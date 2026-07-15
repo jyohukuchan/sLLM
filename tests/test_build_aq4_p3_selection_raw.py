@@ -126,6 +126,26 @@ def run_record(case_id: str, run_index: int, resolved_m: int, prefill_ms: float)
     }
 
 
+def device_lock_fixture(run_id: str) -> dict[str, object]:
+    return {
+        "schema_version": "ullm.aq4_p2_device_lock_owner.v1",
+        "path": "/tmp/fixture-device.lock",
+        "device": 26,
+        "inode": 123456,
+        "pid": 123,
+        "hostname": "fixture-host",
+        "run_id": run_id,
+        "acquired_unix_ns": 123456789,
+        "driver": {
+            "path": "/fixture/resident-driver",
+            "sha256": "b" * 64,
+            "device": 1,
+            "inode": 2,
+            "nlink": 1,
+        },
+    }
+
+
 def raw_fixture(
     path: Path,
     identity_path: Path,
@@ -159,21 +179,7 @@ def raw_fixture(
             "driver_identity": identity["resident_driver_identity"],
             "case_reset_count": 12,
         },
-        "device_lock": {
-            "schema_version": "ullm.aq4_p2_device_lock_owner.v1",
-            "path": "/tmp/fixture-device.lock",
-            "pid": 123,
-            "hostname": "fixture-host",
-            "run_id": run_id,
-            "acquired_unix_ns": 123456789,
-            "driver": {
-                "path": "/fixture/resident-driver",
-                "sha256": "b" * 64,
-                "device": 1,
-                "inode": 2,
-                "nlink": 1,
-            },
-        },
+        "device_lock": device_lock_fixture(run_id),
         "workload": {
             "scope": "full_model",
             "phase": "cold_prefill",
@@ -228,6 +234,7 @@ def summary_fixture(
             "kind": "p3-current-head",
             "identity_file": {"path": str(identity_path.resolve()), "sha256": sha(identity_path)},
         },
+        "device_lock": device_lock_fixture(run_id),
     }
     if diagnostic:
         value.update(
@@ -419,6 +426,204 @@ def build_manifest(path: Path) -> dict[str, object]:
     value = PRODUCER.parse_json(snapshot, "manifest")
     output, _snapshots = PRODUCER.build(value, snapshot)
     return output
+
+
+def resident_pair_fixture(tmp_path: Path) -> tuple[Path, Path, Path]:
+    identity_path, identity = identity_fixture(tmp_path)
+    run_id = "device-lock-fixture-run"
+    summary_path = summary_fixture(
+        tmp_path / "resident-summary.json",
+        identity_path,
+        run_id,
+        diagnostic=True,
+    )
+    raw_path = raw_fixture(
+        tmp_path / "resident-raw.json",
+        identity_path,
+        identity,
+        run_id,
+        "device-lock-fixture-case",
+        "8" * 64,
+        128,
+        100.0,
+        diagnostic=True,
+    )
+    return identity_path, summary_path, raw_path
+
+
+def validate_resident_pair(
+    identity_path: Path,
+    summary_path: Path,
+    raw_path: Path,
+) -> tuple[dict[str, object], dict[str, object], str, list[dict[str, object]]]:
+    identity_snapshot = PRODUCER.capture(identity_path.resolve(), "identity")
+    identity_value = PRODUCER.parse_json(identity_snapshot, "identity")
+    identity = PRODUCER.validate_identity(identity_value, identity_snapshot)
+
+    summary_snapshot = PRODUCER.capture(summary_path.resolve(), "resident summary")
+    summary_value = PRODUCER.parse_json(summary_snapshot, "resident summary")
+    run_id = PRODUCER.validate_summary(
+        summary_value,
+        summary_snapshot,
+        identity,
+        "diagnostic",
+    )
+
+    raw_snapshot = PRODUCER.capture(raw_path.resolve(), "resident raw")
+    raw_value = PRODUCER.parse_json(raw_snapshot, "resident raw")
+    validated_run_id, runs = PRODUCER.validate_raw(
+        raw_value,
+        identity,
+        {run_id: summary_snapshot},
+        "diagnostic",
+    )
+    return summary_value, raw_value, validated_run_id, runs
+
+
+def test_sealed_actual_v8_device_lock_is_accepted_and_matches_summary() -> None:
+    result_root = (
+        ROOT
+        / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2"
+    )
+    identity_path = (
+        ROOT
+        / "benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2"
+        / "resident-one-case-smoke-prepared-v1/identity.json"
+    )
+    execute_root = result_root / "resident-one-case-smoke-profile-execute-v7"
+    summary_path = execute_root / "resident-batch.summary.json"
+    raw_path = execute_root / (
+        "p2-representative-full_model-cold_prefill-cold_batched-n128-m128-"
+        "r9700-rdna4-aq4_0_target.raw.json"
+    )
+
+    assert sha(raw_path) == "397f02a2cd87e5d30eb9eb569b5d022351b1f994358e71535f2ce697af5df25c"
+    assert sha(summary_path) == "b82409bf997e207df5576ba7e38ebefddff363440c256250ffc8f7b521dcb3f5"
+    identity_snapshot = PRODUCER.capture(identity_path.resolve(), "identity")
+    identity = PRODUCER.validate_identity(
+        PRODUCER.parse_json(identity_snapshot, "identity"),
+        identity_snapshot,
+    )
+    summary_snapshot = PRODUCER.capture(summary_path.resolve(), "resident summary")
+    summary = PRODUCER.parse_json(summary_snapshot, "resident summary")
+    run_id = PRODUCER.validate_summary(
+        summary,
+        summary_snapshot,
+        identity,
+        "diagnostic",
+    )
+    raw_snapshot = PRODUCER.capture(raw_path.resolve(), "resident raw")
+    raw = PRODUCER.parse_json(raw_snapshot, "resident raw")
+    PRODUCER.validate_device_lock(
+        raw.get("device_lock"),
+        identity,
+        run_id,
+        "resident raw device_lock",
+    )
+
+    assert run_id == "p2-r9700-resident-one-case-smoke-profile-diagnostic-v7"
+    assert len(raw["runs"]) == 12
+    assert raw["device_lock"] == summary["device_lock"]
+    for field in ("device", "inode"):
+        assert type(raw["device_lock"][field]) is int
+        assert raw["device_lock"][field] > 0
+
+
+@pytest.mark.parametrize("artifact", ["raw", "summary"])
+@pytest.mark.parametrize("field", ["device", "inode"])
+def test_device_lock_requires_device_and_inode(
+    tmp_path: Path,
+    artifact: str,
+    field: str,
+) -> None:
+    identity_path, summary_path, raw_path = resident_pair_fixture(tmp_path)
+    target_path = raw_path if artifact == "raw" else summary_path
+    value = json.loads(target_path.read_text())
+    value["device_lock"].pop(field)
+    write_json(target_path, value)
+
+    with pytest.raises(PRODUCER.ProducerError, match="device_lock fields differ"):
+        validate_resident_pair(identity_path, summary_path, raw_path)
+
+
+@pytest.mark.parametrize("artifact", ["raw", "summary"])
+@pytest.mark.parametrize("field", ["device", "inode"])
+@pytest.mark.parametrize("replacement", [0, -1, "1", True])
+def test_device_lock_device_and_inode_are_positive_nonboolean_integers(
+    tmp_path: Path,
+    artifact: str,
+    field: str,
+    replacement: object,
+) -> None:
+    identity_path, summary_path, raw_path = resident_pair_fixture(tmp_path)
+    target_path = raw_path if artifact == "raw" else summary_path
+    value = json.loads(target_path.read_text())
+    value["device_lock"][field] = replacement
+    write_json(target_path, value)
+
+    with pytest.raises(
+        PRODUCER.ProducerError,
+        match=rf"resident {artifact} device_lock\.{field} must be a positive integer",
+    ):
+        validate_resident_pair(identity_path, summary_path, raw_path)
+
+
+@pytest.mark.parametrize("artifact", ["raw", "summary"])
+def test_device_lock_rejects_unknown_field(tmp_path: Path, artifact: str) -> None:
+    identity_path, summary_path, raw_path = resident_pair_fixture(tmp_path)
+    target_path = raw_path if artifact == "raw" else summary_path
+    value = json.loads(target_path.read_text())
+    value["device_lock"]["unknown"] = 1
+    write_json(target_path, value)
+
+    with pytest.raises(PRODUCER.ProducerError, match="device_lock fields differ"):
+        validate_resident_pair(identity_path, summary_path, raw_path)
+
+
+@pytest.mark.parametrize(
+    ("artifact", "field"),
+    [("raw", "device"), ("summary", "inode")],
+)
+def test_device_lock_raw_and_summary_must_match(
+    tmp_path: Path,
+    artifact: str,
+    field: str,
+) -> None:
+    identity_path, summary_path, raw_path = resident_pair_fixture(tmp_path)
+    target_path = raw_path if artifact == "raw" else summary_path
+    value = json.loads(target_path.read_text())
+    value["device_lock"][field] += 1
+    write_json(target_path, value)
+
+    with pytest.raises(PRODUCER.ProducerError, match="raw/summary device_lock differs"):
+        validate_resident_pair(identity_path, summary_path, raw_path)
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        (
+            lambda lock: lock["driver"].__setitem__("sha256", "0" * 64),
+            "device_lock driver SHA differs",
+        ),
+        (
+            lambda lock: lock.__setitem__("run_id", "different-run"),
+            "device_lock binding differs",
+        ),
+    ],
+)
+def test_device_lock_identity_and_run_binding_fail_closed(
+    tmp_path: Path,
+    mutation,
+    message: str,
+) -> None:
+    identity_path, summary_path, raw_path = resident_pair_fixture(tmp_path)
+    raw = json.loads(raw_path.read_text())
+    mutation(raw["device_lock"])
+    write_json(raw_path, raw)
+
+    with pytest.raises(PRODUCER.ProducerError, match=message):
+        validate_resident_pair(identity_path, summary_path, raw_path)
 
 
 def test_hip_api_parser_counts_union_time_and_rejects_unknown(tmp_path: Path) -> None:

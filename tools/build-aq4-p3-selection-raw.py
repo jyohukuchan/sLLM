@@ -214,7 +214,8 @@ RUN_FIELDS = {
 BASELINE_IDENTITY_FIELDS = {"run_id", "kind", "identity_file"}
 RESIDENT_FIELDS = {"session_id", "model_loads", "driver_identity", "case_reset_count"}
 DEVICE_LOCK_FIELDS = {
-    "schema_version", "path", "pid", "hostname", "run_id", "acquired_unix_ns", "driver"
+    "schema_version", "path", "device", "inode", "pid", "hostname", "run_id",
+    "acquired_unix_ns", "driver",
 }
 DEVICE_LOCK_DRIVER_FIELDS = {"path", "sha256", "device", "inode", "nlink"}
 WORKLOAD_FIELDS = {
@@ -625,6 +626,9 @@ def validate_summary(
     run_id = baseline.get("run_id")
     if not isinstance(run_id, str) or not run_id:
         raise ProducerError("resident summary run_id is invalid")
+    validate_device_lock(
+        value.get("device_lock"), identity, run_id, "resident summary device_lock"
+    )
     smoke = value.get("smoke_only") is True or value.get("execution_mode") == "one_case_smoke"
     explicitly_ineligible = value.get("measurement_eligible") is False
     promotion_false = value.get("promotion_eligible") is False
@@ -633,6 +637,37 @@ def validate_summary(
     if mode == "diagnostic" and not (smoke and promotion_false):
         raise ProducerError("diagnostic resident summary must be smoke-only and promotion-ineligible")
     return run_id
+
+
+def validate_device_lock(
+    value: Any,
+    identity: dict[str, str],
+    run_id: str,
+    label: str,
+) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise ProducerError(f"{label} must be an object")
+    exact(value, DEVICE_LOCK_FIELDS, label)
+    if (
+        value.get("schema_version") != "ullm.aq4_p2_device_lock_owner.v1"
+        or value.get("run_id") != run_id
+    ):
+        raise ProducerError(f"{label} binding differs")
+    for field in ("path", "hostname"):
+        text_value(value.get(field), f"{label}.{field}")
+    for field in ("device", "inode", "pid", "acquired_unix_ns"):
+        count(value.get(field), f"{label}.{field}", positive=True)
+    driver = value.get("driver")
+    if not isinstance(driver, dict):
+        raise ProducerError(f"{label}.driver must be an object")
+    exact(driver, DEVICE_LOCK_DRIVER_FIELDS, f"{label}.driver")
+    text_value(driver.get("path"), f"{label}.driver.path")
+    digest(driver.get("sha256"), f"{label}.driver.sha256")
+    for field in ("device", "inode", "nlink"):
+        count(driver.get(field), f"{label}.driver.{field}", positive=True)
+    if driver["sha256"] != identity["binary_sha256"]:
+        raise ProducerError(f"{label} driver SHA differs")
+    return value
 
 
 def validate_capture_capabilities(value: dict[str, Any], mode: str) -> None:
@@ -750,29 +785,18 @@ def validate_raw(
         or not strict_json_equal(resident.get("driver_identity"), identity["_resident_driver_identity"])
     ):
         raise ProducerError("resident raw artifact identity differs")
-    lock = value.get("device_lock")
-    if not isinstance(lock, dict):
-        raise ProducerError("resident raw device_lock must be an object")
-    exact(lock, DEVICE_LOCK_FIELDS, "resident raw device_lock")
-    if (
-        lock.get("schema_version") != "ullm.aq4_p2_device_lock_owner.v1"
-        or lock.get("run_id") != run_id
-    ):
-        raise ProducerError("resident raw device_lock binding differs")
-    for field in ("path", "hostname"):
-        text_value(lock.get(field), f"resident raw device_lock.{field}")
-    for field in ("pid", "acquired_unix_ns"):
-        count(lock.get(field), f"resident raw device_lock.{field}", positive=True)
-    driver = lock.get("driver")
-    if not isinstance(driver, dict):
-        raise ProducerError("resident raw device_lock.driver must be an object")
-    exact(driver, DEVICE_LOCK_DRIVER_FIELDS, "resident raw device_lock.driver")
-    text_value(driver.get("path"), "resident raw device_lock.driver.path")
-    digest(driver.get("sha256"), "resident raw device_lock.driver.sha256")
-    for field in ("device", "inode", "nlink"):
-        count(driver.get(field), f"resident raw device_lock.driver.{field}", positive=True)
-    if driver["sha256"] != identity["binary_sha256"]:
-        raise ProducerError("resident raw device_lock driver SHA differs")
+    lock = validate_device_lock(
+        value.get("device_lock"), identity, run_id, "resident raw device_lock"
+    )
+    summary_value = parse_json(summaries[run_id], "resident summary")
+    summary_lock = validate_device_lock(
+        summary_value.get("device_lock"),
+        identity,
+        run_id,
+        "resident summary device_lock",
+    )
+    if not strict_json_equal(lock, summary_lock):
+        raise ProducerError("resident raw/summary device_lock differs")
     workload = value.get("workload")
     if not isinstance(workload, dict):
         raise ProducerError("resident raw workload must be an object")
