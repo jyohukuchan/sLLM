@@ -360,6 +360,7 @@ def test_actual_evidence_uses_maintenance_stable2(tmp_path: Path, fixture: dict[
             {"service": {"active": False, "running": False, "main_pid": 0, "worker_pid": 0, "lock_owned": False}, "owners": {"worker_pids": [], "amd_pids": [], "kfd_pids": []}},
         ],
         "lock": {"path": "/run/ullm/device-1.lock", "held": True, "released": True},
+        "vram_headroom_bytes": 1,
         "restore": {"attempted": True, "passed": True},
     }
     maintenance_path = tmp_path / "maintenance-evidence.json"

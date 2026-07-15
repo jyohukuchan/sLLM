@@ -319,6 +319,9 @@ def _gpu_evidence_from_maintenance(value: dict[str, Any]) -> dict[str, Any]:
         raise ReceiptError("maintenance candidate lock evidence is missing")
     if lock.get("path") != "/run/ullm/device-1.lock" or lock.get("held") is not True or lock.get("released") is not True:
         raise ReceiptError("maintenance candidate lock evidence differs")
+    headroom = value.get("vram_headroom_bytes")
+    if type(headroom) is not int or headroom < 1:
+        raise ReceiptError("maintenance VRAM headroom evidence is invalid")
     return {
         "mode": "maintenance_stable2",
         "stable_observation_count": 2,
@@ -326,11 +329,12 @@ def _gpu_evidence_from_maintenance(value: dict[str, Any]) -> dict[str, Any]:
         "amd_smi_owners": [],
         "kfd_owners": [],
         "lock": {"path": "/run/ullm/device-1.lock", "free": True},
+        "vram_headroom_bytes": headroom,
     }
 
 
 def _relative_evidence_ref(path: Path, output_path: Path, label: str) -> dict[str, str]:
-    if path.is_symlink() or not path.is_file():
+    if path.is_symlink() or not path.is_file() or path.stat(follow_symlinks=False).st_nlink != 1:
         raise ReceiptError(f"{label} must be a regular non-symlink file")
     path = path.resolve()
     try:
@@ -343,7 +347,7 @@ def _relative_evidence_ref(path: Path, output_path: Path, label: str) -> dict[st
 
 
 def _absolute_evidence_ref(path: Path, label: str) -> dict[str, str]:
-    if path.is_symlink() or not path.is_file():
+    if path.is_symlink() or not path.is_file() or path.stat(follow_symlinks=False).st_nlink != 1:
         raise ReceiptError(f"{label} must be a regular non-symlink file")
     return {"path": os.fspath(path.resolve()), "sha256": sha256_file(path)}
 

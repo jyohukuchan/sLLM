@@ -66,30 +66,53 @@ class Sq8ProtocolTests(unittest.TestCase):
         self.source_v32.write_text('{"source":"fixture-v32"}\n')
         self.receipt_dir = self.root / "receipt"
         self.receipt_dir.mkdir()
+        self.product_root = self.root / "product"
+        (self.product_root / "artifacts").mkdir(parents=True)
+        (self.product_root / "package").mkdir()
 
     def tearDown(self) -> None:
         self.temp.cleanup()
 
     def _receipt(self, *, actual: bool = True) -> Path:
         request = "sq8-promotion-" + "a" * 64
-        worker = {"path": "/tmp/sq8-worker", "sha256": "b" * 64, "bytes": 1, "mode": "0555", "nlink": 1}
-        profile = {"path": "/tmp/sq8-profile.json", "sha256": "c" * 64}
-        served = {"path": "/tmp/sq8-served.json", "semantic_sha256": "d" * 64}
-        release = {"worker": worker, "profile": profile, "served_model": served}
-        overlay = {"binding_manifest_path": "/tmp/binding.json", "binding_manifest_sha256": "e" * 64, "content_sha256": "f" * 64, "tensor_set_sha256": "1" * 64, "tensor_count": 48, "artifact_inventory": {"regular_file_count": 1}}
-        package = {"manifest_path": "/tmp/package.json", "manifest_sha256": "2" * 64}
+        worker_path = self.receipt_dir / f"worker-{len(list(self.receipt_dir.glob('worker-*'))):03d}"
+        worker_path.write_bytes(b"worker")
+        worker_path.chmod(0o555)
+        binding_path = self.product_root / "artifacts" / "binding.json"
+        binding_value = {"schema_version": "ullm.qwen35_aq4_sq8_qkv_z_overlay.v2", "format_id": "AQ4_0", "overlay_format_id": "SQ8_0", "implementation_id": "qwen35_aq4_sq8_linear_qkv_z_overlay_v1", "content_sha256": "f" * 64, "tensor_set_sha256": "1" * 64, "tensor_names": [f"tensor-{index:02d}" for index in range(48)], "package": {"manifest_sha256": ""}}
+        binding_path.write_text(json.dumps(binding_value, sort_keys=True) + "\n")
+        package_path = self.product_root / "package" / "manifest.json"
+        package_path.write_text('{"package":"sq8"}\n')
+        package = {"manifest_path": str(package_path.resolve()), "manifest_sha256": digest(package_path)}
+        binding_value["package"]["manifest_sha256"] = package["manifest_sha256"]
+        binding_path.write_text(json.dumps(binding_value, sort_keys=True) + "\n")
+        overlay = {"binding_manifest_path": str(binding_path.resolve()), "binding_manifest_sha256": digest(binding_path), "content_sha256": "f" * 64, "tensor_set_sha256": "1" * 64, "tensor_count": 48, "artifact_inventory": {"regular_file_count": 1}}
         source = {"tree_sha256": "3" * 40, "archive_sha256": "4" * 64}
-        prepared = {"schema_version": protocol.SQ8_RECEIPT_SCHEMA, "status": "prepared_not_executed", "request_id": request, "source_commit": "5" * 40, "source_provenance": source, "release": release, "overlay": overlay, "package": package, "authorization_audit": None, "readiness": {}, "actual": {"status": "pending", "required": True}}
-        prepared_path = self.receipt_dir / "prepared.json"
+        prepared_path = self.receipt_dir / ("prepared.json" if actual else "prepared-only.json")
+        readiness = {"schema": "ullm.bridge_container_readiness.v1", "container": {"name": "open-webui", "id": "1" * 64, "image_id": "sha256:" + "2" * 64, "config_image": "ullm/open-webui:test"}, "network": {"name": "open-webui-network", "id": "3" * 64, "driver": "bridge", "bridge_interface": "br-" + "3" * 12}, "endpoint": {"url": "http://172.20.0.1:8000/readyz", "path": "/readyz", "expected_status": 200, "expected_body": '{"status":"ready"}', "expected_body_sha256": hashlib.sha256(b'{"status":"ready"}').hexdigest(), "timeout_seconds": 5}}
+        audit_path = self.receipt_dir / "authorization-audit.json"
+        audit_path.write_text(json.dumps({"schema_version": "ullm.qwen35_aq4_sq8_overlay_independent_audit.v1", "verdict": "implementation_ready", "actual": "not_executed", "fixed_request_id": request}) + "\n")
+        profile_path = self.receipt_dir / "profile.json"
+        profile_value = {"schema_version": "ullm.served_model.profile.v1", "format": {"implementation_id": "qwen35_aq4_sq8_linear_qkv_z_overlay_v1"}, "worker": {"binary": str(worker_path.resolve()), "identity": {"execution_profile": "rdna4_aq4_resident_sq8_linear_qkv_z_overlay"}}, "product": {"root": str(self.product_root.resolve()), "artifact": {"manifest_path": "artifacts/binding.json", "content_sha256_from_receipt": ["overlay", "content_sha256"]}, "package": {"manifest_path": "package/manifest.json"}}, "promotion": {"receipt": str(prepared_path.resolve()), "source_commit_from_receipt": ["source_commit"], "required_schema_version": protocol.SQ8_RECEIPT_SCHEMA, "overlay_from_receipt": ["overlay"], "release_from_receipt": ["release"], "package_from_receipt": ["package"], "actual_evidence_from_receipt": ["actual"], "request_id_from_receipt": ["request_id"], "authorization_audit_from_receipt": ["authorization_audit"], "readiness_from_receipt": ["readiness"], "readiness": readiness, "release_source_commit": "5" * 40}}
+        profile_path.write_text(json.dumps(profile_value, sort_keys=True) + "\n")
+        served_path = self.receipt_dir / "served-model.json"
+        served_value = {"schema_version": "ullm.served_model.v2", "promotion": {"receipt_sha256": "0" * 64, "implementation_id": "qwen35_aq4_sq8_linear_qkv_z_overlay_v1"}}
+        served_path.write_text(json.dumps(served_value, sort_keys=True) + "\n")
+        served = {"path": str(served_path.resolve()), "semantic_sha256": protocol._served_semantic_sha256(served_path)}
+        worker = {"path": str(worker_path.resolve()), "sha256": digest(worker_path), "bytes": worker_path.stat().st_size, "mode": "0555", "nlink": 1}
+        profile = {"path": str(profile_path.resolve()), "sha256": digest(profile_path)}
+        release = {"worker": worker, "profile": profile, "served_model": served}
+        auth = {"path": str(audit_path.resolve()), "sha256": digest(audit_path)}
+        prepared = {"schema_version": protocol.SQ8_RECEIPT_SCHEMA, "status": "prepared_not_executed", "request_id": request, "source_commit": "5" * 40, "source_provenance": source, "release": release, "overlay": overlay, "package": package, "authorization_audit": auth, "readiness": readiness, "actual": {"status": "pending", "required": True}}
         prepared_path.write_text(json.dumps(prepared, sort_keys=True) + "\n")
-        maintenance = self.receipt_dir / "maintenance.json"; maintenance.write_text(json.dumps({"promotion_request_id": request}) + "\n")
+        maintenance = self.receipt_dir / "maintenance.json"; maintenance.write_text(json.dumps({"schema_version": "ullm.qwen35_aq4.sq8_overlay_gpu_promotion_maintenance.v1", "status": "passed", "actual_run_count": 1, "failure": None, "promotion_request_id": request, "candidate_pre": {}, "candidate_post": {}, "stopped_observations": [{"service": {"active": False, "running": False, "main_pid": 0, "worker_pid": 0, "lock_owned": False}, "owners": {"worker_pids": [], "amd_pids": [], "kfd_pids": []}}] * 2, "vram_headroom_bytes": 1, "lock": {"held": True, "released": True, "path": "/run/ullm/device-1.lock"}, "restore": {"attempted": True, "passed": True}}) + "\n")
         telemetry = {"schema_version": "ullm.qwen35_aq4.sq8_promotion_telemetry.v1", "projection": {"single_matvec_count": 0, "batch_matvec_count": 1, "pair_matvec_count": 1, "triple_matvec_count": 0, "fallback_count": 0}, "diagnostic_host_staging": {"read_count": 0, "write_count": 0, "read_bytes": 0, "write_bytes": 0}}
         binding = {"schema_version": "ullm.qwen35_aq4.sq8_promotion_telemetry_binding.v1", "request_id": request, "hash_encoding": "canonical_json_ascii_sort_keys_compact_v1", "telemetry_sha256": protocol.sha_bytes(protocol.canonical(telemetry))}
         manifest_identity = {"implementation_id": "qwen35_aq4_sq8_linear_qkv_z_overlay_v1", "execution_profile": "rdna4_aq4_resident_sq8_linear_qkv_z_overlay", "artifact_content_sha256": overlay["content_sha256"], "artifact_manifest_sha256": overlay["binding_manifest_sha256"], "package_manifest_sha256": package["manifest_sha256"]}
         output_identity = {"token_count": 2, "token_ids_sha256": "6" * 64, "token_ids_recorded": False}
         executor = self.receipt_dir / "executor.json"; executor.write_text(json.dumps({"schema_version": "ullm.production_executor_record.v1", "status": "ok", "sq8_promotion_evidence": {"schema_version": "ullm.qwen35_aq4.sq8_promotion_executor.v1", "request_id": request, "manifest_identity": manifest_identity, "telemetry": telemetry, "telemetry_binding": binding, "output_identity": output_identity}}, sort_keys=True) + "\n")
-        actual_value = {"status": "actual_verified", "required": True, "prepared_receipt": {"path": str(prepared_path.resolve()), "sha256": digest(prepared_path)}, "maintenance_evidence": {"path": maintenance.name, "sha256": digest(maintenance)}, "executor_record": {"path": executor.name, "sha256": digest(executor)}, "gpu_exclusive_preflight": {}, "telemetry": telemetry, "telemetry_binding": binding, "manifest_identity": manifest_identity, "output_identity": output_identity}
-        receipt = {"schema_version": protocol.SQ8_RECEIPT_SCHEMA, "status": "actual_verified" if actual else "prepared_not_executed", "request_id": request, "source_commit": "5" * 40, "source_provenance": source, "release": release, "overlay": overlay, "package": package, "authorization_audit": None, "readiness": {}, "actual": actual_value if actual else {"status": "pending", "required": True}}
+        actual_value = {"status": "actual_verified", "required": True, "prepared_receipt": {"path": str(prepared_path.resolve()), "sha256": digest(prepared_path)}, "maintenance_evidence": {"path": maintenance.name, "sha256": digest(maintenance)}, "executor_record": {"path": executor.name, "sha256": digest(executor)}, "gpu_exclusive_preflight": {"mode": "maintenance_stable2", "stable_observation_count": 2, "worker_pids": [], "amd_smi_owners": [], "kfd_owners": [], "lock": {"path": "/run/ullm/device-1.lock", "free": True}, "vram_headroom_bytes": 1}, "telemetry": telemetry, "telemetry_binding": binding, "manifest_identity": manifest_identity, "output_identity": output_identity}
+        receipt = {"schema_version": protocol.SQ8_RECEIPT_SCHEMA, "status": "actual_verified" if actual else "prepared_not_executed", "request_id": request, "source_commit": "5" * 40, "source_provenance": source, "release": release, "overlay": overlay, "package": package, "authorization_audit": auth, "readiness": readiness, "actual": actual_value if actual else {"status": "pending", "required": True}}
         path = self.receipt_dir / ("actual.json" if actual else "prepared-only.json")
         path.write_text(json.dumps(receipt, sort_keys=True) + "\n")
         return path
@@ -97,9 +120,9 @@ class Sq8ProtocolTests(unittest.TestCase):
     def _run(self, *args: str) -> subprocess.CompletedProcess[str]:
         return subprocess.run([sys.executable, str(SCRIPT), *args], cwd=ROOT, text=True, capture_output=True)
 
-    def _plan(self, actual: bool = True) -> Path:
+    def _plan(self, actual: bool = True, name: str | None = None) -> Path:
         receipt = self._receipt(actual=actual)
-        output = self.root / ("plan.json" if actual else "preflight-plan.json")
+        output = self.root / (name or ("plan.json" if actual else "preflight-plan.json"))
         result = self._run("plan", "--split-root", str(self.split), "--actual-receipt", str(receipt), "--source-v32", str(self.source_v32), "--output", str(output))
         self.assertEqual(result.returncode, 0, result.stderr)
         return output
@@ -266,6 +289,51 @@ class Sq8ProtocolTests(unittest.TestCase):
         rejected = self._run("execute-holdout", "--preflight", str(preflight), "--metrics", str(holdout), "--ledger", str(ledger), "--output", str(output))
         self.assertNotEqual(rejected.returncode, 0)
         self.assertEqual(list(self.root.glob(".*.incomplete")), [])
+
+    def test_six_independent_mutations_are_rejected(self) -> None:
+        prepared = self._plan(actual=False)
+        prepared_value = json.loads(prepared.read_text())
+        prepared_value["status"] = "ready_for_calibration"
+        prepared_value["preflight_only"] = False
+        escalated = self.root / "escalated-plan.json"; escalated.write_text(json.dumps(prepared_value) + "\n")
+        metrics = self._metrics(escalated, "calibration")
+        self.assertNotEqual(self._run("freeze", "--plan", str(escalated), "--metrics", str(metrics), "--output", str(self.root / "escalated-freeze.json")).returncode, 0)
+
+        plan = self._plan(name="plan-stale.json"); calibration = self._metrics(plan, "calibration")
+        freeze = self.root / "stale-freeze.json"
+        self.assertEqual(self._run("freeze", "--plan", str(plan), "--metrics", str(calibration), "--output", str(freeze)).returncode, 0)
+        forged = json.loads(freeze.read_text()); forged["derived_bounds"]["logits_cosine"]["bound"] = 0.0; stale_freeze = self.root / "forged-freeze.json"; stale_freeze.write_text(json.dumps(forged) + "\n")
+        self.assertNotEqual(self._run("preflight-holdout", "--plan", str(plan), "--freeze", str(stale_freeze), "--output", str(self.root / "stale-preflight.json")).returncode, 0)
+
+        plan = self._plan(name="plan-case.json"); calibration = self._metrics(plan, "calibration")
+        freeze = self.root / "case-freeze.json"
+        self.assertEqual(self._run("freeze", "--plan", str(plan), "--metrics", str(calibration), "--output", str(freeze)).returncode, 0)
+        with (self.split / "holdout-cases.jsonl").open("a") as stream: stream.write("{}\n")
+        self.assertNotEqual(self._run("preflight-holdout", "--plan", str(plan), "--freeze", str(freeze), "--output", str(self.root / "stale-case-preflight.json")).returncode, 0)
+        self.split.joinpath("holdout-cases.jsonl").write_text("\n".join(self.split.joinpath("holdout-cases.jsonl").read_text().splitlines()[:24]) + "\n")
+
+        plan = self._plan(name="plan-resource.json"); value = json.loads(plan.read_text()); value["resource_contract"]["unexpected"] = True; unknown_plan = self.root / "unknown-resource-plan.json"; unknown_plan.write_text(json.dumps(value) + "\n")
+        calibration = self._metrics(unknown_plan, "calibration")
+        self.assertNotEqual(self._run("freeze", "--plan", str(unknown_plan), "--metrics", str(calibration), "--output", str(self.root / "unknown-resource-freeze.json")).returncode, 0)
+
+        receipt = self._receipt(); value = json.loads(receipt.read_text()); value["actual"]["manifest_identity"]["execution_profile"] = "wrong"; wrong_receipt = self.root / "wrong-profile-receipt.json"; wrong_receipt.write_text(json.dumps(value) + "\n")
+        self.assertNotEqual(self._run("plan", "--split-root", str(self.split), "--actual-receipt", str(wrong_receipt), "--source-v32", str(self.source_v32), "--output", str(self.root / "wrong-profile-plan.json")).returncode, 0)
+
+        receipt = self._receipt(); value = json.loads(receipt.read_text()); value["readiness"]["network"]["id"] = "4" * 64; wrong_readiness = self.root / "wrong-readiness-receipt.json"; wrong_readiness.write_text(json.dumps(value) + "\n")
+        self.assertNotEqual(self._run("plan", "--split-root", str(self.split), "--actual-receipt", str(wrong_readiness), "--source-v32", str(self.source_v32), "--output", str(self.root / "wrong-readiness-plan.json")).returncode, 0)
+
+    def test_ledger_publication_is_create_new_under_two_process_race(self) -> None:
+        plan = self._plan(); calibration = self._metrics(plan, "calibration"); freeze = self.root / "race-freeze.json"
+        self.assertEqual(self._run("freeze", "--plan", str(plan), "--metrics", str(calibration), "--output", str(freeze)).returncode, 0)
+        preflight = self.root / "race-preflight.json"
+        self.assertEqual(self._run("preflight-holdout", "--plan", str(plan), "--freeze", str(freeze), "--output", str(preflight)).returncode, 0)
+        holdout = self._metrics(plan, "holdout"); ledger = self.root / "race-ledger.json"; output = self.root / "race-result.json"
+        command = [sys.executable, str(SCRIPT), "execute-holdout", "--preflight", str(preflight), "--metrics", str(holdout), "--ledger", str(ledger), "--output", str(output)]
+        first = subprocess.Popen(command, cwd=ROOT, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        second = subprocess.Popen(command, cwd=ROOT, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        first_result = first.communicate(timeout=20); second_result = second.communicate(timeout=20)
+        self.assertEqual(sum(process.returncode == 0 for process in (first, second)), 1, (first_result, second_result))
+        self.assertTrue(ledger.is_file())
 
 
 if __name__ == "__main__":

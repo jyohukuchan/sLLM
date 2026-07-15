@@ -1697,6 +1697,65 @@ def default_owner_snapshot() -> dict[str, Any]:
     }
 
 
+def _bytes_value(value: Any) -> int | None:
+    if isinstance(value, dict):
+        number = value.get("value")
+        unit = str(value.get("unit", "B")).lower()
+    else:
+        number = value
+        unit = "b"
+    if isinstance(number, bool) or not isinstance(number, (int, float)):
+        return None
+    factors = {"b": 1, "kb": 1000, "kib": 1024, "mb": 1000**2, "mib": 1024**2, "gb": 1000**3, "gib": 1024**3}
+    factor = factors.get(unit)
+    if factor is None or number < 0 or int(number) != number:
+        return None
+    return int(number) * factor
+
+
+def default_vram_headroom_bytes() -> int:
+    """Read free VRAM from amd-smi; absence or ambiguity is fail-closed."""
+
+    completed = _run(
+        [str(AMD_SMI), "metric", "--mem-usage", "--gpu", str(AMD_SMI_INDEX), "--json"],
+        timeout=5,
+    )
+    if completed.returncode != 0 or completed.stderr:
+        raise PromotionError("AMD VRAM headroom probe failed")
+    try:
+        value = json.loads(completed.stdout)
+    except (UnicodeError, json.JSONDecodeError) as error:
+        raise PromotionError("AMD VRAM headroom JSON differs") from error
+    free: list[int] = []
+    total: list[int] = []
+    used: list[int] = []
+
+    def visit(node: Any, context: str = "") -> None:
+        if isinstance(node, dict):
+            for key, item in node.items():
+                lowered = f"{context}_{key}".lower().replace("-", "_")
+                numeric = _bytes_value(item)
+                if numeric is not None:
+                    if "free" in lowered and ("mem" in lowered or "vram" in lowered):
+                        free.append(numeric)
+                    elif "total" in lowered and ("mem" in lowered or "vram" in lowered):
+                        total.append(numeric)
+                    elif "used" in lowered and ("mem" in lowered or "vram" in lowered):
+                        used.append(numeric)
+                visit(item, lowered)
+        elif isinstance(node, list):
+            for item in node:
+                visit(item, context)
+
+    visit(value)
+    candidates = set(free)
+    if not candidates and total and used:
+        candidates = {total_value - used_value for total_value in total for used_value in used if total_value >= used_value}
+    if len(candidates) != 1 or next(iter(candidates), 0) < 1:
+        raise PromotionError("AMD VRAM headroom observation is ambiguous")
+    return next(iter(candidates))
+
+
 @dataclass
 class CaptureStream:
     byte_count: int
@@ -2325,6 +2384,7 @@ class Dependencies:
     start_service: Callable[[], None]
     acquire_lock: Callable[[], Any]
     capture: Callable[[list[str], dict[str, str]], subprocess.CompletedProcess[Any]]
+    vram_headroom_bytes: Callable[[], int] = default_vram_headroom_bytes
     monotonic: Callable[[], float] = time.monotonic
     sleep: Callable[[float], None] = time.sleep
 
@@ -2647,6 +2707,7 @@ def execute(
         "lock": None,
         "capture": None,
         "candidate_post": None,
+        "vram_headroom_bytes": None,
         "restore": {
             "attempted": False,
             "passed": False,
@@ -2684,6 +2745,9 @@ def execute(
         service_touched = True
         deps.stop_service()
         evidence["stopped_observations"] = poll_stopped(deps, old_worker_pid, readiness)
+        evidence["vram_headroom_bytes"] = deps.vram_headroom_bytes()
+        if type(evidence["vram_headroom_bytes"]) is not int or evidence["vram_headroom_bytes"] < 1:
+            raise PromotionError("VRAM headroom observation is not positive")
         lease = deps.acquire_lock()
         evidence["lock"] = lease.evidence()
         command = capture_command(candidate, capture_temp, request_id)

@@ -444,6 +444,7 @@ def dependencies(
         start_service=start,
         acquire_lock=acquire,
         capture=capture_run,
+        vram_headroom_bytes=lambda: 1,
         monotonic=lambda: 0.0,
         sleep=lambda _: None,
     )

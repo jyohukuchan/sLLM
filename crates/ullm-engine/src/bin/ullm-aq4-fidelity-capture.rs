@@ -30,6 +30,14 @@ use ullm_engine::qwen35_aq4_session::{QWEN35_AQ4_ROPE_BASE, QWEN35_AQ4_ROTARY_DI
 use ullm_engine::qwen35_aq4_sq8_overlay::Qwen35Aq4Sq8OverlayLoadConfig;
 use ullm_engine::served_model::load_served_model;
 
+const SQ8_OVERLAY_GUARDS: &[&str] = &[
+    "ULLM_DISABLE_AQ4_MATVEC_QKV_Z_GATE_BETA",
+    "ULLM_REQUIRE_HIP_SQ_FP8_MATVEC_KERNEL",
+    "ULLM_REQUIRE_HIP_SQ_FP8_MATVEC_BATCH_KERNEL",
+    "ULLM_REQUIRE_HIP_SQ_FP8_MATVEC_PAIR_KERNEL",
+    "ULLM_REQUIRE_HIP_SQ_FP8_MATVEC_TRIPLE_KERNEL",
+];
+
 const SCHEMA: &str = "ullm.qwen35_aq4_target_calibration.v1";
 const SOURCE_SCHEMA: &str = "ullm.qwen35_aq4_source_calibration.v1";
 const SPLIT_SCHEMA: &str = "ullm.aq4_p2_fidelity_split.v1";
@@ -438,6 +446,7 @@ fn read_json(path: &Path, label: &str) -> Result<Value, String> {
     let metadata = fs::symlink_metadata(path).map_err(|e| format!("{label} metadata: {e}"))?;
     if !metadata.is_file()
         || metadata.file_type().is_symlink()
+        || metadata.nlink() != 1
         || metadata.len() > MAX_JSON_BYTES as u64
     {
         return Err(format!("{label} is not a bounded regular file"));
@@ -891,6 +900,9 @@ fn load_split(
     let mut rows = Vec::new();
     let mut seen = BTreeSet::new();
     for (line_no, line) in BufReader::new(file).lines().enumerate() {
+        if line_no >= MAX_ROWS {
+            return Err("calibration cases contain more than 24 rows".into());
+        }
         let line = line.map_err(|e| format!("calibration row {line_no}: {e}"))?;
         if line.is_empty() || line.len() > MAX_ROW_BYTES {
             return Err("calibration row exceeds bounded size".into());
@@ -1124,10 +1136,14 @@ fn run(args: Args) -> Result<(), String> {
         .iter()
         .map(String::as_str)
         .collect::<BTreeSet<_>>();
-    let expected_guards = QWEN35_AQ4_REQUIRED_HIP_KERNEL_ENV
+    let mut expected_guard_names = QWEN35_AQ4_REQUIRED_HIP_KERNEL_ENV
         .iter()
         .copied()
         .collect::<BTreeSet<_>>();
+    if sq8_identity {
+        expected_guard_names.extend(SQ8_OVERLAY_GUARDS.iter().copied());
+    }
+    let expected_guards = expected_guard_names;
     if actual_guards != expected_guards {
         return Err("served required-environment guard set differs".into());
     }
@@ -1206,11 +1222,7 @@ fn run(args: Args) -> Result<(), String> {
     let capture_sha = sha_file(&capture_binary, "capture binary")?;
     let mut guard_digest = Sha256::new();
     guard_digest.update(b"ullm-aq4-p2-resident-guards-v1\0");
-    for name in QWEN35_AQ4_REQUIRED_HIP_KERNEL_ENV
-        .iter()
-        .copied()
-        .collect::<BTreeSet<_>>()
-    {
+    for name in &expected_guards {
         guard_digest.update(format!("{name}=1\n").as_bytes());
     }
     let guard_sha = format!("{:x}", guard_digest.finalize());
@@ -1618,6 +1630,21 @@ mod tests {
             .copied()
             .collect::<BTreeSet<_>>();
         assert_eq!(guards.len(), QWEN35_AQ4_REQUIRED_HIP_KERNEL_ENV.len());
+    }
+
+    #[test]
+    fn sq8_overlay_guard_contract_is_exactly_thirty_five_entries() {
+        let mut guards = QWEN35_AQ4_REQUIRED_HIP_KERNEL_ENV
+            .iter()
+            .copied()
+            .collect::<BTreeSet<_>>();
+        guards.extend(SQ8_OVERLAY_GUARDS.iter().copied());
+        assert_eq!(QWEN35_AQ4_REQUIRED_HIP_KERNEL_ENV.len(), 30);
+        assert_eq!(SQ8_OVERLAY_GUARDS.len(), 5);
+        assert_eq!(guards.len(), 35);
+        for guard in SQ8_OVERLAY_GUARDS {
+            assert!(guards.contains(guard));
+        }
     }
 
     #[test]
