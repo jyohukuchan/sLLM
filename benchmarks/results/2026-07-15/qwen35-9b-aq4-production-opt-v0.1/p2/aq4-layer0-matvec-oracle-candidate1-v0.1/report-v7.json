@@ -143,22 +143,11 @@
       "sha256": "e78b3cd5696839b16c8ef3b6830f0e199a4cdf7338f349253ef537b6289bf64a"
     },
     "runtime input sidecar": {
-      "canonical_path": "/tmp/ultimateLLM-candidate1/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/aq4-layer0-matvec-oracle-candidate1-v0.1/runtime-input.jsonl",
-      "post_stat": {
-        "ctime_ns": 1784079484881328594,
-        "device": 66306,
-        "inode": 160040123,
-        "mtime_ns": 1784079484873328155,
-        "size_bytes": 250573
-      },
-      "pre_stat": {
-        "ctime_ns": 1784079484881328594,
-        "device": 66306,
-        "inode": 160040123,
-        "mtime_ns": 1784079484873328155,
-        "size_bytes": 250573
-      },
-      "sha256": "c009a9bded30b1b9a7c704c622bd3106b3d17989c438f91eb20bb16817348e17"
+      "artifact_relative_path": "runtime-input.jsonl",
+      "rows": 3,
+      "schema_version": "ullm.aq4_layer0_input_normed_jsonl.v1",
+      "sha256": "c009a9bded30b1b9a7c704c622bd3106b3d17989c438f91eb20bb16817348e17",
+      "size_bytes": 250573
     },
     "source embedding safetensor": {
       "canonical_path": "/home/homelab1/datapool/ai_models/safetensors/Qwen/Qwen3.5-9B/model.safetensors-00001-of-00004.safetensors",
@@ -422,10 +411,11 @@
     }
   ],
   "runtime_input_sidecar": {
-    "canonical_path": "/tmp/ultimateLLM-candidate1/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/aq4-layer0-matvec-oracle-candidate1-v0.1/runtime-input.jsonl",
+    "artifact_relative_path": "runtime-input.jsonl",
     "rows": 3,
     "schema_version": "ullm.aq4_layer0_input_normed_jsonl.v1",
-    "sha256": "c009a9bded30b1b9a7c704c622bd3106b3d17989c438f91eb20bb16817348e17"
+    "sha256": "c009a9bded30b1b9a7c704c622bd3106b3d17989c438f91eb20bb16817348e17",
+    "size_bytes": 250573
   },
   "schema_version": "ullm.aq4_layer0_matvec_oracle.v1",
   "source_canonical_root": "/home/homelab1/datapool/ai_models/safetensors/Qwen/Qwen3.5-9B",

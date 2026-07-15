@@ -33,6 +33,8 @@ DEFAULT_SOURCE_TRACE_SHA = "9638b4e724c00747e8f0cd2eda1637e6e3679869349ce675463b
 DEFAULT_GPU_OPERATION = "fused_qkv_aq4_matvec"
 DEFAULT_GPU_RPB_ROWS = 4
 DEFAULT_GPU_THREADS_PER_ROW = 64
+DEFAULT_GPU_ABS_TOL = 1.0e-3
+DEFAULT_GPU_RELATIVE_TOL = 1.0e-4
 MAX_TRACE_ROWS = 4096
 MAX_GPU_OUTPUT_BYTES = 64 * 1024 * 1024
 MAX_GPU_OUTPUT_ROWS = 4096
@@ -592,6 +594,44 @@ def emit_runtime_input_jsonl(path: Path, vectors: dict[tuple[str, int], list[flo
     return _capture_file_identity(final_path, "runtime input sidecar")
 
 
+def _runtime_input_report_identity(path: Path, identity: dict[str, Any], artifact_root: Path) -> dict[str, Any]:
+    """Return the committed sidecar identity without an ephemeral host path.
+
+    Runtime validation still uses the canonical identity returned by
+    ``_capture_file_identity``.  The committed report instead binds the
+    sidecar to the report artifact directory by relative path and records the
+    immutable content/schema facts needed for a later readback.
+    """
+    canonical = Path(str(identity.get("canonical_path", "")))
+    root = _canonical_directory(artifact_root, "report artifact root")
+    try:
+        relative = canonical.relative_to(root)
+    except ValueError as error:
+        raise OracleError("runtime input sidecar must be contained by the report artifact root") from error
+    if relative.is_absolute() or not relative.parts:
+        raise OracleError("runtime input sidecar artifact-relative path is invalid")
+    post_stat = identity.get("post_stat")
+    if not isinstance(post_stat, dict) or type(post_stat.get("size_bytes")) is not int or post_stat["size_bytes"] < 0:
+        raise OracleError("runtime input sidecar size identity is missing")
+    return {
+        "artifact_relative_path": relative.as_posix(),
+        "sha256": str(identity["sha256"]),
+        "size_bytes": post_stat["size_bytes"],
+        "schema_version": "ullm.aq4_layer0_input_normed_jsonl.v1",
+        "rows": len(EXPECTED_ROWS),
+    }
+
+
+def _validate_gpu_tolerances(abs_tol: float, relative_tol: float) -> None:
+    if not math.isfinite(abs_tol) or not math.isfinite(relative_tol) or abs_tol < 0.0 or relative_tol < 0.0:
+        raise OracleError("GPU comparison tolerances must be finite and non-negative")
+    if abs_tol != DEFAULT_GPU_ABS_TOL or relative_tol != DEFAULT_GPU_RELATIVE_TOL:
+        raise OracleError(
+            "GPU comparison tolerances are pinned to "
+            f"abs_tol={DEFAULT_GPU_ABS_TOL:g}, relative_tol={DEFAULT_GPU_RELATIVE_TOL:g}"
+        )
+
+
 def compare_vectors(left: list[float], right: list[float]) -> dict[str, float | bool]:
     if len(left) != len(right):
         raise OracleError("comparison vector lengths differ")
@@ -672,8 +712,7 @@ def _assert_identities(identities: dict[str, Any]) -> None:
 def run(args: argparse.Namespace) -> dict[str, Any]:
     if args.expected_gpu_operation != DEFAULT_GPU_OPERATION or args.expected_gpu_rpb_rows != DEFAULT_GPU_RPB_ROWS or args.expected_gpu_threads_per_row != DEFAULT_GPU_THREADS_PER_ROW:
         raise OracleError("GPU operation/RPB overrides are not approved; use the pinned qkv binding")
-    if not math.isfinite(args.abs_tol) or not math.isfinite(args.relative_tol) or args.abs_tol < 0.0 or args.relative_tol < 0.0:
-        raise OracleError("GPU comparison tolerances must be finite and non-negative")
+    _validate_gpu_tolerances(args.abs_tol, args.relative_tol)
     package_manifest, item, package_dir, package_sha, package_manifest_identity = _load_package(args.package_dir, args.tensor_name)
     if package_sha != args.expected_package_sha256:
         raise OracleError("package manifest SHA differs from pinned identity")
@@ -755,8 +794,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             "effective_rpb": {"rows_per_block": args.expected_gpu_rpb_rows, "threads_per_row": args.expected_gpu_threads_per_row},
         },
         "gpu_comparison_tolerance": {
-            "abs_tol": args.abs_tol,
-            "relative_tol": args.relative_tol,
+            "abs_tol": DEFAULT_GPU_ABS_TOL,
+            "relative_tol": DEFAULT_GPU_RELATIVE_TOL,
             "basis": "predeclared AQ4-vs-GPU probe bound; not a promotion threshold; any finite mismatch is no-go",
         },
         "promotion_eligible": False,
@@ -779,15 +818,11 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     inputs, input_bindings, norm_identity = _build_input_normed(package_manifest, cases_path, source_rows, source_paths)
     base["input_norm_identity"] = norm_identity
     base["input_bindings_sha256"] = input_bindings_sha(input_bindings)
+    runtime_sidecar_identity: dict[str, Any] | None = None
     if args.emit_runtime_input_jsonl:
-        sidecar_identity = emit_runtime_input_jsonl(args.emit_runtime_input_jsonl, inputs, input_bindings)
-        file_identities["runtime input sidecar"] = sidecar_identity
-        base["runtime_input_sidecar"] = {
-            "canonical_path": sidecar_identity["canonical_path"],
-            "sha256": sidecar_identity["sha256"],
-            "schema_version": "ullm.aq4_layer0_input_normed_jsonl.v1",
-            "rows": len(EXPECTED_ROWS),
-        }
+        runtime_sidecar_identity = emit_runtime_input_jsonl(args.emit_runtime_input_jsonl, inputs, input_bindings)
+        file_identities["runtime input sidecar"] = runtime_sidecar_identity
+        base["runtime_input_sidecar"] = _runtime_input_report_identity(args.emit_runtime_input_jsonl, runtime_sidecar_identity, args.output.parent)
     expected_gpu_identity = {
         "package_manifest_sha256": package_sha,
         "active_manifest_sha256": active_identity["active_manifest_sha256"],
@@ -809,6 +844,9 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             base["classification"] = "no_go_gpu_tensor_output_identity_mismatch"
             base["reason"] = f"GPU tensor output identity rejected: {error}"
             base["rows"] = []
+            base["file_identities"] = dict(file_identities)
+            if runtime_sidecar_identity is not None:
+                base["file_identities"]["runtime input sidecar"] = _runtime_input_report_identity(args.emit_runtime_input_jsonl, runtime_sidecar_identity, args.output.parent)
             return base
     rows: list[dict[str, Any]] = []
     gpu_numeric_mismatch = False
@@ -850,6 +888,9 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     else:
         base["status"] = "valid"
         base["classification"] = "expected_quantization"
+    base["file_identities"] = dict(file_identities)
+    if runtime_sidecar_identity is not None:
+        base["file_identities"]["runtime input sidecar"] = _runtime_input_report_identity(args.emit_runtime_input_jsonl, runtime_sidecar_identity, args.output.parent)
     return base
 
 
@@ -868,8 +909,8 @@ def main() -> int:
     parser.add_argument("--expected-gpu-operation", default=DEFAULT_GPU_OPERATION)
     parser.add_argument("--expected-gpu-rpb-rows", type=int, default=DEFAULT_GPU_RPB_ROWS)
     parser.add_argument("--expected-gpu-threads-per-row", type=int, default=DEFAULT_GPU_THREADS_PER_ROW)
-    parser.add_argument("--abs-tol", type=float, default=1e-3)
-    parser.add_argument("--relative-tol", type=float, default=1e-4)
+    parser.add_argument("--abs-tol", type=float, default=DEFAULT_GPU_ABS_TOL)
+    parser.add_argument("--relative-tol", type=float, default=DEFAULT_GPU_RELATIVE_TOL)
     args = parser.parse_args()
     if args.output.exists() or os.path.lexists(args.output):
         raise SystemExit(f"refusing to overwrite output: {args.output}")

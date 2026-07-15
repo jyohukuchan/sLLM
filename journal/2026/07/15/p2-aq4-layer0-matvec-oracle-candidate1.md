@@ -40,13 +40,16 @@ stage sample が記録されたが、`model.language_model.layers.0.linear_attn.
   bounded-memory oracle 実行だけを行った。
 
 CPU probe audit (db09bcc3, device-index 0) was executed read-only with the emitted sidecar.
-The probe report is `/tmp/aq4-layer0-runtime-probe-cpu-20260715-rmsorder/report.json`
+This worktree-local `...-rmsorder` result is reference-only until the formal integrated run is
+bound: its report is `/tmp/aq4-layer0-runtime-probe-cpu-20260715-rmsorder/report.json`
 (SHA-256 `a7e7e1f678fd28b6ab03b91aea48f05d080524a128fde0c2b4798f8c1d1a9452`), and the
 concatenated output is `/tmp/aq4-layer0-runtime-probe-cpu-20260715-rmsorder/output.f32le`
-(SHA-256 `6808d30743087f28d43fabf69e06f1632fc7dd9a4c0ab87e4aa11e3b0463ef32`). It reported
-`status=valid`, CPU backend, three rows, finite outputs, and `promotion_eligible=false`.
-Comparing those three rows with the oracle's explicit f32 model gave `max_abs=0` and
-`bit_mismatch_count=0` for every row. No GPU context or service was started.
+(SHA-256 `6808d30743087f28d43fabf69e06f1632fc7dd9a4c0ab87e4aa11e3b0463ef32`). The formal
+integrated runtime-order evidence must replace these reference hashes with the actual report
+SHA beginning `6fedd80b` and output SHA beginning `9683b8c5` before any promotion decision.
+The reference probe reported `status=valid`, CPU backend, three rows, finite outputs, and
+`promotion_eligible=false`. Comparing those three rows with the oracle's explicit f32 model
+gave `max_abs=0` and `bit_mismatch_count=0` for every row. No GPU context or service was started.
 
 ## 次の行動
 
