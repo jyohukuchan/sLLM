@@ -57,6 +57,18 @@ def test_sealed_inventory_rejects_member_tampering(tmp_path: Path) -> None:
         OPERATOR.verify_sums(root)
 
 
+def test_seal_existing_preserves_members_and_is_idempotent(tmp_path: Path) -> None:
+    root = tmp_path / "runtime"
+    root.mkdir()
+    (root / "trace.csv").write_bytes(b"a,b\n1,2\n")
+    first = OPERATOR.seal_existing(root)
+    second = OPERATOR.seal_existing(root)
+    assert first == second
+    assert set(first["members"]) == {"trace.csv"}
+    assert root.stat().st_mode & 0o777 == 0o555
+    assert (root / "trace.csv").stat().st_mode & 0o777 == 0o444
+
+
 def test_actual_command_is_exactly_one_non_shell_profile_execution() -> None:
     argv = OPERATOR.actual_argv()
     assert argv == [
