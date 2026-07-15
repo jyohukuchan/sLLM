@@ -14,7 +14,7 @@ fused probe report schema v2とCPU診断は既存実装で完了していた。H
 
 ## 検証
 
-- 実行: `bash -n`、binary/receipt SHA256SUMS検証、fresh BASEの`MOCK_ARCHIVE_SETUP=1`、`PREFLIGHT_ONLY=1`、`MOCK_PREFLIGHT=1`、6 tests（observer mock、runtime copy archive、read-only mock、validatorのwrong-reference/layout negativeを含む）。
+- 実行: `bash -n`、binary/receipt SHA256SUMS検証、fresh BASEの`MOCK_ARCHIVE_SETUP=1`（source checkout mode `0775`からruntime mode `0555`へ変換するケースを含む）、`PREFLIGHT_ONLY=1`、`MOCK_PREFLIGHT=1`、6 tests（observer mock、runtime copy archive、read-only mock、validatorのwrong-reference/layout negativeを含む）。
 - 未実施: GPU probe、service stop/start、ROCm SMI/KFD実測、health実測、holdout、数値閾値判定、promotion。
 
 ## 次の行動
