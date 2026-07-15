@@ -328,6 +328,21 @@ def test_historical_v15_and_current_offline_v11_authorities_are_separate() -> No
     offline = OPERATOR.offline_reassembly_authority()
     assert historical["status"] == "ready_for_one_case"
     assert historical["actual_eligible"] is True
+    historical_dry = OPERATOR.verify_sums(
+        OPERATOR.HISTORICAL_READY_DRY_RUN_V15_ROOT
+    )
+    assert (
+        historical_dry["sha256sums_sha256"]
+        == OPERATOR.HISTORICAL_READY_DRY_RUN_V15_SUMS_SHA256
+    )
+    assert (
+        OPERATOR.git(
+            "rev-parse",
+            f"{OPERATOR.HISTORICAL_READY_V15_COMMIT}:"
+            f"{OPERATOR.HISTORICAL_READY_DRY_RUN_V15_ROOT.relative_to(ROOT)}",
+        )
+        == OPERATOR.HISTORICAL_READY_DRY_RUN_V15_ROOT_TREE
+    )
     assert offline["artifact_commit"] == OPERATOR.OFFLINE_ARTIFACT_COMMIT
     assert offline["artifact_tree"] == OPERATOR.OFFLINE_ARTIFACT_TREE
     assert offline["file_count"] == 42
@@ -336,6 +351,50 @@ def test_historical_v15_and_current_offline_v11_authorities_are_separate() -> No
     assert OPERATOR.OFFLINE_EVIDENCE_ROOT != OPERATOR.MAINTENANCE_EVIDENCE
     assert not OPERATOR.PROFILE_CAPTURE.exists()
     assert not OPERATOR.MAINTENANCE_EVIDENCE.exists()
+
+
+def test_operator_source_authority_uses_path_last_change_after_poststate() -> None:
+    record = OPERATOR.trusted_operator_source_record()
+    assert record["source_commit"] == record["artifact_commit"]
+    assert record["source_commit"] == OPERATOR.git(
+        "log",
+        "-1",
+        "--format=%H",
+        "--",
+        str(SCRIPT.relative_to(ROOT)),
+    )
+    assert record["source_commit"] != OPERATOR.git("rev-parse", "HEAD")
+
+
+@pytest.mark.parametrize("tamper", ("source_bytes", "blob_authority"))
+def test_operator_source_authority_rejects_tamper_and_mismatch(
+    monkeypatch: pytest.MonkeyPatch,
+    tamper: str,
+) -> None:
+    commit = "1" * 40
+    tree = "2" * 40
+    blob = OPERATOR.git("hash-object", str(SCRIPT))
+    raw = SCRIPT.read_bytes()
+
+    def fake_git(*args: str) -> str:
+        if args[:4] == ("log", "-1", "--format=%H", "--"):
+            return commit
+        if args == ("rev-parse", f"{commit}^{{tree}}"):
+            return tree
+        if args[:2] == ("rev-parse", f"{commit}:{SCRIPT.relative_to(ROOT)}"):
+            return blob
+        if args[:1] == ("hash-object",):
+            return "0" * 40 if tamper == "blob_authority" else blob
+        raise AssertionError(f"unexpected Git call: {args}")
+
+    monkeypatch.setattr(OPERATOR, "git", fake_git)
+    monkeypatch.setattr(
+        OPERATOR,
+        "git_bytes",
+        lambda *_args: b"tampered-source" if tamper == "source_bytes" else raw,
+    )
+    with pytest.raises(OPERATOR.OperatorError, match="last-change authority"):
+        OPERATOR.trusted_operator_source_record()
 
 
 def test_previous_v12_seal_is_independent_of_current_v13_poststate(

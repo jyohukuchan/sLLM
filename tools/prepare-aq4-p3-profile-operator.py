@@ -119,7 +119,11 @@ READY_DRY_RUN_EVIDENCE_SHA256 = "82d7a17c5d71c9e0e4019280a1f14a75c569ad8faa6bb2b
 READY_DRY_RUN_SHA256SUMS_SHA256 = "d6b11306091f1132ef1485bf01ee67005b5335ccb32060b6f25987fd8a7c7fc8"
 HISTORICAL_READY_V15_COMMIT = "b39e21822db40e7fd5060da66db885b3a9ff0b8a"
 HISTORICAL_READY_V15_TREE = "4daa8f0cafe93274aeddd902bea58727633b3080"
+HISTORICAL_READY_V15_ROOT_TREE = "8045019bc2346efccc3c37781fc8bd6280e95dac"
 HISTORICAL_READY_V15_BINDING_SHA256 = "4c2c2079fd428c8db156e36d0513726ae49e372927770d4d9aba0a0172b4497b"
+HISTORICAL_READY_DRY_RUN_V15_ROOT_TREE = "b375ac9a0e55b738715dd637d38b864ccf6a2204"
+HISTORICAL_READY_DRY_RUN_V15_SUMS_SHA256 = "86ab1e7714e05951a17e6a7584bf6183f68a1e009f289751810025f36329ec67"
+HISTORICAL_READY_DRY_RUN_V15_EVIDENCE_SHA256 = "743941cfa6c580d9f6fc786a37b9e270f5ee0f8764bb8ffcbceefb0c79f535fd"
 CURRENT_MAINTENANCE_COMMIT = "c4fe279e6c0bf9a8899c2cd36642f45bf145fe8f"
 CURRENT_MAINTENANCE_TREE = "49685f2b9194d6128d8e92ad04d52c01540eed38"
 CURRENT_MAINTENANCE_BLOB = "53ad6ab6eeec43eb77478397ad0fcd8c09caa45b"
@@ -190,6 +194,20 @@ def git(*args: str) -> str:
     if completed.returncode != 0 or completed.stderr:
         raise OperatorError(f"Git command failed: {' '.join(args)}")
     return completed.stdout.strip()
+
+
+def git_bytes(*args: str) -> bytes:
+    completed = subprocess.run(
+        ["git", *args],
+        cwd=ROOT,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    if completed.returncode != 0 or completed.stderr:
+        raise OperatorError(f"Git command failed: {' '.join(args)}")
+    return completed.stdout
 
 
 def verify_sums(root: Path) -> dict[str, Any]:
@@ -628,13 +646,23 @@ def verify_current_source_authority(
 
 def historical_ready_v15_authority() -> dict[str, Any]:
     inventory = verify_sums(HISTORICAL_READY_V15_ROOT)
+    dry_inventory = verify_sums(HISTORICAL_READY_DRY_RUN_V15_ROOT)
     relative = str(HISTORICAL_READY_V15_ROOT.relative_to(ROOT))
+    dry_relative = str(HISTORICAL_READY_DRY_RUN_V15_ROOT.relative_to(ROOT))
     if (
         sha_file(HISTORICAL_READY_V15) != HISTORICAL_READY_V15_BINDING_SHA256
+        or dry_inventory["sha256sums_sha256"]
+        != HISTORICAL_READY_DRY_RUN_V15_SUMS_SHA256
+        or sha_file(
+            HISTORICAL_READY_DRY_RUN_V15_ROOT / "launcher-evidence.json"
+        )
+        != HISTORICAL_READY_DRY_RUN_V15_EVIDENCE_SHA256
         or git("rev-parse", f"{HISTORICAL_READY_V15_COMMIT}^{{tree}}")
         != HISTORICAL_READY_V15_TREE
         or git("rev-parse", f"{HISTORICAL_READY_V15_COMMIT}:{relative}")
-        != "8045019bc2346efccc3c37781fc8bd6280e95dac"
+        != HISTORICAL_READY_V15_ROOT_TREE
+        or git("rev-parse", f"{HISTORICAL_READY_V15_COMMIT}:{dry_relative}")
+        != HISTORICAL_READY_DRY_RUN_V15_ROOT_TREE
     ):
         raise OperatorError("historical profile-ready-v15 authority differs")
     verify_inventory_commit(
@@ -642,10 +670,28 @@ def historical_ready_v15_authority() -> dict[str, Any]:
         inventory,
         HISTORICAL_READY_V15_COMMIT,
     )
+    verify_inventory_commit(
+        HISTORICAL_READY_DRY_RUN_V15_ROOT,
+        dry_inventory,
+        HISTORICAL_READY_V15_COMMIT,
+    )
     maintenance = load_maintenance()
     value = maintenance.load_ready_artifact(HISTORICAL_READY_V15)
     if value != load(HISTORICAL_READY_V15, "historical profile ready binding"):
         raise OperatorError("historical profile-ready-v15 readback differs")
+    dry = load(
+        HISTORICAL_READY_DRY_RUN_V15_ROOT / "launcher-evidence.json",
+        "historical profile ready dry-run evidence",
+    )
+    if (
+        dry.get("status") != "passed"
+        or dry.get("mode") != "dry-run"
+        or dry.get("gpu_command_executed") is not False
+        or dry.get("service_touched") is not False
+        or not isinstance(dry.get("process_counts"), dict)
+        or any(count != 0 for count in dry["process_counts"].values())
+    ):
+        raise OperatorError("historical profile-ready-v15 dry-run differs")
     return value
 
 
@@ -867,6 +913,47 @@ def root_set() -> list[Path]:
     ]
 
 
+def trusted_operator_source_record(path: Path = SOURCE) -> dict[str, Any]:
+    metadata = path.lstat()
+    relative = str(path.relative_to(ROOT))
+    artifact_commit = git("log", "-1", "--format=%H", "--", relative)
+    if not artifact_commit or GIT_OID_RE.fullmatch(artifact_commit) is None:
+        raise OperatorError("operator source last-change commit differs")
+    source_commit = artifact_commit
+    source_tree = git("rev-parse", f"{source_commit}^{{tree}}")
+    committed_blob = git("rev-parse", f"{source_commit}:{relative}")
+    current_blob = git("hash-object", str(path))
+    raw = path.read_bytes()
+    committed_raw = git_bytes("show", f"{source_commit}:{relative}")
+    if (
+        path.is_symlink()
+        or not path.is_file()
+        or metadata.st_nlink != 1
+        or source_commit != artifact_commit
+        or committed_blob != current_blob
+        or committed_raw != raw
+        or sha_bytes(committed_raw) != sha_bytes(raw)
+    ):
+        raise OperatorError("operator source last-change authority differs")
+    return {
+        "path": str(path),
+        "sha256": sha_bytes(raw),
+        "source_commit": source_commit,
+        "artifact_commit": artifact_commit,
+        "source_tree": source_tree,
+        "git_blob": current_blob,
+        "identity": [
+            metadata.st_dev,
+            metadata.st_ino,
+            metadata.st_mode,
+            metadata.st_nlink,
+            metadata.st_size,
+            metadata.st_mtime_ns,
+            metadata.st_ctime_ns,
+        ],
+    }
+
+
 def trusted_source_snapshot(ready: dict[str, Any]) -> list[dict[str, Any]]:
     trust = load(PROFILE_READY_ROOT / "harness-trust.json", "profile harness trust")
     qa = load(PROFILE_READY_ROOT / "qa-attestation.json", "profile QA attestation")
@@ -883,7 +970,6 @@ def trusted_source_snapshot(ready: dict[str, Any]) -> list[dict[str, Any]]:
         for item in suite["files"]:
             path = ROOT / item["path"]
             specifications.append((path, sha_file(path), item["source_commit"], item["git_blob"]))
-    specifications.append((SOURCE, sha_file(SOURCE), git("rev-parse", "HEAD"), None))
     unique: dict[str, tuple[Path, str, str, str | None]] = {}
     for path, expected_sha, source_commit, expected_blob in specifications:
         key = str(path)
@@ -901,6 +987,7 @@ def trusted_source_snapshot(ready: dict[str, Any]) -> list[dict[str, Any]]:
         if not artifact_commit or git("rev-parse", f"{artifact_commit}:{relative}") != current_blob or (expected_blob is not None and expected_blob != current_blob):
             raise OperatorError(f"trusted source Git authority differs: {path}")
         records.append({"path": str(path), "sha256": expected_sha, "source_commit": source_commit, "artifact_commit": artifact_commit, "git_blob": current_blob, "identity": [metadata.st_dev, metadata.st_ino, metadata.st_mode, metadata.st_nlink, metadata.st_size, metadata.st_mtime_ns, metadata.st_ctime_ns]})
+    records.append(trusted_operator_source_record())
     return sorted(records, key=lambda item: item["path"])
 
 
