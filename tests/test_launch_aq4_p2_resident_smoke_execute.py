@@ -737,6 +737,29 @@ def test_execute_binding_remains_ineligible_until_live_sidecar_and_qa() -> None:
     assert value["blocked_reasons"] == ["live preflight sidecar is absent", "independent execute-launcher QA is pending"]
 
 
+def test_current_execute_binding_v10_is_sealed_and_bound_to_launcher_authority() -> None:
+    root = LAUNCHER.EXECUTE_BINDING_ROOT
+    assert root.name == "resident-one-case-smoke-execute-binding-v10"
+    assert stat.S_IMODE(root.stat().st_mode) == 0o555
+    assert {item.name for item in root.iterdir()} == {
+        "execute-binding.json",
+        "launcher-trust.json",
+        "SHA256SUMS",
+    }
+    for item in root.iterdir():
+        assert stat.S_IMODE(item.stat().st_mode) == 0o444
+        assert item.stat().st_nlink == 1
+    for line in (root / "SHA256SUMS").read_text().splitlines():
+        digest, name = line.split("  ", 1)
+        assert LAUNCHER.sha_bytes((root / name).read_bytes()) == digest
+    binding, trust = LAUNCHER.load_execute_binding(root / "execute-binding.json")
+    assert binding == LAUNCHER.execute_binding_document()
+    assert trust["commit"] == "fc4559ee4fb8c7c1e62353fb3978a1a1e0a7d86d"
+    assert trust["tree"] == "a5f938243463e36e401787aa62dfa6a5ef46e125"
+    assert trust["git_blob"] == "debace42c2063c476a9db3dcfe7fdf480bdf5088"
+    assert trust["sha256"] == "5197efa84ec98343dda9438e4c0bc31e144765ce686a4b41199f1ae0315de8a6"
+
+
 def test_historical_execute_binding_v8_is_sealed_and_remains_blocked() -> None:
     root = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-execute-binding-v8"
     assert stat.S_IMODE(root.stat().st_mode) == 0o555
