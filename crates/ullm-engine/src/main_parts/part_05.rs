@@ -466,6 +466,38 @@ fn package_linear_attn_mlp_block_sequence_run(
     row_scale_overrides: Option<&PackageRowScaleOverrides>,
     cell_delta_overrides: Option<&PackageCellDeltaOverrides>,
 ) -> Result<PackageLinearAttnMlpBlockSequenceRun, String> {
+    package_linear_attn_mlp_block_sequence_run_with_diagnostic_inputs(
+        path,
+        device_index,
+        chunk_bytes,
+        layer_index,
+        sequence_len,
+        residual_sequence,
+        row_scale_overrides,
+        cell_delta_overrides,
+        None,
+        None,
+    )
+}
+
+/// Diagnostic-only extension of the production sequence path.
+///
+/// The normal worker never calls this function.  `input_normed_override` is
+/// an explicit fixed-input probe hook and `z_projection_override` is applied
+/// only after the production Z matvec has completed and immediately before
+/// the production SiLU-mul.  Both options are `None` for every normal path.
+fn package_linear_attn_mlp_block_sequence_run_with_diagnostic_inputs(
+    path: &str,
+    device_index: u32,
+    chunk_bytes: usize,
+    layer_index: usize,
+    sequence_len: usize,
+    residual_sequence: Vec<f32>,
+    row_scale_overrides: Option<&PackageRowScaleOverrides>,
+    cell_delta_overrides: Option<&PackageCellDeltaOverrides>,
+    input_normed_override: Option<&[f32]>,
+    z_projection_override: Option<&[f32]>,
+) -> Result<PackageLinearAttnMlpBlockSequenceRun, String> {
     let key_heads = 16_usize;
     let value_heads = 32_usize;
     let key_dim = 128_usize;
@@ -626,55 +658,76 @@ fn package_linear_attn_mlp_block_sequence_run(
         .synchronize()
         .map_err(|err| format!("failed to synchronize after input norm weight copy: {err}"))?;
 
-    let mut expected_input_normed = Vec::with_capacity(sequence_len * hidden);
-    let mut input_normed_sequence_bytes = vec![0_u8; hidden_sequence_bytes];
-    for timestep in 0..sequence_len {
-        let residual_start = timestep * hidden;
-        let residual_end = residual_start + hidden;
-        let residual = &residual_sequence[residual_start..residual_end];
-        let residual_bytes = encode_f32_to_bytes(residual);
-        input_buffer
-            .copy_from_host(0, &residual_bytes, Some(&mut stream))
-            .map_err(|err| {
-                format!("failed to copy residual timestep {timestep} into runtime buffer: {err}")
-            })?;
-        ullm_runtime_sys::rmsnorm_f32(
-            &input_buffer,
-            &input_norm_weight_buffer,
-            hidden,
-            input_epsilon,
-            &mut input_normed_buffer,
-            Some(&mut stream),
-        )
-        .map_err(|err| format!("failed to run input RMSNorm timestep {timestep}: {err}"))?;
-        stream.synchronize().map_err(|err| {
-            format!("failed to synchronize after input RMSNorm timestep {timestep}: {err}")
-        })?;
-        let byte_start = timestep * hidden_bytes;
-        let byte_end = byte_start + hidden_bytes;
-        input_normed_buffer
-            .copy_to_host(
-                0,
-                &mut input_normed_sequence_bytes[byte_start..byte_end],
-                Some(&mut stream),
-            )
-            .map_err(|err| {
-                format!("failed to copy input RMSNorm timestep {timestep} to host: {err}")
-            })?;
-        stream.synchronize().map_err(|err| {
-            format!("failed to synchronize after input RMSNorm host copy {timestep}: {err}")
-        })?;
-        let expected = runtime_host_rmsnorm_f32(residual, &input_norm_weight_values, input_epsilon);
-        expected_input_normed.extend_from_slice(&expected);
-    }
-    let input_normed = decode_f32_le_values(&input_normed_sequence_bytes);
-    let input_norm_max_abs_diff = verify_f32_close(
-        "package-linear-attn-mlp-block-smoke input RMSNorm",
-        &input_normed,
-        &expected_input_normed,
-        1e-4,
-        1e-5,
-    )?;
+    let (input_normed, input_norm_max_abs_diff, input_normed_sequence_bytes) =
+        if let Some(override_values) = input_normed_override {
+            if override_values.len() != sequence_len * hidden
+                || override_values.iter().any(|value| !value.is_finite())
+            {
+                return Err(format!(
+                    "diagnostic input RMSNorm override length/finite mismatch: got {} expected {}",
+                    override_values.len(),
+                    sequence_len * hidden
+                ));
+            }
+            (override_values.to_vec(), 0.0_f32, encode_f32_to_bytes(override_values))
+        } else {
+            let mut expected_input_normed = Vec::with_capacity(sequence_len * hidden);
+            let mut input_normed_sequence_bytes = vec![0_u8; hidden_sequence_bytes];
+            for timestep in 0..sequence_len {
+                let residual_start = timestep * hidden;
+                let residual_end = residual_start + hidden;
+                let residual = &residual_sequence[residual_start..residual_end];
+                let residual_bytes = encode_f32_to_bytes(residual);
+                input_buffer
+                    .copy_from_host(0, &residual_bytes, Some(&mut stream))
+                    .map_err(|err| {
+                        format!("failed to copy residual timestep {timestep} into runtime buffer: {err}")
+                    })?;
+                ullm_runtime_sys::rmsnorm_f32(
+                    &input_buffer,
+                    &input_norm_weight_buffer,
+                    hidden,
+                    input_epsilon,
+                    &mut input_normed_buffer,
+                    Some(&mut stream),
+                )
+                .map_err(|err| format!("failed to run input RMSNorm timestep {timestep}: {err}"))?;
+                stream.synchronize().map_err(|err| {
+                    format!("failed to synchronize after input RMSNorm timestep {timestep}: {err}")
+                })?;
+                let byte_start = timestep * hidden_bytes;
+                let byte_end = byte_start + hidden_bytes;
+                input_normed_buffer
+                    .copy_to_host(
+                        0,
+                        &mut input_normed_sequence_bytes[byte_start..byte_end],
+                        Some(&mut stream),
+                    )
+                    .map_err(|err| {
+                        format!("failed to copy input RMSNorm timestep {timestep} to host: {err}")
+                    })?;
+                stream.synchronize().map_err(|err| {
+                    format!("failed to synchronize after input RMSNorm host copy {timestep}: {err}")
+                })?;
+                let expected = runtime_host_rmsnorm_f32(residual, &input_norm_weight_values, input_epsilon);
+                expected_input_normed.extend_from_slice(&expected);
+            }
+            let input_normed = decode_f32_le_values(&input_normed_sequence_bytes);
+            let input_norm_max_abs_diff = verify_f32_close(
+                "package-linear-attn-mlp-block-smoke input RMSNorm",
+                &input_normed,
+                &expected_input_normed,
+                1e-4,
+                1e-5,
+            )?;
+            (input_normed, input_norm_max_abs_diff, input_normed_sequence_bytes)
+        };
+    input_normed_buffer
+        .copy_from_host(0, &input_normed_sequence_bytes[..hidden_bytes], Some(&mut stream))
+        .map_err(|err| format!("failed to seed diagnostic input norm buffer: {err}"))?;
+    stream
+        .synchronize()
+        .map_err(|err| format!("failed to synchronize diagnostic input norm seed: {err}"))?;
 
     let (
         attention_block_output,
@@ -902,7 +955,20 @@ fn package_linear_attn_mlp_block_sequence_run(
         let qkv_output = decode_f32_le_values(&qkv_sequence_bytes_host);
         let a_output = decode_f32_le_values(&a_sequence_bytes);
         let b_output = decode_f32_le_values(&b_sequence_bytes);
-        let z_output = decode_f32_le_values(&z_sequence_bytes);
+        let mut z_output = decode_f32_le_values(&z_sequence_bytes);
+        if let Some(override_values) = z_projection_override {
+            if override_values.len() != sequence_len * hidden
+                || override_values.iter().any(|value| !value.is_finite())
+            {
+                return Err(format!(
+                    "diagnostic Z projection override length/finite mismatch: got {} expected {}",
+                    override_values.len(),
+                    sequence_len * hidden
+                ));
+            }
+            z_output.copy_from_slice(override_values);
+        }
+        let z_sequence_bytes = encode_f32_to_bytes(&z_output);
         let mut qkv_sequence_buffer = context
             .alloc_buffer(qkv_sequence_bytes)
             .map_err(|err| format!("failed to allocate qkv sequence buffer: {err}"))?;
@@ -1852,6 +1918,329 @@ fn package_linear_attn_mlp_block_sequence_run(
         mlp_output,
         layer_output,
     })
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ZHybridInputHeader {
+    kind: String,
+    schema_version: String,
+    tensor_name: String,
+    dtype: String,
+    shape: Vec<usize>,
+}
+
+#[derive(Debug, serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+struct ZHybridInputCase {
+    kind: String,
+    case_id: String,
+    step: usize,
+    context_token_ids_sha256: String,
+    context_length: usize,
+    input_sha256: String,
+    values: Vec<f32>,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct ZHybridMetric {
+    rows: usize,
+    elements_per_row: usize,
+    max_abs: f64,
+    relative_l2: f64,
+    cosine: Option<f64>,
+    nonfinite: bool,
+}
+
+fn z_hybrid_metric(actual: &[f32], reference: &[f32], rows: usize) -> Result<ZHybridMetric, String> {
+    if rows == 0 || actual.len() != reference.len() || actual.len() % rows != 0 {
+        return Err("Z hybrid metric geometry differs".to_string());
+    }
+    let elements_per_row = actual.len() / rows;
+    let mut max_abs = 0.0_f64;
+    let mut diff_sq = 0.0_f64;
+    let mut ref_sq = 0.0_f64;
+    let mut actual_sq = 0.0_f64;
+    let mut dot = 0.0_f64;
+    let mut nonfinite = false;
+    for (&lhs, &rhs) in actual.iter().zip(reference) {
+        if !lhs.is_finite() || !rhs.is_finite() {
+            nonfinite = true;
+            continue;
+        }
+        let lhs = lhs as f64;
+        let rhs = rhs as f64;
+        let diff = lhs - rhs;
+        max_abs = max_abs.max(diff.abs());
+        diff_sq += diff * diff;
+        ref_sq += rhs * rhs;
+        actual_sq += lhs * lhs;
+        dot += lhs * rhs;
+    }
+    let relative_l2 = if ref_sq > 0.0 {
+        diff_sq.sqrt() / ref_sq.sqrt()
+    } else if diff_sq == 0.0 {
+        0.0
+    } else {
+        f64::INFINITY
+    };
+    let cosine = if actual_sq > 0.0 && ref_sq > 0.0 {
+        Some(dot / (actual_sq * ref_sq).sqrt())
+    } else {
+        None
+    };
+    Ok(ZHybridMetric {
+        rows,
+        elements_per_row,
+        max_abs,
+        relative_l2,
+        cosine,
+        nonfinite,
+    })
+}
+
+fn z_hybrid_per_step_metrics(
+    actual: &[f32],
+    reference: &[f32],
+    rows: usize,
+) -> Result<Vec<ZHybridMetric>, String> {
+    if rows == 0 || actual.len() != reference.len() || actual.len() % rows != 0 {
+        return Err("Z hybrid per-step metric geometry differs".to_string());
+    }
+    let width = actual.len() / rows;
+    (0..rows)
+        .map(|row| z_hybrid_metric(&actual[row * width..(row + 1) * width], &reference[row * width..(row + 1) * width], 1))
+        .collect()
+}
+
+fn z_hybrid_write_f32(path: &std::path::Path, values: &[f32]) -> Result<String, String> {
+    if path.exists() {
+        return Err(format!("refusing to overwrite Z hybrid sidecar: {}", path.display()));
+    }
+    let bytes = encode_f32_to_bytes(values);
+    fs::write(path, &bytes).map_err(|err| format!("failed to write {}: {err}", path.display()))?;
+    Ok(z_hybrid_sha256(&bytes))
+}
+
+fn z_hybrid_sha256(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(bytes);
+    digest.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+fn z_hybrid_read_input(
+    path: &str,
+    expected_sequence_len: usize,
+) -> Result<(Vec<ZHybridInputCase>, Vec<f32>, String), String> {
+    let raw = fs::read(path).map_err(|err| format!("failed to read diagnostic input {path}: {err}"))?;
+    let input_sha256 = z_hybrid_sha256(&raw);
+    let mut lines = raw.split(|byte| *byte == b'\n').filter(|line| !line.is_empty());
+    let header_line = lines.next().ok_or_else(|| "diagnostic input is empty".to_string())?;
+    let header: ZHybridInputHeader = serde_json::from_slice(header_line)
+        .map_err(|err| format!("failed to parse diagnostic input header: {err}"))?;
+    if header.kind != "header"
+        || header.schema_version != "ullm.aq4_layer0_input_normed_jsonl.v1"
+        || header.tensor_name != "model.language_model.layers.0.linear_attn.in_proj_qkv.weight"
+        || header.dtype != "f32"
+        || header.shape != [4096]
+    {
+        return Err("diagnostic input header contract differs".to_string());
+    }
+    let mut cases = Vec::new();
+    let mut values = Vec::new();
+    for line in lines {
+        let case: ZHybridInputCase = serde_json::from_slice(line)
+            .map_err(|err| format!("failed to parse diagnostic input case: {err}"))?;
+        if case.kind != "case" || case.values.len() != 4096 || case.values.iter().any(|value| !value.is_finite()) {
+            return Err(format!("diagnostic input case {} is invalid", case.case_id));
+        }
+        let encoded = encode_f32_to_bytes(&case.values);
+        if z_hybrid_sha256(&encoded) != case.input_sha256 {
+            return Err(format!("diagnostic input case {} hash differs", case.case_id));
+        }
+        values.extend_from_slice(&case.values);
+        cases.push(case);
+    }
+    if cases.len() != expected_sequence_len {
+        return Err(format!(
+            "diagnostic input row count differs: got {} expected {}",
+            cases.len(), expected_sequence_len
+        ));
+    }
+    Ok((cases, values, input_sha256))
+}
+
+fn package_linear_attn_z_hybrid_diagnostic(
+    path: Option<String>,
+    input: Option<String>,
+    source_z: Option<String>,
+    output: Option<String>,
+    device_index: Option<String>,
+    chunk_bytes: Option<String>,
+    sequence_len: Option<String>,
+) -> ExitCode {
+    let Some(path) = path else {
+        eprintln!("package-linear-attn-z-hybrid-diagnostic requires a .ullm.d path");
+        return ExitCode::from(2);
+    };
+    let Some(input) = input else {
+        eprintln!("package-linear-attn-z-hybrid-diagnostic requires a fixed input JSONL");
+        return ExitCode::from(2);
+    };
+    let Some(source_z) = source_z else {
+        eprintln!("package-linear-attn-z-hybrid-diagnostic requires a source Z f32le sidecar");
+        return ExitCode::from(2);
+    };
+    let Some(output) = output else {
+        eprintln!("package-linear-attn-z-hybrid-diagnostic requires a new output directory");
+        return ExitCode::from(2);
+    };
+    let device_index = match parse_optional_device_index(device_index) {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+    if device_index != 0 {
+        eprintln!("package-linear-attn-z-hybrid-diagnostic is CPU-only and requires device index 0");
+        return ExitCode::from(2);
+    }
+    let chunk_bytes = match parse_optional_usize(chunk_bytes, 1024 * 1024, "chunk bytes") {
+        Ok(value) if value > 0 => value,
+        Ok(_) => {
+            eprintln!("chunk bytes must be greater than zero");
+            return ExitCode::from(2);
+        }
+        Err(code) => return code,
+    };
+    let sequence_len = match parse_optional_usize(sequence_len, 3, "sequence length") {
+        Ok(value) if value > 0 => value,
+        Ok(_) => {
+            eprintln!("sequence length must be greater than zero");
+            return ExitCode::from(2);
+        }
+        Err(code) => return code,
+    };
+    if std::path::Path::new(&output).exists() {
+        eprintln!("refusing to overwrite diagnostic output directory: {output}");
+        return ExitCode::from(2);
+    }
+    let result = (|| -> Result<serde_json::Value, String> {
+        let (cases, input_values, input_sha256) = z_hybrid_read_input(&input, sequence_len)?;
+        let source_z_bytes = fs::read(&source_z)
+            .map_err(|err| format!("failed to read source Z sidecar {source_z}: {err}"))?;
+        let hidden = 32 * 128;
+        let expected_source_bytes = sequence_len
+            .checked_mul(hidden)
+            .and_then(|value| value.checked_mul(std::mem::size_of::<f32>()))
+            .ok_or_else(|| "source Z sidecar size overflows".to_string())?;
+        if source_z_bytes.len() != expected_source_bytes {
+            return Err(format!(
+                "source Z sidecar size differs: got {} expected {}",
+                source_z_bytes.len(), expected_source_bytes
+            ));
+        }
+        let source_z_values = decode_f32_le_values(&source_z_bytes);
+        if source_z_values.iter().any(|value| !value.is_finite()) {
+            return Err("source Z sidecar contains non-finite values".to_string());
+        }
+        fs::create_dir_all(&output).map_err(|err| format!("failed to create diagnostic output: {err}"))?;
+        let residual_base = deterministic_f32_vector(hidden);
+        let mut residual_sequence = Vec::with_capacity(sequence_len * hidden);
+        for timestep in 0..sequence_len {
+            residual_sequence.extend(linear_attn_step_input(&residual_base, timestep));
+        }
+        let baseline = package_linear_attn_mlp_block_sequence_run_with_diagnostic_inputs(
+            &path,
+            device_index,
+            chunk_bytes,
+            0,
+            sequence_len,
+            residual_sequence.clone(),
+            None,
+            None,
+            Some(&input_values),
+            None,
+        )?;
+        let hybrid = package_linear_attn_mlp_block_sequence_run_with_diagnostic_inputs(
+            &path,
+            device_index,
+            chunk_bytes,
+            0,
+            sequence_len,
+            residual_sequence,
+            None,
+            None,
+            Some(&input_values),
+            Some(&source_z_values),
+        )?;
+        let output_dir = std::path::Path::new(&output);
+        let baseline_z_sha = z_hybrid_write_f32(&output_dir.join("baseline-z.f32le"), &baseline.attention_z_projection)?;
+        let hybrid_z_sha = z_hybrid_write_f32(&output_dir.join("hybrid-z.f32le"), &hybrid.attention_z_projection)?;
+        let baseline_block_sha = z_hybrid_write_f32(&output_dir.join("baseline-attention-block.f32le"), &baseline.attention_block_output)?;
+        let hybrid_block_sha = z_hybrid_write_f32(&output_dir.join("hybrid-attention-block.f32le"), &hybrid.attention_block_output)?;
+        let baseline_layer_sha = z_hybrid_write_f32(&output_dir.join("baseline-layer-output.f32le"), &baseline.layer_output)?;
+        let hybrid_layer_sha = z_hybrid_write_f32(&output_dir.join("hybrid-layer-output.f32le"), &hybrid.layer_output)?;
+        let manifest_path = std::path::Path::new(&path).join("manifest.json");
+        let manifest_bytes = fs::read(&manifest_path)
+            .map_err(|err| format!("failed to read package manifest: {err}"))?;
+        let package_manifest_sha256 = z_hybrid_sha256(&manifest_bytes);
+        let baseline_source_z = z_hybrid_metric(&baseline.attention_z_projection, &source_z_values, sequence_len)?;
+        let hybrid_source_z = z_hybrid_metric(&hybrid.attention_z_projection, &source_z_values, sequence_len)?;
+        let hybrid_baseline_z = z_hybrid_metric(&hybrid.attention_z_projection, &baseline.attention_z_projection, sequence_len)?;
+        let hybrid_baseline_block = z_hybrid_metric(&hybrid.attention_block_output, &baseline.attention_block_output, sequence_len)?;
+        let hybrid_baseline_layer = z_hybrid_metric(&hybrid.layer_output, &baseline.layer_output, sequence_len)?;
+        let report = serde_json::json!({
+            "schema_version": "ullm.aq4_layer0_z_hybrid_fidelity.cpu.v1",
+            "status": "valid",
+            "classification": "unclassified",
+            "promotion": false,
+            "holdout": "not_run",
+            "policy_evaluation": "policy_not_evaluated",
+            "thresholds": serde_json::Value::Null,
+            "device": {"backend": "cpu", "requested_index": device_index},
+            "package": {"root": path, "manifest_sha256": package_manifest_sha256, "layer_index": 0},
+            "input": {"path": input, "sha256": input_sha256, "schema": "ullm.aq4_layer0_input_normed_jsonl.v1", "rows": sequence_len, "shape": [4096], "cases": cases},
+            "source_z": {"path": source_z, "sha256": z_hybrid_sha256(&source_z_bytes), "shape": [sequence_len, hidden], "dtype": "f32", "operation": "input_f32_matmul_source_bf16_weight_cast_f32_accumulate_f32"},
+            "state_reset": {"boundary": "before_each_run", "recurrent_state": "zero_initialized_once_for_sequence", "same_between_baseline_and_hybrid": true},
+            "override": {"family": "z", "boundary": "after_production_z_matvec_before_production_silu_mul", "default_off": true, "worker_reachable": false, "promotion": false},
+            "baseline": {"mode": "all_aq4", "z_sha256": baseline_z_sha, "attention_block_sha256": baseline_block_sha, "layer_output_sha256": baseline_layer_sha},
+            "hybrid": {"mode": "aq4_except_z_source_bf16", "z_sha256": hybrid_z_sha, "attention_block_sha256": hybrid_block_sha, "layer_output_sha256": hybrid_layer_sha},
+            "metrics": {
+                "baseline_vs_source_z": {"aggregate": baseline_source_z, "per_step": z_hybrid_per_step_metrics(&baseline.attention_z_projection, &source_z_values, sequence_len)?},
+                "hybrid_vs_source_z": {"aggregate": hybrid_source_z, "per_step": z_hybrid_per_step_metrics(&hybrid.attention_z_projection, &source_z_values, sequence_len)?},
+                "hybrid_vs_baseline_z": {"aggregate": hybrid_baseline_z, "per_step": z_hybrid_per_step_metrics(&hybrid.attention_z_projection, &baseline.attention_z_projection, sequence_len)?},
+                "hybrid_vs_baseline_attention_block": {"aggregate": hybrid_baseline_block, "per_step": z_hybrid_per_step_metrics(&hybrid.attention_block_output, &baseline.attention_block_output, sequence_len)?},
+                "hybrid_vs_baseline_layer_output": {"aggregate": hybrid_baseline_layer, "per_step": z_hybrid_per_step_metrics(&hybrid.layer_output, &baseline.layer_output, sequence_len)?}
+            },
+            "production_path": {"input_norm": "same_fixed_input_sidecar", "qkv_a_b": "same_production_aq4_matvec", "conv_gate_beta_recurrent": "same_production_runtime", "post_norm_mlp_residual": "same_production_runtime"}
+        });
+        let report_path = output_dir.join("report.json");
+        let report_bytes = serde_json::to_vec_pretty(&report).map_err(|err| format!("failed to encode report: {err}"))?;
+        fs::write(&report_path, &report_bytes).map_err(|err| format!("failed to write report: {err}"))?;
+        Ok(report)
+    })();
+    match result {
+        Ok(report) => {
+            let metrics = report.get("metrics").and_then(serde_json::Value::as_object);
+            let block_l2 = metrics
+                .and_then(|values| values.get("hybrid_vs_baseline_attention_block"))
+                .and_then(|value| value.get("aggregate"))
+                .and_then(|value| value.get("relative_l2"))
+                .and_then(serde_json::Value::as_f64)
+                .unwrap_or(f64::NAN);
+            let layer_l2 = metrics
+                .and_then(|values| values.get("hybrid_vs_baseline_layer_output"))
+                .and_then(|value| value.get("aggregate"))
+                .and_then(|value| value.get("relative_l2"))
+                .and_then(serde_json::Value::as_f64)
+                .unwrap_or(f64::NAN);
+            println!("package-linear-attn-z-hybrid-diagnostic report={output}/report.json rows={sequence_len} attention_block_relative_l2={block_l2:.9} layer_output_relative_l2={layer_l2:.9} promotion=false holdout=not_run");
+            ExitCode::SUCCESS
+        }
+        Err(err) => {
+            eprintln!("package-linear-attn-z-hybrid-diagnostic: {err}");
+            ExitCode::from(1)
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
