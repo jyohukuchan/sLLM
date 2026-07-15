@@ -89,6 +89,7 @@ RAW_SCHEMA = SELECTOR.RAW_SCHEMA
 MAX_INPUT_BYTES = 128 * 1024 * 1024
 MAX_TRACE_ROWS = 500_000
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+GIT_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 
 ROOT_FIELDS = {
     "schema_version",
@@ -102,6 +103,44 @@ ROOT_FIELDS = {
     "resident_summaries",
     "representative_cases",
     "full_model_pairs",
+}
+IDENTITY_ROOT_FIELDS = {
+    "schema_version",
+    "status",
+    "identity_sha256",
+    "expanded_manifest_sha256",
+    "build_git_commit",
+    "resident_driver_identity",
+    "hash_binding",
+}
+IDENTITY_HASH_BINDING_FIELDS = {
+    "bound_case_manifest_sha256",
+    "worker_binary_sha256",
+    "package_manifest_sha256",
+    "package_content_sha256",
+    "served_model_manifest_sha256",
+}
+IDENTITY_DRIVER_FIELDS = {
+    "binary_sha256",
+    "build_git_commit",
+    "protocol",
+    "worker_binary_sha256",
+    "package_manifest_sha256",
+    "package_content_sha256",
+    "served_model_manifest_sha256",
+    "model_id",
+    "model_revision",
+    "format_id",
+    "implementation_id",
+    "runtime_device",
+    "guard_set_sha256",
+}
+IDENTITY_RUNTIME_DEVICE_FIELDS = {
+    "runtime_device_index",
+    "device_id",
+    "backend",
+    "name",
+    "architecture",
 }
 CANDIDATE_FIELDS = {"candidate_id", "family"}
 REF_FIELDS = {"path", "sha256"}
@@ -473,6 +512,7 @@ def self_hash(value: dict[str, Any], field: str) -> str:
 
 
 def validate_identity(value: dict[str, Any], snapshot: Snapshot) -> dict[str, str]:
+    exact(value, IDENTITY_ROOT_FIELDS, "identity")
     if value.get("schema_version") != "ullm.aq4_production_p2_identity.v2" or value.get("status") != "bound":
         raise ProducerError("identity schema/status differs")
     identity_sha = digest(value.get("identity_sha256"), "identity.identity_sha256")
@@ -482,6 +522,60 @@ def validate_identity(value: dict[str, Any], snapshot: Snapshot) -> dict[str, st
     binding = value.get("hash_binding")
     if not isinstance(resident, dict) or not isinstance(binding, dict):
         raise ProducerError("identity resident/hash binding is incomplete")
+    exact(resident, IDENTITY_DRIVER_FIELDS, "identity resident_driver_identity")
+    exact(binding, IDENTITY_HASH_BINDING_FIELDS, "identity hash_binding")
+    runtime_device = resident.get("runtime_device")
+    if not isinstance(runtime_device, dict):
+        raise ProducerError("identity resident_driver_identity.runtime_device is incomplete")
+    exact(runtime_device, IDENTITY_RUNTIME_DEVICE_FIELDS, "identity resident_driver_identity.runtime_device")
+    if GIT_SHA_RE.fullmatch(value.get("build_git_commit", "")) is None:
+        raise ProducerError("identity build_git_commit is invalid")
+    if resident.get("build_git_commit") != value.get("build_git_commit"):
+        raise ProducerError("identity build commit differs from resident driver")
+    for field in (
+        "protocol",
+        "model_id",
+        "model_revision",
+        "format_id",
+        "implementation_id",
+    ):
+        text_value(resident.get(field), f"identity resident_driver_identity.{field}")
+    runtime_index = resident["runtime_device"].get("runtime_device_index")
+    count(runtime_index, "identity resident_driver_identity.runtime_device.runtime_device_index", positive=True)
+    for field in ("device_id", "backend", "name", "architecture"):
+        text_value(
+            resident["runtime_device"].get(field),
+            f"identity resident_driver_identity.runtime_device.{field}",
+        )
+    for field in (
+        "identity_sha256",
+        "expanded_manifest_sha256",
+        "hash_binding.bound_case_manifest_sha256",
+        "hash_binding.worker_binary_sha256",
+        "hash_binding.package_manifest_sha256",
+        "hash_binding.package_content_sha256",
+        "hash_binding.served_model_manifest_sha256",
+        "resident_driver_identity.binary_sha256",
+        "resident_driver_identity.worker_binary_sha256",
+        "resident_driver_identity.package_manifest_sha256",
+        "resident_driver_identity.package_content_sha256",
+        "resident_driver_identity.served_model_manifest_sha256",
+        "resident_driver_identity.guard_set_sha256",
+    ):
+        cursor: Any = value
+        for part in field.split("."):
+            if not isinstance(cursor, dict):
+                raise ProducerError(f"identity field is not an object: {field}")
+            cursor = cursor.get(part)
+        digest(cursor, f"identity.{field}")
+    for field in (
+        "worker_binary_sha256",
+        "package_manifest_sha256",
+        "package_content_sha256",
+        "served_model_manifest_sha256",
+    ):
+        if binding[field] != resident[field]:
+            raise ProducerError(f"identity {field} differs from resident driver")
     binary_sha = digest(resident.get("binary_sha256"), "identity resident binary")
     package_sha = digest(binding.get("package_content_sha256"), "identity package content")
     case_manifest_sha = digest(
@@ -1299,6 +1393,7 @@ def build(manifest: dict[str, Any], manifest_snapshot: Snapshot) -> tuple[dict[s
         raise ProducerError("full_model_pairs count differs for producer mode")
     pairs: list[dict[str, Any]] = []
     pair_ids: set[str] = set()
+    pair_samples: set[tuple[str, int]] = set()
     for index, pair in enumerate(
         sorted(pair_inputs, key=lambda item: (item.get("pair_id", ""), item.get("case_sha256", "")) if isinstance(item, dict) else ("", ""))
     ):
@@ -1313,6 +1408,10 @@ def build(manifest: dict[str, Any], manifest_snapshot: Snapshot) -> tuple[dict[s
         run_index = count(pair["run_index"], f"{label}.run_index")
         if run_index < 2 or run_index > 11:
             raise ProducerError(f"{label} does not bind a measured run")
+        sample_key = (pair.get("case_id"), run_index)
+        if sample_key in pair_samples:
+            raise ProducerError("full-model pair reuses a measured run sample")
+        pair_samples.add(sample_key)
         baseline, baseline_run_id, baseline_runs = resident_raw(pair["baseline_raw"], f"{label} baseline raw")
         contender, contender_run_id, contender_runs = resident_raw(pair["candidate_raw"], f"{label} candidate raw")
         case_sha = digest(pair["case_sha256"], f"{label}.case_sha256")
