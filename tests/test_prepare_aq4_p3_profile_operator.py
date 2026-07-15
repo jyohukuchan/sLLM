@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import importlib.util
 import inspect
 import json
@@ -375,6 +376,111 @@ def test_current_v15_authority_formal_readback_is_exact_and_read_only() -> None:
     assert authority["actual_executed"] is False
     assert authority["gpu_command_executed"] is False
     assert authority["service_touched"] is False
+
+
+def test_historical_ready_v15_is_self_contained_and_poststate_independent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(OPERATOR, "PROFILE_READY_ROOT", tmp_path / "current-v99")
+    monkeypatch.setattr(OPERATOR, "PROFILE_READY", tmp_path / "current-v99/ready.json")
+    monkeypatch.setattr(
+        OPERATOR,
+        "PROFILE_READY_DRY_RUN_ROOT",
+        tmp_path / "current-dry-v99",
+    )
+    monkeypatch.setattr(OPERATOR, "MAINTENANCE", tmp_path / "current-maintenance.py")
+    monkeypatch.setattr(
+        OPERATOR,
+        "load_maintenance",
+        lambda: (_ for _ in ()).throw(AssertionError("current loader forbidden")),
+    )
+    value = OPERATOR.historical_ready_v15_authority()
+    assert value["status"] == "ready_for_one_case"
+    assert value["actual_eligible"] is True
+    names = {
+        node.id
+        for node in ast.walk(
+            ast.parse(inspect.getsource(OPERATOR.historical_ready_v15_authority))
+        )
+        if isinstance(node, ast.Name)
+    }
+    assert names.isdisjoint(
+        {
+            "PROFILE_READY_ROOT",
+            "PROFILE_READY",
+            "PROFILE_READY_DRY_RUN_ROOT",
+            "PREVIOUS_V13_PROFILE_READY",
+            "MAINTENANCE",
+            "load_maintenance",
+        }
+    )
+
+
+def test_historical_ready_v15_rejects_root_inventory_mismatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    verify = OPERATOR.verify_sums
+
+    def mismatched(root: Path) -> dict:
+        inventory = verify(root)
+        if root == OPERATOR.HISTORICAL_READY_V15_ROOT:
+            inventory = json.loads(json.dumps(inventory))
+            inventory["members"].pop("qa-attestation.json")
+        return inventory
+
+    monkeypatch.setattr(OPERATOR, "verify_sums", mismatched)
+    with pytest.raises(OPERATOR.OperatorError, match="authority differs"):
+        OPERATOR.historical_ready_v15_authority()
+
+
+def test_historical_ready_v15_rejects_source_git_mismatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    git_bytes = OPERATOR.git_bytes
+
+    def mismatched(*args: str) -> bytes:
+        if args[:1] == ("show",) and args[1].startswith(
+            OPERATOR.HISTORICAL_READY_V15_MAINTENANCE_COMMIT
+        ):
+            return b"tampered historical source"
+        return git_bytes(*args)
+
+    monkeypatch.setattr(OPERATOR, "git_bytes", mismatched)
+    with pytest.raises(OPERATOR.OperatorError, match="source authority differs"):
+        OPERATOR.historical_ready_v15_authority()
+
+
+@pytest.mark.parametrize("field", ("qa", "trust_path"))
+def test_historical_ready_v15_rejects_embedded_qa_or_wrong_source_path(
+    monkeypatch: pytest.MonkeyPatch,
+    field: str,
+) -> None:
+    load = OPERATOR.load
+
+    def mismatched(path: Path, label: str) -> dict:
+        value = load(path, label)
+        if field == "qa" and path.name == "qa-attestation.json":
+            value["automated_tests"]["aggregate"]["passed"] -= 1
+        if field == "trust_path" and path.name == "harness-trust.json":
+            value["path"] = "/wrong/historical-maintenance.py"
+        return value
+
+    monkeypatch.setattr(OPERATOR, "load", mismatched)
+    match = "QA aggregate differs" if field == "qa" else "source authority differs"
+    with pytest.raises(OPERATOR.OperatorError, match=match):
+        OPERATOR.historical_ready_v15_authority()
+
+
+def test_audit_current_real_authority_integration_is_clean() -> None:
+    audit = OPERATOR.audit_current()
+    assert audit["status"] == "clean"
+    assert audit["fresh_outputs_absent"] is True
+    assert audit["targeted_processes"] == []
+    assert audit["owners"]["amd_smi"] == [audit["worker"]["pid"]]
+    assert audit["owners"]["kfd"] == [audit["worker"]["pid"]]
+    assert audit["actual_executed"] is False
+    assert audit["service_touched"] is False
 
 
 def test_previous_v13_authority_is_immutable_uninvoked_and_poststate_independent() -> None:

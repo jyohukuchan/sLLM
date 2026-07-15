@@ -185,6 +185,14 @@ HISTORICAL_READY_V15_COMMIT = "b39e21822db40e7fd5060da66db885b3a9ff0b8a"
 HISTORICAL_READY_V15_TREE = "4daa8f0cafe93274aeddd902bea58727633b3080"
 HISTORICAL_READY_V15_ROOT_TREE = "8045019bc2346efccc3c37781fc8bd6280e95dac"
 HISTORICAL_READY_V15_BINDING_SHA256 = "4c2c2079fd428c8db156e36d0513726ae49e372927770d4d9aba0a0172b4497b"
+HISTORICAL_READY_V15_SUMS_SHA256 = "9ac4097022bad03258494c7b24b40aedc280d38ff3086135242d1a354f9dadbb"
+HISTORICAL_READY_V15_TRUST_SHA256 = "1e480401e736310bd0efb02090ddf61f22b11623dc724de269297163ccbcc404"
+HISTORICAL_READY_V15_QA_SHA256 = "40f946ee08af0d77d5a6279d25bd88bfe7170091f8216292608d817e57c52f17"
+HISTORICAL_READY_V15_MAINTENANCE = ROOT / "tools/run-aq4-p2-resident-smoke-maintenance.py"
+HISTORICAL_READY_V15_MAINTENANCE_COMMIT = "2167c33fe56c0efcbd3745055e6de8604aafd456"
+HISTORICAL_READY_V15_MAINTENANCE_TREE = "b76cdd6937d3f5f63565049596d8192ed6f87cd2"
+HISTORICAL_READY_V15_MAINTENANCE_BLOB = "cf4fedca1912cc6cbe54ffbd63456c3ff1dbba53"
+HISTORICAL_READY_V15_MAINTENANCE_SHA256 = "f86f5be10968eab00f1fabae7827cd557514437098545049ac82def2ddbf2f0c"
 HISTORICAL_READY_DRY_RUN_V15_ROOT_TREE = "b375ac9a0e55b738715dd637d38b864ccf6a2204"
 HISTORICAL_READY_DRY_RUN_V15_SUMS_SHA256 = "86ab1e7714e05951a17e6a7584bf6183f68a1e009f289751810025f36329ec67"
 HISTORICAL_READY_DRY_RUN_V15_EVIDENCE_SHA256 = "743941cfa6c580d9f6fc786a37b9e270f5ee0f8764bb8ffcbceefb0c79f535fd"
@@ -1165,6 +1173,116 @@ def verify_current_source_authority(
         raise OperatorError(f"current source authority differs: {path}")
 
 
+def validate_historical_ready_v15_qa(qa: dict[str, Any]) -> None:
+    if (
+        set(qa)
+        != {
+            "schema_version",
+            "status",
+            "automated_tests",
+            "manual_checks",
+            "strict_negative_contract_count",
+            "coverage",
+            "launcher",
+            "runner",
+            "capture_tool",
+            "actual_executed",
+        }
+        or qa.get("schema_version")
+        != "ullm.aq4_p2_resident_execute_qa_attestation.v2"
+        or qa.get("status") != "passed"
+        or qa.get("actual_executed") is not False
+        or qa.get("manual_checks") != {"boundary_count": 15, "status": "passed"}
+        or qa.get("strict_negative_contract_count") != 43
+        or not isinstance(qa.get("coverage"), list)
+        or len(qa["coverage"]) != 20
+    ):
+        raise OperatorError("historical profile-ready-v15 QA authority differs")
+    automated = qa.get("automated_tests")
+    if (
+        not isinstance(automated, dict)
+        or set(automated) != {"schema_version", "aggregate", "suites"}
+        or automated.get("schema_version")
+        != "ullm.aq4_p2_exact_test_file_manifest.v1"
+        or not isinstance(automated.get("suites"), list)
+        or not automated["suites"]
+    ):
+        raise OperatorError("historical profile-ready-v15 QA manifest differs")
+    paths: set[str] = set()
+    collected = passed = 0
+    for suite in automated["suites"]:
+        if (
+            not isinstance(suite, dict)
+            or set(suite)
+            != {
+                "name",
+                "command",
+                "collected",
+                "passed",
+                "failed",
+                "deselected",
+                "files",
+            }
+            or not isinstance(suite.get("command"), list)
+            or not suite["command"]
+            or not isinstance(suite.get("files"), list)
+            or not suite["files"]
+            or suite.get("failed") != 0
+            or suite.get("deselected") != 0
+        ):
+            raise OperatorError("historical profile-ready-v15 QA suite differs")
+        suite_collected = suite_passed = 0
+        for item in suite["files"]:
+            if not isinstance(item, dict) or set(item) != {
+                "path",
+                "source_commit",
+                "git_blob",
+                "collected",
+                "passed",
+            }:
+                raise OperatorError("historical profile-ready-v15 QA file differs")
+            path = item.get("path")
+            commit = item.get("source_commit")
+            blob = item.get("git_blob")
+            if (
+                not isinstance(path, str)
+                or not path
+                or Path(path).is_absolute()
+                or ".." in Path(path).parts
+                or path in paths
+                or not isinstance(commit, str)
+                or GIT_OID_RE.fullmatch(commit) is None
+                or not isinstance(blob, str)
+                or GIT_OID_RE.fullmatch(blob) is None
+                or git("rev-parse", f"{commit}:{path}") != blob
+                or type(item.get("collected")) is not int
+                or type(item.get("passed")) is not int
+                or item["collected"] <= 0
+                or item["passed"] != item["collected"]
+            ):
+                raise OperatorError(
+                    "historical profile-ready-v15 QA Git authority differs"
+                )
+            paths.add(path)
+            suite_collected += item["collected"]
+            suite_passed += item["passed"]
+        if (
+            suite.get("collected") != suite_collected
+            or suite.get("passed") != suite_passed
+        ):
+            raise OperatorError("historical profile-ready-v15 QA counts differ")
+        collected += suite_collected
+        passed += suite_passed
+    if automated.get("aggregate") != {
+        "distinct_test_file_count": len(paths),
+        "collected": collected,
+        "passed": passed,
+        "failed": 0,
+        "deselected": 0,
+    } or (len(paths), collected, passed) != (13, 685, 685):
+        raise OperatorError("historical profile-ready-v15 QA aggregate differs")
+
+
 def historical_ready_v15_authority() -> dict[str, Any]:
     inventory = verify_sums(HISTORICAL_READY_V15_ROOT)
     dry_inventory = verify_sums(HISTORICAL_READY_DRY_RUN_V15_ROOT)
@@ -1172,6 +1290,14 @@ def historical_ready_v15_authority() -> dict[str, Any]:
     dry_relative = str(HISTORICAL_READY_DRY_RUN_V15_ROOT.relative_to(ROOT))
     if (
         sha_file(HISTORICAL_READY_V15) != HISTORICAL_READY_V15_BINDING_SHA256
+        or inventory["sha256sums_sha256"]
+        != HISTORICAL_READY_V15_SUMS_SHA256
+        or set(inventory["members"])
+        != {"ready-binding.json", "harness-trust.json", "qa-attestation.json"}
+        or sha_file(HISTORICAL_READY_V15_ROOT / "harness-trust.json")
+        != HISTORICAL_READY_V15_TRUST_SHA256
+        or sha_file(HISTORICAL_READY_V15_ROOT / "qa-attestation.json")
+        != HISTORICAL_READY_V15_QA_SHA256
         or dry_inventory["sha256sums_sha256"]
         != HISTORICAL_READY_DRY_RUN_V15_SUMS_SHA256
         or sha_file(
@@ -1196,10 +1322,102 @@ def historical_ready_v15_authority() -> dict[str, Any]:
         dry_inventory,
         HISTORICAL_READY_V15_COMMIT,
     )
-    maintenance = load_maintenance()
-    value = maintenance.load_ready_artifact(HISTORICAL_READY_V15)
-    if value != load(HISTORICAL_READY_V15, "historical profile ready binding"):
-        raise OperatorError("historical profile-ready-v15 readback differs")
+    value = load(HISTORICAL_READY_V15, "historical profile ready binding")
+    trust = load(
+        HISTORICAL_READY_V15_ROOT / "harness-trust.json",
+        "historical profile harness trust",
+    )
+    qa = load(
+        HISTORICAL_READY_V15_ROOT / "qa-attestation.json",
+        "historical profile QA attestation",
+    )
+    expected_identity = {
+        "path": str(HISTORICAL_READY_V15_MAINTENANCE),
+        "commit": HISTORICAL_READY_V15_MAINTENANCE_COMMIT,
+        "tree": HISTORICAL_READY_V15_MAINTENANCE_TREE,
+        "git_blob": HISTORICAL_READY_V15_MAINTENANCE_BLOB,
+        "sha256": HISTORICAL_READY_V15_MAINTENANCE_SHA256,
+    }
+    historical_source = git_bytes(
+        "show",
+        f"{HISTORICAL_READY_V15_MAINTENANCE_COMMIT}:"
+        f"{HISTORICAL_READY_V15_MAINTENANCE.relative_to(ROOT)}",
+    )
+    if (
+        trust
+        != {
+            "schema_version": "ullm.aq4_p2_resident_maintenance_harness_trust.v1",
+            "status": "ready_for_one_case",
+            "execution_mode": "profile_diagnostic",
+            "actual_eligible": True,
+            **expected_identity,
+            "ready_binding_sha256": HISTORICAL_READY_V15_BINDING_SHA256,
+        }
+        or git(
+            "rev-parse", f"{HISTORICAL_READY_V15_MAINTENANCE_COMMIT}^{{tree}}"
+        )
+        != HISTORICAL_READY_V15_MAINTENANCE_TREE
+        or git(
+            "rev-parse",
+            f"{HISTORICAL_READY_V15_MAINTENANCE_COMMIT}:"
+            f"{HISTORICAL_READY_V15_MAINTENANCE.relative_to(ROOT)}",
+        )
+        != HISTORICAL_READY_V15_MAINTENANCE_BLOB
+        or sha_bytes(historical_source) != HISTORICAL_READY_V15_MAINTENANCE_SHA256
+        or hashlib.sha1(
+            f"blob {len(historical_source)}\0".encode("ascii")
+            + historical_source
+        ).hexdigest()
+        != HISTORICAL_READY_V15_MAINTENANCE_BLOB
+    ):
+        raise OperatorError("historical profile-ready-v15 source authority differs")
+    validate_historical_ready_v15_qa(qa)
+    launcher_binding = value.get("launcher_binding", {})
+    profile = value.get("profile_diagnostic", {})
+    historical_capture = P3 / "aq4-p3-diagnostic-rocprof-capture-v10"
+    if (
+        value.get("schema_version")
+        != "ullm.aq4_p2_resident_smoke_ready_binding.v1"
+        or value.get("status") != "ready_for_one_case"
+        or value.get("execution_mode") != "profile_diagnostic"
+        or value.get("actual_eligible") is not True
+        or value.get("measurement_eligible") is not False
+        or value.get("promotion_eligible") is not False
+        or value.get("qa_attestation_sha256")
+        != HISTORICAL_READY_V15_QA_SHA256
+        or value.get("trust", {}).get("harness") != expected_identity
+        or value.get("authorization", {}).get("run_id")
+        != "p2-r9700-resident-one-case-smoke-profile-diagnostic-v10"
+        or value.get("authorization", {}).get("maximum_invocations") != 1
+        or launcher_binding.get("schema_version")
+        != "ullm.aq4_p2_resident_smoke_execute_binding.v1"
+        or launcher_binding.get("status") != "ready_for_explicit_execute"
+        or launcher_binding.get("actual_eligible") is not True
+        or launcher_binding.get("run_id")
+        != "p2-r9700-resident-one-case-smoke-profile-diagnostic-v10"
+        or launcher_binding.get("runner_output")
+        != str(P2 / "resident-one-case-smoke-profile-execute-v10")
+        or launcher_binding.get("evidence_output")
+        != str(P2 / "resident-one-case-smoke-profile-execute-evidence-v10")
+        or profile.get("schema_version")
+        != "ullm.aq4_p3_diagnostic_rocprof_ready.v1"
+        or profile.get("status") != "ready_for_one_profile_diagnostic"
+        or profile.get("maximum_invocations") != 1
+        or profile.get("measurement_eligible") is not False
+        or profile.get("promotion_eligible") is not False
+        or profile.get("output")
+        != {
+            "name": "aq4-p3-diagnostic",
+            "directory": str(historical_capture),
+            "artifact": str(historical_capture / "capture-artifact.json"),
+            "must_not_exist_before_capture": True,
+        }
+        or value.get("maintenance", {})
+        .get("restore_poll", {})
+        .get("timeout_seconds")
+        != 120.0
+    ):
+        raise OperatorError("historical profile-ready-v15 semantic authority differs")
     dry = load(
         HISTORICAL_READY_DRY_RUN_V15_ROOT / "launcher-evidence.json",
         "historical profile ready dry-run evidence",
