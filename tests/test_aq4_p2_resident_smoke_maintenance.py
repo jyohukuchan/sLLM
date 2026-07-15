@@ -662,6 +662,9 @@ def test_offline_reassembly_generator_is_process_zero_and_self_validating(
         "model_loads": 0,
     }
     assert capture.lstat().st_mode & 0o777 == evidence.lstat().st_mode & 0o777 == 0o555
+    assert HARNESS.PROFILE_READY_ROOT.is_dir()
+    assert HARNESS.ACTUAL_V12_ROOTS[4].is_dir()
+    assert value == HARNESS.validate_profile_offline_reassembly(capture, evidence)
 
     evidence_path = evidence / "offline-reassembly.json"
     sums_path = evidence / "SHA256SUMS"
@@ -675,6 +678,26 @@ def test_offline_reassembly_generator_is_process_zero_and_self_validating(
     evidence_path.write_bytes(tampered_raw)
     sums_path.write_bytes(
         f"{HARNESS.sha_bytes(tampered_raw)}  offline-reassembly.json\n".encode("ascii")
+    )
+    os.chmod(evidence_path, 0o444)
+    os.chmod(sums_path, 0o444)
+    os.chmod(evidence, 0o555)
+    with pytest.raises(HARNESS.HarnessError, match="source/output seal differs"):
+        HARNESS.validate_profile_offline_reassembly(capture, evidence)
+
+    os.chmod(evidence, 0o700)
+    os.chmod(evidence_path, 0o600)
+    os.chmod(sums_path, 0o600)
+    authority_tampered = json.loads(json.dumps(value))
+    authority_tampered["generator"]["commit"] = "0" * 40
+    authority_tampered["evidence_sha256"] = HARNESS._semantic_self_hash(
+        authority_tampered,
+        "evidence_sha256",
+    )
+    authority_raw = HARNESS.pretty(authority_tampered)
+    evidence_path.write_bytes(authority_raw)
+    sums_path.write_bytes(
+        f"{HARNESS.sha_bytes(authority_raw)}  offline-reassembly.json\n".encode("ascii")
     )
     os.chmod(evidence_path, 0o444)
     os.chmod(sums_path, 0o444)
