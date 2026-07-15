@@ -93,6 +93,8 @@ def make_artifact(root: Path, *, target: bool = False, perturb: bool = False, no
     blocked_count = int(nonfinite or hidden_nonfinite)
     runtime = {"runtime": "fixture", "transformers": None, "torch": None, "safetensors": None, "python": "test", "device": "cpu", "dtype": "bfloat16", "low_cpu_mem_usage": False, "torch_num_threads": 1, "torch_num_interop_threads": 1, "model_loads": 1, "inference_mode": True, "full_vocab_ranking": blocked_count == 0, "max_resident_logit_rows": 1, "memory_preflight": {"checkpoint_bytes": 1, "mem_total_bytes": 1, "mem_available_bytes": 1, "required_headroom_bytes": 1, "headroom_factor": 2.0, "status": "passed"}, "disk_preflight": {"expected_vector_bytes": 1, "required_free_bytes": 1, "free_bytes": 1, "status": "passed"}, "run": {"row_count": 3, "nonfinite_rows": blocked_count, "elapsed_seconds": 0.0}}
     manifest = {"schema_version": comparator.TARGET_SCHEMA if target else validator.SCHEMA, "oracle_kind": "aq4_target" if target else validator.ORACLE_KIND, "status": "blocked" if blocked_count else "available", "evidence_class": "blocked" if blocked_count else "synthetic_fixture", "usable_as_source_evidence": not target and blocked_count == 0, "promotion_eligible": False, "created_utc": old_manifest["created_utc"], "identity": identity, "parent_sampled_oracle": {"path": str((LEGACY_ROOT / "manifest.json").resolve()), "manifest_sha256": legacy_manifest_sha, "schema_version": legacy.SOURCE_SCHEMA}, "vector_contract": {"hidden_shape": [validator.HIDDEN_SIZE], "logits_shape": [validator.VOCAB_SIZE], "dtype": "f32", "endianness": "little", "layout": "flat", "chunk_elements": chunk_elements, "row_bytes": validator.ROW_BYTES, "semantic_hidden": "final_rmsnorm_hidden_used_by_lm_head", "semantic_logits": "raw_pre_softmax_lm_head_logits"}, "limits": {"max_case_file_bytes": validator.MAX_CASE_FILE_BYTES, "max_cases": validator.MAX_CASES, "max_rows": validator.MAX_ROWS, "max_steps": validator.MAX_STEPS}, "cases": {"path": str(cases_path.resolve()), "sha256": validator.sha256_file(cases_path, "cases"), "case_count": 2, "row_count": 3}, "files": {"rows": "rows.jsonl", "hidden": "vectors/hidden.f32le", "logits": "vectors/logits.f32le"}, "runtime": runtime, "legacy_cross_check": {"status": "blocked" if blocked_count else "passed", "legacy_manifest_sha256": legacy_manifest_sha, "legacy_payload_sha256": legacy_payload, "row_count": 0 if blocked_count else 3, "hidden_sample_max_abs_diff": 0.0, "logit_sample_max_abs_diff": 0.0}}
+    if target:
+        manifest["limits"] = {"max_case_file_bytes": validator.TARGET_MAX_CASE_FILE_BYTES, "max_cases": validator.TARGET_MAX_CASES, "max_rows": validator.TARGET_MAX_ROWS, "max_steps": validator.TARGET_MAX_STEPS}
     write_json(root / "manifest.json", manifest)
     write_sha_sums(root)
     return root
@@ -112,6 +114,44 @@ def test_full_source_validator_and_comparator(tmp_path: Path):
     assert result["summary"]["greedy_mismatch_rows"] == 0
     assert result["observed_values_only"] is True
     assert (comparison_dir / "manifest.json").exists()
+
+
+def test_target_accepts_direct_source_calibration_parent(tmp_path: Path):
+    source = make_artifact(tmp_path / "source")
+    target = make_artifact(tmp_path / "target", target=True)
+    source_manifest = json.loads((source / "manifest.json").read_text(encoding="utf-8"))
+    source_manifest_sha = validator.sha256_file(source / "manifest.json", "source manifest")
+    manifest = json.loads((target / "manifest.json").read_text(encoding="utf-8"))
+    manifest["parent_sampled_oracle"] = {"path": str((source / "manifest.json").resolve()), "manifest_sha256": source_manifest_sha, "schema_version": validator.SCHEMA}
+    manifest["legacy_cross_check"] = {"status": "not_applicable", "legacy_manifest_sha256": source_manifest_sha, "legacy_payload_sha256": "", "row_count": source_manifest["cases"]["row_count"], "hidden_sample_max_abs_diff": 0.0, "logit_sample_max_abs_diff": 0.0}
+    write_json(target / "manifest.json", manifest)
+    write_sha_sums(target)
+    report = validator.validate(target)
+    assert report["status"] == "valid"
+    loaded = comparator.load_artifact(target)
+    assert loaded["manifest"]["parent_sampled_oracle"]["schema_version"] == validator.SCHEMA
+
+
+def test_target_limits_are_exact_not_upper_bounded(tmp_path: Path):
+    target = make_artifact(tmp_path / "target", target=True)
+    manifest = json.loads((target / "manifest.json").read_text(encoding="utf-8"))
+    manifest["limits"]["max_rows"] = validator.TARGET_MAX_ROWS - 1
+    write_json(target / "manifest.json", manifest)
+    write_sha_sums(target)
+    with pytest.raises(validator.ValidationError, match="target limits differ"):
+        validator.validate(target)
+
+
+def test_target_cannot_be_marked_source_evidence(tmp_path: Path):
+    target = make_artifact(tmp_path / "target", target=True)
+    manifest = json.loads((target / "manifest.json").read_text(encoding="utf-8"))
+    manifest["usable_as_source_evidence"] = True
+    write_json(target / "manifest.json", manifest)
+    write_sha_sums(target)
+    with pytest.raises(validator.ValidationError, match="manifest blocked status differs"):
+        validator.validate(target)
+    with pytest.raises(comparator.ComparisonError, match="artifact blocked status differs"):
+        comparator.load_artifact(target)
 
 
 def test_validator_rejects_tampered_legacy_payload_hash(tmp_path: Path):

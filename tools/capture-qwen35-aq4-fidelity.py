@@ -187,6 +187,13 @@ def _artifact(root: Path, expected_kind: str) -> dict[str, Any]:
         raise CaptureError(f"{expected_kind} artifact kind differs: {kind}")
     if artifact["nonfinite_rows"]:
         raise CaptureError(f"{expected_kind} artifact contains non-finite rows")
+    manifest = artifact["manifest"]
+    cases = manifest.get("cases", {})
+    runtime = manifest.get("runtime", {})
+    run = runtime.get("run", {}) if isinstance(runtime, dict) else {}
+    row_count = len(artifact["rows"])
+    if cases.get("row_count") != row_count or run.get("row_count") != row_count:
+        raise CaptureError(f"{expected_kind} nested row_count binding differs")
     return artifact
 
 
@@ -198,6 +205,12 @@ def capture(split_root: Path, source_root: Path, active_root: Path, output: Path
     _split_info, split_manifest, split_rows, split_sha, policy_sha, cases_sha = _load_split(split_root, expected_split_sha, expected_policy_sha, expected_cases_sha)
     source = _artifact(source_root, "independent_source_full")
     active = _artifact(active_root, "aq4_target")
+    parent = active["manifest"].get("parent_sampled_oracle", {})
+    if parent.get("schema_version") == FULL_VALIDATE.SCHEMA:
+        parent_path = Path(parent.get("path", ""))
+        source_manifest_path = (source_root / "manifest.json").resolve()
+        if parent_path.resolve() != source_manifest_path or _sha(parent_path, "active direct source parent manifest") != source["manifest_sha256"]:
+            raise CaptureError("active direct source calibration parent binding differs")
     active_runtime = active["manifest"].get("runtime", {}).get("runtime", {})
     expected_active = {"served_model_manifest_sha256": expected_served_sha, "package_manifest_sha256": expected_package_sha, "worker_binary_sha256": expected_worker_sha, "guard_sha256": expected_guard_sha, "device": {"architecture": expected_device_architecture}}
     if active_runtime.get("served_model_manifest_sha256") != expected_active["served_model_manifest_sha256"] or active_runtime.get("package_manifest_sha256") != expected_active["package_manifest_sha256"] or active_runtime.get("worker_binary_sha256") != expected_active["worker_binary_sha256"] or active_runtime.get("guard_sha256") != expected_active["guard_sha256"] or active_runtime.get("device", {}).get("architecture") != expected_device_architecture or active_runtime.get("quantized_artifact_revision") != expected_quantized_revision:

@@ -63,6 +63,20 @@ def binary(value: Any, label: str) -> float:
     return float(value)
 
 
+def metric_value(name: str, value: Any, label: str) -> float:
+    finite(value, label)
+    if name in {"token_agreement_rate", "bf16_top1_retained_in_aq4_top10_rate"}:
+        return binary(value, label)
+    numeric = float(value)
+    if name == "topk_overlap_rate_k10" and not 0 <= numeric <= 1:
+        raise ValidationError(f"{label} is outside domain")
+    if name in {"logits_cosine", "hidden_cosine"} and not -1 <= numeric <= 1:
+        raise ValidationError(f"{label} is outside domain")
+    if name not in {"topk_overlap_rate_k10", "logits_cosine", "hidden_cosine"} and numeric < 0:
+        raise ValidationError(f"{label} is outside domain")
+    return numeric
+
+
 def validate(metrics_path: Path, split_root: Path) -> dict[str, Any]:
     try:
         split_result = SPLIT.validate(split_root)
@@ -127,11 +141,7 @@ def validate(metrics_path: Path, split_root: Path) -> dict[str, Any]:
         if not isinstance(metrics_row, dict) or set(metrics_row) != METRICS:
             raise ValidationError(f"metrics set differs: {case_id}")
         for name, metric in metrics_row.items():
-            finite(metric, f"{case_id}.{name}")
-            if name in {"token_agreement_rate", "topk_overlap_rate_k10", "bf16_top1_retained_in_aq4_top10_rate"}:
-                binary(metric, f"{case_id}.{name}")
-            if float(metric) < 0 or name in {"logits_cosine", "hidden_cosine"} and float(metric) > 1:
-                raise ValidationError(f"{case_id}.{name} is outside domain")
+            metric_value(name, metric, f"{case_id}.{name}")
             if name in {"logits_relative_l2", "hidden_relative_l2"} and float(metric) > 1:
                 raise ValidationError(f"{case_id}.{name} exceeds pathological ceiling")
         raw_row = row.get("raw")

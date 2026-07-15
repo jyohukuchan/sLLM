@@ -103,6 +103,9 @@ class Qwen35Aq4ActiveFidelityGateTemplateTests(unittest.TestCase):
         self.assertIn("for guard_name in \"${REQUIRED_GUARDS[@]}\"; do guard_env+=(\"$guard_name=1\"); done", text)
         self.assertIn("tools/capture-qwen35-aq4-fidelity.py", text)
         self.assertIn("tools/validate-qwen35-aq4-fidelity-capture.py", text)
+        self.assertIn('assert manifest["cases"]["row_count"] == 24 and manifest["runtime"]["run"]["row_count"] == 24', text)
+        self.assertIn('assert manifest["runtime"]["model_loads"] == 1 and manifest["runtime"]["runtime"]["one_model_load"] is True', text)
+        self.assertNotIn('assert manifest["row_count"] == 24', text)
 
     def test_output_sha_verifier_accepts_valid_files_and_rejects_tamper(self) -> None:
         with tempfile.TemporaryDirectory(prefix="ullm-aq4-active-output-") as directory:

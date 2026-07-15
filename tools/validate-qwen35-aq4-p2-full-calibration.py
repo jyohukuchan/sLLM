@@ -28,6 +28,7 @@ import qwen35_aq4_p2_oracle as legacy_oracle  # noqa: E402
 
 SCHEMA = "ullm.qwen35_aq4_source_calibration.v1"
 ORACLE_KIND = "independent_source_full"
+TARGET_SCHEMA = "ullm.qwen35_aq4_target_calibration.v1"
 CASES_SCHEMA = "ullm.qwen35_aq4_source_calibration_cases.v1"
 HIDDEN_SIZE = 4096
 VOCAB_SIZE = 248320
@@ -38,6 +39,10 @@ MAX_CASE_FILE_BYTES = 4 * 1024 * 1024
 MAX_CASES = 8192
 MAX_ROWS = 16384
 MAX_STEPS = 128
+TARGET_MAX_CASE_FILE_BYTES = 64 * 1024 * 1024
+TARGET_MAX_CASES = 24
+TARGET_MAX_ROWS = 24
+TARGET_MAX_STEPS = 1
 MAX_TOPK = 32
 MAX_CHUNK_ELEMENTS = 1_048_576
 MAX_MANIFEST_BYTES = 16 * 1024 * 1024
@@ -265,6 +270,22 @@ def topk_from_chunks(values: Iterator[list[float]], elements: int, count: int) -
     return [{"token_id": token, "logit": value} for value, token in candidates[:count]]
 
 
+def topk_values_match(actual: list[dict[str, Any]], expected: list[dict[str, Any]]) -> bool:
+    if len(actual) != len(expected):
+        return False
+    for left, right in zip(actual, expected):
+        if left["token_id"] != right["token_id"]:
+            return False
+        try:
+            left_f32 = struct.pack("<f", float(left["logit"]))
+            right_f32 = struct.pack("<f", float(right["logit"]))
+        except (TypeError, ValueError, OverflowError, struct.error):
+            return False
+        if left_f32 != right_f32:
+            return False
+    return True
+
+
 def validate_topk(value: Any, label: str, count: int) -> list[dict[str, Any]]:
     if not isinstance(value, list) or not value or len(value) != count:
         raise ValidationError(f"{label} must contain exactly {count} entries")
@@ -428,6 +449,28 @@ def artifact_inventory(root: Path, expected_files: set[str]) -> None:
 def legacy_check(root: Path, manifest: dict[str, Any], rows: dict[tuple[str, int], dict[str, Any]], hidden_path: Path, logits_path: Path) -> dict[str, Any]:
     parent = manifest["parent_sampled_oracle"]
     legacy_manifest_path = Path(parent["path"])
+    if parent["schema_version"] == SCHEMA:
+        parent_root = legacy_manifest_path.parent
+        parent_report = validate(parent_root)
+        if parent_report["manifest_sha256"] != parent["manifest_sha256"]:
+            raise ValidationError("direct source calibration parent manifest hash differs")
+        parent_manifest = read_json(legacy_manifest_path, "direct source calibration parent manifest")
+        for key in ("model_id", "model_revision"):
+            if parent_manifest["identity"].get(key) != manifest["identity"].get(key):
+                raise ValidationError(f"direct source calibration parent identity differs: {key}")
+        if parent_manifest["identity"]["source_checkpoint"]["aggregate_sha256"] != manifest["identity"]["source_checkpoint"]["aggregate_sha256"] or parent_manifest["identity"]["tokenizer"]["aggregate_sha256"] != manifest["identity"]["tokenizer"]["aggregate_sha256"]:
+            raise ValidationError("direct source calibration parent checkpoint/tokenizer differs")
+        expected = {
+            "status": "not_applicable",
+            "legacy_manifest_sha256": parent["manifest_sha256"],
+            "legacy_payload_sha256": "",
+            "row_count": manifest["cases"]["row_count"],
+            "hidden_sample_max_abs_diff": 0.0,
+            "logit_sample_max_abs_diff": 0.0,
+        }
+        if manifest["legacy_cross_check"] != expected:
+            raise ValidationError("direct source calibration parent summary differs")
+        return expected
     legacy = legacy_oracle.validate_manifest(legacy_manifest_path.parent, expected_kind="independent_source")
     if sha256_file(legacy_manifest_path, "parent sampled manifest") != parent["manifest_sha256"]:
         raise ValidationError("parent sampled manifest hash differs")
@@ -538,15 +581,23 @@ def validate_manifest_shape(manifest: Any, schemas: set[str]) -> dict[str, Any]:
     for key in target_extra & identity_keys:
         ensure_sha(identity[key], f"identity.{key}")
     parent = exact_fields(manifest["parent_sampled_oracle"], {"path", "manifest_sha256", "schema_version"}, "parent_sampled_oracle")
-    if not isinstance(parent["path"], str) or not Path(parent["path"]).is_absolute() or parent["schema_version"] != legacy_oracle.SOURCE_SCHEMA:
+    allowed_parent_schemas = {legacy_oracle.SOURCE_SCHEMA}
+    if manifest["schema_version"] == TARGET_SCHEMA:
+        allowed_parent_schemas.add(SCHEMA)
+    if not isinstance(parent["path"], str) or not Path(parent["path"]).is_absolute() or parent["schema_version"] not in allowed_parent_schemas:
         raise ValidationError("parent sampled oracle binding differs")
     ensure_sha(parent["manifest_sha256"], "parent sampled oracle manifest")
     contract = exact_fields(manifest["vector_contract"], {"hidden_shape", "logits_shape", "dtype", "endianness", "layout", "chunk_elements", "row_bytes", "semantic_hidden", "semantic_logits"}, "vector_contract")
     if contract["hidden_shape"] != [HIDDEN_SIZE] or contract["logits_shape"] != [VOCAB_SIZE] or contract["dtype"] != "f32" or contract["endianness"] != "little" or contract["layout"] != "flat" or integer(contract["chunk_elements"], "chunk_elements", 1, MAX_CHUNK_ELEMENTS) <= 0 or contract["row_bytes"] != ROW_BYTES or not isinstance(contract["semantic_hidden"], str) or not isinstance(contract["semantic_logits"], str):
         raise ValidationError("vector contract differs")
     limits = exact_fields(manifest["limits"], {"max_case_file_bytes", "max_cases", "max_rows", "max_steps"}, "limits")
-    for field, upper in (("max_case_file_bytes", MAX_CASE_FILE_BYTES), ("max_cases", MAX_CASES), ("max_rows", MAX_ROWS), ("max_steps", MAX_STEPS)):
-        integer(limits[field], f"limits.{field}", 1, upper)
+    if manifest["schema_version"] == TARGET_SCHEMA:
+        expected_limits = {"max_case_file_bytes": TARGET_MAX_CASE_FILE_BYTES, "max_cases": TARGET_MAX_CASES, "max_rows": TARGET_MAX_ROWS, "max_steps": TARGET_MAX_STEPS}
+        if limits != expected_limits:
+            raise ValidationError("target limits differ")
+    else:
+        for field, upper in (("max_case_file_bytes", MAX_CASE_FILE_BYTES), ("max_cases", MAX_CASES), ("max_rows", MAX_ROWS), ("max_steps", MAX_STEPS)):
+            integer(limits[field], f"limits.{field}", 1, upper)
     cases = exact_fields(manifest["cases"], {"path", "sha256", "case_count", "row_count"}, "cases")
     if not isinstance(cases["path"], str) or not Path(cases["path"]).is_absolute():
         raise ValidationError("cases.path must be absolute")
@@ -569,9 +620,9 @@ def validate(root: Path) -> dict[str, Any]:
     root_info = os.lstat(root)
     if not stat.S_ISDIR(root_info.st_mode):
         raise ValidationError("artifact root must be a real directory")
-    manifest = validate_manifest_shape(read_json(root / "manifest.json", "calibration manifest", max_bytes=MAX_MANIFEST_BYTES), {SCHEMA})
-    if manifest["oracle_kind"] != ORACLE_KIND:
-        raise ValidationError("source calibration oracle kind differs")
+    manifest = validate_manifest_shape(read_json(root / "manifest.json", "calibration manifest", max_bytes=MAX_MANIFEST_BYTES), {SCHEMA, TARGET_SCHEMA})
+    if manifest["oracle_kind"] not in {ORACLE_KIND, "aq4_target"}:
+        raise ValidationError("calibration oracle kind differs")
     files = manifest["files"]
     rows_path = relative_path(root, files["rows"], "rows file")
     hidden_path = relative_path(root, files["hidden"], "hidden file")
@@ -620,10 +671,11 @@ def validate(root: Path) -> dict[str, Any]:
             nonfinite_rows += int(row_nonfinite)
             if not row_nonfinite:
                 ranked = topk_from_chunks(read_f32_chunks(logits, row["logits"]["offset_bytes"], VOCAB_SIZE, chunk_elements), VOCAB_SIZE, TOP_K)
-                if ranked != row["topk"]:
+                if not topk_values_match(ranked, row["topk"]):
                     raise ValidationError(f"top-k ranking differs for {key}")
     blocked = nonfinite_rows > 0
-    if (manifest["status"] == "blocked") != blocked or (manifest["evidence_class"] == "blocked") != blocked or manifest["usable_as_source_evidence"] == blocked or manifest["runtime"]["run"]["nonfinite_rows"] != nonfinite_rows:
+    expected_usable_as_source = manifest["schema_version"] == SCHEMA and not blocked
+    if (manifest["status"] == "blocked") != blocked or (manifest["evidence_class"] == "blocked") != blocked or manifest["usable_as_source_evidence"] != expected_usable_as_source or manifest["runtime"]["run"]["nonfinite_rows"] != nonfinite_rows:
         raise ValidationError("manifest blocked status differs from vector finiteness")
     if blocked:
         parent_check = manifest["legacy_cross_check"]
@@ -632,7 +684,7 @@ def validate(root: Path) -> dict[str, Any]:
         if manifest["legacy_cross_check"] != parent_check:
             raise ValidationError("legacy cross-check summary differs")
     verify_sha_sums(root, expected_artifact_files - {"SHA256SUMS"})
-    return {"schema_version": SCHEMA, "status": "blocked" if blocked else "valid", "artifact_root": str(root.resolve()), "manifest_sha256": sha256_file(root / "manifest.json", "manifest"), "row_count": len(rows), "nonfinite_rows": nonfinite_rows, "legacy_cross_check": parent_check}
+    return {"schema_version": manifest["schema_version"], "status": "blocked" if blocked else "valid", "artifact_root": str(root.resolve()), "manifest_sha256": sha256_file(root / "manifest.json", "manifest"), "row_count": len(rows), "nonfinite_rows": nonfinite_rows, "legacy_cross_check": parent_check}
 
 
 def main(argv: list[str] | None = None) -> int:

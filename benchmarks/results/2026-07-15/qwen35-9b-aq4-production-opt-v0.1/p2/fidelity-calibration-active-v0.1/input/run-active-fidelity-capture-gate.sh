@@ -381,10 +381,10 @@ env "${guard_env[@]}" \
 import json, pathlib, sys
 manifest = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
 rows = pathlib.Path(sys.argv[2]).read_bytes().splitlines()
-assert manifest["row_count"] == 24 and manifest["runtime"]["runtime"]["one_model_load"] is True
-assert manifest["runtime"]["model_loads"] == 1 and manifest["runtime"]["runtime"]["model_loads"] == 1
+assert manifest["cases"]["row_count"] == 24 and manifest["runtime"]["run"]["row_count"] == 24
+assert manifest["runtime"]["model_loads"] == 1 and manifest["runtime"]["runtime"]["one_model_load"] is True
 assert manifest["runtime"]["runtime"]["device"]["architecture"] == "gfx1201"
-assert manifest["runtime"]["runtime"]["run"]["nonfinite_rows"] == 0
+assert manifest["runtime"]["run"]["nonfinite_rows"] == 0
 assert len(rows) == 24 and all(0 < len(row) <= 65536 for row in rows)
 print("active_output_rows=24 sidecars=bounded one_model_load=1 nonfinite_rows=0")
 PY

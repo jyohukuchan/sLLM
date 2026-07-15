@@ -1,0 +1,1 @@
+Qwen3.5 AQ4 fidelity metrics validation failed: p2-representative-production_server-cold_prefill-all_m1-n1011-m32-r9700-rdna4-aq4_0_target.logits_relative_l2 exceeds pathological ceiling

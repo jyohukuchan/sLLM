@@ -281,13 +281,14 @@ def load_artifact(root: Path) -> dict[str, Any]:
                 row_nonfinite_count = row["hidden"]["nonfinite_count"] + row["logits"]["nonfinite_count"]
                 if row_nonfinite_count == 0:
                     ranked = topk_from_chunks(read_chunks(logit, row["logits"]["offset_bytes"], VOCAB_SIZE, chunk_elements), VOCAB_SIZE, TOP_K)
-                    if ranked != row["topk"]:
+                    if not _VALIDATOR.topk_values_match(ranked, row["topk"]):
                         raise ComparisonError(f"artifact top-k differs for {key}")
                 nonfinite_rows += int(row_nonfinite_count > 0)
     except _VALIDATOR.ValidationError as error:
         raise ComparisonError(str(error)) from error
     blocked = nonfinite_rows > 0
-    if (manifest["status"] == "blocked") != blocked or manifest["runtime"]["run"]["nonfinite_rows"] != nonfinite_rows:
+    expected_usable_as_source = manifest["schema_version"] == SOURCE_SCHEMA and not blocked
+    if (manifest["status"] == "blocked") != blocked or manifest["usable_as_source_evidence"] != expected_usable_as_source or manifest["runtime"]["run"]["nonfinite_rows"] != nonfinite_rows:
         raise ComparisonError("artifact blocked status differs from vector finiteness")
     try:
         _VALIDATOR.verify_sha_sums(root, expected_files - {"SHA256SUMS"})

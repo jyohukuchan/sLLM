@@ -1,0 +1,65 @@
+{
+  "schema_version": "ullm.qwen35_aq4_active_calibration_no_go.v1",
+  "status": "no-go",
+  "reason": "frozen relative-L2 pathological rejection",
+  "policy": {
+    "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/fidelity-holdout-split-v0.1/policy.json",
+    "sha256": "302c3219af286a970ddf39ed090021ef102b51b2d188c0ff337f6b9dd04d1a03",
+    "metric": "logits_relative_l2",
+    "rejection_action": "reject any observed relative-L2 > 1 before aggregation",
+    "ceiling": 1.0
+  },
+  "validation": {
+    "metrics_validator_exit_code": 1,
+    "metrics_validator_error": "p2-representative-production_server-cold_prefill-all_m1-n1011-m32-r9700-rdna4-aq4_0_target.logits_relative_l2 exceeds pathological ceiling",
+    "active_full_validator_status": "valid",
+    "active_full_validator_row_count": 24,
+    "active_full_validator_nonfinite_rows": 0,
+    "holdout_execution": "prohibited"
+  },
+  "bindings": {
+    "source_manifest_sha256": "78a6de7d2cae4c2ff31952cfe345fefbce55dfd67db7a4904ba10f4e5f7438bc",
+    "active_manifest_sha256": "5093ad9e495d6232c65035cec26ba0db02ebdf5aed75bde118074688db5df305",
+    "metrics_sha256": "429cc63618f4fde3541d73a5a85d7f2f332624aeec4bdf7644862e6c01be5482",
+    "split_manifest_sha256": "966878f3d9eb13f5b485825208f8072521724f308f5ee3d8a003b0b051198887",
+    "calibration_cases_sha256": "20c09f22bb1ca4dfac907de09febddb01ed0228c3f4a17c01efd646491e0983f"
+  },
+  "relative_l2_rejections": {
+    "count": 19,
+    "maximum": {
+      "case_id": "p2-representative-production_server-cold_prefill-all_m1-n2048-m32-r9700-rdna4-aq4_0_target",
+      "value": 1.2494246455220739
+    },
+    "cases": [
+      {"case_id": "p2-representative-production_server-cold_prefill-all_m1-n1011-m32-r9700-rdna4-aq4_0_target", "value": 1.1554999913015822},
+      {"case_id": "p2-representative-production_server-cold_prefill-all_m1-n1011-m8-r9700-rdna4-aq4_0_target", "value": 1.1230028986832528},
+      {"case_id": "p2-representative-production_server-cold_prefill-all_m1-n1024-m64-r9700-rdna4-aq4_0_target", "value": 1.052979658704406},
+      {"case_id": "p2-representative-production_server-cold_prefill-all_m1-n1339-m1-r9700-rdna4-aq4_0_target", "value": 1.0096318941030251},
+      {"case_id": "p2-representative-production_server-cold_prefill-all_m1-n1339-m32-r9700-rdna4-aq4_0_target", "value": 1.1620325099829454},
+      {"case_id": "p2-representative-production_server-cold_prefill-all_m1-n1339-m64-r9700-rdna4-aq4_0_target", "value": 1.0396394824281172},
+      {"case_id": "p2-representative-production_server-cold_prefill-all_m1-n2048-m16-r9700-rdna4-aq4_0_target", "value": 1.093828217501734},
+      {"case_id": "p2-representative-production_server-cold_prefill-all_m1-n2048-m32-r9700-rdna4-aq4_0_target", "value": 1.2494246455220739},
+      {"case_id": "p2-representative-production_server-cold_prefill-all_m1-n2048-m64-r9700-rdna4-aq4_0_target", "value": 1.0720887803188166},
+      {"case_id": "p2-representative-production_server-cold_prefill-cold_batched-n1011-m128-r9700-rdna4-aq4_0_target", "value": 1.110564537619894},
+      {"case_id": "p2-representative-production_server-cold_prefill-cold_batched-n1011-m64-r9700-rdna4-aq4_0_target", "value": 1.0757779651219919},
+      {"case_id": "p2-representative-production_server-cold_prefill-cold_batched-n1024-m1-r9700-rdna4-aq4_0_target", "value": 1.0640001339804406},
+      {"case_id": "p2-representative-production_server-cold_prefill-cold_batched-n1024-m128-r9700-rdna4-aq4_0_target", "value": 1.1008362871692436},
+      {"case_id": "p2-representative-production_server-cold_prefill-cold_batched-n1024-m8-r9700-rdna4-aq4_0_target", "value": 1.0143389852911144},
+      {"case_id": "p2-representative-production_server-cold_prefill-cold_batched-n1339-m1-r9700-rdna4-aq4_0_target", "value": 1.1012924240547977},
+      {"case_id": "p2-representative-production_server-cold_prefill-cold_batched-n1339-m64-r9700-rdna4-aq4_0_target", "value": 1.1229425339113577},
+      {"case_id": "p2-representative-production_server-cold_prefill-cold_batched-n2048-m128-r9700-rdna4-aq4_0_target", "value": 1.1039922712388595},
+      {"case_id": "p2-representative-production_server-cold_prefill-cold_batched-n2048-m32-r9700-rdna4-aq4_0_target", "value": 1.1792720251205298},
+      {"case_id": "p2-representative-production_server-cold_prefill-cold_batched-n2048-m8-r9700-rdna4-aq4_0_target", "value": 1.0025283929289674}
+    ]
+  },
+  "other_policy_metrics": {
+    "row_count": 24,
+    "token_agreement_rate": {"min": 0.0, "max": 1.0, "mean": 0.041666666666666664},
+    "topk_overlap_rate_k10": {"min": 0.0, "max": 0.6, "mean": 0.11666666666666665},
+    "logits_cosine": {"min": -0.45527967455297136, "max": 0.2899019829877376, "mean": -0.05674708374005319},
+    "hidden_cosine": {"min": 0.8128847308815255, "max": 0.9396553490415033, "mean": 0.8907532005381421},
+    "hidden_relative_l2": {"min": 0.5335396179809431, "max": 0.661742915012446, "mean": 0.5799660711625455},
+    "hidden_max_abs": {"min": 30.527223587036133, "max": 46.32004737854004, "mean": 38.0998298128446},
+    "bf16_top1_retained_in_aq4_top10_rate": {"min": 0.0, "max": 1.0, "mean": 0.16666666666666666}
+  }
+}

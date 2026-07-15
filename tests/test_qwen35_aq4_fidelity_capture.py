@@ -45,6 +45,14 @@ def test_metrics_validator_rejects_fractional_binary_tamper() -> None:
         VALIDATOR.binary(0.5, "tampered_token_agreement_rate")
 
 
+def test_metrics_validator_accepts_fractional_topk_overlap() -> None:
+    assert VALIDATOR.metric_value("topk_overlap_rate_k10", 0.1, "topk_overlap_rate_k10") == pytest.approx(0.1)
+    with pytest.raises(VALIDATOR.ValidationError, match="outside domain"):
+        VALIDATOR.metric_value("topk_overlap_rate_k10", 1.1, "topk_overlap_rate_k10")
+    with pytest.raises(VALIDATOR.ValidationError, match="must be finite"):
+        VALIDATOR.metric_value("topk_overlap_rate_k10", float("nan"), "topk_overlap_rate_k10")
+
+
 def test_output_is_noreplace(tmp_path: Path) -> None:
     output = tmp_path / "metrics.json"
     output.write_text("existing\n", encoding="ascii")
