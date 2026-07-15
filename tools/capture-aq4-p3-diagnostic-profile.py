@@ -26,16 +26,21 @@ ROOT = Path(__file__).resolve().parents[1]
 HELPER_SHA256_RE = re.compile(r"[0-9a-f]{64}")
 HELPER_MAX_BYTES = 2 * 1024 * 1024
 PRODUCER_PATH = ROOT / "tools/build-aq4-p3-selection-raw.py"
-PRODUCER_SHA256 = "d0360a494f30c2bbac7ca1d043385dd6de9384fa2d81ab99881e54afeaaed934"
+PRODUCER_SHA256 = "a589c3e644d36132fb6054afdb15b27543d8e8181e3c737dcbd071d7c52e3d20"
 PRODUCER_GIT_AUTHORITY = {
-    "commit": "dac045244d7609c42c2db1ea0f91aa707ffb717b",
-    "tree": "c8138c2be5c54693e5c63140b9832f7e1c95f623",
-    "blob": "b838d92198f6eb69460ab40990aea893ec19d7ac",
+    "commit": "c8becac66551f216de47d0cd935929afe60b3b96",
+    "tree": "088ac662dc686741d3affafe9b4ecc58cccea638",
+    "blob": "b070361d992fddc5749dba677ecd9d81f4ac6c06",
 }
 SELECTOR_PATH = ROOT / "tools/select-aq4-p3-candidate.py"
 SELECTOR_SHA256 = "4a510c7351131072ed368e2ac8fffeb2daf10488edef94c37fe5dbcb729e9739"
 PROFILE_HELPER_PATH = ROOT / "tools/profile-aq4-p2-family-exclusive.py"
-PROFILE_HELPER_SHA256 = "ef26005a364511ab8d0f7ca2fa46ad2108cac083d0a2a24721f6cef577e16c92"
+PROFILE_HELPER_SHA256 = "f8d32c340231e329f004d9e16192c02378f1fd58b8ab713e8efbbd3029b052d6"
+PROFILE_HELPER_GIT_AUTHORITY = {
+    "commit": "e4f8583a0fc710d2146f70d06b8b49eb42f04a16",
+    "tree": "be5ac39ea05b0b79223d974487c6cddda8d84f0c",
+    "blob": "8c318849838f85cf2f2a687aef260506bfa4097c",
+}
 FD_MAP_SCHEMA = "ullm.aq4_p3_inherited_fd_map.v1"
 FD_MAP_ENV = "ULLM_AQ4_PINNED_FD_MAP"
 FD_MAP_MAX_BYTES = 1024 * 1024

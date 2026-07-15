@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import collections
+import csv
 import importlib.util
 import hashlib
 import json
@@ -1301,9 +1303,9 @@ def test_capture_helper_closure_is_exact_and_reuses_verified_modules() -> None:
 def test_pinned_producer_matches_current_git_authority() -> None:
     authority = CAPTURE.PRODUCER_GIT_AUTHORITY
     assert authority == {
-        "commit": "dac045244d7609c42c2db1ea0f91aa707ffb717b",
-        "tree": "c8138c2be5c54693e5c63140b9832f7e1c95f623",
-        "blob": "b838d92198f6eb69460ab40990aea893ec19d7ac",
+        "commit": "c8becac66551f216de47d0cd935929afe60b3b96",
+        "tree": "088ac662dc686741d3affafe9b4ecc58cccea638",
+        "blob": "b070361d992fddc5749dba677ecd9d81f4ac6c06",
     }
     commit_tree = subprocess.run(
         ["git", "show", "-s", "--format=%T", authority["commit"]],
@@ -1341,6 +1343,46 @@ def test_pinned_producer_matches_current_git_authority() -> None:
     assert hashlib.sha256(committed_bytes).hexdigest() == CAPTURE.PRODUCER_SHA256
     assert hashlib.sha256(CAPTURE.PRODUCER_PATH.read_bytes()).hexdigest() == CAPTURE.PRODUCER_SHA256
     assert CAPTURE.PRODUCER_HELPER.evidence("selection_raw_producer")["sha256"] == CAPTURE.PRODUCER_SHA256
+
+
+def test_pinned_family_helper_matches_current_git_authority() -> None:
+    authority = CAPTURE.PROFILE_HELPER_GIT_AUTHORITY
+    assert authority == {
+        "commit": "e4f8583a0fc710d2146f70d06b8b49eb42f04a16",
+        "tree": "be5ac39ea05b0b79223d974487c6cddda8d84f0c",
+        "blob": "8c318849838f85cf2f2a687aef260506bfa4097c",
+    }
+    commit_tree = subprocess.run(
+        ["git", "show", "-s", "--format=%T", authority["commit"]],
+        cwd=ROOT,
+        check=True,
+        stdout=subprocess.PIPE,
+        text=True,
+    ).stdout.strip()
+    committed_blob = subprocess.run(
+        [
+            "git",
+            "rev-parse",
+            f'{authority["commit"]}:tools/profile-aq4-p2-family-exclusive.py',
+        ],
+        cwd=ROOT,
+        check=True,
+        stdout=subprocess.PIPE,
+        text=True,
+    ).stdout.strip()
+    current_blob = subprocess.run(
+        ["git", "hash-object", str(CAPTURE.PROFILE_HELPER_PATH)],
+        cwd=ROOT,
+        check=True,
+        stdout=subprocess.PIPE,
+        text=True,
+    ).stdout.strip()
+    assert commit_tree == authority["tree"]
+    assert committed_blob == current_blob == authority["blob"]
+    assert hashlib.sha256(CAPTURE.PROFILE_HELPER_PATH.read_bytes()).hexdigest() == (
+        CAPTURE.PROFILE_HELPER_SHA256
+    )
+    assert CAPTURE.PROFILER.mapping_sha256() == CAPTURE.PRODUCER.PROFILER_MAPPING_SHA256
 
 
 def test_pinned_producer_full_validates_sealed_actual_v8() -> None:
@@ -1393,6 +1435,87 @@ def test_pinned_producer_full_validates_sealed_actual_v8() -> None:
     assert len(runs) == 12
     assert raw["device_lock"] == summary["device_lock"]
     assert raw["links"]["live_preflight"] == summary["validation"]["live_preflight"]
+
+
+def test_capture_loaded_helpers_full_validate_actual_v9_and_all_kernel_families() -> None:
+    identity_path = (
+        ROOT
+        / "benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2"
+        / "resident-one-case-smoke-prepared-v1/identity.json"
+    )
+    execute_root = (
+        ROOT
+        / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2"
+        / "resident-one-case-smoke-profile-execute-v8"
+    )
+    summary_path = execute_root / "resident-batch.summary.json"
+    raw_path = execute_root / (
+        "p2-representative-full_model-cold_prefill-cold_batched-n128-m128-"
+        "r9700-rdna4-aq4_0_target.raw.json"
+    )
+    trace_path = (
+        ROOT
+        / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3"
+        / "aq4-p3-diagnostic-rocprof-capture-v8/aq4-p3-diagnostic_kernel_trace.csv"
+    )
+    assert hashlib.sha256(raw_path.read_bytes()).hexdigest() == (
+        "1b2effa4c0ab44159919e32691d08329dec632cf56a1b22a78efc4fc607bf6f2"
+    )
+    assert hashlib.sha256(summary_path.read_bytes()).hexdigest() == (
+        "7b122428ede8e7dd5cc8780386d2f1274ac679c4206990ba45d6a334c2e66c8e"
+    )
+    assert hashlib.sha256(trace_path.read_bytes()).hexdigest() == (
+        "a9833a65cffd6cbc3e974edcfb32fdf5657a17f6e90321085bae734c51a07131"
+    )
+
+    identity_snapshot = CAPTURE.PRODUCER.capture(identity_path.resolve(), "identity")
+    identity = CAPTURE.PRODUCER.validate_identity(
+        CAPTURE.PRODUCER.parse_json(identity_snapshot, "identity"),
+        identity_snapshot,
+    )
+    summary_snapshot = CAPTURE.PRODUCER.capture(
+        summary_path.resolve(), "resident summary"
+    )
+    summary = CAPTURE.PRODUCER.parse_json(summary_snapshot, "resident summary")
+    run_id = CAPTURE.PRODUCER.validate_summary(
+        summary,
+        summary_snapshot,
+        identity,
+        "diagnostic",
+    )
+    raw_snapshot = CAPTURE.PRODUCER.capture(raw_path.resolve(), "resident raw")
+    raw = CAPTURE.PRODUCER.parse_json(raw_snapshot, "resident raw")
+    validated_run_id, runs = CAPTURE.PRODUCER.validate_raw(
+        raw,
+        identity,
+        {run_id: summary_snapshot},
+        "diagnostic",
+    )
+    assert validated_run_id == "p2-r9700-resident-one-case-smoke-profile-diagnostic-v8"
+    assert raw["resident"]["session_id"] == (
+        "3fc38e24c47e904242a3d3f12c9bd3250e53097d62dababbaec5efc4af34e0dc"
+    )
+    assert len(runs) == 12
+    assert raw["device_lock"] == summary["device_lock"]
+    assert raw["links"]["live_preflight"] == summary["validation"]["live_preflight"]
+
+    family_counts: collections.Counter[str] = collections.Counter()
+    with trace_path.open(newline="", encoding="utf-8-sig") as source:
+        for row in csv.DictReader(source):
+            family = CAPTURE.PROFILER.classify_kernel(row["Kernel_Name"].strip())
+            assert family is not None
+            family_counts[family] += 1
+    assert family_counts == {
+        "runtime_support": 4071,
+        "embedding": 1537,
+        "paged_validation": 197,
+        "aq4_projection": 2986,
+        "attention": 104,
+        "recurrent": 1158,
+        "normalization": 2209,
+        "head": 1,
+    }
+    assert family_counts.total() == 12_263
 
 
 def test_post_spawn_manifest_path_swap_emits_failure_and_blocks_success(
