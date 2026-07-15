@@ -2654,19 +2654,19 @@ QA_ATTESTATION = {
     "schema_version": "ullm.aq4_p2_resident_execute_qa_attestation.v2", "status": "passed", "actual_executed": False,
     "automated_tests": {
         "schema_version": "ullm.aq4_p2_exact_test_file_manifest.v1",
-        "aggregate": {"distinct_test_file_count": 12, "collected": 467, "passed": 467, "failed": 0, "deselected": 0},
+        "aggregate": {"distinct_test_file_count": 12, "collected": 468, "passed": 468, "failed": 0, "deselected": 0},
         "suites": [
             {
                 "name": "resident_trust_chain",
                 "command": ["python3", "-m", "pytest", "-q", "tests/test_prepare_aq4_p2_resident_smoke_bundle.py", "tests/test_run_aq4_p2_resident_batch.py", "tests/test_run_aq4_p2_resident_live_preflight.py", "tests/test_launch_aq4_p2_resident_smoke.py", "tests/test_launch_aq4_p2_resident_smoke_execute.py", "tests/test_aq4_p2_resident_smoke_maintenance.py"],
-                "collected": 340, "passed": 340, "failed": 0, "deselected": 0,
+                "collected": 341, "passed": 341, "failed": 0, "deselected": 0,
                 "files": [
                     {"path": "tests/test_prepare_aq4_p2_resident_smoke_bundle.py", "source_commit": "71fc08aadc6bc1a0a3aed85be3502c7362ad8e55", "git_blob": "504aa74f2b05523144d23a5ff23c15a81de35324", "collected": 63, "passed": 63},
                     {"path": "tests/test_run_aq4_p2_resident_batch.py", "source_commit": "ede2b872ab0de5550adbcb1b1dca8b4bbd789efd", "git_blob": "1dcc036971a238b5b48eb8147bfc8cbf8f629f39", "collected": 39, "passed": 39},
                     {"path": "tests/test_run_aq4_p2_resident_live_preflight.py", "source_commit": "e993016f4a62b9970423223db8702f77ee834b12", "git_blob": "7f70bb62b8c46ff68e8597663b6054568b676d9f", "collected": 27, "passed": 27},
                     {"path": "tests/test_launch_aq4_p2_resident_smoke.py", "source_commit": "2ff2e7c4172a2edee49dfce67b07009364a2f958", "git_blob": "6229512f6ee12d21fd9aa42ea85f01380a379546", "collected": 7, "passed": 7},
                     {"path": "tests/test_launch_aq4_p2_resident_smoke_execute.py", "source_commit": "a0a61219be28be1e3765c076d4a23513f6bd6221", "git_blob": "7e79ac50b1f69e49128c90652cf3623db2ecfd78", "collected": 69, "passed": 69},
-                    {"path": "tests/test_aq4_p2_resident_smoke_maintenance.py", "source_commit": "ea32ffb3f2f7f65b210c4c6115af7eef13045f5a", "git_blob": "904ade176f74f3a20a91dd7e1619d03698cd8ec9", "collected": 135, "passed": 135},
+                    {"path": "tests/test_aq4_p2_resident_smoke_maintenance.py", "source_commit": "b89a0ff683884e4d0b1014512259bce5596dd05c", "git_blob": "2ae3b109a95770b70523a1711e57cd7969619e43", "collected": 136, "passed": 136},
                 ],
             },
             {
@@ -2691,7 +2691,7 @@ QA_ATTESTATION = {
                 "name": "selection_raw_producer",
                 "command": ["python3", "-m", "pytest", "-q", "tests/test_build_aq4_p3_selection_raw.py"],
                 "collected": 26, "passed": 26, "failed": 0, "deselected": 0,
-                "files": [{"path": "tests/test_build_aq4_p3_selection_raw.py", "source_commit": "c743007f9748d2baf6d699744f7dad4fd3b1cd21", "git_blob": "8167859108c68fa27c67fe21c3d772e4899e384a", "collected": 26, "passed": 26}],
+                "files": [{"path": "tests/test_build_aq4_p3_selection_raw.py", "source_commit": "c743007f97486e7c7e070f4258ce4e98f0665aad", "git_blob": "8167859108c68fa27c67fe21c3d772e4899e384a", "collected": 26, "passed": 26}],
             },
             {
                 "name": "profile_family_exclusion",
@@ -2746,6 +2746,18 @@ def validate_qa_test_manifest() -> None:
                 raise HarnessError("QA exact test file coverage differs")
             if not isinstance(item.get("source_commit"), str) or re.fullmatch(r"[0-9a-f]{40}", item["source_commit"]) is None or not isinstance(item.get("git_blob"), str) or re.fullmatch(r"[0-9a-f]{40}", item["git_blob"]) is None:
                 raise HarnessError("QA exact test file Git identity differs")
+            committed = subprocess.run(
+                ["git", "rev-parse", f'{item["source_commit"]}:{path}'],
+                cwd=ROOT,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+            if committed.returncode != 0 or committed.stderr:
+                raise HarnessError("QA exact test source commit/path is unavailable")
+            if committed.stdout.decode("ascii").strip() != item["git_blob"]:
+                raise HarnessError("QA exact test source Git blob differs")
             if type(item.get("collected")) is not int or type(item.get("passed")) is not int or item["collected"] <= 0 or item["passed"] != item["collected"]:
                 raise HarnessError("QA exact test file counts differ")
             observed_paths.add(path)
