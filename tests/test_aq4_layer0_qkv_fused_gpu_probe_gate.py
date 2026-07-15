@@ -7,6 +7,7 @@ import struct
 import subprocess
 import tempfile
 import unittest
+import shutil
 from pathlib import Path
 
 
@@ -63,8 +64,17 @@ class Aq4Layer0QkvFusedGpuProbeGateTest(unittest.TestCase):
             self.assertNotIn("systemctl", result.stdout + result.stderr)
 
             archive_base = Path(directory) / "fresh-base"
+            probe_copy = Path(directory) / "probe-checkout-copy"
+            shutil.copytree(PROBE_ROOT, probe_copy)
+            (probe_copy / "ullm-aq4-layer0-qkv-z-gate-beta-runtime-probe").chmod(0o775)
             archive_env = env.copy()
-            archive_env.update(MOCK_BASE=str(archive_base), MOCK_ARCHIVE_SETUP="1")
+            archive_env.update(
+                MOCK_BASE=str(archive_base), MOCK_ARCHIVE_SETUP="1",
+                MOCK_PROBE_ROOT=str(probe_copy),
+                MOCK_PROBE=str(probe_copy / "ullm-aq4-layer0-qkv-z-gate-beta-runtime-probe"),
+                MOCK_RECEIPT=str(probe_copy / "build-receipt.json"),
+                MOCK_SUMS=str(probe_copy / "SHA256SUMS"),
+            )
             archive_result = subprocess.run(
                 ["bash", str(GATE)], env=archive_env, text=True, capture_output=True, check=False,
             )
