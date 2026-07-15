@@ -109,6 +109,7 @@
   },
   "raw_artifacts": {
     "monitor.log": "86cb7e9120cb529e342e19d29233df6b21a73b8f9eaa3f636d7fff6c4633e4ff",
+    "observer-final-temp.json": "c41c9a456d5ff824a3fec7068938fe5347078a6b8af3e24bd4af781fe2a6d317",
     "observer-sample.marker": "c629ee388546bb107fe366dacb61e76e7c6eee89c136770b58b2dd43de72ae8c",
     "run-started.marker": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
     "run.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",

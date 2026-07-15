@@ -1,7 +1,8 @@
-bd8507e199791c249721061c7910a78e8d844bb3d3bd1cea293d220937c5f4de  ./attempt-result.json
+7515df2e460b9ab9652de66f8fd4a5c846fadf36931b81493f57d98622bcd625  ./attempt-result.json
 71f19ae05647249cc13b79d3119b943ca6047e5d5ecdb76066d9a8e4dac38a91  ./metrics.stderr
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  ./metrics.stdout
 86cb7e9120cb529e342e19d29233df6b21a73b8f9eaa3f636d7fff6c4633e4ff  ./monitor.log
+c41c9a456d5ff824a3fec7068938fe5347078a6b8af3e24bd4af781fe2a6d317  ./observer-final-temp.json
 c629ee388546bb107fe366dacb61e76e7c6eee89c136770b58b2dd43de72ae8c  ./observer-sample.marker
 a224fa3ecdef0c2bdae4378c27a343cd73c05a6705d13f9f7144e3eb245b94aa  ./output/SHA256SUMS
 5093ad9e495d6232c65035cec26ba0db02ebdf5aed75bde118074688db5df305  ./output/manifest.json
