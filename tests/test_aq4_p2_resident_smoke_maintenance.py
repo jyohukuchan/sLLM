@@ -565,15 +565,13 @@ def test_profile_ready_v7_is_sealed_historical_preoperator_readback() -> None:
 
 def test_profile_actual_v4_v5_and_v6_failures_are_immutable_historical_readback() -> None:
     base = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1"
-    assert HARNESS.PROFILE_READY_ROOT == base / "p2/resident-one-case-smoke-profile-ready-v8"
+    assert HARNESS.PROFILE_READY_ROOT == base / "p2/resident-one-case-smoke-profile-ready-v9"
     assert HARNESS.PROFILE_MAINTENANCE_EVIDENCE == base / "p2/resident-one-case-smoke-profile-maintenance-evidence-v7"
-    assert HARNESS.PROFILE_DRY_RUN_EVIDENCE == base / "p2/resident-one-case-smoke-profile-ready-dry-run-v8"
+    assert HARNESS.PROFILE_DRY_RUN_EVIDENCE == base / "p2/resident-one-case-smoke-profile-ready-dry-run-v9"
     assert HARNESS.PROFILE_OUTPUT_DIRECTORY == base / "p3/aq4-p3-diagnostic-rocprof-capture-v7"
     assert HARNESS.PROFILE_ARTIFACT == HARNESS.PROFILE_OUTPUT_DIRECTORY / "capture-artifact.json"
-    assert not HARNESS.PROFILE_READY_ROOT.exists()
     assert not HARNESS.LAUNCHER.PROFILE_RUN_OUTPUT.exists()
     assert not HARNESS.LAUNCHER.PROFILE_EVIDENCE_OUTPUT.exists()
-    assert not HARNESS.PROFILE_DRY_RUN_EVIDENCE.exists()
     assert not HARNESS.PROFILE_MAINTENANCE_EVIDENCE.exists()
     assert not HARNESS.PROFILE_OUTPUT_DIRECTORY.exists()
     historical_v6_roots = (

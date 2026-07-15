@@ -13,6 +13,13 @@
 - v6 の ready、dry-run、execute、execute evidence、maintenance evidence、capture failure、operator result、actual audit は `SHA256SUMS` がすべて一致した。これらを履歴証跡として読み取り専用で検証する。
 - GPU、service、actual は実行していない。
 
+## Final-state 再現性修正
+
+- ready-v8 生成後にも残っていた ready と dry-run の current-root absence assertion だけを除去し、生成前後のどちらでも旧 failure 証跡を同じように検証できる形へ修正した。
+- profile runtime、execute evidence、maintenance evidence、capture output の absence は actual 未実行境界として維持した。
+- ready-v8 と dry-run-v8 は pre-operator NO-GO の immutable artifact として保持し、downstream authority には使わない。
+- 次の profile ready と dry-run は未使用の v9 経路へ進める。
+
 ## Verification
 
 - maintenance 全 155 件: passed
