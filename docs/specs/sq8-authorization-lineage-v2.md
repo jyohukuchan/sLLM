@@ -24,6 +24,11 @@ v1 sourceのtreeとarchiveにも完全一致しなければならない。これ
 prefixとして残り、少なくとも1件が末尾に追加された場合だけ受理する。v1/v2とも削除、
 置換、並べ替え、relation rewrite、重複、source spoof、predecessor cycleを拒否する。
 
+Python gatewayのserved-model loaderも同じ二分岐を実装する。v1 migration referenceと
+v2 predecessor referenceはschemaごとに異なるexact field setとして判別し、external
+manifestとruntime copy、predecessor、全entry receiptをlive rehashする。gateway独自の
+弱い互換表現や、v1 migration fieldとv2 append fieldの混在は許可しない。
+
 ## Entry
 
 各entryは次のexact fieldを持つ。

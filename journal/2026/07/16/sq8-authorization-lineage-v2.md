@@ -14,13 +14,13 @@
 - 9件目以降はv2 predecessorのlive identityと旧entriesの完全prefix一致を必須にし、履歴の削除・置換・並べ替え・重複・second migrationを拒否する。
 - v2 referenceへentry countとcurrent implementation audit path/SHAを追加した。builderはactual authorization時に同auditのCLI path/SHAを必須とする。
 - v1の検証互換は残したが、prepared diagnostic専用としてactual authorizationを拒否する。
-- Python gatewayにもv1/v2 typed contractとv2 entry/predecessor live validationを追加した。Rust served-model parserはこの作業では変更していない。
+- Python gatewayにもv1 exact6 migrationとv2 appendをschema別exact field setで判別するtyped contractを追加し、external/runtime/predecessor/entryをlive validationする。Rust served-model parserはこの作業では変更していない。
 
 ## 検証
 
 - lineage validator: 25 passed。
 - builder: 11 passed。
-- Python gateway served-model loader: 62 passed。
+- Python gateway served-model loader: 76 passed。
 - runner/generatorを含む関連集合: 142 passed、既存deployment profileのworktree外絶対pathに依存する1件のみ対象外。
 - GPU、service、sudo、actual retry: 0。
 

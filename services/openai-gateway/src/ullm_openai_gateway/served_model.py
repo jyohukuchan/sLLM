@@ -619,6 +619,189 @@ def _live_lineage_file(path: Path, digest: str, label: str) -> dict[str, Any]:
     return _lineage_json(_bounded_read(resolved, MAX_MANIFEST_BYTES, label), label)
 
 
+def _lineage_entries_sha(entries: list[Any]) -> str:
+    return hashlib.sha256(
+        json.dumps(
+            entries, ensure_ascii=True, allow_nan=False,
+            separators=(",", ":"), sort_keys=True,
+        ).encode("ascii")
+    ).hexdigest()
+
+
+def _lineage_source(value: Any, label: str) -> dict[str, str]:
+    if not isinstance(value, dict) or set(value) != {
+        "commit", "tree_oid", "archive_sha256"
+    }:
+        raise ServedModelError(f"{label} source differs")
+    if (
+        re.fullmatch(r"[0-9a-f]{40}", str(value.get("commit", ""))) is None
+        or re.fullmatch(r"[0-9a-f]{40}", str(value.get("tree_oid", ""))) is None
+        or _SHA256.fullmatch(str(value.get("archive_sha256", ""))) is None
+    ):
+        raise ServedModelError(f"{label} source differs")
+    return value
+
+
+def _validate_lineage_v1_migration(
+    document: dict[str, Any],
+) -> tuple[list[dict[str, Any]], dict[str, str]]:
+    label = "promotion.authorization_lineage v1 predecessor"
+    if (
+        set(document) != {"schema_version", "disposition", "source", "entries"}
+        or document.get("schema_version")
+        != "ullm.sq8_authorization_lineage_input.v1"
+        or document.get("disposition")
+        != "authorization_input_not_yet_runtime_bound"
+    ):
+        raise ServedModelError(f"{label} differs")
+    source_identity = _lineage_source(document.get("source"), label)
+    entries = document.get("entries")
+    relations = (
+        "implementation_go_eligible_for_fresh_runtime_audit",
+        "superseded_capture_implementation_no_go",
+        "superseded_capture_implementation_no_go",
+        "consumed_actual_failure_latest",
+        "consumed_actual_failure_predecessor",
+        "superseded_restore_implementation_no_go",
+    )
+    if not isinstance(entries, list) or len(entries) != len(relations):
+        raise ServedModelError(f"{label} entry count differs")
+    migrated_relations = (
+        "historical_implementation_audit",
+        "capture_implementation_no_go",
+        "capture_implementation_no_go",
+        "actual_failure",
+        "actual_failure",
+        "restore_implementation_no_go",
+    )
+    common = {
+        "relation", "path", "sha256", "schema_version", "consumed",
+        "reusable_as_runtime_authorization",
+    }
+    paths: set[str] = set()
+    migrated: list[dict[str, Any]] = []
+    for sequence, (entry, relation, migrated_relation) in enumerate(
+        zip(entries, relations, migrated_relations, strict=True)
+    ):
+        if not isinstance(entry, dict) or entry.get("relation") != relation:
+            raise ServedModelError(f"{label} relation/order differs")
+        if sequence == 0:
+            expected = common | {"verdict", "actual"}
+        elif sequence in {1, 2}:
+            expected = common | {"verdict", "actual", "reason_codes"}
+        elif sequence in {3, 4}:
+            expected = common | {"status", "actual_status", "request_id"}
+        else:
+            expected = common | {"verdict", "actual", "reason_code"}
+        if (
+            set(entry) != expected
+            or entry.get("reusable_as_runtime_authorization") is not False
+            or entry.get("consumed") is not (sequence != 0)
+        ):
+            raise ServedModelError(f"{label} entry shape differs")
+        path_text = entry.get("path")
+        digest = entry.get("sha256")
+        if (
+            not isinstance(path_text, str)
+            or path_text in paths
+            or not isinstance(digest, str)
+            or _SHA256.fullmatch(digest) is None
+        ):
+            raise ServedModelError(f"{label} entry identity differs")
+        paths.add(path_text)
+        receipt = _live_lineage_file(Path(path_text), digest, f"{label} entry")
+        schema = entry.get("schema_version")
+        if receipt.get("schema_version") != schema:
+            raise ServedModelError(f"{label} entry schema differs")
+        if sequence == 0:
+            authorization = receipt.get("authorization")
+            if (
+                schema
+                != "ullm.qwen35_aq4_sq8_overlay_capture_failure_independent_audit.v1"
+                or entry.get("verdict") != "implementation_ready"
+                or entry.get("actual") != "not_executed"
+                or receipt.get("verdict") != entry["verdict"]
+                or receipt.get("actual") != entry["actual"]
+                or not isinstance(authorization, dict)
+                or authorization.get("eligible_for_fresh_authorization_builder")
+                is not True
+            ):
+                raise ServedModelError(f"{label} implementation GO differs")
+        elif sequence in {1, 2}:
+            reason_codes = entry.get("reason_codes")
+            if (
+                schema
+                != "ullm.qwen35_aq4_sq8_overlay_capture_failure_independent_audit.v1"
+                or entry.get("verdict") != "implementation_no_go"
+                or entry.get("actual") != "not_executed"
+                or not isinstance(reason_codes, list)
+                or not reason_codes
+                or len(reason_codes) != len(set(reason_codes))
+                or not all(isinstance(code, str) and code for code in reason_codes)
+                or receipt.get("verdict") != entry["verdict"]
+                or receipt.get("actual") != entry["actual"]
+                or receipt.get("reason_codes") != reason_codes
+            ):
+                raise ServedModelError(f"{label} capture No-Go differs")
+        elif sequence in {3, 4}:
+            request_id = entry.get("request_id")
+            actual = receipt.get("actual")
+            if (
+                schema != "ullm.qwen35_aq4_sq8_overlay_promotion.v1"
+                or entry.get("status") != "actual_failed"
+                or entry.get("actual_status") != "failed"
+                or not isinstance(request_id, str)
+                or re.fullmatch(r"sq8-promotion-[0-9a-f]{64}", request_id) is None
+                or receipt.get("status") != entry["status"]
+                or receipt.get("request_id") != request_id
+                or not isinstance(actual, dict)
+                or actual.get("status") != entry["actual_status"]
+                or actual.get("request_id") != request_id
+            ):
+                raise ServedModelError(f"{label} actual failure differs")
+        elif (
+            schema != "ullm.qwen35_aq4_sq8_overlay_independent_audit.v1"
+            or entry.get("verdict") != "implementation_no_go"
+            or entry.get("actual") != "not_executed"
+            or entry.get("reason_code")
+            != "restore_retry_terminal_identity_not_fail_closed"
+            or receipt.get("verdict") != entry["verdict"]
+            or receipt.get("actual") != entry["actual"]
+            or receipt.get("reason_code") != entry["reason_code"]
+        ):
+            raise ServedModelError(f"{label} restore No-Go differs")
+        audited = receipt.get("audited_source")
+        source_commit = (
+            receipt.get("source_commit")
+            if schema == "ullm.qwen35_aq4_sq8_overlay_promotion.v1"
+            else audited.get("commit") if isinstance(audited, dict) else None
+        )
+        request_id = entry.get("request_id")
+        if request_id is None:
+            candidate = receipt.get("fixed_request_id")
+            request_id = candidate if isinstance(candidate, str) else None
+        status = entry.get("status", entry.get("verdict"))
+        if (
+            re.fullmatch(r"[0-9a-f]{40}", str(source_commit)) is None
+            or request_id is not None
+            and re.fullmatch(r"sq8-promotion-[0-9a-f]{64}", request_id) is None
+        ):
+            raise ServedModelError(f"{label} migrated identity differs")
+        migrated.append(
+            {
+                "sequence": sequence,
+                "relation": migrated_relation,
+                "path": path_text,
+                "sha256": digest,
+                "schema_version": schema,
+                "status": status,
+                "request_id": request_id,
+                "source_commit": source_commit,
+            }
+        )
+    return migrated, source_identity
+
+
 def _validate_lineage_v2_document(
     document: dict[str, Any], *, seen: frozenset[Path] = frozenset()
 ) -> tuple[str, int, dict[str, str]]:
@@ -626,17 +809,9 @@ def _validate_lineage_v2_document(
         "schema_version", "disposition", "source", "predecessor", "entries"
     } or document.get("schema_version") != "ullm.sq8_authorization_lineage_input.v2":
         raise ServedModelError("promotion.authorization_lineage v2 manifest differs")
-    source_identity = document.get("source")
-    if not isinstance(source_identity, dict) or set(source_identity) != {
-        "commit", "tree_oid", "archive_sha256"
-    }:
-        raise ServedModelError("promotion.authorization_lineage v2 source differs")
-    if (
-        re.fullmatch(r"[0-9a-f]{40}", str(source_identity.get("commit", ""))) is None
-        or re.fullmatch(r"[0-9a-f]{40}", str(source_identity.get("tree_oid", ""))) is None
-        or _SHA256.fullmatch(str(source_identity.get("archive_sha256", ""))) is None
-    ):
-        raise ServedModelError("promotion.authorization_lineage v2 source differs")
+    source_identity = _lineage_source(
+        document.get("source"), "promotion.authorization_lineage v2"
+    )
     entries = document.get("entries")
     if not isinstance(entries, list):
         raise ServedModelError("promotion.authorization_lineage v2 entries differ")
@@ -658,6 +833,7 @@ def _validate_lineage_v2_document(
         "actual_failure": 0,
     }
     current: dict[str, str] | None = None
+    entry_documents: list[dict[str, Any]] = []
     for sequence, entry in enumerate(entries):
         if (
             not isinstance(entry, dict)
@@ -682,6 +858,7 @@ def _validate_lineage_v2_document(
         receipt = _live_lineage_file(
             Path(path_text), digest, "promotion.authorization_lineage entry"
         )
+        entry_documents.append(receipt)
         if receipt.get("schema_version") != entry.get("schema_version"):
             raise ServedModelError("promotion.authorization_lineage entry schema differs")
         relation = entry["relation"]
@@ -705,21 +882,74 @@ def _validate_lineage_v2_document(
         else:
             audited = receipt.get("audited_source")
             observed_commit = audited.get("commit") if isinstance(audited, dict) else None
-            if receipt.get("verdict") != status or receipt.get("actual") != "not_executed":
+            if (
+                request_id is not None
+                and (
+                    not isinstance(request_id, str)
+                    or re.fullmatch(r"sq8-promotion-[0-9a-f]{64}", request_id)
+                    is None
+                    or receipt.get("fixed_request_id") != request_id
+                )
+            ) or receipt.get("verdict") != status or receipt.get("actual") != "not_executed":
                 raise ServedModelError("promotion.authorization_lineage audit entry differs")
         if observed_commit != entry["source_commit"]:
             raise ServedModelError("promotion.authorization_lineage entry source differs")
         if relation in counts:
             counts[relation] += 1
         if relation == "implementation_ready_current":
+            authorization = receipt.get("authorization")
             if (
                 status != "implementation_ready"
                 or entry["source_commit"] != source_identity["commit"]
+                or entry["schema_version"]
+                not in {
+                    "ullm.qwen35_aq4_sq8_overlay_capture_failure_independent_audit.v1",
+                    "ullm.qwen35_aq4_sq8_overlay_independent_audit.v1",
+                }
+                or (
+                    entry["schema_version"]
+                    == "ullm.qwen35_aq4_sq8_overlay_capture_failure_independent_audit.v1"
+                    and (
+                        not isinstance(authorization, dict)
+                        or authorization.get(
+                            "eligible_for_fresh_authorization_builder"
+                        )
+                        is not True
+                    )
+                )
             ):
                 raise ServedModelError("promotion.authorization_lineage current GO differs")
             current = {"path": path_text, "sha256": digest}
-        elif relation in {"capture_implementation_no_go", "restore_implementation_no_go"} and status != "implementation_no_go":
-            raise ServedModelError("promotion.authorization_lineage No-Go differs")
+        elif relation == "capture_implementation_no_go" and (
+            entry["schema_version"]
+            != "ullm.qwen35_aq4_sq8_overlay_capture_failure_independent_audit.v1"
+            or status != "implementation_no_go"
+        ):
+            raise ServedModelError("promotion.authorization_lineage capture No-Go differs")
+        elif relation == "restore_implementation_no_go" and (
+            entry["schema_version"]
+            != "ullm.qwen35_aq4_sq8_overlay_independent_audit.v1"
+            or status != "implementation_no_go"
+            or receipt.get("reason_code")
+            != "restore_retry_terminal_identity_not_fail_closed"
+        ):
+            raise ServedModelError("promotion.authorization_lineage restore No-Go differs")
+        elif relation == "historical_implementation_audit" and (
+            entry["schema_version"]
+            != "ullm.qwen35_aq4_sq8_overlay_capture_failure_independent_audit.v1"
+            or status not in {"implementation_ready", "implementation_no_go"}
+        ):
+            raise ServedModelError(
+                "promotion.authorization_lineage historical implementation audit differs"
+            )
+        elif relation == "historical_runtime_audit" and (
+            entry["schema_version"]
+            != "ullm.qwen35_aq4_sq8_overlay_independent_audit.v1"
+            or status not in {"implementation_ready", "implementation_no_go"}
+        ):
+            raise ServedModelError(
+                "promotion.authorization_lineage historical runtime audit differs"
+            )
     if (
         counts["implementation_ready_current"] != 1
         or counts["capture_implementation_no_go"] < 2
@@ -729,9 +959,50 @@ def _validate_lineage_v2_document(
     ):
         raise ServedModelError("promotion.authorization_lineage minimum history differs")
     predecessor = document.get("predecessor")
-    if predecessor is not None:
-        if not isinstance(predecessor, dict) or set(predecessor) != {
-            "path", "sha256", "entries_sha256", "entry_count"
+    if not isinstance(predecessor, dict) or predecessor.get("schema_version") not in {
+        "ullm.sq8_authorization_lineage_input.v1",
+        "ullm.sq8_authorization_lineage_input.v2",
+    }:
+        raise ServedModelError("promotion.authorization_lineage predecessor differs")
+    predecessor_schema = predecessor["schema_version"]
+    if predecessor_schema == "ullm.sq8_authorization_lineage_input.v1":
+        if set(predecessor) != {
+            "schema_version", "path", "sha256", "migrated_prefix_sha256",
+            "migrated_prefix_count",
+        }:
+            raise ServedModelError("promotion.authorization_lineage predecessor differs")
+        predecessor_path = Path(str(predecessor.get("path", "")))
+        if predecessor_path in seen:
+            raise ServedModelError("promotion.authorization_lineage predecessor cycle differs")
+        previous_document = _live_lineage_file(
+            predecessor_path,
+            _sha256(predecessor.get("sha256"), "lineage predecessor SHA"),
+            "promotion.authorization_lineage predecessor",
+        )
+        migrated, previous_source = _validate_lineage_v1_migration(
+            previous_document
+        )
+        if (
+            predecessor.get("migrated_prefix_sha256")
+            != _lineage_entries_sha(migrated)
+            or predecessor.get("migrated_prefix_count") != len(migrated)
+            or len(entries) != len(migrated) + 2
+            or entries[:len(migrated)] != migrated
+            or entries[6]["relation"] != "actual_failure"
+            or entries[6]["source_commit"] != previous_source["commit"]
+            or entry_documents[6].get("source_provenance")
+            != {
+                "tree_sha256": previous_source["tree_oid"],
+                "archive_sha256": previous_source["archive_sha256"],
+            }
+            or entries[7]["relation"] != "implementation_ready_current"
+        ):
+            raise ServedModelError(
+                "promotion.authorization_lineage v1 migration differs"
+            )
+    else:
+        if set(predecessor) != {
+            "schema_version", "path", "sha256", "entries_sha256", "entry_count"
         }:
             raise ServedModelError("promotion.authorization_lineage predecessor differs")
         predecessor_path = Path(str(predecessor.get("path", "")))
@@ -752,12 +1023,7 @@ def _validate_lineage_v2_document(
             or entries[:previous_count] != previous_document["entries"]
         ):
             raise ServedModelError("promotion.authorization_lineage is not append-only")
-    entries_sha = hashlib.sha256(
-        json.dumps(
-            entries, ensure_ascii=True, allow_nan=False,
-            separators=(",", ":"), sort_keys=True,
-        ).encode("ascii")
-    ).hexdigest()
+    entries_sha = _lineage_entries_sha(entries)
     return entries_sha, len(entries), current
 
 
