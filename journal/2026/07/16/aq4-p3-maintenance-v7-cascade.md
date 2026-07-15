@@ -15,6 +15,7 @@
 
 ## Verification
 
-- maintenance 全 155 件: 確認待ち
-- aggregate QA: 確認待ち
-- fresh v7 経路未作成: 確認待ち
+- maintenance 全 155 件: passed
+- resident trust chain 381、driver 22、ROCTX 5、capture 56、producer 26、family 27、selector 26 の合計 543 件: passed、failed 0
+- fresh v7 の ready、dry-run、execute、execute evidence、maintenance evidence、capture output: すべて未作成
+- 旧 v6/v5 failure evidence: `SHA256SUMS` 再確認済み
