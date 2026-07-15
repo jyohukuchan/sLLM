@@ -237,6 +237,25 @@
     }
 
     #[test]
+    fn cpu_directional_copy_contract_covers_all_three_runtime_copy_paths() {
+        let mut context = RuntimeContext::create(0).unwrap();
+        let mut stream = context.create_stream().unwrap();
+        let mut src = context.alloc_buffer(32).unwrap();
+        let mut dst = context.alloc_buffer(32).unwrap();
+        let input: Vec<u8> = (0..32).map(|value| (value * 19 + 7) as u8).collect();
+
+        src.copy_from_host(0, &input, Some(&mut stream)).unwrap();
+        dst.copy_from_buffer(0, &src, 0, input.len(), Some(&mut stream))
+            .unwrap();
+
+        let mut output = vec![0_u8; input.len()];
+        dst.copy_to_host(0, &mut output, Some(&mut stream))
+            .unwrap();
+        stream.synchronize().unwrap();
+        assert_eq!(output, input);
+    }
+
+    #[test]
     fn cpu_buffer_copy_rejects_out_of_bounds_source_range() {
         let mut context = RuntimeContext::create(0).unwrap();
         let src = context.alloc_buffer(8).unwrap();

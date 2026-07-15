@@ -15,6 +15,7 @@
 #include <mutex>
 #include <new>
 #include <string>
+#include <type_traits>
 #include <unordered_map>
 #include <vector>
 
@@ -307,13 +308,31 @@ public:
 
     bool copy_async(void *dst, const void *src, size_t bytes, int kind, void *stream, int device_id) {
         load_once();
+        if (kind < 1 || kind > 3) {
+            return false;
+        }
         if (bytes == 0) {
             return true;
         }
-        if (hip_memcpy_async_ == nullptr || !set_device(device_id)) {
+        if (!set_device(device_id)) {
             return false;
         }
-        return hip_memcpy_async_(dst, src, bytes, kind, stream) == 0;
+        const auto hip_dst = static_cast<hip_device_pointer>(dst);
+        const auto hip_src = static_cast<hip_device_pointer>(const_cast<void *>(src));
+        const auto hip_stream = static_cast<hip_stream_handle>(stream);
+        switch (kind) {
+        case 1:
+            return hip_memcpy_htod_async_ != nullptr &&
+                hip_memcpy_htod_async_(hip_dst, src, bytes, hip_stream) == 0;
+        case 2:
+            return hip_memcpy_dtoh_async_ != nullptr &&
+                hip_memcpy_dtoh_async_(dst, hip_src, bytes, hip_stream) == 0;
+        case 3:
+            return hip_memcpy_dtod_async_ != nullptr &&
+                hip_memcpy_dtod_async_(hip_dst, hip_src, bytes, hip_stream) == 0;
+        default:
+            return false;
+        }
     }
 
     bool memset_async(void *dst, int value, size_t bytes, void *stream, int device_id) {
@@ -427,7 +446,26 @@ private:
     using hip_stream_destroy_fn = int (*)(void *);
     using hip_stream_synchronize_fn = int (*)(void *);
     using hip_device_synchronize_fn = int (*)();
-    using hip_memcpy_async_fn = int (*)(void *, const void *, size_t, int, void *);
+#if defined(ULLM_HAVE_HIP_RUNTIME_API)
+    using hip_status_code = hipError_t;
+    using hip_device_pointer = hipDeviceptr_t;
+    using hip_stream_handle = hipStream_t;
+#else
+    using hip_status_code = int;
+    using hip_device_pointer = void *;
+    using hip_stream_handle = void *;
+#endif
+    using hip_memcpy_htod_async_fn =
+        hip_status_code (*)(hip_device_pointer, const void *, size_t, hip_stream_handle);
+    using hip_memcpy_dtoh_async_fn =
+        hip_status_code (*)(void *, hip_device_pointer, size_t, hip_stream_handle);
+    using hip_memcpy_dtod_async_fn =
+        hip_status_code (*)(hip_device_pointer, hip_device_pointer, size_t, hip_stream_handle);
+#if defined(ULLM_HAVE_HIP_RUNTIME_API)
+    static_assert(std::is_same_v<hip_memcpy_htod_async_fn, decltype(&hipMemcpyHtoDAsync)>);
+    static_assert(std::is_same_v<hip_memcpy_dtoh_async_fn, decltype(&hipMemcpyDtoHAsync)>);
+    static_assert(std::is_same_v<hip_memcpy_dtod_async_fn, decltype(&hipMemcpyDtoDAsync)>);
+#endif
     using hip_memset_async_fn = int (*)(void *, int, size_t, void *);
     using hip_module_load_data_fn = int (*)(void **, const void *);
     using hip_module_get_function_fn = int (*)(void **, void *, const char *);
@@ -489,8 +527,12 @@ private:
                 dlsym(handle_, "hipStreamSynchronize"));
             hip_device_synchronize_ =
                 reinterpret_cast<hip_device_synchronize_fn>(dlsym(handle_, "hipDeviceSynchronize"));
-            hip_memcpy_async_ =
-                reinterpret_cast<hip_memcpy_async_fn>(dlsym(handle_, "hipMemcpyAsync"));
+            hip_memcpy_htod_async_ = reinterpret_cast<hip_memcpy_htod_async_fn>(
+                dlsym(handle_, "hipMemcpyHtoDAsync"));
+            hip_memcpy_dtoh_async_ = reinterpret_cast<hip_memcpy_dtoh_async_fn>(
+                dlsym(handle_, "hipMemcpyDtoHAsync"));
+            hip_memcpy_dtod_async_ = reinterpret_cast<hip_memcpy_dtod_async_fn>(
+                dlsym(handle_, "hipMemcpyDtoDAsync"));
             hip_memset_async_ =
                 reinterpret_cast<hip_memset_async_fn>(dlsym(handle_, "hipMemsetAsync"));
             hip_module_load_data_ =
@@ -523,7 +565,9 @@ private:
     hip_stream_destroy_fn hip_stream_destroy_ = nullptr;
     hip_stream_synchronize_fn hip_stream_synchronize_ = nullptr;
     hip_device_synchronize_fn hip_device_synchronize_ = nullptr;
-    hip_memcpy_async_fn hip_memcpy_async_ = nullptr;
+    hip_memcpy_htod_async_fn hip_memcpy_htod_async_ = nullptr;
+    hip_memcpy_dtoh_async_fn hip_memcpy_dtoh_async_ = nullptr;
+    hip_memcpy_dtod_async_fn hip_memcpy_dtod_async_ = nullptr;
     hip_memset_async_fn hip_memset_async_ = nullptr;
     hip_module_load_data_fn hip_module_load_data_ = nullptr;
     hip_module_get_function_fn hip_module_get_function_ = nullptr;
