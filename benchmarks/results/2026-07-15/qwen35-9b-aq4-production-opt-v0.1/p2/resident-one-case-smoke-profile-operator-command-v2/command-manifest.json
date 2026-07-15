@@ -1,0 +1,198 @@
+{
+  "actual_executed": false,
+  "argv": [
+    "/usr/bin/python3.12",
+    "/home/homelab1/coding-local/ultimateLLM/uLLM-project/tools/run-aq4-p2-resident-smoke-maintenance.py",
+    "--mode",
+    "execute",
+    "--profile-diagnostic",
+    "--ready-artifact",
+    "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-ready-v1/ready-binding.json",
+    "--evidence-output",
+    "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-maintenance-evidence-v2",
+    "--confirm-one-case"
+  ],
+  "authorization": {
+    "confirmation_flag_count": 1,
+    "external_service_stop_required": true,
+    "maximum_invocations": 1,
+    "measurement_eligible": false,
+    "output_no_reuse": true,
+    "profile_diagnostic_flag_count": 1,
+    "promotion_eligible": false,
+    "quiet_window_go_required": true,
+    "rocprof_wrapper_required": true
+  },
+  "command_sha256": "7474807b74e7f460a7ab61e71d510321f394b3bd379636993b3fc9e52fb798dc",
+  "execution": {
+    "argument_count": 10,
+    "execution_mode": "profile_diagnostic",
+    "operator_must_use_manifest_argv_exactly": true,
+    "requires_fresh_output_recheck_immediately_before_execution": true,
+    "requires_same_pty_sudo_cache": true,
+    "shell": false,
+    "working_directory": "/home/homelab1/coding-local/ultimateLLM/uLLM-project"
+  },
+  "fresh_outputs": [
+    {
+      "derived_from": "manifest.argv[8]",
+      "must_not_exist": true,
+      "observed_exists_during_audit": false,
+      "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-maintenance-evidence-v2",
+      "path_sha256": "b3aed65840289823b40056b8eb4424042521d67265d38a68d954e0d279435004",
+      "role": "profile_maintenance_evidence"
+    },
+    {
+      "derived_from": "ready_artifact.profile_diagnostic.target_launcher.evidence_output",
+      "must_not_exist": true,
+      "observed_exists_during_audit": false,
+      "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-execute-evidence-v1",
+      "path_sha256": "63dfe6befbca1603870864334865d43183854430e2edba7888b3c09025c37089",
+      "role": "profile_launcher_evidence"
+    },
+    {
+      "derived_from": "ready_artifact.profile_diagnostic.target_launcher.runner_output",
+      "must_not_exist": true,
+      "observed_exists_during_audit": false,
+      "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-execute-v1",
+      "path_sha256": "1ebec087f8704fd692ad75e69f13f5eb2cff9954fce6f70454d23d9a84b58b5f",
+      "role": "profile_runner_output"
+    },
+    {
+      "derived_from": "ready_artifact.profile_diagnostic.output.directory",
+      "must_not_exist": true,
+      "observed_exists_during_audit": false,
+      "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v1",
+      "path_sha256": "faf7aebec7a61b7a674d264ec1c26761e84bf8543750bd6559f8e31ab3301593",
+      "role": "capture_output_directory"
+    },
+    {
+      "derived_from": "ready_artifact.profile_diagnostic.output.artifact",
+      "must_not_exist": true,
+      "observed_exists_during_audit": false,
+      "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v1/capture-artifact.json",
+      "path_sha256": "5c4e8d615b371ee1433de9a4ecd6ec5f3a1e8569ac0877ee5990846f9e6754c4",
+      "role": "capture_artifact"
+    },
+    {
+      "derived_from": "capture_tool.rocprof.stdout",
+      "must_not_exist": true,
+      "observed_exists_during_audit": false,
+      "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v1/rocprof.stdout",
+      "path_sha256": "e87ae6f9bbc9ac05dfb4ab6e581ea9de6aa18c8d10e7f6c278961bd67099f438",
+      "role": "rocprof_stdout"
+    },
+    {
+      "derived_from": "capture_tool.rocprof.stderr",
+      "must_not_exist": true,
+      "observed_exists_during_audit": false,
+      "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v1/rocprof.stderr",
+      "path_sha256": "251efc1ae97cbac8e23cdd0c7a6726baeeca2de991a6e1bce2bb5934282e39ee",
+      "role": "rocprof_stderr"
+    }
+  ],
+  "inputs": {
+    "capture_tool": {
+      "commit": "b4d515f9908136fa773f957775beab79edc3065d",
+      "git_blob": "5197f7a2607da2ec281ab8a013ce1476178bf1b1",
+      "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/tools/capture-aq4-p3-diagnostic-profile.py",
+      "sha256": "605a68d308bf4336fc96d23d0ba9f819799ef24b169e3f49ae6a377638ab6cf8"
+    },
+    "harness": {
+      "commit": "3e24fb66c7fd5f5604afdc48e972c7291c7eed26",
+      "git_blob": "0a725f009b257884509fc020864187c6409fedaf",
+      "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/tools/run-aq4-p2-resident-smoke-maintenance.py",
+      "sha256": "287e985b6c29ec647deefab00ae67b05a28f74c787a2539c67dac87c9864e6f3"
+    },
+    "predecessor_operator_manifest": {
+      "artifact_commit": "5e7ecce84c54288453cf102405d6eaf845e6d501",
+      "artifact_tree": "686c48b387c2b65bbbfd17d9183400c002c9f587",
+      "git_blob": "b6936db2c9c4fd6ef89d93f940c4837857996b11",
+      "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-operator-command-v1/command-manifest.json",
+      "sha256": "e4a989fb149d7dc7a583a537fdcef0c6e05257e14978ba6b496661090e45a7a4",
+      "sha256sums_sha256": "4ef75af352ccdcd76794b94f6803fd9191dad831b43f1f823f771e4327371c71"
+    },
+    "profile_ready_artifact": {
+      "artifact_commit": "8b2fa37d72cc710eeaffc6646799cc6a1b9e4634",
+      "git_blob": "e8c109238781a30d9863656879ad47d4acd63b00",
+      "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-ready-v1/ready-binding.json",
+      "sha256": "00ad5901ab08d1bc35acc3dc3b0b9caa4168f90b96bb679aad22fdd1b7f05734",
+      "sha256sums_sha256": "f1515c30ce8571e4c6598da722041212f6ace80eb4945f644e7d6bb29e856b3d"
+    },
+    "profiler": {
+      "path": "/opt/rocm-7.2.1/bin/rocprofv3",
+      "sha256": "13060810d6b80653631b14f0f5e33ea160c2b79a6a3a4c6850142010b48b8ec8"
+    },
+    "python": {
+      "path": "/usr/bin/python3.12",
+      "sha256": "1643dacd9feaedc58f3cc581e4d22577dfe25c09b10282936186ccf0f2e61118"
+    },
+    "quiet_window": {
+      "artifact_commit": "430f0889ef09582deb22b4726a8483711b7c16a3",
+      "artifact_tree": "819a5f73512c473a9470cbd09f72366a495800c0",
+      "baseline_equals_final": true,
+      "formal_health_identity_unchanged": true,
+      "formal_health_start_equals_end": true,
+      "git_blob": "11a9e07c61bfd9f03b0e128d23738ab19d82d8a0",
+      "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-quiet-window-v1/quiet-window.json",
+      "primary_sample_count": 25,
+      "raw_file_sha256": "a2b09cafd00eaf9d20f949c1920034e4e91032ff3ba8ec1a0bc3def617b3aba9",
+      "read_only": true,
+      "service_epoch": {
+        "active_state": "active",
+        "exec_main_start_timestamp": "Wed 2026-07-15 12:39:19 JST",
+        "main_pid": 1722227,
+        "nrestarts": 1,
+        "sub_state": "running"
+      },
+      "sha256sums_git_blob": "64a94ab065ceb8deb1512734091f0303a1c30c09",
+      "sha256sums_sha256": "7a002729a20c14d69f85312576c6c9db6d93496224a3e5926c866abec4bf5dab",
+      "status": "go",
+      "terminal_external_process_observations": 0,
+      "terminal_pts5_process_observations": 0,
+      "terminal_sample_count": 25,
+      "violations": []
+    },
+    "roctx_library": {
+      "invocation_path": "/opt/rocm/lib/libroctx64.so.4",
+      "resolved_path": "/opt/rocm-7.2.1/lib/libroctx64.so.4.1.70201",
+      "sha256": "22bbc6946fdf5d7d8b1755cbd738c42a63f3795d18ac3ed1285b09cc772dee17"
+    },
+    "target_command_manifest": {
+      "manifest_sha256": "bd819fc2b3ecf159d07cac4a410a3ddebe8f0efcb1ddff10ca3788ce1e12be6a",
+      "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-ready-v1/target-command-manifest.json",
+      "raw_file_sha256": "99014dac5f0d0b91d64f9821e76252bf77552121b8102f00e724662c49cd9072"
+    }
+  },
+  "pre_execution_audit": {
+    "dry_and_fake": {
+      "actual_process_counts_all_zero": true,
+      "capture_executed": false,
+      "profile_fake_and_dry_tests_passed": 16,
+      "service_touched": false,
+      "status": "passed"
+    },
+    "output_absence": {
+      "all_seven_absent": true,
+      "capture_artifact_absent": true,
+      "capture_directory_absent": true,
+      "profile_launcher_evidence_absent": true,
+      "profile_maintenance_evidence_absent": true,
+      "profile_runner_output_absent": true,
+      "rocprof_stderr_absent": true,
+      "rocprof_stdout_absent": true,
+      "status": "passed"
+    },
+    "quiet_window": {
+      "evidence_sha256_exact": true,
+      "formal_health_stable": true,
+      "sample_counts_exact": true,
+      "service_epoch_stable": true,
+      "status": "go",
+      "terminal_observations_zero": true
+    }
+  },
+  "schema_version": "ullm.aq4_p2_resident_profile_operator_command.v2",
+  "secret_material_embedded": false,
+  "status": "audited_ready_for_single_explicit_profile_diagnostic"
+}
