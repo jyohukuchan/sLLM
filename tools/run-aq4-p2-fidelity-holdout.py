@@ -21,7 +21,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 ROOT = Path(__file__).resolve().parents[1]
 MAX_ROWS = 24
@@ -193,6 +193,129 @@ def _read_json(path: Path, label: str) -> tuple[dict[str, Any], bytes]:
     if not isinstance(value, dict):
         raise HoldoutError(f"{label} root must be an object")
     return value, raw
+
+
+class _PinnedExecutionPlan(NamedTuple):
+    descriptor: int
+    path: Path
+    fingerprint: tuple[int, ...]
+    plan: dict[str, Any]
+    parsed_plan_sha256: str
+    preflight_sha256: str
+    command: tuple[str, ...]
+    environment: tuple[tuple[str, str], ...]
+    attempt_path: Path
+    receipt_output: Path
+    rescue_path: Path
+    stdout_path: Path
+    stderr_path: Path
+
+
+def _open_execution_plan(preflight: Path, receipt_output: Path) -> _PinnedExecutionPlan:
+    """Read and parse the execute plan once while retaining its stable descriptor."""
+    path = preflight.absolute()
+    _no_symlink_components(path, "preflight")
+    descriptor = os.open(
+        path, os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+    )
+    try:
+        before = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or before.st_nlink != 1
+            or before.st_size > 64 * 1024 * 1024
+        ):
+            raise HoldoutError("preflight stable descriptor topology differs")
+        raw = bytearray()
+        while chunk := os.read(descriptor, 1024 * 1024):
+            raw.extend(chunk)
+            if len(raw) > 64 * 1024 * 1024:
+                raise HoldoutError("preflight exceeds bounded size")
+        after = os.fstat(descriptor)
+        final = os.lstat(path)
+        _no_symlink_components(path, "preflight")
+        fingerprint = _stat_fingerprint(before)
+        if fingerprint != _stat_fingerprint(after) or fingerprint != _stat_fingerprint(
+            final
+        ):
+            raise HoldoutError("preflight changed while reading")
+        try:
+            plan = json.loads(
+                bytes(raw),
+                object_pairs_hook=PROTOCOL.pairs,
+                parse_constant=PROTOCOL.no_constants,
+            )
+        except (UnicodeError, json.JSONDecodeError, PROTOCOL.ProtocolError) as error:
+            raise HoldoutError(f"invalid preflight: {error}") from error
+        if not isinstance(plan, dict):
+            raise HoldoutError("preflight root must be an object")
+        try:
+            attempt_path = Path(plan["paths"]["attempt_marker"])
+            planned_receipt = Path(plan["paths"]["result_receipt"])
+            command = tuple(plan["execution_contract"]["command"])
+            environment = tuple(
+                sorted(plan["execution_contract"]["child_environment"].items())
+            )
+        except (AttributeError, KeyError, TypeError) as error:
+            raise HoldoutError("preflight execution paths are incomplete") from error
+        receipt = receipt_output.resolve()
+        if receipt != planned_receipt.resolve():
+            raise HoldoutError(
+                "execute receipt output differs from the frozen preflight path"
+            )
+        preflight_sha = hashlib.sha256(raw).hexdigest()
+        parsed_plan_sha = hashlib.sha256(
+            json.dumps(
+                plan,
+                ensure_ascii=True,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            ).encode("ascii")
+        ).hexdigest()
+        return _PinnedExecutionPlan(
+            descriptor=descriptor,
+            path=path,
+            fingerprint=fingerprint,
+            plan=plan,
+            parsed_plan_sha256=parsed_plan_sha,
+            preflight_sha256=preflight_sha,
+            command=command,
+            environment=environment,
+            attempt_path=attempt_path,
+            receipt_output=receipt,
+            rescue_path=receipt.with_name(
+                f".{receipt.name}.{preflight_sha[:16]}.rescue-failure.json"
+            ),
+            stdout_path=receipt.parent / "capture.stdout.log",
+            stderr_path=receipt.parent / "capture.stderr.log",
+        )
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
+def _revalidate_execution_plan(execution: _PinnedExecutionPlan, label: str) -> None:
+    before = os.fstat(execution.descriptor)
+    _no_symlink_components(execution.path, "preflight")
+    path_info = os.lstat(execution.path)
+    after = os.fstat(execution.descriptor)
+    parsed_plan_sha = hashlib.sha256(
+        json.dumps(
+            execution.plan,
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("ascii")
+    ).hexdigest()
+    if (
+        _stat_fingerprint(before) != execution.fingerprint
+        or _stat_fingerprint(after) != execution.fingerprint
+        or _stat_fingerprint(path_info) != execution.fingerprint
+        or parsed_plan_sha != execution.parsed_plan_sha256
+    ):
+        raise HoldoutError(f"preflight execution plan identity changed {label}")
 
 
 def _atomic_json(path: Path, value: Any, label: str) -> str:
@@ -1511,12 +1634,13 @@ def _failure(
 
 
 def _reserve_failure_receipt(
-    receipt_output: Path, plan: dict[str, Any], preflight_sha: str
+    receipt_output: Path,
+    plan: dict[str, Any],
+    preflight_sha: str,
+    rescue_path: Path,
 ) -> dict[str, Any]:
     """Durably prepublish an inactive rescue receipt before consuming the attempt."""
-    path = receipt_output.with_name(
-        f".{receipt_output.name}.{preflight_sha[:16]}.rescue-failure.json"
-    )
+    path = rescue_path
     value = _failure_value(
         plan,
         preflight_sha,
@@ -1928,23 +2052,14 @@ def _revalidate_frozen_plan(plan: dict[str, Any]) -> None:
         raise HoldoutError("active output appeared before capture")
 
 
-def _execute_inner(args: argparse.Namespace) -> dict[str, Any]:
-    plan, plan_raw = _read_json(args.preflight, "preflight")
-    preflight_sha = hashlib.sha256(plan_raw).hexdigest()
-    try:
-        attempt_path = Path(plan["paths"]["attempt_marker"])
-    except (KeyError, TypeError) as error:
-        raise HoldoutError("preflight attempt marker path is missing") from error
+def _execute_inner(execution: _PinnedExecutionPlan) -> dict[str, Any]:
+    plan = execution.plan
+    preflight_sha = execution.preflight_sha256
+    attempt_path = execution.attempt_path
+    receipt_output = execution.receipt_output
+    _revalidate_execution_plan(execution, "before attempt")
     if os.path.lexists(attempt_path):
         raise HoldoutError("attempt marker already exists; retry is forbidden")
-    if (
-        args.receipt_output.resolve()
-        != Path(plan.get("paths", {}).get("result_receipt", "")).resolve()
-    ):
-        raise HoldoutError(
-            "execute receipt output differs from the frozen preflight path"
-        )
-    _validate_plan(plan)
     marker = {
         "schema_version": ATTEMPT_SCHEMA,
         "status": "started",
@@ -1953,14 +2068,15 @@ def _execute_inner(args: argparse.Namespace) -> dict[str, Any]:
         "command_sha256": plan["execution_contract"]["command_sha256"],
     }
     _atomic_json(attempt_path, marker, "attempt marker")
-    stdout_path = args.receipt_output.parent / "capture.stdout.log"
-    stderr_path = args.receipt_output.parent / "capture.stderr.log"
+    stdout_path = execution.stdout_path
+    stderr_path = execution.stderr_path
     evidence: dict[str, Any] = {}
     process: subprocess.Popen[bytes] | None = None
     out_fd: int | None = None
     err_fd: int | None = None
     frozen_descriptors: dict[str, int] = {}
     try:
+        _revalidate_execution_plan(execution, "after attempt")
         _revalidate_frozen_plan(plan)
         evidence["pre_spawn_process_census"] = _process_census(
             Path(plan["execution_contract"]["capture_binary"]["path"])
@@ -1970,19 +2086,20 @@ def _execute_inner(args: argparse.Namespace) -> dict[str, Any]:
             raise HoldoutError(
                 "capture process already exists before the one-shot spawn"
             )
-        args.receipt_output.parent.mkdir(parents=True, exist_ok=True)
+        receipt_output.parent.mkdir(parents=True, exist_ok=True)
         out_fd = os.open(
             stdout_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o444
         )
         err_fd = os.open(
             stderr_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o444
         )
-        env = dict(plan["execution_contract"]["child_environment"])
+        env = dict(execution.environment)
         frozen_descriptors = _open_frozen_descriptors(plan)
         binary_fd = frozen_descriptors["capture_binary"]
+        _revalidate_execution_plan(execution, "immediately before spawn")
         try:
             process = subprocess.Popen(
-                plan["execution_contract"]["command"],
+                execution.command,
                 executable=f"/proc/self/fd/{binary_fd}",
                 stdin=subprocess.DEVNULL,
                 stdout=out_fd,
@@ -1994,7 +2111,7 @@ def _execute_inner(args: argparse.Namespace) -> dict[str, Any]:
         except OSError as error:
             _capture_log_evidence(stdout_path, stderr_path, out_fd, err_fd, evidence)
             return _failure(
-                args.receipt_output,
+                receipt_output,
                 plan,
                 preflight_sha,
                 "spawn",
@@ -2066,7 +2183,7 @@ def _execute_inner(args: argparse.Namespace) -> dict[str, Any]:
             )
             evidence["post_exit_gpu_process_census"] = _gpu_process_census()
             return _failure(
-                args.receipt_output,
+                receipt_output,
                 plan,
                 preflight_sha,
                 "timeout",
@@ -2085,7 +2202,7 @@ def _execute_inner(args: argparse.Namespace) -> dict[str, Any]:
         error_number = error.errno if isinstance(error, OSError) else None
         _capture_log_evidence(stdout_path, stderr_path, out_fd, err_fd, evidence)
         return _failure(
-            args.receipt_output,
+            receipt_output,
             plan,
             preflight_sha,
             "partial",
@@ -2119,7 +2236,7 @@ def _execute_inner(args: argparse.Namespace) -> dict[str, Any]:
         evidence["stderr"] = _identity_file(stderr_path, "capture stderr")
     except Exception as error:
         return _failure(
-            args.receipt_output,
+            receipt_output,
             plan,
             preflight_sha,
             "partial",
@@ -2134,7 +2251,7 @@ def _execute_inner(args: argparse.Namespace) -> dict[str, Any]:
         or evidence["post_exit_process_group_census"]
     ):
         return _failure(
-            args.receipt_output,
+            receipt_output,
             plan,
             preflight_sha,
             "partial",
@@ -2153,7 +2270,7 @@ def _execute_inner(args: argparse.Namespace) -> dict[str, Any]:
         or not evidence["model_package_files_observed_from_proc"]
     ):
         return _failure(
-            args.receipt_output,
+            receipt_output,
             plan,
             preflight_sha,
             "partial",
@@ -2165,7 +2282,7 @@ def _execute_inner(args: argparse.Namespace) -> dict[str, Any]:
     if process.returncode != 0:
         kind = "oom" if process.returncode in (-signal.SIGKILL, 137) else "nonzero"
         return _failure(
-            args.receipt_output,
+            receipt_output,
             plan,
             preflight_sha,
             kind,
@@ -2181,7 +2298,7 @@ def _execute_inner(args: argparse.Namespace) -> dict[str, Any]:
         )
     except Exception as error:
         return _failure(
-            args.receipt_output,
+            receipt_output,
             plan,
             preflight_sha,
             "partial",
@@ -2189,7 +2306,7 @@ def _execute_inner(args: argparse.Namespace) -> dict[str, Any]:
         )
     if actual_identity != plan["actual_verified_receipt"]:
         return _failure(
-            args.receipt_output,
+            receipt_output,
             plan,
             preflight_sha,
             "partial",
@@ -2198,7 +2315,7 @@ def _execute_inner(args: argparse.Namespace) -> dict[str, Any]:
     active_root = Path(plan["paths"]["active_output"])
     if not active_root.is_dir() or active_root.is_symlink():
         return _failure(
-            args.receipt_output,
+            receipt_output,
             plan,
             preflight_sha,
             "partial",
@@ -2260,7 +2377,7 @@ def _execute_inner(args: argparse.Namespace) -> dict[str, Any]:
             raise HoldoutError("freeze receipt changed or is no longer executable")
         decision, checks = _decision(means, freeze)
     except Exception as error:
-        return _failure(args.receipt_output, plan, preflight_sha, "partial", str(error))
+        return _failure(receipt_output, plan, preflight_sha, "partial", str(error))
     result = {
         "schema_version": RESULT_SCHEMA,
         "status": "holdout_result",
@@ -2300,12 +2417,10 @@ def _execute_inner(args: argparse.Namespace) -> dict[str, Any]:
         "immutable": True,
     }
     try:
-        _atomic_json(args.receipt_output, result, "holdout result")
+        _atomic_json(receipt_output, result, "holdout result")
     except (OSError, HoldoutError, ValueError, TypeError) as error:
         return _failure(
-            args.receipt_output.with_name(
-                f"{args.receipt_output.name}.publication-failure.json"
-            ),
+            receipt_output.with_name(f"{receipt_output.name}.publication-failure.json"),
             plan,
             preflight_sha,
             "publication",
@@ -2317,56 +2432,55 @@ def _execute_inner(args: argparse.Namespace) -> dict[str, Any]:
     return {
         "status": "ok",
         "decision": decision,
-        "receipt": str(args.receipt_output),
-        "receipt_sha256": _sha(args.receipt_output, "holdout result"),
+        "receipt": str(receipt_output),
+        "receipt_sha256": _sha(receipt_output, "holdout result"),
     }
 
 
 def _execute(args: argparse.Namespace) -> dict[str, Any]:
-    plan, plan_raw = _read_json(args.preflight, "preflight")
-    preflight_sha = hashlib.sha256(plan_raw).hexdigest()
+    execution = _open_execution_plan(args.preflight, args.receipt_output)
     try:
-        attempt_path = Path(plan["paths"]["attempt_marker"])
-    except (KeyError, TypeError) as error:
-        raise HoldoutError("preflight attempt marker path is missing") from error
-    if os.path.lexists(attempt_path):
-        raise HoldoutError("attempt marker already exists; retry is forbidden")
-    if (
-        args.receipt_output.resolve()
-        != Path(plan.get("paths", {}).get("result_receipt", "")).resolve()
-    ):
-        raise HoldoutError(
-            "execute receipt output differs from the frozen preflight path"
+        plan = execution.plan
+        preflight_sha = execution.preflight_sha256
+        if os.path.lexists(execution.attempt_path):
+            raise HoldoutError("attempt marker already exists; retry is forbidden")
+        _validate_plan(plan)
+        _revalidate_execution_plan(execution, "before rescue reservation")
+        rescue = _reserve_failure_receipt(
+            execution.receipt_output,
+            plan,
+            preflight_sha,
+            execution.rescue_path,
         )
-    _validate_plan(plan)
-    rescue = _reserve_failure_receipt(args.receipt_output, plan, preflight_sha)
-    try:
-        result = _execute_inner(args)
-    except BaseException as error:
-        if os.path.lexists(attempt_path):
-            descriptor = rescue.pop("descriptor", None)
-            if descriptor is not None:
-                try:
-                    os.close(descriptor)
-                except OSError:
-                    pass
-            return {
-                **rescue["value"],
-                "receipt": str(rescue["path"]),
-                "receipt_sha256": rescue["sha256"],
-                "escaped_exception_type": type(error).__name__,
-            }
+        try:
+            result = _execute_inner(execution)
+        except BaseException as error:
+            if os.path.lexists(execution.attempt_path):
+                descriptor = rescue.pop("descriptor", None)
+                if descriptor is not None:
+                    try:
+                        os.close(descriptor)
+                    except OSError:
+                        pass
+                return {
+                    **rescue["value"],
+                    "receipt": str(rescue["path"]),
+                    "receipt_sha256": rescue["sha256"],
+                    "escaped_exception_type": type(error).__name__,
+                }
+            try:
+                _retire_failure_rescue(rescue)
+            except OSError:
+                pass
+            raise
         try:
             _retire_failure_rescue(rescue)
         except OSError:
+            # A primary sealed result/failure already exists. Cleanup cannot alter it.
             pass
-        raise
-    try:
-        _retire_failure_rescue(rescue)
-    except OSError:
-        # A primary sealed result/failure already exists.  Cleanup cannot alter it.
-        pass
-    return result
+        return result
+    finally:
+        os.close(execution.descriptor)
 
 
 def main(argv: list[str] | None = None) -> int:

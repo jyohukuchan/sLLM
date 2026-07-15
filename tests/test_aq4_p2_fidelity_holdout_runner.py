@@ -69,9 +69,11 @@ def test_execute_refuses_existing_attempt_marker(tmp_path: Path) -> None:
             "active_output": str(tmp_path / "active"),
             "split_root": str(tmp_path),
             "source_artifact": str(tmp_path),
+            "result_receipt": str(tmp_path / "result.json"),
         },
         "execution_contract": {
             "command": ["false"],
+            "child_environment": {},
             "command_sha256": "0" * 64,
             "timeout_seconds": 1,
         },
@@ -584,12 +586,201 @@ def _minimal_execute_plan(tmp_path: Path) -> dict[str, object]:
         "freeze_receipt_sha256": "e" * 64,
         "actual_verified_receipt": {},
         "identity": {},
-        "execution_contract": {"command_sha256": "f" * 64},
+        "execution_contract": {
+            "command": ["false"],
+            "command_sha256": "f" * 64,
+            "child_environment": {},
+        },
         "paths": {
             "attempt_marker": str(tmp_path / "attempt.json"),
             "result_receipt": str(tmp_path / "result.json"),
         },
     }
+
+
+def _write_plan(path: Path, plan: dict[str, object]) -> str:
+    raw = (json.dumps(plan, sort_keys=True) + "\n").encode("ascii")
+    path.write_bytes(raw)
+    return hashlib.sha256(raw).hexdigest()
+
+
+def test_execute_passes_single_pinned_plan_to_inner_without_second_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    plan = _minimal_execute_plan(tmp_path)
+    preflight = tmp_path / "preflight.json"
+    expected_sha = _write_plan(preflight, plan)
+    monkeypatch.setattr(RUNNER, "_validate_plan", lambda _plan: None)
+    monkeypatch.setattr(
+        RUNNER,
+        "_read_json",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("execute reopened the preflight path")
+        ),
+    )
+
+    def inner(execution: object) -> dict[str, object]:
+        assert execution.plan == plan
+        assert execution.preflight_sha256 == expected_sha
+        assert execution.command == ("false",)
+        assert dict(execution.environment) == {}
+        return {"status": "fixture_success"}
+
+    monkeypatch.setattr(RUNNER, "_execute_inner", inner)
+    assert RUNNER._execute(
+        type(
+            "Args",
+            (),
+            {"preflight": preflight, "receipt_output": tmp_path / "result.json"},
+        )()
+    ) == {"status": "fixture_success"}
+    assert not any(tmp_path.glob("*.rescue-failure.json"))
+
+
+def test_two_read_plan_swap_is_rejected_before_attempt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    old = _minimal_execute_plan(tmp_path)
+    preflight = tmp_path / "preflight.json"
+    _write_plan(preflight, old)
+    new_root = tmp_path / "new"
+    new_root.mkdir()
+    new = _minimal_execute_plan(new_root)
+    replacement = tmp_path / "replacement.json"
+    _write_plan(replacement, new)
+    monkeypatch.setattr(RUNNER, "_validate_plan", lambda _plan: None)
+    original_reserve = RUNNER._reserve_failure_receipt
+
+    def reserve(*args: object) -> dict[str, object]:
+        rescue = original_reserve(*args)
+        os.replace(replacement, preflight)
+        return rescue
+
+    monkeypatch.setattr(RUNNER, "_reserve_failure_receipt", reserve)
+    with pytest.raises(RUNNER.HoldoutError, match="identity changed"):
+        RUNNER._execute(
+            type(
+                "Args",
+                (),
+                {"preflight": preflight, "receipt_output": tmp_path / "result.json"},
+            )()
+        )
+    assert not (tmp_path / "attempt.json").exists()
+    assert not (new_root / "attempt.json").exists()
+    assert not any(tmp_path.glob("*.rescue-failure.json"))
+
+
+@pytest.mark.parametrize("mutation", ["replace", "ctime"])
+def test_preflight_identity_drift_after_marker_fails_before_spawn(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mutation: str
+) -> None:
+    plan = _minimal_execute_plan(tmp_path)
+    preflight = tmp_path / "preflight.json"
+    expected_sha = _write_plan(preflight, plan)
+    replacement = tmp_path / "replacement.json"
+    _write_plan(replacement, plan)
+    monkeypatch.setattr(RUNNER, "_validate_plan", lambda _plan: None)
+    monkeypatch.setattr(
+        RUNNER,
+        "subprocess",
+        type(
+            "NoSpawn",
+            (),
+            {
+                "Popen": lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                    AssertionError("capture spawned after preflight drift")
+                )
+            },
+        ),
+    )
+    original_atomic = RUNNER._atomic_json
+
+    def mutate_after_marker(path: Path, value: object, label: str) -> str:
+        digest = original_atomic(path, value, label)
+        if label == "attempt marker":
+            if mutation == "replace":
+                os.replace(replacement, preflight)
+            else:
+                preflight.chmod(0o444)
+        return digest
+
+    monkeypatch.setattr(RUNNER, "_atomic_json", mutate_after_marker)
+    result = RUNNER._execute(
+        type(
+            "Args",
+            (),
+            {"preflight": preflight, "receipt_output": tmp_path / "result.json"},
+        )()
+    )
+    assert result["status"] == "holdout_failed"
+    assert result["stage"] == "pre_spawn"
+    assert result["preflight_sha256"] == expected_sha
+    assert (tmp_path / "attempt.json").exists()
+    assert not (tmp_path / "active").exists()
+
+
+def test_plan_symlink_and_hardlink_are_rejected(tmp_path: Path) -> None:
+    plan = _minimal_execute_plan(tmp_path)
+    original = tmp_path / "original.json"
+    _write_plan(original, plan)
+    symlink = tmp_path / "symlink.json"
+    symlink.symlink_to(original)
+    with pytest.raises(RUNNER.HoldoutError, match="symlink"):
+        RUNNER._open_execution_plan(symlink, tmp_path / "result.json")
+    hardlink = tmp_path / "hardlink.json"
+    hardlink.hardlink_to(original)
+    with pytest.raises(RUNNER.HoldoutError, match="topology"):
+        RUNNER._open_execution_plan(original, tmp_path / "result.json")
+
+
+def test_parsed_execution_plan_mutation_is_rejected(tmp_path: Path) -> None:
+    plan = _minimal_execute_plan(tmp_path)
+    preflight = tmp_path / "preflight.json"
+    _write_plan(preflight, plan)
+    execution = RUNNER._open_execution_plan(preflight, tmp_path / "result.json")
+    try:
+        execution.plan["paths"]["attempt_marker"] = str(tmp_path / "other.json")
+        with pytest.raises(RUNNER.HoldoutError, match="identity changed"):
+            RUNNER._revalidate_execution_plan(execution, "after mutation")
+    finally:
+        os.close(execution.descriptor)
+
+
+def test_after_marker_exception_seals_rescue_for_old_plan_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    old = _minimal_execute_plan(tmp_path)
+    preflight = tmp_path / "preflight.json"
+    old_sha = _write_plan(preflight, old)
+    new_root = tmp_path / "new"
+    new_root.mkdir()
+    new = _minimal_execute_plan(new_root)
+    replacement = tmp_path / "replacement.json"
+    _write_plan(replacement, new)
+    monkeypatch.setattr(RUNNER, "_validate_plan", lambda _plan: None)
+
+    def failed_inner(execution: object) -> dict[str, object]:
+        RUNNER._atomic_json(
+            execution.attempt_path, {"status": "started"}, "attempt marker"
+        )
+        os.replace(replacement, preflight)
+        raise OSError(errno.EIO, "injected post-marker exception")
+
+    monkeypatch.setattr(RUNNER, "_execute_inner", failed_inner)
+    result = RUNNER._execute(
+        type(
+            "Args",
+            (),
+            {"preflight": preflight, "receipt_output": tmp_path / "result.json"},
+        )()
+    )
+    assert result["failure_kind"] == "fail_safe_rescue"
+    assert result["preflight_sha256"] == old_sha
+    assert Path(result["receipt"]).name == (
+        f".result.json.{old_sha[:16]}.rescue-failure.json"
+    )
+    assert (tmp_path / "attempt.json").exists()
+    assert not (new_root / "attempt.json").exists()
 
 
 @pytest.mark.parametrize("fault_stage", ["link", "fsync", "close"])

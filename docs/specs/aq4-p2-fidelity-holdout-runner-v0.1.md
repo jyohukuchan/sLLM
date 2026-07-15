@@ -16,6 +16,8 @@ P2 split は8 strata（prompt_tokens 4種 × baseline_mode 2種）を各6行に�
 - served model、package manifest/content、worker、guard receipt、capture binary、device index/backend/name/architecture/ID、quantized revisionをexact bindする。device IDは必須である。
 - Rust captureへ明示`--subset holdout`、`--cases-file`、`--expected-holdout-cases-sha256`を渡す。既定のcalibration CLIとcalibration SHA検証は変更しない。capture manifestはsubset、split/cali/holdout SHA、one_process=1、one_model_load=1、gpu_parallelism=1を記録する。
 
+executeはpreflight pathを`O_NOFOLLOW`で一度だけopenし、同じstable fdからbounded bytesを一度だけread/hash/parseする。parsed plan、fd fingerprint、command、child environment、attempt/result/rescue/log pathを単一のexecute contextへ固定し、inner executionはpreflight pathを再openしない。attempt markerとfail-safe rescueもこの同じplanから一度だけ導出する。attempt前、marker後、spawn直前に保持中fdのpre/post `fstat`とpathの`lstat`を初期fingerprintへ一致させ、rename replacement、symlink/hardlink、ctimeを含むidentity driftをspawn前に拒否する。marker後の失敗は旧/new planを混在させず、消費したattemptと同じplanのprimary failureまたはrescueへ封印する。
+
 executeはcommand SHAだけでなく、planの全固定値からcommandを再構成して完全一致を要求する。attempt markerをcreate-newで先に発行した後、split/freeze/source/actual/package/worker/guard/capture/build receiptと全参照をpath/SHA/size/mode/nlink/symlink条件で再検証し、別の`--device-index`は受け取らず固定commandを1回だけ起動する。ROCR/HIP/CUDAの可視GPUとguard環境もplanだけから設定する。
 
 runnerはLinux `/proc` からcapture child PID、process group、session、実行ファイル、command hashを取得し、process group内PID、package root配下のopen fd/memory map、`/dev/kfd`/`/dev/dri/renderD*`を開いたGPU processを実行中に反復censusする。成功にはprocess groupでchild 1個だけ、外部観測されたpackage file、child PIDを含むGPU censusが必要である。Rust manifest側では24行の開始・完了、各行前のclean generation state、generation state観測、同期reset、reset後clean state、direct captureでscheduler未使用・pending 0をexact evidenceとして持つ。self-reportだけでは成功にしない。
