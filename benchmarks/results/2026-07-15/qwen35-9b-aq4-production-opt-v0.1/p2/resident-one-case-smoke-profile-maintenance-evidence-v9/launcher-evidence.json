@@ -1,0 +1,130 @@
+{
+  "capture": null,
+  "commands": [
+    {
+      "argv": [
+        "/usr/bin/sudo",
+        "-n",
+        "-v"
+      ],
+      "captured_unix_ns": 1784140230540797459,
+      "exit_code": 0,
+      "label": "sudo-prevalidate",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    }
+  ],
+  "execution_mode": "profile_diagnostic",
+  "failure": {
+    "launcher_started": false,
+    "reason": "restored worker does not uniquely own target GPU",
+    "stage": "pre-stop-snapshot"
+  },
+  "launcher": null,
+  "lock_substrate": null,
+  "lock_substrate_cleanup": null,
+  "mode": "execute",
+  "package_integrity": {
+    "error": null,
+    "full_content": {
+      "bytes": 7700872459,
+      "duration_ns": 17113109412,
+      "file_count": 1045,
+      "passed": true,
+      "sha256": "a24774432d3f0b7f175dc761ef9a53df1fed901dd02f825e8542b17181f004b1",
+      "stage": "pre-stop-full-content-hash"
+    },
+    "full_hash_count": 1,
+    "integrity_identity": {
+      "expected_sha256": "c0382f0cabec53f07e45c7be5f1d1618c18fe0c16de98a0901b97e217ca5e267",
+      "observed_sha256": "c0382f0cabec53f07e45c7be5f1d1618c18fe0c16de98a0901b97e217ca5e267",
+      "passed": true,
+      "schema_version": "ullm.aq4_package_integrity_identity.v1"
+    },
+    "stage": "pre-stop",
+    "tree_identity": {
+      "bytes": 7700872459,
+      "difference": null,
+      "directory_count": 4,
+      "entry_count": 1049,
+      "file_count": 1045,
+      "identity_fields": [
+        "relative_path",
+        "device",
+        "inode",
+        "mode",
+        "nlink",
+        "size",
+        "mtime_ns",
+        "ctime_ns"
+      ],
+      "identity_sha256": "e105d6f242fc3792fb0e3b5c3dd7ea98449e1b451af0aec1f73c40571438d9a3",
+      "special_count": 0,
+      "stable_across_full_hash": true,
+      "stage": "pre-stop-tree-metadata",
+      "symlink_count": 0
+    }
+  },
+  "pre_stop": null,
+  "process_counts": {
+    "capture_tool": 0,
+    "container_curl": 0,
+    "container_curl_endpoint": 0,
+    "container_curl_total": 0,
+    "container_curl_version": 0,
+    "docker": 0,
+    "docker_exec": 0,
+    "launcher": 0,
+    "rocprof": 0,
+    "stopped_gate_polls": 0,
+    "stopped_gate_probe_commands": 0,
+    "sudo": 1,
+    "sudo_keepalive": 0,
+    "systemctl_start": 0,
+    "systemctl_stop": 0
+  },
+  "profile_trust": [
+    {
+      "capture_tool_sha256": "0ca08a81dcd1204b64b32a480fdfcb0af5fde033a2147bf3686e4472287b26a7",
+      "execution_boundary_sha256": "9397a5eff88fb000c9f45c245bf638ac37244ad11bcc85f580c92a15b504de0d",
+      "launcher_sha256": "8f1dd30ebd39a9db6cf0bb31d5e15d6474648cfeb5842ca02a8a360f6e414bb8",
+      "passed": true,
+      "profiler_sha256": "13060810d6b80653631b14f0f5e33ea160c2b79a6a3a4c6850142010b48b8ec8",
+      "python_sha256": "1643dacd9feaedc58f3cc581e4d22577dfe25c09b10282936186ccf0f2e61118",
+      "stage": "before-start",
+      "target_manifest_source": "fresh_launcher_generated_after_live_preflight"
+    },
+    {
+      "capture_tool_sha256": "0ca08a81dcd1204b64b32a480fdfcb0af5fde033a2147bf3686e4472287b26a7",
+      "execution_boundary_sha256": "9397a5eff88fb000c9f45c245bf638ac37244ad11bcc85f580c92a15b504de0d",
+      "launcher_sha256": "8f1dd30ebd39a9db6cf0bb31d5e15d6474648cfeb5842ca02a8a360f6e414bb8",
+      "passed": true,
+      "profiler_sha256": "13060810d6b80653631b14f0f5e33ea160c2b79a6a3a4c6850142010b48b8ec8",
+      "python_sha256": "1643dacd9feaedc58f3cc581e4d22577dfe25c09b10282936186ccf0f2e61118",
+      "stage": "finalize-before",
+      "target_manifest_source": "fresh_launcher_generated_after_live_preflight"
+    }
+  ],
+  "promotion_eligible": false,
+  "restore": {
+    "attempted": false,
+    "error": null,
+    "passed": true,
+    "post_start": null
+  },
+  "run_id": "p2-r9700-resident-one-case-smoke-profile-diagnostic-v9",
+  "safety": {
+    "gpu_command_executed": false,
+    "model_load_executed": false,
+    "service_stopped": false,
+    "service_touched": false
+  },
+  "schema_version": "ullm.aq4_p2_resident_maintenance.v1",
+  "secret_material_recorded": false,
+  "sequence": [
+    "sudo-prevalidate"
+  ],
+  "status": "failed",
+  "stopped_gate_poll": null,
+  "stopped_gates": null
+}

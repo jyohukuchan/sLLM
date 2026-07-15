@@ -1,0 +1,302 @@
+{
+  "actual_executed": true,
+  "all_returncodes_and_streams": {
+    "operator": {
+      "returncode": 1,
+      "stderr": {
+        "bytes": 0,
+        "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-operator-result-v11/operator.stderr.bin",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "stdout": {
+        "bytes": 254,
+        "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-operator-result-v11/operator.stdout.bin",
+        "sha256": "003e231a108f42540b504eb5795a4890a619032fe2a9c60edefb1bc4eb719868"
+      }
+    },
+    "rocprof": {
+      "returncode": null,
+      "stderr": null,
+      "stdout": null
+    },
+    "runner": {
+      "returncode": null,
+      "stderr": null,
+      "stdout": null
+    },
+    "validator": {
+      "returncode": null,
+      "stderr": null,
+      "stdout": null
+    }
+  },
+  "audit_sha256": "91710bcb87686aae5712ad47ccf6ce3606dbd1e2ea02a7186be9d8f8668f76a6",
+  "authority_commit": "637ca8ed26e8cbb1200656ba4fb6ef1676b8282f",
+  "cleanup": {
+    "capture_children_remaining": [],
+    "capture_process_group_cleanup_complete": true,
+    "driver_cleanup_passed": null,
+    "launcher_children_remaining": [],
+    "launcher_cleanup_passed": true,
+    "residual_targeted_processes": [],
+    "retry_forbidden_and_not_performed": true,
+    "trusted_lock_substrate_cleanup_passed": true,
+    "trusted_lock_substrate_cleanup_required": false,
+    "trusted_lock_substrate_holder_pids": []
+  },
+  "evidence": {
+    "capture": null,
+    "execute": null,
+    "maintenance": {
+      "members": {
+        "launcher-evidence.json": {
+          "mode": "0444",
+          "nlink": 1,
+          "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-maintenance-evidence-v9/launcher-evidence.json",
+          "sha256": "616a1a7bb9de0109093387856d81e41fa1944eedeaf83a15ad89a1714cd81b66",
+          "size": 4225
+        }
+      },
+      "mode": "0555",
+      "root": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-maintenance-evidence-v9",
+      "sha256sums_sha256": "d6dc6cf0df090bcd71d31bf36b02688ac609a1a36c2b6f4071b24cccc9ad2573"
+    },
+    "operator_result": {
+      "members": {
+        "operator-result.json": {
+          "mode": "0444",
+          "nlink": 1,
+          "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-operator-result-v11/operator-result.json",
+          "sha256": "9271e2a3e385ac41a1d4ee84b86768863e8deb069628d063b10cdfc4ad610b34",
+          "size": 2362
+        },
+        "operator.stderr.bin": {
+          "mode": "0444",
+          "nlink": 1,
+          "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-operator-result-v11/operator.stderr.bin",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "size": 0
+        },
+        "operator.stdout.bin": {
+          "mode": "0444",
+          "nlink": 1,
+          "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-operator-result-v11/operator.stdout.bin",
+          "sha256": "003e231a108f42540b504eb5795a4890a619032fe2a9c60edefb1bc4eb719868",
+          "size": 254
+        }
+      },
+      "mode": "0555",
+      "root": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-operator-result-v11",
+      "sha256sums_sha256": "907a9c70d3871db8fe079395dd46da75227490c74600a8fea74b3f9c9fba77a1"
+    },
+    "runtime": null
+  },
+  "execution": {
+    "argument_count": 10,
+    "canonical_end_unix_ns": 1784140248388489836,
+    "canonical_start_unix_ns": 1784140230351226129,
+    "elapsed_ns": 18037263707,
+    "invocation_count": 1,
+    "maximum_invocations": 1,
+    "retry_performed": false,
+    "returncode": 1,
+    "same_pty_sudo_cache": true,
+    "shell": false,
+    "working_directory": "/home/homelab1/coding-local/ultimateLLM/uLLM-project"
+  },
+  "failure": {
+    "capture_failure_reason": null,
+    "capture_failure_schema": null,
+    "capture_failure_sha256": null,
+    "launcher_reason": null,
+    "launcher_stage": null,
+    "maintenance_reason": "restored worker does not uniquely own target GPU",
+    "maintenance_stage": "pre-stop-snapshot",
+    "ready_candidate_reason_code": null,
+    "returncode": 1
+  },
+  "finalizer_authority": {
+    "commit": "370ab8cff2fc745d85657260329a80fab21b0acb",
+    "git_blob": "08da9074dc47c6b158f49cf829c463e60a857a81",
+    "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/tools/prepare-aq4-p3-profile-operator.py",
+    "role": "existing_evidence_recovery_only_not_execution_authority",
+    "sha256": "42e8be4c15f0eabdc21984d506d7b5fcd9885b637cbb52b9ba206216ac21ad5e"
+  },
+  "manifest_file_sha256": "4597826e0c876e3b51c756f65c99c2bb43ee395504b7fe9767eb324db1706102",
+  "package_integrity": {
+    "error": null,
+    "full_content": {
+      "bytes": 7700872459,
+      "duration_ns": 17113109412,
+      "file_count": 1045,
+      "passed": true,
+      "sha256": "a24774432d3f0b7f175dc761ef9a53df1fed901dd02f825e8542b17181f004b1",
+      "stage": "pre-stop-full-content-hash"
+    },
+    "full_hash_count": 1,
+    "integrity_identity": {
+      "expected_sha256": "c0382f0cabec53f07e45c7be5f1d1618c18fe0c16de98a0901b97e217ca5e267",
+      "observed_sha256": "c0382f0cabec53f07e45c7be5f1d1618c18fe0c16de98a0901b97e217ca5e267",
+      "passed": true,
+      "schema_version": "ullm.aq4_package_integrity_identity.v1"
+    },
+    "stage": "pre-stop",
+    "tree_identity": {
+      "bytes": 7700872459,
+      "difference": null,
+      "directory_count": 4,
+      "entry_count": 1049,
+      "file_count": 1045,
+      "identity_fields": [
+        "relative_path",
+        "device",
+        "inode",
+        "mode",
+        "nlink",
+        "size",
+        "mtime_ns",
+        "ctime_ns"
+      ],
+      "identity_sha256": "e105d6f242fc3792fb0e3b5c3dd7ea98449e1b451af0aec1f73c40571438d9a3",
+      "special_count": 0,
+      "stable_across_full_hash": true,
+      "stage": "pre-stop-tree-metadata",
+      "symlink_count": 0
+    }
+  },
+  "post_health": {
+    "formal_health_sha256": "b032d38fcdb8e17f2452daa47ce07f2335875451df2ac47f73d117a4331b3722",
+    "gpu": {
+      "amd_smi_index": 2,
+      "bdf": "0000:47:00.0",
+      "kfd_id": 51545,
+      "node_id": 2,
+      "uuid": "a8ff7551-0000-1000-80e9-ddefa2d60f55"
+    },
+    "hashes": {
+      "package_manifest_sha256": "a790a033f57d9c5b9ae0d731a463c26b86aec691f771ce88bb543d676f08e5ad",
+      "served_manifest_sha256": "feb3190d0ff59778e4da140b8db2bd1ce2ba440e3a69e844b997011d4d08cb44",
+      "worker_sha256": "177f3106414efc7cc4b08fa2d87bed6e147d4188e0a290f43b7a1ac591fae48d"
+    },
+    "lock": {
+      "busy": true,
+      "identity": [
+        26,
+        804343,
+        33152,
+        1,
+        0
+      ],
+      "path": "/run/ullm/r9700.lock"
+    },
+    "owners": {
+      "amd_smi": [
+        1213021
+      ],
+      "kfd": [
+        1213021
+      ]
+    },
+    "service": {
+      "active_state": "active",
+      "control_group": "/system.slice/ullm-openai.service",
+      "main_pid": 1212941,
+      "nrestarts": 0,
+      "sub_state": "running",
+      "unit": "ullm-openai.service"
+    },
+    "targeted_processes": [],
+    "worker": {
+      "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/target/reasoning-v2/release/ullm-aq4-worker",
+      "pid": 1213021,
+      "sha256": "177f3106414efc7cc4b08fa2d87bed6e147d4188e0a290f43b7a1ac591fae48d"
+    }
+  },
+  "pre_stop_failure_snapshot": {
+    "launcher_started": false,
+    "maintenance_evidence_path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-maintenance-evidence-v9/launcher-evidence.json",
+    "maintenance_evidence_sha256": "616a1a7bb9de0109093387856d81e41fa1944eedeaf83a15ad89a1714cd81b66",
+    "normative_external_owner_pids": null,
+    "owner_identity_evidence": "unavailable_not_recorded_by_pre_stop_probe",
+    "post_hoc_owner_diagnostics_normative": false,
+    "reason": "restored worker does not uniquely own target GPU",
+    "source": "sealed_maintenance_failure",
+    "stage": "pre-stop-snapshot"
+  },
+  "profile_artifacts": {
+    "capture_artifact": null,
+    "capture_failure": null,
+    "measurement_eligible": false,
+    "promotion_eligible": false,
+    "runtime_summary": null,
+    "status": "failure_evidence_only",
+    "trace_csv_bytes": 0,
+    "trace_csv_count": 0
+  },
+  "recovery_snapshot": {
+    "actual_outputs_permitted": true,
+    "formal_health_sha256": "b032d38fcdb8e17f2452daa47ce07f2335875451df2ac47f73d117a4331b3722",
+    "gpu": {
+      "amd_smi_index": 2,
+      "bdf": "0000:47:00.0",
+      "kfd_id": 51545,
+      "node_id": 2,
+      "uuid": "a8ff7551-0000-1000-80e9-ddefa2d60f55"
+    },
+    "gpu_workload_executed": false,
+    "hashes": {
+      "package_manifest_sha256": "a790a033f57d9c5b9ae0d731a463c26b86aec691f771ce88bb543d676f08e5ad",
+      "served_manifest_sha256": "feb3190d0ff59778e4da140b8db2bd1ce2ba440e3a69e844b997011d4d08cb44",
+      "worker_sha256": "177f3106414efc7cc4b08fa2d87bed6e147d4188e0a290f43b7a1ac591fae48d"
+    },
+    "lock": {
+      "busy": true,
+      "identity": [
+        26,
+        804343,
+        33152,
+        1,
+        0
+      ],
+      "path": "/run/ullm/r9700.lock"
+    },
+    "owners": {
+      "amd_smi": [
+        1213021
+      ],
+      "kfd": [
+        1213021
+      ]
+    },
+    "phase": "post_actual_evidence_recovery",
+    "previous_authorization_source": "sealed_operator_manifest_no_live_absence_recheck",
+    "read_only": true,
+    "service": {
+      "active_state": "active",
+      "control_group": "/system.slice/ullm-openai.service",
+      "main_pid": 1212941,
+      "nrestarts": 0,
+      "sub_state": "running",
+      "unit": "ullm-openai.service"
+    },
+    "service_touched": false,
+    "source": "fresh_read_only_phase_aware_probe",
+    "targeted_processes": [],
+    "worker": {
+      "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/target/reasoning-v2/release/ullm-aq4-worker",
+      "pid": 1213021,
+      "sha256": "177f3106414efc7cc4b08fa2d87bed6e147d4188e0a290f43b7a1ac591fae48d"
+    }
+  },
+  "restore": {
+    "attempted": false,
+    "error": null,
+    "passed": true,
+    "post_start": null
+  },
+  "restore_classification": "pre_stop_untouched_same_epoch",
+  "retry_performed": false,
+  "schema_version": "ullm.aq4_p3_profile_actual_audit.v11",
+  "secret_material_recorded": false,
+  "status": "failed_immutable_evidence_preserved_restore_passed"
+}
