@@ -1782,6 +1782,7 @@ def _validate_served_model_binding(value: Any, served_sha256: str) -> dict[str, 
         value["mode"] != "logical_path"
         or value["effective_source"] != "path_loader"
         or value["descriptor_transport"] != "none"
+        or value["single_read"] is not True
         or value["logical_path_opened"] is not True
     ):
         raise BatchError("resident legacy served model binding differs")
