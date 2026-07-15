@@ -1,20 +1,16 @@
 from __future__ import annotations
 
 import hashlib
-import importlib.util
 import json
 import stat
-import sys
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SCRIPT = ROOT / "tools/run-aq4-p2-resident-smoke-maintenance.py"
-SPEC = importlib.util.spec_from_file_location("aq4_profile_ready_v12_artifacts", SCRIPT)
-assert SPEC and SPEC.loader
-HARNESS = importlib.util.module_from_spec(SPEC)
-sys.modules[SPEC.name] = HARNESS
-SPEC.loader.exec_module(HARNESS)
+BASE = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2"
+PROFILE_READY_V12_ROOT = BASE / "resident-one-case-smoke-profile-ready-v12"
+PROFILE_READY_V12_PATH = PROFILE_READY_V12_ROOT / "ready-binding.json"
+PROFILE_DRY_RUN_V12 = BASE / "resident-one-case-smoke-profile-ready-dry-run-v12"
 
 
 def verify_sealed(root: Path) -> dict[str, str]:
@@ -36,10 +32,10 @@ def verify_sealed(root: Path) -> dict[str, str]:
 
 
 def test_profile_ready_v12_is_sealed_and_pins_final_authorities() -> None:
-    verify_sealed(HARNESS.PROFILE_READY_ROOT)
-    ready = HARNESS.load_ready_artifact(HARNESS.PROFILE_READY_PATH)
-    trust = json.loads(HARNESS.PROFILE_HARNESS_TRUST_PATH.read_text())
-    qa = json.loads(HARNESS.PROFILE_ATTESTATION_PATH.read_text())
+    verify_sealed(PROFILE_READY_V12_ROOT)
+    ready = json.loads(PROFILE_READY_V12_PATH.read_text())
+    trust = json.loads((PROFILE_READY_V12_ROOT / "harness-trust.json").read_text())
+    qa = json.loads((PROFILE_READY_V12_ROOT / "qa-attestation.json").read_text())
     assert trust["commit"] == "62e8fe91e073575c4776603786f9909f2b8001cd"
     assert trust["git_blob"] == "bffd039b86fdbb5d3cff7402e30f8b12f7ab2e1b"
     assert trust["sha256"] == "3295e56fba8b5139ffca55cc3d742d83a916aa8cb1cf53ded4f7f41fb268892d"
@@ -61,20 +57,20 @@ def test_profile_ready_v12_is_sealed_and_pins_final_authorities() -> None:
         "failed": 0,
         "passed": 639,
     }
-    assert hashlib.sha256((HARNESS.PROFILE_READY_ROOT / "ready-binding.json").read_bytes()).hexdigest() == "4c1fcee0c980e341e5346066a4a59bd7c8ace9eab562e18189b7050ceaf52890"
-    assert hashlib.sha256((HARNESS.PROFILE_READY_ROOT / "SHA256SUMS").read_bytes()).hexdigest() == "c81139e9361b1a8ee740c3d0cb3202f333c5ccd88a4f766a9edd756a54fba575"
+    assert hashlib.sha256((PROFILE_READY_V12_ROOT / "ready-binding.json").read_bytes()).hexdigest() == "4c1fcee0c980e341e5346066a4a59bd7c8ace9eab562e18189b7050ceaf52890"
+    assert hashlib.sha256((PROFILE_READY_V12_ROOT / "SHA256SUMS").read_bytes()).hexdigest() == "c81139e9361b1a8ee740c3d0cb3202f333c5ccd88a4f766a9edd756a54fba575"
     execute_binding = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-execute-binding-v9/SHA256SUMS"
     assert hashlib.sha256(execute_binding.read_bytes()).hexdigest() == "b5764d5bdbcfd2fcd56e602c88081796913429fe6137711e20c249bc524a1532"
 
 
 def test_profile_ready_v12_dry_run_is_process_zero_and_sealed() -> None:
-    verify_sealed(HARNESS.PROFILE_DRY_RUN_EVIDENCE)
-    evidence = json.loads((HARNESS.PROFILE_DRY_RUN_EVIDENCE / "launcher-evidence.json").read_text())
+    verify_sealed(PROFILE_DRY_RUN_V12)
+    evidence = json.loads((PROFILE_DRY_RUN_V12 / "launcher-evidence.json").read_text())
     assert evidence["status"] == "passed" and evidence["mode"] == "dry-run"
     assert evidence["execution_mode"] == "profile_diagnostic" and evidence["actual_eligible"] is True
     assert evidence["process_counts"] and set(evidence["process_counts"].values()) == {0}
     assert evidence["service_touched"] is evidence["gpu_command_executed"] is evidence["model_load_executed"] is False
     assert evidence["profile_diagnostic"]["capture_executed"] is False
-    assert evidence["ready_binding_sha256"] == hashlib.sha256(HARNESS.PROFILE_READY_PATH.read_bytes()).hexdigest()
-    assert hashlib.sha256((HARNESS.PROFILE_DRY_RUN_EVIDENCE / "launcher-evidence.json").read_bytes()).hexdigest() == "20834ed11e58b1d440c015d4bc38f4ab2fc6321dac6b2e86cdb44949d809a70e"
-    assert hashlib.sha256((HARNESS.PROFILE_DRY_RUN_EVIDENCE / "SHA256SUMS").read_bytes()).hexdigest() == "87ebe1c6db8211bb3fa8818a5216d19e63237a27e42f1ee5513418febf75ebf3"
+    assert evidence["ready_binding_sha256"] == hashlib.sha256(PROFILE_READY_V12_PATH.read_bytes()).hexdigest()
+    assert hashlib.sha256((PROFILE_DRY_RUN_V12 / "launcher-evidence.json").read_bytes()).hexdigest() == "20834ed11e58b1d440c015d4bc38f4ab2fc6321dac6b2e86cdb44949d809a70e"
+    assert hashlib.sha256((PROFILE_DRY_RUN_V12 / "SHA256SUMS").read_bytes()).hexdigest() == "87ebe1c6db8211bb3fa8818a5216d19e63237a27e42f1ee5513418febf75ebf3"

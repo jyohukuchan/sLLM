@@ -574,17 +574,24 @@ def test_profile_ready_v7_through_v11_are_sealed_historical_readback() -> None:
     assert dry["service_touched"] is False and dry["gpu_command_executed"] is False
 
 
-def test_profile_actual_failures_through_v9_are_immutable_historical_readback() -> None:
+def test_profile_actual_v11_is_sealed_and_v13_recascade_outputs_are_fresh() -> None:
     base = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1"
-    assert HARNESS.PROFILE_READY_ROOT == base / "p2/resident-one-case-smoke-profile-ready-v12"
-    assert HARNESS.PROFILE_MAINTENANCE_EVIDENCE == base / "p2/resident-one-case-smoke-profile-maintenance-evidence-v9"
-    assert HARNESS.PROFILE_DRY_RUN_EVIDENCE == base / "p2/resident-one-case-smoke-profile-ready-dry-run-v12"
+    assert HARNESS.PROFILE_READY_ROOT == base / "p2/resident-one-case-smoke-profile-ready-v13"
+    assert HARNESS.PROFILE_MAINTENANCE_EVIDENCE == base / "p2/resident-one-case-smoke-profile-maintenance-evidence-v10"
+    assert HARNESS.PROFILE_DRY_RUN_EVIDENCE == base / "p2/resident-one-case-smoke-profile-ready-dry-run-v13"
     assert HARNESS.PROFILE_OUTPUT_DIRECTORY == base / "p3/aq4-p3-diagnostic-rocprof-capture-v9"
     assert HARNESS.PROFILE_ARTIFACT == HARNESS.PROFILE_OUTPUT_DIRECTORY / "capture-artifact.json"
     assert not HARNESS.LAUNCHER.PROFILE_RUN_OUTPUT.exists()
     assert not HARNESS.LAUNCHER.PROFILE_EVIDENCE_OUTPUT.exists()
     assert not HARNESS.PROFILE_MAINTENANCE_EVIDENCE.exists()
     assert not HARNESS.PROFILE_OUTPUT_DIRECTORY.exists()
+    assert not HARNESS.PROFILE_READY_ROOT.exists()
+    assert not HARNESS.PROFILE_DRY_RUN_EVIDENCE.exists()
+    actual_v11_roots = (
+        base / "p2/resident-one-case-smoke-profile-maintenance-evidence-v9",
+        base / "p2/resident-one-case-smoke-profile-operator-result-v11",
+        base / "p2/resident-one-case-smoke-profile-actual-audit-v11",
+    )
     historical_v9_roots = (
         base / "p2/resident-one-case-smoke-profile-maintenance-evidence-v8",
         base / "p2/resident-one-case-smoke-profile-execute-evidence-v8",
@@ -619,7 +626,7 @@ def test_profile_actual_failures_through_v9_are_immutable_historical_readback() 
         base / "p2/resident-one-case-smoke-profile-actual-audit-v6",
     )
     assert not (base / "p2/resident-one-case-smoke-profile-execute-v5").exists()
-    for root in historical_v9_roots + historical_v8_roots + historical_v6_roots + historical_v5_roots:
+    for root in actual_v11_roots + historical_v9_roots + historical_v8_roots + historical_v6_roots + historical_v5_roots:
         completed = subprocess.run(
             ["sha256sum", "-c", "SHA256SUMS"],
             cwd=root,
@@ -628,6 +635,49 @@ def test_profile_actual_failures_through_v9_are_immutable_historical_readback() 
             check=False,
         )
         assert completed.returncode == 0, (root, completed.stdout, completed.stderr)
+    actual_v11_commit = "854e5a348bd3c0f442f2371a0d3619308bce3b95"
+    for root in actual_v11_roots:
+        for path in (root / "SHA256SUMS", *(item for item in root.iterdir() if item.name != "SHA256SUMS")):
+            relative = str(path.relative_to(ROOT))
+            committed = subprocess.run(
+                ["git", "rev-parse", f"{actual_v11_commit}:{relative}"],
+                cwd=ROOT,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+            observed = subprocess.run(
+                ["git", "hash-object", str(path)],
+                cwd=ROOT,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+            assert committed.returncode == observed.returncode == 0
+            assert not committed.stderr and not observed.stderr
+            assert committed.stdout.strip() == observed.stdout.strip()
+    actual_v11_maintenance = json.loads((actual_v11_roots[0] / "launcher-evidence.json").read_text())
+    actual_v11_result = json.loads((actual_v11_roots[1] / "operator-result.json").read_text())
+    actual_v11_audit = json.loads((actual_v11_roots[2] / "actual-audit.json").read_text())
+    assert actual_v11_maintenance["status"] == "failed"
+    assert actual_v11_maintenance["failure"] == {
+        "launcher_started": False,
+        "reason": "restored worker does not uniquely own target GPU",
+        "stage": "pre-stop-snapshot",
+    }
+    assert actual_v11_maintenance["process_counts"]["systemctl_stop"] == 0
+    assert actual_v11_maintenance["process_counts"]["systemctl_start"] == 0
+    assert all(actual_v11_maintenance["process_counts"][name] == 0 for name in ("launcher", "capture_tool", "rocprof"))
+    assert actual_v11_maintenance["safety"]["service_touched"] is False
+    assert actual_v11_result["returncode"] == 1
+    assert actual_v11_result["invocation_count"] == actual_v11_result["maximum_invocations"] == 1
+    assert actual_v11_result["retry_performed"] is False
+    assert actual_v11_audit["status"] == "failed_immutable_evidence_preserved_restore_passed"
+    assert actual_v11_audit["restore_classification"] == "pre_stop_untouched_same_epoch"
+    assert actual_v11_audit["profile_artifacts"]["status"] == "failure_evidence_only"
+    assert all(actual_v11_audit["evidence"][name] is None for name in ("execute", "runtime", "capture"))
     assert json.loads((historical_v9_roots[0] / "launcher-evidence.json").read_text())["status"] == "failed"
     assert json.loads((historical_v9_roots[1] / "launcher-evidence.json").read_text())["status"] == "failed"
     assert json.loads((historical_v9_roots[3] / "capture-failure.json").read_text())["status"] == "failed"
