@@ -187,6 +187,7 @@ READY_DOWNSTREAM_FAILURE_REASONS = {
 }
 MARKER_PREFIX = "ullm.aq4_p2.run.v1"
 MARKER_CLOCK = "rocprofv3_monotonic_ns"
+MARKER_RANGE_DOMAIN = "MARKER_CORE_RANGE_API"
 MAX_ROWS = 500_000
 MARKER_KEYS = {
     "run_id", "session_id", "case_id", "case_sha256", "run_index", "run_kind"
@@ -1839,9 +1840,26 @@ def parse_marker_name(name: str) -> dict[str, str]:
     return values
 
 
+def marker_name_column(
+    fields: list[str], rows: list[dict[str, str]]
+) -> str:
+    legacy_aliases = ("Name", "Marker_Name", "name")
+    legacy_matches = [field for field in legacy_aliases if field in fields]
+    if "Function" in fields:
+        if legacy_matches:
+            raise CaptureError("marker trace name columns are ambiguous")
+        domain_column = one_column(fields, ("Domain",), "marker domain")
+        if any(row[domain_column] != MARKER_RANGE_DOMAIN for row in rows):
+            raise CaptureError("marker trace domain differs")
+        return "Function"
+    if "Domain" in fields:
+        raise CaptureError("marker trace Function column is missing")
+    return one_column(fields, legacy_aliases, "marker name")
+
+
 def markers(snapshot: Any, raw: dict[str, Any], run_id: str) -> list[dict[str, Any]]:
     fields, rows = csv_rows(snapshot, "marker trace")
-    name_column = one_column(fields, ("Name", "Marker_Name", "name"), "marker name")
+    name_column = marker_name_column(fields, rows)
     start_column, end_column = interval_columns(fields)
     expected_session = raw["resident"]["session_id"]
     result: list[dict[str, Any]] = []

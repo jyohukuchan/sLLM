@@ -47,6 +47,26 @@ RUNNER_TESTS = load(
 
 
 def write_marker_trace(path: Path, run_id: str, case_id: str, case_sha: str) -> None:
+    rows = [
+        '"Domain","Function","Process_Id","Thread_Id","Correlation_Id",'
+        '"Start_Timestamp","End_Timestamp"'
+    ]
+    for index in range(12):
+        kind = "warmup" if index < 2 else "measured"
+        name = (
+            f"{CAPTURE.MARKER_PREFIX}/run_id={run_id}/session_id=fixture-session/"
+            f"case_id={case_id}/case_sha256={case_sha}/run_index={index}/run_kind={kind}"
+        )
+        rows.append(
+            f'"{CAPTURE.MARKER_RANGE_DOMAIN}","{name}",123,456,{index},'
+            f"{index * 1000 + 100},{index * 1000 + 900}"
+        )
+    path.write_text("\n".join(rows) + "\n", encoding="utf-8")
+
+
+def write_legacy_marker_trace(
+    path: Path, run_id: str, case_id: str, case_sha: str
+) -> None:
     rows = ["Name,Start_Timestamp,End_Timestamp"]
     for index in range(12):
         kind = "warmup" if index < 2 else "measured"
@@ -1745,6 +1765,141 @@ def test_marker_contract_binds_exact_12_runs_and_rejects_missing(tmp_path: Path)
     marker.write_text("\n".join(marker.read_text().splitlines()[:-1]) + "\n")
     with pytest.raises(CAPTURE.CaptureError, match="exactly 12"):
         CAPTURE.markers(CAPTURE.PRODUCER.capture(marker.resolve(), "short"), raw, "diag-run")
+
+
+def test_marker_contract_keeps_legacy_name_schema_compatibility(
+    tmp_path: Path,
+) -> None:
+    case_sha = "8" * 64
+    marker = tmp_path / "legacy-marker.csv"
+    write_legacy_marker_trace(marker, "diag-run", "diag-case", case_sha)
+    raw = {
+        "case_id": "diag-case",
+        "case_sha256": case_sha,
+        "resident": {"session_id": "fixture-session"},
+    }
+    ranges = CAPTURE.markers(
+        CAPTURE.PRODUCER.capture(marker.resolve(), "legacy marker"),
+        raw,
+        "diag-run",
+    )
+    assert [item["run_index"] for item in ranges] == list(range(12))
+
+
+@pytest.mark.parametrize("domain", ["MARKER_CORE_API", "marker_core_range_api", ""])
+def test_rocprof_marker_function_requires_exact_range_domain(
+    tmp_path: Path, domain: str
+) -> None:
+    case_sha = "8" * 64
+    marker = tmp_path / "wrong-domain.csv"
+    write_marker_trace(marker, "diag-run", "diag-case", case_sha)
+    text = marker.read_text(encoding="utf-8")
+    marker.write_text(
+        text.replace(CAPTURE.MARKER_RANGE_DOMAIN, domain, 1),
+        encoding="utf-8",
+    )
+    raw = {
+        "case_id": "diag-case",
+        "case_sha256": case_sha,
+        "resident": {"session_id": "fixture-session"},
+    }
+    with pytest.raises(CAPTURE.CaptureError, match="marker trace domain differs"):
+        CAPTURE.markers(
+            CAPTURE.PRODUCER.capture(marker.resolve(), "wrong domain"),
+            raw,
+            "diag-run",
+        )
+
+
+def test_rocprof_marker_rejects_mixed_domains_and_missing_function(
+    tmp_path: Path,
+) -> None:
+    case_sha = "8" * 64
+    raw = {
+        "case_id": "diag-case",
+        "case_sha256": case_sha,
+        "resident": {"session_id": "fixture-session"},
+    }
+    mixed = tmp_path / "mixed-domain.csv"
+    write_marker_trace(mixed, "diag-run", "diag-case", case_sha)
+    lines = mixed.read_text(encoding="utf-8").splitlines()
+    lines[-1] = lines[-1].replace(
+        CAPTURE.MARKER_RANGE_DOMAIN, "MARKER_CORE_API", 1
+    )
+    mixed.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    with pytest.raises(CAPTURE.CaptureError, match="marker trace domain differs"):
+        CAPTURE.markers(
+            CAPTURE.PRODUCER.capture(mixed.resolve(), "mixed domains"),
+            raw,
+            "diag-run",
+        )
+
+    missing = tmp_path / "missing-function.csv"
+    write_marker_trace(missing, "diag-run", "diag-case", case_sha)
+    missing.write_text(
+        missing.read_text(encoding="utf-8").replace('"Function"', '"Name"', 1),
+        encoding="utf-8",
+    )
+    with pytest.raises(CAPTURE.CaptureError, match="Function column is missing"):
+        CAPTURE.markers(
+            CAPTURE.PRODUCER.capture(missing.resolve(), "missing Function"),
+            raw,
+            "diag-run",
+        )
+
+
+def test_rocprof_marker_schema_still_fails_closed_on_duplicate_and_clock(
+    tmp_path: Path,
+) -> None:
+    case_sha = "8" * 64
+    raw = {
+        "case_id": "diag-case",
+        "case_sha256": case_sha,
+        "resident": {"session_id": "fixture-session"},
+    }
+    duplicate = tmp_path / "duplicate.csv"
+    write_marker_trace(duplicate, "diag-run", "diag-case", case_sha)
+    duplicate.write_text(
+        duplicate.read_text(encoding="utf-8").replace(
+            '"Domain","Function"', '"Domain","Function","Function"', 1
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(CAPTURE.CaptureError, match="header is missing or duplicated"):
+        CAPTURE.markers(
+            CAPTURE.PRODUCER.capture(duplicate.resolve(), "duplicate header"),
+            raw,
+            "diag-run",
+        )
+
+    clock = tmp_path / "clock.csv"
+    write_marker_trace(clock, "diag-run", "diag-case", case_sha)
+    lines = clock.read_text(encoding="utf-8").splitlines()
+    prefix, _start, _end = lines[1].rsplit(",", 2)
+    lines[1] = f"{prefix},100,100"
+    clock.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    with pytest.raises(
+        CAPTURE.CaptureError, match="marker order/kind/identity/interval differs"
+    ):
+        CAPTURE.markers(
+            CAPTURE.PRODUCER.capture(clock.resolve(), "invalid clock"),
+            raw,
+            "diag-run",
+        )
+
+
+def test_actual_v6_trace_inventory_is_marker_producer_absence() -> None:
+    actual = (
+        ROOT
+        / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1"
+        / "p3/aq4-p3-diagnostic-rocprof-capture-v6"
+    )
+    assert actual.is_dir()
+    assert not [path for path in actual.rglob("*.csv") if "marker" in path.name.lower()]
+    with pytest.raises(
+        CAPTURE.CaptureError, match="expected exactly one marker trace, got 0"
+    ):
+        CAPTURE.discover(actual)
 
 
 def test_assemble_splits_measured_runs_and_emits_diagnostic_producer_bindings(
