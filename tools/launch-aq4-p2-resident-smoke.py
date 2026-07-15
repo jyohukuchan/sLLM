@@ -52,22 +52,46 @@ KFD_PROC_ROOT = Path("/sys/class/kfd/kfd/proc")
 
 INPUT_ROOT_DEVICE = 66306
 INPUT_ROOT_INODE = 10491730
-INPUT_FINGERPRINT_SHA = "985896b1075b227434e1de81f634bea0bf465c41da5278143ff62a20e4704e04"
+INPUT_FINGERPRINT_SHA = "55b30d5d521abf98b0122144f59122b1030a885dbfd67d25bb9d4c6f2955bb14"
 BINDING_ROOT_DEVICE = 66306
-BINDING_ROOT_INODE = 10493962
-BINDING_MANIFEST_SHA = "29ab8991950c0618e11e62e9a3815643fe9cb8f072051080ae221d556bd16975"
-BINDING_PLAN_SHA = "9897d1940af78d6c89a75d824c9a141e961c9571787e3199cabed70888ec7256"
-RUNNER_COMMIT = "ede2b872ab0de5550adbcb1b1dca8b4bbd789efd"
-RUNNER_TREE = "da455a86cccb5661117ae82509749a95c51b08ba"
-RUNNER_GIT_BLOB = "7adc7f9258f491c29a8f2d7842d5ece20488867f"
-RUNNER_SHA = "0b3e55f250894403bf4ef7300a2e67422055dc7f43e82efe0fc75de7ecda0c1b"
-VALIDATOR_COMMIT = "ec25754440e4655750e3bc4ef11c0f1580dbf2f9"
-VALIDATOR_TREE = "ce304dde805a7ece1a1c4697e1e9645e67234867"
-VALIDATOR_GIT_BLOB = "13de5f3d2b96ef1936356e04c12773d674fa4488"
-VALIDATOR_SHA = "c14bff3cd1ca0d18ace1d0e511e28ed01ad96f5b66024b5228343d329b56a154"
+BINDING_ROOT_INODE = 10495383
+BINDING_MANIFEST_SHA = "da0d7fe01a091a5c42b23435c9734c23f84af64460e5713b8aadca78225ab187"
+BINDING_PLAN_SHA = "10cfb1612aa7e4b0945a539bcb886782954accb535d104b6642a3b10b6239d80"
+RUNNER_COMMIT = "81ceebb13518f590b5dbf439cd00b35e508c1c3f"
+RUNNER_TREE = "5e98c3812f9eebdaed3e6085ab2e13521e249521"
+RUNNER_GIT_BLOB = "b7a3af27b17bd9dfae926c320eda04f7c3afae4e"
+RUNNER_SHA = "5d4cf385a83961f8aedc37d36c3e4625d783ec7ddd6b17de4f93648516d42354"
+VALIDATOR_COMMIT = "a44074278d4bbd5e243153ab8c5be272489e23a2"
+VALIDATOR_TREE = "2bb2036e44c4e328c9f61f0400b462db5db11a85"
+VALIDATOR_GIT_BLOB = "392706210060499d1384ceb9bcf58d324e9cca05"
+VALIDATOR_SHA = "f11394f84cdf8b858634bab20a48ba24d19cd51a0f0c95783dfe329f33e1e976"
 PYTHON_SHA = "1643dacd9feaedc58f3cc581e4d22577dfe25c09b10282936186ccf0f2e61118"
-RESIDENT_COMMIT = "eb7bf4513a5bdcc8ea44f111ef42e7fa735a7edf"
-RESIDENT_SHA = "18d8d1a6da74b29a0e1bd38d691827a59a8f47309b994a645c8b989a34900f76"
+RESIDENT_COMMIT = "81ceebb13518f590b5dbf439cd00b35e508c1c3f"
+RESIDENT_TREE = "5e98c3812f9eebdaed3e6085ab2e13521e249521"
+RESIDENT_GIT_BLOB = "7e37119cc8b66dc0e0f7abcf49b896fcdad8315f"
+RESIDENT_SOURCE_SHA = "0acb46d1ab8730267edf40b505224ff157760ec19aa40a07ee1b389860ec54bf"
+RESIDENT_SHA = "458b8603d6823a1c20ea93e7c0d757c8910f3c36c9a2a34ab536853c0c9e7d34"
+RESIDENT_BYTES = 3506904
+RESIDENT_BUILD_ID = "e7313ba6f51feac74f14b5ffd100333265362e1e"
+RESIDENT_BUILD_METADATA = {
+    "command": "CARGO_BUILD_JOBS=1 CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/ullm-served-manifest-lane-d-target cargo build --locked --release -p ullm-engine --bin ullm-aq4-p2-resident-driver",
+    "provenance": "clean Git worktree at the exact source commit with an initially absent independent target directory",
+    "source_commit": RESIDENT_COMMIT,
+    "source_tree": RESIDENT_TREE,
+    "source_git_blob": RESIDENT_GIT_BLOB,
+    "source_sha256": RESIDENT_SOURCE_SHA,
+    "cargo_version": "1.96.0 (30a34c682 2026-05-25)",
+    "rustc_version": "1.96.0 (ac68faa20 2026-05-25)",
+    "rustc_host": "x86_64-unknown-linux-gnu",
+    "llvm_version": "22.1.2",
+    "cargo_build_jobs": 1,
+    "cargo_incremental": False,
+    "locked": True,
+    "profile": "release",
+    "binary_bytes": RESIDENT_BYTES,
+    "binary_build_id_sha1": RESIDENT_BUILD_ID,
+    "expected_binary_sha256": RESIDENT_SHA,
+}
 SERVED_SHA = "feb3190d0ff59778e4da140b8db2bd1ce2ba440e3a69e844b997011d4d08cb44"
 DEVICE_INDEX = 1
 AMD_SMI_INDEX = 2
@@ -87,11 +111,11 @@ PGREP_SHA = "8e1a7f00f33b9447e24835307cef71800677a2fe2975c8a1632b613109816b52"
 SUDO_SHA = "136f2e48b0295b9fc595b8259cf2411ac43f27ddbfe02b956649ddaa2e92b9fa"
 EXECUTE_RUN_ID = "p2-r9700-resident-one-case-smoke-execute-v6"
 PROFILE_RUN_ID = "p2-r9700-resident-one-case-smoke-profile-diagnostic-v1"
-PROFILE_RUN_OUTPUT = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-execute-v3"
-PROFILE_EVIDENCE_OUTPUT = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-execute-evidence-v3"
+PROFILE_RUN_OUTPUT = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-execute-v4"
+PROFILE_EVIDENCE_OUTPUT = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-execute-evidence-v4"
 PROFILE_LIVE_PREFLIGHT_PATH = PROFILE_EVIDENCE_OUTPUT / "live-preflight.json"
 PROFILE_RUNNER_TARGET_MANIFEST_NAME = "runner-target-command-manifest.json"
-PROFILE_CAPTURE_OUTPUT_DIRECTORY = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v3"
+PROFILE_CAPTURE_OUTPUT_DIRECTORY = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v4"
 PROFILE_CAPTURE_ARTIFACT = PROFILE_CAPTURE_OUTPUT_DIRECTORY / "capture-artifact.json"
 PROFILE_CAPTURE_FAILURE = PROFILE_CAPTURE_OUTPUT_DIRECTORY / "capture-failure.json"
 ROCTX_LIBRARY = Path("/opt/rocm/lib/libroctx64.so.4")
@@ -123,34 +147,34 @@ GUARD_NAMES = (
 EXECUTE_ENV = {"HIP_VISIBLE_DEVICES": "1", "ULLM_HIP_VISIBLE_DEVICES": "1", "ULLM_SERVED_MODEL_MANIFEST": str(SERVED_MANIFEST), "ULLM_BUILD_GIT_COMMIT": RESIDENT_COMMIT} | {name: "1" for name in GUARD_NAMES}
 
 INPUT_MEMBER_SHA = {
-    "SHA256SUMS": "d2d617fdbcca9e0b6b39b7e93e17b4ad1ae5cc2ce06693e587d05374a58c9477",
-    "SUPERSEDED-0fd7993.json": "c59552210b555d0bb7b721ea83302afd3cca20e042e0111b42dd8bda59558281",
-    "bundle.json": "85113bdc879cb1005a16a0bba9e38b6fbd08d180672a2ac49d37095d6e8a7d83",
+    "SHA256SUMS": "12e72ded1804ca075fde19f7ceca4d02cde9df2558489288e8ff850caf1a2b2b",
+    "SUPERSEDED-0fd7993.json": "6d8a780482ac800b66e6789aaf6c110342266e610c4968376aa8e91f5803dfc2",
+    "bundle.json": "fe9ad93acb21dc98f2cb8c9a442fe4373ca44022b675da2cb61008bf9ff3811c",
     "case-binding.json": "1c8cf17475c0840900ebcc5cd9334d4ebe76c1bd354aaa5106cb875efa1da8b5",
-    "dry-run.json": "25ce0c42722c450102e5a0bb32dac74b88c5b97c410225be9941b36ca9b5ec63",
-    "fake-ready.json": "097b7dbce565363c1b5020ee73fb910ed378f47e005ee56f0b66fe4b2006fde6",
+    "dry-run.json": "062b4e4fb210245552b1e21d9b8fe472ef79b08be01fbd6400458c31e3e4eea8",
+    "fake-ready.json": "4409002bc6b43db772e6ad921b6158d6014deb74a1fb0d54c37252dc0e1b3972",
     "fixture-index.json": "4bcc02ac22bfd19a55913943e5f28dc690c5917b0743b0b5f679c4a5610d353a",
     "fixture.json": "a61c977a7671e7e3d141b87fc84e20e9957be71706cface1988d03054f2dad50",
-    "identity.json": "d4cf0e3f2c6c1217a30b57c58943a7c2ec14084abbfd7fc9344799627571cb53",
-    "launch-command.json": "d412ee1829a629e793d03c28a473303bca69fe67667d54ff80e679b628157187",
-    "official-case.json": "8fd8722b0b925474f6bcf85f59bfab5ec5acc2578f5c6ff94a79120b7bac4840",
+    "identity.json": "0e47a0090ca74e945414adbc596693ac244a2893d8b31b019f951ee5476df515",
+    "launch-command.json": "714010fc43ec335caf22e8383f771d0aaead09d95a43cc2f8b7a723732439553",
+    "official-case.json": "38eb53e03e9f6f16aec683b546aae6abb3fe7dec6615c511f5afe71d00b51022",
     "package-manifest.json": "a790a033f57d9c5b9ae0d731a463c26b86aec691f771ce88bb543d676f08e5ad",
     "policy.json": "21dff8ecdbc17a1cd86a458fe7f8771eed0cdd18577a5f0fb6c7b96310a2de16",
     "preflight.json": "294ddf1771251c4b1954ea663d73e85821749119da2a4f6c7528fdae510bbc6e",
     "resident-driver": RESIDENT_SHA,
-    "runner-dry-run-evidence.json": "3a969aa0c323b4792203f17ad8f4f5ae773abd1a749f264863cc780a3cebff19",
+    "runner-dry-run-evidence.json": "0050e78174487722a1a21a1b0fc59fac8217f9a4dcfa5c227849144c6c3480cf",
     "served-model.json": SERVED_SHA,
-    "trust-roots.json": "607b089ff857fd85216b5c191dcb2b362d5950228222449e4e72cfd13cfcfe2f",
+    "trust-roots.json": "3185ad06940143a91aa6bb46456c82084421ce21d4f762150db3894651278b81",
     "trusted-runner.py": "e7dae31c64b3844a09fbba7ef36bbae7834e21d5d217bad679dd50bdf314ff02",
 }
 BINDING_MEMBER_SHA = {
     "binding-manifest.json": BINDING_MANIFEST_SHA,
     "runner-plan.json": BINDING_PLAN_SHA,
-    "runner-subprocess-evidence.json": "d04172f396aa1cab60e1cd9f142f6bb1c48c70f8bdc8443af7875722f0c29a67",
+    "runner-subprocess-evidence.json": "0e60bd3b6924be604a269b447e6dbea6ec9f5fbd8c2fd134334cd73991f36895",
     "trusted-runner.py": RUNNER_SHA,
     "trusted-validator.py": VALIDATOR_SHA,
     "validator-report.json": "a6af7c425935971d1ec8be878888922c319222f3b900afad5a1a9421216f84d2",
-    "SHA256SUMS": "703d686d4d110a84fed9f66900654ab52ce1780a8fb27a6ee053e0a0c8b8500e",
+    "SHA256SUMS": "6aa93fbb4cb709906c46ea2e497e052360f01ae9e3ae8d08b4d45323eea412fb",
 }
 SHA_RE = re.compile(r"^[0-9a-f]{64}$")
 MAX_BYTES = 64 * 1024 * 1024
@@ -458,7 +482,17 @@ def validate_binding_manifest(raw: bytes) -> dict[str, Any]:
     if not isinstance(validator, dict) or validator.get("source_commit") != VALIDATOR_COMMIT or validator.get("source_tree") != VALIDATOR_TREE or validator.get("git_blob") != VALIDATOR_GIT_BLOB or validator.get("sha256") != VALIDATOR_SHA or validator.get("execution_path") != str(VALIDATOR):
         raise LauncherError("B validator trust root differs")
     resident = roots.get("resident_driver")
-    if not isinstance(resident, dict) or resident.get("normative_commit") != RESIDENT_COMMIT or resident.get("binary_sha256") != RESIDENT_SHA or resident.get("blob_unchanged") is not True:
+    if resident != {
+        "normative_commit": RESIDENT_COMMIT,
+        "source_tree": RESIDENT_TREE,
+        "git_blob_at_binding_commit": RESIDENT_GIT_BLOB,
+        "source_sha256": RESIDENT_SOURCE_SHA,
+        "blob_unchanged": True,
+        "binary_sha256": RESIDENT_SHA,
+        "binary_bytes": RESIDENT_BYTES,
+        "binary_build_id_sha1": RESIDENT_BUILD_ID,
+        "build": RESIDENT_BUILD_METADATA,
+    }:
         raise LauncherError("B resident trust root differs")
     input_root = manifest.get("input_root")
     if not isinstance(input_root, dict) or input_root.get("sha256") != INPUT_FINGERPRINT_SHA or input_root.get("directory") != {"path": str(INPUT_ROOT), "device": INPUT_ROOT_DEVICE, "inode": INPUT_ROOT_INODE}:

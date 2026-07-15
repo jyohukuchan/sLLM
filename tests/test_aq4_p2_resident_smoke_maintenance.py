@@ -531,12 +531,22 @@ def test_successful_fake_maintenance_stops_launches_and_restores(tmp_path: Path)
     assert evidence["secret_material_recorded"] is False
 
 
-def test_profile_v3_outputs_are_fresh_from_failed_v2_attempt() -> None:
+def test_profile_v4_outputs_are_fresh_and_v3_failure_is_retained() -> None:
     base = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1"
-    assert HARNESS.PROFILE_MAINTENANCE_EVIDENCE == base / "p2/resident-one-case-smoke-profile-maintenance-evidence-v3"
-    assert HARNESS.PROFILE_DRY_RUN_EVIDENCE == base / "p2/resident-one-case-smoke-profile-ready-dry-run-v3"
-    assert HARNESS.PROFILE_OUTPUT_DIRECTORY == base / "p3/aq4-p3-diagnostic-rocprof-capture-v3"
+    assert HARNESS.PROFILE_MAINTENANCE_EVIDENCE == base / "p2/resident-one-case-smoke-profile-maintenance-evidence-v4"
+    assert HARNESS.PROFILE_DRY_RUN_EVIDENCE == base / "p2/resident-one-case-smoke-profile-ready-dry-run-v4"
+    assert HARNESS.PROFILE_OUTPUT_DIRECTORY == base / "p3/aq4-p3-diagnostic-rocprof-capture-v4"
     assert HARNESS.PROFILE_ARTIFACT == HARNESS.PROFILE_OUTPUT_DIRECTORY / "capture-artifact.json"
+    assert not HARNESS.LAUNCHER.PROFILE_RUN_OUTPUT.exists()
+    assert not HARNESS.LAUNCHER.PROFILE_EVIDENCE_OUTPUT.exists()
+    assert not HARNESS.PROFILE_OUTPUT_DIRECTORY.exists()
+    assert (
+        base
+        / "p2/resident-one-case-smoke-profile-execute-v3/resident-batch.failure.json"
+    ).is_file()
+    assert (
+        base / "p3/aq4-p3-diagnostic-rocprof-capture-v3/capture-failure.json"
+    ).is_file()
     value = HARNESS.ready_document({"path": str(SCRIPT), "commit": "1" * 40, "tree": "2" * 40, "git_blob": "3" * 40, "sha256": "4" * 64})
     assert value["trust"]["production"]["expected_package_integrity_identity_sha256"] == HARNESS.PACKAGE_INTEGRITY_IDENTITY_SHA
 

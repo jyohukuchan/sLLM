@@ -60,6 +60,20 @@ def test_binding_manifest_rejects_unknown_duplicate_and_rebound_values() -> None
     with pytest.raises(LAUNCHER.LauncherError, match="runner trust root"):
         LAUNCHER.validate_binding_manifest(LAUNCHER.pretty(rebound))
 
+    for field, replacement in (
+        ("source_tree", "0" * 40),
+        ("source_sha256", "0" * 64),
+        ("binary_build_id_sha1", "0" * 40),
+    ):
+        rebound = json.loads(raw)
+        rebound["trust_roots"]["resident_driver"][field] = replacement
+        with pytest.raises(LAUNCHER.LauncherError, match="resident trust root"):
+            LAUNCHER.validate_binding_manifest(LAUNCHER.pretty(rebound))
+    rebound = json.loads(raw)
+    rebound["trust_roots"]["resident_driver"]["build"]["cargo_build_jobs"] = 2
+    with pytest.raises(LAUNCHER.LauncherError, match="resident trust root"):
+        LAUNCHER.validate_binding_manifest(LAUNCHER.pretty(rebound))
+
 
 def test_rejects_symlinked_ancestor_and_existing_output(tmp_path: Path) -> None:
     real = tmp_path / "real"
