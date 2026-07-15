@@ -158,7 +158,9 @@ assert env["ULLM_REQUIRE_HIP_AQ4_MATVEC_QKV_Z_GATE_BETA_KERNEL"] == "1"
 assert env["ULLM_AQ4_MATVEC_QKV_Z_GATE_BETA_RPB"] == "4"
 assert env["ULLM_AQ4_MATVEC_RPB"] is None
 assert r["input"]["sidecar_sha256"] == input_sha
-assert r["input"]["identity"]["pre_stat"] == r["input"]["identity"]["post_stat"]
+identity = r["input"]["identity"]
+assert identity["pre_stat"] == identity["post_stat"]
+assert identity["consumed_sha256"] == input_sha
 assert r["package"]["manifest_sha256"] == package_sha
 reference = r["qkv_component_reference"]
 assert reference["reference_backend"] == "hip"

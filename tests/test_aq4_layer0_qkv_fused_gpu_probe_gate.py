@@ -147,7 +147,10 @@ class Aq4Layer0QkvFusedGpuProbeGateTest(unittest.TestCase):
                     "ULLM_AQ4_MATVEC_RPB": None,
                 },
             },
-            "input": {"rows": 1, "sidecar_sha256": input_sha, "identity": {"pre_stat": "1", "post_stat": "1"}},
+            "input": {
+                "rows": 1, "sidecar_sha256": input_sha,
+                "identity": {"pre_stat": "1", "post_stat": "1", "consumed_sha256": input_sha},
+            },
             "package": {"manifest_sha256": package_sha},
             "qkv_component_reference": {
                 "reference_backend": "hip", "reference_kind": "diagnostic_standalone_reference",
