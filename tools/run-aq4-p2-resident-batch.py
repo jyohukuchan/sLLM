@@ -1280,7 +1280,7 @@ def validate_one_case_smoke_bundle(args: argparse.Namespace, expanded: dict[str,
         identity,
         cases,
         expected_binary_sha256,
-        allow_pre_binding_fixture=True,
+        allow_pre_binding_fixture=args.dry_run,
     )
     prepared_plan = load(root / "dry-run.json", "one-case smoke prepared dry-run")
     prepared_validation = prepared_plan.get("validation")

@@ -453,6 +453,51 @@ def test_one_case_smoke_dry_run_validates_exact_root_and_subprocesses(tmp_path: 
     assert len(validator["report_sha256"]) == 64
 
 
+def test_historical_fake_ready_compatibility_is_dry_run_only(tmp_path: Path) -> None:
+    output = tmp_path / "historical-fake-ready-non-dry"
+    command = _one_case_command(output)
+    command.remove("--dry-run")
+    command.extend(["--live-preflight", str(tmp_path / "not-reached.json")])
+    completed = subprocess.run(command, text=True, capture_output=True)
+    assert completed.returncode != 0
+    assert "resident driver did not prove one model load" in completed.stderr
+    assert not output.exists()
+
+
+def test_live_ready_requires_top_level_served_model_binding(tmp_path: Path) -> None:
+    resident_identity = _identity("a" * 64)
+    identity = {
+        "resident_driver_identity": resident_identity,
+        "hash_binding": {
+            field: resident_identity[field]
+            for field in (
+                "package_manifest_sha256",
+                "package_content_sha256",
+                "served_model_manifest_sha256",
+                "worker_binary_sha256",
+            )
+        },
+        "build_git_commit": resident_identity["build_git_commit"],
+    }
+    case, _ = _case(tmp_path, 128, 1, "all_m1", 0)
+    event = {
+        "event": "ready",
+        "schema_version": BATCH.DRIVER_SCHEMA,
+        "model_loads": 1,
+        "resident_session_id": "live-ready-session",
+        "driver_identity": resident_identity,
+    }
+    with pytest.raises(BATCH.BatchError, match="did not prove one model load"):
+        BATCH.validate_ready(event, identity, [case], "a" * 64)
+    event["served_model_binding"] = _legacy_served_binding()
+    session_id, ready_identity, served_binding = BATCH.validate_ready(
+        event, identity, [case], "a" * 64
+    )
+    assert session_id == "live-ready-session"
+    assert ready_identity == resident_identity
+    assert served_binding == event["served_model_binding"]
+
+
 def test_one_case_smoke_requires_explicit_bundle_root(tmp_path: Path) -> None:
     command = _one_case_command(tmp_path / "missing-root")
     root_index = command.index("--bundle-root")
