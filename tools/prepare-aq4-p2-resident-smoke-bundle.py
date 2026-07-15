@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import fcntl
 import hashlib
 import json
 import os
@@ -29,9 +30,9 @@ SOURCE_TREE = "ae3191e5bfc2cbd161fd8397d912de9dfa02b497"
 DRIVER_COMMIT = "eb7bf4513a5bdcc8ea44f111ef42e7fa735a7edf"
 DRIVER_TREE = "ae3191e5bfc2cbd161fd8397d912de9dfa02b497"
 DRIVER_SOURCE_SHA = "63821344747158f94e4934bb47da93e265a2a44fe8215979ef826fac0734bd4c"
-RUNNER_COMMIT = "3dc4aa612b6cfd87675d0bd9fe506426f43e64f9"
-RUNNER_TREE = "bd46e713c658878e66fcab6d49ef863e43a06bd8"
-RUNNER_SOURCE_SHA = "e7dae31c64b3844a09fbba7ef36bbae7834e21d5d217bad679dd50bdf314ff02"
+RUNNER_COMMIT = "ede2b872ab0de5550adbcb1b1dca8b4bbd789efd"
+RUNNER_TREE = "da455a86cccb5661117ae82509749a95c51b08ba"
+RUNNER_SOURCE_SHA = "0b3e55f250894403bf4ef7300a2e67422055dc7f43e82efe0fc75de7ecda0c1b"
 EXPANDER_SOURCE_SHA = "575cf80551ca09b681bc7b0e13b46f9259c5d4504f726647277fb0b828dc710e"
 FIXTURE_SOURCE_SHA = "e20285669a87285803bc6f9714b8d1ebae8188551e01a68f645ab39893e6e32c"
 ACTIVE_CASE_DEVICE_FIXTURE_SHA = "d31a5240ac65a09c2f95c12fb3e54be122ba56299ee49cc39ee1d9567a5dcd73"
@@ -51,6 +52,15 @@ MAX_WORKER_RELEASE_ENTRIES = 4096
 MAX_WORKER_RELEASE_DEPTH = 8
 EXPECTED_WORKER_HARDLINK_FIXTURE_SHA = "4a6bfe06d2ebd7bbabc1ad4e4c6df24b14a1c4837466c2a675953cb1d226d340"
 SHA_RE = re.compile(r"^[0-9a-f]{64}$")
+FD_MAP_SCHEMA = "ullm.aq4_p3_inherited_fd_map.v1"
+FD_MAP_ENV = "ULLM_AQ4_PINNED_FD_MAP"
+FD_MAP_MAX_BYTES = 1024 * 1024
+FD_CLOSURE_CONTRACT = {
+    "code_execution_closure": "pinned_fd",
+    "control_input_closure": "pinned_fd",
+    "device_lock_closure": "pinned_fd",
+    "data_integrity": "trusted_pre_post_guarded",
+}
 
 REQUIRED_FILES = {
     "official-case.json": (0o444, "trusted_official_expansion_case"),
@@ -74,10 +84,10 @@ REQUIRED_FILES = {
 POST_RUN_FILES = {"dry-run.json", "runner-dry-run-evidence.json"}
 RUNNER_VALIDATE_OUTPUT = Path("/tmp/ullm-aq4-p2-resident-smoke-validate-only")
 BINDING_RUNNER_OUTPUT = Path("/tmp/ullm-aq4-p2-resident-smoke-binding-v4-runner")
-BINDING_SOURCE_COMMIT = "eb7bf4513a5bdcc8ea44f111ef42e7fa735a7edf"
-BINDING_SOURCE_TREE = "ae3191e5bfc2cbd161fd8397d912de9dfa02b497"
-BINDING_RUNNER_GIT_BLOB = "dbace784cb291837e346dd6ca063fa3a5132cfe7"
-BINDING_RUNNER_SHA = "1a0f0f67eb156ef5cd4e9892aab6850b5716a7228e5ad67c5610052c9ff17f70"
+BINDING_SOURCE_COMMIT = "ede2b872ab0de5550adbcb1b1dca8b4bbd789efd"
+BINDING_SOURCE_TREE = "da455a86cccb5661117ae82509749a95c51b08ba"
+BINDING_RUNNER_GIT_BLOB = "7adc7f9258f491c29a8f2d7842d5ece20488867f"
+BINDING_RUNNER_SHA = "0b3e55f250894403bf4ef7300a2e67422055dc7f43e82efe0fc75de7ecda0c1b"
 BINDING_DRIVER_GIT_BLOB = "ea26726e95aeb73b4285fd36ea3f8b0be74578f4"
 BINDING_FILES = {
     "trusted-runner.py": (0o444, "ed67910_generic_runner_source"),
@@ -128,6 +138,234 @@ def parse_json(raw: bytes, label: str) -> dict[str, Any]:
 
 def fingerprint(value: os.stat_result) -> tuple[int, ...]:
     return (value.st_dev, value.st_ino, value.st_mode, value.st_nlink, value.st_size, value.st_mtime_ns, value.st_ctime_ns)
+
+
+def named_identity(value: os.stat_result) -> dict[str, int]:
+    return {
+        "device": value.st_dev,
+        "inode": value.st_ino,
+        "mode": value.st_mode,
+        "nlink": value.st_nlink,
+        "size": value.st_size,
+        "mtime_ns": value.st_mtime_ns,
+        "ctime_ns": value.st_ctime_ns,
+    }
+
+
+class PinnedFdMap:
+    def __init__(self, descriptor: int, value: dict[str, Any]) -> None:
+        self.descriptor = descriptor
+        self.value = value
+        self.bindings = {item["logical_path"]: item for item in value["bindings"]}
+        self.roles = {item["role"]: item for item in value["bindings"]}
+
+    @classmethod
+    def from_environment(cls) -> "PinnedFdMap | None":
+        raw_descriptor = os.environ.get(FD_MAP_ENV)
+        if raw_descriptor is None:
+            return None
+        if not raw_descriptor.isascii() or not raw_descriptor.isdecimal():
+            raise BundleError("pinned FD map descriptor is invalid")
+        descriptor = int(raw_descriptor)
+        if descriptor < 3:
+            raise BundleError("pinned FD map descriptor is reserved")
+        required_seals = (
+            getattr(fcntl, "F_SEAL_SEAL", 0)
+            | getattr(fcntl, "F_SEAL_SHRINK", 0)
+            | getattr(fcntl, "F_SEAL_GROW", 0)
+            | getattr(fcntl, "F_SEAL_WRITE", 0)
+        )
+        try:
+            if (
+                not required_seals
+                or fcntl.fcntl(descriptor, fcntl.F_GET_SEALS) & required_seals
+                != required_seals
+            ):
+                raise BundleError("pinned FD map seals differ")
+            data = os.pread(descriptor, FD_MAP_MAX_BYTES + 1, 0)
+        except OSError as error:
+            raise BundleError(f"pinned FD map read failed: {error}") from error
+        if len(data) > FD_MAP_MAX_BYTES or not data.endswith(b"\n"):
+            raise BundleError("pinned FD map byte contract differs")
+        value = parse_json(data[:-1], "pinned FD map")
+        if set(value) != {
+            "schema_version", "status", "map_sha256", "logical_argv_sha256",
+            "closure_contract", "bindings",
+        }:
+            raise BundleError("pinned FD map root fields differ")
+        if value.get("schema_version") != FD_MAP_SCHEMA or value.get("status") != "bound":
+            raise BundleError("pinned FD map schema/status differs")
+        declared = value.get("map_sha256")
+        unhashed = dict(value)
+        unhashed["map_sha256"] = None
+        if (
+            not isinstance(declared, str)
+            or SHA_RE.fullmatch(declared) is None
+            or sha_bytes(canonical(unhashed)) != declared
+            or data != canonical(value) + b"\n"
+        ):
+            raise BundleError("pinned FD map self-hash/canonical bytes differ")
+        if (
+            not isinstance(value.get("logical_argv_sha256"), str)
+            or SHA_RE.fullmatch(value["logical_argv_sha256"]) is None
+            or value.get("closure_contract") != FD_CLOSURE_CONTRACT
+        ):
+            raise BundleError("pinned FD map logical argv/closure contract differs")
+        bindings = value.get("bindings")
+        if not isinstance(bindings, list) or not bindings:
+            raise BundleError("pinned FD map bindings are missing")
+        paths: set[str] = set()
+        roles: set[str] = set()
+        descriptors: set[int] = {descriptor}
+        allowed = {
+            "code_execution": {"exec", "dlopen"},
+            "control_input": {"read"},
+            "device_lock": {"flock"},
+            "data_integrity": {"pre_post_guard"},
+        }
+        for item in bindings:
+            if not isinstance(item, dict) or set(item) != {
+                "role", "logical_path", "resolved_path", "descriptor", "kind",
+                "closure", "method", "identity", "sha256",
+            }:
+                raise BundleError("pinned FD map binding fields differ")
+            role = item.get("role")
+            logical_path = item.get("logical_path")
+            resolved_path = item.get("resolved_path")
+            child_descriptor = item.get("descriptor")
+            kind = item.get("kind")
+            closure = item.get("closure")
+            method = item.get("method")
+            identity = item.get("identity")
+            if (
+                not isinstance(role, str)
+                or re.fullmatch(r"[a-z][a-z0-9_]{1,63}", role) is None
+                or role in roles
+                or not isinstance(logical_path, str)
+                or not Path(logical_path).is_absolute()
+                or ".." in Path(logical_path).parts
+                or logical_path in paths
+                or type(child_descriptor) is not int
+                or child_descriptor < 3
+                or child_descriptor in descriptors
+                or kind not in {"regular_file", "directory", "symlinked_file"}
+                or closure not in allowed
+                or method not in allowed[closure]
+                or (kind == "directory") != (method == "pre_post_guard")
+                or (
+                    kind == "symlinked_file"
+                    and (
+                        not isinstance(resolved_path, str)
+                        or not Path(resolved_path).is_absolute()
+                        or ".." in Path(resolved_path).parts
+                    )
+                )
+                or (kind != "symlinked_file" and resolved_path is not None)
+                or not isinstance(identity, dict)
+                or set(identity) != {
+                    "device", "inode", "mode", "nlink", "size", "mtime_ns", "ctime_ns",
+                }
+                or any(type(part) is not int for part in identity.values())
+                or (
+                    method in {"exec", "dlopen", "read"}
+                    and (
+                        not isinstance(item.get("sha256"), str)
+                        or SHA_RE.fullmatch(item["sha256"]) is None
+                    )
+                )
+                or (method in {"flock", "pre_post_guard"} and item.get("sha256") is not None)
+            ):
+                raise BundleError("pinned FD map binding value differs")
+            try:
+                metadata = os.fstat(child_descriptor)
+            except OSError as error:
+                raise BundleError(f"pinned FD binding is unavailable: {role}: {error}") from error
+            if kind == "directory":
+                correct_kind = stat.S_ISDIR(metadata.st_mode)
+            else:
+                correct_kind = stat.S_ISREG(metadata.st_mode)
+            if not correct_kind or not cls._identity_matches(item, metadata):
+                raise BundleError(f"pinned FD binding identity/type differs: {role}")
+            paths.add(logical_path)
+            roles.add(role)
+            descriptors.add(child_descriptor)
+        result = cls(descriptor, value)
+        for item in bindings:
+            if item["method"] in {"exec", "dlopen", "read"}:
+                result.read(item, collect=False)
+        result.verify_data_guards()
+        return result
+
+    @staticmethod
+    def _identity_matches(item: dict[str, Any], metadata: os.stat_result) -> bool:
+        observed = named_identity(metadata)
+        if item["method"] == "flock":
+            keys = {"device", "inode", "mode", "nlink"}
+        elif item["method"] == "pre_post_guard":
+            keys = set(observed)
+        else:
+            keys = {"device", "inode", "mode", "nlink", "size", "mtime_ns"}
+        return all(observed[key] == item["identity"][key] for key in keys)
+
+    def binding(self, path: Path) -> dict[str, Any] | None:
+        return self.bindings.get(str(path))
+
+    def role(self, role: str) -> dict[str, Any]:
+        item = self.roles.get(role)
+        if item is None:
+            raise BundleError(f"required pinned FD role is missing: {role}")
+        return item
+
+    def verify_binding(self, item: dict[str, Any]) -> os.stat_result:
+        try:
+            metadata = os.fstat(item["descriptor"])
+        except OSError as error:
+            raise BundleError(f"pinned FD binding disappeared: {item['role']}: {error}") from error
+        if not self._identity_matches(item, metadata):
+            raise BundleError(f"pinned FD binding identity changed: {item['role']}")
+        return metadata
+
+    def read(
+        self,
+        item: dict[str, Any],
+        *,
+        maximum: int | None = None,
+        collect: bool = True,
+    ) -> tuple[bytes, str, os.stat_result]:
+        if item["method"] not in {"exec", "dlopen", "read"}:
+            raise BundleError(f"pinned FD binding is not readable: {item['role']}")
+        before = self.verify_binding(item)
+        if maximum is not None and before.st_size > maximum:
+            raise BundleError(f"pinned FD binding exceeds bounded size: {item['role']}")
+        digest = hashlib.sha256()
+        chunks: list[bytes] = []
+        offset = 0
+        while offset < before.st_size:
+            chunk = os.pread(item["descriptor"], min(CHUNK, before.st_size - offset), offset)
+            if not chunk:
+                raise BundleError(f"pinned FD binding ended early: {item['role']}")
+            digest.update(chunk)
+            if collect:
+                chunks.append(chunk)
+            offset += len(chunk)
+        after = self.verify_binding(item)
+        observed_sha = digest.hexdigest()
+        if fingerprint(after) != fingerprint(before) or observed_sha != item["sha256"]:
+            raise BundleError(f"pinned FD binding bytes changed: {item['role']}")
+        return b"".join(chunks), observed_sha, before
+
+    def verify_data_guards(self) -> None:
+        for item in self.value["bindings"]:
+            metadata = self.verify_binding(item)
+            if item["method"] != "pre_post_guard":
+                continue
+            path = Path(item["logical_path"])
+            try:
+                logical = os.lstat(path)
+            except OSError as error:
+                raise BundleError(f"guarded data path is unavailable: {path}: {error}") from error
+            if named_identity(logical) != item["identity"] or named_identity(metadata) != item["identity"]:
+                raise BundleError(f"guarded data path identity changed: {path}")
 
 
 def reject_symlink_components(path: Path, label: str) -> None:
@@ -770,55 +1008,147 @@ def finalize(expected: Reconstruction, plan_raw: bytes, evidence_raw: bytes) -> 
     return Reconstruction(payloads, expected.bundle, "".join(lines).encode("ascii"), expected.snapshot)
 
 
-def validate(root: Path, trusted: Reconstruction | None = None) -> dict[str, Any]:
+def _read_bundle_member(
+    root: Path,
+    name: str,
+    label: str,
+    pinned_map: PinnedFdMap | None,
+    *,
+    maximum: int | None = MAX_JSON,
+    collect: bool = True,
+) -> tuple[bytes, str]:
+    path = safe_member(root, name)
+    if pinned_map is None:
+        if collect:
+            raw = read_stable(path, label, maximum, single_link=True)
+            return raw, sha_bytes(raw)
+        return b"", sha_file(path, label)
+    item = pinned_map.binding(path)
+    if item is None:
+        raise BundleError(f"bundle member is absent from pinned FD map: {name}")
+    raw, digest, _metadata = pinned_map.read(item, maximum=maximum, collect=collect)
+    return raw, digest
+
+
+def validate(
+    root: Path,
+    trusted: Reconstruction | None = None,
+    pinned_map: PinnedFdMap | None = None,
+) -> dict[str, Any]:
     root = root.absolute()
-    reject_symlink_components(root, "bundle root")
-    if root.is_symlink() or not root.is_dir():
-        raise BundleError("bundle root must be a non-symlink directory")
-    root_before = fingerprint(root.lstat())
-    names_before = {entry.name for entry in root.iterdir()}
+    root_descriptor: int | None = None
+    root_binding: dict[str, Any] | None = None
+    if pinned_map is None:
+        reject_symlink_components(root, "bundle root")
+        if root.is_symlink() or not root.is_dir():
+            raise BundleError("bundle root must be a non-symlink directory")
+        root_metadata = root.lstat()
+        names_before = {entry.name for entry in root.iterdir()}
+    else:
+        if not root.is_absolute() or ".." in root.parts:
+            raise BundleError("logical bundle root must be absolute without parent traversal")
+        root_binding = pinned_map.role("bundle_root")
+        if (
+            root_binding["logical_path"] != str(root)
+            or root_binding["kind"] != "directory"
+            or root_binding["closure"] != "data_integrity"
+            or root_binding["method"] != "pre_post_guard"
+        ):
+            raise BundleError("pinned bundle root binding differs")
+        root_descriptor = root_binding["descriptor"]
+        root_metadata = pinned_map.verify_binding(root_binding)
+        try:
+            logical_root_metadata = os.lstat(root)
+        except OSError as error:
+            raise BundleError(f"logical bundle root is unavailable: {error}") from error
+        if (
+            named_identity(logical_root_metadata) != root_binding["identity"]
+            or named_identity(root_metadata) != root_binding["identity"]
+            or not stat.S_ISDIR(root_metadata.st_mode)
+        ):
+            raise BundleError("logical and pinned bundle root identity differs")
+        names_before = set(os.listdir(root_descriptor))
+    root_before = fingerprint(root_metadata)
     expected = reconstruct() if trusted is None else trusted
     allowed = set(REQUIRED_FILES) | {"bundle.json", "SHA256SUMS"}
     if names_before != allowed:
         raise BundleError("bundle directory exact coverage differs")
     initial: dict[str, tuple[int, ...]] = {}
     for name in sorted(allowed):
-        path = safe_member(root, name)
-        observed = path.lstat()
+        observed = (
+            safe_member(root, name).lstat()
+            if root_descriptor is None
+            else os.stat(name, dir_fd=root_descriptor, follow_symlinks=False)
+        )
         mode = REQUIRED_FILES.get(name, (0o444, ""))[0]
         if not stat.S_ISREG(observed.st_mode) or observed.st_nlink != 1 or stat.S_IMODE(observed.st_mode) != mode:
             raise BundleError(f"bundle member type/link/mode differs: {name}")
         initial[name] = fingerprint(observed)
     for name, raw in expected.payloads.items():
-        actual = read_stable(root / name, name, single_link=True)
+        actual, _digest = _read_bundle_member(root, name, name, pinned_map)
         if name.endswith(".json"):
             parse_json(actual, name)
         if actual != raw:
             raise BundleError(f"independent semantic reconstruction differs: {name}")
-    if sha_file(root / "resident-driver", "resident driver") != EXPECTED_DRIVER_SHA:
+    _raw, driver_sha = _read_bundle_member(
+        root, "resident-driver", "resident driver", pinned_map, maximum=None, collect=False
+    )
+    if driver_sha != EXPECTED_DRIVER_SHA:
         raise BundleError("detached resident driver expected SHA differs")
-    bundle_raw = read_stable(root / "bundle.json", "bundle", single_link=True)
+    bundle_raw, _digest = _read_bundle_member(root, "bundle.json", "bundle", pinned_map)
     bundle = parse_json(bundle_raw, "bundle")
     if bundle != expected.bundle or bundle_raw != pretty(expected.bundle):
         raise BundleError("independent semantic reconstruction differs: bundle.json")
-    plan_raw = read_stable(root / "dry-run.json", "dry-run.json", single_link=True)
-    evidence_raw = read_stable(root / "runner-dry-run-evidence.json", "runner-dry-run-evidence.json", single_link=True)
+    plan_raw, _digest = _read_bundle_member(root, "dry-run.json", "dry-run.json", pinned_map)
+    evidence_raw, _digest = _read_bundle_member(
+        root, "runner-dry-run-evidence.json", "runner-dry-run-evidence.json", pinned_map
+    )
     expected = finalize(expected, plan_raw, evidence_raw)
     validate_launch_command(parse_json(expected.payloads["launch-command.json"], "launch command"))
-    sums = read_stable(root / "SHA256SUMS", "SHA256SUMS", single_link=True)
+    sums, _digest = _read_bundle_member(root, "SHA256SUMS", "SHA256SUMS", pinned_map)
     if sums != expected.sums:
         raise BundleError("SHA256SUMS independent exact coverage differs")
     for line in sums.decode("ascii").splitlines():
         digest, name = line.split("  ", 1)
-        if SHA_RE.fullmatch(digest) is None or sha_file(safe_member(root, name), name) != digest:
+        safe_member(root, name)
+        _raw, observed_digest = _read_bundle_member(
+            root, name, name, pinned_map, maximum=None, collect=False
+        )
+        if SHA_RE.fullmatch(digest) is None or observed_digest != digest:
             raise BundleError(f"SHA256SUMS differs: {name}")
     if _VALIDATION_HOOK is not None:
         _VALIDATION_HOOK(root)
-    if {entry.name for entry in root.iterdir()} != allowed or fingerprint(root.lstat()) != root_before:
+    if root_descriptor is None:
+        final_names = {entry.name for entry in root.iterdir()}
+        final_root = root.lstat()
+    else:
+        final_names = set(os.listdir(root_descriptor))
+        assert root_binding is not None
+        final_root = pinned_map.verify_binding(root_binding)
+        try:
+            final_logical_root = os.lstat(root)
+        except OSError as error:
+            raise BundleError(f"logical bundle root disappeared: {error}") from error
+        if (
+            named_identity(final_logical_root) != root_binding["identity"]
+            or named_identity(final_root) != root_binding["identity"]
+        ):
+            raise BundleError("late logical bundle root mutation detected")
+    if final_names != allowed or fingerprint(final_root) != root_before:
         raise BundleError("late bundle directory mutation detected")
     for name, before in initial.items():
-        if fingerprint((root / name).lstat()) != before:
+        try:
+            after = (
+                safe_member(root, name).lstat()
+                if root_descriptor is None
+                else os.stat(name, dir_fd=root_descriptor, follow_symlinks=False)
+            )
+        except FileNotFoundError as error:
+            raise BundleError(f"TOCTOU mutation detected: {name}") from error
+        if fingerprint(after) != before:
             raise BundleError(f"TOCTOU mutation detected: {name}")
+    if pinned_map is not None:
+        pinned_map.verify_data_guards()
     expected.snapshot.verify()
     return bundle
 
@@ -1145,7 +1475,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "prepare":
             result = prepare(args.output, args.resident_driver)
         elif args.command == "validate":
-            result = validate(args.bundle)
+            result = validate(args.bundle, pinned_map=PinnedFdMap.from_environment())
         elif args.command == "prepare-binding":
             result = prepare_binding(args.validator_source_commit, args.validator_sha256, args.output)
         else:
