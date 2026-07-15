@@ -44,8 +44,8 @@ def finalizer_fixture(
 ) -> dict:
     paths = {
         "ROOT": tmp_path,
-        "PROFILE_READY_ROOT": tmp_path / "profile-ready-v9",
-        "PROFILE_READY": tmp_path / "profile-ready-v9/ready-binding.json",
+        "PROFILE_READY_ROOT": tmp_path / "profile-ready-v10",
+        "PROFILE_READY": tmp_path / "profile-ready-v10/ready-binding.json",
         "QUIET_ROOT": tmp_path / "quiet-v13",
         "OPERATOR_ROOT": tmp_path / "operator-command-v8",
         "MAINTENANCE_EVIDENCE": tmp_path / "maintenance-v7",
@@ -111,8 +111,8 @@ def finalizer_fixture(
     return paths
 
 
-def test_v8_namespaces_bind_fresh_v9_ready_and_v7_profile_outputs() -> None:
-    assert OPERATOR.PROFILE_READY_ROOT.name == "resident-one-case-smoke-profile-ready-v9"
+def test_v8_namespaces_bind_fresh_v10_ready_and_v7_profile_outputs() -> None:
+    assert OPERATOR.PROFILE_READY_ROOT.name == "resident-one-case-smoke-profile-ready-v10"
     assert OPERATOR.QUIET_ROOT.name == "resident-one-case-smoke-profile-quiet-window-v13"
     assert OPERATOR.OPERATOR_ROOT.name == "resident-one-case-smoke-profile-operator-command-v8"
     assert OPERATOR.MAINTENANCE_EVIDENCE.name == "resident-one-case-smoke-profile-maintenance-evidence-v7"
@@ -226,7 +226,7 @@ def test_prepare_and_validate_operator_self_hash_and_restore_contract(tmp_path: 
     sealed(previous_root, "command-manifest.json", {"schema_version": "historical.v7"})
     monkeypatch.setattr(OPERATOR, "QUIET_ROOT", quiet_root)
     monkeypatch.setattr(OPERATOR, "PREVIOUS_OPERATOR_ROOT", previous_root)
-    monkeypatch.setattr(OPERATOR, "ready_authority", lambda: (ready, {"root": "ready-v9"}))
+    monkeypatch.setattr(OPERATOR, "ready_authority", lambda: (ready, {"root": "ready-v10"}))
     monkeypatch.setattr(OPERATOR, "fresh_paths", lambda _ready: fresh)
 
     value = OPERATOR.prepare_operator(output_root)

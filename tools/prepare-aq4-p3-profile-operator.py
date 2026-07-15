@@ -22,7 +22,7 @@ P2 = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2"
 P3 = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3"
 MAINTENANCE = ROOT / "tools/run-aq4-p2-resident-smoke-maintenance.py"
 SOURCE = Path(__file__).resolve()
-PROFILE_READY_ROOT = P2 / "resident-one-case-smoke-profile-ready-v9"
+PROFILE_READY_ROOT = P2 / "resident-one-case-smoke-profile-ready-v10"
 PROFILE_READY = PROFILE_READY_ROOT / "ready-binding.json"
 QUIET_ROOT = P2 / "resident-one-case-smoke-profile-quiet-window-v13"
 OPERATOR_ROOT = P2 / "resident-one-case-smoke-profile-operator-command-v8"
@@ -44,11 +44,11 @@ DEFAULT_MAXIMUM = 900.0
 DEFAULT_MINIMUM_SPAN = 130.0
 DEFAULT_REQUIRED_SAMPLES = 27
 
-# Filled only after the fresh profile-ready-v9 commit is final.  The collector
+# Filled only after the fresh profile-ready-v10 commit is final.  The collector
 # rejects any other ready artifact rather than silently following a moving path.
-READY_ARTIFACT_COMMIT = "ed10d543bcc0d196b157fad306a6995782692fe9"
-READY_BINDING_SHA256 = "fc05c02cb0d3eabc91ef08d31ea643d582cd615ecc4558031cca2b3af8fc5c5d"
-READY_SHA256SUMS_SHA256 = "c4ce3a86ad02c6252170b8f1b753d60a9dd011322141d92b20f2d7538c0c0570"
+READY_ARTIFACT_COMMIT = "19dce84189765fbca03ddd99da2920feab0cbf6e"
+READY_BINDING_SHA256 = "cc4c9f76c7438c7e25a33db4bfa9c4b1de34ca2273f2b522de1dce52d3a65a61"
+READY_SHA256SUMS_SHA256 = "59cc1c52d864040ba722ceb7a88bd4c0cf961b1d311912be79bffa55cccb4690"
 
 
 class OperatorError(ValueError):
@@ -134,13 +134,13 @@ def verify_sums(root: Path) -> dict[str, Any]:
 
 def ready_authority() -> tuple[dict[str, Any], dict[str, Any]]:
     if not READY_ARTIFACT_COMMIT or not READY_BINDING_SHA256 or not READY_SHA256SUMS_SHA256:
-        raise OperatorError("profile-ready-v9 authority pins are not finalized")
+        raise OperatorError("profile-ready-v10 authority pins are not finalized")
     inventory = verify_sums(PROFILE_READY_ROOT)
     if sha_file(PROFILE_READY) != READY_BINDING_SHA256 or inventory["sha256sums_sha256"] != READY_SHA256SUMS_SHA256:
-        raise OperatorError("profile-ready-v9 hashes differ")
+        raise OperatorError("profile-ready-v10 hashes differ")
     path = str(PROFILE_READY.relative_to(ROOT))
     if git("rev-parse", f"{READY_ARTIFACT_COMMIT}:{path}") != git("hash-object", str(PROFILE_READY)):
-        raise OperatorError("profile-ready-v9 Git blob differs")
+        raise OperatorError("profile-ready-v10 Git blob differs")
     return load(PROFILE_READY, "profile ready binding"), inventory
 
 
@@ -172,7 +172,7 @@ def root_set() -> list[Path]:
         P2 / "resident-one-case-smoke-ready-v6",
         P2 / "resident-one-case-smoke-ready-dry-run-v6",
         PROFILE_READY_ROOT,
-        P2 / "resident-one-case-smoke-profile-ready-dry-run-v9",
+        P2 / "resident-one-case-smoke-profile-ready-dry-run-v10",
     ]
 
 
