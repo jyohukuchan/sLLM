@@ -195,6 +195,19 @@ def test_profile_roctx_sdk_authority_and_generic_runner_cli_are_exact() -> None:
     assert profile[index:index + 5] == ["--profile-roctx-ranges", "--roctx-library", str(library), "--roctx-library-sha256", LAUNCHER.ROCTX_LIBRARY_SHA]
 
 
+def test_v7_normal_and_profile_namespaces_are_fresh_and_disjoint() -> None:
+    assert LAUNCHER.EXECUTE_BINDING_ROOT.name == "resident-one-case-smoke-execute-binding-v7"
+    assert LAUNCHER.EXECUTE_RUN_ID == "p2-r9700-resident-one-case-smoke-execute-v7"
+    assert LAUNCHER.EXECUTE_RUN_OUTPUT.name == "resident-one-case-smoke-execute-v7"
+    assert LAUNCHER.EXECUTE_EVIDENCE_OUTPUT.name == "resident-one-case-smoke-execute-evidence-v7"
+    assert LAUNCHER.PROFILE_RUN_ID == "p2-r9700-resident-one-case-smoke-profile-diagnostic-v7"
+    assert LAUNCHER.PROFILE_RUN_OUTPUT.name == "resident-one-case-smoke-profile-execute-v7"
+    assert LAUNCHER.PROFILE_EVIDENCE_OUTPUT.name == "resident-one-case-smoke-profile-execute-evidence-v7"
+    assert LAUNCHER.PROFILE_CAPTURE_OUTPUT_DIRECTORY.name == "aq4-p3-diagnostic-rocprof-capture-v7"
+    paths = {LAUNCHER.EXECUTE_RUN_OUTPUT, LAUNCHER.EXECUTE_EVIDENCE_OUTPUT, LAUNCHER.PROFILE_RUN_OUTPUT, LAUNCHER.PROFILE_EVIDENCE_OUTPUT, LAUNCHER.PROFILE_CAPTURE_OUTPUT_DIRECTORY}
+    assert len(paths) == 5 and all(not path.exists() and not path.is_symlink() for path in paths)
+
+
 def test_profile_execute_cli_builds_only_the_exact_ready_profile_binding(monkeypatch: pytest.MonkeyPatch) -> None:
     observed: list[tuple[dict, Path, Path, str, str]] = []
 
@@ -722,11 +735,11 @@ def test_execute_binding_remains_ineligible_until_live_sidecar_and_qa() -> None:
     assert value["blocked_reasons"] == ["live preflight sidecar is absent", "independent execute-launcher QA is pending"]
 
 
-def test_canonical_execute_binding_fails_closed_until_sdk_launcher_is_recascaded() -> None:
-    with pytest.raises(LAUNCHER.LauncherError, match="launcher self differs"):
-        LAUNCHER.load_execute_binding(LAUNCHER.EXECUTE_BINDING_PATH)
-    binding = json.loads(LAUNCHER.EXECUTE_BINDING_PATH.read_text())
-    trust = json.loads(LAUNCHER.EXECUTE_LAUNCHER_TRUST_PATH.read_text())
+def test_canonical_execute_binding_v7_is_absent_until_sdk_launcher_is_recascaded() -> None:
+    assert not LAUNCHER.EXECUTE_BINDING_ROOT.exists() and not LAUNCHER.EXECUTE_BINDING_ROOT.is_symlink()
+    previous = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-execute-binding-v6"
+    binding = json.loads((previous / "execute-binding.json").read_text())
+    trust = json.loads((previous / "launcher-trust.json").read_text())
     assert binding["actual_eligible"] is False
     assert trust["actual_eligible"] is False and trust["status"] == "qa_pending"
     committed = subprocess.run(
