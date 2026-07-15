@@ -296,16 +296,33 @@ struct AtomicFile {
 }
 
 struct RollbackGuard {
-    paths: Vec<PathBuf>,
+    published: Vec<PublishedPath>,
     committed: bool,
 }
 
+struct PublishedPath {
+    path: PathBuf,
+    identity: FileStat,
+}
+
 impl RollbackGuard {
-    fn new(paths: Vec<PathBuf>) -> Self {
+    fn new() -> Self {
         Self {
-            paths,
+            published: Vec::new(),
             committed: false,
         }
+    }
+
+    fn register_published(&mut self, path: PathBuf) -> ProbeResult<()> {
+        let identity = file_stat(&path, "published output")?;
+        if identity.nlink != 1 {
+            return Err(format!(
+                "published output must have nlink=1: {}",
+                path.display()
+            ));
+        }
+        self.published.push(PublishedPath { path, identity });
+        Ok(())
     }
 
     fn commit(&mut self) {
@@ -318,14 +335,14 @@ impl Drop for RollbackGuard {
         if self.committed {
             return;
         }
-        for path in &self.paths {
-            let Ok(metadata) = fs::symlink_metadata(path) else {
+        for published in &self.published {
+            let Ok(current) = file_stat(&published.path, "rollback output") else {
                 continue;
             };
-            if metadata.file_type().is_symlink() || !metadata.is_file() {
+            if current != published.identity {
                 continue;
             }
-            let _ = fs::remove_file(path);
+            let _ = fs::remove_file(&published.path);
         }
     }
 }
@@ -744,13 +761,7 @@ fn run() -> ProbeResult<()> {
         return Err("refusing to overwrite an existing output sidecar".to_string());
     }
     let report_file = AtomicFile::create(report_path)?;
-    let mut rollback = RollbackGuard::new(vec![
-        output_dir.join("qkv.f32le"),
-        output_dir.join("z.f32le"),
-        output_dir.join("gate.f32le"),
-        output_dir.join("beta.f32le"),
-        output_dir.join("report.json"),
-    ]);
+    let mut rollback = RollbackGuard::new();
     let mut qkv_sink = OutputSink::create(&output_dir, "qkv", EXPECTED_QKV_ROWS)?;
     let mut z_sink = OutputSink::create(&output_dir, "z", EXPECTED_Z_ROWS)?;
     let mut gate_sink = OutputSink::create(&output_dir, "gate", EXPECTED_HEADS)?;
@@ -938,11 +949,21 @@ fn run() -> ProbeResult<()> {
         .map_err(|err| format!("failed to write report: {err}"))?;
     // Sidecars publish before the report commit marker. RollbackGuard removes
     // every already-published sidecar if any later publication fails.
+    let qkv_path = qkv_sink.path.clone();
     qkv_sink.publish()?;
+    rollback.register_published(qkv_path)?;
+    let z_path = z_sink.path.clone();
     z_sink.publish()?;
+    rollback.register_published(z_path)?;
+    let gate_path = gate_sink.path.clone();
     gate_sink.publish()?;
+    rollback.register_published(gate_path)?;
+    let beta_path = beta_sink.path.clone();
     beta_sink.publish()?;
+    rollback.register_published(beta_path)?;
+    let report_path = report_file.final_path.clone();
     report_file.publish()?;
+    rollback.register_published(report_path)?;
     rollback.commit();
     Ok(())
 }
@@ -1167,12 +1188,7 @@ fn validate_hip_environment_values(
                 .to_string(),
         );
     }
-    if fused_rpb != Some("4") && generic_fused_rpb != Some("4") {
-        return Err(
-            "fused RPB must be exactly 4 in ULLM_AQ4_MATVEC_QKV_Z_GATE_BETA_RPB or ULLM_AQ4_FUSED_RPB"
-                .to_string(),
-        );
-    }
+    resolve_fused_rpb_values(fused_rpb, generic_fused_rpb)?;
     Ok(())
 }
 
@@ -1196,21 +1212,48 @@ fn validate_hip_environment() -> ProbeResult<()> {
 fn resolve_fused_rpb_environment() -> ProbeResult<(Option<String>, Option<u32>, String)> {
     let dedicated = env::var("ULLM_AQ4_MATVEC_QKV_Z_GATE_BETA_RPB").ok();
     let generic = env::var("ULLM_AQ4_FUSED_RPB").ok();
-    if dedicated.as_deref() == Some("4") {
+    let (effective, source) = resolve_fused_rpb_values(dedicated.as_deref(), generic.as_deref())?;
+    if dedicated.as_deref().and_then(parse_rpb_value).is_some() {
         return Ok((
             dedicated,
-            Some(4),
+            Some(effective),
             "environment:ULLM_AQ4_MATVEC_QKV_Z_GATE_BETA_RPB".to_string(),
         ));
     }
-    if generic.as_deref() == Some("4") {
+    Ok((generic, Some(effective), source))
+}
+
+fn parse_rpb_value(raw: &str) -> Option<u32> {
+    let value = raw.parse::<u32>().ok()?;
+    if (1..=32).contains(&value) && 256 % value == 0 {
+        Some(value)
+    } else {
+        None
+    }
+}
+
+fn resolve_fused_rpb_values(
+    dedicated: Option<&str>,
+    generic: Option<&str>,
+) -> ProbeResult<(u32, String)> {
+    if let Some(value) = dedicated.and_then(parse_rpb_value) {
+        if value != 4 {
+            return Err(format!(
+                "dedicated fused RPB must be exactly 4, got {value}"
+            ));
+        }
         return Ok((
-            generic,
-            Some(4),
-            "environment:ULLM_AQ4_FUSED_RPB".to_string(),
+            value,
+            "environment:ULLM_AQ4_MATVEC_QKV_Z_GATE_BETA_RPB".to_string(),
         ));
     }
-    Err("fused RPB must resolve to exactly 4 for HIP".to_string())
+    if let Some(value) = generic.and_then(parse_rpb_value) {
+        if value != 4 {
+            return Err(format!("generic fused RPB must resolve to 4, got {value}"));
+        }
+        return Ok((value, "environment:ULLM_AQ4_FUSED_RPB".to_string()));
+    }
+    Err("fused RPB must resolve to exactly 4 from a valid environment value".to_string())
 }
 
 fn load_package_identity(package_path: &Path) -> ProbeResult<PackageIdentity> {
@@ -1911,6 +1954,34 @@ mod tests {
             None,
         )
         .is_err());
+        assert!(validate_hip_environment_values(
+            Some("1"),
+            Some("1"),
+            Some("1"),
+            Some("1"),
+            Some("2"),
+            Some("4"),
+        )
+        .is_err());
+        assert!(validate_hip_environment_values(
+            Some("1"),
+            Some("1"),
+            Some("1"),
+            Some("1"),
+            Some("4"),
+            Some("2"),
+        )
+        .is_ok());
+        assert!(validate_hip_environment_values(
+            Some("1"),
+            Some("1"),
+            Some("1"),
+            Some("1"),
+            Some("invalid"),
+            Some("4"),
+        )
+        .is_ok());
+        assert!(resolve_fused_rpb_values(None, None).is_err());
     }
 
     #[test]
@@ -1949,10 +2020,29 @@ mod tests {
         fs::write(&qkv, b"qkv").unwrap();
         fs::write(&report, b"report").unwrap();
         {
-            let _guard = RollbackGuard::new(vec![qkv.clone(), report.clone()]);
+            let mut guard = RollbackGuard::new();
+            guard.register_published(qkv.clone()).unwrap();
+            guard.register_published(report.clone()).unwrap();
         }
         assert!(!qkv.exists());
         assert!(!report.exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn rollback_guard_preserves_foreign_replacement() {
+        let root = temp_path("rollback-race");
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("qkv.f32le");
+        fs::write(&path, b"probe").unwrap();
+        {
+            let mut guard = RollbackGuard::new();
+            guard.register_published(path.clone()).unwrap();
+            fs::remove_file(&path).unwrap();
+            fs::write(&path, b"foreign").unwrap();
+        }
+        assert_eq!(fs::read(&path).unwrap(), b"foreign");
         fs::remove_dir_all(root).unwrap();
     }
 

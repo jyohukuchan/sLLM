@@ -32,6 +32,8 @@
 
 ## 次の行動
 
-follow-upではdevice 0 CPUとdevice 1 HIP/gfx1201の境界、HIP visibility/guard、fused RPB=4、manifestの6 exact name count、Q/K/V row segment、4 output layout、output directory symlink拒否、publish rollbackを追加した。GPU/service/holdout実行は行っていない。
+follow-upではdevice 0 CPUとdevice 1 HIP/gfx1201の境界、HIP visibility/guard、runtimeと同じfused RPB precedence（dedicated valid値を優先、invalid/unset時だけgenericへfallback、effective 4を要求）、manifestの6 exact name count、Q/K/V row segment、4 output layout、output directory symlink拒否、publish rollbackを追加した。GPU/service/holdout実行は行っていない。
+
+follow-up検証は`cargo check --bin ullm-aq4-layer0-qkv-z-gate-beta-runtime-probe`成功、targeted `cargo test` 11/11、guard/RPB precedence・manifest duplicate・output symlink・foreign replacement race negativeを含む。CPU device 0のfused QKV bit-exactと4 sidecar SHAは不変だった。
 
 このbranchの限定commitを親branchへcherry-pickし、oracle仕様確定後にgate/beta/zの解釈や追加referenceを必要に応じて更新する。
