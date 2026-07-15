@@ -4,19 +4,19 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import copy
 import fcntl
 import hashlib
 import importlib.util
+import io
 import json
 import os
 import pwd
 import re
-import signal
 import stat
 import subprocess
 import sys
-import tempfile
 import time
 import urllib.request
 from dataclasses import dataclass
@@ -32,10 +32,10 @@ if SPEC is None or SPEC.loader is None:
 LAUNCHER = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(LAUNCHER)
 
-LAUNCHER_COMMIT = "bc382fc04293b8a6a3751ca2ab09b366a5179876"
-LAUNCHER_TREE = "1b85029e15e68568fd0baec28bce98bc2dc9438f"
-LAUNCHER_GIT_BLOB = "7623e6fc31f38596cc897e2cfb6826ce5e32b828"
-LAUNCHER_SHA = "382dca37f2fb5fb398a0c71128a96d58ad7f0d56543c0c418ae09532092ba3b4"
+LAUNCHER_COMMIT = "8593c38d7ba5739a49b4aedc16a9b6d1e8da2553"
+LAUNCHER_TREE = "7992fa953638d5c6fadb6106813f560d3fce1cbd"
+LAUNCHER_GIT_BLOB = "90347ec49b00c0bd89ea9aab08fd68f44850e343"
+LAUNCHER_SHA = "b6ee5e255f768df58e421ed704b59ea4f9fba9d6ade4c821479f7c48102cd528"
 RUNNER_COMMIT = "eb7bf4513a5bdcc8ea44f111ef42e7fa735a7edf"
 RUNNER_SHA = "1a0f0f67eb156ef5cd4e9892aab6850b5716a7228e5ad67c5610052c9ff17f70"
 RUNNER_CLI_ANCESTOR = "ee341c019d873f7c250adbb81414d58b5285a454"
@@ -52,14 +52,13 @@ PROFILE_READY_ROOT = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-product
 PROFILE_READY_PATH = PROFILE_READY_ROOT / "ready-binding.json"
 PROFILE_HARNESS_TRUST_PATH = PROFILE_READY_ROOT / "harness-trust.json"
 PROFILE_ATTESTATION_PATH = PROFILE_READY_ROOT / "qa-attestation.json"
-PROFILE_TARGET_COMMAND_MANIFEST = PROFILE_READY_ROOT / "target-command-manifest.json"
 PROFILE_MAINTENANCE_EVIDENCE = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-maintenance-evidence-v1"
 PROFILE_DRY_RUN_EVIDENCE = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-ready-dry-run-v1"
 PROFILE_CAPTURE_TOOL = ROOT / "tools/capture-aq4-p3-diagnostic-profile.py"
-PROFILE_CAPTURE_COMMIT = "b4d515f9908136fa773f957775beab79edc3065d"
-PROFILE_CAPTURE_TREE = "228bbbd0d05b8055640bd47dd3ed95952e504eef"
-PROFILE_CAPTURE_GIT_BLOB = "5197f7a2607da2ec281ab8a013ce1476178bf1b1"
-PROFILE_CAPTURE_SHA = "605a68d308bf4336fc96d23d0ba9f819799ef24b169e3f49ae6a377638ab6cf8"
+PROFILE_CAPTURE_COMMIT = "8593c38d7ba5739a49b4aedc16a9b6d1e8da2553"
+PROFILE_CAPTURE_TREE = "7992fa953638d5c6fadb6106813f560d3fce1cbd"
+PROFILE_CAPTURE_GIT_BLOB = "671ec370eea971d1e4131b7fb1acef0a5e5697c5"
+PROFILE_CAPTURE_SHA = "9445ab1f1ba4a8d3d2c7b9961ddfc27f65b7b4eeaa4792c5cd7fc3e487c02b7d"
 PROFILE_PROFILER = Path("/opt/rocm-7.2.1/bin/rocprofv3")
 PROFILE_PROFILER_SHA = "13060810d6b80653631b14f0f5e33ea160c2b79a6a3a4c6850142010b48b8ec8"
 PROFILE_OUTPUT_DIRECTORY = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v1"
@@ -109,6 +108,9 @@ STOP_POLL_MAX_INTERVAL_SECONDS = 1.0
 STOP_POLL_STABLE_OBSERVATIONS = 2
 STOP_POLL_SUDO_KEEPALIVE_SECONDS = 10.0
 STOP_POLL_PROBE_TIMEOUT_SECONDS = 2.0
+RESTORE_TIMEOUT_SECONDS = 120.0
+RESTORE_POLL_INTERVAL_SECONDS = 1.0
+RESTORE_PROBE_TIMEOUT_SECONDS = 10.0
 RUN_ID = LAUNCHER.EXECUTE_RUN_ID
 SHA_RE = re.compile(r"^[0-9a-f]{64}$")
 LOCK_SUBSTRATE_OWNER = "homelab1"
@@ -135,6 +137,117 @@ def canonical(value: Any) -> bytes:
 
 def pretty(value: Any) -> bytes:
     return json.dumps(value, ensure_ascii=True, sort_keys=True, indent=2, allow_nan=False).encode() + b"\n"
+
+
+@dataclass(frozen=True)
+class PackageTreeEntry:
+    relative_path: str
+    device: int
+    inode: int
+    mode: int
+    nlink: int
+    size: int
+    mtime_ns: int
+    ctime_ns: int
+
+    def evidence(self) -> dict[str, Any]:
+        return {
+            "relative_path": self.relative_path,
+            "device": self.device,
+            "inode": self.inode,
+            "mode": self.mode,
+            "nlink": self.nlink,
+            "size": self.size,
+            "mtime_ns": self.mtime_ns,
+            "ctime_ns": self.ctime_ns,
+        }
+
+
+@dataclass(frozen=True)
+class PackageTreeSnapshot:
+    entries: tuple[PackageTreeEntry, ...]
+    identity_sha256: str
+    entry_count: int
+    file_count: int
+    directory_count: int
+    symlink_count: int
+    bytes: int
+
+    def evidence(self, stage: str) -> dict[str, Any]:
+        return {
+            "stage": stage,
+            "identity_sha256": self.identity_sha256,
+            "entry_count": self.entry_count,
+            "file_count": self.file_count,
+            "directory_count": self.directory_count,
+            "symlink_count": self.symlink_count,
+            "bytes": self.bytes,
+            "identity_fields": [
+                "relative_path",
+                "device",
+                "inode",
+                "mode",
+                "nlink",
+                "size",
+                "mtime_ns",
+                "ctime_ns",
+            ],
+        }
+
+
+def package_tree_snapshot(root: Path) -> PackageTreeSnapshot:
+    """Capture a no-follow identity snapshot for every package tree entry."""
+
+    try:
+        root_metadata = root.lstat()
+    except OSError as error:
+        raise HarnessError("package root metadata is unavailable") from error
+    if not stat.S_ISDIR(root_metadata.st_mode):
+        raise HarnessError("package root is invalid")
+
+    def entry(relative_path: str, metadata: os.stat_result) -> PackageTreeEntry:
+        return PackageTreeEntry(
+            relative_path=relative_path,
+            device=metadata.st_dev,
+            inode=metadata.st_ino,
+            mode=metadata.st_mode,
+            nlink=metadata.st_nlink,
+            size=metadata.st_size,
+            mtime_ns=metadata.st_mtime_ns,
+            ctime_ns=metadata.st_ctime_ns,
+        )
+
+    entries = [entry(".", root_metadata)]
+    pending = [(root, "")]
+    while pending:
+        directory, prefix = pending.pop()
+        try:
+            children = sorted(os.scandir(directory), key=lambda item: item.name)
+        except OSError as error:
+            raise HarnessError("package tree enumeration failed") from error
+        for child in children:
+            relative = f"{prefix}/{child.name}" if prefix else child.name
+            try:
+                metadata = child.stat(follow_symlinks=False)
+            except OSError as error:
+                raise HarnessError("package tree entry metadata is unavailable") from error
+            entries.append(entry(relative, metadata))
+            if stat.S_ISDIR(metadata.st_mode):
+                pending.append((Path(child.path), relative))
+    ordered = tuple(sorted(entries, key=lambda item: item.relative_path))
+    digest = hashlib.sha256()
+    for item in ordered:
+        digest.update(canonical(item.evidence()))
+        digest.update(b"\n")
+    return PackageTreeSnapshot(
+        entries=ordered,
+        identity_sha256=digest.hexdigest(),
+        entry_count=len(ordered),
+        file_count=sum(stat.S_ISREG(item.mode) for item in ordered),
+        directory_count=sum(stat.S_ISDIR(item.mode) for item in ordered),
+        symlink_count=sum(stat.S_ISLNK(item.mode) for item in ordered),
+        bytes=sum(item.size for item in ordered if stat.S_ISREG(item.mode)),
+    )
 
 
 def tree_hash(root: Path) -> str:
@@ -188,9 +301,9 @@ def _sudo_valid(run: Callable[..., subprocess.CompletedProcess[bytes]], label: s
     return record
 
 
-def _service_snapshot(run: Callable[..., subprocess.CompletedProcess[bytes]]) -> tuple[dict[str, Any], dict[str, Any]]:
+def _service_snapshot(run: Callable[..., subprocess.CompletedProcess[bytes]], *, timeout: float = 30.0) -> tuple[dict[str, Any], dict[str, Any]]:
     argv = [str(LAUNCHER.SYSTEMCTL), "show", SERVICE, "--property=ActiveState", "--property=SubState", "--property=MainPID", "--property=NRestarts", "--property=ControlGroup", "--no-pager"]
-    completed, record = _command(run, argv, "service-running")
+    completed, record = _command(run, argv, "service-running", timeout=timeout)
     try:
         values = dict(line.split("=", 1) for line in completed.stdout.decode().splitlines())
         main_pid = int(values["MainPID"]); restarts = int(values["NRestarts"])
@@ -201,9 +314,9 @@ def _service_snapshot(run: Callable[..., subprocess.CompletedProcess[bytes]]) ->
     return {"unit": SERVICE, "active_state": "active", "sub_state": "running", "main_pid": main_pid, "nrestarts": restarts, "control_group": values["ControlGroup"]}, record
 
 
-def _worker_pid(run: Callable[..., subprocess.CompletedProcess[bytes]]) -> tuple[int, dict[str, Any]]:
+def _worker_pid(run: Callable[..., subprocess.CompletedProcess[bytes]], *, timeout: float = 30.0) -> tuple[int, dict[str, Any]]:
     argv = [str(LAUNCHER.PGREP), "-f", "-x", f"{WORKER}.*"]
-    completed, record = _command(run, argv, "worker-running")
+    completed, record = _command(run, argv, "worker-running", timeout=timeout)
     try:
         pids = [int(item) for item in completed.stdout.decode().splitlines() if item]
     except (UnicodeError, ValueError) as error:
@@ -213,8 +326,8 @@ def _worker_pid(run: Callable[..., subprocess.CompletedProcess[bytes]]) -> tuple
     return pids[0], record
 
 
-def _gpu_identity(run: Callable[..., subprocess.CompletedProcess[bytes]]) -> tuple[dict[str, Any], dict[str, Any]]:
-    completed, record = _command(run, [str(LAUNCHER.AMD_SMI), "list", "--json"], "gpu-identity")
+def _gpu_identity(run: Callable[..., subprocess.CompletedProcess[bytes]], *, timeout: float = 30.0) -> tuple[dict[str, Any], dict[str, Any]]:
+    completed, record = _command(run, [str(LAUNCHER.AMD_SMI), "list", "--json"], "gpu-identity", timeout=timeout)
     try:
         values = json.loads(completed.stdout)
     except (UnicodeError, json.JSONDecodeError) as error:
@@ -1538,11 +1651,12 @@ class Dependencies:
     lock_busy: Callable[[], bool]
     owner_probe: Callable[[Callable[..., subprocess.CompletedProcess[bytes]], int], dict[str, Any]]
     package_hash: Callable[[Path], str]
-    launcher_execute: Callable[[dict[str, Any]], tuple[int, dict[str, Any]]]
+    launcher_execute: Callable[..., tuple[int, dict[str, Any]]]
     profile_capture: Callable[[dict[str, Any]], dict[str, Any]]
     profile_trust: Callable[[dict[str, Any], str], dict[str, Any]]
     sleep: Callable[[float], None]
     monotonic_ns: Callable[[], int]
+    package_metadata: Callable[[Path], PackageTreeSnapshot] = package_tree_snapshot
     lock_substrate_prepare: Callable[[Callable[..., subprocess.CompletedProcess[bytes]]], LockSubstrate] | None = None
     lock_substrate_cleanup: Callable[..., dict[str, Any]] | None = None
 
@@ -1579,20 +1693,117 @@ def _host_route_diagnostics(dependencies: Dependencies) -> dict[str, Any]:
     return result
 
 
-def capture_running(dependencies: Dependencies, previous: dict[str, Any] | None = None) -> dict[str, Any]:
-    service, service_record = _service_snapshot(dependencies.run)
-    worker_pid, worker_record = _worker_pid(dependencies.run)
-    gpu, gpu_record = _gpu_identity(dependencies.run)
+def _bounded_run(
+    run: Callable[..., subprocess.CompletedProcess[bytes]],
+    maximum_timeout_seconds: float,
+) -> Callable[..., subprocess.CompletedProcess[bytes]]:
+    if maximum_timeout_seconds <= 0:
+        raise HarnessError("dynamic readiness probe timeout is exhausted")
+
+    def bounded(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[bytes]:
+        requested = kwargs.get("timeout", maximum_timeout_seconds)
+        if not isinstance(requested, (int, float)) or requested <= 0:
+            requested = maximum_timeout_seconds
+        kwargs["timeout"] = min(float(requested), maximum_timeout_seconds)
+        return run(argv, **kwargs)
+
+    return bounded
+
+
+def _package_tree_difference(expected: PackageTreeSnapshot, actual: PackageTreeSnapshot) -> dict[str, Any] | None:
+    if expected.entries == actual.entries:
+        return None
+    expected_by_path = {item.relative_path: item for item in expected.entries}
+    actual_by_path = {item.relative_path: item for item in actual.entries}
+    added = sorted(set(actual_by_path) - set(expected_by_path))
+    removed = sorted(set(expected_by_path) - set(actual_by_path))
+    changed = sorted(path for path in set(expected_by_path) & set(actual_by_path) if expected_by_path[path] != actual_by_path[path])
+    kind = "added" if added else "removed" if removed else "metadata_changed"
+    paths = added or removed or changed
+    result: dict[str, Any] = {"kind": kind, "relative_path": paths[0] if paths else None}
+    if changed:
+        path = changed[0]
+        before = expected_by_path[path]
+        after = actual_by_path[path]
+        result["changed_fields"] = [
+            field
+            for field in ("device", "inode", "mode", "nlink", "size", "mtime_ns", "ctime_ns")
+            if getattr(before, field) != getattr(after, field)
+        ]
+    return result
+
+
+def capture_package_integrity(dependencies: Dependencies, evidence: dict[str, Any]) -> PackageTreeSnapshot:
+    """Run the one expensive content hash and bind it to stable tree metadata."""
+
+    evidence.update(
+        {
+            "stage": "pre-stop",
+            "full_hash_count": 0,
+            "full_content": None,
+            "tree_identity": None,
+            "error": None,
+        }
+    )
+    before = dependencies.package_metadata(PACKAGE_ROOT)
+    started_ns = dependencies.monotonic_ns()
+    evidence["full_hash_count"] = 1
+    try:
+        content_sha256 = dependencies.package_hash(PACKAGE_ROOT)
+    except Exception as error:
+        evidence["full_content"] = {
+            "stage": "pre-stop-full-content-hash",
+            "passed": False,
+            "duration_ns": max(0, dependencies.monotonic_ns() - started_ns),
+        }
+        evidence["error"] = f"{type(error).__name__}: {error}"
+        raise
+    finished_ns = dependencies.monotonic_ns()
+    after = dependencies.package_metadata(PACKAGE_ROOT)
+    difference = _package_tree_difference(before, after)
+    evidence["full_content"] = {
+        "stage": "pre-stop-full-content-hash",
+        "passed": content_sha256 == PACKAGE_CONTENT_SHA and difference is None,
+        "sha256": content_sha256,
+        "duration_ns": max(0, finished_ns - started_ns),
+        "file_count": after.file_count,
+        "bytes": after.bytes,
+    }
+    evidence["tree_identity"] = {
+        **after.evidence("pre-stop-tree-metadata"),
+        "stable_across_full_hash": difference is None,
+        "difference": difference,
+    }
+    if content_sha256 != PACKAGE_CONTENT_SHA:
+        evidence["error"] = "production package full content hash differs"
+        raise HarnessError(evidence["error"])
+    if difference is not None:
+        evidence["error"] = "production package tree metadata changed during full content hash"
+        raise HarnessError(evidence["error"])
+    return after
+
+
+def capture_running(
+    dependencies: Dependencies,
+    previous: dict[str, Any] | None = None,
+    *,
+    probe_timeout_seconds: float = 30.0,
+) -> dict[str, Any]:
+    """Capture only lightweight dynamic production readiness."""
+
+    bounded_run = _bounded_run(dependencies.run, probe_timeout_seconds)
+    service, service_record = _service_snapshot(bounded_run, timeout=probe_timeout_seconds)
+    worker_pid, worker_record = _worker_pid(bounded_run, timeout=probe_timeout_seconds)
+    gpu, gpu_record = _gpu_identity(bounded_run, timeout=probe_timeout_seconds)
     manifest_sha = LAUNCHER.sha_file(LAUNCHER.SERVED_MANIFEST, "active manifest")[0]
     worker_sha = hash_regular_with_nlink(WORKER, "active worker", 1)
     package_manifest_sha = LAUNCHER.sha_file(PACKAGE_MANIFEST, "package manifest")[0]
-    package_content_sha = dependencies.package_hash(PACKAGE_ROOT)
-    if manifest_sha != LAUNCHER.SERVED_SHA or worker_sha != WORKER_SHA or package_manifest_sha != PACKAGE_MANIFEST_SHA or package_content_sha != PACKAGE_CONTENT_SHA:
+    if manifest_sha != LAUNCHER.SERVED_SHA or worker_sha != WORKER_SHA or package_manifest_sha != PACKAGE_MANIFEST_SHA:
         raise HarnessError("production manifest/worker/package hash differs")
     if not dependencies.lock_busy():
         raise HarnessError("production service does not hold device lock")
-    owners = dependencies.owner_probe(dependencies.run, worker_pid)
-    container_health = dependencies.container_health(dependencies.run)
+    owners = dependencies.owner_probe(bounded_run, worker_pid)
+    container_health = dependencies.container_health(bounded_run)
     if (
         not isinstance(container_health, dict)
         or container_health.get("secret_material_recorded") is not False
@@ -1608,19 +1819,47 @@ def capture_running(dependencies: Dependencies, previous: dict[str, Any] | None 
     ):
         raise HarnessError("container namespace health contract differs")
     host_diagnostics = _host_route_diagnostics(dependencies)
-    if previous is not None and (service["main_pid"] == previous["service"]["main_pid"] or worker_pid == previous["worker"]["pid"] or service["nrestarts"] != previous["service"]["nrestarts"] or service["control_group"] != previous["service"]["control_group"]):
-        raise HarnessError("restored service epoch/NRestarts differs")
+    service_epoch = None
+    if previous is not None:
+        service_epoch = {
+            "restart_kind": "explicit_systemctl_stop_start",
+            "main_pid_changed": service["main_pid"] != previous["service"]["main_pid"],
+            "worker_pid_changed": worker_pid != previous["worker"]["pid"],
+            "nrestarts_before": previous["service"]["nrestarts"],
+            "nrestarts_after": service["nrestarts"],
+            "nrestarts_semantics": "explicit_start_does_not_increment_automatic_restart_counter",
+            "nrestarts_unchanged": service["nrestarts"] == previous["service"]["nrestarts"],
+            "control_group_unchanged": service["control_group"] == previous["service"]["control_group"],
+        }
+        if not all(
+            service_epoch[key]
+            for key in ("main_pid_changed", "worker_pid_changed", "nrestarts_unchanged", "control_group_unchanged")
+        ):
+            raise HarnessError("restored explicit service epoch/NRestarts semantics differ")
     return {
         "service": service, "worker": {"path": str(WORKER), "pid": worker_pid, "sha256": worker_sha}, "gpu": gpu,
         "owners": owners, "lock": {"path": str(LAUNCHER.LOCK_PATH), "busy": True},
-        "hashes": {"served_manifest_sha256": manifest_sha, "worker_sha256": worker_sha, "package_manifest_sha256": package_manifest_sha, "package_content_sha256": package_content_sha},
+        "hashes": {"served_manifest_sha256": manifest_sha, "worker_sha256": worker_sha, "package_manifest_sha256": package_manifest_sha},
+        "service_epoch": service_epoch,
         "health": {"formal": container_health, "host_route_diagnostics": host_diagnostics}, "commands": [service_record, worker_record, gpu_record],
     }
 
 
-def _default_launcher_execute(binding: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+def _default_launcher_execute(
+    binding: dict[str, Any],
+    *,
+    profile_runner_executor: Callable[..., dict[str, Any]] | None = None,
+) -> tuple[int, dict[str, Any]]:
     gate_provider = lambda: LAUNCHER.collect_execute_gates(environment=dict(LAUNCHER.EXECUTE_ENV))
-    return LAUNCHER.execute_bound(binding, Path(binding["evidence_output"]), Path(binding["runner_output"]), binding["run_id"], trusted_launcher_sha=LAUNCHER_SHA, gate_provider=gate_provider)
+    return LAUNCHER.execute_bound(
+        binding,
+        Path(binding["evidence_output"]),
+        Path(binding["runner_output"]),
+        binding["run_id"],
+        trusted_launcher_sha=LAUNCHER_SHA,
+        gate_provider=gate_provider,
+        profile_runner_executor=profile_runner_executor,
+    )
 
 
 class ProfileTrustGuard:
@@ -1632,16 +1871,19 @@ class ProfileTrustGuard:
         allowed = {"before-start", "capture-before", "capture-after", "finalize-before"}
         if stage not in allowed:
             raise HarnessError("profile trust stage differs")
-        manifest = profile_target_command_manifest()
-        manifest_ref = {
-            "path": str(PROFILE_TARGET_COMMAND_MANIFEST),
-            "sha256": sha_bytes(pretty(manifest)),
-            "manifest_sha256": manifest["manifest_sha256"],
-        }
-        if contract.get("command") != profile_capture_command() or contract.get("target_launcher", {}).get("command") != profile_launcher_command():
-            raise HarnessError("profile capture/launcher command manifest differs")
-        if contract.get("target_launcher", {}).get("manifest") != manifest_ref:
-            raise HarnessError("profile target command manifest binding differs")
+        if contract.get("execution_boundary") != {
+            "order": ["maintenance", "launcher", "validator", "gates", "capture", "rocprof", "runner"],
+            "runner_profiled": True,
+            "validator_profiled": False,
+            "gates_profiled": False,
+        } or contract.get("target_runner") != {
+            "generated_by": "launcher_after_live_preflight",
+            "file_name": LAUNCHER.PROFILE_RUNNER_TARGET_MANIFEST_NAME,
+            "fresh_per_execution": True,
+            "environment": "exact_execute_environment",
+            "maximum_invocations": 1,
+        }:
+            raise HarnessError("profile capture/runner execution boundary differs")
         if not self.initialized:
             if stage != "before-start":
                 raise HarnessError("profile trust was not initialized before capture")
@@ -1649,11 +1891,6 @@ class ProfileTrustGuard:
             self.snapshot.file(PROFILE_PROFILER, PROFILE_PROFILER_SHA, "profile profiler")
             self.snapshot.file(LAUNCHER.PYTHON, LAUNCHER.PYTHON_SHA, "profile target Python")
             self.snapshot.file(LAUNCHER_PATH, LAUNCHER_SHA, "profile target launcher")
-            self.snapshot.file(
-                PROFILE_TARGET_COMMAND_MANIFEST,
-                manifest_ref["sha256"],
-                "profile target command manifest",
-            )
             self.initialized = True
         self.snapshot.verify()
         return {
@@ -1663,90 +1900,80 @@ class ProfileTrustGuard:
             "profiler_sha256": PROFILE_PROFILER_SHA,
             "python_sha256": LAUNCHER.PYTHON_SHA,
             "launcher_sha256": LAUNCHER_SHA,
-            "target_manifest_sha256": contract["target_launcher"]["manifest"]["sha256"],
-            "capture_command_sha256": contract["command_sha256"],
-            "launcher_command_sha256": contract["target_launcher"]["command_sha256"],
+            "target_manifest_source": "fresh_launcher_generated_after_live_preflight",
+            "execution_boundary_sha256": sha_bytes(canonical(contract["execution_boundary"])),
         }
 
 
-def _descendant_pids(root_pid: int) -> list[int]:
-    parents: dict[int, int] = {}
-    for entry in Path("/proc").iterdir():
-        if not entry.name.isdigit():
-            continue
-        try:
-            fields = (entry / "stat").read_text().split()
-            parents[int(entry.name)] = int(fields[3])
-        except (OSError, ValueError, IndexError):
-            continue
-    descendants: list[int] = []
-    pending = [root_pid]
-    while pending:
-        parent = pending.pop()
-        children = [pid for pid, ppid in parents.items() if ppid == parent]
-        descendants.extend(children); pending.extend(children)
-    return sorted(set(descendants))
-
-
-def _signal_profile_tree(root_pid: int, descendants: list[int], value: signal.Signals) -> None:
-    groups: set[int] = set()
-    for pid in [*descendants, root_pid]:
-        try:
-            groups.add(os.getpgid(pid))
-        except ProcessLookupError:
-            continue
-    own_group = os.getpgrp()
-    for group in groups:
-        if group == own_group:
-            continue
-        try:
-            os.killpg(group, value)
-        except ProcessLookupError:
-            pass
-
-
-def run_profile_capture(contract: dict[str, Any]) -> dict[str, Any]:
-    command = contract.get("command")
-    if command != profile_capture_command():
-        raise HarnessError("profile capture command differs")
-    timed_out = False; descendants: list[int] = []
-    with tempfile.TemporaryFile() as stdout_file, tempfile.TemporaryFile() as stderr_file:
-        process = subprocess.Popen(command, cwd=ROOT, stdin=subprocess.DEVNULL, stdout=stdout_file, stderr=stderr_file, shell=False, start_new_session=True)
-        try:
-            return_code = process.wait(timeout=PROFILE_TIMEOUT_SECONDS + 30)
-        except subprocess.TimeoutExpired:
-            timed_out = True; descendants = _descendant_pids(process.pid)
-            for sig, seconds in ((signal.SIGINT, 1.0), (signal.SIGTERM, 1.0), (signal.SIGKILL, 5.0)):
-                _signal_profile_tree(process.pid, descendants, sig)
-                try:
-                    return_code = process.wait(timeout=seconds)
-                    break
-                except subprocess.TimeoutExpired:
-                    descendants = sorted(set(descendants) | set(_descendant_pids(process.pid)))
-            else:
-                process.kill(); return_code = process.wait()
-        stdout_file.seek(0); stdout = stdout_file.read(LAUNCHER.MAX_BYTES + 1)
-        stderr_file.seek(0); stderr = stderr_file.read(LAUNCHER.MAX_BYTES + 1)
-    if len(stdout) > LAUNCHER.MAX_BYTES or len(stderr) > LAUNCHER.MAX_BYTES:
+def run_profile_capture(request: dict[str, Any]) -> dict[str, Any]:
+    required = {"contract", "runner_argv", "environment", "mark_runner_started", "target_binding"}
+    if not isinstance(request, dict) or set(request) != required:
+        raise HarnessError("profile runner executor request differs")
+    contract = request["contract"]
+    runner_argv = request["runner_argv"]
+    environment = request["environment"]
+    target_binding = request["target_binding"]
+    mark_runner_started = request["mark_runner_started"]
+    if (
+        not isinstance(contract, dict)
+        or not isinstance(runner_argv, list)
+        or environment != LAUNCHER.EXECUTE_ENV
+        or not callable(mark_runner_started)
+        or not isinstance(target_binding, dict)
+    ):
+        raise HarnessError("profile runner executor binding differs")
+    command = profile_capture_command(target_binding, contract)
+    spec = importlib.util.spec_from_file_location("aq4_p3_profile_capture_executor", PROFILE_CAPTURE_TOOL)
+    if spec is None or spec.loader is None:
+        raise HarnessError("profile capture executor import failed")
+    capture_module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = capture_module
+    spec.loader.exec_module(capture_module)
+    stdout_text = io.StringIO()
+    stderr_text = io.StringIO()
+    with contextlib.redirect_stdout(stdout_text), contextlib.redirect_stderr(stderr_text):
+        return_code = capture_module.main(command[2:], on_started=mark_runner_started)
+    capture_stdout = stdout_text.getvalue().encode()
+    capture_stderr = stderr_text.getvalue().encode()
+    if len(capture_stdout) > LAUNCHER.MAX_BYTES or len(capture_stderr) > LAUNCHER.MAX_BYTES:
         raise HarnessError("profile capture output exceeds evidence bound")
-    remaining = [pid for pid in descendants if Path(f"/proc/{pid}").exists()]
-    completed = subprocess.CompletedProcess(command, return_code, stdout, stderr)
-    launcher_evidence = None
-    launcher_path = LAUNCHER.PROFILE_EVIDENCE_OUTPUT / "launcher-evidence.json"
-    if launcher_path.is_file() and not launcher_path.is_symlink():
-        launcher_evidence = LAUNCHER.parse_json(LAUNCHER.read_regular(launcher_path, "profile launcher evidence")[0], "profile launcher evidence")
-    safety = launcher_evidence.get("safety", {}) if isinstance(launcher_evidence, dict) else {}
+
+    def runner_stream(name: str, fallback: bytes) -> bytes:
+        path = Path(contract["output"]["directory"]) / name
+        if not path.exists():
+            return fallback
+        raw, _ = LAUNCHER.read_regular(path, f"profiled runner {name}")
+        if len(raw) > LAUNCHER.MAX_BYTES:
+            raise HarnessError("profiled runner output exceeds evidence bound")
+        return raw
+
+    runner_stdout = runner_stream("rocprof.stdout", capture_stdout)
+    runner_stderr = runner_stream("rocprof.stderr", capture_stderr)
+    completed = subprocess.CompletedProcess(runner_argv, return_code, runner_stdout, runner_stderr)
+    complete = return_code == 0 and not runner_stderr
     return {
         "completed": completed,
-        "started": True,
-        "timed_out": timed_out,
-        "cleanup_passed": not remaining,
-        "children_remaining": remaining,
-        "rocprof_started": PROFILE_OUTPUT_DIRECTORY.exists(),
-        "launcher_started": isinstance(launcher_evidence, dict),
-        "launcher_status": launcher_evidence.get("status") if isinstance(launcher_evidence, dict) else None,
-        "gpu_command_executed": safety.get("gpu_command_executed", "unknown") if timed_out or return_code != 0 else True,
-        "model_load_executed": safety.get("model_load_executed", "unknown") if timed_out or return_code != 0 else True,
+        "keepalives": [],
+        "keepalive_failed": False,
+        "gpu_command_executed": True if complete else "unknown",
+        "model_load_executed": True if complete else "unknown",
+        "profile_capture": {
+            "status": "complete_diagnostic" if complete else "failed",
+            "runner_profiled": True,
+            "validator_profiled": False,
+            "gates_profiled": False,
+            "capture_tool_invocations": 1,
+            "rocprof_invocations": 1,
+            "target_manifest_sha256": target_binding.get("sha256"),
+            "target_manifest_semantic_sha256": target_binding.get("manifest_sha256"),
+            "target_argv_sha256": sha_bytes(canonical(runner_argv)),
+            "environment_sha256": sha_bytes(canonical(environment)),
+            "capture_stdout_sha256": sha_bytes(capture_stdout),
+            "capture_stderr_sha256": sha_bytes(capture_stderr),
+            "timed_out": False,
+            "cleanup_passed": True,
+            "children_remaining": [],
+        },
     }
 
 
@@ -1755,71 +1982,33 @@ def default_dependencies() -> Dependencies:
     container_health = ContainerHealthGuard()
     stopped_observation = StoppedGateObserver()
     return Dependencies(
-        subprocess.run,
-        default_http_probe,
-        container_health,
-        stopped_observation,
-        default_lock_busy,
-        default_owner_probe,
-        tree_hash,
-        _default_launcher_execute,
-        run_profile_capture,
-        trust,
-        time.sleep,
-        time.monotonic_ns,
-        prepare_lock_substrate,
-        cleanup_lock_substrate,
+        run=subprocess.run,
+        http_probe=default_http_probe,
+        container_health=container_health,
+        stopped_observation=stopped_observation,
+        lock_busy=default_lock_busy,
+        owner_probe=default_owner_probe,
+        package_hash=tree_hash,
+        launcher_execute=_default_launcher_execute,
+        profile_capture=run_profile_capture,
+        profile_trust=trust,
+        sleep=time.sleep,
+        monotonic_ns=time.monotonic_ns,
+        package_metadata=package_tree_snapshot,
+        lock_substrate_prepare=prepare_lock_substrate,
+        lock_substrate_cleanup=cleanup_lock_substrate,
     )
 
 
-def profile_launcher_command() -> list[str]:
-    return [
-        str(LAUNCHER.PYTHON),
-        str(LAUNCHER_PATH),
-        "--mode",
-        "profile-execute",
-        "--evidence-output",
-        str(LAUNCHER.PROFILE_EVIDENCE_OUTPUT),
-        "--runner-output",
-        str(LAUNCHER.PROFILE_RUN_OUTPUT),
-        "--run-id",
-        LAUNCHER.PROFILE_RUN_ID,
-        "--trusted-launcher-sha",
-        LAUNCHER_SHA,
-    ]
-
-
-def profile_target_command_manifest() -> dict[str, Any]:
-    command = profile_launcher_command()
-    value: dict[str, Any] = {
-        "schema_version": "ullm.aq4_p3_profile_target_command.v1",
-        "status": "bound",
-        "manifest_sha256": None,
-        "argv": command,
-        "input_files": [
-            {
-                "argument_index": 0,
-                "path": command[0],
-                "sha256": LAUNCHER.PYTHON_SHA,
-                "executable": True,
-            },
-            {
-                "argument_index": 1,
-                "path": command[1],
-                "sha256": LAUNCHER_SHA,
-                "executable": False,
-            },
-        ],
-        "output_paths": [
-            {"argument_index": 5, "path": command[5]},
-            {"argument_index": 7, "path": command[7]},
-        ],
-    }
-    value["manifest_sha256"] = sha_bytes(canonical(value))
-    return value
-
-
-def profile_capture_command() -> list[str]:
+def profile_capture_command(target_binding: dict[str, Any], contract: dict[str, Any] | None = None) -> list[str]:
+    target_path = target_binding.get("path")
+    target_sha256 = target_binding.get("sha256")
+    if not isinstance(target_path, str) or not Path(target_path).is_absolute() or not isinstance(target_sha256, str) or SHA_RE.fullmatch(target_sha256) is None:
+        raise HarnessError("profile runner target binding differs")
+    output = contract.get("output") if isinstance(contract, dict) else None
+    output_directory = Path(output["directory"]) if isinstance(output, dict) and isinstance(output.get("directory"), str) else PROFILE_OUTPUT_DIRECTORY
+    output_name = output["name"] if isinstance(output, dict) and isinstance(output.get("name"), str) else PROFILE_OUTPUT_NAME
+    artifact = Path(output["artifact"]) if isinstance(output, dict) and isinstance(output.get("artifact"), str) else PROFILE_ARTIFACT
     return [
         str(LAUNCHER.PYTHON),
         str(PROFILE_CAPTURE_TOOL),
@@ -1829,13 +2018,13 @@ def profile_capture_command() -> list[str]:
         "--profiler-sha256",
         PROFILE_PROFILER_SHA,
         "--target-command-manifest",
-        str(PROFILE_TARGET_COMMAND_MANIFEST),
+        target_path,
         "--target-command-manifest-sha256",
-        sha_bytes(pretty(profile_target_command_manifest())),
+        target_sha256,
         "--profile-output-directory",
-        str(PROFILE_OUTPUT_DIRECTORY),
+        str(output_directory),
         "--profile-output-name",
-        PROFILE_OUTPUT_NAME,
+        output_name,
         "--identity",
         str(LAUNCHER.INPUT_ROOT / "identity.json"),
         "--resident-summary",
@@ -1843,7 +2032,7 @@ def profile_capture_command() -> list[str]:
         "--resident-raw",
         str(LAUNCHER.PROFILE_RUN_OUTPUT / f"{LAUNCHER.CASE_ID}.raw.json"),
         "--artifact",
-        str(PROFILE_ARTIFACT),
+        str(artifact),
         "--timeout",
         str(float(PROFILE_TIMEOUT_SECONDS)),
     ]
@@ -2006,6 +2195,20 @@ def ready_document(harness_identity: dict[str, str], *, profile_diagnostic: bool
             "formal_health_route": "docker-exec-openwebui-container-network-namespace",
             "host_direct_health_is_diagnostic_only": True,
             "authenticated_models_header_transport": "docker-exec-stdin-header-file",
+            "package_integrity": {
+                "full_content_hash_stage": "pre_stop_once",
+                "full_hash_count": 1,
+                "tree_metadata_identity_fields": ["relative_path", "device", "inode", "mode", "nlink", "size", "mtime_ns", "ctime_ns"],
+                "includes": ["regular_file", "directory", "symlink"],
+                "post_readiness": "full_tree_metadata_reenumeration_exact_identity",
+            },
+            "restore_poll": {
+                "timeout_seconds": RESTORE_TIMEOUT_SECONDS,
+                "poll_interval_seconds": RESTORE_POLL_INTERVAL_SECONDS,
+                "maximum_probe_timeout_seconds": RESTORE_PROBE_TIMEOUT_SECONDS,
+                "deadline_semantics": "fixed_absolute_monotonic_ns_checked_before_and_after_each_probe_and_final_metadata_recheck",
+                "dynamic_probe_only": True,
+            },
             "stopped_gate_poll": {
                 "timeout_seconds": STOP_POLL_TIMEOUT_SECONDS,
                 "initial_interval_seconds": STOP_POLL_INITIAL_INTERVAL_SECONDS,
@@ -2051,10 +2254,6 @@ def ready_document(harness_identity: dict[str, str], *, profile_diagnostic: bool
     if not profile_diagnostic:
         value.pop("measurement_eligible")
     if profile_diagnostic:
-        command = profile_capture_command()
-        launcher_command = profile_launcher_command()
-        launcher_binding = LAUNCHER.ready_profile_execute_binding()
-        target_manifest = profile_target_command_manifest()
         value["profile_diagnostic"] = {
             "schema_version": "ullm.aq4_p3_diagnostic_rocprof_ready.v1",
             "status": "ready_for_one_profile_diagnostic",
@@ -2070,24 +2269,18 @@ def ready_document(harness_identity: dict[str, str], *, profile_diagnostic: bool
                 "sha256": PROFILE_CAPTURE_SHA,
             },
             "profiler": {"path": str(PROFILE_PROFILER), "resolved_path": str(PROFILE_PROFILER), "sha256": PROFILE_PROFILER_SHA},
-            "command": command,
-            "command_sha256": sha_bytes(canonical(command)),
-            "target_launcher": {
-                "schema_version": "ullm.aq4_p2_profile_target_launcher.v1",
-                "path": str(LAUNCHER_PATH),
-                "commit": LAUNCHER_COMMIT,
-                "sha256": LAUNCHER_SHA,
-                "command": launcher_command,
-                "command_sha256": sha_bytes(canonical(launcher_command)),
-                "binding_sha256": sha_bytes(canonical(launcher_binding)),
-                "manifest": {
-                    "path": str(PROFILE_TARGET_COMMAND_MANIFEST),
-                    "sha256": sha_bytes(pretty(target_manifest)),
-                    "manifest_sha256": target_manifest["manifest_sha256"],
-                },
-                "run_id": LAUNCHER.PROFILE_RUN_ID,
-                "evidence_output": str(LAUNCHER.PROFILE_EVIDENCE_OUTPUT),
-                "runner_output": str(LAUNCHER.PROFILE_RUN_OUTPUT),
+            "execution_boundary": {
+                "order": ["maintenance", "launcher", "validator", "gates", "capture", "rocprof", "runner"],
+                "runner_profiled": True,
+                "validator_profiled": False,
+                "gates_profiled": False,
+            },
+            "target_runner": {
+                "generated_by": "launcher_after_live_preflight",
+                "file_name": LAUNCHER.PROFILE_RUNNER_TARGET_MANIFEST_NAME,
+                "fresh_per_execution": True,
+                "environment": "exact_execute_environment",
+                "maximum_invocations": 1,
             },
             "output": {"directory": str(PROFILE_OUTPUT_DIRECTORY), "name": PROFILE_OUTPUT_NAME, "artifact": str(PROFILE_ARTIFACT), "must_not_exist_before_capture": True},
             "resident_evidence": {
@@ -2130,8 +2323,6 @@ def prepare_ready_artifact(*, profile_diagnostic: bool = False) -> dict[str, Any
     trust = {"schema_version": "ullm.aq4_p2_resident_maintenance_harness_trust.v1", "status": "ready_for_one_case", "execution_mode": value["execution_mode"], "actual_eligible": True, **harness_identity, "ready_binding_sha256": sha_bytes(ready_raw)}
     trust_raw = pretty(trust)
     files = [("ready-binding.json", ready_raw), ("qa-attestation.json", attestation_raw), ("harness-trust.json", trust_raw)]
-    if profile_diagnostic:
-        files.append(("target-command-manifest.json", pretty(profile_target_command_manifest())))
     for name, raw in files:
         LAUNCHER.atomic_write(root, name, raw)
     sums = "".join(f"{sha_bytes(raw)}  {name}\n" for name, raw in sorted(files)).encode("ascii")
@@ -2148,19 +2339,11 @@ def load_ready_artifact(path: Path = READY_PATH) -> dict[str, Any]:
     else:
         raise HarnessError("ready artifact path differs")
     expected_names = {"ready-binding.json", "qa-attestation.json", "harness-trust.json", "SHA256SUMS"}
-    if profile_diagnostic:
-        expected_names.add("target-command-manifest.json")
     if {item.name for item in root.iterdir()} != expected_names:
         raise HarnessError("ready artifact path/coverage differs")
     ready_raw, _ = LAUNCHER.read_regular(path, "ready binding"); value = LAUNCHER.parse_json(ready_raw, "ready binding")
     trust_raw, _ = LAUNCHER.read_regular(trust_path, "harness trust"); trust = LAUNCHER.parse_json(trust_raw, "harness trust")
     attestation_raw, _ = LAUNCHER.read_regular(attestation_path, "QA attestation"); attestation = LAUNCHER.parse_json(attestation_raw, "QA attestation")
-    target_raw = None
-    if profile_diagnostic:
-        target_raw, _ = LAUNCHER.read_regular(PROFILE_TARGET_COMMAND_MANIFEST, "profile target command manifest")
-        target = LAUNCHER.parse_json(target_raw, "profile target command manifest")
-        if target != profile_target_command_manifest():
-            raise HarnessError("profile target command manifest differs")
     expected = ready_document({key: trust[key] for key in ("path", "commit", "tree", "git_blob", "sha256")}, profile_diagnostic=profile_diagnostic)
     if value != expected or attestation != QA_ATTESTATION or trust.get("schema_version") != "ullm.aq4_p2_resident_maintenance_harness_trust.v1" or trust.get("status") != "ready_for_one_case" or trust.get("execution_mode") != value["execution_mode"] or trust.get("actual_eligible") is not True or trust.get("ready_binding_sha256") != sha_bytes(ready_raw):
         raise HarnessError("ready artifact semantic binding differs")
@@ -2168,8 +2351,6 @@ def load_ready_artifact(path: Path = READY_PATH) -> dict[str, Any]:
     if trust.get("path") != str(Path(__file__).resolve()) or trust.get("sha256") != self_sha:
         raise HarnessError("maintenance harness self differs")
     sum_inputs = [("harness-trust.json", trust_raw), ("qa-attestation.json", attestation_raw), ("ready-binding.json", ready_raw)]
-    if target_raw is not None:
-        sum_inputs.append(("target-command-manifest.json", target_raw))
     expected_sums = "".join(f"{sha_bytes(raw)}  {name}\n" for name, raw in sorted(sum_inputs)).encode("ascii")
     sums_raw, _ = LAUNCHER.read_regular(root / "SHA256SUMS", "ready sums")
     if sums_raw != expected_sums:
@@ -2181,6 +2362,100 @@ def _finalize(output: Path, evidence: dict[str, Any]) -> None:
     LAUNCHER.finalize_output(output, evidence)
 
 
+def poll_restore_readiness(
+    dependencies: Dependencies,
+    previous: dict[str, Any],
+    package_before: PackageTreeSnapshot,
+    restore: dict[str, Any],
+) -> dict[str, Any]:
+    """Poll dynamic readiness against one fixed deadline, then recheck tree identity."""
+
+    started_ns = restore["started_monotonic_ns"]
+    deadline_ns = restore["deadline_monotonic_ns"]
+    attempts: list[dict[str, Any]] = []
+    post: dict[str, Any] | None = None
+    last_failure: dict[str, Any] | None = None
+    restore.update(
+        {
+            "timeout_seconds": RESTORE_TIMEOUT_SECONDS,
+            "probe_timeout_seconds": RESTORE_PROBE_TIMEOUT_SECONDS,
+            "poll_interval_seconds": RESTORE_POLL_INTERVAL_SECONDS,
+            "deadline_semantics": "fixed_absolute_monotonic_ns_checked_before_and_after_each_probe",
+            "polls": attempts,
+            "poll_count": 0,
+            "last_failure": None,
+            "final_metadata_recheck": None,
+        }
+    )
+    while True:
+        before_ns = dependencies.monotonic_ns()
+        remaining_ns = deadline_ns - before_ns
+        if remaining_ns <= 0:
+            break
+        probe_timeout = min(RESTORE_PROBE_TIMEOUT_SECONDS, remaining_ns / 1_000_000_000)
+        attempt: dict[str, Any] = {
+            "attempt": len(attempts),
+            "started_monotonic_ns": before_ns,
+            "remaining_before_ns": remaining_ns,
+            "probe_timeout_seconds": probe_timeout,
+            "passed": False,
+            "failure": None,
+        }
+        try:
+            candidate = capture_running(
+                dependencies,
+                previous,
+                probe_timeout_seconds=probe_timeout,
+            )
+            after_ns = dependencies.monotonic_ns()
+            if after_ns > deadline_ns:
+                raise HarnessError("service recovery probe crossed absolute deadline")
+            attempt["passed"] = True
+            post = candidate
+        except (HarnessError, OSError, ValueError, subprocess.SubprocessError) as error:
+            after_ns = dependencies.monotonic_ns()
+            last_failure = {"type": type(error).__name__, "reason": str(error)}
+            attempt["failure"] = last_failure
+        attempt["finished_monotonic_ns"] = after_ns
+        attempt["duration_ns"] = max(0, after_ns - before_ns)
+        attempts.append(attempt)
+        if post is not None:
+            break
+        remaining_ns = deadline_ns - after_ns
+        if remaining_ns <= 0:
+            break
+        dependencies.sleep(min(RESTORE_POLL_INTERVAL_SECONDS, remaining_ns / 1_000_000_000))
+
+    restore["poll_count"] = len(attempts)
+    restore["last_failure"] = last_failure
+    restore["completed_monotonic_ns"] = dependencies.monotonic_ns()
+    restore["duration_ns"] = max(0, restore["completed_monotonic_ns"] - started_ns)
+    if post is None:
+        reason = last_failure["reason"] if last_failure is not None else "absolute deadline expired"
+        raise HarnessError(f"service recovery validation failed: {reason}")
+
+    if dependencies.monotonic_ns() > deadline_ns:
+        raise HarnessError("service recovery readiness crossed absolute deadline")
+    final_tree = dependencies.package_metadata(PACKAGE_ROOT)
+    metadata_finished_ns = dependencies.monotonic_ns()
+    difference = _package_tree_difference(package_before, final_tree)
+    restore["final_metadata_recheck"] = {
+        **final_tree.evidence("post-readiness-final-tree-metadata"),
+        "expected_identity_sha256": package_before.identity_sha256,
+        "passed": difference is None,
+        "difference": difference,
+        "finished_monotonic_ns": metadata_finished_ns,
+        "within_absolute_deadline": metadata_finished_ns <= deadline_ns,
+    }
+    restore["completed_monotonic_ns"] = metadata_finished_ns
+    restore["duration_ns"] = max(0, metadata_finished_ns - started_ns)
+    if metadata_finished_ns > deadline_ns:
+        raise HarnessError("production package final metadata recheck crossed absolute deadline")
+    if difference is not None:
+        raise HarnessError("production package tree metadata identity changed across maintenance")
+    return post
+
+
 def dry_run_ready(value: dict[str, Any], output: Path, ready_path: Path = READY_PATH) -> tuple[int, dict[str, Any]]:
     LAUNCHER.reject_symlink_components(output, "ready dry-run output", allow_missing_leaf=True)
     if output.exists() or output.is_symlink():
@@ -2188,7 +2463,7 @@ def dry_run_ready(value: dict[str, Any], output: Path, ready_path: Path = READY_
     output.mkdir(mode=0o700)
     evidence = {"schema_version": "ullm.aq4_p2_resident_maintenance.v1", "status": "passed", "mode": "dry-run", "execution_mode": value["execution_mode"], "actual_eligible": value["actual_eligible"], "promotion_eligible": False, "run_id": value["authorization"]["run_id"], "process_counts": {"sudo": 0, "sudo_keepalive": 0, "systemctl_stop": 0, "launcher": 0, "systemctl_start": 0, "rocprof": 0, "capture_tool": 0, "docker": 0, "docker_exec": 0, "container_curl": 0, "container_curl_total": 0, "container_curl_version": 0, "container_curl_endpoint": 0, "stopped_gate_polls": 0, "stopped_gate_probe_commands": 0}, "service_touched": False, "gpu_command_executed": False, "model_load_executed": False, "ready_binding_sha256": LAUNCHER.sha_file(ready_path, "ready binding")[0]}
     if value["execution_mode"] == "profile_diagnostic":
-        evidence["profile_diagnostic"] = {"command": value["profile_diagnostic"]["command"], "command_sha256": value["profile_diagnostic"]["command_sha256"], "capture_executed": False, "measurement_eligible": False, "promotion_eligible": False}
+        evidence["profile_diagnostic"] = {"execution_boundary": value["profile_diagnostic"]["execution_boundary"], "target_runner": value["profile_diagnostic"]["target_runner"], "capture_executed": False, "measurement_eligible": False, "promotion_eligible": False}
     _finalize(output, evidence)
     return 0, evidence
 
@@ -2208,26 +2483,28 @@ def execute_maintenance(value: dict[str, Any], output: Path, dependencies: Depen
         if path.exists() or path.is_symlink():
             raise HarnessError(f"{label} already exists")
     if profile_diagnostic:
+        profile_output_directory = Path(value["profile_diagnostic"]["output"]["directory"])
         LAUNCHER.ensure_directory_chain(
-            PROFILE_OUTPUT_DIRECTORY.parent,
+            profile_output_directory.parent,
             "profile capture output parent",
         )
         LAUNCHER.reject_symlink_components(
-            PROFILE_OUTPUT_DIRECTORY,
+            profile_output_directory,
             "profile capture output",
             allow_missing_leaf=True,
         )
-        if PROFILE_OUTPUT_DIRECTORY.exists() or PROFILE_OUTPUT_DIRECTORY.is_symlink():
+        if profile_output_directory.exists() or profile_output_directory.is_symlink():
             raise HarnessError("profile capture output already exists")
         trust_records = [dependencies.profile_trust(value["profile_diagnostic"], "before-start")]
     else:
         trust_records = []
     output.mkdir(mode=0o700)
-    evidence: dict[str, Any] = {"schema_version": "ullm.aq4_p2_resident_maintenance.v1", "status": "failed", "mode": "execute", "execution_mode": value["execution_mode"], "run_id": run_id, "promotion_eligible": False, "profile_trust": trust_records, "capture": None, "sequence": [], "commands": [], "pre_stop": None, "stopped_gates": None, "stopped_gate_poll": None, "lock_substrate": None, "lock_substrate_cleanup": None, "launcher": None, "restore": None, "failure": None, "process_counts": {"sudo": 0, "sudo_keepalive": 0, "systemctl_stop": 0, "launcher": 0, "systemctl_start": 0, "capture_tool": 0, "rocprof": 0, "docker": 0, "docker_exec": 0, "container_curl": 0, "container_curl_total": 0, "container_curl_version": 0, "container_curl_endpoint": 0, "stopped_gate_polls": 0, "stopped_gate_probe_commands": 0}, "safety": {"service_touched": False, "service_stopped": False, "gpu_command_executed": False, "model_load_executed": False}, "secret_material_recorded": False}
-    stop_attempted = False; capture_attempted = False; pre: dict[str, Any] | None = None; substrate: LockSubstrate | None = None; runner_finished = False; runner_evidence: dict[str, Any] | None = None; code = 1; stage = "sudo-prevalidate"
+    evidence: dict[str, Any] = {"schema_version": "ullm.aq4_p2_resident_maintenance.v1", "status": "failed", "mode": "execute", "execution_mode": value["execution_mode"], "run_id": run_id, "promotion_eligible": False, "profile_trust": trust_records, "capture": None, "sequence": [], "commands": [], "package_integrity": {}, "pre_stop": None, "stopped_gates": None, "stopped_gate_poll": None, "lock_substrate": None, "lock_substrate_cleanup": None, "launcher": None, "restore": None, "failure": None, "process_counts": {"sudo": 0, "sudo_keepalive": 0, "systemctl_stop": 0, "launcher": 0, "systemctl_start": 0, "capture_tool": 0, "rocprof": 0, "docker": 0, "docker_exec": 0, "container_curl": 0, "container_curl_total": 0, "container_curl_version": 0, "container_curl_endpoint": 0, "stopped_gate_polls": 0, "stopped_gate_probe_commands": 0}, "safety": {"service_touched": False, "service_stopped": False, "gpu_command_executed": False, "model_load_executed": False}, "secret_material_recorded": False}
+    stop_attempted = False; capture_attempted = False; pre: dict[str, Any] | None = None; package_before: PackageTreeSnapshot | None = None; substrate: LockSubstrate | None = None; runner_finished = False; runner_not_started = False; runner_evidence: dict[str, Any] | None = None; code = 1; stage = "sudo-prevalidate"
     try:
         record = _sudo_valid(dependencies.run, "sudo-prevalidate"); evidence["commands"].append(record); evidence["process_counts"]["sudo"] += 1; evidence["sequence"].append("sudo-prevalidate")
-        stage = "pre-stop-snapshot"; pre = capture_running(dependencies); evidence["pre_stop"] = pre; evidence["sequence"].append("pre-stop-snapshot")
+        stage = "pre-stop-package-integrity"; package_before = capture_package_integrity(dependencies, evidence["package_integrity"])
+        stage = "pre-stop-snapshot"; pre = capture_running(dependencies); pre["package_integrity"] = copy.deepcopy(evidence["package_integrity"]); evidence["pre_stop"] = pre; evidence["sequence"].append("pre-stop-snapshot")
         for name, count in pre["health"]["formal"]["process_counts"].items():
             evidence["process_counts"][name] += count
         marker = {"schema_version": "ullm.aq4_p2_resident_maintenance_marker.v1", "run_id": run_id, "restore_required": True, "service": SERVICE, "pre_stop_sha256": sha_bytes(canonical(pre)), "created_unix_ns": time.time_ns()}
@@ -2260,39 +2537,79 @@ def execute_maintenance(value: dict[str, Any], output: Path, dependencies: Depen
             raise HarnessError("stopped live gates did not reach stable2")
         evidence["sequence"].append("stopped-gates")
         evidence["safety"]["gpu_command_executed"] = "unknown"; evidence["safety"]["model_load_executed"] = "unknown"
-        if profile_diagnostic:
+        stage = "launcher"; evidence["process_counts"]["launcher"] = 1; evidence["sequence"].append("launcher")
+        profile_outcome: dict[str, Any] | None = None
+
+        def profile_runner_executor(
+            runner_argv: list[str],
+            environment: dict[str, str],
+            mark_runner_started: Callable[[], None],
+            target_binding: dict[str, Any],
+        ) -> dict[str, Any]:
+            nonlocal capture_attempted, profile_outcome, stage
             stage = "profile-capture-before"
             evidence["profile_trust"].append(dependencies.profile_trust(value["profile_diagnostic"], "capture-before"))
             stage = "profile-capture"; capture_attempted = True; evidence["process_counts"]["capture_tool"] = 1; evidence["sequence"].append("profile-capture")
             try:
-                outcome = dependencies.profile_capture(value["profile_diagnostic"])
-                runner_finished = True
-                runner_evidence = outcome if isinstance(outcome, dict) else None
+                profile_outcome = dependencies.profile_capture(
+                    {
+                        "contract": value["profile_diagnostic"],
+                        "runner_argv": runner_argv,
+                        "environment": environment,
+                        "mark_runner_started": mark_runner_started,
+                        "target_binding": target_binding,
+                    }
+                )
+                if not isinstance(profile_outcome, dict):
+                    raise HarnessError("profile capture executor outcome differs")
+                capture = profile_outcome.get("profile_capture")
+                if isinstance(capture, dict):
+                    evidence["process_counts"]["rocprof"] = capture.get("rocprof_invocations", 0)
+                return profile_outcome
             finally:
                 evidence["profile_trust"].append(dependencies.profile_trust(value["profile_diagnostic"], "capture-after"))
-            required = {"completed", "started", "timed_out", "cleanup_passed", "children_remaining", "rocprof_started", "launcher_started", "launcher_status", "gpu_command_executed", "model_load_executed"}
-            if not isinstance(outcome, dict) or set(outcome) != required or not isinstance(outcome.get("completed"), subprocess.CompletedProcess) or outcome.get("started") is not True or type(outcome.get("timed_out")) is not bool or type(outcome.get("cleanup_passed")) is not bool or not isinstance(outcome.get("children_remaining"), list) or type(outcome.get("rocprof_started")) is not bool or type(outcome.get("launcher_started")) is not bool:
-                raise HarnessError("profile capture outcome contract differs")
-            completed = outcome["completed"]
-            evidence["process_counts"]["rocprof"] = int(outcome["rocprof_started"]); evidence["process_counts"]["launcher"] = int(outcome["launcher_started"])
-            evidence["safety"]["gpu_command_executed"] = outcome["gpu_command_executed"]; evidence["safety"]["model_load_executed"] = outcome["model_load_executed"]
-            evidence["capture"] = {"command": completed.args, "exit_code": completed.returncode, "stdout_sha256": sha_bytes(completed.stdout), "stderr_sha256": sha_bytes(completed.stderr), "timed_out": outcome["timed_out"], "cleanup_passed": outcome["cleanup_passed"], "children_remaining": outcome["children_remaining"], "launcher_status": outcome["launcher_status"]}
-            if outcome["timed_out"] or not outcome["cleanup_passed"] or outcome["children_remaining"] or completed.returncode != 0 or completed.stderr or outcome["rocprof_started"] is not True or outcome["launcher_started"] is not True or outcome["launcher_status"] != "passed":
-                raise HarnessError("profile capture/launcher failed or left a child process")
-        else:
-            stage = "launcher"; evidence["process_counts"]["launcher"] = 1; evidence["sequence"].append("launcher")
-            try:
-                launcher_code, launcher_evidence = dependencies.launcher_execute(value["launcher_binding"])
-                runner_finished = True
-                runner_evidence = launcher_evidence if isinstance(launcher_evidence, dict) else None
-            except Exception:
-                runner_finished = False
-                raise
-            evidence["launcher"] = {"code": launcher_code, "status": launcher_evidence.get("status"), "safety": launcher_evidence.get("safety"), "failure": launcher_evidence.get("failure"), "children_remaining": launcher_evidence.get("children_remaining", [])}
-            evidence["safety"]["gpu_command_executed"] = launcher_evidence.get("safety", {}).get("gpu_command_executed", "unknown")
-            evidence["safety"]["model_load_executed"] = launcher_evidence.get("safety", {}).get("model_load_executed", "unknown")
-            if launcher_code != 0 or launcher_evidence.get("status") != "passed":
-                raise HarnessError("immutable launcher failed")
+
+        try:
+            launcher_code, launcher_evidence = dependencies.launcher_execute(
+                value["launcher_binding"],
+                **({"profile_runner_executor": profile_runner_executor} if profile_diagnostic else {}),
+            )
+            launcher_failure = launcher_evidence.get("failure")
+            runner_not_started = isinstance(launcher_failure, dict) and launcher_failure.get("runner_started") is False
+            runner_finished = launcher_code == 0 or not (
+                runner_not_started
+            )
+            runner_evidence = launcher_evidence if isinstance(launcher_evidence, dict) else None
+        except Exception:
+            runner_finished = False
+            raise
+        capture_summary = launcher_evidence.get("profile_capture") if profile_diagnostic else None
+        capture_children = capture_summary.get("children_remaining", []) if isinstance(capture_summary, dict) else []
+        evidence["launcher"] = {
+            "code": launcher_code,
+            "status": launcher_evidence.get("status"),
+            "safety": launcher_evidence.get("safety"),
+            "failure": launcher_evidence.get("failure"),
+            "children_remaining": capture_children or launcher_evidence.get("children_remaining", []),
+            "runner_finished": runner_finished,
+            "runner_not_started": runner_not_started,
+            "sequence": launcher_evidence.get("sequence"),
+            "profile_runner_target": launcher_evidence.get("profile_runner_target"),
+        }
+        evidence["safety"]["gpu_command_executed"] = launcher_evidence.get("safety", {}).get("gpu_command_executed", "unknown")
+        evidence["safety"]["model_load_executed"] = launcher_evidence.get("safety", {}).get("model_load_executed", "unknown")
+        if profile_diagnostic and isinstance(profile_outcome, dict):
+            completed = profile_outcome.get("completed")
+            if isinstance(completed, subprocess.CompletedProcess):
+                evidence["capture"] = {
+                    "command": completed.args,
+                    "exit_code": completed.returncode,
+                    "stdout_sha256": sha_bytes(completed.stdout),
+                    "stderr_sha256": sha_bytes(completed.stderr),
+                    **(capture_summary if isinstance(capture_summary, dict) else {}),
+                }
+        if launcher_code != 0 or launcher_evidence.get("status") != "passed":
+            raise HarnessError("immutable launcher failed")
         code = 0
     except (HarnessError, LAUNCHER.LauncherError, OSError, ValueError, subprocess.SubprocessError) as error:
         evidence["failure"] = {"stage": stage, "reason": str(error), "launcher_started": evidence["process_counts"]["launcher"] == 1}
@@ -2309,7 +2626,7 @@ def execute_maintenance(value: dict[str, Any], output: Path, dependencies: Depen
                             value_children = runner_evidence.get(key)
                             if isinstance(value_children, list):
                                 children.extend(value_children)
-                    if not runner_finished and (capture_attempted or evidence["process_counts"]["launcher"]):
+                    if not runner_finished and not runner_not_started and (capture_attempted or evidence["process_counts"]["launcher"]):
                         # A failed/aborted runner has no trustworthy child
                         # inventory.  Keep the service stopped only long
                         # enough to record cleanup failure; never unlink a
@@ -2339,28 +2656,36 @@ def execute_maintenance(value: dict[str, Any], output: Path, dependencies: Depen
                     evidence["lock_substrate_cleanup"] = {"passed": False, "error": cleanup_error, "secret_material_recorded": False}
                     evidence["failure"] = {"stage": "lock-substrate-cleanup", "reason": cleanup_error, "launcher_started": evidence["process_counts"]["launcher"] == 1}
                     code = 1
+            restore_started_ns = dependencies.monotonic_ns()
+            restore_state: dict[str, Any] = {
+                "attempted": True,
+                "passed": False,
+                "error": None,
+                "post_start": None,
+                "lock_substrate_cleanup_passed": cleanup_error is None,
+                "started_monotonic_ns": restore_started_ns,
+                "deadline_monotonic_ns": restore_started_ns + int(RESTORE_TIMEOUT_SECONDS * 1_000_000_000),
+            }
             try:
                 evidence["commands"].append(_sudo_valid(dependencies.run, "sudo-before-restore")); evidence["process_counts"]["sudo"] += 1
                 started, record = _command(dependencies.run, [str(LAUNCHER.SUDO), "-n", str(LAUNCHER.SYSTEMCTL), "start", SERVICE], "service-start"); evidence["commands"].append(record); evidence["process_counts"]["systemctl_start"] = 1; evidence["sequence"].append("service-start")
                 if started.returncode != 0 or started.stdout or started.stderr:
                     raise HarnessError("service start failed")
-                if pre is None:
-                    raise HarnessError("pre-stop snapshot is absent during restore")
-                last_error: Exception | None = None
-                for _ in range(120):
-                    try:
-                        expected_previous = pre if evidence["safety"]["service_stopped"] else None
-                        post = capture_running(dependencies, expected_previous); last_error = None; break
-                    except (HarnessError, OSError, ValueError, subprocess.SubprocessError) as error:
-                        last_error = error; dependencies.sleep(1.0)
-                if last_error is not None or post is None:
-                    raise HarnessError(f"service recovery validation failed: {last_error}")
+                if pre is None or package_before is None:
+                    raise HarnessError("pre-stop snapshot/package identity is absent during restore")
+                expected_previous = pre if evidence["safety"]["service_stopped"] else None
+                if expected_previous is None:
+                    raise HarnessError("explicitly stopped service epoch expectation is absent")
+                post = poll_restore_readiness(dependencies, expected_previous, package_before, restore_state)
                 for name, count in post["health"]["formal"]["process_counts"].items():
                     evidence["process_counts"][name] += count
                 evidence["sequence"].append("service-restored")
             except (HarnessError, OSError, ValueError, subprocess.SubprocessError) as error:
                 restore_error = str(error); code = 1
-            evidence["restore"] = {"attempted": True, "passed": restore_error is None, "error": restore_error, "post_start": post, "lock_substrate_cleanup_passed": cleanup_error is None}
+            restore_state.update({"passed": restore_error is None, "error": restore_error, "post_start": post, "lock_substrate_cleanup_passed": cleanup_error is None})
+            restore_state.setdefault("completed_monotonic_ns", dependencies.monotonic_ns())
+            restore_state.setdefault("duration_ns", max(0, restore_state["completed_monotonic_ns"] - restore_started_ns))
+            evidence["restore"] = restore_state
         else:
             evidence["restore"] = {"attempted": False, "passed": True, "error": None, "post_start": None}
         if profile_diagnostic:

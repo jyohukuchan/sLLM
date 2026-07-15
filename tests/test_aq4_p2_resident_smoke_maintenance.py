@@ -21,7 +21,15 @@ SPEC.loader.exec_module(HARNESS)
 
 
 class FakeRuntime:
-    def __init__(self, *, fail: str | None = None, launcher_mode: str = "success") -> None:
+    def __init__(
+        self,
+        *,
+        fail: str | None = None,
+        launcher_mode: str = "success",
+        restore_health_failures: int = 0,
+        hash_seconds: float = 0.0,
+        metadata_mutation: str | None = None,
+    ) -> None:
         self.active = True
         self.epoch = 0
         self.fail = fail
@@ -31,6 +39,14 @@ class FakeRuntime:
         self.trust_stages: list[str] = []
         self.now = 0.0
         self.stopped_observation_count = 0
+        self.restore_health_failures = restore_health_failures
+        self.restore_health_calls = 0
+        self.hash_seconds = hash_seconds
+        self.full_hash_count = 0
+        self.metadata_scan_count = 0
+        self.metadata_mutation = metadata_mutation
+        self.events: list[str] = []
+        self.runner_started_count = 0
 
     @property
     def gateway_pid(self) -> int:
@@ -48,7 +64,8 @@ class FakeRuntime:
         if argv[:2] == [str(HARNESS.LAUNCHER.SYSTEMCTL), "show"]:
             if not self.active:
                 return subprocess.CompletedProcess(argv, 0, b"ActiveState=inactive\nSubState=dead\nMainPID=0\nNRestarts=0\nControlGroup=/system.slice/ullm-openai.service\n", b"")
-            raw = f"ActiveState=active\nSubState=running\nMainPID={self.gateway_pid}\nNRestarts=0\nControlGroup=/system.slice/ullm-openai.service\n".encode()
+            nrestarts = 1 if self.fail == "nrestarts-increment" and self.epoch > 0 else 0
+            raw = f"ActiveState=active\nSubState=running\nMainPID={self.gateway_pid}\nNRestarts={nrestarts}\nControlGroup=/system.slice/ullm-openai.service\n".encode()
             return subprocess.CompletedProcess(argv, 0, raw, b"")
         if argv[0] == str(HARNESS.LAUNCHER.PGREP):
             return subprocess.CompletedProcess(argv, 0 if self.active else 1, f"{self.worker_pid}\n".encode() if self.active else b"", b"")
@@ -74,8 +91,14 @@ class FakeRuntime:
         return {"url": url, "status": 200, "body": body}
 
     def container_health(self, run) -> dict:
+        if self.epoch > 0:
+            self.restore_health_calls += 1
+        if self.fail == "restore-deadline-crossing" and self.epoch > 0:
+            self.now += HARNESS.RESTORE_TIMEOUT_SECONDS + 1.0
         if self.fail == "health" and self.epoch > 0:
             raise HARNESS.HarnessError("synthetic container health failure")
+        if self.epoch > 0 and self.restore_health_calls <= self.restore_health_failures:
+            raise HARNESS.HarnessError("synthetic transient container health failure")
         container_curl = 5 if self.fail == "curl-count-off-by-one" else 6
         return {
             "transport": "docker-exec-container-network-namespace",
@@ -147,32 +170,120 @@ class FakeRuntime:
             raise HARNESS.HarnessError("fake owner differs")
         return {"amd_smi": [worker_pid], "kfd": [worker_pid]}
 
-    def launch(self, binding: dict) -> tuple[int, dict]:
+    def launch(self, binding: dict, *, profile_runner_executor=None) -> tuple[int, dict]:
+        self.events.append("launcher")
         if self.launcher_mode == "raise":
             raise OSError("synthetic launcher startup failure")
         if self.launcher_mode == "fail":
-            return 1, {"status": "failed", "safety": {"gpu_command_executed": "unknown", "model_load_executed": "unknown"}, "failure": {"reason": "synthetic"}}
+            return 1, {"status": "failed", "safety": {"gpu_command_executed": "unknown", "model_load_executed": "unknown"}, "failure": {"reason": "synthetic", "runner_started": False}}
+        if profile_runner_executor is not None:
+            self.events.extend(["validator", "gates"])
+            target = {
+                "path": str(Path(binding["evidence_output"]) / "profile-runner-target-command-manifest.json"),
+                "sha256": "a" * 64,
+                "manifest_sha256": "b" * 64,
+                "identity": [1, 2, 3, 4, 1, 5, 6],
+            }
+
+            def mark_runner_started() -> None:
+                self.runner_started_count += 1
+                self.events.append("runner")
+
+            outcome = profile_runner_executor(
+                ["/fake/runner", "profile"],
+                dict(HARNESS.LAUNCHER.EXECUTE_ENV),
+                mark_runner_started,
+                target,
+            )
+            completed = outcome["completed"]
+            capture = outcome["profile_capture"]
+            passed = completed.returncode == 0 and not completed.stderr and capture["status"] == "complete_diagnostic"
+            return (0 if passed else 1), {
+                "status": "passed" if passed else "failed",
+                "sequence": ["validator", "pre-exec-gates", "profile-runner-target", "runner", "runner-complete"],
+                "profile_runner_target": target,
+                "profile_capture": capture,
+                "safety": {
+                    "gpu_command_executed": outcome["gpu_command_executed"],
+                    "model_load_executed": outcome["model_load_executed"],
+                },
+                "failure": None if passed else {"reason": "synthetic profile runner failure", "runner_started": self.runner_started_count == 1},
+            }
         return 0, {"status": "passed", "safety": {"gpu_command_executed": True, "model_load_executed": True}, "failure": None}
 
-    def profile_capture(self, contract: dict) -> dict:
+    def package_hash(self, root: Path) -> str:
+        self.full_hash_count += 1
+        self.now += self.hash_seconds
+        return HARNESS.PACKAGE_CONTENT_SHA
+
+    def package_metadata(self, root: Path) -> HARNESS.PackageTreeSnapshot:
+        self.metadata_scan_count += 1
+        entries = [
+            HARNESS.PackageTreeEntry(".", 1, 10, 0o40755, 3, 4096, 100, 100),
+            HARNESS.PackageTreeEntry("manifest.json", 1, 11, 0o100644, 1, 1024, 100, 100),
+            HARNESS.PackageTreeEntry("weights", 1, 12, 0o40755, 2, 4096, 100, 100),
+            HARNESS.PackageTreeEntry("weights/shard.gguf", 1, 13, 0o100644, 1, 7_200_000_000, 100, 100),
+        ]
+        if self.epoch > 0 and self.metadata_mutation is not None:
+            index = 3
+            if self.metadata_mutation == "added":
+                entries.append(HARNESS.PackageTreeEntry("weights/new.gguf", 1, 14, 0o100644, 1, 1, 101, 101))
+            elif self.metadata_mutation == "removed":
+                entries.pop(index)
+            elif self.metadata_mutation == "replaced":
+                entries[index] = HARNESS.PackageTreeEntry("weights/shard.gguf", 1, 99, 0o100644, 1, 7_200_000_000, 100, 101)
+            elif self.metadata_mutation == "content":
+                entries[index] = HARNESS.PackageTreeEntry("weights/shard.gguf", 1, 13, 0o100644, 1, 7_200_000_001, 101, 101)
+            elif self.metadata_mutation == "symlink":
+                entries[index] = HARNESS.PackageTreeEntry("weights/shard.gguf", 1, 99, 0o120777, 1, 17, 101, 101)
+            elif self.metadata_mutation == "directory":
+                entries[2] = HARNESS.PackageTreeEntry("weights", 1, 12, 0o40750, 2, 4096, 101, 101)
+            else:
+                raise AssertionError(self.metadata_mutation)
+        ordered = tuple(sorted(entries, key=lambda item: item.relative_path))
+        digest = HARNESS.hashlib.sha256()
+        for item in ordered:
+            digest.update(HARNESS.canonical(item.evidence()))
+            digest.update(b"\n")
+        return HARNESS.PackageTreeSnapshot(
+            entries=ordered,
+            identity_sha256=digest.hexdigest(),
+            entry_count=len(ordered),
+            file_count=sum(HARNESS.stat.S_ISREG(item.mode) for item in ordered),
+            directory_count=sum(HARNESS.stat.S_ISDIR(item.mode) for item in ordered),
+            symlink_count=sum(HARNESS.stat.S_ISLNK(item.mode) for item in ordered),
+            bytes=sum(item.size for item in ordered if HARNESS.stat.S_ISREG(item.mode)),
+        )
+
+    def profile_capture(self, request: dict) -> dict:
         self.profile_captured = True
+        self.events.extend(["capture", "rocprof"])
         if self.fail == "capture-start":
             raise OSError("synthetic capture startup failure")
         timed_out = self.fail == "capture-timeout"
         remaining = [999999] if self.fail == "capture-child" else []
         launcher_failed = self.fail == "capture-launcher"
-        command = contract["command"]
+        request["mark_runner_started"]()
+        command = request["runner_argv"]
+        complete = not timed_out and not remaining and not launcher_failed
         return {
-            "completed": subprocess.CompletedProcess(command, 1 if timed_out or remaining or launcher_failed else 0, b"", b""),
-            "started": True,
-            "timed_out": timed_out,
-            "cleanup_passed": not remaining,
-            "children_remaining": remaining,
-            "rocprof_started": True,
-            "launcher_started": True,
-            "launcher_status": "failed" if timed_out or remaining or launcher_failed else "passed",
-            "gpu_command_executed": "unknown" if timed_out or launcher_failed else True,
-            "model_load_executed": "unknown" if timed_out or launcher_failed else True,
+            "completed": subprocess.CompletedProcess(command, 0 if complete else 1, b"", b""),
+            "keepalives": [],
+            "keepalive_failed": False,
+            "gpu_command_executed": True if complete else "unknown",
+            "model_load_executed": True if complete else "unknown",
+            "profile_capture": {
+                "status": "complete_diagnostic" if complete else "failed",
+                "runner_profiled": True,
+                "validator_profiled": False,
+                "gates_profiled": False,
+                "capture_tool_invocations": 1,
+                "rocprof_invocations": 1,
+                "target_manifest_sha256": request["target_binding"]["sha256"],
+                "timed_out": timed_out,
+                "cleanup_passed": not remaining,
+                "children_remaining": remaining,
+            },
         }
 
     def profile_trust(self, contract: dict, stage: str) -> dict:
@@ -182,7 +293,21 @@ class FakeRuntime:
         return {"stage": stage, "passed": True}
 
     def dependencies(self) -> HARNESS.Dependencies:
-        return HARNESS.Dependencies(self.run, self.http, self.container_health, self.stopped, lambda: self.active, self.owners, lambda root: HARNESS.PACKAGE_CONTENT_SHA, self.launch, self.profile_capture, self.profile_trust, self.sleep, lambda: int(self.now * 1_000_000_000))
+        return HARNESS.Dependencies(
+            self.run,
+            self.http,
+            self.container_health,
+            self.stopped,
+            lambda: self.active,
+            self.owners,
+            self.package_hash,
+            self.launch,
+            self.profile_capture,
+            self.profile_trust,
+            self.sleep,
+            lambda: int(self.now * 1_000_000_000),
+            self.package_metadata,
+        )
 
 
 class FakeDockerRuntime:
@@ -289,6 +414,8 @@ def profile_ready(tmp_path: Path) -> dict:
     value["launcher_binding"]["runner_output"] = str(tmp_path / "profile-runner")
     value["launcher_binding"]["evidence_output"] = str(tmp_path / "profile-launcher-evidence")
     value["launcher_binding"]["live_preflight"]["path"] = str(tmp_path / "profile-launcher-evidence/live-preflight.json")
+    value["profile_diagnostic"]["output"]["directory"] = str(tmp_path / "profile-output")
+    value["profile_diagnostic"]["output"]["artifact"] = str(tmp_path / "profile-output/capture-artifact.json")
     return value
 
 
@@ -337,8 +464,109 @@ def test_successful_fake_maintenance_stops_launches_and_restores(tmp_path: Path)
     assert evidence["safety"] == {"service_touched": True, "service_stopped": True, "gpu_command_executed": True, "model_load_executed": True}
     assert evidence["restore"]["passed"] is True
     assert evidence["restore"]["post_start"]["service"]["main_pid"] != evidence["pre_stop"]["service"]["main_pid"]
+    assert runtime.full_hash_count == evidence["package_integrity"]["full_hash_count"] == 1
+    assert evidence["package_integrity"]["full_content"] == {
+        "stage": "pre-stop-full-content-hash",
+        "passed": True,
+        "sha256": HARNESS.PACKAGE_CONTENT_SHA,
+        "duration_ns": 0,
+        "file_count": 2,
+        "bytes": 7_200_001_024,
+    }
+    assert evidence["package_integrity"]["tree_identity"]["stage"] == "pre-stop-tree-metadata"
+    assert evidence["restore"]["poll_count"] == 1
+    assert evidence["restore"]["deadline_monotonic_ns"] - evidence["restore"]["started_monotonic_ns"] == 120_000_000_000
+    assert evidence["restore"]["final_metadata_recheck"]["passed"] is True
+    assert evidence["restore"]["post_start"]["service_epoch"] == {
+        "restart_kind": "explicit_systemctl_stop_start",
+        "main_pid_changed": True,
+        "worker_pid_changed": True,
+        "nrestarts_before": 0,
+        "nrestarts_after": 0,
+        "nrestarts_semantics": "explicit_start_does_not_increment_automatic_restart_counter",
+        "nrestarts_unchanged": True,
+        "control_group_unchanged": True,
+    }
     assert (tmp_path / "maintenance/maintenance-marker.json").stat().st_mode & 0o777 == 0o444
     assert evidence["secret_material_recorded"] is False
+
+
+def test_package_tree_snapshot_includes_root_directories_files_and_symlinks(tmp_path: Path) -> None:
+    package = tmp_path / "package"
+    weights = package / "weights"
+    weights.mkdir(parents=True)
+    shard = weights / "shard.gguf"
+    shard.write_bytes(b"abc")
+    (package / "shard-link").symlink_to(shard)
+    before = HARNESS.package_tree_snapshot(package)
+    assert {item.relative_path for item in before.entries} == {".", "weights", "weights/shard.gguf", "shard-link"}
+    assert before.entry_count == 4
+    assert before.file_count == 1
+    assert before.directory_count == 2
+    assert before.symlink_count == 1
+    assert before.bytes == 3
+    shard.write_bytes(b"abcd")
+    after = HARNESS.package_tree_snapshot(package)
+    difference = HARNESS._package_tree_difference(before, after)
+    assert difference["kind"] == "metadata_changed"
+    assert difference["relative_path"] == "weights/shard.gguf"
+    assert {"size", "mtime_ns", "ctime_ns"} & set(difference["changed_fields"])
+
+
+def test_pre_stop_23_second_full_hash_does_not_consume_restore_deadline(tmp_path: Path) -> None:
+    runtime = FakeRuntime(hash_seconds=23.0)
+    code, evidence = HARNESS.execute_maintenance(ready(tmp_path), tmp_path / "slow-hash", runtime.dependencies())
+    assert code == 0 and evidence["status"] == "passed"
+    assert runtime.full_hash_count == evidence["package_integrity"]["full_hash_count"] == 1
+    assert evidence["package_integrity"]["full_content"]["duration_ns"] == 23_000_000_000
+    assert evidence["restore"]["started_monotonic_ns"] >= 23_000_000_000
+    assert evidence["restore"]["duration_ns"] == 0
+
+
+@pytest.mark.parametrize("readiness_failures", (1, 2, 7))
+def test_restore_retries_lightweight_dynamic_probe_until_success(tmp_path: Path, readiness_failures: int) -> None:
+    runtime = FakeRuntime(restore_health_failures=readiness_failures)
+    code, evidence = HARNESS.execute_maintenance(ready(tmp_path), tmp_path / f"restore-{readiness_failures}", runtime.dependencies())
+    assert code == 0 and evidence["restore"]["passed"] is True
+    assert evidence["restore"]["poll_count"] == readiness_failures + 1
+    assert evidence["restore"]["last_failure"]["reason"] == "synthetic transient container health failure"
+    assert runtime.full_hash_count == 1
+    assert evidence["restore"]["final_metadata_recheck"]["passed"] is True
+
+
+def test_restore_permanent_dynamic_failure_uses_one_absolute_deadline(tmp_path: Path) -> None:
+    runtime = FakeRuntime(fail="health")
+    code, evidence = HARNESS.execute_maintenance(ready(tmp_path), tmp_path / "restore-permanent", runtime.dependencies())
+    assert code == 1 and evidence["restore"]["passed"] is False
+    assert evidence["restore"]["poll_count"] == 120
+    assert evidence["restore"]["duration_ns"] == 120_000_000_000
+    assert max(item["probe_timeout_seconds"] for item in evidence["restore"]["polls"]) == 10.0
+    assert evidence["restore"]["polls"][-1]["probe_timeout_seconds"] == 1.0
+    assert evidence["restore"]["last_failure"]["reason"] == "synthetic container health failure"
+    assert evidence["restore"]["final_metadata_recheck"] is None
+    assert runtime.full_hash_count == 1
+
+
+def test_restore_rejects_probe_that_crosses_absolute_deadline(tmp_path: Path) -> None:
+    runtime = FakeRuntime(fail="restore-deadline-crossing")
+    code, evidence = HARNESS.execute_maintenance(ready(tmp_path), tmp_path / "restore-crossing", runtime.dependencies())
+    assert code == 1 and evidence["restore"]["passed"] is False
+    assert evidence["restore"]["poll_count"] == 1
+    assert evidence["restore"]["polls"][0]["probe_timeout_seconds"] == HARNESS.RESTORE_PROBE_TIMEOUT_SECONDS
+    assert "crossed absolute deadline" in evidence["restore"]["last_failure"]["reason"]
+    assert runtime.full_hash_count == 1
+
+
+@pytest.mark.parametrize("mutation", ("added", "removed", "replaced", "content", "symlink", "directory"))
+def test_restore_fails_closed_on_package_tree_metadata_mutation(tmp_path: Path, mutation: str) -> None:
+    runtime = FakeRuntime(metadata_mutation=mutation)
+    code, evidence = HARNESS.execute_maintenance(ready(tmp_path), tmp_path / f"metadata-{mutation}", runtime.dependencies())
+    assert code == 1 and evidence["restore"]["passed"] is False
+    recheck = evidence["restore"]["final_metadata_recheck"]
+    assert recheck["passed"] is False
+    assert recheck["identity_sha256"] != recheck["expected_identity_sha256"]
+    assert recheck["difference"]["kind"] in {"added", "removed", "metadata_changed"}
+    assert runtime.full_hash_count == 1
 
 
 def _poll_documents(output: Path, evidence: dict) -> list[dict]:
@@ -582,6 +810,7 @@ def test_container_health_rejects_legacy_curl_count_off_by_one(tmp_path: Path) -
     runtime = FakeRuntime(fail="curl-count-off-by-one")
     with pytest.raises(HARNESS.HarnessError, match="container namespace health contract differs"):
         HARNESS.capture_running(runtime.dependencies())
+    assert runtime.full_hash_count == 0
     assert not any(call[0][-2:] == ["stop", HARNESS.SERVICE] for call in runtime.calls)
 
 
@@ -664,6 +893,42 @@ def test_launcher_start_or_partial_failure_always_restores(tmp_path: Path, launc
     assert evidence["failure"]["stage"] == "launcher"
     assert evidence["restore"]["attempted"] is True and evidence["restore"]["passed"] is True
     assert runtime.active is True and runtime.epoch == 1
+    assert runtime.full_hash_count == 1
+    if launcher_mode == "fail":
+        assert evidence["launcher"]["failure"]["runner_started"] is False
+        assert evidence["launcher"]["runner_finished"] is False
+        assert evidence["launcher"]["runner_not_started"] is True
+
+
+def test_launcher_rc1_before_runner_start_allows_known_safe_substrate_cleanup(tmp_path: Path) -> None:
+    runtime = FakeRuntime(launcher_mode="fail")
+    substrate = HARNESS.LockSubstrate(tmp_path / "lock-dir", tmp_path / "lock-dir/device.lock", (7, 8), (1, 2), {"passed": True})
+    cleanup_calls: list[dict] = []
+
+    def stopped(old_worker_pid, old_service_pid, run, control):
+        value = runtime.stopped(old_worker_pid, old_service_pid, run, control)
+        value["lock"].update(
+            {
+                "source": "trusted_substrate",
+                "substrate": {"directory": {"device": 7, "inode": 8}, "lock": {"device": 1, "inode": 2}},
+            }
+        )
+        return value
+
+    def cleanup(value, run, *, runner_finished, runner_children):
+        cleanup_calls.append({"runner_finished": runner_finished, "runner_children": runner_children})
+        return {"passed": True, "secret_material_recorded": False}
+
+    dependencies = replace(
+        runtime.dependencies(),
+        stopped_observation=stopped,
+        lock_substrate_prepare=lambda run: substrate,
+        lock_substrate_cleanup=cleanup,
+    )
+    code, evidence = HARNESS.execute_maintenance(ready(tmp_path), tmp_path / "launcher-never-started", dependencies)
+    assert code == 1 and evidence["restore"]["passed"] is True
+    assert cleanup_calls == [{"runner_finished": False, "runner_children": []}]
+    assert evidence["lock_substrate_cleanup"]["passed"] is True
 
 
 @pytest.mark.parametrize(
@@ -703,35 +968,40 @@ def test_output_reuse_rejected_before_any_fake_command(tmp_path: Path) -> None:
 def test_profile_ready_exact_capture_wrapper_and_identity_binding() -> None:
     value = HARNESS.ready_document({"path": str(SCRIPT), "commit": "1" * 40, "tree": "2" * 40, "git_blob": "3" * 40, "sha256": "4" * 64}, profile_diagnostic=True)
     profile = value["profile_diagnostic"]
-    command = profile["command"]
     assert value["execution_mode"] == "profile_diagnostic"
     assert value["measurement_eligible"] is False and value["promotion_eligible"] is False
     assert value["authorization"]["run_id"] == HARNESS.LAUNCHER.PROFILE_RUN_ID
     assert value["authorization"]["maximum_invocations"] == 1
     assert value["authorization"]["rocprof_wrapper_required"] is True
-    assert command == HARNESS.profile_capture_command()
-    assert "--runner-command" not in command
-    assert command[command.index("--profiler-path") + 1] == str(HARNESS.PROFILE_PROFILER)
-    assert command[command.index("--profiler-sha256") + 1] == HARNESS.PROFILE_PROFILER_SHA
-    assert command[command.index("--target-command-manifest") + 1] == str(HARNESS.PROFILE_TARGET_COMMAND_MANIFEST)
-    assert command[command.index("--target-command-manifest-sha256") + 1] == HARNESS.sha_bytes(HARNESS.pretty(HARNESS.profile_target_command_manifest()))
-    assert profile["command_sha256"] == HARNESS.sha_bytes(HARNESS.canonical(command))
+    assert profile["execution_boundary"] == {
+        "order": ["maintenance", "launcher", "validator", "gates", "capture", "rocprof", "runner"],
+        "runner_profiled": True,
+        "validator_profiled": False,
+        "gates_profiled": False,
+    }
+    assert profile["target_runner"] == {
+        "generated_by": "launcher_after_live_preflight",
+        "file_name": HARNESS.LAUNCHER.PROFILE_RUNNER_TARGET_MANIFEST_NAME,
+        "fresh_per_execution": True,
+        "environment": "exact_execute_environment",
+        "maximum_invocations": 1,
+    }
     assert profile["output"]["must_not_exist_before_capture"] is True
     assert profile["resident_evidence"]["run_id"] == HARNESS.LAUNCHER.PROFILE_RUN_ID
     assert profile["resident_evidence"]["resident_session_id_source"] == "resident_raw.resident.session_id"
     assert profile["resident_evidence"]["case_id"] == HARNESS.LAUNCHER.CASE_ID
     assert profile["roctx"]["roctx_library"]["resolved_path"] == str(HARNESS.LAUNCHER.ROCTX_LIBRARY_RESOLVED)
-    assert profile["target_launcher"]["command"] == HARNESS.profile_launcher_command()
-    assert profile["target_launcher"]["binding_sha256"] == HARNESS.sha_bytes(HARNESS.canonical(HARNESS.LAUNCHER.ready_profile_execute_binding()))
-    target = HARNESS.profile_target_command_manifest()
-    assert target["argv"] == HARNESS.profile_launcher_command()
-    assert {item["argument_index"] for item in target["input_files"]} == {0, 1}
-    assert {item["argument_index"] for item in target["output_paths"]} == {5, 7}
-    assert profile["target_launcher"]["manifest"] == {
-        "path": str(HARNESS.PROFILE_TARGET_COMMAND_MANIFEST),
-        "sha256": HARNESS.sha_bytes(HARNESS.pretty(target)),
-        "manifest_sha256": target["manifest_sha256"],
-    }
+
+
+def test_profile_capture_command_binds_fresh_launcher_runner_target(tmp_path: Path) -> None:
+    profile = profile_ready(tmp_path)["profile_diagnostic"]
+    target = {"path": str(tmp_path / "runner-target-command-manifest.json"), "sha256": "a" * 64}
+    command = HARNESS.profile_capture_command(target, profile)
+    assert command[command.index("--target-command-manifest") + 1] == target["path"]
+    assert command[command.index("--target-command-manifest-sha256") + 1] == target["sha256"]
+    assert command[command.index("--profile-output-directory") + 1] == profile["output"]["directory"]
+    assert command[command.index("--artifact") + 1] == profile["output"]["artifact"]
+    assert "--runner-command" not in command
 
 
 def test_profile_fake_maintenance_captures_child_then_restores(tmp_path: Path) -> None:
@@ -741,9 +1011,43 @@ def test_profile_fake_maintenance_captures_child_then_restores(tmp_path: Path) -
     assert runtime.profile_captured is True
     assert runtime.trust_stages == ["before-start", "capture-before", "capture-after", "finalize-before"]
     assert evidence["execution_mode"] == "profile_diagnostic"
-    assert evidence["sequence"] == ["sudo-prevalidate", "pre-stop-snapshot", "durable-marker", "service-stopped", "stopped-gates", "profile-capture", "service-start", "service-restored"]
+    assert evidence["sequence"] == ["sudo-prevalidate", "pre-stop-snapshot", "durable-marker", "service-stopped", "stopped-gates", "launcher", "profile-capture", "service-start", "service-restored"]
+    assert runtime.events == ["launcher", "validator", "gates", "capture", "rocprof", "runner"]
+    assert evidence["launcher"]["profile_runner_target"]["sha256"] == evidence["capture"]["target_manifest_sha256"]
+    assert evidence["capture"]["runner_profiled"] is True
+    assert evidence["capture"]["validator_profiled"] is False
+    assert evidence["capture"]["gates_profiled"] is False
     assert evidence["process_counts"]["capture_tool"] == evidence["process_counts"]["rocprof"] == evidence["process_counts"]["launcher"] == 1
     assert evidence["restore"]["passed"] is True and runtime.active is True
+
+
+def test_default_launcher_adapter_forwards_dedicated_profile_runner_executor(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    observed: dict = {}
+
+    def execute_bound(binding, evidence_output, runner_output, run_id, **kwargs):
+        observed.update(
+            {
+                "binding": binding,
+                "evidence_output": evidence_output,
+                "runner_output": runner_output,
+                "run_id": run_id,
+                **kwargs,
+            }
+        )
+        return 0, {"status": "passed"}
+
+    monkeypatch.setattr(HARNESS.LAUNCHER, "execute_bound", execute_bound)
+    executor = lambda runner_argv, base_env, on_started, target: {}
+    binding = {
+        "evidence_output": str(tmp_path / "launcher-evidence"),
+        "runner_output": str(tmp_path / "runner-output"),
+        "run_id": HARNESS.LAUNCHER.PROFILE_RUN_ID,
+    }
+    code, evidence = HARNESS._default_launcher_execute(binding, profile_runner_executor=executor)
+    assert code == 0 and evidence["status"] == "passed"
+    assert observed["profile_runner_executor"] is executor
+    assert observed["trusted_launcher_sha"] == HARNESS.LAUNCHER_SHA
+    assert callable(observed["gate_provider"])
 
 
 @pytest.mark.parametrize("failure", ("capture-start", "capture-timeout", "capture-child", "capture-launcher"))
@@ -758,7 +1062,7 @@ def test_profile_capture_failure_always_restores_outer_service(tmp_path: Path, f
     assert runtime.trust_stages == ["before-start", "capture-before", "capture-after", "finalize-before"]
 
 
-@pytest.mark.parametrize("target", ("capture", "profiler", "launcher", "manifest"))
+@pytest.mark.parametrize("target", ("capture", "profiler", "launcher"))
 def test_profile_trust_rejects_same_path_hash_swap(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, target: str) -> None:
     capture = tmp_path / "capture.py"; capture.write_bytes(b"capture-trusted")
     profiler = tmp_path / "rocprofv3"; profiler.write_bytes(b"profiler-trusted"); profiler.chmod(0o755)
@@ -769,13 +1073,10 @@ def test_profile_trust_rejects_same_path_hash_swap(tmp_path: Path, monkeypatch: 
     monkeypatch.setattr(HARNESS, "PROFILE_PROFILER_SHA", HARNESS.sha_bytes(profiler.read_bytes()))
     monkeypatch.setattr(HARNESS, "LAUNCHER_PATH", launcher)
     monkeypatch.setattr(HARNESS, "LAUNCHER_SHA", HARNESS.sha_bytes(launcher.read_bytes()))
-    manifest = tmp_path / "target-command-manifest.json"
-    monkeypatch.setattr(HARNESS, "PROFILE_TARGET_COMMAND_MANIFEST", manifest)
-    manifest.write_bytes(HARNESS.pretty(HARNESS.profile_target_command_manifest()))
     contract = HARNESS.ready_document({"path": str(SCRIPT), "commit": "1" * 40, "tree": "2" * 40, "git_blob": "3" * 40, "sha256": "4" * 64}, profile_diagnostic=True)["profile_diagnostic"]
     guard = HARNESS.ProfileTrustGuard()
     assert guard(contract, "before-start")["passed"] is True
-    watched = {"capture": capture, "profiler": profiler, "launcher": launcher, "manifest": manifest}[target]
+    watched = {"capture": capture, "profiler": profiler, "launcher": launcher}[target]
     replacement = tmp_path / f"{target}-replacement"; replacement.write_bytes(b"swapped-bytes")
     if target == "profiler":
         replacement.chmod(0o755)
@@ -794,14 +1095,11 @@ def test_profile_trust_rechecks_exact_command_at_each_stage(tmp_path: Path, monk
     monkeypatch.setattr(HARNESS, "PROFILE_PROFILER_SHA", HARNESS.sha_bytes(profiler.read_bytes()))
     monkeypatch.setattr(HARNESS, "LAUNCHER_PATH", launcher)
     monkeypatch.setattr(HARNESS, "LAUNCHER_SHA", HARNESS.sha_bytes(launcher.read_bytes()))
-    manifest = tmp_path / "target-command-manifest.json"
-    monkeypatch.setattr(HARNESS, "PROFILE_TARGET_COMMAND_MANIFEST", manifest)
-    manifest.write_bytes(HARNESS.pretty(HARNESS.profile_target_command_manifest()))
     contract = HARNESS.ready_document({"path": str(SCRIPT), "commit": "1" * 40, "tree": "2" * 40, "git_blob": "3" * 40, "sha256": "4" * 64}, profile_diagnostic=True)["profile_diagnostic"]
     guard = HARNESS.ProfileTrustGuard()
     assert guard(contract, "before-start")["passed"] is True
-    contract["command"] = [*contract["command"], "--unexpected"]
-    with pytest.raises(HARNESS.HarnessError, match="command manifest differs"):
+    contract["execution_boundary"]["order"] = ["capture", "launcher", "runner"]
+    with pytest.raises(HARNESS.HarnessError, match="execution boundary differs"):
         guard(contract, "capture-before")
 
 
@@ -816,9 +1114,10 @@ def test_profile_late_trust_failure_occurs_with_outer_restore_done(tmp_path: Pat
 
 def test_profile_capture_output_reuse_rejected_before_commands(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     runtime = FakeRuntime(); existing = tmp_path / "existing-profile"; existing.mkdir()
-    monkeypatch.setattr(HARNESS, "PROFILE_OUTPUT_DIRECTORY", existing)
+    value = profile_ready(tmp_path)
+    value["profile_diagnostic"]["output"]["directory"] = str(existing)
     with pytest.raises(HARNESS.HarnessError, match="profile capture output already exists"):
-        HARNESS.execute_maintenance(profile_ready(tmp_path), tmp_path / "maintenance", runtime.dependencies())
+        HARNESS.execute_maintenance(value, tmp_path / "maintenance", runtime.dependencies())
     assert runtime.calls == [] and runtime.profile_captured is False
 
 
@@ -853,7 +1152,7 @@ def test_canonical_profile_ready_readback_and_dry_run_process_zero(tmp_path: Pat
     value = HARNESS.load_ready_artifact(HARNESS.PROFILE_READY_PATH)
     assert value["execution_mode"] == "profile_diagnostic"
     assert value["actual_eligible"] is True and value["measurement_eligible"] is False and value["promotion_eligible"] is False
-    assert value["profile_diagnostic"]["command"] == HARNESS.profile_capture_command()
+    assert value["profile_diagnostic"]["target_runner"]["fresh_per_execution"] is True
     output = tmp_path / "profile-ready-dry-run"
     code = HARNESS.main(["--mode", "dry-run", "--profile-diagnostic", "--ready-artifact", str(HARNESS.PROFILE_READY_PATH), "--evidence-output", str(output)])
     assert code == 0
