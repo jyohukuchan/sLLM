@@ -26,7 +26,12 @@ ROOT = Path(__file__).resolve().parents[1]
 HELPER_SHA256_RE = re.compile(r"[0-9a-f]{64}")
 HELPER_MAX_BYTES = 2 * 1024 * 1024
 PRODUCER_PATH = ROOT / "tools/build-aq4-p3-selection-raw.py"
-PRODUCER_SHA256 = "ce31daba6737a64efd2db3b897bcbef56289052978e7b3be544f89d82b91da52"
+PRODUCER_SHA256 = "d0360a494f30c2bbac7ca1d043385dd6de9384fa2d81ab99881e54afeaaed934"
+PRODUCER_GIT_AUTHORITY = {
+    "commit": "dac045244d7609c42c2db1ea0f91aa707ffb717b",
+    "tree": "c8138c2be5c54693e5c63140b9832f7e1c95f623",
+    "blob": "b838d92198f6eb69460ab40990aea893ec19d7ac",
+}
 SELECTOR_PATH = ROOT / "tools/select-aq4-p3-candidate.py"
 SELECTOR_SHA256 = "4a510c7351131072ed368e2ac8fffeb2daf10488edef94c37fe5dbcb729e9739"
 PROFILE_HELPER_PATH = ROOT / "tools/profile-aq4-p2-family-exclusive.py"

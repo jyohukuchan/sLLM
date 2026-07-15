@@ -100,8 +100,15 @@ def write_source_traces(root: Path, run_id: str, case_id: str, case_sha: str) ->
 
 def resident_evidence(tmp_path: Path):
     identity_path, identity = FIXTURES.identity_fixture(tmp_path)
+    live_preflight = FIXTURES.live_preflight_fixture(
+        tmp_path / "live-preflight.json", "diag-run", identity
+    )
     summary_path = FIXTURES.summary_fixture(
-        tmp_path / "summary.json", identity_path, "diag-run", diagnostic=True
+        tmp_path / "summary.json",
+        identity_path,
+        "diag-run",
+        diagnostic=True,
+        live_preflight=live_preflight,
     )
     case_id, case_sha = "diag-case", "8" * 64
     raw_path = FIXTURES.raw_fixture(
@@ -114,6 +121,7 @@ def resident_evidence(tmp_path: Path):
         128,
         100.0,
         diagnostic=True,
+        live_preflight=live_preflight,
     )
     return identity_path, summary_path, raw_path, case_id, case_sha
 
@@ -1290,6 +1298,103 @@ def test_capture_helper_closure_is_exact_and_reuses_verified_modules() -> None:
         )
 
 
+def test_pinned_producer_matches_current_git_authority() -> None:
+    authority = CAPTURE.PRODUCER_GIT_AUTHORITY
+    assert authority == {
+        "commit": "dac045244d7609c42c2db1ea0f91aa707ffb717b",
+        "tree": "c8138c2be5c54693e5c63140b9832f7e1c95f623",
+        "blob": "b838d92198f6eb69460ab40990aea893ec19d7ac",
+    }
+    commit_tree = subprocess.run(
+        ["git", "show", "-s", "--format=%T", authority["commit"]],
+        cwd=ROOT,
+        check=True,
+        stdout=subprocess.PIPE,
+        text=True,
+    ).stdout.strip()
+    committed_blob = subprocess.run(
+        [
+            "git",
+            "rev-parse",
+            f'{authority["commit"]}:tools/build-aq4-p3-selection-raw.py',
+        ],
+        cwd=ROOT,
+        check=True,
+        stdout=subprocess.PIPE,
+        text=True,
+    ).stdout.strip()
+    current_blob = subprocess.run(
+        ["git", "rev-parse", "HEAD:tools/build-aq4-p3-selection-raw.py"],
+        cwd=ROOT,
+        check=True,
+        stdout=subprocess.PIPE,
+        text=True,
+    ).stdout.strip()
+    committed_bytes = subprocess.run(
+        ["git", "show", f'{authority["commit"]}:tools/build-aq4-p3-selection-raw.py'],
+        cwd=ROOT,
+        check=True,
+        stdout=subprocess.PIPE,
+    ).stdout
+    assert commit_tree == authority["tree"]
+    assert committed_blob == current_blob == authority["blob"]
+    assert hashlib.sha256(committed_bytes).hexdigest() == CAPTURE.PRODUCER_SHA256
+    assert hashlib.sha256(CAPTURE.PRODUCER_PATH.read_bytes()).hexdigest() == CAPTURE.PRODUCER_SHA256
+    assert CAPTURE.PRODUCER_HELPER.evidence("selection_raw_producer")["sha256"] == CAPTURE.PRODUCER_SHA256
+
+
+def test_pinned_producer_full_validates_sealed_actual_v8() -> None:
+    identity_path = (
+        ROOT
+        / "benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2"
+        / "resident-one-case-smoke-prepared-v1/identity.json"
+    )
+    execute_root = (
+        ROOT
+        / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2"
+        / "resident-one-case-smoke-profile-execute-v7"
+    )
+    summary_path = execute_root / "resident-batch.summary.json"
+    raw_path = execute_root / (
+        "p2-representative-full_model-cold_prefill-cold_batched-n128-m128-"
+        "r9700-rdna4-aq4_0_target.raw.json"
+    )
+    assert hashlib.sha256(raw_path.read_bytes()).hexdigest() == (
+        "397f02a2cd87e5d30eb9eb569b5d022351b1f994358e71535f2ce697af5df25c"
+    )
+    assert hashlib.sha256(summary_path.read_bytes()).hexdigest() == (
+        "b82409bf997e207df5576ba7e38ebefddff363440c256250ffc8f7b521dcb3f5"
+    )
+
+    identity_snapshot = CAPTURE.PRODUCER.capture(identity_path.resolve(), "identity")
+    identity = CAPTURE.PRODUCER.validate_identity(
+        CAPTURE.PRODUCER.parse_json(identity_snapshot, "identity"),
+        identity_snapshot,
+    )
+    summary_snapshot = CAPTURE.PRODUCER.capture(
+        summary_path.resolve(), "resident summary"
+    )
+    summary = CAPTURE.PRODUCER.parse_json(summary_snapshot, "resident summary")
+    run_id = CAPTURE.PRODUCER.validate_summary(
+        summary,
+        summary_snapshot,
+        identity,
+        "diagnostic",
+    )
+    raw_snapshot = CAPTURE.PRODUCER.capture(raw_path.resolve(), "resident raw")
+    raw = CAPTURE.PRODUCER.parse_json(raw_snapshot, "resident raw")
+    validated_run_id, runs = CAPTURE.PRODUCER.validate_raw(
+        raw,
+        identity,
+        {run_id: summary_snapshot},
+        "diagnostic",
+    )
+    assert validated_run_id == "p2-r9700-resident-one-case-smoke-profile-diagnostic-v7"
+    assert len(runs) == 12
+    assert raw["device_lock"] == summary["device_lock"]
+    assert raw["links"]["live_preflight"] == summary["validation"]["live_preflight"]
+
+
 def test_post_spawn_manifest_path_swap_emits_failure_and_blocks_success(
     tmp_path: Path,
 ) -> None:
@@ -2210,7 +2315,7 @@ def test_launcher_runs_validator_and_gates_before_profile_runner_only(tmp_path: 
         gate_provider=gates,
         profile_runner_executor=profile_executor,
     )
-    assert code == 0 and evidence["status"] == "passed"
+    assert code == 0 and evidence["status"] == "passed", evidence
     assert events == ["validator", "gates", "capture"]
     assert evidence["profile_capture"]["runner_profiled"] is True
     assert evidence["profile_capture"]["validator_profiled"] is False
