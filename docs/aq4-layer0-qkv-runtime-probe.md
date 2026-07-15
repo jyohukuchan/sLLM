@@ -3,9 +3,8 @@
 `ullm-aq4-layer0-qkv-runtime-probe` is a diagnostic binary for one narrowly
 defined operation: a direct `PackageAq4ResidentMatvec::matvec` call for
 `model.language_model.layers.0.linear_attn.in_proj_qkv.weight`. The probe does
-not call the fused QKV/Z/Gate/Beta wrapper and does not infer a GPU diagnosis.
-The report is therefore emitted with `classification: "unclassified"` and
-`promotion_eligible: false` until a separate GPU tolerance gate is approved.
+not call the fused QKV/Z/Gate/Beta wrapper. The report is therefore emitted
+with `classification: "unclassified"` and `promotion_eligible: false`.
 
 ## Input sidecar
 
@@ -50,7 +49,10 @@ of the bytes consumed by the probe. Any metadata or digest change fails
 closed. Every output value must be finite. Each sidecar is written to a
 temporary file, synced, and published with a no-overwrite hard link.
 
-The same binary can target a future HIP device with `--device-index N`, but it
-requires `ULLM_REQUIRE_HIP_AQ4_MATVEC_KERNEL=1`; fallback is never allowed. Do
-not run that path until the GPU tolerance and holdout gate has been explicitly
-approved.
+The same binary can target a diagnostic HIP device only through the separately
+gated standalone probe gate, with `--device-index 1`,
+`HIP_VISIBLE_DEVICES=1`, and `ULLM_REQUIRE_HIP_AQ4_MATVEC_KERNEL=1`; fallback is
+never allowed. This threshold-free path is not a numeric Go/No-Go, does not
+observe holdout data, and always remains `unclassified` with
+`promotion_eligible: false`. It must not be treated as fused-wrapper or serving
+evidence.
