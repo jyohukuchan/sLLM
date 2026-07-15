@@ -33,10 +33,10 @@ if SPEC is None or SPEC.loader is None:
 LAUNCHER = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(LAUNCHER)
 
-LAUNCHER_COMMIT = "86fb3df33a18ee1b03934a58c7102ddcd6158128"
-LAUNCHER_TREE = "539fe5a4a0c2878947207af8f2bb3c056a3d2816"
-LAUNCHER_GIT_BLOB = "478f9cc735e0c86613e4df946ee55f88d88787c5"
-LAUNCHER_SHA = "1e7f662f7a729374cff6af82002f116688f1d47653b925291a3c315258e5f176"
+LAUNCHER_COMMIT = "288b165c707413aac01753b8254ea98fe843308f"
+LAUNCHER_TREE = "479268bfbf63f72f4103164bfddda31d41e1ecb6"
+LAUNCHER_GIT_BLOB = "9bcda3dad770a7103b018f58544a2bbbb3cf41d9"
+LAUNCHER_SHA = "52908fc4790fbc83e0a95decaad64a5ab1427b7a3c4367f21ef7662927f2bbfc"
 RUNNER_COMMIT = "81ceebb13518f590b5dbf439cd00b35e508c1c3f"
 RUNNER_SHA = "5d4cf385a83961f8aedc37d36c3e4625d783ec7ddd6b17de4f93648516d42354"
 RUNNER_CLI_ANCESTOR = "ee341c019d873f7c250adbb81414d58b5285a454"
@@ -2654,26 +2654,26 @@ QA_ATTESTATION = {
     "schema_version": "ullm.aq4_p2_resident_execute_qa_attestation.v2", "status": "passed", "actual_executed": False,
     "automated_tests": {
         "schema_version": "ullm.aq4_p2_exact_test_file_manifest.v1",
-        "aggregate": {"distinct_test_file_count": 12, "collected": 468, "passed": 468, "failed": 0, "deselected": 0},
+        "aggregate": {"distinct_test_file_count": 12, "collected": 479, "passed": 479, "failed": 0, "deselected": 0},
         "suites": [
             {
                 "name": "resident_trust_chain",
                 "command": ["python3", "-m", "pytest", "-q", "tests/test_prepare_aq4_p2_resident_smoke_bundle.py", "tests/test_run_aq4_p2_resident_batch.py", "tests/test_run_aq4_p2_resident_live_preflight.py", "tests/test_launch_aq4_p2_resident_smoke.py", "tests/test_launch_aq4_p2_resident_smoke_execute.py", "tests/test_aq4_p2_resident_smoke_maintenance.py"],
-                "collected": 341, "passed": 341, "failed": 0, "deselected": 0,
+                "collected": 346, "passed": 346, "failed": 0, "deselected": 0,
                 "files": [
-                    {"path": "tests/test_prepare_aq4_p2_resident_smoke_bundle.py", "source_commit": "71fc08aadc6bc1a0a3aed85be3502c7362ad8e55", "git_blob": "504aa74f2b05523144d23a5ff23c15a81de35324", "collected": 63, "passed": 63},
-                    {"path": "tests/test_run_aq4_p2_resident_batch.py", "source_commit": "ede2b872ab0de5550adbcb1b1dca8b4bbd789efd", "git_blob": "1dcc036971a238b5b48eb8147bfc8cbf8f629f39", "collected": 39, "passed": 39},
+                    {"path": "tests/test_prepare_aq4_p2_resident_smoke_bundle.py", "source_commit": "bad728000405a711dec4faf10d4a60393bf9d7e8", "git_blob": "b09941f39318c0e4a6e1324445c35c94231ce1ec", "collected": 63, "passed": 63},
+                    {"path": "tests/test_run_aq4_p2_resident_batch.py", "source_commit": "1e65fd5c99845c7a64e707df5bf140ca6d62ff82", "git_blob": "3acef1634f3dee47d860b639c6b9f66d5fd0662d", "collected": 44, "passed": 44},
                     {"path": "tests/test_run_aq4_p2_resident_live_preflight.py", "source_commit": "e993016f4a62b9970423223db8702f77ee834b12", "git_blob": "7f70bb62b8c46ff68e8597663b6054568b676d9f", "collected": 27, "passed": 27},
-                    {"path": "tests/test_launch_aq4_p2_resident_smoke.py", "source_commit": "2ff2e7c4172a2edee49dfce67b07009364a2f958", "git_blob": "6229512f6ee12d21fd9aa42ea85f01380a379546", "collected": 7, "passed": 7},
+                    {"path": "tests/test_launch_aq4_p2_resident_smoke.py", "source_commit": "288b165c707413aac01753b8254ea98fe843308f", "git_blob": "1eb197e2cb357c8af264275de33090382619ef21", "collected": 7, "passed": 7},
                     {"path": "tests/test_launch_aq4_p2_resident_smoke_execute.py", "source_commit": "a0a61219be28be1e3765c076d4a23513f6bd6221", "git_blob": "7e79ac50b1f69e49128c90652cf3623db2ecfd78", "collected": 69, "passed": 69},
-                    {"path": "tests/test_aq4_p2_resident_smoke_maintenance.py", "source_commit": "b89a0ff683884e4d0b1014512259bce5596dd05c", "git_blob": "2ae3b109a95770b70523a1711e57cd7969619e43", "collected": 136, "passed": 136},
+                    {"path": "tests/test_aq4_p2_resident_smoke_maintenance.py", "source_commit": "288b165c707413aac01753b8254ea98fe843308f", "git_blob": "c3ae74131fb464520c6f00a0c69ac4aec5d21690", "collected": 136, "passed": 136},
                 ],
             },
             {
                 "name": "resident_driver_unit",
                 "command": ["cargo", "test", "-p", "ullm-engine", "--bin", "ullm-aq4-p2-resident-driver", "--no-default-features"],
-                "collected": 16, "passed": 16, "failed": 0, "deselected": 0,
-                "files": [{"path": "crates/ullm-engine/src/bin/ullm-aq4-p2-resident-driver.rs", "source_commit": "eb7bf4513a5bdcc8ea44f111ef42e7fa735a7edf", "git_blob": "ea26726e95aeb73b4285fd36ea3f8b0be74578f4", "collected": 16, "passed": 16}],
+                "collected": 22, "passed": 22, "failed": 0, "deselected": 0,
+                "files": [{"path": "crates/ullm-engine/src/bin/ullm-aq4-p2-resident-driver.rs", "source_commit": "81ceebb13518f590b5dbf439cd00b35e508c1c3f", "git_blob": "7e37119cc8b66dc0e0f7abcf49b896fcdad8315f", "collected": 22, "passed": 22}],
             },
             {
                 "name": "resident_roctx_ranges",
