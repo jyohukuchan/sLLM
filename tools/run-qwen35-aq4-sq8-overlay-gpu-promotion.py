@@ -76,6 +76,18 @@ READY_URL = "http://172.20.0.1:8000/readyz"
 READY_BODY = b'{"status":"ready"}'
 READINESS_SCHEMA = "ullm.bridge_container_readiness.v1"
 AUTHORIZATION_LINEAGE_SCHEMA = "ullm.sq8_authorization_lineage.v1"
+AUTHORIZED_RUNTIME_MEMBERS = frozenset(
+    {
+        "gate.json",
+        "ullm-aq4-worker",
+        "profile.json",
+        "served-model.json",
+        "promotion-receipt.json",
+        "build-receipt.json",
+        "SHA256SUMS",
+        "lineage-input-manifest.json",
+    }
+)
 READY_CONTAINER_NAME = "open-webui"
 READY_PATH = "/readyz"
 READY_TIMEOUT_SECONDS = 5
@@ -132,7 +144,13 @@ def read_object(path: Path, label: str) -> dict[str, Any]:
 
 def canonical_sha(value: Any) -> str:
     return hashlib.sha256(
-        json.dumps(value, ensure_ascii=True, allow_nan=False, separators=(",", ":"), sort_keys=True).encode("ascii")
+        json.dumps(
+            value,
+            ensure_ascii=True,
+            allow_nan=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("ascii")
     ).hexdigest()
 
 
@@ -140,7 +158,10 @@ def validate_readiness_contract(value: Any) -> dict[str, Any]:
     """Validate the exact Gate-bound Open WebUI readiness identity."""
 
     if not isinstance(value, dict) or set(value) != {
-        "schema", "container", "network", "endpoint"
+        "schema",
+        "container",
+        "network",
+        "endpoint",
     }:
         raise PromotionError("candidate readiness contract shape differs")
     if value.get("schema") != READINESS_SCHEMA:
@@ -149,16 +170,26 @@ def validate_readiness_contract(value: Any) -> dict[str, Any]:
     network = value.get("network")
     endpoint = value.get("endpoint")
     if not isinstance(container, dict) or set(container) != {
-        "name", "id", "image_id", "config_image"
+        "name",
+        "id",
+        "image_id",
+        "config_image",
     }:
         raise PromotionError("candidate readiness container identity differs")
     if not isinstance(network, dict) or set(network) != {
-        "name", "id", "driver", "bridge_interface"
+        "name",
+        "id",
+        "driver",
+        "bridge_interface",
     }:
         raise PromotionError("candidate readiness network identity differs")
     if not isinstance(endpoint, dict) or set(endpoint) != {
-        "url", "path", "expected_status", "expected_body",
-        "expected_body_sha256", "timeout_seconds",
+        "url",
+        "path",
+        "expected_status",
+        "expected_body",
+        "expected_body_sha256",
+        "timeout_seconds",
     }:
         raise PromotionError("candidate readiness endpoint contract differs")
 
@@ -212,7 +243,10 @@ def validate_authorization_lineage(value: Any) -> dict[str, Any] | None:
     if value is None:
         return None
     if not isinstance(value, dict) or set(value) != {
-        "schema", "disposition", "prior_request_id", "prior_failure_receipt",
+        "schema",
+        "disposition",
+        "prior_request_id",
+        "prior_failure_receipt",
         "prior_no_go_audit",
     }:
         raise PromotionError("candidate authorization lineage shape differs")
@@ -261,14 +295,19 @@ def validate_authorization_lineage(value: Any) -> dict[str, Any] | None:
     no_go = value.get("prior_no_go_audit")
     if no_go is not None:
         if not isinstance(no_go, dict) or set(no_go) != {
-            "path", "sha256", "verdict", "reason_code", "audited_source_commit",
+            "path",
+            "sha256",
+            "verdict",
+            "reason_code",
+            "audited_source_commit",
             "audited_gate_sha256",
         }:
             raise PromotionError("candidate prior No-Go audit identity differs")
         raw_audit_path = no_go.get("path")
         if (
             no_go.get("verdict") != "implementation_no_go"
-            or no_go.get("reason_code") != "restore_retry_terminal_identity_not_fail_closed"
+            or no_go.get("reason_code")
+            != "restore_retry_terminal_identity_not_fail_closed"
             or not isinstance(raw_audit_path, str)
             or not Path(raw_audit_path).is_absolute()
             or not isinstance(no_go.get("sha256"), str)
@@ -293,9 +332,12 @@ def validate_authorization_lineage(value: Any) -> dict[str, Any] | None:
         audit = read_object(audit_path, "prior No-Go audit")
         audit_source = audit.get("audited_source")
         audit_runtime = audit.get("runtime")
-        audit_gate = audit_runtime.get("gate") if isinstance(audit_runtime, dict) else None
+        audit_gate = (
+            audit_runtime.get("gate") if isinstance(audit_runtime, dict) else None
+        )
         if (
-            audit.get("schema_version") != "ullm.qwen35_aq4_sq8_overlay_independent_audit.v1"
+            audit.get("schema_version")
+            != "ullm.qwen35_aq4_sq8_overlay_independent_audit.v1"
             or audit.get("verdict") != no_go["verdict"]
             or audit.get("actual") != "not_executed"
             or audit.get("reason_code") != no_go["reason_code"]
@@ -329,15 +371,59 @@ def metadata(path: Path, label: str, *, executable: bool = False) -> dict[str, A
     }
 
 
+def _nested_strings(value: Any):
+    if isinstance(value, dict):
+        for child in value.values():
+            yield from _nested_strings(child)
+    elif isinstance(value, list):
+        for child in value:
+            yield from _nested_strings(child)
+    elif isinstance(value, str):
+        yield value
+
+
+def validate_authorized_runtime_references(candidate: Path, audit_path: Path) -> None:
+    audit = read_object(audit_path, "candidate independent audit")
+    raw_runtime = audit.get("runtime", {}).get("path")
+    if not isinstance(raw_runtime, str) or not Path(raw_runtime).is_absolute():
+        raise PromotionError("candidate audited runtime path differs")
+    audited_runtime = Path(raw_runtime).resolve()
+    if {member.name for member in candidate.iterdir()} != AUTHORIZED_RUNTIME_MEMBERS:
+        raise PromotionError("authorized candidate runtime member set differs")
+    audited_raw = str(audited_runtime).encode("utf-8")
+    for member in sorted(candidate.iterdir()):
+        raw = member.read_bytes()
+        if audited_raw in raw:
+            raise PromotionError(
+                f"authorized candidate retains audited runtime path: {member.name}"
+            )
+        if member.suffix != ".json":
+            continue
+        for text in _nested_strings(json.loads(raw)):
+            candidate_path = text[7:] if text.startswith("file://") else text
+            if not candidate_path.startswith("/"):
+                continue
+            resolved = Path(candidate_path).resolve(strict=False)
+            if resolved == audited_runtime or audited_runtime in resolved.parents:
+                raise PromotionError(
+                    f"authorized candidate retains audited runtime path alias: {member.name}"
+                )
+
+
 def tree_inventory(root: Path) -> dict[str, Any]:
     if root.is_symlink() or not root.is_dir():
-        raise PromotionError("overlay artifact root must be a directory without symlinks")
+        raise PromotionError(
+            "overlay artifact root must be a directory without symlinks"
+        )
     entries: list[dict[str, Any]] = []
     directory_count = 0
     file_count = 0
     symlink_count = 0
     total_bytes = 0
-    for path in sorted((root, *root.rglob("*")), key=lambda item: item.relative_to(root).as_posix() if item != root else ""):
+    for path in sorted(
+        (root, *root.rglob("*")),
+        key=lambda item: item.relative_to(root).as_posix() if item != root else "",
+    ):
         relative = "." if path == root else path.relative_to(root).as_posix()
         value = path.stat(follow_symlinks=False)
         if stat.S_ISLNK(value.st_mode):
@@ -418,7 +504,100 @@ def source_identity(candidate: Path, build: dict[str, Any]) -> dict[str, Any]:
     return {"commit": commit, "tree": tree, "archive_sha256": actual_archive}
 
 
+def validate_build_worker_identity(
+    candidate: Path, build: dict[str, Any], *, authorized: bool
+) -> None:
+    worker_path = (candidate / "ullm-aq4-worker").resolve()
+    worker = build.get("worker")
+    expected_keys = {
+        "source_path",
+        "source_sha256",
+        "source_bytes",
+        "source_mode",
+        "source_nlink",
+        "immutable_path",
+        "immutable_sha256",
+        "immutable_bytes",
+        "immutable_mode",
+        "immutable_nlink",
+    }
+    if not isinstance(worker, dict) or set(worker) != expected_keys:
+        raise PromotionError("candidate build worker receipt shape differs")
+    immutable = metadata(worker_path, "candidate build worker", executable=True)
+    expected_immutable = {
+        "immutable_path": str(worker_path),
+        "immutable_sha256": immutable["sha256"],
+        "immutable_bytes": immutable["bytes"],
+        "immutable_mode": immutable["mode"],
+        "immutable_nlink": 1,
+    }
+    if immutable["mode"] != "0555" or any(
+        worker.get(key) != value for key, value in expected_immutable.items()
+    ):
+        raise PromotionError("candidate build immutable worker identity differs")
+    source_path = Path(str(worker["source_path"]))
+    if not source_path.is_absolute() or source_path != source_path.resolve():
+        raise PromotionError("candidate build worker source path is not absolute")
+    if authorized and source_path != worker_path:
+        raise PromotionError(
+            "authorized candidate worker source is not self-referential"
+        )
+    source = metadata(source_path, "candidate build worker source", executable=True)
+    expected_source = {
+        "source_sha256": source["sha256"],
+        "source_bytes": source["bytes"],
+        "source_mode": source["mode"],
+        "source_nlink": source["nlink"],
+    }
+    if any(worker.get(key) != value for key, value in expected_source.items()):
+        raise PromotionError("candidate build source worker identity differs")
+    if authorized and any(
+        worker.get(source_key) != worker.get(immutable_key)
+        for source_key, immutable_key in (
+            ("source_sha256", "immutable_sha256"),
+            ("source_bytes", "immutable_bytes"),
+            ("source_mode", "immutable_mode"),
+            ("source_nlink", "immutable_nlink"),
+        )
+    ):
+        raise PromotionError(
+            "authorized candidate worker source/immutable identity differs"
+        )
+
+
+def candidate_runtime_fingerprint(candidate: Path) -> tuple[Any, ...]:
+    root = candidate.stat(follow_symlinks=False)
+    if candidate.is_symlink() or not stat.S_ISDIR(root.st_mode):
+        raise PromotionError("candidate runtime must be a real directory")
+
+    def fingerprint(value: os.stat_result) -> tuple[int, ...]:
+        return (
+            value.st_dev,
+            value.st_ino,
+            value.st_mode,
+            value.st_uid,
+            value.st_gid,
+            value.st_nlink,
+            value.st_size,
+            value.st_mtime_ns,
+            value.st_ctime_ns,
+        )
+
+    members = []
+    for member in sorted(candidate.iterdir()):
+        value = member.stat(follow_symlinks=False)
+        if (
+            member.is_symlink()
+            or not stat.S_ISREG(value.st_mode)
+            or value.st_nlink != 1
+        ):
+            raise PromotionError("candidate runtime member topology differs")
+        members.append((member.name, fingerprint(value)))
+    return fingerprint(root), tuple(members)
+
+
 def candidate_snapshot(candidate: Path) -> dict[str, Any]:
+    initial_runtime_fingerprint = candidate_runtime_fingerprint(candidate)
     gate_path = candidate / "gate.json"
     build_path = candidate / "build-receipt.json"
     profile_path = candidate / "profile.json"
@@ -428,6 +607,9 @@ def candidate_snapshot(candidate: Path) -> dict[str, Any]:
     build = read_object(build_path, "candidate build receipt")
     profile = read_object(profile_path, "candidate profile")
     manifest = read_object(manifest_path, "candidate manifest")
+    validate_build_worker_identity(
+        candidate, build, authorized=gate.get("actual_run_allowed") is True
+    )
     promotion = profile.get("promotion")
     legacy_promotion_keys = {
         "receipt",
@@ -444,7 +626,8 @@ def candidate_snapshot(candidate: Path) -> dict[str, Any]:
         "release_source_commit",
     }
     lineage_promotion_keys = legacy_promotion_keys | {
-        "authorization_lineage_from_receipt", "authorization_lineage",
+        "authorization_lineage_from_receipt",
+        "authorization_lineage",
     }
     if not isinstance(promotion, dict) or (
         set(promotion) != legacy_promotion_keys
@@ -454,7 +637,9 @@ def candidate_snapshot(candidate: Path) -> dict[str, Any]:
     has_lineage_contract = set(promotion) == lineage_promotion_keys
     if promotion.get("authorization_audit_from_receipt") != ["authorization_audit"]:
         raise PromotionError("candidate authorization audit profile binding differs")
-    if has_lineage_contract and promotion.get("authorization_lineage_from_receipt") != ["authorization_lineage"]:
+    if has_lineage_contract and promotion.get("authorization_lineage_from_receipt") != [
+        "authorization_lineage"
+    ]:
         raise PromotionError("candidate authorization lineage profile binding differs")
     if promotion.get("readiness_from_receipt") != ["readiness"]:
         raise PromotionError("candidate readiness profile binding differs")
@@ -469,12 +654,17 @@ def candidate_snapshot(candidate: Path) -> dict[str, Any]:
         raise PromotionError("candidate Gate and build source commits differ")
     identity = gate.get("profile_identity")
     worker_identity = manifest.get("worker", {}).get("identity")
-    if not isinstance(identity, dict) or identity.get("implementation_id") != IMPLEMENTATION_ID:
+    if (
+        not isinstance(identity, dict)
+        or identity.get("implementation_id") != IMPLEMENTATION_ID
+    ):
         raise PromotionError("candidate implementation identity differs")
     if worker_identity != {"device": "gfx1201", "execution_profile": EXECUTION_PROFILE}:
         raise PromotionError("candidate worker identity differs")
     required = profile.get("worker", {}).get("required_environment")
-    if not isinstance(required, list) or any(name not in required for name in REQUIRED_OVERLAY_ENV):
+    if not isinstance(required, list) or any(
+        name not in required for name in REQUIRED_OVERLAY_ENV
+    ):
         raise PromotionError("candidate overlay environment contract is incomplete")
     product_root = Path(str(profile.get("product", {}).get("root", ""))).resolve()
     binding = product_root / str(profile["product"]["artifact"]["manifest_path"])
@@ -493,11 +683,22 @@ def candidate_snapshot(candidate: Path) -> dict[str, Any]:
     if any(identity.get(key) != value for key, value in expected.items()):
         raise PromotionError("candidate Gate live identity differs")
     request_id = gate.get("request", {}).get("actual", {}).get("request_id")
-    if not isinstance(request_id, str) or PROMOTION_REQUEST_ID_RE.fullmatch(request_id) is None:
+    if (
+        not isinstance(request_id, str)
+        or PROMOTION_REQUEST_ID_RE.fullmatch(request_id) is None
+    ):
         raise PromotionError("candidate Gate promotion request ID differs")
     receipt_keys = {
-        "schema_version", "status", "request_id", "source_commit", "source_provenance",
-        "release", "overlay", "package", "authorization_audit", "actual",
+        "schema_version",
+        "status",
+        "request_id",
+        "source_commit",
+        "source_provenance",
+        "release",
+        "overlay",
+        "package",
+        "authorization_audit",
+        "actual",
         "readiness",
     }
     if has_lineage_contract:
@@ -512,7 +713,8 @@ def candidate_snapshot(candidate: Path) -> dict[str, Any]:
         or receipt.get("request_id") != request_id
         or build.get("promotion_request_id") != request_id
         or receipt.get("source_commit") != build.get("release_source_commit")
-        or source != {
+        or source
+        != {
             "tree_sha256": build.get("release_source_tree"),
             "archive_sha256": build.get("release_source_archive_sha256"),
         }
@@ -534,7 +736,11 @@ def candidate_snapshot(candidate: Path) -> dict[str, Any]:
                 "bytes": entry["bytes"],
             }
         )
-    receipt_inventory = receipt_overlay.get("artifact_inventory") if isinstance(receipt_overlay, dict) else None
+    receipt_inventory = (
+        receipt_overlay.get("artifact_inventory")
+        if isinstance(receipt_overlay, dict)
+        else None
+    )
     if not isinstance(release, dict) or release.get("worker") != {
         "path": str(worker_path.resolve()),
         "sha256": sha_file(worker_path),
@@ -543,13 +749,19 @@ def candidate_snapshot(candidate: Path) -> dict[str, Any]:
         "nlink": 1,
     }:
         raise PromotionError("candidate promotion receipt worker differs")
-    if release.get("profile") != {"path": str(profile_path.resolve()), "sha256": sha_file(profile_path)}:
+    if release.get("profile") != {
+        "path": str(profile_path.resolve()),
+        "sha256": sha_file(profile_path),
+    }:
         raise PromotionError("candidate promotion receipt profile differs")
     served_release = release.get("served_model")
     semantic_manifest = json.loads(json.dumps(manifest))
     if isinstance(semantic_manifest.get("promotion"), dict):
         semantic_manifest["promotion"].pop("receipt_sha256", None)
-    if served_release != {"path": str(manifest_path.resolve()), "semantic_sha256": canonical_sha(semantic_manifest)}:
+    if served_release != {
+        "path": str(manifest_path.resolve()),
+        "semantic_sha256": canonical_sha(semantic_manifest),
+    }:
         raise PromotionError("candidate promotion receipt served manifest differs")
     if not isinstance(receipt_overlay, dict) or any(
         receipt_overlay.get(key) != value
@@ -562,9 +774,15 @@ def candidate_snapshot(candidate: Path) -> dict[str, Any]:
         }.items()
     ):
         raise PromotionError("candidate promotion receipt overlay differs")
-    if not isinstance(receipt_inventory, dict) or receipt_inventory.get("entries") != expected_entries:
+    if (
+        not isinstance(receipt_inventory, dict)
+        or receipt_inventory.get("entries") != expected_entries
+    ):
         raise PromotionError("candidate promotion receipt inventory differs")
-    if receipt_package != {"manifest_path": str(package.resolve()), "manifest_sha256": sha_file(package)}:
+    if receipt_package != {
+        "manifest_path": str(package.resolve()),
+        "manifest_sha256": sha_file(package),
+    }:
         raise PromotionError("candidate promotion receipt package differs")
     if manifest.get("promotion", {}).get("receipt_sha256") != sha_file(receipt_path):
         raise PromotionError("candidate served manifest receipt SHA differs")
@@ -573,7 +791,11 @@ def candidate_snapshot(candidate: Path) -> dict[str, Any]:
     authorization_audit = receipt.get("authorization_audit")
     if not isinstance(authorization, dict) or actual_run_allowed not in {False, True}:
         raise PromotionError("candidate Gate authorization differs")
-    expected_status = "authorized_pending_execution" if actual_run_allowed else "ready_for_independent_audit"
+    expected_status = (
+        "authorized_pending_execution"
+        if actual_run_allowed
+        else "ready_for_independent_audit"
+    )
     expected_attempts = 1 if actual_run_allowed else 0
     if (
         gate.get("status") != expected_status
@@ -584,15 +806,21 @@ def candidate_snapshot(candidate: Path) -> dict[str, Any]:
     ):
         raise PromotionError("candidate Gate authorization policy differs")
     manifest_audit = manifest.get("promotion", {}).get("authorization_audit")
-    lineage_manifest = receipt.get("authorization_lineage") if has_lineage_contract else None
+    lineage_manifest = (
+        receipt.get("authorization_lineage") if has_lineage_contract else None
+    )
     if has_lineage_contract:
         if (
             promotion.get("authorization_lineage") != lineage_manifest
-            or manifest.get("promotion", {}).get("authorization_lineage") != lineage_manifest
+            or manifest.get("promotion", {}).get("authorization_lineage")
+            != lineage_manifest
             or authorization.get("lineage_manifest") != lineage_manifest
-            or build.get("inputs", {}).get("authorization_lineage_manifest") != lineage_manifest
+            or build.get("inputs", {}).get("authorization_lineage_manifest")
+            != lineage_manifest
         ):
-            raise PromotionError("candidate authorization lineage manifest propagation differs")
+            raise PromotionError(
+                "candidate authorization lineage manifest propagation differs"
+            )
         if lineage_manifest is not None:
             try:
                 lineage_tool.validate_reference(
@@ -605,17 +833,22 @@ def candidate_snapshot(candidate: Path) -> dict[str, Any]:
                 ) from error
     lineage = validate_authorization_lineage(authorization.get("lineage"))
     build_inputs = build.get("inputs")
-    if not isinstance(build_inputs, dict) or build_inputs.get("prior_failure_receipt") != (
-        lineage["prior_failure_receipt"] if lineage is not None else None
-    ):
+    if not isinstance(build_inputs, dict) or build_inputs.get(
+        "prior_failure_receipt"
+    ) != (lineage["prior_failure_receipt"] if lineage is not None else None):
         raise PromotionError("candidate authorization lineage build binding differs")
+    if build_inputs.get("independent_audit_receipt") != authorization_audit:
+        raise PromotionError("candidate authorization audit build binding differs")
     manifest_readiness = manifest.get("promotion", {}).get("readiness")
     if receipt.get("readiness") != readiness or manifest_readiness != readiness:
         raise PromotionError("candidate readiness propagation differs")
     if actual_run_allowed:
         if not has_lineage_contract or lineage_manifest is None:
             raise PromotionError("authorized candidate lineage manifest is incomplete")
-        if not isinstance(authorization_audit, dict) or set(authorization_audit) != {"path", "sha256"}:
+        if not isinstance(authorization_audit, dict) or set(authorization_audit) != {
+            "path",
+            "sha256",
+        }:
             raise PromotionError("authorized candidate audit binding is incomplete")
         raw_audit_path = authorization_audit.get("path")
         audit_sha256 = authorization_audit.get("sha256")
@@ -643,6 +876,7 @@ def candidate_snapshot(candidate: Path) -> dict[str, Any]:
             or manifest_audit != authorization_audit
         ):
             raise PromotionError("authorized candidate audit propagation differs")
+        validate_authorized_runtime_references(candidate, audit_path)
     elif (
         authorization.get("blocked_until") != "independent_executor_and_gate_audit"
         or authorization.get("independent_audit_receipt") is not None
@@ -687,6 +921,8 @@ def candidate_snapshot(candidate: Path) -> dict[str, Any]:
             candidate / "lineage-input-manifest.json",
             "authorization lineage manifest",
         )
+    if candidate_runtime_fingerprint(candidate) != initial_runtime_fingerprint:
+        raise PromotionError("candidate runtime changed during validation")
     return result
 
 
@@ -695,7 +931,9 @@ def stable_identity(snapshot: dict[str, Any]) -> dict[str, Any]:
     return snapshot
 
 
-def validate_executor_record(path: Path, snapshot: dict[str, Any], expected_request_id: str) -> dict[str, Any]:
+def validate_executor_record(
+    path: Path, snapshot: dict[str, Any], expected_request_id: str
+) -> dict[str, Any]:
     value = read_object(path, "SQ8 executor record")
     evidence = value.get("sq8_promotion_evidence")
     if value.get("status") != "ok" or not isinstance(evidence, dict):
@@ -716,14 +954,31 @@ def validate_executor_record(path: Path, snapshot: dict[str, Any], expected_requ
         raise PromotionError("SQ8 executor manifest identity differs")
     telemetry = evidence.get("telemetry")
     projection = telemetry.get("projection") if isinstance(telemetry, dict) else None
-    staging = telemetry.get("diagnostic_host_staging") if isinstance(telemetry, dict) else None
-    if not isinstance(telemetry, dict) or telemetry.get("schema_version") != TELEMETRY_SCHEMA:
+    staging = (
+        telemetry.get("diagnostic_host_staging")
+        if isinstance(telemetry, dict)
+        else None
+    )
+    if (
+        not isinstance(telemetry, dict)
+        or telemetry.get("schema_version") != TELEMETRY_SCHEMA
+    ):
         raise PromotionError("SQ8 executor telemetry schema differs")
-    if not isinstance(projection, dict) or projection.get("batch_matvec_count", 0) <= 0 or projection.get("pair_matvec_count", 0) <= 0:
+    if (
+        not isinstance(projection, dict)
+        or projection.get("batch_matvec_count", 0) <= 0
+        or projection.get("pair_matvec_count", 0) <= 0
+    ):
         raise PromotionError("SQ8 executor lacks batch/pair calls")
-    if any(projection.get(key) != 0 for key in ("single_matvec_count", "triple_matvec_count", "fallback_count")):
+    if any(
+        projection.get(key) != 0
+        for key in ("single_matvec_count", "triple_matvec_count", "fallback_count")
+    ):
         raise PromotionError("SQ8 executor used an unexpected projection path")
-    if not isinstance(staging, dict) or any(staging.get(key) != 0 for key in ("read_count", "write_count", "read_bytes", "write_bytes")):
+    if not isinstance(staging, dict) or any(
+        staging.get(key) != 0
+        for key in ("read_count", "write_count", "read_bytes", "write_bytes")
+    ):
         raise PromotionError("SQ8 executor used diagnostic host staging")
     output = evidence.get("output_identity")
     if (
@@ -754,7 +1009,9 @@ class LockLease:
                 or (before.st_dev, before.st_ino) != (self.device, self.inode)
                 or (current.st_dev, current.st_ino) != (self.device, self.inode)
             ):
-                identity_error = PromotionError("candidate promotion lock inode changed while held")
+                identity_error = PromotionError(
+                    "candidate promotion lock inode changed while held"
+                )
         except (OSError, PromotionError) as error:
             identity_error = error
         try:
@@ -764,15 +1021,24 @@ class LockLease:
         if identity_error is not None:
             if isinstance(identity_error, PromotionError):
                 raise identity_error
-            raise PromotionError(f"candidate promotion lock validation failed: {identity_error}") from identity_error
+            raise PromotionError(
+                f"candidate promotion lock validation failed: {identity_error}"
+            ) from identity_error
         _lock_helper_remove(self.device, self.inode, self.command_runner)
 
     def evidence(self) -> dict[str, Any]:
-        return {"path": str(self.path), "device": self.device, "inode": self.inode, "held": True}
+        return {
+            "path": str(self.path),
+            "device": self.device,
+            "inode": self.inode,
+            "held": True,
+        }
 
 
 def _lock_helper_result(
-    argv: list[str], command_runner: Callable[..., subprocess.CompletedProcess[str]], label: str
+    argv: list[str],
+    command_runner: Callable[..., subprocess.CompletedProcess[str]],
+    label: str,
 ) -> dict[str, Any]:
     allowed_prefix = ["sudo", "-n", str(LOCK_HELPER)]
     create_argv = argv == [*allowed_prefix, "create"]
@@ -792,7 +1058,11 @@ def _lock_helper_result(
         completed = command_runner(argv, timeout=10)
     except (OSError, subprocess.TimeoutExpired) as error:
         raise PromotionError(f"candidate lock helper {label} failed") from error
-    if completed.returncode != 0 or completed.stderr or len(completed.stdout.encode("utf-8")) > 16 * 1024:
+    if (
+        completed.returncode != 0
+        or completed.stderr
+        or len(completed.stdout.encode("utf-8")) > 16 * 1024
+    ):
         raise PromotionError(f"candidate lock helper {label} failed")
     try:
         value = json.loads(completed.stdout)
@@ -804,15 +1074,25 @@ def _lock_helper_result(
 
 
 def _lock_helper_remove(
-    device: int, inode: int, command_runner: Callable[..., subprocess.CompletedProcess[str]]
+    device: int,
+    inode: int,
+    command_runner: Callable[..., subprocess.CompletedProcess[str]],
 ) -> None:
     argv = [
-        "sudo", "-n", str(LOCK_HELPER), "remove",
-        "--device", str(device), "--inode", str(inode),
+        "sudo",
+        "-n",
+        str(LOCK_HELPER),
+        "remove",
+        "--device",
+        str(device),
+        "--inode",
+        str(inode),
     ]
     value = _lock_helper_result(argv, command_runner, "remove")
     if value != {
-        "status": "removed", "device": device, "inode": inode,
+        "status": "removed",
+        "device": device,
+        "inode": inode,
         "runtime_directory_removed": True,
     }:
         raise PromotionError("candidate lock helper remove output differs")
@@ -832,7 +1112,8 @@ def acquire_lock(
     lock = created.get("lock")
     directory = created.get("runtime_directory")
     if (
-        set(created) != {"status", "runtime_directory_created", "runtime_directory", "lock"}
+        set(created)
+        != {"status", "runtime_directory_created", "runtime_directory", "lock"}
         or created.get("status") != "created"
         or created.get("runtime_directory_created") is not True
         or not isinstance(lock, dict)
@@ -850,7 +1131,12 @@ def acquire_lock(
         raise PromotionError("candidate lock helper create output differs")
     device = lock.get("device")
     inode = lock.get("inode")
-    if not isinstance(device, int) or device <= 0 or not isinstance(inode, int) or inode <= 0:
+    if (
+        not isinstance(device, int)
+        or device <= 0
+        or not isinstance(inode, int)
+        or inode <= 0
+    ):
         raise PromotionError("candidate lock helper inode differs")
     descriptor = -1
     try:
@@ -879,14 +1165,22 @@ def acquire_lock(
         try:
             _lock_helper_remove(device, inode, command_runner)
         except PromotionError as cleanup_error:
-            raise PromotionError(f"candidate lock acquire and cleanup failed: {cleanup_error}") from error
+            raise PromotionError(
+                f"candidate lock acquire and cleanup failed: {cleanup_error}"
+            ) from error
         if isinstance(error, PromotionError):
             raise
-        raise PromotionError(f"candidate promotion lock acquire failed: {error}") from error
+        raise PromotionError(
+            f"candidate promotion lock acquire failed: {error}"
+        ) from error
 
 
-def _run(argv: list[str], *, env: dict[str, str] | None = None, timeout: float = 30.0) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(argv, check=False, capture_output=True, text=True, env=env, timeout=timeout)
+def _run(
+    argv: list[str], *, env: dict[str, str] | None = None, timeout: float = 30.0
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        argv, check=False, capture_output=True, text=True, env=env, timeout=timeout
+    )
 
 
 def _bounded_bytes(path: Path, limit: int, label: str) -> bytes:
@@ -898,13 +1192,22 @@ def _bounded_bytes(path: Path, limit: int, label: str) -> bytes:
 
 
 def _cgroup_pids(control_group: str) -> list[int]:
-    if not control_group.startswith("/system.slice/") or ".." in Path(control_group).parts:
+    if (
+        not control_group.startswith("/system.slice/")
+        or ".." in Path(control_group).parts
+    ):
         raise PromotionError("service control group differs")
     path = Path("/sys/fs/cgroup") / control_group.lstrip("/") / "cgroup.procs"
     try:
-        values = _bounded_bytes(path, 64 * 1024, "service cgroup process list").decode("ascii").splitlines()
+        values = (
+            _bounded_bytes(path, 64 * 1024, "service cgroup process list")
+            .decode("ascii")
+            .splitlines()
+        )
     except FileNotFoundError as error:
-        raise TransientRestoreError("service cgroup process list is not ready") from error
+        raise TransientRestoreError(
+            "service cgroup process list is not ready"
+        ) from error
     except (OSError, UnicodeError) as error:
         raise PromotionError("service cgroup process list is unavailable") from error
     try:
@@ -917,11 +1220,17 @@ def _cgroup_pids(control_group: str) -> list[int]:
 
 
 def _worker_pids(candidates: list[int] | None = None) -> list[int]:
-    names = [str(pid) for pid in candidates] if candidates is not None else [entry.name for entry in Path("/proc").iterdir() if entry.name.isdigit()]
+    names = (
+        [str(pid) for pid in candidates]
+        if candidates is not None
+        else [entry.name for entry in Path("/proc").iterdir() if entry.name.isdigit()]
+    )
     result: list[int] = []
     for name in names:
         try:
-            argv0 = _bounded_bytes(Path("/proc") / name / "cmdline", 64 * 1024, "worker command line").split(b"\0", 1)[0]
+            argv0 = _bounded_bytes(
+                Path("/proc") / name / "cmdline", 64 * 1024, "worker command line"
+            ).split(b"\0", 1)[0]
         except (FileNotFoundError, ProcessLookupError):
             continue
         except OSError as error:
@@ -939,7 +1248,11 @@ def _lock_holder_pids(path: Path) -> list[int]:
     if path.is_symlink() or not stat.S_ISREG(value.st_mode) or value.st_nlink != 1:
         raise PromotionError("production lock topology differs")
     try:
-        lines = _bounded_bytes(Path("/proc/locks"), 4 * 1024 * 1024, "kernel lock table").decode("ascii").splitlines()
+        lines = (
+            _bounded_bytes(Path("/proc/locks"), 4 * 1024 * 1024, "kernel lock table")
+            .decode("ascii")
+            .splitlines()
+        )
     except (OSError, UnicodeError) as error:
         raise PromotionError("kernel lock table is unavailable") from error
     device = f"{os.major(value.st_dev):02x}:{os.minor(value.st_dev):x}:{value.st_ino}"
@@ -980,7 +1293,9 @@ def _inspect_object(
 def _ready(
     readiness: dict[str, Any],
     command_runner: Callable[..., subprocess.CompletedProcess[str]] = _run,
-    bridge_exists: Callable[[str], bool] = lambda name: (Path("/sys/class/net") / name).is_dir(),
+    bridge_exists: Callable[[str], bool] = lambda name: (
+        Path("/sys/class/net") / name
+    ).is_dir(),
 ) -> bool:
     """Probe readiness only through the exact Gate-bound Docker identity."""
 
@@ -1001,26 +1316,41 @@ def _ready(
     try:
         container_result = command_runner(
             [
-                "docker", "inspect", "--type", "container", "--format",
-                container_format, container["id"],
+                "docker",
+                "inspect",
+                "--type",
+                "container",
+                "--format",
+                container_format,
+                container["id"],
             ],
             timeout=endpoint["timeout_seconds"],
         )
         network_result = command_runner(
             [
-                "docker", "network", "inspect", "--format", network_format,
+                "docker",
+                "network",
+                "inspect",
+                "--format",
+                network_format,
                 network["id"],
             ],
             timeout=endpoint["timeout_seconds"],
         )
     except subprocess.TimeoutExpired as error:
-        raise PromotionError("Docker readiness identity inspection timed out") from error
+        raise PromotionError(
+            "Docker readiness identity inspection timed out"
+        ) from error
     except OSError as error:
         raise PromotionError("Docker readiness identity inspection failed") from error
 
     observed_container = _inspect_object(container_result, "container inspect")
     if set(observed_container) != {
-        "id", "name", "image_id", "config_image", "networks"
+        "id",
+        "name",
+        "image_id",
+        "config_image",
+        "networks",
     }:
         raise PromotionError("readiness container inspect shape differs")
     observed_name = observed_container.get("name")
@@ -1037,10 +1367,7 @@ def _ready(
     ):
         raise PromotionError("readiness container identity differs from Gate")
     attachment = networks[network["name"]]
-    if (
-        not isinstance(attachment, dict)
-        or attachment.get("NetworkID") != network["id"]
-    ):
+    if not isinstance(attachment, dict) or attachment.get("NetworkID") != network["id"]:
         raise PromotionError("readiness container network attachment differs from Gate")
 
     observed_network = _inspect_object(network_result, "network inspect")
@@ -1053,7 +1380,9 @@ def _ready(
         if isinstance(options, dict)
         else None
     )
-    network_member = containers.get(container["id"]) if isinstance(containers, dict) else None
+    network_member = (
+        containers.get(container["id"]) if isinstance(containers, dict) else None
+    )
     if (
         observed_network.get("id") != network["id"]
         or observed_network.get("name") != network["name"]
@@ -1068,18 +1397,30 @@ def _ready(
 
     expected_body = endpoint["expected_body"]
     curl_command = [
-        "docker", "exec", container["id"], "curl",
-        "--silent", "--show-error", "--request", "GET",
-        "--header", "Accept: application/json",
-        "--connect-timeout", str(endpoint["timeout_seconds"]),
-        "--max-time", str(endpoint["timeout_seconds"]),
-        "--max-filesize", str(len(expected_body.encode("ascii"))),
-        "--output", "-", "--write-out", "\n%{http_code}", endpoint["url"],
+        "docker",
+        "exec",
+        container["id"],
+        "curl",
+        "--silent",
+        "--show-error",
+        "--request",
+        "GET",
+        "--header",
+        "Accept: application/json",
+        "--connect-timeout",
+        str(endpoint["timeout_seconds"]),
+        "--max-time",
+        str(endpoint["timeout_seconds"]),
+        "--max-filesize",
+        str(len(expected_body.encode("ascii"))),
+        "--output",
+        "-",
+        "--write-out",
+        "\n%{http_code}",
+        endpoint["url"],
     ]
     try:
-        completed = command_runner(
-            curl_command, timeout=endpoint["timeout_seconds"]
-        )
+        completed = command_runner(curl_command, timeout=endpoint["timeout_seconds"])
     except (subprocess.TimeoutExpired, OSError):
         return False
     expected = f"{expected_body}\n{endpoint['expected_status']}"
@@ -1099,11 +1440,19 @@ def _amd_owner_snapshot(raw: bytes) -> dict[str, Any]:
     if not isinstance(value, list) or len(value) != 1:
         raise PromotionError("AMD GPU owner root differs")
     root = value[0]
-    if not isinstance(root, dict) or set(root) != {"gpu", "process_list"} or root.get("gpu") != AMD_SMI_INDEX:
+    if (
+        not isinstance(root, dict)
+        or set(root) != {"gpu", "process_list"}
+        or root.get("gpu") != AMD_SMI_INDEX
+    ):
         raise PromotionError("AMD GPU owner identity differs")
     processes = root["process_list"]
     if processes == [{"process_info": "No running processes detected"}]:
-        return {"owners": [], "raw_sha256": hashlib.sha256(raw).hexdigest(), "raw_bytes": len(raw)}
+        return {
+            "owners": [],
+            "raw_sha256": hashlib.sha256(raw).hexdigest(),
+            "raw_bytes": len(raw),
+        }
     if not isinstance(processes, list) or not processes:
         raise PromotionError("AMD GPU owner process list differs")
     owners: list[int] = []
@@ -1112,12 +1461,21 @@ def _amd_owner_snapshot(raw: bytes) -> dict[str, Any]:
         if not isinstance(process, dict) or set(process) != {"process_info"}:
             raise PromotionError("AMD GPU owner entry differs")
         info = process["process_info"]
-        if not isinstance(info, dict) or set(info) != expected or not isinstance(info.get("pid"), int) or info["pid"] <= 0:
+        if (
+            not isinstance(info, dict)
+            or set(info) != expected
+            or not isinstance(info.get("pid"), int)
+            or info["pid"] <= 0
+        ):
             raise PromotionError("AMD GPU owner process information differs")
         owners.append(info["pid"])
     if len(owners) != len(set(owners)):
         raise PromotionError("AMD GPU owner PID is duplicated")
-    return {"owners": sorted(owners), "raw_sha256": hashlib.sha256(raw).hexdigest(), "raw_bytes": len(raw)}
+    return {
+        "owners": sorted(owners),
+        "raw_sha256": hashlib.sha256(raw).hexdigest(),
+        "raw_bytes": len(raw),
+    }
 
 
 def _kfd_owner_snapshot() -> dict[str, Any]:
@@ -1126,7 +1484,9 @@ def _kfd_owner_snapshot() -> dict[str, Any]:
         process_names = sorted(os.listdir(KFD_PROC_ROOT))
     except OSError as error:
         raise PromotionError("KFD owner root is unavailable") from error
-    if not stat.S_ISDIR(root_before.st_mode) or any(not name.isdigit() or int(name) <= 0 for name in process_names):
+    if not stat.S_ISDIR(root_before.st_mode) or any(
+        not name.isdigit() or int(name) <= 0 for name in process_names
+    ):
         raise PromotionError("KFD owner root schema differs")
     owners: set[int] = set()
     sources: list[dict[str, Any]] = []
@@ -1140,7 +1500,9 @@ def _kfd_owner_snapshot() -> dict[str, Any]:
             raise PromotionError("KFD owner source changed during scan") from error
         except OSError as error:
             raise PromotionError("KFD queue source is unavailable") from error
-        if not stat.S_ISDIR(queues_before.st_mode) or any(not name.isdigit() for name in queue_names):
+        if not stat.S_ISDIR(queues_before.st_mode) or any(
+            not name.isdigit() for name in queue_names
+        ):
             raise PromotionError("KFD queue source schema differs")
         for queue_name in queue_names:
             path = queues / queue_name / "gpuid"
@@ -1150,7 +1512,13 @@ def _kfd_owner_snapshot() -> dict[str, Any]:
                 after = path.stat()
             except FileNotFoundError as error:
                 raise PromotionError("KFD owner source changed during scan") from error
-            if not stat.S_ISREG(before.st_mode) or (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns) != (
+            if not stat.S_ISREG(before.st_mode) or (
+                before.st_dev,
+                before.st_ino,
+                before.st_size,
+                before.st_mtime_ns,
+                before.st_ctime_ns,
+            ) != (
                 after.st_dev,
                 after.st_ino,
                 after.st_size,
@@ -1162,11 +1530,21 @@ def _kfd_owner_snapshot() -> dict[str, Any]:
             if not payload.isdigit() or payload.startswith(b"0"):
                 raise PromotionError("KFD GPU ID schema differs")
             gpuid = int(payload)
-            sources.append({"pid": pid, "queue": int(queue_name), "raw_sha256": hashlib.sha256(raw).hexdigest(), "raw_bytes": len(raw)})
+            sources.append(
+                {
+                    "pid": pid,
+                    "queue": int(queue_name),
+                    "raw_sha256": hashlib.sha256(raw).hexdigest(),
+                    "raw_bytes": len(raw),
+                }
+            )
             if gpuid == KFD_ID:
                 owners.add(pid)
         try:
-            if sorted(os.listdir(queues)) != queue_names or (queues.stat().st_dev, queues.stat().st_ino) != (queues_before.st_dev, queues_before.st_ino):
+            if sorted(os.listdir(queues)) != queue_names or (
+                queues.stat().st_dev,
+                queues.stat().st_ino,
+            ) != (queues_before.st_dev, queues_before.st_ino):
                 raise PromotionError("KFD queue source changed during scan")
         except FileNotFoundError as error:
             raise PromotionError("KFD owner source changed during scan") from error
@@ -1175,13 +1553,20 @@ def _kfd_owner_snapshot() -> dict[str, Any]:
         final_names = sorted(os.listdir(KFD_PROC_ROOT))
     except OSError as error:
         raise PromotionError("KFD owner root changed during scan") from error
-    if final_names != process_names or (root_after.st_dev, root_after.st_ino) != (root_before.st_dev, root_before.st_ino):
+    if final_names != process_names or (root_after.st_dev, root_after.st_ino) != (
+        root_before.st_dev,
+        root_before.st_ino,
+    ):
         raise PromotionError("KFD owner root changed during scan")
     return {
         "owners": sorted(owners),
         "enumerated_pids": [int(name) for name in process_names],
         "sources": sources,
-        "root": {"path": str(KFD_PROC_ROOT), "device": root_before.st_dev, "inode": root_before.st_ino},
+        "root": {
+            "path": str(KFD_PROC_ROOT),
+            "device": root_before.st_dev,
+            "inode": root_before.st_ino,
+        },
     }
 
 
@@ -1193,8 +1578,16 @@ def default_service_snapshot(
     result = _run(["systemctl", "show", SERVICE, f"--property={fields}"], timeout=5)
     if result.returncode != 0:
         raise PromotionError("service snapshot failed")
-    values = dict(line.split("=", 1) for line in result.stdout.splitlines() if "=" in line)
-    if set(values) != {"ActiveState", "SubState", "MainPID", "NRestarts", "ControlGroup"}:
+    values = dict(
+        line.split("=", 1) for line in result.stdout.splitlines() if "=" in line
+    )
+    if set(values) != {
+        "ActiveState",
+        "SubState",
+        "MainPID",
+        "NRestarts",
+        "ControlGroup",
+    }:
         raise PromotionError("service snapshot fields differ")
     try:
         main_pid = int(values.get("MainPID", "0"))
@@ -1246,7 +1639,9 @@ def default_owner_snapshot() -> dict[str, Any]:
         "worker_pids": _worker_pids(),
         "amd_pids": parsed["owners"],
         "kfd_pids": kfd["owners"],
-        "amd_diagnostic": {key: value for key, value in parsed.items() if key != "owners"},
+        "amd_diagnostic": {
+            key: value for key, value in parsed.items() if key != "owners"
+        },
         "kfd_source": kfd,
     }
 
@@ -1327,7 +1722,9 @@ class _CaptureStreamCollector:
         )
 
 
-def default_capture(argv: list[str], environment: dict[str, str]) -> CaptureProcessResult:
+def default_capture(
+    argv: list[str], environment: dict[str, str]
+) -> CaptureProcessResult:
     proc = subprocess.Popen(
         argv,
         stdin=subprocess.DEVNULL,
@@ -1456,7 +1853,10 @@ def _bounded_diagnostic_parts(
         )
 
     # Reserve the maximum five-digit count while choosing the largest prefix.
-    if serialized_size(document(redacted, False, CAPTURE_DIAGNOSTIC_MAX_BYTES)) <= CAPTURE_DIAGNOSTIC_MAX_BYTES:
+    if (
+        serialized_size(document(redacted, False, CAPTURE_DIAGNOSTIC_MAX_BYTES))
+        <= CAPTURE_DIAGNOSTIC_MAX_BYTES
+    ):
         display = redacted
         display_truncated = False
     else:
@@ -1464,9 +1864,7 @@ def _bounded_diagnostic_parts(
         high = len(redacted)
         while low < high:
             middle = (low + high + 1) // 2
-            candidate = document(
-                redacted[:middle], True, CAPTURE_DIAGNOSTIC_MAX_BYTES
-            )
+            candidate = document(redacted[:middle], True, CAPTURE_DIAGNOSTIC_MAX_BYTES)
             if serialized_size(candidate) <= CAPTURE_DIAGNOSTIC_MAX_BYTES:
                 low = middle
             else:
@@ -1772,9 +2170,7 @@ class Dependencies:
     stop_service: Callable[[], None]
     start_service: Callable[[], None]
     acquire_lock: Callable[[], Any]
-    capture: Callable[
-        [list[str], dict[str, str]], subprocess.CompletedProcess[Any]
-    ]
+    capture: Callable[[list[str], dict[str, str]], subprocess.CompletedProcess[Any]]
     monotonic: Callable[[], float] = time.monotonic
     sleep: Callable[[float], None] = time.sleep
 
@@ -1795,7 +2191,9 @@ def default_dependencies() -> Dependencies:
     )
 
 
-def stopped_decision(observation: dict[str, Any], old_worker_pid: int, seen_zero: bool) -> tuple[bool, bool]:
+def stopped_decision(
+    observation: dict[str, Any], old_worker_pid: int, seen_zero: bool
+) -> tuple[bool, bool]:
     service = observation.get("service")
     owners = observation.get("owners")
     if not isinstance(service, dict) or not isinstance(owners, dict):
@@ -1803,7 +2201,11 @@ def stopped_decision(observation: dict[str, Any], old_worker_pid: int, seen_zero
     worker = owners.get("worker_pids")
     amd = owners.get("amd_pids")
     kfd = owners.get("kfd_pids")
-    if not all(isinstance(value, list) and all(isinstance(pid, int) and pid > 0 for pid in value) for value in (worker, amd, kfd)):
+    if not all(
+        isinstance(value, list)
+        and all(isinstance(pid, int) and pid > 0 for pid in value)
+        for value in (worker, amd, kfd)
+    ):
         raise PromotionError("stopped owner observation is invalid")
     union = set(worker) | set(amd) | set(kfd)
     if union and union != {old_worker_pid}:
@@ -1927,9 +2329,13 @@ def poll_restored(
         except PromotionError as error:
             terminal(str(error), error)
         except (OSError, ValueError, subprocess.SubprocessError) as error:
-            terminal(f"unexpected restore exception: {type(error).__name__}: {error}", error)
+            terminal(
+                f"unexpected restore exception: {type(error).__name__}: {error}", error
+            )
         except Exception as error:
-            terminal(f"unexpected restore exception: {type(error).__name__}: {error}", error)
+            terminal(
+                f"unexpected restore exception: {type(error).__name__}: {error}", error
+            )
         deps.sleep(POLL_SECONDS)
     return details()
 
@@ -1986,7 +2392,12 @@ def finalize_directory(
             if Path(name).name != name or name in {"", ".", "..", "SHA256SUMS"}:
                 raise PromotionError("promotion evidence document name is unsafe")
             path = staging / name
-            raw = (json.dumps(value, ensure_ascii=True, allow_nan=False, indent=2, sort_keys=True) + "\n").encode("ascii")
+            raw = (
+                json.dumps(
+                    value, ensure_ascii=True, allow_nan=False, indent=2, sort_keys=True
+                )
+                + "\n"
+            ).encode("ascii")
             with path.open("xb") as destination:
                 destination.write(raw)
                 destination.flush()
@@ -2041,7 +2452,9 @@ def finalize_directory(
 
 
 def load_receipt_writer() -> Any:
-    spec = importlib.util.spec_from_file_location("_ullm_sq8_actual_receipt_writer", RECEIPT_WRITER)
+    spec = importlib.util.spec_from_file_location(
+        "_ullm_sq8_actual_receipt_writer", RECEIPT_WRITER
+    )
     if spec is None or spec.loader is None:
         raise PromotionError("promotion receipt writer import failed")
     module = importlib.util.module_from_spec(spec)
@@ -2054,7 +2467,9 @@ def load_receipt_writer() -> Any:
     return module
 
 
-def execute(candidate: Path, output: Path, deps: Dependencies) -> tuple[int, dict[str, Any]]:
+def execute(
+    candidate: Path, output: Path, deps: Dependencies
+) -> tuple[int, dict[str, Any]]:
     before_candidate = candidate_snapshot(candidate)
     if before_candidate.get("authorization", {}).get("actual_run_allowed") is not True:
         raise PromotionError("candidate is not authorized for actual execution")
@@ -2062,7 +2477,10 @@ def execute(candidate: Path, output: Path, deps: Dependencies) -> tuple[int, dic
     readiness = validate_readiness_contract(before_candidate.get("readiness"))
     gate = read_object(candidate / "gate.json", "candidate Gate")
     request_id = gate.get("request", {}).get("actual", {}).get("request_id")
-    if not isinstance(request_id, str) or PROMOTION_REQUEST_ID_RE.fullmatch(request_id) is None:
+    if (
+        not isinstance(request_id, str)
+        or PROMOTION_REQUEST_ID_RE.fullmatch(request_id) is None
+    ):
         raise PromotionError("candidate Gate promotion request ID differs")
     evidence: dict[str, Any] = {
         "schema_version": SCHEMA,
@@ -2076,8 +2494,12 @@ def execute(candidate: Path, output: Path, deps: Dependencies) -> tuple[int, dic
         "capture": None,
         "candidate_post": None,
         "restore": {
-            "attempted": False, "passed": False, "attempts": 0,
-            "elapsed_seconds": 0.0, "last_failure": None, "observations": [],
+            "attempted": False,
+            "passed": False,
+            "attempts": 0,
+            "elapsed_seconds": 0.0,
+            "last_failure": None,
+            "observations": [],
         },
         "failure": None,
         "actual_run_count": 0,
@@ -2085,7 +2507,10 @@ def execute(candidate: Path, output: Path, deps: Dependencies) -> tuple[int, dic
     service_touched = False
     lease = None
     capture_record: dict[str, Any] | None = None
-    capture_temp = Path(tempfile.mkdtemp(prefix="ullm-sq8-overlay-evidence-run-")) / "executor-record.json"
+    capture_temp = (
+        Path(tempfile.mkdtemp(prefix="ullm-sq8-overlay-evidence-run-"))
+        / "executor-record.json"
+    )
     code = 1
     try:
         prestate = deps.service_snapshot(readiness)
@@ -2096,22 +2521,29 @@ def execute(candidate: Path, output: Path, deps: Dependencies) -> tuple[int, dic
             and prestate.get("healthy") is True
             and prestate.get("lock_owned") is True
         ):
-            raise PromotionError("default service prestate is not active/running/healthy/lock-owner")
+            raise PromotionError(
+                "default service prestate is not active/running/healthy/lock-owner"
+            )
         old_worker_pid = prestate.get("worker_pid")
         if not isinstance(old_worker_pid, int) or old_worker_pid <= 0:
             raise PromotionError("default service prestate worker PID is invalid")
         service_touched = True
         deps.stop_service()
-        evidence["stopped_observations"] = poll_stopped(
-            deps, old_worker_pid, readiness
-        )
+        evidence["stopped_observations"] = poll_stopped(deps, old_worker_pid, readiness)
         lease = deps.acquire_lock()
         evidence["lock"] = lease.evidence()
         command = capture_command(candidate, capture_temp, request_id)
         environment = capture_environment(profile)
         evidence["capture"] = {
             "argv": command,
-            "environment": {name: environment[name] for name in ("HIP_VISIBLE_DEVICES", "ULLM_HIP_VISIBLE_DEVICES", *REQUIRED_OVERLAY_ENV)},
+            "environment": {
+                name: environment[name]
+                for name in (
+                    "HIP_VISIBLE_DEVICES",
+                    "ULLM_HIP_VISIBLE_DEVICES",
+                    *REQUIRED_OVERLAY_ENV,
+                )
+            },
         }
         evidence["actual_run_count"] = 1
         try:
@@ -2149,8 +2581,8 @@ def execute(candidate: Path, output: Path, deps: Dependencies) -> tuple[int, dic
                 stdout=completed.stdout,
                 stderr=completed.stderr,
             )
-            evidence["capture_failure"]["capture_tool_error"] = (
-                _capture_error_envelope(completed.stdout)
+            evidence["capture_failure"]["capture_tool_error"] = _capture_error_envelope(
+                completed.stdout
             )
             raise PromotionError("candidate SQ8 capture failed")
         try:
@@ -2180,11 +2612,15 @@ def execute(candidate: Path, output: Path, deps: Dependencies) -> tuple[int, dic
                 stderr=completed.stderr,
             )
             raise PromotionError("candidate SQ8 capture failed")
-        capture_record = validate_executor_record(capture_temp, before_candidate, request_id)
+        capture_record = validate_executor_record(
+            capture_temp, before_candidate, request_id
+        )
         after_candidate = candidate_snapshot(candidate)
         evidence["candidate_post"] = after_candidate
         if stable_identity(after_candidate) != stable_identity(before_candidate):
-            raise PromotionError("candidate/source/artifact/package identity changed during capture")
+            raise PromotionError(
+                "candidate/source/artifact/package identity changed during capture"
+            )
         code = 0
     except (PromotionError, OSError, ValueError, subprocess.SubprocessError) as error:
         evidence["failure"] = {"reason": str(error)}
@@ -2202,18 +2638,28 @@ def execute(candidate: Path, output: Path, deps: Dependencies) -> tuple[int, dic
             evidence["restore"]["attempted"] = True
             try:
                 deps.start_service()
-                restored = poll_restored(
-                    deps, evidence["service_prestate"], readiness
-                )
+                restored = poll_restored(deps, evidence["service_prestate"], readiness)
                 evidence["restore"].update(restored)
                 if not restored["passed"]:
-                    raise PromotionError("default service restore/new epoch/health timed out")
-            except (PromotionError, OSError, ValueError, subprocess.SubprocessError) as error:
-                if isinstance(error, TerminalRestoreError) and error.details is not None:
+                    raise PromotionError(
+                        "default service restore/new epoch/health timed out"
+                    )
+            except (
+                PromotionError,
+                OSError,
+                ValueError,
+                subprocess.SubprocessError,
+            ) as error:
+                if (
+                    isinstance(error, TerminalRestoreError)
+                    and error.details is not None
+                ):
                     evidence["restore"].update(error.details)
                 evidence["restore"]["error"] = str(error)
                 code = 1
-    evidence["status"] = "passed" if code == 0 and evidence["restore"]["passed"] else "failed"
+    evidence["status"] = (
+        "passed" if code == 0 and evidence["restore"]["passed"] else "failed"
+    )
     documents = {"maintenance-evidence.json": evidence}
     if capture_record is not None:
         documents["executor-record.json"] = capture_record
@@ -2253,12 +2699,29 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if not args.execute:
             snapshot = candidate_snapshot(args.candidate.resolve())
-            print(json.dumps({"status": "dry-run-ready", "candidate_sha256": canonical_sha(snapshot)}, sort_keys=True))
+            print(
+                json.dumps(
+                    {
+                        "status": "dry-run-ready",
+                        "candidate_sha256": canonical_sha(snapshot),
+                    },
+                    sort_keys=True,
+                )
+            )
             return 0
         if not args.confirm_independent_audit:
-            raise PromotionError("actual execution requires --confirm-independent-audit")
-        code, evidence = execute(args.candidate.resolve(), args.output.resolve(), default_dependencies())
-        print(json.dumps({"status": evidence["status"], "output": str(args.output.resolve())}, sort_keys=True))
+            raise PromotionError(
+                "actual execution requires --confirm-independent-audit"
+            )
+        code, evidence = execute(
+            args.candidate.resolve(), args.output.resolve(), default_dependencies()
+        )
+        print(
+            json.dumps(
+                {"status": evidence["status"], "output": str(args.output.resolve())},
+                sort_keys=True,
+            )
+        )
         return code
     except (PromotionError, OSError, ValueError, subprocess.SubprocessError) as error:
         print(f"SQ8 overlay GPU promotion failed: {error}", file=os.sys.stderr)

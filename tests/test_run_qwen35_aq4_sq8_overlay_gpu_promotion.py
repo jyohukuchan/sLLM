@@ -29,7 +29,12 @@ class Lease:
         self.release_error = release_error
 
     def evidence(self) -> dict[str, Any]:
-        return {"path": "/run/ullm/device-1.lock", "device": 1, "inode": 2, "held": True}
+        return {
+            "path": "/run/ullm/device-1.lock",
+            "device": 1,
+            "inode": 2,
+            "held": True,
+        }
 
     def release(self) -> None:
         if self.release_error:
@@ -54,7 +59,9 @@ class ReceiptWriter:
                     "actual": {
                         "maintenance_evidence": {
                             "path": maintenance.name,
-                            "sha256": hashlib.sha256(maintenance.read_bytes()).hexdigest(),
+                            "sha256": hashlib.sha256(
+                                maintenance.read_bytes()
+                            ).hexdigest(),
                         }
                     },
                 }
@@ -135,15 +142,53 @@ def candidate(tmp_path: Path) -> Path:
     (root / "profile.json").write_text(json.dumps(profile), encoding="utf-8")
     (root / "gate.json").write_text(
         json.dumps(
-            {
-                "request": {
-                    "actual": {"request_id": "sq8-promotion-" + "a" * 64}
-                }
-            }
+            {"request": {"actual": {"request_id": "sq8-promotion-" + "a" * 64}}}
         ),
         encoding="utf-8",
     )
     return root
+
+
+def _self_worker_build(root: Path) -> dict[str, Any]:
+    worker = root / "ullm-aq4-worker"
+    worker.write_bytes(b"authorized worker\n")
+    worker.chmod(0o555)
+    digest = hashlib.sha256(worker.read_bytes()).hexdigest()
+    return {
+        "worker": {
+            "source_path": str(worker.resolve()),
+            "source_sha256": digest,
+            "source_bytes": worker.stat().st_size,
+            "source_mode": "0555",
+            "source_nlink": 1,
+            "immutable_path": str(worker.resolve()),
+            "immutable_sha256": digest,
+            "immutable_bytes": worker.stat().st_size,
+            "immutable_mode": "0555",
+            "immutable_nlink": 1,
+        }
+    }
+
+
+def test_dry_execute_worker_revalidation_rejects_toctou_and_path_alias(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "candidate"
+    root.mkdir()
+    build = _self_worker_build(root)
+    dry_fingerprint = MODULE.candidate_runtime_fingerprint(root)
+    MODULE.validate_build_worker_identity(root, build, authorized=True)
+    build["worker"]["source_path"] = str(root / "nested" / ".." / "ullm-aq4-worker")
+    with pytest.raises(MODULE.PromotionError, match="source path"):
+        MODULE.validate_build_worker_identity(root, build, authorized=True)
+    build = (
+        _self_worker_build(root) if not (root / "ullm-aq4-worker").exists() else build
+    )
+    build["worker"]["source_path"] = str((root / "ullm-aq4-worker").resolve())
+    (root / "ullm-aq4-worker").chmod(0o755)
+    assert MODULE.candidate_runtime_fingerprint(root) != dry_fingerprint
+    with pytest.raises(MODULE.PromotionError, match="immutable worker identity"):
+        MODULE.validate_build_worker_identity(root, build, authorized=True)
 
 
 def worker_stderr_envelope(preview: str = "worker failed\n") -> dict[str, Any]:
@@ -262,16 +307,22 @@ def dependencies(
         if start_error:
             raise MODULE.PromotionError("injected restore failure")
 
-    def capture_run(argv: list[str], environment: dict[str, str]) -> subprocess.CompletedProcess[str]:
+    def capture_run(
+        argv: list[str], environment: dict[str, str]
+    ) -> subprocess.CompletedProcess[str]:
         calls["capture"].append({"argv": argv, "environment": environment})
         output = Path(argv[argv.index("--output") + 1])
         if capture_code == 0:
             output.write_text("{}\n", encoding="utf-8")
         stdout = (
-            json.dumps({"status": "ok", "output": str(output)})
-            if capture_code == 0
-            else ""
-        ) if capture_stdout is None else capture_stdout
+            (
+                json.dumps({"status": "ok", "output": str(output)})
+                if capture_code == 0
+                else ""
+            )
+            if capture_stdout is None
+            else capture_stdout
+        )
         return subprocess.CompletedProcess(
             argv, capture_code, stdout=stdout, stderr=capture_stderr
         )
@@ -295,7 +346,9 @@ def dependencies(
     return deps, calls
 
 
-def prepare(monkeypatch: pytest.MonkeyPatch, values: list[dict[str, Any]] | None = None) -> None:
+def prepare(
+    monkeypatch: pytest.MonkeyPatch, values: list[dict[str, Any]] | None = None
+) -> None:
     snapshots = iter(values or [snapshot(), snapshot()])
     monkeypatch.setattr(MODULE, "candidate_snapshot", lambda _: next(snapshots))
     monkeypatch.setattr(
@@ -376,9 +429,7 @@ def test_docker_readiness_is_exact_and_uses_full_gate_bound_identity() -> None:
     assert len(calls) == 3
     assert calls[0]["argv"][-1] == contract["container"]["id"]
     assert calls[1]["argv"][-1] == contract["network"]["id"]
-    assert calls[2]["argv"][:3] == [
-        "docker", "exec", contract["container"]["id"]
-    ]
+    assert calls[2]["argv"][:3] == ["docker", "exec", contract["container"]["id"]]
     assert calls[2]["argv"][-1] == contract["endpoint"]["url"]
     assert all(call["timeout"] == MODULE.READY_TIMEOUT_SECONDS for call in calls)
 
@@ -393,7 +444,7 @@ def test_docker_readiness_is_exact_and_uses_full_gate_bound_identity() -> None:
     ],
 )
 def test_docker_readiness_rejects_status_body_nonzero_and_timeout(
-    kwargs: dict[str, Any]
+    kwargs: dict[str, Any],
 ) -> None:
     contract = readiness()
     runner, _calls = docker_runner(contract, **kwargs)
@@ -478,7 +529,8 @@ def test_capture_failure_still_releases_and_restores(
         b"worker initialization failed: invalid device \xff\n"
         b"API_KEY=do-not-persist\n"
         b"token=also-do-not-persist\n"
-        + b"x" * (MODULE.CAPTURE_DIAGNOSTIC_MAX_BYTES + 100)
+        + b"x"
+        * (MODULE.CAPTURE_DIAGNOSTIC_MAX_BYTES + 100)
     )
     deps, calls = dependencies(
         tmp_path,
@@ -535,7 +587,7 @@ def test_capture_failure_still_releases_and_restores(
         output / "maintenance-evidence.json"
     )
     sums = (output / "SHA256SUMS").read_text(encoding="ascii")
-    assert f'{maintenance_ref["sha256"]}  maintenance-evidence.json\n' in sums
+    assert f"{maintenance_ref['sha256']}  maintenance-evidence.json\n" in sums
     for path in output.iterdir():
         metadata = path.stat(follow_symlinks=False)
         assert not path.is_symlink()
@@ -575,9 +627,7 @@ def test_capture_signal_and_timeout_are_preserved(
         )
 
     deps.capture = timeout
-    code, evidence = MODULE.execute(
-        candidate(timeout_root), tmp_path / "timeout", deps
-    )
+    code, evidence = MODULE.execute(candidate(timeout_root), tmp_path / "timeout", deps)
     assert code == 1
     diagnostic = evidence["capture_failure"]
     assert diagnostic["stage"] == "capture_subprocess_timeout"
@@ -689,7 +739,9 @@ def test_capture_error_envelope_fails_closed_on_shape_and_stage(
 def test_capture_error_envelope_rejects_duplicate_invalid_and_truncated() -> None:
     value = capture_error_envelope()
     raw = json.dumps(value, separators=(",", ":")).encode("utf-8")
-    duplicate = raw.replace(b'{"schema_version":', b'{"status":"failed","schema_version":', 1)
+    duplicate = raw.replace(
+        b'{"schema_version":', b'{"status":"failed","schema_version":', 1
+    )
     assert MODULE._capture_error_envelope(capture_stream(duplicate))["reason"] == (
         "capture_error_envelope_duplicate_key"
     )
@@ -791,8 +843,7 @@ def test_capture_error_terminal_matrix_is_exact(
 def test_default_capture_streams_large_fake_tool_and_preserves_raw_identity() -> None:
     preview = (
         "non-JSON worker cause \ufffd\n"
-        "<redacted sensitive diagnostic line>\n"
-        + "ordinary worker detail\n" * 1400
+        "<redacted sensitive diagnostic line>\n" + "ordinary worker detail\n" * 1400
     )
     preview = preview.encode("utf-8")[: MODULE.CAPTURE_DIAGNOSTIC_MAX_BYTES].decode(
         "utf-8", errors="ignore"
@@ -806,7 +857,9 @@ def test_default_capture_streams_large_fake_tool_and_preserves_raw_identity() ->
         "sys.stderr.buffer.write(raw);sys.stderr.flush();sys.exit(7)"
     )
 
-    result = MODULE.default_capture([sys.executable, "-c", script, payload], dict(os.environ))
+    result = MODULE.default_capture(
+        [sys.executable, "-c", script, payload], dict(os.environ)
+    )
 
     assert result.returncode == 7 and result.timed_out is False
     assert result.stdout.byte_count == len((payload + "\n").encode("utf-8"))
@@ -844,7 +897,11 @@ def test_default_capture_preserves_timeout_signal_and_bounded_malformed_output(
 ) -> None:
     monkeypatch.setattr(MODULE, "CAPTURE_SUBPROCESS_TIMEOUT_SECONDS", 0.05)
     timeout = MODULE.default_capture(
-        [sys.executable, "-c", "import time; print('partial', flush=True); time.sleep(10)"],
+        [
+            sys.executable,
+            "-c",
+            "import time; print('partial', flush=True); time.sleep(10)",
+        ],
         dict(os.environ),
     )
     assert timeout.timed_out is True
@@ -853,7 +910,11 @@ def test_default_capture_preserves_timeout_signal_and_bounded_malformed_output(
     assert timeout.stdout.sha256 == hashlib.sha256(b"partial\n").hexdigest()
 
     killed = MODULE.default_capture(
-        [sys.executable, "-c", "import os,signal; os.kill(os.getpid(), signal.SIGTERM)"],
+        [
+            sys.executable,
+            "-c",
+            "import os,signal; os.kill(os.getpid(), signal.SIGTERM)",
+        ],
         dict(os.environ),
     )
     assert killed.timed_out is False
@@ -903,7 +964,9 @@ def test_real_fake_capture_tool_error_binds_worker_stderr_to_final_receipt(
     tool_error = evidence["capture_failure"]["capture_tool_error"]
     assert tool_error["validation"] == "valid"
     assert tool_error["worker_stderr"]["sha256"] == envelope["worker_stderr"]["sha256"]
-    assert "do-not-persist" not in evidence["capture_failure"]["stderr"]["display"]["text"]
+    assert (
+        "do-not-persist" not in evidence["capture_failure"]["stderr"]["display"]["text"]
+    )
     persisted = json.loads((output / "maintenance-evidence.json").read_text())
     assert persisted["capture_failure"]["capture_tool_error"] == tool_error
     receipt = json.loads((output / "promotion-failure-receipt.json").read_text())
@@ -1006,7 +1069,9 @@ def test_stop_failure_attempts_restore(
     prepare(monkeypatch, [snapshot()])
     deps, calls = dependencies(tmp_path, stop_error=True)
 
-    code, evidence = MODULE.execute(candidate(tmp_path), tmp_path / "stop-failure", deps)
+    code, evidence = MODULE.execute(
+        candidate(tmp_path), tmp_path / "stop-failure", deps
+    )
 
     assert code == 1
     assert evidence["restore"]["attempted"] is True
@@ -1022,7 +1087,9 @@ def test_restore_failure_is_terminal(
     prepare(monkeypatch)
     deps, calls = dependencies(tmp_path, start_error=True)
 
-    code, evidence = MODULE.execute(candidate(tmp_path), tmp_path / "restore-failure", deps)
+    code, evidence = MODULE.execute(
+        candidate(tmp_path), tmp_path / "restore-failure", deps
+    )
 
     assert code == 1
     assert evidence["status"] == "failed"
@@ -1037,7 +1104,9 @@ def test_acquire_failure_restores_without_capture(
     prepare(monkeypatch, [snapshot()])
     deps, calls = dependencies(tmp_path, acquire_error=True)
 
-    code, evidence = MODULE.execute(candidate(tmp_path), tmp_path / "acquire-failure", deps)
+    code, evidence = MODULE.execute(
+        candidate(tmp_path), tmp_path / "acquire-failure", deps
+    )
 
     assert code == 1 and evidence["restore"]["passed"] is True
     assert calls["acquire"] == 1 and calls["capture"] == [] and calls["start"] == 1
@@ -1049,7 +1118,9 @@ def test_cleanup_failure_still_restores_service(
     prepare(monkeypatch)
     deps, calls = dependencies(tmp_path, cleanup_error=True)
 
-    code, evidence = MODULE.execute(candidate(tmp_path), tmp_path / "cleanup-failure", deps)
+    code, evidence = MODULE.execute(
+        candidate(tmp_path), tmp_path / "cleanup-failure", deps
+    )
 
     assert code == 1 and evidence["restore"]["passed"] is True
     assert "cleanup failure" in evidence["failure"]["reason"]
@@ -1062,7 +1133,9 @@ def test_candidate_identity_change_is_terminal_but_restores(
     prepare(monkeypatch, [snapshot(), snapshot("changed")])
     deps, calls = dependencies(tmp_path)
 
-    code, evidence = MODULE.execute(candidate(tmp_path), tmp_path / "identity-failure", deps)
+    code, evidence = MODULE.execute(
+        candidate(tmp_path), tmp_path / "identity-failure", deps
+    )
 
     assert code == 1
     assert "identity changed" in evidence["failure"]["reason"]
@@ -1077,7 +1150,9 @@ def test_create_new_output_rejects_existing_directory(tmp_path: Path) -> None:
         MODULE.finalize_directory(output, {"record.json": {"status": "ok"}})
 
 
-@pytest.mark.parametrize("kind", ["output-symlink", "staging-directory", "staging-symlink"])
+@pytest.mark.parametrize(
+    "kind", ["output-symlink", "staging-directory", "staging-symlink"]
+)
 def test_finalize_rejects_preexisting_and_symlink_paths(
     tmp_path: Path, kind: str
 ) -> None:
@@ -1150,23 +1225,39 @@ def _lock_runner(
                 "status": "created",
                 "runtime_directory_created": True,
                 "runtime_directory": {
-                    "path": str(lock_path.parent), "device": directory.st_dev,
-                    "inode": directory.st_ino, "mode": "0750", "uid": os.getuid(),
-                    "gid": os.getgid(), "nlink": directory.st_nlink,
+                    "path": str(lock_path.parent),
+                    "device": directory.st_dev,
+                    "inode": directory.st_ino,
+                    "mode": "0750",
+                    "uid": os.getuid(),
+                    "gid": os.getgid(),
+                    "nlink": directory.st_nlink,
                 },
                 "lock": {
-                    "path": str(lock_path), "device": lock.st_dev, "inode": lock.st_ino,
-                    "mode": "0600", "uid": os.getuid(), "gid": os.getgid(), "nlink": 1,
+                    "path": str(lock_path),
+                    "device": lock.st_dev,
+                    "inode": lock.st_ino,
+                    "mode": "0600",
+                    "uid": os.getuid(),
+                    "gid": os.getgid(),
+                    "nlink": 1,
                 },
             }
-            return subprocess.CompletedProcess(argv, 0, stdout=json.dumps(value), stderr="")
+            return subprocess.CompletedProcess(
+                argv, 0, stdout=json.dumps(value), stderr=""
+            )
         if cleanup_failure:
             return subprocess.CompletedProcess(argv, 1, stdout="", stderr="injected")
         device = int(argv[5])
         inode = int(argv[7])
         lock_path.unlink()
         lock_path.parent.rmdir()
-        value = {"status": "removed", "device": device, "inode": inode, "runtime_directory_removed": True}
+        value = {
+            "status": "removed",
+            "device": device,
+            "inode": inode,
+            "runtime_directory_removed": True,
+        }
         return subprocess.CompletedProcess(argv, 0, stdout=json.dumps(value), stderr="")
 
     return runner, calls
@@ -1200,7 +1291,9 @@ def test_lock_helper_rejects_non_whitelisted_argv() -> None:
         raise AssertionError
 
     with pytest.raises(MODULE.PromotionError, match="not whitelisted"):
-        MODULE._lock_helper_result(["sudo", "-n", str(MODULE.LOCK_HELPER), "shell"], runner, "bad")
+        MODULE._lock_helper_result(
+            ["sudo", "-n", str(MODULE.LOCK_HELPER), "shell"], runner, "bad"
+        )
     assert called is False
 
 
@@ -1211,8 +1304,10 @@ def test_lock_acquire_rejects_eacces_and_wrong_mode(
     monkeypatch.setattr(MODULE, "LOCK_PATH", lock_path)
     monkeypatch.setattr(MODULE, "LOCK_UID", os.getuid())
     monkeypatch.setattr(MODULE, "LOCK_GID", os.getgid())
+
     def denied(argv: list[str], timeout: float) -> subprocess.CompletedProcess[str]:
         return subprocess.CompletedProcess(argv, 1, stdout="", stderr="EACCES")
+
     with pytest.raises(MODULE.PromotionError, match="helper create failed"):
         MODULE.acquire_lock(lock_path, denied)
 
@@ -1254,7 +1349,9 @@ def test_restore_retries_transient_topology_and_reports_attempts() -> None:
         stop_service=lambda: None,
         start_service=lambda: None,
         acquire_lock=lambda: Lease(),
-        capture=lambda argv, env: subprocess.CompletedProcess(argv, 0, stdout="", stderr=""),
+        capture=lambda argv, env: subprocess.CompletedProcess(
+            argv, 0, stdout="", stderr=""
+        ),
         monotonic=lambda: clock[0],
         sleep=lambda seconds: clock.__setitem__(0, clock[0] + seconds),
     )
@@ -1268,7 +1365,9 @@ def test_restore_retries_transient_topology_and_reports_attempts() -> None:
     }
 
 
-def test_restore_timeout_preserves_last_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_restore_timeout_preserves_last_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     clock = [0.0]
     monkeypatch.setattr(MODULE, "RESTORE_TIMEOUT_SECONDS", 0.5)
     deps = MODULE.Dependencies(
@@ -1277,7 +1376,9 @@ def test_restore_timeout_preserves_last_failure(monkeypatch: pytest.MonkeyPatch)
         stop_service=lambda: None,
         start_service=lambda: None,
         acquire_lock=lambda: Lease(),
-        capture=lambda argv, env: subprocess.CompletedProcess(argv, 0, stdout="", stderr=""),
+        capture=lambda argv, env: subprocess.CompletedProcess(
+            argv, 0, stdout="", stderr=""
+        ),
         monotonic=lambda: clock[0],
         sleep=lambda seconds: clock.__setitem__(0, clock[0] + seconds),
     )
@@ -1309,7 +1410,9 @@ def test_restore_terminal_identity_or_unexpected_error_is_not_retried(
         stop_service=lambda: None,
         start_service=lambda: None,
         acquire_lock=lambda: Lease(),
-        capture=lambda argv, env: subprocess.CompletedProcess(argv, 0, stdout="", stderr=""),
+        capture=lambda argv, env: subprocess.CompletedProcess(
+            argv, 0, stdout="", stderr=""
+        ),
         monotonic=lambda: 0.0,
         sleep=sleeps.append,
     )
@@ -1334,9 +1437,13 @@ def test_restore_epoch_regression_and_foreign_owner_are_terminal() -> None:
             stop_service=lambda: None,
             start_service=lambda: None,
             acquire_lock=lambda: Lease(),
-            capture=lambda argv, env: subprocess.CompletedProcess(argv, 0, stdout="", stderr=""),
+            capture=lambda argv, env: subprocess.CompletedProcess(
+                argv, 0, stdout="", stderr=""
+            ),
             monotonic=lambda: 0.0,
-            sleep=lambda _: (_ for _ in ()).throw(AssertionError("terminal restore slept")),
+            sleep=lambda _: (_ for _ in ()).throw(
+                AssertionError("terminal restore slept")
+            ),
         )
         with pytest.raises(MODULE.TerminalRestoreError, match=reason):
             MODULE.poll_restored(deps, service(True), readiness())

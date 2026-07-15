@@ -29,7 +29,9 @@ except ModuleNotFoundError:
 
 
 ROOT = Path(__file__).resolve().parents[1]
-PROFILE = ROOT / "deploy/served-models/qwen35-9b-aq4-sq8-linear-qkv-z-overlay.profile.json"
+PROFILE = (
+    ROOT / "deploy/served-models/qwen35-9b-aq4-sq8-linear-qkv-z-overlay.profile.json"
+)
 WORKER = ROOT / "target/release/ullm-aq4-worker"
 GENERATOR = ROOT / "tools/generate-served-model.py"
 RECEIPT_WRITER = ROOT / "tools/write-qwen35-aq4-sq8-overlay-promotion-receipt.py"
@@ -59,6 +61,18 @@ READY_BODY = '{"status":"ready"}'
 READY_TIMEOUT_SECONDS = 5
 READINESS_SCHEMA = "ullm.bridge_container_readiness.v1"
 AUTHORIZATION_LINEAGE_SCHEMA = "ullm.sq8_authorization_lineage.v1"
+RUNTIME_MEMBERS = frozenset(
+    {
+        "gate.json",
+        "ullm-aq4-worker",
+        "profile.json",
+        "served-model.json",
+        "promotion-receipt.json",
+        "build-receipt.json",
+        "SHA256SUMS",
+        "lineage-input-manifest.json",
+    }
+)
 
 
 class GateError(RuntimeError):
@@ -169,16 +183,27 @@ def fixed_promotion_request_id(
         "authorization_lineage_manifest": authorization_lineage_manifest,
     }
     encoded = json.dumps(
-        identity, ensure_ascii=True, allow_nan=False, separators=(",", ":"), sort_keys=True
+        identity,
+        ensure_ascii=True,
+        allow_nan=False,
+        separators=(",", ":"),
+        sort_keys=True,
     ).encode("ascii")
     return "sq8-promotion-" + hashlib.sha256(encoded).hexdigest()
+
+
+def authorized_output_path(audit_sha256: str) -> Path:
+    digest = require_sha256(audit_sha256, "independent audit receipt SHA")
+    return Path(f"/tmp/ullm-sq8-overlay-gpu-promotion-gate-authorized-{digest[:16]}")
 
 
 def _prior_no_go_audit(path: Path | None) -> dict[str, Any] | None:
     if path is None:
         return None
     if path.is_symlink():
-        raise GateError("prior No-Go audit must be immutable 0444 single-link non-symlink")
+        raise GateError(
+            "prior No-Go audit must be immutable 0444 single-link non-symlink"
+        )
     path = path.resolve()
     metadata = path.stat(follow_symlinks=False)
     if (
@@ -186,7 +211,9 @@ def _prior_no_go_audit(path: Path | None) -> dict[str, Any] | None:
         or stat.S_IMODE(metadata.st_mode) != 0o444
         or metadata.st_nlink != 1
     ):
-        raise GateError("prior No-Go audit must be immutable 0444 single-link non-symlink")
+        raise GateError(
+            "prior No-Go audit must be immutable 0444 single-link non-symlink"
+        )
     receipt = read_object(path, "prior No-Go audit")
     source = receipt.get("audited_source")
     runtime = receipt.get("runtime")
@@ -195,7 +222,8 @@ def _prior_no_go_audit(path: Path | None) -> dict[str, Any] | None:
         receipt.get("schema_version") != AUDIT_SCHEMA
         or receipt.get("verdict") != "implementation_no_go"
         or receipt.get("actual") != "not_executed"
-        or receipt.get("reason_code") != "restore_retry_terminal_identity_not_fail_closed"
+        or receipt.get("reason_code")
+        != "restore_retry_terminal_identity_not_fail_closed"
         or not isinstance(source, dict)
         or not isinstance(source.get("commit"), str)
         or len(source["commit"]) != 40
@@ -220,7 +248,9 @@ def prior_failure_lineage(
     if path is None:
         return None
     if path.is_symlink():
-        raise GateError("prior failure receipt must be immutable 0444 single-link non-symlink")
+        raise GateError(
+            "prior failure receipt must be immutable 0444 single-link non-symlink"
+        )
     path = path.resolve()
     value = path.stat(follow_symlinks=False)
     if (
@@ -228,7 +258,9 @@ def prior_failure_lineage(
         or stat.S_IMODE(value.st_mode) != 0o444
         or value.st_nlink != 1
     ):
-        raise GateError("prior failure receipt must be immutable 0444 single-link non-symlink")
+        raise GateError(
+            "prior failure receipt must be immutable 0444 single-link non-symlink"
+        )
     receipt = read_object(path, "prior failure receipt")
     request_id = receipt.get("request_id")
     actual = receipt.get("actual")
@@ -259,13 +291,21 @@ def _docker_inspect(kind: str, identity: str) -> dict[str, Any]:
         capture_output=True,
         timeout=5,
     )
-    if completed.returncode != 0 or completed.stderr or len(completed.stdout) > MAX_JSON_BYTES:
+    if (
+        completed.returncode != 0
+        or completed.stderr
+        or len(completed.stdout) > MAX_JSON_BYTES
+    ):
         raise GateError(f"readiness {kind} inspect failed")
     try:
         values = json.loads(completed.stdout)
     except (UnicodeError, json.JSONDecodeError) as error:
         raise GateError(f"readiness {kind} inspect JSON differs") from error
-    if not isinstance(values, list) or len(values) != 1 or not isinstance(values[0], dict):
+    if (
+        not isinstance(values, list)
+        or len(values) != 1
+        or not isinstance(values[0], dict)
+    ):
         raise GateError(f"readiness {kind} inspect shape differs")
     return values[0]
 
@@ -293,7 +333,11 @@ def readiness_identity() -> dict[str, Any]:
     ):
         raise GateError("readiness container identity differs")
     network_name, attachment = next(iter(networks.items()))
-    if not isinstance(network_name, str) or not network_name or not isinstance(attachment, dict):
+    if (
+        not isinstance(network_name, str)
+        or not network_name
+        or not isinstance(attachment, dict)
+    ):
         raise GateError("readiness container network attachment differs")
     network_id = attachment.get("NetworkID")
     if not isinstance(network_id, str) or HEX64_RE.fullmatch(network_id) is None:
@@ -334,7 +378,9 @@ def readiness_identity() -> dict[str, Any]:
 
 
 def write_exclusive(path: Path, payload: bytes, mode: int = 0o444) -> None:
-    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, mode)
+    descriptor = os.open(
+        path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, mode
+    )
     try:
         with os.fdopen(descriptor, "wb", closefd=False) as destination:
             destination.write(payload)
@@ -346,32 +392,87 @@ def write_exclusive(path: Path, payload: bytes, mode: int = 0o444) -> None:
 
 
 def write_json_exclusive(path: Path, value: dict[str, Any], mode: int = 0o444) -> None:
-    raw = (json.dumps(value, ensure_ascii=True, allow_nan=False, indent=2, sort_keys=True) + "\n").encode("ascii")
+    raw = (
+        json.dumps(value, ensure_ascii=True, allow_nan=False, indent=2, sort_keys=True)
+        + "\n"
+    ).encode("ascii")
     write_exclusive(path, raw, mode)
 
 
+def _worker_fingerprint(metadata: os.stat_result) -> tuple[int, ...]:
+    return (
+        metadata.st_dev,
+        metadata.st_ino,
+        metadata.st_mode,
+        metadata.st_uid,
+        metadata.st_gid,
+        metadata.st_nlink,
+        metadata.st_size,
+        metadata.st_mtime_ns,
+        metadata.st_ctime_ns,
+    )
+
+
 def copy_binary_exclusive(source: Path, destination: Path) -> dict[str, Any]:
-    metadata = source.stat(follow_symlinks=False)
-    if source.is_symlink() or not stat.S_ISREG(metadata.st_mode) or not os.access(source, os.X_OK):
-        raise GateError("release worker must be an executable regular non-symlink file")
-    source_sha = sha_file(source)
-    descriptor = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o555)
+    source = source.resolve()
+    source_fd = os.open(
+        source, os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+    )
+    destination_fd: int | None = None
+    digest = hashlib.sha256()
     try:
-        with source.open("rb") as src, os.fdopen(descriptor, "wb", closefd=False) as dst:
-            shutil.copyfileobj(src, dst, 1024 * 1024)
-            dst.flush()
-            os.fsync(dst.fileno())
+        before = os.fstat(source_fd)
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or before.st_nlink != 1
+            or stat.S_IMODE(before.st_mode) not in {0o555, 0o755}
+        ):
+            raise GateError(
+                "release worker must be an executable single-link regular non-symlink file"
+            )
+        destination_fd = os.open(
+            destination,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+            0o555,
+        )
+        while chunk := os.read(source_fd, 1024 * 1024):
+            digest.update(chunk)
+            view = memoryview(chunk)
+            while view:
+                written = os.write(destination_fd, view)
+                if written <= 0:
+                    raise OSError("worker copy made no progress")
+                view = view[written:]
+        os.fsync(destination_fd)
+        os.fchmod(destination_fd, 0o555)
+        os.fsync(destination_fd)
+        after = os.fstat(source_fd)
+        final = os.lstat(source)
+        if _worker_fingerprint(before) != _worker_fingerprint(
+            after
+        ) or _worker_fingerprint(after) != _worker_fingerprint(final):
+            raise GateError("release worker changed during copy")
     finally:
-        os.close(descriptor)
-    destination.chmod(0o555)
+        os.close(source_fd)
+        if destination_fd is not None:
+            os.close(destination_fd)
+    source_sha = digest.hexdigest()
     copied = destination.stat(follow_symlinks=False)
-    if copied.st_nlink != 1 or copied.st_size != metadata.st_size or sha_file(destination) != source_sha:
+    if (
+        destination.is_symlink()
+        or not stat.S_ISREG(copied.st_mode)
+        or stat.S_IMODE(copied.st_mode) != 0o555
+        or copied.st_nlink != 1
+        or copied.st_size != before.st_size
+        or sha_file(destination) != source_sha
+    ):
         raise GateError("immutable worker copy identity differs")
     return {
-        "source_path": str(source.resolve()),
+        "source_path": str(source),
         "source_sha256": source_sha,
-        "source_bytes": metadata.st_size,
-        "source_nlink": metadata.st_nlink,
+        "source_bytes": before.st_size,
+        "source_mode": f"{stat.S_IMODE(before.st_mode):04o}",
+        "source_nlink": before.st_nlink,
         "immutable_path": str(destination.resolve()),
         "immutable_sha256": source_sha,
         "immutable_bytes": copied.st_size,
@@ -380,17 +481,90 @@ def copy_binary_exclusive(source: Path, destination: Path) -> dict[str, Any]:
     }
 
 
+def normalize_authorized_worker_identity(
+    identity: dict[str, Any], worker_path: Path
+) -> dict[str, Any]:
+    metadata = worker_path.stat(follow_symlinks=False)
+    digest = sha_file(worker_path)
+    if (
+        worker_path.is_symlink()
+        or not stat.S_ISREG(metadata.st_mode)
+        or stat.S_IMODE(metadata.st_mode) != 0o555
+        or metadata.st_nlink != 1
+        or digest != identity.get("immutable_sha256")
+        or metadata.st_size != identity.get("immutable_bytes")
+    ):
+        raise GateError("authorized worker self identity differs")
+    path = str(worker_path.resolve())
+    return {
+        "source_path": path,
+        "source_sha256": digest,
+        "source_bytes": metadata.st_size,
+        "source_mode": "0555",
+        "source_nlink": 1,
+        "immutable_path": path,
+        "immutable_sha256": digest,
+        "immutable_bytes": metadata.st_size,
+        "immutable_mode": "0555",
+        "immutable_nlink": 1,
+    }
+
+
+def _string_values(value: Any):
+    if isinstance(value, dict):
+        for child in value.values():
+            yield from _string_values(child)
+    elif isinstance(value, list):
+        for child in value:
+            yield from _string_values(child)
+    elif isinstance(value, str):
+        yield value
+
+
+def reject_runtime_references(runtime: Path, forbidden_runtime: Path) -> None:
+    runtime = runtime.resolve()
+    forbidden_runtime = forbidden_runtime.resolve()
+    if {entry.name for entry in runtime.iterdir()} != RUNTIME_MEMBERS:
+        raise GateError("authorized runtime member set differs")
+    forbidden_raw = str(forbidden_runtime).encode("utf-8")
+    for member in sorted(runtime.iterdir()):
+        raw = member.read_bytes()
+        if forbidden_raw in raw:
+            raise GateError(
+                f"authorized runtime retains audited runtime path: {member.name}"
+            )
+        if member.suffix != ".json":
+            continue
+        value = json.loads(raw)
+        for text in _string_values(value):
+            candidate = text[7:] if text.startswith("file://") else text
+            if not candidate.startswith("/"):
+                continue
+            resolved = Path(candidate).resolve(strict=False)
+            if resolved == forbidden_runtime or forbidden_runtime in resolved.parents:
+                raise GateError(
+                    f"authorized runtime retains audited runtime path alias: {member.name}"
+                )
+
+
 def validate_profile(profile: dict[str, Any]) -> None:
     worker = profile.get("worker")
-    if profile.get("schema_version") != "ullm.served_model.profile.v1" or not isinstance(worker, dict):
+    if profile.get(
+        "schema_version"
+    ) != "ullm.served_model.profile.v1" or not isinstance(worker, dict):
         raise GateError("overlay served-model profile schema differs")
-    if profile.get("format") != {"format_id": "AQ4_0", "implementation_id": IMPLEMENTATION_ID}:
+    if profile.get("format") != {
+        "format_id": "AQ4_0",
+        "implementation_id": IMPLEMENTATION_ID,
+    }:
         raise GateError("overlay implementation identity differs")
     identity = worker.get("identity")
     if identity != {"device": "gfx1201", "execution_profile": EXECUTION_PROFILE}:
         raise GateError("overlay worker identity differs")
     required = worker.get("required_environment")
-    if not isinstance(required, list) or any(name not in required for name in REQUIRED_OVERLAY_ENV):
+    if not isinstance(required, list) or any(
+        name not in required for name in REQUIRED_OVERLAY_ENV
+    ):
         raise GateError("overlay required environment is incomplete")
 
 
@@ -406,14 +580,20 @@ def validate_binding(binding: dict[str, Any], package_manifest: Path) -> None:
     names = binding.get("tensor_names")
     if not isinstance(names, list) or len(names) != 48 or len(set(names)) != 48:
         raise GateError("overlay binding tensor set is not exactly 48 unique tensors")
-    if any(not isinstance(name, str) or not name.endswith(("in_proj_qkv.weight", "in_proj_z.weight")) for name in names):
+    if any(
+        not isinstance(name, str)
+        or not name.endswith(("in_proj_qkv.weight", "in_proj_z.weight"))
+        for name in names
+    ):
         raise GateError("overlay binding contains a non-QKV/Z tensor")
     for field in ("content_sha256", "tensor_set_sha256"):
         value = binding.get(field)
         if not isinstance(value, str) or len(value) != 64:
             raise GateError(f"overlay binding {field} is invalid")
     package = binding.get("package")
-    if not isinstance(package, dict) or package.get("manifest_sha256") != sha_file(package_manifest):
+    if not isinstance(package, dict) or package.get("manifest_sha256") != sha_file(
+        package_manifest
+    ):
         raise GateError("overlay package manifest binding differs")
 
 
@@ -422,7 +602,12 @@ def _audit_reference(record: Any, expected_path: Path, label: str) -> str:
         raise GateError(f"independent audit {label} reference differs")
     path = Path(str(record["path"])).resolve()
     digest = require_sha256(record["sha256"], f"independent audit {label}")
-    if path != expected_path.resolve() or path.is_symlink() or not path.is_file() or sha_file(path) != digest:
+    if (
+        path != expected_path.resolve()
+        or path.is_symlink()
+        or not path.is_file()
+        or sha_file(path) != digest
+    ):
         raise GateError(f"independent audit {label} live identity differs")
     return digest
 
@@ -436,7 +621,9 @@ def validate_independent_audit(
     authorization_lineage_manifest: dict[str, Any],
 ) -> dict[str, Any]:
     if path.is_symlink():
-        raise GateError("independent audit receipt must be immutable 0444 single-link non-symlink")
+        raise GateError(
+            "independent audit receipt must be immutable 0444 single-link non-symlink"
+        )
     path = path.resolve()
     metadata = path.stat(follow_symlinks=False)
     if (
@@ -445,18 +632,37 @@ def validate_independent_audit(
         or stat.S_IMODE(metadata.st_mode) != 0o444
         or metadata.st_nlink != 1
     ):
-        raise GateError("independent audit receipt must be immutable 0444 single-link non-symlink")
+        raise GateError(
+            "independent audit receipt must be immutable 0444 single-link non-symlink"
+        )
     audit_sha = sha_file(path)
     audit = read_object(path, "independent audit receipt")
     if set(audit) != {
-        "schema_version", "auditor_task_id", "audited_at_utc", "audited_source", "runtime",
-        "fixed_request_id", "gate_state", "topology", "verdict", "actual", "tests",
+        "schema_version",
+        "auditor_task_id",
+        "audited_at_utc",
+        "audited_source",
+        "runtime",
+        "fixed_request_id",
+        "gate_state",
+        "topology",
+        "verdict",
+        "actual",
+        "tests",
     }:
         raise GateError("independent audit receipt shape differs")
-    if audit.get("schema_version") != AUDIT_SCHEMA or audit.get("verdict") != "implementation_ready" or audit.get("actual") != "not_executed":
+    if (
+        audit.get("schema_version") != AUDIT_SCHEMA
+        or audit.get("verdict") != "implementation_ready"
+        or audit.get("actual") != "not_executed"
+    ):
         raise GateError("independent audit verdict differs")
     source = audit.get("audited_source")
-    if source != {"commit": commit, "tree_sha256": tree, "archive_sha256": archive_sha256}:
+    if source != {
+        "commit": commit,
+        "tree_sha256": tree,
+        "archive_sha256": archive_sha256,
+    }:
         raise GateError("independent audit source identity differs")
     require_sha256(source["archive_sha256"], "independent audit source archive")
     request_id = audit.get("fixed_request_id")
@@ -464,22 +670,44 @@ def validate_independent_audit(
         raise GateError("independent audit fixed request ID differs")
     runtime = audit.get("runtime")
     if not isinstance(runtime, dict) or set(runtime) != {
-        "path", "gate", "worker", "profile", "served_model", "prepared_receipt",
-        "binding", "package", "authorization_lineage_manifest", "sha256sums",
+        "path",
+        "gate",
+        "worker",
+        "profile",
+        "served_model",
+        "prepared_receipt",
+        "binding",
+        "package",
+        "authorization_lineage_manifest",
+        "sha256sums",
     }:
         raise GateError("independent audit runtime shape differs")
     runtime_root = Path(str(runtime["path"])).resolve()
-    if runtime_root.is_symlink() or not runtime_root.is_dir() or stat.S_IMODE(runtime_root.stat().st_mode) != 0o555:
+    if (
+        runtime_root.is_symlink()
+        or not runtime_root.is_dir()
+        or stat.S_IMODE(runtime_root.stat().st_mode) != 0o555
+    ):
         raise GateError("independent audit runtime topology differs")
     if {entry.name for entry in runtime_root.iterdir()} != {
-        "gate.json", "ullm-aq4-worker", "profile.json", "served-model.json",
-        "promotion-receipt.json", "build-receipt.json", "SHA256SUMS",
+        "gate.json",
+        "ullm-aq4-worker",
+        "profile.json",
+        "served-model.json",
+        "promotion-receipt.json",
+        "build-receipt.json",
+        "SHA256SUMS",
         "lineage-input-manifest.json",
     }:
         raise GateError("independent audit runtime member set differs")
     for entry in runtime_root.iterdir():
         item = entry.stat(follow_symlinks=False)
-        if entry.is_symlink() or not stat.S_ISREG(item.st_mode) or stat.S_IMODE(item.st_mode) not in {0o444, 0o555} or item.st_nlink != 1:
+        if (
+            entry.is_symlink()
+            or not stat.S_ISREG(item.st_mode)
+            or stat.S_IMODE(item.st_mode) not in {0o444, 0o555}
+            or item.st_nlink != 1
+        ):
             raise GateError("independent audit runtime file topology differs")
     gate_path = runtime_root / "gate.json"
     worker_path = runtime_root / "ullm-aq4-worker"
@@ -492,11 +720,18 @@ def validate_independent_audit(
         "gate_sha256": _audit_reference(runtime["gate"], gate_path, "Gate"),
         "worker_sha256": _audit_reference(runtime["worker"], worker_path, "worker"),
         "profile_sha256": _audit_reference(runtime["profile"], profile_path, "profile"),
-        "manifest_sha256": _audit_reference(runtime["served_model"], manifest_path, "served model"),
-        "prepared_receipt_sha256": _audit_reference(runtime["prepared_receipt"], receipt_path, "prepared receipt"),
-        "sha256sums_sha256": _audit_reference(runtime["sha256sums"], sums_path, "SHA256SUMS"),
+        "manifest_sha256": _audit_reference(
+            runtime["served_model"], manifest_path, "served model"
+        ),
+        "prepared_receipt_sha256": _audit_reference(
+            runtime["prepared_receipt"], receipt_path, "prepared receipt"
+        ),
+        "sha256sums_sha256": _audit_reference(
+            runtime["sha256sums"], sums_path, "SHA256SUMS"
+        ),
         "authorization_lineage_manifest_sha256": _audit_reference(
-            runtime["authorization_lineage_manifest"], lineage_path,
+            runtime["authorization_lineage_manifest"],
+            lineage_path,
             "authorization lineage manifest",
         ),
     }
@@ -508,7 +743,9 @@ def validate_independent_audit(
             expected_lineage_ref, expected_runtime_path=lineage_path
         )
     except lineage_tool.LineageError as error:
-        raise GateError(f"independent audit authorization lineage differs: {error}") from error
+        raise GateError(
+            f"independent audit authorization lineage differs: {error}"
+        ) from error
     gate = read_object(gate_path, "audited Gate")
     prepared = read_object(receipt_path, "audited prepared receipt")
     build = read_object(runtime_root / "build-receipt.json", "audited build receipt")
@@ -524,7 +761,8 @@ def validate_independent_audit(
         or build.get("release_source_archive_sha256") != archive_sha256
         or build.get("promotion_request_id") != request_id
         or gate.get("authorization", {}).get("lineage_manifest") != expected_lineage_ref
-        or build.get("inputs", {}).get("authorization_lineage_manifest") != expected_lineage_ref
+        or build.get("inputs", {}).get("authorization_lineage_manifest")
+        != expected_lineage_ref
     ):
         raise GateError("independent audit Gate/build state differs")
     if (
@@ -532,44 +770,70 @@ def validate_independent_audit(
         or prepared.get("actual") != {"status": "pending", "required": True}
         or prepared.get("request_id") != request_id
         or prepared.get("source_commit") != commit
-        or prepared.get("source_provenance") != {"tree_sha256": tree, "archive_sha256": archive_sha256}
-        or manifest.get("promotion", {}).get("receipt_sha256") != identities["prepared_receipt_sha256"]
-        or Path(str(profile.get("promotion", {}).get("receipt", ""))).resolve() != receipt_path
-        or profile.get("promotion", {}).get("authorization_lineage") != expected_lineage_ref
+        or prepared.get("source_provenance")
+        != {"tree_sha256": tree, "archive_sha256": archive_sha256}
+        or manifest.get("promotion", {}).get("receipt_sha256")
+        != identities["prepared_receipt_sha256"]
+        or Path(str(profile.get("promotion", {}).get("receipt", ""))).resolve()
+        != receipt_path
+        or profile.get("promotion", {}).get("authorization_lineage")
+        != expected_lineage_ref
         or prepared.get("authorization_lineage") != expected_lineage_ref
-        or manifest.get("promotion", {}).get("authorization_lineage") != expected_lineage_ref
+        or manifest.get("promotion", {}).get("authorization_lineage")
+        != expected_lineage_ref
     ):
         raise GateError("independent audit prepared/profile/manifest state differs")
     product_root = Path(str(profile.get("product", {}).get("root", ""))).resolve()
-    binding_path = product_root / str(profile.get("product", {}).get("artifact", {}).get("manifest_path", ""))
-    package_path = product_root / str(profile.get("product", {}).get("package", {}).get("manifest_path", ""))
+    binding_path = product_root / str(
+        profile.get("product", {}).get("artifact", {}).get("manifest_path", "")
+    )
+    package_path = product_root / str(
+        profile.get("product", {}).get("package", {}).get("manifest_path", "")
+    )
     binding = read_object(binding_path, "audited overlay binding")
     binding_ref = runtime.get("binding")
-    if not isinstance(binding_ref, dict) or set(binding_ref) != {"path", "sha256", "content_sha256", "tensor_set_sha256", "tensor_count"}:
+    if not isinstance(binding_ref, dict) or set(binding_ref) != {
+        "path",
+        "sha256",
+        "content_sha256",
+        "tensor_set_sha256",
+        "tensor_count",
+    }:
         raise GateError("independent audit binding reference differs")
     if (
         Path(str(binding_ref["path"])).resolve() != binding_path.resolve()
-        or require_sha256(binding_ref["sha256"], "independent audit binding") != sha_file(binding_path)
+        or require_sha256(binding_ref["sha256"], "independent audit binding")
+        != sha_file(binding_path)
         or binding_ref.get("content_sha256") != binding.get("content_sha256")
         or binding_ref.get("tensor_set_sha256") != binding.get("tensor_set_sha256")
         or binding_ref.get("tensor_count") != 48
-        or prepared.get("overlay", {}).get("binding_manifest_sha256") != binding_ref["sha256"]
-        or prepared.get("overlay", {}).get("content_sha256") != binding_ref["content_sha256"]
-        or prepared.get("overlay", {}).get("tensor_set_sha256") != binding_ref["tensor_set_sha256"]
+        or prepared.get("overlay", {}).get("binding_manifest_sha256")
+        != binding_ref["sha256"]
+        or prepared.get("overlay", {}).get("content_sha256")
+        != binding_ref["content_sha256"]
+        or prepared.get("overlay", {}).get("tensor_set_sha256")
+        != binding_ref["tensor_set_sha256"]
     ):
         raise GateError("independent audit binding identity differs")
     _audit_reference(runtime["package"], package_path, "package")
-    if prepared.get("package", {}).get("manifest_sha256") != runtime["package"]["sha256"]:
+    if (
+        prepared.get("package", {}).get("manifest_sha256")
+        != runtime["package"]["sha256"]
+    ):
         raise GateError("independent audit package identity differs")
     gate_state = audit.get("gate_state")
     if gate_state != {
-        "status": "ready_for_independent_audit", "actual_run_allowed": False,
+        "status": "ready_for_independent_audit",
+        "actual_run_allowed": False,
         "prepared_receipt_status": "prepared_not_executed",
         "prepared_receipt_actual": {"status": "pending", "required": True},
     }:
         raise GateError("independent audit declared Gate state differs")
     tests = audit.get("tests")
-    if not isinstance(tests, dict) or tests.get("gpu_or_service_execution") is not False:
+    if (
+        not isinstance(tests, dict)
+        or tests.get("gpu_or_service_execution") is not False
+    ):
         raise GateError("independent audit execution boundary differs")
     return {
         "path": str(path),
@@ -583,19 +847,35 @@ def validate_independent_audit(
 
 
 def materialize(args: argparse.Namespace) -> dict[str, Any]:
-    output = args.output.resolve()
+    output_argument = Path(args.output)
+    if not output_argument.is_absolute() or output_argument != output_argument.resolve(
+        strict=False
+    ):
+        raise GateError("output path must be absolute and canonical")
+    output = output_argument
     if output.exists() or output.is_symlink():
         raise GateError(f"refusing to reuse output directory: {output}")
     commit = git_value("rev-parse", f"{args.release_source_commit}^{{commit}}")
     if commit != args.release_source_commit:
         raise GateError("release source commit must be the full canonical commit id")
     profile_source = args.profile.resolve()
-    worker_source = args.worker_binary.resolve()
+    worker_argument = Path(args.worker_binary)
+    if (
+        not worker_argument.is_absolute()
+        or worker_argument.is_symlink()
+        or worker_argument != worker_argument.resolve()
+    ):
+        raise GateError(
+            "worker source path must be absolute, canonical, and non-symlink"
+        )
+    worker_source = worker_argument
     profile = read_object(profile_source, "overlay deployment profile")
     validate_profile(profile)
     product_root = Path(str(profile["product"]["root"])).resolve()
     binding_path = product_root / str(profile["product"]["artifact"]["manifest_path"])
-    package_manifest = product_root / str(profile["product"]["package"]["manifest_path"])
+    package_manifest = product_root / str(
+        profile["product"]["package"]["manifest_path"]
+    )
     binding = read_object(binding_path, "overlay binding")
     validate_binding(binding, package_manifest)
     readiness = readiness_identity()
@@ -619,7 +899,9 @@ def materialize(args: argparse.Namespace) -> dict[str, Any]:
                 },
             )
         except lineage_tool.LineageError as error:
-            raise GateError(f"authorization lineage manifest differs: {error}") from error
+            raise GateError(
+                f"authorization lineage manifest differs: {error}"
+            ) from error
         lineage_request_identity = {
             "schema_version": lineage_tool.REFERENCE_SCHEMA,
             "input_path": lineage_input["path"],
@@ -629,21 +911,30 @@ def materialize(args: argparse.Namespace) -> dict[str, Any]:
     authorize = bool(getattr(args, "authorize_actual_run", False))
     audit_path = getattr(args, "independent_audit_receipt", None)
     if authorize != (audit_path is not None):
-        raise GateError("authorization flag and independent audit receipt are required together")
+        raise GateError(
+            "authorization flag and independent audit receipt are required together"
+        )
     if authorize and lineage_input is None:
-        raise GateError("actual authorization requires an authorization lineage manifest")
+        raise GateError(
+            "actual authorization requires an authorization lineage manifest"
+        )
     audit = None
     if authorize:
         audit = validate_independent_audit(
-            Path(audit_path), commit=commit, tree=source_tree,
+            Path(audit_path),
+            commit=commit,
+            tree=source_tree,
             archive_sha256=source_archive,
             authorization_lineage_manifest=lineage_input,
         )
-        expected_output = Path(
-            f"/tmp/ullm-sq8-overlay-gpu-promotion-gate-authorized-{audit['sha256'][:16]}"
-        )
+        expected_output = authorized_output_path(audit["sha256"])
         if output != expected_output:
-            raise GateError(f"authorized output path must be create-new {expected_output}")
+            raise GateError(
+                f"authorized output path must be create-new {expected_output}"
+            )
+        audited_worker = Path(audit["runtime"]) / "ullm-aq4-worker"
+        if worker_source != audited_worker.resolve():
+            raise GateError("authorized worker source differs from audited runtime")
 
     output.mkdir(mode=0o700, parents=False)
     try:
@@ -676,7 +967,13 @@ def materialize(args: argparse.Namespace) -> dict[str, Any]:
             or sha_file(binding_path) != audit["binding_sha256"]
             or sha_file(package_manifest) != audit["package_sha256"]
         ):
-            raise GateError("authorized candidate differs from independently audited identity")
+            raise GateError(
+                "authorized candidate differs from independently audited identity"
+            )
+        if audit is not None:
+            worker_identity = normalize_authorized_worker_identity(
+                worker_identity, immutable_worker
+            )
         receipt_path = output / "promotion-receipt.json"
         candidate_profile = json.loads(json.dumps(profile))
         candidate_profile["worker"]["binary"] = str(immutable_worker)
@@ -723,12 +1020,22 @@ def materialize(args: argparse.Namespace) -> dict[str, Any]:
             "release_source_tree": source_tree,
             "release_source_archive_sha256": source_archive,
             "build": {
-                "command": ["cargo", "build", "--release", "-p", "ullm-engine", "--bin", "ullm-aq4-worker"],
+                "command": [
+                    "cargo",
+                    "build",
+                    "--release",
+                    "-p",
+                    "ullm-engine",
+                    "--bin",
+                    "ullm-aq4-worker",
+                ],
                 "jobs": 1,
                 "environment": {"CARGO_BUILD_JOBS": "1"},
                 "cargo_version": command_text(["cargo", "--version"]),
                 "rustc_verbose_version": command_text(["rustc", "-vV"]),
-                "cxx_version": command_text([os.environ.get("CXX", "c++"), "--version"]).splitlines()[0],
+                "cxx_version": command_text(
+                    [os.environ.get("CXX", "c++"), "--version"]
+                ).splitlines()[0],
             },
             "worker": worker_identity,
             "inputs": {
@@ -742,7 +1049,13 @@ def materialize(args: argparse.Namespace) -> dict[str, Any]:
                 "package_manifest_sha256": sha_file(package_manifest),
                 "prior_failure_receipt": (
                     authorization_lineage["prior_failure_receipt"]
-                    if authorization_lineage is not None else None
+                    if authorization_lineage is not None
+                    else None
+                ),
+                "independent_audit_receipt": (
+                    {"path": audit["path"], "sha256": audit["sha256"]}
+                    if audit is not None
+                    else None
                 ),
                 "authorization_lineage_manifest": lineage_reference,
             },
@@ -752,7 +1065,9 @@ def materialize(args: argparse.Namespace) -> dict[str, Any]:
 
         gate = {
             "schema_version": SCHEMA,
-            "status": "authorized_pending_execution" if authorize else "ready_for_independent_audit",
+            "status": "authorized_pending_execution"
+            if authorize
+            else "ready_for_independent_audit",
             "actual_run_allowed": authorize,
             "release_source_commit": commit,
             "classification": {
@@ -762,14 +1077,17 @@ def materialize(args: argparse.Namespace) -> dict[str, Any]:
                 "policy_relaxed": False,
             },
             "authorization": {
-                "blocked_until": None if authorize else "independent_executor_and_gate_audit",
+                "blocked_until": None
+                if authorize
+                else "independent_executor_and_gate_audit",
                 "fresh_output_required": True,
                 "maximum_actual_runs": 1,
                 "max_attempts": 1 if authorize else 0,
                 "service_or_gpu_commands_during_preparation": 0,
                 "independent_audit_receipt": (
                     {"path": audit["path"], "sha256": audit["sha256"]}
-                    if audit is not None else None
+                    if audit is not None
+                    else None
                 ),
                 "lineage": authorization_lineage,
                 "lineage_manifest": lineage_reference,
@@ -795,13 +1113,24 @@ def materialize(args: argparse.Namespace) -> dict[str, Any]:
             },
             "required_environment": {name: "1" for name in REQUIRED_OVERLAY_ENV},
             "request": {
-                "smoke": {"prompt_token_ids": [1], "max_new_tokens": 1, "telemetry_eligible": False},
+                "smoke": {
+                    "prompt_token_ids": [1],
+                    "max_new_tokens": 1,
+                    "telemetry_eligible": False,
+                },
                 "actual": {
                     "request_id": request_id,
                     "prompt_token_ids": list(range(1, 129)),
                     "max_new_tokens": 1,
-                    "sampling": {"temperature": 0.0, "top_p": 1.0, "top_k": 1, "seed": 0},
-                    "telemetry_environment": {"ULLM_SQ8_PROMOTION_EVIDENCE_REQUEST_ID": request_id},
+                    "sampling": {
+                        "temperature": 0.0,
+                        "top_p": 1.0,
+                        "top_k": 1,
+                        "seed": 0,
+                    },
+                    "telemetry_environment": {
+                        "ULLM_SQ8_PROMOTION_EVIDENCE_REQUEST_ID": request_id
+                    },
                 },
             },
             "sequence": [
@@ -826,17 +1155,41 @@ def materialize(args: argparse.Namespace) -> dict[str, Any]:
                     "triple_matvec_count": 0,
                     "fallback_count": 0,
                 },
-                "diagnostic_host_staging": {"read_count": 0, "write_count": 0, "read_bytes": 0, "write_bytes": 0},
+                "diagnostic_host_staging": {
+                    "read_count": 0,
+                    "write_count": 0,
+                    "read_bytes": 0,
+                    "write_bytes": 0,
+                },
                 "token_output_identity_sha256_required": True,
-                "pre_post_hashes_equal": ["source", "artifact", "binding", "package", "worker"],
-                "service_restore": {"new_epoch": True, "healthy": True, "lock_restored": True},
+                "pre_post_hashes_equal": [
+                    "source",
+                    "artifact",
+                    "binding",
+                    "package",
+                    "worker",
+                ],
+                "service_restore": {
+                    "new_epoch": True,
+                    "healthy": True,
+                    "lock_restored": True,
+                },
                 "failure_cleanup_and_restore_required": True,
             },
             "trusted_components": {
-                "maintenance_wrapper": {"path": str(MAINTENANCE), "sha256": sha_file(MAINTENANCE)},
+                "maintenance_wrapper": {
+                    "path": str(MAINTENANCE),
+                    "sha256": sha_file(MAINTENANCE),
+                },
                 "executor_capture": {"path": str(CAPTURE), "sha256": sha_file(CAPTURE)},
-                "served_model_generator": {"path": str(GENERATOR), "sha256": sha_file(GENERATOR)},
-                "promotion_receipt_writer": {"path": str(RECEIPT_WRITER), "sha256": sha_file(RECEIPT_WRITER)},
+                "served_model_generator": {
+                    "path": str(GENERATOR),
+                    "sha256": sha_file(GENERATOR),
+                },
+                "promotion_receipt_writer": {
+                    "path": str(RECEIPT_WRITER),
+                    "sha256": sha_file(RECEIPT_WRITER),
+                },
             },
             "candidate": {
                 "worker": str(immutable_worker),
@@ -847,8 +1200,12 @@ def materialize(args: argparse.Namespace) -> dict[str, Any]:
                 "ready_expected": {
                     "model": manifest["public"]["id"],
                     "model_revision": manifest["public"]["revision"],
-                    "artifact_content_sha256": manifest["product"]["artifact"]["content_sha256"],
-                    "package_manifest_sha256": manifest["product"]["package"]["manifest_sha256"],
+                    "artifact_content_sha256": manifest["product"]["artifact"][
+                        "content_sha256"
+                    ],
+                    "package_manifest_sha256": manifest["product"]["package"][
+                        "manifest_sha256"
+                    ],
                     "device": "gfx1201",
                     "execution_profile": EXECUTION_PROFILE,
                 },
@@ -891,7 +1248,15 @@ def materialize(args: argparse.Namespace) -> dict[str, Any]:
                 or refreshed["entries_sha256"] != lineage_input["entries_sha256"]
             ):
                 raise GateError("authorization lineage changed during materialization")
+        if (
+            audit is not None
+            and normalize_authorized_worker_identity(worker_identity, immutable_worker)
+            != worker_identity
+        ):
+            raise GateError("authorized worker changed during materialization")
         write_exclusive(output / "SHA256SUMS", "".join(hashes).encode("ascii"))
+        if audit is not None:
+            reject_runtime_references(output, Path(audit["runtime"]))
         directory = os.open(output, os.O_RDONLY | os.O_DIRECTORY)
         try:
             os.fsync(directory)
@@ -927,7 +1292,10 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(materialize(args), sort_keys=True))
         return 0
     except (GateError, OSError, ValueError, subprocess.SubprocessError) as error:
-        print(f"SQ8 overlay GPU promotion Gate preparation failed: {error}", file=sys.stderr)
+        print(
+            f"SQ8 overlay GPU promotion Gate preparation failed: {error}",
+            file=sys.stderr,
+        )
         return 1
 
 
