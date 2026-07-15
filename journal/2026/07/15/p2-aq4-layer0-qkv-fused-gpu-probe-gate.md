@@ -23,7 +23,9 @@ fused probe report schema v2とCPU診断は既存実装で完了していた。H
 - PTY `sudo -v`後のfresh `attempt2/attempts/attempt1/`はservice stop→stable2停止→lock acquireまで進んだが、observer初回sampleで停止した。実行対象のprobe kernelは未起動で、`run.log`は`observer failed before first sample`、observer failure markerが残った。`amd-smi --showmeminfo vram --showuse --showpower --json`は、実機AMD-SMI 26.2.2/ROCm 7.2.1のsubcommand式CLIと不一致で`AmdSmiInvalidSubcommandException`になった。
 - 失敗trapの復旧は完了した。serviceはactive/running、旧MainPID `1834403`から新MainPID `2381944`、workerは`1834494`から`2382329`、`NRestarts=0`である。`/run/ullm/r9700.lock`はuid/gid `1000:1000`、mode `0600`、nlink `1`の新inode `770421`をservice workerが保持している。GPU kernel、numeric threshold、promotionは実施していない（promotion=false/unclassified固定）。
 - attempt2の証跡はruntime stat SHA-256 `aeae99d8b4c06d16570f3b119d836a7995fe6f27e7e7c18c291c6244d77ab9a9`、prestate SHA-256 `fab7cebdcbb8304528fa53fec9727fc6612bfe7e8409d77e353be3b44ed88fb5`、run log SHA-256 `eb00c14a402386228ca5dbf656ffaf0271e78e47dcde2e0f16bfa4edf21b04a8`である。
+- attempt2の初回sample失敗を根拠に、実機のread-only CLI capabilityを再確認した。`amd-smi version`はAMD-SMI `26.2.2+e1a6bc5663`/ROCm `7.2.1`、metricは`amd-smi metric -g 2 -m -u -p -t --json`、gfx/ASIC identityは`amd-smi static -g 2 -a --json`で取得できる。単発metric JSONはgpu=2のusage/power/mem_usageを、static JSONはgpu=2・`target_graphics_version=gfx1201`を返した。
+- observerを現行subcommand式へ最小修正し、metric/static両JSONの単一gpu=2、usage/power/mem_usage、gfx1201をfail closedで検証してmonitorへ保存する。mockでは初回成功、初回失敗伝播、observer停止を検証した。既存attemptは保全し、GPU kernel/serviceの再実行は行っていない。既定attemptが既存のため、fresh BASEでPREFLIGHT_ONLY/MOCK_PREFLIGHTを再確認した。
 
 ## 次の行動
 
-observer CLIを現行AMD-SMIのsubcommand形式へ別途適合させ、再実行前にpreflightで確認する。今回の失敗証跡を限定commitとして保存し、GPU kernel実行・閾値判定・promotionは行わない。
+このobserver修正を限定commitとして保存する。GPU kernel実行・service stop/start・閾値判定・promotionは行わず、次回の明示許可までread-only preflight/mockだけを維持する。

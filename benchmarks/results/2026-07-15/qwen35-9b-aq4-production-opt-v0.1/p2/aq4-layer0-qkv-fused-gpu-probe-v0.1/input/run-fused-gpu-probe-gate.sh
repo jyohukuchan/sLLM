@@ -48,6 +48,10 @@ RUNTIME_DIR_REMOVE=(sudo -n -- rmdir)
 LOCK="/run/ullm/r9700.lock"
 RUNTIME_DIR="${LOCK%/*}"
 ROCM_SMI="${ROCM_SMI:-/opt/rocm/bin/amd-smi}"
+# AMD-SMI 26.x subcommands are used explicitly. Legacy --show* flags are not
+# retried silently: a capability mismatch must fail closed before any probe.
+ROCM_SMI_METRIC_ARGS=(metric -g "$EXPECTED_PHYSICAL_CARD" -m -u -p -t --json)
+ROCM_SMI_STATIC_ARGS=(static -g "$EXPECTED_PHYSICAL_CARD" -a --json)
 SUDO=(sudo -n --)
 
 PREFLIGHT_ONLY="${PREFLIGHT_ONLY:-0}"
@@ -55,6 +59,7 @@ PREFLIGHT_LOCKED_ONLY="${PREFLIGHT_LOCKED_ONLY:-0}"
 MOCK_PREFLIGHT="${MOCK_PREFLIGHT:-0}"
 EXECUTE_GPU_PROBE="${EXECUTE_GPU_PROBE:-0}"
 MOCK_OBSERVER="${MOCK_OBSERVER:-0}"
+MOCK_OBSERVER_LOOP="${MOCK_OBSERVER_LOOP:-0}"
 if [[ "$PREFLIGHT_ONLY" = 1 && "$PREFLIGHT_LOCKED_ONLY" = 1 ]]; then
   echo "preflight modes are mutually exclusive" >&2
   exit 64
@@ -287,22 +292,44 @@ validate_preflight() {
 }
 
 observer_sample_once() {
-  local sample normalized
-  if ! sample="$("$ROCM_SMI" --showmeminfo vram --showuse --showpower --json 2>&1)"; then
+  local metric static normalized
+  if ! metric="$("$ROCM_SMI" "${ROCM_SMI_METRIC_ARGS[@]}" 2>&1)"; then
     : > "$OBSERVER_FAIL_MARKER"
     return 1
   fi
-  if ! normalized="$(printf '%s' "$sample" | "$PYTHON" -c '
+  if ! static="$("$ROCM_SMI" "${ROCM_SMI_STATIC_ARGS[@]}" 2>&1)"; then
+    : > "$OBSERVER_FAIL_MARKER"
+    return 1
+  fi
+  if ! normalized="$(METRIC_JSON="$metric" STATIC_JSON="$static" "$PYTHON" -c '
 import json
+import os
 import sys
 
-payload = json.load(sys.stdin)
-card = "card" + sys.argv[1]
+metric = json.loads(os.environ["METRIC_JSON"])
+static = json.loads(os.environ["STATIC_JSON"])
+card = int(sys.argv[1])
 architecture = sys.argv[2]
-value = payload.get(card)
-if not isinstance(value, dict) or value.get("GFX Version") != architecture:
+metric_data = metric.get("gpu_data")
+static_data = static.get("gpu_data")
+if not isinstance(metric_data, list) or len(metric_data) != 1:
     raise SystemExit(1)
-print(json.dumps({"physical_card": int(sys.argv[1]), "architecture": architecture, "sample": payload}, separators=(",", ":")))
+if not isinstance(static_data, list) or len(static_data) != 1:
+    raise SystemExit(1)
+metric_card = metric_data[0]
+static_card = static_data[0]
+if not isinstance(metric_card, dict) or metric_card.get("gpu") != card:
+    raise SystemExit(1)
+if not isinstance(static_card, dict) or static_card.get("gpu") != card:
+    raise SystemExit(1)
+if not isinstance(metric_card.get("usage"), dict) or not isinstance(metric_card.get("power"), dict):
+    raise SystemExit(1)
+if not isinstance(metric_card.get("mem_usage"), dict):
+    raise SystemExit(1)
+asic = static_card.get("asic")
+if not isinstance(asic, dict) or asic.get("target_graphics_version") != architecture:
+    raise SystemExit(1)
+print(json.dumps({"physical_card": card, "architecture": architecture, "metric": metric, "static": static}, separators=(",", ":")))
 ' "$EXPECTED_PHYSICAL_CARD" "$EXPECTED_DEVICE_ARCHITECTURE")"; then
     : > "$OBSERVER_FAIL_MARKER"
     return 1
@@ -510,6 +537,12 @@ if [[ "${MOCK_ARCHIVE_SETUP:-0}" = 1 ]]; then
   mkdir -m 0750 -- "$ATTEMPT_ROOT" || fail "attempt directory create-new failed"
   prepare_runtime_probe
   echo "mock_archive_setup=1 runtime_probe_mode=0555 runtime_probe_nlink=1 runtime_probe_sha256=$EXPECTED_PROBE_BINARY_SHA256 service_stop=0 gpu_run=0"
+  exit 0
+fi
+if [[ "$MOCK_OBSERVER_LOOP" = 1 ]]; then
+  start_observer
+  stop_observer || fail "mock observer stop failed"
+  echo "mock_observer_loop=1 observer_stopped=1 service_stop=0 gpu_run=0"
   exit 0
 fi
 if [[ "$MOCK_OBSERVER" = 1 ]]; then

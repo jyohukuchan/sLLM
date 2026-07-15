@@ -40,9 +40,15 @@ class Aq4Layer0QkvFusedGpuProbeGateTest(unittest.TestCase):
             '"concatenated_little_endian_f32_rows"', '"end_row_exclusive": 8192',
             'mkdir -p -- "$BASE/attempts"', "attempt directory create-new failed", "prepare_runtime_probe",
             'install -m 0555 -- "$PROBE" "$RUNTIME_PROBE"', "runtime-probe-stat.json",
-            'MOCK_ARCHIVE_SETUP', 'runtime_probe_mode=0555',
+            'MOCK_ARCHIVE_SETUP', 'runtime_probe_mode=0555', 'MOCK_OBSERVER_LOOP',
+            'ROCM_SMI_METRIC_ARGS=(metric -g "$EXPECTED_PHYSICAL_CARD" -m -u -p -t --json)',
+            'ROCM_SMI_STATIC_ARGS=(static -g "$EXPECTED_PHYSICAL_CARD" -a --json)',
+            'target_graphics_version', 'mem_usage',
         ):
             self.assertIn(token, text)
+        self.assertNotIn("--showmeminfo", text)
+        self.assertNotIn("--showuse", text)
+        self.assertNotIn("--showpower", text)
 
     def test_mock_preflight_is_read_only(self) -> None:
         self.assertTrue(PROBE_ROOT.is_dir())
@@ -106,7 +112,12 @@ class Aq4Layer0QkvFusedGpuProbeGateTest(unittest.TestCase):
             base = Path(directory)
             rocm_smi = base / "fake-amd-smi"
             rocm_smi.write_text(
-                "#!/bin/sh\nprintf '%s\\n' '{\"card2\":{\"GFX Version\":\"gfx1201\"}}'\n",
+                "#!/bin/sh\n"
+                "case \"$1\" in\n"
+                "  metric) printf '%s\\n' '{\"gpu_data\":[{\"gpu\":2,\"usage\":{\"gfx_activity\":{\"value\":1,\"unit\":\"%\"}},\"power\":{\"socket_power\":{\"value\":14,\"unit\":\"W\"}},\"mem_usage\":{\"used_vram\":{\"value\":1,\"unit\":\"MB\"}}}]}' ;;\n"
+                "  static) printf '%s\\n' '{\"gpu_data\":[{\"gpu\":2,\"asic\":{\"target_graphics_version\":\"gfx1201\"}}]}' ;;\n"
+                "  *) exit 2 ;;\n"
+                "esac\n",
                 encoding="utf-8",
             )
             rocm_smi.chmod(0o755)
@@ -129,6 +140,32 @@ class Aq4Layer0QkvFusedGpuProbeGateTest(unittest.TestCase):
             self.assertTrue((base / "observer-sample.marker").is_file())
             self.assertFalse((base / "observer-failed.marker").exists())
             self.assertNotIn("systemctl", result.stdout + result.stderr)
+
+            loop_base = base / "observer-loop"
+            loop_base.mkdir()
+            loop_env = env.copy()
+            loop_env.update(MOCK_BASE=str(loop_base), MOCK_OBSERVER_LOOP="1")
+            loop_result = subprocess.run(
+                ["bash", str(GATE)], env=loop_env, text=True, capture_output=True, check=False,
+            )
+            self.assertEqual(loop_result.returncode, 0, loop_result.stderr)
+            self.assertIn("mock_observer_loop=1 observer_stopped=1", loop_result.stdout)
+            self.assertTrue((loop_base / "observer-sample.marker").is_file())
+            self.assertFalse((loop_base / "observer-failed.marker").exists())
+
+            failing_smi = base / "fake-amd-smi-failing"
+            failing_smi.write_text("#!/bin/sh\nexit 9\n", encoding="utf-8")
+            failing_smi.chmod(0o755)
+            failure_base = base / "observer-failure"
+            failure_base.mkdir()
+            failure_env = env.copy()
+            failure_env.update(MOCK_BASE=str(failure_base), ROCM_SMI=str(failing_smi), MOCK_OBSERVER_LOOP="0")
+            failure_result = subprocess.run(
+                ["bash", str(GATE)], env=failure_env, text=True, capture_output=True, check=False,
+            )
+            self.assertNotEqual(failure_result.returncode, 0)
+            self.assertTrue((failure_base / "observer-failed.marker").is_file())
+            self.assertFalse((failure_base / "observer-sample.marker").exists())
 
     def test_restore_attempts_service_start_after_cleanup_failure(self) -> None:
         text = GATE.read_text(encoding="utf-8")
