@@ -1,11 +1,33 @@
 {
   "bindings": {
-    "build_git_commit": "eb7bf4513a5bdcc8ea44f111ef42e7fa735a7edf",
+    "build_git_commit": "81ceebb13518f590b5dbf439cd00b35e508c1c3f",
     "device_index": 1,
     "driver": {
+      "build": {
+        "binary_build_id_sha1": "e7313ba6f51feac74f14b5ffd100333265362e1e",
+        "binary_bytes": 3506904,
+        "cargo_build_jobs": 1,
+        "cargo_incremental": false,
+        "cargo_version": "1.96.0 (30a34c682 2026-05-25)",
+        "command": "CARGO_BUILD_JOBS=1 CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/ullm-served-manifest-lane-d-target cargo build --locked --release -p ullm-engine --bin ullm-aq4-p2-resident-driver",
+        "expected_binary_sha256": "458b8603d6823a1c20ea93e7c0d757c8910f3c36c9a2a34ab536853c0c9e7d34",
+        "llvm_version": "22.1.2",
+        "locked": true,
+        "profile": "release",
+        "provenance": "clean Git worktree at the exact source commit with an initially absent independent target directory",
+        "rustc_host": "x86_64-unknown-linux-gnu",
+        "rustc_version": "1.96.0 (ac68faa20 2026-05-25)",
+        "source_commit": "81ceebb13518f590b5dbf439cd00b35e508c1c3f",
+        "source_git_blob": "7e37119cc8b66dc0e0f7abcf49b896fcdad8315f",
+        "source_sha256": "0acb46d1ab8730267edf40b505224ff157760ec19aa40a07ee1b389860ec54bf",
+        "source_tree": "5e98c3812f9eebdaed3e6085ab2e13521e249521"
+      },
       "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-prepared-v1/resident-driver",
-      "sha256": "18d8d1a6da74b29a0e1bd38d691827a59a8f47309b994a645c8b989a34900f76",
-      "source_commit": "eb7bf4513a5bdcc8ea44f111ef42e7fa735a7edf"
+      "sha256": "458b8603d6823a1c20ea93e7c0d757c8910f3c36c9a2a34ab536853c0c9e7d34",
+      "source_commit": "81ceebb13518f590b5dbf439cd00b35e508c1c3f",
+      "source_git_blob": "7e37119cc8b66dc0e0f7abcf49b896fcdad8315f",
+      "source_sha256": "0acb46d1ab8730267edf40b505224ff157760ec19aa40a07ee1b389860ec54bf",
+      "source_tree": "5e98c3812f9eebdaed3e6085ab2e13521e249521"
     },
     "one_case_smoke": true,
     "protocol": "ullm.aq4_p2_resident_driver.v2",
@@ -30,7 +52,7 @@
     "--device-index",
     "1",
     "--build-git-commit",
-    "eb7bf4513a5bdcc8ea44f111ef42e7fa735a7edf"
+    "81ceebb13518f590b5dbf439cd00b35e508c1c3f"
   ],
   "runner_validate_only_argv": [
     "/usr/bin/python3.12",

@@ -38,7 +38,7 @@
   },
   "plan": {
     "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-prepared-v1/dry-run.json",
-    "sha256": "25ce0c42722c450102e5a0bb32dac74b88c5b97c410225be9941b36ca9b5ec63"
+    "sha256": "062b4e4fb210245552b1e21d9b8fe472ef79b08be01fbd6400458c31e3e4eea8"
   },
   "runner_source_commit": "3dc4aa612b6cfd87675d0bd9fe506426f43e64f9",
   "runner_source_sha256": "e7dae31c64b3844a09fbba7ef36bbae7834e21d5d217bad679dd50bdf314ff02",

@@ -94,6 +94,21 @@ RUNTIME_DEVICE_KEYS = {
     "name",
     "architecture",
 }
+SERVED_MODEL_BINDING_SCHEMA = "ullm.aq4_p2_served_model_binding.v2"
+SERVED_MODEL_BINDING_KEYS = {
+    "schema_version",
+    "mode",
+    "logical_path",
+    "effective_source",
+    "descriptor_transport",
+    "closure",
+    "method",
+    "identity",
+    "sha256",
+    "byte_count",
+    "single_read",
+    "logical_path_opened",
+}
 DEFAULT_LOCK_PATH = Path("/run/ullm/r9700.lock")
 ROCTX_SCHEMA = "ullm.aq4_p2_resident_roctx_ranges.v1"
 ROCTX_MARKER_PREFIX = "ullm.aq4_p2.run.v1"
@@ -1260,7 +1275,13 @@ def validate_one_case_smoke_bundle(args: argparse.Namespace, expanded: dict[str,
         raise BatchError("one-case smoke resident driver argv binding is invalid")
     validate_driver_argv_schema(expected_driver_argv, identity)
     fake_ready = _run_fake_ready_handshake(fake_ready_path, args.timeout)
-    session_id, driver_identity = validate_ready(fake_ready, identity, cases, expected_binary_sha256)
+    session_id, driver_identity, _ = validate_ready(
+        fake_ready,
+        identity,
+        cases,
+        expected_binary_sha256,
+        allow_pre_binding_fixture=args.dry_run,
+    )
     prepared_plan = load(root / "dry-run.json", "one-case smoke prepared dry-run")
     prepared_validation = prepared_plan.get("validation")
     prepared_baseline = prepared_plan.get("baseline_identity")
@@ -1629,6 +1650,7 @@ def _driver_process_document(
     cleanup: dict[str, Any],
     stderr: dict[str, Any],
     lock_owner: dict[str, Any],
+    invocation: dict[str, Any],
     error: BaseException | None,
 ) -> dict[str, Any]:
     try:
@@ -1649,8 +1671,9 @@ def _driver_process_document(
             "reason": str(error),
         }
     return {
-        "schema_version": "ullm.aq4_p2_resident_driver_process.v1",
+        "schema_version": "ullm.aq4_p2_resident_driver_process.v2",
         "status": "failed" if error is not None else "complete",
+        "invocation": invocation,
         "spawn": {"captured_unix_ns": audit.spawned_unix_ns, "pid": audit.pid, "process_group_id": audit.pgid},
         "protocol": {
             "last_stage": audit.last_stage,
@@ -1673,7 +1696,106 @@ def _driver_process_document(
     }
 
 
-def _validate_ready_identity(value: Any, identity: dict[str, Any], cases: list[dict[str, Any]]) -> dict[str, Any]:
+def _driver_invocation_document(logical_argv: list[str]) -> dict[str, Any]:
+    value: dict[str, Any] = {
+        "logical_argv": list(logical_argv),
+        "logical_argv_sha256": sha_bytes(canonical(logical_argv)),
+        "effective_semantic_bindings": [],
+        "pinned_fd_map": None,
+        "ready_served_model_binding": None,
+    }
+    if ACTIVE_FD_MAP is None:
+        return value
+    bindings = []
+    for argument_index, role, method in (
+        (0, "resident_driver", "exec"),
+        (2, "served_manifest", "read"),
+    ):
+        item = ACTIVE_FD_MAP.role(role, method=method)
+        ACTIVE_FD_MAP.verify_binding(item)
+        if item["logical_path"] != logical_argv[argument_index]:
+            raise BatchError(f"pinned FD logical argv binding differs: {role}")
+        bindings.append(
+            {
+                "argument_index": argument_index,
+                "role": role,
+                "logical_path": item["logical_path"],
+                "resolved_path": item["resolved_path"],
+                "kind": item["kind"],
+                "closure": item["closure"],
+                "method": method,
+                "identity": item["identity"],
+                "sha256": item["sha256"],
+            }
+        )
+    value["effective_semantic_bindings"] = bindings
+    value["pinned_fd_map"] = {
+        "schema_version": FD_MAP_SCHEMA,
+        "map_sha256": ACTIVE_FD_MAP.value["map_sha256"],
+        "closure_contract": ACTIVE_FD_MAP.value["closure_contract"],
+    }
+    return value
+
+
+def _validate_served_model_binding(value: Any, served_sha256: str) -> dict[str, Any]:
+    if not isinstance(value, dict) or set(value) != SERVED_MODEL_BINDING_KEYS:
+        raise BatchError("resident served model binding fields differ")
+    if value["schema_version"] != SERVED_MODEL_BINDING_SCHEMA:
+        raise BatchError("resident served model binding schema differs")
+    if (
+        not isinstance(value["logical_path"], str)
+        or not Path(value["logical_path"]).is_absolute()
+        or ".." in Path(value["logical_path"]).parts
+        or value["closure"] != "control_input"
+        or value["method"] != "read"
+        or value["sha256"] != served_sha256
+        or type(value["byte_count"]) is not int
+        or value["byte_count"] < 0
+        or type(value["single_read"]) is not bool
+        or type(value["logical_path_opened"]) is not bool
+    ):
+        raise BatchError("resident served model binding value differs")
+    identity = value["identity"]
+    if (
+        not isinstance(identity, dict)
+        or set(identity)
+        != {"device", "inode", "mode", "nlink", "size", "mtime_ns", "ctime_ns"}
+        or any(type(part) is not int for part in identity.values())
+        or identity["size"] != value["byte_count"]
+    ):
+        raise BatchError("resident served model binding identity differs")
+    if ACTIVE_FD_MAP is not None:
+        expected = ACTIVE_FD_MAP.role("served_manifest", method="read")
+        ACTIVE_FD_MAP.verify_binding(expected)
+        if (
+            value["mode"] != "pinned_fd"
+            or value["effective_source"] != "inherited_sealed_fd"
+            or value["descriptor_transport"] != "inherited_fd_map"
+            or value["logical_path"] != expected["logical_path"]
+            or value["identity"] != expected["identity"]
+            or value["sha256"] != expected["sha256"]
+            or value["single_read"] is not True
+            or value["logical_path_opened"] is not False
+        ):
+            raise BatchError("resident pinned served model binding differs")
+    elif (
+        value["mode"] != "logical_path"
+        or value["effective_source"] != "path_loader"
+        or value["descriptor_transport"] != "none"
+        or value["single_read"] is not True
+        or value["logical_path_opened"] is not True
+    ):
+        raise BatchError("resident legacy served model binding differs")
+    return value
+
+
+def _validate_ready_identity(
+    value: Any,
+    identity: dict[str, Any],
+    cases: list[dict[str, Any]],
+    *,
+    allow_pre_binding_fixture: bool = False,
+) -> dict[str, Any]:
     if not isinstance(value, dict) or set(value) != READY_IDENTITY_KEYS:
         raise BatchError("resident driver identity fields differ")
     for field in ("binary_sha256", "worker_binary_sha256", "package_manifest_sha256", "package_content_sha256", "served_model_manifest_sha256", "guard_set_sha256"):
@@ -1720,13 +1842,43 @@ def _validate_ready_identity(value: Any, identity: dict[str, Any], cases: list[d
     return value
 
 
-def validate_ready(value: dict[str, Any], identity: dict[str, Any], cases: list[dict[str, Any]], expected_binary_sha256: str) -> tuple[str, dict[str, Any]]:
-    if set(value) != {"event", "schema_version", "model_loads", "resident_session_id", "driver_identity"} or value.get("event") != "ready" or value.get("schema_version") != DRIVER_SCHEMA or type(value.get("model_loads")) is not int or value.get("model_loads") != 1 or not isinstance(value.get("resident_session_id"), str) or not value["resident_session_id"]:
+def validate_ready(
+    value: dict[str, Any],
+    identity: dict[str, Any],
+    cases: list[dict[str, Any]],
+    expected_binary_sha256: str,
+    *,
+    allow_pre_binding_fixture: bool = False,
+) -> tuple[str, dict[str, Any], dict[str, Any] | None]:
+    expected_fields = {
+        "event",
+        "schema_version",
+        "model_loads",
+        "resident_session_id",
+        "driver_identity",
+        "served_model_binding",
+    }
+    if allow_pre_binding_fixture and "served_model_binding" not in value:
+        expected_fields.remove("served_model_binding")
+    if set(value) != expected_fields or value.get("event") != "ready" or value.get("schema_version") != DRIVER_SCHEMA or type(value.get("model_loads")) is not int or value.get("model_loads") != 1 or not isinstance(value.get("resident_session_id"), str) or not value["resident_session_id"]:
         raise BatchError("resident driver did not prove one model load")
-    ready_identity = _validate_ready_identity(value["driver_identity"], identity, cases)
+    ready_identity = _validate_ready_identity(
+        value["driver_identity"],
+        identity,
+        cases,
+        allow_pre_binding_fixture=allow_pre_binding_fixture,
+    )
     if ready_identity["binary_sha256"] != expected_binary_sha256:
         raise BatchError("resident driver ready self SHA differs from pre-spawn executable")
-    return value["resident_session_id"], ready_identity
+    served_binding = (
+        None
+        if "served_model_binding" not in value
+        else _validate_served_model_binding(
+            value["served_model_binding"],
+            ready_identity["served_model_manifest_sha256"],
+        )
+    )
+    return value["resident_session_id"], ready_identity, served_binding
 
 
 def validate_run(value: dict[str, Any], case: dict[str, Any], session_id: str) -> dict[str, Any]:
@@ -2096,13 +2248,11 @@ def _run_batch(args: argparse.Namespace) -> int:
         raise BatchError("--driver-command is required unless --dry-run is set")
     expected_driver_argv = smoke_validation["resident_driver_argv"] if smoke_validation is not None else None
     driver_executable = validate_driver_command(args.driver_command, identity, expected_argv=expected_driver_argv)
+    driver_invocation = _driver_invocation_document(args.driver_command)
     effective_driver_command = list(args.driver_command)
     if ACTIVE_FD_MAP is not None:
         effective_driver_command[0] = effective_fd_path(
             Path(args.driver_command[0]), method="exec", role="resident_driver"
-        )
-        effective_driver_command[2] = effective_fd_path(
-            Path(args.driver_command[2]), method="read", role="served_manifest"
         )
     roctx = (
         RoctxRangeRecorder.load(args.roctx_library, args.roctx_library_sha256)
@@ -2140,12 +2290,13 @@ def _run_batch(args: argparse.Namespace) -> int:
                 **fd_child_options(),
             )
             audit.mark_spawned(process)
-            session_id, driver_identity = validate_ready(
+            session_id, driver_identity, served_model_binding = validate_ready(
                 _recv(process, args.timeout, audit, "ready"),
                 identity,
                 cases,
                 driver_executable["sha256"],
             )
+            driver_invocation["ready_served_model_binding"] = served_model_binding
             audit.ready_received = True
             by_id = {entry["case_id"]: entry for entry in fixture_index["cases"]}
             for case in cases:
@@ -2251,7 +2402,14 @@ def _run_batch(args: argparse.Namespace) -> int:
             atomic_write(
                 args.output_dir
                 / ("resident-batch.failure.json" if effective_error is not None else "resident-batch.driver-process.json"),
-                _driver_process_document(audit, cleanup, stderr, lock_owner, effective_error),
+                _driver_process_document(
+                    audit,
+                    cleanup,
+                    stderr,
+                    lock_owner,
+                    driver_invocation,
+                    effective_error,
+                ),
                 mode=0o444,
             )
             if driver_error is None and cleanup_error is not None:

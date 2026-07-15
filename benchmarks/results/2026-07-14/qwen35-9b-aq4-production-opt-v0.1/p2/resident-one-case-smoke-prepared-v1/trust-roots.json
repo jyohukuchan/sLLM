@@ -54,19 +54,36 @@
   "schema_version": "ullm.aq4_p2_resident_smoke_trust_roots.v1",
   "source": {
     "active_case_device_fixture_sha256": "d31a5240ac65a09c2f95c12fb3e54be122ba56299ee49cc39ee1d9567a5dcd73",
-    "commit": "eb7bf4513a5bdcc8ea44f111ef42e7fa735a7edf",
-    "driver_source_sha256": "63821344747158f94e4934bb47da93e265a2a44fe8215979ef826fac0734bd4c",
+    "commit": "81ceebb13518f590b5dbf439cd00b35e508c1c3f",
+    "driver_source_git_blob": "7e37119cc8b66dc0e0f7abcf49b896fcdad8315f",
+    "driver_source_sha256": "0acb46d1ab8730267edf40b505224ff157760ec19aa40a07ee1b389860ec54bf",
     "expander_source_sha256": "575cf80551ca09b681bc7b0e13b46f9259c5d4504f726647277fb0b828dc710e",
     "fixture_generator_source_sha256": "e20285669a87285803bc6f9714b8d1ebae8188551e01a68f645ab39893e6e32c",
     "normative_driver": {
       "blob_unchanged_at_current_source": true,
       "clean_build": {
-        "command": "CARGO_BUILD_JOBS=1 cargo build --release -p ullm-engine --bin ullm-aq4-p2-resident-driver",
-        "expected_binary_sha256": "18d8d1a6da74b29a0e1bd38d691827a59a8f47309b994a645c8b989a34900f76",
-        "provenance": "detached clean Git worktree at normative driver commit"
+        "binary_build_id_sha1": "e7313ba6f51feac74f14b5ffd100333265362e1e",
+        "binary_bytes": 3506904,
+        "cargo_build_jobs": 1,
+        "cargo_incremental": false,
+        "cargo_version": "1.96.0 (30a34c682 2026-05-25)",
+        "command": "CARGO_BUILD_JOBS=1 CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/ullm-served-manifest-lane-d-target cargo build --locked --release -p ullm-engine --bin ullm-aq4-p2-resident-driver",
+        "expected_binary_sha256": "458b8603d6823a1c20ea93e7c0d757c8910f3c36c9a2a34ab536853c0c9e7d34",
+        "llvm_version": "22.1.2",
+        "locked": true,
+        "profile": "release",
+        "provenance": "clean Git worktree at the exact source commit with an initially absent independent target directory",
+        "rustc_host": "x86_64-unknown-linux-gnu",
+        "rustc_version": "1.96.0 (ac68faa20 2026-05-25)",
+        "source_commit": "81ceebb13518f590b5dbf439cd00b35e508c1c3f",
+        "source_git_blob": "7e37119cc8b66dc0e0f7abcf49b896fcdad8315f",
+        "source_sha256": "0acb46d1ab8730267edf40b505224ff157760ec19aa40a07ee1b389860ec54bf",
+        "source_tree": "5e98c3812f9eebdaed3e6085ab2e13521e249521"
       },
-      "commit": "eb7bf4513a5bdcc8ea44f111ef42e7fa735a7edf",
-      "tree": "ae3191e5bfc2cbd161fd8397d912de9dfa02b497"
+      "commit": "81ceebb13518f590b5dbf439cd00b35e508c1c3f",
+      "git_blob": "7e37119cc8b66dc0e0f7abcf49b896fcdad8315f",
+      "source_sha256": "0acb46d1ab8730267edf40b505224ff157760ec19aa40a07ee1b389860ec54bf",
+      "tree": "5e98c3812f9eebdaed3e6085ab2e13521e249521"
     },
     "one_case_smoke_runner": {
       "flag": "--one-case-smoke",
@@ -89,6 +106,6 @@
     "runner_source_commit": "3dc4aa612b6cfd87675d0bd9fe506426f43e64f9",
     "runner_source_sha256": "e7dae31c64b3844a09fbba7ef36bbae7834e21d5d217bad679dd50bdf314ff02",
     "runner_source_tree": "bd46e713c658878e66fcab6d49ef863e43a06bd8",
-    "tree": "ae3191e5bfc2cbd161fd8397d912de9dfa02b497"
+    "tree": "5e98c3812f9eebdaed3e6085ab2e13521e249521"
   }
 }

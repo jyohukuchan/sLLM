@@ -25,18 +25,40 @@ SERVED_PATH = Path("/etc/ullm/served-models/active.json")
 CASE_MANIFEST_PATH = ROOT / "benchmarks/workloads/aq4-production-opt-p2-case-manifest-v0.1.json"
 DRIVER_BUILD_PATH = ROOT / "target/release/ullm-aq4-p2-resident-driver"
 WORKER_HARDLINK_FIXTURE_PATH = ROOT / "tests/fixtures/aq4-p2-resident-worker-hardlinks/active-production.json"
-SOURCE_COMMIT = "eb7bf4513a5bdcc8ea44f111ef42e7fa735a7edf"
-SOURCE_TREE = "ae3191e5bfc2cbd161fd8397d912de9dfa02b497"
-DRIVER_COMMIT = "eb7bf4513a5bdcc8ea44f111ef42e7fa735a7edf"
-DRIVER_TREE = "ae3191e5bfc2cbd161fd8397d912de9dfa02b497"
-DRIVER_SOURCE_SHA = "63821344747158f94e4934bb47da93e265a2a44fe8215979ef826fac0734bd4c"
+SOURCE_COMMIT = "81ceebb13518f590b5dbf439cd00b35e508c1c3f"
+SOURCE_TREE = "5e98c3812f9eebdaed3e6085ab2e13521e249521"
+DRIVER_COMMIT = "81ceebb13518f590b5dbf439cd00b35e508c1c3f"
+DRIVER_TREE = "5e98c3812f9eebdaed3e6085ab2e13521e249521"
+DRIVER_SOURCE_GIT_BLOB = "7e37119cc8b66dc0e0f7abcf49b896fcdad8315f"
+DRIVER_SOURCE_SHA = "0acb46d1ab8730267edf40b505224ff157760ec19aa40a07ee1b389860ec54bf"
 RUNNER_COMMIT = "3dc4aa612b6cfd87675d0bd9fe506426f43e64f9"
 RUNNER_TREE = "bd46e713c658878e66fcab6d49ef863e43a06bd8"
 RUNNER_SOURCE_SHA = "e7dae31c64b3844a09fbba7ef36bbae7834e21d5d217bad679dd50bdf314ff02"
 EXPANDER_SOURCE_SHA = "575cf80551ca09b681bc7b0e13b46f9259c5d4504f726647277fb0b828dc710e"
 FIXTURE_SOURCE_SHA = "e20285669a87285803bc6f9714b8d1ebae8188551e01a68f645ab39893e6e32c"
 ACTIVE_CASE_DEVICE_FIXTURE_SHA = "d31a5240ac65a09c2f95c12fb3e54be122ba56299ee49cc39ee1d9567a5dcd73"
-EXPECTED_DRIVER_SHA = "18d8d1a6da74b29a0e1bd38d691827a59a8f47309b994a645c8b989a34900f76"
+EXPECTED_DRIVER_SHA = "458b8603d6823a1c20ea93e7c0d757c8910f3c36c9a2a34ab536853c0c9e7d34"
+EXPECTED_DRIVER_BYTES = 3506904
+EXPECTED_DRIVER_BUILD_ID = "e7313ba6f51feac74f14b5ffd100333265362e1e"
+DRIVER_BUILD_METADATA = {
+    "command": "CARGO_BUILD_JOBS=1 CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/ullm-served-manifest-lane-d-target cargo build --locked --release -p ullm-engine --bin ullm-aq4-p2-resident-driver",
+    "provenance": "clean Git worktree at the exact source commit with an initially absent independent target directory",
+    "source_commit": DRIVER_COMMIT,
+    "source_tree": DRIVER_TREE,
+    "source_git_blob": DRIVER_SOURCE_GIT_BLOB,
+    "source_sha256": DRIVER_SOURCE_SHA,
+    "cargo_version": "1.96.0 (30a34c682 2026-05-25)",
+    "rustc_version": "1.96.0 (ac68faa20 2026-05-25)",
+    "rustc_host": "x86_64-unknown-linux-gnu",
+    "llvm_version": "22.1.2",
+    "cargo_build_jobs": 1,
+    "cargo_incremental": False,
+    "locked": True,
+    "profile": "release",
+    "binary_bytes": EXPECTED_DRIVER_BYTES,
+    "binary_build_id_sha1": EXPECTED_DRIVER_BUILD_ID,
+    "expected_binary_sha256": EXPECTED_DRIVER_SHA,
+}
 EXPECTED_SERVED_SHA = "feb3190d0ff59778e4da140b8db2bd1ce2ba440e3a69e844b997011d4d08cb44"
 EXPECTED_WORKER_SHA = "177f3106414efc7cc4b08fa2d87bed6e147d4188e0a290f43b7a1ac591fae48d"
 EXPECTED_PACKAGE_MANIFEST_SHA = "a790a033f57d9c5b9ae0d731a463c26b86aec691f771ce88bb543d676f08e5ad"
@@ -84,11 +106,11 @@ REQUIRED_FILES = {
 POST_RUN_FILES = {"dry-run.json", "runner-dry-run-evidence.json"}
 RUNNER_VALIDATE_OUTPUT = Path("/tmp/ullm-aq4-p2-resident-smoke-validate-only")
 BINDING_RUNNER_OUTPUT = Path("/tmp/ullm-aq4-p2-resident-smoke-binding-v4-runner")
-BINDING_SOURCE_COMMIT = "ede2b872ab0de5550adbcb1b1dca8b4bbd789efd"
-BINDING_SOURCE_TREE = "da455a86cccb5661117ae82509749a95c51b08ba"
-BINDING_RUNNER_GIT_BLOB = "7adc7f9258f491c29a8f2d7842d5ece20488867f"
-BINDING_RUNNER_SHA = "0b3e55f250894403bf4ef7300a2e67422055dc7f43e82efe0fc75de7ecda0c1b"
-BINDING_DRIVER_GIT_BLOB = "ea26726e95aeb73b4285fd36ea3f8b0be74578f4"
+BINDING_SOURCE_COMMIT = "81ceebb13518f590b5dbf439cd00b35e508c1c3f"
+BINDING_SOURCE_TREE = "5e98c3812f9eebdaed3e6085ab2e13521e249521"
+BINDING_RUNNER_GIT_BLOB = "b7a3af27b17bd9dfae926c320eda04f7c3afae4e"
+BINDING_RUNNER_SHA = "5d4cf385a83961f8aedc37d36c3e4625d783ec7ddd6b17de4f93648516d42354"
+BINDING_DRIVER_GIT_BLOB = "7e37119cc8b66dc0e0f7abcf49b896fcdad8315f"
 BINDING_FILES = {
     "trusted-runner.py": (0o444, "ed67910_generic_runner_source"),
     "trusted-validator.py": (0o444, "ed67910_bundle_validator_source"),
@@ -696,6 +718,15 @@ def reconstruct() -> Reconstruction:
     driver_tree = subprocess.run(["git", "rev-parse", f"{DRIVER_COMMIT}^{{tree}}"], cwd=ROOT, text=True, capture_output=True, check=False)
     if driver_tree.returncode != 0 or driver_tree.stdout.strip() != DRIVER_TREE:
         raise BundleError("normative driver commit/tree differs")
+    driver_object = subprocess.run(
+        ["git", "rev-parse", f"{DRIVER_COMMIT}:crates/ullm-engine/src/bin/ullm-aq4-p2-resident-driver.rs"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if driver_object.returncode != 0 or driver_object.stdout.strip() != DRIVER_SOURCE_GIT_BLOB:
+        raise BundleError("normative driver Git blob differs")
     runner_tree = subprocess.run(["git", "rev-parse", f"{RUNNER_COMMIT}^{{tree}}"], cwd=ROOT, text=True, capture_output=True, check=False)
     if runner_tree.returncode != 0 or runner_tree.stdout.strip() != RUNNER_TREE:
         raise BundleError("prepared runner commit/tree differs")
@@ -836,7 +867,7 @@ def reconstruct() -> Reconstruction:
     fake_ready = {"event": "ready", "schema_version": PROTOCOL, "model_loads": 1, "resident_session_id": "offline-fake-ready-not-executed", "driver_identity": resident_identity}
     trust_roots = {
         "schema_version": "ullm.aq4_p2_resident_smoke_trust_roots.v1",
-        "source": {"commit": SOURCE_COMMIT, "tree": SOURCE_TREE, "driver_source_sha256": DRIVER_SOURCE_SHA, "runner_source_commit": RUNNER_COMMIT, "runner_source_tree": RUNNER_TREE, "runner_source_sha256": RUNNER_SOURCE_SHA, "expander_source_sha256": EXPANDER_SOURCE_SHA, "fixture_generator_source_sha256": FIXTURE_SOURCE_SHA, "active_case_device_fixture_sha256": ACTIVE_CASE_DEVICE_FIXTURE_SHA, "protocol": PROTOCOL, "one_case_smoke_runner": {"flag": "--one-case-smoke", "normal_case_count": 84, "smoke_case_count": 1, "smoke_transactions": 12, "warmup_runs": 2, "measured_runs": 10, "promotion_eligible": False}, "normative_driver": {"commit": DRIVER_COMMIT, "tree": DRIVER_TREE, "blob_unchanged_at_current_source": True, "clean_build": {"command": "CARGO_BUILD_JOBS=1 cargo build --release -p ullm-engine --bin ullm-aq4-p2-resident-driver", "provenance": "detached clean Git worktree at normative driver commit", "expected_binary_sha256": EXPECTED_DRIVER_SHA}}, "protocol_path_contract": {"served_model_manifest": "absolute_without_parent_traversal", "case_binding": "absolute_without_parent_traversal", "identity": "absolute_without_parent_traversal", "preflight": "absolute_without_parent_traversal", "policy": "absolute_without_parent_traversal", "fixture": "absolute_without_parent_traversal"}},
+        "source": {"commit": SOURCE_COMMIT, "tree": SOURCE_TREE, "driver_source_git_blob": DRIVER_SOURCE_GIT_BLOB, "driver_source_sha256": DRIVER_SOURCE_SHA, "runner_source_commit": RUNNER_COMMIT, "runner_source_tree": RUNNER_TREE, "runner_source_sha256": RUNNER_SOURCE_SHA, "expander_source_sha256": EXPANDER_SOURCE_SHA, "fixture_generator_source_sha256": FIXTURE_SOURCE_SHA, "active_case_device_fixture_sha256": ACTIVE_CASE_DEVICE_FIXTURE_SHA, "protocol": PROTOCOL, "one_case_smoke_runner": {"flag": "--one-case-smoke", "normal_case_count": 84, "smoke_case_count": 1, "smoke_transactions": 12, "warmup_runs": 2, "measured_runs": 10, "promotion_eligible": False}, "normative_driver": {"commit": DRIVER_COMMIT, "tree": DRIVER_TREE, "git_blob": DRIVER_SOURCE_GIT_BLOB, "source_sha256": DRIVER_SOURCE_SHA, "blob_unchanged_at_current_source": True, "clean_build": DRIVER_BUILD_METADATA}, "protocol_path_contract": {"served_model_manifest": "absolute_without_parent_traversal", "case_binding": "absolute_without_parent_traversal", "identity": "absolute_without_parent_traversal", "preflight": "absolute_without_parent_traversal", "policy": "absolute_without_parent_traversal", "fixture": "absolute_without_parent_traversal"}},
         "external": {"served_model": {"path": str(SERVED_PATH), "sha256": EXPECTED_SERVED_SHA}, "worker": {"path": str(worker_path), "sha256": EXPECTED_WORKER_SHA, "hardlink_set": worker_hardlinks}, "package_manifest": {"path": str(package_manifest_path), "sha256": EXPECTED_PACKAGE_MANIFEST_SHA}, "package_tree": {"path": str(package_manifest_path.parent), "sha256": EXPECTED_PACKAGE_CONTENT_SHA, "file_count": EXPECTED_PACKAGE_FILES}, "case_manifest": {"path": str(CASE_MANIFEST_PATH), "sha256": EXPECTED_CASE_MANIFEST_SHA}, "guard_set_sha256": EXPECTED_GUARD_SHA},
     }
     policy_raw = pretty(policy)
@@ -844,7 +875,7 @@ def reconstruct() -> Reconstruction:
         "schema_version": "ullm.aq4_p2_resident_launch_command.v1",
         "runner_validate_only_argv": runner_validate_argv(),
         "resident_driver_argv": resident_driver_argv(),
-        "bindings": {"python": {"path": str(Path(sys.executable).resolve()), "sha256": sha_file(Path(sys.executable).resolve(), "Python interpreter", single_link=False)}, "runner": {"path": str(CANONICAL_ROOT / "trusted-runner.py"), "sha256": RUNNER_SOURCE_SHA, "source_commit": RUNNER_COMMIT}, "driver": {"path": str(CANONICAL_ROOT / "resident-driver"), "sha256": EXPECTED_DRIVER_SHA, "source_commit": DRIVER_COMMIT}, "served_model_manifest": {"path": str(SERVED_PATH), "sha256": EXPECTED_SERVED_SHA}, "device_index": 1, "build_git_commit": DRIVER_COMMIT, "protocol": PROTOCOL, "one_case_smoke": True},
+        "bindings": {"python": {"path": str(Path(sys.executable).resolve()), "sha256": sha_file(Path(sys.executable).resolve(), "Python interpreter", single_link=False)}, "runner": {"path": str(CANONICAL_ROOT / "trusted-runner.py"), "sha256": RUNNER_SOURCE_SHA, "source_commit": RUNNER_COMMIT}, "driver": {"path": str(CANONICAL_ROOT / "resident-driver"), "sha256": EXPECTED_DRIVER_SHA, "source_commit": DRIVER_COMMIT, "source_tree": DRIVER_TREE, "source_git_blob": DRIVER_SOURCE_GIT_BLOB, "source_sha256": DRIVER_SOURCE_SHA, "build": DRIVER_BUILD_METADATA}, "served_model_manifest": {"path": str(SERVED_PATH), "sha256": EXPECTED_SERVED_SHA}, "device_index": 1, "build_git_commit": DRIVER_COMMIT, "protocol": PROTOCOL, "one_case_smoke": True},
     }
     superseded = {
         "schema_version": "ullm.aq4_p2_resident_smoke_supersession.v1",
@@ -868,7 +899,7 @@ def reconstruct() -> Reconstruction:
         "schema_version": BUNDLE_SCHEMA, "status": "prepared_not_executed", "promotion": False,
         "run_id": "p2-r9700-resident-one-case-smoke-prepared-v3", "canonical_root": str(CANONICAL_ROOT),
         "historical_predecessor": {"source_commit": superseded["source_commit"], "status": superseded["status"], "execution_eligible": False},
-        "resident_driver": {"source_commit": DRIVER_COMMIT, "source_tree": DRIVER_TREE, "blob_unchanged_at_source_commit": SOURCE_COMMIT, "binary_sha256": EXPECTED_DRIVER_SHA, "protocol": PROTOCOL},
+        "resident_driver": {"source_commit": DRIVER_COMMIT, "source_tree": DRIVER_TREE, "source_git_blob": DRIVER_SOURCE_GIT_BLOB, "source_sha256": DRIVER_SOURCE_SHA, "blob_unchanged_at_source_commit": SOURCE_COMMIT, "binary_sha256": EXPECTED_DRIVER_SHA, "binary_bytes": EXPECTED_DRIVER_BYTES, "binary_build_id_sha1": EXPECTED_DRIVER_BUILD_ID, "build": DRIVER_BUILD_METADATA, "protocol": PROTOCOL},
         "runner": {"source_commit": RUNNER_COMMIT, "source_tree": RUNNER_TREE, "source_sha256": RUNNER_SOURCE_SHA, "one_case_smoke": True},
         "expected_runtime": {"device": runtime_device, "environment": {"HIP_VISIBLE_DEVICES": "1", "ULLM_HIP_VISIBLE_DEVICES": "1"}, "required_guards": {name: "1" for name in sorted(guards)}},
         "bindings": {"official_case_sha256": source_case["case_sha256"], "case_sha256": case["case_sha256"], "case_binding_sha256": case_binding_sha, "fixture_sha256": fixture_sha, "identity_file_sha256": sha_bytes(identity_raw), "identity_self_sha256": identity["identity_sha256"], "preflight_sha256": sha_bytes(payloads["preflight.json"]), "policy_sha256": sha_bytes(policy_raw), "served_model_manifest_sha256": EXPECTED_SERVED_SHA, "worker_binary_sha256": EXPECTED_WORKER_SHA, "package_manifest_sha256": EXPECTED_PACKAGE_MANIFEST_SHA, "package_content_sha256": EXPECTED_PACKAGE_CONTENT_SHA, "guard_set_sha256": EXPECTED_GUARD_SHA},
@@ -901,7 +932,15 @@ def validate_launch_command(value: dict[str, Any]) -> None:
     expected_bindings = {
         "python": {"path": runner_argv[0], "sha256": sha_file(Path(runner_argv[0]), "Python interpreter", single_link=False)},
         "runner": {"path": runner_argv[1], "sha256": RUNNER_SOURCE_SHA, "source_commit": RUNNER_COMMIT},
-        "driver": {"path": driver_argv[0], "sha256": EXPECTED_DRIVER_SHA, "source_commit": DRIVER_COMMIT},
+        "driver": {
+            "path": driver_argv[0],
+            "sha256": EXPECTED_DRIVER_SHA,
+            "source_commit": DRIVER_COMMIT,
+            "source_tree": DRIVER_TREE,
+            "source_git_blob": DRIVER_SOURCE_GIT_BLOB,
+            "source_sha256": DRIVER_SOURCE_SHA,
+            "build": DRIVER_BUILD_METADATA,
+        },
         "served_model_manifest": {"path": driver_argv[2], "sha256": EXPECTED_SERVED_SHA},
         "device_index": 1,
         "build_git_commit": DRIVER_COMMIT,
@@ -1159,7 +1198,12 @@ def prepare(output: Path, driver_path: Path) -> dict[str, Any]:
     if output.exists() or output.is_symlink():
         raise BundleError(f"output already exists: {output}")
     expected = reconstruct()
-    if sha_file(driver_path.resolve(), "clean release resident driver", single_link=False) != EXPECTED_DRIVER_SHA:
+    driver_path = driver_path.resolve()
+    if (
+        sha_file(driver_path, "clean release resident driver", single_link=False)
+        != EXPECTED_DRIVER_SHA
+        or driver_path.stat().st_size != EXPECTED_DRIVER_BYTES
+    ):
         raise BundleError("release driver differs from trusted clean-build SHA")
     output.mkdir(parents=True)
     for name, raw in expected.payloads.items():
@@ -1339,7 +1383,7 @@ def binding_manifest(plan_raw: bytes, evidence_raw: bytes, report_raw: bytes, di
             "source_commit": BINDING_SOURCE_COMMIT, "source_tree": BINDING_SOURCE_TREE,
             "runner": {"git_blob": BINDING_RUNNER_GIT_BLOB, "sha256": sha_bytes(runner_raw)},
             "validator": {"source_commit": validator_commit, "source_tree": validator_tree, "git_blob": validator_object, "sha256": sha_bytes(validator_raw), "archive_path": str(BINDING_ROOT / "trusted-validator.py"), "execution_path": str(BINDING_VALIDATOR_EXEC)},
-            "resident_driver": {"normative_commit": DRIVER_COMMIT, "git_blob_at_binding_commit": BINDING_DRIVER_GIT_BLOB, "source_sha256": DRIVER_SOURCE_SHA, "blob_unchanged": True, "binary_sha256": EXPECTED_DRIVER_SHA},
+            "resident_driver": {"normative_commit": DRIVER_COMMIT, "source_tree": DRIVER_TREE, "git_blob_at_binding_commit": BINDING_DRIVER_GIT_BLOB, "source_sha256": DRIVER_SOURCE_SHA, "blob_unchanged": True, "binary_sha256": EXPECTED_DRIVER_SHA, "binary_bytes": EXPECTED_DRIVER_BYTES, "binary_build_id_sha1": EXPECTED_DRIVER_BUILD_ID, "build": DRIVER_BUILD_METADATA},
         },
         "runner_roles": {
             "prepared_bootstrap": {

@@ -17,7 +17,7 @@
     "--trusted-validator",
     "/home/homelab1/coding-local/ultimateLLM/uLLM-project/tools/prepare-aq4-p2-resident-smoke-bundle.py",
     "--trusted-validator-sha256",
-    "c14bff3cd1ca0d18ace1d0e511e28ed01ad96f5b66024b5228343d329b56a154",
+    "f11394f84cdf8b858634bab20a48ba24d19cd51a0f0c95783dfe329f33e1e976",
     "--output-dir",
     "/tmp/ullm-aq4-p2-resident-smoke-binding-v4-runner",
     "--run-id",
@@ -30,7 +30,7 @@
   "exit_code": 0,
   "plan": {
     "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-binding-v4/runner-plan.json",
-    "sha256": "9897d1940af78d6c89a75d824c9a141e961c9571787e3199cabed70888ec7256"
+    "sha256": "10cfb1612aa7e4b0945a539bcb886782954accb535d104b6642a3b10b6239d80"
   },
   "runner_subprocess_count": 1,
   "schema_version": "ullm.aq4_p2_resident_binding_runner_evidence.v1",
@@ -45,7 +45,7 @@
   "trusted_validator": {
     "canonical_report_sha256": "e4173764a06cd90a0d5d6faefaabd83a874595c94702549dda19004598a4684a",
     "report_file_sha256": "a6af7c425935971d1ec8be878888922c319222f3b900afad5a1a9421216f84d2",
-    "source_sha256": "c14bff3cd1ca0d18ace1d0e511e28ed01ad96f5b66024b5228343d329b56a154",
+    "source_sha256": "f11394f84cdf8b858634bab20a48ba24d19cd51a0f0c95783dfe329f33e1e976",
     "subprocess_count": 1
   }
 }

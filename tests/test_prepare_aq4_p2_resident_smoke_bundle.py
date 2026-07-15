@@ -17,8 +17,8 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 ARTIFACT = ROOT / "benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-prepared-v1"
 BINDING = ROOT / "benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-binding-v4"
-VALIDATOR_COMMIT = "ec25754440e4655750e3bc4ef11c0f1580dbf2f9"
-VALIDATOR_SHA = "c14bff3cd1ca0d18ace1d0e511e28ed01ad96f5b66024b5228343d329b56a154"
+VALIDATOR_COMMIT = "a44074278d4bbd5e243153ab8c5be272489e23a2"
+VALIDATOR_SHA = "f11394f84cdf8b858634bab20a48ba24d19cd51a0f0c95783dfe329f33e1e976"
 SPEC = importlib.util.spec_from_file_location(
     "aq4_p2_resident_smoke_bundle",
     ROOT / "tools/prepare-aq4-p2-resident-smoke-bundle.py",

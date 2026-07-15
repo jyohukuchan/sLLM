@@ -10,8 +10,8 @@
     "case_sha256": "d83a420476bde889c7c8014d7982fd52e0f61ab09b888f66415d0ac9fb443ae7",
     "fixture_sha256": "a61c977a7671e7e3d141b87fc84e20e9957be71706cface1988d03054f2dad50",
     "guard_set_sha256": "4eafd9bc149792b9c9849fed07a70830a42cf8227b85431130eec8f41708abc0",
-    "identity_file_sha256": "d4cf0e3f2c6c1217a30b57c58943a7c2ec14084abbfd7fc9344799627571cb53",
-    "identity_self_sha256": "782f5650a5b46566398fdc084bd098f988918742cd0584da90ae3d6078c68dc8",
+    "identity_file_sha256": "0e47a0090ca74e945414adbc596693ac244a2893d8b31b019f951ee5476df515",
+    "identity_self_sha256": "b6f986eedd40bb933a8e304504f44f0e7bd0136319cd96a2116418e24447c89c",
     "official_case_sha256": "bf18481edf53a70efe840243f735c12cb949d127db024b38b89b5974ad77eb5a",
     "package_content_sha256": "a24774432d3f0b7f175dc761ef9a53df1fed901dd02f825e8542b17181f004b1",
     "package_manifest_sha256": "a790a033f57d9c5b9ae0d731a463c26b86aec691f771ce88bb543d676f08e5ad",
@@ -70,7 +70,7 @@
     "SUPERSEDED-0fd7993.json": {
       "mode": "0444",
       "role": "historical_non_executable_bundle_record",
-      "sha256": "c59552210b555d0bb7b721ea83302afd3cca20e042e0111b42dd8bda59558281"
+      "sha256": "6d8a780482ac800b66e6789aaf6c110342266e610c4968376aa8e91f5803dfc2"
     },
     "case-binding.json": {
       "mode": "0444",
@@ -80,7 +80,7 @@
     "fake-ready.json": {
       "mode": "0444",
       "role": "synthetic_ready_event",
-      "sha256": "097b7dbce565363c1b5020ee73fb910ed378f47e005ee56f0b66fe4b2006fde6"
+      "sha256": "4409002bc6b43db772e6ad921b6158d6014deb74a1fb0d54c37252dc0e1b3972"
     },
     "fixture-index.json": {
       "mode": "0444",
@@ -95,17 +95,17 @@
     "identity.json": {
       "mode": "0444",
       "role": "resident_identity",
-      "sha256": "d4cf0e3f2c6c1217a30b57c58943a7c2ec14084abbfd7fc9344799627571cb53"
+      "sha256": "0e47a0090ca74e945414adbc596693ac244a2893d8b31b019f951ee5476df515"
     },
     "launch-command.json": {
       "mode": "0444",
       "role": "exact_resident_launch_command",
-      "sha256": "d412ee1829a629e793d03c28a473303bca69fe67667d54ff80e679b628157187"
+      "sha256": "714010fc43ec335caf22e8383f771d0aaead09d95a43cc2f8b7a723732439553"
     },
     "official-case.json": {
       "mode": "0444",
       "role": "trusted_official_expansion_case",
-      "sha256": "8fd8722b0b925474f6bcf85f59bfab5ec5acc2578f5c6ff94a79120b7bac4840"
+      "sha256": "38eb53e03e9f6f16aec683b546aae6abb3fe7dec6615c511f5afe71d00b51022"
     },
     "package-manifest.json": {
       "mode": "0444",
@@ -125,7 +125,7 @@
     "resident-driver": {
       "mode": "0555",
       "role": "detached_resident_driver",
-      "sha256": "18d8d1a6da74b29a0e1bd38d691827a59a8f47309b994a645c8b989a34900f76"
+      "sha256": "458b8603d6823a1c20ea93e7c0d757c8910f3c36c9a2a34ab536853c0c9e7d34"
     },
     "served-model.json": {
       "mode": "0444",
@@ -135,7 +135,7 @@
     "trust-roots.json": {
       "mode": "0444",
       "role": "independent_trust_roots",
-      "sha256": "607b089ff857fd85216b5c191dcb2b362d5950228222449e4e72cfd13cfcfe2f"
+      "sha256": "3185ad06940143a91aa6bb46456c82084421ce21d4f762150db3894651278b81"
     },
     "trusted-runner.py": {
       "mode": "0444",
@@ -160,11 +160,34 @@
   },
   "promotion": false,
   "resident_driver": {
-    "binary_sha256": "18d8d1a6da74b29a0e1bd38d691827a59a8f47309b994a645c8b989a34900f76",
-    "blob_unchanged_at_source_commit": "eb7bf4513a5bdcc8ea44f111ef42e7fa735a7edf",
+    "binary_build_id_sha1": "e7313ba6f51feac74f14b5ffd100333265362e1e",
+    "binary_bytes": 3506904,
+    "binary_sha256": "458b8603d6823a1c20ea93e7c0d757c8910f3c36c9a2a34ab536853c0c9e7d34",
+    "blob_unchanged_at_source_commit": "81ceebb13518f590b5dbf439cd00b35e508c1c3f",
+    "build": {
+      "binary_build_id_sha1": "e7313ba6f51feac74f14b5ffd100333265362e1e",
+      "binary_bytes": 3506904,
+      "cargo_build_jobs": 1,
+      "cargo_incremental": false,
+      "cargo_version": "1.96.0 (30a34c682 2026-05-25)",
+      "command": "CARGO_BUILD_JOBS=1 CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/ullm-served-manifest-lane-d-target cargo build --locked --release -p ullm-engine --bin ullm-aq4-p2-resident-driver",
+      "expected_binary_sha256": "458b8603d6823a1c20ea93e7c0d757c8910f3c36c9a2a34ab536853c0c9e7d34",
+      "llvm_version": "22.1.2",
+      "locked": true,
+      "profile": "release",
+      "provenance": "clean Git worktree at the exact source commit with an initially absent independent target directory",
+      "rustc_host": "x86_64-unknown-linux-gnu",
+      "rustc_version": "1.96.0 (ac68faa20 2026-05-25)",
+      "source_commit": "81ceebb13518f590b5dbf439cd00b35e508c1c3f",
+      "source_git_blob": "7e37119cc8b66dc0e0f7abcf49b896fcdad8315f",
+      "source_sha256": "0acb46d1ab8730267edf40b505224ff157760ec19aa40a07ee1b389860ec54bf",
+      "source_tree": "5e98c3812f9eebdaed3e6085ab2e13521e249521"
+    },
     "protocol": "ullm.aq4_p2_resident_driver.v2",
-    "source_commit": "eb7bf4513a5bdcc8ea44f111ef42e7fa735a7edf",
-    "source_tree": "ae3191e5bfc2cbd161fd8397d912de9dfa02b497"
+    "source_commit": "81ceebb13518f590b5dbf439cd00b35e508c1c3f",
+    "source_git_blob": "7e37119cc8b66dc0e0f7abcf49b896fcdad8315f",
+    "source_sha256": "0acb46d1ab8730267edf40b505224ff157760ec19aa40a07ee1b389860ec54bf",
+    "source_tree": "5e98c3812f9eebdaed3e6085ab2e13521e249521"
   },
   "run_id": "p2-r9700-resident-one-case-smoke-prepared-v3",
   "runner": {
