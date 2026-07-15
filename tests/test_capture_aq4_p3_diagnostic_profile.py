@@ -2701,7 +2701,12 @@ def test_warmup_unknown_source_rows_fail_and_partial_outputs_are_cleaned(
     assert not artifact_path.exists()
 
 
-def launcher_profile_binding(tmp_path: Path) -> tuple[dict, Path, Path, str]:
+def launcher_profile_binding(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> tuple[dict, Path, Path, str]:
+    lock = tmp_path / "r9700.lock"
+    lock.touch(mode=0o600)
+    monkeypatch.setattr(LAUNCHER, "LOCK_PATH", lock)
     evidence = tmp_path / "profile-launcher-evidence"
     result = tmp_path / "profile-runner-output"
     run_id = "profile-boundary-test-run"
@@ -2813,8 +2818,12 @@ def write_launcher_profile_result(root: Path, binding: dict) -> None:
     )
 
 
-def test_launcher_runs_validator_and_gates_before_profile_runner_only(tmp_path: Path) -> None:
-    binding, evidence_path, result_path, run_id = launcher_profile_binding(tmp_path)
+def test_launcher_runs_validator_and_gates_before_profile_runner_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    binding, evidence_path, result_path, run_id = launcher_profile_binding(
+        tmp_path, monkeypatch
+    )
     events: list[str] = []
 
     def validator(argv, **kwargs):
@@ -2913,9 +2922,11 @@ def test_launcher_runs_validator_and_gates_before_profile_runner_only(tmp_path: 
 
 
 def test_captured_validator_warning_remains_fail_closed_before_profile_runner(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    binding, evidence_path, result_path, run_id = launcher_profile_binding(tmp_path)
+    binding, evidence_path, result_path, run_id = launcher_profile_binding(
+        tmp_path, monkeypatch
+    )
     calls: list[str] = []
     # Regression fixture from the failed evidence committed in 4c89c602.
     warning = (
@@ -2962,8 +2973,12 @@ def test_captured_validator_warning_remains_fail_closed_before_profile_runner(
     assert evidence["safety"]["model_load_executed"] is False
 
 
-def test_profile_launcher_without_capture_executor_never_starts_runner(tmp_path: Path) -> None:
-    binding, evidence_path, result_path, run_id = launcher_profile_binding(tmp_path)
+def test_profile_launcher_without_capture_executor_never_starts_runner(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    binding, evidence_path, result_path, run_id = launcher_profile_binding(
+        tmp_path, monkeypatch
+    )
 
     def validator(argv, **_kwargs):
         return subprocess.CompletedProcess(

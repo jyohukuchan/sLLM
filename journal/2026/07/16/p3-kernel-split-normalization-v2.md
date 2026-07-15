@@ -53,3 +53,17 @@ exact key set, and independently reconstruct the v1 normalization sidecar from t
 raw kernel and marker refs. It must compare the exact 12-group provenance, validate
 the 10 measured split CSVs against the canonical rows, and require equal source
 kernel SHA-256 before/after.
+
+## Final-state-independent launcher fixtures
+
+The three capture-module launcher boundary tests now create a private lock under
+their pytest temporary directory and inject it as `LAUNCHER.LOCK_PATH` with
+`monkeypatch`. Pytest restores the module constant after each test. The tests no
+longer depend on whether `/run/ullm/r9700.lock` exists, while the mocked gate and
+profile-executor boundaries continue to prevent service and GPU operations.
+
+The canonical capture module now reports `83 passed, 1 skipped` in 13.37 seconds.
+The single intentional skip requires `ULLM_TEST_AQ4_P2_RESIDENT_DRIVER` to point to
+a clean release binary; it is unrelated to the kernel normalization or launcher
+fixture boundary. Capture source commit `418e507214b2a4c0352ac8867bf9689b81948ca4`
+was not modified by this follow-up.
