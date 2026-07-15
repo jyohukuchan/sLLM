@@ -2,16 +2,16 @@
   "actual_executed": false,
   "automated_tests": {
     "aggregate": {
-      "collected": 467,
+      "collected": 468,
       "deselected": 0,
       "distinct_test_file_count": 12,
       "failed": 0,
-      "passed": 467
+      "passed": 468
     },
     "schema_version": "ullm.aq4_p2_exact_test_file_manifest.v1",
     "suites": [
       {
-        "collected": 340,
+        "collected": 341,
         "command": [
           "python3",
           "-m",
@@ -63,15 +63,15 @@
             "source_commit": "a0a61219be28be1e3765c076d4a23513f6bd6221"
           },
           {
-            "collected": 135,
-            "git_blob": "904ade176f74f3a20a91dd7e1619d03698cd8ec9",
-            "passed": 135,
+            "collected": 136,
+            "git_blob": "2ae3b109a95770b70523a1711e57cd7969619e43",
+            "passed": 136,
             "path": "tests/test_aq4_p2_resident_smoke_maintenance.py",
-            "source_commit": "ea32ffb3f2f7f65b210c4c6115af7eef13045f5a"
+            "source_commit": "b89a0ff683884e4d0b1014512259bce5596dd05c"
           }
         ],
         "name": "resident_trust_chain",
-        "passed": 340
+        "passed": 341
       },
       {
         "collected": 16,
@@ -161,7 +161,7 @@
             "git_blob": "8167859108c68fa27c67fe21c3d772e4899e384a",
             "passed": 26,
             "path": "tests/test_build_aq4_p3_selection_raw.py",
-            "source_commit": "c743007f9748d2baf6d699744f7dad4fd3b1cd21"
+            "source_commit": "c743007f97486e7c7e070f4258ce4e98f0665aad"
           }
         ],
         "name": "selection_raw_producer",
