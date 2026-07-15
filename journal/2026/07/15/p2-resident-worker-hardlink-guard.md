@@ -53,3 +53,17 @@
 - 並行するfidelity作業がproduction workerを旧exact-two hardlink inodeからsingle-linkの別inodeへdetachした。resident側の既存exact-two fixture/guardは意図どおりこれを拒否する。
 - このためprimary trust-chain pytestはdevice bindingへ到達する前にworker trust rootで拒否され、最終exact QAとmaintenance ready artifact再生成は未完了である。
 - 「無関係guard維持」に従い、resident guardをsingle-linkへ変更せず、production workerも変更していない。exact-twoを復元してfixtureごと再固定するか、resident guardをsingle-linkへ変更するかの明示判断が必要である。
+
+## single-link authoritative決定後の解決
+
+- production workerとfidelity証拠は変更せず、worker fixtureを`roots`、順序付き`paths`、`primary_path`、期待metadata/SHAを持つv2へ更新した。
+- guardは`paths`数と`nlink`の一致を必須とし、宣言された全pathを`O_NOFOLLOW`で開いてmetadata/SHAを検査する。各bounded rootのsame-inode path集合が宣言集合とexact一致することをpre/postで確認するため、single-linkとexact-twoの両方をfixture-drivenで扱い、unknown/extra/missing/swapを拒否する。
+- current active fixtureはsingle-link identityへ固定し、synthetic testsではsingle-linkとexact-twoの正常系および初期・遅延変異の負例を維持した。一般file helperのsingle-link規則は変更していない。
+- driver source/binary、validator、prepared、B、launcher、execute binding、maintenance harness、base/profile readyとdry-runを再固定し、次の明示actual用run/output/evidenceをfreshなv6へ進めた。
+- exact QAは12 distinct files、362 collected / 362 passed / 0 failed / 0 deselectedである。内訳はprimary trust-chain 256、resident Rust 16、その他5 suites 90である。
+- base/profile canonical dry-runはpassedで全actual process countが0、service/GPU/model loadは未実行である。v6 run/evidence、profile run/evidence、rocprof capture outputはすべて不在である。
+
+## 次の行動（更新）
+
+- explicit actualを行う場合だけ、ready artifactに固定されたv6 outputを一度使用する。
+- actualが失敗しても証拠を保持し、再試行時は新しいversionへ進める。
