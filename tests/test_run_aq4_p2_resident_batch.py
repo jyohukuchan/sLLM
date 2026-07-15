@@ -43,11 +43,41 @@ BATCH = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(BATCH)
 
 
-def _identity(driver_sha256: str | None = None) -> dict:
+def _identity(
+    driver_sha256: str | None = None,
+) -> dict:
     value = json.loads(json.dumps(DRIVER_IDENTITY))
     if driver_sha256 is not None:
         value["binary_sha256"] = driver_sha256
     return value
+
+
+def _legacy_served_binding(
+    manifest_path: Path | str = "/served-model.json",
+    sha256: str = "b" * 64,
+) -> dict:
+    return {
+        "schema_version": BATCH.SERVED_MODEL_BINDING_SCHEMA,
+        "mode": "logical_path",
+        "logical_path": str(manifest_path),
+        "effective_source": "path_loader",
+        "descriptor_transport": "none",
+        "closure": "control_input",
+        "method": "read",
+        "identity": {
+            "device": 1,
+            "inode": 1,
+            "mode": 0o100444,
+            "nlink": 1,
+            "size": 0,
+            "mtime_ns": 1,
+            "ctime_ns": 1,
+        },
+        "sha256": sha256,
+        "byte_count": 0,
+        "single_read": True,
+        "logical_path_opened": True,
+    }
 
 
 def _detached_python(tmp_path: Path) -> tuple[Path, str]:
@@ -199,12 +229,35 @@ def _driver(tmp_path: Path, python: Path, oom: bool = False, reset_bad: bool = F
     path = tmp_path / f"fake-{suffix}-driver.py"
     path.write_text(
         """#!%s
-import hashlib,json,sys
+import hashlib,json,os,sys
 oom = %r
 reset_bad = %r
 drift = %r
 identity = %r
+served_model_binding = %r
 identity['binary_sha256'] = hashlib.sha256(open(sys.argv[0], 'rb').read()).hexdigest()
+if 'ULLM_AQ4_PINNED_FD_MAP' in os.environ:
+    map_fd = int(os.environ['ULLM_AQ4_PINNED_FD_MAP'])
+    fd_map = json.loads(os.pread(map_fd, 1024 * 1024, 0))
+    served = next(item for item in fd_map['bindings'] if item['role'] == 'served_manifest')
+    raw = os.pread(served['descriptor'], served['identity']['size'] + 1, 0)
+    assert sys.argv[2] == served['logical_path']
+    assert hashlib.sha256(raw).hexdigest() == served['sha256']
+    identity['served_model_manifest_sha256'] = served['sha256']
+    served_model_binding = {
+        'schema_version': 'ullm.aq4_p2_served_model_binding.v2',
+        'mode': 'pinned_fd',
+        'logical_path': served['logical_path'],
+        'effective_source': 'inherited_sealed_fd',
+        'descriptor_transport': 'inherited_fd_map',
+        'closure': 'control_input',
+        'method': 'read',
+        'identity': served['identity'],
+        'sha256': served['sha256'],
+        'byte_count': len(raw),
+        'single_read': True,
+        'logical_path_opened': False,
+    }
 def file_sha(path):
     with open(path, 'rb') as handle: return hashlib.sha256(handle.read()).hexdigest()
 def exact_link(value):
@@ -228,7 +281,7 @@ session = 'fake-session'
 case_id = None
 requested = 1
 resolved = 1
-print(json.dumps({'event':'ready','schema_version':'ullm.aq4_p2_resident_driver.v2','model_loads':1,'resident_session_id':session,'driver_identity':identity}), flush=True)
+print(json.dumps({'event':'ready','schema_version':'ullm.aq4_p2_resident_driver.v2','model_loads':1,'resident_session_id':session,'driver_identity':identity,'served_model_binding':served_model_binding}), flush=True)
 for line in sys.stdin:
     msg=json.loads(line)
     if msg['command']=='case_begin':
@@ -246,7 +299,14 @@ for line in sys.stdin:
         if terminal_status: break
     elif msg['command']=='case_end': print(json.dumps({'event':'case_complete','schema_version':'ullm.aq4_p2_resident_driver.v2','resident_session_id':session,'case_id':case_id,'release':{'commit':1,'discard':0,'reset':1,'baseline_restored':False if drift=='release' else True}}), flush=True)
     elif msg['command']=='shutdown': break
-""" % (python, oom, reset_bad, drift, _identity("0" * 64)),
+""" % (
+            python,
+            oom,
+            reset_bad,
+            drift,
+            _identity("0" * 64),
+            _legacy_served_binding(tmp_path / "served-model.json"),
+        ),
         encoding="utf-8",
     )
     path.chmod(0o755)
@@ -264,6 +324,7 @@ def _fault_driver(tmp_path: Path, python: Path, fault: str) -> tuple[Path, str]:
 import hashlib,json,os,signal,sys,time
 fault = %r
 identity = %r
+served_model_binding = %r
 identity['binary_sha256'] = hashlib.sha256(open(sys.argv[0], 'rb').read()).hexdigest()
 if fault == 'early_exit':
     os.write(2, b'early-boom\\n'); raise SystemExit(23)
@@ -286,7 +347,7 @@ if fault == 'descendant_hang':
 if fault == 'invalid_json':
     os.write(1, b'not-json\\n'); raise SystemExit(26)
 session = 'fault-session'
-print(json.dumps({'event':'ready','schema_version':'ullm.aq4_p2_resident_driver.v2','model_loads':1,'resident_session_id':session,'driver_identity':identity}), flush=True)
+print(json.dumps({'event':'ready','schema_version':'ullm.aq4_p2_resident_driver.v2','model_loads':1,'resident_session_id':session,'driver_identity':identity,'served_model_binding':served_model_binding}), flush=True)
 for line in sys.stdin:
     message = json.loads(line)
     if message['command'] == 'case_begin':
@@ -296,7 +357,13 @@ for line in sys.stdin:
         os.write(2, b'midrun-boom\\n'); raise SystemExit(25)
     elif message['command'] == 'shutdown':
         break
-""" % (python, fault, _identity("0" * 64)),
+"""
+        % (
+            python,
+            fault,
+            _identity("0" * 64),
+            _legacy_served_binding(tmp_path / "served-model.json"),
+        ),
         encoding="utf-8",
     )
     path.chmod(0o755)
@@ -473,7 +540,12 @@ def test_fake_resident_driver_writes_one_atomic_raw_per_case(tmp_path: Path) -> 
     assert len(raws) == 84
     sample = json.loads(raws[0].read_text())
     assert sample["status"] == "ok"
-    assert sample["resident"] == {"session_id": "fake-session", "model_loads": 1, "driver_identity": _identity(driver_sha256), "case_reset_count": 12}
+    assert sample["resident"] == {
+        "session_id": "fake-session",
+        "model_loads": 1,
+        "driver_identity": _identity(driver_sha256),
+        "case_reset_count": 12,
+    }
     assert sample["device_lock"]["driver"]["sha256"] == driver_sha256
     assert sample["schedule"] == {"warmup_runs": 2, "measured_runs": 10, "completed_runs": 12}
     assert json.loads((output / "resident-batch.summary.json").read_text())["completed_cases"] == 84
@@ -527,6 +599,15 @@ def test_pre_ready_failures_preserve_bounded_process_evidence(
     evidence_path = output / "resident-batch.failure.json"
     assert evidence_path.stat().st_mode & 0o777 == 0o444
     evidence = json.loads(evidence_path.read_text())
+    assert evidence["schema_version"] == "ullm.aq4_p2_resident_driver_process.v2"
+    assert evidence["invocation"]["logical_argv"] == command[
+        command.index("--driver-command") + 1 :
+    ]
+    assert evidence["invocation"]["logical_argv_sha256"] == BATCH.sha_bytes(
+        BATCH.canonical(evidence["invocation"]["logical_argv"])
+    )
+    assert evidence["invocation"]["effective_semantic_bindings"] == []
+    assert evidence["invocation"]["pinned_fd_map"] is None
     assert evidence["failure"]["kind"] == failure_kind
     assert evidence["failure"]["stage"] == "ready"
     assert evidence["protocol"]["ready_received"] is False
@@ -891,6 +972,196 @@ def test_pinned_fd_map_rejects_null_sha_for_code_binding(
     finally:
         os.close(map_descriptor)
         os.close(code_descriptor)
+
+
+def test_pinned_served_manifest_handoff_keeps_logical_argv_and_reads_original_fd(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    driver = tmp_path / "fd-aware-driver.py"
+    driver.write_text(
+        f"#!{Path(sys.executable).resolve()}\n"
+        "import hashlib, json, os, sys\n"
+        "map_fd = int(os.environ['ULLM_AQ4_PINNED_FD_MAP'])\n"
+        "fd_map = json.loads(os.pread(map_fd, 1024 * 1024, 0))\n"
+        "binding = next(item for item in fd_map['bindings'] if item['role'] == 'served_manifest')\n"
+        "raw = os.pread(binding['descriptor'], binding['identity']['size'] + 1, 0)\n"
+        "assert hashlib.sha256(raw).hexdigest() == binding['sha256']\n"
+        "print(json.dumps({'logical_manifest': sys.argv[2], 'manifest': raw.decode('ascii')}))\n",
+        encoding="utf-8",
+    )
+    driver.chmod(0o555)
+    manifest = tmp_path / "active.json"
+    trusted_raw = b'{"trusted":true}\n'
+    manifest.write_bytes(trusted_raw)
+    replacement = tmp_path / "replacement.json"
+    replacement.write_bytes(b'{"trusted":false}\n')
+    driver_fd = os.open(driver, os.O_RDONLY | getattr(os, "O_CLOEXEC", 0))
+    manifest_fd = os.open(manifest, os.O_RDONLY | getattr(os, "O_CLOEXEC", 0))
+    map_fd = os.memfd_create(
+        "served-manifest-handoff",
+        getattr(os, "MFD_CLOEXEC", 0) | getattr(os, "MFD_ALLOW_SEALING", 0),
+    )
+    logical_argv = [
+        str(driver),
+        "--served-model-manifest",
+        str(manifest),
+        "--device-index",
+        "1",
+        "--build-git-commit",
+        "e" * 40,
+    ]
+    bindings = [
+        {
+            "role": "resident_driver",
+            "logical_path": str(driver),
+            "resolved_path": None,
+            "descriptor": driver_fd,
+            "kind": "regular_file",
+            "closure": "code_execution",
+            "method": "exec",
+            "identity": BATCH._named_file_identity(os.fstat(driver_fd)),
+            "sha256": hashlib.sha256(driver.read_bytes()).hexdigest(),
+        },
+        {
+            "role": "served_manifest",
+            "logical_path": str(manifest),
+            "resolved_path": None,
+            "descriptor": manifest_fd,
+            "kind": "regular_file",
+            "closure": "control_input",
+            "method": "read",
+            "identity": BATCH._named_file_identity(os.fstat(manifest_fd)),
+            "sha256": hashlib.sha256(trusted_raw).hexdigest(),
+        },
+    ]
+    value = {
+        "schema_version": BATCH.FD_MAP_SCHEMA,
+        "status": "bound",
+        "map_sha256": None,
+        "logical_argv_sha256": BATCH.sha_bytes(BATCH.canonical(logical_argv)),
+        "closure_contract": BATCH.FD_CLOSURE_CONTRACT,
+        "bindings": bindings,
+    }
+    value["map_sha256"] = BATCH.sha_bytes(BATCH.canonical(value))
+    raw_map = BATCH.canonical(value) + b"\n"
+    os.write(map_fd, raw_map)
+    seals = fcntl.F_SEAL_SEAL | fcntl.F_SEAL_SHRINK | fcntl.F_SEAL_GROW | fcntl.F_SEAL_WRITE
+    fcntl.fcntl(map_fd, fcntl.F_ADD_SEALS, seals)
+    monkeypatch.setenv(BATCH.FD_MAP_ENV, str(map_fd))
+    pinned = BATCH.PinnedFdMap.from_environment(required=True)
+    backup = tmp_path / "trusted-backup.json"
+    assert BATCH.ACTIVE_FD_MAP is None
+    BATCH.ACTIVE_FD_MAP = pinned
+    try:
+        manifest.rename(backup)
+        replacement.rename(manifest)
+        invocation = BATCH._driver_invocation_document(logical_argv)
+        effective = list(logical_argv)
+        effective[0] = BATCH.effective_fd_path(
+            driver, method="exec", role="resident_driver"
+        )
+        completed = subprocess.run(
+            effective,
+            check=True,
+            text=True,
+            capture_output=True,
+            **BATCH.fd_child_options(),
+        )
+        observed = json.loads(completed.stdout)
+        assert observed == {
+            "logical_manifest": str(manifest),
+            "manifest": trusted_raw.decode("ascii"),
+        }
+        assert effective[2] == str(manifest)
+        assert invocation["logical_argv"] == logical_argv
+        assert invocation["logical_argv_sha256"] == BATCH.sha_bytes(
+            BATCH.canonical(logical_argv)
+        )
+        assert [item["argument_index"] for item in invocation["effective_semantic_bindings"]] == [0, 2]
+        assert [item["role"] for item in invocation["effective_semantic_bindings"]] == [
+            "resident_driver",
+            "served_manifest",
+        ]
+        assert invocation["pinned_fd_map"] == {
+            "schema_version": BATCH.FD_MAP_SCHEMA,
+            "map_sha256": value["map_sha256"],
+            "closure_contract": BATCH.FD_CLOSURE_CONTRACT,
+        }
+        assert all(
+            "descriptor" not in item
+            for item in invocation["effective_semantic_bindings"]
+        )
+        ready_binding = {
+            "schema_version": BATCH.SERVED_MODEL_BINDING_SCHEMA,
+            "mode": "pinned_fd",
+            "logical_path": str(manifest),
+            "effective_source": "inherited_sealed_fd",
+            "descriptor_transport": "inherited_fd_map",
+            "closure": "control_input",
+            "method": "read",
+            "identity": bindings[1]["identity"],
+            "sha256": bindings[1]["sha256"],
+            "byte_count": len(trusted_raw),
+            "single_read": True,
+            "logical_path_opened": False,
+        }
+        assert BATCH._validate_served_model_binding(
+            ready_binding, bindings[1]["sha256"]
+        ) == ready_binding
+        for field, replacement_value in (
+            ("logical_path", str(backup)),
+            ("logical_path_opened", True),
+            ("descriptor_transport", "none"),
+        ):
+            drifted = json.loads(json.dumps(ready_binding))
+            drifted[field] = replacement_value
+            with pytest.raises(BATCH.BatchError, match="pinned served model binding"):
+                BATCH._validate_served_model_binding(
+                    drifted, bindings[1]["sha256"]
+                )
+    finally:
+        BATCH.ACTIVE_FD_MAP = None
+        manifest.unlink(missing_ok=True)
+        backup.rename(manifest)
+        os.close(map_fd)
+        os.close(manifest_fd)
+        os.close(driver_fd)
+
+
+def test_required_pinned_fd_map_fails_when_missing_or_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv(BATCH.FD_MAP_ENV, raising=False)
+    with pytest.raises(BATCH.BatchError, match="requires the pinned FD map"):
+        BATCH.PinnedFdMap.from_environment(required=True)
+    descriptor = os.memfd_create("closed-map", getattr(os, "MFD_CLOEXEC", 0))
+    os.close(descriptor)
+    monkeypatch.setenv(BATCH.FD_MAP_ENV, str(descriptor))
+    with pytest.raises(BATCH.BatchError, match="pinned FD map read failed"):
+        BATCH.PinnedFdMap.from_environment(required=True)
+
+
+def test_actual_profile_rc1_is_the_proc_fd_manifest_regression_fixture() -> None:
+    root = (
+        ROOT
+        / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2"
+        / "resident-one-case-smoke-profile-execute-v3"
+    )
+    failure = json.loads((root / "resident-batch.failure.json").read_text())
+    stderr = (root / "resident-driver.stderr.log").read_text()
+    assert failure["schema_version"] == "ullm.aq4_p2_resident_driver_process.v1"
+    assert failure["failure"] == {
+        "kind": "eof",
+        "reason": "resident driver exited before response",
+        "stage": "ready",
+    }
+    assert failure["protocol"]["ready_received"] is False
+    assert failure["protocol"]["warmup_completed"] == 0
+    assert failure["protocol"]["measured_completed"] == 0
+    assert stderr == (
+        "ullm-aq4-p2-resident-driver: served model rejected: "
+        "served-model manifest traverses a symlink\n"
+    )
 
 
 def test_fixture_index_rejects_relative_and_symlink_parent_paths(tmp_path: Path) -> None:

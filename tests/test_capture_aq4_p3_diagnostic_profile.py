@@ -39,6 +39,10 @@ FIXTURES = load(
     "aq4_p3_producer_test_fixtures",
     ROOT / "tests/test_build_aq4_p3_selection_raw.py",
 )
+RUNNER_TESTS = load(
+    "aq4_p2_resident_runner_test_fixtures",
+    ROOT / "tests/test_run_aq4_p2_resident_batch.py",
+)
 
 
 def write_marker_trace(path: Path, run_id: str, case_id: str, case_sha: str) -> None:
@@ -721,6 +725,222 @@ def test_real_trusted_runner_dry_run_crosses_fake_rocprof_with_sealed_fd_map(
         validator_replacement.unlink(missing_ok=True)
         validator.unlink(missing_ok=True)
         assert hashlib.sha256(validator_source.read_bytes()).hexdigest() == validator_source_sha
+        pinned_map.close()
+        CAPTURE.close_target_snapshots(snapshots)
+
+
+def test_real_runner_reaches_fake_driver_ready_through_fake_rocprof_with_pinned_manifest(
+    tmp_path: Path,
+) -> None:
+    runner = (ROOT / "tools/run-aq4-p2-resident-batch.py").resolve()
+    python, _ = RUNNER_TESTS._detached_python(tmp_path / "driver-runtime")
+    driver, driver_sha256 = RUNNER_TESTS._driver(
+        tmp_path / "driver-runtime", python
+    )
+    expanded, fixture_index, identity_path, preflight, policy = RUNNER_TESTS._bundle(
+        tmp_path / "bundle", driver_sha256
+    )
+    manifest = (tmp_path / "active.json").resolve()
+    trusted_manifest = b'{"source":"trusted-pinned-fd"}\n'
+    manifest.write_bytes(trusted_manifest)
+    manifest_sha256 = hashlib.sha256(trusted_manifest).hexdigest()
+    manifest_identity = CAPTURE.named_identity(manifest.lstat())
+    identity = json.loads(identity_path.read_text())
+    identity["resident_driver_identity"]["served_model_manifest_sha256"] = (
+        manifest_sha256
+    )
+    expected_served_binding = {
+        "schema_version": "ullm.aq4_p2_served_model_binding.v2",
+        "mode": "pinned_fd",
+        "logical_path": str(manifest),
+        "effective_source": "inherited_sealed_fd",
+        "descriptor_transport": "inherited_fd_map",
+        "closure": "control_input",
+        "method": "read",
+        "identity": manifest_identity,
+        "sha256": manifest_sha256,
+        "byte_count": len(trusted_manifest),
+        "single_read": True,
+        "logical_path_opened": False,
+    }
+    identity["hash_binding"]["served_model_manifest_sha256"] = manifest_sha256
+    identity["identity_sha256"] = None
+    identity["identity_sha256"] = RUNNER_TESTS.BATCH._identity_self_sha256(identity)
+    identity_path.write_text(json.dumps(identity), encoding="utf-8")
+    lock = (tmp_path / "r9700-test.lock").resolve()
+    lock.touch(mode=0o600)
+    output = (tmp_path / "real-runner-live-output").resolve()
+    command = [
+        str(Path(sys.executable).resolve()),
+        str(runner),
+        "--expanded",
+        str(expanded),
+        "--fixture-index",
+        str(fixture_index),
+        "--identity",
+        str(identity_path),
+        "--preflight",
+        str(preflight),
+        "--policy",
+        str(policy),
+        "--output-dir",
+        str(output),
+        "--run-id",
+        "fd-map-fake-rocprof-live",
+        "--baseline-kind",
+        "p3-current-head",
+        "--lock-path",
+        str(lock),
+        "--driver-command",
+        str(driver),
+        "--served-model-manifest",
+        str(manifest),
+        "--device-index",
+        "1",
+        "--build-git-commit",
+        "e" * 40,
+    ]
+    bound_indices = {
+        0: ("python_interpreter", "code_execution", "exec", True),
+        1: ("resident_runner", "code_execution", "exec", False),
+        command.index(str(expanded)): ("case_binding", "control_input", "read", False),
+        command.index(str(fixture_index)): (
+            "fixture_index",
+            "control_input",
+            "read",
+            False,
+        ),
+        command.index(str(identity_path)): ("identity", "control_input", "read", False),
+        command.index(str(preflight)): (
+            "prepared_preflight",
+            "control_input",
+            "read",
+            False,
+        ),
+        command.index(str(policy)): ("policy", "control_input", "read", False),
+        command.index(str(driver)): ("resident_driver", "code_execution", "exec", True),
+        command.index(str(manifest)): (
+            "served_manifest",
+            "control_input",
+            "read",
+            False,
+        ),
+    }
+    target: dict[str, object] = {
+        "schema_version": CAPTURE.TARGET_SCHEMA,
+        "status": "bound",
+        "manifest_sha256": None,
+        "argv": command,
+        "environment": {"ULLM_TEST_PROFILE_TARGET": "1"},
+        "input_files": [
+            {
+                "argument_index": index,
+                "path": command[index],
+                "sha256": hashlib.sha256(Path(command[index]).read_bytes()).hexdigest(),
+                "executable": executable,
+                "role": role,
+                "closure": closure,
+                "method": method,
+            }
+            for index, (role, closure, method, executable) in sorted(
+                bound_indices.items()
+            )
+        ],
+        "runtime_paths": [
+            {
+                "argument_index": command.index(str(lock)),
+                "path": str(lock),
+                "kind": "regular_file",
+                "identity": list(CAPTURE.PROFILER._identity(lock.lstat())),
+                "role": "device_lock",
+                "closure": "device_lock",
+                "method": "flock",
+            }
+        ],
+        "control_files": [
+            {
+                "path": entry["fixture_path"],
+                "sha256": entry["fixture_sha256"],
+                "role": f"case_fixture_{number:03d}",
+                "closure": "control_input",
+                "method": "read",
+            }
+            for number, entry in enumerate(
+                json.loads(fixture_index.read_text())["cases"]
+            )
+        ],
+        "output_paths": [
+            {"argument_index": command.index(str(output)), "path": str(output)}
+        ],
+        "closure_contract": {
+            "code_execution_closure": "pinned_fd",
+            "control_input_closure": "pinned_fd",
+            "device_lock_closure": "pinned_fd",
+            "data_integrity": "trusted_pre_post_guarded",
+        },
+        "capture_helpers": CAPTURE.capture_helper_contract(),
+        "authorization": {
+            "maximum_invocations": 1,
+            "target_role": "profile_runner_only",
+            "promotion_eligible": False,
+        },
+    }
+    target["manifest_sha256"] = CAPTURE.self_hash(target, "manifest_sha256")
+    target_path = (tmp_path / "live-target.json").resolve()
+    target_path.write_text(json.dumps(target, sort_keys=True) + "\n", encoding="utf-8")
+    loaded, snapshots = CAPTURE.load_target_command_manifest(
+        target_path, hashlib.sha256(target_path.read_bytes()).hexdigest()
+    )
+    pinned_map = CAPTURE.PinnedFdMap.create(loaded, snapshots)
+    effective, descriptors = CAPTURE.pinned_target_argv(loaded, snapshots)
+    fake_rocprof = (tmp_path / "fake-live-rocprof.py").resolve()
+    fake_rocprof.write_text(
+        "#!/usr/bin/python3\n"
+        "import json,os,subprocess,sys\n"
+        "m=int(os.environ['ULLM_AQ4_PINNED_FD_MAP'])\n"
+        "v=json.loads(os.pread(m,1048576,0))\n"
+        "fds=tuple(sorted({m,*[x['descriptor'] for x in v['bindings']]}))\n"
+        "target=sys.argv[sys.argv.index('--')+1:]\n"
+        "raise SystemExit(subprocess.run(target,pass_fds=fds,env=os.environ).returncode)\n",
+        encoding="utf-8",
+    )
+    fake_rocprof.chmod(0o555)
+    replacement = tmp_path / "replacement.json"
+    replacement.write_bytes(b'{"source":"replacement-logical-path"}\n')
+    backup = tmp_path / "trusted-manifest-backup.json"
+    environment = dict(target["environment"])
+    environment[CAPTURE.FD_MAP_ENV] = str(pinned_map.descriptor)
+    try:
+        manifest.rename(backup)
+        replacement.rename(manifest)
+        CAPTURE._run_profile(
+            [str(fake_rocprof), "--", *effective],
+            (tmp_path / "fake-live-rocprof-output").resolve(),
+            30.0,
+            pass_fds=(*descriptors, pinned_map.descriptor),
+            environment=environment,
+        )
+        process = json.loads(
+            (output / "resident-batch.driver-process.json").read_text()
+        )
+        assert process["schema_version"] == "ullm.aq4_p2_resident_driver_process.v2"
+        assert process["protocol"]["ready_received"] is True
+        assert process["invocation"]["logical_argv"][2] == str(manifest)
+        assert (
+            process["invocation"]["ready_served_model_binding"]
+            == expected_served_binding
+        )
+        semantic = process["invocation"]["effective_semantic_bindings"]
+        assert [item["argument_index"] for item in semantic] == [0, 2]
+        assert semantic[1]["sha256"] == manifest_sha256
+        assert all("descriptor" not in item for item in semantic)
+        assert json.loads((output / "resident-batch.summary.json").read_text())[
+            "completed_cases"
+        ] == 84
+    finally:
+        manifest.unlink(missing_ok=True)
+        if backup.exists():
+            backup.rename(manifest)
         pinned_map.close()
         CAPTURE.close_target_snapshots(snapshots)
 
