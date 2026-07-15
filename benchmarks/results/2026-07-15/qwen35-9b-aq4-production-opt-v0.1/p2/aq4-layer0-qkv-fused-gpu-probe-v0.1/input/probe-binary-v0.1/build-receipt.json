@@ -1,0 +1,24 @@
+{
+  "binary": {
+    "bytes": 1558288,
+    "mode": 365,
+    "nlink": 1,
+    "path": "ullm-aq4-layer0-qkv-z-gate-beta-runtime-probe",
+    "sha256": "42752e7a29614f59f72f90bed6797c3e925b032bffb1a4196c462c8476386840",
+    "source_bytes": 1558288
+  },
+  "build": {
+    "command": "CARGO_BUILD_JOBS=1 cargo build --release -p ullm-engine --bin ullm-aq4-layer0-qkv-z-gate-beta-runtime-probe",
+    "exit_status": 0,
+    "jobs": 1,
+    "stderr_sha256": "cf63ead2c5d9eb18bfb0b0390ecaa81da6370dc94fafbf3db7bcd4ef06f4813f",
+    "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "schema_version": "ullm.aq4_layer0_qkv_z_gate_beta_runtime_probe_build_receipt.v1",
+  "source": {
+    "commit": "6082df4966190ae4977b699460a5ecb93fee8e34",
+    "tree_clean": true,
+    "worktree": "/tmp/ullm-fused-build-source"
+  },
+  "status": "ready"
+}
