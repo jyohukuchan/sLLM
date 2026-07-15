@@ -19,7 +19,7 @@ from typing import Any, Callable
 
 ROOT = Path(__file__).resolve().parents[1]
 CANONICAL_ROOT = ROOT / "benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-prepared-v1"
-BINDING_ROOT = ROOT / "benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-binding-v5"
+BINDING_ROOT = ROOT / "benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-binding-v6"
 BINDING_VALIDATOR_EXEC = ROOT / "tools/prepare-aq4-p2-resident-smoke-bundle.py"
 SERVED_PATH = Path("/etc/ullm/served-models/active.json")
 CASE_MANIFEST_PATH = ROOT / "benchmarks/workloads/aq4-production-opt-p2-case-manifest-v0.1.json"
@@ -105,13 +105,19 @@ REQUIRED_FILES = {
 }
 POST_RUN_FILES = {"dry-run.json", "runner-dry-run-evidence.json"}
 RUNNER_VALIDATE_OUTPUT = Path("/tmp/ullm-aq4-p2-resident-smoke-validate-only")
-BINDING_RUNNER_OUTPUT = Path("/tmp/ullm-aq4-p2-resident-smoke-binding-v5-runner")
-BINDING_SOURCE_COMMIT = "076c3662aad6a3c8c74b3875882df4b41c026de7"
-BINDING_SOURCE_TREE = "8e6d8a7470cbc6f6c943393fc06dee1edd1f8dca"
-BINDING_RUNNER_GIT_BLOB = "c6f5f30a0a3bc64dca01787648f19bb74edc95f5"
-BINDING_RUNNER_SHA = "bb21d396b045187cf1c10b3a240db8dd6a4cf769d657dfbfa377e676dbcf85fb"
+BINDING_RUNNER_OUTPUT = Path("/tmp/ullm-aq4-p2-resident-smoke-binding-v6-runner")
+BINDING_SOURCE_COMMIT = "76c48aa27c08f8cd5115a15e6be25b83d679d8fa"
+BINDING_SOURCE_TREE = "e79865753bcbba1a9134670fa2ea57327ab84ea4"
+BINDING_RUNNER_GIT_BLOB = "1929ca23d50c85d3464f9a2c87f1e062d0dc665a"
+BINDING_RUNNER_SHA = "bbe978ede0e4662c33d0d12eee4194531f340b9c06001f37d619019197fd5138"
 BINDING_DRIVER_GIT_BLOB = "7e37119cc8b66dc0e0f7abcf49b896fcdad8315f"
 BINDING_ROOT_MODE = 0o555
+BINDING_FAKE_READY_SCOPE = {
+    "stage": "pre_spawn_fixture_only",
+    "runtime_proof": False,
+    "ready_proof": False,
+    "model_load_proof": False,
+}
 BINDING_FILES = {
     "trusted-runner.py": (0o444, "actual_generic_runner_source"),
     "trusted-validator.py": (0o444, "trusted_bundle_validator_source"),
@@ -1266,11 +1272,12 @@ def binding_sources(validator_commit: str, validator_sha: str) -> tuple[bytes, b
     normative_driver = git_blob("crates/ullm-engine/src/bin/ullm-aq4-p2-resident-driver.rs", DRIVER_SOURCE_SHA, DRIVER_COMMIT)
     if current_driver != normative_driver:
         raise BundleError("binding commit changed the normative resident driver blob")
-    for contract in (b"ONE_CASE_ROOT_CONTRACT", b"def _run_bundle_validator", b'_require_absolute_nonsymlink_path(path, "trusted bundle validator")', b"nargs=argparse.REMAINDER", b"resident_driver_argv", b"fake_driver_subprocess_count", b"--bundle-root", b"--live-preflight", b"def validate_prepared_preflight_link", b"def require_prepared_preflight_link", b"def validate_live_preflight", b"def require_live_preflight_link", b"def verify_live_preflight", b"prepared_preflight_link = validate_prepared_preflight_link", b"live_preflight_link: LivePreflightLink | None"):
+    for contract in (b"ONE_CASE_ROOT_CONTRACT", b"def _run_bundle_validator", b'_require_absolute_nonsymlink_path(path, "trusted bundle validator")', b"nargs=argparse.REMAINDER", b"resident_driver_argv", b"fake_driver_subprocess_count", b"--bundle-root", b"--live-preflight", b"def validate_prepared_preflight_link", b"def require_prepared_preflight_link", b"def validate_live_preflight", b"def require_live_preflight_link", b"def verify_live_preflight", b"prepared_preflight_link = validate_prepared_preflight_link", b"live_preflight_link: LivePreflightLink | None", b"def validate_historical_synthetic_ready_fixture", b"HISTORICAL_SYNTHETIC_READY_FIELDS", b"LIVE_READY_FIELDS", b"HISTORICAL_SYNTHETIC_READY_SCOPE", b'"stage": "pre_spawn_fixture_only"', b"_ready_predicates(value, LIVE_READY_FIELDS)", b"served_binding = _validate_served_model_binding("):
         if contract not in runner:
             raise BundleError("binding runner generic root/validator contract differs")
-    if b"preflight_link = live_preflight_link" in runner:
-        raise BundleError("binding runner prepared/live preflight separation differs")
+    for forbidden in (b"preflight_link = live_preflight_link", b"allow_pre_binding_fixture"):
+        if forbidden in runner:
+            raise BundleError("binding runner prepared/live or synthetic/live separation differs")
     return runner, validator, validator_tree, validator_object
 
 
@@ -1286,7 +1293,7 @@ def binding_runner_argv(validator_sha: str, root: Path = BINDING_ROOT) -> list[s
         "--trusted-validator", str(BINDING_VALIDATOR_EXEC),
         "--trusted-validator-sha256", validator_sha,
         "--output-dir", str(BINDING_RUNNER_OUTPUT),
-        "--run-id", "p2-r9700-resident-one-case-smoke-binding-v5-validate",
+        "--run-id", "p2-r9700-resident-one-case-smoke-binding-v6-validate",
         "--baseline-kind", "active-production", "--one-case-smoke", "--dry-run",
     ]
 
@@ -1329,7 +1336,7 @@ def validate_binding_plan(raw: bytes, report: dict[str, Any], directory: dict[st
         raise BundleError("binding runner plan one-case facts differ")
     identity = parse_json(read_stable(CANONICAL_ROOT / "identity.json", "binding identity"), "binding identity")
     baseline = {
-        "run_id": "p2-r9700-resident-one-case-smoke-binding-v5-validate", "kind": "active-production",
+        "run_id": "p2-r9700-resident-one-case-smoke-binding-v6-validate", "kind": "active-production",
         "identity_file": {"path": str(CANONICAL_ROOT / "identity.json"), "sha256": members["identity.json"]["sha256"]},
         "served_model_manifest_sha256": EXPECTED_SERVED_SHA, "worker_binary_sha256": EXPECTED_WORKER_SHA, "build_git_commit": DRIVER_COMMIT,
     }
@@ -1354,6 +1361,7 @@ def validate_binding_plan(raw: bytes, report: dict[str, Any], directory: dict[st
         "bundle": {"path": str(CANONICAL_ROOT / "bundle.json"), "sha256": members["bundle.json"]["sha256"]},
         "fake_ready": {"path": str(CANONICAL_ROOT / "fake-ready.json"), "sha256": members["fake-ready.json"]["sha256"]},
         "fake_driver_subprocess_count": 1, "driver_fake_handshake": "passed",
+        "fake_ready_scope": BINDING_FAKE_READY_SCOPE,
         "resident_session_id": "offline-fake-ready-not-executed", "driver_identity": identity["resident_driver_identity"],
         "resident_driver_argv": resident_driver_argv(),
         "trusted_bundle_validator": expected_validator,
@@ -1384,7 +1392,7 @@ def binding_evidence(plan_raw: bytes, report: dict[str, Any], stdout: bytes, std
 def binding_manifest(plan_raw: bytes, evidence_raw: bytes, report_raw: bytes, directory: dict[str, Any], members: dict[str, dict[str, Any]], runner_raw: bytes, validator_raw: bytes, validator_commit: str, validator_tree: str, validator_object: str) -> dict[str, Any]:
     root_fingerprint = {"directory": directory, "members": members, "sha256": sha_bytes(canonical({"directory": directory, "members": members}))}
     return {
-        "schema_version": "ullm.aq4_p2_resident_smoke_binding.v5", "status": "prepared_not_executed", "promotion": False,
+        "schema_version": "ullm.aq4_p2_resident_smoke_binding.v6", "status": "prepared_not_executed", "promotion": False,
         "launch_eligible": False, "requires_immutable_launcher": True,
         "binding_root_contract": {
             "type": "directory",
@@ -1564,7 +1572,7 @@ def main(argv: list[str] | None = None) -> int:
         else:
             result = validate_binding(args.validator_source_commit, args.validator_sha256, args.binding)
         summary = {"status": result["status"], "promotion": result["promotion"]}
-        summary["run_id"] = result.get("run_id", "p2-r9700-resident-one-case-smoke-binding-v5")
+        summary["run_id"] = result.get("run_id", "p2-r9700-resident-one-case-smoke-binding-v6")
         print(json.dumps(summary, sort_keys=True))
         return 0
     except (BundleError, OSError, KeyError, TypeError, ValueError, subprocess.SubprocessError) as error:

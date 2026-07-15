@@ -18,7 +18,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 ARTIFACT = ROOT / "benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-prepared-v1"
-BINDING = ROOT / "benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-binding-v5"
+BINDING = ROOT / "benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-binding-v6"
 if (BINDING / "binding-manifest.json").is_file():
     _CHECKED_IN_BINDING_MANIFEST = json.loads(
         (BINDING / "binding-manifest.json").read_text()
@@ -698,10 +698,10 @@ def test_rejects_rebound_runner_plan_or_normal_profile(tmp_path: Path, trusted_r
         BUNDLE.validate(root, trusted_reconstruction)
 
 
-def test_binding_actual_runner_authority_matches_076c_source() -> None:
+def test_binding_actual_runner_authority_matches_76c48aa_source() -> None:
     commit = BUNDLE.BINDING_SOURCE_COMMIT
     source_path = "tools/run-aq4-p2-resident-batch.py"
-    assert commit == "076c3662aad6a3c8c74b3875882df4b41c026de7"
+    assert commit == "76c48aa27c08f8cd5115a15e6be25b83d679d8fa"
     assert subprocess.run(
         ["git", "rev-parse", f"{commit}^{{tree}}"],
         cwd=ROOT,
@@ -724,13 +724,14 @@ def test_binding_actual_runner_authority_matches_076c_source() -> None:
     ).stdout
     assert hashlib.sha256(source).hexdigest() == BUNDLE.BINDING_RUNNER_SHA
     assert BUNDLE.BINDING_RUNNER_SHA == (
-        "bb21d396b045187cf1c10b3a240db8dd6a4cf769d657dfbfa377e676dbcf85fb"
+        "bbe978ede0e4662c33d0d12eee4194531f340b9c06001f37d619019197fd5138"
     )
 
 
-def test_checked_in_v5_binding_sidecar_passes_and_pins_final_runner_validator() -> None:
+def test_checked_in_v6_binding_sidecar_passes_and_pins_final_runner_validator() -> None:
     value = BUNDLE.validate_binding(VALIDATOR_COMMIT, VALIDATOR_SHA, BINDING)
     assert stat.S_IMODE(BINDING.lstat().st_mode) == BUNDLE.BINDING_ROOT_MODE == 0o555
+    assert value["schema_version"] == "ullm.aq4_p2_resident_smoke_binding.v6"
     assert value["status"] == "prepared_not_executed"
     assert value["promotion"] is False
     assert value["launch_eligible"] is False
@@ -758,7 +759,7 @@ def test_checked_in_v5_binding_sidecar_passes_and_pins_final_runner_validator() 
     assert roots["resident_driver"]["build"] == BUNDLE.DRIVER_BUILD_METADATA
 
 
-def test_v5_binding_runner_and_validator_archives_match_pinned_git_objects() -> None:
+def test_v6_binding_runner_and_validator_archives_match_pinned_git_objects() -> None:
     manifest = json.loads((BINDING / "binding-manifest.json").read_text())
     for role, source_path, archive_name in (
         ("runner", "tools/run-aq4-p2-resident-batch.py", "trusted-runner.py"),
@@ -793,7 +794,7 @@ def test_v5_binding_runner_and_validator_archives_match_pinned_git_objects() -> 
         assert hashlib.sha256(archived).hexdigest() == authority["source_sha256" if role == "runner" else "sha256"]
 
 
-def test_v5_binding_records_actual_runner_and_mandatory_validator_subprocesses() -> None:
+def test_v6_binding_records_actual_runner_and_mandatory_validator_subprocesses() -> None:
     plan_raw = (BINDING / "runner-plan.json").read_bytes()
     plan = json.loads(plan_raw)
     evidence = json.loads((BINDING / "runner-subprocess-evidence.json").read_text())
@@ -804,6 +805,12 @@ def test_v5_binding_records_actual_runner_and_mandatory_validator_subprocesses()
     assert plan["validation"]["root_contract"] == "ullm.aq4_p2_resident_smoke_bundle_root.v4"
     assert set(plan["validation"]["members"]) == set(BUNDLE.REQUIRED_FILES) | {"bundle.json", "SHA256SUMS"}
     assert plan["validation"]["fake_driver_subprocess_count"] == 1
+    assert plan["validation"]["fake_ready_scope"] == BUNDLE.BINDING_FAKE_READY_SCOPE == {
+        "stage": "pre_spawn_fixture_only",
+        "runtime_proof": False,
+        "ready_proof": False,
+        "model_load_proof": False,
+    }
     assert plan["validation"]["resident_driver_argv"] == BUNDLE.resident_driver_argv()
     assert validator["subprocess_count"] == 1
     assert validator["source"] == {"path": str(BUNDLE.BINDING_VALIDATOR_EXEC), "sha256": VALIDATOR_SHA}
@@ -823,7 +830,7 @@ def test_v5_binding_records_actual_runner_and_mandatory_validator_subprocesses()
     assert evidence["trusted_validator"]["report_file_sha256"] == hashlib.sha256(report_raw).hexdigest()
 
 
-def test_v5_binding_keeps_generic_runner_outputs_outside_immutable_input_root() -> None:
+def test_v6_binding_keeps_generic_runner_outputs_outside_immutable_input_root() -> None:
     manifest = json.loads((BINDING / "binding-manifest.json").read_text())
     assert manifest["binding_root_contract"] == {
         "type": "directory",
@@ -858,7 +865,7 @@ def test_v5_binding_keeps_generic_runner_outputs_outside_immutable_input_root() 
     assert manifest["next_stage"]["required"] is True
 
 
-def test_v5_binding_rejects_report_replacement(tmp_path: Path) -> None:
+def test_v6_binding_rejects_report_replacement(tmp_path: Path) -> None:
     root = tmp_path / "binding"
     shutil.copytree(BINDING, root)
     report = root / "validator-report.json"
@@ -870,7 +877,7 @@ def test_v5_binding_rejects_report_replacement(tmp_path: Path) -> None:
         BUNDLE.validate_binding(VALIDATOR_COMMIT, VALIDATOR_SHA, root)
 
 
-def test_v5_binding_rejects_writable_root(tmp_path: Path) -> None:
+def test_v6_binding_rejects_writable_root(tmp_path: Path) -> None:
     root = tmp_path / "binding"
     shutil.copytree(BINDING, root)
     root.chmod(0o775)
@@ -879,7 +886,7 @@ def test_v5_binding_rejects_writable_root(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize("variant", ("late_unknown", "late_missing", "late_replace"))
-def test_v5_binding_final_reenumeration_rejects_late_mutation(tmp_path: Path, variant: str) -> None:
+def test_v6_binding_final_reenumeration_rejects_late_mutation(tmp_path: Path, variant: str) -> None:
     root = tmp_path / "binding"
     shutil.copytree(BINDING, root)
     replacement = tmp_path / "replacement-report.json"
