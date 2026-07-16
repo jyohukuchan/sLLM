@@ -63,6 +63,10 @@ promotion_eligible = false
 
 `manifest_sha256`は自身をnullにし、次のarrayを意味順にsortしたcanonical JSONのSHA-256である。
 
+### 2.4 qualification-only terminal mode
+
+P2が校正で`rejected_no_go`になった場合は、GPU profileを実行せず`build-aq4-p3-qualification-only-raw.py`を使える。このmodeはproducer manifest、representative case、profile run、pairを入力せず、rejected qualificationとP3 commit/tree/source archiveだけを結合する。性能・fidelity測定fieldを持たない別root variantであり、promotion modeのschemaや7 prompts×10 run、M=128+other、paired CI条件を変更しない。
+
 - resident summary: SHA-256、path
 - representative case: prompt ID、case SHA-256
 - case内profile run: resident run index

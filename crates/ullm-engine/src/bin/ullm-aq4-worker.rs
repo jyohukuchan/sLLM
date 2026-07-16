@@ -211,16 +211,36 @@ fn load_worker(source: WorkerSource) -> Result<LoadedWorker, ServedModelError> {
                 production_activation.is_some(),
                 direct_requested,
             )?;
-            if let Some(source) = production_activation {
-                load_p3_production_activation(&source.path, &source.bytes_sha256)?;
-                activate_p3_production_direct_sequence_output();
-            }
+            let activation_build = production_activation
+                .map(|source| load_p3_production_activation(&source.path, &source.bytes_sha256))
+                .transpose()?;
             let bindings = direct_trace_bindings
                 .map(|source| {
                     load_direct_trace_binding_manifest(&source.path, &source.bytes_sha256)
                 })
                 .transpose()?;
             let model = load_served_model(served_model)?;
+            if let Some(build) = activation_build {
+                let package_content = model
+                    .product
+                    .artifact
+                    .as_ref()
+                    .map(|artifact| artifact.content_sha256.as_str())
+                    .ok_or_else(|| {
+                        ServedModelError(
+                            "AQ4 P3 production activation requires artifact content identity"
+                                .into(),
+                        )
+                    })?;
+                if build.binary_sha256 != model.worker.binary_sha256
+                    || build.package_content_sha256 != package_content
+                {
+                    return Err(ServedModelError(
+                        "AQ4 P3 activation build differs from served model".into(),
+                    ));
+                }
+                activate_p3_production_direct_sequence_output();
+            }
             let current_exe =
                 env::current_exe().map_err(|error| ServedModelError(error.to_string()))?;
             let mut loaded = load_resident_worker(&model, &current_exe)?;
@@ -327,7 +347,7 @@ struct P3ActivationCandidate {
     family: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct P3ActivationBuild {
     identity_sha256: String,
@@ -573,7 +593,7 @@ fn validate_p3_qualified_success_chain(
 fn load_p3_production_activation(
     path: &Path,
     expected_sha256: &str,
-) -> Result<(), ServedModelError> {
+) -> Result<P3ActivationBuild, ServedModelError> {
     let payload = load_bound_p3_bytes(path, expected_sha256)?;
     let value: serde_json::Value = serde_json::from_slice(&payload)
         .map_err(|_| ServedModelError("AQ4 P3 activation JSON is invalid".into()))?;
@@ -717,7 +737,7 @@ fn load_p3_production_activation(
             ));
         }
     }
-    Ok(())
+    Ok(manifest.build)
 }
 
 fn load_direct_trace_binding_manifest(

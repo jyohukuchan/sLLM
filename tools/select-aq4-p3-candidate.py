@@ -86,6 +86,20 @@ RAW_ROOT_FIELDS = {
     "measurements",
     "full_model_pairs",
 }
+QUALIFICATION_ONLY_ROOT_FIELDS = {
+    "schema_version",
+    "status",
+    "measurement_eligible",
+    "promotion_eligible",
+    "promotion_ineligibility_reason",
+    "evidence_sha256",
+    "upstream_qualification",
+    "p3_implementation",
+}
+P3_IMPLEMENTATION_FIELDS = {
+    "candidate_id", "family", "commit", "tree_sha256", "source_archive",
+    "build_status", "profile_status", "runtime_default",
+}
 IDENTITY_FIELDS = {
     "identity_sha256",
     "case_manifest_sha256",
@@ -361,6 +375,19 @@ class RawSource:
     pairs: tuple[dict[str, Any], ...]
     promotion_eligible: bool
     upstream_qualification: dict[str, Any]
+    p3_implementation: dict[str, Any] | None
+    p2_terminal_bindings: dict[str, str] | None
+
+
+def rejected_terminal_bindings(qualification: dict[str, Any]) -> dict[str, str]:
+    p2 = qualification["p2"]
+    return {
+        "rejection_receipt_sha256": p2["package"]["receipt_sha256"],
+        "rejection_sha256sums_sha256": p2["package"]["sha256sums_sha256"],
+        "plan_sha256": p2["plan"]["sha256"],
+        "actual_receipt_sha256": p2["actual_receipt"]["sha256"],
+        "policy_sha256": p2["policy"]["sha256"],
+    }
 
 
 def file_identity(info: os.stat_result) -> tuple[int, ...]:
@@ -550,6 +577,8 @@ def canonical_json(value: Any) -> bytes:
 def normalized_raw(value: dict[str, Any]) -> dict[str, Any]:
     clone = json.loads(json.dumps(value, allow_nan=False))
     clone["evidence_sha256"] = None
+    if clone.get("status") == "qualification_only_diagnostic":
+        return clone
     clone["measurements"] = sorted(
         clone["measurements"],
         key=lambda row: (
@@ -660,6 +689,76 @@ def _validate_candidate_a_pair(
 
 
 def validate_raw(value: dict[str, Any]) -> RawSource:
+    if value.get("status") == "qualification_only_diagnostic":
+        exact_fields(value, QUALIFICATION_ONLY_ROOT_FIELDS, "qualification-only raw evidence")
+        if value["schema_version"] != RAW_SCHEMA:
+            raise SelectionError("qualification-only raw schema differs")
+        require_bool(value["measurement_eligible"], False, "qualification-only measurement_eligible")
+        require_bool(value["promotion_eligible"], False, "qualification-only promotion_eligible")
+        if value["promotion_ineligibility_reason"] != QUALIFICATION.REASON:
+            raise SelectionError("qualification-only rejection reason differs")
+        qualification_ref = value["upstream_qualification"]
+        if not isinstance(qualification_ref, dict):
+            raise SelectionError("qualification-only upstream qualification must be an object")
+        exact_fields(qualification_ref, QUALIFICATION_REF_FIELDS, "qualification-only upstream qualification")
+        qualification_snapshot = capture(Path(qualification_ref["path"]))
+        if qualification_snapshot.sha256 != require_digest(qualification_ref["sha256"], "qualification-only qualification file SHA-256"):
+            raise SelectionError("qualification-only qualification file SHA-256 differs")
+        qualification_value = parse_json(qualification_snapshot)
+        try:
+            qualification_result = QUALIFICATION.validate(qualification_value)
+        except QUALIFICATION.QualificationError as error:
+            raise SelectionError(f"qualification-only upstream qualification differs: {error}") from error
+        if qualification_result["status"] != "valid_rejected_no_go":
+            raise SelectionError("qualification-only raw requires rejected_no_go")
+        expected_projection = {
+            "path": str(qualification_snapshot.path), "sha256": qualification_snapshot.sha256,
+            "qualification_sha256": qualification_result["qualification_sha256"],
+            "status": "rejected_no_go", "promotion_eligible": False,
+            "reason": QUALIFICATION.REASON,
+        }
+        if qualification_ref != expected_projection:
+            raise SelectionError("qualification-only qualification projection differs")
+        implementation = value["p3_implementation"]
+        if not isinstance(implementation, dict):
+            raise SelectionError("qualification-only P3 implementation must be an object")
+        exact_fields(implementation, P3_IMPLEMENTATION_FIELDS, "qualification-only P3 implementation")
+        if (
+            implementation["candidate_id"] != "sequence-output-direct-v1"
+            or implementation["family"] != "attention_recurrent"
+            or implementation["build_status"] != "not_built_for_promotion"
+            or implementation["profile_status"] != "not_measured"
+            or implementation["runtime_default"] != "off"
+            or type(implementation["commit"]) is not str
+            or re.fullmatch(r"[0-9a-f]{40}", implementation["commit"]) is None
+        ):
+            raise SelectionError("qualification-only P3 implementation state differs")
+        require_digest(implementation["tree_sha256"], "qualification-only P3 tree_sha256")
+        archive = implementation["source_archive"]
+        if not isinstance(archive, dict):
+            raise SelectionError("qualification-only P3 source archive must be an object")
+        exact_fields(archive, {"path", "sha256"}, "qualification-only P3 source archive")
+        archive_snapshot = capture(Path(archive["path"]))
+        if archive_snapshot.sha256 != require_digest(archive["sha256"], "qualification-only P3 source archive SHA-256"):
+            raise SelectionError("qualification-only P3 source archive differs")
+        declared_sha = require_digest(value["evidence_sha256"], "qualification-only evidence SHA-256")
+        calculated_sha = semantic_sha256(value)
+        if declared_sha != calculated_sha:
+            raise SelectionError("qualification-only evidence semantic SHA-256 differs")
+        return RawSource(
+            semantic_sha256=calculated_sha,
+            identity={
+                "identity_sha256": implementation["tree_sha256"],
+                "case_manifest_sha256": "0" * 64,
+                "binary_sha256": "0" * 64,
+                "package_content_sha256": "0" * 64,
+            },
+            capabilities={field: False for field in CAPABILITY_FIELDS},
+            measurements=(), pairs=(), promotion_eligible=False,
+            upstream_qualification=expected_projection,
+            p3_implementation=dict(implementation),
+            p2_terminal_bindings=rejected_terminal_bindings(qualification_value),
+        )
     exact_fields(value, RAW_ROOT_FIELDS, "raw evidence")
     if value["schema_version"] != RAW_SCHEMA or value["status"] not in {"complete", "one_case_diagnostic"}:
         raise SelectionError("raw evidence schema/status differs")
@@ -858,6 +957,10 @@ def validate_raw(value: dict[str, Any]) -> RawSource:
         pairs=tuple(parsed_pairs) if promotion else (),
         promotion_eligible=promotion,
         upstream_qualification=expected_projection,
+        p3_implementation=None,
+        p2_terminal_bindings=(
+            rejected_terminal_bindings(qualification_value) if not promotion else None
+        ),
     )
 
 
@@ -1468,6 +1571,14 @@ def select(values: list[tuple[Snapshot, dict[str, Any]]]) -> dict[str, Any]:
             "upstream_qualification_status": next(iter(qualification_statuses)) if qualification_statuses else None,
             "upstream_p2_promotion_eligible": all(source.promotion_eligible for source in raw_sources) if raw_sources else False,
             "upstream_p2_reason": raw_sources[0].upstream_qualification["reason"] if raw_sources else None,
+            "qualification_only_p3_implementation": sorted(
+                [source.p3_implementation for source in raw_sources if source.p3_implementation is not None],
+                key=lambda item: (item["commit"], item["tree_sha256"]),
+            ),
+            "upstream_p2_terminal_bindings": sorted(
+                [source.p2_terminal_bindings for source in raw_sources if source.p2_terminal_bindings is not None],
+                key=lambda item: (item["rejection_receipt_sha256"], item["plan_sha256"]),
+            ),
         },
         "input_warnings": (
             [

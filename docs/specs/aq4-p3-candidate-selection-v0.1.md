@@ -56,6 +56,21 @@ representative_prompt_count=1
 
 promotion rawは`qualified_go`、diagnostic rawは`rejected_no_go`のupstream qualification fileをpath、file SHA-256、qualification self-hash、status、reasonで結合する。selectorは元fileとP2 chainを再検証する。diagnostic rawの測定値は選考に投入せず、canonical `no_eligible_candidate`を生成する。missing field、unknown field、duplicate JSON key、NaN/Infinity、負値、不正な型も拒否する。
 
+P2が校正段階で`rejected_no_go`になり、P3測定を開始しない終端経路では、完全に別のdiscriminant `status=qualification_only_diagnostic`を受理する。このvariantのexact rootは次だけである。
+
+```text
+schema_version
+status
+measurement_eligible = false
+promotion_eligible = false
+promotion_ineligibility_reason = upstream_p2_calibration_rejected_no_go
+evidence_sha256
+upstream_qualification
+p3_implementation
+```
+
+`measurements`、`capabilities`、`full_model_pairs`、CI、latency、D2H、同期、VRAM、fidelity scoreはfield自体を持てない。`p3_implementation`はCandidate Aのcommit/tree/source archiveと、`build_status=not_built_for_promotion`、`profile_status=not_measured`、`runtime_default=off`だけを持つ。このvariantはpromotion rawの7 prompts、10 measured runs、M幅、paired CI条件を緩和せず、測定値を供給しないraw sourceとしてcanonical `no_eligible_candidate`を作る。
+
 `identity`のexact fieldsは次の通りで、すべてlowercase SHA-256である。
 
 ```text
@@ -274,7 +289,7 @@ raw inputは順序不変のsemantic SHA-256で束縛する。diagnostic profile�
 - 出力先の既存file
 - 読み込み中または書き出し前の入力file identity変更
 
-これらはexit code 2とし、新しいselection outputを発行しない。証拠が正しいschemaだが候補の統計条件を満たさない場合は、exit code 0で`status=no_eligible_candidate`と理由を発行する。
+これらはexit code 2とし、新しいselection outputを発行しない。証拠が正しいschemaだが候補の統計条件を満たさない場合、または正規のqualification-only diagnosticである場合は、exit code 0で`status=no_eligible_candidate`と理由を発行する。
 
 ## 次の行動
 
