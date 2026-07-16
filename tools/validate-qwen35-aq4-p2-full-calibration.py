@@ -29,6 +29,9 @@ import qwen35_aq4_p2_oracle as legacy_oracle  # noqa: E402
 SCHEMA = "ullm.qwen35_aq4_source_calibration.v1"
 ORACLE_KIND = "independent_source_full"
 TARGET_SCHEMA = "ullm.qwen35_aq4_target_calibration.v1"
+SQ8_TARGET_KIND = "aq4_sq8_target"
+SQ8_IMPLEMENTATION_ID = "qwen35_aq4_sq8_linear_qkv_z_overlay_v1"
+SQ8_CAPTURE_RUNTIME = "ullm-aq4-sq8-fidelity-capture"
 CASES_SCHEMA = "ullm.qwen35_aq4_source_calibration_cases.v1"
 HIDDEN_SIZE = 4096
 VOCAB_SIZE = 248320
@@ -551,7 +554,7 @@ def validate_manifest_shape(manifest: Any, schemas: set[str]) -> dict[str, Any]:
     manifest = exact_fields(manifest, ROOT_FIELDS, "manifest")
     if manifest["schema_version"] not in schemas:
         raise ValidationError("calibration manifest schema differs")
-    allowed_kinds = {"independent_source_full", "aq4_target", "same_artifact_all_m1", "aq4_optimized"}
+    allowed_kinds = {"independent_source_full", "aq4_target", SQ8_TARGET_KIND, "same_artifact_all_m1", "aq4_optimized"}
     if manifest["oracle_kind"] not in allowed_kinds:
         raise ValidationError("calibration oracle kind differs")
     if manifest["status"] not in {"available", "blocked"} or manifest["evidence_class"] not in {"production", "blocked", "synthetic_fixture"} or not isinstance(manifest["usable_as_source_evidence"], bool) or manifest["promotion_eligible"] is not False:
@@ -560,13 +563,21 @@ def validate_manifest_shape(manifest: Any, schemas: set[str]) -> dict[str, Any]:
     base_identity = {"artifact", "model_id", "model_revision", "source_checkpoint", "tokenizer", "hidden_size", "vocab_size"}
     target_extra = {"package_content_sha256", "package_manifest_sha256", "worker_binary_sha256"}
     identity_keys = set(manifest["identity"]) if isinstance(manifest["identity"], dict) else set()
-    expected_identity = base_identity if manifest["schema_version"] == SCHEMA else base_identity | target_extra
+    sq8_target = manifest["schema_version"] == TARGET_SCHEMA and manifest["oracle_kind"] == SQ8_TARGET_KIND
+    sq8_extra = {"format_id", "implementation_id"}
+    expected_identity = base_identity if manifest["schema_version"] == SCHEMA else base_identity | target_extra | (sq8_extra if sq8_target else set())
     if identity_keys != expected_identity:
         raise ValidationError("identity fields differ")
     identity = manifest["identity"]
-    artifact = exact_fields(identity["artifact"], {"package_manifest_sha256", "artifact_manifest_sha256"}, "identity.artifact")
+    artifact_fields = {"package_manifest_sha256", "artifact_manifest_sha256"}
+    if sq8_target:
+        artifact_fields |= {"content_sha256", "tensor_set_sha256", "tensor_names"}
+    artifact = exact_fields(identity["artifact"], artifact_fields, "identity.artifact")
     for key, value in artifact.items():
-        if value is not None:
+        if key == "tensor_names":
+            if not isinstance(value, list) or len(value) != 48 or len(set(value)) != 48 or not all(isinstance(name, str) and name for name in value):
+                raise ValidationError("identity.artifact.tensor_names differs")
+        elif value is not None:
             ensure_sha(value, f"identity.artifact.{key}")
     checkpoint = exact_fields(identity["source_checkpoint"], {"aggregate_sha256", "dtype", "files", "root"}, "identity.source_checkpoint")
     tokenizer = exact_fields(identity["tokenizer"], {"aggregate_sha256", "files", "root"}, "identity.tokenizer")
@@ -580,6 +591,8 @@ def validate_manifest_shape(manifest: Any, schemas: set[str]) -> dict[str, Any]:
         raise ValidationError("checkpoint/tokenizer metadata differs")
     for key in target_extra & identity_keys:
         ensure_sha(identity[key], f"identity.{key}")
+    if sq8_target and (identity["format_id"] != "AQ4_0" or identity["implementation_id"] != SQ8_IMPLEMENTATION_ID):
+        raise ValidationError("SQ8 target format/implementation identity differs")
     parent = exact_fields(manifest["parent_sampled_oracle"], {"path", "manifest_sha256", "schema_version"}, "parent_sampled_oracle")
     allowed_parent_schemas = {legacy_oracle.SOURCE_SCHEMA}
     if manifest["schema_version"] == TARGET_SCHEMA:
@@ -609,6 +622,19 @@ def validate_manifest_shape(manifest: Any, schemas: set[str]) -> dict[str, Any]:
     exact_fields(runtime["memory_preflight"], {"checkpoint_bytes", "mem_total_bytes", "mem_available_bytes", "required_headroom_bytes", "headroom_factor", "status"}, "runtime.memory_preflight")
     exact_fields(runtime["disk_preflight"], {"expected_vector_bytes", "required_free_bytes", "free_bytes", "status"}, "runtime.disk_preflight")
     exact_fields(runtime["run"], {"row_count", "nonfinite_rows", "elapsed_seconds"}, "runtime.run")
+    if sq8_target:
+        capture = exact_fields(runtime["runtime"], {"name", "build_sha256", "one_model_load", "split_manifest_sha256", "policy_sha256", "calibration_cases_sha256", "served_model_manifest_sha256", "package_manifest_sha256", "worker_binary_sha256", "guard_sha256", "upstream_model_revision", "quantized_artifact_revision", "source_checkpoint_aggregate_sha256", "tokenizer_aggregate_sha256", "device"}, "runtime.runtime")
+        device = exact_fields(capture["device"], {"requested_index", "device_id", "backend", "name", "architecture"}, "runtime.runtime.device")
+        for field in ("build_sha256", "split_manifest_sha256", "policy_sha256", "calibration_cases_sha256", "served_model_manifest_sha256", "package_manifest_sha256", "worker_binary_sha256", "guard_sha256", "source_checkpoint_aggregate_sha256", "tokenizer_aggregate_sha256"):
+            ensure_sha(capture[field], f"runtime.runtime.{field}")
+        if capture["name"] != SQ8_CAPTURE_RUNTIME or capture["one_model_load"] is not True or capture["package_manifest_sha256"] != identity["package_manifest_sha256"] or capture["worker_binary_sha256"] != identity["worker_binary_sha256"] or capture["source_checkpoint_aggregate_sha256"] != checkpoint["aggregate_sha256"] or capture["tokenizer_aggregate_sha256"] != tokenizer["aggregate_sha256"]:
+            raise ValidationError("SQ8 target runtime identity differs")
+        integer(device["requested_index"], "runtime.runtime.device.requested_index")
+        integer(device["device_id"], "runtime.runtime.device.device_id")
+        if device["architecture"] != "gfx1201" or not all(isinstance(device[field], str) and device[field] for field in ("backend", "name", "architecture")):
+            raise ValidationError("SQ8 target runtime device differs")
+        if runtime["device"] != "gpu" or runtime["dtype"] != "f32" or runtime["model_loads"] != 1 or runtime["inference_mode"] is not True or runtime["full_vocab_ranking"] is not True or runtime["max_resident_logit_rows"] != 1 or runtime["torch_num_threads"] != 1 or runtime["torch_num_interop_threads"] != 1:
+            raise ValidationError("SQ8 target execution contract differs")
     legacy_fields = manifest["legacy_cross_check"]
     if not isinstance(legacy_fields, dict) or set(legacy_fields) not in ({"status", "legacy_manifest_sha256", "legacy_payload_sha256", "row_count", "hidden_sample_max_abs_diff", "logit_sample_max_abs_diff"}, {"status", "legacy_manifest_sha256", "legacy_payload_sha256", "split_manifest_path", "policy_path", "calibration_cases_path", "split_manifest_sha256", "policy_sha256", "calibration_cases_sha256", "excluded_case_ids", "excluded_case_ids_sha256", "overlap_case_ids", "row_count", "hidden_sample_max_abs_diff", "logit_sample_max_abs_diff"}):
         raise ValidationError("legacy_cross_check fields differ")
@@ -621,7 +647,7 @@ def validate(root: Path) -> dict[str, Any]:
     if not stat.S_ISDIR(root_info.st_mode):
         raise ValidationError("artifact root must be a real directory")
     manifest = validate_manifest_shape(read_json(root / "manifest.json", "calibration manifest", max_bytes=MAX_MANIFEST_BYTES), {SCHEMA, TARGET_SCHEMA})
-    if manifest["oracle_kind"] not in {ORACLE_KIND, "aq4_target"}:
+    if manifest["oracle_kind"] not in {ORACLE_KIND, "aq4_target", SQ8_TARGET_KIND}:
         raise ValidationError("calibration oracle kind differs")
     files = manifest["files"]
     rows_path = relative_path(root, files["rows"], "rows file")

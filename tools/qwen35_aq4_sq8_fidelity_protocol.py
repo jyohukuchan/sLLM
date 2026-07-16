@@ -15,6 +15,7 @@ import json
 import math
 import os
 import re
+import stat
 import tempfile
 import sys
 from pathlib import Path
@@ -38,18 +39,47 @@ HEX_RE = re.compile(r"^[0-9a-f]{64}$")
 HEX40_RE = re.compile(r"^[0-9a-f]{40}$")
 
 METRIC_POLICY: dict[str, dict[str, Any]] = {
-    "token_agreement_rate": {"role": "promotion", "direction": "higher", "aggregation": "wilson_lower_one_sided", "margin": None, "relative_margin": None, "absolute_floor": None, "absolute_ceiling": 1.0},
-    "topk_overlap_rate_k10": {"role": "promotion", "direction": "higher", "aggregation": "mean", "margin": 0.01, "relative_margin": 0.01, "absolute_floor": 0.1, "absolute_ceiling": 1.0},
-    "logits_cosine": {"role": "promotion", "direction": "higher", "aggregation": "mean", "margin": 0.01, "relative_margin": 0.01, "absolute_floor": 0.0, "absolute_ceiling": 1.0},
-    "logits_relative_l2": {"role": "promotion", "direction": "lower", "aggregation": "mean", "margin": 0.05, "relative_margin": 0.05, "absolute_floor": 0.0, "absolute_ceiling": 1.0},
-    "hidden_cosine": {"role": "promotion", "direction": "higher", "aggregation": "mean", "margin": 0.01, "relative_margin": 0.01, "absolute_floor": 0.0, "absolute_ceiling": 1.0},
-    "hidden_relative_l2": {"role": "promotion", "direction": "lower", "aggregation": "mean", "margin": 0.05, "relative_margin": 0.05, "absolute_floor": 0.0, "absolute_ceiling": 1.0},
-    "hidden_max_abs": {"role": "diagnostic_only", "direction": "diagnostic", "aggregation": "max", "margin": None, "relative_margin": None, "absolute_floor": None, "absolute_ceiling": None},
-    "bf16_top1_retained_in_aq4_top10_rate": {"role": "promotion", "direction": "higher", "aggregation": "wilson_lower_one_sided", "margin": None, "relative_margin": None, "absolute_floor": None, "absolute_ceiling": 1.0},
+    "token_agreement_rate": {"role": "promotion", "direction": "higher", "aggregation": "wilson_lower_one_sided", "confidence_level": 0.95, "margin": None, "relative_margin": None, "absolute_floor": None, "absolute_ceiling": 1.0, "sample_minimum": 24},
+    "topk_overlap_rate_k10": {"role": "promotion", "direction": "higher", "aggregation": "mean", "margin": 0.01, "relative_margin": 0.01, "absolute_floor": 0.1, "absolute_ceiling": 1.0, "sample_minimum": 24},
+    "logits_cosine": {"role": "promotion", "direction": "higher", "aggregation": "mean", "margin": 0.01, "relative_margin": 0.01, "absolute_floor": 0.0, "absolute_ceiling": 1.0, "sample_minimum": 24},
+    "logits_relative_l2": {"role": "promotion", "direction": "lower", "aggregation": "mean", "margin": 0.05, "relative_margin": 0.05, "absolute_floor": 0.0, "absolute_ceiling": 1.0, "pathological_rejection_ceiling": 1.0, "sample_minimum": 24},
+    "hidden_cosine": {"role": "promotion", "direction": "higher", "aggregation": "mean", "margin": 0.01, "relative_margin": 0.01, "absolute_floor": 0.0, "absolute_ceiling": 1.0, "sample_minimum": 24},
+    "hidden_relative_l2": {"role": "promotion", "direction": "lower", "aggregation": "mean", "margin": 0.05, "relative_margin": 0.05, "absolute_floor": 0.0, "absolute_ceiling": 1.0, "pathological_rejection_ceiling": 1.0, "sample_minimum": 24},
+    "hidden_max_abs": {"role": "diagnostic_only", "direction": "diagnostic", "aggregation": "max", "confidence_level": None, "margin": None, "relative_margin": None, "absolute_floor": None, "absolute_ceiling": None, "sample_minimum": 24},
+    "bf16_top1_retained_in_aq4_top10_rate": {"role": "promotion", "direction": "higher", "aggregation": "wilson_lower_one_sided", "confidence_level": 0.95, "margin": None, "relative_margin": None, "absolute_floor": None, "absolute_ceiling": 1.0, "sample_minimum": 24},
 }
 BINARY_METRICS = {"token_agreement_rate", "bf16_top1_retained_in_aq4_top10_rate"}
 RELATIVE_L2_METRICS = {"logits_relative_l2", "hidden_relative_l2"}
 WILSON_Z = 1.6448536269514722
+EXECUTION_TIMEOUTS = {"ready_seconds": 900, "request_seconds": 240, "shutdown_seconds": 30, "outer_seconds": 1350}
+REQUIRED_OPERATOR_COUNTS = (
+    ("linear_attention_qkv_prepare", "hip.linear-attention-qkv-prepare-f32.m1", 24),
+    ("gated_delta_rule_scan", "hip.linear-attention-recurrent-f32.m1", 24),
+    ("fused_qk_norm_rope_paged_kv_write", "hip.fused-qk-norm-rope-paged-kv-write-f32.m1", 8),
+    ("paged_causal_gqa_read", "hip.paged-decode-attention-sigmoid-gate-f32.m1-gqa", 8),
+    ("linear_attention_qkv_prepare", "hip.linear-attention-qkv-prepare-batch-f32.m2-m128", 24),
+    ("gated_delta_rule_scan", "hip.linear-attention-recurrent-sequence-f32.m2-m128", 24),
+    ("paged_kv_write", "hip.paged-kv-write-chunk-f32.m2-m128", 8),
+    ("paged_causal_gqa_read", "hip.paged-causal-gqa-chunk-sigmoid-gate-f32.m2-m128", 8),
+)
+LOAD_IMPLEMENTATION_KINDS = {
+    "hip.linear-attention-qkv-prepare-f32.m1": ("linear_attention_qkv_prepare", 24),
+    "hip.linear-attention-recurrent-f32.m1": ("gated_delta_rule_scan", 24),
+    "hip.fused-qk-norm-rope-paged-kv-write-f32.m1": ("fused_qk_norm_rope_paged_kv_write", 8),
+    "hip.paged-decode-attention-sigmoid-gate-f32.m1-gqa": ("paged_causal_gqa_read", 8),
+}
+TRUSTED_COMPONENT_FILES = {
+    "maintenance_wrapper": "run-qwen35-aq4-sq8-overlay-gpu-promotion.py",
+    "executor_capture": "capture-aq4-resident-executor-record.py",
+    "served_model_generator": "generate-served-model.py",
+    "promotion_receipt_writer": "write-qwen35-aq4-sq8-overlay-promotion-receipt.py",
+}
+ATTEMPT2_CASE_IDS = ["fixture-prompt-0", "fixture-prompt-1"]
+ATTEMPT2_CONTEXT_HASHES = [
+    "3bca9e0d24c5f880460202136254ac1e81afc6696682f351cceb8df1f2e79e6",
+    "42ea52c2bbdb5aaf75c70220eb41d4b018e85f2eeda3d4e40a8ac130d2e96215",
+    "6af1601e1b18925e5a59b8446901a0afd7e3e3f915646c56ee77b5e77b4d6249",
+]
 
 
 class ProtocolError(ValueError):
@@ -87,6 +117,102 @@ def _strict_equal(left: Any, right: Any) -> bool:
     if isinstance(left, list):
         return len(left) == len(right) and all(_strict_equal(a, b) for a, b in zip(left, right))
     return left == right
+
+
+def _validate_execution_timeouts(value: Any) -> None:
+    if not isinstance(value, dict) or set(value) != set(EXECUTION_TIMEOUTS):
+        raise ProtocolError("SQ8 execution timeout shape differs")
+    for name, expected in EXECUTION_TIMEOUTS.items():
+        _exact_int(value.get(name), expected, f"SQ8 execution timeout {name}")
+
+
+def _validate_operator_audit(value: Any) -> None:
+    fields = {"schema_version", "hash_encoding", "source_audit_sha256", "deterministic_digest_sha256", "physical_operation_invocations", "total_steps", "decode_steps", "token_equivalent_operation_coverage", "implementation_counts"}
+    if not isinstance(value, dict) or set(value) != fields or value.get("schema_version") != "ullm.qwen35_aq4.sq8_operator_audit.v1" or value.get("hash_encoding") != "canonical_json_ascii_sort_keys_compact_v1":
+        raise ProtocolError("SQ8 operator audit shape differs")
+    _hex(value.get("source_audit_sha256"), "SQ8 operator source audit SHA")
+    _hex(value.get("deterministic_digest_sha256"), "SQ8 operator deterministic digest")
+    _exact_int(value.get("physical_operation_invocations"), 128, "SQ8 physical operation invocations")
+    _exact_int(value.get("total_steps"), 129, "SQ8 operator total steps")
+    _exact_int(value.get("decode_steps"), 1, "SQ8 operator decode steps")
+    _exact_int(value.get("token_equivalent_operation_coverage"), 8256, "SQ8 operator token-equivalent coverage")
+    expected = [{"kind": kind, "implementation_id": implementation, "count": count} for kind, implementation, count in REQUIRED_OPERATOR_COUNTS]
+    if value.get("implementation_counts") != expected:
+        raise ProtocolError("SQ8 operator positive implementation counts differ")
+    counts = value["implementation_counts"]
+    if len(counts) != 8 or sum(_int(item.get("count"), "SQ8 operator implementation count", minimum=1) for item in counts) != 128:
+        raise ProtocolError("SQ8 operator implementation count sum differs")
+
+
+def _validate_load_resolutions(value: Any) -> None:
+    if not isinstance(value, dict) or set(value) != {"schema_version", "hash_encoding", "record_count", "records_sha256", "records"} or value.get("schema_version") != "ullm.qwen35_aq4.sq8_load_resolutions.v1" or value.get("hash_encoding") != "canonical_json_ascii_sort_keys_compact_v1":
+        raise ProtocolError("SQ8 load-resolution evidence shape differs")
+    _exact_int(value.get("record_count"), 192, "SQ8 load-resolution record count")
+    records = value.get("records")
+    if not isinstance(records, list) or len(records) != 192 or value.get("records_sha256") != sha_bytes(canonical(records)):
+        raise ProtocolError("SQ8 load-resolution record binding differs")
+    phases = {"cold_prefill", "cached_prefix_prefill", "decode"}
+    observed: dict[tuple[str, str], int] = {}
+    layers: dict[tuple[str, str], set[int]] = {}
+    identities: set[tuple[int, str, str]] = set()
+    for item in records:
+        if not isinstance(item, dict) or set(item) != {"layer_position", "phase", "kind", "implementation_id", "resolution"}:
+            raise ProtocolError("SQ8 load-resolution record shape differs")
+        implementation = item.get("implementation_id")
+        contract = LOAD_IMPLEMENTATION_KINDS.get(implementation)
+        layer = item.get("layer_position")
+        phase = item.get("phase")
+        if contract is None or item.get("kind") != contract[0] or item.get("resolution") != "selected" or phase not in phases:
+            raise ProtocolError("SQ8 load-resolution record contract differs")
+        _int(layer, "SQ8 load-resolution layer", maximum=31)
+        identity = (layer, implementation, phase)
+        if identity in identities:
+            raise ProtocolError("SQ8 load-resolution identity is duplicated")
+        identities.add(identity)
+        key = (implementation, phase)
+        observed[key] = observed.get(key, 0) + 1
+        layers.setdefault(key, set()).add(layer)
+    expected = {(implementation, phase): count for implementation, (_kind, count) in LOAD_IMPLEMENTATION_KINDS.items() for phase in phases}
+    if observed != expected:
+        raise ProtocolError("SQ8 load-resolution topology differs")
+    linear = layers[("hip.linear-attention-qkv-prepare-f32.m1", "cold_prefill")]
+    recurrent = layers[("hip.linear-attention-recurrent-f32.m1", "cold_prefill")]
+    fused = layers[("hip.fused-qk-norm-rope-paged-kv-write-f32.m1", "cold_prefill")]
+    paged = layers[("hip.paged-decode-attention-sigmoid-gate-f32.m1-gqa", "cold_prefill")]
+    if linear != recurrent or fused != paged or linear & fused or linear | fused != set(range(32)):
+        raise ProtocolError("SQ8 load-resolution layer partition differs")
+
+
+def _validate_trusted_components(value: Any) -> None:
+    if not isinstance(value, dict) or set(value) != set(TRUSTED_COMPONENT_FILES):
+        raise ProtocolError("SQ8 trusted component schema differs")
+    approved_root: Path | None = None
+    for name, filename in TRUSTED_COMPONENT_FILES.items():
+        item = value.get(name)
+        if not isinstance(item, dict) or set(item) != {"path", "sha256", "device", "inode"}:
+            raise ProtocolError(f"SQ8 trusted component {name} shape differs")
+        path = Path(str(item.get("path", "")))
+        if not path.is_absolute() or path != path.resolve() or path.name != filename:
+            raise ProtocolError(f"SQ8 trusted component {name} path differs")
+        if approved_root is None:
+            approved_root = path.parent
+        if path.parent != approved_root or path.parent.name != "tools":
+            raise ProtocolError("SQ8 trusted components do not share one approved tools root")
+        _hex(item.get("sha256"), f"SQ8 trusted component {name} SHA")
+        device = _int(item.get("device"), f"SQ8 trusted component {name} device", minimum=1)
+        inode = _int(item.get("inode"), f"SQ8 trusted component {name} inode", minimum=1)
+        descriptor = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
+        try:
+            info = os.fstat(descriptor)
+            if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_dev != device or info.st_ino != inode or not 0 < info.st_size <= 16 * 1024 * 1024:
+                raise ProtocolError(f"SQ8 trusted component {name} runtime identity differs")
+            digest = hashlib.sha256()
+            while chunk := os.read(descriptor, 1024 * 1024):
+                digest.update(chunk)
+            if digest.hexdigest() != item["sha256"]:
+                raise ProtocolError(f"SQ8 trusted component {name} source differs")
+        finally:
+            os.close(descriptor)
 
 
 def _pairs(items: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -306,11 +432,13 @@ def _validate_lineage_reference(value: Any, request_id: str) -> None:
         raise ProtocolError("authorization lineage request ID differs")
 
 
-def _served_semantic_sha256(path: Path) -> str:
+def _served_semantic_sha256(path: Path, *, receipt_path_override: Path | None = None) -> str:
     document, _ = load_json(path, "SQ8 served model")
     value = json.loads(json.dumps(document, ensure_ascii=True, allow_nan=False))
     promotion = value.get("promotion")
     if isinstance(promotion, dict):
+        if receipt_path_override is not None:
+            promotion["receipt"] = str(receipt_path_override.resolve())
         promotion.pop("receipt_sha256", None)
     return sha_bytes(canonical(value))
 
@@ -410,7 +538,11 @@ def _validate_release_and_profile(
     profile_path, _ = _reference(profile_ref, "SQ8 profile")
     served_path = _absolute_regular(served.get("path"), "SQ8 served model")
     served_sha = _hex(served.get("semantic_sha256"), "served-model semantic SHA")
-    if _served_semantic_sha256(served_path) != served_sha:
+    prepared, _ = load_json(prepared_path, "SQ8 prepared receipt for served model")
+    prepared_served = prepared.get("release", {}).get("served_model") if isinstance(prepared.get("release"), dict) else None
+    if not isinstance(prepared_served, dict) or prepared_served.get("path") != str(served_path) or _served_semantic_sha256(served_path) != prepared_served.get("semantic_sha256"):
+        raise ProtocolError("SQ8 live served-model/prepared semantic SHA differs")
+    if _served_semantic_sha256(served_path, receipt_path_override=path) != served_sha:
         raise ProtocolError("SQ8 served-model semantic SHA differs")
     profile, _ = load_json(profile_path, "SQ8 overlay profile")
     if profile.get("schema_version") != "ullm.served_model.profile.v1" or profile.get("format", {}).get("implementation_id") != "qwen35_aq4_sq8_linear_qkv_z_overlay_v1":
@@ -468,11 +600,12 @@ def _validate_release_and_profile(
 
 def _actual_receipt(path: Path) -> tuple[dict[str, Any], bytes, dict[str, Any]]:
     receipt, raw = load_json(path, "SQ8 promotion receipt")
-    receipt_keys = {"schema_version", "status", "request_id", "source_commit", "source_provenance", "release", "overlay", "package", "authorization_audit", "readiness", "actual"}
+    receipt_keys = {"schema_version", "status", "request_id", "source_commit", "source_provenance", "release", "overlay", "package", "authorization_audit", "readiness", "execution_timeouts", "actual"}
     if set(receipt) not in (receipt_keys, receipt_keys | {"authorization_lineage"}):
         raise ProtocolError("SQ8 promotion receipt has unknown or missing fields")
     if receipt.get("schema_version") != SQ8_RECEIPT_SCHEMA or receipt.get("status") != "actual_verified":
         raise ProtocolError("actual_verified SQ8 receipt is required")
+    _validate_execution_timeouts(receipt.get("execution_timeouts"))
     _request(receipt.get("request_id"))
     _hex(receipt.get("source_commit"), "source commit", forty=True)
     source = receipt.get("source_provenance")
@@ -489,7 +622,7 @@ def _actual_receipt(path: Path) -> tuple[dict[str, Any], bytes, dict[str, Any]]:
     tensor_set = _hex(overlay.get("tensor_set_sha256"), "overlay tensor set")
     _validate_artifact_inventory(overlay.get("artifact_inventory"))
     actual = receipt.get("actual")
-    required = {"status", "required", "prepared_receipt", "maintenance_evidence", "executor_record", "gpu_exclusive_preflight", "telemetry", "telemetry_binding", "manifest_identity", "output_identity"}
+    required = {"status", "required", "prepared_receipt", "maintenance_evidence", "executor_record", "gpu_exclusive_preflight", "telemetry", "telemetry_binding", "operator_audit", "load_resolutions", "manifest_identity", "output_identity", "trusted_components"}
     if not isinstance(actual, dict) or set(actual) != required or actual.get("status") != "actual_verified" or actual.get("required") is not True:
         raise ProtocolError("SQ8 actual evidence is incomplete")
     request_id = receipt["request_id"]
@@ -503,11 +636,14 @@ def _actual_receipt(path: Path) -> tuple[dict[str, Any], bytes, dict[str, Any]]:
     if sha_file(prepared_path, "prepared receipt") != prepared_ref["sha256"]:
         raise ProtocolError("prepared receipt SHA differs")
     prepared, _ = load_json(prepared_path, "prepared receipt")
-    prepared_keys = {"schema_version", "status", "request_id", "source_commit", "source_provenance", "release", "overlay", "package", "authorization_audit", "readiness", "actual"}
+    prepared_keys = {"schema_version", "status", "request_id", "source_commit", "source_provenance", "release", "overlay", "package", "authorization_audit", "readiness", "execution_timeouts", "actual"}
     if set(prepared) not in (prepared_keys, prepared_keys | {"authorization_lineage"}):
         raise ProtocolError("prepared receipt has unknown or missing fields")
     if prepared.get("schema_version") != SQ8_RECEIPT_SCHEMA or prepared.get("status") != "prepared_not_executed" or prepared.get("request_id") != request_id:
         raise ProtocolError("prepared receipt state differs")
+    _validate_execution_timeouts(prepared.get("execution_timeouts"))
+    if not _strict_equal(prepared.get("execution_timeouts"), receipt.get("execution_timeouts")):
+        raise ProtocolError("prepared/actual execution timeout binding differs")
     for key in ("source_commit", "source_provenance", "overlay", "package"):
         if not _strict_equal(prepared.get(key), receipt.get(key)):
             raise ProtocolError(f"prepared receipt {key} differs")
@@ -558,6 +694,9 @@ def _actual_receipt(path: Path) -> tuple[dict[str, Any], bytes, dict[str, Any]]:
         raise ProtocolError("SQ8 token output identity differs")
     _exact_int(output.get("token_count"), 2, "SQ8 token count")
     _hex(output.get("token_ids_sha256"), "SQ8 token IDs SHA")
+    _validate_operator_audit(actual.get("operator_audit"))
+    _validate_load_resolutions(actual.get("load_resolutions"))
+    _validate_trusted_components(actual.get("trusted_components"))
     worker, served, package = _validate_release_and_profile(receipt, path, prepared_path)
     inventory_root = overlay["artifact_inventory"]["root"]
     expected_inventory_root = str(Path(overlay["binding_manifest_path"]).resolve().parent)
@@ -574,10 +713,9 @@ def _actual_receipt(path: Path) -> tuple[dict[str, Any], bytes, dict[str, Any]]:
     if "authorization_lineage" in receipt:
         _validate_lineage_reference(receipt["authorization_lineage"], request_id)
     gpu = actual["gpu_exclusive_preflight"]
-    if not isinstance(gpu, dict) or set(gpu) != {"mode", "stable_observation_count", "worker_pids", "amd_smi_owners", "kfd_owners", "lock", "vram_headroom_bytes"} or gpu.get("mode") != "maintenance_stable2" or gpu.get("worker_pids") != [] or gpu.get("amd_smi_owners") != [] or gpu.get("kfd_owners") != [] or gpu.get("lock") != {"path": "/run/ullm/device-1.lock", "free": True}:
+    if not isinstance(gpu, dict) or set(gpu) != {"mode", "stable_observation_count", "worker_pids", "amd_smi_owners", "kfd_owners", "lock"} or gpu.get("mode") != "maintenance_stable2" or gpu.get("worker_pids") != [] or gpu.get("amd_smi_owners") != [] or gpu.get("kfd_owners") != [] or gpu.get("lock") != {"path": "/run/ullm/device-1.lock", "free": True}:
         raise ProtocolError("SQ8 GPU exclusive preflight evidence differs")
     _exact_int(gpu.get("stable_observation_count"), 2, "SQ8 GPU stable observation count")
-    _int(gpu.get("vram_headroom_bytes"), "SQ8 GPU VRAM headroom", minimum=1)
     for key in ("maintenance_evidence", "executor_record"):
         ref = actual[key]
         if not isinstance(ref, dict) or set(ref) != {"path", "sha256"}:
@@ -592,12 +730,15 @@ def _actual_receipt(path: Path) -> tuple[dict[str, Any], bytes, dict[str, Any]]:
     _exact_int(maintenance_value.get("actual_run_count"), 1, "SQ8 maintenance actual run count")
     if not _strict_equal(maintenance_value.get("candidate_pre"), maintenance_value.get("candidate_post")):
         raise ProtocolError("SQ8 maintenance candidate identity changed")
+    capture = maintenance_value.get("capture")
+    if not isinstance(capture, dict) or capture.get("timeouts") != receipt.get("execution_timeouts"):
+        raise ProtocolError("SQ8 maintenance execution timeout binding differs")
+    _validate_trusted_components(maintenance_value.get("trusted_components"))
+    if not _strict_equal(maintenance_value.get("trusted_components"), actual.get("trusted_components")):
+        raise ProtocolError("SQ8 maintenance trusted component binding differs")
     restore = maintenance_value.get("restore")
     if not isinstance(restore, dict) or restore.get("attempted") is not True or restore.get("passed") is not True:
         raise ProtocolError("SQ8 maintenance restore evidence differs")
-    _exact_int(maintenance_value.get("vram_headroom_bytes"), gpu["vram_headroom_bytes"], "SQ8 maintenance VRAM headroom")
-    if maintenance_value.get("vram_headroom_bytes") != gpu["vram_headroom_bytes"]:
-        raise ProtocolError("SQ8 maintenance VRAM evidence differs")
     observations = maintenance_value.get("stopped_observations")
     if not isinstance(observations, list) or len(observations) < 2:
         raise ProtocolError("SQ8 maintenance stable observations differ")
@@ -614,32 +755,65 @@ def _actual_receipt(path: Path) -> tuple[dict[str, Any], bytes, dict[str, Any]]:
     if executor_value.get("schema_version") != "ullm.production_executor_record.v1" or executor_value.get("status") != "ok":
         raise ProtocolError("SQ8 executor record schema/status differs")
     executor_evidence = executor_value.get("sq8_promotion_evidence")
-    if not isinstance(executor_evidence, dict) or set(executor_evidence) != {"schema_version", "request_id", "manifest_identity", "telemetry", "telemetry_binding", "output_identity"} or executor_evidence.get("schema_version") != "ullm.qwen35_aq4.sq8_promotion_executor.v1" or executor_evidence.get("request_id") != request_id or not _strict_equal(executor_evidence.get("manifest_identity"), identity) or not _strict_equal(executor_evidence.get("telemetry"), telemetry) or not _strict_equal(executor_evidence.get("telemetry_binding"), binding) or not _strict_equal(executor_evidence.get("output_identity"), output):
+    if not isinstance(executor_evidence, dict) or set(executor_evidence) != {"schema_version", "request_id", "manifest_identity", "telemetry", "telemetry_binding", "operator_audit", "load_resolutions", "output_identity"} or executor_evidence.get("schema_version") != "ullm.qwen35_aq4.sq8_promotion_executor.v1" or executor_evidence.get("request_id") != request_id or not _strict_equal(executor_evidence.get("manifest_identity"), identity) or not _strict_equal(executor_evidence.get("telemetry"), telemetry) or not _strict_equal(executor_evidence.get("telemetry_binding"), binding) or not _strict_equal(executor_evidence.get("operator_audit"), actual.get("operator_audit")) or not _strict_equal(executor_evidence.get("load_resolutions"), actual.get("load_resolutions")) or not _strict_equal(executor_evidence.get("output_identity"), output):
         raise ProtocolError("SQ8 executor evidence does not bind actual receipt")
-    return receipt, raw, {"request_id": request_id, "content_sha256": content, "tensor_set_sha256": tensor_set, "source_commit": receipt["source_commit"], "source_tree_sha256": source["tree_sha256"], "source_archive_sha256": source["archive_sha256"], "token_ids_sha256": output["token_ids_sha256"], "telemetry_binding": binding, "maintenance_evidence": actual["maintenance_evidence"], "executor_record": actual["executor_record"], "prepared_receipt": prepared_ref, "served_model": served, "worker": worker, "package": package, "vram_headroom_bytes": gpu.get("vram_headroom_bytes", 1)}
+    _validate_operator_audit(executor_evidence.get("operator_audit"))
+    _validate_load_resolutions(executor_evidence.get("load_resolutions"))
+    memory = executor_value.get("memory")
+    if not isinstance(memory, dict):
+        raise ProtocolError("SQ8 executor VRAM evidence is missing")
+    observed_headroom = _int(memory.get("observed_headroom_bytes"), "SQ8 observed VRAM headroom", minimum=1)
+    observed_peak = _int(memory.get("observed_peak_bytes"), "SQ8 observed VRAM peak", minimum=1)
+    capacity = _int(memory.get("vram_capacity_bytes"), "SQ8 VRAM capacity", minimum=1)
+    if capacity - observed_peak != observed_headroom:
+        raise ProtocolError("SQ8 executor VRAM headroom arithmetic differs")
+    return receipt, raw, {"request_id": request_id, "content_sha256": content, "tensor_set_sha256": tensor_set, "source_commit": receipt["source_commit"], "source_tree_sha256": source["tree_sha256"], "source_archive_sha256": source["archive_sha256"], "token_ids_sha256": output["token_ids_sha256"], "telemetry_binding": binding, "maintenance_evidence": actual["maintenance_evidence"], "executor_record": actual["executor_record"], "prepared_receipt": prepared_ref, "served_model": served, "worker": worker, "package": package, "vram_headroom_bytes": observed_headroom}
 
 
 def policy() -> dict[str, Any]:
     metrics = {}
     for name, spec in METRIC_POLICY.items():
         item = dict(spec)
-        item["sample_minimum"] = MAX_ROWS
-        item["observed_domain"] = "[0,1]" if name not in {"hidden_max_abs"} else "[0,+inf)"
-        if name in RELATIVE_L2_METRICS:
-            item["pathological_rejection_ceiling"] = 1.0
+        item["observed_domain"] = "[0,1]" if name in {"token_agreement_rate", "topk_overlap_rate_k10", "logits_cosine", "hidden_cosine", "bf16_top1_retained_in_aq4_top10_rate"} else "[0,+inf)"
+        if name in BINARY_METRICS:
+            item["formula"] = "wilson_lower_one_sided(successes=sum(exact 1.0 rows), n=24, confidence_level=0.95); no mean-minus-margin"
+        elif spec["role"] == "diagnostic_only":
+            item["formula"] = "diagnostic_max only; no promotion bound and no absolute ceiling"
+        else:
+            item["formula"] = "higher: max(absolute_floor, mean-max(absolute_margin, relative_margin*abs(mean))); lower: min(absolute_ceiling, mean+max(absolute_margin, relative_margin*abs(mean)))"
         metrics[name] = item
-    return {"schema_version": "ullm.qwen35_aq4_sq8_fidelity_policy.v1", "status": "formula_frozen_unbound", "promotion_eligible": False, "n": MAX_ROWS, "metrics": metrics, "relative_l2_rejection": {"ceiling": 1.0, "action": "reject any observed relative-L2 > 1 before aggregation"}, "holdout_evaluation_allowed_once": True, "retry_permitted": False, "attempt_boundary": {"remaining_before": 1, "remaining_after": 0, "failure_consumes_attempt": True}}
+    return {
+        "schema_version": "ullm.aq4_p2_fidelity_policy.v1", "status": "formula_frozen_unbound", "promotion_eligible": False,
+        "attempt2_threshold_source_forbidden": True, "observed_attempt2_values_forbidden": True,
+        "attempt2_artifact_ids_forbidden": ATTEMPT2_CASE_IDS, "attempt2_context_hashes_forbidden": ATTEMPT2_CONTEXT_HASHES,
+        "calibration_subset_only_for_active_bf16_envelope": True, "holdout_evaluation_allowed_once": True,
+        "candidate_active_behavioral_gate": {"mode": "exact", "mismatch_action": "no-go"},
+        "split": {"strata_fields": ["prompt_tokens", "baseline_mode"], "stratum_size": 6, "calibration_per_stratum": 3, "holdout_per_stratum": 3, "total_cases": 48, "calibration_cases": 24, "holdout_cases": 24},
+        "metrics": metrics,
+        "quality_task": {"kind": "binary_retention_rate", "score": "bf16_top1_retained_in_aq4_top10", "calculation": "1 when BF16 source greedy token is present in the AQ4 top-10 set, else 0", "task_fixture_identity_required": True, "natural_language_suite": "optional_separate_artifact", "no_regression_against_calibration_bound": True},
+        "relative_l2_rejection": {"ceiling": 1.0, "action": "reject any observed relative-L2 > 1 before aggregation", "reason": "relative-L2 above 100 percent is a predeclared pathological-drift rejection; this structural check is distinct from raw hidden max-abs, which has no natural scale"},
+        "non_vacuity": {"reason": "No Qwen3.5 AQ4 acceptance artifact supplies an absolute token-exact floor; Wilson lower bounds provide finite-sample non-vacuity for binary rates, continuous metrics use fixed absolute+relative margins, and raw hidden max-abs is diagnostic-only because its scale is not dimensionless."},
+        "forbidden_threshold_sources": ["attempt2 differential-trace observed values", "attempt2 rows/payload/VRAM/power/producer summaries"],
+    }
 
 
 def _split(split_root: Path) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any]]:
     manifest, manifest_raw = load_json(split_root / "split-manifest.json", "SQ8 split manifest")
     policy_value, policy_raw = load_json(split_root / "policy.json", "SQ8 policy")
     manifest_fields = {
-        "schema_version", "status", "selected_case_count", "calibration_case_count",
-        "holdout_case_count", "calibration_sha256", "holdout_sha256", "policy_sha256",
+        "schema_version", "status", "expanded_manifest_sha256", "fixture_index_sha256",
+        "selected_case_count", "calibration_case_count", "holdout_case_count", "split_domain",
+        "algorithm", "attempt2_exclusions", "strata", "calibration_sha256", "holdout_sha256",
+        "policy_sha256",
     }
-    if set(manifest) != manifest_fields or manifest.get("schema_version") != "ullm.qwen35_aq4_sq8_fidelity_split.v1" or manifest.get("status") != "ready_for_calibration":
+    if set(manifest) != manifest_fields or manifest.get("schema_version") != "ullm.aq4_p2_fidelity_split.v1" or manifest.get("status") != "ready_for_calibration":
         raise ProtocolError("SQ8 split manifest schema/status differs")
+    _hex(manifest.get("expanded_manifest_sha256"), "SQ8 expanded manifest SHA")
+    _hex(manifest.get("fixture_index_sha256"), "SQ8 fixture index SHA")
+    if manifest.get("split_domain") != "ullm.aq4_p2_fidelity_split.v1\\0 + case_sha256" or manifest.get("algorithm") != "sha256(domain || case_sha256), lexicographic within each prompt_tokens/baseline_mode stratum; first 3 calibration, last 3 holdout":
+        raise ProtocolError("SQ8 split algorithm differs")
+    if not _strict_equal(manifest.get("attempt2_exclusions"), {"case_ids": ATTEMPT2_CASE_IDS, "context_token_ids_sha256": ATTEMPT2_CONTEXT_HASHES}):
+        raise ProtocolError("SQ8 split attempt2 exclusions differ")
     _exact_int(manifest.get("selected_case_count"), 48, "SQ8 selected case count")
     _exact_int(manifest.get("calibration_case_count"), 24, "SQ8 calibration case count")
     _exact_int(manifest.get("holdout_case_count"), 24, "SQ8 holdout case count")
@@ -650,10 +824,14 @@ def _split(split_root: Path) -> tuple[dict[str, Any], dict[str, Any], dict[str, 
     if len(calibration) != MAX_ROWS or len(holdout) != MAX_ROWS:
         raise ProtocolError("SQ8 split must contain exactly 24 rows per subset")
     seen: set[str] = set()
+    row_fields = {"case_id", "case_sha256", "fixture_sha256", "fixture_path", "prompt_token_ids_sha256", "context_token_ids_sha256", "prompt_tokens", "cached_prefix_tokens", "context_tokens", "generated_tokens", "baseline_mode", "prefill_requested_m", "resolved_m", "step", "row_count", "subset"}
     for subset, rows in (("calibration", calibration), ("holdout", holdout)):
         for row in rows:
-            if row.get("subset") != subset:
+            if set(row) != row_fields or row.get("subset") != subset:
                 raise ProtocolError(f"SQ8 {subset} row state differs")
+            fixture_path = Path(str(row.get("fixture_path", "")))
+            if not fixture_path.is_absolute() or fixture_path != fixture_path.resolve():
+                raise ProtocolError(f"SQ8 {subset} fixture path differs")
             for key in ("step", "row_count", "cached_prefix_tokens", "generated_tokens", "prompt_tokens", "context_tokens", "prefill_requested_m", "resolved_m"):
                 _int(row.get(key), f"SQ8 {subset} {key}", maximum=SAFE_INT_MAX)
             _exact_int(row.get("step"), 0, f"SQ8 {subset} step")
@@ -668,6 +846,18 @@ def _split(split_root: Path) -> tuple[dict[str, Any], dict[str, Any], dict[str, 
             seen.add(case_id)
             for key in ("case_sha256", "fixture_sha256", "prompt_token_ids_sha256", "context_token_ids_sha256"):
                 _hex(row.get(key), f"SQ8 {subset} {key}")
+    expected_strata = []
+    for prompt_tokens in (1011, 1024, 1339, 2048):
+        for baseline_mode in ("all_m1", "cold_batched"):
+            members = [row for row in calibration + holdout if row["prompt_tokens"] == prompt_tokens and row["baseline_mode"] == baseline_mode]
+            ordered = sorted(members, key=lambda row: sha_bytes(b"ullm.aq4_p2_fidelity_split.v1\0" + row["case_sha256"].encode("ascii")))
+            calibration_ids = [row["case_id"] for row in ordered[:3]]
+            holdout_ids = [row["case_id"] for row in ordered[3:]]
+            if len(ordered) != 6 or {row["subset"] for row in ordered[:3]} != {"calibration"} or {row["subset"] for row in ordered[3:]} != {"holdout"}:
+                raise ProtocolError("SQ8 split stratum membership differs")
+            expected_strata.append({"prompt_tokens": prompt_tokens, "baseline_mode": baseline_mode, "case_count": 6, "calibration_case_ids": calibration_ids, "holdout_case_ids": holdout_ids})
+    if not _strict_equal(manifest.get("strata"), expected_strata):
+        raise ProtocolError("SQ8 split strata receipt differs")
     if manifest.get("calibration_sha256") != sha_file(split_root / "calibration-cases.jsonl", "SQ8 calibration cases") or manifest.get("holdout_sha256") != sha_file(split_root / "holdout-cases.jsonl", "SQ8 holdout cases") or manifest.get("policy_sha256") != sha_file(split_root / "policy.json", "SQ8 policy"):
         raise ProtocolError("SQ8 split manifest file bindings differ")
     return ({"sha256": sha_bytes(manifest_raw), "path": str((split_root / "split-manifest.json").resolve()), "rows": calibration}, {"sha256": sha_file(split_root / "calibration-cases.jsonl", "SQ8 calibration cases"), "path": str((split_root / "calibration-cases.jsonl").resolve()), "rows": calibration}, {"sha256": sha_file(split_root / "holdout-cases.jsonl", "SQ8 holdout cases"), "path": str((split_root / "holdout-cases.jsonl").resolve()), "rows": holdout}, {"sha256": sha_bytes(policy_raw), "path": str((split_root / "policy.json").resolve()), "value": policy_value})
@@ -806,11 +996,104 @@ def _metric_value(value: Any, label: str, name: str) -> float:
     return number
 
 
+def _metrics_evidence(value: Any, identity: dict[str, Any]) -> dict[tuple[str, int], dict[str, Any]]:
+    if not isinstance(value, dict) or set(value) != {"source_artifact", "target_artifact", "comparison"}:
+        raise ProtocolError("SQ8 metrics evidence has unknown or missing fields")
+    refs: dict[str, tuple[Path, dict[str, Any]]] = {}
+    for name in ("source_artifact", "target_artifact", "comparison"):
+        ref = value[name]
+        if not isinstance(ref, dict) or set(ref) != {"root", "manifest_sha256"}:
+            raise ProtocolError(f"SQ8 metrics {name} reference differs")
+        root = Path(str(ref.get("root", "")))
+        if not root.is_absolute() or root != root.resolve() or not root.is_dir():
+            raise ProtocolError(f"SQ8 metrics {name} root differs")
+        manifest_path = root / "manifest.json"
+        manifest, _ = load_json(manifest_path, f"SQ8 metrics {name} manifest")
+        if sha_file(manifest_path, f"SQ8 metrics {name} manifest") != ref.get("manifest_sha256"):
+            raise ProtocolError(f"SQ8 metrics {name} manifest binding differs")
+        refs[name] = (root, manifest)
+    source_root, source = refs["source_artifact"]
+    target_root, target = refs["target_artifact"]
+    comparison_root, comparison = refs["comparison"]
+    if str((source_root / "manifest.json").resolve()) != identity.get("source_v32_path") or value["source_artifact"]["manifest_sha256"] != identity.get("source_v32_sha256"):
+        raise ProtocolError("SQ8 metrics source-v32 evidence differs")
+    if source.get("schema_version") != "ullm.qwen35_aq4_source_calibration.v1" or source.get("oracle_kind") != "independent_source_full":
+        raise ProtocolError("SQ8 metrics source artifact kind differs")
+    target_identity = target.get("identity")
+    target_runtime = target.get("runtime", {}).get("runtime")
+    if target.get("schema_version") != "ullm.qwen35_aq4_target_calibration.v1" or target.get("oracle_kind") != "aq4_sq8_target" or not isinstance(target_identity, dict) or not isinstance(target_runtime, dict):
+        raise ProtocolError("SQ8 metrics target artifact kind differs")
+    artifact = target_identity.get("artifact")
+    if not isinstance(artifact, dict) or artifact.get("content_sha256") != identity.get("overlay_content_sha256") or artifact.get("tensor_set_sha256") != identity.get("overlay_tensor_set_sha256") or artifact.get("package_manifest_sha256") != identity.get("package", {}).get("manifest_sha256"):
+        raise ProtocolError("SQ8 metrics target overlay/package binding differs")
+    if target_identity.get("worker_binary_sha256") != identity.get("worker", {}).get("sha256") or target_runtime.get("worker_binary_sha256") != identity.get("worker", {}).get("sha256") or target_runtime.get("package_manifest_sha256") != identity.get("package", {}).get("manifest_sha256"):
+        raise ProtocolError("SQ8 metrics target worker/package binding differs")
+    served_path = Path(str(identity.get("served_model", {}).get("path", "")))
+    if not served_path.is_absolute() or sha_file(served_path, "SQ8 served model") != target_runtime.get("served_model_manifest_sha256"):
+        raise ProtocolError("SQ8 metrics target served-model binding differs")
+    if target_runtime.get("split_manifest_sha256") != identity.get("split_manifest_sha256") or target_runtime.get("policy_sha256") != identity.get("policy_sha256") or target_runtime.get("calibration_cases_sha256") != identity.get("calibration_cases_sha256") or target_runtime.get("one_model_load") is not True:
+        raise ProtocolError("SQ8 metrics target split/policy/resource binding differs")
+    parent = target.get("parent_sampled_oracle")
+    expected_parent = {"path": str((source_root / "manifest.json").resolve()), "manifest_sha256": value["source_artifact"]["manifest_sha256"], "schema_version": "ullm.qwen35_aq4_source_calibration.v1"}
+    if not _strict_equal(parent, expected_parent):
+        raise ProtocolError("SQ8 metrics target source-model binding differs")
+    expected_reference = {"path": str(source_root.resolve()), "manifest_sha256": value["source_artifact"]["manifest_sha256"], "schema_version": "ullm.qwen35_aq4_source_calibration.v1", "oracle_kind": "independent_source_full"}
+    expected_candidate = {"path": str(target_root.resolve()), "manifest_sha256": value["target_artifact"]["manifest_sha256"], "schema_version": "ullm.qwen35_aq4_target_calibration.v1", "oracle_kind": "aq4_sq8_target"}
+    if comparison.get("schema_version") != "ullm.qwen35_aq4_calibration_comparison.v1" or comparison.get("status") != "valid" or comparison.get("compare_kind") != "sq8_source_gate" or comparison.get("observed_values_only") is not True or not _strict_equal(comparison.get("reference"), expected_reference) or not _strict_equal(comparison.get("candidate"), expected_candidate):
+        raise ProtocolError("SQ8 metrics comparison identity differs")
+    rows_ref = comparison.get("rows")
+    if not isinstance(rows_ref, dict) or set(rows_ref) != {"file", "record_count", "sha256"} or rows_ref.get("file") != "rows.jsonl":
+        raise ProtocolError("SQ8 metrics comparison row reference differs")
+    _exact_int(rows_ref.get("record_count"), MAX_ROWS, "SQ8 comparison row count")
+    rows_path = comparison_root / "rows.jsonl"
+    if sha_file(rows_path, "SQ8 comparison rows") != rows_ref.get("sha256"):
+        raise ProtocolError("SQ8 metrics comparison rows binding differs")
+    rows = read_jsonl(rows_path, "SQ8 comparison rows")
+    by_key: dict[tuple[str, int], dict[str, Any]] = {}
+    for row in rows:
+        if set(row) != {"case_id", "step", "greedy_exact", "top_k_overlap", "hidden", "logits", "reference_finite", "candidate_finite", "greedy", "ordered_top10"}:
+            raise ProtocolError("SQ8 comparison row fields differ")
+        step = _exact_int(row.get("step"), 0, "SQ8 comparison step")
+        key = (row.get("case_id"), step)
+        if not isinstance(key[0], str) or key in by_key or row.get("reference_finite") is not True or row.get("candidate_finite") is not True:
+            raise ProtocolError("SQ8 comparison row identity/finiteness differs")
+        greedy = row.get("greedy")
+        ordered = row.get("ordered_top10")
+        if not isinstance(greedy, dict) or set(greedy) != {"source", "target"} or not isinstance(ordered, dict) or set(ordered) != {"source", "target"}:
+            raise ProtocolError("SQ8 comparison token evidence differs")
+        for name in ("source", "target"):
+            _int(greedy.get(name), f"SQ8 comparison greedy {name}", maximum=248319)
+            ids = ordered.get(name)
+            if not isinstance(ids, list) or len(ids) != 10 or len(set(ids)) != 10:
+                raise ProtocolError("SQ8 comparison top-10 evidence differs")
+            for token in ids:
+                _int(token, f"SQ8 comparison top-10 {name}", maximum=248319)
+            if ids[0] != greedy[name]:
+                raise ProtocolError("SQ8 comparison greedy/top-10 evidence differs")
+        overlap = len(set(ordered["source"]) & set(ordered["target"]))
+        if row.get("greedy_exact") is not (greedy["source"] == greedy["target"]) or row.get("top_k_overlap") != overlap:
+            raise ProtocolError("SQ8 comparison token summary differs")
+        for vector_name in ("hidden", "logits"):
+            vector = row.get(vector_name)
+            fields = {"reference_norm_sq", "candidate_norm_sq", "dot", "delta_norm_sq", "relative_l2", "cosine", "max_abs", "reference_nonfinite_count", "candidate_nonfinite_count"}
+            if not isinstance(vector, dict) or set(vector) != fields:
+                raise ProtocolError("SQ8 comparison vector fields differ")
+            _exact_int(vector.get("reference_nonfinite_count"), 0, "SQ8 comparison reference nonfinite count")
+            _exact_int(vector.get("candidate_nonfinite_count"), 0, "SQ8 comparison target nonfinite count")
+            for field in fields - {"reference_nonfinite_count", "candidate_nonfinite_count"}:
+                number = vector.get(field)
+                if isinstance(number, bool) or not isinstance(number, (int, float)) or not math.isfinite(float(number)):
+                    raise ProtocolError("SQ8 comparison vector statistic is not finite")
+        by_key[key] = row
+    return by_key
+
+
 def _rows(metrics: dict[str, Any], expected_rows: list[dict[str, Any]], identity: dict[str, Any]) -> list[dict[str, Any]]:
-    if set(metrics) != {"schema_version", "identity", "subset", "rows"}:
+    if set(metrics) != {"schema_version", "identity", "subset", "evidence", "rows"}:
         raise ProtocolError("SQ8 metrics has unknown or missing fields")
     if metrics.get("schema_version") != METRICS_SCHEMA or not _strict_equal(metrics.get("identity"), identity) or metrics.get("subset") != "calibration":
         raise ProtocolError("SQ8 metrics identity/subset differs")
+    comparison_rows = _metrics_evidence(metrics.get("evidence"), identity)
     rows = metrics.get("rows")
     if not isinstance(rows, list) or len(rows) != MAX_ROWS:
         raise ProtocolError("SQ8 calibration metrics must contain exactly 24 rows")
@@ -819,7 +1102,7 @@ def _rows(metrics: dict[str, Any], expected_rows: list[dict[str, Any]], identity
     for row in rows:
         if not isinstance(row, dict) or row.get("case_id") not in expected or row["case_id"] in seen:
             raise ProtocolError("SQ8 metric case identity differs")
-        allowed_row_keys = {"case_id", "case_sha256", "fixture_sha256", "prompt_token_ids_sha256", "context_token_ids_sha256", "prompt_tokens", "cached_prefix_tokens", "context_tokens", "generated_tokens", "baseline_mode", "prefill_requested_m", "resolved_m", "step", "row_count", "subset", "metrics"}
+        allowed_row_keys = {"case_id", "case_sha256", "fixture_sha256", "fixture_path", "prompt_token_ids_sha256", "context_token_ids_sha256", "prompt_tokens", "cached_prefix_tokens", "context_tokens", "generated_tokens", "baseline_mode", "prefill_requested_m", "resolved_m", "step", "row_count", "subset", "metrics"}
         if set(row) != allowed_row_keys:
             raise ProtocolError("SQ8 metric row has unknown or missing fields")
         seen.add(row["case_id"])
@@ -827,7 +1110,7 @@ def _rows(metrics: dict[str, Any], expected_rows: list[dict[str, Any]], identity
         integer_keys = ("prompt_tokens", "cached_prefix_tokens", "context_tokens", "generated_tokens", "prefill_requested_m", "resolved_m", "step", "row_count")
         for key in integer_keys:
             _int(row.get(key), f"SQ8 metric row {row['case_id']} {key}")
-        for key in ("case_sha256", "fixture_sha256", "prompt_token_ids_sha256", "context_token_ids_sha256", "baseline_mode", "subset"):
+        for key in ("case_sha256", "fixture_sha256", "fixture_path", "prompt_token_ids_sha256", "context_token_ids_sha256", "baseline_mode", "subset"):
             if row.get(key) != expected_row.get(key):
                 raise ProtocolError(f"SQ8 metric row identity differs: {row['case_id']} {key}")
         for key in integer_keys:
@@ -838,6 +1121,23 @@ def _rows(metrics: dict[str, Any], expected_rows: list[dict[str, Any]], identity
             raise ProtocolError(f"SQ8 metric set differs: {row['case_id']}")
         for name in METRIC_POLICY:
             _metric_value(values.get(name), f"{row['case_id']}.{name}", name)
+        comparison = comparison_rows.get((row["case_id"], row["step"]))
+        if comparison is None or comparison.get("case_id") != row["case_id"]:
+            raise ProtocolError("SQ8 metric row lacks bound comparison evidence")
+        greedy = comparison["greedy"]
+        ordered = comparison["ordered_top10"]
+        expected_metrics = {
+            "token_agreement_rate": float(greedy["source"] == greedy["target"]),
+            "topk_overlap_rate_k10": float(comparison["top_k_overlap"]) / 10.0,
+            "logits_cosine": float(comparison["logits"]["cosine"]),
+            "logits_relative_l2": float(comparison["logits"]["relative_l2"]),
+            "hidden_cosine": float(comparison["hidden"]["cosine"]),
+            "hidden_relative_l2": float(comparison["hidden"]["relative_l2"]),
+            "hidden_max_abs": float(comparison["hidden"]["max_abs"]),
+            "bf16_top1_retained_in_aq4_top10_rate": float(greedy["source"] in ordered["target"]),
+        }
+        if not _strict_equal(values, expected_metrics):
+            raise ProtocolError(f"SQ8 metric row differs from comparison evidence: {row['case_id']}")
     if seen != set(expected):
         raise ProtocolError("SQ8 calibration metric row set differs")
     return rows

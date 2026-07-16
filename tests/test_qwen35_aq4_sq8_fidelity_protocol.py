@@ -28,42 +28,68 @@ class Sq8ProtocolTests(unittest.TestCase):
         self.root = Path(self.temp.name)
         self.split = self.root / "split"
         self.split.mkdir()
-        rows = []
+        grouped_rows = []
+        fixtures = self.root / "fixtures"
+        fixtures.mkdir()
         for index in range(48):
-            rows.append({
+            prompt_tokens = (1011, 1024, 1339, 2048)[index // 12]
+            baseline_mode = ("all_m1", "cold_batched")[(index // 6) % 2]
+            fixture_path = fixtures / f"fixture-{index:02d}.json"
+            fixture_path.write_text("{}\n")
+            grouped_rows.append({
                 "case_id": f"sq8-case-{index:02d}",
                 "case_sha256": f"{index + 1:064x}",
                 "fixture_sha256": f"{index + 101:064x}",
+                "fixture_path": str(fixture_path.resolve()),
                 "prompt_token_ids_sha256": f"{index + 201:064x}",
                 "context_token_ids_sha256": f"{index + 301:064x}",
-                "prompt_tokens": 1011 + index,
+                "prompt_tokens": prompt_tokens,
                 "cached_prefix_tokens": 0,
-                "context_tokens": 1011 + index,
+                "context_tokens": prompt_tokens,
                 "generated_tokens": 0,
-                "baseline_mode": "all_m1",
+                "baseline_mode": baseline_mode,
                 "prefill_requested_m": 1,
                 "resolved_m": 1,
                 "step": 0,
                 "row_count": 1,
-                "subset": "calibration" if index < 24 else "holdout",
             })
-        for name, subset in (("calibration-cases.jsonl", rows[:24]), ("holdout-cases.jsonl", rows[24:])):
+        calibration = []
+        holdout = []
+        strata = []
+        for prompt_tokens in (1011, 1024, 1339, 2048):
+            for baseline_mode in ("all_m1", "cold_batched"):
+                members = [row for row in grouped_rows if row["prompt_tokens"] == prompt_tokens and row["baseline_mode"] == baseline_mode]
+                ordered = sorted(members, key=lambda row: protocol.sha_bytes(b"ullm.aq4_p2_fidelity_split.v1\0" + row["case_sha256"].encode("ascii")))
+                for row in ordered[:3]: row["subset"] = "calibration"
+                for row in ordered[3:]: row["subset"] = "holdout"
+                calibration.extend(ordered[:3]); holdout.extend(ordered[3:])
+                strata.append({"prompt_tokens": prompt_tokens, "baseline_mode": baseline_mode, "case_count": 6, "calibration_case_ids": [row["case_id"] for row in ordered[:3]], "holdout_case_ids": [row["case_id"] for row in ordered[3:]]})
+        calibration.sort(key=lambda row: row["case_id"])
+        holdout.sort(key=lambda row: row["case_id"])
+        for name, subset in (("calibration-cases.jsonl", calibration), ("holdout-cases.jsonl", holdout)):
             (self.split / name).write_text("".join(json.dumps(row, sort_keys=True) + "\n" for row in subset))
         policy = protocol.policy()
         (self.split / "policy.json").write_text(json.dumps(policy, sort_keys=True) + "\n")
         manifest = {
-            "schema_version": "ullm.qwen35_aq4_sq8_fidelity_split.v1",
+            "schema_version": "ullm.aq4_p2_fidelity_split.v1",
             "status": "ready_for_calibration",
+            "expanded_manifest_sha256": "a" * 64,
+            "fixture_index_sha256": "b" * 64,
             "selected_case_count": 48,
             "calibration_case_count": 24,
             "holdout_case_count": 24,
+            "split_domain": "ullm.aq4_p2_fidelity_split.v1\\0 + case_sha256",
+            "algorithm": "sha256(domain || case_sha256), lexicographic within each prompt_tokens/baseline_mode stratum; first 3 calibration, last 3 holdout",
+            "attempt2_exclusions": {"case_ids": protocol.ATTEMPT2_CASE_IDS, "context_token_ids_sha256": protocol.ATTEMPT2_CONTEXT_HASHES},
+            "strata": strata,
             "calibration_sha256": digest(self.split / "calibration-cases.jsonl"),
             "holdout_sha256": digest(self.split / "holdout-cases.jsonl"),
             "policy_sha256": digest(self.split / "policy.json"),
         }
         (self.split / "split-manifest.json").write_text(json.dumps(manifest, sort_keys=True) + "\n")
-        self.source_v32 = self.root / "source-v32.json"
-        self.source_v32.write_text('{"source":"fixture-v32"}\n')
+        self.source_v32 = self.root / "source-v32" / "manifest.json"
+        self.source_v32.parent.mkdir()
+        self.source_v32.write_text(json.dumps({"schema_version": "ullm.qwen35_aq4_source_calibration.v1", "oracle_kind": "independent_source_full"}) + "\n")
         self.receipt_dir = self.root / "receipt"
         self.receipt_dir.mkdir()
         self.product_root = self.root / "product"
@@ -78,6 +104,19 @@ class Sq8ProtocolTests(unittest.TestCase):
         worker_path = self.receipt_dir / f"worker-{len(list(self.receipt_dir.glob('worker-*'))):03d}"
         worker_path.write_bytes(b"worker")
         worker_path.chmod(0o555)
+        trusted = {}
+        trusted_names = {
+            "maintenance_wrapper": "run-qwen35-aq4-sq8-overlay-gpu-promotion.py",
+            "executor_capture": "capture-aq4-resident-executor-record.py",
+            "served_model_generator": "generate-served-model.py",
+            "promotion_receipt_writer": "write-qwen35-aq4-sq8-overlay-promotion-receipt.py",
+        }
+        trusted_root = self.receipt_dir / "tools"; trusted_root.mkdir(exist_ok=True)
+        for name, filename in trusted_names.items():
+            component = trusted_root / filename; component.write_bytes(f"{name}\n".encode())
+            info = component.stat()
+            trusted[name] = {"path": str(component.resolve()), "sha256": digest(component), "device": info.st_dev, "inode": info.st_ino}
+        timeouts = {"ready_seconds": 900, "request_seconds": 240, "shutdown_seconds": 30, "outer_seconds": 1350}
         binding_path = self.product_root / "artifacts" / "binding.json"
         binding_value = {"schema_version": "ullm.qwen35_aq4_sq8_qkv_z_overlay.v2", "format_id": "AQ4_0", "overlay_format_id": "SQ8_0", "implementation_id": "qwen35_aq4_sq8_linear_qkv_z_overlay_v1", "content_sha256": "f" * 64, "tensor_set_sha256": "1" * 64, "tensor_names": [f"tensor-{index:02d}" for index in range(48)], "package": {"manifest_sha256": ""}}
         binding_path.write_text(json.dumps(binding_value, sort_keys=True) + "\n")
@@ -96,24 +135,36 @@ class Sq8ProtocolTests(unittest.TestCase):
         profile_value = {"schema_version": "ullm.served_model.profile.v1", "format": {"implementation_id": "qwen35_aq4_sq8_linear_qkv_z_overlay_v1"}, "worker": {"binary": str(worker_path.resolve()), "identity": {"execution_profile": "rdna4_aq4_resident_sq8_linear_qkv_z_overlay"}}, "product": {"root": str(self.product_root.resolve()), "artifact": {"manifest_path": "artifacts/binding.json", "content_sha256_from_receipt": ["overlay", "content_sha256"]}, "package": {"manifest_path": "package/manifest.json"}}, "promotion": {"receipt": str(prepared_path.resolve()), "source_commit_from_receipt": ["source_commit"], "required_schema_version": protocol.SQ8_RECEIPT_SCHEMA, "overlay_from_receipt": ["overlay"], "release_from_receipt": ["release"], "package_from_receipt": ["package"], "actual_evidence_from_receipt": ["actual"], "request_id_from_receipt": ["request_id"], "authorization_audit_from_receipt": ["authorization_audit"], "readiness_from_receipt": ["readiness"], "readiness": readiness, "release_source_commit": "5" * 40}}
         profile_path.write_text(json.dumps(profile_value, sort_keys=True) + "\n")
         served_path = self.receipt_dir / "served-model.json"
-        served_value = {"schema_version": "ullm.served_model.v2", "promotion": {"receipt_sha256": "0" * 64, "implementation_id": "qwen35_aq4_sq8_linear_qkv_z_overlay_v1"}}
+        served_value = {"schema_version": "ullm.served_model.v2", "promotion": {"receipt": str(prepared_path.resolve()), "receipt_sha256": "0" * 64, "implementation_id": "qwen35_aq4_sq8_linear_qkv_z_overlay_v1"}}
         served_path.write_text(json.dumps(served_value, sort_keys=True) + "\n")
         served = {"path": str(served_path.resolve()), "semantic_sha256": protocol._served_semantic_sha256(served_path)}
         worker = {"path": str(worker_path.resolve()), "sha256": digest(worker_path), "bytes": worker_path.stat().st_size, "mode": "0555", "nlink": 1}
         profile = {"path": str(profile_path.resolve()), "sha256": digest(profile_path)}
         release = {"worker": worker, "profile": profile, "served_model": served}
         auth = {"path": str(audit_path.resolve()), "sha256": digest(audit_path)}
-        prepared = {"schema_version": protocol.SQ8_RECEIPT_SCHEMA, "status": "prepared_not_executed", "request_id": request, "source_commit": "5" * 40, "source_provenance": source, "release": release, "overlay": overlay, "package": package, "authorization_audit": auth, "readiness": readiness, "actual": {"status": "pending", "required": True}}
+        prepared = {"schema_version": protocol.SQ8_RECEIPT_SCHEMA, "status": "prepared_not_executed", "request_id": request, "source_commit": "5" * 40, "source_provenance": source, "release": release, "overlay": overlay, "package": package, "authorization_audit": auth, "readiness": readiness, "execution_timeouts": timeouts, "actual": {"status": "pending", "required": True}}
         prepared_path.write_text(json.dumps(prepared, sort_keys=True) + "\n")
-        maintenance = self.receipt_dir / "maintenance.json"; maintenance.write_text(json.dumps({"schema_version": "ullm.qwen35_aq4.sq8_overlay_gpu_promotion_maintenance.v1", "status": "passed", "actual_run_count": 1, "failure": None, "promotion_request_id": request, "candidate_pre": {}, "candidate_post": {}, "stopped_observations": [{"service": {"active": False, "running": False, "main_pid": 0, "worker_pid": 0, "lock_owned": False}, "owners": {"worker_pids": [], "amd_pids": [], "kfd_pids": []}}] * 2, "vram_headroom_bytes": 1, "lock": {"held": True, "released": True, "path": "/run/ullm/device-1.lock"}, "restore": {"attempted": True, "passed": True}}) + "\n")
+        maintenance = self.receipt_dir / "maintenance.json"; maintenance.write_text(json.dumps({"schema_version": "ullm.qwen35_aq4.sq8_overlay_gpu_promotion_maintenance.v1", "status": "passed", "actual_run_count": 1, "failure": None, "promotion_request_id": request, "candidate_pre": {}, "candidate_post": {}, "stopped_observations": [{"service": {"active": False, "running": False, "main_pid": 0, "worker_pid": 0, "lock_owned": False}, "owners": {"worker_pids": [], "amd_pids": [], "kfd_pids": []}}] * 2, "lock": {"held": True, "released": True, "path": "/run/ullm/device-1.lock"}, "restore": {"attempted": True, "passed": True}, "capture": {"timeouts": timeouts}, "trusted_components": trusted}) + "\n")
         telemetry = {"schema_version": "ullm.qwen35_aq4.sq8_promotion_telemetry.v1", "projection": {"single_matvec_count": 0, "batch_matvec_count": 1, "pair_matvec_count": 1, "triple_matvec_count": 0, "fallback_count": 0}, "diagnostic_host_staging": {"read_count": 0, "write_count": 0, "read_bytes": 0, "write_bytes": 0}}
         binding = {"schema_version": "ullm.qwen35_aq4.sq8_promotion_telemetry_binding.v1", "request_id": request, "hash_encoding": "canonical_json_ascii_sort_keys_compact_v1", "telemetry_sha256": protocol.sha_bytes(protocol.canonical(telemetry))}
         manifest_identity = {"implementation_id": "qwen35_aq4_sq8_linear_qkv_z_overlay_v1", "execution_profile": "rdna4_aq4_resident_sq8_linear_qkv_z_overlay", "artifact_content_sha256": overlay["content_sha256"], "artifact_manifest_sha256": overlay["binding_manifest_sha256"], "package_manifest_sha256": package["manifest_sha256"]}
         output_identity = {"token_count": 2, "token_ids_sha256": "6" * 64, "token_ids_recorded": False}
-        executor = self.receipt_dir / "executor.json"; executor.write_text(json.dumps({"schema_version": "ullm.production_executor_record.v1", "status": "ok", "sq8_promotion_evidence": {"schema_version": "ullm.qwen35_aq4.sq8_promotion_executor.v1", "request_id": request, "manifest_identity": manifest_identity, "telemetry": telemetry, "telemetry_binding": binding, "output_identity": output_identity}}, sort_keys=True) + "\n")
-        actual_value = {"status": "actual_verified", "required": True, "prepared_receipt": {"path": str(prepared_path.resolve()), "sha256": digest(prepared_path)}, "maintenance_evidence": {"path": maintenance.name, "sha256": digest(maintenance)}, "executor_record": {"path": executor.name, "sha256": digest(executor)}, "gpu_exclusive_preflight": {"mode": "maintenance_stable2", "stable_observation_count": 2, "worker_pids": [], "amd_smi_owners": [], "kfd_owners": [], "lock": {"path": "/run/ullm/device-1.lock", "free": True}, "vram_headroom_bytes": 1}, "telemetry": telemetry, "telemetry_binding": binding, "manifest_identity": manifest_identity, "output_identity": output_identity}
-        receipt = {"schema_version": protocol.SQ8_RECEIPT_SCHEMA, "status": "actual_verified" if actual else "prepared_not_executed", "request_id": request, "source_commit": "5" * 40, "source_provenance": source, "release": release, "overlay": overlay, "package": package, "authorization_audit": auth, "readiness": readiness, "actual": actual_value if actual else {"status": "pending", "required": True}}
+        counts = [{"kind": kind, "implementation_id": implementation, "count": count} for kind, implementation, count in protocol.REQUIRED_OPERATOR_COUNTS]
+        operator_audit = {"schema_version": "ullm.qwen35_aq4.sq8_operator_audit.v1", "hash_encoding": "canonical_json_ascii_sort_keys_compact_v1", "source_audit_sha256": "a" * 64, "deterministic_digest_sha256": "b" * 64, "physical_operation_invocations": 128, "total_steps": 129, "decode_steps": 1, "token_equivalent_operation_coverage": 8256, "implementation_counts": counts}
+        records = []
+        for implementation, (kind, layer_count) in protocol.LOAD_IMPLEMENTATION_KINDS.items():
+            layers = range(24) if layer_count == 24 else range(24, 32)
+            for layer in layers:
+                for phase in ("cold_prefill", "cached_prefix_prefill", "decode"):
+                    records.append({"layer_position": layer, "phase": phase, "kind": kind, "implementation_id": implementation, "resolution": "selected"})
+        load_resolutions = {"schema_version": "ullm.qwen35_aq4.sq8_load_resolutions.v1", "hash_encoding": "canonical_json_ascii_sort_keys_compact_v1", "record_count": 192, "records_sha256": protocol.sha_bytes(protocol.canonical(records)), "records": records}
+        executor_evidence = {"schema_version": "ullm.qwen35_aq4.sq8_promotion_executor.v1", "request_id": request, "manifest_identity": manifest_identity, "telemetry": telemetry, "telemetry_binding": binding, "operator_audit": operator_audit, "load_resolutions": load_resolutions, "output_identity": output_identity}
+        executor = self.receipt_dir / "executor.json"; executor.write_text(json.dumps({"schema_version": "ullm.production_executor_record.v1", "status": "ok", "memory": {"vram_capacity_bytes": 100, "observed_peak_bytes": 40, "observed_headroom_bytes": 60}, "sq8_promotion_evidence": executor_evidence}, sort_keys=True) + "\n")
+        actual_value = {"status": "actual_verified", "required": True, "prepared_receipt": {"path": str(prepared_path.resolve()), "sha256": digest(prepared_path)}, "maintenance_evidence": {"path": maintenance.name, "sha256": digest(maintenance)}, "executor_record": {"path": executor.name, "sha256": digest(executor)}, "gpu_exclusive_preflight": {"mode": "maintenance_stable2", "stable_observation_count": 2, "worker_pids": [], "amd_smi_owners": [], "kfd_owners": [], "lock": {"path": "/run/ullm/device-1.lock", "free": True}}, "telemetry": telemetry, "telemetry_binding": binding, "operator_audit": operator_audit, "load_resolutions": load_resolutions, "manifest_identity": manifest_identity, "output_identity": output_identity, "trusted_components": trusted}
+        receipt = {"schema_version": protocol.SQ8_RECEIPT_SCHEMA, "status": "actual_verified" if actual else "prepared_not_executed", "request_id": request, "source_commit": "5" * 40, "source_provenance": source, "release": release, "overlay": overlay, "package": package, "authorization_audit": auth, "readiness": readiness, "execution_timeouts": timeouts, "actual": actual_value if actual else {"status": "pending", "required": True}}
         path = self.receipt_dir / ("actual.json" if actual else "prepared-only.json")
+        if actual:
+            receipt["release"]["served_model"]["semantic_sha256"] = protocol._served_semantic_sha256(served_path, receipt_path_override=path)
         path.write_text(json.dumps(receipt, sort_keys=True) + "\n")
         return path
 
@@ -130,10 +181,35 @@ class Sq8ProtocolTests(unittest.TestCase):
     def _metrics(self, plan: Path, subset: str) -> Path:
         value = json.loads(plan.read_text())
         rows = json.loads("[" + ",".join((self.split / ("calibration-cases.jsonl" if subset == "calibration" else "holdout-cases.jsonl")).read_text().splitlines()) + "]")
+        source_root = self.source_v32.parent
+        target_root = self.root / f"{subset}-target"
+        comparison_root = self.root / f"{subset}-comparison"
+        target_root.mkdir(exist_ok=True)
+        comparison_root.mkdir(exist_ok=True)
+        identity = value["identity"]
+        target_manifest = {
+            "schema_version": "ullm.qwen35_aq4_target_calibration.v1",
+            "oracle_kind": "aq4_sq8_target",
+            "identity": {
+                "artifact": {"content_sha256": identity["overlay_content_sha256"], "tensor_set_sha256": identity["overlay_tensor_set_sha256"], "package_manifest_sha256": identity["package"]["manifest_sha256"]},
+                "worker_binary_sha256": identity["worker"]["sha256"],
+            },
+            "runtime": {"runtime": {"worker_binary_sha256": identity["worker"]["sha256"], "package_manifest_sha256": identity["package"]["manifest_sha256"], "served_model_manifest_sha256": digest(Path(identity["served_model"]["path"])), "split_manifest_sha256": identity["split_manifest_sha256"], "policy_sha256": identity["policy_sha256"], "calibration_cases_sha256": identity["calibration_cases_sha256"], "one_model_load": True}},
+            "parent_sampled_oracle": {"path": str(self.source_v32.resolve()), "manifest_sha256": digest(self.source_v32), "schema_version": "ullm.qwen35_aq4_source_calibration.v1"},
+        }
+        (target_root / "manifest.json").write_text(json.dumps(target_manifest, sort_keys=True) + "\n")
+        comparison_rows = []
         for row in rows:
             row["metrics"] = {name: (1.0 if name in protocol.BINARY_METRICS else (2.0 if name == "hidden_max_abs" else 0.8)) for name in protocol.METRIC_POLICY}
+            stats = {"reference_norm_sq": 1.0, "candidate_norm_sq": 1.0, "dot": 0.8, "delta_norm_sq": 0.64, "relative_l2": 0.8, "cosine": 0.8, "max_abs": 2.0, "reference_nonfinite_count": 0, "candidate_nonfinite_count": 0}
+            comparison_rows.append({"case_id": row["case_id"], "step": row["step"], "greedy_exact": True, "top_k_overlap": 8, "hidden": stats, "logits": {**stats, "max_abs": 1.0}, "reference_finite": True, "candidate_finite": True, "greedy": {"source": 0, "target": 0}, "ordered_top10": {"source": list(range(10)), "target": list(range(8)) + [10, 11]}})
+        rows_path = comparison_root / "rows.jsonl"
+        rows_path.write_text("".join(json.dumps(row, sort_keys=True) + "\n" for row in comparison_rows))
+        comparison_manifest = {"schema_version": "ullm.qwen35_aq4_calibration_comparison.v1", "status": "valid", "compare_kind": "sq8_source_gate", "observed_values_only": True, "reference": {"path": str(source_root.resolve()), "manifest_sha256": digest(self.source_v32), "schema_version": "ullm.qwen35_aq4_source_calibration.v1", "oracle_kind": "independent_source_full"}, "candidate": {"path": str(target_root.resolve()), "manifest_sha256": digest(target_root / "manifest.json"), "schema_version": "ullm.qwen35_aq4_target_calibration.v1", "oracle_kind": "aq4_sq8_target"}, "rows": {"file": "rows.jsonl", "record_count": 24, "sha256": digest(rows_path)}}
+        (comparison_root / "manifest.json").write_text(json.dumps(comparison_manifest, sort_keys=True) + "\n")
         path = self.root / f"{subset}-metrics.json"
-        path.write_text(json.dumps({"schema_version": protocol.METRICS_SCHEMA, "identity": value["identity"], "subset": subset, "rows": rows}, sort_keys=True) + "\n")
+        evidence = {"source_artifact": {"root": str(source_root.resolve()), "manifest_sha256": digest(self.source_v32)}, "target_artifact": {"root": str(target_root.resolve()), "manifest_sha256": digest(target_root / "manifest.json")}, "comparison": {"root": str(comparison_root.resolve()), "manifest_sha256": digest(comparison_root / "manifest.json")}}
+        path.write_text(json.dumps({"schema_version": protocol.METRICS_SCHEMA, "identity": value["identity"], "subset": subset, "evidence": evidence, "rows": rows}, sort_keys=True) + "\n")
         return path
 
     def test_actual_receipt_binds_plan_and_freeze_recomputes(self) -> None:
@@ -192,6 +268,30 @@ class Sq8ProtocolTests(unittest.TestCase):
                 result = self._run("plan", "--split-root", str(self.split), "--actual-receipt", str(receipt), "--source-v32", str(self.source_v32), "--output", str(self.root / f"bad-{name}.json"))
                 self.assertNotEqual(result.returncode, 0)
 
+    def test_current_actual_audit_timeout_load_and_trusted_component_contract_is_exact(self) -> None:
+        def duplicate_load(value):
+            value["actual"]["load_resolutions"]["records"][1] = json.loads(json.dumps(value["actual"]["load_resolutions"]["records"][0]))
+            value["actual"]["load_resolutions"]["records_sha256"] = protocol.sha_bytes(protocol.canonical(value["actual"]["load_resolutions"]["records"]))
+
+        mutations = (
+            ("timeout-float", lambda value: value["execution_timeouts"].__setitem__("request_seconds", 240.0)),
+            ("timeout-unknown", lambda value: value["execution_timeouts"].__setitem__("unexpected", 1)),
+            ("operator-count", lambda value: value["actual"]["operator_audit"]["implementation_counts"][0].__setitem__("count", 23)),
+            ("operator-source-sha", lambda value: value["actual"]["operator_audit"].__setitem__("source_audit_sha256", "0" * 64)),
+            ("operator-steps-bool", lambda value: value["actual"]["operator_audit"].__setitem__("total_steps", True)),
+            ("load-count-float", lambda value: value["actual"]["load_resolutions"].__setitem__("record_count", 192.0)),
+            ("load-topology", duplicate_load),
+            ("trusted-inode", lambda value: value["actual"]["trusted_components"]["executor_capture"].__setitem__("inode", 1)),
+            ("trusted-sha", lambda value: value["actual"]["trusted_components"]["maintenance_wrapper"].__setitem__("sha256", "0" * 64)),
+            ("actual-unknown", lambda value: value["actual"].__setitem__("unexpected", True)),
+            ("actual-missing", lambda value: value["actual"].pop("load_resolutions")),
+        )
+        for name, mutate in mutations:
+            with self.subTest(name=name):
+                receipt = self._receipt(); value = json.loads(receipt.read_text()); mutate(value); receipt.write_text(json.dumps(value) + "\n")
+                result = self._run("plan", "--split-root", str(self.split), "--actual-receipt", str(receipt), "--source-v32", str(self.source_v32), "--output", str(self.root / f"current-actual-{name}.json"))
+                self.assertNotEqual(result.returncode, 0)
+
     def test_metrics_are_strict_24_rows_and_reject_unknown_missing_duplicate_nonfinite(self) -> None:
         plan = self._plan()
         metrics = self._metrics(plan, "calibration")
@@ -209,6 +309,25 @@ class Sq8ProtocolTests(unittest.TestCase):
         duplicate_path.write_text('{"schema_version":"' + protocol.METRICS_SCHEMA + '","schema_version":"' + protocol.METRICS_SCHEMA + '"}\n')
         result = self._run("freeze", "--plan", str(plan), "--metrics", str(duplicate_path), "--output", str(self.root / "duplicate-out.json"))
         self.assertNotEqual(result.returncode, 0)
+
+    def test_metrics_evidence_and_recomputed_comparison_values_are_fail_closed(self) -> None:
+        plan = self._plan()
+        metrics = self._metrics(plan, "calibration")
+        base = json.loads(metrics.read_text())
+        mutations = (
+            ("source-sha", lambda value: value["evidence"]["source_artifact"].__setitem__("manifest_sha256", "9" * 64)),
+            ("target-sha", lambda value: value["evidence"]["target_artifact"].__setitem__("manifest_sha256", "9" * 64)),
+            ("comparison-sha", lambda value: value["evidence"]["comparison"].__setitem__("manifest_sha256", "9" * 64)),
+            ("served", lambda value: value["rows"][0]["metrics"].__setitem__("hidden_cosine", 0.7)),
+            ("token", lambda value: value["rows"][0]["metrics"].__setitem__("token_agreement_rate", 0.0)),
+            ("unknown", lambda value: value["evidence"].__setitem__("unexpected", {})),
+        )
+        for name, mutate in mutations:
+            with self.subTest(name=name):
+                value = json.loads(json.dumps(base)); mutate(value)
+                path = self.root / f"metrics-evidence-{name}.json"; path.write_text(json.dumps(value) + "\n")
+                result = self._run("freeze", "--plan", str(plan), "--metrics", str(path), "--output", str(self.root / f"metrics-evidence-{name}-freeze.json"))
+                self.assertNotEqual(result.returncode, 0)
 
     def test_plan_resource_limits_and_vram_headroom_are_bound(self) -> None:
         plan = self._plan()

@@ -145,6 +145,8 @@ def read_chunks(fd: int, offset: int, elements: int, chunk_elements: int) -> Ite
 
 def finite_metrics(reference: Iterator[list[float]], candidate: Iterator[list[float]], elements: int, chunk_elements: int | None = None) -> dict[str, Any]:
     ref_sq = 0.0
+    candidate_sq = 0.0
+    dot = 0.0
     delta_sq = 0.0
     max_abs = 0.0
     ref_nonfinite = 0
@@ -181,6 +183,8 @@ def finite_metrics(reference: Iterator[list[float]], candidate: Iterator[list[fl
                 max_abs = max(max_abs, abs(difference))
                 delta_sq += difference * difference
                 ref_sq += float(left) * float(left)
+                candidate_sq += float(right) * float(right)
+                dot += float(left) * float(right)
         ref_index += count
         candidate_index += count
         seen += count
@@ -197,8 +201,9 @@ def finite_metrics(reference: Iterator[list[float]], candidate: Iterator[list[fl
     except StopIteration:
         pass
     if ref_nonfinite or candidate_nonfinite:
-        return {"relative_l2": None, "max_abs": None, "reference_nonfinite_count": ref_nonfinite, "candidate_nonfinite_count": candidate_nonfinite}
-    return {"relative_l2": math.sqrt(delta_sq) / max(math.sqrt(ref_sq), 1e-30), "max_abs": max_abs, "reference_nonfinite_count": 0, "candidate_nonfinite_count": 0}
+        return {"reference_norm_sq": None, "candidate_norm_sq": None, "dot": None, "delta_norm_sq": None, "relative_l2": None, "cosine": None, "max_abs": None, "reference_nonfinite_count": ref_nonfinite, "candidate_nonfinite_count": candidate_nonfinite}
+    denominator = max(math.sqrt(ref_sq) * math.sqrt(candidate_sq), 1e-30)
+    return {"reference_norm_sq": ref_sq, "candidate_norm_sq": candidate_sq, "dot": dot, "delta_norm_sq": delta_sq, "relative_l2": math.sqrt(delta_sq) / max(math.sqrt(ref_sq), 1e-30), "cosine": max(-1.0, min(1.0, dot / denominator)), "max_abs": max_abs, "reference_nonfinite_count": 0, "candidate_nonfinite_count": 0}
 
 
 def topk_from_chunks(values: Iterator[list[float]], elements: int, count: int) -> list[dict[str, Any]]:
@@ -308,6 +313,11 @@ def check_identity(reference: dict[str, Any], candidate: dict[str, Any], compare
         for field in ("package_content_sha256", "package_manifest_sha256", "worker_binary_sha256"):
             if left.get(field) != right.get(field):
                 raise ComparisonError(f"path oracle identity differs: {field}")
+    if compare_kind == "sq8_source_gate":
+        parent = candidate["manifest"].get("parent_sampled_oracle")
+        expected_parent = {"path": str((reference["root"] / "manifest.json").resolve()), "manifest_sha256": reference["manifest_sha256"], "schema_version": SOURCE_SCHEMA}
+        if parent != expected_parent:
+            raise ComparisonError("SQ8 target direct source parent binding differs")
 
 
 def compare(reference: dict[str, Any], candidate: dict[str, Any], compare_kind: str, output: Path) -> dict[str, Any]:
@@ -317,6 +327,10 @@ def compare(reference: dict[str, Any], candidate: dict[str, Any], compare_kind: 
         raise ComparisonError("source_gate reference must be independent_source_full")
     if compare_kind == "source_gate" and candidate["manifest"].get("oracle_kind") != "aq4_target":
         raise ComparisonError("source_gate candidate must be aq4_target")
+    if compare_kind == "sq8_source_gate" and reference["manifest"].get("oracle_kind") != "independent_source_full":
+        raise ComparisonError("sq8_source_gate reference must be independent_source_full")
+    if compare_kind == "sq8_source_gate" and candidate["manifest"].get("oracle_kind") != "aq4_sq8_target":
+        raise ComparisonError("sq8_source_gate candidate must be aq4_sq8_target")
     if compare_kind == "path_gate" and reference["manifest"].get("oracle_kind") not in {"same_artifact_all_m1", "aq4_target"}:
         raise ComparisonError("path_gate reference must be AQ4 all-M1")
     if compare_kind == "path_gate" and candidate["manifest"].get("oracle_kind") != "aq4_optimized":
@@ -367,6 +381,9 @@ def compare(reference: dict[str, Any], candidate: dict[str, Any], compare_kind: 
                 reference_finite = hidden["reference_nonfinite_count"] + logits["reference_nonfinite_count"] == 0
                 candidate_finite = hidden["candidate_nonfinite_count"] + logits["candidate_nonfinite_count"] == 0
                 output_row = {"case_id": key[0], "step": key[1], "greedy_exact": greedy_exact, "top_k_overlap": overlap, "hidden": hidden, "logits": logits, "reference_finite": reference_finite, "candidate_finite": candidate_finite}
+                if compare_kind == "sq8_source_gate":
+                    output_row["greedy"] = {"source": left["greedy_token_id"], "target": right["greedy_token_id"]}
+                    output_row["ordered_top10"] = {"source": [item["token_id"] for item in left["topk"]], "target": [item["token_id"] for item in right["topk"]]}
                 rows_out.write(json.dumps(output_row, ensure_ascii=True, sort_keys=True, separators=(",", ":")) + "\n")
                 row_count += 1
         rows_sha = sha256_file(result_rows, "comparison rows")
@@ -402,7 +419,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--reference", type=Path, required=True)
     parser.add_argument("--candidate", type=Path, required=True)
-    parser.add_argument("--compare-kind", choices=("source_gate", "path_gate"), required=True)
+    parser.add_argument("--compare-kind", choices=("source_gate", "sq8_source_gate", "path_gate"), required=True)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args(argv)
     try:

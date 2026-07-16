@@ -100,6 +100,24 @@ def make_artifact(root: Path, *, target: bool = False, perturb: bool = False, no
     return root
 
 
+def make_sq8_target(source: Path, target: Path) -> Path:
+    make_artifact(target, target=True, perturb=True)
+    source_manifest = json.loads((source / "manifest.json").read_text(encoding="utf-8"))
+    manifest = json.loads((target / "manifest.json").read_text(encoding="utf-8"))
+    manifest["oracle_kind"] = validator.SQ8_TARGET_KIND
+    manifest["identity"]["format_id"] = "AQ4_0"
+    manifest["identity"]["implementation_id"] = validator.SQ8_IMPLEMENTATION_ID
+    manifest["identity"]["artifact"] = {"package_manifest_sha256": "b" * 64, "artifact_manifest_sha256": "d" * 64, "content_sha256": "e" * 64, "tensor_set_sha256": "f" * 64, "tensor_names": [f"tensor-{index:02d}" for index in range(48)]}
+    manifest["parent_sampled_oracle"] = {"path": str((source / "manifest.json").resolve()), "manifest_sha256": validator.sha256_file(source / "manifest.json", "source manifest"), "schema_version": validator.SCHEMA}
+    manifest["legacy_cross_check"] = {"status": "not_applicable", "legacy_manifest_sha256": manifest["parent_sampled_oracle"]["manifest_sha256"], "legacy_payload_sha256": "", "row_count": manifest["cases"]["row_count"], "hidden_sample_max_abs_diff": 0.0, "logit_sample_max_abs_diff": 0.0}
+    source_identity = source_manifest["identity"]
+    manifest["runtime"].update({"device": "gpu", "dtype": "f32", "model_loads": 1, "torch_num_threads": 1, "torch_num_interop_threads": 1, "inference_mode": True, "full_vocab_ranking": True, "max_resident_logit_rows": 1})
+    manifest["runtime"]["runtime"] = {"name": validator.SQ8_CAPTURE_RUNTIME, "build_sha256": "1" * 64, "one_model_load": True, "split_manifest_sha256": "2" * 64, "policy_sha256": "3" * 64, "calibration_cases_sha256": "4" * 64, "served_model_manifest_sha256": "5" * 64, "package_manifest_sha256": manifest["identity"]["package_manifest_sha256"], "worker_binary_sha256": manifest["identity"]["worker_binary_sha256"], "guard_sha256": "6" * 64, "upstream_model_revision": source_identity["model_revision"], "quantized_artifact_revision": "sq8-fixture", "source_checkpoint_aggregate_sha256": source_identity["source_checkpoint"]["aggregate_sha256"], "tokenizer_aggregate_sha256": source_identity["tokenizer"]["aggregate_sha256"], "device": {"requested_index": 1, "device_id": 1, "backend": "HIP", "name": "R9700", "architecture": "gfx1201"}}
+    write_json(target / "manifest.json", manifest)
+    write_sha_sums(target)
+    return target
+
+
 def test_full_source_validator_and_comparator(tmp_path: Path):
     source = make_artifact(tmp_path / "source")
     candidate = make_artifact(tmp_path / "candidate", target=True, perturb=True)
@@ -114,6 +132,33 @@ def test_full_source_validator_and_comparator(tmp_path: Path):
     assert result["summary"]["greedy_mismatch_rows"] == 0
     assert result["observed_values_only"] is True
     assert (comparison_dir / "manifest.json").exists()
+
+
+def test_sq8_target_requires_explicit_typed_compare_lane(tmp_path: Path):
+    source = make_artifact(tmp_path / "source")
+    candidate = make_sq8_target(source, tmp_path / "candidate")
+    assert validator.validate(candidate)["status"] == "valid"
+    left = comparator.load_artifact(source)
+    right = comparator.load_artifact(candidate)
+    with pytest.raises(comparator.ComparisonError, match="source_gate candidate"):
+        comparator.compare(left, right, "source_gate", tmp_path / "wrong-lane")
+    result = comparator.compare(left, right, "sq8_source_gate", tmp_path / "sq8-comparison")
+    assert result["status"] == "valid"
+    row = json.loads((tmp_path / "sq8-comparison/rows.jsonl").read_text(encoding="utf-8").splitlines()[0])
+    assert set(row["greedy"]) == {"source", "target"}
+    assert len(row["ordered_top10"]["source"]) == 10
+    assert set(row["hidden"]) == {"reference_norm_sq", "candidate_norm_sq", "dot", "delta_norm_sq", "relative_l2", "cosine", "max_abs", "reference_nonfinite_count", "candidate_nonfinite_count"}
+
+
+def test_sq8_target_unknown_or_mistyped_identity_is_rejected(tmp_path: Path):
+    source = make_artifact(tmp_path / "source")
+    candidate = make_sq8_target(source, tmp_path / "candidate")
+    manifest = json.loads((candidate / "manifest.json").read_text(encoding="utf-8"))
+    manifest["identity"]["artifact"]["tensor_names"].append("unexpected")
+    write_json(candidate / "manifest.json", manifest)
+    write_sha_sums(candidate)
+    with pytest.raises(validator.ValidationError, match="tensor_names"):
+        validator.validate(candidate)
 
 
 def test_target_accepts_direct_source_calibration_parent(tmp_path: Path):
