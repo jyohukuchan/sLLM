@@ -1,0 +1,23 @@
+	Command being timed: "timeout --signal=TERM --kill-after=60s 45m python3 tools/compare-aq4-multilayer-accumulation.py --chain-binary target/debug/ullm-aq4-layer0-family-isolation --package /home/homelab1/datapool/ullm/product/qwen35-9b-aq4-cli-v0.1/package --hybrid-input benchmarks/results/2026-07-17/qwen35-9b-aq4-production-opt-v0.1/p2/aq4-layer0-hybrid-diagnostic-v0.1/input/hybrid-input.jsonl --source-model /home/homelab1/datapool/ai_models/safetensors/Qwen/Qwen3.5-9B --chain-layer-range 0:11 --aq4-output benchmarks/results/2026-07-17/qwen35-9b-aq4-production-opt-v0.1/p2/aq4-multilayer-accumulation-v0.1/chain-0-11-v0.1/aq4-chain --output benchmarks/results/2026-07-17/qwen35-9b-aq4-production-opt-v0.1/p2/aq4-multilayer-accumulation-v0.1/chain-0-11-v0.1/compare --chunk-bytes 16777216"
+	User time (seconds): 172.94
+	System time (seconds): 19.28
+	Percent of CPU this job got: 122%
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 2:37.13
+	Average shared text size (kbytes): 0
+	Average unshared data size (kbytes): 0
+	Average stack size (kbytes): 0
+	Average total size (kbytes): 0
+	Maximum resident set size (kbytes): 332008
+	Average resident set size (kbytes): 0
+	Major (requiring I/O) page faults: 749012
+	Minor (reclaiming a frame) page faults: 394909
+	Voluntary context switches: 275
+	Involuntary context switches: 2769
+	Swaps: 0
+	File system inputs: 0
+	File system outputs: 544
+	Socket messages sent: 0
+	Socket messages received: 0
+	Signals delivered: 0
+	Page size (bytes): 4096
+	Exit status: 0
