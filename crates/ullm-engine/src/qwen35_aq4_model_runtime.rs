@@ -17,6 +17,7 @@ use crate::loader::{
     PassthroughF32Data, effective_rmsnorm_weight_values, read_named_passthrough_f32,
 };
 use crate::package::TensorSelector;
+use crate::qwen35_aq4_direct_trace::{Qwen35Aq4DirectTraceCounters, Qwen35Aq4DirectTraceRoute};
 use crate::qwen35_aq4_head_runtime::{
     PackageEmbeddingRuntime, PackageFinalNormRuntime, PackageLmHeadMode, PackageLmHeadRuntime,
     PackageTokenLogit, QWEN3_FINAL_NORM_TENSOR, package_embedding_shape,
@@ -119,6 +120,18 @@ fn direct_prefill_sequence_output_enabled_value(value: Option<&str>) -> bool {
 fn direct_prefill_sequence_output_enabled() -> bool {
     direct_prefill_sequence_output_enabled_value(
         std::env::var("ULLM_AQ4_PREFILL_DIRECT_SEQUENCE_OUTPUT")
+            .ok()
+            .as_deref(),
+    )
+}
+
+pub fn direct_trace_diagnostic_enabled_value(value: Option<&str>) -> bool {
+    value.is_some_and(|value| matches!(value, "1" | "true" | "TRUE" | "yes" | "YES"))
+}
+
+fn direct_trace_diagnostic_enabled() -> bool {
+    direct_trace_diagnostic_enabled_value(
+        std::env::var("ULLM_AQ4_P3_DIRECT_TRACE_DIAGNOSTIC")
             .ok()
             .as_deref(),
     )
@@ -706,6 +719,7 @@ pub struct Qwen35Aq4ModelRuntime {
     device_name: String,
     backend: String,
     device_total_global_mem: u64,
+    direct_trace_counters: Option<Qwen35Aq4DirectTraceCounters>,
     last_partial_operation_executions: Vec<[Option<OperationExecutionRecord>; 2]>,
     last_partial_prefill_invocations: Vec<Qwen35Aq4FailedPrefillInvocation>,
 }
@@ -993,6 +1007,8 @@ impl Qwen35Aq4ModelRuntime {
             device_name: info.name,
             backend: info.backend.to_string(),
             device_total_global_mem: info.total_global_mem,
+            direct_trace_counters: direct_trace_diagnostic_enabled()
+                .then(Qwen35Aq4DirectTraceCounters::default),
             last_partial_operation_executions: Vec::with_capacity(32),
             last_partial_prefill_invocations: Vec::new(),
         })
@@ -1016,6 +1032,20 @@ impl Qwen35Aq4ModelRuntime {
 
     pub fn device_total_global_mem(&self) -> u64 {
         self.device_total_global_mem
+    }
+
+    /// Returns whether the explicit candidate-A diagnostic collector is active.
+    pub fn direct_trace_diagnostic_enabled(&self) -> bool {
+        self.direct_trace_counters.is_some()
+    }
+
+    /// Snapshots counters for the just-completed request and clears them for the next request.
+    pub fn take_direct_trace_counters(&mut self) -> Option<Qwen35Aq4DirectTraceCounters> {
+        let snapshot = self.direct_trace_counters.clone();
+        if let Some(counters) = self.direct_trace_counters.as_mut() {
+            counters.reset();
+        }
+        snapshot
     }
 
     pub fn has_resident_embedding(&self) -> bool {
@@ -1152,6 +1182,8 @@ impl Qwen35Aq4ModelRuntime {
         let sequence_bytes = sequence_len
             .checked_mul(hidden_bytes)
             .ok_or_else(|| format!("{label} sequence byte count overflows"))?;
+        let sequence_bytes_u64 = u64::try_from(sequence_bytes)
+            .map_err(|_| format!("{label} sequence byte count exceeds u64"))?;
         let embedding = self.embedding.as_mut().ok_or_else(|| {
             "Qwen3.5 AQ4 native prefill requires a resident embedding".to_string()
         })?;
@@ -1199,155 +1231,19 @@ impl Qwen35Aq4ModelRuntime {
                 }
                 _ => unreachable!("validated sequence ping route"),
             };
-            let committed_next_ping = match &mut self.layers[layer_position] {
-                Qwen35Aq4ResidentLayer::LinearAttention(layer) => {
-                    let workspace = self.prefill_sequence_workspace.as_mut().ok_or_else(|| {
-                        format!("{layer_label} has no shared linear sequence workspace")
-                    })?;
-                    let routed_records_result = if direct_sequence_output {
-                        let direct_result = layer.run_device_sequence_for_phase_to_buffer_typed(
-                            &mut self.stream,
-                            source,
-                            sequence_len,
-                            phase,
-                            workspace,
-                            destination,
-                            &layer_label,
-                        );
-                        resolve_direct_sequence_attempt(
-                            direct_result,
-                            || {
-                                layer.run_device_sequence_for_phase(
-                                    &mut self.stream,
-                                    source,
-                                    sequence_len,
-                                    phase,
-                                    workspace,
-                                    &layer_label,
-                                )
-                            },
-                            &layer_label,
-                        )
-                    } else {
-                        layer
-                            .run_device_sequence_for_phase(
-                                &mut self.stream,
-                                source,
-                                sequence_len,
-                                phase,
-                                workspace,
-                                &layer_label,
-                            )
-                            .map(|records| (records, Qwen35Aq4SequenceOutputRoute::Copy))
-                    };
-                    let (records, output_route) = match routed_records_result {
-                        Ok(result) => result,
-                        Err(error) => {
-                            let partial = layer.take_last_operation_executions();
-                            self.last_partial_operation_executions.push(partial);
-                            self.last_partial_prefill_invocations.push(
-                                Qwen35Aq4FailedPrefillInvocation {
-                                    layer_index: layer_position,
-                                    execution_width: sequence_len,
-                                    phase,
-                                    records: partial,
-                                },
-                            );
-                            return Err(error);
-                        }
-                    };
-                    let output_commit = apply_sequence_output_route(
-                        output_route,
-                        ping_route,
-                        || {
-                            destination
-                                .copy_from_buffer(
-                                    0,
-                                    workspace.output_buffer(),
-                                    0,
-                                    sequence_bytes,
-                                    Some(&mut self.stream),
-                                )
-                                .map_err(|error| {
-                                    format!("failed to copy {layer_label} sequence output: {error}")
-                                })
-                        },
-                        || layer.mark_request_execution_failed(),
-                    )
-                    .map_err(|error| {
-                        self.last_partial_prefill_invocations.push(
-                            Qwen35Aq4FailedPrefillInvocation {
-                                layer_index: layer_position,
-                                execution_width: sequence_len,
-                                phase,
-                                records: [Some(records[0]), Some(records[1])],
-                            },
-                        );
-                        error
-                    })?;
-                    if layer_position + 1 == layer_count {
-                        let retain_result = if matches!(
-                            output_commit.route,
-                            Qwen35Aq4SequenceOutputRoute::Direct
-                        ) {
-                            layer.retain_last_sequence_row_from_buffer(
-                                &mut self.stream,
-                                destination,
-                                sequence_len,
-                                &layer_label,
-                            )
-                        } else {
-                            layer.retain_last_sequence_row(
-                                &mut self.stream,
-                                workspace,
-                                sequence_len,
-                                &layer_label,
-                            )
-                        };
-                        if let Err(error) = retain_result {
-                            layer.mark_request_execution_failed();
-                            self.last_partial_prefill_invocations.push(
-                                Qwen35Aq4FailedPrefillInvocation {
-                                    layer_index: layer_position,
-                                    execution_width: sequence_len,
-                                    phase,
-                                    records: [Some(records[0]), Some(records[1])],
-                                },
-                            );
-                            return Err(error);
-                        }
-                    }
-                    self.last_partial_operation_executions
-                        .push([Some(records[0]), Some(records[1])]);
-                    self.last_partial_prefill_invocations
-                        .push(Qwen35Aq4FailedPrefillInvocation {
-                            layer_index: layer_position,
-                            execution_width: sequence_len,
-                            phase,
-                            records: [Some(records[0]), Some(records[1])],
-                        });
-                    invocations.push(Qwen35Aq4PrefillInvocation {
-                        layer_index: layer_position,
-                        execution_width: sequence_len,
-                        phase,
-                        records,
-                        direct_sequence_output_requested: direct_sequence_output,
-                        output_route: output_commit.route,
-                    });
-                    output_commit.next_source_ping
-                }
-                Qwen35Aq4ResidentLayer::SelfAttention(layer) => {
-                    if let Some(workspace) = self.prefill_self_attention_sequence_workspace.as_mut()
-                    {
+            let (committed_next_ping, observed_route, workspace_bytes, launch_count) =
+                match &mut self.layers[layer_position] {
+                    Qwen35Aq4ResidentLayer::LinearAttention(layer) => {
+                        let workspace =
+                            self.prefill_sequence_workspace.as_mut().ok_or_else(|| {
+                                format!("{layer_label} has no shared linear sequence workspace")
+                            })?;
                         let routed_records_result = if direct_sequence_output {
                             let direct_result = layer
                                 .run_device_sequence_for_phase_to_buffer_typed(
                                     &mut self.stream,
                                     source,
                                     sequence_len,
-                                    rotary_dim,
-                                    rope_base,
-                                    absolute_start,
                                     phase,
                                     workspace,
                                     destination,
@@ -1360,9 +1256,6 @@ impl Qwen35Aq4ModelRuntime {
                                         &mut self.stream,
                                         source,
                                         sequence_len,
-                                        rotary_dim,
-                                        rope_base,
-                                        absolute_start,
                                         phase,
                                         workspace,
                                         &layer_label,
@@ -1376,9 +1269,6 @@ impl Qwen35Aq4ModelRuntime {
                                     &mut self.stream,
                                     source,
                                     sequence_len,
-                                    rotary_dim,
-                                    rope_base,
-                                    absolute_start,
                                     phase,
                                     workspace,
                                     &layer_label,
@@ -1401,7 +1291,162 @@ impl Qwen35Aq4ModelRuntime {
                                 return Err(error);
                             }
                         };
-                        let output_commit = apply_sequence_output_route(
+                        let workspace_bytes = workspace.allocated_bytes()?;
+                        let output_commit =
+                            apply_sequence_output_route(
+                                output_route,
+                                ping_route,
+                                || {
+                                    destination
+                                .copy_from_buffer(
+                                    0,
+                                    workspace.output_buffer(),
+                                    0,
+                                    sequence_bytes,
+                                    Some(&mut self.stream),
+                                )
+                                .map_err(|error| {
+                                    format!("failed to copy {layer_label} sequence output: {error}")
+                                })
+                                },
+                                || layer.mark_request_execution_failed(),
+                            )
+                            .map_err(|error| {
+                                self.last_partial_prefill_invocations.push(
+                                    Qwen35Aq4FailedPrefillInvocation {
+                                        layer_index: layer_position,
+                                        execution_width: sequence_len,
+                                        phase,
+                                        records: [Some(records[0]), Some(records[1])],
+                                    },
+                                );
+                                error
+                            })?;
+                        if layer_position + 1 == layer_count {
+                            let retain_result = if matches!(
+                                output_commit.route,
+                                Qwen35Aq4SequenceOutputRoute::Direct
+                            ) {
+                                layer.retain_last_sequence_row_from_buffer(
+                                    &mut self.stream,
+                                    destination,
+                                    sequence_len,
+                                    &layer_label,
+                                )
+                            } else {
+                                layer.retain_last_sequence_row(
+                                    &mut self.stream,
+                                    workspace,
+                                    sequence_len,
+                                    &layer_label,
+                                )
+                            };
+                            if let Err(error) = retain_result {
+                                layer.mark_request_execution_failed();
+                                self.last_partial_prefill_invocations.push(
+                                    Qwen35Aq4FailedPrefillInvocation {
+                                        layer_index: layer_position,
+                                        execution_width: sequence_len,
+                                        phase,
+                                        records: [Some(records[0]), Some(records[1])],
+                                    },
+                                );
+                                return Err(error);
+                            }
+                        }
+                        self.last_partial_operation_executions
+                            .push([Some(records[0]), Some(records[1])]);
+                        self.last_partial_prefill_invocations.push(
+                            Qwen35Aq4FailedPrefillInvocation {
+                                layer_index: layer_position,
+                                execution_width: sequence_len,
+                                phase,
+                                records: [Some(records[0]), Some(records[1])],
+                            },
+                        );
+                        invocations.push(Qwen35Aq4PrefillInvocation {
+                            layer_index: layer_position,
+                            execution_width: sequence_len,
+                            phase,
+                            records,
+                            direct_sequence_output_requested: direct_sequence_output,
+                            output_route: output_commit.route,
+                        });
+                        (
+                            output_commit.next_source_ping,
+                            output_commit.route,
+                            workspace_bytes,
+                            records.len() as u64,
+                        )
+                    }
+                    Qwen35Aq4ResidentLayer::SelfAttention(layer) => {
+                        if let Some(workspace) =
+                            self.prefill_self_attention_sequence_workspace.as_mut()
+                        {
+                            let routed_records_result = if direct_sequence_output {
+                                let direct_result = layer
+                                    .run_device_sequence_for_phase_to_buffer_typed(
+                                        &mut self.stream,
+                                        source,
+                                        sequence_len,
+                                        rotary_dim,
+                                        rope_base,
+                                        absolute_start,
+                                        phase,
+                                        workspace,
+                                        destination,
+                                        &layer_label,
+                                    );
+                                resolve_direct_sequence_attempt(
+                                    direct_result,
+                                    || {
+                                        layer.run_device_sequence_for_phase(
+                                            &mut self.stream,
+                                            source,
+                                            sequence_len,
+                                            rotary_dim,
+                                            rope_base,
+                                            absolute_start,
+                                            phase,
+                                            workspace,
+                                            &layer_label,
+                                        )
+                                    },
+                                    &layer_label,
+                                )
+                            } else {
+                                layer
+                                    .run_device_sequence_for_phase(
+                                        &mut self.stream,
+                                        source,
+                                        sequence_len,
+                                        rotary_dim,
+                                        rope_base,
+                                        absolute_start,
+                                        phase,
+                                        workspace,
+                                        &layer_label,
+                                    )
+                                    .map(|records| (records, Qwen35Aq4SequenceOutputRoute::Copy))
+                            };
+                            let (records, output_route) = match routed_records_result {
+                                Ok(result) => result,
+                                Err(error) => {
+                                    let partial = layer.take_last_operation_executions();
+                                    self.last_partial_operation_executions.push(partial);
+                                    self.last_partial_prefill_invocations.push(
+                                        Qwen35Aq4FailedPrefillInvocation {
+                                            layer_index: layer_position,
+                                            execution_width: sequence_len,
+                                            phase,
+                                            records: partial,
+                                        },
+                                    );
+                                    return Err(error);
+                                }
+                            };
+                            let workspace_bytes = workspace.allocated_bytes()?;
+                            let output_commit = apply_sequence_output_route(
                             output_route,
                             ping_route,
                             || {
@@ -1432,32 +1477,52 @@ impl Qwen35Aq4ModelRuntime {
                             );
                             error
                         })?;
-                        self.last_partial_operation_executions
-                            .push([Some(records[0]), Some(records[1])]);
-                        self.last_partial_prefill_invocations.push(
-                            Qwen35Aq4FailedPrefillInvocation {
+                            self.last_partial_operation_executions
+                                .push([Some(records[0]), Some(records[1])]);
+                            self.last_partial_prefill_invocations.push(
+                                Qwen35Aq4FailedPrefillInvocation {
+                                    layer_index: layer_position,
+                                    execution_width: sequence_len,
+                                    phase,
+                                    records: [Some(records[0]), Some(records[1])],
+                                },
+                            );
+                            invocations.push(Qwen35Aq4PrefillInvocation {
                                 layer_index: layer_position,
                                 execution_width: sequence_len,
                                 phase,
-                                records: [Some(records[0]), Some(records[1])],
-                            },
-                        );
-                        invocations.push(Qwen35Aq4PrefillInvocation {
-                            layer_index: layer_position,
-                            execution_width: sequence_len,
-                            phase,
-                            records,
-                            direct_sequence_output_requested: direct_sequence_output,
-                            output_route: output_commit.route,
-                        });
-                        output_commit.next_source_ping
-                    } else {
-                        return Err(format!(
-                            "{layer_label} native self-attn sequence workspace is unavailable"
-                        ));
+                                records,
+                                direct_sequence_output_requested: direct_sequence_output,
+                                output_route: output_commit.route,
+                            });
+                            (
+                                output_commit.next_source_ping,
+                                output_commit.route,
+                                workspace_bytes,
+                                records.len() as u64,
+                            )
+                        } else {
+                            return Err(format!(
+                                "{layer_label} native self-attn sequence workspace is unavailable"
+                            ));
+                        }
                     }
-                }
-            };
+                };
+            if let Some(counters) = self.direct_trace_counters.as_mut() {
+                let route = match observed_route {
+                    Qwen35Aq4SequenceOutputRoute::Copy => Qwen35Aq4DirectTraceRoute::Copy,
+                    Qwen35Aq4SequenceOutputRoute::Direct => Qwen35Aq4DirectTraceRoute::Direct,
+                    Qwen35Aq4SequenceOutputRoute::CopyFallback => {
+                        Qwen35Aq4DirectTraceRoute::CopyFallback
+                    }
+                };
+                counters.record_invocation(
+                    route,
+                    sequence_bytes_u64,
+                    launch_count,
+                    workspace_bytes,
+                )?;
+            }
             if sync_each_layer_for_timing {
                 if let Err(error) = self.stream.synchronize() {
                     for layer in &mut self.layers[..=layer_position] {
@@ -1794,6 +1859,17 @@ mod tests {
         assert!(!direct_prefill_sequence_output_enabled_value(Some("false")));
         for value in ["1", "true", "TRUE", "yes", "YES"] {
             assert!(direct_prefill_sequence_output_enabled_value(Some(value)));
+        }
+    }
+
+    #[test]
+    fn direct_trace_diagnostic_gate_is_default_off_and_explicit() {
+        assert!(!direct_trace_diagnostic_enabled_value(None));
+        assert!(!direct_trace_diagnostic_enabled_value(Some("0")));
+        assert!(!direct_trace_diagnostic_enabled_value(Some("false")));
+        assert!(!direct_trace_diagnostic_enabled_value(Some("on")));
+        for value in ["1", "true", "TRUE", "yes", "YES"] {
+            assert!(direct_trace_diagnostic_enabled_value(Some(value)));
         }
     }
 

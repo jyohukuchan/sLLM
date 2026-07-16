@@ -192,6 +192,12 @@ DIRECT_TRACE_ROOT_FIELDS = {
     "identity_sha256",
     "events",
 }
+DIRECT_TRACE_BINDING_FIELDS = {
+    "implementation_id",
+    "source_id",
+    "source_sha256",
+    "request_id",
+}
 DIRECT_EVENT_FIELDS = {"event_id", "event_sha256", "side", "metric", "value"}
 DIRECT_RUN_METRICS = {
     "d2d_bytes",
@@ -1046,6 +1052,10 @@ def parse_direct_sequence_output_trace(
     candidate_id: str,
     binding_kind: str,
     binding_id: str,
+    implementation_id: str | None = None,
+    source_id: str | None = None,
+    source_sha256: str | None = None,
+    request_id: str | None = None,
 ) -> dict[str, dict[str, Any]]:
     """Parse the hash-bound candidate-A route trace.
 
@@ -1054,7 +1064,11 @@ def parse_direct_sequence_output_trace(
     rejected before any aggregate is returned to the selector.
     """
     value = parse_json(snapshot, "direct sequence output trace")
-    exact(value, DIRECT_TRACE_ROOT_FIELDS, "direct sequence output trace")
+    root_fields = set(DIRECT_TRACE_ROOT_FIELDS)
+    enriched = bool(DIRECT_TRACE_BINDING_FIELDS & set(value))
+    if enriched:
+        root_fields |= DIRECT_TRACE_BINDING_FIELDS
+    exact(value, root_fields, "direct sequence output trace")
     if value["schema_version"] != DIRECT_TRACE_SCHEMA or value["status"] != "complete":
         raise ProducerError("direct sequence output trace schema/status differs")
     if value["trace_sha256"] != self_hash(value, "trace_sha256"):
@@ -1067,6 +1081,27 @@ def parse_direct_sequence_output_trace(
         raise ProducerError("direct sequence output trace case differs")
     if value["identity_sha256"] != identity_sha256:
         raise ProducerError("direct sequence output trace identity differs")
+    if enriched:
+        value_implementation_id = text_value(
+            value["implementation_id"], "direct sequence output trace implementation_id"
+        )
+        value_source_id = text_value(
+            value["source_id"], "direct sequence output trace source_id"
+        )
+        value_source_sha256 = digest(
+            value["source_sha256"], "direct sequence output trace source_sha256"
+        )
+        value_request_id = text_value(
+            value["request_id"], "direct sequence output trace request_id"
+        )
+        if implementation_id is not None and value_implementation_id != implementation_id:
+            raise ProducerError("direct sequence output trace implementation differs")
+        if source_id is not None and value_source_id != source_id:
+            raise ProducerError("direct sequence output trace source differs")
+        if source_sha256 is not None and value_source_sha256 != source_sha256:
+            raise ProducerError("direct sequence output trace source hash differs")
+        if request_id is not None and value_request_id != request_id:
+            raise ProducerError("direct sequence output trace request differs")
     if type(value["events"]) is not list or not value["events"]:
         raise ProducerError("direct sequence output trace events must be non-empty")
     expected_metrics = DIRECT_RUN_METRICS if binding_kind == "run" else DIRECT_PAIR_METRICS

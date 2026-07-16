@@ -271,6 +271,9 @@ baseline/candidateは異なるrun ID、同じidentity file、driver identity、c
 固定4候補のbinding/pair fieldsは変更せず、既存fixtureとの互換を維持する。trace schemaは
 `ullm.aq4_p3_candidate_a_direct_sequence_output_trace.v1`で、rootの
 `trace_sha256`と各eventの`event_sha256`をself-hashする。
+assembled traceのrootには、実装を特定する`implementation_id`、観測源を特定する
+`source_id`/`source_sha256`、requestを特定する`request_id`も含める。`binding_kind`と
+`binding_id`はrunまたはpairを特定し、runtime/profilerの両方で同じ値を要求する。
 
 trace eventは`event_id`、`event_sha256`、`side` (`baseline`/`candidate`)、`metric`、`value`を
 持つ。run traceではD2D bytes/copy count、launch count、component/full-model milliseconds、
@@ -292,6 +295,27 @@ reasonのsubset違反、安全性3項目、p50/p95逆転、traceのmissing/unkno
 root/schema/file/identity/case/run/pair tamper、fidelity不一致を個別に検証する。
 
 これらはexit code 2で、outputを発行しない。
+
+### 8.2 candidate A direct traceの実測producer
+
+`tools/assemble-aq4-p3-candidate-a-direct-trace.py` は、runtime observationと
+profiler observationを別々に読み、candidate-A traceへ組み立てる。runtime observationは
+`Qwen35Aq4ModelRuntime::take_direct_trace_counters()` が返す値だけを受け付ける。この値は
+`ULLM_AQ4_P3_DIRECT_TRACE_DIAGNOSTIC=1` のときだけ有効になり、既定値は無効である。
+route applyが実際に実行したworkspace-to-destination D2D copyのbytes/count、完了した
+operation recordのlaunch count、arena allocationのworkspace bytes、copy fallbackの件数と
+理由を記録する。Direct routeはcopyを0として記録し、failed invocationは成功traceへ混入させない。
+診断collectorを初期化するだけではdirect routeを有効にせず、既存の
+`ULLM_AQ4_PREFILL_DIRECT_SEQUENCE_OUTPUT` gateもsideごとに記録して照合する。
+
+peak VRAM、component/full-model latency、direct/copy fidelity bindingはruntimeから推測せず、
+同じimplementation/source/candidate/case/run(or pair)/request bindingを持つ外部profiler
+observationから取り込む。profiler observationはself-hashとfile identityを検証し、
+`timing_lane=profiler_off` のときだけ測定適格とする。instrumented timing laneの出力は
+`measurement_eligible=false` として扱う。p50/p95は10 runの各traceをこのproducerへ渡した後に
+既存selectorが再計算し、producerは入力された合否や集計値を信用しない。runtime/profiler
+recordおよび出力traceにはtoken列や生成文字列を含めない。入力のunknown、duplicate、non-finite、
+binding/self-hash/file-hash tamper、fidelity不一致、既存output上書きはexit code 2で拒否する。
 
 ## 次の行動
 

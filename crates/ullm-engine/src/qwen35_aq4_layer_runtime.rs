@@ -3850,6 +3850,47 @@ impl PackageLinearAttnSequenceWorkspace {
     pub fn output_buffer(&self) -> &ullm_runtime_sys::RuntimeBuffer {
         &self.layer_output
     }
+
+    /// Returns the full model-owned scratch arena allocation used by native sequence runs.
+    pub fn allocated_bytes(&self) -> Result<u64, String> {
+        let columns = [
+            self.geometry.hidden,
+            self.geometry.channels,
+            self.geometry.hidden,
+            self.geometry.value_heads,
+            self.geometry.value_heads,
+            self.geometry.channels,
+            self.geometry.key_elements,
+            self.geometry.key_elements,
+            self.geometry.hidden,
+            self.geometry.value_heads,
+            self.geometry.value_heads,
+            self.geometry.hidden,
+            self.geometry.hidden,
+            self.geometry.hidden,
+            self.geometry.hidden,
+            self.geometry.intermediate,
+            self.geometry.intermediate,
+            self.geometry.intermediate,
+            self.geometry.hidden,
+            self.geometry.hidden,
+            self.geometry.hidden,
+        ]
+        .into_iter()
+        .try_fold(0usize, |total, value| {
+            total
+                .checked_add(value)
+                .ok_or_else(|| "linear-attn sequence workspace element count overflows".to_string())
+        })?;
+        let elements = columns
+            .checked_mul(self.max_width)
+            .ok_or_else(|| "linear-attn sequence workspace byte count overflows".to_string())?;
+        let bytes = elements
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| "linear-attn sequence workspace byte count overflows".to_string())?;
+        u64::try_from(bytes)
+            .map_err(|_| "linear-attn sequence workspace bytes exceed u64".to_string())
+    }
 }
 
 impl PackageLinearAttnResidentStepLayer {
