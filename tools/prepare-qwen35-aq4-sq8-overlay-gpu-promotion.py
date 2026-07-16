@@ -843,7 +843,7 @@ def validate_independent_audit(
         "request_id": request_id,
         "prompt_token_ids": list(range(1, 129)),
         "max_new_tokens": 2,
-        "eos_token_ids": [],
+        "eos_token_ids": [248044, 248046],
         "sampling": {
             "temperature": 0.0,
             "top_p": 1.0,
@@ -1265,7 +1265,7 @@ def materialize(args: argparse.Namespace) -> dict[str, Any]:
                     "request_id": request_id,
                     "prompt_token_ids": list(range(1, 129)),
                     "max_new_tokens": 2,
-                    "eos_token_ids": [],
+                    "eos_token_ids": [248044, 248046],
                     "sampling": {
                         "temperature": 0.0,
                         "top_p": 1.0,

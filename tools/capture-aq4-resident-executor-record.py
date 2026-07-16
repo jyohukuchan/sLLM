@@ -41,6 +41,8 @@ SQ8_TELEMETRY_BINDING_SCHEMA = (
 SQ8_TELEMETRY_HASH_ENCODING = "canonical_json_ascii_sort_keys_compact_v1"
 WORKER_STDERR_SCHEMA_VERSION = "ullm.aq4_resident_worker_stderr.v2"
 WORKER_LIFECYCLE_SCHEMA_VERSION = "ullm.aq4_resident_worker_lifecycle.v1"
+WORKER_ERROR_SCHEMA_VERSION = "ullm.aq4_resident_worker_error.v1"
+WORKER_ERROR_HASH_ENCODING = "canonical_json_ascii_sort_keys_compact_v1"
 WORKER_STDERR_HEAD_MAX_BYTES = 16 * 1024
 WORKER_STDERR_TAIL_MAX_BYTES = 16 * 1024
 WORKER_STDERR_PREVIEW_MAX_BYTES = (
@@ -63,6 +65,20 @@ WORKER_STDERR_DRAIN_CLOSE_GRACE_SECONDS = 1.0
 WORKER_STDOUT_DRAIN_TIMEOUT_SECONDS = 3.0
 WORKER_STDOUT_DRAIN_CLOSE_GRACE_SECONDS = 1.0
 WORKER_OBSERVER_FINISH_TIMEOUT_SECONDS = 3.0
+WORKER_ERROR_CODE_RE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
+WORKER_RECOVERABLE_ERROR_CODES = frozenset(
+    {"invalid_command", "invalid_request", "busy", "unknown_request"}
+)
+WORKER_FATAL_ERROR_CODES = frozenset(
+    {
+        "load_failed",
+        "runtime_failed",
+        "invariant_failed",
+        "protocol_framing_failed",
+        "cleanup_deadline_exceeded",
+    }
+)
+WORKER_ERROR_MESSAGE_MAX_BYTES = 1024
 WORKER_STDERR_REDACTION_RE = re.compile(
     rb"(?i)(?:password|passwd|secret|credential|api[_-]?key|authorization|"
     rb"access[_-]?token|refresh[_-]?token|client[_-]?secret|private[_-]?key|"
@@ -90,6 +106,7 @@ class CaptureError(ValueError):
         request_id: str | None = None,
         timeouts: dict[str, float] | None = None,
         worker_lifecycle: dict[str, Any] | None = None,
+        worker_error: dict[str, Any] | None = None,
     ) -> None:
         super().__init__(message)
         self.worker_stderr = worker_stderr
@@ -105,6 +122,7 @@ class CaptureError(ValueError):
         self.request_id = request_id
         self.timeouts = timeouts
         self.worker_lifecycle = worker_lifecycle
+        self.worker_error = worker_error
 
 
 class WorkerStderrCollector:
@@ -373,7 +391,7 @@ class WorkerLifecycleEvidence:
     """Keep bounded, content-free worker stdout lifecycle evidence."""
 
     _ALLOWED_TYPES = frozenset(
-        {"ready", "started", "progress", "token", "released", "error", "fatal"}
+        {"ready", "started", "progress", "token", "released", "error"}
     )
 
     def __init__(self, request_id: str, started_at: float) -> None:
@@ -498,6 +516,181 @@ def _strict_ready_event(
     ):
         return False
     return all(key in event and event.get(key) == value for key, value in expected.items())
+
+
+class _DuplicateWorkerEventKey(ValueError):
+    pass
+
+
+def _strict_worker_event_object(raw: bytes, protocol_stage: str) -> dict[str, Any]:
+    """Decode one lifecycle object without accepting duplicate or non-finite JSON."""
+
+    def unique(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for key, value in pairs:
+            if key in result:
+                raise _DuplicateWorkerEventKey(key)
+            result[key] = value
+        return result
+
+    def reject_constant(_: str) -> None:
+        raise ValueError("non-finite JSON constant")
+
+    try:
+        value = json.loads(
+            raw,
+            object_pairs_hook=unique,
+            parse_constant=reject_constant,
+        )
+    except _DuplicateWorkerEventKey as error:
+        raise CaptureError(
+            "resident worker lifecycle JSON contains a duplicate key",
+            stage=protocol_stage,
+        ) from error
+    except (UnicodeError, json.JSONDecodeError, ValueError) as error:
+        raise CaptureError(
+            "resident worker emitted invalid lifecycle JSON",
+            stage=protocol_stage,
+        ) from error
+    if not isinstance(value, dict):
+        raise CaptureError(
+            "resident worker emitted a non-object lifecycle event",
+            stage=protocol_stage,
+        )
+    return value
+
+
+def _canonical_worker_event(value: dict[str, Any]) -> bytes:
+    try:
+        return json.dumps(
+            value,
+            ensure_ascii=True,
+            allow_nan=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("ascii")
+    except (TypeError, ValueError, UnicodeError) as error:
+        raise CaptureError(
+            "resident worker lifecycle event is not canonically encodable",
+            stage="request_protocol",
+        ) from error
+
+
+def _strict_worker_error_summary(
+    event: dict[str, Any], protocol: str, request_id: str
+) -> dict[str, Any]:
+    """Validate the real Rust error event and retain no arbitrary message text."""
+
+    if set(event) != {
+        "schema_version",
+        "type",
+        "request_id",
+        "code",
+        "recoverable",
+        "message",
+    }:
+        raise CaptureError(
+            "resident worker error event field set differs",
+            stage="request_protocol",
+        )
+    code = event.get("code")
+    recoverable = event.get("recoverable")
+    message = event.get("message")
+    if (
+        event.get("schema_version") != protocol
+        or event.get("type") != "error"
+        or event.get("request_id") != request_id
+        or not isinstance(code, str)
+        or WORKER_ERROR_CODE_RE.fullmatch(code) is None
+        or type(recoverable) is not bool
+        or not isinstance(message, str)
+    ):
+        raise CaptureError(
+            "resident worker error event identity or metadata differs",
+            stage="request_protocol",
+        )
+    message_raw = message.encode("utf-8")
+    if len(message_raw) > WORKER_ERROR_MESSAGE_MAX_BYTES:
+        raise CaptureError(
+            "resident worker error message exceeds the protocol bound",
+            stage="request_protocol",
+        )
+    expected_codes = (
+        WORKER_RECOVERABLE_ERROR_CODES if recoverable else WORKER_FATAL_ERROR_CODES
+    )
+    if code not in expected_codes:
+        raise CaptureError(
+            "resident worker error code and recoverability differ",
+            stage="request_protocol",
+        )
+    stage = "worker_error" if recoverable else "worker_fatal"
+    canonical = _canonical_worker_event(event)
+    return {
+        "schema_version": WORKER_ERROR_SCHEMA_VERSION,
+        "event_type": "error",
+        "stage": stage,
+        "request_id": request_id,
+        "request_id_matches": True,
+        "code": code,
+        "recoverable": recoverable,
+        "canonical_event_hash_encoding": WORKER_ERROR_HASH_ENCODING,
+        "canonical_event_sha256": hashlib.sha256(canonical).hexdigest(),
+        "message": {
+            "byte_count": len(message_raw),
+            "sha256": hashlib.sha256(message_raw).hexdigest(),
+            # Worker messages are arbitrary diagnostics.  The existing capture
+            # privacy contract does not permit retaining a prefix that could
+            # contain prompt, token, credential, or filesystem-path content.
+            "prefix_text": None,
+            "prefix_bytes": 0,
+            "prefix_truncated": bool(message_raw),
+            "redaction": "omitted_by_capture_privacy_policy",
+        },
+        "shutdown": {
+            "attempted": False,
+            "completed": False,
+            "error": None,
+        },
+    }
+
+
+def _shutdown_after_worker_error(
+    proc: subprocess.Popen[bytes], protocol: str
+) -> dict[str, Any]:
+    """Request graceful shutdown before the existing TERM/KILL/reap fallback."""
+
+    result: dict[str, Any] = {
+        "attempted": False,
+        "completed": proc.poll() is not None,
+        "error": None,
+    }
+    if proc.poll() is not None:
+        return result
+    result["attempted"] = True
+    try:
+        if proc.stdin is None or proc.stdin.closed:
+            result["error"] = "stdin_unavailable"
+            return result
+        proc.stdin.write(
+            (
+                json.dumps(
+                    {"schema_version": protocol, "type": "shutdown"},
+                    separators=(",", ":"),
+                )
+                + "\n"
+            ).encode("ascii")
+        )
+        proc.stdin.flush()
+        proc.stdin.close()
+    except (BrokenPipeError, OSError, ValueError):
+        result["error"] = "shutdown_write_failed"
+        return result
+    try:
+        proc.wait(timeout=WORKER_SHUTDOWN_TIMEOUT_SECONDS)
+        result["completed"] = True
+    except subprocess.TimeoutExpired:
+        result["error"] = "shutdown_timeout"
+    return result
 
 
 def token_identity_digest(token_ids: list[int]) -> str:
@@ -1257,6 +1450,91 @@ def _normalize_worker_lifecycle(
     }
 
 
+def _normalize_worker_error(
+    value: Any, request_id: str | None
+) -> dict[str, Any] | None:
+    if not isinstance(value, dict) or set(value) != {
+        "schema_version",
+        "event_type",
+        "stage",
+        "request_id",
+        "request_id_matches",
+        "code",
+        "recoverable",
+        "canonical_event_hash_encoding",
+        "canonical_event_sha256",
+        "message",
+        "shutdown",
+    }:
+        return None
+    stage = value.get("stage")
+    recoverable = value.get("recoverable")
+    code = value.get("code")
+    expected_codes = (
+        WORKER_RECOVERABLE_ERROR_CODES
+        if recoverable is True
+        else WORKER_FATAL_ERROR_CODES
+        if recoverable is False
+        else frozenset()
+    )
+    message = value.get("message")
+    shutdown = value.get("shutdown")
+    if (
+        value.get("schema_version") != WORKER_ERROR_SCHEMA_VERSION
+        or value.get("event_type") != "error"
+        or stage not in {"worker_error", "worker_fatal"}
+        or stage != ("worker_error" if recoverable is True else "worker_fatal")
+        or value.get("request_id") != request_id
+        or value.get("request_id_matches") is not True
+        or not isinstance(code, str)
+        or WORKER_ERROR_CODE_RE.fullmatch(code) is None
+        or code not in expected_codes
+        or value.get("canonical_event_hash_encoding") != WORKER_ERROR_HASH_ENCODING
+        or not isinstance(value.get("canonical_event_sha256"), str)
+        or re.fullmatch(r"[0-9a-f]{64}", value["canonical_event_sha256"]) is None
+        or not isinstance(message, dict)
+        or set(message)
+        != {
+            "byte_count",
+            "sha256",
+            "prefix_text",
+            "prefix_bytes",
+            "prefix_truncated",
+            "redaction",
+        }
+        or type(message.get("byte_count")) is not int
+        or not 0 <= message["byte_count"] <= WORKER_ERROR_MESSAGE_MAX_BYTES
+        or not isinstance(message.get("sha256"), str)
+        or re.fullmatch(r"[0-9a-f]{64}", message["sha256"]) is None
+        or message.get("prefix_text") is not None
+        or message.get("prefix_bytes") != 0
+        or message.get("prefix_truncated") is not bool(message["byte_count"])
+        or message.get("redaction") != "omitted_by_capture_privacy_policy"
+        or not isinstance(shutdown, dict)
+        or set(shutdown) != {"attempted", "completed", "error"}
+        or type(shutdown.get("attempted")) is not bool
+        or type(shutdown.get("completed")) is not bool
+        or (
+            shutdown.get("attempted"),
+            shutdown.get("completed"),
+            shutdown.get("error"),
+        )
+        not in {
+            (False, True, None),
+            (True, True, None),
+            (True, False, "stdin_unavailable"),
+            (True, False, "shutdown_write_failed"),
+            (True, False, "shutdown_timeout"),
+        }
+    ):
+        return None
+    return {
+        **{key: value[key] for key in value if key not in {"message", "shutdown"}},
+        "message": dict(message),
+        "shutdown": dict(shutdown),
+    }
+
+
 def _bind_worker_terminal(error: CaptureError, proc: subprocess.Popen[bytes]) -> None:
     """Bind the reap result to a failure without losing signal identity."""
 
@@ -1273,13 +1551,13 @@ def _next_worker_event(
     proc: subprocess.Popen[bytes],
     stdout_fd: int,
     stdout_buffer: bytearray,
-    pending: deque[dict[str, Any]],
+    pending: deque[tuple[dict[str, Any], bytes]],
     *,
     deadline: float,
     timeout_stage: str,
     protocol_stage: str,
     timeout_reason: str,
-) -> dict[str, Any]:
+) -> tuple[dict[str, Any], bytes]:
     while True:
         if pending:
             return pending.popleft()
@@ -1313,19 +1591,8 @@ def _next_worker_event(
             newline_index = stdout_buffer.index(b"\n")
             line = bytes(stdout_buffer[:newline_index])
             del stdout_buffer[: newline_index + 1]
-            try:
-                event = json.loads(line)
-            except (UnicodeError, json.JSONDecodeError) as error:
-                raise CaptureError(
-                    "resident worker emitted invalid lifecycle JSON",
-                    stage=protocol_stage,
-                ) from error
-            if not isinstance(event, dict):
-                raise CaptureError(
-                    "resident worker emitted a non-object lifecycle event",
-                    stage=protocol_stage,
-                )
-            pending.append(event)
+            event = _strict_worker_event_object(line, protocol_stage)
+            pending.append((event, line))
 
 
 def run_capture(args: argparse.Namespace) -> dict[str, Any]:
@@ -1365,6 +1632,8 @@ def run_capture(args: argparse.Namespace) -> dict[str, Any]:
             raise CaptureError("SQ8 promotion manifest implementation identity differs")
         if worker.get("identity", {}).get("execution_profile") != SQ8_OVERLAY_EXECUTION_PROFILE:
             raise CaptureError("SQ8 promotion manifest execution profile differs")
+        if manifest.get("generation", {}).get("eos_token_ids") != [248044, 248046]:
+            raise CaptureError("SQ8 promotion manifest EOS identity differs")
     if (
         not math.isfinite(float(args.ready_timeout))
         or not math.isfinite(float(args.timeout))
@@ -1388,11 +1657,11 @@ def run_capture(args: argparse.Namespace) -> dict[str, Any]:
         "prompt_token_ids": list(range(1, prompt_tokens + 1)),
         "max_new_tokens": args.max_new_tokens,
         "sampling": {"temperature": 0.0, "top_p": 1.0, "top_k": 1, "seed": 0},
-        # Promotion evidence must execute one decode step even if the first
-        # sampled token is ordinarily terminal for this model.
-        "eos_token_ids": []
-        if sq8_promotion
-        else manifest.get("generation", {}).get("eos_token_ids", []),
+        # The production worker validates this list as an exact product
+        # identity.  max_new_tokens=2 creates the decode opportunity; the
+        # promotion telemetry remains the fail-closed proof that the required
+        # pair projection path actually executed.
+        "eos_token_ids": manifest.get("generation", {}).get("eos_token_ids", []),
     }
     proc = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=environment)
     process_started = time.monotonic()
@@ -1413,8 +1682,8 @@ def run_capture(args: argparse.Namespace) -> dict[str, Any]:
         stdout_fd = proc.stdout.fileno()
         os.set_blocking(stdout_fd, False)
         stdout_buffer = bytearray()
-        pending_events: deque[dict[str, Any]] = deque()
-        ready_event = _next_worker_event(
+        pending_events: deque[tuple[dict[str, Any], bytes]] = deque()
+        ready_event, _ready_raw = _next_worker_event(
             proc,
             stdout_fd,
             stdout_buffer,
@@ -1438,7 +1707,7 @@ def run_capture(args: argparse.Namespace) -> dict[str, Any]:
         released: dict[str, Any] | None = None
         request_deadline = request_started + float(args.timeout)
         while released is None:
-            event = _next_worker_event(
+            event, _event_raw = _next_worker_event(
                 proc,
                 stdout_fd,
                 stdout_buffer,
@@ -1456,16 +1725,28 @@ def run_capture(args: argparse.Namespace) -> dict[str, Any]:
                 "token",
                 "released",
                 "error",
-                "fatal",
             }:
                 raise CaptureError(
                     "resident worker request lifecycle differs",
                     stage="request_protocol",
                 )
-            if event_type not in {"fatal"} and event.get("request_id") != internal_request_id:
+            if event.get("request_id") != internal_request_id:
                 raise CaptureError(
                     "resident worker request lifecycle identity differs",
                     stage="request_protocol",
+                )
+            if event_type == "error":
+                worker_error = _strict_worker_error_summary(
+                    event, str(protocol), internal_request_id
+                )
+                worker_error["shutdown"] = _shutdown_after_worker_error(
+                    proc, str(protocol)
+                )
+                raise CaptureError(
+                    "resident worker returned a typed error event",
+                    stage=worker_error["stage"],
+                    timed_out=False,
+                    worker_error=worker_error,
                 )
             if event_type == "token":
                 if event.get("index") != len(output_token_ids):
@@ -1888,6 +2169,9 @@ def main(argv: list[str] | None = None) -> int:
         worker_lifecycle = _normalize_worker_lifecycle(
             getattr(error, "worker_lifecycle", None), request_id
         )
+        worker_error = _normalize_worker_error(
+            getattr(error, "worker_error", None), request_id
+        )
         reason = str(error)
         # Keep the status line bounded even when an exception originates in a
         # dependency.  The worker stderr preview has its own independent cap.
@@ -1895,7 +2179,7 @@ def main(argv: list[str] | None = None) -> int:
             "utf-8", errors="replace"
         )
         envelope = {
-            "schema_version": "ullm.aq4_resident_capture_error.v4",
+            "schema_version": "ullm.aq4_resident_capture_error.v5",
             "status": "failed",
             "stage": getattr(error, "stage", None) or "capture",
             "reason": reason,
@@ -1906,6 +2190,7 @@ def main(argv: list[str] | None = None) -> int:
             "worker_signal": getattr(error, "worker_signal", None),
             "worker_stderr": worker_stderr,
             "worker_lifecycle": worker_lifecycle,
+            "worker_error": worker_error,
             "observed_sq8_promotion_telemetry": getattr(
                 error, "observed_sq8_promotion_telemetry", None
             ),

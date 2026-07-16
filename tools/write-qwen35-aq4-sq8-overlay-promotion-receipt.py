@@ -39,6 +39,21 @@ MAX_TRUSTED_COMPONENT_BYTES = 16 * 1024 * 1024
 SAFE_INT = 9_007_199_254_740_991
 TELEMETRY_BINDING_SCHEMA = "ullm.qwen35_aq4.sq8_promotion_telemetry_binding.v1"
 TELEMETRY_HASH_ENCODING = "canonical_json_ascii_sort_keys_compact_v1"
+CAPTURE_ERROR_SCHEMA = "ullm.aq4_resident_capture_error.v5"
+WORKER_ERROR_SCHEMA = "ullm.aq4_resident_worker_error.v1"
+WORKER_ERROR_HASH_ENCODING = "canonical_json_ascii_sort_keys_compact_v1"
+WORKER_RECOVERABLE_ERROR_CODES = frozenset(
+    {"invalid_command", "invalid_request", "busy", "unknown_request"}
+)
+WORKER_FATAL_ERROR_CODES = frozenset(
+    {
+        "load_failed",
+        "runtime_failed",
+        "invariant_failed",
+        "protocol_framing_failed",
+        "cleanup_deadline_exceeded",
+    }
+)
 EXECUTION_TIMEOUTS = {
     "ready_seconds": 900,
     "request_seconds": 240,
@@ -1215,7 +1230,131 @@ def write_failure_receipt(
         if isinstance(capture_failure, dict)
         else None
     )
+    if isinstance(tool_error, dict) and tool_error.get("validation") == "invalid":
+        if (
+            set(tool_error) != {"validation", "reason"}
+            or not isinstance(tool_error.get("reason"), str)
+            or re.fullmatch(r"[a-z][a-z0-9_]{0,127}", tool_error["reason"])
+            is None
+        ):
+            raise ReceiptError("invalid capture tool failure envelope differs")
+        # The maintenance artifact retains the exact invalid diagnostic.  It
+        # cannot carry accepted telemetry or typed worker-error evidence.
+        tool_error = None
     if isinstance(tool_error, dict):
+        if tool_error.get("validation") != "valid":
+            raise ReceiptError("capture tool failure envelope is not valid")
+        if (
+            tool_error.get("schema_version") != CAPTURE_ERROR_SCHEMA
+            or tool_error.get("status") != "failed"
+            or tool_error.get("request_id") != request_id
+            or tool_error.get("timeouts")
+            != {
+                "ready_seconds": EXECUTION_TIMEOUTS["ready_seconds"],
+                "request_seconds": EXECUTION_TIMEOUTS["request_seconds"],
+                "shutdown_seconds": EXECUTION_TIMEOUTS["shutdown_seconds"],
+            }
+        ):
+            raise ReceiptError("capture tool failure schema or request binding differs")
+        stage = tool_error.get("stage")
+        worker_error = tool_error.get("worker_error")
+        if stage in {"worker_error", "worker_fatal"}:
+            message = (
+                worker_error.get("message")
+                if isinstance(worker_error, dict)
+                else None
+            )
+            shutdown = (
+                worker_error.get("shutdown")
+                if isinstance(worker_error, dict)
+                else None
+            )
+            code = worker_error.get("code") if isinstance(worker_error, dict) else None
+            recoverable = (
+                worker_error.get("recoverable")
+                if isinstance(worker_error, dict)
+                else None
+            )
+            expected_codes = (
+                WORKER_RECOVERABLE_ERROR_CODES
+                if recoverable is True
+                else WORKER_FATAL_ERROR_CODES
+                if recoverable is False
+                else frozenset()
+            )
+            if (
+                not isinstance(worker_error, dict)
+                or set(worker_error)
+                != {
+                    "schema_version",
+                    "event_type",
+                    "stage",
+                    "request_id",
+                    "request_id_matches",
+                    "code",
+                    "recoverable",
+                    "canonical_event_hash_encoding",
+                    "canonical_event_sha256",
+                    "message",
+                    "shutdown",
+                }
+                or worker_error.get("schema_version") != WORKER_ERROR_SCHEMA
+                or worker_error.get("event_type") != "error"
+                or worker_error.get("stage") != stage
+                or worker_error.get("request_id") != request_id
+                or worker_error.get("request_id_matches") is not True
+                or not isinstance(code, str)
+                or re.fullmatch(r"[a-z][a-z0-9_]{0,63}", code) is None
+                or code not in expected_codes
+                or recoverable is not (stage == "worker_error")
+                or worker_error.get("canonical_event_hash_encoding")
+                != WORKER_ERROR_HASH_ENCODING
+                or not isinstance(worker_error.get("canonical_event_sha256"), str)
+                or len(worker_error["canonical_event_sha256"]) != 64
+                or any(
+                    byte not in HEX64
+                    for byte in worker_error["canonical_event_sha256"]
+                )
+                or not isinstance(message, dict)
+                or set(message)
+                != {
+                    "byte_count",
+                    "sha256",
+                    "prefix_text",
+                    "prefix_bytes",
+                    "prefix_truncated",
+                    "redaction",
+                }
+                or not safe_counter(message.get("byte_count"))
+                or message["byte_count"] > 1024
+                or not isinstance(message.get("sha256"), str)
+                or len(message["sha256"]) != 64
+                or any(byte not in HEX64 for byte in message["sha256"])
+                or message.get("prefix_text") is not None
+                or message.get("prefix_bytes") != 0
+                or message.get("prefix_truncated") is not bool(message["byte_count"])
+                or message.get("redaction")
+                != "omitted_by_capture_privacy_policy"
+                or not isinstance(shutdown, dict)
+                or set(shutdown) != {"attempted", "completed", "error"}
+                or type(shutdown.get("attempted")) is not bool
+                or type(shutdown.get("completed")) is not bool
+                or (
+                    shutdown.get("attempted"),
+                    shutdown.get("completed"),
+                    shutdown.get("error"),
+                )
+                not in {
+                    (False, True, None),
+                    (True, True, None),
+                    (True, False, "stdin_unavailable"),
+                    (True, False, "shutdown_write_failed"),
+                    (True, False, "shutdown_timeout"),
+                }
+            ):
+                raise ReceiptError("capture worker error evidence differs")
+        elif worker_error is not None:
+            raise ReceiptError("capture worker error evidence is unexpected")
         observed = tool_error.get("observed_sq8_promotion_telemetry")
         observed_binding = tool_error.get(
             "observed_sq8_promotion_telemetry_binding"

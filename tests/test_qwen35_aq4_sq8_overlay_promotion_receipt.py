@@ -94,6 +94,30 @@ def sq8_telemetry() -> dict:
     }
 
 
+def worker_error_summary() -> dict:
+    message = b"worker command failed protocol validation"
+    return {
+        "schema_version": WRITER.WORKER_ERROR_SCHEMA,
+        "event_type": "error",
+        "stage": "worker_error",
+        "request_id": REQUEST_ID,
+        "request_id_matches": True,
+        "code": "invalid_request",
+        "recoverable": True,
+        "canonical_event_hash_encoding": WRITER.WORKER_ERROR_HASH_ENCODING,
+        "canonical_event_sha256": "a" * 64,
+        "message": {
+            "byte_count": len(message),
+            "sha256": hashlib.sha256(message).hexdigest(),
+            "prefix_text": None,
+            "prefix_bytes": 0,
+            "prefix_truncated": True,
+            "redaction": "omitted_by_capture_privacy_policy",
+        },
+        "shutdown": {"attempted": True, "completed": True, "error": None},
+    }
+
+
 def trusted_components() -> dict[str, dict[str, object]]:
     return {
         name: {
@@ -850,6 +874,86 @@ def test_failure_receipt_is_separate_and_request_bound(fixture: dict[str, Path |
         WRITER.write_failure_receipt(prepared, maintenance, output)
 
 
+def test_failure_receipt_strictly_validates_typed_worker_error(
+    fixture: dict[str, Path | dict], tmp_path: Path
+) -> None:
+    prepared = tmp_path / "promotion.json"
+    WRITER.write_receipt(
+        profile_path=Path(fixture["profile"]),
+        output_path=prepared,
+        source_tree_sha256="2" * 40,
+        source_archive_sha256="3" * 64,
+        served_model_path=Path(fixture["served"]),
+        request_id=REQUEST_ID,
+    )
+    base_tool_error = {
+        "validation": "valid",
+        "schema_version": WRITER.CAPTURE_ERROR_SCHEMA,
+        "status": "failed",
+        "stage": "worker_error",
+        "request_id": REQUEST_ID,
+        "timeouts": {
+            "ready_seconds": 900,
+            "request_seconds": 240,
+            "shutdown_seconds": 30,
+        },
+        "worker_error": worker_error_summary(),
+        "observed_sq8_promotion_telemetry": None,
+        "observed_sq8_promotion_telemetry_binding": None,
+    }
+
+    def maintenance_value(tool_error: dict) -> dict:
+        return {
+            "schema_version": "ullm.qwen35_aq4.sq8_overlay_gpu_promotion_maintenance.v1",
+            "promotion_request_id": REQUEST_ID,
+            "status": "failed",
+            "trusted_components": trusted_components(),
+            "capture_failure": {"capture_tool_error": tool_error},
+        }
+
+    output_dir = tmp_path / "typed-output"
+    output_dir.mkdir()
+    maintenance = output_dir / "maintenance-evidence.json"
+    _write_json(maintenance, maintenance_value(base_tool_error))
+    receipt = WRITER.write_failure_receipt(
+        prepared, maintenance, output_dir / "promotion-failure-receipt.json"
+    )
+    assert receipt["status"] == "actual_failed"
+    assert receipt["actual"]["maintenance_evidence"]["sha256"] == (
+        WRITER.sha256_file(maintenance)
+    )
+
+    for index, mutate in enumerate(
+        (
+            lambda value: value["worker_error"].__setitem__(
+                "code", "runtime_failed"
+            ),
+            lambda value: value["worker_error"].__setitem__("recoverable", 1),
+            lambda value: value["worker_error"]["message"].__setitem__(
+                "prefix_text", "secret"
+            ),
+            lambda value: value["worker_error"].__setitem__(
+                "canonical_event_sha256", "0" * 63
+            ),
+            lambda value: value["worker_error"]["shutdown"].update(
+                {"attempted": False, "completed": False, "error": None}
+            ),
+        )
+    ):
+        tampered = json.loads(json.dumps(base_tool_error))
+        mutate(tampered)
+        tampered_output = tmp_path / f"typed-output-tampered-{index}"
+        tampered_output.mkdir()
+        tampered_maintenance = tampered_output / "maintenance-evidence.json"
+        _write_json(tampered_maintenance, maintenance_value(tampered))
+        with pytest.raises(WRITER.ReceiptError, match="worker error evidence"):
+            WRITER.write_failure_receipt(
+                prepared,
+                tampered_maintenance,
+                tampered_output / "promotion-failure-receipt.json",
+            )
+
+
 def test_failure_receipt_rejects_unsafe_observed_telemetry_counter(
     fixture: dict[str, Path | dict],
 ) -> None:
@@ -874,6 +978,17 @@ def test_failure_receipt_rejects_unsafe_observed_telemetry_counter(
             "trusted_components": trusted_components(),
             "capture_failure": {
                 "capture_tool_error": {
+                    "validation": "valid",
+                    "schema_version": WRITER.CAPTURE_ERROR_SCHEMA,
+                    "status": "failed",
+                    "stage": "worker_exit",
+                    "request_id": REQUEST_ID,
+                    "timeouts": {
+                        "ready_seconds": 900,
+                        "request_seconds": 240,
+                        "shutdown_seconds": 30,
+                    },
+                    "worker_error": None,
                     "observed_sq8_promotion_telemetry": telemetry,
                     "observed_sq8_promotion_telemetry_binding": telemetry_binding(
                         telemetry

@@ -80,9 +80,23 @@ CAPTURE_OUTER_CLEANUP_MARGIN_SECONDS = (
     + CAPTURE_STDOUT_DRAIN_TIMEOUT_SECONDS
     + 2 * CAPTURE_PIPE_CLOSE_GRACE_SECONDS
 )
-CAPTURE_ERROR_SCHEMA = "ullm.aq4_resident_capture_error.v4"
+CAPTURE_ERROR_SCHEMA = "ullm.aq4_resident_capture_error.v5"
 WORKER_STDERR_SCHEMA = "ullm.aq4_resident_worker_stderr.v2"
 WORKER_LIFECYCLE_SCHEMA = "ullm.aq4_resident_worker_lifecycle.v1"
+WORKER_ERROR_SCHEMA = "ullm.aq4_resident_worker_error.v1"
+WORKER_ERROR_HASH_ENCODING = "canonical_json_ascii_sort_keys_compact_v1"
+WORKER_RECOVERABLE_ERROR_CODES = frozenset(
+    {"invalid_command", "invalid_request", "busy", "unknown_request"}
+)
+WORKER_FATAL_ERROR_CODES = frozenset(
+    {
+        "load_failed",
+        "runtime_failed",
+        "invariant_failed",
+        "protocol_framing_failed",
+        "cleanup_deadline_exceeded",
+    }
+)
 CAPTURE_READY_TIMEOUT_SECONDS = 900
 CAPTURE_REQUEST_TIMEOUT_SECONDS = 240
 CAPTURE_SHUTDOWN_TIMEOUT_SECONDS = 30
@@ -126,6 +140,8 @@ CAPTURE_ERROR_STAGES = frozenset(
         "ready_protocol",
         "request_timeout",
         "request_protocol",
+        "worker_error",
+        "worker_fatal",
         "shutdown_timeout",
         "cleanup",
         "worker",
@@ -1033,7 +1049,7 @@ def candidate_snapshot(candidate: Path) -> dict[str, Any]:
         "request_id": request_id,
         "prompt_token_ids": list(range(1, 129)),
         "max_new_tokens": 2,
-        "eos_token_ids": [],
+        "eos_token_ids": [248044, 248046],
         "sampling": {
             "temperature": 0.0,
             "top_p": 1.0,
@@ -2520,6 +2536,8 @@ def _capture_terminal_contract_valid(
     if stage in {
         "ready_protocol",
         "request_protocol",
+        "worker_error",
+        "worker_fatal",
         "cleanup",
         "worker",
     }:
@@ -2560,6 +2578,7 @@ def _capture_error_envelope(
         "worker_signal",
         "worker_stderr",
         "worker_lifecycle",
+        "worker_error",
         "observed_sq8_promotion_telemetry",
         "observed_sq8_promotion_telemetry_binding",
         "worker_terminal",
@@ -2795,7 +2814,6 @@ def _capture_error_envelope(
                 "token",
                 "released",
                 "error",
-                "fatal",
                 "unknown",
             }
             and isinstance(offset, (int, float))
@@ -2882,6 +2900,92 @@ def _capture_error_envelope(
     if stage in {"request_timeout", "shutdown_timeout"} and request_sent is not True:
         invalid["reason"] = "worker_lifecycle_stage_mismatch"
         return invalid
+    worker_error = value.get("worker_error")
+    if stage in {"worker_error", "worker_fatal"}:
+        message = worker_error.get("message") if isinstance(worker_error, dict) else None
+        shutdown = worker_error.get("shutdown") if isinstance(worker_error, dict) else None
+        code = worker_error.get("code") if isinstance(worker_error, dict) else None
+        recoverable = worker_error.get("recoverable") if isinstance(worker_error, dict) else None
+        expected_codes = (
+            WORKER_RECOVERABLE_ERROR_CODES
+            if recoverable is True
+            else WORKER_FATAL_ERROR_CODES
+            if recoverable is False
+            else frozenset()
+        )
+        if (
+            not isinstance(worker_error, dict)
+            or set(worker_error)
+            != {
+                "schema_version",
+                "event_type",
+                "stage",
+                "request_id",
+                "request_id_matches",
+                "code",
+                "recoverable",
+                "canonical_event_hash_encoding",
+                "canonical_event_sha256",
+                "message",
+                "shutdown",
+            }
+            or worker_error.get("schema_version") != WORKER_ERROR_SCHEMA
+            or worker_error.get("event_type") != "error"
+            or worker_error.get("stage") != stage
+            or worker_error.get("request_id") != expected_request_id
+            or worker_error.get("request_id_matches") is not True
+            or not isinstance(code, str)
+            or re.fullmatch(r"[a-z][a-z0-9_]{0,63}", code) is None
+            or code not in expected_codes
+            or recoverable is not (stage == "worker_error")
+            or worker_error.get("canonical_event_hash_encoding")
+            != WORKER_ERROR_HASH_ENCODING
+            or not isinstance(worker_error.get("canonical_event_sha256"), str)
+            or SHA256_RE.fullmatch(worker_error["canonical_event_sha256"]) is None
+            or not isinstance(message, dict)
+            or set(message)
+            != {
+                "byte_count",
+                "sha256",
+                "prefix_text",
+                "prefix_bytes",
+                "prefix_truncated",
+                "redaction",
+            }
+            or type(message.get("byte_count")) is not int
+            or not 0 <= message["byte_count"] <= 1024
+            or not isinstance(message.get("sha256"), str)
+            or SHA256_RE.fullmatch(message["sha256"]) is None
+            or message.get("prefix_text") is not None
+            or message.get("prefix_bytes") != 0
+            or message.get("prefix_truncated") is not bool(message["byte_count"])
+            or message.get("redaction") != "omitted_by_capture_privacy_policy"
+            or not isinstance(shutdown, dict)
+            or set(shutdown) != {"attempted", "completed", "error"}
+            or type(shutdown.get("attempted")) is not bool
+            or type(shutdown.get("completed")) is not bool
+            or (
+                shutdown.get("attempted"),
+                shutdown.get("completed"),
+                shutdown.get("error"),
+            )
+            not in {
+                (False, True, None),
+                (True, True, None),
+                (True, False, "stdin_unavailable"),
+                (True, False, "shutdown_write_failed"),
+                (True, False, "shutdown_timeout"),
+            }
+            or request_sent is not True
+            or last_event is None
+            or last_event.get("type") != "error"
+            or last_event.get("request_id_matches") is not True
+        ):
+            invalid["reason"] = "worker_error_invalid"
+            return invalid
+    elif worker_error is not None:
+        invalid["reason"] = "worker_error_unexpected"
+        return invalid
     result = {
         "validation": "valid",
         "schema_version": value["schema_version"],
@@ -2895,6 +2999,7 @@ def _capture_error_envelope(
         "worker_signal": worker_signal,
         "worker_stderr": normalized_worker,
         "worker_lifecycle": lifecycle,
+        "worker_error": worker_error,
     }
     if complete is not True or stream_error is not None:
         result["validation"] = "invalid"

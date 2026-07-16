@@ -260,6 +260,53 @@ def worker_lifecycle_envelope(*, request_sent: bool = True) -> dict[str, Any]:
     }
 
 
+def worker_error_envelope(
+    *, stage: str = "worker_error", code: str | None = None
+) -> dict[str, Any]:
+    recoverable = stage == "worker_error"
+    message = b"worker command failed protocol validation"
+    return {
+        "schema_version": MODULE.WORKER_ERROR_SCHEMA,
+        "event_type": "error",
+        "stage": stage,
+        "request_id": REQUEST_ID,
+        "request_id_matches": True,
+        "code": code or ("invalid_request" if recoverable else "runtime_failed"),
+        "recoverable": recoverable,
+        "canonical_event_hash_encoding": MODULE.WORKER_ERROR_HASH_ENCODING,
+        "canonical_event_sha256": "a" * 64,
+        "message": {
+            "byte_count": len(message),
+            "sha256": hashlib.sha256(message).hexdigest(),
+            "prefix_text": None,
+            "prefix_bytes": 0,
+            "prefix_truncated": True,
+            "redaction": "omitted_by_capture_privacy_policy",
+        },
+        "shutdown": {"attempted": True, "completed": True, "error": None},
+    }
+
+
+def bind_worker_error(value: dict[str, Any], stage: str = "worker_error") -> None:
+    error_event = {
+        "type": "error",
+        "offset_ms": 3.0,
+        "request_id_matches": True,
+        "processed_prompt_tokens": None,
+        "completion_tokens": None,
+        "token_index": None,
+    }
+    value["stage"] = stage
+    value["reason"] = "resident worker returned a typed error event"
+    value["worker_returncode"] = 0
+    value["worker_signal"] = None
+    value["worker_error"] = worker_error_envelope(stage=stage)
+    value["worker_lifecycle"]["event_count"] = 2
+    value["worker_lifecycle"]["events_retained"] = 2
+    value["worker_lifecycle"]["events"].append(error_event)
+    value["worker_lifecycle"]["last_event"] = error_event
+
+
 def capture_error_envelope(
     *, preview: str = "worker failed\n", stage: str = "worker_exit"
 ) -> dict[str, Any]:
@@ -279,6 +326,7 @@ def capture_error_envelope(
         "worker_signal": None,
         "worker_stderr": worker_stderr_envelope(preview),
         "worker_lifecycle": worker_lifecycle_envelope(),
+        "worker_error": None,
         "observed_sq8_promotion_telemetry": None,
         "observed_sq8_promotion_telemetry_binding": None,
         "worker_terminal": None,
@@ -767,7 +815,7 @@ print(_json.dumps({
                     "context_length": 4096,
                 },
                 "generation": {
-                    "eos_token_ids": [],
+                    "eos_token_ids": [248044, 248046],
                     "max_completion_tokens": 2,
                 },
                 "format": {"implementation_id": MODULE.IMPLEMENTATION_ID},
@@ -1679,6 +1727,73 @@ def test_capture_error_terminal_matrix_is_exact(
         assert parsed["reason"] == "capture_error_envelope_stage_terminal_mismatch"
 
 
+@pytest.mark.parametrize("stage", ["worker_error", "worker_fatal"])
+def test_typed_worker_error_envelope_is_strict_and_preserved(stage: str) -> None:
+    value = capture_error_envelope()
+    bind_worker_error(value, stage)
+
+    parsed = parse_capture_error(
+        capture_stream(json.dumps(value, separators=(",", ":")).encode("ascii"))
+    )
+
+    assert parsed["validation"] == "valid"
+    assert parsed["stage"] == stage
+    assert parsed["timed_out"] is False
+    assert parsed["worker_error"] == value["worker_error"]
+    assert parsed["worker_lifecycle"]["last_event"]["type"] == "error"
+
+
+@pytest.mark.parametrize(
+    "tamper",
+    [
+        lambda value: value["worker_error"].__setitem__("unknown", True),
+        lambda value: value["worker_error"].__setitem__("request_id", "other"),
+        lambda value: value["worker_error"].__setitem__("code", "runtime_failed"),
+        lambda value: value["worker_error"].__setitem__("recoverable", 1),
+        lambda value: value["worker_error"]["message"].__setitem__(
+            "prefix_text", "secret"
+        ),
+        lambda value: value["worker_error"]["message"].__setitem__(
+            "byte_count", 1025
+        ),
+        lambda value: value["worker_error"].__setitem__(
+            "canonical_event_sha256", "0" * 63
+        ),
+        lambda value: value["worker_error"]["shutdown"].__setitem__(
+            "attempted", 1
+        ),
+        lambda value: value["worker_error"]["shutdown"].update(
+            {"attempted": False, "completed": False, "error": None}
+        ),
+    ],
+)
+def test_typed_worker_error_envelope_rejects_tampering(tamper: Any) -> None:
+    value = capture_error_envelope()
+    bind_worker_error(value)
+    tamper(value)
+
+    parsed = parse_capture_error(
+        capture_stream(json.dumps(value, separators=(",", ":")).encode("utf-8"))
+    )
+
+    assert parsed == {"validation": "invalid", "reason": "worker_error_invalid"}
+
+
+def test_worker_error_summary_is_required_only_for_typed_stage() -> None:
+    missing = capture_error_envelope()
+    bind_worker_error(missing)
+    missing["worker_error"] = None
+    assert parse_capture_error(
+        capture_stream(json.dumps(missing).encode("ascii"))
+    ) == {"validation": "invalid", "reason": "worker_error_invalid"}
+
+    unexpected = capture_error_envelope()
+    unexpected["worker_error"] = worker_error_envelope()
+    assert parse_capture_error(
+        capture_stream(json.dumps(unexpected).encode("ascii"))
+    ) == {"validation": "invalid", "reason": "worker_error_unexpected"}
+
+
 def test_telemetry_failure_envelope_preserves_measured_counters_and_terminal() -> None:
     value = capture_error_envelope(stage="telemetry_validation")
     value["reason"] = "SQ8 batch and pair projection evidence is required"
@@ -1918,6 +2033,48 @@ def test_real_fake_capture_tool_error_binds_worker_stderr_to_final_receipt(
         metadata = path.stat(follow_symlinks=False)
         assert metadata.st_nlink == 1
         assert stat.S_IMODE(metadata.st_mode) == 0o444
+
+
+def test_typed_worker_error_propagates_through_maintenance_and_failure_receipt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    prepare(monkeypatch, [snapshot()])
+    deps, _calls = dependencies(tmp_path)
+    envelope = capture_error_envelope()
+    bind_worker_error(envelope)
+    payload = json.dumps(envelope, ensure_ascii=True, separators=(",", ":"))
+
+    def real_capture(_argv: list[str], _environment: dict[str, str]) -> Any:
+        return MODULE.default_capture(
+            [
+                sys.executable,
+                "-c",
+                "import sys;sys.stdout.write(sys.argv[1]+'\\n');sys.exit(7)",
+                payload,
+            ],
+            dict(os.environ),
+        )
+
+    deps.capture = real_capture
+    output = tmp_path / "typed-worker-error-failure"
+    code, evidence = MODULE.execute(candidate(tmp_path), output, deps)
+
+    assert code == 1
+    tool_error = evidence["capture_failure"]["capture_tool_error"]
+    assert tool_error["validation"] == "valid"
+    assert tool_error["schema_version"] == MODULE.CAPTURE_ERROR_SCHEMA
+    assert tool_error["stage"] == "worker_error"
+    assert tool_error["worker_error"] == envelope["worker_error"]
+    persisted = json.loads(
+        (output / "maintenance-evidence.json").read_text(encoding="utf-8")
+    )
+    assert persisted["capture_failure"]["capture_tool_error"] == tool_error
+    receipt = json.loads(
+        (output / "promotion-failure-receipt.json").read_text(encoding="utf-8")
+    )
+    assert receipt["actual"]["maintenance_evidence"]["sha256"] == MODULE.sha_file(
+        output / "maintenance-evidence.json"
+    )
 
 
 def test_actual_capture_tool_fake_worker_chain_binds_terminal_and_raw_stderr(

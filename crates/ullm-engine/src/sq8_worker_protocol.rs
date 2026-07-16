@@ -2727,6 +2727,62 @@ mod tests {
     }
 
     #[test]
+    fn promotion_capture_exact_payload_reports_empty_eos_and_accepts_product_eos() {
+        let request_id = format!("sq8-promotion-{}", "a".repeat(64));
+        let prompt = (1..=128)
+            .map(|token_id| token_id.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        let empty_eos_payload = format!(
+            "{{\"schema_version\":\"ullm.worker.v1\",\"type\":\"generate\",\"request_id\":\"{request_id}\",\"prompt_token_ids\":[{prompt}],\"max_new_tokens\":2,\"sampling\":{{\"temperature\":0.0,\"top_p\":1.0,\"top_k\":1,\"seed\":0}},\"eos_token_ids\":[]}}"
+        );
+        let profile = Sq8WorkerProfile {
+            worker_schema: "ullm.worker.v1".into(),
+            model: "ullm-qwen3.5-9b-aq4".into(),
+            model_revision: "aq4-reasoning-v0.1-candidate".into(),
+            artifact_content_sha256: "a".repeat(64),
+            package_manifest_sha256: "b".repeat(64),
+            device: "gfx1201".into(),
+            execution_profile: "rdna4_aq4_resident_sq8_linear_qkv_z_overlay".into(),
+            context_length: 4096,
+            max_new_tokens: 512,
+            vocab_size: 248_320,
+            eos_token_ids: vec![248_044, 248_046],
+            top_k: 1,
+            reasoning: None,
+        };
+
+        let Sq8WorkerCommand::Generate(empty_eos) =
+            decode_sq8_worker_command(empty_eos_payload.as_bytes()).unwrap()
+        else {
+            panic!("expected generate")
+        };
+        let error = empty_eos
+            .into_serving_request_with_profile(&profile)
+            .unwrap_err();
+        assert_eq!(error.kind, Sq8WorkerProtocolErrorKind::InvalidRequest);
+        assert_eq!(
+            error.message,
+            "generate request violates the fixed SQ8 product limits"
+        );
+
+        let product_eos_payload =
+            empty_eos_payload.replace("\"eos_token_ids\":[]", "\"eos_token_ids\":[248044,248046]");
+        let Sq8WorkerCommand::Generate(product_eos) =
+            decode_sq8_worker_command(product_eos_payload.as_bytes()).unwrap()
+        else {
+            panic!("expected generate")
+        };
+        let request = product_eos
+            .into_serving_request_with_profile(&profile)
+            .unwrap();
+        assert_eq!(request.prompt_token_ids.len(), 128);
+        assert_eq!(request.max_new_tokens, 2);
+        assert_eq!(request.eos_token_ids, vec![248_044, 248_046]);
+        assert!(!request.test_only_ignores_eos());
+    }
+
+    #[test]
     fn generate_sampling_validates_f64_before_narrowing_to_f32() {
         for (field, value) in [
             ("temperature", "2.0000000001"),

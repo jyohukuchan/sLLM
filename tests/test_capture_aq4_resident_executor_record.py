@@ -374,7 +374,7 @@ def test_main_emits_fixed_error_envelope_with_worker_stderr(monkeypatch: pytest.
     captured = capsys.readouterr()
     envelope = json.loads(captured.out)
     assert envelope == {
-        "schema_version": "ullm.aq4_resident_capture_error.v4",
+        "schema_version": "ullm.aq4_resident_capture_error.v5",
         "status": "failed",
         "stage": "request",
         "reason": "resident worker did not release",
@@ -399,6 +399,7 @@ def test_main_emits_fixed_error_envelope_with_worker_stderr(monkeypatch: pytest.
             "events": [],
             "last_event": None,
         },
+        "worker_error": None,
         "observed_sq8_promotion_telemetry": None,
         "observed_sq8_promotion_telemetry_binding": None,
         "worker_terminal": None,
@@ -535,6 +536,7 @@ def test_real_fake_worker_failure_envelope_preserves_terminal_identity(
         "worker_signal",
         "worker_stderr",
         "worker_lifecycle",
+        "worker_error",
         "observed_sq8_promotion_telemetry",
         "observed_sq8_promotion_telemetry_binding",
         "worker_terminal",
@@ -629,6 +631,206 @@ time.sleep(10)
     assert envelope["worker_lifecycle"]["last_event"]["token_index"] == 0
     assert "token_id" not in envelope["worker_lifecycle"]["last_event"]
     assert str(secret_token_id) not in captured
+
+
+@pytest.mark.parametrize(
+    ("recoverable", "code", "expected_stage"),
+    [
+        (True, "invalid_request", "worker_error"),
+        (False, "runtime_failed", "worker_fatal"),
+    ],
+)
+def test_immediate_typed_worker_error_is_private_bounded_and_reaped(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    recoverable: bool,
+    code: str,
+    expected_stage: str,
+) -> None:
+    pid_path = tmp_path / "worker.pid"
+    secret = "password=do-not-publish prompt_token=991 /tmp/private-model"
+    worker_source = f'''\
+import json, os, pathlib, sys
+pathlib.Path({str(pid_path)!r}).write_text(str(os.getpid()), encoding="ascii")
+request = json.loads(sys.stdin.buffer.readline())
+event = {{
+    "schema_version": "ullm.worker.v1",
+    "type": "error",
+    "request_id": request["request_id"],
+    "code": {code!r},
+    "recoverable": {recoverable!r},
+    "message": {secret!r},
+}}
+print(json.dumps(event, separators=(",", ":")), flush=True)
+shutdown = json.loads(sys.stdin.buffer.readline())
+assert shutdown == {{"schema_version": "ullm.worker.v1", "type": "shutdown"}}
+'''
+    manifest = _fake_manifest(tmp_path, worker_source)
+    monkeypatch.setattr(TOOL, "copy_worker_environment", lambda _: dict(os.environ))
+    monkeypatch.setattr(TOOL, "target_card", lambda _: None)
+
+    started = time.monotonic()
+    assert TOOL.main(
+        [
+            "--manifest",
+            str(manifest),
+            "--output",
+            str(tmp_path / "record.json"),
+            "--timeout",
+            "30",
+        ]
+    ) == 1
+    elapsed = time.monotonic() - started
+    captured = capsys.readouterr()
+    envelope = json.loads(captured.out)
+    assert elapsed < 2.0
+    assert envelope["stage"] == expected_stage
+    assert envelope["timed_out"] is False
+    assert envelope["worker_returncode"] == 0
+    assert envelope["worker_signal"] is None
+    assert envelope["worker_lifecycle"]["last_event"]["type"] == "error"
+    assert envelope["worker_lifecycle"]["last_event"]["request_id_matches"] is True
+    summary = envelope["worker_error"]
+    assert summary["stage"] == expected_stage
+    assert summary["code"] == code
+    assert summary["recoverable"] is recoverable
+    assert summary["request_id"] == envelope["request_id"]
+    assert summary["message"] == {
+        "byte_count": len(secret.encode("utf-8")),
+        "sha256": hashlib.sha256(secret.encode("utf-8")).hexdigest(),
+        "prefix_text": None,
+        "prefix_bytes": 0,
+        "prefix_truncated": True,
+        "redaction": "omitted_by_capture_privacy_policy",
+    }
+    canonical = json.dumps(
+        {
+            "schema_version": "ullm.worker.v1",
+            "type": "error",
+            "request_id": envelope["request_id"],
+            "code": code,
+            "recoverable": recoverable,
+            "message": secret,
+        },
+        ensure_ascii=True,
+        allow_nan=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("ascii")
+    assert summary["canonical_event_sha256"] == hashlib.sha256(canonical).hexdigest()
+    assert summary["shutdown"] == {
+        "attempted": True,
+        "completed": True,
+        "error": None,
+    }
+    assert secret not in captured.out
+    assert secret not in captured.err
+    pid = int(pid_path.read_text(encoding="ascii"))
+    with pytest.raises(ProcessLookupError):
+        os.kill(pid, 0)
+
+
+def test_typed_worker_error_escalates_shutdown_to_kill_and_reaps(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    pid_path = tmp_path / "stubborn-worker.pid"
+    worker_source = f'''\
+import json, os, pathlib, signal, sys, time
+signal.signal(signal.SIGTERM, signal.SIG_IGN)
+pathlib.Path({str(pid_path)!r}).write_text(str(os.getpid()), encoding="ascii")
+request = json.loads(sys.stdin.buffer.readline())
+print(json.dumps({{
+    "schema_version": "ullm.worker.v1",
+    "type": "error",
+    "request_id": request["request_id"],
+    "code": "runtime_failed",
+    "recoverable": False,
+    "message": "bounded fatal",
+}}, separators=(",", ":")), flush=True)
+while True:
+    time.sleep(1)
+'''
+    manifest = _fake_manifest(tmp_path, worker_source)
+    monkeypatch.setattr(TOOL, "copy_worker_environment", lambda _: dict(os.environ))
+    monkeypatch.setattr(TOOL, "target_card", lambda _: None)
+    monkeypatch.setattr(TOOL, "WORKER_SHUTDOWN_TIMEOUT_SECONDS", 0.1)
+    monkeypatch.setattr(TOOL, "WORKER_TERMINATE_GRACE_SECONDS", 0.1)
+
+    started = time.monotonic()
+    assert TOOL.main(
+        [
+            "--manifest",
+            str(manifest),
+            "--output",
+            str(tmp_path / "record.json"),
+            "--timeout",
+            "30",
+        ]
+    ) == 1
+    envelope = json.loads(capsys.readouterr().out)
+    assert time.monotonic() - started < 2.0
+    assert envelope["stage"] == "worker_fatal"
+    assert envelope["timed_out"] is False
+    assert envelope["worker_returncode"] == -signal.SIGKILL
+    assert envelope["worker_signal"] == signal.SIGKILL
+    assert envelope["worker_error"]["shutdown"] == {
+        "attempted": True,
+        "completed": False,
+        "error": "shutdown_timeout",
+    }
+    pid = int(pid_path.read_text(encoding="ascii"))
+    with pytest.raises(ProcessLookupError):
+        os.kill(pid, 0)
+
+
+@pytest.mark.parametrize(
+    "event_source",
+    [
+        # Duplicate keys are rejected before an event can be accepted.
+        '''print('{"schema_version":"ullm.worker.v1","type":"error","request_id":'+json.dumps(request["request_id"])+',"code":"invalid_request","code":"busy","recoverable":true,"message":"x"}', flush=True)''',
+        '''print(json.dumps({"schema_version":"ullm.worker.v1","type":"error","request_id":request["request_id"],"code":"invented_code","recoverable":True,"message":"x"}, separators=(",", ":")), flush=True)''',
+        '''print(json.dumps({"schema_version":"ullm.worker.v1","type":"error","request_id":request["request_id"],"code":"invalid_request","recoverable":1,"message":"x"}, separators=(",", ":")), flush=True)''',
+        '''print(json.dumps({"schema_version":"ullm.worker.v1","type":"error","request_id":"other-request","code":"invalid_request","recoverable":True,"message":"x"}, separators=(",", ":")), flush=True)''',
+        '''print(json.dumps({"schema_version":"ullm.worker.v1","type":"fatal","request_id":request["request_id"],"code":"runtime_failed","recoverable":False,"message":"x"}, separators=(",", ":")), flush=True)''',
+    ],
+)
+def test_malformed_or_unbound_worker_error_is_protocol_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    event_source: str,
+) -> None:
+    worker_source = f'''\
+import json, sys, time
+request = json.loads(sys.stdin.buffer.readline())
+{event_source}
+time.sleep(10)
+'''
+    manifest = _fake_manifest(tmp_path, worker_source)
+    monkeypatch.setattr(TOOL, "copy_worker_environment", lambda _: dict(os.environ))
+    monkeypatch.setattr(TOOL, "target_card", lambda _: None)
+
+    started = time.monotonic()
+    assert TOOL.main(
+        [
+            "--manifest",
+            str(manifest),
+            "--output",
+            str(tmp_path / "record.json"),
+            "--timeout",
+            "30",
+        ]
+    ) == 1
+    envelope = json.loads(capsys.readouterr().out)
+    assert time.monotonic() - started < 2.0
+    assert envelope["stage"] == "request_protocol"
+    assert envelope["timed_out"] is False
+    assert envelope["worker_error"] is None
+    assert envelope["worker_returncode"] < 0
+    assert envelope["worker_signal"] == signal.SIGTERM
 
 
 def test_real_fake_worker_json_success_path_is_unchanged(
@@ -747,7 +949,7 @@ def test_fake_worker_sq8_failure_preserves_terminal_and_observation(
 import json, sys
 request = json.loads(sys.stdin.buffer.readline())
 assert request["max_new_tokens"] == 2
-assert request["eos_token_ids"] == []
+assert request["eos_token_ids"] == [248044, 248046]
 request_id = request["request_id"]
 for index, token_id in enumerate((42, 43)):
     print(json.dumps({{"schema_version": "ullm.worker.v1", "type": "token", "request_id": request_id, "index": index, "token_id": token_id}}, separators=(",", ":")), flush=True)
@@ -764,6 +966,7 @@ sys.exit({worker_exit_code})
     manifest_value["worker"]["identity"]["execution_profile"] = (
         TOOL.SQ8_OVERLAY_EXECUTION_PROFILE
     )
+    manifest_value["generation"]["eos_token_ids"] = [248044, 248046]
     manifest.write_text(json.dumps(manifest_value), encoding="utf-8")
 
     class CompleteObserver:
@@ -862,6 +1065,7 @@ json.loads(sys.stdin.buffer.readline())
     manifest_value["worker"]["identity"]["execution_profile"] = (
         TOOL.SQ8_OVERLAY_EXECUTION_PROFILE
     )
+    manifest_value["generation"]["eos_token_ids"] = [248044, 248046]
     manifest.write_text(json.dumps(manifest_value), encoding="utf-8")
     if expected_stage == "package_validation":
         (tmp_path / "package.json").write_text(
@@ -951,7 +1155,7 @@ def test_fake_worker_sq8_positive_requires_prefill_and_decode_dispatch(
 import json, sys
 request = json.loads(sys.stdin.buffer.readline())
 assert request["max_new_tokens"] == 2
-assert request["eos_token_ids"] == []
+assert request["eos_token_ids"] == [248044, 248046]
 request_id = request["request_id"]
 for index, token_id in enumerate((42, 43)):
     print(json.dumps({{"schema_version": "ullm.worker.v1", "type": "token", "request_id": request_id, "index": index, "token_id": token_id}}, separators=(",", ":")), flush=True)
@@ -987,6 +1191,7 @@ json.loads(sys.stdin.buffer.readline())
     manifest_value["worker"]["identity"]["execution_profile"] = (
         TOOL.SQ8_OVERLAY_EXECUTION_PROFILE
     )
+    manifest_value["generation"]["eos_token_ids"] = [248044, 248046]
     manifest_value["product"]["artifact"] = {
         "content_sha256": "a" * 64,
         "manifest_sha256": "b" * 64,
