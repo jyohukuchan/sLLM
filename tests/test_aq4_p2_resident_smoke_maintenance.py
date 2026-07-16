@@ -602,6 +602,77 @@ def test_actual_v14_exact_35_file_seal_and_capture_v2_authority() -> None:
     assert HARNESS.PROFILE_CAPTURE_SCHEMA == "ullm.aq4_p3_diagnostic_rocprof_capture.v2"
 
 
+def test_actual_v15_exact_66_file_seal_and_profiler_semantic_contract() -> None:
+    seal = HARNESS.actual_v15_seal()
+    assert seal["commit"] == HARNESS.ACTUAL_V15_COMMIT == "99faf0066b93eb021fa83bea1b1a0193d9a79fd4"
+    assert seal["tree"] == HARNESS.ACTUAL_V15_TREE == "0503c595c738ab66173918bd95986be613ddfc00"
+    assert seal["member_count"] == len(seal["members"]) == 66
+    assert len(seal["root_sums_sha256"]) == len(HARNESS.ACTUAL_V15_ROOTS) == 6
+
+    artifact_path = HARNESS.ACTUAL_V15_ROOTS[-1] / "capture-artifact.json"
+    artifact = json.loads(artifact_path.read_text())
+    profiler = artifact["profiler"]
+    legacy_profiler_fields = {
+        "tool", "invocation_path", "resolved_path", "executable_sha256",
+        "resolved_identity", "symlink_chain", "version", "rocm_version",
+        "version_output_sha256", "target_command_manifest", "target_environment",
+        "capture_helpers", "command", "command_sha256", "subprocess_profile_runs",
+    }
+    legacy_environment_fields = {
+        "sha256", "keys", "exact_base_environment", "secret_material_recorded",
+    }
+    assert set(profiler) - legacy_profiler_fields == {"execution_closure"}
+    assert legacy_profiler_fields - set(profiler) == set()
+    assert set(profiler["target_environment"]) - legacy_environment_fields == {"injected_fd_map_key"}
+    assert legacy_environment_fields - set(profiler["target_environment"]) == set()
+    assert profiler["target_environment"]["injected_fd_map_key"] == "ULLM_AQ4_PINNED_FD_MAP"
+    assert HARNESS._profile_execution_closure_valid(
+        profiler["execution_closure"], profiler["capture_helpers"]
+    )
+
+    target_path = Path(profiler["target_command_manifest"]["path"])
+    target_raw = target_path.read_bytes()
+    target = json.loads(target_raw)
+    expected_command = HARNESS._expected_profile_command(
+        target["argv"],
+        {"output": {"directory": str(HARNESS.ACTUAL_V15_ROOTS[-1]), "name": HARNESS.PROFILE_OUTPUT_NAME}},
+    )
+    reconstructed = {
+        key: profiler[key]
+        for key in (
+            "tool", "invocation_path", "resolved_path", "executable_sha256",
+            "resolved_identity", "symlink_chain", "version", "rocm_version",
+            "version_output_sha256",
+        )
+    }
+    reconstructed.update({
+        "target_command_manifest": {
+            "path": str(target_path),
+            "sha256": HARNESS.sha_bytes(target_raw),
+        },
+        "target_environment": {
+            "sha256": HARNESS.sha_bytes(HARNESS.canonical(target["environment"])),
+            "keys": sorted(target["environment"]),
+            "exact_base_environment": True,
+            "secret_material_recorded": False,
+            "injected_fd_map_key": "ULLM_AQ4_PINNED_FD_MAP",
+        },
+        "execution_closure": profiler["execution_closure"],
+        "capture_helpers": profiler["capture_helpers"],
+        "command": expected_command,
+        "command_sha256": HARNESS.sha_bytes(HARNESS.canonical(expected_command)),
+        "subprocess_profile_runs": 1,
+    })
+    assert HARNESS._profile_profiler_binding_valid({
+        key: profiler[key]
+        for key in (
+            "tool", "invocation_path", "resolved_path", "executable_sha256",
+            "resolved_identity", "symlink_chain",
+        )
+    })
+    assert HARNESS.canonical(profiler) == HARNESS.canonical(reconstructed)
+
+
 def test_generic_memcpy_exact_one_direction_join() -> None:
     value = HARNESS.derive_generic_memcpy_rows(
         [
@@ -641,8 +712,8 @@ def test_generic_memcpy_direction_join_rejects_non_exact_coverage(failure: str) 
 def test_offline_reassembly_generator_is_process_zero_and_self_validating(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    capture = tmp_path / "capture-v10"
-    evidence = tmp_path / "maintenance-evidence-v12"
+    capture = tmp_path / "capture-v11"
+    evidence = tmp_path / "maintenance-evidence-v13"
     monkeypatch.setattr(
         HARNESS,
         "_git_source_identity",
@@ -654,11 +725,11 @@ def test_offline_reassembly_generator_is_process_zero_and_self_validating(
             "sha256": HARNESS.sha_bytes(SCRIPT.read_bytes()),
         },
     )
-    before = HARNESS.actual_v14_seal()
+    before = HARNESS.actual_v15_seal()
     value = HARNESS.prepare_profile_offline_reassembly(capture, evidence)
     assert value == HARNESS.validate_profile_offline_reassembly(capture, evidence)
     assert value["status"] == "offline_reassembled_sealed"
-    assert value["source_actual_seal"] == before == HARNESS.actual_v14_seal()
+    assert value["source_actual_seal"] == before == HARNESS.actual_v15_seal()
     assert value["raw_inputs"]["count"] == len(HARNESS.PROFILE_CAPTURE_RAW_NAMES) == 7
     assert value["output"]["capture_artifact"]["status"] == "complete_diagnostic"
     assert value["execution"] == {
@@ -672,8 +743,8 @@ def test_offline_reassembly_generator_is_process_zero_and_self_validating(
         "model_loads": 0,
     }
     assert capture.lstat().st_mode & 0o777 == evidence.lstat().st_mode & 0o777 == 0o555
-    assert HARNESS.HISTORICAL_PROFILE_READY_V16_ROOT.is_dir()
-    assert HARNESS.ACTUAL_V14_ROOTS[4].is_dir()
+    assert HARNESS.HISTORICAL_PROFILE_READY_V17_ROOT.is_dir()
+    assert HARNESS.ACTUAL_V15_ROOTS[4].is_dir()
     assert value["kernel_normalization"]["scope"] == "derived_marker_bounded_kernel_splits_only"
     assert value["kernel_normalization"]["source_kernel_trace_sha256_before"] == value["kernel_normalization"]["source_kernel_trace_sha256_after"]
     assert value == HARNESS.validate_profile_offline_reassembly(capture, evidence)
@@ -718,16 +789,17 @@ def test_offline_reassembly_generator_is_process_zero_and_self_validating(
         HARNESS.validate_profile_offline_reassembly(capture, evidence)
 
 
-def test_profile_v17_future_outputs_are_poststate_independent() -> None:
+def test_profile_v18_future_outputs_are_poststate_independent() -> None:
     base = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1"
-    assert HARNESS.PROFILE_READY_ROOT == base / "p2/resident-one-case-smoke-profile-ready-v17"
+    assert HARNESS.PROFILE_READY_ROOT == base / "p2/resident-one-case-smoke-profile-ready-v18"
+    assert HARNESS.HISTORICAL_PROFILE_READY_V17_ROOT == base / "p2/resident-one-case-smoke-profile-ready-v17"
     assert HARNESS.HISTORICAL_PROFILE_READY_V16_ROOT == base / "p2/resident-one-case-smoke-profile-ready-v16"
-    assert HARNESS.PROFILE_MAINTENANCE_EVIDENCE == base / "p2/resident-one-case-smoke-profile-maintenance-evidence-v12"
-    assert HARNESS.PROFILE_OFFLINE_REASSEMBLY_EVIDENCE == base / "p2/resident-one-case-smoke-profile-maintenance-offline-reassembly-evidence-v12"
-    assert HARNESS.PROFILE_DRY_RUN_EVIDENCE == base / "p2/resident-one-case-smoke-profile-ready-dry-run-v17"
-    assert HARNESS.PROFILE_OUTPUT_DIRECTORY == base / "p3/aq4-p3-diagnostic-rocprof-capture-v11"
+    assert HARNESS.PROFILE_MAINTENANCE_EVIDENCE == base / "p2/resident-one-case-smoke-profile-maintenance-evidence-v13"
+    assert HARNESS.PROFILE_OFFLINE_REASSEMBLY_EVIDENCE == base / "p2/resident-one-case-smoke-profile-maintenance-offline-reassembly-evidence-v13"
+    assert HARNESS.PROFILE_DRY_RUN_EVIDENCE == base / "p2/resident-one-case-smoke-profile-ready-dry-run-v18"
+    assert HARNESS.PROFILE_OUTPUT_DIRECTORY == base / "p3/aq4-p3-diagnostic-rocprof-capture-v12"
     assert HARNESS.PROFILE_ARTIFACT == HARNESS.PROFILE_OUTPUT_DIRECTORY / "capture-artifact.json"
-    assert HARNESS.PROFILE_OFFLINE_REASSEMBLY_OUTPUT_DIRECTORY == base / "p3/aq4-p3-diagnostic-rocprof-capture-offline-reassembly-v12"
+    assert HARNESS.PROFILE_OFFLINE_REASSEMBLY_OUTPUT_DIRECTORY == base / "p3/aq4-p3-diagnostic-rocprof-capture-offline-reassembly-v13"
     actual_future_outputs = {
         HARNESS.LAUNCHER.PROFILE_RUN_OUTPUT,
         HARNESS.LAUNCHER.PROFILE_EVIDENCE_OUTPUT,
@@ -738,9 +810,9 @@ def test_profile_v17_future_outputs_are_poststate_independent() -> None:
         HARNESS.PROFILE_OFFLINE_REASSEMBLY_OUTPUT_DIRECTORY,
         HARNESS.PROFILE_OFFLINE_REASSEMBLY_EVIDENCE,
     }
-    occupied_actual_v14 = set(HARNESS.ACTUAL_V14_ROOTS)
-    assert len(actual_future_outputs) == 4 and actual_future_outputs.isdisjoint(occupied_actual_v14)
-    assert len(offline_future_outputs) == 2 and offline_future_outputs.isdisjoint(actual_future_outputs | occupied_actual_v14)
+    occupied_actual_v15 = set(HARNESS.ACTUAL_V15_ROOTS)
+    assert len(actual_future_outputs) == 4 and actual_future_outputs.isdisjoint(occupied_actual_v15)
+    assert len(offline_future_outputs) == 2 and offline_future_outputs.isdisjoint(actual_future_outputs | occupied_actual_v15)
     assert all(not path.exists() and not path.is_symlink() for path in actual_future_outputs | offline_future_outputs)
     invalid_preoperator_v13_roots = (
         base / "p2/resident-one-case-smoke-profile-ready-v13",
@@ -1001,7 +1073,7 @@ def test_offline_reassembly_poststate_does_not_change_canonical_ready(
         "sha256": "4" * 64,
     }
     before = HARNESS.ready_document(identity, profile_diagnostic=True)
-    offline = tmp_path / "aq4-p3-diagnostic-rocprof-capture-offline-reassembly-v12"
+    offline = tmp_path / "aq4-p3-diagnostic-rocprof-capture-offline-reassembly-v13"
     monkeypatch.setattr(HARNESS, "PROFILE_OFFLINE_REASSEMBLY_OUTPUT_DIRECTORY", offline)
     offline.mkdir()
     (offline / "capture-artifact.json").write_text("{}\n", encoding="ascii")
@@ -1026,6 +1098,32 @@ def test_historical_offline_v11_loader_is_final_state_independent() -> None:
         ["git", "rev-parse", "HEAD"], cwd=ROOT, text=True, check=True, stdout=subprocess.PIPE,
     ).stdout.strip()
     assert value["output"]["root"] == str(HARNESS.HISTORICAL_PROFILE_OFFLINE_REASSEMBLY_OUTPUT_DIRECTORY_V11)
+
+
+def test_historical_offline_v12_loader_is_final_state_independent() -> None:
+    value = HARNESS.load_historical_profile_offline_reassembly_v12()
+    assert value["status"] == "offline_reassembled_sealed"
+    assert value["schema_version"] == "ullm.aq4_p2_profile_maintenance_evidence.v12"
+    assert value["source_actual_seal"] == HARNESS.actual_v14_seal()
+    assert value["generator"]["commit"] != subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=ROOT, text=True, check=True, stdout=subprocess.PIPE,
+    ).stdout.strip()
+    assert value["output"]["root"] == str(HARNESS.HISTORICAL_PROFILE_OFFLINE_REASSEMBLY_OUTPUT_DIRECTORY_V12)
+
+
+def test_historical_ready_v17_loader_is_final_state_independent() -> None:
+    trust = json.loads(HARNESS.HISTORICAL_PROFILE_HARNESS_TRUST_V17_PATH.read_text())
+    assert subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=ROOT,
+        text=True,
+        stdout=subprocess.PIPE,
+        check=True,
+    ).stdout.strip() != trust["commit"]
+    assert HARNESS.ACTUAL_V15_ROOTS[4].is_dir()
+    value = HARNESS.load_ready_artifact(HARNESS.HISTORICAL_PROFILE_READY_V17_PATH)
+    assert value == json.loads(HARNESS.HISTORICAL_PROFILE_READY_V17_PATH.read_text())
+    assert value["actual_eligible"] is True
 
 
 def test_historical_ready_v16_loader_is_final_state_independent() -> None:
@@ -1726,6 +1824,40 @@ def valid_profile_capture_artifact(request: dict, output: Path) -> dict:
             ("profile_family_classifier", HARNESS.LAUNCHER.PROFILE_FAMILY_HELPER, HARNESS.LAUNCHER.PROFILE_FAMILY_HELPER_SHA),
         )
     ]
+    closure_source = output / "execution-closure-input.json"
+    closure_ref = ref(closure_source)
+    closure_metadata = closure_source.lstat()
+    execution_closure = {
+        "code_execution_closure": "pinned_fd",
+        "control_input_closure": "pinned_fd",
+        "device_lock_closure": "pinned_fd",
+        "data_integrity": "trusted_pre_post_guarded",
+        "fd_map_schema": "ullm.aq4_p3_inherited_fd_map.v1",
+        "fd_map_sha256": "b" * 64,
+        "fd_map_file_sha256": "c" * 64,
+        "bindings": [{
+            "role": "fixture_control_input",
+            "logical_path": str(closure_source),
+            "resolved_path": None,
+            "kind": "regular_file",
+            "closure": "control_input",
+            "method": "read",
+            "identity": {
+                "device": closure_metadata.st_dev,
+                "inode": closure_metadata.st_ino,
+                "mode": closure_metadata.st_mode,
+                "nlink": closure_metadata.st_nlink,
+                "size": closure_metadata.st_size,
+                "mtime_ns": closure_metadata.st_mtime_ns,
+                "ctime_ns": closure_metadata.st_ctime_ns,
+            },
+            "sha256": closure_ref["sha256"],
+        }],
+        "capture_helpers": [
+            {**item, "closure": "code_execution", "method": "verified_in_process"}
+            for item in helpers
+        ],
+    }
     runs = []
     memory_traces = []
     for index in range(2, 12):
@@ -1772,7 +1904,8 @@ def valid_profile_capture_artifact(request: dict, output: Path) -> dict:
             "rocm_version": None,
             "version_output_sha256": "a" * 64,
             "target_command_manifest": {"path": target["path"], "sha256": target["sha256"]},
-            "target_environment": {"sha256": HARNESS.sha_bytes(HARNESS.canonical(request["environment"])), "keys": sorted(request["environment"]), "exact_base_environment": True, "secret_material_recorded": False},
+            "target_environment": {"sha256": HARNESS.sha_bytes(HARNESS.canonical(request["environment"])), "keys": sorted(request["environment"]), "exact_base_environment": True, "secret_material_recorded": False, "injected_fd_map_key": "ULLM_AQ4_PINNED_FD_MAP"},
+            "execution_closure": execution_closure,
             "capture_helpers": helpers,
             "command": command,
             "command_sha256": HARNESS.sha_bytes(HARNESS.canonical(command)),
@@ -2096,6 +2229,9 @@ def default_profile_adapter_fixture(tmp_path: Path, monkeypatch: pytest.MonkeyPa
         if mode in {
             "success", "tampered-artifact", "missing-artifact", "artifact-mode",
             "artifact-binding-field", "artifact-profiler-field", "artifact-command",
+            "artifact-execution-closure-missing", "artifact-execution-closure-unknown",
+            "artifact-execution-closure-wrong", "artifact-fd-map-key-missing",
+            "artifact-fd-map-key-unknown", "artifact-fd-map-key-wrong",
             "artifact-ref-hash", "artifact-ref-outside", "artifact-ref-dotdot",
             "artifact-ref-symlink", "artifact-ref-hardlink", "artifact-ref-mode",
         }:
@@ -2109,6 +2245,24 @@ def default_profile_adapter_fixture(tmp_path: Path, monkeypatch: pytest.MonkeyPa
                     artifact["artifact_sha256"] = HARNESS._semantic_self_hash(artifact, "artifact_sha256")
                 elif mode == "artifact-profiler-field":
                     artifact["profiler"]["unknown"] = True
+                    artifact["artifact_sha256"] = HARNESS._semantic_self_hash(artifact, "artifact_sha256")
+                elif mode == "artifact-execution-closure-missing":
+                    artifact["profiler"].pop("execution_closure")
+                    artifact["artifact_sha256"] = HARNESS._semantic_self_hash(artifact, "artifact_sha256")
+                elif mode == "artifact-execution-closure-unknown":
+                    artifact["profiler"]["execution_closure"]["unknown"] = True
+                    artifact["artifact_sha256"] = HARNESS._semantic_self_hash(artifact, "artifact_sha256")
+                elif mode == "artifact-execution-closure-wrong":
+                    artifact["profiler"]["execution_closure"]["fd_map_schema"] = "wrong"
+                    artifact["artifact_sha256"] = HARNESS._semantic_self_hash(artifact, "artifact_sha256")
+                elif mode == "artifact-fd-map-key-missing":
+                    artifact["profiler"]["target_environment"].pop("injected_fd_map_key")
+                    artifact["artifact_sha256"] = HARNESS._semantic_self_hash(artifact, "artifact_sha256")
+                elif mode == "artifact-fd-map-key-unknown":
+                    artifact["profiler"]["target_environment"]["unknown"] = True
+                    artifact["artifact_sha256"] = HARNESS._semantic_self_hash(artifact, "artifact_sha256")
+                elif mode == "artifact-fd-map-key-wrong":
+                    artifact["profiler"]["target_environment"]["injected_fd_map_key"] = "WRONG"
                     artifact["artifact_sha256"] = HARNESS._semantic_self_hash(artifact, "artifact_sha256")
                 elif mode == "artifact-command":
                     artifact["profiler"]["command"][-1] = "different-runner"
@@ -2391,7 +2545,10 @@ def test_default_adapter_invokes_actual_capture_main_lifecycle_api(
 
 @pytest.mark.parametrize("mode", (
     "missing-artifact", "tampered-artifact", "artifact-mode", "artifact-binding-field",
-    "artifact-profiler-field", "artifact-command", "artifact-ref-hash", "artifact-ref-outside",
+    "artifact-profiler-field", "artifact-execution-closure-missing",
+    "artifact-execution-closure-unknown", "artifact-execution-closure-wrong",
+    "artifact-fd-map-key-missing", "artifact-fd-map-key-unknown", "artifact-fd-map-key-wrong",
+    "artifact-command", "artifact-ref-hash", "artifact-ref-outside",
     "artifact-ref-dotdot", "artifact-ref-symlink", "artifact-ref-hardlink", "artifact-ref-mode",
     "tampered-failure", "failure-mode",
     "failure-profiler", "failure-command", "failure-effective-command", "failure-extra", "failure",
@@ -2406,7 +2563,10 @@ def test_default_profile_adapter_propagates_failure_safety(tmp_path: Path, monke
     assert capture["status"] == "failed"
     runner_completed = mode in {
         "missing-artifact", "tampered-artifact", "artifact-mode", "artifact-binding-field",
-        "artifact-profiler-field", "artifact-command", "artifact-ref-hash", "artifact-ref-outside",
+        "artifact-profiler-field", "artifact-execution-closure-missing",
+        "artifact-execution-closure-unknown", "artifact-execution-closure-wrong",
+        "artifact-fd-map-key-missing", "artifact-fd-map-key-unknown", "artifact-fd-map-key-wrong",
+        "artifact-command", "artifact-ref-hash", "artifact-ref-outside",
         "artifact-ref-dotdot", "artifact-ref-symlink", "artifact-ref-hardlink", "artifact-ref-mode",
     }
     children_state_known = runner_completed or mode in {"failure", "children-nonempty", "timeout", "before-start-failure", "exception-before"}
