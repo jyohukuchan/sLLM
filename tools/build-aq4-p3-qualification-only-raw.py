@@ -38,11 +38,11 @@ class RawError(ValueError):
     pass
 
 
-def build(qualification_path: Path, commit: str, tree_sha256: str, archive_path: Path) -> dict[str, Any]:
+def build(qualification_path: Path, commit: str, tree_oid: str, archive_path: Path) -> dict[str, Any]:
     if re.fullmatch(r"[0-9a-f]{40}", commit) is None:
         raise RawError("commit must be lowercase 40-hex")
-    if SELECTOR.SHA256_RE.fullmatch(tree_sha256) is None:
-        raise RawError("tree SHA-256 must be lowercase SHA-256")
+    if re.fullmatch(r"[0-9a-f]{40}", tree_oid) is None:
+        raise RawError("tree OID must be lowercase 40-hex")
     qualification_snapshot = SELECTOR.capture(qualification_path)
     qualification = SELECTOR.parse_json(qualification_snapshot)
     result = QUALIFICATION.validate(qualification)
@@ -68,7 +68,7 @@ def build(qualification_path: Path, commit: str, tree_sha256: str, archive_path:
             "candidate_id": "sequence-output-direct-v1",
             "family": "attention_recurrent",
             "commit": commit,
-            "tree_sha256": tree_sha256,
+            "tree_oid": tree_oid,
             "source_archive": {"path": str(archive.path), "sha256": archive.sha256},
             "build_status": "not_built_for_promotion",
             "profile_status": "not_measured",
@@ -99,12 +99,12 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--qualification", type=Path, required=True)
     parser.add_argument("--commit", required=True)
-    parser.add_argument("--tree-sha256", required=True)
+    parser.add_argument("--tree-oid", required=True)
     parser.add_argument("--source-archive", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args(argv)
     try:
-        value = build(args.qualification.resolve(), args.commit, args.tree_sha256, args.source_archive.resolve())
+        value = build(args.qualification.resolve(), args.commit, args.tree_oid, args.source_archive.resolve())
         publish(args.output, value)
         print(json.dumps({"status": value["status"], "evidence_sha256": value["evidence_sha256"], "promotion_eligible": False}, sort_keys=True))
         return 0

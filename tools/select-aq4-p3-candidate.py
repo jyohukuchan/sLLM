@@ -97,7 +97,7 @@ QUALIFICATION_ONLY_ROOT_FIELDS = {
     "p3_implementation",
 }
 P3_IMPLEMENTATION_FIELDS = {
-    "candidate_id", "family", "commit", "tree_sha256", "source_archive",
+    "candidate_id", "family", "commit", "tree_oid", "source_archive",
     "build_status", "profile_status", "runtime_default",
 }
 IDENTITY_FIELDS = {
@@ -733,7 +733,8 @@ def validate_raw(value: dict[str, Any]) -> RawSource:
             or re.fullmatch(r"[0-9a-f]{40}", implementation["commit"]) is None
         ):
             raise SelectionError("qualification-only P3 implementation state differs")
-        require_digest(implementation["tree_sha256"], "qualification-only P3 tree_sha256")
+        if type(implementation["tree_oid"]) is not str or re.fullmatch(r"[0-9a-f]{40}", implementation["tree_oid"]) is None:
+            raise SelectionError("qualification-only P3 tree OID differs")
         archive = implementation["source_archive"]
         if not isinstance(archive, dict):
             raise SelectionError("qualification-only P3 source archive must be an object")
@@ -748,7 +749,7 @@ def validate_raw(value: dict[str, Any]) -> RawSource:
         return RawSource(
             semantic_sha256=calculated_sha,
             identity={
-                "identity_sha256": implementation["tree_sha256"],
+                "identity_sha256": archive_snapshot.sha256,
                 "case_manifest_sha256": "0" * 64,
                 "binary_sha256": "0" * 64,
                 "package_content_sha256": "0" * 64,
@@ -1573,7 +1574,7 @@ def select(values: list[tuple[Snapshot, dict[str, Any]]]) -> dict[str, Any]:
             "upstream_p2_reason": raw_sources[0].upstream_qualification["reason"] if raw_sources else None,
             "qualification_only_p3_implementation": sorted(
                 [source.p3_implementation for source in raw_sources if source.p3_implementation is not None],
-                key=lambda item: (item["commit"], item["tree_sha256"]),
+                key=lambda item: (item["commit"], item["tree_oid"]),
             ),
             "upstream_p2_terminal_bindings": sorted(
                 [source.p2_terminal_bindings for source in raw_sources if source.p2_terminal_bindings is not None],

@@ -36,7 +36,7 @@ def fixture(root: Path) -> tuple[dict, Path, Path]:
     QFIX.write_json(qualification_path, qualification)
     archive_path = root / "p3-source.tar"
     archive_path.write_bytes(b"immutable synthetic source archive\n")
-    value = RAW.build(qualification_path, "9" * 40, "8" * 64, archive_path)
+    value = RAW.build(qualification_path, "9" * 40, "8" * 40, archive_path)
     return value, qualification_path, archive_path
 
 

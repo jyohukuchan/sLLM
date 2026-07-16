@@ -36,7 +36,7 @@ def package(root: Path) -> None:
     QFIX.write_json(qualification_path, qualification)
     archive = root / "p3-source.tar"
     archive.write_bytes(b"source archive\n")
-    raw = RAW.build(qualification_path, "9" * 40, "8" * 64, archive)
+    raw = RAW.build(qualification_path, "9" * 40, "8" * 40, archive)
     raw_path = root / "qualification-only-raw.json"
     QFIX.write_json(raw_path, raw)
     snapshot = FINALIZER.SELECTOR.capture(raw_path)
