@@ -470,6 +470,37 @@ def require_count(value: Any, label: str, *, allow_none: bool = False) -> int | 
     return value
 
 
+def require_integer_median(value: Any, label: str) -> int | float:
+    """Accept only an exact median attainable from an even integer sample.
+
+    Ten integer observations can have an integer or half-integer median.  Keeping
+    the half preserves the direction of one-byte/resource differences instead of
+    silently truncating them before the non-regression gates run.
+    """
+
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise SelectionError(
+            f"{label} must be a non-negative integer or half-integer median"
+        )
+    if isinstance(value, int):
+        if value < 0:
+            raise SelectionError(
+                f"{label} must be a non-negative integer or half-integer median"
+            )
+        return value
+    number = value
+    if (
+        not math.isfinite(number)
+        or number < 0.0
+        or number > float(1 << 52)
+        or not (number * 2.0).is_integer()
+    ):
+        raise SelectionError(
+            f"{label} must be a non-negative integer or half-integer median"
+        )
+    return value
+
+
 def require_reason_list(value: Any, label: str) -> list[str]:
     if type(value) is not list or any(type(item) is not str or not item for item in value):
         raise SelectionError(f"{label} must be a string array")
@@ -535,7 +566,7 @@ def _validate_candidate_a_measurement(
         "baseline_fallback_count",
         "candidate_fallback_count",
     }
-    nonnegative_fields = {
+    integer_median_fields = {
         "baseline_d2d_bytes",
         "candidate_d2d_bytes",
         "baseline_workspace_bytes",
@@ -547,8 +578,8 @@ def _validate_candidate_a_measurement(
         parsed[field] = require_number(row[field], f"{label}.{field}", positive=True)
     for field in sorted(count_fields):
         parsed[field] = require_count(row[field], f"{label}.{field}")
-    for field in sorted(nonnegative_fields):
-        parsed[field] = require_count(row[field], f"{label}.{field}")
+    for field in sorted(integer_median_fields):
+        parsed[field] = require_integer_median(row[field], f"{label}.{field}")
     for field in ("baseline_fallback_reasons", "candidate_fallback_reasons"):
         parsed[field] = require_reason_list(row[field], f"{label}.{field}")
     for field in ("direct_alias_safe", "direct_size_safe", "direct_admission_safe"):
@@ -1310,14 +1341,15 @@ def select(values: list[tuple[Snapshot, dict[str, Any]]]) -> dict[str, Any]:
             row for row in measurements if row["candidate_id"] == candidate_id
         ]
         candidate_pairs = [row for row in pairs if row["candidate_id"] == candidate_id]
-        measurement_sources = [
+        candidate_sources = [
             source
             for source in raw_sources
             if any(row["candidate_id"] == candidate_id for row in source.measurements)
+            or any(row["candidate_id"] == candidate_id for row in source.pairs)
         ]
         candidate_capabilities = {
-            field: bool(measurement_sources)
-            and all(source.capabilities[field] for source in measurement_sources)
+            field: bool(candidate_sources)
+            and all(source.capabilities[field] for source in candidate_sources)
             for field in (
                 CAPABILITY_FIELDS
                 | (CANDIDATE_A_CAPABILITY_FIELDS if CANDIDATES[candidate_id].get("candidate_a") else set())

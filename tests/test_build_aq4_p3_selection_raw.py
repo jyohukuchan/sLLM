@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import math
 import sys
 from pathlib import Path
 
@@ -306,6 +307,8 @@ def direct_trace_fixture(
     duplicate: bool = False,
     baseline_full_model_ms: float = 100.0,
     candidate_full_model_ms: float = 90.0,
+    baseline_overrides: dict[str, object] | None = None,
+    candidate_overrides: dict[str, object] | None = None,
 ) -> Path:
     events = []
     for side, d2d_bytes, copy_count in (("baseline", 1000, 10), ("candidate", 400, 4)):
@@ -324,6 +327,12 @@ def direct_trace_fixture(
             "admission_safe": True,
             "fidelity_binding_sha256": "d" * 64,
         }
+        values.update(
+            baseline_overrides if side == "baseline" and baseline_overrides else {}
+        )
+        values.update(
+            candidate_overrides if side == "candidate" and candidate_overrides else {}
+        )
         allowed = PRODUCER.DIRECT_RUN_METRICS if binding_kind == "run" else PRODUCER.DIRECT_PAIR_METRICS
         for metric, value in values.items():
             if metric not in allowed:
@@ -354,6 +363,25 @@ def direct_trace_fixture(
     value["trace_sha256"] = PRODUCER.self_hash(value, "trace_sha256")
     write_json(path, value)
     return path
+
+
+def reseal_direct_trace(value: dict[str, object]) -> dict[str, object]:
+    for event in value["events"]:
+        event["event_sha256"] = PRODUCER.self_hash(event, "event_sha256")
+    value["trace_sha256"] = PRODUCER.self_hash(value, "trace_sha256")
+    return value
+
+
+def parse_run_direct(path: Path) -> dict[str, dict[str, object]]:
+    return PRODUCER.parse_direct_sequence_output_trace(
+        PRODUCER.capture(path.resolve(), "direct"),
+        case_id="case",
+        case_sha256="2" * 64,
+        identity_sha256="3" * 64,
+        candidate_id="sequence-output-direct-v1",
+        binding_kind="run",
+        binding_id="2",
+    )
 
 
 def promotion_manifest(tmp_path: Path, *, all_m128: bool = False) -> tuple[Path, dict[str, object]]:
@@ -470,6 +498,55 @@ def promotion_manifest(tmp_path: Path, *, all_m128: bool = False) -> tuple[Path,
     return path, manifest
 
 
+def candidate_a_promotion_manifest(
+    tmp_path: Path,
+    *,
+    run_overrides=None,
+) -> tuple[Path, dict[str, object]]:
+    _path, manifest = promotion_manifest(tmp_path)
+    identity_path = Path(manifest["identity"]["path"])
+    identity = json.loads(identity_path.read_text())
+    manifest["candidate"] = {
+        "candidate_id": "sequence-output-direct-v1",
+        "family": "attention_recurrent",
+    }
+    for index, case in enumerate(manifest["representative_cases"]):
+        case_id = case["case_id"]
+        case_sha = case["case_sha256"]
+        for binding in case["profile_runs"]:
+            run_index = binding["resident_run_index"]
+            baseline_overrides: dict[str, object] = {}
+            candidate_overrides: dict[str, object] = {}
+            if run_overrides is not None:
+                baseline_overrides, candidate_overrides = run_overrides(index, run_index)
+            direct = direct_trace_fixture(
+                tmp_path / f"direct-{index}-{run_index}.json",
+                case_id=case_id,
+                case_sha=case_sha,
+                identity_sha=identity["identity_sha256"],
+                binding_id=str(run_index),
+                baseline_full_model_ms=100.0 + (run_index % 3) * 0.1,
+                candidate_full_model_ms=90.0 + (run_index % 3) * 0.1,
+                baseline_overrides=baseline_overrides,
+                candidate_overrides=candidate_overrides,
+            )
+            binding["direct_sequence_output_trace"] = ref(direct)
+    for index, pair in enumerate(manifest["full_model_pairs"]):
+        direct = direct_trace_fixture(
+            tmp_path / f"pair-direct-{index}.json",
+            case_id=pair["case_id"],
+            case_sha=pair["case_sha256"],
+            identity_sha=identity["identity_sha256"],
+            binding_kind="pair",
+            binding_id=pair["pair_id"],
+        )
+        pair["direct_sequence_output_trace"] = ref(direct)
+    manifest["manifest_sha256"] = PRODUCER.manifest_sha256(manifest)
+    manifest_path = tmp_path / "candidate-a-manifest.json"
+    write_json(manifest_path, manifest)
+    return manifest_path, manifest
+
+
 def build_manifest(path: Path) -> dict[str, object]:
     snapshot = PRODUCER.capture(path.resolve(), "manifest")
     value = PRODUCER.parse_json(snapshot, "manifest")
@@ -551,15 +628,101 @@ def test_candidate_a_direct_trace_binds_events_and_rejects_duplicate_or_tamper(
     tampered_path = tmp_path / "tampered.json"
     write_json(tampered_path, tampered)
     with pytest.raises(PRODUCER.ProducerError, match="self-hash differs"):
-        PRODUCER.parse_direct_sequence_output_trace(
-            PRODUCER.capture(tampered_path.resolve(), "tampered"),
-            case_id="case",
-            case_sha256="2" * 64,
-            identity_sha256="3" * 64,
-            candidate_id="sequence-output-direct-v1",
-            binding_kind="run",
-            binding_id="2",
+        parse_run_direct(tampered_path)
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        (lambda value: value["events"].pop(), "metrics are missing"),
+        (
+            lambda value: value["events"][0].__setitem__("metric", "unknown_metric"),
+            "side/metric is unknown",
+        ),
+        (
+            lambda value: value["events"].append(
+                {
+                    **value["events"][0],
+                    "event_id": "unique-duplicate-metric",
+                }
+            ),
+            "metric is duplicated",
+        ),
+    ],
+)
+def test_candidate_a_direct_trace_missing_unknown_and_duplicate_metric_matrix(
+    tmp_path: Path, mutation, message: str
+) -> None:
+    path = direct_trace_fixture(tmp_path / "direct.json")
+    value = json.loads(path.read_text())
+    mutation(value)
+    reseal_direct_trace(value)
+    write_json(path, value)
+    with pytest.raises(PRODUCER.ProducerError, match=message):
+        parse_run_direct(path)
+
+
+def test_candidate_a_direct_trace_rejects_nonfinite_json(tmp_path: Path) -> None:
+    path = direct_trace_fixture(tmp_path / "direct.json")
+    value = json.loads(path.read_text())
+    value["events"][0]["value"] = math.nan
+    path.write_text(json.dumps(value, allow_nan=True), encoding="utf-8")
+    with pytest.raises(PRODUCER.ProducerError, match="non-finite JSON"):
+        parse_run_direct(path)
+
+
+@pytest.mark.parametrize(
+    ("field", "replacement", "message"),
+    [
+        ("schema_version", "unknown.schema", "schema/status differs"),
+        ("status", "partial", "schema/status differs"),
+        ("candidate_id", "other-candidate", "candidate differs"),
+        ("identity_sha256", "4" * 64, "identity differs"),
+        ("case_id", "other-case", "case differs"),
+        ("case_sha256", "5" * 64, "case differs"),
+        ("binding_id", "3", "binding differs"),
+        ("binding_kind", "pair", "binding differs"),
+    ],
+)
+def test_candidate_a_direct_trace_root_identity_case_run_pair_matrix(
+    tmp_path: Path, field: str, replacement: str, message: str
+) -> None:
+    path = direct_trace_fixture(tmp_path / "direct.json")
+    value = json.loads(path.read_text())
+    value[field] = replacement
+    reseal_direct_trace(value)
+    write_json(path, value)
+    with pytest.raises(PRODUCER.ProducerError, match=message):
+        parse_run_direct(path)
+
+
+def test_candidate_a_direct_trace_root_and_file_hash_tamper_fail_closed(
+    tmp_path: Path,
+) -> None:
+    path = direct_trace_fixture(tmp_path / "direct.json")
+    value = json.loads(path.read_text())
+    value["trace_sha256"] = "0" * 64
+    write_json(path, value)
+    with pytest.raises(PRODUCER.ProducerError, match="self-hash differs"):
+        parse_run_direct(path)
+
+    with pytest.raises(PRODUCER.ProducerError, match="SHA-256 differs"):
+        PRODUCER.load_ref(
+            {"path": str(path.resolve()), "sha256": "0" * 64},
+            "direct sequence output trace",
+            [],
         )
+
+
+def test_candidate_a_direct_trace_rejects_producer_fidelity_mismatch(
+    tmp_path: Path,
+) -> None:
+    path = direct_trace_fixture(
+        tmp_path / "direct.json",
+        candidate_overrides={"fidelity_binding_sha256": "e" * 64},
+    )
+    with pytest.raises(PRODUCER.ProducerError, match="fidelity binding differs"):
+        parse_run_direct(path)
 
 
 @pytest.mark.parametrize(
@@ -651,46 +814,82 @@ def test_promotion_build_emits_selector_compatible_hash_bound_raw(tmp_path: Path
 
 
 def test_candidate_a_promotion_build_emits_direct_metrics_and_contract(tmp_path: Path) -> None:
-    _path, manifest = promotion_manifest(tmp_path)
-    identity_path = Path(manifest["identity"]["path"])
-    identity = json.loads(identity_path.read_text())
-    manifest["candidate"] = {
-        "candidate_id": "sequence-output-direct-v1",
-        "family": "attention_recurrent",
-    }
-    for index, case in enumerate(manifest["representative_cases"]):
-        case_id = case["case_id"]
-        case_sha = case["case_sha256"]
-        for binding in case["profile_runs"]:
-            run_index = binding["resident_run_index"]
-            direct = direct_trace_fixture(
-                tmp_path / f"direct-{index}-{run_index}.json",
-                case_id=case_id,
-                case_sha=case_sha,
-                identity_sha=identity["identity_sha256"],
-                binding_id=str(run_index),
-                baseline_full_model_ms=100.0 + (run_index % 3) * 0.1,
-                candidate_full_model_ms=90.0 + (run_index % 3) * 0.1,
-            )
-            binding["direct_sequence_output_trace"] = ref(direct)
-    for index, pair in enumerate(manifest["full_model_pairs"]):
-        direct = direct_trace_fixture(
-            tmp_path / f"pair-direct-{index}.json",
-            case_id=pair["case_id"],
-            case_sha=pair["case_sha256"],
-            identity_sha=identity["identity_sha256"],
-            binding_kind="pair",
-            binding_id=pair["pair_id"],
-        )
-        pair["direct_sequence_output_trace"] = ref(direct)
-    manifest["manifest_sha256"] = PRODUCER.manifest_sha256(manifest)
-    manifest_path = tmp_path / "candidate-a-manifest.json"
-    write_json(manifest_path, manifest)
+    manifest_path, _manifest = candidate_a_promotion_manifest(tmp_path)
     output = build_manifest(manifest_path)
     assert output["measurements"][0]["candidate_d2d_bytes"] == 400
     assert output["measurements"][0]["candidate_component_p50_ms"] == 8.0
     assert output["full_model_pairs"][0]["candidate_d2d_copy_count"] == 4
     PRODUCER.SELECTOR.validate_raw(output)
+
+
+def test_candidate_a_nonuniform_ten_run_percentiles_preserve_half_medians(
+    tmp_path: Path,
+) -> None:
+    def overrides(_case_index: int, run_index: int):
+        sample = run_index - 1
+        upper_half = sample > 5
+        return (
+            {
+                "d2d_bytes": 1001 if upper_half else 1000,
+                "workspace_bytes": 2001 if upper_half else 2000,
+                "peak_vram_bytes": 3001 if upper_half else 3000,
+                "component_ms": float(sample),
+            },
+            {
+                "d2d_bytes": 401 if upper_half else 400,
+                "workspace_bytes": 2001 if upper_half else 2000,
+                "peak_vram_bytes": 3001 if upper_half else 3000,
+                "component_ms": float(sample) - 0.5,
+                "full_model_ms": 79.0 + float(sample),
+            },
+        )
+
+    path, _manifest = candidate_a_promotion_manifest(
+        tmp_path, run_overrides=overrides
+    )
+    output = build_manifest(path)
+    row = output["measurements"][0]
+    assert row["baseline_d2d_bytes"] == 1000.5
+    assert row["candidate_d2d_bytes"] == 400.5
+    assert row["baseline_workspace_bytes"] == 2000.5
+    assert row["baseline_peak_vram_bytes"] == 3000.5
+    assert row["baseline_component_p50_ms"] == 5.5
+    assert row["baseline_component_p95_ms"] == pytest.approx(9.55)
+    assert row["candidate_component_p50_ms"] == 5.0
+    assert row["candidate_component_p95_ms"] == pytest.approx(9.05)
+    assert row["candidate_full_model_p50_ms"] == 84.5
+    assert row["candidate_full_model_p95_ms"] == pytest.approx(88.55)
+    PRODUCER.SELECTOR.validate_raw(output)
+
+
+def test_candidate_a_direct_trace_reuse_across_runs_fails_closed(
+    tmp_path: Path,
+) -> None:
+    _path, manifest = candidate_a_promotion_manifest(tmp_path)
+    bindings = manifest["representative_cases"][0]["profile_runs"]
+    bindings[1]["direct_sequence_output_trace"] = bindings[0][
+        "direct_sequence_output_trace"
+    ]
+    manifest["manifest_sha256"] = PRODUCER.manifest_sha256(manifest)
+    path = tmp_path / "reused-direct-manifest.json"
+    write_json(path, manifest)
+    with pytest.raises(PRODUCER.ProducerError, match="direct sequence trace was reused"):
+        build_manifest(path)
+
+
+def test_candidate_a_fidelity_binding_must_be_uniform_across_ten_runs(
+    tmp_path: Path,
+) -> None:
+    def overrides(_case_index: int, run_index: int):
+        fidelity = "e" * 64 if run_index == 11 else "d" * 64
+        values = {"fidelity_binding_sha256": fidelity}
+        return values, values
+
+    path, _manifest = candidate_a_promotion_manifest(
+        tmp_path, run_overrides=overrides
+    )
+    with pytest.raises(PRODUCER.ProducerError, match="changed across measured runs"):
+        build_manifest(path)
 
 
 def test_cli_publishes_once_and_refuses_overwrite(tmp_path: Path) -> None:

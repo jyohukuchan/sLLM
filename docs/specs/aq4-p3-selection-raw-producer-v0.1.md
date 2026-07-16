@@ -279,9 +279,17 @@ workspace/peak VRAM、fallback count/reasons、alias/size/admission safety、fid
 event ID、(side, metric)、trace binding、identity/case/run(or pair) IDは重複・欠落・unknown・
 再利用を拒否し、non-finite、self-hash/file-hash tamper、direct/copy fidelity不一致も拒否する。
 producerは10 measured runのeventからp50/p95と安全性を再計算し、入力が書いた合否や集計値を
-信頼しない。A rawのcapabilityはselectorのA専用10項目を全てtrueにし、D2D bytes/copy countを
+信頼しない。D2D bytes、workspace bytes、peak VRAMのmedianは10件の整数sampleからexactに
+計算し、中央2値の平均が半整数なら`.5`を保持する。整数への切り捨ては禁止する。componentと
+full-model latencyは非一様な10件にも通常のp50と線形補間p95を適用する。`.5`をIEEE-754で
+exactに表現できない大きさでは丸めず、strictに拒否する。
+A rawのcapabilityはselectorのA専用10項目を全てtrueにし、D2D bytes/copy countを
 減らさない、safetyを満たさない、またはfidelityが一致しない証拠はselectorがfail-closedで
 候補を選ばない。
+
+否定系ではD2D bytes/copy、launch、workspace、peak、fallbackのmeasurement/pair回帰、fallback
+reasonのsubset違反、安全性3項目、p50/p95逆転、traceのmissing/unknown/non-finite/reuse、
+root/schema/file/identity/case/run/pair tamper、fidelity不一致を個別に検証する。
 
 これらはexit code 2で、outputを発行しない。
 

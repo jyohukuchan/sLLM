@@ -182,6 +182,18 @@ def select_raw(tmp_path: Path, value: dict[str, object]) -> dict[str, object]:
     return SELECTOR.select([(snapshot, SELECTOR.parse_json(snapshot))])
 
 
+def select_raw_values(
+    tmp_path: Path, *values: dict[str, object]
+) -> dict[str, object]:
+    sources = []
+    for index, value in enumerate(values):
+        path = tmp_path / f"raw-{index}.json"
+        write_json(path, value)
+        snapshot = SELECTOR.capture(path)
+        sources.append((snapshot, SELECTOR.parse_json(snapshot)))
+    return SELECTOR.select(sources)
+
+
 def candidate(result: dict[str, object], candidate_id: str) -> dict[str, object]:
     return next(
         item for item in result["candidates"] if item["candidate_id"] == candidate_id
@@ -383,6 +395,139 @@ def test_candidate_a_missing_metric_rejected_before_selection() -> None:
     value = candidate_a_raw_fixture()
     del value["measurements"][0]["candidate_peak_vram_bytes"]
     with pytest.raises(SELECTOR.SelectionError, match="fields differ"):
+        SELECTOR.validate_raw(value)
+
+
+@pytest.mark.parametrize(
+    ("field", "replacement", "reason"),
+    [
+        ("candidate_d2d_bytes", 1001, "candidate_a_d2d_bytes_regressed"),
+        ("candidate_d2d_copy_count", 11, "candidate_a_d2d_copy_count_regressed"),
+        ("candidate_launch_count", 11, "candidate_a_launch_count_regressed"),
+        ("candidate_workspace_bytes", 2000.5, "candidate_a_workspace_regressed"),
+        ("candidate_peak_vram_bytes", 3000.5, "candidate_a_peak_vram_regressed"),
+        ("candidate_fallback_count", 1, "candidate_a_fallback_regressed"),
+    ],
+)
+def test_candidate_a_measurement_regression_matrix_fails_closed(
+    tmp_path: Path, field: str, replacement: int | float, reason: str
+) -> None:
+    value = candidate_a_raw_fixture()
+    value["measurements"][0][field] = replacement
+    seal(value)
+    item = candidate(select_raw(tmp_path, value), "sequence-output-direct-v1")
+    assert item["eligible"] is False
+    assert reason in item["reason_codes"]
+
+
+@pytest.mark.parametrize(
+    ("field", "replacement"),
+    [
+        ("candidate_d2d_bytes", 1001),
+        ("candidate_d2d_copy_count", 11),
+        ("candidate_launch_count", 11),
+        ("candidate_workspace_bytes", 2001),
+        ("candidate_peak_vram_bytes", 3001),
+        ("candidate_fallback_count", 1),
+    ],
+)
+def test_candidate_a_full_model_pair_regression_matrix_fails_closed(
+    tmp_path: Path, field: str, replacement: int
+) -> None:
+    value = candidate_a_raw_fixture()
+    value["full_model_pairs"][0][field] = replacement
+    seal(value)
+    item = candidate(select_raw(tmp_path, value), "sequence-output-direct-v1")
+    assert item["eligible"] is False
+    assert "candidate_a_full_model_safety_regression" in item["reason_codes"]
+
+
+@pytest.mark.parametrize(
+    ("collection", "reason"),
+    [
+        ("measurements", "candidate_a_fallback_reasons_inconsistent"),
+        ("full_model_pairs", "candidate_a_full_model_fallback_regression"),
+    ],
+)
+def test_candidate_a_fallback_reason_must_be_baseline_subset(
+    tmp_path: Path, collection: str, reason: str
+) -> None:
+    value = candidate_a_raw_fixture()
+    row = value[collection][0]
+    row["baseline_fallback_count"] = 1
+    row["candidate_fallback_count"] = 1
+    row["baseline_fallback_reasons"] = ["baseline-route"]
+    row["candidate_fallback_reasons"] = ["new-route"]
+    seal(value)
+    item = candidate(select_raw(tmp_path, value), "sequence-output-direct-v1")
+    assert item["eligible"] is False
+    assert reason in item["reason_codes"]
+
+
+@pytest.mark.parametrize("collection", ["measurements", "full_model_pairs"])
+@pytest.mark.parametrize(
+    "field", ["direct_alias_safe", "direct_size_safe", "direct_admission_safe"]
+)
+def test_candidate_a_safety_boolean_matrix_fails_closed(
+    tmp_path: Path, collection: str, field: str
+) -> None:
+    value = candidate_a_raw_fixture()
+    value[collection][0][field] = False
+    seal(value)
+    item = candidate(select_raw(tmp_path, value), "sequence-output-direct-v1")
+    assert item["eligible"] is False
+    assert "candidate_a_safety_regression" in item["reason_codes"]
+
+
+@pytest.mark.parametrize(
+    ("field", "replacement"),
+    [
+        ("baseline_component_p50_ms", 14.0),
+        ("candidate_component_p50_ms", 10.0),
+        ("baseline_full_model_p95_ms", 99.0),
+        ("candidate_full_model_p50_ms", 96.0),
+    ],
+)
+def test_candidate_a_rejects_component_and_full_model_p50_above_p95(
+    field: str, replacement: float
+) -> None:
+    value = candidate_a_raw_fixture()
+    value["measurements"][0][field] = replacement
+    with pytest.raises(SELECTOR.SelectionError, match="below"):
+        SELECTOR.validate_raw(value)
+
+
+def test_candidate_a_pair_only_source_capability_false_fails_closed(
+    tmp_path: Path,
+) -> None:
+    measurement_source = candidate_a_raw_fixture()
+    pair_source = candidate_a_raw_fixture()
+    measurement_source["full_model_pairs"] = []
+    pair_source["measurements"] = []
+    pair_source["capabilities"]["direct_copy_fidelity"] = False
+    seal(measurement_source)
+    seal(pair_source)
+    item = candidate(
+        select_raw_values(tmp_path, measurement_source, pair_source),
+        "sequence-output-direct-v1",
+    )
+    assert item["eligible"] is False
+    assert "candidate_a_direct_copy_fidelity_missing" in item["reason_codes"]
+
+
+def test_candidate_a_integer_medians_preserve_half_and_reject_other_fractions(
+    tmp_path: Path,
+) -> None:
+    value = candidate_a_raw_fixture()
+    value["measurements"][0]["candidate_workspace_bytes"] = 2000.5
+    seal(value)
+    item = candidate(select_raw(tmp_path, value), "sequence-output-direct-v1")
+    assert "candidate_a_workspace_regressed" in item["reason_codes"]
+    assert item["representative"]["prompts"][0]["candidate_workspace_bytes"] == 2000.5
+
+    value = candidate_a_raw_fixture()
+    value["measurements"][0]["candidate_workspace_bytes"] = 2000.25
+    with pytest.raises(SELECTOR.SelectionError, match="integer or half-integer"):
         SELECTOR.validate_raw(value)
 
 

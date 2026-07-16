@@ -73,7 +73,9 @@ stream_sync_count
 stream_sync_time_ms
 ```
 
-同じ候補を複数raw inputへ分ける場合、その候補のmeasurementを含む全inputが必要capabilityをtrueにしなければならない。別候補のcapabilityを流用しない。
+同じ候補を複数raw inputへ分ける場合、その候補のmeasurementまたはfull-model pairを含む
+全inputが必要capabilityをtrueにしなければならない。pairだけを供給するinputも集約対象であり、
+falseまたはmissingはfail-closedとする。別候補のcapabilityを流用しない。
 
 既存4固定候補はこの契約をそのまま使用する。候補Aの正式IDは
 `sequence-output-direct-v1`で、familyは既存trace分類と互換な`attention_recurrent`である。
@@ -147,6 +149,10 @@ direct_fidelity_binding_sha256, copy_fidelity_binding_sha256
 
 Aのfull-model pairは、baseline/candidateのD2D bytes/copy count、launch count、workspace/peak
 VRAM、fallback count/reasons、安全性3項目、fidelity binding 2項目を同様に必須とする。
+measurementのD2D bytes、workspace bytes、peak VRAMは10件の非負整数sampleから得たmedian
+なので、非負整数または半整数だけを許す。半整数を整数へ切り捨ててはならない。copy、launch、
+fallbackのcount medianは整数だけを許し、それ以外の分数は証拠契約違反として拒否する。
+浮動小数点でexactな半整数を表せない範囲も拒否する。
 
 ### 2.3 full-model paired sample
 
@@ -255,6 +261,8 @@ raw inputは順序不変のsemantic SHA-256で束縛する。diagnostic profile�
 - non-finite、負値、不正型、0以下の時間
 - semantic hash不一致、identity/case hash不正、複数identityの混在
 - measurement/pair重複、unknown candidate、family不一致
+- component/full-modelのp50が対応するp95を上回る
+- 候補Aの整数由来medianが整数/半整数でない、またはpair専用inputの必要capabilityがfalse/missing
 - smoke-only、promotion不可、measurement不可のraw evidence
 - 31件以上のpaired sample
 - 出力先の既存file

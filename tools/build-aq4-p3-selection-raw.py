@@ -1284,10 +1284,30 @@ def trace_measurement(
             return [item[side][metric] for item in direct_runs]
 
         def median_count(values_: list[int], label: str) -> int:
-            value = median([float(item) for item in values_])
-            if not value.is_integer():
+            ordered = sorted(values_)
+            middle = len(ordered) // 2
+            if len(ordered) % 2:
+                return ordered[middle]
+            total = ordered[middle - 1] + ordered[middle]
+            if total % 2:
                 raise ProducerError(f"{label} median is not an integer")
-            return int(value)
+            return total // 2
+
+        def integer_sample_median(values_: list[int]) -> int | float:
+            ordered = sorted(values_)
+            middle = len(ordered) // 2
+            if len(ordered) % 2:
+                return ordered[middle]
+            total = ordered[middle - 1] + ordered[middle]
+            if total % 2 == 0:
+                return total // 2
+            # JSON has no rational-number type.  Keep .5 only while IEEE-754 can
+            # represent it exactly; reject larger half-integers instead of rounding.
+            if total > (1 << 53) - 1:
+                raise ProducerError(
+                    "integer sample median exceeds exact half-integer range"
+                )
+            return total / 2
 
         def percentile95(values_: list[float]) -> float:
             ordered = sorted(values_)
@@ -1299,8 +1319,12 @@ def trace_measurement(
             return ordered[left] + (ordered[right] - ordered[left]) * (index - left)
 
         for field in ("d2d_bytes", "workspace_bytes", "peak_vram_bytes"):
-            observed[f"baseline_{field}"] = int(median([float(item) for item in values("baseline", field)]))
-            observed[f"candidate_{field}"] = int(median([float(item) for item in values("candidate", field)]))
+            observed[f"baseline_{field}"] = integer_sample_median(
+                values("baseline", field)
+            )
+            observed[f"candidate_{field}"] = integer_sample_median(
+                values("candidate", field)
+            )
         for field in ("d2d_copy_count", "launch_count", "fallback_count"):
             observed[f"baseline_{field}"] = median_count(values("baseline", field), f"baseline {field}")
             observed[f"candidate_{field}"] = median_count(values("candidate", field), f"candidate {field}")
