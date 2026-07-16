@@ -1,6 +1,6 @@
 # AQ4 fidelity root cause and fix plan v0.1
 
-Status: Phase 1・Phase 2・Phase 2b・Phase 3b完了。H8・H6とも棄却方向、H5(GPU kernel固有)が有力。次はPhase 3c(単発承認GPU window、現在未承認・未申請)。P2 fidelity calibrationはNo-Go凍結中、GPU実行は未承認。
+Status: Phase 1・Phase 2・Phase 2b・Phase 3b・Phase 3c-prep完了。H8・H6とも棄却方向、H5(GPU kernel固有)が有力(未確証)。runbook作成済み、**Phase 3cの実行にはユーザーによるGPU window承認が必要**(2026-07-17時点で未申請)。P2 fidelity calibrationはNo-Go凍結中。
 
 **用語訂正(Phase 3bで判明)**: これまで「07/14 production run」「GPU実測」と呼んでいた最終相対L2`0.6151289249`の測定は、実際にはOpenAI Gatewayへの実requestではなく、production packageを直接loadしたM=1診断binary(`ullm-aq4-p2-path-oracle`/`ullm-aq4-differential-trace`、service停止済み)による管理された診断実行だった。以降この計画では「07/14 M=1診断」と呼ぶ。
 
@@ -242,20 +242,25 @@ Exit Criteria:
 
 - 段階別差分が量子化演算の理論上の丸め誤差（ほぼゼロに近いはず）に収まるか、有意な乖離がある場合はその段階が特定されている。
 
-### Phase 3c-prep: GPU window承認待ちのCPU-only準備作業
+### Phase 3c-prep: GPU window承認待ちのCPU-only準備作業 — 完了
 
-GPU window未承認のあいだにCPU-onlyで進められる準備作業。GPU実行やservice操作は一切行わない。
+Status: **完了**（commit `b1bf9499`,`d6c0d6c1`,`859672d9`,`5a0fb4c5`,`6a4f380d`、実行: `gpt-5.6-terra`/`max`。レビュー記録: [aq4-phase3c-prep-fused-kernel-review-v0.1.md](../../journal/2026/07/17/aq4-phase3c-prep-fused-kernel-review-v0.1.md)、runbook: [aq4-phase3c-gpu-window-runbook-v0.1.md](aq4-phase3c-gpu-window-runbook-v0.1.md)）
 
-Tasks:
+結果:
 
-1. Phase 3bで特定したfused kernel実装（`runtime/src/ullm_runtime_hiprtc_sources.inc`のQKV/Z/A/B/gate/beta fused kernel、fused MLP kernel、group scale+tree reduction dequant）を、CPU参照実装（`runtime/src/ullm_runtime_parts/part_00.inc`、`runtime/src/ullm_runtime_api_aq4.inc`のCPU branch）と1行単位で突き合わせ、**単なるf32丸め順序の違いでは説明できない実装上の不一致**（演算の欠落、係数の誤り、shape/index計算のズレ等）がないかをソースコードレビューだけで探す。見つかった場合はGPU実行なしに候補バグとして記録する。
-2. 07/14の`ullm-aq4-differential-trace`を、Phase 1のCPU stage report（QKV dequant、Z dequant、recurrent state、attention residual、post norm、MLP、layer output）と同じ境界でGPU中間値を取得できるよう拡張する。ビルド・静的検証まではCPU-onlyで完結できる。実行はPhase 3cのGPU windowでのみ行う。
-3. GPU window実行時の手順（1回だけの実行内容、比較対象、成功/失敗判定基準）を事前に文書化し、承認依頼時にそのまま使えるようにする。
+1. **ソースコードレビューでは、有効なAQ4 payload前提で07/14規模の不一致を説明する高確信度の通常算術バグは見つからなかった。** QKV/Z/A/B/gate/beta fused、fused MLP、output projection+residual、Conv SiLU/QK norm、recurrent state、layer input RMSNormをCPU参照実装と1行単位で突き合わせ、欠落項・係数取り違え・shape/indexズレは確認されなかった（07/05型の見落としの再発もなし）。H5は未確証のまま、Phase 3c実測が必要。
+2. **副次的に2件の実装差を発見（07/14の根因との確証はないが、記録に値する）**:
+   - GPU fused/genericカーネルは不正な`scale_index`を検出せずgroupをskipして続行するのに対し、CPU側は明示的にエラーとして停止する（`runtime/src/ullm_runtime_hiprtc_sources.inc:657-660`等 vs `part_00.inc:2724-2728`）。有効packageでは発火しないが、**プロジェクトが掲げる「silent fallbackの禁止」という設計原則に反する潜在的な意味論的バグ**であり、Phase 4以降で修正候補として検討する価値がある。
+   - HIPRTC kernelはcompile時にRPB(rows-per-block)を定数として埋め込むが、module cacheはdevice IDだけをkeyにしており、launcherは呼び出しごとに環境変数からRPBを再読する。同一プロセス内でcompile後にRPBを変更すると、compile済みkernelのrows_per_blockとlaunch gridが不整合になり得る（未書込み行または範囲外アクセス）。07/14に実際にRPB変更があった証拠はないが、条件が揃えば確実に起こりうる設定不整合として、Phase 3cのrunbookでRPBをprocess起動前に固定することで除外した。
+3. **GPU stage trace toolingを拡張**（`ullm-aq4-differential-trace`）: fused kernel API/ABIは変更せず、既存device bufferのD2H read-backだけでlayer0の10 stage（QKV/Z dequant、gate、beta、recurrent state/output、attention residual、post norm、MLP activation、layer output）をPhase 1のCPU stage境界と揃えて取得できるようにした。CPU/GPU入力がbit-exactであることを確認するpreflightチェックも追加。
+4. **Phase 3c実行用runbookを作成**: 承認後に一回だけ実行する正確なコマンド、固定fixture（07/14と同一の3 context）、RPB/visible-device/fusion-guard固定、`flock`によるlock取得、成功/失敗判定基準（relative L2の4段階しきい値: `<=1e-5`丸め誤差相当、`1e-5〜1e-3`要記録、`1e-3〜1e-2`有意差候補、`>1e-2`強い実装差）、no-retry/evidence保存の運用規則を文書化した。
+
+CPU-only検証: `cargo build`成功、trace unit tests 11 passed、CPU AQ4 matvec tests 10 passed、Python tooling tests 2 passed。GPU・service・systemd・active manifest・07/16停止中P3 harnessには一切触れていない。
 
 Exit Criteria:
 
-- ソースコードレビューだけで候補バグが見つかった場合、その内容と確信度が記録されている。
-- 見つからなかった場合でも、Phase 3cのGPU window実行が最小の手数（拡張済みtraceツール、明確な実行手順）で完了できる状態になっている。
+- ソースコードレビューだけで候補バグが見つかった場合、その内容と確信度が記録されている。 ✅ 2件（いずれも07/14根因としては未確証）。
+- 見つからなかった場合でも、Phase 3cのGPU window実行が最小の手数（拡張済みtraceツール、明確な実行手順）で完了できる状態になっている。 ✅ runbook完成、承認待ち。
 
 ## Phase 4: 原因分類とfix設計
 
@@ -384,5 +389,5 @@ Phase 2〜3の結果に応じて、次のいずれかのfix pathを選ぶ。
 1. ~~Phase 2: hybrid診断harnessを複数層chainへ拡張し...~~ **完了**（layer 0-3、layer 0-11拡張）。H8は最終相対L2 0.615を単独で説明しないと判定。
 2. ~~Phase 2b: post-norm epsilon control比較~~ **完了**。epsilon差は無視できる規模。
 3. ~~Phase 3b（診断harnessと実productionの構成差監査、H6、CPU-only）~~ **完了**。H6棄却、H5（GPU kernel固有）が有力化。07/14測定の実体はGateway実requestではなくM=1診断だったことも判明。
-4. Phase 3c-prep（fused kernel source vs CPU参照実装のコードレビュー、trace tooling拡張、GPU window実行手順の事前文書化）をCPU-onlyで進める。
-5. Phase 3c（AQ4 CPU vs AQ4 GPU kernel段階別差分）は**人間によるGPU window承認が必要**。ユーザー起床後に承認を得てから実行する。
+4. ~~Phase 3c-prep（fused kernel source vs CPU参照実装のコードレビュー、trace tooling拡張、GPU window実行手順の事前文書化）~~ **完了**。高確信度バグは未発見（H5未確証のまま）だが、副次的に2件の実装差（silent scale-index skip、条件付きRPB cache不整合）を記録し、runbookも完成させた。
+5. **Phase 3c（AQ4 CPU vs AQ4 GPU kernel段階別差分）は人間によるGPU window承認が必要。** runbook（`docs/plans/aq4-phase3c-gpu-window-runbook-v0.1.md`）は実行可能な状態で待機中。ユーザー起床後に承認を得てから、runbook記載のコマンドを一度だけ実行する。
