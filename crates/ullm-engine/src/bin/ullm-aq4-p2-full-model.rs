@@ -3131,6 +3131,9 @@ mod tests {
                 source_commit: "fixture".into(),
                 receipt: PathBuf::from("receipt"),
                 receipt_sha256: "sha256:receipt".into(),
+                authorization_audit: None,
+                authorization_lineage: None,
+                readiness: None,
             },
             reasoning: None,
         };
