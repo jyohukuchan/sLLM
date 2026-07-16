@@ -1,7 +1,6 @@
 build/
 target/
 reference-src/
-journal/
 __pycache__/
 *.pyc
 benchmarks/results/**/logs/
