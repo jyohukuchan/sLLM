@@ -45,7 +45,7 @@ class FinalizeError(ValueError):
 
 
 def sha_file(path: Path) -> str:
-    snapshot = SELECTOR.capture(path)
+    snapshot = SELECTOR.capture_digest(path)
     return snapshot.sha256
 
 
@@ -74,7 +74,8 @@ def finalize(root: Path) -> dict[str, str]:
     if expected_q["path"] != str(qualification_snapshot.path) or expected_q["sha256"] != qualification_snapshot.sha256:
         raise FinalizeError("package raw qualification binding differs")
     archive = raw["p3_implementation"]["source_archive"]
-    if archive != {"path": str((root / "p3-source.tar").resolve()), "sha256": sha_file(root / "p3-source.tar")}:
+    archive_snapshot = SELECTOR.capture_digest(root / "p3-source.tar")
+    if archive != {"path": str(archive_snapshot.path), "sha256": archive_snapshot.sha256, "size_bytes": archive_snapshot.size_bytes}:
         raise FinalizeError("package source archive binding differs")
     selection_snapshot = SELECTOR.capture(root / "selection.json")
     selection = SELECTOR.parse_json(selection_snapshot)

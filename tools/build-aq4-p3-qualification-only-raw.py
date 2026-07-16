@@ -48,7 +48,7 @@ def build(qualification_path: Path, commit: str, tree_oid: str, archive_path: Pa
     result = QUALIFICATION.validate(qualification)
     if result["status"] != "valid_rejected_no_go":
         raise RawError("qualification-only raw requires rejected_no_go")
-    archive = SELECTOR.capture(archive_path)
+    archive = SELECTOR.capture_digest(archive_path)
     value = {
         "schema_version": SELECTOR.RAW_SCHEMA,
         "status": "qualification_only_diagnostic",
@@ -69,7 +69,7 @@ def build(qualification_path: Path, commit: str, tree_oid: str, archive_path: Pa
             "family": "attention_recurrent",
             "commit": commit,
             "tree_oid": tree_oid,
-            "source_archive": {"path": str(archive.path), "sha256": archive.sha256},
+            "source_archive": {"path": str(archive.path), "sha256": archive.sha256, "size_bytes": archive.size_bytes},
             "build_status": "not_built_for_promotion",
             "profile_status": "not_measured",
             "runtime_default": "off",

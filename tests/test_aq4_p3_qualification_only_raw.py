@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import importlib.util
 import json
+import os
 import sys
 import threading
 from pathlib import Path
@@ -95,6 +96,17 @@ def test_qualification_only_rejects_hash_tamper(tmp_path: Path) -> None:
         RAW.SELECTOR.validate_raw(value)
 
 
+def test_qualification_only_rejects_archive_size_type_and_value(tmp_path: Path) -> None:
+    for replacement in (True, 999999):
+        root = tmp_path / str(replacement)
+        root.mkdir()
+        value, _qualification, _archive = fixture(root)
+        value["p3_implementation"]["source_archive"]["size_bytes"] = replacement
+        value["evidence_sha256"] = RAW.SELECTOR.semantic_sha256(value)
+        with pytest.raises(RAW.SELECTOR.SelectionError, match="source archive differs"):
+            RAW.SELECTOR.validate_raw(value)
+
+
 def test_qualification_only_publish_is_no_overwrite_and_race_safe(tmp_path: Path) -> None:
     value, _qualification, _archive = fixture(tmp_path)
     output = tmp_path / "raw.json"
@@ -122,3 +134,45 @@ def test_qualification_only_publish_is_no_overwrite_and_race_safe(tmp_path: Path
     with pytest.raises(RAW.RawError, match="refusing to overwrite"):
         RAW.publish(output, value)
     assert output.read_bytes() == before
+
+
+def test_streaming_archive_snapshot_rejects_symlink_hardlink_and_size_cap(tmp_path: Path) -> None:
+    archive = tmp_path / "archive.tar"
+    archive.write_bytes(b"archive-bytes")
+    symlink = tmp_path / "symlink.tar"
+    symlink.symlink_to(archive)
+    with pytest.raises(RAW.SELECTOR.SelectionError, match="symlink"):
+        RAW.SELECTOR.capture_digest(symlink)
+    hardlink = tmp_path / "hardlink.tar"
+    hardlink.hardlink_to(archive)
+    with pytest.raises(RAW.SELECTOR.SelectionError, match="single-link"):
+        RAW.SELECTOR.capture_digest(archive)
+    hardlink.unlink()
+    with pytest.raises(RAW.SELECTOR.SelectionError, match="size cap"):
+        RAW.SELECTOR.capture_digest(archive, True)
+    with pytest.raises(RAW.SELECTOR.SelectionError, match="bounded"):
+        RAW.SELECTOR.capture_digest(archive, len(b"archive-bytes") - 1)
+
+
+@pytest.mark.parametrize("mutation", ["replace", "truncate", "grow"])
+def test_streaming_archive_snapshot_rejects_mid_read_mutation(tmp_path: Path, mutation: str) -> None:
+    archive = tmp_path / "archive.tar"
+    archive.write_bytes(b"a" * 1024)
+
+    def mutate(phase: str) -> None:
+        if (mutation in {"replace", "truncate"} and phase != "after_open") or (
+            mutation == "grow" and phase != "after_read"
+        ):
+            return
+        if mutation == "replace":
+            replacement = tmp_path / "replacement.tar"
+            replacement.write_bytes(b"a" * 1024)
+            os.replace(replacement, archive)
+        elif mutation == "truncate":
+            archive.write_bytes(b"short")
+        else:
+            with archive.open("ab") as handle:
+                handle.write(b"grown")
+
+    with pytest.raises(RAW.SELECTOR.SelectionError, match="changed while"):
+        RAW.SELECTOR.capture_digest(archive, hook=mutate)

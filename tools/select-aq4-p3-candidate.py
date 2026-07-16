@@ -15,7 +15,7 @@ import sys
 import threading
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -38,6 +38,7 @@ PROFILE_SCHEMA = "ullm.aq4_p2_family_exclusive_profile.v1"
 OUTPUT_SCHEMA = "ullm.aq4_p3_candidate_selection.v1"
 POLICY_VERSION = "ullm.aq4_p3_candidate_selection_policy.v1"
 MAX_EVIDENCE_BYTES = 32 * 1024 * 1024
+MAX_SOURCE_ARCHIVE_BYTES = 2 * 1024 * 1024 * 1024
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 REPRESENTATIVE_PROMPTS = 7
 MIN_ABOVE_NOISE = 4
@@ -364,6 +365,57 @@ class Snapshot:
             raise SelectionError(f"evidence disappeared: {self.path}: {error}") from error
         if file_identity(current) != self.identity:
             raise SelectionError(f"evidence identity changed: {self.path}")
+
+
+@dataclass(frozen=True)
+class DigestSnapshot:
+    path: Path
+    identity: tuple[int, ...]
+    sha256: str
+    size_bytes: int
+
+
+def capture_digest(
+    path: Path,
+    maximum: int = MAX_SOURCE_ARCHIVE_BYTES,
+    hook: Callable[[str], None] | None = None,
+) -> DigestSnapshot:
+    if type(maximum) is not int or maximum <= 0:
+        raise SelectionError("bound file size cap must be a positive integer")
+    path = path.absolute()
+    current = Path(path.anchor)
+    for part in path.parts[1:]:
+        current /= part
+        info = current.lstat()
+        if stat.S_ISLNK(info.st_mode):
+            raise SelectionError(f"bound file path contains a symlink: {current}")
+    path = path.resolve(strict=True)
+    before = path.lstat()
+    if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1 or before.st_size <= 0 or before.st_size > maximum:
+        raise SelectionError(f"bound file must be a bounded single-link regular file: {path}")
+    descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0))
+    digest_value = hashlib.sha256()
+    size = 0
+    try:
+        opened = os.fstat(descriptor)
+        if file_identity(opened) != file_identity(before):
+            raise SelectionError(f"bound file changed while opening: {path}")
+        if hook is not None:
+            hook("after_open")
+        while chunk := os.read(descriptor, 1024 * 1024):
+            size += len(chunk)
+            if size > maximum:
+                raise SelectionError(f"bound file exceeds {maximum} bytes: {path}")
+            digest_value.update(chunk)
+        if hook is not None:
+            hook("after_read")
+        after_fd = os.fstat(descriptor)
+        after_path = path.lstat()
+        if file_identity(after_fd) != file_identity(before) or file_identity(after_path) != file_identity(before):
+            raise SelectionError(f"bound file changed while reading: {path}")
+    finally:
+        os.close(descriptor)
+    return DigestSnapshot(path, file_identity(before), digest_value.hexdigest(), size)
 
 
 @dataclass(frozen=True)
@@ -738,9 +790,13 @@ def validate_raw(value: dict[str, Any]) -> RawSource:
         archive = implementation["source_archive"]
         if not isinstance(archive, dict):
             raise SelectionError("qualification-only P3 source archive must be an object")
-        exact_fields(archive, {"path", "sha256"}, "qualification-only P3 source archive")
-        archive_snapshot = capture(Path(archive["path"]))
-        if archive_snapshot.sha256 != require_digest(archive["sha256"], "qualification-only P3 source archive SHA-256"):
+        exact_fields(archive, {"path", "sha256", "size_bytes"}, "qualification-only P3 source archive")
+        archive_snapshot = capture_digest(Path(archive["path"]))
+        if (
+            archive_snapshot.sha256 != require_digest(archive["sha256"], "qualification-only P3 source archive SHA-256")
+            or type(archive["size_bytes"]) is not int
+            or archive["size_bytes"] != archive_snapshot.size_bytes
+        ):
             raise SelectionError("qualification-only P3 source archive differs")
         declared_sha = require_digest(value["evidence_sha256"], "qualification-only evidence SHA-256")
         calculated_sha = semantic_sha256(value)
