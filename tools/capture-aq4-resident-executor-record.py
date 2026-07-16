@@ -39,6 +39,124 @@ SQ8_TELEMETRY_BINDING_SCHEMA = (
     "ullm.qwen35_aq4.sq8_promotion_telemetry_binding.v1"
 )
 SQ8_TELEMETRY_HASH_ENCODING = "canonical_json_ascii_sort_keys_compact_v1"
+SQ8_OPERATOR_AUDIT_SCHEMA = "ullm.qwen35_aq4.sq8_operator_audit.v1"
+SQ8_LOAD_RESOLUTIONS_SCHEMA = "ullm.qwen35_aq4.sq8_load_resolutions.v1"
+SQ8_AUDIT_HASH_ENCODING = "canonical_json_ascii_sort_keys_compact_v1"
+SQ8_REQUIRED_PHYSICAL_INVOCATIONS = 128
+SQ8_REQUIRED_TOTAL_STEPS = 129
+SQ8_REQUIRED_DECODE_STEPS = 1
+SQ8_REQUIRED_TOKEN_EQUIVALENT_COVERAGE = 8_256
+SQ8_REQUIRED_LOAD_RECORDS = 192
+SQ8_IMPLEMENTATION_CONTRACT = (
+    (
+        "linear_attention_qkv_prepare",
+        "hip.linear-attention-qkv-prepare-f32.m1",
+        24,
+        "decode",
+    ),
+    (
+        "gated_delta_rule_scan",
+        "hip.linear-attention-recurrent-f32.m1",
+        24,
+        "decode",
+    ),
+    ("paged_kv_write", "hip.paged-kv-write-f32.m1", 0, "decode"),
+    (
+        "fused_qk_norm_rope_paged_kv_write",
+        "hip.fused-qk-norm-rope-paged-kv-write-f32.m1",
+        8,
+        "decode",
+    ),
+    (
+        "paged_causal_gqa_read",
+        "hip.paged-decode-attention-f32.m1-gqa",
+        0,
+        "decode",
+    ),
+    (
+        "paged_causal_gqa_read",
+        "hip.paged-decode-attention-sigmoid-gate-f32.m1-gqa",
+        8,
+        "decode",
+    ),
+    (
+        "linear_attention_qkv_prepare",
+        "hip.linear-attention-qkv-prepare-batch-f32.m2-m128",
+        24,
+        "cold_prefill",
+    ),
+    (
+        "gated_delta_rule_scan",
+        "hip.linear-attention-recurrent-sequence-f32.m2-m128",
+        24,
+        "cold_prefill",
+    ),
+    (
+        "paged_kv_write",
+        "hip.paged-kv-write-chunk-f32.m2-m128",
+        8,
+        "cold_prefill",
+    ),
+    (
+        "paged_causal_gqa_read",
+        "hip.paged-causal-gqa-chunk-sigmoid-gate-f32.m2-m128",
+        8,
+        "cold_prefill",
+    ),
+    (
+        "paged_causal_gqa_read",
+        "hip.paged-decode-attention-split-f32.tile128",
+        0,
+        "decode",
+    ),
+    (
+        "paged_causal_gqa_read",
+        "hip.paged-decode-attention-split-f32.tile256",
+        0,
+        "decode",
+    ),
+    (
+        "paged_causal_gqa_read",
+        "hip.paged-decode-attention-split-sigmoid-gate-f32.tile128",
+        0,
+        "decode",
+    ),
+    (
+        "paged_causal_gqa_read",
+        "hip.paged-decode-attention-split-sigmoid-gate-f32.tile256",
+        0,
+        "decode",
+    ),
+)
+SQ8_REQUIRED_IMPLEMENTATION_COUNTS = {
+    implementation: count
+    for _kind, implementation, count, _phase in SQ8_IMPLEMENTATION_CONTRACT
+    if count > 0
+}
+SQ8_IMPLEMENTATION_KINDS = {
+    implementation: kind
+    for kind, implementation, _count, _phase in SQ8_IMPLEMENTATION_CONTRACT
+}
+SQ8_IMPLEMENTATION_PHASES = {
+    implementation: phase
+    for _kind, implementation, _count, phase in SQ8_IMPLEMENTATION_CONTRACT
+}
+SQ8_LOAD_IMPLEMENTATION_KINDS = {
+    "hip.linear-attention-qkv-prepare-f32.m1": "linear_attention_qkv_prepare",
+    "hip.linear-attention-recurrent-f32.m1": "gated_delta_rule_scan",
+    "hip.fused-qk-norm-rope-paged-kv-write-f32.m1": (
+        "fused_qk_norm_rope_paged_kv_write"
+    ),
+    "hip.paged-decode-attention-sigmoid-gate-f32.m1-gqa": (
+        "paged_causal_gqa_read"
+    ),
+}
+SQ8_LOAD_IMPLEMENTATION_LAYER_COUNTS = {
+    "hip.linear-attention-qkv-prepare-f32.m1": 24,
+    "hip.linear-attention-recurrent-f32.m1": 24,
+    "hip.fused-qk-norm-rope-paged-kv-write-f32.m1": 8,
+    "hip.paged-decode-attention-sigmoid-gate-f32.m1-gqa": 8,
+}
 WORKER_STDERR_SCHEMA_VERSION = "ullm.aq4_resident_worker_stderr.v2"
 WORKER_LIFECYCLE_SCHEMA_VERSION = "ullm.aq4_resident_worker_lifecycle.v1"
 WORKER_ERROR_SCHEMA_VERSION = "ullm.aq4_resident_worker_error.v1"
@@ -1040,35 +1158,357 @@ def phase_name(value: str) -> str:
     return {"ColdPrefill": "cold_prefill", "CachedPrefixPrefill": "cached_prefix_prefill", "Decode": "decode"}.get(value, value.lower())
 
 
-def operator_records(
-    load_records: list[dict[str, Any]], audit: dict[str, Any]
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    operators = []
-    fallback_events = []
-    raw_implementation_counts = audit.get("implementation_counts")
-    if not isinstance(raw_implementation_counts, list):
+def canonical_operation_kind(value: str) -> str:
+    """Normalize runtime CamelCase and audit snake_case operation kinds."""
+
+    first = re.sub(r"(.)([A-Z][a-z]+)", r"\1_\2", value)
+    second = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", first)
+    return re.sub(r"[^a-z0-9]+", "_", second.lower()).strip("_")
+
+
+def audit_implementation_entries(
+    audit: dict[str, Any], *, require_canonical_kind: bool = False
+) -> list[dict[str, Any]]:
+    raw_counts = audit.get("implementation_counts")
+    if not isinstance(raw_counts, list):
         raise CaptureError("request audit implementation counts are invalid")
-    implementation_counts: dict[str, int] = {}
-    for index, item in enumerate(raw_implementation_counts):
+    entries: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for index, item in enumerate(raw_counts):
         if not isinstance(item, dict):
             raise CaptureError("request audit implementation count entry is invalid")
         implementation = item.get("implementation_id")
         if not isinstance(implementation, str) or not implementation:
             raise CaptureError("request audit implementation identity is invalid")
-        if implementation in implementation_counts:
+        if implementation in seen:
             raise CaptureError("request audit implementation identity is duplicated")
-        implementation_counts[implementation] = exact_counter(
-            item.get("count"), f"request audit implementation count {index}"
+        seen.add(implementation)
+        kind = item.get("kind")
+        if require_canonical_kind:
+            if set(item) != {"kind", "implementation_id", "count"}:
+                raise CaptureError("request audit implementation count shape differs")
+            if (
+                not isinstance(kind, str)
+                or not kind
+                or canonical_operation_kind(kind) != kind
+            ):
+                raise CaptureError("request audit implementation kind is not canonical")
+        elif kind is not None and (not isinstance(kind, str) or not kind):
+            raise CaptureError("request audit implementation kind is invalid")
+        entries.append(
+            {
+                "implementation_id": implementation,
+                "kind": kind,
+                "count": exact_counter(
+                    item.get("count"),
+                    f"request audit implementation count {index}",
+                ),
+            }
         )
-    assigned_implementations: set[str] = set()
+    return entries
+
+
+def positive_implementation_counts(entries: list[dict[str, Any]]) -> dict[str, int]:
+    return {
+        str(item["implementation_id"]): int(item["count"])
+        for item in entries
+        if int(item["count"]) > 0
+    }
+
+
+def canonical_object_sha256(value: Any, label: str) -> str:
+    try:
+        raw = json.dumps(
+            value,
+            ensure_ascii=True,
+            allow_nan=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("ascii")
+    except (TypeError, ValueError, UnicodeError) as error:
+        raise CaptureError(f"cannot bind {label}: {error}") from error
+    return hashlib.sha256(raw).hexdigest()
+
+
+def validate_sq8_load_resolutions(load_records: list[dict[str, Any]]) -> None:
+    if len(load_records) != SQ8_REQUIRED_LOAD_RECORDS:
+        raise CaptureError("SQ8 load-resolution record count differs")
+    phases = {"cold_prefill", "cached_prefix_prefill", "decode"}
+    observed: dict[tuple[str, str], int] = {}
+    layers: dict[tuple[str, str], set[int]] = {}
+    identities: set[tuple[int, str, str]] = set()
+    for record in load_records:
+        if (
+            not isinstance(record, dict)
+            or record.get("schema_version") != "ullm.backend_operation.load.v1"
+            or type(record.get("layer_position")) is not int
+            or not 0 <= record["layer_position"] < 32
+        ):
+            raise CaptureError("SQ8 load-resolution record shape differs")
+        trace = record.get("trace")
+        if not isinstance(trace, dict) or trace.get("resolution") != "Primary":
+            raise CaptureError("SQ8 load-resolution selection differs")
+        implementation = trace.get("implementation_id")
+        expected_kind = SQ8_LOAD_IMPLEMENTATION_KINDS.get(implementation)
+        if expected_kind is None:
+            raise CaptureError("SQ8 load-resolution implementation is unknown")
+        kind = trace.get("kind")
+        if (
+            not isinstance(kind, str)
+            or canonical_operation_kind(kind) != expected_kind
+        ):
+            raise CaptureError("SQ8 load-resolution implementation kind differs")
+        phase = phase_name(str(trace.get("phase", "")))
+        if phase not in phases:
+            raise CaptureError("SQ8 load-resolution phase differs")
+        identity = (record["layer_position"], implementation, phase)
+        if identity in identities:
+            raise CaptureError("SQ8 load-resolution identity is duplicated")
+        identities.add(identity)
+        key = (implementation, phase)
+        observed[key] = observed.get(key, 0) + 1
+        layers.setdefault(key, set()).add(record["layer_position"])
+    expected = {
+        (implementation, phase): layer_count
+        for implementation, layer_count in SQ8_LOAD_IMPLEMENTATION_LAYER_COUNTS.items()
+        for phase in phases
+    }
+    if observed != expected:
+        raise CaptureError("SQ8 load-resolution topology differs")
+    for implementation, layer_count in SQ8_LOAD_IMPLEMENTATION_LAYER_COUNTS.items():
+        phase_layers = [layers[(implementation, phase)] for phase in phases]
+        if any(len(item) != layer_count for item in phase_layers) or not all(
+            item == phase_layers[0] for item in phase_layers[1:]
+        ):
+            raise CaptureError("SQ8 load-resolution layer binding differs")
+    linear_layers = layers[
+        ("hip.linear-attention-qkv-prepare-f32.m1", "cold_prefill")
+    ]
+    recurrent_layers = layers[
+        ("hip.linear-attention-recurrent-f32.m1", "cold_prefill")
+    ]
+    fused_layers = layers[
+        ("hip.fused-qk-norm-rope-paged-kv-write-f32.m1", "cold_prefill")
+    ]
+    paged_layers = layers[
+        (
+            "hip.paged-decode-attention-sigmoid-gate-f32.m1-gqa",
+            "cold_prefill",
+        )
+    ]
+    if (
+        linear_layers != recurrent_layers
+        or fused_layers != paged_layers
+        or linear_layers & fused_layers
+        or linear_layers | fused_layers != set(range(32))
+    ):
+        raise CaptureError("SQ8 load-resolution model layer partition differs")
+
+
+def validate_sq8_operation_audit(
+    audit: Any,
+    request_audit: dict[str, Any],
+    load_records: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    expected_keys = {
+        "schema_version",
+        "outcome",
+        "expected_layers_per_step",
+        "expected_records_per_layer",
+        "cold_prefill_steps",
+        "cached_prefix_prefill_steps",
+        "decode_steps",
+        "total_steps",
+        "total_records",
+        "physical_operation_invocations",
+        "token_equivalent_operation_coverage",
+        "prefill_chunks_executed",
+        "prefill_tokens_executed",
+        "prefill_tokens_committed",
+        "prefill_width_histogram",
+        "implementation_counts",
+        "deterministic_digest_sha256",
+        "coverage_complete",
+    }
+    if not isinstance(audit, dict) or set(audit) != expected_keys:
+        raise CaptureError("SQ8 operation audit shape differs")
+    if (
+        audit.get("schema_version") != "ullm.backend_operation.request.v2"
+        or audit.get("outcome") != "length"
+        or audit.get("coverage_complete") is not True
+        or audit.get("expected_layers_per_step") != 32
+        or audit.get("expected_records_per_layer") != 2
+    ):
+        raise CaptureError("SQ8 operation audit contract differs")
+    expected_counters = {
+        "cold_prefill_steps": 1,
+        "cached_prefix_prefill_steps": 127,
+        "decode_steps": SQ8_REQUIRED_DECODE_STEPS,
+        "total_steps": SQ8_REQUIRED_TOTAL_STEPS,
+        "total_records": SQ8_REQUIRED_PHYSICAL_INVOCATIONS,
+        "physical_operation_invocations": SQ8_REQUIRED_PHYSICAL_INVOCATIONS,
+        "token_equivalent_operation_coverage": (
+            SQ8_REQUIRED_TOKEN_EQUIVALENT_COVERAGE
+        ),
+        "prefill_chunks_executed": 1,
+        "prefill_tokens_executed": 128,
+        "prefill_tokens_committed": 128,
+    }
+    for field, expected in expected_counters.items():
+        if exact_counter(audit.get(field), f"SQ8 operation audit {field}") != expected:
+            raise CaptureError(f"SQ8 operation audit {field} differs")
+    digest = audit.get("deterministic_digest_sha256")
+    if not isinstance(digest, str) or re.fullmatch(r"[0-9a-f]{64}", digest) is None:
+        raise CaptureError("SQ8 operation audit deterministic digest differs")
+    histogram = audit.get("prefill_width_histogram")
+    if not isinstance(histogram, list) or len(histogram) != 129:
+        raise CaptureError("SQ8 operation audit prefill histogram differs")
+    exact_histogram = [
+        exact_counter(item, f"SQ8 operation audit prefill histogram {index}")
+        for index, item in enumerate(histogram)
+    ]
+    if exact_histogram != [0] * 128 + [1]:
+        raise CaptureError("SQ8 operation audit prefill histogram differs")
+    request_operation_audit = request_audit.get("operation_audit")
+    if request_operation_audit != audit:
+        raise CaptureError("SQ8 request and terminal operation audits differ")
+    assert isinstance(request_operation_audit, dict)
+    entries = audit_implementation_entries(
+        request_operation_audit, require_canonical_kind=True
+    )
+    all_counts = {str(item["implementation_id"]): int(item["count"]) for item in entries}
+    expected_all = {
+        implementation: count
+        for _kind, implementation, count, _phase in SQ8_IMPLEMENTATION_CONTRACT
+    }
+    if set(all_counts) != set(expected_all):
+        raise CaptureError("SQ8 operation audit implementation set differs")
+    for item in entries:
+        implementation = str(item["implementation_id"])
+        if item["kind"] != SQ8_IMPLEMENTATION_KINDS[implementation]:
+            raise CaptureError("SQ8 operation audit implementation kind differs")
+    positive_counts = positive_implementation_counts(entries)
+    if positive_counts != SQ8_REQUIRED_IMPLEMENTATION_COUNTS:
+        raise CaptureError("SQ8 operation audit implementation counts differ")
+    if sum(positive_counts.values()) != SQ8_REQUIRED_PHYSICAL_INVOCATIONS:
+        raise CaptureError("SQ8 operation audit implementation count sum differs")
+    if (
+        request_audit.get("schema_version") != "ullm.qwen35_aq4.request_execution.v1"
+        or request_audit.get("requested_m") != 128
+        or request_audit.get("resolved_m") != 128
+        or request_audit.get("actual_token_batch_width") != 128
+        or request_audit.get("actual_request_batch_width") != 1
+        or request_audit.get("internal_batch_count") != 2
+        or request_audit.get("phase_batch_counts")
+        != {"cold_prefill": 1, "cached_prefix_prefill": 0, "decode": 1}
+    ):
+        raise CaptureError("SQ8 request execution audit contract differs")
+    validate_sq8_load_resolutions(load_records)
+    return entries
+
+
+def sq8_load_resolution_evidence(
+    load_records: list[dict[str, Any]],
+) -> dict[str, Any]:
+    validate_sq8_load_resolutions(load_records)
+    records = []
+    for record in load_records:
+        trace = record["trace"]
+        records.append(
+            {
+                "layer_position": record["layer_position"],
+                "phase": phase_name(trace["phase"]),
+                "kind": canonical_operation_kind(trace["kind"]),
+                "implementation_id": trace["implementation_id"],
+                "resolution": "selected",
+            }
+        )
+    return {
+        "schema_version": SQ8_LOAD_RESOLUTIONS_SCHEMA,
+        "hash_encoding": SQ8_AUDIT_HASH_ENCODING,
+        "record_count": len(records),
+        "records_sha256": canonical_object_sha256(
+            records, "SQ8 load-resolution records"
+        ),
+        "records": records,
+    }
+
+
+def sq8_operator_audit_evidence(
+    audit: dict[str, Any], entries: list[dict[str, Any]]
+) -> dict[str, Any]:
+    positive = positive_implementation_counts(entries)
+    counts = [
+        {
+            "kind": SQ8_IMPLEMENTATION_KINDS[implementation],
+            "implementation_id": implementation,
+            "count": positive[implementation],
+        }
+        for _kind, implementation, expected, _phase in SQ8_IMPLEMENTATION_CONTRACT
+        if expected > 0
+    ]
+    return {
+        "schema_version": SQ8_OPERATOR_AUDIT_SCHEMA,
+        "hash_encoding": SQ8_AUDIT_HASH_ENCODING,
+        "source_audit_sha256": canonical_object_sha256(
+            audit, "SQ8 terminal operation audit"
+        ),
+        "deterministic_digest_sha256": audit["deterministic_digest_sha256"],
+        "physical_operation_invocations": audit[
+            "physical_operation_invocations"
+        ],
+        "total_steps": audit["total_steps"],
+        "decode_steps": audit["decode_steps"],
+        "token_equivalent_operation_coverage": audit[
+            "token_equivalent_operation_coverage"
+        ],
+        "implementation_counts": counts,
+    }
+
+
+def _terminal_template(
+    operators: list[dict[str, Any]], implementation: str, kind: str | None
+) -> dict[str, Any] | None:
+    exact = next(
+        (item for item in operators if item.get("implementation_id") == implementation),
+        None,
+    )
+    if exact is not None:
+        return exact
+    if not isinstance(kind, str):
+        return None
+    compatible_kinds = {kind}
+    if kind == "paged_kv_write":
+        compatible_kinds.add("fused_qk_norm_rope_paged_kv_write")
+    return next(
+        (
+            item
+            for item in operators
+            if canonical_operation_kind(str(item.get("op_kind", "")))
+            in compatible_kinds
+        ),
+        None,
+    )
+
+
+def operator_records(
+    load_records: list[dict[str, Any]],
+    audit: dict[str, Any],
+    *,
+    implementation_entries: list[dict[str, Any]] | None = None,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    operators = []
+    fallback_events = []
+    entries = (
+        audit_implementation_entries(audit)
+        if implementation_entries is None
+        else implementation_entries
+    )
     for record in load_records:
         trace = record.get("trace")
         if not isinstance(trace, dict):
             continue
         resolution = str(trace.get("resolution", ""))
-        implementation = str(trace.get("implementation_id", ""))
-        invocation_count = implementation_counts.get(implementation, 0) if implementation not in assigned_implementations else 0
-        assigned_implementations.add(implementation)
         phase = phase_name(str(trace.get("phase", "")))
         op_kind = str(trace.get("kind", "unknown"))
         implementation_id = str(trace.get("implementation_id", "unknown"))
@@ -1123,16 +1563,12 @@ def operator_records(
                     trace.get("temporary_bytes", 0),
                     "load trace workspace bytes",
                 ),
-                "temporary_bytes": exact_counter(
-                    trace.get("temporary_bytes", 0),
-                    "load trace temporary bytes",
-                ),
                 "observed_peak_bytes": None,
             },
-            "invocation_count": invocation_count or 1,
+            # A backend_operation.load record proves only load-time resolution.
+            # Request invocation counts come exclusively from the terminal audit.
+            "invocation_count": 0,
         }
-        if invocation_count > 0:
-            item["resolution_status"] = "selected"
         operators.append(item)
         if resolution.startswith("Fallback"):
             fallback_events.append({"phase_kind": phase, "op_kind": op_kind, "from_implementation_id": str(trace.get("fallback_from_implementation_id") or "generic"), "to_implementation_id": implementation_id, "reason_code": "backend_resolution_fallback", "classification": "expected"})
@@ -1140,28 +1576,62 @@ def operator_records(
     # for the implementation that actually ran for this request (for example the M128 chunk
     # implementations).  Preserve the bounded load contract above and append one aggregate
     # request-terminal entry for every implementation observed by the audit.
-    for audited in raw_implementation_counts:
-        count = implementation_counts[str(audited["implementation_id"])]
+    for audited in entries:
+        count = int(audited["count"])
         if count <= 0:
             continue
-        implementation = str(audited.get("implementation_id", ""))
-        if any(
-            item.get("implementation_id") == implementation
-            and item.get("invocation_count", 0) > 0
-            for item in operators
-        ):
-            continue
-        template = next((item for item in operators if item.get("op_kind") == audited.get("kind")), None)
+        implementation = str(audited["implementation_id"])
+        kind = audited.get("kind")
+        template = _terminal_template(operators, implementation, kind)
         if template is None:
-            continue
+            raise CaptureError(
+                "request audit implementation lacks a load-resolution binding"
+            )
         item = json.loads(json.dumps(template))
         item["operator_instance_id"] = f"request-terminal-{implementation}"
-        item["phase_kind"] = "decode" if ".m1" in implementation else "cold_prefill"
+        item["phase_kind"] = SQ8_IMPLEMENTATION_PHASES.get(
+            implementation,
+            "decode" if ".m1" in implementation else "cold_prefill",
+        )
+        if isinstance(kind, str):
+            item["op_kind"] = kind
         item["implementation_id"] = implementation
         item["resolution_status"] = "selected"
+        item["selection_reason"] = {
+            "kind": "exact_match",
+            "candidate_count": 1,
+            "score": 1,
+            "priority": 0,
+            "matched_constraints": ["terminal_request_audit", "format", "gpu_arch"],
+        }
+        width = 128 if ".m2-m128" in implementation else 1
+        item["shape_bucket"] = {
+            "id": f"{item['op_kind']}-{width}x{width}",
+            "dimensions": [
+                {"name": "batch", "value": width},
+                {"name": "chunk", "value": width},
+            ],
+        }
         item["invocation_count"] = count
         operators.append(item)
     return operators, fallback_events
+
+
+def terminal_operator_counts(operators: list[dict[str, Any]]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for item in operators:
+        instance = item.get("operator_instance_id")
+        count = exact_counter(
+            item.get("invocation_count"), "operator invocation count"
+        )
+        if isinstance(instance, str) and instance.startswith("request-terminal-"):
+            implementation = str(item.get("implementation_id", ""))
+            if not implementation or implementation in counts:
+                raise CaptureError("terminal operator implementation identity differs")
+            counts[implementation] = count
+        elif count != 0:
+            raise CaptureError("load-resolution record contributes invocation count")
+    return counts
 
 
 def atomic_write(path: Path, value: dict[str, Any]) -> None:
@@ -1925,45 +2395,41 @@ def run_capture(args: argparse.Namespace) -> dict[str, Any]:
         if item.get("schema_version") == "ullm.backend_operation.load.v1"
     ]
     try:
-        operators, fallback_events = operator_records(load_records, audit)
+        implementation_entries = None
+        if sq8_promotion:
+            implementation_entries = validate_sq8_operation_audit(
+                audit, request_audit, load_records
+            )
+            # The request execution audit is the sole invocation-count source.
+            # Equality with the outer terminal copy was proven above.
+            audit = request_audit["operation_audit"]
+        resolved_operators, fallback_events = operator_records(
+            load_records,
+            audit,
+            implementation_entries=implementation_entries,
+        )
     except CaptureError as error:
         raise worker_failure(str(error), "audit_missing") from error
-    if len(operators) == 0 or audit.get("coverage_complete") is not True:
+    if len(resolved_operators) == 0 or audit.get("coverage_complete") is not True:
         raise worker_failure("full resident operator graph was not observed", "audit_missing")
-    raw_counts = audit.get("implementation_counts")
-    if not isinstance(raw_counts, list):
-        raise worker_failure("request audit implementation counts are invalid", "audit_missing")
-    audited_counts: dict[str, int] = {}
-    for index, item in enumerate(raw_counts):
-        if not isinstance(item, dict) or not isinstance(item.get("implementation_id"), str):
-            raise worker_failure(
-                "request audit implementation count entry is invalid",
-                "audit_missing",
-            )
-        implementation = item["implementation_id"]
-        if not implementation or implementation in audited_counts:
-            raise worker_failure("request audit implementation identity is invalid", "audit_missing")
-        try:
-            count = exact_counter(
-                item.get("count"), f"request audit implementation count {index}"
-            )
-        except CaptureError as error:
-            raise worker_failure(str(error), "audit_missing") from error
-        if count > 0:
-            audited_counts[implementation] = count
-    observed_counts: dict[str, int] = {}
-    for item in operators:
-        implementation = str(item.get("implementation_id", ""))
-        try:
-            observed_counts[implementation] = exact_counter_sum(
-                observed_counts.get(implementation, 0),
-                item.get("invocation_count"),
-                "observed operator invocation count",
-            )
-        except CaptureError as error:
-            raise worker_failure(str(error), "audit_missing") from error
+    try:
+        audited_counts = positive_implementation_counts(
+            implementation_entries
+            if implementation_entries is not None
+            else audit_implementation_entries(audit)
+        )
+        observed_counts = terminal_operator_counts(resolved_operators)
+    except CaptureError as error:
+        raise worker_failure(str(error), "audit_missing") from error
     if observed_counts != audited_counts:
         raise worker_failure("operator invocation counts do not reconcile with request audit", "audit_missing")
+    operators = [
+        item
+        for item in resolved_operators
+        if str(item.get("operator_instance_id", "")).startswith("request-terminal-")
+    ]
+    if not operators or any(item.get("invocation_count") == 0 for item in operators):
+        raise worker_failure("terminal operator invocation evidence is incomplete", "audit_missing")
     timings = released.get("timings", {})
     raw_histogram = audit.get("prefill_width_histogram")
     if not isinstance(raw_histogram, list):
@@ -2027,11 +2493,12 @@ def run_capture(args: argparse.Namespace) -> dict[str, Any]:
         "prompt_or_token_content_recorded": False,
     }
     workspace_bytes = 0
-    for item in operators:
+    for record in load_records:
+        trace = record.get("trace", {})
         try:
             workspace_bytes = exact_counter_sum(
                 workspace_bytes,
-                item.get("workspace", {}).get("temporary_bytes", 0),
+                trace.get("temporary_bytes", 0),
                 "operator workspace byte count",
             )
         except CaptureError as error:
@@ -2115,6 +2582,7 @@ def run_capture(args: argparse.Namespace) -> dict[str, Any]:
         "failure": None,
     }
     if sq8_promotion:
+        assert implementation_entries is not None
         result["sq8_promotion_evidence"] = {
             "schema_version": "ullm.qwen35_aq4.sq8_promotion_executor.v1",
             "request_id": internal_request_id,
@@ -2129,6 +2597,10 @@ def run_capture(args: argparse.Namespace) -> dict[str, Any]:
             "telemetry_binding": sq8_promotion_telemetry_binding(
                 sq8_telemetry, internal_request_id
             ),
+            "operator_audit": sq8_operator_audit_evidence(
+                audit, implementation_entries
+            ),
+            "load_resolutions": sq8_load_resolution_evidence(load_records),
             "output_identity": {
                 "token_count": len(output_token_ids),
                 "token_ids_sha256": token_identity_digest(output_token_ids),

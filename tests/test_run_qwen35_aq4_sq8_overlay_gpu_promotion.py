@@ -369,6 +369,48 @@ def telemetry_binding(
     }
 
 
+def operator_audit_evidence() -> dict[str, Any]:
+    return {
+        "schema_version": MODULE.OPERATOR_AUDIT_SCHEMA,
+        "hash_encoding": MODULE.AUDIT_HASH_ENCODING,
+        "source_audit_sha256": "2" * 64,
+        "deterministic_digest_sha256": "3" * 64,
+        "physical_operation_invocations": 128,
+        "total_steps": 129,
+        "decode_steps": 1,
+        "token_equivalent_operation_coverage": 8256,
+        "implementation_counts": [
+            {"kind": kind, "implementation_id": implementation, "count": count}
+            for kind, implementation, count in MODULE.REQUIRED_OPERATOR_COUNTS
+        ],
+    }
+
+
+def load_resolution_evidence() -> dict[str, Any]:
+    records: list[dict[str, Any]] = []
+    phases = ("cold_prefill", "cached_prefix_prefill", "decode")
+    for implementation, (kind, layer_count) in MODULE.LOAD_IMPLEMENTATION_KINDS.items():
+        start = 0 if layer_count == 24 else 24
+        for layer in range(start, start + layer_count):
+            for phase in phases:
+                records.append(
+                    {
+                        "layer_position": layer,
+                        "phase": phase,
+                        "kind": kind,
+                        "implementation_id": implementation,
+                        "resolution": "selected",
+                    }
+                )
+    return {
+        "schema_version": MODULE.LOAD_RESOLUTIONS_SCHEMA,
+        "hash_encoding": MODULE.AUDIT_HASH_ENCODING,
+        "record_count": 192,
+        "records_sha256": MODULE.canonical_sha(records),
+        "records": records,
+    }
+
+
 def released_worker_terminal() -> dict[str, Any]:
     return {
         "schema_version": "ullm.aq4_resident_worker_terminal.v1",
@@ -407,6 +449,8 @@ def executor_record() -> dict[str, Any]:
             },
             "telemetry": telemetry,
             "telemetry_binding": telemetry_binding(telemetry),
+            "operator_audit": operator_audit_evidence(),
+            "load_resolutions": load_resolution_evidence(),
             "output_identity": {
                 "token_count": 2,
                 "token_ids_recorded": False,
@@ -429,6 +473,34 @@ def test_validate_executor_record_binds_telemetry_hash_and_request_id(
     ] = "0" * 64
     path.write_text(json.dumps(value), encoding="ascii")
     with pytest.raises(MODULE.PromotionError, match="telemetry binding"):
+        MODULE.validate_executor_record(path, snapshot(), REQUEST_ID)
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    ["operator_count", "operator_steps", "load_hash", "load_duplicate"],
+)
+def test_validate_executor_record_rejects_operator_audit_or_load_tamper(
+    mutation: str, tmp_path: Path
+) -> None:
+    path = tmp_path / "executor.json"
+    value = executor_record()
+    evidence = value["sq8_promotion_evidence"]
+    if mutation == "operator_count":
+        evidence["operator_audit"]["implementation_counts"][0]["count"] = 23
+    elif mutation == "operator_steps":
+        evidence["operator_audit"]["total_steps"] = 128
+    elif mutation == "load_hash":
+        evidence["load_resolutions"]["records_sha256"] = "0" * 64
+    else:
+        records = evidence["load_resolutions"]["records"]
+        records[-1] = dict(records[0])
+        evidence["load_resolutions"]["records_sha256"] = MODULE.canonical_sha(
+            records
+        )
+    path.write_text(json.dumps(value), encoding="ascii")
+
+    with pytest.raises(MODULE.PromotionError):
         MODULE.validate_executor_record(path, snapshot(), REQUEST_ID)
 
 

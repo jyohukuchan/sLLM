@@ -21,6 +21,114 @@ TOOL = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(TOOL)
 
 
+def _sq8_load_records() -> list[dict[str, object]]:
+    phases = ("ColdPrefill", "CachedPrefixPrefill", "Decode")
+    records: list[dict[str, object]] = []
+
+    def append(
+        layer: int, implementation_id: str, kind: str, phase: str
+    ) -> None:
+        records.append(
+            {
+                "schema_version": "ullm.backend_operation.load.v1",
+                "layer_position": layer,
+                "trace": {
+                    "resolution": "Primary",
+                    "implementation_id": implementation_id,
+                    "kind": kind,
+                    "phase": phase,
+                    "semantic_version": "1.0.0",
+                    "runtime_build": "0.1.0",
+                    "backend": "Hip",
+                    "architecture": "gfx1201",
+                    "device_name": "AMD Radeon Graphics",
+                    "persistent_bytes": 1,
+                    "temporary_bytes": 1,
+                    "batch_width": 1,
+                    "chunk_width": 1,
+                },
+            }
+        )
+
+    for layer in range(24):
+        for phase in phases:
+            append(
+                layer,
+                "hip.linear-attention-qkv-prepare-f32.m1",
+                "LinearAttentionQkvPrepare",
+                phase,
+            )
+            append(
+                layer,
+                "hip.linear-attention-recurrent-f32.m1",
+                "GatedDeltaRuleScan",
+                phase,
+            )
+    for layer in range(24, 32):
+        for phase in phases:
+            append(
+                layer,
+                "hip.fused-qk-norm-rope-paged-kv-write-f32.m1",
+                "FusedQkNormRopePagedKvWrite",
+                phase,
+            )
+            append(
+                layer,
+                "hip.paged-decode-attention-sigmoid-gate-f32.m1-gqa",
+                "PagedCausalGqaRead",
+                phase,
+            )
+    assert len(records) == 192
+    return records
+
+
+def _sq8_operation_audit() -> dict[str, object]:
+    return {
+        "schema_version": "ullm.backend_operation.request.v2",
+        "outcome": "length",
+        "expected_layers_per_step": 32,
+        "expected_records_per_layer": 2,
+        "cold_prefill_steps": 1,
+        "cached_prefix_prefill_steps": 127,
+        "decode_steps": 1,
+        "total_steps": 129,
+        "total_records": 128,
+        "physical_operation_invocations": 128,
+        "token_equivalent_operation_coverage": 8256,
+        "prefill_chunks_executed": 1,
+        "prefill_tokens_executed": 128,
+        "prefill_tokens_committed": 128,
+        "prefill_width_histogram": [0] * 128 + [1],
+        "implementation_counts": [
+            {"kind": kind, "implementation_id": implementation, "count": count}
+            for kind, implementation, count, _phase in TOOL.SQ8_IMPLEMENTATION_CONTRACT
+        ],
+        "deterministic_digest_sha256": "5" * 64,
+        "coverage_complete": True,
+    }
+
+
+def _sq8_request_audit(
+    telemetry: dict[str, object], operation_audit: dict[str, object]
+) -> dict[str, object]:
+    return {
+        "schema_version": "ullm.qwen35_aq4.request_execution.v1",
+        "requested_m": 128,
+        "resolved_m": 128,
+        "actual_token_batch_width": 128,
+        "actual_request_batch_width": 1,
+        "internal_batch_count": 2,
+        "phase_batch_counts": {
+            "cold_prefill": 1,
+            "cached_prefix_prefill": 0,
+            "decode": 1,
+        },
+        "lifecycle": {},
+        "operation_audit": operation_audit,
+        "sq8_promotion_telemetry": telemetry,
+    }
+
+
 def collect(raw: bytes) -> tuple[TOOL.WorkerStderrCollector, dict]:
     collector = TOOL.WorkerStderrCollector(io.BytesIO(raw))
     collector.drain()
@@ -245,6 +353,129 @@ def test_implementation_audit_counts_reject_bool_float_and_safe_int_overflow(
     }
     with pytest.raises(TOOL.CaptureError, match="implementation.*count"):
         TOOL.operator_records(load_records, audit)
+
+
+def test_sq8_real_shaped_audit_keeps_load_resolutions_out_of_invocation_counts() -> None:
+    load_records = _sq8_load_records()
+    audit = _sq8_operation_audit()
+    request_audit = _sq8_request_audit({}, audit)
+
+    entries = TOOL.validate_sq8_operation_audit(audit, request_audit, load_records)
+    operators, fallback = TOOL.operator_records(
+        load_records, audit, implementation_entries=entries
+    )
+
+    assert fallback == []
+    assert len(operators) == 200
+    load_operators = [
+        item
+        for item in operators
+        if not item["operator_instance_id"].startswith("request-terminal-")
+    ]
+    terminal_operators = [
+        item
+        for item in operators
+        if item["operator_instance_id"].startswith("request-terminal-")
+    ]
+    assert len(load_operators) == 192
+    assert all(item["invocation_count"] == 0 for item in load_operators)
+    assert len(terminal_operators) == 8
+    assert TOOL.terminal_operator_counts(operators) == (
+        TOOL.SQ8_REQUIRED_IMPLEMENTATION_COUNTS
+    )
+    assert sum(item["invocation_count"] for item in operators) == 128
+    assert {
+        item["op_kind"] for item in terminal_operators
+    } == set(TOOL.SQ8_IMPLEMENTATION_KINDS.values())
+
+
+@pytest.mark.parametrize("mutation", ["missing", "duplicate", "unknown"])
+def test_sq8_operation_audit_rejects_noncanonical_implementation_set(
+    mutation: str,
+) -> None:
+    audit = _sq8_operation_audit()
+    counts = audit["implementation_counts"]
+    assert isinstance(counts, list)
+    if mutation == "missing":
+        counts.pop(0)
+    elif mutation == "duplicate":
+        counts[-1] = dict(counts[0])
+    else:
+        counts[-1] = {
+            "kind": "paged_causal_gqa_read",
+            "implementation_id": "hip.unknown.m1",
+            "count": 0,
+        }
+    request_audit = _sq8_request_audit({}, audit)
+
+    with pytest.raises(TOOL.CaptureError, match="implementation"):
+        TOOL.validate_sq8_operation_audit(
+            audit, request_audit, _sq8_load_records()
+        )
+
+
+@pytest.mark.parametrize("bad", [True, 1.0, TOOL.SAFE_INT + 1])
+def test_sq8_operation_audit_rejects_nonexact_implementation_counts(
+    bad: object,
+) -> None:
+    audit = _sq8_operation_audit()
+    counts = audit["implementation_counts"]
+    assert isinstance(counts, list) and isinstance(counts[0], dict)
+    counts[0]["count"] = bad
+    request_audit = _sq8_request_audit({}, audit)
+
+    with pytest.raises(TOOL.CaptureError, match="exact non-negative safe integer"):
+        TOOL.validate_sq8_operation_audit(
+            audit, request_audit, _sq8_load_records()
+        )
+
+
+@pytest.mark.parametrize(
+    ("field", "bad"),
+    [
+        ("physical_operation_invocations", 127),
+        ("total_steps", 128),
+        ("decode_steps", 2),
+        ("token_equivalent_operation_coverage", 8255),
+    ],
+)
+def test_sq8_operation_audit_rejects_formula_mismatch(
+    field: str, bad: int
+) -> None:
+    audit = _sq8_operation_audit()
+    audit[field] = bad
+    request_audit = _sq8_request_audit({}, audit)
+
+    with pytest.raises(TOOL.CaptureError, match=field):
+        TOOL.validate_sq8_operation_audit(
+            audit, request_audit, _sq8_load_records()
+        )
+
+
+def test_sq8_operation_audit_rejects_camel_case_terminal_kind() -> None:
+    audit = _sq8_operation_audit()
+    counts = audit["implementation_counts"]
+    assert isinstance(counts, list) and isinstance(counts[0], dict)
+    counts[0]["kind"] = "LinearAttentionQkvPrepare"
+    request_audit = _sq8_request_audit({}, audit)
+
+    with pytest.raises(TOOL.CaptureError, match="not canonical"):
+        TOOL.validate_sq8_operation_audit(
+            audit, request_audit, _sq8_load_records()
+        )
+
+
+def test_sq8_operation_audit_rejects_implementation_count_sum_mismatch() -> None:
+    audit = _sq8_operation_audit()
+    counts = audit["implementation_counts"]
+    assert isinstance(counts, list) and isinstance(counts[0], dict)
+    counts[0]["count"] = 23
+    request_audit = _sq8_request_audit({}, audit)
+
+    with pytest.raises(TOOL.CaptureError, match="implementation counts"):
+        TOOL.validate_sq8_operation_audit(
+            audit, request_audit, _sq8_load_records()
+        )
 
 
 @pytest.mark.parametrize("field", ["prefill_width_histogram", "total_steps"])
@@ -1046,6 +1277,9 @@ def test_post_telemetry_failure_preserves_raw_telemetry_and_terminal(
             "write_bytes": 0,
         },
     }
+    operation_audit = _sq8_operation_audit()
+    request_audit = _sq8_request_audit(telemetry, operation_audit)
+    load_records = _sq8_load_records()
     worker_source = f'''\
 import json, sys
 request = json.loads(sys.stdin.buffer.readline())
@@ -1053,8 +1287,9 @@ request_id = request["request_id"]
 for index, token_id in enumerate((42, 43)):
     print(json.dumps({{"schema_version": "ullm.worker.v1", "type": "token", "request_id": request_id, "index": index, "token_id": token_id}}, separators=(",", ":")), flush=True)
 print(json.dumps({{"schema_version": "ullm.worker.v1", "type": "released", "request_id": request_id, "completion_tokens": 2, "timings": {{"prompt_ms": 1.0, "predicted_ms": 2.0, "cache_n": 0}}, "reset_complete": True}}, separators=(",", ":")), flush=True)
-json.dump({{"schema_version": "ullm.backend_operation.load.v1", "layer_position": 0, "trace": {{"resolution": "Primary", "implementation_id": "impl", "kind": "linear", "semantic_version": "1", "backend": "hip", "architecture": "gfx1201", "device_name": "fake", "persistent_bytes": 1, "temporary_bytes": 1, "batch_width": 128, "chunk_width": 128}}}}, sys.stderr); sys.stderr.write("\\n")
-json.dump({{"event": "request_released", "request_id": request_id, "operation_execution_audit": {{"coverage_complete": True, "implementation_counts": [{{"implementation_id": "impl", "count": 1}}], "prefill_width_histogram": [0] * 128 + [1], "total_steps": 129}}, "request_execution_audit": {{"sq8_promotion_telemetry": {telemetry!r}}}}}, sys.stderr); sys.stderr.write("\\n"); sys.stderr.flush()
+for record in {load_records!r}:
+    json.dump(record, sys.stderr, separators=(",", ":")); sys.stderr.write("\\n")
+json.dump({{"event": "request_released", "request_id": request_id, "operation_execution_audit": {operation_audit!r}, "request_execution_audit": {request_audit!r}}}, sys.stderr, separators=(",", ":")); sys.stderr.write("\\n"); sys.stderr.flush()
 json.loads(sys.stdin.buffer.readline())
 '''
     manifest = _fake_manifest(tmp_path, worker_source)
@@ -1151,6 +1386,9 @@ def test_fake_worker_sq8_positive_requires_prefill_and_decode_dispatch(
             "write_bytes": 0,
         },
     }
+    operation_audit = _sq8_operation_audit()
+    request_audit = _sq8_request_audit(telemetry, operation_audit)
+    load_records = _sq8_load_records()
     worker_source = f'''\
 import json, sys
 request = json.loads(sys.stdin.buffer.readline())
@@ -1160,8 +1398,9 @@ request_id = request["request_id"]
 for index, token_id in enumerate((42, 43)):
     print(json.dumps({{"schema_version": "ullm.worker.v1", "type": "token", "request_id": request_id, "index": index, "token_id": token_id}}, separators=(",", ":")), flush=True)
 print(json.dumps({{"schema_version": "ullm.worker.v1", "type": "released", "request_id": request_id, "completion_tokens": 2, "timings": {{"prompt_ms": 1.0, "predicted_ms": 2.0, "cache_n": 0}}, "reset_complete": True}}, separators=(",", ":")), flush=True)
-json.dump({{"schema_version": "ullm.backend_operation.load.v1", "layer_position": 0, "trace": {{"resolution": "Primary", "implementation_id": "impl", "kind": "linear", "semantic_version": "1", "backend": "hip", "architecture": "gfx1201", "device_name": "fake", "persistent_bytes": 1, "temporary_bytes": 1, "batch_width": 128, "chunk_width": 128}}}}, sys.stderr); sys.stderr.write("\\n")
-json.dump({{"event": "request_released", "request_id": request_id, "operation_execution_audit": {{"coverage_complete": True, "implementation_counts": [{{"implementation_id": "impl", "count": 1}}], "prefill_width_histogram": [0] * 128 + [1], "total_steps": 129}}, "request_execution_audit": {{"sq8_promotion_telemetry": {telemetry!r}}}}}, sys.stderr); sys.stderr.write("\\n"); sys.stderr.flush()
+for record in {load_records!r}:
+    json.dump(record, sys.stderr, separators=(",", ":")); sys.stderr.write("\\n")
+json.dump({{"event": "request_released", "request_id": request_id, "operation_execution_audit": {operation_audit!r}, "request_execution_audit": {request_audit!r}}}, sys.stderr, separators=(",", ":")); sys.stderr.write("\\n"); sys.stderr.flush()
 json.loads(sys.stdin.buffer.readline())
 '''
     manifest = _fake_manifest(tmp_path, worker_source)
@@ -1244,3 +1483,22 @@ json.loads(sys.stdin.buffer.readline())
         telemetry, request_id
     )
     assert evidence["output_identity"]["token_count"] == 2
+    assert evidence["operator_audit"] == TOOL.sq8_operator_audit_evidence(
+        operation_audit,
+        TOOL.audit_implementation_entries(
+            operation_audit, require_canonical_kind=True
+        ),
+    )
+    assert evidence["load_resolutions"] == TOOL.sq8_load_resolution_evidence(
+        load_records
+    )
+    record = json.loads(output.read_text(encoding="utf-8"))
+    assert len(record["operator_resolutions"]) == 8
+    assert all(
+        item["operator_instance_id"].startswith("request-terminal-")
+        and item["invocation_count"] > 0
+        for item in record["operator_resolutions"]
+    )
+    assert sum(
+        item["invocation_count"] for item in record["operator_resolutions"]
+    ) == 128

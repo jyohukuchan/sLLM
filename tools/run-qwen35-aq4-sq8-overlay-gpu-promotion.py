@@ -41,6 +41,25 @@ GATE_SCHEMA = "ullm.qwen35_aq4.sq8_overlay_gpu_promotion_gate.v1"
 TELEMETRY_SCHEMA = "ullm.qwen35_aq4.sq8_promotion_telemetry.v1"
 TELEMETRY_BINDING_SCHEMA = "ullm.qwen35_aq4.sq8_promotion_telemetry_binding.v1"
 TELEMETRY_HASH_ENCODING = "canonical_json_ascii_sort_keys_compact_v1"
+OPERATOR_AUDIT_SCHEMA = "ullm.qwen35_aq4.sq8_operator_audit.v1"
+LOAD_RESOLUTIONS_SCHEMA = "ullm.qwen35_aq4.sq8_load_resolutions.v1"
+AUDIT_HASH_ENCODING = "canonical_json_ascii_sort_keys_compact_v1"
+REQUIRED_OPERATOR_COUNTS = (
+    ("linear_attention_qkv_prepare", "hip.linear-attention-qkv-prepare-f32.m1", 24),
+    ("gated_delta_rule_scan", "hip.linear-attention-recurrent-f32.m1", 24),
+    ("fused_qk_norm_rope_paged_kv_write", "hip.fused-qk-norm-rope-paged-kv-write-f32.m1", 8),
+    ("paged_causal_gqa_read", "hip.paged-decode-attention-sigmoid-gate-f32.m1-gqa", 8),
+    ("linear_attention_qkv_prepare", "hip.linear-attention-qkv-prepare-batch-f32.m2-m128", 24),
+    ("gated_delta_rule_scan", "hip.linear-attention-recurrent-sequence-f32.m2-m128", 24),
+    ("paged_kv_write", "hip.paged-kv-write-chunk-f32.m2-m128", 8),
+    ("paged_causal_gqa_read", "hip.paged-causal-gqa-chunk-sigmoid-gate-f32.m2-m128", 8),
+)
+LOAD_IMPLEMENTATION_KINDS = {
+    "hip.linear-attention-qkv-prepare-f32.m1": ("linear_attention_qkv_prepare", 24),
+    "hip.linear-attention-recurrent-f32.m1": ("gated_delta_rule_scan", 24),
+    "hip.fused-qk-norm-rope-paged-kv-write-f32.m1": ("fused_qk_norm_rope_paged_kv_write", 8),
+    "hip.paged-decode-attention-sigmoid-gate-f32.m1-gqa": ("paged_causal_gqa_read", 8),
+}
 IMPLEMENTATION_ID = "qwen35_aq4_sq8_linear_qkv_z_overlay_v1"
 EXECUTION_PROFILE = "rdna4_aq4_resident_sq8_linear_qkv_z_overlay"
 SERVICE = "ullm-openai.service"
@@ -1318,6 +1337,107 @@ def stable_identity(snapshot: dict[str, Any]) -> dict[str, Any]:
     return snapshot
 
 
+def validate_sq8_operator_audit_evidence(value: Any) -> None:
+    if not isinstance(value, dict) or set(value) != {
+        "schema_version",
+        "hash_encoding",
+        "source_audit_sha256",
+        "deterministic_digest_sha256",
+        "physical_operation_invocations",
+        "total_steps",
+        "decode_steps",
+        "token_equivalent_operation_coverage",
+        "implementation_counts",
+    }:
+        raise PromotionError("SQ8 operator audit evidence shape differs")
+    if (
+        value.get("schema_version") != OPERATOR_AUDIT_SCHEMA
+        or value.get("hash_encoding") != AUDIT_HASH_ENCODING
+        or not isinstance(value.get("source_audit_sha256"), str)
+        or SHA256_RE.fullmatch(value["source_audit_sha256"]) is None
+        or not isinstance(value.get("deterministic_digest_sha256"), str)
+        or SHA256_RE.fullmatch(value["deterministic_digest_sha256"]) is None
+        or value.get("physical_operation_invocations") != 128
+        or value.get("total_steps") != 129
+        or value.get("decode_steps") != 1
+        or value.get("token_equivalent_operation_coverage") != 8256
+    ):
+        raise PromotionError("SQ8 operator audit evidence contract differs")
+    expected = [
+        {"kind": kind, "implementation_id": implementation, "count": count}
+        for kind, implementation, count in REQUIRED_OPERATOR_COUNTS
+    ]
+    if value.get("implementation_counts") != expected:
+        raise PromotionError("SQ8 operator audit implementation counts differ")
+
+
+def validate_sq8_load_resolution_evidence(value: Any) -> None:
+    if not isinstance(value, dict) or set(value) != {
+        "schema_version",
+        "hash_encoding",
+        "record_count",
+        "records_sha256",
+        "records",
+    }:
+        raise PromotionError("SQ8 load-resolution evidence shape differs")
+    records = value.get("records")
+    if (
+        value.get("schema_version") != LOAD_RESOLUTIONS_SCHEMA
+        or value.get("hash_encoding") != AUDIT_HASH_ENCODING
+        or value.get("record_count") != 192
+        or not isinstance(records, list)
+        or len(records) != 192
+        or value.get("records_sha256") != canonical_sha(records)
+    ):
+        raise PromotionError("SQ8 load-resolution evidence binding differs")
+    phases = {"cold_prefill", "cached_prefix_prefill", "decode"}
+    observed: dict[tuple[str, str], int] = {}
+    layers: dict[tuple[str, str], set[int]] = {}
+    identities: set[tuple[int, str, str]] = set()
+    for item in records:
+        if not isinstance(item, dict) or set(item) != {
+            "layer_position",
+            "phase",
+            "kind",
+            "implementation_id",
+            "resolution",
+        }:
+            raise PromotionError("SQ8 load-resolution record shape differs")
+        implementation = item.get("implementation_id")
+        contract = LOAD_IMPLEMENTATION_KINDS.get(implementation)
+        layer = item.get("layer_position")
+        phase = item.get("phase")
+        if (
+            contract is None
+            or item.get("kind") != contract[0]
+            or item.get("resolution") != "selected"
+            or type(layer) is not int
+            or not 0 <= layer < 32
+            or phase not in phases
+        ):
+            raise PromotionError("SQ8 load-resolution record contract differs")
+        identity = (layer, implementation, phase)
+        if identity in identities:
+            raise PromotionError("SQ8 load-resolution identity is duplicated")
+        identities.add(identity)
+        key = (implementation, phase)
+        observed[key] = observed.get(key, 0) + 1
+        layers.setdefault(key, set()).add(layer)
+    expected = {
+        (implementation, phase): layer_count
+        for implementation, (_kind, layer_count) in LOAD_IMPLEMENTATION_KINDS.items()
+        for phase in phases
+    }
+    if observed != expected:
+        raise PromotionError("SQ8 load-resolution topology differs")
+    linear = layers[("hip.linear-attention-qkv-prepare-f32.m1", "cold_prefill")]
+    recurrent = layers[("hip.linear-attention-recurrent-f32.m1", "cold_prefill")]
+    fused = layers[("hip.fused-qk-norm-rope-paged-kv-write-f32.m1", "cold_prefill")]
+    paged = layers[("hip.paged-decode-attention-sigmoid-gate-f32.m1-gqa", "cold_prefill")]
+    if linear != recurrent or fused != paged or linear & fused or linear | fused != set(range(32)):
+        raise PromotionError("SQ8 load-resolution layer partition differs")
+
+
 def validate_executor_record(
     path: Path, snapshot: dict[str, Any], expected_request_id: str
 ) -> dict[str, Any]:
@@ -1331,6 +1451,8 @@ def validate_executor_record(
         "manifest_identity",
         "telemetry",
         "telemetry_binding",
+        "operator_audit",
+        "load_resolutions",
         "output_identity",
     }:
         raise PromotionError("SQ8 executor evidence shape differs")
@@ -1397,6 +1519,8 @@ def validate_executor_record(
         evidence.get("telemetry_binding"), telemetry, expected_request_id
     ):
         raise PromotionError("SQ8 executor telemetry binding differs")
+    validate_sq8_operator_audit_evidence(evidence.get("operator_audit"))
+    validate_sq8_load_resolution_evidence(evidence.get("load_resolutions"))
     output = evidence.get("output_identity")
     if (
         not isinstance(output, dict)

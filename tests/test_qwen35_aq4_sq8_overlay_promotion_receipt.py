@@ -94,6 +94,48 @@ def sq8_telemetry() -> dict:
     }
 
 
+def operator_audit_evidence() -> dict:
+    return {
+        "schema_version": WRITER.OPERATOR_AUDIT_SCHEMA,
+        "hash_encoding": WRITER.AUDIT_HASH_ENCODING,
+        "source_audit_sha256": "2" * 64,
+        "deterministic_digest_sha256": "3" * 64,
+        "physical_operation_invocations": 128,
+        "total_steps": 129,
+        "decode_steps": 1,
+        "token_equivalent_operation_coverage": 8256,
+        "implementation_counts": [
+            {"kind": kind, "implementation_id": implementation, "count": count}
+            for kind, implementation, count in WRITER.REQUIRED_OPERATOR_COUNTS
+        ],
+    }
+
+
+def load_resolution_evidence() -> dict:
+    records = []
+    phases = ("cold_prefill", "cached_prefix_prefill", "decode")
+    for implementation, (kind, layer_count) in WRITER.LOAD_IMPLEMENTATION_KINDS.items():
+        start = 0 if layer_count == 24 else 24
+        for layer in range(start, start + layer_count):
+            for phase in phases:
+                records.append(
+                    {
+                        "layer_position": layer,
+                        "phase": phase,
+                        "kind": kind,
+                        "implementation_id": implementation,
+                        "resolution": "selected",
+                    }
+                )
+    return {
+        "schema_version": WRITER.LOAD_RESOLUTIONS_SCHEMA,
+        "hash_encoding": WRITER.AUDIT_HASH_ENCODING,
+        "record_count": 192,
+        "records_sha256": hashlib.sha256(WRITER._canonical(records)).hexdigest(),
+        "records": records,
+    }
+
+
 def worker_error_summary() -> dict:
     message = b"worker command failed protocol validation"
     return {
@@ -116,6 +158,24 @@ def worker_error_summary() -> dict:
         },
         "shutdown": {"attempted": True, "completed": True, "error": None},
     }
+
+
+@pytest.mark.parametrize("field", ["physical_operation_invocations", "total_steps", "decode_steps", "token_equivalent_operation_coverage"])
+def test_receipt_operator_audit_rejects_formula_tamper(field: str) -> None:
+    value = operator_audit_evidence()
+    value[field] -= 1
+    with pytest.raises(WRITER.ReceiptError, match="operator audit"):
+        WRITER._validate_sq8_operator_audit(value)
+
+
+def test_receipt_load_resolution_rejects_rehashed_duplicate() -> None:
+    value = load_resolution_evidence()
+    value["records"][-1] = dict(value["records"][0])
+    value["records_sha256"] = hashlib.sha256(
+        WRITER._canonical(value["records"])
+    ).hexdigest()
+    with pytest.raises(WRITER.ReceiptError, match="load-resolution"):
+        WRITER._validate_sq8_load_resolutions(value)
 
 
 def trusted_components() -> dict[str, dict[str, object]]:
@@ -192,6 +252,8 @@ def _valid_actual_inputs(
                 },
                 "telemetry": telemetry,
                 "telemetry_binding": telemetry_binding(telemetry),
+                "operator_audit": operator_audit_evidence(),
+                "load_resolutions": load_resolution_evidence(),
                 "output_identity": {
                     "token_count": 2,
                     "token_ids_sha256": "4" * 64,
@@ -674,6 +736,8 @@ def test_actual_evidence_uses_maintenance_stable2(tmp_path: Path, fixture: dict[
                 },
                 "telemetry": telemetry,
                 "telemetry_binding": telemetry_binding(telemetry),
+                "operator_audit": operator_audit_evidence(),
+                "load_resolutions": load_resolution_evidence(),
                 "output_identity": {"token_count": 2, "token_ids_sha256": "4" * 64, "token_ids_recorded": False},
             },
         },
