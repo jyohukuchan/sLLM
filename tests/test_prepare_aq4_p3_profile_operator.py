@@ -47,6 +47,7 @@ def finalizer_fixture(
     pre_stop_noop: bool = False,
     pre_stop_case: str | None = None,
 ) -> dict:
+    monkeypatch.setattr(OPERATOR, "CURRENT_V16_AUTHORITY_BOUND", True)
     paths = {
         "ROOT": tmp_path,
         "PROFILE_READY_ROOT": tmp_path / "profile-ready-v16",
@@ -215,20 +216,20 @@ def finalizer_fixture(
     return paths
 
 
-def test_v15_paths_and_current_authority_are_bound() -> None:
-    assert OPERATOR.PROFILE_READY_ROOT.name == "resident-one-case-smoke-profile-ready-v17"
-    assert OPERATOR.PROFILE_READY_DRY_RUN_ROOT.name == "resident-one-case-smoke-profile-ready-dry-run-v17"
+def test_v16_paths_and_current_authority_are_bound() -> None:
+    assert OPERATOR.PROFILE_READY_ROOT.name == "resident-one-case-smoke-profile-ready-v18"
+    assert OPERATOR.PROFILE_READY_DRY_RUN_ROOT.name == "resident-one-case-smoke-profile-ready-dry-run-v18"
     assert OPERATOR.HISTORICAL_READY_V15_ROOT.name == "resident-one-case-smoke-profile-ready-v15"
-    assert OPERATOR.OFFLINE_CAPTURE_ROOT.name == "aq4-p3-diagnostic-rocprof-capture-offline-reassembly-v12"
-    assert OPERATOR.OFFLINE_EVIDENCE_ROOT.name == "resident-one-case-smoke-profile-maintenance-offline-reassembly-evidence-v12"
-    assert OPERATOR.QUIET_ROOT.name == "resident-one-case-smoke-profile-quiet-window-v20"
-    assert OPERATOR.OPERATOR_ROOT.name == "resident-one-case-smoke-profile-operator-command-v15"
-    assert OPERATOR.MAINTENANCE_EVIDENCE.name == "resident-one-case-smoke-profile-maintenance-evidence-v12"
-    assert OPERATOR.PROFILE_RUNTIME.name == "resident-one-case-smoke-profile-execute-v11"
-    assert OPERATOR.PROFILE_EXECUTE_EVIDENCE.name == "resident-one-case-smoke-profile-execute-evidence-v11"
-    assert OPERATOR.PROFILE_CAPTURE.name == "aq4-p3-diagnostic-rocprof-capture-v11"
-    assert OPERATOR.OPERATOR_RESULT.name == "resident-one-case-smoke-profile-operator-result-v15"
-    assert OPERATOR.ACTUAL_AUDIT.name == "resident-one-case-smoke-profile-actual-audit-v15"
+    assert OPERATOR.OFFLINE_CAPTURE_ROOT.name == "aq4-p3-diagnostic-rocprof-capture-offline-reassembly-v13"
+    assert OPERATOR.OFFLINE_EVIDENCE_ROOT.name == "resident-one-case-smoke-profile-maintenance-offline-reassembly-evidence-v13"
+    assert OPERATOR.QUIET_ROOT.name == "resident-one-case-smoke-profile-quiet-window-v21"
+    assert OPERATOR.OPERATOR_ROOT.name == "resident-one-case-smoke-profile-operator-command-v16"
+    assert OPERATOR.MAINTENANCE_EVIDENCE.name == "resident-one-case-smoke-profile-maintenance-evidence-v13"
+    assert OPERATOR.PROFILE_RUNTIME.name == "resident-one-case-smoke-profile-execute-v12"
+    assert OPERATOR.PROFILE_EXECUTE_EVIDENCE.name == "resident-one-case-smoke-profile-execute-evidence-v12"
+    assert OPERATOR.PROFILE_CAPTURE.name == "aq4-p3-diagnostic-rocprof-capture-v12"
+    assert OPERATOR.OPERATOR_RESULT.name == "resident-one-case-smoke-profile-operator-result-v16"
+    assert OPERATOR.ACTUAL_AUDIT.name == "resident-one-case-smoke-profile-actual-audit-v16"
     assert OPERATOR.PREVIOUS_ACTUAL_V14_MAINTENANCE_EVIDENCE.name == "resident-one-case-smoke-profile-maintenance-evidence-v11"
     assert OPERATOR.PREVIOUS_ACTUAL_V14_PROFILE_RUNTIME.name == "resident-one-case-smoke-profile-execute-v10"
     assert OPERATOR.PREVIOUS_ACTUAL_V14_PROFILE_EXECUTE_EVIDENCE.name == "resident-one-case-smoke-profile-execute-evidence-v10"
@@ -242,10 +243,31 @@ def test_v15_paths_and_current_authority_are_bound() -> None:
     assert OPERATOR.PREVIOUS_OPERATOR_RESULT_V10.name == "resident-one-case-smoke-profile-operator-result-v10"
     assert OPERATOR.PREVIOUS_ACTUAL_AUDIT_V10.name == "resident-one-case-smoke-profile-actual-audit-v10"
     assert OPERATOR.EXECUTE_BINDING_ROOT.name == "resident-one-case-smoke-execute-binding-v10"
-    assert OPERATOR.CURRENT_V15_AUTHORITY_BOUND is True
+    assert OPERATOR.EXECUTE_BINDING_V12_ROOT.name == "resident-one-case-smoke-execute-binding-v12"
+    assert OPERATOR.EXECUTE_RUNTIME_V12.name == "resident-one-case-smoke-execute-v12"
+    assert OPERATOR.EXECUTE_EVIDENCE_V12.name == "resident-one-case-smoke-execute-evidence-v12"
+    assert OPERATOR.CURRENT_V16_AUTHORITY_BOUND is True
+    for name in (
+        "READY_ARTIFACT_COMMIT",
+        "READY_BINDING_SHA256",
+        "CURRENT_MAINTENANCE_COMMIT",
+        "OFFLINE_ARTIFACT_COMMIT",
+        "EXECUTE_BINDING_V12_ARTIFACT_COMMIT",
+        "EXECUTE_BINDING_V12_ROOT_TREE",
+        "EXECUTE_BINDING_V12_SUMS_SHA256",
+        "EXECUTE_BINDING_V12_MANIFEST_SHA256",
+        "EXECUTE_BINDING_V12_LAUNCHER_TRUST_SHA256",
+        "EXECUTE_LAUNCHER_V12_COMMIT",
+        "EXECUTE_LAUNCHER_V12_TREE",
+        "EXECUTE_LAUNCHER_V12_BLOB",
+        "EXECUTE_LAUNCHER_V12_SHA256",
+    ):
+        value = getattr(OPERATOR, name)
+        assert isinstance(value, str)
+        assert len(value) in (40, 64)
 
 
-def test_v15_fresh9_is_exact_and_absent_after_authority_binding() -> None:
+def test_v16_fresh9_is_exact_and_authority_is_bound() -> None:
     capture = OPERATOR.PROFILE_CAPTURE
     assert isinstance(capture, Path)
     expected = [
@@ -264,7 +286,7 @@ def test_v15_fresh9_is_exact_and_absent_after_authority_binding() -> None:
     assert len(fresh) == len({str(path) for path in fresh}) == 9
     assert all(path.is_absolute() and ".." not in path.parts for path in fresh)
     assert all(not path.exists() and not path.is_symlink() for path in fresh)
-    OPERATOR.require_current_v15_authority()
+    OPERATOR.require_current_v16_authority()
 
 
 def test_execute_binding_v10_and_launcher_authorities_are_exact() -> None:
@@ -328,16 +350,62 @@ def test_execute_binding_v11_is_path_namespace_authority_only() -> None:
     assert OPERATOR.EXECUTE_EVIDENCE_V11 != OPERATOR.PROFILE_EXECUTE_EVIDENCE
 
 
-def test_v15_schema_boundary_and_previous_v14_authority_are_exact() -> None:
-    assert OPERATOR.QUIET_SCHEMA.endswith(".v20")
-    assert OPERATOR.OPERATOR_SCHEMA.endswith(".v15")
-    assert OPERATOR.OPERATOR_RESULT_SCHEMA.endswith(".v15")
-    assert OPERATOR.ACTUAL_AUDIT_SCHEMA.endswith(".v15")
-    roots = OPERATOR.current_v15_actual_roots()
+def test_execute_binding_v12_never_reads_an_unpinned_namespace(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(OPERATOR, "CURRENT_V16_AUTHORITY_BOUND", True)
+    monkeypatch.setattr(OPERATOR, "EXECUTE_BINDING_V12_ARTIFACT_COMMIT", None)
+    monkeypatch.setattr(
+        OPERATOR,
+        "verify_sums",
+        lambda _root: (_ for _ in ()).throw(
+            AssertionError("unpinned execute namespace must not be read")
+        ),
+    )
+    with pytest.raises(OPERATOR.OperatorError, match="authority pins are unbound"):
+        OPERATOR.execute_binding_v12_namespace_authority()
+
+
+def test_current_v16_formal_authorities_are_exact() -> None:
+    ready, ready_inventory = OPERATOR.ready_authority()
+    execute = OPERATOR.execute_binding_v12_namespace_authority()
+    offline = OPERATOR.offline_reassembly_authority()
+    authority = OPERATOR.current_v16_authority()
+    assert ready["status"] == "ready_for_one_case"
+    assert len(ready_inventory["members"]) + 1 == 4
+    assert execute["artifact_commit"] == OPERATOR.EXECUTE_BINDING_V12_ARTIFACT_COMMIT
+    assert len(execute["inventory"]["members"]) + 1 == 3
+    assert execute["binding"]["run_id"].endswith("execute-v12")
+    assert offline["artifact_commit"] == OPERATOR.OFFLINE_ARTIFACT_COMMIT
+    assert offline["value"]["source_actual_seal"]["member_count"] == 66
+    assert offline["file_count"] == 42
+    assert authority["authority_bound"] is True
+    assert authority["fresh_output_count"] == 9
+    assert authority["fresh_outputs_absent"] is True
+    assert authority["previous_actual_v15_state"] == (
+        "executed_sealed_failure_restore_passed"
+    )
+
+
+def test_v16_schema_boundary_and_previous_v15_authority_are_exact() -> None:
+    assert OPERATOR.QUIET_SCHEMA.endswith(".v21")
+    assert OPERATOR.OPERATOR_SCHEMA.endswith(".v16")
+    assert OPERATOR.OPERATOR_RESULT_SCHEMA.endswith(".v16")
+    assert OPERATOR.ACTUAL_AUDIT_SCHEMA.endswith(".v16")
+    prepare_source = inspect.getsource(OPERATOR.prepare_operator)
+    validate_source = inspect.getsource(OPERATOR.validate_operator)
+    assert "previous_actual_v15_state" in prepare_source
+    assert '"previous_actual_v15"' in prepare_source
+    assert '"offline_reassembly_v13"' in prepare_source
+    assert '"previous_actual_v14"' not in prepare_source
+    assert 'inputs.get("previous_actual_v15"' in validate_source
+    assert 'inputs.get("offline_reassembly_v13"' in validate_source
+    roots = OPERATOR.current_v16_actual_roots()
     assert len(roots) == len(set(roots.values())) == 6
-    OPERATOR.require_current_v15_authority()
+    OPERATOR.require_current_v16_authority()
     roots = OPERATOR.root_set()
     assert OPERATOR.EXECUTE_BINDING_ROOT in roots
+    assert OPERATOR.EXECUTE_BINDING_V12_ROOT in roots
     assert OPERATOR.PROFILE_READY_DRY_RUN_ROOT in roots
     assert OPERATOR.HISTORICAL_READY_V15_ROOT in roots
     assert OPERATOR.OFFLINE_CAPTURE_ROOT in roots
@@ -358,24 +426,64 @@ def test_v15_schema_boundary_and_previous_v14_authority_are_exact() -> None:
     assert actual["invocation_count"] == actual["maximum_invocations"] == 1
     assert actual["retry_performed"] is False
     assert actual["restore_passed"] is True
+    actual_v15 = OPERATOR.previous_actual_v15_state()
+    assert actual_v15["state"] == "executed_sealed_failure_restore_passed"
+    assert actual_v15["failure_kind"] == "capture_success_artifact_maintenance_semantic_rejection"
+    assert actual_v15["artifact_commit"] == OPERATOR.PREVIOUS_ACTUAL_V15_COMMIT
+    assert actual_v15["artifact_tree"] == OPERATOR.PREVIOUS_ACTUAL_V15_TREE
+    assert actual_v15["journal_commit"] == OPERATOR.PREVIOUS_ACTUAL_V15_JOURNAL_COMMIT
+    assert actual_v15["file_count"] == OPERATOR.PREVIOUS_ACTUAL_V15_FILE_COUNT == 66
+    assert actual_v15["returncode"] == 1
+    assert actual_v15["invocation_count"] == actual_v15["maximum_invocations"] == 1
+    assert actual_v15["retry_performed"] is False
+    assert actual_v15["restore_passed"] is True
+    assert actual_v15["capture_artifact_schema"].endswith(".v2")
 
 
-def test_current_v15_authority_formal_readback_is_exact_and_read_only() -> None:
-    authority = OPERATOR.current_v15_authority()
-    assert authority["authority_bound"] is True
-    assert authority["ready_artifact_commit"] == OPERATOR.READY_ARTIFACT_COMMIT
-    assert authority["ready_actual_eligible"] is True
-    assert authority["offline_artifact_commit"] == OPERATOR.OFFLINE_ARTIFACT_COMMIT
-    assert authority["offline_file_count"] == 42
-    assert authority["actual_root_count"] == 6
-    assert authority["fresh_output_count"] == 9
-    assert authority["fresh_outputs_absent"] is True
-    assert authority["previous_operator_v13_state"] == "authorized_not_invoked_preflight_blocked"
-    assert authority["previous_actual_v14_state"] == "executed_sealed_failure_restore_passed"
-    assert authority["read_only"] is True
-    assert authority["actual_executed"] is False
-    assert authority["gpu_command_executed"] is False
-    assert authority["service_touched"] is False
+def test_current_v16_authority_rejects_before_any_readback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(OPERATOR, "CURRENT_V16_AUTHORITY_BOUND", False)
+    touched = False
+
+    def forbidden_ready() -> tuple[dict, dict]:
+        nonlocal touched
+        touched = True
+        raise AssertionError("unbound authority must fail before readback")
+
+    monkeypatch.setattr(OPERATOR, "ready_authority", forbidden_ready)
+    with pytest.raises(OPERATOR.OperatorError, match="current v16 authority is unbound"):
+        OPERATOR.current_v16_authority()
+    assert touched is False
+
+
+@pytest.mark.parametrize(
+    "entrypoint",
+    (
+        lambda root: OPERATOR.validate_operator(root),
+        lambda _root: OPERATOR.finalize_actual(
+            returncode=1,
+            start_unix_ns=1,
+            end_unix_ns=2,
+        ),
+        lambda _root: OPERATOR.validate_actual(),
+    ),
+)
+def test_unbound_postseal_entrypoints_reject_before_artifact_readback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    entrypoint,
+) -> None:
+    monkeypatch.setattr(OPERATOR, "CURRENT_V16_AUTHORITY_BOUND", False)
+    monkeypatch.setattr(
+        OPERATOR,
+        "verify_sums",
+        lambda _root: (_ for _ in ()).throw(
+            AssertionError("unbound postseal entrypoint must not read artifacts")
+        ),
+    )
+    with pytest.raises(OPERATOR.OperatorError, match="current v16 authority is unbound"):
+        entrypoint(tmp_path / "absent")
 
 
 def test_historical_ready_v15_is_self_contained_and_poststate_independent(
@@ -472,15 +580,12 @@ def test_historical_ready_v15_rejects_embedded_qa_or_wrong_source_path(
         OPERATOR.historical_ready_v15_authority()
 
 
-def test_audit_current_real_authority_integration_is_clean() -> None:
-    audit = OPERATOR.audit_current()
-    assert audit["status"] == "clean"
-    assert audit["fresh_outputs_absent"] is True
-    assert audit["targeted_processes"] == []
-    assert audit["owners"]["amd_smi"] == [audit["worker"]["pid"]]
-    assert audit["owners"]["kfd"] == [audit["worker"]["pid"]]
-    assert audit["actual_executed"] is False
-    assert audit["service_touched"] is False
+def test_audit_current_is_forbidden_while_v16_is_unbound(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(OPERATOR, "CURRENT_V16_AUTHORITY_BOUND", False)
+    with pytest.raises(OPERATOR.OperatorError, match="current v16 authority is unbound"):
+        OPERATOR.audit_current()
 
 
 def test_previous_v13_authority_is_immutable_uninvoked_and_poststate_independent() -> None:
@@ -549,7 +654,7 @@ def test_audit_current_integrates_real_prepared_and_binding_mode_contracts(
     )
     assert all(member["mode"] == "0444" for member in binding["members"].values())
 
-    monkeypatch.setattr(OPERATOR, "CURRENT_V15_AUTHORITY_BOUND", False)
+    monkeypatch.setattr(OPERATOR, "CURRENT_V16_AUTHORITY_BOUND", False)
     touched = False
 
     def forbidden_ready() -> tuple[dict, dict]:
@@ -589,7 +694,7 @@ def test_prepared_json_rejects_executable_mode(
         OPERATOR.verify_sums(prepared)
 
 
-def test_previous_v14_actual_is_separate_from_bound_v15_paths() -> None:
+def test_previous_v14_actual_is_separate_from_unbound_v16_paths() -> None:
     actual = OPERATOR.previous_actual_v14_state()
     assert actual["state"] == "executed_sealed_failure_restore_passed"
     historical = {
@@ -602,10 +707,10 @@ def test_previous_v14_actual_is_separate_from_bound_v15_paths() -> None:
     }
     assert OPERATOR.OPERATOR_RESULT not in historical
     assert OPERATOR.ACTUAL_AUDIT not in historical
-    assert set(OPERATOR.current_v15_actual_roots().values()).isdisjoint(historical)
+    assert set(OPERATOR.current_v16_actual_roots().values()).isdisjoint(historical)
 
 
-def test_previous_v14_seal_is_independent_of_current_v15_poststate(
+def test_previous_v14_seal_is_independent_of_current_v16_poststate(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -625,19 +730,79 @@ def test_previous_v14_seal_is_independent_of_current_v15_poststate(
         (path / "later-version-evidence").write_bytes(b"poststate")
     assert OPERATOR.previous_actual_v14_state() == before_v14
     assert OPERATOR.previous_authorization_v13_state() == before_v13
-    assert set(OPERATOR.current_v15_actual_roots().values()) == set(current.values())
+    assert set(OPERATOR.current_v16_actual_roots().values()) == set(current.values())
 
 
-def test_operator_source_authority_uses_path_last_change() -> None:
-    record = OPERATOR.trusted_operator_source_record()
-    assert record["source_commit"] == record["artifact_commit"]
-    assert record["source_commit"] == OPERATOR.git(
-        "log",
-        "-1",
-        "--format=%H",
-        "--",
-        str(SCRIPT.relative_to(ROOT)),
+def test_operator_source_authority_accepts_committed_v16_source() -> None:
+    authority = OPERATOR.trusted_operator_source_record()
+    assert authority["path"] == str(SCRIPT)
+    assert authority["git_blob"] == OPERATOR.git("hash-object", str(SCRIPT))
+
+
+def test_previous_v15_seal_is_independent_of_current_v16_poststate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    before = OPERATOR.previous_actual_v15_state()
+    current = {
+        "MAINTENANCE_EVIDENCE": tmp_path / "maintenance-v13",
+        "PROFILE_RUNTIME": tmp_path / "runtime-v12",
+        "PROFILE_EXECUTE_EVIDENCE": tmp_path / "execute-evidence-v12",
+        "PROFILE_CAPTURE": tmp_path / "capture-v12",
+        "OPERATOR_RESULT": tmp_path / "operator-result-v16",
+        "ACTUAL_AUDIT": tmp_path / "actual-audit-v16",
+    }
+    for name, path in current.items():
+        monkeypatch.setattr(OPERATOR, name, path)
+        path.mkdir(parents=True)
+        (path / "future-evidence").write_bytes(b"unbound")
+    assert OPERATOR.previous_actual_v15_state() == before
+    assert set(OPERATOR.current_v16_actual_roots().values()) == set(current.values())
+
+
+def test_previous_v15_capture_success_semantic_failure_and_poststate_are_exact(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = OPERATOR.previous_actual_v15_state()
+    assert state["capture_artifact_status"] == "complete_diagnostic"
+    assert state["maintenance_validation_error"] == (
+        "HarnessError: profile capture success artifact semantic binding differs"
     )
+    assert sum(
+        len(inventory["members"]) + 1
+        for inventory in state["inventories"].values()
+    ) == 66
+    audit = OPERATOR.load(
+        OPERATOR.PREVIOUS_ACTUAL_V15_AUDIT / "actual-audit.json",
+        "previous actual-v15 audit",
+    )
+    result = OPERATOR.load(
+        OPERATOR.PREVIOUS_ACTUAL_V15_OPERATOR_RESULT / "operator-result.json",
+        "previous operator-v15 result",
+    )
+    worker_pid = audit["recovery_snapshot"]["worker"]["pid"]
+    assert audit["restore_classification"] == "outer_finally_restored_new_epoch"
+    assert audit["restore"]["passed"] is True
+    assert audit["recovery_snapshot"]["owners"] == {
+        "amd_smi": [worker_pid],
+        "kfd": [worker_pid],
+    }
+    assert result["finalizer_authority"] == audit["finalizer_authority"]
+
+    original_load = OPERATOR.load
+
+    def tampered_load(path: Path, label: str) -> dict:
+        value = original_load(path, label)
+        if path == OPERATOR.PREVIOUS_ACTUAL_V15_PROFILE_CAPTURE / "capture-artifact.json":
+            value["profiler"]["target_environment"].pop("injected_fd_map_key")
+        return value
+
+    monkeypatch.setattr(OPERATOR, "load", tampered_load)
+    with pytest.raises(
+        OPERATOR.OperatorError,
+        match="previous actual-v15 immutable semantic failure differs",
+    ):
+        OPERATOR.previous_actual_v15_state()
 
 
 @pytest.mark.parametrize("tamper", ("source_bytes", "blob_authority"))
@@ -1283,31 +1448,38 @@ def test_actual_command_is_exactly_one_non_shell_profile_execution(
     assert argv.count("--confirm-one-case") == 1
 
 
-def test_v15_actual_namespace_rejects_previous_v14_overlap(
+def test_v16_actual_namespace_rejects_previous_v15_overlap(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
         OPERATOR,
         "MAINTENANCE_EVIDENCE",
-        OPERATOR.PREVIOUS_ACTUAL_V14_MAINTENANCE_EVIDENCE,
+        OPERATOR.PREVIOUS_ACTUAL_V15_MAINTENANCE_EVIDENCE,
     )
     monkeypatch.setattr(OPERATOR, "PROFILE_RUNTIME", tmp_path / "runtime-v11")
     monkeypatch.setattr(OPERATOR, "PROFILE_EXECUTE_EVIDENCE", tmp_path / "execute-evidence-v11")
     monkeypatch.setattr(OPERATOR, "PROFILE_CAPTURE", tmp_path / "capture-v11")
-    with pytest.raises(OPERATOR.OperatorError, match="overlaps historical v14"):
-        OPERATOR.current_v15_actual_roots()
+    with pytest.raises(OPERATOR.OperatorError, match="overlaps historical v15"):
+        OPERATOR.current_v16_actual_roots()
 
 
-def test_v15_actual_namespace_rejects_any_unbound_path(
+def test_v16_actual_namespace_rejects_any_unbound_path(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(OPERATOR, "PROFILE_CAPTURE", None)
     with pytest.raises(OPERATOR.OperatorError, match="namespace is unbound"):
-        OPERATOR.current_v15_actual_roots()
+        OPERATOR.current_v16_actual_roots()
 
 
-def test_prepare_and_validate_operator_self_hash_and_restore_contract(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_prepare_operator_is_blocked_until_v16_authorities_are_bound(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(OPERATOR, "CURRENT_V16_AUTHORITY_BOUND", False)
+    with pytest.raises(OPERATOR.OperatorError, match="current v16 authority is unbound"):
+        OPERATOR.prepare_operator(tmp_path / "operator-v16")
+    return
     quiet_root = tmp_path / "quiet"
     output_root = tmp_path / "operator"
     fresh = [tmp_path / f"fresh-{index}" for index in range(9)]
@@ -1326,7 +1498,7 @@ def test_prepare_and_validate_operator_self_hash_and_restore_contract(tmp_path: 
         "secret_material_recorded": False,
     }
     sealed(quiet_root, "quiet-window.json", quiet)
-    monkeypatch.setattr(OPERATOR, "CURRENT_V15_AUTHORITY_BOUND", True)
+    monkeypatch.setattr(OPERATOR, "CURRENT_V16_AUTHORITY_BOUND", True)
     monkeypatch.setattr(OPERATOR, "QUIET_ROOT", quiet_root)
     monkeypatch.setattr(OPERATOR, "MAINTENANCE_EVIDENCE", tmp_path / "maintenance-v12")
     monkeypatch.setattr(OPERATOR, "PROFILE_RUNTIME", tmp_path / "runtime-v11")
@@ -1449,11 +1621,15 @@ def test_prepare_and_validate_operator_self_hash_and_restore_contract(tmp_path: 
     assert OPERATOR.validate_operator(output_root)["value"] == value
 
 
-def test_prepare_operator_requires_historical_v13_final_state(
+def test_unbound_prepare_precedes_historical_v13_state_readback(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(OPERATOR, "CURRENT_V15_AUTHORITY_BOUND", True)
+    monkeypatch.setattr(OPERATOR, "CURRENT_V16_AUTHORITY_BOUND", False)
+    with pytest.raises(OPERATOR.OperatorError, match="current v16 authority is unbound"):
+        OPERATOR.prepare_operator(tmp_path / "operator-v16")
+    return
+    monkeypatch.setattr(OPERATOR, "CURRENT_V16_AUTHORITY_BOUND", True)
     monkeypatch.setattr(OPERATOR, "MAINTENANCE_EVIDENCE", tmp_path / "maintenance-v12")
     monkeypatch.setattr(OPERATOR, "PROFILE_RUNTIME", tmp_path / "runtime-v11")
     monkeypatch.setattr(OPERATOR, "PROFILE_EXECUTE_EVIDENCE", tmp_path / "execute-evidence-v11")
