@@ -23,6 +23,7 @@
 - command-v16 は 1 回だけ生成し、`audited_ready_for_single_explicit_profile_diagnostic` として封印した。最大 invocation は 1、argv は 10 要素、confirmation/profile/ready/evidence flag は各 1、shell は false、actual/GPU/service は false である。
 - command-v16 commit は `7ec8189d389b81f5b7d77e050707069c11dd6ae1`、commit tree は `3637173cc67ead1ae2661cfb91b9a1fb141d7470`、root tree は `a2761ea5a89a18469e6726a3fb379cbf78f16048` である。JSON/SHA256SUMS SHA256 は `8779b6414b4d017fccba3b15f641ed6e6d3a6ebfc21429aafe2e3d9a43763ce0` / `07430ef010a2ea9b2a48668c29dd5d190cd8c7f2e3b3c3f399be20e79331d21a`、semantic/command SHA256 は `605a47d6ac5f302cc6281cef66b096bb7f42a2047c611129c31c58eb788f34a4` / `a1870af07141fa66afb852f67f947567b67ad10871030754273d64261175af49` である。
 - 2 系統の独立 Luna read-only gate は、quiet/command の Git coverage、mode、SHA256、semantic binding、current authority、previous v15/v14/v13、fresh 9/9 absent、result/audit-v16 absent を確認し、どちらも GO と判定した。
+- command と journal の封印後に、actual 直前相当の live gate を別に 4 polls 実施した。4 polls は HEAD `27d384fd288d17ad93ebc381f81a19688a35804e`、tree `73d1d58cb21c599eaadbf97112da5e7c805e24ed`、blocking identity `77bc35d8a0a36c15a4515d42ea530431f0e483f9858719b6fe77315d59b00e7f` で不変だった。external SQ8 family と targeted process は 0、service main PID `3268257` は active/running・nrestarts 0、worker PID `3268350` は AMD/KFD の唯一の owner、fresh 9/9 absent、authority bound、operator source diff clean だった。
 
 ## 次の行動
 
