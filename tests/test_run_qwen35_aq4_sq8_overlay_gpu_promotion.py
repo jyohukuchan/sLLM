@@ -1192,6 +1192,7 @@ def test_default_capture_outer_kill_and_pipe_drain_use_bounded_typed_cleanup(
 
     class HangingProcess:
         def __init__(self) -> None:
+            self.pid = 424242
             self.stdout = FakeStream(99998)
             self.stderr = FakeStream(99999)
             self.returncode: int | None = None
@@ -1213,6 +1214,11 @@ def test_default_capture_outer_kill_and_pipe_drain_use_bounded_typed_cleanup(
     process = HangingProcess()
     monkeypatch.setattr(MODULE.subprocess, "Popen", lambda *_args, **_kwargs: process)
     monkeypatch.setattr(MODULE.threading, "Thread", FakeThread)
+    monkeypatch.setattr(MODULE.os, "getpgid", lambda pid: pid)
+    signals: list[int] = []
+    monkeypatch.setattr(MODULE.os, "killpg", lambda _pgid, sig: signals.append(sig))
+    monkeypatch.setattr(MODULE, "_process_group_exists", lambda _pgid: True)
+    monkeypatch.setattr(MODULE, "_wait_process_group_absent", lambda _pgid, _timeout: False)
 
     result = MODULE.default_capture(["fake-capture"], {})
 
@@ -1220,22 +1226,181 @@ def test_default_capture_outer_kill_and_pipe_drain_use_bounded_typed_cleanup(
     assert result.returncode is None
     assert result.cleanup_errors == (
         "process_reap_timeout",
+        "process_group_reap_timeout",
         "stdout_drain_timeout",
         "stderr_drain_timeout",
     )
     assert process.calls == [
         ("wait", MODULE.CAPTURE_SUBPROCESS_TIMEOUT_SECONDS),
-        ("terminate", None),
         ("wait", MODULE.CAPTURE_TERMINATE_GRACE_SECONDS),
-        ("kill", None),
         ("wait", MODULE.CAPTURE_KILL_REAP_TIMEOUT_SECONDS),
-        ("kill", None),
-        ("wait", MODULE.CAPTURE_FINAL_REAP_TIMEOUT_SECONDS),
     ]
+    assert signals == [signal.SIGTERM, signal.SIGKILL]
     assert [thread.joins for thread in FakeThread.instances] == [
         [MODULE.CAPTURE_STDOUT_DRAIN_TIMEOUT_SECONDS, MODULE.CAPTURE_PIPE_CLOSE_GRACE_SECONDS],
         [MODULE.CAPTURE_STDERR_DRAIN_TIMEOUT_SECONDS, MODULE.CAPTURE_PIPE_CLOSE_GRACE_SECONDS],
     ]
+
+
+def test_default_capture_kills_owned_descendant_group_with_inherited_pipes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pid_file = tmp_path / "descendant-pids"
+    child = (
+        "import os,signal,time;"
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN);"
+        "open(os.environ['PID_FILE'],'a').write(str(os.getpid())+'\\n');"
+        "print('child-ready', flush=True);time.sleep(30)"
+    )
+    parent = (
+        "import os,signal,subprocess,sys,time;"
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN);"
+        "open(os.environ['PID_FILE'],'a').write(str(os.getpid())+'\\n');"
+        f"subprocess.Popen([sys.executable,'-c',{child!r}]);"
+        "print('parent-ready', flush=True);time.sleep(30)"
+    )
+    environment = dict(os.environ, PID_FILE=str(pid_file))
+    monkeypatch.setattr(MODULE, "CAPTURE_SUBPROCESS_TIMEOUT_SECONDS", 0.1)
+    monkeypatch.setattr(MODULE, "CAPTURE_TERMINATE_GRACE_SECONDS", 0.05)
+    monkeypatch.setattr(MODULE, "CAPTURE_KILL_REAP_TIMEOUT_SECONDS", 1.0)
+    monkeypatch.setattr(MODULE, "CAPTURE_FINAL_REAP_TIMEOUT_SECONDS", 1.0)
+    monkeypatch.setattr(MODULE, "CAPTURE_STDOUT_DRAIN_TIMEOUT_SECONDS", 1.0)
+    monkeypatch.setattr(MODULE, "CAPTURE_STDERR_DRAIN_TIMEOUT_SECONDS", 1.0)
+
+    result = MODULE.default_capture([sys.executable, "-c", parent], environment)
+
+    pids = [int(value) for value in pid_file.read_text().splitlines()]
+    assert len(pids) == 2
+    assert result.timed_out is True
+    assert result.returncode == -signal.SIGKILL
+    assert result.cleanup_errors == ()
+    assert result.stdout.complete is True and result.stderr.complete is True
+    assert all(not Path(f"/proc/{pid}").exists() for pid in pids)
+
+
+def test_default_capture_rejects_success_parent_that_leaves_pipe_child(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pid_file = tmp_path / "orphan-pid"
+    child = (
+        "import os,signal,sys,time;"
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN);"
+        "open(sys.argv[1],'w').write(str(os.getpid()));"
+        "time.sleep(30)"
+    )
+    parent = (
+        "import os,subprocess,sys,time;"
+        f"subprocess.Popen([sys.executable,'-c',{child!r},sys.argv[1]]);"
+        "[(time.sleep(0.01)) for _ in range(100) if not os.path.exists(sys.argv[1])];"
+        "print('parent-complete', flush=True)"
+    )
+    monkeypatch.setattr(MODULE, "CAPTURE_TERMINATE_GRACE_SECONDS", 0.05)
+    monkeypatch.setattr(MODULE, "CAPTURE_KILL_REAP_TIMEOUT_SECONDS", 1.0)
+    monkeypatch.setattr(MODULE, "CAPTURE_FINAL_REAP_TIMEOUT_SECONDS", 1.0)
+
+    result = MODULE.default_capture(
+        [sys.executable, "-c", parent, str(pid_file)], dict(os.environ)
+    )
+
+    child_pid = int(pid_file.read_text())
+    assert result.returncode == 0 and result.timed_out is False
+    assert result.cleanup_errors == ("unexpected_process_group_descendants",)
+    assert not Path(f"/proc/{child_pid}").exists()
+    assert result.stdout.complete is True and result.stderr.complete is True
+
+
+def test_process_group_identity_mismatch_never_calls_killpg(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Process:
+        pid = 515151
+        returncode: int | None = None
+
+        def poll(self) -> None:
+            return None
+
+        def kill(self) -> None:
+            self.returncode = -signal.SIGKILL
+
+        def wait(self, timeout: float) -> int:
+            assert timeout == MODULE.CAPTURE_KILL_REAP_TIMEOUT_SECONDS
+            return self.returncode or 0
+
+    monkeypatch.setattr(MODULE.os, "getpgid", lambda _pid: 616161)
+    monkeypatch.setattr(
+        MODULE.os,
+        "killpg",
+        lambda *_args: pytest.fail("killpg must not run for a mismatched PGID"),
+    )
+    assert MODULE._terminate_owned_process_group(
+        Process(),
+        515151,
+        term_grace=MODULE.CAPTURE_TERMINATE_GRACE_SECONDS,
+        kill_reap_timeout=MODULE.CAPTURE_KILL_REAP_TIMEOUT_SECONDS,
+        final_reap_timeout=MODULE.CAPTURE_FINAL_REAP_TIMEOUT_SECONDS,
+    ) == ["process_group_identity_invalid"]
+
+
+def test_source_archive_timeout_kills_real_descendants_and_reports_typed_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    original_popen = MODULE.subprocess.Popen
+    pid_file = tmp_path / "archive-pids"
+    child = (
+        "import os,signal,sys,time;"
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN);"
+        "open(sys.argv[1],'a').write(str(os.getpid())+'\\n');"
+        "time.sleep(30)"
+    )
+    parent = (
+        "import os,signal,subprocess,sys,time;"
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN);"
+        "open(sys.argv[1],'a').write(str(os.getpid())+'\\n');"
+        f"subprocess.Popen([sys.executable,'-c',{child!r},sys.argv[1]]);"
+        "sys.stdout.buffer.write(b'partial-archive');sys.stdout.flush();time.sleep(30)"
+    )
+
+    def stalled_archive(_argv: list[str], **kwargs: Any) -> Any:
+        return original_popen(
+            [sys.executable, "-c", parent, str(pid_file)], **kwargs
+        )
+
+    monkeypatch.setattr(MODULE.subprocess, "Popen", stalled_archive)
+    monkeypatch.setattr(MODULE, "SOURCE_ARCHIVE_TIMEOUT_SECONDS", 0.1)
+    monkeypatch.setattr(MODULE, "CAPTURE_TERMINATE_GRACE_SECONDS", 0.05)
+    monkeypatch.setattr(MODULE, "CAPTURE_KILL_REAP_TIMEOUT_SECONDS", 1.0)
+    monkeypatch.setattr(MODULE, "CAPTURE_FINAL_REAP_TIMEOUT_SECONDS", 1.0)
+    monkeypatch.setattr(MODULE, "SOURCE_ARCHIVE_DRAIN_TIMEOUT_SECONDS", 1.0)
+
+    with pytest.raises(MODULE.SourceArchiveError) as raised:
+        MODULE.source_archive_sha256("a" * 40)
+
+    assert raised.value.reason == "git archive timed out"
+    assert raised.value.cleanup_errors == ()
+    pids = [int(value) for value in pid_file.read_text().splitlines()]
+    assert len(pids) == 2
+    assert all(not Path(f"/proc/{pid}").exists() for pid in pids)
+
+
+def test_source_archive_concurrently_drains_large_stderr_with_bounded_diagnostic(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original_popen = MODULE.subprocess.Popen
+    script = (
+        "import sys;"
+        "sys.stdout.buffer.write(b'archive-prefix');sys.stdout.flush();"
+        "sys.stderr.buffer.write(b'e'*2000000);sys.stderr.flush();sys.exit(7)"
+    )
+
+    def noisy_archive(_argv: list[str], **kwargs: Any) -> Any:
+        return original_popen([sys.executable, "-c", script], **kwargs)
+
+    monkeypatch.setattr(MODULE.subprocess, "Popen", noisy_archive)
+    with pytest.raises(MODULE.SourceArchiveError) as raised:
+        MODULE.source_archive_sha256("b" * 40)
+
+    assert raised.value.reason.startswith("git archive failed: ")
+    assert len(raised.value.reason.encode()) <= MODULE.CAPTURE_DIAGNOSTIC_MAX_BYTES + 64
 
 
 @pytest.mark.parametrize(

@@ -14,10 +14,13 @@ import importlib.util
 import json
 import os
 import re
+import signal
 import shutil
 import stat
 import subprocess
 import sys
+import tempfile
+import time
 from pathlib import Path
 from types import ModuleType
 from typing import Any
@@ -66,6 +69,10 @@ EXECUTION_TIMEOUTS = {
     "shutdown_seconds": 30,
     "outer_seconds": 1350,
 }
+SOURCE_ARCHIVE_TIMEOUT_SECONDS = 30.0
+SOURCE_ARCHIVE_TERM_GRACE_SECONDS = 1.0
+SOURCE_ARCHIVE_REAP_TIMEOUT_SECONDS = 5.0
+SOURCE_ARCHIVE_DIAGNOSTIC_BYTES = 32 * 1024
 AUTHORIZATION_LINEAGE_SCHEMA = "ullm.sq8_authorization_lineage.v1"
 RUNTIME_MEMBERS = frozenset(
     {
@@ -83,6 +90,13 @@ RUNTIME_MEMBERS = frozenset(
 
 class GateError(RuntimeError):
     pass
+
+
+class SourceArchiveError(GateError):
+    def __init__(self, reason: str, cleanup_errors: tuple[str, ...] = ()) -> None:
+        super().__init__(reason)
+        self.reason = reason
+        self.cleanup_errors = cleanup_errors
 
 
 def require_sha256(value: Any, label: str) -> str:
@@ -144,20 +158,88 @@ def git_value(*args: str) -> str:
 
 
 def source_archive_sha256(commit: str) -> str:
-    archive = subprocess.Popen(
-        ["git", "archive", "--format=tar", commit],
-        cwd=ROOT,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    )
-    assert archive.stdout is not None
-    digest = hashlib.sha256()
-    while chunk := archive.stdout.read(1024 * 1024):
-        digest.update(chunk)
-    _, stderr = archive.communicate(timeout=30)
-    if archive.returncode != 0:
-        raise GateError(f"git archive failed: {stderr.decode(errors='replace')}")
-    return digest.hexdigest()
+    with tempfile.TemporaryFile() as stdout, tempfile.TemporaryFile() as stderr:
+        archive = subprocess.Popen(
+            ["git", "archive", "--format=tar", commit],
+            cwd=ROOT,
+            stdin=subprocess.DEVNULL,
+            stdout=stdout,
+            stderr=stderr,
+            start_new_session=True,
+        )
+        try:
+            archive.wait(timeout=SOURCE_ARCHIVE_TIMEOUT_SECONDS)
+        except subprocess.TimeoutExpired as error:
+            cleanup = _terminate_archive_process_group(archive, archive.pid)
+            raise SourceArchiveError("git archive timed out", tuple(cleanup)) from error
+        if _archive_process_group_exists(archive.pid):
+            cleanup = ["unexpected_process_group_descendants"]
+            cleanup.extend(_terminate_archive_process_group(archive, archive.pid))
+            raise SourceArchiveError("git archive cleanup failed", tuple(cleanup))
+        stdout.seek(0)
+        digest = hashlib.sha256()
+        while chunk := stdout.read(1024 * 1024):
+            digest.update(chunk)
+        if archive.returncode != 0:
+            stderr.seek(0)
+            diagnostic = stderr.read(SOURCE_ARCHIVE_DIAGNOSTIC_BYTES).decode(errors="replace")
+            raise SourceArchiveError(f"git archive failed: {diagnostic}")
+        return digest.hexdigest()
+
+
+def _archive_process_group_exists(pgid: int) -> bool:
+    try:
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _terminate_archive_process_group(process: Any, pgid: int) -> list[str]:
+    cleanup: list[str] = []
+    try:
+        owned = process.pid == pgid and os.getpgid(process.pid) == pgid
+    except ProcessLookupError:
+        owned = process.poll() is not None
+    if not owned:
+        cleanup.append("process_group_identity_invalid")
+        if process.poll() is None:
+            try:
+                process.kill()
+                process.wait(timeout=SOURCE_ARCHIVE_REAP_TIMEOUT_SECONDS)
+            except (OSError, subprocess.TimeoutExpired):
+                cleanup.append("process_reap_timeout")
+        return cleanup
+    try:
+        os.killpg(pgid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+    except OSError:
+        cleanup.append("process_group_term_failed")
+    try:
+        process.wait(timeout=SOURCE_ARCHIVE_TERM_GRACE_SECONDS)
+    except subprocess.TimeoutExpired:
+        pass
+    if _archive_process_group_exists(pgid):
+        try:
+            os.killpg(pgid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        except OSError:
+            cleanup.append("process_group_kill_failed")
+    if process.poll() is None:
+        try:
+            process.wait(timeout=SOURCE_ARCHIVE_REAP_TIMEOUT_SECONDS)
+        except subprocess.TimeoutExpired:
+            cleanup.append("process_reap_timeout")
+    deadline = time.monotonic() + SOURCE_ARCHIVE_REAP_TIMEOUT_SECONDS
+    while _archive_process_group_exists(pgid) and time.monotonic() < deadline:
+        time.sleep(0.01)
+    if _archive_process_group_exists(pgid):
+        cleanup.append("process_group_reap_timeout")
+    return cleanup
 
 
 def fixed_promotion_request_id(

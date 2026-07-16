@@ -440,6 +440,17 @@ It preserves every discarded attempt and never repeats its enclosing observation
 
 External commands and worker cleanup use bounded waits. On failure, the producer
 terminates the complete child process group rather than only its direct PID.
+The promotion wrapper creates a new session for the capture command, verifies that
+the owned process-group ID equals the direct child PID before signaling, then uses
+bounded group-wide TERM, KILL, direct-child wait, and group-disappearance checks.
+A direct child that exits while a descendant retains stdout/stderr is a typed cleanup
+failure; the descendant group is terminated before the wrapper returns.
+
+Release source archive hashing drains stdout and stderr concurrently under one
+30-second process deadline. Stdout is hashed incrementally without retaining the
+archive in memory, stderr diagnostics are bounded, and timeout cleanup uses the same
+owned process-group termination and reap contract. Reading stdout to EOF before
+starting the deadline is forbidden.
 
 An upper-bound p95 above two seconds does not prove the internal exact latency is
 above two seconds, but it does fail this evidence contract. A narrower result then

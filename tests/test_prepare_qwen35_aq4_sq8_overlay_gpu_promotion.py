@@ -5,6 +5,8 @@ import hashlib
 import importlib.util
 import json
 import os
+import signal
+import sys
 from pathlib import Path
 
 import pytest
@@ -16,6 +18,57 @@ SPEC = importlib.util.spec_from_file_location("prepare_sq8_gpu_gate", SCRIPT)
 assert SPEC is not None and SPEC.loader is not None
 TOOL = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(TOOL)
+
+
+def test_prepare_source_archive_timeout_reaps_owned_process_group(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    original_popen = TOOL.subprocess.Popen
+    pid_file = tmp_path / "prepare-archive-pids"
+    child = (
+        "import os,signal,sys,time;"
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN);"
+        "open(sys.argv[1],'a').write(str(os.getpid())+'\\n');time.sleep(30)"
+    )
+    parent = (
+        "import os,signal,subprocess,sys,time;"
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN);"
+        "open(sys.argv[1],'a').write(str(os.getpid())+'\\n');"
+        f"subprocess.Popen([sys.executable,'-c',{child!r},sys.argv[1]]);time.sleep(30)"
+    )
+
+    def stalled(_argv: list[str], **kwargs: object) -> object:
+        return original_popen([sys.executable, "-c", parent, str(pid_file)], **kwargs)
+
+    monkeypatch.setattr(TOOL.subprocess, "Popen", stalled)
+    monkeypatch.setattr(TOOL, "SOURCE_ARCHIVE_TIMEOUT_SECONDS", 0.1)
+    monkeypatch.setattr(TOOL, "SOURCE_ARCHIVE_TERM_GRACE_SECONDS", 0.05)
+    monkeypatch.setattr(TOOL, "SOURCE_ARCHIVE_REAP_TIMEOUT_SECONDS", 1.0)
+
+    with pytest.raises(TOOL.SourceArchiveError) as raised:
+        TOOL.source_archive_sha256("c" * 40)
+
+    assert raised.value.reason == "git archive timed out"
+    assert raised.value.cleanup_errors == ()
+    pids = [int(value) for value in pid_file.read_text().splitlines()]
+    assert len(pids) == 2
+    assert all(not Path(f"/proc/{pid}").exists() for pid in pids)
+
+
+def test_prepare_source_archive_large_stderr_is_bounded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original_popen = TOOL.subprocess.Popen
+    script = "import sys;sys.stderr.buffer.write(b'x'*2000000);sys.exit(8)"
+
+    def noisy(_argv: list[str], **kwargs: object) -> object:
+        return original_popen([sys.executable, "-c", script], **kwargs)
+
+    monkeypatch.setattr(TOOL.subprocess, "Popen", noisy)
+    with pytest.raises(TOOL.SourceArchiveError) as raised:
+        TOOL.source_archive_sha256("d" * 40)
+    assert raised.value.reason.startswith("git archive failed: ")
+    assert len(raised.value.reason.encode()) <= TOOL.SOURCE_ARCHIVE_DIAGNOSTIC_BYTES + 64
 
 
 def sha(path: Path) -> str:

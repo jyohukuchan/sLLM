@@ -70,6 +70,8 @@ CAPTURE_PACKAGING_MARGIN_SECONDS = 60.0
 # inequality is reviewable and testable rather than relying on an implicit
 # "large enough" constant.
 CAPTURE_SUBPROCESS_TIMEOUT_SECONDS = 1350.0
+SOURCE_ARCHIVE_TIMEOUT_SECONDS = 30.0
+SOURCE_ARCHIVE_DRAIN_TIMEOUT_SECONDS = 5.0
 CAPTURE_OUTER_CLEANUP_MARGIN_SECONDS = (
     CAPTURE_TERMINATE_GRACE_SECONDS
     + CAPTURE_KILL_REAP_TIMEOUT_SECONDS
@@ -174,6 +176,13 @@ REQUIRED_OVERLAY_ENV = (
 
 class PromotionError(RuntimeError):
     pass
+
+
+class SourceArchiveError(PromotionError):
+    def __init__(self, reason: str, cleanup_errors: tuple[str, ...] = ()) -> None:
+        super().__init__(reason)
+        self.reason = reason
+        self.cleanup_errors = cleanup_errors
 
 
 class TransientRestoreError(PromotionError):
@@ -752,15 +761,64 @@ def source_archive_sha256(commit: str) -> str:
         cwd=ROOT,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
+        start_new_session=True,
     )
-    assert process.stdout is not None
-    digest = hashlib.sha256()
-    while chunk := process.stdout.read(1024 * 1024):
-        digest.update(chunk)
-    _, stderr = process.communicate(timeout=30)
+    assert process.stdout is not None and process.stderr is not None
+    stdout = _CaptureStreamCollector(retain_parse_buffer=False)
+    stderr = _CaptureStreamCollector(retain_parse_buffer=False)
+    threads = [
+        threading.Thread(target=stdout.drain, args=(process.stdout,), daemon=True),
+        threading.Thread(target=stderr.drain, args=(process.stderr,), daemon=True),
+    ]
+    for thread in threads:
+        thread.start()
+    cleanup_errors: list[str] = []
+    try:
+        process.wait(timeout=SOURCE_ARCHIVE_TIMEOUT_SECONDS)
+    except subprocess.TimeoutExpired as error:
+        cleanup_errors.extend(
+            _terminate_owned_process_group(
+                process,
+                process.pid,
+                term_grace=CAPTURE_TERMINATE_GRACE_SECONDS,
+                kill_reap_timeout=CAPTURE_KILL_REAP_TIMEOUT_SECONDS,
+                final_reap_timeout=CAPTURE_FINAL_REAP_TIMEOUT_SECONDS,
+            )
+        )
+        _finish_stream_threads(
+            (
+                (process.stdout, threads[0], SOURCE_ARCHIVE_DRAIN_TIMEOUT_SECONDS, "stdout"),
+                (process.stderr, threads[1], SOURCE_ARCHIVE_DRAIN_TIMEOUT_SECONDS, "stderr"),
+            ),
+            cleanup_errors,
+        )
+        raise SourceArchiveError("git archive timed out", tuple(cleanup_errors)) from error
+    if _process_group_exists(process.pid):
+        cleanup_errors.append("unexpected_process_group_descendants")
+        cleanup_errors.extend(
+            _terminate_owned_process_group(
+                process,
+                process.pid,
+                term_grace=CAPTURE_TERMINATE_GRACE_SECONDS,
+                kill_reap_timeout=CAPTURE_KILL_REAP_TIMEOUT_SECONDS,
+                final_reap_timeout=CAPTURE_FINAL_REAP_TIMEOUT_SECONDS,
+            )
+        )
+    _finish_stream_threads(
+        (
+            (process.stdout, threads[0], SOURCE_ARCHIVE_DRAIN_TIMEOUT_SECONDS, "stdout"),
+            (process.stderr, threads[1], SOURCE_ARCHIVE_DRAIN_TIMEOUT_SECONDS, "stderr"),
+        ),
+        cleanup_errors,
+    )
+    stdout_result = stdout.result(threads[0].is_alive())
+    stderr_result = stderr.result(threads[1].is_alive())
+    if cleanup_errors or not stdout_result.complete or not stderr_result.complete:
+        raise SourceArchiveError("git archive stream cleanup failed", tuple(cleanup_errors))
     if process.returncode != 0:
-        raise PromotionError(f"git archive failed: {stderr.decode(errors='replace')}")
-    return digest.hexdigest()
+        diagnostic = stderr_result.prefix.decode(errors="replace")
+        raise SourceArchiveError(f"git archive failed: {diagnostic}")
+    return stdout_result.sha256
 
 
 def source_identity(candidate: Path, build: dict[str, Any]) -> dict[str, Any]:
@@ -2074,6 +2132,99 @@ class CaptureCommand(list[str]):
         self.pass_fds = pass_fds
 
 
+def _process_group_exists(pgid: int) -> bool:
+    try:
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _wait_process_group_absent(pgid: int, timeout: float) -> bool:
+    deadline = time.monotonic() + timeout
+    while _process_group_exists(pgid):
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(min(0.01, max(0.0, deadline - time.monotonic())))
+    return True
+
+
+def _validate_owned_process_group(proc: Any, pgid: int) -> bool:
+    if type(getattr(proc, "pid", None)) is not int or proc.pid <= 1 or pgid != proc.pid:
+        return False
+    if proc.poll() is not None:
+        # The group cannot be reassigned while descendants still retain it.  If it is already
+        # absent there is nothing to signal.
+        return True
+    try:
+        return os.getpgid(proc.pid) == pgid
+    except ProcessLookupError:
+        return proc.poll() is not None
+
+
+def _terminate_owned_process_group(
+    proc: Any,
+    pgid: int,
+    *,
+    term_grace: float,
+    kill_reap_timeout: float,
+    final_reap_timeout: float,
+) -> list[str]:
+    errors: list[str] = []
+    if not _validate_owned_process_group(proc, pgid):
+        errors.append("process_group_identity_invalid")
+        if proc.poll() is None:
+            try:
+                proc.kill()
+                proc.wait(timeout=kill_reap_timeout)
+            except (OSError, subprocess.TimeoutExpired):
+                errors.append("process_reap_timeout")
+        return errors
+    try:
+        os.killpg(pgid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+    except OSError:
+        errors.append("process_group_term_failed")
+    try:
+        proc.wait(timeout=term_grace)
+    except subprocess.TimeoutExpired:
+        pass
+    if _process_group_exists(pgid):
+        try:
+            os.killpg(pgid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        except OSError:
+            errors.append("process_group_kill_failed")
+    if proc.poll() is None:
+        try:
+            proc.wait(timeout=kill_reap_timeout)
+        except subprocess.TimeoutExpired:
+            errors.append("process_reap_timeout")
+    if not _wait_process_group_absent(pgid, final_reap_timeout):
+        errors.append("process_group_reap_timeout")
+    return errors
+
+
+def _finish_stream_threads(
+    streams: tuple[tuple[Any, Any, float, str], ...],
+    cleanup_errors: list[str],
+) -> None:
+    for stream, thread, timeout, label in streams:
+        thread.join(timeout=timeout)
+        if thread.is_alive():
+            try:
+                os.close(stream.fileno())
+            except (OSError, ValueError):
+                pass
+            thread.join(timeout=CAPTURE_PIPE_CLOSE_GRACE_SECONDS)
+        if thread.is_alive():
+            cleanup_errors.append(f"{label}_drain_timeout")
+
+
 def default_capture(
     argv: list[str], environment: dict[str, str]
 ) -> CaptureProcessResult:
@@ -2084,6 +2235,7 @@ def default_capture(
         stderr=subprocess.PIPE,
         env=environment,
         pass_fds=getattr(argv, "pass_fds", ()),
+        start_new_session=True,
     )
     assert proc.stdout is not None and proc.stderr is not None
     stdout_collector = _CaptureStreamCollector(retain_parse_buffer=True)
@@ -2108,43 +2260,35 @@ def default_capture(
         proc.wait(timeout=CAPTURE_SUBPROCESS_TIMEOUT_SECONDS)
     except subprocess.TimeoutExpired:
         timed_out = True
-        if proc.poll() is None:
-            try:
-                proc.terminate()
-            except OSError:
-                pass
-            try:
-                proc.wait(timeout=CAPTURE_TERMINATE_GRACE_SECONDS)
-            except subprocess.TimeoutExpired:
-                try:
-                    proc.kill()
-                except OSError:
-                    pass
-                try:
-                    proc.wait(timeout=CAPTURE_KILL_REAP_TIMEOUT_SECONDS)
-                except subprocess.TimeoutExpired:
-                    try:
-                        proc.kill()
-                    except OSError:
-                        pass
-                    try:
-                        proc.wait(timeout=CAPTURE_FINAL_REAP_TIMEOUT_SECONDS)
-                    except subprocess.TimeoutExpired:
-                        cleanup_errors.append("process_reap_timeout")
+        cleanup_errors.extend(
+            _terminate_owned_process_group(
+                proc,
+                proc.pid,
+                term_grace=CAPTURE_TERMINATE_GRACE_SECONDS,
+                kill_reap_timeout=CAPTURE_KILL_REAP_TIMEOUT_SECONDS,
+                final_reap_timeout=CAPTURE_FINAL_REAP_TIMEOUT_SECONDS,
+            )
+        )
+    else:
+        if _process_group_exists(proc.pid):
+            cleanup_errors.append("unexpected_process_group_descendants")
+            cleanup_errors.extend(
+                _terminate_owned_process_group(
+                    proc,
+                    proc.pid,
+                    term_grace=CAPTURE_TERMINATE_GRACE_SECONDS,
+                    kill_reap_timeout=CAPTURE_KILL_REAP_TIMEOUT_SECONDS,
+                    final_reap_timeout=CAPTURE_FINAL_REAP_TIMEOUT_SECONDS,
+                )
+            )
     finally:
-        for stream, thread, drain_timeout, label in (
-            (proc.stdout, stdout_thread, CAPTURE_STDOUT_DRAIN_TIMEOUT_SECONDS, "stdout"),
-            (proc.stderr, stderr_thread, CAPTURE_STDERR_DRAIN_TIMEOUT_SECONDS, "stderr"),
-        ):
-            thread.join(timeout=drain_timeout)
-            if thread.is_alive():
-                try:
-                    os.close(stream.fileno())
-                except (OSError, ValueError):
-                    pass
-                thread.join(timeout=CAPTURE_PIPE_CLOSE_GRACE_SECONDS)
-            if thread.is_alive():
-                cleanup_errors.append(f"{label}_drain_timeout")
+        _finish_stream_threads(
+            (
+                (proc.stdout, stdout_thread, CAPTURE_STDOUT_DRAIN_TIMEOUT_SECONDS, "stdout"),
+                (proc.stderr, stderr_thread, CAPTURE_STDERR_DRAIN_TIMEOUT_SECONDS, "stderr"),
+            ),
+            cleanup_errors,
+        )
     return CaptureProcessResult(
         argv=list(argv),
         returncode=proc.returncode if type(proc.returncode) is int else None,
