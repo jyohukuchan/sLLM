@@ -49,6 +49,40 @@ def _guard_sha(names: Any) -> str:
     return digest.hexdigest()
 
 
+def _exact_keys(value: Any, expected: set[str], label: str) -> dict[str, Any]:
+    if not isinstance(value, dict) or set(value) != expected:
+        raise MetricsBuildError(f"{label} has unknown or missing fields")
+    return value
+
+
+def _binding_tensor_names(binding: dict[str, Any]) -> list[str]:
+    names = binding.get("tensor_names")
+    canonical = PROTOCOL.SQ8_RUNTIME_TENSOR_NAMES
+    if (
+        not isinstance(names, list)
+        or any(type(name) is not str for name in names)
+        or len(names) != len(canonical)
+        or len(set(names)) != len(canonical)
+        or set(names) != set(canonical)
+    ):
+        raise MetricsBuildError("SQ8 binding tensor-name set differs")
+    return names
+
+
+def _target_artifact(value: Any, expected_scalars: dict[str, str], binding_names: list[str]) -> dict[str, Any]:
+    artifact = _exact_keys(value, set(expected_scalars) | {"tensor_names"}, "SQ8 target artifact identity")
+    for field, expected in expected_scalars.items():
+        if type(artifact[field]) is not str or artifact[field] != expected:
+            raise MetricsBuildError(f"SQ8 target artifact identity differs: {field}")
+    names = artifact["tensor_names"]
+    canonical = list(PROTOCOL.SQ8_RUNTIME_TENSOR_NAMES)
+    if not isinstance(names, list) or any(type(name) is not str for name in names) or names != canonical:
+        raise MetricsBuildError("SQ8 target runtime tensor-name order differs")
+    if set(names) != set(binding_names):
+        raise MetricsBuildError("SQ8 target/binding tensor-name authority differs")
+    return artifact
+
+
 def _bind_target(plan: dict[str, Any], source: dict[str, Any], target: dict[str, Any]) -> None:
     identity = plan["identity"]
     if source["manifest"].get("schema_version") != "ullm.qwen35_aq4_source_calibration.v1" or source["manifest"].get("oracle_kind") != "independent_source_full":
@@ -60,19 +94,20 @@ def _bind_target(plan: dict[str, Any], source: dict[str, Any], target: dict[str,
     receipt = _strict_json(Path(identity["sq8_receipt_path"]), "SQ8 actual receipt")
     binding_path = Path(receipt["overlay"]["binding_manifest_path"])
     binding = _strict_json(binding_path, "SQ8 binding manifest")
+    if VALIDATOR.sha256_file(binding_path, "SQ8 binding manifest") != receipt["overlay"]["binding_manifest_sha256"]:
+        raise MetricsBuildError("SQ8 binding manifest SHA differs from actual receipt")
+    binding_names = _binding_tensor_names(binding)
     served_path = Path(identity["served_model"]["path"])
     served = _strict_json(served_path, "SQ8 served model")
     profile_path = Path(receipt["release"]["profile"]["path"])
     profile = _strict_json(profile_path, "SQ8 profile")
-    expected_artifact = {
+    expected_artifact_scalars = {
         "package_manifest_sha256": identity["package"]["manifest_sha256"],
         "artifact_manifest_sha256": receipt["overlay"]["binding_manifest_sha256"],
         "content_sha256": identity["overlay_content_sha256"],
         "tensor_set_sha256": identity["overlay_tensor_set_sha256"],
-        "tensor_names": binding["tensor_names"],
     }
-    if target_identity.get("artifact") != expected_artifact:
-        raise MetricsBuildError("SQ8 target artifact identity differs from actual receipt")
+    _target_artifact(target_identity.get("artifact"), expected_artifact_scalars, binding_names)
     if target_identity.get("format_id") != "AQ4_0" or target_identity.get("implementation_id") != "qwen35_aq4_sq8_linear_qkv_z_overlay_v1":
         raise MetricsBuildError("SQ8 target format/implementation differs")
     if target_identity.get("package_manifest_sha256") != identity["package"]["manifest_sha256"] or target_identity.get("worker_binary_sha256") != identity["worker"]["sha256"]:

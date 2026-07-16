@@ -44,7 +44,7 @@ def binding_fixture():
         source_identity = {"model_id": "Qwen/Qwen3.5-9B", "model_revision": "upstream-fixture", "source_checkpoint": {"aggregate_sha256": "7" * 64, "root": "/models/source"}, "tokenizer": {"aggregate_sha256": "8" * 64, "root": "/models/source"}, "hidden_size": 4096, "vocab_size": 248320}
         source = {"manifest": {"schema_version": "ullm.qwen35_aq4_source_calibration.v1", "oracle_kind": "independent_source_full", "identity": source_identity, "cases": {"path": "/cases.json", "sha256": "9" * 64}}}
         runtime = {"name": "ullm-aq4-sq8-fidelity-capture", "one_model_load": True, "split_manifest_sha256": identity["split_manifest_sha256"], "policy_sha256": identity["policy_sha256"], "calibration_cases_sha256": identity["calibration_cases_sha256"], "served_model_manifest_sha256": sha(served_path), "package_manifest_sha256": identity["package"]["manifest_sha256"], "worker_binary_sha256": identity["worker"]["sha256"], "guard_sha256": builder._guard_sha(served["worker"]["required_environment"]), "upstream_model_revision": source_identity["model_revision"], "quantized_artifact_revision": served["public"]["revision"], "source_checkpoint_aggregate_sha256": source_identity["source_checkpoint"]["aggregate_sha256"], "tokenizer_aggregate_sha256": source_identity["tokenizer"]["aggregate_sha256"], "device": {"architecture": "gfx1201"}}
-        target_identity = {**source_identity, "format_id": "AQ4_0", "implementation_id": "qwen35_aq4_sq8_linear_qkv_z_overlay_v1", "artifact": {"package_manifest_sha256": identity["package"]["manifest_sha256"], "artifact_manifest_sha256": receipt["overlay"]["binding_manifest_sha256"], "content_sha256": identity["overlay_content_sha256"], "tensor_set_sha256": identity["overlay_tensor_set_sha256"], "tensor_names": binding["tensor_names"]}, "package_manifest_sha256": identity["package"]["manifest_sha256"], "worker_binary_sha256": identity["worker"]["sha256"]}
+        target_identity = {**source_identity, "format_id": "AQ4_0", "implementation_id": "qwen35_aq4_sq8_linear_qkv_z_overlay_v1", "artifact": {"package_manifest_sha256": identity["package"]["manifest_sha256"], "artifact_manifest_sha256": receipt["overlay"]["binding_manifest_sha256"], "content_sha256": identity["overlay_content_sha256"], "tensor_set_sha256": identity["overlay_tensor_set_sha256"], "tensor_names": list(builder.PROTOCOL.SQ8_RUNTIME_TENSOR_NAMES)}, "package_manifest_sha256": identity["package"]["manifest_sha256"], "worker_binary_sha256": identity["worker"]["sha256"]}
         target = {"manifest": {"schema_version": "ullm.qwen35_aq4_target_calibration.v1", "oracle_kind": "aq4_sq8_target", "identity": target_identity, "runtime": {"runtime": runtime}, "cases": copy.deepcopy(source["manifest"]["cases"])}}
         yield plan, source, target
     finally:
@@ -77,3 +77,34 @@ def test_independent_binding_mutations_are_rejected(binding_fixture, label, muta
     mutate(tampered)
     with pytest.raises(builder.MetricsBuildError):
         builder._bind_target(plan, source, tampered)
+
+
+@pytest.mark.parametrize(
+    ("label", "mutate"),
+    (
+        ("unknown-field", lambda artifact: artifact.__setitem__("unknown", "0" * 64)),
+        ("missing-field", lambda artifact: artifact.pop("artifact_manifest_sha256")),
+        ("wrong-list-type", lambda artifact: artifact.__setitem__("tensor_names", tuple(artifact["tensor_names"]))),
+        ("same-set-wrong-order", lambda artifact: artifact["tensor_names"].reverse()),
+        ("duplicate-name", lambda artifact: artifact["tensor_names"].__setitem__(1, artifact["tensor_names"][0])),
+        ("unknown-name", lambda artifact: artifact["tensor_names"].__setitem__(0, "model.language_model.layers.31.linear_attn.in_proj_qkv.weight")),
+        ("scalar-type", lambda artifact: artifact.__setitem__("content_sha256", 0)),
+    ),
+)
+def test_target_artifact_shape_type_order_and_membership_mutations_are_rejected(binding_fixture, label, mutate) -> None:
+    plan, source, target = binding_fixture
+    tampered = copy.deepcopy(target)
+    mutate(tampered["manifest"]["identity"]["artifact"])
+    with pytest.raises(builder.MetricsBuildError):
+        builder._bind_target(plan, source, tampered)
+
+
+def test_binding_manifest_membership_tamper_is_rejected_by_receipt_sha(binding_fixture) -> None:
+    plan, source, target = binding_fixture
+    receipt = json.loads(Path(plan["identity"]["sq8_receipt_path"]).read_text())
+    binding_path = Path(receipt["overlay"]["binding_manifest_path"])
+    binding = json.loads(binding_path.read_text())
+    binding["tensor_names"][0] = "model.language_model.layers.31.linear_attn.in_proj_qkv.weight"
+    binding_path.write_text(json.dumps(binding, sort_keys=True) + "\n")
+    with pytest.raises(builder.MetricsBuildError, match="SHA differs"):
+        builder._bind_target(plan, source, target)

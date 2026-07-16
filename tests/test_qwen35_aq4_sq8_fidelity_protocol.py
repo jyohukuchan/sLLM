@@ -118,7 +118,7 @@ class Sq8ProtocolTests(unittest.TestCase):
             trusted[name] = {"path": str(component.resolve()), "sha256": digest(component), "device": info.st_dev, "inode": info.st_ino}
         timeouts = {"ready_seconds": 900, "request_seconds": 240, "shutdown_seconds": 30, "outer_seconds": 1350}
         binding_path = self.product_root / "artifacts" / "binding.json"
-        binding_value = {"schema_version": "ullm.qwen35_aq4_sq8_qkv_z_overlay.v2", "format_id": "AQ4_0", "overlay_format_id": "SQ8_0", "implementation_id": "qwen35_aq4_sq8_linear_qkv_z_overlay_v1", "content_sha256": "f" * 64, "tensor_set_sha256": "1" * 64, "tensor_names": [f"tensor-{index:02d}" for index in range(48)], "package": {"manifest_sha256": ""}}
+        binding_value = {"schema_version": "ullm.qwen35_aq4_sq8_qkv_z_overlay.v2", "format_id": "AQ4_0", "overlay_format_id": "SQ8_0", "implementation_id": "qwen35_aq4_sq8_linear_qkv_z_overlay_v1", "content_sha256": "f" * 64, "tensor_set_sha256": "1" * 64, "tensor_names": sorted(protocol.SQ8_RUNTIME_TENSOR_NAMES), "package": {"manifest_sha256": ""}}
         binding_path.write_text(json.dumps(binding_value, sort_keys=True) + "\n")
         package_path = self.product_root / "package" / "manifest.json"
         package_path.write_text('{"package":"sq8"}\n')

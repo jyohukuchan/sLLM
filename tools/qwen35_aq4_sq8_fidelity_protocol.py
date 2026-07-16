@@ -80,6 +80,12 @@ ATTEMPT2_CONTEXT_HASHES = [
     "42ea52c2bbdb5aaf75c70220eb41d4b018e85f2eeda3d4e40a8ac130d2e96215",
     "6af1601e1b18925e5a59b8446901a0afd7e3e3f915646c56ee77b5e77b4d6249",
 ]
+SQ8_LINEAR_LAYER_INDICES = tuple(layer for layer in range(32) if layer % 4 != 3)
+SQ8_RUNTIME_TENSOR_NAMES = tuple(
+    f"model.language_model.layers.{layer}.linear_attn.in_proj_{projection}.weight"
+    for layer in SQ8_LINEAR_LAYER_INDICES
+    for projection in ("qkv", "z")
+)
 
 
 class ProtocolError(ValueError):
@@ -593,7 +599,7 @@ def _validate_release_and_profile(
         raise ProtocolError("SQ8 package/artifact receipt binding differs")
     binding, _ = load_json(artifact_path, "SQ8 overlay binding manifest")
     tensor_names = binding.get("tensor_names")
-    if binding.get("schema_version") != "ullm.qwen35_aq4_sq8_qkv_z_overlay.v2" or binding.get("implementation_id") != "qwen35_aq4_sq8_linear_qkv_z_overlay_v1" or binding.get("format_id") != "AQ4_0" or binding.get("overlay_format_id") != "SQ8_0" or not isinstance(tensor_names, list) or len(tensor_names) != 48 or len(set(tensor_names)) != 48 or binding.get("content_sha256") != overlay.get("content_sha256") or binding.get("tensor_set_sha256") != overlay.get("tensor_set_sha256") or not isinstance(binding.get("package"), dict) or binding["package"].get("manifest_sha256") != package_receipt.get("manifest_sha256"):
+    if binding.get("schema_version") != "ullm.qwen35_aq4_sq8_qkv_z_overlay.v2" or binding.get("implementation_id") != "qwen35_aq4_sq8_linear_qkv_z_overlay_v1" or binding.get("format_id") != "AQ4_0" or binding.get("overlay_format_id") != "SQ8_0" or not isinstance(tensor_names, list) or any(type(name) is not str for name in tensor_names) or len(tensor_names) != len(SQ8_RUNTIME_TENSOR_NAMES) or len(set(tensor_names)) != len(SQ8_RUNTIME_TENSOR_NAMES) or set(tensor_names) != set(SQ8_RUNTIME_TENSOR_NAMES) or binding.get("content_sha256") != overlay.get("content_sha256") or binding.get("tensor_set_sha256") != overlay.get("tensor_set_sha256") or not isinstance(binding.get("package"), dict) or binding["package"].get("manifest_sha256") != package_receipt.get("manifest_sha256"):
         raise ProtocolError("SQ8 overlay binding manifest identity differs")
     return worker, served, package_receipt
 
