@@ -1,0 +1,386 @@
+{
+  "argv": [
+    "/usr/bin/python3.12",
+    "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-binding-v7/trusted-runner.py",
+    "--expanded",
+    "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-prepared-v2/case-binding.json",
+    "--fixture-index",
+    "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-prepared-v2/fixture-index.json",
+    "--identity",
+    "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-prepared-v2/identity.json",
+    "--preflight",
+    "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-prepared-v2/preflight.json",
+    "--policy",
+    "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-prepared-v2/policy.json",
+    "--bundle-root",
+    "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-prepared-v2",
+    "--trusted-validator",
+    "/home/homelab1/coding-local/ultimateLLM/uLLM-project/tools/prepare-aq4-p2-resident-smoke-bundle.py",
+    "--trusted-validator-sha256",
+    "15a65fed6d182e706473821f128fbae02214ab0bf988bb7c1f363f69233e9904",
+    "--output-dir",
+    "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-execute-v11",
+    "--run-id",
+    "p2-r9700-resident-one-case-smoke-profile-diagnostic-v11",
+    "--baseline-kind",
+    "active-production",
+    "--lock-path",
+    "/run/ullm/r9700.lock",
+    "--one-case-smoke",
+    "--live-preflight",
+    "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-execute-evidence-v11/live-preflight.json",
+    "--profile-roctx-ranges",
+    "--roctx-library",
+    "/opt/rocm-7.2.1/lib/librocprofiler-sdk-roctx.so.1.1.0",
+    "--roctx-library-sha256",
+    "1a5831a3817eac29f63d1442dc348ba31b417202b7ce15f3aed9c09a8f4773c9",
+    "--driver-command",
+    "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-prepared-v2/resident-driver",
+    "--served-model-manifest",
+    "/etc/ullm/served-models/active.json",
+    "--device-index",
+    "1",
+    "--build-git-commit",
+    "43ba16f2347a45caba8a60cac2189714118db280"
+  ],
+  "authorization": {
+    "maximum_invocations": 1,
+    "promotion_eligible": false,
+    "target_role": "profile_runner_only"
+  },
+  "capture_helpers": [
+    {
+      "identity": [
+        66306,
+        206315368,
+        33204,
+        1,
+        83367,
+        1784136670266540663,
+        1784136670266540663
+      ],
+      "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/tools/build-aq4-p3-selection-raw.py",
+      "role": "selection_raw_producer",
+      "sha256": "a589c3e644d36132fb6054afdb15b27543d8e8181e3c737dcbd071d7c52e3d20"
+    },
+    {
+      "identity": [
+        66306,
+        206314691,
+        33204,
+        1,
+        45255,
+        1784044522174045164,
+        1784044522174045164
+      ],
+      "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/tools/select-aq4-p3-candidate.py",
+      "role": "candidate_selector",
+      "sha256": "4a510c7351131072ed368e2ac8fffeb2daf10488edef94c37fe5dbcb729e9739"
+    },
+    {
+      "identity": [
+        66306,
+        206315363,
+        33204,
+        1,
+        36343,
+        1784136426031334297,
+        1784136426031334297
+      ],
+      "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/tools/profile-aq4-p2-family-exclusive.py",
+      "role": "profile_family_classifier",
+      "sha256": "f8d32c340231e329f004d9e16192c02378f1fd58b8ab713e8efbbd3029b052d6"
+    }
+  ],
+  "closure_contract": {
+    "code_execution_closure": "pinned_fd",
+    "control_input_closure": "pinned_fd",
+    "data_integrity": "trusted_pre_post_guarded",
+    "device_lock_closure": "pinned_fd"
+  },
+  "control_files": [
+    {
+      "closure": "control_input",
+      "method": "read",
+      "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-prepared-v2/SHA256SUMS",
+      "role": "bundle_sha256sums",
+      "sha256": "27579326b1ba703585d4683ddcabf47676debeca58878e54a2ae2cccee6e99b9"
+    },
+    {
+      "closure": "control_input",
+      "method": "read",
+      "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-prepared-v2/SUPERSEDED-0fd7993.json",
+      "role": "bundle_superseded_0fd7993_json",
+      "sha256": "ef18c2289b56647ece390683af1e562aea6df071d5fc22cfbf5e63b0ed058a7b"
+    },
+    {
+      "closure": "control_input",
+      "method": "read",
+      "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-prepared-v2/bundle.json",
+      "role": "bundle_bundle_json",
+      "sha256": "b947e43d6aff609967ea9b0909aa14a689b4f35791a7903134453c42ede8fb38"
+    },
+    {
+      "closure": "control_input",
+      "method": "read",
+      "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-prepared-v2/dry-run.json",
+      "role": "bundle_dry_run_json",
+      "sha256": "7a6738f6ebdc3b07b388753c8152d052d3e329e50a44e30e40b6fa97e2269037"
+    },
+    {
+      "closure": "control_input",
+      "method": "read",
+      "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-prepared-v2/fake-ready.json",
+      "role": "bundle_fake_ready_json",
+      "sha256": "b353d412fc11a7656ed1eb522cdc77bd29412ef9b0f702eb4615263a9273427c"
+    },
+    {
+      "closure": "control_input",
+      "method": "read",
+      "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-prepared-v2/fixture.json",
+      "role": "bundle_fixture_json",
+      "sha256": "a61c977a7671e7e3d141b87fc84e20e9957be71706cface1988d03054f2dad50"
+    },
+    {
+      "closure": "control_input",
+      "method": "read",
+      "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-prepared-v2/launch-command.json",
+      "role": "bundle_launch_command_json",
+      "sha256": "6a963811ccab739958bfbf6846eaed9cdb16e45c9e533e47c7a97bd307731383"
+    },
+    {
+      "closure": "control_input",
+      "method": "read",
+      "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-prepared-v2/official-case.json",
+      "role": "bundle_official_case_json",
+      "sha256": "916abe28bd0b82bde85f918d6a6b1a1f54a49d14149f4832f042b17d2eb15bc2"
+    },
+    {
+      "closure": "control_input",
+      "method": "read",
+      "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-prepared-v2/package-manifest.json",
+      "role": "bundle_package_manifest_json",
+      "sha256": "a790a033f57d9c5b9ae0d731a463c26b86aec691f771ce88bb543d676f08e5ad"
+    },
+    {
+      "closure": "control_input",
+      "method": "read",
+      "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-prepared-v2/runner-dry-run-evidence.json",
+      "role": "bundle_runner_dry_run_evidence_json",
+      "sha256": "4f37d7bba1320ff2dd57c0249b0d18ba3e0f1ee45c68cbb5dfb373c54de9ddcf"
+    },
+    {
+      "closure": "control_input",
+      "method": "read",
+      "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-prepared-v2/served-model.json",
+      "role": "bundle_served_model_json",
+      "sha256": "feb3190d0ff59778e4da140b8db2bd1ce2ba440e3a69e844b997011d4d08cb44"
+    },
+    {
+      "closure": "control_input",
+      "method": "read",
+      "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-prepared-v2/trust-roots.json",
+      "role": "bundle_trust_roots_json",
+      "sha256": "b6b5d0975e45a40b2a42d1a8f07345caf510fc15b2c3ce39e23b1ba05badaacd"
+    },
+    {
+      "closure": "control_input",
+      "method": "read",
+      "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-prepared-v2/trusted-runner.py",
+      "role": "bundle_trusted_runner_py",
+      "sha256": "62cf9cd77863d18158afad8955b7d09c2c0f8b09046869bacb25c91c789878e0"
+    }
+  ],
+  "environment": {
+    "HIP_VISIBLE_DEVICES": "1",
+    "ULLM_BUILD_GIT_COMMIT": "43ba16f2347a45caba8a60cac2189714118db280",
+    "ULLM_HIP_VISIBLE_DEVICES": "1",
+    "ULLM_REQUIRE_HIP_ADD_KERNEL": "1",
+    "ULLM_REQUIRE_HIP_AQ4_KERNEL": "1",
+    "ULLM_REQUIRE_HIP_AQ4_MATVEC_ADD_KERNEL": "1",
+    "ULLM_REQUIRE_HIP_AQ4_MATVEC_BATCH_KERNEL": "1",
+    "ULLM_REQUIRE_HIP_AQ4_MATVEC_KERNEL": "1",
+    "ULLM_REQUIRE_HIP_AQ4_MATVEC_PAIR_KERNEL": "1",
+    "ULLM_REQUIRE_HIP_AQ4_MATVEC_QKV_Z_GATE_BETA_KERNEL": "1",
+    "ULLM_REQUIRE_HIP_AQ4_MATVEC_TRIPLE_KERNEL": "1",
+    "ULLM_REQUIRE_HIP_AQ4_REGISTER_BM8_KERNEL": "1",
+    "ULLM_REQUIRE_HIP_BF16_MATVEC_KERNEL": "1",
+    "ULLM_REQUIRE_HIP_BF16_ROW_KERNEL": "1",
+    "ULLM_REQUIRE_HIP_LINEAR_ATTN_GATE_BETA_KERNEL": "1",
+    "ULLM_REQUIRE_HIP_LINEAR_ATTN_KERNEL": "1",
+    "ULLM_REQUIRE_HIP_LINEAR_ATTN_QKV_PREPARE_BATCH_KERNEL": "1",
+    "ULLM_REQUIRE_HIP_LINEAR_ATTN_RECURRENT_KERNEL": "1",
+    "ULLM_REQUIRE_HIP_LINEAR_ATTN_RECURRENT_SEQUENCE_KERNEL": "1",
+    "ULLM_REQUIRE_HIP_PAGED_CAUSAL_GQA_CHUNK_KERNEL": "1",
+    "ULLM_REQUIRE_HIP_PAGED_DECODE_ATTN_KERNEL": "1",
+    "ULLM_REQUIRE_HIP_PAGED_DECODE_SPLIT_KERNEL": "1",
+    "ULLM_REQUIRE_HIP_PAGED_KV_WRITE_CHUNK_KERNEL": "1",
+    "ULLM_REQUIRE_HIP_PAGED_KV_WRITE_KERNEL": "1",
+    "ULLM_REQUIRE_HIP_QWEN35_QK_NORM_ROPE_BATCH_KERNEL": "1",
+    "ULLM_REQUIRE_HIP_QWEN35_QK_NORM_ROPE_PAGED_KV_WRITE_KERNEL": "1",
+    "ULLM_REQUIRE_HIP_QWEN35_Q_SPLIT_KERNEL": "1",
+    "ULLM_REQUIRE_HIP_RMSNORM_KERNEL": "1",
+    "ULLM_REQUIRE_HIP_ROPE_KERNEL": "1",
+    "ULLM_REQUIRE_HIP_SEGMENTED_RMSNORM_SILU_MUL_KERNEL": "1",
+    "ULLM_REQUIRE_HIP_SIGMOID_MUL_KERNEL": "1",
+    "ULLM_REQUIRE_HIP_SILU_MUL_KERNEL": "1",
+    "ULLM_REQUIRE_HIP_TOP1_KERNEL": "1",
+    "ULLM_SERVED_MODEL_MANIFEST": "/etc/ullm/served-models/active.json"
+  },
+  "input_files": [
+    {
+      "argument_index": 0,
+      "closure": "code_execution",
+      "executable": true,
+      "method": "exec",
+      "path": "/usr/bin/python3.12",
+      "role": "python_interpreter",
+      "sha256": "1643dacd9feaedc58f3cc581e4d22577dfe25c09b10282936186ccf0f2e61118"
+    },
+    {
+      "argument_index": 1,
+      "closure": "code_execution",
+      "executable": false,
+      "method": "exec",
+      "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-binding-v7/trusted-runner.py",
+      "role": "resident_runner",
+      "sha256": "98e324414d9e2d7e6db5b066209e6f7c6734e391502ae81ecd1809e8ec558e7f"
+    },
+    {
+      "argument_index": 3,
+      "closure": "control_input",
+      "executable": false,
+      "method": "read",
+      "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-prepared-v2/case-binding.json",
+      "role": "case_binding",
+      "sha256": "1c8cf17475c0840900ebcc5cd9334d4ebe76c1bd354aaa5106cb875efa1da8b5"
+    },
+    {
+      "argument_index": 5,
+      "closure": "control_input",
+      "executable": false,
+      "method": "read",
+      "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-prepared-v2/fixture-index.json",
+      "role": "fixture_index",
+      "sha256": "9bde3a24bd8bb3ff017f5a370cee505e16cb632182fdbf3ad8c2cfb33c23bc4d"
+    },
+    {
+      "argument_index": 7,
+      "closure": "control_input",
+      "executable": false,
+      "method": "read",
+      "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-prepared-v2/identity.json",
+      "role": "identity",
+      "sha256": "6c3e3562eaafbc357497153f46a12c726383130b8b7f4e630ba50c769d03fc37"
+    },
+    {
+      "argument_index": 9,
+      "closure": "control_input",
+      "executable": false,
+      "method": "read",
+      "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-prepared-v2/preflight.json",
+      "role": "prepared_preflight",
+      "sha256": "294ddf1771251c4b1954ea663d73e85821749119da2a4f6c7528fdae510bbc6e"
+    },
+    {
+      "argument_index": 11,
+      "closure": "control_input",
+      "executable": false,
+      "method": "read",
+      "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-prepared-v2/policy.json",
+      "role": "policy",
+      "sha256": "21dff8ecdbc17a1cd86a458fe7f8771eed0cdd18577a5f0fb6c7b96310a2de16"
+    },
+    {
+      "argument_index": 15,
+      "closure": "code_execution",
+      "executable": false,
+      "method": "exec",
+      "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/tools/prepare-aq4-p2-resident-smoke-bundle.py",
+      "role": "trusted_validator",
+      "sha256": "15a65fed6d182e706473821f128fbae02214ab0bf988bb7c1f363f69233e9904"
+    },
+    {
+      "argument_index": 28,
+      "closure": "control_input",
+      "executable": false,
+      "method": "read",
+      "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-execute-evidence-v11/live-preflight.json",
+      "role": "live_preflight",
+      "sha256": "0ea879777e54717bb9ef943b028c9b66255af608972f1e4dcbd79934b705af79"
+    },
+    {
+      "argument_index": 35,
+      "closure": "code_execution",
+      "executable": true,
+      "method": "exec",
+      "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-prepared-v2/resident-driver",
+      "role": "resident_driver",
+      "sha256": "d7458fcdf8553871cac00123413676625c61eff2fdee3be9a440e656f05bcc1e"
+    },
+    {
+      "argument_index": 37,
+      "closure": "control_input",
+      "executable": false,
+      "method": "read",
+      "path": "/etc/ullm/served-models/active.json",
+      "role": "served_manifest",
+      "sha256": "feb3190d0ff59778e4da140b8db2bd1ce2ba440e3a69e844b997011d4d08cb44"
+    }
+  ],
+  "manifest_sha256": "f8f90bd0d0c4791db12bad55a699c3d44dccf8614af0f616b7b1d03c2087474c",
+  "output_paths": [
+    {
+      "argument_index": 19,
+      "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-execute-v11"
+    }
+  ],
+  "runtime_paths": [
+    {
+      "argument_index": 13,
+      "closure": "data_integrity",
+      "identity": [
+        66306,
+        10617640,
+        16749,
+        2,
+        4096,
+        1784147883329443006,
+        1784147883330538795
+      ],
+      "kind": "directory",
+      "method": "pre_post_guard",
+      "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-prepared-v2",
+      "role": "bundle_root"
+    },
+    {
+      "argument_index": 25,
+      "closure": "device_lock",
+      "identity": [
+        26,
+        825809,
+        33152,
+        1,
+        0,
+        1784161026944289263,
+        1784161026944289263
+      ],
+      "kind": "regular_file",
+      "method": "flock",
+      "path": "/run/ullm/r9700.lock",
+      "role": "device_lock"
+    },
+    {
+      "argument_index": 31,
+      "closure": "code_execution",
+      "kind": "symlinked_file",
+      "method": "dlopen",
+      "path": "/opt/rocm-7.2.1/lib/librocprofiler-sdk-roctx.so.1.1.0",
+      "resolved_path": "/opt/rocm-7.2.1/lib/librocprofiler-sdk-roctx.so.1.1.0",
+      "role": "roctx_library",
+      "sha256": "1a5831a3817eac29f63d1442dc348ba31b417202b7ce15f3aed9c09a8f4773c9"
+    }
+  ],
+  "schema_version": "ullm.aq4_p3_profile_target_command.v1",
+  "status": "bound"
+}

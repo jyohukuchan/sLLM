@@ -1,0 +1,1315 @@
+{
+  "actual_executed": true,
+  "all_returncodes_and_streams": {
+    "operator": {
+      "returncode": 1,
+      "stderr": {
+        "bytes": 0,
+        "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-operator-result-v15/operator.stderr.bin",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "stdout": {
+        "bytes": 255,
+        "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-operator-result-v15/operator.stdout.bin",
+        "sha256": "d8e67905abd23ef6908f746bebf68773a8bffedc66e7ec014baf2a98545d4948"
+      }
+    },
+    "rocprof": {
+      "returncode": 1,
+      "stderr": {
+        "bytes": 558,
+        "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v11/rocprof.stderr",
+        "sha256": "7c8e2141bbc0cb94f6aedfeb1265d5f068c39bbc1da96f778b4c790b1f91b165"
+      },
+      "stdout": {
+        "bytes": 0,
+        "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v11/rocprof.stdout",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    },
+    "runner": {
+      "returncode": 1,
+      "stderr": {
+        "bytes": 558,
+        "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-execute-evidence-v11/runner.stderr.bin",
+        "sha256": "7c8e2141bbc0cb94f6aedfeb1265d5f068c39bbc1da96f778b4c790b1f91b165"
+      },
+      "stdout": {
+        "bytes": 0,
+        "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-execute-evidence-v11/runner.stdout.bin",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    },
+    "validator": {
+      "returncode": 0,
+      "stderr": {
+        "bytes": 0,
+        "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-execute-evidence-v11/validator.stderr.bin",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "stdout": {
+        "bytes": 113,
+        "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-execute-evidence-v11/validator.stdout.bin",
+        "sha256": "911c8b8d33e69b37468beb639253fd6c1e276db60b2389135cf1968a2b8fad81"
+      }
+    }
+  },
+  "audit_sha256": "75bf7b7a72be074a2659078a0029cfc31802793e8695d05de4f1cc4b30b515d2",
+  "authority_commit": "c76e46f06106db7489644493f2561b6dbec6b412",
+  "cleanup": {
+    "capture_children_remaining": [],
+    "capture_process_group_cleanup_complete": true,
+    "driver_cleanup_passed": true,
+    "launcher_children_remaining": [],
+    "launcher_cleanup_passed": true,
+    "residual_targeted_processes": [],
+    "retry_forbidden_and_not_performed": true,
+    "trusted_lock_substrate_cleanup_passed": true,
+    "trusted_lock_substrate_cleanup_required": true,
+    "trusted_lock_substrate_holder_pids": []
+  },
+  "evidence": {
+    "capture": {
+      "members": {
+        "aq4-p3-diagnostic_agent_info.csv": {
+          "mode": "0444",
+          "nlink": 1,
+          "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v11/aq4-p3-diagnostic_agent_info.csv",
+          "sha256": "e53fa0d86f357e061cb4881251144d4f0b1d664e69b463827159aad2bfb435a8",
+          "size": 1855
+        },
+        "aq4-p3-diagnostic_hip_api_trace.csv": {
+          "mode": "0444",
+          "nlink": 1,
+          "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v11/aq4-p3-diagnostic_hip_api_trace.csv",
+          "sha256": "6a3bfb19982a132ad528513343f618ea3ea56d8cae3cb2f791efb50b85cf17e1",
+          "size": 7897921
+        },
+        "aq4-p3-diagnostic_kernel_trace.csv": {
+          "mode": "0444",
+          "nlink": 1,
+          "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v11/aq4-p3-diagnostic_kernel_trace.csv",
+          "sha256": "424a424188803cd7e5a872cd843e15ab80e0fd4f59d271111bb0f7b681979a6f",
+          "size": 1863269
+        },
+        "aq4-p3-diagnostic_marker_api_trace.csv": {
+          "mode": "0444",
+          "nlink": 1,
+          "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v11/aq4-p3-diagnostic_marker_api_trace.csv",
+          "sha256": "c4b95dd1146e477f10a9327cb607a5ee107130c7cd0b528b26ca067658357606",
+          "size": 5389
+        },
+        "aq4-p3-diagnostic_memory_copy_trace.csv": {
+          "mode": "0444",
+          "nlink": 1,
+          "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v11/aq4-p3-diagnostic_memory_copy_trace.csv",
+          "sha256": "f419a04f0e1106d0788edb39f6597259305b7f559532a68b119d27440f19943a",
+          "size": 1137027
+        },
+        "capture-artifact.json": {
+          "mode": "0444",
+          "nlink": 1,
+          "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v11/capture-artifact.json",
+          "sha256": "d0fff4fc78d19fd0f12c8a54040a9fbb73abd5253b1e7ef8b2af7f0d4c08783f",
+          "size": 72107
+        },
+        "capture-capabilities.json": {
+          "mode": "0444",
+          "nlink": 1,
+          "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v11/capture-capabilities.json",
+          "sha256": "381920a2db7b5db53822f3536f262d324a895c8840f11bd767e2caada02a80b8",
+          "size": 636
+        },
+        "measured-runs/run-02_hip_api_trace.csv": {
+          "mode": "0444",
+          "nlink": 1,
+          "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v11/measured-runs/run-02_hip_api_trace.csv",
+          "sha256": "56e559331f656d30c3a8de07bbef8cf0314bc9a190ba9290d6d9aec87c711235",
+          "size": 221111
+        },
+        "measured-runs/run-02_kernel_trace.csv": {
+          "mode": "0444",
+          "nlink": 1,
+          "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v11/measured-runs/run-02_kernel_trace.csv",
+          "sha256": "4778cf98cf9d14f52794f7614b4ee431fb92c3fe79ab34e2193feb6bcc039c1a",
+          "size": 144819
+        },
+        "measured-runs/run-02_memory_copy_trace.csv": {
+          "mode": "0444",
+          "nlink": 1,
+          "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v11/measured-runs/run-02_memory_copy_trace.csv",
+          "sha256": "33da2af9ad6361709713e44157ee3185f9fb42a15c05ce7cc0a18ecb9f95ec79",
+          "size": 108
+        },
+        "measured-runs/run-03_hip_api_trace.csv": {
+          "mode": "0444",
+          "nlink": 1,
+          "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v11/measured-runs/run-03_hip_api_trace.csv",
+          "sha256": "af231d7857e8199780ef93bd7922de77eb3b2abb74ffd060c3572b7380c6226a",
+          "size": 221111
+        },
+        "measured-runs/run-03_kernel_trace.csv": {
+          "mode": "0444",
+          "nlink": 1,
+          "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v11/measured-runs/run-03_kernel_trace.csv",
+          "sha256": "bba7f92452c1005fe247162fed691e4fbcbd290dca03e7ce89973abc6c43de55",
+          "size": 144819
+        },
+        "measured-runs/run-03_memory_copy_trace.csv": {
+          "mode": "0444",
+          "nlink": 1,
+          "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v11/measured-runs/run-03_memory_copy_trace.csv",
+          "sha256": "33da2af9ad6361709713e44157ee3185f9fb42a15c05ce7cc0a18ecb9f95ec79",
+          "size": 108
+        },
+        "measured-runs/run-04_hip_api_trace.csv": {
+          "mode": "0444",
+          "nlink": 1,
+          "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v11/measured-runs/run-04_hip_api_trace.csv",
+          "sha256": "d02fb6ba5faea7412b0ae6b24a002f3fa79ba53420c4c6e7ea1ac23791d7f6fc",
+          "size": 221111
+        },
+        "measured-runs/run-04_kernel_trace.csv": {
+          "mode": "0444",
+          "nlink": 1,
+          "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v11/measured-runs/run-04_kernel_trace.csv",
+          "sha256": "8d55711caeb7a2946f9f620152c3f58dcc65cbf20312436fbd66c48afb251a74",
+          "size": 144819
+        },
+        "measured-runs/run-04_memory_copy_trace.csv": {
+          "mode": "0444",
+          "nlink": 1,
+          "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v11/measured-runs/run-04_memory_copy_trace.csv",
+          "sha256": "33da2af9ad6361709713e44157ee3185f9fb42a15c05ce7cc0a18ecb9f95ec79",
+          "size": 108
+        },
+        "measured-runs/run-05_hip_api_trace.csv": {
+          "mode": "0444",
+          "nlink": 1,
+          "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v11/measured-runs/run-05_hip_api_trace.csv",
+          "sha256": "4696c291c7e5e89010438c8a6950b558fde451938497dfb1daea6a1660e8e43f",
+          "size": 221111
+        },
+        "measured-runs/run-05_kernel_trace.csv": {
+          "mode": "0444",
+          "nlink": 1,
+          "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v11/measured-runs/run-05_kernel_trace.csv",
+          "sha256": "eafe4a0f7c89b98c6471e435b54e88d3bd9aadc4095f92a123671473a9cb7281",
+          "size": 144819
+        },
+        "measured-runs/run-05_memory_copy_trace.csv": {
+          "mode": "0444",
+          "nlink": 1,
+          "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v11/measured-runs/run-05_memory_copy_trace.csv",
+          "sha256": "33da2af9ad6361709713e44157ee3185f9fb42a15c05ce7cc0a18ecb9f95ec79",
+          "size": 108
+        },
+        "measured-runs/run-06_hip_api_trace.csv": {
+          "mode": "0444",
+          "nlink": 1,
+          "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v11/measured-runs/run-06_hip_api_trace.csv",
+          "sha256": "96560e69aa00e7061dfaadba2af047de37a6e9a9795971500b0dfd267609f018",
+          "size": 221111
+        },
+        "measured-runs/run-06_kernel_trace.csv": {
+          "mode": "0444",
+          "nlink": 1,
+          "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v11/measured-runs/run-06_kernel_trace.csv",
+          "sha256": "334ef4f83d73cf589ea1aca0160faf6da967d30237da06416f202baff2d4a871",
+          "size": 144819
+        },
+        "measured-runs/run-06_memory_copy_trace.csv": {
+          "mode": "0444",
+          "nlink": 1,
+          "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v11/measured-runs/run-06_memory_copy_trace.csv",
+          "sha256": "33da2af9ad6361709713e44157ee3185f9fb42a15c05ce7cc0a18ecb9f95ec79",
+          "size": 108
+        },
+        "measured-runs/run-07_hip_api_trace.csv": {
+          "mode": "0444",
+          "nlink": 1,
+          "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v11/measured-runs/run-07_hip_api_trace.csv",
+          "sha256": "25a328a614ea116a0a0b1dd2fcbd9044125b76fb5b3b46d72a6e71539344ec72",
+          "size": 221111
+        },
+        "measured-runs/run-07_kernel_trace.csv": {
+          "mode": "0444",
+          "nlink": 1,
+          "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v11/measured-runs/run-07_kernel_trace.csv",
+          "sha256": "70d36e3115dfd375d5f0071e6e0151611e8dcf8768f0644d89a8102086bfa2a4",
+          "size": 144819
+        },
+        "measured-runs/run-07_memory_copy_trace.csv": {
+          "mode": "0444",
+          "nlink": 1,
+          "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v11/measured-runs/run-07_memory_copy_trace.csv",
+          "sha256": "33da2af9ad6361709713e44157ee3185f9fb42a15c05ce7cc0a18ecb9f95ec79",
+          "size": 108
+        },
+        "measured-runs/run-08_hip_api_trace.csv": {
+          "mode": "0444",
+          "nlink": 1,
+          "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v11/measured-runs/run-08_hip_api_trace.csv",
+          "sha256": "ca32ff29bf6a550ed81cd1a448d94336c0f46f2d6ed8b84e1f9667c1536e38b7",
+          "size": 221111
+        },
+        "measured-runs/run-08_kernel_trace.csv": {
+          "mode": "0444",
+          "nlink": 1,
+          "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v11/measured-runs/run-08_kernel_trace.csv",
+          "sha256": "ee674aa3bf8fdd83c46b4081fac8dd047e8f12a061308d823026370ef81f0ff7",
+          "size": 144819
+        },
+        "measured-runs/run-08_memory_copy_trace.csv": {
+          "mode": "0444",
+          "nlink": 1,
+          "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v11/measured-runs/run-08_memory_copy_trace.csv",
+          "sha256": "33da2af9ad6361709713e44157ee3185f9fb42a15c05ce7cc0a18ecb9f95ec79",
+          "size": 108
+        },
+        "measured-runs/run-09_hip_api_trace.csv": {
+          "mode": "0444",
+          "nlink": 1,
+          "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v11/measured-runs/run-09_hip_api_trace.csv",
+          "sha256": "b713acda14c7fc9e448ba6d5ef335dba9d20f6132e33d361431dd37893a0dd2d",
+          "size": 221111
+        },
+        "measured-runs/run-09_kernel_trace.csv": {
+          "mode": "0444",
+          "nlink": 1,
+          "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v11/measured-runs/run-09_kernel_trace.csv",
+          "sha256": "ffec8d53a4b34f2378fbadfad7340c0cbe789ce7490446c2176cdf211e36f97e",
+          "size": 145227
+        },
+        "measured-runs/run-09_memory_copy_trace.csv": {
+          "mode": "0444",
+          "nlink": 1,
+          "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v11/measured-runs/run-09_memory_copy_trace.csv",
+          "sha256": "33da2af9ad6361709713e44157ee3185f9fb42a15c05ce7cc0a18ecb9f95ec79",
+          "size": 108
+        },
+        "measured-runs/run-10_hip_api_trace.csv": {
+          "mode": "0444",
+          "nlink": 1,
+          "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v11/measured-runs/run-10_hip_api_trace.csv",
+          "sha256": "ab9251160a820e6f8333a8d8604efc450e86c107b53d2665633f15d4e87b5664",
+          "size": 221111
+        },
+        "measured-runs/run-10_kernel_trace.csv": {
+          "mode": "0444",
+          "nlink": 1,
+          "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v11/measured-runs/run-10_kernel_trace.csv",
+          "sha256": "a9659ac374a793f14a9762d4793acb2f6d3bd5957b00bdc4060212dbc88fd2e4",
+          "size": 145747
+        },
+        "measured-runs/run-10_memory_copy_trace.csv": {
+          "mode": "0444",
+          "nlink": 1,
+          "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v11/measured-runs/run-10_memory_copy_trace.csv",
+          "sha256": "33da2af9ad6361709713e44157ee3185f9fb42a15c05ce7cc0a18ecb9f95ec79",
+          "size": 108
+        },
+        "measured-runs/run-11_hip_api_trace.csv": {
+          "mode": "0444",
+          "nlink": 1,
+          "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v11/measured-runs/run-11_hip_api_trace.csv",
+          "sha256": "39ac1b1628ca77af8a97c5e06dee88a1eff1c73a4b506211d73ee8d26ab0d2f5",
+          "size": 221111
+        },
+        "measured-runs/run-11_kernel_trace.csv": {
+          "mode": "0444",
+          "nlink": 1,
+          "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v11/measured-runs/run-11_kernel_trace.csv",
+          "sha256": "64ad5568b50c163571af633f192c0bce1978036be30d0bdd311c1f3a4f666ea1",
+          "size": 145747
+        },
+        "measured-runs/run-11_memory_copy_trace.csv": {
+          "mode": "0444",
+          "nlink": 1,
+          "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v11/measured-runs/run-11_memory_copy_trace.csv",
+          "sha256": "33da2af9ad6361709713e44157ee3185f9fb42a15c05ce7cc0a18ecb9f95ec79",
+          "size": 108
+        },
+        "rocprof.stderr": {
+          "mode": "0444",
+          "nlink": 1,
+          "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v11/rocprof.stderr",
+          "sha256": "7c8e2141bbc0cb94f6aedfeb1265d5f068c39bbc1da96f778b4c790b1f91b165",
+          "size": 558
+        },
+        "rocprof.stdout": {
+          "mode": "0444",
+          "nlink": 1,
+          "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v11/rocprof.stdout",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "size": 0
+        }
+      },
+      "mode": "0555",
+      "root": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v11",
+      "sha256sums_sha256": "8ba65db03636c8167ee36d12f59b6cfc9de4e0aaa0df87cb11254ab1313994bb"
+    },
+    "execute": {
+      "members": {
+        "launcher-evidence.json": {
+          "mode": "0444",
+          "nlink": 1,
+          "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-execute-evidence-v11/launcher-evidence.json",
+          "sha256": "9761f919a9a38de83a98812afdb0fcb74ae57e41651e24c80629232b85b6c3a4",
+          "size": 30902
+        },
+        "live-preflight.json": {
+          "mode": "0444",
+          "nlink": 1,
+          "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-execute-evidence-v11/live-preflight.json",
+          "sha256": "0ea879777e54717bb9ef943b028c9b66255af608972f1e4dcbd79934b705af79",
+          "size": 6750
+        },
+        "runner-target-command-manifest.json": {
+          "mode": "0444",
+          "nlink": 1,
+          "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-execute-evidence-v11/runner-target-command-manifest.json",
+          "sha256": "5864bb02e1cbe7d738e461c456bf12c8cd39c19b59342ff55dc2fddda39c6c7f",
+          "size": 17379
+        },
+        "runner.stderr.bin": {
+          "mode": "0444",
+          "nlink": 1,
+          "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-execute-evidence-v11/runner.stderr.bin",
+          "sha256": "7c8e2141bbc0cb94f6aedfeb1265d5f068c39bbc1da96f778b4c790b1f91b165",
+          "size": 558
+        },
+        "runner.stdout.bin": {
+          "mode": "0444",
+          "nlink": 1,
+          "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-execute-evidence-v11/runner.stdout.bin",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "size": 0
+        },
+        "validator.stderr.bin": {
+          "mode": "0444",
+          "nlink": 1,
+          "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-execute-evidence-v11/validator.stderr.bin",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "size": 0
+        },
+        "validator.stdout.bin": {
+          "mode": "0444",
+          "nlink": 1,
+          "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-execute-evidence-v11/validator.stdout.bin",
+          "sha256": "911c8b8d33e69b37468beb639253fd6c1e276db60b2389135cf1968a2b8fad81",
+          "size": 113
+        }
+      },
+      "mode": "0555",
+      "root": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-execute-evidence-v11",
+      "sha256sums_sha256": "b843df5bc5d4a0c243632f1140f9da8ab32d1454e4dd7ecdc2e8cd9208970d78"
+    },
+    "maintenance": {
+      "members": {
+        "launcher-evidence.json": {
+          "mode": "0444",
+          "nlink": 1,
+          "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-maintenance-evidence-v12/launcher-evidence.json",
+          "sha256": "9d8351165d4a2ea76a04884eea71bef7e358e202f661fd1aaea040bf4467d19b",
+          "size": 65185
+        },
+        "maintenance-marker.json": {
+          "mode": "0444",
+          "nlink": 1,
+          "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-maintenance-evidence-v12/maintenance-marker.json",
+          "sha256": "900a7ba51e8b99378479a839d7d7210af61bccbe20e9a289179343420feb4a05",
+          "size": 335
+        },
+        "stopped-gate-poll-0000.json": {
+          "mode": "0444",
+          "nlink": 1,
+          "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-maintenance-evidence-v12/stopped-gate-poll-0000.json",
+          "sha256": "88782c355b84163bff21c62797965a209da197436305110a53288c25d89a84a1",
+          "size": 11302
+        },
+        "stopped-gate-poll-0001.json": {
+          "mode": "0444",
+          "nlink": 1,
+          "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-maintenance-evidence-v12/stopped-gate-poll-0001.json",
+          "sha256": "3a091eafa9e28526fdc536936d14a3bfb61593736571b55ef2521ad4579b21c0",
+          "size": 11305
+        }
+      },
+      "mode": "0555",
+      "root": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-maintenance-evidence-v12",
+      "sha256sums_sha256": "263b3cd500152520e3d6066d3101f70e6ec2dee8f5dbeaf4fcc42404fc2a6225"
+    },
+    "operator_result": {
+      "members": {
+        "operator-result.json": {
+          "mode": "0444",
+          "nlink": 1,
+          "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-operator-result-v15/operator-result.json",
+          "sha256": "a079b1c987fc32eb6c6b465f4878d6619819cbd956490d920127640f56c7a7c2",
+          "size": 2362
+        },
+        "operator.stderr.bin": {
+          "mode": "0444",
+          "nlink": 1,
+          "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-operator-result-v15/operator.stderr.bin",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "size": 0
+        },
+        "operator.stdout.bin": {
+          "mode": "0444",
+          "nlink": 1,
+          "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-operator-result-v15/operator.stdout.bin",
+          "sha256": "d8e67905abd23ef6908f746bebf68773a8bffedc66e7ec014baf2a98545d4948",
+          "size": 255
+        }
+      },
+      "mode": "0555",
+      "root": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-operator-result-v15",
+      "sha256sums_sha256": "4bb61f187baa4b6a001f5e6143e6c3d432b08a12e417f924cf19bd7b28ddcce9"
+    },
+    "runtime": {
+      "members": {
+        "p2-representative-full_model-cold_prefill-cold_batched-n128-m128-r9700-rdna4-aq4_0_target.raw.json": {
+          "mode": "0444",
+          "nlink": 1,
+          "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-execute-v11/p2-representative-full_model-cold_prefill-cold_batched-n128-m128-r9700-rdna4-aq4_0_target.raw.json",
+          "sha256": "96c1490cc5911aae5675b5409b4f41fd8acd1aeabdb772e5623dd0bef75a64cd",
+          "size": 28096
+        },
+        "resident-batch.driver-process.json": {
+          "mode": "0444",
+          "nlink": 1,
+          "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-execute-v11/resident-batch.driver-process.json",
+          "sha256": "2ce18cd149ec853ce9e2b260d8464ad4e2f14285691db267e654f0fd7362564f",
+          "size": 36479
+        },
+        "resident-batch.lock-owner.json": {
+          "mode": "0444",
+          "nlink": 1,
+          "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-execute-v11/resident-batch.lock-owner.json",
+          "sha256": "1bea73b1270d4001d6ab1ecf475e09d80c5ad816961c379870dba4669877d6e2",
+          "size": 647
+        },
+        "resident-batch.roctx-ranges.json": {
+          "mode": "0444",
+          "nlink": 1,
+          "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-execute-v11/resident-batch.roctx-ranges.json",
+          "sha256": "004a4a35ab76626595d10bedad1656ae1561ba943f172c21655aaf5017e5146d",
+          "size": 6556
+        },
+        "resident-batch.summary.json": {
+          "mode": "0444",
+          "nlink": 1,
+          "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-execute-v11/resident-batch.summary.json",
+          "sha256": "c132efcf452ea30ff75eb4f61cc49e2924fd41844d957ba512e036562b46eca5",
+          "size": 34211
+        },
+        "resident-driver.stderr.log": {
+          "mode": "0444",
+          "nlink": 1,
+          "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-execute-v11/resident-driver.stderr.log",
+          "sha256": "c08b27716e6ae7d26d043878740357303d5eddd64eaa7ee9aeb4493b1b698c7a",
+          "size": 1116
+        }
+      },
+      "mode": "0555",
+      "root": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-execute-v11",
+      "sha256sums_sha256": "acd372452c80c334bd8534e19db1152a142219eb232d5a8958bbe0fe8e4f3eb9"
+    }
+  },
+  "execution": {
+    "argument_count": 10,
+    "canonical_end_unix_ns": 1784161087899258437,
+    "canonical_start_unix_ns": 1784161005254172569,
+    "elapsed_ns": 82645085868,
+    "invocation_count": 1,
+    "maximum_invocations": 1,
+    "retry_performed": false,
+    "returncode": 1,
+    "same_pty_sudo_cache": true,
+    "shell": false,
+    "working_directory": "/home/homelab1/coding-local/ultimateLLM/uLLM-project"
+  },
+  "failure": {
+    "capture_failure_reason": null,
+    "capture_failure_schema": null,
+    "capture_failure_sha256": null,
+    "launcher_reason": "execute runner subprocess failed",
+    "launcher_stage": "runner",
+    "maintenance_reason": "immutable launcher failed",
+    "maintenance_stage": "profile-capture",
+    "ready_candidate_reason_code": null,
+    "returncode": 1
+  },
+  "finalizer_authority": {
+    "commit": "7a11d5b204cff70a5b1dfd55b7fe7be3879a5e41",
+    "git_blob": "d203782344946c9046e4e9ee7b98807836c4561b",
+    "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/tools/prepare-aq4-p3-profile-operator.py",
+    "role": "existing_evidence_recovery_only_not_execution_authority",
+    "sha256": "abe26f141030a2ba48bee57050d1d42880221a18658f5ce8d4a75a27cdad801a"
+  },
+  "manifest_file_sha256": "1ce836ee2d472a796e95fef31f8f57688e1f7791d6b5d50106a66485f79b60dd",
+  "package_integrity": {
+    "error": null,
+    "full_content": {
+      "bytes": 7700872459,
+      "duration_ns": 14540905430,
+      "file_count": 1045,
+      "passed": true,
+      "sha256": "a24774432d3f0b7f175dc761ef9a53df1fed901dd02f825e8542b17181f004b1",
+      "stage": "pre-stop-full-content-hash"
+    },
+    "full_hash_count": 1,
+    "integrity_identity": {
+      "expected_sha256": "c0382f0cabec53f07e45c7be5f1d1618c18fe0c16de98a0901b97e217ca5e267",
+      "observed_sha256": "c0382f0cabec53f07e45c7be5f1d1618c18fe0c16de98a0901b97e217ca5e267",
+      "passed": true,
+      "schema_version": "ullm.aq4_package_integrity_identity.v1"
+    },
+    "stage": "pre-stop",
+    "tree_identity": {
+      "bytes": 7700872459,
+      "difference": null,
+      "directory_count": 4,
+      "entry_count": 1049,
+      "file_count": 1045,
+      "identity_fields": [
+        "relative_path",
+        "device",
+        "inode",
+        "mode",
+        "nlink",
+        "size",
+        "mtime_ns",
+        "ctime_ns"
+      ],
+      "identity_sha256": "e105d6f242fc3792fb0e3b5c3dd7ea98449e1b451af0aec1f73c40571438d9a3",
+      "special_count": 0,
+      "stable_across_full_hash": true,
+      "stage": "pre-stop-tree-metadata",
+      "symlink_count": 0
+    }
+  },
+  "post_health": {
+    "formal_health_sha256": "b032d38fcdb8e17f2452daa47ce07f2335875451df2ac47f73d117a4331b3722",
+    "gpu": {
+      "amd_smi_index": 2,
+      "bdf": "0000:47:00.0",
+      "kfd_id": 51545,
+      "node_id": 2,
+      "uuid": "a8ff7551-0000-1000-80e9-ddefa2d60f55"
+    },
+    "hashes": {
+      "package_manifest_sha256": "a790a033f57d9c5b9ae0d731a463c26b86aec691f771ce88bb543d676f08e5ad",
+      "served_manifest_sha256": "feb3190d0ff59778e4da140b8db2bd1ce2ba440e3a69e844b997011d4d08cb44",
+      "worker_sha256": "177f3106414efc7cc4b08fa2d87bed6e147d4188e0a290f43b7a1ac591fae48d"
+    },
+    "lock": {
+      "busy": true,
+      "identity": [
+        26,
+        825848,
+        33152,
+        1,
+        0
+      ],
+      "path": "/run/ullm/r9700.lock"
+    },
+    "owners": {
+      "amd_smi": [
+        3268350
+      ],
+      "kfd": [
+        3268350
+      ]
+    },
+    "service": {
+      "active_state": "active",
+      "control_group": "/system.slice/ullm-openai.service",
+      "main_pid": 3268257,
+      "nrestarts": 0,
+      "sub_state": "running",
+      "unit": "ullm-openai.service"
+    },
+    "targeted_processes": [],
+    "worker": {
+      "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/target/reasoning-v2/release/ullm-aq4-worker",
+      "pid": 3268350,
+      "sha256": "177f3106414efc7cc4b08fa2d87bed6e147d4188e0a290f43b7a1ac591fae48d"
+    }
+  },
+  "pre_stop_failure_snapshot": null,
+  "profile_artifacts": {
+    "capture_artifact": {
+      "mode": "0444",
+      "nlink": 1,
+      "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v11/capture-artifact.json",
+      "sha256": "d0fff4fc78d19fd0f12c8a54040a9fbb73abd5253b1e7ef8b2af7f0d4c08783f",
+      "size": 72107
+    },
+    "capture_failure": null,
+    "measurement_eligible": false,
+    "promotion_eligible": false,
+    "runtime_summary": {
+      "mode": "0444",
+      "nlink": 1,
+      "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-execute-v11/resident-batch.summary.json",
+      "sha256": "c132efcf452ea30ff75eb4f61cc49e2924fd41844d957ba512e036562b46eca5",
+      "size": 34211
+    },
+    "status": "failure_evidence_only",
+    "trace_csv_bytes": 14568105,
+    "trace_csv_count": 35
+  },
+  "recovery_snapshot": {
+    "actual_outputs_permitted": true,
+    "formal_health_sha256": "b032d38fcdb8e17f2452daa47ce07f2335875451df2ac47f73d117a4331b3722",
+    "gpu": {
+      "amd_smi_index": 2,
+      "bdf": "0000:47:00.0",
+      "kfd_id": 51545,
+      "node_id": 2,
+      "uuid": "a8ff7551-0000-1000-80e9-ddefa2d60f55"
+    },
+    "gpu_workload_executed": false,
+    "hashes": {
+      "package_manifest_sha256": "a790a033f57d9c5b9ae0d731a463c26b86aec691f771ce88bb543d676f08e5ad",
+      "served_manifest_sha256": "feb3190d0ff59778e4da140b8db2bd1ce2ba440e3a69e844b997011d4d08cb44",
+      "worker_sha256": "177f3106414efc7cc4b08fa2d87bed6e147d4188e0a290f43b7a1ac591fae48d"
+    },
+    "lock": {
+      "busy": true,
+      "identity": [
+        26,
+        825848,
+        33152,
+        1,
+        0
+      ],
+      "path": "/run/ullm/r9700.lock"
+    },
+    "owners": {
+      "amd_smi": [
+        3268350
+      ],
+      "kfd": [
+        3268350
+      ]
+    },
+    "phase": "post_actual_evidence_recovery",
+    "previous_authorization_source": "sealed_operator_manifest_no_live_absence_recheck",
+    "read_only": true,
+    "service": {
+      "active_state": "active",
+      "control_group": "/system.slice/ullm-openai.service",
+      "main_pid": 3268257,
+      "nrestarts": 0,
+      "sub_state": "running",
+      "unit": "ullm-openai.service"
+    },
+    "service_touched": false,
+    "source": "fresh_read_only_phase_aware_probe",
+    "targeted_processes": [],
+    "worker": {
+      "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/target/reasoning-v2/release/ullm-aq4-worker",
+      "pid": 3268350,
+      "sha256": "177f3106414efc7cc4b08fa2d87bed6e147d4188e0a290f43b7a1ac591fae48d"
+    }
+  },
+  "restore": {
+    "attempted": true,
+    "completed_monotonic_ns": 1408055713876891,
+    "deadline_monotonic_ns": 1408160761312705,
+    "deadline_semantics": "fixed_absolute_monotonic_ns_checked_before_and_after_each_probe",
+    "duration_ns": 14952564186,
+    "error": null,
+    "final_metadata_recheck": {
+      "bytes": 7700872459,
+      "difference": null,
+      "directory_count": 4,
+      "entry_count": 1049,
+      "expected_identity_sha256": "e105d6f242fc3792fb0e3b5c3dd7ea98449e1b451af0aec1f73c40571438d9a3",
+      "file_count": 1045,
+      "finished_monotonic_ns": 1408055713876891,
+      "identity_fields": [
+        "relative_path",
+        "device",
+        "inode",
+        "mode",
+        "nlink",
+        "size",
+        "mtime_ns",
+        "ctime_ns"
+      ],
+      "identity_sha256": "e105d6f242fc3792fb0e3b5c3dd7ea98449e1b451af0aec1f73c40571438d9a3",
+      "passed": true,
+      "special_count": 0,
+      "stage": "post-readiness-final-tree-metadata",
+      "symlink_count": 0,
+      "within_absolute_deadline": true
+    },
+    "last_failure": {
+      "reason": "container health endpoint differs: http://172.20.0.1:8000/readyz",
+      "type": "HarnessError"
+    },
+    "lock_substrate_cleanup_passed": true,
+    "passed": true,
+    "poll_count": 6,
+    "poll_interval_seconds": 1.0,
+    "polls": [
+      {
+        "attempt": 0,
+        "duration_ns": 206468982,
+        "failure": {
+          "reason": "running worker is not unique",
+          "type": "HarnessError"
+        },
+        "finished_monotonic_ns": 1408041415399340,
+        "passed": false,
+        "probe_timeout_seconds": 10.0,
+        "remaining_before_ns": 119552382347,
+        "started_monotonic_ns": 1408041208930358
+      },
+      {
+        "attempt": 1,
+        "duration_ns": 209584444,
+        "failure": {
+          "reason": "running worker is not unique",
+          "type": "HarnessError"
+        },
+        "finished_monotonic_ns": 1408042625068404,
+        "passed": false,
+        "probe_timeout_seconds": 10.0,
+        "remaining_before_ns": 118345828745,
+        "started_monotonic_ns": 1408042415483960
+      },
+      {
+        "attempt": 2,
+        "duration_ns": 209911269,
+        "failure": {
+          "reason": "running worker is not unique",
+          "type": "HarnessError"
+        },
+        "finished_monotonic_ns": 1408043835077145,
+        "passed": false,
+        "probe_timeout_seconds": 10.0,
+        "remaining_before_ns": 117136146829,
+        "started_monotonic_ns": 1408043625165876
+      },
+      {
+        "attempt": 3,
+        "duration_ns": 1190491414,
+        "failure": {
+          "reason": "container health endpoint differs: http://172.20.0.1:8000/readyz",
+          "type": "HarnessError"
+        },
+        "finished_monotonic_ns": 1408046025654903,
+        "passed": false,
+        "probe_timeout_seconds": 10.0,
+        "remaining_before_ns": 115926149216,
+        "started_monotonic_ns": 1408044835163489
+      },
+      {
+        "attempt": 4,
+        "duration_ns": 1193498358,
+        "failure": {
+          "reason": "container health endpoint differs: http://172.20.0.1:8000/readyz",
+          "type": "HarnessError"
+        },
+        "finished_monotonic_ns": 1408048219266248,
+        "passed": false,
+        "probe_timeout_seconds": 10.0,
+        "remaining_before_ns": 113735544815,
+        "started_monotonic_ns": 1408047025767890
+      },
+      {
+        "attempt": 5,
+        "duration_ns": 6477232879,
+        "failure": null,
+        "finished_monotonic_ns": 1408055696616957,
+        "passed": true,
+        "probe_timeout_seconds": 10.0,
+        "remaining_before_ns": 111541928627,
+        "started_monotonic_ns": 1408049219384078
+      }
+    ],
+    "post_start": {
+      "commands": [
+        {
+          "argv": [
+            "/usr/bin/systemctl",
+            "show",
+            "ullm-openai.service",
+            "--property=ActiveState",
+            "--property=SubState",
+            "--property=MainPID",
+            "--property=NRestarts",
+            "--property=ControlGroup",
+            "--no-pager"
+          ],
+          "captured_unix_ns": 1784161081349693808,
+          "exit_code": 0,
+          "label": "service-running",
+          "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "stdout_sha256": "fffff2ec5a509648a235c5de4fb3a82e6a6692d46f5a3d34e28ece33d2009364"
+        },
+        {
+          "argv": [
+            "/usr/bin/pgrep",
+            "-f",
+            "-x",
+            "/home/homelab1/coding-local/ultimateLLM/uLLM-project/target/reasoning-v2/release/ullm-aq4-worker.*"
+          ],
+          "captured_unix_ns": 1784161081553272995,
+          "exit_code": 0,
+          "label": "worker-running",
+          "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "stdout_sha256": "f19009a19438287a8be99f5fcca2985649e609e6786497a8fe79011bb30610ec"
+        },
+        {
+          "argv": [
+            "/opt/rocm/bin/amd-smi",
+            "list",
+            "--json"
+          ],
+          "captured_unix_ns": 1784161081794805926,
+          "exit_code": 0,
+          "label": "gpu-identity",
+          "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "stdout_sha256": "a7fc353f0234d1bb86e01c847fd7a330518dbf6b4f5636d2a6824cef3fd02243"
+        }
+      ],
+      "gpu": {
+        "amd_smi_index": 2,
+        "bdf": "0000:47:00.0",
+        "kfd_id": 51545,
+        "node_id": 2,
+        "uuid": "a8ff7551-0000-1000-80e9-ddefa2d60f55"
+      },
+      "hashes": {
+        "package_manifest_sha256": "a790a033f57d9c5b9ae0d731a463c26b86aec691f771ce88bb543d676f08e5ad",
+        "served_manifest_sha256": "feb3190d0ff59778e4da140b8db2bd1ce2ba440e3a69e844b997011d4d08cb44",
+        "worker_sha256": "177f3106414efc7cc4b08fa2d87bed6e147d4188e0a290f43b7a1ac591fae48d"
+      },
+      "health": {
+        "formal": {
+          "commands": [
+            {
+              "argv": [
+                "/usr/bin/docker",
+                "version",
+                "--format",
+                "{{json .Client}}"
+              ],
+              "captured_unix_ns": 1784161082164631636,
+              "exit_code": 0,
+              "label": "docker-client-version",
+              "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+              "stdin": "devnull",
+              "stdout_sha256": "318bd0262c70774265e31726d6ff0cd87bae5dfbd564f2ce79c8a8d60164e33c"
+            },
+            {
+              "argv": [
+                "/usr/bin/docker",
+                "inspect",
+                "--type",
+                "container",
+                "--format",
+                "{{.Id}}|{{.Image}}|{{.Name}}|{{.State.Status}}|{{.State.Running}}|{{if .State.Health}}{{.State.Health.Status}}{{end}}|{{with index .NetworkSettings.Networks \"open-webui-network\"}}{{.NetworkID}}|{{.IPAddress}}|{{.Gateway}}{{end}}",
+                "open-webui"
+              ],
+              "captured_unix_ns": 1784161082191964815,
+              "exit_code": 0,
+              "label": "openwebui-container-inspect",
+              "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+              "stdin": "devnull",
+              "stdout_sha256": "ef8ce1929209495b03e09ef804047b443902fcfd9ef72e0e5f66006bf3e2eaf1"
+            },
+            {
+              "argv": [
+                "/usr/bin/docker",
+                "exec",
+                "41d5759a47c417ad4774cb4f19647393baa1a39b3987534a377776beb7d4977a",
+                "/usr/bin/curl",
+                "--version"
+              ],
+              "captured_unix_ns": 1784161082268661816,
+              "exit_code": 0,
+              "label": "container-curl-version",
+              "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+              "stdin": "devnull",
+              "stdout_sha256": "cc1470d1e66681b5b01a8df907c86e2947cb30622d2419b9d7d10aea1ddcf7b8"
+            },
+            {
+              "argv": [
+                "/usr/bin/docker",
+                "exec",
+                "41d5759a47c417ad4774cb4f19647393baa1a39b3987534a377776beb7d4977a",
+                "/usr/bin/sha256sum",
+                "/usr/bin/curl"
+              ],
+              "captured_unix_ns": 1784161082350475961,
+              "exit_code": 0,
+              "label": "container-curl-sha256",
+              "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+              "stdin": "devnull",
+              "stdout_sha256": "f753756cb95d3a5d402d12da58d58f6bcb4e7a91cbec47f4f392c6290db43169"
+            },
+            {
+              "argv": [
+                "/usr/bin/docker",
+                "exec",
+                "41d5759a47c417ad4774cb4f19647393baa1a39b3987534a377776beb7d4977a",
+                "/usr/bin/curl",
+                "--silent",
+                "--show-error",
+                "--fail-with-body",
+                "--max-time",
+                "5",
+                "--request",
+                "GET",
+                "--header",
+                "Accept: application/json",
+                "--write-out",
+                "\n__ULLM_HTTP_STATUS__%{http_code}\n",
+                "--url",
+                "http://172.20.0.1:8000/healthz"
+              ],
+              "captured_unix_ns": 1784161082437293759,
+              "exit_code": 0,
+              "label": "gateway_healthz",
+              "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+              "stdin": "devnull",
+              "stdout_sha256": "e1c558b58217af22f18024e482d78585546972e89d4b504c8c0dfd1f52ea6658"
+            },
+            {
+              "argv": [
+                "/usr/bin/docker",
+                "exec",
+                "41d5759a47c417ad4774cb4f19647393baa1a39b3987534a377776beb7d4977a",
+                "/usr/bin/curl",
+                "--silent",
+                "--show-error",
+                "--fail-with-body",
+                "--max-time",
+                "5",
+                "--request",
+                "GET",
+                "--header",
+                "Accept: application/json",
+                "--write-out",
+                "\n__ULLM_HTTP_STATUS__%{http_code}\n",
+                "--url",
+                "http://172.20.0.1:8000/readyz"
+              ],
+              "captured_unix_ns": 1784161082525448838,
+              "exit_code": 0,
+              "label": "gateway_readyz",
+              "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+              "stdin": "devnull",
+              "stdout_sha256": "cf7c607782b09fcf5b87620ac701bd58bb4560e31dddef3ccd5b5f0af3ad3b2f"
+            },
+            {
+              "argv": [
+                "/usr/bin/docker",
+                "exec",
+                "41d5759a47c417ad4774cb4f19647393baa1a39b3987534a377776beb7d4977a",
+                "/usr/bin/curl",
+                "--silent",
+                "--show-error",
+                "--fail-with-body",
+                "--max-time",
+                "5",
+                "--request",
+                "GET",
+                "--header",
+                "Accept: application/json",
+                "--write-out",
+                "\n__ULLM_HTTP_STATUS__%{http_code}\n",
+                "--url",
+                "http://127.0.0.1:8080/health"
+              ],
+              "captured_unix_ns": 1784161082614262108,
+              "exit_code": 0,
+              "label": "openwebui_health",
+              "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+              "stdin": "devnull",
+              "stdout_sha256": "b804451473eee09a5efc90e1b7e81056b6cc82282fdad719f6367836138c3c40"
+            },
+            {
+              "argv": [
+                "/usr/bin/docker",
+                "exec",
+                "-i",
+                "41d5759a47c417ad4774cb4f19647393baa1a39b3987534a377776beb7d4977a",
+                "/usr/bin/curl",
+                "--silent",
+                "--show-error",
+                "--fail-with-body",
+                "--max-time",
+                "5",
+                "--request",
+                "GET",
+                "--header",
+                "Accept: application/json",
+                "--header",
+                "@-",
+                "--write-out",
+                "\n__ULLM_HTTP_STATUS__%{http_code}\n",
+                "--url",
+                "http://172.20.0.1:8000/v1/models"
+              ],
+              "captured_unix_ns": 1784161082698487283,
+              "exit_code": 0,
+              "label": "gateway-models",
+              "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+              "stdin": "authorization_header_redacted",
+              "stdout_sha256": "9e6fc96b8bcd2a846eac6e15b03428610b2bb7502099c2b47a9118d8a7f7506a"
+            },
+            {
+              "argv": [
+                "/usr/bin/docker",
+                "inspect",
+                "--type",
+                "container",
+                "--format",
+                "{{.Id}}|{{.Image}}|{{.Name}}|{{.State.Status}}|{{.State.Running}}|{{if .State.Health}}{{.State.Health.Status}}{{end}}|{{with index .NetworkSettings.Networks \"open-webui-network\"}}{{.NetworkID}}|{{.IPAddress}}|{{.Gateway}}{{end}}",
+                "open-webui"
+              ],
+              "captured_unix_ns": 1784161082721728495,
+              "exit_code": 0,
+              "label": "openwebui-container-inspect",
+              "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+              "stdin": "devnull",
+              "stdout_sha256": "ef8ce1929209495b03e09ef804047b443902fcfd9ef72e0e5f66006bf3e2eaf1"
+            }
+          ],
+          "container": {
+            "health": "healthy",
+            "id": "41d5759a47c417ad4774cb4f19647393baa1a39b3987534a377776beb7d4977a",
+            "image_id": "sha256:ef5ae4fbc06abb662eeefe87e584ea7c69e55838f5f08f637057b9108048b409",
+            "name": "open-webui",
+            "network": {
+              "gateway": "172.20.0.1",
+              "id": "79bb7cfca31cb5d76978cbbb229c946662c137b93ea647b5ae6c205af9126dc8",
+              "ip": "172.20.0.2",
+              "name": "open-webui-network"
+            },
+            "running": true,
+            "status": "running"
+          },
+          "curl": {
+            "path": "/usr/bin/curl",
+            "sha256": "58824afa640f512e07e895c0f2d1e1fe2c3fd1456acab689b6e4c1c75cef2593",
+            "version": "7.88.1"
+          },
+          "docker": {
+            "client_api_version": "1.55",
+            "client_version": "29.6.0",
+            "device": 66306,
+            "inode": 189403434,
+            "mode": 493,
+            "path": "/usr/bin/docker",
+            "sha256": "f8470ebe5d201284a9fb4e7e59326f116e5b764a8d0d9a47097c26d52257d446",
+            "size": 45355819
+          },
+          "endpoints": {
+            "gateway_healthz": {
+              "authenticated": false,
+              "body_bytes": 15,
+              "body_sha256": "a29ee2b15c494311c52521766e44af56a3ad2248e7a8ab465e5206463c13d288",
+              "status": 200,
+              "url": "http://172.20.0.1:8000/healthz"
+            },
+            "gateway_models": {
+              "authenticated": true,
+              "body_bytes": 90,
+              "body_sha256": "ccfc5786e5d0928931111c7a2d272ab62e202abd9978b1490a531aa0b6133c20",
+              "model_id": "ullm-qwen3.5-9b-aq4",
+              "status": 200,
+              "url": "http://172.20.0.1:8000/v1/models"
+            },
+            "gateway_readyz": {
+              "authenticated": false,
+              "body_bytes": 18,
+              "body_sha256": "31bf75f4c0a97cc1f7b60df824fa390b3be9ba014f29b63c87c698ba63d9a9fd",
+              "status": 200,
+              "url": "http://172.20.0.1:8000/readyz"
+            },
+            "openwebui_health": {
+              "authenticated": false,
+              "body_bytes": 15,
+              "body_sha256": "edc48cd3b0bc4fa7ba23aad40b8508a17d370ca38be174bae2a2f64634e65a2b",
+              "status": 200,
+              "url": "http://127.0.0.1:8080/health"
+            }
+          },
+          "process_counts": {
+            "container_curl": 6,
+            "container_curl_endpoint": 5,
+            "container_curl_total": 6,
+            "container_curl_version": 1,
+            "docker": 9,
+            "docker_exec": 6
+          },
+          "secret_material_recorded": false,
+          "transport": "docker-exec-container-network-namespace"
+        },
+        "host_route_diagnostics": {
+          "formal_gate": false,
+          "probes": {
+            "gateway_readyz": {
+              "body_bytes": null,
+              "body_sha256": null,
+              "error_type": "URLError",
+              "matches_formal_response": false,
+              "reachable": false,
+              "status": null,
+              "url": "http://172.20.0.1:8000/readyz"
+            },
+            "openwebui_health": {
+              "body_bytes": 15,
+              "body_sha256": "edc48cd3b0bc4fa7ba23aad40b8508a17d370ca38be174bae2a2f64634e65a2b",
+              "error_type": null,
+              "matches_formal_response": true,
+              "reachable": true,
+              "status": 200,
+              "url": "http://127.0.0.1:3000/health"
+            }
+          }
+        }
+      },
+      "lock": {
+        "busy": true,
+        "path": "/run/ullm/r9700.lock"
+      },
+      "owners": {
+        "amd_smi": [
+          3268350
+        ],
+        "amd_smi_probe": {
+          "argv": [
+            "/opt/rocm/bin/amd-smi",
+            "process",
+            "--gpu",
+            "2",
+            "--general",
+            "--json"
+          ],
+          "captured_unix_ns": 1784161082040989613,
+          "exit_code": 0,
+          "label": "gpu-owner",
+          "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "stdout_sha256": "e8bf7ba290efd1a077c72daaa8d8b6ad86b4e5fec141d4f078c3df113ecbd9f0"
+        },
+        "amd_smi_process": {
+          "entry_key_sets": [
+            [
+              "process_info"
+            ]
+          ],
+          "process_info_types": [
+            "object"
+          ],
+          "process_list_length": 1,
+          "process_list_type": "list",
+          "raw_bytes": 630,
+          "raw_sha256": "e8bf7ba290efd1a077c72daaa8d8b6ad86b4e5fec141d4f078c3df113ecbd9f0",
+          "reason_code": "accepted_owner_records",
+          "root_keys": [
+            "gpu",
+            "process_list"
+          ],
+          "schema_version": "ullm.aq4_p2_amd_process_parse_diagnostic.v1",
+          "status": "accepted",
+          "top_level_length": 1,
+          "top_level_type": "list"
+        },
+        "kfd": [
+          3268350
+        ],
+        "kfd_source": {
+          "attempt_count": 1,
+          "attempts": [
+            {
+              "attempt": 0,
+              "classification": "stable",
+              "enumerated_pid_count": 1,
+              "enumerated_pids_sha256": "9f06b2860e9ed733b64162fa45cfae56ff351719cffece2e3f2940a506c51500"
+            }
+          ],
+          "classification": "stable",
+          "owners": [
+            3268350
+          ],
+          "root": {
+            "device": 23,
+            "inode": 97870,
+            "path": "/sys/class/kfd/kfd/proc"
+          },
+          "schema_version": "ullm.aq4_p2_kfd_owner_snapshot.v1",
+          "secret_material_recorded": false,
+          "source_kind": "kernel_sysfs",
+          "sources": [
+            {
+              "line_ending": "none",
+              "parsed_gpuid": 51545,
+              "pid": 3268350,
+              "queue": 0,
+              "raw_bytes": 5,
+              "raw_sha256": "53bfb177258a9c4448495c24270e0712ac0a01039c23a51bc28a74a1a268c6ab"
+            },
+            {
+              "line_ending": "none",
+              "parsed_gpuid": 51545,
+              "pid": 3268350,
+              "queue": 1,
+              "raw_bytes": 5,
+              "raw_sha256": "53bfb177258a9c4448495c24270e0712ac0a01039c23a51bc28a74a1a268c6ab"
+            },
+            {
+              "line_ending": "none",
+              "parsed_gpuid": 51545,
+              "pid": 3268350,
+              "queue": 2,
+              "raw_bytes": 5,
+              "raw_sha256": "53bfb177258a9c4448495c24270e0712ac0a01039c23a51bc28a74a1a268c6ab"
+            }
+          ]
+        }
+      },
+      "service": {
+        "active_state": "active",
+        "control_group": "/system.slice/ullm-openai.service",
+        "main_pid": 3268257,
+        "nrestarts": 0,
+        "sub_state": "running",
+        "unit": "ullm-openai.service"
+      },
+      "service_epoch": {
+        "control_group_unchanged": true,
+        "main_pid_changed": true,
+        "nrestarts_after": 0,
+        "nrestarts_before": 0,
+        "nrestarts_reset_to_zero": true,
+        "nrestarts_semantics": "explicit_stop_start_resets_automatic_restart_counter_to_zero",
+        "restart_kind": "explicit_systemctl_stop_start",
+        "worker_pid_changed": true
+      },
+      "worker": {
+        "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/target/reasoning-v2/release/ullm-aq4-worker",
+        "pid": 3268350,
+        "sha256": "177f3106414efc7cc4b08fa2d87bed6e147d4188e0a290f43b7a1ac591fae48d"
+      }
+    },
+    "probe_timeout_seconds": 10.0,
+    "started_monotonic_ns": 1408040761312705,
+    "timeout_seconds": 120.0
+  },
+  "restore_classification": "outer_finally_restored_new_epoch",
+  "retry_performed": false,
+  "schema_version": "ullm.aq4_p3_profile_actual_audit.v15",
+  "secret_material_recorded": false,
+  "status": "failed_immutable_evidence_preserved_restore_passed"
+}

@@ -1,0 +1,1526 @@
+{
+  "artifact_sha256": "dfd36dd8382c859fa88986a6aab42cc7277f06a532deb801f104352c3ce01462",
+  "binding": {
+    "case_id": "p2-representative-full_model-cold_prefill-cold_batched-n128-m128-r9700-rdna4-aq4_0_target",
+    "case_sha256": "d83a420476bde889c7c8014d7982fd52e0f61ab09b888f66415d0ac9fb443ae7",
+    "device": {
+      "architecture": "gfx1201",
+      "backend": "hip",
+      "device_id": "r9700-rdna4",
+      "name": "AMD Radeon Graphics",
+      "runtime_device_index": 1
+    },
+    "identity": {
+      "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-prepared-v2/identity.json",
+      "sha256": "6c3e3562eaafbc357497153f46a12c726383130b8b7f4e630ba50c769d03fc37"
+    },
+    "identity_sha256": "a50965d50cbf03019a4b7f88db1c0c8bc387569ca6628648bb2bc4da480d0736",
+    "resident_raw": {
+      "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-execute-v11/p2-representative-full_model-cold_prefill-cold_batched-n128-m128-r9700-rdna4-aq4_0_target.raw.json",
+      "sha256": "96c1490cc5911aae5675b5409b4f41fd8acd1aeabdb772e5623dd0bef75a64cd"
+    },
+    "resident_session_id": "50795bd87ec68439518e2a9318bb22817dd0279d56715f43e1ea2b4868452005",
+    "resident_summary": {
+      "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-execute-v11/resident-batch.summary.json",
+      "sha256": "c132efcf452ea30ff75eb4f61cc49e2924fd41844d957ba512e036562b46eca5"
+    },
+    "run_id": "p2-r9700-resident-one-case-smoke-profile-diagnostic-v11"
+  },
+  "capture_capabilities": {
+    "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v11/capture-capabilities.json",
+    "sha256": "381920a2db7b5db53822f3536f262d324a895c8840f11bd767e2caada02a80b8"
+  },
+  "eligibility_blockers": [
+    "rocprof instrumentation overhead forbids performance promotion",
+    "one-case diagnostic evidence does not satisfy seven-prompt promotion coverage"
+  ],
+  "kernel_normalization": {
+    "groups": [
+      {
+        "conservation": {
+          "correlation_id_multiset_sha256": {
+            "after": "7712f8755520eea1d088a1d6369e3efb060dc09583114057a090a848757446c2",
+            "before": "7712f8755520eea1d088a1d6369e3efb060dc09583114057a090a848757446c2"
+          },
+          "correlation_id_set_sha256": {
+            "after": "da1bda1395a408dd73ffb546672623596d2e8623295a915ff50758fe3ca93995",
+            "before": "da1bda1395a408dd73ffb546672623596d2e8623295a915ff50758fe3ca93995"
+          },
+          "dispatch_id_multiset_sha256": {
+            "after": "c40cdca3f0446a4b15d686e5a19bd3211da1be6e5db78c79e82b6e893766a6f6",
+            "before": "c40cdca3f0446a4b15d686e5a19bd3211da1be6e5db78c79e82b6e893766a6f6"
+          },
+          "dispatch_id_set_sha256": {
+            "after": "75f622e91d5b71da23c12e509b820ee4ce3fb3ae2f357adf2a6931fe83b475e9",
+            "before": "75f622e91d5b71da23c12e509b820ee4ce3fb3ae2f357adf2a6931fe83b475e9"
+          },
+          "duration_sum_ns": {
+            "after": 940948734,
+            "before": 940948734
+          },
+          "row_count": {
+            "after": 928,
+            "before": 928
+          }
+        },
+        "post_order_sha256": "ba61a8b7283ba412699f7d431cc5929f13e5465e87182fe88f21e4c441de9c1d",
+        "pre_order_sha256": "752febd34cc1df64edf47ba4fd2c3ff32f5ed70f1533738c3c2c7fdd9c4ed169",
+        "raw_order_inversion_count": 32,
+        "row_count": 928,
+        "run_index": 0,
+        "run_kind": "warmup"
+      },
+      {
+        "conservation": {
+          "correlation_id_multiset_sha256": {
+            "after": "df504f93ed6e7e2a7addac7808f46a236c849ea1126f74ec199919dd68031b4d",
+            "before": "df504f93ed6e7e2a7addac7808f46a236c849ea1126f74ec199919dd68031b4d"
+          },
+          "correlation_id_set_sha256": {
+            "after": "e4354b8ed895124224ea982e3ba56e01ccb86a699b36098281732e6edfe7a9d7",
+            "before": "e4354b8ed895124224ea982e3ba56e01ccb86a699b36098281732e6edfe7a9d7"
+          },
+          "dispatch_id_multiset_sha256": {
+            "after": "c0962d3f5f35bfcfedcd2813e83930b30ec614bf4ec50b1e8f250f98d0801ec0",
+            "before": "c0962d3f5f35bfcfedcd2813e83930b30ec614bf4ec50b1e8f250f98d0801ec0"
+          },
+          "dispatch_id_set_sha256": {
+            "after": "a629eb38a1c5b238fc77f3c27786bbaeea86ec4720eecd0b8c2fcb137b3404e9",
+            "before": "a629eb38a1c5b238fc77f3c27786bbaeea86ec4720eecd0b8c2fcb137b3404e9"
+          },
+          "duration_sum_ns": {
+            "after": 937762131,
+            "before": 937762131
+          },
+          "row_count": {
+            "after": 928,
+            "before": 928
+          }
+        },
+        "post_order_sha256": "594bf2f33b332740b4309179c95ed8f37a126bcd5487f3d78859ac2de1a2a1cb",
+        "pre_order_sha256": "7dd2b5673ffbfa0162d7c31226de5a1da46cd158f0f12a05c20f081173c343a6",
+        "raw_order_inversion_count": 10,
+        "row_count": 928,
+        "run_index": 1,
+        "run_kind": "warmup"
+      },
+      {
+        "conservation": {
+          "correlation_id_multiset_sha256": {
+            "after": "d7e3ba6d50600185beda649929d1306385e2e673f28463fdc865276a57e60ad8",
+            "before": "d7e3ba6d50600185beda649929d1306385e2e673f28463fdc865276a57e60ad8"
+          },
+          "correlation_id_set_sha256": {
+            "after": "c7da28834eb81bd6483b723c71ab284c00e33b8503580a8b3e4ecb8446096b14",
+            "before": "c7da28834eb81bd6483b723c71ab284c00e33b8503580a8b3e4ecb8446096b14"
+          },
+          "dispatch_id_multiset_sha256": {
+            "after": "aa22377947facfc874734ceba7e8888a09c664a464e6c32ee1a9d21f1170b565",
+            "before": "aa22377947facfc874734ceba7e8888a09c664a464e6c32ee1a9d21f1170b565"
+          },
+          "dispatch_id_set_sha256": {
+            "after": "a06d2deb76520ed69b2a21f7128cda4726a0fafe3634082b67bd96e7314d49a3",
+            "before": "a06d2deb76520ed69b2a21f7128cda4726a0fafe3634082b67bd96e7314d49a3"
+          },
+          "duration_sum_ns": {
+            "after": 939772734,
+            "before": 939772734
+          },
+          "row_count": {
+            "after": 928,
+            "before": 928
+          }
+        },
+        "post_order_sha256": "903a978f9ddc0e15a3ed0d6831c00f4c4f4d1f8c34d5b89d97910d9421327415",
+        "pre_order_sha256": "8f40a7428c4c465f8fa8be6e853c743498658f63396fc6b477c02b4c1b759438",
+        "raw_order_inversion_count": 12,
+        "row_count": 928,
+        "run_index": 2,
+        "run_kind": "measured"
+      },
+      {
+        "conservation": {
+          "correlation_id_multiset_sha256": {
+            "after": "3dae3e0e428f0c2bd79ca559e2a3b608195b2e50488d57bd8dbfa1890c05abef",
+            "before": "3dae3e0e428f0c2bd79ca559e2a3b608195b2e50488d57bd8dbfa1890c05abef"
+          },
+          "correlation_id_set_sha256": {
+            "after": "3879b223c1aa78470792fb7530b0d640c1d834321e37348529de71d482da1319",
+            "before": "3879b223c1aa78470792fb7530b0d640c1d834321e37348529de71d482da1319"
+          },
+          "dispatch_id_multiset_sha256": {
+            "after": "d3157919fcaefde9a26a840fb77b3cfe9c045f6222a46484d94a1b6a092e8699",
+            "before": "d3157919fcaefde9a26a840fb77b3cfe9c045f6222a46484d94a1b6a092e8699"
+          },
+          "dispatch_id_set_sha256": {
+            "after": "2d9d4fa209defb740b79737bcb48f770e1f6d28ad9a3f66dad85009a5f99b747",
+            "before": "2d9d4fa209defb740b79737bcb48f770e1f6d28ad9a3f66dad85009a5f99b747"
+          },
+          "duration_sum_ns": {
+            "after": 939882596,
+            "before": 939882596
+          },
+          "row_count": {
+            "after": 928,
+            "before": 928
+          }
+        },
+        "post_order_sha256": "57125c009abe6888b9a69817deb7bed5334e3d57e8d73d39295b13b1d7ee25f1",
+        "pre_order_sha256": "cdbf92a5107b388e4a5a7c5af09c27443174d699dd122b3e6a9405b6c6c4f013",
+        "raw_order_inversion_count": 22,
+        "row_count": 928,
+        "run_index": 3,
+        "run_kind": "measured"
+      },
+      {
+        "conservation": {
+          "correlation_id_multiset_sha256": {
+            "after": "791543872e30243baccee9260ed8bf042a9271ff282142c61854932030ffbcb3",
+            "before": "791543872e30243baccee9260ed8bf042a9271ff282142c61854932030ffbcb3"
+          },
+          "correlation_id_set_sha256": {
+            "after": "208c3ec2675d3f98d52254e1b0faa2b721031c9182255b1dd2df8e6e03755cc5",
+            "before": "208c3ec2675d3f98d52254e1b0faa2b721031c9182255b1dd2df8e6e03755cc5"
+          },
+          "dispatch_id_multiset_sha256": {
+            "after": "4c151930e2a7fdf5a9fdc9a4cdbf5817cea75fe3c040f44a7eb8f9ae6e4718f1",
+            "before": "4c151930e2a7fdf5a9fdc9a4cdbf5817cea75fe3c040f44a7eb8f9ae6e4718f1"
+          },
+          "dispatch_id_set_sha256": {
+            "after": "a0a55e2238b79036a7989e4e535aa0f9080c44a26ad87819b2d55e8b85883c2f",
+            "before": "a0a55e2238b79036a7989e4e535aa0f9080c44a26ad87819b2d55e8b85883c2f"
+          },
+          "duration_sum_ns": {
+            "after": 940321032,
+            "before": 940321032
+          },
+          "row_count": {
+            "after": 928,
+            "before": 928
+          }
+        },
+        "post_order_sha256": "4a2a11d9ffc592d4a1df16da52a154f03a4b68f4269956afdb86c493d7836999",
+        "pre_order_sha256": "1d9447be4de1a0c4178673e894407bd314e048e24e1bbb1a08898233b0c0eb7d",
+        "raw_order_inversion_count": 31,
+        "row_count": 928,
+        "run_index": 4,
+        "run_kind": "measured"
+      },
+      {
+        "conservation": {
+          "correlation_id_multiset_sha256": {
+            "after": "c04407dd2d3d4534e2101b4f83ddbd82ccdc09bf9da2932387d8bfeab7a8e89d",
+            "before": "c04407dd2d3d4534e2101b4f83ddbd82ccdc09bf9da2932387d8bfeab7a8e89d"
+          },
+          "correlation_id_set_sha256": {
+            "after": "457da9c29dbcf4e0b469852c7d0a89e9b2b0045702bbc0904e6811591c1bfe4a",
+            "before": "457da9c29dbcf4e0b469852c7d0a89e9b2b0045702bbc0904e6811591c1bfe4a"
+          },
+          "dispatch_id_multiset_sha256": {
+            "after": "9e49d8e9a862a4f003201573eace94eeb9c41fbd4ba75617ced84720d791883c",
+            "before": "9e49d8e9a862a4f003201573eace94eeb9c41fbd4ba75617ced84720d791883c"
+          },
+          "dispatch_id_set_sha256": {
+            "after": "6a2f8fdb2339579dbb5f54b17aaad587e7db8f2c22371c369e012620f5bf7a77",
+            "before": "6a2f8fdb2339579dbb5f54b17aaad587e7db8f2c22371c369e012620f5bf7a77"
+          },
+          "duration_sum_ns": {
+            "after": 942052550,
+            "before": 942052550
+          },
+          "row_count": {
+            "after": 928,
+            "before": 928
+          }
+        },
+        "post_order_sha256": "7497a40887f73cd41d1c005f849ac51871ac258aef4aba1fa226e8e11e756eb3",
+        "pre_order_sha256": "e04c3fbc5a9393a8ce53bad105ae87aaf4f29bf850f12bcfca6b5e4561d46213",
+        "raw_order_inversion_count": 27,
+        "row_count": 928,
+        "run_index": 5,
+        "run_kind": "measured"
+      },
+      {
+        "conservation": {
+          "correlation_id_multiset_sha256": {
+            "after": "532fe4e579001dcb117672ea4be9dec5710fd7485bd48937fcc79df01ac38e1d",
+            "before": "532fe4e579001dcb117672ea4be9dec5710fd7485bd48937fcc79df01ac38e1d"
+          },
+          "correlation_id_set_sha256": {
+            "after": "415ff39bbb6c659a9aa887fec7e09878c8383e2e2356f5eac1b1fed9d18dc7b5",
+            "before": "415ff39bbb6c659a9aa887fec7e09878c8383e2e2356f5eac1b1fed9d18dc7b5"
+          },
+          "dispatch_id_multiset_sha256": {
+            "after": "bf4b8eb31ca8182097e31e400c69214cdd6cd099dc97955fdb1718a059cf3fed",
+            "before": "bf4b8eb31ca8182097e31e400c69214cdd6cd099dc97955fdb1718a059cf3fed"
+          },
+          "dispatch_id_set_sha256": {
+            "after": "8c3c6aabee0f23bffe36753c5bf84ad1787695de2fc54553b2dc7560f64dd563",
+            "before": "8c3c6aabee0f23bffe36753c5bf84ad1787695de2fc54553b2dc7560f64dd563"
+          },
+          "duration_sum_ns": {
+            "after": 941284912,
+            "before": 941284912
+          },
+          "row_count": {
+            "after": 928,
+            "before": 928
+          }
+        },
+        "post_order_sha256": "16beaf4791b75d3ce876a778891b0c933a287088b76c5ae48588c518637127af",
+        "pre_order_sha256": "e9734092401209b4424f9dd0ddb054ebeaa2b562052730a1befb0a99ae16afa7",
+        "raw_order_inversion_count": 8,
+        "row_count": 928,
+        "run_index": 6,
+        "run_kind": "measured"
+      },
+      {
+        "conservation": {
+          "correlation_id_multiset_sha256": {
+            "after": "1949e3d129df7b664e8fb490718e783298d6460a3656db514f78ee9601dd909d",
+            "before": "1949e3d129df7b664e8fb490718e783298d6460a3656db514f78ee9601dd909d"
+          },
+          "correlation_id_set_sha256": {
+            "after": "b4b48fe32ba9e697336a6bded22eb169793064d9027a596f9a476b3c08c9749a",
+            "before": "b4b48fe32ba9e697336a6bded22eb169793064d9027a596f9a476b3c08c9749a"
+          },
+          "dispatch_id_multiset_sha256": {
+            "after": "9df0b8c4999d38cc2daa664161a18e0ff1eaf953b997c2dead5ce9a0dcd49d9c",
+            "before": "9df0b8c4999d38cc2daa664161a18e0ff1eaf953b997c2dead5ce9a0dcd49d9c"
+          },
+          "dispatch_id_set_sha256": {
+            "after": "ce7c2cb554abd4a61a9163d40ed4ee0a18d89c0f9b0b1cc4e9d29c5d81be8d9e",
+            "before": "ce7c2cb554abd4a61a9163d40ed4ee0a18d89c0f9b0b1cc4e9d29c5d81be8d9e"
+          },
+          "duration_sum_ns": {
+            "after": 1051547810,
+            "before": 1051547810
+          },
+          "row_count": {
+            "after": 928,
+            "before": 928
+          }
+        },
+        "post_order_sha256": "9b61ef420d6a0220390b18149969d3d88f96720f84ed7bb50912065b2b3b37e7",
+        "pre_order_sha256": "667c9fe646a887174975d6217ae672ee6ba304376e74a77a5331a52a69e038db",
+        "raw_order_inversion_count": 17,
+        "row_count": 928,
+        "run_index": 7,
+        "run_kind": "measured"
+      },
+      {
+        "conservation": {
+          "correlation_id_multiset_sha256": {
+            "after": "fc26039e58087bff0ccd136debea66a0f044d93b69cedc797d5911c86e5d1d86",
+            "before": "fc26039e58087bff0ccd136debea66a0f044d93b69cedc797d5911c86e5d1d86"
+          },
+          "correlation_id_set_sha256": {
+            "after": "5f2819501a408a3df211dba064ccc123e244f8354c5f2f42d591598612561b02",
+            "before": "5f2819501a408a3df211dba064ccc123e244f8354c5f2f42d591598612561b02"
+          },
+          "dispatch_id_multiset_sha256": {
+            "after": "2dd38b861762428a9db47b7bd6289c3b62b65f1489ea2a4ab795b607a3d3d72d",
+            "before": "2dd38b861762428a9db47b7bd6289c3b62b65f1489ea2a4ab795b607a3d3d72d"
+          },
+          "dispatch_id_set_sha256": {
+            "after": "d552d82e08e3fda0e7652f0577939a31541f2b517b94c3fff646d0f9843efa36",
+            "before": "d552d82e08e3fda0e7652f0577939a31541f2b517b94c3fff646d0f9843efa36"
+          },
+          "duration_sum_ns": {
+            "after": 945506767,
+            "before": 945506767
+          },
+          "row_count": {
+            "after": 928,
+            "before": 928
+          }
+        },
+        "post_order_sha256": "042791a07e218b736de1413a637541cecba418589508802d073085e423e69abe",
+        "pre_order_sha256": "4516f18eb910fa10fff170cc57de797526ae0ed72382bb8fd527c80e46dea8b8",
+        "raw_order_inversion_count": 19,
+        "row_count": 928,
+        "run_index": 8,
+        "run_kind": "measured"
+      },
+      {
+        "conservation": {
+          "correlation_id_multiset_sha256": {
+            "after": "8b772f70df4ba426a85b59ef9936ba7870169c540b16d628f89eab5a2cd07df7",
+            "before": "8b772f70df4ba426a85b59ef9936ba7870169c540b16d628f89eab5a2cd07df7"
+          },
+          "correlation_id_set_sha256": {
+            "after": "73e4e98112e6a3b9da9e3c7f0aaf99e0d189d255c7fc32479c01c7144ea5f41f",
+            "before": "73e4e98112e6a3b9da9e3c7f0aaf99e0d189d255c7fc32479c01c7144ea5f41f"
+          },
+          "dispatch_id_multiset_sha256": {
+            "after": "2de9e05863563b489083992d09dea9f2029df76afb8ce53e6c74067048935ee6",
+            "before": "2de9e05863563b489083992d09dea9f2029df76afb8ce53e6c74067048935ee6"
+          },
+          "dispatch_id_set_sha256": {
+            "after": "d4b2fac8ed1f44e32acb5ac1ca72546e822d06b31cc40f6751584cc2ae1c03c7",
+            "before": "d4b2fac8ed1f44e32acb5ac1ca72546e822d06b31cc40f6751584cc2ae1c03c7"
+          },
+          "duration_sum_ns": {
+            "after": 947610664,
+            "before": 947610664
+          },
+          "row_count": {
+            "after": 928,
+            "before": 928
+          }
+        },
+        "post_order_sha256": "f65cc7852805cb83beac1ad9bf0dc295d59045e68da3655db02a2bd6be68242e",
+        "pre_order_sha256": "fb5f355232345f14441b804b244b6e0ae6fb35f0458813b700b5f645d2b5306b",
+        "raw_order_inversion_count": 26,
+        "row_count": 928,
+        "run_index": 9,
+        "run_kind": "measured"
+      },
+      {
+        "conservation": {
+          "correlation_id_multiset_sha256": {
+            "after": "631c8f8ac35774295e4e7c55fc38f4e6d9b184bc6d1553be35e1d6058016095b",
+            "before": "631c8f8ac35774295e4e7c55fc38f4e6d9b184bc6d1553be35e1d6058016095b"
+          },
+          "correlation_id_set_sha256": {
+            "after": "144fe7b21d8a7c88372aa2f320d59beb496d3562c141693c032eb4a1d31737d5",
+            "before": "144fe7b21d8a7c88372aa2f320d59beb496d3562c141693c032eb4a1d31737d5"
+          },
+          "dispatch_id_multiset_sha256": {
+            "after": "8918a1ad9640fe14186dd251089f413f2e811f805557201c249d5889c7afe49d",
+            "before": "8918a1ad9640fe14186dd251089f413f2e811f805557201c249d5889c7afe49d"
+          },
+          "dispatch_id_set_sha256": {
+            "after": "380ef194706dbe2ceabf65a5a73d86be61ec42db7f7a48fa24cf9b9b6280d460",
+            "before": "380ef194706dbe2ceabf65a5a73d86be61ec42db7f7a48fa24cf9b9b6280d460"
+          },
+          "duration_sum_ns": {
+            "after": 949053498,
+            "before": 949053498
+          },
+          "row_count": {
+            "after": 928,
+            "before": 928
+          }
+        },
+        "post_order_sha256": "50f350f40689f7d5a112ba0921025e48ed6564ed4e6e89d1698e772ac184e77a",
+        "pre_order_sha256": "0031ccf23be3e2c41049112525238c572014e987d6237d962be6e309fbd2dd03",
+        "raw_order_inversion_count": 14,
+        "row_count": 928,
+        "run_index": 10,
+        "run_kind": "measured"
+      },
+      {
+        "conservation": {
+          "correlation_id_multiset_sha256": {
+            "after": "f2c2e33b5a42f28c53fd5f5a2db7ac4eb5cb87d98e6a36296fbe99751927521e",
+            "before": "f2c2e33b5a42f28c53fd5f5a2db7ac4eb5cb87d98e6a36296fbe99751927521e"
+          },
+          "correlation_id_set_sha256": {
+            "after": "b604d5f0e1adf08f33c76b71b9cdce211e6a49f2254cc26572ec74422f8ffa6a",
+            "before": "b604d5f0e1adf08f33c76b71b9cdce211e6a49f2254cc26572ec74422f8ffa6a"
+          },
+          "dispatch_id_multiset_sha256": {
+            "after": "5a70a91c352b3d0b4d8baefab8618116a672f3e053d98f7d8e9605e63d2d9c0d",
+            "before": "5a70a91c352b3d0b4d8baefab8618116a672f3e053d98f7d8e9605e63d2d9c0d"
+          },
+          "dispatch_id_set_sha256": {
+            "after": "b6a03c749461b6267b40eb3beed63d0fc836ad14ce01e407e3a4c0e9729753d4",
+            "before": "b6a03c749461b6267b40eb3beed63d0fc836ad14ce01e407e3a4c0e9729753d4"
+          },
+          "duration_sum_ns": {
+            "after": 947468108,
+            "before": 947468108
+          },
+          "row_count": {
+            "after": 928,
+            "before": 928
+          }
+        },
+        "post_order_sha256": "c9c12d45d2d8c801e3233e3673fc200436c90636ad4b75ab49d52b0348356aa8",
+        "pre_order_sha256": "47c2be82fb57addef9f90e31facbf49f207626c577c04fc11bfedb6fcd19c579",
+        "raw_order_inversion_count": 22,
+        "row_count": 928,
+        "run_index": 11,
+        "run_kind": "measured"
+      }
+    ],
+    "numeric_order": [
+      "Start_Timestamp",
+      "End_Timestamp",
+      "Dispatch_Id",
+      "Correlation_Id",
+      "original_ordinal"
+    ],
+    "raw_trace": {
+      "conservation": {
+        "correlation_id_multiset_sha256": {
+          "after": "db3b3f0a384b9f9324d1a3517a3161b65fc7bd9df1f30b0c76d45e186a756129",
+          "before": "db3b3f0a384b9f9324d1a3517a3161b65fc7bd9df1f30b0c76d45e186a756129"
+        },
+        "correlation_id_set_sha256": {
+          "after": "81e0d86ec94d2f5e5ddfe625f96a0cef87c960a446adf5aa4f86fa2c7fb595fc",
+          "before": "81e0d86ec94d2f5e5ddfe625f96a0cef87c960a446adf5aa4f86fa2c7fb595fc"
+        },
+        "dispatch_id_multiset_sha256": {
+          "after": "0d1089a8d6e3636ef5d5c38b5266db6eba017b9960fd16fc1070a0f6bbcce30d",
+          "before": "0d1089a8d6e3636ef5d5c38b5266db6eba017b9960fd16fc1070a0f6bbcce30d"
+        },
+        "dispatch_id_set_sha256": {
+          "after": "88b0fe1195060e3024f6e25b15fcd066e36b125c55ac704d744b84e89083645f",
+          "before": "88b0fe1195060e3024f6e25b15fcd066e36b125c55ac704d744b84e89083645f"
+        },
+        "duration_sum_ns": {
+          "after": 11437489112,
+          "before": 11437489112
+        },
+        "row_count": {
+          "after": 12263,
+          "before": 12263
+        }
+      },
+      "post_order_sha256": "9b688b25c0024ce7e128124211ba66c271b440c106ecc35319c546bae0874a91",
+      "pre_order_sha256": "98a7cdaa0c159bcf81d3c7506ad2d03a7dbb967f35c3a30bc6beddd58268948e",
+      "raw_order_inversion_count": 248,
+      "row_count": 12263
+    },
+    "schema_version": "ullm.aq4_p3_kernel_split_normalization.v1",
+    "scope": "derived_marker_bounded_kernel_splits_only",
+    "source_kernel_trace_sha256_after": "424a424188803cd7e5a872cd843e15ab80e0fd4f59d271111bb0f7b681979a6f",
+    "source_kernel_trace_sha256_before": "424a424188803cd7e5a872cd843e15ab80e0fd4f59d271111bb0f7b681979a6f"
+  },
+  "marker_contract": {
+    "clock_domain": "rocprofv3_monotonic_ns",
+    "measured_indices": [
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11
+    ],
+    "range_count": 12,
+    "schema_version": "ullm.aq4_p2.run.v1",
+    "warmup_excluded": true,
+    "warmup_indices": [
+      0,
+      1
+    ]
+  },
+  "measurement_eligible": false,
+  "memory_copy_traces": [
+    {
+      "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v11/measured-runs/run-02_memory_copy_trace.csv",
+      "sha256": "33da2af9ad6361709713e44157ee3185f9fb42a15c05ce7cc0a18ecb9f95ec79"
+    },
+    {
+      "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v11/measured-runs/run-03_memory_copy_trace.csv",
+      "sha256": "33da2af9ad6361709713e44157ee3185f9fb42a15c05ce7cc0a18ecb9f95ec79"
+    },
+    {
+      "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v11/measured-runs/run-04_memory_copy_trace.csv",
+      "sha256": "33da2af9ad6361709713e44157ee3185f9fb42a15c05ce7cc0a18ecb9f95ec79"
+    },
+    {
+      "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v11/measured-runs/run-05_memory_copy_trace.csv",
+      "sha256": "33da2af9ad6361709713e44157ee3185f9fb42a15c05ce7cc0a18ecb9f95ec79"
+    },
+    {
+      "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v11/measured-runs/run-06_memory_copy_trace.csv",
+      "sha256": "33da2af9ad6361709713e44157ee3185f9fb42a15c05ce7cc0a18ecb9f95ec79"
+    },
+    {
+      "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v11/measured-runs/run-07_memory_copy_trace.csv",
+      "sha256": "33da2af9ad6361709713e44157ee3185f9fb42a15c05ce7cc0a18ecb9f95ec79"
+    },
+    {
+      "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v11/measured-runs/run-08_memory_copy_trace.csv",
+      "sha256": "33da2af9ad6361709713e44157ee3185f9fb42a15c05ce7cc0a18ecb9f95ec79"
+    },
+    {
+      "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v11/measured-runs/run-09_memory_copy_trace.csv",
+      "sha256": "33da2af9ad6361709713e44157ee3185f9fb42a15c05ce7cc0a18ecb9f95ec79"
+    },
+    {
+      "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v11/measured-runs/run-10_memory_copy_trace.csv",
+      "sha256": "33da2af9ad6361709713e44157ee3185f9fb42a15c05ce7cc0a18ecb9f95ec79"
+    },
+    {
+      "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v11/measured-runs/run-11_memory_copy_trace.csv",
+      "sha256": "33da2af9ad6361709713e44157ee3185f9fb42a15c05ce7cc0a18ecb9f95ec79"
+    }
+  ],
+  "producer_profile_runs": [
+    {
+      "capture_capabilities": {
+        "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v11/capture-capabilities.json",
+        "sha256": "381920a2db7b5db53822f3536f262d324a895c8840f11bd767e2caada02a80b8"
+      },
+      "case_id": "p2-representative-full_model-cold_prefill-cold_batched-n128-m128-r9700-rdna4-aq4_0_target",
+      "case_sha256": "d83a420476bde889c7c8014d7982fd52e0f61ab09b888f66415d0ac9fb443ae7",
+      "clock_domain": "rocprofv3_monotonic_ns",
+      "hip_api_trace": {
+        "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v11/measured-runs/run-02_hip_api_trace.csv",
+        "sha256": "56e559331f656d30c3a8de07bbef8cf0314bc9a190ba9290d6d9aec87c711235"
+      },
+      "hip_api_trace_complete": true,
+      "identity_sha256": "a50965d50cbf03019a4b7f88db1c0c8bc387569ca6628648bb2bc4da480d0736",
+      "kernel_trace": {
+        "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v11/measured-runs/run-02_kernel_trace.csv",
+        "sha256": "4778cf98cf9d14f52794f7614b4ee431fb92c3fe79ab34e2193feb6bcc039c1a"
+      },
+      "kernel_trace_complete": true,
+      "measurement_eligible": false,
+      "resident_run_index": 2,
+      "schema_version": "ullm.aq4_p3_rocprof_run_binding.v1"
+    },
+    {
+      "capture_capabilities": {
+        "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v11/capture-capabilities.json",
+        "sha256": "381920a2db7b5db53822f3536f262d324a895c8840f11bd767e2caada02a80b8"
+      },
+      "case_id": "p2-representative-full_model-cold_prefill-cold_batched-n128-m128-r9700-rdna4-aq4_0_target",
+      "case_sha256": "d83a420476bde889c7c8014d7982fd52e0f61ab09b888f66415d0ac9fb443ae7",
+      "clock_domain": "rocprofv3_monotonic_ns",
+      "hip_api_trace": {
+        "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v11/measured-runs/run-03_hip_api_trace.csv",
+        "sha256": "af231d7857e8199780ef93bd7922de77eb3b2abb74ffd060c3572b7380c6226a"
+      },
+      "hip_api_trace_complete": true,
+      "identity_sha256": "a50965d50cbf03019a4b7f88db1c0c8bc387569ca6628648bb2bc4da480d0736",
+      "kernel_trace": {
+        "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v11/measured-runs/run-03_kernel_trace.csv",
+        "sha256": "bba7f92452c1005fe247162fed691e4fbcbd290dca03e7ce89973abc6c43de55"
+      },
+      "kernel_trace_complete": true,
+      "measurement_eligible": false,
+      "resident_run_index": 3,
+      "schema_version": "ullm.aq4_p3_rocprof_run_binding.v1"
+    },
+    {
+      "capture_capabilities": {
+        "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v11/capture-capabilities.json",
+        "sha256": "381920a2db7b5db53822f3536f262d324a895c8840f11bd767e2caada02a80b8"
+      },
+      "case_id": "p2-representative-full_model-cold_prefill-cold_batched-n128-m128-r9700-rdna4-aq4_0_target",
+      "case_sha256": "d83a420476bde889c7c8014d7982fd52e0f61ab09b888f66415d0ac9fb443ae7",
+      "clock_domain": "rocprofv3_monotonic_ns",
+      "hip_api_trace": {
+        "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v11/measured-runs/run-04_hip_api_trace.csv",
+        "sha256": "d02fb6ba5faea7412b0ae6b24a002f3fa79ba53420c4c6e7ea1ac23791d7f6fc"
+      },
+      "hip_api_trace_complete": true,
+      "identity_sha256": "a50965d50cbf03019a4b7f88db1c0c8bc387569ca6628648bb2bc4da480d0736",
+      "kernel_trace": {
+        "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v11/measured-runs/run-04_kernel_trace.csv",
+        "sha256": "8d55711caeb7a2946f9f620152c3f58dcc65cbf20312436fbd66c48afb251a74"
+      },
+      "kernel_trace_complete": true,
+      "measurement_eligible": false,
+      "resident_run_index": 4,
+      "schema_version": "ullm.aq4_p3_rocprof_run_binding.v1"
+    },
+    {
+      "capture_capabilities": {
+        "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v11/capture-capabilities.json",
+        "sha256": "381920a2db7b5db53822f3536f262d324a895c8840f11bd767e2caada02a80b8"
+      },
+      "case_id": "p2-representative-full_model-cold_prefill-cold_batched-n128-m128-r9700-rdna4-aq4_0_target",
+      "case_sha256": "d83a420476bde889c7c8014d7982fd52e0f61ab09b888f66415d0ac9fb443ae7",
+      "clock_domain": "rocprofv3_monotonic_ns",
+      "hip_api_trace": {
+        "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v11/measured-runs/run-05_hip_api_trace.csv",
+        "sha256": "4696c291c7e5e89010438c8a6950b558fde451938497dfb1daea6a1660e8e43f"
+      },
+      "hip_api_trace_complete": true,
+      "identity_sha256": "a50965d50cbf03019a4b7f88db1c0c8bc387569ca6628648bb2bc4da480d0736",
+      "kernel_trace": {
+        "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v11/measured-runs/run-05_kernel_trace.csv",
+        "sha256": "eafe4a0f7c89b98c6471e435b54e88d3bd9aadc4095f92a123671473a9cb7281"
+      },
+      "kernel_trace_complete": true,
+      "measurement_eligible": false,
+      "resident_run_index": 5,
+      "schema_version": "ullm.aq4_p3_rocprof_run_binding.v1"
+    },
+    {
+      "capture_capabilities": {
+        "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v11/capture-capabilities.json",
+        "sha256": "381920a2db7b5db53822f3536f262d324a895c8840f11bd767e2caada02a80b8"
+      },
+      "case_id": "p2-representative-full_model-cold_prefill-cold_batched-n128-m128-r9700-rdna4-aq4_0_target",
+      "case_sha256": "d83a420476bde889c7c8014d7982fd52e0f61ab09b888f66415d0ac9fb443ae7",
+      "clock_domain": "rocprofv3_monotonic_ns",
+      "hip_api_trace": {
+        "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v11/measured-runs/run-06_hip_api_trace.csv",
+        "sha256": "96560e69aa00e7061dfaadba2af047de37a6e9a9795971500b0dfd267609f018"
+      },
+      "hip_api_trace_complete": true,
+      "identity_sha256": "a50965d50cbf03019a4b7f88db1c0c8bc387569ca6628648bb2bc4da480d0736",
+      "kernel_trace": {
+        "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v11/measured-runs/run-06_kernel_trace.csv",
+        "sha256": "334ef4f83d73cf589ea1aca0160faf6da967d30237da06416f202baff2d4a871"
+      },
+      "kernel_trace_complete": true,
+      "measurement_eligible": false,
+      "resident_run_index": 6,
+      "schema_version": "ullm.aq4_p3_rocprof_run_binding.v1"
+    },
+    {
+      "capture_capabilities": {
+        "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v11/capture-capabilities.json",
+        "sha256": "381920a2db7b5db53822f3536f262d324a895c8840f11bd767e2caada02a80b8"
+      },
+      "case_id": "p2-representative-full_model-cold_prefill-cold_batched-n128-m128-r9700-rdna4-aq4_0_target",
+      "case_sha256": "d83a420476bde889c7c8014d7982fd52e0f61ab09b888f66415d0ac9fb443ae7",
+      "clock_domain": "rocprofv3_monotonic_ns",
+      "hip_api_trace": {
+        "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v11/measured-runs/run-07_hip_api_trace.csv",
+        "sha256": "25a328a614ea116a0a0b1dd2fcbd9044125b76fb5b3b46d72a6e71539344ec72"
+      },
+      "hip_api_trace_complete": true,
+      "identity_sha256": "a50965d50cbf03019a4b7f88db1c0c8bc387569ca6628648bb2bc4da480d0736",
+      "kernel_trace": {
+        "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v11/measured-runs/run-07_kernel_trace.csv",
+        "sha256": "70d36e3115dfd375d5f0071e6e0151611e8dcf8768f0644d89a8102086bfa2a4"
+      },
+      "kernel_trace_complete": true,
+      "measurement_eligible": false,
+      "resident_run_index": 7,
+      "schema_version": "ullm.aq4_p3_rocprof_run_binding.v1"
+    },
+    {
+      "capture_capabilities": {
+        "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v11/capture-capabilities.json",
+        "sha256": "381920a2db7b5db53822f3536f262d324a895c8840f11bd767e2caada02a80b8"
+      },
+      "case_id": "p2-representative-full_model-cold_prefill-cold_batched-n128-m128-r9700-rdna4-aq4_0_target",
+      "case_sha256": "d83a420476bde889c7c8014d7982fd52e0f61ab09b888f66415d0ac9fb443ae7",
+      "clock_domain": "rocprofv3_monotonic_ns",
+      "hip_api_trace": {
+        "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v11/measured-runs/run-08_hip_api_trace.csv",
+        "sha256": "ca32ff29bf6a550ed81cd1a448d94336c0f46f2d6ed8b84e1f9667c1536e38b7"
+      },
+      "hip_api_trace_complete": true,
+      "identity_sha256": "a50965d50cbf03019a4b7f88db1c0c8bc387569ca6628648bb2bc4da480d0736",
+      "kernel_trace": {
+        "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v11/measured-runs/run-08_kernel_trace.csv",
+        "sha256": "ee674aa3bf8fdd83c46b4081fac8dd047e8f12a061308d823026370ef81f0ff7"
+      },
+      "kernel_trace_complete": true,
+      "measurement_eligible": false,
+      "resident_run_index": 8,
+      "schema_version": "ullm.aq4_p3_rocprof_run_binding.v1"
+    },
+    {
+      "capture_capabilities": {
+        "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v11/capture-capabilities.json",
+        "sha256": "381920a2db7b5db53822f3536f262d324a895c8840f11bd767e2caada02a80b8"
+      },
+      "case_id": "p2-representative-full_model-cold_prefill-cold_batched-n128-m128-r9700-rdna4-aq4_0_target",
+      "case_sha256": "d83a420476bde889c7c8014d7982fd52e0f61ab09b888f66415d0ac9fb443ae7",
+      "clock_domain": "rocprofv3_monotonic_ns",
+      "hip_api_trace": {
+        "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v11/measured-runs/run-09_hip_api_trace.csv",
+        "sha256": "b713acda14c7fc9e448ba6d5ef335dba9d20f6132e33d361431dd37893a0dd2d"
+      },
+      "hip_api_trace_complete": true,
+      "identity_sha256": "a50965d50cbf03019a4b7f88db1c0c8bc387569ca6628648bb2bc4da480d0736",
+      "kernel_trace": {
+        "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v11/measured-runs/run-09_kernel_trace.csv",
+        "sha256": "ffec8d53a4b34f2378fbadfad7340c0cbe789ce7490446c2176cdf211e36f97e"
+      },
+      "kernel_trace_complete": true,
+      "measurement_eligible": false,
+      "resident_run_index": 9,
+      "schema_version": "ullm.aq4_p3_rocprof_run_binding.v1"
+    },
+    {
+      "capture_capabilities": {
+        "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v11/capture-capabilities.json",
+        "sha256": "381920a2db7b5db53822f3536f262d324a895c8840f11bd767e2caada02a80b8"
+      },
+      "case_id": "p2-representative-full_model-cold_prefill-cold_batched-n128-m128-r9700-rdna4-aq4_0_target",
+      "case_sha256": "d83a420476bde889c7c8014d7982fd52e0f61ab09b888f66415d0ac9fb443ae7",
+      "clock_domain": "rocprofv3_monotonic_ns",
+      "hip_api_trace": {
+        "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v11/measured-runs/run-10_hip_api_trace.csv",
+        "sha256": "ab9251160a820e6f8333a8d8604efc450e86c107b53d2665633f15d4e87b5664"
+      },
+      "hip_api_trace_complete": true,
+      "identity_sha256": "a50965d50cbf03019a4b7f88db1c0c8bc387569ca6628648bb2bc4da480d0736",
+      "kernel_trace": {
+        "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v11/measured-runs/run-10_kernel_trace.csv",
+        "sha256": "a9659ac374a793f14a9762d4793acb2f6d3bd5957b00bdc4060212dbc88fd2e4"
+      },
+      "kernel_trace_complete": true,
+      "measurement_eligible": false,
+      "resident_run_index": 10,
+      "schema_version": "ullm.aq4_p3_rocprof_run_binding.v1"
+    },
+    {
+      "capture_capabilities": {
+        "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v11/capture-capabilities.json",
+        "sha256": "381920a2db7b5db53822f3536f262d324a895c8840f11bd767e2caada02a80b8"
+      },
+      "case_id": "p2-representative-full_model-cold_prefill-cold_batched-n128-m128-r9700-rdna4-aq4_0_target",
+      "case_sha256": "d83a420476bde889c7c8014d7982fd52e0f61ab09b888f66415d0ac9fb443ae7",
+      "clock_domain": "rocprofv3_monotonic_ns",
+      "hip_api_trace": {
+        "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v11/measured-runs/run-11_hip_api_trace.csv",
+        "sha256": "39ac1b1628ca77af8a97c5e06dee88a1eff1c73a4b506211d73ee8d26ab0d2f5"
+      },
+      "hip_api_trace_complete": true,
+      "identity_sha256": "a50965d50cbf03019a4b7f88db1c0c8bc387569ca6628648bb2bc4da480d0736",
+      "kernel_trace": {
+        "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v11/measured-runs/run-11_kernel_trace.csv",
+        "sha256": "64ad5568b50c163571af633f192c0bce1978036be30d0bdd311c1f3a4f666ea1"
+      },
+      "kernel_trace_complete": true,
+      "measurement_eligible": false,
+      "resident_run_index": 11,
+      "schema_version": "ullm.aq4_p3_rocprof_run_binding.v1"
+    }
+  ],
+  "profiler": {
+    "capture_helpers": [
+      {
+        "identity": [
+          66306,
+          206315368,
+          33204,
+          1,
+          83367,
+          1784136670266540663,
+          1784136670266540663
+        ],
+        "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/tools/build-aq4-p3-selection-raw.py",
+        "role": "selection_raw_producer",
+        "sha256": "a589c3e644d36132fb6054afdb15b27543d8e8181e3c737dcbd071d7c52e3d20"
+      },
+      {
+        "identity": [
+          66306,
+          206314691,
+          33204,
+          1,
+          45255,
+          1784044522174045164,
+          1784044522174045164
+        ],
+        "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/tools/select-aq4-p3-candidate.py",
+        "role": "candidate_selector",
+        "sha256": "4a510c7351131072ed368e2ac8fffeb2daf10488edef94c37fe5dbcb729e9739"
+      },
+      {
+        "identity": [
+          66306,
+          206315363,
+          33204,
+          1,
+          36343,
+          1784136426031334297,
+          1784136426031334297
+        ],
+        "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/tools/profile-aq4-p2-family-exclusive.py",
+        "role": "profile_family_classifier",
+        "sha256": "f8d32c340231e329f004d9e16192c02378f1fd58b8ab713e8efbbd3029b052d6"
+      }
+    ],
+    "command": [
+      "/opt/rocm-7.2.1/bin/rocprofv3",
+      "--log-level",
+      "error",
+      "--kernel-trace",
+      "--hip-runtime-trace",
+      "--memory-copy-trace",
+      "--marker-trace",
+      "--output-format",
+      "csv",
+      "--output-directory",
+      "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v11",
+      "--output-file",
+      "aq4-p3-diagnostic",
+      "--",
+      "/usr/bin/python3.12",
+      "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-binding-v7/trusted-runner.py",
+      "--expanded",
+      "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-prepared-v2/case-binding.json",
+      "--fixture-index",
+      "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-prepared-v2/fixture-index.json",
+      "--identity",
+      "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-prepared-v2/identity.json",
+      "--preflight",
+      "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-prepared-v2/preflight.json",
+      "--policy",
+      "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-prepared-v2/policy.json",
+      "--bundle-root",
+      "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-prepared-v2",
+      "--trusted-validator",
+      "/home/homelab1/coding-local/ultimateLLM/uLLM-project/tools/prepare-aq4-p2-resident-smoke-bundle.py",
+      "--trusted-validator-sha256",
+      "15a65fed6d182e706473821f128fbae02214ab0bf988bb7c1f363f69233e9904",
+      "--output-dir",
+      "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-execute-v11",
+      "--run-id",
+      "p2-r9700-resident-one-case-smoke-profile-diagnostic-v11",
+      "--baseline-kind",
+      "active-production",
+      "--lock-path",
+      "/run/ullm/r9700.lock",
+      "--one-case-smoke",
+      "--live-preflight",
+      "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-execute-evidence-v11/live-preflight.json",
+      "--profile-roctx-ranges",
+      "--roctx-library",
+      "/opt/rocm-7.2.1/lib/librocprofiler-sdk-roctx.so.1.1.0",
+      "--roctx-library-sha256",
+      "1a5831a3817eac29f63d1442dc348ba31b417202b7ce15f3aed9c09a8f4773c9",
+      "--driver-command",
+      "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-prepared-v2/resident-driver",
+      "--served-model-manifest",
+      "/etc/ullm/served-models/active.json",
+      "--device-index",
+      "1",
+      "--build-git-commit",
+      "43ba16f2347a45caba8a60cac2189714118db280"
+    ],
+    "command_sha256": "872b2a7a65c79f9121faaa85d2a1969d34b657e10011c25612125896a1db8e8f",
+    "executable_sha256": "13060810d6b80653631b14f0f5e33ea160c2b79a6a3a4c6850142010b48b8ec8",
+    "execution_closure": {
+      "bindings": [
+        {
+          "closure": "control_input",
+          "identity": {
+            "ctime_ns": 1784147883330538795,
+            "device": 66306,
+            "inode": 10617663,
+            "mode": 33060,
+            "mtime_ns": 1784147883269687250,
+            "nlink": 1,
+            "size": 12025
+          },
+          "kind": "regular_file",
+          "logical_path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-prepared-v2/bundle.json",
+          "method": "read",
+          "resolved_path": null,
+          "role": "bundle_bundle_json",
+          "sha256": "b947e43d6aff609967ea9b0909aa14a689b4f35791a7903134453c42ede8fb38"
+        },
+        {
+          "closure": "control_input",
+          "identity": {
+            "ctime_ns": 1784147883330538795,
+            "device": 66306,
+            "inode": 10617664,
+            "mode": 33060,
+            "mtime_ns": 1784147883328335834,
+            "nlink": 1,
+            "size": 3834
+          },
+          "kind": "regular_file",
+          "logical_path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-prepared-v2/dry-run.json",
+          "method": "read",
+          "resolved_path": null,
+          "role": "bundle_dry_run_json",
+          "sha256": "7a6738f6ebdc3b07b388753c8152d052d3e329e50a44e30e40b6fa97e2269037"
+        },
+        {
+          "closure": "control_input",
+          "identity": {
+            "ctime_ns": 1784147883330538795,
+            "device": 66306,
+            "inode": 10617658,
+            "mode": 33060,
+            "mtime_ns": 1784147883261478541,
+            "nlink": 1,
+            "size": 1238
+          },
+          "kind": "regular_file",
+          "logical_path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-prepared-v2/fake-ready.json",
+          "method": "read",
+          "resolved_path": null,
+          "role": "bundle_fake_ready_json",
+          "sha256": "b353d412fc11a7656ed1eb522cdc77bd29412ef9b0f702eb4615263a9273427c"
+        },
+        {
+          "closure": "control_input",
+          "identity": {
+            "ctime_ns": 1784147883330538795,
+            "device": 66306,
+            "inode": 10617650,
+            "mode": 33060,
+            "mtime_ns": 1784147883260927861,
+            "nlink": 1,
+            "size": 2238
+          },
+          "kind": "regular_file",
+          "logical_path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-prepared-v2/fixture.json",
+          "method": "read",
+          "resolved_path": null,
+          "role": "bundle_fixture_json",
+          "sha256": "a61c977a7671e7e3d141b87fc84e20e9957be71706cface1988d03054f2dad50"
+        },
+        {
+          "closure": "control_input",
+          "identity": {
+            "ctime_ns": 1784147883330538795,
+            "device": 66306,
+            "inode": 10617660,
+            "mode": 33060,
+            "mtime_ns": 1784147883261564502,
+            "nlink": 1,
+            "size": 6577
+          },
+          "kind": "regular_file",
+          "logical_path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-prepared-v2/launch-command.json",
+          "method": "read",
+          "resolved_path": null,
+          "role": "bundle_launch_command_json",
+          "sha256": "6a963811ccab739958bfbf6846eaed9cdb16e45c9e533e47c7a97bd307731383"
+        },
+        {
+          "closure": "control_input",
+          "identity": {
+            "ctime_ns": 1784147883330538795,
+            "device": 66306,
+            "inode": 10617648,
+            "mode": 33060,
+            "mtime_ns": 1784147883260831380,
+            "nlink": 1,
+            "size": 1723
+          },
+          "kind": "regular_file",
+          "logical_path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-prepared-v2/official-case.json",
+          "method": "read",
+          "resolved_path": null,
+          "role": "bundle_official_case_json",
+          "sha256": "916abe28bd0b82bde85f918d6a6b1a1f54a49d14149f4832f042b17d2eb15bc2"
+        },
+        {
+          "closure": "control_input",
+          "identity": {
+            "ctime_ns": 1784147883330538795,
+            "device": 66306,
+            "inode": 10617656,
+            "mode": 33060,
+            "mtime_ns": 1784147883261203916,
+            "nlink": 1,
+            "size": 687595
+          },
+          "kind": "regular_file",
+          "logical_path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-prepared-v2/package-manifest.json",
+          "method": "read",
+          "resolved_path": null,
+          "role": "bundle_package_manifest_json",
+          "sha256": "a790a033f57d9c5b9ae0d731a463c26b86aec691f771ce88bb543d676f08e5ad"
+        },
+        {
+          "closure": "data_integrity",
+          "identity": {
+            "ctime_ns": 1784147883330538795,
+            "device": 66306,
+            "inode": 10617640,
+            "mode": 16749,
+            "mtime_ns": 1784147883329443006,
+            "nlink": 2,
+            "size": 4096
+          },
+          "kind": "directory",
+          "logical_path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-prepared-v2",
+          "method": "pre_post_guard",
+          "resolved_path": null,
+          "role": "bundle_root",
+          "sha256": null
+        },
+        {
+          "closure": "control_input",
+          "identity": {
+            "ctime_ns": 1784147883330538795,
+            "device": 66306,
+            "inode": 10617665,
+            "mode": 33060,
+            "mtime_ns": 1784147883329443006,
+            "nlink": 1,
+            "size": 2569
+          },
+          "kind": "regular_file",
+          "logical_path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-prepared-v2/runner-dry-run-evidence.json",
+          "method": "read",
+          "resolved_path": null,
+          "role": "bundle_runner_dry_run_evidence_json",
+          "sha256": "4f37d7bba1320ff2dd57c0249b0d18ba3e0f1ee45c68cbb5dfb373c54de9ddcf"
+        },
+        {
+          "closure": "control_input",
+          "identity": {
+            "ctime_ns": 1784147883330538795,
+            "device": 66306,
+            "inode": 10617655,
+            "mode": 33060,
+            "mtime_ns": 1784147883261160025,
+            "nlink": 1,
+            "size": 4425
+          },
+          "kind": "regular_file",
+          "logical_path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-prepared-v2/served-model.json",
+          "method": "read",
+          "resolved_path": null,
+          "role": "bundle_served_model_json",
+          "sha256": "feb3190d0ff59778e4da140b8db2bd1ce2ba440e3a69e844b997011d4d08cb44"
+        },
+        {
+          "closure": "control_input",
+          "identity": {
+            "ctime_ns": 1784147883330538795,
+            "device": 66306,
+            "inode": 10617666,
+            "mode": 33060,
+            "mtime_ns": 1784147883330538795,
+            "nlink": 1,
+            "size": 1503
+          },
+          "kind": "regular_file",
+          "logical_path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-prepared-v2/SHA256SUMS",
+          "method": "read",
+          "resolved_path": null,
+          "role": "bundle_sha256sums",
+          "sha256": "27579326b1ba703585d4683ddcabf47676debeca58878e54a2ae2cccee6e99b9"
+        },
+        {
+          "closure": "control_input",
+          "identity": {
+            "ctime_ns": 1784147883330538795,
+            "device": 66306,
+            "inode": 10617661,
+            "mode": 33060,
+            "mtime_ns": 1784147883261608853,
+            "nlink": 1,
+            "size": 484
+          },
+          "kind": "regular_file",
+          "logical_path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-prepared-v2/SUPERSEDED-0fd7993.json",
+          "method": "read",
+          "resolved_path": null,
+          "role": "bundle_superseded_0fd7993_json",
+          "sha256": "ef18c2289b56647ece390683af1e562aea6df071d5fc22cfbf5e63b0ed058a7b"
+        },
+        {
+          "closure": "control_input",
+          "identity": {
+            "ctime_ns": 1784147883330538795,
+            "device": 66306,
+            "inode": 10617657,
+            "mode": 33060,
+            "mtime_ns": 1784147883261431170,
+            "nlink": 1,
+            "size": 9620
+          },
+          "kind": "regular_file",
+          "logical_path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-prepared-v2/trust-roots.json",
+          "method": "read",
+          "resolved_path": null,
+          "role": "bundle_trust_roots_json",
+          "sha256": "b6b5d0975e45a40b2a42d1a8f07345caf510fc15b2c3ce39e23b1ba05badaacd"
+        },
+        {
+          "closure": "control_input",
+          "identity": {
+            "ctime_ns": 1784147883330538795,
+            "device": 66306,
+            "inode": 10617659,
+            "mode": 33060,
+            "mtime_ns": 1784147883261517601,
+            "nlink": 1,
+            "size": 20193
+          },
+          "kind": "regular_file",
+          "logical_path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-prepared-v2/trusted-runner.py",
+          "method": "read",
+          "resolved_path": null,
+          "role": "bundle_trusted_runner_py",
+          "sha256": "62cf9cd77863d18158afad8955b7d09c2c0f8b09046869bacb25c91c789878e0"
+        },
+        {
+          "closure": "control_input",
+          "identity": {
+            "ctime_ns": 1784147883330538795,
+            "device": 66306,
+            "inode": 10617649,
+            "mode": 33060,
+            "mtime_ns": 1784147883260886641,
+            "nlink": 1,
+            "size": 2583
+          },
+          "kind": "regular_file",
+          "logical_path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-prepared-v2/case-binding.json",
+          "method": "read",
+          "resolved_path": null,
+          "role": "case_binding",
+          "sha256": "1c8cf17475c0840900ebcc5cd9334d4ebe76c1bd354aaa5106cb875efa1da8b5"
+        },
+        {
+          "closure": "device_lock",
+          "identity": {
+            "ctime_ns": 1784161026944289263,
+            "device": 26,
+            "inode": 825809,
+            "mode": 33152,
+            "mtime_ns": 1784161026944289263,
+            "nlink": 1,
+            "size": 0
+          },
+          "kind": "regular_file",
+          "logical_path": "/run/ullm/r9700.lock",
+          "method": "flock",
+          "resolved_path": null,
+          "role": "device_lock",
+          "sha256": null
+        },
+        {
+          "closure": "control_input",
+          "identity": {
+            "ctime_ns": 1784147883330538795,
+            "device": 66306,
+            "inode": 10617651,
+            "mode": 33060,
+            "mtime_ns": 1784147883260968942,
+            "nlink": 1,
+            "size": 1014
+          },
+          "kind": "regular_file",
+          "logical_path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-prepared-v2/fixture-index.json",
+          "method": "read",
+          "resolved_path": null,
+          "role": "fixture_index",
+          "sha256": "9bde3a24bd8bb3ff017f5a370cee505e16cb632182fdbf3ad8c2cfb33c23bc4d"
+        },
+        {
+          "closure": "control_input",
+          "identity": {
+            "ctime_ns": 1784147883330538795,
+            "device": 66306,
+            "inode": 10617652,
+            "mode": 33060,
+            "mtime_ns": 1784147883261007803,
+            "nlink": 1,
+            "size": 1948
+          },
+          "kind": "regular_file",
+          "logical_path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-prepared-v2/identity.json",
+          "method": "read",
+          "resolved_path": null,
+          "role": "identity",
+          "sha256": "6c3e3562eaafbc357497153f46a12c726383130b8b7f4e630ba50c769d03fc37"
+        },
+        {
+          "closure": "control_input",
+          "identity": {
+            "ctime_ns": 1784161037913883196,
+            "device": 66306,
+            "inode": 10617931,
+            "mode": 33060,
+            "mtime_ns": 1784161037905882763,
+            "nlink": 1,
+            "size": 6750
+          },
+          "kind": "regular_file",
+          "logical_path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-execute-evidence-v11/live-preflight.json",
+          "method": "read",
+          "resolved_path": null,
+          "role": "live_preflight",
+          "sha256": "0ea879777e54717bb9ef943b028c9b66255af608972f1e4dcbd79934b705af79"
+        },
+        {
+          "closure": "control_input",
+          "identity": {
+            "ctime_ns": 1784147883330538795,
+            "device": 66306,
+            "inode": 10617654,
+            "mode": 33060,
+            "mtime_ns": 1784147883261085114,
+            "nlink": 1,
+            "size": 90
+          },
+          "kind": "regular_file",
+          "logical_path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-prepared-v2/policy.json",
+          "method": "read",
+          "resolved_path": null,
+          "role": "policy",
+          "sha256": "21dff8ecdbc17a1cd86a458fe7f8771eed0cdd18577a5f0fb6c7b96310a2de16"
+        },
+        {
+          "closure": "control_input",
+          "identity": {
+            "ctime_ns": 1784147883330538795,
+            "device": 66306,
+            "inode": 10617653,
+            "mode": 33060,
+            "mtime_ns": 1784147883261046253,
+            "nlink": 1,
+            "size": 185
+          },
+          "kind": "regular_file",
+          "logical_path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-prepared-v2/preflight.json",
+          "method": "read",
+          "resolved_path": null,
+          "role": "prepared_preflight",
+          "sha256": "294ddf1771251c4b1954ea663d73e85821749119da2a4f6c7528fdae510bbc6e"
+        },
+        {
+          "closure": "code_execution",
+          "identity": {
+            "ctime_ns": 1783459476867595503,
+            "device": 66306,
+            "inode": 189399148,
+            "mode": 33261,
+            "mtime_ns": 1781873160000000000,
+            "nlink": 1,
+            "size": 8020928
+          },
+          "kind": "regular_file",
+          "logical_path": "/usr/bin/python3.12",
+          "method": "exec",
+          "resolved_path": null,
+          "role": "python_interpreter",
+          "sha256": "1643dacd9feaedc58f3cc581e4d22577dfe25c09b10282936186ccf0f2e61118"
+        },
+        {
+          "closure": "code_execution",
+          "identity": {
+            "ctime_ns": 1784147883330538795,
+            "device": 66306,
+            "inode": 10617662,
+            "mode": 33133,
+            "mtime_ns": 1784147883261718525,
+            "nlink": 1,
+            "size": 3505000
+          },
+          "kind": "regular_file",
+          "logical_path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-prepared-v2/resident-driver",
+          "method": "exec",
+          "resolved_path": null,
+          "role": "resident_driver",
+          "sha256": "d7458fcdf8553871cac00123413676625c61eff2fdee3be9a440e656f05bcc1e"
+        },
+        {
+          "closure": "code_execution",
+          "identity": {
+            "ctime_ns": 1784147906234502855,
+            "device": 66306,
+            "inode": 10617668,
+            "mode": 33060,
+            "mtime_ns": 1784147898344296294,
+            "nlink": 1,
+            "size": 137758
+          },
+          "kind": "regular_file",
+          "logical_path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-binding-v7/trusted-runner.py",
+          "method": "exec",
+          "resolved_path": null,
+          "role": "resident_runner",
+          "sha256": "98e324414d9e2d7e6db5b066209e6f7c6734e391502ae81ecd1809e8ec558e7f"
+        },
+        {
+          "closure": "code_execution",
+          "identity": {
+            "ctime_ns": 1783630549288714043,
+            "device": 66306,
+            "inode": 41551438,
+            "mode": 33188,
+            "mtime_ns": 1773373217000000000,
+            "nlink": 1,
+            "size": 456232
+          },
+          "kind": "symlinked_file",
+          "logical_path": "/opt/rocm-7.2.1/lib/librocprofiler-sdk-roctx.so.1.1.0",
+          "method": "dlopen",
+          "resolved_path": "/opt/rocm-7.2.1/lib/librocprofiler-sdk-roctx.so.1.1.0",
+          "role": "roctx_library",
+          "sha256": "1a5831a3817eac29f63d1442dc348ba31b417202b7ce15f3aed9c09a8f4773c9"
+        },
+        {
+          "closure": "control_input",
+          "identity": {
+            "ctime_ns": 1783964056495219972,
+            "device": 66306,
+            "inode": 10507195,
+            "mode": 33188,
+            "mtime_ns": 1783964056438217111,
+            "nlink": 1,
+            "size": 4425
+          },
+          "kind": "regular_file",
+          "logical_path": "/etc/ullm/served-models/active.json",
+          "method": "read",
+          "resolved_path": null,
+          "role": "served_manifest",
+          "sha256": "feb3190d0ff59778e4da140b8db2bd1ce2ba440e3a69e844b997011d4d08cb44"
+        },
+        {
+          "closure": "code_execution",
+          "identity": {
+            "ctime_ns": 1784147849564485692,
+            "device": 66306,
+            "inode": 206314720,
+            "mode": 33277,
+            "mtime_ns": 1784147849564485692,
+            "nlink": 1,
+            "size": 95955
+          },
+          "kind": "regular_file",
+          "logical_path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/tools/prepare-aq4-p2-resident-smoke-bundle.py",
+          "method": "exec",
+          "resolved_path": null,
+          "role": "trusted_validator",
+          "sha256": "15a65fed6d182e706473821f128fbae02214ab0bf988bb7c1f363f69233e9904"
+        }
+      ],
+      "capture_helpers": [
+        {
+          "closure": "code_execution",
+          "identity": [
+            66306,
+            206315368,
+            33204,
+            1,
+            83367,
+            1784136670266540663,
+            1784136670266540663
+          ],
+          "method": "verified_in_process",
+          "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/tools/build-aq4-p3-selection-raw.py",
+          "role": "selection_raw_producer",
+          "sha256": "a589c3e644d36132fb6054afdb15b27543d8e8181e3c737dcbd071d7c52e3d20"
+        },
+        {
+          "closure": "code_execution",
+          "identity": [
+            66306,
+            206314691,
+            33204,
+            1,
+            45255,
+            1784044522174045164,
+            1784044522174045164
+          ],
+          "method": "verified_in_process",
+          "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/tools/select-aq4-p3-candidate.py",
+          "role": "candidate_selector",
+          "sha256": "4a510c7351131072ed368e2ac8fffeb2daf10488edef94c37fe5dbcb729e9739"
+        },
+        {
+          "closure": "code_execution",
+          "identity": [
+            66306,
+            206315363,
+            33204,
+            1,
+            36343,
+            1784136426031334297,
+            1784136426031334297
+          ],
+          "method": "verified_in_process",
+          "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/tools/profile-aq4-p2-family-exclusive.py",
+          "role": "profile_family_classifier",
+          "sha256": "f8d32c340231e329f004d9e16192c02378f1fd58b8ab713e8efbbd3029b052d6"
+        }
+      ],
+      "code_execution_closure": "pinned_fd",
+      "control_input_closure": "pinned_fd",
+      "data_integrity": "trusted_pre_post_guarded",
+      "device_lock_closure": "pinned_fd",
+      "fd_map_file_sha256": "17088024ff4b3dd5e937077d34d893066c26a15f557cc93c8339261c9001a51b",
+      "fd_map_schema": "ullm.aq4_p3_inherited_fd_map.v1",
+      "fd_map_sha256": "bf32d59e27b74bd1409efc4353284e9e13b41deee15eeef259e74f8b264e99cd"
+    },
+    "invocation_path": "/opt/rocm-7.2.1/bin/rocprofv3",
+    "resolved_identity": [
+      66306,
+      41551451,
+      33261,
+      1,
+      62506,
+      1773373040000000000,
+      1783630549665735286
+    ],
+    "resolved_path": "/opt/rocm-7.2.1/bin/rocprofv3",
+    "rocm_version": "7.2.1",
+    "subprocess_profile_runs": 1,
+    "symlink_chain": [],
+    "target_command_manifest": {
+      "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-execute-evidence-v11/runner-target-command-manifest.json",
+      "sha256": "5864bb02e1cbe7d738e461c456bf12c8cd39c19b59342ff55dc2fddda39c6c7f"
+    },
+    "target_environment": {
+      "exact_base_environment": true,
+      "injected_fd_map_key": "ULLM_AQ4_PINNED_FD_MAP",
+      "keys": [
+        "HIP_VISIBLE_DEVICES",
+        "ULLM_BUILD_GIT_COMMIT",
+        "ULLM_HIP_VISIBLE_DEVICES",
+        "ULLM_REQUIRE_HIP_ADD_KERNEL",
+        "ULLM_REQUIRE_HIP_AQ4_KERNEL",
+        "ULLM_REQUIRE_HIP_AQ4_MATVEC_ADD_KERNEL",
+        "ULLM_REQUIRE_HIP_AQ4_MATVEC_BATCH_KERNEL",
+        "ULLM_REQUIRE_HIP_AQ4_MATVEC_KERNEL",
+        "ULLM_REQUIRE_HIP_AQ4_MATVEC_PAIR_KERNEL",
+        "ULLM_REQUIRE_HIP_AQ4_MATVEC_QKV_Z_GATE_BETA_KERNEL",
+        "ULLM_REQUIRE_HIP_AQ4_MATVEC_TRIPLE_KERNEL",
+        "ULLM_REQUIRE_HIP_AQ4_REGISTER_BM8_KERNEL",
+        "ULLM_REQUIRE_HIP_BF16_MATVEC_KERNEL",
+        "ULLM_REQUIRE_HIP_BF16_ROW_KERNEL",
+        "ULLM_REQUIRE_HIP_LINEAR_ATTN_GATE_BETA_KERNEL",
+        "ULLM_REQUIRE_HIP_LINEAR_ATTN_KERNEL",
+        "ULLM_REQUIRE_HIP_LINEAR_ATTN_QKV_PREPARE_BATCH_KERNEL",
+        "ULLM_REQUIRE_HIP_LINEAR_ATTN_RECURRENT_KERNEL",
+        "ULLM_REQUIRE_HIP_LINEAR_ATTN_RECURRENT_SEQUENCE_KERNEL",
+        "ULLM_REQUIRE_HIP_PAGED_CAUSAL_GQA_CHUNK_KERNEL",
+        "ULLM_REQUIRE_HIP_PAGED_DECODE_ATTN_KERNEL",
+        "ULLM_REQUIRE_HIP_PAGED_DECODE_SPLIT_KERNEL",
+        "ULLM_REQUIRE_HIP_PAGED_KV_WRITE_CHUNK_KERNEL",
+        "ULLM_REQUIRE_HIP_PAGED_KV_WRITE_KERNEL",
+        "ULLM_REQUIRE_HIP_QWEN35_QK_NORM_ROPE_BATCH_KERNEL",
+        "ULLM_REQUIRE_HIP_QWEN35_QK_NORM_ROPE_PAGED_KV_WRITE_KERNEL",
+        "ULLM_REQUIRE_HIP_QWEN35_Q_SPLIT_KERNEL",
+        "ULLM_REQUIRE_HIP_RMSNORM_KERNEL",
+        "ULLM_REQUIRE_HIP_ROPE_KERNEL",
+        "ULLM_REQUIRE_HIP_SEGMENTED_RMSNORM_SILU_MUL_KERNEL",
+        "ULLM_REQUIRE_HIP_SIGMOID_MUL_KERNEL",
+        "ULLM_REQUIRE_HIP_SILU_MUL_KERNEL",
+        "ULLM_REQUIRE_HIP_TOP1_KERNEL",
+        "ULLM_SERVED_MODEL_MANIFEST"
+      ],
+      "secret_material_recorded": false,
+      "sha256": "0fd998b06579b17c7d6b89ee1806f430c74d198162ed84fc50bbb6014f41e1ca"
+    },
+    "tool": "rocprofv3",
+    "version": "1.1.0",
+    "version_output_sha256": "198cdf72a41305a06feb82fcb49d138fe7f5a7431080ae884700917f4f374d95"
+  },
+  "promotion_eligible": false,
+  "schema_version": "ullm.aq4_p3_diagnostic_rocprof_capture.v2",
+  "source_traces": {
+    "hip_api": {
+      "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v11/aq4-p3-diagnostic_hip_api_trace.csv",
+      "sha256": "6a3bfb19982a132ad528513343f618ea3ea56d8cae3cb2f791efb50b85cf17e1"
+    },
+    "kernel": {
+      "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v11/aq4-p3-diagnostic_kernel_trace.csv",
+      "sha256": "424a424188803cd7e5a872cd843e15ab80e0fd4f59d271111bb0f7b681979a6f"
+    },
+    "marker": {
+      "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v11/aq4-p3-diagnostic_marker_api_trace.csv",
+      "sha256": "c4b95dd1146e477f10a9327cb607a5ee107130c7cd0b528b26ca067658357606"
+    },
+    "memory_copy": {
+      "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v11/aq4-p3-diagnostic_memory_copy_trace.csv",
+      "sha256": "f419a04f0e1106d0788edb39f6597259305b7f559532a68b119d27440f19943a"
+    }
+  },
+  "status": "complete_diagnostic"
+}

@@ -1,0 +1,390 @@
+{
+  "absolute_deadline_monotonic_ns": 1408024821271569,
+  "attempt": 0,
+  "captured_unix_ns": 1784161027675336400,
+  "consecutive_stable": 1,
+  "deadline_checkpoints": [
+    {
+      "keepalive": "not_due",
+      "label": "observation:start",
+      "monotonic_ns": 1407994821280739,
+      "remaining_ns": 29999990830
+    },
+    {
+      "keepalive": "not_due",
+      "label": "observer:validation-before",
+      "monotonic_ns": 1407994821284079,
+      "remaining_ns": 29999987490
+    },
+    {
+      "keepalive": "not_due",
+      "label": "observer:validation-after",
+      "monotonic_ns": 1407994823993544,
+      "remaining_ns": 29997278025
+    },
+    {
+      "keepalive": "not_due",
+      "label": "stopped-poll-service-ullm-openai.service:before",
+      "monotonic_ns": 1407994823996984,
+      "remaining_ns": 29997274585
+    },
+    {
+      "keepalive": "not_due",
+      "label": "stopped-poll-service-ullm-openai.service:timeout",
+      "monotonic_ns": 1407994823998234,
+      "remaining_ns": 29997273335
+    },
+    {
+      "keepalive": "not_due",
+      "label": "stopped-poll-service-ullm-openai.service:after",
+      "monotonic_ns": 1407994830338658,
+      "remaining_ns": 29990932911
+    },
+    {
+      "keepalive": "not_due",
+      "label": "stopped-poll-service-llama-qwen35-udq4.service:before",
+      "monotonic_ns": 1407994830367908,
+      "remaining_ns": 29990903661
+    },
+    {
+      "keepalive": "not_due",
+      "label": "stopped-poll-service-llama-qwen35-udq4.service:timeout",
+      "monotonic_ns": 1407994830369208,
+      "remaining_ns": 29990902361
+    },
+    {
+      "keepalive": "not_due",
+      "label": "stopped-poll-service-llama-qwen35-udq4.service:after",
+      "monotonic_ns": 1407994836276125,
+      "remaining_ns": 29984995444
+    },
+    {
+      "keepalive": "not_due",
+      "label": "stopped-poll-worker:before",
+      "monotonic_ns": 1407994836306655,
+      "remaining_ns": 29984964914
+    },
+    {
+      "keepalive": "not_due",
+      "label": "stopped-poll-worker:timeout",
+      "monotonic_ns": 1407994836307805,
+      "remaining_ns": 29984963764
+    },
+    {
+      "keepalive": "not_due",
+      "label": "stopped-poll-worker:after",
+      "monotonic_ns": 1407995034480517,
+      "remaining_ns": 29786791052
+    },
+    {
+      "keepalive": "not_due",
+      "label": "stopped-poll-amd-process:before",
+      "monotonic_ns": 1407995034489937,
+      "remaining_ns": 29786781632
+    },
+    {
+      "keepalive": "not_due",
+      "label": "stopped-poll-amd-process:timeout",
+      "monotonic_ns": 1407995034491088,
+      "remaining_ns": 29786780481
+    },
+    {
+      "keepalive": "not_due",
+      "label": "stopped-poll-amd-process:after",
+      "monotonic_ns": 1407995283733985,
+      "remaining_ns": 29537537584
+    },
+    {
+      "keepalive": "not_due",
+      "label": "stopped-poll-amd-vram:before",
+      "monotonic_ns": 1407995283814707,
+      "remaining_ns": 29537456862
+    },
+    {
+      "keepalive": "not_due",
+      "label": "stopped-poll-amd-vram:timeout",
+      "monotonic_ns": 1407995283816097,
+      "remaining_ns": 29537455472
+    },
+    {
+      "keepalive": "not_due",
+      "label": "stopped-poll-amd-vram:after",
+      "monotonic_ns": 1407995531739283,
+      "remaining_ns": 29289532286
+    },
+    {
+      "keepalive": "not_due",
+      "label": "stopped-poll-kfd:before",
+      "monotonic_ns": 1407995531788373,
+      "remaining_ns": 29289483196
+    },
+    {
+      "keepalive": "not_due",
+      "label": "stopped-poll-kfd:after",
+      "monotonic_ns": 1407995531897915,
+      "remaining_ns": 29289373654
+    },
+    {
+      "keepalive": "not_due",
+      "label": "stopped-poll-lock:before",
+      "monotonic_ns": 1407995531899835,
+      "remaining_ns": 29289371734
+    },
+    {
+      "keepalive": "not_due",
+      "label": "stopped-poll-lock:after",
+      "monotonic_ns": 1407995551172141,
+      "remaining_ns": 29270099428
+    },
+    {
+      "keepalive": "not_due",
+      "label": "stopped-poll-proc-2910396:before",
+      "monotonic_ns": 1407995551179221,
+      "remaining_ns": 29270092348
+    },
+    {
+      "keepalive": "not_due",
+      "label": "stopped-poll-proc-2910396:after",
+      "monotonic_ns": 1407995551220001,
+      "remaining_ns": 29270051568
+    },
+    {
+      "keepalive": "not_due",
+      "label": "stopped-poll-proc-2910553:before",
+      "monotonic_ns": 1407995551221981,
+      "remaining_ns": 29270049588
+    },
+    {
+      "keepalive": "not_due",
+      "label": "stopped-poll-proc-2910553:after",
+      "monotonic_ns": 1407995551242392,
+      "remaining_ns": 29270029177
+    },
+    {
+      "keepalive": "not_due",
+      "label": "observation:complete",
+      "monotonic_ns": 1407995551251592,
+      "remaining_ns": 29270019977
+    }
+  ],
+  "decision": "stable",
+  "elapsed_seconds": 7.02e-06,
+  "next_interval_seconds": 0.25,
+  "observation": {
+    "amd_smi_owners": [],
+    "captured_unix_ns": 1784161027675336400,
+    "kfd_owners": [],
+    "lock": {
+      "device": 26,
+      "free": true,
+      "holder_pids": [],
+      "inode": 825809,
+      "path": "/run/ullm/r9700.lock",
+      "source": "trusted_substrate",
+      "source_bytes": 2364,
+      "source_sha256": "cc4939b58f57551717ca9cd1318d02b784778e1d17411e01a7fc0cba82b32200",
+      "substrate": {
+        "directory": {
+          "device": 26,
+          "inode": 825808
+        },
+        "lock": {
+          "device": 26,
+          "inode": 825809
+        }
+      }
+    },
+    "probes": [
+      {
+        "argv": [
+          "/usr/bin/systemctl",
+          "show",
+          "ullm-openai.service",
+          "--property=ActiveState",
+          "--property=SubState",
+          "--property=MainPID",
+          "--no-pager"
+        ],
+        "captured_unix_ns": 1784161026954424125,
+        "exit_code": 0,
+        "label": "stopped-poll-service-ullm-openai.service",
+        "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "stdout_sha256": "496f978c0e3933fa117a6ed952ffe874e91e4cbe711b8dd4d6dc2ea623ac96ad",
+        "timeout_seconds": 2.0
+      },
+      {
+        "argv": [
+          "/usr/bin/systemctl",
+          "show",
+          "llama-qwen35-udq4.service",
+          "--property=ActiveState",
+          "--property=SubState",
+          "--property=MainPID",
+          "--no-pager"
+        ],
+        "captured_unix_ns": 1784161026960361613,
+        "exit_code": 0,
+        "label": "stopped-poll-service-llama-qwen35-udq4.service",
+        "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "stdout_sha256": "496f978c0e3933fa117a6ed952ffe874e91e4cbe711b8dd4d6dc2ea623ac96ad",
+        "timeout_seconds": 2.0
+      },
+      {
+        "argv": [
+          "/usr/bin/pgrep",
+          "-f",
+          "-x",
+          "/home/homelab1/coding-local/ultimateLLM/uLLM-project/target/reasoning-v2/release/ullm-aq4-worker.*"
+        ],
+        "captured_unix_ns": 1784161027158570205,
+        "exit_code": 1,
+        "label": "stopped-poll-worker",
+        "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "timeout_seconds": 2.0
+      },
+      {
+        "argv": [
+          "/opt/rocm/bin/amd-smi",
+          "process",
+          "--gpu",
+          "2",
+          "--general",
+          "--json"
+        ],
+        "captured_unix_ns": 1784161027407821413,
+        "exit_code": 0,
+        "label": "stopped-poll-amd-process",
+        "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "stdout_sha256": "c623fc11440b2bf81199ddefe42cadc330fa31ecde1cd268ff0ab930889e09ca",
+        "timeout_seconds": 2.0
+      },
+      {
+        "argv": [
+          "/opt/rocm/bin/amd-smi",
+          "static",
+          "--gpu",
+          "2",
+          "--vram",
+          "--json"
+        ],
+        "captured_unix_ns": 1784161027655826381,
+        "exit_code": 0,
+        "label": "stopped-poll-amd-vram",
+        "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "stdout_sha256": "3f1a7aa8dc1cdf943f1cfb4470607f73ee704f092ad98a3e38cceeca31dc1168",
+        "timeout_seconds": 2.0
+      }
+    ],
+    "proc_cmdlines": [
+      {
+        "argv0_basename": null,
+        "bytes": null,
+        "error_type": "FileNotFoundError",
+        "matches_expected_worker": null,
+        "pid": 2910396,
+        "raw_recorded": false,
+        "readable": false,
+        "sha256": null
+      },
+      {
+        "argv0_basename": null,
+        "bytes": null,
+        "error_type": "FileNotFoundError",
+        "matches_expected_worker": null,
+        "pid": 2910553,
+        "raw_recorded": false,
+        "readable": false,
+        "sha256": null
+      }
+    ],
+    "secret_material_recorded": false,
+    "services": [
+      {
+        "active_state": "inactive",
+        "main_pid": 0,
+        "sub_state": "dead",
+        "unit": "ullm-openai.service"
+      },
+      {
+        "active_state": "inactive",
+        "main_pid": 0,
+        "sub_state": "dead",
+        "unit": "llama-qwen35-udq4.service"
+      }
+    ],
+    "virtual_sources": {
+      "amd_smi_owners": {
+        "entry_key_sets": [
+          [
+            "process_info"
+          ]
+        ],
+        "process_info_types": [
+          "string"
+        ],
+        "process_list_length": 1,
+        "process_list_type": "list",
+        "raw_bytes": 162,
+        "raw_sha256": "c623fc11440b2bf81199ddefe42cadc330fa31ecde1cd268ff0ab930889e09ca",
+        "reason_code": "accepted_zero_sentinel",
+        "root_keys": [
+          "gpu",
+          "process_list"
+        ],
+        "schema_version": "ullm.aq4_p2_amd_process_parse_diagnostic.v1",
+        "status": "accepted",
+        "top_level_length": 1,
+        "top_level_type": "list"
+      },
+      "kfd_owners": {
+        "attempt_count": 1,
+        "attempts": [
+          {
+            "attempt": 0,
+            "classification": "stable",
+            "enumerated_pid_count": 0,
+            "enumerated_pids_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+          }
+        ],
+        "classification": "stable",
+        "owners": [],
+        "root": {
+          "device": 23,
+          "inode": 97870,
+          "path": "/sys/class/kfd/kfd/proc"
+        },
+        "schema_version": "ullm.aq4_p2_kfd_owner_snapshot.v1",
+        "secret_material_recorded": false,
+        "source_kind": "kernel_sysfs",
+        "sources": []
+      },
+      "lock_holders": {
+        "parsed_pids": [],
+        "raw_bytes": 2364,
+        "raw_sha256": "cc4939b58f57551717ca9cd1318d02b784778e1d17411e01a7fc0cba82b32200"
+      }
+    },
+    "vram": {
+      "free_bytes": 32624000000,
+      "headroom_bytes": 32624000000,
+      "total_bytes": 32624000000,
+      "used_bytes": 0
+    },
+    "worker_pids": []
+  },
+  "observation_completed_monotonic_ns": 1407995551251592,
+  "observation_started_monotonic_ns": 1407994821278589,
+  "reason": null,
+  "required_consecutive_stable": 2,
+  "schema_version": "ullm.aq4_p2_stopped_gate_poll_observation.v1",
+  "secret_material_recorded": false,
+  "source_classification": {
+    "amd_smi_owners": "stable",
+    "kfd_owners": "stable",
+    "lock": "stable",
+    "services": "stable",
+    "vram": "stable",
+    "worker_pids": "stable"
+  }
+}

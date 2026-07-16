@@ -1,0 +1,53 @@
+{
+  "actual_executed": true,
+  "argument_count": 10,
+  "authority_commit": "19f7d390b97b1e8f0daa72e1007267c27ab4061b",
+  "canonical_end_unix_ns": 1784161087899258437,
+  "canonical_start_unix_ns": 1784161005254172569,
+  "command_sha256": "520297d84df9f88eba8a98097222052079d8caccc15dbb74050dbbaaf93cc855",
+  "elapsed_ns": 82645085868,
+  "finalizer_authority": {
+    "commit": "7a11d5b204cff70a5b1dfd55b7fe7be3879a5e41",
+    "git_blob": "d203782344946c9046e4e9ee7b98807836c4561b",
+    "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/tools/prepare-aq4-p3-profile-operator.py",
+    "role": "existing_evidence_recovery_only_not_execution_authority",
+    "sha256": "abe26f141030a2ba48bee57050d1d42880221a18658f5ce8d4a75a27cdad801a"
+  },
+  "invocation_count": 1,
+  "manifest_file_sha256": "1ce836ee2d472a796e95fef31f8f57688e1f7791d6b5d50106a66485f79b60dd",
+  "manifest_semantic_sha256": "ccc0d7f4184a08fe8bc0bea208ddc16949f8d27de5cc6204ba69564f80f19236",
+  "maximum_invocations": 1,
+  "operator_manifest_commit": "c76e46f06106db7489644493f2561b6dbec6b412",
+  "preflight": {
+    "amd_smi_owners": [
+      2910553
+    ],
+    "formal_health_sha256": "b032d38fcdb8e17f2452daa47ce07f2335875451df2ac47f73d117a4331b3722",
+    "fresh_outputs_absent": 9,
+    "kfd_owners": [
+      2910553
+    ],
+    "passed": true,
+    "service_main_pid": 2910396,
+    "targeted_external_processes": 0,
+    "worker_pid": 2910553
+  },
+  "retry_performed": false,
+  "returncode": 1,
+  "same_pty_sudo_cache": true,
+  "schema_version": "ullm.aq4_p3_profile_operator_result.v15",
+  "secret_material_recorded": false,
+  "shell": false,
+  "status": "failed",
+  "stderr": {
+    "bytes": 0,
+    "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-operator-result-v15/operator.stderr.bin",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "stdout": {
+    "bytes": 255,
+    "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-operator-result-v15/operator.stdout.bin",
+    "sha256": "d8e67905abd23ef6908f746bebf68773a8bffedc66e7ec014baf2a98545d4948"
+  },
+  "working_directory": "/home/homelab1/coding-local/ultimateLLM/uLLM-project"
+}
