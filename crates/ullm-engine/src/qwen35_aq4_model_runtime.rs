@@ -22,10 +22,11 @@ use crate::qwen35_aq4_head_runtime::{
     PackageTokenLogit, QWEN3_FINAL_NORM_TENSOR, package_embedding_shape,
 };
 use crate::qwen35_aq4_layer_runtime::{
-    PackageLinearAttnComponentStepMs, PackageLinearAttnResidentStepLayer,
-    PackageLinearAttnSequenceGeometry, PackageLinearAttnSequenceWorkspace,
-    PackageSelfAttnComponentStepMs, PackageSelfAttnResidentStepLayer,
-    PackageSelfAttnSequenceGeometry, PackageSelfAttnSequenceWorkspace,
+    PackageLinearAttnComponentStepMs, PackageLinearAttnIntermediateTraceStage,
+    PackageLinearAttnResidentStepLayer, PackageLinearAttnSequenceGeometry,
+    PackageLinearAttnSequenceWorkspace, PackageSelfAttnComponentStepMs,
+    PackageSelfAttnResidentStepLayer, PackageSelfAttnSequenceGeometry,
+    PackageSelfAttnSequenceWorkspace,
 };
 use crate::qwen35_package_contract::{
     PackageDecoderLayerKind, PackageManifestLayerEntry, package_manifest_layer_entries,
@@ -59,10 +60,53 @@ pub trait Qwen35Aq4IntermediateTraceObserver {
     fn observe_embedding(&mut self, values: &[f32]) -> Result<(), String>;
 
     fn observe_decoder_layer(&mut self, layer_index: usize, values: &[f32]) -> Result<(), String>;
+
+    /// Opt in to bounded device read-back of a completed resident linear-attention layer.
+    ///
+    /// The default keeps the historic embedding/decoder-output-only trace unchanged.  A caller
+    /// that returns true receives begin/chunk/finish callbacks for every retained production
+    /// buffer of the selected layer, without changing any runtime kernel API or dispatch flag.
+    fn wants_linear_attention_stages(&self, _layer_index: usize) -> bool {
+        false
+    }
+
+    fn begin_linear_attention_stage(
+        &mut self,
+        _layer_index: usize,
+        _stage: PackageLinearAttnIntermediateTraceStage,
+        _elements: usize,
+    ) -> Result<(), String> {
+        Ok(())
+    }
+
+    fn observe_linear_attention_stage_chunk(
+        &mut self,
+        _layer_index: usize,
+        _stage: PackageLinearAttnIntermediateTraceStage,
+        _start: usize,
+        _values: &[f32],
+    ) -> Result<(), String> {
+        Ok(())
+    }
+
+    fn finish_linear_attention_stage(
+        &mut self,
+        _layer_index: usize,
+        _stage: PackageLinearAttnIntermediateTraceStage,
+    ) -> Result<(), String> {
+        Ok(())
+    }
 }
 
 /// Upper bound for one reusable f32 row plus its byte decode scratch in the diagnostic visitor.
 pub const QWEN35_AQ4_INTERMEDIATE_TRACE_SCRATCH_BYTES: usize = 32 * 1024;
+
+/// Maximum raw byte chunk used by the opt-in linear-attention stage visitor.
+///
+/// The companion f32 decode vector has the same upper bound.  In particular, the recurrent
+/// state remains device-resident and is streamed through this bounded scratch rather than being
+/// retained as a full host tensor.
+pub const QWEN35_AQ4_LINEAR_STAGE_TRACE_CHUNK_BYTES: usize = 256 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Qwen35Aq4PrefillInvocation {
@@ -650,6 +694,103 @@ fn read_intermediate_trace_row(
         return Err(format!("differential trace {label} row has trailing bytes"));
     }
     Ok(())
+}
+
+fn visit_linear_attention_trace_buffer(
+    buffer: &ullm_runtime_sys::RuntimeBuffer,
+    stream: &mut ullm_runtime_sys::RuntimeStream,
+    layer_index: usize,
+    stage: PackageLinearAttnIntermediateTraceStage,
+    elements: usize,
+    observer: &mut dyn Qwen35Aq4IntermediateTraceObserver,
+) -> Result<(), String> {
+    if elements == 0 {
+        return Err(format!(
+            "linear-attention differential trace {} has zero elements",
+            stage.label()
+        ));
+    }
+    let element_bytes = std::mem::size_of::<f32>();
+    let expected_bytes = elements.checked_mul(element_bytes).ok_or_else(|| {
+        format!(
+            "linear-attention differential trace {} byte length overflows",
+            stage.label()
+        )
+    })?;
+    let actual_bytes = buffer.size().map_err(|error| {
+        format!(
+            "failed to inspect linear-attention differential trace {} buffer: {error}",
+            stage.label()
+        )
+    })?;
+    if actual_bytes != expected_bytes {
+        return Err(format!(
+            "linear-attention differential trace {} has {actual_bytes} bytes, expected {expected_bytes}",
+            stage.label()
+        ));
+    }
+    if QWEN35_AQ4_LINEAR_STAGE_TRACE_CHUNK_BYTES == 0
+        || QWEN35_AQ4_LINEAR_STAGE_TRACE_CHUNK_BYTES % element_bytes != 0
+    {
+        return Err("linear-attention differential trace chunk bound is invalid".to_string());
+    }
+    let chunk_elements = (QWEN35_AQ4_LINEAR_STAGE_TRACE_CHUNK_BYTES / element_bytes).min(elements);
+    if chunk_elements == 0 {
+        return Err("linear-attention differential trace chunk has no f32 elements".to_string());
+    }
+    let mut raw = vec![0_u8; chunk_elements * element_bytes];
+    let mut values = vec![0_f32; chunk_elements];
+    observer.begin_linear_attention_stage(layer_index, stage, elements)?;
+    let mut start = 0usize;
+    while start < elements {
+        let count = (elements - start).min(chunk_elements);
+        let bytes = count.checked_mul(element_bytes).ok_or_else(|| {
+            "linear-attention differential trace chunk byte length overflows".to_string()
+        })?;
+        let offset = start.checked_mul(element_bytes).ok_or_else(|| {
+            "linear-attention differential trace chunk offset overflows".to_string()
+        })?;
+        buffer
+            .copy_to_host(offset, &mut raw[..bytes], Some(stream))
+            .map_err(|error| {
+                format!(
+                    "failed to copy linear-attention differential trace {}: {error}",
+                    stage.label()
+                )
+            })?;
+        stream.synchronize().map_err(|error| {
+            format!(
+                "failed to synchronize linear-attention differential trace {}: {error}",
+                stage.label()
+            )
+        })?;
+        for (value, bytes) in values[..count]
+            .iter_mut()
+            .zip(raw[..bytes].chunks_exact(element_bytes))
+        {
+            *value = f32::from_le_bytes(
+                bytes
+                    .try_into()
+                    .expect("linear-attention f32 trace chunk width is fixed"),
+            );
+            if !value.is_finite() {
+                return Err(format!(
+                    "linear-attention differential trace {} contains non-finite data",
+                    stage.label()
+                ));
+            }
+        }
+        observer.observe_linear_attention_stage_chunk(
+            layer_index,
+            stage,
+            start,
+            &values[..count],
+        )?;
+        start = start.checked_add(count).ok_or_else(|| {
+            "linear-attention differential trace chunk cursor overflows".to_string()
+        })?;
+    }
+    observer.finish_linear_attention_stage(layer_index, stage)
 }
 
 impl Qwen35Aq4ModelRuntime {
@@ -1339,6 +1480,27 @@ impl Qwen35Aq4ModelRuntime {
                 &format!("decoder layer {layer_index}"),
             )?;
             observer.observe_decoder_layer(layer_index, &values)?;
+            if observer.wants_linear_attention_stages(layer_index) {
+                match layer {
+                    Qwen35Aq4ResidentLayer::LinearAttention(linear) => {
+                        linear.visit_intermediate_trace_buffers(|stage, buffer, elements| {
+                            visit_linear_attention_trace_buffer(
+                                buffer,
+                                &mut self.stream,
+                                layer_index,
+                                stage,
+                                elements,
+                                observer,
+                            )
+                        })?;
+                    }
+                    Qwen35Aq4ResidentLayer::SelfAttention(_) => {
+                        return Err(format!(
+                            "linear-attention differential trace was requested for self-attention layer {layer_index}"
+                        ));
+                    }
+                }
+            }
         }
         Ok(())
     }

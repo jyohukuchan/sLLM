@@ -3542,6 +3542,54 @@ pub struct PackageLinearAttnResidentStepLayer {
     layer_output_buffer: ullm_runtime_sys::RuntimeBuffer,
 }
 
+/// A bounded diagnostic read-back boundary in the resident M=1 linear-attention path.
+///
+/// These names intentionally describe values after the production operation that owns the
+/// buffer.  They are not additional kernels and must only be read after a completed dispatch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PackageLinearAttnIntermediateTraceStage {
+    QkvDequantRowScale,
+    ZDequantRowScale,
+    RecurrentGate,
+    RecurrentBeta,
+    RecurrentStateAfter,
+    RecurrentOutput,
+    AttentionResidual,
+    PostNorm,
+    MlpSiluMulActivation,
+    LayerOutput,
+}
+
+impl PackageLinearAttnIntermediateTraceStage {
+    pub const ORDERED: [Self; 10] = [
+        Self::QkvDequantRowScale,
+        Self::ZDequantRowScale,
+        Self::RecurrentGate,
+        Self::RecurrentBeta,
+        Self::RecurrentStateAfter,
+        Self::RecurrentOutput,
+        Self::AttentionResidual,
+        Self::PostNorm,
+        Self::MlpSiluMulActivation,
+        Self::LayerOutput,
+    ];
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::QkvDequantRowScale => "qkv_dequant_row_scale",
+            Self::ZDequantRowScale => "z_dequant_row_scale",
+            Self::RecurrentGate => "recurrent_gate",
+            Self::RecurrentBeta => "recurrent_beta",
+            Self::RecurrentStateAfter => "recurrent_state_after",
+            Self::RecurrentOutput => "recurrent_output",
+            Self::AttentionResidual => "attention_residual",
+            Self::PostNorm => "post_norm",
+            Self::MlpSiluMulActivation => "mlp_activation",
+            Self::LayerOutput => "layer_output",
+        }
+    }
+}
+
 impl std::ops::Deref for PackageLinearAttnResidentStepLayer {
     type Target = PackageLinearAttnResidentStepWeights;
 
@@ -3667,6 +3715,101 @@ impl PackageLinearAttnSequenceWorkspace {
 }
 
 impl PackageLinearAttnResidentStepLayer {
+    /// Visits device buffers retained by the completed M=1 production step.
+    ///
+    /// This is diagnostic plumbing only.  It neither launches a kernel nor changes the
+    /// QKV/Z/A/B/gate/beta or MLP fused-kernel API/ABI.  The caller owns any device-to-host copy
+    /// and is responsible for requesting this only after the associated dispatch has completed.
+    pub fn visit_intermediate_trace_buffers(
+        &self,
+        mut visitor: impl FnMut(
+            PackageLinearAttnIntermediateTraceStage,
+            &ullm_runtime_sys::RuntimeBuffer,
+            usize,
+        ) -> Result<(), String>,
+    ) -> Result<(), String> {
+        let recurrent_state_elements = self
+            .weights
+            .value_heads
+            .checked_mul(self.weights.key_dim)
+            .and_then(|elements| elements.checked_mul(self.weights.value_dim))
+            .ok_or_else(|| {
+                "linear-attn intermediate recurrent-state element count overflows".to_string()
+            })?;
+        let stages = [
+            (
+                PackageLinearAttnIntermediateTraceStage::QkvDequantRowScale,
+                &self.qkv_buffer,
+                self.weights.qkv_matrix.rows,
+            ),
+            (
+                PackageLinearAttnIntermediateTraceStage::ZDequantRowScale,
+                &self.z_buffer,
+                self.weights.z_matrix.rows,
+            ),
+            (
+                PackageLinearAttnIntermediateTraceStage::RecurrentGate,
+                &self.recurrent_gate_buffer,
+                self.weights.value_heads,
+            ),
+            (
+                PackageLinearAttnIntermediateTraceStage::RecurrentBeta,
+                &self.recurrent_beta_buffer,
+                self.weights.value_heads,
+            ),
+            (
+                PackageLinearAttnIntermediateTraceStage::RecurrentStateAfter,
+                &self.recurrent_state_buffer,
+                recurrent_state_elements,
+            ),
+            (
+                PackageLinearAttnIntermediateTraceStage::RecurrentOutput,
+                &self.recurrent_output_buffer,
+                self.weights.hidden,
+            ),
+            (
+                PackageLinearAttnIntermediateTraceStage::AttentionResidual,
+                &self.attn_block_output_buffer,
+                self.weights.hidden,
+            ),
+            (
+                PackageLinearAttnIntermediateTraceStage::PostNorm,
+                &self.post_normed_buffer,
+                self.weights.hidden,
+            ),
+            (
+                PackageLinearAttnIntermediateTraceStage::MlpSiluMulActivation,
+                &self.mlp_activation_buffer,
+                self.weights.mlp_gate_matrix.rows,
+            ),
+            (
+                PackageLinearAttnIntermediateTraceStage::LayerOutput,
+                &self.layer_output_buffer,
+                self.weights.hidden,
+            ),
+        ];
+        for (stage, buffer, elements) in stages {
+            let expected_bytes = checked_f32_byte_len(
+                elements,
+                &format!("linear-attn intermediate {}", stage.label()),
+            )?;
+            let actual_bytes = buffer.size().map_err(|error| {
+                format!(
+                    "failed to inspect linear-attn intermediate {} buffer: {error}",
+                    stage.label()
+                )
+            })?;
+            if actual_bytes != expected_bytes {
+                return Err(format!(
+                    "linear-attn intermediate {} buffer has {actual_bytes} bytes, expected {expected_bytes}",
+                    stage.label()
+                ));
+            }
+            visitor(stage, buffer, elements)?;
+        }
+        Ok(())
+    }
+
     pub fn sequence_geometry(&self) -> PackageLinearAttnSequenceGeometry {
         PackageLinearAttnSequenceGeometry {
             hidden: self.weights.hidden,
