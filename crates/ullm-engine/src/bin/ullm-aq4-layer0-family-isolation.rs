@@ -26,10 +26,14 @@ use std::path::{Path, PathBuf};
 use ullm_engine::aq4_package_runtime::PackageAq4ResidentMatvec;
 use ullm_engine::host_bytes::{decode_f32_le_values, encode_f32_to_bytes};
 use ullm_engine::loader::{
-    effective_rmsnorm_weight_values, read_named_passthrough_f32, WeightRegistry,
+    WeightRegistry, effective_rmsnorm_weight_values, read_named_passthrough_f32,
 };
 use ullm_engine::qwen35_aq4_layer_runtime::{
     runtime_host_linear_attn_gate_beta_f32, runtime_host_linear_attn_recurrent_f32,
+};
+use ullm_engine::qwen35_aq4_session::{QWEN35_AQ4_ROPE_BASE, QWEN35_AQ4_ROTARY_DIM};
+use ullm_engine::qwen35_package_contract::{
+    PackageDecoderLayerKind, PackageManifestLayerEntry, package_layer_entries_for_indices,
 };
 
 const SCHEMA: &str = "ullm.aq4_layer0_family_isolation.aq4_cpu.v1";
@@ -41,6 +45,7 @@ const MAX_CHUNK_BYTES: usize = 256 * 1024 * 1024;
 
 const HYBRID_SCHEMA: &str = "ullm.aq4_layer0_hybrid_diagnostic.aq4_cpu.v1";
 const HYBRID_INPUT_SCHEMA: &str = "ullm.aq4_layer0_hybrid_input_jsonl.v1";
+const CHAIN_SCHEMA: &str = "ullm.aq4_multilayer_accumulation.aq4_cpu.v1";
 const HYBRID_MAX_CASES: usize = 128;
 const HYBRID_MAX_CONTEXT_LENGTH: usize = 512;
 const HIDDEN: usize = 4096;
@@ -52,6 +57,13 @@ const VALUE_DIM: usize = 128;
 const CONV_KERNEL: usize = 4;
 const INTERMEDIATE: usize = 12288;
 const STATE_ELEMENTS: usize = VALUE_HEADS * KEY_DIM * VALUE_DIM;
+const SELF_Q_HEADS: usize = 16;
+const SELF_KV_HEADS: usize = 4;
+const SELF_HEAD_DIM: usize = 256;
+const SELF_VALUE_DIM: usize = 256;
+const SELF_Q_ROWS: usize = SELF_Q_HEADS * SELF_HEAD_DIM * 2;
+const SELF_KV_ROWS: usize = SELF_KV_HEADS * SELF_HEAD_DIM;
+const SELF_VALUE_ROWS: usize = SELF_KV_HEADS * SELF_VALUE_DIM;
 const INPUT_RMS_EPSILON: f32 = 1e-6_f32;
 const ATTENTION_RMS_EPSILON: f32 = 1e-6_f32;
 // This is deliberately the standalone AQ4 runtime's current layer-0 post
@@ -99,6 +111,13 @@ struct Args {
     chunk_bytes: usize,
     stage_stream_stdout: bool,
     post_norm_epsilon_source_control: bool,
+    chain_layer_range: Option<ChainLayerRange>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ChainLayerRange {
+    start: usize,
+    end: usize,
 }
 
 impl Args {
@@ -340,6 +359,56 @@ struct HybridProbeReport {
     stage_summaries: BTreeMap<String, HybridStageSummary>,
 }
 
+#[derive(Debug, Serialize)]
+struct ChainProbeReport {
+    schema_version: String,
+    status: String,
+    classification: String,
+    promotion: bool,
+    holdout: String,
+    policy_evaluation: String,
+    device: String,
+    chunk_bytes: usize,
+    package_root: String,
+    package_manifest_sha256: String,
+    input: HybridInputReport,
+    chain: ChainExecutionReport,
+    layer_summaries: Vec<ChainLayerSummary>,
+}
+
+#[derive(Debug, Serialize)]
+struct ChainExecutionReport {
+    requested_layer_range: String,
+    contiguous: bool,
+    layers: Vec<ChainLayerTopology>,
+    post_rms_epsilon: f32,
+    post_rms_epsilon_mode: String,
+    self_attention_qk_rms_epsilon: f32,
+    self_attention_rotary_dim: usize,
+    self_attention_rope_base: f32,
+    state_contract: String,
+    persistence_contract: String,
+}
+
+#[derive(Debug, Serialize)]
+struct ChainLayerTopology {
+    layer_index: usize,
+    kind: String,
+}
+
+#[derive(Debug, Serialize)]
+struct ChainLayerSummary {
+    layer_index: usize,
+    kind: String,
+    output: HybridStageSummary,
+}
+
+#[derive(Debug, Clone)]
+struct ChainSequence {
+    case: HybridInputCase,
+    values: Vec<f32>,
+}
+
 #[derive(Debug, Clone)]
 struct FinalLayerOutput {
     case: HybridInputCase,
@@ -543,6 +612,137 @@ impl StageEmitter {
     }
 }
 
+/// Emits only layer outputs for the chained diagnostic.  The f32 payload is
+/// consumed directly by the BF16 comparator and is never persisted locally.
+struct ChainStageEmitter {
+    stream_stdout: bool,
+    stdout: io::BufWriter<io::Stdout>,
+    stages: BTreeMap<usize, (String, StageAccumulator)>,
+}
+
+impl ChainStageEmitter {
+    fn new(stream_stdout: bool) -> Self {
+        Self {
+            stream_stdout,
+            stdout: io::BufWriter::new(io::stdout()),
+            stages: BTreeMap::new(),
+        }
+    }
+
+    fn emit(
+        &mut self,
+        layer: PackageManifestLayerEntry,
+        case: &HybridInputCase,
+        timestep: usize,
+        values: &[f32],
+    ) -> Result<()> {
+        if values.len() != HIDDEN || values.iter().any(|value| !value.is_finite()) {
+            return Err(format!(
+                "chain layer {} output has invalid geometry or values",
+                layer.layer_index
+            ));
+        }
+        let (kind, accumulator) = self
+            .stages
+            .entry(layer.layer_index)
+            .or_insert_with(|| (layer.kind.as_str().to_string(), StageAccumulator::default()));
+        if kind != layer.kind.as_str() {
+            return Err(format!(
+                "chain layer {} kind changed during probe",
+                layer.layer_index
+            ));
+        }
+        match accumulator.elements_per_record {
+            Some(elements) if elements != values.len() => {
+                return Err(format!(
+                    "chain layer {} output element count changed: expected {elements} got {}",
+                    layer.layer_index,
+                    values.len()
+                ));
+            }
+            Some(_) => {}
+            None => accumulator.elements_per_record = Some(values.len()),
+        }
+        accumulator.records = accumulator
+            .records
+            .checked_add(1)
+            .ok_or_else(|| "chain output record count overflow".to_string())?;
+        let mut l2_sq = 0.0_f64;
+        let mut max_abs = 0.0_f64;
+        for value in values {
+            let value64 = f64::from(*value);
+            l2_sq += value64 * value64;
+            max_abs = max_abs.max(value64.abs());
+        }
+        accumulator.sum_sq += l2_sq;
+        accumulator.max_abs = accumulator.max_abs.max(max_abs);
+        let coordinates = fixed_coordinates(values.len());
+        accumulator.samples.push(HybridStageSample {
+            case_id: case.case_id.clone(),
+            step: case.step,
+            context_token_ids_sha256: case.context_token_ids_sha256.clone(),
+            timestep,
+            elements: values.len(),
+            values: coordinates.iter().map(|index| values[*index]).collect(),
+            coordinates,
+            max_abs,
+            l2: l2_sq.sqrt(),
+        });
+
+        if self.stream_stdout {
+            let payload = encode_f32_to_bytes(values);
+            let header = serde_json::json!({
+                "kind": "chain_layer_output",
+                "layer_index": layer.layer_index,
+                "layer_kind": layer.kind.as_str(),
+                "case_id": case.case_id,
+                "step": case.step,
+                "context_token_ids_sha256": case.context_token_ids_sha256,
+                "context_length": case.context_length,
+                "timestep": timestep,
+                "dtype": "f32le",
+                "shape": [values.len()],
+                "bytes": payload.len(),
+            });
+            serde_json::to_writer(&mut self.stdout, &header)
+                .map_err(|err| format!("failed serializing chain layer header: {err}"))?;
+            self.stdout
+                .write_all(b"\n")
+                .and_then(|_| self.stdout.write_all(&payload))
+                .and_then(|_| self.stdout.flush())
+                .map_err(|err| format!("failed streaming chain layer output: {err}"))?;
+        }
+        Ok(())
+    }
+
+    fn finish_stream(&mut self) -> Result<()> {
+        if self.stream_stdout {
+            self.stdout
+                .write_all(b"{\"kind\":\"end\"}\n")
+                .and_then(|_| self.stdout.flush())
+                .map_err(|err| format!("failed finalizing chain stage stream: {err}"))?;
+        }
+        Ok(())
+    }
+
+    fn summaries(self) -> Vec<ChainLayerSummary> {
+        self.stages
+            .into_iter()
+            .map(|(layer_index, (kind, accumulator))| ChainLayerSummary {
+                layer_index,
+                kind,
+                output: HybridStageSummary {
+                    records: accumulator.records,
+                    elements_per_record: accumulator.elements_per_record.unwrap_or(0),
+                    aggregate_l2: accumulator.sum_sq.sqrt(),
+                    max_abs: accumulator.max_abs,
+                    samples: accumulator.samples,
+                },
+            })
+            .collect()
+    }
+}
+
 fn fixed_coordinates(elements: usize) -> Vec<usize> {
     let candidates = [
         0_usize,
@@ -572,8 +772,12 @@ fn main() {
 
 fn run() -> Result<()> {
     let args = parse_args(env::args().skip(1))?;
+    if args.post_norm_epsilon_source_control && args.hybrid_input.is_none() {
+        return Err("--post-norm-epsilon-source-control requires --hybrid-input".to_string());
+    }
     match (&args.input, &args.hybrid_input) {
         (Some(_), None) => run_raw_family_probe(args),
+        (None, Some(_)) if args.chain_layer_range.is_some() => run_multilayer_chain_probe(args),
         (None, Some(_)) => run_hybrid_probe(args),
         (Some(_), Some(_)) => Err("--input and --hybrid-input are mutually exclusive".to_string()),
         (None, None) => Err("one of --input or --hybrid-input is required".to_string()),
@@ -915,6 +1119,198 @@ fn run_hybrid_probe(args: Args) -> Result<()> {
     Ok(())
 }
 
+fn run_multilayer_chain_probe(args: Args) -> Result<()> {
+    if args.chunk_bytes == 0 || args.chunk_bytes > MAX_CHUNK_BYTES {
+        return Err(format!("chunk bytes must be in 1..={MAX_CHUNK_BYTES}"));
+    }
+    if !args.package.is_dir() {
+        return Err(format!(
+            "package is not a directory: {}",
+            args.package.display()
+        ));
+    }
+    let range = args
+        .chain_layer_range
+        .ok_or_else(|| "chain probe requires --chain-layer-range".to_string())?;
+    let input_path = args
+        .hybrid_input
+        .as_ref()
+        .ok_or_else(|| "chain probe requires --hybrid-input".to_string())?;
+    if !input_path.is_file() {
+        return Err(format!(
+            "chain hybrid input is not a file: {}",
+            input_path.display()
+        ));
+    }
+    if args.output.exists() {
+        return Err(format!(
+            "refusing to overwrite output: {}",
+            args.output.display()
+        ));
+    }
+    fs::create_dir_all(&args.output)
+        .map_err(|err| format!("failed creating chain output directory: {err}"))?;
+
+    let input_bytes = fs::read(input_path).map_err(|err| {
+        format!(
+            "failed reading chain hybrid input {}: {err}",
+            input_path.display()
+        )
+    })?;
+    let input_digest = sha256_bytes(&input_bytes);
+    let (header, cases) = parse_hybrid_input(&input_bytes)?;
+    let input_root = input_path
+        .parent()
+        .ok_or_else(|| "chain hybrid input has no parent directory".to_string())?;
+    for case in &cases {
+        validate_hybrid_case_sidecar(input_root, case)?;
+    }
+
+    let selected_indices = (range.start..=range.end).collect::<Vec<_>>();
+    let layers = package_layer_entries_for_indices(&args.package, &selected_indices)
+        .map_err(|err| format!("failed resolving manifest-derived chain topology: {err}"))?;
+    if layers.len() != selected_indices.len()
+        || !layers
+            .iter()
+            .zip(&selected_indices)
+            .all(|(entry, index)| entry.layer_index == *index)
+        || !layers
+            .windows(2)
+            .all(|window| window[0].layer_index.checked_add(1) == Some(window[1].layer_index))
+    {
+        return Err(
+            "manifest-derived chain topology is not the requested contiguous range".to_string(),
+        );
+    }
+
+    let manifest_path = args.package.join("manifest.json");
+    let manifest_bytes = fs::read(&manifest_path)
+        .map_err(|err| format!("failed reading {}: {err}", manifest_path.display()))?;
+    let manifest_sha256 = sha256_bytes(&manifest_bytes);
+
+    let mut context = ullm_runtime_sys::RuntimeContext::create(0)
+        .map_err(|err| format!("failed creating CPU chain runtime context: {err}"))?;
+    let device = context
+        .device_info()
+        .map_err(|err| format!("failed querying CPU chain runtime device: {err}"))?;
+    if !device.backend.eq_ignore_ascii_case("cpu") {
+        return Err(format!(
+            "chain probe requires CPU device zero, got {}",
+            device.backend
+        ));
+    }
+    let mut stream = context
+        .create_stream()
+        .map_err(|err| format!("failed creating CPU chain runtime stream: {err}"))?;
+    let mut chains = cases
+        .iter()
+        .map(|case| {
+            Ok(ChainSequence {
+                case: case.clone(),
+                values: read_hybrid_residual(input_root, case)?,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let mut emitter = ChainStageEmitter::new(args.stage_stream_stdout);
+    for layer in &layers {
+        chains = match layer.kind {
+            PackageDecoderLayerKind::LinearAttention => run_chain_linear_layer(
+                &args,
+                &mut context,
+                &mut stream,
+                *layer,
+                chains,
+                &mut emitter,
+            )?,
+            PackageDecoderLayerKind::SelfAttention => run_chain_self_attention_layer(
+                &args,
+                &mut context,
+                &mut stream,
+                *layer,
+                chains,
+                &mut emitter,
+            )?,
+        };
+    }
+    drop(chains);
+    emitter.finish_stream()?;
+
+    let current_input = fs::read(input_path).map_err(|err| {
+        format!(
+            "failed rereading chain hybrid input {}: {err}",
+            input_path.display()
+        )
+    })?;
+    if sha256_bytes(&current_input) != input_digest {
+        return Err("chain hybrid input changed during probe".to_string());
+    }
+    let current_manifest = fs::read(&manifest_path)
+        .map_err(|err| format!("failed rereading {}: {err}", manifest_path.display()))?;
+    if sha256_bytes(&current_manifest) != manifest_sha256 {
+        return Err("package manifest changed during chain probe".to_string());
+    }
+
+    let report = ChainProbeReport {
+        schema_version: CHAIN_SCHEMA.to_string(),
+        status: "valid".to_string(),
+        classification: "unclassified".to_string(),
+        promotion: false,
+        holdout: "not_run".to_string(),
+        policy_evaluation: "policy_not_evaluated".to_string(),
+        device: format!("cpu:{}", device.device_id),
+        chunk_bytes: args.chunk_bytes,
+        package_root: args.package.display().to_string(),
+        package_manifest_sha256: manifest_sha256,
+        input: HybridInputReport {
+            path: input_path.display().to_string(),
+            schema: header.schema_version,
+            source_embedding_tensor: header.tensor_name,
+            dtype: header.dtype,
+            shape: header.shape,
+            residual_encoding: header.residual_encoding,
+            source_model_index_sha256: header.source_model_index_sha256,
+            rows: cases.len(),
+            consumed_sha256: input_digest,
+            cases: cases
+                .iter()
+                .map(|case| HybridCaseBinding {
+                    case_id: case.case_id.clone(),
+                    step: case.step,
+                    context_token_ids_sha256: case.context_token_ids_sha256.clone(),
+                    context_length: case.context_length,
+                    residual_path: case.residual_path.clone(),
+                    residual_sha256: case.residual_sha256.clone(),
+                })
+                .collect(),
+        },
+        chain: ChainExecutionReport {
+            requested_layer_range: format!("{}:{}", range.start, range.end),
+            contiguous: true,
+            layers: layers
+                .iter()
+                .map(|layer| ChainLayerTopology {
+                    layer_index: layer.layer_index,
+                    kind: layer.kind.as_str().to_string(),
+                })
+                .collect(),
+            post_rms_epsilon: args.post_rms_epsilon(),
+            post_rms_epsilon_mode: args.post_rms_epsilon_mode().to_string(),
+            self_attention_qk_rms_epsilon: AQ4_POST_RMS_EPSILON,
+            self_attention_rotary_dim: QWEN35_AQ4_ROTARY_DIM,
+            self_attention_rope_base: QWEN35_AQ4_ROPE_BASE,
+            state_contract: "The chain is cold-initialized once per fixture before layer 0. Each linear-attention layer uses its own model-defined Conv/recurrent state while replaying the complete temporal context; self-attention retains only the current layer's causal K/V sequence. No case is reset between chained layer outputs.".to_string(),
+            persistence_contract: "Only the current layer's input/output sequence, its current layer-local state, and fixed-coordinate summaries exist in memory. Full layer outputs are streamed to the comparator, then discarded before the next layer; no all-layer hidden/state tensor is retained.".to_string(),
+        },
+        layer_summaries: emitter.summaries(),
+    };
+    let report_path = args.output.join("aq4-report.json");
+    let report_json = serde_json::to_vec_pretty(&report)
+        .map_err(|err| format!("failed serializing chain report: {err}"))?;
+    fs::write(&report_path, report_json)
+        .map_err(|err| format!("failed writing {}: {err}", report_path.display()))?;
+    Ok(())
+}
+
 fn parse_args<I>(mut args: I) -> Result<Args>
 where
     I: Iterator<Item = String>,
@@ -926,6 +1322,7 @@ where
     let mut chunk_bytes = 16 * 1024 * 1024;
     let mut stage_stream_stdout = false;
     let mut post_norm_epsilon_source_control = false;
+    let mut chain_layer_range = None;
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--package" => {
@@ -955,9 +1352,16 @@ where
             "--post-norm-epsilon-source-control" => {
                 post_norm_epsilon_source_control = true
             }
+            "--chain-layer-range" => {
+                chain_layer_range = Some(parse_chain_layer_range(
+                    &args
+                        .next()
+                        .ok_or("--chain-layer-range requires START:END")?,
+                )?)
+            }
             "--help" | "-h" => {
                 return Err(
-                    "usage: --package DIR (--input JSONL | --hybrid-input JSONL) --output DIR [--chunk-bytes N] [--stage-stream-stdout] [--post-norm-epsilon-source-control]".to_string(),
+                    "usage: --package DIR (--input JSONL | --hybrid-input JSONL) --output DIR [--chunk-bytes N] [--stage-stream-stdout] [--post-norm-epsilon-source-control] [--chain-layer-range START:END]".to_string(),
                 )
             }
             other => return Err(format!("unknown argument: {other}")),
@@ -971,7 +1375,24 @@ where
         chunk_bytes,
         stage_stream_stdout,
         post_norm_epsilon_source_control,
+        chain_layer_range,
     })
+}
+
+fn parse_chain_layer_range(value: &str) -> Result<ChainLayerRange> {
+    let (start, end) = value
+        .split_once(':')
+        .ok_or("--chain-layer-range must be START:END")?;
+    let start = start
+        .parse::<usize>()
+        .map_err(|_| "invalid --chain-layer-range start".to_string())?;
+    let end = end
+        .parse::<usize>()
+        .map_err(|_| "invalid --chain-layer-range end".to_string())?;
+    if start >= end {
+        return Err("--chain-layer-range must contain at least two ascending layers".to_string());
+    }
+    Ok(ChainLayerRange { start, end })
 }
 
 fn parse_input(bytes: &[u8]) -> Result<(Header, Vec<Case>)> {
@@ -1519,8 +1940,11 @@ fn one_at_a_time_hybrid(
             )?;
             let attention_residual = add_f32(residual, &attention_projection)?;
             emitter.emit(case, timestep, "attention_residual", &attention_residual)?;
-            let post_normed =
-                rmsnorm_f32(&attention_residual, &post_norm_weight, args.post_rms_epsilon())?;
+            let post_normed = rmsnorm_f32(
+                &attention_residual,
+                &post_norm_weight,
+                args.post_rms_epsilon(),
+            )?;
             emitter.emit(case, timestep, "post_norm", &post_normed)?;
             attention_residuals.extend_from_slice(&attention_residual);
             post_normed_sequence.extend_from_slice(&post_normed);
@@ -1575,6 +1999,822 @@ fn one_at_a_time_hybrid(
         });
     }
     Ok(finals)
+}
+
+struct ChainLinearWeights {
+    qkv: PackageAq4ResidentMatvec,
+    z: PackageAq4ResidentMatvec,
+    a: PackageAq4ResidentMatvec,
+    b: PackageAq4ResidentMatvec,
+    out: PackageAq4ResidentMatvec,
+    mlp_gate: PackageAq4ResidentMatvec,
+    mlp_up: PackageAq4ResidentMatvec,
+    mlp_down: PackageAq4ResidentMatvec,
+    input_norm_weight: Vec<f32>,
+    conv: Vec<f32>,
+    a_log: Vec<f32>,
+    dt_bias: Vec<f32>,
+    attn_norm: Vec<f32>,
+    post_norm_weight: Vec<f32>,
+}
+
+struct ChainSelfAttentionWeights {
+    q: PackageAq4ResidentMatvec,
+    k: PackageAq4ResidentMatvec,
+    v: PackageAq4ResidentMatvec,
+    o: PackageAq4ResidentMatvec,
+    mlp_gate: PackageAq4ResidentMatvec,
+    mlp_up: PackageAq4ResidentMatvec,
+    mlp_down: PackageAq4ResidentMatvec,
+    input_norm_weight: Vec<f32>,
+    q_norm_weight: Vec<f32>,
+    k_norm_weight: Vec<f32>,
+    post_norm_weight: Vec<f32>,
+}
+
+struct ChainMatvecBuffers {
+    hidden_input: ullm_runtime_sys::RuntimeBuffer,
+    intermediate_input: ullm_runtime_sys::RuntimeBuffer,
+    projection_output: ullm_runtime_sys::RuntimeBuffer,
+    intermediate_output: ullm_runtime_sys::RuntimeBuffer,
+}
+
+fn layer_tensor_name(layer_index: usize, suffix: &str) -> String {
+    format!("model.language_model.layers.{layer_index}.{suffix}")
+}
+
+fn read_chain_passthrough(
+    package: &Path,
+    tensor_name: &str,
+    expected_elements: usize,
+    chunk_bytes: usize,
+) -> Result<Vec<f32>> {
+    let tensor = read_named_passthrough_f32(package, tensor_name, chunk_bytes)
+        .map_err(|err| format!("failed reading chain passthrough {tensor_name}: {err}"))?;
+    if tensor.values.len() != expected_elements
+        || tensor.values.iter().any(|value| !value.is_finite())
+    {
+        return Err(format!(
+            "chain passthrough geometry/value contract differs for {tensor_name}"
+        ));
+    }
+    Ok(tensor.values)
+}
+
+fn allocate_chain_matvec_buffers(
+    context: &mut ullm_runtime_sys::RuntimeContext,
+) -> Result<ChainMatvecBuffers> {
+    Ok(ChainMatvecBuffers {
+        hidden_input: context
+            .alloc_buffer(HIDDEN * std::mem::size_of::<f32>())
+            .map_err(|err| format!("failed allocating chain hidden input buffer: {err}"))?,
+        intermediate_input: context
+            .alloc_buffer(INTERMEDIATE * std::mem::size_of::<f32>())
+            .map_err(|err| format!("failed allocating chain intermediate input buffer: {err}"))?,
+        projection_output: context
+            .alloc_buffer(QKV_ROWS * std::mem::size_of::<f32>())
+            .map_err(|err| format!("failed allocating chain projection output buffer: {err}"))?,
+        intermediate_output: context
+            .alloc_buffer(INTERMEDIATE * std::mem::size_of::<f32>())
+            .map_err(|err| format!("failed allocating chain intermediate output buffer: {err}"))?,
+    })
+}
+
+fn load_chain_linear_weights(
+    args: &Args,
+    context: &mut ullm_runtime_sys::RuntimeContext,
+    stream: &mut ullm_runtime_sys::RuntimeStream,
+    layer_index: usize,
+) -> Result<ChainLinearWeights> {
+    let package_path = args
+        .package
+        .to_str()
+        .ok_or_else(|| "package path is not UTF-8".to_string())?;
+    let mut registry = WeightRegistry::new();
+    let qkv_name = layer_tensor_name(layer_index, "linear_attn.in_proj_qkv.weight");
+    let z_name = layer_tensor_name(layer_index, "linear_attn.in_proj_z.weight");
+    let a_name = layer_tensor_name(layer_index, "linear_attn.in_proj_a.weight");
+    let b_name = layer_tensor_name(layer_index, "linear_attn.in_proj_b.weight");
+    let out_name = layer_tensor_name(layer_index, "linear_attn.out_proj.weight");
+    let gate_name = layer_tensor_name(layer_index, "mlp.gate_proj.weight");
+    let up_name = layer_tensor_name(layer_index, "mlp.up_proj.weight");
+    let down_name = layer_tensor_name(layer_index, "mlp.down_proj.weight");
+    let input_norm_name = layer_tensor_name(layer_index, "input_layernorm.weight");
+    let conv_name = layer_tensor_name(layer_index, "linear_attn.conv1d.weight");
+    let a_log_name = layer_tensor_name(layer_index, "linear_attn.A_log");
+    let dt_bias_name = layer_tensor_name(layer_index, "linear_attn.dt_bias");
+    let attn_norm_name = layer_tensor_name(layer_index, "linear_attn.norm.weight");
+    let post_norm_name = layer_tensor_name(layer_index, "post_attention_layernorm.weight");
+
+    let qkv = load_hybrid_aq4_weight(
+        context,
+        stream,
+        &mut registry,
+        package_path,
+        &qkv_name,
+        QKV_ROWS,
+        HIDDEN,
+        args.chunk_bytes,
+    )?;
+    let z = load_hybrid_aq4_weight(
+        context,
+        stream,
+        &mut registry,
+        package_path,
+        &z_name,
+        HIDDEN,
+        HIDDEN,
+        args.chunk_bytes,
+    )?;
+    let a = load_hybrid_aq4_weight(
+        context,
+        stream,
+        &mut registry,
+        package_path,
+        &a_name,
+        VALUE_HEADS,
+        HIDDEN,
+        args.chunk_bytes,
+    )?;
+    let b = load_hybrid_aq4_weight(
+        context,
+        stream,
+        &mut registry,
+        package_path,
+        &b_name,
+        VALUE_HEADS,
+        HIDDEN,
+        args.chunk_bytes,
+    )?;
+    let out = load_hybrid_aq4_weight(
+        context,
+        stream,
+        &mut registry,
+        package_path,
+        &out_name,
+        HIDDEN,
+        HIDDEN,
+        args.chunk_bytes,
+    )?;
+    let mlp_gate = load_hybrid_aq4_weight(
+        context,
+        stream,
+        &mut registry,
+        package_path,
+        &gate_name,
+        INTERMEDIATE,
+        HIDDEN,
+        args.chunk_bytes,
+    )?;
+    let mlp_up = load_hybrid_aq4_weight(
+        context,
+        stream,
+        &mut registry,
+        package_path,
+        &up_name,
+        INTERMEDIATE,
+        HIDDEN,
+        args.chunk_bytes,
+    )?;
+    let mlp_down = load_hybrid_aq4_weight(
+        context,
+        stream,
+        &mut registry,
+        package_path,
+        &down_name,
+        HIDDEN,
+        INTERMEDIATE,
+        args.chunk_bytes,
+    )?;
+
+    let input_norm =
+        read_chain_passthrough(&args.package, &input_norm_name, HIDDEN, args.chunk_bytes)?;
+    let conv = read_chain_passthrough(
+        &args.package,
+        &conv_name,
+        QKV_ROWS * CONV_KERNEL,
+        args.chunk_bytes,
+    )?;
+    let a_log = read_chain_passthrough(&args.package, &a_log_name, VALUE_HEADS, args.chunk_bytes)?;
+    let dt_bias =
+        read_chain_passthrough(&args.package, &dt_bias_name, VALUE_HEADS, args.chunk_bytes)?;
+    let attn_norm =
+        read_chain_passthrough(&args.package, &attn_norm_name, VALUE_DIM, args.chunk_bytes)?;
+    let post_norm =
+        read_chain_passthrough(&args.package, &post_norm_name, HIDDEN, args.chunk_bytes)?;
+    Ok(ChainLinearWeights {
+        qkv,
+        z,
+        a,
+        b,
+        out,
+        mlp_gate,
+        mlp_up,
+        mlp_down,
+        input_norm_weight: effective_rmsnorm_weight_values(&input_norm_name, &input_norm),
+        conv,
+        a_log,
+        dt_bias,
+        attn_norm,
+        post_norm_weight: effective_rmsnorm_weight_values(&post_norm_name, &post_norm),
+    })
+}
+
+fn run_chain_linear_layer(
+    args: &Args,
+    context: &mut ullm_runtime_sys::RuntimeContext,
+    stream: &mut ullm_runtime_sys::RuntimeStream,
+    layer: PackageManifestLayerEntry,
+    chains: Vec<ChainSequence>,
+    emitter: &mut ChainStageEmitter,
+) -> Result<Vec<ChainSequence>> {
+    let weights = load_chain_linear_weights(args, context, stream, layer.layer_index)?;
+    let mut buffers = allocate_chain_matvec_buffers(context)?;
+    let mut next = Vec::with_capacity(chains.len());
+    for chain in chains {
+        let values = execute_chain_linear_sequence(
+            &weights,
+            &chain.values,
+            chain.case.context_length,
+            stream,
+            &mut buffers,
+            args.post_rms_epsilon(),
+            layer.layer_index,
+        )?;
+        for (timestep, output) in values.chunks_exact(HIDDEN).enumerate() {
+            emitter.emit(layer, &chain.case, timestep, output)?;
+        }
+        next.push(ChainSequence {
+            case: chain.case,
+            values,
+        });
+    }
+    Ok(next)
+}
+
+fn execute_chain_linear_sequence(
+    weights: &ChainLinearWeights,
+    residual_sequence: &[f32],
+    sequence_len: usize,
+    stream: &mut ullm_runtime_sys::RuntimeStream,
+    buffers: &mut ChainMatvecBuffers,
+    post_rms_epsilon: f32,
+    layer_index: usize,
+) -> Result<Vec<f32>> {
+    if sequence_len == 0
+        || sequence_len > HYBRID_MAX_CONTEXT_LENGTH
+        || residual_sequence.len() != sequence_len * HIDDEN
+        || residual_sequence.iter().any(|value| !value.is_finite())
+    {
+        return Err(format!("invalid chain linear layer {layer_index} sequence"));
+    }
+    let mut conv_state = vec![0.0_f32; QKV_ROWS * CONV_KERNEL];
+    let mut recurrent_state = vec![0.0_f32; STATE_ELEMENTS];
+    let mut attention_residuals = Vec::with_capacity(sequence_len * HIDDEN);
+    let mut post_normed = Vec::with_capacity(sequence_len * HIDDEN);
+    for timestep in 0..sequence_len {
+        let residual = &residual_sequence[timestep * HIDDEN..(timestep + 1) * HIDDEN];
+        let input_normed = rmsnorm_f32(residual, &weights.input_norm_weight, INPUT_RMS_EPSILON)?;
+        let qkv = aq4_matvec_to_host(
+            &weights.qkv,
+            &input_normed,
+            &mut buffers.hidden_input,
+            &mut buffers.projection_output,
+            stream,
+            &format!("chain_linear_{layer_index}_qkv"),
+        )?;
+        let z = aq4_matvec_to_host(
+            &weights.z,
+            &input_normed,
+            &mut buffers.hidden_input,
+            &mut buffers.projection_output,
+            stream,
+            &format!("chain_linear_{layer_index}_z"),
+        )?;
+        let a = aq4_matvec_to_host(
+            &weights.a,
+            &input_normed,
+            &mut buffers.hidden_input,
+            &mut buffers.projection_output,
+            stream,
+            &format!("chain_linear_{layer_index}_a"),
+        )?;
+        let b = aq4_matvec_to_host(
+            &weights.b,
+            &input_normed,
+            &mut buffers.hidden_input,
+            &mut buffers.projection_output,
+            stream,
+            &format!("chain_linear_{layer_index}_b"),
+        )?;
+        let conv_pre_silu = conv1d_step_f32(&mut conv_state, &qkv, &weights.conv)?;
+        let conv_silu = silu_f32(&conv_pre_silu);
+        let (q, k, v) = split_qkv_for_recurrent_step(&conv_silu)?;
+        let (gate, beta) = runtime_host_linear_attn_gate_beta_f32(
+            &a,
+            &b,
+            &weights.a_log,
+            &weights.dt_bias,
+            VALUE_HEADS,
+            1,
+        );
+        if gate.len() != VALUE_HEADS || beta.len() != VALUE_HEADS {
+            return Err(format!(
+                "chain linear layer {layer_index} gate/beta geometry differs"
+            ));
+        }
+        let recurrent = runtime_host_linear_attn_recurrent_f32(
+            &q,
+            &k,
+            &v,
+            &gate,
+            &beta,
+            KEY_HEADS,
+            VALUE_HEADS,
+            1,
+            KEY_DIM,
+            VALUE_DIM,
+            &mut recurrent_state,
+        );
+        if recurrent.len() != HIDDEN || recurrent.iter().any(|value| !value.is_finite()) {
+            return Err(format!(
+                "chain linear layer {layer_index} recurrent output is invalid"
+            ));
+        }
+        let (_, _, gate_composed) = attention_gated_norm_f32(&recurrent, &z, &weights.attn_norm)?;
+        let attention_projection = aq4_matvec_to_host(
+            &weights.out,
+            &gate_composed,
+            &mut buffers.hidden_input,
+            &mut buffers.projection_output,
+            stream,
+            &format!("chain_linear_{layer_index}_out"),
+        )?;
+        let attention_residual = add_f32(residual, &attention_projection)?;
+        let post = rmsnorm_f32(
+            &attention_residual,
+            &weights.post_norm_weight,
+            post_rms_epsilon,
+        )?;
+        attention_residuals.extend_from_slice(&attention_residual);
+        post_normed.extend_from_slice(&post);
+    }
+    let mut outputs = Vec::with_capacity(sequence_len * HIDDEN);
+    for timestep in 0..sequence_len {
+        let post = &post_normed[timestep * HIDDEN..(timestep + 1) * HIDDEN];
+        let attention_residual = &attention_residuals[timestep * HIDDEN..(timestep + 1) * HIDDEN];
+        let mlp_gate = aq4_matvec_to_host(
+            &weights.mlp_gate,
+            post,
+            &mut buffers.hidden_input,
+            &mut buffers.intermediate_output,
+            stream,
+            &format!("chain_linear_{layer_index}_mlp_gate"),
+        )?;
+        let mlp_up = aq4_matvec_to_host(
+            &weights.mlp_up,
+            post,
+            &mut buffers.hidden_input,
+            &mut buffers.intermediate_output,
+            stream,
+            &format!("chain_linear_{layer_index}_mlp_up"),
+        )?;
+        let activation = mul_f32(&silu_f32(&mlp_gate), &mlp_up)?;
+        let mlp_output = aq4_matvec_to_host(
+            &weights.mlp_down,
+            &activation,
+            &mut buffers.intermediate_input,
+            &mut buffers.projection_output,
+            stream,
+            &format!("chain_linear_{layer_index}_mlp_down"),
+        )?;
+        outputs.extend_from_slice(&add_f32(attention_residual, &mlp_output)?);
+    }
+    if outputs.len() != sequence_len * HIDDEN || outputs.iter().any(|value| !value.is_finite()) {
+        return Err(format!(
+            "chain linear layer {layer_index} output is invalid"
+        ));
+    }
+    Ok(outputs)
+}
+
+fn load_chain_self_attention_weights(
+    args: &Args,
+    context: &mut ullm_runtime_sys::RuntimeContext,
+    stream: &mut ullm_runtime_sys::RuntimeStream,
+    layer_index: usize,
+) -> Result<ChainSelfAttentionWeights> {
+    let package_path = args
+        .package
+        .to_str()
+        .ok_or_else(|| "package path is not UTF-8".to_string())?;
+    let mut registry = WeightRegistry::new();
+    let q_name = layer_tensor_name(layer_index, "self_attn.q_proj.weight");
+    let k_name = layer_tensor_name(layer_index, "self_attn.k_proj.weight");
+    let v_name = layer_tensor_name(layer_index, "self_attn.v_proj.weight");
+    let o_name = layer_tensor_name(layer_index, "self_attn.o_proj.weight");
+    let gate_name = layer_tensor_name(layer_index, "mlp.gate_proj.weight");
+    let up_name = layer_tensor_name(layer_index, "mlp.up_proj.weight");
+    let down_name = layer_tensor_name(layer_index, "mlp.down_proj.weight");
+    let input_norm_name = layer_tensor_name(layer_index, "input_layernorm.weight");
+    let q_norm_name = layer_tensor_name(layer_index, "self_attn.q_norm.weight");
+    let k_norm_name = layer_tensor_name(layer_index, "self_attn.k_norm.weight");
+    let post_norm_name = layer_tensor_name(layer_index, "post_attention_layernorm.weight");
+    let q = load_hybrid_aq4_weight(
+        context,
+        stream,
+        &mut registry,
+        package_path,
+        &q_name,
+        SELF_Q_ROWS,
+        HIDDEN,
+        args.chunk_bytes,
+    )?;
+    let k = load_hybrid_aq4_weight(
+        context,
+        stream,
+        &mut registry,
+        package_path,
+        &k_name,
+        SELF_KV_ROWS,
+        HIDDEN,
+        args.chunk_bytes,
+    )?;
+    let v = load_hybrid_aq4_weight(
+        context,
+        stream,
+        &mut registry,
+        package_path,
+        &v_name,
+        SELF_VALUE_ROWS,
+        HIDDEN,
+        args.chunk_bytes,
+    )?;
+    let o = load_hybrid_aq4_weight(
+        context,
+        stream,
+        &mut registry,
+        package_path,
+        &o_name,
+        HIDDEN,
+        HIDDEN,
+        args.chunk_bytes,
+    )?;
+    let mlp_gate = load_hybrid_aq4_weight(
+        context,
+        stream,
+        &mut registry,
+        package_path,
+        &gate_name,
+        INTERMEDIATE,
+        HIDDEN,
+        args.chunk_bytes,
+    )?;
+    let mlp_up = load_hybrid_aq4_weight(
+        context,
+        stream,
+        &mut registry,
+        package_path,
+        &up_name,
+        INTERMEDIATE,
+        HIDDEN,
+        args.chunk_bytes,
+    )?;
+    let mlp_down = load_hybrid_aq4_weight(
+        context,
+        stream,
+        &mut registry,
+        package_path,
+        &down_name,
+        HIDDEN,
+        INTERMEDIATE,
+        args.chunk_bytes,
+    )?;
+    let input_norm =
+        read_chain_passthrough(&args.package, &input_norm_name, HIDDEN, args.chunk_bytes)?;
+    let q_norm =
+        read_chain_passthrough(&args.package, &q_norm_name, SELF_HEAD_DIM, args.chunk_bytes)?;
+    let k_norm =
+        read_chain_passthrough(&args.package, &k_norm_name, SELF_HEAD_DIM, args.chunk_bytes)?;
+    let post_norm =
+        read_chain_passthrough(&args.package, &post_norm_name, HIDDEN, args.chunk_bytes)?;
+    Ok(ChainSelfAttentionWeights {
+        q,
+        k,
+        v,
+        o,
+        mlp_gate,
+        mlp_up,
+        mlp_down,
+        input_norm_weight: effective_rmsnorm_weight_values(&input_norm_name, &input_norm),
+        q_norm_weight: effective_rmsnorm_weight_values(&q_norm_name, &q_norm),
+        k_norm_weight: effective_rmsnorm_weight_values(&k_norm_name, &k_norm),
+        post_norm_weight: effective_rmsnorm_weight_values(&post_norm_name, &post_norm),
+    })
+}
+
+fn run_chain_self_attention_layer(
+    args: &Args,
+    context: &mut ullm_runtime_sys::RuntimeContext,
+    stream: &mut ullm_runtime_sys::RuntimeStream,
+    layer: PackageManifestLayerEntry,
+    chains: Vec<ChainSequence>,
+    emitter: &mut ChainStageEmitter,
+) -> Result<Vec<ChainSequence>> {
+    let weights = load_chain_self_attention_weights(args, context, stream, layer.layer_index)?;
+    let mut buffers = allocate_chain_matvec_buffers(context)?;
+    let mut next = Vec::with_capacity(chains.len());
+    for chain in chains {
+        let values = execute_chain_self_attention_sequence(
+            &weights,
+            &chain.values,
+            chain.case.context_length,
+            stream,
+            &mut buffers,
+            args.post_rms_epsilon(),
+            layer.layer_index,
+        )?;
+        for (timestep, output) in values.chunks_exact(HIDDEN).enumerate() {
+            emitter.emit(layer, &chain.case, timestep, output)?;
+        }
+        next.push(ChainSequence {
+            case: chain.case,
+            values,
+        });
+    }
+    Ok(next)
+}
+
+fn execute_chain_self_attention_sequence(
+    weights: &ChainSelfAttentionWeights,
+    residual_sequence: &[f32],
+    sequence_len: usize,
+    stream: &mut ullm_runtime_sys::RuntimeStream,
+    buffers: &mut ChainMatvecBuffers,
+    post_rms_epsilon: f32,
+    layer_index: usize,
+) -> Result<Vec<f32>> {
+    if sequence_len == 0
+        || sequence_len > HYBRID_MAX_CONTEXT_LENGTH
+        || residual_sequence.len() != sequence_len * HIDDEN
+        || residual_sequence.iter().any(|value| !value.is_finite())
+    {
+        return Err(format!(
+            "invalid chain self-attention layer {layer_index} sequence"
+        ));
+    }
+    let mut q_projected = Vec::with_capacity(sequence_len * SELF_Q_ROWS);
+    let mut k_projected = Vec::with_capacity(sequence_len * SELF_KV_ROWS);
+    let mut v_projected = Vec::with_capacity(sequence_len * SELF_VALUE_ROWS);
+    for timestep in 0..sequence_len {
+        let residual = &residual_sequence[timestep * HIDDEN..(timestep + 1) * HIDDEN];
+        let input_normed = rmsnorm_f32(residual, &weights.input_norm_weight, INPUT_RMS_EPSILON)?;
+        q_projected.extend_from_slice(&aq4_matvec_to_host(
+            &weights.q,
+            &input_normed,
+            &mut buffers.hidden_input,
+            &mut buffers.projection_output,
+            stream,
+            &format!("chain_self_{layer_index}_q"),
+        )?);
+        k_projected.extend_from_slice(&aq4_matvec_to_host(
+            &weights.k,
+            &input_normed,
+            &mut buffers.hidden_input,
+            &mut buffers.projection_output,
+            stream,
+            &format!("chain_self_{layer_index}_k"),
+        )?);
+        v_projected.extend_from_slice(&aq4_matvec_to_host(
+            &weights.v,
+            &input_normed,
+            &mut buffers.hidden_input,
+            &mut buffers.projection_output,
+            stream,
+            &format!("chain_self_{layer_index}_v"),
+        )?);
+    }
+    let mut q_gate = Vec::with_capacity(sequence_len * HIDDEN);
+    let mut q_rope = Vec::with_capacity(sequence_len * HIDDEN);
+    let mut k_rope = Vec::with_capacity(sequence_len * SELF_KV_ROWS);
+    for timestep in 0..sequence_len {
+        let (gate, q, k) = qwen35_qk_norm_rope_host_f32(
+            &q_projected[timestep * SELF_Q_ROWS..(timestep + 1) * SELF_Q_ROWS],
+            &k_projected[timestep * SELF_KV_ROWS..(timestep + 1) * SELF_KV_ROWS],
+            &weights.q_norm_weight,
+            &weights.k_norm_weight,
+            timestep,
+        )?;
+        q_gate.extend_from_slice(&gate);
+        q_rope.extend_from_slice(&q);
+        k_rope.extend_from_slice(&k);
+    }
+    let attention = causal_gqa_attention_host_f32(&q_rope, &k_rope, &v_projected, sequence_len)?;
+    let mut attention_residuals = Vec::with_capacity(sequence_len * HIDDEN);
+    let mut post_normed = Vec::with_capacity(sequence_len * HIDDEN);
+    for timestep in 0..sequence_len {
+        let attention_start = timestep * HIDDEN;
+        let gated_attention = q_gate[attention_start..attention_start + HIDDEN]
+            .iter()
+            .zip(&attention[attention_start..attention_start + HIDDEN])
+            .map(|(gate, value)| (1.0_f32 / (1.0_f32 + (-*gate).exp())) * value)
+            .collect::<Vec<_>>();
+        let attention_projection = aq4_matvec_to_host(
+            &weights.o,
+            &gated_attention,
+            &mut buffers.hidden_input,
+            &mut buffers.projection_output,
+            stream,
+            &format!("chain_self_{layer_index}_o"),
+        )?;
+        let residual = &residual_sequence[attention_start..attention_start + HIDDEN];
+        let attention_residual = add_f32(residual, &attention_projection)?;
+        let post = rmsnorm_f32(
+            &attention_residual,
+            &weights.post_norm_weight,
+            post_rms_epsilon,
+        )?;
+        attention_residuals.extend_from_slice(&attention_residual);
+        post_normed.extend_from_slice(&post);
+    }
+    let mut outputs = Vec::with_capacity(sequence_len * HIDDEN);
+    for timestep in 0..sequence_len {
+        let post = &post_normed[timestep * HIDDEN..(timestep + 1) * HIDDEN];
+        let attention_residual = &attention_residuals[timestep * HIDDEN..(timestep + 1) * HIDDEN];
+        let mlp_gate = aq4_matvec_to_host(
+            &weights.mlp_gate,
+            post,
+            &mut buffers.hidden_input,
+            &mut buffers.intermediate_output,
+            stream,
+            &format!("chain_self_{layer_index}_mlp_gate"),
+        )?;
+        let mlp_up = aq4_matvec_to_host(
+            &weights.mlp_up,
+            post,
+            &mut buffers.hidden_input,
+            &mut buffers.intermediate_output,
+            stream,
+            &format!("chain_self_{layer_index}_mlp_up"),
+        )?;
+        let activation = mul_f32(&silu_f32(&mlp_gate), &mlp_up)?;
+        let mlp_output = aq4_matvec_to_host(
+            &weights.mlp_down,
+            &activation,
+            &mut buffers.intermediate_input,
+            &mut buffers.projection_output,
+            stream,
+            &format!("chain_self_{layer_index}_mlp_down"),
+        )?;
+        outputs.extend_from_slice(&add_f32(attention_residual, &mlp_output)?);
+    }
+    if outputs.len() != sequence_len * HIDDEN || outputs.iter().any(|value| !value.is_finite()) {
+        return Err(format!(
+            "chain self-attention layer {layer_index} output is invalid"
+        ));
+    }
+    Ok(outputs)
+}
+
+fn qwen35_qk_norm_rope_host_f32(
+    q_projected: &[f32],
+    k_projected: &[f32],
+    q_norm_weight: &[f32],
+    k_norm_weight: &[f32],
+    position: usize,
+) -> Result<(Vec<f32>, Vec<f32>, Vec<f32>)> {
+    if q_projected.len() != SELF_Q_ROWS
+        || k_projected.len() != SELF_KV_ROWS
+        || q_norm_weight.len() != SELF_HEAD_DIM
+        || k_norm_weight.len() != SELF_HEAD_DIM
+        || q_projected
+            .iter()
+            .chain(k_projected)
+            .chain(q_norm_weight)
+            .chain(k_norm_weight)
+            .any(|value| !value.is_finite())
+    {
+        return Err("invalid chain self-attention Q/K norm/RoPE inputs".to_string());
+    }
+    let half = QWEN35_AQ4_ROTARY_DIM / 2;
+    let position = position as f32;
+    let mut q_gate = vec![0.0_f32; HIDDEN];
+    let mut q_rope = vec![0.0_f32; HIDDEN];
+    let mut k_rope = vec![0.0_f32; SELF_KV_ROWS];
+    for head in 0..SELF_Q_HEADS {
+        let source_base = head * 2 * SELF_HEAD_DIM;
+        let output_base = head * SELF_HEAD_DIM;
+        let mean_square = q_projected[source_base..source_base + SELF_HEAD_DIM]
+            .iter()
+            .map(|value| value * value)
+            .sum::<f32>()
+            / SELF_HEAD_DIM as f32;
+        let inv_rms = 1.0_f32 / (mean_square + AQ4_POST_RMS_EPSILON).sqrt();
+        for pair_dim in 0..half {
+            let exponent = (2.0_f32 * pair_dim as f32) / QWEN35_AQ4_ROTARY_DIM as f32;
+            let theta = position / QWEN35_AQ4_ROPE_BASE.powf(exponent);
+            let first = q_projected[source_base + pair_dim] * inv_rms * q_norm_weight[pair_dim];
+            let second_dim = half + pair_dim;
+            let second =
+                q_projected[source_base + second_dim] * inv_rms * q_norm_weight[second_dim];
+            q_rope[output_base + pair_dim] = first * theta.cos() - second * theta.sin();
+            q_rope[output_base + second_dim] = second * theta.cos() + first * theta.sin();
+        }
+        for dim in QWEN35_AQ4_ROTARY_DIM..SELF_HEAD_DIM {
+            q_rope[output_base + dim] =
+                q_projected[source_base + dim] * inv_rms * q_norm_weight[dim];
+        }
+        q_gate[output_base..output_base + SELF_HEAD_DIM].copy_from_slice(
+            &q_projected[source_base + SELF_HEAD_DIM..source_base + SELF_HEAD_DIM * 2],
+        );
+    }
+    for head in 0..SELF_KV_HEADS {
+        let base = head * SELF_HEAD_DIM;
+        let mean_square = k_projected[base..base + SELF_HEAD_DIM]
+            .iter()
+            .map(|value| value * value)
+            .sum::<f32>()
+            / SELF_HEAD_DIM as f32;
+        let inv_rms = 1.0_f32 / (mean_square + AQ4_POST_RMS_EPSILON).sqrt();
+        for pair_dim in 0..half {
+            let exponent = (2.0_f32 * pair_dim as f32) / QWEN35_AQ4_ROTARY_DIM as f32;
+            let theta = position / QWEN35_AQ4_ROPE_BASE.powf(exponent);
+            let first = k_projected[base + pair_dim] * inv_rms * k_norm_weight[pair_dim];
+            let second_dim = half + pair_dim;
+            let second = k_projected[base + second_dim] * inv_rms * k_norm_weight[second_dim];
+            k_rope[base + pair_dim] = first * theta.cos() - second * theta.sin();
+            k_rope[base + second_dim] = second * theta.cos() + first * theta.sin();
+        }
+        for dim in QWEN35_AQ4_ROTARY_DIM..SELF_HEAD_DIM {
+            k_rope[base + dim] = k_projected[base + dim] * inv_rms * k_norm_weight[dim];
+        }
+    }
+    if q_gate
+        .iter()
+        .chain(&q_rope)
+        .chain(&k_rope)
+        .any(|value| !value.is_finite())
+    {
+        return Err("chain self-attention Q/K norm/RoPE output is non-finite".to_string());
+    }
+    Ok((q_gate, q_rope, k_rope))
+}
+
+fn causal_gqa_attention_host_f32(
+    q: &[f32],
+    k: &[f32],
+    v: &[f32],
+    sequence_len: usize,
+) -> Result<Vec<f32>> {
+    if sequence_len == 0
+        || q.len() != sequence_len * HIDDEN
+        || k.len() != sequence_len * SELF_KV_ROWS
+        || v.len() != sequence_len * SELF_VALUE_ROWS
+        || q.iter().chain(k).chain(v).any(|value| !value.is_finite())
+    {
+        return Err("invalid chain causal GQA inputs".to_string());
+    }
+    let q_per_kv = SELF_Q_HEADS / SELF_KV_HEADS;
+    let scale = 1.0_f32 / (SELF_HEAD_DIM as f32).sqrt();
+    let mut output = vec![0.0_f32; sequence_len * HIDDEN];
+    for timestep in 0..sequence_len {
+        for q_head in 0..SELF_Q_HEADS {
+            let kv_head = q_head / q_per_kv;
+            let q_base = (timestep * SELF_Q_HEADS + q_head) * SELF_HEAD_DIM;
+            let mut scores = Vec::with_capacity(timestep + 1);
+            let mut max_score = f32::NEG_INFINITY;
+            for source_timestep in 0..=timestep {
+                let k_base = (source_timestep * SELF_KV_HEADS + kv_head) * SELF_HEAD_DIM;
+                let score = q[q_base..q_base + SELF_HEAD_DIM]
+                    .iter()
+                    .zip(&k[k_base..k_base + SELF_HEAD_DIM])
+                    .map(|(query, key)| query * key)
+                    .sum::<f32>()
+                    * scale;
+                max_score = max_score.max(score);
+                scores.push(score);
+            }
+            let normalizer = scores
+                .iter()
+                .map(|score| (*score - max_score).exp())
+                .sum::<f32>();
+            if !normalizer.is_finite() || normalizer <= 0.0 {
+                return Err("chain causal GQA softmax normalizer is invalid".to_string());
+            }
+            let output_base = (timestep * SELF_Q_HEADS + q_head) * SELF_VALUE_DIM;
+            for (source_timestep, score) in scores.into_iter().enumerate() {
+                let probability = (score - max_score).exp() / normalizer;
+                let v_base = (source_timestep * SELF_KV_HEADS + kv_head) * SELF_VALUE_DIM;
+                for dim in 0..SELF_VALUE_DIM {
+                    output[output_base + dim] += probability * v[v_base + dim];
+                }
+            }
+        }
+    }
+    if output.iter().any(|value| !value.is_finite()) {
+        return Err("chain causal GQA output is non-finite".to_string());
+    }
+    Ok(output)
 }
 
 fn load_hybrid_aq4_weight(

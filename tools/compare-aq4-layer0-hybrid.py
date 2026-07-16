@@ -321,6 +321,18 @@ class SourceLoader:
 
     def tensor(self, key: str) -> torch.Tensor:
         name = TENSORS[key]
+        if key == "a_log" or key == "attn_norm":
+            expected_dtype = torch.float32
+        else:
+            expected_dtype = torch.bfloat16
+        return self.tensor_by_name(name, EXPECTED_SHAPES[key], expected_dtype)
+
+    def tensor_by_name(
+        self,
+        name: str,
+        expected_shape: list[int],
+        expected_dtype: torch.dtype,
+    ) -> torch.Tensor:
         if name not in self.weight_map:
             raise ValueError(f"source model is missing {name}")
         shard = self.source_model / self.weight_map[name]
@@ -328,17 +340,15 @@ class SourceLoader:
             raise ValueError(f"source shard is missing: {shard}")
         with safe_open(str(shard), framework="pt", device="cpu") as handle:
             value = handle.get_tensor(name)
-        if list(value.shape) != EXPECTED_SHAPES[key]:
+        if list(value.shape) != expected_shape:
             raise ValueError(f"source geometry differs for {name}: {list(value.shape)}")
-        if key == "a_log":
-            expected_dtype = torch.float32
-        elif key == "attn_norm":
-            expected_dtype = torch.float32
-        else:
-            expected_dtype = torch.bfloat16
         if value.dtype != expected_dtype:
             raise ValueError(f"source dtype differs for {name}: {value.dtype}")
-        self.used_shards[shard.name] = sha256_file(shard)
+        # The chained diagnostic can draw several tensors from one shard.  Hash
+        # each shard once for the identity record instead of re-reading its
+        # multi-gigabyte contents for every tensor.
+        if shard.name not in self.used_shards:
+            self.used_shards[shard.name] = sha256_file(shard)
         return value
 
     def lm_head_rows(self, rows: tuple[int, ...]) -> torch.Tensor:
@@ -350,7 +360,8 @@ class SourceLoader:
         result = torch.cat(values, dim=0).contiguous()
         if list(result.shape) != [len(rows), HIDDEN] or result.dtype != torch.bfloat16:
             raise ValueError("source LM-head selected row geometry/dtype differs")
-        self.used_shards[shard.name] = sha256_file(shard)
+        if shard.name not in self.used_shards:
+            self.used_shards[shard.name] = sha256_file(shard)
         return result
 
     def identity(self) -> dict[str, Any]:
