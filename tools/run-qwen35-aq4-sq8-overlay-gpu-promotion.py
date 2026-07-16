@@ -52,6 +52,8 @@ STOP_TIMEOUT_SECONDS = 30.0
 RESTORE_TIMEOUT_SECONDS = 120.0
 POLL_SECONDS = 0.25
 MAX_JSON_BYTES = 16 * 1024 * 1024
+MAX_TRUSTED_COMPONENT_BYTES = 16 * 1024 * 1024
+SAFE_INT = 9_007_199_254_740_991
 CAPTURE_DIAGNOSTIC_MAX_BYTES = 32 * 1024
 CAPTURE_ENVELOPE_MAX_BYTES = 512 * 1024
 CAPTURE_READ_CHUNK_BYTES = 64 * 1024
@@ -185,19 +187,105 @@ def sha_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def validate_trusted_components(gate: dict[str, Any]) -> dict[str, dict[str, str]]:
-    """Validate and return the immutable tool paths bound by the Gate.
+def safe_counter(value: Any) -> bool:
+    return type(value) is int and 0 <= value <= SAFE_INT
+
+
+@dataclass
+class VerifiedTrustedComponent:
+    path: Path
+    sha256: str
+    device: int
+    inode: int
+    content: bytes
+    execution_fd: int | None = None
+
+    def evidence(self) -> dict[str, Any]:
+        return {
+            "path": str(self.path),
+            "sha256": self.sha256,
+            "device": self.device,
+            "inode": self.inode,
+        }
+
+    def close(self) -> None:
+        if self.execution_fd is not None:
+            os.close(self.execution_fd)
+            self.execution_fd = None
+
+
+@dataclass
+class VerifiedTrustedComponents:
+    components: dict[str, VerifiedTrustedComponent]
+
+    def evidence(self) -> dict[str, dict[str, Any]]:
+        return {
+            name: component.evidence()
+            for name, component in sorted(self.components.items())
+        }
+
+    def gate_binding(self) -> dict[str, dict[str, str]]:
+        return {
+            name: {"path": str(component.path), "sha256": component.sha256}
+            for name, component in sorted(self.components.items())
+        }
+
+    def sources(self) -> dict[str, bytes]:
+        return {
+            name: component.content
+            for name, component in sorted(self.components.items())
+        }
+
+    def close(self) -> None:
+        for component in self.components.values():
+            component.close()
+
+    def __enter__(self) -> "VerifiedTrustedComponents":
+        return self
+
+    def __exit__(self, *_args: Any) -> None:
+        self.close()
+
+
+def _sealed_execution_fd(name: str, content: bytes) -> int:
+    if not hasattr(os, "memfd_create"):
+        raise PromotionError("sealed trusted component execution is unavailable")
+    flags = os.MFD_CLOEXEC | getattr(os, "MFD_ALLOW_SEALING", 0)
+    descriptor = os.memfd_create(f"ullm-{name}", flags)
+    try:
+        view = memoryview(content)
+        while view:
+            written = os.write(descriptor, view)
+            if written <= 0:
+                raise PromotionError("trusted component sealed copy write failed")
+            view = view[written:]
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        seals = (
+            fcntl.F_SEAL_SEAL
+            | fcntl.F_SEAL_SHRINK
+            | fcntl.F_SEAL_GROW
+            | fcntl.F_SEAL_WRITE
+        )
+        fcntl.fcntl(descriptor, fcntl.F_ADD_SEALS, seals)
+        return descriptor
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
+def pin_trusted_components(gate: dict[str, Any]) -> VerifiedTrustedComponents:
+    """Open, hash, and retain immutable bytes for every Gate-bound tool.
 
     The Gate is the authority for the preparation audit, but its paths are
     accepted only when they are the exact repository tools approved by this
-    wrapper.  This prevents a candidate from naming an arbitrary executable or
-    relying on a modified host-side helper after preparation.
+    wrapper.  Runtime use is from the retained bytes or a sealed memfd, never by
+    reopening the mutable pathname after validation.
     """
 
     raw = gate.get("trusted_components")
     if not isinstance(raw, dict) or set(raw) != TRUSTED_COMPONENT_KEYS:
         raise PromotionError("candidate Gate trusted component schema differs")
-    validated: dict[str, dict[str, str]] = {}
+    validated: dict[str, VerifiedTrustedComponent] = {}
     for name in sorted(TRUSTED_COMPONENT_KEYS):
         value = raw.get(name)
         if not isinstance(value, dict) or set(value) != {"path", "sha256"}:
@@ -212,26 +300,81 @@ def validate_trusted_components(gate: dict[str, Any]) -> dict[str, dict[str, str
             raise PromotionError(f"candidate Gate trusted component {name} identity differs")
         path = Path(raw_path)
         expected = TRUSTED_COMPONENT_PATHS[name]
+        descriptor: int | None = None
         try:
             resolved = path.resolve(strict=True)
-            metadata = path.stat(follow_symlinks=False)
+            descriptor = os.open(
+                path,
+                os.O_RDONLY | os.O_CLOEXEC | getattr(os, "O_NOFOLLOW", 0),
+            )
+            metadata = os.fstat(descriptor)
+            path_metadata = path.stat(follow_symlinks=False)
         except OSError as error:
             raise PromotionError(
                 f"candidate Gate trusted component {name} is unavailable"
             ) from error
-        if (
-            not path.is_absolute()
-            or resolved != path
-            or resolved != expected
-            or resolved.parent != TRUSTED_COMPONENT_APPROVED_ROOT
-            or path.is_symlink()
-            or not stat.S_ISREG(metadata.st_mode)
-            or metadata.st_nlink != 1
-            or sha_file(path) != digest
-        ):
-            raise PromotionError(f"candidate Gate trusted component {name} binding differs")
-        validated[name] = {"path": str(resolved), "sha256": digest}
-    return validated
+        try:
+            if (
+                not path.is_absolute()
+                or resolved != path
+                or resolved != expected
+                or resolved.parent != TRUSTED_COMPONENT_APPROVED_ROOT
+                or path.is_symlink()
+                or not stat.S_ISREG(metadata.st_mode)
+                or metadata.st_nlink != 1
+                or (path_metadata.st_dev, path_metadata.st_ino)
+                != (metadata.st_dev, metadata.st_ino)
+                or metadata.st_size < 1
+                or metadata.st_size > MAX_TRUSTED_COMPONENT_BYTES
+            ):
+                raise PromotionError(
+                    f"candidate Gate trusted component {name} binding differs"
+                )
+            chunks: list[bytes] = []
+            remaining = metadata.st_size
+            while remaining:
+                chunk = os.read(descriptor, min(1024 * 1024, remaining))
+                if not chunk:
+                    raise PromotionError(
+                        f"candidate Gate trusted component {name} read differs"
+                    )
+                chunks.append(chunk)
+                remaining -= len(chunk)
+            if os.read(descriptor, 1):
+                raise PromotionError(
+                    f"candidate Gate trusted component {name} size changed"
+                )
+            after = os.fstat(descriptor)
+            content = b"".join(chunks)
+            observed = hashlib.sha256(content).hexdigest()
+            if (
+                (after.st_dev, after.st_ino, after.st_size, after.st_nlink)
+                != (metadata.st_dev, metadata.st_ino, metadata.st_size, metadata.st_nlink)
+                or observed != digest
+            ):
+                raise PromotionError(
+                    f"candidate Gate trusted component {name} binding differs"
+                )
+            validated[name] = VerifiedTrustedComponent(
+                path=resolved,
+                sha256=digest,
+                device=metadata.st_dev,
+                inode=metadata.st_ino,
+                content=content,
+                execution_fd=None,
+            )
+        finally:
+            if descriptor is not None:
+                os.close(descriptor)
+    validated["executor_capture"].execution_fd = _sealed_execution_fd(
+        "executor_capture", validated["executor_capture"].content
+    )
+    return VerifiedTrustedComponents(validated)
+
+
+def validate_trusted_components(gate: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    with pin_trusted_components(gate) as verified:
+        return verified.evidence()
 
 
 def read_object(path: Path, label: str) -> dict[str, Any]:
@@ -1150,10 +1293,7 @@ def validate_executor_record(
     if (
         not isinstance(projection, dict)
         or set(projection) != projection_keys
-        or any(
-            type(projection[key]) is not int or projection[key] < 0
-            for key in projection_keys
-        )
+        or any(not safe_counter(projection[key]) for key in projection_keys)
         or projection.get("batch_matvec_count", 0) <= 0
         or projection.get("pair_matvec_count", 0) <= 0
     ):
@@ -1166,7 +1306,7 @@ def validate_executor_record(
     if (
         not isinstance(staging, dict)
         or set(staging) != staging_keys
-        or any(type(staging[key]) is not int or staging[key] < 0 for key in staging_keys)
+        or any(not safe_counter(staging[key]) for key in staging_keys)
         or any(staging[key] != 0 for key in staging_keys)
     ):
         raise PromotionError("SQ8 executor used diagnostic host staging")
@@ -1918,6 +2058,12 @@ class _CaptureStreamCollector:
         )
 
 
+class CaptureCommand(list[str]):
+    def __init__(self, values: list[str], *, pass_fds: tuple[int, ...] = ()) -> None:
+        super().__init__(values)
+        self.pass_fds = pass_fds
+
+
 def default_capture(
     argv: list[str], environment: dict[str, str]
 ) -> CaptureProcessResult:
@@ -1927,6 +2073,7 @@ def default_capture(
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         env=environment,
+        pass_fds=getattr(argv, "pass_fds", ()),
     )
     assert proc.stdout is not None and proc.stderr is not None
     stdout_collector = _CaptureStreamCollector(retain_parse_buffer=True)
@@ -2587,10 +2734,10 @@ def _capture_error_envelope(
             or observed_telemetry.get("schema_version") != TELEMETRY_SCHEMA
             or not isinstance(projection, dict)
             or set(projection) != projection_keys
-            or any(type(projection[key]) is not int or projection[key] < 0 for key in projection_keys)
+            or any(not safe_counter(projection[key]) for key in projection_keys)
             or not isinstance(staging, dict)
             or set(staging) != staging_keys
-            or any(type(staging[key]) is not int or staging[key] < 0 for key in staging_keys)
+            or any(not safe_counter(staging[key]) for key in staging_keys)
         ):
             invalid["reason"] = "observed_sq8_promotion_telemetry_invalid"
             return invalid
@@ -2868,29 +3015,41 @@ def capture_environment(profile: dict[str, Any]) -> dict[str, str]:
 
 
 def capture_command(
-    candidate: Path, output: Path, request_id: str, *, capture_path: Path
+    candidate: Path,
+    output: Path,
+    request_id: str,
+    *,
+    capture_path: Path,
+    capture_fd: int | None = None,
 ) -> list[str]:
     if PROMOTION_REQUEST_ID_RE.fullmatch(request_id) is None:
         raise PromotionError("candidate promotion request ID differs")
-    return [
-        "python3",
-        str(capture_path),
-        "--manifest",
-        str(candidate / "served-model.json"),
-        "--output",
-        str(output),
-        "--prompt-tokens",
-        "128",
-        "--max-new-tokens",
-        "2",
-        "--ready-timeout",
-        str(CAPTURE_READY_TIMEOUT_SECONDS),
-        "--timeout",
-        str(CAPTURE_REQUEST_TIMEOUT_SECONDS),
-        "--sq8-promotion-evidence",
-        "--sq8-promotion-request-id",
-        request_id,
-    ]
+    return CaptureCommand(
+        [
+            "python3",
+            (
+                f"/proc/self/fd/{capture_fd}"
+                if capture_fd is not None
+                else str(capture_path)
+            ),
+            "--manifest",
+            str(candidate / "served-model.json"),
+            "--output",
+            str(output),
+            "--prompt-tokens",
+            "128",
+            "--max-new-tokens",
+            "2",
+            "--ready-timeout",
+            str(CAPTURE_READY_TIMEOUT_SECONDS),
+            "--timeout",
+            str(CAPTURE_REQUEST_TIMEOUT_SECONDS),
+            "--sq8-promotion-evidence",
+            "--sq8-promotion-request-id",
+            request_id,
+        ],
+        pass_fds=(capture_fd,) if capture_fd is not None else (),
+    )
 
 
 def finalize_directory(
@@ -2968,7 +3127,7 @@ def finalize_directory(
         raise
 
 
-def load_receipt_writer(receipt_writer_path: Path) -> Any:
+def load_receipt_writer(receipt_writer_path: Path, source: bytes | None = None) -> Any:
     spec = importlib.util.spec_from_file_location(
         "_ullm_sq8_actual_receipt_writer", receipt_writer_path
     )
@@ -2977,15 +3136,20 @@ def load_receipt_writer(receipt_writer_path: Path) -> Any:
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
     try:
-        spec.loader.exec_module(module)
+        if source is None:
+            raise PromotionError("verified promotion receipt writer source is required")
+        exec(compile(source, str(receipt_writer_path), "exec"), module.__dict__)
     except BaseException:
         sys.modules.pop(spec.name, None)
         raise
     return module
 
 
-def execute(
-    candidate: Path, output: Path, deps: Dependencies
+def _execute_verified(
+    candidate: Path,
+    output: Path,
+    deps: Dependencies,
+    verified: VerifiedTrustedComponents,
 ) -> tuple[int, dict[str, Any]]:
     before_candidate = candidate_snapshot(candidate)
     if before_candidate.get("authorization", {}).get("actual_run_allowed") is not True:
@@ -2993,7 +3157,9 @@ def execute(
     profile = read_object(candidate / "profile.json", "candidate profile")
     readiness = validate_readiness_contract(before_candidate.get("readiness"))
     gate = read_object(candidate / "gate.json", "candidate Gate")
-    trusted_components = validate_trusted_components(gate)
+    trusted_components = verified.evidence()
+    if gate.get("trusted_components") != verified.gate_binding():
+        raise PromotionError("candidate trusted component Gate changed during validation")
     if trusted_components != before_candidate.get("trusted_components"):
         raise PromotionError("candidate trusted component binding changed during validation")
     request_id = gate.get("request", {}).get("actual", {}).get("request_id")
@@ -3053,15 +3219,21 @@ def execute(
         evidence["stopped_observations"] = poll_stopped(deps, old_worker_pid, readiness)
         lease = deps.acquire_lock()
         evidence["lock"] = lease.evidence()
+        capture_component = verified.components["executor_capture"]
+        if capture_component.execution_fd is None:
+            raise PromotionError("verified executor capture descriptor is unavailable")
         command = capture_command(
             candidate,
             capture_temp,
             request_id,
-            capture_path=Path(trusted_components["executor_capture"]["path"]),
+            capture_path=capture_component.path,
+            capture_fd=capture_component.execution_fd,
         )
+        evidence_argv = list(command)
+        evidence_argv[1] = str(capture_component.path)
         environment = capture_environment(profile)
         evidence["capture"] = {
-            "argv": command,
+            "argv": evidence_argv,
             "timeouts": dict(CAPTURE_TIMEOUTS),
             "environment": {
                 name: environment[name]
@@ -3194,7 +3366,8 @@ def execute(
 
     def receipt_factory(staging: Path) -> str:
         writer = load_receipt_writer(
-            Path(trusted_components["promotion_receipt_writer"]["path"])
+            verified.components["promotion_receipt_writer"].path,
+            verified.components["promotion_receipt_writer"].content,
         )
         maintenance_path = staging / "maintenance-evidence.json"
         if evidence["status"] == "passed" and capture_record is not None:
@@ -3208,6 +3381,7 @@ def execute(
                     trusted_components["served_model_generator"]["path"]
                 ),
                 trusted_components=trusted_components,
+                trusted_component_sources=verified.sources(),
             )
             return name
         name = "promotion-failure-receipt.json"
@@ -3216,11 +3390,20 @@ def execute(
             maintenance_evidence_path=maintenance_path,
             output_path=staging / name,
             trusted_components=trusted_components,
+            trusted_component_sources=verified.sources(),
         )
         return name
 
     finalize_directory(output, documents, receipt_factory)
     return code, evidence
+
+
+def execute(
+    candidate: Path, output: Path, deps: Dependencies
+) -> tuple[int, dict[str, Any]]:
+    gate = read_object(candidate / "gate.json", "candidate Gate")
+    with pin_trusted_components(gate) as verified:
+        return _execute_verified(candidate, output, deps, verified)
 
 
 def main(argv: list[str] | None = None) -> int:

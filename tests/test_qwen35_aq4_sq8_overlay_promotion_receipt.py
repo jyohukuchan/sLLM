@@ -74,11 +74,81 @@ def telemetry_binding(value: dict, request_id: str = REQUEST_ID) -> dict:
     }
 
 
-def trusted_components() -> dict[str, dict[str, str]]:
+def sq8_telemetry() -> dict:
     return {
-        name: {"path": str(path), "sha256": WRITER.sha256_file(path)}
+        "schema_version": "ullm.qwen35_aq4.sq8_promotion_telemetry.v1",
+        "projection": {
+            "single_matvec_count": 0,
+            "batch_matvec_count": 1,
+            "pair_matvec_count": 1,
+            "triple_matvec_count": 0,
+            "fallback_count": 0,
+        },
+        "diagnostic_host_staging": {
+            "read_count": 0,
+            "write_count": 0,
+            "read_bytes": 0,
+            "write_bytes": 0,
+        },
+    }
+
+
+def trusted_components() -> dict[str, dict[str, object]]:
+    return {
+        name: {
+            "path": str(path),
+            "sha256": WRITER.sha256_file(path),
+            "device": path.stat(follow_symlinks=False).st_dev,
+            "inode": path.stat(follow_symlinks=False).st_ino,
+        }
         for name, path in WRITER.TRUSTED_COMPONENT_PATHS.items()
     }
+
+
+@pytest.mark.parametrize("failure_evidence", [False, True])
+@pytest.mark.parametrize(
+    ("section", "key", "replacement"),
+    [
+        ("projection", "batch_matvec_count", True),
+        ("projection", "batch_matvec_count", 1.0),
+        ("projection", "batch_matvec_count", -1),
+        ("projection", "batch_matvec_count", WRITER.SAFE_INT + 1),
+        ("diagnostic_host_staging", "read_count", False),
+        ("diagnostic_host_staging", "read_count", 0.0),
+        ("diagnostic_host_staging", "read_count", -1),
+        ("diagnostic_host_staging", "read_count", WRITER.SAFE_INT + 1),
+    ],
+)
+def test_receipt_success_and_failure_telemetry_require_safe_integer_counters(
+    failure_evidence: bool, section: str, key: str, replacement: object
+) -> None:
+    value = sq8_telemetry()
+    value[section][key] = replacement
+    with pytest.raises(WRITER.ReceiptError):
+        WRITER._validate_sq8_telemetry(
+            value, require_promotion_thresholds=not failure_evidence
+        )
+
+
+def test_receipt_telemetry_accepts_safe_integer_upper_boundary() -> None:
+    value = sq8_telemetry()
+    value["projection"]["batch_matvec_count"] = WRITER.SAFE_INT
+    value["projection"]["pair_matvec_count"] = WRITER.SAFE_INT
+    assert WRITER._validate_sq8_telemetry(value) is value
+
+
+def test_generator_import_executes_retained_bytes_after_path_replacement(
+    tmp_path: Path,
+) -> None:
+    generator_path = tmp_path / "generator.py"
+    retained = b"MARKER = 'original-generator'\n"
+    generator_path.write_bytes(retained)
+    generator_path.write_text(
+        "MARKER = 'replacement-generator'\n", encoding="ascii"
+    )
+
+    generator = WRITER._load_generator(generator_path, retained)
+    assert generator.MARKER == "original-generator"
 
 
 @pytest.fixture
@@ -613,3 +683,45 @@ def test_failure_receipt_is_separate_and_request_bound(fixture: dict[str, Path |
         )
     with pytest.raises(WRITER.ReceiptError, match="already exists"):
         WRITER.write_failure_receipt(prepared, maintenance, output)
+
+
+def test_failure_receipt_rejects_unsafe_observed_telemetry_counter(
+    fixture: dict[str, Path | dict],
+) -> None:
+    prepared = Path(fixture["profile"]).with_name("promotion.json")
+    WRITER.write_receipt(
+        profile_path=Path(fixture["profile"]),
+        output_path=prepared,
+        source_tree_sha256="2" * 40,
+        source_archive_sha256="3" * 64,
+        served_model_path=Path(fixture["served"]),
+        request_id=REQUEST_ID,
+    )
+    telemetry = sq8_telemetry()
+    telemetry["projection"]["batch_matvec_count"] = WRITER.SAFE_INT + 1
+    maintenance = Path(fixture["profile"]).with_name("unsafe-maintenance.json")
+    _write_json(
+        maintenance,
+        {
+            "schema_version": "ullm.qwen35_aq4.sq8_overlay_gpu_promotion_maintenance.v1",
+            "promotion_request_id": REQUEST_ID,
+            "status": "failed",
+            "trusted_components": trusted_components(),
+            "capture_failure": {
+                "capture_tool_error": {
+                    "observed_sq8_promotion_telemetry": telemetry,
+                    "observed_sq8_promotion_telemetry_binding": telemetry_binding(
+                        telemetry
+                    ),
+                }
+            },
+        },
+    )
+    output_root = Path(fixture["profile"]).with_name("unsafe-failure")
+    output_root.mkdir()
+    with pytest.raises(WRITER.ReceiptError, match="telemetry count"):
+        WRITER.write_failure_receipt(
+            prepared,
+            maintenance,
+            output_root / "promotion-failure-receipt.json",
+        )

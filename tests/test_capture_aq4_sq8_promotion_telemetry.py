@@ -43,6 +43,12 @@ def test_valid_sq8_promotion_telemetry_requires_observed_batch_and_pair() -> Non
         with pytest.raises(TOOL.CaptureError, match="batch and pair"):
             TOOL.validate_sq8_promotion_telemetry(telemetry(**{key: 0}))
 
+    upper = telemetry(
+        batch_matvec_count=TOOL.SAFE_INT,
+        pair_matvec_count=TOOL.SAFE_INT,
+    )
+    assert TOOL.validate_sq8_promotion_telemetry(upper) is upper
+
 
 @pytest.mark.parametrize(
     "key",
@@ -63,6 +69,29 @@ def test_sq8_promotion_telemetry_rejects_host_staging_and_shape_extensions() -> 
     extended["projection"]["unknown"] = 0
     with pytest.raises(TOOL.CaptureError, match="shape differs"):
         TOOL.validate_sq8_promotion_telemetry(extended)
+
+
+@pytest.mark.parametrize(
+    ("section", "key", "replacement"),
+    [
+        ("projection", "batch_matvec_count", True),
+        ("projection", "batch_matvec_count", 1.0),
+        ("projection", "batch_matvec_count", -1),
+        ("projection", "batch_matvec_count", TOOL.SAFE_INT + 1),
+        ("diagnostic_host_staging", "read_count", False),
+        ("diagnostic_host_staging", "read_count", 0.0),
+        ("diagnostic_host_staging", "read_count", -1),
+        ("diagnostic_host_staging", "read_count", TOOL.SAFE_INT + 1),
+    ],
+)
+def test_sq8_telemetry_all_counters_are_exact_safe_integers(
+    section: str, key: str, replacement: object
+) -> None:
+    value = telemetry()
+    value[section][key] = replacement
+    with pytest.raises(TOOL.CaptureError):
+        TOOL.validate_sq8_promotion_telemetry(value)
+    assert TOOL.diagnostic_sq8_promotion_telemetry(value) is None
 
 
 def test_diagnostic_telemetry_preserves_observed_zero_without_accepting_it() -> None:

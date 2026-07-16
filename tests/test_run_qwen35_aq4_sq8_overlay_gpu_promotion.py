@@ -72,9 +72,21 @@ class ReceiptWriter:
         )
 
 
-def trusted_components() -> dict[str, dict[str, str]]:
+def gate_trusted_components() -> dict[str, dict[str, str]]:
     return {
         name: {"path": str(path), "sha256": MODULE.sha_file(path)}
+        for name, path in MODULE.TRUSTED_COMPONENT_PATHS.items()
+    }
+
+
+def trusted_components() -> dict[str, dict[str, Any]]:
+    return {
+        name: {
+            "path": str(path),
+            "sha256": MODULE.sha_file(path),
+            "device": path.stat(follow_symlinks=False).st_dev,
+            "inode": path.stat(follow_symlinks=False).st_ino,
+        }
         for name, path in MODULE.TRUSTED_COMPONENT_PATHS.items()
     }
 
@@ -153,7 +165,7 @@ def candidate(tmp_path: Path) -> Path:
         json.dumps(
             {
                 "request": {"actual": {"request_id": "sq8-promotion-" + "a" * 64}},
-                "trusted_components": trusted_components(),
+                "trusted_components": gate_trusted_components(),
             }
         ),
         encoding="utf-8",
@@ -376,7 +388,7 @@ def test_validate_executor_record_binds_telemetry_hash_and_request_id(
 def test_trusted_components_reject_gate_tamper(
     mutation: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    value = {"trusted_components": trusted_components()}
+    value = {"trusted_components": gate_trusted_components()}
     if mutation == "missing":
         del value["trusted_components"]["executor_capture"]
     elif mutation == "unknown":
@@ -403,7 +415,7 @@ def test_trusted_components_reject_symlink_and_nlink(
     link.symlink_to(target)
     monkeypatch.setitem(MODULE.TRUSTED_COMPONENT_PATHS, "executor_capture", link)
     monkeypatch.setattr(MODULE, "TRUSTED_COMPONENT_APPROVED_ROOT", tmp_path)
-    symlink_gate = {"trusted_components": trusted_components()}
+    symlink_gate = {"trusted_components": gate_trusted_components()}
     with pytest.raises(MODULE.PromotionError, match="trusted component"):
         MODULE.validate_trusted_components(symlink_gate)
 
@@ -412,9 +424,66 @@ def test_trusted_components_reject_symlink_and_nlink(
     hardlink = tmp_path / "capture-hardlink.py"
     hardlink.hardlink_to(regular)
     monkeypatch.setitem(MODULE.TRUSTED_COMPONENT_PATHS, "executor_capture", hardlink)
-    nlink_gate = {"trusted_components": trusted_components()}
+    nlink_gate = {"trusted_components": gate_trusted_components()}
     with pytest.raises(MODULE.PromotionError, match="trusted component"):
         MODULE.validate_trusted_components(nlink_gate)
+
+
+def test_trusted_components_execute_only_pinned_bytes_after_path_replacement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sources = {
+        "maintenance_wrapper": b"MARKER = 'original-maintenance'\n",
+        "executor_capture": b"print('original-capture', flush=True)\n",
+        "served_model_generator": b"MARKER = 'original-generator'\n",
+        "promotion_receipt_writer": b"MARKER = 'original-writer'\n",
+    }
+    paths: dict[str, Path] = {}
+    for name, source in sources.items():
+        path = tmp_path / f"{name}.py"
+        path.write_bytes(source)
+        paths[name] = path.resolve()
+    monkeypatch.setattr(MODULE, "TRUSTED_COMPONENT_PATHS", paths)
+    monkeypatch.setattr(MODULE, "TRUSTED_COMPONENT_APPROVED_ROOT", tmp_path.resolve())
+    gate = {"trusted_components": gate_trusted_components()}
+
+    capture_fd: int
+    with MODULE.pin_trusted_components(gate) as verified:
+        evidence = verified.evidence()
+        assert all(
+            set(item) == {"path", "sha256", "device", "inode"}
+            for item in evidence.values()
+        )
+        capture_component = verified.components["executor_capture"]
+        assert capture_component.execution_fd is not None
+        capture_fd = capture_component.execution_fd
+
+        paths["executor_capture"].write_text(
+            "print('replacement-capture', flush=True)\n", encoding="ascii"
+        )
+        malicious_writer = tmp_path / "malicious-writer.py"
+        malicious_writer.write_text(
+            "MARKER = 'replacement-writer'\n", encoding="ascii"
+        )
+        paths["promotion_receipt_writer"].unlink()
+        paths["promotion_receipt_writer"].symlink_to(malicious_writer)
+
+        command = MODULE.CaptureCommand(
+            ["python3", f"/proc/self/fd/{capture_fd}"], pass_fds=(capture_fd,)
+        )
+        completed = MODULE.default_capture(command, dict(os.environ))
+        assert completed.returncode == 0
+        assert completed.stdout.prefix.strip() == b"original-capture"
+        assert b"replacement-capture" not in completed.stdout.prefix
+
+        writer = MODULE.load_receipt_writer(
+            verified.components["promotion_receipt_writer"].path,
+            verified.components["promotion_receipt_writer"].content,
+        )
+        assert writer.MARKER == "original-writer"
+
+    with pytest.raises(OSError):
+        os.fstat(capture_fd)
 
 
 def test_lifecycle_order_last_event_and_ready_protocol_binding_reject_tamper() -> None:
@@ -450,9 +519,30 @@ def test_lifecycle_order_last_event_and_ready_protocol_binding_reject_tamper() -
         lambda value: value["sq8_promotion_evidence"]["telemetry"]["projection"].__setitem__(
             "batch_matvec_count", "1"
         ),
+        lambda value: value["sq8_promotion_evidence"]["telemetry"]["projection"].__setitem__(
+            "batch_matvec_count", True
+        ),
+        lambda value: value["sq8_promotion_evidence"]["telemetry"]["projection"].__setitem__(
+            "batch_matvec_count", 1.0
+        ),
+        lambda value: value["sq8_promotion_evidence"]["telemetry"]["projection"].__setitem__(
+            "batch_matvec_count", -1
+        ),
+        lambda value: value["sq8_promotion_evidence"]["telemetry"]["projection"].__setitem__(
+            "batch_matvec_count", MODULE.SAFE_INT + 1
+        ),
         lambda value: value["sq8_promotion_evidence"]["telemetry"][
             "diagnostic_host_staging"
         ].__setitem__("read_count", 0.0),
+        lambda value: value["sq8_promotion_evidence"]["telemetry"][
+            "diagnostic_host_staging"
+        ].__setitem__("read_count", False),
+        lambda value: value["sq8_promotion_evidence"]["telemetry"][
+            "diagnostic_host_staging"
+        ].__setitem__("read_count", -1),
+        lambda value: value["sq8_promotion_evidence"]["telemetry"][
+            "diagnostic_host_staging"
+        ].__setitem__("read_count", MODULE.SAFE_INT + 1),
         lambda value: value["sq8_promotion_evidence"]["output_identity"].__setitem__(
             "token_count", 2.0
         ),
@@ -467,7 +557,6 @@ def test_executor_telemetry_malformed_types_fail_closed(
     path.write_text(json.dumps(value), encoding="ascii")
     with pytest.raises(MODULE.PromotionError):
         MODULE.validate_executor_record(path, snapshot(), REQUEST_ID)
-
     value = executor_record()
     value["sq8_promotion_evidence"]["telemetry_binding"]["request_id"] = (
         "sq8-promotion-" + "b" * 64
@@ -476,6 +565,69 @@ def test_executor_telemetry_malformed_types_fail_closed(
     with pytest.raises(MODULE.PromotionError, match="telemetry binding"):
         MODULE.validate_executor_record(path, snapshot(), REQUEST_ID)
 
+
+def test_executor_telemetry_accepts_safe_integer_upper_boundary(
+    tmp_path: Path,
+) -> None:
+    value = executor_record()
+    telemetry = value["sq8_promotion_evidence"]["telemetry"]
+    telemetry["projection"]["batch_matvec_count"] = MODULE.SAFE_INT
+    telemetry["projection"]["pair_matvec_count"] = MODULE.SAFE_INT
+    value["sq8_promotion_evidence"]["telemetry_binding"] = telemetry_binding(
+        telemetry
+    )
+    path = tmp_path / "safe-upper.json"
+    path.write_text(json.dumps(value), encoding="ascii")
+    assert MODULE.validate_executor_record(path, snapshot(), REQUEST_ID) == value
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        lambda value: value["observed_sq8_promotion_telemetry"][
+            "projection"
+        ].__setitem__("batch_matvec_count", True),
+        lambda value: value["observed_sq8_promotion_telemetry"][
+            "projection"
+        ].__setitem__("batch_matvec_count", 1.0),
+        lambda value: value["observed_sq8_promotion_telemetry"][
+            "projection"
+        ].__setitem__("batch_matvec_count", -1),
+        lambda value: value["observed_sq8_promotion_telemetry"][
+            "projection"
+        ].__setitem__("batch_matvec_count", MODULE.SAFE_INT + 1),
+        lambda value: value["observed_sq8_promotion_telemetry"][
+            "diagnostic_host_staging"
+        ].__setitem__("read_count", False),
+        lambda value: value["observed_sq8_promotion_telemetry"][
+            "diagnostic_host_staging"
+        ].__setitem__("read_count", 0.0),
+        lambda value: value["observed_sq8_promotion_telemetry"][
+            "diagnostic_host_staging"
+        ].__setitem__("read_count", -1),
+        lambda value: value["observed_sq8_promotion_telemetry"][
+            "diagnostic_host_staging"
+        ].__setitem__("read_count", MODULE.SAFE_INT + 1),
+    ],
+)
+def test_failure_telemetry_counter_matrix_fails_closed(mutation: Any) -> None:
+    value = capture_error_envelope(stage="telemetry_validation")
+    value["observed_sq8_promotion_telemetry"] = failed_sq8_telemetry()
+    value["observed_sq8_promotion_telemetry_binding"] = telemetry_binding(
+        value["observed_sq8_promotion_telemetry"]
+    )
+    value["worker_terminal"] = released_worker_terminal()
+    value["worker_returncode"] = 0
+    mutation(value)
+    value["observed_sq8_promotion_telemetry_binding"] = telemetry_binding(
+        value["observed_sq8_promotion_telemetry"]
+    )
+    assert parse_capture_error(
+        capture_stream(json.dumps(value).encode("ascii"))
+    ) == {
+        "validation": "invalid",
+        "reason": "observed_sq8_promotion_telemetry_invalid",
+    }
 
 def actual_capture_candidate(tmp_path: Path, worker_source: str) -> Path:
     root = candidate(tmp_path)
@@ -780,6 +932,10 @@ def test_success_runs_candidate_once_and_restores_new_epoch(
     assert all(value == readiness() for value in calls["readiness"])
     assert len(calls["capture"]) == 1
     invocation = calls["capture"][0]
+    assert invocation["argv"][1].startswith("/proc/self/fd/")
+    assert len(invocation["argv"].pass_fds) == 1
+    assert evidence["capture"]["argv"][1] == str(MODULE.CAPTURE)
+    assert "/proc/self/fd/" not in json.dumps(evidence)
     assert invocation["argv"][-2:] == [
         "--sq8-promotion-request-id",
         "sq8-promotion-" + "a" * 64,

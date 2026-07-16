@@ -35,6 +35,8 @@ REQUEST_ID_RE = re.compile(r"^sq8-promotion-[0-9a-f]{64}$")
 HEX40 = set("0123456789abcdef")
 HEX64 = set("0123456789abcdef")
 MAX_JSON_BYTES = 32 * 1024 * 1024
+MAX_TRUSTED_COMPONENT_BYTES = 16 * 1024 * 1024
+SAFE_INT = 9_007_199_254_740_991
 TELEMETRY_BINDING_SCHEMA = "ullm.qwen35_aq4.sq8_promotion_telemetry_binding.v1"
 TELEMETRY_HASH_ENCODING = "canonical_json_ascii_sort_keys_compact_v1"
 EXECUTION_TIMEOUTS = {
@@ -103,15 +105,59 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _trusted_components(value: Any) -> dict[str, dict[str, str]]:
+def safe_counter(value: Any) -> bool:
+    return type(value) is int and 0 <= value <= SAFE_INT
+
+
+def _read_trusted_component(path: Path, expected: dict[str, Any]) -> bytes:
+    descriptor: int | None = None
+    try:
+        descriptor = os.open(
+            path,
+            os.O_RDONLY | os.O_CLOEXEC | getattr(os, "O_NOFOLLOW", 0),
+        )
+        metadata = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_nlink != 1
+            or metadata.st_dev != expected["device"]
+            or metadata.st_ino != expected["inode"]
+            or metadata.st_size < 1
+            or metadata.st_size > MAX_TRUSTED_COMPONENT_BYTES
+        ):
+            raise ReceiptError("trusted component runtime identity differs")
+        chunks: list[bytes] = []
+        remaining = metadata.st_size
+        while remaining:
+            chunk = os.read(descriptor, min(1024 * 1024, remaining))
+            if not chunk:
+                raise ReceiptError("trusted component runtime read differs")
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        if os.read(descriptor, 1):
+            raise ReceiptError("trusted component runtime size differs")
+        return b"".join(chunks)
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+
+
+def _trusted_components(
+    value: Any,
+    component_sources: dict[str, bytes] | None = None,
+) -> dict[str, dict[str, Any]]:
     """Validate the Gate-bound tool identity carried into final receipts."""
 
     if not isinstance(value, dict) or set(value) != TRUSTED_COMPONENT_KEYS:
         raise ReceiptError("trusted component schema differs")
-    result: dict[str, dict[str, str]] = {}
+    if component_sources is not None and set(component_sources) != TRUSTED_COMPONENT_KEYS:
+        raise ReceiptError("trusted component source schema differs")
+    result: dict[str, dict[str, Any]] = {}
     for name in sorted(TRUSTED_COMPONENT_KEYS):
         item = value.get(name)
-        if not isinstance(item, dict) or set(item) != {"path", "sha256"}:
+        if not isinstance(item, dict) or set(item) != {
+            "path", "sha256", "device", "inode"
+        }:
             raise ReceiptError(f"trusted component {name} shape differs")
         raw_path = item.get("path")
         digest = item.get("sha256")
@@ -119,13 +165,14 @@ def _trusted_components(value: Any) -> dict[str, dict[str, str]]:
             not isinstance(raw_path, str)
             or not isinstance(digest, str)
             or _hex(digest, 64, f"trusted component {name} SHA-256") != digest
+            or not safe_counter(item.get("device"))
+            or not safe_counter(item.get("inode"))
         ):
             raise ReceiptError(f"trusted component {name} identity differs")
         path = Path(raw_path)
         expected = TRUSTED_COMPONENT_PATHS[name]
         try:
             resolved = path.resolve(strict=True)
-            metadata = path.stat(follow_symlinks=False)
         except OSError as error:
             raise ReceiptError(f"trusted component {name} is unavailable") from error
         if (
@@ -133,13 +180,21 @@ def _trusted_components(value: Any) -> dict[str, dict[str, str]]:
             or resolved != path
             or resolved != expected
             or resolved.parent != TRUSTED_COMPONENT_APPROVED_ROOT
-            or path.is_symlink()
-            or not stat.S_ISREG(metadata.st_mode)
-            or metadata.st_nlink != 1
-            or sha256_file(path) != digest
         ):
             raise ReceiptError(f"trusted component {name} binding differs")
-        result[name] = {"path": str(resolved), "sha256": digest}
+        source = (
+            component_sources[name]
+            if component_sources is not None
+            else _read_trusted_component(path, item)
+        )
+        if not isinstance(source, bytes) or hashlib.sha256(source).hexdigest() != digest:
+            raise ReceiptError(f"trusted component {name} source differs")
+        result[name] = {
+            "path": str(resolved),
+            "sha256": digest,
+            "device": item["device"],
+            "inode": item["inode"],
+        }
     return result
 
 
@@ -253,7 +308,9 @@ def served_model_semantic_sha256(document: dict[str, Any]) -> str:
     return hashlib.sha256(_canonical(value)).hexdigest()
 
 
-def _load_generator(generator_path: Path | None = None) -> ModuleType:
+def _load_generator(
+    generator_path: Path | None = None, source: bytes | None = None
+) -> ModuleType:
     path = (
         generator_path.resolve()
         if generator_path is not None
@@ -265,7 +322,10 @@ def _load_generator(generator_path: Path | None = None) -> ModuleType:
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
     try:
-        spec.loader.exec_module(module)
+        if source is None:
+            spec.loader.exec_module(module)
+        else:
+            exec(compile(source, str(path), "exec"), module.__dict__)
     except BaseException:
         sys.modules.pop(spec.name, None)
         raise
@@ -476,7 +536,9 @@ def _readiness_identity(value: Any) -> dict[str, Any]:
     return json.loads(json.dumps(value, ensure_ascii=True, allow_nan=False))
 
 
-def _validate_sq8_telemetry(value: Any) -> dict[str, Any]:
+def _validate_sq8_telemetry(
+    value: Any, *, require_promotion_thresholds: bool = True
+) -> dict[str, Any]:
     if not isinstance(value, dict) or set(value) != {
         "schema_version", "projection", "diagnostic_host_staging"
     }:
@@ -490,15 +552,23 @@ def _validate_sq8_telemetry(value: Any) -> dict[str, Any]:
     }
     if not isinstance(projection, dict) or set(projection) != expected_projection:
         raise ReceiptError("SQ8 promotion projection telemetry shape differs")
-    if any(type(projection[key]) is not int or projection[key] < 0 for key in expected_projection):
+    if any(not safe_counter(projection[key]) for key in expected_projection):
         raise ReceiptError("SQ8 promotion projection telemetry count is invalid")
-    if projection["batch_matvec_count"] <= 0 or projection["pair_matvec_count"] <= 0:
+    if require_promotion_thresholds and (
+        projection["batch_matvec_count"] <= 0
+        or projection["pair_matvec_count"] <= 0
+    ):
         raise ReceiptError("SQ8 promotion requires batch and pair telemetry")
     if any(projection[key] != 0 for key in ("single_matvec_count", "triple_matvec_count", "fallback_count")):
         raise ReceiptError("SQ8 promotion has an unexpected projection path")
     staging = value["diagnostic_host_staging"]
     staging_keys = {"read_count", "write_count", "read_bytes", "write_bytes"}
-    if not isinstance(staging, dict) or set(staging) != staging_keys or any(staging[key] != 0 for key in staging_keys):
+    if (
+        not isinstance(staging, dict)
+        or set(staging) != staging_keys
+        or any(not safe_counter(staging[key]) for key in staging_keys)
+        or any(staging[key] != 0 for key in staging_keys)
+    ):
         raise ReceiptError("SQ8 promotion diagnostic host staging is nonzero")
     return value
 
@@ -540,7 +610,8 @@ def _actual_evidence(
     package_sha256: str,
     request_id: str,
     prepared_receipt_path: Path | None = None,
-    trusted_components: dict[str, dict[str, str]] | None = None,
+    trusted_components: dict[str, dict[str, Any]] | None = None,
+    trusted_component_sources: dict[str, bytes] | None = None,
 ) -> dict[str, Any]:
     request_id = _request_id(request_id)
     paths = (maintenance_path, executor_path)
@@ -555,7 +626,8 @@ def _actual_evidence(
     expected_components = _trusted_components(
         trusted_components
         if trusted_components is not None
-        else maintenance.get("trusted_components")
+        else maintenance.get("trusted_components"),
+        trusted_component_sources,
     )
     if maintenance.get("trusted_components") != expected_components:
         raise ReceiptError("maintenance trusted component binding differs")
@@ -654,7 +726,8 @@ def validate_actual_evidence(
     package_sha256: str,
     request_id: str,
     prepared_receipt_path: Path | None = None,
-    trusted_components: dict[str, dict[str, str]] | None = None,
+    trusted_components: dict[str, dict[str, Any]] | None = None,
+    trusted_component_sources: dict[str, bytes] | None = None,
 ) -> dict[str, Any]:
     """Validate post-run evidence and return its canonical receipt projection."""
 
@@ -668,6 +741,7 @@ def validate_actual_evidence(
         request_id=request_id,
         prepared_receipt_path=prepared_receipt_path,
         trusted_components=trusted_components,
+        trusted_component_sources=trusted_component_sources,
     )
 
 
@@ -936,7 +1010,8 @@ def write_actual_receipt(
     executor_record_path: Path,
     output_path: Path,
     generator_path: Path | None = None,
-    trusted_components: dict[str, dict[str, str]] | None = None,
+    trusted_components: dict[str, dict[str, Any]] | None = None,
+    trusted_component_sources: dict[str, bytes] | None = None,
 ) -> dict[str, Any]:
     """Publish a separate actual-verified receipt after one successful run."""
 
@@ -953,14 +1028,23 @@ def write_actual_receipt(
         if trusted_components is not None
         else _read_object(maintenance_evidence_path, "maintenance evidence").get(
             "trusted_components"
-        )
+        ),
+        trusted_component_sources,
     )
     if generator_path is not None and Path(generator_path).resolve() != Path(
         expected_components["served_model_generator"]["path"]
     ):
         raise ReceiptError("served-model generator trusted path differs")
     generator = _load_generator(
-        Path(expected_components["served_model_generator"]["path"])
+        Path(expected_components["served_model_generator"]["path"]),
+        (
+            trusted_component_sources["served_model_generator"]
+            if trusted_component_sources is not None
+            else _read_trusted_component(
+                Path(expected_components["served_model_generator"]["path"]),
+                expected_components["served_model_generator"],
+            )
+        ),
     )
     try:
         generator._materialize_profile_document(
@@ -1034,6 +1118,7 @@ def write_actual_receipt(
         request_id=request_id,
         prepared_receipt_path=prepared_path,
         trusted_components=expected_components,
+        trusted_component_sources=trusted_component_sources,
     )
     if actual.get("status") != "actual_verified":
         raise ReceiptError("actual receipt evidence is not verified")
@@ -1065,7 +1150,8 @@ def write_failure_receipt(
     prepared_receipt_path: Path,
     maintenance_evidence_path: Path,
     output_path: Path,
-    trusted_components: dict[str, dict[str, str]] | None = None,
+    trusted_components: dict[str, dict[str, Any]] | None = None,
+    trusted_component_sources: dict[str, bytes] | None = None,
 ) -> dict[str, Any]:
     """Publish a separate immutable failure receipt without promoting the candidate."""
 
@@ -1084,7 +1170,8 @@ def write_failure_receipt(
     if maintenance.get("status") != "failed":
         raise ReceiptError("maintenance evidence is not a failed run")
     expected_components = _trusted_components(
-        trusted_components if trusted_components is not None else maintenance.get("trusted_components")
+        trusted_components if trusted_components is not None else maintenance.get("trusted_components"),
+        trusted_component_sources,
     )
     if maintenance.get("trusted_components") != expected_components:
         raise ReceiptError("maintenance trusted component binding differs")
@@ -1094,6 +1181,26 @@ def write_failure_receipt(
         or capture.get("timeouts") != prepared.get("execution_timeouts")
     ):
         raise ReceiptError("maintenance execution timeout receipt binding differs")
+    capture_failure = maintenance.get("capture_failure")
+    tool_error = (
+        capture_failure.get("capture_tool_error")
+        if isinstance(capture_failure, dict)
+        else None
+    )
+    if isinstance(tool_error, dict):
+        observed = tool_error.get("observed_sq8_promotion_telemetry")
+        observed_binding = tool_error.get(
+            "observed_sq8_promotion_telemetry_binding"
+        )
+        if (observed is None) != (observed_binding is None):
+            raise ReceiptError("failure telemetry binding is incomplete")
+        if observed is not None:
+            telemetry = _validate_sq8_telemetry(
+                observed, require_promotion_thresholds=False
+            )
+            _validate_sq8_telemetry_binding(
+                observed_binding, telemetry, request_id
+            )
     receipt = json.loads(json.dumps(prepared, ensure_ascii=True, allow_nan=False))
     receipt["status"] = "actual_failed"
     receipt["actual"] = {

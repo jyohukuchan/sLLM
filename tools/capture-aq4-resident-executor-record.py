@@ -509,6 +509,10 @@ def token_identity_digest(token_ids: list[int]) -> str:
     return digest.hexdigest()
 
 
+def safe_counter(value: Any) -> bool:
+    return type(value) is int and 0 <= value <= SAFE_INT
+
+
 def validate_sq8_promotion_telemetry(value: Any) -> dict[str, Any]:
     if not isinstance(value, dict) or set(value) != {
         "schema_version",
@@ -528,12 +532,7 @@ def validate_sq8_promotion_telemetry(value: Any) -> dict[str, Any]:
     }
     if not isinstance(projection, dict) or set(projection) != expected_projection_keys:
         raise CaptureError("SQ8 projection telemetry shape differs")
-    if any(
-        not isinstance(projection[key], int)
-        or isinstance(projection[key], bool)
-        or projection[key] < 0
-        for key in expected_projection_keys
-    ):
+    if any(not safe_counter(projection[key]) for key in expected_projection_keys):
         raise CaptureError("SQ8 projection telemetry counts are invalid")
     if projection["batch_matvec_count"] <= 0 or projection["pair_matvec_count"] <= 0:
         raise CaptureError("SQ8 batch and pair projection evidence is required")
@@ -544,7 +543,7 @@ def validate_sq8_promotion_telemetry(value: Any) -> dict[str, Any]:
     staging_keys = {"read_count", "write_count", "read_bytes", "write_bytes"}
     if not isinstance(staging, dict) or set(staging) != staging_keys:
         raise CaptureError("SQ8 host-staging telemetry shape differs")
-    if any(staging[key] != 0 for key in staging_keys):
+    if any(not safe_counter(staging[key]) or staging[key] != 0 for key in staging_keys):
         raise CaptureError("SQ8 promotion requires zero diagnostic host staging")
     return value
 
@@ -573,10 +572,10 @@ def diagnostic_sq8_promotion_telemetry(value: Any) -> dict[str, Any] | None:
         != "ullm.qwen35_aq4.sq8_promotion_telemetry.v1"
         or not isinstance(projection, dict)
         or set(projection) != projection_keys
-        or any(type(projection[key]) is not int or projection[key] < 0 for key in projection_keys)
+        or any(not safe_counter(projection[key]) for key in projection_keys)
         or not isinstance(staging, dict)
         or set(staging) != staging_keys
-        or any(type(staging[key]) is not int or staging[key] < 0 for key in staging_keys)
+        or any(not safe_counter(staging[key]) for key in staging_keys)
     ):
         return None
     return value
