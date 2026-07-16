@@ -629,6 +629,43 @@ def test_failure_telemetry_counter_matrix_fails_closed(mutation: Any) -> None:
         "reason": "observed_sq8_promotion_telemetry_invalid",
     }
 
+
+def _failure_staging_envelope() -> dict[str, Any]:
+    value = capture_error_envelope(stage="telemetry_validation")
+    value["observed_sq8_promotion_telemetry"] = failed_sq8_telemetry()
+    value["observed_sq8_promotion_telemetry_binding"] = telemetry_binding(
+        value["observed_sq8_promotion_telemetry"]
+    )
+    value["worker_terminal"] = released_worker_terminal()
+    value["worker_returncode"] = 0
+    return value
+
+
+def test_failure_telemetry_staging_all_zero_is_valid() -> None:
+    value = _failure_staging_envelope()
+    parsed = parse_capture_error(capture_stream(json.dumps(value).encode("utf-8")))
+    assert parsed["validation"] == "valid"
+
+
+@pytest.mark.parametrize(
+    ("field", "bad"),
+    [
+        (field, bad)
+        for field in ("read_count", "write_count", "read_bytes", "write_bytes")
+        for bad in (1, True, 0.0, -1, MODULE.SAFE_INT + 1)
+    ],
+)
+def test_failure_telemetry_staging_requires_exact_zero(
+    field: str, bad: Any
+) -> None:
+    value = _failure_staging_envelope()
+    value["observed_sq8_promotion_telemetry"]["diagnostic_host_staging"][field] = bad
+    value["observed_sq8_promotion_telemetry_binding"] = telemetry_binding(
+        value["observed_sq8_promotion_telemetry"]
+    )
+    parsed = parse_capture_error(capture_stream(json.dumps(value).encode("utf-8")))
+    assert parsed["validation"] == "invalid"
+
 def actual_capture_candidate(tmp_path: Path, worker_source: str) -> Path:
     root = candidate(tmp_path)
     worker = root / "fake-worker.py"

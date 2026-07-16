@@ -2738,6 +2738,7 @@ def _capture_error_envelope(
             or not isinstance(staging, dict)
             or set(staging) != staging_keys
             or any(not safe_counter(staging[key]) for key in staging_keys)
+            or any(staging[key] != 0 for key in staging_keys)
         ):
             invalid["reason"] = "observed_sq8_promotion_telemetry_invalid"
             return invalid
