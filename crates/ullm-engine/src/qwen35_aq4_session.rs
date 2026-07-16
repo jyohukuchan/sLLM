@@ -16,6 +16,9 @@ use crate::inference_api::{
     CancellationToken, FinishReason, InferenceRequest, ReasoningUsage, ReleaseOutcome,
     ReleaseSummary,
 };
+use crate::qwen35_aq4_direct_trace::{
+    Qwen35Aq4DirectRuntimeObservation, Qwen35Aq4DirectTraceBinding,
+};
 use crate::qwen35_aq4_model_runtime::{
     Qwen35Aq4CalibrationObserver, Qwen35Aq4ModelLoadConfig, Qwen35Aq4ModelRuntime,
 };
@@ -430,6 +433,30 @@ pub trait Qwen35Aq4SessionModel {
         Vec::new()
     }
 
+    fn direct_trace_diagnostic_enabled(&self) -> bool {
+        false
+    }
+
+    fn begin_direct_trace_request(
+        &mut self,
+        _binding: Qwen35Aq4DirectTraceBinding,
+    ) -> Result<bool, String> {
+        Ok(false)
+    }
+
+    fn finish_direct_trace_request(
+        &mut self,
+        _terminal_status: &str,
+    ) -> Result<Option<Qwen35Aq4DirectRuntimeObservation>, String> {
+        Ok(None)
+    }
+
+    fn record_direct_trace_failure_once(&mut self, _reason: &str) -> Result<(), String> {
+        Ok(())
+    }
+
+    fn reset_direct_trace_without_emission(&mut self) {}
+
     fn dispatch_token(
         &mut self,
         token_id: usize,
@@ -536,6 +563,32 @@ impl Qwen35Aq4SessionModel for Qwen35Aq4ModelRuntime {
 
     fn operation_resolution_traces(&self) -> Vec<Vec<OperationResolutionTrace>> {
         Qwen35Aq4ModelRuntime::operation_resolution_traces(self)
+    }
+
+    fn direct_trace_diagnostic_enabled(&self) -> bool {
+        Qwen35Aq4ModelRuntime::direct_trace_diagnostic_enabled(self)
+    }
+
+    fn begin_direct_trace_request(
+        &mut self,
+        binding: Qwen35Aq4DirectTraceBinding,
+    ) -> Result<bool, String> {
+        Qwen35Aq4ModelRuntime::begin_direct_trace_request(self, binding)
+    }
+
+    fn finish_direct_trace_request(
+        &mut self,
+        terminal_status: &str,
+    ) -> Result<Option<Qwen35Aq4DirectRuntimeObservation>, String> {
+        Qwen35Aq4ModelRuntime::finish_direct_trace_request(self, terminal_status)
+    }
+
+    fn record_direct_trace_failure_once(&mut self, reason: &str) -> Result<(), String> {
+        Qwen35Aq4ModelRuntime::record_direct_trace_failure_once(self, reason)
+    }
+
+    fn reset_direct_trace_without_emission(&mut self) {
+        Qwen35Aq4ModelRuntime::reset_direct_trace_without_emission(self)
     }
 
     fn dispatch_token(
@@ -1596,6 +1649,8 @@ pub struct Qwen35Aq4InferenceSession<M = Qwen35Aq4ModelRuntime> {
     active_lifecycle_observer: Option<Qwen35Aq4LifecycleObserver>,
     last_terminal_request_audit: Option<Qwen35Aq4RequestExecutionAudit>,
     active_calibration_replay: Option<ActiveCalibrationReplay>,
+    active_direct_trace: bool,
+    terminal_direct_trace_observation: Option<Qwen35Aq4DirectRuntimeObservation>,
 }
 
 impl Qwen35Aq4InferenceSession<Qwen35Aq4ModelRuntime> {
@@ -1632,6 +1687,8 @@ impl<M: Qwen35Aq4SessionModel> Qwen35Aq4InferenceSession<M> {
             active_lifecycle_observer: None,
             last_terminal_request_audit: None,
             active_calibration_replay: None,
+            active_direct_trace: false,
+            terminal_direct_trace_observation: None,
         })
     }
 
@@ -1975,8 +2032,42 @@ impl<M: Qwen35Aq4SessionModel> Qwen35Aq4InferenceSession<M> {
         if let Err(error) = self.snapshot_terminal_request_audit() {
             message.push_str(&format!("; terminal lifecycle audit failed: {error}"));
         }
+        if self.active_direct_trace {
+            if let Err(error) = self
+                .model
+                .record_direct_trace_failure_once("request_failed")
+            {
+                message.push_str(&format!("; direct trace failure recording failed: {error}"));
+            }
+            if let Err(error) = self.finish_active_direct_trace("error") {
+                message.push_str(&format!("; direct trace terminalization failed: {error}"));
+            }
+        }
         self.status = Qwen35Aq4SessionStatus::Failed;
         Err(message)
+    }
+
+    fn finish_active_direct_trace(&mut self, terminal_status: &str) -> Result<(), String> {
+        if !self.active_direct_trace {
+            return Ok(());
+        }
+        let result = self.model.finish_direct_trace_request(terminal_status);
+        self.active_direct_trace = false;
+        match result {
+            Ok(Some(observation)) => {
+                if self.terminal_direct_trace_observation.is_some() {
+                    self.model.reset_direct_trace_without_emission();
+                    return Err("previous direct trace observation was not consumed".into());
+                }
+                self.terminal_direct_trace_observation = Some(observation);
+                Ok(())
+            }
+            Ok(None) => Err("enabled direct trace produced no terminal observation".into()),
+            Err(error) => {
+                self.model.reset_direct_trace_without_emission();
+                Err(error)
+            }
+        }
     }
 
     fn snapshot_terminal_request_audit(&mut self) -> Result<(), String> {
@@ -2416,25 +2507,47 @@ impl<M: Qwen35Aq4SessionModel> Qwen35Aq4InferenceSession<M> {
             if let Some(observer) = self.active_lifecycle_observer.as_mut() {
                 let lifecycle_result = observer.fail_reset().and_then(|_| observer.observe_error());
                 if let Err(lifecycle_error) = lifecycle_result {
-                    self.status = Qwen35Aq4SessionStatus::Failed;
-                    return Err(format!(
+                    return self.fail(format!(
                         "Qwen3.5 AQ4 request reset failed: {error}; lifecycle reset failure observation failed: {lifecycle_error}"
                     ));
                 }
             }
             if let Err(lifecycle_error) = self.snapshot_terminal_request_audit() {
-                self.status = Qwen35Aq4SessionStatus::Failed;
-                return Err(format!(
+                return self.fail(format!(
                     "Qwen3.5 AQ4 request reset failed: {error}; terminal lifecycle audit failed: {lifecycle_error}"
                 ));
             }
+            let mut message = format!("Qwen3.5 AQ4 request reset failed: {error}");
+            if self.active_direct_trace {
+                if let Err(trace_error) = self
+                    .model
+                    .record_direct_trace_failure_once("request_reset_failed")
+                {
+                    message.push_str(&format!(
+                        "; direct trace failure recording failed: {trace_error}"
+                    ));
+                }
+                if let Err(trace_error) = self.finish_active_direct_trace("error") {
+                    message.push_str(&format!(
+                        "; direct trace terminalization failed: {trace_error}"
+                    ));
+                }
+            }
             self.status = Qwen35Aq4SessionStatus::Failed;
-            return Err(format!("Qwen3.5 AQ4 request reset failed: {error}"));
+            return Err(message);
         }
         if let Some(observer) = self.active_lifecycle_observer.as_mut() {
             if let Err(error) = observer.complete_reset() {
                 return self.fail(error);
             }
+        }
+        let direct_trace_terminal_status = if outcome == ReleaseOutcome::Cancelled {
+            "cancelled"
+        } else {
+            "completed"
+        };
+        if let Err(error) = self.finish_active_direct_trace(direct_trace_terminal_status) {
+            return self.fail(format!("direct trace terminalization failed: {error}"));
         }
         self.active = None;
         self.active_operation_audit = None;
@@ -2505,6 +2618,47 @@ impl<M: Qwen35Aq4SessionModel> InferenceSession for Qwen35Aq4InferenceSession<M>
             }
             (None, _) => None,
         };
+        let trace_binding = request.aq4_p3_direct_trace.clone();
+        match (self.model.direct_trace_diagnostic_enabled(), trace_binding) {
+            (false, None) => {}
+            (false, Some(_)) => {
+                return Err(
+                    "Qwen3.5 AQ4 direct trace metadata requires the diagnostic gate".into(),
+                );
+            }
+            (true, None) => {
+                return Err(
+                    "Qwen3.5 AQ4 diagnostic gate requires explicit direct trace metadata".into(),
+                );
+            }
+            (true, Some(binding)) => {
+                if self.terminal_direct_trace_observation.is_some() {
+                    return Err(
+                        "Qwen3.5 AQ4 previous direct trace observation was not consumed".into(),
+                    );
+                }
+                if binding.request_id != request.request_id {
+                    return Err(
+                        "Qwen3.5 AQ4 direct trace binding request id differs from request metadata"
+                            .into(),
+                    );
+                }
+                match self.model.begin_direct_trace_request(binding) {
+                    Ok(true) => self.active_direct_trace = true,
+                    Ok(false) => {
+                        self.model.reset_direct_trace_without_emission();
+                        return Err(
+                            "Qwen3.5 AQ4 diagnostic gate did not start the direct trace collector"
+                                .into(),
+                        );
+                    }
+                    Err(error) => {
+                        self.model.reset_direct_trace_without_emission();
+                        return Err(format!("Qwen3.5 AQ4 direct trace start failed: {error}"));
+                    }
+                }
+            }
+        }
         self.active = Some(ActiveRequest {
             request_id: request.request_id,
             prompt_token_ids: request.prompt_token_ids,
@@ -2839,6 +2993,28 @@ impl<M: Qwen35Aq4SessionModel> InferenceSession for Qwen35Aq4InferenceSession<M>
         self.last_terminal_request_execution_audit()
             .and_then(|audit| serde_json::to_value(audit).ok())
     }
+
+    fn take_terminal_diagnostic_observation(
+        &mut self,
+    ) -> Result<Option<serde_json::Value>, String> {
+        self.terminal_direct_trace_observation
+            .take()
+            .map(|observation| {
+                serde_json::to_value(observation).map_err(|error| {
+                    format!("failed to serialize direct trace observation: {error}")
+                })
+            })
+            .transpose()
+    }
+
+    fn terminalize_failed_diagnostic_observation(&mut self) -> Result<(), String> {
+        if self.active_direct_trace {
+            self.model
+                .record_direct_trace_failure_once("worker_request_failed")?;
+            self.finish_active_direct_trace("error")?;
+        }
+        Ok(())
+    }
 }
 
 fn validate_config<M: Qwen35Aq4SessionModel>(
@@ -2882,6 +3058,9 @@ fn validate_config<M: Qwen35Aq4SessionModel>(
 mod tests {
     use super::*;
     use crate::inference_api::SamplingParams;
+    use crate::qwen35_aq4_direct_trace::{
+        Qwen35Aq4DirectTraceCollector, Qwen35Aq4DirectTraceRoute,
+    };
     use std::collections::VecDeque;
 
     fn audited_contract() -> Vec<LayerExecutionContract> {
@@ -3347,6 +3526,10 @@ mod tests {
         calibration_full_logits_available: bool,
         calibration_generation_epoch: u64,
         calibration_full_logits_epoch: Option<u64>,
+        direct_trace_enabled: bool,
+        direct_trace_collector: Qwen35Aq4DirectTraceCollector,
+        direct_trace_begins: usize,
+        direct_trace_finishes: usize,
     }
 
     impl Qwen35Aq4SessionModel for ScriptedModel {
@@ -3356,6 +3539,48 @@ mod tests {
 
         fn vocab_size(&self) -> usize {
             self.vocab
+        }
+
+        fn direct_trace_diagnostic_enabled(&self) -> bool {
+            self.direct_trace_enabled
+        }
+
+        fn begin_direct_trace_request(
+            &mut self,
+            binding: Qwen35Aq4DirectTraceBinding,
+        ) -> Result<bool, String> {
+            if !self.direct_trace_enabled {
+                return Ok(false);
+            }
+            self.direct_trace_collector.begin_request(binding)?;
+            self.direct_trace_begins += 1;
+            Ok(true)
+        }
+
+        fn finish_direct_trace_request(
+            &mut self,
+            terminal_status: &str,
+        ) -> Result<Option<Qwen35Aq4DirectRuntimeObservation>, String> {
+            if !self.direct_trace_enabled {
+                return Ok(None);
+            }
+            self.direct_trace_finishes += 1;
+            self.direct_trace_collector
+                .finish_request(terminal_status)
+                .map(Some)
+        }
+
+        fn record_direct_trace_failure_once(&mut self, reason: &str) -> Result<(), String> {
+            if self.direct_trace_collector.request_active()
+                && !self.direct_trace_collector.failure_recorded()
+            {
+                self.direct_trace_collector.record_failure(reason)?;
+            }
+            Ok(())
+        }
+
+        fn reset_direct_trace_without_emission(&mut self) {
+            self.direct_trace_collector.reset_without_emission();
         }
 
         fn dispatch_token(
@@ -3374,11 +3599,22 @@ mod tests {
             if self.fail_dispatch_phase == Some(phase) {
                 return Err("scripted operation failure".into());
             }
-            if self.audited {
-                Ok(audited_records(&audited_contract(), phase))
+            let records = if self.audited {
+                audited_records(&audited_contract(), phase)
             } else {
-                Ok(Vec::new())
+                Vec::new()
+            };
+            if self.direct_trace_collector.request_active() {
+                for layer_records in &records {
+                    self.direct_trace_collector.record_invocation(
+                        Qwen35Aq4DirectTraceRoute::Direct,
+                        0,
+                        layer_records.len() as u64,
+                        0,
+                    )?;
+                }
             }
+            Ok(records)
         }
 
         fn dispatch_prefill_chunk(
@@ -3429,6 +3665,16 @@ mod tests {
                     phase,
                     records: audited_records(&contract, phase)[layer_index],
                 });
+            }
+            if self.direct_trace_collector.request_active() {
+                for _ in &invocations {
+                    self.direct_trace_collector.record_invocation(
+                        Qwen35Aq4DirectTraceRoute::Direct,
+                        0,
+                        2,
+                        0,
+                    )?;
+                }
             }
             Ok(invocations)
         }
@@ -3558,6 +3804,186 @@ mod tests {
             vec![2],
             SamplingParams::greedy_with_top_k(0, 1),
         )
+    }
+
+    fn direct_trace_binding(request_id: &str) -> Qwen35Aq4DirectTraceBinding {
+        Qwen35Aq4DirectTraceBinding {
+            side: "baseline".into(),
+            binding_kind: "run".into(),
+            binding_id: format!("binding-{request_id}"),
+            request_id: request_id.into(),
+            implementation_id: "qwen35-aq4-production".into(),
+            source_id: "qwen35_aq4_session".into(),
+            source_sha256: "a".repeat(64),
+            case_id: "case-1".into(),
+            case_sha256: "b".repeat(64),
+            identity_sha256: "c".repeat(64),
+            direct_sequence_output_enabled: false,
+        }
+    }
+
+    fn direct_trace_session(
+        tokens: &[usize],
+        prefill_width: usize,
+    ) -> Qwen35Aq4InferenceSession<ScriptedModel> {
+        let mut scripted = model(tokens);
+        scripted.audited = true;
+        scripted.native_hybrid_prefill = prefill_width > 1;
+        scripted.direct_trace_enabled = true;
+        let config = Qwen35Aq4SessionConfig::greedy(8, vec![2])
+            .with_prefill_chunk_tokens(prefill_width)
+            .unwrap();
+        let mut session = Qwen35Aq4InferenceSession::from_model(scripted, config).unwrap();
+        session.execution_contract = Some(native_hybrid_contract(prefill_width));
+        session
+    }
+
+    fn take_direct_trace(
+        session: &mut Qwen35Aq4InferenceSession<ScriptedModel>,
+    ) -> serde_json::Value {
+        session
+            .take_terminal_diagnostic_observation()
+            .unwrap()
+            .expect("terminal direct trace")
+    }
+
+    #[test]
+    fn direct_trace_m1_and_native_m_dispatch_share_request_lifecycle_and_route_counters() {
+        for width in [1, 8] {
+            let id = format!("trace-m{width}");
+            let mut session = direct_trace_session(&[7], width);
+            session
+                .start_request(
+                    request(&id, &vec![4; width], 1)
+                        .with_aq4_p3_direct_trace(direct_trace_binding(&id)),
+                    CancellationToken::new(),
+                )
+                .unwrap();
+            let prepared = next_prepared(&mut session);
+            session.publish_prepared(prepared, |_| Ok(())).unwrap();
+            session.finish_and_reset().unwrap();
+
+            let observation = take_direct_trace(&mut session);
+            assert_eq!(observation["status"], "complete");
+            assert_eq!(observation["terminal_status"], "completed");
+            assert_eq!(observation["request_id"], id);
+            assert!(
+                observation["counters"]["invocation_count"]
+                    .as_u64()
+                    .unwrap()
+                    > 0
+            );
+            assert!(observation["counters"]["launch_count"].as_u64().unwrap() > 0);
+            assert_eq!(session.model().direct_trace_begins, 1);
+            assert_eq!(session.model().direct_trace_finishes, 1);
+            assert!(
+                session
+                    .take_terminal_diagnostic_observation()
+                    .unwrap()
+                    .is_none()
+            );
+        }
+    }
+
+    #[test]
+    fn direct_trace_error_cancel_and_reset_failure_each_finish_once() {
+        let mut dispatch_error = direct_trace_session(&[7], 1);
+        dispatch_error.model.fail_dispatch_phase = Some(ExecutionPhase::ColdPrefill);
+        dispatch_error
+            .start_request(
+                request("trace-error", &[4], 1)
+                    .with_aq4_p3_direct_trace(direct_trace_binding("trace-error")),
+                CancellationToken::new(),
+            )
+            .unwrap();
+        assert!(dispatch_error.prepare_advance().is_err());
+        let error_observation = take_direct_trace(&mut dispatch_error);
+        assert_eq!(error_observation["terminal_status"], "error");
+        assert_eq!(error_observation["status"], "failed");
+        assert_eq!(dispatch_error.model().direct_trace_finishes, 1);
+        dispatch_error.abort_and_reset().unwrap();
+        assert_eq!(dispatch_error.model().direct_trace_finishes, 1);
+
+        let cancel = CancellationToken::new();
+        let mut cancelled = direct_trace_session(&[7], 1);
+        cancelled
+            .start_request(
+                request("trace-cancel", &[4], 1)
+                    .with_aq4_p3_direct_trace(direct_trace_binding("trace-cancel")),
+                cancel.clone(),
+            )
+            .unwrap();
+        cancel.cancel();
+        assert_eq!(
+            cancelled.prepare_advance().unwrap(),
+            SessionAdvance::CancellationObserved
+        );
+        cancelled.abort_and_reset().unwrap();
+        let cancel_observation = take_direct_trace(&mut cancelled);
+        assert_eq!(cancel_observation["terminal_status"], "cancelled");
+        assert_eq!(cancelled.model().direct_trace_finishes, 1);
+
+        let mut reset_error = direct_trace_session(&[7], 1);
+        reset_error.model.fail_reset = true;
+        reset_error
+            .start_request(
+                request("trace-reset", &[4], 1)
+                    .with_aq4_p3_direct_trace(direct_trace_binding("trace-reset")),
+                CancellationToken::new(),
+            )
+            .unwrap();
+        let prepared = next_prepared(&mut reset_error);
+        reset_error.publish_prepared(prepared, |_| Ok(())).unwrap();
+        assert!(reset_error.finish_and_reset().is_err());
+        let reset_observation = take_direct_trace(&mut reset_error);
+        assert_eq!(reset_observation["terminal_status"], "error");
+        assert_eq!(reset_error.model().direct_trace_finishes, 1);
+    }
+
+    #[test]
+    fn direct_trace_is_default_off_and_binding_failures_do_not_carry_state() {
+        let mut ordinary = audited_session(&[7]);
+        ordinary
+            .start_request(request("ordinary-off", &[4], 1), CancellationToken::new())
+            .unwrap();
+        let prepared = next_prepared(&mut ordinary);
+        ordinary.publish_prepared(prepared, |_| Ok(())).unwrap();
+        ordinary.finish_and_reset().unwrap();
+        assert!(
+            ordinary
+                .take_terminal_diagnostic_observation()
+                .unwrap()
+                .is_none()
+        );
+
+        let mut session = direct_trace_session(&[7], 1);
+        assert!(
+            session
+                .start_request(
+                    request("request-a", &[4], 1)
+                        .with_aq4_p3_direct_trace(direct_trace_binding("request-b")),
+                    CancellationToken::new(),
+                )
+                .is_err()
+        );
+        assert_eq!(session.model().direct_trace_begins, 0);
+        let cancel = CancellationToken::new();
+        session
+            .start_request(
+                request("request-a", &[4], 1)
+                    .with_aq4_p3_direct_trace(direct_trace_binding("request-a")),
+                cancel.clone(),
+            )
+            .unwrap();
+        cancel.cancel();
+        assert_eq!(
+            session.prepare_advance().unwrap(),
+            SessionAdvance::CancellationObserved
+        );
+        session.abort_and_reset().unwrap();
+        assert_eq!(take_direct_trace(&mut session)["request_id"], "request-a");
+        assert_eq!(session.model().direct_trace_begins, 1);
+        assert_eq!(session.model().direct_trace_finishes, 1);
     }
 
     fn reasoning_dialect() -> crate::reasoning::ReasoningDialect {

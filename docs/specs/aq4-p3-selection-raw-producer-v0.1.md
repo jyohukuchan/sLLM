@@ -305,8 +305,10 @@ root/schema/file/identity/case/run/pair tamper、fidelity不一致を個別に�
 
 `tools/assemble-aq4-p3-candidate-a-direct-trace.py` は、runtime observationと
 profiler observationを別々に読み、candidate-A traceへ組み立てる。runtime observationは
-`Qwen35Aq4ModelRuntime::observe_direct_trace_request()` がrequest開始時にbindingを検証して
-collectorをresetし、terminal GPU同期後にexactly onceでserializeした値だけを受け付ける。この値は
+production workerが`InferenceRequest`の明示的なdiagnostic metadataとして渡したbindingを、
+`Qwen35Aq4InferenceSession::start_request()`が通常validation完了後かつ最初のdispatch前に検証して
+collectorを一度だけ開始し、terminal GPU同期とrequest resetの完了後にexactly onceで
+serializeした値だけを受け付ける。この値は
 `ULLM_AQ4_P3_DIRECT_TRACE_DIAGNOSTIC=1` のときだけ有効になり、既定値は無効である。
 route applyが実際に実行したworkspace-to-destination D2D copyのbytes/count、完了した
 operation recordのlaunch count、arena allocationのworkspace bytes、copy fallbackの件数と
@@ -314,6 +316,10 @@ operation recordのlaunch count、arena allocationのworkspace bytes、copy fall
 確定する。dispatch、sync、cancel、resetを含むerror terminalはfailureを一度記録し、complete
 observationを発行しない。次requestでは新しいcollector stateから開始し、前requestのcounterを
 持ち越さない。
+M=1 dispatchもM>1 native prefillと同じrequest collectorとroute counterを通り、成功した各layerの
+operation launchを記録する。terminal observationは最大64 KiBのcompact JSON 1行としてstructured
+stderrだけへ出力し、workerのstdout JSONL wireには追加しない。gateとmetadataの片側だけが有効な
+request、request ID不一致、未消費の前request observationはdispatch前に拒否する。
 診断collectorを初期化するだけではdirect routeを有効にせず、既存の
 `ULLM_AQ4_PREFILL_DIRECT_SEQUENCE_OUTPUT` gateもsideごとに記録して照合する。
 
@@ -323,7 +329,11 @@ observationから取り込む。`tools/produce-aq4-p3-candidate-a-profiler-obser
 profiler executableとrawをfile descriptorから読み、path/SHA/device/inode/link count、profiler
 version、実行command、exit code、開始・終了時刻、case/identity/run(or pair)/request、parser SHAを
 observationへ固定する。rawのsampleからlatency、peak VRAM、fidelityを再計算し、出力直前に
-profiler/raw/parserを再読してinodeとSHAを照合する。assemblerもrawを開き直して同じ値を再計算する。
+profiler/raw/parserを再読してinodeとSHAを照合する。versionは検証済みbytesをsealed memfdへ複製し、
+`pass_fds`で渡した`/proc/self/fd/N --version`だけを30秒以内で再実行して得る。exit 0、UTF-8の
+単一stdout行、空stderrを必須とし、stdout/stderrの全byte countとSHA-256、正規化値をprobe receiptへ
+固定する。assemblerもprofiler executableを再captureし、同じsealed-fd probeを実行してstored
+versionとreceiptの完全一致を確認する。resealしたversion/receipt改ざんと同一pathの実体置換は拒否する。
 profiler observationはself-hashとfile identityを検証し、
 `evidence_lane=profiler_off_measurement`かつ`measurement_eligible=true`のときだけ測定適格とする。
 instrumented laneをprofiler metricへ付けた出力はrejectし、適格な値へ昇格させない。p50/p95は10 runの各traceをこのproducerへ渡した後に

@@ -12,6 +12,8 @@ use serde::Serialize;
 use std::io::Write;
 use std::time::Instant;
 
+const MAX_TERMINAL_DIAGNOSTIC_BYTES: usize = 64 * 1024;
+
 /// A JSONL worker backend whose model-specific behavior is entirely supplied by `S`.
 #[derive(Debug)]
 pub struct SessionInferenceBackend<S> {
@@ -61,8 +63,31 @@ impl<S: InferenceSession> InferenceBackend for SessionInferenceBackend<S> {
             request_execution_audit: None,
         });
 
-        let result =
+        let mut result =
             drive_worker_request(&mut self.session, request, admission.cancel, publications);
+        if result.is_err()
+            && let Err(terminal_error) = self.session.terminalize_failed_diagnostic_observation()
+        {
+            let error = result.expect_err("driver result checked above");
+            result = Err(format!(
+                "{error}; terminal diagnostic finalization failed: {terminal_error}"
+            ));
+        }
+        let diagnostic_result = self
+            .session
+            .take_terminal_diagnostic_observation()
+            .and_then(|observation| match observation {
+                Some(observation) => write_terminal_diagnostic(&observation),
+                None => Ok(()),
+            });
+        if let Err(diagnostic_error) = diagnostic_result {
+            result = Err(match result {
+                Ok(_) => diagnostic_error,
+                Err(error) => {
+                    format!("{error}; terminal diagnostic emission failed: {diagnostic_error}")
+                }
+            });
+        }
         let request_execution_audit = self.session.terminal_sanitized_execution_audit();
         match result {
             Ok(outcome) => {
@@ -199,6 +224,37 @@ fn write_backend_log(record: BackendLog<'_>) {
     let _ = stderr.flush();
 }
 
+fn encode_terminal_diagnostic(observation: &serde_json::Value) -> Result<Vec<u8>, String> {
+    let object = observation
+        .as_object()
+        .ok_or_else(|| "terminal diagnostic observation must be a JSON object".to_string())?;
+    let schema = object
+        .get("schema_version")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| "terminal diagnostic observation has no schema version".to_string())?;
+    if schema != crate::qwen35_aq4_direct_trace::RUNTIME_OBSERVATION_SCHEMA {
+        return Err("terminal diagnostic observation schema is not admitted".into());
+    }
+    let mut bytes = serde_json::to_vec(observation)
+        .map_err(|error| format!("failed to encode terminal diagnostic observation: {error}"))?;
+    if bytes.len() > MAX_TERMINAL_DIAGNOSTIC_BYTES {
+        return Err(format!(
+            "terminal diagnostic observation exceeds {MAX_TERMINAL_DIAGNOSTIC_BYTES} bytes"
+        ));
+    }
+    bytes.push(b'\n');
+    Ok(bytes)
+}
+
+fn write_terminal_diagnostic(observation: &serde_json::Value) -> Result<(), String> {
+    let bytes = encode_terminal_diagnostic(observation)?;
+    let mut stderr = std::io::stderr().lock();
+    stderr
+        .write_all(&bytes)
+        .and_then(|_| stderr.flush())
+        .map_err(|error| format!("failed to write terminal diagnostic observation: {error}"))
+}
+
 fn elapsed_millis(started: Instant) -> u64 {
     u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
@@ -225,6 +281,35 @@ mod tests {
             assert_eq!(release_outcome_event(outcome), event);
             assert_eq!(release_outcome_name(outcome), name);
         }
+    }
+
+    #[test]
+    fn terminal_diagnostic_encoding_is_strict_bounded_and_one_json_line() {
+        let observation = serde_json::json!({
+            "schema_version": crate::qwen35_aq4_direct_trace::RUNTIME_OBSERVATION_SCHEMA,
+            "status": "complete"
+        });
+        let encoded = encode_terminal_diagnostic(&observation).unwrap();
+        assert_eq!(encoded.last(), Some(&b'\n'));
+        assert_eq!(encoded.iter().filter(|byte| **byte == b'\n').count(), 1);
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&encoded).unwrap(),
+            observation
+        );
+
+        assert!(
+            encode_terminal_diagnostic(&serde_json::json!({
+                "schema_version": "unknown.v1"
+            }))
+            .is_err()
+        );
+        assert!(
+            encode_terminal_diagnostic(&serde_json::json!({
+                "schema_version": crate::qwen35_aq4_direct_trace::RUNTIME_OBSERVATION_SCHEMA,
+                "oversized": "x".repeat(MAX_TERMINAL_DIAGNOSTIC_BYTES)
+            }))
+            .is_err()
+        );
     }
 
     #[test]

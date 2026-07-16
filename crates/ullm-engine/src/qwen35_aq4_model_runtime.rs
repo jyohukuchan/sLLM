@@ -1048,6 +1048,28 @@ impl Qwen35Aq4ModelRuntime {
         self.direct_trace_collector.is_some()
     }
 
+    pub fn direct_trace_request_active(&self) -> bool {
+        self.direct_trace_collector
+            .as_ref()
+            .is_some_and(Qwen35Aq4DirectTraceCollector::request_active)
+    }
+
+    pub fn record_direct_trace_failure_once(&mut self, reason: &str) -> Result<(), String> {
+        let Some(collector) = self.direct_trace_collector.as_mut() else {
+            return Ok(());
+        };
+        if collector.request_active() && !collector.failure_recorded() {
+            collector.record_failure(reason)?;
+        }
+        Ok(())
+    }
+
+    pub fn reset_direct_trace_without_emission(&mut self) {
+        if let Some(collector) = self.direct_trace_collector.as_mut() {
+            collector.reset_without_emission();
+        }
+    }
+
     /// Starts one request-scoped diagnostic observation and clears any inactive prior counters.
     pub fn begin_direct_trace_request(
         &mut self,
@@ -1178,6 +1200,13 @@ impl Qwen35Aq4ModelRuntime {
         sync_each_layer_for_timing: bool,
         label: &str,
     ) -> Result<Qwen35Aq4StackStep, String> {
+        if self
+            .direct_trace_collector
+            .as_ref()
+            .is_some_and(|collector| !collector.request_active())
+        {
+            return Err("direct trace diagnostic request was not started".into());
+        }
         if cache_position >= self.geometry.context_length {
             return Err(format!(
                 "{label} cache position {cache_position} exceeds context length {}",
@@ -1199,7 +1228,7 @@ impl Qwen35Aq4ModelRuntime {
         let input = embedding.output_buffer();
         self.last_partial_operation_executions.clear();
         self.last_partial_prefill_invocations.clear();
-        dispatch_layer_stack(
+        let result = dispatch_layer_stack(
             &mut self.layers,
             &mut self.stream,
             input,
@@ -1211,7 +1240,31 @@ impl Qwen35Aq4ModelRuntime {
             sync_each_layer_for_timing,
             label,
             &mut self.last_partial_operation_executions,
-        )
+        );
+        if result.is_err() {
+            self.record_direct_trace_failure_once("token_dispatch_failed")?;
+            return result;
+        }
+        let step = result.expect("successful result checked above");
+        if self.direct_trace_request_active() {
+            if self.stream.synchronize().is_err() {
+                self.record_direct_trace_failure_once("token_gpu_sync_failed")?;
+                return Err(format!("{label} diagnostic GPU synchronization failed"));
+            }
+            let collector = self
+                .direct_trace_collector
+                .as_mut()
+                .expect("active collector checked above");
+            for records in &step.operation_executions {
+                collector.record_invocation(
+                    Qwen35Aq4DirectTraceRoute::Direct,
+                    0,
+                    records.len() as u64,
+                    0,
+                )?;
+            }
+        }
+        Ok(step)
     }
 
     /// Executes one single-request prompt chunk. Linear-attention layers consume the complete

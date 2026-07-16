@@ -80,6 +80,21 @@ pub trait InferenceSession {
     fn terminal_sanitized_execution_audit(&self) -> Option<serde_json::Value> {
         None
     }
+
+    /// Takes one request-terminal diagnostic observation for bounded stderr emission.
+    ///
+    /// This is deliberately separate from the worker wire protocol and consumes the value so a
+    /// later request cannot inherit an earlier observation.
+    fn take_terminal_diagnostic_observation(
+        &mut self,
+    ) -> Result<Option<serde_json::Value>, String> {
+        Ok(None)
+    }
+
+    /// Completes an active diagnostic scope after a generic driver/publication error.
+    fn terminalize_failed_diagnostic_observation(&mut self) -> Result<(), String> {
+        Ok(())
+    }
 }
 
 pub trait RequestPublications {

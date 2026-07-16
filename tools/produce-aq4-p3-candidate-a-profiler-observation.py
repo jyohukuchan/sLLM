@@ -4,14 +4,17 @@
 from __future__ import annotations
 
 import argparse
+import fcntl
 import hashlib
 import json
 import math
 import os
 import re
+import signal
 import stat
 import subprocess
 import sys
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -23,6 +26,9 @@ LANE = "profiler_off_measurement"
 MAX_INPUT_BYTES = 8 * 1024 * 1024
 MAX_SAMPLES = 64
 MAX_TEXT = 128
+VERSION_PROBE_TIMEOUT_SECONDS = 30
+VERSION_PROBE_REAP_TIMEOUT_SECONDS = 5
+VERSION_PROBE_MAX_STREAM_BYTES = 16 * 1024
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 ID_RE = re.compile(r"^[A-Za-z0-9._:/-]{1,128}$")
 COMMON_FIELDS = {
@@ -42,10 +48,15 @@ REF_FIELDS = {"path", "sha256", "device", "inode", "nlink"}
 OBSERVATION_FIELDS = {
     "schema_version", "status", "record_sha256", *COMMON_FIELDS,
     "timing_lane", "measurement_eligible", "profiler", "raw_capture", "parser",
-    "profiler_version", "command", "exit_code", "started_unix_ns",
+    "profiler_version", "profiler_version_probe", "command", "exit_code", "started_unix_ns",
     "completed_unix_ns", "sample_count", "component_ms", "full_model_ms",
     "peak_vram_bytes", "fidelity_binding_sha256",
 }
+VERSION_PROBE_FIELDS = {
+    "schema_version", "argv", "timeout_seconds", "exit_code", "stdout", "stderr"
+}
+VERSION_PROBE_STREAM_FIELDS = {"bytes", "sha256", "policy", "normalized"}
+VERSION_PROBE_SCHEMA = "ullm.aq4_p3_candidate_a.profiler_version_probe.v1"
 
 
 class ProfilerEvidenceError(ValueError):
@@ -294,6 +305,189 @@ def _validate_ref(value: Any, label: str, *, executable: bool = False) -> Snapsh
     return snapshot
 
 
+def _sealed_executable_fd(snapshot: Snapshot) -> int:
+    if not hasattr(os, "memfd_create"):
+        raise ProfilerEvidenceError("sealed profiler execution is unavailable")
+    flags = getattr(os, "MFD_CLOEXEC", 0) | getattr(os, "MFD_ALLOW_SEALING", 0)
+    descriptor = os.memfd_create("ullm-aq4-p3-profiler", flags=flags)
+    try:
+        view = memoryview(snapshot.data)
+        while view:
+            written = os.write(descriptor, view)
+            if written <= 0:
+                raise ProfilerEvidenceError("sealed profiler write failed")
+            view = view[written:]
+        os.fchmod(descriptor, snapshot.identity[2] & 0o777)
+        seals = (
+            getattr(fcntl, "F_SEAL_SEAL", 0)
+            | getattr(fcntl, "F_SEAL_SHRINK", 0)
+            | getattr(fcntl, "F_SEAL_GROW", 0)
+            | getattr(fcntl, "F_SEAL_WRITE", 0)
+        )
+        fcntl.fcntl(descriptor, fcntl.F_ADD_SEALS, seals)
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        return descriptor
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
+def _drain_probe_stream(stream: Any, result: dict[str, Any]) -> None:
+    digest_value = hashlib.sha256()
+    retained = bytearray()
+    byte_count = 0
+    try:
+        while True:
+            chunk = stream.read(4096)
+            if not chunk:
+                break
+            byte_count += len(chunk)
+            digest_value.update(chunk)
+            remaining = VERSION_PROBE_MAX_STREAM_BYTES + 1 - len(retained)
+            if remaining > 0:
+                retained.extend(chunk[:remaining])
+    finally:
+        result.update(
+            raw=bytes(retained),
+            bytes=byte_count,
+            sha256=digest_value.hexdigest(),
+        )
+
+
+def _normalize_probe_stdout(raw: bytes) -> str:
+    if len(raw) > VERSION_PROBE_MAX_STREAM_BYTES:
+        raise ProfilerEvidenceError("profiler version stdout exceeds its bound")
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeError as error:
+        raise ProfilerEvidenceError("profiler version stdout is not UTF-8") from error
+    normalized = text[:-1] if text.endswith("\n") else text
+    if normalized.endswith("\r"):
+        normalized = normalized[:-1]
+    if (
+        not normalized
+        or len(normalized.encode("utf-8")) > 4096
+        or "\n" in normalized
+        or "\r" in normalized
+        or any(ord(character) < 0x20 and character != "\t" for character in normalized)
+    ):
+        raise ProfilerEvidenceError("profiler version stdout policy differs")
+    return normalized
+
+
+def probe_profiler_version(profiler: Snapshot) -> tuple[str, dict[str, Any]]:
+    descriptor = _sealed_executable_fd(profiler)
+    executable = f"/proc/self/fd/{descriptor}"
+    process: subprocess.Popen[bytes] | None = None
+    try:
+        process = subprocess.Popen(
+            [executable, "--version"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            pass_fds=(descriptor,),
+            shell=False,
+            start_new_session=True,
+        )
+        assert process.stdout is not None and process.stderr is not None
+        stdout_result: dict[str, Any] = {}
+        stderr_result: dict[str, Any] = {}
+        threads = [
+            threading.Thread(
+                target=_drain_probe_stream,
+                args=(process.stdout, stdout_result),
+                daemon=True,
+            ),
+            threading.Thread(
+                target=_drain_probe_stream,
+                args=(process.stderr, stderr_result),
+                daemon=True,
+            ),
+        ]
+        for thread in threads:
+            thread.start()
+        try:
+            process.wait(timeout=VERSION_PROBE_TIMEOUT_SECONDS)
+        except subprocess.TimeoutExpired as error:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            try:
+                process.wait(timeout=VERSION_PROBE_REAP_TIMEOUT_SECONDS)
+            except subprocess.TimeoutExpired as reap_error:
+                raise ProfilerEvidenceError(
+                    "profiler version probe could not be reaped"
+                ) from reap_error
+            raise ProfilerEvidenceError("profiler version probe timed out") from error
+        for thread in threads:
+            thread.join(timeout=VERSION_PROBE_REAP_TIMEOUT_SECONDS)
+        if any(thread.is_alive() for thread in threads):
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            raise ProfilerEvidenceError("profiler version stream drain timed out")
+        stdout_raw = stdout_result.get("raw", b"")
+        stderr_raw = stderr_result.get("raw", b"")
+        version = _normalize_probe_stdout(stdout_raw)
+        if process.returncode != 0:
+            raise ProfilerEvidenceError("profiler version probe exit code differs")
+        if stderr_result.get("bytes") != 0 or stderr_raw:
+            raise ProfilerEvidenceError("profiler version stderr must be empty")
+        receipt = {
+            "schema_version": VERSION_PROBE_SCHEMA,
+            "argv": ["<verified-profiler-fd>", "--version"],
+            "timeout_seconds": VERSION_PROBE_TIMEOUT_SECONDS,
+            "exit_code": 0,
+            "stdout": {
+                "bytes": stdout_result["bytes"],
+                "sha256": stdout_result["sha256"],
+                "policy": "utf8_single_line_optional_lf",
+                "normalized": version,
+            },
+            "stderr": {
+                "bytes": 0,
+                "sha256": stderr_result["sha256"],
+                "policy": "empty",
+                "normalized": "",
+            },
+        }
+        return version, receipt
+    finally:
+        if process is not None and process.poll() is None:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            try:
+                process.wait(timeout=VERSION_PROBE_REAP_TIMEOUT_SECONDS)
+            except subprocess.TimeoutExpired:
+                pass
+        os.close(descriptor)
+
+
+def validate_version_probe(
+    value: Any, profiler: Snapshot, stored_version: Any
+) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise ProfilerEvidenceError("profiler version probe must be an object")
+    exact(value, VERSION_PROBE_FIELDS, "profiler version probe")
+    for stream_name in ("stdout", "stderr"):
+        stream = value[stream_name]
+        if not isinstance(stream, dict):
+            raise ProfilerEvidenceError("profiler version probe stream must be an object")
+        exact(stream, VERSION_PROBE_STREAM_FIELDS, f"profiler version probe {stream_name}")
+        count(stream["bytes"], f"profiler version probe {stream_name} bytes")
+        digest(stream["sha256"], f"profiler version probe {stream_name} SHA-256")
+        if not isinstance(stream["normalized"], str):
+            raise ProfilerEvidenceError("profiler version probe normalized text differs")
+    observed_version, observed_receipt = probe_profiler_version(profiler)
+    if value != observed_receipt or stored_version != observed_version:
+        raise ProfilerEvidenceError("profiler stored version/probe receipt differs")
+    return observed_receipt
+
+
 def validate_observation(value: dict[str, Any]) -> dict[str, Any]:
     exact(value, OBSERVATION_FIELDS, "profiler observation")
     if (
@@ -322,6 +516,9 @@ def validate_observation(value: dict[str, Any]) -> dict[str, Any]:
             raise ProfilerEvidenceError(f"profiler observation derived {field} differs")
     if not isinstance(value["profiler_version"], str) or not value["profiler_version"] or len(value["profiler_version"]) > 4096:
         raise ProfilerEvidenceError("profiler version is invalid")
+    validate_version_probe(
+        value["profiler_version_probe"], profiler, value["profiler_version"]
+    )
     profiler.verify("profiler executable", executable=True)
     raw.verify("raw profiler capture")
     parser.verify("profiler parser")
@@ -336,13 +533,7 @@ def build(raw_path: Path, profiler_path: Path) -> tuple[dict[str, Any], list[Sna
     common, derived = derive_raw(raw_value)
     if derived["command"][0] != str(profiler.path):
         raise ProfilerEvidenceError("raw profiler command executable differs")
-    version_result = subprocess.run(
-        [str(profiler.path), "--version"], check=False, capture_output=True,
-        text=True, timeout=30,
-    )
-    version = (version_result.stdout + version_result.stderr).strip()
-    if version_result.returncode != 0 or not version or len(version) > 4096:
-        raise ProfilerEvidenceError("profiler version probe failed")
+    version, version_probe = probe_profiler_version(profiler)
     result: dict[str, Any] = {
         "schema_version": OBSERVATION_SCHEMA,
         "status": "complete",
@@ -354,6 +545,7 @@ def build(raw_path: Path, profiler_path: Path) -> tuple[dict[str, Any], list[Sna
         "raw_capture": raw.reference(),
         "parser": parser.reference(),
         "profiler_version": version,
+        "profiler_version_probe": version_probe,
         **derived,
     }
     result["record_sha256"] = self_hash(result, "record_sha256")

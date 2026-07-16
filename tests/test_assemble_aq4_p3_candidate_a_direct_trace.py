@@ -361,3 +361,69 @@ def test_failed_runtime_terminal_cannot_enter_complete_trace(tmp_path: Path) -> 
     write_json(paths["candidate_runtime"], value)
     with pytest.raises(ASSEMBLER.AssemblerError, match="status|terminal"):
         ASSEMBLER.assemble(paths, tmp_path / "failed-runtime.json", "run", "run-1")
+
+
+def test_profiler_resealed_version_and_probe_tamper_are_rejected(tmp_path: Path) -> None:
+    for field in ("version", "probe"):
+        paths = files(tmp_path / field)
+        value = json.loads(paths["candidate_profiler"].read_text(encoding="utf-8"))
+        if field == "version":
+            value["profiler_version"] = "rocprofv3-fixture-9.9"
+        else:
+            value["profiler_version_probe"]["stdout"]["sha256"] = "0" * 64
+        seal(value, "record_sha256")
+        write_json(paths["candidate_profiler"], value)
+        with pytest.raises(ASSEMBLER.AssemblerError, match="profiler evidence"):
+            ASSEMBLER.assemble(
+                paths, tmp_path / f"{field}-tamper.json", "run", "run-1"
+            )
+
+
+def test_profiler_replaced_executable_is_rejected_during_assembly(tmp_path: Path) -> None:
+    paths = files(tmp_path)
+    value = json.loads(paths["candidate_profiler"].read_text(encoding="utf-8"))
+    executable = Path(value["profiler"]["path"])
+    replacement = executable.with_name("rocprofv3-replacement")
+    replacement.write_text("#!/bin/sh\necho rocprofv3-fixture-2.0\n", encoding="ascii")
+    replacement.chmod(0o755)
+    os.replace(replacement, executable)
+    with pytest.raises(ASSEMBLER.AssemblerError, match="profiler evidence"):
+        ASSEMBLER.assemble(paths, tmp_path / "replaced.json", "run", "run-1")
+
+
+def test_profiler_version_probe_has_bounded_timeout_and_empty_stderr_policy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    executable = tmp_path / "slow-profiler"
+    executable.write_text("#!/bin/sh\nsleep 2\necho too-late\n", encoding="ascii")
+    executable.chmod(0o755)
+    snapshot = ASSEMBLER.PROFILER_EVIDENCE.capture(
+        executable, "slow profiler", executable=True
+    )
+    monkeypatch.setattr(
+        ASSEMBLER.PROFILER_EVIDENCE, "VERSION_PROBE_TIMEOUT_SECONDS", 0.05
+    )
+    monkeypatch.setattr(
+        ASSEMBLER.PROFILER_EVIDENCE, "VERSION_PROBE_REAP_TIMEOUT_SECONDS", 0.1
+    )
+    with pytest.raises(
+        ASSEMBLER.PROFILER_EVIDENCE.ProfilerEvidenceError, match="timed out"
+    ):
+        ASSEMBLER.PROFILER_EVIDENCE.probe_profiler_version(snapshot)
+
+    noisy = tmp_path / "noisy-profiler"
+    noisy.write_text(
+        "#!/bin/sh\necho rocprofv3-fixture-1.0\necho diagnostic >&2\n",
+        encoding="ascii",
+    )
+    noisy.chmod(0o755)
+    noisy_snapshot = ASSEMBLER.PROFILER_EVIDENCE.capture(
+        noisy, "noisy profiler", executable=True
+    )
+    monkeypatch.setattr(
+        ASSEMBLER.PROFILER_EVIDENCE, "VERSION_PROBE_TIMEOUT_SECONDS", 30
+    )
+    with pytest.raises(
+        ASSEMBLER.PROFILER_EVIDENCE.ProfilerEvidenceError, match="stderr must be empty"
+    ):
+        ASSEMBLER.PROFILER_EVIDENCE.probe_profiler_version(noisy_snapshot)

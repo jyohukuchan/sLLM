@@ -57,6 +57,11 @@ pub struct InferenceRequest {
     pub eos_token_ids: Vec<usize>,
     pub sampling: SamplingParams,
     pub reasoning: Option<crate::reasoning::ReasoningExecution>,
+    /// Optional, diagnostic-only P3 binding carried inside the process.
+    ///
+    /// Worker JSONL schemas do not expose this field. A trusted AQ4 diagnostic caller must
+    /// attach it explicitly after decoding and validation; ordinary requests remain `None`.
+    pub aq4_p3_direct_trace: Option<crate::qwen35_aq4_direct_trace::Qwen35Aq4DirectTraceBinding>,
     test_only_ignore_eos: bool,
 }
 
@@ -75,8 +80,17 @@ impl InferenceRequest {
             eos_token_ids,
             sampling,
             reasoning: None,
+            aq4_p3_direct_trace: None,
             test_only_ignore_eos: false,
         }
+    }
+
+    pub fn with_aq4_p3_direct_trace(
+        mut self,
+        binding: crate::qwen35_aq4_direct_trace::Qwen35Aq4DirectTraceBinding,
+    ) -> Self {
+        self.aq4_p3_direct_trace = Some(binding);
+        self
     }
 
     pub fn test_only_ignores_eos(&self) -> bool {
