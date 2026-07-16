@@ -12,6 +12,7 @@ import os
 import re
 import stat
 import sys
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
@@ -1489,7 +1490,9 @@ def write_output(path: Path, value: dict[str, Any]) -> None:
     raw = json.dumps(
         value, ensure_ascii=True, sort_keys=True, indent=2, allow_nan=False
     ).encode("ascii") + b"\n"
-    temporary = path.with_name(f".{path.name}.tmp-{os.getpid()}")
+    temporary = path.with_name(
+        f".{path.name}.tmp-{os.getpid()}-{threading.get_ident()}"
+    )
     try:
         with temporary.open("xb") as handle:
             handle.write(raw)

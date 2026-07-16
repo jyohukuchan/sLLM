@@ -9,6 +9,7 @@
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::backend_operation_registry::{OperationExecutionRecord, OperationResolutionTrace};
 use crate::execution_batch::ExecutionPhase;
@@ -39,6 +40,7 @@ const QWEN35_LINEAR_PERSISTENT_STATE_BYTES: u64 = 2_228_224;
 const QWEN35_SELF_PERSISTENT_STATE_BYTES: u64 = 33_554_432;
 const QWEN35_REQUIRED_DEVICE_HEADROOM_BYTES: u64 = 512 * 1024 * 1024;
 pub const QWEN35_AQ4_NATIVE_PREFILL_MAX_WIDTH: usize = 128;
+static P3_PRODUCTION_DIRECT_SEQUENCE_OUTPUT_ACTIVATED: AtomicBool = AtomicBool::new(false);
 
 fn native_prefill_sequence_width_admitted(sequence_len: usize) -> bool {
     (2..=QWEN35_AQ4_NATIVE_PREFILL_MAX_WIDTH).contains(&sequence_len)
@@ -121,11 +123,29 @@ fn direct_prefill_sequence_output_enabled_value(value: Option<&str>) -> bool {
 }
 
 fn direct_prefill_sequence_output_enabled() -> bool {
-    direct_prefill_sequence_output_enabled_value(
+    let requested = direct_prefill_sequence_output_enabled_value(
         std::env::var("ULLM_AQ4_PREFILL_DIRECT_SEQUENCE_OUTPUT")
             .ok()
             .as_deref(),
+    );
+    direct_prefill_sequence_output_admitted(
+        requested,
+        direct_trace_diagnostic_enabled(),
+        P3_PRODUCTION_DIRECT_SEQUENCE_OUTPUT_ACTIVATED.load(Ordering::Acquire),
     )
+}
+
+fn direct_prefill_sequence_output_admitted(
+    requested: bool,
+    diagnostic: bool,
+    production_activated: bool,
+) -> bool {
+    requested && (diagnostic || production_activated)
+}
+
+/// Irreversibly admits Candidate A for this worker process after startup evidence validation.
+pub fn activate_p3_production_direct_sequence_output() {
+    P3_PRODUCTION_DIRECT_SEQUENCE_OUTPUT_ACTIVATED.store(true, Ordering::Release);
 }
 
 pub fn direct_trace_diagnostic_enabled_value(value: Option<&str>) -> bool {
@@ -2047,6 +2067,10 @@ mod tests {
         for value in ["1", "true", "TRUE", "yes", "YES"] {
             assert!(direct_prefill_sequence_output_enabled_value(Some(value)));
         }
+        assert!(!direct_prefill_sequence_output_admitted(true, false, false));
+        assert!(direct_prefill_sequence_output_admitted(true, true, false));
+        assert!(direct_prefill_sequence_output_admitted(true, false, true));
+        assert!(!direct_prefill_sequence_output_admitted(false, true, true));
     }
 
     #[test]

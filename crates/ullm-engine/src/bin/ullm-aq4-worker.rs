@@ -21,7 +21,8 @@ use ullm_engine::aq4_worker_backend::{
 use ullm_engine::qwen35_aq4_direct_trace::Qwen35Aq4DirectTraceBinding;
 use ullm_engine::qwen35_aq4_head_runtime::PackageLmHeadMode;
 use ullm_engine::qwen35_aq4_model_runtime::{
-    QWEN35_AQ4_KV_BLOCK_SIZE, Qwen35Aq4ModelLoadConfig, direct_trace_diagnostic_enabled_value,
+    QWEN35_AQ4_KV_BLOCK_SIZE, Qwen35Aq4ModelLoadConfig,
+    activate_p3_production_direct_sequence_output, direct_trace_diagnostic_enabled_value,
 };
 use ullm_engine::qwen35_aq4_session::{Qwen35Aq4InferenceSession, Qwen35Aq4SessionConfig};
 use ullm_engine::served_model::{
@@ -38,6 +39,7 @@ const RESIDENT_LM_HEAD_CHUNK_ROWS: usize = 8192;
 const P3_DIRECT_TRACE_BINDING_MANIFEST_SCHEMA: &str =
     "ullm.aq4_p3_candidate_a.direct_trace_binding_manifest.v1";
 const P3_DIRECT_TRACE_BINDING_MANIFEST_MAX_ENTRIES: usize = 64;
+const P3_PRODUCTION_ACTIVATION_SCHEMA: &str = "ullm.aq4_p3_candidate_a.production_activation.v1";
 
 #[derive(Debug, PartialEq, Eq)]
 struct WorkerArgs {
@@ -53,6 +55,7 @@ enum WorkerSource {
     ServedModelManifest {
         served_model: PathBuf,
         direct_trace_bindings: Option<DiagnosticBindingSource>,
+        production_activation: Option<DiagnosticBindingSource>,
     },
     BenchmarkServedModelManifest {
         served_model: PathBuf,
@@ -105,6 +108,7 @@ fn main() -> ExitCode {
                  Gateway form: --artifact AQ4_PACKAGE --package COMPAT_PATH [extra options]\n\
                  Manifest mode: ullm-aq4-worker --served-model-manifest PATH\n\
                  P3 diagnostic mode: --served-model-manifest PATH --p3-direct-trace-binding-manifest PATH --p3-direct-trace-binding-manifest-sha256 SHA256\n\
+                 P3 production mode: --served-model-manifest PATH --p3-production-activation PATH --p3-production-activation-sha256 SHA256\n\
                  Benchmark mode: ullm-aq4-worker --served-model-manifest PATH --benchmark-wire --benchmark-case-manifest PATH --benchmark-case-manifest-sha256 SHA256\n\
                  Reads ullm.worker.v1/v2 commands from stdin and writes matching events to stdout.\n\
                  Compatibility mode invokes the AQ4 engine CLI once per request.\n\
@@ -175,9 +179,14 @@ fn load_worker(source: WorkerSource) -> Result<LoadedWorker, ServedModelError> {
             .ok()
             .as_deref(),
     );
+    let direct_requested = direct_trace_diagnostic_enabled_value(
+        env::var("ULLM_AQ4_PREFILL_DIRECT_SEQUENCE_OUTPUT")
+            .ok()
+            .as_deref(),
+    );
     match source {
         WorkerSource::Legacy(args) => {
-            if diagnostic_gate {
+            if diagnostic_gate || direct_requested {
                 return Err(ServedModelError(
                     "AQ4 P3 diagnostic gate requires manifest resident mode".into(),
                 ));
@@ -194,8 +203,18 @@ fn load_worker(source: WorkerSource) -> Result<LoadedWorker, ServedModelError> {
         WorkerSource::ServedModelManifest {
             served_model,
             direct_trace_bindings,
+            production_activation,
         } => {
-            validate_direct_trace_ingress(diagnostic_gate, direct_trace_bindings.is_some())?;
+            validate_direct_trace_ingress(
+                diagnostic_gate,
+                direct_trace_bindings.is_some(),
+                production_activation.is_some(),
+                direct_requested,
+            )?;
+            if let Some(source) = production_activation {
+                load_p3_production_activation(&source.path, &source.bytes_sha256)?;
+                activate_p3_production_direct_sequence_output();
+            }
             let bindings = direct_trace_bindings
                 .map(|source| {
                     load_direct_trace_binding_manifest(&source.path, &source.bytes_sha256)
@@ -222,7 +241,7 @@ fn load_worker(source: WorkerSource) -> Result<LoadedWorker, ServedModelError> {
             case_registry,
             case_registry_sha256,
         } => {
-            if diagnostic_gate {
+            if diagnostic_gate || direct_requested {
                 return Err(ServedModelError(
                     "AQ4 P3 diagnostic gate is not admitted on benchmark wire".into(),
                 ));
@@ -252,10 +271,23 @@ fn load_worker(source: WorkerSource) -> Result<LoadedWorker, ServedModelError> {
 fn validate_direct_trace_ingress(
     diagnostic_gate: bool,
     binding_manifest_configured: bool,
+    production_activation_configured: bool,
+    direct_requested: bool,
 ) -> Result<(), ServedModelError> {
     if diagnostic_gate != binding_manifest_configured {
         return Err(ServedModelError(
             "AQ4 P3 diagnostic gate and binding manifest must be enabled together".into(),
+        ));
+    }
+    if diagnostic_gate && production_activation_configured {
+        return Err(ServedModelError(
+            "AQ4 P3 diagnostic and production activation modes are mutually exclusive".into(),
+        ));
+    }
+    if direct_requested != (diagnostic_gate || production_activation_configured) {
+        return Err(ServedModelError(
+            "AQ4 P3 direct route requires exactly one diagnostic or production activation gate"
+                .into(),
         ));
     }
     Ok(())
@@ -273,6 +305,419 @@ fn load_benchmark_case_registry(
 struct DirectTraceBindingManifest {
     schema_version: String,
     bindings: Vec<Qwen35Aq4DirectTraceBinding>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct P3ProductionActivation {
+    schema_version: String,
+    status: String,
+    activation_sha256: String,
+    candidate: P3ActivationCandidate,
+    build: P3ActivationBuild,
+    profile: P3ActivationProfile,
+    selection: P3ActivationSelection,
+    upstream_qualification: P3ActivationQualification,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct P3ActivationCandidate {
+    candidate_id: String,
+    family: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct P3ActivationBuild {
+    identity_sha256: String,
+    case_manifest_sha256: String,
+    binary_sha256: String,
+    package_content_sha256: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct P3ActivationProfile {
+    selection_file_sha256: String,
+    raw_evidence: Vec<P3ActivationRawReference>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct P3ActivationRawReference {
+    path: PathBuf,
+    sha256: String,
+    evidence_sha256: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct P3ActivationSelection {
+    path: PathBuf,
+    sha256: String,
+    status: String,
+    selected_candidate_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct P3ActivationQualification {
+    path: PathBuf,
+    sha256: String,
+    qualification_sha256: String,
+    status: String,
+    promotion_eligible: bool,
+    reason: String,
+}
+
+fn load_bound_p3_bytes(path: &Path, expected_sha256: &str) -> Result<Vec<u8>, ServedModelError> {
+    if !path.is_absolute()
+        || std::fs::canonicalize(path)
+            .map(|canonical| canonical != path)
+            .unwrap_or(true)
+        || !is_lowercase_sha256(expected_sha256)
+    {
+        return Err(ServedModelError(
+            "AQ4 P3 bound file path or SHA-256 differs".into(),
+        ));
+    }
+    reject_direct_trace_binding_symlink_components(path)?;
+    let before = std::fs::symlink_metadata(path)
+        .map_err(|_| ServedModelError("AQ4 P3 bound file metadata failed".into()))?;
+    if !before.file_type().is_file() || before.nlink() != 1 {
+        return Err(ServedModelError(
+            "AQ4 P3 bound file must be single-link regular".into(),
+        ));
+    }
+    const O_NOFOLLOW: i32 = 0o400000;
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(O_NOFOLLOW)
+        .open(path)
+        .map_err(|_| ServedModelError("AQ4 P3 bound file open failed".into()))?;
+    let identity = RegistryFileIdentity::from(&before);
+    if RegistryFileIdentity::from(
+        &file
+            .metadata()
+            .map_err(|_| ServedModelError("AQ4 P3 bound file metadata failed".into()))?,
+    ) != identity
+    {
+        return Err(ServedModelError(
+            "AQ4 P3 bound file changed while opening".into(),
+        ));
+    }
+    let maximum = ullm_engine::worker_protocol::WORKER_MAX_RECORD_BYTES;
+    let mut payload = Vec::with_capacity(usize::try_from(identity.size).unwrap_or(maximum));
+    file.take(u64::try_from(maximum).unwrap_or(u64::MAX) + 1)
+        .read_to_end(&mut payload)
+        .map_err(|_| ServedModelError("AQ4 P3 bound file read failed".into()))?;
+    if payload.is_empty() || payload.len() > maximum {
+        return Err(ServedModelError("AQ4 P3 bound file size differs".into()));
+    }
+    reject_direct_trace_binding_symlink_components(path)?;
+    let after = std::fs::symlink_metadata(path)
+        .map_err(|_| ServedModelError("AQ4 P3 bound file metadata failed".into()))?;
+    if RegistryFileIdentity::from(&after) != identity {
+        return Err(ServedModelError(
+            "AQ4 P3 bound file changed while reading".into(),
+        ));
+    }
+    if format!("{:x}", Sha256::digest(&payload)) != expected_sha256 {
+        return Err(ServedModelError("AQ4 P3 bound file SHA-256 differs".into()));
+    }
+    Ok(payload)
+}
+
+fn p3_canonical_self_hash(
+    value: &serde_json::Value,
+    field: &str,
+) -> Result<String, ServedModelError> {
+    let mut clone = value.clone();
+    clone
+        .as_object_mut()
+        .ok_or_else(|| ServedModelError("AQ4 P3 object is invalid".into()))?
+        .insert(field.to_string(), serde_json::Value::Null);
+    let bytes = serde_json::to_vec(&clone)
+        .map_err(|_| ServedModelError("AQ4 P3 canonical JSON failed".into()))?;
+    Ok(format!("{:x}", Sha256::digest(bytes)))
+}
+
+fn p3_exact_keys(value: &serde_json::Value, expected: &[&str]) -> bool {
+    value.as_object().is_some_and(|object| {
+        object.len() == expected.len() && expected.iter().all(|field| object.contains_key(*field))
+    })
+}
+
+fn p3_load_qualification_ref(
+    p2: &serde_json::Value,
+    field: &str,
+) -> Result<serde_json::Value, ServedModelError> {
+    let reference = p2
+        .get(field)
+        .ok_or_else(|| ServedModelError("AQ4 P3 qualification reference is missing".into()))?;
+    if !p3_exact_keys(reference, &["path", "sha256"]) {
+        return Err(ServedModelError(
+            "AQ4 P3 qualification reference fields differ".into(),
+        ));
+    }
+    let path = reference
+        .get("path")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| ServedModelError("AQ4 P3 qualification reference path differs".into()))?;
+    let sha = reference
+        .get("sha256")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| ServedModelError("AQ4 P3 qualification reference SHA differs".into()))?;
+    let bytes = load_bound_p3_bytes(Path::new(path), sha)?;
+    serde_json::from_slice(&bytes)
+        .map_err(|_| ServedModelError("AQ4 P3 qualification reference JSON is invalid".into()))
+}
+
+fn validate_p3_qualified_success_chain(
+    qualification: &serde_json::Value,
+) -> Result<(), ServedModelError> {
+    let p2 = qualification
+        .get("p2")
+        .ok_or_else(|| ServedModelError("AQ4 P3 qualification P2 chain is absent".into()))?;
+    let fields = [
+        "plan",
+        "actual_receipt",
+        "policy",
+        "calibration_metrics",
+        "freeze_receipt",
+        "preflight",
+        "ledger",
+        "holdout_metrics",
+        "holdout_receipt",
+        "holdout",
+    ];
+    if !p3_exact_keys(p2, &fields)
+        || !p2.get("holdout").is_some_and(|holdout| {
+            p3_exact_keys(holdout, &["status", "evaluations_remaining", "executed"])
+                && holdout.get("status").and_then(serde_json::Value::as_str) == Some("passed")
+                && holdout
+                    .get("evaluations_remaining")
+                    .and_then(serde_json::Value::as_u64)
+                    == Some(0)
+                && holdout.get("executed").and_then(serde_json::Value::as_bool) == Some(true)
+        })
+    {
+        return Err(ServedModelError(
+            "AQ4 P3 qualification P2 holdout state differs".into(),
+        ));
+    }
+    let plan = p3_load_qualification_ref(p2, "plan")?;
+    let _actual = p3_load_qualification_ref(p2, "actual_receipt")?;
+    let _policy = p3_load_qualification_ref(p2, "policy")?;
+    let _calibration_metrics = p3_load_qualification_ref(p2, "calibration_metrics")?;
+    let freeze = p3_load_qualification_ref(p2, "freeze_receipt")?;
+    let preflight = p3_load_qualification_ref(p2, "preflight")?;
+    let ledger = p3_load_qualification_ref(p2, "ledger")?;
+    let _holdout_metrics = p3_load_qualification_ref(p2, "holdout_metrics")?;
+    let holdout = p3_load_qualification_ref(p2, "holdout_receipt")?;
+    let gates_passed = holdout
+        .get("gate_checks")
+        .and_then(serde_json::Value::as_object)
+        .is_some_and(|checks| {
+            !checks.is_empty() && checks.values().all(|value| value.as_bool() == Some(true))
+        });
+    if plan
+        .get("schema_version")
+        .and_then(serde_json::Value::as_str)
+        != Some("ullm.qwen35_aq4_sq8_fidelity_plan.v1")
+        || plan.get("status").and_then(serde_json::Value::as_str) != Some("ready_for_calibration")
+        || plan
+            .get("preflight_only")
+            .and_then(serde_json::Value::as_bool)
+            != Some(false)
+        || freeze
+            .get("schema_version")
+            .and_then(serde_json::Value::as_str)
+            != Some("ullm.qwen35_aq4_sq8_fidelity_freeze_receipt.v1")
+        || freeze.get("status").and_then(serde_json::Value::as_str)
+            != Some("frozen_calibration_envelope")
+        || preflight
+            .get("schema_version")
+            .and_then(serde_json::Value::as_str)
+            != Some("ullm.qwen35_aq4_sq8_fidelity_holdout_preflight.v1")
+        || preflight.get("status").and_then(serde_json::Value::as_str)
+            != Some("ready_for_one_shot_holdout")
+        || ledger
+            .get("schema_version")
+            .and_then(serde_json::Value::as_str)
+            != Some("ullm.qwen35_aq4_sq8_fidelity_attempt_ledger.v1")
+        || ledger.get("status").and_then(serde_json::Value::as_str) != Some("consumed")
+        || ledger
+            .get("remaining_after")
+            .and_then(serde_json::Value::as_u64)
+            != Some(0)
+        || holdout
+            .get("schema_version")
+            .and_then(serde_json::Value::as_str)
+            != Some("ullm.qwen35_aq4_sq8_fidelity_holdout_receipt.v1")
+        || holdout.get("status").and_then(serde_json::Value::as_str) != Some("passed")
+        || holdout
+            .get("evaluations_remaining")
+            .and_then(serde_json::Value::as_u64)
+            != Some(0)
+        || !gates_passed
+    {
+        return Err(ServedModelError(
+            "AQ4 P3 qualification P2 success chain differs".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn load_p3_production_activation(
+    path: &Path,
+    expected_sha256: &str,
+) -> Result<(), ServedModelError> {
+    let payload = load_bound_p3_bytes(path, expected_sha256)?;
+    let value: serde_json::Value = serde_json::from_slice(&payload)
+        .map_err(|_| ServedModelError("AQ4 P3 activation JSON is invalid".into()))?;
+    let manifest: P3ProductionActivation = serde_json::from_value(value.clone())
+        .map_err(|_| ServedModelError("AQ4 P3 activation schema is invalid".into()))?;
+    if manifest.schema_version != P3_PRODUCTION_ACTIVATION_SCHEMA
+        || manifest.status != "production_activated"
+        || manifest.candidate.candidate_id != "sequence-output-direct-v1"
+        || manifest.candidate.family != "attention_recurrent"
+        || manifest.selection.status != "selected"
+        || manifest.selection.selected_candidate_id != "sequence-output-direct-v1"
+        || manifest.upstream_qualification.status != "qualified_go"
+        || !manifest.upstream_qualification.promotion_eligible
+        || manifest.upstream_qualification.reason != "upstream_p2_holdout_passed"
+        || !is_lowercase_sha256(&manifest.activation_sha256)
+        || p3_canonical_self_hash(&value, "activation_sha256")? != manifest.activation_sha256
+    {
+        return Err(ServedModelError("AQ4 P3 activation state differs".into()));
+    }
+    for sha in [
+        &manifest.build.identity_sha256,
+        &manifest.build.case_manifest_sha256,
+        &manifest.build.binary_sha256,
+        &manifest.build.package_content_sha256,
+        &manifest.selection.sha256,
+        &manifest.profile.selection_file_sha256,
+        &manifest.upstream_qualification.sha256,
+        &manifest.upstream_qualification.qualification_sha256,
+    ] {
+        if !is_lowercase_sha256(sha) {
+            return Err(ServedModelError("AQ4 P3 activation digest differs".into()));
+        }
+    }
+    if manifest.selection.sha256 != manifest.profile.selection_file_sha256
+        || manifest.profile.raw_evidence.is_empty()
+    {
+        return Err(ServedModelError(
+            "AQ4 P3 activation profile binding differs".into(),
+        ));
+    }
+    let selection = load_bound_p3_bytes(&manifest.selection.path, &manifest.selection.sha256)?;
+    let selection_value: serde_json::Value = serde_json::from_slice(&selection)
+        .map_err(|_| ServedModelError("AQ4 P3 selection JSON is invalid".into()))?;
+    if selection_value
+        .get("status")
+        .and_then(serde_json::Value::as_str)
+        != Some("selected")
+        || selection_value
+            .get("selected_candidate_id")
+            .and_then(serde_json::Value::as_str)
+            != Some("sequence-output-direct-v1")
+        || selection_value
+            .get("input_binding")
+            .and_then(|binding| binding.get("upstream_qualification_sha256"))
+            .and_then(serde_json::Value::as_str)
+            != Some(
+                manifest
+                    .upstream_qualification
+                    .qualification_sha256
+                    .as_str(),
+            )
+        || !selection_value
+            .get("candidates")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|candidates| {
+                candidates.iter().any(|candidate| {
+                    candidate
+                        .get("candidate_id")
+                        .and_then(serde_json::Value::as_str)
+                        == Some("sequence-output-direct-v1")
+                        && candidate
+                            .get("eligible")
+                            .and_then(serde_json::Value::as_bool)
+                            == Some(true)
+                })
+            })
+    {
+        return Err(ServedModelError("AQ4 P3 selection state differs".into()));
+    }
+    let qualification = load_bound_p3_bytes(
+        &manifest.upstream_qualification.path,
+        &manifest.upstream_qualification.sha256,
+    )?;
+    let qualification_value: serde_json::Value = serde_json::from_slice(&qualification)
+        .map_err(|_| ServedModelError("AQ4 P3 qualification JSON is invalid".into()))?;
+    if qualification_value
+        .get("status")
+        .and_then(serde_json::Value::as_str)
+        != Some("qualified_go")
+        || qualification_value
+            .get("schema_version")
+            .and_then(serde_json::Value::as_str)
+            != Some("ullm.aq4_p3_upstream_p2_qualification.v1")
+        || qualification_value
+            .get("promotion_eligible")
+            .and_then(serde_json::Value::as_bool)
+            != Some(true)
+        || qualification_value
+            .get("qualification_sha256")
+            .and_then(serde_json::Value::as_str)
+            != Some(
+                manifest
+                    .upstream_qualification
+                    .qualification_sha256
+                    .as_str(),
+            )
+        || p3_canonical_self_hash(&qualification_value, "qualification_sha256")?
+            != manifest.upstream_qualification.qualification_sha256
+    {
+        return Err(ServedModelError(
+            "AQ4 P3 qualification state differs".into(),
+        ));
+    }
+    validate_p3_qualified_success_chain(&qualification_value)?;
+    for raw in manifest.profile.raw_evidence {
+        if !is_lowercase_sha256(&raw.sha256) || !is_lowercase_sha256(&raw.evidence_sha256) {
+            return Err(ServedModelError("AQ4 P3 raw digest differs".into()));
+        }
+        let bytes = load_bound_p3_bytes(&raw.path, &raw.sha256)?;
+        let raw_value: serde_json::Value = serde_json::from_slice(&bytes)
+            .map_err(|_| ServedModelError("AQ4 P3 raw JSON is invalid".into()))?;
+        if raw_value.get("status").and_then(serde_json::Value::as_str) != Some("complete")
+            || raw_value
+                .get("promotion_eligible")
+                .and_then(serde_json::Value::as_bool)
+                != Some(true)
+            || p3_canonical_self_hash(&raw_value, "evidence_sha256")? != raw.evidence_sha256
+            || raw_value
+                .get("upstream_qualification")
+                .and_then(|qualification| qualification.get("qualification_sha256"))
+                .and_then(serde_json::Value::as_str)
+                != Some(
+                    manifest
+                        .upstream_qualification
+                        .qualification_sha256
+                        .as_str(),
+                )
+        {
+            return Err(ServedModelError(
+                "AQ4 P3 promotion raw state differs".into(),
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn load_direct_trace_binding_manifest(
@@ -786,6 +1231,13 @@ fn parse_cli(args: impl IntoIterator<Item = OsString>) -> Result<CliAction, Stri
             && !args[3].is_empty()
             && args[4] == "--p3-direct-trace-binding-manifest-sha256"
             && !args[5].is_empty();
+        let production = args.len() == 6
+            && args[0] == "--served-model-manifest"
+            && !args[1].is_empty()
+            && args[2] == "--p3-production-activation"
+            && !args[3].is_empty()
+            && args[4] == "--p3-production-activation-sha256"
+            && !args[5].is_empty();
         let benchmark = args.len() == 7
             && args[0] == "--served-model-manifest"
             && !args[1].is_empty()
@@ -794,7 +1246,7 @@ fn parse_cli(args: impl IntoIterator<Item = OsString>) -> Result<CliAction, Stri
             && !args[4].is_empty()
             && args[5] == "--benchmark-case-manifest-sha256"
             && !args[6].is_empty();
-        if !ordinary && !diagnostic && !benchmark {
+        if !ordinary && !diagnostic && !production && !benchmark {
             return Err("manifest mode and legacy options are mutually exclusive".into());
         }
         return Ok(CliAction::Run(if benchmark {
@@ -827,9 +1279,25 @@ fn parse_cli(args: impl IntoIterator<Item = OsString>) -> Result<CliAction, Stri
             } else {
                 None
             };
+            let production_activation = if production {
+                let bytes_sha256 = args[5]
+                    .clone()
+                    .into_string()
+                    .map_err(|_| "P3 activation SHA-256 must be UTF-8".to_string())?;
+                if !is_lowercase_sha256(&bytes_sha256) {
+                    return Err("P3 activation SHA-256 must be lowercase SHA-256".into());
+                }
+                Some(DiagnosticBindingSource {
+                    path: PathBuf::from(&args[3]),
+                    bytes_sha256,
+                })
+            } else {
+                None
+            };
             WorkerSource::ServedModelManifest {
                 served_model: PathBuf::from(&args[1]),
                 direct_trace_bindings,
+                production_activation,
             }
         }));
     }
@@ -1048,6 +1516,120 @@ mod tests {
         .unwrap()
     }
 
+    fn activation_fixture(root: &Path) -> (PathBuf, String) {
+        let write_ref = |name: &str, value: serde_json::Value| {
+            let path = root.join(name);
+            let bytes = serde_json::to_vec(&value).unwrap();
+            std::fs::write(&path, &bytes).unwrap();
+            serde_json::json!({"path": path, "sha256": bytes_sha256(&bytes)})
+        };
+        let plan_ref = write_ref(
+            "plan.json",
+            serde_json::json!({"schema_version": "ullm.qwen35_aq4_sq8_fidelity_plan.v1", "status": "ready_for_calibration", "preflight_only": false}),
+        );
+        let actual_ref = write_ref(
+            "actual.json",
+            serde_json::json!({"status": "actual_verified"}),
+        );
+        let policy_ref = write_ref("policy.json", serde_json::json!({"status": "frozen"}));
+        let calibration_metrics_ref = write_ref(
+            "calibration-metrics.json",
+            serde_json::json!({"subset": "calibration"}),
+        );
+        let freeze_ref = write_ref(
+            "freeze.json",
+            serde_json::json!({"schema_version": "ullm.qwen35_aq4_sq8_fidelity_freeze_receipt.v1", "status": "frozen_calibration_envelope"}),
+        );
+        let preflight_ref = write_ref(
+            "preflight.json",
+            serde_json::json!({"schema_version": "ullm.qwen35_aq4_sq8_fidelity_holdout_preflight.v1", "status": "ready_for_one_shot_holdout"}),
+        );
+        let ledger_ref = write_ref(
+            "ledger.json",
+            serde_json::json!({"schema_version": "ullm.qwen35_aq4_sq8_fidelity_attempt_ledger.v1", "status": "consumed", "remaining_after": 0}),
+        );
+        let holdout_metrics_ref = write_ref(
+            "holdout-metrics.json",
+            serde_json::json!({"subset": "holdout"}),
+        );
+        let holdout_receipt_ref = write_ref(
+            "holdout-receipt.json",
+            serde_json::json!({"schema_version": "ullm.qwen35_aq4_sq8_fidelity_holdout_receipt.v1", "status": "passed", "evaluations_remaining": 0, "gate_checks": {"fidelity": true}}),
+        );
+        let qualification_path = root.join("qualification.json");
+        let mut qualification = serde_json::json!({
+            "schema_version": "ullm.aq4_p3_upstream_p2_qualification.v1",
+            "status": "qualified_go",
+            "qualification_sha256": null,
+            "promotion_eligible": true,
+            "reason": "upstream_p2_holdout_passed",
+            "p2": {
+                "plan": plan_ref, "actual_receipt": actual_ref, "policy": policy_ref,
+                "calibration_metrics": calibration_metrics_ref, "freeze_receipt": freeze_ref,
+                "preflight": preflight_ref, "ledger": ledger_ref,
+                "holdout_metrics": holdout_metrics_ref, "holdout_receipt": holdout_receipt_ref,
+                "holdout": {"status": "passed", "evaluations_remaining": 0, "executed": true}
+            }
+        });
+        let qualification_hash =
+            p3_canonical_self_hash(&qualification, "qualification_sha256").unwrap();
+        qualification["qualification_sha256"] = qualification_hash.clone().into();
+        let qualification_bytes = serde_json::to_vec(&qualification).unwrap();
+        std::fs::write(&qualification_path, &qualification_bytes).unwrap();
+        let qualification_file_hash = bytes_sha256(&qualification_bytes);
+
+        let raw_path = root.join("raw.json");
+        let mut raw = serde_json::json!({
+            "status": "complete",
+            "promotion_eligible": true,
+            "evidence_sha256": null,
+            "upstream_qualification": {"qualification_sha256": qualification_hash}
+        });
+        let evidence_hash = p3_canonical_self_hash(&raw, "evidence_sha256").unwrap();
+        raw["evidence_sha256"] = evidence_hash.clone().into();
+        let raw_bytes = serde_json::to_vec(&raw).unwrap();
+        std::fs::write(&raw_path, &raw_bytes).unwrap();
+        let raw_file_hash = bytes_sha256(&raw_bytes);
+
+        let selection_path = root.join("selection.json");
+        let selection = serde_json::json!({
+            "status": "selected",
+            "selected_candidate_id": "sequence-output-direct-v1",
+            "input_binding": {"upstream_qualification_sha256": qualification_hash},
+            "candidates": [{"candidate_id": "sequence-output-direct-v1", "eligible": true}]
+        });
+        let selection_bytes = serde_json::to_vec(&selection).unwrap();
+        std::fs::write(&selection_path, &selection_bytes).unwrap();
+        let selection_hash = bytes_sha256(&selection_bytes);
+
+        let activation_path = root.join("activation.json");
+        let mut activation = serde_json::json!({
+            "schema_version": P3_PRODUCTION_ACTIVATION_SCHEMA,
+            "status": "production_activated",
+            "activation_sha256": null,
+            "candidate": {"candidate_id": "sequence-output-direct-v1", "family": "attention_recurrent"},
+            "build": {
+                "identity_sha256": "1".repeat(64), "case_manifest_sha256": "2".repeat(64),
+                "binary_sha256": "3".repeat(64), "package_content_sha256": "4".repeat(64)
+            },
+            "profile": {
+                "selection_file_sha256": selection_hash,
+                "raw_evidence": [{"path": raw_path, "sha256": raw_file_hash, "evidence_sha256": evidence_hash}]
+            },
+            "selection": {"path": selection_path, "sha256": selection_hash, "status": "selected", "selected_candidate_id": "sequence-output-direct-v1"},
+            "upstream_qualification": {
+                "path": qualification_path, "sha256": qualification_file_hash,
+                "qualification_sha256": qualification_hash, "status": "qualified_go",
+                "promotion_eligible": true, "reason": "upstream_p2_holdout_passed"
+            }
+        });
+        let activation_hash = p3_canonical_self_hash(&activation, "activation_sha256").unwrap();
+        activation["activation_sha256"] = activation_hash.into();
+        let activation_bytes = serde_json::to_vec(&activation).unwrap();
+        std::fs::write(&activation_path, &activation_bytes).unwrap();
+        (activation_path, bytes_sha256(&activation_bytes))
+    }
+
     #[test]
     fn cli_accepts_required_paths_and_optional_device_and_layers() {
         let CliAction::Run(parsed) = parse_cli(args(&[
@@ -1115,6 +1697,7 @@ mod tests {
             WorkerSource::ServedModelManifest {
                 served_model: PathBuf::from("/served-model.json"),
                 direct_trace_bindings: None,
+                production_activation: None,
             }
         );
         assert!(
@@ -1143,6 +1726,7 @@ mod tests {
         let CliAction::Run(WorkerSource::ServedModelManifest {
             served_model,
             direct_trace_bindings: Some(source),
+            production_activation: None,
         }) = parse_cli(args(&[
             "--served-model-manifest",
             "/served-model.json",
@@ -1181,11 +1765,52 @@ mod tests {
     }
 
     #[test]
+    fn cli_accepts_p3_production_activation_only_as_exact_manifest_mode() {
+        let sha = "b".repeat(64);
+        let CliAction::Run(WorkerSource::ServedModelManifest {
+            served_model,
+            direct_trace_bindings: None,
+            production_activation: Some(source),
+        }) = parse_cli(args(&[
+            "--served-model-manifest",
+            "/served-model.json",
+            "--p3-production-activation",
+            "/activation.json",
+            "--p3-production-activation-sha256",
+            &sha,
+        ]))
+        .unwrap()
+        else {
+            panic!("expected production activation manifest mode")
+        };
+        assert_eq!(served_model, PathBuf::from("/served-model.json"));
+        assert_eq!(source.path, PathBuf::from("/activation.json"));
+        assert_eq!(source.bytes_sha256, sha);
+    }
+
+    #[test]
     fn p3_binding_ingress_gate_and_sidecar_are_strictly_coupled() {
-        assert!(validate_direct_trace_ingress(false, false).is_ok());
-        assert!(validate_direct_trace_ingress(true, true).is_ok());
-        assert!(validate_direct_trace_ingress(true, false).is_err());
-        assert!(validate_direct_trace_ingress(false, true).is_err());
+        assert!(validate_direct_trace_ingress(false, false, false, false).is_ok());
+        assert!(validate_direct_trace_ingress(true, true, false, true).is_ok());
+        assert!(validate_direct_trace_ingress(false, false, true, true).is_ok());
+        assert!(validate_direct_trace_ingress(true, false, false, true).is_err());
+        assert!(validate_direct_trace_ingress(false, true, false, false).is_err());
+        assert!(validate_direct_trace_ingress(false, false, false, true).is_err());
+        assert!(validate_direct_trace_ingress(true, true, true, true).is_err());
+    }
+
+    #[test]
+    fn p3_production_activation_binds_selected_candidate_and_qualified_upstream() {
+        let root = registry_test_root("p3-activation");
+        let (path, sha) = activation_fixture(&root);
+        assert!(load_p3_production_activation(&path, &sha).is_ok());
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        value["candidate"]["candidate_id"] = "paged-kv-table-validation-v1".into();
+        let bytes = serde_json::to_vec(&value).unwrap();
+        std::fs::write(&path, &bytes).unwrap();
+        assert!(load_p3_production_activation(&path, &bytes_sha256(&bytes)).is_err());
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

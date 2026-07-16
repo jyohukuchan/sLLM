@@ -5,6 +5,7 @@ import json
 import math
 import sys
 import tempfile
+import threading
 from pathlib import Path
 
 import pytest
@@ -845,6 +846,49 @@ def test_paged_kv_requires_counts_and_observed_transfer_or_sync(tmp_path: Path) 
     other.mkdir()
     item = candidate(select_raw(other, zero), "paged-kv-table-validation-v1")
     assert "paged_kv_transfer_or_sync_not_observed" in item["reason_codes"]
+
+
+def test_selection_publish_is_create_new_for_file_symlink_and_hardlink(tmp_path: Path) -> None:
+    value = {"status": "fixture"}
+    for kind in ("file", "symlink", "hardlink"):
+        target = tmp_path / f"selection-{kind}.json"
+        decoy = tmp_path / f"decoy-{kind}.json"
+        decoy.write_text("decoy\n", encoding="ascii")
+        if kind == "file":
+            target.write_text("existing\n", encoding="ascii")
+        elif kind == "symlink":
+            target.symlink_to(decoy)
+        else:
+            target.hardlink_to(decoy)
+        with pytest.raises(SELECTOR.SelectionError, match="refusing to overwrite"):
+            SELECTOR.write_output(target, value)
+        assert decoy.read_text(encoding="ascii") == "decoy\n"
+
+
+def test_parallel_selection_publish_has_exactly_one_winner(tmp_path: Path) -> None:
+    output = tmp_path / "selection.json"
+    barrier = threading.Barrier(8)
+    results: list[str] = []
+    lock = threading.Lock()
+
+    def publish(index: int) -> None:
+        barrier.wait()
+        try:
+            SELECTOR.write_output(output, {"winner": index})
+            result = "ok"
+        except SELECTOR.SelectionError:
+            result = "exists"
+        with lock:
+            results.append(result)
+
+    threads = [threading.Thread(target=publish, args=(index,)) for index in range(8)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert results.count("ok") == 1
+    assert results.count("exists") == 7
+    assert output.stat().st_nlink == 1
 
 
 def test_candidate_ranking_uses_e_minus_n_then_stable_ties(tmp_path: Path) -> None:
