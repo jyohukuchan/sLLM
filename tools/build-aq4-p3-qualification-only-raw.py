@@ -38,17 +38,31 @@ class RawError(ValueError):
     pass
 
 
-def build(qualification_path: Path, commit: str, tree_oid: str, archive_path: Path) -> dict[str, Any]:
-    if re.fullmatch(r"[0-9a-f]{40}", commit) is None:
-        raise RawError("commit must be lowercase 40-hex")
-    if re.fullmatch(r"[0-9a-f]{40}", tree_oid) is None:
-        raise RawError("tree OID must be lowercase 40-hex")
+def build(
+    qualification_path: Path,
+    commit: str,
+    tree_oid: str,
+    archive_path: Path,
+    toolchain_commit: str,
+    toolchain_tree_oid: str,
+    toolchain_archive_path: Path,
+) -> dict[str, Any]:
+    identities = (
+        (commit, "runtime commit"),
+        (tree_oid, "runtime tree OID"),
+        (toolchain_commit, "toolchain commit"),
+        (toolchain_tree_oid, "toolchain tree OID"),
+    )
+    for value, label in identities:
+        if re.fullmatch(r"[0-9a-f]{40}", value) is None:
+            raise RawError(f"{label} must be lowercase 40-hex")
     qualification_snapshot = SELECTOR.capture(qualification_path)
     qualification = SELECTOR.parse_json(qualification_snapshot)
     result = QUALIFICATION.validate(qualification)
     if result["status"] != "valid_rejected_no_go":
         raise RawError("qualification-only raw requires rejected_no_go")
     archive = SELECTOR.capture_digest(archive_path)
+    toolchain_archive = SELECTOR.capture_digest(toolchain_archive_path)
     value = {
         "schema_version": SELECTOR.RAW_SCHEMA,
         "status": "qualification_only_diagnostic",
@@ -74,6 +88,17 @@ def build(qualification_path: Path, commit: str, tree_oid: str, archive_path: Pa
             "profile_status": "not_measured",
             "runtime_default": "off",
         },
+        "evidence_toolchain": {
+            "commit": toolchain_commit,
+            "tree_oid": toolchain_tree_oid,
+            "source_archive": {
+                "path": str(toolchain_archive.path),
+                "sha256": toolchain_archive.sha256,
+                "size_bytes": toolchain_archive.size_bytes,
+            },
+            "tools": {name: SELECTOR.capture_digest(path).sha256 for name, path in SELECTOR.EVIDENCE_TOOL_FILES.items()},
+        },
+        "p2_comparison": SELECTOR.rejected_comparison_binding(qualification),
     }
     value["evidence_sha256"] = SELECTOR.semantic_sha256(value)
     SELECTOR.validate_raw(value)
@@ -101,10 +126,21 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--commit", required=True)
     parser.add_argument("--tree-oid", required=True)
     parser.add_argument("--source-archive", type=Path, required=True)
+    parser.add_argument("--toolchain-commit", required=True)
+    parser.add_argument("--toolchain-tree-oid", required=True)
+    parser.add_argument("--toolchain-source-archive", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args(argv)
     try:
-        value = build(args.qualification.resolve(), args.commit, args.tree_oid, args.source_archive.resolve())
+        value = build(
+            args.qualification.resolve(),
+            args.commit,
+            args.tree_oid,
+            args.source_archive.resolve(),
+            args.toolchain_commit,
+            args.toolchain_tree_oid,
+            args.toolchain_source_archive.resolve(),
+        )
         publish(args.output, value)
         print(json.dumps({"status": value["status"], "evidence_sha256": value["evidence_sha256"], "promotion_eligible": False}, sort_keys=True))
         return 0

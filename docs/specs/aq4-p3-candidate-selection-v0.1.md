@@ -67,9 +67,13 @@ promotion_ineligibility_reason = upstream_p2_calibration_rejected_no_go
 evidence_sha256
 upstream_qualification
 p3_implementation
+evidence_toolchain
+p2_comparison
 ```
 
-`measurements`、`capabilities`、`full_model_pairs`、CI、latency、D2H、同期、VRAM、fidelity scoreはfield自体を持てない。`p3_implementation`はCandidate Aのcommit/tree/source archiveと、`build_status=not_built_for_promotion`、`profile_status=not_measured`、`runtime_default=off`だけを持つ。このvariantはpromotion rawの7 prompts、10 measured runs、M幅、paired CI条件を緩和せず、測定値を供給しないraw sourceとしてcanonical `no_eligible_candidate`を作る。
+`measurements`、`capabilities`、`full_model_pairs`、CI、latency、D2H、同期、VRAM、fidelity scoreはfield自体を持てない。`p3_implementation`は実行対象Candidate Aのcommit/tree/source archiveと、`build_status=not_built_for_promotion`、`profile_status=not_measured`、`runtime_default=off`だけを持つ。`evidence_toolchain`は証拠生成時点の別identityとしてcommit/tree/source archiveを持ち、qualification builder、raw builder、selector、finalizerのexact SHA-256 mapを持つ。selectorはarchiveのpath/hash/sizeと現在実行している4 toolのhashを再検証する。runtime identityをtoolchain identityで上書きしてはならない。
+
+`p2_comparison`は、再検証済みP2 rejection receiptからcomparison root、manifest SHA-256、SHA256SUMS SHA-256、row countをexactに投影する。qualification-only rawに別のcomparison、行数、manifestを宣言した場合は拒否する。このvariantはpromotion rawの7 prompts、各10 measured runs、M=128を含む複数幅、paired CI条件を緩和せず、測定値を供給しないraw sourceとしてcanonical `no_eligible_candidate`を作る。
 
 `identity`のexact fieldsは次の通りで、すべてlowercase SHA-256である。
 

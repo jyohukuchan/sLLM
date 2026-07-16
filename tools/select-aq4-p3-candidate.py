@@ -96,11 +96,21 @@ QUALIFICATION_ONLY_ROOT_FIELDS = {
     "evidence_sha256",
     "upstream_qualification",
     "p3_implementation",
+    "evidence_toolchain",
+    "p2_comparison",
 }
 P3_IMPLEMENTATION_FIELDS = {
     "candidate_id", "family", "commit", "tree_oid", "source_archive",
     "build_status", "profile_status", "runtime_default",
 }
+EVIDENCE_TOOLCHAIN_FIELDS = {"commit", "tree_oid", "source_archive", "tools"}
+EVIDENCE_TOOL_FILES = {
+    "qualification": ROOT / "tools/aq4_p3_upstream_qualification.py",
+    "raw_builder": ROOT / "tools/build-aq4-p3-qualification-only-raw.py",
+    "selector": ROOT / "tools/select-aq4-p3-candidate.py",
+    "finalizer": ROOT / "tools/finalize-aq4-p3-no-eligible-package.py",
+}
+P2_COMPARISON_FIELDS = {"root", "manifest_sha256", "sha256sums_sha256", "row_count"}
 IDENTITY_FIELDS = {
     "identity_sha256",
     "case_manifest_sha256",
@@ -429,6 +439,8 @@ class RawSource:
     upstream_qualification: dict[str, Any]
     p3_implementation: dict[str, Any] | None
     p2_terminal_bindings: dict[str, str] | None
+    evidence_toolchain: dict[str, Any] | None
+    p2_comparison: dict[str, Any] | None
 
 
 def rejected_terminal_bindings(qualification: dict[str, Any]) -> dict[str, str]:
@@ -439,6 +451,21 @@ def rejected_terminal_bindings(qualification: dict[str, Any]) -> dict[str, str]:
         "plan_sha256": p2["plan"]["sha256"],
         "actual_receipt_sha256": p2["actual_receipt"]["sha256"],
         "policy_sha256": p2["policy"]["sha256"],
+    }
+
+
+def rejected_comparison_binding(qualification: dict[str, Any]) -> dict[str, Any]:
+    package_root = Path(qualification["p2"]["package"]["root"])
+    receipt, _raw = QUALIFICATION.parse(
+        package_root / QUALIFICATION.P2_RECEIPT_NAME,
+        "P2 rejection receipt for comparison binding",
+    )
+    comparison = receipt["bindings"]["comparison"]
+    return {
+        "root": comparison["root"],
+        "manifest_sha256": comparison["manifest_sha256"],
+        "sha256sums_sha256": comparison["sha256sums_sha256"],
+        "row_count": receipt["observed"]["row_count"],
     }
 
 
@@ -771,6 +798,12 @@ def validate_raw(value: dict[str, Any]) -> RawSource:
         }
         if qualification_ref != expected_projection:
             raise SelectionError("qualification-only qualification projection differs")
+        comparison = value["p2_comparison"]
+        if not isinstance(comparison, dict):
+            raise SelectionError("qualification-only P2 comparison must be an object")
+        exact_fields(comparison, P2_COMPARISON_FIELDS, "qualification-only P2 comparison")
+        if comparison != rejected_comparison_binding(qualification_value):
+            raise SelectionError("qualification-only P2 comparison binding differs")
         implementation = value["p3_implementation"]
         if not isinstance(implementation, dict):
             raise SelectionError("qualification-only P3 implementation must be an object")
@@ -798,6 +831,36 @@ def validate_raw(value: dict[str, Any]) -> RawSource:
             or archive["size_bytes"] != archive_snapshot.size_bytes
         ):
             raise SelectionError("qualification-only P3 source archive differs")
+        toolchain = value["evidence_toolchain"]
+        if not isinstance(toolchain, dict):
+            raise SelectionError("qualification-only evidence toolchain must be an object")
+        exact_fields(toolchain, EVIDENCE_TOOLCHAIN_FIELDS, "qualification-only evidence toolchain")
+        for field in ("commit", "tree_oid"):
+            if type(toolchain[field]) is not str or re.fullmatch(r"[0-9a-f]{40}", toolchain[field]) is None:
+                raise SelectionError(f"qualification-only evidence toolchain {field} differs")
+        tool_archive = toolchain["source_archive"]
+        if not isinstance(tool_archive, dict):
+            raise SelectionError("qualification-only evidence toolchain archive must be an object")
+        exact_fields(
+            tool_archive,
+            {"path", "sha256", "size_bytes"},
+            "qualification-only evidence toolchain archive",
+        )
+        tool_archive_snapshot = capture_digest(Path(tool_archive["path"]))
+        expected_tool_archive = {
+            "path": str(tool_archive_snapshot.path),
+            "sha256": tool_archive_snapshot.sha256,
+            "size_bytes": tool_archive_snapshot.size_bytes,
+        }
+        if tool_archive != expected_tool_archive:
+            raise SelectionError("qualification-only evidence toolchain archive differs")
+        tools = toolchain["tools"]
+        if not isinstance(tools, dict):
+            raise SelectionError("qualification-only evidence tool hashes must be an object")
+        exact_fields(tools, set(EVIDENCE_TOOL_FILES), "qualification-only evidence tool hashes")
+        expected_tools = {name: capture_digest(path).sha256 for name, path in EVIDENCE_TOOL_FILES.items()}
+        if tools != expected_tools:
+            raise SelectionError("qualification-only evidence tool hashes differ")
         declared_sha = require_digest(value["evidence_sha256"], "qualification-only evidence SHA-256")
         calculated_sha = semantic_sha256(value)
         if declared_sha != calculated_sha:
@@ -815,6 +878,8 @@ def validate_raw(value: dict[str, Any]) -> RawSource:
             upstream_qualification=expected_projection,
             p3_implementation=dict(implementation),
             p2_terminal_bindings=rejected_terminal_bindings(qualification_value),
+            evidence_toolchain=dict(toolchain),
+            p2_comparison=dict(comparison),
         )
     exact_fields(value, RAW_ROOT_FIELDS, "raw evidence")
     if value["schema_version"] != RAW_SCHEMA or value["status"] not in {"complete", "one_case_diagnostic"}:
@@ -1018,6 +1083,8 @@ def validate_raw(value: dict[str, Any]) -> RawSource:
         p2_terminal_bindings=(
             rejected_terminal_bindings(qualification_value) if not promotion else None
         ),
+        evidence_toolchain=None,
+        p2_comparison=None,
     )
 
 
@@ -1635,6 +1702,14 @@ def select(values: list[tuple[Snapshot, dict[str, Any]]]) -> dict[str, Any]:
             "upstream_p2_terminal_bindings": sorted(
                 [source.p2_terminal_bindings for source in raw_sources if source.p2_terminal_bindings is not None],
                 key=lambda item: (item["rejection_receipt_sha256"], item["plan_sha256"]),
+            ),
+            "qualification_only_evidence_toolchain": sorted(
+                [source.evidence_toolchain for source in raw_sources if source.evidence_toolchain is not None],
+                key=lambda item: (item["commit"], item["tree_oid"]),
+            ),
+            "qualification_only_p2_comparison": sorted(
+                [source.p2_comparison for source in raw_sources if source.p2_comparison is not None],
+                key=lambda item: item["manifest_sha256"],
             ),
         },
         "input_warnings": (

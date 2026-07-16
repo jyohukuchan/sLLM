@@ -65,7 +65,7 @@ promotion_eligible = false
 
 ### 2.4 qualification-only terminal mode
 
-P2が校正で`rejected_no_go`になった場合は、GPU profileを実行せず`build-aq4-p3-qualification-only-raw.py`を使える。このmodeはproducer manifest、representative case、profile run、pairを入力せず、rejected qualificationとP3 commit/tree/source archiveだけを結合する。性能・fidelity測定fieldを持たない別root variantであり、promotion modeのschemaや7 prompts×10 run、M=128+other、paired CI条件を変更しない。
+P2が校正で`rejected_no_go`になった場合は、GPU profileを実行せず`build-aq4-p3-qualification-only-raw.py`を使える。このmodeはproducer manifest、representative case、profile run、pairを入力しない。代わりに、rejected qualification、P2 comparison root/manifest/SHA256SUMS/row count、実行対象P3 runtimeのcommit/tree/source archive、証拠生成toolchainのcommit/tree/source archiveと4 toolのexact SHA-256を結合する。runtimeとtoolchainは別identityであり、一方を他方の代用にしてはならない。性能・fidelity測定fieldを持たない別root variantであり、promotion modeのschemaや7 prompts×各10 measured runs、M=128を含む複数幅、paired CI条件を変更しない。
 
 - resident summary: SHA-256、path
 - representative case: prompt ID、case SHA-256

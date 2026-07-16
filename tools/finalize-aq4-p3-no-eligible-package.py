@@ -16,7 +16,8 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 INVENTORY = (
-    "p3-source.tar",
+    "evidence-toolchain-source.tar",
+    "p3-runtime-source.tar",
     "qualification-only-raw.json",
     "selection.json",
     "upstream-qualification.json",
@@ -74,9 +75,18 @@ def finalize(root: Path) -> dict[str, str]:
     if expected_q["path"] != str(qualification_snapshot.path) or expected_q["sha256"] != qualification_snapshot.sha256:
         raise FinalizeError("package raw qualification binding differs")
     archive = raw["p3_implementation"]["source_archive"]
-    archive_snapshot = SELECTOR.capture_digest(root / "p3-source.tar")
+    archive_snapshot = SELECTOR.capture_digest(root / "p3-runtime-source.tar")
     if archive != {"path": str(archive_snapshot.path), "sha256": archive_snapshot.sha256, "size_bytes": archive_snapshot.size_bytes}:
         raise FinalizeError("package source archive binding differs")
+    tool_archive_snapshot = SELECTOR.capture_digest(root / "evidence-toolchain-source.tar")
+    tool_archive = raw["evidence_toolchain"]["source_archive"]
+    expected_tool_archive = {
+        "path": str(tool_archive_snapshot.path),
+        "sha256": tool_archive_snapshot.sha256,
+        "size_bytes": tool_archive_snapshot.size_bytes,
+    }
+    if tool_archive != expected_tool_archive:
+        raise FinalizeError("package evidence toolchain archive binding differs")
     selection_snapshot = SELECTOR.capture(root / "selection.json")
     selection = SELECTOR.parse_json(selection_snapshot)
     expected_selection = SELECTOR.select([(raw_snapshot, raw)])

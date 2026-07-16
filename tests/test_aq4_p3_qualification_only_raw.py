@@ -37,7 +37,12 @@ def fixture(root: Path) -> tuple[dict, Path, Path]:
     QFIX.write_json(qualification_path, qualification)
     archive_path = root / "p3-source.tar"
     archive_path.write_bytes(b"immutable synthetic source archive\n")
-    value = RAW.build(qualification_path, "9" * 40, "8" * 40, archive_path)
+    toolchain_archive = root / "toolchain-source.tar"
+    toolchain_archive.write_bytes(b"immutable synthetic toolchain archive\n")
+    value = RAW.build(
+        qualification_path, "9" * 40, "8" * 40, archive_path,
+        "7" * 40, "6" * 40, toolchain_archive,
+    )
     return value, qualification_path, archive_path
 
 
@@ -53,6 +58,8 @@ def test_rejected_qualification_produces_metric_free_canonical_no_eligible(tmp_p
     assert selection["selected_candidate_id"] is None
     assert selection["input_binding"]["upstream_qualification_status"] == "rejected_no_go"
     assert selection["input_binding"]["qualification_only_p3_implementation"] == [value["p3_implementation"]]
+    assert selection["input_binding"]["qualification_only_evidence_toolchain"] == [value["evidence_toolchain"]]
+    assert selection["input_binding"]["qualification_only_p2_comparison"] == [value["p2_comparison"]]
     bindings = selection["input_binding"]["upstream_p2_terminal_bindings"]
     assert len(bindings) == 1
     qualification = json.loads(qualification_path.read_text())
@@ -105,6 +112,36 @@ def test_qualification_only_rejects_archive_size_type_and_value(tmp_path: Path) 
         value["evidence_sha256"] = RAW.SELECTOR.semantic_sha256(value)
         with pytest.raises(RAW.SELECTOR.SelectionError, match="source archive differs"):
             RAW.SELECTOR.validate_raw(value)
+
+
+def test_qualification_only_rejects_evidence_tool_hash_tamper(tmp_path: Path) -> None:
+    value, _qualification, _archive = fixture(tmp_path)
+    value["evidence_toolchain"]["tools"]["selector"] = "0" * 64
+    value["evidence_sha256"] = RAW.SELECTOR.semantic_sha256(value)
+    with pytest.raises(RAW.SELECTOR.SelectionError, match="evidence tool hashes differ"):
+        RAW.SELECTOR.validate_raw(value)
+
+
+@pytest.mark.parametrize("field,replacement", [("sha256", "0" * 64), ("size_bytes", 999999)])
+def test_qualification_only_rejects_evidence_toolchain_archive_tamper(
+    tmp_path: Path, field: str, replacement: object,
+) -> None:
+    value, _qualification, _archive = fixture(tmp_path)
+    value["evidence_toolchain"]["source_archive"][field] = replacement
+    value["evidence_sha256"] = RAW.SELECTOR.semantic_sha256(value)
+    with pytest.raises(RAW.SELECTOR.SelectionError, match="evidence toolchain archive differs"):
+        RAW.SELECTOR.validate_raw(value)
+
+
+@pytest.mark.parametrize("field,replacement", [("manifest_sha256", "0" * 64), ("row_count", 23)])
+def test_qualification_only_rejects_p2_comparison_tamper(
+    tmp_path: Path, field: str, replacement: object,
+) -> None:
+    value, _qualification, _archive = fixture(tmp_path)
+    value["p2_comparison"][field] = replacement
+    value["evidence_sha256"] = RAW.SELECTOR.semantic_sha256(value)
+    with pytest.raises(RAW.SELECTOR.SelectionError, match="P2 comparison binding differs"):
+        RAW.SELECTOR.validate_raw(value)
 
 
 def test_qualification_only_publish_is_no_overwrite_and_race_safe(tmp_path: Path) -> None:

@@ -34,9 +34,14 @@ def package(root: Path) -> None:
     qualification = FINALIZER.QUALIFICATION.build_rejection(rejection)
     qualification_path = root / "upstream-qualification.json"
     QFIX.write_json(qualification_path, qualification)
-    archive = root / "p3-source.tar"
-    archive.write_bytes(b"source archive\n")
-    raw = RAW.build(qualification_path, "9" * 40, "8" * 40, archive)
+    archive = root / "p3-runtime-source.tar"
+    archive.write_bytes(b"runtime source archive\n")
+    toolchain_archive = root / "evidence-toolchain-source.tar"
+    toolchain_archive.write_bytes(b"toolchain source archive\n")
+    raw = RAW.build(
+        qualification_path, "9" * 40, "8" * 40, archive,
+        "7" * 40, "6" * 40, toolchain_archive,
+    )
     raw_path = root / "qualification-only-raw.json"
     QFIX.write_json(raw_path, raw)
     snapshot = FINALIZER.SELECTOR.capture(raw_path)
