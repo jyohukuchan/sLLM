@@ -86,7 +86,7 @@ class Sq8ProtocolTests(unittest.TestCase):
         package = {"manifest_path": str(package_path.resolve()), "manifest_sha256": digest(package_path)}
         binding_value["package"]["manifest_sha256"] = package["manifest_sha256"]
         binding_path.write_text(json.dumps(binding_value, sort_keys=True) + "\n")
-        overlay = {"binding_manifest_path": str(binding_path.resolve()), "binding_manifest_sha256": digest(binding_path), "content_sha256": "f" * 64, "tensor_set_sha256": "1" * 64, "tensor_count": 48, "artifact_inventory": {"regular_file_count": 1}}
+        overlay = {"binding_manifest_path": str(binding_path.resolve()), "binding_manifest_sha256": digest(binding_path), "content_sha256": "f" * 64, "tensor_set_sha256": "1" * 64, "tensor_count": 48, "artifact_inventory": {"root": str((self.product_root / "artifacts").resolve()), "uid": 0, "gid": 0, "directory_count": 1, "directory_mode": "0555", "regular_file_count": 1, "regular_file_bytes": binding_path.stat().st_size, "regular_file_mode": "0444", "regular_file_nlink": 1, "symlink_count": 0, "special_count": 0, "entries": [{"path": ".", "kind": "directory", "mode": "0555", "uid": 0, "gid": 0, "nlink": 1, "bytes": 0}, {"path": "binding.json", "kind": "regular", "mode": "0444", "uid": 0, "gid": 0, "nlink": 1, "bytes": binding_path.stat().st_size}]}}
         source = {"tree_sha256": "3" * 40, "archive_sha256": "4" * 64}
         prepared_path = self.receipt_dir / ("prepared.json" if actual else "prepared-only.json")
         readiness = {"schema": "ullm.bridge_container_readiness.v1", "container": {"name": "open-webui", "id": "1" * 64, "image_id": "sha256:" + "2" * 64, "config_image": "ullm/open-webui:test"}, "network": {"name": "open-webui-network", "id": "3" * 64, "driver": "bridge", "bridge_interface": "br-" + "3" * 12}, "endpoint": {"url": "http://172.20.0.1:8000/readyz", "path": "/readyz", "expected_status": 200, "expected_body": '{"status":"ready"}', "expected_body_sha256": hashlib.sha256(b'{"status":"ready"}').hexdigest(), "timeout_seconds": 5}}
@@ -180,6 +180,9 @@ class Sq8ProtocolTests(unittest.TestCase):
             ("token", lambda value: value["actual"]["output_identity"].__setitem__("token_ids_sha256", "9" * 64)),
             ("telemetry", lambda value: value["actual"]["telemetry_binding"].__setitem__("telemetry_sha256", "9" * 64)),
             ("maintenance", lambda value: value["actual"]["maintenance_evidence"].__setitem__("sha256", "9" * 64)),
+            ("inventory-unknown", lambda value: value["overlay"]["artifact_inventory"].__setitem__("unexpected", True)),
+            ("inventory-root", lambda value: value["overlay"]["artifact_inventory"].__setitem__("root", "/tmp/not-the-binding-root")),
+            ("inventory-nlink", lambda value: value["overlay"]["artifact_inventory"]["entries"][1].__setitem__("nlink", 2)),
             ("unknown", lambda value: value.__setitem__("unexpected", True)),
         )
         for name, mutate in mutations:
@@ -321,6 +324,100 @@ class Sq8ProtocolTests(unittest.TestCase):
 
         receipt = self._receipt(); value = json.loads(receipt.read_text()); value["readiness"]["network"]["id"] = "4" * 64; wrong_readiness = self.root / "wrong-readiness-receipt.json"; wrong_readiness.write_text(json.dumps(value) + "\n")
         self.assertNotEqual(self._run("plan", "--split-root", str(self.split), "--actual-receipt", str(wrong_readiness), "--source-v32", str(self.source_v32), "--output", str(self.root / "wrong-readiness-plan.json")).returncode, 0)
+
+    def test_integer_alias_matrix_and_frozen_contracts_fail_closed(self) -> None:
+        for alias in (False, 1.0, -1, protocol.SAFE_INT_MAX + 1):
+            with self.subTest(metric_row_alias=repr(alias)):
+                plan = self._plan(name=f"plan-row-{len(str(alias))}.json")
+                metrics = self._metrics(plan, "calibration")
+                value = json.loads(metrics.read_text())
+                value["rows"][0]["row_count"] = alias
+                metrics.write_text(json.dumps(value, allow_nan=True) + "\n")
+                result = self._run("freeze", "--plan", str(plan), "--metrics", str(metrics), "--output", str(self.root / f"row-alias-{len(str(alias))}.json"))
+                self.assertNotEqual(result.returncode, 0)
+
+        plan = self._plan(name="plan-resource-alias.json")
+        plan_value = json.loads(plan.read_text())
+        for alias in (True, 1.0, -1, protocol.SAFE_INT_MAX + 1):
+            with self.subTest(resource_jobs_alias=repr(alias)):
+                tampered = json.loads(json.dumps(plan_value))
+                tampered["resource_contract"]["jobs"] = alias
+                path = self.root / f"resource-alias-{len(str(alias))}.json"
+                path.write_text(json.dumps(tampered, allow_nan=True) + "\n")
+                metrics = self._metrics(path, "calibration")
+                result = self._run("freeze", "--plan", str(path), "--metrics", str(metrics), "--output", str(self.root / f"resource-alias-out-{len(str(alias))}.json"))
+                self.assertNotEqual(result.returncode, 0)
+        for field, alias in (("case_concurrency", 1.0), ("chunk_elements", False), ("max_rows", 24.0), ("max_case_file_bytes", True), ("vram_headroom_bytes_min", 1.0), ("vram_observed_headroom_bytes", True), ("vram_headroom_required", 1)):
+            with self.subTest(resource_field_alias=field):
+                tampered = json.loads(json.dumps(plan_value))
+                tampered["resource_contract"][field] = alias
+                path = self.root / f"resource-field-alias-{field}.json"
+                path.write_text(json.dumps(tampered, allow_nan=True) + "\n")
+                metrics = self._metrics(path, "calibration")
+                result = self._run("freeze", "--plan", str(path), "--metrics", str(metrics), "--output", str(self.root / f"resource-field-alias-out-{field}.json"))
+                self.assertNotEqual(result.returncode, 0)
+
+        receipt_aliases = (
+            ("overlay", "tensor_count", 48.0),
+            ("worker", "bytes", 6.0),
+            ("worker", "nlink", True),
+            ("gpu", "stable_observation_count", 2.0),
+            ("output", "token_count", 2.0),
+        )
+        for component, field, alias in receipt_aliases:
+            with self.subTest(receipt_integer_alias=f"{component}.{field}"):
+                receipt = self._receipt()
+                value = json.loads(receipt.read_text())
+                if component == "overlay":
+                    value["overlay"][field] = alias
+                elif component == "worker":
+                    value["release"]["worker"][field] = alias
+                elif component == "gpu":
+                    value["actual"]["gpu_exclusive_preflight"][field] = alias
+                else:
+                    value["actual"]["output_identity"][field] = alias
+                receipt.write_text(json.dumps(value) + "\n")
+                result = self._run("plan", "--split-root", str(self.split), "--actual-receipt", str(receipt), "--source-v32", str(self.source_v32), "--output", str(self.root / f"receipt-alias-{component}-{field}.json"))
+                self.assertNotEqual(result.returncode, 0)
+
+        # The receipt-alias mutations above rewrite the shared fixture receipt;
+        # rebuild a clean plan before validating the freeze/preflight contracts.
+        plan = self._plan(name="plan-contracts.json")
+        calibration = self._metrics(plan, "calibration")
+        metrics_identity_alias = json.loads(calibration.read_text())
+        metrics_identity_alias["identity"]["worker"]["bytes"] = 6.0
+        metrics_identity_path = self.root / "metrics-identity-alias.json"
+        metrics_identity_path.write_text(json.dumps(metrics_identity_alias) + "\n")
+        self.assertNotEqual(self._run("freeze", "--plan", str(plan), "--metrics", str(metrics_identity_path), "--output", str(self.root / "metrics-identity-alias-freeze.json")).returncode, 0)
+        freeze = self.root / "contract-freeze.json"
+        self.assertEqual(self._run("freeze", "--plan", str(plan), "--metrics", str(calibration), "--output", str(freeze)).returncode, 0)
+        frozen = json.loads(freeze.read_text())
+        for field, value in (("calibration_case_count", 0), ("relative_l2_rejection_ceiling", 0.0), ("attempt_boundary", {"remaining_before": 0, "remaining_after": 1, "failure_consumes_attempt": False}), ("holdout_evaluations_remaining", 1.0)):
+            with self.subTest(freeze_contract=field):
+                tampered = json.loads(json.dumps(frozen))
+                tampered[field] = value
+                path = self.root / f"freeze-contract-{field}.json"
+                path.write_text(json.dumps(tampered) + "\n")
+                result = self._run("preflight-holdout", "--plan", str(plan), "--freeze", str(path), "--output", str(self.root / f"preflight-contract-{field}.json"))
+                self.assertNotEqual(result.returncode, 0)
+
+        preflight = self.root / "contract-preflight.json"
+        self.assertEqual(self._run("preflight-holdout", "--plan", str(plan), "--freeze", str(freeze), "--output", str(preflight)).returncode, 0)
+        preflight_value = json.loads(preflight.read_text())
+        holdout = self._metrics(plan, "holdout")
+        preflight_identity_alias = json.loads(json.dumps(preflight_value))
+        preflight_identity_alias["identity"]["worker"]["nlink"] = True
+        preflight_identity_path = self.root / "preflight-identity-alias.json"
+        preflight_identity_path.write_text(json.dumps(preflight_identity_alias) + "\n")
+        self.assertNotEqual(self._run("execute-holdout", "--preflight", str(preflight_identity_path), "--metrics", str(holdout), "--ledger", str(self.root / "identity-alias-ledger.json"), "--output", str(self.root / "identity-alias-result.json")).returncode, 0)
+        for field, value in (("holdout_case_count", 0), ("evaluations_remaining", 1.0), ("attempt_boundary", {"remaining_before": 0, "remaining_after": 1, "failure_consumes_attempt": False})):
+            with self.subTest(preflight_contract=field):
+                tampered = json.loads(json.dumps(preflight_value))
+                tampered[field] = value
+                path = self.root / f"preflight-contract-{field}.json"
+                path.write_text(json.dumps(tampered) + "\n")
+                result = self._run("execute-holdout", "--preflight", str(path), "--metrics", str(holdout), "--ledger", str(self.root / f"contract-ledger-{field}.json"), "--output", str(self.root / f"contract-result-{field}.json"))
+                self.assertNotEqual(result.returncode, 0)
 
     def test_ledger_publication_is_create_new_under_two_process_race(self) -> None:
         plan = self._plan(); calibration = self._metrics(plan, "calibration"); freeze = self.root / "race-freeze.json"
