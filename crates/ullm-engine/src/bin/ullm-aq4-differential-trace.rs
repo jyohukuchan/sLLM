@@ -1392,6 +1392,7 @@ fn run(
                 "guard_set_sha256": guard_set_sha256,
                 "device": device_identity,
             },
+            "guard_set": guard_set,
             "stage_contract": {"embedding": true, "decoder_layers": 32, "final_norm": true, "lm_head": true, "hidden_coordinates": HIDDEN_COORDINATES, "logit_coordinates": LOGIT_COORDINATES, "kernel_stage_trace": kernel_stage_contract},
             "production_worker_unchanged": true,
         });
