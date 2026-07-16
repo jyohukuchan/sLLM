@@ -55,7 +55,18 @@ MAX_JSON_BYTES = 16 * 1024 * 1024
 CAPTURE_DIAGNOSTIC_MAX_BYTES = 32 * 1024
 CAPTURE_ENVELOPE_MAX_BYTES = 512 * 1024
 CAPTURE_READ_CHUNK_BYTES = 64 * 1024
-CAPTURE_SUBPROCESS_TIMEOUT_SECONDS = 1200.0
+CAPTURE_TERMINATE_GRACE_SECONDS = 1.0
+CAPTURE_KILL_REAP_TIMEOUT_SECONDS = 30.0
+CAPTURE_FINAL_REAP_TIMEOUT_SECONDS = 5.0
+CAPTURE_STDERR_DRAIN_TIMEOUT_SECONDS = 3.0
+CAPTURE_STDOUT_DRAIN_TIMEOUT_SECONDS = 4.0
+CAPTURE_OBSERVER_FINISH_TIMEOUT_SECONDS = 3.0
+CAPTURE_PACKAGING_MARGIN_SECONDS = 60.0
+# The outer bound covers all inner worker stages, escalation/reap, bounded
+# pipe drains, and a fixed packaging margin.  Keep every term explicit so the
+# inequality is reviewable and testable rather than relying on an implicit
+# "large enough" constant.
+CAPTURE_SUBPROCESS_TIMEOUT_SECONDS = 1350.0
 CAPTURE_ERROR_SCHEMA = "ullm.aq4_resident_capture_error.v4"
 WORKER_STDERR_SCHEMA = "ullm.aq4_resident_worker_stderr.v2"
 WORKER_LIFECYCLE_SCHEMA = "ullm.aq4_resident_worker_lifecycle.v1"
@@ -68,6 +79,33 @@ CAPTURE_TIMEOUTS = {
     "shutdown_seconds": CAPTURE_SHUTDOWN_TIMEOUT_SECONDS,
     "outer_seconds": int(CAPTURE_SUBPROCESS_TIMEOUT_SECONDS),
 }
+CAPTURE_INNER_BOUND_SECONDS = (
+    CAPTURE_READY_TIMEOUT_SECONDS
+    + CAPTURE_REQUEST_TIMEOUT_SECONDS
+    + CAPTURE_SHUTDOWN_TIMEOUT_SECONDS
+    + CAPTURE_TERMINATE_GRACE_SECONDS
+    + CAPTURE_KILL_REAP_TIMEOUT_SECONDS
+    + CAPTURE_FINAL_REAP_TIMEOUT_SECONDS
+    + CAPTURE_STDERR_DRAIN_TIMEOUT_SECONDS
+    + CAPTURE_STDOUT_DRAIN_TIMEOUT_SECONDS
+    + CAPTURE_OBSERVER_FINISH_TIMEOUT_SECONDS
+)
+GENERATOR = ROOT / "tools/generate-served-model.py"
+TRUSTED_COMPONENT_KEYS = frozenset(
+    {
+        "maintenance_wrapper",
+        "executor_capture",
+        "served_model_generator",
+        "promotion_receipt_writer",
+    }
+)
+TRUSTED_COMPONENT_PATHS = {
+    "maintenance_wrapper": Path(__file__).resolve(),
+    "executor_capture": CAPTURE.resolve(),
+    "served_model_generator": GENERATOR.resolve(),
+    "promotion_receipt_writer": RECEIPT_WRITER.resolve(),
+}
+TRUSTED_COMPONENT_APPROVED_ROOT = (ROOT / "tools").resolve()
 CAPTURE_ERROR_STAGES = frozenset(
     {
         "capture",
@@ -145,6 +183,55 @@ def sha_file(path: Path) -> str:
         while chunk := source.read(1024 * 1024):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def validate_trusted_components(gate: dict[str, Any]) -> dict[str, dict[str, str]]:
+    """Validate and return the immutable tool paths bound by the Gate.
+
+    The Gate is the authority for the preparation audit, but its paths are
+    accepted only when they are the exact repository tools approved by this
+    wrapper.  This prevents a candidate from naming an arbitrary executable or
+    relying on a modified host-side helper after preparation.
+    """
+
+    raw = gate.get("trusted_components")
+    if not isinstance(raw, dict) or set(raw) != TRUSTED_COMPONENT_KEYS:
+        raise PromotionError("candidate Gate trusted component schema differs")
+    validated: dict[str, dict[str, str]] = {}
+    for name in sorted(TRUSTED_COMPONENT_KEYS):
+        value = raw.get(name)
+        if not isinstance(value, dict) or set(value) != {"path", "sha256"}:
+            raise PromotionError(f"candidate Gate trusted component {name} differs")
+        raw_path = value.get("path")
+        digest = value.get("sha256")
+        if (
+            not isinstance(raw_path, str)
+            or not isinstance(digest, str)
+            or SHA256_RE.fullmatch(digest) is None
+        ):
+            raise PromotionError(f"candidate Gate trusted component {name} identity differs")
+        path = Path(raw_path)
+        expected = TRUSTED_COMPONENT_PATHS[name]
+        try:
+            resolved = path.resolve(strict=True)
+            metadata = path.stat(follow_symlinks=False)
+        except OSError as error:
+            raise PromotionError(
+                f"candidate Gate trusted component {name} is unavailable"
+            ) from error
+        if (
+            not path.is_absolute()
+            or resolved != path
+            or resolved != expected
+            or resolved.parent != TRUSTED_COMPONENT_APPROVED_ROOT
+            or path.is_symlink()
+            or not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_nlink != 1
+            or sha_file(path) != digest
+        ):
+            raise PromotionError(f"candidate Gate trusted component {name} binding differs")
+        validated[name] = {"path": str(resolved), "sha256": digest}
+    return validated
 
 
 def read_object(path: Path, label: str) -> dict[str, Any]:
@@ -689,6 +776,7 @@ def candidate_snapshot(candidate: Path) -> dict[str, Any]:
     receipt = read_object(receipt_path, "candidate promotion receipt")
     if gate.get("schema_version") != GATE_SCHEMA:
         raise PromotionError("candidate Gate schema differs")
+    trusted_components = validate_trusted_components(gate)
     readiness = validate_readiness_contract(gate.get("readiness"))
     if promotion.get("readiness") != readiness:
         raise PromotionError("candidate readiness profile identity differs")
@@ -987,6 +1075,7 @@ def candidate_snapshot(candidate: Path) -> dict[str, Any]:
             "lineage_manifest": lineage_manifest,
         },
         "readiness": readiness,
+        "trusted_components": trusted_components,
     }
     if lineage_manifest is not None:
         result["files"]["authorization_lineage_manifest"] = metadata(
@@ -1042,11 +1131,29 @@ def validate_executor_record(
     )
     if (
         not isinstance(telemetry, dict)
+        or set(telemetry) != {
+            "schema_version",
+            "projection",
+            "diagnostic_host_staging",
+        }
         or telemetry.get("schema_version") != TELEMETRY_SCHEMA
     ):
         raise PromotionError("SQ8 executor telemetry schema differs")
+    projection_keys = {
+        "single_matvec_count",
+        "batch_matvec_count",
+        "pair_matvec_count",
+        "triple_matvec_count",
+        "fallback_count",
+    }
+    staging_keys = {"read_count", "write_count", "read_bytes", "write_bytes"}
     if (
         not isinstance(projection, dict)
+        or set(projection) != projection_keys
+        or any(
+            type(projection[key]) is not int or projection[key] < 0
+            for key in projection_keys
+        )
         or projection.get("batch_matvec_count", 0) <= 0
         or projection.get("pair_matvec_count", 0) <= 0
     ):
@@ -1056,9 +1163,11 @@ def validate_executor_record(
         for key in ("single_matvec_count", "triple_matvec_count", "fallback_count")
     ):
         raise PromotionError("SQ8 executor used an unexpected projection path")
-    if not isinstance(staging, dict) or any(
-        staging.get(key) != 0
-        for key in ("read_count", "write_count", "read_bytes", "write_bytes")
+    if (
+        not isinstance(staging, dict)
+        or set(staging) != staging_keys
+        or any(type(staging[key]) is not int or staging[key] < 0 for key in staging_keys)
+        or any(staging[key] != 0 for key in staging_keys)
     ):
         raise PromotionError("SQ8 executor used diagnostic host staging")
     if not sq8_telemetry_binding_valid(
@@ -1068,6 +1177,7 @@ def validate_executor_record(
     output = evidence.get("output_identity")
     if (
         not isinstance(output, dict)
+        or type(output.get("token_count")) is not int
         or output.get("token_count") != 2
         or output.get("token_ids_recorded") is not False
         or not isinstance(output.get("token_ids_sha256"), str)
@@ -2400,7 +2510,10 @@ def _capture_error_envelope(
         or not len(lifecycle_events) <= lifecycle_count <= 9_007_199_254_740_991
         or lifecycle.get("events_retained") != len(lifecycle_events)
         or type(lifecycle.get("events_truncated")) is not bool
+        or lifecycle.get("events_truncated") != (lifecycle_count > len(lifecycle_events))
         or (last_event is not None and not valid_lifecycle_event(last_event))
+        or (bool(lifecycle_events) and last_event != lifecycle_events[-1])
+        or (not lifecycle_events and last_event is not None)
         or ((sent_offset is not None) != lifecycle.get("request_sent"))
         or (
             sent_offset is not None
@@ -2413,12 +2526,22 @@ def _capture_error_envelope(
     ):
         invalid["reason"] = "worker_lifecycle_type_or_value_differs"
         return invalid
-    if stage == "ready_timeout" and lifecycle.get("request_sent") is not False:
+    request_sent = lifecycle.get("request_sent")
+    if stage in {"ready_timeout", "ready_protocol"} and request_sent is not False:
         invalid["reason"] = "worker_lifecycle_stage_mismatch"
         return invalid
-    if stage in {"request_timeout", "shutdown_timeout"} and lifecycle.get(
-        "request_sent"
-    ) is not True:
+    if request_sent:
+        if (
+            not lifecycle_events
+            or lifecycle_events[0]["type"] != "ready"
+            or any(item["type"] == "ready" for item in lifecycle_events[1:])
+        ):
+            invalid["reason"] = "worker_lifecycle_ready_order_differs"
+            return invalid
+        if sent_offset < lifecycle_events[0]["offset_ms"]:
+            invalid["reason"] = "worker_lifecycle_request_order_differs"
+            return invalid
+    if stage in {"request_timeout", "shutdown_timeout"} and request_sent is not True:
         invalid["reason"] = "worker_lifecycle_stage_mismatch"
         return invalid
     result = {
@@ -2744,12 +2867,14 @@ def capture_environment(profile: dict[str, Any]) -> dict[str, str]:
     return result
 
 
-def capture_command(candidate: Path, output: Path, request_id: str) -> list[str]:
+def capture_command(
+    candidate: Path, output: Path, request_id: str, *, capture_path: Path
+) -> list[str]:
     if PROMOTION_REQUEST_ID_RE.fullmatch(request_id) is None:
         raise PromotionError("candidate promotion request ID differs")
     return [
         "python3",
-        str(CAPTURE),
+        str(capture_path),
         "--manifest",
         str(candidate / "served-model.json"),
         "--output",
@@ -2843,9 +2968,9 @@ def finalize_directory(
         raise
 
 
-def load_receipt_writer() -> Any:
+def load_receipt_writer(receipt_writer_path: Path) -> Any:
     spec = importlib.util.spec_from_file_location(
-        "_ullm_sq8_actual_receipt_writer", RECEIPT_WRITER
+        "_ullm_sq8_actual_receipt_writer", receipt_writer_path
     )
     if spec is None or spec.loader is None:
         raise PromotionError("promotion receipt writer import failed")
@@ -2868,6 +2993,9 @@ def execute(
     profile = read_object(candidate / "profile.json", "candidate profile")
     readiness = validate_readiness_contract(before_candidate.get("readiness"))
     gate = read_object(candidate / "gate.json", "candidate Gate")
+    trusted_components = validate_trusted_components(gate)
+    if trusted_components != before_candidate.get("trusted_components"):
+        raise PromotionError("candidate trusted component binding changed during validation")
     request_id = gate.get("request", {}).get("actual", {}).get("request_id")
     if (
         not isinstance(request_id, str)
@@ -2880,6 +3008,7 @@ def execute(
         "candidate": str(candidate),
         "promotion_request_id": request_id,
         "candidate_pre": before_candidate,
+        "trusted_components": trusted_components,
         "service_prestate": None,
         "stopped_observations": [],
         "lock": None,
@@ -2924,7 +3053,12 @@ def execute(
         evidence["stopped_observations"] = poll_stopped(deps, old_worker_pid, readiness)
         lease = deps.acquire_lock()
         evidence["lock"] = lease.evidence()
-        command = capture_command(candidate, capture_temp, request_id)
+        command = capture_command(
+            candidate,
+            capture_temp,
+            request_id,
+            capture_path=Path(trusted_components["executor_capture"]["path"]),
+        )
         environment = capture_environment(profile)
         evidence["capture"] = {
             "argv": command,
@@ -3059,7 +3193,9 @@ def execute(
     prepared_receipt = Path(str(profile["promotion"]["receipt"])).resolve()
 
     def receipt_factory(staging: Path) -> str:
-        writer = load_receipt_writer()
+        writer = load_receipt_writer(
+            Path(trusted_components["promotion_receipt_writer"]["path"])
+        )
         maintenance_path = staging / "maintenance-evidence.json"
         if evidence["status"] == "passed" and capture_record is not None:
             name = "promotion-actual-receipt.json"
@@ -3068,6 +3204,10 @@ def execute(
                 maintenance_evidence_path=maintenance_path,
                 executor_record_path=staging / "executor-record.json",
                 output_path=staging / name,
+                generator_path=Path(
+                    trusted_components["served_model_generator"]["path"]
+                ),
+                trusted_components=trusted_components,
             )
             return name
         name = "promotion-failure-receipt.json"
@@ -3075,6 +3215,7 @@ def execute(
             prepared_receipt_path=prepared_receipt,
             maintenance_evidence_path=maintenance_path,
             output_path=staging / name,
+            trusted_components=trusted_components,
         )
         return name
 

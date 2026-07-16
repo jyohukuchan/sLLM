@@ -55,6 +55,14 @@ WORKER_STDOUT_BUFFER_MAX_BYTES = 4 * 1024 * 1024
 DEFAULT_READY_TIMEOUT_SECONDS = 900.0
 DEFAULT_REQUEST_TIMEOUT_SECONDS = 240.0
 WORKER_SHUTDOWN_TIMEOUT_SECONDS = 30.0
+WORKER_TERMINATE_GRACE_SECONDS = 1.0
+WORKER_KILL_REAP_TIMEOUT_SECONDS = 30.0
+WORKER_FINAL_REAP_TIMEOUT_SECONDS = 5.0
+WORKER_STDERR_DRAIN_TIMEOUT_SECONDS = 3.0
+WORKER_STDERR_DRAIN_CLOSE_GRACE_SECONDS = 1.0
+WORKER_STDOUT_DRAIN_TIMEOUT_SECONDS = 3.0
+WORKER_STDOUT_DRAIN_CLOSE_GRACE_SECONDS = 1.0
+WORKER_OBSERVER_FINISH_TIMEOUT_SECONDS = 3.0
 WORKER_STDERR_REDACTION_RE = re.compile(
     rb"(?i)(?:password|passwd|secret|credential|api[_-]?key|authorization|"
     rb"access[_-]?token|refresh[_-]?token|client[_-]?secret|private[_-]?key|"
@@ -749,7 +757,7 @@ class VramObserver:
         self._sample()
         self._stop.set()
         if self._thread is not None:
-            self._thread.join(timeout=3)
+            self._thread.join(timeout=WORKER_OBSERVER_FINISH_TIMEOUT_SECONDS)
         self._sample()
         return {
             "kind": "rocm_smi_vram_target_card",
@@ -939,21 +947,21 @@ def _terminate_worker(proc: subprocess.Popen[bytes]) -> None:
         except (OSError, ProcessLookupError):
             pass
         try:
-            proc.wait(timeout=1)
+            proc.wait(timeout=WORKER_TERMINATE_GRACE_SECONDS)
         except subprocess.TimeoutExpired:
             try:
                 proc.kill()
             except (OSError, ProcessLookupError):
                 pass
     try:
-        proc.wait(timeout=30)
+        proc.wait(timeout=WORKER_KILL_REAP_TIMEOUT_SECONDS)
     except subprocess.TimeoutExpired:
         try:
             proc.kill()
         except (OSError, ProcessLookupError):
             pass
         try:
-            proc.wait(timeout=5)
+            proc.wait(timeout=WORKER_FINAL_REAP_TIMEOUT_SECONDS)
         except subprocess.TimeoutExpired as error:
             raise CaptureError(
                 "resident worker could not be reaped within the cleanup bound",
@@ -968,7 +976,7 @@ def _finish_worker_stderr(
 ) -> dict[str, Any]:
     """Join the drain thread, failing closed if EOF cannot be collected."""
 
-    stderr_thread.join(timeout=3)
+    stderr_thread.join(timeout=WORKER_STDERR_DRAIN_TIMEOUT_SECONDS)
     if stderr_thread.is_alive():
         # This handles a descendant that inherited the pipe or a test double
         # whose read end does not observe EOF after the parent exits.
@@ -977,7 +985,7 @@ def _finish_worker_stderr(
                 proc.stderr.close()
         except (OSError, ValueError):
             pass
-        stderr_thread.join(timeout=1)
+        stderr_thread.join(timeout=WORKER_STDERR_DRAIN_CLOSE_GRACE_SECONDS)
     if stderr_thread.is_alive():
         collector.mark_incomplete()
     return collector.summary()
@@ -995,7 +1003,7 @@ def _finish_worker_stdout(proc: subprocess.Popen[bytes]) -> bool:
     def drain() -> None:
         try:
             fd = stream.fileno()
-            deadline = time.monotonic() + 3
+            deadline = time.monotonic() + WORKER_STDOUT_DRAIN_TIMEOUT_SECONDS
             while True:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
@@ -1018,13 +1026,13 @@ def _finish_worker_stdout(proc: subprocess.Popen[bytes]) -> bool:
 
     thread = threading.Thread(target=drain, name="aq4-stdout-drain", daemon=True)
     thread.start()
-    thread.join(timeout=3)
+    thread.join(timeout=WORKER_STDOUT_DRAIN_TIMEOUT_SECONDS)
     if thread.is_alive():
         try:
             stream.close()
         except (OSError, ValueError):
             pass
-        thread.join(timeout=1)
+        thread.join(timeout=WORKER_STDOUT_DRAIN_CLOSE_GRACE_SECONDS)
     return finished.is_set() and not thread.is_alive() and not stream_error
 
 

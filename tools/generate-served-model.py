@@ -296,7 +296,7 @@ def _validate_sq8_overlay_receipt(
         "ready_seconds": 900,
         "request_seconds": 240,
         "shutdown_seconds": 30,
-        "outer_seconds": 1200,
+        "outer_seconds": 1350,
     }:
         raise GenerationError("SQ8 overlay execution timeout receipt binding differs")
     source_commit = _require_hex(

@@ -15,10 +15,12 @@
 
 - worker 起動後は strict ready identity を最大 900 秒待ち、ready 検証後にだけ generate request を書く。
 - request を flush した時点から既存の 240 秒 request deadline を開始する。
-- shutdown は 30 秒、runner の outer timeout は 1200 秒とし、ready + request + shutdown + bounded cleanup より長くした。
+- shutdown は 30 秒、worker terminate/reap と pipe drain を明示的に上限化し、runner の outer timeout は 1350 秒とした。ready + request + shutdown + terminate/reap + bounded drain + 60 秒 packaging margin の不等式をテストで固定した。
 - cleanup の最後に残っていた無期限 `wait()` を除去した。
 - failure stage を `ready_timeout`、`ready_protocol`、`request_timeout`、`request_protocol`、`shutdown_timeout`、`capture_outer_timeout` として区別した。
-- Gate actual request と prepared/actual/failure receipt に ready=900、request=240、shutdown=30、outer=1200 の契約を固定し、runner と receipt writer で完全一致を検証する。
+- Gate actual request と prepared/actual/failure receipt に ready=900、request=240、shutdown=30、outer=1350 の契約を固定し、runner と receipt writer で完全一致を検証する。
+- Gate の trusted_components を4要素の exact schema とし、approved tools root、canonical path、regular/non-symlink、nlink=1、SHA-256を実行前に検証する。capture、receipt writer、served-model generator は検証済みパスだけを実行時に使用し、maintenance/success/failure evidenceへ同じpath+SHAを束縛する。
+- lifecycle は last_event、events_truncated、ready先頭、request_sent offset順序を検証し、ready_protocol で request_sent を禁止する。runner のSQ8 telemetryはキー、整数非bool、範囲、閾値を厳密に検証する。
 - stderr evidence を v2 に更新し、raw total bytes/SHA-256、各 16 KiB の head/tail、record count、schema counts、最大 512 records/4 MiB、許可フィールドだけの last complete record を保持する。
 - stdout lifecycle evidence を最大 64 events に制限し、process start からの monotonic offset、request ID 一致、token index/count だけを保持する。token ID、prompt、生成内容は保持しない。
 - failure envelope v4 は request ID、timeouts、worker return code/signal、stderr/lifecycle evidence を結び、runner で shape、値、stage/terminal 対応、秘密情報、改ざんを fail closed で検証する。
@@ -36,7 +38,7 @@ PYTHONPATH=. pytest -q \
   tests/test_run_qwen35_aq4_sq8_overlay_gpu_promotion.py
 ```
 
-結果は `143 passed`。delayed-ready success、ready timeout before request、request timeout、outer timeout、partial token lifecycle、stderr tail truncation、secret rejection、request/timeouts/lifecycle/schema-count/receipt tamper rejectionを含む。
+結果は `152 passed`。delayed-ready success、ready timeout before request、request timeout、outer timeout margin、partial token lifecycle、stderr tail truncation、secret rejection、Gate component/path/symlink/nlink/unknown/missing tamper、request/timeouts/lifecycle/schema-count/receipt/telemetry tamper rejectionを含む。
 
 ## lineage への影響
 

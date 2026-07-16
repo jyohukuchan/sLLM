@@ -41,8 +41,23 @@ EXECUTION_TIMEOUTS = {
     "ready_seconds": 900,
     "request_seconds": 240,
     "shutdown_seconds": 30,
-    "outer_seconds": 1200,
+    "outer_seconds": 1350,
 }
+TRUSTED_COMPONENT_KEYS = frozenset(
+    {
+        "maintenance_wrapper",
+        "executor_capture",
+        "served_model_generator",
+        "promotion_receipt_writer",
+    }
+)
+TRUSTED_COMPONENT_PATHS = {
+    "maintenance_wrapper": (ROOT / "tools/run-qwen35-aq4-sq8-overlay-gpu-promotion.py").resolve(),
+    "executor_capture": (ROOT / "tools/capture-aq4-resident-executor-record.py").resolve(),
+    "served_model_generator": (ROOT / "tools/generate-served-model.py").resolve(),
+    "promotion_receipt_writer": Path(__file__).resolve(),
+}
+TRUSTED_COMPONENT_APPROVED_ROOT = (ROOT / "tools").resolve()
 
 
 class ReceiptError(RuntimeError):
@@ -86,6 +101,46 @@ def sha256_file(path: Path) -> str:
     except OSError as error:
         raise ReceiptError(f"cannot hash {path}") from error
     return digest.hexdigest()
+
+
+def _trusted_components(value: Any) -> dict[str, dict[str, str]]:
+    """Validate the Gate-bound tool identity carried into final receipts."""
+
+    if not isinstance(value, dict) or set(value) != TRUSTED_COMPONENT_KEYS:
+        raise ReceiptError("trusted component schema differs")
+    result: dict[str, dict[str, str]] = {}
+    for name in sorted(TRUSTED_COMPONENT_KEYS):
+        item = value.get(name)
+        if not isinstance(item, dict) or set(item) != {"path", "sha256"}:
+            raise ReceiptError(f"trusted component {name} shape differs")
+        raw_path = item.get("path")
+        digest = item.get("sha256")
+        if (
+            not isinstance(raw_path, str)
+            or not isinstance(digest, str)
+            or _hex(digest, 64, f"trusted component {name} SHA-256") != digest
+        ):
+            raise ReceiptError(f"trusted component {name} identity differs")
+        path = Path(raw_path)
+        expected = TRUSTED_COMPONENT_PATHS[name]
+        try:
+            resolved = path.resolve(strict=True)
+            metadata = path.stat(follow_symlinks=False)
+        except OSError as error:
+            raise ReceiptError(f"trusted component {name} is unavailable") from error
+        if (
+            not path.is_absolute()
+            or resolved != path
+            or resolved != expected
+            or resolved.parent != TRUSTED_COMPONENT_APPROVED_ROOT
+            or path.is_symlink()
+            or not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_nlink != 1
+            or sha256_file(path) != digest
+        ):
+            raise ReceiptError(f"trusted component {name} binding differs")
+        result[name] = {"path": str(resolved), "sha256": digest}
+    return result
 
 
 def _hex(value: Any, length: int, label: str) -> str:
@@ -198,8 +253,12 @@ def served_model_semantic_sha256(document: dict[str, Any]) -> str:
     return hashlib.sha256(_canonical(value)).hexdigest()
 
 
-def _load_generator() -> ModuleType:
-    path = ROOT / "tools/generate-served-model.py"
+def _load_generator(generator_path: Path | None = None) -> ModuleType:
+    path = (
+        generator_path.resolve()
+        if generator_path is not None
+        else TRUSTED_COMPONENT_PATHS["served_model_generator"]
+    )
     spec = importlib.util.spec_from_file_location("_ullm_sq8_receipt_generator", path)
     if spec is None or spec.loader is None:
         raise ReceiptError("served-model generator is unavailable")
@@ -481,6 +540,7 @@ def _actual_evidence(
     package_sha256: str,
     request_id: str,
     prepared_receipt_path: Path | None = None,
+    trusted_components: dict[str, dict[str, str]] | None = None,
 ) -> dict[str, Any]:
     request_id = _request_id(request_id)
     paths = (maintenance_path, executor_path)
@@ -492,6 +552,13 @@ def _actual_evidence(
     maintenance = _read_object(maintenance_path, "maintenance evidence")
     if maintenance.get("promotion_request_id") != request_id:
         raise ReceiptError("maintenance promotion request ID differs")
+    expected_components = _trusted_components(
+        trusted_components
+        if trusted_components is not None
+        else maintenance.get("trusted_components")
+    )
+    if maintenance.get("trusted_components") != expected_components:
+        raise ReceiptError("maintenance trusted component binding differs")
     capture = maintenance.get("capture")
     if not isinstance(capture, dict) or capture.get("timeouts") != EXECUTION_TIMEOUTS:
         raise ReceiptError("maintenance execution timeout receipt binding differs")
@@ -548,6 +615,7 @@ def _actual_evidence(
         "telemetry_binding": telemetry_binding,
         "manifest_identity": manifest_identity,
         "output_identity": output_identity,
+        "trusted_components": expected_components,
     }
     if prepared_receipt_path is not None:
         actual["prepared_receipt"] = _absolute_evidence_ref(
@@ -569,6 +637,7 @@ def _actual_evidence(
                     "telemetry_binding",
                     "manifest_identity",
                     "output_identity",
+                    "trusted_components",
                 )
             },
         }
@@ -585,6 +654,7 @@ def validate_actual_evidence(
     package_sha256: str,
     request_id: str,
     prepared_receipt_path: Path | None = None,
+    trusted_components: dict[str, dict[str, str]] | None = None,
 ) -> dict[str, Any]:
     """Validate post-run evidence and return its canonical receipt projection."""
 
@@ -597,6 +667,7 @@ def validate_actual_evidence(
         package_sha256=package_sha256,
         request_id=request_id,
         prepared_receipt_path=prepared_receipt_path,
+        trusted_components=trusted_components,
     )
 
 
@@ -864,6 +935,8 @@ def write_actual_receipt(
     maintenance_evidence_path: Path,
     executor_record_path: Path,
     output_path: Path,
+    generator_path: Path | None = None,
+    trusted_components: dict[str, dict[str, str]] | None = None,
 ) -> dict[str, Any]:
     """Publish a separate actual-verified receipt after one successful run."""
 
@@ -875,7 +948,20 @@ def write_actual_receipt(
         raise ReceiptError("actual receipt cannot replace the prepared receipt")
     prepared, profile, request_id = _load_prepared_receipt(prepared_path)
     worker_profile, product = _profile_contract(profile, prepared_path)
-    generator = _load_generator()
+    expected_components = _trusted_components(
+        trusted_components
+        if trusted_components is not None
+        else _read_object(maintenance_evidence_path, "maintenance evidence").get(
+            "trusted_components"
+        )
+    )
+    if generator_path is not None and Path(generator_path).resolve() != Path(
+        expected_components["served_model_generator"]["path"]
+    ):
+        raise ReceiptError("served-model generator trusted path differs")
+    generator = _load_generator(
+        Path(expected_components["served_model_generator"]["path"])
+    )
     try:
         generator._materialize_profile_document(
             Path(str(prepared["release"]["profile"]["path"])),
@@ -947,6 +1033,7 @@ def write_actual_receipt(
         package_sha256=package_manifest_sha256,
         request_id=request_id,
         prepared_receipt_path=prepared_path,
+        trusted_components=expected_components,
     )
     if actual.get("status") != "actual_verified":
         raise ReceiptError("actual receipt evidence is not verified")
@@ -978,6 +1065,7 @@ def write_failure_receipt(
     prepared_receipt_path: Path,
     maintenance_evidence_path: Path,
     output_path: Path,
+    trusted_components: dict[str, dict[str, str]] | None = None,
 ) -> dict[str, Any]:
     """Publish a separate immutable failure receipt without promoting the candidate."""
 
@@ -995,6 +1083,11 @@ def write_failure_receipt(
         raise ReceiptError("maintenance promotion request ID differs")
     if maintenance.get("status") != "failed":
         raise ReceiptError("maintenance evidence is not a failed run")
+    expected_components = _trusted_components(
+        trusted_components if trusted_components is not None else maintenance.get("trusted_components")
+    )
+    if maintenance.get("trusted_components") != expected_components:
+        raise ReceiptError("maintenance trusted component binding differs")
     capture = maintenance.get("capture")
     if capture is not None and (
         not isinstance(capture, dict)
@@ -1011,6 +1104,7 @@ def write_failure_receipt(
             maintenance_evidence_path, output_path, "maintenance evidence"
         ),
         "request_id": request_id,
+        "trusted_components": expected_components,
     }
     raw = (json.dumps(receipt, ensure_ascii=True, indent=2, sort_keys=True) + "\n").encode("ascii")
     _exclusive_write(output_path, raw)

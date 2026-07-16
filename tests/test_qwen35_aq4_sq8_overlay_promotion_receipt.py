@@ -74,6 +74,13 @@ def telemetry_binding(value: dict, request_id: str = REQUEST_ID) -> dict:
     }
 
 
+def trusted_components() -> dict[str, dict[str, str]]:
+    return {
+        name: {"path": str(path), "sha256": WRITER.sha256_file(path)}
+        for name, path in WRITER.TRUSTED_COMPONENT_PATHS.items()
+    }
+
+
 @pytest.fixture
 def fixture(tmp_path: Path) -> dict[str, Path | dict]:
     tokenizer = tmp_path / "tokenizer"
@@ -362,6 +369,7 @@ def test_actual_evidence_uses_maintenance_stable2(tmp_path: Path, fixture: dict[
         "actual_run_count": 1,
         "failure": None,
         "capture": {"timeouts": dict(WRITER.EXECUTION_TIMEOUTS)},
+        "trusted_components": trusted_components(),
         "candidate_pre": snapshot,
         "candidate_post": snapshot,
         "stopped_observations": [
@@ -451,6 +459,7 @@ def test_actual_evidence_uses_maintenance_stable2(tmp_path: Path, fixture: dict[
     assert value["status"] == "actual_verified"
     assert value["actual"]["gpu_exclusive_preflight"]["mode"] == "maintenance_stable2"
     assert value["actual"]["telemetry_binding"] == telemetry_binding(telemetry)
+    assert value["actual"]["trusted_components"] == trusted_components()
     assert GENERATOR.materialize(
         Path(fixture["profile"]), receipt_path_override=output
     )["promotion"]["source_commit"] == "1" * 40
@@ -582,11 +591,25 @@ def test_failure_receipt_is_separate_and_request_bound(fixture: dict[str, Path |
             "schema_version": "ullm.qwen35_aq4.sq8_overlay_gpu_promotion_maintenance.v1",
             "promotion_request_id": REQUEST_ID,
             "status": "failed",
+            "trusted_components": trusted_components(),
             "failure": {"reason": "capture failed"},
         },
     )
     output = Path(fixture["profile"]).with_name("promotion-failure-receipt.json")
     value = WRITER.write_failure_receipt(prepared, maintenance, output)
     assert value["status"] == "actual_failed"
+    assert value["actual"]["trusted_components"] == trusted_components()
+    tampered = json.loads(maintenance.read_text(encoding="utf-8"))
+    tampered["trusted_components"]["executor_capture"]["sha256"] = "0" * 64
+    tampered_path = maintenance.with_name("tampered-failed-maintenance.json")
+    _write_json(tampered_path, tampered)
+    tampered_output = maintenance.with_name("tampered-output")
+    tampered_output.mkdir()
+    with pytest.raises(WRITER.ReceiptError, match="trusted component"):
+        WRITER.write_failure_receipt(
+            prepared,
+            tampered_path,
+            tampered_output / "promotion-failure-receipt.json",
+        )
     with pytest.raises(WRITER.ReceiptError, match="already exists"):
         WRITER.write_failure_receipt(prepared, maintenance, output)

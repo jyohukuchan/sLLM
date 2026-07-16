@@ -64,7 +64,7 @@ EXECUTION_TIMEOUTS = {
     "ready_seconds": 900,
     "request_seconds": 240,
     "shutdown_seconds": 30,
-    "outer_seconds": 1200,
+    "outer_seconds": 1350,
 }
 AUTHORIZATION_LINEAGE_SCHEMA = "ullm.sq8_authorization_lineage.v1"
 RUNTIME_MEMBERS = frozenset(

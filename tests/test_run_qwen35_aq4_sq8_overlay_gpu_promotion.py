@@ -72,6 +72,13 @@ class ReceiptWriter:
         )
 
 
+def trusted_components() -> dict[str, dict[str, str]]:
+    return {
+        name: {"path": str(path), "sha256": MODULE.sha_file(path)}
+        for name, path in MODULE.TRUSTED_COMPONENT_PATHS.items()
+    }
+
+
 def readiness() -> dict[str, Any]:
     network_id = "3" * 64
     return {
@@ -109,6 +116,7 @@ def snapshot(tag: str = "same", *, authorized: bool = True) -> dict[str, Any]:
         "overlay": {"content_sha256": "f" * 64},
         "authorization": {"actual_run_allowed": authorized},
         "readiness": readiness(),
+        "trusted_components": trusted_components(),
         "tag": tag,
     }
 
@@ -143,7 +151,10 @@ def candidate(tmp_path: Path) -> Path:
     (root / "profile.json").write_text(json.dumps(profile), encoding="utf-8")
     (root / "gate.json").write_text(
         json.dumps(
-            {"request": {"actual": {"request_id": "sq8-promotion-" + "a" * 64}}}
+            {
+                "request": {"actual": {"request_id": "sq8-promotion-" + "a" * 64}},
+                "trusted_components": trusted_components(),
+            }
         ),
         encoding="utf-8",
     )
@@ -360,6 +371,103 @@ def test_validate_executor_record_binds_telemetry_hash_and_request_id(
     with pytest.raises(MODULE.PromotionError, match="telemetry binding"):
         MODULE.validate_executor_record(path, snapshot(), REQUEST_ID)
 
+
+@pytest.mark.parametrize("mutation", ["missing", "unknown", "sha", "path"])
+def test_trusted_components_reject_gate_tamper(
+    mutation: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    value = {"trusted_components": trusted_components()}
+    if mutation == "missing":
+        del value["trusted_components"]["executor_capture"]
+    elif mutation == "unknown":
+        value["trusted_components"]["unknown"] = {
+            "path": str(MODULE.CAPTURE),
+            "sha256": MODULE.sha_file(MODULE.CAPTURE),
+        }
+    elif mutation == "sha":
+        value["trusted_components"]["executor_capture"]["sha256"] = "0" * 64
+    else:
+        value["trusted_components"]["executor_capture"]["path"] = str(
+            tmp_path / "capture.py"
+        )
+    with pytest.raises(MODULE.PromotionError, match="trusted component"):
+        MODULE.validate_trusted_components(value)
+
+
+def test_trusted_components_reject_symlink_and_nlink(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = tmp_path / "capture.py"
+    target.write_text("capture\n", encoding="ascii")
+    link = tmp_path / "capture-link.py"
+    link.symlink_to(target)
+    monkeypatch.setitem(MODULE.TRUSTED_COMPONENT_PATHS, "executor_capture", link)
+    monkeypatch.setattr(MODULE, "TRUSTED_COMPONENT_APPROVED_ROOT", tmp_path)
+    symlink_gate = {"trusted_components": trusted_components()}
+    with pytest.raises(MODULE.PromotionError, match="trusted component"):
+        MODULE.validate_trusted_components(symlink_gate)
+
+    regular = tmp_path / "capture-regular.py"
+    regular.write_text("capture\n", encoding="ascii")
+    hardlink = tmp_path / "capture-hardlink.py"
+    hardlink.hardlink_to(regular)
+    monkeypatch.setitem(MODULE.TRUSTED_COMPONENT_PATHS, "executor_capture", hardlink)
+    nlink_gate = {"trusted_components": trusted_components()}
+    with pytest.raises(MODULE.PromotionError, match="trusted component"):
+        MODULE.validate_trusted_components(nlink_gate)
+
+
+def test_lifecycle_order_last_event_and_ready_protocol_binding_reject_tamper() -> None:
+    value = capture_error_envelope()
+    value["worker_lifecycle"]["last_event"] = dict(
+        value["worker_lifecycle"]["events"][0], type="released"
+    )
+    assert parse_capture_error(capture_stream(json.dumps(value).encode())) == {
+        "validation": "invalid",
+        "reason": "worker_lifecycle_type_or_value_differs",
+    }
+
+    value = capture_error_envelope()
+    value["worker_lifecycle"]["events"][0]["type"] = "started"
+    value["worker_lifecycle"]["last_event"] = dict(
+        value["worker_lifecycle"]["events"][0]
+    )
+    assert parse_capture_error(capture_stream(json.dumps(value).encode())) == {
+        "validation": "invalid",
+        "reason": "worker_lifecycle_ready_order_differs",
+    }
+
+    value = capture_error_envelope(stage="ready_protocol")
+    assert parse_capture_error(capture_stream(json.dumps(value).encode())) == {
+        "validation": "invalid",
+        "reason": "worker_lifecycle_stage_mismatch",
+    }
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        lambda value: value["sq8_promotion_evidence"]["telemetry"]["projection"].__setitem__(
+            "batch_matvec_count", "1"
+        ),
+        lambda value: value["sq8_promotion_evidence"]["telemetry"][
+            "diagnostic_host_staging"
+        ].__setitem__("read_count", 0.0),
+        lambda value: value["sq8_promotion_evidence"]["output_identity"].__setitem__(
+            "token_count", 2.0
+        ),
+    ],
+)
+def test_executor_telemetry_malformed_types_fail_closed(
+    tmp_path: Path, mutation: Any
+) -> None:
+    path = tmp_path / "executor.json"
+    value = executor_record()
+    mutation(value)
+    path.write_text(json.dumps(value), encoding="ascii")
+    with pytest.raises(MODULE.PromotionError):
+        MODULE.validate_executor_record(path, snapshot(), REQUEST_ID)
+
     value = executor_record()
     value["sq8_promotion_evidence"]["telemetry_binding"]["request_id"] = (
         "sq8-promotion-" + "b" * 64
@@ -525,7 +633,7 @@ def prepare(
         "validate_executor_record",
         lambda path, identity, request_id: {"status": "ok"},
     )
-    monkeypatch.setattr(MODULE, "load_receipt_writer", lambda: ReceiptWriter)
+    monkeypatch.setattr(MODULE, "load_receipt_writer", lambda *_args, **_kwargs: ReceiptWriter)
 
 
 def docker_runner(
@@ -964,12 +1072,26 @@ def test_capture_timeout_and_lifecycle_evidence_rejects_tamper(
 
 
 def test_outer_capture_cap_exceeds_all_inner_bounded_stages() -> None:
-    assert MODULE.CAPTURE_SUBPROCESS_TIMEOUT_SECONDS > (
+    assert MODULE.CAPTURE_INNER_BOUND_SECONDS == pytest.approx(
         MODULE.CAPTURE_READY_TIMEOUT_SECONDS
         + MODULE.CAPTURE_REQUEST_TIMEOUT_SECONDS
         + MODULE.CAPTURE_SHUTDOWN_TIMEOUT_SECONDS
+        + MODULE.CAPTURE_TERMINATE_GRACE_SECONDS
+        + MODULE.CAPTURE_KILL_REAP_TIMEOUT_SECONDS
+        + MODULE.CAPTURE_FINAL_REAP_TIMEOUT_SECONDS
+        + MODULE.CAPTURE_STDERR_DRAIN_TIMEOUT_SECONDS
+        + MODULE.CAPTURE_STDOUT_DRAIN_TIMEOUT_SECONDS
+        + MODULE.CAPTURE_OBSERVER_FINISH_TIMEOUT_SECONDS
     )
-    command = MODULE.capture_command(Path("/candidate"), Path("/output"), REQUEST_ID)
+    assert MODULE.CAPTURE_SUBPROCESS_TIMEOUT_SECONDS > (
+        MODULE.CAPTURE_INNER_BOUND_SECONDS + MODULE.CAPTURE_PACKAGING_MARGIN_SECONDS
+    )
+    command = MODULE.capture_command(
+        Path("/candidate"),
+        Path("/output"),
+        REQUEST_ID,
+        capture_path=MODULE.CAPTURE,
+    )
     assert command[command.index("--ready-timeout") + 1] == "900"
     assert command[command.index("--timeout") + 1] == "240"
 
