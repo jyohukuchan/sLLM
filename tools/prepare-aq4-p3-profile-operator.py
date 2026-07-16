@@ -103,6 +103,12 @@ QUIET_SCHEMA = "ullm.aq4_p3_profile_quiet_window.v21"
 OPERATOR_SCHEMA = "ullm.aq4_p3_profile_operator_command.v16"
 OPERATOR_RESULT_SCHEMA = "ullm.aq4_p3_profile_operator_result.v16"
 ACTUAL_AUDIT_SCHEMA = "ullm.aq4_p3_profile_actual_audit.v16"
+FINALIZATION_RECOVERY_RESULT_SCHEMA = (
+    "ullm.aq4_p3_profile_failed_finalization_recovery_result.v16"
+)
+FINALIZATION_RECOVERY_AUDIT_SCHEMA = (
+    "ullm.aq4_p3_profile_failed_finalization_recovery_audit.v16"
+)
 PREVIOUS_QUIET_V18_SCHEMA = "ullm.aq4_p3_profile_quiet_window.v18"
 PREVIOUS_OPERATOR_V13_SCHEMA = "ullm.aq4_p3_profile_operator_command.v13"
 PREVIOUS_OPERATOR_V13_COMMIT = "764045355ee06c3b5c53f296d4bcbe47e1495ece"
@@ -2872,6 +2878,637 @@ def validate_finalizer_source_authority(value: Any) -> None:
         raise OperatorError("finalizer source blob authority differs")
 
 
+def failed_finalization_recovery_source_authority() -> dict[str, Any]:
+    value = finalizer_source_authority()
+    value["role"] = "failed_finalization_recovery_only_not_execution_authority"
+    return value
+
+
+def inspect_unsealed_root(root: Path, *, expected_mode: int) -> dict[str, Any]:
+    """Hash an existing recovery input without changing it."""
+    metadata = root.lstat()
+    if (
+        root.is_symlink()
+        or not root.is_dir()
+        or stat.S_IMODE(metadata.st_mode) != expected_mode
+        or (root / "SHA256SUMS").exists()
+        or (root / "SHA256SUMS").is_symlink()
+    ):
+        raise OperatorError(f"unsealed recovery root differs: {root}")
+    members: dict[str, Any] = {}
+    directories: list[str] = []
+    for path in sorted(root.rglob("*"), key=lambda item: str(item.relative_to(root))):
+        child = path.lstat()
+        relative = str(path.relative_to(root))
+        if path.is_symlink() or (
+            not stat.S_ISREG(child.st_mode) and not stat.S_ISDIR(child.st_mode)
+        ):
+            raise OperatorError(f"unsealed recovery member differs: {path}")
+        if stat.S_ISDIR(child.st_mode):
+            directories.append(relative)
+            continue
+        if child.st_nlink != 1:
+            raise OperatorError(f"unsealed recovery member differs: {path}")
+        members[relative] = {
+            "path": str(path),
+            "sha256": sha_file(path),
+            "mode": f"0{stat.S_IMODE(child.st_mode):o}",
+            "nlink": 1,
+            "size": child.st_size,
+        }
+    if not members:
+        raise OperatorError(f"unsealed recovery root is empty: {root}")
+    return {
+        "root": str(root),
+        "mode": f"0{expected_mode:o}",
+        "members": members,
+        "directories": directories,
+    }
+
+
+def kernel_flock_holders(
+    path: Path,
+    *,
+    proc_locks: Path = Path("/proc/locks"),
+) -> list[int]:
+    """Read the kernel lock table; lock-file payloads are not owner authority."""
+    metadata = path.lstat()
+    if path.is_symlink() or not stat.S_ISREG(metadata.st_mode):
+        raise OperatorError("recovery lock path differs")
+    identity = (
+        f"{os.major(metadata.st_dev):02x}:"
+        f"{os.minor(metadata.st_dev):02x}:{metadata.st_ino}"
+    )
+    holders: set[int] = set()
+    for line in proc_locks.read_text(encoding="ascii").splitlines():
+        fields = line.split()
+        if len(fields) < 6 or fields[1] != "FLOCK" or fields[5] != identity:
+            continue
+        try:
+            pid = int(fields[4])
+        except ValueError as error:
+            raise OperatorError("kernel FLOCK holder differs") from error
+        if pid <= 0:
+            raise OperatorError("kernel FLOCK holder differs")
+        holders.add(pid)
+    return sorted(holders)
+
+
+def _formal_health_sha256(running: dict[str, Any]) -> str:
+    formal = running.get("health", {}).get("formal", {})
+    return sha_bytes(
+        canonical(
+            {
+                key: formal[key]
+                for key in (
+                    "container",
+                    "curl",
+                    "docker",
+                    "endpoints",
+                    "process_counts",
+                    "secret_material_recorded",
+                )
+            }
+        )
+    )
+
+
+def validate_failed_finalization_recovery_semantics(
+    *,
+    manifest: dict[str, Any],
+    maintenance: dict[str, Any],
+    launcher: dict[str, Any],
+    runtime_summary: dict[str, Any],
+    driver_process: dict[str, Any],
+    capture_artifact: dict[str, Any],
+    operator_stdout: dict[str, Any],
+    operator_stderr_bytes: int,
+    rocprof_stderr: bytes,
+    expected_evidence: Path,
+    expected_capture_artifact: Path,
+) -> dict[str, Any]:
+    authorization = manifest.get("authorization", {})
+    execution = manifest.get("execution", {})
+    failure_contract = manifest.get("failure_contract", {})
+    if (
+        authorization.get("maximum_invocations") != 1
+        or execution.get("maximum_invocations") != 1
+        or execution.get("shell") is not False
+        or failure_contract.get("retry_forbidden") is not True
+    ):
+        raise OperatorError("recovery operator authorization differs")
+    if operator_stdout != {
+        "evidence": str(expected_evidence / "launcher-evidence.json"),
+        "mode": "execute",
+        "status": "failed",
+    } or operator_stderr_bytes != 0:
+        raise OperatorError("recovery operator raw streams differ")
+    restore = maintenance.get("restore", {})
+    cleanup = maintenance.get("lock_substrate_cleanup")
+    counts = maintenance.get("process_counts", {})
+    if (
+        maintenance.get("status") != "failed"
+        or maintenance.get("mode") != "execute"
+        or maintenance.get("failure")
+        != {
+            "stage": "lock-substrate-cleanup",
+            "reason": "trusted lock substrate retained because launcher profile lifecycle evidence is unverified",
+            "launcher_started": True,
+        }
+        or restore.get("attempted") is not True
+        or restore.get("passed") is not True
+        or restore.get("final_metadata_recheck", {}).get("within_absolute_deadline")
+        is not True
+        or cleanup
+        != {
+            "passed": False,
+            "attempted": False,
+            "reason": "trusted lock substrate retained because launcher profile lifecycle evidence is unverified",
+            "runner_finished": "unknown",
+            "runner_children": "unknown",
+            "secret_material_recorded": False,
+        }
+        or any(
+            counts.get(name) != 1
+            for name in (
+                "launcher",
+                "capture_tool",
+                "rocprof",
+                "systemctl_stop",
+                "systemctl_start",
+            )
+        )
+    ):
+        raise OperatorError("recovery maintenance boundary differs")
+    raw = maintenance.get("capture", {}).get("raw_profile_capture")
+    diagnostics = maintenance.get("capture", {}).get("raw_profile_diagnostics")
+    required_lifecycle = {
+        "capture_tool_invocations": 1,
+        "rocprof_invocations": 1,
+        "rocprof_started": True,
+        "runner_start_known": True,
+        "runner_started": True,
+        "runner_completed": True,
+        "timed_out": False,
+        "children_state_known": True,
+        "children_remaining": [],
+        "cleanup_passed": True,
+    }
+    if (
+        not isinstance(raw, dict)
+        or raw != launcher.get("profile_capture")
+        or any(raw.get(key) != value for key, value in required_lifecycle.items())
+        or launcher.get("status") != "failed"
+        or launcher.get("failure", {}).get("reason")
+        != "profile capture diagnostics state differs"
+        or launcher.get("failure", {}).get("children_remaining") != []
+        or launcher.get("failure", {}).get("cleanup_passed") is not True
+        or not isinstance(diagnostics, dict)
+        or diagnostics.get("validation_error")
+        != "HarnessError: profiled runner stderr is not empty"
+        or diagnostics.get("runner_finished") is not True
+        or diagnostics.get("capture_artifact", {}).get("path")
+        != str(expected_capture_artifact)
+    ):
+        raise OperatorError("recovery raw profile lifecycle differs")
+    artifact_clone = json.loads(json.dumps(capture_artifact))
+    declared_self_sha256 = artifact_clone.get("artifact_sha256")
+    artifact_clone["artifact_sha256"] = None
+    if (
+        capture_artifact.get("schema_version")
+        != "ullm.aq4_p3_diagnostic_rocprof_capture.v2"
+        or capture_artifact.get("status") != "complete_diagnostic"
+        or capture_artifact.get("measurement_eligible") is not False
+        or capture_artifact.get("promotion_eligible") is not False
+        or declared_self_sha256 != sha_bytes(canonical(artifact_clone))
+        or runtime_summary.get("status") != "complete"
+        or runtime_summary.get("resident_model_loads") != 1
+        or runtime_summary.get("warmup_runs") != 2
+        or runtime_summary.get("measured_runs") != 10
+        or runtime_summary.get("transaction_count") != 12
+        or driver_process.get("status") != "complete"
+        or driver_process.get("cleanup", {}).get("passed") is not True
+    ):
+        raise OperatorError("recovery completed workload evidence differs")
+    try:
+        stderr_lines = rocprof_stderr.decode("ascii").splitlines()
+    except UnicodeDecodeError as error:
+        raise OperatorError("recovery rocprof stderr differs") from error
+    expected_suffixes = {
+        "aq4-p3-diagnostic_marker_api_trace.csv",
+        "aq4-p3-diagnostic_agent_info.csv",
+    }
+    observed_suffixes: set[str] = set()
+    pattern = re.compile(
+        r"^E\d{8} \d{2}:\d{2}:\d{2}\.\d+ \d+ output_stream\.cpp:111\] "
+        r"Opened result file: (/.+)$"
+    )
+    for line in stderr_lines:
+        match = pattern.fullmatch(line)
+        if match is None:
+            raise OperatorError("recovery rocprof stderr differs")
+        path = Path(match.group(1))
+        if path.parent != expected_capture_artifact.parent:
+            raise OperatorError("recovery rocprof stderr differs")
+        observed_suffixes.add(path.name)
+    if observed_suffixes != expected_suffixes or len(stderr_lines) != 2:
+        raise OperatorError("recovery rocprof stderr differs")
+    return {
+        "raw_lifecycle": required_lifecycle,
+        "artifact_self_sha256": declared_self_sha256,
+        "rocprof_stderr_classification": "profiler_information_not_runner_stderr",
+        "validator_false_rejection": True,
+    }
+
+
+def validate_failed_finalization_live_safety(
+    *,
+    post: dict[str, Any],
+    restore_post: dict[str, Any],
+    pre: dict[str, Any],
+    substrate_lock: dict[str, Any],
+    lock_metadata: os.stat_result,
+    holders: list[int],
+) -> None:
+    worker_pid = post.get("worker", {}).get("pid")
+    main_pid = post.get("service", {}).get("main_pid")
+    if (
+        post.get("service") != restore_post.get("service")
+        or post.get("worker") != restore_post.get("worker")
+        or post.get("gpu") != restore_post.get("gpu")
+        or post.get("owners") != {"amd_smi": [worker_pid], "kfd": [worker_pid]}
+        or post.get("owners")
+        != {
+            "amd_smi": restore_post.get("owners", {}).get("amd_smi"),
+            "kfd": restore_post.get("owners", {}).get("kfd"),
+        }
+        or post.get("hashes") != restore_post.get("hashes")
+        or post.get("formal_health_sha256") != _formal_health_sha256(restore_post)
+        or post.get("targeted_processes") != []
+        or post.get("lock", {}).get("busy") is not True
+        or holders != [main_pid]
+        or lock_metadata.st_dev != substrate_lock.get("device")
+        or lock_metadata.st_ino != substrate_lock.get("inode")
+        or main_pid == pre.get("service", {}).get("main_pid")
+        or worker_pid == pre.get("worker", {}).get("pid")
+        or post.get("service", {}).get("active_state") != "active"
+        or post.get("service", {}).get("sub_state") != "running"
+        or post.get("service", {}).get("nrestarts") != 0
+    ):
+        raise OperatorError("failed-finalization recovery live safety differs")
+
+
+def validate_capture_artifact_file_bindings(
+    artifact: dict[str, Any],
+    *,
+    capture_root: Path,
+    preview: dict[str, Any],
+) -> set[str]:
+    """Cross-check every capture-local path/hash pair in the self-hashed artifact."""
+    observed: set[str] = set()
+
+    def visit(value: Any) -> None:
+        if isinstance(value, dict):
+            path_value = value.get("path")
+            digest = value.get("sha256")
+            if isinstance(path_value, str) and isinstance(digest, str):
+                path = Path(path_value)
+                try:
+                    relative = str(path.relative_to(capture_root))
+                except ValueError:
+                    pass
+                else:
+                    member = preview.get("members", {}).get(relative)
+                    if member is None or member.get("sha256") != digest:
+                        raise OperatorError("recovery capture artifact file binding differs")
+                    observed.add(relative)
+            for child in value.values():
+                visit(child)
+        elif isinstance(value, list):
+            for child in value:
+                visit(child)
+
+    visit(artifact)
+    return observed
+
+
+def recover_failed_finalization() -> dict[str, Any]:
+    """Seal the already-produced v16 failure without re-running its finalizer."""
+    require_current_v16_authority()
+    current_v16_actual_roots()
+    stdout_path = OPERATOR_RESULT / "operator.stdout.bin"
+    stderr_path = OPERATOR_RESULT / "operator.stderr.bin"
+    if (
+        ACTUAL_AUDIT.exists()
+        or ACTUAL_AUDIT.is_symlink()
+        or OPERATOR_RESULT.is_symlink()
+        or not OPERATOR_RESULT.is_dir()
+        or {item.name for item in OPERATOR_RESULT.iterdir()}
+        != {"operator.stdout.bin", "operator.stderr.bin"}
+        or not stdout_path.is_file()
+        or stdout_path.is_symlink()
+        or not stderr_path.is_file()
+        or stderr_path.is_symlink()
+    ):
+        raise OperatorError("failed-finalization recovery raw result state differs")
+    manifest = validate_operator()["value"]
+    quiet = validate_quiet()["value"]
+    maintenance_inventory = verify_sums(MAINTENANCE_EVIDENCE)
+    execute_inventory = verify_sums(PROFILE_EXECUTE_EVIDENCE)
+    runtime_preview = inspect_unsealed_root(PROFILE_RUNTIME, expected_mode=0o775)
+    capture_preview = inspect_unsealed_root(PROFILE_CAPTURE, expected_mode=0o700)
+    expected_runtime = {
+        "p2-representative-full_model-cold_prefill-cold_batched-n128-m128-r9700-rdna4-aq4_0_target.raw.json",
+        "resident-batch.driver-process.json",
+        "resident-batch.lock-owner.json",
+        "resident-batch.roctx-ranges.json",
+        "resident-batch.summary.json",
+        "resident-driver.stderr.log",
+    }
+    expected_capture = {
+        "aq4-p3-diagnostic_agent_info.csv",
+        "aq4-p3-diagnostic_hip_api_trace.csv",
+        "aq4-p3-diagnostic_kernel_trace.csv",
+        "aq4-p3-diagnostic_marker_api_trace.csv",
+        "aq4-p3-diagnostic_memory_copy_trace.csv",
+        "capture-artifact.json",
+        "capture-capabilities.json",
+        "rocprof.stderr",
+        "rocprof.stdout",
+        *{
+            f"measured-runs/run-{run:02d}_{kind}_trace.csv"
+            for run in range(2, 12)
+            for kind in ("hip_api", "kernel", "memory_copy")
+        },
+    }
+    if (
+        set(runtime_preview["members"]) != expected_runtime
+        or set(capture_preview["members"]) != expected_capture
+        or capture_preview["directories"] != ["measured-runs"]
+        or (PROFILE_CAPTURE / "capture-failure.json").exists()
+        or (PROFILE_CAPTURE / "capture-failure.json").is_symlink()
+    ):
+        raise OperatorError("failed-finalization recovery member set differs")
+    maintenance = load(MAINTENANCE_EVIDENCE / "launcher-evidence.json", "recovery maintenance")
+    launcher = load(PROFILE_EXECUTE_EVIDENCE / "launcher-evidence.json", "recovery launcher")
+    runtime_summary = load(PROFILE_RUNTIME / "resident-batch.summary.json", "recovery runtime summary")
+    driver_process = load(PROFILE_RUNTIME / "resident-batch.driver-process.json", "recovery driver process")
+    capture_artifact_path = PROFILE_CAPTURE / "capture-artifact.json"
+    capture_artifact = load(capture_artifact_path, "recovery capture artifact")
+    operator_stdout = load(stdout_path, "recovery operator stdout")
+    semantic = validate_failed_finalization_recovery_semantics(
+        manifest=manifest,
+        maintenance=maintenance,
+        launcher=launcher,
+        runtime_summary=runtime_summary,
+        driver_process=driver_process,
+        capture_artifact=capture_artifact,
+        operator_stdout=operator_stdout,
+        operator_stderr_bytes=stderr_path.stat().st_size,
+        rocprof_stderr=(PROFILE_CAPTURE / "rocprof.stderr").read_bytes(),
+        expected_evidence=MAINTENANCE_EVIDENCE,
+        expected_capture_artifact=capture_artifact_path,
+    )
+    artifact_bound_members = validate_capture_artifact_file_bindings(
+        capture_artifact,
+        capture_root=PROFILE_CAPTURE,
+        preview=capture_preview,
+    )
+    if artifact_bound_members != expected_capture - {
+        "aq4-p3-diagnostic_agent_info.csv",
+        "capture-artifact.json",
+        "rocprof.stdout",
+        "rocprof.stderr",
+    }:
+        raise OperatorError("recovery capture artifact file coverage differs")
+    diagnostics = maintenance["capture"]["raw_profile_diagnostics"]
+    if (
+        diagnostics["capture_artifact"]["sha256"] != sha_file(capture_artifact_path)
+        or launcher.get("result", {}).get("files")
+        != {
+            name: member["sha256"]
+            for name, member in runtime_preview["members"].items()
+        }
+    ):
+        raise OperatorError("failed-finalization recovery artifact hash binding differs")
+
+    post = capture_recovery_snapshot(load(PROFILE_READY, "profile ready binding"))
+    lock_path = Path(str(post.get("lock", {}).get("path", "")))
+    lock_metadata = lock_path.lstat()
+    holders = kernel_flock_holders(lock_path)
+    substrate = maintenance.get("lock_substrate", {})
+    substrate_lock = substrate.get("identity", {}).get("lock", {})
+    restore_post = maintenance.get("restore", {}).get("post_start", {})
+    pre = quiet.get("confirmation", {})
+    validate_failed_finalization_live_safety(
+        post=post,
+        restore_post=restore_post,
+        pre=pre,
+        substrate_lock=substrate_lock,
+        lock_metadata=lock_metadata,
+        holders=holders,
+    )
+    main_pid = post["service"]["main_pid"]
+    lock_payload_raw = lock_path.read_bytes()
+    lock_payload = json.loads(lock_payload_raw)
+    if (
+        lock_payload.get("schema_version") != "ullm.aq4_p2_device_lock_owner.v1"
+        or lock_payload.get("inode") != lock_metadata.st_ino
+        or lock_payload.get("run_id")
+        != "p2-r9700-resident-one-case-smoke-profile-diagnostic-v12"
+    ):
+        raise OperatorError("failed-finalization recovery retained lock payload differs")
+
+    authority = failed_finalization_recovery_source_authority()
+    runtime_inventory = seal_existing(PROFILE_RUNTIME)
+    capture_inventory = seal_existing(PROFILE_CAPTURE)
+    observation_limit = "not_independently_reconstructable_from_workspace"
+    result = {
+        "schema_version": FINALIZATION_RECOVERY_RESULT_SCHEMA,
+        "status": "failed_finalization_recovery_sealed_restore_verified_observation_limited",
+        "operator_manifest_commit": git(
+            "log", "-1", "--format=%H", "--",
+            str((OPERATOR_ROOT / "command-manifest.json").relative_to(ROOT)),
+        ),
+        "manifest_file_sha256": sha_file(OPERATOR_ROOT / "command-manifest.json"),
+        "manifest_semantic_sha256": manifest["manifest_sha256"],
+        "command_sha256": manifest["command_sha256"],
+        "recovery_authority": authority,
+        "authorization": {
+            "maximum_invocations": 1,
+            "authorization_consumed": True,
+            "at_least_one_execution": True,
+            "reuse_forbidden": True,
+            "retry_forbidden": True,
+        },
+        "workspace_observation_limits": {
+            key: {"value": None, "availability": observation_limit}
+            for key in (
+                "outer_wait_returncode",
+                "canonical_start_unix_ns",
+                "canonical_end_unix_ns",
+                "exact_invocation_count",
+                "retry_performed",
+                "finalizer_invocation_count",
+                "finalizer_error_stream",
+            )
+        },
+        "inferred_outcome": {
+            "status": "failed",
+            "numeric_returncode": 1,
+            "returncode_kind": "deterministic_source_semantics_not_persisted_outer_wait_status",
+            "sources": [str(stdout_path), str(MAINTENANCE_EVIDENCE / "launcher-evidence.json")],
+        },
+        "stdout": stream_record(stdout_path),
+        "stderr": stream_record(stderr_path),
+        "actual_executed": True,
+        "actual_execution_statement": "at_least_one_execution_from_unique_outputs_and_internal_exact_one_counters",
+        "secret_material_recorded": False,
+    }
+    (OPERATOR_RESULT / "operator-result.json").write_bytes(pretty(result))
+    result_inventory = seal_existing(OPERATOR_RESULT)
+    lock_record = {
+        "path": str(lock_path),
+        "identity": [lock_metadata.st_dev, lock_metadata.st_ino, lock_metadata.st_mode, lock_metadata.st_nlink, lock_metadata.st_size],
+        "kernel_flock_holders": holders,
+        "kernel_holder_authority": "kernel_lock_table_not_file_payload",
+        "restored_service_acquired_same_inode": True,
+        "retained_payload_sha256": sha_bytes(lock_payload_raw),
+        "retained_payload_run_id": lock_payload["run_id"],
+        "retained_payload_pid": lock_payload.get("pid"),
+        "retained_payload_owner_authoritative": False,
+        "removal": "not_attempted_and_now_unsafe_while_restored_service_holds_lock",
+    }
+    audit = {
+        "schema_version": FINALIZATION_RECOVERY_AUDIT_SCHEMA,
+        "status": result["status"],
+        "recovery_authority": authority,
+        "execution_observation": result["authorization"],
+        "workspace_observation_limits": result["workspace_observation_limits"],
+        "inferred_outcome": result["inferred_outcome"],
+        "failure": {
+            "maintenance_stage": maintenance["failure"]["stage"],
+            "maintenance_reason": maintenance["failure"]["reason"],
+            "launcher_reason": launcher["failure"]["reason"],
+            "formal_validation_error": diagnostics["validation_error"],
+        },
+        "restore": maintenance["restore"],
+        "restore_classification": "outer_finally_restored_new_epoch",
+        "recovery_snapshot": {**post, "kernel_flock_holders": holders},
+        "cleanup": {
+            "raw_profile_lifecycle": semantic["raw_lifecycle"],
+            "workload_process_cleanup_passed": True,
+            "residual_targeted_processes": [],
+            "trusted_lock_substrate_cleanup_attempted": False,
+            "trusted_lock_substrate_cleanup_passed": False,
+            "trusted_lock_substrate_state": "retained_by_fail_closed_policy_and_acquired_by_restored_service",
+            "lock": lock_record,
+        },
+        "profile_artifacts": {
+            "status": "failure_evidence_only",
+            "capture_artifact_status": capture_artifact["status"],
+            "capture_artifact_self_sha256": semantic["artifact_self_sha256"],
+            "rocprof_stderr_classification": semantic["rocprof_stderr_classification"],
+            "validator_false_rejection": True,
+            "artifact_unbound_capture_members": [
+                "aq4-p3-diagnostic_agent_info.csv",
+                "rocprof.stdout",
+                "rocprof.stderr",
+            ],
+            "measurement_eligible": False,
+            "promotion_eligible": False,
+        },
+        "evidence": {
+            "maintenance": maintenance_inventory,
+            "execute": execute_inventory,
+            "runtime": runtime_inventory,
+            "capture": capture_inventory,
+            "operator_result": result_inventory,
+        },
+        "actual_executed": True,
+        "retry_performed": None,
+        "secret_material_recorded": False,
+        "audit_sha256": None,
+    }
+    audit["audit_sha256"] = sha_bytes(canonical(audit))
+    write_sealed(ACTUAL_AUDIT, "actual-audit.json", audit)
+    validate_failed_finalization_recovery()
+    return audit
+
+
+def validate_failed_finalization_recovery() -> dict[str, Any]:
+    """Validate the sealed recovery without consulting mutable live state."""
+    inventories = {
+        "maintenance": verify_sums(MAINTENANCE_EVIDENCE),
+        "execute": verify_sums(PROFILE_EXECUTE_EVIDENCE),
+        "runtime": verify_sums(PROFILE_RUNTIME),
+        "capture": verify_sums(PROFILE_CAPTURE),
+        "operator_result": verify_sums(OPERATOR_RESULT),
+        "actual_audit": verify_sums(ACTUAL_AUDIT),
+    }
+    result = load(OPERATOR_RESULT / "operator-result.json", "recovery result")
+    audit = load(ACTUAL_AUDIT / "actual-audit.json", "recovery audit")
+    clone = json.loads(json.dumps(audit))
+    declared = clone.get("audit_sha256")
+    clone["audit_sha256"] = None
+    limits = audit.get("workspace_observation_limits", {})
+    expected_limit = {
+        "value": None,
+        "availability": "not_independently_reconstructable_from_workspace",
+    }
+    cleanup = audit.get("cleanup", {})
+    lock = cleanup.get("lock", {})
+    if (
+        result.get("schema_version") != FINALIZATION_RECOVERY_RESULT_SCHEMA
+        or audit.get("schema_version") != FINALIZATION_RECOVERY_AUDIT_SCHEMA
+        or result.get("status") != audit.get("status")
+        or result.get("status")
+        != "failed_finalization_recovery_sealed_restore_verified_observation_limited"
+        or result.get("authorization", {}).get("maximum_invocations") != 1
+        or result.get("authorization", {}).get("authorization_consumed") is not True
+        or result.get("authorization", {}).get("at_least_one_execution") is not True
+        or result.get("authorization", {}).get("reuse_forbidden") is not True
+        or result.get("workspace_observation_limits") != limits
+        or result.get("recovery_authority") != audit.get("recovery_authority")
+        or result.get("stdout")
+        != stream_record(OPERATOR_RESULT / "operator.stdout.bin")
+        or result.get("stderr")
+        != stream_record(OPERATOR_RESULT / "operator.stderr.bin")
+        or any(value != expected_limit for value in limits.values())
+        or set(limits)
+        != {
+            "outer_wait_returncode",
+            "canonical_start_unix_ns",
+            "canonical_end_unix_ns",
+            "exact_invocation_count",
+            "retry_performed",
+            "finalizer_invocation_count",
+            "finalizer_error_stream",
+        }
+        or audit.get("restore", {}).get("passed") is not True
+        or audit.get("restore_classification") != "outer_finally_restored_new_epoch"
+        or cleanup.get("workload_process_cleanup_passed") is not True
+        or cleanup.get("trusted_lock_substrate_cleanup_attempted") is not False
+        or cleanup.get("trusted_lock_substrate_cleanup_passed") is not False
+        or lock.get("retained_payload_owner_authoritative") is not False
+        or lock.get("kernel_flock_holders")
+        != [audit.get("recovery_snapshot", {}).get("service", {}).get("main_pid")]
+        or lock.get("removal")
+        != "not_attempted_and_now_unsafe_while_restored_service_holds_lock"
+        or audit.get("profile_artifacts", {}).get("measurement_eligible") is not False
+        or audit.get("profile_artifacts", {}).get("promotion_eligible") is not False
+        or audit.get("retry_performed") is not None
+        or declared != sha_bytes(canonical(clone))
+        or audit.get("evidence", {}).get("maintenance") != inventories["maintenance"]
+        or audit.get("evidence", {}).get("execute") != inventories["execute"]
+        or audit.get("evidence", {}).get("runtime") != inventories["runtime"]
+        or audit.get("evidence", {}).get("capture") != inventories["capture"]
+        or audit.get("evidence", {}).get("operator_result") != inventories["operator_result"]
+    ):
+        raise OperatorError("failed-finalization recovery seal differs")
+    return {"result": result, "audit": audit, "inventories": inventories}
+
+
 def pre_stop_noop_failure_record(
     maintenance: dict[str, Any],
     inventory: dict[str, Any],
@@ -4290,6 +4927,8 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("print-actual")
     final = sub.add_parser("finalize-actual"); final.add_argument("--returncode", type=int, required=True); final.add_argument("--start-unix-ns", type=int, required=True); final.add_argument("--end-unix-ns", type=int, required=True)
     sub.add_parser("validate-actual")
+    sub.add_parser("recover-failed-finalization")
+    sub.add_parser("validate-failed-finalization-recovery")
     args = parser.parse_args(argv)
     try:
         if args.command == "collect-quiet": result = collect_quiet(args.output, interval=args.interval, maximum=args.maximum, minimum_span=args.minimum_span, required=args.required_samples)
@@ -4299,6 +4938,8 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "audit-current": result = audit_current()
         elif args.command == "finalize-actual": result = finalize_actual(returncode=args.returncode, start_unix_ns=args.start_unix_ns, end_unix_ns=args.end_unix_ns)
         elif args.command == "validate-actual": result = validate_actual()["audit"]
+        elif args.command == "recover-failed-finalization": result = recover_failed_finalization()
+        elif args.command == "validate-failed-finalization-recovery": result = validate_failed_finalization_recovery()["audit"]
         else: result = {"argv": actual_argv(), "shell": False, "maximum_invocations": 1, "actual_executed": False}
         if args.command == "audit-current":
             print(json.dumps(result, sort_keys=True))

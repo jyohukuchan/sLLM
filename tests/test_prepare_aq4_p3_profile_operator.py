@@ -1423,6 +1423,284 @@ def test_seal_existing_preserves_members_and_is_idempotent(tmp_path: Path) -> No
     assert (root / "trace.csv").stat().st_mode & 0o777 == 0o444
 
 
+def failed_finalization_semantic_fixture(tmp_path: Path) -> dict:
+    evidence = tmp_path / "maintenance-v13"
+    capture = tmp_path / "capture-v12"
+    artifact_path = capture / "capture-artifact.json"
+    raw = {
+        "capture_tool_invocations": 1,
+        "rocprof_invocations": 1,
+        "rocprof_started": True,
+        "runner_start_known": True,
+        "runner_started": True,
+        "runner_completed": True,
+        "timed_out": False,
+        "children_state_known": True,
+        "children_remaining": [],
+        "cleanup_passed": True,
+    }
+    artifact = {
+        "schema_version": "ullm.aq4_p3_diagnostic_rocprof_capture.v2",
+        "status": "complete_diagnostic",
+        "measurement_eligible": False,
+        "promotion_eligible": False,
+        "artifact_sha256": None,
+    }
+    artifact["artifact_sha256"] = OPERATOR.sha_bytes(OPERATOR.canonical(artifact))
+    maintenance = {
+        "status": "failed",
+        "mode": "execute",
+        "failure": {
+            "stage": "lock-substrate-cleanup",
+            "reason": "trusted lock substrate retained because launcher profile lifecycle evidence is unverified",
+            "launcher_started": True,
+        },
+        "restore": {
+            "attempted": True,
+            "passed": True,
+            "final_metadata_recheck": {"within_absolute_deadline": True},
+        },
+        "lock_substrate_cleanup": {
+            "passed": False,
+            "attempted": False,
+            "reason": "trusted lock substrate retained because launcher profile lifecycle evidence is unverified",
+            "runner_finished": "unknown",
+            "runner_children": "unknown",
+            "secret_material_recorded": False,
+        },
+        "process_counts": {
+            "launcher": 1,
+            "capture_tool": 1,
+            "rocprof": 1,
+            "systemctl_stop": 1,
+            "systemctl_start": 1,
+        },
+        "capture": {
+            "raw_profile_capture": raw,
+            "raw_profile_diagnostics": {
+                "validation_error": "HarnessError: profiled runner stderr is not empty",
+                "runner_finished": True,
+                "capture_artifact": {"path": str(artifact_path)},
+            },
+        },
+    }
+    launcher = {
+        "status": "failed",
+        "failure": {
+            "reason": "profile capture diagnostics state differs",
+            "children_remaining": [],
+            "cleanup_passed": True,
+        },
+        "profile_capture": json.loads(json.dumps(raw)),
+    }
+    return {
+        "manifest": {
+            "authorization": {"maximum_invocations": 1},
+            "execution": {"maximum_invocations": 1, "shell": False},
+            "failure_contract": {"retry_forbidden": True},
+        },
+        "maintenance": maintenance,
+        "launcher": launcher,
+        "runtime_summary": {
+            "status": "complete",
+            "resident_model_loads": 1,
+            "warmup_runs": 2,
+            "measured_runs": 10,
+            "transaction_count": 12,
+        },
+        "driver_process": {"status": "complete", "cleanup": {"passed": True}},
+        "capture_artifact": artifact,
+        "operator_stdout": {
+            "evidence": str(evidence / "launcher-evidence.json"),
+            "mode": "execute",
+            "status": "failed",
+        },
+        "operator_stderr_bytes": 0,
+        "rocprof_stderr": (
+            f"E20260716 10:45:22.754747 1 output_stream.cpp:111] Opened result file: {capture}/aq4-p3-diagnostic_marker_api_trace.csv\n"
+            f"E20260716 10:45:22.758917 1 output_stream.cpp:111] Opened result file: {capture}/aq4-p3-diagnostic_agent_info.csv\n"
+        ).encode(),
+        "expected_evidence": evidence,
+        "expected_capture_artifact": artifact_path,
+    }
+
+
+def test_failed_finalization_recovery_semantics_accepts_observation_limited_case(
+    tmp_path: Path,
+) -> None:
+    fixture = failed_finalization_semantic_fixture(tmp_path)
+    value = OPERATOR.validate_failed_finalization_recovery_semantics(**fixture)
+    assert value["validator_false_rejection"] is True
+    assert value["raw_lifecycle"]["children_remaining"] == []
+    assert value["rocprof_stderr_classification"] == "profiler_information_not_runner_stderr"
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    (
+        (lambda value: value["manifest"]["authorization"].update(maximum_invocations=2), "authorization"),
+        (lambda value: value["operator_stdout"].update(status="passed"), "raw streams"),
+        (lambda value: value.update(operator_stderr_bytes=1), "raw streams"),
+        (lambda value: value["maintenance"]["restore"].update(passed=False), "maintenance boundary"),
+        (lambda value: value["maintenance"]["lock_substrate_cleanup"].update(passed=True), "maintenance boundary"),
+        (lambda value: value["maintenance"]["capture"]["raw_profile_capture"].update(children_remaining=[7]), "raw profile lifecycle"),
+        (lambda value: value["launcher"]["profile_capture"].update(runner_completed=False), "raw profile lifecycle"),
+        (lambda value: value["capture_artifact"].update(artifact_sha256="0" * 64), "completed workload"),
+        (lambda value: value["driver_process"]["cleanup"].update(passed=False), "completed workload"),
+        (lambda value: value.update(rocprof_stderr=b"runner failed\n"), "rocprof stderr"),
+    ),
+)
+def test_failed_finalization_recovery_semantics_rejects_tampering(
+    tmp_path: Path,
+    mutation,
+    message: str,
+) -> None:
+    fixture = failed_finalization_semantic_fixture(tmp_path)
+    mutation(fixture)
+    with pytest.raises(OPERATOR.OperatorError, match=message):
+        OPERATOR.validate_failed_finalization_recovery_semantics(**fixture)
+
+
+def test_kernel_flock_holders_ignores_stale_payload_owner(
+    tmp_path: Path,
+) -> None:
+    lock = tmp_path / "lock"
+    lock.write_text('{"pid":3705490}\n', encoding="ascii")
+    metadata = lock.stat()
+    identity = (
+        f"{os.major(metadata.st_dev):02x}:"
+        f"{os.minor(metadata.st_dev):02x}:{metadata.st_ino}"
+    )
+    proc_locks = tmp_path / "proc-locks"
+    proc_locks.write_text(
+        f"7: FLOCK ADVISORY WRITE 3707817 {identity} 0 EOF\n",
+        encoding="ascii",
+    )
+    assert OPERATOR.kernel_flock_holders(lock, proc_locks=proc_locks) == [3707817]
+    assert json.loads(lock.read_text())["pid"] == 3705490
+
+
+def test_recovery_entrypoint_has_no_execution_or_service_mutation_calls() -> None:
+    tree = ast.parse(inspect.getsource(OPERATOR.recover_failed_finalization))
+    names = {
+        node.func.attr if isinstance(node.func, ast.Attribute) else node.func.id
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, (ast.Attribute, ast.Name))
+    }
+    assert names.isdisjoint({"Popen", "run", "system", "kill", "unlink", "rmdir"})
+
+
+def failed_finalization_live_fixture(tmp_path: Path) -> dict:
+    lock = tmp_path / "lock"
+    lock.write_bytes(b"stale")
+    service = {
+        "active_state": "active",
+        "sub_state": "running",
+        "nrestarts": 0,
+        "main_pid": 101,
+    }
+    worker = {"pid": 202, "path": "/worker", "sha256": "a" * 64}
+    formal = {
+        "container": {},
+        "curl": {},
+        "docker": {},
+        "endpoints": {},
+        "process_counts": {},
+        "secret_material_recorded": False,
+    }
+    restore_post = {
+        "service": service,
+        "worker": worker,
+        "gpu": {"node": 2},
+        "owners": {"amd_smi": [202], "kfd": [202]},
+        "hashes": {"worker": "a" * 64},
+        "health": {"formal": formal},
+    }
+    post = {
+        "service": json.loads(json.dumps(service)),
+        "worker": json.loads(json.dumps(worker)),
+        "gpu": {"node": 2},
+        "owners": {"amd_smi": [202], "kfd": [202]},
+        "hashes": {"worker": "a" * 64},
+        "formal_health_sha256": OPERATOR._formal_health_sha256(restore_post),
+        "targeted_processes": [],
+        "lock": {"busy": True},
+    }
+    return {
+        "post": post,
+        "restore_post": restore_post,
+        "pre": {"service": {"main_pid": 1}, "worker": {"pid": 2}},
+        "substrate_lock": {"device": lock.stat().st_dev, "inode": lock.stat().st_ino},
+        "lock_metadata": lock.stat(),
+        "holders": [101],
+    }
+
+
+def test_failed_finalization_live_safety_requires_kernel_service_holder(
+    tmp_path: Path,
+) -> None:
+    fixture = failed_finalization_live_fixture(tmp_path)
+    OPERATOR.validate_failed_finalization_live_safety(**fixture)
+    fixture["holders"] = [3705490]
+    with pytest.raises(OPERATOR.OperatorError, match="live safety"):
+        OPERATOR.validate_failed_finalization_live_safety(**fixture)
+
+
+def test_capture_artifact_file_bindings_rejects_trace_tamper(tmp_path: Path) -> None:
+    trace = tmp_path / "trace.csv"
+    trace.write_bytes(b"original\n")
+    preview = {
+        "members": {
+            "trace.csv": {"sha256": OPERATOR.sha_file(trace)},
+        }
+    }
+    artifact = {"source_traces": [{"path": str(trace), "sha256": OPERATOR.sha_file(trace)}]}
+    assert OPERATOR.validate_capture_artifact_file_bindings(
+        artifact,
+        capture_root=tmp_path,
+        preview=preview,
+    ) == {"trace.csv"}
+    artifact["source_traces"][0]["sha256"] = "0" * 64
+    with pytest.raises(OPERATOR.OperatorError, match="file binding"):
+        OPERATOR.validate_capture_artifact_file_bindings(
+            artifact,
+            capture_root=tmp_path,
+            preview=preview,
+        )
+
+
+@pytest.mark.parametrize("mutation", ("owner", "targeted", "inode", "same_epoch"))
+def test_failed_finalization_live_safety_rejects_mismatch(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    fixture = failed_finalization_live_fixture(tmp_path)
+    if mutation == "owner":
+        fixture["post"]["owners"]["kfd"] = [999]
+    elif mutation == "targeted":
+        fixture["post"]["targeted_processes"] = [999]
+    elif mutation == "inode":
+        fixture["substrate_lock"]["inode"] += 1
+    else:
+        fixture["pre"]["service"]["main_pid"] = 101
+    with pytest.raises(OPERATOR.OperatorError, match="live safety"):
+        OPERATOR.validate_failed_finalization_live_safety(**fixture)
+
+
+def test_recovery_validator_is_poststate_independent() -> None:
+    tree = ast.parse(inspect.getsource(OPERATOR.validate_failed_finalization_recovery))
+    calls = {
+        node.func.attr if isinstance(node.func, ast.Attribute) else node.func.id
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, (ast.Attribute, ast.Name))
+    }
+    assert calls.isdisjoint(
+        {"capture_recovery_snapshot", "kernel_flock_holders", "Popen", "run", "system"}
+    )
+
+
 def test_actual_command_is_exactly_one_non_shell_profile_execution(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
