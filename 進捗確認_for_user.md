@@ -1,3 +1,3 @@
-SQ8 calibration は固定 v4 plan で 24/24 rows を一回だけ取得し、target を publish 済みです。
-binding の集合表現と target の runtime 順を別 authority として厳密化し、回帰を通過しました。
-GPU 再実行と holdout を禁止し、同じ immutable target の offline metrics・freeze・ledger 固定を進めています。
+SQ8 calibration は固定policyのrelative-L2集計前拒否により、NO-GOとして最終固定しました。
+create-new evidence packageとvalidatorがtarget/comparison/capture/restore/commit lineageを再検証しました。
+holdoutはnot_started・remaining 1のまま実行禁止です。P3への影響をread-onlyで監査しています。
