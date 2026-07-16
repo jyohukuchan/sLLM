@@ -37,3 +37,24 @@ GPU、service、sudo、authorization materializationを使わず、jobs 1相当�
 この変更はcapture、maintenance wrapper、receipt writerのtrusted component SHAとsource commit/tree/archiveを変更する。消費済みcandidate、request ID、attempt marker、exact18 lineage、independent auditは再利用できない。
 
 次のauthorizationには、今回のactual-failure receiptをsuccessor entryとして追加し、その後にこの修正sourceのfresh current implementation GOを追加する。現在のexact18から2 entriesを追記するため、次はexact20 lineageが必要である。新しいsource identityからworker、unauthorized runtime、independent audit、authorized runtime、固定request/output/markerをすべてcreate-newで構築し、明示的なone-shot認可後にだけactual executionへ進む。
+
+## 最終監査とpre-actual materialization
+
+### 前回の要点
+
+commit `b88ce2165d6aba3310a9e6a06572ba52217b7cda`をread-onlyで監査し、192件のload resolutionがtopology専用であり、terminal `operation_audit`だけがinvocation countのsourceであることを確認した。消費済みactual、failure receipt、markerには接触していない。
+
+### 今回の変更点
+
+- source identityはtree `6d375047bea11afb4d3a6795fe4ce1c986e1ade5`、archive `0627b19e947c5f76fca9a61d0d9cac9a5ba67b13b9b37c89abd0e0772041b447`で固定した。
+- gateway locked suiteは`269 passed`、Rust full libraryは`749 passed, 1 isolated HIP test ignored`を`CARGO_BUILD_JOBS=1`、`--test-threads=1`で通した。Rust CurrentV2 loader、timeout、error、EOS、trusted ingressの試験を含む。
+- root全件走査は、対象外のactive bundle絶対pathとmodeがisolated worktreeに一致しないため、`853 passed, 5 skipped, 110 failed, 23 errors, 57 subtests passed`時点で診断終了した。対象証明集合の`268 + 7 + 341`とgateway/Rust結果を判定根拠とした。
+- fresh workerは専用targetへjobs 1でbuildし、SHA-256 `e1f8fa90dcac5c493645f3de887b86cfc22e8fa18b1fd1f2185ff7cf62954ef9`、5,293,016 bytes、CPU `--help` exit 0を確認した。
+- exact18を完全prefixとして、seq18にactual failure `a7ab2cd590e192fcf05cc544babd6278bd0970ea887c931b4170e5fd6f602223`、seq19にcurrent GO `a4485a584a188b6187bff667575208160cc671e9881028e047640a1eba919995`を追記した。exact20 manifestはSHA-256 `82d5696cada2abe9d116f223ddbf9ab72c012a019ef03972e02d0ed8c01ead33`、entries SHA-256 `1c47ea621d7c4c90888986f58a257f421f9cd291896eed96f9df45da2d79db15`で、Python append-only validatorを通した。
+- fresh unauthorized runtimeはrequest `sq8-promotion-e57edab532ed2e9833fc83fdbc566bf8880ddfbeaa5a46c5505805c5a0b311aa`、prompt IDs 1..128、completion 2、EOS `[248044,248046]`を固定した。served-model SHA-256は`f94e7ff789605f05e27de20e4f84cf924b0d790eb0ad18b6776328f69f5258ee`である。
+- strict CurrentV2 audit receipt候補はSHA-256 `17581136c57bb90edb0ac6ba78f03c45d94118b11791aaf38918b479a0654739`でPython validatorを通した。そのreceiptを埋め込んだfresh authorized pre-actual served-model `c76a86f985d0dccf522ab2bc782a155f7407a3c6463f75fd79b17f0df5d5df33`は、fresh Rust typed loaderとPython production loaderの双方を通した。
+- exact actual output `/tmp/ullm-sq8-overlay-gpu-promotion-actual-17581136c57bb90e`を指定したwrapper dry-runは`dry-run-ready`、candidate SHA-256 `7938074e8722601aa8a6f4a29f9eec78ad1199850824e55b64d88a8c2abbc442`だった。outputは実行前後とも存在しない。GPU、service、sudo、actual one-shotは実行していない。
+
+### 次の行動
+
+pre-actual判定はGOである。actualを行う場合は、authorized candidate `/tmp/ullm-sq8-overlay-gpu-promotion-gate-authorized-17581136c57bb90e`とcreate-new output `/tmp/ullm-sq8-overlay-gpu-promotion-actual-17581136c57bb90e`だけを使い、明示的なone-shot指示後に1回だけ実行する。
