@@ -1,0 +1,1808 @@
+{
+  "actual_executed": false,
+  "argv": [
+    "/usr/bin/python3.12",
+    "/home/homelab1/coding-local/ultimateLLM/uLLM-project/tools/run-aq4-p2-resident-smoke-maintenance.py",
+    "--mode",
+    "execute",
+    "--profile-diagnostic",
+    "--ready-artifact",
+    "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-ready-v17/ready-binding.json",
+    "--evidence-output",
+    "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-maintenance-evidence-v12",
+    "--confirm-one-case"
+  ],
+  "authorization": {
+    "evidence_output_flag_count": 1,
+    "explicit_confirmation_flag_count": 1,
+    "maximum_invocations": 1,
+    "profile_diagnostic_flag_count": 1,
+    "quiet_window_decision_required": "GO",
+    "quiet_window_status_required": "go",
+    "ready_artifact_flag_count": 1
+  },
+  "command_sha256": "520297d84df9f88eba8a98097222052079d8caccc15dbb74050dbbaaf93cc855",
+  "execution": {
+    "argument_count": 10,
+    "external_service_stop_required": true,
+    "maximum_invocations": 1,
+    "measurement_eligible": false,
+    "operator_must_use_manifest_argv_exactly": true,
+    "output_no_reuse": true,
+    "promotion_eligible": false,
+    "requires_fresh_output_recheck_immediately_before_execution": true,
+    "same_pty_sudo_cache_required": true,
+    "shell": false,
+    "working_directory": "/home/homelab1/coding-local/ultimateLLM/uLLM-project"
+  },
+  "failure_contract": {
+    "children_remaining_must_be_empty": true,
+    "immutable_failure_capture_before_reporting": true,
+    "outer_restore_in_finally": true,
+    "preserve_maintenance_launcher_capture_and_ready_audits": true,
+    "preserve_operator_stdout_stderr": true,
+    "restore_requires_active_running_new_epoch_nrestarts_zero_worker_lock_gpu_kfd_formal_health_and_hashes": true,
+    "restore_timeout_seconds": 120.0,
+    "retry_forbidden": true
+  },
+  "fresh_outputs": [
+    {
+      "absent": true,
+      "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-execute-v11"
+    },
+    {
+      "absent": true,
+      "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-execute-evidence-v11"
+    },
+    {
+      "absent": true,
+      "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-maintenance-evidence-v12"
+    },
+    {
+      "absent": true,
+      "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v11"
+    },
+    {
+      "absent": true,
+      "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v11/capture-artifact.json"
+    },
+    {
+      "absent": true,
+      "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v11/rocprof.stdout"
+    },
+    {
+      "absent": true,
+      "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v11/rocprof.stderr"
+    },
+    {
+      "absent": true,
+      "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-operator-result-v15"
+    },
+    {
+      "absent": true,
+      "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-actual-audit-v15"
+    }
+  ],
+  "gpu_command_executed": false,
+  "inputs": {
+    "historical_ready_v15": {
+      "actual_eligible": true,
+      "artifact_commit": "b39e21822db40e7fd5060da66db885b3a9ff0b8a",
+      "status": "ready_for_one_case"
+    },
+    "offline_reassembly_v12": {
+      "artifact_commit": "fcd0bbdae7e27e137e2b149f701298146e50e878",
+      "artifact_tree": "f913d49d8e19f8f4e4abde577bea35044ad205bd",
+      "capture_inventory": {
+        "members": {
+          "aq4-p3-diagnostic_agent_info.csv": {
+            "mode": "0444",
+            "nlink": 1,
+            "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-offline-reassembly-v12/aq4-p3-diagnostic_agent_info.csv",
+            "sha256": "e53fa0d86f357e061cb4881251144d4f0b1d664e69b463827159aad2bfb435a8",
+            "size": 1855
+          },
+          "aq4-p3-diagnostic_hip_api_trace.csv": {
+            "mode": "0444",
+            "nlink": 1,
+            "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-offline-reassembly-v12/aq4-p3-diagnostic_hip_api_trace.csv",
+            "sha256": "0f6db01548159fe82c831ed67b617820e610b2df3a5bdfdd98eea865d6980470",
+            "size": 7897921
+          },
+          "aq4-p3-diagnostic_kernel_trace.csv": {
+            "mode": "0444",
+            "nlink": 1,
+            "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-offline-reassembly-v12/aq4-p3-diagnostic_kernel_trace.csv",
+            "sha256": "817f97cd97a09c6a2affa6fbc079ea2cac6a9069ae1019b18c8f35b98c0b27dc",
+            "size": 1863269
+          },
+          "aq4-p3-diagnostic_marker_api_trace.csv": {
+            "mode": "0444",
+            "nlink": 1,
+            "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-offline-reassembly-v12/aq4-p3-diagnostic_marker_api_trace.csv",
+            "sha256": "4f848455354da857fb0bb89976639a03655784c086ec0311120b8139922e5280",
+            "size": 5389
+          },
+          "aq4-p3-diagnostic_memory_copy_trace.csv": {
+            "mode": "0444",
+            "nlink": 1,
+            "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-offline-reassembly-v12/aq4-p3-diagnostic_memory_copy_trace.csv",
+            "sha256": "e91bc82d7819509b5bbc841c6a037dccd74cc40abfa90d6e340b09a10e80eda2",
+            "size": 1137027
+          },
+          "capture-artifact.json": {
+            "mode": "0444",
+            "nlink": 1,
+            "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-offline-reassembly-v12/capture-artifact.json",
+            "sha256": "f07b520a46b1b0e641e10c3a22179aa4c499a337a3328505e49955f9be333f4a",
+            "size": 51442
+          },
+          "capture-capabilities.json": {
+            "mode": "0444",
+            "nlink": 1,
+            "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-offline-reassembly-v12/capture-capabilities.json",
+            "sha256": "381920a2db7b5db53822f3536f262d324a895c8840f11bd767e2caada02a80b8",
+            "size": 636
+          },
+          "measured-runs/run-02_hip_api_trace.csv": {
+            "mode": "0444",
+            "nlink": 1,
+            "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-offline-reassembly-v12/measured-runs/run-02_hip_api_trace.csv",
+            "sha256": "dd90a4556f8f57b85e2d35756096b19663d623105b27633efa9e1181a1aafb73",
+            "size": 221111
+          },
+          "measured-runs/run-02_kernel_trace.csv": {
+            "mode": "0444",
+            "nlink": 1,
+            "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-offline-reassembly-v12/measured-runs/run-02_kernel_trace.csv",
+            "sha256": "5701a56aa57e72d88c37107c67299a9b395fea71ff99af36df0056f8ece7ab94",
+            "size": 144819
+          },
+          "measured-runs/run-02_memory_copy_trace.csv": {
+            "mode": "0444",
+            "nlink": 1,
+            "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-offline-reassembly-v12/measured-runs/run-02_memory_copy_trace.csv",
+            "sha256": "33da2af9ad6361709713e44157ee3185f9fb42a15c05ce7cc0a18ecb9f95ec79",
+            "size": 108
+          },
+          "measured-runs/run-03_hip_api_trace.csv": {
+            "mode": "0444",
+            "nlink": 1,
+            "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-offline-reassembly-v12/measured-runs/run-03_hip_api_trace.csv",
+            "sha256": "e5da697a6603d6b029068b31912976b1066a06ab03e60d90ab08a7d325bd2fa1",
+            "size": 221111
+          },
+          "measured-runs/run-03_kernel_trace.csv": {
+            "mode": "0444",
+            "nlink": 1,
+            "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-offline-reassembly-v12/measured-runs/run-03_kernel_trace.csv",
+            "sha256": "53f34dd35aa021af506776d0a553c0fea450047df4d95e41ee578ea2b42ec18b",
+            "size": 144819
+          },
+          "measured-runs/run-03_memory_copy_trace.csv": {
+            "mode": "0444",
+            "nlink": 1,
+            "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-offline-reassembly-v12/measured-runs/run-03_memory_copy_trace.csv",
+            "sha256": "33da2af9ad6361709713e44157ee3185f9fb42a15c05ce7cc0a18ecb9f95ec79",
+            "size": 108
+          },
+          "measured-runs/run-04_hip_api_trace.csv": {
+            "mode": "0444",
+            "nlink": 1,
+            "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-offline-reassembly-v12/measured-runs/run-04_hip_api_trace.csv",
+            "sha256": "39f9837cefdab8994995a7cbd5e07901b9a8892f4341cb76d78ba70f9761ef15",
+            "size": 221111
+          },
+          "measured-runs/run-04_kernel_trace.csv": {
+            "mode": "0444",
+            "nlink": 1,
+            "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-offline-reassembly-v12/measured-runs/run-04_kernel_trace.csv",
+            "sha256": "f0d9960704bf103db444fdef97c7bc73ed7a6760a686420e16e7511ecf951f3c",
+            "size": 144819
+          },
+          "measured-runs/run-04_memory_copy_trace.csv": {
+            "mode": "0444",
+            "nlink": 1,
+            "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-offline-reassembly-v12/measured-runs/run-04_memory_copy_trace.csv",
+            "sha256": "33da2af9ad6361709713e44157ee3185f9fb42a15c05ce7cc0a18ecb9f95ec79",
+            "size": 108
+          },
+          "measured-runs/run-05_hip_api_trace.csv": {
+            "mode": "0444",
+            "nlink": 1,
+            "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-offline-reassembly-v12/measured-runs/run-05_hip_api_trace.csv",
+            "sha256": "b072264ddfa7d50b1a60b73249fa0d1958c07d4326ca47be6a21d69aaec39d39",
+            "size": 221111
+          },
+          "measured-runs/run-05_kernel_trace.csv": {
+            "mode": "0444",
+            "nlink": 1,
+            "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-offline-reassembly-v12/measured-runs/run-05_kernel_trace.csv",
+            "sha256": "7d0dc5bfa7c04faaa381e61d3a3e92c0ce63d276a82e7ea51c8f745df289773f",
+            "size": 144819
+          },
+          "measured-runs/run-05_memory_copy_trace.csv": {
+            "mode": "0444",
+            "nlink": 1,
+            "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-offline-reassembly-v12/measured-runs/run-05_memory_copy_trace.csv",
+            "sha256": "33da2af9ad6361709713e44157ee3185f9fb42a15c05ce7cc0a18ecb9f95ec79",
+            "size": 108
+          },
+          "measured-runs/run-06_hip_api_trace.csv": {
+            "mode": "0444",
+            "nlink": 1,
+            "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-offline-reassembly-v12/measured-runs/run-06_hip_api_trace.csv",
+            "sha256": "1e0f7d706b3df09029887fd3515ceb0137f3fbfab0857e7bf33469158ebd48f4",
+            "size": 221111
+          },
+          "measured-runs/run-06_kernel_trace.csv": {
+            "mode": "0444",
+            "nlink": 1,
+            "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-offline-reassembly-v12/measured-runs/run-06_kernel_trace.csv",
+            "sha256": "5a921dfc36a1fe728e6037397b97386728b94e7b8e48b3f75b2f6e5ee9483bd6",
+            "size": 144819
+          },
+          "measured-runs/run-06_memory_copy_trace.csv": {
+            "mode": "0444",
+            "nlink": 1,
+            "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-offline-reassembly-v12/measured-runs/run-06_memory_copy_trace.csv",
+            "sha256": "33da2af9ad6361709713e44157ee3185f9fb42a15c05ce7cc0a18ecb9f95ec79",
+            "size": 108
+          },
+          "measured-runs/run-07_hip_api_trace.csv": {
+            "mode": "0444",
+            "nlink": 1,
+            "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-offline-reassembly-v12/measured-runs/run-07_hip_api_trace.csv",
+            "sha256": "de7a320a5c09d68a2d50bf4b0e16417f7265e9c6e6e6de61a1b6cfd0481407ee",
+            "size": 221111
+          },
+          "measured-runs/run-07_kernel_trace.csv": {
+            "mode": "0444",
+            "nlink": 1,
+            "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-offline-reassembly-v12/measured-runs/run-07_kernel_trace.csv",
+            "sha256": "a3385e31c0f441c560b9c0c6b58c8c4c7e24fabae4c5a43d089750f72869f314",
+            "size": 144819
+          },
+          "measured-runs/run-07_memory_copy_trace.csv": {
+            "mode": "0444",
+            "nlink": 1,
+            "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-offline-reassembly-v12/measured-runs/run-07_memory_copy_trace.csv",
+            "sha256": "33da2af9ad6361709713e44157ee3185f9fb42a15c05ce7cc0a18ecb9f95ec79",
+            "size": 108
+          },
+          "measured-runs/run-08_hip_api_trace.csv": {
+            "mode": "0444",
+            "nlink": 1,
+            "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-offline-reassembly-v12/measured-runs/run-08_hip_api_trace.csv",
+            "sha256": "9c9fc335492f687fcf6a04044ce86863133aade75e7f53ec97c754e0bc2309c8",
+            "size": 221111
+          },
+          "measured-runs/run-08_kernel_trace.csv": {
+            "mode": "0444",
+            "nlink": 1,
+            "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-offline-reassembly-v12/measured-runs/run-08_kernel_trace.csv",
+            "sha256": "a5ec60981341159d734fac94bcda289b3658d0758f2560e4fd7efb79e57be863",
+            "size": 144819
+          },
+          "measured-runs/run-08_memory_copy_trace.csv": {
+            "mode": "0444",
+            "nlink": 1,
+            "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-offline-reassembly-v12/measured-runs/run-08_memory_copy_trace.csv",
+            "sha256": "33da2af9ad6361709713e44157ee3185f9fb42a15c05ce7cc0a18ecb9f95ec79",
+            "size": 108
+          },
+          "measured-runs/run-09_hip_api_trace.csv": {
+            "mode": "0444",
+            "nlink": 1,
+            "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-offline-reassembly-v12/measured-runs/run-09_hip_api_trace.csv",
+            "sha256": "25d5a37472fd28b105f0ff6c4fbf509d0c9d718b88bf78380d162408904c78a1",
+            "size": 221111
+          },
+          "measured-runs/run-09_kernel_trace.csv": {
+            "mode": "0444",
+            "nlink": 1,
+            "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-offline-reassembly-v12/measured-runs/run-09_kernel_trace.csv",
+            "sha256": "d394c42035eb3b1bf360d0c86b0aa69e2ce321929553ac755126e75d11266f63",
+            "size": 145227
+          },
+          "measured-runs/run-09_memory_copy_trace.csv": {
+            "mode": "0444",
+            "nlink": 1,
+            "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-offline-reassembly-v12/measured-runs/run-09_memory_copy_trace.csv",
+            "sha256": "33da2af9ad6361709713e44157ee3185f9fb42a15c05ce7cc0a18ecb9f95ec79",
+            "size": 108
+          },
+          "measured-runs/run-10_hip_api_trace.csv": {
+            "mode": "0444",
+            "nlink": 1,
+            "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-offline-reassembly-v12/measured-runs/run-10_hip_api_trace.csv",
+            "sha256": "ade7f8de67ef158dd8761972db690c1786a1a34d2532c60d09b26d2f6338ede4",
+            "size": 221111
+          },
+          "measured-runs/run-10_kernel_trace.csv": {
+            "mode": "0444",
+            "nlink": 1,
+            "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-offline-reassembly-v12/measured-runs/run-10_kernel_trace.csv",
+            "sha256": "762f188998b5ca8392dde7ff8608ce07570139b954e5d556c922f38085c53014",
+            "size": 145747
+          },
+          "measured-runs/run-10_memory_copy_trace.csv": {
+            "mode": "0444",
+            "nlink": 1,
+            "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-offline-reassembly-v12/measured-runs/run-10_memory_copy_trace.csv",
+            "sha256": "33da2af9ad6361709713e44157ee3185f9fb42a15c05ce7cc0a18ecb9f95ec79",
+            "size": 108
+          },
+          "measured-runs/run-11_hip_api_trace.csv": {
+            "mode": "0444",
+            "nlink": 1,
+            "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-offline-reassembly-v12/measured-runs/run-11_hip_api_trace.csv",
+            "sha256": "de336b54dd08e482b0561f387196fb2e8edd4f2e85fef1b587d3996d2567ba84",
+            "size": 221111
+          },
+          "measured-runs/run-11_kernel_trace.csv": {
+            "mode": "0444",
+            "nlink": 1,
+            "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-offline-reassembly-v12/measured-runs/run-11_kernel_trace.csv",
+            "sha256": "8743c3eb370d34f22cb1209116613bda9c65ee031a61b124897080e439d96c69",
+            "size": 145747
+          },
+          "measured-runs/run-11_memory_copy_trace.csv": {
+            "mode": "0444",
+            "nlink": 1,
+            "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-offline-reassembly-v12/measured-runs/run-11_memory_copy_trace.csv",
+            "sha256": "33da2af9ad6361709713e44157ee3185f9fb42a15c05ce7cc0a18ecb9f95ec79",
+            "size": 108
+          },
+          "rocprof.stderr": {
+            "mode": "0444",
+            "nlink": 1,
+            "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-offline-reassembly-v12/rocprof.stderr",
+            "sha256": "1bfac056e5bf540ee37dc7de05c41318b1b557b3dc575b16c7f8c18c9cd68d8c",
+            "size": 558
+          },
+          "rocprof.stdout": {
+            "mode": "0444",
+            "nlink": 1,
+            "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-offline-reassembly-v12/rocprof.stdout",
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "size": 0
+          }
+        },
+        "mode": "0555",
+        "root": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-offline-reassembly-v12",
+        "sha256sums_sha256": "555b8a1711b02cb51dbb5d1b3bc5ee1f2c4a28feabe858e7f13d78b85a99ce73"
+      },
+      "evidence_inventory": {
+        "members": {
+          "offline-reassembly.json": {
+            "mode": "0444",
+            "nlink": 1,
+            "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-maintenance-offline-reassembly-evidence-v12/offline-reassembly.json",
+            "sha256": "731a8b81c9553280412f8ae3d45028bf71f5c64cc5439d5296461fcd2a99d991",
+            "size": 49784
+          }
+        },
+        "mode": "0555",
+        "root": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-maintenance-offline-reassembly-evidence-v12",
+        "sha256sums_sha256": "6ff1a790de7098301c0735b647fbe12fd8288309adfd89abb39087d702f14fb9"
+      },
+      "file_count": 42,
+      "value": {
+        "capture_parser": {
+          "commit": "418e507214b2a4c0352ac8867bf9689b81948ca4",
+          "git_blob": "95c4e156e3546aa7fe2ff29a3ff00f39b0932b22",
+          "mode": "offline_assemble",
+          "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/tools/capture-aq4-p3-diagnostic-profile.py",
+          "sha256": "afd3eec63e3621984f500f3f99457173081bed8e04a141a117daf8c1372941ef",
+          "tree": "dc0100092c6e0fa85d66a6082c134349544f5e83"
+        },
+        "evidence_sha256": "0a4b1f421f807cb9e2fe857d05e9ef198c4a957608966c0df9bb26f1bde9a657",
+        "execution": {
+          "actual_invocations": 0,
+          "gpu_commands": 0,
+          "model_loads": 0,
+          "offline_assemble_calls": 1,
+          "operator_invocations": 0,
+          "rocprof_processes": 0,
+          "service_operations": 0,
+          "workload_processes": 0
+        },
+        "generator": {
+          "commit": "9ff2b8861f6d91935679db3bdf1b4af37bc6a543",
+          "git_blob": "1d7c99815a4ee3cbc5f8ef4f5ab438d752338dcd",
+          "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/tools/run-aq4-p2-resident-smoke-maintenance.py",
+          "sha256": "fb2fc515570b1889c21bd170434159845048971339a084a85027707f79665345",
+          "tree": "ac63aa5dadb213ba4f1f43ef6ff3b2a9c8157e2a"
+        },
+        "kernel_normalization": {
+          "groups": [
+            {
+              "conservation": {
+                "correlation_id_multiset_sha256": {
+                  "after": "7712f8755520eea1d088a1d6369e3efb060dc09583114057a090a848757446c2",
+                  "before": "7712f8755520eea1d088a1d6369e3efb060dc09583114057a090a848757446c2"
+                },
+                "correlation_id_set_sha256": {
+                  "after": "da1bda1395a408dd73ffb546672623596d2e8623295a915ff50758fe3ca93995",
+                  "before": "da1bda1395a408dd73ffb546672623596d2e8623295a915ff50758fe3ca93995"
+                },
+                "dispatch_id_multiset_sha256": {
+                  "after": "c40cdca3f0446a4b15d686e5a19bd3211da1be6e5db78c79e82b6e893766a6f6",
+                  "before": "c40cdca3f0446a4b15d686e5a19bd3211da1be6e5db78c79e82b6e893766a6f6"
+                },
+                "dispatch_id_set_sha256": {
+                  "after": "75f622e91d5b71da23c12e509b820ee4ce3fb3ae2f357adf2a6931fe83b475e9",
+                  "before": "75f622e91d5b71da23c12e509b820ee4ce3fb3ae2f357adf2a6931fe83b475e9"
+                },
+                "duration_sum_ns": {
+                  "after": 942465592,
+                  "before": 942465592
+                },
+                "row_count": {
+                  "after": 928,
+                  "before": 928
+                }
+              },
+              "post_order_sha256": "1aa904f89b8bf158bb4d99ecf0e8fecdd3fc82494eee3e1353d349affcf1b9a5",
+              "pre_order_sha256": "b7bda25846659521fa9b64d4d7421ab344bfae3339cb5b8ac4dbb9f34773319e",
+              "raw_order_inversion_count": 35,
+              "row_count": 928,
+              "run_index": 0,
+              "run_kind": "warmup"
+            },
+            {
+              "conservation": {
+                "correlation_id_multiset_sha256": {
+                  "after": "df504f93ed6e7e2a7addac7808f46a236c849ea1126f74ec199919dd68031b4d",
+                  "before": "df504f93ed6e7e2a7addac7808f46a236c849ea1126f74ec199919dd68031b4d"
+                },
+                "correlation_id_set_sha256": {
+                  "after": "e4354b8ed895124224ea982e3ba56e01ccb86a699b36098281732e6edfe7a9d7",
+                  "before": "e4354b8ed895124224ea982e3ba56e01ccb86a699b36098281732e6edfe7a9d7"
+                },
+                "dispatch_id_multiset_sha256": {
+                  "after": "c0962d3f5f35bfcfedcd2813e83930b30ec614bf4ec50b1e8f250f98d0801ec0",
+                  "before": "c0962d3f5f35bfcfedcd2813e83930b30ec614bf4ec50b1e8f250f98d0801ec0"
+                },
+                "dispatch_id_set_sha256": {
+                  "after": "a629eb38a1c5b238fc77f3c27786bbaeea86ec4720eecd0b8c2fcb137b3404e9",
+                  "before": "a629eb38a1c5b238fc77f3c27786bbaeea86ec4720eecd0b8c2fcb137b3404e9"
+                },
+                "duration_sum_ns": {
+                  "after": 940755700,
+                  "before": 940755700
+                },
+                "row_count": {
+                  "after": 928,
+                  "before": 928
+                }
+              },
+              "post_order_sha256": "b08ac2ad367dd83326e20002cf34bd72cc7dabf2cf437f1855614287bd735588",
+              "pre_order_sha256": "548d487f0a68e0025286f8bcb498f3017670528227fdffaab17382b98a5f1e5f",
+              "raw_order_inversion_count": 10,
+              "row_count": 928,
+              "run_index": 1,
+              "run_kind": "warmup"
+            },
+            {
+              "conservation": {
+                "correlation_id_multiset_sha256": {
+                  "after": "d7e3ba6d50600185beda649929d1306385e2e673f28463fdc865276a57e60ad8",
+                  "before": "d7e3ba6d50600185beda649929d1306385e2e673f28463fdc865276a57e60ad8"
+                },
+                "correlation_id_set_sha256": {
+                  "after": "c7da28834eb81bd6483b723c71ab284c00e33b8503580a8b3e4ecb8446096b14",
+                  "before": "c7da28834eb81bd6483b723c71ab284c00e33b8503580a8b3e4ecb8446096b14"
+                },
+                "dispatch_id_multiset_sha256": {
+                  "after": "aa22377947facfc874734ceba7e8888a09c664a464e6c32ee1a9d21f1170b565",
+                  "before": "aa22377947facfc874734ceba7e8888a09c664a464e6c32ee1a9d21f1170b565"
+                },
+                "dispatch_id_set_sha256": {
+                  "after": "a06d2deb76520ed69b2a21f7128cda4726a0fafe3634082b67bd96e7314d49a3",
+                  "before": "a06d2deb76520ed69b2a21f7128cda4726a0fafe3634082b67bd96e7314d49a3"
+                },
+                "duration_sum_ns": {
+                  "after": 941604350,
+                  "before": 941604350
+                },
+                "row_count": {
+                  "after": 928,
+                  "before": 928
+                }
+              },
+              "post_order_sha256": "e377f301f16273907152363ad529562a7ecf9bfe66d14d3f01fb4edae3d9c337",
+              "pre_order_sha256": "56669ffe9cbdde1ece3db44101ad4a3d7dda59d9f41eafc67f62af2423c23e52",
+              "raw_order_inversion_count": 8,
+              "row_count": 928,
+              "run_index": 2,
+              "run_kind": "measured"
+            },
+            {
+              "conservation": {
+                "correlation_id_multiset_sha256": {
+                  "after": "3dae3e0e428f0c2bd79ca559e2a3b608195b2e50488d57bd8dbfa1890c05abef",
+                  "before": "3dae3e0e428f0c2bd79ca559e2a3b608195b2e50488d57bd8dbfa1890c05abef"
+                },
+                "correlation_id_set_sha256": {
+                  "after": "3879b223c1aa78470792fb7530b0d640c1d834321e37348529de71d482da1319",
+                  "before": "3879b223c1aa78470792fb7530b0d640c1d834321e37348529de71d482da1319"
+                },
+                "dispatch_id_multiset_sha256": {
+                  "after": "d3157919fcaefde9a26a840fb77b3cfe9c045f6222a46484d94a1b6a092e8699",
+                  "before": "d3157919fcaefde9a26a840fb77b3cfe9c045f6222a46484d94a1b6a092e8699"
+                },
+                "dispatch_id_set_sha256": {
+                  "after": "2d9d4fa209defb740b79737bcb48f770e1f6d28ad9a3f66dad85009a5f99b747",
+                  "before": "2d9d4fa209defb740b79737bcb48f770e1f6d28ad9a3f66dad85009a5f99b747"
+                },
+                "duration_sum_ns": {
+                  "after": 943260951,
+                  "before": 943260951
+                },
+                "row_count": {
+                  "after": 928,
+                  "before": 928
+                }
+              },
+              "post_order_sha256": "f916dd75928a86d97f134cc6a9ad02c28d3715bd30d8b503a78813030b80d250",
+              "pre_order_sha256": "2861e09b396f735bb1d9627e8b5559e50b5ae8f2084d655e193e565445fb1188",
+              "raw_order_inversion_count": 19,
+              "row_count": 928,
+              "run_index": 3,
+              "run_kind": "measured"
+            },
+            {
+              "conservation": {
+                "correlation_id_multiset_sha256": {
+                  "after": "791543872e30243baccee9260ed8bf042a9271ff282142c61854932030ffbcb3",
+                  "before": "791543872e30243baccee9260ed8bf042a9271ff282142c61854932030ffbcb3"
+                },
+                "correlation_id_set_sha256": {
+                  "after": "208c3ec2675d3f98d52254e1b0faa2b721031c9182255b1dd2df8e6e03755cc5",
+                  "before": "208c3ec2675d3f98d52254e1b0faa2b721031c9182255b1dd2df8e6e03755cc5"
+                },
+                "dispatch_id_multiset_sha256": {
+                  "after": "4c151930e2a7fdf5a9fdc9a4cdbf5817cea75fe3c040f44a7eb8f9ae6e4718f1",
+                  "before": "4c151930e2a7fdf5a9fdc9a4cdbf5817cea75fe3c040f44a7eb8f9ae6e4718f1"
+                },
+                "dispatch_id_set_sha256": {
+                  "after": "a0a55e2238b79036a7989e4e535aa0f9080c44a26ad87819b2d55e8b85883c2f",
+                  "before": "a0a55e2238b79036a7989e4e535aa0f9080c44a26ad87819b2d55e8b85883c2f"
+                },
+                "duration_sum_ns": {
+                  "after": 943546066,
+                  "before": 943546066
+                },
+                "row_count": {
+                  "after": 928,
+                  "before": 928
+                }
+              },
+              "post_order_sha256": "cf3a590f94e581436f2ed5b75f2a3923e3dc494147ae6da0a3dee7cc001e574c",
+              "pre_order_sha256": "20d7f9d264530679613143ba829b2efdc52e77b24f6e7666aa4c7e462d5c710b",
+              "raw_order_inversion_count": 23,
+              "row_count": 928,
+              "run_index": 4,
+              "run_kind": "measured"
+            },
+            {
+              "conservation": {
+                "correlation_id_multiset_sha256": {
+                  "after": "c04407dd2d3d4534e2101b4f83ddbd82ccdc09bf9da2932387d8bfeab7a8e89d",
+                  "before": "c04407dd2d3d4534e2101b4f83ddbd82ccdc09bf9da2932387d8bfeab7a8e89d"
+                },
+                "correlation_id_set_sha256": {
+                  "after": "457da9c29dbcf4e0b469852c7d0a89e9b2b0045702bbc0904e6811591c1bfe4a",
+                  "before": "457da9c29dbcf4e0b469852c7d0a89e9b2b0045702bbc0904e6811591c1bfe4a"
+                },
+                "dispatch_id_multiset_sha256": {
+                  "after": "9e49d8e9a862a4f003201573eace94eeb9c41fbd4ba75617ced84720d791883c",
+                  "before": "9e49d8e9a862a4f003201573eace94eeb9c41fbd4ba75617ced84720d791883c"
+                },
+                "dispatch_id_set_sha256": {
+                  "after": "6a2f8fdb2339579dbb5f54b17aaad587e7db8f2c22371c369e012620f5bf7a77",
+                  "before": "6a2f8fdb2339579dbb5f54b17aaad587e7db8f2c22371c369e012620f5bf7a77"
+                },
+                "duration_sum_ns": {
+                  "after": 942447572,
+                  "before": 942447572
+                },
+                "row_count": {
+                  "after": 928,
+                  "before": 928
+                }
+              },
+              "post_order_sha256": "6d710c1a44ecc5e3de610b937fd4c85f1430abf39768c4e4e4e102989a8319d6",
+              "pre_order_sha256": "df0701ce3da02318fb4b0506e643c04211fbb837f62cce5944574098488bd1de",
+              "raw_order_inversion_count": 16,
+              "row_count": 928,
+              "run_index": 5,
+              "run_kind": "measured"
+            },
+            {
+              "conservation": {
+                "correlation_id_multiset_sha256": {
+                  "after": "532fe4e579001dcb117672ea4be9dec5710fd7485bd48937fcc79df01ac38e1d",
+                  "before": "532fe4e579001dcb117672ea4be9dec5710fd7485bd48937fcc79df01ac38e1d"
+                },
+                "correlation_id_set_sha256": {
+                  "after": "415ff39bbb6c659a9aa887fec7e09878c8383e2e2356f5eac1b1fed9d18dc7b5",
+                  "before": "415ff39bbb6c659a9aa887fec7e09878c8383e2e2356f5eac1b1fed9d18dc7b5"
+                },
+                "dispatch_id_multiset_sha256": {
+                  "after": "bf4b8eb31ca8182097e31e400c69214cdd6cd099dc97955fdb1718a059cf3fed",
+                  "before": "bf4b8eb31ca8182097e31e400c69214cdd6cd099dc97955fdb1718a059cf3fed"
+                },
+                "dispatch_id_set_sha256": {
+                  "after": "8c3c6aabee0f23bffe36753c5bf84ad1787695de2fc54553b2dc7560f64dd563",
+                  "before": "8c3c6aabee0f23bffe36753c5bf84ad1787695de2fc54553b2dc7560f64dd563"
+                },
+                "duration_sum_ns": {
+                  "after": 944598386,
+                  "before": 944598386
+                },
+                "row_count": {
+                  "after": 928,
+                  "before": 928
+                }
+              },
+              "post_order_sha256": "f2f18661b9b30845b53004cec99a295c4562e61045feb2dce80fc4a0d5ba617e",
+              "pre_order_sha256": "08e29686aaf4807683d1dd577c604b3151e847a6af3526152bcae53e01f03c7a",
+              "raw_order_inversion_count": 7,
+              "row_count": 928,
+              "run_index": 6,
+              "run_kind": "measured"
+            },
+            {
+              "conservation": {
+                "correlation_id_multiset_sha256": {
+                  "after": "1949e3d129df7b664e8fb490718e783298d6460a3656db514f78ee9601dd909d",
+                  "before": "1949e3d129df7b664e8fb490718e783298d6460a3656db514f78ee9601dd909d"
+                },
+                "correlation_id_set_sha256": {
+                  "after": "b4b48fe32ba9e697336a6bded22eb169793064d9027a596f9a476b3c08c9749a",
+                  "before": "b4b48fe32ba9e697336a6bded22eb169793064d9027a596f9a476b3c08c9749a"
+                },
+                "dispatch_id_multiset_sha256": {
+                  "after": "9df0b8c4999d38cc2daa664161a18e0ff1eaf953b997c2dead5ce9a0dcd49d9c",
+                  "before": "9df0b8c4999d38cc2daa664161a18e0ff1eaf953b997c2dead5ce9a0dcd49d9c"
+                },
+                "dispatch_id_set_sha256": {
+                  "after": "ce7c2cb554abd4a61a9163d40ed4ee0a18d89c0f9b0b1cc4e9d29c5d81be8d9e",
+                  "before": "ce7c2cb554abd4a61a9163d40ed4ee0a18d89c0f9b0b1cc4e9d29c5d81be8d9e"
+                },
+                "duration_sum_ns": {
+                  "after": 946705293,
+                  "before": 946705293
+                },
+                "row_count": {
+                  "after": 928,
+                  "before": 928
+                }
+              },
+              "post_order_sha256": "59a9058ad4d892a20387b622df8728287705207324dabfb55dd640d5fa7c4b9d",
+              "pre_order_sha256": "4bce5791b1928f68f43d631031ad2f169bbcf321e40541396bddf3a3f2bee945",
+              "raw_order_inversion_count": 20,
+              "row_count": 928,
+              "run_index": 7,
+              "run_kind": "measured"
+            },
+            {
+              "conservation": {
+                "correlation_id_multiset_sha256": {
+                  "after": "fc26039e58087bff0ccd136debea66a0f044d93b69cedc797d5911c86e5d1d86",
+                  "before": "fc26039e58087bff0ccd136debea66a0f044d93b69cedc797d5911c86e5d1d86"
+                },
+                "correlation_id_set_sha256": {
+                  "after": "5f2819501a408a3df211dba064ccc123e244f8354c5f2f42d591598612561b02",
+                  "before": "5f2819501a408a3df211dba064ccc123e244f8354c5f2f42d591598612561b02"
+                },
+                "dispatch_id_multiset_sha256": {
+                  "after": "2dd38b861762428a9db47b7bd6289c3b62b65f1489ea2a4ab795b607a3d3d72d",
+                  "before": "2dd38b861762428a9db47b7bd6289c3b62b65f1489ea2a4ab795b607a3d3d72d"
+                },
+                "dispatch_id_set_sha256": {
+                  "after": "d552d82e08e3fda0e7652f0577939a31541f2b517b94c3fff646d0f9843efa36",
+                  "before": "d552d82e08e3fda0e7652f0577939a31541f2b517b94c3fff646d0f9843efa36"
+                },
+                "duration_sum_ns": {
+                  "after": 947541065,
+                  "before": 947541065
+                },
+                "row_count": {
+                  "after": 928,
+                  "before": 928
+                }
+              },
+              "post_order_sha256": "7ffbddd11d47506d8269e7b307443d73624943bba195854336acf9bb436000c9",
+              "pre_order_sha256": "12233925bc1081b761e0634ec2dc559cdcf1f549e23684c04e3ccf53a66267f5",
+              "raw_order_inversion_count": 17,
+              "row_count": 928,
+              "run_index": 8,
+              "run_kind": "measured"
+            },
+            {
+              "conservation": {
+                "correlation_id_multiset_sha256": {
+                  "after": "8b772f70df4ba426a85b59ef9936ba7870169c540b16d628f89eab5a2cd07df7",
+                  "before": "8b772f70df4ba426a85b59ef9936ba7870169c540b16d628f89eab5a2cd07df7"
+                },
+                "correlation_id_set_sha256": {
+                  "after": "73e4e98112e6a3b9da9e3c7f0aaf99e0d189d255c7fc32479c01c7144ea5f41f",
+                  "before": "73e4e98112e6a3b9da9e3c7f0aaf99e0d189d255c7fc32479c01c7144ea5f41f"
+                },
+                "dispatch_id_multiset_sha256": {
+                  "after": "2de9e05863563b489083992d09dea9f2029df76afb8ce53e6c74067048935ee6",
+                  "before": "2de9e05863563b489083992d09dea9f2029df76afb8ce53e6c74067048935ee6"
+                },
+                "dispatch_id_set_sha256": {
+                  "after": "d4b2fac8ed1f44e32acb5ac1ca72546e822d06b31cc40f6751584cc2ae1c03c7",
+                  "before": "d4b2fac8ed1f44e32acb5ac1ca72546e822d06b31cc40f6751584cc2ae1c03c7"
+                },
+                "duration_sum_ns": {
+                  "after": 947357638,
+                  "before": 947357638
+                },
+                "row_count": {
+                  "after": 928,
+                  "before": 928
+                }
+              },
+              "post_order_sha256": "71f5b1452d2e92a567bc9113021ba554004904c59c159b016921a8c58c2ace95",
+              "pre_order_sha256": "d7b9f2d7d67c8da9fe26266be0a054ce10808f7c48cd656c892f2859ea9ab889",
+              "raw_order_inversion_count": 26,
+              "row_count": 928,
+              "run_index": 9,
+              "run_kind": "measured"
+            },
+            {
+              "conservation": {
+                "correlation_id_multiset_sha256": {
+                  "after": "631c8f8ac35774295e4e7c55fc38f4e6d9b184bc6d1553be35e1d6058016095b",
+                  "before": "631c8f8ac35774295e4e7c55fc38f4e6d9b184bc6d1553be35e1d6058016095b"
+                },
+                "correlation_id_set_sha256": {
+                  "after": "144fe7b21d8a7c88372aa2f320d59beb496d3562c141693c032eb4a1d31737d5",
+                  "before": "144fe7b21d8a7c88372aa2f320d59beb496d3562c141693c032eb4a1d31737d5"
+                },
+                "dispatch_id_multiset_sha256": {
+                  "after": "8918a1ad9640fe14186dd251089f413f2e811f805557201c249d5889c7afe49d",
+                  "before": "8918a1ad9640fe14186dd251089f413f2e811f805557201c249d5889c7afe49d"
+                },
+                "dispatch_id_set_sha256": {
+                  "after": "380ef194706dbe2ceabf65a5a73d86be61ec42db7f7a48fa24cf9b9b6280d460",
+                  "before": "380ef194706dbe2ceabf65a5a73d86be61ec42db7f7a48fa24cf9b9b6280d460"
+                },
+                "duration_sum_ns": {
+                  "after": 950399078,
+                  "before": 950399078
+                },
+                "row_count": {
+                  "after": 928,
+                  "before": 928
+                }
+              },
+              "post_order_sha256": "997f151619c7d0570879c257241ea7911e1294d847790da50ceda8583e6378b9",
+              "pre_order_sha256": "4e9fb407eaaa1ffed08fc7f5014fe5b89f7403108055ec1f8bf701122c515aa0",
+              "raw_order_inversion_count": 3,
+              "row_count": 928,
+              "run_index": 10,
+              "run_kind": "measured"
+            },
+            {
+              "conservation": {
+                "correlation_id_multiset_sha256": {
+                  "after": "f2c2e33b5a42f28c53fd5f5a2db7ac4eb5cb87d98e6a36296fbe99751927521e",
+                  "before": "f2c2e33b5a42f28c53fd5f5a2db7ac4eb5cb87d98e6a36296fbe99751927521e"
+                },
+                "correlation_id_set_sha256": {
+                  "after": "b604d5f0e1adf08f33c76b71b9cdce211e6a49f2254cc26572ec74422f8ffa6a",
+                  "before": "b604d5f0e1adf08f33c76b71b9cdce211e6a49f2254cc26572ec74422f8ffa6a"
+                },
+                "dispatch_id_multiset_sha256": {
+                  "after": "5a70a91c352b3d0b4d8baefab8618116a672f3e053d98f7d8e9605e63d2d9c0d",
+                  "before": "5a70a91c352b3d0b4d8baefab8618116a672f3e053d98f7d8e9605e63d2d9c0d"
+                },
+                "dispatch_id_set_sha256": {
+                  "after": "b6a03c749461b6267b40eb3beed63d0fc836ad14ce01e407e3a4c0e9729753d4",
+                  "before": "b6a03c749461b6267b40eb3beed63d0fc836ad14ce01e407e3a4c0e9729753d4"
+                },
+                "duration_sum_ns": {
+                  "after": 948756364,
+                  "before": 948756364
+                },
+                "row_count": {
+                  "after": 928,
+                  "before": 928
+                }
+              },
+              "post_order_sha256": "a3a4e73716a2ce73c7624c71bc4117a49614156f053f635b8eeb5fb1e95d2182",
+              "pre_order_sha256": "544cfe1da293dec57269c40c84f813ee9dd16003abc2ab7dc19deb93782240a1",
+              "raw_order_inversion_count": 15,
+              "row_count": 928,
+              "run_index": 11,
+              "run_kind": "measured"
+            }
+          ],
+          "numeric_order": [
+            "Start_Timestamp",
+            "End_Timestamp",
+            "Dispatch_Id",
+            "Correlation_Id",
+            "original_ordinal"
+          ],
+          "raw_trace": {
+            "conservation": {
+              "correlation_id_multiset_sha256": {
+                "after": "db3b3f0a384b9f9324d1a3517a3161b65fc7bd9df1f30b0c76d45e186a756129",
+                "before": "db3b3f0a384b9f9324d1a3517a3161b65fc7bd9df1f30b0c76d45e186a756129"
+              },
+              "correlation_id_set_sha256": {
+                "after": "81e0d86ec94d2f5e5ddfe625f96a0cef87c960a446adf5aa4f86fa2c7fb595fc",
+                "before": "81e0d86ec94d2f5e5ddfe625f96a0cef87c960a446adf5aa4f86fa2c7fb595fc"
+              },
+              "dispatch_id_multiset_sha256": {
+                "after": "0d1089a8d6e3636ef5d5c38b5266db6eba017b9960fd16fc1070a0f6bbcce30d",
+                "before": "0d1089a8d6e3636ef5d5c38b5266db6eba017b9960fd16fc1070a0f6bbcce30d"
+              },
+              "dispatch_id_set_sha256": {
+                "after": "88b0fe1195060e3024f6e25b15fcd066e36b125c55ac704d744b84e89083645f",
+                "before": "88b0fe1195060e3024f6e25b15fcd066e36b125c55ac704d744b84e89083645f"
+              },
+              "duration_sum_ns": {
+                "after": 11352683443,
+                "before": 11352683443
+              },
+              "row_count": {
+                "after": 12263,
+                "before": 12263
+              }
+            },
+            "post_order_sha256": "39d50869003f6ba721c06b8193a8110675ccc9e9eb0303aa10b8b0f785982cb6",
+            "pre_order_sha256": "c5a1a25debd9845d045a464c94adfdf8933c715b58dba927d665747dedd8ede8",
+            "raw_order_inversion_count": 207,
+            "row_count": 12263
+          },
+          "schema_version": "ullm.aq4_p3_kernel_split_normalization.v1",
+          "scope": "derived_marker_bounded_kernel_splits_only",
+          "source_kernel_trace_sha256_after": "817f97cd97a09c6a2affa6fbc079ea2cac6a9069ae1019b18c8f35b98c0b27dc",
+          "source_kernel_trace_sha256_before": "817f97cd97a09c6a2affa6fbc079ea2cac6a9069ae1019b18c8f35b98c0b27dc"
+        },
+        "measurement_eligible": false,
+        "output": {
+          "capture_artifact": {
+            "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-offline-reassembly-v12/capture-artifact.json",
+            "self_sha256": "d7d55ce12bfa3f91b0945922ed73aff900dff436d76a5646f9f78bd481ec8fcc",
+            "sha256": "f07b520a46b1b0e641e10c3a22179aa4c499a337a3328505e49955f9be333f4a",
+            "status": "complete_diagnostic"
+          },
+          "member_count": 40,
+          "members_sha256": "7e4897d2cb3230cc6003745b0ec1c3af434222bb36ae45883277f65b24ed67ca",
+          "root": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-offline-reassembly-v12",
+          "root_mode": "0555",
+          "sha256sums_sha256": "555b8a1711b02cb51dbb5d1b3bc5ee1f2c4a28feabe858e7f13d78b85a99ce73"
+        },
+        "promotion_eligible": false,
+        "raw_inputs": {
+          "count": 7,
+          "members": [
+            {
+              "bytes": 1855,
+              "git_blob": "70d3a361c1f65d9ecf570c345e80548867831665",
+              "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v10/aq4-p3-diagnostic_agent_info.csv",
+              "relative_path": "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v10/aq4-p3-diagnostic_agent_info.csv",
+              "sha256": "e53fa0d86f357e061cb4881251144d4f0b1d664e69b463827159aad2bfb435a8"
+            },
+            {
+              "bytes": 7897921,
+              "git_blob": "898317fa4dd74597af75f1c7d045018e86c91413",
+              "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v10/aq4-p3-diagnostic_hip_api_trace.csv",
+              "relative_path": "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v10/aq4-p3-diagnostic_hip_api_trace.csv",
+              "sha256": "0f6db01548159fe82c831ed67b617820e610b2df3a5bdfdd98eea865d6980470"
+            },
+            {
+              "bytes": 1863269,
+              "git_blob": "f3befb9301dc94ce8e29c5b341a24cefbaa8c875",
+              "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v10/aq4-p3-diagnostic_kernel_trace.csv",
+              "relative_path": "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v10/aq4-p3-diagnostic_kernel_trace.csv",
+              "sha256": "817f97cd97a09c6a2affa6fbc079ea2cac6a9069ae1019b18c8f35b98c0b27dc"
+            },
+            {
+              "bytes": 5389,
+              "git_blob": "b8aebf2ca560497e72b1f0083cceba3c8fa24d42",
+              "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v10/aq4-p3-diagnostic_marker_api_trace.csv",
+              "relative_path": "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v10/aq4-p3-diagnostic_marker_api_trace.csv",
+              "sha256": "4f848455354da857fb0bb89976639a03655784c086ec0311120b8139922e5280"
+            },
+            {
+              "bytes": 1137027,
+              "git_blob": "ff2fe82fe42dfbdf10e730caac8e5d540b52e06f",
+              "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v10/aq4-p3-diagnostic_memory_copy_trace.csv",
+              "relative_path": "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v10/aq4-p3-diagnostic_memory_copy_trace.csv",
+              "sha256": "e91bc82d7819509b5bbc841c6a037dccd74cc40abfa90d6e340b09a10e80eda2"
+            },
+            {
+              "bytes": 558,
+              "git_blob": "410bf6c611ba5e5fa3ed0a510472742cf5af5114",
+              "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v10/rocprof.stderr",
+              "relative_path": "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v10/rocprof.stderr",
+              "sha256": "1bfac056e5bf540ee37dc7de05c41318b1b557b3dc575b16c7f8c18c9cd68d8c"
+            },
+            {
+              "bytes": 0,
+              "git_blob": "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391",
+              "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v10/rocprof.stdout",
+              "relative_path": "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v10/rocprof.stdout",
+              "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+            }
+          ],
+          "source_root": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v10"
+        },
+        "safety": {
+          "gpu_state_unchanged_by_generator": true,
+          "secret_material_recorded": false,
+          "service_state_unchanged_by_generator": true,
+          "source_actual_immutable": true,
+          "source_capture_v10_immutable": true
+        },
+        "schema_version": "ullm.aq4_p2_profile_maintenance_evidence.v12",
+        "source_actual_seal": {
+          "commit": "a2fe1ebac5d631919ca9082e17fda2126759a385",
+          "member_count": 35,
+          "members": [
+            {
+              "bytes": 84,
+              "git_blob": "de44bb21084317bc8446ae455474418e1fb23bec",
+              "mode": "0444",
+              "nlink": 1,
+              "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-actual-audit-v14/SHA256SUMS",
+              "relative_path": "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-actual-audit-v14/SHA256SUMS",
+              "sha256": "558519d5e7623899db6b559a4a003d6fb866c35214f406b9364e6aeb9eec42f3"
+            },
+            {
+              "bytes": 45904,
+              "git_blob": "00bf769ebfd334fe1ef1ef10e9bafb7c0d9204df",
+              "mode": "0444",
+              "nlink": 1,
+              "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-actual-audit-v14/actual-audit.json",
+              "relative_path": "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-actual-audit-v14/actual-audit.json",
+              "sha256": "cb68c59909b10fca0b3230d1550fdd06f22550e8a1209b930c46e12753568347"
+            },
+            {
+              "bytes": 619,
+              "git_blob": "878335b9bff092c46041f982fe47eedd409e3466",
+              "mode": "0444",
+              "nlink": 1,
+              "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-execute-evidence-v10/SHA256SUMS",
+              "relative_path": "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-execute-evidence-v10/SHA256SUMS",
+              "sha256": "08c21a39197bd150c7aff02a4b7a3749cc5cfd795f626ba87cf0402107d6959e"
+            },
+            {
+              "bytes": 31199,
+              "git_blob": "27aa756f639ae8e925f6f3745f0adc9a7ef70838",
+              "mode": "0444",
+              "nlink": 1,
+              "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-execute-evidence-v10/launcher-evidence.json",
+              "relative_path": "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-execute-evidence-v10/launcher-evidence.json",
+              "sha256": "d6d0880ac487719cefcbef19f11bad35251ee70b54ba781c89ccd89ba222a3a5"
+            },
+            {
+              "bytes": 6750,
+              "git_blob": "3dc2dc329b0d21e879378f2be1f737f46448ad33",
+              "mode": "0444",
+              "nlink": 1,
+              "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-execute-evidence-v10/live-preflight.json",
+              "relative_path": "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-execute-evidence-v10/live-preflight.json",
+              "sha256": "eb8eb53024e13da3ea74075473922c4a7d39218039ea8e944e44cc63a6f0edb1"
+            },
+            {
+              "bytes": 17379,
+              "git_blob": "08d4328f701825c99dc391bd90cddb1ece9bc423",
+              "mode": "0444",
+              "nlink": 1,
+              "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-execute-evidence-v10/runner-target-command-manifest.json",
+              "relative_path": "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-execute-evidence-v10/runner-target-command-manifest.json",
+              "sha256": "ada12e2b7f3e8ed4332563309cc39ec475ce33a24b435f015b4ef0e7464329a6"
+            },
+            {
+              "bytes": 558,
+              "git_blob": "410bf6c611ba5e5fa3ed0a510472742cf5af5114",
+              "mode": "0444",
+              "nlink": 1,
+              "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-execute-evidence-v10/runner.stderr.bin",
+              "relative_path": "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-execute-evidence-v10/runner.stderr.bin",
+              "sha256": "1bfac056e5bf540ee37dc7de05c41318b1b557b3dc575b16c7f8c18c9cd68d8c"
+            },
+            {
+              "bytes": 0,
+              "git_blob": "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391",
+              "mode": "0444",
+              "nlink": 1,
+              "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-execute-evidence-v10/runner.stdout.bin",
+              "relative_path": "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-execute-evidence-v10/runner.stdout.bin",
+              "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+            },
+            {
+              "bytes": 0,
+              "git_blob": "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391",
+              "mode": "0444",
+              "nlink": 1,
+              "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-execute-evidence-v10/validator.stderr.bin",
+              "relative_path": "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-execute-evidence-v10/validator.stderr.bin",
+              "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+            },
+            {
+              "bytes": 113,
+              "git_blob": "fcaf65146ec647768ddd63868d41d6741b7e1bfc",
+              "mode": "0444",
+              "nlink": 1,
+              "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-execute-evidence-v10/validator.stdout.bin",
+              "relative_path": "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-execute-evidence-v10/validator.stdout.bin",
+              "sha256": "911c8b8d33e69b37468beb639253fd6c1e276db60b2389135cf1968a2b8fad81"
+            },
+            {
+              "bytes": 649,
+              "git_blob": "49ce1c4359036fc4cf51cb5068359a2b8e54a6aa",
+              "mode": "0444",
+              "nlink": 1,
+              "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-execute-v10/SHA256SUMS",
+              "relative_path": "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-execute-v10/SHA256SUMS",
+              "sha256": "9e3e4f429223d5d4f5567a6a37fd104027a3142da7ba6afbde683dd43e727f5c"
+            },
+            {
+              "bytes": 28188,
+              "git_blob": "094ad7a7ea2d6a5e1b1770137e279ba928ac1dfb",
+              "mode": "0444",
+              "nlink": 1,
+              "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-execute-v10/p2-representative-full_model-cold_prefill-cold_batched-n128-m128-r9700-rdna4-aq4_0_target.raw.json",
+              "relative_path": "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-execute-v10/p2-representative-full_model-cold_prefill-cold_batched-n128-m128-r9700-rdna4-aq4_0_target.raw.json",
+              "sha256": "f2593ab596a583c7761d7596e03b87dc8f53fb0b0af9aa1a7fddd9b36d6e6fc0"
+            },
+            {
+              "bytes": 36571,
+              "git_blob": "03693ece3185c76a2b27c2acc686c1525fbe0551",
+              "mode": "0444",
+              "nlink": 1,
+              "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-execute-v10/resident-batch.driver-process.json",
+              "relative_path": "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-execute-v10/resident-batch.driver-process.json",
+              "sha256": "91d4cd3758aa2aeadd45a6def580bb4650680d924ace41e4808f55a7a9856999"
+            },
+            {
+              "bytes": 647,
+              "git_blob": "e00f6ab06d3bafc2b7cdb32501d44559fc5062fe",
+              "mode": "0444",
+              "nlink": 1,
+              "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-execute-v10/resident-batch.lock-owner.json",
+              "relative_path": "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-execute-v10/resident-batch.lock-owner.json",
+              "sha256": "74c57f62bad31c32361851a7d568c7f3674ff77363ef955fd9fc85d5e90d3ea3"
+            },
+            {
+              "bytes": 6556,
+              "git_blob": "b9c080f63fcd3b83abc117b1986ac3beceb93bc7",
+              "mode": "0444",
+              "nlink": 1,
+              "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-execute-v10/resident-batch.roctx-ranges.json",
+              "relative_path": "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-execute-v10/resident-batch.roctx-ranges.json",
+              "sha256": "63f1799b36f0d69285a559f556c2386e71cc31965cbca8061114472513ecc728"
+            },
+            {
+              "bytes": 34211,
+              "git_blob": "488f4a2ae517ddc07ac48a8cafab1f1322cd886c",
+              "mode": "0444",
+              "nlink": 1,
+              "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-execute-v10/resident-batch.summary.json",
+              "relative_path": "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-execute-v10/resident-batch.summary.json",
+              "sha256": "36d8cd6a2c12dbc0ecb4db4f30d0f4475e82dbfe8abc1f9f0146368f54295e77"
+            },
+            {
+              "bytes": 1116,
+              "git_blob": "bdece0c5a3c50470a378e0361924e0a5160a59ab",
+              "mode": "0444",
+              "nlink": 1,
+              "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-execute-v10/resident-driver.stderr.log",
+              "relative_path": "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-execute-v10/resident-driver.stderr.log",
+              "sha256": "70b1c8814397868ce7e1313da071b93d2eca42085f83a39b25e45afdff237243"
+            },
+            {
+              "bytes": 367,
+              "git_blob": "dd1ef0a3452d24fd16bdcd212a69d150e5c4a7a1",
+              "mode": "0444",
+              "nlink": 1,
+              "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-maintenance-evidence-v11/SHA256SUMS",
+              "relative_path": "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-maintenance-evidence-v11/SHA256SUMS",
+              "sha256": "66963d122d201d7e9eba3a09bb57b28f615742eacb6b18c058f45df49e3d322f"
+            },
+            {
+              "bytes": 65799,
+              "git_blob": "5892aa510227d9c376b041f5b5f4d749c0789c51",
+              "mode": "0444",
+              "nlink": 1,
+              "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-maintenance-evidence-v11/launcher-evidence.json",
+              "relative_path": "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-maintenance-evidence-v11/launcher-evidence.json",
+              "sha256": "95b2c2e0b3c6438e214f4dbe97ae376edb4b3c6a175ad41082a5db6cc0b78c1e"
+            },
+            {
+              "bytes": 335,
+              "git_blob": "91dd67b0eb36d733d391e661c00c69a298621b07",
+              "mode": "0444",
+              "nlink": 1,
+              "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-maintenance-evidence-v11/maintenance-marker.json",
+              "relative_path": "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-maintenance-evidence-v11/maintenance-marker.json",
+              "sha256": "f39f97033c2d6e9ba69b1da839917829a57dcb563433482afa1343c1b08582ac"
+            },
+            {
+              "bytes": 11302,
+              "git_blob": "281cd4c7f3de04ed86e4b14bfe1da7f1a97da9af",
+              "mode": "0444",
+              "nlink": 1,
+              "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-maintenance-evidence-v11/stopped-gate-poll-0000.json",
+              "relative_path": "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-maintenance-evidence-v11/stopped-gate-poll-0000.json",
+              "sha256": "f7c728f00a8139289bc3ede18be661301556c9af491939a3f588fdc71ea135f1"
+            },
+            {
+              "bytes": 11305,
+              "git_blob": "b2ac061c25f02fe153633230a92a3165f162a47c",
+              "mode": "0444",
+              "nlink": 1,
+              "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-maintenance-evidence-v11/stopped-gate-poll-0001.json",
+              "relative_path": "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-maintenance-evidence-v11/stopped-gate-poll-0001.json",
+              "sha256": "44a93c0af034c34f89cb0461fbbd41baf6c7e881968ab90b2a90faa433edb6d5"
+            },
+            {
+              "bytes": 259,
+              "git_blob": "6bd541fbb2cd8a9319c40cd42d969fee18813395",
+              "mode": "0444",
+              "nlink": 1,
+              "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-operator-result-v14/SHA256SUMS",
+              "relative_path": "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-operator-result-v14/SHA256SUMS",
+              "sha256": "0b78274b890f8804eb29b78118d0845cc3ad5d34778da5cf1e4a50bbdef6acf8"
+            },
+            {
+              "bytes": 2362,
+              "git_blob": "1f582fc17638b4e79f9c9b569156eba09e3fcd77",
+              "mode": "0444",
+              "nlink": 1,
+              "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-operator-result-v14/operator-result.json",
+              "relative_path": "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-operator-result-v14/operator-result.json",
+              "sha256": "15982bf0ba01eeac23720f19b35a4c4cddad6ec949fa9e2397c7027126097d27"
+            },
+            {
+              "bytes": 0,
+              "git_blob": "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391",
+              "mode": "0444",
+              "nlink": 1,
+              "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-operator-result-v14/operator.stderr.bin",
+              "relative_path": "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-operator-result-v14/operator.stderr.bin",
+              "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+            },
+            {
+              "bytes": 255,
+              "git_blob": "4f5b77a2ed2bb5aadb2efec5f2bea432220c96d3",
+              "mode": "0444",
+              "nlink": 1,
+              "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-operator-result-v14/operator.stdout.bin",
+              "relative_path": "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-operator-result-v14/operator.stdout.bin",
+              "sha256": "ab508f135f0067af2515cd342c1242b1c7e7dc1adc0be3b3b9efcb60a64f836e"
+            },
+            {
+              "bytes": 762,
+              "git_blob": "a4e0945836f4548a9a159a5c3dc3b3b75c95b1ee",
+              "mode": "0444",
+              "nlink": 1,
+              "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v10/SHA256SUMS",
+              "relative_path": "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v10/SHA256SUMS",
+              "sha256": "7c275a461699947b5075f5e491be88cf1e64c8c1a0a05c523a55f8ed0856a09d"
+            },
+            {
+              "bytes": 1855,
+              "git_blob": "70d3a361c1f65d9ecf570c345e80548867831665",
+              "mode": "0444",
+              "nlink": 1,
+              "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v10/aq4-p3-diagnostic_agent_info.csv",
+              "relative_path": "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v10/aq4-p3-diagnostic_agent_info.csv",
+              "sha256": "e53fa0d86f357e061cb4881251144d4f0b1d664e69b463827159aad2bfb435a8"
+            },
+            {
+              "bytes": 7897921,
+              "git_blob": "898317fa4dd74597af75f1c7d045018e86c91413",
+              "mode": "0444",
+              "nlink": 1,
+              "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v10/aq4-p3-diagnostic_hip_api_trace.csv",
+              "relative_path": "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v10/aq4-p3-diagnostic_hip_api_trace.csv",
+              "sha256": "0f6db01548159fe82c831ed67b617820e610b2df3a5bdfdd98eea865d6980470"
+            },
+            {
+              "bytes": 1863269,
+              "git_blob": "f3befb9301dc94ce8e29c5b341a24cefbaa8c875",
+              "mode": "0444",
+              "nlink": 1,
+              "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v10/aq4-p3-diagnostic_kernel_trace.csv",
+              "relative_path": "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v10/aq4-p3-diagnostic_kernel_trace.csv",
+              "sha256": "817f97cd97a09c6a2affa6fbc079ea2cac6a9069ae1019b18c8f35b98c0b27dc"
+            },
+            {
+              "bytes": 5389,
+              "git_blob": "b8aebf2ca560497e72b1f0083cceba3c8fa24d42",
+              "mode": "0444",
+              "nlink": 1,
+              "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v10/aq4-p3-diagnostic_marker_api_trace.csv",
+              "relative_path": "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v10/aq4-p3-diagnostic_marker_api_trace.csv",
+              "sha256": "4f848455354da857fb0bb89976639a03655784c086ec0311120b8139922e5280"
+            },
+            {
+              "bytes": 1137027,
+              "git_blob": "ff2fe82fe42dfbdf10e730caac8e5d540b52e06f",
+              "mode": "0444",
+              "nlink": 1,
+              "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v10/aq4-p3-diagnostic_memory_copy_trace.csv",
+              "relative_path": "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v10/aq4-p3-diagnostic_memory_copy_trace.csv",
+              "sha256": "e91bc82d7819509b5bbc841c6a037dccd74cc40abfa90d6e340b09a10e80eda2"
+            },
+            {
+              "bytes": 2263,
+              "git_blob": "c7e4ef8f1ead5227724cdc2af1c7064e0b5f2749",
+              "mode": "0444",
+              "nlink": 1,
+              "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v10/capture-failure.json",
+              "relative_path": "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v10/capture-failure.json",
+              "sha256": "a6774da72c214bf1ec7967e819e8d13a4ff4a62559cc60f0446880f54b4bdcb4"
+            },
+            {
+              "bytes": 558,
+              "git_blob": "410bf6c611ba5e5fa3ed0a510472742cf5af5114",
+              "mode": "0444",
+              "nlink": 1,
+              "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v10/rocprof.stderr",
+              "relative_path": "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v10/rocprof.stderr",
+              "sha256": "1bfac056e5bf540ee37dc7de05c41318b1b557b3dc575b16c7f8c18c9cd68d8c"
+            },
+            {
+              "bytes": 0,
+              "git_blob": "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391",
+              "mode": "0444",
+              "nlink": 1,
+              "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v10/rocprof.stdout",
+              "relative_path": "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v10/rocprof.stdout",
+              "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+            }
+          ],
+          "members_sha256": "3f4fe70a4ce393f9ccb5fc78d79701578145ee0ea0091ca457c95cd3b8cac0f3",
+          "root_sums_sha256": {
+            "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-actual-audit-v14": "558519d5e7623899db6b559a4a003d6fb866c35214f406b9364e6aeb9eec42f3",
+            "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-execute-evidence-v10": "08c21a39197bd150c7aff02a4b7a3749cc5cfd795f626ba87cf0402107d6959e",
+            "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-execute-v10": "9e3e4f429223d5d4f5567a6a37fd104027a3142da7ba6afbde683dd43e727f5c",
+            "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-maintenance-evidence-v11": "66963d122d201d7e9eba3a09bb57b28f615742eacb6b18c058f45df49e3d322f",
+            "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-operator-result-v14": "0b78274b890f8804eb29b78118d0845cc3ad5d34778da5cf1e4a50bbdef6acf8",
+            "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v10": "7c275a461699947b5075f5e491be88cf1e64c8c1a0a05c523a55f8ed0856a09d"
+          },
+          "tree": "ce8b024ff3bf2a516eac07275a93c171184fa279"
+        },
+        "status": "offline_reassembled_sealed"
+      }
+    },
+    "previous_actual_v14": {
+      "actual_executed": true,
+      "artifact_commit": "a2fe1ebac5d631919ca9082e17fda2126759a385",
+      "artifact_tree": "ce8b024ff3bf2a516eac07275a93c171184fa279",
+      "file_count": 35,
+      "inventories": {
+        "actual_audit": {
+          "members": {
+            "actual-audit.json": {
+              "mode": "0444",
+              "nlink": 1,
+              "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-actual-audit-v14/actual-audit.json",
+              "sha256": "cb68c59909b10fca0b3230d1550fdd06f22550e8a1209b930c46e12753568347",
+              "size": 45904
+            }
+          },
+          "mode": "0555",
+          "root": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-actual-audit-v14",
+          "sha256sums_sha256": "558519d5e7623899db6b559a4a003d6fb866c35214f406b9364e6aeb9eec42f3"
+        },
+        "capture": {
+          "members": {
+            "aq4-p3-diagnostic_agent_info.csv": {
+              "mode": "0444",
+              "nlink": 1,
+              "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v10/aq4-p3-diagnostic_agent_info.csv",
+              "sha256": "e53fa0d86f357e061cb4881251144d4f0b1d664e69b463827159aad2bfb435a8",
+              "size": 1855
+            },
+            "aq4-p3-diagnostic_hip_api_trace.csv": {
+              "mode": "0444",
+              "nlink": 1,
+              "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v10/aq4-p3-diagnostic_hip_api_trace.csv",
+              "sha256": "0f6db01548159fe82c831ed67b617820e610b2df3a5bdfdd98eea865d6980470",
+              "size": 7897921
+            },
+            "aq4-p3-diagnostic_kernel_trace.csv": {
+              "mode": "0444",
+              "nlink": 1,
+              "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v10/aq4-p3-diagnostic_kernel_trace.csv",
+              "sha256": "817f97cd97a09c6a2affa6fbc079ea2cac6a9069ae1019b18c8f35b98c0b27dc",
+              "size": 1863269
+            },
+            "aq4-p3-diagnostic_marker_api_trace.csv": {
+              "mode": "0444",
+              "nlink": 1,
+              "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v10/aq4-p3-diagnostic_marker_api_trace.csv",
+              "sha256": "4f848455354da857fb0bb89976639a03655784c086ec0311120b8139922e5280",
+              "size": 5389
+            },
+            "aq4-p3-diagnostic_memory_copy_trace.csv": {
+              "mode": "0444",
+              "nlink": 1,
+              "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v10/aq4-p3-diagnostic_memory_copy_trace.csv",
+              "sha256": "e91bc82d7819509b5bbc841c6a037dccd74cc40abfa90d6e340b09a10e80eda2",
+              "size": 1137027
+            },
+            "capture-failure.json": {
+              "mode": "0444",
+              "nlink": 1,
+              "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v10/capture-failure.json",
+              "sha256": "a6774da72c214bf1ec7967e819e8d13a4ff4a62559cc60f0446880f54b4bdcb4",
+              "size": 2263
+            },
+            "rocprof.stderr": {
+              "mode": "0444",
+              "nlink": 1,
+              "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v10/rocprof.stderr",
+              "sha256": "1bfac056e5bf540ee37dc7de05c41318b1b557b3dc575b16c7f8c18c9cd68d8c",
+              "size": 558
+            },
+            "rocprof.stdout": {
+              "mode": "0444",
+              "nlink": 1,
+              "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v10/rocprof.stdout",
+              "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+              "size": 0
+            }
+          },
+          "mode": "0555",
+          "root": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v10",
+          "sha256sums_sha256": "7c275a461699947b5075f5e491be88cf1e64c8c1a0a05c523a55f8ed0856a09d"
+        },
+        "execute": {
+          "members": {
+            "launcher-evidence.json": {
+              "mode": "0444",
+              "nlink": 1,
+              "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-execute-evidence-v10/launcher-evidence.json",
+              "sha256": "d6d0880ac487719cefcbef19f11bad35251ee70b54ba781c89ccd89ba222a3a5",
+              "size": 31199
+            },
+            "live-preflight.json": {
+              "mode": "0444",
+              "nlink": 1,
+              "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-execute-evidence-v10/live-preflight.json",
+              "sha256": "eb8eb53024e13da3ea74075473922c4a7d39218039ea8e944e44cc63a6f0edb1",
+              "size": 6750
+            },
+            "runner-target-command-manifest.json": {
+              "mode": "0444",
+              "nlink": 1,
+              "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-execute-evidence-v10/runner-target-command-manifest.json",
+              "sha256": "ada12e2b7f3e8ed4332563309cc39ec475ce33a24b435f015b4ef0e7464329a6",
+              "size": 17379
+            },
+            "runner.stderr.bin": {
+              "mode": "0444",
+              "nlink": 1,
+              "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-execute-evidence-v10/runner.stderr.bin",
+              "sha256": "1bfac056e5bf540ee37dc7de05c41318b1b557b3dc575b16c7f8c18c9cd68d8c",
+              "size": 558
+            },
+            "runner.stdout.bin": {
+              "mode": "0444",
+              "nlink": 1,
+              "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-execute-evidence-v10/runner.stdout.bin",
+              "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+              "size": 0
+            },
+            "validator.stderr.bin": {
+              "mode": "0444",
+              "nlink": 1,
+              "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-execute-evidence-v10/validator.stderr.bin",
+              "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+              "size": 0
+            },
+            "validator.stdout.bin": {
+              "mode": "0444",
+              "nlink": 1,
+              "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-execute-evidence-v10/validator.stdout.bin",
+              "sha256": "911c8b8d33e69b37468beb639253fd6c1e276db60b2389135cf1968a2b8fad81",
+              "size": 113
+            }
+          },
+          "mode": "0555",
+          "root": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-execute-evidence-v10",
+          "sha256sums_sha256": "08c21a39197bd150c7aff02a4b7a3749cc5cfd795f626ba87cf0402107d6959e"
+        },
+        "maintenance": {
+          "members": {
+            "launcher-evidence.json": {
+              "mode": "0444",
+              "nlink": 1,
+              "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-maintenance-evidence-v11/launcher-evidence.json",
+              "sha256": "95b2c2e0b3c6438e214f4dbe97ae376edb4b3c6a175ad41082a5db6cc0b78c1e",
+              "size": 65799
+            },
+            "maintenance-marker.json": {
+              "mode": "0444",
+              "nlink": 1,
+              "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-maintenance-evidence-v11/maintenance-marker.json",
+              "sha256": "f39f97033c2d6e9ba69b1da839917829a57dcb563433482afa1343c1b08582ac",
+              "size": 335
+            },
+            "stopped-gate-poll-0000.json": {
+              "mode": "0444",
+              "nlink": 1,
+              "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-maintenance-evidence-v11/stopped-gate-poll-0000.json",
+              "sha256": "f7c728f00a8139289bc3ede18be661301556c9af491939a3f588fdc71ea135f1",
+              "size": 11302
+            },
+            "stopped-gate-poll-0001.json": {
+              "mode": "0444",
+              "nlink": 1,
+              "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-maintenance-evidence-v11/stopped-gate-poll-0001.json",
+              "sha256": "44a93c0af034c34f89cb0461fbbd41baf6c7e881968ab90b2a90faa433edb6d5",
+              "size": 11305
+            }
+          },
+          "mode": "0555",
+          "root": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-maintenance-evidence-v11",
+          "sha256sums_sha256": "66963d122d201d7e9eba3a09bb57b28f615742eacb6b18c058f45df49e3d322f"
+        },
+        "operator_result": {
+          "members": {
+            "operator-result.json": {
+              "mode": "0444",
+              "nlink": 1,
+              "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-operator-result-v14/operator-result.json",
+              "sha256": "15982bf0ba01eeac23720f19b35a4c4cddad6ec949fa9e2397c7027126097d27",
+              "size": 2362
+            },
+            "operator.stderr.bin": {
+              "mode": "0444",
+              "nlink": 1,
+              "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-operator-result-v14/operator.stderr.bin",
+              "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+              "size": 0
+            },
+            "operator.stdout.bin": {
+              "mode": "0444",
+              "nlink": 1,
+              "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-operator-result-v14/operator.stdout.bin",
+              "sha256": "ab508f135f0067af2515cd342c1242b1c7e7dc1adc0be3b3b9efcb60a64f836e",
+              "size": 255
+            }
+          },
+          "mode": "0555",
+          "root": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-operator-result-v14",
+          "sha256sums_sha256": "0b78274b890f8804eb29b78118d0845cc3ad5d34778da5cf1e4a50bbdef6acf8"
+        },
+        "runtime": {
+          "members": {
+            "p2-representative-full_model-cold_prefill-cold_batched-n128-m128-r9700-rdna4-aq4_0_target.raw.json": {
+              "mode": "0444",
+              "nlink": 1,
+              "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-execute-v10/p2-representative-full_model-cold_prefill-cold_batched-n128-m128-r9700-rdna4-aq4_0_target.raw.json",
+              "sha256": "f2593ab596a583c7761d7596e03b87dc8f53fb0b0af9aa1a7fddd9b36d6e6fc0",
+              "size": 28188
+            },
+            "resident-batch.driver-process.json": {
+              "mode": "0444",
+              "nlink": 1,
+              "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-execute-v10/resident-batch.driver-process.json",
+              "sha256": "91d4cd3758aa2aeadd45a6def580bb4650680d924ace41e4808f55a7a9856999",
+              "size": 36571
+            },
+            "resident-batch.lock-owner.json": {
+              "mode": "0444",
+              "nlink": 1,
+              "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-execute-v10/resident-batch.lock-owner.json",
+              "sha256": "74c57f62bad31c32361851a7d568c7f3674ff77363ef955fd9fc85d5e90d3ea3",
+              "size": 647
+            },
+            "resident-batch.roctx-ranges.json": {
+              "mode": "0444",
+              "nlink": 1,
+              "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-execute-v10/resident-batch.roctx-ranges.json",
+              "sha256": "63f1799b36f0d69285a559f556c2386e71cc31965cbca8061114472513ecc728",
+              "size": 6556
+            },
+            "resident-batch.summary.json": {
+              "mode": "0444",
+              "nlink": 1,
+              "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-execute-v10/resident-batch.summary.json",
+              "sha256": "36d8cd6a2c12dbc0ecb4db4f30d0f4475e82dbfe8abc1f9f0146368f54295e77",
+              "size": 34211
+            },
+            "resident-driver.stderr.log": {
+              "mode": "0444",
+              "nlink": 1,
+              "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-execute-v10/resident-driver.stderr.log",
+              "sha256": "70b1c8814397868ce7e1313da071b93d2eca42085f83a39b25e45afdff237243",
+              "size": 1116
+            }
+          },
+          "mode": "0555",
+          "root": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-execute-v10",
+          "sha256sums_sha256": "9e3e4f429223d5d4f5567a6a37fd104027a3142da7ba6afbde683dd43e727f5c"
+        }
+      },
+      "invocation_count": 1,
+      "journal_commit": "3c1501309f3cafeb0dfd3612cfdf1664f7c80ee3",
+      "journal_tree": "7062920711c49b690cb12a0fbc1970947956941c",
+      "maximum_invocations": 1,
+      "outcome": "failed",
+      "previous_operator_v14": {
+        "actual_executed_at_authorization": false,
+        "authorization_commit": "ba7ab7d41c6de84a9165aa8e3592a9b18fcb0e6d",
+        "authorization_root_tree": "6b0ad082ad999eb7e9269686949beb4868dca1a8",
+        "authorization_tree": "60e0e6d29f29ac2545e0cbdfe7dff6da44a38598",
+        "command_sha256": "5693d75b17f91187b6841566815ad717d001a91280d651860aa127dc20277079",
+        "fresh_outputs_at_authorization": [
+          {
+            "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-execute-v10",
+            "present": false
+          },
+          {
+            "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-execute-evidence-v10",
+            "present": false
+          },
+          {
+            "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-maintenance-evidence-v11",
+            "present": false
+          },
+          {
+            "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v10",
+            "present": false
+          },
+          {
+            "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v10/capture-artifact.json",
+            "present": false
+          },
+          {
+            "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v10/rocprof.stdout",
+            "present": false
+          },
+          {
+            "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v10/rocprof.stderr",
+            "present": false
+          },
+          {
+            "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-operator-result-v14",
+            "present": false
+          },
+          {
+            "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-actual-audit-v14",
+            "present": false
+          }
+        ],
+        "inventory": {
+          "members": {
+            "command-manifest.json": {
+              "mode": "0444",
+              "nlink": 1,
+              "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-operator-command-v14/command-manifest.json",
+              "sha256": "6a85c47818e7fe97fda348203f0721e883e6bbe31c18366c19e76a22ff0f72d3",
+              "size": 160542
+            }
+          },
+          "mode": "0555",
+          "root": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-operator-command-v14",
+          "sha256sums_sha256": "e041014c7c77103a8c2237d5331508be7061bb7075d3deed24d9159eaafd8af0"
+        },
+        "manifest_file_sha256": "6a85c47818e7fe97fda348203f0721e883e6bbe31c18366c19e76a22ff0f72d3",
+        "manifest_semantic_sha256": "bf95bd0e4c2146abbb083d48db0effb744da09a98261d91382b98cd562cfc45e",
+        "maximum_invocations": 1,
+        "quiet_v19": {
+          "artifact_commit": "1a45447b1eaa76a645fff6cca31cc007f034b4ff",
+          "artifact_tree": "253f0fd6b080c4d152e493452bb7013189379c31",
+          "decision": "GO",
+          "inventory": {
+            "members": {
+              "quiet-window.json": {
+                "mode": "0444",
+                "nlink": 1,
+                "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-quiet-window-v19/quiet-window.json",
+                "sha256": "946b778aab81c5ab555ecd427a0c6548dc3326c7f2558244ff1a3affd447af1a",
+                "size": 4653300
+              }
+            },
+            "mode": "0555",
+            "root": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-quiet-window-v19",
+            "sha256sums_sha256": "52dbf1058ca113932b1dcee57147235c26a539ae88a50bfa452af7bfe1ac1434"
+          },
+          "json_sha256": "946b778aab81c5ab555ecd427a0c6548dc3326c7f2558244ff1a3affd447af1a",
+          "root_tree": "a12d0d7e9b10a734bf9d8518ce5ba445c3351787",
+          "status": "go",
+          "summary": {
+            "confirmation_passed": true,
+            "final_streak_samples": 27,
+            "final_streak_span_seconds": 358.729450382,
+            "fresh_outputs_absent": true,
+            "reset_count": 0,
+            "sample_count": 27
+          }
+        },
+        "state": "authorized_sealed"
+      },
+      "restore_passed": true,
+      "retry_performed": false,
+      "returncode": 1,
+      "state": "executed_sealed_failure_restore_passed"
+    },
+    "previous_operator_v13_historical": {
+      "actual_executed": false,
+      "audit_present": false,
+      "authorization_commit": "764045355ee06c3b5c53f296d4bcbe47e1495ece",
+      "authorization_root_tree": "d187b2902aa9f83503c17d6c0c8665210744f2e0",
+      "authorization_tree": "cb73e9c7c34c884eac567510f6d89da238b57a49",
+      "command_sha256": "5693d75b17f91187b6841566815ad717d001a91280d651860aa127dc20277079",
+      "fresh_outputs": [
+        {
+          "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-execute-v10",
+          "present": false
+        },
+        {
+          "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-execute-evidence-v10",
+          "present": false
+        },
+        {
+          "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-maintenance-evidence-v11",
+          "present": false
+        },
+        {
+          "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v10",
+          "present": false
+        },
+        {
+          "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v10/capture-artifact.json",
+          "present": false
+        },
+        {
+          "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v10/rocprof.stdout",
+          "present": false
+        },
+        {
+          "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v10/rocprof.stderr",
+          "present": false
+        },
+        {
+          "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-operator-result-v13",
+          "present": false
+        },
+        {
+          "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-actual-audit-v13",
+          "present": false
+        }
+      ],
+      "gpu_command_executed": false,
+      "inventory": {
+        "members": {
+          "command-manifest.json": {
+            "mode": "0444",
+            "nlink": 1,
+            "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-operator-command-v13/command-manifest.json",
+            "sha256": "78168089ff34e2eb8560bcaa85c94f49c0f3ae23ee4a614f0d0fc7e077a0d4f0",
+            "size": 228743
+          }
+        },
+        "mode": "0555",
+        "root": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-operator-command-v13",
+        "sha256sums_sha256": "1c157f9d864b4e75d62e2acc7b5b5189b1765e3795b3109ef4e815df26b87fd6"
+      },
+      "invocation_count": 0,
+      "manifest_file_sha256": "78168089ff34e2eb8560bcaa85c94f49c0f3ae23ee4a614f0d0fc7e077a0d4f0",
+      "manifest_semantic_sha256": "42c8498adc6c8f97382ef17421d3145a14d50126a549a66d0693f114f8cad313",
+      "maximum_invocations": 1,
+      "quiet_v18": {
+        "artifact_commit": "cb774ac0090380d4fff5b613a942fad9b3d106c8",
+        "artifact_tree": "add160bacc5f372cd21bbaa6840ebcb1735c94f4",
+        "decision": "GO",
+        "inventory": {
+          "members": {
+            "quiet-window.json": {
+              "mode": "0444",
+              "nlink": 1,
+              "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-quiet-window-v18/quiet-window.json",
+              "sha256": "0fb7e3346e7f38d0b9d844d3bac2815b533945eb7d25b3981ac3d5542eb36e00",
+              "size": 4492386
+            }
+          },
+          "mode": "0555",
+          "root": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-quiet-window-v18",
+          "sha256sums_sha256": "081e220fd195c3576eeced4d59464c309be4d1304bb5cfbc771cbe197c59608b"
+        },
+        "json_sha256": "0fb7e3346e7f38d0b9d844d3bac2815b533945eb7d25b3981ac3d5542eb36e00",
+        "root_tree": "18c7e4c0c83142bab61be025022e77696c259ea7",
+        "status": "go",
+        "summary": {
+          "confirmation_passed": true,
+          "final_streak_samples": 27,
+          "final_streak_span_seconds": 355.922490087,
+          "fresh_outputs_absent": true,
+          "reset_count": 0,
+          "sample_count": 27
+        }
+      },
+      "reason": "external_owner_after_seal_before_invocation",
+      "result_present": false,
+      "service_touched": false,
+      "state": "authorized_not_invoked_preflight_blocked"
+    },
+    "profile_ready": {
+      "artifact_commit": "19f7d390b97b1e8f0daa72e1007267c27ab4061b",
+      "inventory": {
+        "members": {
+          "harness-trust.json": {
+            "mode": "0444",
+            "nlink": 1,
+            "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-ready-v17/harness-trust.json",
+            "sha256": "d9c6c3002b1d430e5ba4f82236a48c7dbb8659e4838529b3105e54dc51b89ead",
+            "size": 634
+          },
+          "qa-attestation.json": {
+            "mode": "0444",
+            "nlink": 1,
+            "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-ready-v17/qa-attestation.json",
+            "sha256": "b0984765a29fadd23aa58d2936b8daeb91d9a85237df88017e814174389fb91b",
+            "size": 9050
+          },
+          "ready-binding.json": {
+            "mode": "0444",
+            "nlink": 1,
+            "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-ready-v17/ready-binding.json",
+            "sha256": "0bcf74c243c0744bdfa66af44d641fc230dbf1819e2f18443948aa2406f1cc9a",
+            "size": 23644
+          }
+        },
+        "mode": "0555",
+        "root": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-ready-v17",
+        "sha256sums_sha256": "20b724180f313e9f662af8905193ba4636c7e91b176840df7a98fde496e83d9f"
+      },
+      "ready_binding_sha256": "0bcf74c243c0744bdfa66af44d641fc230dbf1819e2f18443948aa2406f1cc9a"
+    },
+    "quiet_window": {
+      "decision": "GO",
+      "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-quiet-window-v20/quiet-window.json",
+      "sha256": "cefab6d28ce90fcf21d57be6220cc188624f185b34c263da112117097736826c",
+      "status": "go"
+    }
+  },
+  "manifest_sha256": "ccc0d7f4184a08fe8bc0bea208ddc16949f8d27de5cc6204ba69564f80f19236",
+  "pre_execution_audit": {
+    "actual_executed": false,
+    "fresh_outputs": "9/9 absent",
+    "historical_ready_v15": "validated_historical",
+    "offline_reassembly_v12": "offline_reassembled_sealed",
+    "previous_actual_v14": "executed_sealed_failure_restore_passed",
+    "previous_operator_v13_historical": "authorized_not_invoked_preflight_blocked",
+    "previous_operator_v13_reason": "external_owner_after_seal_before_invocation",
+    "quiet_window": "passed"
+  },
+  "quiet_final_streak": {
+    "confirmation_passed": true,
+    "final_streak_samples": 27,
+    "final_streak_span_seconds": 353.686567482,
+    "fresh_outputs_absent": true,
+    "reset_count": 0,
+    "sample_count": 27
+  },
+  "schema_version": "ullm.aq4_p3_profile_operator_command.v15",
+  "secret_material_embedded": false,
+  "service_touched": false,
+  "status": "audited_ready_for_single_explicit_profile_diagnostic",
+  "target_runner_manifest": {
+    "fresh_per_execution": true,
+    "generated_by": "launcher_after_live_preflight",
+    "maximum_invocations": 1,
+    "schema_version": "ullm.aq4_p3_profile_target_command.v1",
+    "static_manifest_present": false
+  }
+}
