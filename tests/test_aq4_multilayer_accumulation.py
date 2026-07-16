@@ -12,6 +12,7 @@ ARTIFACT = (
     ROOT
     / "benchmarks/results/2026-07-17/qwen35-9b-aq4-production-opt-v0.1/p2/aq4-multilayer-accumulation-v0.1"
 )
+EXTENDED_ARTIFACT = ARTIFACT / "chain-0-11-v0.1"
 HYBRID_SPEC = importlib.util.spec_from_file_location(
     "compare_aq4_layer0_hybrid",
     ROOT / "tools/compare-aq4-layer0-hybrid.py",
@@ -110,3 +111,53 @@ def test_epsilon_control_artifact_reports_small_layer_output_effect() -> None:
     assert default_l2 == pytest.approx(0.042451383744)
     assert control_l2 == pytest.approx(0.042349396382)
     assert (default_l2 - control_l2) == pytest.approx(0.000101987362)
+
+
+def test_extended_cpu_multilayer_artifact_records_nonmonotonic_h8_evidence() -> None:
+    import json
+
+    report = json.loads((EXTENDED_ARTIFACT / "compare/comparison.json").read_text(encoding="utf-8"))
+    analysis = json.loads((EXTENDED_ARTIFACT / "analysis.json").read_text(encoding="utf-8"))
+    assert report["status"] == "valid"
+    assert report["device"] == "cpu-only"
+    assert report["classification"] == "partially_explains"
+    assert report["aq4_probe"]["binary_sha256"] == "e1139923fbd26d90f84b91aaa6e5449e595cdd46e04e013fc7c60a2d3e9b8fc1"
+    assert [item["layer_index"] for item in report["topology"]["selected_layers"]] == list(range(12))
+    assert [item["layer_index"] for item in report["layer_metrics"]] == list(range(12))
+    assert [
+        item["layer_index"] for item in report["topology"]["selected_layers"] if item["kind"] == "self_attention"
+    ] == [3, 7, 11]
+    relative_l2 = [item["aggregate"]["relative_l2"] for item in report["layer_metrics"]]
+    assert relative_l2 == pytest.approx(
+        [
+            0.042451383744,
+            0.075075875044,
+            0.092594142713,
+            0.106253645855,
+            0.119418995374,
+            0.125535704929,
+            0.077142617728,
+            0.094488065222,
+            0.094775196394,
+            0.092623375159,
+            0.074961402054,
+            0.080826992876,
+        ]
+    )
+    assert relative_l2[5] == max(relative_l2)
+    assert relative_l2[6] < relative_l2[5]
+    growth = report["growth_curve"]
+    assert growth["shape"] == "nonmonotonic_or_layer_jump"
+    assert growth["chosen_model"] == "linear_conservative"
+    assert growth["chosen_extrapolated_relative_l2_at_layer31"] == pytest.approx(0.215538647671)
+    assert analysis["source_comparison"]["sha256"] == HYBRID.sha256_file(EXTENDED_ARTIFACT / "compare/comparison.json")
+    assert analysis["scope"]["requested_layer_range"] == "0:11"
+    assert analysis["scope"]["self_attention_indices_in_range"] == [3, 7, 11]
+    assert analysis["resource_observation"]["exit_status"] == 0
+    assert analysis["resource_observation"]["swap_operations"] == 0
+    assert analysis["h8_assessment"]["verdict"] == "partially_explains"
+    estimates = {item["name"]: item["estimate_at_layer31"] for item in analysis["extrapolations"]}
+    assert estimates["full_window_signed_mean_delta"] == pytest.approx(0.150600827662)
+    assert estimates["recent_four_signed_mean_delta"] == pytest.approx(0.012521631148)
+    assert estimates["early_positive_delta_geometric_limit"] == pytest.approx(0.137305508365)
+    assert estimates["self_attention_block_end_geometric_level"] == pytest.approx(0.040793209230)
