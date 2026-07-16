@@ -1,0 +1,271 @@
+{
+  "actual_executed": false,
+  "automated_tests": {
+    "aggregate": {
+      "collected": 707,
+      "deselected": 0,
+      "distinct_test_file_count": 13,
+      "failed": 0,
+      "passed": 707
+    },
+    "schema_version": "ullm.aq4_p2_exact_test_file_manifest.v1",
+    "suites": [
+      {
+        "collected": 426,
+        "command": [
+          "python3",
+          "-m",
+          "pytest",
+          "-q",
+          "tests/test_prepare_aq4_p2_resident_smoke_bundle.py",
+          "tests/test_run_aq4_p2_resident_batch.py",
+          "tests/test_run_aq4_p2_resident_prepared_bootstrap.py",
+          "tests/test_run_aq4_p2_resident_live_preflight.py",
+          "tests/test_launch_aq4_p2_resident_smoke.py",
+          "tests/test_launch_aq4_p2_resident_smoke_execute.py",
+          "tests/test_aq4_p2_resident_smoke_maintenance.py"
+        ],
+        "deselected": 0,
+        "failed": 0,
+        "files": [
+          {
+            "collected": 67,
+            "git_blob": "577ccca504997aaca3dc7d24f9626a4a6e90c901",
+            "passed": 67,
+            "path": "tests/test_prepare_aq4_p2_resident_smoke_bundle.py",
+            "source_commit": "a016564b4cc1dd913227df915a4929bac984f392"
+          },
+          {
+            "collected": 59,
+            "git_blob": "b62503b59973828cc87836299fa07ff355c28d85",
+            "passed": 59,
+            "path": "tests/test_run_aq4_p2_resident_batch.py",
+            "source_commit": "d367b6da07393f55c720ded7250bda8cdc402a79"
+          },
+          {
+            "collected": 10,
+            "git_blob": "9c42926eaec7086345b8580022f353de502c2011",
+            "passed": 10,
+            "path": "tests/test_run_aq4_p2_resident_prepared_bootstrap.py",
+            "source_commit": "410d6fa1876a6772215604ba765ae1d6a91d67b9"
+          },
+          {
+            "collected": 27,
+            "git_blob": "7f70bb62b8c46ff68e8597663b6054568b676d9f",
+            "passed": 27,
+            "path": "tests/test_run_aq4_p2_resident_live_preflight.py",
+            "source_commit": "e993016f4a62b9970423223db8702f77ee834b12"
+          },
+          {
+            "collected": 8,
+            "git_blob": "7104e3181ee3584829d673909cd09238119dd0ce",
+            "passed": 8,
+            "path": "tests/test_launch_aq4_p2_resident_smoke.py",
+            "source_commit": "fc4559ee4fb8c7c1e62353fb3978a1a1e0a7d86d"
+          },
+          {
+            "collected": 74,
+            "git_blob": "f037db9f07e6a529e1d4d7ab39937ef6b09d312a",
+            "passed": 74,
+            "path": "tests/test_launch_aq4_p2_resident_smoke_execute.py",
+            "source_commit": "780a68007d424e1cf3f53d4e60728161ce6d13d4"
+          },
+          {
+            "collected": 181,
+            "git_blob": "91bc728cf543d2dd41a515ee6f105d7ed552d622",
+            "passed": 181,
+            "path": "tests/test_aq4_p2_resident_smoke_maintenance.py",
+            "source_commit": "def89e583737778531b7c1b03e61b54580f09afd"
+          }
+        ],
+        "name": "resident_trust_chain",
+        "passed": 426
+      },
+      {
+        "collected": 22,
+        "command": [
+          "cargo",
+          "test",
+          "-p",
+          "ullm-engine",
+          "--bin",
+          "ullm-aq4-p2-resident-driver",
+          "--no-default-features"
+        ],
+        "deselected": 0,
+        "failed": 0,
+        "files": [
+          {
+            "collected": 22,
+            "git_blob": "7e37119cc8b66dc0e0f7abcf49b896fcdad8315f",
+            "passed": 22,
+            "path": "crates/ullm-engine/src/bin/ullm-aq4-p2-resident-driver.rs",
+            "source_commit": "43ba16f2347a45caba8a60cac2189714118db280"
+          }
+        ],
+        "name": "resident_driver_unit",
+        "passed": 22
+      },
+      {
+        "collected": 5,
+        "command": [
+          "python3",
+          "-m",
+          "pytest",
+          "-q",
+          "tests/test_aq4_p2_resident_roctx_ranges.py"
+        ],
+        "deselected": 0,
+        "failed": 0,
+        "files": [
+          {
+            "collected": 5,
+            "git_blob": "a6ee8886ffdf58ea668b1b4c49452fa47637f7d9",
+            "passed": 5,
+            "path": "tests/test_aq4_p2_resident_roctx_ranges.py",
+            "source_commit": "62eadada3082b0c72eb1b467177ffe0c9445f26d"
+          }
+        ],
+        "name": "resident_roctx_ranges",
+        "passed": 5
+      },
+      {
+        "collected": 84,
+        "command": [
+          "env",
+          "ULLM_TEST_AQ4_P2_RESIDENT_DRIVER=/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-prepared-v2/resident-driver",
+          "python3",
+          "-m",
+          "pytest",
+          "-q",
+          "tests/test_capture_aq4_p3_diagnostic_profile.py"
+        ],
+        "deselected": 0,
+        "failed": 0,
+        "files": [
+          {
+            "collected": 84,
+            "git_blob": "6e8a76d30702bf3f2f42fb511fde91091dd1b60c",
+            "passed": 84,
+            "path": "tests/test_capture_aq4_p3_diagnostic_profile.py",
+            "source_commit": "376b733b097db37701529014e4e698093976d689"
+          }
+        ],
+        "name": "diagnostic_capture",
+        "passed": 84
+      },
+      {
+        "collected": 105,
+        "command": [
+          "python3",
+          "-m",
+          "pytest",
+          "-q",
+          "tests/test_build_aq4_p3_selection_raw.py"
+        ],
+        "deselected": 0,
+        "failed": 0,
+        "files": [
+          {
+            "collected": 105,
+            "git_blob": "91658d544a263e9665dd40985b25b680ae84db15",
+            "passed": 105,
+            "path": "tests/test_build_aq4_p3_selection_raw.py",
+            "source_commit": "c8becac66551f216de47d0cd935929afe60b3b96"
+          }
+        ],
+        "name": "selection_raw_producer",
+        "passed": 105
+      },
+      {
+        "collected": 39,
+        "command": [
+          "python3",
+          "-m",
+          "pytest",
+          "-q",
+          "tests/test_profile_aq4_p2_family_exclusive.py"
+        ],
+        "deselected": 0,
+        "failed": 0,
+        "files": [
+          {
+            "collected": 39,
+            "git_blob": "9b04f438aa6389db4966d547d0d97153e784b034",
+            "passed": 39,
+            "path": "tests/test_profile_aq4_p2_family_exclusive.py",
+            "source_commit": "e4f8583a0fc710d2146f70d06b8b49eb42f04a16"
+          }
+        ],
+        "name": "profile_family_exclusion",
+        "passed": 39
+      },
+      {
+        "collected": 26,
+        "command": [
+          "python3",
+          "-m",
+          "pytest",
+          "-q",
+          "tests/test_select_aq4_p3_candidate.py"
+        ],
+        "deselected": 0,
+        "failed": 0,
+        "files": [
+          {
+            "collected": 26,
+            "git_blob": "9665da8fd81cd875b522c80f42bea6777642caf7",
+            "passed": 26,
+            "path": "tests/test_select_aq4_p3_candidate.py",
+            "source_commit": "01055a1960e55ab98990a6ee109e4a778f5bfd67"
+          }
+        ],
+        "name": "candidate_selector",
+        "passed": 26
+      }
+    ]
+  },
+  "capture_tool": {
+    "commit": "418e507214b2a4c0352ac8867bf9689b81948ca4",
+    "sha256": "afd3eec63e3621984f500f3f99457173081bed8e04a141a117daf8c1372941ef"
+  },
+  "coverage": [
+    "safety-success-start-failure-partial",
+    "validator-runner-finalize-toctou",
+    "identity-and-hash-bindings",
+    "source-family-and-runtime-gfx-vocabulary-separation",
+    "runtime-device-five-field-exact-binding",
+    "worker-fixture-driven-single-or-two-link-exact-topology-pre-open-post-and-rehash",
+    "bounded-driver-stdout-and-streamed-stderr-failure-evidence",
+    "driver-process-group-descendant-cleanup-and-secret-redaction",
+    "strict-amd-process-active-owner-and-zero-sentinel-schema",
+    "secret-free-amd-process-rejection-shape-and-raw-sha",
+    "bounded-kfd-enoent-rescan-and-fatal-source-diagnostics",
+    "trusted-runtime-lock-substrate-lifecycle-and-same-inode-runner-binding",
+    "absolute-deadline-stable2-stopped-gate-poll-and-foreign-owner-rejection",
+    "remaining-capped-probe-timeouts-and-between-probe-sudo-keepalive",
+    "immutable-streamed-stop-poll-evidence",
+    "container-namespace-health-and-authenticated-model-binding",
+    "secret-free-stdin-header-transport",
+    "base-and-profile-dry-run-process-count-zero",
+    "rocprof-pinned-fd-and-target-manifest",
+    "profiler-execution-closure-and-injected-fd-map-strict-contract",
+    "roctx-run-session-case-and-library-binding",
+    "capture-v2-derived-kernel-normalization-raw-hash-conservation-and-provenance-recomputation"
+  ],
+  "launcher": {
+    "commit": "780a68007d424e1cf3f53d4e60728161ce6d13d4",
+    "sha256": "55977291b6300b9365e685b4482a3c5ba3c21eb7e5ce7eb777aa7440791dda8a"
+  },
+  "manual_checks": {
+    "boundary_count": 15,
+    "status": "passed"
+  },
+  "runner": {
+    "commit": "d367b6da07393f55c720ded7250bda8cdc402a79",
+    "sha256": "98e324414d9e2d7e6db5b066209e6f7c6734e391502ae81ecd1809e8ec558e7f"
+  },
+  "schema_version": "ullm.aq4_p2_resident_execute_qa_attestation.v2",
+  "status": "passed",
+  "strict_negative_contract_count": 49
+}
