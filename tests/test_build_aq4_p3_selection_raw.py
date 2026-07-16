@@ -554,6 +554,33 @@ def build_manifest(path: Path) -> dict[str, object]:
     return output
 
 
+def pair_trace_target(
+    tmp_path: Path,
+) -> tuple[Path, dict[str, object], Path, dict[str, object]]:
+    manifest_path, manifest = candidate_a_promotion_manifest(tmp_path)
+    pair = manifest["full_model_pairs"][0]
+    trace_path = Path(pair["direct_sequence_output_trace"]["path"])
+    trace = json.loads(trace_path.read_text())
+    return manifest_path, manifest, trace_path, trace
+
+
+def update_pair_trace_ref(
+    manifest_path: Path,
+    manifest: dict[str, object],
+    trace_path: Path,
+    trace: dict[str, object],
+    *,
+    reseal: bool = True,
+) -> None:
+    if reseal:
+        reseal_direct_trace(trace)
+    write_json(trace_path, trace)
+    pair = manifest["full_model_pairs"][0]
+    pair["direct_sequence_output_trace"] = ref(trace_path)
+    manifest["manifest_sha256"] = PRODUCER.manifest_sha256(manifest)
+    write_json(manifest_path, manifest)
+
+
 def test_hip_api_parser_counts_union_time_and_rejects_unknown(tmp_path: Path) -> None:
     _capability_path, capability = capability_fixture(tmp_path / "capability.json")
     trace = tmp_path / "api.csv"
@@ -712,6 +739,101 @@ def test_candidate_a_direct_trace_root_and_file_hash_tamper_fail_closed(
             "direct sequence output trace",
             [],
         )
+
+
+@pytest.mark.parametrize(
+    ("field", "replacement", "message"),
+    [
+        ("schema_version", "unknown.schema", "schema/status differs"),
+        ("identity_sha256", "4" * 64, "identity differs"),
+        ("candidate_id", "other-candidate", "candidate differs"),
+        ("case_id", "other-case", "case differs"),
+        ("case_sha256", "5" * 64, "case differs"),
+        ("binding_id", "pair-other", "binding differs"),
+    ],
+)
+def test_candidate_a_pair_trace_binding_matrix_uses_build_path(
+    tmp_path: Path, field: str, replacement: str, message: str
+) -> None:
+    manifest_path, manifest, trace_path, trace = pair_trace_target(tmp_path)
+    trace[field] = replacement
+    update_pair_trace_ref(manifest_path, manifest, trace_path, trace)
+    with pytest.raises(PRODUCER.ProducerError, match=message):
+        build_manifest(manifest_path)
+
+
+def test_candidate_a_pair_trace_root_self_hash_tamper_uses_build_path(
+    tmp_path: Path,
+) -> None:
+    manifest_path, manifest, trace_path, trace = pair_trace_target(tmp_path)
+    trace["trace_sha256"] = "0" * 64
+    update_pair_trace_ref(manifest_path, manifest, trace_path, trace, reseal=False)
+    with pytest.raises(PRODUCER.ProducerError, match="self-hash differs"):
+        build_manifest(manifest_path)
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        (lambda value: value["events"].pop(), "metrics are missing"),
+        (
+            lambda value: value["events"][0].__setitem__("metric", "unknown_metric"),
+            "side/metric is unknown",
+        ),
+        (
+            lambda value: value["events"].append(
+                {
+                    **value["events"][0],
+                    "event_id": "unique-duplicate-metric",
+                }
+            ),
+            "metric is duplicated",
+        ),
+    ],
+)
+def test_candidate_a_pair_trace_event_matrix_uses_build_path(
+    tmp_path: Path, mutation, message: str
+) -> None:
+    manifest_path, manifest, trace_path, trace = pair_trace_target(tmp_path)
+    mutation(trace)
+    update_pair_trace_ref(manifest_path, manifest, trace_path, trace)
+    with pytest.raises(PRODUCER.ProducerError, match=message):
+        build_manifest(manifest_path)
+
+
+def test_candidate_a_pair_trace_nonfinite_uses_build_path(tmp_path: Path) -> None:
+    manifest_path, manifest, trace_path, trace = pair_trace_target(tmp_path)
+    trace["events"][0]["value"] = math.nan
+    trace_bytes = json.dumps(trace, ensure_ascii=True, sort_keys=True, allow_nan=True) + "\n"
+    trace_path.write_text(trace_bytes, encoding="utf-8")
+    pair = manifest["full_model_pairs"][0]
+    pair["direct_sequence_output_trace"] = ref(trace_path)
+    manifest["manifest_sha256"] = PRODUCER.manifest_sha256(manifest)
+    write_json(manifest_path, manifest)
+    with pytest.raises(PRODUCER.ProducerError, match="non-finite JSON"):
+        build_manifest(manifest_path)
+
+
+def test_candidate_a_pair_trace_file_hash_tamper_uses_build_path(
+    tmp_path: Path,
+) -> None:
+    manifest_path, _manifest, trace_path, trace = pair_trace_target(tmp_path)
+    trace["events"][0]["value"] = 999
+    write_json(trace_path, trace)
+    with pytest.raises(PRODUCER.ProducerError, match="SHA-256 differs"):
+        build_manifest(manifest_path)
+
+
+def test_candidate_a_pair_trace_reuse_uses_build_path(tmp_path: Path) -> None:
+    manifest_path, manifest = candidate_a_promotion_manifest(tmp_path)
+    pairs = manifest["full_model_pairs"]
+    pairs[1]["direct_sequence_output_trace"] = pairs[0][
+        "direct_sequence_output_trace"
+    ]
+    manifest["manifest_sha256"] = PRODUCER.manifest_sha256(manifest)
+    write_json(manifest_path, manifest)
+    with pytest.raises(PRODUCER.ProducerError, match="direct sequence trace was reused"):
+        build_manifest(manifest_path)
 
 
 def test_candidate_a_direct_trace_rejects_producer_fidelity_mismatch(
