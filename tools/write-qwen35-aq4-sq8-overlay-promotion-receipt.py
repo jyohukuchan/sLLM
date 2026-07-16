@@ -66,6 +66,29 @@ class ReceiptError(RuntimeError):
     """Raised when an overlay receipt cannot be safely published."""
 
 
+def _receipt_validator_dependency(
+    trusted_component_sources: dict[str, bytes] | None = None,
+) -> ModuleType:
+    """Bind validator calls to the already-retained component byte set."""
+
+    retained_sources = (
+        dict(trusted_component_sources)
+        if trusted_component_sources is not None
+        else None
+    )
+
+    def bound_validate_actual_evidence(**kwargs: Any) -> dict[str, Any]:
+        return validate_actual_evidence(
+            **kwargs,
+            trusted_component_sources=retained_sources,
+        )
+
+    module = ModuleType("_ullm_retained_receipt_validator")
+    module.artifact_inventory = artifact_inventory
+    module.validate_actual_evidence = bound_validate_actual_evidence
+    return module
+
+
 def _request_id(value: Any) -> str:
     if not isinstance(value, str) or REQUEST_ID_RE.fullmatch(value) is None:
         raise ReceiptError("SQ8 promotion request_id must be sq8-promotion-<64 lowercase hex>")
@@ -894,6 +917,7 @@ def write_receipt(
                 (json.dumps(synthetic_receipt, ensure_ascii=True, indent=2, sort_keys=True) + "\n").encode("utf-8")
             ).hexdigest(),
             validate_receipt=False,
+            overlay_receipt_tool=_receipt_validator_dependency(),
         )
     except Exception as error:
         raise ReceiptError(f"overlay served-model binding could not be reconstructed: {error}") from error
@@ -1053,6 +1077,9 @@ def write_actual_receipt(
             receipt_override=prepared,
             validate_receipt=True,
             allow_prepared=True,
+            overlay_receipt_tool=_receipt_validator_dependency(
+                trusted_component_sources
+            ),
         )
     except Exception as error:
         raise ReceiptError(f"prepared receipt binding could not be revalidated: {error}") from error
@@ -1137,6 +1164,7 @@ def write_actual_receipt(
                 (json.dumps(receipt, ensure_ascii=True, indent=2, sort_keys=True) + "\n").encode("ascii")
             ).hexdigest(),
             validate_receipt=False,
+            overlay_receipt_tool=_receipt_validator_dependency(),
         )
         receipt["release"]["served_model"]["semantic_sha256"] = generator._served_model_semantic_sha256(document)
     except Exception as error:

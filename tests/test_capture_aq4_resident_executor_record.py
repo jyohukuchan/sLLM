@@ -5,6 +5,7 @@ import importlib.util
 import io
 import json
 import os
+import subprocess
 from pathlib import Path
 import signal
 import time
@@ -118,6 +119,223 @@ def test_stderr_drain_failure_is_incomplete_and_structurally_bounded() -> None:
     summary = collector.summary()
     assert summary["complete"] is False
     assert summary["stream_error"] == "OSError"
+
+
+def test_worker_lifecycle_producer_retains_64_events_and_binds_65th_terminal() -> None:
+    request_id = "sq8-promotion-" + "a" * 64
+    lifecycle = TOOL.WorkerLifecycleEvidence(request_id, started_at=0.0)
+
+    for index in range(65):
+        lifecycle.observe(
+            {
+                "type": "ready" if index == 0 else "progress",
+                "request_id": request_id,
+                "processed_prompt_tokens": index,
+                "completion_tokens": index,
+                "index": index,
+            },
+            observed_at=(index + 1) / 1000.0,
+        )
+
+    summary = lifecycle.summary()
+    assert summary["event_count"] == 65
+    assert summary["events_retained"] == TOOL.WORKER_LIFECYCLE_MAX_EVENTS == 64
+    assert summary["events_truncated"] is True
+    assert len(summary["events"]) == 64
+    assert summary["events"][0]["type"] == "ready"
+    assert summary["last_event"]["token_index"] == 64
+
+
+def test_outer_kill_reap_hang_is_bounded_and_typed_cleanup_failure() -> None:
+    class HangingProcess:
+        returncode = None
+
+        def __init__(self) -> None:
+            self.calls: list[object] = []
+
+        def poll(self) -> None:
+            return None
+
+        def terminate(self) -> None:
+            self.calls.append("terminate")
+
+        def kill(self) -> None:
+            self.calls.append("kill")
+
+        def wait(self, *, timeout: float) -> None:
+            self.calls.append(timeout)
+            raise subprocess.TimeoutExpired(["fake-worker"], timeout)
+
+    process = HangingProcess()
+    with pytest.raises(
+        TOOL.CaptureError, match="reaped within the cleanup bound"
+    ) as raised:
+        TOOL._terminate_worker(process)  # type: ignore[arg-type]
+
+    assert raised.value.stage == "cleanup"
+    assert process.calls == [
+        "terminate",
+        TOOL.WORKER_TERMINATE_GRACE_SECONDS,
+        "kill",
+        TOOL.WORKER_KILL_REAP_TIMEOUT_SECONDS,
+        "kill",
+        TOOL.WORKER_FINAL_REAP_TIMEOUT_SECONDS,
+    ]
+
+
+def test_pipe_drain_hang_is_bounded_and_emits_typed_cleanup_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    worker_source = r'''
+import json, sys
+request = json.loads(sys.stdin.buffer.readline())
+print(json.dumps({"schema_version": "ullm.worker.v1", "type": "released", "request_id": request["request_id"], "completion_tokens": 0}), flush=True)
+sys.stdin.buffer.readline()
+'''
+    manifest = _fake_manifest(tmp_path, worker_source)
+    empty = TOOL._empty_worker_stderr()
+    incomplete = dict(empty, complete=False, stream_error="drain_thread_timeout")
+
+    monkeypatch.setattr(TOOL, "copy_worker_environment", lambda _: dict(os.environ))
+    monkeypatch.setattr(TOOL, "target_card", lambda _: None)
+    monkeypatch.setattr(TOOL, "_finish_worker_stderr", lambda *_args: incomplete)
+    monkeypatch.setattr(TOOL, "_finish_worker_stdout", lambda *_args: False)
+
+    assert TOOL.main(
+        [
+            "--manifest",
+            str(manifest),
+            "--output",
+            str(tmp_path / "record.json"),
+            "--timeout",
+            "0.5",
+        ]
+    ) == 1
+    envelope = json.loads(capsys.readouterr().out)
+    assert envelope["stage"] == "cleanup"
+    assert envelope["reason"] == "worker pipe drain did not complete"
+    assert envelope["timeouts"]["shutdown_seconds"] == (
+        TOOL.WORKER_SHUTDOWN_TIMEOUT_SECONDS
+    )
+    assert envelope["worker_stderr"]["complete"] is False
+    assert envelope["worker_stderr"]["stream_error"] == "drain_thread_timeout"
+
+
+@pytest.mark.parametrize("bad", [True, 1.0, TOOL.SAFE_INT + 1])
+def test_implementation_audit_counts_reject_bool_float_and_safe_int_overflow(
+    bad: object,
+) -> None:
+    load_records = [
+        {
+            "schema_version": "ullm.backend_operation.load.v1",
+            "layer_position": 0,
+            "trace": {
+                "resolution": "Primary",
+                "implementation_id": "impl",
+                "kind": "linear",
+            },
+        }
+    ]
+    audit = {
+        "implementation_counts": [
+            {"implementation_id": "impl", "kind": "linear", "count": bad}
+        ]
+    }
+    with pytest.raises(TOOL.CaptureError, match="implementation.*count"):
+        TOOL.operator_records(load_records, audit)
+
+
+@pytest.mark.parametrize("field", ["prefill_width_histogram", "total_steps"])
+@pytest.mark.parametrize("bad", [True, 1.0, TOOL.SAFE_INT + 1])
+def test_audit_histogram_and_total_step_counts_reject_numeric_aliases(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    field: str,
+    bad: object,
+) -> None:
+    audit = {
+        "coverage_complete": True,
+        "implementation_counts": [{"implementation_id": "impl", "count": 1}],
+        "prefill_width_histogram": [0, 1],
+        "total_steps": 1,
+    }
+    if field == "prefill_width_histogram":
+        audit[field] = [0, bad]
+    else:
+        audit[field] = bad
+    worker_source = f'''\
+import json, sys
+request = json.loads(sys.stdin.buffer.readline())
+request_id = request["request_id"]
+print(json.dumps({{"schema_version": "ullm.worker.v1", "type": "token", "request_id": request_id, "index": 0, "token_id": 42}}, separators=(",", ":")), flush=True)
+print(json.dumps({{"schema_version": "ullm.worker.v1", "type": "released", "request_id": request_id, "completion_tokens": 1, "timings": {{"prompt_ms": 1.0, "predicted_ms": 2.0, "cache_n": 0}}}}, separators=(",", ":")), flush=True)
+json.dump({{"schema_version": "ullm.backend_operation.load.v1", "layer_position": 0, "trace": {{"resolution": "Primary", "implementation_id": "impl", "kind": "linear", "semantic_version": "1", "backend": "hip", "architecture": "gfx1201", "device_name": "fake", "persistent_bytes": 1, "temporary_bytes": 1, "batch_width": 1, "chunk_width": 1}}}}, sys.stderr); sys.stderr.write("\\n")
+json.dump({{"event": "request_released", "request_id": request_id, "operation_execution_audit": {audit!r}, "request_execution_audit": {{}}}}, sys.stderr); sys.stderr.write("\\n"); sys.stderr.flush()
+json.loads(sys.stdin.buffer.readline())
+'''
+    manifest = _fake_manifest(tmp_path, worker_source)
+    package = tmp_path / "package.json"
+    package.write_text(
+        json.dumps(
+            {
+                "passthrough_tensors": [],
+                "tensors": [
+                    {
+                        "name": "model.layers.0.self_attn.q_proj.weight",
+                        "index_file": "weights.idx",
+                        "scale_file": "weights.scale",
+                        "codebook_file": "codebook.bin",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    for name in ("weights.idx", "weights.scale", "codebook.bin"):
+        (tmp_path / name).write_bytes(b"x")
+
+    class CompleteObserver:
+        def __init__(self, _: str) -> None:
+            pass
+
+        def start(self) -> None:
+            pass
+
+        def finish(self) -> dict[str, object]:
+            return {
+                "kind": "fake",
+                "sample_count": 2,
+                "complete": True,
+                "capacity_bytes": 1_000_000,
+                "peak_bytes": 100,
+                "target_card": "fake",
+            }
+
+    monkeypatch.setattr(TOOL, "copy_worker_environment", lambda _: dict(os.environ))
+    monkeypatch.setattr(TOOL, "VramObserver", CompleteObserver)
+    output = tmp_path / "record.json"
+    assert TOOL.main(["--manifest", str(manifest), "--output", str(output)]) == 1
+    envelope = json.loads(capsys.readouterr().out)
+    assert envelope["stage"] == "audit_missing"
+    assert "audit" in envelope["reason"]
+
+
+@pytest.mark.parametrize("bad", [True, 1.0, TOOL.SAFE_INT + 1])
+def test_normalized_worker_stderr_rejects_invalid_redacted_line_count(
+    bad: object,
+) -> None:
+    value = TOOL._normalize_worker_stderr(
+        dict(
+            TOOL._empty_worker_stderr(),
+            complete=True,
+            stream_error=None,
+            redacted_lines=bad,
+        )
+    )
+    assert value["redacted_lines"] == 0
 
 
 def test_main_emits_fixed_error_envelope_with_worker_stderr(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:

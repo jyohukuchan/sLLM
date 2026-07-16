@@ -63,12 +63,21 @@ CAPTURE_FINAL_REAP_TIMEOUT_SECONDS = 5.0
 CAPTURE_STDERR_DRAIN_TIMEOUT_SECONDS = 3.0
 CAPTURE_STDOUT_DRAIN_TIMEOUT_SECONDS = 4.0
 CAPTURE_OBSERVER_FINISH_TIMEOUT_SECONDS = 3.0
+CAPTURE_PIPE_CLOSE_GRACE_SECONDS = 1.0
 CAPTURE_PACKAGING_MARGIN_SECONDS = 60.0
 # The outer bound covers all inner worker stages, escalation/reap, bounded
 # pipe drains, and a fixed packaging margin.  Keep every term explicit so the
 # inequality is reviewable and testable rather than relying on an implicit
 # "large enough" constant.
 CAPTURE_SUBPROCESS_TIMEOUT_SECONDS = 1350.0
+CAPTURE_OUTER_CLEANUP_MARGIN_SECONDS = (
+    CAPTURE_TERMINATE_GRACE_SECONDS
+    + CAPTURE_KILL_REAP_TIMEOUT_SECONDS
+    + CAPTURE_FINAL_REAP_TIMEOUT_SECONDS
+    + CAPTURE_STDERR_DRAIN_TIMEOUT_SECONDS
+    + CAPTURE_STDOUT_DRAIN_TIMEOUT_SECONDS
+    + 2 * CAPTURE_PIPE_CLOSE_GRACE_SECONDS
+)
 CAPTURE_ERROR_SCHEMA = "ullm.aq4_resident_capture_error.v4"
 WORKER_STDERR_SCHEMA = "ullm.aq4_resident_worker_stderr.v2"
 WORKER_LIFECYCLE_SCHEMA = "ullm.aq4_resident_worker_lifecycle.v1"
@@ -1997,11 +2006,12 @@ class CaptureStream:
 @dataclass
 class CaptureProcessResult:
     argv: list[str]
-    returncode: int
+    returncode: int | None
     stdout: CaptureStream
     stderr: CaptureStream
     timed_out: bool
     timeout_seconds: float | None
+    cleanup_errors: tuple[str, ...] = ()
 
 
 class _CaptureStreamCollector:
@@ -2093,32 +2103,56 @@ def default_capture(
     stdout_thread.start()
     stderr_thread.start()
     timed_out = False
+    cleanup_errors: list[str] = []
     try:
         proc.wait(timeout=CAPTURE_SUBPROCESS_TIMEOUT_SECONDS)
     except subprocess.TimeoutExpired:
         timed_out = True
-        proc.kill()
-        proc.wait()
+        if proc.poll() is None:
+            try:
+                proc.terminate()
+            except OSError:
+                pass
+            try:
+                proc.wait(timeout=CAPTURE_TERMINATE_GRACE_SECONDS)
+            except subprocess.TimeoutExpired:
+                try:
+                    proc.kill()
+                except OSError:
+                    pass
+                try:
+                    proc.wait(timeout=CAPTURE_KILL_REAP_TIMEOUT_SECONDS)
+                except subprocess.TimeoutExpired:
+                    try:
+                        proc.kill()
+                    except OSError:
+                        pass
+                    try:
+                        proc.wait(timeout=CAPTURE_FINAL_REAP_TIMEOUT_SECONDS)
+                    except subprocess.TimeoutExpired:
+                        cleanup_errors.append("process_reap_timeout")
     finally:
-        stdout_thread.join(timeout=5)
-        stderr_thread.join(timeout=5)
-        for stream, thread in (
-            (proc.stdout, stdout_thread),
-            (proc.stderr, stderr_thread),
+        for stream, thread, drain_timeout, label in (
+            (proc.stdout, stdout_thread, CAPTURE_STDOUT_DRAIN_TIMEOUT_SECONDS, "stdout"),
+            (proc.stderr, stderr_thread, CAPTURE_STDERR_DRAIN_TIMEOUT_SECONDS, "stderr"),
         ):
+            thread.join(timeout=drain_timeout)
             if thread.is_alive():
                 try:
-                    stream.close()
+                    os.close(stream.fileno())
                 except (OSError, ValueError):
                     pass
-                thread.join(timeout=1)
+                thread.join(timeout=CAPTURE_PIPE_CLOSE_GRACE_SECONDS)
+            if thread.is_alive():
+                cleanup_errors.append(f"{label}_drain_timeout")
     return CaptureProcessResult(
         argv=list(argv),
-        returncode=int(proc.returncode),
+        returncode=proc.returncode if type(proc.returncode) is int else None,
         stdout=stdout_collector.result(stdout_thread.is_alive()),
         stderr=stderr_collector.result(stderr_thread.is_alive()),
         timed_out=timed_out,
         timeout_seconds=CAPTURE_SUBPROCESS_TIMEOUT_SECONDS if timed_out else None,
+        cleanup_errors=tuple(cleanup_errors),
     )
 
 
@@ -2240,6 +2274,7 @@ def capture_failure_diagnostic(
     stdout: Any,
     stderr: Any,
     timeout_seconds: float | None = None,
+    cleanup_errors: tuple[str, ...] = (),
 ) -> dict[str, Any]:
     signal_value: dict[str, Any] | None = None
     if isinstance(returncode, int) and returncode < 0:
@@ -2265,6 +2300,7 @@ def capture_failure_diagnostic(
         "returncode": returncode,
         "signal": signal_value,
         "timeout_seconds": timeout_seconds,
+        "cleanup_errors": list(cleanup_errors),
         "stdout": stdout_diagnostic,
         "stderr": stderr_diagnostic,
     }
@@ -2478,8 +2514,7 @@ def _capture_error_envelope(
         or len(tail_text.encode("utf-8")) != tail_bytes
         or type(worker.get("truncated")) is not bool
         or type(worker.get("utf8_replacement")) is not bool
-        or type(redacted_lines) is not int
-        or redacted_lines < 0
+        or not safe_counter(redacted_lines)
         or type(record_count) is not int
         or not 0 <= record_count <= 9_007_199_254_740_991
         or type(records_retained) is not int
@@ -2659,8 +2694,20 @@ def _capture_error_envelope(
         or type(lifecycle.get("events_truncated")) is not bool
         or lifecycle.get("events_truncated") != (lifecycle_count > len(lifecycle_events))
         or (last_event is not None and not valid_lifecycle_event(last_event))
-        or (bool(lifecycle_events) and last_event != lifecycle_events[-1])
-        or (not lifecycle_events and last_event is not None)
+        or (lifecycle_count > 0 and (not lifecycle_events or last_event is None))
+        or (lifecycle_count == 0 and last_event is not None)
+        or (
+            lifecycle_count == len(lifecycle_events)
+            and bool(lifecycle_events)
+            and last_event != lifecycle_events[-1]
+        )
+        or (
+            lifecycle_count > len(lifecycle_events)
+            and bool(lifecycle_events)
+            and last_event is not None
+            and float(last_event["offset_ms"])
+            < float(lifecycle_events[-1]["offset_ms"])
+        )
         or ((sent_offset is not None) != lifecycle.get("request_sent"))
         or (
             sent_offset is not None
@@ -2821,6 +2868,7 @@ def _coerce_capture_result(value: Any) -> CaptureProcessResult:
         stderr=stderr_collector.result(False),
         timed_out=False,
         timeout_seconds=None,
+        cleanup_errors=(),
     )
 
 
@@ -3257,6 +3305,16 @@ def _execute_verified(
                 timeout_seconds=float(error.timeout),
             )
             raise PromotionError("candidate SQ8 capture timed out") from error
+        if completed.cleanup_errors:
+            evidence["capture_failure"] = capture_failure_diagnostic(
+                stage="capture_outer_cleanup_timeout",
+                returncode=completed.returncode,
+                stdout=completed.stdout,
+                stderr=completed.stderr,
+                timeout_seconds=completed.timeout_seconds,
+                cleanup_errors=completed.cleanup_errors,
+            )
+            raise PromotionError("candidate SQ8 capture cleanup timed out")
         if completed.timed_out:
             evidence["capture_failure"] = capture_failure_diagnostic(
                 stage="capture_outer_timeout",
@@ -3264,6 +3322,7 @@ def _execute_verified(
                 stdout=completed.stdout,
                 stderr=completed.stderr,
                 timeout_seconds=completed.timeout_seconds,
+                cleanup_errors=completed.cleanup_errors,
             )
             raise PromotionError("candidate SQ8 capture timed out")
         if not completed.stdout.complete or not completed.stderr.complete:

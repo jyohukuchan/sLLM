@@ -4,6 +4,7 @@ import importlib.util
 import hashlib
 import json
 import stat
+import sys
 from pathlib import Path
 
 import pytest
@@ -105,6 +106,79 @@ def trusted_components() -> dict[str, dict[str, object]]:
     }
 
 
+def _valid_actual_inputs(
+    tmp_path: Path,
+    fixture: dict[str, Path | dict],
+    component_bindings: dict[str, dict[str, object]],
+) -> tuple[Path, Path]:
+    """Create the smallest complete maintenance/executor pair for a receipt chain."""
+
+    binding = json.loads(Path(fixture["binding"]).read_text(encoding="utf-8"))
+    package_sha = WRITER.sha256_file(Path(fixture["package"]))
+    maintenance = {
+        "schema_version": "ullm.qwen35_aq4.sq8_overlay_gpu_promotion_maintenance.v1",
+        "promotion_request_id": REQUEST_ID,
+        "status": "passed",
+        "actual_run_count": 1,
+        "failure": None,
+        "capture": {"timeouts": dict(WRITER.EXECUTION_TIMEOUTS)},
+        "trusted_components": component_bindings,
+        "candidate_pre": {"identity": "unchanged"},
+        "candidate_post": {"identity": "unchanged"},
+        "stopped_observations": [
+            {
+                "service": {
+                    "active": False,
+                    "running": False,
+                    "main_pid": 0,
+                    "worker_pid": 0,
+                    "lock_owned": False,
+                },
+                "owners": {"worker_pids": [], "amd_pids": [], "kfd_pids": []},
+            }
+        ]
+        * 2,
+        "lock": {
+            "path": "/run/ullm/device-1.lock",
+            "held": True,
+            "released": True,
+        },
+        "restore": {"attempted": True, "passed": True},
+    }
+    maintenance_path = tmp_path / "maintenance-evidence.json"
+    _write_json(maintenance_path, maintenance)
+    telemetry = sq8_telemetry()
+    executor_path = tmp_path / "executor-record.json"
+    _write_json(
+        executor_path,
+        {
+            "schema_version": "ullm.production_executor_record.v1",
+            "status": "ok",
+            "sq8_promotion_evidence": {
+                "schema_version": "ullm.qwen35_aq4.sq8_promotion_executor.v1",
+                "request_id": REQUEST_ID,
+                "manifest_identity": {
+                    "implementation_id": WRITER.IMPLEMENTATION_ID,
+                    "execution_profile": "sq8-test",
+                    "artifact_content_sha256": binding["content_sha256"],
+                    "artifact_manifest_sha256": WRITER.sha256_file(
+                        Path(fixture["binding"])
+                    ),
+                    "package_manifest_sha256": package_sha,
+                },
+                "telemetry": telemetry,
+                "telemetry_binding": telemetry_binding(telemetry),
+                "output_identity": {
+                    "token_count": 2,
+                    "token_ids_sha256": "4" * 64,
+                    "token_ids_recorded": False,
+                },
+            },
+        },
+    )
+    return maintenance_path, executor_path
+
+
 @pytest.mark.parametrize("failure_evidence", [False, True])
 @pytest.mark.parametrize(
     ("section", "key", "replacement"),
@@ -149,6 +223,96 @@ def test_generator_import_executes_retained_bytes_after_path_replacement(
 
     generator = WRITER._load_generator(generator_path, retained)
     assert generator.MARKER == "original-generator"
+
+
+def test_actual_retained_writer_generator_validator_chain_ignores_live_replacements(
+    tmp_path: Path, fixture: dict[str, Path | dict]
+) -> None:
+    """Pin writer/generator/validator bytes before replacing every live path."""
+
+    prepared_path = Path(fixture["profile"]).with_name("promotion.json")
+    WRITER.write_receipt(
+        profile_path=Path(fixture["profile"]),
+        output_path=prepared_path,
+        source_tree_sha256="2" * 40,
+        source_archive_sha256="3" * 64,
+        served_model_path=Path(fixture["served"]),
+        request_id=REQUEST_ID,
+    )
+
+    trusted_root = tmp_path / "trusted-tools"
+    trusted_root.mkdir()
+    component_bytes = {
+        "maintenance_wrapper": b"maintenance\n",
+        "executor_capture": b"capture\n",
+        "served_model_generator": Path(GENERATOR.__file__).read_bytes(),
+        "promotion_receipt_writer": Path(WRITER.__file__).read_bytes(),
+    }
+    component_paths: dict[str, Path] = {}
+    for name, source in component_bytes.items():
+        path = trusted_root / f"{name}.py"
+        path.write_bytes(source)
+        component_paths[name] = path.resolve()
+    component_bindings = {
+        name: {
+            "path": str(path),
+            "sha256": hashlib.sha256(component_bytes[name]).hexdigest(),
+            "device": path.stat(follow_symlinks=False).st_dev,
+            "inode": path.stat(follow_symlinks=False).st_ino,
+        }
+        for name, path in component_paths.items()
+    }
+    maintenance_path, executor_path = _valid_actual_inputs(
+        tmp_path, fixture, component_bindings
+    )
+
+    writer_spec = importlib.util.spec_from_file_location(
+        "_retained_sq8_writer", component_paths["promotion_receipt_writer"]
+    )
+    assert writer_spec is not None and writer_spec.loader is not None
+    retained_writer = importlib.util.module_from_spec(writer_spec)
+    sys.modules[writer_spec.name] = retained_writer
+    exec(
+        compile(
+            component_bytes["promotion_receipt_writer"],
+            str(component_paths["promotion_receipt_writer"]),
+            "exec",
+        ),
+        retained_writer.__dict__,
+    )
+    retained_writer.TRUSTED_COMPONENT_PATHS = component_paths
+    retained_writer.TRUSTED_COMPONENT_APPROVED_ROOT = trusted_root.resolve()
+
+    component_paths["served_model_generator"].write_text(
+        "raise RuntimeError('live generator replacement executed')\n", encoding="ascii"
+    )
+    component_paths["promotion_receipt_writer"].write_text(
+        "raise RuntimeError('live writer replacement executed')\n", encoding="ascii"
+    )
+    output = tmp_path / "promotion-actual-receipt.json"
+    value = retained_writer.write_actual_receipt(
+        prepared_receipt_path=prepared_path,
+        maintenance_evidence_path=maintenance_path,
+        executor_record_path=executor_path,
+        output_path=output,
+        generator_path=component_paths["served_model_generator"],
+        trusted_components=component_bindings,
+        trusted_component_sources=component_bytes,
+    )
+    assert value["status"] == "actual_verified"
+
+    retained_generator = retained_writer._load_generator(
+        component_paths["served_model_generator"],
+        component_bytes["served_model_generator"],
+    )
+    document = retained_generator.materialize(
+        Path(fixture["profile"]),
+        receipt_path_override=output,
+        overlay_receipt_tool=retained_writer._receipt_validator_dependency(
+            component_bytes
+        ),
+    )
+    assert document["promotion"]["source_commit"] == "1" * 40
 
 
 @pytest.fixture
@@ -301,6 +465,7 @@ def test_authorization_audit_is_explicit_and_bound_for_prepared_candidate(
         expected_manifest_path=Path(fixture["served"]),
         allow_prepared=True,
         prepared_only=True,
+        overlay_receipt_tool=WRITER._receipt_validator_dependency(),
     )
     assert document["promotion"]["authorization_audit"] == expected_audit
 

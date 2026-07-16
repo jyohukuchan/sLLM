@@ -513,6 +513,21 @@ def safe_counter(value: Any) -> bool:
     return type(value) is int and 0 <= value <= SAFE_INT
 
 
+def exact_counter(value: Any, label: str) -> int:
+    """Return a JSON-safe counter without accepting bool/float aliases."""
+
+    if not safe_counter(value):
+        raise CaptureError(f"{label} must be an exact non-negative safe integer")
+    return value
+
+
+def exact_counter_sum(left: Any, right: Any, label: str) -> int:
+    total = exact_counter(left, label) + exact_counter(right, label)
+    if total > SAFE_INT:
+        raise CaptureError(f"{label} exceeds the safe integer range")
+    return total
+
+
 def validate_sq8_promotion_telemetry(value: Any) -> dict[str, Any]:
     if not isinstance(value, dict) or set(value) != {
         "schema_version",
@@ -832,14 +847,26 @@ def phase_name(value: str) -> str:
     return {"ColdPrefill": "cold_prefill", "CachedPrefixPrefill": "cached_prefix_prefill", "Decode": "decode"}.get(value, value.lower())
 
 
-def operator_records(load_records: list[dict[str, Any]], audit: dict[str, Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+def operator_records(
+    load_records: list[dict[str, Any]], audit: dict[str, Any]
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     operators = []
     fallback_events = []
-    implementation_counts = {
-        str(item.get("implementation_id")): int(item.get("count", 0))
-        for item in audit.get("implementation_counts", [])
-        if isinstance(item, dict)
-    }
+    raw_implementation_counts = audit.get("implementation_counts")
+    if not isinstance(raw_implementation_counts, list):
+        raise CaptureError("request audit implementation counts are invalid")
+    implementation_counts: dict[str, int] = {}
+    for index, item in enumerate(raw_implementation_counts):
+        if not isinstance(item, dict):
+            raise CaptureError("request audit implementation count entry is invalid")
+        implementation = item.get("implementation_id")
+        if not isinstance(implementation, str) or not implementation:
+            raise CaptureError("request audit implementation identity is invalid")
+        if implementation in implementation_counts:
+            raise CaptureError("request audit implementation identity is duplicated")
+        implementation_counts[implementation] = exact_counter(
+            item.get("count"), f"request audit implementation count {index}"
+        )
     assigned_implementations: set[str] = set()
     for record in load_records:
         trace = record.get("trace")
@@ -871,8 +898,18 @@ def operator_records(load_records: list[dict[str, Any]], audit: dict[str, Any]) 
             "shape_bucket": {
                 "id": f"{op_kind}-{trace.get('batch_width', 1)}x{trace.get('chunk_width', 1)}",
                 "dimensions": [
-                    {"name": "batch", "value": int(trace.get("batch_width") or 1)},
-                    {"name": "chunk", "value": int(trace.get("chunk_width") or 1)},
+                    {
+                        "name": "batch",
+                        "value": exact_counter(
+                            trace.get("batch_width", 1), "load trace batch width"
+                        ),
+                    },
+                    {
+                        "name": "chunk",
+                        "value": exact_counter(
+                            trace.get("chunk_width", 1), "load trace chunk width"
+                        ),
+                    },
                 ],
             },
             "selection_reason": {
@@ -888,8 +925,15 @@ def operator_records(load_records: list[dict[str, Any]], audit: dict[str, Any]) 
                 "gpu_name": device_name,
             },
             "workspace": {
-                "planned_bytes": int(trace.get("persistent_bytes", 0)) + int(trace.get("temporary_bytes", 0)),
-                "temporary_bytes": int(trace.get("temporary_bytes", 0)),
+                "planned_bytes": exact_counter_sum(
+                    trace.get("persistent_bytes", 0),
+                    trace.get("temporary_bytes", 0),
+                    "load trace workspace bytes",
+                ),
+                "temporary_bytes": exact_counter(
+                    trace.get("temporary_bytes", 0),
+                    "load trace temporary bytes",
+                ),
                 "observed_peak_bytes": None,
             },
             "invocation_count": invocation_count or 1,
@@ -903,11 +947,16 @@ def operator_records(load_records: list[dict[str, Any]], audit: dict[str, Any]) 
     # for the implementation that actually ran for this request (for example the M128 chunk
     # implementations).  Preserve the bounded load contract above and append one aggregate
     # request-terminal entry for every implementation observed by the audit.
-    for audited in audit.get("implementation_counts", []):
-        if not isinstance(audited, dict) or int(audited.get("count", 0)) <= 0:
+    for audited in raw_implementation_counts:
+        count = implementation_counts[str(audited["implementation_id"])]
+        if count <= 0:
             continue
         implementation = str(audited.get("implementation_id", ""))
-        if any(item.get("implementation_id") == implementation and item.get("invocation_count", 0) > 0 for item in operators):
+        if any(
+            item.get("implementation_id") == implementation
+            and item.get("invocation_count", 0) > 0
+            for item in operators
+        ):
             continue
         template = next((item for item in operators if item.get("op_kind") == audited.get("kind")), None)
         if template is None:
@@ -917,7 +966,7 @@ def operator_records(load_records: list[dict[str, Any]], audit: dict[str, Any]) 
         item["phase_kind"] = "decode" if ".m1" in implementation else "cold_prefill"
         item["implementation_id"] = implementation
         item["resolution_status"] = "selected"
-        item["invocation_count"] = int(audited["count"])
+        item["invocation_count"] = count
         operators.append(item)
     return operators, fallback_events
 
@@ -1124,7 +1173,9 @@ def _normalize_worker_stderr(value: Any) -> dict[str, Any]:
         "tail_bytes": tail_bytes,
         "truncated": value.get("truncated") is True or head_cut or tail_cut,
         "utf8_replacement": value.get("utf8_replacement") is True,
-        "redacted_lines": value.get("redacted_lines") if type(value.get("redacted_lines")) is int and value.get("redacted_lines") >= 0 else 0,
+        "redacted_lines": value.get("redacted_lines")
+        if safe_counter(value.get("redacted_lines"))
+        else 0,
         "record_count": record_count,
         "records_retained": records_retained,
         "records_truncated": value.get("records_truncated") is True,
@@ -1587,23 +1638,63 @@ def run_capture(args: argparse.Namespace) -> dict[str, Any]:
                 str(error),
                 "telemetry_validation",
             ) from error
-    load_records = [x for x in stderr_records if x.get("schema_version") == "ullm.backend_operation.load.v1"]
-    operators, fallback_events = operator_records(load_records, audit)
+    load_records = [
+        item
+        for item in stderr_records
+        if item.get("schema_version") == "ullm.backend_operation.load.v1"
+    ]
+    try:
+        operators, fallback_events = operator_records(load_records, audit)
+    except CaptureError as error:
+        raise worker_failure(str(error), "audit_missing") from error
     if len(operators) == 0 or audit.get("coverage_complete") is not True:
         raise worker_failure("full resident operator graph was not observed", "audit_missing")
-    audited_counts = {
-        str(item.get("implementation_id")): int(item.get("count", 0))
-        for item in audit.get("implementation_counts", [])
-        if isinstance(item, dict) and int(item.get("count", 0)) > 0
-    }
+    raw_counts = audit.get("implementation_counts")
+    if not isinstance(raw_counts, list):
+        raise worker_failure("request audit implementation counts are invalid", "audit_missing")
+    audited_counts: dict[str, int] = {}
+    for index, item in enumerate(raw_counts):
+        if not isinstance(item, dict) or not isinstance(item.get("implementation_id"), str):
+            raise worker_failure(
+                "request audit implementation count entry is invalid",
+                "audit_missing",
+            )
+        implementation = item["implementation_id"]
+        if not implementation or implementation in audited_counts:
+            raise worker_failure("request audit implementation identity is invalid", "audit_missing")
+        try:
+            count = exact_counter(
+                item.get("count"), f"request audit implementation count {index}"
+            )
+        except CaptureError as error:
+            raise worker_failure(str(error), "audit_missing") from error
+        if count > 0:
+            audited_counts[implementation] = count
     observed_counts: dict[str, int] = {}
     for item in operators:
         implementation = str(item.get("implementation_id", ""))
-        observed_counts[implementation] = observed_counts.get(implementation, 0) + int(item.get("invocation_count", 0))
+        try:
+            observed_counts[implementation] = exact_counter_sum(
+                observed_counts.get(implementation, 0),
+                item.get("invocation_count"),
+                "observed operator invocation count",
+            )
+        except CaptureError as error:
+            raise worker_failure(str(error), "audit_missing") from error
     if observed_counts != audited_counts:
         raise worker_failure("operator invocation counts do not reconcile with request audit", "audit_missing")
     timings = released.get("timings", {})
-    width = max((index for index, count in enumerate(audit.get("prefill_width_histogram", [])) if index and count), default=None)
+    raw_histogram = audit.get("prefill_width_histogram")
+    if not isinstance(raw_histogram, list):
+        raise worker_failure("request audit prefill histogram is invalid", "audit_missing")
+    try:
+        histogram = [
+            exact_counter(count, f"request audit prefill histogram count {index}")
+            for index, count in enumerate(raw_histogram)
+        ]
+    except CaptureError as error:
+        raise worker_failure(str(error), "audit_missing") from error
+    width = max((index for index, count in enumerate(histogram) if index and count), default=None)
     if width is None:
         raise worker_failure("actual prefill execution width was not observed", "audit_missing")
     memory = {
@@ -1623,7 +1714,16 @@ def run_capture(args: argparse.Namespace) -> dict[str, Any]:
     # Keep these facts explicit and fail closed if the package/runtime observer cannot provide them.
     if not observer_data["complete"] or observer_data["peak_bytes"] is None or observer_data["capacity_bytes"] is None:
         raise worker_failure("complete R9700 VRAM observation was not available", "resource_observation")
-    completion_tokens = int(released.get("completion_tokens", 0))
+    try:
+        completion_tokens = exact_counter(
+            released.get("completion_tokens"), "worker completion token count"
+        )
+        cached_prefix_token_count = exact_counter(
+            released.get("timings", {}).get("cache_n", 0),
+            "worker cached-prefix token count",
+        )
+    except CaptureError as error:
+        raise worker_failure(str(error), "worker_protocol") from error
     if completion_tokens != len(output_token_ids):
         raise worker_failure("resident worker output token identity count differs")
     phases = [
@@ -1632,21 +1732,42 @@ def run_capture(args: argparse.Namespace) -> dict[str, Any]:
     ]
     graph = layer_graph(package, manifest)
     trace_id = f"aq4-resident-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}-{secrets.token_hex(4)}"
-    total_steps = int(audit.get("total_steps", 0))
+    try:
+        total_steps = exact_counter(audit.get("total_steps"), "request audit total steps")
+    except CaptureError as error:
+        raise worker_failure(str(error), "audit_missing") from error
     request_summary = {
         "fixture_id": "aq4-resident-executor-record-v1",
         "request_count": 1,
         "prompt_token_count": prompt_tokens,
-        "cached_prefix_token_count": int(released.get("timings", {}).get("cache_n", 0)),
+        "cached_prefix_token_count": cached_prefix_token_count,
         "generated_token_count": completion_tokens,
         "context_tokens_at_decode_start": prompt_tokens,
         "prompt_or_token_content_recorded": False,
     }
-    workspace_bytes = sum(int(x.get("workspace", {}).get("temporary_bytes", 0)) for x in operators)
+    workspace_bytes = 0
+    for item in operators:
+        try:
+            workspace_bytes = exact_counter_sum(
+                workspace_bytes,
+                item.get("workspace", {}).get("temporary_bytes", 0),
+                "operator workspace byte count",
+            )
+        except CaptureError as error:
+            raise worker_failure(str(error), "audit_missing") from error
     # Runtime workspace plans are public bounded facts; the package resident size and state
     # allocation are reconstructed from the same package metadata, never from prompt content.
     package_root = package_path.parent
-    resident_bytes = sum(int(x.get("payload_bytes", 0)) for x in package.get("passthrough_tensors", []))
+    resident_bytes = 0
+    for item in package.get("passthrough_tensors", []):
+        try:
+            resident_bytes = exact_counter_sum(
+                resident_bytes,
+                item.get("payload_bytes", 0),
+                "resident payload byte count",
+            )
+        except CaptureError as error:
+            raise worker_failure(str(error), "audit_missing") from error
     codebooks: set[tuple[str, str]] = set()
     for tensor in package.get("tensors", []):
         if not isinstance(tensor, dict):

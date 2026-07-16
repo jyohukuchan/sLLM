@@ -513,6 +513,54 @@ def test_lifecycle_order_last_event_and_ready_protocol_binding_reject_tamper() -
     }
 
 
+def test_runner_accepts_producer_65_plus_lifecycle_truncation_contract() -> None:
+    value = capture_error_envelope()
+    ready = dict(value["worker_lifecycle"]["events"][0])
+    events = [ready]
+    for index in range(1, 65):
+        events.append(
+            {
+                "type": "progress",
+                "offset_ms": float(index + 1),
+                "request_id_matches": True,
+                "processed_prompt_tokens": index,
+                "completion_tokens": index,
+                "token_index": index,
+            }
+        )
+    retained = events[:64]
+    value["worker_lifecycle"].update(
+        {
+            "event_count": 65,
+            "events_retained": 64,
+            "events_truncated": True,
+            "events": retained,
+            "last_event": events[-1],
+        }
+    )
+
+    parsed = parse_capture_error(capture_stream(json.dumps(value).encode("ascii")))
+    assert parsed["validation"] == "valid"
+    assert parsed["worker_lifecycle"]["event_count"] == 65
+    assert parsed["worker_lifecycle"]["events_retained"] == 64
+    assert parsed["worker_lifecycle"]["events_truncated"] is True
+    assert parsed["worker_lifecycle"]["last_event"]["token_index"] == 64
+
+
+@pytest.mark.parametrize("bad", [True, 1.0, MODULE.SAFE_INT + 1])
+def test_runner_rejects_bool_float_and_overflow_redacted_line_counts(
+    bad: object,
+) -> None:
+    value = capture_error_envelope()
+    value["worker_stderr"]["redacted_lines"] = bad
+    assert parse_capture_error(
+        capture_stream(json.dumps(value).encode("ascii"))
+    ) == {
+        "validation": "invalid",
+        "reason": "worker_stderr_type_or_value_differs",
+    }
+
+
 @pytest.mark.parametrize(
     "mutation",
     [
@@ -1109,6 +1157,87 @@ def test_capture_signal_and_timeout_are_preserved(
     assert evidence["actual_run_count"] == 1
 
 
+def test_default_capture_outer_kill_and_pipe_drain_use_bounded_typed_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeStream:
+        def __init__(self, fd: int) -> None:
+            self.fd = fd
+
+        def read(self, _: int) -> bytes:
+            return b""
+
+        def fileno(self) -> int:
+            return self.fd
+
+    class FakeThread:
+        instances: list["FakeThread"] = []
+
+        def __init__(self, *, target: Any, args: tuple[Any, ...], name: str, daemon: bool) -> None:
+            self.target = target
+            self.args = args
+            self.name = name
+            self.daemon = daemon
+            self.joins: list[float] = []
+            self.instances.append(self)
+
+        def start(self) -> None:
+            return None
+
+        def join(self, timeout: float) -> None:
+            self.joins.append(timeout)
+
+        def is_alive(self) -> bool:
+            return True
+
+    class HangingProcess:
+        def __init__(self) -> None:
+            self.stdout = FakeStream(99998)
+            self.stderr = FakeStream(99999)
+            self.returncode: int | None = None
+            self.calls: list[tuple[str, float | None]] = []
+
+        def poll(self) -> None:
+            return None
+
+        def terminate(self) -> None:
+            self.calls.append(("terminate", None))
+
+        def kill(self) -> None:
+            self.calls.append(("kill", None))
+
+        def wait(self, timeout: float) -> None:
+            self.calls.append(("wait", timeout))
+            raise subprocess.TimeoutExpired(["fake-capture"], timeout)
+
+    process = HangingProcess()
+    monkeypatch.setattr(MODULE.subprocess, "Popen", lambda *_args, **_kwargs: process)
+    monkeypatch.setattr(MODULE.threading, "Thread", FakeThread)
+
+    result = MODULE.default_capture(["fake-capture"], {})
+
+    assert result.timed_out is True
+    assert result.returncode is None
+    assert result.cleanup_errors == (
+        "process_reap_timeout",
+        "stdout_drain_timeout",
+        "stderr_drain_timeout",
+    )
+    assert process.calls == [
+        ("wait", MODULE.CAPTURE_SUBPROCESS_TIMEOUT_SECONDS),
+        ("terminate", None),
+        ("wait", MODULE.CAPTURE_TERMINATE_GRACE_SECONDS),
+        ("kill", None),
+        ("wait", MODULE.CAPTURE_KILL_REAP_TIMEOUT_SECONDS),
+        ("kill", None),
+        ("wait", MODULE.CAPTURE_FINAL_REAP_TIMEOUT_SECONDS),
+    ]
+    assert [thread.joins for thread in FakeThread.instances] == [
+        [MODULE.CAPTURE_STDOUT_DRAIN_TIMEOUT_SECONDS, MODULE.CAPTURE_PIPE_CLOSE_GRACE_SECONDS],
+        [MODULE.CAPTURE_STDERR_DRAIN_TIMEOUT_SECONDS, MODULE.CAPTURE_PIPE_CLOSE_GRACE_SECONDS],
+    ]
+
+
 @pytest.mark.parametrize(
     ("raw", "prefix_truncated"),
     [
@@ -1278,6 +1407,14 @@ def test_outer_capture_cap_exceeds_all_inner_bounded_stages() -> None:
     )
     assert MODULE.CAPTURE_SUBPROCESS_TIMEOUT_SECONDS > (
         MODULE.CAPTURE_INNER_BOUND_SECONDS + MODULE.CAPTURE_PACKAGING_MARGIN_SECONDS
+    )
+    assert MODULE.CAPTURE_OUTER_CLEANUP_MARGIN_SECONDS == pytest.approx(
+        MODULE.CAPTURE_TERMINATE_GRACE_SECONDS
+        + MODULE.CAPTURE_KILL_REAP_TIMEOUT_SECONDS
+        + MODULE.CAPTURE_FINAL_REAP_TIMEOUT_SECONDS
+        + MODULE.CAPTURE_STDERR_DRAIN_TIMEOUT_SECONDS
+        + MODULE.CAPTURE_STDOUT_DRAIN_TIMEOUT_SECONDS
+        + 2 * MODULE.CAPTURE_PIPE_CLOSE_GRACE_SECONDS
     )
     command = MODULE.capture_command(
         Path("/candidate"),
@@ -1528,7 +1665,8 @@ def test_default_capture_preserves_timeout_signal_and_bounded_malformed_output(
     )
     assert timeout.timed_out is True
     assert timeout.timeout_seconds == 0.05
-    assert timeout.returncode == -signal.SIGKILL
+    assert timeout.returncode == -signal.SIGTERM
+    assert timeout.cleanup_errors == ()
     assert timeout.stdout.sha256 == hashlib.sha256(b"partial\n").hexdigest()
 
     killed = MODULE.default_capture(

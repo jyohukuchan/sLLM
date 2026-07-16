@@ -91,21 +91,33 @@ def _resolve_receipt_file(receipt_path: Path, raw_path: str, label: str) -> Path
     return resolved
 
 
-def _load_overlay_receipt_tool() -> ModuleType:
-    """Load the standalone SQ8 receipt/inventory validator without a package import."""
+def _load_overlay_receipt_tool(source: bytes, path: Path) -> ModuleType:
+    """Compile an explicitly supplied receipt-validator dependency."""
 
-    path = ROOT / "tools/write-qwen35-aq4-sq8-overlay-promotion-receipt.py"
+    if not isinstance(source, bytes) or not source:
+        raise GenerationError("SQ8 overlay receipt validator source is unavailable")
     spec = importlib.util.spec_from_file_location("_ullm_sq8_overlay_receipt", path)
-    if spec is None or spec.loader is None:
+    if spec is None:
         raise GenerationError("SQ8 overlay receipt validator is unavailable")
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
     try:
-        spec.loader.exec_module(module)
+        exec(compile(source, str(path), "exec"), module.__dict__)
     except BaseException:
         sys.modules.pop(spec.name, None)
         raise
     return module
+
+
+def _standalone_overlay_receipt_tool() -> ModuleType:
+    """Load the CLI dependency once at the outermost standalone boundary."""
+
+    path = ROOT / "tools/write-qwen35-aq4-sq8-overlay-promotion-receipt.py"
+    try:
+        source = path.read_bytes()
+    except OSError as error:
+        raise GenerationError("SQ8 overlay receipt validator is unavailable") from error
+    return _load_overlay_receipt_tool(source, path)
 
 
 def _require_hex(value: Any, pattern: re.Pattern[str], label: str) -> str:
@@ -214,6 +226,7 @@ def _validate_sq8_overlay_receipt(
     expected_manifest_path: Path | None = None,
     allow_prepared: bool = False,
     prepared_only: bool = False,
+    receipt_tool: ModuleType | None = None,
 ) -> dict[str, Any]:
     """Validate the immutable SQ8 overlay publication contract.
 
@@ -449,7 +462,8 @@ def _validate_sq8_overlay_receipt(
     if receipt_package.get("manifest_sha256") != package_manifest_sha256:
         raise GenerationError("SQ8 overlay package manifest SHA-256 differs")
 
-    receipt_tool = _load_overlay_receipt_tool()
+    if receipt_tool is None:
+        raise GenerationError("SQ8 overlay receipt validator dependency is required")
     try:
         inventory = receipt_tool.artifact_inventory(product_root / Path(artifact_manifest_path).parent)
     except Exception as error:
@@ -847,6 +861,7 @@ def _materialize_profile_document(
     receipt_path_override: Path | None = None,
     allow_prepared: bool = False,
     prepared_only: bool = False,
+    overlay_receipt_tool: ModuleType | None = None,
 ) -> dict[str, Any]:
     profile = _load_json(profile_path, "served-model profile")
     if profile.get("schema_version") != PROFILE_SCHEMA:
@@ -966,6 +981,7 @@ def _materialize_profile_document(
                 expected_manifest_path=expected_manifest_path,
                 allow_prepared=allow_prepared,
                 prepared_only=prepared_only,
+                receipt_tool=overlay_receipt_tool,
             )
         else:
             _validate_aq4_evidence(
@@ -1062,11 +1078,17 @@ def materialize(
     *,
     expected_manifest_path: Path | None = None,
     receipt_path_override: Path | None = None,
+    overlay_receipt_tool: ModuleType | None = None,
 ) -> dict[str, Any]:
     return _materialize_profile_document(
         profile_path,
         expected_manifest_path=expected_manifest_path,
         receipt_path_override=receipt_path_override,
+        overlay_receipt_tool=(
+            overlay_receipt_tool
+            if overlay_receipt_tool is not None
+            else _standalone_overlay_receipt_tool()
+        ),
     )
 
 
@@ -1128,6 +1150,7 @@ def generate_prepared_candidate(profile_path: Path, output_path: Path) -> str:
         expected_manifest_path=output_path,
         allow_prepared=True,
         prepared_only=True,
+        overlay_receipt_tool=_standalone_overlay_receipt_tool(),
     )
     output_path.parent.mkdir(parents=True, exist_ok=True)
     encoded = (json.dumps(document, ensure_ascii=True, allow_nan=False, indent=2) + "\n").encode("utf-8")
