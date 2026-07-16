@@ -29,6 +29,7 @@
 
 - `ullm-aq4-differential-trace` に、既存payloadを変えない明示的な`--enable-intermediate-trace --enable-linear-stage-trace`を追加した。
 - opt-in時だけ`kernel-stages.jsonl`（固定座標のsummary）と`kernel-stages.f32le`（Phase 1 CPU `StageEmitter`と同じframed f32le protocol）を出す。各rowは最大16 MiBで、terminal frameを必須にする。manifestと`SHA256SUMS`にsidecarのschema・stage順・byte数・guard identityを記録する。
+- traceがpublication前に失敗した場合は、`OUTPUT.incomplete-PID` を削除せず残し、エラーにそのpathを明記する。これは再試行用ではなくfailure evidenceであり、terminal frame/manifest/`SHA256SUMS`を満たさない不完全rootは比較・promotionに使わない。
 - stage modeは、R9700のglobal device index 1、`HIP_VISIBLE_DEVICES=1`/`ULLM_HIP_VISIBLE_DEVICES=1`、`gfx1201`、layer 0で必要な7つのHIP fusion guardをfail-closedで要求する。`ULLM_SYNC_LINEAR_ATTN_COMPONENTS_FOR_TIMING`と`ULLM_DISABLE_AQ4_MATVEC_QKV_Z_GATE_BETA`は拒否し、意図せずfusionを外した比較を防ぐ。
 - `tools/compare-aq4-layer0-cpu-gpu-stage-stream.py` を追加した。既存Phase 1 CPU stage streamの3 context・最終timestepだけを、GPU sidecarの同一identityとfull f32 element単位で突き合わせる。出力はstageごとのmax abs、relative L2、cosineを含むhash付きJSONであり、入力frameを順次破棄する。
 - `tools/verify-aq4-layer0-package-embedding-fixture.py` を追加した。既存hybrid inputの全context rowをpackageのBF16 passthrough embedding行とraw f32 bytesで照合するCPU-only preflightである。AQ4のlayer 0入力差をGPU差と取り違えない。

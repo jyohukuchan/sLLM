@@ -1434,10 +1434,13 @@ fn run(
         fs::rename(&temporary, &output)
             .map_err(|error| format!("failed to publish trace root: {error}"))
     })();
-    if result.is_err() {
-        let _ = fs::remove_dir_all(&temporary);
+    match result {
+        Ok(()) => Ok(()),
+        Err(error) => Err(format!(
+            "{error}; incomplete diagnostic evidence was retained at {} (do not compare or promote it)",
+            temporary.display()
+        )),
     }
-    result
 }
 
 const USAGE: &str = "usage: ullm-aq4-differential-trace PACKAGE_DIR CASES_JSON REPLAY_JSON OUTPUT_DIR [DEVICE_INDEX] --enable-intermediate-trace [--enable-linear-stage-trace]";
