@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import sys
 from pathlib import Path
 
 import pytest
@@ -15,6 +16,15 @@ SPEC = importlib.util.spec_from_file_location(
 assert SPEC and SPEC.loader
 TOOL = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(TOOL)
+
+HYBRID_SPEC = importlib.util.spec_from_file_location(
+    "compare_aq4_layer0_hybrid",
+    ROOT / "tools/compare-aq4-layer0-hybrid.py",
+)
+assert HYBRID_SPEC and HYBRID_SPEC.loader
+HYBRID_TOOL = importlib.util.module_from_spec(HYBRID_SPEC)
+sys.modules[HYBRID_SPEC.name] = HYBRID_TOOL
+HYBRID_SPEC.loader.exec_module(HYBRID_TOOL)
 
 
 ARTIFACT = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/aq4-layer0-family-isolation-v0.1"
@@ -79,3 +89,50 @@ def test_hybrid_is_explicitly_not_inferred() -> None:
     reason = aq4["one_at_a_time_hybrid"]["reason"]
     assert "recurrent-state" in reason
     assert "not inferred" in reason
+
+
+def test_hybrid_synthetic_fixture_exercises_conv_recurrent_gate_and_residual() -> None:
+    fixture = HYBRID_TOOL.synthetic_hybrid_fixture()
+    torch = HYBRID_TOOL.torch
+    functional = HYBRID_TOOL.functional
+
+    assert fixture["conv_state"].shape == (2, 6)
+    assert torch.allclose(fixture["conv_state"][0], torch.zeros(6))
+    assert torch.allclose(
+        fixture["conv_state"][1],
+        torch.tensor([0.5, -0.5, 1.0, 2.0, -1.0, 0.25]),
+    )
+    assert fixture["state"].shape == (1, 2, 2)
+    assert torch.isfinite(fixture["recurrent"]).all()
+    assert torch.isfinite(fixture["gate_composed"]).all()
+    activation = fixture["layer_output"] - fixture["attention_residual"]
+    assert activation[0] == pytest.approx(-activation[1])
+    assert activation[0] == pytest.approx(
+        float(functional.silu(fixture["post_norm"].sum()).item() * 2.0)
+    )
+
+
+def test_hybrid_context_hash_and_streaming_metric_are_identity_bound() -> None:
+    assert HYBRID_TOOL.canonical_token_ids_hash([11, 12, 13]) == (
+        "42ea52c728680a54afafd1c1e1e45f13300c3ceb962f320f3900196a0c46215c"
+    )
+    accumulator = HYBRID_TOOL.MetricAccumulator()
+    header = {
+        "case_id": "synthetic",
+        "step": 0,
+        "context_token_ids_sha256": "a" * 64,
+        "context_length": 1,
+        "timestep": 0,
+        "stage": "layer_output",
+    }
+    accumulator.update(
+        header,
+        HYBRID_TOOL.torch.tensor([1.0, 3.0], dtype=HYBRID_TOOL.torch.float32),
+        HYBRID_TOOL.torch.tensor([1.0, 1.0], dtype=HYBRID_TOOL.torch.float32),
+    )
+    report = accumulator.report()
+    assert report["records"] == 1
+    assert report["elements_per_record"] == 2
+    assert report["max_abs"] == pytest.approx(2.0)
+    assert report["relative_l2"] == pytest.approx(2.0 / 2.0**0.5)
+    assert report["samples"][0]["coordinates"] == [0, 1]

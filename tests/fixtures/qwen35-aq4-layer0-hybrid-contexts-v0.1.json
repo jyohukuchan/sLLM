@@ -1,0 +1,20 @@
+{
+  "schema_version": "ullm.aq4_layer0_hybrid_contexts.v1",
+  "cases": [
+    {
+      "case_id": "fixture-prompt-0",
+      "step": 0,
+      "context_token_ids": [11, 12, 13]
+    },
+    {
+      "case_id": "fixture-prompt-0",
+      "step": 1,
+      "context_token_ids": [11, 12, 13, 220]
+    },
+    {
+      "case_id": "fixture-prompt-1",
+      "step": 0,
+      "context_token_ids": [21, 22]
+    }
+  ]
+}

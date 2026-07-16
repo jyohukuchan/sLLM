@@ -1,0 +1,7 @@
+a5aff244520f23e2981ace0b3ab84c73fc450cc55b5534d4c853c5bf35ebcf40  aq4/aq4-report.json
+e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  compare/aq4.stderr.log
+7757d5eff527f0240d7d645cbb59ebd76db737ea2af7b4e4f36c81447b7f3778  compare/comparison.json
+34d29e27f115e1d8f117ca3ae0095fc551e0276c165cbd8c9f36cdc5d374436b  input/hybrid-input.jsonl
+c9a58d574f5b29269d6e4ff024263d096cff772188f69e54d38222a5f6e97436  input/input/fixture-prompt-0-step-0-residual.f32le
+cb775fa4bf37425dcbb99ae42f48062c8d0b348f12ffac469fda40b971c4db05  input/input/fixture-prompt-0-step-1-residual.f32le
+a351f964325f93bbe6d01149ab42088e19e072c5745505aca7438099077a8758  input/input/fixture-prompt-1-step-0-residual.f32le
