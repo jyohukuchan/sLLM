@@ -31,11 +31,13 @@ RESIDENT_DRIVER = INPUT_ROOT / "resident-driver"
 SERVED_MANIFEST = Path("/etc/ullm/served-models/active.json")
 LOCK_PATH = Path("/run/ullm/r9700.lock")
 RUNNER_OUTPUT = Path("/tmp/ullm-aq4-p2-resident-smoke-L-dry-run")
-EXECUTE_BINDING_ROOT = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-execute-binding-v11"
+RESULTS_P2_ROOT = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2"
+RESULTS_P3_ROOT = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3"
+EXECUTE_BINDING_ROOT = RESULTS_P2_ROOT / "resident-one-case-smoke-execute-binding-v12"
 EXECUTE_BINDING_PATH = EXECUTE_BINDING_ROOT / "execute-binding.json"
 EXECUTE_LAUNCHER_TRUST_PATH = EXECUTE_BINDING_ROOT / "launcher-trust.json"
-EXECUTE_RUN_OUTPUT = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-execute-v11"
-EXECUTE_EVIDENCE_OUTPUT = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-execute-evidence-v11"
+EXECUTE_RUN_OUTPUT = RESULTS_P2_ROOT / "resident-one-case-smoke-execute-v12"
+EXECUTE_EVIDENCE_OUTPUT = RESULTS_P2_ROOT / "resident-one-case-smoke-execute-evidence-v12"
 LIVE_PREFLIGHT_PATH = EXECUTE_EVIDENCE_OUTPUT / "live-preflight.json"
 AMD_SMI = Path("/opt/rocm/bin/amd-smi")
 AMD_SMI_REAL = Path("/opt/rocm-7.2.1/libexec/amdsmi_cli/amdsmi_cli.py")
@@ -149,15 +151,41 @@ ROCMINFO_SHA = "e22d9361a66797b4f5fc8ff1a305f1492e70d323f76b7bd89b7db2a981b567ed
 SYSTEMCTL_SHA = "7ba82b5ba146759c710e1b80fadaa3fdbc0f9b85c8fb2c8c3196b7b1a0037ef8"
 PGREP_SHA = "8e1a7f00f33b9447e24835307cef71800677a2fe2975c8a1632b613109816b52"
 SUDO_SHA = "136f2e48b0295b9fc595b8259cf2411ac43f27ddbfe02b956649ddaa2e92b9fa"
-EXECUTE_RUN_ID = "p2-r9700-resident-one-case-smoke-execute-v11"
-PROFILE_RUN_ID = "p2-r9700-resident-one-case-smoke-profile-diagnostic-v11"
-PROFILE_RUN_OUTPUT = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-execute-v11"
-PROFILE_EVIDENCE_OUTPUT = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p2/resident-one-case-smoke-profile-execute-evidence-v11"
+EXECUTE_RUN_ID = "p2-r9700-resident-one-case-smoke-execute-v12"
+PROFILE_RUN_ID = "p2-r9700-resident-one-case-smoke-profile-diagnostic-v12"
+PROFILE_RUN_OUTPUT = RESULTS_P2_ROOT / "resident-one-case-smoke-profile-execute-v12"
+PROFILE_EVIDENCE_OUTPUT = RESULTS_P2_ROOT / "resident-one-case-smoke-profile-execute-evidence-v12"
 PROFILE_LIVE_PREFLIGHT_PATH = PROFILE_EVIDENCE_OUTPUT / "live-preflight.json"
 PROFILE_RUNNER_TARGET_MANIFEST_NAME = "runner-target-command-manifest.json"
-PROFILE_CAPTURE_OUTPUT_DIRECTORY = ROOT / "benchmarks/results/2026-07-15/qwen35-9b-aq4-production-opt-v0.1/p3/aq4-p3-diagnostic-rocprof-capture-v11"
+PROFILE_CAPTURE_OUTPUT_DIRECTORY = RESULTS_P3_ROOT / "aq4-p3-diagnostic-rocprof-capture-v12"
 PROFILE_CAPTURE_ARTIFACT = PROFILE_CAPTURE_OUTPUT_DIRECTORY / "capture-artifact.json"
 PROFILE_CAPTURE_FAILURE = PROFILE_CAPTURE_OUTPUT_DIRECTORY / "capture-failure.json"
+PROFILE_MAINTENANCE_EVIDENCE_OUTPUT = RESULTS_P2_ROOT / "resident-one-case-smoke-profile-maintenance-evidence-v13"
+
+HISTORICAL_EXECUTE_BINDING_V11_ROOT = RESULTS_P2_ROOT / "resident-one-case-smoke-execute-binding-v11"
+HISTORICAL_EXECUTE_BINDING_V11_PATH = HISTORICAL_EXECUTE_BINDING_V11_ROOT / "execute-binding.json"
+HISTORICAL_EXECUTE_LAUNCHER_TRUST_V11_PATH = HISTORICAL_EXECUTE_BINDING_V11_ROOT / "launcher-trust.json"
+HISTORICAL_EXECUTE_BINDING_V11_COMMIT = "9111b2a6c9479ebccb61a55641b5be52f86d5dda"
+HISTORICAL_EXECUTE_BINDING_V11_COMMIT_TREE = "3102beeac6be9a7e03e871fb58a0476dd4115384"
+HISTORICAL_EXECUTE_BINDING_V11_ROOT_TREE = "f76c878764aff5d4290bc48967928c0d1e1f6bac"
+HISTORICAL_EXECUTE_BINDING_V11_HASHES = {
+    "execute-binding.json": "ef8962ada001ef9017b76eb91fd9a89473b931aac857282296763750c5f9eb20",
+    "launcher-trust.json": "3c56816b7c07ae03c79f4670855137b7a9c37c9f637659695f47e5c581bc07c0",
+    "SHA256SUMS": "59146edcaa6b455d520783dc9e39dd096478f5414789c5056afc9d51506a68cf",
+}
+HISTORICAL_LAUNCHER_V11_COMMIT = "4cd57c1c0da182224df15c842e072dcc2c4a1de0"
+HISTORICAL_LAUNCHER_V11_TREE = "ba35d4e0642450a5c832f5f1d3fb526cc3911e27"
+HISTORICAL_LAUNCHER_V11_GIT_BLOB = "de145057e67b581963570b63adb12f167afb03fa"
+HISTORICAL_LAUNCHER_V11_SHA = "d0d7804d55b33754534501db4731581e742381f409b0ef290da4cc8db7949dcc"
+HISTORICAL_ACTUAL_V15_COMMIT = "99faf0066b93eb021fa83bea1b1a0193d9a79fd4"
+HISTORICAL_ACTUAL_V15_ROOTS = frozenset({
+    RESULTS_P2_ROOT / "resident-one-case-smoke-profile-execute-v11",
+    RESULTS_P2_ROOT / "resident-one-case-smoke-profile-execute-evidence-v11",
+    RESULTS_P2_ROOT / "resident-one-case-smoke-profile-maintenance-evidence-v12",
+    RESULTS_P2_ROOT / "resident-one-case-smoke-profile-operator-result-v15",
+    RESULTS_P2_ROOT / "resident-one-case-smoke-profile-actual-audit-v15",
+    RESULTS_P3_ROOT / "aq4-p3-diagnostic-rocprof-capture-v11",
+})
 ROCTX_LIBRARY = Path("/opt/rocm-7.2.1/lib/librocprofiler-sdk-roctx.so.1.1.0")
 ROCTX_LIBRARY_RESOLVED = Path("/opt/rocm-7.2.1/lib/librocprofiler-sdk-roctx.so.1.1.0")
 ROCTX_LIBRARY_SHA = "1a5831a3817eac29f63d1442dc348ba31b417202b7ce15f3aed9c09a8f4773c9"
@@ -679,7 +707,120 @@ def validate_runner_plan(raw: bytes) -> dict[str, Any]:
     return plan
 
 
+def git_path_last_change(path: Path, label: str) -> str:
+    try:
+        relative = path.resolve().relative_to(ROOT)
+    except ValueError as error:
+        raise LauncherError(f"{label} is outside the repository") from error
+    completed = subprocess.run(
+        ["git", "log", "-1", "--format=%H", "--", str(relative)],
+        cwd=ROOT,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    if completed.returncode != 0 or completed.stderr or not re.fullmatch(rb"[0-9a-f]{40}\n", completed.stdout):
+        raise LauncherError(f"{label} Git path-last-change lookup failed")
+    return completed.stdout.decode("ascii").strip()
+
+
+def current_execute_namespace_roots() -> frozenset[Path]:
+    roots = frozenset({
+        EXECUTE_BINDING_ROOT,
+        EXECUTE_RUN_OUTPUT,
+        EXECUTE_EVIDENCE_OUTPUT,
+        PROFILE_RUN_OUTPUT,
+        PROFILE_EVIDENCE_OUTPUT,
+        PROFILE_CAPTURE_OUTPUT_DIRECTORY,
+        PROFILE_MAINTENANCE_EVIDENCE_OUTPUT,
+    })
+    if len(roots) != 7 or any(not path.is_absolute() or ".." in path.parts for path in roots):
+        raise LauncherError("current execute namespace roots are not seven canonical absolute paths")
+    if not roots.isdisjoint(HISTORICAL_ACTUAL_V15_ROOTS):
+        raise LauncherError("current execute namespace reuses sealed actual-v15 output")
+    return roots
+
+
+def load_historical_execute_binding_v11() -> tuple[dict[str, Any], dict[str, Any]]:
+    root = HISTORICAL_EXECUTE_BINDING_V11_ROOT
+    relative_root = root.relative_to(ROOT)
+    if stat.S_IMODE(root.lstat().st_mode) != 0o555 or {item.name for item in root.iterdir()} != set(HISTORICAL_EXECUTE_BINDING_V11_HASHES):
+        raise LauncherError("historical execute-binding-v11 root contract differs")
+    observed: dict[str, bytes] = {}
+    for name, expected_sha in HISTORICAL_EXECUTE_BINDING_V11_HASHES.items():
+        raw, _ = read_regular(root / name, f"historical execute-binding-v11 {name}")
+        metadata = (root / name).lstat()
+        if stat.S_IMODE(metadata.st_mode) != 0o444 or metadata.st_nlink != 1 or sha_bytes(raw) != expected_sha:
+            raise LauncherError(f"historical execute-binding-v11 member differs: {name}")
+        observed[name] = raw
+    expected_sums = (
+        f'{HISTORICAL_EXECUTE_BINDING_V11_HASHES["execute-binding.json"]}  execute-binding.json\n'
+        f'{HISTORICAL_EXECUTE_BINDING_V11_HASHES["launcher-trust.json"]}  launcher-trust.json\n'
+    ).encode("ascii")
+    if observed["SHA256SUMS"] != expected_sums:
+        raise LauncherError("historical execute-binding-v11 SHA256SUMS differs")
+
+    binding = parse_json(observed["execute-binding.json"], "historical execute-binding-v11")
+    trust = parse_json(observed["launcher-trust.json"], "historical execute-launcher-v11 trust")
+    expected_binding_facts = {
+        "status": "blocked_pending_live_preflight_and_qa",
+        "actual_eligible": False,
+        "promotion": False,
+        "run_id": "p2-r9700-resident-one-case-smoke-execute-v11",
+        "runner_output": str(RESULTS_P2_ROOT / "resident-one-case-smoke-execute-v11"),
+        "evidence_output": str(RESULTS_P2_ROOT / "resident-one-case-smoke-execute-evidence-v11"),
+    }
+    if any(binding.get(key) != value for key, value in expected_binding_facts.items()):
+        raise LauncherError("historical execute-binding-v11 final state differs")
+    expected_trust = {
+        "schema_version": "ullm.aq4_p2_resident_execute_launcher_trust.v1",
+        "status": "qa_pending",
+        "actual_eligible": False,
+        "path": str(ROOT / "tools/launch-aq4-p2-resident-smoke.py"),
+        "commit": HISTORICAL_LAUNCHER_V11_COMMIT,
+        "tree": HISTORICAL_LAUNCHER_V11_TREE,
+        "git_blob": HISTORICAL_LAUNCHER_V11_GIT_BLOB,
+        "sha256": HISTORICAL_LAUNCHER_V11_SHA,
+        "execute_binding": {
+            "path": str(HISTORICAL_EXECUTE_BINDING_V11_PATH),
+            "sha256": HISTORICAL_EXECUTE_BINDING_V11_HASHES["execute-binding.json"],
+        },
+    }
+    if trust != expected_trust:
+        raise LauncherError("historical execute-launcher-v11 trust differs")
+
+    root_tree = subprocess.run(
+        ["git", "rev-parse", f"{HISTORICAL_EXECUTE_BINDING_V11_COMMIT}:{relative_root}"],
+        cwd=ROOT, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
+    )
+    commit_tree = subprocess.run(
+        ["git", "rev-parse", f"{HISTORICAL_EXECUTE_BINDING_V11_COMMIT}^{{tree}}"],
+        cwd=ROOT, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
+    )
+    if root_tree.returncode != 0 or root_tree.stderr or root_tree.stdout.decode("ascii").strip() != HISTORICAL_EXECUTE_BINDING_V11_ROOT_TREE:
+        raise LauncherError("historical execute-binding-v11 Git root differs")
+    if commit_tree.returncode != 0 or commit_tree.stderr or commit_tree.stdout.decode("ascii").strip() != HISTORICAL_EXECUTE_BINDING_V11_COMMIT_TREE:
+        raise LauncherError("historical execute-binding-v11 commit tree differs")
+    for name, raw in observed.items():
+        committed = subprocess.run(
+            ["git", "show", f"{HISTORICAL_EXECUTE_BINDING_V11_COMMIT}:{relative_root / name}"],
+            cwd=ROOT, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
+        )
+        if committed.returncode != 0 or committed.stderr or committed.stdout != raw:
+            raise LauncherError(f"historical execute-binding-v11 committed member differs: {name}")
+    launcher_relative = Path("tools/launch-aq4-p2-resident-smoke.py")
+    archived_launcher = subprocess.run(
+        ["git", "show", f"{HISTORICAL_LAUNCHER_V11_COMMIT}:{launcher_relative}"],
+        cwd=ROOT, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
+    )
+    if archived_launcher.returncode != 0 or archived_launcher.stderr or sha_bytes(archived_launcher.stdout) != HISTORICAL_LAUNCHER_V11_SHA:
+        raise LauncherError("historical execute-launcher-v11 archived source differs")
+    return binding, trust
+
+
 def execute_binding_document() -> dict[str, Any]:
+    current_execute_namespace_roots()
     return {
         "schema_version": "ullm.aq4_p2_resident_smoke_execute_binding.v1",
         "status": "blocked_pending_live_preflight_and_qa", "actual_eligible": False, "promotion": False,
@@ -842,17 +983,7 @@ def prepare_execute_binding(output: Path = EXECUTE_BINDING_ROOT) -> dict[str, An
     launcher_path = Path(__file__).resolve()
     launcher_raw, _ = read_regular(launcher_path, "execute launcher source")
     relative = launcher_path.relative_to(ROOT)
-    source_commit = subprocess.run(
-        ["git", "log", "-1", "--format=%H", "--", str(relative)],
-        cwd=ROOT,
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        check=False,
-    )
-    if source_commit.returncode != 0 or source_commit.stderr or not re.fullmatch(rb"[0-9a-f]{40}\n", source_commit.stdout):
-        raise LauncherError("execute launcher Git authority lookup failed")
-    source_revision = source_commit.stdout.decode("ascii").strip()
+    source_revision = git_path_last_change(launcher_path, "execute launcher source")
     git_values = [source_revision]
     for revision in (f"{source_revision}^{{tree}}", f"{source_revision}:{relative}"):
         completed = subprocess.run(["git", "rev-parse", revision], cwd=ROOT, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
@@ -893,6 +1024,8 @@ def load_execute_binding(path: Path) -> tuple[dict[str, Any], dict[str, Any]]:
     if sha_bytes(launcher_raw) != trust["sha256"]:
         raise LauncherError("execute launcher self differs from artifact trust")
     relative = Path(__file__).resolve().relative_to(ROOT)
+    if git_path_last_change(Path(__file__).resolve(), "execute launcher trusted self") != trust["commit"]:
+        raise LauncherError("execute launcher artifact is not bound to source path-last-change")
     authority_revisions = (f'{trust["commit"]}^{{tree}}', f'{trust["commit"]}:{relative}')
     authority_values = []
     for revision in authority_revisions:

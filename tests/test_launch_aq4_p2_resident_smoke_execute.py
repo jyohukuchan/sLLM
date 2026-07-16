@@ -207,39 +207,23 @@ def test_profile_roctx_sdk_authority_and_generic_runner_cli_are_exact() -> None:
     assert profile[index:index + 5] == ["--profile-roctx-ranges", "--roctx-library", str(library), "--roctx-library-sha256", LAUNCHER.ROCTX_LIBRARY_SHA]
 
 
-def test_v11_normal_and_profile_namespaces_are_disjoint_and_poststate_independent() -> None:
-    assert LAUNCHER.EXECUTE_BINDING_ROOT.name == "resident-one-case-smoke-execute-binding-v11"
-    assert LAUNCHER.EXECUTE_RUN_ID == "p2-r9700-resident-one-case-smoke-execute-v11"
-    assert LAUNCHER.EXECUTE_RUN_OUTPUT.name == "resident-one-case-smoke-execute-v11"
-    assert LAUNCHER.EXECUTE_EVIDENCE_OUTPUT.name == "resident-one-case-smoke-execute-evidence-v11"
-    assert LAUNCHER.PROFILE_RUN_ID == "p2-r9700-resident-one-case-smoke-profile-diagnostic-v11"
-    assert LAUNCHER.PROFILE_RUN_OUTPUT.name == "resident-one-case-smoke-profile-execute-v11"
-    assert LAUNCHER.PROFILE_EVIDENCE_OUTPUT.name == "resident-one-case-smoke-profile-execute-evidence-v11"
-    assert LAUNCHER.PROFILE_CAPTURE_OUTPUT_DIRECTORY.name == "aq4-p3-diagnostic-rocprof-capture-v11"
+def test_v12_normal_and_profile_namespaces_are_disjoint_from_actual_v15() -> None:
+    assert LAUNCHER.EXECUTE_BINDING_ROOT.name == "resident-one-case-smoke-execute-binding-v12"
+    assert LAUNCHER.EXECUTE_RUN_ID == "p2-r9700-resident-one-case-smoke-execute-v12"
+    assert LAUNCHER.EXECUTE_RUN_OUTPUT.name == "resident-one-case-smoke-execute-v12"
+    assert LAUNCHER.EXECUTE_EVIDENCE_OUTPUT.name == "resident-one-case-smoke-execute-evidence-v12"
+    assert LAUNCHER.PROFILE_RUN_ID == "p2-r9700-resident-one-case-smoke-profile-diagnostic-v12"
+    assert LAUNCHER.PROFILE_RUN_OUTPUT.name == "resident-one-case-smoke-profile-execute-v12"
+    assert LAUNCHER.PROFILE_EVIDENCE_OUTPUT.name == "resident-one-case-smoke-profile-execute-evidence-v12"
+    assert LAUNCHER.PROFILE_CAPTURE_OUTPUT_DIRECTORY.name == "aq4-p3-diagnostic-rocprof-capture-v12"
+    assert LAUNCHER.PROFILE_MAINTENANCE_EVIDENCE_OUTPUT.name == "resident-one-case-smoke-profile-maintenance-evidence-v13"
     assert LAUNCHER.sha_bytes(LAUNCHER.PROFILE_PRODUCER_HELPER.read_bytes()) == LAUNCHER.PROFILE_PRODUCER_HELPER_SHA == "a589c3e644d36132fb6054afdb15b27543d8e8181e3c737dcbd071d7c52e3d20"
     assert LAUNCHER.sha_bytes(LAUNCHER.PROFILE_FAMILY_HELPER.read_bytes()) == LAUNCHER.PROFILE_FAMILY_HELPER_SHA == "f8d32c340231e329f004d9e16192c02378f1fd58b8ab713e8efbbd3029b052d6"
-    p2 = LAUNCHER.EXECUTE_BINDING_ROOT.parent
-    p3 = LAUNCHER.PROFILE_CAPTURE_OUTPUT_DIRECTORY.parent
-    maintenance_v12 = p2 / "resident-one-case-smoke-profile-maintenance-evidence-v12"
-    fresh = {
-        LAUNCHER.EXECUTE_BINDING_ROOT,
-        LAUNCHER.EXECUTE_RUN_OUTPUT,
-        LAUNCHER.EXECUTE_EVIDENCE_OUTPUT,
-        LAUNCHER.PROFILE_RUN_OUTPUT,
-        LAUNCHER.PROFILE_EVIDENCE_OUTPUT,
-        LAUNCHER.PROFILE_CAPTURE_OUTPUT_DIRECTORY,
-        maintenance_v12,
-    }
-    occupied_actual_v14 = {
-        p2 / "resident-one-case-smoke-profile-maintenance-evidence-v11",
-        p2 / "resident-one-case-smoke-profile-execute-v10",
-        p2 / "resident-one-case-smoke-profile-execute-evidence-v10",
-        p2 / "resident-one-case-smoke-profile-operator-result-v14",
-        p2 / "resident-one-case-smoke-profile-actual-audit-v14",
-        p3 / "aq4-p3-diagnostic-rocprof-capture-v10",
-    }
+    fresh = LAUNCHER.current_execute_namespace_roots()
     assert len(fresh) == 7
-    assert fresh.isdisjoint(occupied_actual_v14)
+    assert len(LAUNCHER.HISTORICAL_ACTUAL_V15_ROOTS) == 6
+    assert LAUNCHER.HISTORICAL_ACTUAL_V15_COMMIT == "99faf0066b93eb021fa83bea1b1a0193d9a79fd4"
+    assert fresh.isdisjoint(LAUNCHER.HISTORICAL_ACTUAL_V15_ROOTS)
     assert all(path.is_absolute() and ".." not in path.parts for path in fresh)
 
 
@@ -812,9 +796,9 @@ def test_historical_execute_binding_v10_is_sealed_and_immutable() -> None:
         assert committed.stdout == (root / name).read_bytes()
 
 
-def test_current_execute_binding_v11_is_sealed_and_bound_to_launcher_authority() -> None:
+def test_current_execute_binding_v12_is_sealed_and_bound_to_path_last_change_authority() -> None:
     root = LAUNCHER.EXECUTE_BINDING_ROOT
-    assert root.name == "resident-one-case-smoke-execute-binding-v11"
+    assert root.name == "resident-one-case-smoke-execute-binding-v12"
     assert stat.S_IMODE(root.stat().st_mode) == 0o555
     assert {item.name for item in root.iterdir()} == {"execute-binding.json", "launcher-trust.json", "SHA256SUMS"}
     for item in root.iterdir():
@@ -840,6 +824,30 @@ def test_current_execute_binding_v11_is_sealed_and_bound_to_launcher_authority()
     ).stdout
     assert committed == SCRIPT.read_bytes()
     assert trust["sha256"] == LAUNCHER.sha_bytes(committed)
+
+
+def test_historical_execute_binding_v11_is_immutable_and_current_state_independent(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    binding, trust = LAUNCHER.load_historical_execute_binding_v11()
+    assert binding["run_id"] == "p2-r9700-resident-one-case-smoke-execute-v11"
+    assert binding["status"] == "blocked_pending_live_preflight_and_qa"
+    assert binding["actual_eligible"] is False
+    assert trust["commit"] == "4cd57c1c0da182224df15c842e072dcc2c4a1de0"
+    assert LAUNCHER.HISTORICAL_EXECUTE_BINDING_V11_COMMIT == "9111b2a6c9479ebccb61a55641b5be52f86d5dda"
+
+    for name in (
+        "EXECUTE_BINDING_ROOT",
+        "EXECUTE_RUN_OUTPUT",
+        "EXECUTE_EVIDENCE_OUTPUT",
+        "PROFILE_RUN_OUTPUT",
+        "PROFILE_EVIDENCE_OUTPUT",
+        "PROFILE_CAPTURE_OUTPUT_DIRECTORY",
+        "PROFILE_MAINTENANCE_EVIDENCE_OUTPUT",
+    ):
+        monkeypatch.setattr(LAUNCHER, name, tmp_path / name.lower())
+    monkeypatch.setattr(LAUNCHER, "EXECUTE_RUN_ID", "poststate-mutation")
+    historical_after, trust_after = LAUNCHER.load_historical_execute_binding_v11()
+    assert historical_after == binding
+    assert trust_after == trust
 
 
 def test_historical_execute_binding_v8_is_sealed_and_remains_blocked() -> None:
