@@ -1,0 +1,11 @@
+# SQ8 calibration invocation boundary audit
+
+- Fixed plan: `/tmp/ullm-p2-sq8-calibration-actual-17581136c57bb90e-v4/plan.json`, SHA-256 `3f93c95bfdb6af416c6b5315967263dfc363c292ace6772bb5d22f2b648eee71`.
+- The first invocation stopped before output temporary-directory creation and before `Qwen35Aq4ModelRuntime::load`: the Cargo release binary had two hard links and the capture child rejected it at its own binary identity check.
+- Observed work was zero model loads and zero calibration cases. No target, incomplete target, calibration metrics, freeze receipt, marker, attempt ledger, holdout preflight, or holdout receipt exists under v4.
+- Immutable failure evidence: `calibration-gate.log` `4a8fa1e11819fea04e32e1f3e89134d5d7e79889f56fe1fb7927e3fe7f4cc5ac`; `gpu-stable-1.json` `651c67203ebf2427499e1cb3af04c6a5b2cf313a79c3feaf83beee2c51bc6a47`; `gpu-stable-2.json` `332b0a2d717b0bc70c49c461a5ee173e85b7c013fde894bf0ab20bf095ee4080`; original gate script `2f528565f7cd511df689b1102d431783fe54f6a6f5265608d41a68c8147b0a5c`.
+- The frozen policy's `attempt2_*` fields exclude the historical differential-trace artifact IDs, context hashes, and their observed values as threshold sources. They do not define a calibration execution-attempt ledger.
+- The only irreversible failure-consumes-attempt boundary is in `execute-holdout`: it publishes the holdout ledger before reading holdout metrics. No holdout preflight or ledger was created. Revalidation leaves `holdout_state={status:not_started,evaluations_remaining:1,retry_permitted:false}`.
+- Therefore a later create-new invocation of the same fixed 24-case calibration contract is not an attempt2 artifact and does not consume or retry holdout. Holdout execution remains prohibited.
+- Before another calibration invocation, stage the binary as a create-new single-link executable and verify it with O_NOFOLLOW, fstat, exact size, and streaming SHA immediately before execution. The capture child independently performs O_NOFOLLOW and before/after fstat checks.
+- Service restoration must use the official SQ8 promotion poller and require a new main/worker PID epoch, exact production-lock ownership, exact worker/AMD/KFD PID agreement, unchanged NRestarts, and bridge readiness within its timeout.

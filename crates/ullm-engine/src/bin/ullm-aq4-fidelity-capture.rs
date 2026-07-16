@@ -15,7 +15,7 @@ use std::ffi::CString;
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Seek, Write};
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::MetadataExt;
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Component, Path, PathBuf};
 use std::process::ExitCode;
 
@@ -423,13 +423,33 @@ impl Qwen35Aq4CalibrationObserver for CaptureObserver<'_> {
 }
 
 fn sha_file(path: &Path, label: &str) -> Result<String, String> {
-    let metadata = fs::symlink_metadata(path).map_err(|e| format!("{label} metadata: {e}"))?;
-    if !metadata.is_file() || metadata.file_type().is_symlink() || metadata.nlink() != 1 {
+    const O_NOFOLLOW: i32 = 0o400000;
+    let path_metadata =
+        fs::symlink_metadata(path).map_err(|e| format!("{label} metadata: {e}"))?;
+    if !path_metadata.is_file()
+        || path_metadata.file_type().is_symlink()
+        || path_metadata.nlink() != 1
+    {
         return Err(format!("{label} must be a single-link regular file"));
     }
-    let mut file = File::open(path).map_err(|e| format!("{label} open: {e}"))?;
+    let mut file = OpenOptions::new()
+        .read(true)
+        .custom_flags(O_NOFOLLOW)
+        .open(path)
+        .map_err(|e| format!("{label} O_NOFOLLOW open: {e}"))?;
+    let before = file
+        .metadata()
+        .map_err(|e| format!("{label} fstat before read: {e}"))?;
+    if !before.is_file()
+        || before.nlink() != 1
+        || (path_metadata.dev(), path_metadata.ino(), path_metadata.len())
+            != (before.dev(), before.ino(), before.len())
+    {
+        return Err(format!("{label} identity changed before read"));
+    }
     let mut digest = Sha256::new();
     let mut buf = [0_u8; 1024 * 1024];
+    let mut total = 0_u64;
     loop {
         let read = file
             .read(&mut buf)
@@ -438,6 +458,18 @@ fn sha_file(path: &Path, label: &str) -> Result<String, String> {
             break;
         }
         digest.update(&buf[..read]);
+        total = total
+            .checked_add(read as u64)
+            .ok_or_else(|| format!("{label} size overflow"))?;
+    }
+    let after = file
+        .metadata()
+        .map_err(|e| format!("{label} fstat after read: {e}"))?;
+    if total != before.len()
+        || (before.dev(), before.ino(), before.len(), before.nlink(), before.mtime(), before.mtime_nsec())
+            != (after.dev(), after.ino(), after.len(), after.nlink(), after.mtime(), after.mtime_nsec())
+    {
+        return Err(format!("{label} identity changed during read"));
     }
     Ok(format!("{:x}", digest.finalize()))
 }
@@ -1650,6 +1682,27 @@ mod tests {
     #[test]
     fn strict_json_rejects_duplicate_keys() {
         assert!(parse_strict_json(br#"{"a":1,"a":2}"#, "duplicate").is_err());
+    }
+
+    #[test]
+    fn sha_file_uses_single_link_nofollow_fd_identity() {
+        let root = temp("secure-sha");
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let file = root.join("capture");
+        fs::write(&file, b"capture-binary").unwrap();
+        assert_eq!(
+            sha_file(&file, "capture").unwrap(),
+            "8940c0e35035ed77ce3e01a802ae203bf1bc4323bb5bcdb30de48f45a18a27e1"
+        );
+        let hardlink = root.join("capture-hardlink");
+        fs::hard_link(&file, &hardlink).unwrap();
+        assert!(sha_file(&file, "capture").is_err());
+        fs::remove_file(&hardlink).unwrap();
+        let symlink = root.join("capture-symlink");
+        std::os::unix::fs::symlink(&file, &symlink).unwrap();
+        assert!(sha_file(&symlink, "capture").is_err());
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
