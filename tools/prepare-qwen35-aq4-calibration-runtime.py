@@ -9,6 +9,7 @@ import importlib.util
 import json
 import os
 import stat
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any
@@ -209,6 +210,36 @@ def wait_restored(before_path: Path, served_model: Path, output: Path) -> dict[s
     return value
 
 
+def _artifact_hashes(root: Path) -> dict[str, str]:
+    expected = {"SHA256SUMS", "manifest.json", "rows.jsonl", "vectors/hidden.f32le", "vectors/logits.f32le"}
+    observed = {str(path.relative_to(root)) for path in root.rglob("*") if path.is_file()}
+    if observed != expected:
+        raise RuntimePreparationError("published target file set differs")
+    return {name: binary_identity(root / name, f"target {name}")["sha256"] for name in sorted(expected)}
+
+
+def validate_target_cli(artifact: Path) -> dict[str, Any]:
+    before = _artifact_hashes(artifact)
+    validator = Path(__file__).with_name("validate-qwen35-aq4-p2-full-calibration.py")
+    completed = subprocess.run(
+        [sys.executable, str(validator), "--artifact", str(artifact)],
+        check=False, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True, timeout=60,
+    )
+    if completed.returncode != 0 or completed.stderr:
+        raise RuntimePreparationError(f"strict target validator failed: {completed.stderr.strip()}")
+    try:
+        report = json.loads(completed.stdout)
+    except json.JSONDecodeError as error:
+        raise RuntimePreparationError("strict target validator output differs") from error
+    if report.get("status") != "valid" or report.get("row_count") != 24 or report.get("nonfinite_rows") != 0:
+        raise RuntimePreparationError("strict target validator report differs")
+    after = _artifact_hashes(artifact)
+    if before != after:
+        raise RuntimePreparationError("strict target validator modified the published target")
+    return {"report": report, "artifact_hashes": before, "validator_modified_artifact": False, "command": [sys.executable, str(validator), "--artifact", str(artifact)]}
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -220,12 +251,15 @@ def main(argv: list[str] | None = None) -> int:
     snap.add_argument("--served-model", type=Path, required=True); snap.add_argument("--output", type=Path, required=True)
     restore = sub.add_parser("wait-restored")
     restore.add_argument("--before", type=Path, required=True); restore.add_argument("--served-model", type=Path, required=True); restore.add_argument("--output", type=Path, required=True)
+    target = sub.add_parser("validate-target")
+    target.add_argument("--artifact", type=Path, required=True)
     args = parser.parse_args(argv)
     try:
         if args.command == "stage-binary": result = stage_binary(args.source, args.output, args.receipt)
         elif args.command == "validate-binary": result = validate_binary(args.path, args.expected_sha256, args.expected_bytes)
         elif args.command == "snapshot": result = snapshot(args.served_model, args.output)
-        else: result = wait_restored(args.before, args.served_model, args.output)
+        elif args.command == "wait-restored": result = wait_restored(args.before, args.served_model, args.output)
+        else: result = validate_target_cli(args.artifact)
         print(json.dumps({"status": "ok", "command": args.command, "result": result}, sort_keys=True))
         return 0
     except (RuntimePreparationError, OSError, ValueError, KeyError, json.JSONDecodeError) as error:

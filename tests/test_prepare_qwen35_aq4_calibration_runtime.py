@@ -7,6 +7,8 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -88,6 +90,19 @@ class CalibrationRuntimePreparationTests(unittest.TestCase):
         for name, changed_service, changed_owners in mutations:
             with self.subTest(name=name), self.assertRaises(runtime.RuntimePreparationError):
                 runtime._validate_ready(changed_service, changed_owners, expected_nrestarts=0)
+
+    def test_target_validation_wires_artifact_flag_and_is_read_only(self) -> None:
+        artifact = self.root / "target"
+        (artifact / "vectors").mkdir(parents=True)
+        for relative in ("SHA256SUMS", "manifest.json", "rows.jsonl", "vectors/hidden.f32le", "vectors/logits.f32le"):
+            (artifact / relative).write_bytes(relative.encode())
+        completed = SimpleNamespace(returncode=0, stderr="", stdout=json.dumps({"status": "valid", "row_count": 24, "nonfinite_rows": 0}))
+        with mock.patch.object(runtime.subprocess, "run", return_value=completed) as called:
+            result = runtime.validate_target_cli(artifact)
+        command = called.call_args.args[0]
+        self.assertEqual(command[-2:], ["--artifact", str(artifact)])
+        self.assertFalse(result["validator_modified_artifact"])
+        self.assertEqual(set(result["artifact_hashes"]), {"SHA256SUMS", "manifest.json", "rows.jsonl", "vectors/hidden.f32le", "vectors/logits.f32le"})
 
 
 if __name__ == "__main__":

@@ -1,3 +1,3 @@
-SQ8 calibration は固定 v4 plan で preflight GO です。
-最初の invocation は model load 前・0 cases で hardlink 検査に停止し、holdout attempt は未消費です。
-single-link staging と厳格な service 復旧確認を実装・試験中で、GPU 再実行と holdout は停止しています。
+SQ8 calibration は固定 v4 plan で 24/24 rows を一回だけ取得し、target を publish 済みです。
+service は公式 poller で正常復旧し、target の SHA256SUMS と strict validator は通過しました。
+GPU 再実行と holdout を禁止し、同じ target の offline metrics・freeze・ledger 固定を進めています。
