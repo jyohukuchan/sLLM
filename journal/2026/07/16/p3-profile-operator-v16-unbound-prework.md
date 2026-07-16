@@ -17,9 +17,15 @@
 - operator source/test commit は `4869fde48ca872da70b09b029ebdd9da169fc4b1`、tree は `d531b2e1bfb27e959ff7f8eaa6dc6259a65efcd9` である。source blob/raw SHA256 は `2ccdcb1e5e0e7725c6b965ac0cd86b91d44f9920` / `2990ee98bd24a41c536725a3edd977e6248442b79fc181e342326dd0be9a51c1`、test blob/raw SHA256 は `286215fac77bfb19cffe95d98e1e6a60421082d5` / `d1882f7328781fd8957c86174a7b06b95f35c9cff8c3ca8102cd8465a6d76840` である。
 - `python3.12 -m pytest -q tests/test_prepare_aq4_p3_profile_operator.py` は 75 tests passed、`py_compile` と `git diff --check` も通過した。
 - read-only `audit-current` は `status=clean`、fresh 9/9 absent、targeted processes 0、`service_touched=false`、`actual_executed=false` である。formal health SHA256 は `b032d38fcdb8e17f2452daa47ce07f2335875451df2ac47f73d117a4331b3722` である。
+- quiet 開始直前の 4 stable polls は blocking identity `6d6ae8cc4d839f5f6694e6e3309f47c68d4fd1be870ec223963662a7115c575a` で不変だった。各 poll は clean、fresh 9/9 absent、authority bound、operator source diff clean、service active/running・nrestarts 0、worker/GPU owner PID `3268350` のみ、targeted process 0 だった。
+- quiet-v21 は既定の 27 samples、minimum span 130 秒、reset 0、追加の final confirmation を短縮せずに収集した。実測 span は `362.436759694` 秒で、27 samples と confirmation の blocking identity はすべて一致した。
+- quiet-v21 commit は `e1ad3423ae19f16c0bfd7f4648f54e6c81d91031`、commit tree は `a4cbd62702617a6cc2d56da328de80a818d28bc1`、root tree は `0c99c446a228ae3d5d1199c3bd193c7282be258a` である。JSON/SHA256SUMS SHA256 は `80d4e9075f35d1b43a5694a0bbf492308eb80424c2542710eea822ec4b9ad6c9` / `5fd5714f8c6d310631ca3c799aa57c8529d8277fce38fb93f8e79038beea55d4` である。
+- command-v16 は 1 回だけ生成し、`audited_ready_for_single_explicit_profile_diagnostic` として封印した。最大 invocation は 1、argv は 10 要素、confirmation/profile/ready/evidence flag は各 1、shell は false、actual/GPU/service は false である。
+- command-v16 commit は `7ec8189d389b81f5b7d77e050707069c11dd6ae1`、commit tree は `3637173cc67ead1ae2661cfb91b9a1fb141d7470`、root tree は `a2761ea5a89a18469e6726a3fb379cbf78f16048` である。JSON/SHA256SUMS SHA256 は `8779b6414b4d017fccba3b15f641ed6e6d3a6ebfc21429aafe2e3d9a43763ce0` / `07430ef010a2ea9b2a48668c29dd5d190cd8c7f2e3b3c3f399be20e79331d21a`、semantic/command SHA256 は `605a47d6ac5f302cc6281cef66b096bb7f42a2047c611129c31c58eb788f34a4` / `a1870af07141fa66afb852f67f947567b67ad10871030754273d64261175af49` である。
+- 2 系統の独立 Luna read-only gate は、quiet/command の Git coverage、mode、SHA256、semantic binding、current authority、previous v15/v14/v13、fresh 9/9 absent、result/audit-v16 absent を確認し、どちらも GO と判定した。
 
 ## 次の行動
 
-- 独立 QA では source commit/tree/blob/raw SHA256、ready 4 files、execute-binding 3 files、offline 42 files、previous actual-v15 66 files、fresh 9/9 absent を再確認する。
-- quiet-v21 と operator command-v16 の生成は、明示的な次工程まで行わない。
+- quiet-v21 と command-v16 は再生成せず、sealed commit を immutable authority として扱う。
+- command-v16 は pending のまま維持し、別工程の live preflight/QA と明示的な invocation authorization なしに実行しない。
 - actual、GPU command、service operation は実行しない。
