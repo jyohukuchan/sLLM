@@ -1,0 +1,12 @@
+# P3 candidate-A read-only audit
+
+- 前回の要点: P2 SQ8 calibration は固定policyのrelative-L2集計前拒否でNO-GOとなり、holdoutは `not_started / remaining 1` のまま最終固定した。
+- 今回の変更点: `/tmp/ullm-p3-candidate-a` のcommit `20c3f53ac9326d24e7bf6e4bc40494ca79b943fd`、tree `e26e19cec691e3f1dc71d576e5101d9453e96ef3`、archive SHA-256 `66e10a753c08f9a26027bc9dbc78259263547daedd8b3e2e43d4a7840ef376b6` をread-only監査した。worktreeはcleanで、コード、GPU、serviceは変更・実行していない。
+- 実装済み範囲: candidate A direct sequence output、CPU alias/size/admission safety、poison/reset、default-off gate、request単位diagnostic collector、production parser後のsidecar ingress、runtime/profiler assembler、selection raw producer、selectorは実装済みである。
+- 実証不足: repository内に `ullm.aq4_p2_candidate_selection_raw.v1`、`ullm.aq4_p2_family_exclusive_profile.v1`、`ullm.aq4_p3_candidate_selection.v1` の実artifactは0件である。実R9700 baseline/candidate、7代表prompt、各10 measured、M=128と別M、2件以上のpaired full-model、95% CI、D2D/launch/workspace/peak VRAM/fallback/safety/fidelityのpromotion証拠は存在しない。
+- P2影響: raw producerはpromotion modeだけで `promotion_eligible=true` を生成し、P2 fidelity verdictを入力fieldへ持たない。profiler/selectorのfidelityは任意のSHA-256がbaseline/candidateで一致することだけを検証し、receiptのschema/status/metricsを検証しない。このため現行P2 NO-GOをproduction eligibleへ読み替えず、現identityのpromotion raw生成とselector GOを禁止する必要がある。
+- production binding不足: direct routeは `ULLM_AQ4_PREFILL_DIRECT_SEQUENCE_OUTPUT` の環境変数だけで有効になり、P2 verdictまたは `selected_candidate_id=sequence-output-direct-v1` のselection receiptを要求しない。worker sidecar ingressはdiagnostic trace bindingであり、production route admission bindingではない。
+- contract不一致: selection specのcapability exact fieldsはD2H/syncのcountとtimeを列挙するが、selector/producerのexact capability setはcountだけである。またselector outputは事前existence check後に`os.replace`を使うため、競合時のno-overwriteを保証しない。
+- NO-GO完了経路: selectorは正しいdiagnostic profileだけを入力した場合、exit 0で `status=no_eligible_candidate` を発行する契約とtestを持つ。候補不採用、direct route default OFF、P2 NO-GO bindingをdeployment auditへ固定する経路は正規で安全である。ただし現時点では実diagnostic/selection artifact自体が無いため、P3はまだ未完了である。
+- GO残作業: P2を新しいimplementation identityでcalibration/holdout PASSさせるか、P3を明示的に非promotion診断へ限定する。GOにはP2 verdict/metricsのtyped binding、selectorのcreate-new修正、spec/code exact-field整合、7×10実機trace、M幅、2..30 paired full-model CI下限>0、candidate Aの全resource/safety/fidelity gate、selected receiptのserved-model/worker admission binding、full-model hidden/logit/greedy/top-k/stateとproduction pathの再検証が必要である。
+- 次の行動: 現在の正規判断はP3 production NO-GO、候補A不採用、default OFF維持である。実装を続ける場合も、P2 NO-GO中はpromotion rawではなくmeasurement-ineligible diagnostic evidenceだけを取得する。
