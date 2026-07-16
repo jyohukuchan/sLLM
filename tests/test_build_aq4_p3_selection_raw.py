@@ -22,6 +22,14 @@ try:
 finally:
     sys.modules.pop(SPEC.name, None)
 
+FIXTURE_SPEC = importlib.util.spec_from_file_location(
+    "aq4_p3_qualification_producer_fixture",
+    ROOT / "tests/test_aq4_p3_upstream_qualification.py",
+)
+assert FIXTURE_SPEC and FIXTURE_SPEC.loader
+QFIX = importlib.util.module_from_spec(FIXTURE_SPEC)
+FIXTURE_SPEC.loader.exec_module(QFIX)
+
 DIRECT_IMPLEMENTATION_ID = "fixture-v1"
 DIRECT_SOURCE_ID = "qwen35_aq4_model_runtime"
 DIRECT_SOURCE_SHA256 = "b" * 64
@@ -41,6 +49,18 @@ def sha(path: Path) -> str:
 
 def ref(path: Path) -> dict[str, str]:
     return {"path": str(path.resolve()), "sha256": sha(path)}
+
+
+def upstream_qualification_fixture(tmp_path: Path, *, rejected: bool = False) -> dict[str, str]:
+    qualification_path = tmp_path / ("upstream-rejected.json" if rejected else "upstream-qualified.json")
+    if rejected:
+        package = QFIX.rejection_package(tmp_path / "p2-rejection")
+        value = PRODUCER.QUALIFICATION.build_rejection(package)
+    else:
+        paths = QFIX.success_chain(tmp_path / "p2-success")
+        value = PRODUCER.QUALIFICATION.build_qualified(paths)
+    write_json(qualification_path, value)
+    return ref(qualification_path)
 
 
 def identity_fixture(tmp_path: Path) -> tuple[Path, dict[str, object]]:
@@ -515,6 +535,7 @@ def promotion_manifest(tmp_path: Path, *, all_m128: bool = False) -> tuple[Path,
             "candidate_id": "paged-kv-table-validation-v1",
             "family": "paged_validation",
         },
+        "upstream_qualification": upstream_qualification_fixture(tmp_path),
         "identity": ref(identity_path),
         "resident_summaries": summaries,
         "representative_cases": cases,
@@ -1214,6 +1235,7 @@ def test_one_case_diagnostic_is_explicitly_non_promotable(tmp_path: Path) -> Non
             "candidate_id": "paged-kv-table-validation-v1",
             "family": "paged_validation",
         },
+        "upstream_qualification": upstream_qualification_fixture(tmp_path, rejected=True),
         "identity": ref(identity_path),
         "resident_summaries": [ref(summary)],
         "representative_cases": [
@@ -1251,8 +1273,8 @@ def test_one_case_diagnostic_is_explicitly_non_promotable(tmp_path: Path) -> Non
     assert output["measurement_eligible"] is False
     assert output["smoke_only"] is True
     assert output["promotion_eligible"] is False
-    with pytest.raises(PRODUCER.SELECTOR.SelectionError):
-        PRODUCER.SELECTOR.validate_raw(output)
+    assert output["promotion_ineligibility_reason"] == PRODUCER.QUALIFICATION.REASON
+    assert PRODUCER.SELECTOR.validate_raw(output).promotion_eligible is False
 
 
 def test_producer_rejects_bool_int_float_type_substitution(tmp_path: Path) -> None:

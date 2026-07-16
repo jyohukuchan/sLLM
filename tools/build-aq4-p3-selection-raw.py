@@ -36,6 +36,7 @@ def load_tool(name: str, path: Path) -> Any:
 
 SELECTOR = load_tool("aq4_p3_selector_for_producer", ROOT / "tools/select-aq4-p3-candidate.py")
 PROFILER = load_tool("aq4_p2_profiler_for_producer", ROOT / "tools/profile-aq4-p2-family-exclusive.py")
+QUALIFICATION = load_tool("aq4_p3_upstream_qualification_for_producer", ROOT / "tools/aq4_p3_upstream_qualification.py")
 
 INPUT_SCHEMA = "ullm.aq4_p3_selection_raw_producer_input.v1"
 DIRECT_TRACE_SCHEMA = "ullm.aq4_p3_candidate_a_direct_sequence_output_trace.v1"
@@ -53,6 +54,7 @@ ROOT_FIELDS = {
     "smoke_only",
     "promotion_eligible",
     "manifest_sha256",
+    "upstream_qualification",
     "candidate",
     "identity",
     "resident_summaries",
@@ -1454,6 +1456,25 @@ def build(manifest: dict[str, Any], manifest_snapshot: Snapshot) -> tuple[dict[s
         raise ProducerError("candidate ID/family differs from selector policy")
 
     snapshots: list[Snapshot] = [manifest_snapshot]
+    qualification_snapshot, qualification = load_ref(
+        manifest["upstream_qualification"], "upstream P2 qualification", snapshots
+    )
+    try:
+        qualification_result = QUALIFICATION.validate(qualification)
+    except QUALIFICATION.QualificationError as error:
+        raise ProducerError(f"upstream P2 qualification differs: {error}") from error
+    if mode == "promotion" and qualification_result["status"] != "valid_qualified_go":
+        raise ProducerError("promotion raw requires qualified_go upstream P2 evidence")
+    if mode == "diagnostic" and qualification_result["status"] != "valid_rejected_no_go":
+        raise ProducerError("diagnostic raw requires rejected_no_go upstream P2 evidence")
+    qualification_ref = {
+        "path": str(qualification_snapshot.path),
+        "sha256": qualification_snapshot.sha256,
+        "qualification_sha256": qualification_result["qualification_sha256"],
+        "status": qualification["status"],
+        "promotion_eligible": qualification_result["promotion_eligible"],
+        "reason": qualification_result["reason"],
+    }
     identity_snapshot, identity_value = load_ref(manifest["identity"], "identity", snapshots)
     identity = validate_identity(identity_value, identity_snapshot)
 
@@ -1639,7 +1660,9 @@ def build(manifest: dict[str, Any], manifest_snapshot: Snapshot) -> tuple[dict[s
         "measurement_eligible": mode == "promotion",
         "smoke_only": mode == "diagnostic",
         "promotion_eligible": mode == "promotion",
+        "promotion_ineligibility_reason": None if mode == "promotion" else qualification_result["reason"],
         "evidence_sha256": None,
+        "upstream_qualification": qualification_ref,
         "identity": {
             field: identity[field]
             for field in (
@@ -1654,7 +1677,7 @@ def build(manifest: dict[str, Any], manifest_snapshot: Snapshot) -> tuple[dict[s
             "d2h_count": True,
             "stream_sync_count": True,
         },
-        "representative_prompt_count": 7,
+        "representative_prompt_count": len(measurements),
         "measurements": measurements,
         "full_model_pairs": pairs,
     }
@@ -1662,8 +1685,7 @@ def build(manifest: dict[str, Any], manifest_snapshot: Snapshot) -> tuple[dict[s
         output["capabilities"].update({field: True for field in SELECTOR.CANDIDATE_A_CAPABILITY_FIELDS})
     output["evidence_sha256"] = SELECTOR.semantic_sha256(output)
     ensure_finite_tree(output, "candidate selection raw output")
-    if mode == "promotion":
-        SELECTOR.validate_raw(output)
+    SELECTOR.validate_raw(output)
     return output, snapshots
 
 

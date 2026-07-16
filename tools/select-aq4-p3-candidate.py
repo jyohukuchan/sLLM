@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.util
 import json
 import math
 import os
@@ -14,6 +15,21 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
+
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def load_tool(name: str, path: Path) -> Any:
+    spec = importlib.util.spec_from_file_location(name, path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"cannot import {path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+QUALIFICATION = load_tool("aq4_p3_upstream_qualification_for_selector", ROOT / "tools/aq4_p3_upstream_qualification.py")
 
 
 RAW_SCHEMA = "ullm.aq4_p2_candidate_selection_raw.v1"
@@ -60,7 +76,9 @@ RAW_ROOT_FIELDS = {
     "measurement_eligible",
     "smoke_only",
     "promotion_eligible",
+    "promotion_ineligibility_reason",
     "evidence_sha256",
+    "upstream_qualification",
     "identity",
     "capabilities",
     "representative_prompt_count",
@@ -89,6 +107,9 @@ CANDIDATE_A_CAPABILITY_FIELDS = {
     "fallback_reasons",
     "alias_size_admission_safety",
     "direct_copy_fidelity",
+}
+QUALIFICATION_REF_FIELDS = {
+    "path", "sha256", "qualification_sha256", "status", "promotion_eligible", "reason"
 }
 MEASUREMENT_FIELDS = {
     "candidate_id",
@@ -333,6 +354,8 @@ class RawSource:
     capabilities: dict[str, bool]
     measurements: tuple[dict[str, Any], ...]
     pairs: tuple[dict[str, Any], ...]
+    promotion_eligible: bool
+    upstream_qualification: dict[str, Any]
 
 
 def file_identity(info: os.stat_result) -> tuple[int, ...]:
@@ -633,17 +656,48 @@ def _validate_candidate_a_pair(
 
 def validate_raw(value: dict[str, Any]) -> RawSource:
     exact_fields(value, RAW_ROOT_FIELDS, "raw evidence")
-    if value["schema_version"] != RAW_SCHEMA or value["status"] != "complete":
+    if value["schema_version"] != RAW_SCHEMA or value["status"] not in {"complete", "one_case_diagnostic"}:
         raise SelectionError("raw evidence schema/status differs")
-    require_bool(value["measurement_eligible"], True, "raw measurement_eligible")
-    require_bool(value["smoke_only"], False, "raw smoke_only")
-    require_bool(value["promotion_eligible"], True, "raw promotion_eligible")
+    promotion = value["status"] == "complete"
+    require_bool(value["measurement_eligible"], promotion, "raw measurement_eligible")
+    require_bool(value["smoke_only"], not promotion, "raw smoke_only")
+    require_bool(value["promotion_eligible"], promotion, "raw promotion_eligible")
+    reason = value["promotion_ineligibility_reason"]
+    if promotion and reason is not None:
+        raise SelectionError("promotion raw must not contain an ineligibility reason")
+    if not promotion and reason != QUALIFICATION.REASON:
+        raise SelectionError("diagnostic raw ineligibility reason differs")
+    qualification_ref = value["upstream_qualification"]
+    if not isinstance(qualification_ref, dict):
+        raise SelectionError("raw upstream qualification must be an object")
+    exact_fields(qualification_ref, QUALIFICATION_REF_FIELDS, "raw upstream qualification")
+    qualification_path = Path(qualification_ref["path"])
+    qualification_snapshot = capture(qualification_path)
+    if qualification_snapshot.sha256 != require_digest(qualification_ref["sha256"], "raw upstream qualification file SHA-256"):
+        raise SelectionError("raw upstream qualification file SHA-256 differs")
+    try:
+        qualification_value = parse_json(qualification_snapshot)
+        qualification_result = QUALIFICATION.validate(qualification_value)
+    except QUALIFICATION.QualificationError as error:
+        raise SelectionError(f"raw upstream qualification differs: {error}") from error
+    expected_qualification_status = "valid_qualified_go" if promotion else "valid_rejected_no_go"
+    if qualification_result["status"] != expected_qualification_status:
+        raise SelectionError("raw upstream qualification variant differs")
+    expected_projection = {
+        "path": str(qualification_snapshot.path), "sha256": qualification_snapshot.sha256,
+        "qualification_sha256": qualification_result["qualification_sha256"],
+        "status": qualification_value["status"],
+        "promotion_eligible": qualification_result["promotion_eligible"],
+        "reason": qualification_result["reason"],
+    }
+    if qualification_ref != expected_projection:
+        raise SelectionError("raw upstream qualification projection differs")
     if (
         type(value["representative_prompt_count"]) is not int
-        or value["representative_prompt_count"] != REPRESENTATIVE_PROMPTS
+        or value["representative_prompt_count"] != (REPRESENTATIVE_PROMPTS if promotion else 1)
     ):
         raise SelectionError(
-            f"raw representative_prompt_count must be {REPRESENTATIVE_PROMPTS}"
+            f"raw representative_prompt_count must be {REPRESENTATIVE_PROMPTS if promotion else 1}"
         )
 
     identity = value["identity"]
@@ -795,8 +849,10 @@ def validate_raw(value: dict[str, Any]) -> RawSource:
         semantic_sha256=calculated_sha,
         identity=identity_value,
         capabilities=capability_value,
-        measurements=tuple(parsed_measurements),
-        pairs=tuple(parsed_pairs),
+        measurements=tuple(parsed_measurements) if promotion else (),
+        pairs=tuple(parsed_pairs) if promotion else (),
+        promotion_eligible=promotion,
+        upstream_qualification=expected_projection,
     )
 
 
@@ -1323,6 +1379,16 @@ def select(values: list[tuple[Snapshot, dict[str, Any]]]) -> dict[str, Any]:
     identities = {source.identity["identity_sha256"] for source in raw_sources}
     if len(identities) > 1:
         raise SelectionError("raw evidence identity SHA-256 values differ")
+    qualification_ids = {
+        source.upstream_qualification["qualification_sha256"] for source in raw_sources
+    }
+    if len(qualification_ids) > 1:
+        raise SelectionError("raw evidence upstream P2 qualifications differ")
+    qualification_statuses = {
+        source.upstream_qualification["status"] for source in raw_sources
+    }
+    if len(qualification_statuses) > 1:
+        raise SelectionError("qualified and rejected raw evidence cannot be mixed")
     measurements: list[dict[str, Any]] = []
     pairs: list[dict[str, Any]] = []
     for source in raw_sources:
@@ -1395,6 +1461,10 @@ def select(values: list[tuple[Snapshot, dict[str, Any]]]) -> dict[str, Any]:
             ),
             "diagnostic_profile_file_sha256": sorted(profile["sha256"] for profile in profiles),
             "diagnostic_profiles_measurement_eligible": False,
+            "upstream_qualification_sha256": next(iter(qualification_ids)) if qualification_ids else None,
+            "upstream_qualification_status": next(iter(qualification_statuses)) if qualification_statuses else None,
+            "upstream_p2_promotion_eligible": all(source.promotion_eligible for source in raw_sources) if raw_sources else False,
+            "upstream_p2_reason": raw_sources[0].upstream_qualification["reason"] if raw_sources else None,
         },
         "input_warnings": (
             [
@@ -1423,7 +1493,11 @@ def write_output(path: Path, value: dict[str, Any]) -> None:
             handle.write(raw)
             handle.flush()
             os.fsync(handle.fileno())
-        os.replace(temporary, path)
+        try:
+            os.link(temporary, path, follow_symlinks=False)
+        except FileExistsError as error:
+            raise SelectionError(f"refusing to overwrite output: {path}") from error
+        temporary.unlink()
     finally:
         if temporary.exists():
             temporary.unlink()

@@ -4,6 +4,7 @@ import importlib.util
 import json
 import math
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -21,6 +22,27 @@ try:
     SPEC.loader.exec_module(SELECTOR)
 finally:
     sys.modules.pop(SPEC.name, None)
+
+FIXTURE_SPEC = importlib.util.spec_from_file_location(
+    "aq4_p3_qualification_test_fixture",
+    ROOT / "tests/test_aq4_p3_upstream_qualification.py",
+)
+assert FIXTURE_SPEC and FIXTURE_SPEC.loader
+QFIX = importlib.util.module_from_spec(FIXTURE_SPEC)
+FIXTURE_SPEC.loader.exec_module(QFIX)
+QUALIFICATION_TMP = tempfile.TemporaryDirectory(prefix="aq4-p3-selector-qualified-")
+QUALIFICATION_PATHS = QFIX.success_chain(Path(QUALIFICATION_TMP.name) / "go")
+QUALIFICATION_VALUE = SELECTOR.QUALIFICATION.build_qualified(QUALIFICATION_PATHS)
+QUALIFICATION_PATH = Path(QUALIFICATION_TMP.name) / "qualification.json"
+QFIX.write_json(QUALIFICATION_PATH, QUALIFICATION_VALUE)
+QUALIFICATION_REF = {
+    "path": str(QUALIFICATION_PATH.resolve()),
+    "sha256": SELECTOR.hashlib.sha256(QUALIFICATION_PATH.read_bytes()).hexdigest(),
+    "qualification_sha256": QUALIFICATION_VALUE["qualification_sha256"],
+    "status": "qualified_go",
+    "promotion_eligible": True,
+    "reason": SELECTOR.QUALIFICATION.GO_REASON,
+}
 
 
 IDENTITY_SHA = "1" * 64
@@ -78,7 +100,9 @@ def raw_fixture(candidate_id: str = "paged-kv-table-validation-v1") -> dict[str,
             "measurement_eligible": True,
             "smoke_only": False,
             "promotion_eligible": True,
+            "promotion_ineligibility_reason": None,
             "evidence_sha256": None,
+            "upstream_qualification": QUALIFICATION_REF,
             "identity": {
                 "identity_sha256": IDENTITY_SHA,
                 "case_manifest_sha256": "a" * 64,

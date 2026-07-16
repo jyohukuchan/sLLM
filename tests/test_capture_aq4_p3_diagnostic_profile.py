@@ -215,6 +215,9 @@ def test_assemble_splits_measured_runs_and_emits_diagnostic_producer_bindings(
             "candidate_id": "paged-kv-table-validation-v1",
             "family": "paged_validation",
         },
+        "upstream_qualification": FIXTURES.upstream_qualification_fixture(
+            tmp_path, rejected=True
+        ),
         "identity": FIXTURES.ref(identity_path),
         "resident_summaries": [FIXTURES.ref(summary_path)],
         "representative_cases": [
