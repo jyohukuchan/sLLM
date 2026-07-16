@@ -534,6 +534,8 @@ def run_hybrid_compare(args: argparse.Namespace) -> dict[str, Any]:
         str(args.chunk_bytes),
         "--stage-stream-stdout",
     ]
+    if args.post_norm_epsilon_source_control:
+        command.append("--post-norm-epsilon-source-control")
     loader = SourceLoader(args.source_model)
     with stderr_path.open("xb") as stderr:
         process = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=stderr)
@@ -599,6 +601,7 @@ def run_hybrid_compare(args: argparse.Namespace) -> dict[str, Any]:
             "package_root": aq4["package_root"],
             "package_manifest_sha256": aq4["package_manifest_sha256"],
             "post_rms_epsilon": aq4["one_at_a_time_hybrid"]["post_rms_epsilon"],
+            "post_rms_epsilon_mode": aq4["one_at_a_time_hybrid"]["post_rms_epsilon_mode"],
         },
         "source_model": loader.identity(),
         "source_formula": {
@@ -616,7 +619,7 @@ def run_hybrid_compare(args: argparse.Namespace) -> dict[str, Any]:
         },
         "notes": [
             "diagnostic_lm_head_readout_logits applies selected LM-head rows directly to layer0 output; it is not a full-model vocabulary logit.",
-            "AQ4 post RMSNorm epsilon is intentionally read from the AQ4 report and may differ from the BF16 source config; the stage trace exposes the resulting boundary rather than changing runtime behavior.",
+            "AQ4 post RMSNorm epsilon is intentionally read from the AQ4 report. The optional source-epsilon control changes only this CPU diagnostic invocation and never changes production runtime configuration.",
         ],
     }
     report_path = args.output / "comparison.json"
@@ -690,6 +693,11 @@ def main() -> int:
     parser.add_argument("--aq4-output", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--chunk-bytes", type=int, default=16 * 1024 * 1024)
+    parser.add_argument(
+        "--post-norm-epsilon-source-control",
+        action="store_true",
+        help="diagnostic-only: pass source post-norm epsilon 1e-6 to the CPU AQ4 probe",
+    )
     args = parser.parse_args()
     try:
         if args.chunk_bytes <= 0:

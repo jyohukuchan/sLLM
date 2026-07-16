@@ -58,6 +58,9 @@ const ATTENTION_RMS_EPSILON: f32 = 1e-6_f32;
 // norm epsilon.  The BF16 comparator records the source value separately;
 // this diagnostic must not silently substitute it.
 const AQ4_POST_RMS_EPSILON: f32 = 1e-5_f32;
+// This value is available only through the explicit diagnostic control flag
+// below.  It must never become the production runtime default.
+const SOURCE_POST_RMS_EPSILON: f32 = 1e-6_f32;
 const Q_SCALE: f32 = 1.0_f32 / 11.313_708_f32;
 const DIAGNOSTIC_LOGIT_ROWS: [usize; 34] = [
     0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25,
@@ -95,6 +98,25 @@ struct Args {
     output: PathBuf,
     chunk_bytes: usize,
     stage_stream_stdout: bool,
+    post_norm_epsilon_source_control: bool,
+}
+
+impl Args {
+    fn post_rms_epsilon(&self) -> f32 {
+        if self.post_norm_epsilon_source_control {
+            SOURCE_POST_RMS_EPSILON
+        } else {
+            AQ4_POST_RMS_EPSILON
+        }
+    }
+
+    fn post_rms_epsilon_mode(&self) -> &'static str {
+        if self.post_norm_epsilon_source_control {
+            "source_1e-6_diagnostic_control"
+        } else {
+            "aq4_runtime_default_1e-5"
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -278,6 +300,7 @@ struct HybridExecutionReport {
     input_rms_epsilon: f32,
     attention_rms_epsilon: f32,
     post_rms_epsilon: f32,
+    post_rms_epsilon_mode: String,
     q_scale: f32,
     rope: HybridRopeReport,
     logits: HybridLogitReport,
@@ -865,7 +888,8 @@ fn run_hybrid_probe(args: Args) -> Result<()> {
             ],
             input_rms_epsilon: INPUT_RMS_EPSILON,
             attention_rms_epsilon: ATTENTION_RMS_EPSILON,
-            post_rms_epsilon: AQ4_POST_RMS_EPSILON,
+            post_rms_epsilon: args.post_rms_epsilon(),
+            post_rms_epsilon_mode: args.post_rms_epsilon_mode().to_string(),
             q_scale: Q_SCALE,
             rope: HybridRopeReport {
                 applicable: false,
@@ -901,6 +925,7 @@ where
     let mut output = None;
     let mut chunk_bytes = 16 * 1024 * 1024;
     let mut stage_stream_stdout = false;
+    let mut post_norm_epsilon_source_control = false;
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--package" => {
@@ -927,9 +952,12 @@ where
                     .map_err(|_| "invalid --chunk-bytes".to_string())?
             }
             "--stage-stream-stdout" => stage_stream_stdout = true,
+            "--post-norm-epsilon-source-control" => {
+                post_norm_epsilon_source_control = true
+            }
             "--help" | "-h" => {
                 return Err(
-                    "usage: --package DIR (--input JSONL | --hybrid-input JSONL) --output DIR [--chunk-bytes N] [--stage-stream-stdout]".to_string(),
+                    "usage: --package DIR (--input JSONL | --hybrid-input JSONL) --output DIR [--chunk-bytes N] [--stage-stream-stdout] [--post-norm-epsilon-source-control]".to_string(),
                 )
             }
             other => return Err(format!("unknown argument: {other}")),
@@ -942,6 +970,7 @@ where
         output: output.ok_or("missing --output")?,
         chunk_bytes,
         stage_stream_stdout,
+        post_norm_epsilon_source_control,
     })
 }
 
@@ -1491,7 +1520,7 @@ fn one_at_a_time_hybrid(
             let attention_residual = add_f32(residual, &attention_projection)?;
             emitter.emit(case, timestep, "attention_residual", &attention_residual)?;
             let post_normed =
-                rmsnorm_f32(&attention_residual, &post_norm_weight, AQ4_POST_RMS_EPSILON)?;
+                rmsnorm_f32(&attention_residual, &post_norm_weight, args.post_rms_epsilon())?;
             emitter.emit(case, timestep, "post_norm", &post_normed)?;
             attention_residuals.extend_from_slice(&attention_residual);
             post_normed_sequence.extend_from_slice(&post_normed);
