@@ -9,7 +9,7 @@
 //! keeps this collector disabled; callers must explicitly enable the diagnostic gate and then
 //! pass the bounded counters to the hash-bound Python assembler.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 pub const RUNTIME_OBSERVATION_SCHEMA: &str =
@@ -178,7 +178,8 @@ fn sha256_hex(value: &[u8]) -> String {
     result
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Qwen35Aq4DirectTraceBinding {
     pub side: String,
     pub binding_kind: String,

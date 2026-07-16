@@ -1,8 +1,9 @@
 // Copyright 2026 uLLM contributors
 // SPDX-License-Identifier: Apache-2.0
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::collections::{BTreeSet, VecDeque};
 use std::env;
 use std::ffi::OsString;
 use std::fs::{Metadata, OpenOptions};
@@ -17,8 +18,11 @@ use ullm_engine::aq4_benchmark_worker_runtime::run_aq4_benchmark_worker_process;
 use ullm_engine::aq4_worker_backend::{
     QWEN35_AQ4_REQUIRED_HIP_KERNEL_ENV, Qwen35Aq4WorkerBackend, Qwen35Aq4WorkerBackendConfig,
 };
+use ullm_engine::qwen35_aq4_direct_trace::Qwen35Aq4DirectTraceBinding;
 use ullm_engine::qwen35_aq4_head_runtime::PackageLmHeadMode;
-use ullm_engine::qwen35_aq4_model_runtime::{QWEN35_AQ4_KV_BLOCK_SIZE, Qwen35Aq4ModelLoadConfig};
+use ullm_engine::qwen35_aq4_model_runtime::{
+    QWEN35_AQ4_KV_BLOCK_SIZE, Qwen35Aq4ModelLoadConfig, direct_trace_diagnostic_enabled_value,
+};
 use ullm_engine::qwen35_aq4_session::{Qwen35Aq4InferenceSession, Qwen35Aq4SessionConfig};
 use ullm_engine::served_model::{
     ServedModel, ServedModelError, WorkerBackendKind, WorkerStartupConfig, load_served_model,
@@ -31,6 +35,9 @@ const PROCESS_IO_BUFFER_BYTES: usize = 64 * 1024;
 const RESIDENT_DEVICE_INDEX: u32 = 1;
 const RESIDENT_CHUNK_BYTES: usize = 1024 * 1024;
 const RESIDENT_LM_HEAD_CHUNK_ROWS: usize = 8192;
+const P3_DIRECT_TRACE_BINDING_MANIFEST_SCHEMA: &str =
+    "ullm.aq4_p3_candidate_a.direct_trace_binding_manifest.v1";
+const P3_DIRECT_TRACE_BINDING_MANIFEST_MAX_ENTRIES: usize = 64;
 
 #[derive(Debug, PartialEq, Eq)]
 struct WorkerArgs {
@@ -43,12 +50,21 @@ struct WorkerArgs {
 #[derive(Debug, PartialEq, Eq)]
 enum WorkerSource {
     Legacy(WorkerArgs),
-    ServedModelManifest(PathBuf),
+    ServedModelManifest {
+        served_model: PathBuf,
+        direct_trace_bindings: Option<DiagnosticBindingSource>,
+    },
     BenchmarkServedModelManifest {
         served_model: PathBuf,
         case_registry: PathBuf,
         case_registry_sha256: String,
     },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DiagnosticBindingSource {
+    path: PathBuf,
+    bytes_sha256: String,
 }
 
 enum CliAction {
@@ -72,6 +88,7 @@ enum LoadedWorker {
     Resident {
         config: ResidentWorkerConfig,
         profile: Sq8WorkerProfile,
+        direct_trace_bindings: Option<VecDeque<Qwen35Aq4DirectTraceBinding>>,
     },
     BenchmarkResident {
         config: ResidentWorkerConfig,
@@ -87,6 +104,7 @@ fn main() -> ExitCode {
                 "Usage: ullm-aq4-worker [--engine PATH] --package PATH [--device-index N] [--layers all|CSV]\n\
                  Gateway form: --artifact AQ4_PACKAGE --package COMPAT_PATH [extra options]\n\
                  Manifest mode: ullm-aq4-worker --served-model-manifest PATH\n\
+                 P3 diagnostic mode: --served-model-manifest PATH --p3-direct-trace-binding-manifest PATH --p3-direct-trace-binding-manifest-sha256 SHA256\n\
                  Benchmark mode: ullm-aq4-worker --served-model-manifest PATH --benchmark-wire --benchmark-case-manifest PATH --benchmark-case-manifest-sha256 SHA256\n\
                  Reads ullm.worker.v1/v2 commands from stdin and writes matching events to stdout.\n\
                  Compatibility mode invokes the AQ4 engine CLI once per request.\n\
@@ -152,8 +170,18 @@ fn run_worker(source: WorkerSource) -> ExitCode {
 }
 
 fn load_worker(source: WorkerSource) -> Result<LoadedWorker, ServedModelError> {
+    let diagnostic_gate = direct_trace_diagnostic_enabled_value(
+        env::var("ULLM_AQ4_P3_DIRECT_TRACE_DIAGNOSTIC")
+            .ok()
+            .as_deref(),
+    );
     match source {
         WorkerSource::Legacy(args) => {
+            if diagnostic_gate {
+                return Err(ServedModelError(
+                    "AQ4 P3 diagnostic gate requires manifest resident mode".into(),
+                ));
+            }
             let config = Qwen35Aq4WorkerBackendConfig::new(args.engine, args.package)
                 .map(|config| config.with_device_index(args.device_index))
                 .and_then(|config| config.with_layers(args.layers))
@@ -163,23 +191,52 @@ fn load_worker(source: WorkerSource) -> Result<LoadedWorker, ServedModelError> {
                 profile: configured_aq4_worker_profile(),
             })
         }
-        WorkerSource::ServedModelManifest(path) => {
-            let model = load_served_model(path)?;
+        WorkerSource::ServedModelManifest {
+            served_model,
+            direct_trace_bindings,
+        } => {
+            validate_direct_trace_ingress(diagnostic_gate, direct_trace_bindings.is_some())?;
+            let bindings = direct_trace_bindings
+                .map(|source| {
+                    load_direct_trace_binding_manifest(&source.path, &source.bytes_sha256)
+                })
+                .transpose()?;
+            let model = load_served_model(served_model)?;
             let current_exe =
                 env::current_exe().map_err(|error| ServedModelError(error.to_string()))?;
-            load_resident_worker(&model, &current_exe)
+            let mut loaded = load_resident_worker(&model, &current_exe)?;
+            let LoadedWorker::Resident {
+                direct_trace_bindings,
+                ..
+            } = &mut loaded
+            else {
+                return Err(ServedModelError(
+                    "AQ4 P3 diagnostic bindings require a resident worker".into(),
+                ));
+            };
+            *direct_trace_bindings = bindings;
+            Ok(loaded)
         }
         WorkerSource::BenchmarkServedModelManifest {
             served_model,
             case_registry,
             case_registry_sha256,
         } => {
+            if diagnostic_gate {
+                return Err(ServedModelError(
+                    "AQ4 P3 diagnostic gate is not admitted on benchmark wire".into(),
+                ));
+            }
             let model = load_served_model(served_model)?;
             let registry = load_benchmark_case_registry(&case_registry, &case_registry_sha256)?;
             let current_exe =
                 env::current_exe().map_err(|error| ServedModelError(error.to_string()))?;
             match load_resident_worker(&model, &current_exe)? {
-                LoadedWorker::Resident { config, profile } => Ok(LoadedWorker::BenchmarkResident {
+                LoadedWorker::Resident {
+                    config,
+                    profile,
+                    direct_trace_bindings: None,
+                } => Ok(LoadedWorker::BenchmarkResident {
                     config,
                     profile,
                     registry,
@@ -192,11 +249,164 @@ fn load_worker(source: WorkerSource) -> Result<LoadedWorker, ServedModelError> {
     }
 }
 
+fn validate_direct_trace_ingress(
+    diagnostic_gate: bool,
+    binding_manifest_configured: bool,
+) -> Result<(), ServedModelError> {
+    if diagnostic_gate != binding_manifest_configured {
+        return Err(ServedModelError(
+            "AQ4 P3 diagnostic gate and binding manifest must be enabled together".into(),
+        ));
+    }
+    Ok(())
+}
+
 fn load_benchmark_case_registry(
     path: &Path,
     expected_bytes_sha256: &str,
 ) -> Result<Aq4BenchmarkTrustedCaseRegistry, ServedModelError> {
     load_benchmark_case_registry_with_hook(path, expected_bytes_sha256, |_| {})
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DirectTraceBindingManifest {
+    schema_version: String,
+    bindings: Vec<Qwen35Aq4DirectTraceBinding>,
+}
+
+fn load_direct_trace_binding_manifest(
+    path: &Path,
+    expected_bytes_sha256: &str,
+) -> Result<VecDeque<Qwen35Aq4DirectTraceBinding>, ServedModelError> {
+    if !path.is_absolute()
+        || path
+            .components()
+            .any(|part| part == std::path::Component::ParentDir)
+        || std::fs::canonicalize(path)
+            .map(|canonical| canonical != path)
+            .unwrap_or(true)
+    {
+        return Err(ServedModelError(
+            "AQ4 P3 binding manifest path must be absolute and canonical".into(),
+        ));
+    }
+    if !is_lowercase_sha256(expected_bytes_sha256) {
+        return Err(ServedModelError(
+            "AQ4 P3 binding manifest expected SHA-256 is invalid".into(),
+        ));
+    }
+    reject_direct_trace_binding_symlink_components(path)?;
+    let before = std::fs::symlink_metadata(path)
+        .map_err(|_| ServedModelError("AQ4 P3 binding manifest metadata failed".into()))?;
+    if !before.file_type().is_file() || before.nlink() != 1 {
+        return Err(ServedModelError(
+            "AQ4 P3 binding manifest must be a single-link regular file".into(),
+        ));
+    }
+    const O_NOFOLLOW: i32 = 0o400000;
+    let mut file = OpenOptions::new()
+        .read(true)
+        .custom_flags(O_NOFOLLOW)
+        .open(path)
+        .map_err(|_| ServedModelError("AQ4 P3 binding manifest open failed".into()))?;
+    let identity = RegistryFileIdentity::from(&before);
+    let opened = file
+        .metadata()
+        .map_err(|_| ServedModelError("AQ4 P3 binding manifest metadata failed".into()))?;
+    let opened_path = std::fs::symlink_metadata(path)
+        .map_err(|_| ServedModelError("AQ4 P3 binding manifest metadata failed".into()))?;
+    if !opened.file_type().is_file()
+        || opened.nlink() != 1
+        || RegistryFileIdentity::from(&opened) != identity
+        || RegistryFileIdentity::from(&opened_path) != identity
+    {
+        return Err(ServedModelError(
+            "AQ4 P3 binding manifest changed while opening".into(),
+        ));
+    }
+    let maximum = ullm_engine::worker_protocol::WORKER_MAX_RECORD_BYTES;
+    if identity.size > u64::try_from(maximum).unwrap_or(u64::MAX) {
+        return Err(ServedModelError(
+            "AQ4 P3 binding manifest exceeds the record bound".into(),
+        ));
+    }
+    let mut payload = Vec::with_capacity(usize::try_from(identity.size).unwrap_or(maximum));
+    let mut digest = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let count = file
+            .read(&mut buffer)
+            .map_err(|_| ServedModelError("AQ4 P3 binding manifest read failed".into()))?;
+        if count == 0 {
+            break;
+        }
+        if payload
+            .len()
+            .checked_add(count)
+            .is_none_or(|total| total > maximum)
+        {
+            return Err(ServedModelError(
+                "AQ4 P3 binding manifest exceeds the record bound".into(),
+            ));
+        }
+        digest.update(&buffer[..count]);
+        payload.extend_from_slice(&buffer[..count]);
+    }
+    reject_direct_trace_binding_symlink_components(path)?;
+    let after_fd = file
+        .metadata()
+        .map_err(|_| ServedModelError("AQ4 P3 binding manifest metadata failed".into()))?;
+    let after_path = std::fs::symlink_metadata(path)
+        .map_err(|_| ServedModelError("AQ4 P3 binding manifest metadata failed".into()))?;
+    if RegistryFileIdentity::from(&after_fd) != identity
+        || RegistryFileIdentity::from(&after_path) != identity
+    {
+        return Err(ServedModelError(
+            "AQ4 P3 binding manifest changed while reading".into(),
+        ));
+    }
+    if format!("{:x}", digest.finalize()) != expected_bytes_sha256 {
+        return Err(ServedModelError(
+            "AQ4 P3 binding manifest bytes SHA-256 differs".into(),
+        ));
+    }
+    let manifest: DirectTraceBindingManifest = serde_json::from_slice(&payload)
+        .map_err(|_| ServedModelError("AQ4 P3 binding manifest JSON is invalid".into()))?;
+    if manifest.schema_version != P3_DIRECT_TRACE_BINDING_MANIFEST_SCHEMA
+        || manifest.bindings.is_empty()
+        || manifest.bindings.len() > P3_DIRECT_TRACE_BINDING_MANIFEST_MAX_ENTRIES
+    {
+        return Err(ServedModelError(
+            "AQ4 P3 binding manifest schema or entry count differs".into(),
+        ));
+    }
+    let mut request_ids = BTreeSet::new();
+    let mut binding_ids = BTreeSet::new();
+    for binding in &manifest.bindings {
+        binding.validate().map_err(ServedModelError)?;
+        if !request_ids.insert(binding.request_id.clone())
+            || !binding_ids.insert(binding.binding_id.clone())
+        {
+            return Err(ServedModelError(
+                "AQ4 P3 binding manifest reuses a request or binding ID".into(),
+            ));
+        }
+    }
+    Ok(manifest.bindings.into())
+}
+
+fn reject_direct_trace_binding_symlink_components(path: &Path) -> Result<(), ServedModelError> {
+    for component in path.ancestors() {
+        let metadata = std::fs::symlink_metadata(component)
+            .map_err(|_| ServedModelError("AQ4 P3 binding manifest path metadata failed".into()))?;
+        if metadata.file_type().is_symlink() {
+            return Err(ServedModelError(
+                "AQ4 P3 binding manifest path must not contain symlinks".into(),
+            ));
+        }
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -365,7 +575,11 @@ fn load_resident_worker(
     validate_resident_model_contract(model)?;
     let startup = model.worker_startup(WorkerBackendKind::Aq4, current_exe)?;
     let (config, profile) = resident_config_from_startup(startup)?;
-    Ok(LoadedWorker::Resident { config, profile })
+    Ok(LoadedWorker::Resident {
+        config,
+        profile,
+        direct_trace_bindings: None,
+    })
 }
 
 fn validate_resident_model_contract(model: &ServedModel) -> Result<(), ServedModelError> {
@@ -467,6 +681,57 @@ fn operation_trace_log_line(layer_position: usize, trace_json: &str) -> String {
     )
 }
 
+enum ResidentBindingBackend<B> {
+    Ordinary(B),
+    Diagnostic {
+        inner: B,
+        bindings: VecDeque<Qwen35Aq4DirectTraceBinding>,
+    },
+}
+
+impl<B: InferenceBackend> InferenceBackend for ResidentBindingBackend<B> {
+    fn execute(
+        &mut self,
+        mut request: ullm_engine::inference_api::InferenceRequest,
+        admission: ullm_engine::worker_protocol::WorkerAdmission,
+        publications: &mut ullm_engine::worker_runtime::RequestEventPublisher<'_>,
+    ) -> Result<(), String> {
+        match self {
+            Self::Ordinary(inner) => inner.execute(request, admission, publications),
+            Self::Diagnostic { inner, bindings } => {
+                if request.aq4_p3_direct_trace.is_some() {
+                    return Err(
+                        "AQ4 P3 worker request already contains a diagnostic binding".into(),
+                    );
+                }
+                let binding = bindings
+                    .pop_front()
+                    .ok_or_else(|| "AQ4 P3 binding manifest is exhausted".to_string())?;
+                if binding.request_id != request.request_id {
+                    return Err(
+                        "AQ4 P3 binding request ID differs from the parsed worker request".into(),
+                    );
+                }
+                request.aq4_p3_direct_trace = Some(binding);
+                inner.execute(request, admission, publications)
+            }
+        }
+    }
+
+    fn shutdown(&mut self) -> Result<(), String> {
+        match self {
+            Self::Ordinary(inner) => inner.shutdown(),
+            Self::Diagnostic { inner, bindings } => {
+                let shutdown = inner.shutdown();
+                if !bindings.is_empty() {
+                    return Err("AQ4 P3 binding manifest has unused entries".into());
+                }
+                shutdown
+            }
+        }
+    }
+}
+
 fn run_loaded_worker<R, W, LB, RB, FL, FR>(
     loaded: LoadedWorker,
     input: R,
@@ -486,9 +751,17 @@ where
         LoadedWorker::Legacy { config, profile } => {
             run_worker_process_with_profile(input, output, profile, move || legacy_loader(config))
         }
-        LoadedWorker::Resident { config, profile } => {
-            run_worker_process_with_profile(input, output, profile, move || resident_loader(config))
-        }
+        LoadedWorker::Resident {
+            config,
+            profile,
+            direct_trace_bindings,
+        } => run_worker_process_with_profile(input, output, profile, move || {
+            let inner = resident_loader(config)?;
+            Ok(match direct_trace_bindings {
+                Some(bindings) => ResidentBindingBackend::Diagnostic { inner, bindings },
+                None => ResidentBindingBackend::Ordinary(inner),
+            })
+        }),
         LoadedWorker::BenchmarkResident { .. } => {
             Err("AQ4 benchmark resident was routed through the ordinary worker wire".into())
         }
@@ -506,6 +779,13 @@ fn parse_cli(args: impl IntoIterator<Item = OsString>) -> Result<CliAction, Stri
     if args.iter().any(|value| value == "--served-model-manifest") {
         let ordinary =
             args.len() == 2 && args[0] == "--served-model-manifest" && !args[1].is_empty();
+        let diagnostic = args.len() == 6
+            && args[0] == "--served-model-manifest"
+            && !args[1].is_empty()
+            && args[2] == "--p3-direct-trace-binding-manifest"
+            && !args[3].is_empty()
+            && args[4] == "--p3-direct-trace-binding-manifest-sha256"
+            && !args[5].is_empty();
         let benchmark = args.len() == 7
             && args[0] == "--served-model-manifest"
             && !args[1].is_empty()
@@ -514,7 +794,7 @@ fn parse_cli(args: impl IntoIterator<Item = OsString>) -> Result<CliAction, Stri
             && !args[4].is_empty()
             && args[5] == "--benchmark-case-manifest-sha256"
             && !args[6].is_empty();
-        if !ordinary && !benchmark {
+        if !ordinary && !diagnostic && !benchmark {
             return Err("manifest mode and legacy options are mutually exclusive".into());
         }
         return Ok(CliAction::Run(if benchmark {
@@ -532,7 +812,25 @@ fn parse_cli(args: impl IntoIterator<Item = OsString>) -> Result<CliAction, Stri
                     })?,
             }
         } else {
-            WorkerSource::ServedModelManifest(PathBuf::from(&args[1]))
+            let direct_trace_bindings = if diagnostic {
+                let bytes_sha256 = args[5]
+                    .clone()
+                    .into_string()
+                    .map_err(|_| "P3 binding manifest SHA-256 must be UTF-8".to_string())?;
+                if !is_lowercase_sha256(&bytes_sha256) {
+                    return Err("P3 binding manifest SHA-256 must be lowercase SHA-256".into());
+                }
+                Some(DiagnosticBindingSource {
+                    path: PathBuf::from(&args[3]),
+                    bytes_sha256,
+                })
+            } else {
+                None
+            };
+            WorkerSource::ServedModelManifest {
+                served_model: PathBuf::from(&args[1]),
+                direct_trace_bindings,
+            }
         }));
     }
     let mut engine = None;
@@ -656,6 +954,9 @@ mod tests {
         AQ4_BENCHMARK_CASE_REGISTRY_SCHEMA_VERSION, Aq4BenchmarkCaseBinding,
         aq4_benchmark_case_registry_sha256, aq4_benchmark_case_sha256,
     };
+    use ullm_engine::qwen35_aq4_direct_trace::{
+        Qwen35Aq4DirectRuntimeObservation, Qwen35Aq4DirectTraceCollector, Qwen35Aq4DirectTraceRoute,
+    };
     use ullm_engine::qwen35_aq4_session::Qwen35Aq4SessionModel;
     use ullm_engine::served_model::WorkerProfileSnapshot;
 
@@ -718,6 +1019,33 @@ mod tests {
 
     fn bytes_sha256(bytes: &[u8]) -> String {
         format!("{:x}", Sha256::digest(bytes))
+    }
+
+    fn direct_trace_binding_value(request_id: &str) -> serde_json::Value {
+        serde_json::json!({
+            "side": "baseline",
+            "binding_kind": "run",
+            "binding_id": format!("binding-{request_id}"),
+            "request_id": request_id,
+            "implementation_id": "qwen35-aq4-production",
+            "source_id": "ullm-aq4-worker",
+            "source_sha256": "a".repeat(64),
+            "case_id": "case-1",
+            "case_sha256": "b".repeat(64),
+            "identity_sha256": "c".repeat(64),
+            "direct_sequence_output_enabled": false
+        })
+    }
+
+    fn direct_trace_manifest_bytes(request_ids: &[&str]) -> Vec<u8> {
+        serde_json::to_vec(&serde_json::json!({
+            "schema_version": P3_DIRECT_TRACE_BINDING_MANIFEST_SCHEMA,
+            "bindings": request_ids
+                .iter()
+                .map(|request_id| direct_trace_binding_value(request_id))
+                .collect::<Vec<_>>()
+        }))
+        .unwrap()
     }
 
     #[test]
@@ -784,7 +1112,10 @@ mod tests {
         };
         assert_eq!(
             parsed,
-            WorkerSource::ServedModelManifest(PathBuf::from("/served-model.json"))
+            WorkerSource::ServedModelManifest {
+                served_model: PathBuf::from("/served-model.json"),
+                direct_trace_bindings: None,
+            }
         );
         assert!(
             parse_cli(args(&[
@@ -804,6 +1135,57 @@ mod tests {
             ]))
             .is_err()
         );
+    }
+
+    #[test]
+    fn cli_accepts_p3_binding_sidecar_only_as_exact_manifest_mode() {
+        let sha = "a".repeat(64);
+        let CliAction::Run(WorkerSource::ServedModelManifest {
+            served_model,
+            direct_trace_bindings: Some(source),
+        }) = parse_cli(args(&[
+            "--served-model-manifest",
+            "/served-model.json",
+            "--p3-direct-trace-binding-manifest",
+            "/bindings.json",
+            "--p3-direct-trace-binding-manifest-sha256",
+            &sha,
+        ]))
+        .unwrap()
+        else {
+            panic!("expected diagnostic manifest mode")
+        };
+        assert_eq!(served_model, PathBuf::from("/served-model.json"));
+        assert_eq!(source.path, PathBuf::from("/bindings.json"));
+        assert_eq!(source.bytes_sha256, sha);
+        assert!(
+            parse_cli(args(&[
+                "--served-model-manifest",
+                "/served-model.json",
+                "--p3-direct-trace-binding-manifest",
+                "/bindings.json",
+                "--p3-direct-trace-binding-manifest-sha256",
+                "BAD",
+            ]))
+            .is_err()
+        );
+        assert!(
+            parse_cli(args(&[
+                "--package",
+                "/package",
+                "--p3-direct-trace-binding-manifest",
+                "/bindings.json"
+            ]))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn p3_binding_ingress_gate_and_sidecar_are_strictly_coupled() {
+        assert!(validate_direct_trace_ingress(false, false).is_ok());
+        assert!(validate_direct_trace_ingress(true, true).is_ok());
+        assert!(validate_direct_trace_ingress(true, false).is_err());
+        assert!(validate_direct_trace_ingress(false, true).is_err());
     }
 
     #[test]
@@ -865,6 +1247,50 @@ mod tests {
         let rebound = serde_json::to_vec(&rebound).unwrap();
         std::fs::write(&path, &rebound).unwrap();
         assert!(load_benchmark_case_registry(&path, &bytes_sha256(&rebound)).is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn p3_binding_sidecar_binds_canonical_single_link_bytes_and_rejects_reuse() {
+        let root = registry_test_root("p3-binding-valid");
+        let path = root.join("bindings.json");
+        let bytes = direct_trace_manifest_bytes(&["request-m1", "request-m8"]);
+        std::fs::write(&path, &bytes).unwrap();
+        let bindings = load_direct_trace_binding_manifest(&path, &bytes_sha256(&bytes)).unwrap();
+        assert_eq!(bindings.len(), 2);
+        assert_eq!(bindings[0].request_id, "request-m1");
+        assert!(load_direct_trace_binding_manifest(&path, &"0".repeat(64)).is_err());
+
+        let duplicate = direct_trace_manifest_bytes(&["request-m1", "request-m1"]);
+        std::fs::write(&path, &duplicate).unwrap();
+        assert!(load_direct_trace_binding_manifest(&path, &bytes_sha256(&duplicate)).is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn p3_binding_sidecar_rejects_tamper_escape_symlink_and_hardlink() {
+        let root = registry_test_root("p3-binding-paths");
+        let path = root.join("bindings.json");
+        let bytes = direct_trace_manifest_bytes(&["request-1"]);
+        std::fs::write(&path, &bytes).unwrap();
+        let sha = bytes_sha256(&bytes);
+        std::fs::write(&path, direct_trace_manifest_bytes(&["request-2"])).unwrap();
+        assert!(load_direct_trace_binding_manifest(&path, &sha).is_err());
+        std::fs::write(&path, &bytes).unwrap();
+
+        let nested = root.join("nested");
+        std::fs::create_dir(&nested).unwrap();
+        let escaped = nested.join("..").join("bindings.json");
+        assert!(load_direct_trace_binding_manifest(&escaped, &sha).is_err());
+
+        let link = root.join("bindings-link.json");
+        symlink(&path, &link).unwrap();
+        assert!(load_direct_trace_binding_manifest(&link, &sha).is_err());
+        std::fs::remove_file(link).unwrap();
+
+        let hardlink = root.join("bindings-hardlink.json");
+        std::fs::hard_link(&path, &hardlink).unwrap();
+        assert!(load_direct_trace_binding_manifest(&path, &sha).is_err());
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -1021,6 +1447,9 @@ mod tests {
     struct ScriptedModel {
         tokens: VecDeque<usize>,
         resets: usize,
+        direct_trace_collector: Option<Qwen35Aq4DirectTraceCollector>,
+        direct_trace_observations: Arc<Mutex<Vec<Qwen35Aq4DirectRuntimeObservation>>>,
+        prefill_widths: Arc<Mutex<Vec<usize>>>,
     }
 
     impl Qwen35Aq4SessionModel for ScriptedModel {
@@ -1030,6 +1459,52 @@ mod tests {
 
         fn vocab_size(&self) -> usize {
             32
+        }
+
+        fn direct_trace_diagnostic_enabled(&self) -> bool {
+            self.direct_trace_collector.is_some()
+        }
+
+        fn begin_direct_trace_request(
+            &mut self,
+            binding: Qwen35Aq4DirectTraceBinding,
+        ) -> Result<bool, String> {
+            let Some(collector) = self.direct_trace_collector.as_mut() else {
+                return Ok(false);
+            };
+            collector.begin_request(binding)?;
+            Ok(true)
+        }
+
+        fn finish_direct_trace_request(
+            &mut self,
+            terminal_status: &str,
+        ) -> Result<Option<Qwen35Aq4DirectRuntimeObservation>, String> {
+            let Some(collector) = self.direct_trace_collector.as_mut() else {
+                return Ok(None);
+            };
+            let observation = collector.finish_request(terminal_status)?;
+            self.direct_trace_observations
+                .lock()
+                .unwrap()
+                .push(observation.clone());
+            Ok(Some(observation))
+        }
+
+        fn record_direct_trace_failure_once(&mut self, reason: &str) -> Result<(), String> {
+            if let Some(collector) = self.direct_trace_collector.as_mut()
+                && collector.request_active()
+                && !collector.failure_recorded()
+            {
+                collector.record_failure(reason)?;
+            }
+            Ok(())
+        }
+
+        fn reset_direct_trace_without_emission(&mut self) {
+            if let Some(collector) = self.direct_trace_collector.as_mut() {
+                collector.reset_without_emission();
+            }
         }
 
         fn dispatch_token(
@@ -1045,6 +1520,26 @@ mod tests {
             Vec<[ullm_engine::backend_operation_registry::OperationExecutionRecord; 2]>,
             String,
         > {
+            Ok(Vec::new())
+        }
+
+        fn dispatch_prefill_chunk(
+            &mut self,
+            token_ids: &[usize],
+            _: usize,
+            _: f32,
+            _: usize,
+            _: ullm_engine::execution_batch::ExecutionPhase,
+            _: bool,
+            _: &str,
+        ) -> Result<Vec<ullm_engine::qwen35_aq4_session::Qwen35PrefillExecutionStep>, String>
+        {
+            self.prefill_widths.lock().unwrap().push(token_ids.len());
+            if let Some(collector) = self.direct_trace_collector.as_mut()
+                && collector.request_active()
+            {
+                collector.record_invocation(Qwen35Aq4DirectTraceRoute::Direct, 0, 2, 0)?;
+            }
             Ok(Vec::new())
         }
 
@@ -1139,6 +1634,224 @@ mod tests {
         config
     }
 
+    fn run_diagnostic_resident_worker(
+        request_id: &str,
+        binding_request_id: &str,
+        prefill_width: usize,
+        second_request_id: Option<&str>,
+    ) -> (
+        Result<ullm_engine::worker_runtime::CommandReaderExit, String>,
+        Vec<serde_json::Value>,
+        Vec<serde_json::Value>,
+        Vec<Qwen35Aq4DirectRuntimeObservation>,
+        Vec<usize>,
+    ) {
+        let (mut input_writer, input_reader) = UnixStream::pair().unwrap();
+        let output = SharedOutput::default();
+        let captured = output.clone();
+        let diagnostic_output = SharedOutput::default();
+        let captured_diagnostic = diagnostic_output.clone();
+        let observations = Arc::new(Mutex::new(Vec::new()));
+        let widths = Arc::new(Mutex::new(Vec::new()));
+        let thread_observations = Arc::clone(&observations);
+        let thread_widths = Arc::clone(&widths);
+        let binding: Qwen35Aq4DirectTraceBinding =
+            serde_json::from_value(direct_trace_binding_value(binding_request_id)).unwrap();
+        let mut config = dummy_resident_config();
+        config.session = config
+            .session
+            .with_prefill_chunk_tokens(prefill_width)
+            .unwrap();
+        let process = thread::spawn(move || {
+            run_loaded_worker(
+                LoadedWorker::Resident {
+                    config,
+                    profile: scripted_profile(),
+                    direct_trace_bindings: Some(VecDeque::from([binding])),
+                },
+                BufReader::new(input_reader),
+                output,
+                move |_| {
+                    let session = Qwen35Aq4InferenceSession::from_model(
+                        ScriptedModel::default(),
+                        Qwen35Aq4SessionConfig::greedy(4, vec![2]),
+                    )?;
+                    Ok(SessionInferenceBackend::new(session))
+                },
+                move |config| {
+                    let session = Qwen35Aq4InferenceSession::from_model(
+                        ScriptedModel {
+                            tokens: VecDeque::from([2]),
+                            direct_trace_collector: Some(Qwen35Aq4DirectTraceCollector::default()),
+                            direct_trace_observations: thread_observations,
+                            prefill_widths: thread_widths,
+                            ..ScriptedModel::default()
+                        },
+                        config.session,
+                    )?;
+                    Ok(SessionInferenceBackend::with_diagnostic_writer(
+                        session,
+                        Box::new(diagnostic_output),
+                    ))
+                },
+            )
+        });
+
+        writeln!(
+            input_writer,
+            "{}",
+            serde_json::json!({
+                "schema_version": "ullm.worker.v1",
+                "type": "generate",
+                "request_id": request_id,
+                "prompt_token_ids": vec![4; prefill_width],
+                "max_new_tokens": 1,
+                "sampling": {"temperature": 0.0, "top_p": 1.0, "top_k": 1, "seed": 0},
+                "eos_token_ids": [2]
+            })
+        )
+        .unwrap();
+        input_writer.flush().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            let bytes = captured.0.lock().unwrap().clone();
+            let text = String::from_utf8_lossy(&bytes);
+            if text.contains("\"type\":\"released\"") || text.contains("\"type\":\"error\"") {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "diagnostic worker event timed out"
+            );
+            thread::sleep(Duration::from_millis(5));
+        }
+        if let Some(second_request_id) = second_request_id {
+            writeln!(
+                input_writer,
+                "{}",
+                serde_json::json!({
+                    "schema_version": "ullm.worker.v1",
+                    "type": "generate",
+                    "request_id": second_request_id,
+                    "prompt_token_ids": vec![4; prefill_width],
+                    "max_new_tokens": 1,
+                    "sampling": {"temperature": 0.0, "top_p": 1.0, "top_k": 1, "seed": 0},
+                    "eos_token_ids": [2]
+                })
+            )
+            .unwrap();
+            input_writer.flush().unwrap();
+            let deadline = Instant::now() + Duration::from_secs(2);
+            loop {
+                let text = String::from_utf8_lossy(&captured.0.lock().unwrap()).into_owned();
+                if text.contains("\"type\":\"error\"") {
+                    break;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "diagnostic binding exhaustion timed out"
+                );
+                thread::sleep(Duration::from_millis(5));
+            }
+        } else if request_id == binding_request_id {
+            writeln!(
+                input_writer,
+                "{}",
+                serde_json::json!({"schema_version": "ullm.worker.v1", "type": "shutdown"})
+            )
+            .unwrap();
+            input_writer.flush().unwrap();
+        }
+        drop(input_writer);
+        let result = process.join().unwrap();
+        let lines = captured
+            .0
+            .lock()
+            .unwrap()
+            .split(|byte| *byte == b'\n')
+            .filter(|line| !line.is_empty())
+            .map(|line| serde_json::from_slice::<serde_json::Value>(line).unwrap())
+            .collect::<Vec<_>>();
+        let observed = observations.lock().unwrap().clone();
+        let observed_widths = widths.lock().unwrap().clone();
+        let diagnostic_lines = captured_diagnostic
+            .0
+            .lock()
+            .unwrap()
+            .split(|byte| *byte == b'\n')
+            .filter(|line| !line.is_empty())
+            .map(|line| serde_json::from_slice::<serde_json::Value>(line).unwrap())
+            .collect::<Vec<_>>();
+        (result, lines, diagnostic_lines, observed, observed_widths)
+    }
+
+    #[test]
+    fn p3_binding_ingress_traverses_production_jsonl_to_m1_and_m8_terminal_observation() {
+        for width in [1, 8] {
+            let request_id = format!("diagnostic-m{width}");
+            let (result, lines, diagnostics, observations, widths) =
+                run_diagnostic_resident_worker(&request_id, &request_id, width, None);
+            assert_eq!(
+                result.unwrap(),
+                ullm_engine::worker_runtime::CommandReaderExit::IdleShutdown
+            );
+            assert_eq!(widths, vec![width]);
+            assert_eq!(observations.len(), 1);
+            assert_eq!(observations[0].request_id, request_id);
+            assert_eq!(observations[0].terminal_status, "completed");
+            assert_eq!(observations[0].counters.invocation_count, 1);
+            assert_eq!(observations[0].counters.launch_count, 2);
+            assert_eq!(diagnostics.len(), 1);
+            assert_eq!(
+                diagnostics[0]["schema_version"],
+                ullm_engine::qwen35_aq4_direct_trace::RUNTIME_OBSERVATION_SCHEMA
+            );
+            assert_eq!(diagnostics[0]["request_id"], request_id);
+            assert_eq!(diagnostics[0]["terminal_status"], "completed");
+            assert!(lines.iter().all(|line| {
+                line["schema_version"] == "ullm.worker.v1"
+                    && line.get("counters").is_none()
+                    && line.get("diagnostic_gate").is_none()
+            }));
+            assert_eq!(
+                lines
+                    .iter()
+                    .map(|line| line["type"].as_str().unwrap())
+                    .collect::<Vec<_>>(),
+                ["ready", "started", "progress", "token", "released"]
+            );
+        }
+    }
+
+    #[test]
+    fn p3_binding_request_mismatch_fails_before_session_dispatch() {
+        let (result, lines, diagnostics, observations, widths) =
+            run_diagnostic_resident_worker("request-wire", "request-sidecar", 8, None);
+        assert!(result.is_err());
+        assert!(diagnostics.is_empty());
+        assert!(observations.is_empty());
+        assert!(widths.is_empty());
+        assert!(lines.iter().all(|line| line.get("counters").is_none()));
+        assert!(lines.iter().any(|line| line["type"] == "error"));
+    }
+
+    #[test]
+    fn p3_binding_sidecar_entry_is_consumed_once_without_carryover() {
+        let (result, lines, diagnostics, observations, widths) = run_diagnostic_resident_worker(
+            "request-first",
+            "request-first",
+            1,
+            Some("request-reuse"),
+        );
+        assert!(result.is_err());
+        assert_eq!(widths, vec![1]);
+        assert_eq!(observations.len(), 1);
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0]["request_id"], "request-first");
+        assert!(lines.iter().any(|line| line["type"] == "error"));
+        assert!(lines.iter().all(|line| line.get("counters").is_none()));
+    }
+
     #[test]
     fn manifest_resident_jsonl_route_never_builds_child_backend() {
         let (mut input_writer, input_reader) = UnixStream::pair().unwrap();
@@ -1153,6 +1866,7 @@ mod tests {
                 LoadedWorker::Resident {
                     config: dummy_resident_config(),
                     profile: scripted_profile(),
+                    direct_trace_bindings: None,
                 },
                 BufReader::new(input_reader),
                 output,
@@ -1171,6 +1885,7 @@ mod tests {
                         ScriptedModel {
                             tokens: VecDeque::from([2]),
                             resets: 0,
+                            ..ScriptedModel::default()
                         },
                         config.session,
                     )?;
@@ -1248,6 +1963,7 @@ mod tests {
                 LoadedWorker::Resident {
                     config: dummy_resident_reasoning_config(),
                     profile: scripted_reasoning_profile(),
+                    direct_trace_bindings: None,
                 },
                 BufReader::new(input_reader),
                 output,
@@ -1263,6 +1979,7 @@ mod tests {
                         ScriptedModel {
                             tokens: VecDeque::from([7, 2]),
                             resets: 0,
+                            ..ScriptedModel::default()
                         },
                         config.session,
                     )?;

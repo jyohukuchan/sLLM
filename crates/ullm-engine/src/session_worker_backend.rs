@@ -15,14 +15,39 @@ use std::time::Instant;
 const MAX_TERMINAL_DIAGNOSTIC_BYTES: usize = 64 * 1024;
 
 /// A JSONL worker backend whose model-specific behavior is entirely supplied by `S`.
-#[derive(Debug)]
 pub struct SessionInferenceBackend<S> {
     session: S,
+    diagnostic_writer: Option<Box<dyn Write + Send>>,
+}
+
+impl<S: std::fmt::Debug> std::fmt::Debug for SessionInferenceBackend<S> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("SessionInferenceBackend")
+            .field("session", &self.session)
+            .field(
+                "diagnostic_writer_configured",
+                &self.diagnostic_writer.is_some(),
+            )
+            .finish()
+    }
 }
 
 impl<S> SessionInferenceBackend<S> {
     pub fn new(session: S) -> Self {
-        Self { session }
+        Self {
+            session,
+            diagnostic_writer: None,
+        }
+    }
+
+    /// Installs an explicit diagnostic sink while preserving the ordinary worker stdout writer.
+    /// Production construction uses [`Self::new`] and therefore writes diagnostics to stderr.
+    pub fn with_diagnostic_writer(session: S, writer: Box<dyn Write + Send>) -> Self {
+        Self {
+            session,
+            diagnostic_writer: Some(writer),
+        }
     }
 
     pub fn session(&self) -> &S {
@@ -77,7 +102,10 @@ impl<S: InferenceSession> InferenceBackend for SessionInferenceBackend<S> {
             .session
             .take_terminal_diagnostic_observation()
             .and_then(|observation| match observation {
-                Some(observation) => write_terminal_diagnostic(&observation),
+                Some(observation) => match self.diagnostic_writer.as_mut() {
+                    Some(writer) => write_terminal_diagnostic_to(writer, &observation),
+                    None => write_terminal_diagnostic(&observation),
+                },
                 None => Ok(()),
             });
         if let Err(diagnostic_error) = diagnostic_result {
@@ -247,11 +275,18 @@ fn encode_terminal_diagnostic(observation: &serde_json::Value) -> Result<Vec<u8>
 }
 
 fn write_terminal_diagnostic(observation: &serde_json::Value) -> Result<(), String> {
-    let bytes = encode_terminal_diagnostic(observation)?;
     let mut stderr = std::io::stderr().lock();
-    stderr
+    write_terminal_diagnostic_to(&mut stderr, observation)
+}
+
+fn write_terminal_diagnostic_to(
+    writer: &mut dyn Write,
+    observation: &serde_json::Value,
+) -> Result<(), String> {
+    let bytes = encode_terminal_diagnostic(observation)?;
+    writer
         .write_all(&bytes)
-        .and_then(|_| stderr.flush())
+        .and_then(|_| writer.flush())
         .map_err(|error| format!("failed to write terminal diagnostic observation: {error}"))
 }
 

@@ -320,6 +320,23 @@ M=1 dispatchもM>1 native prefillと同じrequest collectorとroute counterを�
 operation launchを記録する。terminal observationは最大64 KiBのcompact JSON 1行としてstructured
 stderrだけへ出力し、workerのstdout JSONL wireには追加しない。gateとmetadataの片側だけが有効な
 request、request ID不一致、未消費の前request observationはdispatch前に拒否する。
+
+production workerへのbinding ingressは通常の`ullm.worker.v1/v2` JSONL schemaを拡張しない。
+manifest resident modeの起動時に限り、`--p3-direct-trace-binding-manifest`と
+`--p3-direct-trace-binding-manifest-sha256`をexact pairで受け付ける。このCLI pairと
+`ULLM_AQ4_P3_DIRECT_TRACE_DIAGNOSTIC`は同時に有効または同時に無効でなければならず、legacy modeと
+benchmark wireでは診断gateを拒否する。sidecarはabsolute canonical path、parent traversalなし、
+ancestor symlinkなし、single-link regular file、worker record size上限、open fd/pathのdevice/inode/
+mode/size/time identity一致、全bytes SHA-256一致を必須とする。schemaは
+`ullm.aq4_p3_candidate_a.direct_trace_binding_manifest.v1`のexact objectで、1..64個のstrict bindingを
+持つ。各bindingはrun|pair、request/case/source/implementation/source hashを含み、request IDと
+binding IDの重複を拒否する。
+
+workerは通常parserが生成した`InferenceRequest`とsidecar先頭bindingのrequest IDを照合した後、
+`SessionInferenceBackend::execute`の直前に一度だけbindingを付与する。entryは試行時に消費し、
+missing、exhausted、reuse、request mismatch、shutdown時の未使用entryをfail closedにする。
+terminal diagnosticはstderr sinkだけへ流れ、stdout wireは従来のready/started/progress/token/released
+eventだけを維持する。
 診断collectorを初期化するだけではdirect routeを有効にせず、既存の
 `ULLM_AQ4_PREFILL_DIRECT_SEQUENCE_OUTPUT` gateもsideごとに記録して照合する。
 
