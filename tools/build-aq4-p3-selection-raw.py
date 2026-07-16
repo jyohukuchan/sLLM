@@ -1675,7 +1675,12 @@ def build(manifest: dict[str, Any], manifest_snapshot: Snapshot) -> tuple[dict[s
         "capabilities": {
             "family_exclusive_timing": True,
             "d2h_count": True,
+            # Current profile bindings carry HIP API timing but no byte-counted
+            # memory-copy trace reference.  Do not infer bytes from call count.
+            "d2h_bytes": False,
+            "d2h_time_ms": True,
             "stream_sync_count": True,
+            "stream_sync_time_ms": True,
         },
         "representative_prompt_count": len(measurements),
         "measurements": measurements,

@@ -94,7 +94,10 @@ IDENTITY_FIELDS = {
 CAPABILITY_FIELDS = {
     "family_exclusive_timing",
     "d2h_count",
+    "d2h_bytes",
+    "d2h_time_ms",
     "stream_sync_count",
+    "stream_sync_time_ms",
 }
 CANDIDATE_A_CAPABILITY_FIELDS = {
     "direct_sequence_output",
@@ -103,10 +106,11 @@ CANDIDATE_A_CAPABILITY_FIELDS = {
     "launch_count",
     "component_latency",
     "full_model_latency",
-    "workspace_peak_vram",
+    "workspace_bytes",
+    "peak_vram_bytes",
     "fallback_reasons",
     "alias_size_admission_safety",
-    "direct_copy_fidelity",
+    "fidelity_binding",
 }
 QUALIFICATION_REF_FIELDS = {
     "path", "sha256", "qualification_sha256", "status", "promotion_eligible", "reason"
@@ -1301,16 +1305,16 @@ def evaluate_candidate(
         reasons.append("paired_full_model_ci95_not_positive")
 
     if policy["requires_d2h_count"]:
-        if not capabilities.get("d2h_count", False) or any(
+        if not all(capabilities.get(field, False) for field in ("d2h_count", "d2h_bytes", "d2h_time_ms")) or any(
             item["d2h_count"] is None or item["d2h_time_ms"] is None
             for item in prompt_results
         ):
-            reasons.append("paged_kv_d2h_count_missing")
-        if not capabilities.get("stream_sync_count", False) or any(
+            reasons.append("paged_kv_d2h_capability_missing")
+        if not all(capabilities.get(field, False) for field in ("stream_sync_count", "stream_sync_time_ms")) or any(
             item["stream_sync_count"] is None or item["stream_sync_time_ms"] is None
             for item in prompt_results
         ):
-            reasons.append("paged_kv_stream_sync_count_missing")
+            reasons.append("paged_kv_stream_sync_capability_missing")
         observed = any(
             (item["d2h_count"] or 0) > 0 or (item["stream_sync_count"] or 0) > 0
             for item in prompt_results
@@ -1347,9 +1351,7 @@ def evaluate_candidate(
         },
         "paired_full_model_95ci": paired,
         "required_evidence": {
-            "family_exclusive_timing": capabilities.get("family_exclusive_timing", False),
-            "d2h_count": capabilities.get("d2h_count", False),
-            "stream_sync_count": capabilities.get("stream_sync_count", False),
+            field: capabilities.get(field, False) for field in sorted(CAPABILITY_FIELDS)
         },
     }
     if policy.get("candidate_a"):

@@ -31,7 +31,9 @@ status
 measurement_eligible
 smoke_only
 promotion_eligible
+promotion_ineligibility_reason
 evidence_sha256
+upstream_qualification
 identity
 capabilities
 representative_prompt_count
@@ -43,14 +45,16 @@ full_model_pairs
 
 ```text
 schema_version = ullm.aq4_p2_candidate_selection_raw.v1
-status = complete
-measurement_eligible = true
-smoke_only = false
-promotion_eligible = true
-representative_prompt_count = 7
+promotion: status=complete, measurement_eligible=true, smoke_only=false,
+promotion_eligible=true, promotion_ineligibility_reason=null, representative_prompt_count=7
+
+diagnostic: status=one_case_diagnostic, measurement_eligible=false, smoke_only=true,
+promotion_eligible=false,
+promotion_ineligibility_reason=upstream_p2_calibration_rejected_no_go,
+representative_prompt_count=1
 ```
 
-`measurement_eligible=false`、`smoke_only=true`、`promotion_eligible=false`は、測定値の内容にかかわらず入力全体を拒否する。missing field、unknown field、duplicate JSON key、NaN/Infinity、負値、不正な型も拒否する。
+promotion rawは`qualified_go`、diagnostic rawは`rejected_no_go`のupstream qualification fileをpath、file SHA-256、qualification self-hash、status、reasonで結合する。selectorは元fileとP2 chainを再検証する。diagnostic rawの測定値は選考に投入せず、canonical `no_eligible_candidate`を生成する。missing field、unknown field、duplicate JSON key、NaN/Infinity、負値、不正な型も拒否する。
 
 `identity`のexact fieldsは次の通りで、すべてlowercase SHA-256である。
 
@@ -68,6 +72,7 @@ package_content_sha256
 ```text
 family_exclusive_timing
 d2h_count
+d2h_bytes
 d2h_time_ms
 stream_sync_count
 stream_sync_time_ms
@@ -88,10 +93,11 @@ d2d_copy_count
 launch_count
 component_latency
 full_model_latency
-workspace_peak_vram
+workspace_bytes
+peak_vram_bytes
 fallback_reasons
 alias_size_admission_safety
-direct_copy_fidelity
+fidelity_binding
 ```
 
 ### 2.2 代表prompt measurement
@@ -190,8 +196,8 @@ timing_ns.prefill.families が存在する
 
 ```text
 eligible_raw_evidence_missing
-paged_kv_d2h_count_missing
-paged_kv_stream_sync_count_missing
+paged_kv_d2h_capability_missing
+paged_kv_stream_sync_capability_missing
 ```
 
 kernel名からD2Hや同期を推測しない。profileのfamily exclusive時間だけでpaged KV候補を合格させない。

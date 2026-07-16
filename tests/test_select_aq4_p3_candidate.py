@@ -112,7 +112,10 @@ def raw_fixture(candidate_id: str = "paged-kv-table-validation-v1") -> dict[str,
             "capabilities": {
                 "family_exclusive_timing": True,
                 "d2h_count": True,
+                "d2h_bytes": True,
+                "d2h_time_ms": True,
                 "stream_sync_count": True,
+                "stream_sync_time_ms": True,
             },
             "representative_prompt_count": 7,
             "measurements": measurements,
@@ -528,7 +531,7 @@ def test_candidate_a_pair_only_source_capability_false_fails_closed(
     pair_source = candidate_a_raw_fixture()
     measurement_source["full_model_pairs"] = []
     pair_source["measurements"] = []
-    pair_source["capabilities"]["direct_copy_fidelity"] = False
+    pair_source["capabilities"]["fidelity_binding"] = False
     seal(measurement_source)
     seal(pair_source)
     item = candidate(
@@ -536,7 +539,7 @@ def test_candidate_a_pair_only_source_capability_false_fails_closed(
         "sequence-output-direct-v1",
     )
     assert item["eligible"] is False
-    assert "candidate_a_direct_copy_fidelity_missing" in item["reason_codes"]
+    assert "candidate_a_fidelity_binding_missing" in item["reason_codes"]
 
 
 def test_candidate_a_integer_medians_preserve_half_and_reject_other_fractions(
@@ -704,8 +707,8 @@ def test_current_diagnostic_profile_cannot_qualify_paged_kv(tmp_path: Path) -> N
     assert result["status"] == "no_eligible_candidate"
     assert item["eligible"] is False
     assert "eligible_raw_evidence_missing" in item["reason_codes"]
-    assert "paged_kv_d2h_count_missing" in item["reason_codes"]
-    assert "paged_kv_stream_sync_count_missing" in item["reason_codes"]
+    assert "paged_kv_d2h_capability_missing" in item["reason_codes"]
+    assert "paged_kv_stream_sync_capability_missing" in item["reason_codes"]
     assert result["input_warnings"] == [
         "diagnostic family-exclusive profiles are not measurement eligible and do not provide D2H/stream-sync counts"
     ]
@@ -716,6 +719,32 @@ def test_representative_prompt_count_rejects_float_seven() -> None:
     value["representative_prompt_count"] = 7.0
     seal(value)
     with pytest.raises(SELECTOR.SelectionError, match="representative_prompt_count"):
+        SELECTOR.validate_raw(value)
+
+
+@pytest.mark.parametrize(
+    "field",
+    sorted(SELECTOR.CAPABILITY_FIELDS | SELECTOR.CANDIDATE_A_CAPABILITY_FIELDS),
+)
+def test_candidate_a_capability_contract_is_exact_and_boolean(field: str) -> None:
+    missing = candidate_a_raw_fixture()
+    del missing["capabilities"][field]
+    seal(missing)
+    with pytest.raises(SELECTOR.SelectionError, match="raw capabilities fields differ"):
+        SELECTOR.validate_raw(missing)
+
+    substituted = candidate_a_raw_fixture()
+    substituted["capabilities"][field] = 1
+    seal(substituted)
+    with pytest.raises(SELECTOR.SelectionError, match="must be boolean"):
+        SELECTOR.validate_raw(substituted)
+
+
+def test_candidate_a_capability_contract_rejects_unknown_field() -> None:
+    value = candidate_a_raw_fixture()
+    value["capabilities"]["unknown"] = True
+    seal(value)
+    with pytest.raises(SELECTOR.SelectionError, match="raw capabilities fields differ"):
         SELECTOR.validate_raw(value)
 
 
@@ -805,7 +834,7 @@ def test_paged_kv_requires_counts_and_observed_transfer_or_sync(tmp_path: Path) 
         row["d2h_time_ms"] = None
     seal(missing)
     item = candidate(select_raw(tmp_path, missing), "paged-kv-table-validation-v1")
-    assert "paged_kv_d2h_count_missing" in item["reason_codes"]
+    assert "paged_kv_d2h_capability_missing" in item["reason_codes"]
 
     zero = raw_fixture()
     for row in zero["measurements"]:

@@ -29,6 +29,7 @@ measurement_eligible
 smoke_only
 promotion_eligible
 manifest_sha256
+upstream_qualification
 candidate
 identity
 resident_summaries
@@ -45,7 +46,7 @@ smoke_only = false
 promotion_eligible = true
 ```
 
-代表caseはexactly 7件、各caseのprofile runはresident measured index 2..11のexactly 10件、full-model pairは2件以上を要求する。
+`upstream_qualification`は`qualified_go`のimmutable file referenceでなければならない。代表caseはexactly 7件、各caseのprofile runはresident measured index 2..11のexactly 10件、full-model pairは2件以上を要求する。
 
 ### 2.2 one-case diagnostic mode
 
@@ -56,7 +57,7 @@ smoke_only = true
 promotion_eligible = false
 ```
 
-代表caseはexactly 1件、profile runは1件、full-model pairは0件である。出力statusは`one_case_diagnostic`で、同じ非promotion flagを保持する。selectorはこのrawをpromotion inputとして拒否する。
+`upstream_qualification`は`rejected_no_go`のimmutable file referenceでなければならない。代表caseはexactly 1件、profile runは1件またはmeasured index 2..11の10件、full-model pairは0件である。出力statusは`one_case_diagnostic`で、同じ非promotion flagとP2 rejection reasonを保持する。selectorはこのrawを選考測定へ混入させず、`no_eligible_candidate`を生成する。
 
 ### 2.3 manifest hash
 
