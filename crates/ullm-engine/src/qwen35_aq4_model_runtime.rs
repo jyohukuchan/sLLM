@@ -17,7 +17,10 @@ use crate::loader::{
     PassthroughF32Data, effective_rmsnorm_weight_values, read_named_passthrough_f32,
 };
 use crate::package::TensorSelector;
-use crate::qwen35_aq4_direct_trace::{Qwen35Aq4DirectTraceCounters, Qwen35Aq4DirectTraceRoute};
+use crate::qwen35_aq4_direct_trace::{
+    Qwen35Aq4DirectRuntimeObservation, Qwen35Aq4DirectTraceBinding, Qwen35Aq4DirectTraceCollector,
+    Qwen35Aq4DirectTraceRoute,
+};
 use crate::qwen35_aq4_head_runtime::{
     PackageEmbeddingRuntime, PackageFinalNormRuntime, PackageLmHeadMode, PackageLmHeadRuntime,
     PackageTokenLogit, QWEN3_FINAL_NORM_TENSOR, package_embedding_shape,
@@ -179,6 +182,12 @@ pub struct Qwen35Aq4PrefillInvocation {
 pub struct Qwen35Aq4PrefillChunkStep {
     pub execution_width: usize,
     pub invocations: Vec<Qwen35Aq4PrefillInvocation>,
+}
+
+#[derive(Debug)]
+pub struct Qwen35Aq4DirectTraceRequestOutcome<T> {
+    pub result: Result<T, String>,
+    pub observation: Option<Qwen35Aq4DirectRuntimeObservation>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -719,7 +728,7 @@ pub struct Qwen35Aq4ModelRuntime {
     device_name: String,
     backend: String,
     device_total_global_mem: u64,
-    direct_trace_counters: Option<Qwen35Aq4DirectTraceCounters>,
+    direct_trace_collector: Option<Qwen35Aq4DirectTraceCollector>,
     last_partial_operation_executions: Vec<[Option<OperationExecutionRecord>; 2]>,
     last_partial_prefill_invocations: Vec<Qwen35Aq4FailedPrefillInvocation>,
 }
@@ -1007,8 +1016,8 @@ impl Qwen35Aq4ModelRuntime {
             device_name: info.name,
             backend: info.backend.to_string(),
             device_total_global_mem: info.total_global_mem,
-            direct_trace_counters: direct_trace_diagnostic_enabled()
-                .then(Qwen35Aq4DirectTraceCounters::default),
+            direct_trace_collector: direct_trace_diagnostic_enabled()
+                .then(Qwen35Aq4DirectTraceCollector::default),
             last_partial_operation_executions: Vec::with_capacity(32),
             last_partial_prefill_invocations: Vec::new(),
         })
@@ -1036,16 +1045,84 @@ impl Qwen35Aq4ModelRuntime {
 
     /// Returns whether the explicit candidate-A diagnostic collector is active.
     pub fn direct_trace_diagnostic_enabled(&self) -> bool {
-        self.direct_trace_counters.is_some()
+        self.direct_trace_collector.is_some()
     }
 
-    /// Snapshots counters for the just-completed request and clears them for the next request.
-    pub fn take_direct_trace_counters(&mut self) -> Option<Qwen35Aq4DirectTraceCounters> {
-        let snapshot = self.direct_trace_counters.clone();
-        if let Some(counters) = self.direct_trace_counters.as_mut() {
-            counters.reset();
+    /// Starts one request-scoped diagnostic observation and clears any inactive prior counters.
+    pub fn begin_direct_trace_request(
+        &mut self,
+        binding: Qwen35Aq4DirectTraceBinding,
+    ) -> Result<bool, String> {
+        let Some(collector) = self.direct_trace_collector.as_mut() else {
+            return Ok(false);
+        };
+        if binding.direct_sequence_output_enabled != direct_prefill_sequence_output_enabled() {
+            return Err(
+                "direct trace request binding differs from the production route gate".into(),
+            );
         }
-        snapshot
+        collector.begin_request(binding)?;
+        Ok(true)
+    }
+
+    /// Synchronizes the GPU terminal boundary, snapshots exactly once, and clears request state.
+    pub fn finish_direct_trace_request(
+        &mut self,
+        terminal_status: &str,
+    ) -> Result<Option<Qwen35Aq4DirectRuntimeObservation>, String> {
+        let Some(collector) = self.direct_trace_collector.as_mut() else {
+            return Ok(None);
+        };
+        let terminal_status = if let Err(_error) = self.stream.synchronize() {
+            collector.record_failure("terminal_gpu_sync_failed")?;
+            "error"
+        } else {
+            terminal_status
+        };
+        collector.finish_request(terminal_status).map(Some)
+    }
+
+    /// Runs one production request inside the exact diagnostic begin/terminal observation scope.
+    pub fn observe_direct_trace_request<T>(
+        &mut self,
+        binding: Qwen35Aq4DirectTraceBinding,
+        operation: impl FnOnce(&mut Self) -> Result<T, String>,
+    ) -> Result<Qwen35Aq4DirectTraceRequestOutcome<T>, String> {
+        let enabled = self.begin_direct_trace_request(binding)?;
+        let result = operation(self);
+        if !enabled {
+            return Ok(Qwen35Aq4DirectTraceRequestOutcome {
+                result,
+                observation: None,
+            });
+        }
+        if result.is_err()
+            && let Some(collector) = self.direct_trace_collector.as_mut()
+            && !collector.failure_recorded()
+        {
+            collector.record_failure("request_operation_failed")?;
+        }
+        let terminal_status = if result.is_ok() { "completed" } else { "error" };
+        let observation = self.finish_direct_trace_request(terminal_status)?;
+        Ok(Qwen35Aq4DirectTraceRequestOutcome {
+            result,
+            observation,
+        })
+    }
+
+    pub fn cancel_direct_trace_request(
+        &mut self,
+    ) -> Result<Option<Qwen35Aq4DirectRuntimeObservation>, String> {
+        let Some(collector) = self.direct_trace_collector.as_mut() else {
+            return Ok(None);
+        };
+        if !collector.request_active() {
+            return Err("direct trace request was not started".into());
+        }
+        if !collector.failure_recorded() {
+            collector.record_failure("request_cancelled")?;
+        }
+        self.finish_direct_trace_request("cancelled")
     }
 
     pub fn has_resident_embedding(&self) -> bool {
@@ -1142,6 +1219,42 @@ impl Qwen35Aq4ModelRuntime {
     /// row splice.
     #[allow(clippy::too_many_arguments)]
     pub fn dispatch_prefill_chunk_for_phase(
+        &mut self,
+        token_ids: &[usize],
+        rotary_dim: usize,
+        rope_base: f32,
+        absolute_start: usize,
+        phase: ExecutionPhase,
+        sync_each_layer_for_timing: bool,
+        label: &str,
+    ) -> Result<Qwen35Aq4PrefillChunkStep, String> {
+        if self
+            .direct_trace_collector
+            .as_ref()
+            .is_some_and(|collector| !collector.request_active())
+        {
+            return Err("direct trace diagnostic request was not started".into());
+        }
+        let result = self.dispatch_prefill_chunk_for_phase_inner(
+            token_ids,
+            rotary_dim,
+            rope_base,
+            absolute_start,
+            phase,
+            sync_each_layer_for_timing,
+            label,
+        );
+        if result.is_err()
+            && let Some(collector) = self.direct_trace_collector.as_mut()
+            && collector.request_active()
+        {
+            collector.record_failure("prefill_dispatch_failed")?;
+        }
+        result
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn dispatch_prefill_chunk_for_phase_inner(
         &mut self,
         token_ids: &[usize],
         rotary_dim: usize,
@@ -1508,7 +1621,19 @@ impl Qwen35Aq4ModelRuntime {
                         }
                     }
                 };
-            if let Some(counters) = self.direct_trace_counters.as_mut() {
+            let diagnostic_request_active = self
+                .direct_trace_collector
+                .as_ref()
+                .is_some_and(Qwen35Aq4DirectTraceCollector::request_active);
+            if sync_each_layer_for_timing || diagnostic_request_active {
+                if let Err(error) = self.stream.synchronize() {
+                    for layer in &mut self.layers[..=layer_position] {
+                        layer.mark_execution_failed();
+                    }
+                    return Err(format!("failed to synchronize {layer_label}: {error}"));
+                }
+            }
+            if diagnostic_request_active {
                 let route = match observed_route {
                     Qwen35Aq4SequenceOutputRoute::Copy => Qwen35Aq4DirectTraceRoute::Copy,
                     Qwen35Aq4SequenceOutputRoute::Direct => Qwen35Aq4DirectTraceRoute::Direct,
@@ -1516,20 +1641,10 @@ impl Qwen35Aq4ModelRuntime {
                         Qwen35Aq4DirectTraceRoute::CopyFallback
                     }
                 };
-                counters.record_invocation(
-                    route,
-                    sequence_bytes_u64,
-                    launch_count,
-                    workspace_bytes,
-                )?;
-            }
-            if sync_each_layer_for_timing {
-                if let Err(error) = self.stream.synchronize() {
-                    for layer in &mut self.layers[..=layer_position] {
-                        layer.mark_execution_failed();
-                    }
-                    return Err(format!("failed to synchronize {layer_label}: {error}"));
-                }
+                self.direct_trace_collector
+                    .as_mut()
+                    .expect("active collector was checked above")
+                    .record_invocation(route, sequence_bytes_u64, launch_count, workspace_bytes)?;
             }
             current_ping = committed_next_ping;
         }
@@ -1672,17 +1787,30 @@ impl Qwen35Aq4ModelRuntime {
 
     /// Synchronizes, clears all request-owned KV/conv/recurrent state, and retains all weights.
     pub fn reset_all_request_state_synchronized(&mut self) -> Result<(), String> {
-        self.stream.synchronize().map_err(|err| {
-            format!("failed to synchronize Qwen3.5 AQ4 model before request reset: {err}")
-        })?;
-        for (position, layer) in self.layers.iter_mut().enumerate() {
-            layer
-                .reset_synchronized(&mut self.stream)
-                .map_err(|err| format!("failed to reset Qwen3.5 AQ4 layer {position}: {err}"))?;
+        let result = (|| {
+            self.stream.synchronize().map_err(|err| {
+                format!("failed to synchronize Qwen3.5 AQ4 model before request reset: {err}")
+            })?;
+            for (position, layer) in self.layers.iter_mut().enumerate() {
+                layer.reset_synchronized(&mut self.stream).map_err(|err| {
+                    format!("failed to reset Qwen3.5 AQ4 layer {position}: {err}")
+                })?;
+            }
+            self.stream.synchronize().map_err(|err| {
+                format!("failed to synchronize Qwen3.5 AQ4 model request reset: {err}")
+            })
+        })();
+        if let Some(collector) = self.direct_trace_collector.as_mut()
+            && collector.request_active()
+            && !collector.failure_recorded()
+        {
+            collector.record_failure(if result.is_ok() {
+                "request_reset_before_terminal"
+            } else {
+                "request_reset_failed"
+            })?;
         }
-        self.stream
-            .synchronize()
-            .map_err(|err| format!("failed to synchronize Qwen3.5 AQ4 model request reset: {err}"))
+        result
     }
 
     pub fn synchronize(&mut self) -> Result<(), String> {
@@ -1694,6 +1822,12 @@ impl Qwen35Aq4ModelRuntime {
     pub fn mark_prefill_chunk_uncommitted(&mut self) {
         for layer in &mut self.layers {
             layer.mark_execution_failed();
+        }
+        if let Some(collector) = self.direct_trace_collector.as_mut()
+            && collector.request_active()
+            && !collector.failure_recorded()
+        {
+            let _ = collector.record_failure("prefill_chunk_uncommitted");
         }
     }
 

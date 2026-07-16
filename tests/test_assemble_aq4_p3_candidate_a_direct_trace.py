@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -81,37 +83,61 @@ def runtime(side: str, *, binding_kind: str = "run", binding_id: str = "run-1") 
         **COMMON,
         "diagnostic_gate": True,
         "direct_sequence_output_enabled": candidate,
+        "evidence_lane": "instrumented_diagnostic",
         "measurement_eligible": False,
+        "terminal_status": "completed",
         "counters": counters,
     }, "record_sha256")
 
 
-def profiler(side: str, *, binding_kind: str = "run", binding_id: str = "run-1", lane: str = "profiler_off") -> dict[str, object]:
+def profiler(
+    side: str,
+    root: Path,
+    *,
+    binding_kind: str = "run",
+    binding_id: str = "run-1",
+) -> dict[str, object]:
     candidate = side == "candidate"
-    return seal({
-        "schema_version": ASSEMBLER.PROFILER_SCHEMA,
+    executable = root / "rocprofv3-fixture"
+    if not executable.exists():
+        executable.write_text("#!/bin/sh\necho rocprofv3-fixture-1.0\n", encoding="ascii")
+        executable.chmod(0o755)
+    raw = {
+        "schema_version": ASSEMBLER.PROFILER_EVIDENCE.RAW_SCHEMA,
         "status": "complete",
         "record_sha256": None,
         "side": side,
         "binding_kind": binding_kind,
         "binding_id": binding_id,
         **COMMON,
-        "timing_lane": lane,
-        "measurement_eligible": lane == "profiler_off",
-        "component_ms": None if binding_kind == "pair" else (1.25 if candidate else 1.5),
-        "full_model_ms": None if binding_kind == "pair" else (3.25 if candidate else 3.5),
-        "peak_vram_bytes": 8192 if candidate else 9216,
-        "fidelity_binding_sha256": "d" * 64,
-    }, "record_sha256")
+        "timing_lane": "profiler_off_measurement",
+        "measurement_eligible": True,
+        "command": [str(executable.resolve()), "--fixture-capture", binding_id, side],
+        "exit_code": 0,
+        "started_unix_ns": 100,
+        "completed_unix_ns": 200,
+        "samples": [
+            {
+                "component_ms": None if binding_kind == "pair" else (1.25 if candidate else 1.5),
+                "full_model_ms": None if binding_kind == "pair" else (3.25 if candidate else 3.5),
+                "peak_vram_bytes": 8192 if candidate else 9216,
+                "fidelity_binding_sha256": "d" * 64,
+            }
+        ],
+    }
+    raw["record_sha256"] = ASSEMBLER.PROFILER_EVIDENCE.self_hash(raw, "record_sha256")
+    raw_path = write_json(root / f"{side}-{binding_kind}-{binding_id}-raw.json", raw)
+    value, _snapshots = ASSEMBLER.PROFILER_EVIDENCE.build(raw_path, executable)
+    return value
 
 
 def files(tmp_path: Path, *, binding_kind: str = "run", binding_id: str = "run-1") -> dict[str, Path]:
     tmp_path.mkdir(parents=True, exist_ok=True)
     values = {
         "baseline_runtime": runtime("baseline", binding_kind=binding_kind, binding_id=binding_id),
-        "baseline_profiler": profiler("baseline", binding_kind=binding_kind, binding_id=binding_id),
+        "baseline_profiler": profiler("baseline", tmp_path, binding_kind=binding_kind, binding_id=binding_id),
         "candidate_runtime": runtime("candidate", binding_kind=binding_kind, binding_id=binding_id),
-        "candidate_profiler": profiler("candidate", binding_kind=binding_kind, binding_id=binding_id),
+        "candidate_profiler": profiler("candidate", tmp_path, binding_kind=binding_kind, binding_id=binding_id),
     }
     return {key: write_json(tmp_path / f"{key}.json", value) for key, value in values.items()}
 
@@ -139,7 +165,54 @@ def test_assembles_run_trace_from_runtime_and_profiler_records(tmp_path: Path) -
     )
     assert parsed["baseline"]["d2d_bytes"] == 1024
     assert parsed["candidate"]["d2d_copy_count"] == 0
+    profiler_metrics = {
+        "component_ms", "full_model_ms", "peak_vram_bytes",
+        "fidelity_binding_sha256",
+    }
+    assert all(
+        event["measurement_eligible"] is (event["metric"] in profiler_metrics)
+        for event in value["events"]
+    )
+    assert all(
+        event["evidence_lane"]
+        == (
+            "profiler_off_measurement"
+            if event["metric"] in profiler_metrics
+            else "instrumented_diagnostic"
+        )
+        for event in value["events"]
+    )
     assert output.exists()
+
+
+def test_rust_serialized_runtime_observation_matches_assembler_schema(
+    tmp_path: Path,
+) -> None:
+    environment = dict(os.environ)
+    environment["CARGO_BUILD_JOBS"] = "1"
+    completed = subprocess.run(
+        [
+            "cargo", "run", "--quiet", "-p", "ullm-engine", "--example",
+            "aq4_p3_direct_observation_fixture",
+        ],
+        cwd=ROOT,
+        env=environment,
+        check=True,
+        capture_output=True,
+    )
+    path = tmp_path / "rust-runtime.json"
+    path.write_bytes(completed.stdout)
+    snapshot = ASSEMBLER.capture(path.resolve(), "Rust runtime observation")
+    common, counters = ASSEMBLER.validate_runtime(
+        snapshot,
+        side="candidate",
+        binding_kind="run",
+        binding_id="run-1",
+        common=None,
+    )
+    assert common == {key: COMMON[key] for key in common}
+    assert counters["invocation_count"] == 1
+    assert counters["d2d_copy_count"] == 0
 
 
 def test_assembles_pair_without_synthesizing_latency(tmp_path: Path) -> None:
@@ -187,3 +260,104 @@ def test_rejects_diagnostic_gate_off_and_fidelity_mismatch(tmp_path: Path) -> No
     write_json(paths["candidate_profiler"], value)
     with pytest.raises(ASSEMBLER.AssemblerError, match="fidelity"):
         ASSEMBLER.assemble(paths, tmp_path / "fidelity-trace.json", "run", "run-1")
+
+
+def test_profiler_requires_raw_provenance_and_rejects_raw_tamper(
+    tmp_path: Path,
+) -> None:
+    paths = files(tmp_path)
+    value = json.loads(paths["candidate_profiler"].read_text(encoding="utf-8"))
+    del value["raw_capture"]
+    seal(value, "record_sha256")
+    write_json(paths["candidate_profiler"], value)
+    with pytest.raises(ASSEMBLER.AssemblerError, match="fields differ"):
+        ASSEMBLER.assemble(paths, tmp_path / "missing-raw.json", "run", "run-1")
+
+    paths = files(tmp_path / "tamper")
+    value = json.loads(paths["candidate_profiler"].read_text(encoding="utf-8"))
+    raw_path = Path(value["raw_capture"]["path"])
+    raw = json.loads(raw_path.read_text(encoding="utf-8"))
+    raw["samples"][0]["peak_vram_bytes"] += 1
+    raw["record_sha256"] = ASSEMBLER.PROFILER_EVIDENCE.self_hash(
+        raw, "record_sha256"
+    )
+    write_json(raw_path, raw)
+    with pytest.raises(ASSEMBLER.AssemblerError, match="profiler evidence"):
+        ASSEMBLER.assemble(paths, tmp_path / "raw-tamper.json", "run", "run-1")
+
+
+def test_profiler_producer_rechecks_inode_sha_and_bounds(tmp_path: Path) -> None:
+    value = profiler("candidate", tmp_path)
+    raw_path = Path(value["raw_capture"]["path"])
+    executable = Path(value["profiler"]["path"])
+    _result, snapshots = ASSEMBLER.PROFILER_EVIDENCE.build(raw_path, executable)
+    original = raw_path.read_bytes()
+    replacement = raw_path.with_name("replacement.json")
+    replacement.write_bytes(original)
+    os.replace(replacement, raw_path)
+    with pytest.raises(
+        ASSEMBLER.PROFILER_EVIDENCE.ProfilerEvidenceError,
+        match="identity or SHA-256 changed",
+    ):
+        snapshots[0].verify("raw profiler capture")
+
+    oversized = tmp_path / "oversized.raw"
+    with oversized.open("wb") as handle:
+        handle.truncate(ASSEMBLER.PROFILER_EVIDENCE.MAX_INPUT_BYTES + 1)
+    with pytest.raises(
+        ASSEMBLER.PROFILER_EVIDENCE.ProfilerEvidenceError,
+        match="file identity is invalid",
+    ):
+        ASSEMBLER.PROFILER_EVIDENCE.capture(oversized, "oversized raw")
+
+
+def test_profiler_raw_hardlink_and_secret_command_are_rejected(
+    tmp_path: Path,
+) -> None:
+    value = profiler("candidate", tmp_path)
+    raw_path = Path(value["raw_capture"]["path"])
+    hardlink = tmp_path / "raw-hardlink.json"
+    hardlink.hardlink_to(raw_path)
+    with pytest.raises(
+        ASSEMBLER.PROFILER_EVIDENCE.ProfilerEvidenceError,
+        match="file identity is invalid",
+    ):
+        ASSEMBLER.PROFILER_EVIDENCE.capture(raw_path, "linked raw")
+    hardlink.unlink()
+
+    raw = json.loads(raw_path.read_text(encoding="utf-8"))
+    raw["command"].append("--prompt=secret-token")
+    raw["record_sha256"] = ASSEMBLER.PROFILER_EVIDENCE.self_hash(
+        raw, "record_sha256"
+    )
+    with pytest.raises(
+        ASSEMBLER.PROFILER_EVIDENCE.ProfilerEvidenceError,
+        match="token or prompt",
+    ):
+        ASSEMBLER.PROFILER_EVIDENCE.derive_raw(raw)
+
+
+def test_instrumented_profiler_timing_cannot_be_laundered(
+    tmp_path: Path,
+) -> None:
+    paths = files(tmp_path)
+    value = json.loads(paths["candidate_profiler"].read_text(encoding="utf-8"))
+    value["timing_lane"] = "instrumented_diagnostic"
+    value["measurement_eligible"] = False
+    seal(value, "record_sha256")
+    write_json(paths["candidate_profiler"], value)
+    with pytest.raises(ASSEMBLER.AssemblerError, match="profiler evidence|timing lane"):
+        ASSEMBLER.assemble(paths, tmp_path / "laundered.json", "run", "run-1")
+
+
+def test_failed_runtime_terminal_cannot_enter_complete_trace(tmp_path: Path) -> None:
+    paths = files(tmp_path)
+    value = json.loads(paths["candidate_runtime"].read_text(encoding="utf-8"))
+    value["status"] = "failed"
+    value["terminal_status"] = "error"
+    value["counters"]["failed_invocation_count"] = 1
+    value["counters"]["failure_reasons"] = ["prefill_dispatch_failed"]
+    seal(value, "record_sha256")
+    write_json(paths["candidate_runtime"], value)
+    with pytest.raises(ASSEMBLER.AssemblerError, match="status|terminal"):
+        ASSEMBLER.assemble(paths, tmp_path / "failed-runtime.json", "run", "run-1")

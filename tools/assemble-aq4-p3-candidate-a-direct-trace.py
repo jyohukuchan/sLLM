@@ -12,17 +12,39 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.util
 import json
 import math
 import os
 import re
 import stat
+import sys
 from pathlib import Path
 from typing import Any
 
 
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def load_tool(name: str, path: Path) -> Any:
+    spec = importlib.util.spec_from_file_location(name, path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"cannot import {path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        sys.modules.pop(name, None)
+    return module
+
+
+PROFILER_EVIDENCE = load_tool(
+    "aq4_p3_direct_profiler_evidence",
+    ROOT / "tools/produce-aq4-p3-candidate-a-profiler-observation.py",
+)
 RUNTIME_SCHEMA = "ullm.aq4_p3_candidate_a_direct_runtime_observation.v1"
-PROFILER_SCHEMA = "ullm.aq4_p3_candidate_a_direct_profiler_observation.v1"
+PROFILER_SCHEMA = PROFILER_EVIDENCE.OBSERVATION_SCHEMA
 TRACE_SCHEMA = "ullm.aq4_p3_candidate_a_direct_sequence_output_trace.v1"
 CANDIDATE_ID = "sequence-output-direct-v1"
 MAX_INPUT_BYTES = 8 * 1024 * 1024
@@ -35,14 +57,10 @@ RUNTIME_FIELDS = {
     "schema_version", "status", "record_sha256", "side", "binding_kind", "binding_id",
     "request_id", "implementation_id", "source_id", "source_sha256", "candidate_id",
     "case_id", "case_sha256", "identity_sha256", "diagnostic_gate",
-    "direct_sequence_output_enabled", "measurement_eligible", "counters",
+    "direct_sequence_output_enabled", "evidence_lane", "measurement_eligible",
+    "terminal_status", "counters",
 }
-PROFILER_FIELDS = {
-    "schema_version", "status", "record_sha256", "side", "binding_kind", "binding_id",
-    "request_id", "implementation_id", "source_id", "source_sha256", "candidate_id",
-    "case_id", "case_sha256", "identity_sha256", "timing_lane", "measurement_eligible",
-    "component_ms", "full_model_ms", "peak_vram_bytes", "fidelity_binding_sha256",
-}
+PROFILER_FIELDS = set(PROFILER_EVIDENCE.OBSERVATION_FIELDS)
 COUNTER_FIELDS = {
     "invocation_count", "d2d_bytes", "d2d_copy_count", "launch_count", "workspace_bytes",
     "fallback_count", "fallback_reasons", "direct_alias_safe", "direct_size_safe",
@@ -53,7 +71,10 @@ TRACE_FIELDS = {
     "candidate_id", "case_id", "case_sha256", "identity_sha256", "implementation_id",
     "source_id", "source_sha256", "request_id", "events",
 }
-EVENT_FIELDS = {"event_id", "event_sha256", "side", "metric", "value"}
+EVENT_FIELDS = {
+    "event_id", "event_sha256", "side", "metric", "value", "evidence_lane",
+    "measurement_eligible",
+}
 RUN_METRICS = {
     "d2d_bytes", "d2d_copy_count", "launch_count", "component_ms", "full_model_ms",
     "workspace_bytes", "peak_vram_bytes", "fallback_count", "fallback_reasons",
@@ -110,10 +131,10 @@ def capture(path: Path, label: str) -> Snapshot:
         before = path.lstat()
     except OSError as error:
         raise AssemblerError(f"cannot open {label}: {error}") from error
-    if not stat.S_ISREG(before.st_mode):
-        raise AssemblerError(f"{label} must be a regular file")
-    if before.st_size > MAX_INPUT_BYTES:
-        raise AssemblerError(f"{label} exceeds {MAX_INPUT_BYTES} bytes")
+    if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1:
+        raise AssemblerError(f"{label} must be a single-link regular file")
+    if before.st_size <= 0 or before.st_size > MAX_INPUT_BYTES:
+        raise AssemblerError(f"{label} has an invalid bounded size")
     descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0))
     digest = hashlib.sha256()
     chunks: list[bytes] = []
@@ -244,6 +265,10 @@ def validate_runtime(snapshot: Snapshot, *, side: str, binding_kind: str, bindin
                     binding_kind=binding_kind, binding_id=binding_id, common=common)
     if not boolean(value["diagnostic_gate"], "runtime observation.diagnostic_gate") or not value["diagnostic_gate"]:
         raise AssemblerError("runtime diagnostic gate was not explicitly enabled")
+    if value["status"] != "complete" or value["terminal_status"] != "completed":
+        raise AssemblerError("runtime observation terminal status differs")
+    if value["evidence_lane"] != "instrumented_diagnostic":
+        raise AssemblerError("runtime observation evidence lane differs")
     if boolean(value["measurement_eligible"], "runtime observation.measurement_eligible"):
         raise AssemblerError("instrumented runtime observation cannot be measurement eligible")
     expected_direct = side == "candidate"
@@ -276,22 +301,35 @@ def validate_profiler(snapshot: Snapshot, *, side: str, binding_kind: str, bindi
     value = parse_json(snapshot, "profiler observation")
     validate_common(value, fields=PROFILER_FIELDS, label="profiler observation", side=side,
                     binding_kind=binding_kind, binding_id=binding_id, common=common)
+    try:
+        derived = PROFILER_EVIDENCE.validate_observation(value)
+    except (OSError, PROFILER_EVIDENCE.ProfilerEvidenceError) as error:
+        raise AssemblerError(f"profiler evidence differs: {error}") from error
     lane = value["timing_lane"]
-    if lane not in {"profiler_off", "instrumented"}:
-        raise AssemblerError("profiler timing_lane is unknown")
-    if boolean(value["measurement_eligible"], "profiler observation.measurement_eligible") != (lane == "profiler_off"):
-        raise AssemblerError("profiler measurement eligibility does not match timing lane")
+    if lane != "profiler_off_measurement" or value["measurement_eligible"] is not True:
+        raise AssemblerError("profiler timing lane is not measurement eligible")
     required_latency = binding_kind == "run"
     component = nullable_float(value["component_ms"], "profiler observation.component_ms", required=required_latency)
     full_model = nullable_float(value["full_model_ms"], "profiler observation.full_model_ms", required=required_latency)
     integer(value["peak_vram_bytes"], "profiler observation.peak_vram_bytes")
     fidelity = sha(value["fidelity_binding_sha256"], "profiler observation.fidelity_binding_sha256")
-    return {"timing_lane": lane, "component_ms": component, "full_model_ms": full_model,
+    if any(derived[key] != value[key] for key in (
+        "component_ms", "full_model_ms", "peak_vram_bytes", "fidelity_binding_sha256"
+    )):
+        raise AssemblerError("profiler derived evidence differs")
+    return {"timing_lane": lane, "measurement_eligible": True,
+            "component_ms": component, "full_model_ms": full_model,
             "peak_vram_bytes": value["peak_vram_bytes"], "fidelity_binding_sha256": fidelity}
 
 
-def event(side: str, metric: str, value: Any) -> dict[str, Any]:
-    result = {"event_id": f"{side}-{metric}", "event_sha256": None, "side": side, "metric": metric, "value": value}
+def event(
+    side: str, metric: str, value: Any, evidence_lane: str, measurement_eligible: bool
+) -> dict[str, Any]:
+    result = {
+        "event_id": f"{side}-{metric}", "event_sha256": None, "side": side,
+        "metric": metric, "value": value, "evidence_lane": evidence_lane,
+        "measurement_eligible": measurement_eligible,
+    }
     result["event_sha256"] = self_hash(result, "event_sha256")
     return result
 
@@ -326,7 +364,20 @@ def assemble(paths: dict[str, Path], output: Path, binding_kind: str, binding_id
         if binding_kind == "run":
             values[side]["component_ms"] = p["component_ms"]
             values[side]["full_model_ms"] = p["full_model_ms"]
-    events = [event(side, metric, values[side][metric]) for side in ("baseline", "candidate") for metric in sorted(metrics)]
+    profiler_metrics = {
+        "component_ms", "full_model_ms", "peak_vram_bytes", "fidelity_binding_sha256"
+    }
+    events = [
+        event(
+            side,
+            metric,
+            values[side][metric],
+            "profiler_off_measurement" if metric in profiler_metrics else "instrumented_diagnostic",
+            metric in profiler_metrics,
+        )
+        for side in ("baseline", "candidate")
+        for metric in sorted(metrics)
+    ]
     result: dict[str, Any] = {
         "schema_version": TRACE_SCHEMA, "status": "complete", "trace_sha256": None,
         "binding_kind": binding_kind, "binding_id": binding_id, "candidate_id": CANDIDATE_ID,
@@ -348,7 +399,11 @@ def assemble(paths: dict[str, Path], output: Path, binding_kind: str, binding_id
             handle.write(raw)
             handle.flush()
             os.fsync(handle.fileno())
-        os.replace(temporary, output)
+        try:
+            os.link(temporary, output, follow_symlinks=False)
+        except FileExistsError as error:
+            raise AssemblerError(f"refusing to overwrite output: {output}") from error
+        temporary.unlink()
     finally:
         if temporary.exists():
             temporary.unlink()
@@ -375,11 +430,7 @@ def main(argv: list[str] | None = None) -> int:
     except (AssemblerError, OSError, ValueError) as error:
         print(f"error: {error}")
         return 2
-    eligible = all(
-        parse_json(capture(path.absolute(), "profiler record"), "profiler record")["timing_lane"] == "profiler_off"
-        for path in (args.baseline_profiler, args.candidate_profiler)
-    )
-    print(json.dumps({"status": result["status"], "measurement_eligible": eligible,
+    print(json.dumps({"status": result["status"], "measurement_eligible": True,
                       "trace_sha256": result["trace_sha256"]}, sort_keys=True))
     return 0
 

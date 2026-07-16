@@ -22,6 +22,10 @@ try:
 finally:
     sys.modules.pop(SPEC.name, None)
 
+DIRECT_IMPLEMENTATION_ID = "fixture-v1"
+DIRECT_SOURCE_ID = "qwen35_aq4_model_runtime"
+DIRECT_SOURCE_SHA256 = "b" * 64
+
 
 def write_json(path: Path, value: object) -> None:
     path.write_text(
@@ -309,6 +313,10 @@ def direct_trace_fixture(
     candidate_full_model_ms: float = 90.0,
     baseline_overrides: dict[str, object] | None = None,
     candidate_overrides: dict[str, object] | None = None,
+    implementation_id: str = DIRECT_IMPLEMENTATION_ID,
+    source_id: str = DIRECT_SOURCE_ID,
+    source_sha256: str = DIRECT_SOURCE_SHA256,
+    request_id: str | None = None,
 ) -> Path:
     events = []
     for side, d2d_bytes, copy_count in (("baseline", 1000, 10), ("candidate", 400, 4)):
@@ -343,6 +351,18 @@ def direct_trace_fixture(
                 "side": side,
                 "metric": metric,
                 "value": value,
+                "evidence_lane": (
+                    "profiler_off_measurement"
+                    if metric in {
+                        "component_ms", "full_model_ms", "peak_vram_bytes",
+                        "fidelity_binding_sha256",
+                    }
+                    else "instrumented_diagnostic"
+                ),
+                "measurement_eligible": metric in {
+                    "component_ms", "full_model_ms", "peak_vram_bytes",
+                    "fidelity_binding_sha256",
+                },
             }
             event["event_sha256"] = PRODUCER.self_hash(event, "event_sha256")
             events.append(event)
@@ -358,6 +378,10 @@ def direct_trace_fixture(
         "case_id": case_id,
         "case_sha256": case_sha,
         "identity_sha256": identity_sha,
+        "implementation_id": implementation_id,
+        "source_id": source_id,
+        "source_sha256": source_sha256,
+        "request_id": request_id or f"request-{binding_kind}-{binding_id}",
         "events": events,
     }
     value["trace_sha256"] = PRODUCER.self_hash(value, "trace_sha256")
@@ -381,6 +405,10 @@ def parse_run_direct(path: Path) -> dict[str, dict[str, object]]:
         candidate_id="sequence-output-direct-v1",
         binding_kind="run",
         binding_id="2",
+        implementation_id=DIRECT_IMPLEMENTATION_ID,
+        source_id=DIRECT_SOURCE_ID,
+        source_sha256=DIRECT_SOURCE_SHA256,
+        request_id="request-run-2",
     )
 
 
@@ -531,6 +559,14 @@ def candidate_a_promotion_manifest(
                 candidate_overrides=candidate_overrides,
             )
             binding["direct_sequence_output_trace"] = ref(direct)
+            binding.update(
+                {
+                    "implementation_id": DIRECT_IMPLEMENTATION_ID,
+                    "source_id": DIRECT_SOURCE_ID,
+                    "source_sha256": DIRECT_SOURCE_SHA256,
+                    "request_id": f"request-run-{run_index}",
+                }
+            )
     for index, pair in enumerate(manifest["full_model_pairs"]):
         direct = direct_trace_fixture(
             tmp_path / f"pair-direct-{index}.json",
@@ -541,6 +577,14 @@ def candidate_a_promotion_manifest(
             binding_id=pair["pair_id"],
         )
         pair["direct_sequence_output_trace"] = ref(direct)
+        pair.update(
+            {
+                "implementation_id": DIRECT_IMPLEMENTATION_ID,
+                "source_id": DIRECT_SOURCE_ID,
+                "source_sha256": DIRECT_SOURCE_SHA256,
+                "request_id": f"request-pair-{pair['pair_id']}",
+            }
+        )
     manifest["manifest_sha256"] = PRODUCER.manifest_sha256(manifest)
     manifest_path = tmp_path / "candidate-a-manifest.json"
     write_json(manifest_path, manifest)
@@ -637,6 +681,10 @@ def test_candidate_a_direct_trace_binds_events_and_rejects_duplicate_or_tamper(
         candidate_id="sequence-output-direct-v1",
         binding_kind="run",
         binding_id="2",
+        implementation_id=DIRECT_IMPLEMENTATION_ID,
+        source_id=DIRECT_SOURCE_ID,
+        source_sha256=DIRECT_SOURCE_SHA256,
+        request_id="request-run-2",
     )
     assert parsed["candidate"]["d2d_bytes"] == 400
     duplicate_path = direct_trace_fixture(tmp_path / "duplicate.json", duplicate=True)
@@ -649,6 +697,10 @@ def test_candidate_a_direct_trace_binds_events_and_rejects_duplicate_or_tamper(
             candidate_id="sequence-output-direct-v1",
             binding_kind="run",
             binding_id="2",
+            implementation_id=DIRECT_IMPLEMENTATION_ID,
+            source_id=DIRECT_SOURCE_ID,
+            source_sha256=DIRECT_SOURCE_SHA256,
+            request_id="request-run-2",
         )
     tampered = json.loads(path.read_text())
     tampered["events"][0]["value"] = 999
@@ -709,6 +761,10 @@ def test_candidate_a_direct_trace_rejects_nonfinite_json(tmp_path: Path) -> None
         ("case_sha256", "5" * 64, "case differs"),
         ("binding_id", "3", "binding differs"),
         ("binding_kind", "pair", "binding differs"),
+        ("implementation_id", "other-implementation", "implementation differs"),
+        ("source_id", "other-source", "source differs"),
+        ("source_sha256", "6" * 64, "source hash differs"),
+        ("request_id", "other-request", "request differs"),
     ],
 )
 def test_candidate_a_direct_trace_root_identity_case_run_pair_matrix(
@@ -720,6 +776,33 @@ def test_candidate_a_direct_trace_root_identity_case_run_pair_matrix(
     reseal_direct_trace(value)
     write_json(path, value)
     with pytest.raises(PRODUCER.ProducerError, match=message):
+        parse_run_direct(path)
+
+
+def test_candidate_a_legacy_unenriched_trace_is_rejected(tmp_path: Path) -> None:
+    path = direct_trace_fixture(tmp_path / "legacy.json")
+    value = json.loads(path.read_text())
+    for field in PRODUCER.DIRECT_TRACE_BINDING_FIELDS:
+        del value[field]
+    reseal_direct_trace(value)
+    write_json(path, value)
+    with pytest.raises(PRODUCER.ProducerError, match="fields differ"):
+        parse_run_direct(path)
+
+
+def test_candidate_a_profiler_metric_lane_cannot_be_laundered(
+    tmp_path: Path,
+) -> None:
+    path = direct_trace_fixture(tmp_path / "lane.json")
+    value = json.loads(path.read_text())
+    event = next(
+        item for item in value["events"] if item["metric"] == "full_model_ms"
+    )
+    event["evidence_lane"] = "instrumented_diagnostic"
+    event["measurement_eligible"] = False
+    reseal_direct_trace(value)
+    write_json(path, value)
+    with pytest.raises(PRODUCER.ProducerError, match="lane/eligibility"):
         parse_run_direct(path)
 
 

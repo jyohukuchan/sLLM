@@ -83,7 +83,12 @@ PROFILE_RUN_FIELDS = {
     "kernel_trace",
     "hip_api_trace",
 }
-PROFILE_RUN_FIELDS_CANDIDATE_A = PROFILE_RUN_FIELDS | {"direct_sequence_output_trace"}
+DIRECT_BINDING_FIELDS = {
+    "implementation_id", "source_id", "source_sha256", "request_id"
+}
+PROFILE_RUN_FIELDS_CANDIDATE_A = (
+    PROFILE_RUN_FIELDS | {"direct_sequence_output_trace"} | DIRECT_BINDING_FIELDS
+)
 PAIR_FIELDS = {
     "pair_id",
     "case_id",
@@ -92,7 +97,9 @@ PAIR_FIELDS = {
     "baseline_raw",
     "candidate_raw",
 }
-PAIR_FIELDS_CANDIDATE_A = PAIR_FIELDS | {"direct_sequence_output_trace"}
+PAIR_FIELDS_CANDIDATE_A = (
+    PAIR_FIELDS | {"direct_sequence_output_trace"} | DIRECT_BINDING_FIELDS
+)
 RAW_ROOT_FIELDS = {
     "schema_version",
     "case_id",
@@ -198,7 +205,10 @@ DIRECT_TRACE_BINDING_FIELDS = {
     "source_sha256",
     "request_id",
 }
-DIRECT_EVENT_FIELDS = {"event_id", "event_sha256", "side", "metric", "value"}
+DIRECT_EVENT_FIELDS = {
+    "event_id", "event_sha256", "side", "metric", "value", "evidence_lane",
+    "measurement_eligible",
+}
 DIRECT_RUN_METRICS = {
     "d2d_bytes",
     "d2d_copy_count",
@@ -230,11 +240,11 @@ class Snapshot:
 
     def verify(self) -> None:
         try:
-            current = self.path.lstat()
-        except OSError as error:
-            raise ProducerError(f"input disappeared: {self.path}: {error}") from error
-        if file_identity(current) != self.identity:
-            raise ProducerError(f"input identity changed: {self.path}")
+            current = capture(self.path, "input verification")
+        except (OSError, ProducerError) as error:
+            raise ProducerError(f"input verification failed: {self.path}: {error}") from error
+        if current.identity != self.identity or current.sha256 != self.sha256:
+            raise ProducerError(f"input identity or SHA-256 changed: {self.path}")
 
 
 def file_identity(info: os.stat_result) -> tuple[int, ...]:
@@ -1052,10 +1062,10 @@ def parse_direct_sequence_output_trace(
     candidate_id: str,
     binding_kind: str,
     binding_id: str,
-    implementation_id: str | None = None,
-    source_id: str | None = None,
-    source_sha256: str | None = None,
-    request_id: str | None = None,
+    implementation_id: str,
+    source_id: str,
+    source_sha256: str,
+    request_id: str,
 ) -> dict[str, dict[str, Any]]:
     """Parse the hash-bound candidate-A route trace.
 
@@ -1064,11 +1074,11 @@ def parse_direct_sequence_output_trace(
     rejected before any aggregate is returned to the selector.
     """
     value = parse_json(snapshot, "direct sequence output trace")
-    root_fields = set(DIRECT_TRACE_ROOT_FIELDS)
-    enriched = bool(DIRECT_TRACE_BINDING_FIELDS & set(value))
-    if enriched:
-        root_fields |= DIRECT_TRACE_BINDING_FIELDS
-    exact(value, root_fields, "direct sequence output trace")
+    exact(
+        value,
+        DIRECT_TRACE_ROOT_FIELDS | DIRECT_TRACE_BINDING_FIELDS,
+        "direct sequence output trace",
+    )
     if value["schema_version"] != DIRECT_TRACE_SCHEMA or value["status"] != "complete":
         raise ProducerError("direct sequence output trace schema/status differs")
     if value["trace_sha256"] != self_hash(value, "trace_sha256"):
@@ -1081,27 +1091,26 @@ def parse_direct_sequence_output_trace(
         raise ProducerError("direct sequence output trace case differs")
     if value["identity_sha256"] != identity_sha256:
         raise ProducerError("direct sequence output trace identity differs")
-    if enriched:
-        value_implementation_id = text_value(
-            value["implementation_id"], "direct sequence output trace implementation_id"
-        )
-        value_source_id = text_value(
-            value["source_id"], "direct sequence output trace source_id"
-        )
-        value_source_sha256 = digest(
-            value["source_sha256"], "direct sequence output trace source_sha256"
-        )
-        value_request_id = text_value(
-            value["request_id"], "direct sequence output trace request_id"
-        )
-        if implementation_id is not None and value_implementation_id != implementation_id:
-            raise ProducerError("direct sequence output trace implementation differs")
-        if source_id is not None and value_source_id != source_id:
-            raise ProducerError("direct sequence output trace source differs")
-        if source_sha256 is not None and value_source_sha256 != source_sha256:
-            raise ProducerError("direct sequence output trace source hash differs")
-        if request_id is not None and value_request_id != request_id:
-            raise ProducerError("direct sequence output trace request differs")
+    value_implementation_id = text_value(
+        value["implementation_id"], "direct sequence output trace implementation_id"
+    )
+    value_source_id = text_value(
+        value["source_id"], "direct sequence output trace source_id"
+    )
+    value_source_sha256 = digest(
+        value["source_sha256"], "direct sequence output trace source_sha256"
+    )
+    value_request_id = text_value(
+        value["request_id"], "direct sequence output trace request_id"
+    )
+    if value_implementation_id != implementation_id:
+        raise ProducerError("direct sequence output trace implementation differs")
+    if value_source_id != source_id:
+        raise ProducerError("direct sequence output trace source differs")
+    if value_source_sha256 != source_sha256:
+        raise ProducerError("direct sequence output trace source hash differs")
+    if value_request_id != request_id:
+        raise ProducerError("direct sequence output trace request differs")
     if type(value["events"]) is not list or not value["events"]:
         raise ProducerError("direct sequence output trace events must be non-empty")
     expected_metrics = DIRECT_RUN_METRICS if binding_kind == "run" else DIRECT_PAIR_METRICS
@@ -1128,6 +1137,19 @@ def parse_direct_sequence_output_trace(
             raise ProducerError("direct sequence output trace metric is duplicated")
         seen_pairs.add(pair)
         raw = event["value"]
+        profiler_metric = metric in {
+            "component_ms", "full_model_ms", "peak_vram_bytes",
+            "fidelity_binding_sha256",
+        }
+        expected_lane = (
+            "profiler_off_measurement" if profiler_metric else "instrumented_diagnostic"
+        )
+        if (
+            event["evidence_lane"] != expected_lane
+            or boolean(event["measurement_eligible"], f"{label}.measurement_eligible")
+            is not profiler_metric
+        ):
+            raise ProducerError(f"{label} evidence lane/eligibility differs")
         if metric in {
             "d2d_bytes", "d2d_copy_count", "launch_count", "workspace_bytes",
             "peak_vram_bytes", "fallback_count",
@@ -1281,6 +1303,14 @@ def trace_measurement(
                     candidate_id=candidate_id,
                     binding_kind="run",
                     binding_id=str(run_index),
+                    implementation_id=text_value(
+                        binding["implementation_id"], f"{label}.implementation_id"
+                    ),
+                    source_id=text_value(binding["source_id"], f"{label}.source_id"),
+                    source_sha256=digest(
+                        binding["source_sha256"], f"{label}.source_sha256"
+                    ),
+                    request_id=text_value(binding["request_id"], f"{label}.request_id"),
                 )
             )
         exclusive_ms.append(kernel_value["candidate_exclusive_ns"] / 1_000_000.0)
@@ -1581,6 +1611,12 @@ def build(manifest: dict[str, Any], manifest_snapshot: Snapshot) -> tuple[dict[s
                 candidate_id=candidate_id,
                 binding_kind="pair",
                 binding_id=pair_id,
+                implementation_id=text_value(
+                    pair["implementation_id"], f"{label}.implementation_id"
+                ),
+                source_id=text_value(pair["source_id"], f"{label}.source_id"),
+                source_sha256=digest(pair["source_sha256"], f"{label}.source_sha256"),
+                request_id=text_value(pair["request_id"], f"{label}.request_id"),
             )
             for field in (
                 "d2d_bytes", "d2d_copy_count", "launch_count", "workspace_bytes",
@@ -1642,7 +1678,11 @@ def write_output(path: Path, value: dict[str, Any]) -> None:
             handle.write(raw)
             handle.flush()
             os.fsync(handle.fileno())
-        os.replace(temporary, path)
+        try:
+            os.link(temporary, path, follow_symlinks=False)
+        except FileExistsError as error:
+            raise ProducerError(f"refusing to overwrite output: {path}") from error
+        temporary.unlink()
     finally:
         if temporary.exists():
             temporary.unlink()

@@ -268,15 +268,20 @@ baseline/candidateは異なるrun ID、同じidentity file、driver identity、c
 
 候補A (`sequence-output-direct-v1`) のproducer manifestでは、各profile run bindingへ
 `direct_sequence_output_trace`、各full-model pairへ同名のtrace referenceを追加する。
-固定4候補のbinding/pair fieldsは変更せず、既存fixtureとの互換を維持する。trace schemaは
+既存のE/Nと候補A以外のbinding/pair fieldsは変更しない。候補Aのbinding/pairは
+`implementation_id`、`source_id`、`source_sha256`、`request_id`を必須とし、これらを欠く
+旧形式のA manifestは受け付けない。trace schemaは
 `ullm.aq4_p3_candidate_a_direct_sequence_output_trace.v1`で、rootの
 `trace_sha256`と各eventの`event_sha256`をself-hashする。
 assembled traceのrootには、実装を特定する`implementation_id`、観測源を特定する
 `source_id`/`source_sha256`、requestを特定する`request_id`も含める。`binding_kind`と
 `binding_id`はrunまたはpairを特定し、runtime/profilerの両方で同じ値を要求する。
 
-trace eventは`event_id`、`event_sha256`、`side` (`baseline`/`candidate`)、`metric`、`value`を
-持つ。run traceではD2D bytes/copy count、launch count、component/full-model milliseconds、
+trace eventは`event_id`、`event_sha256`、`side` (`baseline`/`candidate`)、`metric`、`value`、
+`evidence_lane`、`measurement_eligible`を持つ。runtime counter、workspace、fallback、safetyは
+`instrumented_diagnostic`かつ測定不適格、latency、peak VRAM、fidelityは
+`profiler_off_measurement`かつ測定適格でなければならない。metricとlaneの組み合わせを入れ替えた
+traceは、rootのself-hashが正しくても拒否する。run traceではD2D bytes/copy count、launch count、component/full-model milliseconds、
 workspace/peak VRAM、fallback count/reasons、alias/size/admission safety、fidelity bindingを
 各sideでexactly一つずつ要求する。pair traceはlatencyを除く同じmetricsを要求する。
 event ID、(side, metric)、trace binding、identity/case/run(or pair) IDは重複・欠落・unknown・
@@ -300,23 +305,35 @@ root/schema/file/identity/case/run/pair tamper、fidelity不一致を個別に�
 
 `tools/assemble-aq4-p3-candidate-a-direct-trace.py` は、runtime observationと
 profiler observationを別々に読み、candidate-A traceへ組み立てる。runtime observationは
-`Qwen35Aq4ModelRuntime::take_direct_trace_counters()` が返す値だけを受け付ける。この値は
+`Qwen35Aq4ModelRuntime::observe_direct_trace_request()` がrequest開始時にbindingを検証して
+collectorをresetし、terminal GPU同期後にexactly onceでserializeした値だけを受け付ける。この値は
 `ULLM_AQ4_P3_DIRECT_TRACE_DIAGNOSTIC=1` のときだけ有効になり、既定値は無効である。
 route applyが実際に実行したworkspace-to-destination D2D copyのbytes/count、完了した
 operation recordのlaunch count、arena allocationのworkspace bytes、copy fallbackの件数と
-理由を記録する。Direct routeはcopyを0として記録し、failed invocationは成功traceへ混入させない。
+理由を記録する。Direct routeはcopyを0として記録し、route成功はterminal GPU同期後にだけ
+確定する。dispatch、sync、cancel、resetを含むerror terminalはfailureを一度記録し、complete
+observationを発行しない。次requestでは新しいcollector stateから開始し、前requestのcounterを
+持ち越さない。
 診断collectorを初期化するだけではdirect routeを有効にせず、既存の
 `ULLM_AQ4_PREFILL_DIRECT_SEQUENCE_OUTPUT` gateもsideごとに記録して照合する。
 
 peak VRAM、component/full-model latency、direct/copy fidelity bindingはruntimeから推測せず、
 同じimplementation/source/candidate/case/run(or pair)/request bindingを持つ外部profiler
-observationから取り込む。profiler observationはself-hashとfile identityを検証し、
-`timing_lane=profiler_off` のときだけ測定適格とする。instrumented timing laneの出力は
-`measurement_eligible=false` として扱う。p50/p95は10 runの各traceをこのproducerへ渡した後に
+observationから取り込む。`tools/produce-aq4-p3-candidate-a-profiler-observation.py`は、single-linkの
+profiler executableとrawをfile descriptorから読み、path/SHA/device/inode/link count、profiler
+version、実行command、exit code、開始・終了時刻、case/identity/run(or pair)/request、parser SHAを
+observationへ固定する。rawのsampleからlatency、peak VRAM、fidelityを再計算し、出力直前に
+profiler/raw/parserを再読してinodeとSHAを照合する。assemblerもrawを開き直して同じ値を再計算する。
+profiler observationはself-hashとfile identityを検証し、
+`evidence_lane=profiler_off_measurement`かつ`measurement_eligible=true`のときだけ測定適格とする。
+instrumented laneをprofiler metricへ付けた出力はrejectし、適格な値へ昇格させない。p50/p95は10 runの各traceをこのproducerへ渡した後に
 既存selectorが再計算し、producerは入力された合否や集計値を信用しない。runtime/profiler
 recordおよび出力traceにはtoken列や生成文字列を含めない。入力のunknown、duplicate、non-finite、
-binding/self-hash/file-hash tamper、fidelity不一致、既存output上書きはexit code 2で拒否する。
+binding/self-hash/file-hash tamper、hard link、sparse oversized raw、TOCTOU、fidelity不一致、既存output
+上書きはexit code 2で拒否する。selection raw builderは候補A manifestのenriched bindingを必須として
+expected値をtrace validatorへ渡し、入力を最終書き出し直前に再読・再hashする。既存のE/N schemaは
+この追加で変更しない。
 
 ## 次の行動
 
-実R9700 captureでは、各代表promptの10 measured runごとにkernel traceとHIP API traceを別fileへ保存し、run bindingへcase/identity/index/hashを固定する。one-case profileはdiagnostic manifestだけを生成し、7 promptとfull-model pairsが揃うまでpromotion rawへ昇格しない。生成したpromotion rawはselectorへ渡し、候補が確定してからP3 runtime実装へ進む。
+実R9700 captureでは、各代表promptの10 measured runごとにkernel traceとHIP API traceを別fileへ保存し、run bindingへcase/identity/index/hashを固定する。one-case profileはdiagnostic manifestだけを生成し、7 promptとfull-model pairsが揃うまでpromotion rawへ昇格しない。生成したpromotion rawはselectorへ渡し、候補が確定してからP3 runtime実装へ進む。今回のCPU検証はproducerの契約と改ざん拒否を証明するが、実R9700/HIPの計測値、GPU上のゼロオーバーヘッド、promotion可否は証明しない。
