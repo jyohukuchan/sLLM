@@ -18,7 +18,7 @@ H9（ハードウェア固有要因）のため、同じBDFだけを対象にECC
 
 | 項目 | 固定値 |
 | --- | --- |
-| trace tooling source | `5a0fb4c50476d5153ced22bd6847c2729bfdb975`（stage tooling、failure evidence保持、manifest guard set記録を含む） |
+| trace tooling source | `811d4271a9ef92f3df4699f0ba8a1862525e2661`（complete Phase 3c guard audit、起動前自己診断、manifest guard set記録を含む） |
 | package | `/home/homelab1/datapool/ullm/product/qwen35-9b-aq4-cli-v0.1/package` |
 | cases | `tests/fixtures/qwen35-aq4-p2-oracle/cases.json` |
 | replay | `benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/differential-trace-gpu-v1-input/replay.json` |
@@ -59,14 +59,14 @@ stage順は`qkv_dequant_row_scale`、`z_dequant_row_scale`、`recurrent_gate`、
 
 - 操作する service は `ullm-openai.service` だけである。`systemctl restart`、`kill`、`rm`、lock の強制解放、manifest write、V620 を対象にする command は使わない。
 - 07/16 に停止した P3 harness の lock/root/artifact/environment/`rocprof` は参照・変更しない。P3 の `prepare_lock_substrate`、recovery、finalize を今回の lock 問題の回避手段として使わない。
-- 既存の `service-stop-window-v0.1`、`v0.2`、`v0.3-runtime-directory-preserve`、`v0.4-absolute-amd-smi-rehearsed` は削除・上書きしない。今回の実service windowの `OUT` はその配下の新規 leaf `service-stop-window-v0.5-nlink-staged` とし、開始時にその leaf が不存在であることを確認する。
+- 既存の `service-stop-window-v0.1`、`v0.2`、`v0.3-runtime-directory-preserve`、`v0.4-absolute-amd-smi-rehearsed`、`v0.5-nlink-staged` は削除・上書きしない。今回の実service windowの `OUT` はその配下の新規 leaf `service-stop-window-v0.6-complete-guard-set` とし、開始時にその leaf が不存在であることを確認する。
 - この unit は `RuntimeDirectory=ullm` かつ `RuntimeDirectoryPreserve=yes` であることを、service 停止直前に読み取り専用で記録する。`yes`以外ならlock lifecycleの前提が満たされないため、serviceを停止せずpre-stop failureとして終了する。stop後に既存lockがregular fileでない、path/親componentがない、またはnonblocking取得できない場合は「free lock」と見なさず **lock取得失敗** とする。既存regular fileだけをnonblocking取得する契約は維持し、`mkdir`、`touch`、`install`、symlink 作成その他の lock substrate 作成・修復は行わない。この場合はtraceを起動せず、stop済みなら直ちに一度だけservice復旧へ進む。
 
 ### guard rehearsal と window driver の共通経路
 
 service-stop window を消費する前に、host-only build済みの HIP guardを `tools/run-aq4-phase3c-r9700-guard.py` で service 稼働中に必要回数リハーサルする。このtoolは root から `runuser -u homelab1 -- /usr/bin/env HOME=/home/homelab1 HIP_VISIBLE_DEVICES=1 ULLM_HIP_VISIBLE_DEVICES=1 ...` を固定して実行し、HIP identity、同じBDFだけへの `/opt/rocm/bin/amd-smi static`、同じBDFだけへの4種のH9 telemetryを保存する。lock、service、systemd、manifestを操作せず、HIP stream作成・device memory確保・kernel launchも行わない。
 
-最終windowでは `tools/run-aq4-phase3c-service-window.sh OUT HIP_GUARD_BIN --confirm-single-window` がこの同じguard toolを lock probe 成功後の trace 前と、trace後のhealth snapshotに使う。driverはstop前に`OUT/trace-binary-staging`を再検証し、raw Cargo outputではなく同rootの`nlink=1` binaryだけを`runuser`で実行する。既存evidenceを変えず、新しい`OUT`を事前に一度だけ作成する。guardまたはstaging verifyの失敗時はtraceを起動せず、stop前ならserviceを操作せず終了し、stop後ならdriverのEXIT trapが`ullm-openai.service`を一回だけstartする。driver自身は `systemctl restart`、lock作成、V620照会を含まない。
+最終windowでは `tools/run-aq4-phase3c-service-window.sh OUT HIP_GUARD_BIN --confirm-single-window` がこの同じguard toolを lock probe 成功後の trace 前と、trace後のhealth snapshotに使う。driverはstop前に`OUT/trace-binary-staging`を再検証し、raw Cargo outputではなく同rootの`nlink=1` binaryだけを`runuser`で実行する。さらにHIP runtime/stream/kernelを作らない `--print-phase3c-trace-guard-requirements` を先に実行し、固定M=1正常経路のrequired 16 guardがすべて`=1`であることをJSONでassertする。既存evidenceを変えず、新しい`OUT`を事前に一度だけ作成する。guard、staging verify、またはこの自己診断の失敗時はtraceを起動せず、stop前ならserviceを操作せず終了し、stop後ならdriverのEXIT trapが`ullm-openai.service`を一回だけstartする。driver自身は `systemctl restart`、lock作成、V620照会を含まない。
 
 ### 停止前の read-only snapshot と非GPU準備
 
@@ -75,12 +75,12 @@ GPU を使わない source/fixture 検査、host-only HIP guard build、`cargo b
 `OUT` を次に固定する。既存の最初の試行の root は parent としてだけ存在してよく、`OUT` 自体は存在してはならない。
 
 ```bash
-OUT="$REPO/benchmarks/results/2026-07-17/qwen35-9b-aq4-production-opt-v0.1/p2/aq4-phase3c-gpu-stage-trace-v0.1/service-stop-window-v0.5-nlink-staged"
+OUT="$REPO/benchmarks/results/2026-07-17/qwen35-9b-aq4-production-opt-v0.1/p2/aq4-phase3c-gpu-stage-trace-v0.1/service-stop-window-v0.6-complete-guard-set"
 test ! -e "$OUT"
 install -d -m 700 "$OUT"
 ```
 
-既存の実行blockにある trace tooling commit/diff、fixture、RPB、fusion guard の全検査をそのまま実行し、`query-hip-device-identity` と2つの trace binary を build する。ただしこの時点では HIP guard を実行せず、GPU health telemetry も採らない。CPU reference の `cpu-input-identity.json`、`cpu-stages.f32le`、`cpu-reference/` をこの `OUT` に生成してから、直後に以下を `service-window-pre-stop.json` として保存する。
+既存の実行blockにある trace tooling commit/diff、fixture、RPB、完全な16 guard、起動前自己診断の全検査をそのまま実行し、`query-hip-device-identity` と2つの trace binary を build する。ただしこの時点では HIP guard を実行せず、GPU health telemetry も採らない。CPU reference の `cpu-input-identity.json`、`cpu-stages.f32le`、`cpu-reference/` をこの `OUT` に生成してから、直後に以下を `service-window-pre-stop.json` として保存する。
 
 - `systemctl show ullm-openai.service` の `ActiveState`、`SubState`、`MainPID`、`NRestarts`、`ExecMainStartTimestamp`、`ControlGroup`、`RuntimeDirectory`、`RuntimeDirectoryPreserve`。
 - cgroup 内 PID、各 PID の `exe`、親 PID、`/dev/kfd` と `/dev/dri/` に限った FD target。これを service/worker の read-only snapshot とする。
@@ -99,7 +99,7 @@ lock probe が成功した場合だけ、次の順番を厳守する。
 
 1. 既存blockと同一の `HIP_VISIBLE_DEVICES=1` / `ULLM_HIP_VISIBLE_DEVICES=1` で、事前build済みの HIP guard を一回実行する。同じ HIP BDF だけを `/opt/rocm/bin/amd-smi static --gpu "$R9700_BDF" --asic --bus --json` に渡し、`gfx1201` / `0x7551` / BDF 一致を assert する。root driverからの全guard queryは `runuser -u homelab1 -- /usr/bin/env HOME=/home/homelab1 HIP_VISIBLE_DEVICES=1 ULLM_HIP_VISIBLE_DEVICES=1 ...` の同一境界を使い、AMD-SMIだけは絶対pathで実行する。guard failure なら telemetry/trace は実行せず restore する。
 2. 既存の `capture_r9700_health before` と同じ、BDF指定済み4 commandを一回採る。対象外GPUへの query はしない。
-3. 既存blockの `flock -n` 内 trace command を、この新しい `OUT/gpu-trace` に対して一回だけ実行する。固定fixture、3 context、RPB、7 fusion guard、`HIP_VISIBLE_DEVICES=1` は変更しない。lock probe 成功後であっても、この trace 内 `flock -n` が失敗した場合は trace command を起動せず、retry せず restore する。
+3. 既存blockの `flock -n` 内 trace command を、この新しい `OUT/gpu-trace` に対して一回だけ実行する。固定fixture、3 context、RPB、完全な16 guard、`HIP_VISIBLE_DEVICES=1` は変更しない。layer 0の9 guardに加えて、実packageのself-attention 5 guard、BF16 row、top-1を含め、worker由来の非対象guardとbranch selectorはunsetにする。lock probe 成功後であっても、この trace 内 `flock -n` が失敗した場合は trace command を起動せず、retry せず restore する。
 4. trace の exit code にかかわらず、既存の `capture_r9700_health after` を一回採り、直ちに restore する。trace が terminal frame/manifest/SHA256SUMS を満たす成功時だけ、既存の checksum、manifest assert、CPU/GPU 30 record 比較を実行する。
 
 `systemctl stop` が成功した時点から EXIT trap を armed にし、guard、telemetry、trace、comparison のいずれで失敗しても `systemctl start ullm-openai.service` を一回だけ呼ぶ。明示的な restore と trap の二重 start を防ぐため、restore 済み flag を持つ。start の失敗時に restart/stop/start を重ねない。
@@ -126,12 +126,12 @@ set -euo pipefail
 umask 077
 
 REPO=/home/homelab1/coding-local/ultimateLLM/uLLM-project
-TRACE_TOOLING_COMMIT=5a0fb4c50476d5153ced22bd6847c2729bfdb975
+TRACE_TOOLING_COMMIT=811d4271a9ef92f3df4699f0ba8a1862525e2661
 PACKAGE=/home/homelab1/datapool/ullm/product/qwen35-9b-aq4-cli-v0.1/package
 CASES="$REPO/tests/fixtures/qwen35-aq4-p2-oracle/cases.json"
 REPLAY="$REPO/benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/differential-trace-gpu-v1-input/replay.json"
 HYBRID_INPUT="$REPO/benchmarks/results/2026-07-17/qwen35-9b-aq4-production-opt-v0.1/p2/aq4-layer0-hybrid-diagnostic-v0.1/input/hybrid-input.jsonl"
-OUT="$REPO/benchmarks/results/2026-07-17/qwen35-9b-aq4-production-opt-v0.1/p2/aq4-phase3c-gpu-stage-trace-v0.1/service-stop-window-v0.5-nlink-staged"
+OUT="$REPO/benchmarks/results/2026-07-17/qwen35-9b-aq4-production-opt-v0.1/p2/aq4-phase3c-gpu-stage-trace-v0.1/service-stop-window-v0.6-complete-guard-set"
 LOCK=/run/ullm/r9700.lock
 R9700_HIP_GUARD_SOURCE="$REPO/tools/query-hip-device-identity.cpp"
 R9700_HIP_GUARD_BIN="$OUT/query-hip-device-identity"
@@ -400,16 +400,108 @@ python3 "$TRACE_STAGING_TOOL" \
 TRACE_BIN="$TRACE_STAGE_DIR/ullm-aq4-differential-trace"
 test -x "$TRACE_BIN"
 
-env \
-  -u HIP_VISIBLE_DEVICES \
-  -u ULLM_HIP_VISIBLE_DEVICES \
-  -u ULLM_REQUIRE_HIP_AQ4_MATVEC_KERNEL \
-  -u ULLM_REQUIRE_HIP_AQ4_MATVEC_ADD_KERNEL \
-  -u ULLM_REQUIRE_HIP_AQ4_MATVEC_QKV_Z_GATE_BETA_KERNEL \
-  -u ULLM_REQUIRE_HIP_LINEAR_ATTN_QKV_PREPARE_BATCH_KERNEL \
-  -u ULLM_REQUIRE_HIP_LINEAR_ATTN_RECURRENT_KERNEL \
-  -u ULLM_REQUIRE_HIP_RMSNORM_KERNEL \
-  -u ULLM_REQUIRE_HIP_SEGMENTED_RMSNORM_SILU_MUL_KERNEL \
+PHASE3C_REQUIRED_GUARDS=(
+  ULLM_REQUIRE_HIP_AQ4_MATVEC_KERNEL
+  ULLM_REQUIRE_HIP_AQ4_MATVEC_BATCH_KERNEL
+  ULLM_REQUIRE_HIP_AQ4_MATVEC_ADD_KERNEL
+  ULLM_REQUIRE_HIP_AQ4_MATVEC_QKV_Z_GATE_BETA_KERNEL
+  ULLM_REQUIRE_HIP_LINEAR_ATTN_KERNEL
+  ULLM_REQUIRE_HIP_LINEAR_ATTN_QKV_PREPARE_BATCH_KERNEL
+  ULLM_REQUIRE_HIP_LINEAR_ATTN_RECURRENT_KERNEL
+  ULLM_REQUIRE_HIP_RMSNORM_KERNEL
+  ULLM_REQUIRE_HIP_SEGMENTED_RMSNORM_SILU_MUL_KERNEL
+  ULLM_REQUIRE_HIP_PAGED_DECODE_ATTN_KERNEL
+  ULLM_REQUIRE_HIP_QWEN35_QK_NORM_ROPE_PAGED_KV_WRITE_KERNEL
+  ULLM_REQUIRE_HIP_PAGED_KV_WRITE_CHUNK_KERNEL
+  ULLM_REQUIRE_HIP_PAGED_CAUSAL_GQA_CHUNK_KERNEL
+  ULLM_REQUIRE_HIP_QWEN35_QK_NORM_ROPE_BATCH_KERNEL
+  ULLM_REQUIRE_HIP_BF16_ROW_KERNEL
+  ULLM_REQUIRE_HIP_TOP1_KERNEL
+)
+PHASE3C_TRACE_UNSET_ENV=(
+  ULLM_SYNC_LINEAR_ATTN_COMPONENTS_FOR_TIMING
+  ULLM_DISABLE_AQ4_MATVEC_QKV_Z_GATE_BETA
+  ULLM_DISABLE_PAGED_DECODE_SIGMOID_GATE_SELF_ATTN
+  ULLM_DISABLE_SIGMOID_MUL_IN_PLACE
+  ULLM_DISABLE_AQ4_MATVEC_TRIPLE_SELF_ATTN_QKV
+  ULLM_DISABLE_AQ4_MATVEC_PAIR_SELF_ATTN_QK
+  ULLM_ENABLE_AQ4_LM_HEAD_DIRECT_TOP1
+  ULLM_EXPERIMENTAL_HIP_PAGED_DECODE_SPLIT_TILE
+  ULLM_EXPERIMENTAL_HIP_PAGED_DECODE_SPLIT_MIN_CACHE_LEN
+  ULLM_REQUIRE_HIP_ADD_KERNEL
+  ULLM_REQUIRE_HIP_AQ4_KERNEL
+  ULLM_REQUIRE_HIP_AQ4_MATVEC_PAIR_KERNEL
+  ULLM_REQUIRE_HIP_AQ4_MATVEC_TOP1_KERNEL
+  ULLM_REQUIRE_HIP_AQ4_MATVEC_TRIPLE_KERNEL
+  ULLM_REQUIRE_HIP_AQ4_REGISTER_BM8_KERNEL
+  ULLM_REQUIRE_HIP_AQ4_ROW_KERNEL
+  ULLM_REQUIRE_HIP_BF16_MATVEC_KERNEL
+  ULLM_REQUIRE_HIP_CACHED_PREFIX_ATTN_F32_FLASH2_KERNEL
+  ULLM_REQUIRE_HIP_CACHED_PREFIX_ATTN_FP8_E4M3_FLASH2_KERNEL
+  ULLM_REQUIRE_HIP_CACHED_PREFIX_ATTN_FP8_E4M3_KERNEL
+  ULLM_REQUIRE_HIP_CACHED_PREFIX_ATTN_KERNEL
+  ULLM_REQUIRE_HIP_CAUSAL_ATTN_BATCH_F32_FLASH2_KERNEL
+  ULLM_REQUIRE_HIP_CAUSAL_ATTN_BATCH_KERNEL
+  ULLM_REQUIRE_HIP_CAUSAL_ATTN_F32_FLASH2_KERNEL
+  ULLM_REQUIRE_HIP_CAUSAL_ATTN_KERNEL
+  ULLM_REQUIRE_HIP_DECODE_ATTN_KERNEL
+  ULLM_REQUIRE_HIP_DEPTHWISE_CONV1D_KERNEL
+  ULLM_REQUIRE_HIP_LINEAR_ATTN_GATE_BETA_KERNEL
+  ULLM_REQUIRE_HIP_LINEAR_ATTN_RECURRENT_SEQUENCE_KERNEL
+  ULLM_REQUIRE_HIP_MATVEC_KERNEL
+  ULLM_REQUIRE_HIP_PAGED_DECODE_SPLIT_KERNEL
+  ULLM_REQUIRE_HIP_PAGED_KV_WRITE_KERNEL
+  ULLM_REQUIRE_HIP_QWEN35_QK_NORM_ROPE_KERNEL
+  ULLM_REQUIRE_HIP_QWEN35_Q_SPLIT_KERNEL
+  ULLM_REQUIRE_HIP_ROPE_KERNEL
+  ULLM_REQUIRE_HIP_SIGMOID_MUL_KERNEL
+  ULLM_REQUIRE_HIP_SILU_MUL_KERNEL
+  ULLM_REQUIRE_HIP_SQ_FP8_MATVEC_BATCH_KERNEL
+  ULLM_REQUIRE_HIP_SQ_FP8_MATVEC_KERNEL
+  ULLM_REQUIRE_HIP_SQ_FP8_MATVEC_PAIR_KERNEL
+  ULLM_REQUIRE_HIP_SQ_FP8_MATVEC_TRIPLE_KERNEL
+  ULLM_REQUIRE_HIP_TOP1_PAIRS_KERNEL
+  ULLM_REQUIRE_HIP_UNKNOWN_KERNEL
+)
+TRACE_ENV=()
+for name in "${PHASE3C_TRACE_UNSET_ENV[@]}"; do
+  TRACE_ENV+=(-u "$name")
+done
+TRACE_ENV+=(
+  HIP_VISIBLE_DEVICES=1
+  ULLM_HIP_VISIBLE_DEVICES=1
+  ULLM_SERVED_MODEL_MANIFEST=/etc/ullm/served-models/active.json
+  ULLM_BUILD_GIT_COMMIT="$TRACE_TOOLING_COMMIT"
+  ULLM_AQ4_MATVEC_QKV_Z_GATE_BETA_RPB=4
+  ULLM_AQ4_MATVEC_SILU_MUL_RPB=8
+  ULLM_AQ4_MATVEC_ADD_RPB=8
+)
+for guard in "${PHASE3C_REQUIRED_GUARDS[@]}"; do
+  TRACE_ENV+=("$guard=1")
+  printf 'phase3c_required_guard=%s\n' "$guard" >> "$OUT/phase3c-preflight.txt"
+done
+
+# This is CPU-only: it reads the environment and exits before HIP runtime/context/stream/kernel.
+env "${TRACE_ENV[@]}" \
+  "$TRACE_BIN" --print-phase3c-trace-guard-requirements \
+  > "$OUT/trace-guard-diagnostic.json" \
+  2> "$OUT/trace-guard-diagnostic.stderr"
+python3 - "$OUT/trace-guard-diagnostic.json" <<'PY'
+import json
+import sys
+
+payload = json.load(open(sys.argv[1], encoding="utf-8"))
+assert payload["schema_version"] == "ullm.qwen35_aq4_phase3c_trace_guard_diagnostic.v1"
+assert payload["status"] == "valid"
+assert len(payload["required_environment"]) == 16
+assert len(payload["linear_stage_guard"]["required_environment"]) == 16
+PY
+
+CPU_ENV=(-u HIP_VISIBLE_DEVICES -u ULLM_HIP_VISIBLE_DEVICES)
+for name in "${PHASE3C_REQUIRED_GUARDS[@]}" "${PHASE3C_TRACE_UNSET_ENV[@]}"; do
+  CPU_ENV+=(-u "$name")
+done
+env "${CPU_ENV[@]}" \
   "$CPU_BIN" \
     --package "$PACKAGE" \
     --hybrid-input "$HYBRID_INPUT" \
@@ -420,23 +512,7 @@ env \
 
 TRACE_STARTED_AT_UTC="$(date --iso-8601=seconds --utc)"
 set +e
-env \
-  -u ULLM_SYNC_LINEAR_ATTN_COMPONENTS_FOR_TIMING \
-  -u ULLM_DISABLE_AQ4_MATVEC_QKV_Z_GATE_BETA \
-  HIP_VISIBLE_DEVICES=1 \
-  ULLM_HIP_VISIBLE_DEVICES=1 \
-  ULLM_SERVED_MODEL_MANIFEST=/etc/ullm/served-models/active.json \
-  ULLM_BUILD_GIT_COMMIT="$TRACE_TOOLING_COMMIT" \
-  ULLM_AQ4_MATVEC_QKV_Z_GATE_BETA_RPB=4 \
-  ULLM_AQ4_MATVEC_SILU_MUL_RPB=8 \
-  ULLM_AQ4_MATVEC_ADD_RPB=8 \
-  ULLM_REQUIRE_HIP_AQ4_MATVEC_KERNEL=1 \
-  ULLM_REQUIRE_HIP_AQ4_MATVEC_ADD_KERNEL=1 \
-  ULLM_REQUIRE_HIP_AQ4_MATVEC_QKV_Z_GATE_BETA_KERNEL=1 \
-  ULLM_REQUIRE_HIP_LINEAR_ATTN_QKV_PREPARE_BATCH_KERNEL=1 \
-  ULLM_REQUIRE_HIP_LINEAR_ATTN_RECURRENT_KERNEL=1 \
-  ULLM_REQUIRE_HIP_RMSNORM_KERNEL=1 \
-  ULLM_REQUIRE_HIP_SEGMENTED_RMSNORM_SILU_MUL_KERNEL=1 \
+env "${TRACE_ENV[@]}" \
   bash -ceu '
     lock=$1
     trace_bin=$2
@@ -445,14 +521,13 @@ env \
     replay=$5
     trace_root=$6
     out=$7
-    (
-      flock -n 9
-      exec "$trace_bin" "$package" "$cases" "$replay" "$trace_root" 1 \
-        --enable-intermediate-trace \
-        --enable-linear-stage-trace \
-        > "$out/gpu-trace.stdout" \
-        2> "$out/gpu-trace.stderr"
-    ) 9<>"$lock"
+    exec 9< "$lock"
+    flock -n 9
+    exec "$trace_bin" "$package" "$cases" "$replay" "$trace_root" 1 \
+      --enable-intermediate-trace \
+      --enable-linear-stage-trace \
+      > "$out/gpu-trace.stdout" \
+      2> "$out/gpu-trace.stderr"
   ' bash "$LOCK" "$TRACE_BIN" "$PACKAGE" "$CASES" "$REPLAY" "$OUT/gpu-trace" "$OUT"
 TRACE_EXIT_CODE=$?
 set -e
@@ -487,7 +562,7 @@ assert kernel["f32le_stream_file"] == "kernel-stages.f32le"
 assert len(kernel["stage_order"]) == 10
 guard = manifest["guard_set"]["linear_stage_guard"]
 assert guard["expected_architecture"] == "gfx1201"
-assert len(guard["required_environment"]) == 7
+assert len(guard["required_environment"]) == 16
 PY
 
 python3 "$REPO/tools/compare-aq4-layer0-cpu-gpu-stage-stream.py" \
@@ -507,7 +582,7 @@ python3 "$REPO/tools/compare-aq4-layer0-cpu-gpu-stage-stream.py" \
 - `cpu-input-identity.json` が`status=valid`で、全hybrid embedding rowがpackage BF16 passthroughとbit-exactである。
 - `trace-binary-staging-create.json`と`trace-binary-staging-verify-pre-stop.json`が`status=valid`で、receiptのCargo source SHA-256とstaged binary SHA-256が一致し、staged binaryがregular/mode `0555`/`nlink=1`である。service-window driverがstop前に同じstaging rootを再検証している。
 - `cpu-stages.f32le`と`kernel-stages.f32le`がterminal frameまで完全であり、比較器が3 context × 10 stage = 30 recordを受理する。
-- `SHA256SUMS`、GPU trace manifest、`HIP`/`gfx1201`/global device `1`、7つのfusion guard、RPB固定、`production_worker_unchanged=true`を確認できる。
+- `SHA256SUMS`、GPU trace manifest、`HIP`/`gfx1201`/global device `1`、layer 0の9件・self-attentionの5件・BF16 row・top-1からなる完全な16 guard、RPB固定、`production_worker_unchanged=true`を確認できる。
 - `cpu-gpu-stage-compare/comparison.json`が`status=valid`かつ全値finiteである。
 
 数値の判定は修正可否ではなく、H5の局所化のためのevidence分類である。07/15の限定QKV/Z/gate/beta probeが相対L2概ね`1e-6`以下だった事実を基準にし、次を使う。
