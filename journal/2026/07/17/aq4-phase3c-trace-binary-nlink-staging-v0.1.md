@@ -22,7 +22,14 @@
 - 最初にparent directoryから`sha256sum -c "$TRACE_STAGE_DIR/SHA256SUMS"`を呼んだため相対entryを解決できなかったが、artifactを書き換えず、staging directory内でのread-only検証を一回行って成功した。これはstaging copyやidentity contractの失敗ではない。
 - GPU kernel、HIP guard、AMD-SMI、service/systemd/manifest、V620、P3 harnessにはこのStepで一切触れていない。
 
+### Step 2 リハーサル結果（service稼働中）
+
+- `sudo`のTTY別認証期限のため、`guard-chain-and-staging-rehearsal-v0.1`と`v0.2`はguard起動前に認証エラーで止まった。いずれもservice、GPU guard、AMD-SMIに未到達であり、既存partial leafは上書き・修復せず保持した。
+- 新規leaf `guard-chain-and-staging-rehearsal-v0.3`で、rootの単一TTY境界から3回連続でguardを実行した。各attemptのstaging verifyは`status=valid`、staged traceはmode `0555`/`nlink=1`、guard summaryは`status=valid`、architecture guardは`gfx1201`、PCI BDF `0000:47:00.0`、PCI device ID `0x7551`、H9 telemetryは`complete`だった。
+- guardの対象は各回とも `HIP_VISIBLE_DEVICES=1` → filtered ordinal 0 → `0000:47:00.0`だけである。V620の列挙・照会を行うcommandは使っていない。guardはidentity/AMD-SMI read-only queryだけで、HIP stream、device memory、kernel launchは行っていない。
+- service read-only snapshotはリハーサル前後とも`active/running`、MainPID=`1128520`、`NRestarts=0`、`RuntimeDirectoryPreserve=yes`だった。service/systemd/manifestには変更を加えていない。
+
 ## 次の行動
 
-- service稼働中にR9700 guard chainと既存staging rootのread-only verifyを3回リハーサルする。R9700だけを対象にし、V620、P3 harness、service/systemd/manifestには触れない。
-- すべてが安定して成功した場合だけ、更新済みdriverによるservice-stop windowを一回実行する。trace内で失敗した場合は再試行せず、直ちにservice復旧結果を優先して記録する。
+- serviceを停止せず、CPU input identityとCPU stage streamを新規`OUT`へ生成し、trace driverのpre-stop contractを再確認する。
+- その準備がすべて成功しているため、更新済みdriverによるservice-stop windowを一回だけ実行する。trace内で失敗した場合は再試行せず、直ちにservice復旧結果を優先して記録する。
