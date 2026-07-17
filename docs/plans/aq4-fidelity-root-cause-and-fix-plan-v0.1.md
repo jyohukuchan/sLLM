@@ -1,16 +1,22 @@
 # AQ4 fidelity root cause and fix plan v0.1
 
-Status: **根本原因を特定した。Phase 4(fix実装)へ進む準備が整った。**
+Status: **根本原因を修正し、CPU-onlyで大幅な改善を確認した。次はGPU再確認(Phase 6)と正式P2 fidelity gate再実行(Phase 7)。**
 
-2026-07-17、Phase 3c（H5否定、GPU kernelはlayer0に関してCPU参照実装と丸め誤差レベルで一致）を経て、Phase 3dでCPU-only測定をlayer0から**全32 decoder層＋final RMSNorm＋LM head固定34行**まで一度のchainで拡張した（`journal/2026/07/17/aq4-phase3d-terminal-chain-extension-v0.1.md`）。
+2026-07-17、Phase 3c（H5否定）→Phase 3d（全32層+final norm+LM head測定、`layer31→final RMSNorm`で相対L2が3.92倍に急増する境界を特定）→根本原因特定（source Qwen3.5の最終RMSNormは`normalized*(1+weight)`のadditive conventionだが、AQ4側`loader.rs`の`effective_rmsnorm_weight_values`が最終normをこの対象から漏らしていた）を経て、**Path Gの修正を実装しCPU-onlyで検証した**（commit `e992b3ea`,`1ed64022`、journal: `aq4-final-rmsnorm-additive-weight-fix-v0.1.md`）。
 
-結果、decoder層は0.075〜0.171の間で非単調に振動し続けるだけで、深さ方向の単純蓄積では最終相対L2 0.615を説明しない（H8再確認、引き続き棄却）。**しかし`layer31 → final RMSNorm`で相対L2が`0.127881 → 0.501033`（3.92倍）へ急増した。** LM head固定34行のsample相対L2は0.586050で、既知の最終値0.6151289249と規模が一致する。
+修正は、Qwen3.5専用の新関数`effective_qwen35_rmsnorm_weight_values`を追加し、値の統計量ヒューリスティックに依存せずテンソル名だけでadditive対象（4種の per-layer norm + 最終norm）を判定する形にした。`linear_attn.norm`（別実装、raw weight乗算と実測確認済み）は明示的に除外。旧関数はSQ8等の他呼び出し元のため変更せず温存し、SQ8のコード・動作は一切変更していない。
 
-**根本原因を特定した**: source Qwen3.5の最終RMSNormは`normalized_hidden * (1.0 + raw_weight)`（additive convention）だが、AQ4 CPU参照実装/runtimeの`effective_rmsnorm_weight_values`（`crates/ullm-engine/src/loader.rs:125-143`）はテンソル名が`.input_layernorm.weight`等4種類の接尾辞に一致し、かつ`mean_abs < 0.75`の場合だけadditiveとして扱う。最終norm（`model.language_model.norm.weight`）はこの4接尾辞のどれにも一致せず、単純な`normalized_hidden * raw_weight`になっていた。source/packageのBF16 payloadはbit単位で完全一致しているため、データの問題ではなく実装の数式バグである。
+CPU-only再測定結果:
 
-**重要な注意点**: 単純にこのテンソル名を4接尾辞リストへ追加するだけでは不十分である可能性が高い。最終normのraw weightの`mean_abs`実測値は1.14で、既存の`mean_abs < 0.75`という値ベースのヒューリスティックの閾値を上回っており、たとえ名前が一致してもこの追加条件で弾かれる。したがって、07/05の「additive RMSNorm」修正で採用された「値の統計量から推測する」ヒューリスティック自体が、この最終normには当てはまらない設計だったことが今回判明した。修正はPhase 4で慎重に設計する必要がある。
+| Endpoint | 修正前 relative L2 | 修正後 relative L2 |
+|---|---:|---:|
+| layer 31 | 0.1278813307 | 0.1278813307（不変） |
+| final RMSNorm | 0.5010330688 | **0.1688691127** |
+| LM head 34-row sample | 0.5860500940 | **0.0582126936** |
 
-P2 fidelity calibrationはNo-Go凍結中。
+final normのlayer31比は3.92倍→1.32倍まで改善、LM head sampleは約90.1%改善した。Phase 1（layer0単体）・Phase 2/2c（layer0-11 chain）は修正前後で完全一致し、decoder層側への悪化はない。`cargo test -p ullm-engine --lib`は729 passed。
+
+残る作業: この改善はCPU-onlyでの確認であり、GPU上での再確認（Phase 6、Phase 3cで確立した17 guard・nlink=1 staging等の仕組みを再利用）と、独立holdoutによる正式P2 fidelity gate再実行（Phase 7）がまだ残っている。P2 fidelity calibrationは引き続きNo-Go凍結中（今回の修正はまだ正式ゲートを通していない）。
 
 **用語訂正(Phase 3bで判明)**: これまで「07/14 production run」「GPU実測」と呼んでいた最終相対L2`0.6151289249`の測定は、実際にはOpenAI Gatewayへの実requestではなく、production packageを直接loadしたM=1診断binary(`ullm-aq4-p2-path-oracle`/`ullm-aq4-differential-trace`、service停止済み)による管理された診断実行だった。以降この計画では「07/14 M=1診断」と呼ぶ。
 
@@ -381,7 +387,9 @@ Phase 2〜3の結果に応じて、次のいずれかのfix pathを選ぶ。**Ph
 - 修正方針が1つのPath（または明示された組み合わせ）に確定している。
 - 修正がruntime hard-codeの局所パッチではなく、共有経路またはquantizer policyへの再現可能な実装修正として設計されている。
 
-## Phase 5: CPU側fix実装と回帰テスト
+## Phase 5: CPU側fix実装と回帰テスト — 完了
+
+Status: **完了**（commit `e992b3ea`,`1ed64022`、実行: `gpt-5.6-terra`/`max`、journal: [aq4-final-rmsnorm-additive-weight-fix-v0.1.md](../../journal/2026/07/17/aq4-final-rmsnorm-additive-weight-fix-v0.1.md)）。Path Gを実装し、final norm相対L2を0.501→0.169、LM head sampleを0.586→0.058へ改善。layer0/layer0-11は修正前後で完全一致（回帰なし）。SQ8のコード・動作は変更していない。詳細は上記Statusセクション参照。
 
 ### Tasks
 
