@@ -12,6 +12,8 @@
 
 H9（ハードウェア固有要因）のため、同じBDFだけを対象にECC/error block、bad page、clock、power、temperature、DPM performance level、driver/IFWI、firmwareをread-onlyで実行前・実行後に保存する。利用不可のmetricはexit codeとstderrを保存して「未取得」と記録するが、設定変更やmonitoring daemonの導入は行わない。単発windowで決定性や他GPU比較を検証しない。
 
+`cargo build --release` が作る `target/release/ullm-aq4-differential-trace` は、Cargoの正常な挙動として `deps/` 側とのhard link（`nlink=2`）になり得る。一方、trace binary自身のidentity contractは自己実行ファイルにregular fileかつ`nlink=1`を要求する。したがってwindowのtraceにはCargo pathを直接渡さない。build後、`OUT/trace-binary-staging/ullm-aq4-differential-trace`へcreate-newの**content copy**を作り、SHA-256一致、mode `0555`、`nlink=1`をreceiptと`SHA256SUMS`で固定・検証してから、そのstaging済みcopyだけを実行する。`ln`、`mv`、既存pathの書換えはこの契約を満たさないため使用しない。CPU-onlyの`ullm-aq4-layer0-family-isolation`は自己実行ファイルをidentity対象にせず、同種の`nlink=1`制約を持たないことをソースで確認済みである。
+
 ## 固定するidentityとfixture
 
 | 項目 | 固定値 |
@@ -25,6 +27,7 @@ H9（ハードウェア固有要因）のため、同じBDFだけを対象にECC
 | R9700 HIP guard source | `tools/query-hip-device-identity.cpp`（host-only `g++` build、filtered ordinal 0だけをquery） |
 | R9700 ASIC cross-check | HIP guardが返すPCI BDFを`/opt/rocm/bin/amd-smi static --gpu`へ渡し、`gfx1201` / `0x7551` / non-empty nameをassertする |
 | H9 telemetry | 同じBDFだけに`/opt/rocm/bin/amd-smi metric`（ECC/clock/power/temperature/DPM）、`bad-pages`、`static`（driver/IFWI）、`firmware`をread-onlyで実行前・後に保存する |
+| trace binary staging | Cargo outputから`OUT/trace-binary-staging/ullm-aq4-differential-trace`へcontent copy。sourceの`nlink=2`は許容し、staged binaryのSHA-256一致、mode `0555`、`nlink=1`を必須にする |
 | lock | `/run/ullm/r9700.lock`（既存regular fileだけをnonblockingで取得） |
 | result root | `benchmarks/results/2026-07-17/qwen35-9b-aq4-production-opt-v0.1/p2/aq4-phase3c-gpu-stage-trace-v0.1` |
 
@@ -45,6 +48,7 @@ stage順は`qkv_dequant_row_scale`、`z_dequant_row_scale`、`recurrent_gate`、
 - `/run/ullm/r9700.lock` がregular fileとして存在し、実行時にnonblocking取得できること。busyまたは欠損なら、その時点で終了する。lockを作成・修復・待機・再試行しない。
 - 07/16停止中P3 harnessのpath、script、output、環境変数、`rocprof`を使用しない。出力は上表の独立した`p2/aq4-phase3c-gpu-stage-trace-v0.1`だけに書く。
 - 既存output root、`gpu-trace`、`cpu-reference`、comparison outputが存在しないこと。既存evidenceを削除・上書きしない。
+- `OUT/trace-binary-staging` が存在しないこと。`tools/stage-aq4-phase3c-trace-binary.py`でcreate-new stagingを作り、`staging-receipt.json`と`SHA256SUMS`をread-only verifyしてから進む。Cargo outputの`nlink=2`は異常として扱わないが、staged trace binaryの`nlink=1`以外はfail-closedとする。
 - RPBはprocess起動前に固定する。`ULLM_AQ4_MATVEC_QKV_Z_GATE_BETA_RPB=4`、`ULLM_AQ4_MATVEC_SILU_MUL_RPB=8`、`ULLM_AQ4_MATVEC_ADD_RPB=8`をtrace childだけに与え、実行中に変えない。これはcompile-time RPBとlaunch-time RPBがずれる既知の条件付きcache bugを除外するためである。
 - `tools/query-hip-device-identity.cpp`がtrackedかつHEADに対してcleanであり、host-only `g++`と`/opt/rocm/bin/amd-smi`が利用可能であること。guardは`HIP_VISIBLE_DEVICES=1`で可視化されたordinal 0だけを問い合わせ、返ったPCI BDF以外を`/opt/rocm/bin/amd-smi`へ渡さない。
 - HIP guardまたはASIC cross-checkが失敗した場合、CPU reference、lock取得、trace binary、比較器へ進まない。guard evidenceだけを保存して終了する。health telemetryはguard成功後だけに採取する。
@@ -55,23 +59,23 @@ stage順は`qkv_dequant_row_scale`、`z_dequant_row_scale`、`recurrent_gate`、
 
 - 操作する service は `ullm-openai.service` だけである。`systemctl restart`、`kill`、`rm`、lock の強制解放、manifest write、V620 を対象にする command は使わない。
 - 07/16 に停止した P3 harness の lock/root/artifact/environment/`rocprof` は参照・変更しない。P3 の `prepare_lock_substrate`、recovery、finalize を今回の lock 問題の回避手段として使わない。
-- 1回目の evidence root `.../aq4-phase3c-gpu-stage-trace-v0.1/` と、service 操作前に終了した準備用 leaf `service-stop-window-v0.1` は削除・上書きしない。今回の実service windowの `OUT` はその配下の新規 leaf `service-stop-window-v0.2` とし、開始時にその leaf が不存在であることを確認する。
-- この unit は `RuntimeDirectory=ullm` かつ `RuntimeDirectoryPreserve=no` であることを、service 停止直前に読み取り専用で記録する。したがって systemd が停止時に `/run/ullm` と lock leaf を削除した場合、これは「free lock」ではなく **lock取得失敗** である。既存regular fileだけを nonblocking 取得する契約は維持し、`mkdir`、`touch`、`install`、symlink 作成その他の lock substrate 作成・修復は行わない。この場合は trace を起動せず、直ちに一度だけ service 復旧へ進む。
+- 既存の `service-stop-window-v0.1`、`v0.2`、`v0.3-runtime-directory-preserve`、`v0.4-absolute-amd-smi-rehearsed` は削除・上書きしない。今回の実service windowの `OUT` はその配下の新規 leaf `service-stop-window-v0.5-nlink-staged` とし、開始時にその leaf が不存在であることを確認する。
+- この unit は `RuntimeDirectory=ullm` かつ `RuntimeDirectoryPreserve=yes` であることを、service 停止直前に読み取り専用で記録する。`yes`以外ならlock lifecycleの前提が満たされないため、serviceを停止せずpre-stop failureとして終了する。stop後に既存lockがregular fileでない、path/親componentがない、またはnonblocking取得できない場合は「free lock」と見なさず **lock取得失敗** とする。既存regular fileだけをnonblocking取得する契約は維持し、`mkdir`、`touch`、`install`、symlink 作成その他の lock substrate 作成・修復は行わない。この場合はtraceを起動せず、stop済みなら直ちに一度だけservice復旧へ進む。
 
 ### guard rehearsal と window driver の共通経路
 
 service-stop window を消費する前に、host-only build済みの HIP guardを `tools/run-aq4-phase3c-r9700-guard.py` で service 稼働中に必要回数リハーサルする。このtoolは root から `runuser -u homelab1 -- /usr/bin/env HOME=/home/homelab1 HIP_VISIBLE_DEVICES=1 ULLM_HIP_VISIBLE_DEVICES=1 ...` を固定して実行し、HIP identity、同じBDFだけへの `/opt/rocm/bin/amd-smi static`、同じBDFだけへの4種のH9 telemetryを保存する。lock、service、systemd、manifestを操作せず、HIP stream作成・device memory確保・kernel launchも行わない。
 
-最終windowでは `tools/run-aq4-phase3c-service-window.sh OUT HIP_GUARD_BIN --confirm-single-window` がこの同じguard toolを lock probe 成功後の trace 前と、trace後のhealth snapshotに使う。既存evidenceを変えず、新しい`OUT`を事前に一度だけ作成する。guardの失敗時はtraceを起動せず、driverのEXIT trapが`ullm-openai.service`を一回だけstartする。driver自身は `systemctl restart`、lock作成、V620照会を含まない。
+最終windowでは `tools/run-aq4-phase3c-service-window.sh OUT HIP_GUARD_BIN --confirm-single-window` がこの同じguard toolを lock probe 成功後の trace 前と、trace後のhealth snapshotに使う。driverはstop前に`OUT/trace-binary-staging`を再検証し、raw Cargo outputではなく同rootの`nlink=1` binaryだけを`runuser`で実行する。既存evidenceを変えず、新しい`OUT`を事前に一度だけ作成する。guardまたはstaging verifyの失敗時はtraceを起動せず、stop前ならserviceを操作せず終了し、stop後ならdriverのEXIT trapが`ullm-openai.service`を一回だけstartする。driver自身は `systemctl restart`、lock作成、V620照会を含まない。
 
 ### 停止前の read-only snapshot と非GPU準備
 
-GPU を使わない source/fixture 検査、host-only HIP guard build、`cargo build`、CPU input identity、CPU stage stream は service 停止前に完了させる。これにより停止時間を、guard・telemetry・GPU trace・復旧に限る。これらの準備が失敗した場合は service を停止しない。
+GPU を使わない source/fixture 検査、host-only HIP guard build、`cargo build`、trace binaryのcreate-new staging/verify、CPU input identity、CPU stage stream は service 停止前に完了させる。これにより停止時間を、guard・telemetry・GPU trace・復旧に限る。これらの準備が失敗した場合は service を停止しない。
 
 `OUT` を次に固定する。既存の最初の試行の root は parent としてだけ存在してよく、`OUT` 自体は存在してはならない。
 
 ```bash
-OUT="$REPO/benchmarks/results/2026-07-17/qwen35-9b-aq4-production-opt-v0.1/p2/aq4-phase3c-gpu-stage-trace-v0.1/service-stop-window-v0.2"
+OUT="$REPO/benchmarks/results/2026-07-17/qwen35-9b-aq4-production-opt-v0.1/p2/aq4-phase3c-gpu-stage-trace-v0.1/service-stop-window-v0.5-nlink-staged"
 test ! -e "$OUT"
 install -d -m 700 "$OUT"
 ```
@@ -127,11 +131,12 @@ PACKAGE=/home/homelab1/datapool/ullm/product/qwen35-9b-aq4-cli-v0.1/package
 CASES="$REPO/tests/fixtures/qwen35-aq4-p2-oracle/cases.json"
 REPLAY="$REPO/benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/differential-trace-gpu-v1-input/replay.json"
 HYBRID_INPUT="$REPO/benchmarks/results/2026-07-17/qwen35-9b-aq4-production-opt-v0.1/p2/aq4-layer0-hybrid-diagnostic-v0.1/input/hybrid-input.jsonl"
-OUT="$REPO/benchmarks/results/2026-07-17/qwen35-9b-aq4-production-opt-v0.1/p2/aq4-phase3c-gpu-stage-trace-v0.1"
+OUT="$REPO/benchmarks/results/2026-07-17/qwen35-9b-aq4-production-opt-v0.1/p2/aq4-phase3c-gpu-stage-trace-v0.1/service-stop-window-v0.5-nlink-staged"
 LOCK=/run/ullm/r9700.lock
 R9700_HIP_GUARD_SOURCE="$REPO/tools/query-hip-device-identity.cpp"
 R9700_HIP_GUARD_BIN="$OUT/query-hip-device-identity"
 AMD_SMI=/opt/rocm/bin/amd-smi
+TRACE_STAGING_TOOL="$REPO/tools/stage-aq4-phase3c-trace-binary.py"
 
 test -d "$REPO"
 test -d "$PACKAGE"
@@ -142,11 +147,15 @@ test -f "$LOCK"
 test ! -L "$LOCK"
 test ! -e "$OUT"
 test -f "$R9700_HIP_GUARD_SOURCE"
+test -f "$TRACE_STAGING_TOOL"
 command -v g++ >/dev/null
 test -x "$AMD_SMI"
 git -C "$REPO" ls-files --error-unmatch tools/query-hip-device-identity.cpp >/dev/null
 git -C "$REPO" diff --quiet HEAD -- tools/query-hip-device-identity.cpp
 git -C "$REPO" diff --cached --quiet HEAD -- tools/query-hip-device-identity.cpp
+git -C "$REPO" ls-files --error-unmatch tools/stage-aq4-phase3c-trace-binary.py >/dev/null
+git -C "$REPO" diff --quiet HEAD -- tools/stage-aq4-phase3c-trace-binary.py
+git -C "$REPO" diff --cached --quiet HEAD -- tools/stage-aq4-phase3c-trace-binary.py
 test "$(git -C "$REPO" rev-parse "$TRACE_TOOLING_COMMIT")" = "$TRACE_TOOLING_COMMIT"
 git -C "$REPO" diff --quiet "$TRACE_TOOLING_COMMIT" -- \
   crates/ullm-engine/src/qwen35_aq4_layer_runtime.rs \
@@ -363,16 +372,33 @@ python3 "$REPO/tools/verify-aq4-layer0-package-embedding-fixture.py" \
 
 (
   cd "$REPO"
-  ULLM_BUILD_GIT_COMMIT="$TRACE_TOOLING_COMMIT" \
+  CARGO_BUILD_JOBS=1 ULLM_BUILD_GIT_COMMIT="$TRACE_TOOLING_COMMIT" \
     cargo build --release -p ullm-engine \
       --bin ullm-aq4-differential-trace \
       --bin ullm-aq4-layer0-family-isolation
 )
 
-TRACE_BIN="$REPO/target/release/ullm-aq4-differential-trace"
+TRACE_SOURCE_BIN="$REPO/target/release/ullm-aq4-differential-trace"
 CPU_BIN="$REPO/target/release/ullm-aq4-layer0-family-isolation"
-test -x "$TRACE_BIN"
+TRACE_STAGE_DIR="$OUT/trace-binary-staging"
+test -x "$TRACE_SOURCE_BIN"
 test -x "$CPU_BIN"
+
+# Cargo may expose TRACE_SOURCE_BIN as nlink=2. Stage a separate inode; do
+# not use ln, mv, or an existing destination as a substitute for this copy.
+python3 "$TRACE_STAGING_TOOL" \
+  --source "$TRACE_SOURCE_BIN" \
+  --output "$TRACE_STAGE_DIR" \
+  --trace-tooling-commit "$TRACE_TOOLING_COMMIT" \
+  > "$OUT/trace-binary-staging-create.json"
+python3 "$TRACE_STAGING_TOOL" \
+  --verify \
+  --source "$TRACE_SOURCE_BIN" \
+  --output "$TRACE_STAGE_DIR" \
+  --trace-tooling-commit "$TRACE_TOOLING_COMMIT" \
+  > "$OUT/trace-binary-staging-verify-pre-stop.json"
+TRACE_BIN="$TRACE_STAGE_DIR/ullm-aq4-differential-trace"
+test -x "$TRACE_BIN"
 
 env \
   -u HIP_VISIBLE_DEVICES \
@@ -479,6 +505,7 @@ python3 "$REPO/tools/compare-aq4-layer0-cpu-gpu-stage-stream.py" \
 - `r9700-architecture-guard.json`が`status=valid`である。filtered HIP ordinal 0は可視GPU数1、`gfx1201`、non-empty name、PCI BDFを記録し、その同一BDFのtargeted `amd-smi` recordは`gfx1201`、PCI device ID `0x7551`、non-empty market nameである。
 - `gpu-health-before-summary.json`と`gpu-health-after-summary.json`、および各raw stdout/stderr/exit-codeが保存されている。metric未対応などでsummaryが`partial`ならH9 telemetryは未取得箇所を明示し、H9を否定しない。
 - `cpu-input-identity.json` が`status=valid`で、全hybrid embedding rowがpackage BF16 passthroughとbit-exactである。
+- `trace-binary-staging-create.json`と`trace-binary-staging-verify-pre-stop.json`が`status=valid`で、receiptのCargo source SHA-256とstaged binary SHA-256が一致し、staged binaryがregular/mode `0555`/`nlink=1`である。service-window driverがstop前に同じstaging rootを再検証している。
 - `cpu-stages.f32le`と`kernel-stages.f32le`がterminal frameまで完全であり、比較器が3 context × 10 stage = 30 recordを受理する。
 - `SHA256SUMS`、GPU trace manifest、`HIP`/`gfx1201`/global device `1`、7つのfusion guard、RPB固定、`production_worker_unchanged=true`を確認できる。
 - `cpu-gpu-stage-compare/comparison.json`が`status=valid`かつ全値finiteである。
@@ -504,5 +531,6 @@ python3 "$REPO/tools/compare-aq4-layer0-cpu-gpu-stage-stream.py" \
 - `OUT`、`phase3c-preflight.txt`、R9700 architecture guard、GPU health telemetry、CPU receipt/stream/report、`gpu-trace.stdout`、`gpu-trace.stderr`を削除・上書きしない。
 - traceがpublication前に失敗した場合、toolが残す`gpu-trace.incomplete-PID`も保存する。ただしterminal frame、manifest、`SHA256SUMS`を満たさないrootは比較・promotionに使わない。
 - lock failure、R9700 architecture guard failure、architecture/backend mismatch、input identity mismatch、checksum failure、comparison parser failureはすべて「測定無効」であり、数値の結論を出さない。guard failure時はHIP/ASIC evidenceだけを残し、CPU referenceやtraceを起動しない。
+- staging create/verify failureも「測定無効」である。service停止前ならstopしない。既存staging rootを修復・上書き・hardlink化せず、新規のevidence rootで原因を記録して終了する。
 - health telemetryの一部が取得不能でも設定を変更して補完しない。traceが成功しても、その項目についてH9は判定不能として記録する。単発runの結果だけで決定性・熱相関・他GPU比較を結論づけない。
 - service/systemd/active manifest/P3 harnessを復旧操作の名目で変更しない。failure evidenceとexit codeをjournalに追記して、次の判断をユーザーに委ねる。

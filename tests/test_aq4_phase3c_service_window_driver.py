@@ -16,3 +16,8 @@ def test_service_window_driver_is_explicitly_single_use_and_preserves_lock_contr
     assert "guard-after" in source
     assert "test -x /opt/rocm/bin/amd-smi" not in source
     assert "! -x /opt/rocm/bin/amd-smi" in source
+    assert 'TRACE_STAGE_DIR="$OUT/trace-binary-staging"' in source
+    assert 'TRACE_BIN="$TRACE_STAGE_DIR/ullm-aq4-differential-trace"' in source
+    assert "stage-aq4-phase3c-trace-binary.py" in source
+    assert "--verify" in source
+    assert "staged trace binary identity contract failed" in source

@@ -26,7 +26,9 @@ CASES="$REPO/tests/fixtures/qwen35-aq4-p2-oracle/cases.json"
 REPLAY="$REPO/benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/differential-trace-gpu-v1-input/replay.json"
 TRACE_TOOLING_COMMIT=5a0fb4c50476d5153ced22bd6847c2729bfdb975
 LOCK=/run/ullm/r9700.lock
-TRACE_BIN="$REPO/target/release/ullm-aq4-differential-trace"
+TRACE_STAGE_DIR="$OUT/trace-binary-staging"
+TRACE_BIN="$TRACE_STAGE_DIR/ullm-aq4-differential-trace"
+TRACE_STAGING_TOOL="$REPO/tools/stage-aq4-phase3c-trace-binary.py"
 GUARD_TOOL="$REPO/tools/run-aq4-phase3c-r9700-guard.py"
 LOCK_PROBE="$REPO/tools/probe-aq4-phase3c-existing-lock.py"
 SERVICE=ullm-openai.service
@@ -85,9 +87,18 @@ if [ ! -d "$OUT" ] || [ -e "$OUT/gpu-trace" ] || [ -e "$OUT/guard-before" ] || [
   echo "output contract failed" >&2
   exit 30
 fi
-if [ ! -f "$LOCK" ] || [ -L "$LOCK" ] || [ ! -x "$TRACE_BIN" ] || [ ! -x "$GUARD_BIN" ] || [ ! -f "$GUARD_TOOL" ] || [ ! -f "$LOCK_PROBE" ] || [ ! -x /opt/rocm/bin/amd-smi ]; then
+if [ ! -f "$LOCK" ] || [ -L "$LOCK" ] || [ ! -x "$TRACE_BIN" ] || [ ! -x "$GUARD_BIN" ] || [ ! -f "$TRACE_STAGING_TOOL" ] || [ ! -f "$GUARD_TOOL" ] || [ ! -f "$LOCK_PROBE" ] || [ ! -x /opt/rocm/bin/amd-smi ]; then
   echo "pre-stop file contract failed" >&2
   exit 31
+fi
+if ! python3 "$TRACE_STAGING_TOOL" \
+  --verify \
+  --source "$REPO/target/release/ullm-aq4-differential-trace" \
+  --output "$TRACE_STAGE_DIR" \
+  --trace-tooling-commit "$TRACE_TOOLING_COMMIT" \
+  > "$OUT/trace-binary-staging-verify.json"; then
+  echo "staged trace binary identity contract failed" >&2
+  exit 37
 fi
 if [ ! -d "$PACKAGE" ] || [ ! -f "$CASES" ] || [ ! -f "$REPLAY" ] || [ ! -r "$MANIFEST" ]; then
   echo "trace input contract failed" >&2
@@ -96,6 +107,12 @@ fi
 if [ "$(git -C "$REPO" rev-parse "$TRACE_TOOLING_COMMIT")" != "$TRACE_TOOLING_COMMIT" ]; then
   echo "trace tooling commit is unavailable" >&2
   exit 34
+fi
+if ! git -C "$REPO" ls-files --error-unmatch tools/stage-aq4-phase3c-trace-binary.py >/dev/null \
+  || ! git -C "$REPO" diff --quiet HEAD -- tools/stage-aq4-phase3c-trace-binary.py \
+  || ! git -C "$REPO" diff --cached --quiet HEAD -- tools/stage-aq4-phase3c-trace-binary.py; then
+  echo "trace-binary staging tool is not tracked and clean" >&2
+  exit 38
 fi
 if ! git -C "$REPO" diff --quiet "$TRACE_TOOLING_COMMIT" -- \
   crates/ullm-engine/src/qwen35_aq4_layer_runtime.rs \
