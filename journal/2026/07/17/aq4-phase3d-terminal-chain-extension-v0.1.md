@@ -16,8 +16,11 @@
 - LM headを全語彙materializeせずAQ4の固定34行だけseek/dequantizeするreaderへ置換した。packed idx4 nibble順、u8 scale table、row-scale overrideを単体testで検証し、terminal chain/reportをschema v3へ更新した。この変更は診断の入力read/dequantize範囲のみで、production fixではない。
 - 修正後の2回目はAQ4 binaryがfinal normとLM headの両terminal frameを正しく出力したが、Python比較器がstage一括順を期待していたため、per-timestepの`final_norm -> lm_head` stream順を拒否して無効終了した。wall `412.37 s`、最大RSS `334748 KiB`、process swap `0`だった。
 - 比較器をproducer順へ合わせ、sourceのfixed-row logitsもcurrent timestepだけで計算するよう修正した。framed streamのterminal順を固定するtestを追加し、`pytest -q tests/test_aq4_multilayer_accumulation.py tests/test_aq4_layer0_family_isolation.py`は`17 passed`だった。
+- 3回目のCPU-only 0:31+final norm+LM headはvalidに完走した。wall `408.41 s`、最大RSS `330744 KiB`、process swap `0`で、見積もりの約7分・512 MiB未満に収まった。32 decoder layer、self-attention `3,7,11,15,19,23,27,31`、full-hidden final norm、固定34 AQ4 LM-head rowをすべて確認した。
+- decoder curveは非単調で、layer 31はrelative L2 `0.1278813307`（decoder最大はlayer 29の`0.1708747154`）だった。final RMSNormで`0.5010330688`へ`+0.3731517381` / `3.917953x`急増し、LM head固定row sampleは`0.5860500940`だった。LM head値はfull vocabulary L2ではない。
+- source/packageのfinal norm BF16 payload bitは同一SHA-256 `44f7283137ae75c262c152f7e529b70c708ea13afc1bfaa565c8ea74b61ecf88`だった。一方source Qwen3.5は`normalized * (1 + raw_weight)`、AQ4 runtime/chainはfinal normをadditive suffix対象外として`normalized * raw_weight`を適用する。このためdominant boundaryはlinear/self/MLPではなくfinal RMSNorm weight interpretationに偏ると判断した。Phase 4 fixは実装していない。
 
 ## 次の行動
 
-- 修正済み比較器で、失敗attemptを上書きせず別ディレクトリにCPU-onlyの0:31+final norm+LM headを一回実行する。wall time/RSS/swapとterminal contractを記録する。
-- 取得した成長曲線からboundaryとtensor familyを記録する。Phase 4のfix、GPU、service、P3 harnessには進まない。
+- Phase 3dの測定・境界特定は完了。`attempt-3/phase3d-analysis.md`、growth curve、weight semantics evidenceをreview対象にする。
+- 次の判断が必要なら、今回のevidenceを入力にPhase 4の別タスクとして扱う。ここではfix、GPU、service、P3 harnessには進まない。

@@ -1,0 +1,42 @@
+{
+  "schema_version": "ullm.aq4_phase3d.final_norm_weight_semantics.v1",
+  "device": "cpu-only",
+  "tensor": "model.language_model.norm.weight",
+  "payload_identity": {
+    "shape": [4096],
+    "dtype": "BF16",
+    "source_payload_sha256": "44f7283137ae75c262c152f7e529b70c708ea13afc1bfaa565c8ea74b61ecf88",
+    "package_payload_sha256": "44f7283137ae75c262c152f7e529b70c708ea13afc1bfaa565c8ea74b61ecf88",
+    "payload_bits_identical": true
+  },
+  "source_semantics": {
+    "implementation": "/home/homelab1/.local/lib/python3.12/site-packages/transformers/models/qwen3_5/modeling_qwen3_5.py:736-750",
+    "model_final_norm_construction": "/home/homelab1/.local/lib/python3.12/site-packages/transformers/models/qwen3_5/modeling_qwen3_5.py:1143-1147",
+    "formula": "normalized_hidden * (1.0 + raw_weight)"
+  },
+  "aq4_cpu_chain_semantics": {
+    "implementation": "crates/ullm-engine/src/bin/ullm-aq4-layer0-family-isolation.rs:1513-1526",
+    "effective_weight_helper": "crates/ullm-engine/src/loader.rs:125-143",
+    "formula": "normalized_hidden * raw_weight",
+    "reason": "model.language_model.norm.weight is not one of the helper's additive suffixes"
+  },
+  "weight_statistics_f32": {
+    "raw_mean_abs": 1.1399471759796143,
+    "raw_rms": 1.148543119430542,
+    "raw_min": -0.22265625,
+    "raw_max": 1.9921875,
+    "raw_negative_fraction": 0.00048828125,
+    "source_effective_mean_abs": 2.1398375034332275,
+    "source_effective_rms": 2.1444873809814453,
+    "source_effective_min": 0.77734375,
+    "source_effective_max": 2.9921875
+  },
+  "observed_full_hidden_boundary": {
+    "comparison_json_sha256": "daf9f44edaf5e77315bc107244cd29679f1e2900919c7fbcf20250cc7ee842df",
+    "layer31_relative_l2": 0.12788133069570853,
+    "final_norm_relative_l2": 0.5010330688097714,
+    "delta_relative_l2": 0.3731517381140629,
+    "ratio_to_layer31": 3.9179531999238506
+  },
+  "interpretation": "The source and package BF16 payload bits are identical, so this is not a package payload mismatch. The directly observed boundary and the source/AQ4 formula difference identify final RMSNorm weight interpretation as the dominant Phase 3d discrepancy. No production fix is included in this evidence."
+}
