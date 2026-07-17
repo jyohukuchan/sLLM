@@ -26,14 +26,15 @@ use std::path::{Path, PathBuf};
 use ullm_engine::aq4_package_runtime::PackageAq4ResidentMatvec;
 use ullm_engine::host_bytes::{decode_f32_le_values, encode_f32_to_bytes};
 use ullm_engine::loader::{
-    WeightRegistry, effective_rmsnorm_weight_values, read_named_passthrough_f32,
+    effective_rmsnorm_weight_values, read_named_passthrough_f32, read_named_passthrough_f32_rows,
+    WeightRegistry,
 };
 use ullm_engine::qwen35_aq4_layer_runtime::{
     runtime_host_linear_attn_gate_beta_f32, runtime_host_linear_attn_recurrent_f32,
 };
 use ullm_engine::qwen35_aq4_session::{QWEN35_AQ4_ROPE_BASE, QWEN35_AQ4_ROTARY_DIM};
 use ullm_engine::qwen35_package_contract::{
-    PackageDecoderLayerKind, PackageManifestLayerEntry, package_layer_entries_for_indices,
+    package_layer_entries_for_indices, PackageDecoderLayerKind, PackageManifestLayerEntry,
 };
 
 const SCHEMA: &str = "ullm.aq4_layer0_family_isolation.aq4_cpu.v1";
@@ -45,7 +46,7 @@ const MAX_CHUNK_BYTES: usize = 256 * 1024 * 1024;
 
 const HYBRID_SCHEMA: &str = "ullm.aq4_layer0_hybrid_diagnostic.aq4_cpu.v1";
 const HYBRID_INPUT_SCHEMA: &str = "ullm.aq4_layer0_hybrid_input_jsonl.v1";
-const CHAIN_SCHEMA: &str = "ullm.aq4_multilayer_accumulation.aq4_cpu.v1";
+const CHAIN_SCHEMA: &str = "ullm.aq4_multilayer_accumulation.aq4_cpu.v2";
 const HYBRID_MAX_CASES: usize = 128;
 const HYBRID_MAX_CONTEXT_LENGTH: usize = 512;
 const HIDDEN: usize = 4096;
@@ -98,6 +99,7 @@ const A_LOG_TENSOR: &str = "model.language_model.layers.0.linear_attn.A_log";
 const DT_BIAS_TENSOR: &str = "model.language_model.layers.0.linear_attn.dt_bias";
 const ATTN_NORM_TENSOR: &str = "model.language_model.layers.0.linear_attn.norm.weight";
 const POST_NORM_TENSOR: &str = "model.language_model.layers.0.post_attention_layernorm.weight";
+const FINAL_NORM_TENSOR: &str = "model.language_model.norm.weight";
 const LM_HEAD_TENSOR: &str = "lm_head.weight";
 
 type Result<T> = std::result::Result<T, String>;
@@ -112,6 +114,7 @@ struct Args {
     stage_stream_stdout: bool,
     post_norm_epsilon_source_control: bool,
     chain_layer_range: Option<ChainLayerRange>,
+    chain_include_final_norm_lm_head: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -374,6 +377,7 @@ struct ChainProbeReport {
     input: HybridInputReport,
     chain: ChainExecutionReport,
     layer_summaries: Vec<ChainLayerSummary>,
+    terminal_summaries: Vec<ChainTerminalSummary>,
 }
 
 #[derive(Debug, Serialize)]
@@ -386,6 +390,10 @@ struct ChainExecutionReport {
     self_attention_qk_rms_epsilon: f32,
     self_attention_rotary_dim: usize,
     self_attention_rope_base: f32,
+    includes_final_norm_lm_head: bool,
+    final_norm_tensor: Option<String>,
+    lm_head_tensor: Option<String>,
+    lm_head_sample_rows: Vec<usize>,
     state_contract: String,
     persistence_contract: String,
 }
@@ -400,6 +408,14 @@ struct ChainLayerTopology {
 struct ChainLayerSummary {
     layer_index: usize,
     kind: String,
+    output: HybridStageSummary,
+}
+
+#[derive(Debug, Serialize)]
+struct ChainTerminalSummary {
+    stage: String,
+    measurement_scope: String,
+    coordinates: Vec<usize>,
     output: HybridStageSummary,
 }
 
@@ -614,10 +630,17 @@ impl StageEmitter {
 
 /// Emits only layer outputs for the chained diagnostic.  The f32 payload is
 /// consumed directly by the BF16 comparator and is never persisted locally.
+struct ChainTerminalAccumulator {
+    measurement_scope: String,
+    coordinates: Vec<usize>,
+    accumulator: StageAccumulator,
+}
+
 struct ChainStageEmitter {
     stream_stdout: bool,
     stdout: io::BufWriter<io::Stdout>,
     stages: BTreeMap<usize, (String, StageAccumulator)>,
+    terminal_stages: BTreeMap<String, ChainTerminalAccumulator>,
 }
 
 impl ChainStageEmitter {
@@ -626,6 +649,7 @@ impl ChainStageEmitter {
             stream_stdout,
             stdout: io::BufWriter::new(io::stdout()),
             stages: BTreeMap::new(),
+            terminal_stages: BTreeMap::new(),
         }
     }
 
@@ -715,6 +739,108 @@ impl ChainStageEmitter {
         Ok(())
     }
 
+    /// Emits a terminal model stage after the decoder stack.  Final RMSNorm
+    /// is a full hidden frame; LM-head is deliberately only a fixed row sample
+    /// so no vocabulary-sized tensor is materialized or persisted.
+    fn emit_terminal(
+        &mut self,
+        stage: &str,
+        measurement_scope: &str,
+        coordinates: &[usize],
+        case: &HybridInputCase,
+        timestep: usize,
+        values: &[f32],
+    ) -> Result<()> {
+        if stage.is_empty()
+            || measurement_scope.is_empty()
+            || values.is_empty()
+            || values.iter().any(|value| !value.is_finite())
+        {
+            return Err(format!(
+                "chain terminal {stage} has invalid metadata or values"
+            ));
+        }
+        let terminal = self
+            .terminal_stages
+            .entry(stage.to_string())
+            .or_insert_with(|| ChainTerminalAccumulator {
+                measurement_scope: measurement_scope.to_string(),
+                coordinates: coordinates.to_vec(),
+                accumulator: StageAccumulator::default(),
+            });
+        if terminal.measurement_scope != measurement_scope || terminal.coordinates != coordinates {
+            return Err(format!(
+                "chain terminal {stage} contract changed during probe"
+            ));
+        }
+        let accumulator = &mut terminal.accumulator;
+        match accumulator.elements_per_record {
+            Some(elements) if elements != values.len() => {
+                return Err(format!(
+                    "chain terminal {stage} element count changed: expected {elements} got {}",
+                    values.len()
+                ));
+            }
+            Some(_) => {}
+            None => accumulator.elements_per_record = Some(values.len()),
+        }
+        accumulator.records = accumulator
+            .records
+            .checked_add(1)
+            .ok_or_else(|| format!("chain terminal {stage} record count overflow"))?;
+        let mut l2_sq = 0.0_f64;
+        let mut max_abs = 0.0_f64;
+        for value in values {
+            let value64 = f64::from(*value);
+            l2_sq += value64 * value64;
+            max_abs = max_abs.max(value64.abs());
+        }
+        accumulator.sum_sq += l2_sq;
+        accumulator.max_abs = accumulator.max_abs.max(max_abs);
+        let sample_coordinates = fixed_coordinates(values.len());
+        accumulator.samples.push(HybridStageSample {
+            case_id: case.case_id.clone(),
+            step: case.step,
+            context_token_ids_sha256: case.context_token_ids_sha256.clone(),
+            timestep,
+            elements: values.len(),
+            values: sample_coordinates
+                .iter()
+                .map(|index| values[*index])
+                .collect(),
+            coordinates: sample_coordinates,
+            max_abs,
+            l2: l2_sq.sqrt(),
+        });
+
+        if self.stream_stdout {
+            let payload = encode_f32_to_bytes(values);
+            let header = serde_json::json!({
+                "kind": "chain_terminal_output",
+                "stage": stage,
+                "measurement_scope": measurement_scope,
+                "coordinates": coordinates,
+                "case_id": case.case_id,
+                "step": case.step,
+                "context_token_ids_sha256": case.context_token_ids_sha256,
+                "context_length": case.context_length,
+                "timestep": timestep,
+                "dtype": "f32le",
+                "shape": [values.len()],
+                "bytes": payload.len(),
+            });
+            serde_json::to_writer(&mut self.stdout, &header).map_err(|err| {
+                format!("failed serializing chain terminal {stage} header: {err}")
+            })?;
+            self.stdout
+                .write_all(b"\n")
+                .and_then(|_| self.stdout.write_all(&payload))
+                .and_then(|_| self.stdout.flush())
+                .map_err(|err| format!("failed streaming chain terminal {stage}: {err}"))?;
+        }
+        Ok(())
+    }
+
     fn finish_stream(&mut self) -> Result<()> {
         if self.stream_stdout {
             self.stdout
@@ -725,8 +851,13 @@ impl ChainStageEmitter {
         Ok(())
     }
 
-    fn summaries(self) -> Vec<ChainLayerSummary> {
-        self.stages
+    fn summaries(self) -> (Vec<ChainLayerSummary>, Vec<ChainTerminalSummary>) {
+        let Self {
+            stages,
+            terminal_stages,
+            ..
+        } = self;
+        let layer_summaries = stages
             .into_iter()
             .map(|(layer_index, (kind, accumulator))| ChainLayerSummary {
                 layer_index,
@@ -739,7 +870,23 @@ impl ChainStageEmitter {
                     samples: accumulator.samples,
                 },
             })
-            .collect()
+            .collect();
+        let terminal_summaries = terminal_stages
+            .into_iter()
+            .map(|(stage, terminal)| ChainTerminalSummary {
+                stage,
+                measurement_scope: terminal.measurement_scope,
+                coordinates: terminal.coordinates,
+                output: HybridStageSummary {
+                    records: terminal.accumulator.records,
+                    elements_per_record: terminal.accumulator.elements_per_record.unwrap_or(0),
+                    aggregate_l2: terminal.accumulator.sum_sq.sqrt(),
+                    max_abs: terminal.accumulator.max_abs,
+                    samples: terminal.accumulator.samples,
+                },
+            })
+            .collect();
+        (layer_summaries, terminal_summaries)
     }
 }
 
@@ -774,6 +921,11 @@ fn run() -> Result<()> {
     let args = parse_args(env::args().skip(1))?;
     if args.post_norm_epsilon_source_control && args.hybrid_input.is_none() {
         return Err("--post-norm-epsilon-source-control requires --hybrid-input".to_string());
+    }
+    if args.chain_include_final_norm_lm_head && args.chain_layer_range.is_none() {
+        return Err(
+            "--chain-include-final-norm-lm-head requires --chain-layer-range 0:31".to_string(),
+        );
     }
     match (&args.input, &args.hybrid_input) {
         (Some(_), None) => run_raw_family_probe(args),
@@ -1132,6 +1284,18 @@ fn run_multilayer_chain_probe(args: Args) -> Result<()> {
     let range = args
         .chain_layer_range
         .ok_or_else(|| "chain probe requires --chain-layer-range".to_string())?;
+    if range.start != 0 {
+        return Err(
+            "chain range must start at layer 0 because the fixture provides embedded residuals"
+                .to_string(),
+        );
+    }
+    if args.chain_include_final_norm_lm_head && range.end != 31 {
+        return Err(
+            "--chain-include-final-norm-lm-head requires the complete decoder range 0:31"
+                .to_string(),
+        );
+    }
     let input_path = args
         .hybrid_input
         .as_ref()
@@ -1232,6 +1396,9 @@ fn run_multilayer_chain_probe(args: Args) -> Result<()> {
             )?,
         };
     }
+    if args.chain_include_final_norm_lm_head {
+        run_chain_terminal_stages(&args, &chains, &mut emitter)?;
+    }
     drop(chains);
     emitter.finish_stream()?;
 
@@ -1249,6 +1416,7 @@ fn run_multilayer_chain_probe(args: Args) -> Result<()> {
     if sha256_bytes(&current_manifest) != manifest_sha256 {
         return Err("package manifest changed during chain probe".to_string());
     }
+    let (layer_summaries, terminal_summaries) = emitter.summaries();
 
     let report = ChainProbeReport {
         schema_version: CHAIN_SCHEMA.to_string(),
@@ -1298,16 +1466,131 @@ fn run_multilayer_chain_probe(args: Args) -> Result<()> {
             self_attention_qk_rms_epsilon: AQ4_POST_RMS_EPSILON,
             self_attention_rotary_dim: QWEN35_AQ4_ROTARY_DIM,
             self_attention_rope_base: QWEN35_AQ4_ROPE_BASE,
+            includes_final_norm_lm_head: args.chain_include_final_norm_lm_head,
+            final_norm_tensor: args
+                .chain_include_final_norm_lm_head
+                .then(|| FINAL_NORM_TENSOR.to_string()),
+            lm_head_tensor: args
+                .chain_include_final_norm_lm_head
+                .then(|| LM_HEAD_TENSOR.to_string()),
+            lm_head_sample_rows: args
+                .chain_include_final_norm_lm_head
+                .then(|| DIAGNOSTIC_LOGIT_ROWS.to_vec())
+                .unwrap_or_default(),
             state_contract: "The chain is cold-initialized once per fixture before layer 0. Each linear-attention layer uses its own model-defined Conv/recurrent state while replaying the complete temporal context; self-attention retains only the current layer's causal K/V sequence. No case is reset between chained layer outputs.".to_string(),
-            persistence_contract: "Only the current layer's input/output sequence, its current layer-local state, and fixed-coordinate summaries exist in memory. Full layer outputs are streamed to the comparator, then discarded before the next layer; no all-layer hidden/state tensor is retained.".to_string(),
+            persistence_contract: "Only the current layer's input/output sequence, its current layer-local state, and fixed-coordinate summaries exist in memory. Full decoder/final-norm frames are streamed to the comparator then discarded before the next stage. LM-head is decoded as fixed rows only; no full vocabulary tensor or all-layer hidden/state tensor is retained.".to_string(),
         },
-        layer_summaries: emitter.summaries(),
+        layer_summaries,
+        terminal_summaries,
     };
     let report_path = args.output.join("aq4-report.json");
     let report_json = serde_json::to_vec_pretty(&report)
         .map_err(|err| format!("failed serializing chain report: {err}"))?;
     fs::write(&report_path, report_json)
         .map_err(|err| format!("failed writing {}: {err}", report_path.display()))?;
+    Ok(())
+}
+
+/// Applies the model head stages to the already-chained decoder outputs.
+///
+/// The final norm is measured for every fixture timestep.  LM-head metrics
+/// deliberately cover only the fixed `DIAGNOSTIC_LOGIT_ROWS`: loading or
+/// producing a 248,320-token vector would defeat this CPU-only diagnostic's
+/// bounded-memory contract.  The rows are decoded once, then reused for each
+/// current timestep and discarded with the terminal frame.
+fn run_chain_terminal_stages(
+    args: &Args,
+    chains: &[ChainSequence],
+    emitter: &mut ChainStageEmitter,
+) -> Result<()> {
+    if chains.is_empty() {
+        return Err("chain terminal stages require at least one sequence".to_string());
+    }
+    let final_norm = read_named_passthrough_f32(&args.package, FINAL_NORM_TENSOR, args.chunk_bytes)
+        .map_err(|err| format!("failed reading chain final RMSNorm: {err}"))?;
+    if final_norm.dtype != "BF16"
+        || final_norm.shape != vec![HIDDEN as u64]
+        || final_norm.values.len() != HIDDEN
+        || final_norm.values.iter().any(|value| !value.is_finite())
+    {
+        return Err("chain final RMSNorm geometry/value contract differs".to_string());
+    }
+    // This helper matches the AQ4 model runtime's final-norm weight handling.
+    // Qwen3.5 final norm is intentionally not included in the loader's
+    // additive-weight suffix set, so the effective runtime vector is the raw
+    // package payload rather than a hidden diagnostic adjustment.
+    let final_norm_weight = effective_rmsnorm_weight_values(FINAL_NORM_TENSOR, &final_norm.values);
+    if final_norm_weight.len() != HIDDEN || final_norm_weight.iter().any(|value| !value.is_finite())
+    {
+        return Err("chain effective final RMSNorm weight is invalid".to_string());
+    }
+
+    let lm_head_rows =
+        read_named_passthrough_f32_rows(&args.package, LM_HEAD_TENSOR, &DIAGNOSTIC_LOGIT_ROWS)
+            .map_err(|err| format!("failed reading chain fixed LM-head rows: {err}"))?;
+    let max_row = *DIAGNOSTIC_LOGIT_ROWS
+        .iter()
+        .max()
+        .ok_or_else(|| "chain LM-head sample rows are empty".to_string())?;
+    if lm_head_rows.dtype != "BF16"
+        || lm_head_rows.shape.len() != 2
+        || usize::try_from(lm_head_rows.shape[0])
+            .ok()
+            .is_none_or(|rows| rows <= max_row)
+        || usize::try_from(lm_head_rows.shape[1]).ok() != Some(HIDDEN)
+        || lm_head_rows.columns != HIDDEN
+        || lm_head_rows.row_indices != DIAGNOSTIC_LOGIT_ROWS
+        || lm_head_rows.values.len() != DIAGNOSTIC_LOGIT_ROWS.len() * HIDDEN
+        || lm_head_rows.values.iter().any(|value| !value.is_finite())
+    {
+        return Err("chain fixed LM-head row geometry/value contract differs".to_string());
+    }
+
+    for chain in chains {
+        if chain.values.len() != chain.case.context_length * HIDDEN
+            || chain.values.iter().any(|value| !value.is_finite())
+        {
+            return Err(format!(
+                "chain terminal input is invalid for {}",
+                chain.case.case_id
+            ));
+        }
+        for (timestep, decoder_output) in chain.values.chunks_exact(HIDDEN).enumerate() {
+            let final_norm_output =
+                rmsnorm_f32(decoder_output, &final_norm_weight, INPUT_RMS_EPSILON)?;
+            emitter.emit_terminal(
+                "final_norm",
+                "full_hidden",
+                &[],
+                &chain.case,
+                timestep,
+                &final_norm_output,
+            )?;
+            let logits = lm_head_rows
+                .values
+                .chunks_exact(HIDDEN)
+                .map(|row| {
+                    row.iter()
+                        .zip(&final_norm_output)
+                        .map(|(weight, hidden)| weight * hidden)
+                        .sum::<f32>()
+                })
+                .collect::<Vec<_>>();
+            if logits.len() != DIAGNOSTIC_LOGIT_ROWS.len()
+                || logits.iter().any(|value| !value.is_finite())
+            {
+                return Err("chain fixed LM-head logits are invalid".to_string());
+            }
+            emitter.emit_terminal(
+                "lm_head",
+                "fixed_logit_rows",
+                &DIAGNOSTIC_LOGIT_ROWS,
+                &chain.case,
+                timestep,
+                &logits,
+            )?;
+        }
+    }
     Ok(())
 }
 
@@ -1323,6 +1606,7 @@ where
     let mut stage_stream_stdout = false;
     let mut post_norm_epsilon_source_control = false;
     let mut chain_layer_range = None;
+    let mut chain_include_final_norm_lm_head = false;
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--package" => {
@@ -1359,9 +1643,10 @@ where
                         .ok_or("--chain-layer-range requires START:END")?,
                 )?)
             }
+            "--chain-include-final-norm-lm-head" => chain_include_final_norm_lm_head = true,
             "--help" | "-h" => {
                 return Err(
-                    "usage: --package DIR (--input JSONL | --hybrid-input JSONL) --output DIR [--chunk-bytes N] [--stage-stream-stdout] [--post-norm-epsilon-source-control] [--chain-layer-range START:END]".to_string(),
+                    "usage: --package DIR (--input JSONL | --hybrid-input JSONL) --output DIR [--chunk-bytes N] [--stage-stream-stdout] [--post-norm-epsilon-source-control] [--chain-layer-range START:END] [--chain-include-final-norm-lm-head]".to_string(),
                 )
             }
             other => return Err(format!("unknown argument: {other}")),
@@ -1376,6 +1661,7 @@ where
         stage_stream_stdout,
         post_norm_epsilon_source_control,
         chain_layer_range,
+        chain_include_final_norm_lm_head,
     })
 }
 

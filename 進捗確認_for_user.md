@@ -1,5 +1,5 @@
-# Phase 3c GPU window 進捗
+# Phase 3d CPU-only 進捗
 
-- 唯一のservice-stop windowは実行済み。R9700 guard とhealth telemetryは成功したが、trace binaryのnlink=2がidentity contract（nlink=1）でfail-closedしたため、GPU kernel traceは未起動・再試行なしで終了した。
-- serviceは正常復旧済み（active/running、NRestarts=0、healthz/readyz成功、worker KFD/R9700 owner、manifest、lock holder確認済み）。stop開始からreadyz成功までは約20秒。
-- H5/H9と10 stage比較は判定不能。07/16停止中P3 harness、service/systemd/manifest、既存evidenceには追加変更をしていない。
+- 既存chainをlayer 0--31、final norm、LM head固定row sampleまで拡張した。
+- 0:11実測を基に、0:31は約7分・RSS 512 MiB未満と見積もり、20分上限の単発CPU測定を準備した。
+- GPU、service、systemd、active manifest、P3 harness、service-stop関連には触れていない。

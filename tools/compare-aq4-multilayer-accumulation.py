@@ -33,8 +33,8 @@ sys.modules[SPEC.name] = HYBRID
 SPEC.loader.exec_module(HYBRID)
 
 
-SCHEMA = "ullm.aq4_multilayer_accumulation.source_compare.v1"
-AQ4_SCHEMA = "ullm.aq4_multilayer_accumulation.aq4_cpu.v1"
+SCHEMA = "ullm.aq4_multilayer_accumulation.source_compare.v2"
+AQ4_SCHEMA = "ullm.aq4_multilayer_accumulation.aq4_cpu.v2"
 HIDDEN = 4096
 INTERMEDIATE = 12288
 QKV = 8192
@@ -57,6 +57,9 @@ ATTN_EPS = 1e-6
 SOURCE_POST_EPS = 1e-6
 MAX_LINE_BYTES = 64 * 1024
 FINAL_RELATIVE_L2 = 0.615
+FINAL_NORM_TENSOR = "model.language_model.norm.weight"
+LM_HEAD_TENSOR = "lm_head.weight"
+LM_HEAD_SAMPLE_ROWS = HYBRID.DIAGNOSTIC_LOGIT_ROWS
 
 
 def parse_layer_range(raw: str) -> tuple[int, int]:
@@ -282,10 +285,27 @@ def source_self_attention_layer(loader: HYBRID.SourceLoader, layer_index: int, r
     return (attention_residual + mlp_output).contiguous()
 
 
+def source_final_rmsnorm(loader: HYBRID.SourceLoader, residual: torch.Tensor) -> torch.Tensor:
+    """Runs Qwen3.5's additive final RMSNorm on the current BF16 sequence.
+
+    The checkpoint's final norm is an instance of `Qwen3_5RMSNorm`, whose
+    forward equation is `normalized * (1 + weight)`.  Its raw weights are not
+    interchangeable with a direct-weight RMSNorm, so keep this source-side
+    contract explicit instead of reusing the AQ4 package's runtime handling.
+    """
+    if residual.ndim != 2 or residual.shape[1] != HIDDEN or residual.dtype != torch.bfloat16:
+        raise ValueError("invalid BF16 source residual for final RMSNorm")
+    weight = tensor(loader, FINAL_NORM_TENSOR, [HIDDEN], torch.bfloat16)
+    result = HYBRID.source_rmsnorm(residual, weight, SOURCE_POST_EPS)
+    del weight
+    return result.contiguous()
+
+
 class ChainReader:
     def __init__(self, source: BinaryIO) -> None:
         self.source = source
         self.accumulators: dict[int, HYBRID.MetricAccumulator] = {}
+        self.terminal_accumulators: dict[str, HYBRID.MetricAccumulator] = {}
 
     def expect(self, layer_index: int, layer_kind: str, case: dict[str, Any], timestep: int, reference: torch.Tensor) -> None:
         raw = self.source.readline(MAX_LINE_BYTES + 1)
@@ -316,6 +336,46 @@ class ChainReader:
         metric_header = dict(header)
         metric_header["stage"] = f"layer_{layer_index}_output"
         self.accumulators.setdefault(layer_index, HYBRID.MetricAccumulator()).update(metric_header, actual, reference.reshape(-1))
+
+    def expect_terminal(
+        self,
+        stage: str,
+        measurement_scope: str,
+        coordinates: tuple[int, ...],
+        case: dict[str, Any],
+        timestep: int,
+        reference: torch.Tensor,
+    ) -> None:
+        raw = self.source.readline(MAX_LINE_BYTES + 1)
+        if not raw:
+            raise ValueError(f"AQ4 stream ended before terminal {stage}")
+        if len(raw) > MAX_LINE_BYTES or not raw.endswith(b"\n"):
+            raise ValueError("AQ4 terminal stream header is oversized or unterminated")
+        header = json.loads(raw)
+        elements = int(reference.numel())
+        expected = {
+            "kind": "chain_terminal_output",
+            "stage": stage,
+            "measurement_scope": measurement_scope,
+            "coordinates": list(coordinates),
+            "case_id": case["case_id"],
+            "step": case["step"],
+            "context_token_ids_sha256": case["context_token_ids_sha256"],
+            "context_length": case["context_length"],
+            "timestep": timestep,
+            "dtype": "f32le",
+            "shape": [elements],
+            "bytes": elements * 4,
+        }
+        if header != expected:
+            raise ValueError(f"AQ4 terminal stream identity/order differs for {stage}: {header}")
+        payload = self.source.read(elements * 4)
+        if len(payload) != elements * 4:
+            raise ValueError(f"AQ4 terminal stream payload is short for {stage}")
+        actual = torch.frombuffer(bytearray(payload), dtype=torch.float32).clone()
+        self.terminal_accumulators.setdefault(stage, HYBRID.MetricAccumulator()).update(
+            header, actual, reference.reshape(-1)
+        )
 
     def expect_end(self) -> None:
         line = self.source.readline(MAX_LINE_BYTES + 1)
@@ -355,7 +415,12 @@ def extrapolate(layer_metrics: list[dict[str, Any]]) -> dict[str, Any]:
     else:
         shape = "nonmonotonic_or_layer_jump"
         chosen_model = "linear_conservative"
-    chosen = geometric if chosen_model == "geometric" and geometric is not None else linear
+    complete_decoder_stack = indices == list(range(32))
+    if complete_decoder_stack:
+        chosen_model = "observed_full_decoder_stack"
+        chosen = last
+    else:
+        chosen = geometric if chosen_model == "geometric" and geometric is not None else linear
     fraction = chosen / FINAL_RELATIVE_L2
     if fraction >= 0.8:
         verdict = "explains"
@@ -366,6 +431,7 @@ def extrapolate(layer_metrics: list[dict[str, Any]]) -> dict[str, Any]:
     return {
         "observed_layer_indices": indices,
         "observed_relative_l2": values,
+        "complete_decoder_stack": complete_decoder_stack,
         "increment_per_observed_transition": increments,
         "multiplicative_ratio_per_observed_transition": ratios,
         "shape": shape,
@@ -384,36 +450,88 @@ def extrapolate(layer_metrics: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
-def write_growth_artifacts(output: Path, metrics: list[dict[str, Any]], extrapolation: dict[str, Any]) -> list[Path]:
+def terminal_boundary_assessment(
+    layer_metrics: list[dict[str, Any]], terminal_metrics: list[dict[str, Any]]
+) -> dict[str, Any]:
+    """Records stage-boundary facts without treating sampled logits as full vocab."""
+    if not terminal_metrics:
+        return {"status": "not_measured"}
+    final_norm = next((item for item in terminal_metrics if item["stage"] == "final_norm"), None)
+    lm_head = next((item for item in terminal_metrics if item["stage"] == "lm_head"), None)
+    if final_norm is None or lm_head is None:
+        raise ValueError("terminal stages are incomplete")
+    if not layer_metrics or int(layer_metrics[-1]["layer_index"]) != 31:
+        raise ValueError("terminal stages require an observed layer 31")
+    decoder = layer_metrics[-1]["aggregate"]
+    norm = final_norm["aggregate"]
+    decoder_l2 = float(decoder["relative_l2"])
+    norm_l2 = float(norm["relative_l2"])
+    return {
+        "status": "measured",
+        "pre_final_norm_stage": "decoder_layer_31_output",
+        "pre_final_norm_relative_l2": decoder_l2,
+        "final_norm_relative_l2": norm_l2,
+        "final_norm_delta_relative_l2": norm_l2 - decoder_l2,
+        "final_norm_ratio_to_layer31": norm_l2 / decoder_l2 if decoder_l2 else None,
+        "lm_head_measurement_scope": lm_head["measurement_scope"],
+        "lm_head_coordinates": lm_head["coordinates"],
+        "lm_head_sampled_relative_l2": lm_head["aggregate"]["relative_l2"],
+        "lm_head_sampled_cosine": lm_head["aggregate"]["cosine"],
+        "lm_head_sampled_max_abs": lm_head["aggregate"]["max_abs"],
+        "interpretation_limit": "LM-head values are fixed-row samples, not a full-vocabulary relative L2. The final-norm boundary is full-hidden and directly comparable with layer 31.",
+    }
+
+
+def write_growth_artifacts(
+    output: Path,
+    metrics: list[dict[str, Any]],
+    extrapolation: dict[str, Any],
+    terminal_metrics: list[dict[str, Any]],
+) -> list[Path]:
     csv_path = output / "growth-curve.csv"
-    rows = ["layer_index,layer_kind,relative_l2,cosine,max_abs,records"]
+    rows = ["stage_order,stage,layer_index,kind,measurement_scope,coordinates,relative_l2,cosine,max_abs,records"]
     for item in metrics:
         aggregate = item["aggregate"]
         rows.append(
-            f"{item['layer_index']},{item['kind']},{aggregate['relative_l2']:.12g},{aggregate['cosine']:.12g},{aggregate['max_abs']:.12g},{aggregate['records']}"
+            f"{item['layer_index']},decoder_layer,{item['layer_index']},{item['kind']},full_hidden,,{aggregate['relative_l2']:.12g},{aggregate['cosine']:.12g},{aggregate['max_abs']:.12g},{aggregate['records']}"
+        )
+    for offset, item in enumerate(terminal_metrics, start=len(metrics)):
+        aggregate = item["aggregate"]
+        coordinates = "|".join(str(value) for value in item["coordinates"])
+        rows.append(
+            f"{offset},{item['stage']},,{item['kind']},{item['measurement_scope']},{coordinates},{aggregate['relative_l2']:.12g},{aggregate['cosine']:.12g},{aggregate['max_abs']:.12g},{aggregate['records']}"
         )
     csv_path.write_text("\n".join(rows) + "\n", encoding="utf-8")
     md_path = output / "growth-curve.md"
     lines = [
         "# AQ4 multi-layer accumulation growth curve",
         "",
-        "| layer | kind | relative L2 | cosine | max abs | records |",
-        "| ---: | --- | ---: | ---: | ---: | ---: |",
+        "| stage | kind | scope | relative L2 | cosine | max abs | records |",
+        "| --- | --- | --- | ---: | ---: | ---: | ---: |",
     ]
     for item in metrics:
         aggregate = item["aggregate"]
         lines.append(
-            f"| {item['layer_index']} | {item['kind']} | {aggregate['relative_l2']:.6f} | {aggregate['cosine']:.6f} | {aggregate['max_abs']:.6f} | {aggregate['records']} |"
+            f"| layer {item['layer_index']} | {item['kind']} | full hidden | {aggregate['relative_l2']:.6f} | {aggregate['cosine']:.6f} | {aggregate['max_abs']:.6f} | {aggregate['records']} |"
+        )
+    for item in terminal_metrics:
+        aggregate = item["aggregate"]
+        coordinate_note = (
+            "" if not item["coordinates"] else f"; rows {','.join(str(value) for value in item['coordinates'])}"
+        )
+        lines.append(
+            f"| {item['stage']} | {item['kind']} | {item['measurement_scope']}{coordinate_note} | {aggregate['relative_l2']:.6f} | {aggregate['cosine']:.6f} | {aggregate['max_abs']:.6f} | {aggregate['records']} |"
         )
     lines.extend(
         [
             "",
             f"Shape: `{extrapolation['shape']}`; selected model: `{extrapolation['chosen_model']}`.",
-            f"Layer-31 extrapolation: `{extrapolation['chosen_extrapolated_relative_l2_at_layer31']:.6f}` vs observed production final `{FINAL_RELATIVE_L2:.6f}` ({extrapolation['chosen_fraction_of_production_final']:.1%}); verdict: `{extrapolation['verdict']}`.",
+            f"Layer-31 {'observation' if extrapolation['complete_decoder_stack'] else 'extrapolation'}: `{extrapolation['chosen_extrapolated_relative_l2_at_layer31']:.6f}` vs observed production final `{FINAL_RELATIVE_L2:.6f}` ({extrapolation['chosen_fraction_of_production_final']:.1%}); verdict: `{extrapolation['verdict']}`.",
             f"Linear extrapolation: `{extrapolation['linear_extrapolated_relative_l2_at_layer31']:.6f}`.",
             f"Geometric extrapolation: `{extrapolation['geometric_extrapolated_relative_l2_at_layer31']!r}` (mean ratio `{extrapolation['geometric_mean_ratio']!r}`).",
             "",
-            "This is a CPU-only diagnostic extrapolation, not a production-path or GPU-kernel measurement.",
+            "Final norm is a full-hidden comparison. LM head is explicitly fixed-row sampled, not a full-vocabulary comparison.",
+            "This is a CPU-only diagnostic, not a production-path or GPU-kernel measurement.",
         ]
     )
     md_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -426,6 +544,12 @@ def run_compare(args: argparse.Namespace) -> dict[str, Any]:
     if not args.chain_binary.is_file():
         raise ValueError(f"chain binary is missing: {args.chain_binary}")
     start, end = parse_layer_range(args.chain_layer_range)
+    if start != 0:
+        raise ValueError(
+            "the CPU chain starts from the embedded residual, so --chain-layer-range must start at 0"
+        )
+    if args.chain_include_final_norm_lm_head and end != 31:
+        raise ValueError("--chain-include-final-norm-lm-head requires --chain-layer-range 0:31")
     source_topology = source_config(args.source_model)
     selected_types = source_topology["layer_types"][start : end + 1]
     header, cases, input_sha = HYBRID.load_hybrid_input(args.hybrid_input)
@@ -448,6 +572,8 @@ def run_compare(args: argparse.Namespace) -> dict[str, Any]:
     ]
     if args.post_norm_epsilon_source_control:
         command.append("--post-norm-epsilon-source-control")
+    if args.chain_include_final_norm_lm_head:
+        command.append("--chain-include-final-norm-lm-head")
     loader = HYBRID.SourceLoader(args.source_model)
     with stderr_path.open("xb") as stderr:
         process = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=stderr)
@@ -466,6 +592,26 @@ def run_compare(args: argparse.Namespace) -> dict[str, Any]:
                     for timestep in range(case["context_length"]):
                         reader.expect(layer_index, stream_kind, case, timestep, sequence[timestep])
                 source_sequences = next_sequences
+            if args.chain_include_final_norm_lm_head:
+                final_sequences = [(case, source_final_rmsnorm(loader, sequence)) for case, sequence in source_sequences]
+                for case, sequence in final_sequences:
+                    for timestep in range(case["context_length"]):
+                        reader.expect_terminal(
+                            "final_norm", "full_hidden", (), case, timestep, sequence[timestep]
+                        )
+                lm_head_rows = loader.lm_head_rows(LM_HEAD_SAMPLE_ROWS)
+                for case, sequence in final_sequences:
+                    logits = functional.linear(sequence, lm_head_rows)
+                    for timestep in range(case["context_length"]):
+                        reader.expect_terminal(
+                            "lm_head",
+                            "fixed_logit_rows",
+                            LM_HEAD_SAMPLE_ROWS,
+                            case,
+                            timestep,
+                            logits[timestep],
+                        )
+                del lm_head_rows, final_sequences
             reader.expect_end()
         except BaseException:
             process.kill()
@@ -496,12 +642,57 @@ def run_compare(args: argparse.Namespace) -> dict[str, Any]:
         if accumulator is None:
             raise ValueError(f"missing metrics for layer {item['layer_index']}")
         metrics.append({**item, "aggregate": accumulator.report()})
+    terminal_metrics: list[dict[str, Any]] = []
+    if args.chain_include_final_norm_lm_head:
+        expected_terminal_contract = [
+            ("final_norm", "final_rmsnorm", "full_hidden", ()),
+            ("lm_head", "lm_head_projection", "fixed_logit_rows", LM_HEAD_SAMPLE_ROWS),
+        ]
+        if aq4["chain"].get("includes_final_norm_lm_head") is not True:
+            raise ValueError("AQ4 chain report did not record requested terminal stages")
+        if aq4["chain"].get("final_norm_tensor") != FINAL_NORM_TENSOR:
+            raise ValueError("AQ4 chain final norm tensor differs")
+        if aq4["chain"].get("lm_head_tensor") != LM_HEAD_TENSOR:
+            raise ValueError("AQ4 chain LM-head tensor differs")
+        if aq4["chain"].get("lm_head_sample_rows") != list(LM_HEAD_SAMPLE_ROWS):
+            raise ValueError("AQ4 chain LM-head sample rows differ")
+        report_terminals = aq4.get("terminal_summaries")
+        if not isinstance(report_terminals, list) or len(report_terminals) != len(expected_terminal_contract):
+            raise ValueError("AQ4 chain terminal summary count differs")
+        for stage, kind, scope, coordinates in expected_terminal_contract:
+            accumulator = reader.terminal_accumulators.get(stage)
+            if accumulator is None:
+                raise ValueError(f"missing metrics for terminal {stage}")
+            report_terminal = next((item for item in report_terminals if item.get("stage") == stage), None)
+            if not isinstance(report_terminal, dict):
+                raise ValueError(f"AQ4 chain terminal summary is missing {stage}")
+            if (
+                report_terminal.get("measurement_scope") != scope
+                or report_terminal.get("coordinates") != list(coordinates)
+                or report_terminal.get("output", {}).get("elements_per_record")
+                != (HIDDEN if stage == "final_norm" else len(coordinates))
+            ):
+                raise ValueError(f"AQ4 chain terminal summary contract differs for {stage}")
+            terminal_metrics.append(
+                {
+                    "stage": stage,
+                    "kind": kind,
+                    "measurement_scope": scope,
+                    "coordinates": list(coordinates),
+                    "aggregate": accumulator.report(),
+                }
+            )
+    elif aq4["chain"].get("includes_final_norm_lm_head") is not False:
+        raise ValueError("AQ4 chain report unexpectedly includes terminal stages")
     extrapolation = extrapolate(metrics)
-    growth_paths = write_growth_artifacts(args.output, metrics, extrapolation)
+    boundary_assessment = terminal_boundary_assessment(metrics, terminal_metrics)
+    growth_paths = write_growth_artifacts(args.output, metrics, extrapolation, terminal_metrics)
     result = {
         "schema_version": SCHEMA,
         "status": "valid",
-        "classification": extrapolation["verdict"],
+        "classification": "complete_decoder_and_terminal_measured"
+        if args.chain_include_final_norm_lm_head
+        else extrapolation["verdict"],
         "promotion": False,
         "holdout": "not_run",
         "policy_evaluation": "policy_not_evaluated",
@@ -517,11 +708,14 @@ def run_compare(args: argparse.Namespace) -> dict[str, Any]:
             "package_manifest_sha256": aq4["package_manifest_sha256"],
             "post_rms_epsilon": aq4["chain"]["post_rms_epsilon"],
             "post_rms_epsilon_mode": aq4["chain"]["post_rms_epsilon_mode"],
+            "includes_final_norm_lm_head": aq4["chain"]["includes_final_norm_lm_head"],
         },
         "source_model": loader.identity(),
         "topology": {"source_config": source_topology, "selected_layers": expected_topology},
-        "comparison_contract": "Each AQ4 f32 layer output is compared immediately with the matching BF16 source output. Only the current source layer sequence and per-layer aggregate/fixed-coordinate metrics are retained; full all-layer hidden/state tensors are discarded.",
+        "comparison_contract": "Each AQ4 f32 decoder/final-norm output is compared immediately with the matching BF16 source output. LM head compares only fixed token rows. Only the current source layer sequence and per-stage aggregate/fixed-coordinate metrics are retained; no full all-layer hidden/state or full vocabulary tensor is retained.",
         "layer_metrics": metrics,
+        "terminal_metrics": terminal_metrics,
+        "boundary_assessment": boundary_assessment,
         "growth_curve": extrapolation,
         "growth_artifacts": [{"path": str(path), "sha256": HYBRID.sha256_file(path)} for path in growth_paths],
     }
@@ -545,6 +739,7 @@ def main() -> int:
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--chunk-bytes", type=int, default=16 * 1024 * 1024)
     parser.add_argument("--post-norm-epsilon-source-control", action="store_true")
+    parser.add_argument("--chain-include-final-norm-lm-head", action="store_true")
     args = parser.parse_args()
     try:
         if args.chunk_bytes <= 0:

@@ -63,6 +63,63 @@ def test_extrapolation_uses_linear_model_for_linear_curve() -> None:
     assert result["linear_extrapolated_relative_l2_at_layer31"] == pytest.approx(1.28)
 
 
+def test_complete_decoder_stack_uses_observed_layer31_not_an_extrapolation() -> None:
+    result = TOOL.extrapolate([metric(index, 0.04 + index * 0.001) for index in range(32)])
+    assert result["complete_decoder_stack"] is True
+    assert result["chosen_model"] == "observed_full_decoder_stack"
+    assert result["chosen_extrapolated_relative_l2_at_layer31"] == pytest.approx(0.071)
+
+
+def test_source_final_rmsnorm_uses_qwen35_additive_weight(monkeypatch: pytest.MonkeyPatch) -> None:
+    torch = TOOL.torch
+    residual = torch.tensor([[2.0, -2.0]], dtype=torch.bfloat16)
+    weight = torch.tensor([0.5, -0.25], dtype=torch.bfloat16)
+
+    def fake_tensor(_loader: object, name: str, shape: list[int], dtype: object) -> object:
+        assert name == TOOL.FINAL_NORM_TENSOR
+        assert shape == [2]
+        assert dtype == torch.bfloat16
+        return weight
+
+    monkeypatch.setattr(TOOL, "HIDDEN", 2)
+    monkeypatch.setattr(TOOL, "tensor", fake_tensor)
+    result = TOOL.source_final_rmsnorm(object(), residual)
+    expected = TOOL.HYBRID.source_rmsnorm(residual, weight, TOOL.SOURCE_POST_EPS)
+    direct_weight = (
+        residual.float()
+        * torch.rsqrt(residual.float().pow(2).mean(dim=-1, keepdim=True) + TOOL.SOURCE_POST_EPS)
+        * weight.float()
+    ).to(dtype=torch.bfloat16)
+    assert torch.equal(result, expected)
+    assert not torch.equal(result, direct_weight)
+
+
+def test_terminal_boundary_preserves_lm_head_sample_scope() -> None:
+    result = TOOL.terminal_boundary_assessment(
+        [metric(31, 0.08)],
+        [
+            {
+                "stage": "final_norm",
+                "kind": "final_rmsnorm",
+                "measurement_scope": "full_hidden",
+                "coordinates": [],
+                "aggregate": {"relative_l2": 0.47, "cosine": 0.9, "max_abs": 1.0, "records": 9},
+            },
+            {
+                "stage": "lm_head",
+                "kind": "lm_head_projection",
+                "measurement_scope": "fixed_logit_rows",
+                "coordinates": [0, 220],
+                "aggregate": {"relative_l2": 0.61, "cosine": 0.8, "max_abs": 3.0, "records": 9},
+            },
+        ],
+    )
+    assert result["final_norm_delta_relative_l2"] == pytest.approx(0.39)
+    assert result["final_norm_ratio_to_layer31"] == pytest.approx(0.47 / 0.08)
+    assert result["lm_head_measurement_scope"] == "fixed_logit_rows"
+    assert result["lm_head_coordinates"] == [0, 220]
+
+
 def test_rope_preserves_non_rotary_tail_and_is_finite() -> None:
     hidden = TOOL.torch.ones((2, 1, TOOL.SELF_HEAD_DIM), dtype=TOOL.torch.bfloat16)
     result = TOOL.source_rope(hidden)
