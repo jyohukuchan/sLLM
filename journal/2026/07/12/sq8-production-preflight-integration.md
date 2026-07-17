@@ -1,0 +1,39 @@
+# SQ8 production preflight integration
+
+- 製品計画のstatusをcompleteへ更新し、evidenceのcommit `64370fe`と既知の制限を明示するoperator documentationのcommit `8575312`をGitHub `main`へpushした。最終remote HEADは`85753121f688dc38790a4d89c0f59cab391cfeea`である。
+- HEAD `f647a8a`のfull production campaignは2026-07-12に完走し、`/home/homelab1/datapool/ullm/sq8-openwebui-product-20260712-v0.1`を公開した。独立validatorは21 OpenWebUI success、5 cancellation phases、100 normal + 20 restart resource requests、72 latency requests、計画的restart 7→8、610 resource samplesを再構築して`complete`と判定した。公開物の別copyでvalidatorを再実行し、判定ファイルのSHA-256 `4261908b...8e08`が完全一致した。campaign外のOpenWebUI通常chatも200/`ULLM_PRODUCT_OK`で成功した。
+- 診断用credential copy、診断bundle、旧private `.work-*` 7件はowner/inode/非symlinkを確認する既存の安全な再帰削除で整理した。公開bundleは`benchmarks/results/2026-07-12/sq8-openwebui-product-20260712-v0.1/`へ収録し、`SHA256SUMS` 19件はすべて一致した。
+- HEAD `19ef4d4`は主validatorのquiet 0-journal検査を通過したが、独立view再構築器に同じ旧制約が残っていた。再構築器自身で13 checkのcount/new count=0、同一anchor、observer 0件、HTTP完了後の時刻順を独立検証し、関連125 testsとRuff/strict mypyに合格した。他の同種の旧制約がないことも検索済みである。
+- HEAD `c36041c`のcampaignはrendererを通過し、独立validatorでquiet APIの`journal_record_count=0`を旧下限1が拒否した。0件時は13 check全でcount/new count=0、同一開始anchor cursor、observer 0件、HTTP完了後の時刻順を独立検証する。開始anchorはglobal journalの取得対象外なので、journal内の存在は要求しない。関連146 testsに合格した。
+- HEAD `1a7af67`のcampaignは全gate、resource、latency、final checkpoint、journal sealを完了した。rendererは可変のHTTP chunk数を32件固定で拒否したため、ingestorの上限に合わせて32〜2048件を受理する。cases 8件、lifecycle 55件、順序、hashの検査は維持し、関連60 testsとRuff/strict mypyに合格した。
+
+- `PreparedProductionCampaign`でlock、Git HEAD、HEAD由来tool、secret masterを実行終了まで保持し、失敗時は逆順にcleanupする構成を追加した。
+- 必須の`--preflight-only` / `--execute`を追加し、backend未統合の`--execute`はfail closedとした。preflightはsecretを含まない有界JSONのみを返す。
+- 独立reviewで検出したidentity再構築時の取得時刻ずれと、cleanup完了前の`ready`出力を修正した。
+- 関逡6 suites 119 tests、完全fake campaign 2 tests、Ruff check/format、`py_compile`、`git diff --check`は合格した。
+- 次は固定Git HEADで実機`--preflight-only`を実行し、service/container/GPU/final pathの前後不変を確認する。
+- 実機初回で、HEAD tool ownerとsecret ownerが同じprivate parentに作る正規の兄弟directoryを改変と誤判定する問題を検出した。親自体の置換・mode・ownerは固定したまま、独立ownerの兄弟entryを許容する`be0dbe7`とした。
+- Cargoがrelease binaryと`target/release/deps`に作る通常のhardlinkを一律単一link制約が拒否していた。source/configの制約は維持し、worker binaryのみFD・hash・live executable照合で複数linkを許容する`11e12fb`とした。
+- 実機`--preflight-only`はHEAD `11e12fb34620b8259bbf2a78ba4cbdc8542f526d`で`ready`。Gateway PID 1452201、worker PID 1452625、NRestarts 2、OpenWebUI container ID/PID/restart、KFD PID、Git status、final pathが前後で不変だった。private tool/secret directoryの残留もない。
+- commit `423e14e`で、API secret masterをFDとentryの前後同一性確認下でtrusted owner factoryにだけ渡すcallback境界を追加した。raw secretはPrepared/report/backend stateに保持しない。
+- commit `09b4c29`で、6 gateの固定argv、実行中stdout/stderr上限、process-group cleanup、secret owner再検査、producerの一度限り状態、ingestor/resource/bridge境界をproduction backendに追加した。独立reviewを3回反映し、12 tests、Ruff、strict mypy、`py_compile`は合格した。
+- commit `c570c00`でproduction backend自身を70番目のsource roleとしてidentity producerと独立validatorの両方へ結合した。
+- commit `efb98b3`でSystemRuntime、RuntimeSnapshots、global CampaignJournalCapture、resource collector、preflight/final、6 ingestorの実bridgeを追加した。secret callbackは最初の利用時に一度だけ実行し、初期化失敗後もowner cleanupを再試行できる。
+- commit `edf9941`で、固定HEADの`tools/sq8-openwebui-http-client.py`を明示SHA・1 MiB上限・GitAnchor前後再検査で取得する公開APIを追加した。
+- commit `8d46213`で70-source seal/live identityから6 gateの実InputBindingsを完全生成し、failure後のrestart epochをprivate canonical fileとFD ownerでlatency完了まで固定する処理を追加した。epochはJSON生成前に型・長さ・固定値を検査し、OOMとTOCTOUの独立review指摘を閉じた。
+- commit `d37e049`で固定browser/probe image、HEAD client reader、live/prepared identity照合、System bridge、6 ingestor、renderer、独立validator、`run_full_campaign`を`--execute`へ配線した。success JSONはpublicationとPrepared owner cleanupの両方が完了した後にだけ出力する。
+- HEAD `d37e0498bf3bf315096aaa4cac819d027870c71a`で実`--preflight-only`と実assembly dry-runが完走した。Gateway PID 1452201、worker PID 1452625、NRestarts 2、OpenWebUI container、KFD PID、Git status、final pathは不変、private owner残留もない。
+- 実`--execute`初回で`SystemRuntimeConfig.identities`に証拠用フィールドまで渡していたため、5個のruntime identityフィールドへ投影する`625734b`とした。
+- direct sd-journalの`INVALIDATE`をcursor再検証後に回復する`96a81ce`、gatewayが`access_log=False`の場合に厳密なquiet check 13件を条件として0件のjournalを受理する`bfdb21b`を追加した。
+- `python-systemd`の`Reader.wait()`がこの環境で秒単位を受け取ることを実probeで特定した。マイクロ秒からfloat秒へ変換する修正と回帰テストを追加し、本番campaign再開前の検証を進める。
+- HEAD `2e139ee`で実API contractを再実行し、combined直前のsentinalまで完走した。gateway PID 1452201、NRestarts 2、container、worker PID 1452625、final pathは前後で不変だった。
+- 本番campaignはcombined browserで非0終了した。失敗証拠のSHA-256を固定browser sourceと照合し、`TimeoutError: page.waitForFunction: Timeout 60000ms exceeded.`と復元した。release JWTの`exp`が約59分前に切れ、`/api/models`が401だったことが原因である。
+- OpenWebUI DBで同じadmin user IDが有効なことを確認し、永続署名鍵で4週間のJWTへ原子的に更新した。更新後の`/api/models`は200で、対象model ID/表示名は一致した。token値は記録していない。
+- 失敗時の`.work-*`残留は、gate-bundleを0500でsealした後に`shutil.rmtree`が書込み権限を復元せず削除したことが原因だった。FD基準、`O_NOFOLLOW`、owner/inode検証付きの再帰削除に置き換え、sealed clear/abortと置換拒否の回帰テスを追加した。
+- 更新後tokenでcombined producerの21 browser chatは完走した。次の独立ingestorでsupport sourceに`campaign_journal`を誤結合していたため、producerの実依存とingestorの期待に一致する`gate_openwebui_stop`へ修正した。今回分の`.work-*`は残留せず、cleanup修正の実動も確認した。
+- HEAD `5559c4f`でcombinedとdirect cancelは完走し、次の実行でOpenWebUI Stopと回復turnも完走した。normal resourceの最初の2-token requestが`completion_tokens=2/reset_complete=true`ながらEOSで`outcome=stop`となり、`length`固定契約に反して停止した。
+- 旧fixtureの「readyと答える」は`ready + EOS`が2 tokenで成立するため、2 tokenでは完答できない固定8語列の逐語応答へ変更した。実GPUでseed 0とsampling seed 5〜100の全21条件が200/length/2 tokensとなり、resource/collector/validator/independent view・metricsの194 testsに合格した。
+- HEAD `7df17be`の実campaignは全6 gate、normal/restart resource、latencyまで完了し、計画的failure後はNRestarts 3、新gateway PID 3948212で復旧した。最後のfinal checkpointで、`backend.final()`直後にbridgeをcloseした後に`backend.now_ns()`を呼んで失敗した。
+- backend closeをfinal checkpointとjournal sealの完了後へ移した。test fakeもclose後の`now_ns()`を拒否させ、`journal:seal < backend:close < render`の順序を回帰検査する。orchestrator 38 tests、Ruff、strict mypy、`py_compile`に合格した。
+- HEAD `03f19f2`の再実行はnormal resourceの約51件目でglobal journal captureのtrace claimが5秒timeoutした。gatewayはPID/NRestarts不変で、authoritative journalには対象のadmission〜releaseが全て存在し、event観測からjournal timestampまでは842件中最大7.4 msだった。
+- cancel性能合格閾値の`RELEASE_TIMEOUT_NS=5s`を観測planeのcapture待機にも流用していた。性能閾値は5秒のまま、campaign resourceのcapture待機だけを30秒の独立定数へ分離した。event時刻、cursor、PID、順序の検証は変更しない。関連188 testsとRuffは合格、collector全体のstrict mypyは既存baseline 51 errorsで非0だった。

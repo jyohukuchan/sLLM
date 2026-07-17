@@ -1,0 +1,1532 @@
+# AQ runtime continued improvements
+
+## 前回の要点
+- 2026-07-06時点の採用済み最速構成は、R9700 suite decode平均 `56.683 tps`、V620 suite decode平均 `34.578 tps`。
+- RDNA4向けにAQ4 `matvec_add`、`matvec_silu_mul`、linear-attn `qkv/z gate-beta` を `rows_per_block=8` にし、BF16 lm-head paired loadも採用済み。
+- 残りの主要コストは、sync-each-layer計測で layers約 `14.565 ms/token`、lm-head約 `3.320 ms/token`。self-attnとlinear-attnは1 layerあたりどちらも約 `0.45 ms`。
+
+## 今回の変更点
+- Qwen3.5 gated self-attention decode向けに `qwen35_qk_norm_rope_f32` runtime APIを追加。
+- q projectionのquery/gate split、q/k head単位RMSNorm、q/k RoPEを1つのHIP kernelへ融合し、q_gate、q_rope、k_ropeを同時出力するようにした。
+- `PackageSelfAttnResidentStepLayer` のQwen3.5 gated pathで既存の `qwen35_split_q_gate_f32`、q RMSNorm、k RMSNorm、q RoPE、k RoPEの連続呼び出しを fused kernelへ置換。
+- load時に fused kernel をprewarmし、decodeの最初の計測stepへHIPRTC compileが混ざらないようにした。
+- 不要になった self-attn resident `q_query_buffer` を削除。
+- `docs/words.txt` に `Qwen3.5 q/k norm RoPE fusion` を追加。
+
+## 検証
+- `cargo test -p ullm-runtime-sys qwen35_qk_norm_rope -- --test-threads=1`: pass。
+- `cargo test -p ullm-runtime-sys first_hip_qwen35_qk_norm_rope -- --test-threads=1`: pass。
+- `cargo test -p ullm-runtime-sys -- --test-threads=1`: `80 passed`。
+- `cargo test -p ullm-engine -- --test-threads=1`: lib `97 passed`、main `14 passed`。
+- `cargo fmt --all --check`: pass。
+- `git diff --check`: pass。
+- `cargo build -p ullm-engine --release`: pass。
+
+## 実測
+- R9700 direct gen32: `59.578 tps`、verified。前回有効値は `59.214 tps`。
+- R9700 direct gen128: `57.474 tps`、verified。前回有効値は `57.024 tps`。
+- V620 direct gen32: `35.951 tps`、verified。
+- R9700 sync-each-layer:
+  - 前回 self-attn平均 `0.4633 ms/layer`、self-attn合計 `3.7067 ms/token`。
+  - 今回 self-attn平均 `0.4460 ms/layer`、self-attn合計 `3.5683 ms/token`。
+  - layers合計は `14.5649 -> 14.3601 ms/token`。
+- R9700 prompt suite:
+  - decode平均 `56.683 -> 56.838 tps`。
+  - decode min/max `46.734/59.034 -> 46.902/59.217 tps`。
+  - verified all true、output statusは前回同様 `ok=5, warn=1, not_evaluated=1`。
+- V620 prompt suite:
+  - decode平均 `34.578 -> 34.766 tps`。
+  - decode min/max `30.410/35.582 -> 30.605/35.760 tps`。
+  - verified all true、output statusは前回同様 `ok=5, warn=1, not_evaluated=1`。
+- R9700/V620 guard bundle:
+  - passed true。
+  - generated token match `7/7`。
+  - top logits match `7/7`。
+  - max prefill top logit diff `2.86102294921875e-06`。
+  - max decode last top logit diff `8.869171142578125e-05`。
+
+## 判断
+- 今回のfusionは品質を崩さず、R9700/RDNA4とV620/RDNA2の両方で小幅にdecode tpsを改善したため採用対象。
+- 改善幅は大きくない。sync計測上は、self-attn内の小粒launch削減で約 `0.14 ms/token`、全layerで約 `0.20 ms/token` の改善に留まる。
+- 現在の構成は、君の最低ラインだったR9700 `15-20 tps` は大きく超えている。一方で既存量子化との比較で十分かは、比較対象の実測を同一prompt suiteで取らないと断定できない。
+
+## 不採用実験
+- BF16 lm-head matvecのrowgroup2を試した。
+- R9700 direct gen32 `59.629 tps`、gen128 `57.527 tps`、V620 direct gen32 `36.012 tps` で、いずれもverified。
+- ただしsync-each-layerのlm-head平均は `3.3169 -> 3.3135 ms` 程度で、改善幅が小さすぎてノイズと区別しにくい。
+- コード複雑化に対する効果が薄いため不採用にして差分は戻した。
+
+## 追加変更: q/k norm RoPE + paged KV write fusion
+- Qwen3.5 gated self-attention decode向けに `qwen35_qk_norm_rope_paged_kv_write_f32` runtime APIを追加。
+- q projectionのquery/gate split、q/k head単位RMSNorm、q/k RoPE、paged K/V cache writeを1つのHIP kernelへ融合した。
+- k_ropeは中間bufferへ書かず、RoPE後の値をpaged K cacheの物理slotへ直接書き込む。Vは `v_projected` からpaged V cacheへ同じkernel内で書き込む。
+- `PackageSelfAttnResidentStepLayer` のQwen3.5 gated pathで、前回追加した `qwen35_qk_norm_rope_f32` と後続の `paged_kv_write_f32` を新APIへ置換。
+- load時prewarmも新APIへ置き換え、decodeの初回計測stepへHIPRTC compileが混ざらないようにした。
+- `docs/words.txt` に `Qwen3.5 q/k norm RoPE paged KV write fusion` を追加。
+
+## 追加検証
+- `cargo test -p ullm-runtime-sys qwen35_qk_norm_rope_paged -- --test-threads=1`: pass。
+- `cargo build -p ullm-engine --release`: pass。
+- `git diff --check`: pass。
+- R9700 direct gen32: `59.817 tps`、verified。前回採用値は `59.578 tps`。
+- R9700 direct gen128: `57.549 tps`、verified。前回採用値は `57.474 tps`。
+- V620 direct gen32: `35.992 tps`、verified。前回採用値は `35.951 tps`。
+- R9700 prompt suite:
+  - decode平均 `56.838 -> 56.935 tps`、`+0.172%`。
+  - verified all true、output statusは前回同様 `ok=5, warn=1, not_evaluated=1`。
+- V620 prompt suite:
+  - decode平均 `34.766 -> 34.844 tps`、`+0.224%`。
+  - verified all true、output statusは前回同様 `ok=5, warn=1, not_evaluated=1`。
+- R9700/V620 guard bundle:
+  - passed true。
+  - generated token match `7/7`。
+  - top logits match `7/7`。
+  - max prefill top logit diff `2.86102294921875e-06`。
+  - max decode last top logit diff `8.869171142578125e-05`。
+
+## 追加判断
+- 改善幅は小さいが、R9700/RDNA4とV620/RDNA2の両方で同方向に改善し、品質guardも前回と同じ範囲に収まったため採用対象。
+- この段階のlaunch削減は、token/sを大きく変える主因ではなくなっている。今後の大きい差分はAQ4 matvec本体、lm-head、または既存量子化との同条件比較から探す必要がある。
+- 採用commit `e75c646 Fuse Qwen3.5 qk norm rope KV write` を作成済み。
+
+## 次の行動
+- 採用commit `4a7cc71 Fuse Qwen3.5 qk norm rope decode step` を作成済み。
+- 追加で改善するなら、次はgeneric AQ4 matvec/row-group系の正しさと性能、またはlm-head top1/final RMSNorm側を調べる。
+- ただし今回の結果から、AQ4 dequant実装そのものは少なくとも「壊滅的に遅い」段階ではなく、残りは小刻みなlaunch削減とmemory-bound部分の定量比較になる。
+
+## 既存量子化との比較
+- llama.cpp比較用の現行 `/home/homelab1/llama.cpp-src/build/bin/llama-bench` は Qwen3.5-9B GGUF のロード時にsegfaultしたため、既存の比較で使っていた `build/reference/llama.cpp-hip/bin/llama-bench` を使用した。
+- 比較対象:
+  - Qwen3.5-9B UD-Q4_K_XL: `/home/homelab1/datapool/ai_models/gguf/unsloth/Qwen3.5-9B-GGUF/Qwen3.5-9B-UD-Q4_K_XL.gguf`
+  - Qwen3.5-9B NVFP4: `/home/homelab1/datapool/ai_models/gguf/hf/AxionML-Qwen3.5-9B-NVFP4.gguf`
+- llama.cpp条件:
+  - `-p 16,256,1024 -n 128 -b 2048 -ub 512 -ctk f16 -ctv f16 -ngl 999 -sm none -fa auto -r 3 -o jsonl`
+  - R9700は `-dev ROCm1`、V620は `-dev ROCm0`。
+- 出力:
+  - `benchmarks/results/2026-07-07/llama.cpp/qwen35-9b-ud-q4-k-xl-r9700-pp16-256-1024-tg128-r3.jsonl`
+  - `benchmarks/results/2026-07-07/llama.cpp/qwen35-9b-ud-q4-k-xl-v620-pp16-256-1024-tg128-r3.jsonl`
+  - `benchmarks/results/2026-07-07/llama.cpp/qwen35-9b-nvfp4-r9700-pp16-256-1024-tg128-r3.jsonl`
+  - `benchmarks/results/2026-07-07/llama.cpp/qwen35-9b-nvfp4-v620-pp16-256-1024-tg128-r3.jsonl`
+- llama.cpp UD-Q4_K_XL:
+  - R9700 decode `77.520 tok/s`、prefill `3275 tok/s` at prompt256、`3527 tok/s` at prompt1024。
+  - V620 decode `56.042 tok/s`、prefill `1231 tok/s` at prompt256、`1320 tok/s` at prompt1024。
+- llama.cpp NVFP4:
+  - R9700 decode `58.844 tok/s`、prefill `2933 tok/s` at prompt256、`3228 tok/s` at prompt1024。
+  - V620 decode `50.582 tok/s`、prefill `1221 tok/s` at prompt256、`1473 tok/s` at prompt1024。
+- uLLM AQ現行:
+  - R9700 direct gen128 `57.549 tok/s`、prompt suite decode平均 `56.935 tok/s`、prefill平均 `54.923 tok/s`。
+  - V620 direct gen32 `35.992 tok/s`、prompt suite decode平均 `34.844 tok/s`、prefill平均 `41.168 tok/s`。
+- 比較判断:
+  - R9700 decodeはNVFP4相当だが、UD-Q4_K_XL比では約 `74%`。
+  - V620 decodeはNVFP4比で約 `69%`、UD-Q4_K_XL比で約 `64%`。
+  - prefillはuLLMが現状 token-by-token に近い実行で、llama.cpp prompt-processingとは桁違いに遅い。
+
+## 現在の壁
+- R9700 sync-each-layerでは現行uLLMが `layers 14.31 ms/token`、`lm_head 3.31 ms/token`。llama.cpp UD-Q4_K_XL decode `77.52 tok/s` は約 `12.90 ms/token`。
+- `lm_head.weight` はpackage manifest上で `passthrough/000-lm_head_weight.raw` のBF16、`2034237440 bytes`。`tensors` 側に `lm_head.weight` のAQ4 payloadは存在しない。
+- したがって、現行runtime内の小粒fusionだけでQ4_K_XLに追いつくのは難しい。主因はAQ dequant実装そのものではなく、未AQ化のBF16 lm-headと、batched prefill未実装に移っている。
+- AQフォーマット自体が不可能という壁にはまだ当たっていない。一方で、次に必要な作業は「低遅延dequant kernelの微調整」ではなく、少なくともlm_headをAQ/SQ化してtop1まで扱うpackage/runtime拡張、またはbatched prefill実行の実装になる。
+
+## 追加実験: BF16 lm-head top1融合
+- `ullm_runtime_matvec_bf16_top1_f32` を試作し、BF16 lm-head matvec と top1 partial 出力を1 kernelに融合した。
+- row group 8:
+  - R9700 direct gen32 `59.445 tps`。前回 `59.817 tps` より低下。
+  - V620 direct gen32 `35.908 tps`。前回 `35.992 tps` より低下。
+  - R9700 sync-each-layer lm-head平均 `3.3106 -> 3.3846 ms` で悪化。
+- row group 2:
+  - R9700 direct gen32 `58.847 tps`、sync lm-head平均 `3.5645 ms` でさらに悪化。
+- 判断:
+  - 品質はverifiedだったが、lm-headはmatrix readが支配的で、top1融合によるlogits write削減よりもrow group化による並列度低下とpartial増加の悪影響が大きい。
+  - 採用せず、コード差分は戻した。
+
+## 追加変更: RDNA2 AQ4 fused row group 2
+- AQ4 fused kernelsのrow group選択を調整した。
+- 対象は `aq4_matvec_add_f32`、`aq4_matvec_qkv_z_gate_beta_f32`、`aq4_matvec_silu_mul_f32`。
+- RDNA4は既存どおり row group 8 を維持し、RDNA2/非RDNA4は既定の row group 1 から row group 2 に変更した。
+- row group 8をRDNA2にも適用する実験は不採用:
+  - V620 direct gen32 `27.912 tps` まで悪化。
+  - R9700は `59.802 tps` でほぼ維持だが、V620劣化が大きすぎる。
+- row group 2採用候補:
+  - V620 direct gen32 `35.992 -> 37.120 tps`、`+3.14%`、verified true、NaN/Infなし。
+  - V620 direct gen128 `36.126 tps`、verified true、NaN/Infなし。
+  - R9700 direct gen128 `57.549 -> 57.590 tps`、ほぼ維持、verified true。
+- 検証:
+  - `cargo test -p ullm-runtime-sys -- --test-threads=1`: pass。
+  - `cargo test -p ullm-engine -- --test-threads=1`: pass。
+  - `cargo build -p ullm-engine --release`: pass。
+  - `git diff --check`: pass。
+- 判断:
+  - RDNA2で明確に改善し、RDNA4をほぼ維持するため採用対象。
+  - ただしV620はまだllama.cpp NVFP4/Q4_K系に届かない。AQ format自体の壁ではなく、kernel scheduling/row groupingと未AQ化lm-headが残る。
+  - 採用commit `671393d Use RDNA2 row groups for fused AQ4 matvecs` を作成済み。
+
+## 追加変更: RDNA2でqkv/z/gate/beta fusion有効化
+- `aq4_matvec_qkv_z_gate_beta_f32` は従来RDNA4のみ有効だったが、RDNA2 row group 2にした後はV620でも有効化可能だった。
+- `compute_major >= 12` の制限を外し、HIP backendならfusionを使うように変更。
+- 切り分け:
+  - V620では変更前 `use_aq4_matvec_qkv_z_gate_beta=false` で、`qkv/z pair` fusionだけを使っていた。
+  - `qkv/z pair` fusionを切るとV620 gen32 `37.120 -> 32.689 tps` まで落ちるため、pair fusionは必須。
+  - R9700では `qkv/z/gate/beta` fusionを切ると `59.778 -> 58.105 tps` に落ちるため、従来どおり有効でよい。
+- 採用候補:
+  - V620 direct gen32 `37.120 -> 37.644 tps`、`+1.41%`、verified true、NaN/Infなし。
+  - V620 direct gen128 `36.126 -> 36.604 tps`、`+1.32%`、verified true、NaN/Infなし。
+  - R9700 direct gen32 `59.778 -> 59.779 tps`、実質維持、verified true。
+  - R9700 direct gen128 `57.590 -> 57.500 tps`、`-0.16%`程度で測定ノイズ範囲、verified true。
+- 検証:
+  - `cargo test -p ullm-engine -- --test-threads=1`: pass。
+  - `cargo build -p ullm-engine --release`: pass。
+- 判断:
+  - V620で追加改善し、R9700の品質・速度をほぼ維持するため採用対象。
+  - 採用commit `6edf147 Enable linear AQ4 qkv gate fusion on RDNA2` を作成済み。
+
+## 追加変更: RDNA2 AQ4 pair/triple row group 2
+- AQ4 self-attention側で使う `aq4_matvec_pair_f32` と `aq4_matvec_triple_f32` も、RDNA2/非RDNA4では row group 2 を使うようにした。
+- RDNA4は既存どおり row group 16 を維持する。
+- 採用候補:
+  - V620 direct gen32 `37.644 -> 37.988 tps`、`+0.91%`、verified true、NaN/Infなし。
+  - V620 direct gen128 `36.604 -> 36.831 tps`、`+0.62%`、verified true、NaN/Infなし。
+  - R9700 direct gen32 `59.779 -> 59.808 tps`、実質維持、verified true。
+  - R9700 direct gen128 `57.500 -> 57.578 tps`、実質維持、verified true。
+- 検証:
+  - `cargo test -p ullm-runtime-sys aq4_matvec_pair -- --test-threads=1`: pass。
+  - `cargo test -p ullm-runtime-sys aq4_matvec_triple -- --test-threads=1`: pass。
+  - `cargo test -p ullm-runtime-sys -- --test-threads=1`: pass。
+  - `cargo test -p ullm-engine -- --test-threads=1`: pass。
+  - `cargo build -p ullm-engine --release`: pass。
+  - `cargo fmt --all --check`: pass。
+  - `git diff --check`: pass。
+- 判断:
+  - V620で小さいが再現性のある改善があり、R9700は維持できているため採用対象。
+  - V620の直近合計は `35.992 -> 37.988 tps`、約 `+5.55%`。まだNVFP4/Q4_K系には届かないが、AQ format自体の壁というよりRDNA2向けkernel schedulingの未調整分だった。
+  - 採用commit `f4357f8 Use RDNA2 row groups for AQ4 pair kernels` を作成済み。
+
+## 追加変更: RDNA2 AQ4 pair/triple row group 4
+- pair/tripleだけRDNA2/非RDNA4のrow groupを `2 -> 4` に上げた。qkv/z/gate/beta、matvec add、SiLU-mul系の既定row group 2は維持した。
+- 採用候補:
+  - V620 direct gen32 `37.988 -> 38.005 tps`、verified true。
+  - V620 direct gen128 `36.831 -> 36.960 tps`、verified true。
+  - V620 sync-each-layer gen32 `37.110 -> 37.219 tps`、verified true。
+  - V620 self-attention layer平均 `0.7033 -> 0.6939 ms/layer`。
+  - R9700 direct gen32 `59.808 -> 59.771 tps`、実質維持、verified true。
+  - R9700 direct gen128 `57.578 -> 57.507 tps`、実質維持、verified true。
+- 検証:
+  - `cargo test -p ullm-runtime-sys aq4_matvec_pair -- --test-threads=1`: pass。
+  - `cargo test -p ullm-runtime-sys aq4_matvec_triple -- --test-threads=1`: pass。
+  - `cargo test -p ullm-runtime-sys -- --test-threads=1`: pass。
+  - `cargo test -p ullm-engine -- --test-threads=1`: pass。
+  - `cargo build -p ullm-engine --release`: pass。
+  - `cargo fmt --all --check`: pass。
+  - `git diff --check`: pass。
+- 判断:
+  - 改善幅は小さいが、V620 self-attention側の実測が改善し、R9700は維持できているため採用対象。
+  - row group 8は過去ログでV620/R9700とも悪化していたため、この系統の調整はrow4近辺で頭打ちと見る。
+
+## 追加実装: opt-in AQ4 lm_head prototype
+- `ullm-quant` で `--aq-high-tensor lm_head.weight` のように明示指定した2D float tensorは、default quant family外でもquantize対象にできるようにした。既定の量子化対象は変更していない。
+- `ullm-engine` の `gpu_resident_f32` lm_head runtimeで、packageの `tensors` に `lm_head.weight` が存在する場合だけAQ4 resident matvecを使うvariantを追加した。既存packageでは従来どおりBF16 passthroughへfallbackする。
+- 生成artifact:
+  - g16 codebook: `benchmarks/results/2026-07-07/aq/qwen35-9b-lm-head-codebook-g16-smoke.json`
+  - g16 direct package summary: `benchmarks/results/2026-07-07/aq/qwen35-9b-lm-head-aq4-g16-direct-package-summary.json`
+  - g8 codebook: `benchmarks/results/2026-07-07/aq/qwen35-9b-lm-head-codebook-g8-smoke.json`
+  - g8 direct package summary: `benchmarks/results/2026-07-07/aq/qwen35-9b-lm-head-aq4-g8-direct-package-summary.json`
+  - g16 package: `/tmp/ullm-quant-direct-package-fullpkg-qwen35-9b-p4p6-lmhead-aq4-g16-proto.ullm.d`
+  - g8 package: `/tmp/ullm-quant-direct-package-fullpkg-qwen35-9b-p4p6-lmhead-aq4-g8-proto.ullm.d`
+- g16 lm_head:
+  - relative MSE `0.0051826`、max abs error `0.01615`。
+  - R9700 direct gen32 `59.714 -> 63.146 tps`、`+5.75%`。
+  - R9700 direct gen128 `57.519 -> 60.779 tps`、`+5.67%`。
+  - R9700 sync-each-layer lm_head平均 `3.316 -> 2.362 ms/token`。
+  - V620 direct gen32 `38.005 -> 37.317 tps`、`-1.81%`。
+  - V620 direct gen128 `36.960 -> 36.315 tps`、`-1.74%`。
+  - V620 sync-each-layer lm_head平均 `4.855 -> 5.296 ms/token`。
+  - direct promptの生成tokenはgen8ではBF16と一致したが、gen32/gen128では30 token目で分岐した。
+  - R9700 prompt suite平均 `55.210 -> 58.162 tps`、`+5.35%`。
+  - prompt suiteのoutput statusは `ok=5,warn=1,not_evaluated=1` から `ok=3,warn=3,not_evaluated=1` に悪化。`hit_generation_limit` が2件出た。
+- g8 lm_head:
+  - relative MSE `0.0036179`、max abs error `0.01758`。
+  - R9700 direct gen32 `62.404 tps`、gen128 `60.140 tps`。
+  - V620 direct gen32 `37.499 tps`、gen128 `36.424 tps`。
+  - MSEはg16より低いが、direct promptでは4 token目でBF16から分岐したため品質候補としてはg16より悪い。
+- 検証:
+  - `cargo test -p ullm-quant -- --test-threads=1`: pass。
+  - `cargo test -p ullm-engine -- --test-threads=1`: pass。
+  - `cargo test -p ullm-runtime-sys -- --test-threads=1`: pass。
+  - `cargo build -p ullm-engine -p ullm-quant --release`: pass。
+  - `cargo fmt --all --check`: pass。
+  - `git diff --check`: pass。
+- 判断:
+  - AQ4 lm_headはR9700では速度改善が出るが、V620では既存BF16 lm_headより遅い。
+  - g16/g8ともtop1分岐とprompt health悪化があり、正式なpackage policyには採用不可。
+  - ここで見えた壁はAQ formatのデコード不能ではなく、lm_headの出力品質補償とRDNA2向けAQ4 lm_head kernelの不足。
+  - 次に進めるなら、lm_head専用の品質補償、top-k安定性を重視したcodebook/scale設計、またはRDNA2向けgeneric AQ4 matvec tuningが必要。
+  - 採用commit `c2947c3 Support opt-in AQ4 lm head prototypes` を作成済み。
+
+## 追加変更: generic AQ4 matvecのpacked pair展開
+- `runtime/src/ullm_runtime.cpp` の `ullm_aq4_matvec_f32_kernel` で、`group_size` が偶数のときに1 byteから2つの4bit codeをまとめて処理するようにした。
+- `aq4_matvec_add` などのfused系には既に同種の処理があったが、`lm_head` が使うgeneric `aq4_matvec_f32` だけ1要素ずつ同じpacked byteを読み直していた。
+- フォーマット、scale、演算式は変更していない。生成tokenも変更前AQ4 lm_head g16と一致した。
+- 採用候補:
+  - AQ4 lm_head g16 R9700 gen32 `57.182 -> 60.694 total tps`、decode step `+6.14%`、verified true、生成token一致。
+  - AQ4 lm_head g16 R9700 gen128 `59.404 -> 63.026 total tps`、decode step `60.779 -> 65.198 tps`、verified true、生成token一致。
+  - AQ4 lm_head g16 V620 gen32 `39.170 -> 41.062 total tps`、decode step `+4.83%`、verified true、生成token一致。
+  - AQ4 lm_head g16 V620 gen128 `37.068 -> 39.742 total tps`、decode step `36.315 -> 39.571 tps`、verified true、生成token一致。
+  - sync-each-layerではAQ4 lm_head平均がR9700 `2.362 -> 1.229 ms/token`、V620 `5.296 -> 3.088 ms/token`。
+  - 既定BF16 lm_head packageでは生成token一致。R9700はtotal tps上は揺れたがdecode warmup後は約 `59.7 tps` を維持、V620はrow4既存比でほぼ横ばいから微増。
+- 検証:
+  - `cargo test -p ullm-runtime-sys aq4_matvec_f32 -- --test-threads=1`: pass。
+  - `cargo test -p ullm-runtime-sys -- --test-threads=1`: pass。
+  - `cargo test -p ullm-engine -- --test-threads=1`: pass。
+  - `cargo build -p ullm-engine --release`: pass。
+  - `cargo fmt --all --check`: pass。
+  - `git diff --check`: pass。
+- 判断:
+  - V620のAQ4 lm_headはまだBF16 lm_headより絶対的に優位とは言い切れないが、generic AQ4 matvec単体の明確な改善で、R9700/V620とも品質差分なしに速くなるため採用。
+  - 採用commit `ae035e7 Unroll packed pairs in AQ4 matvec` を作成済み。
+
+## 追加実験: activation-weighted lm_head AQ4 codebook
+- `lm_head` 入力のsecond momentを校正データから取得し、その重みに基づいて `lm_head.weight` 専用codebookを作った。
+- activation stats:
+  - smoke: `benchmarks/results/2026-07-07/aq/activation-r9700-lmhead-smoke-qwen35-9b-s64`
+  - calibration: `benchmarks/results/2026-07-07/aq/activation-r9700-calib32-qwen35-9b-lmhead-s512`
+  - calibrationは32 promptを512 tokensへrepeatし、`lm_head` 入力 `14061 x 4096` のsecond momentを収集。
+- g16 weighted:
+  - codebook: `benchmarks/results/2026-07-07/aq/qwen35-9b-lm-head-codebook-g16-weighted-lmhead-calib32.json`
+  - summary: `benchmarks/results/2026-07-07/aq/qwen35-9b-lm-head-aq4-g16-weighted-lmhead-calib32-direct-package-summary.json`
+  - relative MSE `0.0052139`、max abs error `0.01529`。unweighted g16よりMSEは少し悪化したがmax abs errorは改善。
+  - R9700 direct gen32はBF16と生成token完全一致。gen128は33 token目で分岐。
+  - R9700 prompt suite平均 `64.057 decode tps`、`55.195 prefill tps`。
+  - prompt suiteのoutput statusは `ok=3,warn=3,not_evaluated=1` で、unweighted g16から改善なし。
+  - V620 direct gen32 `40.706 decode tps`、gen128 `39.555 decode tps`。R9700と生成token一致。
+- g8 weighted:
+  - codebook: `benchmarks/results/2026-07-07/aq/qwen35-9b-lm-head-codebook-g8-weighted-lmhead-calib32.json`
+  - summary: `benchmarks/results/2026-07-07/aq/qwen35-9b-lm-head-aq4-g8-weighted-lmhead-calib32-direct-package-summary.json`
+  - relative MSE `0.0036267`、max abs error `0.01783`。
+  - R9700 direct gen32はBF16と生成token完全一致。gen128は85 token目で分岐。
+  - R9700 direct gen32 `65.573 decode tps`、gen128 `63.102 decode tps`。
+  - V620 direct gen32 `39.646 decode tps`、gen128 `38.456 decode tps`。R9700と生成token一致。
+  - R9700 prompt suite平均 `62.241 decode tps`、`54.812 prefill tps`。
+  - prompt suiteのoutput statusは `ok=5,warn=1,not_evaluated=1`、`hit_generation_limit=1`、`low_unique_token_ratio=0`。
+- 比較:
+  - BF16 lm_head packageのR9700 prompt suiteは `55.210 decode tps`、`54.958 prefill tps`、`ok=5,warn=1,not_evaluated=1`。
+  - unweighted g16は `58.162 decode tps` だが `ok=3,warn=3,not_evaluated=1`。
+  - weighted g8はBF16と同じoutput health countを維持しながら、R9700 prompt suite decode平均で約 `+12.7%`。
+  - V620 direct gen32でもBF16 lm_head `36.012 decode tps` に対して weighted g8 `39.646 decode tps`、約 `+10.1%`。
+- 判断:
+  - 以前の「AQ4 lm_headは正式package policyには採用不可」という判断は、unweighted codebookに限定した結論として扱う。
+  - activation-weighted g8 lm_headは、R9700/RDNA4とV620/RDNA2の両方でBF16 lm_headより速く、prompt healthもBF16同等まで戻るため、現時点の最有力prototype policy。
+  - ただし、品質保証はまだprompt suiteとdirect top1分岐だけで、広い校正セットやtop-k margin評価では未確認。正式ポリシー化するなら、activation stats生成、weighted codebook export、prompt suite guardをpackage作成手順に組み込む必要がある。
+
+## 追加実装: package overlay toolとprompt suite summary path修正
+- `tools/overlay-ullm-prototype-package.py` を追加した。
+  - 既存full packageをhardlink copyし、`--replace-tensor` で指定したtensorだけをoverride packageのquantized/passthrough entryへ置換する。
+  - base package内の置換対象passthrough/tensor entryをmanifestから削除し、参照されなくなったbase fileもoutput packageから外す。
+  - replacementは `shape`、`dtype`、`elements`、`family` の互換性を検査する。
+  - AQ replacementは `index_file`、`scale_file`、`codebook_file` が揃っていない場合に停止する。
+  - codebook keyがbaseと衝突した場合は、byte一致なら再利用し、不一致なら停止する。
+- `tools/run-package-token-prompt-suite.py` の `--summary-json` / `--summary-md` を修正した。
+  - これまでは `output_dir / args.summary_json` 固定だったため、`summary-json` にoutput dirを含む相対パスを渡すと二重prefixになった。
+  - 修正後は、絶対パス、output dirを含む相対パス、単なるファイル名のいずれも扱える。
+- 検証:
+  - `python3 -m py_compile tools/overlay-ullm-prototype-package.py tools/run-package-token-prompt-suite.py`: pass。
+  - `run-package-token-prompt-suite.py --summarize-existing` で、output dirを含む `--summary-json` / `--summary-md` を渡してsummary再生成: pass。
+  - `overlay-ullm-prototype-package.py --dry-run` で `lm_head.weight` replacement検証: pass。
+  - tool経由package `/tmp/ullm-quant-direct-package-fullpkg-qwen35-9b-p4p6-lmhead-aq4-g8-weighted-lmhead-calib32-tool.ullm.d` を生成。
+  - `ullm-engine inspect-package` で `missing_referenced_files=0`、quantized `256`、passthrough `519`、codebooks `13`。
+  - old `passthrough/000-lm_head_weight.raw` はtool経由packageから削除済み。
+  - R9700 direct gen32はad hoc packageと生成token完全一致。tool packageは `65.556 decode tps`、verified true。
+- 判断:
+  - activation-weighted g8 lm_headを再現可能なprototype packageとして組み立てる最低限の手順化ができた。
+  - 次はactivation stats収集とweighted codebook exportも同じ粒度でbundle化し、prompt suite guardまで一括実行できるようにする。
+
+## 追加検証: weighted g8 lm_headのV620 prompt suiteとcross-device guard
+- tool経由package:
+  - `/tmp/ullm-quant-direct-package-fullpkg-qwen35-9b-p4p6-lmhead-aq4-g8-weighted-lmhead-calib32-tool.ullm.d`
+- V620/RDNA2 prompt suite:
+  - summary: `benchmarks/results/2026-07-07/engine/prompt-suite-aq4-lmhead-g8-weighted-lmhead-calib32-tool-v620/summary.json`
+  - mean decode `38.068 tok/s`
+  - mean prefill `44.235 tok/s`
+  - `verified_all=true`
+  - output status `ok=5,warn=1,not_evaluated=1`
+  - `hit_generation_limit=1`
+  - `low_unique_token_ratio=0`
+- R9700/RDNA4とのcross-device guard:
+  - output: `benchmarks/results/2026-07-07/engine/prompt-suite-aq4-lmhead-g8-weighted-lmhead-calib32-r9700-v620-tool-compare-atol1e-3/guard-bundle-summary.json`
+  - `passed=true`
+  - compared cases `7`
+  - generated token matches `7/7`
+  - top logits matches `7/7`
+  - max prefill top-logit abs diff `0.000003814697265625`
+  - max decode-last top-logit abs diff `0.0000705718994140625`
+- 追加実装:
+  - `tools/run-package-prompt-guard-bundle.py` にもsummary path resolverを追加した。
+  - `--summary-json` / `--summary-md` にoutput dirを含む相対パスを渡しても二重prefixにならない。
+- 検証:
+  - `python3 -m py_compile tools/run-package-prompt-guard-bundle.py tools/run-package-token-prompt-suite.py tools/overlay-ullm-prototype-package.py`: pass。
+  - `run-package-prompt-guard-bundle.py` にoutput dir込みのsummary pathを渡して再生成: pass。
+- 判断:
+  - activation-weighted g8 lm_headは、controlled v0.3 prompt suiteでもR9700/RDNA4とV620/RDNA2の生成tokenおよびtop logits guardが一致した。
+  - V620でもBF16 lm_head direct baselineを上回る速度と、R9700同等のprompt healthを確認できたため、RDNA2/RDNA4 prototype policyとしての根拠が強くなった。
+
+## 追加実装: weighted lm_head AQ4 prototype runner
+- `tools/run-lmhead-aq4-weighted-prototype.py` を追加した。
+  - activation stats収集、weighted codebook export、1 tensor convert、full package overlay、inspect-package、prompt suite、cross-device guard bundleを既存ツールで順に実行する。
+  - `--skip-existing` で既存のactivation statsや中間artifactを再利用できる。
+  - `--dry-run` でもsummary JSONを書き、実行予定のcommand列とartifact pathを確認できる。
+  - `--suite-device LABEL:INDEX` を複数指定すると、prompt suiteを各deviceで実行し、先頭deviceをreferenceにguard bundleを走らせる。
+- 検証:
+  - `python3 -m py_compile tools/run-lmhead-aq4-weighted-prototype.py`: pass。
+  - dry-runで `r9700:2` と `v620:1` のsuite/guard command列を生成し、summary JSONを書き出し: pass。
+  - actual runは既存activation statsを再利用し、prompt suiteを省略して `codebook -> convert -> overlay -> inspect` まで実行: pass。
+  - actual run output:
+    - `/tmp/ullm-lmhead-weighted-runner-real/package.ullm.d`
+    - inspect-packageで `missing_referenced_files=0`
+    - overlay summaryは `lm_head.weight` を `aq4_e4m3_g8_ts_flloyd16` へ置換、quantized `256`、passthrough `519`、codebooks `13`
+  - runner生成packageのR9700 direct gen32は既存g8 weighted packageと生成token完全一致。
+  - runner生成packageのR9700 direct gen32は `65.751 decode tps`、verified true。
+- 判断:
+  - activation-weighted g8 lm_head prototypeを、ad hocな手順ではなく単一runnerで再現できるようになった。
+  - まだ正式policy化には、より広い校正prompt、top-k margin評価、full prompt suiteの自動合否基準をrunner summaryに取り込む余地がある。
+
+## 追加実装: runner summary gate集約
+- `tools/run-lmhead-aq4-weighted-prototype.py` のsummaryに `gates` を追加した。
+  - `inspect-package` の `missing_referenced_files=0` をpackage integrity gateとして集約。
+  - prompt suite summaryの `verified_all`、`output_warn_count`、`output_not_evaluated_count`、`hit_generation_limit_count`、`low_unique_token_ratio_count`、`prompt_echo_count` を既定しきい値で評価。
+  - guard bundle summaryの `passed` と主要metricを集約。
+  - dry-runでは実測gateを評価せず、`passed=null`、`reason=dry_run` とする。
+- 既定しきい値:
+  - `max_output_warn_count=1`
+  - `max_output_not_evaluated_count=1`
+  - `max_hit_generation_limit_count=1`
+  - `max_low_unique_token_ratio_count=0`
+  - `max_prompt_echo_count=0`
+  - `logit_atol=1e-3`
+- 検証:
+  - `python3 -m py_compile tools/run-lmhead-aq4-weighted-prototype.py`: pass。
+  - dry-run summaryで `gates.passed=null`、`reason=dry_run`: pass。
+  - `/tmp/ullm-lmhead-weighted-runner-real` の既存codebook/convert/overlay/inspectを再利用し、runner経由でR9700/V620 prompt suiteとguard bundleを実行: pass。
+  - runner summary:
+    - `gates.passed=true`
+    - `gates.full_quality_evaluated=true`
+    - package integrity `missing_referenced_files=0`
+    - R9700 prompt suite mean decode `62.291 tok/s`
+    - V620 prompt suite mean decode `38.056 tok/s`
+    - R9700/V620 guard `passed=true`
+    - generated token matches `7/7`
+    - top logits matches `7/7`
+    - max decode-last top-logit abs diff `0.0000705718994140625`
+- 判断:
+  - runnerのsummaryだけで、package integrity、prompt health、cross-device token/logit guardの合否が読めるようになった。
+  - 次の改善候補は、校正promptを広げることと、top-k marginやBF16 baselineとの差分をrunner gateに入れること。
+
+## 追加実装: BF16 baseline比較gate
+- `tools/run-lmhead-aq4-weighted-prototype.py` に `--baseline-summary LABEL:PATH` を追加した。
+  - `LABEL` は `--suite-device LABEL:INDEX` と対応させる。
+  - runner summaryの `gates.baseline_comparisons` に、candidate suiteとbaseline suiteの速度・health比較を集約する。
+- 既定しきい値:
+  - `min_decode_tps_ratio_vs_baseline=1.0`
+  - `min_prefill_tps_ratio_vs_baseline=0.95`
+  - `max_hit_generation_limit_regression_vs_baseline=1`
+  - output ok/warn/not_evaluated、low_unique、prompt_echoはbaselineより悪化しないことを確認する。
+- 検証:
+  - `python3 -m py_compile tools/run-lmhead-aq4-weighted-prototype.py`: pass。
+  - `/tmp/ullm-lmhead-weighted-runner-real` の既存suite/guard artifactを再利用してbaseline付きsummaryを再生成: pass。
+  - baseline:
+    - R9700: `benchmarks/results/2026-07-07/engine/prompt-suite-aq4-rdna2-rowgroup-pairtriple-r9700/summary.json`
+    - V620: `benchmarks/results/2026-07-07/engine/prompt-suite-aq4-rdna2-rowgroup-pairtriple-v620/summary.json`
+  - runner summary:
+    - `gates.passed=true`
+    - R9700 decode ratio `62.291 / 55.210 = 1.128x`
+    - R9700 prefill ratio `55.513 / 54.958 = 1.010x`
+    - V620 decode ratio `38.056 / 35.788 = 1.063x`
+    - V620 prefill ratio `44.123 / 44.293 = 0.996x`
+    - output ok/warnはbaselineと同数。
+    - hit generation limitはbaseline `0` に対してcandidate `1` だが、既定の許容回帰 `+1` 内。
+  - dry-runでもbaseline summary pathとbaselineしきい値がsummaryに出ることを確認: pass。
+- 判断:
+  - runner summaryだけで、weighted g8 lm_head AQ4がBF16 lm_head baselineよりdecodeで速いこと、prompt healthが同等範囲にあることを確認できるようになった。
+  - 次の改善候補は、より広い校正promptに切り替えたときにも同じbaseline gateを維持できるかを見ること。
+
+## 追加実装・検証: text-only + embed AQ4 package
+- 目的:
+  - 旧packageで大きく見えていた未量子化 `model.language_model.embed_tokens.weight` をAQ4化する。
+  - `model.visual.*` と `mtp.*` をprototype packageから除外し、UD-Q4_K_XLと比較できるtext-only条件に寄せる。
+- 追加実装:
+  - `ullm_runtime_aq4_row_f32` をruntime C API / Rust wrapperへ追加した。
+    - AQ4行をGPU residentのまま1行だけF32出力へ展開する。
+    - `ULLM_REQUIRE_HIP_AQ4_ROW_KERNEL=1` でHIP kernel経路を強制できる。
+  - `package-token-ids-generate-smoke` のembedding runtimeを `gpu_resident_bf16` / `gpu_resident_aq4` 両対応にした。
+    - quantized `model.language_model.embed_tokens.weight` があればAQ4 residentを優先する。
+    - なければ従来どおりBF16 passthrough embeddingへfallbackする。
+  - `tools/strip-ullm-prototype-package.py` を追加した。
+    - `--strip-prefix model.visual.` と `--strip-prefix mtp.` でprototype packageからvisual/MTP tensorと参照fileを除去できる。
+- 作成artifact:
+  - plan: `/tmp/ullm-textonly-embed-aq4-g8-proto/plan.json`
+  - embed codebook: `/tmp/ullm-textonly-embed-aq4-g8-proto/embed-codebook.json`
+  - embed one-tensor package: `/tmp/ullm-textonly-embed-aq4-g8-proto/embed-one-tensor.ullm.d`
+  - overlay package: `/tmp/ullm-textonly-embed-aq4-g8-proto/package-embed-aq4.ullm.d`
+  - text-only final package: `/tmp/ullm-textonly-embed-aq4-g8-proto/package-textonly-embed-aq4.ullm.d`
+- size:
+  - previous weighted lm_head package: `7.172 GiB`
+  - embed AQ4 + visual/MTP included: `5.870 GiB`
+  - text-only + embed AQ4: `4.846 GiB`
+  - UD-Q4_K_XL GGUF: `5.556 GiB`
+  - text-only + embed AQ4はUD-Q4_K_XLより約 `12.8%` 小さい。
+- direct gen128 on R9700:
+  - text-only + embed AQ4: `62.772 decode tok/s`, `54.215 prefill tok/s`, embedding `gpu_resident_aq4`, verified true。
+  - previous weighted lm_head + BF16 embed: `62.946 decode tok/s`, `55.710 prefill tok/s`, embedding `gpu_resident_bf16`, verified true。
+  - UD-Q4_K_XL llama.cpp: PP256 `2973.369 tok/s`, TG128 `77.304 tok/s`。
+- direct gen128 on V620:
+  - text-only + embed AQ4: `38.288 decode tok/s`, `43.879 prefill tok/s`, embedding `gpu_resident_aq4`, verified true。
+  - previous weighted lm_head + BF16 embed: `38.418 decode tok/s`, `44.541 prefill tok/s`, embedding `gpu_resident_bf16`, verified true。
+  - UD-Q4_K_XL llama.cpp: PP256 `1081.557 tok/s`, TG128 `56.108 tok/s`。
+- external VRAM sampling:
+  - R9700 text-only + embed AQ4: peak `5.294 GiB`, baseline delta `5.212 GiB`
+  - R9700 previous weighted lm_head + BF16 embed: peak `6.594 GiB`, delta `6.513 GiB`
+  - R9700 UD-Q4_K_XL llama.cpp: peak `5.787 GiB`, delta `5.706 GiB`
+  - V620 text-only + embed AQ4: peak `5.222 GiB`, delta `5.202 GiB`
+  - V620 previous weighted lm_head + BF16 embed: peak `6.522 GiB`, delta `6.502 GiB`
+  - V620 UD-Q4_K_XL llama.cpp: peak `5.649 GiB`, delta `5.629 GiB`
+  - embed AQ4化で旧package比約 `1.30 GiB` の実VRAM削減。visual/MTP除去は現runtimeでは未ロードなので、主にファイルサイズに効く。
+- prompt suite:
+  - R9700 summary: `/tmp/ullm-textonly-embed-aq4-g8-proto/prompt-suite-r9700/summary.json`
+    - mean decode `62.019 tok/s`
+    - short/medium mean excluding timing case `63.837 tok/s`
+    - mean prefill `54.920 tok/s`
+    - `verified_all=true`, output `ok=5,warn=1,not_evaluated=1`
+  - V620 summary: `/tmp/ullm-textonly-embed-aq4-g8-proto/prompt-suite-v620/summary.json`
+    - mean decode `38.004 tok/s`
+    - short/medium mean excluding timing case `38.827 tok/s`
+    - mean prefill `44.577 tok/s`
+    - `verified_all=true`, output `ok=5,warn=1,not_evaluated=1`
+  - previous weighted lm_head + BF16 embedとの差:
+    - R9700 mean decode `62.291 -> 62.019`
+    - V620 mean decode `38.056 -> 38.004`
+    - 速度差は測定揺らぎに近い。embedding量子化はdecode hot pathをほぼ変えない。
+  - 旧BF16 embedding版とは生成token列が完全一致ではないが、suite healthは維持した。
+  - text-only + embed AQ4のR9700/V620 cross-device guard:
+    - output: `/tmp/ullm-textonly-embed-aq4-g8-proto/guard-r9700-v620/guard-bundle-summary.md`
+    - `passed=true`, compared cases `7`
+    - generated token matches `7/7`
+    - top logits matches `7/7`
+    - max prefill top-logit abs diff `0.0000019073486328125`
+    - max decode-last top-logit abs diff `0.00000095367431640625`
+- 検証:
+  - `cargo fmt --all --check`: pass。
+  - `cargo test -p ullm-runtime-sys -- --test-threads=1`: pass, `83 passed`。
+  - `cargo test -p ullm-engine -- --test-threads=1`: pass, lib `97 passed`, main `14 passed`。
+  - `python3 -m py_compile tools/strip-ullm-prototype-package.py`: pass。
+  - `cargo build -p ullm-engine --release`: pass。
+  - `git diff --check`: pass。
+- 判断:
+  - 君の見立てどおり、未量子化embeddingをAQ4化し、visual/MTPを除けば、VRAMとpackage sizeはUD-Q4_K_XL同等以下まで落ちる。
+  - ただしtoken/sはUD-Q4同等ではなく、R9700で約 `81%`、V620で約 `68%` 程度。残差はembeddingやvisual/MTPではなく、decode hot path本体のkernel効率差にある。
+  - 現段階のprototype発表材料としては「text-only Qwen3.5-9B AQ4 packageがRDNA2/RDNA4で動き、UD-Q4以下のサイズ/VRAMで、R9700約63 tok/s、V620約38 tok/s」が正確。
+
+## 追加整理: AQ4 decode速度の現在のボトルネック
+- 追加測定artifact:
+  - regular gen128: `/tmp/ullm-textonly-embed-aq4-g8-proto/vram-textonly-r9700-gen128-output.json`
+  - sync layers gen32: `/tmp/ullm-textonly-embed-aq4-g8-proto/current-r9700-gen32-sync-layers.json`
+  - sync components gen32: `/tmp/ullm-textonly-embed-aq4-g8-proto/current-r9700-gen32-sync-components.json`
+- regular gen128 on R9700:
+  - decode wall `2039.139 ms` / 127 timed steps
+  - mean step `16.056 ms`, `62.281 tok/s`
+  - embedding step mean `0.085 ms`
+  - non-sync runでは `lm_head_step_ms` mean `15.287 ms` だが、これはdeferred GPU workが最後のtop1/lm_head境界へ寄っているため、lm_head単体時間ではない。
+- sync layers gen32 on R9700:
+  - decode wall `638.641 ms` / 31 timed steps
+  - mean step `20.601 ms`, `48.541 tok/s`
+  - layers mean `18.491 ms`
+  - lm_head mean `2.020 ms`
+  - embedding mean `0.091 ms`
+  - per-layer syncで絶対値は遅くなるが、AQ4 lm_head化後の大枠ではlayer側が支配的。
+- sync components gen32 on R9700:
+  - decode wall `726.058 ms` / 31 timed steps
+  - mean step `23.421 ms`, `42.696 tok/s`
+  - layers mean `21.603 ms`
+  - lm_head mean `1.743 ms`
+  - component syncは一部fusionを切るため絶対値は参考値。
+  - linear-attn component mean per linear-attn layer:
+    - total `0.742 ms`
+    - `mlp_gate_up_activation_ms` `0.147 ms`
+    - `mlp_down_residual_ms` `0.106 ms`
+    - `qkv_projection_ms` `0.086 ms`
+    - `recurrent_ms` `0.081 ms`
+    - `out_projection_residual_ms` `0.070 ms`
+    - `z_projection_ms` `0.064 ms`
+    - `gate_beta_projection_ms` `0.047 ms`
+    - `input_rmsnorm_ms` `0.039 ms`
+    - `post_rmsnorm_ms` `0.037 ms`
+    - `qkv_prepare_ms` `0.033 ms`
+    - `attention_post_ms` `0.032 ms`
+- 切り分け:
+  - embeddingはdecode hot pathで支配的ではない。BF16 embedからAQ4 embedに変えてもR9700 direct gen128は `62.946 -> 62.772 tok/s` でほぼ不変。
+  - visual/MTPは現runtimeではdecode時にロードされていないので、速度には効かずpackage sizeに効く。
+  - lm_headはBF16からweighted g8 AQ4化で改善済み。現在のsync計測では約 `1.7-2.0 ms/token` 程度で、まだ重いが主因ではない。
+  - 現在の主因は32層のlayer hot path、特にlinear-attn/MLP projection群と、それに付随する小kernel群。
+  - AQ4 dequantはFP32 materializeではなくmatvec内で行っているが、index/codebook/scale/raw valueを読むcustom kernelの効率がGGML/llama.cppの既存Q4 kernelにまだ届いていない可能性が高い。
+- UD-Q4_K_XLとの差:
+  - R9700 current AQ4 regular decode: `16.06 ms/token`
+  - R9700 UD-Q4_K_XL llama.cpp TG128: `77.304 tok/s` = `12.94 ms/token`
+  - gapは約 `3.12 ms/token`。
+  - この差はembedding/visual/MTPでは説明できず、layer kernels、kernel launch/fusion、AQ4 matvecのメモリアクセス効率、small-kernel overheadが主な候補。
+- 次の行動:
+  - syncなしの通常実行に近い形でlayer/lm_headのGPU event timingを入れる。
+  - linear-attn layerのAQ4 matvec fusion候補を優先する。具体的にはMLP gate/up/activation、down+residual、qkv/z/gate-beta、recurrent周辺。
+  - 小kernel削減としてRMSNorm、qkv_prepare、attention_post、residual addを隣接projectionへさらに融合する。
+  - prefillについては別問題として、現状はdecode-like逐次実行のためUD-Q4のPP性能とは桁違いに遅い。sq策定前にはbatched/tiled prefill経路が必要。
+
+## 追加計測: llama.cpp graph profilerとのlayer/lm_head比較
+- 目的:
+  - uLLM AQ4 decodeの遅さが `lm_head` 側なのか、32層のlayer本体側なのかを、llama.cpp UD-Q4_K_XLと同じような境界同期方式で比較する。
+- 実装:
+  - `reference-src/llama.cpp/tools/llama-bench/llama-bench.cpp` に環境変数 `LLAMA_BENCH_GRAPH_PROFILE_JSONL` で有効化する軽量graph profilerを追加した。
+  - 通常時は無効。環境変数が指定されたときだけ `llama_context_params.cb_eval` を設定する。
+  - warmupではprofileしない。測定repのgeneration decodeだけをprofileする。
+  - callbackはtensor値を読まず、境界nodeだけを観測する。
+  - Qwen3.5の境界:
+    - `model.input_embed` / `embd`: embedding
+    - `l_out-N` / `post_ffn-N` / `mtp_post_ffn-N`: layer
+    - `h_nextn` / `result_norm`: final_norm
+    - `result_output`: lm_head
+  - 出力はJSONLで、tokenごとの `group_ms` と `segments` を記録する。
+- build:
+  - `cmake --build build/reference/llama.cpp-hip --target llama-bench -j 16`: pass。
+- R9700 llama.cpp UD-Q4_K_XL normal TG128:
+  - command:
+    - `build/reference/llama.cpp-hip/bin/llama-bench -m /home/homelab1/datapool/ai_models/gguf/unsloth/Qwen3.5-9B-GGUF/Qwen3.5-9B-UD-Q4_K_XL.gguf -p 0 -n 128 -r 3 -ngl 999 -dev ROCm1 -o jsonl`
+  - avg `77.470 tok/s`
+  - avg step `12.908 ms/token`
+- R9700 llama.cpp UD-Q4_K_XL graph profile gen32:
+  - output: `/tmp/llama-bench-qwen35-udq4-r9700-profile-gen32.jsonl`
+  - callback同期込み全32 token平均:
+    - total `14.828 ms/token`, `67.438 tok/s`
+    - embedding `0.047 ms/token`
+    - layers `13.269 ms/token`
+    - final_norm `0.082 ms/token`
+    - lm_head `1.363 ms/token`
+    - post_graph `0.066 ms/token`
+  - skip first 2 token平均:
+    - total `14.429 ms/token`, `69.306 tok/s`
+    - embedding `0.017 ms/token`
+    - layers `12.908 ms/token`
+    - final_norm `0.077 ms/token`
+    - lm_head `1.360 ms/token`
+    - post_graph `0.066 ms/token`
+  - 遅いlayer例(skip first 2平均):
+    - layer 0 `0.657 ms`
+    - layer 28 `0.448 ms`
+    - layer 30 `0.444 ms`
+    - layer 18 `0.440 ms`
+    - layer 4 `0.431 ms`
+- uLLM AQ4 R9700 sync layers gen32:
+  - source: `/tmp/ullm-textonly-embed-aq4-g8-proto/current-r9700-gen32-sync-layers.json`
+  - total `20.601 ms/token`, `48.541 tok/s`
+  - embedding `0.091 ms/token`
+  - layers `18.491 ms/token`
+  - lm_head `2.020 ms/token`
+- 比較:
+  - 通常run:
+    - llama.cpp UD-Q4_K_XL `12.908 ms/token`
+    - uLLM AQ4 `16.056 ms/token`
+    - gap `3.148 ms/token`
+  - 同期込み内訳run:
+    - total gap `20.601 - 14.828 = 5.773 ms/token`
+    - layers gap `18.491 - 13.269 = 5.222 ms/token`
+    - lm_head gap `2.020 - 1.363 = 0.657 ms/token`
+    - embedding gap `0.091 - 0.047 = 0.044 ms/token`
+  - sync方式の違いとcallback overheadがあるため、絶対値より割合を見る。
+  - 差分の大半はlayer本体側。lm_headにも余地はあるが、最優先はlinear-attn/MLP projection群と小kernel削減。
+- 判断:
+  - llama.cpp側もlayer/lm_head段階に分けた時間分析は可能になった。
+  - この比較では、AQ4 decodeの現在の主要な最適化余地は `lm_head` ではなく32層のlayer hot pathにある。
+  - 次はuLLM側のlayer内で、llama.cppより遅いprojection群を優先して潰す。
+
+## 追加実装: AQ4 rows-per-block tuning knobとrecurrent decode reg-cache
+- 実装:
+  - `runtime/src/ullm_runtime.cpp` にAQ4 matvec/fused matvecの rows-per-block を環境変数で切り替える調整口を追加した。
+    - 共通: `ULLM_AQ4_MATVEC_RPB`, `ULLM_AQ4_FUSED_RPB`
+    - 個別: `ULLM_AQ4_MATVEC_ADD_RPB`, `ULLM_AQ4_MATVEC_PAIR_RPB`, `ULLM_AQ4_MATVEC_TRIPLE_RPB`, `ULLM_AQ4_MATVEC_QKV_Z_GATE_BETA_RPB`, `ULLM_AQ4_MATVEC_SILU_MUL_RPB`
+  - `linear_attn_recurrent_f32` のdecode fast pathで、`key_dim <= blockDim.x` の場合はdecayed stateをレジスタに保持し、中間のdecayed state書き込みと再読み込みを省いた。
+  - Qwen3.5 linear-attnでは `key_dim=128`, `blockDim=256` なのでこの分岐が有効。
+- validation:
+  - `cargo fmt --all --check`: pass
+  - `cargo test -p ullm-runtime-sys -- --test-threads=1`: pass, 83 tests
+  - `cargo build -p ullm-engine --release`: pass
+  - R9700 gen128/top8 token列は旧artifactと一致。
+- rows-per-block tuning:
+  - artifact: `/tmp/ullm-aq4-rpb-tune-20260707/summary.json`
+  - fused RPBの変更は高速化につながらなかった。
+    - default gen32 `62.893 tok/s`
+    - `ULLM_AQ4_FUSED_RPB=4` `62.800 tok/s`
+    - `ULLM_AQ4_FUSED_RPB=16` `58.934 tok/s`
+    - `ULLM_AQ4_FUSED_RPB=32` `41.964 tok/s`
+  - 個別に `qkv_z_gate_beta`, `silu_mul`, `add` を16へ振っても改善なし。
+  - 結論: RDNA4の既定RPBは大きく外していない。調整口は今後のkernel検証用として残す価値がある。
+- fusion ablation:
+  - artifact: `/tmp/ullm-aq4-fusion-ablation-20260707/summary.json`
+  - default gen32 `62.219 tok/s`
+  - `qkv_z_gate_beta` off `60.987 tok/s`
+  - `qkv_z_gate_beta` + `qkv_z_pair` off `59.709 tok/s`
+  - self-attn qkv/qk fusion offはほぼ不変。
+  - 結論: linear-attn qkv/z/gate-beta fusionは約2%効いている。self-attn側fusionはこの短いdecodeでは支配的ではない。
+- recurrent reg-cache結果:
+  - artifacts:
+    - `/tmp/ullm-aq4-recurrent-regcache-20260707/gen128.json`
+    - `/tmp/ullm-aq4-recurrent-regcache-20260707/gen32-sync-layers.json`
+    - `/tmp/ullm-aq4-recurrent-regcache-20260707/gen32-sync-components.json`
+  - normal gen128/top8:
+    - new `62.061 tok/s`, mean `16.113 ms/token`
+    - old `/tmp/ullm-textonly-embed-aq4-g8-proto/vram-textonly-r9700-gen128-output.json` `62.281 tok/s`, mean `16.056 ms/token`
+    - token列一致。通常TPSではほぼ横ばい。
+  - sync layers gen32:
+    - new `61.103 tok/s`, mean `16.366 ms/token`
+    - layers mean `14.070 ms`, lm_head mean `2.201 ms`
+    - old `48.541 tok/s`, mean `20.601 ms/token`
+    - layers mean `18.491 ms`, lm_head mean `2.020 ms`
+    - sync計測では大きく改善。ただし通常runが横ばいなので、この差はper-layer sync overheadや過去artifact条件の影響を含む可能性がある。
+  - sync components gen32:
+    - recurrent mean `0.0814 -> 0.0724 ms/layer`
+    - step mean `23.421 -> 23.292 ms/token`
+    - recurrent単体は下がったが、通常TPSを動かすほどではない。
+- top_k計測条件:
+  - 現在のbench commandは `top_k=8` なので、GPU top1 fast pathを使わず、毎stepでfull logitsをhostへコピーしてCPU top-kを取っていた。
+  - greedy decode速度を見るなら `top_k=1` が実運用に近い。
+  - R9700 gen128:
+    - top8 `62.061 tok/s`, mean `16.113 ms/token`
+    - top1 `63.905 tok/s`, mean `15.648 ms/token`
+    - token列は一致。
+  - sync layers gen32/top1:
+    - `62.804 tok/s`, mean `15.922 ms/token`
+    - layers mean `14.104 ms`
+    - lm_head mean `1.746 ms`
+  - `ULLM_AQ4_MATVEC_RPB=32` はlm_head単体を少し下げるが、normal gen128/top1では `63.819 tok/s` で既定RPB16と同等。
+- 現在の判断:
+  - llama.cpp比較により、最適化余地の中心は引き続きlayer hot path。
+  - ただし計測・デモ用のTPSは `top_k=1` で報告すべき。`top_k=8` は診断用top logits収集としては便利だが、decode速度比較としてはhost copyを余計に含む。
+  - 次に実装効果がありそうなのは、RMSNorm+AQ4 matvecの融合、linear-attn qkv_prepare+recurrent周辺のさらなる融合、またはlm_head AQ4 matvec+top1の直接融合。
+
+## AQ4 lm_head direct top1実験
+- 実装:
+  - `ullm_runtime_aq4_matvec_top1_f32` を追加し、AQ4 matvecの行dotとblock内top1を同じHIP kernelで行えるようにした。
+  - `ullm_runtime_top1_pairs_f32` / Rust `top1_pairs_f32_in_place` を追加し、`value + original token index` のpartialをGPU上でさらにreduceできるようにした。
+  - engine側は `ULLM_ENABLE_AQ4_LM_HEAD_DIRECT_TOP1=1` のopt-in時だけAQ4 lm_head direct top1を使う。defaultは従来の `AQ4 matvec -> f32 top1` のまま。
+- validation:
+  - `cargo fmt --all --check`: pass
+  - `git diff --check`: pass
+  - `cargo test -p ullm-runtime-sys -- --test-threads=1`: pass, 87 tests
+  - `cargo build -p ullm-engine --release`: pass
+- R9700 gen128/top1結果:
+  - 前回baseline `/tmp/ullm-aq4-recurrent-regcache-20260707/gen128-top1.json`
+    - `63.905 tok/s`, mean `15.648 ms/token`
+  - direct top1 first-stageのみ:
+    - `/tmp/ullm-aq4-lmhead-top1-direct-20260707/gen128-top1-direct.json`
+    - `63.657 tok/s`, mean `15.709 ms/token`
+  - direct top1 + paired reduce:
+    - `/tmp/ullm-aq4-lmhead-top1-direct-20260707/gen128-top1-direct-paired.json`
+    - `63.720 tok/s`, mean `15.694 ms/token`
+  - direct無効の同一build旧経路:
+    - `/tmp/ullm-aq4-lmhead-top1-direct-20260707/gen128-top1-disabled-after-paired.json`
+    - `63.789 tok/s`, mean `15.677 ms/token`
+  - current default:
+    - `/tmp/ullm-aq4-current-default-20260707/gen128-default.json`
+    - `63.834 tok/s`, mean `15.666 ms/token`
+  - 生成token列はいずれも前回baselineと一致。
+- 判断:
+  - direct top1は正しく動くが、速度改善にならなかった。
+  - first-stageのみではAQ4 direct partialが多く、host readback量が増える。
+  - paired reduceでreadback量は下げられるが、追加kernel launchの分を含めると従来経路を超えない。
+  - sync layers計測ではlm_headは約1.7ms/tokenで、見かけのunsync `lm_head_step_ms` 14ms台はdeferred GPU workが後段host境界へ寄っているため。よって今の主戦場はlm_head direct top1ではない。
+- 追加で試したが戻した案:
+  - AQ4 matvecでinputベクトルをdynamic shared memoryへblock単位で読み込む案を試した。
+  - `/tmp/ullm-aq4-shared-input-20260707/gen128-shared-input.json` は `64.054 tok/s` とわずかに速かったが、生成tokenがdefaultと一致せず、prefill top1も `417` から `7904` に変わった。
+  - 小型HIP testだけでは検出できない実モデル上の誤差/実装バグがあるため、差分は戻した。
+- 次の焦点:
+  - llama.cpp比較とsync layers結果に戻り、layer hot pathを優先する。
+  - 候補は `linear_attn qkv_prepare + recurrent` のさらなる融合、RMSNorm + AQ4 projection融合、またはper-layerの小kernel削減。
+
+## linear-attn recurrent decode block size tuning
+- 実装:
+  - `runtime/src/ullm_runtime.cpp` にblock size調整口を追加した。
+    - `ULLM_LINEAR_ATTN_RECURRENT_DECODE_BLOCK`
+  - decode fast pathの `linear_attn_recurrent_f32` は、`sequence_len == 1` かつ `key_dim <= 128` の場合、default block sizeを `256 -> 128` に変更した。
+  - Qwen3.5 linear-attn decodeでは `key_dim=128` なのでこのdefaultが有効。
+- validation:
+  - `cargo fmt --all --check`: pass
+  - `git diff --check`: pass
+  - `cargo test -p ullm-runtime-sys -- --test-threads=1`: pass, 87 tests
+  - `cargo build -p ullm-engine --release`: pass
+  - `ULLM_LINEAR_ATTN_RECURRENT_DECODE_BLOCK=128 cargo test -p ullm-runtime-sys first_hip_linear_attn_recurrent_f32_decode_step_computes_expected_values_when_available -- --test-threads=1`: pass
+- R9700 gen128/top1 tuning:
+  - artifact dir: `/tmp/ullm-linear-attn-block-tune-20260707`
+  - old default block256:
+    - `gen128-default.json`
+    - `63.891 tok/s`, mean `15.652 ms/token`
+  - recurrentのみ128:
+    - `gen128-recurrent128.json`
+    - `64.399 tok/s`, mean `15.528 ms/token`
+  - 生成token列はold defaultと一致。
+- default変更後:
+  - artifact: `/tmp/ullm-linear-attn-recurrent128-final-20260707/gen128-default.json`
+  - `64.416 tok/s`, mean `15.524 ms/token`
+  - old default比 `+0.82%`
+  - 前回top1 baseline `/tmp/ullm-aq4-recurrent-regcache-20260707/gen128-top1.json` `63.905 tok/s` 比 `+0.80%`
+  - 生成token列は前回top1 baselineと一致。
+- 判断:
+  - recurrent decodeでは `key_dim=128` に対してblock 256は半分のthreadが非activeで、block 128が少し有利。
+  - 小さいが再現性のある改善なので、recurrent decode block 128をdefault化する。
+
+## llama.cpp graph profile確認
+- `reference-src/llama.cpp` は `dd53c2e Add llama-bench graph profile mode` で、`LLAMA_BENCH_GRAPH_PROFILE_JSONL` を設定するとdecode stepごとのgraph boundary profileをJSONLへ出力できる。
+- 分類されるgroup:
+  - `embedding`
+  - `layer`
+  - `final_norm`
+  - `lm_head`
+  - `post_graph`
+- 短い確認run:
+  - artifact dir: `/tmp/ullm-llamacpp-graph-profile-20260707`
+  - model: Qwen3.5-9B UD-Q4_K_XL
+  - device: R9700 (`-dev ROCm1`)
+  - command条件: `-p 16 -n 16 -b 2048 -ub 512 -ctk f16 -ctv f16 -ngl 999 -sm none -fa auto -r 1 -o jsonl`
+  - bench decode: `66.126 tok/s`
+  - profile steady skip first4 average:
+    - total `14.165 ms/token`
+    - layers `12.629 ms/token`
+    - lm_head `1.363 ms/token`
+    - final_norm `0.087 ms/token`
+    - embedding `0.021 ms/token`
+    - post_graph `0.066 ms/token`
+- 判断:
+  - このprofileは短い確認runなので、最終TPS比較にはgen128/r3の既存bench結果を使う。
+  - ただし段階別の比率を見る用途には十分で、uLLMのsync layers計測と対応付けできる。
+  - uLLM側の直近sync計測はlayers約 `14.1 ms/token`、lm_head約 `1.7 ms/token` なので、最適化余地はまずlayer hot path、その次にlm_headにある。
+
+## 追加実験: linear-attn qkv prepare軽量decode kernel
+- 仮説:
+  - `linear_attn_qkv_prepare_f32` はdecode経路で後段が使わない `conv_output` も全channel分書いている。
+  - decode専用APIで `conv_output` を書かず、q/k/vだけを生成すれば、linear-attn layerの小幅改善が期待できる。
+- 実装して試した内容:
+  - `ullm_runtime_linear_attn_qkv_prepare_decode_f32` を追加。
+  - CPU/HIPの小型テストはpass。
+  - engineのlinear-attn decode経路だけを新APIに呼び替え、不要になった `qkv_conv_output_buffer` も削除。
+- R9700 gen128/top1:
+  - artifact: `/tmp/ullm-qkv-prepare-decode-20260707/r9700-gen128.json`
+  - new `64.389 tok/s`, mean `15.531 ms/token`
+  - baseline `/tmp/ullm-linear-attn-recurrent128-final-20260707/gen128-default.json` `64.416 tok/s`, mean `15.524 ms/token`
+  - token列一致、verified true。
+- 判断:
+  - 速度は直前baseline比 `-0.04%` で実質横ばいから微減。
+  - `qkv_prepare` 自体が支配的ではなく、余計な `conv_output` write削減だけではdecode TPSを動かせなかった。
+  - V620確認は初回runが想定より長くなったため中断。R9700で改善していないため採用せず、差分は戻した。
+
+## 追加実験: linear-attn recurrent decode block再探索
+- 既定は `key_dim=128` でblock `128`。
+- R9700 gen64/top1で `ULLM_LINEAR_ATTN_RECURRENT_DECODE_BLOCK` を探索:
+  - artifact dir: `/tmp/ullm-recurrent-block-sweep-20260707`
+  - default/128: `66.998 tok/s`, mean `14.926 ms/token`
+  - 64: `66.310 tok/s`, mean `15.081 ms/token`
+  - 32: `66.985 tok/s`, mean `14.929 ms/token`
+  - token列はdefaultと一致、verified true。
+- 判断:
+  - block64は約 `-1.03%` で悪化。
+  - block32はdefault/128と同等だが改善ではない。
+  - 現在のblock128 defaultを維持する。
+
+## llama.cpp段階別profileとuLLM同期profileの比較
+- llama.cpp側は `LLAMA_BENCH_GRAPH_PROFILE_JSONL` で、decode stepを `embedding` / `layer` / `final_norm` / `lm_head` / `post_graph` に分けて出力できる。
+- 直近R9700 UD-Q4 profile、先頭4 token除外平均:
+  - total `14.165 ms/token`
+  - layers `12.629 ms/token`
+  - lm_head `1.363 ms/token`
+  - final_norm `0.087 ms/token`
+  - embedding `0.021 ms/token`
+  - post_graph `0.066 ms/token`
+- uLLM AQ4 sync-each-layer profile:
+  - artifact: `/tmp/ullm-current-component-20260707/r9700-gen32-sync-each-layer.json`
+  - total `15.563 ms/token`
+  - layers `13.734 ms/token`
+  - lm_head `1.756 ms/token`
+  - embedding `0.073 ms/token`
+  - layer内訳:
+    - linear_attention: `0.427 ms/layer` * 24 = `10.249 ms/token`
+    - self_attention: `0.435 ms/layer` * 8 = `3.478 ms/token`
+- 差分:
+  - total: uLLMが約 `+1.398 ms/token`
+  - layers: uLLMが約 `+1.105 ms/token`
+  - lm_head: uLLMが約 `+0.393 ms/token`
+- 注意:
+  - llama.cpp profileはUD-Q4、uLLMはAQ4で、測定も短いtg16とsync診断なので完全な同条件比較ではない。
+  - ただし大枠の支配項を見るには十分で、次の最適化対象は `lm_head` とlayer hot path、特にlinear-attn側のMLP/AQ4 matvec系と見る。
+
+## 追加実験: self-attn Qwen35 gateとo-projectionの融合
+- 仮説:
+  - Qwen3.5 gated self-attnでは `paged_decode_attn_f32` の後に `sigmoid_mul_f32` を実行し、その結果をAQ4 `o_proj matvec_add` に渡している。
+  - `o_proj` 側の入力読み込み時に `attention_output[col] * sigmoid(q_gate[col])` を計算すれば、self-attn 8層で小kernelを1つずつ削れる。
+- 実装して試した内容:
+  - `ullm_runtime_aq4_matvec_add_sigmoid_gate_f32` を追加。
+  - CPU/HIP小型テストはpass。
+  - engineのQwen35Gated self-attn `o_proj` 経路だけを新APIへ呼び替え。
+- R9700 gen128/top1:
+  - artifact dir: `/tmp/ullm-aq4-gated-oproj-fusion-20260707`
+  - enabled: `63.392 tok/s`, mean `15.775 ms/token`
+  - disabled旧経路: `64.374 tok/s`, mean `15.534 ms/token`
+  - 生成token列は一致、verified true。
+- 判断:
+  - 速度は旧経路比 `-1.53%` で悪化。
+  - 原因は、別kernelの `sigmoid_mul_f32` なら `cols` 回だけのsigmoid計算で済むのに、matvec内融合では各rowのdot積ごとにgate sigmoidを再計算して実質 `rows * cols` 回へ増えるため。
+  - この方向は採用せず、実装差分は戻す。
+
+## 採用: self-attn Qwen35 gateのsigmoid_mul in-place化
+- 仮説:
+  - Qwen3.5 gated self-attnの `sigmoid_mul_f32` は、attention outputを別bufferへ書いてから `o_proj` が読む。
+  - 同じkernelをin-placeでattention output bufferへ書けば、kernel数やsigmoid計算回数を増やさず、中間bufferを避けられる。
+- 実装:
+  - Rust wrapper `sigmoid_mul_f32_in_place` を追加。C APIは既存 `ullm_runtime_sigmoid_mul_f32` を同一input/output bufferで呼ぶ。
+  - CPU/HIP小型テストを追加。
+  - engineのQwen35Gated self-attn output gateをin-placeへ変更。
+  - 旧経路は `ULLM_DISABLE_SIGMOID_MUL_IN_PLACE=1` で強制可能。
+- 検証:
+  - `cargo fmt --all --check`: pass
+  - `git diff --check`: pass
+  - `cargo test -p ullm-runtime-sys sigmoid_mul_f32_in_place -- --test-threads=1`: pass, 2 tests
+  - `cargo test -p ullm-runtime-sys -- --test-threads=1`: pass, 89 tests
+  - `cargo build -p ullm-engine --release`: pass
+- R9700 gen128/top1:
+  - artifact dir: `/tmp/ullm-sigmoid-inplace-20260707`
+  - enabled: `64.500 tok/s`, mean `15.504 ms/token`
+  - disabled旧経路: `64.294 tok/s`, mean `15.553 ms/token`
+  - disabled比 `+0.32%`
+  - 直近baseline `/tmp/ullm-linear-attn-recurrent128-final-20260707/gen128-default.json` `64.416 tok/s` 比 `+0.13%`
+  - token列一致、verified true。
+- R9700 gen256/top1:
+  - enabled: `61.180 tok/s`, mean `16.345 ms/token`
+  - disabled旧経路: `61.040 tok/s`, mean `16.383 ms/token`
+  - disabled比 `+0.23%`
+  - token列一致、verified true。
+- 判断:
+  - 改善幅は小さいが、gen128/gen256で同方向かつ出力一致。
+  - 計算回数を増やさない局所変更なので採用する。
+
+## 追加確認: AQ4 matvec SiLU-mul RPB sweep
+- 目的:
+  - layer hot pathの `mlp_gate_up_activation` を担う `aq4_matvec_silu_mul` のrows-per-blockを再確認。
+- R9700 gen128/top1:
+  - artifact dir: `/tmp/ullm-silumul-rpb-sweep-20260707`
+  - `ULLM_AQ4_MATVEC_SILU_MUL_RPB=4`: `64.451 tok/s`, mean `15.516 ms/token`
+  - `8`: `64.312 tok/s`, mean `15.549 ms/token`
+  - `16`: `62.443 tok/s`, mean `16.015 ms/token`
+  - token列一致、verified true。
+- R9700 gen256/top1:
+  - `4`: `60.682 tok/s`, mean `16.479 ms/token`
+  - `8`: `60.923 tok/s`, mean `16.414 ms/token`
+  - token列一致、verified true。
+- 判断:
+  - gen128では4が少し良いが、gen256ではdefault 8が良い。
+  - `16` は明確に悪化。
+  - 現時点では `aq4_matvec_silu_mul` のdefault `8` を維持する。
+
+## 追加確認: AQ4 matvec add RPB sweep
+- 目的:
+  - `out_projection_residual` と `mlp_down_residual` で使う `aq4_matvec_add` のrows-per-blockを再確認。
+- R9700 gen128/top1:
+  - artifact dir: `/tmp/ullm-matvecadd-rpb-sweep-20260707`
+  - `ULLM_AQ4_MATVEC_ADD_RPB=4`: `63.105 tok/s`, mean `15.847 ms/token`
+  - `8`: `64.025 tok/s`, mean `15.619 ms/token`
+  - `16`: `62.619 tok/s`, mean `15.970 ms/token`
+  - token列一致、verified true。
+- 判断:
+  - default `8` が最良。
+  - `4` と `16` は悪化するため、defaultは変更しない。
+
+## 採用: AQ4 qkv/z/gate/beta fused kernel RDNA4 RPB 4
+- 目的:
+  - linear-attn側の `qkv_projection` / `z_projection` / `gate_beta` をまとめる `aq4_matvec_qkv_z_gate_beta` のrows-per-blockを再確認。
+- R9700 gen128/top1 sweep:
+  - artifact dir: `/tmp/ullm-qkvzgated-rpb-sweep-20260707`
+  - `ULLM_AQ4_MATVEC_QKV_Z_GATE_BETA_RPB=4`: `64.440 tok/s`, mean `15.518 ms/token`
+  - `8`: `63.927 tok/s`, mean `15.643 ms/token`
+  - `16`: `63.320 tok/s`, mean `15.793 ms/token`
+  - token列一致、verified true。
+- R9700 gen256/top1 sweep:
+  - `4`: `61.309 tok/s`, mean `16.311 ms/token`
+  - `8`: `60.771 tok/s`, mean `16.455 ms/token`
+  - token列一致、verified true。
+- default変更:
+  - RDNA4 defaultを `8` から `4` へ変更。RDNA2 defaultは `2` のまま。
+- default変更後R9700:
+  - artifact dir: `/tmp/ullm-qkvzgated-rpb4-default-20260707`
+  - gen128: `64.684 tok/s`, mean `15.460 ms/token`
+    - in-place直後 `64.500 tok/s` 比 `+0.29%`
+    - recurrent128 baseline `64.416 tok/s` 比 `+0.42%`
+  - gen256: `61.369 tok/s`, mean `16.295 ms/token`
+    - in-place直後 `61.180 tok/s` 比 `+0.31%`
+  - token列一致、verified true。
+- 検証:
+  - `cargo fmt --all --check`: pass
+  - `git diff --check`: pass
+  - `cargo test -p ullm-runtime-sys aq4_matvec_qkv_z_gate_beta -- --test-threads=1`: pass, CPU test
+  - `cargo build -p ullm-engine --release`: pass
+- 判断:
+  - gen128/gen256で同方向に改善したため、RDNA4 default `4` を採用する。
+
+## 採用: AQ4 triple fused kernel RDNA4 RPB 8
+- 目的:
+  - self-attn q/k/v projectionで使う `aq4_matvec_triple` のrows-per-blockを再確認。
+- R9700 gen128/top1 sweep:
+  - artifact dir: `/tmp/ullm-triple-rpb-sweep-20260707`
+  - `ULLM_AQ4_MATVEC_TRIPLE_RPB=8`: `64.728 tok/s`, mean `15.449 ms/token`
+  - `16`: `64.498 tok/s`, mean `15.504 ms/token`
+  - `32`: `63.085 tok/s`, mean `15.852 ms/token`
+  - token列一致、verified true。
+- R9700 gen256/top1 sweep:
+  - `8`: `61.438 tok/s`, mean `16.277 ms/token`
+  - `16`: `61.225 tok/s`, mean `16.333 ms/token`
+  - token列一致、verified true。
+- default変更:
+  - RDNA4 defaultを `16` から `8` へ変更。RDNA2 defaultは `4` のまま。
+- default変更後R9700:
+  - artifact dir: `/tmp/ullm-triple-rpb8-default-20260707`
+  - gen128: `64.685 tok/s`, mean `15.460 ms/token`
+    - qkv/z/gate/beta RPB4後 `64.684 tok/s` とほぼ同等
+    - recurrent128 baseline `64.416 tok/s` 比 `+0.42%`
+  - gen256: `61.499 tok/s`, mean `16.261 ms/token`
+    - qkv/z/gate/beta RPB4後 `61.369 tok/s` 比 `+0.21%`
+  - token列一致、verified true。
+- 検証:
+  - `cargo fmt --all --check`: pass
+  - `git diff --check`: pass
+  - `cargo test -p ullm-runtime-sys aq4_matvec_triple -- --test-threads=1`: pass, 2 tests
+  - `cargo build -p ullm-engine --release`: pass
+- 判断:
+  - gen128では横ばい、gen256では改善。
+  - 長めdecodeで有利なのでRDNA4 default `8` を採用する。
+
+## 採用: AQ4 matvec RDNA4 RPB 32
+- 目的:
+  - lm_headで使う通常 `aq4_matvec` のrows-per-blockを再確認。
+- R9700 gen128/top1 sweep:
+  - artifact dir: `/tmp/ullm-matvec-rpb-sweep-20260707`
+  - `ULLM_AQ4_MATVEC_RPB=8`: `63.907 tok/s`, mean `15.648 ms/token`
+  - `16`: `64.672 tok/s`, mean `15.463 ms/token`
+  - `32`: `64.826 tok/s`, mean `15.426 ms/token`
+  - token列一致、verified true。
+- R9700 gen256/top1 sweep:
+  - `16`: `61.463 tok/s`, mean `16.270 ms/token`
+  - `32`: `61.463 tok/s`, mean `16.270 ms/token`
+  - token列一致、verified true。
+- default変更:
+  - RDNA4 defaultを `16` から `32` へ変更。RDNA2 defaultは `1` のまま。
+- default変更後R9700:
+  - artifact dir: `/tmp/ullm-matvec-rpb32-default-20260707`
+  - gen128: `65.055 tok/s`, mean `15.372 ms/token`
+    - triple RPB8後 `64.685 tok/s` 比 `+0.57%`
+    - recurrent128 baseline `64.416 tok/s` 比 `+0.99%`
+  - gen256: `61.648 tok/s`, mean `16.221 ms/token`
+    - triple RPB8後 `61.499 tok/s` 比 `+0.24%`
+  - token列一致、verified true。
+- 検証:
+  - `cargo fmt --all --check`: pass
+  - `git diff --check`: pass
+  - `cargo test -p ullm-runtime-sys aq4_matvec_f32 -- --test-threads=1`: pass, 2 tests
+  - `cargo build -p ullm-engine --release`: pass
+- 判断:
+  - gen128/gen256で悪化せず、通常default runでは明確に改善。
+  - lm_head寄りの改善としてRDNA4 default `32` を採用する。
+
+## 追加確認: AQ4 matvec RPB 64/128
+- 目的:
+  - 通常 `aq4_matvec` のRDNA4 rows-per-blockを `32` より上げられるか確認。
+- 注意:
+  - `aq4_rows_per_block_is_valid` は `1..=32` かつ `256 % value == 0` のみを許可する。
+  - そのため `ULLM_AQ4_MATVEC_RPB=64/128` のenv sweepは実際には無効値としてfallback `32` で動いていた。
+- 誤ってdefaultを `64` にした場合のR9700通常run:
+  - artifact dir: `/tmp/ullm-matvec-rpb64-default-20260707`
+  - gen128: `61.367 tok/s`, mean `16.296 ms/token`
+    - RPB32 default `65.055 tok/s` 比 `-5.67%`
+  - gen256: `58.124 tok/s`, mean `17.205 ms/token`
+    - RPB32 default `61.648 tok/s` 比 `-5.72%`
+  - token列一致、verified true。
+- 判断:
+  - `64` は明確に悪化し、かつenv指定では有効にできない範囲なので採用しない。
+  - RDNA4 defaultは `32` のまま維持する。
+
+## 追加確認: AQ4 lm_head direct top1再確認
+- 目的:
+  - 通常AQ4 matvec RPB32後に、opt-inのAQ4 lm_head direct top1が有利になるか再確認。
+- R9700 gen128/top1:
+  - artifact dir: `/tmp/ullm-direct-top1-after-rpb32-20260707`
+  - normal RPB32: `65.055 tok/s`, mean `15.372 ms/token`
+  - `ULLM_ENABLE_AQ4_LM_HEAD_DIRECT_TOP1=1`: `64.852 tok/s`, mean `15.420 ms/token`
+  - normal比 `-0.31%`
+  - token列一致、verified true。
+- 判断:
+  - 現行でもdirect top1は微減。
+  - 通常 `aq4_matvec` + top1経路を維持する。
+
+## 追加実験: paged decode attention block size 128
+- 仮説:
+  - self-attn paged decode attentionは1 headあたり256 threads固定。
+  - 現行モデルは `head_dim=128` / `value_dim=128` なので、128 threadsにするとidle threadとreduction段数を減らせる可能性がある。
+- 実装して試した内容:
+  - `ULLM_PAGED_DECODE_ATTN_BLOCK_SIZE=128|256` を追加。
+  - head/value dimが指定block size以下の場合、head-parallel kernelをそのblock sizeで起動するように変更。
+  - CPU/HIP小型テストはpass。
+- R9700 gen128/top1:
+  - artifact dir: `/tmp/ullm-paged-attn-block-sweep-20260707`
+  - `128`: `64.638 tok/s`, mean `15.471 ms/token`
+  - `256`: `64.506 tok/s`, mean `15.502 ms/token`
+  - token列一致、verified true。
+- R9700 gen256/top1:
+  - `128`: `60.938 tok/s`, mean `16.410 ms/token`
+  - `256`: `60.776 tok/s`, mean `16.454 ms/token`
+  - token列一致、verified true。
+- default 128確認:
+  - artifact dir: `/tmp/ullm-paged-attn-bs128-default-20260707`
+  - gen128: `64.519 tok/s`, mean `15.499 ms/token`
+    - 同sweepの256比 `+0.02%`
+    - 直前RPB32 artifact `65.055 tok/s` 比では低い。
+  - gen256: `60.877 tok/s`, mean `16.427 ms/token`
+    - 同sweepの256比 `+0.17%`
+- 判断:
+  - 128は同一sweep内では少し良いが、gen128の差はノイズ域。
+  - 追加実装に対して改善が小さく、全体runのばらつきに埋もれるため採用しない。
+  - 差分は戻す。
+
+## 追加実験: Qwen35 q/k norm RoPE paged KV write block size 128
+- 仮説:
+  - Qwen3.5 self-attnのq/k norm + RoPE + KV write融合kernelは256 threads固定。
+  - 現行モデルは `head_dim=128` / `value_dim=128` なので、128 threadsで十分な可能性がある。
+- 実装して試した内容:
+  - `ULLM_QWEN35_QK_NORM_ROPE_BLOCK_SIZE=128|256` を追加。
+  - paged KV write融合kernelのlaunch block sizeを切り替え可能にした。
+  - CPU/HIP小型テストはpass。
+- R9700 gen128/top1 sweep:
+  - artifact dir: `/tmp/ullm-qwen35-qkrope-block-sweep-20260707`
+  - `128`: `65.167 tok/s`, mean `15.345 ms/token`
+  - `256`: `65.099 tok/s`, mean `15.361 ms/token`
+  - token列一致、verified true。
+- R9700 gen256/top1 sweep:
+  - `128`: `61.866 tok/s`, mean `16.164 ms/token`
+  - `256`: `61.661 tok/s`, mean `16.218 ms/token`
+  - token列一致、verified true。
+- default 128確認:
+  - artifact dir: `/tmp/ullm-qwen35-qkrope-bs128-default-20260707`
+  - gen128: `65.050 tok/s`, mean `15.373 ms/token`
+    - 同sweepの256比 `-0.07%`
+    - 直前RPB32 artifact `65.055 tok/s` とほぼ同等から微減。
+  - gen256: `61.791 tok/s`, mean `16.184 ms/token`
+    - 同sweepの256比 `+0.21%`
+- 判断:
+  - sweepでは128が良く見えたが、default確認ではgen128が微減。
+  - 標準のgen128で改善が立たないため採用しない。
+  - 差分は戻す。
+
+## llama.cpp decode段階別profileとの比較
+- 目的:
+  - uLLM AQ4 decodeの段階別時間を、llama.cpp UD-Q4_K_XLのdecode段階別時間と比較し、最適化余地の所在を確認する。
+- llama.cpp側の計測方法:
+  - `reference-src/llama.cpp/tools/llama-bench/llama-bench.cpp` には `LLAMA_BENCH_GRAPH_PROFILE_JSONL` によるgraph callback profileがある。
+  - `ggml_backend_sched_eval_callback` は観測対象nodeごとにgraph viewを分割し、`ggml_backend_synchronize` 後にcallbackを呼ぶため、境界同期込みの診断値になる。
+  - 現状の実装はdecode `tg` のみをprofileする。prefill `pp` には同じbegin/endがまだ入っていない。
+- 実行条件:
+  - binary: `build/reference/llama.cpp-hip/bin/llama-bench`
+  - model: `/home/homelab1/datapool/ai_models/gguf/unsloth/Qwen3.5-9B-GGUF/Qwen3.5-9B-UD-Q4_K_XL.gguf`
+  - device: `ROCm1` (`gfx1201`, R9700)
+  - args: `-dev ROCm1 -sm none -ngl 99 -p 32 -n 128 -b 512 -ub 512 -fa auto -r 1 -o json`
+  - artifacts:
+    - `/tmp/ullm-llamacpp-profile-20260707/qwen35-9b-udq4-decode128.json`
+    - `/tmp/ullm-llamacpp-profile-20260707/qwen35-9b-udq4-decode128-profile.jsonl`
+- llama.cpp結果:
+  - prompt: `893.726 tok/s`
+  - decode: `68.925 tok/s`, total `1857.083 ms / 128 tokens`
+  - profile平均、先頭8 token除外:
+    - total: `14.359 ms/token` (`69.643 tok/s`)
+    - embedding: `0.017 ms/token`
+    - layers: `12.837 ms/token`
+    - final_norm: `0.078 ms/token`
+    - lm_head: `1.361 ms/token`
+    - post_graph: `0.066 ms/token`
+  - layer内訳、先頭8 token除外:
+    - linear-attn層相当: `10.129 ms/token`, `0.422 ms/layer`, 24 layers
+    - self-attn層相当: `2.708 ms/token`, `0.338 ms/layer`, 8 layers
+- uLLM側の比較対象:
+  - throughput基準: `/tmp/ullm-matvec-rpb32-default-20260707/r9700-gen128-default.json`
+    - `65.055 tok/s`, mean `15.372 ms/token`
+  - 段階別診断: `/tmp/ullm-current-after-rpb-timing-20260707/r9700-gen32-sync-each-layer.json`
+    - `64.095 tok/s`, mean `15.602 ms/token`
+    - embedding: `0.074 ms/token`
+    - layers: `13.824 ms/token`
+    - lm_head: `1.703 ms/token`
+- 比較:
+  - throughputでは llama.cpp UD-Q4_K_XL が uLLM AQ4 RPB32 より約 `+5.95%` 速い。
+  - 段階別診断では、uLLMは llama.cpp比で:
+    - layers: `+0.987 ms/token`
+    - lm_head: `+0.342 ms/token`
+    - embedding: `+0.057 ms/token`
+  - 最大の絶対差はlayers、次がlm_head。
+- 判断:
+  - llama.cpp側もlayer/lm_head/final_norm/embedding程度の段階別分析は可能で、既存profileを使えばすぐ比較できる。
+  - uLLMの通常component timingは非同期実行のため、前段の未完了時間が後段に寄って見える。段階別比較にはsync診断値を使う。
+  - 次の最適化対象は、まずlayers全体の約1ms/token差を分解すること。特にlinear-attn層は合計時間が大きく、self-attn層はuLLM側が相対的に遅い可能性があるため、llama.cpp profileとuLLMのper-layer timingを同じ粒度で照合する。
+
+## 追加分析: self-attn内訳とQKV mode
+- QKV projection mode sweep:
+  - artifact dir: `/tmp/ullm-self-attn-qkv-mode-sweep-20260707`
+  - triple: gen128 `65.259 tok/s`, mean `15.323 ms/token`
+  - pair+v: gen128 `64.135 tok/s`
+  - single q/k/v: gen128 `62.810 tok/s`
+  - token列一致、verified true。
+  - 判断: 現行triple pathが最速なので維持する。
+- self-attn component timing:
+  - artifact: `/tmp/ullm-self-attn-component-timing-20260707/r9700-gen32-self-components-sync-layer.json`
+  - `ULLM_SYNC_DECODE_EACH_LAYER_FOR_TIMING=1` と `ULLM_SYNC_SELF_ATTN_COMPONENTS_FOR_TIMING=1` を併用し、前段の未完了workが先頭componentへ寄るのを避けた。
+  - 先頭4 step除外、1 self-attn layer平均:
+    - input RMSNorm: `0.042 ms`
+    - QKV projection: `0.104 ms`
+    - q/k norm + RoPE + KV write: `0.034 ms`
+    - paged decode: `0.113 ms`
+    - output gate: `0.032 ms`
+    - O projection residual: `0.071 ms`
+    - post RMSNorm: `0.038 ms`
+    - MLP gate/up: `0.149 ms`
+    - MLP down: `0.105 ms`
+  - component timingはcomponentごとにsyncする診断値なので、通常runのthroughput値とは直接比較しない。
+- 判断:
+  - llama.cppとの差はlinear matvec本体だけではなく、self-attn側にも残っている。
+  - ただしself-attn内では単独で巨大な箇所はなく、1 launchまたは中間buffer 1個分を削る小さい改善の積み上げになる。
+
+## 追加変更: paged decode sigmoid gate fusion
+- Qwen3.5 gated self-attnの `paged_decode -> sigmoid(gate) * attention_output` を、paged decode kernelの出力時点に融合した。
+- 追加API:
+  - C runtime: `ullm_runtime_paged_decode_attn_sigmoid_gate_f32`
+  - Rust wrapper: `paged_decode_attn_sigmoid_gate_f32`
+- `PackageSelfAttnResidentStepLayer` ではQwen3.5 gated layoutの場合に新APIを使い、`ULLM_DISABLE_PAGED_DECODE_SIGMOID_GATE_SELF_ATTN=1` で旧pathへ戻せるようにした。
+- 診断用に `ULLM_SYNC_SELF_ATTN_COMPONENTS_FOR_TIMING=1` を追加し、decode JSONへ `self_attn_component_step_ms` を出すようにした。
+- sweep:
+  - artifact dir: `/tmp/ullm-paged-decode-gated-sweep-20260707`
+  - gen128 fused: `65.235 tok/s`, mean `15.329 ms/token`
+  - gen128 disabled: `65.184 tok/s`, mean `15.341 ms/token`
+  - gen128 delta: `+0.079%`, `-0.012 ms/token`
+  - gen256 fused: `62.029 tok/s`, mean `16.122 ms/token`
+  - gen256 disabled: `61.794 tok/s`, mean `16.183 ms/token`
+  - gen256 delta: `+0.380%`, `-0.061 ms/token`
+  - token列一致、verified true。
+- 通常default確認、warm-up後:
+  - artifact dir: `/tmp/ullm-paged-decode-gated-default-20260707`
+  - gen128: `65.209 tok/s`, mean `15.335 ms/token`
+    - RPB32 baseline `65.055 tok/s`, mean `15.372 ms/token` 比 `+0.237%`, `-0.036 ms/token`
+  - gen256: `61.899 tok/s`, mean `16.155 ms/token`
+    - RPB32 baseline `61.648 tok/s`, mean `16.221 ms/token` 比 `+0.406%`, `-0.066 ms/token`
+  - token列一致、verified true。
+- 検証:
+  - `cargo fmt --all`: pass。
+  - `git diff --check`: pass。
+  - `cargo test -p ullm-runtime-sys paged_decode_attn -- --test-threads=1`: pass、`4 passed`。
+  - `cargo build -p ullm-engine --release`: pass。
+- 判断:
+  - 改善幅は小さいが、gen128/gen256で同方向、生成token列一致、旧pathへ戻すenvもあるため採用対象。
+  - この変更でllama.cppとの差が消えるわけではない。残りはself-attnの小粒launch、lm_head、linear-attn側の長い合計時間をさらに見る必要がある。
+
+## 今回の要点
+- llama.cpp側もdecodeを段階別に分解でき、UD-Q4_K_XLではdecode約 `68.925 tok/s`、profile平均ではlayers `12.837 ms/token`、lm_head `1.361 ms/token` だった。
+- uLLM AQ4は直前baselineでgen128 `65.055 tok/s`、段階別ではlayers `13.824 ms/token`、lm_head `1.703 ms/token`。
+- 差の中心はlayers約 `+0.987 ms/token` とlm_head約 `+0.342 ms/token` で、self-attn側にも約1ms/token規模の改善余地がある。
+
+## 今回の変更点
+- self-attn component timingを追加し、Qwen3.5 self-attn内訳を見られるようにした。
+- paged decode sigmoid gate fusionを実装し、Qwen3.5 gated self-attnのattention出力後gate処理を1 kernel分削った。
+- 通常default runではR9700 gen128 `65.055 -> 65.209 tok/s`、gen256 `61.648 -> 61.899 tok/s` に改善した。
+
+## 次の行動
+- 次に見るなら、self-attn内の残り小粒fusionよりも、llama.cpp比で差が残るlm_headと、合計時間が大きいlinear-attn層のAQ4 matvecを優先する。
+- ただし今回の変更単体は採用し、次の比較基準を `65.209 tok/s` / `61.899 tok/s` に更新する。
+
+## 追加変更: paged decode warp reduction
+- 仮説:
+  - Qwen3.5 self-attnのpaged decode fast pathは、1 q-headあたり256 threadsでhead_dim dotをshared memory reductionしている。
+  - 各source timestepでshared memory + `__syncthreads()` の木構造reductionを2回行うため、decode長が伸びるほどsync回数が多くなる。
+  - wavefront内 `__shfl_down` で先に縮約し、wave代表だけをshared memoryに置けばsync回数を減らせる。
+- 実装:
+  - `ullm_paged_decode_reduce_sum_256` を追加し、既定ではwarp/wave shuffle reductionを使う。
+  - `ULLM_DISABLE_PAGED_DECODE_WARP_REDUCE=1` で旧shared reductionへ戻せるようにした。
+  - 対象はfast head-parallel pathのみ。fallback scalar pathは変更していない。
+- 検証:
+  - `cargo fmt --all --check`: pass。
+  - `git diff --check`: pass。
+  - `cargo test -p ullm-runtime-sys paged_decode_attn -- --test-threads=1`: pass、`4 passed`。
+  - `cargo build -p ullm-engine --release`: pass。
+- R9700通常run:
+  - artifact dir: `/tmp/ullm-paged-decode-warp-reduce-20260707`
+  - gen128 warp: `65.531 tok/s`, mean `15.260 ms/token`
+  - gen128 shared: `65.056 tok/s`, mean `15.371 ms/token`
+  - delta: `+0.730%`, `-0.111 ms/token`
+  - gen256 warp: `62.463 tok/s`, mean `16.009 ms/token`
+  - gen256 shared: `61.573 tok/s`, mean `16.241 ms/token`
+  - delta: `+1.446%`, `-0.232 ms/token`
+  - token列一致、verified true。
+- 直前採用baseline比:
+  - gen128: `65.209 -> 65.531 tok/s`, `+0.493%`
+  - gen256: `61.899 -> 62.463 tok/s`, `+0.912%`
+- component診断:
+  - shared paged_decode: `0.1138 ms/self-layer`
+  - warp paged_decode: `0.1072 ms/self-layer`
+  - componentごとにsyncするため全体stepはノイズを拾うが、paged decode単体は意図どおり短縮した。
+- 判断:
+  - decode長が長いgen256で改善幅が広がっており、狙いどおりpaged decodeのcache_len依存コストを削れている。
+  - 生成token列とverifiedは維持され、旧pathへのenv fallbackもあるため採用対象。
+
+## 今回の要点
+- AQ4 fused add/silu rows/blockの上方向/下方向sweepでは現行defaultが最良だった。
+- self-attnのpaged decodeはまだ改善余地があり、shared memory reductionをwarp/wave shuffle reductionへ置き換えると、gen128/gen256で明確に改善した。
+
+## 今回の変更点
+- paged decode fast pathのq/k dot reductionを、shared memory tree reductionからwavefront shuffle併用reductionへ変更した。
+- `ULLM_DISABLE_PAGED_DECODE_WARP_REDUCE=1` を追加し、旧shared reductionと比較可能にした。
+- 次の比較基準はR9700 gen128 `65.531 tok/s`、gen256 `62.463 tok/s`。
+
+## 次の行動
+- まだself-attnはllama.cpp比で遅い。次はpaged decodeのさらなるspecialization、またはlm_headのtop1 partial削減を優先して見る。
+
+## 追加変更: AQ4 lm_head top1 rows/block 8
+- 仮説:
+  - AQ4 lm_head direct top1は、vocab行ごとの4096 dotとpartial top1 reductionの組み合わせ。
+  - rows/blockを増やすとpartial数は減るが、1行あたりのthread数が減ってdotが遅くなる可能性がある。
+  - rows/blockを16から8へ下げるとpartial数は増えるが、1行あたり32 threadsになり、lm_headのrow dotが少し速くなる可能性がある。
+- 実装:
+  - `ULLM_AQ4_MATVEC_TOP1_RPB` を追加し、C++ runtime kernel sourceとRust partial_count計算を同じ値で切り替えるようにした。
+  - defaultを `16 -> 8` に変更した。
+- 検証:
+  - `cargo fmt --all --check`: pass。
+  - `git diff --check`: pass。
+  - `cargo test -p ullm-runtime-sys aq4_matvec_top1 -- --test-threads=1`: pass、`2 passed`。
+  - `cargo build -p ullm-engine --release`: pass。
+- R9700 sweep:
+  - artifact dir: `/tmp/ullm-lmhead-top1-rpb-sweep-20260707`
+  - gen128:
+    - RPB8 `65.700 tok/s`, mean `15.221 ms/token`, partial `31040`
+    - RPB16 `65.513 tok/s`, mean `15.264 ms/token`, partial `15520`
+    - RPB32 `65.513 tok/s`, mean `15.264 ms/token`, partial `7760`
+  - gen256:
+    - RPB8 `62.459 tok/s`, mean `16.010 ms/token`
+    - RPB16 `62.366 tok/s`, mean `16.034 ms/token`
+  - token列一致、verified true。
+- V620確認:
+  - RPB8 `39.913 tok/s`
+  - RPB16 `39.856 tok/s`
+  - delta `+0.143%`
+  - token列一致、verified true。
+- default化後のR9700確認:
+  - artifact dir: `/tmp/ullm-lmhead-top1-rpb8-default-20260707`
+  - gen128 default8 `65.459 tok/s`, current-build RPB16 `65.339 tok/s`, delta `+0.184%`
+  - gen256 default8 `62.516 tok/s`, current-build RPB16 `62.352 tok/s`, delta `+0.263%`
+  - token列一致、verified true。
+- 判断:
+  - 改善幅は小さいが、R9700 gen128/gen256とV620 gen128で同方向。
+  - lm_headではpartial削減よりrow dotの並列度が支配的と見て、default RPB8を採用対象にする。
+
+## 今回の要点
+- lm_head top1はpartial数を減らす方向ではなく、rows/blockを下げて1行あたりのthread数を増やす方向が少し速かった。
+- これでR9700の直近default基準はgen128 `65.459 tok/s`、gen256 `62.516 tok/s`。
+
+## 今回の変更点
+- `ULLM_AQ4_MATVEC_TOP1_RPB` を追加した。
+- AQ4 lm_head direct top1のdefault rows/blockを `16 -> 8` に変更した。
+
+## 次の行動
+- 残る差はまだself-attnとlm_headにある。次はpaged decode fast pathのcache_len別specialization、またはlm_head top1 kernel内の行内reductionをshuffle化できるかを見る。
+
+## 追加変更: RDNA4 AQ4 lm_head top1 row reduction shuffle
+- 仮説:
+  - default RPB8では、AQ4 lm_head top1の1行dotに32 threadsを使う。
+  - 旧実装は行内sumをshared memory tree reductionで行うため、各rowで複数回 `__syncthreads()` が入る。
+  - R9700/RDNA4では `__shfl_down` による行内reductionへ置き換えると少し速くなる可能性がある。
+- 実装:
+  - AQ4 matvec top1 kernelの行内sum reductionをshuffle化した。
+  - `ULLM_DISABLE_AQ4_MATVEC_TOP1_WARP_REDUCE=1` で旧shared reductionへ戻せるようにした。
+  - V620/RDNA2ではdefaultを旧shared reductionのままにした。R9700/RDNA4、つまり `gfx12*` のみdefaultでshuffle reductionを使う。
+- 検証:
+  - `cargo fmt --all --check`: pass。
+  - `git diff --check`: pass。
+  - `cargo test -p ullm-runtime-sys aq4_matvec_top1 -- --test-threads=1`: pass、`2 passed`。
+  - `cargo build -p ullm-engine --release`: pass。
+- R9700比較:
+  - artifact dir: `/tmp/ullm-lmhead-top1-warp-reduce-20260707`
+  - gen128 warp `65.563 tok/s`, shared `65.431 tok/s`, delta `+0.202%`
+  - gen256 warp `62.496 tok/s`, shared `62.440 tok/s`, delta `+0.091%`
+  - token列一致、verified true。
+- V620確認:
+  - warp強制はshared比 `-0.095%` だったため、RDNA2 defaultにはしない。
+  - RDNA2 default shared path確認: `/tmp/ullm-lmhead-top1-rdna4-warp-reduce-20260707/v620-gen128-default.json`
+    - `39.878 tok/s`, token列一致、verified true。
+- 最終default確認:
+  - artifact dir: `/tmp/ullm-lmhead-top1-rdna4-warp-reduce-20260707`
+  - R9700 gen128 `65.596 tok/s`, mean `15.245 ms/token`
+  - R9700 gen256 `62.608 tok/s`, mean `15.972 ms/token`
+  - token列一致、verified true。
+- 判断:
+  - 改善幅は小さいが、R9700/RDNA4で同方向に改善する。
+  - V620/RDNA2は旧path維持にしたため、R9700向け最適化として採用対象。
+
+## 今回の要点
+- lm_head top1 row reductionも小さく削れた。
+- R9700最終defaultはgen128 `65.596 tok/s`、gen256 `62.608 tok/s`。
+
+## 今回の変更点
+- AQ4 lm_head top1の行内sum reductionを、RDNA4のみshuffle reductionへ変更した。
+- `ULLM_DISABLE_AQ4_MATVEC_TOP1_WARP_REDUCE=1` を追加した。
+
+## 次の行動
+- 次はself-attn paged decode側で、cache_lenが小さい範囲のspecializationや、q/k score計算の再利用可能性を調べる。
+
+## 追加変更: paged decode online softmax
+- 仮説:
+  - paged decode fast pathは、softmax maxを求めるpassとweighted sumを求めるpassで、同じq/k dotを2回計算している。
+  - decode長が伸びるほどK cache readとdot reductionの2-passコストが重くなる。
+  - online softmaxへ置き換えると、各source timestepのq/k dotとreductionを1回にできる。
+- 実装:
+  - paged decode fast head-parallel pathをonline softmax化した。
+  - `ULLM_DISABLE_PAGED_DECODE_ONLINE_SOFTMAX=1` で旧2-pass softmaxへ戻せるようにした。
+  - fallback scalar pathは変更していない。
+- 検証:
+  - `cargo fmt --all --check`: pass。
+  - `git diff --check`: pass。
+  - `cargo test -p ullm-runtime-sys paged_decode_attn -- --test-threads=1`: pass、`4 passed`。
+  - `cargo build -p ullm-engine --release`: pass。
+- R9700比較:
+  - artifact dir: `/tmp/ullm-paged-decode-online-softmax-20260707`
+  - gen128 online `67.528 tok/s`, two-pass `65.581 tok/s`, delta `+2.969%`
+  - gen256 online `65.454 tok/s`, two-pass `62.372 tok/s`, delta `+4.941%`
+  - 直前baseline比:
+    - gen128 `65.596 -> 67.528 tok/s`, `+2.944%`
+    - gen256 `62.608 -> 65.454 tok/s`, `+4.546%`
+  - token列一致、verified true。
+- V620確認:
+  - gen128 online `40.683 tok/s`, two-pass `39.926 tok/s`, delta `+1.895%`
+  - token列一致、verified true。
+- 判断:
+  - これまでの小粒最適化より改善幅が大きい。
+  - decode長が長いgen256で改善幅が広がっており、K cache readとq/k dotを1-pass化する狙いと一致している。
+  - R9700/RDNA4とV620/RDNA2の両方で改善し、旧path fallbackもあるため採用対象。
+
+## 今回の要点
+- self-attn paged decodeの2-pass q/k score計算をonline softmaxで1-pass化できた。
+- R9700の直近default基準はgen128 `67.528 tok/s`、gen256 `65.454 tok/s`。
+- V620もgen128で `40.683 tok/s` まで改善した。
+
+## 今回の変更点
+- paged decode fast pathをonline softmax化した。
+- `ULLM_DISABLE_PAGED_DECODE_ONLINE_SOFTMAX=1` を追加した。
+
+## 次の行動
+- 次はonline softmax後のself-attn component timingを取り、残る支配項がpaged decode、QKV projection、MLP側のどこへ移ったかを確認する。
+
+## 追加分析: online softmax後のcomponent timing
+- R9700 sync-each-layer:
+  - artifact: `/tmp/ullm-after-online-softmax-timing-20260707/r9700-gen32-sync-each-layer.json`
+  - step mean、先頭4 step除外: `15.348 ms/token`
+  - embedding: `0.073 ms/token`
+  - layers: `13.570 ms/token`
+  - lm_head: `1.705 ms/token`
+  - self-attn合計: `3.437 ms/token`
+  - linear-attn合計: `10.127 ms/token`
+  - self-attnはonline softmax前 `3.719 ms/token` から `-0.282 ms/token`。
+- R9700 self-attn component:
+  - artifact: `/tmp/ullm-after-online-softmax-timing-20260707/r9700-gen32-self-components-sync-layer.json`
+  - paged_decode: `0.0775 ms/self-layer`
+  - QKV projection: `0.1030 ms/self-layer`
+  - MLP gate/up: `0.1468 ms/self-layer`
+  - MLP down: `0.1044 ms/self-layer`
+  - online softmax前 paged_decode `0.1138 ms/self-layer` から大きく低下。
+- R9700 linear-attn component:
+  - artifact: `/tmp/ullm-after-online-softmax-timing-20260707/r9700-gen32-linear-components-sync-layer.json`
+  - MLP gate/up: `0.1505 ms/layer`
+  - MLP down: `0.1054 ms/layer`
+  - QKV projection: `0.0977 ms/layer`
+  - Z projection: `0.0777 ms/layer`
+  - out projection residual: `0.0707 ms/layer`
+  - recurrent: `0.0678 ms/layer`
+- RPB sweep:
+  - `ULLM_AQ4_MATVEC_QKV_Z_GATE_BETA_RPB=2|4|8`
+    - artifact dir: `/tmp/ullm-linear-qkv-z-rpb-after-online-20260707`
+    - RPB2 `66.905 tok/s`
+    - RPB4 `67.425 tok/s`
+    - RPB8 `66.651 tok/s`
+    - 現行default RPB4が最良。
+  - `ULLM_AQ4_MATVEC_TRIPLE_RPB=4|8|16`
+    - artifact dir: `/tmp/ullm-self-triple-rpb-after-online-20260707`
+    - RPB4 `67.221 tok/s`
+    - RPB8 `67.228 tok/s`
+    - RPB16 `67.158 tok/s`
+    - 現行default RPB8が最良。ただし差はノイズ域。
+- 判断:
+  - rows/block系は現行defaultから変更しない。
+  - 次の改善対象は、paged decode内の残ったblock table/index計算か、MLP系AQ4 kernel自体。
+
+## 追加変更: paged decode incremental block walk
+- 仮説:
+  - online softmax後も、paged decode fast pathは各source timestepで `source_timestep / block_size` とblock offset計算、block_table参照を行っている。
+  - block indexとphysical timestepは単調に進むので、loop内でincrementalに更新すれば除算・剰余相当・block_table readを削れる。
+  - fragmented block tableでも、block境界だけblock_tableを読み直せば対応できる。
+- 実装:
+  - online softmax pathで `block_index`, `block_end`, `physical_timestep` をincrementalに更新するようにした。
+  - 旧2-pass fallback pathは変更していない。
+- 検証:
+  - `cargo fmt --all --check`: pass。
+  - `git diff --check`: pass。
+  - `cargo test -p ullm-runtime-sys paged_decode_attn -- --test-threads=1`: pass、`4 passed`。
+  - `cargo build -p ullm-engine --release`: pass。
+- R9700比較:
+  - artifact dir: `/tmp/ullm-paged-decode-block-walk-20260707`
+  - gen128 block-walk `67.878 tok/s`, online baseline `67.528 tok/s`, delta `+0.518%`
+  - gen256 block-walk `66.198 tok/s`, online baseline `65.454 tok/s`, delta `+1.138%`
+  - token列一致、verified true。
+- V620確認:
+  - gen128 block-walk `40.860 tok/s`, online baseline `40.683 tok/s`, delta `+0.435%`
+  - token列一致、verified true。
+- 判断:
+  - R9700/RDNA4とV620/RDNA2の両方で改善。
+  - gen256で改善幅が広がるため、decode長依存のindex計算削減として狙いどおり。
+  - 採用対象。
+
+## 今回の要点
+- online softmax後もpaged decode内のblock index計算を削る余地があり、incremental block walkでさらに改善した。
+- R9700の直近default基準はgen128 `67.878 tok/s`、gen256 `66.198 tok/s`。
+- V620 gen128は `40.860 tok/s`。
+
+## 今回の変更点
+- paged decode online softmax pathでblock table/index計算をincremental化した。
+
+## 次の行動
+- 次はMLP gate/up、MLP down、QKV projectionなどAQ4 matvec本体側の改善余地を探す。
+
+## 追加整理: メモリ帯域幅rooflineから見たAQ4 decode効率
+- 前提:
+  - R9700公称ピーク帯域: `640 GB/s`。
+  - V620公称ピーク帯域: `512 GB/s`。
+  - 現行text-only + embed AQ4 package: `/tmp/ullm-textonly-embed-aq4-g8-proto/package-textonly-embed-aq4.ullm.d`
+  - package apparent size: `5.203 GB`。
+  - manifest上の量子化payload:
+    - layer weights: `3.929 GB`
+    - lm_head: `0.636 GB`
+    - embedding table: `0.636 GB`
+    - passthrough tensors: `2.13 MB`
+  - decodeではembedding table全体は毎token読まないため、帯域下限の主分母は `layer weights + lm_head + passthrough + codebooks` とした。
+  - その下限は `4.567 GB/token`。
+  - KV cache readはgen128/gen256程度では数MBから十数MB/tokenで、weight readに対して小さいため一次近似では無視できる。
+- R9700:
+  - gen128 current block-walk: `67.878 tok/s`
+  - 帯域roof: `640 / 4.567 = 140.13 tok/s`
+  - 効率: `48.44%`
+  - 下限ベース実効帯域: `310.0 GB/s`
+  - gen256 current block-walk: `66.198 tok/s`
+  - 効率: `47.24%`
+  - 下限ベース実効帯域: `302.3 GB/s`
+- V620:
+  - gen128 current block-walk: `40.860 tok/s`
+  - 帯域roof: `512 / 4.567 = 112.10 tok/s`
+  - 効率: `36.45%`
+  - 下限ベース実効帯域: `186.6 GB/s`
+- 解釈:
+  - R9700は「完全に帯域を使い切る」状態ではなく、まだ約2.1倍のroofline余地がある。
+  - V620はさらに低く、RDNA2向けkernel scheduling / memory coalescing / launch-fusionの改善余地が大きい。
+  - full package sizeを誤って毎token読み出し量に使うと、R9700 gen128効率は約`55%`、V620 gen128効率は約`42%`になるが、embedding table全体をdecodeごとに読むわけではないのでこれは楽観側の見積もり。

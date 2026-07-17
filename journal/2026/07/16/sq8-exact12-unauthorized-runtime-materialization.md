@@ -1,0 +1,18 @@
+# SQ8 exact12 unauthorized runtime materialization
+
+## 前回の要点
+
+source `ba3f02ee3773919259450099db6ca6a58ba52065`はcurrent-v2 Rust loaderの修正とformal current GO `46a536aa287bde7def56f9c0a1141a256873fac996e94cab60ab9770ce37f1e3`を得た。predecessorはexact10 lineage `5c7d71d205469ec13613b35ee4c78efb7bea36950dcc30c43a6db61a84b3c89d`、latest failureは`01c6aa1a44f90612f94e3ff285aad4f52734b5aa662f4b4e2e438fe13b74dd63`である。
+
+## 今回の変更点
+
+- predecessorの先頭10 entriesを値として維持し、seq10へlatest actual failure、seq11へcurrent GOを追記したexact12 successorをcreate-new生成した。manifestは`/tmp/ullm-sq8-authorization-lineage-input-v2-ba3f02ee-46a536aa/lineage-input-manifest.json`、SHAは`dd926fad8ef0b1686e57d9d13877be466a6e4414c146e7baea25404aef63be1e`、entries SHAは`6c22b754d83f05aa5aed7ccd028ddc158c4b23ea0de332eca2ee12e80e797766`である。
+- release対象をcleanして`CARGO_BUILD_JOBS=1`、`--jobs 1`でfresh workerを構築した。Cargo出力はdepsとのhard-linkでnlink 2だったためbuilderがfail-closedで拒否し、SHAを維持した0555/nlink 1のcreate-new stagingを作成した。worker SHAは`4dcf1bd3164d0a83aec4ded51c199876d407e22a325fff9d7015df7648c9e050`である。
+- unauthorized runtimeを`/tmp/ullm-sq8-overlay-gpu-promotion-ba3f02ee-dd926fad-unauthorized-v2`へcreate-new生成した。served-model SHAは`9b453941367e3aaa35594db4fc6e737a7298daf6bfd211b64be6e581dcd8e290`、gate SHAは`cef07c3104fcb0666385a5be97ebd168007111e4c1ef8dd3beeb980a692700aa`、SHA256SUMS SHAは`0bc5610a72b845118982ddfbe938d295770a507069d35db904624374837b2b99`である。
+- exact8メンバー、regular 0444/nlink 1、worker 0555/nlink 1、SUMS 7 entries、worker source/immutable self-reference、lineage 5箇所伝播、historical runtime reference 0、staging reference 0、source/artifact/package/readiness一致を機械監査した。Gateは`ready_for_independent_audit`、`actual_run_allowed=false`、`max_attempts=0`、authorization audit nullである。
+- fresh rlib `f092100f641e2ddd7571d743769a22509878c9795e761e002382dc5c6f4213c2`へ再リンクしたCPU validator `6a83df01de986d6604665f6f16e4526c0a3061a82ca00aa2564a2024c82b4f58`が新served-modelを受理した。旧exact10 lineageの新source認可と旧runtime audit `08044245855b9bc2d59902fc1b803f47eef35e7ed3932e07ac174c2e74457d60`の再認可はsource mismatchで拒否され、出力は作られなかった。
+- wrapper dry-runはcandidate SHA `6e1b34b023423766d84308944fc096fdbd9573ca39f0229ca398f4eb25831fbe`で成功し、dry-run outputは前後とも存在しない。GPU、service、sudo、actual executionは行っていない。materialization source worktreeはHEAD `ba3f02ee3773919259450099db6ca6a58ba52065`のclean状態を維持した。
+
+## 次の行動
+
+新unauthorized runtimeをfresh independent runtime auditへ渡す。runtime auditがformal GOになるまではauthorized runtimeの生成とactual executionを行わない。
