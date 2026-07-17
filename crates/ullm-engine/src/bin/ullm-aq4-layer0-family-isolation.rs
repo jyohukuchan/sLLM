@@ -26,7 +26,7 @@ use std::path::{Path, PathBuf};
 use ullm_engine::aq4_package_runtime::PackageAq4ResidentMatvec;
 use ullm_engine::host_bytes::{decode_f32_le_values, encode_f32_to_bytes};
 use ullm_engine::loader::{
-    effective_rmsnorm_weight_values, read_named_passthrough_f32, read_named_passthrough_f32_rows,
+    effective_rmsnorm_weight_values, read_named_aq4_f32_rows, read_named_passthrough_f32,
     WeightRegistry,
 };
 use ullm_engine::qwen35_aq4_layer_runtime::{
@@ -46,7 +46,7 @@ const MAX_CHUNK_BYTES: usize = 256 * 1024 * 1024;
 
 const HYBRID_SCHEMA: &str = "ullm.aq4_layer0_hybrid_diagnostic.aq4_cpu.v1";
 const HYBRID_INPUT_SCHEMA: &str = "ullm.aq4_layer0_hybrid_input_jsonl.v1";
-const CHAIN_SCHEMA: &str = "ullm.aq4_multilayer_accumulation.aq4_cpu.v2";
+const CHAIN_SCHEMA: &str = "ullm.aq4_multilayer_accumulation.aq4_cpu.v3";
 const HYBRID_MAX_CASES: usize = 128;
 const HYBRID_MAX_CONTEXT_LENGTH: usize = 512;
 const HIDDEN: usize = 4096;
@@ -393,6 +393,7 @@ struct ChainExecutionReport {
     includes_final_norm_lm_head: bool,
     final_norm_tensor: Option<String>,
     lm_head_tensor: Option<String>,
+    lm_head_weight_representation: Option<String>,
     lm_head_sample_rows: Vec<usize>,
     state_contract: String,
     persistence_contract: String,
@@ -1473,12 +1474,15 @@ fn run_multilayer_chain_probe(args: Args) -> Result<()> {
             lm_head_tensor: args
                 .chain_include_final_norm_lm_head
                 .then(|| LM_HEAD_TENSOR.to_string()),
+            lm_head_weight_representation: args
+                .chain_include_final_norm_lm_head
+                .then(|| "aq4_dequantized_fixed_rows".to_string()),
             lm_head_sample_rows: args
                 .chain_include_final_norm_lm_head
                 .then(|| DIAGNOSTIC_LOGIT_ROWS.to_vec())
                 .unwrap_or_default(),
             state_contract: "The chain is cold-initialized once per fixture before layer 0. Each linear-attention layer uses its own model-defined Conv/recurrent state while replaying the complete temporal context; self-attention retains only the current layer's causal K/V sequence. No case is reset between chained layer outputs.".to_string(),
-            persistence_contract: "Only the current layer's input/output sequence, its current layer-local state, and fixed-coordinate summaries exist in memory. Full decoder/final-norm frames are streamed to the comparator then discarded before the next stage. LM-head is decoded as fixed rows only; no full vocabulary tensor or all-layer hidden/state tensor is retained.".to_string(),
+            persistence_contract: "Only the current layer's input/output sequence, its current layer-local state, and fixed-coordinate summaries exist in memory. Full decoder/final-norm frames are streamed to the comparator then discarded before the next stage. LM-head AQ4 payload is dequantized as fixed rows only; no full vocabulary tensor or all-layer hidden/state tensor is retained.".to_string(),
         },
         layer_summaries,
         terminal_summaries,
@@ -1496,8 +1500,8 @@ fn run_multilayer_chain_probe(args: Args) -> Result<()> {
 /// The final norm is measured for every fixture timestep.  LM-head metrics
 /// deliberately cover only the fixed `DIAGNOSTIC_LOGIT_ROWS`: loading or
 /// producing a 248,320-token vector would defeat this CPU-only diagnostic's
-/// bounded-memory contract.  The rows are decoded once, then reused for each
-/// current timestep and discarded with the terminal frame.
+/// bounded-memory contract.  The AQ4 rows are dequantized once, then reused
+/// for each current timestep and discarded with the terminal frame.
 fn run_chain_terminal_stages(
     args: &Args,
     chains: &[ChainSequence],
@@ -1526,14 +1530,13 @@ fn run_chain_terminal_stages(
     }
 
     let lm_head_rows =
-        read_named_passthrough_f32_rows(&args.package, LM_HEAD_TENSOR, &DIAGNOSTIC_LOGIT_ROWS)
-            .map_err(|err| format!("failed reading chain fixed LM-head rows: {err}"))?;
+        read_named_aq4_f32_rows(&args.package, LM_HEAD_TENSOR, &DIAGNOSTIC_LOGIT_ROWS)
+            .map_err(|err| format!("failed reading chain fixed AQ4 LM-head rows: {err}"))?;
     let max_row = *DIAGNOSTIC_LOGIT_ROWS
         .iter()
         .max()
         .ok_or_else(|| "chain LM-head sample rows are empty".to_string())?;
-    if lm_head_rows.dtype != "BF16"
-        || lm_head_rows.shape.len() != 2
+    if lm_head_rows.shape.len() != 2
         || usize::try_from(lm_head_rows.shape[0])
             .ok()
             .is_none_or(|rows| rows <= max_row)

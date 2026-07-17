@@ -33,8 +33,8 @@ sys.modules[SPEC.name] = HYBRID
 SPEC.loader.exec_module(HYBRID)
 
 
-SCHEMA = "ullm.aq4_multilayer_accumulation.source_compare.v2"
-AQ4_SCHEMA = "ullm.aq4_multilayer_accumulation.aq4_cpu.v2"
+SCHEMA = "ullm.aq4_multilayer_accumulation.source_compare.v3"
+AQ4_SCHEMA = "ullm.aq4_multilayer_accumulation.aq4_cpu.v3"
 HIDDEN = 4096
 INTERMEDIATE = 12288
 QKV = 8192
@@ -646,7 +646,7 @@ def run_compare(args: argparse.Namespace) -> dict[str, Any]:
     if args.chain_include_final_norm_lm_head:
         expected_terminal_contract = [
             ("final_norm", "final_rmsnorm", "full_hidden", ()),
-            ("lm_head", "lm_head_projection", "fixed_logit_rows", LM_HEAD_SAMPLE_ROWS),
+            ("lm_head", "aq4_lm_head_projection", "fixed_logit_rows", LM_HEAD_SAMPLE_ROWS),
         ]
         if aq4["chain"].get("includes_final_norm_lm_head") is not True:
             raise ValueError("AQ4 chain report did not record requested terminal stages")
@@ -654,6 +654,8 @@ def run_compare(args: argparse.Namespace) -> dict[str, Any]:
             raise ValueError("AQ4 chain final norm tensor differs")
         if aq4["chain"].get("lm_head_tensor") != LM_HEAD_TENSOR:
             raise ValueError("AQ4 chain LM-head tensor differs")
+        if aq4["chain"].get("lm_head_weight_representation") != "aq4_dequantized_fixed_rows":
+            raise ValueError("AQ4 chain LM-head weight representation differs")
         if aq4["chain"].get("lm_head_sample_rows") != list(LM_HEAD_SAMPLE_ROWS):
             raise ValueError("AQ4 chain LM-head sample rows differ")
         report_terminals = aq4.get("terminal_summaries")
@@ -709,10 +711,11 @@ def run_compare(args: argparse.Namespace) -> dict[str, Any]:
             "post_rms_epsilon": aq4["chain"]["post_rms_epsilon"],
             "post_rms_epsilon_mode": aq4["chain"]["post_rms_epsilon_mode"],
             "includes_final_norm_lm_head": aq4["chain"]["includes_final_norm_lm_head"],
+            "lm_head_weight_representation": aq4["chain"].get("lm_head_weight_representation"),
         },
         "source_model": loader.identity(),
         "topology": {"source_config": source_topology, "selected_layers": expected_topology},
-        "comparison_contract": "Each AQ4 f32 decoder/final-norm output is compared immediately with the matching BF16 source output. LM head compares only fixed token rows. Only the current source layer sequence and per-stage aggregate/fixed-coordinate metrics are retained; no full all-layer hidden/state or full vocabulary tensor is retained.",
+        "comparison_contract": "Each AQ4 f32 decoder/final-norm output is compared immediately with the matching BF16 source output. LM head applies AQ4-dequantized fixed token rows only, then compares those sampled logits with BF16 source rows. Only the current source layer sequence and per-stage aggregate/fixed-coordinate metrics are retained; no full all-layer hidden/state or full vocabulary tensor is retained.",
         "layer_metrics": metrics,
         "terminal_metrics": terminal_metrics,
         "boundary_assessment": boundary_assessment,

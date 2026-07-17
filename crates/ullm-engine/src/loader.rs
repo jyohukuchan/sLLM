@@ -2,10 +2,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::package::{
-    PackageSummary, PassthroughPayloadBundle, ReferencedFile, ReferencedFileRole,
-    RowScaleOverrideEntry, TensorPayloadBundle, TensorSelector, list_tensor_payload_bundles,
-    select_exact_passthrough_payload_bundle, select_passthrough_payload_bundle,
-    select_tensor_payload_bundle,
+    list_tensor_payload_bundles, select_exact_passthrough_payload_bundle,
+    select_passthrough_payload_bundle, select_tensor_payload_bundle, PackageSummary,
+    PassthroughPayloadBundle, ReferencedFile, ReferencedFileRole, RowScaleOverrideEntry,
+    TensorPayloadBundle, TensorSelector,
 };
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
@@ -72,6 +72,19 @@ pub struct PassthroughF32Data {
 pub struct PassthroughF32Rows {
     pub values: Vec<f32>,
     pub dtype: String,
+    pub shape: Vec<u64>,
+    pub row_indices: Vec<usize>,
+    pub columns: usize,
+}
+
+/// A bounded set of dequantized AQ4 matrix rows.
+///
+/// Unlike `materialize_selected_aq4_matrix`, this never materializes the
+/// entire tensor.  It seeks only the packed-index and scale bytes required for
+/// the requested rows, which is important for the quantized LM head.
+#[derive(Debug, Clone)]
+pub struct Aq4F32Rows {
+    pub values: Vec<f32>,
     pub shape: Vec<u64>,
     pub row_indices: Vec<usize>,
     pub columns: usize,
@@ -261,6 +274,30 @@ pub fn read_named_passthrough_f32_rows(
     Ok(PassthroughF32Rows {
         values,
         dtype,
+        shape: bundle.shape,
+        row_indices: row_indices.to_vec(),
+        columns,
+    })
+}
+
+/// Dequantizes only explicitly requested rows from an AQ4 matrix payload.
+///
+/// The payload contract is intentionally the same `idx4_low_nibble_first` +
+/// `u8_scale_table_index` contract used by the runtime.  This reader exists
+/// for CPU diagnostics that need a few LM-head rows without allocating the
+/// multi-gigabyte full vocabulary matrix.
+pub fn read_named_aq4_f32_rows(
+    package_path: impl AsRef<Path>,
+    tensor_name: &str,
+    row_indices: &[usize],
+) -> Result<Aq4F32Rows, String> {
+    let selector = TensorSelector::Name(tensor_name.to_string());
+    let bundle = select_tensor_payload_bundle(package_path, &selector)
+        .map_err(|err| format!("failed to select AQ4 tensor {tensor_name}: {err}"))?;
+    let (columns, values) = read_aq4_payload_f32_rows(&bundle, row_indices)
+        .map_err(|err| format!("failed to read AQ4 rows for {tensor_name}: {err}"))?;
+    Ok(Aq4F32Rows {
+        values,
         shape: bundle.shape,
         row_indices: row_indices.to_vec(),
         columns,
@@ -769,6 +806,255 @@ pub fn materialize_selected_aq4_matrix(
         &bundle.row_scale_overrides,
     )?;
     Ok((rows, cols, output))
+}
+
+fn read_aq4_payload_f32_rows(
+    bundle: &TensorPayloadBundle,
+    row_indices: &[usize],
+) -> Result<(usize, Vec<f32>), String> {
+    let elements = usize::try_from(bundle.elements).map_err(|_| {
+        format!(
+            "AQ4 tensor {} is too large for this host",
+            bundle.tensor_name
+        )
+    })?;
+    let (rows, columns) = matrix_shape_rows_cols(&bundle.shape, elements)
+        .map_err(|err| format!("invalid AQ4 matrix shape: {err}"))?;
+    let group_size = bundle
+        .group_size
+        .filter(|value| *value > 0)
+        .ok_or_else(|| format!("AQ4 tensor {} has no valid group size", bundle.tensor_name))?;
+    let tensor_scale = bundle
+        .tensor_scale
+        .filter(|value| value.is_finite() && *value > 0.0)
+        .ok_or_else(|| {
+            format!(
+                "AQ4 tensor {} has no valid tensor scale",
+                bundle.tensor_name
+            )
+        })?;
+    if bundle.index_encoding.as_deref() != Some("idx4_low_nibble_first") {
+        return Err(format!(
+            "AQ4 tensor {} uses unsupported index encoding {:?}",
+            bundle.tensor_name, bundle.index_encoding
+        ));
+    }
+    if bundle.scale_encoding.as_deref() != Some("u8_scale_table_index") {
+        return Err(format!(
+            "AQ4 tensor {} uses unsupported scale encoding {:?}",
+            bundle.tensor_name, bundle.scale_encoding
+        ));
+    }
+    let scale_format = bundle
+        .scale_format
+        .as_deref()
+        .ok_or_else(|| format!("AQ4 tensor {} has no scale format", bundle.tensor_name))?;
+    let scale_values = crate::aq::scale_values(scale_format)?;
+    if scale_values.is_empty() {
+        return Err(format!(
+            "AQ4 tensor {} has an empty scale table",
+            bundle.tensor_name
+        ));
+    }
+
+    let expected_index_bytes = elements / 2 + usize::from(!elements.is_multiple_of(2));
+    let expected_groups = elements / group_size + usize::from(!elements.is_multiple_of(group_size));
+    if usize::try_from(bundle.groups).ok() != Some(expected_groups) {
+        return Err(format!(
+            "AQ4 tensor {} group count mismatch: declared {} expected {}",
+            bundle.tensor_name, bundle.groups, expected_groups
+        ));
+    }
+    verify_aq4_payload_file(
+        &bundle.index_file,
+        expected_index_bytes,
+        "index",
+        &bundle.tensor_name,
+    )?;
+    verify_aq4_payload_file(
+        &bundle.scale_file,
+        expected_groups,
+        "scale",
+        &bundle.tensor_name,
+    )?;
+    let codebook_bytes = 16 * std::mem::size_of::<f32>();
+    verify_aq4_payload_file(
+        &bundle.codebook_file,
+        codebook_bytes,
+        "codebook",
+        &bundle.tensor_name,
+    )?;
+
+    let mut codebook_file = File::open(&bundle.codebook_file.absolute_path).map_err(|err| {
+        format!(
+            "failed to open AQ4 codebook {}: {err}",
+            bundle.codebook_file.absolute_path.display()
+        )
+    })?;
+    let mut codebook_bytes_buf = [0_u8; 16 * std::mem::size_of::<f32>()];
+    codebook_file
+        .read_exact(&mut codebook_bytes_buf)
+        .map_err(|err| {
+            format!(
+                "failed to read AQ4 codebook {}: {err}",
+                bundle.codebook_file.absolute_path.display()
+            )
+        })?;
+    let codebook = codebook_bytes_buf
+        .chunks_exact(std::mem::size_of::<f32>())
+        .map(|bytes| f32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+        .collect::<Vec<_>>();
+
+    let mut row_scale_overrides = BTreeMap::new();
+    for entry in &bundle.row_scale_overrides {
+        if entry.row_index >= rows {
+            return Err(format!(
+                "AQ4 tensor {} row-scale override row {} is out of range 0..{}",
+                bundle.tensor_name, entry.row_index, rows
+            ));
+        }
+        row_scale_overrides.insert(entry.row_index, entry.scale);
+    }
+
+    let output_elements = row_indices.len().checked_mul(columns).ok_or_else(|| {
+        format!(
+            "AQ4 tensor {} requested row output element count overflows",
+            bundle.tensor_name
+        )
+    })?;
+    let mut values = Vec::new();
+    values.try_reserve(output_elements).map_err(|err| {
+        format!(
+            "failed to reserve AQ4 row output for tensor {}: {err}",
+            bundle.tensor_name
+        )
+    })?;
+    let mut index_file = File::open(&bundle.index_file.absolute_path).map_err(|err| {
+        format!(
+            "failed to open AQ4 index {}: {err}",
+            bundle.index_file.absolute_path.display()
+        )
+    })?;
+    let mut scale_file = File::open(&bundle.scale_file.absolute_path).map_err(|err| {
+        format!(
+            "failed to open AQ4 scale {}: {err}",
+            bundle.scale_file.absolute_path.display()
+        )
+    })?;
+
+    for row_index in row_indices {
+        if *row_index >= rows {
+            return Err(format!(
+                "AQ4 tensor {} row index {} is out of range 0..{}",
+                bundle.tensor_name, row_index, rows
+            ));
+        }
+        let row_start = row_index.checked_mul(columns).ok_or_else(|| {
+            format!(
+                "AQ4 tensor {} row byte offset overflows",
+                bundle.tensor_name
+            )
+        })?;
+        let row_end = row_start
+            .checked_add(columns)
+            .ok_or_else(|| format!("AQ4 tensor {} row end overflows", bundle.tensor_name))?;
+        let index_start = row_start / 2;
+        let index_end = row_end / 2 + usize::from(!row_end.is_multiple_of(2));
+        let index_len = index_end
+            .checked_sub(index_start)
+            .ok_or_else(|| format!("AQ4 tensor {} index range underflows", bundle.tensor_name))?;
+        let group_start = row_start / group_size;
+        let group_end = row_end / group_size + usize::from(!row_end.is_multiple_of(group_size));
+        let group_len = group_end
+            .checked_sub(group_start)
+            .ok_or_else(|| format!("AQ4 tensor {} scale range underflows", bundle.tensor_name))?;
+        let mut packed_indices = vec![0_u8; index_len];
+        let mut scale_indices = vec![0_u8; group_len];
+        seek_and_read_exact(
+            &mut index_file,
+            index_start,
+            &mut packed_indices,
+            "AQ4 index",
+            &bundle.tensor_name,
+        )?;
+        seek_and_read_exact(
+            &mut scale_file,
+            group_start,
+            &mut scale_indices,
+            "AQ4 scale",
+            &bundle.tensor_name,
+        )?;
+        let row_scale = row_scale_overrides
+            .get(row_index)
+            .copied()
+            .unwrap_or(1.0_f32);
+        for column in 0..columns {
+            let element = row_start.checked_add(column).ok_or_else(|| {
+                format!("AQ4 tensor {} element offset overflows", bundle.tensor_name)
+            })?;
+            let packed_byte = packed_indices[element / 2 - index_start];
+            let codebook_index = if element.is_multiple_of(2) {
+                usize::from(packed_byte & 0x0f)
+            } else {
+                usize::from(packed_byte >> 4)
+            };
+            let scale_index = usize::from(scale_indices[element / group_size - group_start]);
+            let scale_value = scale_values.get(scale_index).ok_or_else(|| {
+                format!(
+                    "AQ4 tensor {} scale index {} is outside the {} table",
+                    bundle.tensor_name, scale_index, scale_format
+                )
+            })?;
+            values.push(codebook[codebook_index] * scale_value * tensor_scale * row_scale);
+        }
+    }
+    Ok((columns, values))
+}
+
+fn verify_aq4_payload_file(
+    file: &ReferencedFile,
+    expected_bytes: usize,
+    role: &str,
+    tensor_name: &str,
+) -> Result<(), String> {
+    let expected_bytes = u64::try_from(expected_bytes).map_err(|_| {
+        format!("AQ4 tensor {tensor_name} expected {role} byte count does not fit u64")
+    })?;
+    if file.bytes != expected_bytes {
+        return Err(format!(
+            "AQ4 tensor {tensor_name} {role} byte count mismatch: declared {} expected {expected_bytes}",
+            file.bytes
+        ));
+    }
+    let actual_bytes = std::fs::metadata(&file.absolute_path)
+        .map_err(|err| {
+            format!(
+                "failed to stat AQ4 {role} {}: {err}",
+                file.absolute_path.display()
+            )
+        })?
+        .len();
+    if actual_bytes != expected_bytes {
+        return Err(format!(
+            "AQ4 tensor {tensor_name} {role} changed: expected {expected_bytes} got {actual_bytes}"
+        ));
+    }
+    Ok(())
+}
+
+fn seek_and_read_exact(
+    file: &mut File,
+    byte_offset: usize,
+    bytes: &mut [u8],
+    role: &str,
+    tensor_name: &str,
+) -> Result<(), String> {
+    let byte_offset = u64::try_from(byte_offset)
+        .map_err(|_| format!("{role} byte offset does not fit u64 for {tensor_name}"))?;
+    file.seek(SeekFrom::Start(byte_offset))
+        .map_err(|err| format!("failed to seek {role} for {tensor_name}: {err}"))?;
+    file.read_exact(bytes)
+        .map_err(|err| format!("failed to read {role} for {tensor_name}: {err}"))
 }
 
 fn apply_row_scale_overrides_to_materialized_matrix(
@@ -1673,7 +1959,7 @@ fn load_payload_file(
 mod tests {
     use super::*;
     use crate::host_bytes::{decode_f32_le_values, encode_f32_to_bytes};
-    use crate::package::{TensorSelector, select_tensor_payload_bundle};
+    use crate::package::{select_tensor_payload_bundle, TensorSelector};
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -2456,6 +2742,76 @@ mod tests {
     }
 
     #[test]
+    fn read_named_aq4_f32_rows_dequantizes_only_selected_rows() {
+        let root = std::env::temp_dir().join(format!(
+            "ullm-engine-loader-aq4-row-read-test-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(root.join("tensors")).unwrap();
+        fs::create_dir_all(root.join("codebooks")).unwrap();
+        // Low nibble is the even element and high nibble is the odd element.
+        fs::write(
+            root.join("tensors/head.idx4"),
+            [0x21_u8, 0x43, 0x65, 0x87, 0xa9, 0xcb],
+        )
+        .unwrap();
+        // e8m0 index 127 is exactly 1.0; each group contains two values.
+        fs::write(root.join("tensors/head.scale_u8"), [127_u8; 6]).unwrap();
+        let codebook_values: Vec<f32> = (0..16).map(|value| value as f32).collect();
+        fs::write(
+            root.join("codebooks/head.f32"),
+            encode_f32_to_bytes(&codebook_values),
+        )
+        .unwrap();
+        fs::write(
+            root.join("manifest.json"),
+            r#"{
+              "tensors": [{
+                "name": "lm_head.weight",
+                "dtype": "BF16",
+                "shape": [3, 4],
+                "family": "lm_head",
+                "candidate_id": "aq4_test",
+                "scale_format": "e8m0",
+                "group_size": 2,
+                "tensor_scale": 0.5,
+                "index_encoding": "idx4_low_nibble_first",
+                "scale_encoding": "u8_scale_table_index",
+                "elements": 12,
+                "groups": 6,
+                "index_file": "tensors/head.idx4",
+                "scale_file": "tensors/head.scale_u8",
+                "codebook_file": "codebooks/head.f32"
+              }],
+              "row_scale_overrides": {
+                "schema_version": "row-scale-overrides-v0.1",
+                "entries": [{
+                  "tensor_name": "lm_head.weight",
+                  "row_index": 1,
+                  "scale": 10.0,
+                  "source": "unit-test"
+                }]
+              }
+            }"#,
+        )
+        .unwrap();
+
+        let rows = read_named_aq4_f32_rows(&root, "lm_head.weight", &[2, 0, 1]).unwrap();
+        assert_eq!(rows.shape, vec![3, 4]);
+        assert_eq!(rows.row_indices, vec![2, 0, 1]);
+        assert_eq!(rows.columns, 4);
+        assert_eq!(
+            rows.values,
+            vec![4.5_f32, 5.0, 5.5, 6.0, 0.5, 1.0, 1.5, 2.0, 25.0, 30.0, 35.0, 40.0]
+        );
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn registry_deduplicates_shared_codebook_payloads() {
         let root = std::env::temp_dir().join(format!(
             "ullm-engine-loader-codebook-dedup-test-{}",
@@ -2602,18 +2958,14 @@ mod tests {
         assert_eq!(loaded.registry().len(), 1);
         assert_eq!(loaded.registry().total_payload_bytes(), 7);
         assert_eq!(loaded.registry().resident_payload_bytes(), 7);
-        assert!(
-            loaded
-                .registry()
-                .get_by_name("layer.0.attn.q_proj.weight")
-                .is_some()
-        );
-        assert!(
-            loaded
-                .registry()
-                .get_by_name("layer.0.attn.k_proj.weight")
-                .is_none()
-        );
+        assert!(loaded
+            .registry()
+            .get_by_name("layer.0.attn.q_proj.weight")
+            .is_some());
+        assert!(loaded
+            .registry()
+            .get_by_name("layer.0.attn.k_proj.weight")
+            .is_none());
 
         fs::remove_dir_all(root).unwrap();
     }
@@ -2737,22 +3089,16 @@ mod tests {
         );
         assert!(all.next().is_none());
 
-        assert!(
-            registry
-                .tensor_by_name("layer.0.attn.q_proj.weight")
-                .is_some()
-        );
-        assert!(
-            registry
-                .find_by_family_candidate("attn_k", "ak4_small")
-                .iter()
-                .any(|bundle| bundle.tensor_name == "layer.1.attn.k_proj.weight")
-        );
-        assert!(
-            registry
-                .find_by_family_candidate("attn_k", "aq4_small")
-                .is_empty()
-        );
+        assert!(registry
+            .tensor_by_name("layer.0.attn.q_proj.weight")
+            .is_some());
+        assert!(registry
+            .find_by_family_candidate("attn_k", "ak4_small")
+            .iter()
+            .any(|bundle| bundle.tensor_name == "layer.1.attn.k_proj.weight"));
+        assert!(registry
+            .find_by_family_candidate("attn_k", "aq4_small")
+            .is_empty());
 
         let t0_index = registry
             .get_loaded_payload(
@@ -2776,19 +3122,15 @@ mod tests {
             .unwrap();
         assert_eq!(t0_codebook.bytes, 2);
 
-        assert!(
-            registry
-                .get_loaded_payload(
-                    "layer.0.attn.q_proj.weight",
-                    ReferencedFileRole::Passthrough
-                )
-                .is_none()
-        );
-        assert!(
-            registry
-                .get_loaded_payload("missing", ReferencedFileRole::TensorIndex)
-                .is_none()
-        );
+        assert!(registry
+            .get_loaded_payload(
+                "layer.0.attn.q_proj.weight",
+                ReferencedFileRole::Passthrough
+            )
+            .is_none());
+        assert!(registry
+            .get_loaded_payload("missing", ReferencedFileRole::TensorIndex)
+            .is_none());
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -2851,11 +3193,9 @@ mod tests {
         )
         .unwrap();
 
-        assert!(
-            loaded
-                .tensor_by_name("layer.0.attn.q_proj.weight")
-                .is_some()
-        );
+        assert!(loaded
+            .tensor_by_name("layer.0.attn.q_proj.weight")
+            .is_some());
         assert_eq!(
             loaded.find_by_family_candidate("attn_k", "ak4_small").len(),
             1
@@ -2868,14 +3208,12 @@ mod tests {
             .unwrap();
         assert_eq!(payload.bytes, 1);
 
-        assert!(
-            loaded
-                .payload_by_name_and_role(
-                    "layer.0.attn.q_proj.weight",
-                    ReferencedFileRole::Passthrough
-                )
-                .is_none()
-        );
+        assert!(loaded
+            .payload_by_name_and_role(
+                "layer.0.attn.q_proj.weight",
+                ReferencedFileRole::Passthrough
+            )
+            .is_none());
         assert!(loaded.tensor_by_name("missing.tensor.weight").is_none());
 
         fs::remove_dir_all(root).unwrap();
