@@ -1,8 +1,16 @@
 # AQ4 fidelity root cause and fix plan v0.1
 
-Status: **Phase 3c完了、H5は否定された。** 2026-07-17、ユーザー承認のもとR9700 service-stop windowを計7回試行し(内訳: lock競合1回、RuntimeDirectoryPreserve欠如によるlock消失1回、amd-smi PATH不備1回、trace binary nlink=2による拒否1回、必須環境変数16件の網羅漏れ1回、Aq4MatvecBatch/ColdPrefillのload admission失敗(BM8 guard欠如)1回、最終成功1回)、最終windowでlayer0の10段階(dequant、gate、beta、recurrent state、attention residual、post norm、MLP、layer output)についてCPU参照実装とGPU kernel実装を直接比較した。**全10段階で相対L2は1e-7〜3e-6、cosineは1.0000000000で、f32丸め誤差の範囲に完全に収まった。GPU kernel実装はCPU参照実装と layer0 に関して実質的に同一であり、H5(GPU kernel固有バグ)は否定された。** サービス停止時間は最終windowで約8秒、全windowを通じてサービスは即座に正常復旧している。
+Status: **根本原因を特定した。Phase 4(fix実装)へ進む準備が整った。**
 
-**新たな気づき**: H1〜H9まで検証した仮説はすべてlayer0を起点にしていたが、layer0自体(BF16との比較でも0.042、CPU-GPU比較でも1e-6オーダー)は健全と確認された。しかし**layer 12〜31、final norm、LM headは一度も直接測定していない**。真の乖離(最終相対L2 0.615)はそこにあるはずである。次はPhase 3d(仮)として、CPU-onlyでのlayer chain測定をlayer 11から先へ拡張し、必要ならGPU側の追加windowも検討する。P2 fidelity calibrationはNo-Go凍結中。
+2026-07-17、Phase 3c（H5否定、GPU kernelはlayer0に関してCPU参照実装と丸め誤差レベルで一致）を経て、Phase 3dでCPU-only測定をlayer0から**全32 decoder層＋final RMSNorm＋LM head固定34行**まで一度のchainで拡張した（`journal/2026/07/17/aq4-phase3d-terminal-chain-extension-v0.1.md`）。
+
+結果、decoder層は0.075〜0.171の間で非単調に振動し続けるだけで、深さ方向の単純蓄積では最終相対L2 0.615を説明しない（H8再確認、引き続き棄却）。**しかし`layer31 → final RMSNorm`で相対L2が`0.127881 → 0.501033`（3.92倍）へ急増した。** LM head固定34行のsample相対L2は0.586050で、既知の最終値0.6151289249と規模が一致する。
+
+**根本原因を特定した**: source Qwen3.5の最終RMSNormは`normalized_hidden * (1.0 + raw_weight)`（additive convention）だが、AQ4 CPU参照実装/runtimeの`effective_rmsnorm_weight_values`（`crates/ullm-engine/src/loader.rs:125-143`）はテンソル名が`.input_layernorm.weight`等4種類の接尾辞に一致し、かつ`mean_abs < 0.75`の場合だけadditiveとして扱う。最終norm（`model.language_model.norm.weight`）はこの4接尾辞のどれにも一致せず、単純な`normalized_hidden * raw_weight`になっていた。source/packageのBF16 payloadはbit単位で完全一致しているため、データの問題ではなく実装の数式バグである。
+
+**重要な注意点**: 単純にこのテンソル名を4接尾辞リストへ追加するだけでは不十分である可能性が高い。最終normのraw weightの`mean_abs`実測値は1.14で、既存の`mean_abs < 0.75`という値ベースのヒューリスティックの閾値を上回っており、たとえ名前が一致してもこの追加条件で弾かれる。したがって、07/05の「additive RMSNorm」修正で採用された「値の統計量から推測する」ヒューリスティック自体が、この最終normには当てはまらない設計だったことが今回判明した。修正はPhase 4で慎重に設計する必要がある。
+
+P2 fidelity calibrationはNo-Go凍結中。
 
 **用語訂正(Phase 3bで判明)**: これまで「07/14 production run」「GPU実測」と呼んでいた最終相対L2`0.6151289249`の測定は、実際にはOpenAI Gatewayへの実requestではなく、production packageを直接loadしたM=1診断binary(`ullm-aq4-p2-path-oracle`/`ullm-aq4-differential-trace`、service停止済み)による管理された診断実行だった。以降この計画では「07/14 M=1診断」と呼ぶ。
 
@@ -280,26 +288,32 @@ Exit Criteria:
 
 - 段階別差分が量子化演算の理論上の丸め誤差（ほぼゼロに近いはず）に収まるか、有意な乖離がある場合はその段階が特定されている。 ✅ 丸め誤差の範囲に収まり、有意な乖離なし。
 
-### Phase 3d: layer0を超えた測定範囲の拡張(新設) — 次の焦点
+### Phase 3d: layer0を超えた測定範囲の拡張 — 完了、根本原因特定
 
-**背景**: H1〜H9まで検証した仮説はすべてlayer0を起点にしていた。しかしPhase 1（BF16 vs AQ4 CPU参照、layer0のみ）とPhase 3c（AQ4 CPU参照 vs AQ4 GPU kernel、layer0のみ）の両方で、layer0自体は健全と確認された。一方Phase 2/2cのCPU-only多層chainはlayer 0-11までしか測定しておらず、そこでは相対L2が0.08〜0.13で頭打ちだった。**layer 12〜31、final norm、LM headは、CPU・GPUいずれの方法でも一度も直接測定していない。** 07/14の最終相対L2 0.615はモデル全体の最終出力の値であり、この未測定範囲のどこかに真の乖離があるはずである。
+Status: **完了**（commit `061a9ffb`,`b2b846be`,`809e4551`,`ced8cdfe`、実行: `gpt-5.6-terra`/`max`、journal: [aq4-phase3d-terminal-chain-extension-v0.1.md](../../journal/2026/07/17/aq4-phase3d-terminal-chain-extension-v0.1.md)）
 
-Tasks:
+**背景**: H1〜H9まで検証した仮説はすべてlayer0を起点にしていた。しかしPhase 1・Phase 3cの両方で、layer0自体は健全と確認された。一方Phase 2/2cのCPU-only多層chainはlayer 0-11までしか測定しておらず、そこでは相対L2が0.08〜0.13で頭打ちだった。**layer 12〜31、final norm、LM headは、CPU・GPUいずれの方法でも一度も直接測定していなかった。**
 
-1. Phase 2/2cのCPU-only多層chain診断を、layer 12〜31・final norm・LM headまで拡張する。全32層を一度に測定するとメモリ・時間が線形に増えるため、必要に応じて分割measurement（例: layer 12-19、20-27、28-31+final norm+LM head）を検討する。
-2. 拡張した範囲で、相対L2が0.615に向けて明確に増加する境界（layer）を特定する。
-3. 境界が見つかったら、その層をPhase 3cと同様の単発GPU windowでCPU-GPU比較し、GPU kernel固有の問題か、量子化誤差の深さ方向蓄積(H8の再検討)か、final norm/LM head特有の問題かを切り分ける。
-4. GPU windowが必要な場合は、Phase 3cで確立した17 guard・nlink=1 staging・RuntimeDirectoryPreserve=yes・R9700限定guardの仕組みをそのまま再利用する（新たな試行錯誤は最小限で済むはずである）。
+### 結果
 
-Deliverables:
+全32 decoder層＋final RMSNorm＋LM head固定34行を、分割せず一度のCPU-only連続chainで測定した（有効run: 6分48秒、最大RSS 330,744 KiB、swap 0）。
 
-- layer 0-31・final norm・LM headの相対L2成長曲線（CPU-only）
-- 乖離が明確になる境界層の特定
-- 必要に応じてその層のCPU-GPU比較report
+- decoder層（layer 0-31）: 相対L2は0.075〜0.171の範囲で非単調に振動し続けるだけで、深さ方向の単純蓄積では最終相対L2 0.615を説明しない。**H8は再確認され、引き続き棄却。**
+- **`layer31 → final RMSNorm`で相対L2が`0.127881 → 0.501033`（+0.373152、3.92倍）へ急増。**
+- LM head固定34行のsample相対L2は0.586050。full-vocabularyではないため0.615との同一視はしていないが、規模は一致する。
+- self-attention層（L19, L27等）に局所的な上昇はあるが持続的な主因ではない。
+
+### 根本原因
+
+source Qwen3.5の最終RMSNormは`normalized_hidden * (1.0 + raw_weight)`（`transformers/models/qwen3_5/modeling_qwen3_5.py:736-750,1143-1147`、additive convention）。AQ4側の`effective_rmsnorm_weight_values`（`crates/ullm-engine/src/loader.rs:125-143`）は、テンソル名が`.input_layernorm.weight`/`.post_attention_layernorm.weight`/`.self_attn.q_norm.weight`/`.self_attn.k_norm.weight`の4接尾辞のいずれかに一致し、**かつ**`mean_abs < 0.75`の場合だけadditive（`+1.0`）として扱う。最終norm（`model.language_model.norm.weight`）はこの4接尾辞のどれにも一致せず、単純な`normalized_hidden * raw_weight`になっていた。
+
+source/packageのBF16 payloadはbit単位で完全一致（SHA-256一致確認済み）なので、データではなく実装の数式バグである。raw weightの統計値はmean_abs 1.14・range[-0.22, 1.99]で、（1+weight）適用時のmean_abs 2.14・range[0.78, 2.99]と大きく異なる分布になる。
+
+**重要な注意点**: 最終normのraw weight mean_abs（1.14）は既存の`mean_abs < 0.75`ヒューリスティック閾値を上回っている。したがって、テンソル名を4接尾辞リストへ追加するだけでは、この値ベースのヒューリスティックに阻まれて修正が効かない可能性が高い。07/05の「additive RMSNorm」修正が採用した「値の統計量から推測する」設計そのものが、この最終normには当てはまらなかったことが今回判明した。fix実装はPhase 4で慎重に設計する。
 
 Exit Criteria:
 
-- 最終相対L2 0.615に至る経路上で、乖離が集中的に発生する層または段階が特定されている。
+- 最終相対L2 0.615に至る経路上で、乖離が集中的に発生する層または段階が特定されている。 ✅ `layer31 → final RMSNorm`境界、原因はRMSNorm weight適用式の欠落。
 
 ### Phase 3c-prep: GPU window承認待ちのCPU-only準備作業 — 完了
 
@@ -323,29 +337,40 @@ Exit Criteria:
 
 ## Phase 4: 原因分類とfix設計
 
-Phase 2〜3の結果に応じて、次のいずれかのfix pathを選ぶ。
+Phase 2〜3の結果に応じて、次のいずれかのfix pathを選ぶ。**Phase 3dの結果、Path Gが確定した根本原因である。** Path A〜Fはlayer0起点の仮説として棄却・否定されたが、記録として残す。
+
+### Path G: 最終RMSNormのadditive weight適用漏れ（Phase 3dで確定） — 採用
+
+`crates/ullm-engine/src/loader.rs`の`uses_additive_rmsnorm_weight`が、最終norm（`model.language_model.norm.weight`）をadditive対象として認識していない。修正方針の選択肢:
+
+1. **テンソル名の接尾辞リストへ追加するだけでは不十分**（raw weightのmean_abs 1.14が既存の`< 0.75`ヒューリスティックに阻まれる）。
+2. 選択肢A: 最終normのテンソル名を明示的に特別扱いし、値ベースのヒューリスティックを迂回してadditiveを強制する。
+3. 選択肢B: `mean_abs < 0.75`という値ベースの推測ヒューリスティックそのものを、テンソル名（アーキテクチャ上のRMSNorm識別）だけに基づく判定へ置き換える。source Qwen3.5の実装を確認し、全RMSNorm系テンソル（per-layer + final）が一律でadditive conventionを使うかどうかを検証してから決めること。もし全RMSNormが一律additiveなら、値ヒューリスティックは不要になり、より頑健な修正になる。
+4. SQ8_0も同じ`loader.rs`のヘルパーを共有している可能性があるため、修正前にSQ8側の呼び出し箇所・releaseへの影響を確認すること（Non-Goals/Risks参照）。
+
+### Path A: runtime合成ロジックの実装漏れ（H1、GPU kernel固有として再検証された場合） — 不採用（H5はPhase 3cで否定）
 
 ### Path A: runtime合成ロジックの実装漏れ（H1、GPU kernel固有として再検証された場合）
 
 - Phase 3cでGPU kernel固有の欠落演算が見つかった場合、該当箇所をGPU kernel source（`runtime/src/ullm_runtime_hiprtc_sources.inc`等）に修正として実装する。
 
-### Path B: dequant/row-scale適用のバグ（H2、GPU kernel固有として再検証された場合）
+### Path B: dequant/row-scale適用のバグ（H2、GPU kernel固有として再検証された場合） — 不採用（H5はPhase 3cで否定）
 
 - GPU kernel内でのscale展開・group境界処理を、CPU参照実装（Phase 1で健全性確認済み）と突き合わせて修正する。
 
-### Path C: recurrent/conv state初期化のバグ（H3、GPU kernel固有として再検証された場合）
+### Path C: recurrent/conv state初期化のバグ（H3、GPU kernel固有として再検証された場合） — 不採用（H5はPhase 3cで否定）
 
 - GPU kernel側のstate初期化コードをCPU参照実装と突き合わせて修正する。
 
-### Path D: AQ4レイアウト/RoPEのバグ（H4、GPU kernel固有として再検証された場合）
+### Path D: AQ4レイアウト/RoPEのバグ（H4、GPU kernel固有として再検証された場合） — 不採用（H5はPhase 3cで否定）
 
 - GPU kernel側のQKV分割・転置箇所のstride/axis解釈をCPU参照実装と突き合わせて修正する。
 
-### Path E: 診断harnessが発見した実production構成差の修正（H6）
+### Path E: 診断harnessが発見した実production構成差の修正（H6） — 不採用（H6はPhase 3bで棄却）
 
 - Phase 3bで発見した構成差（chunk境界、warm state、position handling等）を、production driver側の実装修正として反映する。
 
-### Path F: 量子化フォーマットの深さ方向蓄積が理論的限界（H8）
+### Path F: 量子化フォーマットの深さ方向蓄積が理論的限界（H8） — 不採用（H8はPhase 2c/3dで棄却）
 
 - Non-Goalsに従い、この計画を凍結し、quantizer policy改定を別計画として起案する。scoped fix（特定層/テンソルの精度向上）で対応可能と判断した場合は、Phase 3aの結論に基づき最小限の量子化policy変更を本計画の範囲内で実装する。
 
