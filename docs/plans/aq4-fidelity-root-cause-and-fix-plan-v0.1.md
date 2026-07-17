@@ -1,6 +1,6 @@
 # AQ4 fidelity root cause and fix plan v0.1
 
-Status: Phase 1・Phase 2・Phase 2b・Phase 3b・Phase 3c-prep完了。H8・H6とも棄却方向、H5(GPU kernel固有)が有力(未確証)。2026-07-17朝の1回目Phase 3c試行は、AQ4本番service(`ullm-openai.service`)がR9700 lockを保持中のため取得失敗で安全停止(サービス操作なし、evidenceは記録済み)。同日、ユーザーの追加承認に基づく**唯一のservice一時停止 window**を実行したが、unitの`RuntimeDirectoryPreserve=no`により停止直後に`/run/ullm/r9700.lock`がENOENTとなった。既存regular fileのみを使うlock契約を守り、GPU traceは起動せず、一回の`systemctl start`でservice/worker/GPU/KFD/manifest/healthzを正常復旧した。したがってH5/H9の今回の実負荷判定は未実施のまま。P2 fidelity calibrationはNo-Go凍結中。
+Status: Phase 1・Phase 2・Phase 2b・Phase 3b・Phase 3c-prep完了。H8・H6とも棄却方向、H5(GPU kernel固有)が有力(未確証)。2026-07-17朝の1回目Phase 3c試行は、AQ4本番service(ullm-openai.service)がR9700 lockを保持中のため取得失敗で安全停止(サービス操作なし、evidenceは記録済み)。同日の最初のservice一時停止 window は RuntimeDirectoryPreserve=no により stop 直後に lock が ENOENT となった。これを最小 drop-in の RuntimeDirectoryPreserve=yes と daemon-reload で修正した後、別途承認された一回の window では、既存 lock は同一 inode のまま存続し nonblocking flock に成功したため、systemd lifecycle 側の根本原因は解消された。しかし R9700 HIP guard の gfx1201 判定後、同一 BDF の ASIC cross-check が runuser 下の amd-smi command-path 不備で完了しなかった。single-use 契約に従い trace/telemetry を起動せず一回だけ service を復旧し、service/worker/GPU/KFD/manifest/healthz は正常である。従って H5/H9 の実負荷判定は未実施のまま。P2 fidelity calibrationはNo-Go凍結中。
 
 **用語訂正(Phase 3bで判明)**: これまで「07/14 production run」「GPU実測」と呼んでいた最終相対L2`0.6151289249`の測定は、実際にはOpenAI Gatewayへの実requestではなく、production packageを直接loadしたM=1診断binary(`ullm-aq4-p2-path-oracle`/`ullm-aq4-differential-trace`、service停止済み)による管理された診断実行だった。以降この計画では「07/14 M=1診断」と呼ぶ。
 
@@ -237,9 +237,9 @@ Status: **完了**（commit `4d04ff1d`、実行: `gpt-5.6-terra`/`max`、journal
 
 Exit Criteria: 構成差が実測誤差に寄与するかどうかが判定されている。 ✅ H6は棄却、H5が有力化。
 
-### Phase 3c: AQ4 CPU参照 vs AQ4 GPU kernelの段階別差分(単発承認GPU window) — service window完了、数値測定は未成立
+### Phase 3c: AQ4 CPU参照 vs AQ4 GPU kernelの段階別差分(単発承認GPU window) — lock lifecycle 修正・実証済み、数値測定は未成立
 
-Status: H8・H6の棄却によりH5が最有力仮説として確定。2026-07-17のサービス停止を伴う単発windowでは、停止前baselineは正常、`systemctl stop`/`start`は各一回成功、復旧確認も成功した。しかし`RuntimeDirectory=ullm`かつ`RuntimeDirectoryPreserve=no`のため、stop後の`/run/ullm/r9700.lock`はENOENTであり、既存regular fileのnonblocking取得というrunbook契約を満たさなかった。lock作成・修復をせずtraceを起動しなかったため、30 recordのGPU段階比較、H5、実負荷下のH9はいずれも判定不能である。evidenceは[service-stop-window-v0.2](../../benchmarks/results/2026-07-17/qwen35-9b-aq4-production-opt-v0.1/p2/aq4-phase3c-gpu-stage-trace-v0.1/service-stop-window-v0.2/)とjournalに保存する。
+Status: H8・H6の棄却によりH5が最有力仮説として確定。2026-07-17の最初の service-stop window では RuntimeDirectory=ullm / RuntimeDirectoryPreserve=no のため stop 後の lock が ENOENT となり、trace を起動しなかった。その根本原因を RuntimeDirectoryPreserve=yes drop-in で修正して daemon-reload した後の一回の window では、stop 後も既存 regular lock が同一 device/inode で存続し、no-create nonblocking flock に成功した。HIP-only guard は R9700 の gfx1201 / 0000:47:00.0 を確認したが、同一 BDF の amd-smi ASIC cross-check は runuser の default PATH に amd-smi がなく未完了だった。guard 全体を通過しなかったため trace と H9 telemetry を開始せず、同一 window 内の修正・再試行はしなかった。stop/start は各一回成功し、復旧後は service/worker/GPU/KFD/manifest/healthz と lock owner が正常である。よって 30 record の GPU 段階比較、H5、実負荷下の H9 は依然判定不能である。evidence は [service-stop-window-v0.2](../../benchmarks/results/2026-07-17/qwen35-9b-aq4-production-opt-v0.1/p2/aq4-phase3c-gpu-stage-trace-v0.1/service-stop-window-v0.2/)、service-stop-window-v0.3-runtime-directory-preserve/ と journal に保存する。
 
 BF16 sourceとの比較ではなく、**同じAQ4量子化のCPU参照実装とGPU kernel実装を直接比較**することで、量子化近似誤差の問題とGPU実装バグの問題を完全に分離する。
 
@@ -406,4 +406,4 @@ Phase 2〜3の結果に応じて、次のいずれかのfix pathを選ぶ。
 2. ~~Phase 2b: post-norm epsilon control比較~~ **完了**。epsilon差は無視できる規模。
 3. ~~Phase 3b（診断harnessと実productionの構成差監査、H6、CPU-only）~~ **完了**。H6棄却、H5（GPU kernel固有）が有力化。07/14測定の実体はGateway実requestではなくM=1診断だったことも判明。
 4. ~~Phase 3c-prep（fused kernel source vs CPU参照実装のコードレビュー、trace tooling拡張、GPU window実行手順の事前文書化）~~ **完了**。高確信度バグは未発見（H5未確証のまま）だが、副次的に2件の実装差（silent scale-index skip、条件付きRPB cache不整合）を記録し、runbookも完成させた。
-5. **Phase 3cの承認済みservice windowは消費済み。** lock pathをservice lifecycle外へ移す、またはstop後の新規lock substrateを許可することは、既存runbookの「既存regular fileのみ」契約と別の設計変更になる。その必要性を示すevidenceは得たが、本計画では実装・再試行を行わない。追加windowまたはlock lifecycle設計を扱うには、別途明示承認が必要である。
+5. **Phase 3cの承認済みservice windowは消費済み。** RuntimeDirectoryPreserve=yes により lock lifecycle の欠陥は修正・実証されたが、GPU trace は ASIC cross-check の command-path 不備で未実行である。本計画では command 修正・再試行を行わない。追加windowには別途明示承認が必要であり、その前に runuser 下でも絶対 path /opt/rocm/bin/amd-smi を解決できることを CPU-only/read-only で preflight する。
