@@ -8,7 +8,7 @@
 
 この手順はserviceを停止・起動・再起動せず、systemd、active manifest、P3 harnessを変更しない。trace binaryは既存の`/etc/ullm/served-models/active.json`を**read-onlyでhashしてidentityに記録するだけ**である。lockが利用できない場合、GPUを使わず失敗として終了する。GPU windowの外部調整はこのrunbookの権限外である。
 
-追加の承認条件として、traceの前にR9700対象だけを機械的に確認する。`tools/query-hip-device-identity.cpp`をhost-onlyでbuildし、`HIP_VISIBLE_DEVICES=1` / `ULLM_HIP_VISIBLE_DEVICES=1`のfiltered HIP ordinal 0について、可視GPU数、architecture、name、PCI BDFを読み取り専用で取得する。このtoolはdevice memoryの確保、stream作成、kernel launchを行わない。`gfx1201`でない、可視GPU数が1台でない、name/BDFが欠ける場合は終了し、traceを起動しない。続けて、そのHIP BDFを明示した`amd-smi --gpu "$R9700_BDF"`だけでASIC identityを取得し、同じBDF・`gfx1201`・R9700のPCI device ID `0x7551`をassertする。`amd-smi list`、対象指定なしの`amd-smi`、V620を対象とする問い合わせは使用しない。
+追加の承認条件として、traceの前にR9700対象だけを機械的に確認する。`tools/query-hip-device-identity.cpp`をhost-onlyでbuildし、`HIP_VISIBLE_DEVICES=1` / `ULLM_HIP_VISIBLE_DEVICES=1`のfiltered HIP ordinal 0について、可視GPU数、architecture、name、PCI BDFを読み取り専用で取得する。このtoolはdevice memoryの確保、stream作成、kernel launchを行わない。`gfx1201`でない、可視GPU数が1台でない、name/BDFが欠ける場合は終了し、traceを起動しない。続けて、そのHIP BDFを明示した`/opt/rocm/bin/amd-smi --gpu "$R9700_BDF"`だけでASIC identityを取得し、同じBDF・`gfx1201`・R9700のPCI device ID `0x7551`をassertする。`amd-smi list`、対象指定なしの`amd-smi`、V620を対象とする問い合わせは使用しない。service-stop driverが使う`runuser`のdefault PATHには`/opt/rocm/bin`が含まれないため、ASIC cross-checkとH9 telemetryはすべてこの絶対pathを使う。PATHを変更・継承して解決してはならない。
 
 H9（ハードウェア固有要因）のため、同じBDFだけを対象にECC/error block、bad page、clock、power、temperature、DPM performance level、driver/IFWI、firmwareをread-onlyで実行前・実行後に保存する。利用不可のmetricはexit codeとstderrを保存して「未取得」と記録するが、設定変更やmonitoring daemonの導入は行わない。単発windowで決定性や他GPU比較を検証しない。
 
@@ -23,8 +23,8 @@ H9（ハードウェア固有要因）のため、同じBDFだけを対象にECC
 | CPU hybrid input | `benchmarks/results/2026-07-17/qwen35-9b-aq4-production-opt-v0.1/p2/aq4-layer0-hybrid-diagnostic-v0.1/input/hybrid-input.jsonl` |
 | R9700 mapping | physical card 2 → `HIP_VISIBLE_DEVICES=1` → filtered HIP ordinal 0 → global runtime device index `1` → `gfx1201` |
 | R9700 HIP guard source | `tools/query-hip-device-identity.cpp`（host-only `g++` build、filtered ordinal 0だけをquery） |
-| R9700 ASIC cross-check | HIP guardが返すPCI BDFを`amd-smi static --gpu`へ渡し、`gfx1201` / `0x7551` / non-empty nameをassertする |
-| H9 telemetry | 同じBDFだけに`amd-smi metric`（ECC/clock/power/temperature/DPM）、`bad-pages`、`static`（driver/IFWI）、`firmware`をread-onlyで実行前・後に保存する |
+| R9700 ASIC cross-check | HIP guardが返すPCI BDFを`/opt/rocm/bin/amd-smi static --gpu`へ渡し、`gfx1201` / `0x7551` / non-empty nameをassertする |
+| H9 telemetry | 同じBDFだけに`/opt/rocm/bin/amd-smi metric`（ECC/clock/power/temperature/DPM）、`bad-pages`、`static`（driver/IFWI）、`firmware`をread-onlyで実行前・後に保存する |
 | lock | `/run/ullm/r9700.lock`（既存regular fileだけをnonblockingで取得） |
 | result root | `benchmarks/results/2026-07-17/qwen35-9b-aq4-production-opt-v0.1/p2/aq4-phase3c-gpu-stage-trace-v0.1` |
 
@@ -46,7 +46,7 @@ stage順は`qkv_dequant_row_scale`、`z_dequant_row_scale`、`recurrent_gate`、
 - 07/16停止中P3 harnessのpath、script、output、環境変数、`rocprof`を使用しない。出力は上表の独立した`p2/aq4-phase3c-gpu-stage-trace-v0.1`だけに書く。
 - 既存output root、`gpu-trace`、`cpu-reference`、comparison outputが存在しないこと。既存evidenceを削除・上書きしない。
 - RPBはprocess起動前に固定する。`ULLM_AQ4_MATVEC_QKV_Z_GATE_BETA_RPB=4`、`ULLM_AQ4_MATVEC_SILU_MUL_RPB=8`、`ULLM_AQ4_MATVEC_ADD_RPB=8`をtrace childだけに与え、実行中に変えない。これはcompile-time RPBとlaunch-time RPBがずれる既知の条件付きcache bugを除外するためである。
-- `tools/query-hip-device-identity.cpp`がtrackedかつHEADに対してcleanであり、host-only `g++`と`amd-smi`が利用可能であること。guardは`HIP_VISIBLE_DEVICES=1`で可視化されたordinal 0だけを問い合わせ、返ったPCI BDF以外を`amd-smi`へ渡さない。
+- `tools/query-hip-device-identity.cpp`がtrackedかつHEADに対してcleanであり、host-only `g++`と`/opt/rocm/bin/amd-smi`が利用可能であること。guardは`HIP_VISIBLE_DEVICES=1`で可視化されたordinal 0だけを問い合わせ、返ったPCI BDF以外を`/opt/rocm/bin/amd-smi`へ渡さない。
 - HIP guardまたはASIC cross-checkが失敗した場合、CPU reference、lock取得、trace binary、比較器へ進まない。guard evidenceだけを保存して終了する。health telemetryはguard成功後だけに採取する。
 
 ## 追加承認済みの service 一時停止 window（2026-07-17、今回だけ）
@@ -87,7 +87,7 @@ lock probe が regular file でない、path/親component がない、open/flock
 
 lock probe が成功した場合だけ、次の順番を厳守する。
 
-1. 既存blockと同一の `HIP_VISIBLE_DEVICES=1` / `ULLM_HIP_VISIBLE_DEVICES=1` で、事前build済みの HIP guard を一回実行する。同じ HIP BDF だけを `amd-smi static --gpu "$R9700_BDF" --asic --bus --json` に渡し、`gfx1201` / `0x7551` / BDF 一致を assert する。guard failure なら telemetry/trace は実行せず restore する。
+1. 既存blockと同一の `HIP_VISIBLE_DEVICES=1` / `ULLM_HIP_VISIBLE_DEVICES=1` で、事前build済みの HIP guard を一回実行する。同じ HIP BDF だけを `/opt/rocm/bin/amd-smi static --gpu "$R9700_BDF" --asic --bus --json` に渡し、`gfx1201` / `0x7551` / BDF 一致を assert する。root driverからの全guard queryは `runuser -u homelab1 -- /usr/bin/env HOME=/home/homelab1 HIP_VISIBLE_DEVICES=1 ULLM_HIP_VISIBLE_DEVICES=1 ...` の同一境界を使い、AMD-SMIだけは絶対pathで実行する。guard failure なら telemetry/trace は実行せず restore する。
 2. 既存の `capture_r9700_health before` と同じ、BDF指定済み4 commandを一回採る。対象外GPUへの query はしない。
 3. 既存blockの `flock -n` 内 trace command を、この新しい `OUT/gpu-trace` に対して一回だけ実行する。固定fixture、3 context、RPB、7 fusion guard、`HIP_VISIBLE_DEVICES=1` は変更しない。lock probe 成功後であっても、この trace 内 `flock -n` が失敗した場合は trace command を起動せず、retry せず restore する。
 4. trace の exit code にかかわらず、既存の `capture_r9700_health after` を一回採り、直ちに restore する。trace が terminal frame/manifest/SHA256SUMS を満たす成功時だけ、既存の checksum、manifest assert、CPU/GPU 30 record 比較を実行する。
@@ -101,7 +101,7 @@ lock probe が成功した場合だけ、次の順番を厳守する。
 次を `service-window-post-restore.json` として保存・判定する。
 
 - `ullm-openai.service` が `active/running`、MainPID が正、`NRestarts` が停止前値から増えていないこと。明示的 stop/start により MainPID/worker PID が変わることは期待どおりである。
-- 新しい worker が service cgroup に存在し、対象 worker の `/dev/kfd` FD を確認できること。HIP guard が確認した R9700 BDF だけに `amd-smi process --gpu "$R9700_BDF" --general --json` を実行し、worker PID を owner として記録する。KFD はその worker の `/sys/class/kfd/kfd/proc/<worker-pid>/vram_51545` を読むだけに留め、全GPU/全PID scan はしない。
+- 新しい worker が service cgroup に存在し、対象 worker の `/dev/kfd` FD を確認できること。HIP guard が確認した R9700 BDF だけに `/opt/rocm/bin/amd-smi process --gpu "$R9700_BDF" --general --json` を実行し、worker PID を owner として記録する。KFD はその worker の `/sys/class/kfd/kfd/proc/<worker-pid>/vram_51545` を読むだけに留め、全GPU/全PID scan はしない。
 - active manifest SHA-256 が停止前 snapshot と完全一致すること。
 - container namespace の `/healthz` が正常応答すること。`/readyz` または worker/GPU/KFD owner が失敗した場合も復旧確認失敗として扱う。
 
@@ -125,6 +125,7 @@ OUT="$REPO/benchmarks/results/2026-07-17/qwen35-9b-aq4-production-opt-v0.1/p2/aq
 LOCK=/run/ullm/r9700.lock
 R9700_HIP_GUARD_SOURCE="$REPO/tools/query-hip-device-identity.cpp"
 R9700_HIP_GUARD_BIN="$OUT/query-hip-device-identity"
+AMD_SMI=/opt/rocm/bin/amd-smi
 
 test -d "$REPO"
 test -d "$PACKAGE"
@@ -136,7 +137,7 @@ test ! -L "$LOCK"
 test ! -e "$OUT"
 test -f "$R9700_HIP_GUARD_SOURCE"
 command -v g++ >/dev/null
-command -v amd-smi >/dev/null
+test -x "$AMD_SMI"
 git -C "$REPO" ls-files --error-unmatch tools/query-hip-device-identity.cpp >/dev/null
 git -C "$REPO" diff --quiet HEAD -- tools/query-hip-device-identity.cpp
 git -C "$REPO" diff --cached --quiet HEAD -- tools/query-hip-device-identity.cpp
@@ -214,7 +215,7 @@ print(bdf)
 PY
 )"
 
-amd-smi static --gpu "$R9700_BDF" --asic --bus --json \
+"$AMD_SMI" static --gpu "$R9700_BDF" --asic --bus --json \
   > "$OUT/r9700-amd-smi-identity.json" \
   2> "$OUT/r9700-amd-smi-identity.stderr"
 
@@ -298,13 +299,13 @@ capture_readonly_telemetry() {
 capture_r9700_health() {
   local phase=$1
   capture_readonly_telemetry "gpu-health-${phase}-metrics" \
-    amd-smi metric --gpu "$R9700_BDF" --ecc --ecc-blocks --clock --power --temperature --perf-level --json
+    "$AMD_SMI" metric --gpu "$R9700_BDF" --ecc --ecc-blocks --clock --power --temperature --perf-level --json
   capture_readonly_telemetry "gpu-health-${phase}-bad-pages" \
-    amd-smi bad-pages --gpu "$R9700_BDF" --pending --retired --un-res --json
+    "$AMD_SMI" bad-pages --gpu "$R9700_BDF" --pending --retired --un-res --json
   capture_readonly_telemetry "gpu-health-${phase}-static" \
-    amd-smi static --gpu "$R9700_BDF" --driver --ifwi --limit --json
+    "$AMD_SMI" static --gpu "$R9700_BDF" --driver --ifwi --limit --json
   capture_readonly_telemetry "gpu-health-${phase}-firmware" \
-    amd-smi firmware --gpu "$R9700_BDF" --ucode-list --json
+    "$AMD_SMI" firmware --gpu "$R9700_BDF" --ucode-list --json
   python3 - "$OUT" "$phase" "$R9700_BDF" <<'PY'
 import datetime
 import hashlib
