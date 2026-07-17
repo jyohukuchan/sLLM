@@ -122,20 +122,52 @@ pub struct PassthroughPayloadVerification {
     pub verified_chunks: u64,
 }
 
-pub fn effective_rmsnorm_weight_values(tensor_name: &str, values: &[f32]) -> Vec<f32> {
-    if uses_additive_rmsnorm_weight(tensor_name, values) {
+/// Applies Qwen3.5's documented additive RMSNorm convention.
+///
+/// This is deliberately architecture-specific: Qwen3 uses the same decoder
+/// tensor suffixes with a direct (non-additive) convention.  Callers must
+/// therefore use this only after selecting the Qwen3.5 package/runtime path.
+pub fn effective_qwen35_rmsnorm_weight_values(tensor_name: &str, values: &[f32]) -> Vec<f32> {
+    if uses_additive_rmsnorm_weight(tensor_name) {
         values.iter().map(|value| value + 1.0_f32).collect()
     } else {
         values.to_vec()
     }
 }
 
-fn uses_additive_rmsnorm_weight(tensor_name: &str, values: &[f32]) -> bool {
-    let is_rmsnorm_tensor = tensor_name.ends_with(".input_layernorm.weight")
+/// Returns whether a Qwen3.5 decoder/final RMSNorm tensor uses `1 + weight`.
+///
+/// Qwen3.5's `Qwen3_5RMSNorm` is used uniformly for decoder input/post
+/// norms, attention q/k norms, and the final norm.  The linear-attention
+/// gated norm is intentionally excluded because its source implementation
+/// multiplies by its raw weight directly.
+fn uses_additive_rmsnorm_weight(tensor_name: &str) -> bool {
+    if tensor_name == "model.language_model.norm.weight" {
+        return true;
+    }
+    if !tensor_name.starts_with("model.language_model.layers.") {
+        return false;
+    }
+    tensor_name.ends_with(".input_layernorm.weight")
         || tensor_name.ends_with(".post_attention_layernorm.weight")
         || tensor_name.ends_with(".self_attn.q_norm.weight")
-        || tensor_name.ends_with(".self_attn.k_norm.weight");
-    if !is_rmsnorm_tensor || values.is_empty() {
+        || tensor_name.ends_with(".self_attn.k_norm.weight")
+}
+
+/// Preserves the legacy value-inference behavior for callers that do not yet
+/// carry an architecture contract.  New Qwen3.5 AQ4 paths must use
+/// `effective_qwen35_rmsnorm_weight_values` instead, so their semantics never
+/// depend on weight statistics.
+pub fn effective_rmsnorm_weight_values(tensor_name: &str, values: &[f32]) -> Vec<f32> {
+    if uses_legacy_additive_rmsnorm_weight(tensor_name, values) {
+        values.iter().map(|value| value + 1.0_f32).collect()
+    } else {
+        values.to_vec()
+    }
+}
+
+fn uses_legacy_additive_rmsnorm_weight(tensor_name: &str, values: &[f32]) -> bool {
+    if !uses_additive_rmsnorm_weight(tensor_name) || values.is_empty() {
         return false;
     }
     let mean_abs = values.iter().map(|value| value.abs()).sum::<f32>() / values.len() as f32;
@@ -2568,7 +2600,31 @@ mod tests {
     }
 
     #[test]
-    fn effective_rmsnorm_weight_values_handles_qwen35_additive_weights() {
+    fn effective_qwen35_rmsnorm_weight_values_uses_name_only_for_all_additive_norms() {
+        let values = [1.14, -0.25];
+        for tensor_name in [
+            "model.language_model.layers.6.input_layernorm.weight",
+            "model.language_model.layers.6.post_attention_layernorm.weight",
+            "model.language_model.layers.7.self_attn.q_norm.weight",
+            "model.language_model.layers.7.self_attn.k_norm.weight",
+            "model.language_model.norm.weight",
+        ] {
+            assert_eq!(
+                effective_qwen35_rmsnorm_weight_values(tensor_name, &values),
+                vec![values[0] + 1.0_f32, values[1] + 1.0_f32],
+                "{tensor_name} must use Qwen3.5's additive convention"
+            );
+        }
+
+        let gated_linear_norm = effective_qwen35_rmsnorm_weight_values(
+            "model.language_model.layers.6.linear_attn.norm.weight",
+            &values,
+        );
+        assert_eq!(gated_linear_norm, values);
+    }
+
+    #[test]
+    fn effective_rmsnorm_weight_values_preserves_legacy_value_inference() {
         let additive = effective_rmsnorm_weight_values(
             "model.language_model.layers.6.input_layernorm.weight",
             &[-0.25, 0.0, 0.5],

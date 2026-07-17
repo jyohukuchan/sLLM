@@ -114,7 +114,8 @@ fn package_linear_attn_qkv_prepare_batch_smoke_impl(
 
     let mut input_norm = read_named_passthrough_f32(path, &input_norm_tensor, chunk_bytes)
         .map_err(|err| format!("failed to read input RMSNorm tensor: {err}"))?;
-    input_norm.values = effective_rmsnorm_weight_values(&input_norm_tensor, &input_norm.values);
+    input_norm.values =
+        effective_qwen35_rmsnorm_weight_values(&input_norm_tensor, &input_norm.values);
     if input_norm.values.len() != hidden {
         return Err(format!(
             "linear-attn qkv prepare batch input norm length {} does not match hidden {hidden}",
@@ -686,7 +687,8 @@ fn package_linear_attn_recurrent_batch_smoke_impl(
 
     let mut input_norm = read_named_passthrough_f32(path, &input_norm_tensor, chunk_bytes)
         .map_err(|err| format!("failed to read input RMSNorm tensor: {err}"))?;
-    input_norm.values = effective_rmsnorm_weight_values(&input_norm_tensor, &input_norm.values);
+    input_norm.values =
+        effective_qwen35_rmsnorm_weight_values(&input_norm_tensor, &input_norm.values);
     if input_norm.values.len() != hidden {
         return Err(format!(
             "linear-attn recurrent batch input norm length {} does not match hidden {hidden}",
@@ -1373,7 +1375,8 @@ fn package_linear_attn_post_batch_smoke_impl(
 
     let mut input_norm = read_named_passthrough_f32(path, &input_norm_tensor, chunk_bytes)
         .map_err(|err| format!("failed to read input RMSNorm tensor: {err}"))?;
-    input_norm.values = effective_rmsnorm_weight_values(&input_norm_tensor, &input_norm.values);
+    input_norm.values =
+        effective_qwen35_rmsnorm_weight_values(&input_norm_tensor, &input_norm.values);
     if input_norm.values.len() != hidden {
         return Err(format!(
             "linear-attn post batch input norm length {} does not match hidden {hidden}",
@@ -1850,7 +1853,8 @@ fn package_linear_attn_attention_batch_smoke_impl(
 
     let mut input_norm = read_named_passthrough_f32(path, &input_norm_tensor, chunk_bytes)
         .map_err(|err| format!("failed to read input RMSNorm tensor: {err}"))?;
-    input_norm.values = effective_rmsnorm_weight_values(&input_norm_tensor, &input_norm.values);
+    input_norm.values =
+        effective_qwen35_rmsnorm_weight_values(&input_norm_tensor, &input_norm.values);
     if input_norm.values.len() != hidden {
         return Err(format!(
             "linear-attn attention batch input norm length {} does not match hidden {hidden}",
@@ -2700,7 +2704,8 @@ fn package_linear_attn_mlp_batch_smoke_impl(
 
     let mut post_norm = read_named_passthrough_f32(path, &post_norm_tensor, chunk_bytes)
         .map_err(|err| format!("failed to read post RMSNorm tensor: {err}"))?;
-    post_norm.values = effective_rmsnorm_weight_values(&post_norm_tensor, &post_norm.values);
+    post_norm.values =
+        effective_qwen35_rmsnorm_weight_values(&post_norm_tensor, &post_norm.values);
     if post_norm.values.len() != hidden {
         return Err(format!(
             "linear-attn MLP batch post norm length {} does not match hidden {hidden}",
@@ -3187,7 +3192,8 @@ fn package_linear_attn_layer_batch_smoke_impl(
 
     let mut input_norm = read_named_passthrough_f32(path, &input_norm_tensor, chunk_bytes)
         .map_err(|err| format!("failed to read input RMSNorm tensor: {err}"))?;
-    input_norm.values = effective_rmsnorm_weight_values(&input_norm_tensor, &input_norm.values);
+    input_norm.values =
+        effective_qwen35_rmsnorm_weight_values(&input_norm_tensor, &input_norm.values);
     if input_norm.values.len() != hidden {
         return Err(format!(
             "linear-attn layer batch input norm length {} does not match hidden {hidden}",
@@ -3242,7 +3248,8 @@ fn package_linear_attn_layer_batch_smoke_impl(
     }
     let mut post_norm = read_named_passthrough_f32(path, &post_norm_tensor, chunk_bytes)
         .map_err(|err| format!("failed to read post RMSNorm tensor: {err}"))?;
-    post_norm.values = effective_rmsnorm_weight_values(&post_norm_tensor, &post_norm.values);
+    post_norm.values =
+        effective_qwen35_rmsnorm_weight_values(&post_norm_tensor, &post_norm.values);
     if post_norm.values.len() != hidden {
         return Err(format!(
             "linear-attn layer batch post norm length {} does not match hidden {hidden}",
@@ -5291,7 +5298,7 @@ fn package_token_ids_generate_incremental_smoke_impl(
     let mut final_norm = read_named_passthrough_f32(path, QWEN3_FINAL_NORM_TENSOR, chunk_bytes)
         .map_err(|err| format!("failed to read final RMSNorm tensor: {err}"))?;
     final_norm.values =
-        effective_rmsnorm_weight_values(QWEN3_FINAL_NORM_TENSOR, &final_norm.values);
+        effective_qwen35_rmsnorm_weight_values(QWEN3_FINAL_NORM_TENSOR, &final_norm.values);
     if final_norm.values.len() != hidden {
         return Err(format!(
             "incremental final RMSNorm length mismatch: len={} hidden={hidden}",
@@ -6205,7 +6212,7 @@ fn package_token_ids_logits_smoke_impl_with_sq_overlay(
     let mut final_norm = read_named_passthrough_f32(path, QWEN3_FINAL_NORM_TENSOR, chunk_bytes)
         .map_err(|err| format!("failed to read final RMSNorm tensor: {err}"))?;
     final_norm.values =
-        effective_rmsnorm_weight_values(QWEN3_FINAL_NORM_TENSOR, &final_norm.values);
+        effective_qwen35_rmsnorm_weight_values(QWEN3_FINAL_NORM_TENSOR, &final_norm.values);
     if final_norm.values.len() != hidden {
         return Err(format!(
             "final RMSNorm length mismatch: len={} hidden={}",

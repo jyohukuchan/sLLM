@@ -641,9 +641,9 @@ fn package_linear_attn_mlp_block_sequence_run_with_diagnostic_inputs(
         ));
     }
     let input_norm_weight_values =
-        effective_rmsnorm_weight_values(&input_norm_tensor, &input_norm.values);
+        effective_qwen35_rmsnorm_weight_values(&input_norm_tensor, &input_norm.values);
     let post_norm_weight_values =
-        effective_rmsnorm_weight_values(&post_norm_tensor, &post_norm.values);
+        effective_qwen35_rmsnorm_weight_values(&post_norm_tensor, &post_norm.values);
     let input_norm_weight_bytes = encode_f32_to_bytes(&input_norm_weight_values);
     let conv_weight_bytes = encode_f32_to_bytes(&conv.values);
     let a_log_bytes = encode_f32_to_bytes(&a_log.values);

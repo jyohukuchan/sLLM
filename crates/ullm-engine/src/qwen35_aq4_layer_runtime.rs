@@ -15,7 +15,9 @@ use crate::backend_operation_registry::{
 use crate::decoder::PagedDecodeShape;
 use crate::execution_batch::ExecutionPhase;
 use crate::host_bytes::{decode_f32_le_values, encode_f32_to_bytes, encode_u32_to_bytes};
-use crate::loader::{WeightRegistry, effective_rmsnorm_weight_values, read_named_passthrough_f32};
+use crate::loader::{
+    WeightRegistry, effective_qwen35_rmsnorm_weight_values, read_named_passthrough_f32,
+};
 use crate::package::{TensorSelector, select_tensor_payload_bundle};
 use crate::qwen3_loader::Qwen3PackageSqOverlay;
 use crate::scheduler::RequestId;
@@ -1392,13 +1394,15 @@ impl PackageSelfAttnResidentStepLayer {
         let down_tensor = format!("model.language_model.layers.{layer_index}.mlp.down_proj.weight");
 
         let mut input_norm = read_named_passthrough_f32(path, &input_norm_tensor, chunk_bytes)?;
-        input_norm.values = effective_rmsnorm_weight_values(&input_norm_tensor, &input_norm.values);
+        input_norm.values =
+            effective_qwen35_rmsnorm_weight_values(&input_norm_tensor, &input_norm.values);
         let mut q_norm = read_named_passthrough_f32(path, &q_norm_tensor, chunk_bytes)?;
-        q_norm.values = effective_rmsnorm_weight_values(&q_norm_tensor, &q_norm.values);
+        q_norm.values = effective_qwen35_rmsnorm_weight_values(&q_norm_tensor, &q_norm.values);
         let mut k_norm = read_named_passthrough_f32(path, &k_norm_tensor, chunk_bytes)?;
-        k_norm.values = effective_rmsnorm_weight_values(&k_norm_tensor, &k_norm.values);
+        k_norm.values = effective_qwen35_rmsnorm_weight_values(&k_norm_tensor, &k_norm.values);
         let mut post_norm = read_named_passthrough_f32(path, &post_norm_tensor, chunk_bytes)?;
-        post_norm.values = effective_rmsnorm_weight_values(&post_norm_tensor, &post_norm.values);
+        post_norm.values =
+            effective_qwen35_rmsnorm_weight_values(&post_norm_tensor, &post_norm.values);
 
         // Manifest-only geometry and real device capability admission happen before any resident
         // matrix upload, device buffer allocation, or prewarm call.
@@ -3976,9 +3980,9 @@ impl PackageLinearAttnResidentStepLayer {
             ));
         }
         let input_norm_weight_values =
-            effective_rmsnorm_weight_values(&input_norm_tensor, &input_norm.values);
+            effective_qwen35_rmsnorm_weight_values(&input_norm_tensor, &input_norm.values);
         let post_norm_weight_values =
-            effective_rmsnorm_weight_values(&post_norm_tensor, &post_norm.values);
+            effective_qwen35_rmsnorm_weight_values(&post_norm_tensor, &post_norm.values);
 
         let (qkv_rows, qkv_cols) = package_aq4_matrix_shape(path, &qkv_tensor)?;
         if qkv_rows != qkv_step_elements || qkv_cols != hidden {

@@ -44,7 +44,7 @@ use ullm_engine::golden::{GoldenTensorFixture, compare_f32_slices};
 use ullm_engine::host_bytes::{decode_f32_le_values, encode_f32_to_bytes, encode_u32_to_bytes};
 use ullm_engine::loader::{
     LoadOptions, LoadedPayload, PassthroughF32Data, WeightRegistry,
-    effective_rmsnorm_weight_values, load_package_tensor_prefix, materialize_config,
+    effective_qwen35_rmsnorm_weight_values, load_package_tensor_prefix, materialize_config,
     materialize_selected_aq4_matrix, matrix_shape_rows_cols, read_named_passthrough_f32,
     read_named_passthrough_f32_rows,
     read_passthrough_payload_f32_bytes, resolve_passthrough_dtype,

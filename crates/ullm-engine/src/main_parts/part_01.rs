@@ -6752,7 +6752,7 @@ impl PackageModelLoopSmokeRun {
         let mut final_norm = read_named_passthrough_f32(path, QWEN3_FINAL_NORM_TENSOR, chunk_bytes)
             .map_err(|err| format!("failed to read model-loop final RMSNorm tensor: {err}"))?;
         final_norm.values =
-            effective_rmsnorm_weight_values(QWEN3_FINAL_NORM_TENSOR, &final_norm.values);
+            effective_qwen35_rmsnorm_weight_values(QWEN3_FINAL_NORM_TENSOR, &final_norm.values);
         if final_norm.values.len() != self.model.hidden {
             return Err(format!(
                 "model-loop final RMSNorm length mismatch: len={} hidden={}",
@@ -7747,7 +7747,7 @@ fn package_golden_prefix_smoke_impl(
                 let mut input_norm =
                     read_named_passthrough_f32(path, &input_norm_tensor, chunk_bytes)?;
                 input_norm.values =
-                    effective_rmsnorm_weight_values(&input_norm_tensor, &input_norm.values);
+                    effective_qwen35_rmsnorm_weight_values(&input_norm_tensor, &input_norm.values);
                 if input_norm.values.len() != hidden {
                     return Err(format!(
                         "self-attn input RMSNorm length {} does not match hidden={hidden}",

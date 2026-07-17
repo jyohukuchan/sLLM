@@ -26,8 +26,8 @@ use std::path::{Path, PathBuf};
 use ullm_engine::aq4_package_runtime::PackageAq4ResidentMatvec;
 use ullm_engine::host_bytes::{decode_f32_le_values, encode_f32_to_bytes};
 use ullm_engine::loader::{
-    effective_rmsnorm_weight_values, read_named_aq4_f32_rows, read_named_passthrough_f32,
-    WeightRegistry,
+    WeightRegistry, effective_qwen35_rmsnorm_weight_values, read_named_aq4_f32_rows,
+    read_named_passthrough_f32,
 };
 use ullm_engine::qwen35_aq4_layer_runtime::{
     runtime_host_linear_attn_gate_beta_f32, runtime_host_linear_attn_recurrent_f32,
@@ -1519,11 +1519,10 @@ fn run_chain_terminal_stages(
     {
         return Err("chain final RMSNorm geometry/value contract differs".to_string());
     }
-    // This helper matches the AQ4 model runtime's final-norm weight handling.
-    // Qwen3.5 final norm is intentionally not included in the loader's
-    // additive-weight suffix set, so the effective runtime vector is the raw
-    // package payload rather than a hidden diagnostic adjustment.
-    let final_norm_weight = effective_rmsnorm_weight_values(FINAL_NORM_TENSOR, &final_norm.values);
+    // This helper matches the Qwen3.5 AQ4 model runtime's documented
+    // additive final-norm convention.
+    let final_norm_weight =
+        effective_qwen35_rmsnorm_weight_values(FINAL_NORM_TENSOR, &final_norm.values);
     if final_norm_weight.len() != HIDDEN || final_norm_weight.iter().any(|value| !value.is_finite())
     {
         return Err("chain effective final RMSNorm weight is invalid".to_string());
@@ -2089,8 +2088,10 @@ fn one_at_a_time_hybrid(
     {
         return Err("layer0 hybrid passthrough geometry/value contract differs".to_string());
     }
-    let input_norm_weight = effective_rmsnorm_weight_values(INPUT_NORM_TENSOR, &input_norm.values);
-    let post_norm_weight = effective_rmsnorm_weight_values(POST_NORM_TENSOR, &post_norm.values);
+    let input_norm_weight =
+        effective_qwen35_rmsnorm_weight_values(INPUT_NORM_TENSOR, &input_norm.values);
+    let post_norm_weight =
+        effective_qwen35_rmsnorm_weight_values(POST_NORM_TENSOR, &post_norm.values);
 
     let mut hidden_input_buffer = context
         .alloc_buffer(HIDDEN * std::mem::size_of::<f32>())
@@ -2500,12 +2501,12 @@ fn load_chain_linear_weights(
         mlp_gate,
         mlp_up,
         mlp_down,
-        input_norm_weight: effective_rmsnorm_weight_values(&input_norm_name, &input_norm),
+        input_norm_weight: effective_qwen35_rmsnorm_weight_values(&input_norm_name, &input_norm),
         conv,
         a_log,
         dt_bias,
         attn_norm,
-        post_norm_weight: effective_rmsnorm_weight_values(&post_norm_name, &post_norm),
+        post_norm_weight: effective_qwen35_rmsnorm_weight_values(&post_norm_name, &post_norm),
     })
 }
 
@@ -2795,10 +2796,10 @@ fn load_chain_self_attention_weights(
         mlp_gate,
         mlp_up,
         mlp_down,
-        input_norm_weight: effective_rmsnorm_weight_values(&input_norm_name, &input_norm),
-        q_norm_weight: effective_rmsnorm_weight_values(&q_norm_name, &q_norm),
-        k_norm_weight: effective_rmsnorm_weight_values(&k_norm_name, &k_norm),
-        post_norm_weight: effective_rmsnorm_weight_values(&post_norm_name, &post_norm),
+        input_norm_weight: effective_qwen35_rmsnorm_weight_values(&input_norm_name, &input_norm),
+        q_norm_weight: effective_qwen35_rmsnorm_weight_values(&q_norm_name, &q_norm),
+        k_norm_weight: effective_qwen35_rmsnorm_weight_values(&k_norm_name, &k_norm),
+        post_norm_weight: effective_qwen35_rmsnorm_weight_values(&post_norm_name, &post_norm),
     })
 }
 

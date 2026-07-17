@@ -14,7 +14,7 @@ use crate::backend_operation_registry::{OperationExecutionRecord, OperationResol
 use crate::execution_batch::ExecutionPhase;
 use crate::execution_batch::WorkspacePlan;
 use crate::loader::{
-    PassthroughF32Data, effective_rmsnorm_weight_values, read_named_passthrough_f32,
+    PassthroughF32Data, effective_qwen35_rmsnorm_weight_values, read_named_passthrough_f32,
 };
 use crate::package::TensorSelector;
 use crate::qwen35_aq4_head_runtime::{
@@ -912,7 +912,7 @@ impl Qwen35Aq4ModelRuntime {
             read_named_passthrough_f32(path, QWEN3_FINAL_NORM_TENSOR, config.chunk_bytes)
                 .map_err(|err| format!("failed to read Qwen3.5 final RMSNorm: {err}"))?;
         final_norm.values =
-            effective_rmsnorm_weight_values(QWEN3_FINAL_NORM_TENSOR, &final_norm.values);
+            effective_qwen35_rmsnorm_weight_values(QWEN3_FINAL_NORM_TENSOR, &final_norm.values);
         if final_norm.values.len() != hidden {
             return Err(format!(
                 "Qwen3.5 final RMSNorm length {} does not match hidden {hidden}",

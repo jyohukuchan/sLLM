@@ -4964,9 +4964,9 @@ fn package_linear_attn_mlp_block_smoke_impl(
     let residual = deterministic_f32_vector(hidden);
     let residual_bytes = encode_f32_to_bytes(&residual);
     let input_norm_weight_values =
-        effective_rmsnorm_weight_values(&input_norm_tensor, &input_norm.values);
+        effective_qwen35_rmsnorm_weight_values(&input_norm_tensor, &input_norm.values);
     let post_norm_weight_values =
-        effective_rmsnorm_weight_values(&post_norm_tensor, &post_norm.values);
+        effective_qwen35_rmsnorm_weight_values(&post_norm_tensor, &post_norm.values);
     let input_norm_weight_bytes = encode_f32_to_bytes(&input_norm_weight_values);
     let conv_weight_bytes = encode_f32_to_bytes(&conv.values);
     let a_log_bytes = encode_f32_to_bytes(&a_log.values);
@@ -6380,7 +6380,7 @@ fn package_linear_attn_stateful_step_smoke_impl(
         .ok_or_else(|| "linear attention value dim byte size overflows".to_string())?;
     let attn_norm_weight_bytes = encode_f32_to_bytes(&attn_norm.values);
     let post_norm_weight_values =
-        effective_rmsnorm_weight_values(&post_norm_tensor, &post_norm.values);
+        effective_qwen35_rmsnorm_weight_values(&post_norm_tensor, &post_norm.values);
     let post_norm_weight_bytes = encode_f32_to_bytes(&post_norm_weight_values);
     let mut registry = WeightRegistry::new();
     let (out_rows, out_cols, out_matrix) = materialize_selected_aq4_matrix(
