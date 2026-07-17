@@ -147,7 +147,9 @@ payload = json.load(open(sys.argv[1], encoding="utf-8"))
 assert payload["schema_version"] == "ullm.qwen35_aq4_phase3c_trace_guard_diagnostic.v1"
 assert payload["status"] == "valid"
 assert len(payload["required_environment"]) == 17
-assert len(payload["linear_stage_guard"]["required_environment"]) == 17
+assert payload["linear_stage_guard"]["required_environment"] == {
+    name: "1" for name in payload["required_environment"]
+}
 PY
 
 python3 "$REPO/tools/verify-aq4-layer0-package-embedding-fixture.py" \

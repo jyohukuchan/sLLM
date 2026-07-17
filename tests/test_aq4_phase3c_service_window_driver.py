@@ -53,3 +53,5 @@ def test_service_window_driver_is_explicitly_single_use_and_preserves_lock_contr
     assert "ULLM_REQUIRE_HIP_AQ4_REGISTER_BM8_KERNEL\n" not in source.split(
         "PHASE3C_TRACE_UNSET_ENV=(", 1
     )[1].split(")\nTRACE_ENV=", 1)[0]
+    assert 'assert payload["linear_stage_guard"]["required_environment"] == {' in source
+    assert 'name: "1" for name in expected' in source

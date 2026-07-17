@@ -247,7 +247,9 @@ expected = [
 assert payload["schema_version"] == "ullm.qwen35_aq4_phase3c_trace_guard_diagnostic.v1"
 assert payload["status"] == "valid"
 assert payload["required_environment"] == expected
-assert len(payload["linear_stage_guard"]["required_environment"]) == len(expected)
+assert payload["linear_stage_guard"]["required_environment"] == {
+    name: "1" for name in expected
+}
 PY
 then
   echo "complete Phase 3c trace guard diagnostic contract failed before service stop" >&2
