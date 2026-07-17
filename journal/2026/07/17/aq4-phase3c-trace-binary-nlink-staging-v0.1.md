@@ -13,8 +13,16 @@
 - runbookを新しい`service-stop-window-v0.5-nlink-staged` leaf、CPU-only staging preflight、trace binaryの固定SHA/nlink検証へ更新した。`ullm-aq4-layer0-family-isolation`には`current_exe()`/nlink identity guardがないことを確認し、CPU reference binaryはstaging対象から除外した。
 - 新規stagerのhardlink切断、SHA保持、create-new拒否、検証失敗をCPU-only testで確認し、driver source testもstaging contractを確認するよう拡張した。
 
+### Step 1 実測（service停止なし、CPU-only）
+
+- 固定trace tooling commit `5a0fb4c50476d5153ced22bd6847c2729bfdb975` に対する対象source/index diffがcleanであることを確認してから、`CARGO_BUILD_JOBS=1 ULLM_BUILD_GIT_COMMIT=5a0fb4c50476d5153ced22bd6847c2729bfdb975 cargo build --release -p ullm-engine --bin ullm-aq4-differential-trace --bin ullm-aq4-layer0-family-isolation`を成功させた。既知のC++ warning以外のbuild failureはなかった。
+- Cargo source `target/release/ullm-aq4-differential-trace` はmode `0700`、`nlink=2`、size `3002128`、SHA-256 `835ca1cb15aba577ef72902af719451a91c55371cbff8c41444d8f343469f2a4`だった。これは期待どおりのhardlink状態である。
+- create-new staging rootは `benchmarks/results/2026-07-17/qwen35-9b-aq4-production-opt-v0.1/p2/aq4-phase3c-gpu-stage-trace-v0.1/service-stop-window-v0.5-nlink-staged/trace-binary-staging/` とした。staged `ullm-aq4-differential-trace` はmode `0555`、`nlink=1`、size `3002128`、device/inode `66306:10754708`、SHA-256はsourceと同じ `835ca1cb15aba577ef72902af719451a91c55371cbff8c41444d8f343469f2a4`である。
+- `staging-receipt.json`と`SHA256SUMS`はいずれもmode `0444`/`nlink=1`であり、stagerのread-only verifyは`status=valid`、source/staged SHA一致、staged mode `0555`/`nlink=1`を返した。staging directory内で実行した`sha256sum -c SHA256SUMS`も2 entryとも`OK`だった。
+- 最初にparent directoryから`sha256sum -c "$TRACE_STAGE_DIR/SHA256SUMS"`を呼んだため相対entryを解決できなかったが、artifactを書き換えず、staging directory内でのread-only検証を一回行って成功した。これはstaging copyやidentity contractの失敗ではない。
+- GPU kernel、HIP guard、AMD-SMI、service/systemd/manifest、V620、P3 harnessにはこのStepで一切触れていない。
+
 ## 次の行動
 
-- serviceを停止せず、固定trace tooling commitでrelease buildを行い、新しい`service-stop-window-v0.5-nlink-staged` evidence rootにstaging copyを生成する。sourceとstaged copyのSHA-256、mode、nlinkを記録・検証する。
-- service稼働中にR9700 guard chainとstaging verifyを複数回リハーサルする。R9700だけを対象にし、V620、P3 harness、service/systemd/manifestには触れない。
+- service稼働中にR9700 guard chainと既存staging rootのread-only verifyを3回リハーサルする。R9700だけを対象にし、V620、P3 harness、service/systemd/manifestには触れない。
 - すべてが安定して成功した場合だけ、更新済みdriverによるservice-stop windowを一回実行する。trace内で失敗した場合は再試行せず、直ちにservice復旧結果を優先して記録する。
