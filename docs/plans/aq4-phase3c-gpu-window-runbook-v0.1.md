@@ -49,6 +49,64 @@ stage順は`qkv_dequant_row_scale`、`z_dequant_row_scale`、`recurrent_gate`、
 - `tools/query-hip-device-identity.cpp`がtrackedかつHEADに対してcleanであり、host-only `g++`と`amd-smi`が利用可能であること。guardは`HIP_VISIBLE_DEVICES=1`で可視化されたordinal 0だけを問い合わせ、返ったPCI BDF以外を`amd-smi`へ渡さない。
 - HIP guardまたはASIC cross-checkが失敗した場合、CPU reference、lock取得、trace binary、比較器へ進まない。guard evidenceだけを保存して終了する。health telemetryはguard成功後だけに採取する。
 
+## 追加承認済みの service 一時停止 window（2026-07-17、今回だけ）
+
+この節は、2026-07-17にユーザーから得た「このマシンに関する全権限」と、AQ4本番 gateway を一時停止して Phase 3c を一回だけ行うという明示承認にだけ適用する。上の「service を停止・起動・再起動しない」という記述は、最初の lock-contention 試行を含む通常の GPU window の安全境界として残す。本節はその境界に対する狭い例外であり、`ullm-openai.service` 以外の unit、active manifest、P3 harness を変更する権限にはならない。
+
+- 操作する service は `ullm-openai.service` だけである。`systemctl restart`、`kill`、`rm`、lock の強制解放、manifest write、V620 を対象にする command は使わない。
+- 07/16 に停止した P3 harness の lock/root/artifact/environment/`rocprof` は参照・変更しない。P3 の `prepare_lock_substrate`、recovery、finalize を今回の lock 問題の回避手段として使わない。
+- 1回目の evidence root `.../aq4-phase3c-gpu-stage-trace-v0.1/` は削除・上書きしない。今回の `OUT` はその配下の新規 leaf `service-stop-window-v0.1` とし、開始時にその leaf が不存在であることを確認する。
+- この unit は `RuntimeDirectory=ullm` かつ `RuntimeDirectoryPreserve=no` であることを、service 停止直前に読み取り専用で記録する。したがって systemd が停止時に `/run/ullm` と lock leaf を削除した場合、これは「free lock」ではなく **lock取得失敗** である。既存regular fileだけを nonblocking 取得する契約は維持し、`mkdir`、`touch`、`install`、symlink 作成その他の lock substrate 作成・修復は行わない。この場合は trace を起動せず、直ちに一度だけ service 復旧へ進む。
+
+### 停止前の read-only snapshot と非GPU準備
+
+GPU を使わない source/fixture 検査、host-only HIP guard build、`cargo build`、CPU input identity、CPU stage stream は service 停止前に完了させる。これにより停止時間を、guard・telemetry・GPU trace・復旧に限る。これらの準備が失敗した場合は service を停止しない。
+
+`OUT` を次に固定する。既存の最初の試行の root は parent としてだけ存在してよく、`OUT` 自体は存在してはならない。
+
+```bash
+OUT="$REPO/benchmarks/results/2026-07-17/qwen35-9b-aq4-production-opt-v0.1/p2/aq4-phase3c-gpu-stage-trace-v0.1/service-stop-window-v0.1"
+test ! -e "$OUT"
+install -d -m 700 "$OUT"
+```
+
+既存の実行blockにある trace tooling commit/diff、fixture、RPB、fusion guard の全検査をそのまま実行し、`query-hip-device-identity` と2つの trace binary を build する。ただしこの時点では HIP guard を実行せず、GPU health telemetry も採らない。CPU reference の `cpu-input-identity.json`、`cpu-stages.f32le`、`cpu-reference/` をこの `OUT` に生成してから、直後に以下を `service-window-pre-stop.json` として保存する。
+
+- `systemctl show ullm-openai.service` の `ActiveState`、`SubState`、`MainPID`、`NRestarts`、`ExecMainStartTimestamp`、`ControlGroup`、`RuntimeDirectory`、`RuntimeDirectoryPreserve`。
+- cgroup 内 PID、各 PID の `exe`、親 PID、`/dev/kfd` と `/dev/dri/` に限った FD target。これを service/worker の read-only snapshot とする。
+- `/etc/ullm/served-models/active.json` の SHA-256。
+- `/run/ullm/r9700.lock` の `lstat`（regular file / device / inode / mode / uid / gid）と、その device/inode に一致する `/proc/locks` の holder PID。
+
+停止直前の期待baselineは、`MainPID=1218698`、`NRestarts=0`、`active/running`、`ExecMainStartTimestamp=Thu 2026-07-16 18:14:24 JST`、manifest SHA-256=`feb3190d0ff59778e4da140b8db2bd1ce2ba440e3a69e844b997011d4d08cb44`である。値が変わっている場合は snapshot の実測値を優先して記録する。`active/running` でない、MainPID が 0、manifest が読めない場合は stop しない。
+
+### 単回 stop → lock → trace → restore
+
+`systemctl stop ullm-openai.service` は一回だけ実行し、開始・終了時刻と stop 後の unit state を `service-window-stop.json` に保存する。stop が返った後、**作成を伴わない** lock probe を一回だけ行う。probe は `lstat` で regular file/non-symlink を確認してから `O_RDWR|O_NOFOLLOW`（`O_CREAT` なし）で開き、`LOCK_EX|LOCK_NB` を取得・解放する。probe は lock の内容を書き換えず、結果・errno・device/inode・`/proc/locks` holder を `service-window-lock-after-stop.json` に保存する。
+
+lock probe が regular file でない、path/親component がない、open/flock が失敗する、または holder が残る場合は、待機・再probe・trace を行わない。この一回を lock acquisition failure として記録し、以下の restore 手順へ直行する。特に `RuntimeDirectoryPreserve=no` による ENOENT を free と見なしてはならない。
+
+lock probe が成功した場合だけ、次の順番を厳守する。
+
+1. 既存blockと同一の `HIP_VISIBLE_DEVICES=1` / `ULLM_HIP_VISIBLE_DEVICES=1` で、事前build済みの HIP guard を一回実行する。同じ HIP BDF だけを `amd-smi static --gpu "$R9700_BDF" --asic --bus --json` に渡し、`gfx1201` / `0x7551` / BDF 一致を assert する。guard failure なら telemetry/trace は実行せず restore する。
+2. 既存の `capture_r9700_health before` と同じ、BDF指定済み4 commandを一回採る。対象外GPUへの query はしない。
+3. 既存blockの `flock -n` 内 trace command を、この新しい `OUT/gpu-trace` に対して一回だけ実行する。固定fixture、3 context、RPB、7 fusion guard、`HIP_VISIBLE_DEVICES=1` は変更しない。lock probe 成功後であっても、この trace 内 `flock -n` が失敗した場合は trace command を起動せず、retry せず restore する。
+4. trace の exit code にかかわらず、既存の `capture_r9700_health after` を一回採り、直ちに restore する。trace が terminal frame/manifest/SHA256SUMS を満たす成功時だけ、既存の checksum、manifest assert、CPU/GPU 30 record 比較を実行する。
+
+`systemctl stop` が成功した時点から EXIT trap を armed にし、guard、telemetry、trace、comparison のいずれで失敗しても `systemctl start ullm-openai.service` を一回だけ呼ぶ。明示的な restore と trap の二重 start を防ぐため、restore 済み flag を持つ。start の失敗時に restart/stop/start を重ねない。
+
+### restore 後の必須確認
+
+`systemctl start ullm-openai.service` の一回の結果と開始・終了時刻を保存し、その後は読み取り専用で確認する。gateway は host localhost ではなく Docker bridge `172.20.0.1:8000` に bind しているため、実際の healthz は既存の `open-webui` container network namespace から `http://172.20.0.1:8000/healthz` を GET する。最大90回、1秒間隔の health poll は service start の再試行ではない。`/healthz` が HTTP 200 かつ本文 `{"status":"ok"}` を返した時点で終了し、90回で成功しなければ失敗として記録する。`/readyz` の HTTP 200 / `{"status":"ready"}` は worker ready の補助確認として同じ namespace から一回だけ取得する。
+
+次を `service-window-post-restore.json` として保存・判定する。
+
+- `ullm-openai.service` が `active/running`、MainPID が正、`NRestarts` が停止前値から増えていないこと。明示的 stop/start により MainPID/worker PID が変わることは期待どおりである。
+- 新しい worker が service cgroup に存在し、対象 worker の `/dev/kfd` FD を確認できること。HIP guard が確認した R9700 BDF だけに `amd-smi process --gpu "$R9700_BDF" --general --json` を実行し、worker PID を owner として記録する。KFD はその worker の `/sys/class/kfd/kfd/proc/<worker-pid>/vram_51545` を読むだけに留め、全GPU/全PID scan はしない。
+- active manifest SHA-256 が停止前 snapshot と完全一致すること。
+- container namespace の `/healthz` が正常応答すること。`/readyz` または worker/GPU/KFD owner が失敗した場合も復旧確認失敗として扱う。
+
+この復旧確認のどれかが失敗したら、それが最優先の問題である。追加の service 操作、設定変更、trace retry、GPU再実行をせず、収集済み evidence と実際の状態を journal に記録して直ちに報告する。
+
 ## 承認後に一回だけ実行するコマンド
 
 次のblockをそのまま一回実行する。`cargo build`、HIP guardのhost-only build、CPU referenceはGPU kernelを起動しない。GPUに対するread-onlyのidentity/health queryはtrace前後にR9700だけへ行い、device memory確保・stream作成・kernel実行は最後の`flock`内のtrace binaryだけである。
