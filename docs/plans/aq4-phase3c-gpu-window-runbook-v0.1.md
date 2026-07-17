@@ -55,7 +55,7 @@ stage順は`qkv_dequant_row_scale`、`z_dequant_row_scale`、`recurrent_gate`、
 
 - 操作する service は `ullm-openai.service` だけである。`systemctl restart`、`kill`、`rm`、lock の強制解放、manifest write、V620 を対象にする command は使わない。
 - 07/16 に停止した P3 harness の lock/root/artifact/environment/`rocprof` は参照・変更しない。P3 の `prepare_lock_substrate`、recovery、finalize を今回の lock 問題の回避手段として使わない。
-- 1回目の evidence root `.../aq4-phase3c-gpu-stage-trace-v0.1/` は削除・上書きしない。今回の `OUT` はその配下の新規 leaf `service-stop-window-v0.1` とし、開始時にその leaf が不存在であることを確認する。
+- 1回目の evidence root `.../aq4-phase3c-gpu-stage-trace-v0.1/` と、service 操作前に終了した準備用 leaf `service-stop-window-v0.1` は削除・上書きしない。今回の実service windowの `OUT` はその配下の新規 leaf `service-stop-window-v0.2` とし、開始時にその leaf が不存在であることを確認する。
 - この unit は `RuntimeDirectory=ullm` かつ `RuntimeDirectoryPreserve=no` であることを、service 停止直前に読み取り専用で記録する。したがって systemd が停止時に `/run/ullm` と lock leaf を削除した場合、これは「free lock」ではなく **lock取得失敗** である。既存regular fileだけを nonblocking 取得する契約は維持し、`mkdir`、`touch`、`install`、symlink 作成その他の lock substrate 作成・修復は行わない。この場合は trace を起動せず、直ちに一度だけ service 復旧へ進む。
 
 ### 停止前の read-only snapshot と非GPU準備
@@ -65,7 +65,7 @@ GPU を使わない source/fixture 検査、host-only HIP guard build、`cargo b
 `OUT` を次に固定する。既存の最初の試行の root は parent としてだけ存在してよく、`OUT` 自体は存在してはならない。
 
 ```bash
-OUT="$REPO/benchmarks/results/2026-07-17/qwen35-9b-aq4-production-opt-v0.1/p2/aq4-phase3c-gpu-stage-trace-v0.1/service-stop-window-v0.1"
+OUT="$REPO/benchmarks/results/2026-07-17/qwen35-9b-aq4-production-opt-v0.1/p2/aq4-phase3c-gpu-stage-trace-v0.1/service-stop-window-v0.2"
 test ! -e "$OUT"
 install -d -m 700 "$OUT"
 ```
