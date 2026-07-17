@@ -38,6 +38,7 @@ def test_service_window_driver_is_explicitly_single_use_and_preserves_lock_contr
         "ULLM_REQUIRE_HIP_LINEAR_ATTN_RECURRENT_KERNEL",
         "ULLM_REQUIRE_HIP_RMSNORM_KERNEL",
         "ULLM_REQUIRE_HIP_SEGMENTED_RMSNORM_SILU_MUL_KERNEL",
+        "ULLM_REQUIRE_HIP_AQ4_REGISTER_BM8_KERNEL",
         "ULLM_REQUIRE_HIP_PAGED_DECODE_ATTN_KERNEL",
         "ULLM_REQUIRE_HIP_QWEN35_QK_NORM_ROPE_PAGED_KV_WRITE_KERNEL",
         "ULLM_REQUIRE_HIP_PAGED_KV_WRITE_CHUNK_KERNEL",
@@ -48,3 +49,7 @@ def test_service_window_driver_is_explicitly_single_use_and_preserves_lock_contr
     )
     for guard in required_guards:
         assert f"{guard}=1" in source
+
+    assert "ULLM_REQUIRE_HIP_AQ4_REGISTER_BM8_KERNEL\n" not in source.split(
+        "PHASE3C_TRACE_UNSET_ENV=(", 1
+    )[1].split(")\nTRACE_ENV=", 1)[0]

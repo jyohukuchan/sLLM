@@ -24,7 +24,7 @@ REPO=/home/homelab1/coding-local/ultimateLLM/uLLM-project
 PACKAGE=/home/homelab1/datapool/ullm/product/qwen35-9b-aq4-cli-v0.1/package
 CASES="$REPO/tests/fixtures/qwen35-aq4-p2-oracle/cases.json"
 REPLAY="$REPO/benchmarks/results/2026-07-14/qwen35-9b-aq4-production-opt-v0.1/p2/differential-trace-gpu-v1-input/replay.json"
-TRACE_TOOLING_COMMIT=811d4271a9ef92f3df4699f0ba8a1862525e2661
+TRACE_TOOLING_COMMIT=a7cb46e252b2f1a3e045278fe112bce21af05d32
 LOCK=/run/ullm/r9700.lock
 TRACE_STAGE_DIR="$OUT/trace-binary-staging"
 TRACE_BIN="$TRACE_STAGE_DIR/ullm-aq4-differential-trace"
@@ -35,9 +35,11 @@ SERVICE=ullm-openai.service
 MANIFEST=/etc/ullm/served-models/active.json
 EXPECTED_MANIFEST_SHA=feb3190d0ff59778e4da140b8db2bd1ce2ba440e3a69e844b997011d4d08cb44
 
-# Keep the trace on the audited normal M=1 route.  In particular, do not inherit
-# the worker's broader guard profile: several of those flags add probes or select
-# a different fallback/dispatch path than this fixed Phase 3c measurement.
+# Keep the trace on the audited normal M=1 route.  The normal resident matrix
+# loader eagerly resolves its M=2..=128 AQ4 plan cache, so Register-BM8 must be
+# proven for gfx1201 even though this trace dispatches only M=1 tokens.  Do not
+# inherit the rest of the worker's broader guard profile: those flags add probes
+# or select a different fallback/dispatch path than this fixed measurement.
 PHASE3C_TRACE_UNSET_ENV=(
   ULLM_SYNC_LINEAR_ATTN_COMPONENTS_FOR_TIMING
   ULLM_DISABLE_AQ4_MATVEC_QKV_Z_GATE_BETA
@@ -53,7 +55,6 @@ PHASE3C_TRACE_UNSET_ENV=(
   ULLM_REQUIRE_HIP_AQ4_MATVEC_PAIR_KERNEL
   ULLM_REQUIRE_HIP_AQ4_MATVEC_TOP1_KERNEL
   ULLM_REQUIRE_HIP_AQ4_MATVEC_TRIPLE_KERNEL
-  ULLM_REQUIRE_HIP_AQ4_REGISTER_BM8_KERNEL
   ULLM_REQUIRE_HIP_AQ4_ROW_KERNEL
   ULLM_REQUIRE_HIP_BF16_MATVEC_KERNEL
   ULLM_REQUIRE_HIP_CACHED_PREFIX_ATTN_F32_FLASH2_KERNEL
@@ -105,6 +106,7 @@ TRACE_ENV+=(
   ULLM_REQUIRE_HIP_LINEAR_ATTN_RECURRENT_KERNEL=1
   ULLM_REQUIRE_HIP_RMSNORM_KERNEL=1
   ULLM_REQUIRE_HIP_SEGMENTED_RMSNORM_SILU_MUL_KERNEL=1
+  ULLM_REQUIRE_HIP_AQ4_REGISTER_BM8_KERNEL=1
   ULLM_REQUIRE_HIP_PAGED_DECODE_ATTN_KERNEL=1
   ULLM_REQUIRE_HIP_QWEN35_QK_NORM_ROPE_PAGED_KV_WRITE_KERNEL=1
   ULLM_REQUIRE_HIP_PAGED_KV_WRITE_CHUNK_KERNEL=1
@@ -233,6 +235,7 @@ expected = [
     "ULLM_REQUIRE_HIP_LINEAR_ATTN_RECURRENT_KERNEL",
     "ULLM_REQUIRE_HIP_RMSNORM_KERNEL",
     "ULLM_REQUIRE_HIP_SEGMENTED_RMSNORM_SILU_MUL_KERNEL",
+    "ULLM_REQUIRE_HIP_AQ4_REGISTER_BM8_KERNEL",
     "ULLM_REQUIRE_HIP_PAGED_DECODE_ATTN_KERNEL",
     "ULLM_REQUIRE_HIP_QWEN35_QK_NORM_ROPE_PAGED_KV_WRITE_KERNEL",
     "ULLM_REQUIRE_HIP_PAGED_KV_WRITE_CHUNK_KERNEL",
