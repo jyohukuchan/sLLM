@@ -58,6 +58,12 @@ stage順は`qkv_dequant_row_scale`、`z_dequant_row_scale`、`recurrent_gate`、
 - 1回目の evidence root `.../aq4-phase3c-gpu-stage-trace-v0.1/` と、service 操作前に終了した準備用 leaf `service-stop-window-v0.1` は削除・上書きしない。今回の実service windowの `OUT` はその配下の新規 leaf `service-stop-window-v0.2` とし、開始時にその leaf が不存在であることを確認する。
 - この unit は `RuntimeDirectory=ullm` かつ `RuntimeDirectoryPreserve=no` であることを、service 停止直前に読み取り専用で記録する。したがって systemd が停止時に `/run/ullm` と lock leaf を削除した場合、これは「free lock」ではなく **lock取得失敗** である。既存regular fileだけを nonblocking 取得する契約は維持し、`mkdir`、`touch`、`install`、symlink 作成その他の lock substrate 作成・修復は行わない。この場合は trace を起動せず、直ちに一度だけ service 復旧へ進む。
 
+### guard rehearsal と window driver の共通経路
+
+service-stop window を消費する前に、host-only build済みの HIP guardを `tools/run-aq4-phase3c-r9700-guard.py` で service 稼働中に必要回数リハーサルする。このtoolは root から `runuser -u homelab1 -- /usr/bin/env HOME=/home/homelab1 HIP_VISIBLE_DEVICES=1 ULLM_HIP_VISIBLE_DEVICES=1 ...` を固定して実行し、HIP identity、同じBDFだけへの `/opt/rocm/bin/amd-smi static`、同じBDFだけへの4種のH9 telemetryを保存する。lock、service、systemd、manifestを操作せず、HIP stream作成・device memory確保・kernel launchも行わない。
+
+最終windowでは `tools/run-aq4-phase3c-service-window.sh OUT HIP_GUARD_BIN --confirm-single-window` がこの同じguard toolを lock probe 成功後の trace 前と、trace後のhealth snapshotに使う。既存evidenceを変えず、新しい`OUT`を事前に一度だけ作成する。guardの失敗時はtraceを起動せず、driverのEXIT trapが`ullm-openai.service`を一回だけstartする。driver自身は `systemctl restart`、lock作成、V620照会を含まない。
+
 ### 停止前の read-only snapshot と非GPU準備
 
 GPU を使わない source/fixture 検査、host-only HIP guard build、`cargo build`、CPU input identity、CPU stage stream は service 停止前に完了させる。これにより停止時間を、guard・telemetry・GPU trace・復旧に限る。これらの準備が失敗した場合は service を停止しない。
