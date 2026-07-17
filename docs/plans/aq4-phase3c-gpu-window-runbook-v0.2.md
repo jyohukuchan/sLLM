@@ -168,7 +168,18 @@ env -i "HOME=/home/homelab1" "PATH=$PATH" \
 
 ## 実行直前に親エージェントが行うこと
 
-CPU-only 準備を確認した後にだけ、親エージェントが service 稼働中に既存の root-only guard rehearsal を行う。今回はこの runbook の作業者は実行しない。guard rehearsal が成功し、`OUT` の staged trace と guard binary が存在することを確認してから、下の **一度だけ** の最終 command を親エージェントが直接実行する。
+CPU-only 準備を確認した後にだけ、親エージェントが service 稼働中に既存の root-only guard rehearsal を行う。今回はこの runbook の作業者は実行しない。rehearsal evidence は final `OUT` と分離した create-new leaf に保存する。
+
+```bash
+GUARD_REHEARSAL_OUT="$REPO/benchmarks/results/2026-07-17/qwen35-9b-aq4-production-opt-v0.1/p2/aq4-phase3c-gpu-stage-trace-v0.1/guard-chain-rehearsal-v0.7-register-bm8-load-admission/attempt-1"
+test ! -e "$GUARD_REHEARSAL_OUT"
+sudo /usr/bin/python3 /home/homelab1/coding-local/ultimateLLM/uLLM-project/tools/run-aq4-phase3c-r9700-guard.py \
+  --output "$GUARD_REHEARSAL_OUT" \
+  --guard-bin /home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-17/qwen35-9b-aq4-production-opt-v0.1/p2/aq4-phase3c-gpu-stage-trace-v0.1/service-stop-window-v0.7-register-bm8-load-admission/query-hip-device-identity \
+  --health-phase pre-window
+```
+
+guard rehearsal が成功し、`OUT` の staged trace と guard binary が存在することを確認してから、下の **一度だけ** の最終 command を親エージェントが直接実行する。
 
 ```bash
 sudo /home/homelab1/coding-local/ultimateLLM/uLLM-project/tools/run-aq4-phase3c-service-window.sh \
