@@ -35,6 +35,33 @@
 - `tools/verify-aq4-layer0-package-embedding-fixture.py`は`{"cases": 3, "status": "valid"}`を返した。CPU-only `ullm-aq4-layer0-family-isolation --stage-stream-stdout`は成功し、`cpu-stages.f32le`を`24692172` bytesで生成した。
 - この準備ではHIP visibilityと全HIP kernel required環境変数をunsetし、GPU kernel、AMD-SMI、service/systemd/manifest、V620、P3 harnessには触れていない。
 
+### Step 3 単回service-stop window結果
+
+#### 最優先: service復旧
+
+- `ullm-openai.service`は`2026-07-17T04:30:34+00:00`に一回だけstopされ、`2026-07-17T04:30:36+00:00`に一回だけstartを呼び、`2026-07-17T04:30:37+00:00`に成功した。stop invocationからstart成功まで約3秒であり、restart、追加stop/start、trace retryは実行していない。
+- restore後は`active/running`、MainPID=`1228628`、worker PID=`1228734`、`NRestarts=0`、`RuntimeDirectoryPreserve=yes`、manifest SHA-256=`feb3190d0ff59778e4da140b8db2bd1ce2ba440e3a69e844b997011d4d08cb44`で停止前と一致した。workerの`/dev/kfd` FD、`/sys/class/kfd/kfd/proc/1228734/vram_51545`、R9700 BDF `0000:47:00.0`だけへのAMD-SMI process queryのowner PIDも確認した。Docker bridge namespaceのhealthz=`{"status":"ok"}`、readyz=`{"status":"ready"}`である。
+- 最初のpost-restore collectorはPPID文字列の解析ミスで`service-window-post-restore.json`をinvalidとして残し、次のcollectorは有効状態を記録したが末尾literal `\\n`のためJSON parserに拒否された。いずれもservice操作やevidence上書きはしていない。`service-window-post-restore-v0.3-reconstructed.json`はv0.2の収集済みvalid dataだけからread-onlyで整形式再構成した最終receiptである。
+
+#### lock、staging、R9700 guard
+
+- stop後のno-create lock probeは`2026-07-17T04:30:34.383260+00:00`に既存regular file、mode `0600`、device/inode `26:889811`を確認し、`O_RDWR|O_NOFOLLOW|O_CLOEXEC`と`LOCK_EX|LOCK_NB`を取得・解放した。`create_flag_used=false`である。
+- driverのstop前staging verifyを通過した後にstaged binaryが実行された。window後のread-only verifyでもSHA-256 `835ca1cb15aba577ef72902af719451a91c55371cbff8c41444d8f343469f2a4`、mode `0555`、`nlink=1`、inode `10754708`を維持している。したがって今回のfailureはCargo hardlink/trace binary identity contractのfailureではない。
+- trace前後のR9700 guardはともにvalid、HIP filtered ordinal 0=`gfx1201`/`0000:47:00.0`、AMD-SMIは同一BDF/`gfx1201`/`0x7551`だった。V620を対象にするcommandは使っていない。
+
+#### trace failureと比較不能の理由
+
+- trace invocationは`2026-07-17T04:30:35+00:00`に一回だけ開始し、同秒にexit code `1`で終わった。stderrは`failed to load Qwen3.5 AQ4 linear layer 0: required backend operation runtime feature/guard is unavailable`である。`gpu-trace/` publish root、kernel stage stream、manifest、30 record比較は生成されていない。
+- source inspectionではlinear layer loadが`HipLinearAttentionRecurrent`、`HipLinearAttentionQkvPrepare`、`HipAq4MatvecBatch`、`HipLinearAttentionQkvPrepareBatch`の4 featureを必須化する。一方、driverはrecurrentとQKV-prepare-batchをpolicyへ入れる環境変数は設定したが、`ULLM_REQUIRE_HIP_LINEAR_ATTN_KERNEL=1`と`ULLM_REQUIRE_HIP_AQ4_MATVEC_BATCH_KERNEL=1`を設定していない。不足した`HipLinearAttentionQkvPrepare`と`HipAq4MatvecBatch`がprovenにならず、このgeneric require_features failureになったと読むのが根拠のある結論である。
+- capability probeはpolicyで有効なscratch HIP operationを実行してからfeatureをprovenにする実装なので、traceは完全な「GPU未接触」ではない。ただしproduction layer0 forwardと10 stage D2H traceには到達していない。single-use契約に従い、環境変数を追加して同一windowで再実行することはしていない。
+
+#### H9 telemetry、仮説判定
+
+- before: power `15 W`、throttle `UNTHROTTLED`、gfx/mem clock `905/96 MHz`、edge/hotspot/mem `38/39/36 °C`、ECC total/UMC correctable・uncorrectable・deferredはすべて`0`、bad pageはなし、perf level=`AUTO`。
+- after: power `14 W`、throttle `UNTHROTTLED`、gfx/mem clock `49/96 MHz`、edge/hotspot/mem `38/39/36 °C`、ECC/UMC ECCはすべて`0`、bad pageはなし、perf level=`AUTO`。driver=`amdgpu 6.16.13`、IFWI=`SAPPHIRE RADEON AI 32GB` version `00158746`、firmware recordsもbefore/afterで同一だった。
+- 10 stageすべて（QKV dequant、Z dequant、gate、beta、recurrent state/output、attention residual、post norm、MLP activation、layer output）は未測定であり、relative L2/cosine/max absのthreshold判定は適用不能である。最初の有意乖離stageは特定不能。
+- H5（GPU kernel固有バグ）は判定不能である。H9（hardware要因）も、telemetryに異常はないが実production stage traceがないため判定不能である。H9を支持する直接evidenceは得られていない。
+
 ## 次の行動
 
-- 更新済みdriverによるservice-stop windowを一回だけ実行する。trace内で失敗した場合は再試行せず、直ちにservice復旧結果を優先して記録する。
+- このwindowでtrace retry、feature guard修正、Phase 4以降のfix実装には進まない。次のGPU windowを検討するには、今回のruntime-feature guard不足を独立にreviewし、別途明示承認を得る必要がある。
