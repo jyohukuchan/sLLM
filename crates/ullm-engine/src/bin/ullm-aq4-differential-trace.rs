@@ -22,12 +22,12 @@ use std::process::ExitCode;
 use ullm_engine::inference_api::{CancellationToken, InferenceRequest, SamplingParams};
 use ullm_engine::qwen35_aq4_head_runtime::PackageLmHeadMode;
 use ullm_engine::qwen35_aq4_layer_runtime::PackageLinearAttnIntermediateTraceStage;
+#[cfg(test)]
+use ullm_engine::qwen35_aq4_layer_runtime::QWEN35_AQ4_M1_LINEAR_STAGE_REQUIRED_ENV;
 use ullm_engine::qwen35_aq4_model_runtime::{
     QWEN35_AQ4_CONTEXT_LENGTH, QWEN35_AQ4_KV_BLOCK_SIZE, QWEN35_AQ4_LINEAR_STAGE_TRACE_CHUNK_BYTES,
     Qwen35Aq4CalibrationObserver, Qwen35Aq4IntermediateTraceObserver, Qwen35Aq4ModelLoadConfig,
 };
-#[cfg(test)]
-use ullm_engine::qwen35_aq4_layer_runtime::QWEN35_AQ4_M1_LINEAR_STAGE_REQUIRED_ENV;
 use ullm_engine::qwen35_aq4_session::{
     Qwen35Aq4CalibrationReplay, Qwen35Aq4InferenceSession, Qwen35Aq4SessionConfig,
     Qwen35Aq4SessionStatus,
@@ -55,12 +55,15 @@ const MAX_IDENTITY_FILE_BYTES: u64 = 256 * 1024 * 1024;
 const EMBEDDED_BUILD_GIT_COMMIT: Option<&str> = option_env!("ULLM_BUILD_GIT_COMMIT");
 /// Complete fail-closed environment for the fixed Phase 3c full-model M=1 trace.
 ///
-/// The first nine entries are the layer-0 linear-attention path. The next five are required when
-/// the trace loads the real package's Qwen3.5-gated self-attention layers. The final two cover
-/// the package's BF16 embedding gather and full-logit top-1 selection. Keep this intentionally
-/// narrower than the worker's all-profile environment: enabling unrelated guards can add probes
-/// or change dispatch outside this trace's fixed M=1 path.
-const REQUIRED_PHASE3C_TRACE_ENV: [&str; 16] = [
+/// The first nine entries guard the layer-0 linear-attention M=1 execution path. The next entry
+/// is a normal production *model-load* prerequisite: every AQ4 resident matrix eagerly resolves
+/// its M=2..=128 batch-plan cache, and gfx1201 uses the Register-BM8 descriptor for widths 8..=128.
+/// It does not select an AQ4 batch operation while this trace dispatches a token at M=1. The next
+/// five entries are required when the trace loads the real package's Qwen3.5-gated self-attention
+/// layers. The final two cover the package's BF16 embedding gather and full-logit top-1 selection.
+/// Keep this intentionally narrower than the worker's all-profile environment: enabling unrelated
+/// guards can add probes or change dispatch outside this trace's fixed M=1 path.
+const REQUIRED_PHASE3C_TRACE_ENV: [&str; 17] = [
     "ULLM_REQUIRE_HIP_AQ4_MATVEC_KERNEL",
     "ULLM_REQUIRE_HIP_AQ4_MATVEC_BATCH_KERNEL",
     "ULLM_REQUIRE_HIP_AQ4_MATVEC_ADD_KERNEL",
@@ -70,6 +73,7 @@ const REQUIRED_PHASE3C_TRACE_ENV: [&str; 16] = [
     "ULLM_REQUIRE_HIP_LINEAR_ATTN_RECURRENT_KERNEL",
     "ULLM_REQUIRE_HIP_RMSNORM_KERNEL",
     "ULLM_REQUIRE_HIP_SEGMENTED_RMSNORM_SILU_MUL_KERNEL",
+    "ULLM_REQUIRE_HIP_AQ4_REGISTER_BM8_KERNEL",
     "ULLM_REQUIRE_HIP_PAGED_DECODE_ATTN_KERNEL",
     "ULLM_REQUIRE_HIP_QWEN35_QK_NORM_ROPE_PAGED_KV_WRITE_KERNEL",
     "ULLM_REQUIRE_HIP_PAGED_KV_WRITE_CHUNK_KERNEL",
@@ -79,7 +83,7 @@ const REQUIRED_PHASE3C_TRACE_ENV: [&str; 16] = [
     "ULLM_REQUIRE_HIP_TOP1_KERNEL",
 ];
 /// Variables which would move the fixed Phase 3c trace onto a different implementation branch.
-const DISALLOWED_PHASE3C_TRACE_ENV: [&str; 15] = [
+const DISALLOWED_PHASE3C_TRACE_ENV: [&str; 14] = [
     "ULLM_SYNC_LINEAR_ATTN_COMPONENTS_FOR_TIMING",
     "ULLM_DISABLE_AQ4_MATVEC_QKV_Z_GATE_BETA",
     "ULLM_DISABLE_PAGED_DECODE_SIGMOID_GATE_SELF_ATTN",
@@ -92,7 +96,6 @@ const DISALLOWED_PHASE3C_TRACE_ENV: [&str; 15] = [
     "ULLM_REQUIRE_HIP_LINEAR_ATTN_RECURRENT_SEQUENCE_KERNEL",
     "ULLM_REQUIRE_HIP_PAGED_KV_WRITE_KERNEL",
     "ULLM_REQUIRE_HIP_PAGED_DECODE_SPLIT_KERNEL",
-    "ULLM_REQUIRE_HIP_AQ4_REGISTER_BM8_KERNEL",
     "ULLM_EXPERIMENTAL_HIP_PAGED_DECODE_SPLIT_TILE",
     "ULLM_EXPERIMENTAL_HIP_PAGED_DECODE_SPLIT_MIN_CACHE_LEN",
 ];
@@ -1815,6 +1818,22 @@ mod tests {
         assert!(error.contains("ULLM_REQUIRE_HIP_AQ4_MATVEC_BATCH_KERNEL=<unset>"));
         assert!(error.contains("ULLM_REQUIRE_HIP_BF16_ROW_KERNEL=<unset>"));
         assert!(error.contains("ULLM_REQUIRE_HIP_TOP1_KERNEL=<unset>"));
+    }
+
+    #[test]
+    fn phase3c_trace_guard_requires_register_bm8_for_normal_m1_model_loading() {
+        assert_eq!(
+            &REQUIRED_PHASE3C_TRACE_ENV[..QWEN35_AQ4_M1_LINEAR_STAGE_REQUIRED_ENV.len()],
+            &QWEN35_AQ4_M1_LINEAR_STAGE_REQUIRED_ENV,
+        );
+        assert_eq!(
+            REQUIRED_PHASE3C_TRACE_ENV[QWEN35_AQ4_M1_LINEAR_STAGE_REQUIRED_ENV.len()],
+            "ULLM_REQUIRE_HIP_AQ4_REGISTER_BM8_KERNEL",
+        );
+        assert!(
+            !DISALLOWED_PHASE3C_TRACE_ENV.contains(&"ULLM_REQUIRE_HIP_AQ4_REGISTER_BM8_KERNEL"),
+            "the normal full-model loader eagerly admits its M=8..=128 AQ4 batch plans"
+        );
     }
 
     #[test]
