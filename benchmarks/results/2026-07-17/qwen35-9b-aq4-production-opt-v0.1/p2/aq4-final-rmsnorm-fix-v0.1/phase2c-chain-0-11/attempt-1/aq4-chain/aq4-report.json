@@ -1,0 +1,3180 @@
+{
+  "schema_version": "ullm.aq4_multilayer_accumulation.aq4_cpu.v3",
+  "status": "valid",
+  "classification": "unclassified",
+  "promotion": false,
+  "holdout": "not_run",
+  "policy_evaluation": "policy_not_evaluated",
+  "device": "cpu:0",
+  "chunk_bytes": 16777216,
+  "package_root": "/home/homelab1/datapool/ullm/product/qwen35-9b-aq4-cli-v0.1/package",
+  "package_manifest_sha256": "a790a033f57d9c5b9ae0d731a463c26b86aec691f771ce88bb543d676f08e5ad",
+  "input": {
+    "path": "benchmarks/results/2026-07-17/qwen35-9b-aq4-production-opt-v0.1/p2/aq4-layer0-hybrid-diagnostic-v0.1/input/hybrid-input.jsonl",
+    "schema": "ullm.aq4_layer0_hybrid_input_jsonl.v1",
+    "source_embedding_tensor": "model.language_model.embed_tokens.weight",
+    "dtype": "f32",
+    "shape": [
+      4096
+    ],
+    "residual_encoding": "f32le_row_major",
+    "source_model_index_sha256": "26d3539b516be613f39563617cb9d33b3f83d401298125be392c80cefb8f7fe5",
+    "rows": 3,
+    "consumed_sha256": "34d29e27f115e1d8f117ca3ae0095fc551e0276c165cbd8c9f36cdc5d374436b",
+    "cases": [
+      {
+        "case_id": "fixture-prompt-0",
+        "step": 0,
+        "context_token_ids_sha256": "42ea52c728680a54afafd1c1e1e45f13300c3ceb962f320f3900196a0c46215c",
+        "context_length": 3,
+        "residual_path": "input/fixture-prompt-0-step-0-residual.f32le",
+        "residual_sha256": "c9a58d574f5b29269d6e4ff024263d096cff772188f69e54d38222a5f6e97436"
+      },
+      {
+        "case_id": "fixture-prompt-0",
+        "step": 1,
+        "context_token_ids_sha256": "6af1601b9bf35d095b24c5bac3a95a01bf77d047b576441d0a5f9510eec66249",
+        "context_length": 4,
+        "residual_path": "input/fixture-prompt-0-step-1-residual.f32le",
+        "residual_sha256": "cb775fa4bf37425dcbb99ae42f48062c8d0b348f12ffac469fda40b971c4db05"
+      },
+      {
+        "case_id": "fixture-prompt-1",
+        "step": 0,
+        "context_token_ids_sha256": "3bca9e21e3b6f741ed412f91d7696146c254ff68bd9be9ca41b1d172eb3549e6",
+        "context_length": 2,
+        "residual_path": "input/fixture-prompt-1-step-0-residual.f32le",
+        "residual_sha256": "a351f964325f93bbe6d01149ab42088e19e072c5745505aca7438099077a8758"
+      }
+    ]
+  },
+  "chain": {
+    "requested_layer_range": "0:11",
+    "contiguous": true,
+    "layers": [
+      {
+        "layer_index": 0,
+        "kind": "linear_attention"
+      },
+      {
+        "layer_index": 1,
+        "kind": "linear_attention"
+      },
+      {
+        "layer_index": 2,
+        "kind": "linear_attention"
+      },
+      {
+        "layer_index": 3,
+        "kind": "self_attention"
+      },
+      {
+        "layer_index": 4,
+        "kind": "linear_attention"
+      },
+      {
+        "layer_index": 5,
+        "kind": "linear_attention"
+      },
+      {
+        "layer_index": 6,
+        "kind": "linear_attention"
+      },
+      {
+        "layer_index": 7,
+        "kind": "self_attention"
+      },
+      {
+        "layer_index": 8,
+        "kind": "linear_attention"
+      },
+      {
+        "layer_index": 9,
+        "kind": "linear_attention"
+      },
+      {
+        "layer_index": 10,
+        "kind": "linear_attention"
+      },
+      {
+        "layer_index": 11,
+        "kind": "self_attention"
+      }
+    ],
+    "post_rms_epsilon": 0.00001,
+    "post_rms_epsilon_mode": "aq4_runtime_default_1e-5",
+    "self_attention_qk_rms_epsilon": 0.00001,
+    "self_attention_rotary_dim": 64,
+    "self_attention_rope_base": 10000000.0,
+    "includes_final_norm_lm_head": false,
+    "final_norm_tensor": null,
+    "lm_head_tensor": null,
+    "lm_head_weight_representation": null,
+    "lm_head_sample_rows": [],
+    "state_contract": "The chain is cold-initialized once per fixture before layer 0. Each linear-attention layer uses its own model-defined Conv/recurrent state while replaying the complete temporal context; self-attention retains only the current layer's causal K/V sequence. No case is reset between chained layer outputs.",
+    "persistence_contract": "Only the current layer's input/output sequence, its current layer-local state, and fixed-coordinate summaries exist in memory. Full decoder/final-norm frames are streamed to the comparator then discarded before the next stage. LM-head AQ4 payload is dequantized as fixed rows only; no full vocabulary tensor or all-layer hidden/state tensor is retained."
+  },
+  "layer_summaries": [
+    {
+      "layer_index": 0,
+      "kind": "linear_attention",
+      "output": {
+        "records": 9,
+        "elements_per_record": 4096,
+        "aggregate_l2": 17.057853583682984,
+        "max_abs": 6.442965984344482,
+        "samples": [
+          {
+            "case_id": "fixture-prompt-0",
+            "step": 0,
+            "context_token_ids_sha256": "42ea52c728680a54afafd1c1e1e45f13300c3ceb962f320f3900196a0c46215c",
+            "timestep": 0,
+            "elements": 4096,
+            "coordinates": [
+              0,
+              1,
+              31,
+              127,
+              1024,
+              2048,
+              4095
+            ],
+            "values": [
+              -0.025754912,
+              0.059784636,
+              0.010785914,
+              0.014352629,
+              0.017241117,
+              0.029221658,
+              -0.046608027
+            ],
+            "max_abs": 5.2453765869140625,
+            "l2": 5.686982009553928
+          },
+          {
+            "case_id": "fixture-prompt-0",
+            "step": 0,
+            "context_token_ids_sha256": "42ea52c728680a54afafd1c1e1e45f13300c3ceb962f320f3900196a0c46215c",
+            "timestep": 1,
+            "elements": 4096,
+            "coordinates": [
+              0,
+              1,
+              31,
+              127,
+              1024,
+              2048,
+              4095
+            ],
+            "values": [
+              -0.003244926,
+              -0.0029145747,
+              0.046753682,
+              -0.004983132,
+              -0.010506989,
+              0.03244445,
+              -0.02207397
+            ],
+            "max_abs": 5.632126808166504,
+            "l2": 5.929879960467752
+          },
+          {
+            "case_id": "fixture-prompt-0",
+            "step": 0,
+            "context_token_ids_sha256": "42ea52c728680a54afafd1c1e1e45f13300c3ceb962f320f3900196a0c46215c",
+            "timestep": 2,
+            "elements": 4096,
+            "coordinates": [
+              0,
+              1,
+              31,
+              127,
+              1024,
+              2048,
+              4095
+            ],
+            "values": [
+              -0.015919562,
+              -0.0030791077,
+              -0.0044922745,
+              -0.0021513212,
+              -0.018150503,
+              0.011169447,
+              -0.0075283553
+            ],
+            "max_abs": 4.729043960571289,
+            "l2": 4.961949450589985
+          },
+          {
+            "case_id": "fixture-prompt-0",
+            "step": 1,
+            "context_token_ids_sha256": "6af1601b9bf35d095b24c5bac3a95a01bf77d047b576441d0a5f9510eec66249",
+            "timestep": 0,
+            "elements": 4096,
+            "coordinates": [
+              0,
+              1,
+              31,
+              127,
+              1024,
+              2048,
+              4095
+            ],
+            "values": [
+              -0.025754912,
+              0.059784636,
+              0.010785914,
+              0.014352629,
+              0.017241117,
+              0.029221658,
+              -0.046608027
+            ],
+            "max_abs": 5.2453765869140625,
+            "l2": 5.686982009553928
+          },
+          {
+            "case_id": "fixture-prompt-0",
+            "step": 1,
+            "context_token_ids_sha256": "6af1601b9bf35d095b24c5bac3a95a01bf77d047b576441d0a5f9510eec66249",
+            "timestep": 1,
+            "elements": 4096,
+            "coordinates": [
+              0,
+              1,
+              31,
+              127,
+              1024,
+              2048,
+              4095
+            ],
+            "values": [
+              -0.003244926,
+              -0.0029145747,
+              0.046753682,
+              -0.004983132,
+              -0.010506989,
+              0.03244445,
+              -0.02207397
+            ],
+            "max_abs": 5.632126808166504,
+            "l2": 5.929879960467752
+          },
+          {
+            "case_id": "fixture-prompt-0",
+            "step": 1,
+            "context_token_ids_sha256": "6af1601b9bf35d095b24c5bac3a95a01bf77d047b576441d0a5f9510eec66249",
+            "timestep": 2,
+            "elements": 4096,
+            "coordinates": [
+              0,
+              1,
+              31,
+              127,
+              1024,
+              2048,
+              4095
+            ],
+            "values": [
+              -0.015919562,
+              -0.0030791077,
+              -0.0044922745,
+              -0.0021513212,
+              -0.018150503,
+              0.011169447,
+              -0.0075283553
+            ],
+            "max_abs": 4.729043960571289,
+            "l2": 4.961949450589985
+          },
+          {
+            "case_id": "fixture-prompt-0",
+            "step": 1,
+            "context_token_ids_sha256": "6af1601b9bf35d095b24c5bac3a95a01bf77d047b576441d0a5f9510eec66249",
+            "timestep": 3,
+            "elements": 4096,
+            "coordinates": [
+              0,
+              1,
+              31,
+              127,
+              1024,
+              2048,
+              4095
+            ],
+            "values": [
+              0.014295532,
+              -0.011679914,
+              0.007197284,
+              0.00034876447,
+              0.0146017,
+              -0.018184172,
+              0.0061508357
+            ],
+            "max_abs": 5.185468673706055,
+            "l2": 5.306852608035033
+          },
+          {
+            "case_id": "fixture-prompt-1",
+            "step": 0,
+            "context_token_ids_sha256": "3bca9e21e3b6f741ed412f91d7696146c254ff68bd9be9ca41b1d172eb3549e6",
+            "timestep": 0,
+            "elements": 4096,
+            "coordinates": [
+              0,
+              1,
+              31,
+              127,
+              1024,
+              2048,
+              4095
+            ],
+            "values": [
+              -0.04424438,
+              -0.0031288518,
+              0.016914101,
+              -0.01387771,
+              -0.044247743,
+              0.013280485,
+              -0.011025525
+            ],
+            "max_abs": 5.668216228485107,
+            "l2": 5.9556177439986495
+          },
+          {
+            "case_id": "fixture-prompt-1",
+            "step": 0,
+            "context_token_ids_sha256": "3bca9e21e3b6f741ed412f91d7696146c254ff68bd9be9ca41b1d172eb3549e6",
+            "timestep": 1,
+            "elements": 4096,
+            "coordinates": [
+              0,
+              1,
+              31,
+              127,
+              1024,
+              2048,
+              4095
+            ],
+            "values": [
+              -0.009727839,
+              -0.024277726,
+              -0.010255229,
+              0.019786116,
+              -0.116117895,
+              0.012009274,
+              -0.0015824619
+            ],
+            "max_abs": 6.442965984344482,
+            "l2": 6.5639877681796515
+          }
+        ]
+      }
+    },
+    {
+      "layer_index": 1,
+      "kind": "linear_attention",
+      "output": {
+        "records": 9,
+        "elements_per_record": 4096,
+        "aggregate_l2": 25.034191313656304,
+        "max_abs": 8.13817024230957,
+        "samples": [
+          {
+            "case_id": "fixture-prompt-0",
+            "step": 0,
+            "context_token_ids_sha256": "42ea52c728680a54afafd1c1e1e45f13300c3ceb962f320f3900196a0c46215c",
+            "timestep": 0,
+            "elements": 4096,
+            "coordinates": [
+              0,
+              1,
+              31,
+              127,
+              1024,
+              2048,
+              4095
+            ],
+            "values": [
+              -0.07444616,
+              0.12245381,
+              0.01180227,
+              0.00688577,
+              0.048850045,
+              0.019013792,
+              0.0020234697
+            ],
+            "max_abs": 6.518041610717773,
+            "l2": 7.4109937198167755
+          },
+          {
+            "case_id": "fixture-prompt-0",
+            "step": 0,
+            "context_token_ids_sha256": "42ea52c728680a54afafd1c1e1e45f13300c3ceb962f320f3900196a0c46215c",
+            "timestep": 1,
+            "elements": 4096,
+            "coordinates": [
+              0,
+              1,
+              31,
+              127,
+              1024,
+              2048,
+              4095
+            ],
+            "values": [
+              0.04327463,
+              -0.0077651143,
+              -0.0035979748,
+              -0.11105562,
+              -0.011158135,
+              0.11815572,
+              -0.020076782
+            ],
+            "max_abs": 7.6734113693237305,
+            "l2": 9.233842163582361
+          },
+          {
+            "case_id": "fixture-prompt-0",
+            "step": 0,
+            "context_token_ids_sha256": "42ea52c728680a54afafd1c1e1e45f13300c3ceb962f320f3900196a0c46215c",
+            "timestep": 2,
+            "elements": 4096,
+            "coordinates": [
+              0,
+              1,
+              31,
+              127,
+              1024,
+              2048,
+              4095
+            ],
+            "values": [
+              -0.026216812,
+              -0.118621156,
+              -0.008630516,
+              -0.02637111,
+              -0.12302047,
+              -0.04101961,
+              -0.09906553
+            ],
+            "max_abs": 8.13817024230957,
+            "l2": 9.023542480624306
+          },
+          {
+            "case_id": "fixture-prompt-0",
+            "step": 1,
+            "context_token_ids_sha256": "6af1601b9bf35d095b24c5bac3a95a01bf77d047b576441d0a5f9510eec66249",
+            "timestep": 0,
+            "elements": 4096,
+            "coordinates": [
+              0,
+              1,
+              31,
+              127,
+              1024,
+              2048,
+              4095
+            ],
+            "values": [
+              -0.07444616,
+              0.12245381,
+              0.01180227,
+              0.00688577,
+              0.048850045,
+              0.019013792,
+              0.0020234697
+            ],
+            "max_abs": 6.518041610717773,
+            "l2": 7.4109937198167755
+          },
+          {
+            "case_id": "fixture-prompt-0",
+            "step": 1,
+            "context_token_ids_sha256": "6af1601b9bf35d095b24c5bac3a95a01bf77d047b576441d0a5f9510eec66249",
+            "timestep": 1,
+            "elements": 4096,
+            "coordinates": [
+              0,
+              1,
+              31,
+              127,
+              1024,
+              2048,
+              4095
+            ],
+            "values": [
+              0.04327463,
+              -0.0077651143,
+              -0.0035979748,
+              -0.11105562,
+              -0.011158135,
+              0.11815572,
+              -0.020076782
+            ],
+            "max_abs": 7.6734113693237305,
+            "l2": 9.233842163582361
+          },
+          {
+            "case_id": "fixture-prompt-0",
+            "step": 1,
+            "context_token_ids_sha256": "6af1601b9bf35d095b24c5bac3a95a01bf77d047b576441d0a5f9510eec66249",
+            "timestep": 2,
+            "elements": 4096,
+            "coordinates": [
+              0,
+              1,
+              31,
+              127,
+              1024,
+              2048,
+              4095
+            ],
+            "values": [
+              -0.026216812,
+              -0.118621156,
+              -0.008630516,
+              -0.02637111,
+              -0.12302047,
+              -0.04101961,
+              -0.09906553
+            ],
+            "max_abs": 8.13817024230957,
+            "l2": 9.023542480624306
+          },
+          {
+            "case_id": "fixture-prompt-0",
+            "step": 1,
+            "context_token_ids_sha256": "6af1601b9bf35d095b24c5bac3a95a01bf77d047b576441d0a5f9510eec66249",
+            "timestep": 3,
+            "elements": 4096,
+            "coordinates": [
+              0,
+              1,
+              31,
+              127,
+              1024,
+              2048,
+              4095
+            ],
+            "values": [
+              0.0041199476,
+              -0.066955544,
+              -0.05589298,
+              -0.017218992,
+              0.0017477348,
+              -0.11518322,
+              -0.06124152
+            ],
+            "max_abs": 6.453507423400879,
+            "l2": 6.958679918600237
+          },
+          {
+            "case_id": "fixture-prompt-1",
+            "step": 0,
+            "context_token_ids_sha256": "3bca9e21e3b6f741ed412f91d7696146c254ff68bd9be9ca41b1d172eb3549e6",
+            "timestep": 0,
+            "elements": 4096,
+            "coordinates": [
+              0,
+              1,
+              31,
+              127,
+              1024,
+              2048,
+              4095
+            ],
+            "values": [
+              -0.059208933,
+              0.011261158,
+              0.015063037,
+              0.003030925,
+              0.00044645742,
+              0.052173965,
+              0.014760332
+            ],
+            "max_abs": 7.670190811157227,
+            "l2": 8.242806250890945
+          },
+          {
+            "case_id": "fixture-prompt-1",
+            "step": 0,
+            "context_token_ids_sha256": "3bca9e21e3b6f741ed412f91d7696146c254ff68bd9be9ca41b1d172eb3549e6",
+            "timestep": 1,
+            "elements": 4096,
+            "coordinates": [
+              0,
+              1,
+              31,
+              127,
+              1024,
+              2048,
+              4095
+            ],
+            "values": [
+              0.016043082,
+              -0.012076888,
+              -0.019897833,
+              0.03829281,
+              -0.23214296,
+              0.020919815,
+              0.00067149475
+            ],
+            "max_abs": 7.772881507873535,
+            "l2": 8.192782054711005
+          }
+        ]
+      }
+    },
+    {
+      "layer_index": 2,
+      "kind": "linear_attention",
+      "output": {
+        "records": 9,
+        "elements_per_record": 4096,
+        "aggregate_l2": 34.45451802418449,
+        "max_abs": 14.933571815490723,
+        "samples": [
+          {
+            "case_id": "fixture-prompt-0",
+            "step": 0,
+            "context_token_ids_sha256": "42ea52c728680a54afafd1c1e1e45f13300c3ceb962f320f3900196a0c46215c",
+            "timestep": 0,
+            "elements": 4096,
+            "coordinates": [
+              0,
+              1,
+              31,
+              127,
+              1024,
+              2048,
+              4095
+            ],
+            "values": [
+              -0.09025074,
+              0.28700536,
+              -0.0065584052,
+              0.052419133,
+              0.19194195,
+              -0.018877577,
+              0.029301427
+            ],
+            "max_abs": 13.055914878845215,
+            "l2": 15.263955494898234
+          },
+          {
+            "case_id": "fixture-prompt-0",
+            "step": 0,
+            "context_token_ids_sha256": "42ea52c728680a54afafd1c1e1e45f13300c3ceb962f320f3900196a0c46215c",
+            "timestep": 1,
+            "elements": 4096,
+            "coordinates": [
+              0,
+              1,
+              31,
+              127,
+              1024,
+              2048,
+              4095
+            ],
+            "values": [
+              0.063510984,
+              -0.1008191,
+              -0.032149903,
+              -0.095809944,
+              -0.0061689815,
+              0.06565356,
+              -0.010281185
+            ],
+            "max_abs": 5.8326544761657715,
+            "l2": 9.734415865346746
+          },
+          {
+            "case_id": "fixture-prompt-0",
+            "step": 0,
+            "context_token_ids_sha256": "42ea52c728680a54afafd1c1e1e45f13300c3ceb962f320f3900196a0c46215c",
+            "timestep": 2,
+            "elements": 4096,
+            "coordinates": [
+              0,
+              1,
+              31,
+              127,
+              1024,
+              2048,
+              4095
+            ],
+            "values": [
+              -0.017943028,
+              -0.20678668,
+              0.0009652176,
+              -0.041110873,
+              -0.033603035,
+              0.006641887,
+              -0.075949684
+            ],
+            "max_abs": 5.106123924255371,
+            "l2": 8.184548113912978
+          },
+          {
+            "case_id": "fixture-prompt-0",
+            "step": 1,
+            "context_token_ids_sha256": "6af1601b9bf35d095b24c5bac3a95a01bf77d047b576441d0a5f9510eec66249",
+            "timestep": 0,
+            "elements": 4096,
+            "coordinates": [
+              0,
+              1,
+              31,
+              127,
+              1024,
+              2048,
+              4095
+            ],
+            "values": [
+              -0.09025074,
+              0.28700536,
+              -0.0065584052,
+              0.052419133,
+              0.19194195,
+              -0.018877577,
+              0.029301427
+            ],
+            "max_abs": 13.055914878845215,
+            "l2": 15.263955494898234
+          },
+          {
+            "case_id": "fixture-prompt-0",
+            "step": 1,
+            "context_token_ids_sha256": "6af1601b9bf35d095b24c5bac3a95a01bf77d047b576441d0a5f9510eec66249",
+            "timestep": 1,
+            "elements": 4096,
+            "coordinates": [
+              0,
+              1,
+              31,
+              127,
+              1024,
+              2048,
+              4095
+            ],
+            "values": [
+              0.063510984,
+              -0.1008191,
+              -0.032149903,
+              -0.095809944,
+              -0.0061689815,
+              0.06565356,
+              -0.010281185
+            ],
+            "max_abs": 5.8326544761657715,
+            "l2": 9.734415865346746
+          },
+          {
+            "case_id": "fixture-prompt-0",
+            "step": 1,
+            "context_token_ids_sha256": "6af1601b9bf35d095b24c5bac3a95a01bf77d047b576441d0a5f9510eec66249",
+            "timestep": 2,
+            "elements": 4096,
+            "coordinates": [
+              0,
+              1,
+              31,
+              127,
+              1024,
+              2048,
+              4095
+            ],
+            "values": [
+              -0.017943028,
+              -0.20678668,
+              0.0009652176,
+              -0.041110873,
+              -0.033603035,
+              0.006641887,
+              -0.075949684
+            ],
+            "max_abs": 5.106123924255371,
+            "l2": 8.184548113912978
+          },
+          {
+            "case_id": "fixture-prompt-0",
+            "step": 1,
+            "context_token_ids_sha256": "6af1601b9bf35d095b24c5bac3a95a01bf77d047b576441d0a5f9510eec66249",
+            "timestep": 3,
+            "elements": 4096,
+            "coordinates": [
+              0,
+              1,
+              31,
+              127,
+              1024,
+              2048,
+              4095
+            ],
+            "values": [
+              -0.031600155,
+              -0.22472458,
+              -0.090197876,
+              -0.14686632,
+              0.06773474,
+              -0.15375279,
+              -0.11925991
+            ],
+            "max_abs": 4.878198623657227,
+            "l2": 7.57003464819329
+          },
+          {
+            "case_id": "fixture-prompt-1",
+            "step": 0,
+            "context_token_ids_sha256": "3bca9e21e3b6f741ed412f91d7696146c254ff68bd9be9ca41b1d172eb3549e6",
+            "timestep": 0,
+            "elements": 4096,
+            "coordinates": [
+              0,
+              1,
+              31,
+              127,
+              1024,
+              2048,
+              4095
+            ],
+            "values": [
+              -0.07455799,
+              0.14967194,
+              0.03141453,
+              0.0068437806,
+              0.14445718,
+              0.020890469,
+              0.027051777
+            ],
+            "max_abs": 14.933571815490723,
+            "l2": 16.382653141227745
+          },
+          {
+            "case_id": "fixture-prompt-1",
+            "step": 0,
+            "context_token_ids_sha256": "3bca9e21e3b6f741ed412f91d7696146c254ff68bd9be9ca41b1d172eb3549e6",
+            "timestep": 1,
+            "elements": 4096,
+            "coordinates": [
+              0,
+              1,
+              31,
+              127,
+              1024,
+              2048,
+              4095
+            ],
+            "values": [
+              0.043494888,
+              0.030851586,
+              -0.00848931,
+              0.024092004,
+              -0.2752548,
+              0.018058168,
+              -0.016570184
+            ],
+            "max_abs": 7.196252822875977,
+            "l2": 8.4822773428377
+          }
+        ]
+      }
+    },
+    {
+      "layer_index": 3,
+      "kind": "self_attention",
+      "output": {
+        "records": 9,
+        "elements_per_record": 4096,
+        "aggregate_l2": 45.43085377088826,
+        "max_abs": 14.436506271362305,
+        "samples": [
+          {
+            "case_id": "fixture-prompt-0",
+            "step": 0,
+            "context_token_ids_sha256": "42ea52c728680a54afafd1c1e1e45f13300c3ceb962f320f3900196a0c46215c",
+            "timestep": 0,
+            "elements": 4096,
+            "coordinates": [
+              0,
+              1,
+              31,
+              127,
+              1024,
+              2048,
+              4095
+            ],
+            "values": [
+              -0.095924675,
+              0.32037815,
+              -0.018193614,
+              0.028654449,
+              0.036350034,
+              -0.033304356,
+              -0.046595946
+            ],
+            "max_abs": 12.198893547058105,
+            "l2": 15.191101481056148
+          },
+          {
+            "case_id": "fixture-prompt-0",
+            "step": 0,
+            "context_token_ids_sha256": "42ea52c728680a54afafd1c1e1e45f13300c3ceb962f320f3900196a0c46215c",
+            "timestep": 1,
+            "elements": 4096,
+            "coordinates": [
+              0,
+              1,
+              31,
+              127,
+              1024,
+              2048,
+              4095
+            ],
+            "values": [
+              0.03830138,
+              -0.15713443,
+              0.0051478595,
+              -0.13204162,
+              0.1359232,
+              -0.04085003,
+              0.051605724
+            ],
+            "max_abs": 12.16377067565918,
+            "l2": 15.74032510285362
+          },
+          {
+            "case_id": "fixture-prompt-0",
+            "step": 0,
+            "context_token_ids_sha256": "42ea52c728680a54afafd1c1e1e45f13300c3ceb962f320f3900196a0c46215c",
+            "timestep": 2,
+            "elements": 4096,
+            "coordinates": [
+              0,
+              1,
+              31,
+              127,
+              1024,
+              2048,
+              4095
+            ],
+            "values": [
+              -0.035052776,
+              -0.23627399,
+              -0.06786624,
+              0.065994665,
+              -0.095369995,
+              -0.012937278,
+              0.029253233
+            ],
+            "max_abs": 11.982518196105957,
+            "l2": 14.530222503022802
+          },
+          {
+            "case_id": "fixture-prompt-0",
+            "step": 1,
+            "context_token_ids_sha256": "6af1601b9bf35d095b24c5bac3a95a01bf77d047b576441d0a5f9510eec66249",
+            "timestep": 0,
+            "elements": 4096,
+            "coordinates": [
+              0,
+              1,
+              31,
+              127,
+              1024,
+              2048,
+              4095
+            ],
+            "values": [
+              -0.095924675,
+              0.32037815,
+              -0.018193614,
+              0.028654449,
+              0.036350034,
+              -0.033304356,
+              -0.046595946
+            ],
+            "max_abs": 12.198893547058105,
+            "l2": 15.191101481056148
+          },
+          {
+            "case_id": "fixture-prompt-0",
+            "step": 1,
+            "context_token_ids_sha256": "6af1601b9bf35d095b24c5bac3a95a01bf77d047b576441d0a5f9510eec66249",
+            "timestep": 1,
+            "elements": 4096,
+            "coordinates": [
+              0,
+              1,
+              31,
+              127,
+              1024,
+              2048,
+              4095
+            ],
+            "values": [
+              0.03830138,
+              -0.15713443,
+              0.0051478595,
+              -0.13204162,
+              0.1359232,
+              -0.04085003,
+              0.051605724
+            ],
+            "max_abs": 12.16377067565918,
+            "l2": 15.74032510285362
+          },
+          {
+            "case_id": "fixture-prompt-0",
+            "step": 1,
+            "context_token_ids_sha256": "6af1601b9bf35d095b24c5bac3a95a01bf77d047b576441d0a5f9510eec66249",
+            "timestep": 2,
+            "elements": 4096,
+            "coordinates": [
+              0,
+              1,
+              31,
+              127,
+              1024,
+              2048,
+              4095
+            ],
+            "values": [
+              -0.035052776,
+              -0.23627399,
+              -0.06786624,
+              0.065994665,
+              -0.095369995,
+              -0.012937278,
+              0.029253233
+            ],
+            "max_abs": 11.982518196105957,
+            "l2": 14.530222503022802
+          },
+          {
+            "case_id": "fixture-prompt-0",
+            "step": 1,
+            "context_token_ids_sha256": "6af1601b9bf35d095b24c5bac3a95a01bf77d047b576441d0a5f9510eec66249",
+            "timestep": 3,
+            "elements": 4096,
+            "coordinates": [
+              0,
+              1,
+              31,
+              127,
+              1024,
+              2048,
+              4095
+            ],
+            "values": [
+              -0.06886167,
+              -0.17224361,
+              -0.20084962,
+              -0.16255793,
+              0.10848528,
+              -0.22284476,
+              -0.25026152
+            ],
+            "max_abs": 11.558030128479004,
+            "l2": 14.235823231743465
+          },
+          {
+            "case_id": "fixture-prompt-1",
+            "step": 0,
+            "context_token_ids_sha256": "3bca9e21e3b6f741ed412f91d7696146c254ff68bd9be9ca41b1d172eb3549e6",
+            "timestep": 0,
+            "elements": 4096,
+            "coordinates": [
+              0,
+              1,
+              31,
+              127,
+              1024,
+              2048,
+              4095
+            ],
+            "values": [
+              -0.02415959,
+              0.15497246,
+              0.05600149,
+              -0.0015851352,
+              -0.09591429,
+              -0.032364674,
+              0.011955276
+            ],
+            "max_abs": 14.436506271362305,
+            "l2": 16.66124210029784
+          },
+          {
+            "case_id": "fixture-prompt-1",
+            "step": 0,
+            "context_token_ids_sha256": "3bca9e21e3b6f741ed412f91d7696146c254ff68bd9be9ca41b1d172eb3549e6",
+            "timestep": 1,
+            "elements": 4096,
+            "coordinates": [
+              0,
+              1,
+              31,
+              127,
+              1024,
+              2048,
+              4095
+            ],
+            "values": [
+              -0.008389585,
+              -0.05528847,
+              -0.094579555,
+              -0.027144805,
+              -0.35257414,
+              -0.018860038,
+              0.017172955
+            ],
+            "max_abs": 13.178277015686035,
+            "l2": 14.296758159261396
+          }
+        ]
+      }
+    },
+    {
+      "layer_index": 4,
+      "kind": "linear_attention",
+      "output": {
+        "records": 9,
+        "elements_per_record": 4096,
+        "aggregate_l2": 52.72467413526968,
+        "max_abs": 15.151233673095703,
+        "samples": [
+          {
+            "case_id": "fixture-prompt-0",
+            "step": 0,
+            "context_token_ids_sha256": "42ea52c728680a54afafd1c1e1e45f13300c3ceb962f320f3900196a0c46215c",
+            "timestep": 0,
+            "elements": 4096,
+            "coordinates": [
+              0,
+              1,
+              31,
+              127,
+              1024,
+              2048,
+              4095
+            ],
+            "values": [
+              -0.067282364,
+              0.3413506,
+              -0.06962901,
+              0.0895507,
+              -0.029412705,
+              -0.09793528,
+              -0.013380274
+            ],
+            "max_abs": 12.947905540466309,
+            "l2": 16.74102134938299
+          },
+          {
+            "case_id": "fixture-prompt-0",
+            "step": 0,
+            "context_token_ids_sha256": "42ea52c728680a54afafd1c1e1e45f13300c3ceb962f320f3900196a0c46215c",
+            "timestep": 1,
+            "elements": 4096,
+            "coordinates": [
+              0,
+              1,
+              31,
+              127,
+              1024,
+              2048,
+              4095
+            ],
+            "values": [
+              0.107135706,
+              -0.16693676,
+              -0.0013246424,
+              -0.03672512,
+              0.058364242,
+              -0.002929844,
+              -0.18447988
+            ],
+            "max_abs": 14.154060363769531,
+            "l2": 18.35066748909629
+          },
+          {
+            "case_id": "fixture-prompt-0",
+            "step": 0,
+            "context_token_ids_sha256": "42ea52c728680a54afafd1c1e1e45f13300c3ceb962f320f3900196a0c46215c",
+            "timestep": 2,
+            "elements": 4096,
+            "coordinates": [
+              0,
+              1,
+              31,
+              127,
+              1024,
+              2048,
+              4095
+            ],
+            "values": [
+              -0.15959798,
+              -0.31953794,
+              -0.07675005,
+              0.10318393,
+              -0.21407819,
+              -0.06859651,
+              0.047630507
+            ],
+            "max_abs": 13.750631332397461,
+            "l2": 17.272140772434433
+          },
+          {
+            "case_id": "fixture-prompt-0",
+            "step": 1,
+            "context_token_ids_sha256": "6af1601b9bf35d095b24c5bac3a95a01bf77d047b576441d0a5f9510eec66249",
+            "timestep": 0,
+            "elements": 4096,
+            "coordinates": [
+              0,
+              1,
+              31,
+              127,
+              1024,
+              2048,
+              4095
+            ],
+            "values": [
+              -0.067282364,
+              0.3413506,
+              -0.06962901,
+              0.0895507,
+              -0.029412705,
+              -0.09793528,
+              -0.013380274
+            ],
+            "max_abs": 12.947905540466309,
+            "l2": 16.74102134938299
+          },
+          {
+            "case_id": "fixture-prompt-0",
+            "step": 1,
+            "context_token_ids_sha256": "6af1601b9bf35d095b24c5bac3a95a01bf77d047b576441d0a5f9510eec66249",
+            "timestep": 1,
+            "elements": 4096,
+            "coordinates": [
+              0,
+              1,
+              31,
+              127,
+              1024,
+              2048,
+              4095
+            ],
+            "values": [
+              0.107135706,
+              -0.16693676,
+              -0.0013246424,
+              -0.03672512,
+              0.058364242,
+              -0.002929844,
+              -0.18447988
+            ],
+            "max_abs": 14.154060363769531,
+            "l2": 18.35066748909629
+          },
+          {
+            "case_id": "fixture-prompt-0",
+            "step": 1,
+            "context_token_ids_sha256": "6af1601b9bf35d095b24c5bac3a95a01bf77d047b576441d0a5f9510eec66249",
+            "timestep": 2,
+            "elements": 4096,
+            "coordinates": [
+              0,
+              1,
+              31,
+              127,
+              1024,
+              2048,
+              4095
+            ],
+            "values": [
+              -0.15959798,
+              -0.31953794,
+              -0.07675005,
+              0.10318393,
+              -0.21407819,
+              -0.06859651,
+              0.047630507
+            ],
+            "max_abs": 13.750631332397461,
+            "l2": 17.272140772434433
+          },
+          {
+            "case_id": "fixture-prompt-0",
+            "step": 1,
+            "context_token_ids_sha256": "6af1601b9bf35d095b24c5bac3a95a01bf77d047b576441d0a5f9510eec66249",
+            "timestep": 3,
+            "elements": 4096,
+            "coordinates": [
+              0,
+              1,
+              31,
+              127,
+              1024,
+              2048,
+              4095
+            ],
+            "values": [
+              -0.070818394,
+              -0.22715059,
+              -0.23007137,
+              -0.010992333,
+              0.23151182,
+              -0.1575464,
+              -0.21303028
+            ],
+            "max_abs": 15.009115219116211,
+            "l2": 18.281686005930094
+          },
+          {
+            "case_id": "fixture-prompt-1",
+            "step": 0,
+            "context_token_ids_sha256": "3bca9e21e3b6f741ed412f91d7696146c254ff68bd9be9ca41b1d172eb3549e6",
+            "timestep": 0,
+            "elements": 4096,
+            "coordinates": [
+              0,
+              1,
+              31,
+              127,
+              1024,
+              2048,
+              4095
+            ],
+            "values": [
+              -0.04500648,
+              0.18064311,
+              -0.03987048,
+              0.050627865,
+              -0.22267058,
+              -0.07805461,
+              0.09499928
+            ],
+            "max_abs": 15.151233673095703,
+            "l2": 18.73304252781689
+          },
+          {
+            "case_id": "fixture-prompt-1",
+            "step": 0,
+            "context_token_ids_sha256": "3bca9e21e3b6f741ed412f91d7696146c254ff68bd9be9ca41b1d172eb3549e6",
+            "timestep": 1,
+            "elements": 4096,
+            "coordinates": [
+              0,
+              1,
+              31,
+              127,
+              1024,
+              2048,
+              4095
+            ],
+            "values": [
+              0.06463353,
+              -0.052076254,
+              -0.09954109,
+              -0.014350358,
+              -0.43009865,
+              0.033687223,
+              -0.023056176
+            ],
+            "max_abs": 14.636368751525879,
+            "l2": 16.250324831972762
+          }
+        ]
+      }
+    },
+    {
+      "layer_index": 5,
+      "kind": "linear_attention",
+      "output": {
+        "records": 9,
+        "elements_per_record": 4096,
+        "aggregate_l2": 58.74460600941056,
+        "max_abs": 18.95699119567871,
+        "samples": [
+          {
+            "case_id": "fixture-prompt-0",
+            "step": 0,
+            "context_token_ids_sha256": "42ea52c728680a54afafd1c1e1e45f13300c3ceb962f320f3900196a0c46215c",
+            "timestep": 0,
+            "elements": 4096,
+            "coordinates": [
+              0,
+              1,
+              31,
+              127,
+              1024,
+              2048,
+              4095
+            ],
+            "values": [
+              -0.096292324,
+              0.33532268,
+              -0.028101385,
+              0.1544694,
+              -0.056970228,
+              -0.104051314,
+              0.015324442
+            ],
+            "max_abs": 9.925430297851562,
+            "l2": 15.721442665740197
+          },
+          {
+            "case_id": "fixture-prompt-0",
+            "step": 0,
+            "context_token_ids_sha256": "42ea52c728680a54afafd1c1e1e45f13300c3ceb962f320f3900196a0c46215c",
+            "timestep": 1,
+            "elements": 4096,
+            "coordinates": [
+              0,
+              1,
+              31,
+              127,
+              1024,
+              2048,
+              4095
+            ],
+            "values": [
+              0.1133055,
+              -0.22838604,
+              -0.0032888316,
+              -0.07786347,
+              0.106821686,
+              -0.06576408,
+              -0.39777982
+            ],
+            "max_abs": 16.272232055664062,
+            "l2": 21.45952747504795
+          },
+          {
+            "case_id": "fixture-prompt-0",
+            "step": 0,
+            "context_token_ids_sha256": "42ea52c728680a54afafd1c1e1e45f13300c3ceb962f320f3900196a0c46215c",
+            "timestep": 2,
+            "elements": 4096,
+            "coordinates": [
+              0,
+              1,
+              31,
+              127,
+              1024,
+              2048,
+              4095
+            ],
+            "values": [
+              0.004684493,
+              -0.4449494,
+              -0.08535355,
+              0.16672157,
+              -0.14784338,
+              -0.16240972,
+              -0.1018161
+            ],
+            "max_abs": 16.419189453125,
+            "l2": 20.537927734373845
+          },
+          {
+            "case_id": "fixture-prompt-0",
+            "step": 1,
+            "context_token_ids_sha256": "6af1601b9bf35d095b24c5bac3a95a01bf77d047b576441d0a5f9510eec66249",
+            "timestep": 0,
+            "elements": 4096,
+            "coordinates": [
+              0,
+              1,
+              31,
+              127,
+              1024,
+              2048,
+              4095
+            ],
+            "values": [
+              -0.096292324,
+              0.33532268,
+              -0.028101385,
+              0.1544694,
+              -0.056970228,
+              -0.104051314,
+              0.015324442
+            ],
+            "max_abs": 9.925430297851562,
+            "l2": 15.721442665740197
+          },
+          {
+            "case_id": "fixture-prompt-0",
+            "step": 1,
+            "context_token_ids_sha256": "6af1601b9bf35d095b24c5bac3a95a01bf77d047b576441d0a5f9510eec66249",
+            "timestep": 1,
+            "elements": 4096,
+            "coordinates": [
+              0,
+              1,
+              31,
+              127,
+              1024,
+              2048,
+              4095
+            ],
+            "values": [
+              0.1133055,
+              -0.22838604,
+              -0.0032888316,
+              -0.07786347,
+              0.106821686,
+              -0.06576408,
+              -0.39777982
+            ],
+            "max_abs": 16.272232055664062,
+            "l2": 21.45952747504795
+          },
+          {
+            "case_id": "fixture-prompt-0",
+            "step": 1,
+            "context_token_ids_sha256": "6af1601b9bf35d095b24c5bac3a95a01bf77d047b576441d0a5f9510eec66249",
+            "timestep": 2,
+            "elements": 4096,
+            "coordinates": [
+              0,
+              1,
+              31,
+              127,
+              1024,
+              2048,
+              4095
+            ],
+            "values": [
+              0.004684493,
+              -0.4449494,
+              -0.08535355,
+              0.16672157,
+              -0.14784338,
+              -0.16240972,
+              -0.1018161
+            ],
+            "max_abs": 16.419189453125,
+            "l2": 20.537927734373845
+          },
+          {
+            "case_id": "fixture-prompt-0",
+            "step": 1,
+            "context_token_ids_sha256": "6af1601b9bf35d095b24c5bac3a95a01bf77d047b576441d0a5f9510eec66249",
+            "timestep": 3,
+            "elements": 4096,
+            "coordinates": [
+              0,
+              1,
+              31,
+              127,
+              1024,
+              2048,
+              4095
+            ],
+            "values": [
+              -0.09402375,
+              -0.4563003,
+              -0.27739543,
+              -0.057229485,
+              0.23387691,
+              -0.11357653,
+              -0.2633881
+            ],
+            "max_abs": 18.95699119567871,
+            "l2": 23.118744571962623
+          },
+          {
+            "case_id": "fixture-prompt-1",
+            "step": 0,
+            "context_token_ids_sha256": "3bca9e21e3b6f741ed412f91d7696146c254ff68bd9be9ca41b1d172eb3549e6",
+            "timestep": 0,
+            "elements": 4096,
+            "coordinates": [
+              0,
+              1,
+              31,
+              127,
+              1024,
+              2048,
+              4095
+            ],
+            "values": [
+              -0.15539838,
+              0.27240324,
+              -0.101347536,
+              0.05835646,
+              -0.26527825,
+              -0.10026842,
+              0.0056870915
+            ],
+            "max_abs": 12.054502487182617,
+            "l2": 17.444339706740017
+          },
+          {
+            "case_id": "fixture-prompt-1",
+            "step": 0,
+            "context_token_ids_sha256": "3bca9e21e3b6f741ed412f91d7696146c254ff68bd9be9ca41b1d172eb3549e6",
+            "timestep": 1,
+            "elements": 4096,
+            "coordinates": [
+              0,
+              1,
+              31,
+              127,
+              1024,
+              2048,
+              4095
+            ],
+            "values": [
+              0.06632037,
+              -0.10908733,
+              -0.10404514,
+              0.014145967,
+              -0.3522762,
+              0.031006623,
+              -0.11625247
+            ],
+            "max_abs": 16.81766700744629,
+            "l2": 18.793197909865263
+          }
+        ]
+      }
+    },
+    {
+      "layer_index": 6,
+      "kind": "linear_attention",
+      "output": {
+        "records": 9,
+        "elements_per_record": 4096,
+        "aggregate_l2": 133.6591921020757,
+        "max_abs": 40.955909729003906,
+        "samples": [
+          {
+            "case_id": "fixture-prompt-0",
+            "step": 0,
+            "context_token_ids_sha256": "42ea52c728680a54afafd1c1e1e45f13300c3ceb962f320f3900196a0c46215c",
+            "timestep": 0,
+            "elements": 4096,
+            "coordinates": [
+              0,
+              1,
+              31,
+              127,
+              1024,
+              2048,
+              4095
+            ],
+            "values": [
+              0.1921462,
+              1.9541472,
+              -0.3741089,
+              0.38712808,
+              0.07359415,
+              -0.11250362,
+              -0.020568877
+            ],
+            "max_abs": 39.5610237121582,
+            "l2": 67.8068639337937
+          },
+          {
+            "case_id": "fixture-prompt-0",
+            "step": 0,
+            "context_token_ids_sha256": "42ea52c728680a54afafd1c1e1e45f13300c3ceb962f320f3900196a0c46215c",
+            "timestep": 1,
+            "elements": 4096,
+            "coordinates": [
+              0,
+              1,
+              31,
+              127,
+              1024,
+              2048,
+              4095
+            ],
+            "values": [
+              0.19712986,
+              -0.26149786,
+              0.061949085,
+              -0.21023543,
+              0.115100995,
+              0.14591467,
+              -0.4300957
+            ],
+            "max_abs": 20.31591796875,
+            "l2": 28.168793520134237
+          },
+          {
+            "case_id": "fixture-prompt-0",
+            "step": 0,
+            "context_token_ids_sha256": "42ea52c728680a54afafd1c1e1e45f13300c3ceb962f320f3900196a0c46215c",
+            "timestep": 2,
+            "elements": 4096,
+            "coordinates": [
+              0,
+              1,
+              31,
+              127,
+              1024,
+              2048,
+              4095
+            ],
+            "values": [
+              -0.058041245,
+              -0.5514545,
+              -0.19272648,
+              0.19428697,
+              -0.40022665,
+              -0.22176,
+              0.018704586
+            ],
+            "max_abs": 17.573659896850586,
+            "l2": 25.259866676394598
+          },
+          {
+            "case_id": "fixture-prompt-0",
+            "step": 1,
+            "context_token_ids_sha256": "6af1601b9bf35d095b24c5bac3a95a01bf77d047b576441d0a5f9510eec66249",
+            "timestep": 0,
+            "elements": 4096,
+            "coordinates": [
+              0,
+              1,
+              31,
+              127,
+              1024,
+              2048,
+              4095
+            ],
+            "values": [
+              0.1921462,
+              1.9541472,
+              -0.3741089,
+              0.38712808,
+              0.07359415,
+              -0.11250362,
+              -0.020568877
+            ],
+            "max_abs": 39.5610237121582,
+            "l2": 67.8068639337937
+          },
+          {
+            "case_id": "fixture-prompt-0",
+            "step": 1,
+            "context_token_ids_sha256": "6af1601b9bf35d095b24c5bac3a95a01bf77d047b576441d0a5f9510eec66249",
+            "timestep": 1,
+            "elements": 4096,
+            "coordinates": [
+              0,
+              1,
+              31,
+              127,
+              1024,
+              2048,
+              4095
+            ],
+            "values": [
+              0.19712986,
+              -0.26149786,
+              0.061949085,
+              -0.21023543,
+              0.115100995,
+              0.14591467,
+              -0.4300957
+            ],
+            "max_abs": 20.31591796875,
+            "l2": 28.168793520134237
+          },
+          {
+            "case_id": "fixture-prompt-0",
+            "step": 1,
+            "context_token_ids_sha256": "6af1601b9bf35d095b24c5bac3a95a01bf77d047b576441d0a5f9510eec66249",
+            "timestep": 2,
+            "elements": 4096,
+            "coordinates": [
+              0,
+              1,
+              31,
+              127,
+              1024,
+              2048,
+              4095
+            ],
+            "values": [
+              -0.058041245,
+              -0.5514545,
+              -0.19272648,
+              0.19428697,
+              -0.40022665,
+              -0.22176,
+              0.018704586
+            ],
+            "max_abs": 17.573659896850586,
+            "l2": 25.259866676394598
+          },
+          {
+            "case_id": "fixture-prompt-0",
+            "step": 1,
+            "context_token_ids_sha256": "6af1601b9bf35d095b24c5bac3a95a01bf77d047b576441d0a5f9510eec66249",
+            "timestep": 3,
+            "elements": 4096,
+            "coordinates": [
+              0,
+              1,
+              31,
+              127,
+              1024,
+              2048,
+              4095
+            ],
+            "values": [
+              -0.13138601,
+              -0.5647784,
+              -0.34258422,
+              -0.06259464,
+              0.11167526,
+              -0.2933995,
+              -0.40287194
+            ],
+            "max_abs": 20.75640869140625,
+            "l2": 27.6116387049466
+          },
+          {
+            "case_id": "fixture-prompt-1",
+            "step": 0,
+            "context_token_ids_sha256": "3bca9e21e3b6f741ed412f91d7696146c254ff68bd9be9ca41b1d172eb3549e6",
+            "timestep": 0,
+            "elements": 4096,
+            "coordinates": [
+              0,
+              1,
+              31,
+              127,
+              1024,
+              2048,
+              4095
+            ],
+            "values": [
+              0.16261357,
+              1.7640078,
+              -0.4205474,
+              0.37034756,
+              -0.097925454,
+              -0.18364859,
+              0.00060400367
+            ],
+            "max_abs": 40.955909729003906,
+            "l2": 66.85463570354278
+          },
+          {
+            "case_id": "fixture-prompt-1",
+            "step": 0,
+            "context_token_ids_sha256": "3bca9e21e3b6f741ed412f91d7696146c254ff68bd9be9ca41b1d172eb3549e6",
+            "timestep": 1,
+            "elements": 4096,
+            "coordinates": [
+              0,
+              1,
+              31,
+              127,
+              1024,
+              2048,
+              4095
+            ],
+            "values": [
+              0.23788133,
+              -0.14188917,
+              -0.10104354,
+              0.041795895,
+              -0.5943302,
+              0.009301461,
+              -0.22644499
+            ],
+            "max_abs": 20.142990112304688,
+            "l2": 23.962669874270055
+          }
+        ]
+      }
+    },
+    {
+      "layer_index": 7,
+      "kind": "self_attention",
+      "output": {
+        "records": 9,
+        "elements_per_record": 4096,
+        "aggregate_l2": 115.70809467833232,
+        "max_abs": 26.432092666625977,
+        "samples": [
+          {
+            "case_id": "fixture-prompt-0",
+            "step": 0,
+            "context_token_ids_sha256": "42ea52c728680a54afafd1c1e1e45f13300c3ceb962f320f3900196a0c46215c",
+            "timestep": 0,
+            "elements": 4096,
+            "coordinates": [
+              0,
+              1,
+              31,
+              127,
+              1024,
+              2048,
+              4095
+            ],
+            "values": [
+              0.17190674,
+              1.6309791,
+              -0.14575315,
+              0.2660789,
+              -0.12237383,
+              -0.19223666,
+              -0.17595486
+            ],
+            "max_abs": 26.432092666625977,
+            "l2": 53.495570210762
+          },
+          {
+            "case_id": "fixture-prompt-0",
+            "step": 0,
+            "context_token_ids_sha256": "42ea52c728680a54afafd1c1e1e45f13300c3ceb962f320f3900196a0c46215c",
+            "timestep": 1,
+            "elements": 4096,
+            "coordinates": [
+              0,
+              1,
+              31,
+              127,
+              1024,
+              2048,
+              4095
+            ],
+            "values": [
+              -0.07427518,
+              -0.25900793,
+              0.10496047,
+              -0.18006387,
+              -0.08129445,
+              0.2239911,
+              -0.37310416
+            ],
+            "max_abs": 21.849475860595703,
+            "l2": 30.669964305644353
+          },
+          {
+            "case_id": "fixture-prompt-0",
+            "step": 0,
+            "context_token_ids_sha256": "42ea52c728680a54afafd1c1e1e45f13300c3ceb962f320f3900196a0c46215c",
+            "timestep": 2,
+            "elements": 4096,
+            "coordinates": [
+              0,
+              1,
+              31,
+              127,
+              1024,
+              2048,
+              4095
+            ],
+            "values": [
+              -0.07197039,
+              -0.4834423,
+              0.011525065,
+              0.25945607,
+              -0.4386694,
+              -0.07013583,
+              0.059821203
+            ],
+            "max_abs": 19.127025604248047,
+            "l2": 27.306366693220003
+          },
+          {
+            "case_id": "fixture-prompt-0",
+            "step": 1,
+            "context_token_ids_sha256": "6af1601b9bf35d095b24c5bac3a95a01bf77d047b576441d0a5f9510eec66249",
+            "timestep": 0,
+            "elements": 4096,
+            "coordinates": [
+              0,
+              1,
+              31,
+              127,
+              1024,
+              2048,
+              4095
+            ],
+            "values": [
+              0.17190674,
+              1.6309791,
+              -0.14575315,
+              0.2660789,
+              -0.12237383,
+              -0.19223666,
+              -0.17595486
+            ],
+            "max_abs": 26.432092666625977,
+            "l2": 53.495570210762
+          },
+          {
+            "case_id": "fixture-prompt-0",
+            "step": 1,
+            "context_token_ids_sha256": "6af1601b9bf35d095b24c5bac3a95a01bf77d047b576441d0a5f9510eec66249",
+            "timestep": 1,
+            "elements": 4096,
+            "coordinates": [
+              0,
+              1,
+              31,
+              127,
+              1024,
+              2048,
+              4095
+            ],
+            "values": [
+              -0.07427518,
+              -0.25900793,
+              0.10496047,
+              -0.18006387,
+              -0.08129445,
+              0.2239911,
+              -0.37310416
+            ],
+            "max_abs": 21.849475860595703,
+            "l2": 30.669964305644353
+          },
+          {
+            "case_id": "fixture-prompt-0",
+            "step": 1,
+            "context_token_ids_sha256": "6af1601b9bf35d095b24c5bac3a95a01bf77d047b576441d0a5f9510eec66249",
+            "timestep": 2,
+            "elements": 4096,
+            "coordinates": [
+              0,
+              1,
+              31,
+              127,
+              1024,
+              2048,
+              4095
+            ],
+            "values": [
+              -0.07197039,
+              -0.4834423,
+              0.011525065,
+              0.25945607,
+              -0.4386694,
+              -0.07013583,
+              0.059821203
+            ],
+            "max_abs": 19.127025604248047,
+            "l2": 27.306366693220003
+          },
+          {
+            "case_id": "fixture-prompt-0",
+            "step": 1,
+            "context_token_ids_sha256": "6af1601b9bf35d095b24c5bac3a95a01bf77d047b576441d0a5f9510eec66249",
+            "timestep": 3,
+            "elements": 4096,
+            "coordinates": [
+              0,
+              1,
+              31,
+              127,
+              1024,
+              2048,
+              4095
+            ],
+            "values": [
+              -0.41105312,
+              -0.53644127,
+              -0.03503281,
+              -0.11659098,
+              0.023350637,
+              -0.057903886,
+              -0.26708853
+            ],
+            "max_abs": 21.462533950805664,
+            "l2": 29.08609371529655
+          },
+          {
+            "case_id": "fixture-prompt-1",
+            "step": 0,
+            "context_token_ids_sha256": "3bca9e21e3b6f741ed412f91d7696146c254ff68bd9be9ca41b1d172eb3549e6",
+            "timestep": 0,
+            "elements": 4096,
+            "coordinates": [
+              0,
+              1,
+              31,
+              127,
+              1024,
+              2048,
+              4095
+            ],
+            "values": [
+              0.11272429,
+              1.4316872,
+              -0.17935595,
+              0.2754929,
+              -0.2890592,
+              -0.25493544,
+              -0.22740893
+            ],
+            "max_abs": 25.024240493774414,
+            "l2": 52.16868736168633
+          },
+          {
+            "case_id": "fixture-prompt-1",
+            "step": 0,
+            "context_token_ids_sha256": "3bca9e21e3b6f741ed412f91d7696146c254ff68bd9be9ca41b1d172eb3549e6",
+            "timestep": 1,
+            "elements": 4096,
+            "coordinates": [
+              0,
+              1,
+              31,
+              127,
+              1024,
+              2048,
+              4095
+            ],
+            "values": [
+              0.24907082,
+              -0.20408534,
+              -0.058088135,
+              0.0012785998,
+              -0.66134757,
+              0.024146937,
+              -0.22992945
+            ],
+            "max_abs": 23.152587890625,
+            "l2": 26.919687518546937
+          }
+        ]
+      }
+    },
+    {
+      "layer_index": 8,
+      "kind": "linear_attention",
+      "output": {
+        "records": 9,
+        "elements_per_record": 4096,
+        "aggregate_l2": 116.5502080958099,
+        "max_abs": 26.59674835205078,
+        "samples": [
+          {
+            "case_id": "fixture-prompt-0",
+            "step": 0,
+            "context_token_ids_sha256": "42ea52c728680a54afafd1c1e1e45f13300c3ceb962f320f3900196a0c46215c",
+            "timestep": 0,
+            "elements": 4096,
+            "coordinates": [
+              0,
+              1,
+              31,
+              127,
+              1024,
+              2048,
+              4095
+            ],
+            "values": [
+              0.16567397,
+              1.603976,
+              -0.06461517,
+              0.36687768,
+              -0.28757733,
+              -0.2806441,
+              0.12275937
+            ],
+            "max_abs": 26.59674835205078,
+            "l2": 52.33174204247788
+          },
+          {
+            "case_id": "fixture-prompt-0",
+            "step": 0,
+            "context_token_ids_sha256": "42ea52c728680a54afafd1c1e1e45f13300c3ceb962f320f3900196a0c46215c",
+            "timestep": 1,
+            "elements": 4096,
+            "coordinates": [
+              0,
+              1,
+              31,
+              127,
+              1024,
+              2048,
+              4095
+            ],
+            "values": [
+              -0.24989507,
+              -0.23183694,
+              0.13517389,
+              -0.16507833,
+              -0.1524908,
+              0.18610455,
+              -0.27916133
+            ],
+            "max_abs": 23.486080169677734,
+            "l2": 32.36403251365258
+          },
+          {
+            "case_id": "fixture-prompt-0",
+            "step": 0,
+            "context_token_ids_sha256": "42ea52c728680a54afafd1c1e1e45f13300c3ceb962f320f3900196a0c46215c",
+            "timestep": 2,
+            "elements": 4096,
+            "coordinates": [
+              0,
+              1,
+              31,
+              127,
+              1024,
+              2048,
+              4095
+            ],
+            "values": [
+              -0.0010363385,
+              -0.4020704,
+              -0.021119978,
+              0.31158552,
+              -0.4144518,
+              -0.20700234,
+              0.024193034
+            ],
+            "max_abs": 20.02188491821289,
+            "l2": 28.706522585842404
+          },
+          {
+            "case_id": "fixture-prompt-0",
+            "step": 1,
+            "context_token_ids_sha256": "6af1601b9bf35d095b24c5bac3a95a01bf77d047b576441d0a5f9510eec66249",
+            "timestep": 0,
+            "elements": 4096,
+            "coordinates": [
+              0,
+              1,
+              31,
+              127,
+              1024,
+              2048,
+              4095
+            ],
+            "values": [
+              0.16567397,
+              1.603976,
+              -0.06461517,
+              0.36687768,
+              -0.28757733,
+              -0.2806441,
+              0.12275937
+            ],
+            "max_abs": 26.59674835205078,
+            "l2": 52.33174204247788
+          },
+          {
+            "case_id": "fixture-prompt-0",
+            "step": 1,
+            "context_token_ids_sha256": "6af1601b9bf35d095b24c5bac3a95a01bf77d047b576441d0a5f9510eec66249",
+            "timestep": 1,
+            "elements": 4096,
+            "coordinates": [
+              0,
+              1,
+              31,
+              127,
+              1024,
+              2048,
+              4095
+            ],
+            "values": [
+              -0.24989507,
+              -0.23183694,
+              0.13517389,
+              -0.16507833,
+              -0.1524908,
+              0.18610455,
+              -0.27916133
+            ],
+            "max_abs": 23.486080169677734,
+            "l2": 32.36403251365258
+          },
+          {
+            "case_id": "fixture-prompt-0",
+            "step": 1,
+            "context_token_ids_sha256": "6af1601b9bf35d095b24c5bac3a95a01bf77d047b576441d0a5f9510eec66249",
+            "timestep": 2,
+            "elements": 4096,
+            "coordinates": [
+              0,
+              1,
+              31,
+              127,
+              1024,
+              2048,
+              4095
+            ],
+            "values": [
+              -0.0010363385,
+              -0.4020704,
+              -0.021119978,
+              0.31158552,
+              -0.4144518,
+              -0.20700234,
+              0.024193034
+            ],
+            "max_abs": 20.02188491821289,
+            "l2": 28.706522585842404
+          },
+          {
+            "case_id": "fixture-prompt-0",
+            "step": 1,
+            "context_token_ids_sha256": "6af1601b9bf35d095b24c5bac3a95a01bf77d047b576441d0a5f9510eec66249",
+            "timestep": 3,
+            "elements": 4096,
+            "coordinates": [
+              0,
+              1,
+              31,
+              127,
+              1024,
+              2048,
+              4095
+            ],
+            "values": [
+              -0.34100896,
+              -0.46162623,
+              -0.07778361,
+              0.08995047,
+              -0.0360092,
+              -0.04729914,
+              -0.36935574
+            ],
+            "max_abs": 22.61803436279297,
+            "l2": 31.15707554491252
+          },
+          {
+            "case_id": "fixture-prompt-1",
+            "step": 0,
+            "context_token_ids_sha256": "3bca9e21e3b6f741ed412f91d7696146c254ff68bd9be9ca41b1d172eb3549e6",
+            "timestep": 0,
+            "elements": 4096,
+            "coordinates": [
+              0,
+              1,
+              31,
+              127,
+              1024,
+              2048,
+              4095
+            ],
+            "values": [
+              0.10513712,
+              1.4429849,
+              -0.12293194,
+              0.28532186,
+              -0.32139698,
+              -0.31964418,
+              -0.11184317
+            ],
+            "max_abs": 25.221826553344727,
+            "l2": 51.02186336713163
+          },
+          {
+            "case_id": "fixture-prompt-1",
+            "step": 0,
+            "context_token_ids_sha256": "3bca9e21e3b6f741ed412f91d7696146c254ff68bd9be9ca41b1d172eb3549e6",
+            "timestep": 1,
+            "elements": 4096,
+            "coordinates": [
+              0,
+              1,
+              31,
+              127,
+              1024,
+              2048,
+              4095
+            ],
+            "values": [
+              0.1792036,
+              -0.26541138,
+              -0.12082654,
+              0.009394474,
+              -0.6462554,
+              0.042824604,
+              -0.20499706
+            ],
+            "max_abs": 23.923294067382812,
+            "l2": 28.10239455593739
+          }
+        ]
+      }
+    },
+    {
+      "layer_index": 9,
+      "kind": "linear_attention",
+      "output": {
+        "records": 9,
+        "elements_per_record": 4096,
+        "aggregate_l2": 119.36994247806669,
+        "max_abs": 26.770484924316406,
+        "samples": [
+          {
+            "case_id": "fixture-prompt-0",
+            "step": 0,
+            "context_token_ids_sha256": "42ea52c728680a54afafd1c1e1e45f13300c3ceb962f320f3900196a0c46215c",
+            "timestep": 0,
+            "elements": 4096,
+            "coordinates": [
+              0,
+              1,
+              31,
+              127,
+              1024,
+              2048,
+              4095
+            ],
+            "values": [
+              0.10425015,
+              1.5699631,
+              -0.015697062,
+              0.3406499,
+              -0.2849293,
+              -0.30787888,
+              0.15121806
+            ],
+            "max_abs": 26.770484924316406,
+            "l2": 51.6660696331681
+          },
+          {
+            "case_id": "fixture-prompt-0",
+            "step": 0,
+            "context_token_ids_sha256": "42ea52c728680a54afafd1c1e1e45f13300c3ceb962f320f3900196a0c46215c",
+            "timestep": 1,
+            "elements": 4096,
+            "coordinates": [
+              0,
+              1,
+              31,
+              127,
+              1024,
+              2048,
+              4095
+            ],
+            "values": [
+              -0.25916553,
+              -0.08658911,
+              0.03471086,
+              -0.26681113,
+              -0.1485968,
+              0.30562413,
+              -0.34604362
+            ],
+            "max_abs": 24.878379821777344,
+            "l2": 34.2641836589474
+          },
+          {
+            "case_id": "fixture-prompt-0",
+            "step": 0,
+            "context_token_ids_sha256": "42ea52c728680a54afafd1c1e1e45f13300c3ceb962f320f3900196a0c46215c",
+            "timestep": 2,
+            "elements": 4096,
+            "coordinates": [
+              0,
+              1,
+              31,
+              127,
+              1024,
+              2048,
+              4095
+            ],
+            "values": [
+              0.03064929,
+              -0.29508418,
+              -0.030832581,
+              0.3575954,
+              -0.3262379,
+              -0.18729842,
+              0.05447541
+            ],
+            "max_abs": 22.71658706665039,
+            "l2": 31.706233129751705
+          },
+          {
+            "case_id": "fixture-prompt-0",
+            "step": 1,
+            "context_token_ids_sha256": "6af1601b9bf35d095b24c5bac3a95a01bf77d047b576441d0a5f9510eec66249",
+            "timestep": 0,
+            "elements": 4096,
+            "coordinates": [
+              0,
+              1,
+              31,
+              127,
+              1024,
+              2048,
+              4095
+            ],
+            "values": [
+              0.10425015,
+              1.5699631,
+              -0.015697062,
+              0.3406499,
+              -0.2849293,
+              -0.30787888,
+              0.15121806
+            ],
+            "max_abs": 26.770484924316406,
+            "l2": 51.6660696331681
+          },
+          {
+            "case_id": "fixture-prompt-0",
+            "step": 1,
+            "context_token_ids_sha256": "6af1601b9bf35d095b24c5bac3a95a01bf77d047b576441d0a5f9510eec66249",
+            "timestep": 1,
+            "elements": 4096,
+            "coordinates": [
+              0,
+              1,
+              31,
+              127,
+              1024,
+              2048,
+              4095
+            ],
+            "values": [
+              -0.25916553,
+              -0.08658911,
+              0.03471086,
+              -0.26681113,
+              -0.1485968,
+              0.30562413,
+              -0.34604362
+            ],
+            "max_abs": 24.878379821777344,
+            "l2": 34.2641836589474
+          },
+          {
+            "case_id": "fixture-prompt-0",
+            "step": 1,
+            "context_token_ids_sha256": "6af1601b9bf35d095b24c5bac3a95a01bf77d047b576441d0a5f9510eec66249",
+            "timestep": 2,
+            "elements": 4096,
+            "coordinates": [
+              0,
+              1,
+              31,
+              127,
+              1024,
+              2048,
+              4095
+            ],
+            "values": [
+              0.03064929,
+              -0.29508418,
+              -0.030832581,
+              0.3575954,
+              -0.3262379,
+              -0.18729842,
+              0.05447541
+            ],
+            "max_abs": 22.71658706665039,
+            "l2": 31.706233129751705
+          },
+          {
+            "case_id": "fixture-prompt-0",
+            "step": 1,
+            "context_token_ids_sha256": "6af1601b9bf35d095b24c5bac3a95a01bf77d047b576441d0a5f9510eec66249",
+            "timestep": 3,
+            "elements": 4096,
+            "coordinates": [
+              0,
+              1,
+              31,
+              127,
+              1024,
+              2048,
+              4095
+            ],
+            "values": [
+              -0.20878218,
+              -0.3764695,
+              -0.08758657,
+              0.0587914,
+              -0.0073793456,
+              -0.034619905,
+              -0.2331278
+            ],
+            "max_abs": 22.892086029052734,
+            "l2": 32.707933304938216
+          },
+          {
+            "case_id": "fixture-prompt-1",
+            "step": 0,
+            "context_token_ids_sha256": "3bca9e21e3b6f741ed412f91d7696146c254ff68bd9be9ca41b1d172eb3549e6",
+            "timestep": 0,
+            "elements": 4096,
+            "coordinates": [
+              0,
+              1,
+              31,
+              127,
+              1024,
+              2048,
+              4095
+            ],
+            "values": [
+              0.019658387,
+              1.444512,
+              -0.040385976,
+              0.22774392,
+              -0.3551058,
+              -0.30761728,
+              -0.075740665
+            ],
+            "max_abs": 25.654953002929688,
+            "l2": 51.21707078016414
+          },
+          {
+            "case_id": "fixture-prompt-1",
+            "step": 0,
+            "context_token_ids_sha256": "3bca9e21e3b6f741ed412f91d7696146c254ff68bd9be9ca41b1d172eb3549e6",
+            "timestep": 1,
+            "elements": 4096,
+            "coordinates": [
+              0,
+              1,
+              31,
+              127,
+              1024,
+              2048,
+              4095
+            ],
+            "values": [
+              0.025229529,
+              -0.35553426,
+              -0.16754006,
+              -0.0058086067,
+              -0.64348763,
+              0.020115763,
+              -0.2239845
+            ],
+            "max_abs": 24.641651153564453,
+            "l2": 29.304972649246512
+          }
+        ]
+      }
+    },
+    {
+      "layer_index": 10,
+      "kind": "linear_attention",
+      "output": {
+        "records": 9,
+        "elements_per_record": 4096,
+        "aggregate_l2": 158.30448432864583,
+        "max_abs": 47.58983612060547,
+        "samples": [
+          {
+            "case_id": "fixture-prompt-0",
+            "step": 0,
+            "context_token_ids_sha256": "42ea52c728680a54afafd1c1e1e45f13300c3ceb962f320f3900196a0c46215c",
+            "timestep": 0,
+            "elements": 4096,
+            "coordinates": [
+              0,
+              1,
+              31,
+              127,
+              1024,
+              2048,
+              4095
+            ],
+            "values": [
+              0.11796004,
+              1.8708042,
+              -0.024280738,
+              0.24443266,
+              -0.30048358,
+              -0.053396314,
+              0.28836963
+            ],
+            "max_abs": 47.58983612060547,
+            "l2": 77.273937726392
+          },
+          {
+            "case_id": "fixture-prompt-0",
+            "step": 0,
+            "context_token_ids_sha256": "42ea52c728680a54afafd1c1e1e45f13300c3ceb962f320f3900196a0c46215c",
+            "timestep": 1,
+            "elements": 4096,
+            "coordinates": [
+              0,
+              1,
+              31,
+              127,
+              1024,
+              2048,
+              4095
+            ],
+            "values": [
+              -0.02021785,
+              -0.06411751,
+              0.12770127,
+              -0.34008467,
+              -0.1812714,
+              0.26853278,
+              -0.22031239
+            ],
+            "max_abs": 24.60826301574707,
+            "l2": 35.66276126533355
+          },
+          {
+            "case_id": "fixture-prompt-0",
+            "step": 0,
+            "context_token_ids_sha256": "42ea52c728680a54afafd1c1e1e45f13300c3ceb962f320f3900196a0c46215c",
+            "timestep": 2,
+            "elements": 4096,
+            "coordinates": [
+              0,
+              1,
+              31,
+              127,
+              1024,
+              2048,
+              4095
+            ],
+            "values": [
+              0.072320856,
+              -0.19595367,
+              -0.04341966,
+              0.22594488,
+              -0.43010265,
+              -0.26828465,
+              -0.08920017
+            ],
+            "max_abs": 22.258451461791992,
+            "l2": 33.14634131593817
+          },
+          {
+            "case_id": "fixture-prompt-0",
+            "step": 1,
+            "context_token_ids_sha256": "6af1601b9bf35d095b24c5bac3a95a01bf77d047b576441d0a5f9510eec66249",
+            "timestep": 0,
+            "elements": 4096,
+            "coordinates": [
+              0,
+              1,
+              31,
+              127,
+              1024,
+              2048,
+              4095
+            ],
+            "values": [
+              0.11796004,
+              1.8708042,
+              -0.024280738,
+              0.24443266,
+              -0.30048358,
+              -0.053396314,
+              0.28836963
+            ],
+            "max_abs": 47.58983612060547,
+            "l2": 77.273937726392
+          },
+          {
+            "case_id": "fixture-prompt-0",
+            "step": 1,
+            "context_token_ids_sha256": "6af1601b9bf35d095b24c5bac3a95a01bf77d047b576441d0a5f9510eec66249",
+            "timestep": 1,
+            "elements": 4096,
+            "coordinates": [
+              0,
+              1,
+              31,
+              127,
+              1024,
+              2048,
+              4095
+            ],
+            "values": [
+              -0.02021785,
+              -0.06411751,
+              0.12770127,
+              -0.34008467,
+              -0.1812714,
+              0.26853278,
+              -0.22031239
+            ],
+            "max_abs": 24.60826301574707,
+            "l2": 35.66276126533355
+          },
+          {
+            "case_id": "fixture-prompt-0",
+            "step": 1,
+            "context_token_ids_sha256": "6af1601b9bf35d095b24c5bac3a95a01bf77d047b576441d0a5f9510eec66249",
+            "timestep": 2,
+            "elements": 4096,
+            "coordinates": [
+              0,
+              1,
+              31,
+              127,
+              1024,
+              2048,
+              4095
+            ],
+            "values": [
+              0.072320856,
+              -0.19595367,
+              -0.04341966,
+              0.22594488,
+              -0.43010265,
+              -0.26828465,
+              -0.08920017
+            ],
+            "max_abs": 22.258451461791992,
+            "l2": 33.14634131593817
+          },
+          {
+            "case_id": "fixture-prompt-0",
+            "step": 1,
+            "context_token_ids_sha256": "6af1601b9bf35d095b24c5bac3a95a01bf77d047b576441d0a5f9510eec66249",
+            "timestep": 3,
+            "elements": 4096,
+            "coordinates": [
+              0,
+              1,
+              31,
+              127,
+              1024,
+              2048,
+              4095
+            ],
+            "values": [
+              -0.10317222,
+              -0.31311557,
+              -0.12527518,
+              0.07970456,
+              -0.016207308,
+              -0.1542804,
+              -0.109053224
+            ],
+            "max_abs": 24.393596649169922,
+            "l2": 35.99745234323708
+          },
+          {
+            "case_id": "fixture-prompt-1",
+            "step": 0,
+            "context_token_ids_sha256": "3bca9e21e3b6f741ed412f91d7696146c254ff68bd9be9ca41b1d172eb3549e6",
+            "timestep": 0,
+            "elements": 4096,
+            "coordinates": [
+              0,
+              1,
+              31,
+              127,
+              1024,
+              2048,
+              4095
+            ],
+            "values": [
+              0.05006434,
+              1.7594571,
+              -0.016474616,
+              0.08948097,
+              -0.37102294,
+              -0.09431328,
+              0.09287855
+            ],
+            "max_abs": 47.02491760253906,
+            "l2": 78.18872777977394
+          },
+          {
+            "case_id": "fixture-prompt-1",
+            "step": 0,
+            "context_token_ids_sha256": "3bca9e21e3b6f741ed412f91d7696146c254ff68bd9be9ca41b1d172eb3549e6",
+            "timestep": 1,
+            "elements": 4096,
+            "coordinates": [
+              0,
+              1,
+              31,
+              127,
+              1024,
+              2048,
+              4095
+            ],
+            "values": [
+              -0.015556246,
+              -0.45778406,
+              -0.16060434,
+              -0.06885889,
+              -0.7391862,
+              0.044282965,
+              -0.087553695
+            ],
+            "max_abs": 25.36115264892578,
+            "l2": 31.104150215830476
+          }
+        ]
+      }
+    },
+    {
+      "layer_index": 11,
+      "kind": "self_attention",
+      "output": {
+        "records": 9,
+        "elements_per_record": 4096,
+        "aggregate_l2": 150.80621278889376,
+        "max_abs": 47.17875671386719,
+        "samples": [
+          {
+            "case_id": "fixture-prompt-0",
+            "step": 0,
+            "context_token_ids_sha256": "42ea52c728680a54afafd1c1e1e45f13300c3ceb962f320f3900196a0c46215c",
+            "timestep": 0,
+            "elements": 4096,
+            "coordinates": [
+              0,
+              1,
+              31,
+              127,
+              1024,
+              2048,
+              4095
+            ],
+            "values": [
+              0.05379339,
+              1.8648769,
+              -0.09283331,
+              0.16853133,
+              -0.43601394,
+              0.17856285,
+              0.18199207
+            ],
+            "max_abs": 47.17875671386719,
+            "l2": 70.56590379662165
+          },
+          {
+            "case_id": "fixture-prompt-0",
+            "step": 0,
+            "context_token_ids_sha256": "42ea52c728680a54afafd1c1e1e45f13300c3ceb962f320f3900196a0c46215c",
+            "timestep": 1,
+            "elements": 4096,
+            "coordinates": [
+              0,
+              1,
+              31,
+              127,
+              1024,
+              2048,
+              4095
+            ],
+            "values": [
+              -0.1541731,
+              -0.04288484,
+              0.026717499,
+              -0.19296916,
+              -0.10842685,
+              0.21928376,
+              -0.3741559
+            ],
+            "max_abs": 27.140213012695312,
+            "l2": 38.04857141148162
+          },
+          {
+            "case_id": "fixture-prompt-0",
+            "step": 0,
+            "context_token_ids_sha256": "42ea52c728680a54afafd1c1e1e45f13300c3ceb962f320f3900196a0c46215c",
+            "timestep": 2,
+            "elements": 4096,
+            "coordinates": [
+              0,
+              1,
+              31,
+              127,
+              1024,
+              2048,
+              4095
+            ],
+            "values": [
+              -0.0006836653,
+              -0.21856084,
+              -0.07040711,
+              0.26064906,
+              -0.42376453,
+              -0.17852822,
+              -0.16699848
+            ],
+            "max_abs": 24.021764755249023,
+            "l2": 35.0634715564288
+          },
+          {
+            "case_id": "fixture-prompt-0",
+            "step": 1,
+            "context_token_ids_sha256": "6af1601b9bf35d095b24c5bac3a95a01bf77d047b576441d0a5f9510eec66249",
+            "timestep": 0,
+            "elements": 4096,
+            "coordinates": [
+              0,
+              1,
+              31,
+              127,
+              1024,
+              2048,
+              4095
+            ],
+            "values": [
+              0.05379339,
+              1.8648769,
+              -0.09283331,
+              0.16853133,
+              -0.43601394,
+              0.17856285,
+              0.18199207
+            ],
+            "max_abs": 47.17875671386719,
+            "l2": 70.56590379662165
+          },
+          {
+            "case_id": "fixture-prompt-0",
+            "step": 1,
+            "context_token_ids_sha256": "6af1601b9bf35d095b24c5bac3a95a01bf77d047b576441d0a5f9510eec66249",
+            "timestep": 1,
+            "elements": 4096,
+            "coordinates": [
+              0,
+              1,
+              31,
+              127,
+              1024,
+              2048,
+              4095
+            ],
+            "values": [
+              -0.1541731,
+              -0.04288484,
+              0.026717499,
+              -0.19296916,
+              -0.10842685,
+              0.21928376,
+              -0.3741559
+            ],
+            "max_abs": 27.140213012695312,
+            "l2": 38.04857141148162
+          },
+          {
+            "case_id": "fixture-prompt-0",
+            "step": 1,
+            "context_token_ids_sha256": "6af1601b9bf35d095b24c5bac3a95a01bf77d047b576441d0a5f9510eec66249",
+            "timestep": 2,
+            "elements": 4096,
+            "coordinates": [
+              0,
+              1,
+              31,
+              127,
+              1024,
+              2048,
+              4095
+            ],
+            "values": [
+              -0.0006836653,
+              -0.21856084,
+              -0.07040711,
+              0.26064906,
+              -0.42376453,
+              -0.17852822,
+              -0.16699848
+            ],
+            "max_abs": 24.021764755249023,
+            "l2": 35.0634715564288
+          },
+          {
+            "case_id": "fixture-prompt-0",
+            "step": 1,
+            "context_token_ids_sha256": "6af1601b9bf35d095b24c5bac3a95a01bf77d047b576441d0a5f9510eec66249",
+            "timestep": 3,
+            "elements": 4096,
+            "coordinates": [
+              0,
+              1,
+              31,
+              127,
+              1024,
+              2048,
+              4095
+            ],
+            "values": [
+              -0.20420825,
+              -0.3232487,
+              -0.21456067,
+              0.20931807,
+              -0.101938374,
+              -0.07351488,
+              -0.44050783
+            ],
+            "max_abs": 25.135093688964844,
+            "l2": 37.13597481007964
+          },
+          {
+            "case_id": "fixture-prompt-1",
+            "step": 0,
+            "context_token_ids_sha256": "3bca9e21e3b6f741ed412f91d7696146c254ff68bd9be9ca41b1d172eb3549e6",
+            "timestep": 0,
+            "elements": 4096,
+            "coordinates": [
+              0,
+              1,
+              31,
+              127,
+              1024,
+              2048,
+              4095
+            ],
+            "values": [
+              -0.049469884,
+              1.7241138,
+              -0.13269778,
+              0.05663398,
+              -0.52335477,
+              0.17725782,
+              -0.0059255287
+            ],
+            "max_abs": 46.59741973876953,
+            "l2": 70.7204414986177
+          },
+          {
+            "case_id": "fixture-prompt-1",
+            "step": 0,
+            "context_token_ids_sha256": "3bca9e21e3b6f741ed412f91d7696146c254ff68bd9be9ca41b1d172eb3549e6",
+            "timestep": 1,
+            "elements": 4096,
+            "coordinates": [
+              0,
+              1,
+              31,
+              127,
+              1024,
+              2048,
+              4095
+            ],
+            "values": [
+              -0.09530967,
+              -0.43347973,
+              -0.17242466,
+              0.0026327,
+              -0.79287136,
+              -0.057169013,
+              -0.14689736
+            ],
+            "max_abs": 26.560192108154297,
+            "l2": 32.38328487847529
+          }
+        ]
+      }
+    }
+  ],
+  "terminal_summaries": []
+}
