@@ -29,7 +29,12 @@
 - guardの対象は各回とも `HIP_VISIBLE_DEVICES=1` → filtered ordinal 0 → `0000:47:00.0`だけである。V620の列挙・照会を行うcommandは使っていない。guardはidentity/AMD-SMI read-only queryだけで、HIP stream、device memory、kernel launchは行っていない。
 - service read-only snapshotはリハーサル前後とも`active/running`、MainPID=`1128520`、`NRestarts=0`、`RuntimeDirectoryPreserve=yes`だった。service/systemd/manifestには変更を加えていない。
 
+### Step 3 停止前CPU準備
+
+- serviceを停止せず、staging rootをもう一度read-only verifyして`status=valid`、staged trace SHA-256 `835ca1cb15aba577ef72902af719451a91c55371cbff8c41444d8f343469f2a4`、mode `0555`、`nlink=1`を確認した。
+- `tools/verify-aq4-layer0-package-embedding-fixture.py`は`{"cases": 3, "status": "valid"}`を返した。CPU-only `ullm-aq4-layer0-family-isolation --stage-stream-stdout`は成功し、`cpu-stages.f32le`を`24692172` bytesで生成した。
+- この準備ではHIP visibilityと全HIP kernel required環境変数をunsetし、GPU kernel、AMD-SMI、service/systemd/manifest、V620、P3 harnessには触れていない。
+
 ## 次の行動
 
-- serviceを停止せず、CPU input identityとCPU stage streamを新規`OUT`へ生成し、trace driverのpre-stop contractを再確認する。
-- その準備がすべて成功しているため、更新済みdriverによるservice-stop windowを一回だけ実行する。trace内で失敗した場合は再試行せず、直ちにservice復旧結果を優先して記録する。
+- 更新済みdriverによるservice-stop windowを一回だけ実行する。trace内で失敗した場合は再試行せず、直ちにservice復旧結果を優先して記録する。
