@@ -1,6 +1,6 @@
 # AQ4 fidelity root cause and fix plan v0.1
 
-Status: Phase 1・Phase 2・Phase 2b・Phase 3b・Phase 3c-prep完了。H8・H6とも棄却方向、H5(GPU kernel固有)が有力(未確証)。**2026-07-17朝、ユーザーがGPU window使用を承認**（R9700限定、ハードウェア原因の可能性も並行して考慮すること、という条件付き）。Phase 3cを実行段階へ進める。P2 fidelity calibrationはNo-Go凍結中。
+Status: Phase 1・Phase 2・Phase 2b・Phase 3b・Phase 3c-prep完了。H8・H6とも棄却方向、H5(GPU kernel固有)が有力(未確証)。2026-07-17朝、ユーザーがGPU window使用を承認（R9700限定、H9も考慮）。1回目のPhase 3c試行は、AQ4本番service(`ullm-openai.service`)がR9700 lockを保持中のため取得失敗で安全停止(サービス操作なし、evidenceは記録済み)。**同日、ユーザーがこのマシンに関する全権限を追加承認し、本番serviceの一時停止を含めて進めることを許可した。** 2回目の試行(service一時停止→trace実行→復旧確認)を準備中。P2 fidelity calibrationはNo-Go凍結中。
 
 **用語訂正(Phase 3bで判明)**: これまで「07/14 production run」「GPU実測」と呼んでいた最終相対L2`0.6151289249`の測定は、実際にはOpenAI Gatewayへの実requestではなく、production packageを直接loadしたM=1診断binary(`ullm-aq4-p2-path-oracle`/`ullm-aq4-differential-trace`、service停止済み)による管理された診断実行だった。以降この計画では「07/14 M=1診断」と呼ぶ。
 
