@@ -14,8 +14,10 @@
 - `cargo check --package ullm-engine --bin ullm-aq4-layer0-family-isolation`、`python3 -m py_compile tools/compare-aq4-multilayer-accumulation.py`、`pytest -q tests/test_aq4_multilayer_accumulation.py tests/test_aq4_layer0_family_isolation.py`（16 passed）を完了した。
 - 初回のCPU-only 0:31実行はdecoder計算後、LM headがpassthroughでなくAQ4 tensorであることを検出してterminal frame前に停止した。wall `405.62 s`、最大RSS `331188 KiB`、process swap `0`であり、fidelity結果としては無効として保存した。
 - LM headを全語彙materializeせずAQ4の固定34行だけseek/dequantizeするreaderへ置換した。packed idx4 nibble順、u8 scale table、row-scale overrideを単体testで検証し、terminal chain/reportをschema v3へ更新した。この変更は診断の入力read/dequantize範囲のみで、production fixではない。
+- 修正後の2回目はAQ4 binaryがfinal normとLM headの両terminal frameを正しく出力したが、Python比較器がstage一括順を期待していたため、per-timestepの`final_norm -> lm_head` stream順を拒否して無効終了した。wall `412.37 s`、最大RSS `334748 KiB`、process swap `0`だった。
+- 比較器をproducer順へ合わせ、sourceのfixed-row logitsもcurrent timestepだけで計算するよう修正した。framed streamのterminal順を固定するtestを追加し、`pytest -q tests/test_aq4_multilayer_accumulation.py tests/test_aq4_layer0_family_isolation.py`は`17 passed`だった。
 
 ## 次の行動
 
-- 修正済みbinaryをbuildし、失敗attemptを上書きせず別ディレクトリでCPU-onlyの0:31+final norm+LM headを実行する。wall time/RSS/swapとterminal contractを記録する。
+- 修正済み比較器で、失敗attemptを上書きせず別ディレクトリにCPU-onlyの0:31+final norm+LM headを一回実行する。wall time/RSS/swapとterminal contractを記録する。
 - 取得した成長曲線からboundaryとtensor familyを記録する。Phase 4のfix、GPU、service、P3 harnessには進まない。

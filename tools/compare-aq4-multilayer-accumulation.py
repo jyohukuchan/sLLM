@@ -482,6 +482,28 @@ def terminal_boundary_assessment(
     }
 
 
+def consume_terminal_frames(
+    reader: ChainReader, loader: Any, final_sequences: list[tuple[dict[str, Any], torch.Tensor]]
+) -> None:
+    """Consumes the terminal stream in the chain's timestep-interleaved order."""
+    lm_head_rows = loader.lm_head_rows(LM_HEAD_SAMPLE_ROWS)
+    for case, sequence in final_sequences:
+        for timestep in range(case["context_length"]):
+            final_norm_output = sequence[timestep]
+            reader.expect_terminal(
+                "final_norm", "full_hidden", (), case, timestep, final_norm_output
+            )
+            logits = functional.linear(final_norm_output, lm_head_rows)
+            reader.expect_terminal(
+                "lm_head",
+                "fixed_logit_rows",
+                LM_HEAD_SAMPLE_ROWS,
+                case,
+                timestep,
+                logits,
+            )
+
+
 def write_growth_artifacts(
     output: Path,
     metrics: list[dict[str, Any]],
@@ -594,24 +616,8 @@ def run_compare(args: argparse.Namespace) -> dict[str, Any]:
                 source_sequences = next_sequences
             if args.chain_include_final_norm_lm_head:
                 final_sequences = [(case, source_final_rmsnorm(loader, sequence)) for case, sequence in source_sequences]
-                for case, sequence in final_sequences:
-                    for timestep in range(case["context_length"]):
-                        reader.expect_terminal(
-                            "final_norm", "full_hidden", (), case, timestep, sequence[timestep]
-                        )
-                lm_head_rows = loader.lm_head_rows(LM_HEAD_SAMPLE_ROWS)
-                for case, sequence in final_sequences:
-                    logits = functional.linear(sequence, lm_head_rows)
-                    for timestep in range(case["context_length"]):
-                        reader.expect_terminal(
-                            "lm_head",
-                            "fixed_logit_rows",
-                            LM_HEAD_SAMPLE_ROWS,
-                            case,
-                            timestep,
-                            logits[timestep],
-                        )
-                del lm_head_rows, final_sequences
+                consume_terminal_frames(reader, loader, final_sequences)
+                del final_sequences
             reader.expect_end()
         except BaseException:
             process.kill()

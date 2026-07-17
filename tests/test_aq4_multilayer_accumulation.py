@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import importlib.util
+import io
+import json
+import struct
 import sys
 from pathlib import Path
 
@@ -118,6 +121,61 @@ def test_terminal_boundary_preserves_lm_head_sample_scope() -> None:
     assert result["final_norm_ratio_to_layer31"] == pytest.approx(0.47 / 0.08)
     assert result["lm_head_measurement_scope"] == "fixed_logit_rows"
     assert result["lm_head_coordinates"] == [0, 220]
+
+
+def test_terminal_consumer_accepts_timestep_interleaved_final_norm_and_lm_head(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    torch = TOOL.torch
+    monkeypatch.setattr(TOOL, "HIDDEN", 2)
+    case = {
+        "case_id": "fixture",
+        "step": 0,
+        "context_token_ids_sha256": "a" * 64,
+        "context_length": 1,
+    }
+    final_norm = torch.tensor([[2.0, -2.0]], dtype=torch.float32)
+    lm_head_rows = torch.stack(
+        [torch.tensor([float(index + 1), 0.0], dtype=torch.float32) for index in range(len(TOOL.LM_HEAD_SAMPLE_ROWS))]
+    )
+    logits = TOOL.functional.linear(final_norm[0], lm_head_rows)
+
+    def frame(stage: str, scope: str, coordinates: list[int], values: object) -> bytes:
+        tensor = values.contiguous()
+        header = {
+            "kind": "chain_terminal_output",
+            "stage": stage,
+            "measurement_scope": scope,
+            "coordinates": coordinates,
+            "case_id": case["case_id"],
+            "step": case["step"],
+            "context_token_ids_sha256": case["context_token_ids_sha256"],
+            "context_length": case["context_length"],
+            "timestep": 0,
+            "dtype": "f32le",
+            "shape": [int(tensor.numel())],
+            "bytes": int(tensor.numel()) * 4,
+        }
+        return json.dumps(header).encode("utf-8") + b"\n" + struct.pack(
+            f"<{tensor.numel()}f", *tensor.tolist()
+        )
+
+    stream = io.BytesIO(
+        frame("final_norm", "full_hidden", [], final_norm[0])
+        + frame("lm_head", "fixed_logit_rows", list(TOOL.LM_HEAD_SAMPLE_ROWS), logits)
+        + b'{"kind":"end"}\n'
+    )
+
+    class Loader:
+        def lm_head_rows(self, rows: tuple[int, ...]) -> object:
+            assert rows == TOOL.LM_HEAD_SAMPLE_ROWS
+            return lm_head_rows
+
+    reader = TOOL.ChainReader(stream)
+    TOOL.consume_terminal_frames(reader, Loader(), [(case, final_norm)])
+    reader.expect_end()
+    assert reader.terminal_accumulators["final_norm"].report()["records"] == 1
+    assert reader.terminal_accumulators["lm_head"].report()["records"] == 1
 
 
 def test_rope_preserves_non_rotary_tail_and_is_finite() -> None:
