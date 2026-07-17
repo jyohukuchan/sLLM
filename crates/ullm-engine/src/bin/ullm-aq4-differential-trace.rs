@@ -26,6 +26,8 @@ use ullm_engine::qwen35_aq4_model_runtime::{
     QWEN35_AQ4_CONTEXT_LENGTH, QWEN35_AQ4_KV_BLOCK_SIZE, QWEN35_AQ4_LINEAR_STAGE_TRACE_CHUNK_BYTES,
     Qwen35Aq4CalibrationObserver, Qwen35Aq4IntermediateTraceObserver, Qwen35Aq4ModelLoadConfig,
 };
+#[cfg(test)]
+use ullm_engine::qwen35_aq4_layer_runtime::QWEN35_AQ4_M1_LINEAR_STAGE_REQUIRED_ENV;
 use ullm_engine::qwen35_aq4_session::{
     Qwen35Aq4CalibrationReplay, Qwen35Aq4InferenceSession, Qwen35Aq4SessionConfig,
     Qwen35Aq4SessionStatus,
@@ -51,18 +53,48 @@ const MAX_OUTPUT_BYTES: u64 = 96 * 1024;
 const MAX_KERNEL_STAGE_STREAM_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_IDENTITY_FILE_BYTES: u64 = 256 * 1024 * 1024;
 const EMBEDDED_BUILD_GIT_COMMIT: Option<&str> = option_env!("ULLM_BUILD_GIT_COMMIT");
-const REQUIRED_LINEAR_STAGE_ENV: [&str; 7] = [
+/// Complete fail-closed environment for the fixed Phase 3c full-model M=1 trace.
+///
+/// The first nine entries are the layer-0 linear-attention path. The next five are required when
+/// the trace loads the real package's Qwen3.5-gated self-attention layers. The final two cover
+/// the package's BF16 embedding gather and full-logit top-1 selection. Keep this intentionally
+/// narrower than the worker's all-profile environment: enabling unrelated guards can add probes
+/// or change dispatch outside this trace's fixed M=1 path.
+const REQUIRED_PHASE3C_TRACE_ENV: [&str; 16] = [
     "ULLM_REQUIRE_HIP_AQ4_MATVEC_KERNEL",
+    "ULLM_REQUIRE_HIP_AQ4_MATVEC_BATCH_KERNEL",
     "ULLM_REQUIRE_HIP_AQ4_MATVEC_ADD_KERNEL",
     "ULLM_REQUIRE_HIP_AQ4_MATVEC_QKV_Z_GATE_BETA_KERNEL",
+    "ULLM_REQUIRE_HIP_LINEAR_ATTN_KERNEL",
     "ULLM_REQUIRE_HIP_LINEAR_ATTN_QKV_PREPARE_BATCH_KERNEL",
     "ULLM_REQUIRE_HIP_LINEAR_ATTN_RECURRENT_KERNEL",
     "ULLM_REQUIRE_HIP_RMSNORM_KERNEL",
     "ULLM_REQUIRE_HIP_SEGMENTED_RMSNORM_SILU_MUL_KERNEL",
+    "ULLM_REQUIRE_HIP_PAGED_DECODE_ATTN_KERNEL",
+    "ULLM_REQUIRE_HIP_QWEN35_QK_NORM_ROPE_PAGED_KV_WRITE_KERNEL",
+    "ULLM_REQUIRE_HIP_PAGED_KV_WRITE_CHUNK_KERNEL",
+    "ULLM_REQUIRE_HIP_PAGED_CAUSAL_GQA_CHUNK_KERNEL",
+    "ULLM_REQUIRE_HIP_QWEN35_QK_NORM_ROPE_BATCH_KERNEL",
+    "ULLM_REQUIRE_HIP_BF16_ROW_KERNEL",
+    "ULLM_REQUIRE_HIP_TOP1_KERNEL",
 ];
-const DISALLOWED_LINEAR_STAGE_ENV: [&str; 2] = [
+/// Variables which would move the fixed Phase 3c trace onto a different implementation branch.
+const DISALLOWED_PHASE3C_TRACE_ENV: [&str; 15] = [
     "ULLM_SYNC_LINEAR_ATTN_COMPONENTS_FOR_TIMING",
     "ULLM_DISABLE_AQ4_MATVEC_QKV_Z_GATE_BETA",
+    "ULLM_DISABLE_PAGED_DECODE_SIGMOID_GATE_SELF_ATTN",
+    "ULLM_DISABLE_SIGMOID_MUL_IN_PLACE",
+    "ULLM_DISABLE_AQ4_MATVEC_TRIPLE_SELF_ATTN_QKV",
+    "ULLM_DISABLE_AQ4_MATVEC_PAIR_SELF_ATTN_QK",
+    "ULLM_ENABLE_AQ4_LM_HEAD_DIRECT_TOP1",
+    "ULLM_REQUIRE_HIP_AQ4_MATVEC_PAIR_KERNEL",
+    "ULLM_REQUIRE_HIP_AQ4_MATVEC_TRIPLE_KERNEL",
+    "ULLM_REQUIRE_HIP_LINEAR_ATTN_RECURRENT_SEQUENCE_KERNEL",
+    "ULLM_REQUIRE_HIP_PAGED_KV_WRITE_KERNEL",
+    "ULLM_REQUIRE_HIP_PAGED_DECODE_SPLIT_KERNEL",
+    "ULLM_REQUIRE_HIP_AQ4_REGISTER_BM8_KERNEL",
+    "ULLM_EXPERIMENTAL_HIP_PAGED_DECODE_SPLIT_TILE",
+    "ULLM_EXPERIMENTAL_HIP_PAGED_DECODE_SPLIT_MIN_CACHE_LEN",
 ];
 const EXPECTED_CASES: [(&str, usize, &str, usize, &'static [usize]); 2] = [
     (
@@ -961,41 +993,54 @@ fn validate_build_git_commit(value: &str) -> Result<String, String> {
     Ok(value.to_string())
 }
 
-fn trace_env_flag_enabled(name: &str) -> bool {
-    env::var(name)
-        .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
-        .unwrap_or(false)
+fn trace_env_value_enabled(value: Option<&str>) -> bool {
+    matches!(value, Some("1" | "true" | "TRUE" | "yes" | "YES"))
 }
 
-fn linear_stage_trace_guard_set(device_index: u32) -> Result<Value, String> {
+fn phase3c_trace_guard_set_with<F>(device_index: u32, mut lookup: F) -> Result<Value, String>
+where
+    F: FnMut(&str) -> Option<String>,
+{
     if device_index != 1 {
         return Err(format!(
             "linear-stage trace requires global runtime device index 1, got {device_index}"
         ));
     }
+    let mut invalid = Vec::new();
     let mut visibility = BTreeMap::new();
     for name in ["HIP_VISIBLE_DEVICES", "ULLM_HIP_VISIBLE_DEVICES"] {
-        let value = env::var(name).map_err(|_| format!("linear-stage trace requires {name}=1"))?;
-        if value != "1" {
-            return Err(format!("linear-stage trace requires {name}=1, got {value}"));
+        match lookup(name) {
+            Some(value) if value == "1" => {
+                visibility.insert(name.to_string(), value);
+            }
+            Some(value) => invalid.push(format!("{name}={value:?}")),
+            None => invalid.push(format!("{name}=<unset>")),
         }
-        visibility.insert(name.to_string(), value);
     }
     let mut required = BTreeMap::new();
-    for name in REQUIRED_LINEAR_STAGE_ENV {
-        let value = env::var(name).map_err(|_| format!("linear-stage trace requires {name}=1"))?;
-        if value != "1" {
-            return Err(format!("linear-stage trace requires {name}=1, got {value}"));
+    for name in REQUIRED_PHASE3C_TRACE_ENV {
+        match lookup(name) {
+            Some(value) if value == "1" => {
+                required.insert(name.to_string(), value);
+            }
+            Some(value) => invalid.push(format!("{name}={value:?}")),
+            None => invalid.push(format!("{name}=<unset>")),
         }
-        required.insert(name.to_string(), value);
     }
     let mut disabled = BTreeMap::new();
-    for name in DISALLOWED_LINEAR_STAGE_ENV {
-        let value = env::var(name).ok();
-        if trace_env_flag_enabled(name) {
-            return Err(format!("linear-stage trace rejects enabled {name}"));
+    for name in DISALLOWED_PHASE3C_TRACE_ENV {
+        let value = lookup(name);
+        if trace_env_value_enabled(value.as_deref()) {
+            invalid.push(format!("{name}={:?}", value.as_deref().unwrap_or_default()));
         }
         disabled.insert(name.to_string(), value);
+    }
+    if !invalid.is_empty() {
+        return Err(format!(
+            "Phase 3c full-model M=1 trace guard validation failed; invalid: {}; complete required guard set: {}",
+            invalid.join(", "),
+            REQUIRED_PHASE3C_TRACE_ENV.join(", "),
+        ));
     }
     Ok(json!({
         "target_backend": "hip",
@@ -1007,6 +1052,39 @@ fn linear_stage_trace_guard_set(device_index: u32) -> Result<Value, String> {
         "qkv_z_gate_beta_fusion_required": true,
         "component_timing_sync_allowed": false,
     }))
+}
+
+fn linear_stage_trace_guard_set(device_index: u32) -> Result<Value, String> {
+    phase3c_trace_guard_set_with(device_index, |name| env::var(name).ok())
+}
+
+fn print_phase3c_trace_guard_requirements() -> ExitCode {
+    match linear_stage_trace_guard_set(1) {
+        Ok(guard) => {
+            println!(
+                "{}",
+                json!({
+                    "schema_version": "ullm.qwen35_aq4_phase3c_trace_guard_diagnostic.v1",
+                    "status": "valid",
+                    "required_environment": REQUIRED_PHASE3C_TRACE_ENV,
+                    "linear_stage_guard": guard,
+                })
+            );
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            println!(
+                "{}",
+                json!({
+                    "schema_version": "ullm.qwen35_aq4_phase3c_trace_guard_diagnostic.v1",
+                    "status": "invalid",
+                    "required_environment": REQUIRED_PHASE3C_TRACE_ENV,
+                    "error": error,
+                })
+            );
+            ExitCode::from(1)
+        }
+    }
 }
 
 fn required_regular_sha256(path: &Path, label: &str) -> Result<String, String> {
@@ -1444,7 +1522,7 @@ fn run(
     }
 }
 
-const USAGE: &str = "usage: ullm-aq4-differential-trace PACKAGE_DIR CASES_JSON REPLAY_JSON OUTPUT_DIR [DEVICE_INDEX] --enable-intermediate-trace [--enable-linear-stage-trace]";
+const USAGE: &str = "usage: ullm-aq4-differential-trace PACKAGE_DIR CASES_JSON REPLAY_JSON OUTPUT_DIR [DEVICE_INDEX] --enable-intermediate-trace [--enable-linear-stage-trace]\n       ullm-aq4-differential-trace --print-phase3c-trace-guard-requirements";
 
 fn parse_cli(args: &[String]) -> Result<(u32, bool, bool), String> {
     if args.len() < 6 || args.len() > 8 {
@@ -1475,6 +1553,9 @@ fn parse_cli(args: &[String]) -> Result<(u32, bool, bool), String> {
 
 fn main() -> ExitCode {
     let args = env::args().collect::<Vec<_>>();
+    if args.len() == 2 && args[1] == "--print-phase3c-trace-guard-requirements" {
+        return print_phase3c_trace_guard_requirements();
+    }
     let (device_index, enabled, linear_stage_trace) = match parse_cli(&args) {
         Ok(parsed) => parsed,
         Err(error) => {
@@ -1709,6 +1790,50 @@ mod tests {
             "--unexpected".to_string(),
         ];
         assert!(parse_cli(&unknown_flag).is_err());
+    }
+
+    #[test]
+    fn phase3c_trace_guard_reports_every_missing_or_invalid_requirement() {
+        let error = phase3c_trace_guard_set_with(1, |name| match name {
+            "HIP_VISIBLE_DEVICES" | "ULLM_HIP_VISIBLE_DEVICES" => Some("1".to_string()),
+            "ULLM_REQUIRE_HIP_AQ4_MATVEC_KERNEL" => Some("0".to_string()),
+            _ => None,
+        })
+        .expect_err("incomplete guard set must fail before trace startup");
+        assert_eq!(
+            &REQUIRED_PHASE3C_TRACE_ENV[..QWEN35_AQ4_M1_LINEAR_STAGE_REQUIRED_ENV.len()],
+            &QWEN35_AQ4_M1_LINEAR_STAGE_REQUIRED_ENV,
+        );
+        for name in REQUIRED_PHASE3C_TRACE_ENV {
+            assert!(
+                error.contains(name),
+                "missing diagnostic for {name}: {error}"
+            );
+        }
+        assert!(error.contains("ULLM_REQUIRE_HIP_AQ4_MATVEC_KERNEL=\"0\""));
+        assert!(error.contains("ULLM_REQUIRE_HIP_LINEAR_ATTN_KERNEL=<unset>"));
+        assert!(error.contains("ULLM_REQUIRE_HIP_AQ4_MATVEC_BATCH_KERNEL=<unset>"));
+        assert!(error.contains("ULLM_REQUIRE_HIP_BF16_ROW_KERNEL=<unset>"));
+        assert!(error.contains("ULLM_REQUIRE_HIP_TOP1_KERNEL=<unset>"));
+    }
+
+    #[test]
+    fn phase3c_trace_guard_accepts_only_the_complete_normal_path() {
+        let guard = phase3c_trace_guard_set_with(1, |name| {
+            (["HIP_VISIBLE_DEVICES", "ULLM_HIP_VISIBLE_DEVICES"]
+                .as_slice()
+                .contains(&name)
+                || REQUIRED_PHASE3C_TRACE_ENV.contains(&name))
+            .then(|| "1".to_string())
+        })
+        .expect("complete normal Phase 3c environment must validate before HIP startup");
+        assert_eq!(
+            guard["required_environment"]
+                .as_object()
+                .expect("required guard map")
+                .len(),
+            REQUIRED_PHASE3C_TRACE_ENV.len()
+        );
     }
 
     #[test]

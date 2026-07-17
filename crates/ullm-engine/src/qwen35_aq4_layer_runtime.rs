@@ -10,7 +10,7 @@ use crate::backend_operation_registry::{
     PagedDecodeSplitConfig, QueryScale, ResolvedOperationPlan, ResolvedPhasePlans, RuntimeFeature,
     RuntimeFeatureSet, paged_decode_split_production_registry, qwen35_m1_production_registry,
     qwen35_paged_chunk_operation_request, qwen35_paged_chunk_production_registry,
-    rebind_paged_geometry_registry,
+    rebind_paged_geometry_registry, runtime_feature_environment,
 };
 use crate::decoder::PagedDecodeShape;
 use crate::execution_batch::ExecutionPhase;
@@ -27,6 +27,34 @@ fn env_flag_enabled(name: &str) -> bool {
         .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
         .unwrap_or(false)
 }
+
+/// HIP capabilities that a production M=1 linear-attention layer must have proven while loading.
+///
+/// Keep this set as the source of truth for the layer-load feature gate.  The Phase 3c trace
+/// additionally requires the matching environment guards below before it can enter this load
+/// path, so a missing guard is reported before a runtime capability probe can launch work.
+pub const QWEN35_AQ4_M1_LINEAR_LOAD_FEATURES: RuntimeFeatureSet = RuntimeFeatureSet::EMPTY
+    .with(RuntimeFeature::HipLinearAttentionRecurrent)
+    .with(RuntimeFeature::HipLinearAttentionQkvPrepare)
+    .with(RuntimeFeature::HipAq4MatvecBatch)
+    .with(RuntimeFeature::HipLinearAttentionQkvPrepareBatch);
+
+/// Complete fail-closed guard set for the Phase 3c production M=1 layer-0 linear-stage trace.
+///
+/// The first, third, fourth, eighth, and ninth entries guard direct runtime operations in
+/// `run_device_step`. The other four are derived from [`QWEN35_AQ4_M1_LINEAR_LOAD_FEATURES`]
+/// through the backend capability registry and are required before the layer can load.
+pub const QWEN35_AQ4_M1_LINEAR_STAGE_REQUIRED_ENV: [&str; 9] = [
+    "ULLM_REQUIRE_HIP_AQ4_MATVEC_KERNEL",
+    runtime_feature_environment(RuntimeFeature::HipAq4MatvecBatch),
+    "ULLM_REQUIRE_HIP_AQ4_MATVEC_ADD_KERNEL",
+    "ULLM_REQUIRE_HIP_AQ4_MATVEC_QKV_Z_GATE_BETA_KERNEL",
+    runtime_feature_environment(RuntimeFeature::HipLinearAttentionQkvPrepare),
+    runtime_feature_environment(RuntimeFeature::HipLinearAttentionQkvPrepareBatch),
+    runtime_feature_environment(RuntimeFeature::HipLinearAttentionRecurrent),
+    "ULLM_REQUIRE_HIP_RMSNORM_KERNEL",
+    "ULLM_REQUIRE_HIP_SEGMENTED_RMSNORM_SILU_MUL_KERNEL",
+];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct PagedDecodeSplitExperimentConfig {
@@ -3959,12 +3987,7 @@ impl PackageLinearAttnResidentStepLayer {
             ));
         }
         let device = DeviceCapabilities::probe_m1_runtime_context(context, stream)?;
-        device.require_features(
-            RuntimeFeatureSet::from_feature(RuntimeFeature::HipLinearAttentionRecurrent)
-                .with(RuntimeFeature::HipLinearAttentionQkvPrepare)
-                .with(RuntimeFeature::HipAq4MatvecBatch)
-                .with(RuntimeFeature::HipLinearAttentionQkvPrepareBatch),
-        )?;
+        device.require_features(QWEN35_AQ4_M1_LINEAR_LOAD_FEATURES)?;
         let operation_plans = ResolvedPhasePlans::resolve_m1(
             &qwen35_m1_production_registry()?,
             OperationKind::GatedDeltaRuleScan,
@@ -7542,6 +7565,31 @@ mod linear_attn_step_test_support {
 mod linear_attn_step_state_tests {
     use super::linear_attn_step_test_support::*;
     use super::*;
+
+    #[test]
+    fn m1_linear_stage_guard_set_covers_every_load_feature_and_step_guard() {
+        assert_eq!(QWEN35_AQ4_M1_LINEAR_LOAD_FEATURES.len(), 4);
+        for feature in [
+            RuntimeFeature::HipLinearAttentionRecurrent,
+            RuntimeFeature::HipLinearAttentionQkvPrepare,
+            RuntimeFeature::HipAq4MatvecBatch,
+            RuntimeFeature::HipLinearAttentionQkvPrepareBatch,
+        ] {
+            assert!(QWEN35_AQ4_M1_LINEAR_LOAD_FEATURES.contains(feature));
+            assert!(QWEN35_AQ4_M1_LINEAR_STAGE_REQUIRED_ENV
+                .contains(&runtime_feature_environment(feature)));
+        }
+        assert_eq!(QWEN35_AQ4_M1_LINEAR_STAGE_REQUIRED_ENV.len(), 9);
+        for name in [
+            "ULLM_REQUIRE_HIP_AQ4_MATVEC_KERNEL",
+            "ULLM_REQUIRE_HIP_AQ4_MATVEC_ADD_KERNEL",
+            "ULLM_REQUIRE_HIP_AQ4_MATVEC_QKV_Z_GATE_BETA_KERNEL",
+            "ULLM_REQUIRE_HIP_RMSNORM_KERNEL",
+            "ULLM_REQUIRE_HIP_SEGMENTED_RMSNORM_SILU_MUL_KERNEL",
+        ] {
+            assert!(QWEN35_AQ4_M1_LINEAR_STAGE_REQUIRED_ENV.contains(&name));
+        }
+    }
 
     #[test]
     fn paged_decode_split_experiment_parser_is_all_or_nothing_and_strict() {
