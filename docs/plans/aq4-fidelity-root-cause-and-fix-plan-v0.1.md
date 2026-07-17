@@ -1,6 +1,6 @@
 # AQ4 fidelity root cause and fix plan v0.1
 
-Status: Phase 1・Phase 2・Phase 2b・Phase 3b・Phase 3c-prep完了。H8・H6とも棄却方向、H5(GPU kernel固有)が有力(未確証)。2026-07-17朝、ユーザーがGPU window使用を承認（R9700限定、H9も考慮）。1回目のPhase 3c試行は、AQ4本番service(`ullm-openai.service`)がR9700 lockを保持中のため取得失敗で安全停止(サービス操作なし、evidenceは記録済み)。**同日、ユーザーがこのマシンに関する全権限を追加承認し、本番serviceの一時停止を含めて進めることを許可した。** 2回目の試行(service一時停止→trace実行→復旧確認)を準備中。P2 fidelity calibrationはNo-Go凍結中。
+Status: Phase 1・Phase 2・Phase 2b・Phase 3b・Phase 3c-prep完了。H8・H6とも棄却方向、H5(GPU kernel固有)が有力(未確証)。2026-07-17朝の1回目Phase 3c試行は、AQ4本番service(`ullm-openai.service`)がR9700 lockを保持中のため取得失敗で安全停止(サービス操作なし、evidenceは記録済み)。同日、ユーザーの追加承認に基づく**唯一のservice一時停止 window**を実行したが、unitの`RuntimeDirectoryPreserve=no`により停止直後に`/run/ullm/r9700.lock`がENOENTとなった。既存regular fileのみを使うlock契約を守り、GPU traceは起動せず、一回の`systemctl start`でservice/worker/GPU/KFD/manifest/healthzを正常復旧した。したがってH5/H9の今回の実負荷判定は未実施のまま。P2 fidelity calibrationはNo-Go凍結中。
 
 **用語訂正(Phase 3bで判明)**: これまで「07/14 production run」「GPU実測」と呼んでいた最終相対L2`0.6151289249`の測定は、実際にはOpenAI Gatewayへの実requestではなく、production packageを直接loadしたM=1診断binary(`ullm-aq4-p2-path-oracle`/`ullm-aq4-differential-trace`、service停止済み)による管理された診断実行だった。以降この計画では「07/14 M=1診断」と呼ぶ。
 
@@ -237,16 +237,16 @@ Status: **完了**（commit `4d04ff1d`、実行: `gpt-5.6-terra`/`max`、journal
 
 Exit Criteria: 構成差が実測誤差に寄与するかどうかが判定されている。 ✅ H6は棄却、H5が有力化。
 
-### Phase 3c: AQ4 CPU参照 vs AQ4 GPU kernelの段階別差分(単発承認GPU window) — 次の焦点、GPU window未承認
+### Phase 3c: AQ4 CPU参照 vs AQ4 GPU kernelの段階別差分(単発承認GPU window) — service window完了、数値測定は未成立
 
-Status: H8・H6の棄却によりH5が最有力仮説として確定。**2026-07-17朝、ユーザーがGPU window使用を承認した。** 条件: (1) R9700だけを対象とし、実行前にdevice architectureが`gfx1201`であることを機械的に確認してから進める、(2) H9(ハードウェア固有の問題)も並行して考慮し、GPU health telemetryを記録する。runbookにこれらのguardを追加してから実行する。
+Status: H8・H6の棄却によりH5が最有力仮説として確定。2026-07-17のサービス停止を伴う単発windowでは、停止前baselineは正常、`systemctl stop`/`start`は各一回成功、復旧確認も成功した。しかし`RuntimeDirectory=ullm`かつ`RuntimeDirectoryPreserve=no`のため、stop後の`/run/ullm/r9700.lock`はENOENTであり、既存regular fileのnonblocking取得というrunbook契約を満たさなかった。lock作成・修復をせずtraceを起動しなかったため、30 recordのGPU段階比較、H5、実負荷下のH9はいずれも判定不能である。evidenceは[service-stop-window-v0.2](../../benchmarks/results/2026-07-17/qwen35-9b-aq4-production-opt-v0.1/p2/aq4-phase3c-gpu-stage-trace-v0.1/service-stop-window-v0.2/)とjournalに保存する。
 
 BF16 sourceとの比較ではなく、**同じAQ4量子化のCPU参照実装とGPU kernel実装を直接比較**することで、量子化近似誤差の問題とGPU実装バグの問題を完全に分離する。
 
 Tasks:
 
 1. Phase 1のCPU stage report（QKV dequant、Z dequant、recurrent state、attention residual、post norm、MLP、layer output）と同じ境界で、GPU kernel実行時の中間値を取得できるよう、07/14の`ullm-aq4-differential-trace`を拡張する。
-2. R9700排他lock・`HIP_VISIBLE_DEVICES`固定・active service非変更の専用windowで、同一fixture・同一座標のGPU中間traceを1回だけ取得する。再試行は行わない。
+2. R9700排他lock・`HIP_VISIBLE_DEVICES`固定・停止前service snapshot・一回だけの許可済みstop/startを含む専用windowで、同一fixture・同一座標のGPU中間traceを1回だけ取得する。**実施済み**: stop後にlock pathがENOENTとなり、traceは起動せず復旧した。再試行は行わない。
 3. AQ4 CPU参照とAQ4 GPU kernelの段階別差分を比較する。BF16との比較ではないため、量子化誤差そのものは両者で理論上ほぼ一致するはずであり、有意な差があればGPU kernel実装固有のバグと確定できる。
 4. 07/16に一時停止したP3 harnessとは別の実行系列として扱い、そのlock/serviceの再開手順とは独立に、通常のGPU承認手続きに従う。
 
@@ -406,4 +406,4 @@ Phase 2〜3の結果に応じて、次のいずれかのfix pathを選ぶ。
 2. ~~Phase 2b: post-norm epsilon control比較~~ **完了**。epsilon差は無視できる規模。
 3. ~~Phase 3b（診断harnessと実productionの構成差監査、H6、CPU-only）~~ **完了**。H6棄却、H5（GPU kernel固有）が有力化。07/14測定の実体はGateway実requestではなくM=1診断だったことも判明。
 4. ~~Phase 3c-prep（fused kernel source vs CPU参照実装のコードレビュー、trace tooling拡張、GPU window実行手順の事前文書化）~~ **完了**。高確信度バグは未発見（H5未確証のまま）だが、副次的に2件の実装差（silent scale-index skip、条件付きRPB cache不整合）を記録し、runbookも完成させた。
-5. **Phase 3c（AQ4 CPU vs AQ4 GPU kernel段階別差分）は人間によるGPU window承認が必要。** runbook（`docs/plans/aq4-phase3c-gpu-window-runbook-v0.1.md`）は実行可能な状態で待機中。ユーザー起床後に承認を得てから、runbook記載のコマンドを一度だけ実行する。
+5. **Phase 3cの承認済みservice windowは消費済み。** lock pathをservice lifecycle外へ移す、またはstop後の新規lock substrateを許可することは、既存runbookの「既存regular fileのみ」契約と別の設計変更になる。その必要性を示すevidenceは得たが、本計画では実装・再試行を行わない。追加windowまたはlock lifecycle設計を扱うには、別途明示承認が必要である。
