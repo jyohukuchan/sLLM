@@ -122,6 +122,132 @@ def write_inputs(root: Path) -> tuple[Path, Path, Path, Path]:
     return cases_path, manifest, worker, lifecycle_path
 
 
+def write_v2_campaign(
+    root: Path,
+    *,
+    manifest: Path,
+    cases_path: Path,
+    lifecycle_path: Path,
+    run_id: str = "reasoning-release-run",
+) -> tuple[Path, Path, Path]:
+    campaign = root / "reasoning-campaign"
+    campaign.mkdir()
+    candidate_raw = manifest.read_bytes()
+    candidate_sha256 = hashlib.sha256(candidate_raw).hexdigest()
+    authorization = root / "authorization.json"
+    authorization.write_bytes(b'{"authorization":true}\n')
+    authorization.chmod(0o444)
+    claim_path = root / "authorization.claimed.json"
+    claim_path.write_bytes(b'{"claim":true}\n')
+    claim_path.chmod(0o444)
+    claim = {
+        "path": str(claim_path),
+        "sha256": hashlib.sha256(claim_path.read_bytes()).hexdigest(),
+        "bytes": len(claim_path.read_bytes()),
+        "authorization_path": str(authorization),
+        "authorization_sha256": hashlib.sha256(
+            authorization.read_bytes()
+        ).hexdigest(),
+    }
+    identity = {
+        "device": 1,
+        "inode": 2,
+        "mode": 0o444,
+        "links": 1,
+        "uid": 1000,
+        "gid": 1000,
+        "bytes": len(candidate_raw),
+        "mtime_ns": 3,
+        "ctime_ns": 4,
+    }
+    rows = [
+        {
+            "schema_version": "ullm.served_model.active_manifest_observation.v1",
+            "sequence": sequence,
+            "stage": stage,
+            "observed_unix_ns": sequence,
+            "observed_monotonic_ns": sequence,
+            "candidate": {
+                "path": str(manifest),
+                "sha256": candidate_sha256,
+                "identity": identity,
+            },
+            "active": {
+                "path": str(root / "active.json"),
+                "sha256": candidate_sha256,
+                "identity": identity,
+            },
+            "bytes_equal": True,
+            "claim": claim,
+        }
+        for sequence, stage in enumerate(TOOL.REASONING_CAMPAIGN_STAGES)
+    ]
+    observations_raw = b"".join(
+        (
+            json.dumps(row, separators=(",", ":"), sort_keys=True) + "\n"
+        ).encode("ascii")
+        for row in rows
+    )
+    binding = {
+        "schema_version": "ullm.served_model.active_binding.v1",
+        "status": "complete",
+        "candidate": {
+            "artifact": "candidate-served-model.json",
+            "source_path": str(manifest),
+            "sha256": candidate_sha256,
+            "bytes": len(candidate_raw),
+        },
+        "actual_active_path": str(root / "active.json"),
+        "expected_stages": list(TOOL.REASONING_CAMPAIGN_STAGES),
+        "observation_count": len(rows),
+        "observations": {
+            "artifact": "active-manifest-observations.jsonl",
+            "sha256": hashlib.sha256(observations_raw).hexdigest(),
+            "bytes": len(observations_raw),
+        },
+        "claim": claim,
+        "campaign": {
+            "name": "reasoning_release",
+            "run_id": run_id,
+            "final_path": str(campaign),
+        },
+    }
+    summary = {
+        "schema_version": TOOL.REASONING_CAMPAIGN_SCHEMA_V2,
+        "status": "incomplete",
+        "raw_bodies_stored": False,
+        "case_count": len(json.loads(cases_path.read_text(encoding="ascii"))),
+        "stream_case_count": len(json.loads(cases_path.read_text(encoding="ascii"))),
+        "nonstream_case_count": 0,
+        "modes": ["disabled", "budget-32", "budget-128", "budget-256", "unbounded"],
+        "manifest_sha256": candidate_sha256,
+        "model_id": "fixture",
+        "worker_binary_sha256": "1" * 64,
+        "gpu_exclusive_preflight": {},
+        "active_manifest_binding": binding,
+        "run_id": run_id,
+    }
+    values = {
+        "cases.json": cases_path.read_bytes(),
+        "lifecycle.json": lifecycle_path.read_bytes(),
+        "resource-samples.jsonl": b"{}\n",
+        "summary.json": (
+            json.dumps(summary, ensure_ascii=True, indent=2) + "\n"
+        ).encode("ascii"),
+        "candidate-served-model.json": candidate_raw,
+        "active-manifest-observations.jsonl": observations_raw,
+        "active-manifest-binding.json": (
+            json.dumps(binding, separators=(",", ":"), sort_keys=True) + "\n"
+        ).encode("ascii"),
+    }
+    for name, raw in values.items():
+        path = campaign / name
+        path.write_bytes(raw)
+        path.chmod(0o444)
+    campaign.chmod(0o555)
+    return campaign, campaign / "cases.json", campaign / "lifecycle.json"
+
+
 def test_prepare_writes_valid_complete_hash_only_evidence(tmp_path: Path, monkeypatch) -> None:
     cases_path, manifest, worker, lifecycle_path = write_inputs(tmp_path)
     commit = "1" * 40
@@ -144,6 +270,47 @@ def test_prepare_writes_valid_complete_hash_only_evidence(tmp_path: Path, monkey
     assert document["git_worktree_clean"] is True
     assert document["git_worktree_status_sha256"] == hashlib.sha256(b"").hexdigest()
     assert TOOL._load_validator().validate(output)["gate_eligible"] is True
+
+
+def test_prepare_v2_binds_exact_claim_run_output_and_every_observation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cases_path, manifest, worker, lifecycle_path = write_inputs(tmp_path)
+    campaign, cases_path, lifecycle_path = write_v2_campaign(
+        tmp_path,
+        manifest=manifest,
+        cases_path=cases_path,
+        lifecycle_path=lifecycle_path,
+    )
+    commit = "1" * 40
+    monkeypatch.setattr(TOOL, "_git_commit", lambda: commit)
+    monkeypatch.setattr(TOOL, "_git_status", lambda: b"")
+    output = tmp_path / "release-v2.json"
+
+    document = TOOL.prepare(
+        cases_path,
+        manifest,
+        worker,
+        "ullm/open-webui@sha256:" + "b" * 64,
+        commit,
+        output,
+        lifecycle_path=lifecycle_path,
+        campaign_output_dir=campaign,
+        status="complete",
+    )
+
+    assert document["schema_version"] == TOOL.EVIDENCE_SCHEMA_V2
+    lineage = document["campaign_lineage"]
+    assert lineage["claim"]["sha256"] == hashlib.sha256(
+        (tmp_path / "authorization.claimed.json").read_bytes()
+    ).hexdigest()
+    assert lineage["campaign"]["run_id"] == "reasoning-release-run"
+    assert len(lineage["observations"]["stages"]) == 12
+    report = TOOL._load_validator().validate(output)
+    assert report["gate_eligible"] is True
+    assert report["campaign_lineage"]["observation_count"] == 12
+    assert output.stat().st_mode & 0o777 == 0o444
+    assert output.stat().st_nlink == 1
 
 
 def test_prepare_keeps_dirty_incomplete_evidence_but_rejects_complete(tmp_path: Path, monkeypatch) -> None:
@@ -234,3 +401,49 @@ def test_prepare_rejects_invalid_served_model_manifest(tmp_path: Path, monkeypat
             tmp_path / "release.json",
             lifecycle_path=lifecycle_path,
         )
+
+
+def test_evidence_publication_never_replaces_a_raced_output(
+    tmp_path: Path,
+) -> None:
+    output = tmp_path / "release.json"
+    output.write_bytes(b"racer-owned\n")
+
+    with pytest.raises(TOOL.EvidenceError, match="already exists"):
+        TOOL._atomic_write(output, {"schema_version": "fixture"})
+
+    assert output.read_bytes() == b"racer-owned\n"
+
+
+def test_v2_evidence_rejects_replayed_observation_bytes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cases_path, manifest, worker, lifecycle_path = write_inputs(tmp_path)
+    campaign, cases_path, lifecycle_path = write_v2_campaign(
+        tmp_path,
+        manifest=manifest,
+        cases_path=cases_path,
+        lifecycle_path=lifecycle_path,
+    )
+    monkeypatch.setattr(TOOL, "_git_commit", lambda: "1" * 40)
+    monkeypatch.setattr(TOOL, "_git_status", lambda: b"")
+    output = tmp_path / "release-v2.json"
+    TOOL.prepare(
+        cases_path,
+        manifest,
+        worker,
+        "ullm/open-webui@sha256:" + "b" * 64,
+        "1" * 40,
+        output,
+        lifecycle_path=lifecycle_path,
+        campaign_output_dir=campaign,
+    )
+    observations = campaign / "active-manifest-observations.jsonl"
+    observations.chmod(0o644)
+    lines = observations.read_bytes().splitlines(keepends=True)
+    observations.write_bytes(b"".join([lines[0], *lines[:-1]]))
+    observations.chmod(0o444)
+
+    validator = TOOL._load_validator()
+    with pytest.raises(validator.ValidationError):
+        validator.validate(output)

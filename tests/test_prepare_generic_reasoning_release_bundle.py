@@ -157,3 +157,53 @@ def test_prepare_v2_publishes_immutable_nine_slot_bundle(
             output=fixture_bundle,
             status="complete",
         )
+
+
+def test_prepare_v2_no_replace_race_preserves_existing_target(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fixture_bundle, fakes, _report = FIXTURES.make_v2_bundle(tmp_path)
+    FIXTURES.install_v2_fakes(monkeypatch, fakes)
+    fixture = json.loads(fixture_bundle.read_text(encoding="ascii"))
+    component_paths = {
+        name: tmp_path / value["path"]
+        for name, value in fixture["artifacts"].items()
+    }
+    fixture_bundle.unlink()
+    rollback = {
+        "rollback_manifest": tmp_path / "active.json",
+        "systemd_unit": tmp_path / "ullm-openai.service",
+        "environment_file": tmp_path / "ullm-openai.env",
+    }
+    for path in rollback.values():
+        path.write_bytes(b"rollback-fixture")
+    monkeypatch.setattr(PREPARER, "_load_validator", lambda: FIXTURES.BUNDLE)
+    original_link = PREPARER.os.link
+    attacker = b"attacker-owned-target\n"
+
+    def race_link(
+        source: Path,
+        destination: Path,
+        *,
+        follow_symlinks: bool,
+    ) -> None:
+        if Path(destination) == fixture_bundle:
+            fixture_bundle.write_bytes(attacker)
+        original_link(
+            source,
+            destination,
+            follow_symlinks=follow_symlinks,
+        )
+
+    monkeypatch.setattr(PREPARER.os, "link", race_link)
+
+    with pytest.raises(PREPARER.BundleError, match="already exists"):
+        PREPARER.prepare_v2(
+            **component_paths,
+            **rollback,
+            output=fixture_bundle,
+            status="complete",
+        )
+
+    assert fixture_bundle.read_bytes() == attacker

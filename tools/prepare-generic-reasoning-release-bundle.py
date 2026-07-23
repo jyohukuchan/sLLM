@@ -328,8 +328,8 @@ def prepare_v2(
         raise BundleError("output bundle already exists or is a symlink")
     bundle_root = output.parent
     release = _read_json(release_evidence, "release evidence")
-    if release.get("schema_version") != "ullm.generic_reasoning_release_evidence.v1":
-        raise BundleError("release evidence schema differs")
+    if release.get("schema_version") != "ullm.generic_reasoning_release_evidence.v2":
+        raise BundleError("bundle v2 requires lineage-bearing release evidence v2")
     source_commit = _commit(release.get("source_commit"), "source_commit")
     active_promotion_source_commit = _commit(
         release.get("active_promotion_source_commit"),
@@ -386,7 +386,7 @@ def prepare_v2(
     validator = _load_validator()
     temporary = output.parent / f".{output.name}.validate"
     try:
-        _atomic_write(temporary, document)
+        _publish_immutable(temporary, document)
         report = validator.validate(temporary)
         if (
             report.get("input_schema_version")

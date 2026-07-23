@@ -5,7 +5,8 @@ The browser script writes only its bounded JSON evidence to stdout.  This
 runner executes it in an immutable Playwright container, binds the expected
 model identities explicitly, validates the result, and publishes it atomically.
 Legacy runs preserve the historical v2 evidence; active-manifest-bound runs
-publish release-identity-bearing v3 evidence. Prompt, response, token, and
+publish one authorized directory containing lineage-bearing v4 evidence.
+Prompt, response, token, and
 credential contents are never written by this runner.
 """
 
@@ -13,6 +14,8 @@ from __future__ import annotations
 
 import argparse
 import base64
+import ctypes
+import errno
 import hashlib
 import importlib.util
 import json
@@ -75,6 +78,17 @@ ALLOWED_WORKER_PROCESS_BASENAMES = frozenset(
 )
 BROWSER_EVIDENCE_SCHEMA_V2 = "ullm.openwebui.reasoning_browser_smoke.v2"
 BROWSER_EVIDENCE_SCHEMA_V3 = "ullm.openwebui.reasoning_browser_smoke.v3"
+BROWSER_EVIDENCE_SCHEMA_V4 = "ullm.openwebui.reasoning_browser_smoke.v4"
+CAMPAIGN_LINEAGE_SCHEMA_V2 = "ullm.served_model.campaign_lineage.v2"
+BROWSER_EVIDENCE_FILE = "browser-evidence.json"
+BROWSER_OUTPUT_FILES_V2 = frozenset(
+    {
+        BROWSER_EVIDENCE_FILE,
+        "candidate-served-model.json",
+        "active-manifest-observations.jsonl",
+        "active-manifest-binding.json",
+    }
+)
 SWITCH_EVIDENCE_FIELDS = {
     "provider_switch_performed",
     "provider_switch_model_id_sha256",
@@ -101,21 +115,57 @@ def _sha256(value: bytes) -> str:
 
 
 def _read_regular(path: Path, label: str, maximum: int) -> bytes:
+    flags = os.O_RDONLY | os.O_CLOEXEC
+    if not hasattr(os, "O_NOFOLLOW"):
+        raise SmokeError("O_NOFOLLOW is required for browser evidence reads")
+    flags |= os.O_NOFOLLOW
     try:
-        metadata = path.lstat()
+        descriptor = os.open(path, flags)
     except OSError as error:
         raise SmokeError(f"{label} is unavailable") from error
-    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
-        raise SmokeError(f"{label} is not a regular non-symlink file")
-    if metadata.st_size <= 0 or metadata.st_size > maximum:
-        raise SmokeError(f"{label} exceeds its size bound")
     try:
-        raw = path.read_bytes()
+        before = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or before.st_size <= 0
+            or before.st_size > maximum
+        ):
+            raise SmokeError(f"{label} exceeds its size bound")
+        raw = bytearray()
+        while len(raw) <= maximum:
+            chunk = os.read(
+                descriptor,
+                min(1024 * 1024, maximum + 1 - len(raw)),
+            )
+            if not chunk:
+                break
+            raw.extend(chunk)
+        after = os.fstat(descriptor)
+        named = path.lstat()
+        def identity(value: os.stat_result) -> tuple[int, ...]:
+            return (
+                value.st_dev,
+                value.st_ino,
+                value.st_mode,
+                value.st_nlink,
+                value.st_uid,
+                value.st_gid,
+                value.st_size,
+                value.st_mtime_ns,
+                value.st_ctime_ns,
+            )
+        if (
+            len(raw) != before.st_size
+            or len(raw) > maximum
+            or identity(before) != identity(after)
+            or identity(after) != identity(named)
+        ):
+            raise SmokeError(f"{label} changed while being read")
+        return bytes(raw)
     except OSError as error:
         raise SmokeError(f"{label} cannot be read") from error
-    if len(raw) != metadata.st_size or len(raw) > maximum:
-        raise SmokeError(f"{label} changed while being read")
-    return raw
+    finally:
+        os.close(descriptor)
 
 
 def _validate_image(value: str) -> str:
@@ -567,6 +617,170 @@ def _upgrade_browser_evidence_v3(
     }
 
 
+def _lineage_artifact(raw: bytes) -> dict[str, Any]:
+    if not raw:
+        raise SmokeError("browser lineage artifact is empty")
+    return {"bytes": len(raw), "sha256": _sha256(raw)}
+
+
+def _lineage_inventory(artifacts: dict[str, dict[str, Any]]) -> str:
+    canonical = json.dumps(
+        artifacts,
+        ensure_ascii=True,
+        allow_nan=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("ascii")
+    return _sha256(
+        CAMPAIGN_LINEAGE_SCHEMA_V2.encode("ascii") + b"\0" + canonical
+    )
+
+
+def _upgrade_browser_evidence_v4(
+    document: dict[str, Any],
+    *,
+    output: Path,
+    artifacts: ActiveBindingArtifacts,
+) -> dict[str, Any]:
+    """Bind the v3 payload to its claimed run and every active-byte observation."""
+
+    if document.get("schema_version") != BROWSER_EVIDENCE_SCHEMA_V3:
+        raise SmokeError("browser evidence is not the v3 identity schema")
+    if "campaign_lineage" in document:
+        raise SmokeError("v3 browser evidence contains reserved lineage")
+    try:
+        binding = _strict_json(artifacts.binding_json)
+    except SmokeError:
+        raise
+    expected_binding_fields = {
+        "schema_version",
+        "status",
+        "candidate",
+        "actual_active_path",
+        "expected_stages",
+        "observation_count",
+        "observations",
+        "claim",
+        "campaign",
+    }
+    if not isinstance(binding, dict) or set(binding) != expected_binding_fields:
+        raise SmokeError("browser active binding fields differ")
+    candidate = binding.get("candidate")
+    observations_reference = binding.get("observations")
+    claim = binding.get("claim")
+    campaign = binding.get("campaign")
+    if (
+        binding.get("schema_version") != "ullm.served_model.active_binding.v1"
+        or binding.get("status") != "complete"
+        or binding.get("expected_stages") != list(ACTIVE_BINDING_STAGES)
+        or binding.get("observation_count") != len(ACTIVE_BINDING_STAGES)
+        or not isinstance(candidate, dict)
+        or set(candidate) != {"artifact", "source_path", "sha256", "bytes"}
+        or not isinstance(observations_reference, dict)
+        or set(observations_reference) != {"artifact", "sha256", "bytes"}
+        or not isinstance(claim, dict)
+        or set(claim)
+        != {
+            "path",
+            "sha256",
+            "bytes",
+            "authorization_path",
+            "authorization_sha256",
+        }
+        or not isinstance(campaign, dict)
+        or set(campaign) != {"name", "run_id", "final_path"}
+    ):
+        raise SmokeError("browser active binding contract differs")
+    output_absolute = output.absolute()
+    if (
+        not output.is_absolute()
+        or output != output_absolute
+        or campaign["name"] != "reasoning_browser"
+        or campaign["final_path"] != os.fspath(output)
+        or not isinstance(campaign["run_id"], str)
+        or not campaign["run_id"]
+        or candidate["artifact"] != "candidate-served-model.json"
+        or candidate["sha256"] != _sha256(artifacts.candidate_manifest)
+        or candidate["bytes"] != len(artifacts.candidate_manifest)
+        or observations_reference
+        != {
+            "artifact": "active-manifest-observations.jsonl",
+            "sha256": _sha256(artifacts.observations_jsonl),
+            "bytes": len(artifacts.observations_jsonl),
+        }
+    ):
+        raise SmokeError("browser candidate, run, or final output binding differs")
+    for field in ("sha256", "authorization_sha256"):
+        if not isinstance(claim[field], str) or HASH_RE.fullmatch(claim[field]) is None:
+            raise SmokeError(f"browser campaign claim {field} differs")
+    for field in ("path", "authorization_path"):
+        if not isinstance(claim[field], str) or not Path(claim[field]).is_absolute():
+            raise SmokeError(f"browser campaign claim {field} differs")
+    if type(claim["bytes"]) is not int or claim["bytes"] < 1:
+        raise SmokeError("browser campaign claim bytes differ")
+
+    lines = artifacts.observations_jsonl.splitlines(keepends=True)
+    if len(lines) != len(ACTIVE_BINDING_STAGES) or any(
+        not line.endswith(b"\n") for line in lines
+    ):
+        raise SmokeError("browser active observation count differs")
+    stages: list[dict[str, Any]] = []
+    for sequence, (line, expected_stage) in enumerate(
+        zip(lines, ACTIVE_BINDING_STAGES, strict=True)
+    ):
+        row = _strict_json(line)
+        if (
+            not isinstance(row, dict)
+            or row.get("schema_version")
+            != "ullm.served_model.active_manifest_observation.v1"
+            or row.get("sequence") != sequence
+            or row.get("stage") != expected_stage
+            or row.get("bytes_equal") is not True
+            or row.get("claim") != claim
+        ):
+            raise SmokeError(f"browser active observation {sequence} differs")
+        stages.append(
+            {
+                "sequence": sequence,
+                "stage": expected_stage,
+                "sha256": _sha256(line),
+            }
+        )
+    lineage_artifacts = {
+        "active-manifest-binding.json": _lineage_artifact(
+            artifacts.binding_json
+        ),
+        "active-manifest-observations.jsonl": _lineage_artifact(
+            artifacts.observations_jsonl
+        ),
+        "candidate-served-model.json": _lineage_artifact(
+            artifacts.candidate_manifest
+        ),
+    }
+    lineage = {
+        "schema_version": CAMPAIGN_LINEAGE_SCHEMA_V2,
+        "campaign": {
+            "name": "reasoning_browser",
+            "run_id": campaign["run_id"],
+            "final_path": os.fspath(output),
+            "final_kind": "directory",
+            "files": sorted(BROWSER_OUTPUT_FILES_V2),
+        },
+        "claim": dict(claim),
+        "artifacts": lineage_artifacts,
+        "artifact_inventory_sha256": _lineage_inventory(lineage_artifacts),
+        "observations": {
+            "count": len(stages),
+            "stages": stages,
+        },
+    }
+    return {
+        **document,
+        "schema_version": BROWSER_EVIDENCE_SCHEMA_V4,
+        "campaign_lineage": lineage,
+    }
+
+
 def _bind_model_identity(
     document: dict[str, Any],
     *,
@@ -595,8 +809,11 @@ def _bind_model_identity(
 
 
 def _atomic_publish(output: Path, raw: bytes) -> None:
-    if output.exists() or output.is_symlink():
-        raise SmokeError("browser evidence output already exists or is a symlink")
+    """Publish one immutable legacy evidence file with no-replace semantics."""
+
+    if not raw or len(raw) > MAX_EVIDENCE_BYTES:
+        raise SmokeError("browser evidence output exceeds its size bound")
+    output.parent.mkdir(parents=True, exist_ok=True)
     try:
         parent = output.parent.resolve(strict=True)
         metadata = parent.lstat()
@@ -604,88 +821,218 @@ def _atomic_publish(output: Path, raw: bytes) -> None:
         raise SmokeError("browser evidence output directory is unavailable") from error
     if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
         raise SmokeError("browser evidence output parent is not a real directory")
-    incomplete = parent / f".{output.name}.incomplete-{uuid.uuid4().hex}"
-    descriptor: int | None = None
+    if parent != output.parent.absolute():
+        raise SmokeError("browser evidence output parent is not canonical")
+    parent_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC
+    if not hasattr(os, "O_NOFOLLOW"):
+        raise SmokeError("O_NOFOLLOW is required for browser publication")
+    parent_flags |= os.O_NOFOLLOW
+    parent_descriptor = os.open(parent, parent_flags)
+    incomplete_name = f".{output.name}.incomplete-{uuid.uuid4().hex}"
+    descriptor = -1
     try:
         descriptor = os.open(
-            incomplete,
+            incomplete_name,
             os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC,
             stat.S_IRUSR | stat.S_IWUSR,
+            dir_fd=parent_descriptor,
         )
-        with os.fdopen(descriptor, "wb", buffering=0) as destination:
-            descriptor = None
-            destination.write(raw)
-            destination.flush()
-            os.fsync(destination.fileno())
-        os.replace(incomplete, output)
-        directory = os.open(parent, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+        view = memoryview(raw)
+        while view:
+            written = os.write(descriptor, view)
+            if written <= 0:
+                raise SmokeError("browser evidence write failed")
+            view = view[written:]
+        os.fsync(descriptor)
+        os.fchmod(descriptor, 0o444)
+        os.close(descriptor)
+        descriptor = -1
         try:
-            os.fsync(directory)
-        finally:
-            os.close(directory)
+            os.link(
+                incomplete_name,
+                output.name,
+                src_dir_fd=parent_descriptor,
+                dst_dir_fd=parent_descriptor,
+                follow_symlinks=False,
+            )
+        except FileExistsError as error:
+            raise SmokeError("browser evidence output already exists") from error
+        os.unlink(incomplete_name, dir_fd=parent_descriptor)
+        os.fsync(parent_descriptor)
+        if _read_regular(output, "published browser evidence", MAX_EVIDENCE_BYTES) != raw:
+            raise SmokeError("published browser evidence bytes differ")
+        published = output.lstat()
+        if stat.S_IMODE(published.st_mode) != 0o444 or published.st_nlink != 1:
+            raise SmokeError("published browser evidence identity differs")
     except OSError as error:
         raise SmokeError("browser evidence could not be published atomically") from error
     finally:
-        if descriptor is not None:
+        if descriptor >= 0:
             os.close(descriptor)
-        incomplete.unlink(missing_ok=True)
+        try:
+            os.unlink(incomplete_name, dir_fd=parent_descriptor)
+        except FileNotFoundError:
+            pass
+        os.close(parent_descriptor)
 
 
-def _publish_active_binding_directory(
+def _rename_directory_noreplace(
+    parent_descriptor: int,
+    source_name: str,
+    destination_name: str,
+) -> None:
+    renameat2 = getattr(ctypes.CDLL(None, use_errno=True), "renameat2", None)
+    if renameat2 is None:
+        raise SmokeError("renameat2 is required for browser publication")
+    renameat2.argtypes = [
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_uint,
+    ]
+    renameat2.restype = ctypes.c_int
+    if (
+        renameat2(
+            parent_descriptor,
+            os.fsencode(source_name),
+            parent_descriptor,
+            os.fsencode(destination_name),
+            1,
+        )
+        != 0
+    ):
+        observed_errno = ctypes.get_errno()
+        if observed_errno in {errno.EEXIST, errno.ENOTEMPTY}:
+            raise SmokeError("browser v2 output already exists")
+        raise SmokeError(
+            f"browser v2 output publication failed: errno {observed_errno}"
+        )
+
+
+def _write_immutable_stage_file(path: Path, raw: bytes) -> None:
+    if not raw or len(raw) > MAX_EVIDENCE_BYTES:
+        raise SmokeError("browser v2 artifact exceeds its size bound")
+    descriptor = os.open(
+        path,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC,
+        0o600,
+    )
+    try:
+        view = memoryview(raw)
+        while view:
+            written = os.write(descriptor, view)
+            if written <= 0:
+                raise SmokeError("browser v2 artifact write failed")
+            view = view[written:]
+        os.fsync(descriptor)
+        os.fchmod(descriptor, 0o444)
+    finally:
+        os.close(descriptor)
+
+
+def _publish_v2_output_directory(
     output: Path,
     artifacts: ActiveBindingArtifacts,
+    evidence_raw: bytes,
 ) -> Path:
-    final = output.with_name(f"{output.name}.active-binding")
-    if final.exists() or final.is_symlink():
-        raise SmokeError("browser active-binding output already exists")
+    """Publish the one authorized, immutable browser v2 output directory."""
+
+    output.parent.mkdir(parents=True, exist_ok=True)
     try:
         parent = output.parent.resolve(strict=True)
     except OSError as error:
-        raise SmokeError("browser active-binding parent is unavailable") from error
-    stage = parent / f".{final.name}.incomplete-{uuid.uuid4().hex}"
-    stage.mkdir(mode=0o700)
+        raise SmokeError("browser v2 output parent is unavailable") from error
+    if parent != output.parent.absolute():
+        raise SmokeError("browser v2 output parent is not canonical")
+    parent_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC
+    if not hasattr(os, "O_NOFOLLOW"):
+        raise SmokeError("O_NOFOLLOW is required for browser v2 publication")
+    parent_flags |= os.O_NOFOLLOW
+    parent_descriptor = os.open(parent, parent_flags)
+    parent_identity = os.fstat(parent_descriptor)
+    stage = parent / f".{output.name}.incomplete-{uuid.uuid4().hex}"
+    os.mkdir(stage.name, mode=0o700, dir_fd=parent_descriptor)
     published = False
     try:
-        for name, raw in artifacts.by_name().items():
-            descriptor = os.open(
-                stage / name,
-                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC,
-                0o600,
-            )
-            try:
-                view = memoryview(raw)
-                while view:
-                    written = os.write(descriptor, view)
-                    if written <= 0:
-                        raise SmokeError(
-                            "browser active-binding artifact write failed"
-                        )
-                    view = view[written:]
-                os.fsync(descriptor)
-            finally:
-                os.close(descriptor)
+        values = {
+            **artifacts.by_name(),
+            BROWSER_EVIDENCE_FILE: evidence_raw,
+        }
+        if set(values) != BROWSER_OUTPUT_FILES_V2:
+            raise SmokeError("browser v2 output file set differs")
+        for name, raw in values.items():
+            _write_immutable_stage_file(stage / name, raw)
+        stage.chmod(0o555)
         stage_descriptor = os.open(
-            stage, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC
+            stage,
+            os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW,
         )
         try:
             os.fsync(stage_descriptor)
         finally:
             os.close(stage_descriptor)
-        os.rename(stage, final)
-        published = True
-        parent_descriptor = os.open(
-            parent, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC
+        validator = _load_validator()
+        report = validator.validate(
+            stage / BROWSER_EVIDENCE_FILE,
+            lineage_root_override=stage,
         )
+        if report.get("gate_eligible") is not True:
+            raise SmokeError("browser v4 staged evidence is not gate eligible")
+        _rename_directory_noreplace(
+            parent_descriptor,
+            stage.name,
+            output.name,
+        )
+        published = True
+        os.fsync(parent_descriptor)
+        verification_descriptor = os.open(parent, parent_flags)
         try:
-            os.fsync(parent_descriptor)
+            before = parent_identity
+            after = os.fstat(verification_descriptor)
+            if (
+                before.st_dev,
+                before.st_ino,
+                before.st_mode,
+                before.st_uid,
+                before.st_gid,
+            ) != (
+                after.st_dev,
+                after.st_ino,
+                after.st_mode,
+                after.st_uid,
+                after.st_gid,
+            ):
+                raise SmokeError("browser v2 output parent changed")
         finally:
-            os.close(parent_descriptor)
-        return final
+            os.close(verification_descriptor)
+        observed = {entry.name for entry in os.scandir(output)}
+        metadata = output.lstat()
+        if (
+            observed != BROWSER_OUTPUT_FILES_V2
+            or stat.S_IMODE(metadata.st_mode) != 0o555
+        ):
+            raise SmokeError("published browser v2 directory identity differs")
+        for name, raw in values.items():
+            path = output / name
+            if _read_regular(path, f"published browser {name}", MAX_EVIDENCE_BYTES) != raw:
+                raise SmokeError(f"published browser {name} bytes differ")
+            file_metadata = path.lstat()
+            if (
+                stat.S_IMODE(file_metadata.st_mode) != 0o444
+                or file_metadata.st_nlink != 1
+            ):
+                raise SmokeError(f"published browser {name} identity differs")
+        published_report = validator.validate(output / BROWSER_EVIDENCE_FILE)
+        if published_report != report:
+            raise SmokeError("published browser v4 validation differs")
+        return output
     except (OSError, SmokeError) as error:
         if isinstance(error, SmokeError):
             raise
-        raise SmokeError("browser active-binding output could not be published") from error
+        raise SmokeError("browser v2 output could not be published") from error
     finally:
+        os.close(parent_descriptor)
         if not published:
             shutil.rmtree(stage, ignore_errors=True)
 
@@ -1223,61 +1570,64 @@ def execute(
     )
     if active_binding is None:
         published_raw = raw.strip() + b"\n"
-    else:
-        assert v3_source_commit is not None and v3_identity is not None
-        document = _upgrade_browser_evidence_v3(
-            document,
-            source_commit=v3_source_commit,
-            identity=v3_identity,
-        )
-        published_raw = (
-            json.dumps(
-                document,
-                ensure_ascii=True,
-                allow_nan=False,
-                separators=(",", ":"),
-                sort_keys=True,
-            ).encode("ascii")
-            + b"\n"
-        )
-    temporary = output.parent / f".{output.name}.validate-{uuid.uuid4().hex}"
-    try:
-        if active_binding is not None:
-            active_binding.observe("validation")
-        _atomic_publish(temporary, published_raw)
-        report = _load_validator().validate(temporary)
-        if report.get("gate_eligible") is not True:
-            raise SmokeError("browser evidence is not gate eligible")
-        temporary.unlink(missing_ok=True)
-    except Exception:
-        temporary.unlink(missing_ok=True)
-        raise
-    binding_output: Path | None = None
-    if active_binding is not None:
-        active_binding.observe("publication")
-        binding_output = _publish_active_binding_directory(
-            output, active_binding.artifacts()
-        )
-    try:
+        temporary = output.parent / f".{output.name}.validate-{uuid.uuid4().hex}"
+        try:
+            _atomic_publish(temporary, published_raw)
+            report = _load_validator().validate(temporary)
+            if report.get("gate_eligible") is not True:
+                raise SmokeError("browser evidence is not gate eligible")
+            temporary.unlink()
+        except Exception:
+            temporary.unlink(missing_ok=True)
+            raise
         _atomic_publish(output, published_raw)
-    except BaseException:
-        if binding_output is not None:
-            shutil.rmtree(binding_output, ignore_errors=True)
-        raise
+        return {
+            "schema_version": document["schema_version"],
+            "output": os.fspath(output.resolve()),
+            "model_id_sha256": document["model_id_sha256"],
+            "provider_request_count": document["provider_request_count"],
+            "manifest_sha256": manifest_summary["manifest_sha256"],
+        }
+
+    assert v3_source_commit is not None and v3_identity is not None
+    document = _upgrade_browser_evidence_v3(
+        document,
+        source_commit=v3_source_commit,
+        identity=v3_identity,
+    )
+    active_binding.observe("validation")
+    active_binding.observe("publication")
+    active_artifacts = active_binding.artifacts()
+    document = _upgrade_browser_evidence_v4(
+        document,
+        output=output,
+        artifacts=active_artifacts,
+    )
+    published_raw = (
+        json.dumps(
+            document,
+            ensure_ascii=True,
+            allow_nan=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("ascii")
+        + b"\n"
+    )
+    published_output = _publish_v2_output_directory(
+        output,
+        active_artifacts,
+        published_raw,
+    )
     return {
         "schema_version": document["schema_version"],
-        "output": os.fspath(output.resolve()),
+        "output": os.fspath(published_output.resolve()),
+        "evidence": os.fspath(
+            (published_output / BROWSER_EVIDENCE_FILE).resolve()
+        ),
         "model_id_sha256": document["model_id_sha256"],
         "provider_request_count": document["provider_request_count"],
         "manifest_sha256": manifest_summary["manifest_sha256"],
-        **(
-            {}
-            if binding_output is None
-            else {
-                "active_binding_output": os.fspath(binding_output.resolve()),
-                "run_id": run_id,
-            }
-        ),
+        "run_id": run_id,
     }
 
 

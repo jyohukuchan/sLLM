@@ -12,12 +12,15 @@ contents are used only in memory for quality checks and are never persisted.
 from __future__ import annotations
 
 import argparse
+import ctypes
+import errno
 import hashlib
 import importlib.util
 import json
 import os
 import re
 import select
+import shutil
 import socket
 import stat
 import subprocess
@@ -65,6 +68,22 @@ COMMIT_RE = re.compile(r"[0-9a-f]{40}\Z")
 LIFECYCLE_SCHEMA = "ullm.gateway.lifecycle.v1"
 CAMPAIGN_SCHEMA = "ullm.generic_reasoning_release_campaign.v1"
 CAMPAIGN_SCHEMA_V2 = "ullm.generic_reasoning_release_campaign.v2"
+CAMPAIGN_OUTPUT_FILES = frozenset(
+    {
+        "cases.json",
+        "lifecycle.json",
+        "resource-samples.jsonl",
+        "summary.json",
+    }
+)
+CAMPAIGN_OUTPUT_FILES_V2 = frozenset(
+    {
+        *CAMPAIGN_OUTPUT_FILES,
+        "candidate-served-model.json",
+        "active-manifest-observations.jsonl",
+        "active-manifest-binding.json",
+    }
+)
 MODES = ("disabled", "budget-32", "budget-128", "budget-256", "unbounded")
 ACTIVE_BINDING_STAGES = (
     "preflight",
@@ -897,10 +916,7 @@ def _case_and_lifecycle(
 
 def _write_json(path: Path, value: Any) -> None:
     encoded = (json.dumps(value, ensure_ascii=True, allow_nan=False, indent=2) + "\n").encode("ascii")
-    with path.open("wb") as destination:
-        destination.write(encoded)
-        destination.flush()
-        os.fsync(destination.fileno())
+    _write_bytes(path, encoded)
 
 
 def _write_bytes(path: Path, raw: bytes) -> None:
@@ -919,8 +935,115 @@ def _write_bytes(path: Path, raw: bytes) -> None:
                 raise CampaignError("active-manifest binding artifact write failed")
             view = view[written:]
         os.fsync(descriptor)
+        os.fchmod(descriptor, 0o444)
     finally:
         os.close(descriptor)
+
+
+def _rename_directory_noreplace(
+    parent_descriptor: int,
+    source_name: str,
+    destination_name: str,
+) -> None:
+    """Atomically publish a directory without replacing any raced target."""
+
+    renameat2 = getattr(ctypes.CDLL(None, use_errno=True), "renameat2", None)
+    if renameat2 is None:
+        raise CampaignError("renameat2 is required for no-replace publication")
+    renameat2.argtypes = [
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_uint,
+    ]
+    renameat2.restype = ctypes.c_int
+    result = renameat2(
+        parent_descriptor,
+        os.fsencode(source_name),
+        parent_descriptor,
+        os.fsencode(destination_name),
+        1,  # RENAME_NOREPLACE
+    )
+    if result != 0:
+        observed_errno = ctypes.get_errno()
+        if observed_errno in {errno.EEXIST, errno.ENOTEMPTY}:
+            raise CampaignError("campaign output directory already exists")
+        raise CampaignError(
+            f"campaign output directory publication failed: errno {observed_errno}"
+        )
+
+
+def _file_identity(metadata: os.stat_result) -> tuple[int, ...]:
+    return (
+        metadata.st_dev,
+        metadata.st_ino,
+        metadata.st_mode,
+        metadata.st_nlink,
+        metadata.st_uid,
+        metadata.st_gid,
+        metadata.st_size,
+        metadata.st_mtime_ns,
+        metadata.st_ctime_ns,
+    )
+
+
+def _verify_published_directory(
+    output_dir: Path,
+    *,
+    expected_files: frozenset[str],
+) -> None:
+    """Re-open every published artifact and reject links, races, or mutability."""
+
+    try:
+        directory_metadata = output_dir.lstat()
+        observed = {entry.name for entry in os.scandir(output_dir)}
+    except OSError as error:
+        raise CampaignError("published campaign output is unavailable") from error
+    if (
+        stat.S_ISLNK(directory_metadata.st_mode)
+        or not stat.S_ISDIR(directory_metadata.st_mode)
+        or stat.S_IMODE(directory_metadata.st_mode) != 0o555
+        or observed != expected_files
+    ):
+        raise CampaignError("published campaign directory identity differs")
+    for name in sorted(expected_files):
+        path = output_dir / name
+        flags = os.O_RDONLY | os.O_CLOEXEC
+        if not hasattr(os, "O_NOFOLLOW"):
+            raise CampaignError("O_NOFOLLOW is required for campaign publication")
+        flags |= os.O_NOFOLLOW
+        try:
+            descriptor = os.open(path, flags)
+        except OSError as error:
+            raise CampaignError("published campaign artifact is unavailable") from error
+        try:
+            before = os.fstat(descriptor)
+            raw = bytearray()
+            while len(raw) <= MAX_JSON_BYTES:
+                chunk = os.read(
+                    descriptor,
+                    min(1024 * 1024, MAX_JSON_BYTES + 1 - len(raw)),
+                )
+                if not chunk:
+                    break
+                raw.extend(chunk)
+            after = os.fstat(descriptor)
+            named = path.lstat()
+            if (
+                not stat.S_ISREG(before.st_mode)
+                or stat.S_IMODE(before.st_mode) != 0o444
+                or before.st_nlink != 1
+                or before.st_size <= 0
+                or before.st_size > MAX_JSON_BYTES
+                or len(raw) != before.st_size
+                or _file_identity(before) != _file_identity(after)
+                or _file_identity(after) != _file_identity(named)
+            ):
+                raise CampaignError("published campaign artifact identity differs")
+            hashlib.sha256(raw).digest()
+        finally:
+            os.close(descriptor)
 
 
 def _select_manifest_and_binding(
@@ -1030,8 +1153,34 @@ def execute(
         stream=False,
     )
     output_dir.parent.mkdir(parents=True, exist_ok=True)
-    stage = output_dir.parent / f".{output_dir.name}.incomplete-{uuid.uuid4().hex}"
-    stage.mkdir(mode=0o700, parents=True)
+    try:
+        parent = output_dir.parent.resolve(strict=True)
+    except OSError as error:
+        raise CampaignError("campaign output parent is unavailable") from error
+    if parent != output_dir.parent.absolute():
+        raise CampaignError("campaign output parent is not canonical")
+    parent_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC
+    if not hasattr(os, "O_NOFOLLOW"):
+        raise CampaignError("O_NOFOLLOW is required for campaign publication")
+    parent_flags |= os.O_NOFOLLOW
+    try:
+        parent_descriptor = os.open(parent, parent_flags)
+    except OSError as error:
+        raise CampaignError("campaign output parent cannot be opened safely") from error
+    parent_metadata = os.fstat(parent_descriptor)
+    parent_identity = (
+        parent_metadata.st_dev,
+        parent_metadata.st_ino,
+        parent_metadata.st_mode,
+        parent_metadata.st_uid,
+        parent_metadata.st_gid,
+    )
+    stage = parent / f".{output_dir.name}.incomplete-{uuid.uuid4().hex}"
+    try:
+        os.mkdir(stage.name, mode=0o700, dir_fd=parent_descriptor)
+    except OSError as error:
+        os.close(parent_descriptor)
+        raise CampaignError("campaign staging directory cannot be created") from error
     observer = LifecycleObserver(observer_socket)
     cases: list[dict[str, Any]] = []
     lifecycle: list[dict[str, Any]] = []
@@ -1077,11 +1226,20 @@ def execute(
             active_binding.observe("final")
         _write_json(stage / "cases.json", cases)
         _write_json(stage / "lifecycle.json", {"schema_version": "ullm.generic_reasoning_lifecycle_evidence.v1", "events": lifecycle})
-        with (stage / "resource-samples.jsonl").open("w", encoding="ascii") as output:
-            for sample in samples:
-                output.write(json.dumps(sample, ensure_ascii=True, sort_keys=True) + "\n")
-            output.flush()
-            os.fsync(output.fileno())
+        resource_raw = b"".join(
+            (
+                json.dumps(
+                    sample,
+                    ensure_ascii=True,
+                    allow_nan=False,
+                    separators=(",", ":"),
+                    sort_keys=True,
+                )
+                + "\n"
+            ).encode("ascii")
+            for sample in samples
+        )
+        _write_bytes(stage / "resource-samples.jsonl", resource_raw)
         active_artifacts: ActiveBindingArtifacts | None = (
             active_binding.artifacts() if active_binding is not None else None
         )
@@ -1110,15 +1268,50 @@ def execute(
             )
             summary["run_id"] = run_id
         _write_json(stage / "summary.json", summary)
-        stage.chmod(0o700)
-        os.replace(stage, output_dir)
+        stage.chmod(0o555)
+        stage_descriptor = os.open(
+            stage,
+            os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW,
+        )
+        try:
+            os.fsync(stage_descriptor)
+        finally:
+            os.close(stage_descriptor)
+        _rename_directory_noreplace(
+            parent_descriptor,
+            stage.name,
+            output_dir.name,
+        )
+        os.fsync(parent_descriptor)
+        verification_descriptor = os.open(parent, parent_flags)
+        try:
+            verification_metadata = os.fstat(verification_descriptor)
+            if (
+                verification_metadata.st_dev,
+                verification_metadata.st_ino,
+                verification_metadata.st_mode,
+                verification_metadata.st_uid,
+                verification_metadata.st_gid,
+            ) != parent_identity:
+                raise CampaignError(
+                    "campaign output parent changed during publication"
+                )
+        finally:
+            os.close(verification_descriptor)
+        _verify_published_directory(
+            output_dir,
+            expected_files=(
+                CAMPAIGN_OUTPUT_FILES_V2
+                if active_artifacts is not None
+                else CAMPAIGN_OUTPUT_FILES
+            ),
+        )
     except BaseException:
-        import shutil
-
         shutil.rmtree(stage, ignore_errors=True)
         raise
     finally:
         observer.close()
+        os.close(parent_descriptor)
     return {
         "schema_version": (
             CAMPAIGN_SCHEMA_V2 if active_binding is not None else CAMPAIGN_SCHEMA

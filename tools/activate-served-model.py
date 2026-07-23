@@ -33,6 +33,7 @@ RESULT_SCHEMA = "ullm.served_model.activation.v1"
 _VALIDATOR_MODULE_NAME = "_ullm_served_model_activation_validator"
 _BUNDLE_VALIDATOR_MODULE_NAME = "_ullm_release_bundle_activation_validator"
 _COMMIT_RE = re.compile(r"[0-9a-f]{40}\Z")
+_HASH_RE = re.compile(r"[0-9a-f]{64}\Z")
 AQ4_FORMAT_ID = "AQ4_0"
 SQ8_FORMAT_ID = "SQ8_0"
 BUNDLE_SCHEMA_V1 = "ullm.generic_reasoning_release_bundle.v1"
@@ -139,7 +140,12 @@ def _safe_existing_active(active: Path) -> bool:
     return True
 
 
-def _read_safe_manifest(path: Path, label: str) -> bytes:
+def _read_safe_manifest(
+    path: Path,
+    label: str,
+    *,
+    require_immutable: bool = False,
+) -> bytes:
     _reject_symlink_components(path, label, leaf_may_absent=False)
     flags = os.O_RDONLY | os.O_CLOEXEC
     if hasattr(os, "O_NOFOLLOW"):
@@ -152,6 +158,12 @@ def _read_safe_manifest(path: Path, label: str) -> bytes:
         before = os.fstat(descriptor)
         if not stat.S_ISREG(before.st_mode) or before.st_mode & stat.S_IWOTH:
             raise ActivationError(f"{label} is unsafe")
+        if require_immutable and (
+            stat.S_IMODE(before.st_mode) != 0o444 or before.st_nlink != 1
+        ):
+            raise ActivationError(
+                f"{label} must be an immutable mode-0444 single-link file"
+            )
         if before.st_size <= 0 or before.st_size > MAX_MANIFEST_BYTES:
             raise ActivationError(f"{label} has an invalid size")
         chunks: list[bytes] = []
@@ -180,6 +192,20 @@ def _read_safe_manifest(path: Path, label: str) -> bytes:
         )
         if identity_before != identity_after:
             raise ActivationError(f"{label} changed while being read")
+        if require_immutable:
+            try:
+                named = path.lstat()
+            except OSError as error:
+                raise ActivationError(f"{label} changed while being read") from error
+            named_identity = (
+                named.st_dev,
+                named.st_ino,
+                named.st_size,
+                named.st_mtime_ns,
+                named.st_ctime_ns,
+            )
+            if identity_after != named_identity:
+                raise ActivationError(f"{label} changed while being read")
         if not raw or len(raw) > MAX_MANIFEST_BYTES or len(raw) != before.st_size:
             raise ActivationError(f"{label} has an invalid size")
         return raw
@@ -256,12 +282,6 @@ def _validate_release_bundle(
         raise ActivationError("release bundle preflight failed") from error
     if report.get("gate_eligible") is not True:
         raise ActivationError("release bundle is not production-gate eligible")
-    try:
-        bundle_document = json.loads(
-            _read_safe_manifest(bundle, "release bundle").decode("utf-8")
-        )
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
-        raise ActivationError("release bundle cannot be read") from error
     candidate_format = candidate_summary.get("format_id")
     expected_bundle_pair = {
         AQ4_FORMAT_ID: (BUNDLE_SCHEMA_V1, BUNDLE_VALIDATOR_SCHEMA_V1),
@@ -270,12 +290,31 @@ def _validate_release_bundle(
     if expected_bundle_pair is None:
         raise ActivationError("v2 candidate format has no release-bundle route")
     expected_bundle_schema, expected_validator_schema = expected_bundle_pair
+    try:
+        bundle_raw = _read_safe_manifest(
+            bundle,
+            "release bundle",
+            require_immutable=expected_bundle_schema == BUNDLE_SCHEMA_V2,
+        )
+        bundle_document = json.loads(bundle_raw.decode("utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ActivationError("release bundle cannot be read") from error
     if (
         bundle_document.get("schema_version") != expected_bundle_schema
         or report.get("schema_version") != expected_validator_schema
         or report.get("input_schema_version") != expected_bundle_schema
     ):
         raise ActivationError("release bundle schema/format pairing differs")
+    if expected_bundle_schema == BUNDLE_SCHEMA_V2:
+        reported_digest = report.get("bundle_sha256")
+        if (
+            not isinstance(reported_digest, str)
+            or _HASH_RE.fullmatch(reported_digest) is None
+            or reported_digest != hashlib.sha256(bundle_raw).hexdigest()
+        ):
+            raise ActivationError(
+                "release bundle validator snapshot digest differs"
+            )
     identity = bundle_document.get("identity")
     if not isinstance(identity, dict):
         raise ActivationError("release bundle identity is missing")

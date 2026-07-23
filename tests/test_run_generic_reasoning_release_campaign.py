@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import socket
 import sys
 import threading
@@ -284,6 +285,30 @@ def test_immutable_http_image_is_required(tmp_path: Path) -> None:
             token_file=token,
             http_image="curl:latest",
         )
+
+
+def test_campaign_directory_publication_is_atomic_no_replace(
+    tmp_path: Path,
+) -> None:
+    stage = tmp_path / ".campaign.incomplete"
+    stage.mkdir()
+    target = tmp_path / "campaign"
+    target.mkdir()
+    marker = target / "belongs-to-racer"
+    marker.write_bytes(b"preserve")
+    descriptor = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        with pytest.raises(TOOL.CampaignError, match="already exists"):
+            TOOL._rename_directory_noreplace(
+                descriptor,
+                stage.name,
+                target.name,
+            )
+    finally:
+        os.close(descriptor)
+
+    assert marker.read_bytes() == b"preserve"
+    assert stage.is_dir()
 
 
 @pytest.mark.parametrize("basename", ["ullm-aq4-worker", "ullm-sq8-worker"])

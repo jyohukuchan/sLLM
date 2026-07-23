@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import json
+import os
 import sys
 from pathlib import Path
 from types import ModuleType
@@ -225,16 +226,69 @@ def test_runner_publishes_gate_eligible_evidence_without_a_provider_switch(
     assert all("OPENWEBUI_SWITCH_MODEL_" not in part for part in commands[0])
 
 
-def test_active_binding_path_publishes_identity_bearing_v3_evidence(
+def test_legacy_browser_publication_never_replaces_a_raced_file(
+    tmp_path: Path,
+) -> None:
+    output = tmp_path / "browser.json"
+    output.write_bytes(b"racer-owned\n")
+
+    with pytest.raises(TOOL.SmokeError, match="already exists"):
+        TOOL._atomic_publish(output, b'{"fixture":true}\n')
+
+    assert output.read_bytes() == b"racer-owned\n"
+
+
+def test_v2_browser_directory_publication_never_replaces_a_raced_output(
+    tmp_path: Path,
+) -> None:
+    stage = tmp_path / ".browser.incomplete"
+    stage.mkdir()
+    target = tmp_path / "browser"
+    target.mkdir()
+    marker = target / "belongs-to-racer"
+    marker.write_bytes(b"preserve")
+    descriptor = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        with pytest.raises(TOOL.SmokeError, match="already exists"):
+            TOOL._rename_directory_noreplace(
+                descriptor,
+                stage.name,
+                target.name,
+            )
+    finally:
+        os.close(descriptor)
+
+    assert marker.read_bytes() == b"preserve"
+    assert stage.is_dir()
+
+
+def test_active_binding_path_publishes_lineage_bearing_v4_directory(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     token = tmp_path / "token"
     token.write_text(SESSION_JWT + "\n", encoding="ascii")
     script = tmp_path / "smoke.cjs"
     script.write_text("console.log('{}')\n", encoding="ascii")
-    output = tmp_path / "browser-v3.json"
+    output = tmp_path / "browser-v4"
     candidate = tmp_path / "candidate.json"
     candidate.write_text("{}\n", encoding="ascii")
+    candidate_raw = candidate.read_bytes()
+    candidate_sha256 = hashlib.sha256(candidate_raw).hexdigest()
+    authorization = tmp_path / "authorization.json"
+    authorization.write_bytes(b'{"authorization":true}\n')
+    authorization.chmod(0o444)
+    claim_path = tmp_path / "authorization.claimed.json"
+    claim_path.write_bytes(b'{"claim":true}\n')
+    claim_path.chmod(0o444)
+    claim = {
+        "path": str(claim_path),
+        "sha256": hashlib.sha256(claim_path.read_bytes()).hexdigest(),
+        "bytes": len(claim_path.read_bytes()),
+        "authorization_path": str(authorization),
+        "authorization_sha256": hashlib.sha256(
+            authorization.read_bytes()
+        ).hexdigest(),
+    }
     model_id = "ullm-qwen3-14b-sq8"
     payload = (json.dumps(evidence(model_id)) + "\n").encode("ascii")
     stages: list[str] = []
@@ -244,7 +298,83 @@ def test_active_binding_path_publishes_identity_bearing_v3_evidence(
             stages.append(stage)
 
         def artifacts(self) -> object:
-            return object()
+            identity = {
+                "device": 1,
+                "inode": 2,
+                "mode": 0o444,
+                "links": 1,
+                "uid": 1000,
+                "gid": 1000,
+                "bytes": len(candidate_raw),
+                "mtime_ns": 3,
+                "ctime_ns": 4,
+            }
+            rows = [
+                {
+                    "schema_version": "ullm.served_model.active_manifest_observation.v1",
+                    "sequence": sequence,
+                    "stage": stage,
+                    "observed_unix_ns": sequence,
+                    "observed_monotonic_ns": sequence,
+                    "candidate": {
+                        "path": str(candidate),
+                        "sha256": candidate_sha256,
+                        "identity": identity,
+                    },
+                    "active": {
+                        "path": str(tmp_path / "active.json"),
+                        "sha256": candidate_sha256,
+                        "identity": identity,
+                    },
+                    "bytes_equal": True,
+                    "claim": claim,
+                }
+                for sequence, stage in enumerate(stages)
+            ]
+            observations = b"".join(
+                (
+                    json.dumps(
+                        row, separators=(",", ":"), sort_keys=True
+                    )
+                    + "\n"
+                ).encode("ascii")
+                for row in rows
+            )
+            binding_document = {
+                "schema_version": "ullm.served_model.active_binding.v1",
+                "status": "complete",
+                "candidate": {
+                    "artifact": "candidate-served-model.json",
+                    "source_path": str(candidate),
+                    "sha256": candidate_sha256,
+                    "bytes": len(candidate_raw),
+                },
+                "actual_active_path": str(tmp_path / "active.json"),
+                "expected_stages": list(TOOL.ACTIVE_BINDING_STAGES),
+                "observation_count": len(rows),
+                "observations": {
+                    "artifact": "active-manifest-observations.jsonl",
+                    "sha256": hashlib.sha256(observations).hexdigest(),
+                    "bytes": len(observations),
+                },
+                "claim": claim,
+                "campaign": {
+                    "name": "reasoning_browser",
+                    "run_id": "browser-run",
+                    "final_path": str(output),
+                },
+            }
+            binding_raw = (
+                json.dumps(
+                    binding_document, separators=(",", ":"), sort_keys=True
+                )
+                + "\n"
+            ).encode("ascii")
+            return TOOL.ActiveBindingArtifacts(
+                candidate_raw,
+                observations,
+                binding_raw,
+            )
 
     binding = Binding()
     monkeypatch.setattr(
@@ -256,7 +386,7 @@ def test_active_binding_path_publishes_identity_bearing_v3_evidence(
         TOOL,
         "_validate_manifest_identity",
         lambda _path, _model: {
-            "manifest_sha256": "1" * 64,
+            "manifest_sha256": candidate_sha256,
             "format_id": "SQ8_0",
             "worker": {
                 "binary": "/opt/ullm/bin/ullm-sq8-worker",
@@ -265,7 +395,7 @@ def test_active_binding_path_publishes_identity_bearing_v3_evidence(
         },
     )
     v3_identity = {
-        "manifest_sha256": "1" * 64,
+        "manifest_sha256": candidate_sha256,
         "worker_binary_sha256": "2" * 64,
         "tokenizer_sha256": "3" * 64,
         "openwebui_image": "registry.example/open-webui@sha256:" + "4" * 64,
@@ -280,19 +410,13 @@ def test_active_binding_path_publishes_identity_bearing_v3_evidence(
         return FakeProcess(stdout, payload)
 
     monkeypatch.setattr(TOOL.subprocess, "Popen", fake_popen)
-    monkeypatch.setattr(
-        TOOL,
-        "_publish_active_binding_directory",
-        lambda _output, _artifacts: tmp_path / "binding",
-    )
-
     result = TOOL.execute(
         output=output,
         manifest=None,
         active_binding_mode="v2",
         candidate_served_model_manifest=candidate,
         active_served_model_manifest=tmp_path / "active.json",
-        expected_served_model_manifest_sha256="1" * 64,
+        expected_served_model_manifest_sha256=candidate_sha256,
         campaign_authorization=tmp_path / "authorization.json",
         run_id="browser-run",
         openwebui_session_token_file=token,
@@ -303,12 +427,15 @@ def test_active_binding_path_publishes_identity_bearing_v3_evidence(
         browser_script=script,
     )
 
-    document = json.loads(output.read_text(encoding="ascii"))
-    assert result["schema_version"] == TOOL.BROWSER_EVIDENCE_SCHEMA_V3
+    evidence_path = output / TOOL.BROWSER_EVIDENCE_FILE
+    document = json.loads(evidence_path.read_text(encoding="ascii"))
+    assert result["schema_version"] == TOOL.BROWSER_EVIDENCE_SCHEMA_V4
     assert document["source_commit"] == "5" * 40
     assert document["identity"] == v3_identity
-    assert TOOL._load_validator().validate(output)["gate_eligible"] is True
+    assert TOOL._load_validator().validate(evidence_path)["gate_eligible"] is True
     assert stages == list(TOOL.ACTIVE_BINDING_STAGES)
+    assert {entry.name for entry in output.iterdir()} == TOOL.BROWSER_OUTPUT_FILES_V2
+    assert all(entry.stat().st_mode & 0o777 == 0o444 for entry in output.iterdir())
 
 
 def test_runner_cli_allows_switch_arguments_to_be_omitted(tmp_path: Path) -> None:

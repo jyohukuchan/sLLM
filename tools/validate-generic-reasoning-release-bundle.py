@@ -12,6 +12,7 @@ import re
 import stat
 import sys
 import tempfile
+from datetime import datetime, timezone
 from pathlib import Path
 from types import ModuleType
 from typing import Any, Sequence
@@ -29,6 +30,7 @@ BROWSER_VALIDATOR_PATH = ROOT / "tools/validate-openwebui-reasoning-browser-smok
 SERVED_MODEL_VALIDATOR_PATH = ROOT / "tools/validate-served-model.py"
 SQ8_PROMOTION_VALIDATOR_PATH = ROOT / "tools/sq8_serving_promotion.py"
 SQ8_CAMPAIGN_VALIDATOR_PATH = ROOT / "tools/validate-sq8-openwebui-release.py"
+CAMPAIGN_AUTHORIZATION_PATH = ROOT / "tools/served_model_campaign_authorization.py"
 COMMIT_RE = re.compile(r"[0-9a-f]{40}\Z")
 HASH_RE = re.compile(r"[0-9a-f]{64}\Z")
 MAX_BUNDLE_BYTES = 1 * 1024 * 1024
@@ -60,6 +62,34 @@ FORBIDDEN_KEYS = {
     "api_key",
     "token",
     "conversation",
+}
+AUTHORIZATION_SCHEMA = (
+    "ullm.served_model.v2_cross_model_campaign_authorization.v1"
+)
+CLAIM_SCHEMA = "ullm.served_model.v2_cross_model_campaign_claim.v1"
+CLAIM_FIELDS = {
+    "schema_version",
+    "authorization_id",
+    "authorization_path",
+    "authorization_sha256",
+    "claimed_at",
+    "attempt",
+    "max_attempts",
+}
+CAMPAIGN_NAMES = {"sq8_full", "reasoning_release", "reasoning_browser"}
+OUTCOME_SELECTED_ARTIFACTS = {
+    "SHA256SUMS",
+    "active-manifest-binding.json",
+    "browser-validator.json",
+    "candidate-served-model.json",
+    "model-identity.json",
+    "release-validation.json",
+    "summary.json",
+    "validation.json",
+    "active-manifest-observations.jsonl",
+    "browser-evidence.json",
+    "lifecycle.json",
+    "resource-samples.jsonl",
 }
 
 
@@ -120,7 +150,13 @@ def _stat_identity(value: os.stat_result) -> tuple[int, ...]:
     )
 
 
-def _stable_read_regular(path: Path, label: str, maximum: int) -> bytes:
+def _stable_read_regular(
+    path: Path,
+    label: str,
+    maximum: int,
+    *,
+    require_immutable: bool = False,
+) -> bytes:
     """Read one named regular file without accepting links or byte races."""
 
     if not path.is_absolute():
@@ -141,6 +177,12 @@ def _stable_read_regular(path: Path, label: str, maximum: int) -> bytes:
             or before.st_size > maximum
         ):
             raise ValidationError(f"{label} exceeds its size bound")
+        if require_immutable and (
+            stat.S_IMODE(before.st_mode) != 0o444 or before.st_nlink != 1
+        ):
+            raise ValidationError(
+                f"{label} must be an immutable mode-0444 single-link file"
+            )
         raw = bytearray()
         while len(raw) <= maximum:
             chunk = os.read(
@@ -723,6 +765,283 @@ def _validate_sq8_promotion_and_candidate(
         raise ValidationError("SQ8 candidate served-model summary differs")
 
 
+def _validate_generic_campaign_lineages(
+    *,
+    bundle_path: Path,
+    release: dict[str, Any],
+    release_report: dict[str, Any],
+    browser: dict[str, Any],
+    browser_report: dict[str, Any],
+    browser_path: Path,
+    campaign_identity: dict[str, Any],
+    identity: dict[str, Any],
+    source_commit: str,
+    rollback: dict[str, Any],
+) -> dict[str, Any]:
+    """Cross-bind both auxiliary campaigns to the one claimed SQ8 authorization."""
+
+    release_lineage = release.get("campaign_lineage")
+    browser_lineage = browser.get("campaign_lineage")
+    if not isinstance(release_lineage, dict) or not isinstance(browser_lineage, dict):
+        raise ValidationError("generic campaign lineage is missing")
+    if (
+        release_lineage.get("schema_version")
+        != "ullm.served_model.campaign_lineage.v2"
+        or browser_lineage.get("schema_version")
+        != "ullm.served_model.campaign_lineage.v2"
+    ):
+        raise ValidationError("generic campaign lineage schema differs")
+    claim = campaign_identity["campaign_authorization_claim"]
+    if (
+        release_lineage.get("claim") != claim
+        or browser_lineage.get("claim") != claim
+    ):
+        raise ValidationError("generic campaign authorization claim differs")
+    release_campaign = release_lineage.get("campaign")
+    browser_campaign = browser_lineage.get("campaign")
+    if (
+        not isinstance(release_campaign, dict)
+        or not isinstance(browser_campaign, dict)
+        or release_campaign.get("name") != "reasoning_release"
+        or browser_campaign.get("name") != "reasoning_browser"
+        or release_campaign.get("run_id") == browser_campaign.get("run_id")
+        or release_campaign.get("final_path") == browser_campaign.get("final_path")
+    ):
+        raise ValidationError("generic campaign run/output identity differs")
+    release_artifacts = release_lineage.get("artifacts")
+    browser_artifacts = browser_lineage.get("artifacts")
+    if (
+        not isinstance(release_artifacts, dict)
+        or not isinstance(browser_artifacts, dict)
+        or not isinstance(release_artifacts.get("candidate-served-model.json"), dict)
+        or not isinstance(browser_artifacts.get("candidate-served-model.json"), dict)
+        or release_artifacts["candidate-served-model.json"].get("sha256")
+        != identity["manifest_sha256"]
+        or browser_artifacts["candidate-served-model.json"].get("sha256")
+        != identity["manifest_sha256"]
+    ):
+        raise ValidationError("generic campaign candidate identity differs")
+    release_observations = release_lineage.get("observations")
+    browser_observations = browser_lineage.get("observations")
+    if (
+        not isinstance(release_observations, dict)
+        or not isinstance(browser_observations, dict)
+        or release_observations.get("count") != 12
+        or browser_observations.get("count") != 5
+    ):
+        raise ValidationError("generic campaign observation coverage differs")
+
+    recomputed_release = release_report.get("campaign_lineage")
+    recomputed_browser = browser_report.get("campaign_lineage")
+    if (
+        not isinstance(recomputed_release, dict)
+        or not isinstance(recomputed_browser, dict)
+        or recomputed_release.get("claim_sha256") != claim["sha256"]
+        or recomputed_release.get("authorization_sha256")
+        != claim["authorization_sha256"]
+        or recomputed_browser.get("claim_sha256") != claim["sha256"]
+        or recomputed_browser.get("authorization_sha256")
+        != claim["authorization_sha256"]
+        or recomputed_release.get("run_id") != release_campaign["run_id"]
+        or recomputed_browser.get("run_id") != browser_campaign["run_id"]
+    ):
+        raise ValidationError("generic campaign recomputed lineage differs")
+
+    try:
+        bundle_root = bundle_path.parent.resolve(strict=True)
+        release_root = Path(release_campaign["final_path"]).resolve(strict=True)
+        browser_root = Path(browser_campaign["final_path"]).resolve(strict=True)
+        release_root.relative_to(bundle_root)
+        browser_root.relative_to(bundle_root)
+    except (OSError, ValueError, TypeError) as error:
+        raise ValidationError(
+            "generic campaign final output is outside the bundle root"
+        ) from error
+    if browser_path.resolve(strict=True) != browser_root / "browser-evidence.json":
+        raise ValidationError("browser bundle component is not its claimed final output")
+
+    claim_path = Path(claim["path"])
+    authorization_path = Path(claim["authorization_path"])
+    try:
+        if (
+            claim_path.resolve(strict=True) != claim_path
+            or authorization_path.resolve(strict=True) != authorization_path
+        ):
+            raise ValidationError("loaded campaign claim path is not canonical")
+    except OSError as error:
+        raise ValidationError("loaded campaign claim path is unavailable") from error
+    claim_raw = _stable_read_regular(
+        claim_path,
+        "campaign authorization claim",
+        MAX_COMPONENT_BYTES,
+        require_immutable=True,
+    )
+    authorization_raw = _stable_read_regular(
+        authorization_path,
+        "campaign authorization",
+        MAX_COMPONENT_BYTES,
+        require_immutable=True,
+    )
+    if (
+        len(claim_raw) != claim["bytes"]
+        or hashlib.sha256(claim_raw).hexdigest() != claim["sha256"]
+        or hashlib.sha256(authorization_raw).hexdigest()
+        != claim["authorization_sha256"]
+    ):
+        raise ValidationError("loaded campaign claim bytes differ")
+    claim_document = _json_bytes(claim_raw, "campaign authorization claim")
+    authorization_document = _json_bytes(
+        authorization_raw,
+        "campaign authorization",
+    )
+    if (
+        set(claim_document) != CLAIM_FIELDS
+        or claim_document.get("schema_version") != CLAIM_SCHEMA
+        or claim_document.get("authorization_path") != claim["authorization_path"]
+        or claim_document.get("authorization_sha256")
+        != claim["authorization_sha256"]
+        or claim_document.get("attempt") != 1
+        or claim_document.get("max_attempts") != 1
+        or authorization_document.get("schema_version") != AUTHORIZATION_SCHEMA
+        or claim_document.get("authorization_id")
+        != authorization_document.get("authorization_id")
+    ):
+        raise ValidationError("loaded campaign claim identity differs")
+    authorization_validator = _load_module(
+        "_ullm_generic_reasoning_bundle_campaign_authorization",
+        CAMPAIGN_AUTHORIZATION_PATH,
+    )
+    try:
+        authorization_validator.validate_authorization_document(
+            authorization_document,
+            now=datetime.now(timezone.utc),
+            required_uid=os.getuid(),
+            validate_prior_outcome=False,
+            require_fresh_outputs=False,
+            enforce_current_window=False,
+        )
+        if (
+            authorization_validator.canonical_json_bytes(authorization_document)
+            != authorization_raw
+            or authorization_validator.canonical_json_bytes(claim_document)
+            != claim_raw
+        ):
+            raise ValidationError(
+                "campaign authorization or claim is not canonical JSON"
+            )
+    except Exception as error:
+        if isinstance(error, ValidationError):
+            raise
+        raise ValidationError("campaign authorization validation failed") from error
+    try:
+        claimed_at = datetime.fromisoformat(
+            claim_document["claimed_at"].replace("Z", "+00:00")
+        )
+        issued_at = datetime.fromisoformat(
+            authorization_document["issued_at"].replace("Z", "+00:00")
+        )
+        expires_at = datetime.fromisoformat(
+            authorization_document["expires_at"].replace("Z", "+00:00")
+        )
+    except (AttributeError, TypeError, ValueError) as error:
+        raise ValidationError("campaign authorization claim time is invalid") from error
+    if (
+        claimed_at.tzinfo is None
+        or issued_at.tzinfo is None
+        or expires_at.tzinfo is None
+        or not issued_at <= claimed_at < expires_at
+    ):
+        raise ValidationError("campaign authorization claim time is out of range")
+    authorized_campaigns = authorization_document.get("campaigns")
+    if (
+        not isinstance(authorized_campaigns, dict)
+        or set(authorized_campaigns) != CAMPAIGN_NAMES
+        or authorized_campaigns.get("reasoning_release")
+        != {
+            "run_id": release_campaign["run_id"],
+            "final_path": release_campaign["final_path"],
+        }
+        or authorized_campaigns.get("reasoning_browser")
+        != {
+            "run_id": browser_campaign["run_id"],
+            "final_path": browser_campaign["final_path"],
+        }
+    ):
+        raise ValidationError(
+            "generic campaign lineage differs from its authorization"
+        )
+    authorized_candidate = authorization_document.get("candidate")
+    authorized_source = authorization_document.get("source")
+    authorized_before = authorization_document.get("before")
+    authorized_rollback = authorization_document.get("rollback")
+    served_identity = campaign_identity["served_model_manifest"]
+    if (
+        not isinstance(authorized_source, dict)
+        or authorized_source.get("commit") != source_commit
+        or not isinstance(authorized_before, dict)
+        or authorized_before.get("manifest_sha256")
+        != rollback["manifest_sha256"]
+        or not isinstance(authorized_rollback, dict)
+        or authorized_rollback.get("systemd_unit_sha256")
+        != rollback["systemd_unit_sha256"]
+        or authorized_rollback.get("environment_sha256")
+        != rollback["environment_sha256"]
+        or not isinstance(authorized_candidate, dict)
+        or authorized_candidate.get("model_id") != SQ8_MODEL_ID
+        or authorized_candidate.get("format_id") != SQ8_FORMAT_ID
+        or authorized_candidate.get("worker_protocol") != SQ8_WORKER_PROTOCOL
+        or authorized_candidate.get("manifest_sha256")
+        != identity["manifest_sha256"]
+        or authorized_candidate.get("worker_binary_sha256")
+        != identity["worker_binary_sha256"]
+        or authorized_candidate.get("promotion_source_commit") != source_commit
+        or authorized_candidate.get("promotion_receipt_sha256")
+        != served_identity["promotion_receipt_sha256"]
+    ):
+        raise ValidationError("campaign authorization candidate identity differs")
+
+    inventory = [
+        {
+            "path": name,
+            "bytes": release_artifacts[name]["bytes"],
+            "sha256": release_artifacts[name]["sha256"],
+        }
+        for name in sorted(release_artifacts, key=lambda item: item.encode("utf-8"))
+    ]
+    outcome_inventory_raw = (
+        json.dumps(
+            {"files": inventory},
+            ensure_ascii=True,
+            allow_nan=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("ascii")
+        + b"\n"
+    )
+    return {
+        "campaign_name": "reasoning_release",
+        "run_id": release_campaign["run_id"],
+        "final_path": release_campaign["final_path"],
+        "kind": "directory",
+        "sha256": hashlib.sha256(outcome_inventory_raw).hexdigest(),
+        "artifact_inventory_sha256": release_lineage[
+            "artifact_inventory_sha256"
+        ],
+        "artifact_count": len(inventory),
+        "total_bytes": sum(item["bytes"] for item in inventory),
+        "selected_artifacts": {
+            item["path"]: item["sha256"]
+            for item in inventory
+            if item["path"] in OUTCOME_SELECTED_ARTIFACTS
+            or Path(item["path"]).name in OUTCOME_SELECTED_ARTIFACTS
+        },
+        "claim_path": claim["path"],
+        "claim_sha256": claim["sha256"],
+        "authorization_path": claim["authorization_path"],
+        "authorization_sha256": claim["authorization_sha256"],
+    }
+
+
 def _validate_v2(path: Path, document: dict[str, Any]) -> dict[str, Any]:
     expected_root = {
         "schema_version",
@@ -783,7 +1102,7 @@ def _validate_v2(path: Path, document: dict[str, Any]) -> dict[str, Any]:
     )
     if (
         release.get("schema_version")
-        != "ullm.generic_reasoning_release_evidence.v1"
+        != "ullm.generic_reasoning_release_evidence.v2"
         or release.get("source_commit") != document["source_commit"]
         or release.get("active_promotion_source_commit")
         != document["active_promotion_source_commit"]
@@ -803,17 +1122,17 @@ def _validate_v2(path: Path, document: dict[str, Any]) -> dict[str, Any]:
     if (
         release_report != recomputed_release_report
         or release_report.get("schema_version")
-        != "ullm.generic_reasoning_release_validator.v1"
+        != "ullm.generic_reasoning_release_validator.v2"
     ):
         raise ValidationError("release validator report differs from recomputation")
 
     if (
         browser.get("schema_version")
-        != "ullm.openwebui.reasoning_browser_smoke.v3"
+        != "ullm.openwebui.reasoning_browser_smoke.v4"
         or browser.get("source_commit") != document["source_commit"]
         or browser.get("identity") != identity
     ):
-        raise ValidationError("browser v3 identity differs")
+        raise ValidationError("browser v4 identity differs")
     browser_validator = _load_module(
         "_ullm_openwebui_reasoning_bundle_v2_validator",
         BROWSER_VALIDATOR_PATH,
@@ -827,7 +1146,7 @@ def _validate_v2(path: Path, document: dict[str, Any]) -> dict[str, Any]:
     if (
         browser_report != recomputed_browser_report
         or browser_report.get("schema_version")
-        != "ullm.openwebui.reasoning_browser_smoke_validator.v1"
+        != "ullm.openwebui.reasoning_browser_smoke_validator.v2"
     ):
         raise ValidationError("browser validator report differs from recomputation")
 
@@ -849,6 +1168,18 @@ def _validate_v2(path: Path, document: dict[str, Any]) -> dict[str, Any]:
         }
     ):
         raise ValidationError("SQ8 campaign model identity schema differs")
+    release_campaign = _validate_generic_campaign_lineages(
+        bundle_path=path,
+        release=release,
+        release_report=release_report,
+        browser=browser,
+        browser_report=browser_report,
+        browser_path=files["browser_evidence"],
+        campaign_identity=campaign_identity,
+        identity=identity,
+        source_commit=document["source_commit"],
+        rollback=rollback,
+    )
     campaign_root, _campaign_manifest, _campaign_evidence, campaign_report = (
         _campaign_paths(files)
     )
@@ -896,6 +1227,7 @@ def _validate_v2(path: Path, document: dict[str, Any]) -> dict[str, Any]:
         "source_commit": document["source_commit"],
         "artifact_count": len(files),
         "model_campaign_schema_version": campaign_identity["schema_version"],
+        "reasoning_release_campaign": release_campaign,
         "reasons": reasons,
     }
 
@@ -906,7 +1238,34 @@ def validate(path: Path) -> dict[str, Any]:
     if schema == SCHEMA_VERSION_V1:
         return _validate_v1(path)
     if schema == SCHEMA_VERSION_V2:
-        return _validate_v2(path, document)
+        absolute = path.absolute()
+        try:
+            if absolute.resolve(strict=True) != absolute:
+                raise ValidationError("release bundle v2 path is not canonical")
+        except OSError as error:
+            raise ValidationError("release bundle v2 path is unavailable") from error
+        raw = _stable_read_regular(
+            absolute,
+            "release bundle v2",
+            MAX_BUNDLE_BYTES,
+            require_immutable=True,
+        )
+        stable_document = _json_bytes(raw, "release bundle v2")
+        if stable_document.get("schema_version") != SCHEMA_VERSION_V2:
+            raise ValidationError("release bundle v2 changed before validation")
+        report = _validate_v2(absolute, stable_document)
+        if (
+            _stable_read_regular(
+                absolute,
+                "release bundle v2",
+                MAX_BUNDLE_BYTES,
+                require_immutable=True,
+            )
+            != raw
+        ):
+            raise ValidationError("release bundle v2 changed during validation")
+        report["bundle_sha256"] = hashlib.sha256(raw).hexdigest()
+        return report
     raise ValidationError("release bundle schema is unsupported")
 
 

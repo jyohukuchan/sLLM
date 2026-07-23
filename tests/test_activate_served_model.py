@@ -494,6 +494,8 @@ def test_v2_activation_rejects_mixed_format_bundle_versions(
         json.dumps({"schema_version": bundle_schema}),
         encoding="ascii",
     )
+    if format_id == ACTIVATOR.SQ8_FORMAT_ID:
+        bundle.chmod(0o444)
     unit = tmp_path / "unit"
     environment = tmp_path / "environment"
     unit.write_bytes(b"unit")
@@ -564,6 +566,8 @@ def test_sq8_v2_activation_accepts_only_bundle_v2_dispatch(
         ),
         encoding="ascii",
     )
+    bundle.chmod(0o444)
+    bundle_sha256 = hashlib.sha256(bundle.read_bytes()).hexdigest()
     monkeypatch.setattr(
         ACTIVATOR,
         "load_bundle_validator",
@@ -575,6 +579,7 @@ def test_sq8_v2_activation_accepts_only_bundle_v2_dispatch(
                     "schema_version": ACTIVATOR.BUNDLE_VALIDATOR_SCHEMA_V2,
                     "input_schema_version": ACTIVATOR.BUNDLE_SCHEMA_V2,
                     "gate_eligible": True,
+                    "bundle_sha256": bundle_sha256,
                 }
             },
         )(),
@@ -597,6 +602,79 @@ def test_sq8_v2_activation_accepts_only_bundle_v2_dispatch(
         systemd_unit=unit,
         environment_file=environment,
     )
+
+
+def test_sq8_v2_activation_rejects_bundle_mutated_after_validator_snapshot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    active_raw = b"active"
+    unit = tmp_path / "unit"
+    environment = tmp_path / "environment"
+    unit.write_bytes(b"unit")
+    environment.write_bytes(b"environment")
+    bundle = tmp_path / "bundle-v2.json"
+    document = {
+        "schema_version": ACTIVATOR.BUNDLE_SCHEMA_V2,
+        "source_commit": "1" * 40,
+        "identity": {
+            "manifest_sha256": "a" * 64,
+            "worker_binary_sha256": "b" * 64,
+        },
+        "rollback_target": {
+            "manifest_sha256": hashlib.sha256(active_raw).hexdigest(),
+            "systemd_unit_sha256": hashlib.sha256(unit.read_bytes()).hexdigest(),
+            "environment_sha256": hashlib.sha256(
+                environment.read_bytes()
+            ).hexdigest(),
+        },
+    }
+    bundle.write_text(json.dumps(document), encoding="ascii")
+    bundle.chmod(0o444)
+
+    class MutatingValidator:
+        @staticmethod
+        def validate(path: Path) -> dict[str, object]:
+            validated_sha256 = hashlib.sha256(path.read_bytes()).hexdigest()
+            changed = dict(document)
+            changed["source_commit"] = "2" * 40
+            path.chmod(0o644)
+            path.write_text(json.dumps(changed), encoding="ascii")
+            path.chmod(0o444)
+            return {
+                "schema_version": ACTIVATOR.BUNDLE_VALIDATOR_SCHEMA_V2,
+                "input_schema_version": ACTIVATOR.BUNDLE_SCHEMA_V2,
+                "gate_eligible": True,
+                "bundle_sha256": validated_sha256,
+            }
+
+    monkeypatch.setattr(
+        ACTIVATOR,
+        "load_bundle_validator",
+        lambda: MutatingValidator,
+    )
+
+    with pytest.raises(
+        ACTIVATOR.ActivationError,
+        match="validator snapshot digest differs",
+    ):
+        ACTIVATOR._validate_release_bundle(
+            bundle,
+            candidate_raw=json.dumps(
+                {
+                    "schema_version": "ullm.served_model.v2",
+                    "promotion": {"source_commit": "1" * 40},
+                }
+            ).encode("ascii"),
+            candidate_summary={
+                "format_id": ACTIVATOR.SQ8_FORMAT_ID,
+                "manifest_sha256": "a" * 64,
+                "worker": {"binary_sha256": "b" * 64},
+            },
+            active_raw=active_raw,
+            systemd_unit=unit,
+            environment_file=environment,
+        )
 
 
 def test_v2_activation_accepts_real_complete_bundle_binding(tmp_path: Path) -> None:
