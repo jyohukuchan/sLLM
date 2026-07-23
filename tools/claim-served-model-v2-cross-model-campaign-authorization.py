@@ -1,18 +1,11 @@
 #!/usr/bin/env python3
-"""Consume one pre-issued cross-model campaign authorization exactly once."""
+"""Reject standalone claims; the locked campaign transaction owns consumption."""
 
 from __future__ import annotations
 
 import argparse
-import json
 import sys
-from datetime import datetime, timezone
 from pathlib import Path
-
-from served_model_campaign_authorization import (
-    AuthorizationError,
-    claim_authorization,
-)
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -22,31 +15,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = parse_args(argv)
-    try:
-        record = claim_authorization(
-            args.authorization,
-            now=datetime.now(timezone.utc),
-        )
-    except AuthorizationError:
-        print("campaign authorization claim failed", file=sys.stderr)
-        return 1
+    parse_args(argv)
     print(
-        json.dumps(
-            {
-                "schema_version": record.document["schema_version"],
-                "authorization_id": record.document["authorization_id"],
-                "authorization_sha256": record.authorization.snapshot.sha256,
-                "claim_sha256": record.snapshot.sha256,
-                "claim_path": str(record.snapshot.path),
-            },
-            ensure_ascii=True,
-            allow_nan=False,
-            separators=(",", ":"),
-            sort_keys=True,
-        )
+        "standalone authorization mutation is disabled; "
+        "use run-served-model-v2-cross-model-campaign.py",
+        file=sys.stderr,
     )
-    return 0
+    return 2
 
 
 if __name__ == "__main__":

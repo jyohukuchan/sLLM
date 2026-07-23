@@ -7,12 +7,20 @@ import hashlib
 import json
 import os
 import re
+import secrets
 import stat
-import tempfile
+import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+
+TOOLS = Path(__file__).resolve().parent
+if os.fspath(TOOLS) not in sys.path:
+    sys.path.insert(0, os.fspath(TOOLS))
+
+import served_model_aq4_restoration_proof as restoration_proof
 
 
 AUTHORIZATION_SCHEMA = (
@@ -20,8 +28,17 @@ AUTHORIZATION_SCHEMA = (
 )
 CLAIM_SCHEMA = "ullm.served_model.v2_cross_model_campaign_claim.v1"
 OUTCOME_SCHEMA = "ullm.served_model.v2_cross_model_campaign_outcome.v1"
+RECOVERY_SCHEMA = "ullm.served_model.v2_cross_model_campaign_recovery.v1"
 FIXED_CLAIM_REGISTRY = Path("/var/lib/ullm/served-model-campaign-claims")
 FIXED_OUTCOME_REGISTRY = Path("/var/lib/ullm/served-model-campaign-outcomes")
+FIXED_ACTIVE_MANIFEST = Path("/etc/ullm/served-models/active.json")
+FIXED_SYSTEMD_UNIT_PATH = Path(
+    "/etc/systemd/system/ullm-openai.service"
+)
+FIXED_ENVIRONMENT_FILE_PATH = Path(
+    "/etc/ullm/openai-gateway-manifest.env"
+)
+FIXED_SERVICE_UNIT = "ullm-openai.service"
 MAX_DOCUMENT_BYTES = 1_048_576
 HASH_RE = re.compile(r"[0-9a-f]{64}\Z")
 GIT_OBJECT_RE = re.compile(r"[0-9a-f]{40}\Z")
@@ -126,6 +143,7 @@ OUTCOME_CAMPAIGN_FIELDS = {
 }
 OUTCOME_RESTORATION_FIELDS = {
     "expected_manifest_sha256",
+    "displaced_manifest_sha256",
     "observed_manifest_sha256",
     "bytes_equal",
     "reverse_reconciliation_passed",
@@ -133,7 +151,43 @@ OUTCOME_RESTORATION_FIELDS = {
     "model_id",
     "format_id",
     "worker_binary_sha256",
+    "proof",
 }
+RECOVERY_FIELDS = {
+    "schema_version",
+    "authorization_id",
+    "authorization_path",
+    "authorization_sha256",
+    "claim_path",
+    "claim_sha256",
+    "started_at",
+    "completed_at",
+    "status",
+    "failure_stage",
+    "source",
+    "active_before",
+    "backup",
+    "restoration",
+}
+RECOVERY_ACTIVE_FIELDS = {"path", "sha256", "state"}
+RECOVERY_BACKUP_FIELDS = {"path", "sha256"}
+RECOVERY_STAGES = {
+    "preflight",
+    "aq4_restore",
+    "reverse_reconciliation",
+    "final_checks",
+}
+CANDIDATE_OBSERVATION_STAGES = (
+    "candidate_activation",
+    "candidate_reconciliation",
+    "candidate_checks",
+    "sq8_full:before",
+    "sq8_full:after",
+    "reasoning_release:before",
+    "reasoning_release:after",
+    "reasoning_browser:before",
+    "reasoning_browser:after",
+)
 SAFE_ARTIFACT_NAME_RE = re.compile(
     r"[A-Za-z0-9][A-Za-z0-9._/-]{0,511}\Z"
 )
@@ -177,6 +231,10 @@ class RegistryPolicy:
     claim_registry: Path = FIXED_CLAIM_REGISTRY
     outcome_registry: Path = FIXED_OUTCOME_REGISTRY
     required_uid: int = 0
+    active_manifest_path: Path = FIXED_ACTIVE_MANIFEST
+    systemd_unit_path: Path = FIXED_SYSTEMD_UNIT_PATH
+    environment_file_path: Path = FIXED_ENVIRONMENT_FILE_PATH
+    service_unit: str = FIXED_SERVICE_UNIT
 
 
 def _without_duplicates(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -243,6 +301,82 @@ def _reject_symlink_components(
             raise AuthorizationError(f"{label} traverses a symlink")
 
 
+def _lexical_absolute(path: Path, label: str) -> Path:
+    if not isinstance(path, Path) or not path.is_absolute():
+        raise AuthorizationError(f"{label} path must be absolute")
+    normalized = Path(os.path.abspath(path))
+    if (
+        normalized != path
+        or path.name in {"", ".", ".."}
+        or ".." in path.parts
+    ):
+        raise AuthorizationError(f"{label} path is not canonical")
+    return normalized
+
+
+def _directory_flags() -> int:
+    if not hasattr(os, "O_DIRECTORY") or not hasattr(os, "O_NOFOLLOW"):
+        raise AuthorizationError("safe directory descriptor flags are unavailable")
+    return os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW
+
+
+def _stat_identity(metadata: os.stat_result) -> tuple[int, ...]:
+    return (
+        metadata.st_dev,
+        metadata.st_ino,
+        metadata.st_mode,
+        metadata.st_uid,
+        metadata.st_gid,
+        metadata.st_nlink,
+        metadata.st_size,
+        metadata.st_mtime_ns,
+        metadata.st_ctime_ns,
+    )
+
+
+def _directory_anchor(metadata: os.stat_result) -> tuple[int, ...]:
+    return (
+        metadata.st_dev,
+        metadata.st_ino,
+        metadata.st_mode,
+        metadata.st_uid,
+        metadata.st_gid,
+        metadata.st_nlink,
+    )
+
+
+def _open_directory(path: Path, label: str) -> int:
+    absolute = _lexical_absolute(path / "_entry", label).parent
+    descriptor = -1
+    try:
+        descriptor = os.open(absolute.anchor, _directory_flags())
+        for component in absolute.parts[1:]:
+            next_descriptor = os.open(
+                component,
+                _directory_flags(),
+                dir_fd=descriptor,
+            )
+            os.close(descriptor)
+            descriptor = next_descriptor
+        return descriptor
+    except AuthorizationError:
+        if descriptor >= 0:
+            os.close(descriptor)
+        raise
+    except OSError as error:
+        if descriptor >= 0:
+            os.close(descriptor)
+        raise AuthorizationError(
+            f"{label} parent is unavailable or traverses a symlink"
+        ) from error
+
+
+def _open_parent(path: Path, label: str) -> tuple[Path, int, tuple[int, ...]]:
+    absolute = _lexical_absolute(path, label)
+    descriptor = _open_directory(absolute.parent, label)
+    return absolute, descriptor, _stat_identity(os.fstat(descriptor))
+
+
 def _stable_read(
     path: Path,
     label: str,
@@ -252,18 +386,22 @@ def _stable_read(
     required_uid: int | None = None,
     required_nlink: int | None = None,
 ) -> FileSnapshot:
-    _reject_symlink_components(path, label, leaf_may_absent=False)
-    flags = os.O_RDONLY | os.O_CLOEXEC
-    if hasattr(os, "O_NOFOLLOW"):
-        flags |= os.O_NOFOLLOW
+    absolute, parent, parent_before = _open_parent(path, label)
+    flags = os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW
+    verification_parent = -1
+    descriptor = -1
     try:
-        descriptor = os.open(path, flags)
-    except OSError as error:
-        raise AuthorizationError(f"{label} is unavailable") from error
-    try:
+        entry_before = os.stat(
+            absolute.name,
+            dir_fd=parent,
+            follow_symlinks=False,
+        )
+        descriptor = os.open(absolute.name, flags, dir_fd=parent)
         before = os.fstat(descriptor)
         mode = stat.S_IMODE(before.st_mode)
         if (
+            _stat_identity(entry_before) != _stat_identity(before)
+            or
             not stat.S_ISREG(before.st_mode)
             or before.st_size <= 0
             or before.st_size > maximum
@@ -283,41 +421,39 @@ def _stable_read(
                 raise AuthorizationError(f"{label} exceeds its size bound")
             chunks.append(chunk)
         after = os.fstat(descriptor)
-        identity_before = (
-            before.st_dev,
-            before.st_ino,
-            before.st_size,
-            before.st_mtime_ns,
-            before.st_ctime_ns,
-            before.st_mode,
-            before.st_uid,
-            before.st_gid,
-            before.st_nlink,
+        entry_after = os.stat(
+            absolute.name,
+            dir_fd=parent,
+            follow_symlinks=False,
         )
-        identity_after = (
-            after.st_dev,
-            after.st_ino,
-            after.st_size,
-            after.st_mtime_ns,
-            after.st_ctime_ns,
-            after.st_mode,
-            after.st_uid,
-            after.st_gid,
-            after.st_nlink,
-        )
+        parent_after = _stat_identity(os.fstat(parent))
+        verification_parent = _open_directory(absolute.parent, label)
+        parent_by_path = _stat_identity(os.fstat(verification_parent))
         raw = b"".join(chunks)
-        if identity_before != identity_after or len(raw) != before.st_size:
+        if (
+            _stat_identity(before) != _stat_identity(after)
+            or _stat_identity(before) != _stat_identity(entry_after)
+            or parent_before != parent_after
+            or parent_before != parent_by_path
+            or len(raw) != before.st_size
+        ):
             raise AuthorizationError(f"{label} changed while being read")
         return FileSnapshot(
-            path=path.resolve(strict=True),
+            path=absolute,
             raw=raw,
             sha256=hashlib.sha256(raw).hexdigest(),
             mode=mode,
             uid=before.st_uid,
             nlink=before.st_nlink,
         )
+    except AuthorizationError:
+        raise
+    except OSError as error:
+        raise AuthorizationError(f"{label} is unavailable or changed") from error
     finally:
-        os.close(descriptor)
+        for value in (verification_parent, descriptor, parent):
+            if value >= 0:
+                os.close(value)
 
 
 def _exact_object(value: Any, fields: set[str], label: str) -> dict[str, Any]:
@@ -526,6 +662,10 @@ def _validate_outcome_document_shape(document: dict[str, Any]) -> None:
                 digest,
                 f"outcome.campaigns.{name}.selected_artifacts.{artifact_name}",
             )
+    if document["status"] == "succeeded_restored" and any(
+        campaigns[name] is None for name in CAMPAIGN_FIELDS
+    ):
+        raise AuthorizationError("successful campaign outcome lacks campaign output")
 
     restoration = _exact_object(
         document["restoration"],
@@ -537,6 +677,9 @@ def _validate_outcome_document_shape(document: dict[str, Any]) -> None:
         "outcome.restoration.expected_manifest_sha256",
     )
     observed = restoration["observed_manifest_sha256"]
+    displaced = restoration["displaced_manifest_sha256"]
+    if displaced is not None:
+        _hash(displaced, "outcome.restoration.displaced_manifest_sha256")
     if observed is not None:
         _hash(observed, "outcome.restoration.observed_manifest_sha256")
     for field in (
@@ -557,6 +700,9 @@ def _validate_outcome_document_shape(document: dict[str, Any]) -> None:
         _hash(worker_hash, "outcome.restoration.worker_binary_sha256")
     if restoration["bytes_equal"] != (observed == expected):
         raise AuthorizationError("campaign outcome restoration byte result differs")
+    proof = restoration["proof"]
+    if proof is not None and not isinstance(proof, dict):
+        raise AuthorizationError("campaign outcome restoration proof is invalid")
     if document["status"] in {"succeeded_restored", "failed_restored"}:
         if (
             not restoration["bytes_equal"]
@@ -565,6 +711,7 @@ def _validate_outcome_document_shape(document: dict[str, Any]) -> None:
             or model_id != "ullm-qwen3.5-9b-aq4"
             or format_id != "AQ4_0"
             or worker_hash is None
+            or proof is None
         ):
             raise AuthorizationError("campaign outcome does not prove AQ4 restoration")
     elif (
@@ -579,6 +726,7 @@ def validate_outcome_document(
     document: dict[str, Any],
     *,
     claim: ClaimRecord | None = None,
+    policy: RegistryPolicy = RegistryPolicy(),
 ) -> None:
     """Validate one outcome and, when supplied, bind it to the consumed claim."""
 
@@ -602,8 +750,35 @@ def validate_outcome_document(
         claim.document["claimed_at"], "claim.claimed_at"
     ):
         raise AuthorizationError("campaign outcome predates its claim")
+    observations = document["candidate_observations"]
+    observed_stages = tuple(value["stage"] for value in observations)
+    if (
+        observed_stages
+        != CANDIDATE_OBSERVATION_STAGES[: len(observed_stages)]
+        or any(
+            value["bytes_equal"] is not True
+            or value["active_manifest_sha256"]
+            != authorization.document["candidate"]["manifest_sha256"]
+            for value in observations
+        )
+    ):
+        raise AuthorizationError(
+            "campaign outcome candidate observations differ from authorization"
+        )
+    if (
+        document["status"] == "succeeded_restored"
+        and observed_stages != CANDIDATE_OBSERVATION_STAGES
+    ):
+        raise AuthorizationError(
+            "successful campaign outcome lacks complete candidate observations"
+        )
     for name in sorted(CAMPAIGN_FIELDS):
         campaign = document["campaigns"][name]
+        stage_passed = document["stages"][name] == "passed"
+        if stage_passed != (campaign is not None):
+            raise AuthorizationError(
+                "campaign outcome stage/output presence differs"
+            )
         if campaign is None:
             continue
         authorized = authorization.document["campaigns"][name]
@@ -612,11 +787,261 @@ def validate_outcome_document(
             or campaign["path"] != authorized["final_path"]
         ):
             raise AuthorizationError("campaign outcome run/output identity differs")
+    if (
+        document["status"] in {"succeeded_restored", "failed_restored"}
+        and document["restoration"]["worker_binary_sha256"]
+        != authorization.document["before"]["worker_binary_sha256"]
+    ):
+        raise AuthorizationError(
+            "campaign outcome restored worker differs from authorization"
+        )
+    proof = document["restoration"]["proof"]
+    if proof is not None:
+        try:
+            proof_active = proof.get("active_manifest")
+            proof_service = proof.get("service")
+            if not isinstance(proof_active, dict) or not isinstance(proof_service, dict):
+                raise restoration_proof.RestorationProofError(
+                    "restoration proof identity is missing"
+                )
+            restoration_proof.validate_proof(
+                proof,
+                authorization_sha256=authorization.snapshot.sha256,
+                claim_sha256=claim.snapshot.sha256,
+                active_manifest_path=policy.active_manifest_path,
+                expected_manifest_sha256=authorization.document["before"][
+                    "manifest_sha256"
+                ],
+                expected_worker_sha256=authorization.document["before"][
+                    "worker_binary_sha256"
+                ],
+                service_unit=policy.service_unit,
+            )
+        except restoration_proof.RestorationProofError as error:
+            raise AuthorizationError(
+                "campaign outcome live restoration proof differs"
+            ) from error
+
+
+def validate_recovery_document(
+    document: dict[str, Any],
+    *,
+    claim: ClaimRecord,
+    policy: RegistryPolicy = RegistryPolicy(),
+) -> None:
+    """Strictly bind one immutable recovery receipt to a consumed claim."""
+
+    _exact_object(document, RECOVERY_FIELDS, "campaign recovery receipt")
+    if (
+        document["schema_version"] != RECOVERY_SCHEMA
+        or document["authorization_id"]
+        != claim.authorization.document["authorization_id"]
+        or document["authorization_path"]
+        != os.fspath(claim.authorization.snapshot.path)
+        or document["authorization_sha256"]
+        != claim.authorization.snapshot.sha256
+        or document["claim_path"] != os.fspath(claim.snapshot.path)
+        or document["claim_sha256"] != claim.snapshot.sha256
+    ):
+        raise AuthorizationError("campaign recovery claim identity differs")
+    started_at = _timestamp(document["started_at"], "recovery.started_at")
+    completed_at = _timestamp(document["completed_at"], "recovery.completed_at")
+    claimed_at = _timestamp(claim.document["claimed_at"], "claim.claimed_at")
+    if completed_at < started_at or started_at < claimed_at:
+        raise AuthorizationError("campaign recovery timestamps differ")
+    if document["status"] not in {"restored", "failed_restore"}:
+        raise AuthorizationError("campaign recovery status differs")
+    failure_stage = document["failure_stage"]
+    if (
+        failure_stage is not None
+        and (
+            not isinstance(failure_stage, str)
+            or failure_stage not in RECOVERY_STAGES
+        )
+    ):
+        raise AuthorizationError("campaign recovery failure stage differs")
+    if (document["status"] == "restored") != (failure_stage is None):
+        raise AuthorizationError("campaign recovery failure identity differs")
+
+    source = _exact_object(document["source"], SOURCE_FIELDS, "recovery.source")
+    if source != claim.authorization.document["source"]:
+        raise AuthorizationError("campaign recovery source identity differs")
+
+    active = _exact_object(
+        document["active_before"],
+        RECOVERY_ACTIVE_FIELDS,
+        "recovery.active_before",
+    )
+    if not isinstance(active["path"], str):
+        raise AuthorizationError("campaign recovery active path is invalid")
+    _absolute_bound_path(
+        active["path"],
+        "recovery.active_before.path",
+        require_fresh=False,
+    )
+    if active["path"] != os.fspath(policy.active_manifest_path):
+        raise AuthorizationError(
+            "campaign recovery active path differs from policy"
+        )
+    active_hash = _hash(active["sha256"], "recovery.active_before.sha256")
+    if active["state"] == "aq4":
+        expected_active_hash = claim.authorization.document["before"][
+            "manifest_sha256"
+        ]
+    elif active["state"] == "sq8":
+        expected_active_hash = claim.authorization.document["candidate"][
+            "manifest_sha256"
+        ]
+    elif active["state"] == "unknown":
+        expected_active_hash = active_hash
+    else:
+        raise AuthorizationError("campaign recovery active state differs")
+    if active_hash != expected_active_hash:
+        raise AuthorizationError("campaign recovery active identity differs")
+
+    backup = _exact_object(
+        document["backup"], RECOVERY_BACKUP_FIELDS, "recovery.backup"
+    )
+    if (
+        backup["path"]
+        != claim.authorization.document["rollback"]["backup_path"]
+        or _hash(backup["sha256"], "recovery.backup.sha256")
+        != claim.authorization.document["before"]["manifest_sha256"]
+    ):
+        raise AuthorizationError("campaign recovery backup identity differs")
+
+    restoration = _exact_object(
+        document["restoration"],
+        OUTCOME_RESTORATION_FIELDS,
+        "recovery.restoration",
+    )
+    expected = _hash(
+        restoration["expected_manifest_sha256"],
+        "recovery.restoration.expected_manifest_sha256",
+    )
+    observed = restoration["observed_manifest_sha256"]
+    displaced = restoration["displaced_manifest_sha256"]
+    if displaced is not None:
+        _hash(displaced, "recovery.restoration.displaced_manifest_sha256")
+    if observed is not None:
+        _hash(observed, "recovery.restoration.observed_manifest_sha256")
+    for field in (
+        "bytes_equal",
+        "reverse_reconciliation_passed",
+        "final_checks_passed",
+    ):
+        if type(restoration[field]) is not bool:
+            raise AuthorizationError(
+                f"recovery.restoration.{field} is invalid"
+            )
+    worker_hash = restoration["worker_binary_sha256"]
+    if worker_hash is not None:
+        _hash(worker_hash, "recovery.restoration.worker_binary_sha256")
+    if (
+        expected != claim.authorization.document["before"]["manifest_sha256"]
+        or restoration["bytes_equal"] != (observed == expected)
+        or (
+            restoration["model_id"] is not None
+            and restoration["model_id"] != "ullm-qwen3.5-9b-aq4"
+        )
+        or (
+            restoration["format_id"] is not None
+            and restoration["format_id"] != "AQ4_0"
+        )
+        or (
+            worker_hash is not None
+            and worker_hash
+            != claim.authorization.document["before"]["worker_binary_sha256"]
+        )
+        or (
+            restoration["proof"] is not None
+            and not isinstance(restoration["proof"], dict)
+        )
+    ):
+        raise AuthorizationError("campaign recovery restoration identity differs")
+
+    fully_restored = (
+        restoration["bytes_equal"]
+        and restoration["reverse_reconciliation_passed"]
+        and restoration["final_checks_passed"]
+        and restoration["model_id"] == "ullm-qwen3.5-9b-aq4"
+        and restoration["format_id"] == "AQ4_0"
+        and worker_hash
+        == claim.authorization.document["before"]["worker_binary_sha256"]
+        and isinstance(restoration["proof"], dict)
+    )
+    if (document["status"] == "restored") != fully_restored:
+        raise AuthorizationError("campaign recovery restoration result differs")
+    if restoration["proof"] is not None:
+        proof = restoration["proof"]
+        try:
+            proof_active = proof.get("active_manifest")
+            proof_service = proof.get("service")
+            if not isinstance(proof_active, dict) or not isinstance(
+                proof_service, dict
+            ):
+                raise restoration_proof.RestorationProofError(
+                    "restoration proof identity is missing"
+                )
+            restoration_proof.validate_proof(
+                proof,
+                authorization_sha256=claim.authorization.snapshot.sha256,
+                claim_sha256=claim.snapshot.sha256,
+                active_manifest_path=policy.active_manifest_path,
+                expected_manifest_sha256=claim.authorization.document["before"][
+                    "manifest_sha256"
+                ],
+                expected_worker_sha256=claim.authorization.document["before"][
+                    "worker_binary_sha256"
+                ],
+                service_unit=policy.service_unit,
+            )
+        except restoration_proof.RestorationProofError as error:
+            raise AuthorizationError(
+                "campaign recovery live restoration proof differs"
+            ) from error
+
+
+def _load_claim_for_record(
+    authorization: AuthorizationRecord,
+    *,
+    policy: RegistryPolicy,
+) -> ClaimRecord:
+    expected = claim_path(authorization.snapshot.sha256, policy=policy)
+    snapshot = _stable_read(
+        expected,
+        "campaign authorization claim",
+        required_mode=0o444,
+        required_uid=policy.required_uid,
+        required_nlink=1,
+    )
+    document = strict_json_bytes(snapshot.raw, "campaign authorization claim")
+    if canonical_json_bytes(document) != snapshot.raw:
+        raise AuthorizationError("campaign authorization claim is not canonical JSON")
+    _exact_object(document, CLAIM_FIELDS, "campaign authorization claim")
+    if (
+        document["schema_version"] != CLAIM_SCHEMA
+        or document["authorization_id"]
+        != authorization.document["authorization_id"]
+        or document["authorization_path"]
+        != os.fspath(authorization.snapshot.path)
+        or document["authorization_sha256"] != authorization.snapshot.sha256
+        or document["attempt"] != 1
+        or document["max_attempts"] != 1
+    ):
+        raise AuthorizationError("campaign authorization claim identity differs")
+    claimed_at = _timestamp(document["claimed_at"], "claim.claimed_at")
+    if claimed_at < authorization.issued_at or claimed_at >= authorization.expires_at:
+        raise AuthorizationError("campaign authorization claim time is out of range")
+    return ClaimRecord(snapshot, document, authorization)
 
 
 def _validate_outcome_reference(
-    value: Any, label: str, *, required_uid: int
-) -> None:
+    value: Any,
+    label: str,
+    *,
+    policy: RegistryPolicy,
+) -> tuple[AuthorizationRecord, dict[str, Any]]:
     reference = _exact_object(value, PRIOR_OUTCOME_FIELDS, label)
     expected_hash = _hash(reference["sha256"], f"{label}.sha256")
     if not isinstance(reference["path"], str):
@@ -625,7 +1050,7 @@ def _validate_outcome_reference(
         Path(reference["path"]),
         label,
         required_mode=0o444,
-        required_uid=required_uid,
+        required_uid=policy.required_uid,
         required_nlink=1,
     )
     if snapshot.sha256 != expected_hash:
@@ -633,10 +1058,53 @@ def _validate_outcome_reference(
     outcome = strict_json_bytes(snapshot.raw, label)
     if canonical_json_bytes(outcome) != snapshot.raw:
         raise AuthorizationError(f"{label} is not canonical JSON")
+    _validate_outcome_document_shape(outcome)
+    if outcome.get("status") not in {"failed_restored", "failed_restore"}:
+        raise AuthorizationError(f"{label} is not a failed campaign outcome")
+    authorization_snapshot = _stable_read(
+        Path(outcome.get("authorization_path", "")),
+        f"{label} authorization",
+        required_mode=0o444,
+        required_uid=policy.required_uid,
+        required_nlink=1,
+    )
+    if authorization_snapshot.sha256 != outcome.get("authorization_sha256"):
+        raise AuthorizationError(f"{label} authorization SHA-256 differs")
+    authorization_document = strict_json_bytes(
+        authorization_snapshot.raw, f"{label} authorization"
+    )
+    if canonical_json_bytes(authorization_document) != authorization_snapshot.raw:
+        raise AuthorizationError(f"{label} authorization is not canonical JSON")
+    issued_at, expires_at = validate_authorization_document(
+        authorization_document,
+        now=datetime.fromtimestamp(0, timezone.utc),
+        required_uid=policy.required_uid,
+        validate_prior_outcome=False,
+        require_fresh_outputs=False,
+        enforce_current_window=False,
+        policy=policy,
+    )
+    authorization = AuthorizationRecord(
+        authorization_snapshot,
+        authorization_document,
+        issued_at,
+        expires_at,
+    )
+    claim = _load_claim_for_record(authorization, policy=policy)
+    expected_outcome = outcome_path(authorization_snapshot.sha256, policy=policy)
     try:
-        validate_outcome_document(outcome)
+        resolved_expected_outcome = expected_outcome.resolve(strict=True)
+    except OSError as error:
+        raise AuthorizationError(
+            f"{label} fixed outcome path is unavailable"
+        ) from error
+    if snapshot.path != resolved_expected_outcome:
+        raise AuthorizationError(f"{label} is outside the fixed outcome registry")
+    try:
+        validate_outcome_document(outcome, claim=claim, policy=policy)
     except AuthorizationError as error:
         raise AuthorizationError(f"{label} is invalid") from error
+    return authorization, outcome
 
 
 def validate_authorization_document(
@@ -646,6 +1114,9 @@ def validate_authorization_document(
     required_uid: int = 0,
     validate_prior_outcome: bool = True,
     require_fresh_outputs: bool = True,
+    enforce_current_window: bool = True,
+    policy: RegistryPolicy | None = None,
+    source_root: Path | None = None,
 ) -> tuple[datetime, datetime]:
     _exact_object(document, AUTHORIZATION_FIELDS, "authorization")
     if document["schema_version"] != AUTHORIZATION_SCHEMA:
@@ -653,11 +1124,14 @@ def validate_authorization_document(
     _identifier(document["authorization_id"], "authorization_id")
     issued_at = _timestamp(document["issued_at"], "issued_at")
     expires_at = _timestamp(document["expires_at"], "expires_at")
-    normalized_now = now.astimezone(timezone.utc)
-    if issued_at > normalized_now:
-        raise AuthorizationError("authorization is not yet valid")
-    if expires_at <= issued_at or expires_at <= normalized_now:
-        raise AuthorizationError("authorization is expired")
+    if expires_at <= issued_at:
+        raise AuthorizationError("authorization window is invalid")
+    if enforce_current_window:
+        normalized_now = now.astimezone(timezone.utc)
+        if issued_at > normalized_now:
+            raise AuthorizationError("authorization is not yet valid")
+        if expires_at <= normalized_now:
+            raise AuthorizationError("authorization is expired")
     if type(document["max_attempts"]) is not int or document["max_attempts"] != 1:
         raise AuthorizationError("authorization max_attempts must equal one")
     _bounded_text(document["authorization_note"], "authorization_note")
@@ -732,15 +1206,42 @@ def validate_authorization_document(
     )
     if backup_path in final_paths:
         raise AuthorizationError("rollback backup collides with a campaign output")
+    if source_root is not None:
+        try:
+            source_root_absolute = source_root.resolve(strict=True)
+        except OSError as error:
+            raise AuthorizationError(
+                "authorization source root is unavailable"
+            ) from error
+        for output_path in (*final_paths, backup_path):
+            if (
+                output_path == source_root_absolute
+                or source_root_absolute in output_path.parents
+            ):
+                raise AuthorizationError(
+                    "campaign outputs must be outside the source root"
+                )
     _hash(rollback["systemd_unit_sha256"], "rollback.systemd_unit_sha256")
     _hash(rollback["environment_sha256"], "rollback.environment_sha256")
 
     prior_outcome = document["prior_outcome"]
     if prior_outcome is not None:
         if validate_prior_outcome:
-            _validate_outcome_reference(
-                prior_outcome, "prior_outcome", required_uid=required_uid
+            selected_policy = (
+                RegistryPolicy(required_uid=required_uid)
+                if policy is None
+                else policy
             )
+            previous_authorization, _previous_outcome = _validate_outcome_reference(
+                prior_outcome,
+                "prior_outcome",
+                policy=selected_policy,
+            )
+            for field in ("source", "before", "candidate"):
+                if previous_authorization.document[field] != document[field]:
+                    raise AuthorizationError(
+                        f"prior_outcome {field} lineage differs"
+                    )
         else:
             reference = _exact_object(
                 prior_outcome, PRIOR_OUTCOME_FIELDS, "prior_outcome"
@@ -757,6 +1258,8 @@ def load_authorization(
     now: datetime,
     policy: RegistryPolicy = RegistryPolicy(),
     require_fresh_outputs: bool = True,
+    enforce_current_window: bool = True,
+    source_root: Path | None = None,
 ) -> AuthorizationRecord:
     snapshot = _stable_read(
         path,
@@ -773,23 +1276,31 @@ def load_authorization(
         now=now,
         required_uid=policy.required_uid,
         require_fresh_outputs=require_fresh_outputs,
+        enforce_current_window=enforce_current_window,
+        policy=policy,
+        source_root=source_root,
     )
     return AuthorizationRecord(snapshot, document, issued_at, expires_at)
 
 
 def _validate_registry(path: Path, label: str, *, required_uid: int) -> Path:
-    _reject_symlink_components(path, label, leaf_may_absent=False)
+    descriptor = -1
     try:
-        metadata = path.stat()
+        descriptor = _open_directory(path, label)
+        metadata = os.fstat(descriptor)
     except OSError as error:
         raise AuthorizationError(f"{label} is unavailable") from error
-    if (
-        not stat.S_ISDIR(metadata.st_mode)
-        or metadata.st_uid != required_uid
-        or stat.S_IMODE(metadata.st_mode) & 0o022
-    ):
-        raise AuthorizationError(f"{label} metadata is unsafe")
-    return path.resolve(strict=True)
+    try:
+        if (
+            not stat.S_ISDIR(metadata.st_mode)
+            or metadata.st_uid != required_uid
+            or stat.S_IMODE(metadata.st_mode) & 0o022
+        ):
+            raise AuthorizationError(f"{label} metadata is unsafe")
+        return _lexical_absolute(path / "_entry", label).parent
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
 
 
 def claim_path(
@@ -810,6 +1321,15 @@ def outcome_path(
     return policy.outcome_registry / f"{authorization_sha256}.outcome.json"
 
 
+def recovery_path(
+    authorization_sha256: str,
+    *,
+    policy: RegistryPolicy = RegistryPolicy(),
+) -> Path:
+    _hash(authorization_sha256, "authorization_sha256")
+    return policy.outcome_registry / f"{authorization_sha256}.recovery.json"
+
+
 def _publish_no_replace(
     path: Path,
     raw: bytes,
@@ -820,16 +1340,40 @@ def _publish_no_replace(
 ) -> FileSnapshot:
     if os.geteuid() != required_uid:
         raise AuthorizationError(f"{label} publisher has the wrong effective UID")
-    if path.exists() or path.is_symlink():
-        raise FileExistsError(path)
-    parent = _validate_registry(path.parent, f"{label} directory", required_uid=required_uid)
-    descriptor, temporary_raw = tempfile.mkstemp(
-        prefix=f".{path.name}.", dir=parent
+    absolute = _lexical_absolute(path, label)
+    parent_path = _validate_registry(
+        absolute.parent,
+        f"{label} directory",
+        required_uid=required_uid,
     )
-    temporary = Path(temporary_raw)
+    parent = _open_directory(parent_path, f"{label} directory")
+    parent_identity = _directory_anchor(os.fstat(parent))
+    try:
+        os.stat(absolute.name, dir_fd=parent, follow_symlinks=False)
+    except FileNotFoundError:
+        pass
+    except OSError as error:
+        os.close(parent)
+        raise AuthorizationError(f"{label} destination is unsafe") from error
+    else:
+        os.close(parent)
+        raise FileExistsError(absolute)
+    temporary = f".{absolute.name}.{secrets.token_hex(16)}.tmp"
+    descriptor = -1
     published = False
     try:
+        descriptor = os.open(
+            temporary,
+            os.O_WRONLY
+            | os.O_CREAT
+            | os.O_EXCL
+            | os.O_CLOEXEC
+            | os.O_NOFOLLOW,
+            0o600,
+            dir_fd=parent,
+        )
         os.fchmod(descriptor, mode)
+        os.fchown(descriptor, required_uid, os.fstat(descriptor).st_gid)
         view = memoryview(raw)
         while view:
             written = os.write(descriptor, view)
@@ -837,19 +1381,32 @@ def _publish_no_replace(
                 raise AuthorizationError(f"{label} write made no progress")
             view = view[written:]
         os.fsync(descriptor)
+        os.close(descriptor)
+        descriptor = -1
         try:
-            os.link(temporary, path)
+            os.link(
+                temporary,
+                absolute.name,
+                src_dir_fd=parent,
+                dst_dir_fd=parent,
+                follow_symlinks=False,
+            )
         except FileExistsError:
             raise
         published = True
-        temporary.unlink()
-        directory_descriptor = os.open(parent, os.O_RDONLY | os.O_DIRECTORY)
+        os.unlink(temporary, dir_fd=parent)
+        os.fsync(parent)
+        verification_parent = _open_directory(
+            parent_path,
+            f"{label} directory",
+        )
         try:
-            os.fsync(directory_descriptor)
+            if _directory_anchor(os.fstat(verification_parent)) != parent_identity:
+                raise AuthorizationError(f"{label} directory changed")
         finally:
-            os.close(directory_descriptor)
+            os.close(verification_parent)
         snapshot = _stable_read(
-            path,
+            absolute,
             label,
             required_mode=mode,
             required_uid=required_uid,
@@ -859,14 +1416,19 @@ def _publish_no_replace(
             raise AuthorizationError(f"{label} bytes differ after publication")
         return snapshot
     except BaseException:
-        temporary.unlink(missing_ok=True)
+        try:
+            os.unlink(temporary, dir_fd=parent)
+        except FileNotFoundError:
+            pass
         # Once the destination link exists it is never removed here: publication
         # is the durable consume boundary even if a later verification fails.
         if published:
             pass
         raise
     finally:
-        os.close(descriptor)
+        if descriptor >= 0:
+            os.close(descriptor)
+        os.close(parent)
 
 
 def issue_authorization(
@@ -875,11 +1437,14 @@ def issue_authorization(
     *,
     now: datetime,
     policy: RegistryPolicy = RegistryPolicy(),
+    source_root: Path | None = None,
 ) -> AuthorizationRecord:
     validate_authorization_document(
         document,
         now=now,
         required_uid=policy.required_uid,
+        policy=policy,
+        source_root=source_root,
     )
     raw = canonical_json_bytes(document)
     if len(raw) > MAX_DOCUMENT_BYTES:
@@ -946,34 +1511,9 @@ def load_claim(
         now=now,
         policy=policy,
         require_fresh_outputs=False,
+        enforce_current_window=False,
     )
-    expected = claim_path(authorization.snapshot.sha256, policy=policy)
-    snapshot = _stable_read(
-        expected,
-        "campaign authorization claim",
-        required_mode=0o444,
-        required_uid=policy.required_uid,
-        required_nlink=1,
-    )
-    document = strict_json_bytes(snapshot.raw, "campaign authorization claim")
-    if canonical_json_bytes(document) != snapshot.raw:
-        raise AuthorizationError("campaign authorization claim is not canonical JSON")
-    _exact_object(document, CLAIM_FIELDS, "campaign authorization claim")
-    if (
-        document["schema_version"] != CLAIM_SCHEMA
-        or document["authorization_id"]
-        != authorization.document["authorization_id"]
-        or document["authorization_path"]
-        != os.fspath(authorization.snapshot.path)
-        or document["authorization_sha256"] != authorization.snapshot.sha256
-        or document["attempt"] != 1
-        or document["max_attempts"] != 1
-    ):
-        raise AuthorizationError("campaign authorization claim identity differs")
-    claimed_at = _timestamp(document["claimed_at"], "claim.claimed_at")
-    if claimed_at < authorization.issued_at or claimed_at >= authorization.expires_at:
-        raise AuthorizationError("campaign authorization claim time is out of range")
-    return ClaimRecord(snapshot, document, authorization)
+    return _load_claim_for_record(authorization, policy=policy)
 
 
 def publish_outcome(
@@ -984,7 +1524,7 @@ def publish_outcome(
 ) -> FileSnapshot:
     """Publish the authorization-derived immutable outcome exactly once."""
 
-    validate_outcome_document(document, claim=claim)
+    validate_outcome_document(document, claim=claim, policy=policy)
     raw = canonical_json_bytes(document)
     if len(raw) > MAX_DOCUMENT_BYTES:
         raise AuthorizationError("campaign outcome exceeds its size bound")
@@ -1037,8 +1577,103 @@ def load_outcome(
     document = strict_json_bytes(snapshot.raw, "campaign outcome")
     if canonical_json_bytes(document) != snapshot.raw:
         raise AuthorizationError("campaign outcome is not canonical JSON")
-    validate_outcome_document(document, claim=claim)
+    validate_outcome_document(document, claim=claim, policy=policy)
     return snapshot, document
+
+
+def publish_recovery(
+    claim: ClaimRecord,
+    document: dict[str, Any],
+    *,
+    policy: RegistryPolicy = RegistryPolicy(),
+) -> FileSnapshot:
+    """Publish the authorization-derived immutable recovery receipt once."""
+
+    validate_recovery_document(document, claim=claim, policy=policy)
+    raw = canonical_json_bytes(document)
+    if len(raw) > MAX_DOCUMENT_BYTES:
+        raise AuthorizationError("campaign recovery receipt exceeds its size bound")
+    registry = _validate_registry(
+        policy.outcome_registry,
+        "campaign outcome registry",
+        required_uid=policy.required_uid,
+    )
+    destination = registry / (
+        f"{claim.authorization.snapshot.sha256}.recovery.json"
+    )
+    try:
+        return _publish_no_replace(
+            destination,
+            raw,
+            mode=0o444,
+            required_uid=policy.required_uid,
+            label="campaign recovery receipt",
+        )
+    except FileExistsError as error:
+        raise AuthorizationConsumed(
+            "campaign authorization recovery receipt already exists"
+        ) from error
+
+
+def load_recovery(
+    authorization_path: Path,
+    *,
+    now: datetime,
+    policy: RegistryPolicy = RegistryPolicy(),
+) -> tuple[FileSnapshot, dict[str, Any]]:
+    """Load an immutable recovery receipt after its claim window expires."""
+
+    claim = load_claim(authorization_path, now=now, policy=policy)
+    destination = recovery_path(
+        claim.authorization.snapshot.sha256,
+        policy=policy,
+    )
+    snapshot = _stable_read(
+        destination,
+        "campaign recovery receipt",
+        required_mode=0o444,
+        required_uid=policy.required_uid,
+        required_nlink=1,
+    )
+    document = strict_json_bytes(snapshot.raw, "campaign recovery receipt")
+    if canonical_json_bytes(document) != snapshot.raw:
+        raise AuthorizationError(
+            "campaign recovery receipt is not canonical JSON"
+        )
+    validate_recovery_document(document, claim=claim, policy=policy)
+    return snapshot, document
+
+
+def require_authorization_window_binding(
+    record: AuthorizationRecord,
+    *,
+    source_commit: str,
+    source_tree: str,
+    before_manifest_sha256: str,
+    candidate_manifest_sha256: str,
+    candidate_worker_binary_sha256: str,
+    candidate_promotion_receipt_sha256: str,
+    rollback_backup_path: Path,
+) -> None:
+    """Bind an operational window to every authorization-owned identity."""
+
+    document = record.document
+    source = document["source"]
+    before = document["before"]
+    candidate = document["candidate"]
+    rollback = document["rollback"]
+    if (
+        source_commit != source["commit"]
+        or source_tree != source["tree"]
+        or before_manifest_sha256 != before["manifest_sha256"]
+        or candidate_manifest_sha256 != candidate["manifest_sha256"]
+        or candidate_worker_binary_sha256 != candidate["worker_binary_sha256"]
+        or candidate_promotion_receipt_sha256
+        != candidate["promotion_receipt_sha256"]
+        or os.fspath(rollback_backup_path)
+        != os.fspath(Path(rollback["backup_path"]))
+    ):
+        raise AuthorizationError("campaign window identity differs from authorization")
 
 
 def require_window_binding(
@@ -1052,25 +1687,18 @@ def require_window_binding(
     candidate_promotion_receipt_sha256: str,
     rollback_backup_path: Path,
 ) -> None:
-    """Bind an operational window to every authorization-owned identity."""
+    """Bind a claimed operational window to every authorization-owned identity."""
 
-    authorization = claim.authorization.document
-    source = authorization["source"]
-    before = authorization["before"]
-    candidate = authorization["candidate"]
-    rollback = authorization["rollback"]
-    if (
-        source_commit != source["commit"]
-        or source_tree != source["tree"]
-        or before_manifest_sha256 != before["manifest_sha256"]
-        or candidate_manifest_sha256 != candidate["manifest_sha256"]
-        or candidate_worker_binary_sha256 != candidate["worker_binary_sha256"]
-        or candidate_promotion_receipt_sha256
-        != candidate["promotion_receipt_sha256"]
-        or os.fspath(rollback_backup_path)
-        != os.fspath(Path(rollback["backup_path"]))
-    ):
-        raise AuthorizationError("campaign window identity differs from authorization")
+    require_authorization_window_binding(
+        claim.authorization,
+        source_commit=source_commit,
+        source_tree=source_tree,
+        before_manifest_sha256=before_manifest_sha256,
+        candidate_manifest_sha256=candidate_manifest_sha256,
+        candidate_worker_binary_sha256=candidate_worker_binary_sha256,
+        candidate_promotion_receipt_sha256=candidate_promotion_receipt_sha256,
+        rollback_backup_path=rollback_backup_path,
+    )
 
 
 def require_campaign_binding(

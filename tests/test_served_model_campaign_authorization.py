@@ -94,7 +94,7 @@ def issue(tmp_path: Path) -> tuple[object, Path, dict[str, object]]:
     authorization_dir = tmp_path / "authorizations"
     authorization_dir.mkdir(mode=0o700)
     path = authorization_dir / "authorization.json"
-    record = AUTH.issue_authorization(
+    AUTH.issue_authorization(
         value,
         path,
         now=NOW,
@@ -113,6 +113,7 @@ def outcome_document(
     stages = {name: "passed" for name in AUTH.OUTCOME_STAGE_FIELDS}
     restoration = {
         "expected_manifest_sha256": authorization["before"]["manifest_sha256"],
+        "displaced_manifest_sha256": authorization["candidate"]["manifest_sha256"],
         "observed_manifest_sha256": authorization["before"]["manifest_sha256"],
         "bytes_equal": True,
         "reverse_reconciliation_passed": True,
@@ -120,6 +121,54 @@ def outcome_document(
         "model_id": "ullm-qwen3.5-9b-aq4",
         "format_id": "AQ4_0",
         "worker_binary_sha256": authorization["before"]["worker_binary_sha256"],
+        "proof": {
+            "schema_version": AUTH.restoration_proof.SCHEMA_VERSION,
+            "authorization_sha256": claim.authorization.snapshot.sha256,
+            "claim_sha256": claim.snapshot.sha256,
+            "captured_at": AUTH.utc_timestamp(NOW),
+            "active_manifest": {
+                "path": str(AUTH.FIXED_ACTIVE_MANIFEST),
+                "expected_sha256": authorization["before"]["manifest_sha256"],
+                "observed_sha256": authorization["before"]["manifest_sha256"],
+                "bytes_equal": True,
+            },
+            "service": {
+                "unit": "ullm-openai.service",
+                "active_state": "active",
+                "sub_state": "running",
+                "boot_id": "11111111-2222-3333-4444-555555555555",
+                "n_restarts": 0,
+            },
+            "gateway": {
+                "pid": 100,
+                "ppid": 1,
+                "starttime_ticks": 10,
+                "executable_sha256": "7" * 64,
+            },
+            "worker": {
+                "pid": 101,
+                "ppid": 100,
+                "starttime_ticks": 11,
+                "executable_sha256": authorization["before"][
+                    "worker_binary_sha256"
+                ],
+            },
+            "endpoints": {
+                "gateway_healthz": {"status": 200},
+                "gateway_readyz": {"status": 200},
+                "gateway_models": {
+                    "status": 200,
+                    "model_ids": ["ullm-qwen3.5-9b-aq4"],
+                },
+                "openwebui_health": {"status": 200},
+                "openwebui_models": {
+                    "status": 200,
+                    "model_ids": ["ullm-qwen3.5-9b-aq4"],
+                },
+            },
+            "epoch_stable": True,
+            "passed": True,
+        },
     }
     if failure_stage is not None:
         stages[failure_stage] = "failed"
@@ -135,18 +184,23 @@ def outcome_document(
             model_id=None,
             format_id=None,
             worker_binary_sha256=None,
+            proof=None,
         )
     campaigns = {}
     for name, value in authorization["campaigns"].items():
-        campaigns[name] = {
-            "run_id": value["run_id"],
-            "path": value["final_path"],
-            "kind": "directory",
-            "sha256": "8" * 64,
-            "artifact_count": 1,
-            "total_bytes": 2,
-            "selected_artifacts": {"SHA256SUMS": "9" * 64},
-        }
+        campaigns[name] = (
+            None
+            if stages[name] != "passed"
+            else {
+                "run_id": value["run_id"],
+                "path": value["final_path"],
+                "kind": "directory",
+                "sha256": "8" * 64,
+                "artifact_count": 1,
+                "total_bytes": 2,
+                "selected_artifacts": {"SHA256SUMS": "9" * 64},
+            }
+        )
     return {
         "schema_version": AUTH.OUTCOME_SCHEMA,
         "authorization_id": authorization["authorization_id"],
@@ -161,12 +215,13 @@ def outcome_document(
         "stages": stages,
         "candidate_observations": [
             {
-                "stage": "candidate_checks",
+                "stage": stage,
                 "active_manifest_sha256": authorization["candidate"][
                     "manifest_sha256"
                 ],
                 "bytes_equal": True,
             }
+            for stage in AUTH.CANDIDATE_OBSERVATION_STAGES
         ],
         "campaigns": campaigns,
         "restoration": restoration,
@@ -299,6 +354,41 @@ def test_claim_remains_valid_after_authorized_outputs_are_created(
     assert loaded.snapshot.sha256 == claim.snapshot.sha256
 
 
+def test_consumed_claim_and_outcome_remain_loadable_after_expiry(
+    tmp_path: Path,
+) -> None:
+    selected_policy, path, _ = issue(tmp_path)
+    claim = AUTH.claim_authorization(path, now=NOW, policy=selected_policy)
+    AUTH.publish_outcome(
+        claim,
+        outcome_document(claim),
+        policy=selected_policy,
+    )
+    after_expiry = NOW + timedelta(days=1)
+
+    loaded_claim = AUTH.load_claim(
+        path,
+        now=after_expiry,
+        policy=selected_policy,
+    )
+    _snapshot, loaded_outcome = AUTH.load_outcome(
+        path,
+        now=after_expiry,
+        policy=selected_policy,
+    )
+
+    assert loaded_claim.snapshot.sha256 == claim.snapshot.sha256
+    assert loaded_outcome["authorization_sha256"] == (
+        claim.authorization.snapshot.sha256
+    )
+    with pytest.raises(AUTH.AuthorizationError, match="expired"):
+        AUTH.load_authorization(
+            path,
+            now=after_expiry,
+            policy=selected_policy,
+        )
+
+
 def test_window_and_campaign_bindings_are_exact(tmp_path: Path) -> None:
     selected_policy, path, value = issue(tmp_path)
     claim = AUTH.claim_authorization(path, now=NOW, policy=selected_policy)
@@ -354,10 +444,17 @@ def test_prior_outcome_must_be_live_immutable_and_hash_bound(
         now=NOW,
         policy=prior_policy,
     )
-    outcome = tmp_path / "previous-outcome.json"
-    outcome_value = outcome_document(claim)
-    outcome.write_bytes(AUTH.canonical_json_bytes(outcome_value))
-    outcome.chmod(0o444)
+    outcome_value = outcome_document(
+        claim,
+        status="failed_restored",
+        failure_stage="sq8_full",
+    )
+    outcome_snapshot = AUTH.publish_outcome(
+        claim,
+        outcome_value,
+        policy=prior_policy,
+    )
+    outcome = outcome_snapshot.path
     successor_root = tmp_path / "successor"
     successor_root.mkdir()
     value = document(successor_root)
@@ -369,6 +466,7 @@ def test_prior_outcome_must_be_live_immutable_and_hash_bound(
         value,
         now=NOW,
         required_uid=os.geteuid(),
+        policy=prior_policy,
     )
     value["prior_outcome"]["sha256"] = "0" * 64
     with pytest.raises(AUTH.AuthorizationError, match="SHA-256 differs"):
@@ -376,6 +474,86 @@ def test_prior_outcome_must_be_live_immutable_and_hash_bound(
             value,
             now=NOW,
             required_uid=os.geteuid(),
+            policy=prior_policy,
+        )
+
+
+def test_prior_outcome_rejects_success_external_copy_and_unrelated_lineage(
+    tmp_path: Path,
+) -> None:
+    prior_root = tmp_path / "prior"
+    prior_root.mkdir()
+    prior_policy, prior_authorization, _ = issue(prior_root)
+    claim = AUTH.claim_authorization(
+        prior_authorization,
+        now=NOW,
+        policy=prior_policy,
+    )
+    successful = AUTH.publish_outcome(
+        claim,
+        outcome_document(claim),
+        policy=prior_policy,
+    )
+    successor_root = tmp_path / "successor-success"
+    successor_root.mkdir()
+    successor = document(successor_root)
+    successor["prior_outcome"] = {
+        "path": str(successful.path),
+        "sha256": successful.sha256,
+    }
+    with pytest.raises(AUTH.AuthorizationError, match="not a failed"):
+        AUTH.validate_authorization_document(
+            successor,
+            now=NOW,
+            required_uid=os.geteuid(),
+            policy=prior_policy,
+        )
+
+    failed_root = tmp_path / "failed"
+    failed_root.mkdir()
+    failed_policy, failed_authorization, _ = issue(failed_root)
+    failed_claim = AUTH.claim_authorization(
+        failed_authorization,
+        now=NOW,
+        policy=failed_policy,
+    )
+    failed = AUTH.publish_outcome(
+        failed_claim,
+        outcome_document(
+            failed_claim,
+            status="failed_restored",
+            failure_stage="sq8_full",
+        ),
+        policy=failed_policy,
+    )
+    external_dir = tmp_path / "external"
+    external_dir.mkdir(mode=0o700)
+    external = external_dir / "copied.outcome.json"
+    external.write_bytes(failed.raw)
+    external.chmod(0o444)
+    successor_root = tmp_path / "successor-copy"
+    successor_root.mkdir()
+    successor = document(successor_root)
+    successor["prior_outcome"] = {
+        "path": str(external),
+        "sha256": failed.sha256,
+    }
+    with pytest.raises(AUTH.AuthorizationError, match="outside"):
+        AUTH.validate_authorization_document(
+            successor,
+            now=NOW,
+            required_uid=os.geteuid(),
+            policy=failed_policy,
+        )
+
+    successor["prior_outcome"]["path"] = str(failed.path)
+    successor["candidate"]["worker_binary_sha256"] = "e" * 64
+    with pytest.raises(AUTH.AuthorizationError, match="lineage differs"):
+        AUTH.validate_authorization_document(
+            successor,
+            now=NOW,
+            required_uid=os.geteuid(),
+            policy=failed_policy,
         )
 
 
@@ -428,6 +606,28 @@ def test_publish_and_load_outcome_are_exact_claim_bound_and_no_replace(
             lambda value: value["stages"].update(sq8_full="pending"),
             "pending",
         ),
+        (
+            lambda value: value["candidate_observations"].pop(0),
+            "observations differ",
+        ),
+        (
+            lambda value: value["restoration"]["proof"]["active_manifest"].update(
+                path="/tmp/untrusted-active.json"
+            ),
+            "live restoration proof differs",
+        ),
+        (
+            lambda value: value["restoration"]["proof"]["service"].update(
+                unit="other.service"
+            ),
+            "live restoration proof differs",
+        ),
+        (
+            lambda value: value["restoration"]["proof"]["worker"].update(
+                executable_sha256="f" * 64
+            ),
+            "live restoration proof differs",
+        ),
     ],
 )
 def test_outcome_mutations_are_rejected(
@@ -459,3 +659,99 @@ def test_failed_restored_and_failed_restore_outcomes_are_distinct(
         failure_stage="aq4_restore",
     )
     AUTH.validate_outcome_document(failed_restore, claim=claim)
+
+
+def test_authorization_rejects_campaign_outputs_inside_source_root(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    document_root = tmp_path / "document"
+    document_root.mkdir()
+    value = document(document_root)
+    inside = source / "campaign-output"
+    value["campaigns"]["sq8_full"]["final_path"] = str(inside)
+
+    with pytest.raises(AUTH.AuthorizationError, match="outside the source"):
+        AUTH.validate_authorization_document(
+            value,
+            now=NOW,
+            required_uid=os.geteuid(),
+            source_root=source,
+        )
+
+
+def test_stable_read_detects_parent_path_replacement(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    parent = tmp_path / "parent"
+    replacement = tmp_path / "replacement"
+    moved = tmp_path / "moved"
+    parent.mkdir(mode=0o700)
+    replacement.mkdir(mode=0o700)
+    target = parent / "document.json"
+    target.write_bytes(b"{}\n")
+    target.chmod(0o444)
+    (replacement / target.name).write_bytes(b"{}\n")
+    (replacement / target.name).chmod(0o444)
+    real_open_directory = AUTH._open_directory
+    calls = 0
+
+    def replace_on_verification(path: Path, label: str) -> int:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            parent.rename(moved)
+            replacement.rename(parent)
+        return real_open_directory(path, label)
+
+    monkeypatch.setattr(AUTH, "_open_directory", replace_on_verification)
+    with pytest.raises(AUTH.AuthorizationError, match="changed"):
+        AUTH._stable_read(
+            target,
+            "race fixture",
+            required_mode=0o444,
+            required_uid=os.geteuid(),
+            required_nlink=1,
+        )
+
+
+def test_no_replace_publication_detects_parent_registry_replacement(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registry = tmp_path / "registry"
+    replacement = tmp_path / "replacement"
+    moved = tmp_path / "moved"
+    registry.mkdir(mode=0o700)
+    replacement.mkdir(mode=0o700)
+    registry.chmod(0o700)
+    replacement.chmod(0o700)
+    destination = registry / "receipt.json"
+    real_open_directory = AUTH._open_directory
+    calls = 0
+
+    def replace_before_verification(path: Path, label: str) -> int:
+        nonlocal calls
+        calls += 1
+        if calls == 3:
+            registry.rename(moved)
+            replacement.rename(registry)
+        return real_open_directory(path, label)
+
+    monkeypatch.setattr(
+        AUTH,
+        "_open_directory",
+        replace_before_verification,
+    )
+    with pytest.raises(AUTH.AuthorizationError, match="directory changed"):
+        AUTH._publish_no_replace(
+            destination,
+            b"{}\n",
+            mode=0o444,
+            required_uid=os.geteuid(),
+            label="publication race fixture",
+        )
+    assert not destination.exists()
+    assert (moved / destination.name).exists()

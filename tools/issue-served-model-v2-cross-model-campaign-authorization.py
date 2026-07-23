@@ -20,6 +20,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--document", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
+    parser.add_argument("--source-root", required=True, type=Path)
     return parser.parse_args(argv)
 
 
@@ -32,6 +33,7 @@ def main(argv: list[str] | None = None) -> int:
             document,
             args.output,
             now=datetime.now(timezone.utc),
+            source_root=args.source_root,
         )
     except (OSError, AuthorizationError):
         print("campaign authorization issuance failed", file=sys.stderr)
