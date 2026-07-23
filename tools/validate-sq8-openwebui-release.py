@@ -56,6 +56,7 @@ PHASE1_REPORT_SCHEMA = "ullm.sq8.openwebui_release.validation.phase1.v1"
 FULL_REPORT_SCHEMA = "ullm.sq8.openwebui_release.validation.v1"
 FULL_REPORT_SCHEMA_V2 = "ullm.sq8.openwebui_release.validation.v2"
 ENVIRONMENT_SCHEMA = "ullm.sq8.full_campaign.environment.v1"
+ENVIRONMENT_SCHEMA_V2 = "ullm.sq8.full_campaign.environment.v2"
 MODEL_IDENTITY_SCHEMA = "ullm.sq8.full_campaign.model_identity.v1"
 MODEL_IDENTITY_SCHEMA_V2 = "ullm.sq8.full_campaign.model_identity.v2"
 PROMOTION_SCHEMA = "ullm.sq8_product_promotion.v1"
@@ -357,6 +358,72 @@ EXPECTED_SOURCE_GROUPS = {
     ),
     "all": tuple(EXPECTED_SOURCE_ROLE_PATHS),
 }
+
+# Kept independent from the producer on purpose.  The parity tests below catch
+# drift, while the separate table prevents validation from trusting producer data.
+EXPECTED_SOURCE_ROLE_PATHS_V2 = {
+    **EXPECTED_SOURCE_ROLE_PATHS,
+    "gateway_reasoning": (
+        "services/openai-gateway/src/ullm_openai_gateway/reasoning.py"
+    ),
+    "gateway_served_model": (
+        "services/openai-gateway/src/ullm_openai_gateway/served_model.py"
+    ),
+    "worker_reasoning": "crates/ullm-engine/src/reasoning.rs",
+    "worker_served_model": "crates/ullm-engine/src/served_model.rs",
+    "worker_sampling": "crates/ullm-engine/src/sq8_sampling.rs",
+    "worker_serving_runtime": "crates/ullm-engine/src/sq8_serving_runtime.rs",
+    "spec_served_model_manifest": "docs/specs/served-model-manifest-v0.2.md",
+    "spec_serving_session": "docs/specs/sq8-serving-session-v0.2.md",
+    "spec_worker_acceptance": "docs/specs/sq8-worker-acceptance-v0.3.md",
+}
+EXPECTED_SOURCE_ROLE_PATHS_V2["spec_release"] = (
+    "docs/specs/sq8-openwebui-release-v0.2.md"
+)
+EXPECTED_SOURCE_ROLE_PATHS_V2["spec_worker_protocol"] = (
+    "docs/specs/sq8-worker-protocol-v0.2.md"
+)
+
+EXPECTED_SOURCE_GROUPS_V2 = {
+    **EXPECTED_SOURCE_GROUPS,
+    "gateway": (
+        *EXPECTED_SOURCE_GROUPS["gateway"],
+        "gateway_reasoning",
+        "gateway_served_model",
+    ),
+    "worker": (
+        *EXPECTED_SOURCE_GROUPS["worker"],
+        "worker_reasoning",
+        "worker_served_model",
+        "worker_sampling",
+        "worker_serving_runtime",
+    ),
+    "spec": (
+        "spec_served_model_manifest",
+        "spec_release",
+        "spec_openai_chat_subset",
+        "spec_serving_session",
+        "spec_worker_acceptance",
+        "spec_worker_protocol",
+    ),
+    "all": tuple(EXPECTED_SOURCE_ROLE_PATHS_V2),
+}
+
+V2_REASONING_SOURCE_ROLES = (
+    "gateway_reasoning",
+    "gateway_served_model",
+    "worker_reasoning",
+    "worker_served_model",
+    "worker_sampling",
+    "worker_serving_runtime",
+)
+V2_RELEASE_SPEC_ROLES = (
+    "spec_served_model_manifest",
+    "spec_release",
+    "spec_serving_session",
+    "spec_worker_acceptance",
+    "spec_worker_protocol",
+)
 
 EXPECTED_ARTIFACT_IDENTITY = {
     "schema_version": ARTIFACT_SCHEMA,
@@ -1313,6 +1380,16 @@ def _validate_identity_source_contract(
         fail("source group coverage differs")
 
 
+def _identity_source_contract_for_environment_schema(
+    schema_version: Any,
+) -> tuple[dict[str, str], dict[str, tuple[str, ...]]]:
+    if schema_version == ENVIRONMENT_SCHEMA:
+        return EXPECTED_SOURCE_ROLE_PATHS, EXPECTED_SOURCE_GROUPS
+    if schema_version == ENVIRONMENT_SCHEMA_V2:
+        return EXPECTED_SOURCE_ROLE_PATHS_V2, EXPECTED_SOURCE_GROUPS_V2
+    fail("environment.json source-contract schema differs")
+
+
 @dataclass(frozen=True)
 class _SourceDigest:
     byte_count: int
@@ -1570,7 +1647,6 @@ def _validate_environment_identity(
     dict[str, Any],
     dict[str, Any],
 ]:
-    _validate_identity_source_contract()
     exact_fields(
         document,
         {
@@ -1587,10 +1663,11 @@ def _validate_environment_identity(
         },
         "environment.json",
     )
-    if (
-        document["schema_version"] != ENVIRONMENT_SCHEMA
-        or document["record_type"] != "environment"
-    ):
+    role_paths, source_groups = _identity_source_contract_for_environment_schema(
+        document["schema_version"]
+    )
+    _validate_identity_source_contract(role_paths, source_groups)
+    if document["record_type"] != "environment":
         fail("environment.json schema or record type differs")
     _identity_timestamp(
         document["captured_utc"], "environment.json.captured_utc", require_utc_z=True
@@ -1608,7 +1685,7 @@ def _validate_environment_identity(
         fail("environment.json Git dirty flag and status SHA-256 disagree")
 
     sources = document["sources"]
-    if type(sources) is not list or len(sources) != len(EXPECTED_SOURCE_ROLE_PATHS):
+    if type(sources) is not list or len(sources) != len(role_paths):
         fail("environment.json source list count differs")
     by_role: dict[str, dict[str, Any]] = {}
     paths: list[str] = []
@@ -1621,16 +1698,16 @@ def _validate_environment_identity(
         role = string(entry["role"], f"environment.json.sources[{index}].role")
         path = string(entry["path"], f"environment.json.sources[{index}].path")
         if (
-            role not in EXPECTED_SOURCE_ROLE_PATHS
+            role not in role_paths
             or role in by_role
-            or path != EXPECTED_SOURCE_ROLE_PATHS[role]
+            or path != role_paths[role]
         ):
             fail("environment.json source role or path differs")
         integer(entry["bytes"], f"environment.json.sources[{index}].bytes", minimum=1)
         sha256_value(entry["sha256"], f"environment.json.sources[{index}].sha256")
         by_role[role] = entry
         paths.append(path)
-    if set(by_role) != set(EXPECTED_SOURCE_ROLE_PATHS) or paths != sorted(
+    if set(by_role) != set(role_paths) or paths != sorted(
         paths, key=lambda item: item.encode("utf-8")
     ):
         fail("environment.json sources are not the exact bytewise-sorted set")
@@ -1645,11 +1722,11 @@ def _validate_environment_identity(
 
     source_sets_raw = exact_fields(
         document["source_sets"],
-        set(EXPECTED_SOURCE_GROUPS),
+        set(source_groups),
         "environment.json.source_sets",
     )
     source_sets: dict[str, str] = {}
-    for group, roles in EXPECTED_SOURCE_GROUPS.items():
+    for group, roles in source_groups.items():
         digest = sha256_value(
             source_sets_raw[group], f"environment.json.source_sets.{group}"
         )
@@ -2400,6 +2477,13 @@ def validate_campaign_identity(
         _validate_environment_identity(environment, trusted_commit)
     )
     product, tokenizer, oracle, model_worker = _validate_model_identity(model_identity)
+    expected_environment_schema = (
+        ENVIRONMENT_SCHEMA_V2
+        if model_identity["schema_version"] == MODEL_IDENTITY_SCHEMA_V2
+        else ENVIRONMENT_SCHEMA
+    )
+    if environment["schema_version"] != expected_environment_schema:
+        fail("environment/model identity schema lineage differs")
     if model_identity["schema_version"] == MODEL_IDENTITY_SCHEMA_V2:
         if (
             expected_served_model_manifest_sha256 is None
@@ -2686,7 +2770,10 @@ def validate_campaign_source_checkout(
 
     if not isinstance(identity, IdentityData) or not isinstance(repo_root, os.PathLike):
         fail("campaign source checkout arguments differ")
-    _validate_identity_source_contract()
+    role_paths, source_groups = _identity_source_contract_for_environment_schema(
+        identity.environment.get("schema_version")
+    )
+    _validate_identity_source_contract(role_paths, source_groups)
     root = Path(os.path.abspath(repo_root))
     root_fd = -1
     try:
@@ -2729,10 +2816,10 @@ def validate_campaign_source_checkout(
         if resolved_commit.raw != identity.expected_commit.encode("ascii") + b"\n":
             fail("trusted campaign Git commit does not resolve exactly")
 
-        if set(identity.source_by_role) != set(EXPECTED_SOURCE_ROLE_PATHS):
+        if set(identity.source_by_role) != set(role_paths):
             fail("campaign source identity role set differs")
         git_entries: dict[str, dict[str, Any]] = {}
-        for role, relative in EXPECTED_SOURCE_ROLE_PATHS.items():
+        for role, relative in role_paths.items():
             source = identity.source_by_role[role]
             if set(source) != {"role", "path", "bytes", "sha256"}:
                 fail("campaign source identity fields differ")
@@ -2748,9 +2835,9 @@ def validate_campaign_source_checkout(
                 fail("campaign source differs from its trusted Git blob")
             git_entries[role] = expected
 
-        if set(identity.source_sets) != set(EXPECTED_SOURCE_GROUPS):
+        if set(identity.source_sets) != set(source_groups):
             fail("campaign source aggregate set differs")
-        for group, roles in EXPECTED_SOURCE_GROUPS.items():
+        for group, roles in source_groups.items():
             if identity.source_sets[group] != _identity_source_aggregate(
                 git_entries, roles
             ):

@@ -145,20 +145,26 @@ class IdentityFixture:
             "chat_template_fixture_manifest",
             "runtime_oracle_validation",
         }
-        for role, relative in IDENTITY.SOURCE_ROLE_PATHS.items():
-            if role in oracle_roles:
-                continue
-            if role in IDENTITY.TTFT_FIXTURE_IDENTITIES:
-                raw = (ROOT / relative).read_bytes()
-            elif role == "systemd_service":
-                raw = b"[Service]\nUser=homelab1\nUMask=0077\n"
-            elif role == "systemd_environment_contract":
-                raw = self._runtime_environment()
-            elif role == "openwebui_patch":
-                raw = b"--- middleware.py\n+++ middleware.py\n@@ fake patch\n"
-            else:
-                raw = f"fixture source for {role}\n".encode("ascii")
-            self._write(self.repo / relative, raw)
+        written: set[str] = set()
+        for role_paths in (
+            IDENTITY.SOURCE_ROLE_PATHS,
+            IDENTITY.SOURCE_ROLE_PATHS_V2,
+        ):
+            for role, relative in role_paths.items():
+                if relative in written or role in oracle_roles:
+                    continue
+                if role in IDENTITY.TTFT_FIXTURE_IDENTITIES:
+                    raw = (ROOT / relative).read_bytes()
+                elif role == "systemd_service":
+                    raw = b"[Service]\nUser=homelab1\nUMask=0077\n"
+                elif role == "systemd_environment_contract":
+                    raw = self._runtime_environment()
+                elif role == "openwebui_patch":
+                    raw = b"--- middleware.py\n+++ middleware.py\n@@ fake patch\n"
+                else:
+                    raw = f"fixture source for {role}\n".encode("ascii")
+                self._write(self.repo / relative, raw)
+                written.add(relative)
         chat_manifest_raw = canonical(
             {"schema_version": "ullm.sq8.chat_template_fixtures.v1"}
         )
@@ -508,6 +514,7 @@ class FakeProbe:
 class FullCampaignIdentityTests(unittest.TestCase):
     def test_source_contract_has_exact_unique_group_coverage(self) -> None:
         self.assertEqual(len(IDENTITY.SOURCE_ROLE_PATHS), 70)
+        self.assertEqual(len(IDENTITY.SOURCE_ROLE_PATHS_V2), 79)
         self.assertEqual(
             IDENTITY.SOURCE_ROLE_PATHS["campaign_backend"],
             "tools/sq8_full_campaign_backend.py",
@@ -525,6 +532,35 @@ class FullCampaignIdentityTests(unittest.TestCase):
         )
         self.assertEqual(semantic, set(IDENTITY.SOURCE_ROLE_PATHS))
         IDENTITY._validate_source_contract()
+        IDENTITY._validate_source_contract(
+            IDENTITY.SOURCE_ROLE_PATHS_V2, IDENTITY.SOURCE_GROUPS_V2
+        )
+        self.assertEqual(
+            {
+                role: IDENTITY.SOURCE_ROLE_PATHS_V2[role]
+                for role in IDENTITY.V2_RELEASE_SPEC_ROLES
+            },
+            {
+                "spec_served_model_manifest": (
+                    "docs/specs/served-model-manifest-v0.2.md"
+                ),
+                "spec_release": "docs/specs/sq8-openwebui-release-v0.2.md",
+                "spec_serving_session": (
+                    "docs/specs/sq8-serving-session-v0.2.md"
+                ),
+                "spec_worker_acceptance": (
+                    "docs/specs/sq8-worker-acceptance-v0.3.md"
+                ),
+                "spec_worker_protocol": (
+                    "docs/specs/sq8-worker-protocol-v0.2.md"
+                ),
+            },
+        )
+        self.assertTrue(
+            set(IDENTITY.V2_REASONING_SOURCE_ROLES)
+            <= set(IDENTITY.SOURCE_GROUPS_V2["gateway"])
+            | set(IDENTITY.SOURCE_GROUPS_V2["worker"])
+        )
 
     def test_source_contract_rejects_duplicate_paths_and_bad_groups(self) -> None:
         duplicate_paths = dict(IDENTITY.SOURCE_ROLE_PATHS)
@@ -555,6 +591,69 @@ class FullCampaignIdentityTests(unittest.TestCase):
         for groups in mutations:
             with self.subTest(groups=groups), self.assertRaises(IDENTITY.IdentityError):
                 IDENTITY._validate_source_contract(IDENTITY.SOURCE_ROLE_PATHS, groups)
+
+    def test_v2_source_specs_require_every_reasoning_source_and_release_spec(
+        self,
+    ) -> None:
+        required = (
+            *IDENTITY.V2_REASONING_SOURCE_ROLES,
+            *IDENTITY.V2_RELEASE_SPEC_ROLES,
+        )
+        with IdentityFixture() as fixture:
+            binding = IDENTITY.ServedModelCampaignBinding(
+                candidate_path=fixture.root / "candidate.json",
+                candidate_sha256="1" * 64,
+                claim_path=fixture.root / "claim.json",
+                claim_sha256="2" * 64,
+                authorization_path=fixture.root / "authorization.json",
+                authorization_sha256="3" * 64,
+            )
+            v2_specs = IDENTITY.default_source_specs(
+                fixture.repo,
+                model_identity_schema=IDENTITY.MODEL_IDENTITY_SCHEMA_V2,
+            )
+            inputs = dataclasses.replace(
+                fixture.inputs,
+                source_specs=v2_specs,
+                served_model_binding=binding,
+            )
+            self.assertEqual(
+                IDENTITY._validate_source_specs(inputs),
+                v2_specs,
+            )
+            for role in required:
+                with self.subTest(role=role), self.assertRaisesRegex(
+                    IDENTITY.IdentityError, "source role set differs"
+                ):
+                    IDENTITY._validate_source_specs(
+                        dataclasses.replace(
+                            inputs,
+                            source_specs=tuple(
+                                spec for spec in v2_specs if spec.role != role
+                            ),
+                        )
+                    )
+
+        self.assertEqual(
+            IDENTITY.SOURCE_ROLE_PATHS["spec_release"],
+            "docs/specs/sq8-openwebui-release-v0.1.md",
+        )
+        self.assertEqual(
+            IDENTITY.SOURCE_ROLE_PATHS["spec_worker_protocol"],
+            "docs/specs/sq8-worker-protocol-v0.1.md",
+        )
+        self.assertTrue(
+            set(IDENTITY.V2_REASONING_SOURCE_ROLES).isdisjoint(
+                IDENTITY.SOURCE_ROLE_PATHS
+            )
+        )
+        self.assertTrue(
+            {
+                "spec_served_model_manifest",
+                "spec_serving_session",
+                "spec_worker_acceptance",
+            }.isdisjoint(IDENTITY.SOURCE_ROLE_PATHS)
+        )
 
     def test_fake_live_capture_builds_both_strict_identity_artifacts(self) -> None:
         with IdentityFixture() as fixture:
@@ -639,10 +738,23 @@ class FullCampaignIdentityTests(unittest.TestCase):
                 authorization_sha256=authorization_sha,
             )
             inputs = dataclasses.replace(
-                fixture.inputs, served_model_binding=binding
+                fixture.inputs,
+                source_specs=IDENTITY.default_source_specs(
+                    fixture.repo,
+                    model_identity_schema=IDENTITY.MODEL_IDENTITY_SCHEMA_V2,
+                ),
+                served_model_binding=binding,
             )
             artifacts = IDENTITY.build_identity_artifacts(inputs, fixture.live)
 
+        self.assertEqual(
+            artifacts.environment["schema_version"],
+            IDENTITY.ENVIRONMENT_SCHEMA_V2,
+        )
+        self.assertEqual(
+            len(artifacts.environment["sources"]),
+            len(IDENTITY.SOURCE_ROLE_PATHS_V2),
+        )
         self.assertEqual(
             artifacts.model_identity["schema_version"],
             IDENTITY.MODEL_IDENTITY_SCHEMA_V2,

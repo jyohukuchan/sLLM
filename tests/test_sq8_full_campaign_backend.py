@@ -927,7 +927,7 @@ class BackendTests(unittest.TestCase):
         self.assertIsNone(bridge.snapshots)
         self.assertTrue(bridge.closed)
 
-    def production_binding_inputs(self, root: Path) -> Any:
+    def production_binding_inputs(self, root: Path, *, v2: bool = False) -> Any:
         required = {
             "gate_api_contract",
             "gate_direct_cancel",
@@ -946,7 +946,14 @@ class BackendTests(unittest.TestCase):
             "browser_failure",
             "gate_http_latency",
         }
-        roles = sorted(required | {f"dummy_{index:02d}" for index in range(54)})
+        source_count = 79 if v2 else 70
+        roles = sorted(
+            required
+            | {
+                f"dummy_{index:02d}"
+                for index in range(source_count - len(required))
+            }
+        )
         paths = {role: f"tools/{role}.source" for role in roles}
         sources = [
             {"role": role, "path": paths[role], "bytes": 1, "sha256": "a" * 64}
@@ -977,7 +984,14 @@ class BackendTests(unittest.TestCase):
         )
         guard = SimpleNamespace(reject=lambda raw, label: None)
         return BACKEND.ProductionBindingInputs(
-            {"sources": sources},
+            {
+                "schema_version": (
+                    BACKEND.ENVIRONMENT_SCHEMA_V2
+                    if v2
+                    else BACKEND.ENVIRONMENT_SCHEMA_V1
+                ),
+                "sources": sources,
+            },
             paths,
             root,
             binding_types,
@@ -1038,6 +1052,33 @@ class BackendTests(unittest.TestCase):
         )
         self.assertEqual(failure.normal_gateway_pid, 1)
         self.assertEqual(failure.restart_gateway_pid, 11)
+
+    def test_production_binding_accepts_only_matching_v1_and_v2_source_counts(
+        self,
+    ) -> None:
+        for v2, expected_count in ((False, 70), (True, 79)):
+            with self.subTest(v2=v2):
+                inputs = self.production_binding_inputs(ROOT, v2=v2)
+                bindings = BACKEND._source_bindings(inputs)
+                self.assertEqual(len(bindings), expected_count)
+
+                wrong_schema = (
+                    BACKEND.ENVIRONMENT_SCHEMA_V1
+                    if v2
+                    else BACKEND.ENVIRONMENT_SCHEMA_V2
+                )
+                mismatched = dataclasses.replace(
+                    inputs,
+                    environment={
+                        **inputs.environment,
+                        "schema_version": wrong_schema,
+                    },
+                )
+                with self.assertRaisesRegex(
+                    BACKEND.ProductionBackendError,
+                    "source set differs",
+                ):
+                    BACKEND._source_bindings(mismatched)
 
     def test_production_binding_sources_reject_missing_duplicate_and_sha_tamper(
         self,

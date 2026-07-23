@@ -74,6 +74,7 @@ AMD_SMI_LIBRARY = "26.2.2"
 ROCM_VERSION = "7.2.1"
 
 EXPECTED_SOURCE_COUNT = 70
+EXPECTED_SOURCE_COUNT_V2 = 79
 SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
 
 
@@ -408,9 +409,34 @@ def _validate_live_identity(
     return PidEpoch(live.gateway.pid, live.worker.pid)
 
 
-def _validate_artifact_sources(artifacts: identity.IdentityArtifacts) -> str:
+def _source_contract_for_binding(
+    served_model_binding: identity.ServedModelCampaignBinding | None,
+) -> tuple[str, str, dict[str, str], int]:
+    if served_model_binding is None:
+        return (
+            identity.MODEL_IDENTITY_SCHEMA,
+            identity.ENVIRONMENT_SCHEMA,
+            identity.SOURCE_ROLE_PATHS,
+            EXPECTED_SOURCE_COUNT,
+        )
+    return (
+        identity.MODEL_IDENTITY_SCHEMA_V2,
+        identity.ENVIRONMENT_SCHEMA_V2,
+        identity.SOURCE_ROLE_PATHS_V2,
+        EXPECTED_SOURCE_COUNT_V2,
+    )
+
+
+def _validate_artifact_sources(
+    artifacts: identity.IdentityArtifacts,
+    *,
+    expected_environment_schema: str,
+    expected_role_paths: dict[str, str],
+    expected_source_count: int,
+) -> str:
     if not isinstance(artifacts, identity.IdentityArtifacts):
         fail("identity artifact result type differs")
+    environment_schema = artifacts.environment.get("schema_version")
     sources = artifacts.environment.get("sources")
     source_sets = artifacts.environment.get("source_sets")
     if type(sources) is not list or type(source_sets) is not dict:
@@ -418,13 +444,14 @@ def _validate_artifact_sources(artifacts: identity.IdentityArtifacts) -> str:
     roles = [item.get("role") for item in sources if type(item) is dict]
     all_sha = source_sets.get("all")
     if (
-        len(sources) != EXPECTED_SOURCE_COUNT
-        or len(roles) != EXPECTED_SOURCE_COUNT
-        or set(roles) != set(identity.SOURCE_ROLE_PATHS)
+        environment_schema != expected_environment_schema
+        or len(sources) != expected_source_count
+        or len(roles) != expected_source_count
+        or set(roles) != set(expected_role_paths)
         or type(all_sha) is not str
         or SHA256_RE.fullmatch(all_sha) is None
     ):
-        fail("70-source identity artifact contract differs")
+        fail("versioned source identity artifact contract differs")
     assert isinstance(all_sha, str)
     return all_sha
 
@@ -521,13 +548,14 @@ def _validate_independent_result(
     expected_commit: str,
     expected_worker_binary_sha256: str,
     expected_all_source_sha256: str,
+    expected_source_count: int,
 ) -> None:
     if (
         getattr(independent_identity, "expected_commit", None) != expected_commit
         or getattr(independent_identity, "expected_worker_binary_sha256", None)
         != expected_worker_binary_sha256
         or getattr(source_checkout, "git_commit", None) != expected_commit
-        or getattr(source_checkout, "source_count", None) != EXPECTED_SOURCE_COUNT
+        or getattr(source_checkout, "source_count", None) != expected_source_count
         or getattr(source_checkout, "all_source_sha256", None)
         != expected_all_source_sha256
     ):
@@ -575,8 +603,16 @@ def build_production_identity_preflight(
         service_epoch = _validate_live_identity(
             live, settings, expected_worker_binary_sha256
         )
-        source_specs = identity.default_source_specs(settings.repo_root)
-        if len(source_specs) != EXPECTED_SOURCE_COUNT:
+        (
+            model_identity_schema,
+            environment_schema,
+            role_paths,
+            expected_source_count,
+        ) = _source_contract_for_binding(served_model_binding)
+        source_specs = identity.default_source_specs(
+            settings.repo_root, model_identity_schema=model_identity_schema
+        )
+        if len(source_specs) != expected_source_count:
             fail("production source specification count differs")
         artifacts = identity.build_identity_artifacts(
             identity.IdentityBuildInputs(
@@ -596,7 +632,12 @@ def build_production_identity_preflight(
             ),
             live,
         )
-        all_source_sha256 = _validate_artifact_sources(artifacts)
+        all_source_sha256 = _validate_artifact_sources(
+            artifacts,
+            expected_environment_schema=environment_schema,
+            expected_role_paths=role_paths,
+            expected_source_count=expected_source_count,
+        )
         _scan_forbidden(
             forbidden_values,
             artifacts.environment_bytes,
@@ -617,6 +658,7 @@ def build_production_identity_preflight(
             expected_commit=expected_commit,
             expected_worker_binary_sha256=expected_worker_binary_sha256,
             expected_all_source_sha256=all_source_sha256,
+            expected_source_count=expected_source_count,
         )
         _scan_forbidden(
             forbidden_values,
@@ -683,6 +725,7 @@ def build_operational_expectation(
 
 __all__ = [
     "EXPECTED_SOURCE_COUNT",
+    "EXPECTED_SOURCE_COUNT_V2",
     "IndependentIdentityValidator",
     "ProductionIdentityPreflight",
     "ProductionIdentityPreflightError",

@@ -43,6 +43,14 @@ PRODUCTION_NETWORK_ID = (
     "79bb7cfca31cb5d76978cbbb229c946662c137b93ea647b5ae6c205af9126dc8"
 )
 IMAGE_RE = re.compile(r"(?:[a-z0-9._/-]+@)?sha256:[0-9a-f]{64}\Z")
+ENVIRONMENT_SCHEMA_V1 = "ullm.sq8.full_campaign.environment.v1"
+ENVIRONMENT_SCHEMA_V2 = "ullm.sq8.full_campaign.environment.v2"
+MODEL_IDENTITY_SCHEMA_V1 = "ullm.sq8.full_campaign.model_identity.v1"
+MODEL_IDENTITY_SCHEMA_V2 = "ullm.sq8.full_campaign.model_identity.v2"
+SOURCE_COUNT_BY_ENVIRONMENT_SCHEMA = {
+    ENVIRONMENT_SCHEMA_V1: 70,
+    ENVIRONMENT_SCHEMA_V2: 79,
+}
 
 GateName = Literal[
     "api_contract", "combined", "direct_cancel", "stop", "failure", "latency"
@@ -770,10 +778,13 @@ class ProductionBindingInputs:
 def _source_bindings(inputs: ProductionBindingInputs) -> dict[str, tuple[Path, str]]:
     sources = inputs.environment.get("sources")
     expected = inputs.expected_source_role_paths
+    schema_version = inputs.environment.get("schema_version")
+    expected_count = SOURCE_COUNT_BY_ENVIRONMENT_SCHEMA.get(schema_version)
     if (
         type(sources) is not list
-        or len(sources) != 70
-        or len(expected) != 70
+        or expected_count is None
+        or len(sources) != expected_count
+        or len(expected) != expected_count
         or not inputs.repo_root.is_absolute()
     ):
         fail("production binding source set differs")
@@ -1445,7 +1456,19 @@ def execute_prepared_campaign(prepared: Any, orchestrator: Any) -> Path:
     collector = runtime.collector
     production = runtime.production_module
     identity_module = runtime.identity_module
-    environment = prepared.identity.identity_artifacts.environment
+    identity_artifacts = prepared.identity.identity_artifacts
+    environment = identity_artifacts.environment
+    model_identity = identity_artifacts.model_identity
+    schema_pair = (
+        environment.get("schema_version"),
+        model_identity.get("schema_version"),
+    )
+    if schema_pair == (ENVIRONMENT_SCHEMA_V1, MODEL_IDENTITY_SCHEMA_V1):
+        expected_source_role_paths = identity_module.SOURCE_ROLE_PATHS
+    elif schema_pair == (ENVIRONMENT_SCHEMA_V2, MODEL_IDENTITY_SCHEMA_V2):
+        expected_source_role_paths = identity_module.SOURCE_ROLE_PATHS_V2
+    else:
+        fail("prepared environment/model source lineage differs")
     source_items = environment.get("sources")
     if type(source_items) is not list:
         fail("prepared production sources differ")
@@ -1510,7 +1533,7 @@ def execute_prepared_campaign(prepared: Any, orchestrator: Any) -> Path:
     )
     binding_inputs = ProductionBindingInputs(
         environment,
-        identity_module.SOURCE_ROLE_PATHS,
+        expected_source_role_paths,
         production.production_preflight_settings().repo_root,
         {
             "api_contract": api_ingest.ApiContractInputBindings,

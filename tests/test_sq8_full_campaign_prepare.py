@@ -84,6 +84,9 @@ class FakeIndependentValidator:
         self.source_count = PREPARE.EXPECTED_SOURCE_COUNT
         self.identity_calls = 0
         self.source_calls = 0
+        self.trusted_v2_anchors: tuple[str | None, str | None, str | None] | None = (
+            None
+        )
 
     def validate_campaign_identity(
         self,
@@ -91,8 +94,16 @@ class FakeIndependentValidator:
         *,
         expected_commit: str,
         expected_worker_binary_sha256: str,
+        expected_served_model_manifest_sha256: str | None = None,
+        expected_authorization_claim_sha256: str | None = None,
+        expected_authorization_sha256: str | None = None,
     ) -> FakeIndependentIdentity:
         self.identity_calls += 1
+        self.trusted_v2_anchors = (
+            expected_served_model_manifest_sha256,
+            expected_authorization_claim_sha256,
+            expected_authorization_sha256,
+        )
         if self.identity_error:
             raise ValueError("synthetic identity rejection")
         self._require_private_artifact(bundle / "environment.json")
@@ -213,7 +224,10 @@ def live_identity() -> Any:
     )
 
 
-def artifacts() -> Any:
+def artifacts(*, v2: bool = False) -> Any:
+    role_paths = (
+        IDENTITY.SOURCE_ROLE_PATHS_V2 if v2 else IDENTITY.SOURCE_ROLE_PATHS
+    )
     sources = [
         {
             "role": role,
@@ -221,13 +235,23 @@ def artifacts() -> Any:
             "bytes": 1,
             "sha256": hashlib.sha256(role.encode("ascii")).hexdigest(),
         }
-        for role, relative in IDENTITY.SOURCE_ROLE_PATHS.items()
+        for role, relative in role_paths.items()
     ]
     environment = {
+        "schema_version": (
+            IDENTITY.ENVIRONMENT_SCHEMA_V2 if v2 else IDENTITY.ENVIRONMENT_SCHEMA
+        ),
         "sources": sources,
         "source_sets": {"all": ALL_SOURCE_SHA},
     }
-    model = {"worker": {"binary_sha256": WORKER_SHA}}
+    model = {
+        "schema_version": (
+            IDENTITY.MODEL_IDENTITY_SCHEMA_V2
+            if v2
+            else IDENTITY.MODEL_IDENTITY_SCHEMA
+        ),
+        "worker": {"binary_sha256": WORKER_SHA},
+    }
     return IDENTITY.IdentityArtifacts(
         environment,
         model,
@@ -270,11 +294,21 @@ class ProductionIdentityPrepareTests(unittest.TestCase):
         validator: FakeIndependentValidator | None = None,
         receipt: dict[str, Any] | None = None,
         forbidden_values: tuple[bytes, ...] = (SECRET,),
+        served_model_binding: IDENTITY.ServedModelCampaignBinding | None = None,
     ) -> Any:
         used_anchor = FakeAnchor() if anchor is None else anchor
         used_live = live_identity() if live is None else live
-        used_artifacts = artifacts() if built_artifacts is None else built_artifacts
-        used_validator = FakeIndependentValidator() if validator is None else validator
+        used_artifacts = (
+            artifacts(v2=served_model_binding is not None)
+            if built_artifacts is None
+            else built_artifacts
+        )
+        if validator is None:
+            used_validator = FakeIndependentValidator()
+            if served_model_binding is not None:
+                used_validator.source_count = PREPARE.EXPECTED_SOURCE_COUNT_V2
+        else:
+            used_validator = validator
         used_receipt = promotion_receipt() if receipt is None else receipt
         with (
             mock.patch.object(
@@ -296,11 +330,19 @@ class ProductionIdentityPrepareTests(unittest.TestCase):
                 forbidden_values=forbidden_values,
                 identity_probe=cast(IDENTITY.IdentityProbe, object()),
                 independent_validator=used_validator,
+                served_model_binding=served_model_binding,
             )
         expectation = capture.call_args.args[1]
         self.assertEqual(expectation.forbidden_values, forbidden_values)
         inputs = build.call_args.args[0]
-        self.assertEqual(len(inputs.source_specs), PREPARE.EXPECTED_SOURCE_COUNT)
+        self.assertEqual(
+            len(inputs.source_specs),
+            (
+                PREPARE.EXPECTED_SOURCE_COUNT_V2
+                if served_model_binding is not None
+                else PREPARE.EXPECTED_SOURCE_COUNT
+            ),
+        )
         self.assertEqual(inputs.git_commit, COMMIT)
         self.assertEqual(inputs.git_status_raw, b"")
         return result
@@ -330,7 +372,14 @@ class ProductionIdentityPrepareTests(unittest.TestCase):
         self.assertEqual(
             IDENTITY.SOURCE_ROLE_PATHS, VALIDATOR.EXPECTED_SOURCE_ROLE_PATHS
         )
+        self.assertEqual(
+            IDENTITY.SOURCE_ROLE_PATHS_V2,
+            VALIDATOR.EXPECTED_SOURCE_ROLE_PATHS_V2,
+        )
         self.assertEqual(len(IDENTITY.SOURCE_ROLE_PATHS), 70)
+        self.assertEqual(len(IDENTITY.SOURCE_ROLE_PATHS_V2), 79)
+        self.assertEqual(PREPARE.EXPECTED_SOURCE_COUNT, 70)
+        self.assertEqual(PREPARE.EXPECTED_SOURCE_COUNT_V2, 79)
         self.assertEqual(IDENTITY.HIP_GUARDS, VALIDATOR.HIP_GUARDS)
         self.assertEqual(IDENTITY.UPSTREAM_MODEL_ID, VALIDATOR.UPSTREAM_MODEL_ID)
         self.assertEqual(IDENTITY.SERVED_MODEL_ID, VALIDATOR.SERVED_MODEL_ID)
@@ -392,6 +441,34 @@ class ProductionIdentityPrepareTests(unittest.TestCase):
         self.assertNotIn(SECRET, repr(result).encode("utf-8"))
         with self.assertRaises(dataclasses.FrozenInstanceError):
             result.service_n_restarts = 3
+
+    def test_v2_binding_selects_79_sources_and_passes_all_trusted_anchors(
+        self,
+    ) -> None:
+        binding = IDENTITY.ServedModelCampaignBinding(
+            candidate_path=Path("/opt/ullm/candidate-served-model.json"),
+            candidate_sha256="1" * 64,
+            claim_path=Path("/opt/ullm/campaign-claim.json"),
+            claim_sha256="2" * 64,
+            authorization_path=Path("/opt/ullm/campaign-authorization.json"),
+            authorization_sha256="3" * 64,
+        )
+        validator = FakeIndependentValidator()
+        validator.source_count = PREPARE.EXPECTED_SOURCE_COUNT_V2
+
+        self.run_build(
+            validator=validator,
+            served_model_binding=binding,
+        )
+
+        self.assertEqual(
+            validator.trusted_v2_anchors,
+            (
+                binding.candidate_sha256,
+                binding.claim_sha256,
+                binding.authorization_sha256,
+            ),
+        )
 
     def test_operational_expectation_uses_live_identity_and_fixed_endpoints(
         self,

@@ -23,6 +23,9 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 VALIDATOR_PATH = REPO_ROOT / "tools" / "validate-sq8-openwebui-release.py"
 GIT_COMMIT = "a" * 40
 WORKER_SHA256 = "b" * 64
+V2_CANDIDATE_SHA256 = "c" * 64
+V2_CLAIM_SHA256 = "d" * 64
+V2_AUTHORIZATION_SHA256 = "e" * 64
 BOOT_ID = "11111111111111111111111111111111"
 RUN_ID = "synthetic-openwebui-release"
 
@@ -112,13 +115,25 @@ def identity_canonical(value) -> bytes:
     )
 
 
-def build_identity_documents() -> tuple[dict[str, Any], dict[str, Any]]:
+def build_identity_documents(
+    *, v2: bool = False
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    role_paths = (
+        VALIDATOR.EXPECTED_SOURCE_ROLE_PATHS_V2
+        if v2
+        else VALIDATOR.EXPECTED_SOURCE_ROLE_PATHS
+    )
+    source_groups = (
+        VALIDATOR.EXPECTED_SOURCE_GROUPS_V2
+        if v2
+        else VALIDATOR.EXPECTED_SOURCE_GROUPS
+    )
     source_entries = []
     fixed_sources = {
         **VALIDATOR.EXPECTED_ORACLE_FILE_IDENTITIES,
         **VALIDATOR.EXPECTED_TTFT_FIXTURE_IDENTITIES,
     }
-    for role, path in VALIDATOR.EXPECTED_SOURCE_ROLE_PATHS.items():
+    for role, path in role_paths.items():
         if role in fixed_sources:
             expected = fixed_sources[role]
             entry = {
@@ -142,7 +157,7 @@ def build_identity_documents() -> tuple[dict[str, Any], dict[str, Any]]:
         group: sha256_bytes(
             identity_canonical([by_role[role] for role in sorted(roles)])
         )
-        for group, roles in VALIDATOR.EXPECTED_SOURCE_GROUPS.items()
+        for group, roles in source_groups.items()
     }
     worker_binary = "/opt/ullm/bin/ullm-sq8-worker"
     product_root = "/opt/ullm/product/qwen3-14b-sq8"
@@ -158,7 +173,11 @@ def build_identity_documents() -> tuple[dict[str, Any], dict[str, Any]]:
         "sha256": by_role["systemd_environment_contract"]["sha256"],
     }
     environment = {
-        "schema_version": VALIDATOR.ENVIRONMENT_SCHEMA,
+        "schema_version": (
+            VALIDATOR.ENVIRONMENT_SCHEMA_V2
+            if v2
+            else VALIDATOR.ENVIRONMENT_SCHEMA
+        ),
         "record_type": "environment",
         "captured_utc": "2026-07-11T12:00:00Z",
         "git": {
@@ -310,7 +329,11 @@ def build_identity_documents() -> tuple[dict[str, Any], dict[str, Any]]:
         "verified": True,
     }
     model_identity = {
-        "schema_version": VALIDATOR.MODEL_IDENTITY_SCHEMA,
+        "schema_version": (
+            VALIDATOR.MODEL_IDENTITY_SCHEMA_V2
+            if v2
+            else VALIDATOR.MODEL_IDENTITY_SCHEMA
+        ),
         "record_type": "model_identity",
         "model": {
             "upstream_id": VALIDATOR.UPSTREAM_MODEL_ID,
@@ -348,7 +371,11 @@ def build_identity_documents() -> tuple[dict[str, Any], dict[str, Any]]:
             "binary_bytes": environment["service"]["worker"]["executable_bytes"],
             "binary_sha256": WORKER_SHA256,
             "source_sha256": source_sets["worker"],
-            "protocol_schema": VALIDATOR.WORKER_PROTOCOL_SCHEMA,
+            "protocol_schema": (
+                VALIDATOR.WORKER_PROTOCOL_SCHEMA_V2
+                if v2
+                else VALIDATOR.WORKER_PROTOCOL_SCHEMA
+            ),
             "device_architecture": VALIDATOR.DEVICE_ARCHITECTURE,
             "execution_profile": VALIDATOR.EXECUTION_PROFILE,
             "context_length": VALIDATOR.CONTEXT_LENGTH,
@@ -359,6 +386,28 @@ def build_identity_documents() -> tuple[dict[str, Any], dict[str, Any]]:
             "package_manifest_sha256": package["manifest_sha256"],
         },
     }
+    if v2:
+        model_identity["served_model_manifest"] = {
+            "artifact": "candidate-served-model.json",
+            "source_path": "/opt/ullm/candidate-served-model.json",
+            "bytes": 4096,
+            "sha256": V2_CANDIDATE_SHA256,
+            "schema_version": "ullm.served_model.v2",
+            "model_id": VALIDATOR.SERVED_MODEL_ID,
+            "model_revision": VALIDATOR.MODEL_REVISION,
+            "format_id": "SQ8_0",
+            "worker_protocol": VALIDATOR.WORKER_PROTOCOL_SCHEMA_V2,
+            "worker_binary_sha256": WORKER_SHA256,
+            "promotion_source_commit": GIT_COMMIT,
+            "promotion_receipt_sha256": "f" * 64,
+        }
+        model_identity["campaign_authorization_claim"] = {
+            "path": "/opt/ullm/campaign-claim.json",
+            "bytes": 2048,
+            "sha256": V2_CLAIM_SHA256,
+            "authorization_path": "/opt/ullm/campaign-authorization.json",
+            "authorization_sha256": V2_AUTHORIZATION_SHA256,
+        }
     return environment, model_identity
 
 
@@ -2751,22 +2800,37 @@ class CampaignIdentityValidationTest(unittest.TestCase):
             identity_canonical(self.model_identity)
         )
 
+    def source_contract(
+        self,
+    ) -> tuple[dict[str, str], dict[str, tuple[str, ...]]]:
+        if self.environment["schema_version"] == VALIDATOR.ENVIRONMENT_SCHEMA_V2:
+            return (
+                VALIDATOR.EXPECTED_SOURCE_ROLE_PATHS_V2,
+                VALIDATOR.EXPECTED_SOURCE_GROUPS_V2,
+            )
+        return (
+            VALIDATOR.EXPECTED_SOURCE_ROLE_PATHS,
+            VALIDATOR.EXPECTED_SOURCE_GROUPS,
+        )
+
     def refresh_source_sets(self) -> None:
+        _role_paths, source_groups = self.source_contract()
         by_role = {item["role"]: item for item in self.environment["sources"]}
         self.environment["source_sets"] = {
             group: sha256_bytes(
                 identity_canonical([by_role[role] for role in sorted(roles)])
             )
-            for group, roles in VALIDATOR.EXPECTED_SOURCE_GROUPS.items()
+            for group, roles in source_groups.items()
         }
 
     def build_source_checkout(self) -> tuple[Path, str]:
+        role_paths, _source_groups = self.source_contract()
         repo = Path(self.temporary.name) / "source-checkout"
         fixed_sources = {
             **VALIDATOR.EXPECTED_ORACLE_FILE_IDENTITIES,
             **VALIDATOR.EXPECTED_TTFT_FIXTURE_IDENTITIES,
         }
-        for role, relative in VALIDATOR.EXPECTED_SOURCE_ROLE_PATHS.items():
+        for role, relative in role_paths.items():
             path = repo / relative
             path.parent.mkdir(parents=True, exist_ok=True)
             raw = (
@@ -2804,10 +2868,18 @@ class CampaignIdentityValidationTest(unittest.TestCase):
     def validate(
         self, *, commit: str = GIT_COMMIT, worker_sha: str = WORKER_SHA256
     ) -> Any:
+        arguments: dict[str, Any] = {}
+        if self.model_identity["schema_version"] == VALIDATOR.MODEL_IDENTITY_SCHEMA_V2:
+            arguments = {
+                "expected_served_model_manifest_sha256": V2_CANDIDATE_SHA256,
+                "expected_authorization_claim_sha256": V2_CLAIM_SHA256,
+                "expected_authorization_sha256": V2_AUTHORIZATION_SHA256,
+            }
         return VALIDATOR.validate_campaign_identity(
             self.root,
             expected_commit=commit,
             expected_worker_binary_sha256=worker_sha,
+            **arguments,
         )
 
     def assert_invalid(self, text: str) -> None:
@@ -2828,6 +2900,81 @@ class CampaignIdentityValidationTest(unittest.TestCase):
             sha256_file(self.root / "environment.json"),
         )
 
+    def test_v2_identity_requires_the_independent_79_role_contract(self) -> None:
+        self.environment, self.model_identity = build_identity_documents(v2=True)
+        self.write_documents()
+
+        result = self.validate()
+
+        self.assertEqual(
+            result.environment["schema_version"],
+            VALIDATOR.ENVIRONMENT_SCHEMA_V2,
+        )
+        self.assertEqual(
+            result.model_identity["schema_version"],
+            VALIDATOR.MODEL_IDENTITY_SCHEMA_V2,
+        )
+        self.assertEqual(
+            set(result.source_by_role),
+            set(VALIDATOR.EXPECTED_SOURCE_ROLE_PATHS_V2),
+        )
+        self.assertEqual(len(result.source_by_role), 79)
+        self.assertEqual(
+            result.model_worker["source_sha256"],
+            result.source_sets["worker"],
+        )
+
+    def test_environment_and_model_identity_schema_lineages_cannot_be_mixed(
+        self,
+    ) -> None:
+        v1_environment, v1_model = build_identity_documents()
+        v2_environment, v2_model = build_identity_documents(v2=True)
+        for environment, model in (
+            (v1_environment, v2_model),
+            (v2_environment, v1_model),
+        ):
+            with self.subTest(
+                environment=environment["schema_version"],
+                model=model["schema_version"],
+            ):
+                self.environment = deepcopy(environment)
+                self.model_identity = deepcopy(model)
+                self.write_documents()
+                with self.assertRaisesRegex(
+                    VALIDATOR.ValidationError,
+                    "schema lineage differs",
+                ):
+                    self.validate()
+
+    def test_v2_checkout_rejects_every_reasoning_source_and_spec_mutation(
+        self,
+    ) -> None:
+        self.environment, self.model_identity = build_identity_documents(v2=True)
+        repo, commit = self.build_source_checkout()
+        self.environment["git"]["commit"] = commit
+        self.write_documents()
+        identity = self.validate(commit=commit)
+        required = (
+            *VALIDATOR.V2_REASONING_SOURCE_ROLES,
+            *VALIDATOR.V2_RELEASE_SPEC_ROLES,
+        )
+
+        for role in required:
+            path = repo / VALIDATOR.EXPECTED_SOURCE_ROLE_PATHS_V2[role]
+            original = path.read_bytes()
+            path.write_bytes(original + b"mutated\n")
+            try:
+                with self.subTest(role=role), self.assertRaisesRegex(
+                    VALIDATOR.ValidationError,
+                    "trusted Git blob",
+                ):
+                    VALIDATOR.validate_campaign_source_checkout(
+                        identity,
+                        repo_root=repo,
+                    )
+            finally:
+                path.write_bytes(original)
+
     def test_source_contract_map_and_groups_match_producer(self) -> None:
         generator_path = REPO_ROOT / "tools" / "sq8_full_campaign_identity.py"
         spec = importlib.util.spec_from_file_location(
@@ -2844,6 +2991,22 @@ class CampaignIdentityValidationTest(unittest.TestCase):
         self.assertEqual(
             VALIDATOR.EXPECTED_SOURCE_GROUPS,
             module.SOURCE_GROUPS,
+        )
+        self.assertEqual(
+            VALIDATOR.EXPECTED_SOURCE_ROLE_PATHS_V2,
+            module.SOURCE_ROLE_PATHS_V2,
+        )
+        self.assertEqual(
+            VALIDATOR.EXPECTED_SOURCE_GROUPS_V2,
+            module.SOURCE_GROUPS_V2,
+        )
+        self.assertEqual(
+            VALIDATOR.V2_REASONING_SOURCE_ROLES,
+            module.V2_REASONING_SOURCE_ROLES,
+        )
+        self.assertEqual(
+            VALIDATOR.V2_RELEASE_SPEC_ROLES,
+            module.V2_RELEASE_SPEC_ROLES,
         )
         self.assertEqual(
             VALIDATOR.EXPECTED_TTFT_FIXTURE_IDENTITIES,

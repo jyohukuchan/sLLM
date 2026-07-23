@@ -22,6 +22,7 @@ from typing import Any, NamedTuple, NoReturn, Protocol, Sequence, cast
 
 
 ENVIRONMENT_SCHEMA = "ullm.sq8.full_campaign.environment.v1"
+ENVIRONMENT_SCHEMA_V2 = "ullm.sq8.full_campaign.environment.v2"
 MODEL_IDENTITY_SCHEMA = "ullm.sq8.full_campaign.model_identity.v1"
 MODEL_IDENTITY_SCHEMA_V2 = "ullm.sq8.full_campaign.model_identity.v2"
 PROMOTION_SCHEMA = "ullm.sq8_product_promotion.v1"
@@ -247,6 +248,72 @@ SOURCE_GROUPS = {
     ),
     "all": tuple(SOURCE_ROLE_PATHS),
 }
+
+# The v1 source contract is frozen because existing 2026-07-12 campaign evidence
+# hashes its exact role/path set.  A served-model v2 campaign uses the independent
+# v2 contract below so the reasoning implementation and every ratified v2 release
+# specification are part of the campaign identity without reinterpreting v1.
+SOURCE_ROLE_PATHS_V2 = {
+    **SOURCE_ROLE_PATHS,
+    "gateway_reasoning": (
+        "services/openai-gateway/src/ullm_openai_gateway/reasoning.py"
+    ),
+    "gateway_served_model": (
+        "services/openai-gateway/src/ullm_openai_gateway/served_model.py"
+    ),
+    "worker_reasoning": "crates/ullm-engine/src/reasoning.rs",
+    "worker_served_model": "crates/ullm-engine/src/served_model.rs",
+    "worker_sampling": "crates/ullm-engine/src/sq8_sampling.rs",
+    "worker_serving_runtime": "crates/ullm-engine/src/sq8_serving_runtime.rs",
+    "spec_served_model_manifest": "docs/specs/served-model-manifest-v0.2.md",
+    "spec_serving_session": "docs/specs/sq8-serving-session-v0.2.md",
+    "spec_worker_acceptance": "docs/specs/sq8-worker-acceptance-v0.3.md",
+}
+SOURCE_ROLE_PATHS_V2["spec_release"] = "docs/specs/sq8-openwebui-release-v0.2.md"
+SOURCE_ROLE_PATHS_V2["spec_worker_protocol"] = (
+    "docs/specs/sq8-worker-protocol-v0.2.md"
+)
+
+SOURCE_GROUPS_V2 = {
+    **SOURCE_GROUPS,
+    "gateway": (
+        *SOURCE_GROUPS["gateway"],
+        "gateway_reasoning",
+        "gateway_served_model",
+    ),
+    "worker": (
+        *SOURCE_GROUPS["worker"],
+        "worker_reasoning",
+        "worker_served_model",
+        "worker_sampling",
+        "worker_serving_runtime",
+    ),
+    "spec": (
+        "spec_served_model_manifest",
+        "spec_release",
+        "spec_openai_chat_subset",
+        "spec_serving_session",
+        "spec_worker_acceptance",
+        "spec_worker_protocol",
+    ),
+    "all": tuple(SOURCE_ROLE_PATHS_V2),
+}
+
+V2_REASONING_SOURCE_ROLES = (
+    "gateway_reasoning",
+    "gateway_served_model",
+    "worker_reasoning",
+    "worker_served_model",
+    "worker_sampling",
+    "worker_serving_runtime",
+)
+V2_RELEASE_SPEC_ROLES = (
+    "spec_served_model_manifest",
+    "spec_release",
+    "spec_serving_session",
+    "spec_worker_acceptance",
+    "spec_worker_protocol",
+)
 
 TTFT_FIXTURE_IDENTITIES = {
     "fixture_ttft_p0032": {
@@ -871,12 +938,37 @@ def _validate_source_contract(
         fail("source group coverage differs")
 
 
-def default_source_specs(repo_root: Path) -> tuple[SourceFileSpec, ...]:
-    _validate_source_contract()
+def _source_contract_for_model_identity_schema(
+    schema_version: str,
+) -> tuple[dict[str, str], dict[str, tuple[str, ...]], str]:
+    if schema_version == MODEL_IDENTITY_SCHEMA:
+        return SOURCE_ROLE_PATHS, SOURCE_GROUPS, ENVIRONMENT_SCHEMA
+    if schema_version == MODEL_IDENTITY_SCHEMA_V2:
+        return SOURCE_ROLE_PATHS_V2, SOURCE_GROUPS_V2, ENVIRONMENT_SCHEMA_V2
+    fail("model identity source-contract schema differs")
+
+
+def _source_contract_for_environment_schema(
+    schema_version: Any,
+) -> tuple[dict[str, str], dict[str, tuple[str, ...]]]:
+    if schema_version == ENVIRONMENT_SCHEMA:
+        return SOURCE_ROLE_PATHS, SOURCE_GROUPS
+    if schema_version == ENVIRONMENT_SCHEMA_V2:
+        return SOURCE_ROLE_PATHS_V2, SOURCE_GROUPS_V2
+    fail("environment source-contract schema differs")
+
+
+def default_source_specs(
+    repo_root: Path, *, model_identity_schema: str = MODEL_IDENTITY_SCHEMA
+) -> tuple[SourceFileSpec, ...]:
+    role_paths, groups, _environment_schema = (
+        _source_contract_for_model_identity_schema(model_identity_schema)
+    )
+    _validate_source_contract(role_paths, groups)
     root = Path(os.path.abspath(repo_root))
     return tuple(
         SourceFileSpec(role, relative, root / relative)
-        for role, relative in SOURCE_ROLE_PATHS.items()
+        for role, relative in role_paths.items()
     )
 
 
@@ -1692,18 +1784,26 @@ def _source_aggregate(
 def _validate_source_specs(
     inputs: IdentityBuildInputs,
 ) -> tuple[SourceFileSpec, ...]:
-    _validate_source_contract()
+    schema_version = (
+        MODEL_IDENTITY_SCHEMA_V2
+        if inputs.served_model_binding is not None
+        else MODEL_IDENTITY_SCHEMA
+    )
+    role_paths, groups, _environment_schema = (
+        _source_contract_for_model_identity_schema(schema_version)
+    )
+    _validate_source_contract(role_paths, groups)
     if type(inputs.source_specs) is not tuple:
         fail("source specs must be an immutable tuple")
     roles = [spec.role for spec in inputs.source_specs]
-    if len(roles) != len(set(roles)) or set(roles) != set(SOURCE_ROLE_PATHS):
+    if len(roles) != len(set(roles)) or set(roles) != set(role_paths):
         fail("full campaign source role set differs")
     repo_root = Path(os.path.abspath(inputs.repo_root))
     result: list[SourceFileSpec] = []
     for spec in inputs.source_specs:
         if not isinstance(spec, SourceFileSpec):
             fail("full campaign source spec type differs")
-        expected_logical = SOURCE_ROLE_PATHS[spec.role]
+        expected_logical = role_paths[spec.role]
         if (
             spec.logical_path != expected_logical
             or Path(os.path.abspath(spec.path)) != repo_root / expected_logical
@@ -2117,7 +2217,11 @@ def _environment_document(
     environment_file: _PinnedFile,
 ) -> dict[str, Any]:
     return {
-        "schema_version": ENVIRONMENT_SCHEMA,
+        "schema_version": (
+            ENVIRONMENT_SCHEMA_V2
+            if inputs.served_model_binding is not None
+            else ENVIRONMENT_SCHEMA
+        ),
         "record_type": "environment",
         "captured_utc": inputs.captured_utc,
         "git": {
@@ -2448,6 +2552,14 @@ def build_identity_artifacts(
         fail("Git status identity exceeds its bound")
     scanner = _SecretScanner(inputs.forbidden_values)
     scanner.consume(inputs.git_status_raw)
+    model_identity_schema = (
+        MODEL_IDENTITY_SCHEMA_V2
+        if inputs.served_model_binding is not None
+        else MODEL_IDENTITY_SCHEMA
+    )
+    role_paths, source_groups, expected_environment_schema = (
+        _source_contract_for_model_identity_schema(model_identity_schema)
+    )
     specs = _validate_source_specs(inputs)
     pins = _PinSet()
     try:
@@ -2480,7 +2592,7 @@ def build_identity_artifacts(
         )
         source_sets = {
             group: _source_aggregate(source_entries_by_role, roles)
-            for group, roles in SOURCE_GROUPS.items()
+            for group, roles in source_groups.items()
         }
         unit_file = pins.open(
             inputs.effective_service_unit,
@@ -2628,7 +2740,11 @@ def build_identity_artifacts(
         validate_environment_document(environment)
         validate_model_identity_document(model_identity)
         if (
-            environment["source_sets"]["worker"]
+            environment["schema_version"] != expected_environment_schema
+            or model_identity["schema_version"] != model_identity_schema
+            or set(source_entries_by_role) != set(role_paths)
+            or set(source_sets) != set(source_groups)
+            or environment["source_sets"]["worker"]
             != model_identity["worker"]["source_sha256"]
             or environment["service"]["worker"]["executable_sha256"]
             != model_identity["worker"]["binary_sha256"]
@@ -2713,7 +2829,6 @@ def _validate_process_document(value: Any, label: str) -> dict[str, Any]:
 
 
 def validate_environment_document(value: Any) -> dict[str, Any]:
-    _validate_source_contract()
     document = _exact(
         value,
         {
@@ -2731,10 +2846,11 @@ def validate_environment_document(value: Any) -> dict[str, Any]:
         "environment document",
     )
     _reject_key_recursive(document, "passed")
-    if (
-        document["schema_version"] != ENVIRONMENT_SCHEMA
-        or document["record_type"] != "environment"
-    ):
+    role_paths, source_groups = _source_contract_for_environment_schema(
+        document["schema_version"]
+    )
+    _validate_source_contract(role_paths, source_groups)
+    if document["record_type"] != "environment":
         fail("environment schema or record type differs")
     _validate_timestamp(document["captured_utc"], "environment captured_utc")
     git = _exact(
@@ -2747,7 +2863,7 @@ def validate_environment_document(value: Any) -> dict[str, Any]:
     _sha(git["status_sha256"], "environment Git status SHA-256")
 
     sources = document["sources"]
-    if type(sources) is not list or len(sources) != len(SOURCE_ROLE_PATHS):
+    if type(sources) is not list or len(sources) != len(role_paths):
         fail("environment source list count differs")
     by_role: dict[str, dict[str, Any]] = {}
     paths: list[str] = []
@@ -2760,16 +2876,16 @@ def validate_environment_document(value: Any) -> dict[str, Any]:
         role = _safe_text(entry["role"], f"environment source {index}.role")
         path = _safe_text(entry["path"], f"environment source {index}.path")
         if (
-            role not in SOURCE_ROLE_PATHS
+            role not in role_paths
             or role in by_role
-            or path != SOURCE_ROLE_PATHS[role]
+            or path != role_paths[role]
         ):
             fail("environment source role or path differs")
         _integer(entry["bytes"], f"environment source {index}.bytes", minimum=1)
         _sha(entry["sha256"], f"environment source {index}.sha256")
         by_role[role] = entry
         paths.append(path)
-    if set(by_role) != set(SOURCE_ROLE_PATHS) or paths != sorted(
+    if set(by_role) != set(role_paths) or paths != sorted(
         paths, key=lambda item: item.encode("utf-8")
     ):
         fail("environment sources are not the exact bytewise-sorted set")
@@ -2778,9 +2894,9 @@ def validate_environment_document(value: Any) -> dict[str, Any]:
         if any(source[key] != expected[key] for key in ("path", "bytes", "sha256")):
             fail("environment TTFT fixture source differs")
     source_sets = _exact(
-        document["source_sets"], set(SOURCE_GROUPS), "environment source sets"
+        document["source_sets"], set(source_groups), "environment source sets"
     )
-    for group, roles in SOURCE_GROUPS.items():
+    for group, roles in source_groups.items():
         digest = _sha(source_sets[group], f"environment source set {group}")
         if digest != _source_aggregate(by_role, roles):
             fail("environment source set aggregate differs")
@@ -3510,8 +3626,15 @@ def write_identity_artifacts(
 
 __all__ = [
     "ENVIRONMENT_SCHEMA",
+    "ENVIRONMENT_SCHEMA_V2",
     "MODEL_IDENTITY_SCHEMA",
     "MODEL_IDENTITY_SCHEMA_V2",
+    "SOURCE_GROUPS",
+    "SOURCE_GROUPS_V2",
+    "SOURCE_ROLE_PATHS",
+    "SOURCE_ROLE_PATHS_V2",
+    "V2_REASONING_SOURCE_ROLES",
+    "V2_RELEASE_SPEC_ROLES",
     "HardwareExpectation",
     "IdentityArtifacts",
     "IdentityBuildInputs",
