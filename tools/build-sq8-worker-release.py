@@ -18,6 +18,7 @@ from typing import Any, Callable, Sequence
 
 
 RECEIPT_SCHEMA = "ullm.sq8_worker_build_receipt.v1"
+PROVENANCE_SCHEMA = "ullm.sq8_worker_build_provenance.v1"
 SEAL_SCHEMA = "ullm.sq8_worker_release_seal.v1"
 GIT_RE = re.compile(r"[0-9a-f]{40}\Z")
 MAX_TEXT_BYTES = 1_048_576
@@ -376,6 +377,42 @@ def build_release(
     receipt = {
         "schema_version": RECEIPT_SCHEMA,
         "source": {
+            "repository_root": os.fspath(repo_root),
+            "commit": commit,
+            "tree": tree,
+            "detached": True,
+            "worktree_clean": True,
+            "status_sha256": hashlib.sha256(b"").hexdigest(),
+        },
+        "build": {
+            "argv": [cargo, *BUILD_ARGUMENTS],
+            "environment": {
+                **BUILD_OVERRIDES,
+                "CARGO_TARGET_DIR": os.fspath(target_directory),
+                "SOURCE_DATE_EPOCH": str(source_date_epoch),
+                "RUSTC_WRAPPER": None,
+            },
+            "result": "success",
+        },
+        "inputs": [
+            {"path": relative, "sha256": inputs[relative]["sha256"]}
+            for relative in sorted(inputs, key=lambda value: value.encode("utf-8"))
+        ],
+        "worker": {
+            "path": os.fspath(worker_output),
+            "bytes": worker_bytes,
+            "mode": "0555",
+            "nlink": 1,
+            "sha256": worker_sha256,
+        },
+    }
+    receipt_raw = canonical_json(receipt)
+    receipt_path = output / "build-receipt.json"
+    _exclusive_write(receipt_path, receipt_raw, 0o444)
+    provenance = {
+        "schema_version": PROVENANCE_SCHEMA,
+        "source": {
+            "repository_root": os.fspath(repo_root),
             "commit": commit,
             "tree": tree,
             "detached": True,
@@ -384,37 +421,28 @@ def build_release(
             "inputs": inputs,
         },
         "build": {
-            "argv": [os.fspath(Path(cargo).resolve(strict=True)), *BUILD_ARGUMENTS],
+            "argv": [cargo, *BUILD_ARGUMENTS],
             "working_directory": os.fspath(repo_root),
             "target_directory": os.fspath(target_directory),
-            "environment_overrides": {
-                **BUILD_OVERRIDES,
-                "CARGO_TARGET_DIR": os.fspath(target_directory),
-                "SOURCE_DATE_EPOCH": str(source_date_epoch),
-            },
+            "environment": receipt["build"]["environment"],
             "ambient_environment_hermetic": False,
             "ambient_compile_overrides_rejected": sorted(
                 DISALLOWED_BUILD_ENVIRONMENT
             ),
             "started_unix_ns": started_ns,
             "finished_unix_ns": finished_ns,
-            "result": "success",
             "toolchain": toolchain,
+            "result": "success",
         },
         "worker": {
-            "path": "ullm-sq8-worker",
-            "bytes": worker_bytes,
-            "mode": "0555",
-            "nlink": 1,
-            "sha256": worker_sha256,
+            **receipt["worker"],
             "protocol": "ullm.worker.v2",
             "format_id": "SQ8_0",
             "model_id": "ullm-qwen3-14b-sq8",
         },
     }
-    receipt_raw = canonical_json(receipt)
-    receipt_path = output / "build-receipt.json"
-    _exclusive_write(receipt_path, receipt_raw, 0o444)
+    provenance_path = output / "build-provenance.json"
+    _exclusive_write(provenance_path, canonical_json(provenance), 0o444)
     readme = (
         "# SQ8_0 v2 worker release\n\n"
         "This directory is a build artifact, not an activation authorization.\n"
@@ -422,7 +450,12 @@ def build_release(
         f"Worker SHA-256: `{worker_sha256}`\n"
     ).encode("ascii")
     _exclusive_write(output / "README.md", readme, 0o444)
-    members = ("README.md", "build-receipt.json", "ullm-sq8-worker")
+    members = (
+        "README.md",
+        "build-provenance.json",
+        "build-receipt.json",
+        "ullm-sq8-worker",
+    )
     sums = "".join(f"{sha256_file(output / name)}  {name}\n" for name in members).encode(
         "ascii"
     )
@@ -433,6 +466,7 @@ def build_release(
         "source_tree": tree,
         "worker_sha256": worker_sha256,
         "build_receipt_sha256": sha256_file(receipt_path),
+        "build_provenance_sha256": sha256_file(provenance_path),
         "sha256sums_sha256": sha256_bytes(sums),
         "complete": True,
     }
@@ -448,7 +482,13 @@ def build_release(
         or any(
             (output / name).stat().st_nlink != 1
             or stat.S_IMODE((output / name).stat().st_mode) != 0o444
-            for name in ("README.md", "build-receipt.json", "SHA256SUMS", "SEALED.json")
+            for name in (
+                "README.md",
+                "build-provenance.json",
+                "build-receipt.json",
+                "SHA256SUMS",
+                "SEALED.json",
+            )
         )
     ):
         raise BuildError("sealed release metadata differs after publication")
