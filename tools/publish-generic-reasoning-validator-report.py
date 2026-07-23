@@ -25,6 +25,15 @@ from typing import Any
 
 
 ROOT = Path(__file__).resolve().parents[1]
+TOOLS = ROOT / "tools"
+if os.fspath(TOOLS) not in sys.path:
+    sys.path.insert(0, os.fspath(TOOLS))
+
+from served_model_active_binding import (  # noqa: E402
+    ActiveBindingError,
+    stable_read_regular,
+)
+
 RELEASE_VALIDATOR = ROOT / "tools/validate-generic-reasoning-release.py"
 BROWSER_VALIDATOR = (
     ROOT / "tools/validate-openwebui-reasoning-browser-smoke.py"
@@ -64,61 +73,24 @@ def _reject_constant(_value: str) -> None:
     raise ReportPublicationError("evidence contains a non-finite number")
 
 
-def _identity(metadata: os.stat_result) -> tuple[int, ...]:
-    return (
-        metadata.st_dev,
-        metadata.st_ino,
-        metadata.st_mode,
-        metadata.st_nlink,
-        metadata.st_uid,
-        metadata.st_gid,
-        metadata.st_size,
-        metadata.st_mtime_ns,
-        metadata.st_ctime_ns,
-    )
-
-
 def _stable_read_immutable(path: Path, label: str, maximum: int) -> bytes:
     if not path.is_absolute() or Path(os.path.abspath(path)) != path:
         raise ReportPublicationError(f"{label} path is not canonical absolute")
-    flags = os.O_RDONLY | os.O_CLOEXEC
-    if not hasattr(os, "O_NOFOLLOW"):
-        raise ReportPublicationError("O_NOFOLLOW is required")
-    flags |= os.O_NOFOLLOW
     try:
-        descriptor = os.open(path, flags)
-    except OSError as error:
-        raise ReportPublicationError(f"{label} is unavailable") from error
-    try:
-        before = os.fstat(descriptor)
-        if (
-            not stat.S_ISREG(before.st_mode)
-            or stat.S_IMODE(before.st_mode) != 0o444
-            or before.st_nlink != 1
-            or before.st_size < 1
-            or before.st_size > maximum
-        ):
-            raise ReportPublicationError(f"{label} identity differs")
-        raw = bytearray()
-        while len(raw) <= maximum:
-            chunk = os.read(descriptor, min(1 << 20, maximum + 1 - len(raw)))
-            if not chunk:
-                break
-            raw.extend(chunk)
-        after = os.fstat(descriptor)
-        try:
-            named = path.lstat()
-        except OSError as error:
-            raise ReportPublicationError(f"{label} pathname changed") from error
-        if (
-            len(raw) != before.st_size
-            or _identity(before) != _identity(after)
-            or _identity(after) != _identity(named)
-        ):
-            raise ReportPublicationError(f"{label} changed while read")
-        return bytes(raw)
-    finally:
-        os.close(descriptor)
+        snapshot = stable_read_regular(
+            path,
+            label,
+            maximum=maximum,
+            require_single_link=True,
+            require_read_only=True,
+        )
+    except ActiveBindingError as error:
+        raise ReportPublicationError(
+            f"{label} identity differs or is unavailable"
+        ) from error
+    if stat.S_IMODE(snapshot.identity.mode) != 0o444:
+        raise ReportPublicationError(f"{label} identity differs")
+    return snapshot.raw
 
 
 def _strict_object(raw: bytes, label: str) -> dict[str, Any]:
