@@ -18,6 +18,7 @@ from typing import Any, Sequence
 
 ROOT = Path(__file__).resolve().parents[1]
 LOADER_PATH = ROOT / "services/openai-gateway/src/ullm_openai_gateway/served_model.py"
+SQ8_PROMOTION_PATH = ROOT / "tools/sq8_serving_promotion.py"
 PROFILE_SCHEMA = "ullm.served_model.profile.v1"
 AQ4_EVIDENCE_SCHEMA = "ullm.aq4_resident_promotion_evidence.v1"
 
@@ -192,6 +193,126 @@ def _validate_aq4_evidence(
         raise GenerationError("AQ4 promotion evidence package identity differs")
     if profile.get("worker", {}).get("protocol") == "ullm.worker.v2":
         _validate_v2_reasoning_evidence(evidence, manifest)
+
+
+def _load_sq8_promotion_validator() -> ModuleType:
+    module_name = "_ullm_sq8_serving_promotion_generator_validator"
+    existing = sys.modules.get(module_name)
+    if existing is not None:
+        return existing
+    spec = importlib.util.spec_from_file_location(module_name, SQ8_PROMOTION_PATH)
+    if spec is None or spec.loader is None:
+        raise GenerationError("SQ8 serving promotion validator is unavailable")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    try:
+        spec.loader.exec_module(module)
+    except BaseException:
+        sys.modules.pop(module_name, None)
+        raise
+    return module
+
+
+def _validate_promotion_evidence(
+    *,
+    profile_path: Path,
+    profile: dict[str, Any],
+    promotion_profile: dict[str, Any],
+    receipt: dict[str, Any],
+    receipt_path: Path,
+    source_commit: str,
+    worker_binary: Path,
+    worker_sha256: str,
+    product_root: Path,
+    package_manifest_path: str,
+    package_manifest_sha256: str,
+    manifest: dict[str, Any],
+) -> None:
+    """Dispatch current-main promotion schemas without cross-admitting formats."""
+
+    required_schema = promotion_profile.get("required_schema_version")
+    if required_schema is None:
+        # Preserve the legacy profile path.  Production AQ4/SQ8 profiles opt in
+        # to a strict receipt schema and are dispatched below.
+        return
+    format_value = profile.get("format")
+    format_id = format_value.get("format_id") if isinstance(format_value, dict) else None
+    pairing = (format_id, required_schema)
+    if pairing == ("AQ4_0", "ullm.aq4_resident_promotion.v1"):
+        _validate_aq4_evidence(
+            profile=profile,
+            promotion_profile=promotion_profile,
+            receipt=receipt,
+            receipt_path=receipt_path,
+            source_commit=source_commit,
+            worker_binary=worker_binary,
+            worker_sha256=worker_sha256,
+            product_root=product_root,
+            package_manifest_path=package_manifest_path,
+            package_manifest_sha256=package_manifest_sha256,
+        )
+        return
+    if pairing == ("SQ8_0", "ullm.sq8_serving_promotion.v1"):
+        if receipt.get("schema_version") != required_schema:
+            raise GenerationError("SQ8 serving promotion receipt schema differs")
+        evidence_path_value = _receipt_value(
+            receipt,
+            promotion_profile.get("evidence_from_receipt"),
+            "SQ8 serving promotion evidence path",
+        )
+        evidence_sha256 = _receipt_value(
+            receipt,
+            promotion_profile.get("evidence_sha256_from_receipt"),
+            "SQ8 serving promotion evidence SHA-256",
+        )
+        if (
+            len(evidence_sha256) != 64
+            or any(character not in "0123456789abcdef" for character in evidence_sha256)
+        ):
+            raise GenerationError("SQ8 serving promotion evidence SHA-256 is invalid")
+        evidence_path = _resolve_receipt_file(
+            receipt_path,
+            evidence_path_value,
+            "SQ8 serving promotion evidence path",
+        )
+        if _sha256_file(evidence_path) != evidence_sha256:
+            raise GenerationError("SQ8 serving promotion evidence SHA-256 differs")
+        try:
+            _load_sq8_promotion_validator().validate_generator_binding(
+                evidence_path=evidence_path,
+                receipt=receipt,
+                receipt_path=receipt_path,
+                profile_path=profile_path.resolve(),
+                source_commit=source_commit,
+                worker_binary=worker_binary,
+                worker_sha256=worker_sha256,
+                manifest=manifest,
+            )
+        except Exception as error:
+            raise GenerationError(
+                "SQ8 serving promotion evidence validation failed"
+            ) from error
+        return
+    raise GenerationError("profile promotion receipt schema/format pairing is unsupported")
+
+
+def _validate_promotion_dispatch(
+    profile: dict[str, Any], promotion_profile: dict[str, Any]
+) -> None:
+    """Reject cross-format promotion schemas before opening their receipt."""
+
+    required_schema = promotion_profile.get("required_schema_version")
+    if required_schema is None:
+        return
+    format_value = profile.get("format")
+    format_id = format_value.get("format_id") if isinstance(format_value, dict) else None
+    if (format_id, required_schema) not in {
+        ("AQ4_0", "ullm.aq4_resident_promotion.v1"),
+        ("SQ8_0", "ullm.sq8_serving_promotion.v1"),
+    }:
+        raise GenerationError(
+            "profile promotion receipt schema/format pairing is unsupported"
+        )
 
 
 def _validate_aq4_token_comparisons(evidence: dict[str, Any]) -> None:
@@ -375,6 +496,7 @@ def materialize(profile_path: Path) -> dict[str, Any]:
             raise GenerationError("profile.reasoning requires ullm.worker.v2")
     elif worker_profile.get("protocol") == "ullm.worker.v2":
         raise GenerationError("ullm.worker.v2 profile requires reasoning")
+    _validate_promotion_dispatch(profile, promotion_profile)
 
     tokenizer_root = Path(str(tokenizer_profile.get("root", ""))).resolve()
     tokenizer_config = _load_json(
@@ -405,18 +527,6 @@ def materialize(profile_path: Path) -> dict[str, Any]:
         receipt,
         promotion_profile.get("source_commit_from_receipt"),
         "promotion source commit",
-    )
-    _validate_aq4_evidence(
-        profile=profile,
-        promotion_profile=promotion_profile,
-        receipt=receipt,
-        receipt_path=receipt_path,
-        source_commit=source_commit,
-        worker_binary=worker_binary,
-        worker_sha256=worker_sha256,
-        product_root=product_root,
-        package_manifest_path=package_manifest_path,
-        package_manifest_sha256=package_manifest_sha256,
     )
 
     artifact_profile = product_profile.get("artifact")
@@ -480,6 +590,20 @@ def materialize(profile_path: Path) -> dict[str, Any]:
     }
     if reasoning_profile is not None:
         document["reasoning"] = reasoning_profile
+    _validate_promotion_evidence(
+        profile_path=profile_path,
+        profile=profile,
+        promotion_profile=promotion_profile,
+        receipt=receipt,
+        receipt_path=receipt_path,
+        source_commit=source_commit,
+        worker_binary=worker_binary,
+        worker_sha256=worker_sha256,
+        product_root=product_root,
+        package_manifest_path=package_manifest_path,
+        package_manifest_sha256=package_manifest_sha256,
+        manifest=document,
+    )
     return document
 
 
