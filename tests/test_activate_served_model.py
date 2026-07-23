@@ -361,12 +361,19 @@ def test_v2_activation_binds_bundle_and_rollback_identity(
         lambda: type(
             "BundleValidator",
             (),
-            {"validate": lambda _self, _path: {"gate_eligible": True}},
+            {
+                "validate": lambda _self, _path: {
+                    "schema_version": ACTIVATOR.BUNDLE_VALIDATOR_SCHEMA_V1,
+                    "input_schema_version": ACTIVATOR.BUNDLE_SCHEMA_V1,
+                    "gate_eligible": True,
+                }
+            },
         )(),
     )
     bundle.write_text(
         json.dumps(
             {
+                "schema_version": ACTIVATOR.BUNDLE_SCHEMA_V1,
                 "source_commit": "1" * 40,
                 "identity": {
                     "manifest_sha256": summary["manifest_sha256"],
@@ -416,12 +423,19 @@ def test_v2_activation_rejects_rollback_identity_mismatch(
         lambda: type(
             "BundleValidator",
             (),
-            {"validate": lambda _self, _path: {"gate_eligible": True}},
+            {
+                "validate": lambda _self, _path: {
+                    "schema_version": ACTIVATOR.BUNDLE_VALIDATOR_SCHEMA_V1,
+                    "input_schema_version": ACTIVATOR.BUNDLE_SCHEMA_V1,
+                    "gate_eligible": True,
+                }
+            },
         )(),
     )
     bundle.write_text(
         json.dumps(
             {
+                "schema_version": ACTIVATOR.BUNDLE_SCHEMA_V1,
                 "source_commit": "1" * 40,
                 "identity": {
                     "manifest_sha256": summary["manifest_sha256"],
@@ -451,6 +465,138 @@ def test_v2_activation_rejects_rollback_identity_mismatch(
         )
 
     assert active.read_bytes() == b"known-old-active"
+
+
+@pytest.mark.parametrize(
+    ("format_id", "bundle_schema", "validator_schema"),
+    [
+        (
+            ACTIVATOR.AQ4_FORMAT_ID,
+            ACTIVATOR.BUNDLE_SCHEMA_V2,
+            ACTIVATOR.BUNDLE_VALIDATOR_SCHEMA_V2,
+        ),
+        (
+            ACTIVATOR.SQ8_FORMAT_ID,
+            ACTIVATOR.BUNDLE_SCHEMA_V1,
+            ACTIVATOR.BUNDLE_VALIDATOR_SCHEMA_V1,
+        ),
+    ],
+)
+def test_v2_activation_rejects_mixed_format_bundle_versions(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    format_id: str,
+    bundle_schema: str,
+    validator_schema: str,
+) -> None:
+    bundle = tmp_path / "bundle.json"
+    bundle.write_text(
+        json.dumps({"schema_version": bundle_schema}),
+        encoding="ascii",
+    )
+    unit = tmp_path / "unit"
+    environment = tmp_path / "environment"
+    unit.write_bytes(b"unit")
+    environment.write_bytes(b"environment")
+    monkeypatch.setattr(
+        ACTIVATOR,
+        "load_bundle_validator",
+        lambda: type(
+            "BundleValidator",
+            (),
+            {
+                "validate": lambda _self, _path: {
+                    "schema_version": validator_schema,
+                    "input_schema_version": bundle_schema,
+                    "gate_eligible": True,
+                }
+            },
+        )(),
+    )
+
+    with pytest.raises(ACTIVATOR.ActivationError, match="schema/format pairing"):
+        ACTIVATOR._validate_release_bundle(
+            bundle,
+            candidate_raw=json.dumps(
+                {
+                    "schema_version": "ullm.served_model.v2",
+                    "promotion": {"source_commit": "1" * 40},
+                }
+            ).encode("ascii"),
+            candidate_summary={
+                "format_id": format_id,
+                "manifest_sha256": "a" * 64,
+                "worker": {"binary_sha256": "b" * 64},
+            },
+            active_raw=b"active",
+            systemd_unit=unit,
+            environment_file=environment,
+        )
+
+
+def test_sq8_v2_activation_accepts_only_bundle_v2_dispatch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    active_raw = b"active"
+    unit = tmp_path / "unit"
+    environment = tmp_path / "environment"
+    unit.write_bytes(b"unit")
+    environment.write_bytes(b"environment")
+    bundle = tmp_path / "bundle-v2.json"
+    bundle.write_text(
+        json.dumps(
+            {
+                "schema_version": ACTIVATOR.BUNDLE_SCHEMA_V2,
+                "source_commit": "1" * 40,
+                "identity": {
+                    "manifest_sha256": "a" * 64,
+                    "worker_binary_sha256": "b" * 64,
+                },
+                "rollback_target": {
+                    "manifest_sha256": hashlib.sha256(active_raw).hexdigest(),
+                    "systemd_unit_sha256": hashlib.sha256(unit.read_bytes()).hexdigest(),
+                    "environment_sha256": hashlib.sha256(
+                        environment.read_bytes()
+                    ).hexdigest(),
+                },
+            }
+        ),
+        encoding="ascii",
+    )
+    monkeypatch.setattr(
+        ACTIVATOR,
+        "load_bundle_validator",
+        lambda: type(
+            "BundleValidator",
+            (),
+            {
+                "validate": lambda _self, _path: {
+                    "schema_version": ACTIVATOR.BUNDLE_VALIDATOR_SCHEMA_V2,
+                    "input_schema_version": ACTIVATOR.BUNDLE_SCHEMA_V2,
+                    "gate_eligible": True,
+                }
+            },
+        )(),
+    )
+
+    ACTIVATOR._validate_release_bundle(
+        bundle,
+        candidate_raw=json.dumps(
+            {
+                "schema_version": "ullm.served_model.v2",
+                "promotion": {"source_commit": "1" * 40},
+            }
+        ).encode("ascii"),
+        candidate_summary={
+            "format_id": ACTIVATOR.SQ8_FORMAT_ID,
+            "manifest_sha256": "a" * 64,
+            "worker": {"binary_sha256": "b" * 64},
+        },
+        active_raw=active_raw,
+        systemd_unit=unit,
+        environment_file=environment,
+    )
 
 
 def test_v2_activation_accepts_real_complete_bundle_binding(tmp_path: Path) -> None:

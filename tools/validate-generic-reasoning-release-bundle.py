@@ -7,22 +7,50 @@ import argparse
 import hashlib
 import importlib.util
 import json
+import os
 import re
+import stat
 import sys
+import tempfile
 from pathlib import Path
 from types import ModuleType
 from typing import Any, Sequence
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SCHEMA_VERSION = "ullm.generic_reasoning_release_bundle.v1"
-VALIDATOR_SCHEMA_VERSION = "ullm.generic_reasoning_release_bundle_validator.v1"
+SCHEMA_VERSION_V1 = "ullm.generic_reasoning_release_bundle.v1"
+SCHEMA_VERSION_V2 = "ullm.generic_reasoning_release_bundle.v2"
+SCHEMA_VERSION = SCHEMA_VERSION_V1
+VALIDATOR_SCHEMA_VERSION_V1 = "ullm.generic_reasoning_release_bundle_validator.v1"
+VALIDATOR_SCHEMA_VERSION_V2 = "ullm.generic_reasoning_release_bundle_validator.v2"
+VALIDATOR_SCHEMA_VERSION = VALIDATOR_SCHEMA_VERSION_V1
 GENERIC_VALIDATOR_PATH = ROOT / "tools/validate-generic-reasoning-release.py"
 BROWSER_VALIDATOR_PATH = ROOT / "tools/validate-openwebui-reasoning-browser-smoke.py"
+SERVED_MODEL_VALIDATOR_PATH = ROOT / "tools/validate-served-model.py"
+SQ8_PROMOTION_VALIDATOR_PATH = ROOT / "tools/sq8_serving_promotion.py"
+SQ8_CAMPAIGN_VALIDATOR_PATH = ROOT / "tools/validate-sq8-openwebui-release.py"
 COMMIT_RE = re.compile(r"[0-9a-f]{40}\Z")
 HASH_RE = re.compile(r"[0-9a-f]{64}\Z")
 MAX_BUNDLE_BYTES = 1 * 1024 * 1024
 MAX_COMPONENT_BYTES = 16 * 1024 * 1024
+MAX_CAMPAIGN_FILE_BYTES = 64 * 1024 * 1024
+MAX_CAMPAIGN_TOTAL_BYTES = 512 * 1024 * 1024
+SQ8_MODEL_ID = "ullm-qwen3-14b-sq8"
+SQ8_FORMAT_ID = "SQ8_0"
+SQ8_WORKER_PROTOCOL = "ullm.worker.v2"
+V1_ARTIFACT_NAMES = {
+    "release_evidence",
+    "release_validator",
+    "browser_evidence",
+    "browser_validator",
+    "promotion_evidence",
+    "promotion_receipt",
+}
+V2_ARTIFACT_NAMES = V1_ARTIFACT_NAMES | {
+    "model_campaign_manifest",
+    "model_campaign_evidence",
+    "model_campaign_validator",
+}
 FORBIDDEN_KEYS = {
     "prompt",
     "response",
@@ -76,6 +104,67 @@ def _read_json(path: Path, label: str, maximum: int) -> tuple[dict[str, Any], by
     if not raw or len(raw) > maximum:
         raise ValidationError(f"{label} exceeds its size bound")
     return _json_bytes(raw, label), raw
+
+
+def _stat_identity(value: os.stat_result) -> tuple[int, ...]:
+    return (
+        value.st_dev,
+        value.st_ino,
+        value.st_mode,
+        value.st_nlink,
+        value.st_uid,
+        value.st_gid,
+        value.st_size,
+        value.st_mtime_ns,
+        value.st_ctime_ns,
+    )
+
+
+def _stable_read_regular(path: Path, label: str, maximum: int) -> bytes:
+    """Read one named regular file without accepting links or byte races."""
+
+    if not path.is_absolute():
+        path = path.absolute()
+    flags = os.O_RDONLY | os.O_CLOEXEC
+    if not hasattr(os, "O_NOFOLLOW"):
+        raise ValidationError("O_NOFOLLOW is required for bundle v2 validation")
+    flags |= os.O_NOFOLLOW
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as error:
+        raise ValidationError(f"failed to open {label}") from error
+    try:
+        before = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or before.st_size <= 0
+            or before.st_size > maximum
+        ):
+            raise ValidationError(f"{label} exceeds its size bound")
+        raw = bytearray()
+        while len(raw) <= maximum:
+            chunk = os.read(
+                descriptor,
+                min(1024 * 1024, maximum + 1 - len(raw)),
+            )
+            if not chunk:
+                break
+            raw.extend(chunk)
+        after = os.fstat(descriptor)
+        try:
+            named = path.lstat()
+        except OSError as error:
+            raise ValidationError(f"{label} disappeared while being read") from error
+        if (
+            len(raw) != before.st_size
+            or len(raw) > maximum
+            or _stat_identity(before) != _stat_identity(after)
+            or _stat_identity(after) != _stat_identity(named)
+        ):
+            raise ValidationError(f"{label} changed while being read")
+        return bytes(raw)
+    finally:
+        os.close(descriptor)
 
 
 def _hash(value: Any, label: str) -> None:
@@ -157,6 +246,52 @@ def _resolve_component(bundle: Path, value: Any, label: str) -> tuple[Path, str]
     return resolved, digest.hexdigest()
 
 
+def _resolve_component_v2(
+    bundle: Path,
+    value: Any,
+    label: str,
+) -> tuple[Path, str, bytes]:
+    """Resolve and stable-read a v2 component below a canonical bundle root."""
+
+    if not isinstance(value, dict) or set(value) != {"path", "sha256"}:
+        raise ValidationError(f"{label} fields differ")
+    relative = value["path"]
+    _text(relative, f"{label}.path", 1024)
+    path = Path(relative)
+    if path.is_absolute() or not path.parts or any(
+        part in {"", ".", ".."} for part in path.parts
+    ):
+        raise ValidationError(f"{label}.path is unsafe")
+    base_path = bundle.parent.absolute()
+    try:
+        base = base_path.resolve(strict=True)
+    except OSError as error:
+        raise ValidationError("release bundle directory is unavailable") from error
+    if base != base_path:
+        raise ValidationError("release bundle directory is not canonical")
+    candidate = base / path
+    current = base
+    for part in path.parts:
+        current /= part
+        try:
+            metadata = current.lstat()
+        except OSError as error:
+            raise ValidationError(f"{label} file is unavailable") from error
+        if stat.S_ISLNK(metadata.st_mode):
+            raise ValidationError(f"{label}.path contains a symlink component")
+    try:
+        resolved = candidate.resolve(strict=True)
+        resolved.relative_to(base)
+    except (OSError, ValueError) as error:
+        raise ValidationError(f"{label}.path escapes the bundle directory") from error
+    _hash(value["sha256"], f"{label}.sha256")
+    raw = _stable_read_regular(resolved, label, MAX_COMPONENT_BYTES)
+    digest = hashlib.sha256(raw).hexdigest()
+    if digest != value["sha256"]:
+        raise ValidationError(f"{label} SHA-256 differs")
+    return resolved, digest, raw
+
+
 def _validate_identity(value: Any, label: str) -> dict[str, Any]:
     if not isinstance(value, dict) or set(value) != {
         "manifest_sha256",
@@ -229,7 +364,7 @@ def _validate_promotion(
         raise ValidationError("promotion receipt does not bind promotion evidence")
 
 
-def validate(path: Path) -> dict[str, Any]:
+def _validate_v1(path: Path) -> dict[str, Any]:
     document, _raw = _read_json(path, "release bundle", MAX_BUNDLE_BYTES)
     _scan_forbidden(document)
     expected = {
@@ -262,14 +397,7 @@ def validate(path: Path) -> dict[str, Any]:
         _hash(rollback[field], f"rollback_target.{field}")
 
     artifacts = document["artifacts"]
-    names = {
-        "release_evidence",
-        "release_validator",
-        "browser_evidence",
-        "browser_validator",
-        "promotion_evidence",
-        "promotion_receipt",
-    }
+    names = V1_ARTIFACT_NAMES
     if not isinstance(artifacts, dict) or set(artifacts) != names:
         raise ValidationError("release bundle artifacts differ")
     files = {
@@ -339,6 +467,447 @@ def validate(path: Path) -> dict[str, Any]:
         "artifact_count": len(files),
         "reasons": reasons,
     }
+
+
+def _campaign_paths(
+    files: dict[str, Path],
+) -> tuple[Path, Path, Path, Path]:
+    manifest = files["model_campaign_manifest"]
+    evidence = files["model_campaign_evidence"]
+    report = files["model_campaign_validator"]
+    root = manifest.parent
+    if (
+        manifest.name != "SHA256SUMS"
+        or evidence.name != "model-identity.json"
+        or report.name != "release-validation.json"
+        or evidence.parent != root
+        or report.parent != root
+    ):
+        raise ValidationError("SQ8 model-campaign artifact locations differ")
+    return root, manifest, evidence, report
+
+
+def _copy_campaign_for_recomputation(
+    campaign_root: Path,
+    destination: Path,
+    expected_files: set[str],
+) -> None:
+    """Create a private stable byte copy without the published validator report."""
+
+    if not expected_files or "release-validation.json" in expected_files:
+        raise ValidationError("SQ8 campaign validator file contract differs")
+    expected_root_entries = {
+        Path(relative).parts[0] for relative in expected_files
+    } | {"release-validation.json"}
+    try:
+        observed_root_entries = {entry.name for entry in os.scandir(campaign_root)}
+    except OSError as error:
+        raise ValidationError("failed to enumerate SQ8 campaign") from error
+    if observed_root_entries != expected_root_entries:
+        raise ValidationError("SQ8 campaign root file set differs")
+    browser_expected = {
+        Path(relative).name
+        for relative in expected_files
+        if len(Path(relative).parts) == 2
+        and Path(relative).parts[0] == "browser"
+    }
+    browser_path = campaign_root / "browser"
+    try:
+        browser_metadata = browser_path.lstat()
+        browser_observed = {entry.name for entry in os.scandir(browser_path)}
+    except OSError as error:
+        raise ValidationError("failed to enumerate SQ8 campaign browser files") from error
+    if (
+        stat.S_ISLNK(browser_metadata.st_mode)
+        or not stat.S_ISDIR(browser_metadata.st_mode)
+        or browser_observed != browser_expected
+    ):
+        raise ValidationError("SQ8 campaign browser file set differs")
+
+    destination.mkdir(mode=0o700)
+    (destination / "browser").mkdir(mode=0o700)
+    total = 0
+    for relative in sorted(expected_files, key=lambda value: value.encode("utf-8")):
+        source = campaign_root / relative
+        raw = _stable_read_regular(
+            source,
+            f"SQ8 campaign file {relative}",
+            MAX_CAMPAIGN_FILE_BYTES,
+        )
+        total += len(raw)
+        if total > MAX_CAMPAIGN_TOTAL_BYTES:
+            raise ValidationError("SQ8 campaign exceeds its aggregate size bound")
+        target = destination / relative
+        try:
+            descriptor = os.open(
+                target,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC,
+                0o600,
+            )
+            with os.fdopen(descriptor, "wb", buffering=0) as output:
+                view = memoryview(raw)
+                while view:
+                    written = output.write(view)
+                    if written is None or written <= 0:
+                        raise ValidationError(
+                            "failed to isolate SQ8 campaign evidence"
+                        )
+                    view = view[written:]
+                output.flush()
+                os.fsync(output.fileno())
+        except OSError as error:
+            raise ValidationError("failed to isolate SQ8 campaign evidence") from error
+
+
+def _recompute_sq8_campaign_report(
+    *,
+    campaign_root: Path,
+    campaign_identity: dict[str, Any],
+    source_commit: str,
+    worker_sha256: str,
+    published_report_raw: bytes,
+) -> dict[str, Any]:
+    validator = _load_module(
+        "_ullm_generic_reasoning_bundle_sq8_campaign_validator",
+        SQ8_CAMPAIGN_VALIDATOR_PATH,
+    )
+    expected_files_value = getattr(validator, "BUNDLE_FILES_V2", None)
+    if not isinstance(expected_files_value, set) or not all(
+        isinstance(value, str) for value in expected_files_value
+    ):
+        raise ValidationError("SQ8 campaign validator contract is unavailable")
+    expected_files = set(expected_files_value)
+    served = campaign_identity["served_model_manifest"]
+    claim = campaign_identity["campaign_authorization_claim"]
+    try:
+        with tempfile.TemporaryDirectory(
+            prefix="ullm-sq8-bundle-v2-validation-"
+        ) as temporary:
+            isolated = Path(temporary) / "campaign"
+            _copy_campaign_for_recomputation(
+                campaign_root,
+                isolated,
+                expected_files,
+            )
+            recomputed_raw = validator.validate_full_release_no_publish(
+                isolated,
+                expected_commit=source_commit,
+                expected_worker_binary_sha256=worker_sha256,
+                repo_root=ROOT,
+                expected_served_model_manifest_sha256=served["sha256"],
+                expected_authorization_claim_sha256=claim["sha256"],
+                expected_authorization_sha256=claim["authorization_sha256"],
+            )
+    except ValidationError:
+        raise
+    except Exception as error:
+        raise ValidationError("SQ8 campaign independent recomputation failed") from error
+    if (
+        not isinstance(recomputed_raw, bytes)
+        or recomputed_raw != published_report_raw
+    ):
+        raise ValidationError(
+            "SQ8 campaign validator report differs from recomputation"
+        )
+    report = _json_bytes(recomputed_raw, "SQ8 campaign validator report")
+    if (
+        report.get("schema_version")
+        != "ullm.sq8.openwebui_release.validation.v2"
+        or report.get("release_status") != "complete"
+    ):
+        raise ValidationError("SQ8 campaign validator report is not complete v2")
+    return report
+
+
+def _validate_sq8_promotion_and_candidate(
+    *,
+    evidence_path: Path,
+    receipt_path: Path,
+    receipt_raw: bytes,
+    candidate_path: Path,
+    candidate_raw: bytes,
+    source_commit: str,
+    identity: dict[str, Any],
+    campaign_identity: dict[str, Any],
+) -> None:
+    promotion_validator = _load_module(
+        "_ullm_generic_reasoning_bundle_sq8_promotion_validator",
+        SQ8_PROMOTION_VALIDATOR_PATH,
+    )
+    try:
+        receipt, evidence = promotion_validator.validate_receipt(
+            receipt_path,
+            expected_evidence_path=evidence_path,
+            verify_live_source=True,
+        )
+    except Exception as error:
+        raise ValidationError("SQ8 promotion receipt validation failed") from error
+    if (
+        receipt.get("schema_version") != "ullm.sq8_serving_promotion.v1"
+        or receipt.get("source_commit") != source_commit
+        or evidence.get("schema_version")
+        != "ullm.sq8_serving_promotion_evidence.v1"
+        or not isinstance(evidence.get("worker"), dict)
+        or evidence["worker"].get("sha256")
+        != identity["worker_binary_sha256"]
+    ):
+        raise ValidationError("SQ8 promotion source or worker identity differs")
+
+    candidate = _json_bytes(candidate_raw, "SQ8 candidate served-model manifest")
+    public = candidate.get("public")
+    format_value = candidate.get("format")
+    worker = candidate.get("worker")
+    promotion = candidate.get("promotion")
+    if (
+        candidate.get("schema_version") != "ullm.served_model.v2"
+        or not isinstance(public, dict)
+        or public.get("id") != SQ8_MODEL_ID
+        or not isinstance(format_value, dict)
+        or format_value.get("format_id") != SQ8_FORMAT_ID
+        or not isinstance(worker, dict)
+        or worker.get("protocol") != SQ8_WORKER_PROTOCOL
+        or worker.get("binary_sha256") != identity["worker_binary_sha256"]
+        or not isinstance(promotion, dict)
+        or set(promotion) != {"source_commit", "receipt", "receipt_sha256"}
+        or promotion.get("source_commit") != source_commit
+        or promotion.get("receipt_sha256")
+        != hashlib.sha256(receipt_raw).hexdigest()
+    ):
+        raise ValidationError("SQ8 candidate promotion identity differs")
+    if hashlib.sha256(candidate_raw).hexdigest() != identity["manifest_sha256"]:
+        raise ValidationError("SQ8 candidate manifest differs from bundle identity")
+    campaign_served = campaign_identity["served_model_manifest"]
+    if (
+        campaign_served.get("sha256") != identity["manifest_sha256"]
+        or campaign_served.get("worker_binary_sha256")
+        != identity["worker_binary_sha256"]
+        or campaign_served.get("promotion_source_commit") != source_commit
+        or campaign_served.get("promotion_receipt_sha256")
+        != hashlib.sha256(receipt_raw).hexdigest()
+    ):
+        raise ValidationError("SQ8 campaign candidate identity differs")
+
+    receipt_value = promotion.get("receipt")
+    if not isinstance(receipt_value, str):
+        raise ValidationError("SQ8 candidate live promotion receipt path is invalid")
+    live_receipt_path = Path(receipt_value)
+    if not live_receipt_path.is_absolute():
+        raise ValidationError("SQ8 candidate live promotion receipt path is not absolute")
+    live_receipt_raw = _stable_read_regular(
+        live_receipt_path,
+        "SQ8 candidate live promotion receipt",
+        MAX_COMPONENT_BYTES,
+    )
+    if live_receipt_raw != receipt_raw:
+        raise ValidationError(
+            "SQ8 candidate live promotion receipt differs from bundle component"
+        )
+
+    served_model_validator = _load_module(
+        "_ullm_generic_reasoning_bundle_served_model_validator",
+        SERVED_MODEL_VALIDATOR_PATH,
+    )
+    try:
+        summary = served_model_validator.validation_summary(candidate_path)
+    except Exception as error:
+        raise ValidationError("SQ8 candidate served-model validation failed") from error
+    if (
+        summary.get("manifest_sha256") != identity["manifest_sha256"]
+        or summary.get("model_id") != SQ8_MODEL_ID
+        or summary.get("format_id") != SQ8_FORMAT_ID
+        or not isinstance(summary.get("worker"), dict)
+        or summary["worker"].get("protocol") != SQ8_WORKER_PROTOCOL
+        or summary["worker"].get("binary_sha256")
+        != identity["worker_binary_sha256"]
+    ):
+        raise ValidationError("SQ8 candidate served-model summary differs")
+
+
+def _validate_v2(path: Path, document: dict[str, Any]) -> dict[str, Any]:
+    expected_root = {
+        "schema_version",
+        "status",
+        "production_activation_performed",
+        "source_commit",
+        "active_promotion_source_commit",
+        "identity",
+        "artifacts",
+        "rollback_target",
+    }
+    if set(document) != expected_root or document["schema_version"] != SCHEMA_VERSION_V2:
+        raise ValidationError("release bundle v2 root fields differ")
+    _scan_forbidden(document)
+    if document["status"] not in {"incomplete", "complete"}:
+        raise ValidationError("release bundle v2 status is invalid")
+    if document["production_activation_performed"] is not False:
+        raise ValidationError("release bundle v2 claims activation")
+    _commit(document["source_commit"], "source_commit")
+    _commit(
+        document["active_promotion_source_commit"],
+        "active_promotion_source_commit",
+    )
+    identity = _validate_identity(document["identity"], "identity")
+    rollback = document["rollback_target"]
+    if not isinstance(rollback, dict) or set(rollback) != {
+        "manifest_sha256",
+        "systemd_unit_sha256",
+        "environment_sha256",
+    }:
+        raise ValidationError("release bundle v2 rollback_target fields differ")
+    for field in rollback:
+        _hash(rollback[field], f"rollback_target.{field}")
+
+    artifacts = document["artifacts"]
+    if not isinstance(artifacts, dict) or set(artifacts) != V2_ARTIFACT_NAMES:
+        raise ValidationError("release bundle v2 artifacts differ")
+    resolved = {
+        name: _resolve_component_v2(path, artifacts[name], name)
+        for name in sorted(V2_ARTIFACT_NAMES)
+    }
+    files = {name: value[0] for name, value in resolved.items()}
+    raws = {name: value[2] for name, value in resolved.items()}
+
+    release = _json_bytes(raws["release_evidence"], "release evidence")
+    release_report = _json_bytes(
+        raws["release_validator"],
+        "release validator report",
+    )
+    browser = _json_bytes(raws["browser_evidence"], "browser evidence")
+    browser_report = _json_bytes(
+        raws["browser_validator"],
+        "browser validator report",
+    )
+    campaign_identity = _json_bytes(
+        raws["model_campaign_evidence"],
+        "SQ8 campaign model identity",
+    )
+    if (
+        release.get("schema_version")
+        != "ullm.generic_reasoning_release_evidence.v1"
+        or release.get("source_commit") != document["source_commit"]
+        or release.get("active_promotion_source_commit")
+        != document["active_promotion_source_commit"]
+        or release.get("identity") != identity
+    ):
+        raise ValidationError("release evidence identity differs")
+    generic_validator = _load_module(
+        "_ullm_generic_reasoning_release_bundle_v2_validator",
+        GENERIC_VALIDATOR_PATH,
+    )
+    try:
+        recomputed_release_report = generic_validator.validate(
+            files["release_evidence"]
+        )
+    except Exception as error:
+        raise ValidationError("release evidence recomputation failed") from error
+    if (
+        release_report != recomputed_release_report
+        or release_report.get("schema_version")
+        != "ullm.generic_reasoning_release_validator.v1"
+    ):
+        raise ValidationError("release validator report differs from recomputation")
+
+    if (
+        browser.get("schema_version")
+        != "ullm.openwebui.reasoning_browser_smoke.v3"
+        or browser.get("source_commit") != document["source_commit"]
+        or browser.get("identity") != identity
+    ):
+        raise ValidationError("browser v3 identity differs")
+    browser_validator = _load_module(
+        "_ullm_openwebui_reasoning_bundle_v2_validator",
+        BROWSER_VALIDATOR_PATH,
+    )
+    try:
+        recomputed_browser_report = browser_validator.validate(
+            files["browser_evidence"]
+        )
+    except Exception as error:
+        raise ValidationError("browser evidence recomputation failed") from error
+    if (
+        browser_report != recomputed_browser_report
+        or browser_report.get("schema_version")
+        != "ullm.openwebui.reasoning_browser_smoke_validator.v1"
+    ):
+        raise ValidationError("browser validator report differs from recomputation")
+
+    if (
+        campaign_identity.get("schema_version")
+        != "ullm.sq8.full_campaign.model_identity.v2"
+        or set(campaign_identity)
+        != {
+            "schema_version",
+            "record_type",
+            "model",
+            "promotion_validation",
+            "product",
+            "tokenizer",
+            "oracle",
+            "worker",
+            "served_model_manifest",
+            "campaign_authorization_claim",
+        }
+    ):
+        raise ValidationError("SQ8 campaign model identity schema differs")
+    campaign_root, _campaign_manifest, _campaign_evidence, campaign_report = (
+        _campaign_paths(files)
+    )
+    candidate_path = campaign_root / "candidate-served-model.json"
+    candidate_raw = _stable_read_regular(
+        candidate_path,
+        "SQ8 candidate served-model manifest",
+        MAX_COMPONENT_BYTES,
+    )
+    _validate_sq8_promotion_and_candidate(
+        evidence_path=files["promotion_evidence"],
+        receipt_path=files["promotion_receipt"],
+        receipt_raw=raws["promotion_receipt"],
+        candidate_path=candidate_path,
+        candidate_raw=candidate_raw,
+        source_commit=document["source_commit"],
+        identity=identity,
+        campaign_identity=campaign_identity,
+    )
+    campaign_report_document = _recompute_sq8_campaign_report(
+        campaign_root=campaign_root,
+        campaign_identity=campaign_identity,
+        source_commit=document["source_commit"],
+        worker_sha256=identity["worker_binary_sha256"],
+        published_report_raw=raws["model_campaign_validator"],
+    )
+    if campaign_report != files["model_campaign_validator"]:
+        raise ValidationError("SQ8 campaign validator location changed")
+    del campaign_report_document
+
+    reasons: list[str] = []
+    if release_report.get("gate_eligible") is not True:
+        reasons.append("release validator gate is not eligible")
+    if browser_report.get("gate_eligible") is not True:
+        reasons.append("browser validator gate is not eligible")
+    if document["source_commit"] != document["active_promotion_source_commit"]:
+        reasons.append("source commit is not aligned with active promotion source")
+    if document["status"] != "complete":
+        reasons.append("release bundle status is incomplete")
+    return {
+        "schema_version": VALIDATOR_SCHEMA_VERSION_V2,
+        "input_schema_version": SCHEMA_VERSION_V2,
+        "structurally_valid": True,
+        "gate_eligible": not reasons,
+        "source_commit": document["source_commit"],
+        "artifact_count": len(files),
+        "model_campaign_schema_version": campaign_identity["schema_version"],
+        "reasons": reasons,
+    }
+
+
+def validate(path: Path) -> dict[str, Any]:
+    document, _raw = _read_json(path, "release bundle", MAX_BUNDLE_BYTES)
+    schema = document.get("schema_version")
+    if schema == SCHEMA_VERSION_V1:
+        return _validate_v1(path)
+    if schema == SCHEMA_VERSION_V2:
+        return _validate_v2(path, document)
+    raise ValidationError("release bundle schema is unsupported")
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:

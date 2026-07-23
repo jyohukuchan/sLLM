@@ -9,6 +9,7 @@ import importlib.util
 import json
 import os
 import re
+import stat
 import sys
 import tempfile
 from pathlib import Path
@@ -28,6 +29,11 @@ ARTIFACT_NAMES = (
     "browser_validator",
     "promotion_evidence",
     "promotion_receipt",
+)
+V2_ARTIFACT_NAMES = ARTIFACT_NAMES + (
+    "model_campaign_manifest",
+    "model_campaign_evidence",
+    "model_campaign_validator",
 )
 
 
@@ -157,6 +163,63 @@ def _atomic_write(path: Path, document: dict[str, Any]) -> None:
             temporary.unlink(missing_ok=True)
 
 
+def _publish_immutable(path: Path, document: dict[str, Any]) -> None:
+    """Publish one mode-0444 bundle with atomic no-replace semantics."""
+
+    if path.is_symlink() or path.exists():
+        raise BundleError("output bundle already exists or is a symlink")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    parent = path.parent.absolute()
+    try:
+        if parent.resolve(strict=True) != parent:
+            raise BundleError("output bundle parent is not canonical")
+        metadata = parent.lstat()
+    except OSError as error:
+        raise BundleError("output bundle parent is unavailable") from error
+    if not stat.S_ISDIR(metadata.st_mode) or stat.S_ISLNK(metadata.st_mode):
+        raise BundleError("output bundle parent is not a real directory")
+    temporary: Path | None = None
+    try:
+        descriptor, raw_path = tempfile.mkstemp(prefix=f".{path.name}.", dir=parent)
+        temporary = Path(raw_path)
+        with os.fdopen(descriptor, "w", encoding="ascii") as destination:
+            json.dump(
+                document,
+                destination,
+                ensure_ascii=True,
+                allow_nan=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            )
+            destination.write("\n")
+            destination.flush()
+            os.fsync(destination.fileno())
+            os.fchmod(destination.fileno(), 0o444)
+        try:
+            os.link(temporary, path, follow_symlinks=False)
+        except FileExistsError as error:
+            raise BundleError("output bundle already exists") from error
+        except OSError as error:
+            raise BundleError("output bundle could not be published") from error
+        temporary.unlink()
+        temporary = None
+        directory = os.open(parent, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+        observed = path.lstat()
+        if (
+            not stat.S_ISREG(observed.st_mode)
+            or stat.S_IMODE(observed.st_mode) != 0o444
+            or observed.st_nlink != 1
+        ):
+            raise BundleError("published output bundle identity differs")
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+
+
 def prepare(
     release_evidence: Path,
     release_validator: Path,
@@ -240,8 +303,116 @@ def prepare(
         raise
 
 
+def prepare_v2(
+    release_evidence: Path,
+    release_validator: Path,
+    browser_evidence: Path,
+    browser_validator: Path,
+    promotion_evidence: Path,
+    promotion_receipt: Path,
+    model_campaign_manifest: Path,
+    model_campaign_evidence: Path,
+    model_campaign_validator: Path,
+    rollback_manifest: Path,
+    systemd_unit: Path,
+    environment_file: Path,
+    output: Path,
+    *,
+    status: str = "incomplete",
+) -> dict[str, Any]:
+    """Assemble the exact nine-slot independent-SQ8 release envelope."""
+
+    if status not in {"incomplete", "complete"}:
+        raise BundleError("bundle status is invalid")
+    if output.exists() or output.is_symlink():
+        raise BundleError("output bundle already exists or is a symlink")
+    bundle_root = output.parent
+    release = _read_json(release_evidence, "release evidence")
+    if release.get("schema_version") != "ullm.generic_reasoning_release_evidence.v1":
+        raise BundleError("release evidence schema differs")
+    source_commit = _commit(release.get("source_commit"), "source_commit")
+    active_promotion_source_commit = _commit(
+        release.get("active_promotion_source_commit"),
+        "active_promotion_source_commit",
+    )
+    identity = release.get("identity")
+    if not isinstance(identity, dict) or set(identity) != {
+        "manifest_sha256",
+        "worker_binary_sha256",
+        "tokenizer_sha256",
+        "openwebui_image",
+    }:
+        raise BundleError("release evidence identity fields differ")
+    for field in ("manifest_sha256", "worker_binary_sha256", "tokenizer_sha256"):
+        _hash(identity[field], f"identity.{field}")
+    if (
+        not isinstance(identity["openwebui_image"], str)
+        or "@sha256:" not in identity["openwebui_image"]
+    ):
+        raise BundleError("identity.openwebui_image is invalid")
+
+    inputs = {
+        "release_evidence": release_evidence,
+        "release_validator": release_validator,
+        "browser_evidence": browser_evidence,
+        "browser_validator": browser_validator,
+        "promotion_evidence": promotion_evidence,
+        "promotion_receipt": promotion_receipt,
+        "model_campaign_manifest": model_campaign_manifest,
+        "model_campaign_evidence": model_campaign_evidence,
+        "model_campaign_validator": model_campaign_validator,
+    }
+    artifacts: dict[str, dict[str, str]] = {}
+    for name in V2_ARTIFACT_NAMES:
+        relative, digest = _relative_component(inputs[name], bundle_root, name)
+        artifacts[name] = {"path": relative, "sha256": digest}
+    rollback_target = {}
+    for field, source in (
+        ("manifest_sha256", rollback_manifest),
+        ("systemd_unit_sha256", systemd_unit),
+        ("environment_sha256", environment_file),
+    ):
+        rollback_target[field] = _hash_file(source, f"rollback {field}")
+    document = {
+        "schema_version": "ullm.generic_reasoning_release_bundle.v2",
+        "status": status,
+        "production_activation_performed": False,
+        "source_commit": source_commit,
+        "active_promotion_source_commit": active_promotion_source_commit,
+        "identity": identity,
+        "artifacts": artifacts,
+        "rollback_target": rollback_target,
+    }
+    validator = _load_validator()
+    temporary = output.parent / f".{output.name}.validate"
+    try:
+        _atomic_write(temporary, document)
+        report = validator.validate(temporary)
+        if (
+            report.get("input_schema_version")
+            != "ullm.generic_reasoning_release_bundle.v2"
+            or (status == "complete" and report.get("gate_eligible") is not True)
+        ):
+            raise BundleError("bundle v2 is not production-gate eligible")
+        temporary.unlink(missing_ok=True)
+        _publish_immutable(output, document)
+        observed = validator.validate(output)
+        if observed != report:
+            raise BundleError("published bundle v2 validation differs")
+        return document
+    except Exception:
+        temporary.unlink(missing_ok=True)
+        raise
+
+
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--bundle-version",
+        choices=("v1", "v2"),
+        default="v1",
+        help="v1 is the historical AQ4 envelope; v2 is the nine-slot SQ8 envelope",
+    )
     for name in (
         "release-evidence",
         "release-validator",
@@ -254,6 +425,12 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "environment-file",
     ):
         parser.add_argument(f"--{name}", required=True, type=Path)
+    for name in (
+        "model-campaign-manifest",
+        "model-campaign-evidence",
+        "model-campaign-validator",
+    ):
+        parser.add_argument(f"--{name}", type=Path)
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--status", choices=("incomplete", "complete"), default="incomplete")
     return parser.parse_args(argv)
@@ -262,19 +439,49 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
 def main(argv: Sequence[str] | None = None) -> int:
     args = parse_args(argv)
     try:
-        document = prepare(
-            args.release_evidence,
-            args.release_validator,
-            args.browser_evidence,
-            args.browser_validator,
-            args.promotion_evidence,
-            args.promotion_receipt,
-            args.rollback_manifest,
-            args.systemd_unit,
-            args.environment_file,
-            args.output,
-            status=args.status,
+        campaign_values = (
+            args.model_campaign_manifest,
+            args.model_campaign_evidence,
+            args.model_campaign_validator,
         )
+        if args.bundle_version == "v1":
+            if any(value is not None for value in campaign_values):
+                raise BundleError("bundle v1 forbids model-campaign inputs")
+            document = prepare(
+                args.release_evidence,
+                args.release_validator,
+                args.browser_evidence,
+                args.browser_validator,
+                args.promotion_evidence,
+                args.promotion_receipt,
+                args.rollback_manifest,
+                args.systemd_unit,
+                args.environment_file,
+                args.output,
+                status=args.status,
+            )
+        else:
+            if any(value is None for value in campaign_values):
+                raise BundleError("bundle v2 requires all model-campaign inputs")
+            assert args.model_campaign_manifest is not None
+            assert args.model_campaign_evidence is not None
+            assert args.model_campaign_validator is not None
+            document = prepare_v2(
+                args.release_evidence,
+                args.release_validator,
+                args.browser_evidence,
+                args.browser_validator,
+                args.promotion_evidence,
+                args.promotion_receipt,
+                args.model_campaign_manifest,
+                args.model_campaign_evidence,
+                args.model_campaign_validator,
+                args.rollback_manifest,
+                args.systemd_unit,
+                args.environment_file,
+                args.output,
+                status=args.status,
+            )
     except Exception as error:
         print(f"Generic reasoning release bundle preparation failed: {error}", file=sys.stderr)
         return 1

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import sys
 from pathlib import Path
 from types import ModuleType
@@ -114,3 +115,45 @@ def test_prepare_rejects_symlinked_rollback_input(tmp_path: Path) -> None:
 
     with pytest.raises(PREPARER.BundleError, match="rollback manifest_sha256"):
         PREPARER.prepare(**paths, output=tmp_path / "bundle.json")
+
+
+def test_prepare_v2_publishes_immutable_nine_slot_bundle(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fixture_bundle, fakes, _report = FIXTURES.make_v2_bundle(tmp_path)
+    FIXTURES.install_v2_fakes(monkeypatch, fakes)
+    fixture = json.loads(fixture_bundle.read_text(encoding="ascii"))
+    component_paths = {
+        name: tmp_path / value["path"]
+        for name, value in fixture["artifacts"].items()
+    }
+    fixture_bundle.unlink()
+    rollback = {
+        "rollback_manifest": tmp_path / "active.json",
+        "systemd_unit": tmp_path / "ullm-openai.service",
+        "environment_file": tmp_path / "ullm-openai.env",
+    }
+    for path in rollback.values():
+        path.write_bytes(b"rollback-fixture")
+    monkeypatch.setattr(PREPARER, "_load_validator", lambda: FIXTURES.BUNDLE)
+
+    document = PREPARER.prepare_v2(
+        **component_paths,
+        **rollback,
+        output=fixture_bundle,
+        status="complete",
+    )
+
+    assert document["schema_version"] == FIXTURES.BUNDLE.SCHEMA_VERSION_V2
+    assert len(document["artifacts"]) == 9
+    assert fixture_bundle.stat().st_mode & 0o777 == 0o444
+    assert fixture_bundle.stat().st_nlink == 1
+    assert FIXTURES.BUNDLE.validate(fixture_bundle)["gate_eligible"] is True
+    with pytest.raises(PREPARER.BundleError, match="already exists"):
+        PREPARER.prepare_v2(
+            **component_paths,
+            **rollback,
+            output=fixture_bundle,
+            status="complete",
+        )

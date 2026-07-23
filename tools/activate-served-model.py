@@ -33,6 +33,12 @@ RESULT_SCHEMA = "ullm.served_model.activation.v1"
 _VALIDATOR_MODULE_NAME = "_ullm_served_model_activation_validator"
 _BUNDLE_VALIDATOR_MODULE_NAME = "_ullm_release_bundle_activation_validator"
 _COMMIT_RE = re.compile(r"[0-9a-f]{40}\Z")
+AQ4_FORMAT_ID = "AQ4_0"
+SQ8_FORMAT_ID = "SQ8_0"
+BUNDLE_SCHEMA_V1 = "ullm.generic_reasoning_release_bundle.v1"
+BUNDLE_SCHEMA_V2 = "ullm.generic_reasoning_release_bundle.v2"
+BUNDLE_VALIDATOR_SCHEMA_V1 = "ullm.generic_reasoning_release_bundle_validator.v1"
+BUNDLE_VALIDATOR_SCHEMA_V2 = "ullm.generic_reasoning_release_bundle_validator.v2"
 BOOTSTRAP_AUTHORIZATION_SCHEMA = (
     "ullm.served_model.v2_differing_worker_bootstrap_authorization.v1"
 )
@@ -251,9 +257,25 @@ def _validate_release_bundle(
     if report.get("gate_eligible") is not True:
         raise ActivationError("release bundle is not production-gate eligible")
     try:
-        bundle_document = json.loads(bundle.read_bytes())
+        bundle_document = json.loads(
+            _read_safe_manifest(bundle, "release bundle").decode("utf-8")
+        )
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
         raise ActivationError("release bundle cannot be read") from error
+    candidate_format = candidate_summary.get("format_id")
+    expected_bundle_pair = {
+        AQ4_FORMAT_ID: (BUNDLE_SCHEMA_V1, BUNDLE_VALIDATOR_SCHEMA_V1),
+        SQ8_FORMAT_ID: (BUNDLE_SCHEMA_V2, BUNDLE_VALIDATOR_SCHEMA_V2),
+    }.get(candidate_format)
+    if expected_bundle_pair is None:
+        raise ActivationError("v2 candidate format has no release-bundle route")
+    expected_bundle_schema, expected_validator_schema = expected_bundle_pair
+    if (
+        bundle_document.get("schema_version") != expected_bundle_schema
+        or report.get("schema_version") != expected_validator_schema
+        or report.get("input_schema_version") != expected_bundle_schema
+    ):
+        raise ActivationError("release bundle schema/format pairing differs")
     identity = bundle_document.get("identity")
     if not isinstance(identity, dict):
         raise ActivationError("release bundle identity is missing")
