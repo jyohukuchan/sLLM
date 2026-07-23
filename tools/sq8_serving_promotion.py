@@ -92,6 +92,7 @@ EVIDENCE_SOURCE_PATHS = tuple(
             "services/openai-gateway/src/ullm_openai_gateway/served_model.py",
             "services/openai-gateway/tests/test_app.py",
             "services/openai-gateway/uv.lock",
+            "tools/build-sq8-worker-release.py",
             "tools/generate-served-model.py",
             "tools/prepare-sq8-serving-promotion-ephemeral.py",
             "tools/run-sq8-serving-promotion-cpu-cases.py",

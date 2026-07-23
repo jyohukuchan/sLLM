@@ -462,6 +462,10 @@ class Fixture:
         )
 
 
+def test_sq8_evidence_sources_bind_the_worker_release_builder() -> None:
+    assert "tools/build-sq8-worker-release.py" in PROMOTION.EVIDENCE_SOURCE_PATHS
+
+
 def test_sq8_evidence_receipt_and_generator_bind_end_to_end(tmp_path: Path) -> None:
     fixture = Fixture(tmp_path)
 
