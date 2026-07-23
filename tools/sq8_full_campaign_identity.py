@@ -30,6 +30,9 @@ ARTIFACT_SCHEMA = "sq-fp8-artifact-v0.2"
 PACKAGE_SCHEMA = "ullm-prototype-manifest-v0.1"
 WORKER_PROTOCOL_SCHEMA = "ullm.worker.v1"
 WORKER_PROTOCOL_SCHEMA_V2 = "ullm.worker.v2"
+CAMPAIGN_CLAIM_SCHEMA_V2 = (
+    "ullm.served_model.v2_cross_model_campaign_claim.v2"
+)
 
 UPSTREAM_MODEL_ID = "Qwen/Qwen3-14B-FP8"
 SERVED_MODEL_ID = "ullm-qwen3-14b-sq8"
@@ -2391,8 +2394,7 @@ def _served_model_binding_documents(
         fail("candidate served-model manifest contract differs")
     claim_value = _json_object(claim.raw, "campaign authorization claim")
     if (
-        claim_value.get("schema_version")
-        != "ullm.served_model.v2_cross_model_campaign_claim.v1"
+        claim_value.get("schema_version") != CAMPAIGN_CLAIM_SCHEMA_V2
         or claim_value.get("authorization_path")
         != os.fspath(binding.authorization_path)
         or claim_value.get("authorization_sha256")

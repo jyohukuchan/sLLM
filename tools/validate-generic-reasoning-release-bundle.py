@@ -64,9 +64,9 @@ FORBIDDEN_KEYS = {
     "conversation",
 }
 AUTHORIZATION_SCHEMA = (
-    "ullm.served_model.v2_cross_model_campaign_authorization.v1"
+    "ullm.served_model.v2_cross_model_campaign_authorization.v2"
 )
-CLAIM_SCHEMA = "ullm.served_model.v2_cross_model_campaign_claim.v1"
+CLAIM_SCHEMA = "ullm.served_model.v2_cross_model_campaign_claim.v2"
 CLAIM_FIELDS = {
     "schema_version",
     "authorization_id",
@@ -76,7 +76,15 @@ CLAIM_FIELDS = {
     "attempt",
     "max_attempts",
 }
-CAMPAIGN_NAMES = {"sq8_full", "reasoning_release", "reasoning_browser"}
+AUTHORIZED_CAMPAIGN_NAMES = {
+    "aq4_reasoning_release",
+    "aq4_reasoning_browser",
+    "aq4_bundle",
+    "sq8_full",
+    "reasoning_release",
+    "reasoning_browser",
+}
+SQ8_CAMPAIGN_NAMES = {"sq8_full", "reasoning_release", "reasoning_browser"}
 OUTCOME_SELECTED_ARTIFACTS = {
     "SHA256SUMS",
     "active-manifest-binding.json",
@@ -768,6 +776,8 @@ def _validate_sq8_promotion_and_candidate(
 def _validate_generic_campaign_lineages(
     *,
     bundle_path: Path,
+    campaign_root: Path,
+    campaign_run_id: str,
     release: dict[str, Any],
     release_report: dict[str, Any],
     browser: dict[str, Any],
@@ -918,6 +928,7 @@ def _validate_generic_campaign_lineages(
             required_uid=os.getuid(),
             validate_prior_outcome=False,
             require_fresh_outputs=False,
+            require_bound_inputs=False,
             enforce_current_window=False,
         )
         if (
@@ -955,7 +966,12 @@ def _validate_generic_campaign_lineages(
     authorized_campaigns = authorization_document.get("campaigns")
     if (
         not isinstance(authorized_campaigns, dict)
-        or set(authorized_campaigns) != CAMPAIGN_NAMES
+        or set(authorized_campaigns) != AUTHORIZED_CAMPAIGN_NAMES
+        or authorized_campaigns.get("sq8_full")
+        != {
+            "run_id": campaign_run_id,
+            "final_path": os.fspath(campaign_root),
+        }
         or authorized_campaigns.get("reasoning_release")
         != {
             "run_id": release_campaign["run_id"],
@@ -970,6 +986,11 @@ def _validate_generic_campaign_lineages(
         raise ValidationError(
             "generic campaign lineage differs from its authorization"
         )
+    if any(
+        not isinstance(authorized_campaigns.get(name), dict)
+        for name in SQ8_CAMPAIGN_NAMES
+    ):
+        raise ValidationError("SQ8 campaign authorization identity is missing")
     authorized_candidate = authorization_document.get("candidate")
     authorized_source = authorization_document.get("source")
     authorized_before = authorization_document.get("before")
@@ -1168,18 +1189,6 @@ def _validate_v2(path: Path, document: dict[str, Any]) -> dict[str, Any]:
         }
     ):
         raise ValidationError("SQ8 campaign model identity schema differs")
-    release_campaign = _validate_generic_campaign_lineages(
-        bundle_path=path,
-        release=release,
-        release_report=release_report,
-        browser=browser,
-        browser_report=browser_report,
-        browser_path=files["browser_evidence"],
-        campaign_identity=campaign_identity,
-        identity=identity,
-        source_commit=document["source_commit"],
-        rollback=rollback,
-    )
     campaign_root, _campaign_manifest, _campaign_evidence, campaign_report = (
         _campaign_paths(files)
     )
@@ -1208,7 +1217,23 @@ def _validate_v2(path: Path, document: dict[str, Any]) -> dict[str, Any]:
     )
     if campaign_report != files["model_campaign_validator"]:
         raise ValidationError("SQ8 campaign validator location changed")
-    del campaign_report_document
+    campaign_run_id = campaign_report_document.get("run_id")
+    if not isinstance(campaign_run_id, str) or not campaign_run_id:
+        raise ValidationError("SQ8 campaign validator run identity differs")
+    release_campaign = _validate_generic_campaign_lineages(
+        bundle_path=path,
+        campaign_root=campaign_root,
+        campaign_run_id=campaign_run_id,
+        release=release,
+        release_report=release_report,
+        browser=browser,
+        browser_report=browser_report,
+        browser_path=files["browser_evidence"],
+        campaign_identity=campaign_identity,
+        identity=identity,
+        source_commit=document["source_commit"],
+        rollback=rollback,
+    )
 
     reasons: list[str] = []
     if release_report.get("gate_eligible") is not True:

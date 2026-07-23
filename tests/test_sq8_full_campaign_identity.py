@@ -721,9 +721,7 @@ class FullCampaignIdentityTests(unittest.TestCase):
             claim.write_bytes(
                 canonical(
                     {
-                        "schema_version": (
-                            "ullm.served_model.v2_cross_model_campaign_claim.v1"
-                        ),
+                        "schema_version": IDENTITY.CAMPAIGN_CLAIM_SCHEMA_V2,
                         "authorization_path": str(authorization),
                         "authorization_sha256": authorization_sha,
                     }
@@ -746,6 +744,32 @@ class FullCampaignIdentityTests(unittest.TestCase):
                 served_model_binding=binding,
             )
             artifacts = IDENTITY.build_identity_artifacts(inputs, fixture.live)
+            claim.write_bytes(
+                canonical(
+                    {
+                        "schema_version": (
+                            "ullm.served_model.v2_cross_model_campaign_claim.v1"
+                        ),
+                        "authorization_path": str(authorization),
+                        "authorization_sha256": authorization_sha,
+                    }
+                )
+            )
+            legacy_binding = dataclasses.replace(
+                binding,
+                claim_sha256=sha256(claim.read_bytes()),
+            )
+            with self.assertRaisesRegex(
+                IDENTITY.IdentityError,
+                "campaign authorization claim binding differs",
+            ):
+                IDENTITY.build_identity_artifacts(
+                    dataclasses.replace(
+                        inputs,
+                        served_model_binding=legacy_binding,
+                    ),
+                    fixture.live,
+                )
 
         self.assertEqual(
             artifacts.environment["schema_version"],

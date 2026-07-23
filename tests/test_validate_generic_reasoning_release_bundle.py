@@ -77,6 +77,67 @@ def digest(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def add_aq4_authorization_v2_bindings(
+    document: dict[str, Any],
+    *,
+    root: Path,
+) -> None:
+    """Populate the AQ4 half of the exact-six authorization fixture."""
+
+    aq4_source = root / "aq4-source"
+    aq4_output = root / "aq4-output"
+    before = document["before"]
+    before.update(
+        {
+            "worker_protocol": "ullm.worker.v2",
+            "worker_binary_path": str(aq4_source / "ullm-worker"),
+            "promotion_receipt_path": str(
+                aq4_source / "promotion-receipt.json"
+            ),
+            "promotion_receipt_sha256": "4" * 64,
+        }
+    )
+    document["aq4_release"] = {
+        "source": {
+            "root": str(aq4_source),
+            "commit": before["promotion_source_commit"],
+            "tree": "5" * 40,
+        },
+        "openwebui_image": (
+            "registry.example/openwebui-aq4@sha256:" + "6" * 64
+        ),
+        "promotion_evidence": {
+            "source_path": str(aq4_source / "promotion-evidence.json"),
+            "path": str(aq4_output / "promotion-evidence.json"),
+            "sha256": "7" * 64,
+        },
+        "promotion_receipt": {
+            "source_path": before["promotion_receipt_path"],
+            "path": str(aq4_output / "promotion-receipt.json"),
+            "sha256": before["promotion_receipt_sha256"],
+        },
+        "release_evidence_path": str(aq4_output / "release-evidence.json"),
+        "release_validator_path": str(aq4_output / "release-validator.json"),
+        "browser_validator_path": str(aq4_output / "browser-validator.json"),
+    }
+    document["campaigns"].update(
+        {
+            "aq4_reasoning_release": {
+                "run_id": "aq4-reasoning-release-run",
+                "final_path": str(aq4_output / "reasoning-release"),
+            },
+            "aq4_reasoning_browser": {
+                "run_id": "aq4-reasoning-browser-run",
+                "final_path": str(aq4_output / "browser-evidence.json"),
+            },
+            "aq4_bundle": {
+                "run_id": "aq4-bundle-run",
+                "final_path": str(aq4_output / "bundle.json"),
+            },
+        }
+    )
+
+
 def seal_bundle_v2(path: Path) -> None:
     path.chmod(0o444)
 
@@ -315,6 +376,12 @@ def make_bundle(root: Path) -> Path:
 
 def make_v2_bundle(
     root: Path,
+    *,
+    authorization_schema: str | None = None,
+    claim_schema: str | None = None,
+    include_aq4_campaigns: bool = True,
+    authorized_sq8_run_id: str = "sq8-full-run",
+    authorized_sq8_final_path: Path | None = None,
 ) -> tuple[Path, dict[str, ModuleType | object], bytes]:
     source = "1" * 40
     worker_sha = "c" * 64
@@ -367,7 +434,11 @@ def make_v2_bundle(
     }
     authorization_path = root / "campaign-authorization.json"
     authorization_document = {
-        "schema_version": BUNDLE.AUTHORIZATION_SCHEMA,
+        "schema_version": (
+            BUNDLE.AUTHORIZATION_SCHEMA
+            if authorization_schema is None
+            else authorization_schema
+        ),
         "authorization_id": "bundle-v2-fixture-authorization",
         "issued_at": "2026-07-24T00:00:00Z",
         "expires_at": "2026-07-25T00:00:00Z",
@@ -394,8 +465,12 @@ def make_v2_bundle(
         },
         "campaigns": {
             "sq8_full": {
-                "run_id": "sq8-full-run",
-                "final_path": str(root / "campaign"),
+                "run_id": authorized_sq8_run_id,
+                "final_path": str(
+                    root / "campaign"
+                    if authorized_sq8_final_path is None
+                    else authorized_sq8_final_path
+                ),
             },
             "reasoning_release": {
                 "run_id": "reasoning-release-run",
@@ -413,13 +488,28 @@ def make_v2_bundle(
         },
         "prior_outcome": None,
     }
+    add_aq4_authorization_v2_bindings(
+        authorization_document,
+        root=root,
+    )
+    if not include_aq4_campaigns:
+        for name in (
+            "aq4_reasoning_release",
+            "aq4_reasoning_browser",
+            "aq4_bundle",
+        ):
+            del authorization_document["campaigns"][name]
     write_canonical_json(authorization_path, authorization_document)
     authorization_path.chmod(0o444)
     claim_path = root / "campaign-authorization.claimed.json"
     write_canonical_json(
         claim_path,
         {
-            "schema_version": BUNDLE.CLAIM_SCHEMA,
+            "schema_version": (
+                BUNDLE.CLAIM_SCHEMA
+                if claim_schema is None
+                else claim_schema
+            ),
             "authorization_id": authorization_document["authorization_id"],
             "authorization_path": str(authorization_path),
             "authorization_sha256": digest(authorization_path),
@@ -573,8 +663,8 @@ def make_v2_bundle(
     campaign_manifest_path = root / "campaign/SHA256SUMS"
     campaign_manifest_path.write_text("fixture\n", encoding="ascii")
     campaign_report_raw = (
-        b'{"release_status":"complete","schema_version":'
-        b'"ullm.sq8.openwebui_release.validation.v2"}\n'
+        b'{"release_status":"complete","run_id":"sq8-full-run",'
+        b'"schema_version":"ullm.sq8.openwebui_release.validation.v2"}\n'
     )
     campaign_report_path = root / "campaign/release-validation.json"
     campaign_report_path.write_bytes(campaign_report_raw)
@@ -898,7 +988,7 @@ def make_real_validator_v2_bundle(
             source_groups = full_fixtures.VALIDATOR.EXPECTED_SOURCE_GROUPS_V2
             for source in environment["sources"]:
                 relative = role_paths[source["role"]]
-                raw = (ROOT / relative).read_bytes()
+                raw = (promotion.source / relative).read_bytes()
                 source.update(
                     path=relative,
                     bytes=len(raw),
@@ -970,7 +1060,7 @@ def make_real_validator_v2_bundle(
                 ],
             }
             model_identity["campaign_authorization_claim"] = self.claim_value
-            self.source_root = ROOT
+            self.source_root = promotion.source
             self.commit = source_commit
             self.environment = environment
             self.model_identity = model_identity
@@ -1017,7 +1107,7 @@ def make_real_validator_v2_bundle(
             return full_fixtures.VALIDATOR.FullCampaignIndependentValidator(
                 expected_commit=source_commit,
                 expected_worker_binary_sha256=worker_sha256,
-                repo_root=ROOT,
+                repo_root=promotion.source,
                 forbidden_values=(b"never-present-real-bundle-token",),
                 expected_served_model_manifest_sha256=digest(candidate_path),
                 expected_authorization_claim_sha256=self.claim_value["sha256"],
@@ -1094,6 +1184,10 @@ def make_real_validator_v2_bundle(
         },
         "prior_outcome": None,
     }
+    add_aq4_authorization_v2_bindings(
+        authorization,
+        root=root,
+    )
     write_canonical_json(authorization_path, authorization)
     authorization_path.chmod(0o444)
     claim_path = root / "campaign-authorization.claimed.json"
@@ -1263,6 +1357,120 @@ def test_bundle_rejects_symlink_component(tmp_path: Path) -> None:
     write_json(bundle, value)
 
     with pytest.raises(BUNDLE.ValidationError, match="path is a symlink"):
+        BUNDLE.validate(bundle)
+
+
+def test_aq4_bundle_v1_report_and_cli_bytes_remain_unchanged(
+    tmp_path: Path,
+) -> None:
+    bundle = make_bundle(tmp_path)
+    expected = {
+        "schema_version": BUNDLE.VALIDATOR_SCHEMA_VERSION,
+        "input_schema_version": BUNDLE.SCHEMA_VERSION,
+        "structurally_valid": True,
+        "gate_eligible": True,
+        "source_commit": "1" * 40,
+        "artifact_count": 6,
+        "reasons": [],
+    }
+
+    assert BUNDLE.validate(bundle) == expected
+    completed = subprocess.run(
+        [sys.executable, os.fspath(BUNDLE_PATH), os.fspath(bundle)],
+        check=False,
+        capture_output=True,
+    )
+    assert completed.returncode == 0
+    assert completed.stderr == b""
+    assert completed.stdout == (
+        json.dumps(expected, separators=(",", ":"), sort_keys=True).encode(
+            "ascii"
+        )
+        + b"\n"
+    )
+
+
+@pytest.mark.parametrize(
+    ("authorization_schema", "claim_schema"),
+    (
+        (
+            "ullm.served_model.v2_cross_model_campaign_authorization.v1",
+            BUNDLE.CLAIM_SCHEMA,
+        ),
+        (
+            BUNDLE.AUTHORIZATION_SCHEMA,
+            "ullm.served_model.v2_cross_model_campaign_claim.v1",
+        ),
+    ),
+)
+def test_bundle_v2_rejects_mixed_v1_v2_authorization_and_claim(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    authorization_schema: str,
+    claim_schema: str,
+) -> None:
+    bundle, fakes, _report = make_v2_bundle(
+        tmp_path,
+        authorization_schema=authorization_schema,
+        claim_schema=claim_schema,
+    )
+    install_v2_fakes(monkeypatch, fakes)
+
+    with pytest.raises(
+        BUNDLE.ValidationError,
+        match="loaded campaign claim identity differs",
+    ):
+        BUNDLE.validate(bundle)
+
+
+def test_bundle_v2_rejects_three_campaign_authorization(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bundle, fakes, _report = make_v2_bundle(
+        tmp_path,
+        include_aq4_campaigns=False,
+    )
+    install_v2_fakes(monkeypatch, fakes)
+
+    with pytest.raises(
+        BUNDLE.ValidationError,
+        match="campaign authorization validation failed",
+    ):
+        BUNDLE.validate(bundle)
+
+
+def test_bundle_v2_rejects_sq8_full_run_not_selected_by_authorization(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bundle, fakes, _report = make_v2_bundle(
+        tmp_path,
+        authorized_sq8_run_id="alternate-sq8-full-run",
+    )
+    install_v2_fakes(monkeypatch, fakes)
+
+    with pytest.raises(
+        BUNDLE.ValidationError,
+        match="lineage differs from its authorization",
+    ):
+        BUNDLE.validate(bundle)
+
+
+def test_bundle_v2_rejects_sq8_full_output_not_selected_by_authorization(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bundle, fakes, _report = make_v2_bundle(
+        tmp_path,
+        authorized_sq8_final_path=tmp_path / "alternate-sq8-campaign",
+    )
+    install_v2_fakes(monkeypatch, fakes)
+
+    with pytest.raises(
+        BUNDLE.ValidationError,
+        match="lineage differs from its authorization",
+    ):
         BUNDLE.validate(bundle)
 
 
@@ -1585,8 +1793,10 @@ def test_bundle_v2_requires_exact_campaign_component_locations(
 
 def test_bundle_v2_real_validators_and_build_receipt_mutation_matrix(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     bundle, promotion = make_real_validator_v2_bundle(tmp_path)
+    monkeypatch.setattr(BUNDLE, "ROOT", promotion.source)
 
     report = BUNDLE.validate(bundle)
 
