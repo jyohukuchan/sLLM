@@ -49,6 +49,13 @@ DEFAULT_ENDPOINT = "http://172.20.0.1:8000/v1/chat/completions"
 DEFAULT_HTTP_IMAGE = "sha256:5dce198cca467ce79994ed65e01d03882238f9efdd16a8c6f4bc55151c8a4a54"
 TARGET_GFX = "gfx1201"
 TARGET_GPU_INDEX = "1"
+WORKER_PROCESS_BASENAME_BY_FORMAT = {
+    "AQ4_0": "ullm-aq4-worker",
+    "SQ8_0": "ullm-sq8-worker",
+}
+ALLOWED_WORKER_PROCESS_BASENAMES = frozenset(
+    WORKER_PROCESS_BASENAME_BY_FORMAT.values()
+)
 MAX_JSON_BYTES = 16 * 1024 * 1024
 MAX_RESPONSE_BYTES = 4 * 1024 * 1024
 MAX_FIXTURE_BYTES = 1 * 1024 * 1024
@@ -225,7 +232,30 @@ def _validate_manifest(path: Path) -> dict[str, Any]:
     return summary
 
 
-def _read_gpu_processes(rocm_smi: str = "rocm-smi") -> dict[str, Any]:
+def _worker_process_basename(manifest_summary: dict[str, Any]) -> str:
+    worker = manifest_summary.get("worker")
+    binary = worker.get("binary") if isinstance(worker, dict) else None
+    if not isinstance(binary, str) or not binary or "\x00" in binary:
+        raise CampaignError("validated manifest has no worker executable identity")
+    binary_path = Path(binary)
+    basename = binary_path.name
+    expected = WORKER_PROCESS_BASENAME_BY_FORMAT.get(
+        manifest_summary.get("format_id")
+    )
+    if (
+        not binary_path.is_absolute()
+        or expected is None
+        or basename != expected
+    ):
+        raise CampaignError("validated manifest worker executable is not an allowed release worker")
+    return basename
+
+
+def _read_gpu_processes(
+    rocm_smi: str = "rocm-smi",
+    *,
+    expected_process_basename: str | None = None,
+) -> dict[str, Any]:
     try:
         result = subprocess.run(
             [rocm_smi, "--showpids", "--json"],
@@ -269,7 +299,9 @@ def _read_gpu_processes(rocm_smi: str = "rocm-smi") -> dict[str, Any]:
         raise CampaignError("target R9700 has no resident v2 worker")
     if any(item["process"] == "llama-server" for item in positive):
         raise CampaignError("llama.cpp is resident; release campaign requires an exclusive R9700")
-    if any(item["process"] != "ullm-aq4-worker" for item in positive):
+    if expected_process_basename not in ALLOWED_WORKER_PROCESS_BASENAMES:
+        raise CampaignError("resident worker process identity is not bound to the validated manifest")
+    if any(item["process"] != expected_process_basename for item in positive):
         raise CampaignError("an unexpected process owns the target R9700")
     return {"tool": f"{rocm_smi} --showpids --json", "gpu_index": TARGET_GPU_INDEX, "positive_vram_processes": positive}
 
@@ -293,8 +325,16 @@ def _hash_process_executable(pid: str) -> str:
     return digest.hexdigest()
 
 
-def _bind_gpu_processes(preflight: dict[str, Any], expected_binary_sha256: str) -> None:
+def _bind_gpu_processes(
+    preflight: dict[str, Any],
+    expected_binary_sha256: str,
+    expected_process_basename: str,
+) -> None:
+    if expected_process_basename not in ALLOWED_WORKER_PROCESS_BASENAMES:
+        raise CampaignError("resident worker process identity is not bound to the validated manifest")
     for process in preflight["positive_vram_processes"]:
+        if process.get("process") != expected_process_basename:
+            raise CampaignError("resident GPU worker name differs from the v2 manifest")
         observed = _hash_process_executable(process["pid"])
         if observed != expected_binary_sha256:
             raise CampaignError("resident GPU worker binary differs from the v2 manifest")
@@ -963,8 +1003,16 @@ def execute(
     missing = [mode for mode in MODES if f"generic-reasoning-{mode}" not in fixtures]
     if missing:
         raise CampaignError("fixture suite lacks modes: " + ",".join(missing))
-    gpu_preflight = _read_gpu_processes(rocm_smi)
-    _bind_gpu_processes(gpu_preflight, manifest_summary["worker"]["binary_sha256"])
+    worker_process_basename = _worker_process_basename(manifest_summary)
+    gpu_preflight = _read_gpu_processes(
+        rocm_smi,
+        expected_process_basename=worker_process_basename,
+    )
+    _bind_gpu_processes(
+        gpu_preflight,
+        manifest_summary["worker"]["binary_sha256"],
+        worker_process_basename,
+    )
     stream_command = _docker_command(
         docker=docker,
         image=http_image,

@@ -286,18 +286,86 @@ def test_immutable_http_image_is_required(tmp_path: Path) -> None:
         )
 
 
-def test_gpu_process_identity_is_bound_to_manifest_binary(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("basename", ["ullm-aq4-worker", "ullm-sq8-worker"])
+def test_gpu_process_identity_is_bound_to_manifest_binary_and_name(
+    basename: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
     preflight = {
-        "positive_vram_processes": [{"pid": "123", "process": "ullm-aq4-worker"}]
+        "positive_vram_processes": [{"pid": "123", "process": basename}]
     }
     monkeypatch.setattr(TOOL, "_hash_process_executable", lambda _pid: "a" * 64)
 
-    TOOL._bind_gpu_processes(preflight, "a" * 64)
+    TOOL._bind_gpu_processes(preflight, "a" * 64, basename)
     assert preflight["positive_vram_processes"][0]["binary_sha256"] == "a" * 64
 
     monkeypatch.setattr(TOOL, "_hash_process_executable", lambda _pid: "b" * 64)
     with pytest.raises(TOOL.CampaignError, match="differs from the v2 manifest"):
-        TOOL._bind_gpu_processes(preflight, "a" * 64)
+        TOOL._bind_gpu_processes(preflight, "a" * 64, basename)
+
+
+@pytest.mark.parametrize(
+    ("format_id", "binary", "expected"),
+    [
+        ("AQ4_0", "/opt/ullm/bin/ullm-aq4-worker", "ullm-aq4-worker"),
+        ("SQ8_0", "/opt/ullm/bin/ullm-sq8-worker", "ullm-sq8-worker"),
+    ],
+)
+def test_worker_process_basename_is_derived_from_validated_manifest(
+    format_id: str, binary: str, expected: str
+) -> None:
+    assert (
+        TOOL._worker_process_basename(
+            {"format_id": format_id, "worker": {"binary": binary}}
+        )
+        == expected
+    )
+
+
+@pytest.mark.parametrize(
+    ("format_id", "binary"),
+    [
+        ("SQ8_0", "/opt/ullm/bin/ullm-worker"),
+        ("SQ8_0", "ullm-sq8-worker"),
+        ("SQ8_0", "/opt/ullm/bin/llama-server"),
+        ("SQ8_0", ""),
+        ("SQ8_0", "/opt/ullm/bin/ullm-aq4-worker"),
+        ("AQ4_0", "/opt/ullm/bin/ullm-sq8-worker"),
+        ("UNKNOWN", "/opt/ullm/bin/ullm-sq8-worker"),
+    ],
+)
+def test_worker_process_basename_rejects_unbound_names(
+    format_id: str, binary: str
+) -> None:
+    with pytest.raises(TOOL.CampaignError, match="worker executable"):
+        TOOL._worker_process_basename(
+            {"format_id": format_id, "worker": {"binary": binary}}
+        )
+
+
+def test_gpu_preflight_requires_the_manifest_derived_process_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = {
+        "system": {
+            "PID123": "ullm-sq8-worker, 1, 4096",
+        }
+    }
+    monkeypatch.setattr(
+        TOOL.subprocess,
+        "run",
+        lambda *args, **kwargs: TOOL.subprocess.CompletedProcess(
+            args, 0, stdout=json.dumps(payload), stderr=""
+        ),
+    )
+
+    preflight = TOOL._read_gpu_processes(
+        expected_process_basename="ullm-sq8-worker"
+    )
+    assert preflight["positive_vram_processes"][0]["process"] == "ullm-sq8-worker"
+    with pytest.raises(TOOL.CampaignError, match="unexpected process"):
+        TOOL._read_gpu_processes(expected_process_basename="ullm-aq4-worker")
+    with pytest.raises(TOOL.CampaignError, match="not bound"):
+        TOOL._read_gpu_processes()
 
 
 def test_gpu_preflight_accepts_rocm_no_process_output(monkeypatch: pytest.MonkeyPatch) -> None:

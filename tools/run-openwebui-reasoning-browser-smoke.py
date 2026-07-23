@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""Run the hash-only v2 OpenWebUI reasoning browser smoke safely.
+"""Run the hash-only OpenWebUI reasoning browser smoke safely.
 
 The browser script writes only its bounded JSON evidence to stdout.  This
 runner executes it in an immutable Playwright container, binds the expected
-model identities explicitly, validates the result, and publishes it
-atomically.  Prompt, response, token, and credential contents are never
-written by this runner.
+model identities explicitly, validates the result, and publishes it atomically.
+Legacy runs preserve the historical v2 evidence; active-manifest-bound runs
+publish release-identity-bearing v3 evidence. Prompt, response, token, and
+credential contents are never written by this runner.
 """
 
 from __future__ import annotations
@@ -50,14 +51,30 @@ SERVED_MODEL_VALIDATOR_PATH = ROOT / "tools/validate-served-model.py"
 MAX_TOKEN_FILE_BYTES = 65_536
 MAX_SCRIPT_BYTES = 1 * 1024 * 1024
 MAX_EVIDENCE_BYTES = 1 * 1024 * 1024
+MAX_TOKENIZER_FILE_BYTES = 512 * 1024 * 1024
+MAX_TOKENIZER_TOTAL_BYTES = 1024 * 1024 * 1024
 IMAGE_RE = re.compile(
     r"(?:[A-Za-z0-9][A-Za-z0-9._/:+-]*@)?sha256:[0-9a-f]{64}\Z"
 )
+CONTENT_ADDRESSED_IMAGE_RE = re.compile(
+    r"[A-Za-z0-9][A-Za-z0-9._/:+-]*@sha256:[0-9a-f]{64}\Z"
+)
+HASH_RE = re.compile(r"[0-9a-f]{64}\Z")
+COMMIT_RE = re.compile(r"[0-9a-f]{40}\Z")
 CONTAINER_USER_RE = re.compile(r"[0-9]{1,5}:[0-9]{1,5}\Z")
 JWT_SEGMENT_RE = re.compile(r"[A-Za-z0-9_-]{1,16384}\Z")
 _VALIDATOR_MODULE_NAME = "_ullm_openwebui_reasoning_browser_validator"
 _SERVED_MODEL_MODULE_NAME = "_ullm_reasoning_browser_served_model_validator"
 TARGET_GPU_INDEX = "1"
+WORKER_PROCESS_BASENAME_BY_FORMAT = {
+    "AQ4_0": "ullm-aq4-worker",
+    "SQ8_0": "ullm-sq8-worker",
+}
+ALLOWED_WORKER_PROCESS_BASENAMES = frozenset(
+    WORKER_PROCESS_BASENAME_BY_FORMAT.values()
+)
+BROWSER_EVIDENCE_SCHEMA_V2 = "ullm.openwebui.reasoning_browser_smoke.v2"
+BROWSER_EVIDENCE_SCHEMA_V3 = "ullm.openwebui.reasoning_browser_smoke.v3"
 SWITCH_EVIDENCE_FIELDS = {
     "provider_switch_performed",
     "provider_switch_model_id_sha256",
@@ -105,6 +122,151 @@ def _validate_image(value: str) -> str:
     if IMAGE_RE.fullmatch(value) is None:
         raise SmokeError("browser image must be an immutable Docker SHA-256 identity")
     return value
+
+
+def _validate_v3_image(value: str) -> str:
+    if CONTENT_ADDRESSED_IMAGE_RE.fullmatch(value) is None:
+        raise SmokeError(
+            "v3 browser evidence requires a content-addressed Docker image"
+        )
+    return value
+
+
+def _stable_hash_regular(
+    path: Path,
+    label: str,
+    *,
+    maximum: int,
+) -> tuple[str, int]:
+    try:
+        before = path.lstat()
+    except OSError as error:
+        raise SmokeError(f"{label} is unavailable") from error
+    if (
+        stat.S_ISLNK(before.st_mode)
+        or not stat.S_ISREG(before.st_mode)
+        or before.st_size <= 0
+        or before.st_size > maximum
+    ):
+        raise SmokeError(f"{label} is not a bounded regular non-symlink file")
+    flags = os.O_RDONLY | os.O_CLOEXEC
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as error:
+        raise SmokeError(f"{label} cannot be opened safely") from error
+    digest = hashlib.sha256()
+    size = 0
+    try:
+        opened = os.fstat(descriptor)
+        identity = (
+            before.st_dev,
+            before.st_ino,
+            before.st_mode,
+            before.st_nlink,
+            before.st_uid,
+            before.st_gid,
+            before.st_size,
+            before.st_mtime_ns,
+            before.st_ctime_ns,
+        )
+        opened_identity = (
+            opened.st_dev,
+            opened.st_ino,
+            opened.st_mode,
+            opened.st_nlink,
+            opened.st_uid,
+            opened.st_gid,
+            opened.st_size,
+            opened.st_mtime_ns,
+            opened.st_ctime_ns,
+        )
+        if opened_identity != identity:
+            raise SmokeError(f"{label} changed before hashing")
+        while True:
+            chunk = os.read(descriptor, 1024 * 1024)
+            if not chunk:
+                break
+            size += len(chunk)
+            if size > maximum:
+                raise SmokeError(f"{label} exceeds its size bound")
+            digest.update(chunk)
+        after = os.fstat(descriptor)
+        after_identity = (
+            after.st_dev,
+            after.st_ino,
+            after.st_mode,
+            after.st_nlink,
+            after.st_uid,
+            after.st_gid,
+            after.st_size,
+            after.st_mtime_ns,
+            after.st_ctime_ns,
+        )
+        if after_identity != identity or size != before.st_size:
+            raise SmokeError(f"{label} changed while being hashed")
+    except OSError as error:
+        raise SmokeError(f"{label} cannot be hashed") from error
+    finally:
+        os.close(descriptor)
+    return digest.hexdigest(), size
+
+
+def _tokenizer_identity(
+    manifest: dict[str, Any],
+    manifest_path: Path,
+) -> str:
+    tokenizer = manifest.get("tokenizer")
+    if not isinstance(tokenizer, dict) or not isinstance(tokenizer.get("root"), str):
+        raise SmokeError("served-model manifest tokenizer root is missing")
+    files = tokenizer.get("files")
+    if not isinstance(files, dict) or not files:
+        raise SmokeError("served-model manifest tokenizer files are missing")
+    root_path = Path(tokenizer["root"])
+    if not root_path.is_absolute():
+        root_path = manifest_path.parent / root_path
+    try:
+        root = root_path.resolve(strict=True)
+        root_metadata = root.lstat()
+    except OSError as error:
+        raise SmokeError("served-model tokenizer root is unavailable") from error
+    if not stat.S_ISDIR(root_metadata.st_mode):
+        raise SmokeError("served-model tokenizer root is not a directory")
+    aggregate = hashlib.sha256()
+    total_size = 0
+    for name in sorted(files):
+        expected = files[name]
+        if (
+            not isinstance(name, str)
+            or not name
+            or "\x00" in name
+            or Path(name).is_absolute()
+            or any(part in {"", ".", ".."} for part in Path(name).parts)
+            or not isinstance(expected, str)
+            or HASH_RE.fullmatch(expected) is None
+        ):
+            raise SmokeError("served-model tokenizer file identity is invalid")
+        unresolved = root / name
+        try:
+            resolved = unresolved.resolve(strict=True)
+            resolved.relative_to(root)
+        except (OSError, ValueError) as error:
+            raise SmokeError("served-model tokenizer file escapes its root") from error
+        observed, size = _stable_hash_regular(
+            resolved,
+            f"served-model tokenizer file {name}",
+            maximum=MAX_TOKENIZER_FILE_BYTES,
+        )
+        total_size += size
+        if total_size > MAX_TOKENIZER_TOTAL_BYTES:
+            raise SmokeError("served-model tokenizer files exceed their total size bound")
+        if observed != expected:
+            raise SmokeError(f"served-model tokenizer file hash differs: {name}")
+        aggregate.update(name.encode("utf-8"))
+        aggregate.update(b"\0")
+        aggregate.update(bytes.fromhex(observed))
+    return aggregate.hexdigest()
 
 
 def _validate_container_user(value: str) -> tuple[int, int]:
@@ -307,6 +469,104 @@ def _validate_manifest_identity(manifest: Path, model_id: str) -> dict[str, Any]
     return summary
 
 
+def _worker_process_basename(manifest_summary: dict[str, Any]) -> str:
+    worker = manifest_summary.get("worker")
+    binary = worker.get("binary") if isinstance(worker, dict) else None
+    if not isinstance(binary, str) or not binary or "\x00" in binary:
+        raise SmokeError("validated manifest has no worker executable identity")
+    binary_path = Path(binary)
+    basename = binary_path.name
+    expected = WORKER_PROCESS_BASENAME_BY_FORMAT.get(
+        manifest_summary.get("format_id")
+    )
+    if (
+        not binary_path.is_absolute()
+        or expected is None
+        or basename != expected
+    ):
+        raise SmokeError(
+            "validated manifest worker executable is not an allowed release worker"
+        )
+    return basename
+
+
+def _v3_release_identity(
+    manifest_path: Path,
+    manifest_summary: dict[str, Any],
+    openwebui_image: str,
+) -> tuple[str, dict[str, str]]:
+    raw = _read_regular(
+        manifest_path,
+        "served-model manifest",
+        1_048_576,
+    )
+    manifest_sha256 = _sha256(raw)
+    if manifest_summary.get("manifest_sha256") != manifest_sha256:
+        raise SmokeError("served-model manifest changed after validation")
+    document = _strict_json(raw)
+    promotion = document.get("promotion")
+    source_commit = (
+        promotion.get("source_commit") if isinstance(promotion, dict) else None
+    )
+    if not isinstance(source_commit, str) or COMMIT_RE.fullmatch(source_commit) is None:
+        raise SmokeError("served-model manifest has no full promotion source commit")
+    worker = manifest_summary.get("worker")
+    worker_binary_sha256 = (
+        worker.get("binary_sha256") if isinstance(worker, dict) else None
+    )
+    if (
+        not isinstance(worker_binary_sha256, str)
+        or HASH_RE.fullmatch(worker_binary_sha256) is None
+    ):
+        raise SmokeError("validated manifest has no worker binary SHA-256")
+    return source_commit, {
+        "manifest_sha256": manifest_sha256,
+        "worker_binary_sha256": worker_binary_sha256,
+        "tokenizer_sha256": _tokenizer_identity(document, manifest_path),
+        "openwebui_image": _validate_v3_image(openwebui_image),
+    }
+
+
+def _upgrade_browser_evidence_v3(
+    document: dict[str, Any],
+    *,
+    source_commit: str,
+    identity: dict[str, str],
+) -> dict[str, Any]:
+    if document.get("schema_version") != BROWSER_EVIDENCE_SCHEMA_V2:
+        raise SmokeError("browser evidence is not the v2 transport schema")
+    if "source_commit" in document or "identity" in document:
+        raise SmokeError("v2 browser evidence contains reserved v3 identity fields")
+    if not isinstance(source_commit, str) or COMMIT_RE.fullmatch(source_commit) is None:
+        raise SmokeError("v3 browser evidence source commit is invalid")
+    if set(identity) != {
+        "manifest_sha256",
+        "worker_binary_sha256",
+        "tokenizer_sha256",
+        "openwebui_image",
+    }:
+        raise SmokeError("v3 browser evidence identity fields differ")
+    if any(
+        not isinstance(identity[field], str)
+        or HASH_RE.fullmatch(identity[field]) is None
+        for field in (
+            "manifest_sha256",
+            "worker_binary_sha256",
+            "tokenizer_sha256",
+        )
+    ):
+        raise SmokeError("v3 browser evidence identity SHA-256 is invalid")
+    if not isinstance(identity["openwebui_image"], str):
+        raise SmokeError("v3 browser evidence image identity is invalid")
+    _validate_v3_image(identity["openwebui_image"])
+    return {
+        **document,
+        "schema_version": BROWSER_EVIDENCE_SCHEMA_V3,
+        "source_commit": source_commit,
+        "identity": dict(identity),
+    }
+
+
 def _bind_model_identity(
     document: dict[str, Any],
     *,
@@ -314,7 +574,7 @@ def _bind_model_identity(
     switch_model_id: str | None,
 ) -> None:
     expected = _sha256(model_id.encode("utf-8"))
-    if document.get("schema_version") != "ullm.openwebui.reasoning_browser_smoke.v2":
+    if document.get("schema_version") != BROWSER_EVIDENCE_SCHEMA_V2:
         raise SmokeError("browser evidence is not the v2 schema")
     if document.get("model_id_sha256") != expected:
         raise SmokeError("browser evidence primary model identity differs")
@@ -629,6 +889,7 @@ class _AlternatingServiceCoordinator:
         rocm_smi: str,
         ullm_service: str,
         llama_service: str,
+        ullm_worker_process_basename: str,
         docker: str = "docker",
         ullm_port: int = 8000,
         llama_port: int = 8001,
@@ -637,6 +898,11 @@ class _AlternatingServiceCoordinator:
         self.rocm_smi = rocm_smi
         self.ullm_service = ullm_service
         self.llama_service = llama_service
+        if ullm_worker_process_basename not in ALLOWED_WORKER_PROCESS_BASENAMES:
+            raise SmokeError(
+                "uLLM worker process identity is not bound to a validated manifest"
+            )
+        self.ullm_worker_process_basename = ullm_worker_process_basename
         self.docker = docker
         self.ullm_port = ullm_port
         self.llama_port = llama_port
@@ -648,7 +914,9 @@ class _AlternatingServiceCoordinator:
         if _service_state(self.llama_service, self.systemctl)[1] not in {"inactive", "failed"}:
             raise SmokeError("llama.cpp service must be inactive before alternating browser smoke")
         processes = _target_gpu_processes(self.rocm_smi)
-        if {process["process"] for process in processes} != {"ullm-aq4-worker"}:
+        if {process["process"] for process in processes} != {
+            self.ullm_worker_process_basename
+        }:
             raise SmokeError("target R9700 is not exclusively owned by uLLM")
         for process in processes:
             try:
@@ -679,7 +947,10 @@ class _AlternatingServiceCoordinator:
             _service_command(self.systemctl, "stop", self.llama_service)
             _wait_for_gpu_owner(self.rocm_smi, set())
             _service_command(self.systemctl, "start", self.ullm_service)
-            _wait_for_gpu_owner(self.rocm_smi, {"ullm-aq4-worker"})
+            _wait_for_gpu_owner(
+                self.rocm_smi,
+                {self.ullm_worker_process_basename},
+            )
             _wait_for_tcp_port(
                 self.docker,
                 "172.20.0.1",
@@ -772,6 +1043,7 @@ def execute(
     if active_binding is not None:
         active_binding.observe("preflight")
     manifest_summary = _validate_manifest_identity(selected_manifest, model_id)
+    worker_process_basename = _worker_process_basename(manifest_summary)
     token = _read_regular(
         openwebui_session_token_file,
         "OpenWebUI session token file",
@@ -784,6 +1056,14 @@ def execute(
     )
     url = _validate_url(openwebui_url)
     image = _validate_image(browser_image)
+    v3_source_commit: str | None = None
+    v3_identity: dict[str, str] | None = None
+    if active_binding is not None:
+        v3_source_commit, v3_identity = _v3_release_identity(
+            selected_manifest,
+            manifest_summary,
+            image,
+        )
     model_id = _validate_public_text(model_id, "model ID")
     model_name = _validate_public_text(model_name, "model name")
     if (switch_model_id is None) != (switch_model_name is None):
@@ -802,7 +1082,12 @@ def execute(
 
     coordinator = (
         _AlternatingServiceCoordinator(
-            systemctl, rocm_smi, ullm_service, llama_service, docker=docker
+            systemctl,
+            rocm_smi,
+            ullm_service,
+            llama_service,
+            worker_process_basename,
+            docker=docker,
         )
         if alternate_r9700_services
         else None
@@ -936,11 +1221,30 @@ def execute(
         model_id=model_id,
         switch_model_id=switch_model_id,
     )
+    if active_binding is None:
+        published_raw = raw.strip() + b"\n"
+    else:
+        assert v3_source_commit is not None and v3_identity is not None
+        document = _upgrade_browser_evidence_v3(
+            document,
+            source_commit=v3_source_commit,
+            identity=v3_identity,
+        )
+        published_raw = (
+            json.dumps(
+                document,
+                ensure_ascii=True,
+                allow_nan=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode("ascii")
+            + b"\n"
+        )
     temporary = output.parent / f".{output.name}.validate-{uuid.uuid4().hex}"
     try:
         if active_binding is not None:
             active_binding.observe("validation")
-        _atomic_publish(temporary, raw.strip() + b"\n")
+        _atomic_publish(temporary, published_raw)
         report = _load_validator().validate(temporary)
         if report.get("gate_eligible") is not True:
             raise SmokeError("browser evidence is not gate eligible")
@@ -955,7 +1259,7 @@ def execute(
             output, active_binding.artifacts()
         )
     try:
-        _atomic_publish(output, raw.strip() + b"\n")
+        _atomic_publish(output, published_raw)
     except BaseException:
         if binding_output is not None:
             shutil.rmtree(binding_output, ignore_errors=True)

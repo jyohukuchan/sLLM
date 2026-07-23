@@ -149,7 +149,11 @@ def test_runner_publishes_valid_hash_only_evidence_and_binds_command(
     monkeypatch.setattr(
         TOOL,
         "_validate_manifest_identity",
-        lambda _path, _model: {"manifest_sha256": "m" * 64},
+        lambda _path, _model: {
+            "manifest_sha256": "m" * 64,
+            "format_id": "AQ4_0",
+            "worker": {"binary": "/opt/ullm/bin/ullm-aq4-worker"},
+        },
     )
     result = TOOL.execute(
         output=output,
@@ -165,6 +169,7 @@ def test_runner_publishes_valid_hash_only_evidence_and_binds_command(
     )
 
     assert result["provider_request_count"] == 4
+    assert output.read_bytes() == payload
     assert json.loads(output.read_text(encoding="ascii"))["model_id_sha256"] == digest(
         model_id
     )
@@ -196,7 +201,11 @@ def test_runner_publishes_gate_eligible_evidence_without_a_provider_switch(
     monkeypatch.setattr(
         TOOL,
         "_validate_manifest_identity",
-        lambda _path, _model: {"manifest_sha256": "m" * 64},
+        lambda _path, _model: {
+            "manifest_sha256": "m" * 64,
+            "format_id": "AQ4_0",
+            "worker": {"binary": "/opt/ullm/bin/ullm-aq4-worker"},
+        },
     )
     result = TOOL.execute(
         output=output,
@@ -214,6 +223,92 @@ def test_runner_publishes_gate_eligible_evidence_without_a_provider_switch(
     assert TOOL._load_validator().validate(output)["gate_eligible"] is True
     assert not (set(document) & TOOL.SWITCH_EVIDENCE_FIELDS)
     assert all("OPENWEBUI_SWITCH_MODEL_" not in part for part in commands[0])
+
+
+def test_active_binding_path_publishes_identity_bearing_v3_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    token = tmp_path / "token"
+    token.write_text(SESSION_JWT + "\n", encoding="ascii")
+    script = tmp_path / "smoke.cjs"
+    script.write_text("console.log('{}')\n", encoding="ascii")
+    output = tmp_path / "browser-v3.json"
+    candidate = tmp_path / "candidate.json"
+    candidate.write_text("{}\n", encoding="ascii")
+    model_id = "ullm-qwen3-14b-sq8"
+    payload = (json.dumps(evidence(model_id)) + "\n").encode("ascii")
+    stages: list[str] = []
+
+    class Binding:
+        def observe(self, stage: str) -> None:
+            stages.append(stage)
+
+        def artifacts(self) -> object:
+            return object()
+
+    binding = Binding()
+    monkeypatch.setattr(
+        TOOL,
+        "_select_manifest_and_binding",
+        lambda **_kwargs: (candidate, binding),
+    )
+    monkeypatch.setattr(
+        TOOL,
+        "_validate_manifest_identity",
+        lambda _path, _model: {
+            "manifest_sha256": "1" * 64,
+            "format_id": "SQ8_0",
+            "worker": {
+                "binary": "/opt/ullm/bin/ullm-sq8-worker",
+                "binary_sha256": "2" * 64,
+            },
+        },
+    )
+    v3_identity = {
+        "manifest_sha256": "1" * 64,
+        "worker_binary_sha256": "2" * 64,
+        "tokenizer_sha256": "3" * 64,
+        "openwebui_image": "registry.example/open-webui@sha256:" + "4" * 64,
+    }
+    monkeypatch.setattr(
+        TOOL,
+        "_v3_release_identity",
+        lambda *_args: ("5" * 40, v3_identity),
+    )
+
+    def fake_popen(_command, *, stdout, **_kwargs):
+        return FakeProcess(stdout, payload)
+
+    monkeypatch.setattr(TOOL.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(
+        TOOL,
+        "_publish_active_binding_directory",
+        lambda _output, _artifacts: tmp_path / "binding",
+    )
+
+    result = TOOL.execute(
+        output=output,
+        manifest=None,
+        active_binding_mode="v2",
+        candidate_served_model_manifest=candidate,
+        active_served_model_manifest=tmp_path / "active.json",
+        expected_served_model_manifest_sha256="1" * 64,
+        campaign_authorization=tmp_path / "authorization.json",
+        run_id="browser-run",
+        openwebui_session_token_file=token,
+        browser_image=v3_identity["openwebui_image"],
+        openwebui_url="http://127.0.0.1:3000/",
+        model_id=model_id,
+        model_name="uLLM Qwen3 14B SQ8",
+        browser_script=script,
+    )
+
+    document = json.loads(output.read_text(encoding="ascii"))
+    assert result["schema_version"] == TOOL.BROWSER_EVIDENCE_SCHEMA_V3
+    assert document["source_commit"] == "5" * 40
+    assert document["identity"] == v3_identity
+    assert TOOL._load_validator().validate(output)["gate_eligible"] is True
+    assert stages == list(TOOL.ACTIVE_BINDING_STAGES)
 
 
 def test_runner_cli_allows_switch_arguments_to_be_omitted(tmp_path: Path) -> None:
@@ -258,7 +353,11 @@ def test_runner_rejects_external_model_binding_mismatch(
     monkeypatch.setattr(
         TOOL,
         "_validate_manifest_identity",
-        lambda _path, _model: {"manifest_sha256": "m" * 64},
+        lambda _path, _model: {
+            "manifest_sha256": "m" * 64,
+            "format_id": "AQ4_0",
+            "worker": {"binary": "/opt/ullm/bin/ullm-aq4-worker"},
+        },
     )
     with pytest.raises(TOOL.SmokeError, match="primary model identity"):
         TOOL.execute(
@@ -285,6 +384,139 @@ def test_runner_rejects_a_v1_active_manifest(tmp_path: Path) -> None:
         TOOL._validate_manifest_identity(manifest, "ullm-qwen3.5-9b-aq4")
 
 
+@pytest.mark.parametrize(
+    ("format_id", "binary", "expected"),
+    [
+        ("AQ4_0", "/opt/ullm/bin/ullm-aq4-worker", "ullm-aq4-worker"),
+        ("SQ8_0", "/opt/ullm/bin/ullm-sq8-worker", "ullm-sq8-worker"),
+    ],
+)
+def test_browser_worker_process_name_is_manifest_derived(
+    format_id: str, binary: str, expected: str
+) -> None:
+    assert (
+        TOOL._worker_process_basename(
+            {"format_id": format_id, "worker": {"binary": binary}}
+        )
+        == expected
+    )
+
+
+@pytest.mark.parametrize(
+    ("format_id", "binary"),
+    [
+        ("SQ8_0", "/opt/ullm/bin/ullm-worker"),
+        ("SQ8_0", "ullm-sq8-worker"),
+        ("SQ8_0", "/opt/ullm/bin/llama-server"),
+        ("SQ8_0", "/opt/ullm/bin/ullm-aq4-worker"),
+        ("AQ4_0", "/opt/ullm/bin/ullm-sq8-worker"),
+        ("UNKNOWN", "/opt/ullm/bin/ullm-sq8-worker"),
+    ],
+)
+def test_browser_worker_process_name_rejects_unbound_values(
+    format_id: str, binary: str
+) -> None:
+    with pytest.raises(TOOL.SmokeError, match="worker executable"):
+        TOOL._worker_process_basename(
+            {"format_id": format_id, "worker": {"binary": binary}}
+        )
+
+
+def test_v3_release_identity_rehashes_live_tokenizer_files(
+    tmp_path: Path,
+) -> None:
+    tokenizer = tmp_path / "tokenizer"
+    tokenizer.mkdir()
+    members = {
+        "tokenizer.json": b'{"fixture":true}\n',
+        "tokenizer_config.json": b'{"chat_template":"fixture"}\n',
+    }
+    for name, raw in members.items():
+        (tokenizer / name).write_bytes(raw)
+    manifest = {
+        "promotion": {"source_commit": "1" * 40},
+        "tokenizer": {
+            "root": str(tokenizer),
+            "files": {
+                name: hashlib.sha256(raw).hexdigest()
+                for name, raw in members.items()
+            },
+        },
+    }
+    manifest_path = tmp_path / "candidate.json"
+    manifest_path.write_text(
+        json.dumps(manifest, separators=(",", ":"), sort_keys=True) + "\n",
+        encoding="ascii",
+    )
+    manifest_sha256 = hashlib.sha256(manifest_path.read_bytes()).hexdigest()
+    summary = {
+        "manifest_sha256": manifest_sha256,
+        "worker": {"binary_sha256": "2" * 64},
+    }
+
+    source_commit, identity = TOOL._v3_release_identity(
+        manifest_path,
+        summary,
+        "registry.example/open-webui@sha256:" + "3" * 64,
+    )
+
+    aggregate = hashlib.sha256()
+    for name in sorted(members):
+        aggregate.update(name.encode("utf-8"))
+        aggregate.update(b"\0")
+        aggregate.update(hashlib.sha256(members[name]).digest())
+    assert source_commit == "1" * 40
+    assert identity == {
+        "manifest_sha256": manifest_sha256,
+        "worker_binary_sha256": "2" * 64,
+        "tokenizer_sha256": aggregate.hexdigest(),
+        "openwebui_image": "registry.example/open-webui@sha256:" + "3" * 64,
+    }
+
+    with pytest.raises(TOOL.SmokeError, match="changed after validation"):
+        TOOL._v3_release_identity(
+            manifest_path,
+            {**summary, "manifest_sha256": "0" * 64},
+            "registry.example/open-webui@sha256:" + "3" * 64,
+        )
+    with pytest.raises(TOOL.SmokeError, match="content-addressed"):
+        TOOL._v3_release_identity(
+            manifest_path,
+            summary,
+            "sha256:" + "3" * 64,
+        )
+
+    (tokenizer / "tokenizer.json").write_bytes(b"changed\n")
+    with pytest.raises(TOOL.SmokeError, match="tokenizer file hash differs"):
+        TOOL._v3_release_identity(
+            manifest_path,
+            summary,
+            "registry.example/open-webui@sha256:" + "3" * 64,
+        )
+
+
+def test_v3_upgrade_adds_exact_release_identity_without_mutating_v2() -> None:
+    original = evidence("ullm-qwen3-14b-sq8")
+    identity = {
+        "manifest_sha256": "1" * 64,
+        "worker_binary_sha256": "2" * 64,
+        "tokenizer_sha256": "3" * 64,
+        "openwebui_image": "registry.example/open-webui@sha256:" + "4" * 64,
+    }
+
+    upgraded = TOOL._upgrade_browser_evidence_v3(
+        original,
+        source_commit="5" * 40,
+        identity=identity,
+    )
+
+    assert original["schema_version"] == TOOL.BROWSER_EVIDENCE_SCHEMA_V2
+    assert "identity" not in original
+    assert upgraded["schema_version"] == TOOL.BROWSER_EVIDENCE_SCHEMA_V3
+    assert upgraded["source_commit"] == "5" * 40
+    assert upgraded["identity"] == identity
+
+
 @pytest.mark.parametrize("value", ["browser:latest", "sha256:ABC" + "a" * 61])
 def test_runner_requires_immutable_browser_image(value: str) -> None:
     with pytest.raises(TOOL.SmokeError, match="immutable Docker"):
@@ -307,7 +539,12 @@ def test_runner_rejects_gateway_api_key_as_openwebui_session() -> None:
     )
 
 
+@pytest.mark.parametrize(
+    "worker_process_basename",
+    ["ullm-aq4-worker", "ullm-sq8-worker"],
+)
 def test_alternating_r9700_coordinator_serializes_provider_ownership(
+    worker_process_basename: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     actions: list[tuple[str, str]] = []
@@ -323,7 +560,11 @@ def test_alternating_r9700_coordinator_serializes_provider_ownership(
     monkeypatch.setattr(TOOL, "_wait_for_gpu_owner", wait)
     monkeypatch.setattr(TOOL, "_wait_for_tcp_port", lambda *_args, **_kwargs: None)
     coordinator = TOOL._AlternatingServiceCoordinator(
-        "systemctl", "rocm-smi", "ullm-openai.service", "llama-qwen35-udq4.service"
+        "systemctl",
+        "rocm-smi",
+        "ullm-openai.service",
+        "llama-qwen35-udq4.service",
+        worker_process_basename,
     )
 
     coordinator.transition("before-switch")
@@ -338,7 +579,7 @@ def test_alternating_r9700_coordinator_serializes_provider_ownership(
         ("stop", "llama-qwen35-udq4.service"),
         ("gpu", ""),
         ("start", "ullm-openai.service"),
-        ("gpu", "ullm-aq4-worker"),
+        ("gpu", worker_process_basename),
     ]
 
 

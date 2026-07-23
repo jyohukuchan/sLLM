@@ -12,11 +12,17 @@ from typing import Any, Sequence
 
 
 SCHEMA_VERSION_V1 = "ullm.openwebui.reasoning_browser_smoke.v1"
-SCHEMA_VERSION = "ullm.openwebui.reasoning_browser_smoke.v2"
+SCHEMA_VERSION_V2 = "ullm.openwebui.reasoning_browser_smoke.v2"
+SCHEMA_VERSION = SCHEMA_VERSION_V2
+SCHEMA_VERSION_V3 = "ullm.openwebui.reasoning_browser_smoke.v3"
 VALIDATOR_SCHEMA_VERSION = "ullm.openwebui.reasoning_browser_smoke_validator.v1"
 MAX_EVIDENCE_BYTES = 1 * 1024 * 1024
 MAX_PROVIDER_REQUESTS = 4
 HASH_RE = re.compile(r"[0-9a-f]{64}\Z")
+COMMIT_RE = re.compile(r"[0-9a-f]{40}\Z")
+IMAGE_RE = re.compile(
+    r"[A-Za-z0-9][A-Za-z0-9._/:+-]*@sha256:[0-9a-f]{64}\Z"
+)
 FORBIDDEN_KEYS = {
     "prompt",
     "response",
@@ -93,6 +99,23 @@ def _hash(value: Any, label: str) -> None:
         raise ValidationError(f"{label} is not a lowercase SHA-256")
 
 
+def _identity(value: Any) -> None:
+    if not isinstance(value, dict) or set(value) != {
+        "manifest_sha256",
+        "worker_binary_sha256",
+        "tokenizer_sha256",
+        "openwebui_image",
+    }:
+        raise ValidationError("identity fields differ")
+    for field in ("manifest_sha256", "worker_binary_sha256", "tokenizer_sha256"):
+        _hash(value[field], f"identity.{field}")
+    if (
+        not isinstance(value["openwebui_image"], str)
+        or IMAGE_RE.fullmatch(value["openwebui_image"]) is None
+    ):
+        raise ValidationError("identity.openwebui_image is not content-addressed")
+
+
 def _integer(value: Any, label: str, *, minimum: int = 0, maximum: int | None = None) -> None:
     if type(value) is not int or value < minimum or (
         maximum is not None and value > maximum
@@ -114,13 +137,13 @@ def _request(value: Any, index: int, *, version: str) -> None:
         "has_reasoning_content_key",
         "assistant_has_reasoning_content",
     }
-    if version == SCHEMA_VERSION:
+    if version in {SCHEMA_VERSION_V2, SCHEMA_VERSION_V3}:
         expected.add("model_id_sha256")
     if not isinstance(value, dict) or set(value) != expected:
         raise ValidationError(f"provider request {index} fields differ")
     _hash(value["sha256"], f"provider request {index}.sha256")
     _integer(value["utf8_bytes"], f"provider request {index}.utf8_bytes", minimum=2)
-    if version == SCHEMA_VERSION:
+    if version in {SCHEMA_VERSION_V2, SCHEMA_VERSION_V3}:
         _hash(value["model_id_sha256"], f"provider request {index}.model_id_sha256")
     if type(value["has_reasoning_content_key"]) is not bool or type(
         value["assistant_has_reasoning_content"]
@@ -148,16 +171,23 @@ def validate(path: Path) -> dict[str, Any]:
     switch_cycle = False
     if version == SCHEMA_VERSION_V1:
         expected = expected_v1
-    elif version == SCHEMA_VERSION:
+    elif version in {SCHEMA_VERSION_V2, SCHEMA_VERSION_V3}:
         switch_fields = set(document) & SWITCH_EVIDENCE_FIELDS
         if switch_fields and switch_fields != SWITCH_EVIDENCE_FIELDS:
             raise ValidationError("browser evidence switch fields differ")
         switch_cycle = bool(switch_fields)
         expected = expected_v1 | switch_fields
+        if version == SCHEMA_VERSION_V3:
+            expected |= {"source_commit", "identity"}
     else:
         expected = set()
     if set(document) != expected:
         raise ValidationError("browser evidence root fields differ")
+    if version == SCHEMA_VERSION_V3:
+        source_commit = document["source_commit"]
+        if not isinstance(source_commit, str) or COMMIT_RE.fullmatch(source_commit) is None:
+            raise ValidationError("source_commit is not a full lowercase Git commit")
+        _identity(document["identity"])
     _hash(document["model_id_sha256"], "model_id_sha256")
     _text_evidence(document["first_answer"], "first_answer")
     _text_evidence(document["expanded_view"], "expanded_view")
@@ -177,7 +207,7 @@ def validate(path: Path) -> dict[str, Any]:
         raise ValidationError("provider request count differs")
     for index, request in enumerate(requests):
         _request(request, index, version=version)
-    if version == SCHEMA_VERSION:
+    if version in {SCHEMA_VERSION_V2, SCHEMA_VERSION_V3}:
         if switch_cycle:
             if document["provider_switch_performed"] is not True:
                 raise ValidationError("provider switch was not performed")

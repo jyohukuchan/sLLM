@@ -68,6 +68,19 @@ def no_switch_evidence() -> dict:
     return value
 
 
+def v3_evidence() -> dict:
+    value = evidence()
+    value["schema_version"] = TOOL.SCHEMA_VERSION_V3
+    value["source_commit"] = "1" * 40
+    value["identity"] = {
+        "manifest_sha256": "7" * 64,
+        "worker_binary_sha256": "8" * 64,
+        "tokenizer_sha256": "9" * 64,
+        "openwebui_image": "registry.example/open-webui@sha256:" + "a" * 64,
+    }
+    return value
+
+
 def test_validator_accepts_hash_only_browser_gate(tmp_path: Path) -> None:
     path = tmp_path / "browser.json"
     path.write_text(json.dumps(evidence()), encoding="ascii")
@@ -88,6 +101,55 @@ def test_validator_accepts_v2_browser_gate_without_a_switch_cycle(tmp_path: Path
     assert report["structurally_valid"] is True
     assert report["gate_eligible"] is True
     assert report["provider_request_count"] == 2
+
+
+def test_validator_accepts_strict_identity_bearing_v3_browser_gate(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "browser-v3.json"
+    path.write_text(json.dumps(v3_evidence()), encoding="ascii")
+
+    report = TOOL.validate(path)
+
+    assert report["input_schema_version"] == TOOL.SCHEMA_VERSION_V3
+    assert report["structurally_valid"] is True
+    assert report["gate_eligible"] is True
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        lambda value: value.__setitem__("source_commit", "1" * 39),
+        lambda value: value["identity"].__setitem__("manifest_sha256", "A" * 64),
+        lambda value: value["identity"].__setitem__(
+            "openwebui_image", "sha256:" + "a" * 64
+        ),
+        lambda value: value["identity"].__setitem__("extra", "a" * 64),
+        lambda value: value.pop("identity"),
+    ],
+)
+def test_validator_rejects_v3_identity_mutations(
+    tmp_path: Path, mutation
+) -> None:
+    value = v3_evidence()
+    mutation(value)
+    path = tmp_path / "browser-v3.json"
+    path.write_text(json.dumps(value), encoding="ascii")
+
+    with pytest.raises(TOOL.ValidationError):
+        TOOL.validate(path)
+
+
+def test_validator_does_not_reinterpret_v2_with_v3_identity(
+    tmp_path: Path,
+) -> None:
+    value = v3_evidence()
+    value["schema_version"] = TOOL.SCHEMA_VERSION_V2
+    path = tmp_path / "mixed-browser.json"
+    path.write_text(json.dumps(value), encoding="ascii")
+
+    with pytest.raises(TOOL.ValidationError, match="root fields differ"):
+        TOOL.validate(path)
 
 
 @pytest.mark.parametrize(
