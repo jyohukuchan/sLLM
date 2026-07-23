@@ -17,9 +17,22 @@ from pathlib import Path
 from typing import Any, BinaryIO, Iterable
 
 
-RAW_SCHEMA_VERSION = "ullm.sq8.worker_acceptance.raw.v2"
-RESULT_SCHEMA_VERSION = "ullm.sq8.worker_acceptance.validation.v2"
-WORKER_SCHEMA_VERSION = "ullm.worker.v1"
+RAW_SCHEMA_VERSION_V1 = "ullm.sq8.worker_acceptance.raw.v1"
+RAW_SCHEMA_VERSION_V2 = "ullm.sq8.worker_acceptance.raw.v2"
+RAW_SCHEMA_VERSION_V3 = "ullm.sq8.worker_acceptance.raw.v3"
+RESULT_SCHEMA_VERSION_V1 = "ullm.sq8.worker_acceptance.validation.v1"
+RESULT_SCHEMA_VERSION_V2 = "ullm.sq8.worker_acceptance.validation.v2"
+RESULT_SCHEMA_VERSION_V3 = "ullm.sq8.worker_acceptance.validation.v3"
+WORKER_SCHEMA_VERSION_V1 = "ullm.worker.v1"
+WORKER_SCHEMA_VERSION_V2 = "ullm.worker.v2"
+SERVED_MODEL_SCHEMA_VERSION = "ullm.served_model.v2"
+
+# The unqualified names describe the only schema emitted by the current
+# producer. Historical dispatch below never derives its contract from these
+# aliases.
+RAW_SCHEMA_VERSION = RAW_SCHEMA_VERSION_V3
+RESULT_SCHEMA_VERSION = RESULT_SCHEMA_VERSION_V3
+WORKER_SCHEMA_VERSION = WORKER_SCHEMA_VERSION_V2
 MAX_LINE_BYTES = 8 * 1024 * 1024
 U64_MAX = (1 << 64) - 1
 U32_MAX = (1 << 32) - 1
@@ -33,6 +46,28 @@ GPU_INDEX = 2
 GPU_BDF = "0000:47:00.0"
 GPU_UUID = "a8ff7551-0000-1000-80e9-ddefa2d60f55"
 KFD_GPU_ID = 51_545
+
+REASONING_DIALECT = {
+    "enabled_by_default": False,
+    "dialect_id": "qwen3-thinking-v1",
+    "start_token_ids": [151_667],
+    "end_token_ids": [151_668],
+    "forced_end_token_ids": [151_668],
+    "initial_phase": "reasoning",
+    "eos_policy": "close",
+    "effort_budgets": {"low": 32, "medium": 128, "high": 256},
+    "max_budget_tokens": 256,
+    "reserved_answer_tokens": 1,
+    "history_reasoning_policy": "omit",
+}
+REASONING_EXECUTION = {
+    "enabled": False,
+    "budget_tokens": None,
+    "dialect_id": "qwen3-thinking-v1",
+    "end_token_ids": [151_668],
+    "forced_end_token_ids": [151_668],
+    "reserved_answer_tokens": 1,
+}
 
 REQUIRED_HIP_GUARDS = {
     "ULLM_REQUIRE_HIP_ADD_KERNEL",
@@ -90,11 +125,13 @@ HEADER_FIELDS = {
     "clock",
     "build",
     "worker",
+    "served_model",
     "device",
     "environment",
     "schedule",
     "thresholds",
 }
+LEGACY_HEADER_FIELDS = HEADER_FIELDS - {"served_model"}
 COMMAND_BASE_FIELDS = {
     "schema_version",
     "record_type",
@@ -113,7 +150,9 @@ GENERATE_FIELDS = COMMAND_BASE_FIELDS | {
     "max_new_tokens",
     "sampling",
     "eos_token_ids",
+    "reasoning",
 }
+LEGACY_GENERATE_FIELDS = GENERATE_FIELDS - {"reasoning"}
 CANCEL_FIELDS = COMMAND_BASE_FIELDS | {"cancel_reason", "cancel_target"}
 WORKER_EVENT_FIELDS = {
     "schema_version",
@@ -171,6 +210,21 @@ RESOURCE_GPU_FIELDS = {
     "mem_usage_unit",
     "kfd_snapshot",
 }
+RESOURCE_GPU_FIELDS_V1 = {
+    "index",
+    "bdf",
+    "uuid",
+    "kfd_gpu_id",
+    "process_raw_json",
+    "process_raw_sha256",
+    "worker_pid",
+    "mem_usage_value",
+    "mem_usage_unit",
+    "kfd_vram_bytes",
+    "kfd_processes",
+    "kfd_positive_processes",
+    "unrelated_positive_kfd_pids",
+}
 ISOLATION_CHECK_FIELDS = {
     "schema_version",
     "record_type",
@@ -179,6 +233,16 @@ ISOLATION_CHECK_FIELDS = {
     "request_id",
     "release_observed_monotonic_ns",
     "kfd_snapshot",
+}
+ISOLATION_CHECK_FIELDS_V1 = {
+    "schema_version",
+    "record_type",
+    "phase",
+    "request_index",
+    "request_id",
+    "release_observed_monotonic_ns",
+    "captured_monotonic_ns",
+    "kfd_processes",
 }
 KFD_SNAPSHOT_FIELDS = {
     "acquisition_started_monotonic_ns",
@@ -480,6 +544,37 @@ def validated_raw_text(value: Any, digest_value: Any, label: str) -> str:
     if expected != sha256_text(value):
         fail(f"{label} SHA-256 differs")
     return value
+
+
+def parse_kfd_processes_v1(value: Any, label: str) -> list[tuple[int, int]]:
+    """Parse the immutable raw.v1 KFD list without v2 identity fields."""
+
+    if not isinstance(value, list):
+        fail(f"{label} must be an array")
+    parsed: list[tuple[int, int]] = []
+    for index, entry_value in enumerate(value):
+        entry = exact_fields(
+            entry_value, {"pid", "vram_raw", "vram_bytes"}, f"{label}[{index}]"
+        )
+        pid = integer(
+            entry["pid"], f"{label}[{index}].pid", minimum=1, maximum=U32_MAX
+        )
+        raw = entry["vram_raw"]
+        if (
+            not isinstance(raw, str)
+            or not raw
+            or not raw.isascii()
+            or not raw.isdecimal()
+            or raw != raw.strip()
+        ):
+            fail(f"{label}[{index}].vram_raw must be stripped decimal ASCII")
+        amount = integer(entry["vram_bytes"], f"{label}[{index}].vram_bytes")
+        if int(raw, 10) != amount:
+            fail(f"{label}[{index}] raw KFD value differs from vram_bytes")
+        parsed.append((pid, amount))
+    if parsed != sorted(parsed) or len({pid for pid, _ in parsed}) != len(parsed):
+        fail(f"{label} must have ascending unique PIDs")
+    return parsed
 
 
 def parse_kfd_pids(value: Any, label: str) -> list[int]:
@@ -919,10 +1014,42 @@ def resource_plan(segment: str, phase: str, count: int) -> list[RequestExpectati
 
 
 class AcceptanceValidator:
-    def __init__(self, raw_path: Path, expected_commit: str, expected_binary_sha256: str):
+    def __init__(
+        self,
+        raw_path: Path,
+        expected_commit: str,
+        expected_binary_sha256: str,
+        raw_schema_version: str = RAW_SCHEMA_VERSION,
+        expected_manifest_sha256: str | None = None,
+    ):
+        if raw_schema_version not in {
+            RAW_SCHEMA_VERSION_V1,
+            RAW_SCHEMA_VERSION_V2,
+            RAW_SCHEMA_VERSION_V3,
+        }:
+            fail("worker acceptance raw schema is unsupported")
+        if raw_schema_version == RAW_SCHEMA_VERSION_V3:
+            if expected_manifest_sha256 is None:
+                fail("raw.v3 validation requires the expected manifest SHA-256")
+            sha256_value(expected_manifest_sha256, "expected manifest SHA-256")
+        elif expected_manifest_sha256 is not None:
+            fail("legacy acceptance validation forbids an expected manifest SHA-256")
         self.raw_path = raw_path
         self.expected_commit = expected_commit
         self.expected_binary_sha256 = expected_binary_sha256
+        self.raw_schema_version = raw_schema_version
+        self.result_schema_version = {
+            RAW_SCHEMA_VERSION_V1: RESULT_SCHEMA_VERSION_V1,
+            RAW_SCHEMA_VERSION_V2: RESULT_SCHEMA_VERSION_V2,
+            RAW_SCHEMA_VERSION_V3: RESULT_SCHEMA_VERSION_V3,
+        }[raw_schema_version]
+        self.worker_schema_version = (
+            WORKER_SCHEMA_VERSION_V2
+            if raw_schema_version == RAW_SCHEMA_VERSION_V3
+            else WORKER_SCHEMA_VERSION_V1
+        )
+        self.expected_manifest_sha256 = expected_manifest_sha256
+        self.served_model_identity: dict[str, Any] | None = None
         self.stage = "header"
         self.worker_identity: dict[str, Any] | None = None
         self.worker_binary_path: Path | None = None
@@ -980,7 +1107,7 @@ class AcceptanceValidator:
 
     def consume(self, record: dict[str, Any], line_number: int) -> None:
         label = f"line {line_number}"
-        if record.get("schema_version") != RAW_SCHEMA_VERSION:
+        if record.get("schema_version") != self.raw_schema_version:
             fail(f"{label} has the wrong schema_version")
         record_type = record.get("record_type")
         if not isinstance(record_type, str):
@@ -1049,7 +1176,12 @@ class AcceptanceValidator:
         fail(f"{label} reached unknown validator stage {self.stage}")
 
     def _consume_header(self, record: dict[str, Any], label: str) -> None:
-        exact_fields(record, HEADER_FIELDS, f"{label} header")
+        header_fields = (
+            HEADER_FIELDS
+            if self.raw_schema_version == RAW_SCHEMA_VERSION_V3
+            else LEGACY_HEADER_FIELDS
+        )
+        exact_fields(record, header_fields, f"{label} header")
         if record["record_type"] != "header" or record["clock"] != "python.time.monotonic_ns":
             fail("the first record is not the frozen header")
 
@@ -1106,6 +1238,57 @@ class AcceptanceValidator:
         self.worker_binary_path = worker_executable
         self.worker_identity = worker_identity
 
+        if self.raw_schema_version == RAW_SCHEMA_VERSION_V3:
+            served_model = exact_fields(
+                record["served_model"],
+                {
+                    "manifest_path",
+                    "manifest_sha256",
+                    "schema_version",
+                    "model_id",
+                    "model_revision",
+                    "format_id",
+                    "worker_protocol",
+                    "worker_arguments",
+                    "reasoning",
+                },
+                "header.served_model",
+            )
+            manifest_path_value = served_model["manifest_path"]
+            if not isinstance(manifest_path_value, str) or not manifest_path_value:
+                fail("header.served_model.manifest_path must be a nonempty string")
+            manifest_path = regular_file(
+                Path(manifest_path_value), "header served-model manifest"
+            )
+            manifest_sha256 = sha256_value(
+                served_model["manifest_sha256"],
+                "header.served_model.manifest_sha256",
+            )
+            if (
+                self.expected_manifest_sha256 is None
+                or manifest_sha256 != self.expected_manifest_sha256
+                or sha256_file(manifest_path) != manifest_sha256
+                or served_model["schema_version"] != SERVED_MODEL_SCHEMA_VERSION
+                or served_model["model_id"] != "ullm-qwen3-14b-sq8"
+                or served_model["model_revision"] != MODEL_REVISION
+                or served_model["format_id"] != "SQ8_0"
+                or served_model["worker_protocol"] != WORKER_SCHEMA_VERSION_V2
+                or not json_type_equal(
+                    served_model["worker_arguments"],
+                    ["--served-model-manifest", str(manifest_path)],
+                )
+                or not json_type_equal(
+                    served_model["reasoning"], REASONING_DIALECT
+                )
+            ):
+                fail("header served-model v2 identity differs from the expected manifest")
+            self.served_model_identity = {
+                "manifest_sha256": manifest_sha256,
+                "schema_version": SERVED_MODEL_SCHEMA_VERSION,
+                "worker_protocol": WORKER_SCHEMA_VERSION_V2,
+                "reasoning_dialect_id": REASONING_DIALECT["dialect_id"],
+            }
+
         device = exact_fields(
             record["device"],
             {
@@ -1152,16 +1335,19 @@ class AcceptanceValidator:
         ):
             fail("header.device AMD SMI list must contain one unique matching GPU index 2")
 
+        environment_fields = {
+            "hip_visible_devices",
+            "required_hip_guards",
+            "amd_smi_version_raw",
+            "amd_smi_version_raw_sha256",
+            (
+                "preflight_kfd_processes"
+                if self.raw_schema_version == RAW_SCHEMA_VERSION_V1
+                else "preflight_kfd_snapshot"
+            ),
+        }
         environment = exact_fields(
-            record["environment"],
-            {
-                "hip_visible_devices",
-                "required_hip_guards",
-                "amd_smi_version_raw",
-                "amd_smi_version_raw_sha256",
-                "preflight_kfd_snapshot",
-            },
-            "header.environment",
+            record["environment"], environment_fields, "header.environment"
         )
         guards = exact_fields(
             environment["required_hip_guards"], REQUIRED_HIP_GUARDS, "header.environment.required_hip_guards"
@@ -1181,12 +1367,22 @@ class AcceptanceValidator:
         ):
             if required not in version_raw:
                 fail(f"header.environment AMD SMI version is missing {required!r}")
-        preflight_kfd = self._validate_kfd_snapshot(
-            environment["preflight_kfd_snapshot"],
-            "header.environment.preflight_kfd_snapshot",
-            None,
-        )
-        self.preflight_kfd_completed_ns = preflight_kfd.completed_ns
+        if self.raw_schema_version == RAW_SCHEMA_VERSION_V1:
+            preflight_kfd = parse_kfd_processes_v1(
+                environment["preflight_kfd_processes"],
+                "header.environment.preflight_kfd_processes",
+            )
+            if any(amount > 0 for _, amount in preflight_kfd):
+                fail(
+                    "header.environment preflight KFD evidence contains positive R9700 VRAM"
+                )
+        else:
+            preflight_kfd = self._validate_kfd_snapshot(
+                environment["preflight_kfd_snapshot"],
+                "header.environment.preflight_kfd_snapshot",
+                None,
+            )
+            self.preflight_kfd_completed_ns = preflight_kfd.completed_ns
 
         schedule = exact_fields(record["schedule"], set(SCHEDULE), "header.schedule")
         thresholds = exact_fields(record["thresholds"], set(THRESHOLDS), "header.thresholds")
@@ -1203,7 +1399,7 @@ class AcceptanceValidator:
     def _consume_ready(self, record: dict[str, Any], label: str) -> None:
         event, observed = self._outer_worker_event(record, label)
         expected = {
-            "schema_version": WORKER_SCHEMA_VERSION,
+            "schema_version": self.worker_schema_version,
             "type": "ready",
             "model": "ullm-qwen3-14b-sq8",
             "model_revision": MODEL_REVISION,
@@ -1228,24 +1424,28 @@ class AcceptanceValidator:
     def _consume_generate(
         self, record: dict[str, Any], expectation: RequestExpectation, label: str
     ) -> None:
-        exact_fields(record, GENERATE_FIELDS, f"{label} generate")
+        generate_fields = (
+            GENERATE_FIELDS
+            if self.raw_schema_version == RAW_SCHEMA_VERSION_V3
+            else LEGACY_GENERATE_FIELDS
+        )
+        exact_fields(record, generate_fields, f"{label} generate")
         if record["record_type"] != "command" or record["command_type"] != "generate":
             fail(f"{label} must be the next scheduled generate command")
         start, _ = self._validate_command_common(record, expectation.phase, label)
         raw_command = self._decode_command_raw(record, label)
-        exact_fields(
-            raw_command,
-            {
-                "schema_version",
-                "type",
-                "request_id",
-                "prompt_token_ids",
-                "max_new_tokens",
-                "sampling",
-                "eos_token_ids",
-            },
-            f"{label}.raw_json",
-        )
+        raw_generate_fields = {
+            "schema_version",
+            "type",
+            "request_id",
+            "prompt_token_ids",
+            "max_new_tokens",
+            "sampling",
+            "eos_token_ids",
+        }
+        if self.raw_schema_version == RAW_SCHEMA_VERSION_V3:
+            raw_generate_fields.add("reasoning")
+        exact_fields(raw_command, raw_generate_fields, f"{label}.raw_json")
         index = integer(record["request_index"], f"{label}.request_index", minimum=1)
         if index != expectation.index:
             fail(f"{label} request index differs from the frozen matrix")
@@ -1294,6 +1494,11 @@ class AcceptanceValidator:
             fail(f"{label} sampling differs from the frozen greedy request")
         if record["eos_token_ids"] != [151_645, 151_643]:
             fail(f"{label}.eos_token_ids differs from the product EOS IDs")
+        if self.raw_schema_version == RAW_SCHEMA_VERSION_V3 and (
+            not json_type_equal(record["reasoning"], REASONING_EXECUTION)
+            or not json_type_equal(raw_command["reasoning"], REASONING_EXECUTION)
+        ):
+            fail(f"{label}.reasoning differs from the frozen disabled v2 request")
         expected_prompt_ids = list(range(1, prompt_tokens + 1))
         raw_prompt_ids = raw_command["prompt_token_ids"]
         if (
@@ -1307,15 +1512,18 @@ class AcceptanceValidator:
             or any(type(token_id) is not int for token_id in raw_command["eos_token_ids"])
         ):
             fail(f"{label} raw generate object uses the wrong JSON field types")
-        if not json_type_equal(raw_command, {
-            "schema_version": WORKER_SCHEMA_VERSION,
+        expected_raw_command = {
+            "schema_version": self.worker_schema_version,
             "type": "generate",
             "request_id": current_id,
             "prompt_token_ids": expected_prompt_ids,
             "max_new_tokens": max_new_tokens,
             "sampling": sampling,
             "eos_token_ids": [151_645, 151_643],
-        }):
+        }
+        if self.raw_schema_version == RAW_SCHEMA_VERSION_V3:
+            expected_raw_command["reasoning"] = REASONING_EXECUTION
+        if not json_type_equal(raw_command, expected_raw_command):
             fail(f"{label} command summary differs from the complete raw generate object")
 
         self.command_count += 1
@@ -1394,7 +1602,7 @@ class AcceptanceValidator:
         if record["cancel_reason"] != "operator" or record["cancel_target"] != self.active.expectation.cancel_target:
             fail(f"{label} cancel reason/target differs from the frozen matrix")
         if not json_type_equal(raw_command, {
-            "schema_version": WORKER_SCHEMA_VERSION,
+            "schema_version": self.worker_schema_version,
             "type": "cancel",
             "request_id": self.active.request_id,
             "reason": "operator",
@@ -1459,8 +1667,11 @@ class AcceptanceValidator:
         self.last_event_ns = observed
         self.worker_event_count += 1
         event = record["event"]
-        if not isinstance(event, dict) or event.get("schema_version") != WORKER_SCHEMA_VERSION:
-            fail(f"{label}.event is not an ullm.worker.v1 object")
+        if (
+            not isinstance(event, dict)
+            or event.get("schema_version") != self.worker_schema_version
+        ):
+            fail(f"{label}.event worker schema differs from the raw acceptance branch")
         raw = validated_raw_text(
             record["raw_json"], record["raw_sha256"], f"{label}.raw_json"
         )
@@ -1552,13 +1763,18 @@ class AcceptanceValidator:
             "completion_tokens",
             "reset_complete",
         }
+        if self.raw_schema_version == RAW_SCHEMA_VERSION_V3:
+            fields.update({"reasoning_tokens", "forced_end_tokens"})
         if cancelled:
             if "timings" in event:
                 fail(f"{label} cancelled release must not contain timings")
             fields.add("cancel_reason")
-        elif "timings" in event:
-            # Historical raw.v2 evidence predates worker timings. New evidence
-            # carries this field, while omission remains readable here only.
+        elif self.raw_schema_version == RAW_SCHEMA_VERSION_V3:
+            fields.add("timings")
+        elif self.raw_schema_version == RAW_SCHEMA_VERSION_V2 and "timings" in event:
+            # raw.v2 was extended by a worker-v1 timings field after the first
+            # immutable run. Both shapes belong to that already-published
+            # branch. raw.v1 and raw.v3 remain exact and separate.
             fields.add("timings")
         exact_fields(event, fields, f"{label}.event")
         if self.active.started_observed_ns is None or event["request_id"] != self.active.request_id:
@@ -1571,6 +1787,21 @@ class AcceptanceValidator:
             or event["reset_complete"] is not True
         ):
             fail(f"{label} release counters/reset do not match the observed request")
+        if self.raw_schema_version == RAW_SCHEMA_VERSION_V3:
+            reasoning_tokens = integer(
+                event["reasoning_tokens"], f"{label}.event.reasoning_tokens"
+            )
+            forced_end_tokens = integer(
+                event["forced_end_tokens"], f"{label}.event.forced_end_tokens"
+            )
+            if (
+                reasoning_tokens != 0
+                or forced_end_tokens != 0
+                or reasoning_tokens + forced_end_tokens > completion_tokens
+            ):
+                fail(
+                    f"{label} release reasoning accounting differs from the disabled request"
+                )
         if not cancelled and "timings" in event:
             validate_release_timings(
                 event["timings"],
@@ -1651,7 +1882,12 @@ class AcceptanceValidator:
         if self.worker_identity is None:
             fail("isolation check appears before worker identity")
         expected = self.pending_isolation
-        exact_fields(record, ISOLATION_CHECK_FIELDS, f"{label} isolation_check")
+        fields = (
+            ISOLATION_CHECK_FIELDS_V1
+            if self.raw_schema_version == RAW_SCHEMA_VERSION_V1
+            else ISOLATION_CHECK_FIELDS
+        )
+        exact_fields(record, fields, f"{label} isolation_check")
         if record["record_type"] != "isolation_check" or record["phase"] != expected.phase:
             fail(f"{label} is not the required immediate {expected.phase} isolation check")
         if (
@@ -1660,17 +1896,36 @@ class AcceptanceValidator:
             or record["release_observed_monotonic_ns"] != expected.release_observed_ns
         ):
             fail(f"{label} isolation check does not match Ready/release identity")
-        snapshot = self._validate_kfd_snapshot(
-            record["kfd_snapshot"],
-            f"{label}.kfd_snapshot",
-            self.worker_identity["pid"],
-        )
-        if (
-            snapshot.started_ns <= expected.not_before_ns
-            or snapshot.started_ns <= self.last_record_time_ns
-        ):
-            fail(f"{label} isolation capture is not ordered after Ready/release")
-        self.last_record_time_ns = snapshot.completed_ns
+        if self.raw_schema_version == RAW_SCHEMA_VERSION_V1:
+            captured = timestamp(
+                record["captured_monotonic_ns"],
+                f"{label}.captured_monotonic_ns",
+            )
+            if captured < expected.not_before_ns or captured <= self.last_record_time_ns:
+                fail(f"{label} isolation capture is not ordered after Ready/release")
+            kfd = parse_kfd_processes_v1(
+                record["kfd_processes"], f"{label}.kfd_processes"
+            )
+            positive = [(pid, amount) for pid, amount in kfd if amount > 0]
+            if (
+                len(positive) != 1
+                or positive[0][0] != self.worker_identity["pid"]
+                or positive[0][1] <= 0
+            ):
+                fail(f"{label} does not prove sole positive worker KFD ownership")
+            self.last_record_time_ns = captured
+        else:
+            snapshot = self._validate_kfd_snapshot(
+                record["kfd_snapshot"],
+                f"{label}.kfd_snapshot",
+                self.worker_identity["pid"],
+            )
+            if (
+                snapshot.started_ns <= expected.not_before_ns
+                or snapshot.started_ns <= self.last_record_time_ns
+            ):
+                fail(f"{label} isolation capture is not ordered after Ready/release")
+            self.last_record_time_ns = snapshot.completed_ns
         self.isolation_check_count += 1
         self.pending_isolation = None
 
@@ -1838,7 +2093,12 @@ class AcceptanceValidator:
         if raw_children != parsed_children:
             fail(f"{label} child PID summary differs from raw /proc children")
 
-        gpu = exact_fields(gpu_value, RESOURCE_GPU_FIELDS, f"{label}.gpu")
+        gpu_fields = (
+            RESOURCE_GPU_FIELDS_V1
+            if self.raw_schema_version == RAW_SCHEMA_VERSION_V1
+            else RESOURCE_GPU_FIELDS
+        )
+        gpu = exact_fields(gpu_value, gpu_fields, f"{label}.gpu")
         if (
             gpu["index"] != GPU_INDEX
             or gpu["bdf"] != GPU_BDF
@@ -1849,18 +2109,87 @@ class AcceptanceValidator:
         ):
             fail(f"{label} GPU identity/isolation differs from the frozen R9700")
         mem_usage = integer(gpu["mem_usage_value"], f"{label}.gpu.mem_usage_value", minimum=1)
-        kfd_snapshot = self._validate_kfd_snapshot(
-            gpu["kfd_snapshot"], f"{label}.gpu.kfd_snapshot", pid
-        )
-        if kfd_snapshot.started_ns < sample_started:
-            fail(f"{label} KFD acquisition starts before resource sample")
-        own_kfd = [
-            amount
-            for process_pid, _, _, amount in kfd_snapshot.processes
-            if process_pid == pid and amount > 0
-        ]
-        if own_kfd != [mem_usage]:
-            fail(f"{label} AMD SMI and final stable KFD VRAM bytes differ")
+        if self.raw_schema_version == RAW_SCHEMA_VERSION_V1:
+            kfd_vram = integer(
+                gpu["kfd_vram_bytes"], f"{label}.gpu.kfd_vram_bytes", minimum=1
+            )
+            if mem_usage != kfd_vram:
+                fail(f"{label} AMD SMI and KFD VRAM bytes differ")
+            full_kfd = parse_kfd_processes_v1(
+                gpu["kfd_processes"], f"{label}.gpu.kfd_processes"
+            )
+            positive_value = gpu["kfd_positive_processes"]
+            if not isinstance(positive_value, list) or not positive_value:
+                fail(
+                    f"{label}.gpu.kfd_positive_processes must be a nonempty array"
+                )
+            parsed_positive: list[tuple[int, int]] = []
+            for index, process_value in enumerate(positive_value):
+                process = exact_fields(
+                    process_value,
+                    {"pid", "vram_bytes"},
+                    f"{label}.gpu.kfd_positive_processes[{index}]",
+                )
+                parsed_positive.append(
+                    (
+                        integer(
+                            process["pid"],
+                            f"{label}.gpu.kfd_positive_processes[{index}].pid",
+                            minimum=1,
+                            maximum=U32_MAX,
+                        ),
+                        integer(
+                            process["vram_bytes"],
+                            f"{label}.gpu.kfd_positive_processes[{index}].vram_bytes",
+                            minimum=1,
+                        ),
+                    )
+                )
+            if parsed_positive != sorted(parsed_positive) or len(
+                {item[0] for item in parsed_positive}
+            ) != len(parsed_positive):
+                fail(
+                    f"{label}.gpu.kfd_positive_processes must have ascending unique PIDs"
+                )
+            derived_positive = [
+                (process_pid, amount)
+                for process_pid, amount in full_kfd
+                if amount > 0
+            ]
+            own_kfd = [
+                amount
+                for process_pid, amount in parsed_positive
+                if process_pid == pid
+            ]
+            unrelated_kfd = [
+                process_pid
+                for process_pid, _ in parsed_positive
+                if process_pid != pid
+            ]
+            if (
+                parsed_positive != derived_positive
+                or own_kfd != [kfd_vram]
+                or gpu["unrelated_positive_kfd_pids"] != unrelated_kfd
+                or unrelated_kfd
+            ):
+                fail(
+                    f"{label} KFD process evidence does not prove isolated worker ownership"
+                )
+            kfd_completed = sample_started
+        else:
+            kfd_snapshot = self._validate_kfd_snapshot(
+                gpu["kfd_snapshot"], f"{label}.gpu.kfd_snapshot", pid
+            )
+            if kfd_snapshot.started_ns < sample_started:
+                fail(f"{label} KFD acquisition starts before resource sample")
+            own_kfd = [
+                amount
+                for process_pid, _, _, amount in kfd_snapshot.processes
+                if process_pid == pid and amount > 0
+            ]
+            if own_kfd != [mem_usage]:
+                fail(f"{label} AMD SMI and final stable KFD VRAM bytes differ")
+            kfd_completed = kfd_snapshot.completed_ns
         raw_json = gpu["process_raw_json"]
         if not isinstance(raw_json, str):
             fail(f"{label}.gpu.process_raw_json must be a string")
@@ -1905,7 +2234,7 @@ class AcceptanceValidator:
                 "fds": fd_count,
                 "children": len(parsed_children),
             },
-            kfd_snapshot.completed_ns,
+            kfd_completed,
         )
 
     def _finish_resource_point(self, point: ResourcePoint) -> None:
@@ -1974,7 +2303,7 @@ class AcceptanceValidator:
         exact_fields(raw_command, {"schema_version", "type"}, f"{label}.raw_json")
         if not json_type_equal(
             raw_command,
-            {"schema_version": WORKER_SCHEMA_VERSION, "type": "shutdown"},
+            {"schema_version": self.worker_schema_version, "type": "shutdown"},
         ):
             fail(f"{label} command summary differs from the complete raw shutdown object")
         started, _ = self._validate_command_common(record, "shutdown", label)
@@ -2069,7 +2398,10 @@ class AcceptanceValidator:
                 "worker evidence must contain Ready plus 134 release isolation checks, "
                 f"got {self.isolation_check_count}"
             )
-        if self.kfd_snapshot_count != 641:
+        if (
+            self.raw_schema_version != RAW_SCHEMA_VERSION_V1
+            and self.kfd_snapshot_count != 641
+        ):
             fail(
                 "worker evidence must contain preflight + 135 isolation + 505 resource "
                 f"KFD snapshots, got {self.kfd_snapshot_count}"
@@ -2108,8 +2440,30 @@ class AcceptanceValidator:
                     f"{label} final delta {fraction_json(value)} exceeds {THRESHOLDS['final_delta_max_bytes']} bytes"
                 )
 
-        return {
-            "schema_version": RESULT_SCHEMA_VERSION,
+        counts = {
+            "commands": self.command_count,
+            "worker_events": self.worker_event_count,
+            "releases": self.release_count,
+            "resource_samples": self.resource_sample_count,
+            "resource_points": len(self.rss_points),
+            "gpu_metrics": self.gpu_metric_count,
+            "isolation_checks": self.isolation_check_count,
+            "all_cancellations": len(self.all_cancel_bounds),
+            "non_latency_warmup_cancellations": len(
+                self.non_latency_warmup_cancel_bounds
+            ),
+            "theil_sen_pairs_per_series": 4_950,
+        }
+        if self.raw_schema_version != RAW_SCHEMA_VERSION_V1:
+            counts.update(
+                {
+                    "kfd_snapshots": self.kfd_snapshot_count,
+                    "kfd_attempts": self.kfd_attempt_count,
+                    "kfd_retries": self.kfd_retry_count,
+                }
+            )
+        result = {
+            "schema_version": self.result_schema_version,
             "passed": not self.gate_errors,
             "gate_errors": self.gate_errors,
             "build_identity": {
@@ -2117,23 +2471,7 @@ class AcceptanceValidator:
                 "tracked_clean": True,
                 "binary_sha256": self.expected_binary_sha256,
             },
-            "counts": {
-                "commands": self.command_count,
-                "worker_events": self.worker_event_count,
-                "releases": self.release_count,
-                "resource_samples": self.resource_sample_count,
-                "resource_points": len(self.rss_points),
-                "gpu_metrics": self.gpu_metric_count,
-                "isolation_checks": self.isolation_check_count,
-                "kfd_snapshots": self.kfd_snapshot_count,
-                "kfd_attempts": self.kfd_attempt_count,
-                "kfd_retries": self.kfd_retry_count,
-                "all_cancellations": len(self.all_cancel_bounds),
-                "non_latency_warmup_cancellations": len(
-                    self.non_latency_warmup_cancel_bounds
-                ),
-                "theil_sen_pairs_per_series": 4_950,
-            },
+            "counts": counts,
             "cancellation": {
                 "warmup_samples": len(self.latency_warmup_bounds),
                 "measured_samples": len(self.latency_measured_bounds),
@@ -2161,6 +2499,11 @@ class AcceptanceValidator:
                 "stderr_sha256": self.stderr_sha256,
             },
         }
+        if self.raw_schema_version == RAW_SCHEMA_VERSION_V3:
+            if self.served_model_identity is None:
+                fail("raw.v3 evidence ended without served-model identity")
+            result["served_model"] = self.served_model_identity
+        return result
 
 
 def iter_jsonl(handle: BinaryIO, digest: Any) -> Iterable[tuple[int, dict[str, Any]]]:
@@ -2191,7 +2534,10 @@ def iter_jsonl(handle: BinaryIO, digest: Any) -> Iterable[tuple[int, dict[str, A
 
 
 def validate_evidence(
-    raw_path: Path, expected_git_commit: str, expected_binary_sha256: str
+    raw_path: Path,
+    expected_git_commit: str,
+    expected_binary_sha256: str,
+    expected_manifest_sha256: str | None = None,
 ) -> dict[str, Any]:
     if GIT_COMMIT_RE.fullmatch(expected_git_commit) is None:
         fail("expected git commit must be 40 lowercase hexadecimal characters")
@@ -2200,14 +2546,31 @@ def validate_evidence(
     canonical = regular_file(raw_path, "raw evidence")
     if canonical.name != "raw.jsonl":
         fail("successful raw evidence basename must be raw.jsonl")
-    validator = AcceptanceValidator(canonical, expected_git_commit, expected_binary_sha256)
+    validator: AcceptanceValidator | None = None
     digest = hashlib.sha256()
     try:
         with canonical.open("rb") as handle:
             for line_number, record in iter_jsonl(handle, digest):
+                if validator is None:
+                    raw_schema_version = record.get("schema_version")
+                    if raw_schema_version not in {
+                        RAW_SCHEMA_VERSION_V1,
+                        RAW_SCHEMA_VERSION_V2,
+                        RAW_SCHEMA_VERSION_V3,
+                    }:
+                        fail("worker acceptance raw schema is unsupported")
+                    validator = AcceptanceValidator(
+                        canonical,
+                        expected_git_commit,
+                        expected_binary_sha256,
+                        raw_schema_version,
+                        expected_manifest_sha256,
+                    )
                 validator.consume(record, line_number)
     except OSError as error:
         fail(f"failed to read raw evidence {canonical}: {error}")
+    if validator is None:
+        fail("raw JSONL is empty")
     return validator.finish(digest.hexdigest())
 
 
@@ -2229,6 +2592,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("raw_evidence", type=Path)
     parser.add_argument("--expected-git-commit", required=True)
     parser.add_argument("--expected-binary-sha256", required=True)
+    parser.add_argument("--expected-manifest-sha256")
     parser.add_argument("--output", type=Path)
     return parser.parse_args()
 
@@ -2240,6 +2604,7 @@ def main() -> int:
             args.raw_evidence,
             args.expected_git_commit,
             args.expected_binary_sha256,
+            args.expected_manifest_sha256,
         )
         if args.output is not None:
             write_json_create_new(args.output, validation)

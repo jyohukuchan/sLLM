@@ -14,6 +14,8 @@ VALIDATOR_PATH = REPO_ROOT / "tools" / "validate-sq8-worker-acceptance.py"
 GIT_COMMIT = "a" * 40
 BINARY_BYTES = b"synthetic ullm-sq8-worker release binary\n"
 BINARY_SHA256 = hashlib.sha256(BINARY_BYTES).hexdigest()
+MANIFEST_BYTES = b'{"schema_version":"ullm.served_model.v2","fixture":true}\n'
+MANIFEST_SHA256 = hashlib.sha256(MANIFEST_BYTES).hexdigest()
 WORKER_PID = 4242
 WORKER_PPID = 4000
 WORKER_STARTTIME = 123456
@@ -33,6 +35,19 @@ def load_validator():
 
 
 VALIDATOR = load_validator()
+_VALIDATE_EVIDENCE = VALIDATOR.validate_evidence
+
+
+def validate_current(raw_path, expected_git_commit, expected_binary_sha256):
+    return _VALIDATE_EVIDENCE(
+        raw_path,
+        expected_git_commit,
+        expected_binary_sha256,
+        MANIFEST_SHA256,
+    )
+
+
+VALIDATOR.validate_evidence = validate_current
 
 
 def compact_json(value) -> str:
@@ -178,6 +193,20 @@ class EvidenceBuilder:
                     "starttime_ticks": WORKER_STARTTIME,
                     "exe": WORKER_EXE,
                 },
+                "served_model": {
+                    "manifest_path": "/tmp/served-model.json",
+                    "manifest_sha256": MANIFEST_SHA256,
+                    "schema_version": VALIDATOR.SERVED_MODEL_SCHEMA_VERSION,
+                    "model_id": "ullm-qwen3-14b-sq8",
+                    "model_revision": VALIDATOR.MODEL_REVISION,
+                    "format_id": "SQ8_0",
+                    "worker_protocol": VALIDATOR.WORKER_SCHEMA_VERSION,
+                    "worker_arguments": [
+                        "--served-model-manifest",
+                        "/tmp/served-model.json",
+                    ],
+                    "reasoning": deepcopy(VALIDATOR.REASONING_DIALECT),
+                },
                 "device": {
                     "gpu_index": VALIDATOR.GPU_INDEX,
                     "bdf": VALIDATOR.GPU_BDF,
@@ -230,7 +259,7 @@ class EvidenceBuilder:
         )
 
     def ready(self):
-        observed = self.worker_event(
+        self.worker_event(
             {
                 "schema_version": VALIDATOR.WORKER_SCHEMA_VERSION,
                 "type": "ready",
@@ -258,6 +287,7 @@ class EvidenceBuilder:
                 "max_new_tokens": extra["max_new_tokens"],
                 "sampling": extra["sampling"],
                 "eos_token_ids": extra["eos_token_ids"],
+                "reasoning": extra["reasoning"],
             }
         elif command_type == "cancel":
             raw_command = {
@@ -299,6 +329,7 @@ class EvidenceBuilder:
             max_new_tokens=max_new_tokens,
             sampling={"temperature": 0.0, "top_p": 1.0, "top_k": 20, "seed": 0},
             eos_token_ids=[151645, 151643],
+            reasoning=deepcopy(VALIDATOR.REASONING_EXECUTION),
         )
 
     def cancel(self, phase, index, request_id, target):
@@ -369,6 +400,8 @@ class EvidenceBuilder:
             "outcome": "cancelled" if target else "length",
             "prompt_tokens": prompt_tokens,
             "completion_tokens": completion,
+            "reasoning_tokens": 0,
+            "forced_end_tokens": 0,
             "reset_complete": True,
         }
         if target:
@@ -551,10 +584,18 @@ class EvidenceBuilder:
 def write_fixture(directory: Path, records):
     worker_path = directory / "ullm-sq8-worker"
     worker_path.write_bytes(BINARY_BYTES)
+    manifest_path = directory / "served-model.json"
+    manifest_path.write_bytes(MANIFEST_BYTES)
     stderr_path = directory / "worker-stderr.jsonl"
     stderr_path.write_text('{"event":"worker_test"}\n', encoding="utf-8")
     records = deepcopy(records)
     records[0]["worker"]["exe"] = str(worker_path)
+    if "served_model" in records[0]:
+        records[0]["served_model"]["manifest_path"] = str(manifest_path)
+        records[0]["served_model"]["worker_arguments"] = [
+            "--served-model-manifest",
+            str(manifest_path),
+        ]
     for record in records:
         if record.get("record_type") == "resource_sample":
             record["worker"]["exe"] = str(worker_path)
@@ -582,6 +623,80 @@ def first_record(records, predicate):
 def refresh_worker_event_raw(record):
     record["raw_json"] = compact_json(record["event"])
     record["raw_sha256"] = sha256_text(record["raw_json"])
+
+
+def legacy_records(records, raw_schema_version):
+    if raw_schema_version not in {
+        VALIDATOR.RAW_SCHEMA_VERSION_V1,
+        VALIDATOR.RAW_SCHEMA_VERSION_V2,
+    }:
+        raise ValueError("legacy fixture schema is invalid")
+    converted = deepcopy(records)
+
+    def v1_processes(snapshot):
+        return [
+            {
+                "pid": process["pid"],
+                "vram_raw": process["vram_raw"],
+                "vram_bytes": process["vram_bytes"],
+            }
+            for process in snapshot["processes"]
+        ]
+
+    for record in converted:
+        record["schema_version"] = raw_schema_version
+        if record.get("record_type") == "header":
+            record.pop("served_model")
+            if raw_schema_version == VALIDATOR.RAW_SCHEMA_VERSION_V1:
+                snapshot = record["environment"].pop("preflight_kfd_snapshot")
+                record["environment"]["preflight_kfd_processes"] = v1_processes(
+                    snapshot
+                )
+        elif record.get("record_type") == "command":
+            command = json.loads(record["raw_json"])
+            command["schema_version"] = VALIDATOR.WORKER_SCHEMA_VERSION_V1
+            if record["command_type"] == "generate":
+                command.pop("reasoning")
+                record.pop("reasoning")
+            record["raw_json"] = compact_json(command)
+            record["raw_sha256"] = sha256_text(record["raw_json"])
+        elif record.get("record_type") == "worker_event":
+            event = record["event"]
+            event["schema_version"] = VALIDATOR.WORKER_SCHEMA_VERSION_V1
+            if event.get("type") == "released":
+                event.pop("reasoning_tokens")
+                event.pop("forced_end_tokens")
+                if raw_schema_version == VALIDATOR.RAW_SCHEMA_VERSION_V1:
+                    event.pop("timings", None)
+            refresh_worker_event_raw(record)
+        elif (
+            raw_schema_version == VALIDATOR.RAW_SCHEMA_VERSION_V1
+            and record.get("record_type") == "isolation_check"
+        ):
+            snapshot = record.pop("kfd_snapshot")
+            record["captured_monotonic_ns"] = snapshot[
+                "acquisition_completed_monotonic_ns"
+            ]
+            record["kfd_processes"] = v1_processes(snapshot)
+        elif (
+            raw_schema_version == VALIDATOR.RAW_SCHEMA_VERSION_V1
+            and record.get("record_type") == "resource_sample"
+        ):
+            gpu = record["gpu"]
+            snapshot = gpu.pop("kfd_snapshot")
+            processes = v1_processes(snapshot)
+            positive = [
+                {"pid": item["pid"], "vram_bytes": item["vram_bytes"]}
+                for item in processes
+                if item["vram_bytes"] > 0
+            ]
+            gpu["kfd_vram_bytes"] = gpu["mem_usage_value"]
+            gpu["kfd_processes"] = processes
+            gpu["kfd_positive_processes"] = positive
+            gpu["unrelated_positive_kfd_pids"] = [
+                item["pid"] for item in positive if item["pid"] != WORKER_PID
+            ]
+    return converted
 
 
 def shift_timestamps(value, cutoff, delta):
@@ -646,6 +761,18 @@ class ValidateSq8WorkerAcceptanceTests(unittest.TestCase):
             result = VALIDATOR.validate_evidence(raw_path, GIT_COMMIT, BINARY_SHA256)
 
             self.assertTrue(result["passed"])
+            self.assertEqual(
+                result["schema_version"], VALIDATOR.RESULT_SCHEMA_VERSION_V3
+            )
+            self.assertEqual(
+                result["served_model"],
+                {
+                    "manifest_sha256": MANIFEST_SHA256,
+                    "schema_version": "ullm.served_model.v2",
+                    "worker_protocol": "ullm.worker.v2",
+                    "reasoning_dialect_id": "qwen3-thinking-v1",
+                },
+            )
             self.assertEqual(result["gate_errors"], [])
             self.assertEqual(result["counts"]["commands"], 169)
             self.assertEqual(result["counts"]["releases"], 134)
@@ -667,11 +794,20 @@ class ValidateSq8WorkerAcceptanceTests(unittest.TestCase):
                 and record.get("event", {}).get("outcome") == "cancelled",
             )
             self.assertEqual(normal_release["event"]["timings"]["predicted_n"], 2)
+            self.assertEqual(
+                (
+                    normal_release["event"]["reasoning_tokens"],
+                    normal_release["event"]["forced_end_tokens"],
+                ),
+                (0, 0),
+            )
             self.assertNotIn("timings", cancelled_release["event"])
 
     def test_historical_normal_releases_without_timings_remain_valid(self):
         with tempfile.TemporaryDirectory() as temporary:
-            records = EvidenceBuilder().build()
+            records = legacy_records(
+                EvidenceBuilder().build(), VALIDATOR.RAW_SCHEMA_VERSION_V2
+            )
             removed = 0
             for record in records:
                 event = record.get("event", {})
@@ -684,8 +820,11 @@ class ValidateSq8WorkerAcceptanceTests(unittest.TestCase):
                     removed += 1
             self.assertGreater(removed, 0)
             raw_path, _ = write_fixture(Path(temporary), records)
-            result = VALIDATOR.validate_evidence(raw_path, GIT_COMMIT, BINARY_SHA256)
+            result = _VALIDATE_EVIDENCE(raw_path, GIT_COMMIT, BINARY_SHA256)
             self.assertTrue(result["passed"])
+            self.assertEqual(
+                result["schema_version"], VALIDATOR.RESULT_SCHEMA_VERSION_V2
+            )
 
     def test_release_timings_are_strictly_validated(self):
         mutations = (
@@ -757,6 +896,8 @@ class ValidateSq8WorkerAcceptanceTests(unittest.TestCase):
                     GIT_COMMIT,
                     "--expected-binary-sha256",
                     BINARY_SHA256,
+                    "--expected-manifest-sha256",
+                    MANIFEST_SHA256,
                     "--output",
                     str(output_path),
                 ],
@@ -798,6 +939,22 @@ class ValidateSq8WorkerAcceptanceTests(unittest.TestCase):
                 VALIDATOR.validate_evidence(raw_path, "c" * 40, BINARY_SHA256)
             with self.assertRaisesRegex(VALIDATOR.ValidationError, "build/model identity"):
                 VALIDATOR.validate_evidence(raw_path, GIT_COMMIT, "d" * 64)
+
+    def test_v3_requires_independent_exact_manifest_digest(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            raw_path, _ = write_fixture(
+                Path(temporary), EvidenceBuilder().build()
+            )
+            with self.assertRaisesRegex(
+                VALIDATOR.ValidationError, "requires the expected manifest"
+            ):
+                _VALIDATE_EVIDENCE(raw_path, GIT_COMMIT, BINARY_SHA256)
+            with self.assertRaisesRegex(
+                VALIDATOR.ValidationError, "served-model v2 identity"
+            ):
+                _VALIDATE_EVIDENCE(
+                    raw_path, GIT_COMMIT, BINARY_SHA256, "d" * 64
+                )
 
     def test_amd_smi_list_is_reparsed_instead_of_trusting_header_fields(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -1063,13 +1220,112 @@ class ValidateSq8WorkerAcceptanceTests(unittest.TestCase):
                     with self.assertRaises(VALIDATOR.ValidationError):
                         VALIDATOR.validate_evidence(raw_path, GIT_COMMIT, BINARY_SHA256)
 
-    def test_v1_incomplete_schema_is_not_accepted_by_v2_validator(self):
+    def test_archived_v1_and_v2_branches_remain_independently_valid(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for raw_schema, result_schema in (
+                (
+                    VALIDATOR.RAW_SCHEMA_VERSION_V1,
+                    VALIDATOR.RESULT_SCHEMA_VERSION_V1,
+                ),
+                (
+                    VALIDATOR.RAW_SCHEMA_VERSION_V2,
+                    VALIDATOR.RESULT_SCHEMA_VERSION_V2,
+                ),
+            ):
+                with self.subTest(raw_schema=raw_schema):
+                    directory = root / raw_schema.rsplit(".", 1)[-1]
+                    directory.mkdir()
+                    records = legacy_records(EvidenceBuilder().build(), raw_schema)
+                    raw_path, _ = write_fixture(directory, records)
+                    result = _VALIDATE_EVIDENCE(
+                        raw_path, GIT_COMMIT, BINARY_SHA256
+                    )
+                    self.assertTrue(result["passed"])
+                    self.assertEqual(result["schema_version"], result_schema)
+                    self.assertNotIn("served_model", result)
+                    if raw_schema == VALIDATOR.RAW_SCHEMA_VERSION_V1:
+                        self.assertNotIn("kfd_snapshots", result["counts"])
+                    else:
+                        self.assertEqual(result["counts"]["kfd_snapshots"], 641)
+
+    def test_mixed_raw_schema_branches_are_rejected(self):
         with tempfile.TemporaryDirectory() as temporary:
             records = EvidenceBuilder().build()
-            records[0]["schema_version"] = "ullm.sq8.worker_acceptance.raw.v1"
+            records[1]["schema_version"] = VALIDATOR.RAW_SCHEMA_VERSION_V2
             raw_path, _ = write_fixture(Path(temporary), records)
             with self.assertRaisesRegex(VALIDATOR.ValidationError, "wrong schema_version"):
                 VALIDATOR.validate_evidence(raw_path, GIT_COMMIT, BINARY_SHA256)
+
+    def test_v3_rejects_worker_v1_and_missing_reasoning_accounting(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for name, mutate in (
+                (
+                    "worker-v1",
+                    lambda record: record["event"].__setitem__(
+                        "schema_version", VALIDATOR.WORKER_SCHEMA_VERSION_V1
+                    ),
+                ),
+                (
+                    "missing-accounting",
+                    lambda record: record["event"].pop("forced_end_tokens"),
+                ),
+            ):
+                with self.subTest(name=name):
+                    directory = root / name
+                    directory.mkdir()
+                    records = EvidenceBuilder().build()
+                    released = first_record(
+                        records,
+                        lambda record: record.get("record_type") == "worker_event"
+                        and record.get("event", {}).get("type") == "released",
+                    )
+                    mutate(released)
+                    refresh_worker_event_raw(released)
+                    raw_path, _ = write_fixture(directory, records)
+                    with self.assertRaises(VALIDATOR.ValidationError):
+                        VALIDATOR.validate_evidence(
+                            raw_path, GIT_COMMIT, BINARY_SHA256
+                        )
+
+    def test_v3_generate_requires_exact_disabled_reasoning_object(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for name, mutate in (
+                (
+                    "missing",
+                    lambda record, command: (
+                        record.pop("reasoning"),
+                        command.pop("reasoning"),
+                    ),
+                ),
+                (
+                    "dialect",
+                    lambda record, command: (
+                        record["reasoning"].__setitem__("dialect_id", "wrong"),
+                        command["reasoning"].__setitem__("dialect_id", "wrong"),
+                    ),
+                ),
+            ):
+                with self.subTest(name=name):
+                    directory = root / name
+                    directory.mkdir()
+                    records = EvidenceBuilder().build()
+                    generate = first_record(
+                        records,
+                        lambda record: record.get("record_type") == "command"
+                        and record.get("command_type") == "generate",
+                    )
+                    raw_command = json.loads(generate["raw_json"])
+                    mutate(generate, raw_command)
+                    generate["raw_json"] = compact_json(raw_command)
+                    generate["raw_sha256"] = sha256_text(generate["raw_json"])
+                    raw_path, _ = write_fixture(directory, records)
+                    with self.assertRaises(VALIDATOR.ValidationError):
+                        VALIDATOR.validate_evidence(
+                            raw_path, GIT_COMMIT, BINARY_SHA256
+                        )
 
     def test_cancel_p95_gate_is_derived_from_ten_measured_bounds(self):
         with tempfile.TemporaryDirectory() as temporary:

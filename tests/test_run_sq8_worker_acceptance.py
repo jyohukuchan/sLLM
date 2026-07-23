@@ -54,6 +54,9 @@ def ready_event():
 
 def event(kind: str, request_id: str = "req-1", **fields):
     value = {"schema_version": TOOL.WORKER_SCHEMA, "type": kind, "request_id": request_id}
+    if kind == "released":
+        fields.setdefault("reasoning_tokens", 0)
+        fields.setdefault("forced_end_tokens", 0)
     value.update(fields)
     return value
 
@@ -242,6 +245,16 @@ class StrictJsonAndPumpTests(unittest.TestCase):
         missing.pop("timings")
         with self.assertRaisesRegex(TOOL.AcceptanceError, "keys differ"):
             TOOL.validate_worker_event_shape(missing)
+
+        missing_usage = dict(released)
+        missing_usage.pop("reasoning_tokens")
+        with self.assertRaisesRegex(TOOL.AcceptanceError, "keys differ"):
+            TOOL.validate_worker_event_shape(missing_usage)
+
+        nonzero_usage = dict(released)
+        nonzero_usage["forced_end_tokens"] = 1
+        with self.assertRaisesRegex(TOOL.AcceptanceError, "disabled"):
+            TOOL.validate_worker_event_shape(nonzero_usage)
 
         extra = json.loads(json.dumps(released))
         extra["timings"]["unexpected"] = 1
@@ -501,6 +514,8 @@ class CommandAndEvidenceTests(unittest.TestCase):
         self.assertEqual(evidence.records[1]["cancel_target"], "prompt")
         commands = [json.loads(line) for line in stdin.getvalue().splitlines()]
         self.assertEqual(commands[0]["prompt_token_ids"], list(range(1, 129)))
+        self.assertEqual(commands[0]["schema_version"], "ullm.worker.v2")
+        self.assertEqual(commands[0]["reasoning"], TOOL.REASONING_EXECUTION)
         self.assertEqual(commands[-1], {"schema_version": TOOL.WORKER_SCHEMA, "type": "shutdown"})
 
     def test_shutdown_write_deadline_is_based_on_write_start(self):
@@ -860,8 +875,7 @@ else:
     def test_worker_starts_a_dedicated_session(self):
         identity = mock.Mock(
             worker=Path("/worker"),
-            artifact=Path("/artifact"),
-            package=Path("/package"),
+            worker_arguments=("--served-model-manifest", "/candidate/served-model.json"),
         )
         sentinel = object()
         with mock.patch.object(TOOL.subprocess, "Popen", return_value=sentinel) as popen:
@@ -870,7 +884,11 @@ else:
         options = popen.call_args.kwargs
         self.assertEqual(
             arguments,
-            ["/worker", "--artifact", "/artifact", "--package", "/package"],
+            [
+                "/worker",
+                "--served-model-manifest",
+                "/candidate/served-model.json",
+            ],
         )
         self.assertIs(options["start_new_session"], True)
         self.assertEqual(options["bufsize"], 0)
@@ -1420,13 +1438,108 @@ class ProcAndGpuProbeTests(unittest.TestCase):
 
 
 class HeaderAndCliTests(unittest.TestCase):
+    def test_served_model_preflight_binds_v2_sq8_reasoning_and_worker(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            worker = root / "ullm-sq8-worker"
+            worker.write_bytes(b"worker")
+            worker.chmod(0o755)
+            worker_sha256 = TOOL.sha256_file(worker)
+            manifest = root / "served-model.json"
+            document = {
+                "schema_version": "ullm.served_model.v2",
+                "public": {
+                    "id": "ullm-qwen3-14b-sq8",
+                    "upstream_id": "Qwen/Qwen3-14B-FP8",
+                    "revision": TOOL.EXPECTED_MODEL_REVISION,
+                    "context_length": 4096,
+                },
+                "generation": {
+                    "max_completion_tokens": 512,
+                    "vocab_size": 151936,
+                    "eos_token_ids": TOOL.EOS_TOKEN_IDS,
+                    "sampling": {
+                        "top_k": 20,
+                        "temperature": True,
+                        "top_p": True,
+                    },
+                },
+                "format": {
+                    "format_id": "SQ8_0",
+                    "implementation_id": "qwen3_sq8_rdna4_v1",
+                },
+                "worker": {
+                    "protocol": "ullm.worker.v2",
+                    "binary_sha256": worker_sha256,
+                    "arguments": [
+                        "--served-model-manifest",
+                        "{manifest}",
+                    ],
+                    "required_environment": list(TOOL.REQUIRED_HIP_GUARDS),
+                },
+                "reasoning": TOOL.REASONING_DIALECT,
+            }
+            manifest.write_bytes(compact(document))
+            manifest_sha256 = TOOL.sha256_file(manifest)
+            summary = {
+                "schema_version": "ullm.served_model.validation.v1",
+                "validated": True,
+                "manifest_sha256": manifest_sha256,
+                "model_id": "ullm-qwen3-14b-sq8",
+                "format_id": "SQ8_0",
+                "worker": {
+                    "binary": str(worker),
+                    "binary_sha256": worker_sha256,
+                    "protocol": "ullm.worker.v2",
+                    "device": "gfx1201",
+                    "execution_profile": "rdna4_w8a8_block_ck",
+                },
+                "product": {
+                    "root": "/product",
+                    "artifact": {
+                        "manifest_path": "artifact/sq_manifest.json",
+                        "manifest_sha256": TOOL.EXPECTED_ARTIFACT_MANIFEST_SHA256,
+                        "content_sha256": TOOL.EXPECTED_ARTIFACT_CONTENT_SHA256,
+                    },
+                    "package": {
+                        "manifest_path": "package/manifest.json",
+                        "manifest_sha256": TOOL.EXPECTED_PACKAGE_MANIFEST_SHA256,
+                    },
+                },
+            }
+            with mock.patch.object(
+                TOOL, "run_bounded_command", return_value=compact(summary)
+            ):
+                validated = TOOL.validate_served_model_manifest(root, manifest)
+            self.assertEqual(validated[0], manifest.resolve())
+            self.assertEqual(validated[1], manifest_sha256)
+            self.assertEqual(validated[2], worker.resolve())
+            self.assertEqual(validated[3], worker_sha256)
+            self.assertEqual(
+                validated[4],
+                ("--served-model-manifest", str(manifest.resolve())),
+            )
+
+            document["reasoning"] = dict(TOOL.REASONING_DIALECT)
+            document["reasoning"]["dialect_id"] = "wrong"
+            manifest.write_bytes(compact(document))
+            summary["manifest_sha256"] = TOOL.sha256_file(manifest)
+            with mock.patch.object(
+                TOOL, "run_bounded_command", return_value=compact(summary)
+            ), self.assertRaisesRegex(TOOL.AcceptanceError, "reasoning identity"):
+                TOOL.validate_served_model_manifest(root, manifest)
+
     def test_header_has_exact_frozen_nested_fields_and_raw_hashes(self):
         identity = TOOL.Preflight(
             repo_root=Path("/repo"),
             output_dir=Path("/evidence"),
             worker=Path("/worker"),
-            artifact=Path("/artifact"),
-            package=Path("/package"),
+            served_model_manifest=Path("/candidate/served-model.json"),
+            served_model_manifest_sha256="c" * 64,
+            worker_arguments=(
+                "--served-model-manifest",
+                "/candidate/served-model.json",
+            ),
             git_commit="a" * 40,
             git_status_raw="?? .rocprofv3/counters.dat\n",
             binary_sha256="b" * 64,
@@ -1444,6 +1557,7 @@ class HeaderAndCliTests(unittest.TestCase):
                 "clock",
                 "build",
                 "worker",
+                "served_model",
                 "device",
                 "environment",
                 "schedule",
@@ -1463,10 +1577,36 @@ class HeaderAndCliTests(unittest.TestCase):
             header["environment"]["preflight_kfd_snapshot"],
             synthetic_kfd_snapshot(111, 0),
         )
+        self.assertEqual(
+            header["served_model"],
+            {
+                "manifest_path": "/candidate/served-model.json",
+                "manifest_sha256": "c" * 64,
+                "schema_version": "ullm.served_model.v2",
+                "model_id": "ullm-qwen3-14b-sq8",
+                "model_revision": TOOL.EXPECTED_MODEL_REVISION,
+                "format_id": "SQ8_0",
+                "worker_protocol": "ullm.worker.v2",
+                "worker_arguments": [
+                    "--served-model-manifest",
+                    "/candidate/served-model.json",
+                ],
+                "reasoning": TOOL.REASONING_DIALECT,
+            },
+        )
 
-    def test_cli_requires_worker_and_fresh_output_directory(self):
-        args = TOOL.parse_args(["--worker", "/tmp/worker", "--output-dir", "/tmp/evidence"])
-        self.assertEqual(args.worker, Path("/tmp/worker"))
+    def test_cli_requires_v2_manifest_and_fresh_output_directory(self):
+        args = TOOL.parse_args(
+            [
+                "--served-model-manifest",
+                "/tmp/served-model.json",
+                "--output-dir",
+                "/tmp/evidence",
+            ]
+        )
+        self.assertEqual(
+            args.served_model_manifest, Path("/tmp/served-model.json")
+        )
         self.assertEqual(args.output_dir, Path("/tmp/evidence"))
         self.assertEqual(args.amd_smi, "amd-smi")
 

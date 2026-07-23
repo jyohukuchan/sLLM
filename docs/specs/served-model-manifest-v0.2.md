@@ -1,20 +1,34 @@
 # Served-model manifest v0.2
 
-Status: proposed implementation contract
+Status: ratified production contract
 
-`ullm.served_model.v2` keeps every v1 field and adds one required top-level
-`reasoning` object. The v1 loader remains strict and does not accept this field.
+Date: 2026-07-24
 
-## 1. Reasoning object
+## 1. Version boundary
+
+`ullm.served_model.v2` incorporates every file, JSON, path, identity, and
+failure rule of `served-model-manifest-v0.1.md` and adds exactly one required
+top-level `reasoning` object. Its `worker.protocol` MUST be
+`ullm.worker.v2`. Conversely, `ullm.served_model.v1` MUST use
+`ullm.worker.v1`, MUST NOT contain `reasoning`, and retains its frozen
+semantics.
+
+There is no implicit upgrade, compatibility fallback, or schema inference.
+Manifest schema, worker protocol, and the command/event discriminator are one
+version-locked tuple.
+
+## 2. Reasoning object
+
+The independent Qwen3-14B-FP8 `SQ8_0` production identity is:
 
 ```json
 {
   "reasoning": {
     "enabled_by_default": false,
-    "dialect_id": "qwen3.5.thinking.v1",
-    "start_token_ids": [248068],
-    "end_token_ids": [248069],
-    "forced_end_token_ids": [248069],
+    "dialect_id": "qwen3-thinking-v1",
+    "start_token_ids": [151667],
+    "end_token_ids": [151668],
+    "forced_end_token_ids": [151668],
     "initial_phase": "reasoning",
     "eos_policy": "close",
     "effort_budgets": {"low": 32, "medium": 128, "high": 256},
@@ -25,27 +39,55 @@ Status: proposed implementation contract
 }
 ```
 
-All token sequences are nonempty arrays of unique nonnegative IDs below the
-declared vocabulary size. Sequences are token-level values and may contain more
-than one token. `end_token_ids` and `forced_end_token_ids` must be identical in
-v0.2. `initial_phase` is `reasoning` or `answer`; `eos_policy` is `close`,
-`finish`, or `continue`. Effort keys are exactly `low`, `medium`, and `high`,
-with positive budgets not exceeding `max_budget_tokens`.
+The reasoning object has exactly the eleven fields shown. Every token sequence
+is a nonempty array of unique nonnegative integer token IDs below
+`generation.vocab_size`; JSON booleans are not integers. Sequences operate on
+tokens and may contain more than one token.
 
-`history_reasoning_policy` is `omit` or `preserve`. `reserved_answer_tokens`
-must be at least one. The loader rejects empty arrays, duplicates, invalid IDs,
-unknown keys, effort budgets above the maximum, and a delimiter prefix collision
-that cannot be represented by the token state machine.
+`end_token_ids` and `forced_end_token_ids` MUST be identical in v0.2.
+`initial_phase` is exactly `reasoning` or `answer`; `eos_policy` is exactly
+`close`, `finish`, or `continue`; and `history_reasoning_policy` is exactly
+`omit` or `preserve`. `enabled_by_default` is a JSON boolean.
 
-## 2. Template options
+`effort_budgets` has exactly `low`, `medium`, and `high`. Each value is a
+positive integer no greater than the positive integer
+`max_budget_tokens`. `reserved_answer_tokens` is a positive integer. The sum
 
-The v2 tokenizer contract keeps `add_generation_prompt` and allows
-`enable_thinking` to be selected per normalized request. The manifest's value is
-the default, not a permission to bypass the dialect or tokenizer identity.
+```text
+max_budget_tokens
++ len(forced_end_token_ids)
++ reserved_answer_tokens
+```
 
-## 3. Identity and activation
+MUST NOT exceed `generation.max_completion_tokens`.
 
-The manifest digest, tokenizer digest, worker digest, and promotion receipt bind
-the dialect identity. Activation is atomic and rollback restores the previous
-active manifest. A v2 manifest is not activated until the v2 validator and the
-synthetic multi-token dialect fixture pass.
+The loader rejects an empty or duplicate sequence, an out-of-vocabulary ID,
+an unknown/missing field, an incomplete effort map, a budget above the
+maximum, unequal natural/forced delimiters, or a start/end prefix collision
+that the token state machine cannot distinguish.
+
+## 3. Request and template boundary
+
+The v2 tokenizer contract retains `add_generation_prompt` and
+`enable_thinking`. The manifest value is the default template choice; it does
+not authorize a request to replace token IDs, the dialect identity, the
+history policy, or any other manifest field.
+
+Every `ullm.worker.v2` generate command carries an explicit reasoning execution
+object, including when reasoning is disabled. Request normalization selects
+only `enabled` and a bounded/unbounded budget; all dialect identity and
+reservation fields must equal the loaded manifest.
+
+## 4. Identity, loading, and activation
+
+The manifest SHA-256 binds the public model, tokenizer files and template,
+worker binary/protocol, product manifests, promotion receipt, and reasoning
+dialect. Python and Rust loaders MUST apply the same strict v1 file boundary,
+exact-field checks, hash verification, and v2 version alignment before worker
+launch.
+
+Activation remains atomic and rollback restores the exact previous manifest
+bytes. A v2 candidate is not production-admissible until the v2 worker,
+serving-session, worker-acceptance, release-evidence, and bundle validators
+have all accepted identities from that same candidate. This ratification does
+not itself authorize activation.

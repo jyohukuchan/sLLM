@@ -25,8 +25,9 @@ from pathlib import Path
 from typing import Any, BinaryIO, Callable, Iterable
 
 
-RAW_SCHEMA = "ullm.sq8.worker_acceptance.raw.v2"
-WORKER_SCHEMA = "ullm.worker.v1"
+RAW_SCHEMA = "ullm.sq8.worker_acceptance.raw.v3"
+WORKER_SCHEMA = "ullm.worker.v2"
+SERVED_MODEL_SCHEMA = "ullm.served_model.v2"
 MAX_LINE_BYTES = 8 * 1024 * 1024
 STDOUT_QUEUE_ITEMS = 2
 COMMAND_TIMEOUT_SECONDS = 30.0
@@ -77,6 +78,27 @@ REQUIRED_HIP_GUARDS = (
 )
 SAMPLING = {"temperature": 0.0, "top_p": 1.0, "top_k": 20, "seed": 0}
 EOS_TOKEN_IDS = [151_645, 151_643]
+REASONING_DIALECT = {
+    "enabled_by_default": False,
+    "dialect_id": "qwen3-thinking-v1",
+    "start_token_ids": [151_667],
+    "end_token_ids": [151_668],
+    "forced_end_token_ids": [151_668],
+    "initial_phase": "reasoning",
+    "eos_policy": "close",
+    "effort_budgets": {"low": 32, "medium": 128, "high": 256},
+    "max_budget_tokens": 256,
+    "reserved_answer_tokens": 1,
+    "history_reasoning_policy": "omit",
+}
+REASONING_EXECUTION = {
+    "enabled": False,
+    "budget_tokens": None,
+    "dialect_id": REASONING_DIALECT["dialect_id"],
+    "end_token_ids": REASONING_DIALECT["end_token_ids"],
+    "forced_end_token_ids": REASONING_DIALECT["forced_end_token_ids"],
+    "reserved_answer_tokens": REASONING_DIALECT["reserved_answer_tokens"],
+}
 TIMING_FIELDS = {
     "cache_n",
     "prompt_n",
@@ -663,6 +685,8 @@ def validate_worker_event_shape(event: dict[str, Any]) -> None:
             "outcome",
             "prompt_tokens",
             "completion_tokens",
+            "reasoning_tokens",
+            "forced_end_tokens",
             "reset_complete",
         }
         if outcome == "cancelled":
@@ -679,6 +703,16 @@ def validate_worker_event_shape(event: dict[str, Any]) -> None:
         completion_tokens = integer(
             event["completion_tokens"], "released.completion_tokens", maximum=512
         )
+        reasoning_tokens = integer(
+            event["reasoning_tokens"], "released.reasoning_tokens", maximum=512
+        )
+        forced_end_tokens = integer(
+            event["forced_end_tokens"], "released.forced_end_tokens", maximum=512
+        )
+        if reasoning_tokens != 0 or forced_end_tokens != 0:
+            fail("released reasoning accounting differs from the disabled acceptance request")
+        if reasoning_tokens + forced_end_tokens > completion_tokens:
+            fail("released reasoning accounting exceeds completion tokens")
         if outcome != "cancelled":
             validate_release_timings(
                 event["timings"],
@@ -1665,6 +1699,7 @@ class WorkerTransport:
             "max_new_tokens": spec.max_new_tokens,
             "sampling": SAMPLING,
             "eos_token_ids": EOS_TOKEN_IDS,
+            "reasoning": REASONING_EXECUTION,
         }
         raw = {
             "phase": spec.phase,
@@ -1676,6 +1711,7 @@ class WorkerTransport:
             "max_new_tokens": spec.max_new_tokens,
             "sampling": SAMPLING,
             "eos_token_ids": EOS_TOKEN_IDS,
+            "reasoning": REASONING_EXECUTION,
         }
         return self._send(
             command,
@@ -1998,8 +2034,9 @@ class Preflight:
     repo_root: Path
     output_dir: Path
     worker: Path
-    artifact: Path
-    package: Path
+    served_model_manifest: Path
+    served_model_manifest_sha256: str
+    worker_arguments: tuple[str, ...]
     git_commit: str
     git_status_raw: str
     binary_sha256: str
@@ -2009,24 +2046,170 @@ class Preflight:
     preflight_kfd_snapshot: dict[str, Any]
 
 
+def validate_served_model_manifest(
+    repo_root: Path, manifest_path: Path
+) -> tuple[Path, str, Path, str, tuple[str, ...]]:
+    manifest = regular_file(manifest_path, "served-model manifest")
+    summary_raw = run_bounded_command(
+        [
+            sys.executable,
+            str(repo_root / "tools" / "validate-served-model.py"),
+            "--manifest",
+            str(manifest),
+        ],
+        "served-model manifest validation",
+        cwd=repo_root,
+    )
+    summary = strict_json_object(summary_raw, "served-model validation summary")
+    exact_keys(
+        summary,
+        {
+            "schema_version",
+            "validated",
+            "manifest_sha256",
+            "model_id",
+            "format_id",
+            "worker",
+            "product",
+        },
+        "served-model validation summary",
+    )
+    if (
+        summary["schema_version"] != "ullm.served_model.validation.v1"
+        or summary["validated"] is not True
+        or summary["model_id"] != "ullm-qwen3-14b-sq8"
+        or summary["format_id"] != "SQ8_0"
+    ):
+        fail("served-model validation summary identity differs")
+    worker_summary = summary["worker"]
+    product_summary = summary["product"]
+    if not isinstance(worker_summary, dict) or not isinstance(product_summary, dict):
+        fail("served-model validation summary nested identity is invalid")
+    exact_keys(
+        worker_summary,
+        {
+            "binary",
+            "binary_sha256",
+            "protocol",
+            "device",
+            "execution_profile",
+        },
+        "served-model validation summary worker",
+    )
+    exact_keys(
+        product_summary,
+        {"root", "artifact", "package"},
+        "served-model validation summary product",
+    )
+    artifact_summary = product_summary["artifact"]
+    package_summary = product_summary["package"]
+    if not isinstance(artifact_summary, dict) or not isinstance(package_summary, dict):
+        fail("served-model validation summary omits SQ8 product identities")
+    exact_keys(
+        artifact_summary,
+        {"manifest_path", "manifest_sha256", "content_sha256"},
+        "served-model validation summary artifact",
+    )
+    exact_keys(
+        package_summary,
+        {"manifest_path", "manifest_sha256"},
+        "served-model validation summary package",
+    )
+    if (
+        worker_summary["protocol"] != WORKER_SCHEMA
+        or worker_summary["device"] != "gfx1201"
+        or worker_summary["execution_profile"] != "rdna4_w8a8_block_ck"
+        or artifact_summary["manifest_sha256"]
+        != EXPECTED_ARTIFACT_MANIFEST_SHA256
+        or artifact_summary["content_sha256"] != EXPECTED_ARTIFACT_CONTENT_SHA256
+        or package_summary["manifest_sha256"]
+        != EXPECTED_PACKAGE_MANIFEST_SHA256
+    ):
+        fail("served-model validation summary differs from the SQ8 v2 contract")
+
+    manifest_raw = read_small_file(
+        manifest, "served-model manifest", maximum=1_048_576
+    )
+    manifest_sha256 = sha256_bytes(manifest_raw)
+    if summary["manifest_sha256"] != manifest_sha256:
+        fail("served-model validation summary manifest SHA-256 differs")
+    document = strict_json_object(manifest_raw, "served-model manifest")
+    if document.get("schema_version") != SERVED_MODEL_SCHEMA:
+        fail("worker acceptance requires ullm.served_model.v2")
+    public = document.get("public")
+    generation = document.get("generation")
+    format_contract = document.get("format")
+    worker_contract = document.get("worker")
+    reasoning = document.get("reasoning")
+    if not all(
+        isinstance(value, dict)
+        for value in (public, generation, format_contract, worker_contract, reasoning)
+    ):
+        fail("served-model v2 identity objects are missing")
+    assert isinstance(public, dict)
+    assert isinstance(generation, dict)
+    assert isinstance(format_contract, dict)
+    assert isinstance(worker_contract, dict)
+    assert isinstance(reasoning, dict)
+    if (
+        public.get("id") != "ullm-qwen3-14b-sq8"
+        or public.get("upstream_id") != "Qwen/Qwen3-14B-FP8"
+        or public.get("revision") != EXPECTED_MODEL_REVISION
+        or public.get("context_length") != 4096
+        or generation.get("max_completion_tokens") != 512
+        or generation.get("vocab_size") != 151_936
+        or not json_type_equal(generation.get("eos_token_ids"), EOS_TOKEN_IDS)
+        or not json_type_equal(
+            generation.get("sampling"),
+            {"top_k": 20, "temperature": True, "top_p": True},
+        )
+        or not json_type_equal(
+            format_contract,
+            {
+                "format_id": "SQ8_0",
+                "implementation_id": "qwen3_sq8_rdna4_v1",
+            },
+        )
+        or not json_type_equal(reasoning, REASONING_DIALECT)
+    ):
+        fail("served-model v2 SQ8/reasoning identity differs")
+    arguments = worker_contract.get("arguments")
+    required_environment = worker_contract.get("required_environment")
+    if (
+        worker_contract.get("protocol") != WORKER_SCHEMA
+        or not json_type_equal(
+            arguments, ["--served-model-manifest", "{manifest}"]
+        )
+        or not isinstance(required_environment, list)
+        or tuple(required_environment) != REQUIRED_HIP_GUARDS
+    ):
+        fail("served-model v2 worker launch contract differs")
+    worker = regular_file(
+        Path(nonempty_string(worker_summary["binary"], "validated worker binary")),
+        "worker binary",
+        executable=True,
+    )
+    binary_sha256 = sha256_file(worker)
+    if (
+        worker_summary["binary_sha256"] != binary_sha256
+        or worker_contract.get("binary_sha256") != binary_sha256
+    ):
+        fail("served-model worker binary SHA-256 differs")
+    launch_arguments = tuple(
+        str(manifest) if argument == "{manifest}" else argument
+        for argument in arguments
+    )
+    return manifest, manifest_sha256, worker, binary_sha256, launch_arguments
+
+
 def preflight(args: argparse.Namespace, runner: CommandRunner = run_bounded_command) -> Preflight:
     repo_root = regular_directory(args.repo_root, "repository root")
     require_git_toplevel(repo_root)
     output_dir = prospective_output_directory(args.output_dir, repo_root)
-    worker = regular_file(args.worker, "worker binary", executable=True)
-    artifact = regular_directory(args.artifact, "artifact directory")
-    package = regular_directory(args.package, "package directory")
+    manifest, manifest_sha256, worker, binary_sha256, worker_arguments = (
+        validate_served_model_manifest(repo_root, args.served_model_manifest)
+    )
     commit, git_status_raw = git_identity(repo_root)
-    artifact_manifest = read_small_file(artifact / "sq_manifest.json", "artifact manifest")
-    if sha256_bytes(artifact_manifest) != EXPECTED_ARTIFACT_MANIFEST_SHA256:
-        fail("artifact manifest SHA-256 differs")
-    artifact_value = strict_json_object(artifact_manifest, "artifact manifest")
-    integrity = artifact_value.get("integrity")
-    if not isinstance(integrity, dict) or integrity.get("content_sha256") != EXPECTED_ARTIFACT_CONTENT_SHA256:
-        fail("artifact content SHA-256 differs")
-    package_manifest = read_small_file(package / "manifest.json", "package manifest")
-    if sha256_bytes(package_manifest) != EXPECTED_PACKAGE_MANIFEST_SHA256:
-        fail("package manifest SHA-256 differs")
     if os.environ.get("HIP_VISIBLE_DEVICES") != "1":
         fail("HIP_VISIBLE_DEVICES must be exactly 1")
     guards = {name: os.environ.get(name, "") for name in REQUIRED_HIP_GUARDS}
@@ -2046,11 +2229,12 @@ def preflight(args: argparse.Namespace, runner: CommandRunner = run_bounded_comm
         repo_root=repo_root,
         output_dir=output_dir,
         worker=worker,
-        artifact=artifact,
-        package=package,
+        served_model_manifest=manifest,
+        served_model_manifest_sha256=manifest_sha256,
+        worker_arguments=worker_arguments,
         git_commit=commit,
         git_status_raw=git_status_raw,
-        binary_sha256=sha256_file(worker),
+        binary_sha256=binary_sha256,
         amd_version_raw=amd_version,
         amd_list_raw=amd_list,
         guards=guards,
@@ -2093,6 +2277,17 @@ def header_record(
             "ppid": worker_ppid,
             "starttime_ticks": worker_starttime,
             "exe": worker_exe,
+        },
+        "served_model": {
+            "manifest_path": str(preflight_result.served_model_manifest),
+            "manifest_sha256": preflight_result.served_model_manifest_sha256,
+            "schema_version": SERVED_MODEL_SCHEMA,
+            "model_id": "ullm-qwen3-14b-sq8",
+            "model_revision": EXPECTED_MODEL_REVISION,
+            "format_id": "SQ8_0",
+            "worker_protocol": WORKER_SCHEMA,
+            "worker_arguments": list(preflight_result.worker_arguments),
+            "reasoning": REASONING_DIALECT,
         },
         "device": {
             "gpu_index": GPU_INDEX,
@@ -2152,13 +2347,7 @@ def spawn_worker(
     identity: Preflight, environment: dict[str, str]
 ) -> subprocess.Popen[bytes]:
     return subprocess.Popen(
-        [
-            str(identity.worker),
-            "--artifact",
-            str(identity.artifact),
-            "--package",
-            str(identity.package),
-        ],
+        [str(identity.worker), *identity.worker_arguments],
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -2388,16 +2577,10 @@ def execute(args: argparse.Namespace) -> None:
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--worker", type=Path, required=True)
     parser.add_argument(
-        "--artifact",
+        "--served-model-manifest",
         type=Path,
-        default=Path("/home/homelab1/datapool/ullm/product/qwen3-14b-fp8-sq8-v0.1/artifact"),
-    )
-    parser.add_argument(
-        "--package",
-        type=Path,
-        default=Path("/home/homelab1/datapool/ullm/product/qwen3-14b-fp8-sq8-v0.1/package"),
+        required=True,
     )
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument(
