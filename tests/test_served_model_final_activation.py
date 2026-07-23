@@ -8,6 +8,7 @@ import stat
 import subprocess
 import sys
 import time
+from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -32,15 +33,19 @@ ROLLBACK_PATH = ROOT / "tools/rollback-served-model.py"
 NOW = datetime(2026, 7, 24, 12, 0, 0, tzinfo=timezone.utc)
 SOURCE_COMMIT = "a" * 40
 SOURCE_TREE = "b" * 40
-AQ4_WORKER = "2" * 64
-SQ8_WORKER = "4" * 64
+AQ4_SOURCE_COMMIT = "c" * 40
+AQ4_SOURCE_TREE = "d" * 40
+AQ4_WORKER_RAW = b"fixture-aq4-worker\n"
+SQ8_WORKER_RAW = b"fixture-sq8-worker\n"
+AQ4_WORKER = hashlib.sha256(AQ4_WORKER_RAW).hexdigest()
+SQ8_WORKER = hashlib.sha256(SQ8_WORKER_RAW).hexdigest()
 
 
 def digest(raw: bytes) -> str:
     return hashlib.sha256(raw).hexdigest()
 
 
-def canonical(value: dict[str, object]) -> bytes:
+def canonical(value: object) -> bytes:
     return (
         json.dumps(
             value,
@@ -63,7 +68,12 @@ def load_cli(name: str, path: Path) -> object:
 
 
 class Fixture:
-    def __init__(self, tmp_path: Path) -> None:
+    def __init__(
+        self,
+        tmp_path: Path,
+        *,
+        aq4_mutator: Callable[["Fixture"], None] | None = None,
+    ) -> None:
         self.root = tmp_path
         self.registry = tmp_path / "registry"
         self.claims = self.registry / "claims"
@@ -89,9 +99,50 @@ class Fixture:
         self.release_root = tmp_path / "release"
         self.release_root.mkdir(mode=0o700)
         (self.release_root / "campaigns").mkdir(mode=0o700)
+        self.aq4_bundle_root = self.release_root / "aq4-bundle"
+        self.aq4_bundle_root.mkdir(mode=0o700)
+        self.aq4_source_root = tmp_path / "aq4-source"
+        self.aq4_source_root.mkdir(mode=0o700)
         self.final_outcomes = tmp_path / "final-outcomes"
         self.final_outcomes.mkdir(mode=0o700)
 
+        self.aq4_worker = self.release_root / "aq4-worker"
+        self.aq4_worker.write_bytes(AQ4_WORKER_RAW)
+        self.sq8_worker = self.release_root / "sq8-worker"
+        self.sq8_worker.write_bytes(SQ8_WORKER_RAW)
+        self.aq4_promotion_source = (
+            self.release_root / "aq4-promotion-source"
+        )
+        self.aq4_promotion_source.mkdir(mode=0o700)
+        self.aq4_source_promotion_evidence = (
+            self.aq4_promotion_source / "promotion-evidence.json"
+        )
+        self.aq4_source_promotion_evidence.write_bytes(
+            canonical(
+                {
+                    "schema_version": "ullm.aq4_resident_promotion_evidence.v1",
+                    "source_commit": AQ4_SOURCE_COMMIT,
+                    "worker_binary_sha256": AQ4_WORKER,
+                }
+            )
+        )
+        self.aq4_receipt = (
+            self.aq4_promotion_source / "promotion-receipt.json"
+        )
+        self.aq4_receipt.write_bytes(
+            canonical(
+                {
+                    "schema_version": "ullm.aq4_resident_promotion.v1",
+                    "source_commit": AQ4_SOURCE_COMMIT,
+                }
+            )
+        )
+        self.aq4_promotion_evidence = (
+            self.aq4_bundle_root / "promotion-evidence.json"
+        )
+        self.aq4_bundle_receipt = (
+            self.aq4_bundle_root / "promotion-receipt.json"
+        )
         self.receipt = self.release_root / "sq8-promotion-receipt.json"
         self.receipt.write_bytes(
             b'{"schema_version":"ullm.sq8_serving_promotion.v1"}\n'
@@ -100,9 +151,9 @@ class Fixture:
             {
                 "schema_version": FINAL.SERVED_MODEL_SCHEMA,
                 "promotion": {
-                    "source_commit": "c" * 40,
-                    "receipt": "aq4-receipt.json",
-                    "receipt_sha256": "1" * 64,
+                    "source_commit": AQ4_SOURCE_COMMIT,
+                    "receipt": os.fspath(self.aq4_receipt),
+                    "receipt_sha256": digest(self.aq4_receipt.read_bytes()),
                 },
             }
         )
@@ -126,10 +177,26 @@ class Fixture:
         self.rollback = self.release_root / "aq4-rollback.json"
 
         self.campaign_paths = {
+            "aq4_reasoning_release": (
+                self.release_root / "campaigns/aq4-reasoning-release"
+            ),
+            "aq4_reasoning_browser": (
+                self.aq4_bundle_root / "browser-evidence.json"
+            ),
+            "aq4_bundle": self.aq4_bundle_root / "release-bundle-v1.json",
             "sq8_full": self.release_root / "campaigns/sq8-full",
             "reasoning_release": self.release_root / "campaigns/reasoning-release",
             "reasoning_browser": self.release_root / "campaigns/reasoning-browser",
         }
+        self.aq4_release_evidence = (
+            self.aq4_bundle_root / "release-evidence.json"
+        )
+        self.aq4_release_validator = (
+            self.aq4_bundle_root / "release-validator.json"
+        )
+        self.aq4_browser_validator = (
+            self.aq4_bundle_root / "browser-validator.json"
+        )
         self.authorization_path = self.registry / "authorization.json"
         self.authorization_document = {
             "schema_version": AUTH.AUTHORIZATION_SCHEMA,
@@ -145,8 +212,47 @@ class Fixture:
                 "model_id": FINAL.AQ4_MODEL_ID,
                 "format_id": FINAL.AQ4_FORMAT_ID,
                 "manifest_sha256": digest(self.aq4_raw),
+                "worker_protocol": FINAL.WORKER_PROTOCOL,
+                "worker_binary_path": os.fspath(self.aq4_worker),
                 "worker_binary_sha256": AQ4_WORKER,
-                "promotion_source_commit": "c" * 40,
+                "promotion_source_commit": AQ4_SOURCE_COMMIT,
+                "promotion_receipt_path": os.fspath(self.aq4_receipt),
+                "promotion_receipt_sha256": digest(
+                    self.aq4_receipt.read_bytes()
+                ),
+            },
+            "aq4_release": {
+                "source": {
+                    "root": os.fspath(self.aq4_source_root),
+                    "commit": AQ4_SOURCE_COMMIT,
+                    "tree": AQ4_SOURCE_TREE,
+                },
+                "openwebui_image": (
+                    f"ullm/open-webui@sha256:{'9' * 64}"
+                ),
+                "promotion_evidence": {
+                    "source_path": os.fspath(
+                        self.aq4_source_promotion_evidence
+                    ),
+                    "path": os.fspath(self.aq4_promotion_evidence),
+                    "sha256": digest(
+                        self.aq4_source_promotion_evidence.read_bytes()
+                    ),
+                },
+                "promotion_receipt": {
+                    "source_path": os.fspath(self.aq4_receipt),
+                    "path": os.fspath(self.aq4_bundle_receipt),
+                    "sha256": digest(self.aq4_receipt.read_bytes()),
+                },
+                "release_evidence_path": os.fspath(
+                    self.aq4_release_evidence
+                ),
+                "release_validator_path": os.fspath(
+                    self.aq4_release_validator
+                ),
+                "browser_validator_path": os.fspath(
+                    self.aq4_browser_validator
+                ),
             },
             "candidate": {
                 "model_id": FINAL.SQ8_MODEL_ID,
@@ -192,6 +298,123 @@ class Fixture:
 
         self.rollback.write_bytes(self.aq4_raw)
         self.rollback.chmod(0o444)
+        self.aq4_promotion_evidence.write_bytes(
+            self.aq4_source_promotion_evidence.read_bytes()
+        )
+        self.aq4_bundle_receipt.write_bytes(self.aq4_receipt.read_bytes())
+        aq4_release = self.campaign_paths["aq4_reasoning_release"]
+        aq4_release.mkdir(parents=True)
+        self.aq4_cases = [
+            {
+                "case_id": "aq4-case-001",
+                "mode": "disabled",
+                "passed": True,
+            }
+        ]
+        self.aq4_lifecycle = {
+            "schema_version": "ullm.generic_reasoning_lifecycle_evidence.v1",
+            "events": [{"case_id": "aq4-case-001", "passed": True}],
+        }
+        (aq4_release / "cases.json").write_bytes(canonical(self.aq4_cases))
+        (aq4_release / "lifecycle.json").write_bytes(
+            canonical(self.aq4_lifecycle)
+        )
+        aq4_browser = self.campaign_paths["aq4_reasoning_browser"]
+        aq4_browser.write_bytes(
+            canonical(
+                {
+                    "schema_version": (
+                        "ullm.openwebui.reasoning_browser_smoke.v2"
+                    ),
+                    "status": "complete",
+                    "model_id": FINAL.AQ4_MODEL_ID,
+                }
+            )
+        )
+        self.aq4_release_evidence.write_bytes(
+            canonical(
+                {
+                    "schema_version": (
+                        "ullm.generic_reasoning_release_evidence.v1"
+                    ),
+                    "status": "complete",
+                    "production_activation_performed": False,
+                    "source_commit": AQ4_SOURCE_COMMIT,
+                    "active_promotion_source_commit": AQ4_SOURCE_COMMIT,
+                    "identity": {
+                        "manifest_sha256": digest(self.aq4_raw),
+                        "worker_binary_sha256": AQ4_WORKER,
+                        "tokenizer_sha256": "8" * 64,
+                        "openwebui_image": (
+                            f"ullm/open-webui@sha256:{'9' * 64}"
+                        ),
+                    },
+                    "cases": self.aq4_cases,
+                    "lifecycle": self.aq4_lifecycle,
+                }
+            )
+        )
+        self.aq4_release_validator.write_text(
+            '{"gate_eligible":true}\n',
+            encoding="ascii",
+        )
+        self.aq4_browser_validator.write_text(
+            '{"gate_eligible":true}\n',
+            encoding="ascii",
+        )
+        aq4_artifacts = {
+            "release_evidence": self.aq4_release_evidence,
+            "release_validator": self.aq4_release_validator,
+            "browser_evidence": aq4_browser,
+            "browser_validator": self.aq4_browser_validator,
+            "promotion_evidence": self.aq4_promotion_evidence,
+            "promotion_receipt": self.aq4_bundle_receipt,
+        }
+        self.aq4_bundle_document = {
+            "schema_version": FINAL.AQ4_BUNDLE_SCHEMA,
+            "status": "complete",
+            "production_activation_performed": False,
+            "source_commit": AQ4_SOURCE_COMMIT,
+            "active_promotion_source_commit": AQ4_SOURCE_COMMIT,
+            "identity": {
+                "manifest_sha256": digest(self.aq4_raw),
+                "worker_binary_sha256": AQ4_WORKER,
+                "tokenizer_sha256": "8" * 64,
+                "openwebui_image": (
+                    f"ullm/open-webui@sha256:{'9' * 64}"
+                ),
+            },
+            "artifacts": {
+                name: {
+                    "path": path.relative_to(self.aq4_bundle_root).as_posix(),
+                    "sha256": digest(path.read_bytes()),
+                }
+                for name, path in aq4_artifacts.items()
+            },
+            "rollback_target": {
+                "manifest_sha256": "7" * 64,
+                "systemd_unit_sha256": digest(self.unit.read_bytes()),
+                "environment_sha256": digest(self.environment.read_bytes()),
+            },
+        }
+        self.aq4_bundle = self.campaign_paths["aq4_bundle"]
+        self.aq4_bundle.write_bytes(canonical(self.aq4_bundle_document))
+        if aq4_mutator is not None:
+            aq4_mutator(self)
+        for path in (
+            aq4_release / "cases.json",
+            aq4_release / "lifecycle.json",
+            aq4_browser,
+            self.aq4_release_evidence,
+            self.aq4_release_validator,
+            self.aq4_browser_validator,
+            self.aq4_promotion_evidence,
+            self.aq4_bundle_receipt,
+            self.aq4_bundle,
+        ):
+            path.chmod(0o444)
+        aq4_release.chmod(0o555)
+
         full = self.campaign_paths["sq8_full"]
         full.mkdir(parents=True)
         (full / "SHA256SUMS").write_text("fixture checksums\n", encoding="ascii")
@@ -289,6 +512,14 @@ class Fixture:
             "status": "succeeded_restored",
             "failure_stage": None,
             "stages": {name: "passed" for name in AUTH.OUTCOME_STAGE_FIELDS},
+            "aq4_observations": [
+                {
+                    "stage": stage,
+                    "active_manifest_sha256": digest(self.aq4_raw),
+                    "bytes_equal": True,
+                }
+                for stage in AUTH.AQ4_OBSERVATION_STAGES
+            ],
             "candidate_observations": [
                 {
                     "stage": stage,
@@ -461,7 +692,19 @@ class Fixture:
             }
         raise ValueError("unknown manifest")
 
-    def bundle_validator(self, _path: Path) -> dict[str, object]:
+    def bundle_validator(self, path: Path) -> dict[str, object]:
+        if path == self.aq4_bundle:
+            return {
+                "schema_version": FINAL.AQ4_BUNDLE_VALIDATOR_SCHEMA,
+                "input_schema_version": FINAL.AQ4_BUNDLE_SCHEMA,
+                "structurally_valid": True,
+                "gate_eligible": True,
+                "source_commit": AQ4_SOURCE_COMMIT,
+                "artifact_count": 6,
+                "reasons": [],
+            }
+        if path != self.bundle:
+            raise ValueError("unknown release bundle")
         reasoning_release = FINAL._output_inventory(
             self.campaign_paths["reasoning_release"],
             run_id=self.authorization_document["campaigns"]["reasoning_release"][
@@ -675,9 +918,25 @@ def test_prepare_preflight_activate_and_manual_rollback(tmp_path: Path) -> None:
     document = fixture.prepare()
 
     assert document["route"] == FINAL.ROUTE
+    assert document["schema_version"] == "ullm.served_model.final_activation_plan.v2"
+    assert document["aq4_release_bundle"] == {
+        "path": os.fspath(fixture.aq4_bundle),
+        "sha256": digest(fixture.aq4_bundle.read_bytes()),
+        "schema_version": FINAL.AQ4_BUNDLE_SCHEMA,
+        "validator_schema_version": FINAL.AQ4_BUNDLE_VALIDATOR_SCHEMA,
+        "validator_report_sha256": digest(
+            canonical(fixture.bundle_validator(fixture.aq4_bundle))
+        ),
+    }
     assert stat.S_IMODE(fixture.plan.stat().st_mode) == 0o444
     preflight = fixture.load("activate")
     assert preflight.active.raw == fixture.aq4_raw
+    assert (
+        FINAL.preflight_report(preflight, action="activate")[
+            "aq4_release_bundle_sha256"
+        ]
+        == digest(fixture.aq4_bundle.read_bytes())
+    )
 
     activation_runner = Runner()
     activated = execute_activation(fixture, activation_runner)
@@ -795,6 +1054,208 @@ def test_changed_campaign_output_invalidates_plan(tmp_path: Path) -> None:
     ):
         fixture.load("activate")
     assert fixture.active.read_bytes() == fixture.aq4_raw
+
+
+@pytest.mark.parametrize("mutation", ["missing", "stale"])
+def test_aq4_bundle_campaign_output_must_remain_exact(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    fixture = Fixture(tmp_path)
+    if mutation == "missing":
+        fixture.aq4_bundle.unlink()
+    else:
+        changed = dict(fixture.aq4_bundle_document)
+        changed["identity"] = dict(changed["identity"])
+        changed["identity"]["tokenizer_sha256"] = "6" * 64
+        fixture.aq4_bundle.chmod(0o644)
+        fixture.aq4_bundle.write_bytes(canonical(changed))
+        fixture.aq4_bundle.chmod(0o444)
+
+    with pytest.raises(FINAL.FinalActivationError):
+        fixture.prepare()
+
+
+def test_aq4_bundle_must_be_v1_gate_eligible(tmp_path: Path) -> None:
+    fixture = Fixture(tmp_path)
+
+    def gate_false(path: Path) -> dict[str, object]:
+        report = fixture.bundle_validator(path)
+        if path == fixture.aq4_bundle:
+            report["gate_eligible"] = False
+            report["reasons"] = ["fixture rejection"]
+        return report
+
+    with pytest.raises(
+        FINAL.FinalActivationError,
+        match="AQ4 release bundle is not production-gate eligible",
+    ):
+        FINAL.prepare_plan(
+            plan_id="sq8-final-test-001",
+            authorization_path=fixture.authorization_path,
+            candidate_manifest=fixture.candidate,
+            active_manifest=fixture.active,
+            rollback_manifest=fixture.rollback,
+            release_bundle=fixture.bundle,
+            systemd_unit=fixture.unit,
+            environment_file=fixture.environment,
+            operations_document=fixture.operations,
+            activation_outcome=fixture.activation_outcome,
+            rollback_outcome=fixture.rollback_outcome,
+            output=fixture.plan,
+            now=NOW + timedelta(minutes=1),
+            policy=fixture.policy,
+            manifest_validator=fixture.manifest_validator,
+            bundle_validator=gate_false,
+        )
+
+
+def test_fresh_aq4_raw_output_mutation_is_rejected(tmp_path: Path) -> None:
+    fixture = Fixture(tmp_path)
+    cases_path = fixture.campaign_paths["aq4_reasoning_release"] / "cases.json"
+    cases_path.chmod(0o644)
+    cases_path.write_bytes(
+        canonical([{"case_id": "mutated-after-outcome", "passed": True}])
+    )
+
+    with pytest.raises(FINAL.FinalActivationError, match="campaign output changed"):
+        fixture.prepare()
+
+
+def test_aq4_bundle_browser_component_must_be_the_fresh_output(
+    tmp_path: Path,
+) -> None:
+    def mismatch(fixture: Fixture) -> None:
+        alternate = fixture.aq4_bundle_root / "alternate-browser-evidence.json"
+        alternate.write_bytes(
+            fixture.campaign_paths["aq4_reasoning_browser"].read_bytes()
+        )
+        fixture.aq4_bundle_document["artifacts"]["browser_evidence"] = {
+            "path": alternate.relative_to(fixture.aq4_bundle_root).as_posix(),
+            "sha256": digest(alternate.read_bytes()),
+        }
+        fixture.aq4_bundle.write_bytes(canonical(fixture.aq4_bundle_document))
+
+    fixture = Fixture(tmp_path, aq4_mutator=mismatch)
+
+    with pytest.raises(
+        FINAL.FinalActivationError,
+        match="outside its fresh campaign output",
+    ):
+        fixture.prepare()
+
+
+@pytest.mark.parametrize(
+    ("artifact_name", "attribute"),
+    (
+        ("promotion_evidence", "aq4_promotion_evidence"),
+        ("promotion_receipt", "aq4_bundle_receipt"),
+    ),
+)
+def test_aq4_bundle_promotion_pair_must_be_exact_authorized_copies(
+    tmp_path: Path,
+    artifact_name: str,
+    attribute: str,
+) -> None:
+    def mismatch(fixture: Fixture) -> None:
+        target = getattr(fixture, attribute)
+        target.write_bytes(canonical({"different-valid-copy": True}))
+        fixture.aq4_bundle_document["artifacts"][artifact_name]["sha256"] = (
+            digest(target.read_bytes())
+        )
+        fixture.aq4_bundle.write_bytes(canonical(fixture.aq4_bundle_document))
+
+    fixture = Fixture(tmp_path, aq4_mutator=mismatch)
+
+    with pytest.raises(
+        FINAL.FinalActivationError,
+        match=f"AQ4 bundle {artifact_name} differs from its authorization",
+    ):
+        fixture.prepare()
+
+
+def test_aq4_release_evidence_must_embed_fresh_cases_and_lifecycle(
+    tmp_path: Path,
+) -> None:
+    def mismatch(fixture: Fixture) -> None:
+        release = json.loads(
+            fixture.aq4_release_evidence.read_text(encoding="ascii")
+        )
+        release["cases"] = [{"case_id": "different-valid-case", "passed": True}]
+        fixture.aq4_release_evidence.write_bytes(canonical(release))
+        fixture.aq4_bundle_document["artifacts"]["release_evidence"][
+            "sha256"
+        ] = digest(fixture.aq4_release_evidence.read_bytes())
+        fixture.aq4_bundle.write_bytes(canonical(fixture.aq4_bundle_document))
+
+    fixture = Fixture(tmp_path, aq4_mutator=mismatch)
+
+    with pytest.raises(
+        FINAL.FinalActivationError,
+        match="release evidence differs from fresh",
+    ):
+        fixture.prepare()
+
+
+@pytest.mark.parametrize("mutation", ["source", "manifest", "worker"])
+def test_aq4_bundle_source_and_identity_must_equal_authorized_before(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    def mismatch(fixture: Fixture) -> None:
+        if mutation == "source":
+            fixture.aq4_bundle_document["source_commit"] = "e" * 40
+            fixture.aq4_bundle_document["active_promotion_source_commit"] = (
+                "e" * 40
+            )
+        else:
+            identity = fixture.aq4_bundle_document["identity"]
+            identity[f"{mutation}_sha256" if mutation == "manifest" else "worker_binary_sha256"] = (
+                "e" * 64
+            )
+        fixture.aq4_bundle.write_bytes(canonical(fixture.aq4_bundle_document))
+
+    fixture = Fixture(tmp_path, aq4_mutator=mismatch)
+
+    with pytest.raises(FINAL.FinalActivationError, match="bundle identity differs"):
+        fixture.prepare()
+
+
+def test_plan_cannot_select_a_different_valid_aq4_bundle(tmp_path: Path) -> None:
+    fixture = Fixture(tmp_path)
+    fixture.prepare()
+    alternate = fixture.aq4_bundle_root / "alternate-valid-bundle-v1.json"
+    alternate.write_bytes(fixture.aq4_bundle.read_bytes())
+    alternate.chmod(0o444)
+    plan = json.loads(fixture.plan.read_text(encoding="ascii"))
+    plan["aq4_release_bundle"]["path"] = os.fspath(alternate)
+    fixture.plan.chmod(0o644)
+    fixture.plan.write_bytes(canonical(plan))
+    fixture.plan.chmod(0o444)
+
+    with pytest.raises(
+        FINAL.FinalActivationError,
+        match="plan path differs from fresh campaign output",
+    ):
+        fixture.load("activate")
+
+
+def test_plan_tampered_aq4_validator_report_hash_is_rejected(
+    tmp_path: Path,
+) -> None:
+    fixture = Fixture(tmp_path)
+    fixture.prepare()
+    plan = json.loads(fixture.plan.read_text(encoding="ascii"))
+    plan["aq4_release_bundle"]["validator_report_sha256"] = "0" * 64
+    fixture.plan.chmod(0o644)
+    fixture.plan.write_bytes(canonical(plan))
+    fixture.plan.chmod(0o444)
+
+    with pytest.raises(
+        FINAL.FinalActivationError,
+        match="AQ4 release bundle validator report changed",
+    ):
+        fixture.load("activate")
 
 
 def test_changed_reviewed_executable_invalidates_plan(tmp_path: Path) -> None:
@@ -1097,6 +1558,57 @@ def test_plan_input_mutation_between_command_boundaries_fails_closed(
     outcome = json.loads(fixture.activation_outcome.read_text(encoding="ascii"))
     assert outcome["status"] == "failed_restore"
     assert outcome["failure_stage"] == "candidate_reconciliation"
+
+
+def test_aq4_bundle_mutation_during_activation_is_detected_and_restores_bytes(
+    tmp_path: Path,
+) -> None:
+    fixture = Fixture(tmp_path)
+    fixture.prepare()
+
+    class MutatingRunner(Runner):
+        def __call__(
+            self,
+            argv: list[str],
+            **kwargs: object,
+        ) -> subprocess.CompletedProcess[str]:
+            completed = super().__call__(argv, **kwargs)
+            if self.stages[-1] == "candidate_reconciliation":
+                fixture.aq4_bundle.chmod(0o644)
+                changed = dict(fixture.aq4_bundle_document)
+                changed["identity"] = dict(changed["identity"])
+                changed["identity"]["tokenizer_sha256"] = "6" * 64
+                fixture.aq4_bundle.write_bytes(canonical(changed))
+                fixture.aq4_bundle.chmod(0o444)
+            return completed
+
+    with pytest.raises(FINAL.FinalActivationError):
+        execute_activation(fixture, MutatingRunner())
+
+    assert fixture.active.read_bytes() == fixture.aq4_raw
+    outcome = json.loads(fixture.activation_outcome.read_text(encoding="ascii"))
+    assert outcome["status"] == "failed_restore"
+    assert outcome["restoration"]["bytes_equal"] is True
+
+
+def test_aq4_bundle_mutation_blocks_manual_rollback_before_active_write(
+    tmp_path: Path,
+) -> None:
+    fixture = Fixture(tmp_path)
+    fixture.prepare()
+    execute_activation(fixture, Runner())
+    fixture.aq4_bundle.chmod(0o644)
+    changed = dict(fixture.aq4_bundle_document)
+    changed["identity"] = dict(changed["identity"])
+    changed["identity"]["tokenizer_sha256"] = "6" * 64
+    fixture.aq4_bundle.write_bytes(canonical(changed))
+    fixture.aq4_bundle.chmod(0o444)
+
+    with pytest.raises(FINAL.FinalActivationError):
+        execute_rollback(fixture, Runner())
+
+    assert fixture.active.read_bytes() == fixture.sq8_raw
+    assert not fixture.rollback_outcome.exists()
 
 
 def test_active_mutation_during_command_is_detected_and_exact_aq4_is_restored(
@@ -1431,6 +1943,8 @@ def test_bundle_validator_reasoning_release_report_must_equal_outcome(
 
     def wrong_report(path: Path) -> dict[str, object]:
         report = fixture.bundle_validator(path)
+        if path == fixture.aq4_bundle:
+            return report
         reasoning_campaign = dict(report["reasoning_release_campaign"])
         reasoning_campaign["run_id"] = "other-run"
         report["reasoning_release_campaign"] = reasoning_campaign

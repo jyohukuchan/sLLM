@@ -50,11 +50,13 @@ from served_model_active_binding import (  # noqa: E402
 )
 
 
-PLAN_SCHEMA = "ullm.served_model.final_activation_plan.v1"
+PLAN_SCHEMA = "ullm.served_model.final_activation_plan.v2"
 OPERATIONS_SCHEMA = "ullm.served_model.final_activation_operations.v1"
 ACTIVATION_OUTCOME_SCHEMA = "ullm.served_model.final_activation_outcome.v1"
 ROLLBACK_OUTCOME_SCHEMA = "ullm.served_model.final_rollback_outcome.v1"
-PREFLIGHT_SCHEMA = "ullm.served_model.final_activation_preflight.v1"
+PREFLIGHT_SCHEMA = "ullm.served_model.final_activation_preflight.v2"
+AQ4_BUNDLE_SCHEMA = "ullm.generic_reasoning_release_bundle.v1"
+AQ4_BUNDLE_VALIDATOR_SCHEMA = "ullm.generic_reasoning_release_bundle_validator.v1"
 BUNDLE_SCHEMA = "ullm.generic_reasoning_release_bundle.v2"
 BUNDLE_VALIDATOR_SCHEMA = "ullm.generic_reasoning_release_bundle_validator.v2"
 SERVED_MODEL_SCHEMA = "ullm.served_model.v2"
@@ -205,6 +207,14 @@ LIVE_PROOF_SPEC_FIELDS = {
 }
 LIVE_PROOF_ENVELOPE_FIELDS = {"reference", "document"}
 ENDPOINT_NAMES = frozenset(LIVE_PROOF_ENDPOINT_FIELDS)
+FINAL_CAMPAIGN_FIELDS = {
+    "aq4_reasoning_release",
+    "aq4_reasoning_browser",
+    "aq4_bundle",
+    "sq8_full",
+    "reasoning_release",
+    "reasoning_browser",
+}
 
 
 class FinalActivationError(RuntimeError):
@@ -223,6 +233,7 @@ class PlanRecord:
     candidate: StableFileSnapshot
     rollback: StableFileSnapshot
     active: StableFileSnapshot
+    aq4_bundle: StableFileSnapshot
     bundle: StableFileSnapshot
     unit: StableFileSnapshot
     environment: StableFileSnapshot
@@ -265,7 +276,7 @@ def _sha256(raw: bytes) -> str:
     return hashlib.sha256(raw).hexdigest()
 
 
-def _canonical_json(value: dict[str, Any]) -> bytes:
+def _canonical_json(value: Any) -> bytes:
     try:
         return (
             json.dumps(
@@ -294,15 +305,19 @@ def _reject_constant(_value: str) -> None:
     fail("JSON contains a non-finite number")
 
 
-def _strict_object(raw: bytes, label: str) -> dict[str, Any]:
+def _strict_json(raw: bytes, label: str) -> Any:
     try:
-        value = json.loads(
+        return json.loads(
             raw.decode("utf-8"),
             object_pairs_hook=_without_duplicates,
             parse_constant=_reject_constant,
         )
     except (UnicodeError, json.JSONDecodeError) as error:
         raise FinalActivationError(f"{label} is not strict JSON") from error
+
+
+def _strict_object(raw: bytes, label: str) -> dict[str, Any]:
+    value = _strict_json(raw, label)
     if not isinstance(value, dict):
         fail(f"{label} root is not an object")
     return value
@@ -1348,6 +1363,7 @@ def _output_inventory(path: Path, *, run_id: str) -> dict[str, Any]:
         selected[path.name] = digest
         inventory = [{"path": path.name, "bytes": size, "sha256": digest}]
         kind = "file"
+        inventory_sha256 = digest
     elif stat.S_ISDIR(metadata.st_mode) and not stat.S_ISLNK(metadata.st_mode):
         inventory = []
         before_root, before_members = _enumerate_output_tree(path)
@@ -1370,6 +1386,7 @@ def _output_inventory(path: Path, *, run_id: str) -> dict[str, Any]:
         if not inventory:
             fail("campaign output directory is empty")
         kind = "directory"
+        inventory_sha256 = _sha256(_canonical_json({"files": inventory}))
     else:
         fail("campaign output has an unsafe type")
     total_bytes = sum(int(item["bytes"]) for item in inventory)
@@ -1379,7 +1396,7 @@ def _output_inventory(path: Path, *, run_id: str) -> dict[str, Any]:
         "run_id": run_id,
         "path": os.fspath(path),
         "kind": kind,
-        "sha256": _sha256(_canonical_json({"files": inventory})),
+        "sha256": inventory_sha256,
         "artifact_count": len(inventory),
         "total_bytes": total_bytes,
         "selected_artifacts": selected,
@@ -1389,6 +1406,12 @@ def _output_inventory(path: Path, *, run_id: str) -> dict[str, Any]:
 def _campaign_outputs_unchanged(
     outcome: dict[str, Any],
 ) -> dict[str, dict[str, Any]]:
+    if (
+        authorization.CAMPAIGN_FIELDS != FINAL_CAMPAIGN_FIELDS
+        or not isinstance(outcome.get("campaigns"), dict)
+        or set(outcome["campaigns"]) != FINAL_CAMPAIGN_FIELDS
+    ):
+        fail("final activation requires all six fresh campaign outputs")
     observed: dict[str, dict[str, Any]] = {}
     for name in sorted(authorization.CAMPAIGN_FIELDS):
         expected = outcome["campaigns"][name]
@@ -1659,6 +1682,253 @@ def _validate_bundle(
     return document, report, _sha256(_canonical_json(report))
 
 
+def _aq4_bundle_snapshot(
+    outputs: dict[str, dict[str, Any]],
+    *,
+    required_uid: int,
+) -> StableFileSnapshot:
+    output = outputs["aq4_bundle"]
+    if output["kind"] != "file":
+        fail("fresh AQ4 bundle campaign output is not a file")
+    path = Path(output["path"])
+    snapshot = _stable(
+        path,
+        "complete AQ4 release bundle",
+        read_only=True,
+        single_link=True,
+    )
+    if (
+        snapshot.identity.uid != required_uid
+        or stat.S_IMODE(snapshot.identity.mode) != 0o444
+        or output["selected_artifacts"].get(path.name) != snapshot.sha256
+    ):
+        fail("fresh AQ4 bundle bytes differ from the campaign outcome")
+    return snapshot
+
+
+def _validate_aq4_bundle(
+    bundle: StableFileSnapshot,
+    *,
+    bundle_validator: BundleValidator,
+) -> tuple[dict[str, Any], dict[str, Any], str]:
+    document = _strict_object(bundle.raw, "AQ4 release bundle")
+    if (
+        document.get("schema_version") != AQ4_BUNDLE_SCHEMA
+        or document.get("status") != "complete"
+        or document.get("production_activation_performed") is not False
+    ):
+        fail("AQ4 release bundle is not a complete unactivated v1 bundle")
+    report = bundle_validator(bundle.path)
+    if (
+        not isinstance(report, dict)
+        or report.get("schema_version") != AQ4_BUNDLE_VALIDATOR_SCHEMA
+        or report.get("input_schema_version") != AQ4_BUNDLE_SCHEMA
+        or report.get("structurally_valid") is not True
+        or report.get("gate_eligible") is not True
+    ):
+        fail("AQ4 release bundle is not production-gate eligible")
+    return document, report, _sha256(_canonical_json(report))
+
+
+def _bind_aq4_bundle_to_campaign_outputs(
+    bundle_path: Path,
+    bundle_document: dict[str, Any],
+    bundle_report: dict[str, Any],
+    outputs: dict[str, dict[str, Any]],
+    authorization_document: dict[str, Any],
+    *,
+    rollback: StableFileSnapshot,
+    rollback_worker: str,
+) -> None:
+    before = authorization_document["before"]
+    aq4_release = authorization_document["aq4_release"]
+    promotion_source = before["promotion_source_commit"]
+    identity = bundle_document.get("identity")
+    if (
+        bundle_document.get("source_commit") != promotion_source
+        or bundle_document.get("active_promotion_source_commit") != promotion_source
+        or aq4_release["source"]["commit"] != promotion_source
+        or bundle_report.get("source_commit") != promotion_source
+        or not isinstance(identity, dict)
+        or identity.get("manifest_sha256") != rollback.sha256
+        or identity.get("worker_binary_sha256") != rollback_worker
+        or identity.get("worker_binary_sha256")
+        != before["worker_binary_sha256"]
+        or identity.get("openwebui_image") != aq4_release["openwebui_image"]
+    ):
+        fail("AQ4 release bundle identity differs from the authorized rollback")
+
+    artifacts = _exact(
+        bundle_document.get("artifacts"),
+        {
+            "release_evidence",
+            "release_validator",
+            "browser_evidence",
+            "browser_validator",
+            "promotion_evidence",
+            "promotion_receipt",
+        },
+        "AQ4 release bundle artifacts",
+    )
+    authorized_components: dict[str, tuple[Path, str | None]] = {
+        "release_evidence": (
+            Path(aq4_release["release_evidence_path"]),
+            None,
+        ),
+        "release_validator": (
+            Path(aq4_release["release_validator_path"]),
+            None,
+        ),
+        "browser_validator": (
+            Path(aq4_release["browser_validator_path"]),
+            None,
+        ),
+        "promotion_evidence": (
+            Path(aq4_release["promotion_evidence"]["path"]),
+            aq4_release["promotion_evidence"]["sha256"],
+        ),
+        "promotion_receipt": (
+            Path(aq4_release["promotion_receipt"]["path"]),
+            aq4_release["promotion_receipt"]["sha256"],
+        ),
+    }
+    for name, (expected_path, expected_sha256) in authorized_components.items():
+        observed_path, observed_sha256 = _resolve_bundle_component(
+            bundle_path,
+            artifacts[name],
+            name,
+        )
+        if observed_path != expected_path or (
+            expected_sha256 is not None
+            and observed_sha256 != expected_sha256
+        ):
+            fail(f"AQ4 bundle {name} differs from its authorization")
+        component_snapshot = _stable(
+            observed_path,
+            f"AQ4 bundle {name}",
+            read_only=True,
+            single_link=True,
+        )
+        if (
+            component_snapshot.identity.uid != rollback.identity.uid
+            or stat.S_IMODE(component_snapshot.identity.mode) != 0o444
+            or component_snapshot.sha256 != observed_sha256
+        ):
+            fail(f"AQ4 bundle {name} is not immutable")
+    if outputs["aq4_reasoning_browser"]["kind"] != "file":
+        fail("fresh AQ4 reasoning browser output is not the evidence file")
+    browser_path = Path(outputs["aq4_reasoning_browser"]["path"])
+    browser_snapshot = _stable(
+        browser_path,
+        "fresh AQ4 reasoning browser evidence",
+        read_only=True,
+        single_link=True,
+    )
+    if (
+        browser_snapshot.identity.uid != rollback.identity.uid
+        or stat.S_IMODE(browser_snapshot.identity.mode) != 0o444
+        or outputs["aq4_reasoning_browser"]["selected_artifacts"].get(
+            browser_path.name
+        )
+        != browser_snapshot.sha256
+    ):
+        fail("fresh AQ4 reasoning browser evidence bytes differ")
+    _require_selected_campaign_artifact(
+        bundle_path=bundle_path,
+        artifacts=artifacts,
+        artifact_name="browser_evidence",
+        output=outputs["aq4_reasoning_browser"],
+    )
+
+    release_output = outputs["aq4_reasoning_release"]
+    if release_output["kind"] != "directory":
+        fail("fresh AQ4 reasoning release output is not a directory")
+    release_root = Path(release_output["path"])
+    try:
+        release_root_metadata = release_root.lstat()
+    except OSError as error:
+        raise FinalActivationError(
+            "fresh AQ4 reasoning release root is unavailable"
+        ) from error
+    if (
+        not stat.S_ISDIR(release_root_metadata.st_mode)
+        or release_root_metadata.st_uid != rollback.identity.uid
+        or stat.S_IMODE(release_root_metadata.st_mode) != 0o555
+    ):
+        fail("fresh AQ4 reasoning release root is not immutable")
+    cases_snapshot = _stable(
+        release_root / "cases.json",
+        "fresh AQ4 reasoning cases",
+        maximum=MAX_OUTPUT_FILE_BYTES,
+        read_only=True,
+        single_link=True,
+    )
+    lifecycle_snapshot = _stable(
+        release_root / "lifecycle.json",
+        "fresh AQ4 reasoning lifecycle",
+        maximum=MAX_OUTPUT_FILE_BYTES,
+        read_only=True,
+        single_link=True,
+    )
+    if any(
+        snapshot.identity.uid != rollback.identity.uid
+        or stat.S_IMODE(snapshot.identity.mode) != 0o444
+        for snapshot in (cases_snapshot, lifecycle_snapshot)
+    ):
+        fail("fresh AQ4 reasoning release files are not immutable")
+    cases = _strict_json(cases_snapshot.raw, "fresh AQ4 reasoning cases")
+    lifecycle = _strict_object(
+        lifecycle_snapshot.raw,
+        "fresh AQ4 reasoning lifecycle",
+    )
+    if not isinstance(cases, list) or not cases:
+        fail("fresh AQ4 reasoning cases are not a nonempty array")
+
+    release = _bundle_json_artifact(
+        bundle_path,
+        artifacts,
+        "release_evidence",
+    )
+    release_identity = release.get("identity")
+    if (
+        release.get("schema_version")
+        != "ullm.generic_reasoning_release_evidence.v1"
+        or release.get("source_commit") != promotion_source
+        or release.get("active_promotion_source_commit") != promotion_source
+        or not isinstance(release_identity, dict)
+        or release_identity != identity
+        or release_identity.get("manifest_sha256") != rollback.sha256
+        or release_identity.get("worker_binary_sha256") != rollback_worker
+        or _canonical_json(release.get("cases")) != _canonical_json(cases)
+        or _canonical_json(release.get("lifecycle")) != _canonical_json(lifecycle)
+    ):
+        fail("AQ4 release evidence differs from fresh authorized campaign output")
+
+
+def _require_authorized_rollback_identity(
+    rollback: StableFileSnapshot,
+    rollback_worker: str,
+    authorization_document: dict[str, Any],
+) -> None:
+    before = authorization_document["before"]
+    rollback_document = _strict_object(
+        rollback.raw,
+        "AQ4 rollback manifest",
+    )
+    promotion = rollback_document.get("promotion")
+    if (
+        before["manifest_sha256"] != rollback.sha256
+        or before["worker_protocol"] != WORKER_PROTOCOL
+        or before["worker_binary_sha256"] != rollback_worker
+        or not isinstance(promotion, dict)
+        or promotion.get("source_commit") != before["promotion_source_commit"]
+        or promotion.get("receipt") != before["promotion_receipt_path"]
+        or promotion.get("receipt_sha256")
+        != before["promotion_receipt_sha256"]
+    ):
+        fail("AQ4 rollback identity differs from campaign authorization")
+
+
 def _load_successful_campaign_outcome(
     authorization_path: Path,
     *,
@@ -1687,7 +1957,14 @@ def _load_successful_campaign_outcome(
             "campaign authorization/outcome validation failed"
         ) from error
     if (
-        outcome["status"] != "succeeded_restored"
+        authorization.AUTHORIZATION_SCHEMA
+        != "ullm.served_model.v2_cross_model_campaign_authorization.v2"
+        or authorization.OUTCOME_SCHEMA
+        != "ullm.served_model.v2_cross_model_campaign_outcome.v2"
+        or record.document.get("schema_version")
+        != authorization.AUTHORIZATION_SCHEMA
+        or outcome.get("schema_version") != authorization.OUTCOME_SCHEMA
+        or outcome["status"] != "succeeded_restored"
         or outcome["failure_stage"] is not None
         or any(value != "passed" for value in outcome["stages"].values())
         or outcome["restoration"]["bytes_equal"] is not True
@@ -1960,11 +2237,10 @@ def prepare_plan(
     if (
         auth["candidate"]["manifest_sha256"] != candidate.sha256
         or auth["candidate"]["worker_binary_sha256"] != candidate_worker
-        or auth["before"]["manifest_sha256"] != rollback.sha256
-        or auth["before"]["worker_binary_sha256"] != rollback_worker
         or outcome["restoration"]["observed_manifest_sha256"] != rollback.sha256
     ):
         fail("candidate/rollback identity differs from campaign authorization")
+    _require_authorized_rollback_identity(rollback, rollback_worker, auth)
 
     unit = _stable(systemd_unit, "systemd unit")
     environment = _stable(environment_file, "systemd environment")
@@ -1973,6 +2249,38 @@ def prepare_plan(
         or environment.sha256 != auth["rollback"]["environment_sha256"]
     ):
         fail("unit/environment identity differs from campaign authorization")
+
+    promotion = candidate_document.get("promotion")
+    if (
+        not isinstance(promotion, dict)
+        or promotion.get("source_commit") != auth["source"]["commit"]
+        or promotion.get("receipt_sha256")
+        != auth["candidate"]["promotion_receipt_sha256"]
+    ):
+        fail("candidate promotion identity differs from authorization")
+
+    outputs = _campaign_outputs_unchanged(outcome)
+    aq4_bundle = _aq4_bundle_snapshot(
+        outputs,
+        required_uid=policy.required_uid,
+    )
+    (
+        aq4_bundle_document,
+        aq4_bundle_report,
+        aq4_bundle_report_sha256,
+    ) = _validate_aq4_bundle(
+        aq4_bundle,
+        bundle_validator=bundle_validator,
+    )
+    _bind_aq4_bundle_to_campaign_outputs(
+        aq4_bundle.path,
+        aq4_bundle_document,
+        aq4_bundle_report,
+        outputs,
+        auth,
+        rollback=rollback,
+        rollback_worker=rollback_worker,
+    )
 
     bundle = _stable(release_bundle, "complete release bundle")
     bundle_document, bundle_report, bundle_report_sha256 = _validate_bundle(
@@ -1992,17 +2300,6 @@ def prepare_plan(
         or rollback_target.get("environment_sha256") != environment.sha256
     ):
         fail("release bundle final-route identity differs")
-
-    promotion = candidate_document.get("promotion")
-    if (
-        not isinstance(promotion, dict)
-        or promotion.get("source_commit") != auth["source"]["commit"]
-        or promotion.get("receipt_sha256")
-        != auth["candidate"]["promotion_receipt_sha256"]
-    ):
-        fail("candidate promotion identity differs from authorization")
-
-    outputs = _campaign_outputs_unchanged(outcome)
     _bind_bundle_to_campaign_outputs(
         bundle.path,
         bundle_document,
@@ -2078,6 +2375,13 @@ def prepare_plan(
             "worker_protocol": WORKER_PROTOCOL,
             "worker_binary_sha256": rollback_worker,
         },
+        "aq4_release_bundle": {
+            "path": os.fspath(aq4_bundle.path),
+            "sha256": aq4_bundle.sha256,
+            "schema_version": AQ4_BUNDLE_SCHEMA,
+            "validator_schema_version": AQ4_BUNDLE_VALIDATOR_SCHEMA,
+            "validator_report_sha256": aq4_bundle_report_sha256,
+        },
         "release_bundle": {
             "path": os.fspath(bundle.path),
             "sha256": bundle.sha256,
@@ -2132,6 +2436,7 @@ def _validate_plan_shape(document: dict[str, Any]) -> None:
             "active_manifest",
             "candidate",
             "rollback",
+            "aq4_release_bundle",
             "release_bundle",
             "campaign",
             "deployment",
@@ -2201,6 +2506,25 @@ def _validate_plan_shape(document: dict[str, Any]) -> None:
         candidate["promotion_receipt_sha256"],
         "candidate.promotion_receipt_sha256",
     )
+    aq4_bundle = _exact(
+        document["aq4_release_bundle"],
+        {
+            "path",
+            "sha256",
+            "schema_version",
+            "validator_schema_version",
+            "validator_report_sha256",
+        },
+        "aq4_release_bundle",
+    )
+    _absolute(aq4_bundle["path"], "aq4_release_bundle", must_exist=True)
+    for field in ("sha256", "validator_report_sha256"):
+        _hash(aq4_bundle[field], f"aq4_release_bundle.{field}")
+    if (
+        aq4_bundle["schema_version"] != AQ4_BUNDLE_SCHEMA
+        or aq4_bundle["validator_schema_version"] != AQ4_BUNDLE_VALIDATOR_SCHEMA
+    ):
+        fail("AQ4 release bundle schema binding differs")
     bundle = _exact(
         document["release_bundle"],
         {
@@ -2244,7 +2568,7 @@ def _validate_plan_shape(document: dict[str, Any]) -> None:
         fail("campaign outcome status binding differs")
     if (
         not isinstance(campaign["outputs"], dict)
-        or set(campaign["outputs"]) != authorization.CAMPAIGN_FIELDS
+        or set(campaign["outputs"]) != FINAL_CAMPAIGN_FIELDS
     ):
         fail("campaign output bindings differ")
     deployment = _exact(
@@ -2506,6 +2830,12 @@ def load_plan(
         or stat.S_IMODE(active.identity.mode) != 0o644
     ):
         fail("actual active manifest metadata differs")
+    aq4_bundle = _stable(
+        Path(document["aq4_release_bundle"]["path"]),
+        "complete AQ4 release bundle",
+        read_only=True,
+        single_link=True,
+    )
     bundle = _stable(
         Path(document["release_bundle"]["path"]),
         "complete release bundle",
@@ -2536,6 +2866,9 @@ def load_plan(
     if (
         candidate.sha256 != document["candidate"]["manifest_sha256"]
         or rollback.sha256 != document["rollback"]["manifest_sha256"]
+        or aq4_bundle.identity.uid != policy.required_uid
+        or stat.S_IMODE(aq4_bundle.identity.mode) != 0o444
+        or aq4_bundle.sha256 != document["aq4_release_bundle"]["sha256"]
         or bundle.sha256 != document["release_bundle"]["sha256"]
         or unit.sha256 != document["deployment"]["systemd_unit_sha256"]
         or environment.sha256 != document["deployment"]["environment_sha256"]
@@ -2567,13 +2900,6 @@ def load_plan(
     ):
         fail("final activation worker identity differs")
 
-    bundle_document, bundle_report, report_sha256 = _validate_bundle(
-        bundle,
-        bundle_validator=bundle_validator,
-    )
-    if report_sha256 != document["release_bundle"]["validator_report_sha256"]:
-        fail("release bundle validator report changed")
-
     record, outcome_snapshot, outcome = _load_successful_campaign_outcome(
         Path(document["campaign"]["authorization_path"]),
         now=now,
@@ -2590,9 +2916,49 @@ def load_plan(
         or record.document["source"] != document["source"]
     ):
         fail("campaign authorization/outcome plan binding differs")
+    _require_authorized_rollback_identity(
+        rollback,
+        rollback_worker,
+        record.document,
+    )
     outputs = _campaign_outputs_unchanged(outcome)
     if outputs != document["campaign"]["outputs"]:
         fail("campaign output plan binding differs")
+    if (
+        aq4_bundle.path != Path(outputs["aq4_bundle"]["path"])
+        or aq4_bundle.sha256
+        != outputs["aq4_bundle"]["selected_artifacts"].get(aq4_bundle.path.name)
+    ):
+        fail("AQ4 release bundle plan path differs from fresh campaign output")
+    (
+        aq4_bundle_document,
+        aq4_bundle_report,
+        aq4_report_sha256,
+    ) = _validate_aq4_bundle(
+        aq4_bundle,
+        bundle_validator=bundle_validator,
+    )
+    if (
+        aq4_report_sha256
+        != document["aq4_release_bundle"]["validator_report_sha256"]
+    ):
+        fail("AQ4 release bundle validator report changed")
+    _bind_aq4_bundle_to_campaign_outputs(
+        aq4_bundle.path,
+        aq4_bundle_document,
+        aq4_bundle_report,
+        outputs,
+        record.document,
+        rollback=rollback,
+        rollback_worker=rollback_worker,
+    )
+
+    bundle_document, bundle_report, report_sha256 = _validate_bundle(
+        bundle,
+        bundle_validator=bundle_validator,
+    )
+    if report_sha256 != document["release_bundle"]["validator_report_sha256"]:
+        fail("release bundle validator report changed")
     _bind_bundle_to_campaign_outputs(
         bundle.path,
         bundle_document,
@@ -2616,6 +2982,7 @@ def load_plan(
         candidate,
         rollback,
         active,
+        aq4_bundle,
         bundle,
         unit,
         environment,
@@ -2675,6 +3042,12 @@ def _repin_plan_inputs(
         read_only=True,
         single_link=True,
     )
+    aq4_bundle = _stable(
+        record.aq4_bundle.path,
+        "complete AQ4 release bundle",
+        read_only=True,
+        single_link=True,
+    )
     bundle = _stable(record.bundle.path, "complete release bundle")
     unit = _stable(record.unit.path, "systemd unit")
     environment = _stable(record.environment.path, "systemd environment")
@@ -2689,6 +3062,7 @@ def _repin_plan_inputs(
         (plan, record.snapshot, "plan"),
         (candidate, record.candidate, "candidate"),
         (rollback, record.rollback, "rollback"),
+        (aq4_bundle, record.aq4_bundle, "AQ4 bundle"),
         (bundle, record.bundle, "bundle"),
         (unit, record.unit, "unit"),
         (environment, record.environment, "environment"),
@@ -2732,13 +3106,6 @@ def _repin_plan_inputs(
         or rollback_worker != record.document["rollback"]["worker_binary_sha256"]
     ):
         fail("worker identity changed during final activation")
-    bundle_document, bundle_report, report_sha256 = _validate_bundle(
-        bundle,
-        bundle_validator=bundle_validator,
-    )
-    if report_sha256 != record.document["release_bundle"]["validator_report_sha256"]:
-        fail("release bundle validation changed during final activation")
-
     campaign_record, outcome_snapshot, outcome = _load_successful_campaign_outcome(
         Path(record.document["campaign"]["authorization_path"]),
         now=now,
@@ -2752,10 +3119,46 @@ def _repin_plan_inputs(
         or outcome != record.campaign_outcome_document
     ):
         fail("campaign authority changed during final activation")
+    _require_authorized_rollback_identity(
+        rollback,
+        rollback_worker,
+        campaign_record.document,
+    )
     _require_restoration_path(outcome, record.active.path)
     outputs = _campaign_outputs_unchanged(outcome)
     if outputs != record.document["campaign"]["outputs"]:
         fail("campaign outputs changed during final activation")
+    if aq4_bundle.path != Path(outputs["aq4_bundle"]["path"]):
+        fail("AQ4 release bundle path changed during final activation")
+    (
+        aq4_bundle_document,
+        aq4_bundle_report,
+        aq4_report_sha256,
+    ) = _validate_aq4_bundle(
+        aq4_bundle,
+        bundle_validator=bundle_validator,
+    )
+    if (
+        aq4_report_sha256
+        != record.document["aq4_release_bundle"]["validator_report_sha256"]
+    ):
+        fail("AQ4 release bundle validation changed during final activation")
+    _bind_aq4_bundle_to_campaign_outputs(
+        aq4_bundle.path,
+        aq4_bundle_document,
+        aq4_bundle_report,
+        outputs,
+        campaign_record.document,
+        rollback=rollback,
+        rollback_worker=rollback_worker,
+    )
+
+    bundle_document, bundle_report, report_sha256 = _validate_bundle(
+        bundle,
+        bundle_validator=bundle_validator,
+    )
+    if report_sha256 != record.document["release_bundle"]["validator_report_sha256"]:
+        fail("release bundle validation changed during final activation")
     _bind_bundle_to_campaign_outputs(
         bundle.path,
         bundle_document,
@@ -2768,6 +3171,7 @@ def _repin_plan_inputs(
     for expected, label, maximum, read_only in (
         (record.candidate, "SQ8 candidate manifest", MAX_MANIFEST_BYTES, False),
         (record.rollback, "AQ4 rollback manifest", MAX_MANIFEST_BYTES, True),
+        (record.aq4_bundle, "complete AQ4 release bundle", MAX_INPUT_BYTES, True),
         (record.bundle, "complete release bundle", MAX_INPUT_BYTES, False),
     ):
         observed = _stable(
@@ -4125,6 +4529,7 @@ def preflight_report(record: PlanRecord, *, action: str) -> dict[str, Any]:
         "active_manifest_sha256": record.active.sha256,
         "candidate_manifest_sha256": record.candidate.sha256,
         "rollback_manifest_sha256": record.rollback.sha256,
+        "aq4_release_bundle_sha256": record.aq4_bundle.sha256,
         "release_bundle_sha256": record.bundle.sha256,
         "campaign_outcome_sha256": record.campaign_outcome.sha256,
         "active_manifest_changed": False,
