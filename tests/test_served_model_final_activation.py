@@ -11,6 +11,7 @@ import time
 from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -75,6 +76,8 @@ class Fixture:
         aq4_mutator: Callable[["Fixture"], None] | None = None,
     ) -> None:
         self.root = tmp_path
+        self.root.mkdir(parents=True, mode=0o700, exist_ok=True)
+        self.root.chmod(0o700)
         self.registry = tmp_path / "registry"
         self.claims = self.registry / "claims"
         self.outcomes = self.registry / "campaign-outcomes"
@@ -110,10 +113,28 @@ class Fixture:
         self.aq4_worker.write_bytes(AQ4_WORKER_RAW)
         self.sq8_worker = self.release_root / "sq8-worker"
         self.sq8_worker.write_bytes(SQ8_WORKER_RAW)
-        self.aq4_promotion_source = (
-            self.release_root / "aq4-promotion-source"
-        )
-        self.aq4_promotion_source.mkdir(mode=0o700)
+        self.aq4_tokenizer = tmp_path / "aq4-tokenizer"
+        self.aq4_tokenizer.mkdir(mode=0o700)
+        self.aq4_tokenizer_file = self.aq4_tokenizer / "tokenizer.json"
+        self.aq4_tokenizer_file.write_bytes(b'{"tokenizer":"aq4"}\n')
+        self.sq8_tokenizer = tmp_path / "sq8-tokenizer"
+        self.sq8_tokenizer.mkdir(mode=0o700)
+        self.sq8_tokenizer_file = self.sq8_tokenizer / "tokenizer.json"
+        self.sq8_tokenizer_file.write_bytes(b'{"tokenizer":"sq8"}\n')
+
+        self.aq4_product = tmp_path / "aq4-product"
+        (self.aq4_product / "package").mkdir(parents=True, mode=0o700)
+        self.aq4_package_manifest = self.aq4_product / "package/manifest.json"
+        self.aq4_package_manifest.write_bytes(b'{"package":"aq4"}\n')
+        self.sq8_product = self.release_root / "sq8-product"
+        (self.sq8_product / "package").mkdir(parents=True, mode=0o700)
+        (self.sq8_product / "artifact").mkdir(mode=0o700)
+        self.sq8_package_manifest = self.sq8_product / "package/manifest.json"
+        self.sq8_package_manifest.write_bytes(b'{"package":"sq8"}\n')
+        self.sq8_artifact_manifest = self.sq8_product / "artifact/manifest.json"
+        self.sq8_artifact_manifest.write_bytes(b'{"artifact":"sq8"}\n')
+
+        self.aq4_promotion_source = self.aq4_product
         self.aq4_source_promotion_evidence = (
             self.aq4_promotion_source / "promotion-evidence.json"
         )
@@ -122,6 +143,7 @@ class Fixture:
                 {
                     "schema_version": "ullm.aq4_resident_promotion_evidence.v1",
                     "source_commit": AQ4_SOURCE_COMMIT,
+                    "worker_binary": os.fspath(self.aq4_worker),
                     "worker_binary_sha256": AQ4_WORKER,
                 }
             )
@@ -134,6 +156,12 @@ class Fixture:
                 {
                     "schema_version": "ullm.aq4_resident_promotion.v1",
                     "source_commit": AQ4_SOURCE_COMMIT,
+                    "evidence": {
+                        "path": self.aq4_source_promotion_evidence.name,
+                        "sha256": digest(
+                            self.aq4_source_promotion_evidence.read_bytes()
+                        ),
+                    },
                 }
             )
         )
@@ -143,13 +171,57 @@ class Fixture:
         self.aq4_bundle_receipt = (
             self.aq4_bundle_root / "promotion-receipt.json"
         )
-        self.receipt = self.release_root / "sq8-promotion-receipt.json"
+        self.sq8_promotion_evidence = (
+            self.sq8_product / "sq8-serving-promotion-evidence.json"
+        )
+        self.sq8_promotion_evidence.write_bytes(
+            canonical(
+                {
+                    "schema_version": "ullm.sq8_serving_promotion_evidence.v1",
+                    "source_commit": SOURCE_COMMIT,
+                    "worker_binary_sha256": SQ8_WORKER,
+                }
+            )
+        )
+        self.receipt = self.sq8_product / "sq8-promotion-receipt.json"
         self.receipt.write_bytes(
-            b'{"schema_version":"ullm.sq8_serving_promotion.v1"}\n'
+            canonical(
+                {
+                    "schema_version": "ullm.sq8_serving_promotion.v1",
+                    "source_commit": SOURCE_COMMIT,
+                    "evidence": {
+                        "path": self.sq8_promotion_evidence.name,
+                        "sha256": digest(self.sq8_promotion_evidence.read_bytes()),
+                    },
+                }
+            )
         )
         self.aq4_raw = canonical(
             {
                 "schema_version": FINAL.SERVED_MODEL_SCHEMA,
+                "tokenizer": {
+                    "root": os.fspath(self.aq4_tokenizer),
+                    "files": {
+                        self.aq4_tokenizer_file.name: digest(
+                            self.aq4_tokenizer_file.read_bytes()
+                        )
+                    },
+                },
+                "worker": {
+                    "protocol": FINAL.WORKER_PROTOCOL,
+                    "binary": os.fspath(self.aq4_worker),
+                    "binary_sha256": AQ4_WORKER,
+                },
+                "product": {
+                    "root": os.fspath(self.aq4_product),
+                    "artifact": None,
+                    "package": {
+                        "manifest_path": "package/manifest.json",
+                        "manifest_sha256": digest(
+                            self.aq4_package_manifest.read_bytes()
+                        ),
+                    },
+                },
                 "promotion": {
                     "source_commit": AQ4_SOURCE_COMMIT,
                     "receipt": os.fspath(self.aq4_receipt),
@@ -160,6 +232,34 @@ class Fixture:
         self.sq8_raw = canonical(
             {
                 "schema_version": FINAL.SERVED_MODEL_SCHEMA,
+                "tokenizer": {
+                    "root": os.fspath(self.sq8_tokenizer),
+                    "files": {
+                        self.sq8_tokenizer_file.name: digest(
+                            self.sq8_tokenizer_file.read_bytes()
+                        )
+                    },
+                },
+                "worker": {
+                    "protocol": FINAL.WORKER_PROTOCOL,
+                    "binary": os.fspath(self.sq8_worker),
+                    "binary_sha256": SQ8_WORKER,
+                },
+                "product": {
+                    "root": os.fspath(self.sq8_product),
+                    "artifact": {
+                        "manifest_path": "artifact/manifest.json",
+                        "manifest_sha256": digest(
+                            self.sq8_artifact_manifest.read_bytes()
+                        ),
+                    },
+                    "package": {
+                        "manifest_path": "package/manifest.json",
+                        "manifest_sha256": digest(
+                            self.sq8_package_manifest.read_bytes()
+                        ),
+                    },
+                },
                 "promotion": {
                     "source_commit": SOURCE_COMMIT,
                     "receipt": os.fspath(self.receipt),
@@ -227,9 +327,7 @@ class Fixture:
                     "commit": AQ4_SOURCE_COMMIT,
                     "tree": AQ4_SOURCE_TREE,
                 },
-                "openwebui_image": (
-                    f"ullm/open-webui@sha256:{'9' * 64}"
-                ),
+                "openwebui_image": AUTH.FIXED_OPENWEBUI_IMAGE,
                 "promotion_evidence": {
                     "source_path": os.fspath(
                         self.aq4_source_promotion_evidence
@@ -345,9 +443,7 @@ class Fixture:
                         "manifest_sha256": digest(self.aq4_raw),
                         "worker_binary_sha256": AQ4_WORKER,
                         "tokenizer_sha256": "8" * 64,
-                        "openwebui_image": (
-                            f"ullm/open-webui@sha256:{'9' * 64}"
-                        ),
+                        "openwebui_image": AUTH.FIXED_OPENWEBUI_IMAGE,
                     },
                     "cases": self.aq4_cases,
                     "lifecycle": self.aq4_lifecycle,
@@ -380,9 +476,7 @@ class Fixture:
                 "manifest_sha256": digest(self.aq4_raw),
                 "worker_binary_sha256": AQ4_WORKER,
                 "tokenizer_sha256": "8" * 64,
-                "openwebui_image": (
-                    f"ullm/open-webui@sha256:{'9' * 64}"
-                ),
+                "openwebui_image": AUTH.FIXED_OPENWEBUI_IMAGE,
             },
             "artifacts": {
                 name: {
@@ -431,7 +525,42 @@ class Fixture:
         browser_evidence.write_bytes(
             canonical(
                 {
-                    "schema_version": "ullm.openwebui.reasoning_browser_smoke.v4",
+                    "schema_version": "ullm.openwebui.reasoning_browser_smoke.v5",
+                    "browser_image": AUTH.FIXED_BROWSER_IMAGE,
+                    "openwebui_server": {
+                        "before": {
+                            "container_id": "1" * 64,
+                            "image_id": AUTH.FIXED_OPENWEBUI_IMAGE.rsplit(
+                                "@",
+                                1,
+                            )[1],
+                            "config_image": AUTH.FIXED_OPENWEBUI_CONFIG_IMAGE,
+                            "name": (
+                                f"/{AUTH.FIXED_OPENWEBUI_CONTAINER_NAME}"
+                            ),
+                            "running": True,
+                            "pid": 1234,
+                            "started_at": (
+                                "2026-07-24T00:00:00.000000000Z"
+                            ),
+                        },
+                        "after": {
+                            "container_id": "1" * 64,
+                            "image_id": AUTH.FIXED_OPENWEBUI_IMAGE.rsplit(
+                                "@",
+                                1,
+                            )[1],
+                            "config_image": AUTH.FIXED_OPENWEBUI_CONFIG_IMAGE,
+                            "name": (
+                                f"/{AUTH.FIXED_OPENWEBUI_CONTAINER_NAME}"
+                            ),
+                            "running": True,
+                            "pid": 1234,
+                            "started_at": (
+                                "2026-07-24T00:00:00.000000000Z"
+                            ),
+                        },
+                    },
                     "campaign_lineage": {
                         "schema_version": "ullm.served_model.campaign_lineage.v2",
                         "claim": self.claim_reference,
@@ -598,7 +727,7 @@ class Fixture:
                 "manifest_sha256": digest(self.sq8_raw),
                 "worker_binary_sha256": SQ8_WORKER,
                 "tokenizer_sha256": "5" * 64,
-                "openwebui_image": f"ghcr.io/open-webui/open-webui@sha256:{'6' * 64}",
+                "openwebui_image": AUTH.FIXED_OPENWEBUI_IMAGE,
             },
             "artifacts": {
                 name: {
@@ -665,6 +794,31 @@ class Fixture:
         self.plan = self.release_root / "final-activation-plan.json"
         self.activation_outcome = self.final_outcomes / "activation-outcome.json"
         self.rollback_outcome = self.final_outcomes / "rollback-outcome.json"
+        for runtime_file in (
+            self.aq4_worker,
+            self.sq8_worker,
+            self.aq4_tokenizer_file,
+            self.sq8_tokenizer_file,
+            self.aq4_package_manifest,
+            self.sq8_package_manifest,
+            self.sq8_artifact_manifest,
+            self.aq4_source_promotion_evidence,
+            self.aq4_receipt,
+            self.sq8_promotion_evidence,
+            self.receipt,
+            self.candidate,
+            self.unit,
+            self.environment,
+        ):
+            runtime_file.chmod(0o644)
+        for runtime_directory in (
+            self.aq4_product,
+            self.aq4_product / "package",
+            self.sq8_product,
+            self.sq8_product / "package",
+            self.sq8_product / "artifact",
+        ):
+            runtime_directory.chmod(0o700)
 
     def manifest_validator(self, path: Path) -> dict[str, object]:
         raw = path.read_bytes()
@@ -913,6 +1067,29 @@ def execute_rollback(fixture: Fixture, runner: Runner) -> object:
     )
 
 
+def damage_campaign_authority(
+    fixture: Fixture,
+    *,
+    target: str,
+    fault: str,
+) -> Path:
+    if target == "authorization":
+        path = fixture.authorization_path
+    elif target == "outcome":
+        path = fixture.campaign_outcome.path
+    else:
+        raise AssertionError(f"unknown campaign authority target: {target}")
+    if fault == "delete":
+        path.unlink()
+    elif fault == "corrupt":
+        path.chmod(0o644)
+        path.write_bytes(canonical({"corrupted": True}))
+        path.chmod(0o444)
+    else:
+        raise AssertionError(f"unknown campaign authority fault: {fault}")
+    return path
+
+
 def test_prepare_preflight_activate_and_manual_rollback(tmp_path: Path) -> None:
     fixture = Fixture(tmp_path)
     document = fixture.prepare()
@@ -966,6 +1143,142 @@ def test_prepare_preflight_activate_and_manual_rollback(tmp_path: Path) -> None:
     assert rollback_document["status"] == "rolled_back"
     assert rollback_document["bytes_equal"] is True
     assert stat.S_IMODE(fixture.rollback_outcome.stat().st_mode) == 0o444
+
+
+@pytest.mark.parametrize("target", ["authorization", "outcome"])
+@pytest.mark.parametrize("fault", ["delete", "corrupt"])
+def test_activation_admission_still_requires_campaign_authority(
+    tmp_path: Path,
+    target: str,
+    fault: str,
+) -> None:
+    fixture = Fixture(tmp_path)
+    fixture.prepare()
+    damaged = damage_campaign_authority(
+        fixture,
+        target=target,
+        fault=fault,
+    )
+    runner = Runner()
+
+    with pytest.raises(FINAL.FinalActivationError):
+        execute_activation(fixture, runner)
+
+    assert fixture.active.read_bytes() == fixture.aq4_raw
+    assert runner.stages == []
+    assert not fixture.activation_outcome.exists()
+    if fault == "delete":
+        assert not damaged.exists()
+    else:
+        assert damaged.read_bytes() == canonical({"corrupted": True})
+
+
+@pytest.mark.parametrize("target", ["authorization", "outcome"])
+@pytest.mark.parametrize("fault", ["delete", "corrupt"])
+def test_manual_rollback_uses_pinned_plan_not_campaign_registry(
+    tmp_path: Path,
+    target: str,
+    fault: str,
+) -> None:
+    fixture = Fixture(tmp_path)
+    fixture.prepare()
+    execute_activation(fixture, Runner())
+    damage_campaign_authority(
+        fixture,
+        target=target,
+        fault=fault,
+    )
+
+    rollback_preflight = fixture.load("rollback")
+    assert rollback_preflight.campaign_outcome is None
+    assert rollback_preflight.campaign_outcome_document is None
+    assert (
+        FINAL.preflight_report(rollback_preflight, action="rollback")[
+            "campaign_outcome_sha256"
+        ]
+        == json.loads(fixture.plan.read_text(encoding="ascii"))["campaign"][
+            "outcome_sha256"
+        ]
+    )
+    result = execute_rollback(fixture, Runner())
+
+    assert result.status == "rolled_back"
+    assert fixture.active.read_bytes() == fixture.aq4_raw
+    outcome = json.loads(fixture.rollback_outcome.read_text(encoding="ascii"))
+    assert outcome["status"] == "rolled_back"
+    assert outcome["bytes_equal"] is True
+
+
+def test_campaign_independent_rollback_rejects_unknown_active_bytes(
+    tmp_path: Path,
+) -> None:
+    fixture = Fixture(tmp_path)
+    fixture.prepare()
+    execute_activation(fixture, Runner())
+    damage_campaign_authority(
+        fixture,
+        target="authorization",
+        fault="delete",
+    )
+    damage_campaign_authority(
+        fixture,
+        target="outcome",
+        fault="delete",
+    )
+    unknown = b'{"unexpected-active":true}\n'
+    fixture.active.write_bytes(unknown)
+    runner = Runner()
+
+    with pytest.raises(FINAL.FinalActivationError, match="input hash"):
+        execute_rollback(fixture, runner)
+
+    assert fixture.active.read_bytes() == unknown
+    assert runner.stages == []
+    assert not fixture.rollback_outcome.exists()
+
+
+@pytest.mark.parametrize("target", ["authorization", "outcome"])
+@pytest.mark.parametrize("fault", ["delete", "corrupt"])
+def test_activation_failure_restore_ignores_lost_campaign_registry_after_swap(
+    tmp_path: Path,
+    target: str,
+    fault: str,
+) -> None:
+    fixture = Fixture(tmp_path)
+    fixture.prepare()
+
+    class CampaignAuthorityFaultRunner(Runner):
+        def __call__(
+            self,
+            argv: list[str],
+            **kwargs: object,
+        ) -> subprocess.CompletedProcess[str]:
+            completed = super().__call__(argv, **kwargs)
+            if self.stages[-1] == "candidate_reconciliation":
+                assert fixture.active.read_bytes() == fixture.sq8_raw
+                damage_campaign_authority(
+                    fixture,
+                    target=target,
+                    fault=fault,
+                )
+            return completed
+
+    runner = CampaignAuthorityFaultRunner()
+    with pytest.raises(FINAL.FinalActivationError):
+        execute_activation(fixture, runner)
+
+    assert fixture.active.read_bytes() == fixture.aq4_raw
+    assert runner.stages == [
+        "candidate_reconciliation",
+        "reverse_reconciliation",
+        "rollback_live_health",
+    ]
+    outcome = json.loads(fixture.activation_outcome.read_text(encoding="ascii"))
+    assert outcome["status"] == "failed_restored"
+    assert outcome["failure_stage"] == "candidate_reconciliation"
+    assert outcome["restoration"]["bytes_equal"] is True
+    assert outcome["restoration"]["reverse_reconciliation_passed"] is True
+    assert outcome["restoration"]["live_health_passed"] is True
 
 
 def test_activation_health_failure_restores_aq4_and_records_outcome(
@@ -1498,7 +1811,7 @@ def test_reviewed_true_cannot_replace_structured_live_health(
 ) -> None:
     fixture = Fixture(tmp_path)
     operations = json.loads(fixture.operations.read_text(encoding="ascii"))
-    true_path = Path("/usr/bin/true")
+    true_path = fixture.executable
     for commands in operations["stages"].values():
         commands[:] = [
             {
@@ -1587,11 +1900,11 @@ def test_aq4_bundle_mutation_during_activation_is_detected_and_restores_bytes(
 
     assert fixture.active.read_bytes() == fixture.aq4_raw
     outcome = json.loads(fixture.activation_outcome.read_text(encoding="ascii"))
-    assert outcome["status"] == "failed_restore"
+    assert outcome["status"] == "failed_restored"
     assert outcome["restoration"]["bytes_equal"] is True
 
 
-def test_aq4_bundle_mutation_blocks_manual_rollback_before_active_write(
+def test_aq4_bundle_mutation_does_not_block_exact_runtime_rollback(
     tmp_path: Path,
 ) -> None:
     fixture = Fixture(tmp_path)
@@ -1604,11 +1917,10 @@ def test_aq4_bundle_mutation_blocks_manual_rollback_before_active_write(
     fixture.aq4_bundle.write_bytes(canonical(changed))
     fixture.aq4_bundle.chmod(0o444)
 
-    with pytest.raises(FINAL.FinalActivationError):
-        execute_rollback(fixture, Runner())
+    result = execute_rollback(fixture, Runner())
 
-    assert fixture.active.read_bytes() == fixture.sq8_raw
-    assert not fixture.rollback_outcome.exists()
+    assert result.status == "rolled_back"
+    assert fixture.active.read_bytes() == fixture.aq4_raw
 
 
 def test_active_mutation_during_command_is_detected_and_exact_aq4_is_restored(
@@ -2001,8 +2313,14 @@ def test_live_proof_is_fresh_and_independently_reobserved(
         },
     )
 
-    def endpoints(name: str, _url: str, *, timeout: float) -> tuple[int, bytes]:
-        del timeout
+    def endpoints(
+        name: str,
+        _url: str,
+        *,
+        timeout: float,
+        required_uid: int,
+    ) -> tuple[int, bytes]:
+        del timeout, required_uid
         if name in {"gateway_models", "openwebui_models"}:
             return 200, canonical({"data": [{"id": FINAL.SQ8_MODEL_ID}]})
         return 200, b"{}\n"
@@ -2017,8 +2335,14 @@ def test_live_proof_is_fresh_and_independently_reobserved(
         10.0,
     )
 
-    def wrong_models(name: str, _url: str, *, timeout: float) -> tuple[int, bytes]:
-        del timeout
+    def wrong_models(
+        name: str,
+        _url: str,
+        *,
+        timeout: float,
+        required_uid: int,
+    ) -> tuple[int, bytes]:
+        del timeout, required_uid
         if name in {"gateway_models", "openwebui_models"}:
             return 200, canonical({"data": [{"id": FINAL.AQ4_MODEL_ID}]})
         return 200, b"{}\n"
@@ -2131,3 +2455,270 @@ def test_wrong_service_and_renamed_interpreter_binary_are_rejected(
     renamed.operations.chmod(0o444)
     with pytest.raises(FINAL.FinalActivationError, match="renamed command wrapper"):
         renamed.prepare()
+
+
+@pytest.mark.parametrize(
+    "target_attribute",
+    [
+        "candidate",
+        "sq8_worker",
+        "receipt",
+        "sq8_artifact_manifest",
+    ],
+)
+def test_candidate_runtime_swap_and_exact_restore_is_detected(
+    tmp_path: Path,
+    target_attribute: str,
+) -> None:
+    fixture = Fixture(tmp_path)
+    fixture.prepare()
+    target = getattr(fixture, target_attribute)
+
+    class SwapAndRestoreRunner(Runner):
+        def __call__(
+            self,
+            argv: list[str],
+            **kwargs: object,
+        ) -> subprocess.CompletedProcess[str]:
+            completed = super().__call__(argv, **kwargs)
+            if self.stages[-1] == "candidate_reconciliation":
+                held = target.with_name(f".{target.name}.held")
+                target.rename(held)
+                target.write_bytes(b"attacker-controlled-runtime\n")
+                target.unlink()
+                held.rename(target)
+            return completed
+
+    with pytest.raises(FINAL.FinalActivationError):
+        execute_activation(fixture, SwapAndRestoreRunner())
+
+    assert fixture.active.read_bytes() == fixture.aq4_raw
+    outcome = json.loads(fixture.activation_outcome.read_text(encoding="ascii"))
+    assert outcome["status"] == "failed_restored"
+    assert outcome["failure_stage"] == "candidate_reconciliation"
+
+
+def test_changed_aq4_worker_blocks_unsafe_manifest_restoration(
+    tmp_path: Path,
+) -> None:
+    fixture = Fixture(tmp_path)
+    fixture.prepare()
+
+    class ReplaceAQ4AndFailRunner(Runner):
+        def __call__(
+            self,
+            argv: list[str],
+            **kwargs: object,
+        ) -> subprocess.CompletedProcess[str]:
+            completed = super().__call__(argv, **kwargs)
+            if self.stages[-1] == "candidate_live_health":
+                fixture.aq4_worker.write_bytes(b"attacker-aq4-worker\n")
+                return subprocess.CompletedProcess(argv, 23, "", "")
+            return completed
+
+    with pytest.raises(FINAL.FinalActivationError):
+        execute_activation(fixture, ReplaceAQ4AndFailRunner())
+
+    assert fixture.active.read_bytes() == fixture.sq8_raw
+    outcome = json.loads(fixture.activation_outcome.read_text(encoding="ascii"))
+    assert outcome["status"] == "failed_restore"
+    assert outcome["stages"]["aq4_restore"] == "failed"
+
+
+def test_manual_rollback_survives_missing_sq8_runtime_and_evidence(
+    tmp_path: Path,
+) -> None:
+    fixture = Fixture(tmp_path)
+    candidate_executable = fixture.release_root / "candidate-operation"
+    candidate_executable.write_bytes(fixture.executable.read_bytes())
+    candidate_executable.chmod(0o755)
+    operations = json.loads(fixture.operations.read_text(encoding="ascii"))
+    for stage in ("candidate_reconciliation", "candidate_live_health"):
+        operations["stages"][stage][0] = {
+            "argv": [os.fspath(candidate_executable), stage],
+            "executable_sha256": digest(candidate_executable.read_bytes()),
+        }
+    fixture.operations.chmod(0o644)
+    fixture.operations.write_bytes(canonical(operations))
+    fixture.operations.chmod(0o444)
+    fixture.prepare()
+    execute_activation(fixture, Runner())
+
+    for path in (
+        fixture.candidate,
+        fixture.sq8_worker,
+        fixture.receipt,
+        fixture.sq8_promotion_evidence,
+        fixture.bundle,
+        candidate_executable,
+    ):
+        path.unlink()
+
+    result = execute_rollback(fixture, Runner())
+    assert result.status == "rolled_back"
+    assert fixture.active.read_bytes() == fixture.aq4_raw
+
+
+@pytest.mark.parametrize("unsafe_kind", ["ancestor", "setid"])
+def test_reviewed_executable_runtime_metadata_is_sealed(
+    tmp_path: Path,
+    unsafe_kind: str,
+) -> None:
+    fixture = Fixture(tmp_path)
+    executable = fixture.executable
+    if unsafe_kind == "ancestor":
+        unsafe = fixture.root / "unsafe-executable-parent"
+        unsafe.mkdir(mode=0o770)
+        unsafe.chmod(0o770)
+        executable = unsafe / "reviewed-operation"
+        executable.write_bytes(fixture.executable.read_bytes())
+        executable.chmod(0o755)
+    else:
+        executable.chmod(0o4755)
+    operations = json.loads(fixture.operations.read_text(encoding="ascii"))
+    for commands in operations["stages"].values():
+        commands[0]["argv"][0] = os.fspath(executable)
+        commands[0]["executable_sha256"] = digest(executable.read_bytes())
+    fixture.operations.chmod(0o644)
+    fixture.operations.write_bytes(canonical(operations))
+    fixture.operations.chmod(0o444)
+
+    with pytest.raises(FINAL.FinalActivationError, match="runtime artifact"):
+        fixture.prepare()
+
+
+def test_double_slash_runtime_destination_alias_is_rejected(tmp_path: Path) -> None:
+    fixture = Fixture(tmp_path)
+    operations = json.loads(fixture.operations.read_text(encoding="ascii"))
+    original = operations["live_proofs"]["rollback_live_health"]["path"]
+    operations["live_proofs"]["rollback_live_health"]["path"] = (
+        f"//{original.lstrip('/')}"
+    )
+    fixture.operations.chmod(0o644)
+    fixture.operations.write_bytes(canonical(operations))
+    fixture.operations.chmod(0o444)
+
+    with pytest.raises(FINAL.FinalActivationError, match="lexically canonical"):
+        fixture.prepare()
+
+
+@pytest.mark.parametrize(
+    ("kind", "uid", "gid", "mode", "seal_uid"),
+    [
+        ("api", 0, 1000, 0o640, 0),
+        ("jwt", 1000, 1000, 0o600, 1000),
+    ],
+)
+def test_runtime_secret_fixed_private_metadata_is_accepted(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    kind: str,
+    uid: int,
+    gid: int,
+    mode: int,
+    seal_uid: int,
+) -> None:
+    api_path = tmp_path / "api-key"
+    jwt_path = tmp_path / "session.jwt"
+    monkeypatch.setattr(FINAL.campaign_plan, "API_KEY_FILE", api_path)
+    monkeypatch.setattr(
+        FINAL.campaign_plan,
+        "OPENWEBUI_SESSION_TOKEN_FILE",
+        jwt_path,
+    )
+    selected = api_path if kind == "api" else jwt_path
+
+    def capture(
+        path: Path,
+        *,
+        label: str,
+        maximum: int,
+        required_uid: int,
+    ) -> object:
+        del label, maximum
+        assert path == selected
+        assert required_uid == seal_uid
+        identity = FINAL.runtime_seal.FileIdentity(
+            1,
+            2,
+            stat.S_IFREG | mode,
+            1,
+            uid,
+            gid,
+            13,
+            1,
+            1,
+        )
+        return SimpleNamespace(
+            snapshot=FINAL.StableFileSnapshot(
+                selected,
+                b"fixture-token\n",
+                digest(b"fixture-token\n"),
+                identity,
+            )
+        )
+
+    monkeypatch.setattr(FINAL, "_capture_runtime_artifact", capture)
+    secret = FINAL._read_runtime_secret(
+        selected,
+        "credential",
+        required_uid=0,
+    )
+    assert bytes(secret) == b"fixture-token"
+
+
+@pytest.mark.parametrize(
+    ("kind", "uid", "gid", "mode"),
+    [
+        ("api", 0, 0, 0o640),
+        ("api", 0, 1000, 0o600),
+        ("jwt", 0, 1000, 0o600),
+        ("jwt", 1000, 1000, 0o640),
+    ],
+)
+def test_runtime_secret_wrong_metadata_is_rejected(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    kind: str,
+    uid: int,
+    gid: int,
+    mode: int,
+) -> None:
+    api_path = tmp_path / "api-key"
+    jwt_path = tmp_path / "session.jwt"
+    monkeypatch.setattr(FINAL.campaign_plan, "API_KEY_FILE", api_path)
+    monkeypatch.setattr(
+        FINAL.campaign_plan,
+        "OPENWEBUI_SESSION_TOKEN_FILE",
+        jwt_path,
+    )
+    selected = api_path if kind == "api" else jwt_path
+
+    def capture(*_args: object, **_kwargs: object) -> object:
+        identity = FINAL.runtime_seal.FileIdentity(
+            1,
+            2,
+            stat.S_IFREG | mode,
+            1,
+            uid,
+            gid,
+            6,
+            1,
+            1,
+        )
+        return SimpleNamespace(
+            snapshot=FINAL.StableFileSnapshot(
+                selected,
+                b"token\n",
+                digest(b"token\n"),
+                identity,
+            )
+        )
+
+    monkeypatch.setattr(FINAL, "_capture_runtime_artifact", capture)
+    with pytest.raises(FINAL.FinalActivationError, match="private metadata"):
+        FINAL._read_runtime_secret(
+            selected,
+            "credential",
+            required_uid=0,
+        )

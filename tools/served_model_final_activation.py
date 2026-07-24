@@ -43,6 +43,7 @@ if os.fspath(TOOLS) not in sys.path:
 
 import served_model_campaign_authorization as authorization  # noqa: E402
 import served_model_campaign_plan as campaign_plan  # noqa: E402
+import served_model_campaign_runtime_seal as runtime_seal  # noqa: E402
 from served_model_active_binding import (  # noqa: E402
     MAX_MANIFEST_BYTES,
     StableFileSnapshot,
@@ -233,12 +234,29 @@ class PlanRecord:
     candidate: StableFileSnapshot
     rollback: StableFileSnapshot
     active: StableFileSnapshot
-    aq4_bundle: StableFileSnapshot
-    bundle: StableFileSnapshot
+    aq4_bundle: StableFileSnapshot | None
+    bundle: StableFileSnapshot | None
     unit: StableFileSnapshot
     environment: StableFileSnapshot
-    campaign_outcome: authorization.FileSnapshot
-    campaign_outcome_document: dict[str, Any]
+    campaign_outcome: authorization.FileSnapshot | None
+    campaign_outcome_document: dict[str, Any] | None
+    candidate_runtime: "ManifestRuntimeSeals | None"
+    rollback_runtime: "ManifestRuntimeSeals"
+    shared_runtime_artifacts: tuple[runtime_seal.RuntimeArtifactSeal, ...]
+    candidate_operation_artifacts: tuple[runtime_seal.RuntimeArtifactSeal, ...]
+    rollback_operation_artifacts: tuple[runtime_seal.RuntimeArtifactSeal, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class ManifestRuntimeSeals:
+    """Every named file/tree that one served-model worker may consume."""
+
+    manifest: runtime_seal.RuntimeArtifactSeal
+    worker: runtime_seal.RuntimeArtifactSeal
+    promotion_receipt: runtime_seal.RuntimeArtifactSeal
+    promotion_evidence: runtime_seal.RuntimeArtifactSeal
+    artifacts: tuple[runtime_seal.RuntimeArtifactSeal, ...]
+    trees: tuple[runtime_seal.RuntimeTreeSeal, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -380,7 +398,10 @@ def _absolute(path_value: Any, label: str, *, must_exist: bool) -> Path:
         fail(f"{label} path is invalid")
     path = Path(path_value)
     if (
-        not path.is_absolute()
+        os.fspath(path) != path_value
+        or not path.is_absolute()
+        or path.anchor != "/"
+        or path_value.startswith("//")
         or Path(os.path.abspath(path)) != path
         or path.name in {"", ".", ".."}
         or ".." in path.parts
@@ -443,6 +464,383 @@ def _stable(
         )
     except Exception as error:
         raise FinalActivationError(f"{label} is unavailable or changed") from error
+
+
+def _runtime_path(
+    value: Any,
+    *,
+    base: Path,
+    label: str,
+    relative_only: bool = False,
+) -> Path:
+    if (
+        not isinstance(value, str)
+        or not value
+        or "\x00" in value
+        or len(value.encode("utf-8")) > 4_096
+    ):
+        fail(f"{label} path is invalid")
+    selected = Path(value)
+    if os.fspath(selected) != value or any(
+        component in {"", ".", ".."} for component in selected.parts
+    ):
+        fail(f"{label} path is not lexical")
+    if relative_only:
+        if selected.is_absolute():
+            fail(f"{label} path is not relative")
+        selected = base / selected
+    elif not selected.is_absolute():
+        selected = base / selected
+    try:
+        return runtime_seal._lexical_absolute(selected)
+    except runtime_seal.RuntimeArtifactSealError as error:
+        raise FinalActivationError(
+            f"{label} path is not lexical absolute"
+        ) from error
+
+
+def _capture_runtime_artifact(
+    path: Path,
+    *,
+    label: str,
+    maximum: int,
+    required_uid: int,
+) -> runtime_seal.RuntimeArtifactSeal:
+    try:
+        return runtime_seal.capture_runtime_artifact_seal(
+            path,
+            label=label,
+            maximum=maximum,
+            required_uid=required_uid,
+        )
+    except runtime_seal.RuntimeArtifactSealError as error:
+        raise FinalActivationError(
+            f"{label} runtime artifact is not sealed"
+        ) from error
+
+
+def _capture_runtime_tree(
+    path: Path,
+    *,
+    label: str,
+    required_uid: int,
+) -> runtime_seal.RuntimeTreeSeal:
+    try:
+        return runtime_seal.capture_runtime_tree_seal(
+            path,
+            label=label,
+            required_uid=required_uid,
+        )
+    except runtime_seal.RuntimeArtifactSealError as error:
+        raise FinalActivationError(
+            f"{label} runtime tree is not sealed"
+        ) from error
+
+
+def _capture_manifest_runtime_seals(
+    manifest: StableFileSnapshot,
+    document: dict[str, Any],
+    *,
+    label: str,
+    required_uid: int,
+) -> ManifestRuntimeSeals:
+    """Capture a non-empty exact-file and recursive runtime closure."""
+
+    worker = document.get("worker")
+    tokenizer = document.get("tokenizer")
+    product = document.get("product")
+    promotion = document.get("promotion")
+    if not all(
+        isinstance(value, dict)
+        for value in (worker, tokenizer, product, promotion)
+    ):
+        fail(f"{label} runtime contract is incomplete")
+    assert isinstance(worker, dict)
+    assert isinstance(tokenizer, dict)
+    assert isinstance(product, dict)
+    assert isinstance(promotion, dict)
+
+    manifest_seal = _capture_runtime_artifact(
+        manifest.path,
+        label=f"{label} manifest",
+        maximum=MAX_MANIFEST_BYTES,
+        required_uid=required_uid,
+    )
+    if (
+        manifest_seal.snapshot.raw != manifest.raw
+        or manifest_seal.snapshot.identity != manifest.identity
+    ):
+        fail(f"{label} manifest runtime seal differs")
+
+    worker_path = _runtime_path(
+        worker.get("binary"),
+        base=manifest.path.parent,
+        label=f"{label} worker",
+    )
+    worker_seal = _capture_runtime_artifact(
+        worker_path,
+        label=f"{label} worker binary",
+        maximum=MAX_OUTPUT_FILE_BYTES,
+        required_uid=required_uid,
+    )
+    if worker_seal.snapshot.sha256 != _hash(
+        worker.get("binary_sha256"),
+        f"{label} worker binary SHA-256",
+    ):
+        fail(f"{label} worker runtime bytes differ")
+
+    product_root = _runtime_path(
+        product.get("root"),
+        base=manifest.path.parent,
+        label=f"{label} product root",
+    )
+    receipt_path = _runtime_path(
+        promotion.get("receipt"),
+        base=manifest.path.parent,
+        label=f"{label} promotion receipt",
+    )
+    try:
+        receipt_path.relative_to(product_root)
+    except ValueError:
+        fail(f"{label} promotion receipt is outside the product root")
+    receipt_seal = _capture_runtime_artifact(
+        receipt_path,
+        label=f"{label} promotion receipt",
+        maximum=MAX_INPUT_BYTES,
+        required_uid=required_uid,
+    )
+    if receipt_seal.snapshot.sha256 != _hash(
+        promotion.get("receipt_sha256"),
+        f"{label} promotion receipt SHA-256",
+    ):
+        fail(f"{label} promotion receipt bytes differ")
+    receipt_document = _strict_object(
+        receipt_seal.snapshot.raw,
+        f"{label} promotion receipt",
+    )
+    evidence_reference = _exact(
+        receipt_document.get("evidence"),
+        {"path", "sha256"},
+        f"{label} promotion evidence reference",
+    )
+    evidence_path = _runtime_path(
+        evidence_reference["path"],
+        base=receipt_path.parent,
+        label=f"{label} promotion evidence",
+        relative_only=True,
+    )
+    try:
+        evidence_path.relative_to(product_root)
+    except ValueError:
+        fail(f"{label} promotion evidence is outside the product root")
+    evidence_seal = _capture_runtime_artifact(
+        evidence_path,
+        label=f"{label} promotion evidence",
+        maximum=MAX_INPUT_BYTES,
+        required_uid=required_uid,
+    )
+    if evidence_seal.snapshot.sha256 != _hash(
+        evidence_reference["sha256"],
+        f"{label} promotion evidence SHA-256",
+    ):
+        fail(f"{label} promotion evidence bytes differ")
+
+    package = product.get("package")
+    artifact = product.get("artifact")
+    if not isinstance(package, dict) or (
+        artifact is not None and not isinstance(artifact, dict)
+    ):
+        fail(f"{label} product contract differs")
+    declared_files: list[tuple[Path, str, int, str]] = [
+        (
+            _runtime_path(
+                package.get("manifest_path"),
+                base=product_root,
+                label=f"{label} package manifest",
+                relative_only=True,
+            ),
+            f"{label} package manifest",
+            MAX_INPUT_BYTES,
+            _hash(
+                package.get("manifest_sha256"),
+                f"{label} package manifest SHA-256",
+            ),
+        ),
+    ]
+    if isinstance(artifact, dict):
+        declared_files.append(
+            (
+                _runtime_path(
+                    artifact.get("manifest_path"),
+                    base=product_root,
+                    label=f"{label} artifact manifest",
+                    relative_only=True,
+                ),
+                f"{label} artifact manifest",
+                MAX_INPUT_BYTES,
+                _hash(
+                    artifact.get("manifest_sha256"),
+                    f"{label} artifact manifest SHA-256",
+                ),
+            )
+        )
+
+    tokenizer_root = _runtime_path(
+        tokenizer.get("root"),
+        base=manifest.path.parent,
+        label=f"{label} tokenizer root",
+    )
+    tokenizer_files = tokenizer.get("files")
+    if (
+        not isinstance(tokenizer_files, dict)
+        or not tokenizer_files
+        or len(tokenizer_files) > 128
+    ):
+        fail(f"{label} tokenizer file contract differs")
+    for relative, expected_hash in sorted(
+        tokenizer_files.items(),
+        key=lambda item: os.fsencode(str(item[0])),
+    ):
+        if not isinstance(relative, str):
+            fail(f"{label} tokenizer path is invalid")
+        declared_files.append(
+            (
+                _runtime_path(
+                    relative,
+                    base=tokenizer_root,
+                    label=f"{label} tokenizer file",
+                    relative_only=True,
+                ),
+                f"{label} tokenizer file {relative}",
+                MAX_OUTPUT_FILE_BYTES,
+                _hash(
+                    expected_hash,
+                    f"{label} tokenizer file {relative} SHA-256",
+                ),
+            )
+        )
+    all_paths = [
+        manifest.path,
+        worker_path,
+        receipt_path,
+        evidence_path,
+        *(path for path, _name, _maximum, _hash_value in declared_files),
+    ]
+    if len(set(all_paths)) != len(all_paths):
+        fail(f"{label} runtime file paths are not distinct")
+
+    declared_seals: list[runtime_seal.RuntimeArtifactSeal] = []
+    for path, file_label, maximum, expected_hash in declared_files:
+        sealed = _capture_runtime_artifact(
+            path,
+            label=file_label,
+            maximum=maximum,
+            required_uid=required_uid,
+        )
+        if sealed.snapshot.sha256 != expected_hash:
+            fail(f"{file_label} runtime bytes differ")
+        declared_seals.append(sealed)
+    trees = (
+        _capture_runtime_tree(
+            tokenizer_root,
+            label=f"{label} tokenizer",
+            required_uid=required_uid,
+        ),
+        _capture_runtime_tree(
+            product_root,
+            label=f"{label} product",
+            required_uid=required_uid,
+        ),
+    )
+    result = ManifestRuntimeSeals(
+        manifest=manifest_seal,
+        worker=worker_seal,
+        promotion_receipt=receipt_seal,
+        promotion_evidence=evidence_seal,
+        artifacts=(
+            manifest_seal,
+            worker_seal,
+            receipt_seal,
+            evidence_seal,
+            *declared_seals,
+        ),
+        trees=trees,
+    )
+    _require_manifest_runtime_seals(result, required_uid=required_uid)
+    return result
+
+
+def _require_artifact_seals(
+    artifacts: tuple[runtime_seal.RuntimeArtifactSeal, ...],
+    *,
+    required_uid: int,
+) -> None:
+    if not artifacts:
+        fail("runtime artifact seal collection is empty")
+    try:
+        for sealed in artifacts:
+            runtime_seal.require_runtime_artifact_seal(
+                sealed,
+                required_uid=required_uid,
+            )
+    except runtime_seal.RuntimeArtifactSealError as error:
+        raise FinalActivationError(
+            "final activation runtime artifact seal changed"
+        ) from error
+
+
+def _require_manifest_runtime_seals(
+    sealed: ManifestRuntimeSeals,
+    *,
+    required_uid: int,
+) -> None:
+    _require_artifact_seals(sealed.artifacts, required_uid=required_uid)
+    if not sealed.trees:
+        fail("runtime tree seal collection is empty")
+    try:
+        for tree in sealed.trees:
+            runtime_seal.require_runtime_tree_seal(
+                tree,
+                required_uid=required_uid,
+            )
+    except runtime_seal.RuntimeArtifactSealError as error:
+        raise FinalActivationError(
+            "final activation runtime tree seal changed"
+        ) from error
+
+
+def _require_record_runtime_seals(
+    record: PlanRecord,
+    *,
+    required_uid: int,
+    scope: str,
+) -> None:
+    if scope not in {"all", "rollback", "rollback_core"}:
+        fail("runtime seal scope is invalid")
+    if scope != "rollback_core":
+        _require_artifact_seals(
+            record.shared_runtime_artifacts,
+            required_uid=required_uid,
+        )
+        _require_artifact_seals(
+            record.rollback_operation_artifacts,
+            required_uid=required_uid,
+        )
+    _require_manifest_runtime_seals(
+        record.rollback_runtime,
+        required_uid=required_uid,
+    )
+    if scope == "all":
+        if record.candidate_runtime is None:
+            fail("candidate runtime seal collection is unavailable")
+        _require_manifest_runtime_seals(
+            record.candidate_runtime,
+            required_uid=required_uid,
+        )
+        _require_artifact_seals(
+            record.candidate_operation_artifacts,
+            required_uid=required_uid,
+        )
 
 
 def _load_module(name: str, path: Path) -> ModuleType:
@@ -542,6 +940,7 @@ def _operation_document(
     *,
     required_uid: int,
     verify_executables: bool,
+    executable_stages: set[str] | None = None,
 ) -> dict[str, Any]:
     if (
         stat.S_IMODE(snapshot.identity.mode) != 0o444
@@ -623,6 +1022,9 @@ def _operation_document(
     stages = _exact(document["stages"], OPERATION_STAGES, "operations.stages")
     disallowed_hashes = _disallowed_executable_hashes()
     for stage, commands in stages.items():
+        verify_stage = verify_executables and (
+            executable_stages is None or stage in executable_stages
+        )
         if (
             not isinstance(commands, list)
             or not commands
@@ -652,7 +1054,7 @@ def _operation_document(
             executable = _absolute(
                 argv[0],
                 f"operations.{stage}[{index}].argv[0]",
-                must_exist=True,
+                must_exist=verify_stage,
             )
             if executable.name in DISALLOWED_COMMAND_EXECUTABLES:
                 fail(f"operations.{stage}[{index}] uses a shell or interpreter wrapper")
@@ -662,7 +1064,7 @@ def _operation_document(
             )
             if expected in disallowed_hashes:
                 fail(f"operations.{stage}[{index}] pins a renamed command wrapper")
-            if verify_executables:
+            if verify_stage:
                 executable_snapshot = _stable(
                     executable,
                     f"operations executable {stage}[{index}]",
@@ -682,6 +1084,40 @@ def _operation_document(
                 ):
                     fail(f"operations executable {stage}[{index}] differs")
     return document
+
+
+def _capture_operation_executable_seals(
+    operations: dict[str, Any],
+    *,
+    required_uid: int,
+    stages: set[str],
+) -> tuple[runtime_seal.RuntimeArtifactSeal, ...]:
+    expected_by_path: dict[Path, str] = {}
+    labels: dict[Path, str] = {}
+    for stage in sorted(operations["stages"]):
+        if stage not in stages:
+            continue
+        for index, command in enumerate(operations["stages"][stage]):
+            path = Path(command["argv"][0])
+            expected = command["executable_sha256"]
+            previous = expected_by_path.setdefault(path, expected)
+            if previous != expected:
+                fail("reviewed executable path has conflicting SHA-256 values")
+            labels.setdefault(path, f"operations executable {stage}[{index}]")
+    if not expected_by_path:
+        fail("reviewed executable runtime seal collection is empty")
+    result: list[runtime_seal.RuntimeArtifactSeal] = []
+    for path in sorted(expected_by_path, key=os.fsencode):
+        sealed = _capture_runtime_artifact(
+            path,
+            label=labels[path],
+            maximum=MAX_INPUT_BYTES,
+            required_uid=required_uid,
+        )
+        if sealed.snapshot.sha256 != expected_by_path[path]:
+            fail(f"{labels[path]} runtime bytes differ")
+        result.append(sealed)
+    return tuple(result)
 
 
 def _positive_int(value: Any, label: str, *, allow_zero: bool = False) -> int:
@@ -1091,17 +1527,51 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
-def _read_runtime_secret(path: Path, label: str) -> bytearray:
-    snapshot = _stable(
+def _runtime_secret_seal(
+    path: Path,
+    label: str,
+    *,
+    required_uid: int,
+) -> runtime_seal.RuntimeArtifactSeal:
+    if path == campaign_plan.API_KEY_FILE:
+        expected_mode = 0o640
+        expected_uid = 0
+        expected_gid = 1000
+    elif path == campaign_plan.OPENWEBUI_SESSION_TOKEN_FILE:
+        expected_mode = 0o600
+        expected_uid = 1000
+        expected_gid = 1000
+    else:
+        fail(f"{label} path differs from the fixed credential policy")
+    sealed = _capture_runtime_artifact(
+        path,
+        label=label,
+        maximum=65_536,
+        required_uid=expected_uid,
+    )
+    snapshot = sealed.snapshot
+    if (
+        stat.S_IMODE(snapshot.identity.mode) != expected_mode
+        or snapshot.identity.uid != expected_uid
+        or snapshot.identity.links != 1
+        or (expected_gid is not None and snapshot.identity.gid != expected_gid)
+    ):
+        fail(f"{label} private metadata differs")
+    return sealed
+
+
+def _read_runtime_secret(
+    path: Path,
+    label: str,
+    *,
+    required_uid: int,
+) -> bytearray:
+    sealed = _runtime_secret_seal(
         path,
         label,
-        maximum=65_536,
-        read_only=True,
-        single_link=True,
+        required_uid=required_uid,
     )
-    if snapshot.identity.uid != 0:
-        fail(f"{label} owner differs")
-    value = bytearray(snapshot.raw.strip())
+    value = bytearray(sealed.snapshot.raw.strip())
     if (
         not value
         or len(value) > 16_384
@@ -1113,11 +1583,47 @@ def _read_runtime_secret(path: Path, label: str) -> bytearray:
     return value
 
 
+def _capture_live_credential_seals(
+    *,
+    required_uid: int,
+) -> tuple[runtime_seal.RuntimeArtifactSeal, ...]:
+    return (
+        _runtime_secret_seal(
+            campaign_plan.API_KEY_FILE,
+            "gateway API key",
+            required_uid=required_uid,
+        ),
+        _runtime_secret_seal(
+            campaign_plan.OPENWEBUI_SESSION_TOKEN_FILE,
+            "OpenWebUI session token",
+            required_uid=required_uid,
+        ),
+    )
+
+
+def _require_live_credential_seals(
+    sealed: tuple[runtime_seal.RuntimeArtifactSeal, ...],
+) -> None:
+    if len(sealed) != 2:
+        fail("live credential runtime seal collection differs")
+    try:
+        for artifact in sealed:
+            runtime_seal.require_runtime_artifact_seal(
+                artifact,
+                required_uid=artifact.required_uid,
+            )
+    except runtime_seal.RuntimeArtifactSealError as error:
+        raise FinalActivationError(
+            "live credential runtime seal changed"
+        ) from error
+
+
 def _endpoint_live_state(
     name: str,
     url: str,
     *,
     timeout: float,
+    required_uid: int,
 ) -> tuple[int, bytes]:
     secret: bytearray | None = None
     headers = {"Accept": "application/json", "Connection": "close"}
@@ -1125,11 +1631,13 @@ def _endpoint_live_state(
         secret = _read_runtime_secret(
             campaign_plan.API_KEY_FILE,
             "gateway API key",
+            required_uid=required_uid,
         )
     elif name == "openwebui_models":
         secret = _read_runtime_secret(
             campaign_plan.OPENWEBUI_SESSION_TOKEN_FILE,
             "OpenWebUI session token",
+            required_uid=required_uid,
         )
     if secret is not None:
         try:
@@ -1223,6 +1731,7 @@ def default_live_state_verifier(
             name,
             endpoint_urls[name],
             timeout=min(timeout, 10.0),
+            required_uid=record.snapshot.identity.uid,
         )
         expected = document["endpoints"][name]
         if status != expected["status"]:
@@ -2218,6 +2727,23 @@ def prepare_plan(
         or rollback_document.get("schema_version") != SERVED_MODEL_SCHEMA
     ):
         fail("final route requires v2 candidate and rollback manifests")
+    candidate_runtime = _capture_manifest_runtime_seals(
+        candidate,
+        candidate_document,
+        label="SQ8 candidate",
+        required_uid=policy.required_uid,
+    )
+    rollback_runtime = _capture_manifest_runtime_seals(
+        rollback,
+        rollback_document,
+        label="AQ4 rollback",
+        required_uid=policy.required_uid,
+    )
+    if (
+        candidate_runtime.worker.snapshot.sha256 != candidate_worker
+        or rollback_runtime.worker.snapshot.sha256 != rollback_worker
+    ):
+        fail("served-model worker bytes differ from validated identity")
 
     policy_unit, policy_environment = _policy_deployment_paths(policy)
     if (
@@ -2320,6 +2846,40 @@ def prepare_plan(
         required_uid=policy.required_uid,
         verify_executables=True,
     )
+    deployment_runtime_artifacts = tuple(
+        _capture_runtime_artifact(
+            snapshot.path,
+            label=label,
+            maximum=maximum,
+            required_uid=policy.required_uid,
+        )
+        for snapshot, label, maximum in (
+            (unit, "systemd unit", MAX_INPUT_BYTES),
+            (environment, "systemd environment", MAX_INPUT_BYTES),
+            (operations, "reviewed operations document", MAX_DOCUMENT_BYTES),
+        )
+    )
+    for sealed, expected in zip(
+        deployment_runtime_artifacts,
+        (unit, environment, operations),
+        strict=True,
+    ):
+        if (
+            sealed.snapshot.raw != expected.raw
+            or sealed.snapshot.identity != expected.identity
+        ):
+            fail("deployment runtime seal differs from the reviewed input")
+    shared_runtime_artifacts = deployment_runtime_artifacts
+    candidate_operation_artifacts = _capture_operation_executable_seals(
+        operation_document,
+        required_uid=policy.required_uid,
+        stages={"candidate_reconciliation", "candidate_live_health"},
+    )
+    rollback_operation_artifacts = _capture_operation_executable_seals(
+        operation_document,
+        required_uid=policy.required_uid,
+        stages={"reverse_reconciliation", "rollback_live_health"},
+    )
     if any(
         specification["service_unit"] != policy.service_unit
         for specification in operation_document["live_proofs"].values()
@@ -2419,11 +2979,51 @@ def prepare_plan(
             "rollback_path": os.fspath(rollback_outcome),
         },
     }
+    _require_artifact_seals(
+        shared_runtime_artifacts,
+        required_uid=policy.required_uid,
+    )
+    _require_artifact_seals(
+        candidate_operation_artifacts,
+        required_uid=policy.required_uid,
+    )
+    _require_artifact_seals(
+        rollback_operation_artifacts,
+        required_uid=policy.required_uid,
+    )
+    _require_manifest_runtime_seals(
+        candidate_runtime,
+        required_uid=policy.required_uid,
+    )
+    _require_manifest_runtime_seals(
+        rollback_runtime,
+        required_uid=policy.required_uid,
+    )
     _publish_immutable(output, document, required_uid=policy.required_uid)
+    _require_artifact_seals(
+        shared_runtime_artifacts,
+        required_uid=policy.required_uid,
+    )
+    _require_artifact_seals(
+        candidate_operation_artifacts,
+        required_uid=policy.required_uid,
+    )
+    _require_artifact_seals(
+        rollback_operation_artifacts,
+        required_uid=policy.required_uid,
+    )
+    _require_manifest_runtime_seals(
+        candidate_runtime,
+        required_uid=policy.required_uid,
+    )
+    _require_manifest_runtime_seals(
+        rollback_runtime,
+        required_uid=policy.required_uid,
+    )
     return document
 
 
-def _validate_plan_shape(document: dict[str, Any]) -> None:
+def _validate_plan_shape(document: dict[str, Any], *, action: str) -> None:
     _exact(
         document,
         {
@@ -2493,7 +3093,11 @@ def _validate_plan_shape(document: dict[str, Any]) -> None:
         ("candidate", candidate, SQ8_MODEL_ID, SQ8_FORMAT_ID),
         ("rollback", rollback, AQ4_MODEL_ID, AQ4_FORMAT_ID),
     ):
-        _absolute(value["path"], label, must_exist=True)
+        _absolute(
+            value["path"],
+            label,
+            must_exist=action == "activate" or label == "rollback",
+        )
         _hash(value["manifest_sha256"], f"{label}.manifest_sha256")
         _hash(value["worker_binary_sha256"], f"{label}.worker_binary_sha256")
         if (
@@ -2517,7 +3121,11 @@ def _validate_plan_shape(document: dict[str, Any]) -> None:
         },
         "aq4_release_bundle",
     )
-    _absolute(aq4_bundle["path"], "aq4_release_bundle", must_exist=True)
+    _absolute(
+        aq4_bundle["path"],
+        "aq4_release_bundle",
+        must_exist=action == "activate",
+    )
     for field in ("sha256", "validator_report_sha256"):
         _hash(aq4_bundle[field], f"aq4_release_bundle.{field}")
     if (
@@ -2536,7 +3144,11 @@ def _validate_plan_shape(document: dict[str, Any]) -> None:
         },
         "release_bundle",
     )
-    _absolute(bundle["path"], "release_bundle", must_exist=True)
+    _absolute(
+        bundle["path"],
+        "release_bundle",
+        must_exist=action == "activate",
+    )
     for field in ("sha256", "validator_report_sha256"):
         _hash(bundle[field], f"release_bundle.{field}")
     if (
@@ -2558,8 +3170,16 @@ def _validate_plan_shape(document: dict[str, Any]) -> None:
         },
         "campaign",
     )
-    _absolute(campaign["authorization_path"], "campaign authorization", must_exist=True)
-    _absolute(campaign["outcome_path"], "campaign outcome", must_exist=True)
+    _absolute(
+        campaign["authorization_path"],
+        "campaign authorization",
+        must_exist=action == "activate",
+    )
+    _absolute(
+        campaign["outcome_path"],
+        "campaign outcome",
+        must_exist=action == "activate",
+    )
     _hash(campaign["authorization_sha256"], "campaign.authorization_sha256")
     _hash(campaign["outcome_sha256"], "campaign.outcome_sha256")
     _identifier(campaign["authorization_id"], "campaign.authorization_id")
@@ -2798,7 +3418,7 @@ def load_plan(
     document = _strict_object(plan.raw, "final activation plan")
     if _canonical_json(document) != plan.raw:
         fail("final activation plan is not canonical JSON")
-    _validate_plan_shape(document)
+    _validate_plan_shape(document, action=action)
     policy_unit, policy_environment = _policy_deployment_paths(policy)
     if (
         Path(document["active_manifest"]["path"]) != policy.active_manifest_path
@@ -2807,11 +3427,6 @@ def load_plan(
     ):
         fail("final activation plan paths differ from production policy")
 
-    candidate = _stable(
-        Path(document["candidate"]["path"]),
-        "SQ8 candidate manifest",
-        maximum=MAX_MANIFEST_BYTES,
-    )
     rollback = _stable(
         Path(document["rollback"]["path"]),
         "AQ4 rollback manifest",
@@ -2824,22 +3439,42 @@ def load_plan(
         "actual active manifest",
         maximum=MAX_MANIFEST_BYTES,
     )
+    if action == "activate":
+        candidate = _stable(
+            Path(document["candidate"]["path"]),
+            "SQ8 candidate manifest",
+            maximum=MAX_MANIFEST_BYTES,
+        )
+    else:
+        # A manual rollback is specifically the recovery path for a broken or
+        # missing SQ8 release closure.  The successfully activated exact bytes
+        # at active.json, plus the immutable activation outcome, are its
+        # candidate precondition; the original candidate pathname is not.
+        candidate = StableFileSnapshot(
+            path=Path(document["candidate"]["path"]),
+            raw=active.raw,
+            sha256=active.sha256,
+            identity=active.identity,
+        )
     if (
         active.identity.uid != policy.required_uid
         or active.identity.links != 1
         or stat.S_IMODE(active.identity.mode) != 0o644
     ):
         fail("actual active manifest metadata differs")
-    aq4_bundle = _stable(
-        Path(document["aq4_release_bundle"]["path"]),
-        "complete AQ4 release bundle",
-        read_only=True,
-        single_link=True,
-    )
-    bundle = _stable(
-        Path(document["release_bundle"]["path"]),
-        "complete release bundle",
-    )
+    aq4_bundle: StableFileSnapshot | None = None
+    bundle: StableFileSnapshot | None = None
+    if action == "activate":
+        aq4_bundle = _stable(
+            Path(document["aq4_release_bundle"]["path"]),
+            "complete AQ4 release bundle",
+            read_only=True,
+            single_link=True,
+        )
+        bundle = _stable(
+            Path(document["release_bundle"]["path"]),
+            "complete release bundle",
+        )
     unit = _stable(Path(document["deployment"]["systemd_unit_path"]), "systemd unit")
     environment = _stable(
         Path(document["deployment"]["environment_path"]),
@@ -2856,6 +3491,11 @@ def load_plan(
         operations_snapshot,
         required_uid=policy.required_uid,
         verify_executables=True,
+        executable_stages=(
+            None
+            if action == "activate"
+            else {"reverse_reconciliation", "rollback_live_health"}
+        ),
     )
     if any(
         specification["service_unit"] != policy.service_unit
@@ -2866,10 +3506,18 @@ def load_plan(
     if (
         candidate.sha256 != document["candidate"]["manifest_sha256"]
         or rollback.sha256 != document["rollback"]["manifest_sha256"]
-        or aq4_bundle.identity.uid != policy.required_uid
-        or stat.S_IMODE(aq4_bundle.identity.mode) != 0o444
-        or aq4_bundle.sha256 != document["aq4_release_bundle"]["sha256"]
-        or bundle.sha256 != document["release_bundle"]["sha256"]
+        or (
+            aq4_bundle is not None
+            and (
+                aq4_bundle.identity.uid != policy.required_uid
+                or stat.S_IMODE(aq4_bundle.identity.mode) != 0o444
+                or aq4_bundle.sha256 != document["aq4_release_bundle"]["sha256"]
+            )
+        )
+        or (
+            bundle is not None
+            and bundle.sha256 != document["release_bundle"]["sha256"]
+        )
         or unit.sha256 != document["deployment"]["systemd_unit_sha256"]
         or environment.sha256 != document["deployment"]["environment_sha256"]
         or operations_snapshot.sha256 != document["operations"]["sha256"]
@@ -2880,13 +3528,77 @@ def load_plan(
     ):
         fail("final activation plan input hash differs")
 
-    candidate_worker = _summary_identity(
-        manifest_validator(candidate.path),
-        snapshot=candidate,
-        model_id=SQ8_MODEL_ID,
-        format_id=SQ8_FORMAT_ID,
-        label="SQ8 candidate",
+    rollback_document = _strict_object(rollback.raw, "AQ4 rollback manifest")
+    candidate_runtime: ManifestRuntimeSeals | None = None
+    if action == "activate":
+        candidate_document = _strict_object(
+            candidate.raw,
+            "SQ8 candidate manifest",
+        )
+        candidate_runtime = _capture_manifest_runtime_seals(
+            candidate,
+            candidate_document,
+            label="SQ8 candidate",
+            required_uid=policy.required_uid,
+        )
+    rollback_runtime = _capture_manifest_runtime_seals(
+        rollback,
+        rollback_document,
+        label="AQ4 rollback",
+        required_uid=policy.required_uid,
     )
+    deployment_runtime_artifacts = tuple(
+        _capture_runtime_artifact(
+            snapshot.path,
+            label=label,
+            maximum=maximum,
+            required_uid=policy.required_uid,
+        )
+        for snapshot, label, maximum in (
+            (unit, "systemd unit", MAX_INPUT_BYTES),
+            (environment, "systemd environment", MAX_INPUT_BYTES),
+            (
+                operations_snapshot,
+                "reviewed operations document",
+                MAX_DOCUMENT_BYTES,
+            ),
+        )
+    )
+    for sealed, expected in zip(
+        deployment_runtime_artifacts,
+        (unit, environment, operations_snapshot),
+        strict=True,
+    ):
+        if (
+            sealed.snapshot.raw != expected.raw
+            or sealed.snapshot.identity != expected.identity
+        ):
+            fail("deployment runtime seal differs from the plan input")
+    shared_runtime_artifacts = deployment_runtime_artifacts
+    candidate_operation_artifacts = (
+        _capture_operation_executable_seals(
+            operations,
+            required_uid=policy.required_uid,
+            stages={"candidate_reconciliation", "candidate_live_health"},
+        )
+        if action == "activate"
+        else ()
+    )
+    rollback_operation_artifacts = _capture_operation_executable_seals(
+        operations,
+        required_uid=policy.required_uid,
+        stages={"reverse_reconciliation", "rollback_live_health"},
+    )
+
+    candidate_worker = document["candidate"]["worker_binary_sha256"]
+    if action == "activate":
+        candidate_worker = _summary_identity(
+            manifest_validator(candidate.path),
+            snapshot=candidate,
+            model_id=SQ8_MODEL_ID,
+            format_id=SQ8_FORMAT_ID,
+            label="SQ8 candidate",
+        )
     rollback_worker = _summary_identity(
         manifest_validator(rollback.path),
         snapshot=rollback,
@@ -2897,75 +3609,93 @@ def load_plan(
     if (
         candidate_worker != document["candidate"]["worker_binary_sha256"]
         or rollback_worker != document["rollback"]["worker_binary_sha256"]
+        or (
+            candidate_runtime is not None
+            and candidate_runtime.worker.snapshot.sha256 != candidate_worker
+        )
+        or rollback_runtime.worker.snapshot.sha256 != rollback_worker
     ):
         fail("final activation worker identity differs")
 
-    record, outcome_snapshot, outcome = _load_successful_campaign_outcome(
-        Path(document["campaign"]["authorization_path"]),
-        now=now,
-        policy=policy,
-    )
-    _require_restoration_path(outcome, active.path)
-    if (
-        record.snapshot.sha256 != document["campaign"]["authorization_sha256"]
-        or outcome_snapshot.path != Path(document["campaign"]["outcome_path"])
-        or outcome_snapshot.sha256 != document["campaign"]["outcome_sha256"]
-        or record.document["authorization_id"]
-        != document["campaign"]["authorization_id"]
-        or outcome["completed_at"] != document["campaign"]["completed_at"]
-        or record.document["source"] != document["source"]
-    ):
-        fail("campaign authorization/outcome plan binding differs")
-    _require_authorized_rollback_identity(
-        rollback,
-        rollback_worker,
-        record.document,
-    )
-    outputs = _campaign_outputs_unchanged(outcome)
-    if outputs != document["campaign"]["outputs"]:
-        fail("campaign output plan binding differs")
-    if (
-        aq4_bundle.path != Path(outputs["aq4_bundle"]["path"])
-        or aq4_bundle.sha256
-        != outputs["aq4_bundle"]["selected_artifacts"].get(aq4_bundle.path.name)
-    ):
-        fail("AQ4 release bundle plan path differs from fresh campaign output")
-    (
-        aq4_bundle_document,
-        aq4_bundle_report,
-        aq4_report_sha256,
-    ) = _validate_aq4_bundle(
-        aq4_bundle,
-        bundle_validator=bundle_validator,
-    )
-    if (
-        aq4_report_sha256
-        != document["aq4_release_bundle"]["validator_report_sha256"]
-    ):
-        fail("AQ4 release bundle validator report changed")
-    _bind_aq4_bundle_to_campaign_outputs(
-        aq4_bundle.path,
-        aq4_bundle_document,
-        aq4_bundle_report,
-        outputs,
-        record.document,
-        rollback=rollback,
-        rollback_worker=rollback_worker,
-    )
+    campaign_outcome_snapshot: authorization.FileSnapshot | None = None
+    campaign_outcome_document: dict[str, Any] | None = None
+    if action == "activate":
+        (
+            campaign_record,
+            campaign_outcome_snapshot,
+            campaign_outcome_document,
+        ) = _load_successful_campaign_outcome(
+            Path(document["campaign"]["authorization_path"]),
+            now=now,
+            policy=policy,
+        )
+        _require_restoration_path(campaign_outcome_document, active.path)
+        if (
+            campaign_record.snapshot.sha256
+            != document["campaign"]["authorization_sha256"]
+            or campaign_outcome_snapshot.path
+            != Path(document["campaign"]["outcome_path"])
+            or campaign_outcome_snapshot.sha256
+            != document["campaign"]["outcome_sha256"]
+            or campaign_record.document["authorization_id"]
+            != document["campaign"]["authorization_id"]
+            or campaign_outcome_document["completed_at"]
+            != document["campaign"]["completed_at"]
+            or campaign_record.document["source"] != document["source"]
+        ):
+            fail("campaign authorization/outcome plan binding differs")
+        _require_authorized_rollback_identity(
+            rollback,
+            rollback_worker,
+            campaign_record.document,
+        )
+        assert aq4_bundle is not None
+        assert bundle is not None
+        outputs = _campaign_outputs_unchanged(campaign_outcome_document)
+        if outputs != document["campaign"]["outputs"]:
+            fail("campaign output plan binding differs")
+        if (
+            aq4_bundle.path != Path(outputs["aq4_bundle"]["path"])
+            or aq4_bundle.sha256
+            != outputs["aq4_bundle"]["selected_artifacts"].get(aq4_bundle.path.name)
+        ):
+            fail("AQ4 release bundle plan path differs from fresh campaign output")
+        (
+            aq4_bundle_document,
+            aq4_bundle_report,
+            aq4_report_sha256,
+        ) = _validate_aq4_bundle(
+            aq4_bundle,
+            bundle_validator=bundle_validator,
+        )
+        if (
+            aq4_report_sha256
+            != document["aq4_release_bundle"]["validator_report_sha256"]
+        ):
+            fail("AQ4 release bundle validator report changed")
+        _bind_aq4_bundle_to_campaign_outputs(
+            aq4_bundle.path,
+            aq4_bundle_document,
+            aq4_bundle_report,
+            outputs,
+            campaign_record.document,
+            rollback=rollback,
+            rollback_worker=rollback_worker,
+        )
 
-    bundle_document, bundle_report, report_sha256 = _validate_bundle(
-        bundle,
-        bundle_validator=bundle_validator,
-    )
-    if report_sha256 != document["release_bundle"]["validator_report_sha256"]:
-        fail("release bundle validator report changed")
-    _bind_bundle_to_campaign_outputs(
-        bundle.path,
-        bundle_document,
-        bundle_report,
-        outputs,
-        outcome,
-    )
+        bundle_document, bundle_report, report_sha256 = _validate_bundle(
+            bundle,
+            bundle_validator=bundle_validator,
+        )
+        if report_sha256 != document["release_bundle"]["validator_report_sha256"]:
+            fail("release bundle validator report changed")
+        _bind_bundle_to_campaign_outputs(
+            bundle.path,
+            bundle_document,
+            bundle_report,
+            outputs,
+            campaign_outcome_document,
+        )
 
     expected_active = rollback.raw if action == "activate" else candidate.raw
     if active.raw != expected_active:
@@ -2986,8 +3716,13 @@ def load_plan(
         bundle,
         unit,
         environment,
-        outcome_snapshot,
-        outcome,
+        campaign_outcome_snapshot,
+        campaign_outcome_document,
+        candidate_runtime,
+        rollback_runtime,
+        shared_runtime_artifacts,
+        candidate_operation_artifacts,
+        rollback_operation_artifacts,
     )
     if action == "activate":
         _ensure_fresh_destination(activation_path, "activation outcome")
@@ -3010,6 +3745,11 @@ def load_plan(
             "rollback_live_health live proof",
         )
 
+    _require_record_runtime_seals(
+        result,
+        required_uid=policy.required_uid,
+        scope="all" if action == "activate" else "rollback",
+    )
     return result
 
 
@@ -3023,6 +3763,18 @@ def _repin_plan_inputs(
 ) -> None:
     """Re-pin every immutable plan authority without outcome freshness checks."""
 
+    _require_record_runtime_seals(
+        record,
+        required_uid=policy.required_uid,
+        scope="all",
+    )
+    if (
+        record.aq4_bundle is None
+        or record.bundle is None
+        or record.campaign_outcome is None
+        or record.campaign_outcome_document is None
+    ):
+        fail("activation release/campaign authorities are unavailable")
     plan = _stable(
         record.snapshot.path,
         "final activation plan",
@@ -3183,6 +3935,105 @@ def _repin_plan_inputs(
         )
         if observed.raw != expected.raw or observed.identity != expected.identity:
             fail(f"{label} changed across validation")
+    _require_record_runtime_seals(
+        record,
+        required_uid=policy.required_uid,
+        scope="all",
+    )
+
+
+def _repin_rollback_inputs(
+    record: PlanRecord,
+    *,
+    policy: authorization.RegistryPolicy,
+    manifest_validator: ManifestValidator,
+    include_shared: bool = True,
+) -> None:
+    """Re-pin only authorities needed to restore and run exact AQ4 safely."""
+
+    _require_record_runtime_seals(
+        record,
+        required_uid=policy.required_uid,
+        scope="rollback" if include_shared else "rollback_core",
+    )
+    plan = _stable(
+        record.snapshot.path,
+        "final activation plan",
+        maximum=MAX_DOCUMENT_BYTES,
+        read_only=True,
+        single_link=True,
+    )
+    rollback = _stable(
+        record.rollback.path,
+        "AQ4 rollback manifest",
+        maximum=MAX_MANIFEST_BYTES,
+        read_only=True,
+        single_link=True,
+    )
+    for current, expected, label in (
+        (plan, record.snapshot, "plan"),
+        (rollback, record.rollback, "rollback"),
+    ):
+        if (
+            current.path != expected.path
+            or current.raw != expected.raw
+            or current.identity != expected.identity
+        ):
+            fail(f"{label} changed during exact AQ4 restoration")
+    if include_shared:
+        unit = _stable(record.unit.path, "systemd unit")
+        environment = _stable(record.environment.path, "systemd environment")
+        operations_snapshot = _stable(
+            Path(record.document["operations"]["path"]),
+            "reviewed operations document",
+            maximum=MAX_DOCUMENT_BYTES,
+            read_only=True,
+            single_link=True,
+        )
+        for current, expected, label in (
+            (unit, record.unit, "unit"),
+            (environment, record.environment, "environment"),
+        ):
+            if (
+                current.path != expected.path
+                or current.raw != expected.raw
+                or current.identity != expected.identity
+            ):
+                fail(f"{label} changed during exact AQ4 restoration")
+        if (
+            operations_snapshot.sha256 != record.document["operations"]["sha256"]
+            or operations_snapshot.identity.uid != policy.required_uid
+        ):
+            fail("reviewed operations changed during exact AQ4 restoration")
+        operations = _operation_document(
+            operations_snapshot,
+            required_uid=policy.required_uid,
+            verify_executables=True,
+            executable_stages={
+                "reverse_reconciliation",
+                "rollback_live_health",
+            },
+        )
+        if operations != record.operations:
+            fail("reviewed operations identity changed during exact AQ4 restoration")
+
+    rollback_worker = _summary_identity(
+        manifest_validator(rollback.path),
+        snapshot=rollback,
+        model_id=AQ4_MODEL_ID,
+        format_id=AQ4_FORMAT_ID,
+        label="AQ4 rollback",
+    )
+    if (
+        rollback_worker != record.document["rollback"]["worker_binary_sha256"]
+        or rollback_worker != record.rollback_runtime.worker.snapshot.sha256
+    ):
+        fail("AQ4 worker identity changed during exact restoration")
+    _require_record_runtime_seals(
+        record,
+        required_uid=policy.required_uid,
+        scope="rollback" if include_shared else "rollback_core",
+    )
 
 
 def _open_activation_lock(active: Path, *, required_uid: int) -> tuple[int, int]:
@@ -3444,9 +4295,14 @@ def _open_verified_executable(
             or before.st_uid not in {0, required_uid}
             or before.st_nlink != 1
             or stat.S_IMODE(before.st_mode) & 0o022
+            or before.st_mode & (stat.S_ISUID | stat.S_ISGID)
             or not before.st_mode & (stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
         ):
             fail(f"{label} metadata is unsafe")
+        if runtime_seal._has_posix_acl(descriptor):
+            fail(f"{label} has a POSIX ACL")
+        if runtime_seal._has_forbidden_security_xattr(descriptor):
+            fail(f"{label} has a file capability")
         chunks: list[bytes] = []
         remaining = before.st_size
         while remaining:
@@ -3980,6 +4836,7 @@ def execute_activation(
         "rollback_live_health": None,
     }
     active_deadline: float | None = None
+    credential_seals: tuple[runtime_seal.RuntimeArtifactSeal, ...] | None = None
     with _termination_guard() as termination:
         try:
             try:
@@ -4022,6 +4879,42 @@ def execute_activation(
                     manifest_validator=manifest_validator,
                     bundle_validator=bundle_validator,
                 )
+
+            def repin_rollback() -> None:
+                assert record is not None
+                _repin_rollback_inputs(
+                    record,
+                    policy=policy,
+                    manifest_validator=manifest_validator,
+                )
+
+            def repin_rollback_core() -> None:
+                assert record is not None
+                _repin_rollback_inputs(
+                    record,
+                    policy=policy,
+                    manifest_validator=manifest_validator,
+                    include_shared=False,
+                )
+
+            def repin_credentials() -> None:
+                nonlocal credential_seals
+                if live_state_verifier is not default_live_state_verifier:
+                    return
+                if credential_seals is None:
+                    credential_seals = _capture_live_credential_seals(
+                        required_uid=policy.required_uid,
+                    )
+                else:
+                    _require_live_credential_seals(credential_seals)
+
+            def repin_candidate_stage() -> None:
+                repin()
+                repin_credentials()
+
+            def repin_rollback_stage() -> None:
+                repin_rollback()
+                repin_credentials()
 
             def require_candidate() -> None:
                 assert record is not None
@@ -4075,7 +4968,7 @@ def execute_activation(
                         record,
                         stage,
                         runner=runner,
-                        repin=repin,
+                        repin=repin_candidate_stage,
                         require_active=require_candidate,
                         activation_epoch=os.urandom(32).hex(),
                         live_proof_loader=live_proof_loader,
@@ -4090,7 +4983,7 @@ def execute_activation(
                     failure_stage = stage
                     primary_error = error
                     raise
-            repin()
+            repin_candidate_stage()
             require_candidate()
             _remaining_window(active_deadline, "final activation")
             if live_proofs["candidate_live_health"] is None:
@@ -4126,6 +5019,7 @@ def execute_activation(
                     record.operations["active_window_timeout_seconds"]
                 )
                 try:
+                    repin_rollback_core()
                     with termination.recovery_deferred():
                         current = _read_entry(
                             parent_descriptor,
@@ -4146,6 +5040,8 @@ def execute_activation(
                                 expected_raw=current,
                                 replacement_raw=record.rollback.raw,
                             )
+                    repin_rollback_core()
+                    require_rollback()
                     stages["aq4_restore"] = "passed"
                 except BaseException:
                     stages["aq4_restore"] = "failed"
@@ -4159,7 +5055,7 @@ def execute_activation(
                                 record,
                                 rollback_stage,
                                 runner=runner,
-                                repin=repin,
+                                repin=repin_rollback_stage,
                                 require_active=require_rollback,
                                 activation_epoch=os.urandom(32).hex(),
                                 live_proof_loader=live_proof_loader,
@@ -4313,6 +5209,7 @@ def execute_rollback(
     primary_error: BaseException | None = None
     rollback_live_proof: dict[str, Any] | None = None
     rollback_deadline: float | None = None
+    credential_seals: tuple[runtime_seal.RuntimeArtifactSeal, ...] | None = None
     with _termination_guard() as termination:
         try:
             try:
@@ -4339,6 +5236,25 @@ def execute_rollback(
                     record,
                     expected_plan_sha256=expected_plan_sha256,
                 )
+                locked_activation_snapshot, _locked_activation_document = (
+                    _load_activation_outcome(
+                        Path(record.document["outcomes"]["activation_path"]),
+                        plan=record.snapshot,
+                        required_uid=policy.required_uid,
+                        record=record,
+                    )
+                )
+                if (
+                    locked_activation_snapshot.path != activation_snapshot.path
+                    or locked_activation_snapshot.raw != activation_snapshot.raw
+                    or locked_activation_snapshot.identity
+                    != activation_snapshot.identity
+                ):
+                    fail(
+                        "successful activation outcome changed before "
+                        "the locked rollback boundary"
+                    )
+                activation_snapshot = locked_activation_snapshot
                 stages["preflight"] = "passed"
             except BaseException as error:
                 failure_stage = "preflight"
@@ -4355,6 +5271,38 @@ def execute_rollback(
                     manifest_validator=manifest_validator,
                     bundle_validator=bundle_validator,
                 )
+
+            def repin_rollback() -> None:
+                assert record is not None
+                _repin_rollback_inputs(
+                    record,
+                    policy=policy,
+                    manifest_validator=manifest_validator,
+                )
+
+            def repin_rollback_core() -> None:
+                assert record is not None
+                _repin_rollback_inputs(
+                    record,
+                    policy=policy,
+                    manifest_validator=manifest_validator,
+                    include_shared=False,
+                )
+
+            def repin_credentials() -> None:
+                nonlocal credential_seals
+                if live_state_verifier is not default_live_state_verifier:
+                    return
+                if credential_seals is None:
+                    credential_seals = _capture_live_credential_seals(
+                        required_uid=policy.required_uid,
+                    )
+                else:
+                    _require_live_credential_seals(credential_seals)
+
+            def repin_rollback_stage() -> None:
+                repin_rollback()
+                repin_credentials()
 
             def require_candidate() -> None:
                 assert record is not None
@@ -4381,7 +5329,7 @@ def execute_rollback(
                     fail("AQ4 active bytes changed during manual rollback")
 
             try:
-                repin()
+                repin_rollback()
                 require_candidate()
                 rollback_deadline = time.monotonic() + float(
                     record.operations["active_window_timeout_seconds"]
@@ -4394,7 +5342,7 @@ def execute_rollback(
                         expected_raw=record.candidate.raw,
                         replacement_raw=record.rollback.raw,
                     )
-                repin()
+                repin_rollback()
                 require_rollback()
                 _remaining_window(rollback_deadline, "manual rollback")
                 stages["aq4_restore"] = "passed"
@@ -4408,7 +5356,7 @@ def execute_rollback(
                         record,
                         stage,
                         runner=runner,
-                        repin=repin,
+                        repin=repin_rollback_stage,
                         require_active=require_rollback,
                         activation_epoch=os.urandom(32).hex(),
                         live_proof_loader=live_proof_loader,
@@ -4423,7 +5371,7 @@ def execute_rollback(
                     failure_stage = stage
                     primary_error = error
                     raise
-            repin()
+            repin_rollback_stage()
             require_rollback()
             _remaining_window(rollback_deadline, "manual rollback")
             if rollback_live_proof is None:
@@ -4457,6 +5405,7 @@ def execute_rollback(
                 stages["outcome_publication"] = "failed"
             if record is not None and parent_descriptor is not None:
                 try:
+                    repin_rollback_core()
                     with termination.recovery_deferred():
                         current = _read_entry(
                             parent_descriptor,
@@ -4470,6 +5419,8 @@ def execute_rollback(
                                 expected_raw=current,
                                 replacement_raw=record.rollback.raw,
                             )
+                    repin_rollback_core()
+                    require_rollback()
                     stages["aq4_restore"] = "passed"
                 except BaseException:
                     stages["aq4_restore"] = "failed"
@@ -4529,9 +5480,21 @@ def preflight_report(record: PlanRecord, *, action: str) -> dict[str, Any]:
         "active_manifest_sha256": record.active.sha256,
         "candidate_manifest_sha256": record.candidate.sha256,
         "rollback_manifest_sha256": record.rollback.sha256,
-        "aq4_release_bundle_sha256": record.aq4_bundle.sha256,
-        "release_bundle_sha256": record.bundle.sha256,
-        "campaign_outcome_sha256": record.campaign_outcome.sha256,
+        "aq4_release_bundle_sha256": (
+            record.aq4_bundle.sha256
+            if record.aq4_bundle is not None
+            else record.document["aq4_release_bundle"]["sha256"]
+        ),
+        "release_bundle_sha256": (
+            record.bundle.sha256
+            if record.bundle is not None
+            else record.document["release_bundle"]["sha256"]
+        ),
+        "campaign_outcome_sha256": (
+            record.campaign_outcome.sha256
+            if record.campaign_outcome is not None
+            else record.document["campaign"]["outcome_sha256"]
+        ),
         "active_manifest_changed": False,
         "commands_executed": False,
     }
