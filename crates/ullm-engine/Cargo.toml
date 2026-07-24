@@ -3,6 +3,7 @@ name = "ullm-engine"
 version = "0.1.0"
 edition = "2024"
 license = "Apache-2.0"
+autoexamples = false
 
 [features]
 default = []
@@ -61,3 +62,15 @@ required-features = ["rocm-ck-gfx1201"]
 [[example]]
 name = "sq8_ck_serving"
 required-features = ["rocm-ck-gfx1201"]
+
+[[example]]
+name = "sq8_optimized_fixture"
+
+[[example]]
+name = "sq8_reference_batch_bench"
+
+[[example]]
+name = "sq8_reference_linear"
+
+[[example]]
+name = "verify_sq8_canonical"
