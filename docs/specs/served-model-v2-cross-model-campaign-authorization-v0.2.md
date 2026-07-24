@@ -272,6 +272,12 @@ Validator v3 requires both observations to be identical and to equal the
 fixed server identity, and the bundle-v2 validator cross-binds them to this
 authorization. Historical v4 evidence cannot satisfy bundle v2.
 
+Every lineage-bearing generic-release v2, browser v4/v5, and SQ8 full-campaign
+v2 observation names the actual active manifest as exactly
+`/etc/ullm/served-models/active.json`. The binding summary must name the same
+fixed path. A self-consistent observation set over a candidate copy or any
+other absolute pathname is not production evidence and is rejected.
+
 The command child receives a fixed minimal environment. Ambient loader,
 Python import, Docker configuration, Git configuration, and PATH overrides
 are not inherited from the invoking shell. Source-owned Python tools use the
@@ -438,6 +444,27 @@ The successful transaction itself produces the fresh AQ4 complete bundle v1.
 Afterward, the operator assembles and independently validates the SQ8
 `ullm.generic_reasoning_release_bundle.v2` from the three fresh SQ8 campaign
 outputs and final SQ8 promotion pair.
+
+Bundle-v2 validation does not trust the claim pathname embedded in campaign
+evidence. It loads the referenced authorization with the production
+`RegistryPolicy`, derives
+`<fixed-claim-registry>/<authorization-sha256>.claim.json`, and uses the
+authorization module's archival `load_claim` path. Both authorization and
+claim remain canonical mode-`0444`, single-link files owned by the policy UID
+(`0` in production), and their loaded bytes, hashes, identities, and claim
+timestamp are cross-checked against all campaign evidence. Archival loading
+deliberately does not reapply the expired execution window or fresh-output
+preconditions; it proves completed evidence and never authorizes a new
+mutation. Producer admission instead uses `load_live_claim`, which rechecks
+the current authorization window and bound inputs before each live campaign
+stage.
+
+The standalone bundle publisher writes and fsyncs a mode-`0444` temporary
+file, commits its single directory entry with
+`renameat2(RENAME_NOREPLACE)`, fsyncs the parent directory, and verifies
+mode-`0444` with `nlink == 1`. It never creates a temporary hard-link alias:
+an interruption after the rename leaves a valid single-link destination, and
+a raced pre-existing destination is preserved and fails publication.
 
 `ullm.served_model.final_activation_plan.v2` is a separate, default-read-only
 boundary. It reloads and inventories all six successful campaign outputs,

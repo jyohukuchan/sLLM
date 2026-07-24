@@ -27,6 +27,12 @@ PREPARER = load_module("generic_reasoning_release_bundle_preparer", PREPARER_PAT
 FIXTURES = load_module("generic_reasoning_release_bundle_preparer_fixtures", BUNDLE_TEST_PATH)
 
 
+class InjectedV2Validator:
+    @staticmethod
+    def validate(path: Path) -> dict[str, object]:
+        return FIXTURES.validate_v2_bundle(path)
+
+
 def inputs(tmp_path: Path) -> tuple[dict[str, Path], Path]:
     bundle = FIXTURES.make_bundle(tmp_path)
     bundle.unlink()
@@ -136,7 +142,7 @@ def test_prepare_v2_publishes_immutable_nine_slot_bundle(
     }
     for path in rollback.values():
         path.write_bytes(b"rollback-fixture")
-    monkeypatch.setattr(PREPARER, "_load_validator", lambda: FIXTURES.BUNDLE)
+    monkeypatch.setattr(PREPARER, "_load_validator", lambda: InjectedV2Validator)
 
     document = PREPARER.prepare_v2(
         **component_paths,
@@ -149,7 +155,7 @@ def test_prepare_v2_publishes_immutable_nine_slot_bundle(
     assert len(document["artifacts"]) == 9
     assert fixture_bundle.stat().st_mode & 0o777 == 0o444
     assert fixture_bundle.stat().st_nlink == 1
-    assert FIXTURES.BUNDLE.validate(fixture_bundle)["gate_eligible"] is True
+    assert FIXTURES.validate_v2_bundle(fixture_bundle)["gate_eligible"] is True
     with pytest.raises(PREPARER.BundleError, match="already exists"):
         PREPARER.prepare_v2(
             **component_paths,
@@ -178,25 +184,21 @@ def test_prepare_v2_no_replace_race_preserves_existing_target(
     }
     for path in rollback.values():
         path.write_bytes(b"rollback-fixture")
-    monkeypatch.setattr(PREPARER, "_load_validator", lambda: FIXTURES.BUNDLE)
-    original_link = PREPARER.os.link
+    monkeypatch.setattr(PREPARER, "_load_validator", lambda: InjectedV2Validator)
+    original_rename = PREPARER._rename_noreplace_at
     attacker = b"attacker-owned-target\n"
 
-    def race_link(
-        source: Path,
-        destination: Path,
-        *,
-        follow_symlinks: bool,
+    def race_rename(
+        parent: Path,
+        source_name: str,
+        destination_name: str,
     ) -> None:
-        if Path(destination) == fixture_bundle:
+        destination = parent / destination_name
+        if destination == fixture_bundle:
             fixture_bundle.write_bytes(attacker)
-        original_link(
-            source,
-            destination,
-            follow_symlinks=follow_symlinks,
-        )
+        original_rename(parent, source_name, destination_name)
 
-    monkeypatch.setattr(PREPARER.os, "link", race_link)
+    monkeypatch.setattr(PREPARER, "_rename_noreplace_at", race_rename)
 
     with pytest.raises(PREPARER.BundleError, match="already exists"):
         PREPARER.prepare_v2(
@@ -207,3 +209,38 @@ def test_prepare_v2_no_replace_race_preserves_existing_target(
         )
 
     assert fixture_bundle.read_bytes() == attacker
+
+
+def test_publish_fault_after_noreplace_leaves_single_link_destination(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    output = tmp_path / "bundle.json"
+    original_rename = PREPARER._rename_noreplace_at
+    observed: dict[str, object] = {}
+
+    def publish_then_fail(
+        parent: Path,
+        source_name: str,
+        destination_name: str,
+    ) -> None:
+        original_rename(parent, source_name, destination_name)
+        destination = parent / destination_name
+        observed["source_exists"] = (parent / source_name).exists()
+        observed["links"] = destination.stat().st_nlink
+        raise RuntimeError("simulated interruption after rename")
+
+    monkeypatch.setattr(
+        PREPARER,
+        "_rename_noreplace_at",
+        publish_then_fail,
+    )
+
+    with pytest.raises(RuntimeError, match="simulated interruption"):
+        PREPARER._publish_immutable(output, {"schema_version": "fixture.v1"})
+
+    assert output.is_file()
+    assert output.stat().st_mode & 0o777 == 0o444
+    assert output.stat().st_nlink == 1
+    assert observed == {"source_exists": False, "links": 1}
+    assert not list(tmp_path.glob(".bundle.json.*"))

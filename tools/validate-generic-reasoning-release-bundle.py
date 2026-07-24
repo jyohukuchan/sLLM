@@ -793,6 +793,7 @@ def _validate_generic_campaign_lineages(
     identity: dict[str, Any],
     source_commit: str,
     rollback: dict[str, Any],
+    authorization_policy: Any | None,
 ) -> dict[str, Any]:
     """Cross-bind both auxiliary campaigns to the one claimed SQ8 authorization."""
 
@@ -876,42 +877,48 @@ def _validate_generic_campaign_lineages(
     if browser_path.resolve(strict=True) != browser_root / "browser-evidence.json":
         raise ValidationError("browser bundle component is not its claimed final output")
 
-    claim_path = Path(claim["path"])
     authorization_path = Path(claim["authorization_path"])
+    authorization_validator = _load_module(
+        "_ullm_generic_reasoning_bundle_campaign_authorization",
+        CAMPAIGN_AUTHORIZATION_PATH,
+    )
     try:
-        if (
-            claim_path.resolve(strict=True) != claim_path
-            or authorization_path.resolve(strict=True) != authorization_path
-        ):
-            raise ValidationError("loaded campaign claim path is not canonical")
-    except OSError as error:
-        raise ValidationError("loaded campaign claim path is unavailable") from error
-    claim_raw = _stable_read_regular(
-        claim_path,
-        "campaign authorization claim",
-        MAX_COMPONENT_BYTES,
-        require_immutable=True,
-    )
-    authorization_raw = _stable_read_regular(
-        authorization_path,
-        "campaign authorization",
-        MAX_COMPONENT_BYTES,
-        require_immutable=True,
-    )
+        policy = (
+            authorization_validator.RegistryPolicy()
+            if authorization_policy is None
+            else authorization_policy
+        )
+        claim_record = authorization_validator.load_claim(
+            authorization_path,
+            now=datetime.now(timezone.utc),
+            policy=policy,
+        )
+    except Exception as error:
+        raise ValidationError("campaign authorization validation failed") from error
+
+    claim_path = Path(claim["path"])
+    claim_snapshot = claim_record.snapshot
+    authorization_snapshot = claim_record.authorization.snapshot
+    claim_document = claim_record.document
+    authorization_document = claim_record.authorization.document
     if (
-        len(claim_raw) != claim["bytes"]
-        or hashlib.sha256(claim_raw).hexdigest() != claim["sha256"]
-        or hashlib.sha256(authorization_raw).hexdigest()
-        != claim["authorization_sha256"]
-    ):
-        raise ValidationError("loaded campaign claim bytes differ")
-    claim_document = _json_bytes(claim_raw, "campaign authorization claim")
-    authorization_document = _json_bytes(
-        authorization_raw,
-        "campaign authorization",
-    )
-    if (
-        set(claim_document) != CLAIM_FIELDS
+        claim_snapshot.path != claim_path
+        or authorization_snapshot.path != authorization_path
+        or claim_snapshot.path
+        != authorization_validator.claim_path(
+            authorization_snapshot.sha256,
+            policy=policy,
+        )
+        or claim_snapshot.raw
+        != authorization_validator.canonical_json_bytes(claim_document)
+        or authorization_snapshot.raw
+        != authorization_validator.canonical_json_bytes(
+            authorization_document
+        )
+        or len(claim_snapshot.raw) != claim["bytes"]
+        or claim_snapshot.sha256 != claim["sha256"]
+        or authorization_snapshot.sha256 != claim["authorization_sha256"]
+        or set(claim_document) != CLAIM_FIELDS
         or claim_document.get("schema_version") != CLAIM_SCHEMA
         or claim_document.get("authorization_path") != claim["authorization_path"]
         or claim_document.get("authorization_sha256")
@@ -923,33 +930,6 @@ def _validate_generic_campaign_lineages(
         != authorization_document.get("authorization_id")
     ):
         raise ValidationError("loaded campaign claim identity differs")
-    authorization_validator = _load_module(
-        "_ullm_generic_reasoning_bundle_campaign_authorization",
-        CAMPAIGN_AUTHORIZATION_PATH,
-    )
-    try:
-        authorization_validator.validate_authorization_document(
-            authorization_document,
-            now=datetime.now(timezone.utc),
-            required_uid=os.getuid(),
-            validate_prior_outcome=False,
-            require_fresh_outputs=False,
-            require_bound_inputs=False,
-            enforce_current_window=False,
-        )
-        if (
-            authorization_validator.canonical_json_bytes(authorization_document)
-            != authorization_raw
-            or authorization_validator.canonical_json_bytes(claim_document)
-            != claim_raw
-        ):
-            raise ValidationError(
-                "campaign authorization or claim is not canonical JSON"
-            )
-    except Exception as error:
-        if isinstance(error, ValidationError):
-            raise
-        raise ValidationError("campaign authorization validation failed") from error
     authorized_aq4_release = authorization_document.get("aq4_release")
     fixed_openwebui_image = getattr(
         authorization_validator,
@@ -1157,7 +1137,12 @@ def _validate_generic_campaign_lineages(
     }
 
 
-def _validate_v2(path: Path, document: dict[str, Any]) -> dict[str, Any]:
+def _validate_v2(
+    path: Path,
+    document: dict[str, Any],
+    *,
+    authorization_policy: Any | None = None,
+) -> dict[str, Any]:
     expected_root = {
         "schema_version",
         "status",
@@ -1327,6 +1312,7 @@ def _validate_v2(path: Path, document: dict[str, Any]) -> dict[str, Any]:
         identity=identity,
         source_commit=document["source_commit"],
         rollback=rollback,
+        authorization_policy=authorization_policy,
     )
 
     reasons: list[str] = []
@@ -1351,7 +1337,11 @@ def _validate_v2(path: Path, document: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def validate(path: Path) -> dict[str, Any]:
+def validate(
+    path: Path,
+    *,
+    authorization_policy: Any | None = None,
+) -> dict[str, Any]:
     document, _raw = _read_json(path, "release bundle", MAX_BUNDLE_BYTES)
     schema = document.get("schema_version")
     if schema == SCHEMA_VERSION_V1:
@@ -1372,7 +1362,11 @@ def validate(path: Path) -> dict[str, Any]:
         stable_document = _json_bytes(raw, "release bundle v2")
         if stable_document.get("schema_version") != SCHEMA_VERSION_V2:
             raise ValidationError("release bundle v2 changed before validation")
-        report = _validate_v2(absolute, stable_document)
+        report = _validate_v2(
+            absolute,
+            stable_document,
+            authorization_policy=authorization_policy,
+        )
         if (
             _stable_read_regular(
                 absolute,

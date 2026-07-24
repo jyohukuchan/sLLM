@@ -41,6 +41,7 @@ BROWSER_FIXTURE = load_module(
     ROOT / "tests/test_validate_openwebui_reasoning_browser_smoke.py",
 )
 _REAL_VALIDATOR_FIXTURES: tuple[ModuleType, ModuleType] | None = None
+FIXED_ACTIVE_MANIFEST_PATH = "/etc/ullm/served-models/active.json"
 
 
 def real_validator_fixtures() -> tuple[ModuleType, ModuleType]:
@@ -156,6 +157,40 @@ def seal_bundle_v2(path: Path) -> None:
     path.chmod(0o444)
 
 
+def v2_registry_policy(
+    root: Path,
+    *,
+    required_uid: int | None = None,
+) -> Any:
+    return AUTH.RegistryPolicy(
+        claim_registry=root / "campaign-claims",
+        outcome_registry=root / "campaign-outcomes",
+        required_uid=os.getuid() if required_uid is None else required_uid,
+    )
+
+
+def validate_v2_bundle(
+    bundle: Path,
+    *,
+    required_uid: int | None = None,
+) -> dict[str, Any]:
+    return BUNDLE.validate(
+        bundle,
+        authorization_policy=v2_registry_policy(
+            bundle.parent,
+            required_uid=required_uid,
+        ),
+    )
+
+
+def v2_claim_path(root: Path, authorization_path: Path) -> Path:
+    return (
+        root
+        / "campaign-claims"
+        / f"{digest(authorization_path)}.claim.json"
+    )
+
+
 def seal_bundle_v2_components(path: Path, value: object) -> None:
     assert isinstance(value, dict)
     artifacts = value["artifacts"]
@@ -209,7 +244,7 @@ def active_binding_artifacts(
                 "identity": identity,
             },
             "active": {
-                "path": str(output.parent / "active.json"),
+                "path": FIXED_ACTIVE_MANIFEST_PATH,
                 "sha256": candidate_sha256,
                 "identity": identity,
             },
@@ -233,7 +268,7 @@ def active_binding_artifacts(
             "sha256": candidate_sha256,
             "bytes": len(candidate_raw),
         },
-        "actual_active_path": str(output.parent / "active.json"),
+        "actual_active_path": FIXED_ACTIVE_MANIFEST_PATH,
         "expected_stages": list(stages),
         "observation_count": len(stages),
         "observations": {
@@ -525,7 +560,8 @@ def make_v2_bundle(
             del authorization_document["campaigns"][name]
     write_canonical_json(authorization_path, authorization_document)
     authorization_path.chmod(0o444)
-    claim_path = root / "campaign-authorization.claimed.json"
+    (root / "campaign-claims").mkdir()
+    claim_path = v2_claim_path(root, authorization_path)
     write_canonical_json(
         claim_path,
         {
@@ -1205,7 +1241,9 @@ def make_real_validator_v2_bundle(
     full_base = root / "full-real"
     full_base.mkdir()
     placeholder_claim = {
-        "path": str(root / "campaign-authorization.claimed.json"),
+        "path": str(
+            root / "campaign-claims" / f"{'0' * 64}.claim.json"
+        ),
         "sha256": "0" * 64,
         "bytes": 1,
         "authorization_path": str(root / "campaign-authorization.json"),
@@ -1269,7 +1307,8 @@ def make_real_validator_v2_bundle(
     )
     write_canonical_json(authorization_path, authorization)
     authorization_path.chmod(0o444)
-    claim_path = root / "campaign-authorization.claimed.json"
+    (root / "campaign-claims").mkdir()
+    claim_path = v2_claim_path(root, authorization_path)
     write_canonical_json(
         claim_path,
         {
@@ -1501,9 +1540,9 @@ def test_bundle_v2_rejects_mixed_v1_v2_authorization_and_claim(
 
     with pytest.raises(
         BUNDLE.ValidationError,
-        match="loaded campaign claim identity differs",
+        match="campaign authorization validation failed",
     ):
-        BUNDLE.validate(bundle)
+        validate_v2_bundle(bundle)
 
 
 def test_bundle_v2_rejects_three_campaign_authorization(
@@ -1520,7 +1559,7 @@ def test_bundle_v2_rejects_three_campaign_authorization(
         BUNDLE.ValidationError,
         match="campaign authorization validation failed",
     ):
-        BUNDLE.validate(bundle)
+        validate_v2_bundle(bundle)
 
 
 def test_bundle_v2_rejects_sq8_full_run_not_selected_by_authorization(
@@ -1537,7 +1576,7 @@ def test_bundle_v2_rejects_sq8_full_run_not_selected_by_authorization(
         BUNDLE.ValidationError,
         match="lineage differs from its authorization",
     ):
-        BUNDLE.validate(bundle)
+        validate_v2_bundle(bundle)
 
 
 def test_bundle_v2_rejects_sq8_full_output_not_selected_by_authorization(
@@ -1554,7 +1593,7 @@ def test_bundle_v2_rejects_sq8_full_output_not_selected_by_authorization(
         BUNDLE.ValidationError,
         match="lineage differs from its authorization",
     ):
-        BUNDLE.validate(bundle)
+        validate_v2_bundle(bundle)
 
 
 def test_bundle_v2_recomputes_nine_slots_and_cross_bindings(
@@ -1564,7 +1603,7 @@ def test_bundle_v2_recomputes_nine_slots_and_cross_bindings(
     bundle, fakes, _report = make_v2_bundle(tmp_path)
     install_v2_fakes(monkeypatch, fakes)
 
-    result = BUNDLE.validate(bundle)
+    result = validate_v2_bundle(bundle)
 
     assert result["input_schema_version"] == BUNDLE.SCHEMA_VERSION_V2
     assert result["schema_version"] == BUNDLE.VALIDATOR_SCHEMA_VERSION_V2
@@ -1577,7 +1616,10 @@ def test_bundle_v2_recomputes_nine_slots_and_cross_bindings(
     assert reasoning_campaign["final_path"] == str(tmp_path / "reasoning-release")
     assert reasoning_campaign["artifact_count"] == 7
     assert reasoning_campaign["claim_sha256"] == digest(
-        tmp_path / "campaign-authorization.claimed.json"
+        v2_claim_path(
+            tmp_path,
+            tmp_path / "campaign-authorization.json",
+        )
     )
     assert reasoning_campaign["authorization_sha256"] == digest(
         tmp_path / "campaign-authorization.json"
@@ -1613,6 +1655,56 @@ def test_bundle_v2_recomputes_nine_slots_and_cross_bindings(
     )
 
 
+def test_bundle_v2_default_policy_does_not_trust_fixture_claim(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bundle, fakes, _report = make_v2_bundle(tmp_path)
+    install_v2_fakes(monkeypatch, fakes)
+
+    with pytest.raises(
+        BUNDLE.ValidationError,
+        match="campaign authorization validation failed",
+    ):
+        BUNDLE.validate(bundle)
+
+
+def test_bundle_v2_rejects_claim_outside_injected_registry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bundle, fakes, _report = make_v2_bundle(tmp_path)
+    install_v2_fakes(monkeypatch, fakes)
+    alternate_claim_registry = tmp_path / "alternate-claims"
+    alternate_claim_registry.mkdir()
+    policy = AUTH.RegistryPolicy(
+        claim_registry=alternate_claim_registry,
+        outcome_registry=tmp_path / "alternate-outcomes",
+        required_uid=os.getuid(),
+    )
+
+    with pytest.raises(
+        BUNDLE.ValidationError,
+        match="campaign authorization validation failed",
+    ):
+        BUNDLE.validate(bundle, authorization_policy=policy)
+
+
+def test_bundle_v2_rejects_wrong_registry_uid_policy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bundle, fakes, _report = make_v2_bundle(tmp_path)
+    install_v2_fakes(monkeypatch, fakes)
+    wrong_uid = 1 if os.getuid() == 0 else 0
+
+    with pytest.raises(
+        BUNDLE.ValidationError,
+        match="campaign authorization validation failed",
+    ):
+        validate_v2_bundle(bundle, required_uid=wrong_uid)
+
+
 def test_bundle_v2_root_must_be_mode_0444_single_link(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1622,7 +1714,7 @@ def test_bundle_v2_root_must_be_mode_0444_single_link(
     bundle.chmod(0o644)
 
     with pytest.raises(BUNDLE.ValidationError, match="mode-0444 single-link"):
-        BUNDLE.validate(bundle)
+        validate_v2_bundle(bundle)
 
 
 def test_bundle_v2_root_rejects_hard_link(
@@ -1634,7 +1726,7 @@ def test_bundle_v2_root_rejects_hard_link(
     os.link(bundle, tmp_path / "bundle-v2-alias.json")
 
     with pytest.raises(BUNDLE.ValidationError, match="mode-0444 single-link"):
-        BUNDLE.validate(bundle)
+        validate_v2_bundle(bundle)
 
 
 def test_bundle_v2_component_must_be_mode_0444(
@@ -1648,7 +1740,7 @@ def test_bundle_v2_component_must_be_mode_0444(
     component.chmod(0o644)
 
     with pytest.raises(BUNDLE.ValidationError, match="mode-0444 single-link"):
-        BUNDLE.validate(bundle)
+        validate_v2_bundle(bundle)
 
 
 def test_bundle_v2_component_rejects_hard_link(
@@ -1662,7 +1754,7 @@ def test_bundle_v2_component_rejects_hard_link(
     os.link(component, tmp_path / "release-validator-hardlink.json")
 
     with pytest.raises(BUNDLE.ValidationError, match="mode-0444 single-link"):
-        BUNDLE.validate(bundle)
+        validate_v2_bundle(bundle)
 
 
 def test_bundle_v2_root_rejects_symlink(
@@ -1676,7 +1768,7 @@ def test_bundle_v2_root_rejects_symlink(
     bundle.symlink_to(target)
 
     with pytest.raises(BUNDLE.ValidationError, match="regular non-symlink"):
-        BUNDLE.validate(bundle)
+        validate_v2_bundle(bundle)
 
 
 def test_bundle_v2_root_rejects_mutation_during_validation(
@@ -1687,8 +1779,17 @@ def test_bundle_v2_root_rejects_mutation_during_validation(
     install_v2_fakes(monkeypatch, fakes)
     original = BUNDLE._validate_v2
 
-    def mutate(path: Path, document: dict[str, Any]) -> dict[str, Any]:
-        report = original(path, document)
+    def mutate(
+        path: Path,
+        document: dict[str, Any],
+        *,
+        authorization_policy: Any | None = None,
+    ) -> dict[str, Any]:
+        report = original(
+            path,
+            document,
+            authorization_policy=authorization_policy,
+        )
         changed = dict(document)
         changed["status"] = "incomplete"
         rewrite_bundle_v2(path, changed)
@@ -1697,7 +1798,7 @@ def test_bundle_v2_root_rejects_mutation_during_validation(
     monkeypatch.setattr(BUNDLE, "_validate_v2", mutate)
 
     with pytest.raises(BUNDLE.ValidationError, match="changed during validation"):
-        BUNDLE.validate(bundle)
+        validate_v2_bundle(bundle)
 
 
 def test_bundle_v2_rejects_six_slot_v1_artifact_mix(tmp_path: Path) -> None:
@@ -1708,7 +1809,7 @@ def test_bundle_v2_rejects_six_slot_v1_artifact_mix(tmp_path: Path) -> None:
     seal_bundle_v2(bundle)
 
     with pytest.raises(BUNDLE.ValidationError, match="v2 artifacts differ"):
-        BUNDLE.validate(bundle)
+        validate_v2_bundle(bundle)
 
 
 def test_bundle_v2_does_not_reinterpret_release_v1_as_lineage_v2(
@@ -1728,7 +1829,7 @@ def test_bundle_v2_does_not_reinterpret_release_v1_as_lineage_v2(
     rewrite_bundle_v2(bundle, value)
 
     with pytest.raises(BUNDLE.ValidationError, match="release evidence identity"):
-        BUNDLE.validate(bundle)
+        validate_v2_bundle(bundle)
 
 
 def test_bundle_v2_rejects_cross_campaign_claim_mix(
@@ -1747,7 +1848,7 @@ def test_bundle_v2_rejects_cross_campaign_claim_mix(
     rewrite_bundle_v2(bundle, value)
 
     with pytest.raises(BUNDLE.ValidationError):
-        BUNDLE.validate(bundle)
+        validate_v2_bundle(bundle)
 
 
 def test_bundle_v2_rejects_alternate_valid_release_lineage_not_in_authorization(
@@ -1823,7 +1924,7 @@ def test_bundle_v2_rejects_alternate_valid_release_lineage_not_in_authorization(
         BUNDLE.ValidationError,
         match="lineage differs from its authorization",
     ):
-        BUNDLE.validate(bundle)
+        validate_v2_bundle(bundle)
 
 
 def test_bundle_v2_rejects_browser_identity_mismatch(
@@ -1842,7 +1943,7 @@ def test_bundle_v2_rejects_browser_identity_mismatch(
     rewrite_bundle_v2(bundle, value)
 
     with pytest.raises(BUNDLE.ValidationError, match="browser v5 identity"):
-        BUNDLE.validate(bundle)
+        validate_v2_bundle(bundle)
 
 
 @pytest.mark.parametrize(
@@ -1898,7 +1999,7 @@ def test_bundle_v2_rejects_unfixed_browser_or_server_image(
         BUNDLE.ValidationError,
         match="image identities differ from authorization",
     ):
-        BUNDLE.validate(bundle)
+        validate_v2_bundle(bundle)
 
 
 def test_bundle_v2_rejects_candidate_receipt_hash_mismatch(
@@ -1917,7 +2018,7 @@ def test_bundle_v2_rejects_candidate_receipt_hash_mismatch(
     rewrite_bundle_v2(bundle, value)
 
     with pytest.raises(BUNDLE.ValidationError, match="candidate promotion identity"):
-        BUNDLE.validate(bundle)
+        validate_v2_bundle(bundle)
 
 
 def test_bundle_v2_rejects_forged_campaign_validator_report(
@@ -1941,7 +2042,7 @@ def test_bundle_v2_rejects_forged_campaign_validator_report(
     rewrite_bundle_v2(bundle, value)
 
     with pytest.raises(BUNDLE.ValidationError, match="differs from recomputation"):
-        BUNDLE.validate(bundle)
+        validate_v2_bundle(bundle)
 
 
 def test_bundle_v2_requires_exact_campaign_component_locations(
@@ -1961,7 +2062,7 @@ def test_bundle_v2_requires_exact_campaign_component_locations(
     rewrite_bundle_v2(bundle, value)
 
     with pytest.raises(BUNDLE.ValidationError, match="artifact locations differ"):
-        BUNDLE.validate(bundle)
+        validate_v2_bundle(bundle)
 
 
 def test_bundle_v2_real_validators_and_build_receipt_mutation_matrix(
@@ -1971,7 +2072,7 @@ def test_bundle_v2_real_validators_and_build_receipt_mutation_matrix(
     bundle, promotion = make_real_validator_v2_bundle(tmp_path)
     monkeypatch.setattr(BUNDLE, "ROOT", promotion.source)
 
-    report = BUNDLE.validate(bundle)
+    report = validate_v2_bundle(bundle)
 
     assert report["gate_eligible"] is True
     assert report["bundle_sha256"] == digest(bundle)
@@ -2023,7 +2124,7 @@ def test_bundle_v2_real_validators_and_build_receipt_mutation_matrix(
             BUNDLE.ValidationError,
             match="SQ8 promotion receipt validation failed",
         ):
-            BUNDLE.validate(bundle)
+            validate_v2_bundle(bundle)
 
     build_receipt.chmod(0o644)
     build_receipt.write_bytes(original)
@@ -2031,7 +2132,7 @@ def test_bundle_v2_real_validators_and_build_receipt_mutation_matrix(
         BUNDLE.ValidationError,
         match="SQ8 promotion receipt validation failed",
     ):
-        BUNDLE.validate(bundle)
+        validate_v2_bundle(bundle)
     build_receipt.chmod(0o444)
 
     promotion.build_release.chmod(0o755)
@@ -2042,7 +2143,7 @@ def test_bundle_v2_real_validators_and_build_receipt_mutation_matrix(
             BUNDLE.ValidationError,
             match="SQ8 promotion receipt validation failed",
         ):
-            BUNDLE.validate(bundle)
+            validate_v2_bundle(bundle)
     finally:
         promotion.build_release.chmod(0o755)
         alias.unlink()

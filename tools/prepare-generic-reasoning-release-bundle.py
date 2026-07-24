@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import argparse
+import ctypes
+import errno
 import hashlib
 import importlib.util
 import json
@@ -35,6 +37,7 @@ V2_ARTIFACT_NAMES = ARTIFACT_NAMES + (
     "model_campaign_evidence",
     "model_campaign_validator",
 )
+RENAME_NOREPLACE = 1
 
 
 class BundleError(RuntimeError):
@@ -195,13 +198,11 @@ def _publish_immutable(path: Path, document: dict[str, Any]) -> None:
             destination.flush()
             os.fsync(destination.fileno())
             os.fchmod(destination.fileno(), 0o444)
-        try:
-            os.link(temporary, path, follow_symlinks=False)
-        except FileExistsError as error:
-            raise BundleError("output bundle already exists") from error
-        except OSError as error:
-            raise BundleError("output bundle could not be published") from error
-        temporary.unlink()
+        _rename_noreplace_at(
+            parent,
+            temporary.name,
+            path.name,
+        )
         temporary = None
         directory = os.open(parent, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
         try:
@@ -218,6 +219,65 @@ def _publish_immutable(path: Path, document: dict[str, Any]) -> None:
     finally:
         if temporary is not None:
             temporary.unlink(missing_ok=True)
+
+
+def _rename_noreplace_at(
+    parent: Path,
+    source_name: str,
+    destination_name: str,
+) -> None:
+    """Atomically publish one name without a transient second hard link."""
+
+    if (
+        not source_name
+        or not destination_name
+        or "/" in source_name
+        or "/" in destination_name
+        or "\x00" in source_name
+        or "\x00" in destination_name
+    ):
+        raise BundleError("output bundle publication names are invalid")
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC
+    if not hasattr(os, "O_NOFOLLOW"):
+        raise BundleError("O_NOFOLLOW is required for bundle publication")
+    flags |= os.O_NOFOLLOW
+    try:
+        renameat2 = ctypes.CDLL(None, use_errno=True).renameat2
+    except (AttributeError, OSError) as error:
+        raise BundleError(
+            "renameat2(RENAME_NOREPLACE) is unavailable"
+        ) from error
+    renameat2.argtypes = (
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_uint,
+    )
+    renameat2.restype = ctypes.c_int
+    descriptor = -1
+    try:
+        descriptor = os.open(parent, flags)
+        ctypes.set_errno(0)
+        result = renameat2(
+            descriptor,
+            os.fsencode(source_name),
+            descriptor,
+            os.fsencode(destination_name),
+            RENAME_NOREPLACE,
+        )
+        if result == 0:
+            return
+        error_number = ctypes.get_errno()
+        if error_number in {errno.EEXIST, errno.ENOTEMPTY}:
+            raise BundleError("output bundle already exists")
+        raise BundleError("output bundle could not be published") from OSError(
+            error_number,
+            os.strerror(error_number),
+        )
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
 
 
 def prepare(
