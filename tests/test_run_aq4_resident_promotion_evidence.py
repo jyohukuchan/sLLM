@@ -304,8 +304,8 @@ def test_evidence_accepts_v2_resident_and_keeps_legacy_v1(
         "enabled_by_default": False,
         "dialect_id": "fixture-thinking-v1",
         "start_token_ids": [10],
-        "end_token_ids": [20, 21],
-        "forced_end_token_ids": [20, 21],
+        "end_token_ids": [20],
+        "forced_end_token_ids": [20],
         "initial_phase": "reasoning",
         "eos_policy": "close",
         "effort_budgets": {"low": 1, "medium": 1, "high": 1},
@@ -336,7 +336,7 @@ def test_evidence_accepts_v2_resident_and_keeps_legacy_v1(
     ]
     assert reasoning_cases[0]["reasoning_usage"] == {
         "reasoning_tokens": 0,
-        "forced_end_tokens": 2,
+        "forced_end_tokens": 1,
     }
     GENERATOR._validate_v2_reasoning_evidence(
         document, document["ephemeral_bundle"]["manifest"]
@@ -364,8 +364,8 @@ def test_v2_evidence_receipt_and_manifest_pipeline_is_bound(
         "enabled_by_default": False,
         "dialect_id": "fixture-thinking-v1",
         "start_token_ids": [10],
-        "end_token_ids": [20, 21],
-        "forced_end_token_ids": [20, 21],
+        "end_token_ids": [20],
+        "forced_end_token_ids": [20],
         "initial_phase": "reasoning",
         "eos_policy": "close",
         "effort_budgets": {"low": 1, "medium": 1, "high": 1},
@@ -399,3 +399,32 @@ def test_v2_evidence_receipt_and_manifest_pipeline_is_bound(
     assert manifest["schema_version"] == "ullm.served_model.v2"
     assert manifest["worker"]["protocol"] == "ullm.worker.v2"
     assert manifest["promotion"]["source_commit"] == "fixture-v2-pipeline"
+
+    for label, mutation in (
+        (
+            "token",
+            lambda document: document["reasoning"].__setitem__(
+                "start_token_ids", [11]
+            ),
+        ),
+        (
+            "dialect",
+            lambda document: document["reasoning"].__setitem__(
+                "dialect_id", "fixture-thinking-v2"
+            ),
+        ),
+        (
+            "budget",
+            lambda document: document["reasoning"].__setitem__(
+                "max_budget_tokens", 2
+            ),
+        ),
+    ):
+        mutated = json.loads(json.dumps(value))
+        mutation(mutated)
+        profile.write_text(json.dumps(mutated) + "\n", encoding="ascii")
+        with pytest.raises(
+            GENERATOR.GenerationError,
+            match="evidence, profile, and output reasoning differ",
+        ):
+            GENERATOR.materialize(profile)

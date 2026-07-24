@@ -249,6 +249,11 @@ def _parse_reasoning(value: Any, vocab_size: int) -> ReasoningDialect:
         raw = item[name]
         if not isinstance(raw, list) or not raw:
             raise ServedModelError(f"reasoning.{name} must be a nonempty array")
+        if len(raw) != 1:
+            raise ServedModelError(
+                f"reasoning.{name} must contain exactly one token in "
+                "ullm.served_model.v2"
+            )
         values = tuple(
             _nonnegative_integer(token, f"reasoning.{name}[{index}]")
             for index, token in enumerate(raw)

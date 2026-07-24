@@ -38,7 +38,11 @@ pub struct ReasoningExecution {
 `None` is valid only for a v1 profile. A v2 profile and request must both have
 reasoning data; a v1 profile and request must both omit it. The execution
 dialect, end sequences, and reservation exactly equal the loaded manifest.
-The budget is `None` or an integer in `0..=max_budget_tokens`.
+The manifest start sequence and the request/manifest natural and forced end
+sequences each have length exactly one. The `Vec` representation is retained
+only as an internal API shape; it does not authorize multi-token v2
+delimiters. The budget is `None` or an integer in
+`0..=max_budget_tokens`.
 
 The release summary additionally carries:
 
@@ -86,16 +90,18 @@ completion. A natural delimiter is neither reasoning-body nor forced usage.
 In addition to v0.1 validation, `start` verifies before mutation:
 
 1. profile and request worker schemas are exactly v2;
-2. the loaded reasoning dialect is valid for the loaded vocabulary;
+2. the loaded reasoning dialect is valid for the loaded vocabulary and each
+   start, natural-end, and forced-end sequence contains exactly one token;
 3. request dialect, end sequence, forced sequence, and reservation exactly
    match that dialect;
 4. a bounded budget does not exceed the manifest maximum; and
 5. `max_new_tokens` can contain every required forced token and the positive
    answer reservation.
 
-The manifest-level maximum budget plus forced sequence plus answer reservation
-must also fit the manifest completion maximum. Failure leaves scheduler,
-cache, counters, and sampler RNG at the `Ready` baseline and emits no release.
+The manifest-level maximum budget plus the forced token plus answer
+reservation must also fit the manifest completion maximum. Failure leaves
+scheduler, cache, counters, and sampler RNG at the `Ready` baseline and emits
+no release.
 
 ## 5. Phase transitions
 
@@ -107,10 +113,10 @@ Enabled reasoning normally starts in `Reasoning`. A zero budget starts in
 
 - a sampled non-delimiter token becomes committed reasoning body only after
   its publication succeeds;
-- a complete natural end sequence changes to `Answer`;
+- the natural end token changes to `Answer`;
 - reaching the hard budget changes to `ForcingEndSequence`;
 - the length guard forces close before the remaining completion capacity
-  would fall below forced-sequence length plus answer reservation; and
+  would fall below the forced token plus answer reservation; and
 - with EOS policy `close`, a reasoning-phase EOS proposal is discarded and
   replaced in the same completion slot by the first forced token.
 
@@ -119,7 +125,7 @@ answer content by the gateway. It remains sampled raw worker output. A forced
 delimiter is also suppressed from user-visible content, but is raw worker
 output and forced usage.
 
-After the forced sequence commits, the phase is `Answer`. At least
+After the forced token commits, the phase is `Answer`. At least
 `reserved_answer_tokens` capacity remains. Normal EOS/length terminal
 precedence then follows v0.1.
 
@@ -163,10 +169,11 @@ failure remains fatal and cannot produce a successful release.
 
 ## 8. Required conformance
 
-CPU conformance covers exact profile schema selection, explicit disabled
-execution, budgets `0/32/128/256`, unbounded natural/forced/EOS close,
-reservation, transactional cancellation/publication rollback, release/reset
-preservation, reuse reset, and forced-token RNG nonconsumption.
+CPU conformance covers exact profile schema selection, multi-token v2 profile
+and request rejection, explicit disabled execution, budgets
+`0/32/128/256`, unbounded natural/forced/EOS close, reservation,
+transactional cancellation/publication rollback, release/reset preservation,
+reuse reset, and forced-token RNG nonconsumption.
 
 The standalone physical-GPU gate is
 `sq8-worker-acceptance-v0.3.md`. Fresh OpenWebUI evidence is governed by

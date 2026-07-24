@@ -5,6 +5,22 @@ use ullm_engine::sq8_worker_protocol::{
     Sq8OrderedJsonlWriter, Sq8WorkerEvent, Sq8WorkerProfile, inspect_sq8_worker_command,
 };
 
+fn v2_reasoning_dialect() -> ullm_engine::reasoning::ReasoningDialect {
+    ullm_engine::reasoning::ReasoningDialect {
+        identity: "synthetic.single-token.v1".into(),
+        start_sequence: vec![10],
+        end_sequence: vec![20],
+        forced_end_sequence: vec![20],
+        max_budget_tokens: 2,
+        reserved_answer_tokens: 1,
+        enabled_by_default: false,
+        effort_budgets: vec![("low".into(), 1), ("medium".into(), 1), ("high".into(), 2)],
+        history_reasoning_policy: ullm_engine::reasoning::HistoryReasoningPolicy::Omit,
+        initial_phase: ullm_engine::reasoning::InitialReasoningPhase::Reasoning,
+        eos_policy: ullm_engine::reasoning::ReasoningEosPolicy::Close,
+    }
+}
+
 fn profile() -> Sq8WorkerProfile {
     Sq8WorkerProfile {
         worker_schema: "ullm.worker.v1".into(),
@@ -63,6 +79,7 @@ fn command_decode_and_request_validation_share_the_explicit_snapshot() {
 fn v2_profile_drives_ready_and_regular_event_schema() {
     let mut profile = profile();
     profile.worker_schema = "ullm.worker.v2".into();
+    profile.reasoning = Some(v2_reasoning_dialect());
     let mut writer = Sq8OrderedJsonlWriter::with_profile(Vec::new(), profile.clone());
     writer
         .write_ready_event(&Sq8WorkerEvent::ready_with_profile(&profile))

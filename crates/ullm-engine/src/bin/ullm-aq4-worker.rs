@@ -1094,10 +1094,10 @@ mod tests {
 
     fn scripted_reasoning_dialect() -> ullm_engine::reasoning::ReasoningDialect {
         ullm_engine::reasoning::ReasoningDialect {
-            identity: "synthetic.worker-v2.v1".into(),
-            start_sequence: vec![10, 11],
-            end_sequence: vec![20, 21],
-            forced_end_sequence: vec![20, 21],
+            identity: "synthetic.worker-v2.single-token.v1".into(),
+            start_sequence: vec![10],
+            end_sequence: vec![20],
+            forced_end_sequence: vec![20],
             max_budget_tokens: 2,
             reserved_answer_tokens: 1,
             enabled_by_default: false,
@@ -1285,9 +1285,9 @@ mod tests {
                 "reasoning": {
                     "enabled": true,
                     "budget_tokens": 1,
-                    "dialect_id": "synthetic.worker-v2.v1",
-                    "end_token_ids": [20, 21],
-                    "forced_end_token_ids": [20, 21],
+                    "dialect_id": "synthetic.worker-v2.single-token.v1",
+                    "end_token_ids": [20],
+                    "forced_end_token_ids": [20],
                     "reserved_answer_tokens": 1
                 }
             })
@@ -1337,15 +1337,15 @@ mod tests {
             .filter(|line| line["type"] == "token")
             .map(|line| line["token_id"].as_u64().unwrap())
             .collect::<Vec<_>>();
-        assert_eq!(token_ids, [7, 20, 21, 2]);
+        assert_eq!(token_ids, [7, 20, 2]);
         let released = lines
             .iter()
             .find(|line| line["type"] == "released")
             .unwrap();
         assert_eq!(released["outcome"], "stop");
-        assert_eq!(released["completion_tokens"], 4);
+        assert_eq!(released["completion_tokens"], 3);
         assert_eq!(released["reasoning_tokens"], 1);
-        assert_eq!(released["forced_end_tokens"], 2);
+        assert_eq!(released["forced_end_tokens"], 1);
     }
 
     #[test]

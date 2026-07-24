@@ -107,6 +107,39 @@ class WorkerConfig:
     worker_schema: str = WORKER_SCHEMA
     reasoning_dialect: ReasoningDialect | None = None
 
+    def __post_init__(self) -> None:
+        if self.worker_schema not in SUPPORTED_WORKER_SCHEMAS:
+            raise WorkerProtocolError("worker protocol is unsupported")
+        if self.worker_schema == WORKER_SCHEMA:
+            if self.reasoning_dialect is not None:
+                raise WorkerProtocolError(
+                    "ullm.worker.v1 forbids a reasoning dialect"
+                )
+            return
+        dialect = self.reasoning_dialect
+        if dialect is None:
+            raise WorkerProtocolError(
+                "ullm.worker.v2 requires a reasoning dialect"
+            )
+        if any(
+            len(sequence) != 1
+            for sequence in (
+                dialect.start_sequence,
+                dialect.end_sequence,
+                dialect.forced_end_sequence,
+            )
+        ):
+            raise WorkerProtocolError(
+                "ullm.worker.v2 reasoning token sequences must contain "
+                "exactly one token"
+            )
+        try:
+            dialect.validate(vocab_size=self.vocab_size)
+        except ValueError as error:
+            raise WorkerProtocolError(
+                "ullm.worker.v2 reasoning dialect is invalid"
+            ) from error
+
     @classmethod
     def from_settings(cls, settings: GatewaySettings) -> "WorkerConfig":
         environment = dict(os.environ)

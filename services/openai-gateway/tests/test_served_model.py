@@ -101,10 +101,10 @@ def test_v2_manifest_loads_reasoning_dialect_without_changing_v1_loader() -> Non
     value["worker"]["protocol"] = "ullm.worker.v2"
     value["reasoning"] = {
         "enabled_by_default": False,
-        "dialect_id": "synthetic.multi-token.v1",
-        "start_token_ids": [248068, 12],
-        "end_token_ids": [248069, 13],
-        "forced_end_token_ids": [248069, 13],
+        "dialect_id": "synthetic.single-token.v1",
+        "start_token_ids": [248068],
+        "end_token_ids": [248069],
+        "forced_end_token_ids": [248069],
         "initial_phase": "reasoning",
         "eos_policy": "close",
         "effort_budgets": {"low": 32, "medium": 64, "high": 128},
@@ -124,7 +124,7 @@ def test_v2_manifest_loads_reasoning_dialect_without_changing_v1_loader() -> Non
         loaded = load_served_model(copied)
 
     assert loaded.reasoning_dialect is not None
-    assert loaded.reasoning_dialect.identity == "synthetic.multi-token.v1"
+    assert loaded.reasoning_dialect.identity == "synthetic.single-token.v1"
     assert loaded.reasoning_dialect.effort_budgets[-1] == ("high", 128)
 
 
@@ -141,10 +141,10 @@ def test_manifest_schema_and_worker_protocol_must_be_version_aligned(
     if schema == "ullm.served_model.v2":
         value["reasoning"] = {
             "enabled_by_default": False,
-            "dialect_id": "synthetic.multi-token.v1",
-            "start_token_ids": [248068, 12],
-            "end_token_ids": [248069, 13],
-            "forced_end_token_ids": [248069, 13],
+            "dialect_id": "synthetic.single-token.v1",
+            "start_token_ids": [248068],
+            "end_token_ids": [248069],
+            "forced_end_token_ids": [248069],
             "initial_phase": "reasoning",
             "eos_policy": "close",
             "effort_budgets": {"low": 32, "medium": 64, "high": 128},
@@ -154,6 +154,39 @@ def test_manifest_schema_and_worker_protocol_must_be_version_aligned(
         }
     _write(path, value)
     with pytest.raises(ServedModelError, match="version aligned"):
+        load_served_model(path)
+
+
+@pytest.mark.parametrize(
+    "field",
+    ["start_token_ids", "end_token_ids", "forced_end_token_ids"],
+)
+def test_v2_manifest_rejects_multi_token_reasoning_sequences(
+    tmp_path: Path, field: str
+) -> None:
+    root = tmp_path / "aq4-v2"
+    shutil.copytree(FIXTURES / "aq4", root)
+    path = root / "served-model.json"
+    value = _document(path)
+    value["schema_version"] = "ullm.served_model.v2"
+    value["worker"]["protocol"] = "ullm.worker.v2"
+    value["reasoning"] = {
+        "enabled_by_default": False,
+        "dialect_id": "synthetic.single-token.v1",
+        "start_token_ids": [248068],
+        "end_token_ids": [248069],
+        "forced_end_token_ids": [248069],
+        "initial_phase": "reasoning",
+        "eos_policy": "close",
+        "effort_budgets": {"low": 32, "medium": 64, "high": 128},
+        "max_budget_tokens": 128,
+        "reserved_answer_tokens": 1,
+        "history_reasoning_policy": "omit",
+    }
+    value["reasoning"][field].append(12)
+    _write(path, value)
+
+    with pytest.raises(ServedModelError, match="exactly one token"):
         load_served_model(path)
 
 

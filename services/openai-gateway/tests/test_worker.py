@@ -82,11 +82,7 @@ for line in sys.stdin:
                 "processed_prompt_tokens": processed,
             }, separators=(",", ":")), flush=True)
         if mode in {"reasoning_v2", "reasoning_v2_no_answer"}:
-            token_ids = (
-                [7, 20, 151645]
-                if mode == "reasoning_v2_no_answer"
-                else [7, 20, 21, 151645]
-            )
+            token_ids = [7, 20, 151645]
             for index, token_id in enumerate(token_ids):
                 print(json.dumps({
                     "schema_version": schema,
@@ -103,7 +99,7 @@ for line in sys.stdin:
                 "prompt_tokens": prompt_tokens,
                 "completion_tokens": len(token_ids),
                 "reasoning_tokens": 1,
-                "forced_end_tokens": 2,
+                "forced_end_tokens": 1,
                 "reset_complete": True,
             }, separators=(",", ":")), flush=True)
             active = None
@@ -261,10 +257,10 @@ def test_v2_reasoning_release_records_worker_accounting(
             config(tmp_path, mode="reasoning_v2"),
             worker_schema="ullm.worker.v2",
             reasoning_dialect=ReasoningDialect(
-                identity="synthetic.worker-v2.v1",
+                identity="synthetic.worker-v2.single-token.v1",
                 start_sequence=(10,),
-                end_sequence=(20, 21),
-                forced_end_sequence=(20, 21),
+                end_sequence=(20,),
+                forced_end_sequence=(20,),
                 max_budget_tokens=8,
                 reserved_answer_tokens=1,
                 effort_budgets=(("low", 1), ("medium", 2), ("high", 4)),
@@ -285,13 +281,13 @@ def test_v2_reasoning_release_records_worker_accounting(
                 enabled=True,
                 budget_tokens=1,
                 history_reasoning_policy="omit",
-                dialect_id="synthetic.worker-v2.v1",
+                dialect_id="synthetic.worker-v2.single-token.v1",
             ),
         )
         result = await supervisor.wait(await supervisor.admit(request))
-        assert result.token_ids == (7, 20, 21, 151645)
+        assert result.token_ids == (7, 20, 151645)
         assert result.reasoning_tokens == 1
-        assert result.forced_end_tokens == 2
+        assert result.forced_end_tokens == 1
         await supervisor.shutdown()
 
     caplog.set_level(logging.INFO, logger="uvicorn.error")
@@ -304,7 +300,7 @@ def test_v2_reasoning_release_records_worker_accounting(
     ]
     assert len(released) == 1
     assert released[0]["reasoning_tokens"] == 1
-    assert released[0]["forced_end_tokens"] == 2
+    assert released[0]["forced_end_tokens"] == 1
 
 
 def test_v2_reasoning_release_requires_reserved_answer_after_forced_close(
@@ -316,12 +312,12 @@ def test_v2_reasoning_release_requires_reserved_answer_after_forced_close(
             config(tmp_path, mode="reasoning_v2_no_answer"),
             worker_schema="ullm.worker.v2",
             reasoning_dialect=ReasoningDialect(
-                identity="synthetic.worker-v2.v1",
+                identity="synthetic.worker-v2.single-token.v1",
                 start_sequence=(10,),
-                end_sequence=(20, 21),
-                forced_end_sequence=(20, 21),
+                end_sequence=(20,),
+                forced_end_sequence=(20,),
                 max_budget_tokens=8,
-                reserved_answer_tokens=1,
+                reserved_answer_tokens=2,
                 effort_budgets=(("low", 1), ("medium", 2), ("high", 4)),
             ),
         )
@@ -338,7 +334,7 @@ def test_v2_reasoning_release_requires_reserved_answer_after_forced_close(
                 enabled=True,
                 budget_tokens=1,
                 history_reasoning_policy="omit",
-                dialect_id="synthetic.worker-v2.v1",
+                dialect_id="synthetic.worker-v2.single-token.v1",
             ),
         )
         with pytest.raises(WorkerFatal):
@@ -351,6 +347,36 @@ def test_v2_reasoning_release_requires_reserved_answer_after_forced_close(
         await supervisor.shutdown()
 
     asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    "start,end,forced",
+    [
+        ((10, 11), (20,), (20,)),
+        ((10,), (20, 21), (20,)),
+        ((10,), (20,), (20, 21)),
+    ],
+)
+def test_v2_worker_config_rejects_multi_token_reasoning_sequences(
+    tmp_path: Path,
+    start: tuple[int, ...],
+    end: tuple[int, ...],
+    forced: tuple[int, ...],
+) -> None:
+    with pytest.raises(worker_module.WorkerProtocolError, match="exactly one token"):
+        replace(
+            config(tmp_path),
+            worker_schema="ullm.worker.v2",
+            reasoning_dialect=ReasoningDialect(
+                identity="synthetic.worker-v2.single-token.v1",
+                start_sequence=start,
+                end_sequence=end,
+                forced_end_sequence=forced,
+                max_budget_tokens=8,
+                reserved_answer_tokens=1,
+                effort_budgets=(("low", 1), ("medium", 2), ("high", 4)),
+            ),
+        )
 
 
 @pytest.mark.parametrize(

@@ -39,10 +39,14 @@ The independent Qwen3-14B-FP8 `SQ8_0` production identity is:
 }
 ```
 
-The reasoning object has exactly the eleven fields shown. Every token sequence
-is a nonempty array of unique nonnegative integer token IDs below
-`generation.vocab_size`; JSON booleans are not integers. Sequences operate on
-tokens and may contain more than one token.
+The reasoning object has exactly the eleven fields shown.
+`start_token_ids`, `end_token_ids`, and `forced_end_token_ids` are each an
+array containing exactly one nonnegative integer token ID below
+`generation.vocab_size`; JSON booleans are not integers. A multi-token
+delimiter is outside `ullm.served_model.v2` and requires a future versioned
+manifest and worker/session contract. Model-independent internal reasoning
+utilities may support such sequences, but that capability is not a v2
+production authorization.
 
 `end_token_ids` and `forced_end_token_ids` MUST be identical in v0.2.
 `initial_phase` is exactly `reasoning` or `answer`; `eos_policy` is exactly
@@ -61,10 +65,10 @@ max_budget_tokens
 
 MUST NOT exceed `generation.max_completion_tokens`.
 
-The loader rejects an empty or duplicate sequence, an out-of-vocabulary ID,
-an unknown/missing field, an incomplete effort map, a budget above the
-maximum, unequal natural/forced delimiters, or a start/end prefix collision
-that the token state machine cannot distinguish.
+The loader rejects a token sequence whose length differs from one, an
+out-of-vocabulary ID, an unknown/missing field, an incomplete effort map, a
+budget above the maximum, unequal natural/forced delimiters, or a start/end
+collision.
 
 ## 3. Request and template boundary
 

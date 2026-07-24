@@ -580,6 +580,18 @@ fn parse_reasoning(
     raw: RawReasoning,
     vocab_size: usize,
 ) -> Result<crate::reasoning::ReasoningDialect> {
+    if [
+        &raw.start_token_ids,
+        &raw.end_token_ids,
+        &raw.forced_end_token_ids,
+    ]
+    .into_iter()
+    .any(|sequence| sequence.len() != 1)
+    {
+        return Err(ServedModelError(
+            "ullm.served_model.v2 reasoning token sequences must contain exactly one token".into(),
+        ));
+    }
     let dialect = crate::reasoning::ReasoningDialect {
         identity: bounded_text(raw.dialect_id, "reasoning.dialect_id", 256)?,
         start_sequence: raw.start_token_ids,
@@ -1179,6 +1191,49 @@ fn io_error(error: std::io::Error) -> ServedModelError {
 mod tests {
     use super::*;
 
+    fn raw_v2_reasoning() -> RawReasoning {
+        RawReasoning {
+            enabled_by_default: false,
+            dialect_id: "synthetic.single-token.v1".into(),
+            start_token_ids: vec![10],
+            end_token_ids: vec![20],
+            forced_end_token_ids: vec![20],
+            initial_phase: "reasoning".into(),
+            eos_policy: "close".into(),
+            effort_budgets: BTreeMap::from([
+                ("low".into(), 1),
+                ("medium".into(), 2),
+                ("high".into(), 4),
+            ]),
+            max_budget_tokens: 4,
+            reserved_answer_tokens: 1,
+            history_reasoning_policy: "omit".into(),
+        }
+    }
+
+    fn v2_manifest_value(name: &str) -> Value {
+        let mut value = serde_json::from_slice::<Value>(
+            &bounded_read(&fixture(name), MAX_MANIFEST_BYTES, "fixture").unwrap(),
+        )
+        .unwrap();
+        value["schema_version"] = Value::String(SERVED_MODEL_SCHEMA_VERSION_V2.into());
+        value["worker"]["protocol"] = Value::String("ullm.worker.v2".into());
+        value["reasoning"] = serde_json::json!({
+            "enabled_by_default": false,
+            "dialect_id": "qwen3-thinking-v1",
+            "start_token_ids": [151667],
+            "end_token_ids": [151668],
+            "forced_end_token_ids": [151668],
+            "initial_phase": "reasoning",
+            "eos_policy": "close",
+            "effort_budgets": {"low": 32, "medium": 128, "high": 256},
+            "max_budget_tokens": 256,
+            "reserved_answer_tokens": 1,
+            "history_reasoning_policy": "omit"
+        });
+        value
+    }
+
     fn fixture(name: &str) -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../services/openai-gateway/tests/fixtures/served-model")
@@ -1241,5 +1296,39 @@ mod tests {
             },
         };
         assert!(parse_generation(invalid, &public).is_err());
+    }
+
+    #[test]
+    fn v2_reasoning_requires_exactly_one_token_per_sequence() {
+        parse_reasoning(raw_v2_reasoning(), 32).unwrap();
+
+        for field in ["start", "end", "forced_end"] {
+            let mut reasoning = raw_v2_reasoning();
+            match field {
+                "start" => reasoning.start_token_ids.push(11),
+                "end" => reasoning.end_token_ids.push(21),
+                "forced_end" => reasoning.forced_end_token_ids.push(21),
+                _ => unreachable!(),
+            }
+            let error = parse_reasoning(reasoning, 32).unwrap_err();
+            assert!(error.0.contains("exactly one token"));
+        }
+    }
+
+    #[test]
+    fn v2_manifest_loader_rejects_every_multi_token_reasoning_sequence() {
+        let valid = serde_json::to_vec(&v2_manifest_value("sq8")).unwrap();
+        load_served_model_bytes(fixture("sq8"), &valid).unwrap();
+
+        for field in ["start_token_ids", "end_token_ids", "forced_end_token_ids"] {
+            let mut value = v2_manifest_value("sq8");
+            value["reasoning"][field]
+                .as_array_mut()
+                .unwrap()
+                .push(Value::from(1));
+            let raw = serde_json::to_vec(&value).unwrap();
+            let error = load_served_model_bytes(fixture("sq8"), &raw).unwrap_err();
+            assert!(error.0.contains("exactly one token"));
+        }
     }
 }

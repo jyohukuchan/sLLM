@@ -389,6 +389,21 @@ impl ActiveServingRequest {
     ) -> Result<Self, String> {
         let reasoning = match (request.reasoning.as_ref(), reasoning_dialect) {
             (Some(execution), Some(dialect)) => {
+                if [
+                    dialect.start_sequence.len(),
+                    dialect.end_sequence.len(),
+                    dialect.forced_end_sequence.len(),
+                    execution.end_sequence.len(),
+                    execution.forced_end_sequence.len(),
+                ]
+                .into_iter()
+                .any(|length| length != 1)
+                {
+                    return Err(
+                        "SQ8 serving v2 reasoning token sequences must contain exactly one token"
+                            .into(),
+                    );
+                }
                 if execution.dialect_id != dialect.identity
                     || execution.end_sequence != dialect.end_sequence
                     || execution.forced_end_sequence != dialect.forced_end_sequence
@@ -2748,6 +2763,51 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn serving_v2_rejects_multi_token_loaded_and_request_sequences() {
+        for field in [
+            "loaded_start",
+            "loaded_end",
+            "loaded_forced_end",
+            "request_end",
+            "request_forced_end",
+        ] {
+            let mut dialect = qwen3_reasoning_dialect();
+            let mut request = reasoning_active(true, Some(0), 2, 0.0).request;
+            match field {
+                "loaded_start" => dialect.start_sequence.push(1),
+                "loaded_end" => {
+                    dialect.end_sequence.push(1);
+                    request.reasoning.as_mut().unwrap().end_sequence.push(1);
+                }
+                "loaded_forced_end" => {
+                    dialect.forced_end_sequence.push(1);
+                    request
+                        .reasoning
+                        .as_mut()
+                        .unwrap()
+                        .forced_end_sequence
+                        .push(1);
+                }
+                "request_end" => request.reasoning.as_mut().unwrap().end_sequence.push(1),
+                "request_forced_end" => request
+                    .reasoning
+                    .as_mut()
+                    .unwrap()
+                    .forced_end_sequence
+                    .push(1),
+                _ => unreachable!(),
+            }
+            let error = ActiveServingRequest::new_with_reasoning_dialect(
+                request,
+                Sq8CancellationToken::new(),
+                Some(&dialect),
+            )
+            .unwrap_err();
+            assert!(error.contains("exactly one token"), "field={field}");
+        }
     }
 
     #[test]

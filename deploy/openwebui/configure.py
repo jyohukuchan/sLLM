@@ -139,10 +139,12 @@ def validate_reasoning_manifest(value: Any) -> None:
         raise ConfigurationError("reasoning dialect id must be nonempty text")
     for name in ("start_token_ids", "end_token_ids", "forced_end_token_ids"):
         values = reasoning.get(name)
-        if not isinstance(values, list) or not values or any(
+        if not isinstance(values, list) or len(values) != 1 or any(
             type(token) is not int or token < 0 for token in values
         ):
-            raise ConfigurationError(f"reasoning {name} must be a nonempty integer list")
+            raise ConfigurationError(
+                f"reasoning {name} must contain exactly one nonnegative integer"
+            )
     effort_budgets = require_mapping(
         reasoning.get("effort_budgets"), "reasoning effort budgets"
     )

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import hashlib
 import importlib.util
 import json
@@ -185,10 +186,10 @@ def test_generator_materializes_v2_reasoning_profile(tmp_path: Path) -> None:
     profile["worker"]["protocol"] = "ullm.worker.v2"
     profile["reasoning"] = {
         "enabled_by_default": False,
-        "dialect_id": "synthetic.multi-token.v1",
-        "start_token_ids": [10, 11],
-        "end_token_ids": [20, 21],
-        "forced_end_token_ids": [20, 21],
+        "dialect_id": "synthetic.single-token.v1",
+        "start_token_ids": [10],
+        "end_token_ids": [20],
+        "forced_end_token_ids": [20],
         "initial_phase": "reasoning",
         "eos_policy": "close",
         "effort_budgets": {"low": 2, "medium": 4, "high": 8},
@@ -205,7 +206,39 @@ def test_generator_materializes_v2_reasoning_profile(tmp_path: Path) -> None:
 
     assert document["schema_version"] == "ullm.served_model.v2"
     assert document["worker"]["protocol"] == "ullm.worker.v2"
-    assert document["reasoning"]["dialect_id"] == "synthetic.multi-token.v1"
+    assert document["reasoning"]["dialect_id"] == "synthetic.single-token.v1"
+
+
+@pytest.mark.parametrize(
+    "field",
+    ["start_token_ids", "end_token_ids", "forced_end_token_ids"],
+)
+def test_generator_rejects_multi_token_v2_reasoning_sequences(
+    tmp_path: Path, field: str
+) -> None:
+    profile = json.loads(write_profile(tmp_path).read_text(encoding="utf-8"))
+    profile["worker"]["protocol"] = "ullm.worker.v2"
+    profile["reasoning"] = {
+        "enabled_by_default": False,
+        "dialect_id": "synthetic.single-token.v1",
+        "start_token_ids": [10],
+        "end_token_ids": [20],
+        "forced_end_token_ids": [20],
+        "initial_phase": "reasoning",
+        "eos_policy": "close",
+        "effort_budgets": {"low": 2, "medium": 4, "high": 8},
+        "max_budget_tokens": 8,
+        "reserved_answer_tokens": 1,
+        "history_reasoning_policy": "omit",
+    }
+    profile["reasoning"][field].append(21)
+    profile_path = tmp_path / "profile-v2-invalid.json"
+    profile_path.write_text(json.dumps(profile), encoding="utf-8")
+    output = tmp_path / "served-model-v2-invalid.json"
+
+    with pytest.raises(RuntimeError, match="exactly one token"):
+        GENERATOR.generate(profile_path, output)
+    assert not output.exists()
 
 
 def test_v2_generator_profile_requires_reasoning(tmp_path: Path) -> None:
@@ -222,9 +255,10 @@ def test_v2_promotion_validator_recomputes_budget_zero_case() -> None:
     manifest = {
         "worker": {"protocol": "ullm.worker.v2"},
         "reasoning": {
-            "dialect_id": "synthetic.multi-token.v1",
-            "end_token_ids": [20, 21],
-            "forced_end_token_ids": [20, 21],
+            "dialect_id": "synthetic.single-token.v1",
+            "start_token_ids": [10],
+            "end_token_ids": [20],
+            "forced_end_token_ids": [20],
             "reserved_answer_tokens": 1,
         },
     }
@@ -238,16 +272,16 @@ def test_v2_promotion_validator_recomputes_budget_zero_case() -> None:
                     "reasoning": {
                         "enabled": True,
                         "budget_tokens": 0,
-                        "dialect_id": "synthetic.multi-token.v1",
-                        "end_token_ids": [20, 21],
-                        "forced_end_token_ids": [20, 21],
+                        "dialect_id": "synthetic.single-token.v1",
+                        "end_token_ids": [20],
+                        "forced_end_token_ids": [20],
                         "reserved_answer_tokens": 1,
                     },
                     "reasoning_usage": {
                         "reasoning_tokens": 0,
-                        "forced_end_tokens": 2,
+                        "forced_end_tokens": 1,
                     },
-                    "tokens": [20, 21, 30],
+                    "tokens": [20, 30],
                 },
             ],
         },
@@ -259,7 +293,23 @@ def test_v2_promotion_validator_recomputes_budget_zero_case() -> None:
 
     GENERATOR._validate_v2_reasoning_evidence(evidence, manifest)
 
-    evidence["resident"]["cases"][1]["tokens"] = [30, 20, 21]
+    for field in (
+        "start_token_ids",
+        "end_token_ids",
+        "forced_end_token_ids",
+    ):
+        invalid_manifest = copy.deepcopy(manifest)
+        invalid_manifest["reasoning"][field].append(21)
+        with pytest.raises(GENERATOR.GenerationError, match="exactly one token"):
+            GENERATOR._validate_v2_reasoning_evidence(evidence, invalid_manifest)
+
+    for field in ("end_token_ids", "forced_end_token_ids"):
+        invalid_evidence = copy.deepcopy(evidence)
+        invalid_evidence["resident"]["cases"][1]["reasoning"][field].append(21)
+        with pytest.raises(GENERATOR.GenerationError, match="exactly one token"):
+            GENERATOR._validate_v2_reasoning_evidence(invalid_evidence, manifest)
+
+    evidence["resident"]["cases"][1]["tokens"] = [30, 20]
     with pytest.raises(GENERATOR.GenerationError, match="accounting"):
         GENERATOR._validate_v2_reasoning_evidence(evidence, manifest)
 

@@ -765,10 +765,10 @@ def test_manifest_mode_accepts_v2_reasoning_manifest(tmp_path: Path) -> None:
     value["schema_version"] = "ullm.served_model.v2"
     value["reasoning"] = {
         "enabled_by_default": False,
-        "dialect_id": "synthetic.multi-token.v1",
-        "start_token_ids": [10, 11],
-        "end_token_ids": [20, 21],
-        "forced_end_token_ids": [20, 21],
+        "dialect_id": "synthetic.single-token.v1",
+        "start_token_ids": [10],
+        "end_token_ids": [20],
+        "forced_end_token_ids": [20],
         "initial_phase": "reasoning",
         "eos_policy": "close",
         "effort_budgets": {"low": 2, "medium": 4, "high": 8},
@@ -794,6 +794,11 @@ def test_manifest_mode_accepts_v2_reasoning_manifest(tmp_path: Path) -> None:
         lambda value: value["reasoning"].pop("forced_end_token_ids"),
         lambda value: value["reasoning"]["effort_budgets"].__setitem__("low", 0),
         lambda value: value["reasoning"].__setitem__("history_reasoning_policy", "inject"),
+        lambda value: value["reasoning"].__setitem__("start_token_ids", [10, 11]),
+        lambda value: value["reasoning"].__setitem__("end_token_ids", [20, 21]),
+        lambda value: value["reasoning"].__setitem__(
+            "forced_end_token_ids", [20, 21]
+        ),
     ],
 )
 def test_manifest_mode_rejects_invalid_v2_reasoning_manifest(

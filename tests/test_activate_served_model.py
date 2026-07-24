@@ -52,10 +52,10 @@ def v2_activation_directory(tmp_path: Path) -> tuple[Path, Path]:
     document["promotion"]["source_commit"] = "1" * 40
     document["reasoning"] = {
         "enabled_by_default": False,
-        "dialect_id": "synthetic.multi-token.v1",
-        "start_token_ids": [10, 11],
-        "end_token_ids": [20, 21],
-        "forced_end_token_ids": [20, 21],
+        "dialect_id": "synthetic.single-token.v1",
+        "start_token_ids": [10],
+        "end_token_ids": [20],
+        "forced_end_token_ids": [20],
         "initial_phase": "reasoning",
         "eos_policy": "close",
         "effort_budgets": {"low": 2, "medium": 4, "high": 8},

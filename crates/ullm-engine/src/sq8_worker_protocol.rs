@@ -107,6 +107,18 @@ impl Sq8WorkerProfile {
         match (self.worker_schema.as_str(), self.reasoning.as_ref()) {
             (SQ8_WORKER_SCHEMA_VERSION, None) => Ok(()),
             (SQ8_WORKER_SCHEMA_VERSION_V2, Some(dialect)) => {
+                if [
+                    &dialect.start_sequence,
+                    &dialect.end_sequence,
+                    &dialect.forced_end_sequence,
+                ]
+                .into_iter()
+                .any(|sequence| sequence.len() != 1)
+                {
+                    return Err(Sq8WorkerProtocolError::invalid_command(
+                        "ullm.worker.v2 reasoning token sequences must contain exactly one token",
+                    ));
+                }
                 dialect.validate(self.vocab_size).map_err(|_| {
                     Sq8WorkerProtocolError::invalid_command(
                         "ullm.worker.v2 profile has an invalid reasoning dialect",
@@ -332,6 +344,11 @@ impl Sq8GenerateCommand {
         self,
         profile: &Sq8WorkerProfile,
     ) -> Result<Sq8ServingRequest, Sq8WorkerProtocolError> {
+        profile.validate_protocol_contract().map_err(|_| {
+            Sq8WorkerProtocolError::invalid_request(
+                "loaded worker profile violates the protocol contract",
+            )
+        })?;
         if !self.sampling.temperature.is_finite()
             || !(0.0..=2.0).contains(&self.sampling.temperature)
             || !self.sampling.top_p.is_finite()
@@ -1557,6 +1574,11 @@ fn convert_reasoning(
     if raw.dialect_id.is_empty() || raw.dialect_id.len() > 256 {
         return Err(Sq8WorkerProtocolError::invalid_command(
             "reasoning dialect_id violates the bounded text contract",
+        ));
+    }
+    if raw.end_token_ids.len() != 1 || raw.forced_end_token_ids.len() != 1 {
+        return Err(Sq8WorkerProtocolError::invalid_command(
+            "ullm.worker.v2 reasoning token sequences must contain exactly one token",
         ));
     }
     Ok(crate::reasoning::ReasoningExecution {
@@ -2795,6 +2817,40 @@ mod tests {
         let mut v2_without_reasoning = v2;
         v2_without_reasoning.reasoning = None;
         assert!(v2_without_reasoning.validate_protocol_contract().is_err());
+    }
+
+    #[test]
+    fn v2_profile_requires_exactly_one_token_per_reasoning_sequence() {
+        for field in ["start", "end", "forced_end"] {
+            let mut profile = v2_profile();
+            let dialect = profile.reasoning.as_mut().unwrap();
+            match field {
+                "start" => dialect.start_sequence.push(1),
+                "end" => dialect.end_sequence.push(1),
+                "forced_end" => dialect.forced_end_sequence.push(1),
+                _ => unreachable!(),
+            }
+            let error = profile.validate_protocol_contract().unwrap_err();
+            assert!(error.message.contains("exactly one token"));
+        }
+    }
+
+    #[test]
+    fn v2_command_requires_exactly_one_end_and_forced_end_token() {
+        for field in ["end_token_ids", "forced_end_token_ids"] {
+            let payload = String::from_utf8(valid_v2_generate().to_vec())
+                .unwrap()
+                .replace(
+                    &format!("\"{field}\":[151668]"),
+                    &format!("\"{field}\":[151668,151669]"),
+                );
+            let error = inspect_sq8_worker_command(payload.as_bytes())
+                .unwrap()
+                .decode_with_profile(&v2_profile())
+                .unwrap_err();
+            assert_eq!(error.kind, Sq8WorkerProtocolErrorKind::InvalidCommand);
+            assert!(error.message.contains("exactly one token"));
+        }
     }
 
     #[test]

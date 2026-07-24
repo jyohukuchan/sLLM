@@ -48,9 +48,12 @@ The generate command has exactly:
 The reasoning object is required even when `enabled` is false and has exactly
 the six fields shown. `budget_tokens` is JSON `null` for unbounded reasoning
 or a nonnegative integer no greater than the loaded manifest maximum. A zero
-budget requests immediate forced close. The dialect ID, both end sequences,
-and answer reservation MUST exactly equal the loaded manifest. The complete
-request MUST leave room for the forced sequence and
+budget requests immediate forced close. `end_token_ids` and
+`forced_end_token_ids` MUST each contain exactly one token. The dialect ID,
+both single-token arrays, and answer reservation MUST exactly equal the loaded
+manifest. A multi-token delimiter requires a future worker schema and is
+rejected during command decoding. The complete request MUST leave room for
+the forced token and
 `reserved_answer_tokens`; otherwise it is rejected before generation.
 
 Cancel and shutdown retain their v1 field sets with the v2 discriminator.
@@ -63,17 +66,17 @@ When disabled, generated tokens are answer tokens and reasoning usage remains
 zero. When enabled, the worker starts in the manifest's initial phase and
 tracks reasoning, forced-close, and answer tokens in request-local state.
 
-A complete naturally sampled end sequence changes to answer phase without
+A naturally sampled end token changes to answer phase without
 exposing the delimiter as user-visible content. The sampled delimiter remains
 a sampled raw worker token and is counted in completion usage, but not in
 reasoning-body or forced-end usage.
 
 At a hard budget, answer-reservation guard, or reasoning-phase EOS, the worker
-publishes the configured forced sequence through the same
+publishes the configured forced token through the same
 prepare/publish/commit boundary as sampled output. A reasoning-phase EOS
-proposal is replaced in that completion slot by the first forced token: the
+proposal is replaced in that completion slot by the forced token: the
 sampled EOS is neither published nor counted and does not advance committed
-sampler RNG. Every forced token is counted in completion and forced-end usage,
+sampler RNG. The forced token is counted in completion and forced-end usage,
 not reasoning-body usage, and does not consume sampler RNG.
 
 Reasoning/accounting state commits only after successful token publication.
@@ -108,9 +111,10 @@ release timing rules are unchanged.
 
 ## 5. Conformance
 
-Conformance requires CPU tests for exact schema selection, disabled `0/0`,
-budgets `0/32/128/256`, unbounded natural and forced closure, EOS replacement,
-answer reservation, cancellation/publication rollback, release/reset
-accounting, worker reuse, and forced-token RNG nonconsumption. GPU acceptance
-uses `ullm.sq8.worker_acceptance.raw.v3`; archived raw.v1/raw.v2 remain
-validated only under their frozen worker-v1 contracts.
+Conformance requires CPU tests for exact schema selection, multi-token profile
+and command rejection, disabled `0/0`, budgets `0/32/128/256`, unbounded
+natural and forced closure, EOS replacement, answer reservation,
+cancellation/publication rollback, release/reset accounting, worker reuse, and
+forced-token RNG nonconsumption. GPU acceptance uses
+`ullm.sq8.worker_acceptance.raw.v3`; archived raw.v1/raw.v2 remain validated
+only under their frozen worker-v1 contracts.

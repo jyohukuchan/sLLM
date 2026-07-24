@@ -93,6 +93,7 @@ def _validate_aq4_evidence(
     product_root: Path,
     package_manifest_path: str,
     package_manifest_sha256: str,
+    output_manifest: dict[str, Any],
 ) -> None:
     required_schema = promotion_profile.get("required_schema_version")
     if required_schema is None:
@@ -192,6 +193,17 @@ def _validate_aq4_evidence(
     }:
         raise GenerationError("AQ4 promotion evidence package identity differs")
     if profile.get("worker", {}).get("protocol") == "ullm.worker.v2":
+        expected_reasoning = profile.get("reasoning")
+        if (
+            not isinstance(expected_reasoning, dict)
+            or manifest.get("schema_version") != "ullm.served_model.v2"
+            or output_manifest.get("schema_version") != "ullm.served_model.v2"
+            or manifest.get("reasoning") != expected_reasoning
+            or output_manifest.get("reasoning") != expected_reasoning
+        ):
+            raise GenerationError(
+                "AQ4 v2 promotion evidence, profile, and output reasoning differ"
+            )
         _validate_v2_reasoning_evidence(evidence, manifest)
 
 
@@ -251,6 +263,7 @@ def _validate_promotion_evidence(
             product_root=product_root,
             package_manifest_path=package_manifest_path,
             package_manifest_sha256=package_manifest_sha256,
+            output_manifest=manifest,
         )
         return
     if pairing == ("SQ8_0", "ullm.sq8_serving_promotion.v1"):
@@ -380,6 +393,22 @@ def _validate_v2_reasoning_evidence(
     worker = manifest.get("worker")
     if not isinstance(reasoning, dict) or not isinstance(worker, dict):
         raise GenerationError("AQ4 v2 promotion evidence lacks reasoning binding")
+    for name in (
+        "start_token_ids",
+        "end_token_ids",
+        "forced_end_token_ids",
+    ):
+        sequence = reasoning.get(name)
+        if (
+            not isinstance(sequence, list)
+            or len(sequence) != 1
+            or type(sequence[0]) is not int
+            or sequence[0] < 0
+        ):
+            raise GenerationError(
+                "AQ4 v2 promotion reasoning token sequences must contain "
+                "exactly one token"
+            )
     resident = evidence.get("resident")
     legacy = evidence.get("legacy")
     if not isinstance(resident, dict) or not isinstance(legacy, dict):
@@ -417,6 +446,18 @@ def _validate_v2_reasoning_evidence(
     request = reasoning_case.get("reasoning")
     if not isinstance(request, dict):
         raise GenerationError("AQ4 v2 promotion reasoning request is absent")
+    for name in ("end_token_ids", "forced_end_token_ids"):
+        sequence = request.get(name)
+        if (
+            not isinstance(sequence, list)
+            or len(sequence) != 1
+            or type(sequence[0]) is not int
+            or sequence[0] < 0
+        ):
+            raise GenerationError(
+                "AQ4 v2 promotion request token sequences must contain "
+                "exactly one token"
+            )
     if (
         request.get("enabled") is not True
         or request.get("budget_tokens") != 0
