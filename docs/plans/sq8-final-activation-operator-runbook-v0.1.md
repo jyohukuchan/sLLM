@@ -202,10 +202,12 @@ execution time from these fixed, root-owned, read-only, single-link files:
   `/run/ullm-campaign-secrets/openwebui-session.jwt`
 
 Neither secret is accepted in the operations document, plan, proof, or
-outcome. The OpenWebUI file must contain the real browser-login session JWT;
-an API key is not a substitute. **That JWT is not currently available, so
-activation execution remains blocked even after this runbook and scripts are
-prepared.**
+outcome. The OpenWebUI file must contain a valid OpenWebUI frontend session
+JWT; an API key is not a substitute. The pinned 0.9.4 token can be minted and
+verified offline, without a login request, by following the
+[session JWT provisioning procedure](../../deploy/openwebui/session-jwt.md).
+Its runtime presence and remaining lifetime are still preflight conditions;
+the procedure does not authorize or start activation.
 
 Read-only preflight seals both credential files and reports
 `credential_seals_ready`. If either file is absent, malformed, mutable, or

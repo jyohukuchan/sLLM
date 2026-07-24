@@ -355,6 +355,22 @@ curl --fail --silent http://127.0.0.1:3000/health
 docker inspect --format '{{.State.Health.Status}}' open-webui
 ```
 
+### Provision a browser-session JWT
+
+Browser gates require an OpenWebUI frontend session JWT, not the gateway API
+key. The pinned 0.9.4 implementation can be provisioned without a login by
+signing the existing administrator identity with the existing root-owned
+OpenWebUI signing key. The dedicated tool never prints the signing key, token,
+or user ID and verifies the signature, expiry, claims, and current database
+binding offline.
+
+Follow [the session JWT provisioning procedure](openwebui/session-jwt.md).
+For the sealed final campaign, it writes
+`/run/ullm-campaign-secrets/openwebui-session.jwt` as
+`root:homelab1`, mode `0640`, below a `root:homelab1` mode-`0750`
+directory. Token generation and offline verification do not send a request to
+OpenWebUI or start a campaign.
+
 ## Known v0.1 limitations
 
 - The product runs one active GPU request with no waiting queue or request batching. A concurrent request receives `429` with `Retry-After: 1`; OpenWebUI v0.9.4 may present this as a visible HTTP 400 busy error.

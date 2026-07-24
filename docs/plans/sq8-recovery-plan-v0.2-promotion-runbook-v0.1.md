@@ -212,6 +212,14 @@ updated runners reject a non-JWT value, require an `alg` header and integer
 the token. OpenWebUI itself remains the authority that validates its signature
 and session claims.
 
+For the pinned OpenWebUI 0.9.4 image, use the
+[offline session JWT provisioning procedure](../../deploy/openwebui/session-jwt.md).
+It signs the exactly-one existing administrator ID with the mounted signing
+key, emits the same `id`, `exp`, `jti`, and `iat` claim contract as login, and
+verifies the signature and live database binding without sending a request.
+Use an explicit short lifetime. This provisioning step does not run any gate
+or campaign.
+
 The exposed interfaces are now:
 
 ```text
