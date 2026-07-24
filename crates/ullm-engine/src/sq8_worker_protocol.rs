@@ -2121,9 +2121,9 @@ impl Sq8WorkerEvent {
                 "cancel_reason must exist only for a cancelled release",
             ));
         }
-        if reasoning_usage.is_some() && schema_version != SQ8_WORKER_SCHEMA_VERSION_V2 {
+        if (schema_version == SQ8_WORKER_SCHEMA_VERSION_V2) != reasoning_usage.is_some() {
             return Err(Sq8WorkerProtocolError::invalid_command(
-                "reasoning release accounting requires ullm.worker.v2",
+                "reasoning release accounting presence must match ullm.worker.v2",
             ));
         }
         if let Some(usage) = reasoning_usage.as_ref()
@@ -2287,8 +2287,8 @@ impl Sq8WorkerEvent {
                     return Err("SQ8 released event violates its terminal contract".into());
                 }
                 if reasoning_tokens.is_some() != forced_end_tokens.is_some()
-                    || (schema_version != &SQ8_WORKER_SCHEMA_VERSION_V2
-                        && (reasoning_tokens.is_some() || forced_end_tokens.is_some()))
+                    || ((schema_version == &SQ8_WORKER_SCHEMA_VERSION_V2)
+                        != reasoning_tokens.is_some())
                     || reasoning_tokens.zip(*forced_end_tokens).is_some_and(
                         |(reasoning, forced)| reasoning.saturating_add(forced) > *completion_tokens,
                     )
@@ -3317,6 +3317,62 @@ mod tests {
         assert_eq!(timed["timings"]["predicted_per_second"], 250.0);
         assert_eq!(normal["reset_complete"], true);
         assert_eq!(normal["schema_version"], SQ8_WORKER_SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn v2_release_requires_and_serializes_both_reasoning_counters() {
+        assert!(
+            Sq8WorkerEvent::released_with_schema(
+                SQ8_WORKER_SCHEMA_VERSION_V2,
+                "req-missing",
+                Sq8ReleaseOutcomeEvent::Length,
+                None,
+                3,
+                2,
+            )
+            .is_err()
+        );
+
+        let released = Sq8WorkerEvent::released_with_schema_and_reasoning(
+            SQ8_WORKER_SCHEMA_VERSION_V2,
+            "req-v2",
+            Sq8ReleaseOutcomeEvent::Length,
+            None,
+            3,
+            2,
+            Some(ReasoningUsage {
+                reasoning_tokens: 0,
+                forced_end_tokens: 0,
+            }),
+        )
+        .unwrap();
+        released.validate_with_profile(&v2_profile()).unwrap();
+        let serialized = serde_json::to_value(released).unwrap();
+        assert_eq!(serialized["reasoning_tokens"], 0);
+        assert_eq!(serialized["forced_end_tokens"], 0);
+
+        let missing = Sq8WorkerEvent::Released {
+            schema_version: SQ8_WORKER_SCHEMA_VERSION_V2.into(),
+            request_id: "req-invalid".into(),
+            outcome: Sq8ReleaseOutcomeEvent::Length,
+            cancel_reason: None,
+            prompt_tokens: 3,
+            completion_tokens: 2,
+            reasoning_tokens: None,
+            forced_end_tokens: None,
+            timings: None,
+            reset_complete: true,
+        };
+        assert!(missing.validate_with_profile(&v2_profile()).is_err());
+
+        let legacy =
+            Sq8WorkerEvent::released("req-v1", Sq8ReleaseOutcomeEvent::Length, None, 3, 2).unwrap();
+        legacy
+            .validate_with_profile(&Sq8WorkerProfile::sq8_defaults())
+            .unwrap();
+        let serialized = serde_json::to_value(legacy).unwrap();
+        assert!(serialized.get("reasoning_tokens").is_none());
+        assert!(serialized.get("forced_end_tokens").is_none());
     }
 
     #[test]
