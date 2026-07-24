@@ -24,11 +24,11 @@ import served_model_aq4_restoration_proof as restoration_proof
 
 
 AUTHORIZATION_SCHEMA = (
-    "ullm.served_model.v2_cross_model_campaign_authorization.v1"
+    "ullm.served_model.v2_cross_model_campaign_authorization.v2"
 )
-CLAIM_SCHEMA = "ullm.served_model.v2_cross_model_campaign_claim.v1"
-OUTCOME_SCHEMA = "ullm.served_model.v2_cross_model_campaign_outcome.v1"
-RECOVERY_SCHEMA = "ullm.served_model.v2_cross_model_campaign_recovery.v1"
+CLAIM_SCHEMA = "ullm.served_model.v2_cross_model_campaign_claim.v2"
+OUTCOME_SCHEMA = "ullm.served_model.v2_cross_model_campaign_outcome.v2"
+RECOVERY_SCHEMA = "ullm.served_model.v2_cross_model_campaign_recovery.v2"
 FIXED_CLAIM_REGISTRY = Path("/var/lib/ullm/served-model-campaign-claims")
 FIXED_OUTCOME_REGISTRY = Path("/var/lib/ullm/served-model-campaign-outcomes")
 FIXED_ACTIVE_MANIFEST = Path("/etc/ullm/served-models/active.json")
@@ -39,6 +39,16 @@ FIXED_ENVIRONMENT_FILE_PATH = Path(
     "/etc/ullm/openai-gateway-manifest.env"
 )
 FIXED_SERVICE_UNIT = "ullm-openai.service"
+FIXED_OPENWEBUI_IMAGE = (
+    "ullm/open-webui@sha256:"
+    "ef5ae4fbc06abb662eeefe87e584ea7c69e55838f5f08f637057b9108048b409"
+)
+FIXED_BROWSER_IMAGE = (
+    "sha256:"
+    "0bd709ea36ffa7204cd60da0fe9707be38eb73c97c7a9d45911ff0e8b7c1e3ea"
+)
+FIXED_OPENWEBUI_CONFIG_IMAGE = "ullm/open-webui:0.9.4-ullm.1"
+FIXED_OPENWEBUI_CONTAINER_NAME = "open-webui"
 MAX_DOCUMENT_BYTES = 1_048_576
 HASH_RE = re.compile(r"[0-9a-f]{64}\Z")
 GIT_OBJECT_RE = re.compile(r"[0-9a-f]{40}\Z")
@@ -56,6 +66,7 @@ AUTHORIZATION_FIELDS = {
     "required_final_route",
     "source",
     "before",
+    "aq4_release",
     "candidate",
     "campaigns",
     "rollback",
@@ -66,14 +77,41 @@ BEFORE_FIELDS = {
     "model_id",
     "format_id",
     "manifest_sha256",
+    "worker_protocol",
+    "worker_binary_path",
     "worker_binary_sha256",
     "promotion_source_commit",
-}
-CANDIDATE_FIELDS = BEFORE_FIELDS | {
-    "worker_protocol",
+    "promotion_receipt_path",
     "promotion_receipt_sha256",
 }
-CAMPAIGN_FIELDS = {"sq8_full", "reasoning_release", "reasoning_browser"}
+CANDIDATE_FIELDS = {
+    "model_id",
+    "format_id",
+    "manifest_sha256",
+    "worker_protocol",
+    "worker_binary_sha256",
+    "promotion_source_commit",
+    "promotion_receipt_sha256",
+}
+AQ4_RELEASE_FIELDS = {
+    "source",
+    "openwebui_image",
+    "promotion_evidence",
+    "promotion_receipt",
+    "release_evidence_path",
+    "release_validator_path",
+    "browser_validator_path",
+}
+AQ4_SOURCE_FIELDS = {"root", "commit", "tree"}
+ARTIFACT_REFERENCE_FIELDS = {"source_path", "path", "sha256"}
+CAMPAIGN_FIELDS = {
+    "aq4_reasoning_release",
+    "aq4_reasoning_browser",
+    "aq4_bundle",
+    "sq8_full",
+    "reasoning_release",
+    "reasoning_browser",
+}
 CAMPAIGN_IDENTITY_FIELDS = {"run_id", "final_path"}
 ROLLBACK_FIELDS = {
     "backup_path",
@@ -102,6 +140,7 @@ OUTCOME_FIELDS = {
     "status",
     "failure_stage",
     "stages",
+    "aq4_observations",
     "candidate_observations",
     "campaigns",
     "restoration",
@@ -119,6 +158,9 @@ OUTCOME_STAGE_FIELDS = {
     "reasoning_browser",
     "aq4_restore",
     "reverse_reconciliation",
+    "aq4_reasoning_release",
+    "aq4_reasoning_browser",
+    "aq4_bundle",
     "final_checks",
 }
 OUTCOME_STAGE_STATES = {"pending", "passed", "failed", "skipped"}
@@ -187,6 +229,14 @@ CANDIDATE_OBSERVATION_STAGES = (
     "reasoning_release:after",
     "reasoning_browser:before",
     "reasoning_browser:after",
+)
+AQ4_OBSERVATION_STAGES = (
+    "aq4_reasoning_release:before",
+    "aq4_reasoning_release:after",
+    "aq4_reasoning_browser:before",
+    "aq4_reasoning_browser:after",
+    "aq4_bundle:before",
+    "aq4_bundle:after",
 )
 SAFE_ARTIFACT_NAME_RE = re.compile(
     r"[A-Za-z0-9][A-Za-z0-9._/-]{0,511}\Z"
@@ -283,8 +333,7 @@ def strict_json_bytes(raw: bytes, label: str) -> dict[str, Any]:
 def _reject_symlink_components(
     path: Path, label: str, *, leaf_may_absent: bool
 ) -> None:
-    if not path.is_absolute():
-        raise AuthorizationError(f"{label} path must be absolute")
+    _lexical_absolute(path, label)
     current = Path(path.anchor)
     components = path.parts[1:]
     for index, component in enumerate(components):
@@ -304,14 +353,26 @@ def _reject_symlink_components(
 def _lexical_absolute(path: Path, label: str) -> Path:
     if not isinstance(path, Path) or not path.is_absolute():
         raise AuthorizationError(f"{label} path must be absolute")
+    raw = os.fspath(path)
     normalized = Path(os.path.abspath(path))
     if (
-        normalized != path
+        path.anchor != "/"
+        or raw.startswith("//")
+        or normalized != path
         or path.name in {"", ".", ".."}
         or ".." in path.parts
     ):
         raise AuthorizationError(f"{label} path is not canonical")
     return normalized
+
+
+def _path_value(value: Any, label: str) -> Path:
+    if not isinstance(value, str) or not value or "\x00" in value:
+        raise AuthorizationError(f"{label} is invalid")
+    path = Path(value)
+    if value != os.fspath(path):
+        raise AuthorizationError(f"{label} path is not canonical")
+    return _lexical_absolute(path, label)
 
 
 def _directory_flags() -> int:
@@ -513,9 +574,7 @@ def utc_timestamp(value: datetime) -> str:
 
 
 def _absolute_future_path(value: Any, label: str) -> Path:
-    if not isinstance(value, str) or "\x00" in value:
-        raise AuthorizationError(f"{label} is invalid")
-    path = Path(value)
+    path = _path_value(value, label)
     _reject_symlink_components(path, label, leaf_may_absent=True)
     if path.exists() or path.is_symlink():
         raise AuthorizationError(f"{label} must name a fresh output")
@@ -525,9 +584,7 @@ def _absolute_future_path(value: Any, label: str) -> Path:
 def _absolute_bound_path(value: Any, label: str, *, require_fresh: bool) -> Path:
     if require_fresh:
         return _absolute_future_path(value, label)
-    if not isinstance(value, str) or "\x00" in value:
-        raise AuthorizationError(f"{label} is invalid")
-    path = Path(value)
+    path = _path_value(value, label)
     if path.exists() or path.is_symlink():
         _reject_symlink_components(path, label, leaf_may_absent=False)
     else:
@@ -535,10 +592,43 @@ def _absolute_bound_path(value: Any, label: str, *, require_fresh: bool) -> Path
     return path
 
 
+def _absolute_archival_path(value: Any, label: str) -> Path:
+    return _path_value(value, label)
+
+
 def _nullable_identifier(value: Any, label: str) -> str | None:
     if value is None:
         return None
     return _identifier(value, label)
+
+
+def _content_addressed_image(value: Any, label: str) -> str:
+    text = _bounded_text(value, label, 1_024)
+    marker = "@sha256:"
+    if marker not in text or HASH_RE.fullmatch(text.rsplit(marker, 1)[1]) is None:
+        raise AuthorizationError(f"{label} is not content-addressed")
+    return text
+
+
+def _bound_existing_path(
+    value: Any,
+    label: str,
+    *,
+    directory: bool,
+) -> Path:
+    path = _absolute_bound_path(value, label, require_fresh=False)
+    try:
+        metadata = path.lstat()
+    except OSError as error:
+        raise AuthorizationError(f"{label} is unavailable") from error
+    expected = stat.S_ISDIR if directory else stat.S_ISREG
+    if stat.S_ISLNK(metadata.st_mode) or not expected(metadata.st_mode):
+        raise AuthorizationError(f"{label} has the wrong file type")
+    return path
+
+
+def _paths_overlap(left: Path, right: Path) -> bool:
+    return left == right or left in right.parents or right in left.parents
 
 
 def _validate_outcome_document_shape(document: dict[str, Any]) -> None:
@@ -590,28 +680,31 @@ def _validate_outcome_document_shape(document: dict[str, Any]) -> None:
     elif failure_stage is None or stages[failure_stage] != "failed":
         raise AuthorizationError("failed campaign outcome lacks its failed stage")
 
-    observations = document["candidate_observations"]
-    if (
-        not isinstance(observations, list)
-        or len(observations) > 4_096
-    ):
-        raise AuthorizationError("campaign outcome observations are invalid")
-    for index, value in enumerate(observations):
-        observation = _exact_object(
-            value,
-            OUTCOME_OBSERVATION_FIELDS,
-            f"outcome.candidate_observations[{index}]",
-        )
-        _identifier(
-            observation["stage"],
-            f"outcome.candidate_observations[{index}].stage",
-        )
-        _hash(
-            observation["active_manifest_sha256"],
-            f"outcome.candidate_observations[{index}].active_manifest_sha256",
-        )
-        if type(observation["bytes_equal"]) is not bool:
-            raise AuthorizationError("campaign outcome observation result is invalid")
+    for observation_field in ("aq4_observations", "candidate_observations"):
+        observations = document[observation_field]
+        if (
+            not isinstance(observations, list)
+            or len(observations) > 4_096
+        ):
+            raise AuthorizationError("campaign outcome observations are invalid")
+        for index, value in enumerate(observations):
+            observation = _exact_object(
+                value,
+                OUTCOME_OBSERVATION_FIELDS,
+                f"outcome.{observation_field}[{index}]",
+            )
+            _identifier(
+                observation["stage"],
+                f"outcome.{observation_field}[{index}].stage",
+            )
+            _hash(
+                observation["active_manifest_sha256"],
+                f"outcome.{observation_field}[{index}].active_manifest_sha256",
+            )
+            if type(observation["bytes_equal"]) is not bool:
+                raise AuthorizationError(
+                    "campaign outcome observation result is invalid"
+                )
 
     campaigns = _exact_object(
         document["campaigns"], CAMPAIGN_FIELDS, "outcome.campaigns"
@@ -626,10 +719,9 @@ def _validate_outcome_document_shape(document: dict[str, Any]) -> None:
         _identifier(campaign["run_id"], f"outcome.campaigns.{name}.run_id")
         if not isinstance(campaign["path"], str):
             raise AuthorizationError(f"outcome.campaigns.{name}.path is invalid")
-        _absolute_bound_path(
+        _absolute_archival_path(
             campaign["path"],
             f"outcome.campaigns.{name}.path",
-            require_fresh=False,
         )
         if campaign["kind"] not in {"file", "directory"}:
             raise AuthorizationError(f"outcome.campaigns.{name}.kind differs")
@@ -771,6 +863,30 @@ def validate_outcome_document(
     ):
         raise AuthorizationError(
             "successful campaign outcome lacks complete candidate observations"
+        )
+    aq4_observations = document["aq4_observations"]
+    aq4_observed_stages = tuple(
+        value["stage"] for value in aq4_observations
+    )
+    if (
+        aq4_observed_stages
+        != AQ4_OBSERVATION_STAGES[: len(aq4_observed_stages)]
+        or any(
+            value["bytes_equal"] is not True
+            or value["active_manifest_sha256"]
+            != authorization.document["before"]["manifest_sha256"]
+            for value in aq4_observations
+        )
+    ):
+        raise AuthorizationError(
+            "campaign outcome AQ4 observations differ from authorization"
+        )
+    if (
+        document["status"] == "succeeded_restored"
+        and aq4_observed_stages != AQ4_OBSERVATION_STAGES
+    ):
+        raise AuthorizationError(
+            "successful campaign outcome lacks complete AQ4 observations"
         )
     for name in sorted(CAMPAIGN_FIELDS):
         campaign = document["campaigns"][name]
@@ -1081,6 +1197,7 @@ def _validate_outcome_reference(
         required_uid=policy.required_uid,
         validate_prior_outcome=False,
         require_fresh_outputs=False,
+        require_bound_inputs=False,
         enforce_current_window=False,
         policy=policy,
     )
@@ -1114,6 +1231,7 @@ def validate_authorization_document(
     required_uid: int = 0,
     validate_prior_outcome: bool = True,
     require_fresh_outputs: bool = True,
+    require_bound_inputs: bool = True,
     enforce_current_window: bool = True,
     policy: RegistryPolicy | None = None,
     source_root: Path | None = None,
@@ -1148,11 +1266,120 @@ def validate_authorization_document(
     _git_object(source["tree"], "source.tree")
 
     before = _exact_object(document["before"], BEFORE_FIELDS, "before")
-    if before["model_id"] != "ullm-qwen3.5-9b-aq4" or before["format_id"] != "AQ4_0":
+    if (
+        before["model_id"] != "ullm-qwen3.5-9b-aq4"
+        or before["format_id"] != "AQ4_0"
+        or before["worker_protocol"] != "ullm.worker.v2"
+    ):
         raise AuthorizationError("authorization before identity is not AQ4_0")
     _hash(before["manifest_sha256"], "before.manifest_sha256")
+    existing_or_bound = (
+        _bound_existing_path
+        if require_bound_inputs
+        else lambda value, label, *, directory: _absolute_archival_path(
+            value,
+            label,
+        )
+    )
+    before_worker = existing_or_bound(
+        before["worker_binary_path"],
+        "before.worker_binary_path",
+        directory=False,
+    )
     _hash(before["worker_binary_sha256"], "before.worker_binary_sha256")
     _git_object(before["promotion_source_commit"], "before.promotion_source_commit")
+    before_receipt = existing_or_bound(
+        before["promotion_receipt_path"],
+        "before.promotion_receipt_path",
+        directory=False,
+    )
+    _hash(
+        before["promotion_receipt_sha256"],
+        "before.promotion_receipt_sha256",
+    )
+
+    aq4_release = _exact_object(
+        document["aq4_release"],
+        AQ4_RELEASE_FIELDS,
+        "aq4_release",
+    )
+    aq4_source = _exact_object(
+        aq4_release["source"],
+        AQ4_SOURCE_FIELDS,
+        "aq4_release.source",
+    )
+    aq4_source_root = existing_or_bound(
+        aq4_source["root"],
+        "aq4_release.source.root",
+        directory=True,
+    )
+    aq4_source_commit = _git_object(
+        aq4_source["commit"],
+        "aq4_release.source.commit",
+    )
+    _git_object(aq4_source["tree"], "aq4_release.source.tree")
+    if aq4_source_commit != before["promotion_source_commit"]:
+        raise AuthorizationError(
+            "AQ4 release source/promotion commit differs"
+        )
+    openwebui_image = _content_addressed_image(
+        aq4_release["openwebui_image"],
+        "aq4_release.openwebui_image",
+    )
+    if openwebui_image != FIXED_OPENWEBUI_IMAGE:
+        raise AuthorizationError("AQ4 release OpenWebUI image differs")
+    aq4_promotion_source_paths: dict[str, Path] = {}
+    aq4_promotion_paths: dict[str, Path] = {}
+    for name in ("promotion_evidence", "promotion_receipt"):
+        reference = _exact_object(
+            aq4_release[name],
+            ARTIFACT_REFERENCE_FIELDS,
+            f"aq4_release.{name}",
+        )
+        aq4_promotion_source_paths[name] = existing_or_bound(
+            reference["source_path"],
+            f"aq4_release.{name}.source_path",
+            directory=False,
+        )
+        aq4_promotion_paths[name] = (
+            _absolute_archival_path(
+                reference["path"],
+                f"aq4_release.{name}.path",
+            )
+            if not require_bound_inputs and not require_fresh_outputs
+            else _absolute_bound_path(
+                reference["path"],
+                f"aq4_release.{name}.path",
+                require_fresh=require_fresh_outputs,
+            )
+        )
+        _hash(reference["sha256"], f"aq4_release.{name}.sha256")
+    if (
+        aq4_promotion_source_paths["promotion_receipt"] != before_receipt
+        or aq4_release["promotion_receipt"]["sha256"]
+        != before["promotion_receipt_sha256"]
+    ):
+        raise AuthorizationError(
+            "AQ4 release/before promotion receipt differs"
+        )
+    aq4_fresh_paths: dict[str, Path] = {}
+    for name in (
+        "release_evidence_path",
+        "release_validator_path",
+        "browser_validator_path",
+    ):
+        aq4_fresh_paths[name] = (
+            _absolute_archival_path(
+                aq4_release[name],
+                f"aq4_release.{name}",
+            )
+            if not require_bound_inputs and not require_fresh_outputs
+            else _absolute_bound_path(
+                aq4_release[name],
+                f"aq4_release.{name}",
+                require_fresh=require_fresh_outputs,
+            )
+        )
 
     candidate = _exact_object(
         document["candidate"], CANDIDATE_FIELDS, "candidate"
@@ -1188,21 +1415,64 @@ def validate_authorization_document(
             campaigns[name], CAMPAIGN_IDENTITY_FIELDS, f"campaigns.{name}"
         )
         run_id = _identifier(campaign["run_id"], f"campaigns.{name}.run_id")
-        final_path = _absolute_bound_path(
-            campaign["final_path"],
-            f"campaigns.{name}.final_path",
-            require_fresh=require_fresh_outputs,
+        final_path = (
+            _absolute_archival_path(
+                campaign["final_path"],
+                f"campaigns.{name}.final_path",
+            )
+            if not require_bound_inputs and not require_fresh_outputs
+            else _absolute_bound_path(
+                campaign["final_path"],
+                f"campaigns.{name}.final_path",
+                require_fresh=require_fresh_outputs,
+            )
         )
         if run_id in run_ids or final_path in final_paths:
             raise AuthorizationError("campaign run IDs and final paths must be distinct")
         run_ids.add(run_id)
         final_paths.add(final_path)
 
+    aq4_bundle_root = Path(
+        campaigns["aq4_bundle"]["final_path"]
+    ).parent
+    aq4_component_paths = {
+        aq4_promotion_paths["promotion_evidence"],
+        aq4_promotion_paths["promotion_receipt"],
+        aq4_fresh_paths["release_evidence_path"],
+        aq4_fresh_paths["release_validator_path"],
+        Path(campaigns["aq4_reasoning_browser"]["final_path"]),
+        aq4_fresh_paths["browser_validator_path"],
+    }
+    if any(
+        path != aq4_bundle_root and aq4_bundle_root not in path.parents
+        for path in aq4_component_paths
+    ):
+        raise AuthorizationError(
+            "AQ4 bundle components must be below its output parent"
+        )
+    if (
+        len(aq4_component_paths) != 6
+        or len(set(aq4_promotion_source_paths.values())) != 2
+        or any(
+            path in aq4_promotion_source_paths.values()
+            for path in aq4_promotion_paths.values()
+        )
+        or any(path in final_paths for path in aq4_fresh_paths.values())
+    ):
+        raise AuthorizationError("AQ4 release paths must be distinct")
+
     rollback = _exact_object(document["rollback"], ROLLBACK_FIELDS, "rollback")
-    backup_path = _absolute_bound_path(
-        rollback["backup_path"],
-        "rollback.backup_path",
-        require_fresh=require_fresh_outputs,
+    backup_path = (
+        _absolute_archival_path(
+            rollback["backup_path"],
+            "rollback.backup_path",
+        )
+        if not require_bound_inputs and not require_fresh_outputs
+        else _absolute_bound_path(
+            rollback["backup_path"],
+            "rollback.backup_path",
+            require_fresh=require_fresh_outputs,
+        )
     )
     if backup_path in final_paths:
         raise AuthorizationError("rollback backup collides with a campaign output")
@@ -1213,14 +1483,42 @@ def validate_authorization_document(
             raise AuthorizationError(
                 "authorization source root is unavailable"
             ) from error
-        for output_path in (*final_paths, backup_path):
+        if _paths_overlap(source_root_absolute, aq4_source_root):
+            raise AuthorizationError(
+                "SQ8 and AQ4 source roots must be disjoint"
+            )
+        all_outputs = (
+            *final_paths,
+            *aq4_fresh_paths.values(),
+            *aq4_promotion_paths.values(),
+            backup_path,
+        )
+        for output_path in all_outputs:
             if (
-                output_path == source_root_absolute
-                or source_root_absolute in output_path.parents
+                _paths_overlap(output_path, source_root_absolute)
+                or _paths_overlap(output_path, aq4_source_root)
             ):
                 raise AuthorizationError(
                     "campaign outputs must be outside the source root"
                 )
+        if any(
+            _paths_overlap(left, right)
+            for index, left in enumerate(all_outputs)
+            for right in all_outputs[index + 1 :]
+        ):
+            raise AuthorizationError(
+                "campaign output paths must not overlap"
+            )
+    if any(
+        _paths_overlap(before_worker, path)
+        for path in (
+            *final_paths,
+            *aq4_fresh_paths.values(),
+            *aq4_promotion_paths.values(),
+            backup_path,
+        )
+    ):
+        raise AuthorizationError("AQ4 worker path collides with an output")
     _hash(rollback["systemd_unit_sha256"], "rollback.systemd_unit_sha256")
     _hash(rollback["environment_sha256"], "rollback.environment_sha256")
 
@@ -1237,11 +1535,43 @@ def validate_authorization_document(
                 "prior_outcome",
                 policy=selected_policy,
             )
-            for field in ("source", "before", "candidate"):
-                if previous_authorization.document[field] != document[field]:
+            previous = previous_authorization.document
+            if previous["source"] != document["source"]:
+                raise AuthorizationError("prior_outcome source lineage differs")
+            for field in (
+                "model_id",
+                "format_id",
+                "manifest_sha256",
+                "worker_protocol",
+                "worker_binary_sha256",
+                "promotion_source_commit",
+                "promotion_receipt_sha256",
+            ):
+                if previous["before"][field] != document["before"][field]:
                     raise AuthorizationError(
-                        f"prior_outcome {field} lineage differs"
+                        "prior_outcome before lineage differs"
                     )
+            if previous["candidate"] != document["candidate"]:
+                raise AuthorizationError(
+                    "prior_outcome candidate lineage differs"
+                )
+            previous_aq4 = previous["aq4_release"]
+            selected_aq4 = document["aq4_release"]
+            if (
+                previous_aq4["source"]["commit"]
+                != selected_aq4["source"]["commit"]
+                or previous_aq4["source"]["tree"]
+                != selected_aq4["source"]["tree"]
+                or previous_aq4["openwebui_image"]
+                != selected_aq4["openwebui_image"]
+                or previous_aq4["promotion_evidence"]["sha256"]
+                != selected_aq4["promotion_evidence"]["sha256"]
+                or previous_aq4["promotion_receipt"]["sha256"]
+                != selected_aq4["promotion_receipt"]["sha256"]
+            ):
+                raise AuthorizationError(
+                    "prior_outcome AQ4 release lineage differs"
+                )
         else:
             reference = _exact_object(
                 prior_outcome, PRIOR_OUTCOME_FIELDS, "prior_outcome"
@@ -1259,6 +1589,7 @@ def load_authorization(
     policy: RegistryPolicy = RegistryPolicy(),
     require_fresh_outputs: bool = True,
     enforce_current_window: bool = True,
+    require_bound_inputs: bool = True,
     source_root: Path | None = None,
 ) -> AuthorizationRecord:
     snapshot = _stable_read(
@@ -1277,6 +1608,7 @@ def load_authorization(
         required_uid=policy.required_uid,
         require_fresh_outputs=require_fresh_outputs,
         enforce_current_window=enforce_current_window,
+        require_bound_inputs=require_bound_inputs,
         policy=policy,
         source_root=source_root,
     )
@@ -1512,6 +1844,7 @@ def load_claim(
         policy=policy,
         require_fresh_outputs=False,
         enforce_current_window=False,
+        require_bound_inputs=False,
     )
     return _load_claim_for_record(authorization, policy=policy)
 
@@ -1649,7 +1982,16 @@ def require_authorization_window_binding(
     *,
     source_commit: str,
     source_tree: str,
+    aq4_source_root: Path,
+    aq4_source_commit: str,
+    aq4_source_tree: str,
     before_manifest_sha256: str,
+    before_worker_protocol: str,
+    before_worker_binary_path: Path,
+    before_promotion_receipt_path: Path,
+    before_promotion_receipt_sha256: str,
+    aq4_promotion_evidence_path: Path,
+    aq4_promotion_evidence_sha256: str,
     candidate_manifest_sha256: str,
     candidate_worker_binary_sha256: str,
     candidate_promotion_receipt_sha256: str,
@@ -1660,12 +2002,28 @@ def require_authorization_window_binding(
     document = record.document
     source = document["source"]
     before = document["before"]
+    aq4_release = document["aq4_release"]
+    aq4_source = aq4_release["source"]
     candidate = document["candidate"]
     rollback = document["rollback"]
     if (
         source_commit != source["commit"]
         or source_tree != source["tree"]
+        or os.fspath(aq4_source_root) != aq4_source["root"]
+        or aq4_source_commit != aq4_source["commit"]
+        or aq4_source_tree != aq4_source["tree"]
         or before_manifest_sha256 != before["manifest_sha256"]
+        or before_worker_protocol != before["worker_protocol"]
+        or os.fspath(before_worker_binary_path)
+        != before["worker_binary_path"]
+        or os.fspath(before_promotion_receipt_path)
+        != before["promotion_receipt_path"]
+        or before_promotion_receipt_sha256
+        != before["promotion_receipt_sha256"]
+        or os.fspath(aq4_promotion_evidence_path)
+        != aq4_release["promotion_evidence"]["source_path"]
+        or aq4_promotion_evidence_sha256
+        != aq4_release["promotion_evidence"]["sha256"]
         or candidate_manifest_sha256 != candidate["manifest_sha256"]
         or candidate_worker_binary_sha256 != candidate["worker_binary_sha256"]
         or candidate_promotion_receipt_sha256
@@ -1681,7 +2039,16 @@ def require_window_binding(
     *,
     source_commit: str,
     source_tree: str,
+    aq4_source_root: Path,
+    aq4_source_commit: str,
+    aq4_source_tree: str,
     before_manifest_sha256: str,
+    before_worker_protocol: str,
+    before_worker_binary_path: Path,
+    before_promotion_receipt_path: Path,
+    before_promotion_receipt_sha256: str,
+    aq4_promotion_evidence_path: Path,
+    aq4_promotion_evidence_sha256: str,
     candidate_manifest_sha256: str,
     candidate_worker_binary_sha256: str,
     candidate_promotion_receipt_sha256: str,
@@ -1693,7 +2060,16 @@ def require_window_binding(
         claim.authorization,
         source_commit=source_commit,
         source_tree=source_tree,
+        aq4_source_root=aq4_source_root,
+        aq4_source_commit=aq4_source_commit,
+        aq4_source_tree=aq4_source_tree,
         before_manifest_sha256=before_manifest_sha256,
+        before_worker_protocol=before_worker_protocol,
+        before_worker_binary_path=before_worker_binary_path,
+        before_promotion_receipt_path=before_promotion_receipt_path,
+        before_promotion_receipt_sha256=before_promotion_receipt_sha256,
+        aq4_promotion_evidence_path=aq4_promotion_evidence_path,
+        aq4_promotion_evidence_sha256=aq4_promotion_evidence_sha256,
         candidate_manifest_sha256=candidate_manifest_sha256,
         candidate_worker_binary_sha256=candidate_worker_binary_sha256,
         candidate_promotion_receipt_sha256=candidate_promotion_receipt_sha256,

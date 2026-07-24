@@ -13,7 +13,9 @@ from pathlib import Path
 from typing import Any
 
 
+sys.dont_write_bytecode = True
 TOOLS = Path(__file__).resolve().parent
+REPOSITORY_ROOT = TOOLS.parent
 if os.fspath(TOOLS) not in sys.path:
     sys.path.insert(0, os.fspath(TOOLS))
 
@@ -55,6 +57,10 @@ def _request(
     claim: authorization.ClaimRecord,
 ) -> TransactionRequest:
     source_root = _existing(args.source_root, "source root")
+    if source_root != REPOSITORY_ROOT:
+        raise recovery.RecoveryError(
+            "recovery runner must execute from the sealed source root"
+        )
     candidate = _existing(args.candidate_manifest, "candidate manifest")
     commands = plan.derive_commands(
         source_root=source_root,
@@ -115,7 +121,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             report = {
                 "schema_version": (
                     "ullm.served_model.v2_cross_model_campaign_"
-                    "recovery_preflight.v1"
+                    "recovery_preflight.v2"
                 ),
                 "ready": True,
                 "plan_id": plan.PLAN_ID,
@@ -123,6 +129,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                     pinned.claim.authorization.snapshot.sha256
                 ),
                 "claim_sha256": pinned.claim.snapshot.sha256,
+                "source_seal_sha256": (
+                    pinned.transaction_preflight.source_seal.fingerprint_sha256
+                ),
                 "active_state": pinned.active_state,
                 "active_manifest_sha256": pinned.active_before.sha256,
                 "backup_manifest_sha256": pinned.backup.sha256,
@@ -136,7 +145,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             result = recovery.recover_transaction(request)
             report = {
                 "schema_version": (
-                    "ullm.served_model.v2_cross_model_campaign_recovery_result.v1"
+                    "ullm.served_model.v2_cross_model_campaign_recovery_result.v2"
                 ),
                 "plan_id": plan.PLAN_ID,
                 "status": result.status,
@@ -148,7 +157,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             {
                 "schema_version": (
                     "ullm.served_model.v2_cross_model_campaign_"
-                    "recovery_failure.v1"
+                    "recovery_failure.v2"
                 ),
                 "status": error.result.status,
                 "failure_stage": error.result.failure_stage,

@@ -204,6 +204,16 @@ def test_claim_reference_requires_authorized_campaign_and_candidate(
     outputs.mkdir(mode=0o700)
     claims.mkdir(mode=0o700)
     outcomes.mkdir(mode=0o700)
+    aq4_source = tmp_path / "aq4-source"
+    aq4_source.mkdir(mode=0o700)
+    aq4_worker = tmp_path / "aq4-worker"
+    aq4_worker.write_bytes(b"fixture worker\n")
+    bundle_root = outputs / "aq4-bundle"
+    bundle_root.mkdir(mode=0o700)
+    promotion_evidence = tmp_path / "promotion-evidence.json"
+    promotion_receipt = tmp_path / "promotion-receipt.json"
+    promotion_evidence.write_bytes(b'{"fixture":"evidence"}\n')
+    promotion_receipt.write_bytes(b'{"fixture":"receipt"}\n')
     policy = BINDING.campaign_authorization.RegistryPolicy(
         claim_registry=claims,
         outcome_registry=outcomes,
@@ -229,8 +239,35 @@ def test_claim_reference_requires_authorized_campaign_and_candidate(
             "model_id": "ullm-qwen3.5-9b-aq4",
             "format_id": "AQ4_0",
             "manifest_sha256": "1" * 64,
+            "worker_protocol": "ullm.worker.v2",
+            "worker_binary_path": str(aq4_worker),
             "worker_binary_sha256": "2" * 64,
             "promotion_source_commit": "c" * 40,
+            "promotion_receipt_path": str(promotion_receipt),
+            "promotion_receipt_sha256": "8" * 64,
+        },
+        "aq4_release": {
+            "source": {
+                "root": str(aq4_source),
+                "commit": "c" * 40,
+                "tree": "d" * 40,
+            },
+            "openwebui_image": (
+                BINDING.campaign_authorization.FIXED_OPENWEBUI_IMAGE
+            ),
+            "promotion_evidence": {
+                "source_path": str(promotion_evidence),
+                "path": str(bundle_root / promotion_evidence.name),
+                "sha256": "a" * 64,
+            },
+            "promotion_receipt": {
+                "source_path": str(promotion_receipt),
+                "path": str(bundle_root / promotion_receipt.name),
+                "sha256": "8" * 64,
+            },
+            "release_evidence_path": str(bundle_root / "release-evidence.json"),
+            "release_validator_path": str(bundle_root / "release-validator.json"),
+            "browser_validator_path": str(bundle_root / "browser-validator.json"),
         },
         "candidate": {
             "model_id": "ullm-qwen3-14b-sq8",
@@ -242,6 +279,18 @@ def test_claim_reference_requires_authorized_campaign_and_candidate(
             "promotion_receipt_sha256": "5" * 64,
         },
         "campaigns": {
+            "aq4_reasoning_release": {
+                "run_id": "aq4-reasoning-run",
+                "final_path": str(outputs / "aq4-reasoning"),
+            },
+            "aq4_reasoning_browser": {
+                "run_id": "aq4-browser-run",
+                "final_path": str(bundle_root / "browser-evidence.json"),
+            },
+            "aq4_bundle": {
+                "run_id": "aq4-bundle-run",
+                "final_path": str(bundle_root / "bundle.json"),
+            },
             "sq8_full": {"run_id": "sq8-run", "final_path": str(final)},
             "reasoning_release": {
                 "run_id": "reasoning-run",

@@ -140,6 +140,10 @@ def preflight_recovery(
     """Pin a consumed claim, its immutable backup, and the only two safe states."""
 
     transaction._validate_commands(request.commands)
+    transaction._lexical_absolute(
+        request.candidate_manifest,
+        "recovery candidate manifest",
+    )
     if (
         request.service_unit not in request.inactive_services
         or transaction._lexical_absolute(
@@ -169,6 +173,15 @@ def preflight_recovery(
         or request.service_unit != policy.service_unit
         or request.api_key_file is None
         or request.openwebui_session_token_file is None
+        or (
+            policy.required_uid == 0
+            and (
+                request.api_key_file
+                != transaction.FIXED_GATEWAY_API_KEY_PATH
+                or request.openwebui_session_token_file
+                != transaction.FIXED_OPENWEBUI_SESSION_TOKEN_PATH
+            )
+        )
         or not math.isfinite(request.command_timeout_seconds)
         or request.command_timeout_seconds <= 0
         or request.command_timeout_seconds
@@ -189,6 +202,7 @@ def preflight_recovery(
             now=now,
             required_uid=policy.required_uid,
             require_fresh_outputs=False,
+            require_bound_inputs=False,
             enforce_current_window=False,
             policy=policy,
             source_root=request.source_root,
@@ -202,9 +216,15 @@ def preflight_recovery(
         policy=policy,
     )
 
-    source_commit, source_tree = transaction._source_identity(
+    command_runtime = transaction._capture_command_runtime_seals(
+        request.commands,
+        required_uid=policy.required_uid,
+        recovery_only=True,
+    )
+    source_commit, source_tree, source_seal = transaction._sealed_source_identity(
         request.source_root,
         runner=runner,
+        required_uid=policy.required_uid,
     )
     active = transaction._read_input(
         request.active_manifest,
@@ -218,10 +238,12 @@ def preflight_recovery(
     ):
         raise RecoveryError("recovery active manifest metadata is unsafe")
     active_state = _active_state(active, claim)
-    candidate = transaction._read_input(
+    candidate_authorization = claim.authorization.document["candidate"]
+    candidate = StableFileSnapshot(
         request.candidate_manifest,
-        "frozen candidate served-model manifest",
-        transaction.MAX_MANIFEST_BYTES,
+        b"",
+        candidate_authorization["manifest_sha256"],
+        active.identity,
     )
     backup_path = Path(
         claim.authorization.document["rollback"]["backup_path"]
@@ -261,17 +283,63 @@ def preflight_recovery(
         )
     ):
         raise RecoveryError("authorized AQ4 backup identity differs")
-    candidate_summary = validator(candidate.path)
+    backup_document = transaction._strict_object(
+        backup.raw,
+        "backup served-model manifest",
+    )
+    if (
+        backup_document.get("schema_version") != "ullm.served_model.v2"
+        or not isinstance(backup_document.get("promotion"), dict)
+        or backup_document["promotion"].get("source_commit")
+        != claim.authorization.document["before"]["promotion_source_commit"]
+    ):
+        raise RecoveryError("recovery served-model document identity differs")
+    receipt_sha256 = candidate_authorization["promotion_receipt_sha256"]
+    before = claim.authorization.document["before"]
+    aq4_receipt_path, aq4_receipt_sha256 = transaction._promotion_identity(
+        backup_document,
+        manifest_parent=active.path.parent,
+        source_commit=before["promotion_source_commit"],
+        label="backup AQ4",
+    )
+    if (
+        aq4_receipt_path != Path(before["promotion_receipt_path"])
+        or aq4_receipt_sha256 != before["promotion_receipt_sha256"]
+    ):
+        raise RecoveryError("backup AQ4 promotion identity differs")
+    aq4_runtime = transaction._manifest_runtime_seals(
+        backup_document,
+        manifest_path=active.path,
+        expected_receipt_path=aq4_receipt_path,
+        label="backup AQ4",
+        required_uid=policy.required_uid,
+    )
+    unit_seal = transaction._capture_runtime_artifact(
+        request.systemd_unit,
+        label="systemd unit",
+        maximum=transaction.MAX_INPUT_BYTES,
+        required_uid=policy.required_uid,
+    )
+    environment_seal = transaction._capture_runtime_artifact(
+        request.environment_file,
+        label="systemd environment file",
+        maximum=transaction.MAX_INPUT_BYTES,
+        required_uid=policy.required_uid,
+    )
+    backup_seals: tuple[
+        transaction.campaign_runtime_seal.RuntimeArtifactSeal, ...
+    ] = ()
+    if not backup_requires_publication:
+        backup_seals = (
+            transaction._capture_runtime_artifact(
+                backup.path,
+                label="authorized immutable AQ4 backup",
+                maximum=transaction.MAX_MANIFEST_BYTES,
+                required_uid=policy.required_uid,
+            ),
+        )
     backup_summary = validator(
         active.path if backup_requires_publication else backup.path
-    )
-    candidate_worker = transaction._summary_identity(
-        candidate_summary,
-        model_id="ullm-qwen3-14b-sq8",
-        format_id="SQ8_0",
-        manifest_sha256=candidate.sha256,
-        worker_protocol="ullm.worker.v2",
-        label="candidate SQ8",
     )
     backup_worker = transaction._summary_identity(
         backup_summary,
@@ -281,58 +349,30 @@ def preflight_recovery(
         worker_protocol="ullm.worker.v2",
         label="backup AQ4",
     )
-    candidate_document = transaction._strict_object(
-        candidate.raw,
-        "candidate served-model manifest",
-    )
-    backup_document = transaction._strict_object(
-        backup.raw,
-        "backup served-model manifest",
-    )
+    backup_worker_document = backup_summary.get("worker")
     if (
-        candidate_document.get("schema_version") != "ullm.served_model.v2"
-        or backup_document.get("schema_version") != "ullm.served_model.v2"
-        or not isinstance(backup_document.get("promotion"), dict)
-        or backup_document["promotion"].get("source_commit")
-        != claim.authorization.document["before"]["promotion_source_commit"]
+        not isinstance(backup_worker_document, dict)
+        or backup_worker_document.get("binary")
+        != os.fspath(aq4_runtime.worker.snapshot.path)
+        or aq4_runtime.worker.snapshot.sha256 != backup_worker
     ):
-        raise RecoveryError("recovery served-model document identity differs")
-    receipt_path, receipt_sha256 = transaction._promotion_identity(
-        candidate_document,
-        manifest_parent=candidate.path.parent,
-        source_commit=source_commit,
-        label="candidate SQ8",
-    )
-    promotion_receipt = transaction._read_input(
-        receipt_path,
-        "candidate promotion receipt",
-        transaction.MAX_INPUT_BYTES,
-    )
-    unit = transaction._read_input(
-        request.systemd_unit,
-        "systemd unit",
-        transaction.MAX_INPUT_BYTES,
-    )
-    environment = transaction._read_input(
-        request.environment_file,
-        "systemd environment file",
-        transaction.MAX_INPUT_BYTES,
-    )
+        raise RecoveryError("recovery runtime worker identity differs")
+    unit = unit_seal.snapshot
+    environment = environment_seal.snapshot
     rollback = claim.authorization.document["rollback"]
     if (
         source_commit != claim.authorization.document["source"]["commit"]
         or source_tree != claim.authorization.document["source"]["tree"]
-        or candidate.sha256
-        != claim.authorization.document["candidate"]["manifest_sha256"]
-        or candidate_worker
-        != claim.authorization.document["candidate"]["worker_binary_sha256"]
         or backup_worker
         != claim.authorization.document["before"]["worker_binary_sha256"]
         or receipt_sha256
         != claim.authorization.document["candidate"][
             "promotion_receipt_sha256"
         ]
-        or promotion_receipt.sha256 != receipt_sha256
+        or (
+            backup_seals
+            and backup_seals[0].snapshot != backup
+        )
         or unit.sha256 != rollback["systemd_unit_sha256"]
         or environment.sha256 != rollback["environment_sha256"]
     ):
@@ -347,19 +387,99 @@ def preflight_recovery(
         "OpenWebUI session token",
         required_uid=policy.required_uid,
     )
+    api_key_seal = transaction._capture_runtime_artifact(
+        request.api_key_file,
+        label="gateway API key",
+        maximum=65_536,
+        required_uid=transaction._private_secret_seal_uid(
+            request.api_key_file,
+            required_uid=policy.required_uid,
+        ),
+    )
+    session_token_seal = transaction._capture_runtime_artifact(
+        request.openwebui_session_token_file,
+        label="OpenWebUI session token",
+        maximum=65_536,
+        required_uid=transaction._private_secret_seal_uid(
+            request.openwebui_session_token_file,
+            required_uid=policy.required_uid,
+        ),
+    )
+    if (
+        api_key_seal.snapshot.sha256 != api_key_sha256
+        or session_token_seal.snapshot.sha256 != session_token_sha256
+    ):
+        raise RecoveryError("recovery private credential changed while sealing")
+    aq4_runtime_artifact_seals = (
+        *aq4_runtime.artifacts,
+        *backup_seals,
+        *command_runtime.aq4,
+    )
+    aq4_runtime_tree_seals = aq4_runtime.trees
+    shared_runtime_artifact_seals = (
+        unit_seal,
+        environment_seal,
+        api_key_seal,
+        session_token_seal,
+        *command_runtime.shared,
+    )
+    shared_runtime_tree_seals: tuple[
+        transaction.campaign_runtime_seal.RuntimeTreeSeal, ...
+    ] = ()
+    runtime_artifact_seals = (
+        *aq4_runtime_artifact_seals,
+        *shared_runtime_artifact_seals,
+    )
+    runtime_tree_seals = (
+        *aq4_runtime_tree_seals,
+        *shared_runtime_tree_seals,
+    )
+    candidate_summary = {
+        "validated": False,
+        "manifest_sha256": candidate.sha256,
+        "model_id": candidate_authorization["model_id"],
+        "format_id": candidate_authorization["format_id"],
+        "worker": {
+            "binary": None,
+            "binary_sha256": candidate_authorization[
+                "worker_binary_sha256"
+            ],
+            "protocol": candidate_authorization["worker_protocol"],
+        },
+    }
+    aq4_source = claim.authorization.document["aq4_release"]["source"]
     pseudo = transaction.TransactionPreflight(
-        claim.authorization,
-        source_commit,
-        source_tree,
-        active,
-        candidate,
-        backup_summary,
-        candidate_summary,
-        unit.sha256,
-        environment.sha256,
-        promotion_receipt.sha256,
-        api_key_sha256,
-        session_token_sha256,
+        authorization=claim.authorization,
+        source_commit=source_commit,
+        source_tree=source_tree,
+        source_seal=source_seal,
+        active=active,
+        candidate=candidate,
+        active_summary=backup_summary,
+        candidate_summary=candidate_summary,
+        systemd_unit_sha256=unit.sha256,
+        environment_sha256=environment.sha256,
+        candidate_promotion_receipt_sha256=receipt_sha256,
+        aq4_source_root=Path(aq4_source["root"]),
+        aq4_source_commit=aq4_source["commit"],
+        aq4_source_tree=aq4_source["tree"],
+        aq4_source_seal=None,
+        aq4_worker_binary=aq4_runtime.worker.snapshot,
+        aq4_promotion_receipt=aq4_runtime.promotion_receipt.snapshot,
+        aq4_promotion_evidence=None,
+        api_key_sha256=api_key_sha256,
+        openwebui_session_token_sha256=session_token_sha256,
+        runtime_artifact_seals=runtime_artifact_seals,
+        runtime_tree_seals=runtime_tree_seals,
+        aq4_runtime_artifact_seals=aq4_runtime_artifact_seals,
+        aq4_runtime_tree_seals=aq4_runtime_tree_seals,
+        shared_runtime_artifact_seals=shared_runtime_artifact_seals,
+        shared_runtime_tree_seals=shared_runtime_tree_seals,
+    )
+    transaction._require_runtime_seals(
+        pseudo,
+        required_uid=policy.required_uid,
+        scope="aq4",
     )
     return RecoveryPreflight(
         claim,
@@ -373,7 +493,7 @@ def preflight_recovery(
         backup_summary,
         unit.sha256,
         environment.sha256,
-        promotion_receipt.sha256,
+        receipt_sha256,
         pseudo,
         backup_requires_publication,
     )
@@ -387,6 +507,11 @@ def _repin(
     policy: authorization.RegistryPolicy,
     runner: transaction.CommandRunner,
 ) -> None:
+    if (
+        not pinned.transaction_preflight.runtime_artifact_seals
+        or not pinned.transaction_preflight.runtime_tree_seals
+    ):
+        raise RecoveryError("recovery runtime seals are unavailable")
     transaction._repin_transaction_inputs(
         request,
         pinned.claim,
@@ -394,6 +519,8 @@ def _repin(
         policy=policy,
         runner=runner,
         now=now,
+        repin_aq4_release=False,
+        runtime_scope="aq4",
     )
     backup = transaction._read_input(
         pinned.backup.path,
@@ -446,9 +573,30 @@ def _materialize_missing_backup(
         or stat.S_IMODE(backup.identity.mode) != 0o444
     ):
         raise RecoveryError("bootstrapped AQ4 backup identity differs")
+    backup_seal = transaction._capture_runtime_artifact(
+        backup.path,
+        label="authorized immutable AQ4 backup",
+        maximum=transaction.MAX_MANIFEST_BYTES,
+        required_uid=policy.required_uid,
+    )
+    if backup_seal.snapshot != backup:
+        raise RecoveryError("bootstrapped AQ4 backup seal differs")
+    aq4_runtime_artifact_seals = (
+        *pinned.transaction_preflight.aq4_runtime_artifact_seals,
+        backup_seal,
+    )
+    transaction_preflight = replace(
+        pinned.transaction_preflight,
+        runtime_artifact_seals=(
+            *aq4_runtime_artifact_seals,
+            *pinned.transaction_preflight.shared_runtime_artifact_seals,
+        ),
+        aq4_runtime_artifact_seals=aq4_runtime_artifact_seals,
+    )
     return replace(
         pinned,
         backup=backup,
+        transaction_preflight=transaction_preflight,
         backup_requires_publication=False,
     )
 
@@ -611,6 +759,7 @@ def recover_transaction(
                         preflight_result=pinned.transaction_preflight,
                         stage="reverse_reconciliation",
                         runner=runner,
+                        runtime_scope="aq4",
                     )
                     _repin(
                         request,
@@ -638,6 +787,7 @@ def recover_transaction(
                         preflight_result=pinned.transaction_preflight,
                         stage="final_checks",
                         runner=runner,
+                        runtime_scope="aq4",
                     )
                     _repin(
                         request,
@@ -657,19 +807,58 @@ def recover_transaction(
                         "recovered active served-model manifest",
                         transaction.MAX_MANIFEST_BYTES,
                     )
+                    transaction_preflight = pinned.transaction_preflight
                     proof_preflight = transaction.TransactionPreflight(
-                        pinned.claim.authorization,
-                        pinned.source_commit,
-                        pinned.source_tree,
-                        restored_snapshot,
-                        pinned.candidate,
-                        pinned.backup_summary,
-                        pinned.candidate_summary,
-                        pinned.systemd_unit_sha256,
-                        pinned.environment_sha256,
-                        pinned.candidate_promotion_receipt_sha256,
-                        pinned.transaction_preflight.api_key_sha256,
-                        pinned.transaction_preflight.openwebui_session_token_sha256,
+                        authorization=pinned.claim.authorization,
+                        source_commit=pinned.source_commit,
+                        source_tree=pinned.source_tree,
+                        source_seal=transaction_preflight.source_seal,
+                        active=restored_snapshot,
+                        candidate=pinned.candidate,
+                        active_summary=pinned.backup_summary,
+                        candidate_summary=pinned.candidate_summary,
+                        systemd_unit_sha256=pinned.systemd_unit_sha256,
+                        environment_sha256=pinned.environment_sha256,
+                        candidate_promotion_receipt_sha256=(
+                            pinned.candidate_promotion_receipt_sha256
+                        ),
+                        aq4_source_root=transaction_preflight.aq4_source_root,
+                        aq4_source_commit=transaction_preflight.aq4_source_commit,
+                        aq4_source_tree=transaction_preflight.aq4_source_tree,
+                        aq4_source_seal=None,
+                        aq4_worker_binary=None,
+                        aq4_promotion_receipt=None,
+                        aq4_promotion_evidence=None,
+                        api_key_sha256=transaction_preflight.api_key_sha256,
+                        openwebui_session_token_sha256=(
+                            transaction_preflight.openwebui_session_token_sha256
+                        ),
+                        runtime_artifact_seals=(
+                            transaction_preflight.runtime_artifact_seals
+                        ),
+                        runtime_tree_seals=(
+                            transaction_preflight.runtime_tree_seals
+                        ),
+                        candidate_runtime_artifact_seals=(
+                            transaction_preflight
+                            .candidate_runtime_artifact_seals
+                        ),
+                        candidate_runtime_tree_seals=(
+                            transaction_preflight.candidate_runtime_tree_seals
+                        ),
+                        aq4_runtime_artifact_seals=(
+                            transaction_preflight.aq4_runtime_artifact_seals
+                        ),
+                        aq4_runtime_tree_seals=(
+                            transaction_preflight.aq4_runtime_tree_seals
+                        ),
+                        shared_runtime_artifact_seals=(
+                            transaction_preflight
+                            .shared_runtime_artifact_seals
+                        ),
+                        shared_runtime_tree_seals=(
+                            transaction_preflight.shared_runtime_tree_seals
+                        ),
                     )
                     proof = restoration_probe(
                         request,
@@ -688,6 +877,13 @@ def recover_transaction(
                             "before"
                         ]["worker_binary_sha256"],
                         service_unit=request.service_unit,
+                    )
+                    _repin(
+                        request,
+                        pinned,
+                        now=clock(),
+                        policy=policy,
+                        runner=runner,
                     )
                     restoration.update(
                         observed_manifest_sha256=pinned.backup.sha256,

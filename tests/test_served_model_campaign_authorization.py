@@ -39,6 +39,18 @@ def policy(tmp_path: Path) -> object:
 def document(tmp_path: Path) -> dict[str, object]:
     outputs = tmp_path / "outputs"
     outputs.mkdir(mode=0o700)
+    aq4_source = tmp_path / "aq4-source"
+    aq4_source.mkdir(mode=0o700)
+    aq4_worker = tmp_path / "aq4-worker"
+    aq4_worker.write_bytes(b"fixture AQ4 worker\n")
+    bundle_root = outputs / "aq4-bundle-components"
+    bundle_root.mkdir(mode=0o700)
+    promotion_source = tmp_path / "aq4-promotion-source"
+    promotion_source.mkdir(mode=0o700)
+    promotion_evidence = promotion_source / "promotion-evidence.json"
+    promotion_evidence.write_bytes(b'{"fixture":"evidence"}\n')
+    promotion_receipt = promotion_source / "promotion-receipt.json"
+    promotion_receipt.write_bytes(b'{"fixture":"receipt"}\n')
     return {
         "schema_version": AUTH.AUTHORIZATION_SCHEMA,
         "authorization_id": "sq8-v2-window-20260724-001",
@@ -53,8 +65,33 @@ def document(tmp_path: Path) -> dict[str, object]:
             "model_id": "ullm-qwen3.5-9b-aq4",
             "format_id": "AQ4_0",
             "manifest_sha256": "1" * 64,
+            "worker_protocol": "ullm.worker.v2",
+            "worker_binary_path": str(aq4_worker),
             "worker_binary_sha256": "2" * 64,
             "promotion_source_commit": "c" * 40,
+            "promotion_receipt_path": str(promotion_receipt),
+            "promotion_receipt_sha256": "d" * 64,
+        },
+        "aq4_release": {
+            "source": {
+                "root": str(aq4_source),
+                "commit": "c" * 40,
+                "tree": "d" * 40,
+            },
+            "openwebui_image": AUTH.FIXED_OPENWEBUI_IMAGE,
+            "promotion_evidence": {
+                "source_path": str(promotion_evidence),
+                "path": str(bundle_root / promotion_evidence.name),
+                "sha256": "f" * 64,
+            },
+            "promotion_receipt": {
+                "source_path": str(promotion_receipt),
+                "path": str(bundle_root / promotion_receipt.name),
+                "sha256": "d" * 64,
+            },
+            "release_evidence_path": str(bundle_root / "release-evidence.json"),
+            "release_validator_path": str(bundle_root / "release-validator.json"),
+            "browser_validator_path": str(bundle_root / "browser-validator.json"),
         },
         "candidate": {
             "model_id": "ullm-qwen3-14b-sq8",
@@ -66,6 +103,18 @@ def document(tmp_path: Path) -> dict[str, object]:
             "promotion_receipt_sha256": "5" * 64,
         },
         "campaigns": {
+            "aq4_reasoning_release": {
+                "run_id": "aq4-reasoning-release-20260724-001",
+                "final_path": str(outputs / "aq4-reasoning-release"),
+            },
+            "aq4_reasoning_browser": {
+                "run_id": "aq4-reasoning-browser-20260724-001",
+                "final_path": str(bundle_root / "browser-evidence.json"),
+            },
+            "aq4_bundle": {
+                "run_id": "aq4-bundle-20260724-001",
+                "final_path": str(bundle_root / "bundle.json"),
+            },
             "sq8_full": {
                 "run_id": "sq8-full-20260724-001",
                 "final_path": str(outputs / "sq8-full"),
@@ -194,7 +243,11 @@ def outcome_document(
             else {
                 "run_id": value["run_id"],
                 "path": value["final_path"],
-                "kind": "directory",
+                "kind": (
+                    "file"
+                    if name in {"aq4_reasoning_browser", "aq4_bundle"}
+                    else "directory"
+                ),
                 "sha256": "8" * 64,
                 "artifact_count": 1,
                 "total_bytes": 2,
@@ -213,6 +266,16 @@ def outcome_document(
         "status": status,
         "failure_stage": failure_stage,
         "stages": stages,
+        "aq4_observations": [
+            {
+                "stage": stage,
+                "active_manifest_sha256": authorization["before"][
+                    "manifest_sha256"
+                ],
+                "bytes_equal": True,
+            }
+            for stage in AUTH.AQ4_OBSERVATION_STAGES
+        ],
         "candidate_observations": [
             {
                 "stage": stage,
@@ -293,6 +356,30 @@ def test_concurrent_claim_has_exactly_one_winner(tmp_path: Path) -> None:
         (
             lambda value: value["source"].update(commit="8" * 40),
             "source/candidate commit",
+        ),
+        (
+            lambda value: value["aq4_release"]["source"].update(
+                commit="8" * 40
+            ),
+            "AQ4 release source",
+        ),
+        (
+            lambda value: value["before"].update(
+                worker_protocol="ullm.worker.v1"
+            ),
+            "before identity",
+        ),
+        (
+            lambda value: value["aq4_release"]["promotion_receipt"].update(
+                sha256="8" * 64
+            ),
+            "promotion receipt differs",
+        ),
+        (
+            lambda value: value["aq4_release"].update(
+                openwebui_image="fixture/openwebui@sha256:" + "8" * 64
+            ),
+            "OpenWebUI image differs",
         ),
         (
             lambda value: value["campaigns"]["sq8_full"].update(
@@ -396,7 +483,24 @@ def test_window_and_campaign_bindings_are_exact(tmp_path: Path) -> None:
         claim,
         source_commit=value["source"]["commit"],
         source_tree=value["source"]["tree"],
+        aq4_source_root=Path(value["aq4_release"]["source"]["root"]),
+        aq4_source_commit=value["aq4_release"]["source"]["commit"],
+        aq4_source_tree=value["aq4_release"]["source"]["tree"],
         before_manifest_sha256=value["before"]["manifest_sha256"],
+        before_worker_protocol=value["before"]["worker_protocol"],
+        before_worker_binary_path=Path(value["before"]["worker_binary_path"]),
+        before_promotion_receipt_path=Path(
+            value["before"]["promotion_receipt_path"]
+        ),
+        before_promotion_receipt_sha256=value["before"][
+            "promotion_receipt_sha256"
+        ],
+        aq4_promotion_evidence_path=Path(
+            value["aq4_release"]["promotion_evidence"]["source_path"]
+        ),
+        aq4_promotion_evidence_sha256=value["aq4_release"][
+            "promotion_evidence"
+        ]["sha256"],
         candidate_manifest_sha256=value["candidate"]["manifest_sha256"],
         candidate_worker_binary_sha256=value["candidate"]["worker_binary_sha256"],
         candidate_promotion_receipt_sha256=value["candidate"][
@@ -416,7 +520,26 @@ def test_window_and_campaign_bindings_are_exact(tmp_path: Path) -> None:
             claim,
             source_commit=value["source"]["commit"],
             source_tree=value["source"]["tree"],
+            aq4_source_root=Path(value["aq4_release"]["source"]["root"]),
+            aq4_source_commit=value["aq4_release"]["source"]["commit"],
+            aq4_source_tree=value["aq4_release"]["source"]["tree"],
             before_manifest_sha256=value["before"]["manifest_sha256"],
+            before_worker_protocol=value["before"]["worker_protocol"],
+            before_worker_binary_path=Path(
+                value["before"]["worker_binary_path"]
+            ),
+            before_promotion_receipt_path=Path(
+                value["before"]["promotion_receipt_path"]
+            ),
+            before_promotion_receipt_sha256=value["before"][
+                "promotion_receipt_sha256"
+            ],
+            aq4_promotion_evidence_path=Path(
+                value["aq4_release"]["promotion_evidence"]["source_path"]
+            ),
+            aq4_promotion_evidence_sha256=value["aq4_release"][
+                "promotion_evidence"
+            ]["sha256"],
             candidate_manifest_sha256="0" * 64,
             candidate_worker_binary_sha256=value["candidate"][
                 "worker_binary_sha256"
@@ -678,6 +801,79 @@ def test_authorization_rejects_campaign_outputs_inside_source_root(
             now=NOW,
             required_uid=os.geteuid(),
             source_root=source,
+        )
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    ("duplicate_output", "source_overlap"),
+)
+def test_authorization_rejects_double_slash_posix_path_aliases(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    document_root = tmp_path / "document"
+    document_root.mkdir()
+    value = document(document_root)
+    if mutation == "duplicate_output":
+        canonical = value["campaigns"]["sq8_full"]["final_path"]
+        value["campaigns"]["reasoning_release"]["final_path"] = f"/{canonical}"
+    else:
+        inside = source / "campaign-output"
+        value["campaigns"]["sq8_full"]["final_path"] = f"/{inside}"
+
+    with pytest.raises(AUTH.AuthorizationError, match="canonical"):
+        AUTH.validate_authorization_document(
+            value,
+            now=NOW,
+            required_uid=os.geteuid(),
+            source_root=source,
+        )
+
+
+def test_archival_claim_load_survives_disappeared_aq4_source(
+    tmp_path: Path,
+) -> None:
+    selected_policy, path, value = issue(tmp_path)
+    claim = AUTH.claim_authorization(path, now=NOW, policy=selected_policy)
+    Path(value["aq4_release"]["source"]["root"]).rmdir()
+
+    loaded = AUTH.load_claim(
+        path,
+        now=NOW + timedelta(hours=3),
+        policy=selected_policy,
+    )
+    assert loaded.snapshot.sha256 == claim.snapshot.sha256
+
+
+def test_aq4_promotion_copy_destination_is_fresh_and_below_bundle_root(
+    tmp_path: Path,
+) -> None:
+    value = document(tmp_path)
+    value["aq4_release"]["promotion_evidence"]["path"] = str(
+        tmp_path / "outside-promotion-copy.json"
+    )
+    with pytest.raises(AUTH.AuthorizationError, match="below its output parent"):
+        AUTH.validate_authorization_document(
+            value,
+            now=NOW,
+            required_uid=os.geteuid(),
+        )
+
+    second = tmp_path / "second"
+    second.mkdir()
+    other = document(second)
+    destination = Path(
+        other["aq4_release"]["promotion_evidence"]["path"]
+    )
+    destination.write_bytes(b"already present\n")
+    with pytest.raises(AUTH.AuthorizationError, match="fresh output"):
+        AUTH.validate_authorization_document(
+            other,
+            now=NOW,
+            required_uid=os.geteuid(),
         )
 
 

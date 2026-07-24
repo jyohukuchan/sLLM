@@ -34,6 +34,8 @@ if os.fspath(TOOLS) not in sys.path:
 
 import served_model_campaign_authorization as authorization  # noqa: E402
 import served_model_aq4_restoration_proof as restoration_proof  # noqa: E402
+import served_model_campaign_runtime_seal as campaign_runtime_seal  # noqa: E402
+import served_model_campaign_source_seal as campaign_source_seal  # noqa: E402
 from served_model_active_binding import (  # noqa: E402
     FileIdentity,
     MAX_MANIFEST_BYTES,
@@ -52,8 +54,49 @@ MAX_COMMANDS = 64
 MAX_ARGUMENTS = 128
 MAX_ARGUMENT_BYTES = 65_536
 MAX_COMMAND_TIMEOUT_SECONDS = 3_600.0
+SQ8_FULL_MAX_TIMEOUT_SECONDS = 6 * 60 * 60.0
 COMMAND_TERMINATION_GRACE_SECONDS = 2.0
+CANDIDATE_STABILIZATION_SECONDS = 15 * 60.0
+CANDIDATE_STABILIZATION_POLL_SECONDS = 30.0
+MAX_CANDIDATE_STABILIZATION_POLLS = 4_096
 GIT_RE = re.compile(r"[0-9a-f]{40}\Z")
+GIT_BINARY = campaign_source_seal.GIT_BINARY
+GIT_COMMAND_PREFIX = campaign_source_seal.GIT_COMMAND_PREFIX
+PYTHON_BINARY = "/usr/bin/python3.12"
+DOCKER_BINARY = "/usr/bin/docker"
+OPENWEBUI_IMAGE_VERIFIER = Path("tools/verify-openwebui-container-image.py")
+NESTED_EXECUTABLE_FLAGS = frozenset(
+    {"--docker", "--rocm-smi", "--systemctl"}
+)
+FIXED_GATEWAY_API_KEY_PATH = Path("/etc/ullm/openai-api-key")
+FIXED_GATEWAY_API_KEY_UID = 0
+FIXED_GATEWAY_API_KEY_GID = 1000
+FIXED_GATEWAY_API_KEY_MODE = 0o640
+FIXED_OPENWEBUI_SESSION_TOKEN_PATH = Path(
+    "/run/ullm-campaign-secrets/openwebui-session.jwt"
+)
+FIXED_OPENWEBUI_SESSION_TOKEN_PARENT = Path("/run/ullm-campaign-secrets")
+FIXED_OPENWEBUI_SESSION_TOKEN_PARENT_UID = 0
+FIXED_OPENWEBUI_SESSION_TOKEN_PARENT_GID = 1000
+FIXED_OPENWEBUI_SESSION_TOKEN_PARENT_MODE = 0o750
+CAMPAIGN_EXECUTOR_UID = 1000
+CAMPAIGN_EXECUTOR_GID = 1000
+CAMPAIGN_EXECUTOR_SUPPLEMENTARY_GROUPS = (27, 44, 984, 992, 1000)
+CAMPAIGN_STAGING_OUTPUT_ENVIRONMENT = "ULLM_CAMPAIGN_STAGING_OUTPUT"
+CAMPAIGN_SOURCE_ROOT_ENVIRONMENT = "ULLM_CAMPAIGN_SOURCE_ROOT"
+FIXED_OPENWEBUI_SESSION_TOKEN_UID = 0
+FIXED_OPENWEBUI_SESSION_TOKEN_GID = 1000
+FIXED_OPENWEBUI_SESSION_TOKEN_MODE = 0o640
+STAGE_BASE_ENVIRONMENT = {
+    "HOME": "/nonexistent",
+    "LANG": "C.UTF-8",
+    "LC_ALL": "C.UTF-8",
+    "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+    "PYTHONDONTWRITEBYTECODE": "1",
+    "PYTHONNOUSERSITE": "1",
+    "PYTHONSAFEPATH": "1",
+    "TZ": "UTC",
+}
 SELECTED_ARTIFACTS = {
     "SHA256SUMS",
     "active-manifest-binding.json",
@@ -119,7 +162,21 @@ REASONING_BROWSER_V2_FILES = frozenset(
         "active-manifest-binding.json",
     }
 )
+AQ4_REASONING_RELEASE_FILES = frozenset(
+    {
+        "cases.json",
+        "lifecycle.json",
+        "resource-samples.jsonl",
+        "summary.json",
+    }
+)
 CAMPAIGN_OUTPUT_LAYOUTS = {
+    "aq4_reasoning_release": {
+        "files": AQ4_REASONING_RELEASE_FILES,
+        "directories": frozenset(),
+        "directory_mode": 0o555,
+        "file_mode": 0o444,
+    },
     "sq8_full": {
         "files": SQ8_FULL_V2_FILES,
         "directories": frozenset({"browser"}),
@@ -197,6 +254,9 @@ class TransactionCommands:
     reasoning_release: tuple[str, ...]
     reasoning_browser: tuple[str, ...]
     reverse_reconciliation: tuple[tuple[str, ...], ...]
+    aq4_reasoning_release: tuple[tuple[str, ...], ...]
+    aq4_reasoning_browser: tuple[tuple[str, ...], ...]
+    aq4_bundle: tuple[tuple[str, ...], ...]
     final_checks: tuple[tuple[str, ...], ...]
 
 
@@ -221,6 +281,7 @@ class TransactionPreflight:
     authorization: authorization.AuthorizationRecord
     source_commit: str
     source_tree: str
+    source_seal: campaign_source_seal.SourceSeal
     active: StableFileSnapshot
     candidate: StableFileSnapshot
     active_summary: dict[str, Any]
@@ -228,8 +289,37 @@ class TransactionPreflight:
     systemd_unit_sha256: str
     environment_sha256: str
     candidate_promotion_receipt_sha256: str
+    aq4_source_root: Path
+    aq4_source_commit: str
+    aq4_source_tree: str
+    aq4_source_seal: campaign_source_seal.SourceSeal | None
+    aq4_worker_binary: StableFileSnapshot | None
+    aq4_promotion_receipt: StableFileSnapshot | None
+    aq4_promotion_evidence: StableFileSnapshot | None
     api_key_sha256: str | None
     openwebui_session_token_sha256: str | None
+    runtime_artifact_seals: tuple[
+        campaign_runtime_seal.RuntimeArtifactSeal, ...
+    ] = ()
+    runtime_tree_seals: tuple[campaign_runtime_seal.RuntimeTreeSeal, ...] = ()
+    candidate_runtime_artifact_seals: tuple[
+        campaign_runtime_seal.RuntimeArtifactSeal, ...
+    ] = ()
+    candidate_runtime_tree_seals: tuple[
+        campaign_runtime_seal.RuntimeTreeSeal, ...
+    ] = ()
+    aq4_runtime_artifact_seals: tuple[
+        campaign_runtime_seal.RuntimeArtifactSeal, ...
+    ] = ()
+    aq4_runtime_tree_seals: tuple[
+        campaign_runtime_seal.RuntimeTreeSeal, ...
+    ] = ()
+    shared_runtime_artifact_seals: tuple[
+        campaign_runtime_seal.RuntimeArtifactSeal, ...
+    ] = ()
+    shared_runtime_tree_seals: tuple[
+        campaign_runtime_seal.RuntimeTreeSeal, ...
+    ] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -251,6 +341,16 @@ RestorationProbe = Callable[
     ],
     dict[str, Any],
 ]
+CandidateStabilizationProbe = Callable[
+    [
+        TransactionRequest,
+        authorization.ClaimRecord,
+        TransactionPreflight,
+    ],
+    dict[str, Any],
+]
+Sleeper = Callable[[float], None]
+MonotonicClock = Callable[[], float]
 
 
 def _load_validator() -> ModuleType:
@@ -309,6 +409,9 @@ def _validate_commands(commands: TransactionCommands) -> None:
         (commands.reasoning_release,),
         (commands.reasoning_browser,),
         commands.reverse_reconciliation,
+        commands.aq4_reasoning_release,
+        commands.aq4_reasoning_browser,
+        commands.aq4_bundle,
         commands.final_checks,
     )
     if any(not group or len(group) > MAX_COMMANDS for group in groups):
@@ -337,8 +440,9 @@ def _run_git(
 ) -> str:
     try:
         completed = runner(
-            ["git", *arguments],
+            campaign_source_seal.git_argv(list(arguments)),
             cwd=source_root,
+            env=campaign_source_seal.git_environment(),
             check=False,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
@@ -360,14 +464,46 @@ def _source_identity(
     source_root: Path,
     *,
     runner: CommandRunner,
+    require_detached: bool = False,
 ) -> tuple[str, str]:
+    commit, tree, _seal = _sealed_source_identity(
+        source_root,
+        runner=runner,
+        required_uid=os.geteuid(),
+        require_detached=require_detached,
+    )
+    return commit, tree
+
+
+def _sealed_source_identity(
+    source_root: Path,
+    *,
+    runner: CommandRunner,
+    required_uid: int,
+    require_detached: bool = False,
+    expected_seal: campaign_source_seal.SourceSeal | None = None,
+) -> tuple[str, str, campaign_source_seal.SourceSeal]:
     try:
-        root = source_root.resolve(strict=True)
-    except OSError as error:
-        raise TransactionError("source root is unavailable") from error
+        if expected_seal is None:
+            sealed = campaign_source_seal.capture_source_seal(
+                source_root,
+                required_uid=required_uid,
+            )
+        else:
+            if expected_seal.root != source_root:
+                raise campaign_source_seal.SourceSealError(
+                    "campaign source root differs from its seal"
+                )
+            sealed = campaign_source_seal.require_source_seal(
+                expected_seal,
+                required_uid=required_uid,
+            )
+    except campaign_source_seal.SourceSealError as error:
+        raise TransactionError("campaign source is not sealed") from error
+    root = sealed.root
     top = Path(
         _run_git(root, ("rev-parse", "--show-toplevel"), runner=runner)
-    ).resolve(strict=True)
+    )
     if top != root:
         raise TransactionError("source root differs from Git top-level")
     commit = _run_git(root, ("rev-parse", "HEAD"), runner=runner)
@@ -376,12 +512,35 @@ def _source_identity(
         raise TransactionError("source identity is not a full Git object ID")
     status = _run_git(
         root,
-        ("status", "--porcelain=v1", "--untracked-files=all"),
+        (
+            "status",
+            "--porcelain=v1",
+            "--untracked-files=all",
+            "--ignore-submodules=all",
+            "--no-renames",
+        ),
         runner=runner,
     )
     if status:
         raise TransactionError("campaign source worktree is not clean")
-    return commit, tree
+    if require_detached:
+        branch = _run_git(
+            root,
+            ("rev-parse", "--abbrev-ref", "HEAD"),
+            runner=runner,
+        )
+        if branch != "HEAD":
+            raise TransactionError("AQ4 campaign source is not detached")
+    try:
+        campaign_source_seal.require_source_seal(
+            sealed,
+            required_uid=required_uid,
+        )
+    except campaign_source_seal.SourceSealError as error:
+        raise TransactionError(
+            "campaign source changed during Git identity read"
+        ) from error
+    return commit, tree, sealed
 
 
 def _strict_object(raw: bytes, label: str) -> dict[str, Any]:
@@ -448,11 +607,663 @@ def _promotion_identity(
     return receipt_path, receipt_sha256
 
 
+def _aq4_promotion_identity(
+    active_document: dict[str, Any],
+    *,
+    manifest_parent: Path,
+    authorization_document: dict[str, Any],
+) -> tuple[Path, str, Path, str]:
+    before = authorization_document["before"]
+    aq4_release = authorization_document["aq4_release"]
+    receipt_path, receipt_sha256 = _promotion_identity(
+        active_document,
+        manifest_parent=manifest_parent,
+        source_commit=before["promotion_source_commit"],
+        label="active AQ4",
+    )
+    expected_receipt = Path(before["promotion_receipt_path"])
+    evidence_reference = aq4_release["promotion_evidence"]
+    expected_evidence = Path(evidence_reference["source_path"])
+    if (
+        receipt_path != expected_receipt
+        or receipt_sha256 != before["promotion_receipt_sha256"]
+        or aq4_release["promotion_receipt"]["source_path"]
+        != os.fspath(expected_receipt)
+        or aq4_release["promotion_receipt"]["sha256"] != receipt_sha256
+    ):
+        raise TransactionError("active AQ4 promotion receipt identity differs")
+    receipt = _read_input(
+        receipt_path,
+        "active AQ4 promotion receipt",
+        MAX_INPUT_BYTES,
+    )
+    if receipt.sha256 != receipt_sha256:
+        raise TransactionError("active AQ4 promotion receipt bytes differ")
+    receipt_document = _strict_object(
+        receipt.raw,
+        "active AQ4 promotion receipt",
+    )
+    reference = receipt_document.get("evidence")
+    if (
+        set(receipt_document)
+        != {"schema_version", "source_commit", "evidence"}
+        or receipt_document.get("schema_version")
+        != "ullm.aq4_resident_promotion.v1"
+        or receipt_document.get("source_commit")
+        != before["promotion_source_commit"]
+        or not isinstance(reference, dict)
+        or set(reference) != {"path", "sha256"}
+        or reference.get("sha256") != evidence_reference["sha256"]
+    ):
+        raise TransactionError("active AQ4 promotion receipt lineage differs")
+    raw_evidence_path = reference["path"]
+    if not isinstance(raw_evidence_path, str) or not raw_evidence_path:
+        raise TransactionError("active AQ4 promotion evidence path is invalid")
+    referenced_path = Path(raw_evidence_path)
+    if (
+        referenced_path.is_absolute()
+        or any(part in {"", ".", ".."} for part in referenced_path.parts)
+    ):
+        raise TransactionError(
+            "active AQ4 promotion evidence reference is unsafe"
+        )
+    destination_receipt = Path(
+        aq4_release["promotion_receipt"]["path"]
+    )
+    destination_evidence = Path(
+        aq4_release["promotion_evidence"]["path"]
+    )
+    if destination_receipt.parent / referenced_path != destination_evidence:
+        raise TransactionError(
+            "AQ4 promotion copy paths do not preserve receipt lineage"
+        )
+    referenced_path = receipt_path.parent / referenced_path
+    try:
+        referenced_path = referenced_path.resolve(strict=True)
+        expected_evidence_resolved = expected_evidence.resolve(strict=True)
+    except OSError as error:
+        raise TransactionError(
+            "active AQ4 promotion evidence is unavailable"
+        ) from error
+    if referenced_path != expected_evidence_resolved:
+        raise TransactionError("active AQ4 promotion evidence path differs")
+    evidence = _read_input(
+        expected_evidence,
+        "active AQ4 promotion evidence",
+        MAX_INPUT_BYTES,
+    )
+    if evidence.sha256 != evidence_reference["sha256"]:
+        raise TransactionError("active AQ4 promotion evidence bytes differ")
+    evidence_document = _strict_object(
+        evidence.raw,
+        "active AQ4 promotion evidence",
+    )
+    if (
+        evidence_document.get("schema_version")
+        != "ullm.aq4_resident_promotion_evidence.v1"
+        or evidence_document.get("source_commit")
+        != before["promotion_source_commit"]
+        or evidence_document.get("worker_binary")
+        != before["worker_binary_path"]
+        or evidence_document.get("worker_binary_sha256")
+        != before["worker_binary_sha256"]
+        or evidence_document.get("verified") is not True
+        or evidence_document.get("production_receipt_written") is not False
+    ):
+        raise TransactionError("active AQ4 promotion evidence identity differs")
+    return (
+        receipt_path,
+        receipt.sha256,
+        expected_evidence,
+        evidence.sha256,
+    )
+
+
 def _read_input(path: Path, label: str, maximum: int) -> StableFileSnapshot:
     try:
         return stable_read_regular(path, label, maximum=maximum)
     except Exception as error:
         raise TransactionError(f"{label} is unavailable or changed") from error
+
+
+@dataclass(frozen=True, slots=True)
+class _ManifestRuntimeSeals:
+    worker: campaign_runtime_seal.RuntimeArtifactSeal
+    promotion_receipt: campaign_runtime_seal.RuntimeArtifactSeal
+    artifacts: tuple[campaign_runtime_seal.RuntimeArtifactSeal, ...]
+    trees: tuple[campaign_runtime_seal.RuntimeTreeSeal, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class _CommandRuntimeSeals:
+    candidate: tuple[campaign_runtime_seal.RuntimeArtifactSeal, ...]
+    aq4: tuple[campaign_runtime_seal.RuntimeArtifactSeal, ...]
+    shared: tuple[campaign_runtime_seal.RuntimeArtifactSeal, ...]
+
+
+def _runtime_path(
+    raw: Any,
+    *,
+    base: Path,
+    label: str,
+    relative_only: bool = False,
+) -> Path:
+    if (
+        not isinstance(raw, str)
+        or not raw
+        or "\x00" in raw
+        or len(raw.encode("utf-8")) > 4_096
+    ):
+        raise TransactionError(f"{label} path is invalid")
+    selected = Path(raw)
+    if os.fspath(selected) != raw or any(
+        part in {"", ".", ".."} for part in selected.parts
+    ):
+        raise TransactionError(f"{label} path is not lexical")
+    if relative_only:
+        if selected.is_absolute():
+            raise TransactionError(f"{label} path is not relative")
+        selected = base / selected
+    elif not selected.is_absolute():
+        selected = base / selected
+    try:
+        return campaign_runtime_seal._lexical_absolute(selected)
+    except campaign_runtime_seal.RuntimeArtifactSealError as error:
+        raise TransactionError(f"{label} path is not lexical absolute") from error
+
+
+def _capture_runtime_artifact(
+    path: Path,
+    *,
+    label: str,
+    maximum: int,
+    required_uid: int,
+) -> campaign_runtime_seal.RuntimeArtifactSeal:
+    try:
+        return campaign_runtime_seal.capture_runtime_artifact_seal(
+            path,
+            label=label,
+            maximum=maximum,
+            required_uid=required_uid,
+        )
+    except campaign_runtime_seal.RuntimeArtifactSealError as error:
+        raise TransactionError(f"{label} runtime artifact is not sealed") from error
+
+
+def _capture_runtime_tree(
+    root: Path,
+    *,
+    label: str,
+    required_uid: int,
+) -> campaign_runtime_seal.RuntimeTreeSeal:
+    try:
+        return campaign_runtime_seal.capture_runtime_tree_seal(
+            root,
+            label=label,
+            required_uid=required_uid,
+        )
+    except campaign_runtime_seal.RuntimeArtifactSealError as error:
+        raise TransactionError(f"{label} runtime tree is not sealed") from error
+
+
+def _command_executable_paths(
+    groups: Sequence[Sequence[Sequence[str]]],
+    *,
+    label: str,
+) -> set[Path]:
+    paths: set[Path] = set()
+    for group in groups:
+        for command in group:
+            if not Path(command[0]).is_absolute():
+                raise TransactionError(
+                    f"{label} command executable is not absolute"
+                )
+            executable = _runtime_path(
+                command[0],
+                base=Path("/"),
+                label=f"{label} command executable",
+            )
+            paths.add(executable)
+            for index, argument in enumerate(command[:-1]):
+                if argument not in NESTED_EXECUTABLE_FLAGS:
+                    continue
+                if not Path(command[index + 1]).is_absolute():
+                    raise TransactionError(
+                        f"{label} nested executable for {argument} "
+                        "is not absolute"
+                    )
+                paths.add(
+                    _runtime_path(
+                        command[index + 1],
+                        base=Path("/"),
+                        label=(
+                            f"{label} nested executable for {argument}"
+                        ),
+                    )
+                )
+    return paths
+
+
+def _capture_command_executable(
+    path: Path,
+    *,
+    label: str,
+    required_uid: int,
+) -> campaign_runtime_seal.RuntimeArtifactSeal:
+    try:
+        owner = path.lstat().st_uid
+    except OSError as error:
+        raise TransactionError(f"{label} is unavailable") from error
+    if owner not in {0, required_uid}:
+        raise TransactionError(f"{label} owner is untrusted")
+    sealed = _capture_runtime_artifact(
+        path,
+        label=label,
+        maximum=MAX_OUTPUT_FILE_BYTES,
+        required_uid=owner,
+    )
+    if not stat.S_IMODE(sealed.snapshot.identity.mode) & 0o111:
+        raise TransactionError(f"{label} is not directly executable")
+    return sealed
+
+
+def _capture_command_runtime_seals(
+    commands: TransactionCommands,
+    *,
+    required_uid: int,
+    recovery_only: bool = False,
+) -> _CommandRuntimeSeals:
+    candidate_groups: tuple[Sequence[Sequence[str]], ...]
+    if recovery_only:
+        candidate_groups = ()
+        aq4_groups: tuple[Sequence[Sequence[str]], ...] = (
+            commands.reverse_reconciliation,
+            commands.final_checks,
+        )
+    else:
+        candidate_groups = (
+            commands.candidate_reconciliation,
+            commands.candidate_checks,
+            (commands.sq8_full,),
+            (commands.reasoning_release,),
+            (commands.reasoning_browser,),
+        )
+        aq4_groups = (
+            commands.reverse_reconciliation,
+            commands.aq4_reasoning_release,
+            commands.aq4_reasoning_browser,
+            commands.aq4_bundle,
+            commands.final_checks,
+        )
+    candidate_paths = _command_executable_paths(
+        candidate_groups,
+        label="candidate",
+    )
+    aq4_paths = _command_executable_paths(aq4_groups, label="AQ4")
+    if not recovery_only:
+        # The transaction adds these two source-bound verifier invocations
+        # around both browser campaigns even though they are not stored in the
+        # request command vectors.
+        candidate_paths.update(
+            {Path(PYTHON_BINARY), Path(DOCKER_BINARY)}
+        )
+        aq4_paths.update({Path(PYTHON_BINARY), Path(DOCKER_BINARY)})
+    shared_paths = (
+        candidate_paths & aq4_paths
+    ) | {Path(GIT_COMMAND_PREFIX[0])}
+    candidate_paths -= shared_paths
+    aq4_paths -= shared_paths
+
+    def capture(
+        selected: set[Path],
+        scope: str,
+    ) -> tuple[campaign_runtime_seal.RuntimeArtifactSeal, ...]:
+        return tuple(
+            _capture_command_executable(
+                path,
+                label=f"{scope} command executable {path}",
+                required_uid=required_uid,
+            )
+            for path in sorted(selected, key=lambda value: os.fsencode(value))
+        )
+
+    return _CommandRuntimeSeals(
+        candidate=capture(candidate_paths, "candidate"),
+        aq4=capture(aq4_paths, "AQ4"),
+        shared=capture(shared_paths, "shared"),
+    )
+
+
+def _runtime_sha256(raw: Any, label: str) -> str:
+    if (
+        not isinstance(raw, str)
+        or authorization.HASH_RE.fullmatch(raw) is None
+    ):
+        raise TransactionError(f"{label} is not a lowercase SHA-256")
+    return raw
+
+
+def _manifest_runtime_seals(
+    document: dict[str, Any],
+    *,
+    manifest_path: Path,
+    expected_receipt_path: Path,
+    label: str,
+    required_uid: int,
+) -> _ManifestRuntimeSeals:
+    worker = document.get("worker")
+    tokenizer = document.get("tokenizer")
+    product = document.get("product")
+    promotion = document.get("promotion")
+    if not all(
+        isinstance(value, dict)
+        for value in (worker, tokenizer, product, promotion)
+    ):
+        raise TransactionError(f"{label} runtime contract is incomplete")
+    assert isinstance(worker, dict)
+    assert isinstance(tokenizer, dict)
+    assert isinstance(product, dict)
+    assert isinstance(promotion, dict)
+    manifest_parent = manifest_path.parent
+    worker_path = _runtime_path(
+        worker.get("binary"),
+        base=manifest_parent,
+        label=f"{label} worker",
+    )
+    receipt_path = _runtime_path(
+        promotion.get("receipt"),
+        base=manifest_parent,
+        label=f"{label} promotion receipt",
+    )
+    if receipt_path != expected_receipt_path:
+        raise TransactionError(f"{label} promotion receipt path differs")
+
+    tokenizer_root = _runtime_path(
+        tokenizer.get("root"),
+        base=manifest_parent,
+        label=f"{label} tokenizer root",
+    )
+    tokenizer_files = tokenizer.get("files")
+    if (
+        not isinstance(tokenizer_files, dict)
+        or not tokenizer_files
+        or len(tokenizer_files) > 128
+    ):
+        raise TransactionError(f"{label} tokenizer file contract differs")
+
+    product_root = _runtime_path(
+        product.get("root"),
+        base=manifest_parent,
+        label=f"{label} product root",
+    )
+    package = product.get("package")
+    artifact = product.get("artifact")
+    if not isinstance(package, dict) or (
+        artifact is not None and not isinstance(artifact, dict)
+    ):
+        raise TransactionError(f"{label} product contract differs")
+
+    file_specs: list[tuple[Path, str, int, str]] = [
+        (
+            worker_path,
+            f"{label} worker binary",
+            MAX_OUTPUT_FILE_BYTES,
+            _runtime_sha256(
+                worker.get("binary_sha256"),
+                f"{label} worker binary SHA-256",
+            ),
+        ),
+        (
+            receipt_path,
+            f"{label} promotion receipt",
+            MAX_INPUT_BYTES,
+            _runtime_sha256(
+                promotion.get("receipt_sha256"),
+                f"{label} promotion receipt SHA-256",
+            ),
+        ),
+        (
+            _runtime_path(
+                package.get("manifest_path"),
+                base=product_root,
+                label=f"{label} package manifest",
+                relative_only=True,
+            ),
+            f"{label} package manifest",
+            MAX_INPUT_BYTES,
+            _runtime_sha256(
+                package.get("manifest_sha256"),
+                f"{label} package manifest SHA-256",
+            ),
+        ),
+    ]
+    if isinstance(artifact, dict):
+        file_specs.append(
+            (
+                _runtime_path(
+                    artifact.get("manifest_path"),
+                    base=product_root,
+                    label=f"{label} artifact manifest",
+                    relative_only=True,
+                ),
+                f"{label} artifact manifest",
+                MAX_INPUT_BYTES,
+                _runtime_sha256(
+                    artifact.get("manifest_sha256"),
+                    f"{label} artifact manifest SHA-256",
+                ),
+            )
+        )
+    if any(not isinstance(relative, str) for relative in tokenizer_files):
+        raise TransactionError(f"{label} tokenizer path is invalid")
+    for relative, expected_sha256 in sorted(
+        tokenizer_files.items(),
+        key=lambda item: os.fsencode(item[0]),
+    ):
+        if not isinstance(relative, str):
+            raise TransactionError(f"{label} tokenizer path is invalid")
+        file_specs.append(
+            (
+                _runtime_path(
+                    relative,
+                    base=tokenizer_root,
+                    label=f"{label} tokenizer file",
+                    relative_only=True,
+                ),
+                f"{label} tokenizer file {relative}",
+                MAX_OUTPUT_FILE_BYTES,
+                _runtime_sha256(
+                    expected_sha256,
+                    f"{label} tokenizer file {relative} SHA-256",
+                ),
+            )
+        )
+    if len(
+        {
+            path
+            for path, _name, _maximum, _expected_sha256 in file_specs
+        }
+    ) != len(file_specs):
+        raise TransactionError(f"{label} runtime file paths are not distinct")
+
+    captured: list[campaign_runtime_seal.RuntimeArtifactSeal] = []
+    for path, file_label, maximum, expected_sha256 in file_specs:
+        sealed = _capture_runtime_artifact(
+            path,
+            label=file_label,
+            maximum=maximum,
+            required_uid=required_uid,
+        )
+        if sealed.snapshot.sha256 != expected_sha256:
+            raise TransactionError(f"{file_label} runtime bytes differ")
+        captured.append(sealed)
+    artifacts = tuple(captured)
+    trees = (
+        _capture_runtime_tree(
+            tokenizer_root,
+            label=f"{label} tokenizer",
+            required_uid=required_uid,
+        ),
+        _capture_runtime_tree(
+            product_root,
+            label=f"{label} product",
+            required_uid=required_uid,
+        ),
+    )
+    return _ManifestRuntimeSeals(
+        worker=artifacts[0],
+        promotion_receipt=artifacts[1],
+        artifacts=artifacts,
+        trees=trees,
+    )
+
+
+def _require_runtime_seal_collections(
+    artifacts: Sequence[campaign_runtime_seal.RuntimeArtifactSeal],
+    trees: Sequence[campaign_runtime_seal.RuntimeTreeSeal],
+    *,
+    required_uid: int,
+) -> None:
+    if not artifacts or not trees:
+        raise TransactionError("transaction runtime seals are unavailable")
+    try:
+        for sealed in artifacts:
+            sealed_uid = sealed.required_uid
+            path = sealed.snapshot.path
+            mixed_owner_allowed = (
+                (
+                    "command executable " in sealed.label
+                    and sealed_uid in {0, required_uid}
+                )
+                or (
+                    path == FIXED_GATEWAY_API_KEY_PATH
+                    and sealed_uid == FIXED_GATEWAY_API_KEY_UID
+                )
+                or (
+                    path == FIXED_OPENWEBUI_SESSION_TOKEN_PATH
+                    and sealed_uid == FIXED_OPENWEBUI_SESSION_TOKEN_UID
+                )
+            )
+            if sealed_uid != required_uid and not mixed_owner_allowed:
+                raise TransactionError(
+                    "transaction runtime artifact seal owner scope differs"
+                )
+            campaign_runtime_seal.require_runtime_artifact_seal(
+                sealed,
+                required_uid=sealed_uid,
+            )
+        for sealed in trees:
+            if sealed.required_uid != required_uid:
+                raise TransactionError(
+                    "transaction runtime tree seal owner scope differs"
+                )
+            campaign_runtime_seal.require_runtime_tree_seal(
+                sealed,
+                required_uid=required_uid,
+            )
+    except campaign_runtime_seal.RuntimeArtifactSealError as error:
+        raise TransactionError(
+            "transaction runtime artifact seal changed"
+        ) from error
+
+
+def _require_runtime_seals(
+    preflight_result: TransactionPreflight,
+    *,
+    required_uid: int,
+    scope: str = "all",
+) -> None:
+    expected_artifacts = (
+        *preflight_result.candidate_runtime_artifact_seals,
+        *preflight_result.aq4_runtime_artifact_seals,
+        *preflight_result.shared_runtime_artifact_seals,
+    )
+    expected_trees = (
+        *preflight_result.candidate_runtime_tree_seals,
+        *preflight_result.aq4_runtime_tree_seals,
+        *preflight_result.shared_runtime_tree_seals,
+    )
+    if (
+        preflight_result.runtime_artifact_seals != expected_artifacts
+        or preflight_result.runtime_tree_seals != expected_trees
+    ):
+        raise TransactionError(
+            "transaction runtime seal classification differs"
+        )
+    if scope == "all":
+        if (
+            not preflight_result.candidate_runtime_artifact_seals
+            or not preflight_result.candidate_runtime_tree_seals
+        ):
+            raise TransactionError(
+                "candidate transaction runtime seals are unavailable"
+            )
+        artifacts = expected_artifacts
+        trees = expected_trees
+    elif scope == "aq4":
+        artifacts = (
+            *preflight_result.aq4_runtime_artifact_seals,
+            *preflight_result.shared_runtime_artifact_seals,
+        )
+        trees = (
+            *preflight_result.aq4_runtime_tree_seals,
+            *preflight_result.shared_runtime_tree_seals,
+        )
+    else:
+        raise TransactionError("transaction runtime seal scope is invalid")
+    if (
+        not preflight_result.aq4_runtime_artifact_seals
+        or not preflight_result.aq4_runtime_tree_seals
+        or not preflight_result.shared_runtime_artifact_seals
+    ):
+        raise TransactionError("AQ4 transaction runtime seals are unavailable")
+    _require_runtime_seal_collections(
+        artifacts,
+        trees,
+        required_uid=required_uid,
+    )
+
+
+def _open_command_executable(
+    preflight_result: TransactionPreflight,
+    command: Sequence[str],
+    *,
+    scope: str,
+) -> int:
+    path = Path(command[0])
+    if scope == "all":
+        artifacts = (
+            *preflight_result.candidate_runtime_artifact_seals,
+            *preflight_result.aq4_runtime_artifact_seals,
+            *preflight_result.shared_runtime_artifact_seals,
+        )
+    elif scope == "aq4":
+        artifacts = (
+            *preflight_result.aq4_runtime_artifact_seals,
+            *preflight_result.shared_runtime_artifact_seals,
+        )
+    else:
+        raise TransactionError("transaction runtime seal scope is invalid")
+    matches = tuple(
+        sealed
+        for sealed in artifacts
+        if "command executable " in sealed.label
+        and sealed.snapshot.path == path
+    )
+    if len(matches) != 1:
+        raise TransactionError(
+            "transaction command executable seal is unavailable"
+        )
+    sealed = matches[0]
+    try:
+        return campaign_runtime_seal.open_runtime_artifact_seal(
+            sealed,
+            required_uid=sealed.required_uid,
+        )
+    except campaign_runtime_seal.RuntimeArtifactSealError as error:
+        raise TransactionError(
+            "transaction command executable changed before descriptor pin"
+        ) from error
 
 
 def _validate_private_secret(
@@ -461,15 +1272,75 @@ def _validate_private_secret(
     *,
     required_uid: int,
 ) -> str:
+    if path == FIXED_OPENWEBUI_SESSION_TOKEN_PATH:
+        _validate_fixed_session_token_parent(path)
     snapshot = _read_input(path, label, 65_536)
+    mode = stat.S_IMODE(snapshot.identity.mode)
+    if path == FIXED_GATEWAY_API_KEY_PATH:
+        metadata_safe = (
+            snapshot.identity.uid == FIXED_GATEWAY_API_KEY_UID
+            and snapshot.identity.gid == FIXED_GATEWAY_API_KEY_GID
+            and mode == FIXED_GATEWAY_API_KEY_MODE
+        )
+    elif path == FIXED_OPENWEBUI_SESSION_TOKEN_PATH:
+        metadata_safe = (
+            snapshot.identity.uid == FIXED_OPENWEBUI_SESSION_TOKEN_UID
+            and snapshot.identity.gid == FIXED_OPENWEBUI_SESSION_TOKEN_GID
+            and mode == FIXED_OPENWEBUI_SESSION_TOKEN_MODE
+        )
+    else:
+        metadata_safe = (
+            snapshot.identity.uid == required_uid and mode == 0o600
+        )
     if (
-        snapshot.identity.uid != required_uid
+        not metadata_safe
         or snapshot.identity.links != 1
-        or stat.S_IMODE(snapshot.identity.mode) & 0o077
         or not snapshot.raw.rstrip(b"\r\n")
     ):
         raise TransactionError(f"{label} metadata is unsafe")
     return snapshot.sha256
+
+
+def _validate_fixed_session_token_parent(path: Path) -> None:
+    if path != FIXED_OPENWEBUI_SESSION_TOKEN_PATH:
+        raise TransactionError("OpenWebUI session token path is not fixed")
+    parent_descriptor = -1
+    try:
+        parent_descriptor, _identity = _open_parent_descriptor(
+            path,
+            "OpenWebUI session token",
+            required_uid=FIXED_OPENWEBUI_SESSION_TOKEN_PARENT_UID,
+        )
+        metadata = os.fstat(parent_descriptor)
+        if (
+            path.parent != FIXED_OPENWEBUI_SESSION_TOKEN_PARENT
+            or metadata.st_uid
+            != FIXED_OPENWEBUI_SESSION_TOKEN_PARENT_UID
+            or metadata.st_gid
+            != FIXED_OPENWEBUI_SESSION_TOKEN_PARENT_GID
+            or stat.S_IMODE(metadata.st_mode)
+            != FIXED_OPENWEBUI_SESSION_TOKEN_PARENT_MODE
+            or metadata.st_mode & (stat.S_ISUID | stat.S_ISGID)
+        ):
+            raise TransactionError(
+                "OpenWebUI session token parent metadata is unsafe"
+            )
+        _require_service_entry_xattrs(parent_descriptor)
+    except OSError as error:
+        raise TransactionError(
+            "OpenWebUI session token parent is unavailable"
+        ) from error
+    finally:
+        if parent_descriptor >= 0:
+            os.close(parent_descriptor)
+
+
+def _private_secret_seal_uid(path: Path, *, required_uid: int) -> int:
+    if path == FIXED_GATEWAY_API_KEY_PATH:
+        return FIXED_GATEWAY_API_KEY_UID
+    if path == FIXED_OPENWEBUI_SESSION_TOKEN_PATH:
+        return FIXED_OPENWEBUI_SESSION_TOKEN_UID
+    return required_uid
 
 
 def preflight(
@@ -563,17 +1434,34 @@ def preflight(
             auth = reloaded_claim.authorization
     except authorization.AuthorizationError as error:
         raise TransactionError("campaign authorization preflight failed") from error
-    source_commit, source_tree = _source_identity(request.source_root, runner=runner)
+    command_runtime = _capture_command_runtime_seals(
+        request.commands,
+        required_uid=policy.required_uid,
+    )
+    source_commit, source_tree, source_seal = _sealed_source_identity(
+        request.source_root,
+        runner=runner,
+        required_uid=policy.required_uid,
+    )
+    aq4_source_root = Path(auth.document["aq4_release"]["source"]["root"])
+    aq4_source_commit, aq4_source_tree, aq4_source_seal = _sealed_source_identity(
+        aq4_source_root,
+        runner=runner,
+        required_uid=policy.required_uid,
+        require_detached=True,
+    )
     active = _read_input(
         request.active_manifest,
         "actual active served-model manifest",
         MAX_MANIFEST_BYTES,
     )
-    candidate = _read_input(
+    candidate_manifest_seal = _capture_runtime_artifact(
         request.candidate_manifest,
-        "frozen candidate served-model manifest",
-        MAX_MANIFEST_BYTES,
+        label="frozen candidate served-model manifest",
+        maximum=MAX_MANIFEST_BYTES,
+        required_uid=policy.required_uid,
     )
+    candidate = candidate_manifest_seal.snapshot
     if (
         active.identity.uid != policy.required_uid
         or active.identity.links != 1
@@ -582,6 +1470,9 @@ def preflight(
         raise TransactionError("active manifest metadata is unsafe")
     api_key_sha256: str | None = None
     session_token_sha256: str | None = None
+    secret_seals: tuple[
+        campaign_runtime_seal.RuntimeArtifactSeal, ...
+    ] = ()
     secret_paths = (
         request.api_key_file,
         request.openwebui_session_token_file,
@@ -591,6 +1482,14 @@ def preflight(
             raise TransactionError("transaction private credential binding is incomplete")
         assert request.api_key_file is not None
         assert request.openwebui_session_token_file is not None
+        if policy.required_uid == 0 and (
+            request.api_key_file != FIXED_GATEWAY_API_KEY_PATH
+            or request.openwebui_session_token_file
+            != FIXED_OPENWEBUI_SESSION_TOKEN_PATH
+        ):
+            raise TransactionError(
+                "production transaction credential paths differ"
+            )
         api_key_sha256 = _validate_private_secret(
             request.api_key_file,
             "gateway API key",
@@ -601,6 +1500,33 @@ def preflight(
             "OpenWebUI session token",
             required_uid=policy.required_uid,
         )
+        api_key_seal = _capture_runtime_artifact(
+            request.api_key_file,
+            label="gateway API key",
+            maximum=65_536,
+            required_uid=_private_secret_seal_uid(
+                request.api_key_file,
+                required_uid=policy.required_uid,
+            ),
+        )
+        session_token_seal = _capture_runtime_artifact(
+            request.openwebui_session_token_file,
+            label="OpenWebUI session token",
+            maximum=65_536,
+            required_uid=_private_secret_seal_uid(
+                request.openwebui_session_token_file,
+                required_uid=policy.required_uid,
+            ),
+        )
+        if (
+            api_key_seal.snapshot.sha256 != api_key_sha256
+            or session_token_seal.snapshot.sha256
+            != session_token_sha256
+        ):
+            raise TransactionError(
+                "transaction private credential changed while sealing"
+            )
+        secret_seals = (api_key_seal, session_token_seal)
     if active.path == candidate.path or active.raw == candidate.raw:
         raise TransactionError("AQ4 and SQ8 manifest inputs are not distinct")
     active_document = _strict_object(active.raw, "active served-model manifest")
@@ -612,6 +1538,55 @@ def preflight(
         or candidate_document.get("schema_version") != "ullm.served_model.v2"
     ):
         raise TransactionError("cross-model transaction requires two v2 manifests")
+    before = auth.document["before"]
+    (
+        aq4_receipt_path,
+        aq4_receipt_sha256,
+        aq4_evidence_path,
+        aq4_evidence_sha256,
+    ) = _aq4_promotion_identity(
+        active_document,
+        manifest_parent=active.path.parent,
+        authorization_document=auth.document,
+    )
+    receipt_path, receipt_sha256 = _promotion_identity(
+        candidate_document,
+        manifest_parent=candidate.path.parent,
+        source_commit=source_commit,
+        label="candidate SQ8",
+    )
+    candidate_runtime = _manifest_runtime_seals(
+        candidate_document,
+        manifest_path=candidate.path,
+        expected_receipt_path=receipt_path,
+        label="candidate SQ8",
+        required_uid=policy.required_uid,
+    )
+    aq4_runtime = _manifest_runtime_seals(
+        active_document,
+        manifest_path=active.path,
+        expected_receipt_path=aq4_receipt_path,
+        label="active AQ4",
+        required_uid=policy.required_uid,
+    )
+    aq4_evidence_seal = _capture_runtime_artifact(
+        aq4_evidence_path,
+        label="active AQ4 promotion evidence",
+        maximum=MAX_INPUT_BYTES,
+        required_uid=policy.required_uid,
+    )
+    aq4_worker_binary = aq4_runtime.worker.snapshot
+    aq4_promotion_receipt = aq4_runtime.promotion_receipt.snapshot
+    aq4_promotion_evidence = aq4_evidence_seal.snapshot
+    receipt = candidate_runtime.promotion_receipt.snapshot
+    if (
+        aq4_worker_binary.path != Path(before["worker_binary_path"])
+        or aq4_worker_binary.sha256 != before["worker_binary_sha256"]
+        or aq4_promotion_receipt.sha256 != aq4_receipt_sha256
+        or aq4_promotion_evidence.sha256 != aq4_evidence_sha256
+        or receipt.sha256 != receipt_sha256
+    ):
+        raise TransactionError("served-model runtime bytes differ")
     active_summary = validator(active.path)
     candidate_summary = validator(candidate.path)
     active_worker = _summary_identity(
@@ -630,38 +1605,98 @@ def preflight(
         worker_protocol="ullm.worker.v2",
         label="candidate SQ8",
     )
-    active_promotion = active_document.get("promotion")
+    active_worker_document = active_summary.get("worker")
     if (
-        not isinstance(active_promotion, dict)
-        or active_promotion.get("source_commit")
-        != auth.document["before"]["promotion_source_commit"]
+        not isinstance(active_worker_document, dict)
+        or active_worker_document.get("protocol") != before["worker_protocol"]
+        or active_worker_document.get("binary") != before["worker_binary_path"]
     ):
-        raise TransactionError("active AQ4 promotion identity differs")
-    receipt_path, receipt_sha256 = _promotion_identity(
-        candidate_document,
-        manifest_parent=candidate.path.parent,
-        source_commit=source_commit,
-        label="candidate SQ8",
+        raise TransactionError("active AQ4 worker path/protocol differs")
+    candidate_worker_document = candidate_summary.get("worker")
+    if (
+        not isinstance(candidate_worker_document, dict)
+        or candidate_worker_document.get("binary")
+        != os.fspath(candidate_runtime.worker.snapshot.path)
+        or candidate_runtime.worker.snapshot.sha256 != candidate_worker
+        or aq4_runtime.worker.snapshot != aq4_worker_binary
+        or aq4_runtime.promotion_receipt.snapshot
+        != aq4_promotion_receipt
+        or candidate_runtime.promotion_receipt.snapshot != receipt
+    ):
+        raise TransactionError("served-model runtime identity differs")
+    unit_seal = _capture_runtime_artifact(
+        request.systemd_unit,
+        label="systemd unit",
+        maximum=MAX_INPUT_BYTES,
+        required_uid=policy.required_uid,
     )
-    receipt = _read_input(receipt_path, "candidate promotion receipt", MAX_INPUT_BYTES)
-    if receipt.sha256 != receipt_sha256:
-        raise TransactionError("candidate promotion receipt bytes differ")
-    unit = _read_input(request.systemd_unit, "systemd unit", MAX_INPUT_BYTES)
-    environment = _read_input(
-        request.environment_file, "systemd environment file", MAX_INPUT_BYTES
+    environment_seal = _capture_runtime_artifact(
+        request.environment_file,
+        label="systemd environment file",
+        maximum=MAX_INPUT_BYTES,
+        required_uid=policy.required_uid,
     )
+    unit = unit_seal.snapshot
+    environment = environment_seal.snapshot
     rollback = auth.document["rollback"]
     if (
         unit.sha256 != rollback["systemd_unit_sha256"]
         or environment.sha256 != rollback["environment_sha256"]
     ):
         raise TransactionError("rollback unit/environment identity differs")
+    candidate_runtime_artifact_seals = (
+        candidate_manifest_seal,
+        *candidate_runtime.artifacts,
+        *command_runtime.candidate,
+        # Required to build the fresh AQ4 release bundle, but not to restart
+        # and prove the already-authorized AQ4 serving route.
+        aq4_evidence_seal,
+    )
+    aq4_runtime_artifact_seals = (
+        *aq4_runtime.artifacts,
+        *command_runtime.aq4,
+    )
+    shared_runtime_artifact_seals = (
+        unit_seal,
+        environment_seal,
+        *secret_seals,
+        *command_runtime.shared,
+    )
+    candidate_runtime_tree_seals = candidate_runtime.trees
+    aq4_runtime_tree_seals = aq4_runtime.trees
+    shared_runtime_tree_seals: tuple[
+        campaign_runtime_seal.RuntimeTreeSeal, ...
+    ] = ()
+    runtime_artifact_seals = (
+        *candidate_runtime_artifact_seals,
+        *aq4_runtime_artifact_seals,
+        *shared_runtime_artifact_seals,
+    )
+    runtime_tree_seals = (
+        *candidate_runtime_tree_seals,
+        *aq4_runtime_tree_seals,
+        *shared_runtime_tree_seals,
+    )
+    _require_runtime_seal_collections(
+        runtime_artifact_seals,
+        runtime_tree_seals,
+        required_uid=policy.required_uid,
+    )
     try:
         authorization.require_authorization_window_binding(
             auth,
             source_commit=source_commit,
             source_tree=source_tree,
+            aq4_source_root=aq4_source_root,
+            aq4_source_commit=aq4_source_commit,
+            aq4_source_tree=aq4_source_tree,
             before_manifest_sha256=active.sha256,
+            before_worker_protocol=active_worker_document["protocol"],
+            before_worker_binary_path=Path(active_worker_document["binary"]),
+            before_promotion_receipt_path=aq4_receipt_path,
+            before_promotion_receipt_sha256=aq4_receipt_sha256,
+            aq4_promotion_evidence_path=aq4_evidence_path,
+            aq4_promotion_evidence_sha256=aq4_evidence_sha256,
             candidate_manifest_sha256=candidate.sha256,
             candidate_worker_binary_sha256=candidate_worker,
             candidate_promotion_receipt_sha256=receipt.sha256,
@@ -675,6 +1710,7 @@ def preflight(
         auth,
         source_commit,
         source_tree,
+        source_seal,
         active,
         candidate,
         active_summary,
@@ -682,8 +1718,23 @@ def preflight(
         unit.sha256,
         environment.sha256,
         receipt.sha256,
+        aq4_source_root,
+        aq4_source_commit,
+        aq4_source_tree,
+        aq4_source_seal,
+        aq4_worker_binary,
+        aq4_promotion_receipt,
+        aq4_promotion_evidence,
         api_key_sha256,
         session_token_sha256,
+        runtime_artifact_seals,
+        runtime_tree_seals,
+        candidate_runtime_artifact_seals,
+        candidate_runtime_tree_seals,
+        aq4_runtime_artifact_seals,
+        aq4_runtime_tree_seals,
+        shared_runtime_artifact_seals,
+        shared_runtime_tree_seals,
     )
 
 
@@ -692,7 +1743,7 @@ def default_inactive_checker(services: Sequence[str]) -> None:
         try:
             completed = subprocess.run(
                 [
-                    "systemctl",
+                    "/usr/bin/systemctl",
                     "show",
                     service,
                     "--property=LoadState",
@@ -1318,12 +2369,14 @@ def _exclusive_publish(
     *,
     mode: int,
     required_uid: int,
+    label: str = "authorized AQ4 backup",
+    maximum: int = MAX_MANIFEST_BYTES,
 ) -> None:
     if not path.is_absolute() or path.exists() or path.is_symlink():
-        raise TransactionError("authorized AQ4 backup path is not fresh")
+        raise TransactionError(f"{label} path is not fresh")
     parent, parent_identity = _open_parent_descriptor(
         path,
-        "authorized AQ4 backup",
+        label,
         required_uid=required_uid,
     )
     temporary_name = f".{path.name}.{secrets.token_hex(16)}.tmp"
@@ -1346,7 +2399,7 @@ def _exclusive_publish(
         while view:
             written = os.write(descriptor, view)
             if written <= 0:
-                raise TransactionError("authorized AQ4 backup write made no progress")
+                raise TransactionError(f"{label} write made no progress")
             view = view[written:]
         os.fsync(descriptor)
         os.close(descriptor)
@@ -1365,11 +2418,11 @@ def _exclusive_publish(
             path,
             parent_identity,
             required_uid=required_uid,
-            label="authorized AQ4 backup",
+            label=label,
         )
     except FileExistsError as error:
         raise TransactionError(
-            "authorized AQ4 backup publication is not fresh"
+            f"{label} publication is not fresh"
         ) from error
     finally:
         if descriptor >= 0:
@@ -1380,14 +2433,1624 @@ def _exclusive_publish(
             except FileNotFoundError:
                 pass
         os.close(parent)
-    backup = _read_input(path, "authorized AQ4 backup", MAX_MANIFEST_BYTES)
+    backup = _read_input(path, label, maximum)
     if (
         backup.raw != raw
         or backup.identity.links != 1
         or stat.S_IMODE(backup.identity.mode) != mode
         or backup.identity.uid != required_uid
     ):
-        raise TransactionError("authorized AQ4 backup differs after publication")
+        raise TransactionError(f"{label} differs after publication")
+
+
+RENAME_NOREPLACE = 1
+AQ4_STAGING_PREFIX = ".ullm-aq4-campaign-stage-"
+SERVICE_PRODUCER_STAGING_PREFIX = ".ullm-service-producer-stage-"
+SERVICE_PRODUCER_OUTPUT_NAME = "output"
+
+
+def _rewrite_authorized_output_argument(
+    command: Sequence[str],
+    *,
+    flag: str,
+    authorized_path: Path,
+    staging_path: Path,
+) -> tuple[str, ...]:
+    """Replace only one exact source-derived output value in a fixed command."""
+
+    authorized = os.fspath(_lexical_absolute(authorized_path, "authorized output"))
+    staging = os.fspath(_lexical_absolute(staging_path, "AQ4 staging output"))
+    positions = [
+        index
+        for index, argument in enumerate(command)
+        if argument == flag
+    ]
+    if (
+        len(positions) != 1
+        or positions[0] + 1 >= len(command)
+        or command[positions[0] + 1] != authorized
+        or authorized == staging
+    ):
+        raise TransactionError(
+            "AQ4 producer fixed output argument differs from authorization"
+        )
+    rewritten = list(command)
+    rewritten[positions[0] + 1] = staging
+    return tuple(rewritten)
+
+
+def _rename_noreplace(
+    source_name: str,
+    destination_name: str,
+    *,
+    source_parent_descriptor: int,
+    destination_parent_descriptor: int,
+) -> None:
+    """Move one entry with a kernel-enforced destination-absence condition."""
+
+    if (
+        not source_name
+        or not destination_name
+        or "/" in source_name
+        or "/" in destination_name
+        or "\x00" in source_name
+        or "\x00" in destination_name
+    ):
+        raise TransactionError("AQ4 staged publication names are invalid")
+    try:
+        function = ctypes.CDLL(None, use_errno=True).renameat2
+    except (AttributeError, OSError) as error:
+        raise TransactionError(
+            "renameat2(RENAME_NOREPLACE) is unavailable"
+        ) from error
+    function.argtypes = (
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_uint,
+    )
+    function.restype = ctypes.c_int
+    ctypes.set_errno(0)
+    result = function(
+        source_parent_descriptor,
+        os.fsencode(source_name),
+        destination_parent_descriptor,
+        os.fsencode(destination_name),
+        RENAME_NOREPLACE,
+    )
+    if result == 0:
+        return
+    error_number = ctypes.get_errno()
+    if error_number in {errno.EEXIST, errno.ENOTEMPTY}:
+        message = "authorized AQ4 output publication is not fresh"
+    elif error_number in {errno.ENOSYS, errno.EINVAL, errno.EOPNOTSUPP}:
+        message = "renameat2(RENAME_NOREPLACE) is unsupported"
+    else:
+        message = "authorized AQ4 output publication failed"
+    raise TransactionError(message) from OSError(
+        error_number,
+        os.strerror(error_number),
+    )
+
+
+def _same_directory_object(
+    left: os.stat_result,
+    right: os.stat_result,
+) -> bool:
+    return (
+        stat.S_ISDIR(left.st_mode)
+        and stat.S_ISDIR(right.st_mode)
+        and left.st_dev == right.st_dev
+        and left.st_ino == right.st_ino
+        and left.st_uid == right.st_uid
+        and left.st_gid == right.st_gid
+    )
+
+
+def _require_stable_parent_metadata(
+    descriptor: int,
+    initial: os.stat_result,
+    *,
+    expected_link_delta: int,
+    label: str,
+) -> os.stat_result:
+    try:
+        current = os.fstat(descriptor)
+    except OSError as error:
+        raise TransactionError(f"{label} parent is unavailable") from error
+    if (
+        not stat.S_ISDIR(current.st_mode)
+        or current.st_dev != initial.st_dev
+        or current.st_ino != initial.st_ino
+        or current.st_uid != initial.st_uid
+        or current.st_gid != initial.st_gid
+        or current.st_mode != initial.st_mode
+        or current.st_nlink != initial.st_nlink + expected_link_delta
+    ):
+        raise TransactionError(f"{label} parent metadata changed")
+    return current
+
+
+def _clear_owned_directory(
+    descriptor: int,
+    *,
+    root_device: int,
+    required_uid: int,
+    remaining: list[int],
+) -> None:
+    try:
+        names = os.listdir(descriptor)
+    except OSError as error:
+        raise TransactionError(
+            "AQ4 private staging directory cannot be enumerated"
+        ) from error
+    for name in names:
+        remaining[0] -= 1
+        if remaining[0] < 0 or not name or "/" in name or "\x00" in name:
+            raise TransactionError(
+                "AQ4 private staging cleanup exceeded its safety bound"
+            )
+        try:
+            metadata = os.stat(
+                name,
+                dir_fd=descriptor,
+                follow_symlinks=False,
+            )
+        except OSError as error:
+            raise TransactionError(
+                "AQ4 private staging member changed during cleanup"
+            ) from error
+        if metadata.st_uid != required_uid:
+            raise TransactionError(
+                "AQ4 private staging contains a foreign-owned member"
+            )
+        if stat.S_ISDIR(metadata.st_mode):
+            if metadata.st_dev != root_device:
+                raise TransactionError(
+                    "AQ4 private staging contains a foreign mount"
+                )
+            child = -1
+            try:
+                child = os.open(name, _directory_flags(), dir_fd=descriptor)
+                opened = os.fstat(child)
+                if not _same_directory_object(metadata, opened):
+                    raise TransactionError(
+                        "AQ4 private staging directory changed during cleanup"
+                    )
+                os.fchmod(child, 0o700)
+                _clear_owned_directory(
+                    child,
+                    root_device=root_device,
+                    required_uid=required_uid,
+                    remaining=remaining,
+                )
+            finally:
+                if child >= 0:
+                    os.close(child)
+            try:
+                os.rmdir(name, dir_fd=descriptor)
+            except OSError as error:
+                raise TransactionError(
+                    "AQ4 private staging directory cannot be removed"
+                ) from error
+        else:
+            try:
+                os.unlink(name, dir_fd=descriptor)
+            except OSError as error:
+                raise TransactionError(
+                    "AQ4 private staging member cannot be removed"
+                ) from error
+    try:
+        os.fsync(descriptor)
+    except OSError as error:
+        raise TransactionError(
+            "AQ4 private staging cleanup cannot be synchronized"
+        ) from error
+
+
+@dataclass(slots=True)
+class _PrivateStagingRoot:
+    path: Path
+    name: str
+    authorized: Path
+    parent_descriptor: int
+    parent_identity: tuple[int, int]
+    initial_parent_metadata: os.stat_result
+    descriptor: int
+    initial_metadata: os.stat_result
+    required_uid: int
+    label: str
+    closed: bool = False
+
+    @classmethod
+    def create(
+        cls,
+        authorized_path: Path,
+        *,
+        required_uid: int,
+        label: str,
+    ) -> "_PrivateStagingRoot":
+        authorized = _lexical_absolute(authorized_path, label)
+        parent, parent_identity = _open_parent_descriptor(
+            authorized,
+            label,
+            required_uid=required_uid,
+        )
+        name = f"{AQ4_STAGING_PREFIX}{secrets.token_hex(16)}"
+        initial_parent_metadata = os.fstat(parent)
+        descriptor = -1
+        try:
+            try:
+                os.stat(
+                    authorized.name,
+                    dir_fd=parent,
+                    follow_symlinks=False,
+                )
+            except FileNotFoundError:
+                pass
+            except OSError as error:
+                raise TransactionError(
+                    "authorized AQ4 output cannot be inspected"
+                ) from error
+            else:
+                raise TransactionError(
+                    "authorized AQ4 output is not fresh"
+                )
+            os.mkdir(name, 0o700, dir_fd=parent)
+            descriptor = os.open(name, _directory_flags(), dir_fd=parent)
+            os.fchmod(descriptor, 0o700)
+            metadata = os.fstat(descriptor)
+            named = os.stat(name, dir_fd=parent, follow_symlinks=False)
+            if (
+                not _same_directory_object(metadata, named)
+                or metadata.st_uid != required_uid
+                or stat.S_IMODE(metadata.st_mode) != 0o700
+                or metadata.st_nlink != 2
+            ):
+                raise TransactionError(
+                    "AQ4 private staging root metadata is unsafe"
+                )
+            os.fsync(descriptor)
+            os.fsync(parent)
+            return cls(
+                path=authorized.parent / name,
+                name=name,
+                authorized=authorized,
+                parent_descriptor=parent,
+                parent_identity=parent_identity,
+                initial_parent_metadata=initial_parent_metadata,
+                descriptor=descriptor,
+                initial_metadata=metadata,
+                required_uid=required_uid,
+                label=label,
+            )
+        except BaseException:
+            if descriptor >= 0:
+                os.close(descriptor)
+            try:
+                os.rmdir(name, dir_fd=parent)
+            except OSError:
+                pass
+            os.close(parent)
+            raise
+
+    def _authorized_directory_delta(self) -> int:
+        try:
+            metadata = os.stat(
+                self.authorized.name,
+                dir_fd=self.parent_descriptor,
+                follow_symlinks=False,
+            )
+        except FileNotFoundError:
+            return 0
+        except OSError as error:
+            raise TransactionError(
+                "authorized AQ4 output cannot be inspected"
+            ) from error
+        return int(stat.S_ISDIR(metadata.st_mode))
+
+    def verify(self) -> os.stat_result:
+        if self.closed:
+            raise TransactionError("AQ4 private staging root is closed")
+        try:
+            opened = os.fstat(self.descriptor)
+            named = os.stat(
+                self.name,
+                dir_fd=self.parent_descriptor,
+                follow_symlinks=False,
+            )
+        except OSError as error:
+            raise TransactionError(
+                "AQ4 private staging root is unavailable"
+            ) from error
+        if (
+            not _same_directory_object(opened, named)
+            or opened.st_dev != self.initial_metadata.st_dev
+            or opened.st_ino != self.initial_metadata.st_ino
+            or opened.st_uid != self.required_uid
+            or stat.S_IMODE(opened.st_mode) != 0o700
+        ):
+            raise TransactionError("AQ4 private staging root identity differs")
+        _require_stable_parent_metadata(
+            self.parent_descriptor,
+            self.initial_parent_metadata,
+            expected_link_delta=1 + self._authorized_directory_delta(),
+            label=self.label,
+        )
+        _verify_parent_descriptor(
+            self.path,
+            self.parent_identity,
+            required_uid=self.required_uid,
+            label=self.label,
+        )
+        return opened
+
+    def output(self, authorized_path: Path) -> Path:
+        authorized = _lexical_absolute(authorized_path, self.label)
+        if authorized.parent != self.path.parent:
+            raise TransactionError(
+                "AQ4 private staging/output parent binding differs"
+            )
+        self.verify()
+        output = self.path / authorized.name
+        try:
+            os.stat(
+                authorized.name,
+                dir_fd=self.descriptor,
+                follow_symlinks=False,
+            )
+        except FileNotFoundError:
+            return output
+        except OSError as error:
+            raise TransactionError(
+                "AQ4 private staging output cannot be inspected"
+            ) from error
+        raise TransactionError("AQ4 private staging output is not fresh")
+
+    def close(self) -> None:
+        if self.closed:
+            return
+        try:
+            self.verify()
+            root = os.fstat(self.descriptor)
+            _clear_owned_directory(
+                self.descriptor,
+                root_device=root.st_dev,
+                required_uid=self.required_uid,
+                remaining=[MAX_OUTPUT_FILES + 128],
+            )
+            self.verify()
+            if os.fstat(self.descriptor).st_nlink != 2:
+                raise TransactionError(
+                    "AQ4 private staging root is not empty"
+                )
+            os.close(self.descriptor)
+            self.descriptor = -1
+            os.rmdir(self.name, dir_fd=self.parent_descriptor)
+            os.fsync(self.parent_descriptor)
+            _require_stable_parent_metadata(
+                self.parent_descriptor,
+                self.initial_parent_metadata,
+                expected_link_delta=self._authorized_directory_delta(),
+                label=self.label,
+            )
+        finally:
+            if self.descriptor >= 0:
+                os.close(self.descriptor)
+                self.descriptor = -1
+            os.close(self.parent_descriptor)
+            self.parent_descriptor = -1
+            self.closed = True
+
+
+@dataclass(slots=True)
+class _AdoptionBudget:
+    entries: int = 0
+    total_bytes: int = 0
+
+
+def _same_opened_entry(
+    named: os.stat_result,
+    opened: os.stat_result,
+) -> bool:
+    return (
+        named.st_dev == opened.st_dev
+        and named.st_ino == opened.st_ino
+        and named.st_mode == opened.st_mode
+        and named.st_uid == opened.st_uid
+        and named.st_gid == opened.st_gid
+        and named.st_nlink == opened.st_nlink
+        and named.st_size == opened.st_size
+        and named.st_mtime_ns == opened.st_mtime_ns
+        and named.st_ctime_ns == opened.st_ctime_ns
+    )
+
+
+def _require_service_entry_xattrs(descriptor: int) -> None:
+    try:
+        if campaign_runtime_seal._has_posix_acl(descriptor):
+            raise TransactionError(
+                "campaign producer staging entry has a POSIX ACL"
+            )
+        if campaign_runtime_seal._has_forbidden_security_xattr(descriptor):
+            raise TransactionError(
+                "campaign producer staging entry has a file capability"
+            )
+    except campaign_runtime_seal.RuntimeArtifactSealError as error:
+        raise TransactionError(
+            "campaign producer staging security metadata is unavailable"
+        ) from error
+
+
+def _service_entry_metadata_is_safe(
+    metadata: os.stat_result,
+    *,
+    root_device: int,
+    control_uid: int,
+    control_gid: int,
+    service_uid: int,
+    service_gid: int,
+) -> bool:
+    return (
+        metadata.st_dev == root_device
+        and metadata.st_uid in {control_uid, service_uid}
+        and metadata.st_gid in {control_gid, service_gid}
+        and not metadata.st_mode & (stat.S_ISUID | stat.S_ISGID)
+        and not stat.S_IMODE(metadata.st_mode) & 0o022
+        and not stat.S_ISLNK(metadata.st_mode)
+    )
+
+
+def _adopt_service_entry(
+    parent_descriptor: int,
+    name: str,
+    *,
+    root_device: int,
+    control_uid: int,
+    control_gid: int,
+    service_uid: int,
+    service_gid: int,
+    budget: _AdoptionBudget,
+) -> os.stat_result:
+    """Validate and adopt one producer-created entry without following names."""
+
+    if not name or "/" in name or "\x00" in name or name in {".", ".."}:
+        raise TransactionError("campaign producer staging name is invalid")
+    budget.entries += 1
+    if budget.entries > MAX_OUTPUT_FILES:
+        raise TransactionError("campaign producer staging has too many entries")
+    try:
+        named = os.stat(name, dir_fd=parent_descriptor, follow_symlinks=False)
+    except OSError as error:
+        raise TransactionError(
+            "campaign producer staging entry is unavailable"
+        ) from error
+    if not _service_entry_metadata_is_safe(
+        named,
+        root_device=root_device,
+        control_uid=control_uid,
+        control_gid=control_gid,
+        service_uid=service_uid,
+        service_gid=service_gid,
+    ):
+        raise TransactionError(
+            "campaign producer staging entry metadata is unsafe"
+        )
+    descriptor = -1
+    try:
+        if stat.S_ISDIR(named.st_mode):
+            descriptor = os.open(
+                name,
+                _directory_flags(),
+                dir_fd=parent_descriptor,
+            )
+            opened = os.fstat(descriptor)
+            if not _same_opened_entry(named, opened):
+                raise TransactionError(
+                    "campaign producer staging directory changed while opening"
+                )
+            _require_service_entry_xattrs(descriptor)
+            try:
+                children = sorted(os.listdir(descriptor), key=os.fsencode)
+            except OSError as error:
+                raise TransactionError(
+                    "campaign producer staging directory cannot be enumerated"
+                ) from error
+            if len(children) > MAX_OUTPUT_FILES:
+                raise TransactionError(
+                    "campaign producer staging has too many entries"
+                )
+            for child in children:
+                _adopt_service_entry(
+                    descriptor,
+                    child,
+                    root_device=root_device,
+                    control_uid=control_uid,
+                    control_gid=control_gid,
+                    service_uid=service_uid,
+                    service_gid=service_gid,
+                    budget=budget,
+                )
+        elif stat.S_ISREG(named.st_mode):
+            if (
+                named.st_nlink != 1
+                or named.st_size < 0
+                or named.st_size > MAX_OUTPUT_FILE_BYTES
+            ):
+                raise TransactionError(
+                    "campaign producer staging file metadata is unsafe"
+                )
+            budget.total_bytes += named.st_size
+            if budget.total_bytes > MAX_OUTPUT_TOTAL_BYTES:
+                raise TransactionError(
+                    "campaign producer staging byte total is invalid"
+                )
+            descriptor = os.open(
+                name,
+                os.O_RDONLY
+                | os.O_CLOEXEC
+                | os.O_NOFOLLOW
+                | os.O_NONBLOCK,
+                dir_fd=parent_descriptor,
+            )
+            opened = os.fstat(descriptor)
+            if not _same_opened_entry(named, opened):
+                raise TransactionError(
+                    "campaign producer staging file changed while opening"
+                )
+            _require_service_entry_xattrs(descriptor)
+        else:
+            raise TransactionError(
+                "campaign producer staging contains a special file"
+            )
+        os.fchown(descriptor, control_uid, control_gid)
+        os.fsync(descriptor)
+        adopted = os.fstat(descriptor)
+        named_after = os.stat(
+            name,
+            dir_fd=parent_descriptor,
+            follow_symlinks=False,
+        )
+        if (
+            adopted.st_dev != named.st_dev
+            or adopted.st_ino != named.st_ino
+            or adopted.st_uid != control_uid
+            or adopted.st_gid != control_gid
+            or not _same_opened_entry(adopted, named_after)
+        ):
+            raise TransactionError(
+                "campaign producer staging adoption identity differs"
+            )
+        return adopted
+    except OSError as error:
+        raise TransactionError(
+            "campaign producer staging adoption failed"
+        ) from error
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+
+
+def _clear_service_staging_directory(
+    descriptor: int,
+    *,
+    root_device: int,
+    remaining: list[int],
+) -> None:
+    """Remove a reclaimed staging tree without following hostile entries."""
+
+    try:
+        names = os.listdir(descriptor)
+    except OSError as error:
+        raise TransactionError(
+            "campaign producer staging cleanup cannot enumerate entries"
+        ) from error
+    for name in names:
+        remaining[0] -= 1
+        if (
+            remaining[0] < 0
+            or not name
+            or "/" in name
+            or "\x00" in name
+            or name in {".", ".."}
+        ):
+            raise TransactionError(
+                "campaign producer staging cleanup exceeded its bound"
+            )
+        try:
+            metadata = os.stat(
+                name,
+                dir_fd=descriptor,
+                follow_symlinks=False,
+            )
+        except OSError as error:
+            raise TransactionError(
+                "campaign producer staging changed during cleanup"
+            ) from error
+        if stat.S_ISDIR(metadata.st_mode):
+            if metadata.st_dev != root_device:
+                raise TransactionError(
+                    "campaign producer staging contains a foreign mount"
+                )
+            child = -1
+            try:
+                child = os.open(name, _directory_flags(), dir_fd=descriptor)
+                opened = os.fstat(child)
+                if (
+                    opened.st_dev != metadata.st_dev
+                    or opened.st_ino != metadata.st_ino
+                ):
+                    raise TransactionError(
+                        "campaign producer staging changed during cleanup"
+                    )
+                os.fchmod(child, 0o700)
+                _clear_service_staging_directory(
+                    child,
+                    root_device=root_device,
+                    remaining=remaining,
+                )
+            finally:
+                if child >= 0:
+                    os.close(child)
+            os.rmdir(name, dir_fd=descriptor)
+        else:
+            os.unlink(name, dir_fd=descriptor)
+    os.fsync(descriptor)
+
+
+def _mode_allows_campaign_executor_traversal(
+    metadata: os.stat_result,
+) -> bool:
+    if metadata.st_uid == CAMPAIGN_EXECUTOR_UID:
+        return bool(metadata.st_mode & stat.S_IXUSR)
+    if metadata.st_gid in set(CAMPAIGN_EXECUTOR_SUPPLEMENTARY_GROUPS):
+        return bool(metadata.st_mode & stat.S_IXGRP)
+    return bool(metadata.st_mode & stat.S_IXOTH)
+
+
+def _require_campaign_executor_parent_traversal(path: Path) -> None:
+    absolute = _lexical_absolute(path, "campaign producer output")
+    descriptor = -1
+    try:
+        descriptor = os.open(absolute.anchor, _directory_flags())
+        root = os.fstat(descriptor)
+        if not _mode_allows_campaign_executor_traversal(root):
+            raise TransactionError(
+                "campaign producer cannot traverse output ancestry"
+            )
+        for component in absolute.parent.parts[1:]:
+            next_descriptor = os.open(
+                component,
+                _directory_flags(),
+                dir_fd=descriptor,
+            )
+            os.close(descriptor)
+            descriptor = next_descriptor
+            metadata = os.fstat(descriptor)
+            if not _mode_allows_campaign_executor_traversal(metadata):
+                raise TransactionError(
+                    "campaign producer cannot traverse output ancestry"
+                )
+    except OSError as error:
+        raise TransactionError(
+            "campaign producer output ancestry is unavailable"
+        ) from error
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+
+
+@dataclass(slots=True)
+class _ServiceProducerStaging:
+    path: Path
+    name: str
+    actual: Path
+    authorized: Path
+    expected_kind: str
+    parent_descriptor: int
+    parent_identity: tuple[int, int]
+    descriptor: int
+    device: int
+    inode: int
+    control_uid: int
+    control_gid: int
+    published_identity: tuple[int, int] | None = None
+    published: bool = False
+    committed: bool = False
+    closed: bool = False
+    tree_seal: campaign_runtime_seal.RuntimeTreeSeal | None = None
+    artifact_seal: campaign_runtime_seal.RuntimeArtifactSeal | None = None
+
+    @classmethod
+    def create(
+        cls,
+        authorized_path: Path,
+        *,
+        required_uid: int,
+        expected_kind: str,
+        label: str,
+    ) -> "_ServiceProducerStaging":
+        if expected_kind not in {"directory", "file"}:
+            raise TransactionError("campaign producer output kind is invalid")
+        if required_uid not in {0, CAMPAIGN_EXECUTOR_UID}:
+            raise TransactionError(
+                "campaign producer control identity is unsupported"
+            )
+        authorized = _lexical_absolute(authorized_path, label)
+        _require_campaign_executor_parent_traversal(authorized)
+        parent, parent_identity = _open_parent_descriptor(
+            authorized,
+            label,
+            required_uid=required_uid,
+        )
+        control_gid = 0 if required_uid == 0 else os.getegid()
+        name = (
+            f"{SERVICE_PRODUCER_STAGING_PREFIX}{secrets.token_hex(16)}"
+        )
+        descriptor = -1
+        try:
+            for entry_name in (authorized.name, name):
+                try:
+                    os.stat(
+                        entry_name,
+                        dir_fd=parent,
+                        follow_symlinks=False,
+                    )
+                except FileNotFoundError:
+                    pass
+                except OSError as error:
+                    raise TransactionError(
+                        "campaign producer output freshness cannot be inspected"
+                    ) from error
+                else:
+                    raise TransactionError(
+                        "campaign producer authorized output is not fresh"
+                    )
+            os.mkdir(name, 0o700, dir_fd=parent)
+            descriptor = os.open(name, _directory_flags(), dir_fd=parent)
+            os.fchown(
+                descriptor,
+                CAMPAIGN_EXECUTOR_UID,
+                CAMPAIGN_EXECUTOR_GID,
+            )
+            os.fchmod(descriptor, 0o700)
+            os.fsync(descriptor)
+            os.fsync(parent)
+            metadata = os.fstat(descriptor)
+            named = os.stat(name, dir_fd=parent, follow_symlinks=False)
+            if (
+                not _same_directory_object(metadata, named)
+                or metadata.st_uid != CAMPAIGN_EXECUTOR_UID
+                or metadata.st_gid != CAMPAIGN_EXECUTOR_GID
+                or stat.S_IMODE(metadata.st_mode) != 0o700
+                or metadata.st_nlink != 2
+            ):
+                raise TransactionError(
+                    "campaign producer private staging root is unsafe"
+                )
+            return cls(
+                path=authorized.parent / name,
+                name=name,
+                actual=authorized.parent
+                / name
+                / SERVICE_PRODUCER_OUTPUT_NAME,
+                authorized=authorized,
+                expected_kind=expected_kind,
+                parent_descriptor=parent,
+                parent_identity=parent_identity,
+                descriptor=descriptor,
+                device=metadata.st_dev,
+                inode=metadata.st_ino,
+                control_uid=required_uid,
+                control_gid=control_gid,
+            )
+        except BaseException:
+            if descriptor >= 0:
+                try:
+                    os.fchown(descriptor, required_uid, control_gid)
+                    os.fchmod(descriptor, 0o700)
+                except OSError:
+                    pass
+                os.close(descriptor)
+            try:
+                os.rmdir(name, dir_fd=parent)
+            except OSError:
+                pass
+            os.close(parent)
+            raise
+
+    def _verify_named_root(self) -> os.stat_result:
+        if self.closed:
+            raise TransactionError("campaign producer staging root is closed")
+        try:
+            opened = os.fstat(self.descriptor)
+            named = os.stat(
+                self.name,
+                dir_fd=self.parent_descriptor,
+                follow_symlinks=False,
+            )
+        except OSError as error:
+            raise TransactionError(
+                "campaign producer staging root is unavailable"
+            ) from error
+        if (
+            opened.st_dev != self.device
+            or opened.st_ino != self.inode
+            or named.st_dev != self.device
+            or named.st_ino != self.inode
+            or not stat.S_ISDIR(opened.st_mode)
+            or not stat.S_ISDIR(named.st_mode)
+        ):
+            raise TransactionError(
+                "campaign producer staging root identity differs"
+            )
+        _verify_parent_descriptor(
+            self.authorized,
+            self.parent_identity,
+            required_uid=self.control_uid,
+            label="campaign producer authorized output",
+        )
+        return opened
+
+    def reclaim_and_adopt(self) -> None:
+        self._verify_named_root()
+        try:
+            os.fchown(self.descriptor, self.control_uid, self.control_gid)
+            os.fchmod(self.descriptor, 0o700)
+            os.fsync(self.descriptor)
+        except OSError as error:
+            raise TransactionError(
+                "campaign producer staging root adoption failed"
+            ) from error
+        root = self._verify_named_root()
+        if (
+            root.st_uid != self.control_uid
+            or root.st_gid != self.control_gid
+            or stat.S_IMODE(root.st_mode) != 0o700
+        ):
+            raise TransactionError(
+                "campaign producer staging root adoption differs"
+            )
+        try:
+            names = os.listdir(self.descriptor)
+        except OSError as error:
+            raise TransactionError(
+                "campaign producer staging root cannot be enumerated"
+            ) from error
+        if names != [SERVICE_PRODUCER_OUTPUT_NAME]:
+            raise TransactionError(
+                "campaign producer staging root layout differs"
+            )
+        adopted = _adopt_service_entry(
+            self.descriptor,
+            SERVICE_PRODUCER_OUTPUT_NAME,
+            root_device=self.device,
+            control_uid=self.control_uid,
+            control_gid=self.control_gid,
+            service_uid=CAMPAIGN_EXECUTOR_UID,
+            service_gid=CAMPAIGN_EXECUTOR_GID,
+            budget=_AdoptionBudget(),
+        )
+        if (
+            self.expected_kind == "directory"
+            and not stat.S_ISDIR(adopted.st_mode)
+        ) or (
+            self.expected_kind == "file"
+            and not stat.S_ISREG(adopted.st_mode)
+        ):
+            raise TransactionError(
+                "campaign producer staging output kind differs"
+            )
+        self.refresh_seal()
+
+    def refresh_seal(self) -> None:
+        self._verify_named_root()
+        try:
+            if self.expected_kind == "directory":
+                self.tree_seal = (
+                    campaign_runtime_seal.capture_runtime_tree_seal(
+                        self.actual,
+                        label="adopted campaign producer output",
+                        required_uid=self.control_uid,
+                    )
+                )
+                self.artifact_seal = None
+            else:
+                self.artifact_seal = (
+                    campaign_runtime_seal.capture_runtime_artifact_seal(
+                        self.actual,
+                        label="adopted campaign producer output",
+                        maximum=MAX_OUTPUT_FILE_BYTES,
+                        required_uid=self.control_uid,
+                    )
+                )
+                self.tree_seal = None
+        except campaign_runtime_seal.RuntimeArtifactSealError as error:
+            raise TransactionError(
+                "adopted campaign producer output seal failed"
+            ) from error
+
+    def require_seal(self) -> None:
+        try:
+            if self.expected_kind == "directory":
+                if self.tree_seal is None:
+                    raise TransactionError(
+                        "campaign producer directory seal is unavailable"
+                    )
+                campaign_runtime_seal.require_runtime_tree_seal(
+                    self.tree_seal,
+                    required_uid=self.control_uid,
+                )
+            else:
+                if self.artifact_seal is None:
+                    raise TransactionError(
+                        "campaign producer file seal is unavailable"
+                    )
+                campaign_runtime_seal.require_runtime_artifact_seal(
+                    self.artifact_seal,
+                    required_uid=self.control_uid,
+                )
+        except campaign_runtime_seal.RuntimeArtifactSealError as error:
+            raise TransactionError(
+                "adopted campaign producer output changed"
+            ) from error
+
+    def publish_directory(self) -> None:
+        if self.expected_kind != "directory":
+            raise TransactionError(
+                "campaign producer publication kind differs"
+            )
+        self.require_seal()
+        output_descriptor = -1
+        try:
+            before = os.stat(
+                SERVICE_PRODUCER_OUTPUT_NAME,
+                dir_fd=self.descriptor,
+                follow_symlinks=False,
+            )
+            output_descriptor = os.open(
+                SERVICE_PRODUCER_OUTPUT_NAME,
+                _directory_flags(),
+                dir_fd=self.descriptor,
+            )
+            opened = os.fstat(output_descriptor)
+            if not _same_directory_object(before, opened):
+                raise TransactionError(
+                    "campaign producer directory changed before publication"
+                )
+            original_mode = stat.S_IMODE(opened.st_mode)
+            # Linux may require owner-write permission on a directory whose
+            # ``..`` entry changes.  The reclaimed root is private, so grant
+            # it only on the pinned descriptor and restore it before expose.
+            os.fchmod(
+                output_descriptor,
+                original_mode | stat.S_IWUSR | stat.S_IXUSR,
+            )
+            os.fsync(output_descriptor)
+            _rename_noreplace(
+                SERVICE_PRODUCER_OUTPUT_NAME,
+                self.authorized.name,
+                source_parent_descriptor=self.descriptor,
+                destination_parent_descriptor=self.parent_descriptor,
+            )
+            self.published_identity = (before.st_dev, before.st_ino)
+            self.published = True
+            os.fchmod(output_descriptor, original_mode)
+            os.fsync(output_descriptor)
+            after = os.stat(
+                self.authorized.name,
+                dir_fd=self.parent_descriptor,
+                follow_symlinks=False,
+            )
+            opened_after = os.fstat(output_descriptor)
+            if (
+                before.st_dev != after.st_dev
+                or before.st_ino != after.st_ino
+                or not _same_directory_object(after, opened_after)
+                or not stat.S_ISDIR(after.st_mode)
+                or after.st_uid != self.control_uid
+                or stat.S_IMODE(after.st_mode) != original_mode
+            ):
+                raise TransactionError(
+                    "published campaign producer directory identity differs"
+                )
+            os.fsync(self.descriptor)
+            os.fsync(self.parent_descriptor)
+        except OSError as error:
+            raise TransactionError(
+                "campaign producer directory publication failed"
+            ) from error
+        finally:
+            if output_descriptor >= 0:
+                os.close(output_descriptor)
+
+    def publish_file(self, *, label: str) -> None:
+        if self.expected_kind != "file":
+            raise TransactionError(
+                "campaign producer publication kind differs"
+            )
+        self.require_seal()
+        published = _publish_staged_file(
+            self.actual,
+            self.authorized,
+            required_uid=self.control_uid,
+            label=label,
+        )
+        self.published_identity = (
+            published.identity.device,
+            published.identity.inode,
+        )
+        self.published = True
+
+    def commit(self) -> None:
+        if not self.published:
+            raise TransactionError(
+                "campaign producer output was not published"
+            )
+        self.committed = True
+
+    def _remove_uncommitted_publication(self) -> None:
+        if (
+            not self.published
+            or self.committed
+            or self.published_identity is None
+        ):
+            return
+        try:
+            metadata = os.stat(
+                self.authorized.name,
+                dir_fd=self.parent_descriptor,
+                follow_symlinks=False,
+            )
+        except FileNotFoundError:
+            return
+        if (metadata.st_dev, metadata.st_ino) != self.published_identity:
+            raise TransactionError(
+                "uncommitted campaign publication identity changed"
+            )
+        if stat.S_ISDIR(metadata.st_mode):
+            descriptor = os.open(
+                self.authorized.name,
+                _directory_flags(),
+                dir_fd=self.parent_descriptor,
+            )
+            try:
+                os.fchmod(descriptor, 0o700)
+                _clear_service_staging_directory(
+                    descriptor,
+                    root_device=metadata.st_dev,
+                    remaining=[MAX_OUTPUT_FILES + 128],
+                )
+            finally:
+                os.close(descriptor)
+            os.rmdir(
+                self.authorized.name,
+                dir_fd=self.parent_descriptor,
+            )
+        elif stat.S_ISREG(metadata.st_mode):
+            os.unlink(
+                self.authorized.name,
+                dir_fd=self.parent_descriptor,
+            )
+        else:
+            raise TransactionError(
+                "uncommitted campaign publication kind differs"
+            )
+        os.fsync(self.parent_descriptor)
+        self.published = False
+
+    def close(self) -> None:
+        if self.closed:
+            return
+        pending_error: BaseException | None = None
+        try:
+            try:
+                self._remove_uncommitted_publication()
+            except BaseException as error:
+                pending_error = error
+            try:
+                self._verify_named_root()
+                try:
+                    os.fchown(
+                        self.descriptor,
+                        self.control_uid,
+                        self.control_gid,
+                    )
+                    os.fchmod(self.descriptor, 0o700)
+                except OSError as error:
+                    raise TransactionError(
+                        "campaign producer staging cleanup cannot reclaim root"
+                    ) from error
+                _clear_service_staging_directory(
+                    self.descriptor,
+                    root_device=self.device,
+                    remaining=[MAX_OUTPUT_FILES + 128],
+                )
+                os.close(self.descriptor)
+                self.descriptor = -1
+                os.rmdir(self.name, dir_fd=self.parent_descriptor)
+                os.fsync(self.parent_descriptor)
+                _verify_parent_descriptor(
+                    self.authorized,
+                    self.parent_identity,
+                    required_uid=self.control_uid,
+                    label="campaign producer authorized output",
+                )
+            except BaseException as error:
+                if pending_error is None:
+                    pending_error = error
+        finally:
+            if self.descriptor >= 0:
+                os.close(self.descriptor)
+                self.descriptor = -1
+            os.close(self.parent_descriptor)
+            self.parent_descriptor = -1
+            self.closed = True
+        if pending_error is not None:
+            raise pending_error
+
+
+@contextmanager
+def _service_producer_staging(
+    authorized_path: Path,
+    *,
+    required_uid: int,
+    expected_kind: str,
+    label: str,
+) -> Iterator[_ServiceProducerStaging]:
+    staging = _ServiceProducerStaging.create(
+        authorized_path,
+        required_uid=required_uid,
+        expected_kind=expected_kind,
+        label=label,
+    )
+    try:
+        yield staging
+    finally:
+        staging.close()
+
+
+@dataclass(slots=True)
+class _PrivateSiblingDirectory:
+    path: Path
+    name: str
+    authorized: Path
+    parent_descriptor: int
+    parent_identity: tuple[int, int]
+    initial_parent_metadata: os.stat_result
+    required_uid: int
+    label: str
+    published: bool = False
+    closed: bool = False
+
+    @classmethod
+    def create(
+        cls,
+        authorized_path: Path,
+        *,
+        required_uid: int,
+        label: str,
+    ) -> "_PrivateSiblingDirectory":
+        authorized = _lexical_absolute(authorized_path, label)
+        parent, parent_identity = _open_parent_descriptor(
+            authorized,
+            label,
+            required_uid=required_uid,
+        )
+        initial = os.fstat(parent)
+        name = (
+            f"{AQ4_STAGING_PREFIX}{secrets.token_hex(16)}-"
+            f"{authorized.name}"
+        )
+        try:
+            for entry_name, entry_label in (
+                (name, "staging name"),
+                (authorized.name, "authorized output"),
+            ):
+                try:
+                    os.stat(
+                        entry_name,
+                        dir_fd=parent,
+                        follow_symlinks=False,
+                    )
+                except FileNotFoundError:
+                    pass
+                except OSError as error:
+                    raise TransactionError(
+                        f"AQ4 sibling directory {entry_label} cannot be "
+                        "inspected"
+                    ) from error
+                else:
+                    raise TransactionError(
+                        f"AQ4 sibling directory {entry_label} is not fresh"
+                    )
+            _require_stable_parent_metadata(
+                parent,
+                initial,
+                expected_link_delta=0,
+                label=label,
+            )
+            _verify_parent_descriptor(
+                authorized,
+                parent_identity,
+                required_uid=required_uid,
+                label=label,
+            )
+            return cls(
+                path=authorized.parent / name,
+                name=name,
+                authorized=authorized,
+                parent_descriptor=parent,
+                parent_identity=parent_identity,
+                initial_parent_metadata=initial,
+                required_uid=required_uid,
+                label=label,
+            )
+        except BaseException:
+            os.close(parent)
+            raise
+
+    def _verify_parent(self, *, expected_link_delta: int) -> None:
+        if self.closed:
+            raise TransactionError("AQ4 sibling directory staging is closed")
+        _require_stable_parent_metadata(
+            self.parent_descriptor,
+            self.initial_parent_metadata,
+            expected_link_delta=expected_link_delta,
+            label=self.label,
+        )
+        _verify_parent_descriptor(
+            self.authorized,
+            self.parent_identity,
+            required_uid=self.required_uid,
+            label=self.label,
+        )
+
+    def _authorized_directory_delta(self) -> int:
+        try:
+            metadata = os.stat(
+                self.authorized.name,
+                dir_fd=self.parent_descriptor,
+                follow_symlinks=False,
+            )
+        except FileNotFoundError:
+            return 0
+        except OSError as error:
+            raise TransactionError(
+                "authorized AQ4 output cannot be inspected"
+            ) from error
+        return int(stat.S_ISDIR(metadata.st_mode))
+
+    def _open_staged(
+        self,
+        *,
+        expected_mode: int,
+    ) -> tuple[int, os.stat_result]:
+        self._verify_parent(
+            expected_link_delta=1 + self._authorized_directory_delta()
+        )
+        descriptor = -1
+        try:
+            named = os.stat(
+                self.name,
+                dir_fd=self.parent_descriptor,
+                follow_symlinks=False,
+            )
+            descriptor = os.open(
+                self.name,
+                _directory_flags(),
+                dir_fd=self.parent_descriptor,
+            )
+            opened = os.fstat(descriptor)
+            if (
+                not _same_directory_object(named, opened)
+                or opened.st_dev != self.initial_parent_metadata.st_dev
+                or opened.st_uid != self.required_uid
+                or stat.S_IMODE(opened.st_mode) != expected_mode
+            ):
+                raise TransactionError(
+                    "AQ4 sibling directory staging metadata differs"
+                )
+            return descriptor, opened
+        except FileNotFoundError as error:
+            raise TransactionError(
+                "AQ4 sibling directory staging output is unavailable"
+            ) from error
+        except BaseException:
+            if descriptor >= 0:
+                os.close(descriptor)
+            raise
+
+    def require_private(self) -> None:
+        descriptor, _ = self._open_staged(expected_mode=0o700)
+        os.close(descriptor)
+
+    def publish(self) -> None:
+        descriptor, before = self._open_staged(expected_mode=0o555)
+        try:
+            _rename_noreplace(
+                self.name,
+                self.authorized.name,
+                source_parent_descriptor=self.parent_descriptor,
+                destination_parent_descriptor=self.parent_descriptor,
+            )
+            try:
+                after = os.stat(
+                    self.authorized.name,
+                    dir_fd=self.parent_descriptor,
+                    follow_symlinks=False,
+                )
+            except OSError as error:
+                raise TransactionError(
+                    "published AQ4 directory is unavailable"
+                ) from error
+            if (
+                not _same_directory_object(before, after)
+                or before.st_mode != after.st_mode
+                or stat.S_IMODE(after.st_mode) != 0o555
+            ):
+                raise TransactionError(
+                    "published AQ4 directory identity differs"
+                )
+            try:
+                os.stat(
+                    self.name,
+                    dir_fd=self.parent_descriptor,
+                    follow_symlinks=False,
+                )
+            except FileNotFoundError:
+                pass
+            else:
+                raise TransactionError(
+                    "AQ4 sibling directory staging name remains published"
+                )
+            os.fsync(descriptor)
+            os.fsync(self.parent_descriptor)
+            self._verify_parent(expected_link_delta=1)
+            self.published = True
+        finally:
+            os.close(descriptor)
+
+    def close(self) -> None:
+        if self.closed:
+            return
+        descriptor = -1
+        try:
+            try:
+                named = os.stat(
+                    self.name,
+                    dir_fd=self.parent_descriptor,
+                    follow_symlinks=False,
+                )
+            except FileNotFoundError:
+                self._verify_parent(
+                    expected_link_delta=(
+                        1
+                        if self.published
+                        else self._authorized_directory_delta()
+                    ),
+                )
+                return
+            except OSError as error:
+                raise TransactionError(
+                    "AQ4 sibling directory staging cannot be inspected "
+                    "for cleanup"
+                ) from error
+            descriptor = os.open(
+                self.name,
+                _directory_flags(),
+                dir_fd=self.parent_descriptor,
+            )
+            opened = os.fstat(descriptor)
+            if (
+                not _same_directory_object(named, opened)
+                or opened.st_dev != self.initial_parent_metadata.st_dev
+                or opened.st_uid != self.required_uid
+            ):
+                raise TransactionError(
+                    "AQ4 sibling directory staging identity differs"
+                )
+            os.fchmod(descriptor, 0o700)
+            _clear_owned_directory(
+                descriptor,
+                root_device=opened.st_dev,
+                required_uid=self.required_uid,
+                remaining=[MAX_OUTPUT_FILES + 128],
+            )
+            named_after = os.stat(
+                self.name,
+                dir_fd=self.parent_descriptor,
+                follow_symlinks=False,
+            )
+            opened_after = os.fstat(descriptor)
+            if not _same_directory_object(named_after, opened_after):
+                raise TransactionError(
+                    "AQ4 sibling directory staging changed during cleanup"
+                )
+            os.close(descriptor)
+            descriptor = -1
+            os.rmdir(self.name, dir_fd=self.parent_descriptor)
+            os.fsync(self.parent_descriptor)
+            self._verify_parent(
+                expected_link_delta=self._authorized_directory_delta()
+            )
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
+            os.close(self.parent_descriptor)
+            self.parent_descriptor = -1
+            self.closed = True
+
+
+@contextmanager
+def _private_staging_root(
+    authorized_path: Path,
+    *,
+    required_uid: int,
+    label: str,
+) -> Iterator[_PrivateStagingRoot]:
+    staging = _PrivateStagingRoot.create(
+        authorized_path,
+        required_uid=required_uid,
+        label=label,
+    )
+    try:
+        yield staging
+    finally:
+        staging.close()
+
+
+@contextmanager
+def _private_sibling_staging_directory(
+    authorized_path: Path,
+    *,
+    required_uid: int,
+    label: str,
+) -> Iterator[_PrivateSiblingDirectory]:
+    staging = _PrivateSiblingDirectory.create(
+        authorized_path,
+        required_uid=required_uid,
+        label=label,
+    )
+    try:
+        yield staging
+    finally:
+        staging.close()
+
+
+@contextmanager
+def _private_sibling_staging_path(
+    authorized_path: Path,
+    *,
+    required_uid: int,
+    label: str,
+) -> Iterator[Path]:
+    """Reserve an unguessable fresh name in the bundle's authorized parent."""
+
+    authorized = _lexical_absolute(authorized_path, label)
+    parent, parent_identity = _open_parent_descriptor(
+        authorized,
+        label,
+        required_uid=required_uid,
+    )
+    initial_parent_metadata = os.fstat(parent)
+    name = f"{AQ4_STAGING_PREFIX}{secrets.token_hex(16)}-{authorized.name}"
+    staging = authorized.parent / name
+    try:
+        try:
+            for entry_name, entry_label in (
+                (name, "staging name"),
+                (authorized.name, "authorized output"),
+            ):
+                try:
+                    os.stat(
+                        entry_name,
+                        dir_fd=parent,
+                        follow_symlinks=False,
+                    )
+                except FileNotFoundError:
+                    pass
+                except OSError as error:
+                    raise TransactionError(
+                        f"AQ4 sibling {entry_label} cannot be inspected"
+                    ) from error
+                else:
+                    raise TransactionError(
+                        f"AQ4 sibling {entry_label} is not fresh"
+                    )
+            _verify_parent_descriptor(
+                staging,
+                parent_identity,
+                required_uid=required_uid,
+                label=label,
+            )
+            _require_stable_parent_metadata(
+                parent,
+                initial_parent_metadata,
+                expected_link_delta=0,
+                label=label,
+            )
+            yield staging
+        finally:
+            try:
+                metadata = os.stat(
+                    name,
+                    dir_fd=parent,
+                    follow_symlinks=False,
+                )
+            except FileNotFoundError:
+                pass
+            except OSError as error:
+                raise TransactionError(
+                    "AQ4 sibling staging output cannot be inspected for cleanup"
+                ) from error
+            else:
+                if (
+                    not stat.S_ISREG(metadata.st_mode)
+                    or metadata.st_uid != required_uid
+                    or metadata.st_nlink != 1
+                ):
+                    raise TransactionError(
+                        "AQ4 sibling staging output identity differs"
+                    )
+                os.unlink(name, dir_fd=parent)
+                os.fsync(parent)
+            _verify_parent_descriptor(
+                staging,
+                parent_identity,
+                required_uid=required_uid,
+                label=label,
+            )
+            _require_stable_parent_metadata(
+                parent,
+                initial_parent_metadata,
+                expected_link_delta=0,
+                label=label,
+            )
+    finally:
+        os.close(parent)
+
+
+def _require_private_staged_file(
+    path: Path,
+    *,
+    required_uid: int,
+    label: str,
+) -> StableFileSnapshot:
+    snapshot = _read_input(path, label, MAX_OUTPUT_FILE_BYTES)
+    if (
+        snapshot.identity.uid != required_uid
+        or snapshot.identity.links != 1
+        or stat.S_IMODE(snapshot.identity.mode) != 0o600
+    ):
+        raise TransactionError(f"{label} private staging metadata differs")
+    return snapshot
+
+
+def _publish_staged_file(
+    staged_path: Path,
+    authorized_path: Path,
+    *,
+    required_uid: int,
+    label: str,
+) -> StableFileSnapshot:
+    staged = _read_input(staged_path, label, MAX_OUTPUT_FILE_BYTES)
+    if (
+        staged.identity.uid != required_uid
+        or staged.identity.links != 1
+        or stat.S_IMODE(staged.identity.mode) != 0o444
+    ):
+        raise TransactionError(f"{label} immutable staging identity differs")
+    _exclusive_publish(
+        authorized_path,
+        staged.raw,
+        mode=0o444,
+        required_uid=required_uid,
+        label=label,
+        maximum=MAX_OUTPUT_FILE_BYTES,
+    )
+    return _read_input(authorized_path, label, MAX_OUTPUT_FILE_BYTES)
 
 
 def _observe_candidate(
@@ -1411,6 +4074,25 @@ def _observe_candidate(
     )
     if not equal:
         raise TransactionError("actual active manifest bytes differ from candidate")
+    return {
+        "stage": stage,
+        "active_manifest_sha256": active_now.sha256,
+        "bytes_equal": True,
+    }
+
+
+def _observe_aq4(
+    preflight_result: TransactionPreflight,
+    *,
+    stage: str,
+) -> dict[str, Any]:
+    active_now = _read_input(
+        preflight_result.active.path,
+        "actual active served-model manifest",
+        MAX_MANIFEST_BYTES,
+    )
+    if active_now.raw != preflight_result.active.raw:
+        raise TransactionError("actual active manifest bytes differ from AQ4")
     return {
         "stage": stage,
         "active_manifest_sha256": active_now.sha256,
@@ -1469,32 +4151,120 @@ def _repin_transaction_inputs(
     policy: authorization.RegistryPolicy,
     runner: CommandRunner,
     now: datetime,
+    repin_aq4_release: bool = True,
+    runtime_scope: str = "all",
 ) -> None:
-    source_commit, source_tree = _source_identity(request.source_root, runner=runner)
+    _require_runtime_seals(
+        preflight_result,
+        required_uid=policy.required_uid,
+        scope=runtime_scope,
+    )
+    source_commit, source_tree, _source_seal = _sealed_source_identity(
+        request.source_root,
+        runner=runner,
+        required_uid=policy.required_uid,
+        expected_seal=preflight_result.source_seal,
+    )
+    if repin_aq4_release:
+        if preflight_result.aq4_source_seal is None:
+            raise TransactionError("AQ4 campaign source seal is unavailable")
+        aq4_source_commit, aq4_source_tree, _aq4_source_seal = (
+            _sealed_source_identity(
+                preflight_result.aq4_source_root,
+                runner=runner,
+                required_uid=policy.required_uid,
+                require_detached=True,
+                expected_seal=preflight_result.aq4_source_seal,
+            )
+        )
+    else:
+        aq4_source_commit = preflight_result.aq4_source_commit
+        aq4_source_tree = preflight_result.aq4_source_tree
     reloaded = authorization.load_claim(
         request.authorization_path,
         now=now,
         policy=policy,
     )
-    candidate = _read_input(
-        preflight_result.candidate.path,
-        "frozen candidate served-model manifest",
-        MAX_MANIFEST_BYTES,
-    )
     unit = _read_input(request.systemd_unit, "systemd unit", MAX_INPUT_BYTES)
     environment = _read_input(
         request.environment_file, "systemd environment file", MAX_INPUT_BYTES
     )
-    candidate_document = _strict_object(
-        candidate.raw, "candidate served-model manifest"
-    )
-    receipt_path, receipt_sha256 = _promotion_identity(
-        candidate_document,
-        manifest_parent=candidate.path.parent,
-        source_commit=preflight_result.source_commit,
-        label="candidate SQ8",
-    )
-    receipt = _read_input(receipt_path, "candidate promotion receipt", MAX_INPUT_BYTES)
+    candidate: StableFileSnapshot | None = None
+    receipt_sha256: str | None = None
+    receipt: StableFileSnapshot | None = None
+    if runtime_scope == "all":
+        candidate = _read_input(
+            preflight_result.candidate.path,
+            "frozen candidate served-model manifest",
+            MAX_MANIFEST_BYTES,
+        )
+        candidate_document = _strict_object(
+            candidate.raw, "candidate served-model manifest"
+        )
+        receipt_path, receipt_sha256 = _promotion_identity(
+            candidate_document,
+            manifest_parent=candidate.path.parent,
+            source_commit=preflight_result.source_commit,
+            label="candidate SQ8",
+        )
+        receipt = _read_input(
+            receipt_path,
+            "candidate promotion receipt",
+            MAX_INPUT_BYTES,
+        )
+    aq4_worker = preflight_result.aq4_worker_binary
+    aq4_receipt = preflight_result.aq4_promotion_receipt
+    aq4_evidence = preflight_result.aq4_promotion_evidence
+    if repin_aq4_release:
+        if (
+            aq4_worker is None
+            or aq4_receipt is None
+            or aq4_evidence is None
+        ):
+            raise TransactionError("AQ4 release inputs are not pinned")
+        aq4_worker = _read_input(
+            aq4_worker.path,
+            "active AQ4 worker binary",
+            MAX_OUTPUT_FILE_BYTES,
+        )
+        aq4_receipt = _read_input(
+            aq4_receipt.path,
+            "active AQ4 promotion receipt",
+            MAX_INPUT_BYTES,
+        )
+        aq4_evidence = _read_input(
+            aq4_evidence.path,
+            "active AQ4 promotion evidence",
+            MAX_INPUT_BYTES,
+        )
+        aq4_release = claim.authorization.document["aq4_release"]
+        for name, source_snapshot in (
+            ("promotion_evidence", aq4_evidence),
+            ("promotion_receipt", aq4_receipt),
+        ):
+            destination = Path(aq4_release[name]["path"])
+            try:
+                destination.lstat()
+            except FileNotFoundError:
+                continue
+            except OSError as error:
+                raise TransactionError(
+                    f"AQ4 {name} copy cannot be inspected"
+                ) from error
+            copied = _read_input(
+                destination,
+                f"AQ4 {name} immutable copy",
+                MAX_INPUT_BYTES,
+            )
+            if (
+                copied.raw != source_snapshot.raw
+                or copied.identity.uid != policy.required_uid
+                or copied.identity.links != 1
+                or stat.S_IMODE(copied.identity.mode) != 0o444
+            ):
+                raise TransactionError(
+                    f"AQ4 {name} immutable copy differs"
+                )
     api_key_sha256: str | None = None
     session_token_sha256: str | None = None
     if request.api_key_file is not None:
@@ -1512,14 +4282,33 @@ def _repin_transaction_inputs(
     if (
         source_commit != preflight_result.source_commit
         or source_tree != preflight_result.source_tree
+        or aq4_source_commit != preflight_result.aq4_source_commit
+        or aq4_source_tree != preflight_result.aq4_source_tree
         or reloaded.snapshot.sha256 != claim.snapshot.sha256
         or reloaded.authorization.snapshot.sha256
         != claim.authorization.snapshot.sha256
-        or candidate.raw != preflight_result.candidate.raw
         or unit.sha256 != preflight_result.systemd_unit_sha256
         or environment.sha256 != preflight_result.environment_sha256
-        or receipt_sha256 != preflight_result.candidate_promotion_receipt_sha256
-        or receipt.sha256 != preflight_result.candidate_promotion_receipt_sha256
+        or (
+            runtime_scope == "all"
+            and (
+                candidate is None
+                or candidate.raw != preflight_result.candidate.raw
+                or receipt_sha256
+                != preflight_result.candidate_promotion_receipt_sha256
+                or receipt is None
+                or receipt.sha256
+                != preflight_result.candidate_promotion_receipt_sha256
+            )
+        )
+        or (
+            repin_aq4_release
+            and (
+                aq4_worker != preflight_result.aq4_worker_binary
+                or aq4_receipt != preflight_result.aq4_promotion_receipt
+                or aq4_evidence != preflight_result.aq4_promotion_evidence
+            )
+        )
         or api_key_sha256 != preflight_result.api_key_sha256
         or session_token_sha256
         != preflight_result.openwebui_session_token_sha256
@@ -1558,14 +4347,220 @@ def default_restoration_probe(
         raise TransactionError("live AQ4 restoration proof failed") from error
 
 
+def default_candidate_stabilization_probe(
+    request: TransactionRequest,
+    _claim: authorization.ClaimRecord,
+    _preflight_result: TransactionPreflight,
+) -> dict[str, Any]:
+    """Capture the exact live candidate service/process epoch."""
+
+    try:
+        service, gateway, worker = restoration_proof._service_identity(
+            request.service_unit
+        )
+    except restoration_proof.RestorationProofError as error:
+        raise TransactionError(
+            "candidate stabilization service identity is unavailable"
+        ) from error
+    return {
+        "service": service,
+        "gateway": gateway,
+        "worker": worker,
+    }
+
+
+def _candidate_epoch_identity(
+    value: dict[str, Any],
+    *,
+    request: TransactionRequest,
+    preflight_result: TransactionPreflight,
+) -> tuple[Any, ...]:
+    if not isinstance(value, dict) or set(value) != {
+        "service",
+        "gateway",
+        "worker",
+    }:
+        raise TransactionError("candidate stabilization epoch is malformed")
+    service = value["service"]
+    gateway = value["gateway"]
+    worker = value["worker"]
+    if (
+        not isinstance(service, dict)
+        or not isinstance(gateway, dict)
+        or not isinstance(worker, dict)
+    ):
+        raise TransactionError("candidate stabilization epoch is malformed")
+    expected_worker_sha256 = preflight_result.candidate_summary["worker"][
+        "binary_sha256"
+    ]
+    required_service = {
+        "unit",
+        "active_state",
+        "sub_state",
+        "boot_id",
+        "n_restarts",
+    }
+    required_process = {
+        "pid",
+        "ppid",
+        "starttime_ticks",
+        "executable_sha256",
+    }
+    if (
+        set(service) != required_service
+        or set(gateway) != required_process
+        or set(worker) != required_process
+        or service["unit"] != request.service_unit
+        or service["active_state"] != "active"
+        or service["sub_state"] != "running"
+        or not isinstance(service["boot_id"], str)
+        or not service["boot_id"]
+        or type(service["n_restarts"]) is not int
+        or service["n_restarts"] < 0
+        or any(
+            type(process[field]) is not int or process[field] <= 0
+            for process in (gateway, worker)
+            for field in ("pid", "ppid", "starttime_ticks")
+        )
+        or gateway["ppid"] != 1
+        or worker["ppid"] != gateway["pid"]
+        or any(
+            not isinstance(process["executable_sha256"], str)
+            or re.fullmatch(
+                r"[0-9a-f]{64}",
+                process["executable_sha256"],
+            )
+            is None
+            for process in (gateway, worker)
+        )
+        or worker["executable_sha256"] != expected_worker_sha256
+    ):
+        raise TransactionError("candidate stabilization epoch is invalid")
+    return (
+        service["unit"],
+        service["active_state"],
+        service["sub_state"],
+        service["boot_id"],
+        service["n_restarts"],
+        gateway["pid"],
+        gateway["ppid"],
+        gateway["starttime_ticks"],
+        gateway["executable_sha256"],
+        worker["pid"],
+        worker["ppid"],
+        worker["starttime_ticks"],
+        worker["executable_sha256"],
+    )
+
+
+def _monitor_candidate_stabilization(
+    request: TransactionRequest,
+    claim: authorization.ClaimRecord,
+    preflight_result: TransactionPreflight,
+    *,
+    deadline: datetime,
+    repin: Callable[[], None],
+    clock: Clock,
+    probe: CandidateStabilizationProbe,
+    sleeper: Sleeper,
+    monotonic: MonotonicClock,
+) -> dict[str, Any]:
+    """Continuously re-pin the candidate and one unchanged live epoch."""
+
+    wall_remaining = (deadline - clock()).total_seconds()
+    if (
+        not math.isfinite(wall_remaining)
+        or wall_remaining < CANDIDATE_STABILIZATION_SECONDS
+    ):
+        raise CandidateWindowExpired(
+            "authorization has insufficient time for candidate stabilization"
+        )
+    started = monotonic()
+    if not math.isfinite(started):
+        raise TransactionError("candidate stabilization clock is invalid")
+    baseline: tuple[Any, ...] | None = None
+    polls = 0
+    while True:
+        current = monotonic()
+        if not math.isfinite(current) or current < started:
+            raise TransactionError("candidate stabilization clock is invalid")
+        elapsed = current - started
+        remaining_stabilization = max(
+            0.0,
+            CANDIDATE_STABILIZATION_SECONDS - elapsed,
+        )
+        wall_remaining = (deadline - clock()).total_seconds()
+        if (
+            not math.isfinite(wall_remaining)
+            or wall_remaining <= 0
+            or wall_remaining < remaining_stabilization
+        ):
+            raise CandidateWindowExpired(
+                "authorization expired during candidate stabilization"
+            )
+        repin()
+        _observe_candidate(
+            preflight_result,
+            stage="candidate_stabilization",
+        )
+        epoch = _candidate_epoch_identity(
+            probe(request, claim, preflight_result),
+            request=request,
+            preflight_result=preflight_result,
+        )
+        if baseline is None:
+            baseline = epoch
+        elif epoch != baseline:
+            raise TransactionError(
+                "candidate service/gateway/worker epoch changed while stabilizing"
+            )
+        polls += 1
+        if polls > MAX_CANDIDATE_STABILIZATION_POLLS:
+            raise TransactionError(
+                "candidate stabilization exceeded its poll bound"
+            )
+        if elapsed >= CANDIDATE_STABILIZATION_SECONDS:
+            assert baseline is not None
+            return {
+                "stage": "candidate_stabilization",
+                "active_manifest_sha256": preflight_result.candidate.sha256,
+                "bytes_equal": True,
+                "duration_seconds": CANDIDATE_STABILIZATION_SECONDS,
+                "polls": polls,
+                "service_boot_id": baseline[3],
+                "service_n_restarts": baseline[4],
+                "gateway_pid": baseline[5],
+                "gateway_starttime_ticks": baseline[7],
+                "worker_pid": baseline[9],
+                "worker_starttime_ticks": baseline[11],
+                "worker_executable_sha256": baseline[12],
+            }
+        sleep_seconds = min(
+            CANDIDATE_STABILIZATION_POLL_SECONDS,
+            remaining_stabilization,
+        )
+        if (
+            not math.isfinite(sleep_seconds)
+            or sleep_seconds <= 0
+            or sleep_seconds > wall_remaining
+        ):
+            raise CandidateWindowExpired(
+                "authorization cannot cover the next stabilization probe"
+            )
+        sleeper(sleep_seconds)
+
+
 def _stage_environment(
     request: TransactionRequest,
     claim: authorization.ClaimRecord,
     preflight_result: TransactionPreflight,
     stage: str,
+    *,
+    producer_staging_output: Path | None = None,
+    producer_source_root: Path | None = None,
 ) -> dict[str, str]:
-    return {
-        **os.environ,
+    environment = {
+        **STAGE_BASE_ENVIRONMENT,
         "ULLM_CAMPAIGN_TRANSACTION_STAGE": stage,
         "ULLM_CAMPAIGN_AUTHORIZATION": os.fspath(
             claim.authorization.snapshot.path
@@ -1582,6 +4577,36 @@ def _stage_environment(
             "backup_path"
         ],
     }
+    if producer_staging_output is not None:
+        environment[CAMPAIGN_STAGING_OUTPUT_ENVIRONMENT] = os.fspath(
+            _lexical_absolute(
+                producer_staging_output,
+                "campaign producer staging output",
+            )
+        )
+        environment[CAMPAIGN_SOURCE_ROOT_ENVIRONMENT] = os.fspath(
+            preflight_result.source_seal.root
+            if producer_source_root is None
+            else _lexical_absolute(
+                producer_source_root,
+                "campaign producer source root",
+            )
+        )
+    return environment
+
+
+def _openwebui_image_verifier_command(
+    source_root: Path,
+) -> tuple[str, ...]:
+    return (
+        PYTHON_BINARY,
+        "-I",
+        "-S",
+        "-B",
+        os.fspath(source_root / OPENWEBUI_IMAGE_VERIFIER),
+        "--docker",
+        DOCKER_BINARY,
+    )
 
 
 def _run_commands(
@@ -1594,10 +4619,32 @@ def _run_commands(
     runner: CommandRunner,
     deadline: datetime | None = None,
     clock: Clock = utc_now,
+    runtime_scope: str = "all",
+    producer_staging_output: Path | None = None,
+    producer_source_root: Path | None = None,
+    fixed_timeout_seconds: float | None = None,
+    maximum_timeout_seconds: float = MAX_COMMAND_TIMEOUT_SECONDS,
 ) -> None:
-    environment = _stage_environment(request, claim, preflight_result, stage)
+    environment = _stage_environment(
+        request,
+        claim,
+        preflight_result,
+        stage,
+        producer_staging_output=producer_staging_output,
+        producer_source_root=producer_source_root,
+    )
     for command in commands:
-        timeout_seconds = request.command_timeout_seconds
+        timeout_seconds = (
+            request.command_timeout_seconds
+            if fixed_timeout_seconds is None
+            else fixed_timeout_seconds
+        )
+        if (
+            not math.isfinite(timeout_seconds)
+            or timeout_seconds <= 0
+            or timeout_seconds > maximum_timeout_seconds
+        ):
+            raise TransactionError(f"{stage} command timeout is invalid")
         if deadline is not None:
             remaining = (deadline - clock()).total_seconds()
             if not math.isfinite(remaining) or remaining <= 0:
@@ -1605,30 +4652,57 @@ def _run_commands(
                     "candidate-active authorization deadline expired"
                 )
             timeout_seconds = min(timeout_seconds, remaining)
-        if runner is subprocess.run:
-            _run_owned_process_group(
-                command,
-                request=request,
-                environment=environment,
-                stage=stage,
-                timeout_seconds=timeout_seconds,
+        _require_runtime_seals(
+            preflight_result,
+            required_uid=preflight_result.source_seal.required_uid,
+            scope=runtime_scope,
+        )
+        if deadline is not None and clock() >= deadline:
+            raise CandidateWindowExpired(
+                "candidate-active authorization deadline expired"
             )
-        else:
-            try:
-                completed = runner(
-                    list(command),
-                    cwd=request.source_root,
-                    env=environment,
-                    check=False,
-                    stdin=subprocess.DEVNULL,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    timeout=timeout_seconds,
+        executable_descriptor = _open_command_executable(
+            preflight_result,
+            command,
+            scope=runtime_scope,
+        )
+        try:
+            if runner is subprocess.run:
+                _run_owned_process_group(
+                    command,
+                    request=request,
+                    environment=environment,
+                    stage=stage,
+                    timeout_seconds=timeout_seconds,
+                    executable_descriptor=executable_descriptor,
+                    run_as_campaign_executor=(
+                        producer_staging_output is not None
+                    ),
+                    maximum_timeout_seconds=maximum_timeout_seconds,
                 )
-            except (OSError, subprocess.TimeoutExpired) as error:
-                raise TransactionError(f"{stage} command failed") from error
-            if completed.returncode != 0:
-                raise TransactionError(f"{stage} command failed")
+            else:
+                try:
+                    completed = runner(
+                        list(command),
+                        cwd=request.source_root,
+                        env=environment,
+                        check=False,
+                        stdin=subprocess.DEVNULL,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        timeout=timeout_seconds,
+                    )
+                except (OSError, subprocess.TimeoutExpired) as error:
+                    raise TransactionError(
+                        f"{stage} command failed"
+                    ) from error
+                if completed.returncode != 0:
+                    raise TransactionError(f"{stage} command failed")
+        finally:
+            try:
+                os.close(executable_descriptor)
+            except OSError:
+                pass
         if deadline is not None and clock() >= deadline:
             raise CandidateWindowExpired(
                 "candidate-active authorization deadline expired"
@@ -1829,11 +4903,47 @@ def _cleanup_supervised_descendants(
     return not _descendant_processes(supervisor_pid), root_status
 
 
+def _drop_campaign_executor_privileges() -> None:
+    """Apply the fixed service identity in setgroups→setgid→setuid order."""
+
+    effective_uid = os.geteuid()
+    effective_gid = os.getegid()
+    if effective_uid == CAMPAIGN_EXECUTOR_UID:
+        if effective_gid != CAMPAIGN_EXECUTOR_GID:
+            raise TransactionError(
+                "campaign executor test identity has an unexpected group"
+            )
+        return
+    if effective_uid != 0:
+        raise TransactionError(
+            "campaign producer privilege drop requires root supervision"
+        )
+    try:
+        os.setgroups(list(CAMPAIGN_EXECUTOR_SUPPLEMENTARY_GROUPS))
+        os.setgid(CAMPAIGN_EXECUTOR_GID)
+        os.setuid(CAMPAIGN_EXECUTOR_UID)
+    except OSError as error:
+        raise TransactionError(
+            "campaign producer privilege drop failed"
+        ) from error
+    if (
+        os.geteuid() != CAMPAIGN_EXECUTOR_UID
+        or os.getegid() != CAMPAIGN_EXECUTOR_GID
+        or tuple(sorted(os.getgroups()))
+        != tuple(sorted(CAMPAIGN_EXECUTOR_SUPPLEMENTARY_GROUPS))
+    ):
+        raise TransactionError(
+            "campaign producer privilege identity differs"
+        )
+
+
 def _exec_supervised_command(
     command: Sequence[str],
     *,
     source_root: Path,
     environment: dict[str, str],
+    executable_descriptor: int | None,
+    run_as_campaign_executor: bool,
 ) -> None:
     try:
         os.setsid()
@@ -1843,6 +4953,9 @@ def _exec_supervised_command(
             os.dup2(null_descriptor, target)
         if null_descriptor > 2:
             os.close(null_descriptor)
+        if run_as_campaign_executor:
+            os.umask(0o077)
+            _drop_campaign_executor_privileges()
         maximum = 1_048_576
         try:
             configured = os.sysconf("SC_OPEN_MAX")
@@ -1850,8 +4963,16 @@ def _exec_supervised_command(
                 maximum = configured
         except (OSError, ValueError):
             pass
-        os.closerange(3, maximum)
-        os.execvpe(command[0], list(command), environment)
+        if executable_descriptor is None:
+            os.closerange(3, maximum)
+            os.execvpe(command[0], list(command), environment)
+        if executable_descriptor < 3:
+            raise TransactionError(
+                "sealed command executable descriptor is invalid"
+            )
+        os.closerange(3, executable_descriptor)
+        os.closerange(executable_descriptor + 1, maximum)
+        os.execve(executable_descriptor, list(command), environment)
     except BaseException:
         os._exit(127)
 
@@ -1862,6 +4983,8 @@ def _subreaper_supervisor(
     source_root: Path,
     environment: dict[str, str],
     timeout_seconds: float,
+    executable_descriptor: int | None,
+    run_as_campaign_executor: bool,
 ) -> int:
     _enable_child_subreaper()
     supervisor_pid = os.getpid()
@@ -1879,8 +5002,15 @@ def _subreaper_supervisor(
             command,
             source_root=source_root,
             environment=environment,
+            executable_descriptor=executable_descriptor,
+            run_as_campaign_executor=run_as_campaign_executor,
         )
         os._exit(127)
+    if executable_descriptor is not None:
+        try:
+            os.close(executable_descriptor)
+        except OSError:
+            return SUPERVISOR_INTERNAL_ERROR
 
     deadline = time.monotonic() + timeout_seconds
     root_status: int | None = None
@@ -1989,6 +5119,9 @@ def _run_owned_process_group(
     environment: dict[str, str],
     stage: str,
     timeout_seconds: float | None = None,
+    executable_descriptor: int | None = None,
+    run_as_campaign_executor: bool = False,
+    maximum_timeout_seconds: float = MAX_COMMAND_TIMEOUT_SECONDS,
 ) -> None:
     selected_timeout = (
         request.command_timeout_seconds
@@ -1998,7 +5131,9 @@ def _run_owned_process_group(
     if (
         not math.isfinite(selected_timeout)
         or selected_timeout <= 0
-        or selected_timeout > MAX_COMMAND_TIMEOUT_SECONDS
+        or not math.isfinite(maximum_timeout_seconds)
+        or maximum_timeout_seconds <= 0
+        or selected_timeout > maximum_timeout_seconds
     ):
         raise TransactionError(f"{stage} command timeout is invalid")
     if not hasattr(os, "fork"):
@@ -2015,6 +5150,8 @@ def _run_owned_process_group(
                     source_root=request.source_root,
                     environment=environment,
                     timeout_seconds=selected_timeout,
+                    executable_descriptor=executable_descriptor,
+                    run_as_campaign_executor=run_as_campaign_executor,
                 )
             except BaseException:
                 result = SUPERVISOR_INTERNAL_ERROR
@@ -2038,6 +5175,155 @@ def _run_owned_process_group(
 def _inventory_file(path: Path, label: str) -> tuple[int, str]:
     snapshot = _read_input(path, label, MAX_OUTPUT_FILE_BYTES)
     return len(snapshot.raw), snapshot.sha256
+
+
+def _freeze_regular_output(
+    path: Path,
+    label: str,
+    *,
+    required_uid: int,
+) -> StableFileSnapshot:
+    absolute = _lexical_absolute(path, label)
+    parent, parent_identity = _open_parent_descriptor(
+        absolute,
+        label,
+        required_uid=required_uid,
+    )
+    descriptor = -1
+    try:
+        descriptor = os.open(
+            absolute.name,
+            os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW,
+            dir_fd=parent,
+        )
+        before = os.fstat(descriptor)
+        named = os.stat(
+            absolute.name,
+            dir_fd=parent,
+            follow_symlinks=False,
+        )
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or _entry_identity(before) != _entry_identity(named)
+            or before.st_uid != required_uid
+            or before.st_nlink != 1
+            or before.st_size <= 0
+            or before.st_size > MAX_OUTPUT_FILE_BYTES
+        ):
+            raise TransactionError(f"{label} metadata is unsafe")
+        os.fchmod(descriptor, 0o444)
+        os.fsync(descriptor)
+        after = os.fstat(descriptor)
+        named_after = os.stat(
+            absolute.name,
+            dir_fd=parent,
+            follow_symlinks=False,
+        )
+        if (
+            stat.S_IMODE(after.st_mode) != 0o444
+            or after.st_uid != required_uid
+            or after.st_nlink != 1
+            or _entry_identity(after) != _entry_identity(named_after)
+            or after.st_dev != before.st_dev
+            or after.st_ino != before.st_ino
+            or after.st_size != before.st_size
+        ):
+            raise TransactionError(f"{label} changed while being frozen")
+        os.fsync(parent)
+        _verify_parent_descriptor(
+            absolute,
+            parent_identity,
+            required_uid=required_uid,
+            label=label,
+        )
+    except OSError as error:
+        raise TransactionError(f"{label} could not be frozen") from error
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        os.close(parent)
+    snapshot = _read_input(absolute, label, MAX_OUTPUT_FILE_BYTES)
+    if (
+        snapshot.identity.uid != required_uid
+        or snapshot.identity.links != 1
+        or stat.S_IMODE(snapshot.identity.mode) != 0o444
+    ):
+        raise TransactionError(f"{label} frozen identity differs")
+    return snapshot
+
+
+def _freeze_aq4_release_output(
+    path: Path,
+    *,
+    required_uid: int,
+) -> None:
+    first = _scan_output_tree(path)
+    files = {
+        relative
+        for relative, identity in first.items()
+        if relative != "." and stat.S_ISREG(identity[2])
+    }
+    directories = {
+        relative
+        for relative, identity in first.items()
+        if relative != "." and stat.S_ISDIR(identity[2])
+    }
+    if files != AQ4_REASONING_RELEASE_FILES or directories:
+        raise TransactionError("AQ4 release raw output layout differs")
+    root_before = path.lstat()
+    if (
+        not stat.S_ISDIR(root_before.st_mode)
+        or root_before.st_uid != required_uid
+    ):
+        raise TransactionError("AQ4 release raw output root metadata differs")
+    for relative in sorted(files, key=lambda value: value.encode("utf-8")):
+        _freeze_regular_output(
+            path / relative,
+            "AQ4 release raw output member",
+            required_uid=required_uid,
+        )
+    try:
+        os.chmod(path, 0o555, follow_symlinks=False)
+        directory = os.open(path, _directory_flags())
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    except OSError as error:
+        raise TransactionError(
+            "AQ4 release raw output root could not be frozen"
+        ) from error
+    after = _scan_output_tree(path)
+    def same_object(
+        before_identity: tuple[int, ...],
+        after_identity: tuple[int, ...],
+    ) -> bool:
+        return (
+            before_identity[0] == after_identity[0]
+            and before_identity[1] == after_identity[1]
+            and before_identity[3] == after_identity[3]
+            and before_identity[4] == after_identity[4]
+            and before_identity[5] == after_identity[5]
+            and before_identity[6] == after_identity[6]
+            and before_identity[7] == after_identity[7]
+            and after_identity[8] >= before_identity[8]
+        )
+    if (
+        set(after) != set(first)
+        or any(
+            not same_object(first[relative], after[relative])
+            for relative in first
+        )
+        or stat.S_IMODE(after["."][2]) != 0o555
+        or after["."][3] != required_uid
+        or any(
+            stat.S_IMODE(after[relative][2]) != 0o444
+            or after[relative][3] != required_uid
+            or after[relative][5] != 1
+            for relative in files
+        )
+    ):
+        raise TransactionError("AQ4 release raw output freeze differs")
 
 
 def _entry_identity(metadata: os.stat_result) -> tuple[int, ...]:
@@ -2117,6 +5403,43 @@ def _scan_output_tree(path: Path) -> dict[str, tuple[int, ...]]:
     return result
 
 
+def _require_no_staging_path_references(
+    path: Path,
+    *,
+    forbidden_paths: Sequence[Path],
+) -> None:
+    needles = tuple(
+        os.fsencode(
+            _lexical_absolute(value, "forbidden campaign staging path")
+        )
+        for value in forbidden_paths
+    )
+    if not needles:
+        raise TransactionError("campaign staging reference set is empty")
+    metadata = path.lstat()
+    if stat.S_ISDIR(metadata.st_mode):
+        scanned = _scan_output_tree(path)
+        files = (
+            path / relative
+            for relative, identity in scanned.items()
+            if relative != "." and stat.S_ISREG(identity[2])
+        )
+    elif stat.S_ISREG(metadata.st_mode):
+        files = (path,)
+    else:
+        raise TransactionError("published campaign output kind is unsafe")
+    for member in files:
+        snapshot = _read_input(
+            member,
+            "published campaign output member",
+            MAX_OUTPUT_FILE_BYTES,
+        )
+        if any(needle in snapshot.raw for needle in needles):
+            raise TransactionError(
+                "published campaign output contains a staging pathname"
+            )
+
+
 def _output_inventory(
     path: Path,
     *,
@@ -2124,6 +5447,7 @@ def _output_inventory(
     campaign_name: str,
     required_uid: int,
     candidate_raw: bytes,
+    semantic_path: Path | None = None,
 ) -> dict[str, Any]:
     if not path.is_absolute():
         raise TransactionError("campaign output path is not absolute")
@@ -2190,16 +5514,40 @@ def _output_inventory(
     after_hashing = _scan_output_tree(path)
     if after_hashing != first:
         raise TransactionError("campaign output tree changed during inventory")
-    candidate_artifact = _read_input(
-        path / "candidate-served-model.json",
-        f"{campaign_name} candidate manifest artifact",
-        MAX_MANIFEST_BYTES,
-    )
-    if candidate_artifact.raw != candidate_raw:
-        raise TransactionError(
-            f"{campaign_name} candidate manifest artifact differs"
+    if campaign_name == "aq4_reasoning_release":
+        summary_snapshot = _read_input(
+            path / "summary.json",
+            "AQ4 reasoning release summary",
+            MAX_OUTPUT_FILE_BYTES,
         )
+        summary = _strict_object(
+            summary_snapshot.raw,
+            "AQ4 reasoning release summary",
+        )
+        if (
+            summary.get("schema_version")
+            != "ullm.generic_reasoning_release_campaign.v1"
+            or summary.get("status") != "incomplete"
+            or summary.get("manifest_sha256") != _sha256(candidate_raw)
+            or summary.get("model_id") != "ullm-qwen3.5-9b-aq4"
+        ):
+            raise TransactionError(
+                "AQ4 reasoning release semantic identity differs"
+            )
+    else:
+        candidate_artifact = _read_input(
+            path / "candidate-served-model.json",
+            f"{campaign_name} candidate manifest artifact",
+            MAX_MANIFEST_BYTES,
+        )
+        if candidate_artifact.raw != candidate_raw:
+            raise TransactionError(
+                f"{campaign_name} candidate manifest artifact differs"
+            )
     if campaign_name in {"reasoning_release", "reasoning_browser"}:
+        expected_semantic_path = (
+            path if semantic_path is None else semantic_path
+        )
         evidence_name = (
             "summary.json"
             if campaign_name == "reasoning_release"
@@ -2208,7 +5556,7 @@ def _output_inventory(
         expected_schema = (
             "ullm.generic_reasoning_release_campaign.v2"
             if campaign_name == "reasoning_release"
-            else "ullm.openwebui.reasoning_browser_smoke.v4"
+            else "ullm.openwebui.reasoning_browser_smoke.v5"
         )
         evidence_snapshot = _read_input(
             path / evidence_name,
@@ -2243,7 +5591,8 @@ def _output_inventory(
             or not isinstance(campaign, dict)
             or campaign.get("name") != campaign_name
             or campaign.get("run_id") != run_id
-            or campaign.get("final_path") != os.fspath(path)
+            or campaign.get("final_path")
+            != os.fspath(expected_semantic_path)
             or not isinstance(candidate, dict)
             or candidate.get("sha256") != _sha256(candidate_raw)
         ):
@@ -2264,6 +5613,159 @@ def _output_inventory(
         "total_bytes": total_bytes,
         "selected_artifacts": selected,
     }
+
+
+def _output_file_inventory(
+    path: Path,
+    *,
+    run_id: str,
+    campaign_name: str,
+    required_uid: int,
+) -> dict[str, Any]:
+    snapshot = _read_input(path, f"{campaign_name} output", MAX_OUTPUT_FILE_BYTES)
+    if (
+        snapshot.identity.uid != required_uid
+        or snapshot.identity.links != 1
+        or stat.S_IMODE(snapshot.identity.mode) != 0o444
+    ):
+        raise TransactionError(f"{campaign_name} output metadata differs")
+    document = _strict_object(snapshot.raw, f"{campaign_name} output")
+    if campaign_name == "aq4_reasoning_browser":
+        if (
+            document.get("schema_version")
+            != "ullm.openwebui.reasoning_browser_smoke.v2"
+        ):
+            raise TransactionError("AQ4 browser evidence schema differs")
+    elif campaign_name == "aq4_bundle":
+        if (
+            document.get("schema_version")
+            != "ullm.generic_reasoning_release_bundle.v1"
+            or document.get("status") != "complete"
+            or document.get("production_activation_performed") is not False
+        ):
+            raise TransactionError("AQ4 release bundle identity differs")
+    else:
+        raise TransactionError("campaign file output layout is unknown")
+    return {
+        "run_id": run_id,
+        "path": os.fspath(path),
+        "kind": "file",
+        "sha256": snapshot.sha256,
+        "artifact_count": 1,
+        "total_bytes": len(snapshot.raw),
+        "selected_artifacts": {path.name: snapshot.sha256},
+    }
+
+
+def _validate_aq4_release_evidence_identity(
+    preflight_result: TransactionPreflight,
+    claim: authorization.ClaimRecord,
+    evidence_snapshot: StableFileSnapshot,
+    *,
+    required_uid: int,
+) -> None:
+    aq4_release = claim.authorization.document["aq4_release"]
+    before = claim.authorization.document["before"]
+    if (
+        evidence_snapshot.identity.uid != required_uid
+        or evidence_snapshot.identity.links != 1
+        or stat.S_IMODE(evidence_snapshot.identity.mode) != 0o444
+    ):
+        raise TransactionError("AQ4 release evidence metadata differs")
+    evidence = _strict_object(evidence_snapshot.raw, "AQ4 release evidence")
+    identity = evidence.get("identity")
+    if (
+        evidence.get("schema_version")
+        != "ullm.generic_reasoning_release_evidence.v1"
+        or evidence.get("status") != "complete"
+        or evidence.get("source_commit") != preflight_result.aq4_source_commit
+        or evidence.get("active_promotion_source_commit")
+        != before["promotion_source_commit"]
+        or evidence.get("source_commit_aligned") is not True
+        or evidence.get("git_worktree_clean") is not True
+        or not isinstance(identity, dict)
+        or identity.get("manifest_sha256") != preflight_result.active.sha256
+        or identity.get("worker_binary_sha256")
+        != before["worker_binary_sha256"]
+        or identity.get("openwebui_image") != aq4_release["openwebui_image"]
+    ):
+        raise TransactionError("AQ4 release evidence lineage differs")
+
+
+def _validate_aq4_release_components(
+    preflight_result: TransactionPreflight,
+    claim: authorization.ClaimRecord,
+    *,
+    required_uid: int,
+) -> None:
+    aq4_release = claim.authorization.document["aq4_release"]
+    evidence_snapshot = _read_input(
+        Path(aq4_release["release_evidence_path"]),
+        "AQ4 release evidence",
+        MAX_OUTPUT_FILE_BYTES,
+    )
+    _validate_aq4_release_evidence_identity(
+        preflight_result,
+        claim,
+        evidence_snapshot,
+        required_uid=required_uid,
+    )
+    validator_snapshot = _read_input(
+        Path(aq4_release["release_validator_path"]),
+        "AQ4 release validator report",
+        MAX_OUTPUT_FILE_BYTES,
+    )
+    if (
+        validator_snapshot.identity.uid != required_uid
+        or validator_snapshot.identity.links != 1
+        or stat.S_IMODE(validator_snapshot.identity.mode) != 0o444
+    ):
+        raise TransactionError("AQ4 release validator report metadata differs")
+    report = _strict_object(
+        validator_snapshot.raw,
+        "AQ4 release validator report",
+    )
+    if (
+        report.get("schema_version")
+        != "ullm.generic_reasoning_release_validator.v1"
+        or report.get("input_schema_version")
+        != "ullm.generic_reasoning_release_evidence.v1"
+        or report.get("structurally_valid") is not True
+        or report.get("gate_eligible") is not True
+    ):
+        raise TransactionError("AQ4 release validator lineage differs")
+
+
+def _validate_aq4_browser_components(
+    claim: authorization.ClaimRecord,
+    *,
+    required_uid: int,
+) -> None:
+    aq4_release = claim.authorization.document["aq4_release"]
+    report_snapshot = _read_input(
+        Path(aq4_release["browser_validator_path"]),
+        "AQ4 browser validator report",
+        MAX_OUTPUT_FILE_BYTES,
+    )
+    if (
+        report_snapshot.identity.uid != required_uid
+        or report_snapshot.identity.links != 1
+        or stat.S_IMODE(report_snapshot.identity.mode) != 0o444
+    ):
+        raise TransactionError("AQ4 browser validator report metadata differs")
+    report = _strict_object(
+        report_snapshot.raw,
+        "AQ4 browser validator report",
+    )
+    if (
+        report.get("schema_version")
+        != "ullm.openwebui.reasoning_browser_smoke_validator.v1"
+        or report.get("input_schema_version")
+        != "ullm.openwebui.reasoning_browser_smoke.v2"
+        or report.get("structurally_valid") is not True
+        or report.get("gate_eligible") is not True
+    ):
+        raise TransactionError("AQ4 browser validator report differs")
 
 
 class _TerminationController:
@@ -2331,6 +5833,11 @@ def execute_transaction(
     inactive_checker: InactiveChecker = default_inactive_checker,
     clock: Clock = utc_now,
     restoration_probe: RestorationProbe = default_restoration_probe,
+    candidate_stabilization_probe: CandidateStabilizationProbe = (
+        default_candidate_stabilization_probe
+    ),
+    stabilization_sleeper: Sleeper = time.sleep,
+    stabilization_monotonic: MonotonicClock = time.monotonic,
 ) -> TransactionResult:
     """Consume one authorization and run the complete locked temporary window."""
 
@@ -2354,6 +5861,7 @@ def execute_transaction(
         campaign_results: dict[str, dict[str, Any] | None] = {
             name: None for name in authorization.CAMPAIGN_FIELDS
         }
+        aq4_observations: list[dict[str, Any]] = []
         observations: list[dict[str, Any]] = []
         active_slot: ActiveSlot | None = None
         preflight_result: TransactionPreflight | None = None
@@ -2400,7 +5908,11 @@ def execute_transaction(
             if primary_error is None:
                 primary_error = error
 
-        def repin() -> None:
+        def repin(
+            *,
+            include_aq4_release: bool = True,
+            runtime_scope: str = "all",
+        ) -> None:
             assert preflight_result is not None
             _repin_transaction_inputs(
                 request,
@@ -2409,6 +5921,8 @@ def execute_transaction(
                 policy=policy,
                 runner=runner,
                 now=clock(),
+                repin_aq4_release=include_aq4_release,
+                runtime_scope=runtime_scope,
             )
 
         def ensure_candidate_window() -> None:
@@ -2422,11 +5936,20 @@ def execute_transaction(
             commands: Sequence[Sequence[str]],
             *,
             candidate_active: bool = False,
+            repin_aq4_release: bool = True,
+            runtime_scope: str = "all",
+            producer_staging_output: Path | None = None,
+            producer_source_root: Path | None = None,
+            fixed_timeout_seconds: float | None = None,
+            maximum_timeout_seconds: float = MAX_COMMAND_TIMEOUT_SECONDS,
         ) -> None:
             assert preflight_result is not None
             if candidate_active:
                 ensure_candidate_window()
-            repin()
+            repin(
+                include_aq4_release=repin_aq4_release,
+                runtime_scope=runtime_scope,
+            )
             if candidate_active:
                 ensure_candidate_window()
             _run_commands(
@@ -2438,10 +5961,18 @@ def execute_transaction(
                 runner=runner,
                 deadline=candidate_deadline if candidate_active else None,
                 clock=clock,
+                runtime_scope=runtime_scope,
+                producer_staging_output=producer_staging_output,
+                producer_source_root=producer_source_root,
+                fixed_timeout_seconds=fixed_timeout_seconds,
+                maximum_timeout_seconds=maximum_timeout_seconds,
             )
             if candidate_active:
                 ensure_candidate_window()
-            repin()
+            repin(
+                include_aq4_release=repin_aq4_release,
+                runtime_scope=runtime_scope,
+            )
             if candidate_active:
                 ensure_candidate_window()
 
@@ -2483,7 +6014,28 @@ def execute_transaction(
                     claim,
                     source_commit=preflight_result.source_commit,
                     source_tree=preflight_result.source_tree,
+                    aq4_source_root=preflight_result.aq4_source_root,
+                    aq4_source_commit=preflight_result.aq4_source_commit,
+                    aq4_source_tree=preflight_result.aq4_source_tree,
                     before_manifest_sha256=preflight_result.active.sha256,
+                    before_worker_protocol=(
+                        preflight_result.active_summary["worker"]["protocol"]
+                    ),
+                    before_worker_binary_path=Path(
+                        preflight_result.active_summary["worker"]["binary"]
+                    ),
+                    before_promotion_receipt_path=(
+                        preflight_result.aq4_promotion_receipt.path
+                    ),
+                    before_promotion_receipt_sha256=(
+                        preflight_result.aq4_promotion_receipt.sha256
+                    ),
+                    aq4_promotion_evidence_path=(
+                        preflight_result.aq4_promotion_evidence.path
+                    ),
+                    aq4_promotion_evidence_sha256=(
+                        preflight_result.aq4_promotion_evidence.sha256
+                    ),
                     candidate_manifest_sha256=preflight_result.candidate.sha256,
                     candidate_worker_binary_sha256=preflight_result.candidate_summary[
                         "worker"
@@ -2569,6 +6121,17 @@ def execute_transaction(
                         stage="candidate_checks",
                     )
                 )
+                _monitor_candidate_stabilization(
+                    request,
+                    claim,
+                    preflight_result,
+                    deadline=candidate_deadline,
+                    repin=repin,
+                    clock=clock,
+                    probe=candidate_stabilization_probe,
+                    sleeper=stabilization_sleeper,
+                    monotonic=stabilization_monotonic,
+                )
                 stages["candidate_checks"] = "passed"
             except BaseException as error:
                 fail_stage("candidate_checks", error)
@@ -2613,26 +6176,89 @@ def execute_transaction(
                         raise TransactionError(
                             "legacy browser binding sidecar is not authorized"
                         )
-                    execute_commands(
-                        name,
-                        (campaign_commands[name],),
-                        candidate_active=True,
-                    )
-                    ensure_candidate_window()
-                    observations.append(
-                        _observe_candidate(
-                            preflight_result,
-                            stage=f"{name}:after",
+                    if name == "reasoning_browser":
+                        execute_commands(
+                            "reasoning_browser_openwebui_image_before",
+                            (
+                                _openwebui_image_verifier_command(
+                                    request.source_root
+                                ),
+                            ),
+                            candidate_active=True,
                         )
-                    )
-                    inventory = _output_inventory(
+                    with _service_producer_staging(
                         final_path,
-                        run_id=campaign["run_id"],
-                        campaign_name=name,
                         required_uid=policy.required_uid,
-                        candidate_raw=preflight_result.candidate.raw,
-                    )
-                    ensure_candidate_window()
+                        expected_kind="directory",
+                        label=f"{name} authorized output",
+                    ) as producer_staging:
+                        execute_commands(
+                            name,
+                            (campaign_commands[name],),
+                            candidate_active=True,
+                            producer_staging_output=producer_staging.actual,
+                            fixed_timeout_seconds=(
+                                SQ8_FULL_MAX_TIMEOUT_SECONDS
+                                if name == "sq8_full"
+                                else None
+                            ),
+                            maximum_timeout_seconds=(
+                                SQ8_FULL_MAX_TIMEOUT_SECONDS
+                                if name == "sq8_full"
+                                else MAX_COMMAND_TIMEOUT_SECONDS
+                            ),
+                        )
+                        producer_staging.reclaim_and_adopt()
+                        _output_inventory(
+                            producer_staging.actual,
+                            run_id=campaign["run_id"],
+                            campaign_name=name,
+                            required_uid=policy.required_uid,
+                            candidate_raw=preflight_result.candidate.raw,
+                            semantic_path=final_path,
+                        )
+                        _require_no_staging_path_references(
+                            producer_staging.actual,
+                            forbidden_paths=(
+                                producer_staging.path,
+                                producer_staging.actual,
+                            ),
+                        )
+                        producer_staging.require_seal()
+                        producer_staging.publish_directory()
+                        if name == "reasoning_browser":
+                            execute_commands(
+                                "reasoning_browser_openwebui_image_after",
+                                (
+                                    _openwebui_image_verifier_command(
+                                        request.source_root
+                                    ),
+                                ),
+                                candidate_active=True,
+                            )
+                        ensure_candidate_window()
+                        observations.append(
+                            _observe_candidate(
+                                preflight_result,
+                                stage=f"{name}:after",
+                            )
+                        )
+                        inventory = _output_inventory(
+                            final_path,
+                            run_id=campaign["run_id"],
+                            campaign_name=name,
+                            required_uid=policy.required_uid,
+                            candidate_raw=preflight_result.candidate.raw,
+                        )
+                        _require_no_staging_path_references(
+                            final_path,
+                            forbidden_paths=(
+                                producer_staging.path,
+                                producer_staging.actual,
+                            ),
+                        )
+                        ensure_candidate_window()
+                        producer_staging.commit()
                     if (
                         name == "reasoning_browser"
                         and (
@@ -2753,6 +6379,8 @@ def execute_transaction(
                         execute_commands(
                             "reverse_reconciliation",
                             request.commands.reverse_reconciliation,
+                            repin_aq4_release=(primary_error is None),
+                            runtime_scope="aq4",
                         )
                         stages["reverse_reconciliation"] = "passed"
                     except BaseException as error:
@@ -2761,11 +6389,502 @@ def execute_transaction(
                             error,
                             prioritize=True,
                         )
+                    sq8_completed = (
+                        primary_error is None
+                        and deferred_interrupt is None
+                        and all(
+                            stages[name] == "passed"
+                            for name in (
+                                "sq8_full",
+                                "reasoning_release",
+                                "reasoning_browser",
+                            )
+                        )
+                        and stages["reverse_reconciliation"] == "passed"
+                    )
+                    if sq8_completed:
+                        aq4_campaigns = claim.authorization.document[
+                            "campaigns"
+                        ]
+                        try:
+                            name = "aq4_reasoning_release"
+                            campaign = aq4_campaigns[name]
+                            final_path = Path(campaign["final_path"])
+                            authorization.require_campaign_binding(
+                                claim,
+                                campaign_name=name,
+                                run_id=campaign["run_id"],
+                                final_path=final_path,
+                            )
+                            ensure_candidate_window()
+                            aq4_observations.append(
+                                _observe_aq4(
+                                    preflight_result,
+                                    stage=f"{name}:before",
+                                )
+                            )
+                            if (
+                                final_path.exists()
+                                or final_path.is_symlink()
+                                or Path(
+                                    claim.authorization.document[
+                                        "aq4_release"
+                                    ]["release_evidence_path"]
+                                ).exists()
+                                or Path(
+                                    claim.authorization.document[
+                                        "aq4_release"
+                                    ]["release_validator_path"]
+                                ).exists()
+                            ):
+                                raise TransactionError(
+                                    "AQ4 release authorized output is not fresh"
+                                )
+                            release_commands = (
+                                request.commands.aq4_reasoning_release
+                            )
+                            if len(release_commands) != 3:
+                                raise TransactionError(
+                                    "AQ4 release fixed command plan differs"
+                                )
+                            with _service_producer_staging(
+                                final_path,
+                                required_uid=policy.required_uid,
+                                expected_kind="directory",
+                                label="AQ4 release raw output",
+                            ) as raw_staging:
+                                staged_raw = raw_staging.actual
+                                execute_commands(
+                                    name,
+                                    (release_commands[0],),
+                                    candidate_active=True,
+                                    producer_staging_output=staged_raw,
+                                    producer_source_root=(
+                                        preflight_result.aq4_source_root
+                                    ),
+                                )
+                                raw_staging.reclaim_and_adopt()
+                                _freeze_aq4_release_output(
+                                    staged_raw,
+                                    required_uid=policy.required_uid,
+                                )
+                                raw_staging.refresh_seal()
+                                _output_inventory(
+                                    staged_raw,
+                                    run_id=campaign["run_id"],
+                                    campaign_name=name,
+                                    required_uid=policy.required_uid,
+                                    candidate_raw=preflight_result.active.raw,
+                                    semantic_path=final_path,
+                                )
+                                _require_no_staging_path_references(
+                                    staged_raw,
+                                    forbidden_paths=(
+                                        raw_staging.path,
+                                        raw_staging.actual,
+                                    ),
+                                )
+                                raw_staging.publish_directory()
+                                _output_inventory(
+                                    final_path,
+                                    run_id=campaign["run_id"],
+                                    campaign_name=name,
+                                    required_uid=policy.required_uid,
+                                    candidate_raw=preflight_result.active.raw,
+                                )
+                                _require_no_staging_path_references(
+                                    final_path,
+                                    forbidden_paths=(
+                                        raw_staging.path,
+                                        raw_staging.actual,
+                                    ),
+                                )
+                                raw_staging.commit()
+                            release_evidence_path = Path(
+                                claim.authorization.document[
+                                    "aq4_release"
+                                ]["release_evidence_path"]
+                            )
+                            with _private_staging_root(
+                                release_evidence_path,
+                                required_uid=policy.required_uid,
+                                label="AQ4 release evidence",
+                            ) as evidence_staging:
+                                staged_evidence = evidence_staging.output(
+                                    release_evidence_path
+                                )
+                                evidence_command = (
+                                    _rewrite_authorized_output_argument(
+                                        release_commands[1],
+                                        flag="--output",
+                                        authorized_path=release_evidence_path,
+                                        staging_path=staged_evidence,
+                                    )
+                                )
+                                execute_commands(
+                                    name,
+                                    (evidence_command,),
+                                    candidate_active=True,
+                                )
+                                evidence_staging.verify()
+                                _require_private_staged_file(
+                                    staged_evidence,
+                                    required_uid=policy.required_uid,
+                                    label="AQ4 release evidence",
+                                )
+                                staged_evidence_snapshot = (
+                                    _freeze_regular_output(
+                                        staged_evidence,
+                                        "AQ4 release evidence",
+                                        required_uid=policy.required_uid,
+                                    )
+                                )
+                                _validate_aq4_release_evidence_identity(
+                                    preflight_result,
+                                    claim,
+                                    staged_evidence_snapshot,
+                                    required_uid=policy.required_uid,
+                                )
+                                _publish_staged_file(
+                                    staged_evidence,
+                                    release_evidence_path,
+                                    required_uid=policy.required_uid,
+                                    label="AQ4 release evidence",
+                                )
+                            execute_commands(
+                                name,
+                                (release_commands[2],),
+                                candidate_active=True,
+                            )
+                            _validate_aq4_release_components(
+                                preflight_result,
+                                claim,
+                                required_uid=policy.required_uid,
+                            )
+                            aq4_observations.append(
+                                _observe_aq4(
+                                    preflight_result,
+                                    stage=f"{name}:after",
+                                )
+                            )
+                            campaign_results[name] = _output_inventory(
+                                final_path,
+                                run_id=campaign["run_id"],
+                                campaign_name=name,
+                                required_uid=policy.required_uid,
+                                candidate_raw=preflight_result.active.raw,
+                            )
+                            stages[name] = "passed"
+                        except BaseException as error:
+                            fail_stage("aq4_reasoning_release", error)
+
+                    if sq8_completed and primary_error is None:
+                        try:
+                            name = "aq4_reasoning_browser"
+                            campaign = aq4_campaigns[name]
+                            final_path = Path(campaign["final_path"])
+                            authorization.require_campaign_binding(
+                                claim,
+                                campaign_name=name,
+                                run_id=campaign["run_id"],
+                                final_path=final_path,
+                            )
+                            ensure_candidate_window()
+                            aq4_observations.append(
+                                _observe_aq4(
+                                    preflight_result,
+                                    stage=f"{name}:before",
+                                )
+                            )
+                            browser_validator_path = Path(
+                                claim.authorization.document["aq4_release"][
+                                    "browser_validator_path"
+                                ]
+                            )
+                            if (
+                                final_path.exists()
+                                or final_path.is_symlink()
+                                or browser_validator_path.exists()
+                                or browser_validator_path.is_symlink()
+                            ):
+                                raise TransactionError(
+                                    "AQ4 browser authorized output is not fresh"
+                                )
+                            browser_commands = (
+                                request.commands.aq4_reasoning_browser
+                            )
+                            if len(browser_commands) != 2:
+                                raise TransactionError(
+                                    "AQ4 browser fixed command plan differs"
+                                )
+                            with _service_producer_staging(
+                                final_path,
+                                required_uid=policy.required_uid,
+                                expected_kind="file",
+                                label="AQ4 browser evidence",
+                            ) as browser_staging:
+                                staged_browser = browser_staging.actual
+                                execute_commands(
+                                    "aq4_reasoning_browser_openwebui_image_before",
+                                    (
+                                        _openwebui_image_verifier_command(
+                                            request.source_root
+                                        ),
+                                    ),
+                                    candidate_active=True,
+                                )
+                                execute_commands(
+                                    name,
+                                    (browser_commands[0],),
+                                    candidate_active=True,
+                                    producer_staging_output=staged_browser,
+                                    producer_source_root=(
+                                        preflight_result.aq4_source_root
+                                    ),
+                                )
+                                browser_staging.reclaim_and_adopt()
+                                _freeze_regular_output(
+                                    staged_browser,
+                                    "AQ4 browser evidence",
+                                    required_uid=policy.required_uid,
+                                )
+                                browser_staging.refresh_seal()
+                                _output_file_inventory(
+                                    staged_browser,
+                                    run_id=campaign["run_id"],
+                                    campaign_name=name,
+                                    required_uid=policy.required_uid,
+                                )
+                                _require_no_staging_path_references(
+                                    staged_browser,
+                                    forbidden_paths=(
+                                        browser_staging.path,
+                                        browser_staging.actual,
+                                    ),
+                                )
+                                browser_staging.publish_file(
+                                    label="AQ4 browser evidence"
+                                )
+                                execute_commands(
+                                    "aq4_reasoning_browser_openwebui_image_after",
+                                    (
+                                        _openwebui_image_verifier_command(
+                                            request.source_root
+                                        ),
+                                    ),
+                                    candidate_active=True,
+                                )
+                                _output_file_inventory(
+                                    final_path,
+                                    run_id=campaign["run_id"],
+                                    campaign_name=name,
+                                    required_uid=policy.required_uid,
+                                )
+                                _require_no_staging_path_references(
+                                    final_path,
+                                    forbidden_paths=(
+                                        browser_staging.path,
+                                        browser_staging.actual,
+                                    ),
+                                )
+                                browser_staging.commit()
+                            execute_commands(
+                                name,
+                                (browser_commands[1],),
+                                candidate_active=True,
+                            )
+                            _validate_aq4_browser_components(
+                                claim,
+                                required_uid=policy.required_uid,
+                            )
+                            aq4_observations.append(
+                                _observe_aq4(
+                                    preflight_result,
+                                    stage=f"{name}:after",
+                                )
+                            )
+                            campaign_results[name] = (
+                                _output_file_inventory(
+                                    final_path,
+                                    run_id=campaign["run_id"],
+                                    campaign_name=name,
+                                    required_uid=policy.required_uid,
+                                )
+                            )
+                            stages[name] = "passed"
+                        except BaseException as error:
+                            fail_stage("aq4_reasoning_browser", error)
+
+                    if sq8_completed and primary_error is None:
+                        try:
+                            name = "aq4_bundle"
+                            campaign = aq4_campaigns[name]
+                            final_path = Path(campaign["final_path"])
+                            authorization.require_campaign_binding(
+                                claim,
+                                campaign_name=name,
+                                run_id=campaign["run_id"],
+                                final_path=final_path,
+                            )
+                            ensure_candidate_window()
+                            aq4_observations.append(
+                                _observe_aq4(
+                                    preflight_result,
+                                    stage=f"{name}:before",
+                                )
+                            )
+                            if final_path.exists() or final_path.is_symlink():
+                                raise TransactionError(
+                                    "AQ4 bundle authorized output is not fresh"
+                                )
+                            aq4_release = claim.authorization.document[
+                                "aq4_release"
+                            ]
+                            if (
+                                preflight_result.aq4_promotion_evidence is None
+                                or preflight_result.aq4_promotion_receipt is None
+                            ):
+                                raise TransactionError(
+                                    "AQ4 promotion source pair is not pinned"
+                                )
+                            repin()
+                            for component_name, source_snapshot in (
+                                (
+                                    "promotion_evidence",
+                                    preflight_result.aq4_promotion_evidence,
+                                ),
+                                (
+                                    "promotion_receipt",
+                                    preflight_result.aq4_promotion_receipt,
+                                ),
+                            ):
+                                ensure_candidate_window()
+                                _exclusive_publish(
+                                    Path(
+                                        aq4_release[component_name]["path"]
+                                    ),
+                                    source_snapshot.raw,
+                                    mode=0o444,
+                                    required_uid=policy.required_uid,
+                                    label=(
+                                        f"AQ4 {component_name} immutable copy"
+                                    ),
+                                    maximum=MAX_INPUT_BYTES,
+                                )
+                            ensure_candidate_window()
+                            repin()
+                            bundle_commands = request.commands.aq4_bundle
+                            if len(bundle_commands) != 2:
+                                raise TransactionError(
+                                    "AQ4 bundle fixed command plan differs"
+                                )
+                            with _private_sibling_staging_path(
+                                final_path,
+                                required_uid=policy.required_uid,
+                                label="AQ4 release bundle v1",
+                            ) as staged_bundle:
+                                bundle_command = (
+                                    _rewrite_authorized_output_argument(
+                                        bundle_commands[0],
+                                        flag="--output",
+                                        authorized_path=final_path,
+                                        staging_path=staged_bundle,
+                                    )
+                                )
+                                execute_commands(
+                                    name,
+                                    (bundle_command,),
+                                    candidate_active=True,
+                                )
+                                _require_private_staged_file(
+                                    staged_bundle,
+                                    required_uid=policy.required_uid,
+                                    label="AQ4 release bundle v1",
+                                )
+                                _freeze_regular_output(
+                                    staged_bundle,
+                                    "AQ4 release bundle v1",
+                                    required_uid=policy.required_uid,
+                                )
+                                _output_file_inventory(
+                                    staged_bundle,
+                                    run_id=campaign["run_id"],
+                                    campaign_name=name,
+                                    required_uid=policy.required_uid,
+                                )
+                                _publish_staged_file(
+                                    staged_bundle,
+                                    final_path,
+                                    required_uid=policy.required_uid,
+                                    label="AQ4 release bundle v1",
+                                )
+                            execute_commands(
+                                name,
+                                (bundle_commands[1],),
+                                candidate_active=True,
+                            )
+                            aq4_observations.append(
+                                _observe_aq4(
+                                    preflight_result,
+                                    stage=f"{name}:after",
+                                )
+                            )
+                            campaign_results[name] = (
+                                _output_file_inventory(
+                                    final_path,
+                                    run_id=campaign["run_id"],
+                                    campaign_name=name,
+                                    required_uid=policy.required_uid,
+                                )
+                            )
+                            stages[name] = "passed"
+                        except BaseException as error:
+                            fail_stage("aq4_bundle", error)
+                    if sq8_completed:
+                        try:
+                            aq4_current = active_slot.snapshot_current()
+                            repaired_after_aq4 = (
+                                aq4_current.raw != preflight_result.active.raw
+                            )
+                            if repaired_after_aq4:
+                                restoration[
+                                    "displaced_manifest_sha256"
+                                ] = aq4_current.sha256
+                                active_slot.replace(
+                                    preflight_result.active.raw,
+                                    preflight_result.active.identity,
+                                    expected_current=aq4_current,
+                                )
+                                execute_commands(
+                                    "reverse_reconciliation",
+                                    request.commands.reverse_reconciliation,
+                                    repin_aq4_release=(
+                                        primary_error is None
+                                    ),
+                                    runtime_scope="aq4",
+                                )
+                            restored_after_aq4 = active_slot.snapshot_current()
+                            if (
+                                restored_after_aq4.raw
+                                != preflight_result.active.raw
+                            ):
+                                raise TransactionError(
+                                    "AQ4 campaign window did not retain "
+                                    "the exact restored manifest"
+                                )
+                        except BaseException as error:
+                            fail_stage(
+                                "aq4_restore",
+                                error,
+                                prioritize=True,
+                            )
                     final_commands_passed = False
                     try:
                         execute_commands(
                             "final_checks",
                             request.commands.final_checks,
+                            repin_aq4_release=(primary_error is None),
+                            runtime_scope="aq4",
                         )
                         final_commands_passed = True
                     except BaseException as error:
@@ -2777,7 +6896,41 @@ def execute_transaction(
                             prioritize=True,
                         )
                     try:
-                        repin()
+                        final_active = active_slot.snapshot_current()
+                        if final_active.raw != preflight_result.active.raw:
+                            restoration[
+                                "displaced_manifest_sha256"
+                            ] = final_active.sha256
+                            active_slot.replace(
+                                preflight_result.active.raw,
+                                preflight_result.active.identity,
+                                expected_current=final_active,
+                            )
+                            stages["reverse_reconciliation"] = "failed"
+                            final_commands_passed = False
+                            if failure_stage is None:
+                                fail_stage(
+                                    "reverse_reconciliation",
+                                    TransactionError(
+                                        "final AQ4 bytes required a second "
+                                        "post-command restoration"
+                                    ),
+                                )
+                        exact_final_active = active_slot.snapshot_current()
+                        if (
+                            exact_final_active.raw
+                            != preflight_result.active.raw
+                        ):
+                            raise TransactionError(
+                                "final active manifest is not exact AQ4"
+                            )
+                    except BaseException as error:
+                        fail_stage("aq4_restore", error, prioritize=True)
+                    try:
+                        repin(
+                            include_aq4_release=(primary_error is None),
+                            runtime_scope="aq4",
+                        )
                         proof = restoration_probe(
                             request,
                             claim,
@@ -2795,6 +6948,10 @@ def execute_transaction(
                                 "before"
                             ]["worker_binary_sha256"],
                             service_unit=request.service_unit,
+                        )
+                        repin(
+                            include_aq4_release=(primary_error is None),
+                            runtime_scope="aq4",
                         )
                         restoration.update(
                             observed_manifest_sha256=preflight_result.active.sha256,
@@ -2869,6 +7026,7 @@ def execute_transaction(
                         "status": status,
                         "failure_stage": failure_stage,
                         "stages": stages,
+                        "aq4_observations": aq4_observations,
                         "candidate_observations": observations,
                         "campaigns": campaign_results,
                         "restoration": restoration,

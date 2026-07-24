@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import copy
+import dataclasses
 import hashlib
+import stat
 from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
 
 from tools import served_model_aq4_restoration_proof as PROOF
+import served_model_active_binding as ACTIVE_BINDING
 
 
 AUTH_HASH = "1" * 64
@@ -150,3 +153,90 @@ def test_collect_live_proof_is_epoch_stable_and_secret_free(
     serialized = PROOF.canonical_json_bytes(result)
     assert b"private-api-key" not in serialized
     assert b"private-session-token" not in serialized
+
+
+@pytest.mark.parametrize(
+    ("path", "uid", "gid", "mode"),
+    (
+        (PROOF.FIXED_GATEWAY_API_KEY_PATH, 0, 1000, 0o640),
+        (
+            PROOF.FIXED_OPENWEBUI_SESSION_TOKEN_PATH,
+            0,
+            1000,
+            0o640,
+        ),
+    ),
+)
+def test_fixed_secret_metadata_contract_is_exact(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    path: Path,
+    uid: int,
+    gid: int,
+    mode: int,
+) -> None:
+    source = tmp_path / "secret"
+    source.write_bytes(b"fixture-secret\n")
+    source.chmod(0o600)
+    captured = ACTIVE_BINDING.stable_read_regular(
+        source,
+        "fixture secret",
+        maximum=65_536,
+        require_single_link=True,
+    )
+    if path == PROOF.FIXED_OPENWEBUI_SESSION_TOKEN_PATH:
+        monkeypatch.setattr(
+            PROOF,
+            "_validate_fixed_session_parent",
+            lambda _path: None,
+        )
+
+    def snapshot_with(*, selected_uid: int, selected_gid: int, selected_mode: int):
+        return dataclasses.replace(
+            captured,
+            path=path,
+            identity=dataclasses.replace(
+                captured.identity,
+                uid=selected_uid,
+                gid=selected_gid,
+                mode=stat.S_IFREG | selected_mode,
+            ),
+        )
+
+    monkeypatch.setattr(
+        ACTIVE_BINDING,
+        "stable_read_regular",
+        lambda *_args, **_kwargs: snapshot_with(
+            selected_uid=uid,
+            selected_gid=gid,
+            selected_mode=mode,
+        ),
+    )
+    assert PROOF._read_secret(path, "fixture secret") == bytearray(
+        b"fixture-secret"
+    )
+
+    for wrong in (
+        snapshot_with(
+            selected_uid=uid + 1,
+            selected_gid=gid,
+            selected_mode=mode,
+        ),
+        snapshot_with(
+            selected_uid=uid,
+            selected_gid=gid + 1,
+            selected_mode=mode,
+        ),
+        snapshot_with(
+            selected_uid=uid,
+            selected_gid=gid,
+            selected_mode=0o600 if mode == 0o640 else 0o640,
+        ),
+    ):
+        monkeypatch.setattr(
+            ACTIVE_BINDING,
+            "stable_read_regular",
+            lambda *_args, _wrong=wrong, **_kwargs: _wrong,
+        )
+        with pytest.raises(PROOF.RestorationProofError, match="unsafe"):
+            PROOF._read_secret(path, "fixture secret")

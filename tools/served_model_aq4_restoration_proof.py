@@ -31,6 +31,19 @@ TIMESTAMP_RE = re.compile(
     r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z\Z"
 )
 MAX_RESPONSE_BYTES = 1_048_576
+FIXED_GATEWAY_API_KEY_PATH = Path("/etc/ullm/openai-api-key")
+FIXED_GATEWAY_API_KEY_UID = 0
+FIXED_GATEWAY_API_KEY_GID = 1000
+FIXED_GATEWAY_API_KEY_MODE = 0o640
+FIXED_OPENWEBUI_SESSION_TOKEN_PATH = Path(
+    "/run/ullm-campaign-secrets/openwebui-session.jwt"
+)
+FIXED_OPENWEBUI_SESSION_PARENT_UID = 0
+FIXED_OPENWEBUI_SESSION_PARENT_GID = 1000
+FIXED_OPENWEBUI_SESSION_PARENT_MODE = 0o750
+FIXED_OPENWEBUI_SESSION_TOKEN_UID = 0
+FIXED_OPENWEBUI_SESSION_TOKEN_GID = 1000
+FIXED_OPENWEBUI_SESSION_TOKEN_MODE = 0o640
 PROOF_FIELDS = {
     "schema_version",
     "authorization_sha256",
@@ -375,11 +388,54 @@ def _model_ids(value: Any) -> list[str]:
     return sorted(ids)
 
 
+def _validate_fixed_session_parent(path: Path) -> None:
+    if (
+        path != FIXED_OPENWEBUI_SESSION_TOKEN_PATH
+        or not hasattr(os, "O_DIRECTORY")
+        or not hasattr(os, "O_NOFOLLOW")
+    ):
+        raise RestorationProofError(
+            "OpenWebUI session token parent binding differs"
+        )
+    descriptor = -1
+    try:
+        descriptor = os.open(
+            path.parent,
+            os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW,
+        )
+        opened = os.fstat(descriptor)
+        named = path.parent.lstat()
+    except OSError as error:
+        raise RestorationProofError(
+            "OpenWebUI session token parent is unavailable"
+        ) from error
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+    if (
+        not stat.S_ISDIR(opened.st_mode)
+        or opened.st_dev != named.st_dev
+        or opened.st_ino != named.st_ino
+        or opened.st_mode != named.st_mode
+        or opened.st_uid != named.st_uid
+        or opened.st_gid != named.st_gid
+        or opened.st_uid != FIXED_OPENWEBUI_SESSION_PARENT_UID
+        or opened.st_gid != FIXED_OPENWEBUI_SESSION_PARENT_GID
+        or stat.S_IMODE(opened.st_mode)
+        != FIXED_OPENWEBUI_SESSION_PARENT_MODE
+    ):
+        raise RestorationProofError(
+            "OpenWebUI session token parent is unsafe"
+        )
+
+
 def _read_secret(path: Path, label: str) -> bytearray:
     # Lazy import avoids the authorization -> proof -> active-binding cycle:
     # active binding itself imports campaign authorization.
     from served_model_active_binding import stable_read_regular
 
+    if path == FIXED_OPENWEBUI_SESSION_TOKEN_PATH:
+        _validate_fixed_session_parent(path)
     try:
         snapshot = stable_read_regular(
             path,
@@ -390,10 +446,22 @@ def _read_secret(path: Path, label: str) -> bytearray:
         raw = bytearray(snapshot.raw)
     except Exception as error:
         raise RestorationProofError(f"{label} is unavailable") from error
-    if (
-        snapshot.identity.mode & 0o077
-        or not raw
-    ):
+    mode = stat.S_IMODE(snapshot.identity.mode)
+    if path == FIXED_GATEWAY_API_KEY_PATH:
+        metadata_safe = (
+            snapshot.identity.uid == FIXED_GATEWAY_API_KEY_UID
+            and snapshot.identity.gid == FIXED_GATEWAY_API_KEY_GID
+            and mode == FIXED_GATEWAY_API_KEY_MODE
+        )
+    elif path == FIXED_OPENWEBUI_SESSION_TOKEN_PATH:
+        metadata_safe = (
+            snapshot.identity.uid == FIXED_OPENWEBUI_SESSION_TOKEN_UID
+            and snapshot.identity.gid == FIXED_OPENWEBUI_SESSION_TOKEN_GID
+            and mode == FIXED_OPENWEBUI_SESSION_TOKEN_MODE
+        )
+    else:
+        metadata_safe = not snapshot.identity.mode & 0o077
+    if not metadata_safe or not raw:
         raise RestorationProofError(f"{label} is unsafe")
     while raw and raw[-1] in b"\r\n":
         raw.pop()

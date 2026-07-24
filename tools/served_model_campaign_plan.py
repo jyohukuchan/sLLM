@@ -10,30 +10,28 @@ from typing import Any
 import served_model_campaign_authorization as authorization
 
 
-PLAN_ID = "ullm.served_model.v2_cross_model_campaign_plan.v1"
+PLAN_ID = "ullm.served_model.v2_cross_model_campaign_plan.v2"
 ACTIVE_MANIFEST = authorization.FIXED_ACTIVE_MANIFEST
 SYSTEMD_UNIT = authorization.FIXED_SYSTEMD_UNIT_PATH
 ENVIRONMENT_FILE = authorization.FIXED_ENVIRONMENT_FILE_PATH
 API_KEY_FILE = Path("/etc/ullm/openai-api-key")
 OPENWEBUI_SESSION_TOKEN_FILE = Path(
-    "/run/ullm/sq8-v2-cross-model-openwebui-session.jwt"
+    "/run/ullm-campaign-secrets/openwebui-session.jwt"
 )
 SERVICE_UNIT = authorization.FIXED_SERVICE_UNIT
 INACTIVE_SERVICES = (SERVICE_UNIT,)
-PYTHON = "/usr/bin/python3"
+PYTHON = "/usr/bin/python3.12"
+PYTHON_PREFIX = (PYTHON, "-I", "-S", "-B")
 SYSTEMCTL = "/usr/bin/systemctl"
 DOCKER = "/usr/bin/docker"
-ROCM_SMI = "/opt/rocm/bin/rocm-smi"
+ROCM_SMI = "/opt/rocm-7.2.1/libexec/rocm_smi/rocm_smi.py"
 HTTP_IMAGE = (
     "sha256:5dce198cca467ce79994ed65e01d03882238f9efdd16a8c6f4bc55151c8a4a54"
 )
-BROWSER_IMAGE = (
-    "sha256:0bd709ea36ffa7204cd60da0fe9707be38eb73c97c7a9d45911ff0e8b7c1e3ea"
-)
-OPENWEBUI_IMAGE = (
-    "ullm/open-webui@sha256:"
-    "ef5ae4fbc06abb662eeefe87e584ea7c69e55838f5f08f637057b9108048b409"
-)
+BROWSER_IMAGE = authorization.FIXED_BROWSER_IMAGE
+OPENWEBUI_IMAGE = authorization.FIXED_OPENWEBUI_IMAGE
+OPENWEBUI_CONTAINER_NAME = authorization.FIXED_OPENWEBUI_CONTAINER_NAME
+OPENWEBUI_CONFIG_IMAGE = authorization.FIXED_OPENWEBUI_CONFIG_IMAGE
 GATEWAY_CHECK_IMAGE = (
     "ghcr.io/open-webui/open-webui@sha256:"
     "a6da0c292081d810a396ce786a10536d0b1b9ba2925dcca20ebb03f9fa90dbff"
@@ -41,6 +39,8 @@ GATEWAY_CHECK_IMAGE = (
 OPENWEBUI_URL = "http://127.0.0.1:3000"
 SQ8_MODEL_ID = "ullm-qwen3-14b-sq8"
 SQ8_MODEL_NAME = "uLLM Qwen3 14B SQ8"
+AQ4_MODEL_ID = "ullm-qwen3.5-9b-aq4"
+AQ4_MODEL_NAME = "uLLM Qwen3.5 9B AQ4 reasoning"
 
 
 class PlanError(ValueError):
@@ -102,6 +102,15 @@ def _ready_command() -> tuple[str, ...]:
     )
 
 
+def openwebui_verifier_command(source_root: Path) -> tuple[str, ...]:
+    return (
+        *PYTHON_PREFIX,
+        _tool(source_root, "verify-openwebui-container-image.py"),
+        "--docker",
+        DOCKER,
+    )
+
+
 def derive_commands(
     *,
     source_root: Path,
@@ -131,6 +140,22 @@ def derive_commands(
     sq8 = campaigns["sq8_full"]
     reasoning = campaigns["reasoning_release"]
     browser = campaigns["reasoning_browser"]
+    aq4_release_campaign = campaigns["aq4_reasoning_release"]
+    aq4_browser_campaign = campaigns["aq4_reasoning_browser"]
+    aq4_bundle_campaign = campaigns["aq4_bundle"]
+    aq4_release = authorization_document["aq4_release"]
+    if aq4_release.get("openwebui_image") != OPENWEBUI_IMAGE:
+        raise PlanError("authorization OpenWebUI image differs from fixed plan")
+    before = authorization_document["before"]
+    rollback = authorization_document["rollback"]
+    aq4_source_root = Path(aq4_release["source"]["root"])
+    aq4_raw_output = Path(aq4_release_campaign["final_path"])
+    aq4_browser_output = Path(aq4_browser_campaign["final_path"])
+    aq4_bundle_output = Path(aq4_bundle_campaign["final_path"])
+    aq4_release_evidence = Path(aq4_release["release_evidence_path"])
+    aq4_release_validator = Path(aq4_release["release_validator_path"])
+    aq4_browser_validator = Path(aq4_release["browser_validator_path"])
+    aq4_manifest = Path(rollback["backup_path"])
     compose = (
         DOCKER,
         "compose",
@@ -144,15 +169,17 @@ def derive_commands(
         (SYSTEMCTL, "restart", SERVICE_UNIT),
         _configure_command(source_root),
         compose,
+        openwebui_verifier_command(source_root),
     )
     return TransactionCommands(
         candidate_reconciliation=reconcile,
         candidate_checks=(
             (SYSTEMCTL, "is-active", "--quiet", SERVICE_UNIT),
             _ready_command(),
+            openwebui_verifier_command(source_root),
         ),
         sq8_full=(
-            PYTHON,
+            *PYTHON_PREFIX,
             _tool(source_root, "run-sq8-full-openwebui-campaign.py"),
             "--execute",
             "--expected-commit",
@@ -170,7 +197,7 @@ def derive_commands(
             *common_binding,
         ),
         reasoning_release=(
-            PYTHON,
+            *PYTHON_PREFIX,
             _tool(source_root, "run-generic-reasoning-release-campaign.py"),
             "--output-dir",
             reasoning["final_path"],
@@ -191,7 +218,7 @@ def derive_commands(
             SYSTEMCTL,
         ),
         reasoning_browser=(
-            PYTHON,
+            *PYTHON_PREFIX,
             _tool(source_root, "run-openwebui-reasoning-browser-smoke.py"),
             "--output",
             browser["final_path"],
@@ -202,6 +229,8 @@ def derive_commands(
             os.fspath(OPENWEBUI_SESSION_TOKEN_FILE),
             "--browser-image",
             BROWSER_IMAGE,
+            "--openwebui-image",
+            OPENWEBUI_IMAGE,
             "--openwebui-url",
             OPENWEBUI_URL,
             "--model-id",
@@ -218,8 +247,158 @@ def derive_commands(
             ROCM_SMI,
         ),
         reverse_reconciliation=reconcile,
+        aq4_reasoning_release=(
+            (
+                *PYTHON_PREFIX,
+                _tool(
+                    aq4_source_root,
+                    "run-generic-reasoning-release-campaign.py",
+                ),
+                "--output-dir",
+                os.fspath(aq4_raw_output),
+                "--manifest",
+                os.fspath(aq4_manifest),
+                "--token-file",
+                os.fspath(API_KEY_FILE),
+                "--http-image",
+                HTTP_IMAGE,
+                "--service",
+                SERVICE_UNIT,
+                "--docker",
+                DOCKER,
+                "--rocm-smi",
+                ROCM_SMI,
+                "--systemctl",
+                SYSTEMCTL,
+            ),
+            (
+                *PYTHON_PREFIX,
+                _tool(
+                    aq4_source_root,
+                    "prepare-generic-reasoning-release-evidence.py",
+                ),
+                "--cases",
+                os.fspath(aq4_raw_output / "cases.json"),
+                "--lifecycle",
+                os.fspath(aq4_raw_output / "lifecycle.json"),
+                "--manifest",
+                os.fspath(aq4_manifest),
+                "--worker-binary",
+                before["worker_binary_path"],
+                "--openwebui-image",
+                OPENWEBUI_IMAGE,
+                "--active-promotion-source-commit",
+                before["promotion_source_commit"],
+                "--output",
+                os.fspath(aq4_release_evidence),
+                "--status",
+                "complete",
+            ),
+            (
+                *PYTHON_PREFIX,
+                _tool(
+                    source_root,
+                    "publish-generic-reasoning-validator-report.py",
+                ),
+                "--kind",
+                "release",
+                "--evidence",
+                os.fspath(aq4_release_evidence),
+                "--output",
+                os.fspath(aq4_release_validator),
+                "--require-complete",
+            ),
+        ),
+        aq4_reasoning_browser=(
+            (
+                *PYTHON_PREFIX,
+                _tool(
+                    aq4_source_root,
+                    "run-openwebui-reasoning-browser-smoke.py",
+                ),
+                "--output",
+                os.fspath(aq4_browser_output),
+                "--manifest",
+                os.fspath(aq4_manifest),
+                "--token-file",
+                os.fspath(OPENWEBUI_SESSION_TOKEN_FILE),
+                "--browser-image",
+                BROWSER_IMAGE,
+                "--openwebui-url",
+                OPENWEBUI_URL,
+                "--model-id",
+                AQ4_MODEL_ID,
+                "--model-name",
+                AQ4_MODEL_NAME,
+                "--ullm-service",
+                SERVICE_UNIT,
+                "--docker",
+                DOCKER,
+                "--systemctl",
+                SYSTEMCTL,
+                "--rocm-smi",
+                ROCM_SMI,
+            ),
+            (
+                *PYTHON_PREFIX,
+                _tool(
+                    source_root,
+                    "publish-generic-reasoning-validator-report.py",
+                ),
+                "--kind",
+                "browser",
+                "--evidence",
+                os.fspath(aq4_browser_output),
+                "--output",
+                os.fspath(aq4_browser_validator),
+                "--require-complete",
+            ),
+        ),
+        aq4_bundle=(
+            (
+                *PYTHON_PREFIX,
+                _tool(
+                    source_root,
+                    "prepare-generic-reasoning-release-bundle.py",
+                ),
+                "--bundle-version",
+                "v1",
+                "--release-evidence",
+                os.fspath(aq4_release_evidence),
+                "--release-validator",
+                os.fspath(aq4_release_validator),
+                "--browser-evidence",
+                os.fspath(aq4_browser_output),
+                "--browser-validator",
+                os.fspath(aq4_browser_validator),
+                "--promotion-evidence",
+                aq4_release["promotion_evidence"]["path"],
+                "--promotion-receipt",
+                aq4_release["promotion_receipt"]["path"],
+                "--rollback-manifest",
+                os.fspath(aq4_manifest),
+                "--systemd-unit",
+                os.fspath(SYSTEMD_UNIT),
+                "--environment-file",
+                os.fspath(ENVIRONMENT_FILE),
+                "--output",
+                os.fspath(aq4_bundle_output),
+                "--status",
+                "complete",
+            ),
+            (
+                *PYTHON_PREFIX,
+                _tool(
+                    source_root,
+                    "validate-generic-reasoning-release-bundle.py",
+                ),
+                os.fspath(aq4_bundle_output),
+                "--require-complete",
+            ),
+        ),
         final_checks=(
             (SYSTEMCTL, "is-active", "--quiet", SERVICE_UNIT),
             _ready_command(),
+            openwebui_verifier_command(source_root),
         ),
     )

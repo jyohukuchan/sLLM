@@ -13,7 +13,9 @@ from pathlib import Path
 from typing import Any
 
 
+sys.dont_write_bytecode = True
 TOOLS = Path(__file__).resolve().parent
+REPOSITORY_ROOT = TOOLS.parent
 if os.fspath(TOOLS) not in sys.path:
     sys.path.insert(0, os.fspath(TOOLS))
 
@@ -70,6 +72,10 @@ def _request(
     record: authorization.AuthorizationRecord,
 ) -> TransactionRequest:
     source_root = _canonical_existing(args.source_root, "source root")
+    if source_root != REPOSITORY_ROOT:
+        raise TransactionError(
+            "campaign runner must execute from the sealed source root"
+        )
     candidate = _canonical_existing(
         args.candidate_manifest,
         "candidate served-model manifest",
@@ -100,7 +106,7 @@ def _failure_report(error: TransactionFailed) -> dict[str, Any]:
     restoration = error.restoration
     return {
         "schema_version": (
-            "ullm.served_model.v2_cross_model_campaign_execution_failure.v1"
+            "ullm.served_model.v2_cross_model_campaign_execution_failure.v2"
         ),
         "status": error.result.status,
         "outcome_path": os.fspath(error.result.outcome_path),
@@ -141,6 +147,10 @@ def _emit(value: dict[str, Any], *, stream: Any = sys.stdout) -> None:
 def main(argv: Sequence[str] | None = None) -> int:
     args = parse_args(argv)
     try:
+        if args.execute and os.geteuid() != 0:
+            raise TransactionError(
+                "campaign execution requires the root transaction supervisor"
+            )
         now = datetime.now(timezone.utc)
         record = authorization.load_authorization(
             args.authorization,
@@ -166,13 +176,19 @@ def main(argv: Sequence[str] | None = None) -> int:
             default_inactive_checker(request.inactive_services)
             report = {
                 "schema_version": (
-                    "ullm.served_model.v2_cross_model_campaign_preflight.v1"
+                    "ullm.served_model.v2_cross_model_campaign_preflight.v2"
                 ),
                 "ready": True,
                 "plan_id": plan.PLAN_ID,
                 "authorization_sha256": result.authorization.snapshot.sha256,
                 "source_commit": result.source_commit,
                 "source_tree": result.source_tree,
+                "source_seal_sha256": result.source_seal.fingerprint_sha256,
+                "aq4_source_seal_sha256": (
+                    result.aq4_source_seal.fingerprint_sha256
+                    if result.aq4_source_seal is not None
+                    else None
+                ),
                 "before_manifest_sha256": result.active.sha256,
                 "candidate_manifest_sha256": result.candidate.sha256,
                 "candidate_worker_binary_sha256": result.candidate_summary[
@@ -187,7 +203,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             completed = execute_transaction(request)
             report = {
                 "schema_version": (
-                    "ullm.served_model.v2_cross_model_campaign_execution.v1"
+                    "ullm.served_model.v2_cross_model_campaign_execution.v2"
                 ),
                 "plan_id": plan.PLAN_ID,
                 "status": completed.status,
