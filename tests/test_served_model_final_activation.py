@@ -30,6 +30,11 @@ AUTH = FINAL.authorization
 
 RUNNER_PATH = ROOT / "tools/run-served-model-final-activation.py"
 ROLLBACK_PATH = ROOT / "tools/rollback-served-model.py"
+PREPARE_PATH = ROOT / "tools/prepare-served-model-final-activation.py"
+RUNBOOK_PATH = ROOT / "docs/plans/sq8-final-activation-operator-runbook-v0.1.md"
+
+REAL_CAPTURE_SOURCE_ROOT = FINAL._capture_source_root
+REAL_REQUIRE_PRODUCTION_ENTRYPOINT = FINAL.require_production_entrypoint
 
 NOW = datetime(2026, 7, 24, 12, 0, 0, tzinfo=timezone.utc)
 SOURCE_COMMIT = "a" * 40
@@ -40,6 +45,47 @@ AQ4_WORKER_RAW = b"fixture-aq4-worker\n"
 SQ8_WORKER_RAW = b"fixture-sq8-worker\n"
 AQ4_WORKER = hashlib.sha256(AQ4_WORKER_RAW).hexdigest()
 SQ8_WORKER = hashlib.sha256(SQ8_WORKER_RAW).hexdigest()
+
+
+@pytest.fixture(autouse=True)
+def stub_execution_source_guard(
+    monkeypatch: pytest.MonkeyPatch,
+) -> SimpleNamespace:
+    """Keep fixture tests hermetic; dedicated tests exercise the real Git seal."""
+
+    sealed = SimpleNamespace(
+        root=FINAL.ROOT,
+        required_uid=os.geteuid(),
+        entries=(),
+        fingerprint_sha256="e" * 64,
+    )
+
+    def capture(
+        *,
+        expected_commit: str,
+        expected_tree: str,
+        required_uid: int,
+    ) -> SimpleNamespace:
+        assert len(expected_commit) == 40
+        assert len(expected_tree) == 40
+        sealed.required_uid = required_uid
+        return sealed
+
+    def require(
+        expected: object,
+        *,
+        expected_commit: str,
+        expected_tree: str,
+        required_uid: int,
+    ) -> None:
+        assert expected is sealed
+        assert len(expected_commit) == 40
+        assert len(expected_tree) == 40
+        assert sealed.required_uid == required_uid
+
+    monkeypatch.setattr(FINAL, "_capture_execution_source", capture)
+    monkeypatch.setattr(FINAL, "_require_execution_source", require)
+    return sealed
 
 
 def digest(raw: bytes) -> str:
@@ -2606,7 +2652,7 @@ def test_double_slash_runtime_destination_alias_is_rejected(tmp_path: Path) -> N
     ("kind", "uid", "gid", "mode", "seal_uid"),
     [
         ("api", 0, 1000, 0o640, 0),
-        ("jwt", 1000, 1000, 0o600, 1000),
+        ("jwt", 0, 1000, 0o640, 0),
     ],
 )
 def test_runtime_secret_fixed_private_metadata_is_accepted(
@@ -2627,6 +2673,12 @@ def test_runtime_secret_fixed_private_metadata_is_accepted(
         jwt_path,
     )
     selected = api_path if kind == "api" else jwt_path
+    if kind == "jwt":
+        monkeypatch.setattr(
+            FINAL,
+            "OPENWEBUI_SESSION_TOKEN_PARENT",
+            jwt_path.parent,
+        )
 
     def capture(
         path: Path,
@@ -2655,7 +2707,15 @@ def test_runtime_secret_fixed_private_metadata_is_accepted(
                 b"fixture-token\n",
                 digest(b"fixture-token\n"),
                 identity,
-            )
+            ),
+            ancestry=(
+                SimpleNamespace(
+                    path=selected.parent,
+                    mode=stat.S_IFDIR | 0o750,
+                    uid=0,
+                    gid=1000,
+                ),
+            ),
         )
 
     monkeypatch.setattr(FINAL, "_capture_runtime_artifact", capture)
@@ -2693,6 +2753,12 @@ def test_runtime_secret_wrong_metadata_is_rejected(
         jwt_path,
     )
     selected = api_path if kind == "api" else jwt_path
+    if kind == "jwt":
+        monkeypatch.setattr(
+            FINAL,
+            "OPENWEBUI_SESSION_TOKEN_PARENT",
+            jwt_path.parent,
+        )
 
     def capture(*_args: object, **_kwargs: object) -> object:
         identity = FINAL.runtime_seal.FileIdentity(
@@ -2712,7 +2778,15 @@ def test_runtime_secret_wrong_metadata_is_rejected(
                 b"token\n",
                 digest(b"token\n"),
                 identity,
-            )
+            ),
+            ancestry=(
+                SimpleNamespace(
+                    path=selected.parent,
+                    mode=stat.S_IFDIR | 0o750,
+                    uid=0,
+                    gid=1000,
+                ),
+            ),
         )
 
     monkeypatch.setattr(FINAL, "_capture_runtime_artifact", capture)
@@ -2720,5 +2794,479 @@ def test_runtime_secret_wrong_metadata_is_rejected(
         FINAL._read_runtime_secret(
             selected,
             "credential",
+            required_uid=0,
+        )
+
+
+def _git_for_source(root: Path, *arguments: str) -> subprocess.CompletedProcess[bytes]:
+    environment = FINAL.source_seal.git_environment()
+    environment.update(
+        {
+            "GIT_AUTHOR_EMAIL": "source-seal@example.invalid",
+            "GIT_AUTHOR_NAME": "Source Seal Test",
+            "GIT_COMMITTER_EMAIL": "source-seal@example.invalid",
+            "GIT_COMMITTER_NAME": "Source Seal Test",
+        }
+    )
+    return subprocess.run(
+        FINAL.source_seal.git_argv(["-C", os.fspath(root), *arguments]),
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=environment,
+        timeout=10.0,
+        check=True,
+    )
+
+
+def _standalone_source(
+    tmp_path: Path,
+) -> tuple[Path, str, str]:
+    root = tmp_path / "sealed-final-source"
+    root.mkdir(mode=0o700)
+    tools = root / "tools"
+    tools.mkdir(mode=0o700)
+    (tools / "served_model_final_activation.py").write_text(
+        "FINAL_SOURCE_FIXTURE = True\n",
+        encoding="ascii",
+    )
+    for name in FINAL.PRODUCTION_WRAPPER_NAMES:
+        (tools / name).write_text(
+            "#!/usr/bin/python3.12\n",
+            encoding="ascii",
+        )
+    subprocess.run(
+        ["/usr/bin/git", "init", "--quiet", os.fspath(root)],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=FINAL.source_seal.git_environment(),
+        timeout=10.0,
+        check=True,
+    )
+    _git_for_source(root, "add", "--all")
+    _git_for_source(root, "commit", "--quiet", "-m", "sealed fixture")
+    commit = (
+        _git_for_source(root, "rev-parse", "--verify", "HEAD^{commit}")
+        .stdout.decode("ascii")
+        .strip()
+    )
+    tree = (
+        _git_for_source(root, "rev-parse", "--verify", "HEAD^{tree}")
+        .stdout.decode("ascii")
+        .strip()
+    )
+    _git_for_source(root, "checkout", "--quiet", "--detach", commit)
+    _protect_source_tree(root)
+    return root, commit, tree
+
+
+def _protect_source_tree(root: Path) -> None:
+    for path in [root, *root.rglob("*")]:
+        metadata = path.lstat()
+        if stat.S_ISDIR(metadata.st_mode):
+            path.chmod(0o700)
+        elif stat.S_ISREG(metadata.st_mode):
+            executable = bool(stat.S_IMODE(metadata.st_mode) & 0o100)
+            path.chmod(0o700 if executable else 0o600)
+
+
+def test_real_execution_source_seal_requires_detached_clean_standalone_git(
+    tmp_path: Path,
+) -> None:
+    root, commit, tree = _standalone_source(tmp_path)
+    marker = tmp_path / "fsmonitor-ran"
+    monitor = tmp_path / "malicious-fsmonitor"
+    monitor.write_text(
+        f"#!/bin/sh\n/usr/bin/touch {marker}\n",
+        encoding="ascii",
+    )
+    monitor.chmod(0o755)
+    _git_for_source(root, "config", "core.fsmonitor", os.fspath(monitor))
+    _protect_source_tree(root)
+
+    sealed = REAL_CAPTURE_SOURCE_ROOT(
+        root,
+        expected_commit=commit,
+        expected_tree=tree,
+        required_uid=os.geteuid(),
+    )
+
+    assert sealed.root == root
+    assert sealed.required_uid == os.geteuid()
+    assert not marker.exists()
+
+    _git_for_source(root, "switch", "--quiet", "-c", "unsafe-attached")
+    _protect_source_tree(root)
+    with pytest.raises(FINAL.FinalActivationError, match="detached"):
+        REAL_CAPTURE_SOURCE_ROOT(
+            root,
+            expected_commit=commit,
+            expected_tree=tree,
+            required_uid=os.geteuid(),
+        )
+
+
+@pytest.mark.parametrize("fault", ["writable", "linked", "alternate"])
+def test_real_execution_source_seal_rejects_unsafe_repository_forms(
+    tmp_path: Path,
+    fault: str,
+) -> None:
+    root, commit, tree = _standalone_source(tmp_path)
+    selected = root
+    if fault == "writable":
+        root.chmod(0o770)
+    elif fault == "linked":
+        selected = tmp_path / "linked-worktree"
+        _git_for_source(
+            root,
+            "worktree",
+            "add",
+            "--quiet",
+            "--detach",
+            os.fspath(selected),
+            commit,
+        )
+    else:
+        alternates = root / ".git/objects/info/alternates"
+        alternates.write_text("/untrusted/object/store\n", encoding="ascii")
+
+    with pytest.raises(
+        FINAL.FinalActivationError,
+        match="protected standalone",
+    ):
+        REAL_CAPTURE_SOURCE_ROOT(
+            selected,
+            expected_commit=commit,
+            expected_tree=tree,
+            required_uid=os.geteuid(),
+        )
+
+
+@pytest.mark.parametrize("field", ["commit", "tree"])
+def test_real_execution_source_seal_rejects_plan_source_mismatch(
+    tmp_path: Path,
+    field: str,
+) -> None:
+    root, commit, tree = _standalone_source(tmp_path)
+    expected_commit = "f" * 40 if field == "commit" else commit
+    expected_tree = "f" * 40 if field == "tree" else tree
+
+    with pytest.raises(FINAL.FinalActivationError, match=f"Git {field}"):
+        REAL_CAPTURE_SOURCE_ROOT(
+            root,
+            expected_commit=expected_commit,
+            expected_tree=expected_tree,
+            required_uid=os.geteuid(),
+        )
+
+
+@pytest.mark.parametrize("phase", ["prepare", "load"])
+def test_execution_source_is_admitted_before_local_validators(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    phase: str,
+) -> None:
+    fixture = Fixture(tmp_path)
+    if phase == "load":
+        fixture.prepare()
+    validator_called = False
+
+    def validator(_path: Path) -> dict[str, object]:
+        nonlocal validator_called
+        validator_called = True
+        raise AssertionError("validator must not run")
+
+    def reject_source(**_kwargs: object) -> object:
+        raise FINAL.FinalActivationError("execution source rejected")
+
+    monkeypatch.setattr(FINAL, "_capture_execution_source", reject_source)
+    with pytest.raises(FINAL.FinalActivationError, match="execution source"):
+        if phase == "prepare":
+            FINAL.prepare_plan(
+                plan_id="sq8-final-test-001",
+                authorization_path=fixture.authorization_path,
+                candidate_manifest=fixture.candidate,
+                active_manifest=fixture.active,
+                rollback_manifest=fixture.rollback,
+                release_bundle=fixture.bundle,
+                systemd_unit=fixture.unit,
+                environment_file=fixture.environment,
+                operations_document=fixture.operations,
+                activation_outcome=fixture.activation_outcome,
+                rollback_outcome=fixture.rollback_outcome,
+                output=fixture.plan,
+                now=NOW + timedelta(minutes=1),
+                policy=fixture.policy,
+                manifest_validator=validator,
+                bundle_validator=fixture.bundle_validator,
+            )
+        else:
+            FINAL.load_plan(
+                fixture.plan,
+                action="activate",
+                now=NOW + timedelta(minutes=2),
+                policy=fixture.policy,
+                manifest_validator=validator,
+                bundle_validator=fixture.bundle_validator,
+            )
+    assert validator_called is False
+
+
+@pytest.mark.parametrize(
+    ("mutation_point", "expected_prefix"),
+    [
+        ("before_candidate_command", []),
+        ("after_candidate_command", ["candidate_reconciliation"]),
+    ],
+)
+def test_execution_source_repin_failure_restores_exact_aq4(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mutation_point: str,
+    expected_prefix: list[str],
+) -> None:
+    fixture = Fixture(tmp_path)
+    fixture.prepare()
+    runner = Runner()
+    original = FINAL._require_execution_source
+    raised = False
+
+    def fail_once(
+        expected: object,
+        *,
+        expected_commit: str,
+        expected_tree: str,
+        required_uid: int,
+    ) -> None:
+        nonlocal raised
+        armed = fixture.active.read_bytes() == fixture.sq8_raw
+        if mutation_point == "after_candidate_command":
+            armed = armed and runner.stages == ["candidate_reconciliation"]
+        else:
+            armed = armed and not runner.stages
+        if armed and not raised:
+            raised = True
+            raise FINAL.FinalActivationError("execution source seal changed")
+        original(
+            expected,
+            expected_commit=expected_commit,
+            expected_tree=expected_tree,
+            required_uid=required_uid,
+        )
+
+    monkeypatch.setattr(FINAL, "_require_execution_source", fail_once)
+    with pytest.raises(FINAL.FinalActivationError):
+        execute_activation(fixture, runner)
+
+    assert raised is True
+    assert fixture.active.read_bytes() == fixture.aq4_raw
+    assert runner.stages[: len(expected_prefix)] == expected_prefix
+    assert "reverse_reconciliation" in runner.stages
+    assert "rollback_live_health" in runner.stages
+
+
+def test_rollback_core_repins_source_without_campaign_registry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fixture = Fixture(tmp_path)
+    fixture.prepare()
+    execute_activation(fixture, Runner())
+    record = fixture.load("rollback")
+    damage_campaign_authority(fixture, target="authorization", fault="delete")
+    damage_campaign_authority(fixture, target="outcome", fault="delete")
+    original = FINAL._require_execution_source
+    calls = 0
+
+    def observe(
+        expected: object,
+        *,
+        expected_commit: str,
+        expected_tree: str,
+        required_uid: int,
+    ) -> None:
+        nonlocal calls
+        calls += 1
+        original(
+            expected,
+            expected_commit=expected_commit,
+            expected_tree=expected_tree,
+            required_uid=required_uid,
+        )
+
+    monkeypatch.setattr(FINAL, "_require_execution_source", observe)
+    FINAL._repin_rollback_inputs(
+        record,
+        policy=fixture.policy,
+        manifest_validator=fixture.manifest_validator,
+        include_shared=False,
+    )
+
+    assert calls == 2
+    assert fixture.active.read_bytes() == fixture.sq8_raw
+
+
+def test_production_entrypoint_requires_exact_canonical_python_invocation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "sealed-entrypoint"
+    tools = root / "tools"
+    tools.mkdir(parents=True)
+    wrapper = tools / "run-served-model-final-activation.py"
+    wrapper.write_text("#!/usr/bin/python3.12\n", encoding="ascii")
+    sealed = SimpleNamespace(root=root, required_uid=0)
+    monkeypatch.setattr(FINAL, "_module_execution_root", lambda: root)
+    monkeypatch.setattr(FINAL.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(
+        FINAL.sys,
+        "flags",
+        SimpleNamespace(
+            isolated=1,
+            no_site=1,
+            dont_write_bytecode=1,
+            safe_path=True,
+        ),
+    )
+    monkeypatch.setattr(
+        FINAL.sys,
+        "orig_argv",
+        [
+            "/usr/bin/python3.12",
+            "-I",
+            "-S",
+            "-B",
+            os.fspath(wrapper),
+            "--plan",
+            "/run/plan.json",
+        ],
+    )
+    monkeypatch.setattr(
+        FINAL.source_seal,
+        "capture_source_seal",
+        lambda _root, required_uid: sealed,
+    )
+    monkeypatch.setattr(
+        FINAL,
+        "_source_git",
+        lambda _root, arguments, _label: (
+            b"a" * 40 + b"\n"
+            if arguments[-1] == "HEAD^{commit}"
+            else b"b" * 40 + b"\n"
+        ),
+    )
+    monkeypatch.setattr(FINAL, "_require_execution_source", lambda *_args, **_kwargs: None)
+
+    REAL_REQUIRE_PRODUCTION_ENTRYPOINT(wrapper)
+
+    FINAL.sys.orig_argv[0] = "/usr/bin/python3"
+    with pytest.raises(FINAL.FinalActivationError, match="exact"):
+        REAL_REQUIRE_PRODUCTION_ENTRYPOINT(wrapper)
+    FINAL.sys.orig_argv[0] = "/usr/bin/python3.12"
+    with pytest.raises(FINAL.FinalActivationError, match="exact"):
+        REAL_REQUIRE_PRODUCTION_ENTRYPOINT(Path(wrapper.name))
+
+
+@pytest.mark.parametrize("path", [PREPARE_PATH, RUNNER_PATH, ROLLBACK_PATH])
+def test_production_wrappers_are_guarded_and_have_fixed_python_shebang(
+    path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = load_cli(f"test_guarded_{path.stem}", path)
+    called = False
+
+    def reject(_path: Path) -> None:
+        nonlocal called
+        called = True
+        raise module.final_activation.FinalActivationError("guarded")
+
+    monkeypatch.setattr(
+        module.final_activation,
+        "require_production_entrypoint",
+        reject,
+    )
+    assert path.read_text(encoding="utf-8").startswith("#!/usr/bin/python3.12\n")
+    assert module.main([]) == 1
+    assert called is True
+    direct = subprocess.run(
+        ["/usr/bin/python3.12", os.fspath(path), "--help"],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=10.0,
+        check=False,
+    )
+    assert direct.returncode != 0
+    assert b"production wrapper requires exact root" in direct.stderr
+
+
+def test_final_activation_runbook_uses_only_sealed_absolute_python_entrypoints() -> None:
+    raw = RUNBOOK_PATH.read_text(encoding="utf-8")
+    prefix = (
+        "sudo -- /usr/bin/python3.12 -I -S -B "
+        "/ABSOLUTE/ROOT-OWNED-SEALED-SQ8-SOURCE/tools/"
+    )
+
+    assert "sudo tools/" not in raw
+    assert "sudo -- tools/" not in raw
+    assert raw.count(prefix) == 5
+    assert f"{prefix}prepare-served-model-final-activation.py" in raw
+    assert f"{prefix}run-served-model-final-activation.py" in raw
+    assert f"{prefix}rollback-served-model.py" in raw
+
+
+def test_openwebui_session_secret_requires_fixed_root_owned_parent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    jwt_path = tmp_path / "openwebui-session.jwt"
+    monkeypatch.setattr(
+        FINAL.campaign_plan,
+        "OPENWEBUI_SESSION_TOKEN_FILE",
+        jwt_path,
+    )
+    monkeypatch.setattr(
+        FINAL,
+        "OPENWEBUI_SESSION_TOKEN_PARENT",
+        jwt_path.parent,
+    )
+    identity = FINAL.runtime_seal.FileIdentity(
+        1,
+        2,
+        stat.S_IFREG | 0o640,
+        1,
+        0,
+        1000,
+        6,
+        1,
+        1,
+    )
+    sealed = SimpleNamespace(
+        snapshot=FINAL.StableFileSnapshot(
+            jwt_path,
+            b"token\n",
+            digest(b"token\n"),
+            identity,
+        ),
+        ancestry=(
+            SimpleNamespace(
+                path=jwt_path.parent,
+                mode=stat.S_IFDIR | 0o770,
+                uid=0,
+                gid=1000,
+            ),
+        ),
+    )
+    monkeypatch.setattr(
+        FINAL,
+        "_capture_runtime_artifact",
+        lambda *_args, **_kwargs: sealed,
+    )
+
+    with pytest.raises(FINAL.FinalActivationError, match="parent metadata"):
+        FINAL._runtime_secret_seal(
+            jwt_path,
+            "OpenWebUI session token",
             required_uid=0,
         )

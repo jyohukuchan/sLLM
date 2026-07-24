@@ -8,24 +8,75 @@ model. It does not apply to the historical AQ4 SQ8 overlay.
 
 ## Admission boundary
 
-Do not prepare or execute a final plan until all of the following exist from
-the same clean release commit and identity:
+Do not prepare or execute a final plan until all of the following exist with
+their two deliberately distinct source lineages exactly bound. The SQ8
+worker, candidate, promotion pair, three SQ8 campaigns, and bundle v2 use the
+same clean SQ8 release commit/tree. The restored-AQ4 campaigns and fresh AQ4
+bundle v1 use the authorization's exact `before.promotion_source_commit` and
+detached AQ4 source tree; they must not be relabeled as SQ8-source artifacts.
 
 1. the final sealed SQ8 worker and build receipt;
 2. an immutable, consumed cross-model campaign authorization;
-3. its `succeeded_restored` immutable outcome, including the complete
-   `sq8_full`, `reasoning_release`, and `reasoning_browser` output inventories
-   and a live AQ4 restoration proof;
+3. its `succeeded_restored` immutable outcome, including all six complete
+   `sq8_full`, `reasoning_release`, `reasoning_browser`,
+   `aq4_reasoning_release`, `aq4_reasoning_browser`, and `aq4_bundle` output
+   inventories and a live AQ4 restoration proof;
 4. the exact read-only AQ4 manifest backup named by that authorization;
-5. a complete, gate-eligible
+5. the fresh complete, gate-eligible AQ4
+   `ullm.generic_reasoning_release_bundle.v1` at the exact path and hash in
+   the successful outcome;
+6. a complete, gate-eligible SQ8
    `ullm.generic_reasoning_release_bundle.v2`;
-6. the frozen SQ8 candidate manifest, systemd unit, and environment file whose
+7. the frozen SQ8 candidate manifest, systemd unit, and environment file whose
    hashes equal the authorization and bundle; and
-7. a human-reviewed operations document as described below.
+8. separate root-owned, non-writable, standalone Git clones for the exact SQ8
+   and AQ4 campaign commits/trees, with the campaign runner invoked from the
+   sealed SQ8 clone itself; and
+9. root-owned sealed runtime closures for both manifests, including every
+   worker/legacy-engine executable, promotion input, tokenizer member,
+   product/package manifest, and package payload, below protected ancestry;
+   and
+10. a human-reviewed operations document as described below.
 
 The fresh browser campaigns require a real private OpenWebUI browser-session
 JWT and the full campaigns require the production GPU/service window. Those
 runs are outside this implementation task.
+
+The existing development checkout, the preserved
+`uLLM-sq8-manifest-candidate-release-ee62d04e` baseline, and the historical
+AQ4 detached worktree are evidence/build inputs only. They do not satisfy the
+campaign source seal. Before authorization issuance, create new standalone
+clones under a root-owned, non-group/world-writable operations directory with
+`git clone --no-hardlinks`, detach the exact commits, remove no files, and
+confirm clean trees. Do not use `git worktree add`: an external `.git` file
+or object alternate is rejected. The cross-model runner and recovery runner
+must be executed by absolute path from that sealed SQ8 clone and must receive
+that same clone as `--source-root`.
+
+The final-plan preparation, activation/preflight, and rollback wrappers must
+also be invoked from that same root-owned sealed SQ8 clone. Their execution
+source is derived only from the loaded module path; there is no CLI or plan
+field that can redirect it. Before any local validator runs, the core requires
+an internal `.git` directory, no object alternate or linked worktree, detached
+and clean HEAD, protected root-owned ancestry, and an exact match between the
+loaded source commit/tree and the plan's existing SQ8 `source` lineage. It
+re-pins that source before and after every activation, restoration, rollback,
+and outcome-publication boundary. The wrappers reject relative paths,
+development checkouts, direct shebang execution, and every interpreter form
+other than the exact absolute command shown below.
+
+The current AQ4 bootstrap manifest
+`5d015a013dcf70cea13dd9ed569d89ed2a025a17e14a6192ca18ee4cdadd1c8a`
+also does not satisfy runtime admission: its worker, promotion inputs,
+tokenizer, and 1,044 package payloads are below user-owned/writable `/home`
+and product trees. Do not issue the exact-six authorization from that
+baseline. First complete a separately reviewed and authorized AQ4-to-AQ4
+runtime-hardening promotion: no-hardlink root-stage the complete closure
+outside `/home`, collect fresh path-bound AQ4 promotion evidence/receipt,
+freeze a new manifest, and activate it through its own locked rollback/live
+proof route. That future prerequisite requires a GPU/service window and is
+not executed by this runbook. The exact-six `before`, backup, fresh AQ4
+campaigns, and final rollback must all bind the resulting hardened manifest.
 
 ## Reviewed operations document
 
@@ -122,13 +173,18 @@ execution time from these fixed, root-owned, read-only, single-link files:
 
 - Gateway API key: `/etc/ullm/openai-api-key`
 - OpenWebUI browser-session JWT:
-  `/run/ullm/sq8-v2-cross-model-openwebui-session.jwt`
+  `/run/ullm-campaign-secrets/openwebui-session.jwt`
 
 Neither secret is accepted in the operations document, plan, proof, or
 outcome. The OpenWebUI file must contain the real browser-login session JWT;
 an API key is not a substitute. **That JWT is not currently available, so
 activation execution remains blocked even after this runbook and scripts are
 prepared.**
+
+Both files must be `uid=0,gid=1000`, mode `0640`, and single-link. The JWT
+parent `/run/ullm-campaign-secrets` must itself be
+`uid=0,gid=1000`, mode `0750`, and must not be nested below a service-user
+writable parent.
 
 Exit status alone is not a live-health proof. Each health executable must
 publish its designated path as one canonical, root-owned, single-link `0444`
@@ -163,7 +219,7 @@ absolute. The outcome parent directories must already exist, be root-owned,
 and not be group/world writable.
 
 ```text
-sudo tools/prepare-served-model-final-activation.py \
+sudo -- /usr/bin/python3.12 -I -S -B /ABSOLUTE/ROOT-OWNED-SEALED-SQ8-SOURCE/tools/prepare-served-model-final-activation.py \
   --plan-id SQ8-FINAL-PLAN-ID \
   --authorization /ABSOLUTE/CAMPAIGN-AUTHORIZATION.json \
   --candidate-manifest /ABSOLUTE/SQ8-CANDIDATE.json \
@@ -179,20 +235,24 @@ sudo tools/prepare-served-model-final-activation.py \
 ```
 
 Preparation writes only the new plan. It rejects an existing destination. It
-revalidates the campaign claim/outcome, re-inventories all three campaign
-outputs, recomputes bundle v2 validation, binds its independently recomputed
-`reasoning_release_campaign` inventory and exact claim to the successful
-transaction outcome, and proves the actual active bytes still equal the exact
-AQ4 backup. The active path, service unit, unit file, and environment file are
-fixed by production policy; alternate same-byte copies are rejected. Record
-the printed plan SHA-256 in the human review record.
+revalidates the campaign claim/outcome and re-inventories all six campaign
+outputs. It derives the AQ4 bundle path only from the successful outcome,
+validates that fresh complete bundle v1 and its raw/browser/promotion
+components first, then recomputes SQ8 bundle-v2 validation and binds its
+independently recomputed SQ8 campaign inventories and exact claim to the same
+outcome. It also proves the actual active bytes still equal the exact AQ4
+backup. It inventories and seals the complete AQ4 and SQ8 runtime closures;
+missing or empty seals, user-owned ancestry, ACLs, symlinks, hardlinks, and
+writable entries are rejected. The active path, service unit, unit file, and
+environment file are fixed by production policy; alternate same-byte copies
+are rejected. Record the printed plan SHA-256 in the human review record.
 
 ## Read-only final preflight
 
 The runner is preflight-only by default:
 
 ```text
-sudo tools/run-served-model-final-activation.py \
+sudo -- /usr/bin/python3.12 -I -S -B /ABSOLUTE/ROOT-OWNED-SEALED-SQ8-SOURCE/tools/run-served-model-final-activation.py \
   --plan /ABSOLUTE/final-activation-plan.json
 ```
 
@@ -208,7 +268,7 @@ After Claude and the user jointly review the exact plan hash and approve the
 live window, the only executable form is:
 
 ```text
-sudo tools/run-served-model-final-activation.py \
+sudo -- /usr/bin/python3.12 -I -S -B /ABSOLUTE/ROOT-OWNED-SEALED-SQ8-SOURCE/tools/run-served-model-final-activation.py \
   --plan /ABSOLUTE/final-activation-plan.json \
   --execute \
   --confirm-plan-sha256 EXACT-PRINTED-PLAN-SHA256 \
@@ -227,11 +287,14 @@ fsynced.
 
 It then runs the two fixed SQ8 stages, verifies candidate bytes again, and
 publishes the no-replace read-only activation outcome. Before and after each
-command the runner re-pins the plan, candidate, rollback, bundle validation,
-unit, environment, operations/executables, campaign outcome and all three
-campaign inventories, and compares the active entry's exact bytes through the
-already-open directory descriptor. All stage timeouts are capped by the
-single monotonic candidate-active deadline.
+command the runner re-pins the plan, candidate, rollback, both
+AQ4-bundle-v1 and SQ8-bundle-v2 validations, unit, environment,
+operations/executables, campaign outcome, and all six campaign inventories.
+It also rechecks every sealed worker, tokenizer, product/package payload, and
+promotion input immediately before and after each reviewed stage. It compares
+the active entry's exact bytes through the already-open directory descriptor.
+All stage timeouts are capped by the single monotonic candidate-active
+deadline.
 
 Any failure after the replacement attempts exact AQ4 byte restoration while
 the same lock remains held, then runs the fixed reverse reconciliation and AQ4
@@ -246,14 +309,14 @@ outcome and exact candidate bytes currently active. Its default is also
 read-only:
 
 ```text
-sudo tools/rollback-served-model.py \
+sudo -- /usr/bin/python3.12 -I -S -B /ABSOLUTE/ROOT-OWNED-SEALED-SQ8-SOURCE/tools/rollback-served-model.py \
   --plan /ABSOLUTE/final-activation-plan.json
 ```
 
 After reviewing that preflight and the same plan hash:
 
 ```text
-sudo tools/rollback-served-model.py \
+sudo -- /usr/bin/python3.12 -I -S -B /ABSOLUTE/ROOT-OWNED-SEALED-SQ8-SOURCE/tools/rollback-served-model.py \
   --plan /ABSOLUTE/final-activation-plan.json \
   --execute \
   --confirm-plan-sha256 EXACT-PRINTED-PLAN-SHA256 \

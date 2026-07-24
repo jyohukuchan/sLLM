@@ -44,6 +44,7 @@ if os.fspath(TOOLS) not in sys.path:
 import served_model_campaign_authorization as authorization  # noqa: E402
 import served_model_campaign_plan as campaign_plan  # noqa: E402
 import served_model_campaign_runtime_seal as runtime_seal  # noqa: E402
+import served_model_campaign_source_seal as source_seal  # noqa: E402
 from served_model_active_binding import (  # noqa: E402
     MAX_MANIFEST_BYTES,
     StableFileSnapshot,
@@ -89,6 +90,20 @@ MAX_ENDPOINT_RESPONSE_BYTES = 4 * 1024 * 1024
 MAX_LIVE_PROOF_CLOCK_SKEW_SECONDS = 2
 MAX_ACTIVE_WINDOW_SECONDS = 7_200
 SYSTEMCTL_PATH = Path("/usr/bin/systemctl")
+PRODUCTION_PYTHON_PATH = Path("/usr/bin/python3.12")
+PRODUCTION_WRAPPER_NAMES = frozenset(
+    {
+        "prepare-served-model-final-activation.py",
+        "rollback-served-model.py",
+        "run-served-model-final-activation.py",
+    }
+)
+SOURCE_GIT_TIMEOUT_SECONDS = 10.0
+SOURCE_GIT_MAX_BYTES = 4 * 1024 * 1024
+OPENWEBUI_SESSION_TOKEN_PARENT = Path("/run/ullm-campaign-secrets")
+OPENWEBUI_SESSION_TOKEN_PARENT_UID = 0
+OPENWEBUI_SESSION_TOKEN_PARENT_GID = 1000
+OPENWEBUI_SESSION_TOKEN_PARENT_MODE = 0o750
 RENAME_EXCHANGE = 2
 PR_SET_CHILD_SUBREAPER = 36
 PR_GET_CHILD_SUBREAPER = 37
@@ -245,6 +260,7 @@ class PlanRecord:
     shared_runtime_artifacts: tuple[runtime_seal.RuntimeArtifactSeal, ...]
     candidate_operation_artifacts: tuple[runtime_seal.RuntimeArtifactSeal, ...]
     rollback_operation_artifacts: tuple[runtime_seal.RuntimeArtifactSeal, ...]
+    execution_source: source_seal.SourceSeal
 
 
 @dataclass(frozen=True, slots=True)
@@ -357,6 +373,268 @@ def _git(value: Any, label: str) -> str:
     if not isinstance(value, str) or GIT_RE.fullmatch(value) is None:
         fail(f"{label} is not a full lowercase Git object ID")
     return value
+
+
+def _module_execution_root() -> Path:
+    """Return only the source root derived from this loaded module."""
+
+    module_path = Path(__file__)
+    if (
+        not module_path.is_absolute()
+        or Path(os.path.abspath(module_path)) != module_path
+        or module_path.resolve(strict=True) != module_path
+        or module_path.parent != TOOLS
+        or TOOLS.parent != ROOT
+    ):
+        fail("final activation module source path is not canonical")
+    return module_path.parent.parent
+
+
+def _source_git(
+    root: Path,
+    arguments: tuple[str, ...],
+    label: str,
+) -> bytes:
+    argv = source_seal.git_argv(
+        ["-C", os.fspath(root), *arguments]
+    )
+    try:
+        completed = subprocess.run(
+            argv,
+            cwd="/",
+            env=source_seal.git_environment(),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=SOURCE_GIT_TIMEOUT_SECONDS,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as error:
+        raise FinalActivationError(
+            f"{label} could not be read with hardened Git"
+        ) from error
+    if (
+        completed.returncode != 0
+        or completed.stderr
+        or len(completed.stdout) > SOURCE_GIT_MAX_BYTES
+    ):
+        fail(f"{label} differs")
+    return completed.stdout
+
+
+def _require_source_git_identity(
+    root: Path,
+    *,
+    expected_commit: str,
+    expected_tree: str,
+) -> None:
+    _git(expected_commit, "execution source commit")
+    _git(expected_tree, "execution source tree")
+    expected_reads = (
+        (
+            ("rev-parse", "--show-toplevel"),
+            os.fsencode(root) + b"\n",
+            "execution source Git top-level",
+        ),
+        (
+            ("rev-parse", "--verify", "HEAD^{commit}"),
+            expected_commit.encode("ascii") + b"\n",
+            "execution source Git commit",
+        ),
+        (
+            ("rev-parse", "--verify", "HEAD^{tree}"),
+            expected_tree.encode("ascii") + b"\n",
+            "execution source Git tree",
+        ),
+        (
+            ("rev-parse", "--abbrev-ref", "HEAD"),
+            b"HEAD\n",
+            "execution source detached HEAD",
+        ),
+    )
+    for arguments, expected, label in expected_reads:
+        if _source_git(root, arguments, label) != expected:
+            fail(f"{label} differs")
+    status = _source_git(
+        root,
+        (
+            "status",
+            "--porcelain=v1",
+            "-z",
+            "--untracked-files=all",
+            "--ignore-submodules=all",
+            "--no-renames",
+        ),
+        "execution source Git status",
+    )
+    if status:
+        fail("execution source worktree is not clean")
+
+
+def _capture_source_root(
+    root: Path,
+    *,
+    expected_commit: str,
+    expected_tree: str,
+    required_uid: int,
+) -> source_seal.SourceSeal:
+    """Seal one already-derived source root and bind its exact Git identity."""
+
+    try:
+        sealed = source_seal.capture_source_seal(
+            root,
+            required_uid=required_uid,
+        )
+    except source_seal.SourceSealError as error:
+        raise FinalActivationError(
+            "final activation execution source is not a protected "
+            "standalone clone"
+        ) from error
+    _require_source_git_identity(
+        root,
+        expected_commit=expected_commit,
+        expected_tree=expected_tree,
+    )
+    try:
+        source_seal.require_source_seal(
+            sealed,
+            required_uid=required_uid,
+        )
+    except source_seal.SourceSealError as error:
+        raise FinalActivationError(
+            "final activation execution source changed during capture"
+        ) from error
+    _require_source_git_identity(
+        root,
+        expected_commit=expected_commit,
+        expected_tree=expected_tree,
+    )
+    try:
+        source_seal.require_source_seal(
+            sealed,
+            required_uid=required_uid,
+        )
+    except source_seal.SourceSealError as error:
+        raise FinalActivationError(
+            "final activation execution source changed across Git capture"
+        ) from error
+    return sealed
+
+
+def _capture_execution_source(
+    *,
+    expected_commit: str,
+    expected_tree: str,
+    required_uid: int,
+) -> source_seal.SourceSeal:
+    """Capture the protected source containing this module, never a caller root."""
+
+    return _capture_source_root(
+        _module_execution_root(),
+        expected_commit=expected_commit,
+        expected_tree=expected_tree,
+        required_uid=required_uid,
+    )
+
+
+def _require_execution_source(
+    expected: source_seal.SourceSeal,
+    *,
+    expected_commit: str,
+    expected_tree: str,
+    required_uid: int,
+) -> None:
+    root = _module_execution_root()
+    if expected.root != root or expected.required_uid != required_uid:
+        fail("final activation execution source binding differs")
+    try:
+        source_seal.require_source_seal(
+            expected,
+            required_uid=required_uid,
+        )
+    except source_seal.SourceSealError as error:
+        raise FinalActivationError(
+            "final activation execution source seal changed"
+        ) from error
+    _require_source_git_identity(
+        root,
+        expected_commit=expected_commit,
+        expected_tree=expected_tree,
+    )
+    try:
+        source_seal.require_source_seal(
+            expected,
+            required_uid=required_uid,
+        )
+    except source_seal.SourceSealError as error:
+        raise FinalActivationError(
+            "final activation execution source changed across Git repin"
+        ) from error
+
+
+def require_production_entrypoint(wrapper_path: Path) -> None:
+    """Admit only the documented root/canonical-Python wrapper invocation."""
+
+    root = _module_execution_root()
+    wrapper = Path(wrapper_path)
+    expected_wrapper = root / "tools" / wrapper.name
+    original_argv = getattr(sys, "orig_argv", None)
+    expected_prefix = [
+        os.fspath(PRODUCTION_PYTHON_PATH),
+        "-I",
+        "-S",
+        "-B",
+        os.fspath(expected_wrapper),
+    ]
+    if (
+        os.geteuid() != 0
+        or not wrapper.is_absolute()
+        or Path(os.path.abspath(wrapper)) != wrapper
+        or wrapper.resolve(strict=True) != wrapper
+        or wrapper.name not in PRODUCTION_WRAPPER_NAMES
+        or wrapper != expected_wrapper
+        or not isinstance(original_argv, list)
+        or original_argv[:5] != expected_prefix
+        or not sys.flags.isolated
+        or not sys.flags.no_site
+        or not sys.flags.dont_write_bytecode
+        or not sys.flags.safe_path
+    ):
+        fail(
+            "final activation wrapper requires root and exact "
+            "/usr/bin/python3.12 -I -S -B absolute invocation"
+        )
+    try:
+        initial = source_seal.capture_source_seal(root, required_uid=0)
+    except source_seal.SourceSealError as error:
+        raise FinalActivationError(
+            "final activation wrapper source is not protected"
+        ) from error
+    commit_raw = _source_git(
+        root,
+        ("rev-parse", "--verify", "HEAD^{commit}"),
+        "execution source Git commit",
+    )
+    tree_raw = _source_git(
+        root,
+        ("rev-parse", "--verify", "HEAD^{tree}"),
+        "execution source Git tree",
+    )
+    try:
+        commit = commit_raw.decode("ascii").strip()
+        tree = tree_raw.decode("ascii").strip()
+    except UnicodeError as error:
+        raise FinalActivationError(
+            "final activation wrapper source identity is invalid"
+        ) from error
+    _git(commit, "execution source commit")
+    _git(tree, "execution source tree")
+    _require_execution_source(
+        initial,
+        expected_commit=commit,
+        expected_tree=tree,
+        required_uid=0,
+    )
 
 
 def _identifier(value: Any, label: str) -> str:
@@ -841,6 +1119,20 @@ def _require_record_runtime_seals(
             record.candidate_operation_artifacts,
             required_uid=required_uid,
         )
+
+
+def _require_record_execution_source(
+    record: PlanRecord,
+    *,
+    required_uid: int,
+) -> None:
+    source = record.document["source"]
+    _require_execution_source(
+        record.execution_source,
+        expected_commit=source["commit"],
+        expected_tree=source["tree"],
+        required_uid=required_uid,
+    )
 
 
 def _load_module(name: str, path: Path) -> ModuleType:
@@ -1538,8 +1830,8 @@ def _runtime_secret_seal(
         expected_uid = 0
         expected_gid = 1000
     elif path == campaign_plan.OPENWEBUI_SESSION_TOKEN_FILE:
-        expected_mode = 0o600
-        expected_uid = 1000
+        expected_mode = 0o640
+        expected_uid = 0
         expected_gid = 1000
     else:
         fail(f"{label} path differs from the fixed credential policy")
@@ -1557,6 +1849,18 @@ def _runtime_secret_seal(
         or (expected_gid is not None and snapshot.identity.gid != expected_gid)
     ):
         fail(f"{label} private metadata differs")
+    if path == campaign_plan.OPENWEBUI_SESSION_TOKEN_FILE:
+        if not sealed.ancestry:
+            fail(f"{label} private parent metadata differs")
+        parent = sealed.ancestry[-1]
+        if (
+            path.parent != OPENWEBUI_SESSION_TOKEN_PARENT
+            or parent.path != OPENWEBUI_SESSION_TOKEN_PARENT
+            or parent.uid != OPENWEBUI_SESSION_TOKEN_PARENT_UID
+            or parent.gid != OPENWEBUI_SESSION_TOKEN_PARENT_GID
+            or stat.S_IMODE(parent.mode) != OPENWEBUI_SESSION_TOKEN_PARENT_MODE
+        ):
+            fail(f"{label} private parent metadata differs")
     return sealed
 
 
@@ -2679,6 +2983,18 @@ def prepare_plan(
     if len({output, activation_outcome, rollback_outcome}) != 3:
         fail("plan and outcome destinations must be distinct")
 
+    record, outcome_snapshot, outcome = _load_successful_campaign_outcome(
+        authorization_path,
+        now=now,
+        policy=policy,
+    )
+    auth = record.document
+    execution_source = _capture_execution_source(
+        expected_commit=auth["source"]["commit"],
+        expected_tree=auth["source"]["tree"],
+        required_uid=policy.required_uid,
+    )
+
     candidate = _stable(
         candidate_manifest,
         "SQ8 candidate manifest",
@@ -2753,13 +3069,7 @@ def prepare_plan(
     ):
         fail("final route paths differ from the fixed production policy")
 
-    record, outcome_snapshot, outcome = _load_successful_campaign_outcome(
-        authorization_path,
-        now=now,
-        policy=policy,
-    )
     _require_restoration_path(outcome, active.path)
-    auth = record.document
     if (
         auth["candidate"]["manifest_sha256"] != candidate.sha256
         or auth["candidate"]["worker_binary_sha256"] != candidate_worker
@@ -2999,7 +3309,19 @@ def prepare_plan(
         rollback_runtime,
         required_uid=policy.required_uid,
     )
+    _require_execution_source(
+        execution_source,
+        expected_commit=auth["source"]["commit"],
+        expected_tree=auth["source"]["tree"],
+        required_uid=policy.required_uid,
+    )
     _publish_immutable(output, document, required_uid=policy.required_uid)
+    _require_execution_source(
+        execution_source,
+        expected_commit=auth["source"]["commit"],
+        expected_tree=auth["source"]["tree"],
+        required_uid=policy.required_uid,
+    )
     _require_artifact_seals(
         shared_runtime_artifacts,
         required_uid=policy.required_uid,
@@ -3018,6 +3340,12 @@ def prepare_plan(
     )
     _require_manifest_runtime_seals(
         rollback_runtime,
+        required_uid=policy.required_uid,
+    )
+    _require_execution_source(
+        execution_source,
+        expected_commit=auth["source"]["commit"],
+        expected_tree=auth["source"]["tree"],
         required_uid=policy.required_uid,
     )
     return document
@@ -3419,6 +3747,11 @@ def load_plan(
     if _canonical_json(document) != plan.raw:
         fail("final activation plan is not canonical JSON")
     _validate_plan_shape(document, action=action)
+    execution_source = _capture_execution_source(
+        expected_commit=document["source"]["commit"],
+        expected_tree=document["source"]["tree"],
+        required_uid=policy.required_uid,
+    )
     policy_unit, policy_environment = _policy_deployment_paths(policy)
     if (
         Path(document["active_manifest"]["path"]) != policy.active_manifest_path
@@ -3723,6 +4056,7 @@ def load_plan(
         shared_runtime_artifacts,
         candidate_operation_artifacts,
         rollback_operation_artifacts,
+        execution_source,
     )
     if action == "activate":
         _ensure_fresh_destination(activation_path, "activation outcome")
@@ -3750,6 +4084,12 @@ def load_plan(
         required_uid=policy.required_uid,
         scope="all" if action == "activate" else "rollback",
     )
+    _require_execution_source(
+        result.execution_source,
+        expected_commit=document["source"]["commit"],
+        expected_tree=document["source"]["tree"],
+        required_uid=policy.required_uid,
+    )
     return result
 
 
@@ -3763,6 +4103,10 @@ def _repin_plan_inputs(
 ) -> None:
     """Re-pin every immutable plan authority without outcome freshness checks."""
 
+    _require_record_execution_source(
+        record,
+        required_uid=policy.required_uid,
+    )
     _require_record_runtime_seals(
         record,
         required_uid=policy.required_uid,
@@ -3940,6 +4284,10 @@ def _repin_plan_inputs(
         required_uid=policy.required_uid,
         scope="all",
     )
+    _require_record_execution_source(
+        record,
+        required_uid=policy.required_uid,
+    )
 
 
 def _repin_rollback_inputs(
@@ -3951,6 +4299,10 @@ def _repin_rollback_inputs(
 ) -> None:
     """Re-pin only authorities needed to restore and run exact AQ4 safely."""
 
+    _require_record_execution_source(
+        record,
+        required_uid=policy.required_uid,
+    )
     _require_record_runtime_seals(
         record,
         required_uid=policy.required_uid,
@@ -4033,6 +4385,10 @@ def _repin_rollback_inputs(
         record,
         required_uid=policy.required_uid,
         scope="rollback" if include_shared else "rollback_core",
+    )
+    _require_record_execution_source(
+        record,
+        required_uid=policy.required_uid,
     )
 
 
@@ -4785,6 +5141,7 @@ def _require_same_plan(
         or initial.snapshot.path != locked.snapshot.path
         or initial.snapshot.raw != locked.snapshot.raw
         or initial.snapshot.identity != locked.snapshot.identity
+        or initial.execution_source != locked.execution_source
         or initial.document["active_manifest"]["path"]
         != locked.document["active_manifest"]["path"]
     ):
@@ -5002,9 +5359,17 @@ def execute_activation(
                 live_proofs=live_proofs,
             )
             with termination.deferred():
+                _require_record_execution_source(
+                    record,
+                    required_uid=policy.required_uid,
+                )
                 outcome_snapshot = _publish_immutable(
                     Path(record.document["outcomes"]["activation_path"]),
                     outcome,
+                    required_uid=policy.required_uid,
+                )
+                _require_record_execution_source(
+                    record,
                     required_uid=policy.required_uid,
                 )
                 termination.commit()
@@ -5098,9 +5463,17 @@ def execute_activation(
                 )
                 try:
                     with termination.deferred():
+                        _require_record_execution_source(
+                            record,
+                            required_uid=policy.required_uid,
+                        )
                         outcome_snapshot = _publish_immutable(
                             Path(record.document["outcomes"]["activation_path"]),
                             outcome,
+                            required_uid=policy.required_uid,
+                        )
+                        _require_record_execution_source(
+                            record,
                             required_uid=policy.required_uid,
                         )
                         termination.commit()
@@ -5391,9 +5764,17 @@ def execute_rollback(
                 live_proof=rollback_live_proof,
             )
             with termination.deferred():
+                _require_record_execution_source(
+                    record,
+                    required_uid=policy.required_uid,
+                )
                 outcome_snapshot = _publish_immutable(
                     Path(record.document["outcomes"]["rollback_path"]),
                     outcome,
+                    required_uid=policy.required_uid,
+                )
+                _require_record_execution_source(
+                    record,
                     required_uid=policy.required_uid,
                 )
                 termination.commit()
@@ -5439,9 +5820,17 @@ def execute_rollback(
                 )
                 try:
                     with termination.deferred():
+                        _require_record_execution_source(
+                            record,
+                            required_uid=policy.required_uid,
+                        )
                         outcome_snapshot = _publish_immutable(
                             Path(record.document["outcomes"]["rollback_path"]),
                             outcome,
+                            required_uid=policy.required_uid,
+                        )
+                        _require_record_execution_source(
+                            record,
                             required_uid=policy.required_uid,
                         )
                         termination.commit()
@@ -5494,6 +5883,10 @@ def preflight_report(record: PlanRecord, *, action: str) -> dict[str, Any]:
             record.campaign_outcome.sha256
             if record.campaign_outcome is not None
             else record.document["campaign"]["outcome_sha256"]
+        ),
+        "execution_source_root": os.fspath(record.execution_source.root),
+        "execution_source_fingerprint_sha256": (
+            record.execution_source.fingerprint_sha256
         ),
         "active_manifest_changed": False,
         "commands_executed": False,
