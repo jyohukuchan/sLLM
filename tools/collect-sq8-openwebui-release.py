@@ -36,7 +36,7 @@ import uuid
 from collections.abc import Mapping
 from pathlib import Path, PurePosixPath
 from types import MappingProxyType
-from typing import Any, BinaryIO, Callable, Iterable, Protocol, Sequence
+from typing import Any, BinaryIO, Callable, Iterable, Mapping, Protocol, Sequence
 
 
 CONFIG_SCHEMA = "ullm.sq8.openwebui_release.collector.config.v1"
@@ -72,7 +72,10 @@ GPU_BDF = "0000:47:00.0"
 GPU_UUID = "a8ff7551-0000-1000-80e9-ddefa2d60f55"
 KFD_GPU_ID = 51_545
 SERVICE_UNIT = "ullm-openai.service"
-DOCKER_BIN = "/usr/bin/docker"
+DEFAULT_DOCKER_BIN = "/usr/bin/docker"
+DOCKER_ENVIRONMENT = "ULLM_CAMPAIGN_DOCKER"
+DOCKER_LEASE_ENVIRONMENT = "ULLM_CAMPAIGN_DOCKER_LEASE_LABEL"
+DOCKER_LEASE_KEY = "com.ultimatellm.served-model-campaign.claim"
 AMD_SMI_BIN = "/opt/rocm/bin/amd-smi"
 PYTHON_BIN = "/usr/bin/python3.12"
 AMD_SMI_SCRIPT = "/opt/rocm-7.2.1/libexec/amdsmi_cli/amdsmi_cli.py"
@@ -83,7 +86,7 @@ AMD_SMI_COMMAND_PREFIX = (
     "-B",
     AMD_SMI_SCRIPT,
 )
-HOST_COMMAND_ENVIRONMENT = {
+BASE_HOST_COMMAND_ENVIRONMENT = {
     "HOME": "/",
     "LANG": "C",
     "LC_ALL": "C",
@@ -323,6 +326,49 @@ class CollectorError(RuntimeError):
 
 def fail(message: str) -> None:
     raise CollectorError(message)
+
+
+def _campaign_docker(
+    environment: Mapping[str, str] | None = None,
+) -> str:
+    selected = os.environ if environment is None else environment
+    docker = selected.get(DOCKER_ENVIRONMENT)
+    lease = selected.get(DOCKER_LEASE_ENVIRONMENT)
+    if docker is None and lease is None:
+        return DEFAULT_DOCKER_BIN
+    if (
+        type(docker) is not str
+        or not docker.startswith("/")
+        or "\x00" in docker
+        or os.path.normpath(docker) != docker
+        or docker == DEFAULT_DOCKER_BIN
+        or type(lease) is not str
+        or re.fullmatch(
+            rf"{re.escape(DOCKER_LEASE_KEY)}=[0-9a-f]{{64}}",
+            lease,
+        )
+        is None
+    ):
+        fail("campaign Docker lease environment differs")
+    return docker
+
+
+def _host_command_environment(
+    environment: Mapping[str, str] | None = None,
+) -> dict[str, str]:
+    selected = os.environ if environment is None else environment
+    result = dict(BASE_HOST_COMMAND_ENVIRONMENT)
+    docker = _campaign_docker(selected)
+    if docker != DEFAULT_DOCKER_BIN:
+        result[DOCKER_ENVIRONMENT] = docker
+        result[DOCKER_LEASE_ENVIRONMENT] = selected[
+            DOCKER_LEASE_ENVIRONMENT
+        ]
+    return result
+
+
+DOCKER_BIN = _campaign_docker()
+HOST_COMMAND_ENVIRONMENT = _host_command_environment()
 
 
 def exact_keys(value: Any, expected: set[str], label: str) -> dict[str, Any]:

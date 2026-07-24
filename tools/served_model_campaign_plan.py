@@ -23,7 +23,7 @@ INACTIVE_SERVICES = (SERVICE_UNIT,)
 PYTHON = "/usr/bin/python3.12"
 PYTHON_PREFIX = (PYTHON, "-I", "-S", "-B")
 SYSTEMCTL = "/usr/bin/systemctl"
-DOCKER = "/usr/bin/docker"
+DOCKER_WRAPPER_RELATIVE_PATH = Path("tools/ullm-campaign-docker")
 ROCM_SMI = "/opt/rocm-7.2.1/libexec/rocm_smi/rocm_smi.py"
 HTTP_IMAGE = (
     "sha256:5dce198cca467ce79994ed65e01d03882238f9efdd16a8c6f4bc55151c8a4a54"
@@ -54,9 +54,20 @@ def _tool(source_root: Path, name: str) -> str:
     return os.fspath(path)
 
 
+def _docker_wrapper(source_root: Path) -> str:
+    path = source_root / DOCKER_WRAPPER_RELATIVE_PATH
+    if not path.is_absolute():
+        raise PlanError("source-bound Docker wrapper path is not absolute")
+    return os.fspath(path)
+
+
+def _docker_command(source_root: Path, *arguments: str) -> tuple[str, ...]:
+    return (*PYTHON_PREFIX, _docker_wrapper(source_root), *arguments)
+
+
 def _configure_command(source_root: Path) -> tuple[str, ...]:
-    return (
-        DOCKER,
+    return _docker_command(
+        source_root,
         "run",
         "--rm",
         "-v",
@@ -78,9 +89,9 @@ def _configure_command(source_root: Path) -> tuple[str, ...]:
     )
 
 
-def _ready_command() -> tuple[str, ...]:
-    return (
-        DOCKER,
+def _ready_command(source_root: Path) -> tuple[str, ...]:
+    return _docker_command(
+        source_root,
         "run",
         "--rm",
         "--network",
@@ -107,7 +118,7 @@ def openwebui_verifier_command(source_root: Path) -> tuple[str, ...]:
         *PYTHON_PREFIX,
         _tool(source_root, "verify-openwebui-container-image.py"),
         "--docker",
-        DOCKER,
+        _docker_wrapper(source_root),
     )
 
 
@@ -156,8 +167,8 @@ def derive_commands(
     aq4_release_validator = Path(aq4_release["release_validator_path"])
     aq4_browser_validator = Path(aq4_release["browser_validator_path"])
     aq4_manifest = Path(rollback["backup_path"])
-    compose = (
-        DOCKER,
+    compose = _docker_command(
+        source_root,
         "compose",
         "-f",
         os.fspath(source_root / "deploy/openwebui/compose.yaml"),
@@ -175,7 +186,7 @@ def derive_commands(
         candidate_reconciliation=reconcile,
         candidate_checks=(
             (SYSTEMCTL, "is-active", "--quiet", SERVICE_UNIT),
-            _ready_command(),
+            _ready_command(source_root),
             openwebui_verifier_command(source_root),
         ),
         sq8_full=(
@@ -194,6 +205,8 @@ def derive_commands(
             os.fspath(API_KEY_FILE),
             "--openwebui-session-token-file",
             os.fspath(OPENWEBUI_SESSION_TOKEN_FILE),
+            "--docker",
+            _docker_wrapper(source_root),
             *common_binding,
         ),
         reasoning_release=(
@@ -211,7 +224,7 @@ def derive_commands(
             "--service",
             SERVICE_UNIT,
             "--docker",
-            DOCKER,
+            _docker_wrapper(source_root),
             "--rocm-smi",
             ROCM_SMI,
             "--systemctl",
@@ -240,7 +253,7 @@ def derive_commands(
             "--ullm-service",
             SERVICE_UNIT,
             "--docker",
-            DOCKER,
+            _docker_wrapper(source_root),
             "--systemctl",
             SYSTEMCTL,
             "--rocm-smi",
@@ -265,7 +278,7 @@ def derive_commands(
                 "--service",
                 SERVICE_UNIT,
                 "--docker",
-                DOCKER,
+                _docker_wrapper(source_root),
                 "--rocm-smi",
                 ROCM_SMI,
                 "--systemctl",
@@ -320,7 +333,7 @@ def derive_commands(
                 os.fspath(aq4_browser_output),
                 "--manifest",
                 os.fspath(aq4_manifest),
-                "--token-file",
+                "--openwebui-session-token-file",
                 os.fspath(OPENWEBUI_SESSION_TOKEN_FILE),
                 "--browser-image",
                 BROWSER_IMAGE,
@@ -333,7 +346,7 @@ def derive_commands(
                 "--ullm-service",
                 SERVICE_UNIT,
                 "--docker",
-                DOCKER,
+                _docker_wrapper(source_root),
                 "--systemctl",
                 SYSTEMCTL,
                 "--rocm-smi",
@@ -398,7 +411,7 @@ def derive_commands(
         ),
         final_checks=(
             (SYSTEMCTL, "is-active", "--quiet", SERVICE_UNIT),
-            _ready_command(),
+            _ready_command(source_root),
             openwebui_verifier_command(source_root),
         ),
     )

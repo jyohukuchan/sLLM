@@ -64,9 +64,28 @@ GIT_BINARY = campaign_source_seal.GIT_BINARY
 GIT_COMMAND_PREFIX = campaign_source_seal.GIT_COMMAND_PREFIX
 PYTHON_BINARY = "/usr/bin/python3.12"
 DOCKER_BINARY = "/usr/bin/docker"
+DOCKER_LEASE_WRAPPER_RELATIVE_PATH = Path("tools/ullm-campaign-docker")
+DOCKER_LEASE_WRAPPER_ENVIRONMENT = "ULLM_CAMPAIGN_DOCKER"
+DOCKER_LEASE_LABEL_ENVIRONMENT = "ULLM_CAMPAIGN_DOCKER_LEASE_LABEL"
+DOCKER_LEASE_LABEL_KEY = "com.ultimatellm.served-model-campaign.claim"
+DOCKER_LEASE_CONTROL_TIMEOUT_SECONDS = 30.0
+DOCKER_LEASE_QUIESCENCE_SECONDS = COMMAND_TERMINATION_GRACE_SECONDS
+DOCKER_LEASE_QUIESCENCE_POLL_SECONDS = 0.25
+DOCKER_LEASE_MINIMUM_EMPTY_POLLS = 3
+DOCKER_LEASE_CLEANUP_TOTAL_TIMEOUT_SECONDS = 95.0
+MAX_DOCKER_LEASE_QUIESCENCE_POLLS = 512
+MAX_DOCKER_LEASE_CONTAINERS = 256
 OPENWEBUI_IMAGE_VERIFIER = Path("tools/verify-openwebui-container-image.py")
 NESTED_EXECUTABLE_FLAGS = frozenset(
     {"--docker", "--rocm-smi", "--systemctl"}
+)
+DOCKER_PRODUCER_TOOL_NAMES = frozenset(
+    {
+        "run-sq8-full-openwebui-campaign.py",
+        "run-generic-reasoning-release-campaign.py",
+        "run-openwebui-reasoning-browser-smoke.py",
+        "verify-openwebui-container-image.py",
+    }
 )
 FIXED_GATEWAY_API_KEY_PATH = Path("/etc/ullm/openai-api-key")
 FIXED_GATEWAY_API_KEY_UID = 0
@@ -320,6 +339,12 @@ class TransactionPreflight:
     shared_runtime_tree_seals: tuple[
         campaign_runtime_seal.RuntimeTreeSeal, ...
     ] = ()
+    aq4_release_runtime_artifact_seals: tuple[
+        campaign_runtime_seal.RuntimeArtifactSeal, ...
+    ] = ()
+    aq4_release_runtime_tree_seals: tuple[
+        campaign_runtime_seal.RuntimeTreeSeal, ...
+    ] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -430,6 +455,373 @@ def _validate_commands(commands: TransactionCommands) -> None:
                 )
             ):
                 raise TransactionError("transaction command is invalid")
+
+
+def _docker_lease_wrapper(source_root: Path) -> Path:
+    return source_root / DOCKER_LEASE_WRAPPER_RELATIVE_PATH
+
+
+def _require_docker_lease_wrapper_commands(
+    commands: TransactionCommands,
+    source_root: Path,
+    *,
+    recovery_only: bool = False,
+) -> None:
+    wrapper = os.fspath(_docker_lease_wrapper(source_root))
+    candidate_groups: tuple[Sequence[Sequence[str]], ...] = (
+        commands.candidate_reconciliation,
+        commands.candidate_checks,
+        (commands.sq8_full,),
+        (commands.reasoning_release,),
+        (commands.reasoning_browser,),
+    )
+    aq4_groups: tuple[Sequence[Sequence[str]], ...] = (
+        commands.reverse_reconciliation,
+        commands.aq4_reasoning_release,
+        commands.aq4_reasoning_browser,
+        commands.aq4_bundle,
+        commands.final_checks,
+    )
+
+    def inspect(groups: Sequence[Sequence[Sequence[str]]]) -> bool:
+        found = False
+        for group in groups:
+            for command in group:
+                docker_flags = tuple(
+                    index
+                    for index, argument in enumerate(command)
+                    if argument == "--docker"
+                )
+                if (
+                    len(docker_flags) > 1
+                    or any(
+                        argument.startswith("--docker=")
+                        for argument in command
+                    )
+                    or any(
+                        Path(argument).name == "docker"
+                        for argument in command
+                        if not argument.startswith("-")
+                    )
+                ):
+                    raise TransactionError(
+                        "transaction command bypasses the Docker lease wrapper"
+                    )
+                for index in docker_flags:
+                    if index + 1 >= len(command) or command[index + 1] != wrapper:
+                        raise TransactionError(
+                            "transaction Docker executable binding differs"
+                        )
+                    found = True
+                wrapper_indexes = tuple(
+                    index
+                    for index, argument in enumerate(command)
+                    if argument == wrapper
+                )
+                allowed_wrapper_indexes = {
+                    index + 1 for index in docker_flags
+                }
+                direct_wrapper = (
+                    len(command) >= 5
+                    and command[4] == wrapper
+                    and tuple(command[:4])
+                    == (PYTHON_BINARY, "-I", "-S", "-B")
+                )
+                if direct_wrapper:
+                    allowed_wrapper_indexes.add(4)
+                    found = True
+                if any(
+                    index not in allowed_wrapper_indexes
+                    for index in wrapper_indexes
+                ):
+                    raise TransactionError(
+                        "transaction Docker lease wrapper placement differs"
+                    )
+                producer_indexes = tuple(
+                    index
+                    for index, argument in enumerate(command)
+                    if Path(argument).name in DOCKER_PRODUCER_TOOL_NAMES
+                )
+                if producer_indexes:
+                    if (
+                        len(producer_indexes) != 1
+                        or producer_indexes[0] != 4
+                        or tuple(command[:4])
+                        != (PYTHON_BINARY, "-I", "-S", "-B")
+                        or len(docker_flags) != 1
+                    ):
+                        raise TransactionError(
+                            "Docker producer wrapper binding differs"
+                        )
+                if command[0] == wrapper:
+                    raise TransactionError(
+                        "direct Docker lease wrapper prefix differs"
+                    )
+        return found
+
+    candidate_bound = inspect(candidate_groups) if not recovery_only else True
+    aq4_bound = inspect(aq4_groups)
+    if not candidate_bound or not aq4_bound:
+        raise TransactionError(
+            "transaction Docker lease wrapper is not bound in every route"
+        )
+
+
+def _docker_lease_label(claim: authorization.ClaimRecord) -> str:
+    claim_sha256 = claim.snapshot.sha256
+    if authorization.HASH_RE.fullmatch(claim_sha256) is None:
+        raise CommandContainmentLost("campaign Docker lease claim hash is invalid")
+    return f"{DOCKER_LEASE_LABEL_KEY}={claim_sha256}"
+
+
+def _docker_lease_control_environment(
+    request: TransactionRequest,
+    claim: authorization.ClaimRecord,
+    stage: str,
+) -> dict[str, str]:
+    return {
+        **STAGE_BASE_ENVIRONMENT,
+        "ULLM_CAMPAIGN_TRANSACTION_STAGE": stage,
+        DOCKER_LEASE_WRAPPER_ENVIRONMENT: os.fspath(
+            _docker_lease_wrapper(request.source_root)
+        ),
+        DOCKER_LEASE_LABEL_ENVIRONMENT: _docker_lease_label(claim),
+    }
+
+
+def _run_docker_lease_control(
+    request: TransactionRequest,
+    claim: authorization.ClaimRecord,
+    arguments: Sequence[str],
+    *,
+    runner: CommandRunner,
+    stage: str,
+    timeout_seconds: float = DOCKER_LEASE_CONTROL_TIMEOUT_SECONDS,
+) -> str:
+    if (
+        not isinstance(timeout_seconds, (int, float))
+        or isinstance(timeout_seconds, bool)
+        or not math.isfinite(timeout_seconds)
+        or timeout_seconds <= 0
+        or timeout_seconds > DOCKER_LEASE_CONTROL_TIMEOUT_SECONDS
+    ):
+        raise CommandContainmentLost(
+            "campaign Docker lease control timeout is invalid"
+        )
+    command = [DOCKER_BINARY, *arguments]
+    try:
+        completed = runner(
+            command,
+            cwd=request.source_root,
+            env=_docker_lease_control_environment(request, claim, stage),
+            check=False,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=float(timeout_seconds),
+        )
+    except (OSError, subprocess.SubprocessError) as error:
+        raise CommandContainmentLost(
+            "campaign Docker lease control failed"
+        ) from error
+    if completed.returncode != 0 or not isinstance(completed.stdout, str):
+        raise CommandContainmentLost("campaign Docker lease control failed")
+    if len(completed.stdout.encode("utf-8")) > (
+        MAX_DOCKER_LEASE_CONTAINERS * 65
+    ):
+        raise CommandContainmentLost("campaign Docker lease inventory is too large")
+    return completed.stdout
+
+
+def _docker_lease_container_ids(
+    request: TransactionRequest,
+    claim: authorization.ClaimRecord,
+    *,
+    runner: CommandRunner,
+    stage: str,
+    timeout_seconds: float = DOCKER_LEASE_CONTROL_TIMEOUT_SECONDS,
+) -> tuple[str, ...]:
+    raw = _run_docker_lease_control(
+        request,
+        claim,
+        (
+            "container",
+            "ls",
+            "--all",
+            "--quiet",
+            "--no-trunc",
+            "--filter",
+            f"label={_docker_lease_label(claim)}",
+        ),
+        runner=runner,
+        stage=stage,
+        timeout_seconds=timeout_seconds,
+    )
+    identifiers = tuple(line for line in raw.splitlines() if line)
+    if (
+        len(identifiers) > MAX_DOCKER_LEASE_CONTAINERS
+        or len(set(identifiers)) != len(identifiers)
+        or any(re.fullmatch(r"[0-9a-f]{64}", value) is None for value in identifiers)
+    ):
+        raise CommandContainmentLost(
+            "campaign Docker lease inventory is malformed"
+        )
+    return identifiers
+
+
+def _require_empty_docker_lease(
+    request: TransactionRequest,
+    claim: authorization.ClaimRecord,
+    *,
+    runner: CommandRunner,
+    stage: str,
+) -> None:
+    _settle_docker_lease(
+        request,
+        claim,
+        runner=runner,
+        stage=stage,
+        remove=False,
+    )
+
+
+def _cleanup_docker_lease(
+    request: TransactionRequest,
+    claim: authorization.ClaimRecord,
+    *,
+    runner: CommandRunner,
+    stage: str,
+) -> None:
+    _settle_docker_lease(
+        request,
+        claim,
+        runner=runner,
+        stage=stage,
+        remove=True,
+    )
+
+
+def _settle_docker_lease(
+    request: TransactionRequest,
+    claim: authorization.ClaimRecord,
+    *,
+    runner: CommandRunner,
+    stage: str,
+    remove: bool,
+) -> None:
+    monotonic = getattr(runner, "docker_lease_monotonic", time.monotonic)
+    sleeper = getattr(runner, "docker_lease_sleep", time.sleep)
+    if not callable(monotonic) or not callable(sleeper):
+        raise CommandContainmentLost(
+            "campaign Docker lease quiescence clock is invalid"
+        )
+
+    def now() -> float:
+        try:
+            value = monotonic()
+        except BaseException as error:
+            raise CommandContainmentLost(
+                "campaign Docker lease quiescence clock failed"
+            ) from error
+        if (
+            not isinstance(value, (int, float))
+            or isinstance(value, bool)
+            or not math.isfinite(value)
+        ):
+            raise CommandContainmentLost(
+                "campaign Docker lease quiescence clock is invalid"
+            )
+        return float(value)
+
+    started = now()
+    deadline = started + DOCKER_LEASE_CLEANUP_TOTAL_TIMEOUT_SECONDS
+    quiet_since: float | None = None
+    empty_polls = 0
+    polls = 0
+    prior = started
+    while True:
+        current = now()
+        if current < prior or current >= deadline:
+            raise CommandContainmentLost(
+                "campaign Docker lease quiescence deadline expired"
+            )
+        remaining = deadline - current
+        identifiers = _docker_lease_container_ids(
+            request,
+            claim,
+            runner=runner,
+            stage=stage,
+            timeout_seconds=min(
+                DOCKER_LEASE_CONTROL_TIMEOUT_SECONDS,
+                remaining,
+            ),
+        )
+        observed = now()
+        if observed < current or observed > deadline:
+            raise CommandContainmentLost(
+                "campaign Docker lease quiescence deadline expired"
+            )
+        prior = observed
+        polls += 1
+        if polls > MAX_DOCKER_LEASE_QUIESCENCE_POLLS:
+            raise CommandContainmentLost(
+                "campaign Docker lease quiescence poll bound exceeded"
+            )
+        if identifiers:
+            if not remove:
+                raise CommandContainmentLost(
+                    "campaign Docker lease was not empty before execution"
+                )
+            remaining = deadline - observed
+            if remaining <= 0:
+                raise CommandContainmentLost(
+                    "campaign Docker lease quiescence deadline expired"
+                )
+            _run_docker_lease_control(
+                request,
+                claim,
+                ("container", "rm", "--force", *identifiers),
+                runner=runner,
+                stage=stage,
+                timeout_seconds=min(
+                    DOCKER_LEASE_CONTROL_TIMEOUT_SECONDS,
+                    remaining,
+                ),
+            )
+            after_remove = now()
+            if after_remove < observed or after_remove > deadline:
+                raise CommandContainmentLost(
+                    "campaign Docker lease quiescence deadline expired"
+                )
+            prior = after_remove
+            quiet_since = None
+            empty_polls = 0
+            continue
+
+        if quiet_since is None:
+            quiet_since = observed
+        empty_polls += 1
+        if (
+            empty_polls >= DOCKER_LEASE_MINIMUM_EMPTY_POLLS
+            and observed - quiet_since >= DOCKER_LEASE_QUIESCENCE_SECONDS
+        ):
+            return
+        remaining = deadline - observed
+        if remaining <= 0:
+            raise CommandContainmentLost(
+                "campaign Docker lease quiescence deadline expired"
+            )
+        sleep_seconds = min(
+            DOCKER_LEASE_QUIESCENCE_POLL_SECONDS,
+            remaining,
+        )
+        try:
+            sleeper(sleep_seconds)
+        except BaseException as error:
+            raise CommandContainmentLost(
+                "campaign Docker lease quiescence sleep failed"
+            ) from error
 
 
 def _run_git(
@@ -900,6 +1292,10 @@ def _capture_command_runtime_seals(
         label="candidate",
     )
     aq4_paths = _command_executable_paths(aq4_groups, label="AQ4")
+    # The wrapper itself is carried by --docker in every campaign command.
+    # Its backend is not visible in those vectors, so pin the real Docker CLI
+    # explicitly in both normal execution and recovery.
+    aq4_paths.update({Path(PYTHON_BINARY), Path(DOCKER_BINARY)})
     if not recovery_only:
         # The transaction adds these two source-bound verifier invocations
         # around both browser campaigns even though they are not stored in the
@@ -907,7 +1303,6 @@ def _capture_command_runtime_seals(
         candidate_paths.update(
             {Path(PYTHON_BINARY), Path(DOCKER_BINARY)}
         )
-        aq4_paths.update({Path(PYTHON_BINARY), Path(DOCKER_BINARY)})
     shared_paths = (
         candidate_paths & aq4_paths
     ) | {Path(GIT_COMMAND_PREFIX[0])}
@@ -1176,11 +1571,13 @@ def _require_runtime_seals(
     expected_artifacts = (
         *preflight_result.candidate_runtime_artifact_seals,
         *preflight_result.aq4_runtime_artifact_seals,
+        *preflight_result.aq4_release_runtime_artifact_seals,
         *preflight_result.shared_runtime_artifact_seals,
     )
     expected_trees = (
         *preflight_result.candidate_runtime_tree_seals,
         *preflight_result.aq4_runtime_tree_seals,
+        *preflight_result.aq4_release_runtime_tree_seals,
         *preflight_result.shared_runtime_tree_seals,
     )
     if (
@@ -1209,6 +1606,21 @@ def _require_runtime_seals(
             *preflight_result.aq4_runtime_tree_seals,
             *preflight_result.shared_runtime_tree_seals,
         )
+    elif scope == "aq4_release":
+        if not preflight_result.aq4_release_runtime_artifact_seals:
+            raise TransactionError(
+                "AQ4 release transaction runtime seals are unavailable"
+            )
+        artifacts = (
+            *preflight_result.aq4_runtime_artifact_seals,
+            *preflight_result.aq4_release_runtime_artifact_seals,
+            *preflight_result.shared_runtime_artifact_seals,
+        )
+        trees = (
+            *preflight_result.aq4_runtime_tree_seals,
+            *preflight_result.aq4_release_runtime_tree_seals,
+            *preflight_result.shared_runtime_tree_seals,
+        )
     else:
         raise TransactionError("transaction runtime seal scope is invalid")
     if (
@@ -1235,11 +1647,17 @@ def _open_command_executable(
         artifacts = (
             *preflight_result.candidate_runtime_artifact_seals,
             *preflight_result.aq4_runtime_artifact_seals,
+            *preflight_result.aq4_release_runtime_artifact_seals,
             *preflight_result.shared_runtime_artifact_seals,
         )
-    elif scope == "aq4":
+    elif scope in {"aq4", "aq4_release"}:
         artifacts = (
             *preflight_result.aq4_runtime_artifact_seals,
+            *(
+                preflight_result.aq4_release_runtime_artifact_seals
+                if scope == "aq4_release"
+                else ()
+            ),
             *preflight_result.shared_runtime_artifact_seals,
         )
     else:
@@ -1434,10 +1852,24 @@ def preflight(
             auth = reloaded_claim.authorization
     except authorization.AuthorizationError as error:
         raise TransactionError("campaign authorization preflight failed") from error
+    _require_docker_lease_wrapper_commands(
+        request.commands,
+        request.source_root,
+    )
     command_runtime = _capture_command_runtime_seals(
         request.commands,
         required_uid=policy.required_uid,
     )
+    wrapper_path = _docker_lease_wrapper(request.source_root)
+    wrapper_seals = tuple(
+        sealed
+        for sealed in command_runtime.shared
+        if sealed.snapshot.path == wrapper_path
+    )
+    if len(wrapper_seals) != 1:
+        raise TransactionError(
+            "shared Docker lease wrapper runtime seal is unavailable"
+        )
     source_commit, source_tree, source_seal = _sealed_source_identity(
         request.source_root,
         runner=runner,
@@ -1648,14 +2080,15 @@ def preflight(
         candidate_manifest_seal,
         *candidate_runtime.artifacts,
         *command_runtime.candidate,
-        # Required to build the fresh AQ4 release bundle, but not to restart
-        # and prove the already-authorized AQ4 serving route.
-        aq4_evidence_seal,
     )
     aq4_runtime_artifact_seals = (
         *aq4_runtime.artifacts,
         *command_runtime.aq4,
     )
+    # Required only by the fresh AQ4 evidence/bundle phase. It is deliberately
+    # excluded from both candidate serving and the minimal AQ4 restore/proof
+    # scope so either serving route can be recovered without the other.
+    aq4_release_runtime_artifact_seals = (aq4_evidence_seal,)
     shared_runtime_artifact_seals = (
         unit_seal,
         environment_seal,
@@ -1670,6 +2103,7 @@ def preflight(
     runtime_artifact_seals = (
         *candidate_runtime_artifact_seals,
         *aq4_runtime_artifact_seals,
+        *aq4_release_runtime_artifact_seals,
         *shared_runtime_artifact_seals,
     )
     runtime_tree_seals = (
@@ -1735,6 +2169,8 @@ def preflight(
         aq4_runtime_tree_seals,
         shared_runtime_artifact_seals,
         shared_runtime_tree_seals,
+        aq4_release_runtime_artifact_seals,
+        (),
     )
 
 
@@ -4576,6 +5012,10 @@ def _stage_environment(
         "ULLM_AQ4_BACKUP_MANIFEST": claim.authorization.document["rollback"][
             "backup_path"
         ],
+        DOCKER_LEASE_WRAPPER_ENVIRONMENT: os.fspath(
+            _docker_lease_wrapper(request.source_root)
+        ),
+        DOCKER_LEASE_LABEL_ENVIRONMENT: _docker_lease_label(claim),
     }
     if producer_staging_output is not None:
         environment[CAMPAIGN_STAGING_OUTPUT_ENVIRONMENT] = os.fspath(
@@ -4605,7 +5045,7 @@ def _openwebui_image_verifier_command(
         "-B",
         os.fspath(source_root / OPENWEBUI_IMAGE_VERIFIER),
         "--docker",
-        DOCKER_BINARY,
+        os.fspath(_docker_lease_wrapper(source_root)),
     )
 
 
@@ -4703,6 +5143,12 @@ def _run_commands(
                 os.close(executable_descriptor)
             except OSError:
                 pass
+            _cleanup_docker_lease(
+                request,
+                claim,
+                runner=runner,
+                stage=f"{stage}:docker_lease_cleanup",
+            )
         if deadline is not None and clock() >= deadline:
             raise CandidateWindowExpired(
                 "candidate-active authorization deadline expired"
@@ -5870,6 +6316,7 @@ def execute_transaction(
         switched = False
         ownership_lost = False
         containment_lost = False
+        docker_lease_cleanup_proved = False
         restoration: dict[str, Any] = {
             "expected_manifest_sha256": claim.authorization.document["before"][
                 "manifest_sha256"
@@ -6048,6 +6495,12 @@ def execute_transaction(
                     ),
                 )
                 inactive_checker(request.inactive_services)
+                _require_empty_docker_lease(
+                    request,
+                    claim,
+                    runner=runner,
+                    stage="docker_lease_preflight",
+                )
                 stages["preflight"] = "passed"
             except BaseException as error:
                 fail_stage("preflight", error)
@@ -6282,6 +6735,22 @@ def execute_transaction(
                     stages["preflight"] = "failed"
         finally:
             deferred_interrupt: TransactionInterrupted | None = None
+            try:
+                with termination.deferred():
+                    _cleanup_docker_lease(
+                        request,
+                        claim,
+                        runner=runner,
+                        stage="docker_lease_before_aq4_restore",
+                    )
+                    docker_lease_cleanup_proved = True
+            except BaseException as error:
+                docker_lease_cleanup_proved = False
+                fail_stage(
+                    "aq4_restore" if switched else "preflight",
+                    error,
+                    prioritize=switched,
+                )
             if active_slot is not None and preflight_result is not None:
                 try:
                     last_restore_error: BaseException | None = None
@@ -6458,6 +6927,7 @@ def execute_transaction(
                                     name,
                                     (release_commands[0],),
                                     candidate_active=True,
+                                    runtime_scope="aq4_release",
                                     producer_staging_output=staged_raw,
                                     producer_source_root=(
                                         preflight_result.aq4_source_root
@@ -6525,6 +6995,7 @@ def execute_transaction(
                                     name,
                                     (evidence_command,),
                                     candidate_active=True,
+                                    runtime_scope="aq4_release",
                                 )
                                 evidence_staging.verify()
                                 _require_private_staged_file(
@@ -6555,6 +7026,7 @@ def execute_transaction(
                                 name,
                                 (release_commands[2],),
                                 candidate_active=True,
+                                runtime_scope="aq4_release",
                             )
                             _validate_aq4_release_components(
                                 preflight_result,
@@ -6632,11 +7104,13 @@ def execute_transaction(
                                         ),
                                     ),
                                     candidate_active=True,
+                                    runtime_scope="aq4_release",
                                 )
                                 execute_commands(
                                     name,
                                     (browser_commands[0],),
                                     candidate_active=True,
+                                    runtime_scope="aq4_release",
                                     producer_staging_output=staged_browser,
                                     producer_source_root=(
                                         preflight_result.aq4_source_root
@@ -6673,6 +7147,7 @@ def execute_transaction(
                                         ),
                                     ),
                                     candidate_active=True,
+                                    runtime_scope="aq4_release",
                                 )
                                 _output_file_inventory(
                                     final_path,
@@ -6692,6 +7167,7 @@ def execute_transaction(
                                 name,
                                 (browser_commands[1],),
                                 candidate_active=True,
+                                runtime_scope="aq4_release",
                             )
                             _validate_aq4_browser_components(
                                 claim,
@@ -6747,7 +7223,7 @@ def execute_transaction(
                                 raise TransactionError(
                                     "AQ4 promotion source pair is not pinned"
                                 )
-                            repin()
+                            repin(runtime_scope="aq4_release")
                             for component_name, source_snapshot in (
                                 (
                                     "promotion_evidence",
@@ -6772,7 +7248,7 @@ def execute_transaction(
                                     maximum=MAX_INPUT_BYTES,
                                 )
                             ensure_candidate_window()
-                            repin()
+                            repin(runtime_scope="aq4_release")
                             bundle_commands = request.commands.aq4_bundle
                             if len(bundle_commands) != 2:
                                 raise TransactionError(
@@ -6795,6 +7271,7 @@ def execute_transaction(
                                     name,
                                     (bundle_command,),
                                     candidate_active=True,
+                                    runtime_scope="aq4_release",
                                 )
                                 _require_private_staged_file(
                                     staged_bundle,
@@ -6822,6 +7299,7 @@ def execute_transaction(
                                 name,
                                 (bundle_commands[1],),
                                 candidate_active=True,
+                                runtime_scope="aq4_release",
                             )
                             aq4_observations.append(
                                 _observe_aq4(
@@ -6927,6 +7405,14 @@ def execute_transaction(
                     except BaseException as error:
                         fail_stage("aq4_restore", error, prioritize=True)
                     try:
+                        docker_lease_cleanup_proved = False
+                        _cleanup_docker_lease(
+                            request,
+                            claim,
+                            runner=runner,
+                            stage="docker_lease_final_zero",
+                        )
+                        docker_lease_cleanup_proved = True
                         repin(
                             include_aq4_release=(primary_error is None),
                             runtime_scope="aq4",
@@ -6980,7 +7466,8 @@ def execute_transaction(
                 with termination.deferred():
                     _complete_stage_states(stages, failure_stage)
                     restoration_proved = (
-                        restoration["bytes_equal"]
+                        docker_lease_cleanup_proved
+                        and restoration["bytes_equal"]
                         and restoration["reverse_reconciliation_passed"]
                         and restoration["final_checks_passed"]
                         and restoration["model_id"] == "ullm-qwen3.5-9b-aq4"
@@ -6991,8 +7478,10 @@ def execute_transaction(
                         ]
                         and restoration["proof"] is not None
                     )
-                    if primary_error is None and all(
-                        value == "passed" for value in stages.values()
+                    if (
+                        primary_error is None
+                        and docker_lease_cleanup_proved
+                        and all(value == "passed" for value in stages.values())
                     ):
                         status = "succeeded_restored"
                         failure_stage = None

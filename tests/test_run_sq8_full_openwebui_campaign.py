@@ -1941,6 +1941,59 @@ class ProductionPreparationCliTests(unittest.TestCase):
             )
         return status, stdout.getvalue(), stderr.getvalue()
 
+    def test_v2_parser_requires_exact_transaction_docker_lease_binding(self):
+        wrapper = self.root / "source/tools/ullm-campaign-docker"
+        lease = (
+            ORCHESTRATOR.TRANSACTION_DOCKER_LEASE_KEY + "=" + "c" * 64
+        )
+        environment = {
+            ORCHESTRATOR.TRANSACTION_DOCKER_ENV: os.fspath(wrapper),
+            ORCHESTRATOR.TRANSACTION_DOCKER_LEASE_ENV: lease,
+        }
+        parsed = ORCHESTRATOR.build_parser().parse_args(
+            [
+                *self.arguments(),
+                "--active-binding-mode",
+                "v2",
+                "--docker",
+                os.fspath(wrapper),
+            ]
+        )
+        ORCHESTRATOR._require_v2_docker_binding(
+            parsed.docker,
+            active_binding_mode=parsed.active_binding_mode,
+            environment=environment,
+        )
+        for docker, selected, message in (
+            (Path("/usr/bin/docker"), environment, "binding differs"),
+            (
+                wrapper,
+                {
+                    **environment,
+                    ORCHESTRATOR.TRANSACTION_DOCKER_LEASE_ENV: "bad",
+                },
+                "binding differs",
+            ),
+            (wrapper, {}, "is missing"),
+        ):
+            with (
+                self.subTest(docker=docker, environment=selected),
+                self.assertRaisesRegex(
+                    ORCHESTRATOR.FullCampaignError,
+                    message,
+                ),
+            ):
+                ORCHESTRATOR._require_v2_docker_binding(
+                    docker,
+                    active_binding_mode="v2",
+                    environment=selected,
+                )
+        ORCHESTRATOR._require_v2_docker_binding(
+            Path("/usr/bin/docker"),
+            active_binding_mode="legacy",
+            environment={},
+        )
+
     def test_preflight_success_has_fixed_order_redacted_report_and_no_campaign(self):
         runtime = FakePreparationRuntime()
         status, stdout, stderr = self.run_main(runtime)

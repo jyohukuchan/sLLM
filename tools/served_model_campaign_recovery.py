@@ -216,11 +216,26 @@ def preflight_recovery(
         policy=policy,
     )
 
+    transaction._require_docker_lease_wrapper_commands(
+        request.commands,
+        request.source_root,
+        recovery_only=True,
+    )
     command_runtime = transaction._capture_command_runtime_seals(
         request.commands,
         required_uid=policy.required_uid,
         recovery_only=True,
     )
+    wrapper_path = transaction._docker_lease_wrapper(request.source_root)
+    wrapper_seals = tuple(
+        sealed
+        for sealed in command_runtime.aq4
+        if sealed.snapshot.path == wrapper_path
+    )
+    if len(wrapper_seals) != 1:
+        raise RecoveryError(
+            "recovery Docker lease wrapper runtime seal is unavailable"
+        )
     source_commit, source_tree, source_seal = transaction._sealed_source_identity(
         request.source_root,
         runner=runner,
@@ -475,6 +490,8 @@ def preflight_recovery(
         aq4_runtime_tree_seals=aq4_runtime_tree_seals,
         shared_runtime_artifact_seals=shared_runtime_artifact_seals,
         shared_runtime_tree_seals=shared_runtime_tree_seals,
+        aq4_release_runtime_artifact_seals=(),
+        aq4_release_runtime_tree_seals=(),
     )
     transaction._require_runtime_seals(
         pseudo,
@@ -635,6 +652,7 @@ def recover_transaction(
     receipt: authorization.FileSnapshot | None = None
     post_receipt_interrupt: transaction.TransactionInterrupted | None = None
     ownership_lost = False
+    docker_lease_cleanup_proved = False
     with transaction._termination_guard() as termination, ExitStack() as resources:
         try:
             try:
@@ -682,6 +700,20 @@ def recover_transaction(
                 "worker_binary_sha256": None,
                 "proof": None,
             }
+            try:
+                with termination.deferred():
+                    transaction._cleanup_docker_lease(
+                        request,
+                        pinned.claim,
+                        runner=runner,
+                        stage="recovery_docker_lease_before_aq4_restore",
+                    )
+                    docker_lease_cleanup_proved = True
+            except BaseException as error:
+                docker_lease_cleanup_proved = False
+                failure_stage = "aq4_restore"
+                primary_error = error
+                raise
             deferred_interrupt: transaction.TransactionInterrupted | None = None
             try:
                 last_error: BaseException | None = None
@@ -802,6 +834,14 @@ def recover_transaction(
                     if primary_error is None:
                         primary_error = error
                 try:
+                    docker_lease_cleanup_proved = False
+                    transaction._cleanup_docker_lease(
+                        request,
+                        pinned.claim,
+                        runner=runner,
+                        stage="recovery_docker_lease_final_zero",
+                    )
+                    docker_lease_cleanup_proved = True
                     restored_snapshot = transaction._read_input(
                         pinned.active_before.path,
                         "recovered active served-model manifest",
@@ -859,6 +899,14 @@ def recover_transaction(
                         shared_runtime_tree_seals=(
                             transaction_preflight.shared_runtime_tree_seals
                         ),
+                        aq4_release_runtime_artifact_seals=(
+                            transaction_preflight
+                            .aq4_release_runtime_artifact_seals
+                        ),
+                        aq4_release_runtime_tree_seals=(
+                            transaction_preflight
+                            .aq4_release_runtime_tree_seals
+                        ),
                     )
                     proof = restoration_probe(
                         request,
@@ -910,7 +958,16 @@ def recover_transaction(
             assert primary_error is not None
             raise RecoveryError("campaign recovery preflight failed") from primary_error
 
-        status = "restored" if failure_stage is None else "failed_restore"
+        status = (
+            "restored"
+            if failure_stage is None and docker_lease_cleanup_proved
+            else "failed_restore"
+        )
+        if status == "failed_restore" and failure_stage is None:
+            failure_stage = "aq4_restore"
+            primary_error = RecoveryError(
+                "campaign Docker lease cleanup was not proved"
+            )
         document = {
             "schema_version": authorization.RECOVERY_SCHEMA,
             "authorization_id": pinned.claim.authorization.document[

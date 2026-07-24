@@ -280,12 +280,100 @@ class BackendTests(unittest.TestCase):
                 self.assertIn(str(self.secrets.api_key), command)
             else:
                 self.assertIn(str(self.secrets.openwebui_token), command)
+            self.assertEqual(
+                command[command.index("--docker") + 1],
+                BACKEND.DEFAULT_DOCKER,
+            )
         self.assertEqual(
             {
                 BACKEND.COMMAND_ENVIRONMENT["PYTHONNOUSERSITE"],
                 BACKEND.COMMAND_ENVIRONMENT["PYTHONSAFEPATH"],
             },
             {"1"},
+        )
+
+    def test_all_six_gates_propagate_exact_lease_wrapper_and_label(self) -> None:
+        wrapper = "/source/tools/ullm-campaign-docker"
+        lease = BACKEND.DOCKER_LEASE_KEY + "=" + "9" * 64
+        environment = {
+            BACKEND.DOCKER_ENVIRONMENT: wrapper,
+            BACKEND.DOCKER_LEASE_ENVIRONMENT: lease,
+        }
+        with mock.patch.dict(os.environ, environment, clear=False):
+            for gate in BACKEND.GATE_ORDER:
+                command = BACKEND.build_gate_argv(
+                    gate,
+                    Path(f"/tmp/{gate}"),
+                    self.secrets,
+                    self.deployment,
+                )
+                self.assertTrue(BACKEND._is_allowed_command(command))
+                self.assertEqual(
+                    command[command.index("--docker") + 1],
+                    wrapper,
+                )
+            child_environment = BACKEND._command_environment()
+        self.assertEqual(child_environment[BACKEND.DOCKER_ENVIRONMENT], wrapper)
+        self.assertEqual(
+            child_environment[BACKEND.DOCKER_LEASE_ENVIRONMENT],
+            lease,
+        )
+        for invalid in (
+            {BACKEND.DOCKER_ENVIRONMENT: wrapper},
+            {
+                BACKEND.DOCKER_ENVIRONMENT: wrapper,
+                BACKEND.DOCKER_LEASE_ENVIRONMENT: "bad",
+            },
+            {
+                BACKEND.DOCKER_ENVIRONMENT: BACKEND.DEFAULT_DOCKER,
+                BACKEND.DOCKER_LEASE_ENVIRONMENT: lease,
+            },
+        ):
+            with (
+                self.subTest(environment=invalid),
+                self.assertRaises(BACKEND.ProductionBackendError),
+            ):
+                BACKEND._command_environment(invalid)
+
+    def test_gate_process_receives_same_wrapper_argument_and_environment(
+        self,
+    ) -> None:
+        wrapper = "/source/tools/ullm-campaign-docker"
+        lease = BACKEND.DOCKER_LEASE_KEY + "=" + "6" * 64
+        calls: list[tuple[tuple[str, ...], dict[str, Any]]] = []
+
+        def factory(
+            arguments: tuple[str, ...],
+            **kwargs: Any,
+        ) -> FakeProcess:
+            calls.append((arguments, kwargs))
+            return FakeProcess()
+
+        runner = BACKEND.BoundedGateRunner(
+            timeout_seconds=1.0,
+            process_factory=factory,
+        )
+        with mock.patch.dict(
+            os.environ,
+            {
+                BACKEND.DOCKER_ENVIRONMENT: wrapper,
+                BACKEND.DOCKER_LEASE_ENVIRONMENT: lease,
+            },
+            clear=False,
+        ):
+            runner.run_gate(
+                "combined",
+                Path("/tmp/combined"),
+                self.secrets,
+                self.deployment,
+            )
+
+        command, kwargs = calls[0]
+        self.assertEqual(command[command.index("--docker") + 1], wrapper)
+        self.assertEqual(kwargs["env"][BACKEND.DOCKER_ENVIRONMENT], wrapper)
+        self.assertEqual(
+            kwargs["env"][BACKEND.DOCKER_LEASE_ENVIRONMENT],
+            lease,
         )
 
     def test_runner_kills_and_reaps_group_on_timeout_and_interrupt(self) -> None:

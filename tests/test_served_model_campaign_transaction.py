@@ -84,6 +84,11 @@ class Fixture:
             encoding="ascii",
         )
         source_stage.chmod(0o644)
+        self.docker_wrapper = (
+            self.source / TX.DOCKER_LEASE_WRAPPER_RELATIVE_PATH
+        )
+        self.docker_wrapper.write_bytes(b"#!/bin/sh\nexit 0\n")
+        self.docker_wrapper.chmod(0o555)
         self.aq4_source = tmp_path / "aq4-source"
         self.aq4_source.mkdir()
         self.aq4_source.chmod(0o755)
@@ -462,6 +467,8 @@ class Fixture:
                 str(self.candidate_command),
                 "--final-path",
                 str(self.campaign_paths["sq8_full"]),
+                "--docker",
+                str(self.docker_wrapper),
             ),
             reasoning_release=(
                 str(self.candidate_command),
@@ -526,7 +533,13 @@ class Fixture:
                     str(self.campaign_paths["aq4_bundle"]),
                 ),
             ),
-            final_checks=((str(self.aq4_command),),),
+            final_checks=(
+                (
+                    str(self.aq4_command),
+                    "--docker",
+                    str(self.docker_wrapper),
+                ),
+            ),
         )
         self.request = TX.TransactionRequest(
             authorization_path=self.authorization_path,
@@ -584,6 +597,13 @@ class Runner:
         self.mutate_active_stage = mutate_active_stage
         self.stage_calls: list[str] = []
         self.stage_call_counts: dict[str, int] = {}
+        self.docker_lease_clock = 0.0
+
+    def docker_lease_monotonic(self) -> float:
+        return self.docker_lease_clock
+
+    def docker_lease_sleep(self, seconds: float) -> None:
+        self.docker_lease_clock += seconds
 
     @staticmethod
     def _argument(argv: list[str], flag: str) -> str:
@@ -886,6 +906,76 @@ class Runner:
         return subprocess.CompletedProcess(argv, 0, "", "")
 
 
+class DockerLeaseRunner(Runner):
+    def __init__(
+        self,
+        fixture: Fixture,
+        *,
+        container_ids: tuple[str, ...] = (),
+        leak_stage: str | None = None,
+        failed_rm_calls: int = 0,
+        delayed_create_at: float | None = None,
+        **kwargs: object,
+    ) -> None:
+        super().__init__(fixture, **kwargs)
+        self.container_ids = list(container_ids)
+        self.leak_stage = leak_stage
+        self.failed_rm_calls = failed_rm_calls
+        self.delayed_create_at = delayed_create_at
+        self.delayed_create_done = False
+        self.docker_calls: list[tuple[str, ...]] = []
+
+    def docker_lease_sleep(self, seconds: float) -> None:
+        super().docker_lease_sleep(seconds)
+        if (
+            self.delayed_create_at is not None
+            and not self.delayed_create_done
+            and self.docker_lease_clock >= self.delayed_create_at
+        ):
+            self.container_ids[:] = ["c" * 64]
+            self.delayed_create_done = True
+
+    def __call__(
+        self,
+        argv: list[str],
+        **kwargs: object,
+    ) -> subprocess.CompletedProcess:
+        if (
+            len(argv) >= 3
+            and argv[1] == "container"
+            and argv[2] in {"ls", "rm"}
+        ):
+            self.docker_calls.append(tuple(argv))
+            if argv[2] == "ls":
+                assert kwargs["timeout"] == TX.DOCKER_LEASE_CONTROL_TIMEOUT_SECONDS
+                assert argv[-2] == "--filter"
+                assert argv[-1].startswith(
+                    f"label={TX.DOCKER_LEASE_LABEL_KEY}="
+                )
+                stdout = "".join(
+                    f"{identifier}\n" for identifier in self.container_ids
+                )
+                return subprocess.CompletedProcess(argv, 0, stdout, "")
+            assert argv[3] == "--force"
+            if self.failed_rm_calls:
+                self.failed_rm_calls -= 1
+                return subprocess.CompletedProcess(argv, 19, "", "")
+            requested = argv[4:]
+            assert requested == self.container_ids
+            self.container_ids.clear()
+            return subprocess.CompletedProcess(argv, 0, "\n".join(requested), "")
+        completed = super().__call__(argv, **kwargs)
+        if (
+            self.leak_stage is not None
+            and not is_git(argv)
+            and kwargs["env"]["ULLM_CAMPAIGN_TRANSACTION_STAGE"]
+            == self.leak_stage
+        ):
+            self.container_ids[:] = ["e" * 64]
+            self.leak_stage = None
+        return completed
+
+
 def live_aq4_proof(
     request: object,
     claim: object,
@@ -1040,6 +1130,244 @@ def test_success_restores_exact_aq4_and_publishes_complete_outcome(
         assert stat.S_IMODE(copied.stat().st_mode) == 0o444
         assert copied.stat().st_nlink == 1
         assert stat.S_IMODE(source.stat().st_mode) != 0o444
+
+
+def test_docker_lease_preflight_rejects_and_cleans_stale_container(
+    tmp_path: Path,
+) -> None:
+    fixture = Fixture(tmp_path)
+    runner = DockerLeaseRunner(
+        fixture,
+        container_ids=("d" * 64,),
+    )
+
+    with pytest.raises(TX.TransactionFailed) as caught:
+        execute(fixture, runner)
+
+    assert caught.value.result.status == "failed_restore"
+    assert fixture.active.read_bytes() == fixture.aq4_raw
+    assert runner.container_ids == []
+    assert "candidate_reconciliation" not in runner.stage_calls
+    assert load_outcome(fixture)["status"] == "failed_restore"
+
+
+def test_producer_leaked_container_is_removed_before_transaction_continues(
+    tmp_path: Path,
+) -> None:
+    fixture = Fixture(tmp_path)
+    runner = DockerLeaseRunner(fixture, leak_stage="sq8_full")
+
+    result = execute(fixture, runner)
+
+    assert result.status == "succeeded_restored"
+    assert runner.container_ids == []
+    removals = [
+        call
+        for call in runner.docker_calls
+        if call[1:4] == ("container", "rm", "--force")
+    ]
+    assert removals
+    assert removals[0][4:] == ("e" * 64,)
+
+
+def test_docker_cleanup_failure_forbids_restored_status_and_recovery_retries(
+    tmp_path: Path,
+) -> None:
+    fixture = Fixture(tmp_path)
+    failed_runner = DockerLeaseRunner(
+        fixture,
+        leak_stage="sq8_full",
+        failed_rm_calls=1,
+    )
+
+    with pytest.raises(TX.TransactionFailed) as caught:
+        execute(fixture, failed_runner)
+
+    assert caught.value.result.status == "failed_restore"
+    assert fixture.active.read_bytes() == fixture.sq8_raw
+    assert failed_runner.container_ids == []
+    assert load_outcome(fixture)["status"] == "failed_restore"
+
+    recovery_runner = DockerLeaseRunner(fixture)
+    recovered = RECOVERY.recover_transaction(
+        recovery_request(fixture),
+        policy=fixture.policy,
+        validator=fixture.validator,
+        runner=recovery_runner,
+        clock=lambda: NOW + timedelta(hours=2),
+        restoration_probe=live_aq4_proof,
+    )
+    assert recovered.status == "restored"
+    assert fixture.active.read_bytes() == fixture.aq4_raw
+    assert recovery_runner.container_ids == []
+
+
+def test_unproved_docker_cleanup_cannot_publish_failed_restored(
+    tmp_path: Path,
+) -> None:
+    fixture = Fixture(tmp_path)
+    runner = DockerLeaseRunner(
+        fixture,
+        leak_stage="sq8_full",
+        failed_rm_calls=100,
+    )
+
+    with pytest.raises(TX.TransactionFailed) as caught:
+        execute(fixture, runner)
+
+    assert caught.value.result.status == "failed_restore"
+    assert runner.container_ids == ["e" * 64]
+    outcome = load_outcome(fixture)
+    assert outcome["status"] == "failed_restore"
+    assert outcome["restoration"]["bytes_equal"] is False
+
+
+def test_docker_cleanup_is_one_bounded_batch_for_maximum_inventory(
+    tmp_path: Path,
+) -> None:
+    fixture = Fixture(tmp_path)
+    claim = AUTH.claim_authorization(
+        fixture.authorization_path,
+        now=NOW,
+        policy=fixture.policy,
+    )
+    identifiers = tuple(f"{index:064x}" for index in range(256))
+    runner = DockerLeaseRunner(fixture, container_ids=identifiers)
+
+    TX._cleanup_docker_lease(
+        fixture.request,
+        claim,
+        runner=runner,
+        stage="bounded_cleanup_test",
+    )
+
+    removals = [
+        call
+        for call in runner.docker_calls
+        if call[1:4] == ("container", "rm", "--force")
+    ]
+    assert len(removals) == 1
+    assert len(runner.docker_calls) <= 16
+    assert removals[0][1:4] == (
+        "container",
+        "rm",
+        "--force",
+    )
+    assert removals[0][4:] == identifiers
+    assert (
+        runner.docker_lease_clock
+        >= TX.DOCKER_LEASE_QUIESCENCE_SECONDS
+    )
+    assert runner.container_ids == []
+
+
+def test_docker_cleanup_catches_daemon_delayed_create_during_quiescence(
+    tmp_path: Path,
+) -> None:
+    fixture = Fixture(tmp_path)
+    claim = AUTH.claim_authorization(
+        fixture.authorization_path,
+        now=NOW,
+        policy=fixture.policy,
+    )
+    runner = DockerLeaseRunner(
+        fixture,
+        delayed_create_at=1.0,
+    )
+
+    TX._cleanup_docker_lease(
+        fixture.request,
+        claim,
+        runner=runner,
+        stage="delayed_create_cleanup_test",
+    )
+
+    removals = [
+        call
+        for call in runner.docker_calls
+        if call[1:4] == ("container", "rm", "--force")
+    ]
+    assert len(removals) == 1
+    assert removals[0][4:] == ("c" * 64,)
+    assert runner.container_ids == []
+    assert runner.docker_lease_clock >= (
+        1.0 + TX.DOCKER_LEASE_QUIESCENCE_SECONDS
+    )
+
+
+def test_recovery_cleans_stale_lease_before_replacing_active_manifest(
+    tmp_path: Path,
+) -> None:
+    fixture = Fixture(tmp_path)
+    AUTH.claim_authorization(
+        fixture.authorization_path,
+        now=NOW,
+        policy=fixture.policy,
+    )
+    fixture.backup.write_bytes(fixture.aq4_raw)
+    fixture.backup.chmod(0o444)
+    fixture.active.write_bytes(fixture.sq8_raw)
+    fixture.active.chmod(0o644)
+    runner = DockerLeaseRunner(
+        fixture,
+        container_ids=("f" * 64,),
+    )
+
+    result = RECOVERY.recover_transaction(
+        recovery_request(fixture),
+        policy=fixture.policy,
+        validator=fixture.validator,
+        runner=runner,
+        clock=lambda: NOW + timedelta(hours=2),
+        restoration_probe=live_aq4_proof,
+    )
+
+    assert result.status == "restored"
+    assert fixture.active.read_bytes() == fixture.aq4_raw
+    assert runner.container_ids == []
+    assert runner.docker_calls[1][1:4] == (
+        "container",
+        "rm",
+        "--force",
+    )
+
+
+def test_fresh_aq4_campaigns_do_not_reopen_displaced_candidate(
+    tmp_path: Path,
+) -> None:
+    fixture = Fixture(tmp_path)
+
+    class CandidateLossAfterRestoreRunner(Runner):
+        def __call__(
+            self,
+            argv: list[str],
+            **kwargs: object,
+        ) -> subprocess.CompletedProcess:
+            result = super().__call__(argv, **kwargs)
+            environment = kwargs["env"]
+            assert isinstance(environment, dict)
+            stage = environment.get("ULLM_CAMPAIGN_TRANSACTION_STAGE")
+            if (
+                stage == "reverse_reconciliation"
+                and self.stage_call_counts[stage]
+                == len(fixture.request.commands.reverse_reconciliation)
+            ):
+                fixture.candidate.unlink()
+            return result
+
+    result = execute(fixture, CandidateLossAfterRestoreRunner(fixture))
+
+    assert result.status == "succeeded_restored"
+    assert not fixture.candidate.exists()
+    outcome = load_outcome(fixture)
+    assert all(
+        outcome["stages"][name] == "passed"
+        for name in (
+            "aq4_reasoning_release",
+            "aq4_reasoning_browser",
+            "aq4_bundle",
+        )
+    )
 
 
 def test_aq4_staging_rewrite_changes_only_exact_authorized_output_argument(
@@ -1209,12 +1537,109 @@ def test_read_only_preflight_does_not_claim_or_write_backup(tmp_path: Path) -> N
     assert report.runtime_artifact_seals
     assert report.runtime_tree_seals
     labels = {sealed.label for sealed in report.runtime_artifact_seals}
+    shared_paths = {
+        sealed.snapshot.path
+        for sealed in report.shared_runtime_artifact_seals
+    }
     assert "candidate SQ8 worker binary" in labels
     assert "active AQ4 worker binary" in labels
     assert "frozen candidate served-model manifest" in labels
+    assert fixture.docker_wrapper in shared_paths
+    assert Path(TX.PYTHON_BINARY) in shared_paths
+    assert Path(TX.DOCKER_BINARY) in shared_paths
     assert not list(fixture.claims.iterdir())
     assert not list(fixture.outcomes.iterdir())
     assert not fixture.backup.exists()
+
+
+def test_docker_wrapper_command_binding_rejects_route_local_bypasses(
+    tmp_path: Path,
+) -> None:
+    fixture = Fixture(tmp_path)
+    wrapper = str(fixture.docker_wrapper)
+    sq8_full = fixture.commands.sq8_full
+    docker_index = sq8_full.index("--docker")
+    wrong_value = list(sq8_full)
+    wrong_value[docker_index + 1] = "/tmp/not-the-wrapper"
+    known_producer = (
+        TX.PYTHON_BINARY,
+        "-I",
+        "-S",
+        "-B",
+        str(
+            fixture.source
+            / "tools/run-sq8-full-openwebui-campaign.py"
+        ),
+        "--execute",
+    )
+    cases = (
+        replace(
+            fixture.commands,
+            sq8_full=(*sq8_full, "--docker=/usr/bin/docker"),
+        ),
+        replace(
+            fixture.commands,
+            sq8_full=(*sq8_full, "--docker", wrapper),
+        ),
+        replace(fixture.commands, sq8_full=tuple(wrong_value)),
+        replace(
+            fixture.commands,
+            reasoning_release=(
+                *fixture.commands.reasoning_release,
+                "/tmp/docker",
+            ),
+        ),
+        replace(
+            fixture.commands,
+            candidate_reconciliation=(("/tmp/docker", "run", "image"),),
+        ),
+        replace(fixture.commands, sq8_full=known_producer),
+        replace(
+            fixture.commands,
+            candidate_reconciliation=((wrapper, "run", "--rm", "image"),),
+        ),
+        replace(
+            fixture.commands,
+            candidate_reconciliation=(
+                (
+                    TX.PYTHON_BINARY,
+                    "-S",
+                    "-I",
+                    "-B",
+                    wrapper,
+                    "run",
+                    "--rm",
+                    "image",
+                ),
+            ),
+        ),
+    )
+    for commands in cases:
+        with pytest.raises(TX.TransactionError, match="Docker"):
+            TX._require_docker_lease_wrapper_commands(
+                commands,
+                fixture.source,
+            )
+
+    valid_direct = replace(
+        fixture.commands,
+        candidate_reconciliation=(
+            (
+                TX.PYTHON_BINARY,
+                "-I",
+                "-S",
+                "-B",
+                wrapper,
+                "run",
+                "--rm",
+                "image",
+            ),
+        ),
+    )
+    TX._require_docker_lease_wrapper_commands(
+        valid_direct,
+        fixture.source,
+    )
 
 
 @pytest.mark.parametrize(
@@ -1993,7 +2418,12 @@ def test_browser_campaigns_are_bracketed_by_source_bound_image_checks(
                 if not is_git(argv)
                 else ""
             )
-            if "openwebui_image_" in stage:
+            if stage in {
+                "reasoning_browser_openwebui_image_before",
+                "reasoning_browser_openwebui_image_after",
+                "aq4_reasoning_browser_openwebui_image_before",
+                "aq4_reasoning_browser_openwebui_image_after",
+            }:
                 assert argv == [
                     TX.PYTHON_BINARY,
                     "-I",
@@ -2005,7 +2435,7 @@ def test_browser_campaigns_are_bracketed_by_source_bound_image_checks(
                         / "verify-openwebui-container-image.py"
                     ),
                     "--docker",
-                    TX.DOCKER_BINARY,
+                    str(fixture.docker_wrapper),
                 ]
             return super().__call__(argv, **kwargs)
 
@@ -2477,6 +2907,54 @@ def test_sq8_full_timeout_cannot_exceed_fixed_six_hour_ceiling(
             timeout_seconds=TX.SQ8_FULL_MAX_TIMEOUT_SECONDS + 1,
             maximum_timeout_seconds=TX.SQ8_FULL_MAX_TIMEOUT_SECONDS,
         )
+
+
+def test_sq8_full_timeout_uses_deadline_remaining_after_stabilization(
+    tmp_path: Path,
+) -> None:
+    fixture = Fixture(
+        tmp_path,
+        authorization_lifetime=timedelta(hours=2),
+    )
+    timer = FastStabilizationTimer()
+
+    class TimeoutCapturingRunner(Runner):
+        sq8_timeout: float | None = None
+
+        def __call__(
+            self,
+            argv: list[str],
+            **kwargs: object,
+        ) -> subprocess.CompletedProcess:
+            environment = kwargs["env"]
+            if (
+                not is_git(argv)
+                and isinstance(environment, dict)
+                and environment.get("ULLM_CAMPAIGN_TRANSACTION_STAGE")
+                == "sq8_full"
+            ):
+                self.sq8_timeout = float(kwargs["timeout"])
+            return super().__call__(argv, **kwargs)
+
+    runner = TimeoutCapturingRunner(fixture)
+    result = TX.execute_transaction(
+        fixture.request,
+        policy=fixture.policy,
+        validator=fixture.validator,
+        runner=runner,
+        inactive_checker=lambda _services: None,
+        clock=lambda: NOW + timedelta(seconds=timer.value),
+        restoration_probe=live_aq4_proof,
+        candidate_stabilization_probe=live_sq8_epoch,
+        stabilization_sleeper=timer.sleep,
+        stabilization_monotonic=timer.monotonic,
+    )
+
+    assert result.status == "succeeded_restored"
+    assert timer.value == TX.CANDIDATE_STABILIZATION_SECONDS
+    assert runner.sq8_timeout == (
+        2 * 60 * 60 - TX.CANDIDATE_STABILIZATION_SECONDS
+    )
 
 
 def test_candidate_stabilization_monitors_exactly_nine_hundred_seconds(
@@ -3380,6 +3858,18 @@ def test_recovery_preflight_has_nonempty_runtime_seals(
     assert "candidate SQ8 worker binary" not in labels
     assert "backup AQ4 worker binary" in labels
     assert "authorized immutable AQ4 backup" in labels
+    assert fixture.docker_wrapper in {
+        sealed.snapshot.path
+        for sealed in runtime.aq4_runtime_artifact_seals
+    }
+    assert Path(RECOVERY.transaction.PYTHON_BINARY) in {
+        sealed.snapshot.path
+        for sealed in runtime.aq4_runtime_artifact_seals
+    }
+    assert Path(RECOVERY.transaction.DOCKER_BINARY) in {
+        sealed.snapshot.path
+        for sealed in runtime.aq4_runtime_artifact_seals
+    }
 
 
 def test_recovery_repin_rejects_empty_runtime_seals(

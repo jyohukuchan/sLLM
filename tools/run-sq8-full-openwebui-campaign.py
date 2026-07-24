@@ -102,6 +102,11 @@ TRANSACTION_CLAIM_SHA256_ENV = "ULLM_CAMPAIGN_CLAIM_SHA256"
 TRANSACTION_ACTIVE_MANIFEST_ENV = "ULLM_ACTIVE_MANIFEST"
 TRANSACTION_CANDIDATE_MANIFEST_ENV = "ULLM_CANDIDATE_MANIFEST"
 TRANSACTION_CANDIDATE_SHA256_ENV = "ULLM_CANDIDATE_MANIFEST_SHA256"
+TRANSACTION_DOCKER_ENV = "ULLM_CAMPAIGN_DOCKER"
+TRANSACTION_DOCKER_LEASE_ENV = "ULLM_CAMPAIGN_DOCKER_LEASE_LABEL"
+TRANSACTION_DOCKER_LEASE_KEY = (
+    "com.ultimatellm.served-model-campaign.claim"
+)
 SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
 
 
@@ -147,6 +152,35 @@ def _required_transaction_value(
     if type(value) is not str or not value:
         fail(f"transaction environment {name} is missing")
     return value
+
+
+def _require_v2_docker_binding(
+    docker: Path,
+    *,
+    active_binding_mode: str,
+    environment: Mapping[str, str] | None = None,
+) -> None:
+    if active_binding_mode != "v2":
+        return
+    selected = os.environ if environment is None else environment
+    expected = _strict_transaction_path(
+        _required_transaction_value(selected, TRANSACTION_DOCKER_ENV),
+        "transaction Docker wrapper",
+    )
+    lease = _required_transaction_value(
+        selected,
+        TRANSACTION_DOCKER_LEASE_ENV,
+    )
+    if (
+        docker != expected
+        or expected == Path("/usr/bin/docker")
+        or re.fullmatch(
+            rf"{re.escape(TRANSACTION_DOCKER_LEASE_KEY)}=[0-9a-f]{{64}}",
+            lease,
+        )
+        is None
+    ):
+        fail("transaction Docker lease binding differs")
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -3026,6 +3060,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--active-served-model-manifest", type=Path)
     parser.add_argument("--expected-served-model-manifest-sha256")
     parser.add_argument("--campaign-authorization", type=Path)
+    parser.add_argument("--docker", type=Path, default=Path("/usr/bin/docker"))
     return parser
 
 
@@ -3050,6 +3085,10 @@ def main(
         arguments.campaign_authorization,
     )
     try:
+        _require_v2_docker_binding(
+            arguments.docker,
+            active_binding_mode=arguments.active_binding_mode,
+        )
         if arguments.execute and runtime is not None and executor is None:
             fail("injected preparation runtime requires an injected executor")
         selected = SystemProductionPreparationRuntime() if runtime is None else runtime

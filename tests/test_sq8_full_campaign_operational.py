@@ -240,16 +240,16 @@ class FakeGatewayHttp:
                 TOOL.HttpResponse(GATEWAY_URL, 200, TOOL.GATEWAY_READY_BODY),
             ]
         )
-        self.calls: list[tuple[int, float, int]] = []
+        self.calls: list[tuple[str, float, int]] = []
 
     def get(
         self,
-        container_pid: int,
+        container_id: str,
         *,
         timeout_seconds: float,
         maximum_body_bytes: int,
     ) -> Any:
-        self.calls.append((container_pid, timeout_seconds, maximum_body_bytes))
+        self.calls.append((container_id, timeout_seconds, maximum_body_bytes))
         if not self.responses:
             raise AssertionError("gateway HTTP fixture exhausted")
         return self.responses.pop(0)
@@ -459,7 +459,10 @@ class OperationalPreflightTests(unittest.TestCase):
         self.assertTrue(
             all(call[1] == TOOL.HTTP_TIMEOUT_SECONDS for call in http.calls)
         )
-        self.assertEqual([call[0] for call in gateway_http.calls], [404, 404])
+        self.assertEqual(
+            [call[0] for call in gateway_http.calls],
+            [CONTAINER_ID, CONTAINER_ID],
+        )
         self.assertEqual(observer.paths, [Path("/run/ullm/lifecycle-observer.sock")])
         self.assertEqual(observer.handle.closed, 1)
         flattened = " ".join(item for call in commands.calls for item in call[0])
@@ -1016,6 +1019,39 @@ class BoundedDependencyTests(unittest.TestCase):
         self.assertIn(TOOL._systemd_command("ullm-openai.service"), commands)
         self.assertIn(TOOL._docker_command("open-webui"), commands)
 
+    def test_transaction_wrapper_reaches_inspect_and_helper_container(self) -> None:
+        wrapper = "/source/tools/ullm-campaign-docker"
+        lease = TOOL.DOCKER_LEASE_KEY + "=" + "7" * 64
+        environment = {
+            TOOL.DOCKER_ENVIRONMENT: wrapper,
+            TOOL.DOCKER_LEASE_ENVIRONMENT: lease,
+        }
+        self.assertEqual(TOOL._campaign_docker(environment), wrapper)
+        child_environment = dict(TOOL._command_environment(environment))
+        self.assertEqual(child_environment[TOOL.DOCKER_ENVIRONMENT], wrapper)
+        self.assertEqual(
+            child_environment[TOOL.DOCKER_LEASE_ENVIRONMENT],
+            lease,
+        )
+        process = FakePopenProcess(stdout=TOOL.GATEWAY_NAMESPACE_OUTPUT)
+        factory = FakePopenFactory(process)
+        with (
+            mock.patch.object(TOOL, "DOCKER_BIN", wrapper),
+            mock.patch.object(TOOL.subprocess, "Popen", factory),
+            mock.patch.object(TOOL.os, "killpg") as killpg,
+        ):
+            self.assertEqual(
+                TOOL._docker_command("open-webui")[0],
+                wrapper,
+            )
+            TOOL.ProductionGatewayNamespaceReader().get(
+                CONTAINER_ID,
+                timeout_seconds=TOOL.HTTP_TIMEOUT_SECONDS,
+                maximum_body_bytes=TOOL.MAX_HTTP_BODY_BYTES,
+            )
+        self.assertEqual(factory.calls[0][0][:3], [wrapper, "run", "--rm"])
+        killpg.assert_not_called()
+
     def test_http_reader_rejects_nonallowlisted_url_before_network_io(self) -> None:
         reader = TOOL.BoundedHttpReader(frozenset({GATEWAY_URL}))
         with self.assertRaisesRegex(TOOL.OperationalError, "allowlist"):
@@ -1035,7 +1071,7 @@ class BoundedDependencyTests(unittest.TestCase):
             mock.patch.object(TOOL.os, "killpg", killpg),
         ):
             response = TOOL.ProductionGatewayNamespaceReader().get(
-                404,
+                CONTAINER_ID,
                 timeout_seconds=TOOL.HTTP_TIMEOUT_SECONDS,
                 maximum_body_bytes=TOOL.MAX_HTTP_BODY_BYTES,
             )
@@ -1055,17 +1091,23 @@ class BoundedDependencyTests(unittest.TestCase):
         self.assertEqual(
             factory.calls[0][0],
             [
-                "/usr/bin/sudo",
-                "-n",
-                "/usr/bin/nsenter",
-                "--target",
-                "404",
-                "--net",
-                "--setgid",
-                "1000",
-                "--setuid",
-                "1000",
-                *TOOL.PYTHON_PREFIX,
+                TOOL.DOCKER_BIN,
+                "run",
+                "--rm",
+                "--pull=never",
+                f"--network=container:{CONTAINER_ID}",
+                "--user=1000:1000",
+                "--read-only",
+                "--cap-drop=ALL",
+                "--security-opt=no-new-privileges",
+                "--pids-limit=32",
+                "--memory=128m",
+                "--tmpfs=/tmp:rw,noexec,nosuid,nodev,size=8388608",
+                "--entrypoint=python3",
+                TOOL.OPENWEBUI_IMAGE_ID,
+                "-I",
+                "-S",
+                "-B",
                 "-c",
                 TOOL.GATEWAY_NAMESPACE_SOURCE,
             ],
@@ -1074,33 +1116,47 @@ class BoundedDependencyTests(unittest.TestCase):
         self.assertIn("HTTPConnection('172.20.0.1',8000,timeout=5.0)", source)
         self.assertIn("c.request('GET','/readyz'", source)
         flattened = " ".join(factory.calls[0][0])
-        for forbidden in ("docker run", "docker exec", " restart ", " kill "):
+        for forbidden in (
+            "docker exec",
+            "--mount",
+            "--volume",
+            "/run/secrets",
+            " restart ",
+            " kill ",
+        ):
             self.assertNotIn(forbidden, flattened)
         self.assertEqual(dataclasses.fields(TOOL.ProductionGatewayNamespaceReader), ())
         self.assertIs(factory.calls[0][1]["stdin"], TOOL.subprocess.DEVNULL)
         self.assertEqual(factory.calls[0][1]["env"], dict(TOOL.COMMAND_ENVIRONMENT))
-        self.assertFalse(factory.calls[0][1]["start_new_session"])
-        self.assertEqual(factory.calls[0][1]["process_group"], 0)
+        self.assertTrue(factory.calls[0][1]["start_new_session"])
+        self.assertIsNone(factory.calls[0][1]["process_group"])
         self.assertTrue(process.stdout.closed)
         self.assertTrue(process.stderr.closed)
         killpg.assert_not_called()
 
-    def test_gateway_namespace_reader_rejects_pid_and_limit_drift(self) -> None:
+    def test_gateway_namespace_reader_rejects_container_id_and_limit_drift(
+        self,
+    ) -> None:
         reader = TOOL.ProductionGatewayNamespaceReader()
         cases = (
-            (False, TOOL.HTTP_TIMEOUT_SECONDS, TOOL.MAX_HTTP_BODY_BYTES, "PID"),
-            (0, TOOL.HTTP_TIMEOUT_SECONDS, TOOL.MAX_HTTP_BODY_BYTES, "PID"),
-            (404, 9.0, TOOL.MAX_HTTP_BODY_BYTES, "timeout"),
-            (404, TOOL.HTTP_TIMEOUT_SECONDS, 4095, "body bound"),
+            (False, TOOL.HTTP_TIMEOUT_SECONDS, TOOL.MAX_HTTP_BODY_BYTES, "ID"),
+            ("", TOOL.HTTP_TIMEOUT_SECONDS, TOOL.MAX_HTTP_BODY_BYTES, "ID"),
+            ("g" * 64, TOOL.HTTP_TIMEOUT_SECONDS, TOOL.MAX_HTTP_BODY_BYTES, "ID"),
+            (CONTAINER_ID, 9.0, TOOL.MAX_HTTP_BODY_BYTES, "timeout"),
+            (CONTAINER_ID, TOOL.HTTP_TIMEOUT_SECONDS, 4095, "body bound"),
         )
-        for pid, timeout, maximum, message in cases:
+        for container_id, timeout, maximum, message in cases:
             with (
-                self.subTest(pid=pid, timeout=timeout, maximum=maximum),
+                self.subTest(
+                    container_id=container_id,
+                    timeout=timeout,
+                    maximum=maximum,
+                ),
                 mock.patch.object(TOOL.subprocess, "Popen") as popen,
                 self.assertRaisesRegex(TOOL.OperationalError, message),
             ):
                 reader.get(
-                    pid,
+                    container_id,
                     timeout_seconds=timeout,
                     maximum_body_bytes=maximum,
                 )
@@ -1130,7 +1186,7 @@ class BoundedDependencyTests(unittest.TestCase):
             ):
                 warnings.simplefilter("error", ResourceWarning)
                 TOOL.ProductionGatewayNamespaceReader().get(
-                    404,
+                    CONTAINER_ID,
                     timeout_seconds=TOOL.HTTP_TIMEOUT_SECONDS,
                     maximum_body_bytes=TOOL.MAX_HTTP_BODY_BYTES,
                 )
@@ -1155,7 +1211,7 @@ class BoundedDependencyTests(unittest.TestCase):
             self.assertRaises(KeyboardInterrupt),
         ):
             TOOL.ProductionGatewayNamespaceReader().get(
-                404,
+                CONTAINER_ID,
                 timeout_seconds=TOOL.HTTP_TIMEOUT_SECONDS,
                 maximum_body_bytes=TOOL.MAX_HTTP_BODY_BYTES,
             )
@@ -1163,9 +1219,11 @@ class BoundedDependencyTests(unittest.TestCase):
         self.assertTrue(process.stdout.closed)
         self.assertTrue(process.stderr.closed)
 
-    def test_gateway_namespace_reader_rejects_sudo_or_nsenter_failure(self) -> None:
+    def test_gateway_namespace_reader_rejects_helper_container_failure(
+        self,
+    ) -> None:
         process = FakePopenProcess(
-            stderr=b"sudo or nsenter failed",
+            stderr=b"helper container failed",
             return_code=1,
         )
         factory = FakePopenFactory(process)
@@ -1175,7 +1233,7 @@ class BoundedDependencyTests(unittest.TestCase):
             self.assertRaisesRegex(TOOL.OperationalError, "exited 1"),
         ):
             TOOL.ProductionGatewayNamespaceReader().get(
-                404,
+                CONTAINER_ID,
                 timeout_seconds=TOOL.HTTP_TIMEOUT_SECONDS,
                 maximum_body_bytes=TOOL.MAX_HTTP_BODY_BYTES,
             )

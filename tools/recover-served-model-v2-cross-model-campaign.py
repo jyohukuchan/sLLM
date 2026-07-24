@@ -52,6 +52,27 @@ def _existing(path: Path, label: str) -> Path:
         raise recovery.RecoveryError(f"{label} is unavailable") from error
 
 
+def _lexical_absolute(path: Path, label: str) -> Path:
+    """Validate an identity-only path without requiring its former leaf."""
+
+    text = os.fspath(path)
+    if (
+        not path.is_absolute()
+        or text.startswith("//")
+        or path.name in {"", ".", ".."}
+        or ".." in path.parts
+    ):
+        raise recovery.RecoveryError(
+            f"{label} is not a canonical absolute path"
+        )
+    normalized = Path(os.path.abspath(text))
+    if normalized != path or os.fspath(normalized) != text:
+        raise recovery.RecoveryError(
+            f"{label} is not a canonical absolute path"
+        )
+    return normalized
+
+
 def _request(
     args: argparse.Namespace,
     claim: authorization.ClaimRecord,
@@ -61,7 +82,13 @@ def _request(
         raise recovery.RecoveryError(
             "recovery runner must execute from the sealed source root"
         )
-    candidate = _existing(args.candidate_manifest, "candidate manifest")
+    # Recovery recognizes SQ8 from the authorization and actual active bytes.
+    # The original candidate pathname is retained only as a plan identity and
+    # deliberately need not survive a failed candidate window.
+    candidate = _lexical_absolute(
+        args.candidate_manifest,
+        "candidate manifest",
+    )
     commands = plan.derive_commands(
         source_root=source_root,
         authorization_path=claim.authorization.snapshot.path,

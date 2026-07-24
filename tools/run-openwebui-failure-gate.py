@@ -3386,6 +3386,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--control-timeout-ms", type=int, default=180_000)
     parser.add_argument("--recovery-probe-timeout-seconds", type=int, default=180)
     args = parser.parse_args(argv)
+    transaction_docker = os.environ.get("ULLM_CAMPAIGN_DOCKER")
+    if transaction_docker is not None and args.docker != transaction_docker:
+        parser.error("--docker differs from the transaction lease wrapper")
     if args.timeout_seconds < 60 or args.timeout_seconds > 1800:
         parser.error("--timeout-seconds must be between 60 and 1800")
     if args.control_timeout_ms < 10_000 or args.control_timeout_ms > 600_000:

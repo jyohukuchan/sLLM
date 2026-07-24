@@ -1397,6 +1397,50 @@ class CollectorTestCase(unittest.TestCase):
             snapshots.close()
         self.assertFalse(directory.exists())
 
+    def test_transaction_wrapper_reaches_http_client_and_ready_containers(self):
+        wrapper = "/source/tools/ullm-campaign-docker"
+        lease = COLLECTOR.DOCKER_LEASE_KEY + "=" + "8" * 64
+        environment = {
+            COLLECTOR.DOCKER_ENVIRONMENT: wrapper,
+            COLLECTOR.DOCKER_LEASE_ENVIRONMENT: lease,
+        }
+        self.assertEqual(COLLECTOR._campaign_docker(environment), wrapper)
+        child_environment = COLLECTOR._host_command_environment(environment)
+        self.assertEqual(child_environment[COLLECTOR.DOCKER_ENVIRONMENT], wrapper)
+        self.assertEqual(
+            child_environment[COLLECTOR.DOCKER_LEASE_ENVIRONMENT],
+            lease,
+        )
+
+        self.root.chmod(0o700)
+        snapshots = COLLECTOR.RuntimeSnapshots.create(
+            b"print('client')\n",
+            SECRET,
+            parent=self.root,
+        )
+        try:
+            with mock.patch.object(COLLECTOR, "DOCKER_BIN", wrapper):
+                command = COLLECTOR.build_http_client_command(
+                    self.config,
+                    snapshots,
+                )
+                runtime = object.__new__(COLLECTOR.SystemRuntime)
+                runtime.config = mock.Mock(
+                    identities=self.config.identities
+                )
+                with mock.patch.object(
+                    COLLECTOR,
+                    "run_bounded_command",
+                    return_value=b"200\n",
+                ) as bounded:
+                    self.assertEqual(runtime._ready_status(), 200)
+            self.assertEqual(command[0], wrapper)
+            ready_command = bounded.call_args.args[0]
+            self.assertEqual(ready_command[0], wrapper)
+            self.assertEqual(ready_command[1:4], ["run", "--rm", "--pull=never"])
+        finally:
+            snapshots.close()
+
     def test_system_runtime_config_is_deeply_snapshotted_and_immutable(self):
         identities = json.loads(json.dumps(self.config.identities))
         expected_image = identities["openwebui"]["derived_image_id"]

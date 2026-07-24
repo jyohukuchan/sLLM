@@ -32,6 +32,10 @@ COMMAND_ENVIRONMENT = {
     "SYSTEMD_COLORS": "0",
     "SYSTEMD_PAGER": "",
 }
+DOCKER_ENVIRONMENT = "ULLM_CAMPAIGN_DOCKER"
+DOCKER_LEASE_ENVIRONMENT = "ULLM_CAMPAIGN_DOCKER_LEASE_LABEL"
+DOCKER_LEASE_KEY = "com.ultimatellm.served-model-campaign.claim"
+DEFAULT_DOCKER = "/usr/bin/docker"
 MAX_STDOUT_BYTES = 64 << 10
 MAX_STDERR_BYTES = 64 << 10
 READ_CHUNK_BYTES = 16 << 10
@@ -82,6 +86,46 @@ class ProductionBackendError(RuntimeError):
 
 def fail(message: str) -> NoReturn:
     raise ProductionBackendError(message)
+
+
+def _campaign_docker(
+    environment: Mapping[str, str] | None = None,
+) -> str:
+    selected = os.environ if environment is None else environment
+    docker = selected.get(DOCKER_ENVIRONMENT)
+    lease = selected.get(DOCKER_LEASE_ENVIRONMENT)
+    if docker is None and lease is None:
+        return DEFAULT_DOCKER
+    if (
+        type(docker) is not str
+        or not docker
+        or "\x00" in docker
+        or not docker.startswith("/")
+        or os.path.normpath(docker) != docker
+        or docker == DEFAULT_DOCKER
+        or type(lease) is not str
+        or re.fullmatch(
+            rf"{re.escape(DOCKER_LEASE_KEY)}=[0-9a-f]{{64}}",
+            lease,
+        )
+        is None
+    ):
+        fail("production Docker lease environment differs")
+    return docker
+
+
+def _command_environment(
+    environment: Mapping[str, str] | None = None,
+) -> dict[str, str]:
+    selected = os.environ if environment is None else environment
+    result = dict(COMMAND_ENVIRONMENT)
+    docker = _campaign_docker(selected)
+    if docker != DEFAULT_DOCKER:
+        result[DOCKER_ENVIRONMENT] = docker
+        result[DOCKER_LEASE_ENVIRONMENT] = selected[
+            DOCKER_LEASE_ENVIRONMENT
+        ]
+    return result
 
 
 class SecretOwnerProtocol(Protocol):
@@ -238,6 +282,7 @@ def build_gate_argv(
         ]
     else:
         fail("unsupported production gate")
+    command += ["--docker", _campaign_docker()]
     return tuple(command)
 
 
@@ -301,7 +346,7 @@ class BoundedGateRunner:
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            env=COMMAND_ENVIRONMENT,
+            env=_command_environment(),
             close_fds=True,
             start_new_session=True,
         )
@@ -394,6 +439,7 @@ def _is_allowed_command(command: tuple[str, ...]) -> bool:
             "--api-key-file",
             "--http-image-id",
             "--docker-network-id",
+            "--docker",
         ),
         "combined": (
             "--output-dir",
@@ -402,12 +448,14 @@ def _is_allowed_command(command: tuple[str, ...]) -> bool:
             "--openwebui-url",
             "--service",
             "--include-smoke",
+            "--docker",
         ),
         "direct_cancel": (
             "--output-dir",
             "--api-key-file",
             "--http-image-id",
             "--docker-network-id",
+            "--docker",
         ),
         "stop": (
             "--output-dir",
@@ -415,6 +463,7 @@ def _is_allowed_command(command: tuple[str, ...]) -> bool:
             "--browser-image",
             "--openwebui-url",
             "--service",
+            "--docker",
         ),
         "failure": (
             "--output-dir",
@@ -425,6 +474,7 @@ def _is_allowed_command(command: tuple[str, ...]) -> bool:
             "--ready-url",
             "--network",
             "--service",
+            "--docker",
         ),
         "latency": (
             "--output-dir",
@@ -432,6 +482,7 @@ def _is_allowed_command(command: tuple[str, ...]) -> bool:
             "--http-image-id",
             "--docker-network-id",
             "--expected-epoch-file",
+            "--docker",
         ),
     }
     index = 5

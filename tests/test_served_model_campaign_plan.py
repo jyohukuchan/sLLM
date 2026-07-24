@@ -15,6 +15,7 @@ if str(TOOLS) not in sys.path:
     sys.path.insert(0, str(TOOLS))
 
 import served_model_campaign_plan as PLAN
+import served_model_campaign_transaction as TRANSACTION
 
 
 def test_fixed_plan_paths_equal_authorization_policy_defaults() -> None:
@@ -52,6 +53,10 @@ RECOVERY = load_script(
 ISSUE = load_script(
     "issue-served-model-v2-cross-model-campaign-authorization.py",
     "test_cross_model_issue_cli",
+)
+BROWSER = load_script(
+    "run-openwebui-reasoning-browser-smoke.py",
+    "test_cross_model_aq4_browser_cli",
 )
 
 
@@ -120,6 +125,7 @@ def test_fixed_plan_derives_every_command_without_caller_vectors(
         candidate_manifest=candidate,
         authorization_document=authorization_document(tmp_path),
     )
+    TRANSACTION._require_docker_lease_wrapper_commands(commands, source)
 
     flattened = [
         *commands.candidate_reconciliation,
@@ -135,11 +141,12 @@ def test_fixed_plan_derives_every_command_without_caller_vectors(
     ]
     assert commands.candidate_reconciliation == commands.reverse_reconciliation
     assert commands.candidate_checks == commands.final_checks
+    docker_wrapper = str(source / "tools/ullm-campaign-docker")
     verifier = (
         *PLAN.PYTHON_PREFIX,
         str(source / "tools/verify-openwebui-container-image.py"),
         "--docker",
-        PLAN.DOCKER,
+        docker_wrapper,
     )
     assert commands.candidate_reconciliation[-1] == verifier
     assert commands.candidate_checks[-1] == verifier
@@ -149,6 +156,18 @@ def test_fixed_plan_derives_every_command_without_caller_vectors(
     for command in flattened:
         if command[0] == PLAN.PYTHON:
             assert command[:4] == PLAN.PYTHON_PREFIX
+        if "--docker" in command:
+            assert command[command.index("--docker") + 1] == docker_wrapper
+        assert "/usr/bin/docker" not in command
+    for command in (
+        commands.candidate_reconciliation[1],
+        commands.candidate_reconciliation[2],
+        commands.candidate_checks[1],
+        commands.reverse_reconciliation[1],
+        commands.reverse_reconciliation[2],
+        commands.final_checks[1],
+    ):
+        assert command[:5] == (*PLAN.PYTHON_PREFIX, docker_wrapper)
     for command in (
         commands.sq8_full,
         commands.reasoning_release,
@@ -170,6 +189,9 @@ def test_fixed_plan_derives_every_command_without_caller_vectors(
         source / "tools/run-openwebui-reasoning-browser-smoke.py"
     )
     assert str(PLAN.ACTIVE_MANIFEST) in commands.sq8_full
+    assert commands.sq8_full[
+        commands.sq8_full.index("--docker") + 1
+    ] == docker_wrapper
     assert PLAN.SERVICE_UNIT in commands.reasoning_release
     assert PLAN.SERVICE_UNIT in commands.reasoning_browser
     for command in (
@@ -182,11 +204,19 @@ def test_fixed_plan_derives_every_command_without_caller_vectors(
         assert "--campaign-authorization" not in command
         assert command[4].startswith(str(tmp_path / "aq4-source"))
     assert "--token-file" in commands.aq4_reasoning_release[0]
-    assert "--token-file" in commands.aq4_reasoning_browser[0]
     assert (
         "--openwebui-session-token-file"
-        not in commands.aq4_reasoning_browser[0]
+        in commands.aq4_reasoning_browser[0]
     )
+    assert "--token-file" not in commands.aq4_reasoning_browser[0]
+    parsed_aq4_browser = BROWSER.parse_args(
+        list(commands.aq4_reasoning_browser[0][5:])
+    )
+    assert (
+        parsed_aq4_browser.openwebui_session_token_file
+        == PLAN.OPENWEBUI_SESSION_TOKEN_FILE
+    )
+    assert parsed_aq4_browser.active_binding_mode == "legacy"
     assert commands.aq4_reasoning_browser[0][
         commands.aq4_reasoning_browser[0].index("--model-name") + 1
     ] == "uLLM Qwen3.5 9B AQ4 reasoning"
@@ -276,6 +306,57 @@ def test_campaign_and_recovery_runners_reject_another_source_root(
         match="sealed source root",
     ):
         RECOVERY._request(args, record)
+
+
+def test_recovery_cli_request_does_not_require_candidate_leaf(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate = tmp_path / "removed-candidate.json"
+    authorization_path = tmp_path / "authorization.json"
+    commands = SimpleNamespace(fixed=True)
+    captured: dict[str, object] = {}
+
+    def derive_commands(**kwargs: object) -> object:
+        captured.update(kwargs)
+        return commands
+
+    monkeypatch.setattr(RECOVERY.plan, "derive_commands", derive_commands)
+    claim = SimpleNamespace(
+        authorization=SimpleNamespace(
+            snapshot=SimpleNamespace(path=authorization_path),
+            document={},
+        )
+    )
+    args = SimpleNamespace(
+        source_root=RECOVERY.REPOSITORY_ROOT,
+        candidate_manifest=candidate,
+        command_timeout_seconds=10.0,
+    )
+
+    request = RECOVERY._request(args, claim)
+
+    assert not candidate.exists()
+    assert request.candidate_manifest == candidate
+    assert captured["candidate_manifest"] == candidate
+
+
+@pytest.mark.parametrize(
+    "candidate",
+    (
+        Path("relative-candidate.json"),
+        Path("//tmp/double-root-candidate.json"),
+        Path("/tmp/parent/../candidate.json"),
+    ),
+)
+def test_recovery_cli_rejects_noncanonical_candidate_identity(
+    candidate: Path,
+) -> None:
+    with pytest.raises(
+        RECOVERY.recovery.RecoveryError,
+        match="canonical absolute",
+    ):
+        RECOVERY._lexical_absolute(candidate, "candidate manifest")
 
 
 def test_campaign_preflight_report_exposes_both_source_seals(

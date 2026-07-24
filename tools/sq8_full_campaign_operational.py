@@ -25,7 +25,7 @@ import time
 import urllib.parse
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any, NoReturn, Protocol, cast
+from typing import Any, Mapping, NoReturn, Protocol, cast
 
 
 MAX_COMMAND_STDOUT_BYTES = 8 << 20
@@ -44,9 +44,10 @@ KFD_GPU_ID = 51_545
 AMD_SMI_BIN = "/opt/rocm/bin/amd-smi"
 AMD_SMI_SCRIPT = "/opt/rocm-7.2.1/libexec/amdsmi_cli/amdsmi_cli.py"
 SYSTEMCTL_BIN = "/usr/bin/systemctl"
-DOCKER_BIN = "/usr/bin/docker"
-SUDO_BIN = "/usr/bin/sudo"
-NSENTER_BIN = "/usr/bin/nsenter"
+DEFAULT_DOCKER_BIN = "/usr/bin/docker"
+DOCKER_ENVIRONMENT = "ULLM_CAMPAIGN_DOCKER"
+DOCKER_LEASE_ENVIRONMENT = "ULLM_CAMPAIGN_DOCKER_LEASE_LABEL"
+DOCKER_LEASE_KEY = "com.ultimatellm.served-model-campaign.claim"
 PYTHON_BIN = "/usr/bin/python3.12"
 PYTHON_PREFIX = (PYTHON_BIN, "-I", "-S", "-B")
 AMD_SMI_COMMAND_PREFIX = (
@@ -66,7 +67,7 @@ OPENWEBUI_NETWORK_NAME = "open-webui-network"
 OPENWEBUI_NETWORK_ID = (
     "79bb7cfca31cb5d76978cbbb229c946662c137b93ea647b5ae6c205af9126dc8"
 )
-COMMAND_ENVIRONMENT = (
+BASE_COMMAND_ENVIRONMENT = (
     ("HOME", "/"),
     ("LANG", "C"),
     ("LC_ALL", "C"),
@@ -101,6 +102,49 @@ class OperationalError(RuntimeError):
 
 def fail(message: str) -> NoReturn:
     raise OperationalError(message)
+
+
+def _campaign_docker(
+    environment: Mapping[str, str] | None = None,
+) -> str:
+    selected = os.environ if environment is None else environment
+    docker = selected.get(DOCKER_ENVIRONMENT)
+    lease = selected.get(DOCKER_LEASE_ENVIRONMENT)
+    if docker is None and lease is None:
+        return DEFAULT_DOCKER_BIN
+    if (
+        type(docker) is not str
+        or not docker.startswith("/")
+        or "\x00" in docker
+        or os.path.normpath(docker) != docker
+        or docker == DEFAULT_DOCKER_BIN
+        or type(lease) is not str
+        or re.fullmatch(
+            rf"{re.escape(DOCKER_LEASE_KEY)}=[0-9a-f]{{64}}",
+            lease,
+        )
+        is None
+    ):
+        fail("campaign Docker lease environment differs")
+    return docker
+
+
+def _command_environment(
+    environment: Mapping[str, str] | None = None,
+) -> tuple[tuple[str, str], ...]:
+    selected = os.environ if environment is None else environment
+    result = dict(BASE_COMMAND_ENVIRONMENT)
+    docker = _campaign_docker(selected)
+    if docker != DEFAULT_DOCKER_BIN:
+        result[DOCKER_ENVIRONMENT] = docker
+        result[DOCKER_LEASE_ENVIRONMENT] = selected[
+            DOCKER_LEASE_ENVIRONMENT
+        ]
+    return tuple(result.items())
+
+
+DOCKER_BIN = _campaign_docker()
+COMMAND_ENVIRONMENT = _command_environment()
 
 
 @dataclasses.dataclass(frozen=True)
@@ -245,7 +289,7 @@ class HttpReader(Protocol):
 class GatewayNamespaceReader(Protocol):
     def get(
         self,
-        container_pid: int,
+        container_id: str,
         *,
         timeout_seconds: float,
         maximum_body_bytes: int,
@@ -520,33 +564,42 @@ class BoundedHttpReader:
 
 @dataclasses.dataclass(frozen=True)
 class ProductionGatewayNamespaceReader:
-    """Read gateway readiness through an existing container network namespace."""
+    """Read readiness through one lease-labeled, mount-free helper container."""
 
     def get(
         self,
-        container_pid: int,
+        container_id: str,
         *,
         timeout_seconds: float,
         maximum_body_bytes: int,
     ) -> HttpResponse:
-        if type(container_pid) is not int or container_pid <= 0:
-            fail("gateway namespace PID differs")
+        if (
+            type(container_id) is not str
+            or CONTAINER_ID_RE.fullmatch(container_id) is None
+        ):
+            fail("gateway namespace container ID differs")
         if timeout_seconds != HTTP_TIMEOUT_SECONDS:
             fail("gateway namespace timeout differs")
         if maximum_body_bytes != MAX_HTTP_BODY_BYTES:
             fail("gateway namespace body bound differs")
         arguments = (
-            SUDO_BIN,
-            "-n",
-            NSENTER_BIN,
-            "--target",
-            str(container_pid),
-            "--net",
-            "--setgid",
-            str(EXECUTION_GID),
-            "--setuid",
-            str(EXECUTION_UID),
-            *PYTHON_PREFIX,
+            DOCKER_BIN,
+            "run",
+            "--rm",
+            "--pull=never",
+            f"--network=container:{container_id}",
+            f"--user={EXECUTION_UID}:{EXECUTION_GID}",
+            "--read-only",
+            "--cap-drop=ALL",
+            "--security-opt=no-new-privileges",
+            "--pids-limit=32",
+            "--memory=128m",
+            "--tmpfs=/tmp:rw,noexec,nosuid,nodev,size=8388608",
+            "--entrypoint=python3",
+            OPENWEBUI_IMAGE_ID,
+            "-I",
+            "-S",
+            "-B",
             "-c",
             GATEWAY_NAMESPACE_SOURCE,
         )
@@ -555,7 +608,6 @@ class ProductionGatewayNamespaceReader:
             label="gateway namespace readiness GET",
             timeout_seconds=HTTP_TIMEOUT_SECONDS,
             maximum_stdout_bytes=len(GATEWAY_NAMESPACE_OUTPUT),
-            preserve_controlling_tty=True,
         )
         if raw != GATEWAY_NAMESPACE_OUTPUT:
             fail("gateway namespace readiness output differs")
@@ -1269,10 +1321,10 @@ def _http_get(http: HttpReader, url: str, body: bytes, label: str) -> HttpRespon
 
 
 def _gateway_get(
-    gateway_http: GatewayNamespaceReader, container_pid: int, url: str, label: str
+    gateway_http: GatewayNamespaceReader, container_id: str, url: str, label: str
 ) -> HttpResponse:
     response = gateway_http.get(
-        container_pid,
+        container_id,
         timeout_seconds=HTTP_TIMEOUT_SECONDS,
         maximum_body_bytes=MAX_HTTP_BODY_BYTES,
     )
@@ -1354,7 +1406,7 @@ def run_operational_preflight(
         container_before = _capture_container(dependencies.commands, expectation)
         ready = _gateway_get(
             dependencies.gateway_http,
-            container_before.pid,
+            container_before.container_id,
             expectation.gateway_ready_url,
             "gateway readiness",
         )
@@ -1374,7 +1426,7 @@ def run_operational_preflight(
         )
         _gateway_get(
             dependencies.gateway_http,
-            container_before.pid,
+            container_before.container_id,
             expectation.gateway_ready_url,
             "final gateway readiness",
         )

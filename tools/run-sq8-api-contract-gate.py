@@ -1666,6 +1666,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--api-key-file", type=Path, required=True)
     parser.add_argument("--http-image-id", required=True)
     parser.add_argument("--docker-network-id", required=True)
+    parser.add_argument("--docker", default="/usr/bin/docker")
     return parser
 
 
@@ -1678,6 +1679,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         docker_network_id=namespace.docker_network_id,
     )
     try:
+        if namespace.docker != DIRECT.COL.DOCKER_BIN:
+            fail("API contract Docker executable binding differs")
         result = execute(arguments)
     except Exception:
         print("SQ8 API contract gate failed", file=sys.stderr)

@@ -1799,6 +1799,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--api-key-file", type=Path, required=True)
     parser.add_argument("--http-image-id", required=True)
     parser.add_argument("--docker-network-id", required=True)
+    parser.add_argument("--docker", default="/usr/bin/docker")
     parser.add_argument("--expected-epoch-file", type=Path, required=True)
     return parser
 
@@ -1813,6 +1814,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         expected_epoch_file=namespace.expected_epoch_file,
     )
     try:
+        if namespace.docker != COL.DOCKER_BIN:
+            fail("HTTP latency Docker executable binding differs")
         result = execute(arguments)
     except (LatencyGateError, DIRECT.GateError, COL.CollectorError) as error:
         print(f"SQ8 HTTP latency gate: {error}", file=sys.stderr)

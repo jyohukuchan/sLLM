@@ -1,14 +1,16 @@
 # SQ8_0 Qwen3-14B-FP8 production promotion runbook v0.1
 
-Status (2026-07-24): **v2 is selected; cutover is not authorized yet.** The
+Status (2026-07-24): **v2 implementation is prepared; cutover is not
+authorized yet.** The
 immutable SQ8_0 product artifact and the complete 2026-07-12 historical
 campaign have both been revalidated, but that campaign is bound to an
 unavailable historical worker binary, `ullm.worker.v1`, and a legacy worker
 invocation. It is not evidence for the current manifest-capable SQ8 worker.
 The previously documented v1 activation alternative is closed by the user's
-v2 decision. This runbook therefore stops before an `active.json` change
-until the SQ8 v2 implementation items in sections 9 through 14 exist and a
-fresh, identity-bound candidate-active campaign has completed.
+v2 decision. Sections 12 through 14 retain the investigation/design history;
+section 15 records the implemented state. This runbook still stops before an
+`active.json` change because the final clean worker build and fresh,
+identity-bound candidate-active campaigns have not completed.
 
 This concerns the independent `SQ8_0` FP8 E4M3 format for
 `Qwen/Qwen3-14B-FP8`. It is not AQ4_0 with FP8 applied to selected tensors.
@@ -793,11 +795,11 @@ existing EOS IDs `151645` and `151643`. The initial contract to test is:
 }
 ```
 
-These token IDs are fixed tokenizer facts; the dialect name, budget policy,
-and interaction with `template_options.enable_thinking` are proposed serving
-semantics. Freeze them only after the CPU protocol/state tests in section 13
-prove disabled, zero-budget, bounded, forced-close, EOS-close, unbounded,
-history-omission, and answer-reservation behavior.
+These token IDs are fixed tokenizer facts. The dialect and budget policy were
+subsequently ratified after CPU tests covered disabled, zero-budget, bounded,
+forced-close, EOS-close, unbounded, history-omission, answer-reservation,
+cancellation, and accounting behavior. This paragraph is the original design
+input; the ratified v0.2 contracts are authoritative.
 
 ### 12.2 SQ8 serving-promotion receipt
 
@@ -892,9 +894,10 @@ request at release if usage was not supplied.
 
 There is a second protocol gap: the decoder accepts both v1 and v2
 discriminators, while `decode_with_profile()` does not enforce the loaded
-profile's worker schema. A v2-profile SQ8 worker can therefore accept v1
+profile's worker schema. A v2-profile SQ8 worker could therefore accept v1
 commands without the explicit launcher compatibility mode required by the
-proposed protocol v0.2 contract. Enforce exact profile-schema equality for
+now-ratified protocol v0.2 contract. The implementation enforces exact
+profile-schema equality for
 `generate`, `cancel`, and `shutdown`; any v1 compatibility mode must be
 separately explicit and disabled in the production v2 profile. Add
 wrong-discriminator and mixed-request negative tests.
@@ -958,11 +961,12 @@ Bundle v2 must also close two current-main AQ4 gaps:
   the bundled `promotion_receipt` component SHA-256, then require its schema,
   source, evidence reference, and worker identity to match the SQ8 promotion
   branch; and
-- introduce `ullm.openwebui.reasoning_browser_smoke.v3` rather than
-  reinterpreting browser v1/v2. It must add `source_commit` and an exact
-  `identity` object with `manifest_sha256`, `worker_binary_sha256`,
-  `tokenizer_sha256`, and content-addressed `openwebui_image`, all equal to
-  bundle identity.
+- retain `ullm.openwebui.reasoning_browser_smoke.v3` as the identity-bearing
+  intermediate schema and v4 as the lineage-only archive, then publish
+  `ullm.openwebui.reasoning_browser_smoke.v5` for bundle v2. V5 keeps exact
+  candidate/claim/run/output/actual-active lineage, separates the fixed
+  Playwright runner image from the OpenWebUI server identity, and records
+  exact server observations immediately before and after the browser gate.
 
 `activate-served-model.py` must dispatch the independently validated bundle
 schema explicitly: existing AQ4 remains on bundle v1 with unchanged
@@ -1002,6 +1006,13 @@ must hash the final validated campaign outputs. Historical 2026-07-12
 evidence remains archival and cannot satisfy any new identity slot.
 
 ### 12.7 Temporary cross-model v2 campaign window and durable one-shot
+
+The exact-three `.v1` shape in this subsection is the original unissued
+design draft. It is preserved as investigation history and is superseded by
+the exact-six authorization/claim/outcome/recovery `.v2` contract in
+`docs/specs/served-model-v2-cross-model-campaign-authorization-v0.2.md` and
+the implementation snapshot in section 15. No live operator may issue or
+claim the `.v1` shape below.
 
 Candidate-active browser evidence requires a controlled temporary AQ4-v2 to
 SQ8-v2 switch. Do not broaden
@@ -1092,13 +1103,14 @@ assembled against that rollback target. Final SQ8 activation then uses
 
 ### 12.8 Specification and immutable-publication prerequisites
 
-`docs/specs/served-model-manifest-v0.2.md` and
-`docs/specs/sq8-worker-protocol-v0.2.md` are still marked proposed, while
-`docs/specs/sq8-serving-session-v0.1.md`,
-`docs/specs/sq8-openwebui-release-v0.1.md`, and the current worker acceptance
-tools remain pinned to protocol v0.1. Ratify a versioned SQ8 v2 manifest,
-worker, serving-session, acceptance, and release contract before production;
-do not silently reinterpret the frozen v0.1 documents.
+`docs/specs/served-model-manifest-v0.2.md`,
+`docs/specs/sq8-worker-protocol-v0.2.md`,
+`docs/specs/sq8-worker-build-release-v0.2.md`,
+`docs/specs/sq8-serving-session-v0.2.md`,
+`docs/specs/sq8-worker-acceptance-v0.3.md`, and
+`docs/specs/sq8-openwebui-release-v0.2.md` are now ratified production
+contracts. Their new schemas coexist with read-only validation of archived
+v1 evidence; no frozen v0.1 document was reinterpreted.
 
 Receipt, evidence, authorization, claim, outcome, final candidate, and bundle
 publication all require atomic no-replace plus stable rehash. In particular,
@@ -1173,12 +1185,15 @@ this investigation.
 Cutover remains fail-closed until every item below is true:
 
 - [ ] The separate worker reconstruction is recorded as a baseline, and a
-      fresh final worker/build receipt is produced from the same clean release
-      commit after every worker-affecting v2 change.
+      fresh complete `sq8-worker-build-release-v0.2.md` directory is produced
+      from the same clean release commit after every worker-affecting v2
+      change. The complete directory is byte-copied and validated at its final
+      staged path before any absolute-path profile or promotion artifact is
+      generated.
 - [ ] Qwen3 reasoning dialect and budget semantics are approved and all Rust,
       gateway, generator, and mutation tests pass.
-- [ ] The proposed v2 manifest/worker/session/acceptance/release specs are
-      ratified, and a v2-profile worker rejects v1 commands unless an explicit
+- [x] The v2 manifest/worker/session/acceptance/release specs are ratified,
+      and a v2-profile worker rejects v1 commands unless an explicit
       non-production compatibility mode is selected.
 - [ ] The SQ8 serving promotion evidence/receipt pair exists and independently
       validates.
@@ -1189,13 +1204,25 @@ Cutover remains fail-closed until every item below is true:
 - [ ] Bundle v2 includes and independently recomputes the full SQ8 campaign,
       cross-binds candidate promotion receipt and browser identity, and rejects
       every v1/v2 or AQ4/SQ8 schema mix.
+- [ ] A separate AQ4-to-AQ4 runtime-hardening promotion has replaced the
+      current user-owned bootstrap closure with a root-owned protected
+      closure, fresh promotion pair, new frozen manifest, and immutable
+      locked-transaction outcome.
 - [ ] A human pre-issues the narrow AQ4-v2 to SQ8-v2 campaign authorization;
       its fixed-registry claim is atomically consumed exactly once.
+- [ ] The exact SQ8 and AQ4 campaign commits are separately materialized as
+      root-owned, non-writable standalone clones with in-tree `.git`
+      directories, no hardlinks/alternates/ACLs/symlinks, and protected
+      ancestry. The runner itself is invoked from the sealed SQ8 clone.
+- [ ] Both candidate and rollback manifests resolve only to root-owned sealed
+      runtime closures; worker/engine binaries, promotion inputs, tokenizers,
+      product/package manifests, and all payloads remain repinnable.
 - [ ] A real, private, sufficiently unexpired OpenWebUI frontend session JWT
       is provisioned for the parent-only browser gates.
-- [ ] Both fresh candidate-active campaign families are complete and bind the
-      same active/candidate bytes, claim, worker, product, source, model, and
-      image identities.
+- [ ] The three fresh candidate-active SQ8 campaigns and three fresh
+      restored-AQ4 campaigns are complete. Each phase binds its exact active
+      bytes, claim, run/output, worker, source, model, promotion, and image
+      identities without conflating the distinct AQ4 and SQ8 source lineages.
 - [ ] The encompassing wrapper restores the exact AQ4 rollback bytes,
       reconciles OpenWebUI back to AQ4, and publishes a successful immutable
       outcome before complete-bundle assembly.
@@ -1204,16 +1231,228 @@ Cutover remains fail-closed until every item below is true:
 - [ ] Post-activation `active.json` bytes equal the frozen candidate exactly;
       any later rollback uses the locked rollback subcommand.
 
-The only policy decisions still requiring a human are:
-
-1. approve or revise the proposed Qwen3 reasoning dialect/budgets after the
-   CPU behavior tests;
-2. ratify the versioned v2 manifest/worker/session/acceptance/release and
-   bundle-v2 contracts; and
-3. pre-issue the narrowly scoped cross-model candidate-window authorization
-   after reviewing its exact candidate, rollback, campaign, expiry, and
-   output identities.
+The remaining human decisions are operational: review the final clean
+worker/build receipt and exact candidate/rollback/run/output/expiry
+identities; pre-issue the narrow campaign authorization; then review the
+complete bundle-v2 and final-activation plan hashes before execution.
 
 OpenWebUI session-token provisioning is also an operator prerequisite, but it
 does not change the v2 design. No decision is needed about the historical
 overlay lineage: it is definitively out of scope and must not be imported.
+
+## 15. Implementation snapshot before live holds
+
+This section supersedes present-tense implementation gaps above while
+preserving the investigation history. It applies only to the independent
+Qwen3-14B-FP8 `SQ8_0`, never the historical Qwen3.5 `AQ4_0` partial-FP8
+overlay.
+
+### 15.1 Nine-step status
+
+| Step | Status |
+|---|---|
+| 1. Reasoning/accounting and worker-v2 equality | **Complete.** Exact v2 command discriminators and disabled, 0/32/128/256/unbounded, close, reservation, cancellation, publish, reset, and accounting paths are implemented. |
+| 2. V2 specifications | **Complete.** Manifest v0.2, worker v0.2, worker build release v0.2, session v0.2, acceptance v0.3, and OpenWebUI release v0.2 are ratified; archived v1 validation remains separate. |
+| 3. SQ8 promotion and AQ4/SQ8 dispatch | **Implementation complete; final artifacts wait for step 4.** SQ8 evidence/receipt validation and no-replace writers coexist with the unchanged AQ4 branch. |
+| 4. Final clean worker rebuild | **Pending at this documentation snapshot.** The earlier `uLLM-sq8-manifest-candidate-release-ee62d04e` is only a preserved baseline. No final path or hash is asserted here. |
+| 5. Per-stage active-byte binding | **Complete.** Ordered observations compare the actual active bytes to SQ8 before/after all three SQ8 campaigns and to exact restored AQ4 before/after all three AQ4 campaigns. Candidate copies, claims, run IDs, and outputs are validator-bound. |
+| 6. Generic bundle v2 | **Implementation complete; live complete bundle pending.** The SQ8 nine-slot path coexists with unchanged AQ4 bundle v1. A successful transaction produces the fresh AQ4 bundle v1; the later SQ8 bundle v2 awaits fresh GPU/JWT output. |
+| 7. One-shot authorization | **Implementation complete; not issued or claimed in production.** Schema v2 authorizes exactly six distinct campaigns, fixed AQ4/SQ8 lineages and separate fixed browser/server images, fixed registries, one atomic claim, one deadline, immutable outcome, and predecessor binding. Production admission additionally requires sealed source clones and runtime closures. |
+| 8. Locked campaign transaction | **Implementation complete in private/mock tests; production held.** Plan v2 runs the three SQ8 campaigns, unconditionally restores/reconciles AQ4, then runs fresh AQ4 reasoning/browser/bundle-v1 stages under the same lock/deadline. Legacy outputs use no-replace staging; source and complete runtime closures are recursively sealed/repinned; each browser stage is bracketed by fixed-server verification; structured restoration proof and locked recovery remain mandatory. The current AQ4 bootstrap closure is intentionally inadmissible until a separate AQ4 hardening promotion. |
+| 9. Final activation procedure | **Prepared, never executed.** Plan v2 re-inventories all six outputs, validates fresh AQ4 bundle v1 before SQ8 bundle v2, seals both activation runtime closures, and retains default read-only preflight, exact plan-hash/literal confirmation, failure restoration, and later locked rollback. |
+
+The final worker must be built only after all implementation commits, from one
+clean detached commit/tree. No production `active.json`, worker, systemd
+configuration, service, GPU, or V620 state was changed for this snapshot.
+
+### 15.2 Exact release schemas and layouts
+
+`ullm.generic_reasoning_release_evidence.v2` adds
+`ullm.served_model.campaign_lineage.v2` to the v1 evidence. Its immutable
+mode-`0555` output directory contains exactly:
+
+```text
+active-manifest-binding.json
+active-manifest-observations.jsonl
+candidate-served-model.json
+cases.json
+lifecycle.json
+resource-samples.jsonl
+summary.json
+```
+
+The observations are `preflight`, stream/nonstream for disabled,
+budget-32/128/256 and unbounded, then `final`.
+
+`ullm.openwebui.reasoning_browser_smoke.v5` retains the v4 source/identity
+and campaign-lineage payload, adds the distinct Playwright `browser_image`,
+and binds identical before/after observations of the fixed OpenWebUI server
+container ID, image ID, configured image, container name, running state, PID,
+and start timestamp. Its immutable mode-`0555` output
+contains exactly:
+
+```text
+active-manifest-binding.json
+active-manifest-observations.jsonl
+browser-evidence.json
+candidate-served-model.json
+```
+
+Its observations are `preflight`, `browser-launch`, `browser-complete`,
+`validation`, and `publication`. Both schemas bind the immutable claim,
+authorized run/output, included candidate bytes, and every actual-active byte
+comparison.
+
+`ullm.generic_reasoning_release_bundle.v2` has exactly these nine artifact
+slots:
+
+```text
+release_evidence
+release_validator
+browser_evidence
+browser_validator
+promotion_evidence
+promotion_receipt
+model_campaign_manifest
+model_campaign_evidence
+model_campaign_validator
+```
+
+It requires generic evidence/validator v2, browser v5/validator v3, SQ8 full
+campaign identity/validation v2, the candidate's live SQ8 promotion receipt,
+one source/candidate/worker/tokenizer/image/claim lineage, and exact rollback
+manifest/unit/environment hashes. The validator recomputes generic, browser,
+promotion, and isolated no-publish full-campaign validation. Bundle v1 remains
+the exact six-slot AQ4 path. Validator code is authoritative for every exact
+root-field set and size/stable-read bound.
+
+### 15.3 Transaction and final-route boundary
+
+The campaign runner accepts no caller command vectors. It derives
+`ullm.served_model.v2_cross_model_campaign_plan.v2`, and the v2 claim is its
+first mutation. `expires_at` caps all SQ8 and restored-AQ4 evidence commands
+but not restoration. The held activation lock, pinned directory descriptor,
+`renameat2(RENAME_EXCHANGE)`, displaced inode/byte checks, directory `fsync`,
+subreaper containment, and signal deferral extend through all six campaigns,
+AQ4 restoration, structured live proof, immutable outcome, and lock close.
+After candidate reconciliation/readiness, a monitored stabilization gate
+requires at least 900 seconds of unchanged authorization/claim, source,
+candidate/runtime, exact active bytes, and service/gateway/worker epoch before
+`sq8_full`. The full campaign's fixed timeout maximum is 21,600 seconds and
+is still capped by the authorization time remaining. The fixed OpenWebUI
+image is checked against the running container after reconciliation and
+around each browser campaign.
+
+Only the evidence-producing subprocesses drop to the fixed service identity
+and exact supplementary-group allowlist. They write a randomized
+service-owned transaction-private staging tree, never an authorized final
+path. After every descendant has been reaped, root descriptor-walks and
+adopts the tree, rejects symlinks, special/hard-linked/cross-device entries,
+unexpected ownership/layout/size, or a leaked staging path, freezes and
+validates it, then publishes without replacement. Root retains claim, lock,
+manifest exchange, validation, restoration, proof, and outcome ownership.
+This boundary also contains the separately sealed, current transaction-aware
+AQ4 producers whose native publication primitive can replace an existing
+target. The AQ4 campaign/hardening source must not be the historical
+`qwen35-9b-aq4-fidelity-promotion-f1a3cf4c` source/route; that lineage lacks
+the current transaction and Docker-lease contracts. The separate
+default-read-only recovery CLI can use a consumed claim after expiry without
+the selected AQ4 campaign source or campaign outputs.
+
+The transaction never root-executes tools from the writable development or
+historical worktree. Production preflight accepts only standalone SQ8 and AQ4
+Git roots whose complete worktree and `.git` metadata are root-owned,
+symlink/ACL/alternate/hardlink-free, and not group/world writable through
+their ancestry. It captures a stable recursive fingerprint, rechecks it
+around fixed, non-mutating Git queries and every campaign command, and strips
+ambient loader/Python/Docker/Git configuration from command environments.
+The run/recovery CLI must itself come from the sealed SQ8 root. Recovery still
+does not depend on the old AQ4 source after expiry: it seals the SQ8 recovery
+code it actually executes, the exact AQ4 backup runtime, and the shared
+unit/environment/credential/rollback-operation closure. It deliberately does
+not require the displaced SQ8 candidate or candidate runtime.
+
+The same admission applies to the complete runtime closure reachable from
+both manifests: worker and legacy engine executables, promotion
+receipt/evidence, tokenizer members, product/package manifests, and every
+package payload. Every entry and replace-capable ancestor must be root-owned
+and protected; seals are rechecked at command boundaries and in standalone
+recovery. The current AQ4 bootstrap manifest hash
+`5d015a013dcf70cea13dd9ed569d89ed2a025a17e14a6192ca18ee4cdadd1c8a`
+does not pass: its worker, receipt/evidence, 1,044 package leaves (about
+7.70 GB), and four tokenizer files live below user-owned/writable trees.
+Failing before claim is the required behavior.
+
+Therefore a separate reviewed AQ4-to-AQ4 runtime-hardening promotion is a
+live prerequisite, not part of the exact-six window. It must root-stage the
+complete closure outside `/home`, create fresh AQ4 promotion evidence and
+receipt for the new absolute paths, freeze a new AQ4 manifest, and activate it
+through its own locked authorization/outcome/rollback route. The historical
+receipt cannot be copied because it binds the old worker, product, and
+manifest paths. The exact-six authorization must name this new hardened AQ4
+manifest as `before`.
+
+Source-owned Python commands use the canonical
+`/usr/bin/python3.12 -I -S -B` prefix and a minimal import/configuration
+environment. The fixed ROCm vendor scripts use
+`/usr/bin/python3.12 -E -S -B` because their root-owned sibling imports are
+required. Root-owned OS/Python/ROCm libraries, ELF loaders and shared
+libraries, Git/Docker/systemd internals, the Docker daemon/container runtime,
+`/bin/sh`, and `/usr/bin/ps` are explicit reviewed TCB, rather than falsely
+described as recursively campaign-sealed artifacts. The browser-session JWT
+is fixed at `/run/ullm-campaign-secrets/openwebui-session.jwt`, owned
+`uid=0,gid=1000`, mode `0640`, below an `uid=0,gid=1000`, mode `0750`
+directory; the API key remains `/etc/ullm/openai-api-key` with the same file
+ownership and mode. Neither secret value enters public evidence.
+
+Final activation is a separate boundary. Plan preparation requires a
+`succeeded_restored` outcome, unchanged inventories for all six campaigns, a
+fresh gate-eligible AQ4 bundle v1 derived from that outcome, a gate-eligible
+complete SQ8 bundle v2, exact AQ4 rollback bytes, and reviewed direct
+executables. Its runner source is itself a module-derived, clean detached
+standalone root-owned Git seal; the plan pins that source commit/tree and
+rechecks the in-memory seal at every stage. Activation and later rollback are
+read-only unless the exact plan SHA-256 and respectively
+`ACTIVATE_SQ8_0_FROM_RESTORED_AQ4` or
+`ROLLBACK_SQ8_0_TO_EXACT_AQ4` are supplied. Neither was run here.
+
+### 15.4 Live holds and human order
+
+Still prohibited or unavailable: production `active.json` writes;
+`ullm-openai.service` start/stop/restart; systemd changes; production GPU
+campaign or GPU worker launch; V620 access; obtaining/using the real
+OpenWebUI browser-login JWT; production claim; and activation/rollback.
+
+Human/operator order:
+
+1. prepare and execute the separately reviewed AQ4-to-AQ4 runtime-hardening
+   promotion; this future step requires its own GPU/service window and must
+   finish with a protected AQ4 runtime closure and immutable outcome;
+2. build/freeze the complete worker-release-v2 directory from one clean
+   detached commit; byte-copy and validate the whole release at its final
+   protected staged path without rewriting its receipt or seal;
+3. against that staged worker path and one explicitly supplied current sealed
+   source root, create in order the profile, ephemeral manifest, CPU report,
+   distinct promotion evidence/receipt pair, and final candidate;
+4. root-stage the rest of the complete SQ8 runtime closure, create separate
+   root-owned standalone sealed clones for the exact SQ8 and current
+   transaction-aware AQ4 campaign commits (not the historical
+   `f1a3cf4c` AQ4 source/route), and complete read-only campaign preflight
+   from the sealed SQ8 clone;
+5. provision the real browser-session JWT and pre-issue the exact,
+   sufficiently unexpired authorization;
+6. enter the separately approved maintenance window, explicitly stop
+   `ullm-openai.service`, and read-only verify that every fixed
+   `inactive_services` member is inactive **before** invoking any command
+   that claims the authorization; this is a future operator action and was
+   not executed while preparing this runbook;
+7. only after that inactive-state verification, invoke the locked
+   transaction; its first mutation atomically claims the authorization, then
+   execute the three fresh SQ8 campaigns, exact AQ4 restore/reconciliation,
+   and the three fresh AQ4 campaigns (including complete AQ4 bundle v1) in one
+   locked window; require immutable `succeeded_restored`;
+8. assemble and independently validate the SQ8 `status: complete` bundle v2,
+   retaining the outcome-bound AQ4 bundle v1 as a separate admission input;
+9. prepare/review the final plan and read-only preflight; and
+10. execute activation only after explicit Claude+user approval, using the
+   plan-bound rollback route if rollback is later needed.

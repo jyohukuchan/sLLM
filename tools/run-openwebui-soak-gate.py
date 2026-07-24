@@ -1685,7 +1685,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         choices=range(300, 3601),
         metavar="[300-3600]",
     )
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    transaction_docker = os.environ.get("ULLM_CAMPAIGN_DOCKER")
+    if transaction_docker is not None and args.docker != transaction_docker:
+        parser.error("--docker differs from the transaction lease wrapper")
+    return args
 
 
 def main(argv: list[str] | None = None) -> int:
