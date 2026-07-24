@@ -32,7 +32,29 @@ GENERATOR_PATH = ROOT / "tools/generate-served-model.py"
 
 EVIDENCE_SCHEMA = "ullm.sq8_serving_promotion_evidence.v1"
 RECEIPT_SCHEMA = "ullm.sq8_serving_promotion.v1"
-BUILD_RECEIPT_SCHEMA = "ullm.sq8_worker_build_receipt.v1"
+BUILD_RECEIPT_SCHEMA_V1 = "ullm.sq8_worker_build_receipt.v1"
+BUILD_RECEIPT_SCHEMA = "ullm.sq8_worker_build_receipt.v2"
+BUILD_PROVENANCE_SCHEMA_V1 = "ullm.sq8_worker_build_provenance.v1"
+BUILD_PROVENANCE_SCHEMA = "ullm.sq8_worker_build_provenance.v2"
+BUILD_RELEASE_SEAL_SCHEMA_V1 = "ullm.sq8_worker_release_seal.v1"
+BUILD_RELEASE_SEAL_SCHEMA = "ullm.sq8_worker_release_seal.v2"
+BUILD_WORKER_RELATIVE_PATH = "ullm-sq8-worker"
+BUILD_RELEASE_MEMBERS = frozenset(
+    {
+        "README.md",
+        "SHA256SUMS",
+        "SEALED.json",
+        "build-provenance.json",
+        "build-receipt.json",
+        BUILD_WORKER_RELATIVE_PATH,
+    }
+)
+BUILD_SUMMED_MEMBERS = (
+    "README.md",
+    "build-provenance.json",
+    "build-receipt.json",
+    BUILD_WORKER_RELATIVE_PATH,
+)
 CPU_CASES_SCHEMA = "ullm.sq8_serving_promotion_cpu_cases.v1"
 PRODUCT_SCHEMA = "ullm.sq8_product_promotion.v1"
 WORKER_PROTOCOL = "ullm.worker.v2"
@@ -81,6 +103,39 @@ REQUIRED_BUILD_INPUTS = frozenset(
         "crates/ullm-engine/src/sq8_worker_runtime.rs",
         "crates/ullm-runtime-sys/build.rs",
     }
+)
+BUILD_INPUTS_V2 = (
+    ".cargo/config.toml",
+    "Cargo.lock",
+    "Cargo.toml",
+    "crates/ullm-engine/Cargo.toml",
+    "crates/ullm-engine/src/bin/ullm-sq8-worker.rs",
+    "crates/ullm-engine/src/reasoning.rs",
+    "crates/ullm-engine/src/served_model.rs",
+    "crates/ullm-engine/src/sq8_sampling.rs",
+    "crates/ullm-engine/src/sq8_serving_runtime.rs",
+    "crates/ullm-engine/src/sq8_worker_backend.rs",
+    "crates/ullm-engine/src/sq8_worker_protocol.rs",
+    "crates/ullm-engine/src/sq8_worker_runtime.rs",
+    "crates/ullm-runtime-sys/Cargo.toml",
+    "crates/ullm-runtime-sys/build.rs",
+)
+BUILD_REJECTED_ENVIRONMENT_V2 = (
+    "CARGO_ENCODED_RUSTFLAGS",
+    "CARGO_PROFILE_RELEASE_CODEGEN_UNITS",
+    "CARGO_PROFILE_RELEASE_DEBUG",
+    "CARGO_PROFILE_RELEASE_LTO",
+    "CARGO_PROFILE_RELEASE_OPT_LEVEL",
+    "CARGO_PROFILE_RELEASE_PANIC",
+    "CFLAGS",
+    "CPPFLAGS",
+    "CXXFLAGS",
+    "LDFLAGS",
+    "RUSTC",
+    "RUSTC_BOOTSTRAP",
+    "RUSTC_WRAPPER",
+    "RUSTDOCFLAGS",
+    "RUSTFLAGS",
 )
 
 EVIDENCE_SOURCE_PATHS = tuple(
@@ -500,8 +555,27 @@ def _git(
     return result.returncode, result.stdout
 
 
+def _audit_absolute_path(value: Any, label: str) -> Path:
+    """Validate an absolute lexical audit path without dereferencing it."""
+
+    text = _text(value, label, 4096)
+    selected = PurePosixPath(text)
+    if (
+        not selected.is_absolute()
+        or text.startswith("//")
+        or selected.as_posix() != text
+        or any(part in {"", ".", ".."} for part in selected.parts[1:])
+    ):
+        fail(f"{label} is not a canonical absolute audit path")
+    return Path(text)
+
+
 def _validate_clean_detached_source(
-    source: dict[str, Any], *, verify_live: bool
+    source: dict[str, Any],
+    *,
+    verify_live: bool,
+    live_root: Path | None = None,
+    relocatable: bool = False,
 ) -> Path:
     source = _exact(
         source,
@@ -515,9 +589,15 @@ def _validate_clean_detached_source(
         },
         "worker build source",
     )
-    root = _canonical_absolute(
-        Path(_text(source["repository_root"], "worker build repository root")),
-        "worker build repository root",
+    audit_root = (
+        _audit_absolute_path(
+            source["repository_root"], "worker build repository root"
+        )
+        if relocatable
+        else _canonical_absolute(
+            Path(_text(source["repository_root"], "worker build repository root")),
+            "worker build repository root",
+        )
     )
     commit = _git_object(source["commit"], "worker build source commit")
     tree = _git_object(source["tree"], "worker build source tree")
@@ -527,7 +607,31 @@ def _validate_clean_detached_source(
         or source["status_sha256"] != hashlib.sha256(b"").hexdigest()
     ):
         fail("worker build source is not a clean detached checkout")
+    if relocatable:
+        if live_root is None:
+            if verify_live:
+                fail("v2 worker build validation requires an explicit source root")
+            root = audit_root
+        else:
+            root = _canonical_absolute(live_root, "current worker build source root")
+    else:
+        if live_root is not None:
+            requested = _canonical_absolute(
+                live_root, "requested v1 worker build source root"
+            )
+            if requested != audit_root:
+                fail("v1 worker build source root override differs")
+        root = audit_root
     if verify_live:
+        if relocatable:
+            _, observed_top = _git(
+                root, ["rev-parse", "--show-toplevel"], "source repository root"
+            )
+            if (
+                observed_top.strip().decode("utf-8", errors="strict")
+                != os.fspath(root)
+            ):
+                fail("current worker build source is not its Git top-level")
         _, observed_commit = _git(root, ["rev-parse", "HEAD"], "source commit")
         _, observed_tree = _git(root, ["rev-parse", "HEAD^{tree}"], "source tree")
         branch_status, _ = _git(
@@ -592,11 +696,55 @@ def _validate_build_environment(value: Any) -> dict[str, Any]:
     return environment
 
 
+def resolve_build_worker_path(
+    path: Path, document: dict[str, Any]
+) -> Path:
+    """Resolve the live worker while preserving the v1/v2 version boundary."""
+
+    receipt_path = _canonical_absolute(path, "SQ8 worker build receipt")
+    schema = document.get("schema_version")
+    if schema == BUILD_RECEIPT_SCHEMA_V1:
+        worker = _exact(
+            document.get("worker"),
+            {"path", "bytes", "sha256", "mode", "nlink"},
+            "built SQ8 worker",
+        )
+        worker_path = _canonical_absolute(
+            Path(_text(worker["path"], "built SQ8 worker path")),
+            "built SQ8 worker path",
+        )
+    elif schema == BUILD_RECEIPT_SCHEMA:
+        worker = _exact(
+            document.get("worker"),
+            {"relative_path", "bytes", "sha256", "mode", "nlink"},
+            "built SQ8 worker",
+        )
+        if worker["relative_path"] != BUILD_WORKER_RELATIVE_PATH:
+            fail("built SQ8 worker relative locator differs")
+        if receipt_path.name != "build-receipt.json":
+            fail("v2 worker build receipt filename differs")
+        worker_path = _canonical_absolute(
+            receipt_path.parent / BUILD_WORKER_RELATIVE_PATH,
+            "built SQ8 worker",
+        )
+        if worker_path.parent != receipt_path.parent:
+            fail("built SQ8 worker escapes its release root")
+    else:
+        fail("SQ8 worker build receipt schema differs")
+    if worker_path.name != BUILD_WORKER_RELATIVE_PATH:
+        fail("built SQ8 worker basename differs")
+    return worker_path
+
+
 def validate_build_receipt(
-    path: Path, *, verify_live_source: bool = True
+    path: Path,
+    *,
+    verify_live_source: bool = True,
+    source_root: Path | None = None,
 ) -> dict[str, Any]:
+    receipt_path = _canonical_absolute(path, "SQ8 worker build receipt")
     document, _ = _load_json_file(
-        path,
+        receipt_path,
         "SQ8 worker build receipt",
         canonical=True,
         required_mode=0o444,
@@ -607,10 +755,14 @@ def validate_build_receipt(
         {"schema_version", "source", "build", "inputs", "worker"},
         "SQ8 worker build receipt",
     )
-    if document["schema_version"] != BUILD_RECEIPT_SCHEMA:
+    schema = document["schema_version"]
+    if schema not in {BUILD_RECEIPT_SCHEMA_V1, BUILD_RECEIPT_SCHEMA}:
         fail("SQ8 worker build receipt schema differs")
     source_root = _validate_clean_detached_source(
-        document["source"], verify_live=verify_live_source
+        document["source"],
+        verify_live=verify_live_source,
+        live_root=source_root,
+        relocatable=schema == BUILD_RECEIPT_SCHEMA,
     )
     build = _exact(document["build"], {"argv", "environment", "result"}, "worker build")
     argv = build["argv"]
@@ -656,20 +808,20 @@ def validate_build_receipt(
         observed_paths, key=lambda value: value.encode("utf-8")
     ):
         fail("SQ8 worker build inputs are not bytewise sorted")
-    if not REQUIRED_BUILD_INPUTS.issubset(observed_paths):
+    if schema == BUILD_RECEIPT_SCHEMA and observed_paths != list(BUILD_INPUTS_V2):
+        fail("v2 SQ8 worker build input set differs")
+    if schema == BUILD_RECEIPT_SCHEMA_V1 and not REQUIRED_BUILD_INPUTS.issubset(
+        observed_paths
+    ):
         fail("SQ8 worker build inputs are incomplete")
 
-    worker = _exact(
-        document["worker"],
-        {"path", "bytes", "sha256", "mode", "nlink"},
-        "built SQ8 worker",
+    worker_fields = (
+        {"path", "bytes", "sha256", "mode", "nlink"}
+        if schema == BUILD_RECEIPT_SCHEMA_V1
+        else {"relative_path", "bytes", "sha256", "mode", "nlink"}
     )
-    worker_path = _canonical_absolute(
-        Path(_text(worker["path"], "built SQ8 worker path")),
-        "built SQ8 worker path",
-    )
-    if worker_path.name != "ullm-sq8-worker":
-        fail("built SQ8 worker basename differs")
+    worker = _exact(document["worker"], worker_fields, "built SQ8 worker")
+    worker_path = resolve_build_worker_path(receipt_path, document)
     if worker["mode"] != "0555" or worker["nlink"] != 1:
         fail("built SQ8 worker immutable identity differs")
     size, digest = stable_hash(
@@ -684,6 +836,327 @@ def validate_build_receipt(
     ):
         fail("built SQ8 worker byte identity differs")
     return document
+
+
+def _validate_build_provenance(
+    path: Path,
+    *,
+    receipt: dict[str, Any],
+) -> dict[str, Any]:
+    provenance, _ = _load_json_file(
+        path,
+        "SQ8 worker build provenance",
+        canonical=True,
+        required_mode=0o444,
+        required_nlink=1,
+    )
+    provenance = _exact(
+        provenance,
+        {"schema_version", "source", "build", "worker"},
+        "SQ8 worker build provenance",
+    )
+    receipt_schema = receipt["schema_version"]
+    expected_schema = (
+        BUILD_PROVENANCE_SCHEMA_V1
+        if receipt_schema == BUILD_RECEIPT_SCHEMA_V1
+        else BUILD_PROVENANCE_SCHEMA
+    )
+    if provenance["schema_version"] != expected_schema:
+        fail("SQ8 worker build provenance schema differs")
+    source = _exact(
+        provenance["source"],
+        {
+            "repository_root",
+            "commit",
+            "tree",
+            "detached",
+            "tracked_clean",
+            "untracked_clean",
+            "inputs",
+        },
+        "SQ8 worker build provenance source",
+    )
+    receipt_source = receipt["source"]
+    if (
+        source["repository_root"] != receipt_source["repository_root"]
+        or source["commit"] != receipt_source["commit"]
+        or source["tree"] != receipt_source["tree"]
+        or source["detached"] is not True
+        or source["tracked_clean"] is not True
+        or source["untracked_clean"] is not True
+    ):
+        fail("SQ8 worker build provenance source identity differs")
+    provenance_inputs = source["inputs"]
+    if type(provenance_inputs) is not dict:
+        fail("SQ8 worker build provenance inputs differ")
+    for raw in receipt["inputs"]:
+        relative = raw["path"]
+        entry = _exact(
+            provenance_inputs.get(relative),
+            {"bytes", "sha256"},
+            f"SQ8 worker build provenance input {relative}",
+        )
+        if (
+            _integer(
+                entry["bytes"],
+                f"SQ8 worker build provenance input {relative} bytes",
+            )
+            < 0
+            or entry["sha256"] != raw["sha256"]
+        ):
+            fail("SQ8 worker build provenance input identity differs")
+    if set(provenance_inputs) != {entry["path"] for entry in receipt["inputs"]}:
+        fail("SQ8 worker build provenance input set differs")
+    build = _exact(
+        provenance["build"],
+        {
+            "argv",
+            "working_directory",
+            "target_directory",
+            "environment",
+            "ambient_environment_hermetic",
+            "ambient_compile_overrides_rejected",
+            "started_unix_ns",
+            "finished_unix_ns",
+            "toolchain",
+            "result",
+        },
+        "SQ8 worker build provenance build",
+    )
+    if (
+        build["argv"] != receipt["build"]["argv"]
+        or build["environment"] != receipt["build"]["environment"]
+        or build["result"] != "success"
+        or build["working_directory"] != source["repository_root"]
+        or build["target_directory"]
+        != receipt["build"]["environment"]["CARGO_TARGET_DIR"]
+        or build["ambient_environment_hermetic"] is not False
+        or build["ambient_compile_overrides_rejected"]
+        != list(BUILD_REJECTED_ENVIRONMENT_V2)
+        or _integer(build["started_unix_ns"], "build start", minimum=1)
+        > _integer(build["finished_unix_ns"], "build finish", minimum=1)
+    ):
+        fail("SQ8 worker build provenance build identity differs")
+    toolchain = _exact(
+        build["toolchain"],
+        {"cargo", "rustc", "cxx", "hipcc"},
+        "SQ8 worker build provenance toolchain",
+    )
+    for name, value in toolchain.items():
+        identity = _exact(
+            value,
+            {"path", "sha256", "version"},
+            f"SQ8 worker build provenance {name}",
+        )
+        _audit_absolute_path(
+            identity["path"],
+            f"SQ8 worker build provenance {name} path",
+        )
+        _hash(
+            identity["sha256"],
+            f"SQ8 worker build provenance {name} SHA-256",
+        )
+        _text(
+            identity["version"],
+            f"SQ8 worker build provenance {name} version",
+            4096,
+        )
+    worker_fields = (
+        {
+            "path",
+            "bytes",
+            "sha256",
+            "mode",
+            "nlink",
+            "protocol",
+            "format_id",
+            "model_id",
+        }
+        if receipt_schema == BUILD_RECEIPT_SCHEMA_V1
+        else {
+            "relative_path",
+            "bytes",
+            "sha256",
+            "mode",
+            "nlink",
+            "protocol",
+            "format_id",
+            "model_id",
+        }
+    )
+    worker = _exact(provenance["worker"], worker_fields, "build provenance worker")
+    if (
+        {key: worker[key] for key in receipt["worker"]} != receipt["worker"]
+        or worker["protocol"] != WORKER_PROTOCOL
+        or worker["format_id"] != FORMAT_ID
+        or worker["model_id"] != MODEL_ID
+    ):
+        fail("SQ8 worker build provenance worker identity differs")
+    return provenance
+
+
+def validate_build_release(
+    root: Path,
+    *,
+    verify_live_source: bool = True,
+    source_root: Path | None = None,
+) -> dict[str, Any]:
+    """Validate one exact, relocatable SQ8 worker release directory."""
+
+    release_root = _canonical_absolute(root, "SQ8 worker build release")
+    metadata = release_root.lstat()
+    if (
+        not stat.S_ISDIR(metadata.st_mode)
+        or stat.S_IMODE(metadata.st_mode) != 0o555
+    ):
+        fail("SQ8 worker build release directory identity differs")
+    try:
+        observed_members = {entry.name for entry in os.scandir(release_root)}
+    except OSError as error:
+        raise PromotionError("SQ8 worker build release cannot be inventoried") from error
+    if observed_members != BUILD_RELEASE_MEMBERS:
+        fail("SQ8 worker build release member set differs")
+
+    receipt_path = release_root / "build-receipt.json"
+    receipt = validate_build_receipt(
+        receipt_path,
+        verify_live_source=verify_live_source,
+        source_root=source_root,
+    )
+    if receipt["schema_version"] != BUILD_RECEIPT_SCHEMA:
+        fail("complete SQ8 worker build release requires receipt v2")
+    worker_path = resolve_build_worker_path(receipt_path, receipt)
+    if (
+        receipt["schema_version"] == BUILD_RECEIPT_SCHEMA
+        and worker_path != release_root / BUILD_WORKER_RELATIVE_PATH
+    ):
+        fail("SQ8 worker build release locator differs")
+    provenance_path = release_root / "build-provenance.json"
+    _validate_build_provenance(provenance_path, receipt=receipt)
+
+    member_hashes: dict[str, str] = {}
+    for name in BUILD_SUMMED_MEMBERS:
+        member_hashes[name] = stable_hash(
+            release_root / name,
+            f"SQ8 worker release member {name}",
+            required_mode=0o555 if name == BUILD_WORKER_RELATIVE_PATH else 0o444,
+            required_nlink=1,
+        )[1]
+    sums_path = release_root / "SHA256SUMS"
+    sums_raw = stable_read(
+        sums_path,
+        "SQ8 worker release SHA256SUMS",
+        required_mode=0o444,
+        required_nlink=1,
+    )
+    expected_sums = "".join(
+        f"{member_hashes[name]}  {name}\n" for name in BUILD_SUMMED_MEMBERS
+    ).encode("ascii")
+    if sums_raw != expected_sums:
+        fail("SQ8 worker release SHA256SUMS differs")
+
+    seal_path = release_root / "SEALED.json"
+    seal, _ = _load_json_file(
+        seal_path,
+        "SQ8 worker release seal",
+        canonical=True,
+        required_mode=0o444,
+        required_nlink=1,
+    )
+    seal = _exact(
+        seal,
+        {
+            "schema_version",
+            "source_commit",
+            "source_tree",
+            "worker_sha256",
+            "build_receipt_sha256",
+            "build_provenance_sha256",
+            "sha256sums_sha256",
+            "complete",
+        },
+        "SQ8 worker release seal",
+    )
+    if (
+        seal["schema_version"] != BUILD_RELEASE_SEAL_SCHEMA
+        or seal["source_commit"] != receipt["source"]["commit"]
+        or seal["source_tree"] != receipt["source"]["tree"]
+        or seal["worker_sha256"] != receipt["worker"]["sha256"]
+        or seal["build_receipt_sha256"] != member_hashes["build-receipt.json"]
+        or seal["build_provenance_sha256"]
+        != member_hashes["build-provenance.json"]
+        or seal["sha256sums_sha256"] != hashlib.sha256(sums_raw).hexdigest()
+        or seal["complete"] is not True
+    ):
+        fail("SQ8 worker release seal identity differs")
+    return {
+        "schema_version": seal["schema_version"],
+        "release_root": os.fspath(release_root),
+        "worker_path": os.fspath(worker_path),
+        "worker_sha256": receipt["worker"]["sha256"],
+        "build_receipt_sha256": member_hashes["build-receipt.json"],
+        "seal_sha256": stable_hash(
+            seal_path,
+            "SQ8 worker release seal",
+            required_mode=0o444,
+            required_nlink=1,
+        )[1],
+        "receipt": receipt,
+        "seal": seal,
+    }
+
+
+def resolve_build_source_root(
+    build: dict[str, Any], source_root: Path | None
+) -> Path:
+    schema = build.get("schema_version")
+    if schema == BUILD_RECEIPT_SCHEMA:
+        if source_root is None:
+            fail("v2 worker build validation requires an explicit source root")
+        return _canonical_absolute(source_root, "current worker build source root")
+    if schema != BUILD_RECEIPT_SCHEMA_V1:
+        fail("SQ8 worker build receipt schema differs")
+    recorded = _canonical_absolute(
+        Path(
+            _text(
+                build["source"]["repository_root"],
+                "v1 worker build repository root",
+            )
+        ),
+        "v1 worker build repository root",
+    )
+    if source_root is None:
+        return recorded
+    selected = _canonical_absolute(source_root, "requested v1 worker build source root")
+    if selected != recorded:
+        fail("v1 worker build source root override differs")
+    return recorded
+
+
+def _validate_promotion_build(
+    build_receipt_path: Path,
+    *,
+    verify_live_source: bool,
+    source_root: Path | None,
+) -> dict[str, Any]:
+    """Require the complete v2 release while preserving v1 receipt semantics."""
+
+    build = validate_build_receipt(
+        build_receipt_path,
+        verify_live_source=verify_live_source,
+        source_root=source_root,
+    )
+    if build["schema_version"] == BUILD_RECEIPT_SCHEMA:
+        release = validate_build_release(
+            _canonical_absolute(
+                build_receipt_path, "SQ8 worker build receipt"
+            ).parent,
+            verify_live_source=verify_live_source,
+            source_root=source_root,
+        )
+        if release["receipt"] != build:
+            fail("SQ8 worker build release receipt changed during validation")
+    return build
 
 
 def _cpu_tool_identity(path: Path, label: str) -> dict[str, Any]:
@@ -1016,6 +1489,7 @@ def _cpu_case_run_map() -> dict[str, list[str]]:
 def build_cpu_cases_report(
     *,
     build_receipt_path: Path,
+    source_root: Path | None = None,
     ephemeral_manifest_path: Path,
     cargo_path: Path,
     python_path: Path,
@@ -1024,10 +1498,13 @@ def build_cpu_cases_report(
 ) -> dict[str, Any]:
     """Execute the exact GPU-hidden CPU admission tests and build their report."""
 
-    build = validate_build_receipt(
-        build_receipt_path, verify_live_source=verify_live_source
+    build = _validate_promotion_build(
+        build_receipt_path,
+        verify_live_source=verify_live_source,
+        source_root=source_root,
     )
-    source_root = Path(build["source"]["repository_root"])
+    source_root = resolve_build_source_root(build, source_root)
+    worker_path = resolve_build_worker_path(build_receipt_path, build)
     sources = _evidence_source_entries(source_root)
     _validate_evidence_sources(
         sources,
@@ -1045,7 +1522,7 @@ def build_cpu_cases_report(
         manifest.get("schema_version") != SERVED_MODEL_SCHEMA
         or manifest.get("format", {}).get("format_id") != FORMAT_ID
         or manifest.get("worker", {}).get("protocol") != WORKER_PROTOCOL
-        or manifest.get("worker", {}).get("binary") != build["worker"]["path"]
+        or manifest.get("worker", {}).get("binary") != os.fspath(worker_path)
         or manifest.get("worker", {}).get("binary_sha256") != build["worker"]["sha256"]
         or manifest.get("promotion", {}).get("source_commit")
         != build["source"]["commit"]
@@ -1113,7 +1590,12 @@ def build_cpu_cases_report(
                 "result": "pass",
             }
         )
-    _validate_clean_detached_source(build["source"], verify_live=verify_live_source)
+    _validate_clean_detached_source(
+        build["source"],
+        verify_live=verify_live_source,
+        live_root=source_root,
+        relocatable=build["schema_version"] == BUILD_RECEIPT_SCHEMA,
+    )
     _validate_evidence_sources(
         sources,
         source_root=source_root,
@@ -1772,6 +2254,7 @@ def _ephemeral_product_metadata(product_root: Path) -> dict[str, Any]:
 def prepare_ephemeral_manifest(
     *,
     build_receipt_path: Path,
+    source_root: Path | None = None,
     profile_path: Path,
     receipt_output_path: Path,
     manifest_output_path: Path,
@@ -1779,10 +2262,12 @@ def prepare_ephemeral_manifest(
 ) -> dict[str, Any]:
     """Publish the pre-receipt scaffold and its strict SQ8 v2 manifest."""
 
-    build = validate_build_receipt(
-        build_receipt_path, verify_live_source=verify_live_source
+    build = _validate_promotion_build(
+        build_receipt_path,
+        verify_live_source=verify_live_source,
+        source_root=source_root,
     )
-    source_root = Path(build["source"]["repository_root"])
+    source_root = resolve_build_source_root(build, source_root)
     sources = _evidence_source_entries(source_root)
     _validate_evidence_sources(
         sources,
@@ -1797,8 +2282,9 @@ def prepare_ephemeral_manifest(
         Path(_text(profile["worker"]["binary"], "SQ8 profile worker")),
         "SQ8 profile worker",
     )
+    build_worker_path = resolve_build_worker_path(build_receipt_path, build)
     if (
-        worker_path != Path(build["worker"]["path"])
+        worker_path != build_worker_path
         or build["worker"]["sha256"]
         != stable_hash(
             worker_path,
@@ -1851,7 +2337,11 @@ def prepare_ephemeral_manifest(
         temporary_manifest = temporary / "manifest.json"
         temporary_profile.write_bytes(_canonical_json(profile_copy))
         try:
-            generator.generate(temporary_profile, temporary_manifest)
+            generator.generate(
+                temporary_profile,
+                temporary_manifest,
+                source_root=source_root,
+            )
         except Exception as error:
             raise PromotionError("SQ8 ephemeral manifest generation failed") from error
         generated, _ = _load_json_file(
@@ -1893,7 +2383,12 @@ def prepare_ephemeral_manifest(
         ) from error
     if final_summary.get("manifest_sha256") != manifest_sha256:
         fail("published SQ8 ephemeral manifest SHA-256 differs")
-    _validate_clean_detached_source(build["source"], verify_live=verify_live_source)
+    _validate_clean_detached_source(
+        build["source"],
+        verify_live=verify_live_source,
+        live_root=source_root,
+        relocatable=build["schema_version"] == BUILD_RECEIPT_SCHEMA,
+    )
     return {
         "receipt": scaffold,
         "receipt_path": os.fspath(receipt_output),
@@ -2008,6 +2503,7 @@ def _product_evidence(
 def build_evidence(
     *,
     build_receipt_path: Path,
+    source_root: Path | None = None,
     profile_path: Path,
     ephemeral_manifest_path: Path,
     cpu_cases_path: Path,
@@ -2016,15 +2512,17 @@ def build_evidence(
 ) -> dict[str, Any]:
     """Construct and fully validate one pre-receipt SQ8 promotion document."""
 
-    build = validate_build_receipt(
-        build_receipt_path, verify_live_source=verify_live_source
+    build = _validate_promotion_build(
+        build_receipt_path,
+        verify_live_source=verify_live_source,
+        source_root=source_root,
     )
-    source_root = Path(build["source"]["repository_root"])
+    source_root = resolve_build_source_root(build, source_root)
     profile, profile_raw = _load_json_file(profile_path, "SQ8 served-model profile")
     reasoning, final_receipt_path = _profile_contract(profile)
     if final_receipt_path.exists() or final_receipt_path.is_symlink():
         fail("SQ8 production serving receipt already exists")
-    worker_path = Path(build["worker"]["path"])
+    worker_path = resolve_build_worker_path(build_receipt_path, build)
     worker_sha256 = build["worker"]["sha256"]
     if (
         _canonical_absolute(
@@ -2086,12 +2584,17 @@ def build_evidence(
         worker_sha256=worker_sha256,
         reasoning=reasoning,
     )
+    evidence_source = dict(build["source"])
+    if build["schema_version"] == BUILD_RECEIPT_SCHEMA:
+        # The build-time pathname is audit provenance only.  Promotion
+        # evidence names the current sealed checkout used for live validation.
+        evidence_source["repository_root"] = os.fspath(source_root)
     evidence = {
         "schema_version": EVIDENCE_SCHEMA,
         "verified": True,
         "production_receipt_written": False,
         "source": {
-            **build["source"],
+            **evidence_source,
             "evidence_files": _evidence_source_entries(source_root),
         },
         "worker_build_receipt": {
@@ -2102,7 +2605,7 @@ def build_evidence(
                 required_mode=0o444,
                 required_nlink=1,
             )[1],
-            "schema_version": BUILD_RECEIPT_SCHEMA,
+            "schema_version": build["schema_version"],
         },
         "worker": {
             "binary": os.fspath(worker_path),
@@ -2147,6 +2650,7 @@ def build_evidence(
     validate_evidence_document(
         evidence,
         expected_profile_path=profile_path,
+        source_root=source_root,
         verify_live_source=verify_live_source,
         require_receipt_absent=True,
     )
@@ -2183,6 +2687,7 @@ def validate_evidence_document(
     document: Any,
     *,
     expected_profile_path: Path | None = None,
+    source_root: Path | None = None,
     verify_live_source: bool = True,
     require_receipt_absent: bool = False,
 ) -> dict[str, Any]:
@@ -2233,20 +2738,15 @@ def validate_evidence_document(
             "status_sha256",
         )
     }
-    source_root = _validate_clean_detached_source(
-        build_source, verify_live=verify_live_source
-    )
-    _validate_evidence_sources(
-        source["evidence_files"],
-        source_root=source_root,
-        verify_live=verify_live_source,
-    )
     build_reference = _exact(
         evidence["worker_build_receipt"],
         {"path", "sha256", "schema_version"},
         "SQ8 worker build-receipt reference",
     )
-    if build_reference["schema_version"] != BUILD_RECEIPT_SCHEMA:
+    if build_reference["schema_version"] not in {
+        BUILD_RECEIPT_SCHEMA_V1,
+        BUILD_RECEIPT_SCHEMA,
+    }:
         fail("SQ8 worker build-receipt reference schema differs")
     build_path = _canonical_absolute(
         Path(_text(build_reference["path"], "SQ8 worker build-receipt path")),
@@ -2262,9 +2762,43 @@ def validate_evidence_document(
         build_reference["sha256"], "SQ8 worker build-receipt SHA-256"
     ):
         fail("SQ8 worker build-receipt SHA-256 differs")
-    build = validate_build_receipt(build_path, verify_live_source=verify_live_source)
-    if build["source"] != build_source:
+    build = _validate_promotion_build(
+        build_path,
+        verify_live_source=verify_live_source,
+        source_root=source_root,
+    )
+    source_identity_fields = {
+        "commit",
+        "tree",
+        "detached",
+        "worktree_clean",
+        "status_sha256",
+    }
+    if (
+        build["schema_version"] != build_reference["schema_version"]
+        or any(
+            build["source"][field] != build_source[field]
+            for field in source_identity_fields
+        )
+        or (
+            build["schema_version"] == BUILD_RECEIPT_SCHEMA_V1
+            and build["source"]["repository_root"]
+            != build_source["repository_root"]
+        )
+    ):
         fail("SQ8 evidence and build-receipt source identities differ")
+    current_source_root = resolve_build_source_root(build, source_root)
+    if (
+        build["schema_version"] == BUILD_RECEIPT_SCHEMA
+        and build_source["repository_root"] != os.fspath(current_source_root)
+    ):
+        fail("SQ8 evidence current source root differs")
+    _validate_evidence_sources(
+        source["evidence_files"],
+        source_root=current_source_root,
+        verify_live=verify_live_source,
+    )
+    build_worker_path = resolve_build_worker_path(build_path, build)
 
     worker = _exact(
         evidence["worker"],
@@ -2272,7 +2806,7 @@ def validate_evidence_document(
         "SQ8 serving worker",
     )
     if (
-        worker["binary"] != build["worker"]["path"]
+        worker["binary"] != os.fspath(build_worker_path)
         or worker["bytes"] != build["worker"]["bytes"]
         or worker["sha256"] != build["worker"]["sha256"]
         or worker["protocol"] != WORKER_PROTOCOL
@@ -2445,7 +2979,7 @@ def validate_evidence_document(
         fail("SQ8 serving CPU-case SHA-256 differs")
     observed_cpu = validate_cpu_cases(
         cpu_path,
-        source_root=source_root,
+        source_root=current_source_root,
         source_commit=source["commit"],
         source_tree=source["tree"],
         manifest_sha256=ephemeral["sha256"],
@@ -2461,6 +2995,7 @@ def validate_evidence(
     path: Path,
     *,
     expected_profile_path: Path | None = None,
+    source_root: Path | None = None,
     verify_live_source: bool = True,
     require_receipt_absent: bool = False,
 ) -> dict[str, Any]:
@@ -2474,6 +3009,7 @@ def validate_evidence(
     return validate_evidence_document(
         document,
         expected_profile_path=expected_profile_path,
+        source_root=source_root,
         verify_live_source=verify_live_source,
         require_receipt_absent=require_receipt_absent,
     )
@@ -2501,6 +3037,7 @@ def validate_receipt_document(
     receipt_path: Path,
     expected_evidence_path: Path | None = None,
     expected_profile_path: Path | None = None,
+    source_root: Path | None = None,
     verify_live_source: bool = True,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     receipt = _exact(
@@ -2542,6 +3079,7 @@ def validate_receipt_document(
     evidence = validate_evidence(
         evidence_path,
         expected_profile_path=expected_profile_path,
+        source_root=source_root,
         verify_live_source=verify_live_source,
     )
     if source_commit != evidence["source"]["commit"]:
@@ -2562,6 +3100,7 @@ def validate_receipt(
     *,
     expected_evidence_path: Path | None = None,
     expected_profile_path: Path | None = None,
+    source_root: Path | None = None,
     verify_live_source: bool = True,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     receipt_path = _canonical_absolute(path, "SQ8 serving promotion receipt")
@@ -2577,6 +3116,7 @@ def validate_receipt(
         receipt_path=receipt_path,
         expected_evidence_path=expected_evidence_path,
         expected_profile_path=expected_profile_path,
+        source_root=source_root,
         verify_live_source=verify_live_source,
     )
 
@@ -2683,6 +3223,7 @@ def write_receipt(
     profile_path: Path,
     evidence_path: Path,
     output_path: Path,
+    source_root: Path | None = None,
     verify_live_source: bool = True,
 ) -> dict[str, Any]:
     profile, _ = _load_json_file(profile_path, "SQ8 served-model profile")
@@ -2697,6 +3238,7 @@ def write_receipt(
     evidence = validate_evidence(
         evidence_path,
         expected_profile_path=profile_path,
+        source_root=source_root,
         verify_live_source=verify_live_source,
         require_receipt_absent=True,
     )
@@ -2730,6 +3272,7 @@ def write_receipt(
         receipt_path=output,
         expected_evidence_path=evidence_path,
         expected_profile_path=profile_path,
+        source_root=source_root,
         verify_live_source=verify_live_source,
     )
     publish_immutable_json(output, receipt)
@@ -2737,6 +3280,7 @@ def write_receipt(
         output,
         expected_evidence_path=evidence_path,
         expected_profile_path=profile_path,
+        source_root=source_root,
         verify_live_source=verify_live_source,
     )
     return observed
@@ -2749,6 +3293,7 @@ def validate_generator_binding(
     receipt_path: Path,
     profile_path: Path,
     source_commit: str,
+    source_root: Path | None = None,
     worker_binary: Path,
     worker_sha256: str,
     manifest: dict[str, Any],
@@ -2781,6 +3326,7 @@ def validate_generator_binding(
         receipt_path=canonical_receipt_path,
         expected_evidence_path=evidence_path,
         expected_profile_path=profile_path,
+        source_root=source_root,
         verify_live_source=True,
     )
     if (
@@ -2823,7 +3369,12 @@ def validate_generator_binding(
 
 
 __all__ = [
+    "BUILD_INPUTS_V2",
+    "BUILD_REJECTED_ENVIRONMENT_V2",
     "BUILD_RECEIPT_SCHEMA",
+    "BUILD_RECEIPT_SCHEMA_V1",
+    "BUILD_RELEASE_SEAL_SCHEMA",
+    "BUILD_WORKER_RELATIVE_PATH",
     "CPU_CASES_SCHEMA",
     "CPU_CASE_IDS",
     "CPU_PYTEST_TESTS",
@@ -2839,6 +3390,9 @@ __all__ = [
     "run_full_product_validation",
     "stable_hash",
     "stable_read",
+    "resolve_build_source_root",
+    "resolve_build_worker_path",
+    "validate_build_release",
     "validate_build_receipt",
     "validate_cpu_cases",
     "validate_cpu_cases_document",

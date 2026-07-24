@@ -23,6 +23,12 @@ It replaces only the candidate and protocol identity boundary for independent
 The frozen v0.1 release schema remains a historical worker-v1 campaign. No v2
 validator may infer missing v2 identity from v0.1 bytes.
 
+The candidate worker is supplied only as a complete
+`sq8-worker-build-release-v0.2.md` release. Its receipt-v2 worker locator is
+relative to that sealed directory; all profile, promotion, and candidate
+absolute paths are created only after the directory reaches its final staged
+location.
+
 ## 2. Exact candidate binding
 
 One immutable candidate manifest is supplied before the run. The campaign
@@ -110,6 +116,10 @@ separate hash-bound artifacts.
 All candidate, acceptance, campaign, validator, authorization, claim, outcome,
 receipt, and bundle outputs use atomic no-replace publication followed by
 stable rehash. An existing target is never overwritten.
+
+Every SQ8 serving-promotion producer and validator receives the current sealed
+source root explicitly. The historical build-time path in receipt v2 is audit
+evidence and is never used as a live-source fallback.
 
 Successful fresh AQ4 and SQ8 campaigns permit assembly of
 `ullm.generic_reasoning_release_bundle.v2`; they do not themselves perform

@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import shutil
 import stat
 import subprocess
 import sys
@@ -48,12 +49,17 @@ class FakeRunner:
         *,
         dirty: bool = False,
         attached: bool = False,
+        mutate_input_during_build: bool = False,
+        change_commit_during_build: bool = False,
         build_bytes: bytes = b"sealed-sq8-worker\n",
     ) -> None:
         self.root = root
         self.dirty = dirty
         self.attached = attached
+        self.mutate_input_during_build = mutate_input_during_build
+        self.change_commit_during_build = change_commit_during_build
         self.build_bytes = build_bytes
+        self.build_completed = False
         self.calls: list[tuple[list[str], Path]] = []
 
     def __call__(self, argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
@@ -65,7 +71,12 @@ class FakeRunner:
             if arguments == ["rev-parse", "--show-toplevel"]:
                 return subprocess.CompletedProcess(argv, 0, str(self.root) + "\n", "")
             if arguments == ["rev-parse", "HEAD"]:
-                return subprocess.CompletedProcess(argv, 0, "a" * 40 + "\n", "")
+                commit = (
+                    "c" * 40
+                    if self.build_completed and self.change_commit_during_build
+                    else "a" * 40
+                )
+                return subprocess.CompletedProcess(argv, 0, commit + "\n", "")
             if arguments == ["rev-parse", "HEAD^{tree}"]:
                 return subprocess.CompletedProcess(argv, 0, "b" * 40 + "\n", "")
             if arguments == ["status", "--porcelain=v1", "--untracked-files=all"]:
@@ -87,6 +98,10 @@ class FakeRunner:
             worker.parent.mkdir(parents=True)
             worker.write_bytes(self.build_bytes)
             worker.chmod(0o755)
+            if self.mutate_input_during_build:
+                changed = self.root / TOOL.SOURCE_INPUTS[0]
+                changed.write_bytes(changed.read_bytes() + b"mutated during build\n")
+            self.build_completed = True
             return subprocess.CompletedProcess(argv, 0, "", "compiled")
         versions = {
             "cargo": "cargo 1.96.0",
@@ -102,6 +117,12 @@ class FakeRunner:
 def test_build_release_seals_clean_detached_source_and_worker(
     tmp_path: Path,
 ) -> None:
+    assert tuple(
+        sorted(TOOL.SOURCE_INPUTS, key=lambda value: value.encode("utf-8"))
+    ) == PROMOTION.BUILD_INPUTS_V2
+    assert tuple(sorted(TOOL.DISALLOWED_BUILD_ENVIRONMENT)) == (
+        PROMOTION.BUILD_REJECTED_ENVIRONMENT_V2
+    )
     repo = source_tree(tmp_path)
     output = tmp_path / "release"
     target = tmp_path / "target"
@@ -116,7 +137,7 @@ def test_build_release_seals_clean_detached_source_and_worker(
     assert receipt["worker"]["sha256"] == TOOL.sha256_file(
         output / "ullm-sq8-worker"
     )
-    assert receipt["worker"]["path"] == os.fspath(output / "ullm-sq8-worker")
+    assert receipt["worker"]["relative_path"] == "ullm-sq8-worker"
     assert receipt["source"]["repository_root"] == os.fspath(repo)
     assert receipt["source"]["worktree_clean"] is True
     assert receipt["build"]["result"] == "success"
@@ -143,6 +164,12 @@ def test_build_release_seals_clean_detached_source_and_worker(
         )
         == receipt
     )
+    release = PROMOTION.validate_build_release(
+        output,
+        verify_live_source=False,
+    )
+    assert release["receipt"] == receipt
+    assert release["worker_path"] == os.fspath(output / "ullm-sq8-worker")
     seal = json.loads((output / "SEALED.json").read_text(encoding="ascii"))
     assert seal["complete"] is True
     assert seal["worker_sha256"] == receipt["worker"]["sha256"]
@@ -223,6 +250,33 @@ def test_build_rejects_ambient_compile_override(
     assert not (tmp_path / "release").exists()
 
 
+@pytest.mark.parametrize(
+    "runner_kwargs",
+    [
+        {"mutate_input_during_build": True},
+        {"change_commit_during_build": True},
+    ],
+)
+def test_build_rejects_source_identity_change_before_receipt_publication(
+    tmp_path: Path,
+    runner_kwargs: dict[str, bool],
+) -> None:
+    repo = source_tree(tmp_path)
+    output = tmp_path / "release"
+    with pytest.raises(TOOL.BuildError, match="source identity changed"):
+        TOOL.build_release(
+            repo,
+            output,
+            tmp_path / "target",
+            runner=FakeRunner(repo, **runner_kwargs),
+        )
+
+    assert output.is_dir()
+    assert (output / "ullm-sq8-worker").is_file()
+    assert not (output / "build-receipt.json").exists()
+    assert not (output / "SEALED.json").exists()
+
+
 def test_second_release_cannot_replace_first(tmp_path: Path) -> None:
     repo = source_tree(tmp_path)
     output = tmp_path / "release"
@@ -237,3 +291,84 @@ def test_second_release_cannot_replace_first(tmp_path: Path) -> None:
             runner=FakeRunner(repo, build_bytes=b"second\n"),
         )
     assert (output / "ullm-sq8-worker").read_bytes() == original
+
+
+def test_v2_release_relocates_without_rewriting_receipt_or_seal(
+    tmp_path: Path,
+) -> None:
+    repo = source_tree(tmp_path)
+    original = tmp_path / "release-a"
+    relocated = tmp_path / "release-b"
+    TOOL.build_release(
+        repo,
+        original,
+        tmp_path / "target",
+        runner=FakeRunner(repo),
+    )
+    receipt_raw = (original / "build-receipt.json").read_bytes()
+    seal_raw = (original / "SEALED.json").read_bytes()
+    receipt_sha256 = TOOL.sha256_file(original / "build-receipt.json")
+    seal_sha256 = TOOL.sha256_file(original / "SEALED.json")
+
+    shutil.copytree(original, relocated, copy_function=shutil.copy2)
+    original.chmod(0o755)
+    shutil.rmtree(original)
+
+    assert (relocated / "build-receipt.json").read_bytes() == receipt_raw
+    assert (relocated / "SEALED.json").read_bytes() == seal_raw
+    assert TOOL.sha256_file(relocated / "build-receipt.json") == receipt_sha256
+    assert TOOL.sha256_file(relocated / "SEALED.json") == seal_sha256
+    result = PROMOTION.validate_build_release(
+        relocated,
+        verify_live_source=False,
+    )
+    assert result["worker_path"] == os.fspath(
+        relocated / "ullm-sq8-worker"
+    )
+
+
+def test_v1_receipt_keeps_historical_absolute_worker_semantics(
+    tmp_path: Path,
+) -> None:
+    repo = source_tree(tmp_path)
+    release = tmp_path / "release"
+    TOOL.build_release(
+        repo,
+        release,
+        tmp_path / "target",
+        runner=FakeRunner(repo),
+    )
+    receipt_path = release / "build-receipt.json"
+    document = json.loads(receipt_path.read_text(encoding="ascii"))
+    worker = dict(document["worker"])
+    relative = worker.pop("relative_path")
+    worker["path"] = os.fspath(release / relative)
+    document["schema_version"] = PROMOTION.BUILD_RECEIPT_SCHEMA_V1
+    document["worker"] = worker
+    receipt_path.chmod(0o644)
+    receipt_path.write_bytes(TOOL.canonical_json(document))
+    receipt_path.chmod(0o444)
+
+    assert (
+        PROMOTION.validate_build_receipt(
+            receipt_path,
+            verify_live_source=False,
+        )
+        == document
+    )
+    moved = tmp_path / "receipt-only.json"
+    shutil.copy2(receipt_path, moved)
+    assert (
+        PROMOTION.validate_build_receipt(
+            moved,
+            verify_live_source=False,
+        )
+        == document
+    )
+    release.chmod(0o755)
+    (release / "ullm-sq8-worker").unlink()
+    with pytest.raises(PROMOTION.PromotionError, match="absent path component"):
+        PROMOTION.validate_build_receipt(
+            moved,
+            verify_live_source=False,
+        )

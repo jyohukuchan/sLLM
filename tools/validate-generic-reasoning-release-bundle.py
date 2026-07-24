@@ -688,6 +688,7 @@ def _validate_sq8_promotion_and_candidate(
         receipt, evidence = promotion_validator.validate_receipt(
             receipt_path,
             expected_evidence_path=evidence_path,
+            source_root=ROOT,
             verify_live_source=True,
         )
     except Exception as error:

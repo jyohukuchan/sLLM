@@ -16,6 +16,11 @@ import sq8_serving_promotion as promotion
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--build-receipt", required=True, type=Path)
+    parser.add_argument(
+        "--source-root",
+        type=Path,
+        help="current sealed source root; mandatory for build receipt v2",
+    )
     parser.add_argument("--profile", required=True, type=Path)
     parser.add_argument("--ephemeral-manifest", required=True, type=Path)
     parser.add_argument("--cpu-cases", required=True, type=Path)
@@ -28,6 +33,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         document = promotion.build_evidence(
             build_receipt_path=args.build_receipt,
+            source_root=args.source_root,
             profile_path=args.profile,
             ephemeral_manifest_path=args.ephemeral_manifest,
             cpu_cases_path=args.cpu_cases,
@@ -36,6 +42,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         promotion.validate_evidence(
             args.output,
             expected_profile_path=args.profile,
+            source_root=args.source_root,
             require_receipt_absent=True,
         )
     except Exception:

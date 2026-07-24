@@ -735,6 +735,7 @@ def make_v2_bundle(
             _path: Path,
             **_kwargs: object,
         ) -> tuple[dict[str, Any], dict[str, Any]]:
+            assert _kwargs["source_root"] == BUNDLE.ROOT
             return (
                 {
                     "schema_version": "ullm.sq8_serving_promotion.v1",
@@ -970,6 +971,42 @@ def make_real_validator_v2_bundle(
                 ],
                 check=True,
             )
+            subprocess.run(
+                ["git", "-C", self.source, "config", "user.name", "SQ8 Fixture"],
+                check=True,
+            )
+            subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    self.source,
+                    "config",
+                    "user.email",
+                    "sq8@example.invalid",
+                ],
+                check=True,
+            )
+            for relative in set(
+                promotion_fixtures.PROMOTION.EVIDENCE_SOURCE_PATHS
+            ) | set(promotion_fixtures.PROMOTION.BUILD_INPUTS_V2):
+                shutil_source = ROOT / relative
+                shutil_destination = self.source / relative
+                shutil_destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil_destination.write_bytes(shutil_source.read_bytes())
+            subprocess.run(["git", "-C", self.source, "add", "."], check=True)
+            subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    self.source,
+                    "commit",
+                    "-q",
+                    "--allow-empty",
+                    "-m",
+                    "fixture current source",
+                ],
+                check=True,
+            )
 
     promotion_root = root / "promotion-real"
     promotion_root.mkdir()
@@ -977,7 +1014,11 @@ def make_real_validator_v2_bundle(
     promotion.publish_evidence()
     promotion.publish_receipt()
     candidate_path = promotion.release / "served-model-final.json"
-    promotion_fixtures.GENERATOR.generate(promotion.profile, candidate_path)
+    promotion_fixtures.GENERATOR.generate(
+        promotion.profile,
+        candidate_path,
+        source_root=promotion.source,
+    )
     candidate_path.chmod(0o444)
     candidate = json.loads(candidate_path.read_text(encoding="ascii"))
     source_commit = promotion.commit
@@ -1941,7 +1982,9 @@ def test_bundle_v2_real_validators_and_build_receipt_mutation_matrix(
         BUNDLE.validate(bundle)
     build_receipt.chmod(0o444)
 
+    promotion.build_release.chmod(0o755)
     os.link(build_receipt, alias)
+    promotion.build_release.chmod(0o555)
     try:
         with pytest.raises(
             BUNDLE.ValidationError,
@@ -1949,7 +1992,9 @@ def test_bundle_v2_real_validators_and_build_receipt_mutation_matrix(
         ):
             BUNDLE.validate(bundle)
     finally:
+        promotion.build_release.chmod(0o755)
         alias.unlink()
+        promotion.build_release.chmod(0o555)
 
     assert stat.S_IMODE(build_receipt.stat().st_mode) == 0o444
     assert build_receipt.stat().st_nlink == 1

@@ -17,9 +17,12 @@ from pathlib import Path
 from typing import Any, Callable, Sequence
 
 
-RECEIPT_SCHEMA = "ullm.sq8_worker_build_receipt.v1"
-PROVENANCE_SCHEMA = "ullm.sq8_worker_build_provenance.v1"
-SEAL_SCHEMA = "ullm.sq8_worker_release_seal.v1"
+# This builder emits v2 only. Historical receipt-v1 support is read-only and
+# lives in sq8_serving_promotion.py.
+RECEIPT_SCHEMA = "ullm.sq8_worker_build_receipt.v2"
+PROVENANCE_SCHEMA = "ullm.sq8_worker_build_provenance.v2"
+SEAL_SCHEMA = "ullm.sq8_worker_release_seal.v2"
+WORKER_RELATIVE_PATH = "ullm-sq8-worker"
 GIT_RE = re.compile(r"[0-9a-f]{40}\Z")
 MAX_TEXT_BYTES = 1_048_576
 SOURCE_INPUTS = (
@@ -356,7 +359,7 @@ def build_release(
         label="SQ8 release build",
     )
     finished_ns = time.time_ns()
-    worker_source = target_directory / "release/ullm-sq8-worker"
+    worker_source = target_directory / f"release/{WORKER_RELATIVE_PATH}"
     if worker_source.is_symlink() or not worker_source.is_file():
         raise BuildError("Cargo did not produce the SQ8 worker")
     source_mode = stat.S_IMODE(worker_source.stat().st_mode)
@@ -370,10 +373,26 @@ def build_release(
         "hipcc": _tool_version(runner, repo_root, "hipcc", "--version"),
     }
     output.mkdir(mode=0o700)
-    worker_output = output / "ullm-sq8-worker"
+    worker_output = output / WORKER_RELATIVE_PATH
     _exclusive_copy(worker_source, worker_output, 0o555)
     worker_sha256 = sha256_file(worker_output)
     worker_bytes = worker_output.stat().st_size
+    try:
+        (
+            post_commit,
+            post_tree,
+            post_source_date_epoch,
+            post_inputs,
+        ) = _source_identity(repo_root, runner)
+    except BuildError as error:
+        raise BuildError("source identity changed during the SQ8 build") from error
+    if (
+        post_commit != commit
+        or post_tree != tree
+        or post_source_date_epoch != source_date_epoch
+        or post_inputs != inputs
+    ):
+        raise BuildError("source identity changed during the SQ8 build")
     receipt = {
         "schema_version": RECEIPT_SCHEMA,
         "source": {
@@ -399,7 +418,10 @@ def build_release(
             for relative in sorted(inputs, key=lambda value: value.encode("utf-8"))
         ],
         "worker": {
-            "path": os.fspath(worker_output),
+            # v2 is deliberately relocatable as one complete sealed release.
+            # The absolute source/output/target paths above remain build-audit
+            # facts and are never used as the deployed worker locator.
+            "relative_path": WORKER_RELATIVE_PATH,
             "bytes": worker_bytes,
             "mode": "0555",
             "nlink": 1,
@@ -454,7 +476,7 @@ def build_release(
         "README.md",
         "build-provenance.json",
         "build-receipt.json",
-        "ullm-sq8-worker",
+        WORKER_RELATIVE_PATH,
     )
     sums = "".join(f"{sha256_file(output / name)}  {name}\n" for name in members).encode(
         "ascii"

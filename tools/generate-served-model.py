@@ -221,6 +221,7 @@ def _validate_promotion_evidence(
     receipt: dict[str, Any],
     receipt_path: Path,
     source_commit: str,
+    source_root: Path | None,
     worker_binary: Path,
     worker_sha256: str,
     product_root: Path,
@@ -284,6 +285,7 @@ def _validate_promotion_evidence(
                 receipt_path=receipt_path,
                 profile_path=profile_path.resolve(),
                 source_commit=source_commit,
+                source_root=source_root,
                 worker_binary=worker_binary,
                 worker_sha256=worker_sha256,
                 manifest=manifest,
@@ -479,7 +481,9 @@ def _required_object(parent: dict[str, Any], name: str) -> dict[str, Any]:
     return value
 
 
-def materialize(profile_path: Path) -> dict[str, Any]:
+def materialize(
+    profile_path: Path, *, source_root: Path | None = None
+) -> dict[str, Any]:
     profile = _load_json(profile_path, "served-model profile")
     if profile.get("schema_version") != PROFILE_SCHEMA:
         raise GenerationError("served-model profile schema is unsupported")
@@ -597,6 +601,7 @@ def materialize(profile_path: Path) -> dict[str, Any]:
         receipt=receipt,
         receipt_path=receipt_path,
         source_commit=source_commit,
+        source_root=source_root,
         worker_binary=worker_binary,
         worker_sha256=worker_sha256,
         product_root=product_root,
@@ -607,8 +612,13 @@ def materialize(profile_path: Path) -> dict[str, Any]:
     return document
 
 
-def generate(profile_path: Path, output_path: Path) -> str:
-    document = materialize(profile_path)
+def generate(
+    profile_path: Path,
+    output_path: Path,
+    *,
+    source_root: Path | None = None,
+) -> str:
+    document = materialize(profile_path, source_root=source_root)
     if output_path.is_symlink():
         raise GenerationError("output path must not be a symlink")
     output_path = output_path.resolve()
@@ -645,13 +655,25 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--profile", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
+    parser.add_argument(
+        "--source-root",
+        type=Path,
+        help=(
+            "current sealed source root; mandatory when SQ8 promotion "
+            "evidence uses worker build receipt v2"
+        ),
+    )
     return parser.parse_args(argv)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = parse_args(argv)
     try:
-        digest = generate(args.profile, args.output)
+        digest = generate(
+            args.profile,
+            args.output,
+            source_root=args.source_root,
+        )
     except Exception as error:
         print(f"served-model generation failed: {error}", file=sys.stderr)
         return 1

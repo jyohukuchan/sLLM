@@ -15,6 +15,11 @@ import sq8_serving_promotion as promotion
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("evidence", type=Path)
+    parser.add_argument(
+        "--source-root",
+        type=Path,
+        help="current sealed source root; mandatory for build receipt v2",
+    )
     parser.add_argument("--profile", type=Path)
     parser.add_argument(
         "--require-pre-receipt-state",
@@ -30,6 +35,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         document = promotion.validate_evidence(
             args.evidence,
             expected_profile_path=args.profile,
+            source_root=args.source_root,
             require_receipt_absent=args.require_pre_receipt_state,
         )
     except Exception:

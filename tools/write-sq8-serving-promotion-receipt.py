@@ -14,6 +14,11 @@ import sq8_serving_promotion as promotion
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--source-root",
+        type=Path,
+        help="current sealed source root; mandatory for build receipt v2",
+    )
     parser.add_argument("--profile", required=True, type=Path)
     parser.add_argument("--evidence", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
@@ -27,6 +32,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             profile_path=args.profile,
             evidence_path=args.evidence,
             output_path=args.output,
+            source_root=args.source_root,
         )
     except Exception:
         print("SQ8 serving promotion receipt publication failed", file=sys.stderr)
