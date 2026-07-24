@@ -29,7 +29,7 @@ import urllib.parse
 import urllib.request
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import ModuleType
@@ -52,11 +52,13 @@ from served_model_active_binding import (  # noqa: E402
 )
 
 
-PLAN_SCHEMA = "ullm.served_model.final_activation_plan.v2"
-OPERATIONS_SCHEMA = "ullm.served_model.final_activation_operations.v1"
-ACTIVATION_OUTCOME_SCHEMA = "ullm.served_model.final_activation_outcome.v1"
+PLAN_SCHEMA = "ullm.served_model.final_activation_plan.v3"
+OPERATIONS_SCHEMA = "ullm.served_model.final_activation_operations.v2"
+ACTIVATION_OUTCOME_SCHEMA = "ullm.served_model.final_activation_outcome.v2"
+ACTIVATION_INTENT_SCHEMA = "ullm.served_model.final_activation_intent.v1"
+ACTIVATION_RECOVERY_SCHEMA = "ullm.served_model.final_activation_recovery.v1"
 ROLLBACK_OUTCOME_SCHEMA = "ullm.served_model.final_rollback_outcome.v1"
-PREFLIGHT_SCHEMA = "ullm.served_model.final_activation_preflight.v2"
+PREFLIGHT_SCHEMA = "ullm.served_model.final_activation_preflight.v3"
 AQ4_BUNDLE_SCHEMA = "ullm.generic_reasoning_release_bundle.v1"
 AQ4_BUNDLE_VALIDATOR_SCHEMA = "ullm.generic_reasoning_release_bundle_validator.v1"
 BUNDLE_SCHEMA = "ullm.generic_reasoning_release_bundle.v2"
@@ -70,6 +72,7 @@ WORKER_PROTOCOL = "ullm.worker.v2"
 ROUTE = "restored_aq4_to_independent_sq8_bundle_v2"
 ACTIVATION_CONFIRMATION = "ACTIVATE_SQ8_0_FROM_RESTORED_AQ4"
 ROLLBACK_CONFIRMATION = "ROLLBACK_SQ8_0_TO_EXACT_AQ4"
+RECOVERY_CONFIRMATION = "RECOVER_FAILED_SQ8_0_TO_EXACT_AQ4"
 LIVE_PROOF_SCHEMA = "ullm.served_model.final_activation_live_proof.v1"
 
 VALIDATOR_PATH = TOOLS / "validate-served-model.py"
@@ -105,6 +108,7 @@ OPENWEBUI_SESSION_TOKEN_PARENT_UID = 0
 OPENWEBUI_SESSION_TOKEN_PARENT_GID = 1000
 OPENWEBUI_SESSION_TOKEN_PARENT_MODE = 0o750
 RENAME_EXCHANGE = 2
+RENAME_NOREPLACE = 1
 PR_SET_CHILD_SUBREAPER = 36
 PR_GET_CHILD_SUBREAPER = 37
 HASH_RE = re.compile(r"[0-9a-f]{64}\Z")
@@ -120,6 +124,7 @@ OPERATION_STAGES = {
     "candidate_live_health",
     "reverse_reconciliation",
     "rollback_live_health",
+    "recovery_live_health",
 }
 ACTIVATION_STAGES = {
     "lock",
@@ -138,6 +143,14 @@ ROLLBACK_STAGES = {
     "aq4_restore",
     "reverse_reconciliation",
     "rollback_live_health",
+    "outcome_publication",
+}
+RECOVERY_STAGES = {
+    "lock",
+    "preflight",
+    "aq4_restore",
+    "reverse_reconciliation",
+    "recovery_live_health",
     "outcome_publication",
 }
 STAGE_STATES = {"pending", "passed", "failed", "skipped"}
@@ -239,6 +252,10 @@ class FinalActivationError(RuntimeError):
 
 class FinalActivationInterrupted(BaseException):
     """A termination signal requested exact-byte restoration."""
+
+
+class ImmutablePublicationCommittedError(FinalActivationError):
+    """The no-replace rename committed, but durable revalidation failed."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -1274,7 +1291,11 @@ def _operation_document(
         fail("operations active-window timeout is invalid")
     live_proofs = _exact(
         document["live_proofs"],
-        {"candidate_live_health", "rollback_live_health"},
+        {
+            "candidate_live_health",
+            "rollback_live_health",
+            "recovery_live_health",
+        },
         "operations.live_proofs",
     )
     proof_paths: set[Path] = set()
@@ -1290,7 +1311,7 @@ def _operation_document(
             must_exist=False,
         )
         if proof_path in proof_paths:
-            fail("candidate and rollback live-proof paths collide")
+            fail("final-route live-proof paths collide")
         proof_paths.add(proof_path)
         _text(
             proof["service_unit"],
@@ -1425,7 +1446,7 @@ def _live_proof_expectation(
 ) -> tuple[dict[str, Any], str, str, str]:
     if stage == "candidate_live_health":
         identity = record.document["candidate"]
-    elif stage == "rollback_live_health":
+    elif stage in {"rollback_live_health", "recovery_live_health"}:
         identity = record.document["rollback"]
     else:
         fail("live-proof stage is invalid")
@@ -2887,12 +2908,87 @@ def _open_parent(path: Path, label: str) -> int:
             os.close(verification)
 
 
+def _rename_noreplace(parent_descriptor: int, source: str, destination: str) -> None:
+    libc = ctypes.CDLL(None, use_errno=True)
+    renameat2 = getattr(libc, "renameat2", None)
+    if renameat2 is None:
+        fail("renameat2(RENAME_NOREPLACE) is unavailable")
+    result = renameat2(
+        ctypes.c_int(parent_descriptor),
+        ctypes.c_char_p(os.fsencode(source)),
+        ctypes.c_int(parent_descriptor),
+        ctypes.c_char_p(os.fsencode(destination)),
+        ctypes.c_uint(RENAME_NOREPLACE),
+    )
+    if result != 0:
+        error_number = ctypes.get_errno()
+        if error_number == 17:
+            raise FinalActivationError("immutable output already exists")
+        raise FinalActivationError("immutable output rename failed") from OSError(
+            error_number,
+            os.strerror(error_number),
+        )
+
+
+def _committed_immutable(
+    path: Path,
+    document: dict[str, Any],
+    *,
+    required_uid: int,
+    parent_descriptor: int | None = None,
+) -> StableFileSnapshot | None:
+    """Durably re-open an exact no-replace publication."""
+
+    expected = _canonical_json(document)
+    owned_parent = parent_descriptor is None
+    if parent_descriptor is None:
+        try:
+            parent_descriptor = _open_parent(path, "committed immutable output")
+        except FinalActivationError:
+            return None
+    try:
+        before = _stable(
+            path,
+            "committed immutable output",
+            maximum=MAX_DOCUMENT_BYTES,
+            read_only=True,
+            single_link=True,
+        )
+        if before.identity.uid != required_uid or before.raw != expected:
+            return None
+        os.fsync(parent_descriptor)
+        after = _stable(
+            path,
+            "committed immutable output",
+            maximum=MAX_DOCUMENT_BYTES,
+            read_only=True,
+            single_link=True,
+        )
+        if (
+            after.identity.uid != required_uid
+            or after.raw != expected
+            or after.identity != before.identity
+        ):
+            return None
+        return after
+    except Exception:
+        return None
+    finally:
+        if owned_parent:
+            try:
+                os.close(parent_descriptor)
+            except OSError:
+                pass
+
+
 def _publish_immutable(
     path: Path,
     document: dict[str, Any],
     *,
     required_uid: int,
 ) -> StableFileSnapshot:
+    """Publish one exact, single-link file with a no-replace rename commit."""
+
     if os.geteuid() != required_uid:
         fail("immutable publisher has the wrong effective UID")
     raw = _canonical_json(document)
@@ -2901,7 +2997,7 @@ def _publish_immutable(
     parent_descriptor = _open_parent(path, "immutable output")
     temporary_name = f".{path.name}.{os.getpid()}.{os.urandom(8).hex()}"
     descriptor = -1
-    linked = False
+    renamed = False
     try:
         flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC | os.O_NOFOLLOW
         descriptor = os.open(
@@ -2918,38 +3014,77 @@ def _publish_immutable(
                 fail("immutable output write made no progress")
             view = view[written:]
         os.fsync(descriptor)
+        staged_metadata = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(staged_metadata.st_mode)
+            or stat.S_IMODE(staged_metadata.st_mode) != 0o444
+            or staged_metadata.st_nlink != 1
+            or staged_metadata.st_uid != required_uid
+            or staged_metadata.st_size != len(raw)
+        ):
+            fail("immutable staged output metadata differs")
         try:
-            os.link(
-                temporary_name,
-                path.name,
-                src_dir_fd=parent_descriptor,
-                dst_dir_fd=parent_descriptor,
-                follow_symlinks=False,
+            _rename_noreplace(parent_descriptor, temporary_name, path.name)
+        except BaseException:
+            try:
+                named = os.stat(
+                    path.name,
+                    dir_fd=parent_descriptor,
+                    follow_symlinks=False,
+                )
+                renamed = (
+                    named.st_dev == staged_metadata.st_dev
+                    and named.st_ino == staged_metadata.st_ino
+                )
+            except OSError:
+                renamed = False
+            if not renamed:
+                raise
+        else:
+            renamed = True
+        snapshot = _committed_immutable(
+            path,
+            document,
+            required_uid=required_uid,
+            parent_descriptor=parent_descriptor,
+        )
+        if snapshot is None:
+            # Retry once so a fault immediately after rename cannot be
+            # mistaken for a pre-commit failure.
+            snapshot = _committed_immutable(
+                path,
+                document,
+                required_uid=required_uid,
+                parent_descriptor=parent_descriptor,
             )
-        except FileExistsError as error:
-            raise FinalActivationError("immutable output already exists") from error
-        linked = True
-        os.unlink(temporary_name, dir_fd=parent_descriptor)
-        os.fsync(parent_descriptor)
+        if snapshot is None:
+            raise ImmutablePublicationCommittedError(
+                "immutable output was renamed but durable validation failed"
+            )
+        return snapshot
     finally:
         if descriptor >= 0:
-            os.close(descriptor)
-        if not linked:
+            try:
+                os.close(descriptor)
+            except OSError as error:
+                if renamed:
+                    raise ImmutablePublicationCommittedError(
+                        "immutable output was renamed but descriptor close failed"
+                    ) from error
+                raise
+        if not renamed:
             try:
                 os.unlink(temporary_name, dir_fd=parent_descriptor)
             except OSError:
                 pass
-        os.close(parent_descriptor)
-    snapshot = _stable(
-        path,
-        "immutable output",
-        maximum=MAX_DOCUMENT_BYTES,
-        read_only=True,
-        single_link=True,
-    )
-    if snapshot.raw != raw or snapshot.identity.uid != required_uid:
-        fail("immutable output differs after publication")
-    return snapshot
+        try:
+            os.close(parent_descriptor)
+        except OSError as error:
+            if renamed:
+                raise ImmutablePublicationCommittedError(
+                    "immutable output was renamed but parent close failed"
+                ) from error
+            raise
 
 
 def prepare_plan(
@@ -2963,7 +3098,9 @@ def prepare_plan(
     systemd_unit: Path,
     environment_file: Path,
     operations_document: Path,
+    activation_intent: Path,
     activation_outcome: Path,
+    activation_recovery: Path,
     rollback_outcome: Path,
     output: Path,
     now: datetime,
@@ -2976,12 +3113,25 @@ def prepare_plan(
     _identifier(plan_id, "plan_id")
     for destination, label in (
         (output, "plan output"),
+        (activation_intent, "activation intent"),
         (activation_outcome, "activation outcome"),
+        (activation_recovery, "activation recovery receipt"),
         (rollback_outcome, "rollback outcome"),
     ):
         _ensure_fresh_destination(destination, label)
-    if len({output, activation_outcome, rollback_outcome}) != 3:
-        fail("plan and outcome destinations must be distinct")
+    if (
+        len(
+            {
+                output,
+                activation_intent,
+                activation_outcome,
+                activation_recovery,
+                rollback_outcome,
+            }
+        )
+        != 5
+    ):
+        fail("plan, intent, and outcome destinations must be distinct")
 
     record, outcome_snapshot, outcome = _load_successful_campaign_outcome(
         authorization_path,
@@ -3188,7 +3338,11 @@ def prepare_plan(
     rollback_operation_artifacts = _capture_operation_executable_seals(
         operation_document,
         required_uid=policy.required_uid,
-        stages={"reverse_reconciliation", "rollback_live_health"},
+        stages={
+            "reverse_reconciliation",
+            "rollback_live_health",
+            "recovery_live_health",
+        },
     )
     if any(
         specification["service_unit"] != policy.service_unit
@@ -3205,14 +3359,16 @@ def prepare_plan(
         len(
             {
                 output,
+                activation_intent,
                 activation_outcome,
+                activation_recovery,
                 rollback_outcome,
                 *proof_paths.values(),
             }
         )
-        != 5
+        != 8
     ):
-        fail("plan, outcome, and live-proof destinations must be distinct")
+        fail("plan, intent, outcome, and live-proof destinations must be distinct")
 
     document = {
         "schema_version": PLAN_SCHEMA,
@@ -3285,7 +3441,9 @@ def prepare_plan(
         },
         "live_proofs": operation_document["live_proofs"],
         "outcomes": {
+            "activation_intent_path": os.fspath(activation_intent),
             "activation_path": os.fspath(activation_outcome),
+            "activation_recovery_path": os.fspath(activation_recovery),
             "rollback_path": os.fspath(rollback_outcome),
         },
     }
@@ -3553,7 +3711,11 @@ def _validate_plan_shape(document: dict[str, Any], *, action: str) -> None:
         fail("operations schema binding differs")
     live_proofs = _exact(
         document["live_proofs"],
-        {"candidate_live_health", "rollback_live_health"},
+        {
+            "candidate_live_health",
+            "rollback_live_health",
+            "recovery_live_health",
+        },
         "live_proofs",
     )
     proof_paths: set[Path] = set()
@@ -3585,21 +3747,101 @@ def _validate_plan_shape(document: dict[str, Any], *, action: str) -> None:
             _endpoint_url(url, f"live_proofs.{stage}.endpoint_urls.{endpoint}")
     outcomes = _exact(
         document["outcomes"],
-        {"activation_path", "rollback_path"},
+        {
+            "activation_intent_path",
+            "activation_path",
+            "activation_recovery_path",
+            "rollback_path",
+        },
         "outcomes",
     )
     for field in outcomes:
         _absolute(outcomes[field], f"outcomes.{field}", must_exist=False)
-    if outcomes["activation_path"] == outcomes["rollback_path"]:
-        fail("activation and rollback outcome paths collide")
-    if proof_paths & {
-        Path(outcomes["activation_path"]),
-        Path(outcomes["rollback_path"]),
-    }:
+    outcome_paths = {Path(value) for value in outcomes.values()}
+    if len(outcome_paths) != len(outcomes):
+        fail("activation intent and outcome paths collide")
+    if proof_paths & outcome_paths:
         fail("live-proof and outcome paths collide")
 
 
-def _load_activation_outcome(
+def _activation_intent(
+    record: PlanRecord,
+    *,
+    created_at: datetime,
+) -> dict[str, Any]:
+    outcomes = record.document["outcomes"]
+    return {
+        "schema_version": ACTIVATION_INTENT_SCHEMA,
+        "plan_id": record.document["plan_id"],
+        "plan_path": os.fspath(record.snapshot.path),
+        "plan_sha256": record.snapshot.sha256,
+        "created_at": utc_timestamp(created_at),
+        "active_manifest_path": record.document["active_manifest"]["path"],
+        "before_manifest_sha256": record.rollback.sha256,
+        "candidate_manifest_sha256": record.candidate.sha256,
+        "activation_outcome_path": outcomes["activation_path"],
+        "recovery_receipt_path": outcomes["activation_recovery_path"],
+    }
+
+
+def _load_activation_intent(
+    path: Path,
+    *,
+    plan: StableFileSnapshot,
+    required_uid: int,
+) -> tuple[StableFileSnapshot, dict[str, Any]]:
+    snapshot = _stable(
+        path,
+        "activation intent",
+        maximum=MAX_DOCUMENT_BYTES,
+        read_only=True,
+        single_link=True,
+    )
+    if snapshot.identity.uid != required_uid:
+        fail("activation intent owner differs")
+    document = _strict_object(snapshot.raw, "activation intent")
+    plan_document = _strict_object(plan.raw, "final activation plan")
+    if _canonical_json(document) != snapshot.raw:
+        fail("activation intent is not canonical JSON")
+    _exact(
+        document,
+        {
+            "schema_version",
+            "plan_id",
+            "plan_path",
+            "plan_sha256",
+            "created_at",
+            "active_manifest_path",
+            "before_manifest_sha256",
+            "candidate_manifest_sha256",
+            "activation_outcome_path",
+            "recovery_receipt_path",
+        },
+        "activation intent",
+    )
+    _timestamp(document["created_at"], "activation intent.created_at")
+    outcomes = plan_document["outcomes"]
+    if (
+        document["schema_version"] != ACTIVATION_INTENT_SCHEMA
+        or document["plan_id"] != plan_document["plan_id"]
+        or document["plan_path"] != os.fspath(plan.path)
+        or document["plan_sha256"] != plan.sha256
+        or document["active_manifest_path"]
+        != plan_document["active_manifest"]["path"]
+        or document["before_manifest_sha256"]
+        != plan_document["rollback"]["manifest_sha256"]
+        or document["candidate_manifest_sha256"]
+        != plan_document["candidate"]["manifest_sha256"]
+        or document["activation_outcome_path"] != outcomes["activation_path"]
+        or document["recovery_receipt_path"]
+        != outcomes["activation_recovery_path"]
+        or snapshot.path != Path(outcomes["activation_intent_path"])
+    ):
+        fail("activation intent plan binding differs")
+    return snapshot, document
+
+
+def _load_any_activation_outcome(
     path: Path,
     *,
     plan: StableFileSnapshot,
@@ -3626,6 +3868,8 @@ def _load_activation_outcome(
             "plan_id",
             "plan_path",
             "plan_sha256",
+            "intent_path",
+            "intent_sha256",
             "started_at",
             "completed_at",
             "status",
@@ -3639,15 +3883,31 @@ def _load_activation_outcome(
         },
         "activation outcome",
     )
+    intent_snapshot, _intent_document = _load_activation_intent(
+        Path(plan_document["outcomes"]["activation_intent_path"]),
+        plan=plan,
+        required_uid=required_uid,
+    )
+    status = document["status"]
+    failure_stage = document["failure_stage"]
     if (
         document["schema_version"] != ACTIVATION_OUTCOME_SCHEMA
         or document["plan_id"] != plan_document["plan_id"]
         or document["plan_path"] != os.fspath(plan.path)
         or document["plan_sha256"] != plan.sha256
-        or document["status"] != "activated"
-        or document["failure_stage"] is not None
+        or document["intent_path"] != os.fspath(intent_snapshot.path)
+        or document["intent_sha256"] != intent_snapshot.sha256
+        or status not in {"activated", "failed_restored", "failed_restore"}
+        or (
+            status == "activated"
+            and failure_stage is not None
+        )
+        or (
+            status != "activated"
+            and failure_stage not in ACTIVATION_STAGES
+        )
     ):
-        fail("activation outcome does not prove successful activation")
+        fail("activation outcome root binding differs")
     started_at = _timestamp(document["started_at"], "activation outcome.started_at")
     completed_at = _timestamp(
         document["completed_at"],
@@ -3660,13 +3920,63 @@ def _load_activation_outcome(
         != plan_document["rollback"]["manifest_sha256"]
         or document["candidate_manifest_sha256"]
         != plan_document["candidate"]["manifest_sha256"]
-        or document["observed_manifest_sha256"]
-        != plan_document["candidate"]["manifest_sha256"]
     ):
         fail("activation outcome manifest identity differs")
     stages = _exact(document["stages"], ACTIVATION_STAGES, "activation outcome stages")
+    if any(value not in STAGE_STATES for value in stages.values()):
+        fail("activation outcome stage state is invalid")
+    restoration = _exact(
+        document["restoration"],
+        {
+            "attempted",
+            "manifest_sha256",
+            "bytes_equal",
+            "reverse_reconciliation_passed",
+            "live_health_passed",
+        },
+        "activation outcome restoration",
+    )
+    if restoration["manifest_sha256"] != plan_document["rollback"]["manifest_sha256"]:
+        fail("activation outcome restoration identity differs")
+    live_proofs = _exact(
+        document["live_proofs"],
+        {"candidate_live_health", "rollback_live_health"},
+        "activation outcome live_proofs",
+    )
+    for stage, envelope in live_proofs.items():
+        if envelope is not None and not isinstance(envelope, dict):
+            fail(f"activation outcome {stage} live-proof presence differs")
+        if record is not None and isinstance(envelope, dict):
+            _validate_live_proof_envelope(
+                record,
+                stage,
+                envelope,
+                read_named=False,
+            )
+    return snapshot, document
+
+
+def _load_activation_outcome(
+    path: Path,
+    *,
+    plan: StableFileSnapshot,
+    required_uid: int,
+    record: PlanRecord | None = None,
+) -> tuple[StableFileSnapshot, dict[str, Any]]:
+    snapshot, document = _load_any_activation_outcome(
+        path,
+        plan=plan,
+        required_uid=required_uid,
+        record=record,
+    )
+    plan_document = _strict_object(plan.raw, "final activation plan")
+    stages = document["stages"]
     if (
-        stages["lock"] != "passed"
+        document["status"] != "activated"
+        or document["failure_stage"] is not None
+        or document["observed_manifest_sha256"]
+        != plan_document["candidate"]["manifest_sha256"]
+        or stages["lock"] != "passed"
         or stages["preflight"] != "passed"
         or stages["candidate_activation"] != "passed"
         or stages["candidate_reconciliation"] != "passed"
@@ -3682,17 +3992,7 @@ def _load_activation_outcome(
         )
     ):
         fail("activation outcome stages do not prove successful activation")
-    restoration = _exact(
-        document["restoration"],
-        {
-            "attempted",
-            "manifest_sha256",
-            "bytes_equal",
-            "reverse_reconciliation_passed",
-            "live_health_passed",
-        },
-        "activation outcome restoration",
-    )
+    restoration = document["restoration"]
     if restoration != {
         "attempted": False,
         "manifest_sha256": plan_document["rollback"]["manifest_sha256"],
@@ -3701,21 +4001,116 @@ def _load_activation_outcome(
         "live_health_passed": False,
     }:
         fail("activation outcome unexpectedly reports rollback")
-    live_proofs = _exact(
-        document["live_proofs"],
-        {"candidate_live_health", "rollback_live_health"},
-        "activation outcome live_proofs",
-    )
+    live_proofs = document["live_proofs"]
     if (
         not isinstance(live_proofs["candidate_live_health"], dict)
         or live_proofs["rollback_live_health"] is not None
     ):
         fail("activation outcome live-proof presence differs")
-    if record is not None:
+    return snapshot, document
+
+
+def _load_failed_restore_outcome(
+    path: Path,
+    *,
+    plan: StableFileSnapshot,
+    required_uid: int,
+    record: PlanRecord | None = None,
+) -> tuple[StableFileSnapshot, dict[str, Any]]:
+    snapshot, document = _load_any_activation_outcome(
+        path,
+        plan=plan,
+        required_uid=required_uid,
+        record=record,
+    )
+    if (
+        document["status"] != "failed_restore"
+        or document["failure_stage"] not in ACTIVATION_STAGES
+        or document["restoration"]["attempted"] is not True
+    ):
+        fail("activation outcome does not authorize failed-activation recovery")
+    return snapshot, document
+
+
+def _load_incomplete_rollback_outcome(
+    path: Path,
+    *,
+    record: PlanRecord,
+    activation_outcome: StableFileSnapshot,
+    required_uid: int,
+) -> tuple[StableFileSnapshot, dict[str, Any]]:
+    snapshot = _stable(
+        path,
+        "incomplete rollback outcome",
+        maximum=MAX_DOCUMENT_BYTES,
+        read_only=True,
+        single_link=True,
+    )
+    if snapshot.identity.uid != required_uid:
+        fail("incomplete rollback outcome owner differs")
+    document = _strict_object(snapshot.raw, "incomplete rollback outcome")
+    if _canonical_json(document) != snapshot.raw:
+        fail("incomplete rollback outcome is not canonical JSON")
+    _exact(
+        document,
+        {
+            "schema_version",
+            "plan_id",
+            "plan_path",
+            "plan_sha256",
+            "activation_outcome_sha256",
+            "started_at",
+            "completed_at",
+            "status",
+            "failure_stage",
+            "stages",
+            "expected_current_manifest_sha256",
+            "rollback_manifest_sha256",
+            "observed_manifest_sha256",
+            "bytes_equal",
+            "live_proof",
+        },
+        "incomplete rollback outcome",
+    )
+    if (
+        document["schema_version"] != ROLLBACK_OUTCOME_SCHEMA
+        or document["plan_id"] != record.document["plan_id"]
+        or document["plan_path"] != os.fspath(record.snapshot.path)
+        or document["plan_sha256"] != record.snapshot.sha256
+        or document["activation_outcome_sha256"] != activation_outcome.sha256
+        or document["status"] != "rollback_incomplete"
+        or document["failure_stage"] not in ROLLBACK_STAGES
+        or document["expected_current_manifest_sha256"]
+        != record.document["candidate"]["manifest_sha256"]
+        or document["rollback_manifest_sha256"] != record.rollback.sha256
+        or type(document["bytes_equal"]) is not bool
+    ):
+        fail("incomplete rollback outcome binding differs")
+    started_at = _timestamp_value(
+        document["started_at"],
+        "incomplete rollback outcome.started_at",
+    )
+    completed_at = _timestamp_value(
+        document["completed_at"],
+        "incomplete rollback outcome.completed_at",
+    )
+    if completed_at < started_at:
+        fail("incomplete rollback outcome timestamps are reversed")
+    stages = _exact(
+        document["stages"],
+        ROLLBACK_STAGES,
+        "incomplete rollback outcome stages",
+    )
+    if any(value not in STAGE_STATES for value in stages.values()):
+        fail("incomplete rollback outcome stage state is invalid")
+    proof = document["live_proof"]
+    if proof is not None:
+        if not isinstance(proof, dict):
+            fail("incomplete rollback outcome live proof differs")
         _validate_live_proof_envelope(
             record,
-            "candidate_live_health",
-            live_proofs["candidate_live_health"],
+            "rollback_live_health",
+            proof,
             read_named=False,
         )
     return snapshot, document
@@ -3730,9 +4125,9 @@ def load_plan(
     manifest_validator: ManifestValidator = default_manifest_validator,
     bundle_validator: BundleValidator = default_bundle_validator,
 ) -> PlanRecord:
-    """Revalidate every plan input for activation or manual rollback."""
+    """Revalidate every plan input for activation, rollback, or recovery."""
 
-    if action not in {"activate", "rollback"}:
+    if action not in {"activate", "rollback", "recovery"}:
         fail("plan action is invalid")
     plan = _stable(
         plan_path,
@@ -3778,7 +4173,7 @@ def load_plan(
             "SQ8 candidate manifest",
             maximum=MAX_MANIFEST_BYTES,
         )
-    else:
+    elif action == "rollback":
         # A manual rollback is specifically the recovery path for a broken or
         # missing SQ8 release closure.  The successfully activated exact bytes
         # at active.json, plus the immutable activation outcome, are its
@@ -3787,6 +4182,20 @@ def load_plan(
             path=Path(document["candidate"]["path"]),
             raw=active.raw,
             sha256=active.sha256,
+            identity=active.identity,
+        )
+    else:
+        # Crash recovery must not depend on the SQ8 release pathname still
+        # existing.  It is authorized by the durable intent and restores only
+        # an active entry whose bytes are exactly SQ8 or exact rollback AQ4.
+        candidate = StableFileSnapshot(
+            path=Path(document["candidate"]["path"]),
+            raw=(
+                active.raw
+                if active.sha256 == document["candidate"]["manifest_sha256"]
+                else b""
+            ),
+            sha256=document["candidate"]["manifest_sha256"],
             identity=active.identity,
         )
     if (
@@ -3827,7 +4236,11 @@ def load_plan(
         executable_stages=(
             None
             if action == "activate"
-            else {"reverse_reconciliation", "rollback_live_health"}
+            else {
+                "reverse_reconciliation",
+                "rollback_live_health",
+                "recovery_live_health",
+            }
         ),
     )
     if any(
@@ -3920,7 +4333,11 @@ def load_plan(
     rollback_operation_artifacts = _capture_operation_executable_seals(
         operations,
         required_uid=policy.required_uid,
-        stages={"reverse_reconciliation", "rollback_live_health"},
+        stages={
+            "reverse_reconciliation",
+            "rollback_live_health",
+            "recovery_live_health",
+        },
     )
 
     candidate_worker = document["candidate"]["worker_binary_sha256"]
@@ -4030,13 +4447,24 @@ def load_plan(
             campaign_outcome_document,
         )
 
-    expected_active = rollback.raw if action == "activate" else candidate.raw
-    if active.raw != expected_active:
-        fail(f"actual active bytes differ from the exact {action} precondition")
+    if action == "activate":
+        if active.raw != rollback.raw:
+            fail("actual active bytes differ from the exact activate precondition")
+    elif action == "rollback":
+        if active.raw != candidate.raw:
+            fail("actual active bytes differ from the exact rollback precondition")
+    elif active.sha256 not in {candidate.sha256, rollback.sha256}:
+        fail("actual active bytes are outside the exact recovery precondition")
     if document["active_manifest"]["expected_current_sha256"] != rollback.sha256:
         fail("plan expected-current AQ4 identity differs")
 
+    activation_intent_path = Path(
+        document["outcomes"]["activation_intent_path"]
+    )
     activation_path = Path(document["outcomes"]["activation_path"])
+    activation_recovery_path = Path(
+        document["outcomes"]["activation_recovery_path"]
+    )
     rollback_path = Path(document["outcomes"]["rollback_path"])
     result = PlanRecord(
         plan,
@@ -4059,14 +4487,24 @@ def load_plan(
         execution_source,
     )
     if action == "activate":
+        _ensure_fresh_destination(activation_intent_path, "activation intent")
         _ensure_fresh_destination(activation_path, "activation outcome")
+        _ensure_fresh_destination(
+            activation_recovery_path,
+            "activation recovery receipt",
+        )
         _ensure_fresh_destination(rollback_path, "rollback outcome")
         for stage, specification in document["live_proofs"].items():
             _ensure_fresh_destination(
                 Path(specification["path"]),
                 f"{stage} live proof",
             )
-    else:
+    elif action == "rollback":
+        _load_activation_intent(
+            activation_intent_path,
+            plan=plan,
+            required_uid=policy.required_uid,
+        )
         _load_activation_outcome(
             activation_path,
             plan=plan,
@@ -4077,6 +4515,24 @@ def load_plan(
         _ensure_fresh_destination(
             Path(document["live_proofs"]["rollback_live_health"]["path"]),
             "rollback_live_health live proof",
+        )
+    else:
+        _load_activation_intent(
+            activation_intent_path,
+            plan=plan,
+            required_uid=policy.required_uid,
+        )
+        _recovery_outcome_authority(
+            result,
+            required_uid=policy.required_uid,
+        )
+        _ensure_fresh_destination(
+            activation_recovery_path,
+            "activation recovery receipt",
+        )
+        _ensure_fresh_destination(
+            Path(document["live_proofs"]["recovery_live_health"]["path"]),
+            "recovery_live_health live proof",
         )
 
     _require_record_runtime_seals(
@@ -4364,6 +4820,7 @@ def _repin_rollback_inputs(
             executable_stages={
                 "reverse_reconciliation",
                 "rollback_live_health",
+                "recovery_live_health",
             },
         )
         if operations != record.operations:
@@ -4906,6 +5363,7 @@ def _run_stage(
     live_state_verifier: LiveStateVerifier,
     clock: Clock,
     deadline: float,
+    live_proof_path: Path | None = None,
 ) -> dict[str, Any] | None:
     commands = record.operations["stages"][stage]
     timeout = float(record.operations["timeout_seconds"])
@@ -4921,8 +5379,27 @@ def _run_stage(
         "ULLM_CANDIDATE_MANIFEST_SHA256": record.candidate.sha256,
         "ULLM_ROLLBACK_MANIFEST_SHA256": record.rollback.sha256,
     }
-    if stage in {"candidate_live_health", "rollback_live_health"}:
-        proof_path = Path(record.document["live_proofs"][stage]["path"])
+    proof_record = record
+    if live_proof_path is not None:
+        if stage not in {
+            "candidate_live_health",
+            "rollback_live_health",
+            "recovery_live_health",
+        }:
+            fail("live-proof override targets a non-live stage")
+        overridden_document = dict(record.document)
+        overridden_proofs = dict(record.document["live_proofs"])
+        overridden_specification = dict(overridden_proofs[stage])
+        overridden_specification["path"] = os.fspath(live_proof_path)
+        overridden_proofs[stage] = overridden_specification
+        overridden_document["live_proofs"] = overridden_proofs
+        proof_record = replace(record, document=overridden_document)
+    if stage in {
+        "candidate_live_health",
+        "rollback_live_health",
+        "recovery_live_health",
+    }:
+        proof_path = Path(proof_record.document["live_proofs"][stage]["path"])
         _ensure_fresh_destination(proof_path, f"{stage} live proof")
         environment["ULLM_FINAL_ACTIVATION_LIVE_PROOF"] = os.fspath(proof_path)
     for index, command in enumerate(commands):
@@ -4966,13 +5443,17 @@ def _run_stage(
         repin()
         require_active()
         _remaining_window(deadline, stage)
-    if stage not in {"candidate_live_health", "rollback_live_health"}:
+    if stage not in {
+        "candidate_live_health",
+        "rollback_live_health",
+        "recovery_live_health",
+    }:
         return None
     _remaining_window(deadline, stage)
-    proof = live_proof_loader(record, stage, activation_epoch)
+    proof = live_proof_loader(proof_record, stage, activation_epoch)
     verified_at = clock()
     reference = _validate_live_proof(
-        record,
+        proof_record,
         stage,
         activation_epoch,
         proof,
@@ -4982,9 +5463,9 @@ def _run_stage(
     # The production loader requires an immutable file.  Re-open it after
     # validation to bind the named entry to the reference stored in outcomes.
     if live_proof_loader is default_live_proof_loader:
-        _validate_live_proof_reference(record, stage, reference)
+        _validate_live_proof_reference(proof_record, stage, reference)
     live_state_verifier(
-        record,
+        proof_record,
         stage,
         proof,
         stage_started,
@@ -5073,6 +5554,7 @@ def _complete_stages(
 def _activation_outcome(
     record: PlanRecord,
     *,
+    intent: StableFileSnapshot,
     started_at: datetime,
     completed_at: datetime,
     status: str,
@@ -5088,6 +5570,8 @@ def _activation_outcome(
         "plan_id": record.document["plan_id"],
         "plan_path": os.fspath(record.snapshot.path),
         "plan_sha256": record.snapshot.sha256,
+        "intent_path": os.fspath(intent.path),
+        "intent_sha256": intent.sha256,
         "started_at": utc_timestamp(started_at),
         "completed_at": utc_timestamp(completed_at),
         "status": status,
@@ -5185,8 +5669,10 @@ def execute_activation(
     stages = {name: "pending" for name in ACTIVATION_STAGES}
     failure_stage: str | None = None
     switched = False
+    activation_publication_committed = False
     started_at = clock()
     primary_error: BaseException | None = None
+    intent_snapshot: StableFileSnapshot | None = None
     outcome_snapshot: StableFileSnapshot | None = None
     live_proofs: dict[str, dict[str, Any] | None] = {
         "candidate_live_health": None,
@@ -5220,6 +5706,11 @@ def execute_activation(
                     record,
                     expected_plan_sha256=expected_plan_sha256,
                 )
+                if live_state_verifier is default_live_state_verifier:
+                    credential_seals = _capture_live_credential_seals(
+                        required_uid=policy.required_uid,
+                    )
+                    _require_live_credential_seals(credential_seals)
                 stages["preflight"] = "passed"
             except BaseException as error:
                 failure_stage = "preflight"
@@ -5300,6 +5791,31 @@ def execute_activation(
             try:
                 repin()
                 require_rollback()
+                repin_credentials()
+                intent = _activation_intent(record, created_at=clock())
+                intent_path = Path(
+                    record.document["outcomes"]["activation_intent_path"]
+                )
+                try:
+                    intent_snapshot = _publish_immutable(
+                        intent_path,
+                        intent,
+                        required_uid=policy.required_uid,
+                    )
+                except BaseException:
+                    intent_snapshot = _committed_immutable(
+                        intent_path,
+                        intent,
+                        required_uid=policy.required_uid,
+                    )
+                    if intent_snapshot is None:
+                        raise
+                _require_record_execution_source(
+                    record,
+                    required_uid=policy.required_uid,
+                )
+                repin()
+                require_rollback()
                 active_deadline = time.monotonic() + float(
                     record.operations["active_window_timeout_seconds"]
                 )
@@ -5349,6 +5865,7 @@ def execute_activation(
             _complete_stages(stages, failure_stage=None)
             outcome = _activation_outcome(
                 record,
+                intent=intent_snapshot,
                 started_at=started_at,
                 completed_at=clock(),
                 status="activated",
@@ -5363,15 +5880,32 @@ def execute_activation(
                     record,
                     required_uid=policy.required_uid,
                 )
-                outcome_snapshot = _publish_immutable(
-                    Path(record.document["outcomes"]["activation_path"]),
-                    outcome,
-                    required_uid=policy.required_uid,
+                activation_path = Path(
+                    record.document["outcomes"]["activation_path"]
                 )
-                _require_record_execution_source(
-                    record,
-                    required_uid=policy.required_uid,
-                )
+                try:
+                    outcome_snapshot = _publish_immutable(
+                        activation_path,
+                        outcome,
+                        required_uid=policy.required_uid,
+                    )
+                except BaseException as publication_error:
+                    outcome_snapshot = _committed_immutable(
+                        activation_path,
+                        outcome,
+                        required_uid=policy.required_uid,
+                    )
+                    if outcome_snapshot is None:
+                        if isinstance(
+                            publication_error,
+                            ImmutablePublicationCommittedError,
+                        ):
+                            activation_publication_committed = True
+                            termination.commit()
+                        raise
+                # The immutable activated receipt is the commit boundary.
+                # There is intentionally no fallible validation after it and
+                # before the termination guard is committed.
                 termination.commit()
         except BaseException as error:
             if primary_error is None:
@@ -5379,7 +5913,12 @@ def execute_activation(
             if failure_stage is None:
                 failure_stage = "outcome_publication"
                 stages["outcome_publication"] = "failed"
-            if switched and record is not None and parent_descriptor is not None:
+            if (
+                switched
+                and not activation_publication_committed
+                and record is not None
+                and parent_descriptor is not None
+            ):
                 recovery_deadline = time.monotonic() + float(
                     record.operations["active_window_timeout_seconds"]
                 )
@@ -5449,6 +5988,7 @@ def execute_activation(
                 status = "failed_restored" if restored else "failed_restore"
                 outcome = _activation_outcome(
                     record,
+                    intent=intent_snapshot,
                     started_at=started_at,
                     completed_at=clock(),
                     status=status,
@@ -5467,15 +6007,23 @@ def execute_activation(
                             record,
                             required_uid=policy.required_uid,
                         )
-                        outcome_snapshot = _publish_immutable(
-                            Path(record.document["outcomes"]["activation_path"]),
-                            outcome,
-                            required_uid=policy.required_uid,
+                        failure_path = Path(
+                            record.document["outcomes"]["activation_path"]
                         )
-                        _require_record_execution_source(
-                            record,
-                            required_uid=policy.required_uid,
-                        )
+                        try:
+                            outcome_snapshot = _publish_immutable(
+                                failure_path,
+                                outcome,
+                                required_uid=policy.required_uid,
+                            )
+                        except BaseException:
+                            outcome_snapshot = _committed_immutable(
+                                failure_path,
+                                outcome,
+                                required_uid=policy.required_uid,
+                            )
+                            if outcome_snapshot is None:
+                                raise
                         termination.commit()
                 except BaseException:
                     pass
@@ -5501,6 +6049,582 @@ def execute_activation(
         outcome_snapshot.path,
         outcome_snapshot.sha256,
         "activated",
+    )
+
+
+def _activation_recovery_receipt(
+    record: PlanRecord,
+    *,
+    intent: StableFileSnapshot,
+    activation_outcome: StableFileSnapshot | None,
+    activation_outcome_document: dict[str, Any] | None,
+    rollback_outcome: StableFileSnapshot | None,
+    rollback_outcome_document: dict[str, Any] | None,
+    started_at: datetime,
+    completed_at: datetime,
+    status: str,
+    failure_stage: str | None,
+    stages: dict[str, str],
+    before_manifest_sha256: str,
+    observed_manifest_sha256: str | None,
+    live_proof: dict[str, Any] | None,
+    attempt_id: str,
+) -> dict[str, Any]:
+    if (activation_outcome is None) != (activation_outcome_document is None):
+        fail("activation recovery outcome authority is incomplete")
+    outcome_reference = (
+        None
+        if activation_outcome is None or activation_outcome_document is None
+        else {
+            "path": os.fspath(activation_outcome.path),
+            "sha256": activation_outcome.sha256,
+            "status": activation_outcome_document["status"],
+        }
+    )
+    if (rollback_outcome is None) != (rollback_outcome_document is None):
+        fail("activation recovery rollback authority is incomplete")
+    rollback_reference = (
+        None
+        if rollback_outcome is None or rollback_outcome_document is None
+        else {
+            "path": os.fspath(rollback_outcome.path),
+            "sha256": rollback_outcome.sha256,
+            "status": rollback_outcome_document["status"],
+        }
+    )
+    return {
+        "schema_version": ACTIVATION_RECOVERY_SCHEMA,
+        "plan_id": record.document["plan_id"],
+        "plan_path": os.fspath(record.snapshot.path),
+        "plan_sha256": record.snapshot.sha256,
+        "intent_path": os.fspath(intent.path),
+        "intent_sha256": intent.sha256,
+        "attempt_id": attempt_id,
+        "activation_outcome": outcome_reference,
+        "rollback_outcome": rollback_reference,
+        "started_at": utc_timestamp(started_at),
+        "completed_at": utc_timestamp(completed_at),
+        "status": status,
+        "failure_stage": failure_stage,
+        "stages": stages,
+        "before_manifest_sha256": before_manifest_sha256,
+        "candidate_manifest_sha256": record.document["candidate"][
+            "manifest_sha256"
+        ],
+        "rollback_manifest_sha256": record.rollback.sha256,
+        "observed_manifest_sha256": observed_manifest_sha256,
+        "bytes_equal": observed_manifest_sha256 == record.rollback.sha256,
+        "live_proof": live_proof,
+    }
+
+
+def _recovery_attempt_path(
+    base: Path,
+    attempt_id: str,
+    suffix: str,
+) -> Path:
+    if HASH_RE.fullmatch(attempt_id) is None:
+        fail("activation recovery attempt ID is invalid")
+    if suffix not in {"failed.json", "live-proof.json"}:
+        fail("activation recovery attempt suffix is invalid")
+    path = Path(f"{base}.attempt-{attempt_id}.{suffix}")
+    _absolute(
+        os.fspath(path),
+        "activation recovery attempt output",
+        must_exist=False,
+    )
+    if path.parent != base.parent:
+        fail("activation recovery attempt output left its bound parent")
+    return path
+
+
+def _recovery_outcome_authority(
+    record: PlanRecord,
+    *,
+    required_uid: int,
+) -> tuple[
+    StableFileSnapshot | None,
+    dict[str, Any] | None,
+    StableFileSnapshot | None,
+    dict[str, Any] | None,
+]:
+    activation_path = Path(record.document["outcomes"]["activation_path"])
+    rollback_path = Path(record.document["outcomes"]["rollback_path"])
+    activation_exists = activation_path.exists() or activation_path.is_symlink()
+    rollback_exists = rollback_path.exists() or rollback_path.is_symlink()
+    if not activation_exists:
+        if rollback_exists:
+            fail("rollback outcome exists without an activation outcome")
+        # Durable intent with no activation receipt is the crash authority,
+        # whether the crash occurred immediately before or after the SQ8 swap.
+        return None, None, None, None
+
+    activation_snapshot, activation_document = _load_any_activation_outcome(
+        activation_path,
+        plan=record.snapshot,
+        required_uid=required_uid,
+        record=record,
+    )
+    if activation_document["status"] == "failed_restore":
+        if rollback_exists:
+            fail("failed activation recovery has an unrelated rollback outcome")
+        _load_failed_restore_outcome(
+            activation_path,
+            plan=record.snapshot,
+            required_uid=required_uid,
+            record=record,
+        )
+        return activation_snapshot, activation_document, None, None
+    if activation_document["status"] != "activated":
+        fail("activation outcome does not authorize recovery")
+
+    # Re-apply the full success contract before admitting interrupted manual
+    # rollback recovery.
+    activation_snapshot, activation_document = _load_activation_outcome(
+        activation_path,
+        plan=record.snapshot,
+        required_uid=required_uid,
+        record=record,
+    )
+    if rollback_exists:
+        rollback_snapshot, rollback_document = _load_incomplete_rollback_outcome(
+            rollback_path,
+            record=record,
+            activation_outcome=activation_snapshot,
+            required_uid=required_uid,
+        )
+        return (
+            activation_snapshot,
+            activation_document,
+            rollback_snapshot,
+            rollback_document,
+        )
+    if record.active.sha256 != record.rollback.sha256:
+        fail(
+            "successful activation without an incomplete rollback does not "
+            "authorize recovery"
+        )
+    # AQ4 bytes plus no rollback receipt is the durable signature of a crash
+    # after manual rollback swapped active.json but before outcome publication.
+    return activation_snapshot, activation_document, None, None
+
+
+def execute_activation_recovery(
+    plan_path: Path,
+    *,
+    expected_plan_sha256: str,
+    confirmation: str,
+    policy: authorization.RegistryPolicy = authorization.RegistryPolicy(),
+    manifest_validator: ManifestValidator = default_manifest_validator,
+    bundle_validator: BundleValidator = default_bundle_validator,
+    runner: CommandRunner = subprocess.run,
+    live_proof_loader: LiveProofLoader = default_live_proof_loader,
+    live_state_verifier: LiveStateVerifier = default_live_state_verifier,
+    clock: Clock = utc_now,
+) -> ExecutionResult:
+    """Recover exact AQ4 after a durable-intent crash or ``failed_restore``."""
+
+    _require_execution_authority(
+        expected_plan_sha256=expected_plan_sha256,
+        confirmation=confirmation,
+        expected_confirmation=RECOVERY_CONFIRMATION,
+    )
+    initial = load_plan(
+        plan_path,
+        action="recovery",
+        now=clock(),
+        policy=policy,
+        manifest_validator=manifest_validator,
+        bundle_validator=bundle_validator,
+    )
+    if initial.snapshot.sha256 != expected_plan_sha256:
+        fail("confirmed plan SHA-256 differs before activation recovery")
+    initial_intent, _initial_intent_document = _load_activation_intent(
+        Path(initial.document["outcomes"]["activation_intent_path"]),
+        plan=initial.snapshot,
+        required_uid=policy.required_uid,
+    )
+    (
+        initial_activation,
+        initial_activation_document,
+        initial_rollback,
+        initial_rollback_document,
+    ) = _recovery_outcome_authority(initial, required_uid=policy.required_uid)
+    active = Path(initial.document["active_manifest"]["path"])
+    lock_descriptor: int | None = None
+    parent_descriptor: int | None = None
+    record: PlanRecord | None = None
+    intent_snapshot: StableFileSnapshot | None = None
+    activation_snapshot: StableFileSnapshot | None = None
+    activation_document: dict[str, Any] | None = None
+    rollback_snapshot: StableFileSnapshot | None = None
+    rollback_document: dict[str, Any] | None = None
+    credential_seals: tuple[runtime_seal.RuntimeArtifactSeal, ...] | None = None
+    stages = {name: "pending" for name in RECOVERY_STAGES}
+    started_at = clock()
+    failure_stage: str | None = None
+    primary_error: BaseException | None = None
+    outcome_snapshot: StableFileSnapshot | None = None
+    recovery_publication_committed = False
+    live_proof: dict[str, Any] | None = None
+    before_manifest_sha256 = initial.active.sha256
+    deadline: float | None = None
+    attempt_id = os.urandom(32).hex()
+    failure_audit_path = _recovery_attempt_path(
+        Path(initial.document["outcomes"]["activation_recovery_path"]),
+        attempt_id,
+        "failed.json",
+    )
+    recovery_proof_path = _recovery_attempt_path(
+        Path(initial.document["live_proofs"]["recovery_live_health"]["path"]),
+        attempt_id,
+        "live-proof.json",
+    )
+
+    with _termination_guard() as termination:
+        try:
+            try:
+                lock_descriptor, parent_descriptor = _open_activation_lock(
+                    active,
+                    required_uid=policy.required_uid,
+                )
+                stages["lock"] = "passed"
+            except BaseException as error:
+                failure_stage = "lock"
+                primary_error = error
+                raise
+            try:
+                record = load_plan(
+                    plan_path,
+                    action="recovery",
+                    now=clock(),
+                    policy=policy,
+                    manifest_validator=manifest_validator,
+                    bundle_validator=bundle_validator,
+                )
+                _require_same_plan(
+                    initial,
+                    record,
+                    expected_plan_sha256=expected_plan_sha256,
+                )
+                intent_snapshot, _intent_document = _load_activation_intent(
+                    Path(record.document["outcomes"]["activation_intent_path"]),
+                    plan=record.snapshot,
+                    required_uid=policy.required_uid,
+                )
+                (
+                    activation_snapshot,
+                    activation_document,
+                    rollback_snapshot,
+                    rollback_document,
+                ) = _recovery_outcome_authority(
+                    record,
+                    required_uid=policy.required_uid,
+                )
+                if (
+                    intent_snapshot.path != initial_intent.path
+                    or intent_snapshot.raw != initial_intent.raw
+                    or intent_snapshot.identity != initial_intent.identity
+                    or (activation_snapshot is None)
+                    != (initial_activation is None)
+                    or (
+                        activation_snapshot is not None
+                        and initial_activation is not None
+                        and (
+                            activation_snapshot.path != initial_activation.path
+                            or activation_snapshot.raw != initial_activation.raw
+                            or activation_snapshot.identity
+                            != initial_activation.identity
+                        )
+                    )
+                    or activation_document != initial_activation_document
+                    or (rollback_snapshot is None) != (initial_rollback is None)
+                    or (
+                        rollback_snapshot is not None
+                        and initial_rollback is not None
+                        and (
+                            rollback_snapshot.path != initial_rollback.path
+                            or rollback_snapshot.raw != initial_rollback.raw
+                            or rollback_snapshot.identity
+                            != initial_rollback.identity
+                        )
+                    )
+                    or rollback_document != initial_rollback_document
+                ):
+                    fail("activation recovery authority changed before lock")
+                if live_state_verifier is default_live_state_verifier:
+                    credential_seals = _capture_live_credential_seals(
+                        required_uid=policy.required_uid,
+                    )
+                    _require_live_credential_seals(credential_seals)
+                _ensure_fresh_destination(
+                    failure_audit_path,
+                    "activation recovery failure audit",
+                )
+                _ensure_fresh_destination(
+                    recovery_proof_path,
+                    "activation recovery live proof",
+                )
+                stages["preflight"] = "passed"
+            except BaseException as error:
+                failure_stage = "preflight"
+                primary_error = error
+                raise
+
+            assert record is not None
+            assert intent_snapshot is not None
+            assert parent_descriptor is not None
+
+            def repin_rollback() -> None:
+                assert record is not None
+                _repin_rollback_inputs(
+                    record,
+                    policy=policy,
+                    manifest_validator=manifest_validator,
+                )
+
+            def repin_rollback_core() -> None:
+                assert record is not None
+                _repin_rollback_inputs(
+                    record,
+                    policy=policy,
+                    manifest_validator=manifest_validator,
+                    include_shared=False,
+                )
+
+            def repin_credentials() -> None:
+                nonlocal credential_seals
+                if live_state_verifier is not default_live_state_verifier:
+                    return
+                if credential_seals is None:
+                    credential_seals = _capture_live_credential_seals(
+                        required_uid=policy.required_uid,
+                    )
+                else:
+                    _require_live_credential_seals(credential_seals)
+
+            def repin_stage() -> None:
+                repin_rollback()
+                repin_credentials()
+
+            def current_recoverable() -> bytes:
+                current = _read_entry(
+                    parent_descriptor,
+                    active.name,
+                    "actual active manifest",
+                )
+                if (
+                    current != record.rollback.raw
+                    and _sha256(current)
+                    != record.document["candidate"]["manifest_sha256"]
+                ):
+                    fail("active manifest left the plan-bound recovery states")
+                return current
+
+            def require_rollback() -> None:
+                if current_recoverable() != record.rollback.raw:
+                    fail("AQ4 active bytes changed during activation recovery")
+
+            try:
+                repin_rollback()
+                repin_credentials()
+                current = current_recoverable()
+                before_manifest_sha256 = _sha256(current)
+                deadline = time.monotonic() + float(
+                    record.operations["active_window_timeout_seconds"]
+                )
+                _remaining_window(deadline, "activation recovery")
+                if current != record.rollback.raw:
+                    with termination.recovery_deferred():
+                        _atomic_replace_exact(
+                            active=active,
+                            parent_descriptor=parent_descriptor,
+                            expected_raw=current,
+                            replacement_raw=record.rollback.raw,
+                        )
+                repin_rollback()
+                require_rollback()
+                stages["aq4_restore"] = "passed"
+            except BaseException as error:
+                failure_stage = "aq4_restore"
+                primary_error = error
+                raise
+
+            for stage in ("reverse_reconciliation", "recovery_live_health"):
+                try:
+                    proof_reference = _run_stage(
+                        record,
+                        stage,
+                        runner=runner,
+                        repin=repin_stage,
+                        require_active=require_rollback,
+                        activation_epoch=os.urandom(32).hex(),
+                        live_proof_loader=live_proof_loader,
+                        live_state_verifier=live_state_verifier,
+                        clock=clock,
+                        deadline=deadline,
+                        live_proof_path=(
+                            recovery_proof_path
+                            if stage == "recovery_live_health"
+                            else None
+                        ),
+                    )
+                    if proof_reference is not None:
+                        live_proof = proof_reference
+                    stages[stage] = "passed"
+                except BaseException as error:
+                    failure_stage = stage
+                    primary_error = error
+                    raise
+            repin_stage()
+            require_rollback()
+            if live_proof is None:
+                failure_stage = "recovery_live_health"
+                fail("activation recovery lacks a structured AQ4 live proof")
+            stages["outcome_publication"] = "passed"
+            _complete_stages(stages, failure_stage=None)
+            receipt = _activation_recovery_receipt(
+                record,
+                intent=intent_snapshot,
+                activation_outcome=activation_snapshot,
+                activation_outcome_document=activation_document,
+                rollback_outcome=rollback_snapshot,
+                rollback_outcome_document=rollback_document,
+                started_at=started_at,
+                completed_at=clock(),
+                status="recovered_aq4",
+                failure_stage=None,
+                stages=stages,
+                before_manifest_sha256=before_manifest_sha256,
+                observed_manifest_sha256=record.rollback.sha256,
+                live_proof=live_proof,
+                attempt_id=attempt_id,
+            )
+            receipt_path = Path(
+                record.document["outcomes"]["activation_recovery_path"]
+            )
+            with termination.deferred():
+                _require_record_execution_source(
+                    record,
+                    required_uid=policy.required_uid,
+                )
+                try:
+                    outcome_snapshot = _publish_immutable(
+                        receipt_path,
+                        receipt,
+                        required_uid=policy.required_uid,
+                    )
+                except BaseException as publication_error:
+                    outcome_snapshot = _committed_immutable(
+                        receipt_path,
+                        receipt,
+                        required_uid=policy.required_uid,
+                    )
+                    if outcome_snapshot is None:
+                        if isinstance(
+                            publication_error,
+                            ImmutablePublicationCommittedError,
+                        ):
+                            recovery_publication_committed = True
+                            termination.commit()
+                        raise
+                termination.commit()
+        except BaseException as error:
+            if primary_error is None:
+                primary_error = error
+            if failure_stage is None:
+                failure_stage = "outcome_publication"
+            stages[failure_stage] = "failed"
+            if (
+                record is not None
+                and intent_snapshot is not None
+                and parent_descriptor is not None
+                and not recovery_publication_committed
+            ):
+                try:
+                    repin_rollback_core()
+                    current = current_recoverable()
+                    if current != record.rollback.raw:
+                        with termination.recovery_deferred():
+                            _atomic_replace_exact(
+                                active=active,
+                                parent_descriptor=parent_descriptor,
+                                expected_raw=current,
+                                replacement_raw=record.rollback.raw,
+                            )
+                    repin_rollback_core()
+                    require_rollback()
+                    stages["aq4_restore"] = "passed"
+                except BaseException:
+                    stages["aq4_restore"] = "failed"
+                _complete_stages(stages, failure_stage=failure_stage)
+                receipt = _activation_recovery_receipt(
+                    record,
+                    intent=intent_snapshot,
+                    activation_outcome=activation_snapshot,
+                    activation_outcome_document=activation_document,
+                    rollback_outcome=rollback_snapshot,
+                    rollback_outcome_document=rollback_document,
+                    started_at=started_at,
+                    completed_at=clock(),
+                    status="recovery_incomplete",
+                    failure_stage=failure_stage,
+                    stages=stages,
+                    before_manifest_sha256=before_manifest_sha256,
+                    observed_manifest_sha256=_observed_hash(
+                        parent_descriptor,
+                        active,
+                    ),
+                    live_proof=live_proof,
+                    attempt_id=attempt_id,
+                )
+                try:
+                    with termination.deferred():
+                        _require_record_execution_source(
+                            record,
+                            required_uid=policy.required_uid,
+                        )
+                        try:
+                            outcome_snapshot = _publish_immutable(
+                                failure_audit_path,
+                                receipt,
+                                required_uid=policy.required_uid,
+                            )
+                        except BaseException:
+                            outcome_snapshot = _committed_immutable(
+                                failure_audit_path,
+                                receipt,
+                                required_uid=policy.required_uid,
+                            )
+                            if outcome_snapshot is None:
+                                raise
+                        termination.commit()
+                except BaseException:
+                    pass
+            if isinstance(primary_error, (KeyboardInterrupt, SystemExit)):
+                raise primary_error
+        finally:
+            if lock_descriptor is not None:
+                os.close(lock_descriptor)
+            if parent_descriptor is not None:
+                os.close(parent_descriptor)
+
+    if outcome_snapshot is None or record is None:
+        if isinstance(primary_error, FinalActivationError):
+            raise primary_error
+        raise FinalActivationError(
+            "activation recovery failed before an outcome"
+        ) from primary_error
+    receipt_document = _strict_object(
+        outcome_snapshot.raw,
+        "activation recovery receipt",
+    )
+    if receipt_document["status"] != "recovered_aq4":
+        raise FinalActivationError("activation recovery did not re-establish AQ4")
+    return ExecutionResult(
+        outcome_snapshot.path,
+        outcome_snapshot.sha256,
+        "recovered_aq4",
     )
 
 
@@ -5580,6 +6704,7 @@ def execute_rollback(
     started_at = clock()
     outcome_snapshot: StableFileSnapshot | None = None
     primary_error: BaseException | None = None
+    rollback_publication_committed = False
     rollback_live_proof: dict[str, Any] | None = None
     rollback_deadline: float | None = None
     credential_seals: tuple[runtime_seal.RuntimeArtifactSeal, ...] | None = None
@@ -5628,6 +6753,11 @@ def execute_rollback(
                         "the locked rollback boundary"
                     )
                 activation_snapshot = locked_activation_snapshot
+                if live_state_verifier is default_live_state_verifier:
+                    credential_seals = _capture_live_credential_seals(
+                        required_uid=policy.required_uid,
+                    )
+                    _require_live_credential_seals(credential_seals)
                 stages["preflight"] = "passed"
             except BaseException as error:
                 failure_stage = "preflight"
@@ -5768,15 +6898,29 @@ def execute_rollback(
                     record,
                     required_uid=policy.required_uid,
                 )
-                outcome_snapshot = _publish_immutable(
-                    Path(record.document["outcomes"]["rollback_path"]),
-                    outcome,
-                    required_uid=policy.required_uid,
+                rollback_path = Path(
+                    record.document["outcomes"]["rollback_path"]
                 )
-                _require_record_execution_source(
-                    record,
-                    required_uid=policy.required_uid,
-                )
+                try:
+                    outcome_snapshot = _publish_immutable(
+                        rollback_path,
+                        outcome,
+                        required_uid=policy.required_uid,
+                    )
+                except BaseException as publication_error:
+                    outcome_snapshot = _committed_immutable(
+                        rollback_path,
+                        outcome,
+                        required_uid=policy.required_uid,
+                    )
+                    if outcome_snapshot is None:
+                        if isinstance(
+                            publication_error,
+                            ImmutablePublicationCommittedError,
+                        ):
+                            rollback_publication_committed = True
+                            termination.commit()
+                        raise
                 termination.commit()
         except BaseException as error:
             if primary_error is None:
@@ -5784,7 +6928,11 @@ def execute_rollback(
             if failure_stage is None:
                 failure_stage = "outcome_publication"
                 stages["outcome_publication"] = "failed"
-            if record is not None and parent_descriptor is not None:
+            if (
+                not rollback_publication_committed
+                and record is not None
+                and parent_descriptor is not None
+            ):
                 try:
                     repin_rollback_core()
                     with termination.recovery_deferred():
@@ -5824,15 +6972,23 @@ def execute_rollback(
                             record,
                             required_uid=policy.required_uid,
                         )
-                        outcome_snapshot = _publish_immutable(
-                            Path(record.document["outcomes"]["rollback_path"]),
-                            outcome,
-                            required_uid=policy.required_uid,
+                        failure_path = Path(
+                            record.document["outcomes"]["rollback_path"]
                         )
-                        _require_record_execution_source(
-                            record,
-                            required_uid=policy.required_uid,
-                        )
+                        try:
+                            outcome_snapshot = _publish_immutable(
+                                failure_path,
+                                outcome,
+                                required_uid=policy.required_uid,
+                            )
+                        except BaseException:
+                            outcome_snapshot = _committed_immutable(
+                                failure_path,
+                                outcome,
+                                required_uid=policy.required_uid,
+                            )
+                            if outcome_snapshot is None:
+                                raise
                         termination.commit()
                 except BaseException:
                     pass
@@ -5859,10 +7015,25 @@ def execute_rollback(
     )
 
 
-def preflight_report(record: PlanRecord, *, action: str) -> dict[str, Any]:
+def preflight_report(
+    record: PlanRecord,
+    *,
+    action: str,
+    check_credentials: bool = True,
+) -> dict[str, Any]:
+    credential_seals_ready = not check_credentials
+    if check_credentials:
+        try:
+            credentials = _capture_live_credential_seals(
+                required_uid=record.snapshot.identity.uid,
+            )
+            _require_live_credential_seals(credentials)
+            credential_seals_ready = True
+        except (FinalActivationError, OSError):
+            credential_seals_ready = False
     return {
         "schema_version": PREFLIGHT_SCHEMA,
-        "ready": True,
+        "ready": credential_seals_ready,
         "action": action,
         "plan_id": record.document["plan_id"],
         "plan_sha256": record.snapshot.sha256,
@@ -5888,6 +7059,8 @@ def preflight_report(record: PlanRecord, *, action: str) -> dict[str, Any]:
         "execution_source_fingerprint_sha256": (
             record.execution_source.fingerprint_sha256
         ),
+        "credential_seals_ready": credential_seals_ready,
+        "credential_files_required": 2,
         "active_manifest_changed": False,
         "commands_executed": False,
     }

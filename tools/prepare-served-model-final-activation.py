@@ -109,7 +109,9 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--systemd-unit", required=True, type=Path)
     parser.add_argument("--environment-file", required=True, type=Path)
     parser.add_argument("--reviewed-operations", required=True, type=Path)
+    parser.add_argument("--activation-intent", required=True, type=Path)
     parser.add_argument("--activation-outcome", required=True, type=Path)
+    parser.add_argument("--activation-recovery", required=True, type=Path)
     parser.add_argument("--rollback-outcome", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
     return parser.parse_args(argv)
@@ -129,7 +131,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             systemd_unit=args.systemd_unit,
             environment_file=args.environment_file,
             operations_document=args.reviewed_operations,
+            activation_intent=args.activation_intent,
             activation_outcome=args.activation_outcome,
+            activation_recovery=args.activation_recovery,
             rollback_outcome=args.rollback_outcome,
             output=args.output,
             now=final_activation.utc_now(),

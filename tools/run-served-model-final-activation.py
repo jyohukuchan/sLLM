@@ -127,6 +127,7 @@ def _require_mode(args: argparse.Namespace, observed_sha256: str) -> None:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    exit_status = 0
     try:
         final_activation.require_production_entrypoint(Path(__file__))
         args = parse_args(argv)
@@ -152,6 +153,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             }
         else:
             report = final_activation.preflight_report(plan, action="activate")
+            if report["ready"] is not True:
+                exit_status = 1
     except Exception:
         print("final served-model activation failed", file=sys.stderr)
         return 1
@@ -164,7 +167,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             sort_keys=True,
         )
     )
-    return 0
+    return exit_status
 
 
 if __name__ == "__main__":

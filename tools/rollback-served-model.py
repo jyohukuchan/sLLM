@@ -1,5 +1,5 @@
 #!/usr/bin/python3.12
-"""Preflight or execute the exact AQ4 rollback bound by a final SQ8 plan."""
+"""Preflight/execute exact AQ4 rollback or failed-activation recovery."""
 
 from __future__ import annotations
 
@@ -106,19 +106,32 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="restore AQ4 and run the plan-bound reverse/health operations",
     )
+    parser.add_argument(
+        "--recover-failed-activation",
+        action="store_true",
+        help=(
+            "use the durable pre-switch intent to recover a crashed or "
+            "failed_restore activation"
+        ),
+    )
     parser.add_argument("--confirm-plan-sha256")
     parser.add_argument("--confirmation")
     return parser.parse_args(argv)
 
 
 def _require_mode(args: argparse.Namespace, observed_sha256: str) -> None:
+    expected_confirmation = (
+        final_activation.RECOVERY_CONFIRMATION
+        if args.recover_failed_activation
+        else final_activation.ROLLBACK_CONFIRMATION
+    )
     if args.execute:
         if (
             args.confirm_plan_sha256 != observed_sha256
-            or args.confirmation != final_activation.ROLLBACK_CONFIRMATION
+            or args.confirmation != expected_confirmation
         ):
             raise final_activation.FinalActivationError(
-                "execute requires the exact plan SHA-256 and rollback confirmation"
+                "execute requires the exact plan SHA-256 and mode confirmation"
             )
     elif args.confirm_plan_sha256 is not None or args.confirmation is not None:
         raise final_activation.FinalActivationError(
@@ -127,31 +140,48 @@ def _require_mode(args: argparse.Namespace, observed_sha256: str) -> None:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    exit_status = 0
     try:
         final_activation.require_production_entrypoint(Path(__file__))
         args = parse_args(argv)
+        action = (
+            "recovery"
+            if args.recover_failed_activation
+            else "rollback"
+        )
         plan = final_activation.load_plan(
             args.plan,
-            action="rollback",
+            action=action,
             now=final_activation.utc_now(),
         )
         _require_mode(args, plan.snapshot.sha256)
         if args.execute:
             assert args.confirm_plan_sha256 is not None
             assert args.confirmation is not None
-            completed = final_activation.execute_rollback(
-                args.plan,
-                expected_plan_sha256=args.confirm_plan_sha256,
-                confirmation=args.confirmation,
-            )
+            if args.recover_failed_activation:
+                completed = final_activation.execute_activation_recovery(
+                    args.plan,
+                    expected_plan_sha256=args.confirm_plan_sha256,
+                    confirmation=args.confirmation,
+                )
+                schema_version = final_activation.ACTIVATION_RECOVERY_SCHEMA
+            else:
+                completed = final_activation.execute_rollback(
+                    args.plan,
+                    expected_plan_sha256=args.confirm_plan_sha256,
+                    confirmation=args.confirmation,
+                )
+                schema_version = final_activation.ROLLBACK_OUTCOME_SCHEMA
             report = {
-                "schema_version": final_activation.ROLLBACK_OUTCOME_SCHEMA,
+                "schema_version": schema_version,
                 "status": completed.status,
                 "outcome_path": os.fspath(completed.outcome_path),
                 "outcome_sha256": completed.outcome_sha256,
             }
         else:
-            report = final_activation.preflight_report(plan, action="rollback")
+            report = final_activation.preflight_report(plan, action=action)
+            if report["ready"] is not True:
+                exit_status = 1
     except Exception:
         print("served-model rollback failed", file=sys.stderr)
         return 1
@@ -164,7 +194,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             sort_keys=True,
         )
     )
-    return 0
+    return exit_status
 
 
 if __name__ == "__main__":

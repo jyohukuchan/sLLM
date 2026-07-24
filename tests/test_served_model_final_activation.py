@@ -823,6 +823,15 @@ class Fixture:
                         for name in FINAL.ENDPOINT_NAMES
                     },
                 },
+                "recovery_live_health": {
+                    "path": os.fspath(self.final_outcomes / "recovery-live-proof.json"),
+                    "service_unit": "ullm-openai.service",
+                    "gateway_executable_sha256": "7" * 64,
+                    "endpoint_urls": {
+                        name: f"http://127.0.0.1:19003/{name}"
+                        for name in FINAL.ENDPOINT_NAMES
+                    },
+                },
             },
             "stages": {
                 stage: [
@@ -838,7 +847,11 @@ class Fixture:
         self.operations.write_bytes(canonical(self.operations_document))
         self.operations.chmod(0o444)
         self.plan = self.release_root / "final-activation-plan.json"
+        self.activation_intent = self.final_outcomes / "activation-intent.json"
         self.activation_outcome = self.final_outcomes / "activation-outcome.json"
+        self.activation_recovery = (
+            self.final_outcomes / "activation-recovery.json"
+        )
         self.rollback_outcome = self.final_outcomes / "rollback-outcome.json"
         for runtime_file in (
             self.aq4_worker,
@@ -952,7 +965,9 @@ class Fixture:
             systemd_unit=self.unit,
             environment_file=self.environment,
             operations_document=self.operations,
+            activation_intent=self.activation_intent,
             activation_outcome=self.activation_outcome,
+            activation_recovery=self.activation_recovery,
             rollback_outcome=self.rollback_outcome,
             output=self.plan,
             now=NOW + timedelta(minutes=1),
@@ -1113,6 +1128,21 @@ def execute_rollback(fixture: Fixture, runner: Runner) -> object:
     )
 
 
+def execute_recovery(fixture: Fixture, runner: Runner) -> object:
+    return FINAL.execute_activation_recovery(
+        fixture.plan,
+        expected_plan_sha256=digest(fixture.plan.read_bytes()),
+        confirmation=FINAL.RECOVERY_CONFIRMATION,
+        policy=fixture.policy,
+        manifest_validator=fixture.manifest_validator,
+        bundle_validator=fixture.bundle_validator,
+        runner=runner,
+        live_proof_loader=LiveProofLoader(NOW + timedelta(minutes=5)),
+        live_state_verifier=noop_live_state_verifier,
+        clock=lambda: NOW + timedelta(minutes=5),
+    )
+
+
 def damage_campaign_authority(
     fixture: Fixture,
     *,
@@ -1141,7 +1171,7 @@ def test_prepare_preflight_activate_and_manual_rollback(tmp_path: Path) -> None:
     document = fixture.prepare()
 
     assert document["route"] == FINAL.ROUTE
-    assert document["schema_version"] == "ullm.served_model.final_activation_plan.v2"
+    assert document["schema_version"] == "ullm.served_model.final_activation_plan.v3"
     assert document["aq4_release_bundle"] == {
         "path": os.fspath(fixture.aq4_bundle),
         "sha256": digest(fixture.aq4_bundle.read_bytes()),
@@ -1155,7 +1185,11 @@ def test_prepare_preflight_activate_and_manual_rollback(tmp_path: Path) -> None:
     preflight = fixture.load("activate")
     assert preflight.active.raw == fixture.aq4_raw
     assert (
-        FINAL.preflight_report(preflight, action="activate")[
+        FINAL.preflight_report(
+            preflight,
+            action="activate",
+            check_credentials=False,
+        )[
             "aq4_release_bundle_sha256"
         ]
         == digest(fixture.aq4_bundle.read_bytes())
@@ -1189,6 +1223,270 @@ def test_prepare_preflight_activate_and_manual_rollback(tmp_path: Path) -> None:
     assert rollback_document["status"] == "rolled_back"
     assert rollback_document["bytes_equal"] is True
     assert stat.S_IMODE(fixture.rollback_outcome.stat().st_mode) == 0o444
+
+
+def test_missing_live_credentials_fail_preflight_and_precede_active_swap(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fixture = Fixture(tmp_path)
+    fixture.prepare()
+    record = fixture.load("activate")
+
+    def unavailable(*, required_uid: int) -> tuple[object, ...]:
+        assert required_uid == fixture.policy.required_uid
+        raise FINAL.FinalActivationError("fixture credentials unavailable")
+
+    monkeypatch.setattr(FINAL, "_capture_live_credential_seals", unavailable)
+    report = FINAL.preflight_report(record, action="activate")
+    assert report["ready"] is False
+    assert report["credential_seals_ready"] is False
+
+    runner = Runner()
+    with pytest.raises(FINAL.FinalActivationError, match="credentials unavailable"):
+        FINAL.execute_activation(
+            fixture.plan,
+            expected_plan_sha256=digest(fixture.plan.read_bytes()),
+            confirmation=FINAL.ACTIVATION_CONFIRMATION,
+            policy=fixture.policy,
+            manifest_validator=fixture.manifest_validator,
+            bundle_validator=fixture.bundle_validator,
+            runner=runner,
+            live_proof_loader=LiveProofLoader(),
+            clock=lambda: NOW + timedelta(minutes=3),
+        )
+
+    assert fixture.active.read_bytes() == fixture.aq4_raw
+    assert runner.stages == []
+    assert not fixture.activation_intent.exists()
+    assert not fixture.activation_outcome.exists()
+
+
+def test_activation_receipt_post_publish_fault_keeps_sq8_and_success(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fixture = Fixture(tmp_path)
+    fixture.prepare()
+    original = FINAL._publish_immutable
+    faulted = False
+
+    def publish_then_fault(
+        path: Path,
+        document: dict[str, object],
+        *,
+        required_uid: int,
+    ) -> object:
+        nonlocal faulted
+        snapshot = original(path, document, required_uid=required_uid)
+        if path == fixture.activation_outcome and not faulted:
+            faulted = True
+            raise FINAL.FinalActivationError("post-publication fixture fault")
+        return snapshot
+
+    monkeypatch.setattr(FINAL, "_publish_immutable", publish_then_fault)
+    result = execute_activation(fixture, Runner())
+
+    assert faulted is True
+    assert result.status == "activated"
+    assert fixture.active.read_bytes() == fixture.sq8_raw
+    outcome = json.loads(fixture.activation_outcome.read_text(encoding="ascii"))
+    assert outcome["status"] == "activated"
+    assert outcome["intent_sha256"] == digest(fixture.activation_intent.read_bytes())
+    assert fixture.activation_outcome.stat().st_nlink == 1
+
+
+def test_activation_receipt_post_rename_reopen_fault_is_retried(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fixture = Fixture(tmp_path)
+    fixture.prepare()
+    original = FINAL._stable
+    faults = 0
+
+    def fail_first_committed_reopen(
+        path: Path,
+        label: str,
+        **kwargs: object,
+    ) -> object:
+        nonlocal faults
+        if (
+            path == fixture.activation_outcome
+            and label == "committed immutable output"
+            and faults == 0
+        ):
+            faults += 1
+            raise FINAL.FinalActivationError("fixture post-rename reopen fault")
+        return original(path, label, **kwargs)
+
+    monkeypatch.setattr(FINAL, "_stable", fail_first_committed_reopen)
+    result = execute_activation(fixture, Runner())
+
+    assert faults == 1
+    assert result.status == "activated"
+    assert fixture.active.read_bytes() == fixture.sq8_raw
+    assert fixture.activation_outcome.stat().st_nlink == 1
+
+
+def test_sigkill_after_swap_is_recoverable_from_durable_intent(
+    tmp_path: Path,
+) -> None:
+    fixture = Fixture(tmp_path)
+    fixture.prepare()
+    child = os.fork()
+    if child == 0:
+        class KillAfterSwapRunner(Runner):
+            def __call__(
+                self,
+                argv: list[str],
+                **kwargs: object,
+            ) -> subprocess.CompletedProcess[str]:
+                stage = str(kwargs["env"]["ULLM_FINAL_ACTIVATION_STAGE"])
+                if stage == "candidate_reconciliation":
+                    os.kill(os.getpid(), signal.SIGKILL)
+                return super().__call__(argv, **kwargs)
+
+        import signal
+
+        try:
+            execute_activation(fixture, KillAfterSwapRunner())
+        finally:
+            os._exit(99)
+
+    _pid, status = os.waitpid(child, 0)
+    import signal
+
+    assert os.WIFSIGNALED(status)
+    assert os.WTERMSIG(status) == signal.SIGKILL
+    assert fixture.activation_intent.exists()
+    assert fixture.activation_intent.stat().st_nlink == 1
+    assert fixture.active.read_bytes() == fixture.sq8_raw
+    assert not fixture.activation_outcome.exists()
+
+    recovery_preflight = fixture.load("recovery")
+    assert recovery_preflight.active.sha256 == digest(fixture.sq8_raw)
+    runner = Runner()
+    result = execute_recovery(fixture, runner)
+    assert result.status == "recovered_aq4"
+    assert fixture.active.read_bytes() == fixture.aq4_raw
+    assert runner.stages == [
+        "reverse_reconciliation",
+        "recovery_live_health",
+    ]
+    receipt = json.loads(fixture.activation_recovery.read_text(encoding="ascii"))
+    assert receipt["status"] == "recovered_aq4"
+    assert receipt["activation_outcome"] is None
+    assert receipt["bytes_equal"] is True
+
+
+def test_failed_restore_recovery_failure_audit_does_not_block_retry(
+    tmp_path: Path,
+) -> None:
+    fixture = Fixture(tmp_path)
+    fixture.prepare()
+
+    class FailCandidateAndReverse(Runner):
+        def __call__(
+            self,
+            argv: list[str],
+            **kwargs: object,
+        ) -> subprocess.CompletedProcess[str]:
+            stage = str(kwargs["env"]["ULLM_FINAL_ACTIVATION_STAGE"])
+            self.stages.append(stage)
+            code = (
+                19
+                if stage in {"candidate_live_health", "reverse_reconciliation"}
+                else 0
+            )
+            return subprocess.CompletedProcess(argv, code, "", "")
+
+    with pytest.raises(FINAL.FinalActivationError):
+        execute_activation(fixture, FailCandidateAndReverse())
+    activation = json.loads(fixture.activation_outcome.read_text(encoding="ascii"))
+    assert activation["status"] == "failed_restore"
+
+    with pytest.raises(FINAL.FinalActivationError):
+        execute_recovery(
+            fixture,
+            Runner(fail_stage="recovery_live_health"),
+        )
+    assert not fixture.activation_recovery.exists()
+    failure_audits = list(
+        fixture.final_outcomes.glob("activation-recovery.json.attempt-*.failed.json")
+    )
+    assert len(failure_audits) == 1
+    failure = json.loads(failure_audits[0].read_text(encoding="ascii"))
+    assert failure["status"] == "recovery_incomplete"
+
+    result = execute_recovery(fixture, Runner())
+    assert result.status == "recovered_aq4"
+    assert fixture.active.read_bytes() == fixture.aq4_raw
+    assert fixture.activation_recovery.exists()
+
+
+def test_incomplete_manual_rollback_with_sq8_active_authorizes_recovery(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fixture = Fixture(tmp_path)
+    fixture.prepare()
+    execute_activation(fixture, Runner())
+    original = FINAL._atomic_replace_exact
+
+    def reject_aq4_replacement(**kwargs: object) -> None:
+        if kwargs["replacement_raw"] == fixture.aq4_raw:
+            raise FINAL.FinalActivationError("fixture AQ4 exchange fault")
+        original(**kwargs)
+
+    monkeypatch.setattr(FINAL, "_atomic_replace_exact", reject_aq4_replacement)
+    with pytest.raises(FINAL.FinalActivationError):
+        execute_rollback(fixture, Runner())
+    assert fixture.active.read_bytes() == fixture.sq8_raw
+    rollback = json.loads(fixture.rollback_outcome.read_text(encoding="ascii"))
+    assert rollback["status"] == "rollback_incomplete"
+
+    monkeypatch.setattr(FINAL, "_atomic_replace_exact", original)
+    result = execute_recovery(fixture, Runner())
+    assert result.status == "recovered_aq4"
+    assert fixture.active.read_bytes() == fixture.aq4_raw
+    recovery = json.loads(fixture.activation_recovery.read_text(encoding="ascii"))
+    assert recovery["rollback_outcome"]["sha256"] == digest(
+        fixture.rollback_outcome.read_bytes()
+    )
+
+
+def test_manual_rollback_receipt_post_publish_fault_is_still_success(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fixture = Fixture(tmp_path)
+    fixture.prepare()
+    execute_activation(fixture, Runner())
+    original = FINAL._publish_immutable
+    faulted = False
+
+    def publish_then_fault(
+        path: Path,
+        document: dict[str, object],
+        *,
+        required_uid: int,
+    ) -> object:
+        nonlocal faulted
+        snapshot = original(path, document, required_uid=required_uid)
+        if path == fixture.rollback_outcome and not faulted:
+            faulted = True
+            raise FINAL.FinalActivationError("post-rollback-publication fault")
+        return snapshot
+
+    monkeypatch.setattr(FINAL, "_publish_immutable", publish_then_fault)
+    result = execute_rollback(fixture, Runner())
+
+    assert faulted is True
+    assert result.status == "rolled_back"
+    assert fixture.active.read_bytes() == fixture.aq4_raw
+    outcome = json.loads(fixture.rollback_outcome.read_text(encoding="ascii"))
+    assert outcome["status"] == "rolled_back"
 
 
 @pytest.mark.parametrize("target", ["authorization", "outcome"])
@@ -1239,7 +1537,11 @@ def test_manual_rollback_uses_pinned_plan_not_campaign_registry(
     assert rollback_preflight.campaign_outcome is None
     assert rollback_preflight.campaign_outcome_document is None
     assert (
-        FINAL.preflight_report(rollback_preflight, action="rollback")[
+        FINAL.preflight_report(
+            rollback_preflight,
+            action="rollback",
+            check_credentials=False,
+        )[
             "campaign_outcome_sha256"
         ]
         == json.loads(fixture.plan.read_text(encoding="ascii"))["campaign"][
@@ -1459,7 +1761,9 @@ def test_aq4_bundle_must_be_v1_gate_eligible(tmp_path: Path) -> None:
             systemd_unit=fixture.unit,
             environment_file=fixture.environment,
             operations_document=fixture.operations,
+            activation_intent=fixture.activation_intent,
             activation_outcome=fixture.activation_outcome,
+            activation_recovery=fixture.activation_recovery,
             rollback_outcome=fixture.rollback_outcome,
             output=fixture.plan,
             now=NOW + timedelta(minutes=1),
@@ -1651,7 +1955,9 @@ def test_complete_bundle_v2_is_required(tmp_path: Path) -> None:
             systemd_unit=fixture.unit,
             environment_file=fixture.environment,
             operations_document=fixture.operations,
+            activation_intent=fixture.activation_intent,
             activation_outcome=fixture.activation_outcome,
+            activation_recovery=fixture.activation_recovery,
             rollback_outcome=fixture.rollback_outcome,
             output=fixture.plan,
             now=NOW + timedelta(minutes=1),
@@ -1725,6 +2031,19 @@ def test_execute_confirmation_is_exact_and_cli_has_no_command_json(
         ]
     )
     rollback_cli._require_mode(rollback_confirmed, observed)
+    recovery_confirmed = rollback_cli.parse_args(
+        [
+            "--plan",
+            os.fspath(fixture.plan),
+            "--recover-failed-activation",
+            "--execute",
+            "--confirm-plan-sha256",
+            observed,
+            "--confirmation",
+            FINAL.RECOVERY_CONFIRMATION,
+        ]
+    )
+    rollback_cli._require_mode(recovery_confirmed, observed)
 
 
 def test_lock_is_shared_with_existing_activation_route(tmp_path: Path) -> None:
@@ -2322,7 +2641,9 @@ def test_bundle_validator_reasoning_release_report_must_equal_outcome(
             systemd_unit=fixture.unit,
             environment_file=fixture.environment,
             operations_document=fixture.operations,
+            activation_intent=fixture.activation_intent,
             activation_outcome=fixture.activation_outcome,
+            activation_recovery=fixture.activation_recovery,
             rollback_outcome=fixture.rollback_outcome,
             output=fixture.plan,
             now=NOW + timedelta(minutes=1),
@@ -2993,7 +3314,9 @@ def test_execution_source_is_admitted_before_local_validators(
                 systemd_unit=fixture.unit,
                 environment_file=fixture.environment,
                 operations_document=fixture.operations,
+                activation_intent=fixture.activation_intent,
                 activation_outcome=fixture.activation_outcome,
+                activation_recovery=fixture.activation_recovery,
                 rollback_outcome=fixture.rollback_outcome,
                 output=fixture.plan,
                 now=NOW + timedelta(minutes=1),
@@ -3210,7 +3533,7 @@ def test_final_activation_runbook_uses_only_sealed_absolute_python_entrypoints()
 
     assert "sudo tools/" not in raw
     assert "sudo -- tools/" not in raw
-    assert raw.count(prefix) == 5
+    assert raw.count(prefix) == 7
     assert f"{prefix}prepare-served-model-final-activation.py" in raw
     assert f"{prefix}run-served-model-final-activation.py" in raw
     assert f"{prefix}rollback-served-model.py" in raw

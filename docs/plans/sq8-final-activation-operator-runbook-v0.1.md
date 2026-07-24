@@ -80,13 +80,13 @@ campaigns, and final rollback must all bind the resulting hardened manifest.
 
 ## Reviewed operations document
 
-The final tools do not accept command JSON on their command line. The four
+The final tools do not accept command JSON on their command line. The five
 operational stages are instead fixed in a separately reviewed, canonical JSON
 file, made read-only (`0444`), owned by root, and linked exactly once:
 
 ```json
 {
-  "schema_version": "ullm.served_model.final_activation_operations.v1",
+  "schema_version": "ullm.served_model.final_activation_operations.v2",
   "review_id": "REVIEWED-ID",
   "reviewed_at": "YYYY-MM-DDTHH:MM:SSZ",
   "reviewed_by": "HUMAN-REVIEWER",
@@ -107,6 +107,18 @@ file, made read-only (`0444`), owned by root, and linked exactly once:
     },
     "rollback_live_health": {
       "path": "/ABSOLUTE/final-aq4-live-proof.json",
+      "service_unit": "ullm-openai.service",
+      "gateway_executable_sha256": "64-lowercase-hex",
+      "endpoint_urls": {
+        "gateway_healthz": "http://127.0.0.1:PORT/healthz",
+        "gateway_readyz": "http://127.0.0.1:PORT/readyz",
+        "gateway_models": "http://127.0.0.1:PORT/v1/models",
+        "openwebui_health": "http://127.0.0.1:PORT/health",
+        "openwebui_models": "http://127.0.0.1:PORT/api/models"
+      }
+    },
+    "recovery_live_health": {
+      "path": "/ABSOLUTE/final-aq4-recovery-live-proof.json",
       "service_unit": "ullm-openai.service",
       "gateway_executable_sha256": "64-lowercase-hex",
       "endpoint_urls": {
@@ -140,6 +152,12 @@ file, made read-only (`0444`), owned by root, and linked exactly once:
     "rollback_live_health": [
       {
         "argv": ["/absolute/path/to/reviewed-aq4-live-health"],
+        "executable_sha256": "64-lowercase-hex"
+      }
+    ],
+    "recovery_live_health": [
+      {
+        "argv": ["/absolute/path/to/reviewed-aq4-recovery-live-health"],
         "executable_sha256": "64-lowercase-hex"
       }
     ]
@@ -180,6 +198,12 @@ outcome. The OpenWebUI file must contain the real browser-login session JWT;
 an API key is not a substitute. **That JWT is not currently available, so
 activation execution remains blocked even after this runbook and scripts are
 prepared.**
+
+Read-only preflight seals both credential files and reports
+`credential_seals_ready`. If either file is absent, malformed, mutable, or
+below unsafe ancestry, it reports `ready: false` and exits nonzero. Execution
+repeats the seal under the activation lock before it publishes an intent or
+changes `active.json`.
 
 Both files must be `uid=0,gid=1000`, mode `0640`, and single-link. The JWT
 parent `/run/ullm-campaign-secrets` must itself be
@@ -229,12 +253,18 @@ sudo -- /usr/bin/python3.12 -I -S -B /ABSOLUTE/ROOT-OWNED-SEALED-SQ8-SOURCE/tool
   --systemd-unit /etc/systemd/system/ullm-openai.service \
   --environment-file /etc/ullm/openai-gateway-manifest.env \
   --reviewed-operations /ABSOLUTE/reviewed-final-operations.json \
+  --activation-intent /ABSOLUTE/final-activation-intent.json \
   --activation-outcome /ABSOLUTE/final-activation-outcome.json \
+  --activation-recovery /ABSOLUTE/final-activation-recovery.json \
   --rollback-outcome /ABSOLUTE/final-rollback-outcome.json \
   --output /ABSOLUTE/final-activation-plan.json
 ```
 
-Preparation writes only the new plan. It rejects an existing destination. It
+Preparation writes only the new
+`ullm.served_model.final_activation_plan.v3`. The v3 revision is intentionally
+incompatible with plan v2: it binds separate intent, activation outcome,
+recovery success, rollback outcome, and three live-proof paths. It rejects an
+existing destination. It
 revalidates the campaign claim/outcome and re-inventories all six campaign
 outputs. It derives the AQ4 bundle path only from the successful outcome,
 validates that fresh complete bundle v1 and its raw/browser/promotion
@@ -256,7 +286,7 @@ sudo -- /usr/bin/python3.12 -I -S -B /ABSOLUTE/ROOT-OWNED-SEALED-SQ8-SOURCE/tool
   --plan /ABSOLUTE/final-activation-plan.json
 ```
 
-This command must report `ready: true`,
+This command must report `ready: true`, `credential_seals_ready: true`,
 `active_manifest_changed: false`, and `commands_executed: false`. It still
 performs the expensive complete-bundle validation and campaign-output
 re-inventory. It does not acquire a campaign authorization, alter
@@ -279,14 +309,25 @@ The SHA-256 and literal confirmation are checked again by the core execution
 API, not only by the CLI. The runner reacquires
 `.active.json.activation.lock`, reopens the same plan under that lock, and
 requires its path, inode identity, bytes, SHA-256, and active target to equal
-the pre-lock confirmed snapshot. It repeats preflight under the lock, then
-uses Linux `renameat2(RENAME_EXCHANGE)` with inode/byte comparison to make an
+the pre-lock confirmed snapshot. It repeats preflight and seals both live
+credential files under the lock. It then publishes a plan-bound, root-owned,
+single-link `0444` `ullm.served_model.final_activation_intent.v1` with
+`renameat2(RENAME_NOREPLACE)`, exact re-open, and parent-directory `fsync`.
+Only after that durable intent exists does it use Linux
+`renameat2(RENAME_EXCHANGE)` with inode/byte comparison to make an
 exact-current compare-and-swap of `active.json`; a racing entry is detected
 and the exchange is reverted when safely possible. The active directory is
 fsynced.
 
 It then runs the two fixed SQ8 stages, verifies candidate bytes again, and
-publishes the no-replace read-only activation outcome. Before and after each
+publishes the no-replace read-only
+`ullm.served_model.final_activation_outcome.v2`. Publication stages a
+single-link file, commits it with `renameat2(RENAME_NOREPLACE)`, exactly
+reopens it, and fsyncs the parent; there is no two-hardlink crash window.
+That receipt is the success commit boundary. No source recheck or other
+fallible action occurs between publication and committing the termination
+guard, so a post-publication fault cannot restore AQ4 behind an `activated`
+receipt. Before and after each
 command the runner re-pins the plan, candidate, rollback, both
 AQ4-bundle-v1 and SQ8-bundle-v2 validations, unit, environment,
 operations/executables, campaign outcome, and all six campaign inventories.
@@ -301,6 +342,53 @@ the same lock remains held, then runs the fixed reverse reconciliation and AQ4
 live-health stages. A failure is never reported as safely restored merely
 because the AQ4 bytes are present; reconciliation and live health must also
 pass.
+
+## Crash or failed-restore recovery
+
+Use this mode only when the durable intent exists and one of these exact
+authorities is present:
+
+- no activation outcome (a SIGKILL, power loss, or equivalent crash);
+- an activation outcome whose status is `failed_restore`; or
+- a successful activation followed by `rollback_incomplete`, including an
+  interrupted manual rollback that already restored exact AQ4 bytes.
+
+A normal successful activation with SQ8 still active is not admitted here;
+use the ordinary rollback route below.
+
+Read-only recovery preflight:
+
+```text
+sudo -- /usr/bin/python3.12 -I -S -B /ABSOLUTE/ROOT-OWNED-SEALED-SQ8-SOURCE/tools/rollback-served-model.py \
+  --plan /ABSOLUTE/final-activation-plan.json \
+  --recover-failed-activation
+```
+
+After reviewing the same plan hash and recovery authority:
+
+```text
+sudo -- /usr/bin/python3.12 -I -S -B /ABSOLUTE/ROOT-OWNED-SEALED-SQ8-SOURCE/tools/rollback-served-model.py \
+  --plan /ABSOLUTE/final-activation-plan.json \
+  --recover-failed-activation \
+  --execute \
+  --confirm-plan-sha256 EXACT-PRINTED-PLAN-SHA256 \
+  --confirmation RECOVER_FAILED_SQ8_0_TO_EXACT_AQ4
+```
+
+The recovery core reacquires the same activation lock, revalidates the intent
+and any failed activation/rollback receipt, seals both credentials before any
+swap, accepts only exact candidate SQ8 or exact rollback AQ4 bytes, restores
+AQ4 when needed, then runs reviewed reverse reconciliation and the dedicated
+recovery live-health stage. Its successful
+`ullm.served_model.final_activation_recovery.v1` receipt is immutable and
+one-shot.
+
+If one recovery attempt fails, it does not consume the successful receipt
+path. It writes an immutable failure audit and live proof at paths derived
+from the plan-bound recovery bases plus a 256-bit attempt ID. A later reviewed
+invocation can retry under the same lock; all prior failure audits remain
+preserved. Never delete an intent, outcome, recovery audit, or proof to make a
+retry pass.
 
 ## Later operator rollback
 
@@ -329,7 +417,11 @@ embedded successful SQ8 proof from the activation outcome and does not need
 to reopen its original proof file. It publishes the plan-bound immutable
 rollback outcome. If AQ4 bytes are restored but reverse reconciliation or
 live health fails, the outcome is `rollback_incomplete` and records byte
-equality separately; it never claims a healthy rollback.
+equality separately; it never claims a healthy rollback. That immutable
+incomplete outcome authorizes the explicit recovery route above, so a failed
+rollback cannot strand exact SQ8 or AQ4 without a plan-bound retry path. A
+successfully published `rolled_back` receipt is also the commit boundary: no
+fallible source recheck follows it.
 
 Never replace `active.json` manually with `install`, `cp`, or an unreviewed
 script. Never bypass the complete bundle, immutable campaign outcome, plan

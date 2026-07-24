@@ -466,17 +466,26 @@ mode-`0444` with `nlink == 1`. It never creates a temporary hard-link alias:
 an interruption after the rename leaves a valid single-link destination, and
 a raced pre-existing destination is preserved and fails publication.
 
-`ullm.served_model.final_activation_plan.v2` is a separate, default-read-only
+`ullm.served_model.final_activation_plan.v3` is a separate, default-read-only
 boundary. It reloads and inventories all six successful campaign outputs,
 derives the AQ4 bundle path only from the outcome, validates the fresh AQ4
 bundle v1 first, validates the SQ8 bundle v2 second, and pins exact rollback
-and candidate bytes. Activation requires the exact plan SHA-256 and literal
-confirmation. Later rollback uses the plan-bound locked rollback route and
+and candidate bytes. Plan v3 also pins distinct pre-switch intent, activation,
+recovery, rollback, and dedicated recovery-live-proof destinations; it does
+not admit the older plan-v2 or operations-v1 shapes. Activation requires the
+exact plan SHA-256 and literal confirmation, seals both live credentials under
+the lock, and durably publishes the immutable intent before changing the
+active bytes. Later rollback uses the plan-bound locked rollback route and
 does not reopen the campaign authorization, claim, outcome, SQ8 bundle, SQ8
 candidate pathname, or SQ8 runtime. It requires the immutable successful
 activation outcome, exact currently-active SQ8 bytes, sealed AQ4 rollback
-closure, and reviewed rollback operations. Thus loss or corruption of the
-completed campaign registry cannot strand an activated system on SQ8.
+closure, and reviewed rollback operations. A missing activation outcome,
+`failed_restore`, interrupted manual rollback, or `rollback_incomplete`
+instead admits the explicit-confirmation recovery route bound to the durable
+intent. Failed recovery attempts use separate immutable audit/proof paths and
+do not consume the one-shot success receipt. Thus loss or corruption of the
+completed campaign registry, or a process crash after the SQ8 swap, cannot
+strand an activated system on SQ8.
 
 Implementation and private/mock/CPU validation do not authorize live
 execution. A production claim, either fresh GPU campaign, final bundle, or
