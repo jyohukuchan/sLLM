@@ -28,6 +28,10 @@ def load_module(name: str, path: Path) -> ModuleType:
 
 
 BUNDLE = load_module("generic_reasoning_release_bundle_validator", BUNDLE_PATH)
+AUTH = load_module(
+    "generic_reasoning_release_bundle_authorization_fixture",
+    ROOT / "tools/served_model_campaign_authorization.py",
+)
 RELEASE_FIXTURE = load_module(
     "generic_reasoning_release_bundle_release_fixture",
     ROOT / "tests/test_validate_generic_reasoning_release.py",
@@ -77,6 +81,18 @@ def digest(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def fixed_openwebui_server_observation() -> dict[str, object]:
+    return {
+        "container_id": "1" * 64,
+        "image_id": AUTH.FIXED_OPENWEBUI_IMAGE.rsplit("@", 1)[1],
+        "config_image": AUTH.FIXED_OPENWEBUI_CONFIG_IMAGE,
+        "name": f"/{AUTH.FIXED_OPENWEBUI_CONTAINER_NAME}",
+        "running": True,
+        "pid": 1234,
+        "started_at": "2026-07-24T00:00:00.000000000Z",
+    }
+
+
 def add_aq4_authorization_v2_bindings(
     document: dict[str, Any],
     *,
@@ -103,9 +119,7 @@ def add_aq4_authorization_v2_bindings(
             "commit": before["promotion_source_commit"],
             "tree": "5" * 40,
         },
-        "openwebui_image": (
-            "registry.example/openwebui-aq4@sha256:" + "6" * 64
-        ),
+        "openwebui_image": AUTH.FIXED_OPENWEBUI_IMAGE,
         "promotion_evidence": {
             "source_path": str(aq4_source / "promotion-evidence.json"),
             "path": str(aq4_output / "promotion-evidence.json"),
@@ -386,7 +400,7 @@ def make_v2_bundle(
     source = "1" * 40
     worker_sha = "c" * 64
     tokenizer_sha = "d" * 64
-    image = "registry.example/openwebui@sha256:" + "e" * 64
+    image = AUTH.FIXED_OPENWEBUI_IMAGE
     rollback_sha = hashlib.sha256(b"rollback-fixture").hexdigest()
     promotion_path = root / "promotion-evidence.json"
     write_json(
@@ -600,9 +614,14 @@ def make_v2_bundle(
     browser = BROWSER_FIXTURE.evidence()
     browser.update(
         {
-            "schema_version": "ullm.openwebui.reasoning_browser_smoke.v4",
+            "schema_version": "ullm.openwebui.reasoning_browser_smoke.v5",
             "source_commit": source,
             "identity": identity,
+            "browser_image": AUTH.FIXED_BROWSER_IMAGE,
+            "openwebui_server": {
+                "before": fixed_openwebui_server_observation(),
+                "after": fixed_openwebui_server_observation(),
+            },
         }
     )
     browser_output = root / "reasoning-browser"
@@ -886,9 +905,14 @@ def _real_auxiliary_campaigns(
     browser = BROWSER_FIXTURE.evidence()
     browser.update(
         {
-            "schema_version": "ullm.openwebui.reasoning_browser_smoke.v4",
+            "schema_version": "ullm.openwebui.reasoning_browser_smoke.v5",
             "source_commit": source_commit,
             "identity": identity,
+            "browser_image": AUTH.FIXED_BROWSER_IMAGE,
+            "openwebui_server": {
+                "before": fixed_openwebui_server_observation(),
+                "after": fixed_openwebui_server_observation(),
+            },
         }
     )
     browser_output = root / "reasoning-browser-real"
@@ -1223,7 +1247,7 @@ def make_real_validator_v2_bundle(
         "manifest_sha256": digest(candidate_path),
         "worker_binary_sha256": worker_sha256,
         "tokenizer_sha256": _tokenizer_identity(candidate),
-        "openwebui_image": "registry.example/openwebui@sha256:" + "e" * 64,
+        "openwebui_image": AUTH.FIXED_OPENWEBUI_IMAGE,
     }
     (
         release_path,
@@ -1726,7 +1750,63 @@ def test_bundle_v2_rejects_browser_identity_mismatch(
     value["artifacts"]["browser_evidence"]["sha256"] = digest(browser_path)
     rewrite_bundle_v2(bundle, value)
 
-    with pytest.raises(BUNDLE.ValidationError, match="browser v4 identity"):
+    with pytest.raises(BUNDLE.ValidationError, match="browser v5 identity"):
+        BUNDLE.validate(bundle)
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    (
+        lambda browser: browser.__setitem__(
+            "browser_image",
+            "sha256:" + "0" * 64,
+        ),
+        lambda browser: browser.__setitem__(
+            "openwebui_server",
+            {
+                "before": {
+                    "container_id": "1" * 64,
+                    "image_id": "sha256:" + "0" * 64,
+                    "config_image": "attacker/open-webui:fixed-looking",
+                    "name": "/open-webui",
+                    "running": True,
+                    "pid": 1234,
+                    "started_at": "2026-07-24T00:00:00.000000000Z",
+                },
+                "after": {
+                    "container_id": "1" * 64,
+                    "image_id": "sha256:" + "0" * 64,
+                    "config_image": "attacker/open-webui:fixed-looking",
+                    "name": "/open-webui",
+                    "running": True,
+                    "pid": 1234,
+                    "started_at": "2026-07-24T00:00:00.000000000Z",
+                },
+            },
+        ),
+    ),
+)
+def test_bundle_v2_rejects_unfixed_browser_or_server_image(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mutate,
+) -> None:
+    bundle, fakes, _report = make_v2_bundle(tmp_path)
+    install_v2_fakes(monkeypatch, fakes)
+    value = json.loads(bundle.read_text(encoding="ascii"))
+    browser_path = tmp_path / value["artifacts"]["browser_evidence"]["path"]
+    browser = json.loads(browser_path.read_text(encoding="ascii"))
+    mutate(browser)
+    browser_path.chmod(0o644)
+    write_json(browser_path, browser)
+    browser_path.chmod(0o444)
+    value["artifacts"]["browser_evidence"]["sha256"] = digest(browser_path)
+    rewrite_bundle_v2(bundle, value)
+
+    with pytest.raises(
+        BUNDLE.ValidationError,
+        match="image identities differ from authorization",
+    ):
         BUNDLE.validate(bundle)
 
 

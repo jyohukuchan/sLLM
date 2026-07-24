@@ -109,7 +109,7 @@ def test_publish_aq4_bundle_v1_report(
     ("kind", "schema"),
     (
         ("release", "ullm.generic_reasoning_release_evidence.v2"),
-        ("browser", "ullm.openwebui.reasoning_browser_smoke.v4"),
+        ("browser", "ullm.openwebui.reasoning_browser_smoke.v5"),
     ),
 )
 def test_sq8_lineage_schema_cannot_enter_aq4_report(

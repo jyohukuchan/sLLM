@@ -944,6 +944,94 @@ def _validate_generic_campaign_lineages(
         if isinstance(error, ValidationError):
             raise
         raise ValidationError("campaign authorization validation failed") from error
+    authorized_aq4_release = authorization_document.get("aq4_release")
+    fixed_openwebui_image = getattr(
+        authorization_validator,
+        "FIXED_OPENWEBUI_IMAGE",
+        None,
+    )
+    fixed_browser_image = getattr(
+        authorization_validator,
+        "FIXED_BROWSER_IMAGE",
+        None,
+    )
+    fixed_openwebui_config_image = getattr(
+        authorization_validator,
+        "FIXED_OPENWEBUI_CONFIG_IMAGE",
+        None,
+    )
+    fixed_openwebui_container_name = getattr(
+        authorization_validator,
+        "FIXED_OPENWEBUI_CONTAINER_NAME",
+        None,
+    )
+    expected_server_static = {
+        "image_id": (
+            fixed_openwebui_image.rsplit("@", 1)[1]
+            if isinstance(fixed_openwebui_image, str)
+            and "@" in fixed_openwebui_image
+            else None
+        ),
+        "config_image": fixed_openwebui_config_image,
+        "name": (
+            f"/{fixed_openwebui_container_name}"
+            if isinstance(fixed_openwebui_container_name, str)
+            else None
+        ),
+        "running": True,
+    }
+    openwebui_server = browser.get("openwebui_server")
+    server_observations_valid = (
+        isinstance(openwebui_server, dict)
+        and set(openwebui_server) == {"before", "after"}
+        and openwebui_server["before"] == openwebui_server["after"]
+    )
+    if server_observations_valid:
+        for label in ("before", "after"):
+            observation = openwebui_server[label]
+            if (
+                not isinstance(observation, dict)
+                or set(observation)
+                != {
+                    "container_id",
+                    "image_id",
+                    "config_image",
+                    "name",
+                    "running",
+                    "pid",
+                    "started_at",
+                }
+                or not isinstance(observation.get("container_id"), str)
+                or re.fullmatch(
+                    r"[0-9a-f]{64}",
+                    observation["container_id"],
+                )
+                is None
+                or type(observation.get("pid")) is not int
+                or observation["pid"] <= 0
+                or not isinstance(observation.get("started_at"), str)
+                or not observation["started_at"]
+                or len(observation["started_at"]) > 128
+                or not observation["started_at"].isascii()
+                or {
+                    field: observation.get(field)
+                    for field in expected_server_static
+                }
+                != expected_server_static
+            ):
+                server_observations_valid = False
+                break
+    if (
+        not isinstance(authorized_aq4_release, dict)
+        or identity["openwebui_image"]
+        != authorized_aq4_release.get("openwebui_image")
+        or identity["openwebui_image"] != fixed_openwebui_image
+        or browser.get("browser_image") != fixed_browser_image
+        or not server_observations_valid
+    ):
+        raise ValidationError(
+            "browser and OpenWebUI image identities differ from authorization"
+        )
     try:
         claimed_at = datetime.fromisoformat(
             claim_document["claimed_at"].replace("Z", "+00:00")
@@ -1149,11 +1237,11 @@ def _validate_v2(path: Path, document: dict[str, Any]) -> dict[str, Any]:
 
     if (
         browser.get("schema_version")
-        != "ullm.openwebui.reasoning_browser_smoke.v4"
+        != "ullm.openwebui.reasoning_browser_smoke.v5"
         or browser.get("source_commit") != document["source_commit"]
         or browser.get("identity") != identity
     ):
-        raise ValidationError("browser v4 identity differs")
+        raise ValidationError("browser v5 identity differs")
     browser_validator = _load_module(
         "_ullm_openwebui_reasoning_bundle_v2_validator",
         BROWSER_VALIDATOR_PATH,
@@ -1167,7 +1255,7 @@ def _validate_v2(path: Path, document: dict[str, Any]) -> dict[str, Any]:
     if (
         browser_report != recomputed_browser_report
         or browser_report.get("schema_version")
-        != "ullm.openwebui.reasoning_browser_smoke_validator.v2"
+        != "ullm.openwebui.reasoning_browser_smoke_validator.v3"
     ):
         raise ValidationError("browser validator report differs from recomputation")
 

@@ -27,7 +27,9 @@ import subprocess
 import sys
 import time
 import uuid
+from collections.abc import Mapping
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from types import ModuleType
 from typing import Any, Sequence
@@ -43,6 +45,7 @@ from served_model_active_binding import (  # noqa: E402
     ActiveManifestBinding,
     optional_v2_binding,
 )
+import served_model_campaign_authorization as campaign_authorization  # noqa: E402
 
 
 SERVED_MODEL_VALIDATOR_PATH = ROOT / "tools/validate-served-model.py"
@@ -50,6 +53,14 @@ DEFAULT_FIXTURES = ROOT / "tests/fixtures/generic-reasoning-release-v0.1/prompts
 DEFAULT_OBSERVER = Path("/run/ullm/lifecycle-observer.sock")
 DEFAULT_ENDPOINT = "http://172.20.0.1:8000/v1/chat/completions"
 DEFAULT_HTTP_IMAGE = "sha256:5dce198cca467ce79994ed65e01d03882238f9efdd16a8c6f4bc55151c8a4a54"
+CANONICAL_PYTHON = "/usr/bin/python3.12"
+# ROCm's vendor CLI imports sibling modules from its trusted root-owned script
+# directory.  ``-E -S`` keeps ambient Python settings and site packages out
+# while retaining that fixed script-directory import.
+ROCM_PYTHON_ARGUMENTS = ("-E", "-S", "-B")
+CANONICAL_ROCM_SMI = (
+    "/opt/rocm-7.2.1/libexec/rocm_smi/rocm_smi.py"
+)
 TARGET_GFX = "gfx1201"
 TARGET_GPU_INDEX = "1"
 WORKER_PROCESS_BASENAME_BY_FORMAT = {
@@ -65,6 +76,7 @@ MAX_FIXTURE_BYTES = 1 * 1024 * 1024
 MAX_EVENT_BYTES = 65_536
 IMAGE_RE = re.compile(r"(?:[A-Za-z0-9][A-Za-z0-9._/:+-]*@)?sha256:[0-9a-f]{64}\Z")
 COMMIT_RE = re.compile(r"[0-9a-f]{40}\Z")
+HASH_RE = re.compile(r"[0-9a-f]{64}\Z")
 LIFECYCLE_SCHEMA = "ullm.gateway.lifecycle.v1"
 CAMPAIGN_SCHEMA = "ullm.generic_reasoning_release_campaign.v1"
 CAMPAIGN_SCHEMA_V2 = "ullm.generic_reasoning_release_campaign.v2"
@@ -102,6 +114,14 @@ MODE_BUDGETS: dict[str, int | None] = {
     "unbounded": None,
 }
 _SERVED_MODEL_MODULE_NAME = "_ullm_generic_campaign_served_model_validator"
+TRANSACTION_STAGING_OUTPUT_ENV = "ULLM_CAMPAIGN_STAGING_OUTPUT"
+TRANSACTION_STAGE_ENV = "ULLM_CAMPAIGN_TRANSACTION_STAGE"
+TRANSACTION_AUTHORIZATION_ENV = "ULLM_CAMPAIGN_AUTHORIZATION"
+TRANSACTION_CLAIM_ENV = "ULLM_CAMPAIGN_CLAIM"
+TRANSACTION_AUTHORIZATION_SHA256_ENV = (
+    "ULLM_CAMPAIGN_AUTHORIZATION_SHA256"
+)
+TRANSACTION_CLAIM_SHA256_ENV = "ULLM_CAMPAIGN_CLAIM_SHA256"
 
 
 class CampaignError(RuntimeError):
@@ -143,6 +163,197 @@ class StreamResult:
 
 def _sha256(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
+
+
+def _strict_transaction_path(value: str | Path, label: str) -> Path:
+    """Reject path aliases before comparing authorization identities."""
+
+    if isinstance(value, Path):
+        raw = os.fspath(value)
+    elif type(value) is str:
+        raw = value
+    else:
+        raise CampaignError(f"{label} path is invalid")
+    if (
+        not raw
+        or "\x00" in raw
+        or "//" in raw
+        or not raw.startswith("/")
+        or os.path.normpath(raw) != raw
+    ):
+        raise CampaignError(f"{label} path must be lexically canonical")
+    path = Path(raw)
+    if (
+        not path.is_absolute()
+        or path.anchor != "/"
+        or path.name in {"", ".", ".."}
+        or ".." in path.parts
+        or os.fspath(path) != raw
+        or path != path.absolute()
+    ):
+        raise CampaignError(f"{label} path must be lexically canonical")
+    return path
+
+
+def _required_transaction_value(
+    environment: Mapping[str, str],
+    name: str,
+) -> str:
+    value = environment.get(name)
+    if type(value) is not str or not value:
+        raise CampaignError(f"transaction environment {name} is missing")
+    return value
+
+
+def _transaction_publication_output(
+    *,
+    authorized_output: Path,
+    active_binding_mode: str,
+    campaign_authorization_path: Path | None,
+    run_id: str | None,
+    active_binding: ActiveManifestBinding | None,
+    environment: Mapping[str, str] | None = None,
+) -> tuple[Path, str | None]:
+    """Select an authorized transaction-owned staging output, if requested.
+
+    The CLI output remains the authorization and lineage identity.  The
+    staging environment is accepted only when it is backed by the exact
+    consumed claim already supplied by the locked transaction.
+    """
+
+    selected_environment = os.environ if environment is None else environment
+    if TRANSACTION_STAGING_OUTPUT_ENV not in selected_environment:
+        return authorized_output, None
+
+    final_path = _strict_transaction_path(
+        authorized_output,
+        "authorized campaign output",
+    )
+    staging_path = _strict_transaction_path(
+        _required_transaction_value(
+            selected_environment,
+            TRANSACTION_STAGING_OUTPUT_ENV,
+        ),
+        "transaction staging output",
+    )
+    if (
+        final_path == staging_path
+        or final_path in staging_path.parents
+        or staging_path in final_path.parents
+    ):
+        raise CampaignError(
+            "transaction staging and authorized output paths overlap"
+        )
+    if staging_path.exists() or staging_path.is_symlink():
+        raise CampaignError("transaction staging output already exists")
+
+    expected_campaign = (
+        "reasoning_release"
+        if active_binding_mode == "v2"
+        else "aq4_reasoning_release"
+    )
+    stage = _required_transaction_value(
+        selected_environment,
+        TRANSACTION_STAGE_ENV,
+    )
+    if stage != expected_campaign:
+        raise CampaignError("transaction campaign stage differs")
+    environment_authorization = _strict_transaction_path(
+        _required_transaction_value(
+            selected_environment,
+            TRANSACTION_AUTHORIZATION_ENV,
+        ),
+        "transaction authorization",
+    )
+    environment_claim = _strict_transaction_path(
+        _required_transaction_value(
+            selected_environment,
+            TRANSACTION_CLAIM_ENV,
+        ),
+        "transaction claim",
+    )
+    environment_authorization_sha256 = _required_transaction_value(
+        selected_environment,
+        TRANSACTION_AUTHORIZATION_SHA256_ENV,
+    )
+    environment_claim_sha256 = _required_transaction_value(
+        selected_environment,
+        TRANSACTION_CLAIM_SHA256_ENV,
+    )
+    if (
+        HASH_RE.fullmatch(environment_authorization_sha256) is None
+        or HASH_RE.fullmatch(environment_claim_sha256) is None
+    ):
+        raise CampaignError("transaction authorization hashes are invalid")
+
+    if active_binding_mode == "v2":
+        if (
+            campaign_authorization_path is None
+            or run_id is None
+            or not run_id
+            or active_binding is None
+        ):
+            raise CampaignError("transaction v2 campaign binding is incomplete")
+        cli_authorization = _strict_transaction_path(
+            campaign_authorization_path,
+            "CLI campaign authorization",
+        )
+        claim = active_binding.claim
+        if (
+            claim is None
+            or active_binding.campaign_name != expected_campaign
+            or active_binding.run_id != run_id
+            or active_binding.final_path != final_path
+            or cli_authorization != environment_authorization
+            or claim.authorization_path != environment_authorization
+            or claim.path != environment_claim
+            or claim.authorization_sha256
+            != environment_authorization_sha256
+            or claim.sha256 != environment_claim_sha256
+        ):
+            raise CampaignError(
+                "transaction v2 authorization claim or output differs"
+            )
+        return staging_path, run_id
+
+    if active_binding_mode != "legacy" or active_binding is not None:
+        raise CampaignError("transaction campaign binding mode differs")
+    if campaign_authorization_path is not None or run_id is not None:
+        raise CampaignError(
+            "legacy transaction campaign forbids v2 CLI binding inputs"
+        )
+    try:
+        claim_record = campaign_authorization.load_claim(
+            environment_authorization,
+            now=datetime.now(timezone.utc),
+        )
+        campaign = claim_record.authorization.document["campaigns"][
+            expected_campaign
+        ]
+        derived_run_id = campaign["run_id"]
+        if type(derived_run_id) is not str or not derived_run_id:
+            raise CampaignError("authorized legacy campaign run ID differs")
+        campaign_authorization.require_campaign_binding(
+            claim_record,
+            campaign_name=expected_campaign,
+            run_id=derived_run_id,
+            final_path=final_path,
+        )
+    except campaign_authorization.AuthorizationError as error:
+        raise CampaignError(
+            "legacy transaction authorization claim or output differs"
+        ) from error
+    if (
+        claim_record.authorization.snapshot.path != environment_authorization
+        or claim_record.snapshot.path != environment_claim
+        or claim_record.authorization.snapshot.sha256
+        != environment_authorization_sha256
+        or claim_record.snapshot.sha256 != environment_claim_sha256
+    ):
+        raise CampaignError(
+            "legacy transaction authorization claim identity differs"
+        )
+    return staging_path, derived_run_id
 
 
 def _read_regular(path: Path, label: str, maximum: int) -> bytes:
@@ -270,14 +481,29 @@ def _worker_process_basename(manifest_summary: dict[str, Any]) -> str:
     return basename
 
 
+def _rocm_smi_command(rocm_smi: str, *arguments: str) -> list[str]:
+    """Avoid the production ROCm script's ``/usr/bin/env`` shebang."""
+
+    if rocm_smi == CANONICAL_ROCM_SMI:
+        return [
+            CANONICAL_PYTHON,
+            *ROCM_PYTHON_ARGUMENTS,
+            rocm_smi,
+            *arguments,
+        ]
+    return [rocm_smi, *arguments]
+
+
 def _read_gpu_processes(
     rocm_smi: str = "rocm-smi",
     *,
     expected_process_basename: str | None = None,
 ) -> dict[str, Any]:
+    command = _rocm_smi_command(rocm_smi, "--showpids", "--json")
+    tool = " ".join(command)
     try:
         result = subprocess.run(
-            [rocm_smi, "--showpids", "--json"],
+            command,
             check=False,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
@@ -290,7 +516,7 @@ def _read_gpu_processes(
         raise CampaignError("ROCm GPU preflight returned nonzero")
     if not result.stdout.strip():
         return {
-            "tool": f"{rocm_smi} --showpids --json",
+            "tool": tool,
             "gpu_index": TARGET_GPU_INDEX,
             "positive_vram_processes": [],
         }
@@ -322,7 +548,7 @@ def _read_gpu_processes(
         raise CampaignError("resident worker process identity is not bound to the validated manifest")
     if any(item["process"] != expected_process_basename for item in positive):
         raise CampaignError("an unexpected process owns the target R9700")
-    return {"tool": f"{rocm_smi} --showpids --json", "gpu_index": TARGET_GPU_INDEX, "positive_vram_processes": positive}
+    return {"tool": tool, "gpu_index": TARGET_GPU_INDEX, "positive_vram_processes": positive}
 
 
 def _hash_process_executable(pid: str) -> str:
@@ -397,7 +623,15 @@ def _rss_bytes(pid: int) -> int:
 def _resource_sample(service: str, rocm_smi: str, systemctl: str) -> ResourceSample:
     try:
         result = subprocess.run(
-            [rocm_smi, "--showproductname", "--showmeminfo", "vram", "--showtemp", "--showpower", "--json"],
+            _rocm_smi_command(
+                rocm_smi,
+                "--showproductname",
+                "--showmeminfo",
+                "vram",
+                "--showtemp",
+                "--showpower",
+                "--json",
+            ),
             check=False,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
@@ -1119,6 +1353,13 @@ def execute(
         run_id=run_id,
         output_dir=output_dir,
     )
+    publication_output, transaction_run_id = _transaction_publication_output(
+        authorized_output=output_dir,
+        active_binding_mode=active_binding_mode,
+        campaign_authorization_path=campaign_authorization,
+        run_id=run_id,
+        active_binding=active_binding,
+    )
     if active_binding is not None:
         active_binding.observe("preflight")
     manifest_summary = _validate_manifest(selected_manifest)
@@ -1152,12 +1393,12 @@ def execute(
         network=network,
         stream=False,
     )
-    output_dir.parent.mkdir(parents=True, exist_ok=True)
+    publication_output.parent.mkdir(parents=True, exist_ok=True)
     try:
-        parent = output_dir.parent.resolve(strict=True)
+        parent = publication_output.parent.resolve(strict=True)
     except OSError as error:
         raise CampaignError("campaign output parent is unavailable") from error
-    if parent != output_dir.parent.absolute():
+    if parent != publication_output.parent.absolute():
         raise CampaignError("campaign output parent is not canonical")
     parent_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC
     if not hasattr(os, "O_NOFOLLOW"):
@@ -1175,7 +1416,9 @@ def execute(
         parent_metadata.st_uid,
         parent_metadata.st_gid,
     )
-    stage = parent / f".{output_dir.name}.incomplete-{uuid.uuid4().hex}"
+    stage = parent / (
+        f".{publication_output.name}.incomplete-{uuid.uuid4().hex}"
+    )
     try:
         os.mkdir(stage.name, mode=0o700, dir_fd=parent_descriptor)
     except OSError as error:
@@ -1267,6 +1510,12 @@ def execute(
                 active_artifacts.binding_json
             )
             summary["run_id"] = run_id
+        elif transaction_run_id is not None:
+            summary["transaction_campaign"] = {
+                "name": "aq4_reasoning_release",
+                "run_id": transaction_run_id,
+                "final_path": os.fspath(output_dir),
+            }
         _write_json(stage / "summary.json", summary)
         stage.chmod(0o555)
         stage_descriptor = os.open(
@@ -1280,7 +1529,7 @@ def execute(
         _rename_directory_noreplace(
             parent_descriptor,
             stage.name,
-            output_dir.name,
+            publication_output.name,
         )
         os.fsync(parent_descriptor)
         verification_descriptor = os.open(parent, parent_flags)
@@ -1299,7 +1548,7 @@ def execute(
         finally:
             os.close(verification_descriptor)
         _verify_published_directory(
-            output_dir,
+            publication_output,
             expected_files=(
                 CAMPAIGN_OUTPUT_FILES_V2
                 if active_artifacts is not None
@@ -1316,10 +1565,22 @@ def execute(
         "schema_version": (
             CAMPAIGN_SCHEMA_V2 if active_binding is not None else CAMPAIGN_SCHEMA
         ),
-        "output_dir": os.fspath(output_dir.resolve()),
+        "output_dir": os.fspath(
+            output_dir
+            if transaction_run_id is not None
+            else output_dir.resolve()
+        ),
         "case_count": len(cases),
         "modes": list(MODES),
-        **({"run_id": run_id} if active_binding is not None else {}),
+        **(
+            {"run_id": run_id}
+            if active_binding is not None
+            else (
+                {"run_id": transaction_run_id}
+                if transaction_run_id is not None
+                else {}
+            )
+        ),
     }
 
 

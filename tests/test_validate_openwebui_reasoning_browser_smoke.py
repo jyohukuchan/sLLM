@@ -83,8 +83,18 @@ def v3_evidence() -> dict:
     return value
 
 
-def write_v4_evidence(tmp_path: Path) -> Path:
-    root = tmp_path / "browser-output"
+def write_v4_evidence(
+    tmp_path: Path,
+    *,
+    schema_version: str = TOOL.SCHEMA_VERSION_V4,
+) -> Path:
+    if schema_version not in {TOOL.SCHEMA_VERSION_V4, TOOL.SCHEMA_VERSION_V5}:
+        raise AssertionError("unsupported lineage fixture schema")
+    root = tmp_path / (
+        "browser-output-v5"
+        if schema_version == TOOL.SCHEMA_VERSION_V5
+        else "browser-output-v4"
+    )
     root.mkdir()
     candidate_raw = b'{"candidate":true}\n'
     candidate_sha256 = hashlib.sha256(candidate_raw).hexdigest()
@@ -205,9 +215,30 @@ def write_v4_evidence(tmp_path: Path) -> Path:
         },
     }
     value = v3_evidence()
-    value["schema_version"] = TOOL.SCHEMA_VERSION_V4
+    value["schema_version"] = schema_version
     value["identity"]["manifest_sha256"] = candidate_sha256
     value["campaign_lineage"] = lineage
+    if schema_version == TOOL.SCHEMA_VERSION_V5:
+        value["identity"]["openwebui_image"] = (
+            TOOL.authorization.FIXED_OPENWEBUI_IMAGE
+        )
+        value["browser_image"] = TOOL.authorization.FIXED_BROWSER_IMAGE
+        server = {
+            "container_id": "1" * 64,
+            "image_id": TOOL.authorization.FIXED_OPENWEBUI_IMAGE.rsplit(
+                "@",
+                1,
+            )[1],
+            "config_image": TOOL.authorization.FIXED_OPENWEBUI_CONFIG_IMAGE,
+            "name": f"/{TOOL.authorization.FIXED_OPENWEBUI_CONTAINER_NAME}",
+            "running": True,
+            "pid": 1234,
+            "started_at": "2026-07-24T00:00:00.000000000Z",
+        }
+        value["openwebui_server"] = {
+            "before": server,
+            "after": dict(server),
+        }
     evidence_path = root / TOOL.BROWSER_EVIDENCE_FILE
     for name, raw in {
         **artifact_raws,
@@ -270,6 +301,145 @@ def test_validator_accepts_v4_and_recomputes_full_campaign_lineage(
     assert report["campaign_lineage"]["run_id"] == "reasoning-browser-run"
     assert report["campaign_lineage"]["observation_count"] == 5
     assert report["gate_eligible"] is True
+
+
+def test_validator_accepts_v5_with_distinct_browser_and_server_images(
+    tmp_path: Path,
+) -> None:
+    path = write_v4_evidence(
+        tmp_path,
+        schema_version=TOOL.SCHEMA_VERSION_V5,
+    )
+
+    report = TOOL.validate(path)
+    document = json.loads(path.read_text(encoding="ascii"))
+
+    assert report["input_schema_version"] == TOOL.SCHEMA_VERSION_V5
+    assert report["schema_version"] == TOOL.VALIDATOR_SCHEMA_VERSION_V3
+    assert (
+        document["browser_image"]
+        == TOOL.authorization.FIXED_BROWSER_IMAGE
+    )
+    assert document["openwebui_server"]["before"] == document[
+        "openwebui_server"
+    ]["after"]
+    assert (
+        document["identity"]["openwebui_image"]
+        == TOOL.authorization.FIXED_OPENWEBUI_IMAGE
+    )
+    assert report["gate_eligible"] is True
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    (
+        lambda value: value.pop("browser_image"),
+        lambda value: value.__setitem__("browser_image", "browser:latest"),
+    ),
+)
+def test_validator_rejects_v5_browser_image_shape_mutations(
+    tmp_path: Path,
+    mutation,
+) -> None:
+    path = write_v4_evidence(
+        tmp_path,
+        schema_version=TOOL.SCHEMA_VERSION_V5,
+    )
+    value = json.loads(path.read_text(encoding="ascii"))
+    mutation(value)
+    path.chmod(0o644)
+    path.write_text(json.dumps(value), encoding="ascii")
+    path.chmod(0o444)
+
+    with pytest.raises(TOOL.ValidationError):
+        TOOL.validate(path)
+
+
+@pytest.mark.parametrize(
+    ("field", "replacement"),
+    (
+        ("container_id", "2" * 64),
+        ("image_id", "sha256:" + "0" * 64),
+        ("pid", 4321),
+        ("started_at", "2026-07-24T00:01:00.000000000Z"),
+    ),
+)
+def test_validator_rejects_v5_openwebui_server_change_during_gate(
+    tmp_path: Path,
+    field: str,
+    replacement: object,
+) -> None:
+    path = write_v4_evidence(
+        tmp_path,
+        schema_version=TOOL.SCHEMA_VERSION_V5,
+    )
+    value = json.loads(path.read_text(encoding="ascii"))
+    value["openwebui_server"]["after"][field] = replacement
+    path.chmod(0o644)
+    path.write_text(json.dumps(value), encoding="ascii")
+    path.chmod(0o444)
+
+    with pytest.raises(TOOL.ValidationError, match="changed during browser"):
+        TOOL.validate(path)
+
+
+def test_validator_rejects_v5_consistent_but_unfixed_openwebui_server(
+    tmp_path: Path,
+) -> None:
+    path = write_v4_evidence(
+        tmp_path,
+        schema_version=TOOL.SCHEMA_VERSION_V5,
+    )
+    value = json.loads(path.read_text(encoding="ascii"))
+    alternate = {
+        "container_id": "1" * 64,
+        "image_id": "sha256:" + "0" * 64,
+        "config_image": "attacker/open-webui:fixed-looking",
+        "name": "/open-webui",
+        "running": True,
+        "pid": 1234,
+        "started_at": "2026-07-24T00:00:00.000000000Z",
+    }
+    value["openwebui_server"] = {
+        "before": alternate,
+        "after": dict(alternate),
+    }
+    path.chmod(0o644)
+    path.write_text(json.dumps(value), encoding="ascii")
+    path.chmod(0o444)
+
+    with pytest.raises(TOOL.ValidationError, match="fixed identity"):
+        TOOL.validate(path)
+
+
+@pytest.mark.parametrize(
+    ("field", "replacement"),
+    (
+        ("container_id", "1" * 63),
+        ("pid", True),
+        ("pid", 0),
+        ("started_at", ""),
+        ("started_at", "\N{SNOWMAN}"),
+    ),
+)
+def test_validator_rejects_malformed_dynamic_openwebui_server_identity(
+    tmp_path: Path,
+    field: str,
+    replacement: object,
+) -> None:
+    path = write_v4_evidence(
+        tmp_path,
+        schema_version=TOOL.SCHEMA_VERSION_V5,
+    )
+    value = json.loads(path.read_text(encoding="ascii"))
+    value["openwebui_server"]["before"][field] = replacement
+    value["openwebui_server"]["after"][field] = replacement
+    path.chmod(0o644)
+    path.write_text(json.dumps(value), encoding="ascii")
+    path.chmod(0o444)
+
+    with pytest.raises(TOOL.ValidationError, match="openwebui_server"):
+        TOOL.validate(path)
 
 
 def test_validator_rejects_v4_observation_replay(

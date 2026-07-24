@@ -7,7 +7,7 @@ import socket
 import sys
 import threading
 from pathlib import Path
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
 
 import pytest
 
@@ -72,6 +72,225 @@ def test_v2_dispatch_binds_reasoning_release_run_and_output(
     assert observed["campaign_name"] == "reasoning_release"
     assert observed["run_id"] == "reasoning-release-run"
     assert observed["final_path"] == tmp_path / "release-output"
+
+
+def _transaction_environment(
+    *,
+    stage: str,
+    staging: Path,
+    authorization: Path,
+    claim: Path,
+    authorization_sha256: str = "a" * 64,
+    claim_sha256: str = "b" * 64,
+) -> dict[str, str]:
+    return {
+        TOOL.TRANSACTION_STAGING_OUTPUT_ENV: str(staging),
+        TOOL.TRANSACTION_STAGE_ENV: stage,
+        TOOL.TRANSACTION_AUTHORIZATION_ENV: str(authorization),
+        TOOL.TRANSACTION_CLAIM_ENV: str(claim),
+        TOOL.TRANSACTION_AUTHORIZATION_SHA256_ENV: authorization_sha256,
+        TOOL.TRANSACTION_CLAIM_SHA256_ENV: claim_sha256,
+    }
+
+
+def _v2_transaction_binding(
+    *,
+    final: Path,
+    authorization: Path,
+    claim: Path,
+    run_id: str = "release-run",
+) -> SimpleNamespace:
+    return SimpleNamespace(
+        campaign_name="reasoning_release",
+        run_id=run_id,
+        final_path=final,
+        claim=SimpleNamespace(
+            authorization_path=authorization,
+            authorization_sha256="a" * 64,
+            path=claim,
+            sha256="b" * 64,
+        ),
+    )
+
+
+def test_transaction_staging_is_opt_in_and_preserves_legacy_default() -> None:
+    output = Path("relative-legacy-output")
+
+    selected, transaction_run_id = TOOL._transaction_publication_output(
+        authorized_output=output,
+        active_binding_mode="legacy",
+        campaign_authorization_path=None,
+        run_id=None,
+        active_binding=None,
+        environment={
+            TOOL.TRANSACTION_STAGE_ENV: "forged-but-not-opted-in",
+            TOOL.TRANSACTION_CLAIM_SHA256_ENV: "not-a-hash",
+        },
+    )
+
+    assert selected == output
+    assert transaction_run_id is None
+
+
+def test_sq8_transaction_staging_binds_claim_stage_run_and_final_without_leak(
+    tmp_path: Path,
+) -> None:
+    final = tmp_path / "authorized-release"
+    staging = tmp_path / "private-release-stage"
+    authorization = tmp_path / "authorization.json"
+    claim = tmp_path / "claim.json"
+    binding = _v2_transaction_binding(
+        final=final,
+        authorization=authorization,
+        claim=claim,
+    )
+
+    selected, transaction_run_id = TOOL._transaction_publication_output(
+        authorized_output=final,
+        active_binding_mode="v2",
+        campaign_authorization_path=authorization,
+        run_id="release-run",
+        active_binding=binding,
+        environment=_transaction_environment(
+            stage="reasoning_release",
+            staging=staging,
+            authorization=authorization,
+            claim=claim,
+        ),
+    )
+
+    assert selected == staging
+    assert transaction_run_id == "release-run"
+    public_result = {"output_dir": str(final), "run_id": transaction_run_id}
+    assert str(staging) not in json.dumps(public_result, sort_keys=True)
+    assert binding.final_path == final
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "wrong-stage",
+        "wrong-claim",
+        "wrong-claim-hash",
+        "wrong-final",
+        "double-slash",
+        "equal",
+        "overlap",
+        "existing",
+    ],
+)
+def test_sq8_transaction_staging_rejects_forged_environment_and_paths(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    final = tmp_path / "authorized-release"
+    staging = tmp_path / "private-release-stage"
+    authorization = tmp_path / "authorization.json"
+    claim = tmp_path / "claim.json"
+    binding = _v2_transaction_binding(
+        final=final,
+        authorization=authorization,
+        claim=claim,
+    )
+    environment = _transaction_environment(
+        stage="reasoning_release",
+        staging=staging,
+        authorization=authorization,
+        claim=claim,
+    )
+    if mutation == "wrong-stage":
+        environment[TOOL.TRANSACTION_STAGE_ENV] = "reasoning_browser"
+    elif mutation == "wrong-claim":
+        environment[TOOL.TRANSACTION_CLAIM_ENV] = str(
+            tmp_path / "forged-claim.json"
+        )
+    elif mutation == "wrong-claim-hash":
+        environment[TOOL.TRANSACTION_CLAIM_SHA256_ENV] = "c" * 64
+    elif mutation == "wrong-final":
+        binding.final_path = tmp_path / "different-final"
+    elif mutation == "double-slash":
+        environment[TOOL.TRANSACTION_STAGING_OUTPUT_ENV] = (
+            f"{tmp_path}//private-release-stage"
+        )
+    elif mutation == "equal":
+        environment[TOOL.TRANSACTION_STAGING_OUTPUT_ENV] = str(final)
+    elif mutation == "overlap":
+        environment[TOOL.TRANSACTION_STAGING_OUTPUT_ENV] = str(
+            final / "nested-stage"
+        )
+    elif mutation == "existing":
+        staging.mkdir()
+
+    with pytest.raises(TOOL.CampaignError, match="transaction"):
+        TOOL._transaction_publication_output(
+            authorized_output=final,
+            active_binding_mode="v2",
+            campaign_authorization_path=authorization,
+            run_id="release-run",
+            active_binding=binding,
+            environment=environment,
+        )
+
+
+def test_fresh_aq4_transaction_staging_loads_consumed_claim_and_derives_run_id(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    final = tmp_path / "authorized-aq4-release"
+    staging = tmp_path / "private-aq4-release-stage"
+    authorization = tmp_path / "authorization.json"
+    claim = tmp_path / "claim.json"
+    record = SimpleNamespace(
+        snapshot=SimpleNamespace(path=claim, sha256="b" * 64),
+        authorization=SimpleNamespace(
+            snapshot=SimpleNamespace(
+                path=authorization,
+                sha256="a" * 64,
+            ),
+            document={
+                "campaigns": {
+                    "aq4_reasoning_release": {
+                        "run_id": "aq4-release-run",
+                        "final_path": str(final),
+                    }
+                }
+            },
+        ),
+    )
+    monkeypatch.setattr(
+        TOOL.campaign_authorization,
+        "load_claim",
+        lambda path, **_kwargs: record
+        if path == authorization
+        else pytest.fail("unexpected authorization path"),
+    )
+    environment = _transaction_environment(
+        stage="aq4_reasoning_release",
+        staging=staging,
+        authorization=authorization,
+        claim=claim,
+    )
+
+    selected, transaction_run_id = TOOL._transaction_publication_output(
+        authorized_output=final,
+        active_binding_mode="legacy",
+        campaign_authorization_path=None,
+        run_id=None,
+        active_binding=None,
+        environment=environment,
+    )
+
+    assert selected == staging
+    assert transaction_run_id == "aq4-release-run"
+    with pytest.raises(TOOL.CampaignError, match="authorization claim or output"):
+        TOOL._transaction_publication_output(
+            authorized_output=tmp_path / "forged-final",
+            active_binding_mode="legacy",
+            campaign_authorization_path=None,
+            run_id=None,
+            active_binding=None,
+            environment=environment,
+        )
 
 
 def test_modes_and_request_body_are_explicit_and_bounded() -> None:
@@ -287,6 +506,184 @@ def test_immutable_http_image_is_required(tmp_path: Path) -> None:
         )
 
 
+def test_fresh_aq4_runner_publishes_only_to_transaction_staging(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    token = tmp_path / "token"
+    token.write_bytes(b"opaque-token")
+    final = tmp_path / "authorized-release"
+    staging = tmp_path / "private-stage" / "release"
+    authorization = tmp_path / "authorization.json"
+    claim = tmp_path / "claim.json"
+    fixtures = {
+        f"generic-reasoning-{mode}": TOOL.Fixture(
+            f"generic-reasoning-{mode}",
+            f"prompt-{mode}",
+            "ok",
+        )
+        for mode in TOOL.MODES
+    }
+
+    def result(mode: str, *, stream: bool) -> TOOL.StreamResult:
+        reasoning_tokens = 0 if mode == "disabled" else 1
+        return TOOL.StreamResult(
+            status=200,
+            completion_id=f"{mode}-{'stream' if stream else 'nonstream'}",
+            finish_reason="stop",
+            prompt_tokens=8,
+            completion_tokens=reasoning_tokens + 2,
+            reasoning_tokens=reasoning_tokens,
+            usage_timings={
+                "prompt_per_second": 100.0,
+                "predicted_per_second": 80.0,
+            },
+            answer_text="ok",
+            reasoning_text="" if mode == "disabled" else "thought",
+            sse_chunk_count=2 if stream else 0,
+            first_reasoning_ms=1.0 if reasoning_tokens else None,
+            first_answer_ms=2.0,
+            latency_ms=10.0,
+            stream=stream,
+        )
+
+    stream_modes = iter(TOOL.MODES)
+    nonstream_modes = iter(TOOL.MODES)
+    monkeypatch.setattr(
+        TOOL,
+        "_stream_request",
+        lambda *_args, **_kwargs: result(next(stream_modes), stream=True),
+    )
+    monkeypatch.setattr(
+        TOOL,
+        "_nonstream_request",
+        lambda *_args, **_kwargs: result(
+            next(nonstream_modes),
+            stream=False,
+        ),
+    )
+    monkeypatch.setattr(TOOL, "_load_fixtures", lambda _path: fixtures)
+    monkeypatch.setattr(
+        TOOL,
+        "_validate_manifest",
+        lambda _path: {
+            "manifest_sha256": "d" * 64,
+            "model_id": "ullm-qwen3.5-9b-aq4",
+            "format_id": "AQ4_0",
+            "worker": {
+                "binary": "/opt/ullm/bin/ullm-aq4-worker",
+                "binary_sha256": "e" * 64,
+            },
+        },
+    )
+    monkeypatch.setattr(
+        TOOL,
+        "_read_gpu_processes",
+        lambda *_args, **_kwargs: {"positive_vram_processes": []},
+    )
+    monkeypatch.setattr(TOOL, "_bind_gpu_processes", lambda *_args: None)
+    monkeypatch.setattr(TOOL, "_docker_command", lambda **_kwargs: [])
+    sample = TOOL.ResourceSample(100, 200, 50.0, 100.0)
+    monkeypatch.setattr(
+        TOOL,
+        "_resource_sample",
+        lambda *_args, **_kwargs: sample,
+    )
+
+    class Observer:
+        def __init__(self, _path: Path) -> None:
+            pass
+
+        def open(self) -> None:
+            pass
+
+        def close(self) -> None:
+            pass
+
+        def wait_release(
+            self,
+            completion_id: str,
+            _timeout_seconds: float,
+        ) -> dict[str, object]:
+            mode = completion_id.rsplit("-", 1)[0]
+            reasoning_tokens = 0 if mode == "disabled" else 1
+            release: dict[str, object] = {
+                "completion_id": completion_id,
+                "outcome": "stop",
+                "prompt_tokens": 8,
+                "completion_tokens": reasoning_tokens + 2,
+                "reset_complete": True,
+                "admit_to_start_ns": 1,
+                "start_to_release_ns": 2,
+                "admit_to_release_ns": 3,
+            }
+            if mode != "disabled":
+                release.update(
+                    {"reasoning_tokens": reasoning_tokens, "forced_end_tokens": 0}
+                )
+            return release
+
+    monkeypatch.setattr(TOOL, "LifecycleObserver", Observer)
+    record = SimpleNamespace(
+        snapshot=SimpleNamespace(path=claim, sha256="b" * 64),
+        authorization=SimpleNamespace(
+            snapshot=SimpleNamespace(
+                path=authorization,
+                sha256="a" * 64,
+            ),
+            document={
+                "campaigns": {
+                    "aq4_reasoning_release": {
+                        "run_id": "fresh-aq4-release",
+                        "final_path": str(final),
+                    }
+                }
+            },
+        ),
+    )
+    monkeypatch.setattr(
+        TOOL.campaign_authorization,
+        "load_claim",
+        lambda _path, **_kwargs: record,
+    )
+    for name, value in _transaction_environment(
+        stage="aq4_reasoning_release",
+        staging=staging,
+        authorization=authorization,
+        claim=claim,
+    ).items():
+        monkeypatch.setenv(name, value)
+
+    execution = TOOL.execute(
+        output_dir=final,
+        manifest=tmp_path / "manifest.json",
+        fixture_suite=tmp_path / "fixtures.json",
+        token_file=token,
+        http_image="sha256:" + "f" * 64,
+    )
+
+    assert not final.exists()
+    assert staging.is_dir()
+    assert {
+        entry.name for entry in staging.iterdir()
+    } == TOOL.CAMPAIGN_OUTPUT_FILES
+    assert execution["output_dir"] == str(final)
+    assert execution["run_id"] == "fresh-aq4-release"
+    assert str(staging) not in json.dumps(execution, sort_keys=True)
+    summary = json.loads(
+        (staging / "summary.json").read_text(encoding="ascii")
+    )
+    assert summary["transaction_campaign"] == {
+        "name": "aq4_reasoning_release",
+        "run_id": "fresh-aq4-release",
+        "final_path": str(final),
+    }
+    assert all(
+        str(staging) not in entry.read_text(encoding="ascii")
+        for entry in staging.iterdir()
+    )
+
+
 def test_campaign_directory_publication_is_atomic_no_replace(
     tmp_path: Path,
 ) -> None:
@@ -394,15 +791,32 @@ def test_gpu_preflight_requires_the_manifest_derived_process_name(
 
 
 def test_gpu_preflight_accepts_rocm_no_process_output(monkeypatch: pytest.MonkeyPatch) -> None:
+    observed: list[list[str]] = []
+
+    def run(args, **_kwargs):
+        observed.append(args)
+        return TOOL.subprocess.CompletedProcess(
+            args, 0, stdout="", stderr="WARNING: No JSON data to report.\n"
+        )
+
     monkeypatch.setattr(
         TOOL.subprocess,
         "run",
-        lambda *args, **kwargs: TOOL.subprocess.CompletedProcess(
-            args, 0, stdout="", stderr="WARNING: No JSON data to report.\n"
-        ),
+        run,
     )
 
-    assert TOOL._read_gpu_processes()["positive_vram_processes"] == []
+    assert TOOL._read_gpu_processes(
+        TOOL.CANONICAL_ROCM_SMI
+    )["positive_vram_processes"] == []
+    assert observed == [
+        [
+            TOOL.CANONICAL_PYTHON,
+            *TOOL.ROCM_PYTHON_ARGUMENTS,
+            TOOL.CANONICAL_ROCM_SMI,
+            "--showpids",
+            "--json",
+        ]
+    ]
 
 
 def test_lifecycle_observer_correlates_release_and_removes_socket(tmp_path: Path) -> None:

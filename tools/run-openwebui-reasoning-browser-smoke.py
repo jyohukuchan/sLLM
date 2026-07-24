@@ -5,7 +5,7 @@ The browser script writes only its bounded JSON evidence to stdout.  This
 runner executes it in an immutable Playwright container, binds the expected
 model identities explicitly, validates the result, and publishes it atomically.
 Legacy runs preserve the historical v2 evidence; active-manifest-bound runs
-publish one authorized directory containing lineage-bearing v4 evidence.
+publish one authorized directory containing lineage-bearing v5 evidence.
 Prompt, response, token, and
 credential contents are never written by this runner.
 """
@@ -30,6 +30,8 @@ import time
 import uuid
 import socket
 import shutil
+from collections.abc import Mapping
+from datetime import datetime, timezone
 from pathlib import Path
 from types import ModuleType
 from typing import Any, Sequence
@@ -46,11 +48,23 @@ from served_model_active_binding import (  # noqa: E402
     ActiveManifestBinding,
     optional_v2_binding,
 )
+import served_model_campaign_authorization as campaign_authorization  # noqa: E402
 
 
 DEFAULT_SCRIPT = ROOT / "deploy/openwebui/browser-reasoning-smoke.cjs"
 VALIDATOR_PATH = ROOT / "tools/validate-openwebui-reasoning-browser-smoke.py"
 SERVED_MODEL_VALIDATOR_PATH = ROOT / "tools/validate-served-model.py"
+OPENWEBUI_IMAGE_VERIFIER_PATH = (
+    ROOT / "tools/verify-openwebui-container-image.py"
+)
+CANONICAL_PYTHON = "/usr/bin/python3.12"
+# ROCm's vendor CLI imports sibling modules from its trusted root-owned script
+# directory.  ``-E -S`` keeps ambient Python settings and site packages out
+# while retaining that fixed script-directory import.
+ROCM_PYTHON_ARGUMENTS = ("-E", "-S", "-B")
+CANONICAL_ROCM_SMI = (
+    "/opt/rocm-7.2.1/libexec/rocm_smi/rocm_smi.py"
+)
 MAX_TOKEN_FILE_BYTES = 65_536
 MAX_SCRIPT_BYTES = 1 * 1024 * 1024
 MAX_EVIDENCE_BYTES = 1 * 1024 * 1024
@@ -68,6 +82,9 @@ CONTAINER_USER_RE = re.compile(r"[0-9]{1,5}:[0-9]{1,5}\Z")
 JWT_SEGMENT_RE = re.compile(r"[A-Za-z0-9_-]{1,16384}\Z")
 _VALIDATOR_MODULE_NAME = "_ullm_openwebui_reasoning_browser_validator"
 _SERVED_MODEL_MODULE_NAME = "_ullm_reasoning_browser_served_model_validator"
+_OPENWEBUI_IMAGE_VERIFIER_MODULE_NAME = (
+    "_ullm_reasoning_browser_openwebui_image_verifier"
+)
 TARGET_GPU_INDEX = "1"
 WORKER_PROCESS_BASENAME_BY_FORMAT = {
     "AQ4_0": "ullm-aq4-worker",
@@ -79,6 +96,7 @@ ALLOWED_WORKER_PROCESS_BASENAMES = frozenset(
 BROWSER_EVIDENCE_SCHEMA_V2 = "ullm.openwebui.reasoning_browser_smoke.v2"
 BROWSER_EVIDENCE_SCHEMA_V3 = "ullm.openwebui.reasoning_browser_smoke.v3"
 BROWSER_EVIDENCE_SCHEMA_V4 = "ullm.openwebui.reasoning_browser_smoke.v4"
+BROWSER_EVIDENCE_SCHEMA_V5 = "ullm.openwebui.reasoning_browser_smoke.v5"
 CAMPAIGN_LINEAGE_SCHEMA_V2 = "ullm.served_model.campaign_lineage.v2"
 BROWSER_EVIDENCE_FILE = "browser-evidence.json"
 BROWSER_OUTPUT_FILES_V2 = frozenset(
@@ -104,6 +122,14 @@ ACTIVE_BINDING_STAGES = (
     "validation",
     "publication",
 )
+TRANSACTION_STAGING_OUTPUT_ENV = "ULLM_CAMPAIGN_STAGING_OUTPUT"
+TRANSACTION_STAGE_ENV = "ULLM_CAMPAIGN_TRANSACTION_STAGE"
+TRANSACTION_AUTHORIZATION_ENV = "ULLM_CAMPAIGN_AUTHORIZATION"
+TRANSACTION_CLAIM_ENV = "ULLM_CAMPAIGN_CLAIM"
+TRANSACTION_AUTHORIZATION_SHA256_ENV = (
+    "ULLM_CAMPAIGN_AUTHORIZATION_SHA256"
+)
+TRANSACTION_CLAIM_SHA256_ENV = "ULLM_CAMPAIGN_CLAIM_SHA256"
 
 
 class SmokeError(RuntimeError):
@@ -112,6 +138,192 @@ class SmokeError(RuntimeError):
 
 def _sha256(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
+
+
+def _strict_transaction_path(value: str | Path, label: str) -> Path:
+    """Reject path aliases before comparing authorization identities."""
+
+    if isinstance(value, Path):
+        raw = os.fspath(value)
+    elif type(value) is str:
+        raw = value
+    else:
+        raise SmokeError(f"{label} path is invalid")
+    if (
+        not raw
+        or "\x00" in raw
+        or "//" in raw
+        or not raw.startswith("/")
+        or os.path.normpath(raw) != raw
+    ):
+        raise SmokeError(f"{label} path must be lexically canonical")
+    path = Path(raw)
+    if (
+        not path.is_absolute()
+        or path.anchor != "/"
+        or path.name in {"", ".", ".."}
+        or ".." in path.parts
+        or os.fspath(path) != raw
+        or path != path.absolute()
+    ):
+        raise SmokeError(f"{label} path must be lexically canonical")
+    return path
+
+
+def _required_transaction_value(
+    environment: Mapping[str, str],
+    name: str,
+) -> str:
+    value = environment.get(name)
+    if type(value) is not str or not value:
+        raise SmokeError(f"transaction environment {name} is missing")
+    return value
+
+
+def _transaction_publication_output(
+    *,
+    authorized_output: Path,
+    active_binding_mode: str,
+    campaign_authorization_path: Path | None,
+    run_id: str | None,
+    active_binding: ActiveManifestBinding | None,
+    environment: Mapping[str, str] | None = None,
+) -> tuple[Path, str | None]:
+    """Select the exact transaction-owned staging output, if requested."""
+
+    selected_environment = os.environ if environment is None else environment
+    if TRANSACTION_STAGING_OUTPUT_ENV not in selected_environment:
+        return authorized_output, None
+
+    final_path = _strict_transaction_path(
+        authorized_output,
+        "authorized browser output",
+    )
+    staging_path = _strict_transaction_path(
+        _required_transaction_value(
+            selected_environment,
+            TRANSACTION_STAGING_OUTPUT_ENV,
+        ),
+        "transaction staging output",
+    )
+    if (
+        final_path == staging_path
+        or final_path in staging_path.parents
+        or staging_path in final_path.parents
+    ):
+        raise SmokeError(
+            "transaction staging and authorized output paths overlap"
+        )
+    if staging_path.exists() or staging_path.is_symlink():
+        raise SmokeError("transaction staging output already exists")
+
+    expected_campaign = (
+        "reasoning_browser"
+        if active_binding_mode == "v2"
+        else "aq4_reasoning_browser"
+    )
+    stage = _required_transaction_value(
+        selected_environment,
+        TRANSACTION_STAGE_ENV,
+    )
+    if stage != expected_campaign:
+        raise SmokeError("transaction campaign stage differs")
+    environment_authorization = _strict_transaction_path(
+        _required_transaction_value(
+            selected_environment,
+            TRANSACTION_AUTHORIZATION_ENV,
+        ),
+        "transaction authorization",
+    )
+    environment_claim = _strict_transaction_path(
+        _required_transaction_value(
+            selected_environment,
+            TRANSACTION_CLAIM_ENV,
+        ),
+        "transaction claim",
+    )
+    environment_authorization_sha256 = _required_transaction_value(
+        selected_environment,
+        TRANSACTION_AUTHORIZATION_SHA256_ENV,
+    )
+    environment_claim_sha256 = _required_transaction_value(
+        selected_environment,
+        TRANSACTION_CLAIM_SHA256_ENV,
+    )
+    if (
+        HASH_RE.fullmatch(environment_authorization_sha256) is None
+        or HASH_RE.fullmatch(environment_claim_sha256) is None
+    ):
+        raise SmokeError("transaction authorization hashes are invalid")
+
+    if active_binding_mode == "v2":
+        if (
+            campaign_authorization_path is None
+            or run_id is None
+            or not run_id
+            or active_binding is None
+        ):
+            raise SmokeError("transaction v2 browser binding is incomplete")
+        cli_authorization = _strict_transaction_path(
+            campaign_authorization_path,
+            "CLI campaign authorization",
+        )
+        claim = active_binding.claim
+        if (
+            claim is None
+            or active_binding.campaign_name != expected_campaign
+            or active_binding.run_id != run_id
+            or active_binding.final_path != final_path
+            or cli_authorization != environment_authorization
+            or claim.authorization_path != environment_authorization
+            or claim.path != environment_claim
+            or claim.authorization_sha256
+            != environment_authorization_sha256
+            or claim.sha256 != environment_claim_sha256
+        ):
+            raise SmokeError(
+                "transaction v2 authorization claim or output differs"
+            )
+        return staging_path, run_id
+
+    if active_binding_mode != "legacy" or active_binding is not None:
+        raise SmokeError("transaction browser binding mode differs")
+    if campaign_authorization_path is not None or run_id is not None:
+        raise SmokeError(
+            "legacy transaction browser forbids v2 CLI binding inputs"
+        )
+    try:
+        claim_record = campaign_authorization.load_claim(
+            environment_authorization,
+            now=datetime.now(timezone.utc),
+        )
+        campaign = claim_record.authorization.document["campaigns"][
+            expected_campaign
+        ]
+        derived_run_id = campaign["run_id"]
+        if type(derived_run_id) is not str or not derived_run_id:
+            raise SmokeError("authorized legacy browser run ID differs")
+        campaign_authorization.require_campaign_binding(
+            claim_record,
+            campaign_name=expected_campaign,
+            run_id=derived_run_id,
+            final_path=final_path,
+        )
+    except campaign_authorization.AuthorizationError as error:
+        raise SmokeError(
+            "legacy transaction authorization claim or output differs"
+        ) from error
+    if (
+        claim_record.authorization.snapshot.path != environment_authorization
+        or claim_record.snapshot.path != environment_claim
+        or claim_record.authorization.snapshot.sha256
+        != environment_authorization_sha256
+        or claim_record.snapshot.sha256 != environment_claim_sha256
+    ):
+        raise SmokeError(
+            "legacy transaction authorization claim identity differs"
+        )
+    return staging_path, derived_run_id
 
 
 def _read_regular(path: Path, label: str, maximum: int) -> bytes:
@@ -463,6 +675,65 @@ def _load_served_model_validator() -> ModuleType:
     return module
 
 
+def _load_openwebui_image_verifier() -> ModuleType:
+    existing = sys.modules.get(_OPENWEBUI_IMAGE_VERIFIER_MODULE_NAME)
+    if existing is not None:
+        return existing
+    spec = importlib.util.spec_from_file_location(
+        _OPENWEBUI_IMAGE_VERIFIER_MODULE_NAME,
+        OPENWEBUI_IMAGE_VERIFIER_PATH,
+    )
+    if spec is None or spec.loader is None:
+        raise SmokeError("OpenWebUI image verifier is unavailable")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[_OPENWEBUI_IMAGE_VERIFIER_MODULE_NAME] = module
+    try:
+        spec.loader.exec_module(module)
+    except BaseException:
+        sys.modules.pop(_OPENWEBUI_IMAGE_VERIFIER_MODULE_NAME, None)
+        raise
+    return module
+
+
+def _verify_openwebui_server(
+    *,
+    docker: str,
+    expected_image: str,
+) -> dict[str, Any]:
+    verifier = _load_openwebui_image_verifier()
+    fixed_image = getattr(
+        getattr(verifier, "authorization", None),
+        "FIXED_OPENWEBUI_IMAGE",
+        None,
+    )
+    if expected_image != fixed_image:
+        raise SmokeError("OpenWebUI server image differs from fixed policy")
+    try:
+        identity = verifier.verify_container_image(docker=Path(docker))
+    except Exception as error:
+        raise SmokeError("OpenWebUI server image verification failed") from error
+    observation = {
+        "container_id": getattr(identity, "container_id", None),
+        "image_id": getattr(identity, "image_id", None),
+        "config_image": getattr(identity, "config_image", None),
+        "name": getattr(identity, "name", None),
+        "running": getattr(identity, "running", None),
+        "pid": getattr(identity, "pid", None),
+        "started_at": getattr(identity, "started_at", None),
+    }
+    if (
+        not isinstance(observation["container_id"], str)
+        or not isinstance(observation["image_id"], str)
+        or not isinstance(observation["config_image"], str)
+        or not isinstance(observation["name"], str)
+        or type(observation["running"]) is not bool
+        or type(observation["pid"]) is not int
+        or not isinstance(observation["started_at"], str)
+    ):
+        raise SmokeError("OpenWebUI server image observation differs")
+    return observation
+
+
 def _strict_json(raw: bytes) -> dict[str, Any]:
     def without_duplicates(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
         result: dict[str, Any] = {}
@@ -781,6 +1052,32 @@ def _upgrade_browser_evidence_v4(
     }
 
 
+def _upgrade_browser_evidence_v5(
+    document: dict[str, Any],
+    *,
+    browser_image: str,
+    openwebui_server_before: dict[str, Any],
+    openwebui_server_after: dict[str, Any],
+) -> dict[str, Any]:
+    """Separate the browser runner image from the OpenWebUI server identity."""
+
+    if document.get("schema_version") != BROWSER_EVIDENCE_SCHEMA_V4:
+        raise SmokeError("browser evidence is not the v4 lineage schema")
+    if "browser_image" in document or "openwebui_server" in document:
+        raise SmokeError("v4 browser evidence contains reserved image fields")
+    if openwebui_server_before != openwebui_server_after:
+        raise SmokeError("OpenWebUI server identity changed during browser gate")
+    return {
+        **document,
+        "schema_version": BROWSER_EVIDENCE_SCHEMA_V5,
+        "browser_image": _validate_image(browser_image),
+        "openwebui_server": {
+            "before": dict(openwebui_server_before),
+            "after": dict(openwebui_server_after),
+        },
+    }
+
+
 def _bind_model_identity(
     document: dict[str, Any],
     *,
@@ -935,8 +1232,15 @@ def _publish_v2_output_directory(
     output: Path,
     artifacts: ActiveBindingArtifacts,
     evidence_raw: bytes,
+    *,
+    lineage_final_output: Path | None = None,
 ) -> Path:
-    """Publish the one authorized, immutable browser v2 output directory."""
+    """Publish one immutable browser v2 directory and validate its lineage.
+
+    ``lineage_final_output`` remains the authorized final identity when the
+    locked transaction requires this producer to publish into a private
+    staging path first.
+    """
 
     output.parent.mkdir(parents=True, exist_ok=True)
     try:
@@ -978,7 +1282,7 @@ def _publish_v2_output_directory(
             lineage_root_override=stage,
         )
         if report.get("gate_eligible") is not True:
-            raise SmokeError("browser v4 staged evidence is not gate eligible")
+            raise SmokeError("browser v5 staged evidence is not gate eligible")
         _rename_directory_noreplace(
             parent_descriptor,
             stage.name,
@@ -1023,9 +1327,19 @@ def _publish_v2_output_directory(
                 or file_metadata.st_nlink != 1
             ):
                 raise SmokeError(f"published browser {name} identity differs")
-        published_report = validator.validate(output / BROWSER_EVIDENCE_FILE)
+        published_report = validator.validate(
+            output / BROWSER_EVIDENCE_FILE,
+            lineage_root_override=(
+                output
+                if (
+                    lineage_final_output is not None
+                    and lineage_final_output != output
+                )
+                else None
+            ),
+        )
         if published_report != report:
-            raise SmokeError("published browser v4 validation differs")
+            raise SmokeError("published browser v5 validation differs")
         return output
     except (OSError, SmokeError) as error:
         if isinstance(error, SmokeError):
@@ -1129,10 +1443,23 @@ def _service_command(systemctl: str, action: str, service: str) -> None:
         raise SmokeError("service transition failed")
 
 
+def _rocm_smi_command(rocm_smi: str, *arguments: str) -> list[str]:
+    """Avoid the production ROCm script's ``/usr/bin/env`` shebang."""
+
+    if rocm_smi == CANONICAL_ROCM_SMI:
+        return [
+            CANONICAL_PYTHON,
+            *ROCM_PYTHON_ARGUMENTS,
+            rocm_smi,
+            *arguments,
+        ]
+    return [rocm_smi, *arguments]
+
+
 def _target_gpu_processes(rocm_smi: str) -> list[dict[str, Any]]:
     try:
         result = subprocess.run(
-            [rocm_smi, "--showpids", "--json"],
+            _rocm_smi_command(rocm_smi, "--showpids", "--json"),
             check=False,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
@@ -1352,6 +1679,7 @@ def execute(
     manifest: Path | None,
     openwebui_session_token_file: Path,
     browser_image: str,
+    openwebui_image: str | None = None,
     openwebui_url: str,
     model_id: str,
     model_name: str,
@@ -1387,6 +1715,13 @@ def execute(
         run_id=run_id,
         output=output,
     )
+    publication_output, transaction_run_id = _transaction_publication_output(
+        authorized_output=output,
+        active_binding_mode=active_binding_mode,
+        campaign_authorization_path=campaign_authorization,
+        run_id=run_id,
+        active_binding=active_binding,
+    )
     if active_binding is not None:
         active_binding.observe("preflight")
     manifest_summary = _validate_manifest_identity(selected_manifest, model_id)
@@ -1406,10 +1741,18 @@ def execute(
     v3_source_commit: str | None = None
     v3_identity: dict[str, str] | None = None
     if active_binding is not None:
+        if openwebui_image is None:
+            raise SmokeError(
+                "v2 browser evidence requires the OpenWebUI server image"
+            )
         v3_source_commit, v3_identity = _v3_release_identity(
             selected_manifest,
             manifest_summary,
-            image,
+            _validate_v3_image(openwebui_image),
+        )
+    elif openwebui_image is not None:
+        raise SmokeError(
+            "legacy browser evidence must not claim an unbound OpenWebUI image"
         )
     model_id = _validate_public_text(model_id, "model ID")
     model_name = _validate_public_text(model_name, "model name")
@@ -1507,9 +1850,16 @@ def execute(
         ]
     )
     deadline = time.monotonic() + timeout_seconds
+    openwebui_server_before: dict[str, Any] | None = None
+    openwebui_server_after: dict[str, Any] | None = None
     try:
         if active_binding is not None:
             active_binding.observe("browser-launch")
+            assert openwebui_image is not None
+            openwebui_server_before = _verify_openwebui_server(
+                docker=docker,
+                expected_image=openwebui_image,
+            )
         with tempfile.TemporaryFile() as stdout:
             process = subprocess.Popen(
                 command,
@@ -1547,6 +1897,12 @@ def execute(
                     "browser smoke container failed"
                     + (f": {detail}" if detail else "")
                 )
+            if active_binding is not None:
+                assert openwebui_image is not None
+                openwebui_server_after = _verify_openwebui_server(
+                    docker=docker,
+                    expected_image=openwebui_image,
+                )
             stdout.seek(0)
             raw = stdout.read(MAX_EVIDENCE_BYTES + 1)
     except Exception:
@@ -1570,7 +1926,9 @@ def execute(
     )
     if active_binding is None:
         published_raw = raw.strip() + b"\n"
-        temporary = output.parent / f".{output.name}.validate-{uuid.uuid4().hex}"
+        temporary = publication_output.parent / (
+            f".{publication_output.name}.validate-{uuid.uuid4().hex}"
+        )
         try:
             _atomic_publish(temporary, published_raw)
             report = _load_validator().validate(temporary)
@@ -1580,13 +1938,22 @@ def execute(
         except Exception:
             temporary.unlink(missing_ok=True)
             raise
-        _atomic_publish(output, published_raw)
+        _atomic_publish(publication_output, published_raw)
         return {
             "schema_version": document["schema_version"],
-            "output": os.fspath(output.resolve()),
+            "output": os.fspath(
+                output
+                if transaction_run_id is not None
+                else output.resolve()
+            ),
             "model_id_sha256": document["model_id_sha256"],
             "provider_request_count": document["provider_request_count"],
             "manifest_sha256": manifest_summary["manifest_sha256"],
+            **(
+                {"run_id": transaction_run_id}
+                if transaction_run_id is not None
+                else {}
+            ),
         }
 
     assert v3_source_commit is not None and v3_identity is not None
@@ -1603,6 +1970,14 @@ def execute(
         output=output,
         artifacts=active_artifacts,
     )
+    assert openwebui_server_before is not None
+    assert openwebui_server_after is not None
+    document = _upgrade_browser_evidence_v5(
+        document,
+        browser_image=image,
+        openwebui_server_before=openwebui_server_before,
+        openwebui_server_after=openwebui_server_after,
+    )
     published_raw = (
         json.dumps(
             document,
@@ -1613,16 +1988,25 @@ def execute(
         ).encode("ascii")
         + b"\n"
     )
-    published_output = _publish_v2_output_directory(
-        output,
+    _publish_v2_output_directory(
+        publication_output,
         active_artifacts,
         published_raw,
+        lineage_final_output=output,
     )
     return {
         "schema_version": document["schema_version"],
-        "output": os.fspath(published_output.resolve()),
+        "output": os.fspath(
+            output
+            if transaction_run_id is not None
+            else output.resolve()
+        ),
         "evidence": os.fspath(
-            (published_output / BROWSER_EVIDENCE_FILE).resolve()
+            (
+                output / BROWSER_EVIDENCE_FILE
+                if transaction_run_id is not None
+                else (output / BROWSER_EVIDENCE_FILE).resolve()
+            )
         ),
         "model_id_sha256": document["model_id_sha256"],
         "provider_request_count": document["provider_request_count"],
@@ -1652,6 +2036,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="private OpenWebUI frontend session JWT; not the gateway API key",
     )
     parser.add_argument("--browser-image", required=True)
+    parser.add_argument("--openwebui-image")
     parser.add_argument("--openwebui-url", required=True)
     parser.add_argument("--model-id", required=True)
     parser.add_argument("--model-name", required=True)
@@ -1677,6 +2062,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             manifest=args.manifest,
             openwebui_session_token_file=args.openwebui_session_token_file,
             browser_image=args.browser_image,
+            openwebui_image=args.openwebui_image,
             openwebui_url=args.openwebui_url,
             model_id=args.model_id,
             model_name=args.model_name,

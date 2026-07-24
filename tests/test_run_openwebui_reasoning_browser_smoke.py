@@ -6,7 +6,7 @@ import json
 import os
 import sys
 from pathlib import Path
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
 
 import pytest
 
@@ -60,6 +60,229 @@ def test_v2_dispatch_binds_reasoning_browser_run_and_output(
     assert observed["campaign_name"] == "reasoning_browser"
     assert observed["run_id"] == "reasoning-browser-run"
     assert observed["final_path"] == tmp_path / "browser-output.json"
+
+
+def _transaction_environment(
+    *,
+    stage: str,
+    staging: Path,
+    authorization: Path,
+    claim: Path,
+    authorization_sha256: str = "a" * 64,
+    claim_sha256: str = "b" * 64,
+) -> dict[str, str]:
+    return {
+        TOOL.TRANSACTION_STAGING_OUTPUT_ENV: str(staging),
+        TOOL.TRANSACTION_STAGE_ENV: stage,
+        TOOL.TRANSACTION_AUTHORIZATION_ENV: str(authorization),
+        TOOL.TRANSACTION_CLAIM_ENV: str(claim),
+        TOOL.TRANSACTION_AUTHORIZATION_SHA256_ENV: authorization_sha256,
+        TOOL.TRANSACTION_CLAIM_SHA256_ENV: claim_sha256,
+    }
+
+
+def _v2_transaction_binding(
+    *,
+    final: Path,
+    authorization: Path,
+    claim: Path,
+    run_id: str = "browser-run",
+) -> SimpleNamespace:
+    return SimpleNamespace(
+        campaign_name="reasoning_browser",
+        run_id=run_id,
+        final_path=final,
+        claim=SimpleNamespace(
+            authorization_path=authorization,
+            authorization_sha256="a" * 64,
+            path=claim,
+            sha256="b" * 64,
+        ),
+    )
+
+
+def test_transaction_staging_is_opt_in_and_preserves_browser_default() -> None:
+    output = Path("relative-legacy-browser.json")
+
+    selected, transaction_run_id = TOOL._transaction_publication_output(
+        authorized_output=output,
+        active_binding_mode="legacy",
+        campaign_authorization_path=None,
+        run_id=None,
+        active_binding=None,
+        environment={
+            TOOL.TRANSACTION_STAGE_ENV: "forged-but-not-opted-in",
+            TOOL.TRANSACTION_CLAIM_SHA256_ENV: "not-a-hash",
+        },
+    )
+
+    assert selected == output
+    assert transaction_run_id is None
+
+
+def test_sq8_browser_staging_binds_claim_stage_run_and_final_without_leak(
+    tmp_path: Path,
+) -> None:
+    final = tmp_path / "authorized-browser"
+    staging = tmp_path / "private-browser-stage"
+    authorization = tmp_path / "authorization.json"
+    claim = tmp_path / "claim.json"
+    binding = _v2_transaction_binding(
+        final=final,
+        authorization=authorization,
+        claim=claim,
+    )
+
+    selected, transaction_run_id = TOOL._transaction_publication_output(
+        authorized_output=final,
+        active_binding_mode="v2",
+        campaign_authorization_path=authorization,
+        run_id="browser-run",
+        active_binding=binding,
+        environment=_transaction_environment(
+            stage="reasoning_browser",
+            staging=staging,
+            authorization=authorization,
+            claim=claim,
+        ),
+    )
+
+    assert selected == staging
+    assert transaction_run_id == "browser-run"
+    public_result = {
+        "output": str(final),
+        "evidence": str(final / TOOL.BROWSER_EVIDENCE_FILE),
+        "run_id": transaction_run_id,
+    }
+    assert str(staging) not in json.dumps(public_result, sort_keys=True)
+    assert binding.final_path == final
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "wrong-stage",
+        "wrong-authorization",
+        "wrong-authorization-hash",
+        "wrong-final",
+        "double-slash",
+        "equal",
+        "overlap",
+        "existing",
+    ],
+)
+def test_sq8_browser_staging_rejects_forged_environment_and_paths(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    final = tmp_path / "authorized-browser"
+    staging = tmp_path / "private-browser-stage"
+    authorization = tmp_path / "authorization.json"
+    claim = tmp_path / "claim.json"
+    binding = _v2_transaction_binding(
+        final=final,
+        authorization=authorization,
+        claim=claim,
+    )
+    environment = _transaction_environment(
+        stage="reasoning_browser",
+        staging=staging,
+        authorization=authorization,
+        claim=claim,
+    )
+    if mutation == "wrong-stage":
+        environment[TOOL.TRANSACTION_STAGE_ENV] = "reasoning_release"
+    elif mutation == "wrong-authorization":
+        environment[TOOL.TRANSACTION_AUTHORIZATION_ENV] = str(
+            tmp_path / "forged-authorization.json"
+        )
+    elif mutation == "wrong-authorization-hash":
+        environment[TOOL.TRANSACTION_AUTHORIZATION_SHA256_ENV] = "c" * 64
+    elif mutation == "wrong-final":
+        binding.final_path = tmp_path / "different-final"
+    elif mutation == "double-slash":
+        environment[TOOL.TRANSACTION_STAGING_OUTPUT_ENV] = (
+            f"{tmp_path}//private-browser-stage"
+        )
+    elif mutation == "equal":
+        environment[TOOL.TRANSACTION_STAGING_OUTPUT_ENV] = str(final)
+    elif mutation == "overlap":
+        environment[TOOL.TRANSACTION_STAGING_OUTPUT_ENV] = str(
+            final / "nested-stage"
+        )
+    elif mutation == "existing":
+        staging.mkdir()
+
+    with pytest.raises(TOOL.SmokeError, match="transaction"):
+        TOOL._transaction_publication_output(
+            authorized_output=final,
+            active_binding_mode="v2",
+            campaign_authorization_path=authorization,
+            run_id="browser-run",
+            active_binding=binding,
+            environment=environment,
+        )
+
+
+def test_fresh_aq4_browser_staging_loads_claim_and_derives_run_id(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    final = tmp_path / "authorized-aq4-browser.json"
+    staging = tmp_path / "private-aq4-browser.json"
+    authorization = tmp_path / "authorization.json"
+    claim = tmp_path / "claim.json"
+    record = SimpleNamespace(
+        snapshot=SimpleNamespace(path=claim, sha256="b" * 64),
+        authorization=SimpleNamespace(
+            snapshot=SimpleNamespace(
+                path=authorization,
+                sha256="a" * 64,
+            ),
+            document={
+                "campaigns": {
+                    "aq4_reasoning_browser": {
+                        "run_id": "aq4-browser-run",
+                        "final_path": str(final),
+                    }
+                }
+            },
+        ),
+    )
+    monkeypatch.setattr(
+        TOOL.campaign_authorization,
+        "load_claim",
+        lambda path, **_kwargs: record
+        if path == authorization
+        else pytest.fail("unexpected authorization path"),
+    )
+    environment = _transaction_environment(
+        stage="aq4_reasoning_browser",
+        staging=staging,
+        authorization=authorization,
+        claim=claim,
+    )
+
+    selected, transaction_run_id = TOOL._transaction_publication_output(
+        authorized_output=final,
+        active_binding_mode="legacy",
+        campaign_authorization_path=None,
+        run_id=None,
+        active_binding=None,
+        environment=environment,
+    )
+
+    assert selected == staging
+    assert transaction_run_id == "aq4-browser-run"
+    with pytest.raises(TOOL.SmokeError, match="authorization claim or output"):
+        TOOL._transaction_publication_output(
+            authorized_output=tmp_path / "forged-final.json",
+            active_binding_mode="legacy",
+            campaign_authorization_path=None,
+            run_id=None,
+            active_binding=None,
+            environment=environment,
+        )
 
 
 def digest(value: str) -> str:
@@ -226,6 +449,82 @@ def test_runner_publishes_gate_eligible_evidence_without_a_provider_switch(
     assert all("OPENWEBUI_SWITCH_MODEL_" not in part for part in commands[0])
 
 
+def test_fresh_aq4_runner_publishes_only_to_transaction_staging(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    token = tmp_path / "token"
+    token.write_text(SESSION_JWT + "\n", encoding="ascii")
+    script = tmp_path / "smoke.cjs"
+    script.write_text("console.log('{}')\n", encoding="ascii")
+    final = tmp_path / "authorized-browser.json"
+    staging = tmp_path / "private-stage" / "browser.json"
+    authorization = tmp_path / "authorization.json"
+    claim = tmp_path / "claim.json"
+    model_id = "ullm-qwen3.5-9b-aq4"
+    payload = (json.dumps(evidence(model_id)) + "\n").encode("ascii")
+
+    def fake_popen(_command, *, stdout, **_kwargs):
+        return FakeProcess(stdout, payload)
+
+    monkeypatch.setattr(TOOL.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(
+        TOOL,
+        "_validate_manifest_identity",
+        lambda _path, _model: {
+            "manifest_sha256": "m" * 64,
+            "format_id": "AQ4_0",
+            "worker": {"binary": "/opt/ullm/bin/ullm-aq4-worker"},
+        },
+    )
+    record = SimpleNamespace(
+        snapshot=SimpleNamespace(path=claim, sha256="b" * 64),
+        authorization=SimpleNamespace(
+            snapshot=SimpleNamespace(
+                path=authorization,
+                sha256="a" * 64,
+            ),
+            document={
+                "campaigns": {
+                    "aq4_reasoning_browser": {
+                        "run_id": "fresh-aq4-browser",
+                        "final_path": str(final),
+                    }
+                }
+            },
+        ),
+    )
+    monkeypatch.setattr(
+        TOOL.campaign_authorization,
+        "load_claim",
+        lambda _path, **_kwargs: record,
+    )
+    for name, value in _transaction_environment(
+        stage="aq4_reasoning_browser",
+        staging=staging,
+        authorization=authorization,
+        claim=claim,
+    ).items():
+        monkeypatch.setenv(name, value)
+
+    result = TOOL.execute(
+        output=final,
+        manifest=tmp_path / "manifest.json",
+        openwebui_session_token_file=token,
+        browser_image="sha256:" + "a" * 64,
+        openwebui_url="http://127.0.0.1:3000/",
+        model_id=model_id,
+        model_name="uLLM Qwen3.5 9B AQ4",
+        browser_script=script,
+    )
+
+    assert not final.exists()
+    assert staging.read_bytes() == payload
+    assert result["output"] == str(final)
+    assert result["run_id"] == "fresh-aq4-browser"
+    assert str(staging) not in json.dumps(result, sort_keys=True)
+
+
 def test_legacy_browser_publication_never_replaces_a_raced_file(
     tmp_path: Path,
 ) -> None:
@@ -260,6 +559,52 @@ def test_v2_browser_directory_publication_never_replaces_a_raced_output(
 
     assert marker.read_bytes() == b"preserve"
     assert stage.is_dir()
+
+
+def test_v2_staging_publication_validates_with_actual_lineage_root_override(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    staging = tmp_path / "private-browser-stage"
+    authorized_final = tmp_path / "authorized-browser-final"
+    artifacts = TOOL.ActiveBindingArtifacts(
+        b'{"candidate":true}\n',
+        b'{"observation":true}\n',
+        b'{"binding":true}\n',
+    )
+    calls: list[tuple[Path, Path | None]] = []
+
+    class Validator:
+        @staticmethod
+        def validate(
+            path: Path,
+            *,
+            lineage_root_override: Path | None = None,
+        ) -> dict[str, object]:
+            calls.append((path, lineage_root_override))
+            return {"gate_eligible": True}
+
+    monkeypatch.setattr(TOOL, "_load_validator", lambda: Validator)
+
+    published = TOOL._publish_v2_output_directory(
+        staging,
+        artifacts,
+        b'{"evidence":true}\n',
+        lineage_final_output=authorized_final,
+    )
+
+    assert published == staging
+    assert staging.is_dir()
+    assert not authorized_final.exists()
+    assert len(calls) == 2
+    assert calls[0][1] == calls[0][0].parent
+    assert calls[1] == (
+        staging / TOOL.BROWSER_EVIDENCE_FILE,
+        staging,
+    )
+    assert {
+        entry.name for entry in staging.iterdir()
+    } == TOOL.BROWSER_OUTPUT_FILES_V2
 
 
 def test_active_binding_path_publishes_lineage_bearing_v4_directory(
@@ -394,22 +739,49 @@ def test_active_binding_path_publishes_lineage_bearing_v4_directory(
             },
         },
     )
+    image_policy = TOOL._load_openwebui_image_verifier().authorization
     v3_identity = {
         "manifest_sha256": candidate_sha256,
         "worker_binary_sha256": "2" * 64,
         "tokenizer_sha256": "3" * 64,
-        "openwebui_image": "registry.example/open-webui@sha256:" + "4" * 64,
+        "openwebui_image": image_policy.FIXED_OPENWEBUI_IMAGE,
     }
+    observed_server_images: list[str] = []
+
+    def release_identity(
+        _manifest: Path,
+        _summary: dict[str, object],
+        server_image: str,
+    ) -> tuple[str, dict[str, str]]:
+        observed_server_images.append(server_image)
+        return "5" * 40, v3_identity
+
     monkeypatch.setattr(
         TOOL,
         "_v3_release_identity",
-        lambda *_args: ("5" * 40, v3_identity),
+        release_identity,
     )
 
     def fake_popen(_command, *, stdout, **_kwargs):
         return FakeProcess(stdout, payload)
 
     monkeypatch.setattr(TOOL.subprocess, "Popen", fake_popen)
+    server_checks: list[tuple[str, str]] = []
+    server_observation = {
+        "container_id": "1" * 64,
+        "image_id": image_policy.FIXED_OPENWEBUI_IMAGE.rsplit("@", 1)[1],
+        "config_image": image_policy.FIXED_OPENWEBUI_CONFIG_IMAGE,
+        "name": f"/{image_policy.FIXED_OPENWEBUI_CONTAINER_NAME}",
+        "running": True,
+        "pid": 1234,
+        "started_at": "2026-07-24T00:00:00.000000000Z",
+    }
+
+    def verify_server(*, docker: str, expected_image: str) -> dict[str, object]:
+        server_checks.append((docker, expected_image))
+        return dict(server_observation)
+
+    monkeypatch.setattr(TOOL, "_verify_openwebui_server", verify_server)
     result = TOOL.execute(
         output=output,
         manifest=None,
@@ -420,7 +792,8 @@ def test_active_binding_path_publishes_lineage_bearing_v4_directory(
         campaign_authorization=tmp_path / "authorization.json",
         run_id="browser-run",
         openwebui_session_token_file=token,
-        browser_image=v3_identity["openwebui_image"],
+        browser_image="sha256:" + "a" * 64,
+        openwebui_image=v3_identity["openwebui_image"],
         openwebui_url="http://127.0.0.1:3000/",
         model_id=model_id,
         model_name="uLLM Qwen3 14B SQ8",
@@ -429,9 +802,19 @@ def test_active_binding_path_publishes_lineage_bearing_v4_directory(
 
     evidence_path = output / TOOL.BROWSER_EVIDENCE_FILE
     document = json.loads(evidence_path.read_text(encoding="ascii"))
-    assert result["schema_version"] == TOOL.BROWSER_EVIDENCE_SCHEMA_V4
+    assert result["schema_version"] == TOOL.BROWSER_EVIDENCE_SCHEMA_V5
     assert document["source_commit"] == "5" * 40
     assert document["identity"] == v3_identity
+    assert document["browser_image"] == "sha256:" + "a" * 64
+    assert document["openwebui_server"] == {
+        "before": server_observation,
+        "after": server_observation,
+    }
+    assert observed_server_images == [v3_identity["openwebui_image"]]
+    assert server_checks == [
+        ("docker", v3_identity["openwebui_image"]),
+        ("docker", v3_identity["openwebui_image"]),
+    ]
     assert TOOL._load_validator().validate(evidence_path)["gate_eligible"] is True
     assert stages == list(TOOL.ACTIVE_BINDING_STAGES)
     assert {entry.name for entry in output.iterdir()} == TOOL.BROWSER_OUTPUT_FILES_V2
@@ -460,6 +843,7 @@ def test_runner_cli_allows_switch_arguments_to_be_omitted(tmp_path: Path) -> Non
 
     assert args.switch_model_id is None
     assert args.switch_model_name is None
+    assert args.openwebui_image is None
 
 
 def test_runner_rejects_external_model_binding_mismatch(
@@ -711,12 +1095,27 @@ def test_alternating_r9700_coordinator_serializes_provider_ownership(
 
 
 def test_gpu_owner_probe_accepts_rocm_no_process_output(monkeypatch: pytest.MonkeyPatch) -> None:
+    observed: list[list[str]] = []
+
+    def run(args, **_kwargs):
+        observed.append(args)
+        return TOOL.subprocess.CompletedProcess(
+            args, 0, stdout="", stderr="WARNING: No JSON data to report.\n"
+        )
+
     monkeypatch.setattr(
         TOOL.subprocess,
         "run",
-        lambda *args, **kwargs: TOOL.subprocess.CompletedProcess(
-            args, 0, stdout="", stderr="WARNING: No JSON data to report.\n"
-        ),
+        run,
     )
 
-    assert TOOL._target_gpu_processes("rocm-smi") == []
+    assert TOOL._target_gpu_processes(TOOL.CANONICAL_ROCM_SMI) == []
+    assert observed == [
+        [
+            TOOL.CANONICAL_PYTHON,
+            *TOOL.ROCM_PYTHON_ARGUMENTS,
+            TOOL.CANONICAL_ROCM_SMI,
+            "--showpids",
+            "--json",
+        ]
+    ]

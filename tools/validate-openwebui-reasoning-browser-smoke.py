@@ -14,19 +14,31 @@ from pathlib import Path
 from typing import Any, Sequence
 
 
+TOOLS = Path(__file__).resolve().parent
+if os.fspath(TOOLS) not in sys.path:
+    sys.path.insert(0, os.fspath(TOOLS))
+
+import served_model_campaign_authorization as authorization  # noqa: E402
+
+
 SCHEMA_VERSION_V1 = "ullm.openwebui.reasoning_browser_smoke.v1"
 SCHEMA_VERSION_V2 = "ullm.openwebui.reasoning_browser_smoke.v2"
 SCHEMA_VERSION = SCHEMA_VERSION_V2
 SCHEMA_VERSION_V3 = "ullm.openwebui.reasoning_browser_smoke.v3"
 SCHEMA_VERSION_V4 = "ullm.openwebui.reasoning_browser_smoke.v4"
+SCHEMA_VERSION_V5 = "ullm.openwebui.reasoning_browser_smoke.v5"
 VALIDATOR_SCHEMA_VERSION = "ullm.openwebui.reasoning_browser_smoke_validator.v1"
 VALIDATOR_SCHEMA_VERSION_V2 = "ullm.openwebui.reasoning_browser_smoke_validator.v2"
+VALIDATOR_SCHEMA_VERSION_V3 = "ullm.openwebui.reasoning_browser_smoke_validator.v3"
 MAX_EVIDENCE_BYTES = 1 * 1024 * 1024
 MAX_PROVIDER_REQUESTS = 4
 HASH_RE = re.compile(r"[0-9a-f]{64}\Z")
 COMMIT_RE = re.compile(r"[0-9a-f]{40}\Z")
 IMAGE_RE = re.compile(
     r"[A-Za-z0-9][A-Za-z0-9._/:+-]*@sha256:[0-9a-f]{64}\Z"
+)
+IMMUTABLE_IMAGE_RE = re.compile(
+    r"(?:[A-Za-z0-9][A-Za-z0-9._/:+-]*@)?sha256:[0-9a-f]{64}\Z"
 )
 FORBIDDEN_KEYS = {
     "prompt",
@@ -213,6 +225,68 @@ def _identity(value: Any) -> None:
         raise ValidationError("identity.openwebui_image is not content-addressed")
 
 
+def _openwebui_server(value: Any, identity: dict[str, Any]) -> None:
+    if not isinstance(value, dict) or set(value) != {"before", "after"}:
+        raise ValidationError("openwebui_server fields differ")
+    expected_fields = {
+        "container_id",
+        "image_id",
+        "config_image",
+        "name",
+        "running",
+        "pid",
+        "started_at",
+    }
+    for label in ("before", "after"):
+        observation = value[label]
+        if (
+            not isinstance(observation, dict)
+            or set(observation) != expected_fields
+            or not isinstance(observation["container_id"], str)
+            or re.fullmatch(r"[0-9a-f]{64}", observation["container_id"])
+            is None
+            or not isinstance(observation["image_id"], str)
+            or re.fullmatch(r"sha256:[0-9a-f]{64}", observation["image_id"])
+            is None
+            or not isinstance(observation["config_image"], str)
+            or not observation["config_image"]
+            or len(observation["config_image"].encode("utf-8")) > 1024
+            or not isinstance(observation["name"], str)
+            or not observation["name"].startswith("/")
+            or len(observation["name"].encode("utf-8")) > 256
+            or observation["running"] is not True
+            or type(observation["pid"]) is not int
+            or observation["pid"] <= 0
+            or not isinstance(observation["started_at"], str)
+            or not observation["started_at"]
+            or len(observation["started_at"]) > 128
+            or not observation["started_at"].isascii()
+        ):
+            raise ValidationError(f"openwebui_server.{label} differs")
+    if value["before"] != value["after"]:
+        raise ValidationError("OpenWebUI server identity changed during browser gate")
+    expected_static = {
+        "image_id": authorization.FIXED_OPENWEBUI_IMAGE.rsplit("@", 1)[1],
+        "config_image": authorization.FIXED_OPENWEBUI_CONFIG_IMAGE,
+        "name": f"/{authorization.FIXED_OPENWEBUI_CONTAINER_NAME}",
+        "running": True,
+    }
+    if (
+        identity.get("openwebui_image") != authorization.FIXED_OPENWEBUI_IMAGE
+        or any(
+            {
+                field: value[label][field]
+                for field in expected_static
+            }
+            != expected_static
+            for label in ("before", "after")
+        )
+    ):
+        raise ValidationError(
+            "OpenWebUI server observation differs from fixed identity"
+        )
+
+
 def _integer(value: Any, label: str, *, minimum: int = 0, maximum: int | None = None) -> None:
     if type(value) is not int or value < minimum or (
         maximum is not None and value > maximum
@@ -234,13 +308,23 @@ def _request(value: Any, index: int, *, version: str) -> None:
         "has_reasoning_content_key",
         "assistant_has_reasoning_content",
     }
-    if version in {SCHEMA_VERSION_V2, SCHEMA_VERSION_V3, SCHEMA_VERSION_V4}:
+    if version in {
+        SCHEMA_VERSION_V2,
+        SCHEMA_VERSION_V3,
+        SCHEMA_VERSION_V4,
+        SCHEMA_VERSION_V5,
+    }:
         expected.add("model_id_sha256")
     if not isinstance(value, dict) or set(value) != expected:
         raise ValidationError(f"provider request {index} fields differ")
     _hash(value["sha256"], f"provider request {index}.sha256")
     _integer(value["utf8_bytes"], f"provider request {index}.utf8_bytes", minimum=2)
-    if version in {SCHEMA_VERSION_V2, SCHEMA_VERSION_V3, SCHEMA_VERSION_V4}:
+    if version in {
+        SCHEMA_VERSION_V2,
+        SCHEMA_VERSION_V3,
+        SCHEMA_VERSION_V4,
+        SCHEMA_VERSION_V5,
+    }:
         _hash(value["model_id_sha256"], f"provider request {index}.model_id_sha256")
     if type(value["has_reasoning_content_key"]) is not bool or type(
         value["assistant_has_reasoning_content"]
@@ -624,21 +708,28 @@ def validate(
     switch_cycle = False
     if version == SCHEMA_VERSION_V1:
         expected = expected_v1
-    elif version in {SCHEMA_VERSION_V2, SCHEMA_VERSION_V3, SCHEMA_VERSION_V4}:
+    elif version in {
+        SCHEMA_VERSION_V2,
+        SCHEMA_VERSION_V3,
+        SCHEMA_VERSION_V4,
+        SCHEMA_VERSION_V5,
+    }:
         switch_fields = set(document) & SWITCH_EVIDENCE_FIELDS
         if switch_fields and switch_fields != SWITCH_EVIDENCE_FIELDS:
             raise ValidationError("browser evidence switch fields differ")
         switch_cycle = bool(switch_fields)
         expected = expected_v1 | switch_fields
-        if version in {SCHEMA_VERSION_V3, SCHEMA_VERSION_V4}:
+        if version in {SCHEMA_VERSION_V3, SCHEMA_VERSION_V4, SCHEMA_VERSION_V5}:
             expected |= {"source_commit", "identity"}
-        if version == SCHEMA_VERSION_V4:
+        if version in {SCHEMA_VERSION_V4, SCHEMA_VERSION_V5}:
             expected.add("campaign_lineage")
+        if version == SCHEMA_VERSION_V5:
+            expected |= {"browser_image", "openwebui_server"}
     else:
         expected = set()
     if set(document) != expected:
         raise ValidationError("browser evidence root fields differ")
-    if version in {SCHEMA_VERSION_V3, SCHEMA_VERSION_V4}:
+    if version in {SCHEMA_VERSION_V3, SCHEMA_VERSION_V4, SCHEMA_VERSION_V5}:
         source_commit = document["source_commit"]
         if not isinstance(source_commit, str) or COMMIT_RE.fullmatch(source_commit) is None:
             raise ValidationError("source_commit is not a full lowercase Git commit")
@@ -662,7 +753,12 @@ def validate(
         raise ValidationError("provider request count differs")
     for index, request in enumerate(requests):
         _request(request, index, version=version)
-    if version in {SCHEMA_VERSION_V2, SCHEMA_VERSION_V3, SCHEMA_VERSION_V4}:
+    if version in {
+        SCHEMA_VERSION_V2,
+        SCHEMA_VERSION_V3,
+        SCHEMA_VERSION_V4,
+        SCHEMA_VERSION_V5,
+    }:
         if switch_cycle:
             if document["provider_switch_performed"] is not True:
                 raise ValidationError("provider switch was not performed")
@@ -723,16 +819,35 @@ def validate(
             document,
             lineage_root_override=lineage_root_override,
         )
-        if version == SCHEMA_VERSION_V4
+        if version in {SCHEMA_VERSION_V4, SCHEMA_VERSION_V5}
         else None
     )
-    if lineage_root_override is not None and version != SCHEMA_VERSION_V4:
-        raise ValidationError("lineage root override requires browser evidence v4")
+    if lineage_root_override is not None and version not in {
+        SCHEMA_VERSION_V4,
+        SCHEMA_VERSION_V5,
+    }:
+        raise ValidationError(
+            "lineage root override requires lineage-bearing browser evidence"
+        )
+    if version == SCHEMA_VERSION_V5 and (
+        not isinstance(document["browser_image"], str)
+        or IMMUTABLE_IMAGE_RE.fullmatch(document["browser_image"]) is None
+    ):
+        raise ValidationError("browser_image is not content-addressed")
+    if version == SCHEMA_VERSION_V5:
+        _openwebui_server(
+            document["openwebui_server"],
+            document["identity"],
+        )
     return {
         "schema_version": (
-            VALIDATOR_SCHEMA_VERSION_V2
-            if version == SCHEMA_VERSION_V4
-            else VALIDATOR_SCHEMA_VERSION
+            VALIDATOR_SCHEMA_VERSION_V3
+            if version == SCHEMA_VERSION_V5
+            else (
+                VALIDATOR_SCHEMA_VERSION_V2
+                if version == SCHEMA_VERSION_V4
+                else VALIDATOR_SCHEMA_VERSION
+            )
         ),
         "input_schema_version": version,
         "structurally_valid": True,
