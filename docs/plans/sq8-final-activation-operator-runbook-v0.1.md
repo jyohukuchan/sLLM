@@ -78,6 +78,14 @@ proof route. That future prerequisite requires a GPU/service window and is
 not executed by this runbook. The exact-six `before`, backup, fresh AQ4
 campaigns, and final rollback must all bind the resulting hardened manifest.
 
+The 2026-07-24 read-only follow-up in
+`journal/2026/07/24/aq4-bootstrap-closure-audit.md` confirms the live content
+identity, reconstructs only the historical core release-evidence slot, and
+records the concrete bundle/runtime-closure gaps. The unexecuted root-owned
+SQ8 worker staging commands and corresponding AQ4 asset audit are in
+`docs/plans/sq8-aq4-root-owned-staging-runbook-v0.1.md`. Neither document
+waives this AQ4-to-AQ4 prerequisite.
+
 ## Reviewed operations document
 
 The final tools do not accept command JSON on their command line. The five
