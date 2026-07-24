@@ -2576,6 +2576,7 @@ ACTIVE_BINDING_PHASE_ORDER = (
     "latency",
     "final",
 )
+FIXED_ACTIVE_MANIFEST_PATH = "/etc/ullm/served-models/active.json"
 
 
 def validate_v2_active_manifest_evidence(
@@ -2735,6 +2736,8 @@ def validate_v2_active_manifest_evidence(
             fail("active-manifest observation order/binding differs")
         if candidate_row["path"] != served["source_path"]:
             fail("active-manifest candidate source path differs")
+        if active_row["path"] != FIXED_ACTIVE_MANIFEST_PATH:
+            fail("actual active manifest path differs from fixed production path")
         if candidate_identity is None:
             candidate_identity = candidate_row["identity"]
         elif not json_equal(candidate_row["identity"], candidate_identity):

@@ -12,6 +12,7 @@ import pytest
 
 
 ROOT = Path(__file__).resolve().parents[1]
+FIXED_ACTIVE_MANIFEST_PATH = "/etc/ullm/served-models/active.json"
 TOOL_PATH = ROOT / "tools/prepare-generic-reasoning-release-evidence.py"
 
 
@@ -173,7 +174,7 @@ def write_v2_campaign(
                 "identity": identity,
             },
             "active": {
-                "path": str(root / "active.json"),
+                "path": FIXED_ACTIVE_MANIFEST_PATH,
                 "sha256": candidate_sha256,
                 "identity": identity,
             },
@@ -197,7 +198,7 @@ def write_v2_campaign(
             "sha256": candidate_sha256,
             "bytes": len(candidate_raw),
         },
-        "actual_active_path": str(root / "active.json"),
+        "actual_active_path": FIXED_ACTIVE_MANIFEST_PATH,
         "expected_stages": list(TOOL.REASONING_CAMPAIGN_STAGES),
         "observation_count": len(rows),
         "observations": {

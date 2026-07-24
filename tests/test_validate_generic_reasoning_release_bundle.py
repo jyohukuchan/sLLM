@@ -1669,6 +1669,71 @@ def test_bundle_v2_default_policy_does_not_trust_fixture_claim(
         BUNDLE.validate(bundle)
 
 
+def test_generic_v2_validator_rejects_consistent_nonproduction_active_path(
+    tmp_path: Path,
+) -> None:
+    bundle, _fakes, _report = make_v2_bundle(tmp_path)
+    bundle_document = json.loads(bundle.read_text(encoding="ascii"))
+    release_path = (
+        tmp_path / bundle_document["artifacts"]["release_evidence"]["path"]
+    )
+    release = json.loads(release_path.read_text(encoding="ascii"))
+    output = Path(release["campaign_lineage"]["campaign"]["final_path"])
+    observations_path = output / "active-manifest-observations.jsonl"
+    binding_path = output / "active-manifest-binding.json"
+    arbitrary_path = str(tmp_path / "candidate-copy-active.json")
+
+    rows = [
+        json.loads(line)
+        for line in observations_path.read_text(encoding="ascii").splitlines()
+    ]
+    for row in rows:
+        row["active"]["path"] = arbitrary_path
+    observations_raw = b"".join(
+        (
+            json.dumps(row, separators=(",", ":"), sort_keys=True) + "\n"
+        ).encode("ascii")
+        for row in rows
+    )
+    binding = json.loads(binding_path.read_text(encoding="ascii"))
+    binding["actual_active_path"] = arbitrary_path
+    binding["observations"] = {
+        "artifact": "active-manifest-observations.jsonl",
+        "sha256": hashlib.sha256(observations_raw).hexdigest(),
+        "bytes": len(observations_raw),
+    }
+    binding_raw = (
+        json.dumps(binding, separators=(",", ":"), sort_keys=True) + "\n"
+    ).encode("ascii")
+
+    output.chmod(0o755)
+    for path, raw in (
+        (observations_path, observations_raw),
+        (binding_path, binding_raw),
+    ):
+        path.chmod(0o644)
+        path.write_bytes(raw)
+        path.chmod(0o444)
+        release["campaign_lineage"]["artifacts"][path.name] = {
+            "bytes": len(raw),
+            "sha256": hashlib.sha256(raw).hexdigest(),
+        }
+    release["campaign_lineage"]["artifact_inventory_sha256"] = (
+        RELEASE_FIXTURE.TOOL._artifact_inventory_sha256(
+            release["campaign_lineage"]["artifacts"]
+        )
+    )
+    output.chmod(0o555)
+    release_path.chmod(0o644)
+    write_json(release_path, release)
+
+    with pytest.raises(
+        RELEASE_FIXTURE.TOOL.ValidationError,
+        match="active binding differs",
+    ):
+        RELEASE_FIXTURE.TOOL.validate(release_path)
+
+
 def test_bundle_v2_rejects_claim_outside_injected_registry(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

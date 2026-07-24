@@ -64,6 +64,7 @@ SWITCH_EVIDENCE_FIELDS = {
 CAMPAIGN_LINEAGE_SCHEMA_V2 = "ullm.served_model.campaign_lineage.v2"
 ACTIVE_BINDING_SCHEMA = "ullm.served_model.active_binding.v1"
 ACTIVE_OBSERVATION_SCHEMA = "ullm.served_model.active_manifest_observation.v1"
+FIXED_ACTIVE_MANIFEST_PATH = "/etc/ullm/served-models/active.json"
 BROWSER_EVIDENCE_FILE = "browser-evidence.json"
 BROWSER_LINEAGE_ARTIFACTS = frozenset(
     {
@@ -552,6 +553,7 @@ def _validate_campaign_lineage(
     if (
         binding["schema_version"] != ACTIVE_BINDING_SCHEMA
         or binding["status"] != "complete"
+        or binding["actual_active_path"] != FIXED_ACTIVE_MANIFEST_PATH
         or binding["expected_stages"] != list(ACTIVE_BINDING_STAGES)
         or binding["observation_count"] != len(ACTIVE_BINDING_STAGES)
         or binding["claim"] != claim

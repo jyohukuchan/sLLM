@@ -43,6 +43,7 @@ LIFECYCLE_SCHEMA_VERSION = "ullm.generic_reasoning_lifecycle_evidence.v1"
 CAMPAIGN_LINEAGE_SCHEMA_V2 = "ullm.served_model.campaign_lineage.v2"
 ACTIVE_BINDING_SCHEMA = "ullm.served_model.active_binding.v1"
 ACTIVE_OBSERVATION_SCHEMA = "ullm.served_model.active_manifest_observation.v1"
+FIXED_ACTIVE_MANIFEST_PATH = "/etc/ullm/served-models/active.json"
 REASONING_CAMPAIGN_SCHEMA_V2 = "ullm.generic_reasoning_release_campaign.v2"
 REASONING_CAMPAIGN_STAGES = (
     "preflight",
@@ -624,6 +625,7 @@ def _validate_campaign_lineage(
     if (
         binding["schema_version"] != ACTIVE_BINDING_SCHEMA
         or binding["status"] != "complete"
+        or binding["actual_active_path"] != FIXED_ACTIVE_MANIFEST_PATH
         or binding["expected_stages"] != list(REASONING_CAMPAIGN_STAGES)
         or binding["observation_count"] != len(REASONING_CAMPAIGN_STAGES)
         or binding["claim"] != claim

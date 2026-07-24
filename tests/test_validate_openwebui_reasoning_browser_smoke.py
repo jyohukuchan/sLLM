@@ -87,6 +87,7 @@ def write_v4_evidence(
     tmp_path: Path,
     *,
     schema_version: str = TOOL.SCHEMA_VERSION_V4,
+    active_path: str = TOOL.FIXED_ACTIVE_MANIFEST_PATH,
 ) -> Path:
     if schema_version not in {TOOL.SCHEMA_VERSION_V4, TOOL.SCHEMA_VERSION_V5}:
         raise AssertionError("unsupported lineage fixture schema")
@@ -137,7 +138,7 @@ def write_v4_evidence(
                 "identity": file_identity,
             },
             "active": {
-                "path": str(tmp_path / "active.json"),
+                "path": active_path,
                 "sha256": candidate_sha256,
                 "identity": file_identity,
             },
@@ -161,7 +162,7 @@ def write_v4_evidence(
             "sha256": candidate_sha256,
             "bytes": len(candidate_raw),
         },
-        "actual_active_path": str(tmp_path / "active.json"),
+        "actual_active_path": active_path,
         "expected_stages": list(TOOL.ACTIVE_BINDING_STAGES),
         "observation_count": len(rows),
         "observations": {
@@ -301,6 +302,18 @@ def test_validator_accepts_v4_and_recomputes_full_campaign_lineage(
     assert report["campaign_lineage"]["run_id"] == "reasoning-browser-run"
     assert report["campaign_lineage"]["observation_count"] == 5
     assert report["gate_eligible"] is True
+
+
+def test_validator_rejects_v4_nonproduction_active_path(
+    tmp_path: Path,
+) -> None:
+    path = write_v4_evidence(
+        tmp_path,
+        active_path=str(tmp_path / "candidate-copy-active.json"),
+    )
+
+    with pytest.raises(TOOL.ValidationError, match="active binding differs"):
+        TOOL.validate(path)
 
 
 def test_validator_accepts_v5_with_distinct_browser_and_server_images(

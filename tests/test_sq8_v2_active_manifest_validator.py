@@ -60,7 +60,7 @@ def fixture(tmp_path: Path) -> tuple[object, list[dict[str, object]]]:
     candidate_sha = hashlib.sha256(candidate_raw).hexdigest()
     (tmp_path / "candidate-served-model.json").write_bytes(candidate_raw)
     source_path = str(tmp_path / "source-candidate.json")
-    active_path = str(tmp_path / "actual-active.json")
+    active_path = VALIDATOR.FIXED_ACTIVE_MANIFEST_PATH
     claim = {
         "path": str(tmp_path / "claim.json"),
         "sha256": "6" * 64,
@@ -163,5 +163,22 @@ def test_v2_validator_rejects_stage_or_exact_candidate_byte_drift(
     with pytest.raises(
         VALIDATOR.ValidationError,
         match="bytes differ",
+    ):
+        VALIDATOR.validate_v2_active_manifest_evidence(tmp_path, identity)
+
+
+def test_v2_validator_rejects_consistent_nonproduction_active_path(
+    tmp_path: Path,
+) -> None:
+    identity, rows = fixture(tmp_path)
+    for row in rows:
+        row["active"]["path"] = str(tmp_path / "candidate-copy-active.json")
+    (tmp_path / "active-manifest-observations.jsonl").write_bytes(
+        b"".join(canonical(row) for row in rows)
+    )
+
+    with pytest.raises(
+        VALIDATOR.ValidationError,
+        match="fixed production path",
     ):
         VALIDATOR.validate_v2_active_manifest_evidence(tmp_path, identity)
