@@ -270,12 +270,23 @@ class BackendTests(unittest.TestCase):
                 gate, Path(f"/tmp/{gate}"), self.secrets, self.deployment
             )
             self.assertTrue(BACKEND._is_allowed_command(command))
+            self.assertEqual(
+                command[:4],
+                ("/usr/bin/python3.12", "-I", "-S", "-B"),
+            )
             joined = "\0".join(command)
             self.assertNotIn(original, joined)
             if gate in {"api_contract", "direct_cancel", "latency"}:
                 self.assertIn(str(self.secrets.api_key), command)
             else:
                 self.assertIn(str(self.secrets.openwebui_token), command)
+        self.assertEqual(
+            {
+                BACKEND.COMMAND_ENVIRONMENT["PYTHONNOUSERSITE"],
+                BACKEND.COMMAND_ENVIRONMENT["PYTHONSAFEPATH"],
+            },
+            {"1"},
+        )
 
     def test_runner_kills_and_reaps_group_on_timeout_and_interrupt(self) -> None:
         for process, error_type in (
@@ -406,7 +417,7 @@ class BackendTests(unittest.TestCase):
         failure_commands = [
             command
             for command in runner.commands
-            if "run-openwebui-failure-gate.py" in command[2]
+            if "run-openwebui-failure-gate.py" in command[4]
         ]
         self.assertEqual(len(failure_commands), 1)
         with self.assertRaises(BACKEND.ProductionBackendError):

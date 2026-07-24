@@ -96,16 +96,28 @@ class ProductionIdentitySettings:
     worker_binary: Path
     effective_service_unit: Path
     effective_environment_file: Path
+    transaction_runtime: production.TransactionRuntimeClosure | None = None
 
     def __post_init__(self) -> None:
-        expected = (
-            production.PRODUCTION_REPO_ROOT,
-            production.PRODUCTION_PRODUCT_ROOT,
-            PRODUCTION_TOKENIZER_ROOT,
-            PRODUCTION_WORKER_BINARY,
-            PRODUCTION_EFFECTIVE_SERVICE_UNIT,
-            PRODUCTION_EFFECTIVE_ENVIRONMENT_FILE,
-        )
+        if self.transaction_runtime is None:
+            expected = (
+                production.PRODUCTION_REPO_ROOT,
+                production.PRODUCTION_PRODUCT_ROOT,
+                PRODUCTION_TOKENIZER_ROOT,
+                PRODUCTION_WORKER_BINARY,
+                PRODUCTION_EFFECTIVE_SERVICE_UNIT,
+                PRODUCTION_EFFECTIVE_ENVIRONMENT_FILE,
+            )
+        else:
+            closure = self.transaction_runtime
+            expected = (
+                closure.source_root,
+                closure.product_root,
+                closure.tokenizer_root,
+                closure.worker_binary,
+                PRODUCTION_EFFECTIVE_SERVICE_UNIT,
+                PRODUCTION_EFFECTIVE_ENVIRONMENT_FILE,
+            )
         actual = (
             self.repo_root,
             self.product_root,
@@ -131,6 +143,28 @@ def production_identity_settings() -> ProductionIdentitySettings:
         worker_binary=PRODUCTION_WORKER_BINARY,
         effective_service_unit=PRODUCTION_EFFECTIVE_SERVICE_UNIT,
         effective_environment_file=PRODUCTION_EFFECTIVE_ENVIRONMENT_FILE,
+    )
+
+
+def transaction_identity_settings(
+    settings: production.ProductionPreflightSettings,
+) -> ProductionIdentitySettings:
+    """Translate the manifest-only runtime closure into identity inputs."""
+
+    if (
+        not isinstance(settings, production.ProductionPreflightSettings)
+        or settings.transaction_runtime is None
+    ):
+        fail("transaction identity settings require a runtime closure")
+    closure = settings.transaction_runtime
+    return ProductionIdentitySettings(
+        repo_root=closure.source_root,
+        product_root=closure.product_root,
+        tokenizer_root=closure.tokenizer_root,
+        worker_binary=closure.worker_binary,
+        effective_service_unit=PRODUCTION_EFFECTIVE_SERVICE_UNIT,
+        effective_environment_file=PRODUCTION_EFFECTIVE_ENVIRONMENT_FILE,
+        transaction_runtime=closure,
     )
 
 
@@ -572,11 +606,16 @@ def build_production_identity_preflight(
     identity_probe: identity.IdentityProbe,
     independent_validator: IndependentIdentityValidator,
     served_model_binding: identity.ServedModelCampaignBinding | None = None,
+    settings: ProductionIdentitySettings | None = None,
 ) -> ProductionIdentityPreflight:
     """Build and independently verify one secret-free production identity cache."""
 
     try:
-        settings = production_identity_settings()
+        settings = (
+            production_identity_settings() if settings is None else settings
+        )
+        if not isinstance(settings, ProductionIdentitySettings):
+            fail("production identity settings type differs")
         _validate_forbidden_values(forbidden_values)
         if SHA256_RE.fullmatch(expected_worker_binary_sha256) is None:
             fail("expected worker binary SHA-256 differs")
@@ -733,5 +772,6 @@ __all__ = [
     "build_operational_expectation",
     "build_production_identity_preflight",
     "production_identity_settings",
+    "transaction_identity_settings",
     "production_live_capture_expectation",
 ]

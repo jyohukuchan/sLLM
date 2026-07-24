@@ -42,11 +42,20 @@ GPU_BDF = "0000:47:00.0"
 GPU_UUID = "a8ff7551-0000-1000-80e9-ddefa2d60f55"
 KFD_GPU_ID = 51_545
 AMD_SMI_BIN = "/opt/rocm/bin/amd-smi"
+AMD_SMI_SCRIPT = "/opt/rocm-7.2.1/libexec/amdsmi_cli/amdsmi_cli.py"
 SYSTEMCTL_BIN = "/usr/bin/systemctl"
 DOCKER_BIN = "/usr/bin/docker"
 SUDO_BIN = "/usr/bin/sudo"
 NSENTER_BIN = "/usr/bin/nsenter"
-PYTHON_BIN = "/usr/bin/python3"
+PYTHON_BIN = "/usr/bin/python3.12"
+PYTHON_PREFIX = (PYTHON_BIN, "-I", "-S", "-B")
+AMD_SMI_COMMAND_PREFIX = (
+    PYTHON_BIN,
+    "-E",
+    "-S",
+    "-B",
+    AMD_SMI_SCRIPT,
+)
 EXECUTION_UID = 1000
 EXECUTION_GID = 1000
 OPENWEBUI_CONTAINER_NAME = "open-webui"
@@ -62,6 +71,8 @@ COMMAND_ENVIRONMENT = (
     ("LANG", "C"),
     ("LC_ALL", "C"),
     ("PATH", "/usr/bin:/bin:/opt/rocm/bin"),
+    ("PYTHONNOUSERSITE", "1"),
+    ("PYTHONSAFEPATH", "1"),
     ("SYSTEMD_COLORS", "0"),
     ("SYSTEMD_PAGER", ""),
 )
@@ -535,8 +546,7 @@ class ProductionGatewayNamespaceReader:
             str(EXECUTION_GID),
             "--setuid",
             str(EXECUTION_UID),
-            PYTHON_BIN,
-            "-I",
+            *PYTHON_PREFIX,
             "-c",
             GATEWAY_NAMESPACE_SOURCE,
         )
@@ -672,6 +682,8 @@ class WorkerAcceptanceGpuReader:
             fail("GPU isolation worker PID is invalid")
 
         def legacy_runner(arguments: list[str], label: str) -> bytes:
+            if arguments and arguments[0] == self.amd_smi:
+                arguments = [*AMD_SMI_COMMAND_PREFIX, *arguments[1:]]
             return self.commands.run(
                 tuple(arguments),
                 label=label,
@@ -934,9 +946,13 @@ def _is_read_only_command(arguments: tuple[str, ...]) -> bool:
         "inspect",
     ):
         return CONTAINER_NAME_RE.fullmatch(arguments[3]) is not None
-    if not arguments or arguments[0] != AMD_SMI_BIN:
+    if (
+        len(arguments) <= len(AMD_SMI_COMMAND_PREFIX)
+        or arguments[: len(AMD_SMI_COMMAND_PREFIX)]
+        != AMD_SMI_COMMAND_PREFIX
+    ):
         return False
-    return arguments[1:] in {
+    return arguments[len(AMD_SMI_COMMAND_PREFIX) :] in {
         ("list", "--json"),
         ("process", "--gpu", str(GPU_INDEX), "--general", "--json"),
     }
@@ -956,9 +972,9 @@ def production_read_only_commands(
         {
             _systemd_command(expectation.service_unit),
             _docker_command(expectation.container_name),
-            (amd_smi, "list", "--json"),
+            (*AMD_SMI_COMMAND_PREFIX, "list", "--json"),
             (
-                amd_smi,
+                *AMD_SMI_COMMAND_PREFIX,
                 "process",
                 "--gpu",
                 str(GPU_INDEX),

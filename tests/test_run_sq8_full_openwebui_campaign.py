@@ -698,6 +698,62 @@ class ProductionSafetyPrimitiveTests(unittest.TestCase):
             self.OPENWEBUI_SESSION_JWT,
         )
 
+    def test_fixed_secret_paths_use_production_owner_and_mode_contracts(self):
+        with mock.patch.object(
+            ORCHESTRATOR,
+            "_snapshot_secret_file",
+            return_value=self.API_SECRET,
+        ) as snapshot:
+            self.assertEqual(
+                ORCHESTRATOR.snapshot_api_secret(
+                    ORCHESTRATOR.FIXED_GATEWAY_API_KEY_PATH
+                ),
+                self.API_SECRET,
+            )
+        snapshot.assert_called_once_with(
+            ORCHESTRATOR.FIXED_GATEWAY_API_KEY_PATH,
+            expected_uid=0,
+            expected_gid=1000,
+            expected_mode=0o640,
+            label="API credential",
+        )
+
+        with (
+            mock.patch.object(
+                ORCHESTRATOR,
+                "_snapshot_secret_file",
+                return_value=self.OPENWEBUI_SESSION_JWT,
+            ) as snapshot,
+            mock.patch.object(
+                ORCHESTRATOR,
+                "_open_fixed_session_parent",
+                return_value=(-1, object()),
+            ) as open_parent,
+            mock.patch.object(
+                ORCHESTRATOR,
+                "_revalidate_fixed_session_parent",
+            ) as revalidate_parent,
+        ):
+            self.assertEqual(
+                ORCHESTRATOR.snapshot_openwebui_session_token(
+                    ORCHESTRATOR.FIXED_OPENWEBUI_SESSION_TOKEN_PATH
+                ),
+                self.OPENWEBUI_SESSION_JWT,
+            )
+        snapshot.assert_called_once_with(
+            ORCHESTRATOR.FIXED_OPENWEBUI_SESSION_TOKEN_PATH,
+            expected_uid=0,
+            expected_gid=1000,
+            expected_mode=0o640,
+            label="OpenWebUI session token",
+        )
+        open_parent.assert_called_once_with()
+        revalidate_parent.assert_called_once()
+        self.assertEqual(
+            ORCHESTRATOR.FIXED_OPENWEBUI_SESSION_TOKEN_PATH,
+            Path("/run/ullm-campaign-secrets/openwebui-session.jwt"),
+        )
+
     def test_secret_snapshot_rejects_symlink_mode_owner_and_multiple_lines(self):
         api = self.write_secret("api-key", self.API_SECRET, 0o640)
         symlink = self.root / "api-key-link"
@@ -1387,6 +1443,352 @@ class FullCampaignOrchestratorTests(unittest.TestCase):
             ORCHESTRATOR.main([])
 
 
+class TransactionCampaignBindingTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name)
+        self.final = self.root / "authorized" / "sq8-full"
+        self.stage = self.root / "staging" / "sq8-full"
+        self.final.parent.mkdir()
+        self.stage.parent.mkdir()
+        self.authorization = self.root / "authorization.json"
+        self.claim_path = self.root / "claim.json"
+        self.candidate = self.root / "candidate.json"
+        self.active = self.root / "active.json"
+        self.authorization_sha = "1" * 64
+        self.claim_sha = "2" * 64
+        self.candidate_sha = "3" * 64
+        self.commit = "a" * 40
+        self.tree = "b" * 40
+        self.request = ORCHESTRATOR.ProductionPreparationRequest(
+            self.commit,
+            "4" * 64,
+            "sq8-run",
+            self.final,
+            self.root / "api",
+            self.root / "token",
+            "v2",
+            self.candidate,
+            self.active,
+            self.candidate_sha,
+            self.authorization,
+        )
+        claim = types.SimpleNamespace(
+            authorization_path=self.authorization,
+            authorization_sha256=self.authorization_sha,
+            path=self.claim_path,
+            sha256=self.claim_sha,
+        )
+        self.binding = types.SimpleNamespace(
+            candidate=types.SimpleNamespace(
+                path=self.candidate,
+                sha256=self.candidate_sha,
+                raw=b"candidate\n",
+            ),
+            active_path=self.active,
+            claim=claim,
+            campaign_name="sq8_full",
+            run_id="sq8-run",
+            final_path=self.final,
+        )
+        self.environment = {
+            ORCHESTRATOR.TRANSACTION_STAGING_OUTPUT_ENV: os.fspath(self.stage),
+            ORCHESTRATOR.TRANSACTION_SOURCE_ROOT_ENV: os.fspath(ROOT),
+            ORCHESTRATOR.TRANSACTION_STAGE_ENV: "sq8_full",
+            ORCHESTRATOR.TRANSACTION_AUTHORIZATION_ENV: os.fspath(
+                self.authorization
+            ),
+            ORCHESTRATOR.TRANSACTION_CLAIM_ENV: os.fspath(self.claim_path),
+            ORCHESTRATOR.TRANSACTION_AUTHORIZATION_SHA256_ENV: (
+                self.authorization_sha
+            ),
+            ORCHESTRATOR.TRANSACTION_CLAIM_SHA256_ENV: self.claim_sha,
+            ORCHESTRATOR.TRANSACTION_ACTIVE_MANIFEST_ENV: os.fspath(self.active),
+            ORCHESTRATOR.TRANSACTION_CANDIDATE_MANIFEST_ENV: os.fspath(
+                self.candidate
+            ),
+            ORCHESTRATOR.TRANSACTION_CANDIDATE_SHA256_ENV: self.candidate_sha,
+        }
+
+    def consumed_claim(self, *, commit=None, tree=None):
+        return types.SimpleNamespace(
+            authorization=types.SimpleNamespace(
+                snapshot=types.SimpleNamespace(
+                    path=self.authorization,
+                    sha256=self.authorization_sha,
+                ),
+                document={
+                    "source": {
+                        "commit": self.commit if commit is None else commit,
+                        "tree": self.tree if tree is None else tree,
+                    }
+                },
+            ),
+            snapshot=types.SimpleNamespace(
+                path=self.claim_path,
+                sha256=self.claim_sha,
+            ),
+        )
+
+    def context(self, environment=None, consumed=None):
+        with mock.patch.object(
+            ORCHESTRATOR.campaign_authorization,
+            "load_claim",
+            return_value=self.consumed_claim() if consumed is None else consumed,
+        ):
+            return ORCHESTRATOR._transaction_campaign_context(
+                request=self.request,
+                active_binding=self.binding,
+                environment=self.environment if environment is None else environment,
+            )
+
+    def test_exact_sq8_transaction_uses_staging_but_retains_authorized_lineage(self):
+        context = self.context()
+        self.assertEqual(context.publication_path, self.stage)
+        self.assertEqual(context.source_root, ROOT)
+        self.assertEqual(context.source_commit, self.commit)
+        self.assertEqual(context.source_tree, self.tree)
+        self.assertEqual(self.request.final_path, self.final)
+
+    def test_transaction_rejects_wrong_stage_claim_source_and_path_aliases(self):
+        mutations = {
+            "stage": (ORCHESTRATOR.TRANSACTION_STAGE_ENV, "reasoning_release"),
+            "claim": (ORCHESTRATOR.TRANSACTION_CLAIM_SHA256_ENV, "9" * 64),
+            "source": (
+                ORCHESTRATOR.TRANSACTION_SOURCE_ROOT_ENV,
+                os.fspath(self.root),
+            ),
+            "candidate": (
+                ORCHESTRATOR.TRANSACTION_CANDIDATE_MANIFEST_ENV,
+                os.fspath(self.root / "other.json"),
+            ),
+            "alias": (
+                ORCHESTRATOR.TRANSACTION_STAGING_OUTPUT_ENV,
+                os.fspath(self.stage.parent) + "//sq8-full",
+            ),
+            "equal": (
+                ORCHESTRATOR.TRANSACTION_STAGING_OUTPUT_ENV,
+                os.fspath(self.final),
+            ),
+            "ancestor": (
+                ORCHESTRATOR.TRANSACTION_STAGING_OUTPUT_ENV,
+                os.fspath(self.final.parent),
+            ),
+        }
+        for label, (key, value) in mutations.items():
+            with self.subTest(label=label):
+                environment = dict(self.environment)
+                environment[key] = value
+                with self.assertRaises(ORCHESTRATOR.FullCampaignError):
+                    self.context(environment)
+
+        self.stage.mkdir()
+        with self.assertRaisesRegex(
+            ORCHESTRATOR.FullCampaignError, "already exists"
+        ):
+            self.context()
+
+    def test_transaction_rejects_forged_authorization_source_commit_or_tree(self):
+        for consumed in (
+            self.consumed_claim(commit="c" * 40),
+            self.consumed_claim(tree="not-a-tree"),
+        ):
+            with self.assertRaisesRegex(
+                ORCHESTRATOR.FullCampaignError, "source commit/tree"
+            ):
+                self.context(consumed=consumed)
+
+    def test_archived_default_without_staging_is_unchanged(self):
+        legacy = dataclasses.replace(
+            self.request,
+            active_binding_mode="legacy",
+            candidate_served_model_manifest=None,
+            active_served_model_manifest=None,
+            expected_served_model_manifest_sha256=None,
+            campaign_authorization=None,
+        )
+        self.assertIsNone(
+            ORCHESTRATOR._transaction_campaign_context(
+                request=legacy,
+                active_binding=None,
+                environment={},
+            )
+        )
+
+
+class SystemRuntimeTransactionDispatchTests(unittest.TestCase):
+    def test_reused_runtime_clears_transaction_settings_for_legacy(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            runtime = object.__new__(
+                ORCHESTRATOR.SystemProductionPreparationRuntime
+            )
+            legacy_settings = object()
+            runtime.production_module = types.SimpleNamespace(
+                production_preflight_settings=mock.Mock(
+                    return_value=legacy_settings
+                )
+            )
+            runtime.settings = types.SimpleNamespace(
+                transaction_runtime=object()
+            )
+            request = ORCHESTRATOR.ProductionPreparationRequest(
+                "a" * 40,
+                "b" * 64,
+                "run",
+                root / "final",
+                root / "api",
+                root / "token",
+            )
+
+            runtime.validate_request(request)
+
+            self.assertIs(runtime.settings, legacy_settings)
+
+    def test_v2_runtime_requires_fixed_production_secret_paths(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            runtime = object.__new__(
+                ORCHESTRATOR.SystemProductionPreparationRuntime
+            )
+            runtime.production_module = types.SimpleNamespace()
+            runtime.settings = types.SimpleNamespace(
+                transaction_runtime=None
+            )
+            request = ORCHESTRATOR.ProductionPreparationRequest(
+                "a" * 40,
+                "b" * 64,
+                "run",
+                root / "final",
+                root / "api",
+                root / "token",
+                "v2",
+                root / "candidate",
+                root / "active",
+                "c" * 64,
+                root / "authorization",
+                publication_path=root / "stage",
+                transaction_source_root=ROOT,
+                transaction_source_commit="a" * 40,
+                transaction_source_tree="d" * 40,
+                transaction_candidate_manifest_raw=b"candidate\n",
+            )
+
+            with self.assertRaisesRegex(
+                ORCHESTRATOR.FullCampaignError,
+                "active-manifest request binding",
+            ):
+                runtime.validate_request(request)
+
+    def test_v2_never_materializes_legacy_same_uid_tool_snapshots(self):
+        runtime = object.__new__(
+            ORCHESTRATOR.SystemProductionPreparationRuntime
+        )
+        sealed = mock.Mock()
+        legacy = mock.Mock()
+        sealed.create.return_value = object()
+        runtime.production_module = types.SimpleNamespace(
+            SealedSourcePromotionTools=sealed,
+            HeadPromotionToolSnapshotOwner=legacy,
+        )
+        runtime.settings = types.SimpleNamespace(
+            transaction_runtime=object()
+        )
+        anchor = object()
+
+        result = runtime.create_head_tools(anchor)
+
+        self.assertIs(result, sealed.create.return_value)
+        sealed.create.assert_called_once_with(runtime.settings, anchor)
+        legacy.create.assert_not_called()
+
+    def test_preparation_keeps_authorized_final_and_builds_at_staging(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            final = root / "final"
+            stage = root / "stage"
+            request = ORCHESTRATOR.ProductionPreparationRequest(
+                "a" * 40,
+                "b" * 64,
+                "run",
+                final,
+                root / "api",
+                root / "token",
+                "v2",
+                root / "candidate",
+                root / "active",
+                "c" * 64,
+                root / "authorization",
+            )
+            binding = types.SimpleNamespace(
+                claim=object(),
+                candidate=types.SimpleNamespace(raw=b"candidate\n"),
+            )
+
+            class Runtime(FakePreparationRuntime):
+                def validate_request(self, selected):
+                    self.step("validate")
+                    ORCHESTRATOR._validate_final_destination(
+                        selected.final_path
+                    )
+                    ORCHESTRATOR._validate_final_destination(
+                        selected.publication_path
+                    )
+
+                def build_identity(
+                    self,
+                    request,
+                    anchor,
+                    promotion,
+                    guard,
+                    active_binding,
+                ):
+                    self.step("identity")
+                    self.guard = guard
+                    self.asserted_binding = active_binding
+                    return types.SimpleNamespace(name="identity")
+
+                def build_config(self, selected, identity, resource):
+                    self.step("config")
+                    return ORCHESTRATOR.CampaignConfig(
+                        selected.campaign_output_path,
+                        os.getuid(),
+                        os.getgid(),
+                        BOOT_ID,
+                        ORCHESTRATOR.PidEpoch(
+                            NORMAL_GATEWAY, NORMAL_WORKER
+                        ),
+                    )
+
+            runtime = Runtime()
+            context = ORCHESTRATOR.TransactionCampaignContext(
+                stage,
+                ROOT,
+                "a" * 40,
+                "d" * 40,
+            )
+            with (
+                mock.patch.object(
+                    ORCHESTRATOR,
+                    "optional_v2_binding",
+                    return_value=binding,
+                ),
+                mock.patch.object(
+                    ORCHESTRATOR,
+                    "_transaction_campaign_context",
+                    return_value=context,
+                ),
+                ORCHESTRATOR.PreparedProductionCampaign.create(
+                    request, runtime
+                ) as prepared,
+            ):
+                self.assertEqual(prepared.request.final_path, final)
+                self.assertEqual(prepared.request.publication_path, stage)
+                self.assertEqual(prepared.config.final_path, stage)
+                self.assertIs(runtime.asserted_binding, binding)
+
+
 class FakePreparationOwner:
     def __init__(self, name: str, calls: list[str], *, close_error: bool = False):
         self.name = name
@@ -1610,6 +2012,58 @@ class ProductionPreparationCliTests(unittest.TestCase):
             runtime.calls.index("execute"), runtime.calls.index("close:secret")
         )
         self.assertTrue(executor.prepared.closed)
+
+    def test_transaction_execution_report_never_leaks_private_staging_path(self):
+        stage = self.root / "private-stage"
+
+        class Prepared:
+            def __init__(self, request):
+                self.request = dataclasses.replace(
+                    request, publication_path=stage
+                )
+                self.active_binding = object()
+                self.secret_guard = types.SimpleNamespace(
+                    reject=lambda *_arguments: None
+                )
+                self.closed = False
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_arguments):
+                self.closed = True
+
+            def revalidate(self):
+                return None
+
+        prepared: Prepared | None = None
+
+        def create(request, _runtime):
+            nonlocal prepared
+            prepared = Prepared(request)
+            return prepared
+
+        executor = types.SimpleNamespace(
+            execute=lambda selected: selected.request.campaign_output_path
+        )
+        with mock.patch.object(
+            ORCHESTRATOR.PreparedProductionCampaign,
+            "create",
+            side_effect=create,
+        ):
+            status, stdout, stderr = self.run_main(
+                FakePreparationRuntime(),
+                "--execute",
+                executor,
+            )
+        self.assertEqual((status, stderr), (0, ""))
+        self.assertEqual(
+            json.loads(stdout)["published_path"],
+            os.fspath(self.root / "campaign"),
+        )
+        self.assertNotIn(os.fspath(stage), stdout)
+        assert prepared is not None
+        self.assertTrue(prepared.closed)
 
     def test_execute_failure_and_cleanup_failure_print_no_success(self):
         class FailingExecutor:

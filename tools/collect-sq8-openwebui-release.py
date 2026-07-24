@@ -74,6 +74,23 @@ KFD_GPU_ID = 51_545
 SERVICE_UNIT = "ullm-openai.service"
 DOCKER_BIN = "/usr/bin/docker"
 AMD_SMI_BIN = "/opt/rocm/bin/amd-smi"
+PYTHON_BIN = "/usr/bin/python3.12"
+AMD_SMI_SCRIPT = "/opt/rocm-7.2.1/libexec/amdsmi_cli/amdsmi_cli.py"
+AMD_SMI_COMMAND_PREFIX = (
+    PYTHON_BIN,
+    "-E",
+    "-S",
+    "-B",
+    AMD_SMI_SCRIPT,
+)
+HOST_COMMAND_ENVIRONMENT = {
+    "HOME": "/",
+    "LANG": "C",
+    "LC_ALL": "C",
+    "PATH": "/usr/bin:/bin:/opt/rocm/bin",
+    "PYTHONNOUSERSITE": "1",
+    "PYTHONSAFEPATH": "1",
+}
 HTTP_NETWORK_NAME = "open-webui-network"
 HTTP_NETWORK_SUBNET = "172.20.0.0/16"
 HTTP_NETWORK_GATEWAY = "172.20.0.1"
@@ -3356,18 +3373,25 @@ def run_bounded_command(
 ) -> bytes:
     if not arguments:
         fail(f"{label} command is empty")
+    selected_arguments = list(arguments)
+    if selected_arguments[0] == AMD_SMI_BIN:
+        selected_arguments = [
+            *AMD_SMI_COMMAND_PREFIX,
+            *selected_arguments[1:],
+        ]
     with (
         tempfile.TemporaryFile() as stdout_file,
         tempfile.TemporaryFile() as stderr_file,
     ):
         try:
             process = subprocess.Popen(
-                list(arguments),
+                selected_arguments,
                 cwd=cwd,
                 stdin=subprocess.DEVNULL,
                 stdout=stdout_file,
                 stderr=stderr_file,
                 start_new_session=True,
+                env=HOST_COMMAND_ENVIRONMENT,
             )
             try:
                 code = process.wait(timeout=timeout_seconds)

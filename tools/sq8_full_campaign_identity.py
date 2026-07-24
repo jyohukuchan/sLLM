@@ -21,6 +21,18 @@ from pathlib import Path, PurePosixPath
 from typing import Any, NamedTuple, NoReturn, Protocol, Sequence, cast
 
 
+PYTHON_BIN = "/usr/bin/python3.12"
+PYTHON_PREFIX = (PYTHON_BIN, "-I", "-S", "-B")
+AMD_SMI_SCRIPT = "/opt/rocm-7.2.1/libexec/amdsmi_cli/amdsmi_cli.py"
+AMD_SMI_COMMAND_PREFIX = (
+    PYTHON_BIN,
+    "-E",
+    "-S",
+    "-B",
+    AMD_SMI_SCRIPT,
+)
+
+
 ENVIRONMENT_SCHEMA = "ullm.sq8.full_campaign.environment.v1"
 ENVIRONMENT_SCHEMA_V2 = "ullm.sq8.full_campaign.environment.v2"
 MODEL_IDENTITY_SCHEMA = "ullm.sq8.full_campaign.model_identity.v1"
@@ -1123,7 +1135,12 @@ def _run_bounded_command(
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
-            env={"PATH": "/usr/sbin:/usr/bin:/sbin:/bin", "LC_ALL": "C"},
+            env={
+                "PATH": "/usr/sbin:/usr/bin:/sbin:/bin",
+                "LC_ALL": "C",
+                "PYTHONNOUSERSITE": "1",
+                "PYTHONSAFEPATH": "1",
+            },
             close_fds=True,
         )
         assert process.stdout is not None
@@ -1199,7 +1216,7 @@ class SystemIdentityProbe:
         return _run_bounded_command(("systemctl", "--version"), maximum=64 << 10)
 
     def python_version(self) -> bytes:
-        return _run_bounded_command(("/usr/bin/python3", "--version"), maximum=4096)
+        return _run_bounded_command((*PYTHON_PREFIX, "--version"), maximum=4096)
 
     def rustc_version(self) -> bytes:
         return _run_bounded_command(("/usr/bin/rustc", "--version"), maximum=4096)
@@ -1294,11 +1311,13 @@ class SystemIdentityProbe:
 
     def amd_smi_version(self) -> bytes:
         return _run_bounded_command(
-            ("/opt/rocm/bin/amd-smi", "version"), maximum=64 << 10
+            (*AMD_SMI_COMMAND_PREFIX, "version"), maximum=64 << 10
         )
 
     def amd_smi_list(self) -> bytes:
-        return _run_bounded_command(("/opt/rocm/bin/amd-smi", "list", "--json"))
+        return _run_bounded_command(
+            (*AMD_SMI_COMMAND_PREFIX, "list", "--json")
+        )
 
 
 def _probe_raw(raw: bytes, forbidden_values: tuple[bytes, ...], label: str) -> bytes:

@@ -1065,8 +1065,7 @@ class BoundedDependencyTests(unittest.TestCase):
                 "1000",
                 "--setuid",
                 "1000",
-                "/usr/bin/python3",
-                "-I",
+                *TOOL.PYTHON_PREFIX,
                 "-c",
                 TOOL.GATEWAY_NAMESPACE_SOURCE,
             ],
@@ -1269,9 +1268,9 @@ class WorkerAcceptanceGpuReaderTests(unittest.TestCase):
     def command_fixture(self) -> FakeCommands:
         return FakeCommands(
             extras={
-                ("/opt/rocm/bin/amd-smi", "list", "--json"): [b"list-json"],
+                (*TOOL.AMD_SMI_COMMAND_PREFIX, "list", "--json"): [b"list-json"],
                 (
-                    "/opt/rocm/bin/amd-smi",
+                    *TOOL.AMD_SMI_COMMAND_PREFIX,
                     "process",
                     "--gpu",
                     "2",
@@ -1291,7 +1290,11 @@ class WorkerAcceptanceGpuReaderTests(unittest.TestCase):
         self.assertEqual(result.amd_vram_bytes, 20_000)
         self.assertEqual(result.kfd_vram_bytes, 20_000)
         self.assertEqual(result.positive_kfd_pids, (202,))
-        self.assertEqual([call[0][1] for call in commands.calls], ["list", "process"])
+        prefix_length = len(TOOL.AMD_SMI_COMMAND_PREFIX)
+        self.assertEqual(
+            [call[0][prefix_length] for call in commands.calls],
+            ["list", "process"],
+        )
         self.assertTrue(
             all(
                 call[2] == TOOL.COMMAND_TIMEOUT_SECONDS
@@ -1315,7 +1318,7 @@ class WorkerAcceptanceGpuReaderTests(unittest.TestCase):
             )
             commands = FakeCommands(
                 extras={
-                    (TOOL.AMD_SMI_BIN, "list", "--json"): [
+                    (*TOOL.AMD_SMI_COMMAND_PREFIX, "list", "--json"): [
                         compact(
                             [
                                 {
@@ -1328,7 +1331,7 @@ class WorkerAcceptanceGpuReaderTests(unittest.TestCase):
                         )
                     ],
                     (
-                        TOOL.AMD_SMI_BIN,
+                        *TOOL.AMD_SMI_COMMAND_PREFIX,
                         "process",
                         "--gpu",
                         "2",

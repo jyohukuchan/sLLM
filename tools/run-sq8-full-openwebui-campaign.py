@@ -12,6 +12,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import re
 import secrets
 import stat
 import sys
@@ -39,6 +40,7 @@ from served_model_active_binding import (  # noqa: E402
     OBSERVATIONS_ARTIFACT_NAME,
     optional_v2_binding,
 )
+import served_model_campaign_authorization as campaign_authorization  # noqa: E402
 
 
 PHASE_ORDER = (
@@ -75,6 +77,32 @@ SECRET_COPY_CHUNK_BYTES = 64 << 10
 JWT_SEGMENT_ALPHABET = frozenset(
     "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-"
 )
+FIXED_GATEWAY_API_KEY_PATH = Path("/etc/ullm/openai-api-key")
+FIXED_GATEWAY_API_KEY_UID = 0
+FIXED_GATEWAY_API_KEY_GID = 1000
+FIXED_GATEWAY_API_KEY_MODE = 0o640
+FIXED_OPENWEBUI_SESSION_TOKEN_PATH = Path(
+    "/run/ullm-campaign-secrets/openwebui-session.jwt"
+)
+FIXED_OPENWEBUI_SESSION_PARENT_UID = 0
+FIXED_OPENWEBUI_SESSION_PARENT_GID = 1000
+FIXED_OPENWEBUI_SESSION_PARENT_MODE = 0o750
+FIXED_OPENWEBUI_SESSION_TOKEN_UID = 0
+FIXED_OPENWEBUI_SESSION_TOKEN_GID = 1000
+CAMPAIGN_EXECUTOR_UID = 1000
+CAMPAIGN_EXECUTOR_GID = 1000
+FIXED_OPENWEBUI_SESSION_TOKEN_MODE = 0o640
+TRANSACTION_STAGING_OUTPUT_ENV = "ULLM_CAMPAIGN_STAGING_OUTPUT"
+TRANSACTION_SOURCE_ROOT_ENV = "ULLM_CAMPAIGN_SOURCE_ROOT"
+TRANSACTION_STAGE_ENV = "ULLM_CAMPAIGN_TRANSACTION_STAGE"
+TRANSACTION_AUTHORIZATION_ENV = "ULLM_CAMPAIGN_AUTHORIZATION"
+TRANSACTION_CLAIM_ENV = "ULLM_CAMPAIGN_CLAIM"
+TRANSACTION_AUTHORIZATION_SHA256_ENV = "ULLM_CAMPAIGN_AUTHORIZATION_SHA256"
+TRANSACTION_CLAIM_SHA256_ENV = "ULLM_CAMPAIGN_CLAIM_SHA256"
+TRANSACTION_ACTIVE_MANIFEST_ENV = "ULLM_ACTIVE_MANIFEST"
+TRANSACTION_CANDIDATE_MANIFEST_ENV = "ULLM_CANDIDATE_MANIFEST"
+TRANSACTION_CANDIDATE_SHA256_ENV = "ULLM_CANDIDATE_MANIFEST_SHA256"
+SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
 
 
 class FullCampaignError(RuntimeError):
@@ -83,6 +111,192 @@ class FullCampaignError(RuntimeError):
 
 def fail(message: str) -> NoReturn:
     raise FullCampaignError(message)
+
+
+def _strict_transaction_path(value: str | Path, label: str) -> Path:
+    """Reject lexical aliases before comparing transaction identities."""
+
+    raw = os.fspath(value) if isinstance(value, Path) else value
+    if (
+        type(raw) is not str
+        or not raw
+        or "\x00" in raw
+        or "//" in raw
+        or not raw.startswith("/")
+        or os.path.normpath(raw) != raw
+    ):
+        fail(f"{label} path must be lexically canonical")
+    path = Path(raw)
+    if (
+        not path.is_absolute()
+        or path.anchor != "/"
+        or path.name in {"", ".", ".."}
+        or ".." in path.parts
+        or os.fspath(path) != raw
+        or path != path.absolute()
+    ):
+        fail(f"{label} path must be lexically canonical")
+    return path
+
+
+def _required_transaction_value(
+    environment: Mapping[str, str],
+    name: str,
+) -> str:
+    value = environment.get(name)
+    if type(value) is not str or not value:
+        fail(f"transaction environment {name} is missing")
+    return value
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class TransactionCampaignContext:
+    """Exact transaction bindings which never replace authorization lineage."""
+
+    publication_path: Path
+    source_root: Path
+    source_commit: str
+    source_tree: str
+
+
+def _transaction_campaign_context(
+    *,
+    request: "ProductionPreparationRequest",
+    active_binding: ActiveManifestBinding | None,
+    environment: Mapping[str, str] | None = None,
+) -> TransactionCampaignContext | None:
+    """Validate the locked SQ8 transaction and select its private output."""
+
+    selected = os.environ if environment is None else environment
+    if TRANSACTION_STAGING_OUTPUT_ENV not in selected:
+        return None
+    if (
+        request.active_binding_mode != "v2"
+        or active_binding is None
+        or active_binding.claim is None
+    ):
+        fail("transaction SQ8 full campaign requires a v2 authorization claim")
+
+    final_path = _strict_transaction_path(
+        request.final_path, "authorized SQ8 full output"
+    )
+    publication_path = _strict_transaction_path(
+        _required_transaction_value(selected, TRANSACTION_STAGING_OUTPUT_ENV),
+        "transaction SQ8 full staging output",
+    )
+    if (
+        publication_path == final_path
+        or publication_path in final_path.parents
+        or final_path in publication_path.parents
+    ):
+        fail("transaction staging and authorized output paths overlap")
+    if publication_path.exists() or publication_path.is_symlink():
+        fail("transaction SQ8 full staging output already exists")
+    if _required_transaction_value(selected, TRANSACTION_STAGE_ENV) != "sq8_full":
+        fail("transaction campaign stage differs")
+
+    authorization_path = _strict_transaction_path(
+        _required_transaction_value(selected, TRANSACTION_AUTHORIZATION_ENV),
+        "transaction authorization",
+    )
+    claim_path = _strict_transaction_path(
+        _required_transaction_value(selected, TRANSACTION_CLAIM_ENV),
+        "transaction claim",
+    )
+    authorization_sha256 = _required_transaction_value(
+        selected, TRANSACTION_AUTHORIZATION_SHA256_ENV
+    )
+    claim_sha256 = _required_transaction_value(
+        selected, TRANSACTION_CLAIM_SHA256_ENV
+    )
+    candidate_path = _strict_transaction_path(
+        _required_transaction_value(selected, TRANSACTION_CANDIDATE_MANIFEST_ENV),
+        "transaction candidate manifest",
+    )
+    active_path = _strict_transaction_path(
+        _required_transaction_value(selected, TRANSACTION_ACTIVE_MANIFEST_ENV),
+        "transaction active manifest",
+    )
+    candidate_sha256 = _required_transaction_value(
+        selected, TRANSACTION_CANDIDATE_SHA256_ENV
+    )
+    source_root = _strict_transaction_path(
+        _required_transaction_value(selected, TRANSACTION_SOURCE_ROOT_ENV),
+        "transaction source root",
+    )
+    actual_source_root = Path(__file__).resolve().parents[1]
+    claim = active_binding.claim
+    cli_authorization = (
+        None
+        if request.campaign_authorization is None
+        else _strict_transaction_path(
+            request.campaign_authorization, "CLI campaign authorization"
+        )
+    )
+    cli_candidate = (
+        None
+        if request.candidate_served_model_manifest is None
+        else _strict_transaction_path(
+            request.candidate_served_model_manifest,
+            "CLI candidate manifest",
+        )
+    )
+    cli_active = (
+        None
+        if request.active_served_model_manifest is None
+        else _strict_transaction_path(
+            request.active_served_model_manifest,
+            "CLI active manifest",
+        )
+    )
+    if (
+        SHA256_RE.fullmatch(authorization_sha256) is None
+        or SHA256_RE.fullmatch(claim_sha256) is None
+        or SHA256_RE.fullmatch(candidate_sha256) is None
+        or source_root != actual_source_root
+        or cli_authorization != authorization_path
+        or cli_candidate != candidate_path
+        or cli_active != active_path
+        or active_binding.candidate.path != candidate_path
+        or active_binding.active_path != active_path
+        or active_binding.candidate.sha256 != candidate_sha256
+        or request.expected_served_model_manifest_sha256 != candidate_sha256
+        or active_binding.campaign_name != "sq8_full"
+        or active_binding.run_id != request.run_id
+        or active_binding.final_path != final_path
+        or claim.authorization_path != authorization_path
+        or claim.authorization_sha256 != authorization_sha256
+        or claim.path != claim_path
+        or claim.sha256 != claim_sha256
+    ):
+        fail("transaction SQ8 authorization, source, or manifest binding differs")
+
+    try:
+        consumed = campaign_authorization.load_claim(
+            authorization_path,
+            now=datetime.now(UTC),
+        )
+    except campaign_authorization.AuthorizationError:
+        fail("transaction SQ8 authorization claim cannot be reloaded")
+    source = consumed.authorization.document.get("source")
+    if (
+        consumed.authorization.snapshot.path != authorization_path
+        or consumed.authorization.snapshot.sha256 != authorization_sha256
+        or consumed.snapshot.path != claim_path
+        or consumed.snapshot.sha256 != claim_sha256
+        or type(source) is not dict
+        or set(source) != {"commit", "tree"}
+        or source.get("commit") != request.expected_commit
+        or type(source.get("tree")) is not str
+        or re.fullmatch(r"[0-9a-f]{40}", source["tree"]) is None
+    ):
+        fail("transaction authorization source commit/tree differs")
+    return TransactionCampaignContext(
+        publication_path,
+        source_root,
+        request.expected_commit,
+        source["tree"],
+    )
 
 
 @dataclasses.dataclass(frozen=True)
@@ -226,11 +440,14 @@ def _snapshot_secret_file(
 def snapshot_api_secret(path: Path) -> bytes:
     """Snapshot the root-owned, execution-group-readable gateway credential."""
 
+    fixed = path == FIXED_GATEWAY_API_KEY_PATH
     return _snapshot_secret_file(
         path,
-        expected_uid=0,
-        expected_gid=os.getegid(),
-        expected_mode=0o640,
+        expected_uid=FIXED_GATEWAY_API_KEY_UID if fixed else 0,
+        expected_gid=(
+            FIXED_GATEWAY_API_KEY_GID if fixed else os.getegid()
+        ),
+        expected_mode=FIXED_GATEWAY_API_KEY_MODE,
         label="API credential",
     )
 
@@ -288,16 +505,76 @@ def _validate_openwebui_session_jwt(value: bytes) -> None:
         fail("OpenWebUI session token expires before campaign setup can finish")
 
 
+def _open_fixed_session_parent() -> tuple[int, _StableFileIdentity]:
+    descriptor = -1
+    try:
+        descriptor = os.open(
+            FIXED_OPENWEBUI_SESSION_TOKEN_PATH.parent,
+            _private_directory_flags(),
+        )
+        identity = _StableFileIdentity.from_stat(os.fstat(descriptor))
+        entry = _StableFileIdentity.from_stat(
+            FIXED_OPENWEBUI_SESSION_TOKEN_PATH.parent.lstat()
+        )
+    except OSError:
+        if descriptor >= 0:
+            os.close(descriptor)
+        fail("OpenWebUI session token parent is unavailable")
+    if (
+        identity != entry
+        or not stat.S_ISDIR(identity.mode)
+        or stat.S_IMODE(identity.mode) != FIXED_OPENWEBUI_SESSION_PARENT_MODE
+        or identity.uid != FIXED_OPENWEBUI_SESSION_PARENT_UID
+        or identity.gid != FIXED_OPENWEBUI_SESSION_PARENT_GID
+    ):
+        os.close(descriptor)
+        fail("OpenWebUI session token parent identity differs")
+    return descriptor, identity
+
+
+def _revalidate_fixed_session_parent(
+    descriptor: int,
+    expected: _StableFileIdentity,
+) -> None:
+    try:
+        current = _StableFileIdentity.from_stat(os.fstat(descriptor))
+        entry = _StableFileIdentity.from_stat(
+            FIXED_OPENWEBUI_SESSION_TOKEN_PATH.parent.lstat()
+        )
+    except OSError:
+        fail("OpenWebUI session token parent changed")
+    if current != expected or entry != expected:
+        fail("OpenWebUI session token parent changed")
+
+
 def snapshot_openwebui_session_token(path: Path) -> bytes:
     """Snapshot one private OpenWebUI frontend session JWT."""
 
-    value = _snapshot_secret_file(
-        path,
-        expected_uid=os.geteuid(),
-        expected_gid=os.getegid(),
-        expected_mode=0o600,
-        label="OpenWebUI session token",
-    )
+    fixed = path == FIXED_OPENWEBUI_SESSION_TOKEN_PATH
+    parent_descriptor = -1
+    parent_identity: _StableFileIdentity | None = None
+    if fixed:
+        parent_descriptor, parent_identity = _open_fixed_session_parent()
+    try:
+        value = _snapshot_secret_file(
+            path,
+            expected_uid=(
+                FIXED_OPENWEBUI_SESSION_TOKEN_UID if fixed else os.geteuid()
+            ),
+            expected_gid=(
+                FIXED_OPENWEBUI_SESSION_TOKEN_GID if fixed else os.getegid()
+            ),
+            expected_mode=FIXED_OPENWEBUI_SESSION_TOKEN_MODE if fixed else 0o600,
+            label="OpenWebUI session token",
+        )
+        if fixed:
+            assert parent_identity is not None
+            _revalidate_fixed_session_parent(
+                parent_descriptor, parent_identity
+            )
+    finally:
+        if parent_descriptor >= 0:
+            os.close(parent_descriptor)
     _validate_openwebui_session_jwt(value)
     return value
 
@@ -2057,6 +2334,15 @@ class ProductionPreparationRequest:
     active_served_model_manifest: Path | None = None
     expected_served_model_manifest_sha256: str | None = None
     campaign_authorization: Path | None = None
+    publication_path: Path | None = None
+    transaction_source_root: Path | None = None
+    transaction_source_commit: str | None = None
+    transaction_source_tree: str | None = None
+    transaction_candidate_manifest_raw: bytes | None = None
+
+    @property
+    def campaign_output_path(self) -> Path:
+        return self.final_path if self.publication_path is None else self.publication_path
 
 
 class ProductionPreparationRuntime(Protocol):
@@ -2156,6 +2442,59 @@ class PreparedProductionCampaign:
         request: ProductionPreparationRequest,
         runtime: ProductionPreparationRuntime,
     ) -> "PreparedProductionCampaign":
+        if any(
+            value is not None
+            for value in (
+                request.publication_path,
+                request.transaction_source_root,
+                request.transaction_source_commit,
+                request.transaction_source_tree,
+                request.transaction_candidate_manifest_raw,
+            )
+        ):
+            fail("transaction runtime bindings are producer-internal")
+        active_binding = optional_v2_binding(
+            mode=request.active_binding_mode,
+            candidate_path=request.candidate_served_model_manifest,
+            active_path=request.active_served_model_manifest,
+            expected_sha256=request.expected_served_model_manifest_sha256,
+            expected_stages=PHASE_ORDER,
+            authorization_path=request.campaign_authorization,
+            campaign_name=(
+                "sq8_full" if request.active_binding_mode == "v2" else None
+            ),
+            run_id=(request.run_id if request.active_binding_mode == "v2" else None),
+            final_path=(
+                request.final_path if request.active_binding_mode == "v2" else None
+            ),
+            expected_source_commit=(
+                request.expected_commit
+                if request.active_binding_mode == "v2"
+                else None
+            ),
+        )
+        if (
+            request.active_binding_mode == "v2"
+            and active_binding is not None
+            and active_binding.claim is None
+        ):
+            fail("SQ8 v2 full campaign requires an immutable authorization claim")
+        transaction = _transaction_campaign_context(
+            request=request,
+            active_binding=active_binding,
+        )
+        if transaction is not None:
+            assert active_binding is not None
+            request = dataclasses.replace(
+                request,
+                publication_path=transaction.publication_path,
+                transaction_source_root=transaction.source_root,
+                transaction_source_commit=transaction.source_commit,
+                transaction_source_tree=transaction.source_tree,
+                transaction_candidate_manifest_raw=bytes(
+                    active_binding.candidate.raw
+                ),
+            )
         runtime.validate_request(request)
         lock_owner: Any | None = None
         tool_owner: Any | None = None
@@ -2175,40 +2514,6 @@ class PreparedProductionCampaign:
             finally:
                 api_key = b""
                 token = b""
-            active_binding = optional_v2_binding(
-                mode=request.active_binding_mode,
-                candidate_path=request.candidate_served_model_manifest,
-                active_path=request.active_served_model_manifest,
-                expected_sha256=request.expected_served_model_manifest_sha256,
-                expected_stages=PHASE_ORDER,
-                authorization_path=request.campaign_authorization,
-                campaign_name=(
-                    "sq8_full"
-                    if request.active_binding_mode == "v2"
-                    else None
-                ),
-                run_id=(
-                    request.run_id
-                    if request.active_binding_mode == "v2"
-                    else None
-                ),
-                final_path=(
-                    request.final_path
-                    if request.active_binding_mode == "v2"
-                    else None
-                ),
-                expected_source_commit=(
-                    request.expected_commit
-                    if request.active_binding_mode == "v2"
-                    else None
-                ),
-            )
-            if (
-                request.active_binding_mode == "v2"
-                and active_binding is not None
-                and active_binding.claim is None
-            ):
-                fail("SQ8 v2 full campaign requires an immutable authorization claim")
             identity = runtime.build_identity(
                 request,
                 anchor,
@@ -2220,6 +2525,8 @@ class PreparedProductionCampaign:
             operational = runtime.run_operational(identity, container)
             resource = runtime.build_resource(request, identity, guard)
             config = runtime.build_config(request, identity, resource)
+            if config.final_path != request.campaign_output_path:
+                fail("production campaign output differs from its transaction binding")
             return cls(
                 request,
                 runtime,
@@ -2259,6 +2566,8 @@ class PreparedProductionCampaign:
         if self.active_binding is not None:
             self.active_binding.revalidate_sources()
         _validate_final_destination(self.request.final_path)
+        if self.request.publication_path is not None:
+            _validate_final_destination(self.request.publication_path)
         self.runtime.revalidate_prepared(self)
 
     def report(self) -> dict[str, Any]:
@@ -2388,7 +2697,20 @@ class SystemProductionPreparationRuntime:
             request.campaign_authorization,
         )
         if request.active_binding_mode == "legacy":
-            if any(value is not None for value in v2_values):
+            # A runtime instance may be reused by tests or an embedding caller.
+            # Never let a prior v2 transaction's sealed settings bleed into the
+            # archived legacy path.
+            self.settings = self.production_module.production_preflight_settings()
+            if any(value is not None for value in v2_values) or any(
+                value is not None
+                for value in (
+                    request.publication_path,
+                    request.transaction_source_root,
+                    request.transaction_source_commit,
+                    request.transaction_source_tree,
+                    request.transaction_candidate_manifest_raw,
+                )
+            ):
                 fail("v2 active-manifest inputs require active-binding mode v2")
         elif request.active_binding_mode == "v2":
             if (
@@ -2402,11 +2724,75 @@ class SystemProductionPreparationRuntime:
                     value not in "0123456789abcdef"
                     for value in request.expected_served_model_manifest_sha256
                 )
+                or request.api_key_file != FIXED_GATEWAY_API_KEY_PATH
+                or (
+                    request.openwebui_session_token_file
+                    != FIXED_OPENWEBUI_SESSION_TOKEN_PATH
+                )
             ):
                 fail("v2 active-manifest request binding differs")
+            transaction_values = (
+                request.publication_path,
+                request.transaction_source_root,
+                request.transaction_source_commit,
+                request.transaction_source_tree,
+                request.transaction_candidate_manifest_raw,
+            )
+            if (
+                any(value is None for value in transaction_values)
+                or not isinstance(request.publication_path, Path)
+                or not isinstance(request.transaction_source_root, Path)
+                or type(request.transaction_source_commit) is not str
+                or request.transaction_source_commit != request.expected_commit
+                or type(request.transaction_source_tree) is not str
+                or re.fullmatch(
+                    r"[0-9a-f]{40}", request.transaction_source_tree
+                )
+                is None
+                or type(request.transaction_candidate_manifest_raw) is not bytes
+            ):
+                fail("v2 production requires a sealed transaction runtime")
         else:
             fail("active-manifest binding mode differs")
         _validate_final_destination(request.final_path)
+        if request.active_binding_mode == "v2":
+            assert request.publication_path is not None
+            assert request.transaction_source_root is not None
+            assert request.transaction_source_commit is not None
+            assert request.transaction_source_tree is not None
+            assert request.transaction_candidate_manifest_raw is not None
+            assert request.candidate_served_model_manifest is not None
+            assert request.expected_served_model_manifest_sha256 is not None
+            _validate_final_destination(request.publication_path)
+            self.settings = self.production_module.transaction_preflight_settings(
+                source_root=request.transaction_source_root,
+                source_commit=request.transaction_source_commit,
+                source_tree=request.transaction_source_tree,
+                candidate_manifest_path=request.candidate_served_model_manifest,
+                candidate_manifest_raw=request.transaction_candidate_manifest_raw,
+                candidate_manifest_sha256=(
+                    request.expected_served_model_manifest_sha256
+                ),
+                expected_worker_binary_sha256=(
+                    request.expected_worker_binary_sha256
+                ),
+            )
+            execution_modules = (
+                self.production_module,
+                self.prepare_module,
+                self.identity_module,
+                self.operational_module,
+                self.resource_module,
+                self.collector,
+                self.validator,
+            )
+            if any(
+                Path(module.__file__).resolve().parent != (
+                    request.transaction_source_root / "tools"
+                )
+                for module in execution_modules
+            ):
+                fail("v2 production module escaped the sealed execution source")
 
     def acquire_lock(self) -> CampaignLockOwner:
         return CampaignLockOwner.acquire(
@@ -2419,6 +2805,10 @@ class SystemProductionPreparationRuntime:
         )
 
     def create_head_tools(self, anchor: Any) -> Any:
+        if self.settings.transaction_runtime is not None:
+            return self.production_module.SealedSourcePromotionTools.create(
+                self.settings, anchor
+            )
         return self.production_module.HeadPromotionToolSnapshotOwner.create(
             self.settings, anchor
         )
@@ -2470,6 +2860,13 @@ class SystemProductionPreparationRuntime:
             identity_probe=self.identity_module.SystemIdentityProbe(),
             independent_validator=self.validator,
             served_model_binding=served_model_binding,
+            settings=(
+                None
+                if self.settings.transaction_runtime is None
+                else self.prepare_module.transaction_identity_settings(
+                    self.settings
+                )
+            ),
         )
 
     def discover_container(self) -> Any:
@@ -2523,7 +2920,7 @@ class SystemProductionPreparationRuntime:
         del resource
         boot_id = identity.identity_artifacts.environment["host"]["boot_id"]
         return CampaignConfig(
-            request.final_path,
+            request.campaign_output_path,
             os.geteuid(),
             os.getegid(),
             boot_id,
@@ -2533,6 +2930,8 @@ class SystemProductionPreparationRuntime:
     def revalidate_prepared(self, prepared: PreparedProductionCampaign) -> None:
         # Promotion payload hashing is deliberately cached; all mutable live pins are
         # checked again through identity, operational, and resource composition.
+        if self.settings.transaction_runtime is not None:
+            self.production_module.revalidate_transaction_settings(self.settings)
         captured_utc = prepared.identity.identity_artifacts.environment["captured_utc"]
         rebuilt_identity = self.prepare_module.build_production_identity_preflight(
             prepared.git_anchor,
@@ -2558,6 +2957,13 @@ class SystemProductionPreparationRuntime:
                     authorization_sha256=(
                         prepared.active_binding.claim.authorization_sha256
                     ),
+                )
+            ),
+            settings=(
+                None
+                if self.settings.transaction_runtime is None
+                else self.prepare_module.transaction_identity_settings(
+                    self.settings
                 )
             ),
         )
@@ -2652,7 +3058,7 @@ def main(
             prepared.revalidate()
             if arguments.execute:
                 published = selected_executor.execute(prepared)
-                if published != request.final_path:
+                if published != prepared.request.campaign_output_path:
                     fail("production executor publication path differs")
                 report = {
                     "schema_version": (
@@ -2663,7 +3069,7 @@ def main(
                     "status": "published",
                     "run_id": request.run_id,
                     "git_commit": request.expected_commit,
-                    "published_path": os.fspath(published),
+                    "published_path": os.fspath(prepared.request.final_path),
                 }
             else:
                 report = prepared.report()

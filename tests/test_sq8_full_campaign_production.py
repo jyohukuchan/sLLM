@@ -4,10 +4,12 @@ import dataclasses
 import hashlib
 import importlib.util
 import inspect
+import json
 import os
 import subprocess
 import sys
 import tempfile
+import types
 import unittest
 from pathlib import Path
 from types import ModuleType
@@ -191,7 +193,7 @@ class CallbackRunner(RecordingRunner):
             stdout_limit=stdout_limit,
             stderr_limit=stderr_limit,
         )
-        if len(argv) == 4 and argv[1] == "-B":
+        if tuple(argv[:4]) == PRODUCTION.PRODUCTION_PYTHON_PREFIX:
             self.callback()
         return result
 
@@ -206,7 +208,7 @@ class KeyboardInterruptRunner(RecordingRunner):
         stdout_limit: int,
         stderr_limit: int,
     ) -> Any:
-        if len(argv) == 4 and argv[1] == "-B":
+        if tuple(argv[:4]) == PRODUCTION.PRODUCTION_PYTHON_PREFIX:
             raise KeyboardInterrupt
         return super().run(
             argv,
@@ -249,6 +251,203 @@ class ProductionSettingsTests(unittest.TestCase):
                 Path("/python"),
                 Path("/runtime"),
             )
+
+    def test_v2_settings_derive_runtime_only_from_candidate_manifest(self) -> None:
+        with ProductionFixture() as fixture:
+            tokenizer = fixture.root / "tokenizer"
+            tokenizer.mkdir()
+            tokenizer_file = tokenizer / "tokenizer.json"
+            tokenizer_file.write_bytes(b'{"tokenizer":"sealed"}\n')
+            worker = fixture.root / "ullm-sq8-worker"
+            worker.write_bytes(b"sealed-worker\n")
+            receipt = fixture.product / "promotion.json"
+            receipt.write_bytes(b'{"promotion":"sealed"}\n')
+            package = fixture.product / "package"
+            artifact = fixture.product / "artifact"
+            package.mkdir()
+            artifact.mkdir()
+            package_manifest = package / "manifest.json"
+            artifact_manifest = artifact / "sq_manifest.json"
+            package_manifest.write_bytes(b'{"package":"sealed"}\n')
+            artifact_manifest.write_bytes(b'{"artifact":"sealed"}\n')
+
+            digest = lambda path: hashlib.sha256(path.read_bytes()).hexdigest()
+            commit = "a" * 40
+            tree = "b" * 40
+            document = {
+                "schema_version": "ullm.served_model.v2",
+                "public": {"id": "ullm-qwen3-14b-sq8"},
+                "format": {"format_id": "SQ8_0"},
+                "worker": {
+                    "protocol": "ullm.worker.v2",
+                    "binary": os.fspath(worker),
+                    "binary_sha256": digest(worker),
+                },
+                "product": {
+                    "root": os.fspath(fixture.product),
+                    "package": {
+                        "manifest_path": "package/manifest.json",
+                        "manifest_sha256": digest(package_manifest),
+                    },
+                    "artifact": {
+                        "manifest_path": "artifact/sq_manifest.json",
+                        "manifest_sha256": digest(artifact_manifest),
+                    },
+                },
+                "tokenizer": {
+                    "root": os.fspath(tokenizer),
+                    "files": {"tokenizer.json": digest(tokenizer_file)},
+                },
+                "promotion": {
+                    "source_commit": commit,
+                    "receipt": os.fspath(receipt),
+                    "receipt_sha256": digest(receipt),
+                },
+            }
+            raw = (
+                json.dumps(document, separators=(",", ":"), sort_keys=True)
+                + "\n"
+            ).encode("ascii")
+            candidate = fixture.root / "candidate.json"
+            candidate.write_bytes(raw)
+            candidate_sha = hashlib.sha256(raw).hexdigest()
+            with mock.patch.object(
+                PRODUCTION,
+                "_capture_transaction_source",
+                return_value="c" * 64,
+            ):
+                settings = PRODUCTION.transaction_preflight_settings(
+                    source_root=fixture.repo,
+                    source_commit=commit,
+                    source_tree=tree,
+                    candidate_manifest_path=candidate,
+                    candidate_manifest_raw=raw,
+                    candidate_manifest_sha256=candidate_sha,
+                    expected_worker_binary_sha256=digest(worker),
+                )
+            closure = settings.transaction_runtime
+            assert closure is not None
+            self.assertEqual(settings.repo_root, fixture.repo)
+            self.assertEqual(settings.product_root, fixture.product)
+            self.assertEqual(closure.tokenizer_root, tokenizer)
+            self.assertEqual(closure.worker_binary, worker)
+            self.assertEqual(closure.promotion_receipt, receipt)
+            self.assertEqual(
+                settings.python_executable, Path("/usr/bin/python3.12")
+            )
+            self.assertNotIn(
+                "product_root",
+                inspect.signature(
+                    PRODUCTION.transaction_preflight_settings
+                ).parameters,
+            )
+
+            worker.write_bytes(b"forged-worker\n")
+            with (
+                mock.patch.object(
+                    PRODUCTION,
+                    "_capture_transaction_source",
+                    return_value="c" * 64,
+                ),
+                self.assertRaisesRegex(
+                    PRODUCTION.ProductionPreflightError,
+                    "bytes or identity differ",
+                ),
+            ):
+                PRODUCTION.revalidate_transaction_settings(settings)
+
+            document["product"]["root"] = (
+                os.fspath(fixture.product.parent) + "//product"
+            )
+            alias_raw = (
+                json.dumps(document, separators=(",", ":"), sort_keys=True)
+                + "\n"
+            ).encode("ascii")
+            candidate.write_bytes(alias_raw)
+            with self.assertRaisesRegex(
+                PRODUCTION.ProductionPreflightError, "path is invalid"
+            ):
+                PRODUCTION.transaction_preflight_settings(
+                    source_root=fixture.repo,
+                    source_commit=commit,
+                    source_tree=tree,
+                    candidate_manifest_path=candidate,
+                    candidate_manifest_raw=alias_raw,
+                    candidate_manifest_sha256=hashlib.sha256(alias_raw).hexdigest(),
+                    expected_worker_binary_sha256=digest(worker),
+                )
+
+    def test_transaction_source_requires_exact_tree_clean_detached_and_sealed(self):
+        root = Path("/sealed/source")
+        commit = "a" * 40
+        tree = "b" * 40
+        seal = types.SimpleNamespace(fingerprint_sha256="c" * 64)
+
+        def responses(*, branch=b"HEAD\n", status=b"", observed_tree=None):
+            selected_tree = tree if observed_tree is None else observed_tree
+
+            def read(_root, arguments, _label):
+                if arguments == ("rev-parse", "--show-toplevel"):
+                    return b"/sealed/source\n"
+                if arguments == ("rev-parse", "--verify", "HEAD^{commit}"):
+                    return commit.encode() + b"\n"
+                if arguments == ("rev-parse", "--verify", "HEAD^{tree}"):
+                    return selected_tree.encode() + b"\n"
+                if arguments == ("rev-parse", "--abbrev-ref", "HEAD"):
+                    return branch
+                return status
+
+            return read
+
+        with (
+            mock.patch.object(
+                PRODUCTION.campaign_source_seal,
+                "capture_source_seal",
+                return_value=seal,
+            ),
+            mock.patch.object(
+                PRODUCTION.campaign_source_seal,
+                "require_source_seal",
+                return_value=seal,
+            ),
+            mock.patch.object(
+                PRODUCTION, "_source_git", side_effect=responses()
+            ),
+        ):
+            self.assertEqual(
+                PRODUCTION._capture_transaction_source(
+                    root, expected_commit=commit, expected_tree=tree
+                ),
+                "c" * 64,
+            )
+
+        for label, overrides in (
+            ("detached", {"branch": b"main\n"}),
+            ("clean", {"status": b" M tools/runner.py\x00"}),
+            ("tree", {"observed_tree": "d" * 40}),
+        ):
+            with (
+                self.subTest(label=label),
+                mock.patch.object(
+                    PRODUCTION.campaign_source_seal,
+                    "capture_source_seal",
+                    return_value=seal,
+                ),
+                mock.patch.object(
+                    PRODUCTION.campaign_source_seal,
+                    "require_source_seal",
+                    return_value=seal,
+                ),
+                mock.patch.object(
+                    PRODUCTION,
+                    "_source_git",
+                    side_effect=responses(**overrides),
+                ),
+                self.assertRaises(PRODUCTION.ProductionPreflightError),
+            ):
+                PRODUCTION._capture_transaction_source(
+                    root, expected_commit=commit, expected_tree=tree
+                )
 
 
 class BoundedCommandRunnerTests(unittest.TestCase):
@@ -493,7 +692,7 @@ class PinnedHttpClientSourceTests(unittest.TestCase):
                 captures,
                 [
                     (
-                        "/usr/bin/git",
+                        *PRODUCTION.campaign_source_seal.GIT_COMMAND_PREFIX,
                         "-C",
                         os.fspath(fixture.repo),
                         "cat-file",
@@ -645,11 +844,17 @@ class PromotionValidationTests(unittest.TestCase):
             receipt = self.run_validation(fixture, runner=runner)
             self.assertIs(receipt["full_payloads"], True)
             validation_argv = [
-                argv for argv in runner.argvs if len(argv) == 4 and argv[1] == "-B"
+                argv
+                for argv in runner.argvs
+                if argv[:4] == PRODUCTION.PRODUCTION_PYTHON_PREFIX
             ]
             self.assertEqual(len(validation_argv), 1)
             self.assertNotIn("--metadata-only", validation_argv[0])
             self.assertEqual(validation_argv[0][-1], os.fspath(fixture.product))
+            self.assertEqual(
+                validation_argv[0][:4],
+                ("/usr/bin/python3.12", "-I", "-S", "-B"),
+            )
 
     def test_validation_rejects_stderr_nonzero_and_strict_json_failures(self) -> None:
         cases = {

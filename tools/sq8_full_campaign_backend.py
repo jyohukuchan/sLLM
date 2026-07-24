@@ -19,13 +19,16 @@ from pathlib import Path
 from typing import Any, Literal, NoReturn, Protocol, cast
 
 
-PYTHON_BIN = "/usr/bin/python3"
+PYTHON_BIN = "/usr/bin/python3.12"
+PYTHON_PREFIX = (PYTHON_BIN, "-I", "-S", "-B")
 TOOLS_DIR = Path(__file__).resolve().parent
 COMMAND_ENVIRONMENT = {
     "HOME": "/",
     "LANG": "C",
     "LC_ALL": "C",
     "PATH": "/usr/bin:/bin:/opt/rocm/bin",
+    "PYTHONNOUSERSITE": "1",
+    "PYTHONSAFEPATH": "1",
     "SYSTEMD_COLORS": "0",
     "SYSTEMD_PAGER": "",
 }
@@ -153,8 +156,7 @@ def _base(gate: GateName, output_dir: Path) -> list[str]:
     ):
         fail("gate output directory must be absolute")
     return [
-        PYTHON_BIN,
-        "-I",
+        *PYTHON_PREFIX,
         os.fspath(GATE_SCRIPTS[gate]),
         "--output-dir",
         os.fspath(output_dir),
@@ -373,18 +375,18 @@ class BoundedGateRunner:
 
 def _is_allowed_command(command: tuple[str, ...]) -> bool:
     if (
-        len(command) < 5
+        len(command) < 7
         or any(type(item) is not str or not item or "\x00" in item for item in command)
-        or command[:2] != (PYTHON_BIN, "-I")
+        or command[:4] != PYTHON_PREFIX
     ):
         return False
     try:
-        script = Path(command[2])
+        script = Path(command[4])
     except TypeError:
         return False
     scripts = {path: gate for gate, path in GATE_SCRIPTS.items()}
     gate = scripts.get(script)
-    if gate is None or command[3] != "--output-dir":
+    if gate is None or command[5] != "--output-dir":
         return False
     layouts: Mapping[GateName, tuple[str, ...]] = {
         "api_contract": (
@@ -432,7 +434,7 @@ def _is_allowed_command(command: tuple[str, ...]) -> bool:
             "--expected-epoch-file",
         ),
     }
-    index = 3
+    index = 5
     for option in layouts[gate]:
         if index >= len(command) or command[index] != option:
             return False
@@ -1453,6 +1455,11 @@ def execute_prepared_campaign(prepared: Any, orchestrator: Any) -> Path:
     import sq8_openwebui_stop_gate_ingest as stop_ingest
 
     runtime = prepared.runtime
+    if (
+        runtime.settings.transaction_runtime is not None
+        and TOOLS_DIR.parent != runtime.settings.repo_root
+    ):
+        fail("production backend escaped the sealed execution source")
     collector = runtime.collector
     production = runtime.production_module
     identity_module = runtime.identity_module
@@ -1483,7 +1490,7 @@ def execute_prepared_campaign(prepared: Any, orchestrator: Any) -> Path:
     if type(client_sha) is not str or re.fullmatch(r"[0-9a-f]{64}", client_sha) is None:
         fail("prepared HTTP client SHA-256 differs")
     client_raw = production.read_pinned_http_client_source(
-        production.production_preflight_settings(),
+        runtime.settings,
         prepared.git_anchor,
         expected_sha256=client_sha,
     )
@@ -1525,7 +1532,7 @@ def execute_prepared_campaign(prepared: Any, orchestrator: Any) -> Path:
             prepared.secret_owner,
             client_raw,
             client_sha,
-            production.production_preflight_settings().repo_root,
+            runtime.settings.repo_root,
             collector.AMD_SMI_BIN,
         ),
         system_bridge_factories(collector, campaign_module, orchestrator),
@@ -1534,7 +1541,7 @@ def execute_prepared_campaign(prepared: Any, orchestrator: Any) -> Path:
     binding_inputs = ProductionBindingInputs(
         environment,
         expected_source_role_paths,
-        production.production_preflight_settings().repo_root,
+        runtime.settings.repo_root,
         {
             "api_contract": api_ingest.ApiContractInputBindings,
             "combined": openwebui_ingest.GateInputBindings,
@@ -1592,7 +1599,7 @@ def execute_prepared_campaign(prepared: Any, orchestrator: Any) -> Path:
     validator = runtime.validator.FullCampaignIndependentValidator(
         expected_commit=prepared.request.expected_commit,
         expected_worker_binary_sha256=(prepared.request.expected_worker_binary_sha256),
-        repo_root=production.production_preflight_settings().repo_root,
+        repo_root=runtime.settings.repo_root,
         forbidden_values=prepared.secret_guard.secrets,
         expected_served_model_manifest_sha256=(
             None
