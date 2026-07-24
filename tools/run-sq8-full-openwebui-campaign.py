@@ -203,6 +203,8 @@ def _transaction_campaign_context(
 
     selected = os.environ if environment is None else environment
     if TRANSACTION_STAGING_OUTPUT_ENV not in selected:
+        if request.active_binding_mode == "v2":
+            fail("SQ8 v2 full campaign requires locked transaction staging")
         return None
     if (
         request.active_binding_mode != "v2"
@@ -306,7 +308,7 @@ def _transaction_campaign_context(
         fail("transaction SQ8 authorization, source, or manifest binding differs")
 
     try:
-        consumed = campaign_authorization.load_claim(
+        consumed = campaign_authorization.load_live_claim(
             authorization_path,
             now=datetime.now(UTC),
         )

@@ -1534,7 +1534,7 @@ class TransactionCampaignBindingTests(unittest.TestCase):
     def context(self, environment=None, consumed=None):
         with mock.patch.object(
             ORCHESTRATOR.campaign_authorization,
-            "load_claim",
+            "load_live_claim",
             return_value=self.consumed_claim() if consumed is None else consumed,
         ):
             return ORCHESTRATOR._transaction_campaign_context(
@@ -1615,6 +1615,17 @@ class TransactionCampaignBindingTests(unittest.TestCase):
                 environment={},
             )
         )
+
+    def test_v2_without_transaction_staging_is_rejected(self):
+        with self.assertRaisesRegex(
+            ORCHESTRATOR.FullCampaignError,
+            "requires locked transaction staging",
+        ):
+            ORCHESTRATOR._transaction_campaign_context(
+                request=self.request,
+                active_binding=self.binding,
+                environment={},
+            )
 
 
 class SystemRuntimeTransactionDispatchTests(unittest.TestCase):

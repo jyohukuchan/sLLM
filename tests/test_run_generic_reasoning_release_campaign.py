@@ -132,6 +132,18 @@ def test_transaction_staging_is_opt_in_and_preserves_legacy_default() -> None:
     assert transaction_run_id is None
 
 
+def test_v2_transaction_staging_is_mandatory(tmp_path: Path) -> None:
+    with pytest.raises(TOOL.CampaignError, match="requires locked transaction"):
+        TOOL._transaction_publication_output(
+            authorized_output=tmp_path / "authorized-release",
+            active_binding_mode="v2",
+            campaign_authorization_path=tmp_path / "authorization.json",
+            run_id="release-run",
+            active_binding=SimpleNamespace(),
+            environment={},
+        )
+
+
 def test_sq8_transaction_staging_binds_claim_stage_run_and_final_without_leak(
     tmp_path: Path,
 ) -> None:
@@ -259,7 +271,7 @@ def test_fresh_aq4_transaction_staging_loads_consumed_claim_and_derives_run_id(
     )
     monkeypatch.setattr(
         TOOL.campaign_authorization,
-        "load_claim",
+        "load_live_claim",
         lambda path, **_kwargs: record
         if path == authorization
         else pytest.fail("unexpected authorization path"),
@@ -643,7 +655,7 @@ def test_fresh_aq4_runner_publishes_only_to_transaction_staging(
     )
     monkeypatch.setattr(
         TOOL.campaign_authorization,
-        "load_claim",
+        "load_live_claim",
         lambda _path, **_kwargs: record,
     )
     for name, value in _transaction_environment(

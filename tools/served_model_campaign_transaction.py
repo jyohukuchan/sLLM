@@ -36,6 +36,7 @@ import served_model_campaign_authorization as authorization  # noqa: E402
 import served_model_aq4_restoration_proof as restoration_proof  # noqa: E402
 import served_model_campaign_runtime_seal as campaign_runtime_seal  # noqa: E402
 import served_model_campaign_source_seal as campaign_source_seal  # noqa: E402
+import sq8_serving_promotion as sq8_promotion  # noqa: E402
 from served_model_active_binding import (  # noqa: E402
     FileIdentity,
     MAX_MANIFEST_BYTES,
@@ -999,6 +1000,60 @@ def _promotion_identity(
     return receipt_path, receipt_sha256
 
 
+def _validate_candidate_promotion_receipt(
+    candidate_document: dict[str, Any],
+    *,
+    receipt_path: Path,
+    source_root: Path,
+) -> None:
+    """Require the production SQ8 receipt and its complete evidence binding."""
+
+    try:
+        receipt, evidence = sq8_promotion.validate_receipt(
+            receipt_path,
+            source_root=source_root,
+            verify_live_source=True,
+        )
+        if receipt.get("schema_version") != sq8_promotion.RECEIPT_SCHEMA:
+            raise sq8_promotion.PromotionError(
+                "candidate SQ8 promotion receipt schema differs"
+            )
+        evidence_reference = receipt.get("evidence")
+        profile_reference = evidence.get("profile")
+        worker = candidate_document.get("worker")
+        promotion = candidate_document.get("promotion")
+        if (
+            not isinstance(evidence_reference, dict)
+            or set(evidence_reference) != {"path", "sha256"}
+            or not isinstance(evidence_reference.get("path"), str)
+            or not isinstance(profile_reference, dict)
+            or not isinstance(profile_reference.get("path"), str)
+            or not isinstance(worker, dict)
+            or not isinstance(worker.get("binary"), str)
+            or not isinstance(worker.get("binary_sha256"), str)
+            or not isinstance(promotion, dict)
+            or not isinstance(promotion.get("source_commit"), str)
+        ):
+            raise sq8_promotion.PromotionError(
+                "candidate SQ8 promotion evidence binding differs"
+            )
+        sq8_promotion.validate_generator_binding(
+            evidence_path=receipt_path.parent / evidence_reference["path"],
+            receipt=receipt,
+            receipt_path=receipt_path,
+            profile_path=Path(profile_reference["path"]),
+            source_commit=promotion["source_commit"],
+            source_root=source_root,
+            worker_binary=Path(worker["binary"]),
+            worker_sha256=worker["binary_sha256"],
+            manifest=candidate_document,
+        )
+    except (OSError, sq8_promotion.PromotionError) as error:
+        raise TransactionError(
+            "candidate SQ8 production promotion receipt is invalid"
+        ) from error
+
+
 def _aq4_promotion_identity(
     active_document: dict[str, Any],
     *,
@@ -1827,7 +1882,7 @@ def preflight(
                 source_root=request.source_root,
             )
         else:
-            reloaded_claim = authorization.load_claim(
+            reloaded_claim = authorization.load_live_claim(
                 request.authorization_path,
                 now=selected_now,
                 policy=policy,
@@ -2019,6 +2074,11 @@ def preflight(
         or receipt.sha256 != receipt_sha256
     ):
         raise TransactionError("served-model runtime bytes differ")
+    _validate_candidate_promotion_receipt(
+        candidate_document,
+        receipt_path=receipt_path,
+        source_root=request.source_root,
+    )
     active_summary = validator(active.path)
     candidate_summary = validator(candidate.path)
     active_worker = _summary_identity(
@@ -2840,14 +2900,12 @@ def _exclusive_publish(
         os.fsync(descriptor)
         os.close(descriptor)
         descriptor = -1
-        os.link(
+        _rename_noreplace(
             temporary_name,
             path.name,
-            src_dir_fd=parent,
-            dst_dir_fd=parent,
-            follow_symlinks=False,
+            source_parent_descriptor=parent,
+            destination_parent_descriptor=parent,
         )
-        os.unlink(temporary_name, dir_fd=parent)
         published = True
         os.fsync(parent)
         _verify_parent_descriptor(
@@ -4568,6 +4626,11 @@ def _revalidate_pre_switch(
         "candidate promotion receipt",
         MAX_INPUT_BYTES,
     )
+    _validate_candidate_promotion_receipt(
+        candidate_document,
+        receipt_path=receipt_path,
+        source_root=request.source_root,
+    )
     if (
         active.raw != preflight_result.active.raw
         or candidate.raw != preflight_result.candidate.raw
@@ -4616,6 +4679,9 @@ def _repin_transaction_inputs(
     else:
         aq4_source_commit = preflight_result.aq4_source_commit
         aq4_source_tree = preflight_result.aq4_source_tree
+    # Repinning is also the restoration/recovery primitive.  It must remain
+    # available after the campaign window closes; admission to new campaign
+    # work is enforced by the live preflight and candidate-window guards.
     reloaded = authorization.load_claim(
         request.authorization_path,
         now=now,
@@ -4647,6 +4713,11 @@ def _repin_transaction_inputs(
             receipt_path,
             "candidate promotion receipt",
             MAX_INPUT_BYTES,
+        )
+        _validate_candidate_promotion_receipt(
+            candidate_document,
+            receipt_path=receipt_path,
+            source_root=request.source_root,
         )
     aq4_worker = preflight_result.aq4_worker_binary
     aq4_receipt = preflight_result.aq4_promotion_receipt

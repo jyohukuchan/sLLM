@@ -218,6 +218,7 @@ def test_claim_reference_requires_authorized_campaign_and_candidate(
         claim_registry=claims,
         outcome_registry=outcomes,
         required_uid=os.geteuid(),
+        active_manifest_path=active,
     )
     final = outputs / "sq8-full"
     authorization = tmp_path / "authorization.json"
@@ -356,6 +357,32 @@ def test_claim_reference_requires_authorized_campaign_and_candidate(
             final_path=final,
             authorization_policy=policy,
             authorization_now=lambda: now,
+        )
+    with pytest.raises(BINDING.ActiveBindingError, match="policy"):
+        BINDING.ActiveManifestBinding(
+            candidate_path=candidate,
+            active_path=tmp_path / "candidate-copy-as-active.json",
+            expected_sha256=hashlib.sha256(raw).hexdigest(),
+            expected_stages=("preflight",),
+            authorization_path=authorization,
+            campaign_name="sq8_full",
+            run_id="sq8-run",
+            final_path=final,
+            authorization_policy=policy,
+            authorization_now=lambda: now,
+        )
+    with pytest.raises(BINDING.ActiveBindingError, match="run/output"):
+        BINDING.ActiveManifestBinding(
+            candidate_path=candidate,
+            active_path=active,
+            expected_sha256=hashlib.sha256(raw).hexdigest(),
+            expected_stages=("preflight",),
+            authorization_path=authorization,
+            campaign_name="sq8_full",
+            run_id="sq8-run",
+            final_path=final,
+            authorization_policy=policy,
+            authorization_now=lambda: now + timedelta(hours=2),
         )
     assert stat.S_IMODE(claim.snapshot.path.stat().st_mode) == 0o444
 

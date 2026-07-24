@@ -48,6 +48,137 @@ AQ4_WORKER = hashlib.sha256(AQ4_WORKER_RAW).hexdigest()
 SQ8_WORKER_RAW = b"fixture SQ8 worker binary\n"
 SQ8_WORKER = hashlib.sha256(SQ8_WORKER_RAW).hexdigest()
 ORIGINAL_GIT_COMMAND_PREFIX = TX.GIT_COMMAND_PREFIX
+REAL_VALIDATE_CANDIDATE_PROMOTION_RECEIPT = (
+    TX._validate_candidate_promotion_receipt
+)
+
+
+@pytest.fixture(autouse=True)
+def _stub_complete_sq8_promotion_fixture(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The transaction fixture predates the full serving-promotion fixture."""
+
+    monkeypatch.setattr(
+        TX,
+        "_validate_candidate_promotion_receipt",
+        lambda *_args, **_kwargs: None,
+    )
+
+
+def test_candidate_promotion_validation_rejects_ephemeral_receipt_schema(
+    tmp_path: Path,
+) -> None:
+    receipt = tmp_path / "sq8-promotion.json"
+    receipt.write_text(
+        json.dumps(
+            {
+                "schema_version": (
+                    TX.sq8_promotion.EPHEMERAL_RECEIPT_SCHEMA
+                ),
+                "source_commit": SOURCE_COMMIT,
+                "evidence": {
+                    "path": "missing-evidence.json",
+                    "sha256": "a" * 64,
+                },
+                "product": {},
+            },
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="ascii",
+    )
+    receipt.chmod(0o444)
+    candidate = {
+        "worker": {
+            "binary": str(tmp_path / "ullm-sq8-worker"),
+            "binary_sha256": "b" * 64,
+        },
+        "promotion": {
+            "source_commit": SOURCE_COMMIT,
+            "receipt": str(receipt),
+            "receipt_sha256": digest(receipt.read_bytes()),
+        },
+    }
+
+    with pytest.raises(
+        TX.TransactionError,
+        match="production promotion receipt is invalid",
+    ):
+        REAL_VALIDATE_CANDIDATE_PROMOTION_RECEIPT(
+            candidate,
+            receipt_path=receipt,
+            source_root=tmp_path,
+        )
+
+
+def test_candidate_promotion_validation_binds_receipt_evidence_and_manifest(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    receipt_path = tmp_path / "sq8-promotion.json"
+    profile_path = tmp_path / "profile.json"
+    source_root = tmp_path / "source"
+    worker_path = tmp_path / "ullm-sq8-worker"
+    receipt = {
+        "schema_version": TX.sq8_promotion.RECEIPT_SCHEMA,
+        "source_commit": SOURCE_COMMIT,
+        "evidence": {"path": "evidence.json", "sha256": "a" * 64},
+        "product": {},
+    }
+    evidence = {"profile": {"path": str(profile_path)}}
+    candidate = {
+        "worker": {
+            "binary": str(worker_path),
+            "binary_sha256": "b" * 64,
+        },
+        "promotion": {
+            "source_commit": SOURCE_COMMIT,
+            "receipt": str(receipt_path),
+            "receipt_sha256": "c" * 64,
+        },
+    }
+    calls: dict[str, object] = {}
+
+    def validate_receipt(path: Path, **kwargs: object) -> object:
+        calls["receipt"] = (path, kwargs)
+        return receipt, evidence
+
+    def validate_generator_binding(**kwargs: object) -> None:
+        calls["generator"] = kwargs
+
+    monkeypatch.setattr(
+        TX.sq8_promotion,
+        "validate_receipt",
+        validate_receipt,
+    )
+    monkeypatch.setattr(
+        TX.sq8_promotion,
+        "validate_generator_binding",
+        validate_generator_binding,
+    )
+
+    REAL_VALIDATE_CANDIDATE_PROMOTION_RECEIPT(
+        candidate,
+        receipt_path=receipt_path,
+        source_root=source_root,
+    )
+
+    assert calls["receipt"] == (
+        receipt_path,
+        {
+            "source_root": source_root,
+            "verify_live_source": True,
+        },
+    )
+    generator = calls["generator"]
+    assert generator["evidence_path"] == tmp_path / "evidence.json"
+    assert generator["receipt"] is receipt
+    assert generator["profile_path"] == profile_path
+    assert generator["source_root"] == source_root
+    assert generator["worker_binary"] == worker_path
+    assert generator["manifest"] is candidate
 
 
 def digest(raw: bytes) -> str:
@@ -1552,6 +1683,54 @@ def test_read_only_preflight_does_not_claim_or_write_backup(tmp_path: Path) -> N
     assert not fixture.backup.exists()
 
 
+def test_preflight_and_repin_revalidate_candidate_production_promotion(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fixture = Fixture(tmp_path)
+    calls: list[tuple[Path, Path]] = []
+
+    def validate(
+        _candidate: dict[str, object],
+        *,
+        receipt_path: Path,
+        source_root: Path,
+    ) -> None:
+        calls.append((receipt_path, source_root))
+
+    monkeypatch.setattr(
+        TX,
+        "_validate_candidate_promotion_receipt",
+        validate,
+    )
+    runner = Runner(fixture)
+    pinned = TX.preflight(
+        fixture.request,
+        now=NOW,
+        policy=fixture.policy,
+        validator=fixture.validator,
+        runner=runner,
+    )
+    claim = AUTH.claim_authorization(
+        fixture.authorization_path,
+        now=NOW,
+        policy=fixture.policy,
+    )
+    TX._repin_transaction_inputs(
+        fixture.request,
+        claim,
+        pinned,
+        policy=fixture.policy,
+        runner=runner,
+        now=NOW,
+    )
+
+    assert calls == [
+        (fixture.receipt, fixture.source),
+        (fixture.receipt, fixture.source),
+    ]
+
+
 def test_docker_wrapper_command_binding_rejects_route_local_bypasses(
     tmp_path: Path,
 ) -> None:
@@ -2562,6 +2741,72 @@ def test_backup_publication_failure_is_restored_and_recorded(
     assert outcome["failure_stage"] == "backup"
     assert outcome["status"] == "failed_restored"
     assert fixture.active.read_bytes() == fixture.aq4_raw
+
+
+def test_backup_publication_is_single_link_after_rename_boundary_fault(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    parent = tmp_path / "backup"
+    parent.mkdir(mode=0o700)
+    destination = parent / "aq4.json"
+    raw = b'{"backup":"aq4"}\n'
+    real_rename = TX._rename_noreplace
+
+    def rename_then_fail(*args: object, **kwargs: object) -> None:
+        real_rename(*args, **kwargs)
+        raise TX.TransactionError("injected fault immediately after rename")
+
+    monkeypatch.setattr(TX, "_rename_noreplace", rename_then_fail)
+    with pytest.raises(TX.TransactionError, match="immediately after rename"):
+        TX._exclusive_publish(
+            destination,
+            raw,
+            mode=0o444,
+            required_uid=os.geteuid(),
+        )
+
+    metadata = destination.stat()
+    assert destination.read_bytes() == raw
+    assert stat.S_IMODE(metadata.st_mode) == 0o444
+    assert metadata.st_nlink == 1
+    assert not tuple(parent.glob(".*.tmp"))
+    assert TX._read_input(
+        destination,
+        "authorized AQ4 backup",
+        TX.MAX_MANIFEST_BYTES,
+    ).raw == raw
+
+
+def test_backup_publication_is_single_link_at_parent_fsync_fault(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    parent = tmp_path / "backup"
+    parent.mkdir(mode=0o700)
+    destination = parent / "aq4.json"
+    raw = b'{"backup":"aq4"}\n'
+    real_fsync = TX.os.fsync
+
+    def fail_directory_fsync(descriptor: int) -> None:
+        if stat.S_ISDIR(os.fstat(descriptor).st_mode):
+            raise OSError("injected parent fsync fault")
+        real_fsync(descriptor)
+
+    monkeypatch.setattr(TX.os, "fsync", fail_directory_fsync)
+    with pytest.raises(OSError, match="parent fsync fault"):
+        TX._exclusive_publish(
+            destination,
+            raw,
+            mode=0o444,
+            required_uid=os.geteuid(),
+        )
+
+    metadata = destination.stat()
+    assert destination.read_bytes() == raw
+    assert stat.S_IMODE(metadata.st_mode) == 0o444
+    assert metadata.st_nlink == 1
+    assert not tuple(parent.glob(".*.tmp"))
 
 
 def test_candidate_replace_failure_runs_exact_restore_path(

@@ -223,6 +223,10 @@ def _transaction_publication_output(
 
     selected_environment = os.environ if environment is None else environment
     if TRANSACTION_STAGING_OUTPUT_ENV not in selected_environment:
+        if active_binding_mode == "v2":
+            raise CampaignError(
+                "v2 campaign requires locked transaction staging"
+            )
         return authorized_output, None
 
     final_path = _strict_transaction_path(
@@ -323,7 +327,7 @@ def _transaction_publication_output(
             "legacy transaction campaign forbids v2 CLI binding inputs"
         )
     try:
-        claim_record = campaign_authorization.load_claim(
+        claim_record = campaign_authorization.load_live_claim(
             environment_authorization,
             now=datetime.now(timezone.utc),
         )

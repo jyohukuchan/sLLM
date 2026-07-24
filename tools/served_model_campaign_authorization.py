@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import ctypes
+import errno
 import hashlib
 import json
 import os
@@ -49,6 +51,7 @@ FIXED_BROWSER_IMAGE = (
 )
 FIXED_OPENWEBUI_CONFIG_IMAGE = "ullm/open-webui:0.9.4-ullm.1"
 FIXED_OPENWEBUI_CONTAINER_NAME = "open-webui"
+RENAME_NOREPLACE = 1
 MAX_DOCUMENT_BYTES = 1_048_576
 HASH_RE = re.compile(r"[0-9a-f]{64}\Z")
 GIT_OBJECT_RE = re.compile(r"[0-9a-f]{40}\Z")
@@ -1715,18 +1718,13 @@ def _publish_no_replace(
         os.fsync(descriptor)
         os.close(descriptor)
         descriptor = -1
-        try:
-            os.link(
-                temporary,
-                absolute.name,
-                src_dir_fd=parent,
-                dst_dir_fd=parent,
-                follow_symlinks=False,
-            )
-        except FileExistsError:
-            raise
+        _rename_noreplace_at(
+            parent,
+            temporary,
+            absolute.name,
+            label=label,
+        )
         published = True
-        os.unlink(temporary, dir_fd=parent)
         os.fsync(parent)
         verification_parent = _open_directory(
             parent_path,
@@ -1761,6 +1759,63 @@ def _publish_no_replace(
         if descriptor >= 0:
             os.close(descriptor)
         os.close(parent)
+
+
+def _rename_noreplace_at(
+    parent_descriptor: int,
+    source_name: str,
+    destination_name: str,
+    *,
+    label: str,
+) -> None:
+    """Commit one temporary name without an intermediate hard-link state."""
+
+    if (
+        type(parent_descriptor) is not int
+        or parent_descriptor < 0
+        or not source_name
+        or not destination_name
+        or "/" in source_name
+        or "/" in destination_name
+        or "\x00" in source_name
+        or "\x00" in destination_name
+    ):
+        raise AuthorizationError(f"{label} publication names are invalid")
+    try:
+        function = ctypes.CDLL(None, use_errno=True).renameat2
+    except (AttributeError, OSError) as error:
+        raise AuthorizationError(
+            "renameat2(RENAME_NOREPLACE) is unavailable"
+        ) from error
+    function.argtypes = (
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_uint,
+    )
+    function.restype = ctypes.c_int
+    ctypes.set_errno(0)
+    result = function(
+        parent_descriptor,
+        os.fsencode(source_name),
+        parent_descriptor,
+        os.fsencode(destination_name),
+        RENAME_NOREPLACE,
+    )
+    if result == 0:
+        return
+    error_number = ctypes.get_errno()
+    if error_number in {errno.EEXIST, errno.ENOTEMPTY}:
+        raise FileExistsError(destination_name)
+    if error_number in {errno.ENOSYS, errno.EINVAL, errno.EOPNOTSUPP}:
+        message = "renameat2(RENAME_NOREPLACE) is unsupported"
+    else:
+        message = f"{label} publication failed"
+    raise AuthorizationError(message) from OSError(
+        error_number,
+        os.strerror(error_number),
+    )
 
 
 def issue_authorization(
@@ -1845,6 +1900,31 @@ def load_claim(
         require_fresh_outputs=False,
         enforce_current_window=False,
         require_bound_inputs=False,
+    )
+    return _load_claim_for_record(authorization, policy=policy)
+
+
+def load_live_claim(
+    authorization_path: Path,
+    *,
+    now: datetime,
+    policy: RegistryPolicy = RegistryPolicy(),
+) -> ClaimRecord:
+    """Load a consumed claim for an in-window campaign execution.
+
+    Unlike :func:`load_claim`, this is not an archival reader.  It revalidates
+    the authorization window and all bound input paths on every call.  Outputs
+    are allowed to exist because one locked transaction invokes several
+    sequential campaign stages under the same one-shot claim.
+    """
+
+    authorization = load_authorization(
+        authorization_path,
+        now=now,
+        policy=policy,
+        require_fresh_outputs=False,
+        enforce_current_window=True,
+        require_bound_inputs=True,
     )
     return _load_claim_for_record(authorization, policy=policy)
 

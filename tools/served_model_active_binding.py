@@ -388,6 +388,14 @@ class ActiveManifestBinding:
             if authorization_policy is None
             else authorization_policy
         )
+        if (
+            authorization_path is not None
+            and self.active_path != self.authorization_policy.active_manifest_path
+        ):
+            fail(
+                "actual active served-model manifest path differs from "
+                "the authorization policy"
+            )
         self._authorization_now = authorization_now
         self.claim = (
             self._load_authorized_claim()
@@ -463,7 +471,7 @@ class ActiveManifestBinding:
         if not isinstance(now, datetime) or now.tzinfo is None:
             fail("campaign authorization clock result differs")
         try:
-            record = campaign_authorization.load_claim(
+            record = campaign_authorization.load_live_claim(
                 self.authorization_path,
                 now=now,
                 policy=self.authorization_policy,

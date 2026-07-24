@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import stat
 import sys
 import threading
 from datetime import datetime, timedelta, timezone
@@ -438,7 +439,9 @@ def test_claim_remains_valid_after_authorized_outputs_are_created(
         Path(campaign["final_path"]).mkdir()
     Path(value["rollback"]["backup_path"]).write_bytes(b"aq4\n")
     loaded = AUTH.load_claim(path, now=NOW, policy=selected_policy)
+    live = AUTH.load_live_claim(path, now=NOW, policy=selected_policy)
     assert loaded.snapshot.sha256 == claim.snapshot.sha256
+    assert live.snapshot.sha256 == claim.snapshot.sha256
 
 
 def test_consumed_claim_and_outcome_remain_loadable_after_expiry(
@@ -458,6 +461,12 @@ def test_consumed_claim_and_outcome_remain_loadable_after_expiry(
         now=after_expiry,
         policy=selected_policy,
     )
+    with pytest.raises(AUTH.AuthorizationError, match="expired"):
+        AUTH.load_live_claim(
+            path,
+            now=after_expiry,
+            policy=selected_policy,
+        )
     _snapshot, loaded_outcome = AUTH.load_outcome(
         path,
         now=after_expiry,
@@ -951,3 +960,73 @@ def test_no_replace_publication_detects_parent_registry_replacement(
         )
     assert not destination.exists()
     assert (moved / destination.name).exists()
+
+
+def test_no_replace_publication_is_single_link_after_rename_boundary_fault(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registry = tmp_path / "registry"
+    registry.mkdir(mode=0o700)
+    destination = registry / "claim.json"
+    raw = b'{"claim":"fixture"}\n'
+    real_rename = AUTH._rename_noreplace_at
+
+    def rename_then_fail(*args: object, **kwargs: object) -> None:
+        real_rename(*args, **kwargs)
+        raise RuntimeError("injected fault immediately after rename")
+
+    monkeypatch.setattr(AUTH, "_rename_noreplace_at", rename_then_fail)
+    with pytest.raises(RuntimeError, match="immediately after rename"):
+        AUTH._publish_no_replace(
+            destination,
+            raw,
+            mode=0o444,
+            required_uid=os.geteuid(),
+            label="claim fault fixture",
+        )
+
+    metadata = destination.stat()
+    assert destination.read_bytes() == raw
+    assert stat.S_IMODE(metadata.st_mode) == 0o444
+    assert metadata.st_nlink == 1
+    assert not tuple(registry.glob(".*.tmp"))
+    assert AUTH._stable_read(
+        destination,
+        "claim fault fixture",
+        required_mode=0o444,
+        required_uid=os.geteuid(),
+        required_nlink=1,
+    ).raw == raw
+
+
+def test_no_replace_publication_is_single_link_at_parent_fsync_fault(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registry = tmp_path / "registry"
+    registry.mkdir(mode=0o700)
+    destination = registry / "outcome.json"
+    raw = b'{"outcome":"fixture"}\n'
+    real_fsync = AUTH.os.fsync
+
+    def fail_directory_fsync(descriptor: int) -> None:
+        if stat.S_ISDIR(os.fstat(descriptor).st_mode):
+            raise OSError("injected parent fsync fault")
+        real_fsync(descriptor)
+
+    monkeypatch.setattr(AUTH.os, "fsync", fail_directory_fsync)
+    with pytest.raises(OSError, match="parent fsync fault"):
+        AUTH._publish_no_replace(
+            destination,
+            raw,
+            mode=0o444,
+            required_uid=os.geteuid(),
+            label="outcome fault fixture",
+        )
+
+    metadata = destination.stat()
+    assert destination.read_bytes() == raw
+    assert stat.S_IMODE(metadata.st_mode) == 0o444
+    assert metadata.st_nlink == 1
+    assert not tuple(registry.glob(".*.tmp"))

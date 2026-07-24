@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import subprocess
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -384,6 +385,11 @@ def test_campaign_preflight_report_exposes_both_source_seals(
     )
     monkeypatch.setattr(
         RUNNER,
+        "require_production_entrypoint",
+        lambda _path: None,
+    )
+    monkeypatch.setattr(
+        RUNNER,
         "parse_args",
         lambda _argv=None: SimpleNamespace(
             authorization=authorization_path,
@@ -422,6 +428,11 @@ def test_campaign_execute_cli_requires_root_supervisor(
 ) -> None:
     monkeypatch.setattr(
         RUNNER,
+        "require_production_entrypoint",
+        lambda _path: None,
+    )
+    monkeypatch.setattr(
+        RUNNER,
         "parse_args",
         lambda _argv=None: SimpleNamespace(execute=True),
     )
@@ -454,6 +465,11 @@ def test_recovery_preflight_report_exposes_sq8_source_seal(
         active_before=SimpleNamespace(sha256="d" * 64),
         backup=SimpleNamespace(sha256="e" * 64),
         backup_requires_publication=False,
+    )
+    monkeypatch.setattr(
+        RECOVERY,
+        "require_production_entrypoint",
+        lambda _path: None,
     )
     monkeypatch.setattr(
         RECOVERY,
@@ -494,8 +510,14 @@ def test_recovery_preflight_report_exposes_sq8_source_seal(
 
 def test_standalone_claim_cli_is_read_only_disabled(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
+    monkeypatch.setattr(
+        CLAIM,
+        "require_production_entrypoint",
+        lambda _path: None,
+    )
     authorization = tmp_path / "authorization.json"
     before = set(tmp_path.iterdir())
     assert CLAIM.main(["--authorization", str(authorization)]) == 2
@@ -508,6 +530,11 @@ def test_issue_cli_requires_and_forwards_source_root(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
+    monkeypatch.setattr(
+        ISSUE,
+        "require_production_entrypoint",
+        lambda _path: None,
+    )
     document = tmp_path / "reviewed.json"
     output = tmp_path / "authorization.json"
     source = tmp_path / "source"
@@ -563,6 +590,49 @@ def test_issue_cli_requires_and_forwards_source_root(
     report = json.loads(capsys.readouterr().out)
     assert report["authorization_sha256"] == "a" * 64
     assert report["output"] == str(output)
+
+
+@pytest.mark.parametrize(
+    "script",
+    (
+        "claim-served-model-v2-cross-model-campaign-authorization.py",
+        "issue-served-model-v2-cross-model-campaign-authorization.py",
+        "recover-served-model-v2-cross-model-campaign.py",
+        "run-served-model-v2-cross-model-campaign.py",
+    ),
+)
+def test_campaign_control_wrappers_require_canonical_python_prefix(
+    script: str,
+) -> None:
+    path = TOOLS / script
+    assert path.read_bytes().splitlines()[0] == b"#!/usr/bin/python3.12"
+    completed = subprocess.run(
+        ["/usr/bin/python3.12", str(path), "--help"],
+        check=False,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=10.0,
+    )
+    assert completed.returncode != 0
+    assert b"/usr/bin/python3.12 -I -S -B" in completed.stderr
+
+
+@pytest.mark.parametrize("module", (RUNNER, RECOVERY, ISSUE, CLAIM))
+def test_campaign_control_entrypoint_guard_precedes_argument_parsing(
+    module: object,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def reject(_path: Path) -> None:
+        raise module.campaign_entrypoint.ProductionEntrypointError("rejected")
+
+    monkeypatch.setattr(module, "require_production_entrypoint", reject)
+    monkeypatch.setattr(
+        module,
+        "parse_args",
+        lambda _argv=None: pytest.fail("arguments parsed before entrypoint guard"),
+    )
+    assert module.main([]) == 1
 
 
 def test_recovery_cli_has_no_arbitrary_operational_paths_or_commands() -> None:

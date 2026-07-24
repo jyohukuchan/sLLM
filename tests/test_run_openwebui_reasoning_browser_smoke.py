@@ -120,6 +120,18 @@ def test_transaction_staging_is_opt_in_and_preserves_browser_default() -> None:
     assert transaction_run_id is None
 
 
+def test_v2_browser_transaction_staging_is_mandatory(tmp_path: Path) -> None:
+    with pytest.raises(TOOL.SmokeError, match="requires locked transaction"):
+        TOOL._transaction_publication_output(
+            authorized_output=tmp_path / "authorized-browser",
+            active_binding_mode="v2",
+            campaign_authorization_path=tmp_path / "authorization.json",
+            run_id="browser-run",
+            active_binding=SimpleNamespace(),
+            environment={},
+        )
+
+
 def test_sq8_browser_staging_binds_claim_stage_run_and_final_without_leak(
     tmp_path: Path,
 ) -> None:
@@ -251,7 +263,7 @@ def test_fresh_aq4_browser_staging_loads_claim_and_derives_run_id(
     )
     monkeypatch.setattr(
         TOOL.campaign_authorization,
-        "load_claim",
+        "load_live_claim",
         lambda path, **_kwargs: record
         if path == authorization
         else pytest.fail("unexpected authorization path"),
@@ -496,7 +508,7 @@ def test_fresh_aq4_runner_publishes_only_to_transaction_staging(
     )
     monkeypatch.setattr(
         TOOL.campaign_authorization,
-        "load_claim",
+        "load_live_claim",
         lambda _path, **_kwargs: record,
     )
     for name, value in _transaction_environment(
@@ -615,6 +627,7 @@ def test_active_binding_path_publishes_lineage_bearing_v4_directory(
     script = tmp_path / "smoke.cjs"
     script.write_text("console.log('{}')\n", encoding="ascii")
     output = tmp_path / "browser-v4"
+    staging = tmp_path / "private-browser-v4"
     candidate = tmp_path / "candidate.json"
     candidate.write_text("{}\n", encoding="ascii")
     candidate_raw = candidate.read_bytes()
@@ -637,8 +650,19 @@ def test_active_binding_path_publishes_lineage_bearing_v4_directory(
     model_id = "ullm-qwen3-14b-sq8"
     payload = (json.dumps(evidence(model_id)) + "\n").encode("ascii")
     stages: list[str] = []
+    claim_reference = claim
 
     class Binding:
+        campaign_name = "reasoning_browser"
+        run_id = "browser-run"
+        final_path = output
+        claim = SimpleNamespace(
+            authorization_path=authorization,
+            authorization_sha256=claim_reference["authorization_sha256"],
+            path=claim_path,
+            sha256=claim_reference["sha256"],
+        )
+
         def observe(self, stage: str) -> None:
             stages.append(stage)
 
@@ -667,7 +691,7 @@ def test_active_binding_path_publishes_lineage_bearing_v4_directory(
                         "identity": identity,
                     },
                     "active": {
-                        "path": str(tmp_path / "active.json"),
+                        "path": "/etc/ullm/served-models/active.json",
                         "sha256": candidate_sha256,
                         "identity": identity,
                     },
@@ -694,7 +718,9 @@ def test_active_binding_path_publishes_lineage_bearing_v4_directory(
                     "sha256": candidate_sha256,
                     "bytes": len(candidate_raw),
                 },
-                "actual_active_path": str(tmp_path / "active.json"),
+                "actual_active_path": (
+                    "/etc/ullm/served-models/active.json"
+                ),
                 "expected_stages": list(TOOL.ACTIVE_BINDING_STAGES),
                 "observation_count": len(rows),
                 "observations": {
@@ -782,12 +808,23 @@ def test_active_binding_path_publishes_lineage_bearing_v4_directory(
         return dict(server_observation)
 
     monkeypatch.setattr(TOOL, "_verify_openwebui_server", verify_server)
+    for name, value in _transaction_environment(
+        stage="reasoning_browser",
+        staging=staging,
+        authorization=authorization,
+        claim=claim_path,
+        authorization_sha256=claim["authorization_sha256"],
+        claim_sha256=claim["sha256"],
+    ).items():
+        monkeypatch.setenv(name, value)
     result = TOOL.execute(
         output=output,
         manifest=None,
         active_binding_mode="v2",
         candidate_served_model_manifest=candidate,
-        active_served_model_manifest=tmp_path / "active.json",
+        active_served_model_manifest=Path(
+            "/etc/ullm/served-models/active.json"
+        ),
         expected_served_model_manifest_sha256=candidate_sha256,
         campaign_authorization=tmp_path / "authorization.json",
         run_id="browser-run",
@@ -800,7 +837,7 @@ def test_active_binding_path_publishes_lineage_bearing_v4_directory(
         browser_script=script,
     )
 
-    evidence_path = output / TOOL.BROWSER_EVIDENCE_FILE
+    evidence_path = staging / TOOL.BROWSER_EVIDENCE_FILE
     document = json.loads(evidence_path.read_text(encoding="ascii"))
     assert result["schema_version"] == TOOL.BROWSER_EVIDENCE_SCHEMA_V5
     assert document["source_commit"] == "5" * 40
@@ -815,10 +852,17 @@ def test_active_binding_path_publishes_lineage_bearing_v4_directory(
         ("docker", v3_identity["openwebui_image"]),
         ("docker", v3_identity["openwebui_image"]),
     ]
-    assert TOOL._load_validator().validate(evidence_path)["gate_eligible"] is True
+    assert (
+        TOOL._load_validator().validate(
+            evidence_path,
+            lineage_root_override=staging,
+        )["gate_eligible"]
+        is True
+    )
     assert stages == list(TOOL.ACTIVE_BINDING_STAGES)
-    assert {entry.name for entry in output.iterdir()} == TOOL.BROWSER_OUTPUT_FILES_V2
-    assert all(entry.stat().st_mode & 0o777 == 0o444 for entry in output.iterdir())
+    assert not output.exists()
+    assert {entry.name for entry in staging.iterdir()} == TOOL.BROWSER_OUTPUT_FILES_V2
+    assert all(entry.stat().st_mode & 0o777 == 0o444 for entry in staging.iterdir())
 
 
 def test_runner_cli_allows_switch_arguments_to_be_omitted(tmp_path: Path) -> None:
