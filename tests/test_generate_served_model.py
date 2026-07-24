@@ -19,6 +19,7 @@ AQ4_DEPLOYMENT_PROFILE = ROOT / "deploy/served-models/qwen35-9b-aq4.profile.json
 AQ4_REASONING_DEPLOYMENT_PROFILE = (
     ROOT / "deploy/served-models/qwen35-9b-aq4-reasoning.profile.json"
 )
+EPHEMERAL_COMMIT = "a" * 40
 
 
 def load_module(name: str, path: Path) -> ModuleType:
@@ -163,6 +164,47 @@ def write_profile(root: Path, *, receipt_exists: bool = True) -> Path:
     return path
 
 
+def write_sq8_v2_ephemeral_profile(root: Path) -> Path:
+    profile_path = write_profile(root)
+    profile = json.loads(profile_path.read_text(encoding="utf-8"))
+    profile["worker"]["protocol"] = "ullm.worker.v2"
+    profile["reasoning"] = {
+        "enabled_by_default": False,
+        "dialect_id": "synthetic.single-token.v1",
+        "start_token_ids": [10],
+        "end_token_ids": [20],
+        "forced_end_token_ids": [20],
+        "initial_phase": "reasoning",
+        "eos_policy": "close",
+        "effort_budgets": {"low": 2, "medium": 4, "high": 8},
+        "max_budget_tokens": 8,
+        "reserved_answer_tokens": 1,
+        "history_reasoning_policy": "omit",
+    }
+    receipt_path = root / "promotion.json"
+    receipt_path.write_text(
+        json.dumps(
+            {
+                "schema_version": GENERATOR.SQ8_EPHEMERAL_RECEIPT_SCHEMA,
+                "source_commit": EPHEMERAL_COMMIT,
+                "product": {"artifact_content_sha256": "1" * 64},
+            }
+        ),
+        encoding="utf-8",
+    )
+    profile["promotion"] = {
+        "receipt": os.fspath(receipt_path),
+        "source_commit_from_receipt": ["source_commit"],
+        "required_schema_version": GENERATOR.SQ8_EPHEMERAL_RECEIPT_SCHEMA,
+    }
+    profile["product"]["artifact"]["content_sha256_from_receipt"] = [
+        "product",
+        "artifact_content_sha256",
+    ]
+    profile_path.write_text(json.dumps(profile), encoding="utf-8")
+    return profile_path
+
+
 def test_generate_hashes_live_files_and_passes_strict_loader(tmp_path: Path) -> None:
     profile = write_profile(tmp_path)
     output = tmp_path / "served-model.json"
@@ -182,26 +224,10 @@ def test_generate_hashes_live_files_and_passes_strict_loader(tmp_path: Path) -> 
 
 
 def test_generator_materializes_v2_reasoning_profile(tmp_path: Path) -> None:
-    profile = json.loads(write_profile(tmp_path).read_text(encoding="utf-8"))
-    profile["worker"]["protocol"] = "ullm.worker.v2"
-    profile["reasoning"] = {
-        "enabled_by_default": False,
-        "dialect_id": "synthetic.single-token.v1",
-        "start_token_ids": [10],
-        "end_token_ids": [20],
-        "forced_end_token_ids": [20],
-        "initial_phase": "reasoning",
-        "eos_policy": "close",
-        "effort_budgets": {"low": 2, "medium": 4, "high": 8},
-        "max_budget_tokens": 8,
-        "reserved_answer_tokens": 1,
-        "history_reasoning_policy": "omit",
-    }
-    profile_path = tmp_path / "profile.json"
-    profile_path.write_text(json.dumps(profile), encoding="utf-8")
+    profile_path = write_sq8_v2_ephemeral_profile(tmp_path)
     output = tmp_path / "served-model-v2.json"
 
-    GENERATOR.generate(profile_path, output)
+    GENERATOR.generate_sq8_promotion_ephemeral(profile_path, output)
     document = json.loads(output.read_text(encoding="utf-8"))
 
     assert document["schema_version"] == "ullm.served_model.v2"
@@ -216,29 +242,60 @@ def test_generator_materializes_v2_reasoning_profile(tmp_path: Path) -> None:
 def test_generator_rejects_multi_token_v2_reasoning_sequences(
     tmp_path: Path, field: str
 ) -> None:
-    profile = json.loads(write_profile(tmp_path).read_text(encoding="utf-8"))
-    profile["worker"]["protocol"] = "ullm.worker.v2"
-    profile["reasoning"] = {
-        "enabled_by_default": False,
-        "dialect_id": "synthetic.single-token.v1",
-        "start_token_ids": [10],
-        "end_token_ids": [20],
-        "forced_end_token_ids": [20],
-        "initial_phase": "reasoning",
-        "eos_policy": "close",
-        "effort_budgets": {"low": 2, "medium": 4, "high": 8},
-        "max_budget_tokens": 8,
-        "reserved_answer_tokens": 1,
-        "history_reasoning_policy": "omit",
-    }
+    profile_path = write_sq8_v2_ephemeral_profile(tmp_path)
+    profile = json.loads(profile_path.read_text(encoding="utf-8"))
     profile["reasoning"][field].append(21)
-    profile_path = tmp_path / "profile-v2-invalid.json"
+    profile_path = tmp_path / f"profile-v2-invalid-{field}.json"
     profile_path.write_text(json.dumps(profile), encoding="utf-8")
     output = tmp_path / "served-model-v2-invalid.json"
 
     with pytest.raises(RuntimeError, match="exactly one token"):
-        GENERATOR.generate(profile_path, output)
+        GENERATOR.generate_sq8_promotion_ephemeral(profile_path, output)
     assert not output.exists()
+
+
+def test_normal_generator_rejects_ephemeral_selector(tmp_path: Path) -> None:
+    profile_path = write_sq8_v2_ephemeral_profile(tmp_path)
+
+    with pytest.raises(GENERATOR.GenerationError, match="schema/format/protocol"):
+        GENERATOR.materialize(profile_path)
+
+
+def test_normal_generator_rejects_selectorless_sq8_worker_v2(
+    tmp_path: Path,
+) -> None:
+    profile_path = write_sq8_v2_ephemeral_profile(tmp_path)
+    profile = json.loads(profile_path.read_text(encoding="utf-8"))
+    profile["promotion"].pop("required_schema_version")
+    profile_path.write_text(json.dumps(profile), encoding="utf-8")
+
+    with pytest.raises(GENERATOR.GenerationError, match="schema/format/protocol"):
+        GENERATOR.materialize(profile_path)
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda profile: profile["format"].__setitem__("format_id", "UNKNOWN"),
+        lambda profile: profile["worker"].__setitem__(
+            "protocol", "ullm.worker.unknown"
+        ),
+        lambda profile: profile["promotion"].__setitem__(
+            "required_schema_version", "ullm.promotion.unknown"
+        ),
+    ],
+)
+def test_generator_rejects_unknown_format_protocol_or_schema_pair(
+    tmp_path: Path,
+    mutate,
+) -> None:
+    profile_path = write_profile(tmp_path)
+    profile = json.loads(profile_path.read_text(encoding="utf-8"))
+    mutate(profile)
+    profile_path.write_text(json.dumps(profile), encoding="utf-8")
+
+    with pytest.raises(GENERATOR.GenerationError, match="schema/format/protocol"):
+        GENERATOR.materialize(profile_path)
 
 
 def test_v2_generator_profile_requires_reasoning(tmp_path: Path) -> None:
@@ -367,16 +424,28 @@ def write_aq4_profile(root: Path) -> tuple[Path, Path, dict[str, object]]:
     profile["promotion"] = {
         "receipt": os.fspath(root / "promotion.json"),
         "source_commit_from_receipt": ["source_commit"],
+        "required_schema_version": GENERATOR.AQ4_EPHEMERAL_RECEIPT_SCHEMA,
     }
     (root / "promotion.json").write_text(
-        json.dumps({"source_commit": "abc1234"}), encoding="utf-8"
+        json.dumps(
+            {
+                "schema_version": GENERATOR.AQ4_EPHEMERAL_RECEIPT_SCHEMA,
+                "source_commit": EPHEMERAL_COMMIT,
+            }
+        ),
+        encoding="utf-8",
     )
     profile_path.write_text(json.dumps(profile), encoding="utf-8")
-    bound_manifest = GENERATOR.materialize(profile_path)
+    ephemeral_manifest_path = root / "aq4-ephemeral-served-model.json"
+    GENERATOR.generate_aq4_promotion_ephemeral(
+        profile_path,
+        ephemeral_manifest_path,
+    )
+    bound_manifest = json.loads(ephemeral_manifest_path.read_text(encoding="utf-8"))
 
     evidence: dict[str, object] = {
         "schema_version": "ullm.aq4_resident_promotion_evidence.v1",
-        "source_commit": "abc1234",
+        "source_commit": EPHEMERAL_COMMIT,
         "production_receipt_written": False,
         "gpu_exclusive_preflight": {
             "tool": "rocm-smi --showpids --json",
@@ -399,7 +468,7 @@ def write_aq4_profile(root: Path) -> tuple[Path, Path, dict[str, object]]:
     evidence_path.write_text(json.dumps(evidence), encoding="utf-8")
     receipt = {
         "schema_version": "ullm.aq4_resident_promotion.v1",
-        "source_commit": "abc1234",
+        "source_commit": EPHEMERAL_COMMIT,
         "evidence": {
             "path": evidence_path.name,
             "sha256": sha256(evidence_path.read_bytes()),
@@ -431,7 +500,7 @@ def test_aq4_evidence_gate_accepts_fully_bound_verified_evidence(tmp_path: Path)
     document = GENERATOR.materialize(profile)
 
     assert document["format"]["format_id"] == "AQ4_0"
-    assert document["promotion"]["source_commit"] == "abc1234"
+    assert document["promotion"]["source_commit"] == EPHEMERAL_COMMIT
     assert document["worker"]["required_environment"] == [
         "ULLM_REQUIRE_HIP_AQ4_MATVEC_BATCH_KERNEL",
         "ULLM_REQUIRE_HIP_AQ4_REGISTER_BM8_KERNEL",
@@ -447,6 +516,87 @@ def test_aq4_evidence_gate_accepts_fully_bound_verified_evidence(tmp_path: Path)
         "ULLM_REQUIRE_HIP_PAGED_CAUSAL_GQA_WMMA_KERNEL",
         "ULLM_REQUIRE_HIP_QWEN35_QK_NORM_ROPE_BATCH_KERNEL",
     ]
+
+
+@pytest.mark.parametrize("worker_protocol", ["ullm.worker.v1", "ullm.worker.v2"])
+def test_aq4_profile_requires_promotion_selector(
+    tmp_path: Path, worker_protocol: str
+) -> None:
+    profile_path, _, _ = write_aq4_profile(tmp_path)
+    profile = json.loads(profile_path.read_text(encoding="utf-8"))
+    profile["promotion"].pop("required_schema_version")
+    if worker_protocol == "ullm.worker.v2":
+        profile["worker"]["protocol"] = worker_protocol
+        profile["reasoning"] = {
+            "enabled_by_default": False,
+            "dialect_id": "synthetic.single-token.v1",
+            "start_token_ids": [10],
+            "end_token_ids": [20],
+            "forced_end_token_ids": [20],
+            "initial_phase": "reasoning",
+            "eos_policy": "close",
+            "effort_budgets": {"low": 2, "medium": 4, "high": 8},
+            "max_budget_tokens": 8,
+            "reserved_answer_tokens": 1,
+            "history_reasoning_policy": "omit",
+        }
+    profile_path.write_text(json.dumps(profile), encoding="utf-8")
+
+    with pytest.raises(GENERATOR.GenerationError, match="schema/format/protocol"):
+        GENERATOR.materialize(profile_path)
+
+
+def test_normal_generator_rejects_aq4_ephemeral_scaffold(tmp_path: Path) -> None:
+    profile_path, _, _ = write_aq4_profile(tmp_path)
+    profile = json.loads(profile_path.read_text(encoding="utf-8"))
+    scaffold_path = tmp_path / "aq4-normal-path-scaffold.json"
+    scaffold_path.write_text(
+        json.dumps(
+            {
+                "schema_version": GENERATOR.AQ4_EPHEMERAL_RECEIPT_SCHEMA,
+                "source_commit": EPHEMERAL_COMMIT,
+            }
+        ),
+        encoding="utf-8",
+    )
+    profile["promotion"] = {
+        "receipt": os.fspath(scaffold_path),
+        "source_commit_from_receipt": ["source_commit"],
+        "required_schema_version": GENERATOR.AQ4_EPHEMERAL_RECEIPT_SCHEMA,
+    }
+    profile_path.write_text(json.dumps(profile), encoding="utf-8")
+
+    with pytest.raises(GENERATOR.GenerationError, match="schema/format/protocol"):
+        GENERATOR.materialize(profile_path)
+
+
+def test_aq4_ephemeral_generator_requires_full_lowercase_commit(
+    tmp_path: Path,
+) -> None:
+    profile_path, _, _ = write_aq4_profile(tmp_path)
+    profile = json.loads(profile_path.read_text(encoding="utf-8"))
+    scaffold_path = tmp_path / "aq4-invalid-commit-scaffold.json"
+    scaffold_path.write_text(
+        json.dumps(
+            {
+                "schema_version": GENERATOR.AQ4_EPHEMERAL_RECEIPT_SCHEMA,
+                "source_commit": "A" * 40,
+            }
+        ),
+        encoding="utf-8",
+    )
+    profile["promotion"] = {
+        "receipt": os.fspath(scaffold_path),
+        "source_commit_from_receipt": ["source_commit"],
+        "required_schema_version": GENERATOR.AQ4_EPHEMERAL_RECEIPT_SCHEMA,
+    }
+    profile_path.write_text(json.dumps(profile), encoding="utf-8")
+
+    with pytest.raises(GENERATOR.GenerationError, match="ephemeral"):
+        GENERATOR.generate_aq4_promotion_ephemeral(
+            profile_path,
+            tmp_path / "aq4-invalid-commit-manifest.json",
+        )
 
 
 @pytest.mark.parametrize(
@@ -560,7 +710,10 @@ def test_receipt_tool_validates_then_atomically_publishes(tmp_path: Path) -> Non
     assert json.loads(receipt_path.read_text(encoding="ascii")) == receipt
     assert receipt["schema_version"] == "ullm.aq4_resident_promotion.v1"
     assert receipt["evidence"]["path"] == evidence_path.name
-    assert GENERATOR.materialize(profile)["promotion"]["source_commit"] == "abc1234"
+    assert (
+        GENERATOR.materialize(profile)["promotion"]["source_commit"]
+        == EPHEMERAL_COMMIT
+    )
     with pytest.raises(RECEIPT_TOOL.ReceiptError, match="already exists"):
         RECEIPT_TOOL.write_receipt(profile, evidence_path, receipt_path)
 

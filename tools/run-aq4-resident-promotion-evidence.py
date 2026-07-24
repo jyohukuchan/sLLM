@@ -29,6 +29,9 @@ DEFAULT_PROFILE = ROOT / "deploy/served-models/qwen35-9b-aq4.profile.json"
 DEFAULT_WORKER = ROOT / "target/release/ullm-aq4-worker"
 DEFAULT_ENGINE = ROOT / "target/release/ullm-engine"
 GENERATOR_PATH = ROOT / "tools/generate-served-model.py"
+AQ4_EPHEMERAL_RECEIPT_SCHEMA = (
+    "ullm.aq4_resident_promotion_ephemeral_receipt.v1"
+)
 RESULT_SCHEMA = "ullm.aq4_resident_promotion_evidence.v1"
 MAX_EVENT_BYTES = 4_194_304
 STDERR_TAIL_BYTES = 65_536
@@ -191,17 +194,20 @@ def prepare_smoke_bundle(
     if not isinstance(promotion, dict) or not isinstance(worker, dict):
         raise EvidenceError("AQ4 deployment profile lacks promotion or worker configuration")
 
-    receipt = {"source_commit": source_commit}
+    receipt = {
+        "schema_version": AQ4_EPHEMERAL_RECEIPT_SCHEMA,
+        "source_commit": source_commit,
+    }
     receipt_path = temporary_root / "smoke-promotion.json"
     profile_copy_path = temporary_root / "smoke-profile.json"
     manifest_path = temporary_root / "served-model.json"
     receipt_path.write_text(json.dumps(receipt, sort_keys=True) + "\n", encoding="ascii")
     promotion["receipt"] = os.fspath(receipt_path)
     promotion["source_commit_from_receipt"] = ["source_commit"]
-    # Evidence must be produced before the production receipt exists.  The
-    # ephemeral smoke manifest is therefore generated without the production
-    # receipt/evidence gate; the final generator rebinds and validates it.
-    promotion.pop("required_schema_version", None)
+    # Evidence must be produced before the production receipt exists. Bind the
+    # temporary manifest to a purpose-specific scaffold which normal candidate
+    # generation deliberately refuses to admit.
+    promotion["required_schema_version"] = AQ4_EPHEMERAL_RECEIPT_SCHEMA
     promotion.pop("evidence_from_receipt", None)
     promotion.pop("evidence_sha256_from_receipt", None)
     worker["binary"] = os.fspath(worker_binary.resolve())
@@ -212,7 +218,10 @@ def prepare_smoke_bundle(
 
     generator = _load_module("_ullm_aq4_evidence_generator", GENERATOR_PATH)
     try:
-        generator.generate(profile_copy_path, manifest_path)
+        generator.generate_aq4_promotion_ephemeral(
+            profile_copy_path,
+            manifest_path,
+        )
     except Exception as error:
         raise EvidenceError(f"failed to generate ephemeral served-model manifest: {error}") from error
     manifest = _read_object(manifest_path, "ephemeral served-model manifest")

@@ -410,6 +410,7 @@ class Fixture:
         write_json(
             pre_receipt,
             {
+                "schema_version": PROMOTION.EPHEMERAL_RECEIPT_SCHEMA,
                 "source_commit": self.commit,
                 "product": {"artifact_content_sha256": "a" * 64},
             },
@@ -420,10 +421,11 @@ class Fixture:
         profile["promotion"] = {
             "receipt": os.fspath(pre_receipt),
             "source_commit_from_receipt": ["source_commit"],
+            "required_schema_version": PROMOTION.EPHEMERAL_RECEIPT_SCHEMA,
         }
         write_json(temporary_profile, profile)
         path = self.release / "ephemeral-served-model.json"
-        GENERATOR.generate(
+        GENERATOR.generate_sq8_promotion_ephemeral(
             temporary_profile,
             path,
             source_root=self.source,
@@ -1467,7 +1469,7 @@ def test_generator_rejects_aq4_receipt_schema_for_sq8_format(tmp_path: Path) -> 
     profile["promotion"]["required_schema_version"] = "ullm.aq4_resident_promotion.v1"
     write_json(fixture.profile, profile)
 
-    with pytest.raises(GENERATOR.GenerationError, match="schema/format pairing"):
+    with pytest.raises(GENERATOR.GenerationError, match="schema/format"):
         GENERATOR.materialize(fixture.profile, source_root=fixture.source)
 
 
@@ -1477,8 +1479,83 @@ def test_generator_rejects_sq8_receipt_schema_for_aq4_format(tmp_path: Path) -> 
     profile["format"]["format_id"] = "AQ4_0"
     write_json(fixture.profile, profile)
 
-    with pytest.raises(GENERATOR.GenerationError, match="schema/format pairing"):
+    with pytest.raises(GENERATOR.GenerationError, match="schema/format"):
         GENERATOR.materialize(fixture.profile, source_root=fixture.source)
+
+
+def test_generator_rejects_selectorless_sq8_worker_v2(tmp_path: Path) -> None:
+    fixture = Fixture(tmp_path)
+    profile = json.loads(fixture.profile.read_text())
+    profile["promotion"].pop("required_schema_version")
+    write_json(fixture.profile, profile)
+
+    with pytest.raises(GENERATOR.GenerationError, match="schema/format/protocol"):
+        GENERATOR.materialize(fixture.profile, source_root=fixture.source)
+
+
+def test_normal_generator_rejects_sq8_ephemeral_scaffold(tmp_path: Path) -> None:
+    fixture = Fixture(tmp_path)
+    profile = json.loads(fixture.profile.read_text())
+    profile["promotion"] = {
+        "receipt": os.fspath(fixture.release / "normal-path-scaffold.json"),
+        "source_commit_from_receipt": ["source_commit"],
+        "required_schema_version": PROMOTION.EPHEMERAL_RECEIPT_SCHEMA,
+    }
+    write_json(
+        Path(profile["promotion"]["receipt"]),
+        {
+            "schema_version": PROMOTION.EPHEMERAL_RECEIPT_SCHEMA,
+            "source_commit": fixture.commit,
+            "product": {"artifact_content_sha256": "a" * 64},
+        },
+        mode=0o444,
+    )
+    write_json(fixture.profile, profile)
+
+    with pytest.raises(GENERATOR.GenerationError, match="schema/format/protocol"):
+        GENERATOR.materialize(fixture.profile, source_root=fixture.source)
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda value: value.pop("schema_version"),
+        lambda value: value.__setitem__("schema_version", "unknown"),
+        lambda value: value.__setitem__("extra", True),
+        lambda value: value.__setitem__("source_commit", "g" * 40),
+        lambda value: value["product"].__setitem__("extra", True),
+        lambda value: value["product"].__setitem__(
+            "artifact_content_sha256", "0" * 63
+        ),
+    ],
+)
+def test_sq8_ephemeral_generator_requires_exact_scaffold(
+    tmp_path: Path, mutate: Any
+) -> None:
+    fixture = Fixture(tmp_path)
+    profile = json.loads(fixture.profile.read_text())
+    scaffold = fixture.release / "mutated-scaffold.json"
+    document = {
+        "schema_version": PROMOTION.EPHEMERAL_RECEIPT_SCHEMA,
+        "source_commit": fixture.commit,
+        "product": {"artifact_content_sha256": "a" * 64},
+    }
+    mutate(document)
+    write_json(scaffold, document, mode=0o444)
+    profile["promotion"] = {
+        "receipt": os.fspath(scaffold),
+        "source_commit_from_receipt": ["source_commit"],
+        "required_schema_version": PROMOTION.EPHEMERAL_RECEIPT_SCHEMA,
+    }
+    profile_path = fixture.release / "mutated-scaffold-profile.json"
+    write_json(profile_path, profile)
+
+    with pytest.raises(GENERATOR.GenerationError, match="ephemeral"):
+        GENERATOR.generate_sq8_promotion_ephemeral(
+            profile_path,
+            fixture.release / "mutated-scaffold-manifest.json",
+            source_root=fixture.source,
+        )
 
 
 def test_generator_rejects_tampered_sq8_receipt_evidence_hash(

@@ -11,6 +11,7 @@ import os
 import stat
 import sys
 import tempfile
+from enum import Enum
 from pathlib import Path
 from types import ModuleType
 from typing import Any, Sequence
@@ -21,10 +22,24 @@ LOADER_PATH = ROOT / "services/openai-gateway/src/ullm_openai_gateway/served_mod
 SQ8_PROMOTION_PATH = ROOT / "tools/sq8_serving_promotion.py"
 PROFILE_SCHEMA = "ullm.served_model.profile.v1"
 AQ4_EVIDENCE_SCHEMA = "ullm.aq4_resident_promotion_evidence.v1"
+AQ4_PROMOTION_SCHEMA = "ullm.aq4_resident_promotion.v1"
+AQ4_EPHEMERAL_RECEIPT_SCHEMA = (
+    "ullm.aq4_resident_promotion_ephemeral_receipt.v1"
+)
+SQ8_PROMOTION_SCHEMA = "ullm.sq8_serving_promotion.v1"
+SQ8_EPHEMERAL_RECEIPT_SCHEMA = (
+    "ullm.sq8_serving_promotion_ephemeral_receipt.v1"
+)
 
 
 class GenerationError(RuntimeError):
     """Raised when a profile cannot be bound to immutable local files."""
+
+
+class _PromotionGenerationMode(Enum):
+    FINAL = "final"
+    AQ4_EPHEMERAL = "aq4_ephemeral"
+    SQ8_EPHEMERAL = "sq8_ephemeral"
 
 
 def _sha256_file(path: Path) -> str:
@@ -225,6 +240,64 @@ def _load_sq8_promotion_validator() -> ModuleType:
     return module
 
 
+def _validate_ephemeral_receipt(
+    *,
+    promotion_profile: dict[str, Any],
+    receipt: dict[str, Any],
+    required_schema: str,
+    source_commit: str,
+) -> None:
+    """Validate the narrow pre-evidence receipt accepted by an internal API."""
+
+    expected_profile_fields = {
+        "receipt",
+        "source_commit_from_receipt",
+        "required_schema_version",
+    }
+    if set(promotion_profile) != expected_profile_fields:
+        raise GenerationError("ephemeral promotion profile fields differ")
+    if promotion_profile["required_schema_version"] != required_schema:
+        raise GenerationError("ephemeral promotion receipt schema differs")
+    if promotion_profile["source_commit_from_receipt"] != ["source_commit"]:
+        raise GenerationError("ephemeral promotion source path differs")
+
+    expected_receipt_fields = {"schema_version", "source_commit"}
+    if required_schema == SQ8_EPHEMERAL_RECEIPT_SCHEMA:
+        expected_receipt_fields.add("product")
+    if set(receipt) != expected_receipt_fields:
+        raise GenerationError("ephemeral promotion receipt fields differ")
+    if (
+        receipt.get("schema_version") != required_schema
+        or not isinstance(receipt.get("source_commit"), str)
+        or len(receipt["source_commit"]) != 40
+        or any(
+            character not in "0123456789abcdef"
+            for character in receipt["source_commit"]
+        )
+        or receipt["source_commit"] != source_commit
+    ):
+        raise GenerationError("ephemeral promotion receipt identity differs")
+
+    if required_schema == SQ8_EPHEMERAL_RECEIPT_SCHEMA:
+        product = receipt.get("product")
+        if not isinstance(product, dict) or set(product) != {
+            "artifact_content_sha256"
+        }:
+            raise GenerationError("SQ8 ephemeral promotion product fields differ")
+        artifact_sha256 = product["artifact_content_sha256"]
+        if (
+            not isinstance(artifact_sha256, str)
+            or len(artifact_sha256) != 64
+            or any(
+                character not in "0123456789abcdef"
+                for character in artifact_sha256
+            )
+        ):
+            raise GenerationError(
+                "SQ8 ephemeral artifact content SHA-256 is invalid"
+            )
+
+
 def _validate_promotion_evidence(
     *,
     profile_path: Path,
@@ -240,18 +313,35 @@ def _validate_promotion_evidence(
     package_manifest_path: str,
     package_manifest_sha256: str,
     manifest: dict[str, Any],
+    mode: _PromotionGenerationMode,
 ) -> None:
     """Dispatch current-main promotion schemas without cross-admitting formats."""
 
     required_schema = promotion_profile.get("required_schema_version")
+    if mode is _PromotionGenerationMode.AQ4_EPHEMERAL:
+        _validate_ephemeral_receipt(
+            promotion_profile=promotion_profile,
+            receipt=receipt,
+            required_schema=AQ4_EPHEMERAL_RECEIPT_SCHEMA,
+            source_commit=source_commit,
+        )
+        return
+    if mode is _PromotionGenerationMode.SQ8_EPHEMERAL:
+        _validate_ephemeral_receipt(
+            promotion_profile=promotion_profile,
+            receipt=receipt,
+            required_schema=SQ8_EPHEMERAL_RECEIPT_SCHEMA,
+            source_commit=source_commit,
+        )
+        return
     if required_schema is None:
-        # Preserve the legacy profile path.  Production AQ4/SQ8 profiles opt in
-        # to a strict receipt schema and are dispatched below.
+        # Only the explicitly admitted historical SQ8 worker-v1 profile reaches
+        # this branch. Current worker-v2 candidates always require a selector.
         return
     format_value = profile.get("format")
     format_id = format_value.get("format_id") if isinstance(format_value, dict) else None
     pairing = (format_id, required_schema)
-    if pairing == ("AQ4_0", "ullm.aq4_resident_promotion.v1"):
+    if pairing == ("AQ4_0", AQ4_PROMOTION_SCHEMA):
         _validate_aq4_evidence(
             profile=profile,
             promotion_profile=promotion_profile,
@@ -266,7 +356,7 @@ def _validate_promotion_evidence(
             output_manifest=manifest,
         )
         return
-    if pairing == ("SQ8_0", "ullm.sq8_serving_promotion.v1"):
+    if pairing == ("SQ8_0", SQ8_PROMOTION_SCHEMA):
         if receipt.get("schema_version") != required_schema:
             raise GenerationError("SQ8 serving promotion receipt schema differs")
         evidence_path_value = _receipt_value(
@@ -312,21 +402,52 @@ def _validate_promotion_evidence(
 
 
 def _validate_promotion_dispatch(
-    profile: dict[str, Any], promotion_profile: dict[str, Any]
+    profile: dict[str, Any],
+    promotion_profile: dict[str, Any],
+    *,
+    mode: _PromotionGenerationMode,
 ) -> None:
     """Reject cross-format promotion schemas before opening their receipt."""
 
     required_schema = promotion_profile.get("required_schema_version")
-    if required_schema is None:
-        return
     format_value = profile.get("format")
     format_id = format_value.get("format_id") if isinstance(format_value, dict) else None
-    if (format_id, required_schema) not in {
-        ("AQ4_0", "ullm.aq4_resident_promotion.v1"),
-        ("SQ8_0", "ullm.sq8_serving_promotion.v1"),
-    }:
+    worker_value = profile.get("worker")
+    worker_protocol = (
+        worker_value.get("protocol") if isinstance(worker_value, dict) else None
+    )
+    reasoning_present = profile.get("reasoning") is not None
+
+    if mode is _PromotionGenerationMode.AQ4_EPHEMERAL:
+        admitted = (
+            format_id == "AQ4_0"
+            and worker_protocol in {"ullm.worker.v1", "ullm.worker.v2"}
+            and required_schema == AQ4_EPHEMERAL_RECEIPT_SCHEMA
+        )
+    elif mode is _PromotionGenerationMode.SQ8_EPHEMERAL:
+        admitted = (
+            format_id == "SQ8_0"
+            and worker_protocol == "ullm.worker.v2"
+            and reasoning_present
+            and required_schema == SQ8_EPHEMERAL_RECEIPT_SCHEMA
+        )
+    else:
+        admitted = (
+            format_id == "SQ8_0"
+            and worker_protocol == "ullm.worker.v1"
+            and not reasoning_present
+            and required_schema is None
+        ) or (
+            (format_id, worker_protocol, required_schema)
+            in {
+                ("AQ4_0", "ullm.worker.v1", AQ4_PROMOTION_SCHEMA),
+                ("AQ4_0", "ullm.worker.v2", AQ4_PROMOTION_SCHEMA),
+                ("SQ8_0", "ullm.worker.v2", SQ8_PROMOTION_SCHEMA),
+            }
+        )
+    if not admitted:
         raise GenerationError(
-            "profile promotion receipt schema/format pairing is unsupported"
+            "profile promotion receipt schema/format/protocol pairing is unsupported"
         )
 
 
@@ -522,8 +643,11 @@ def _required_object(parent: dict[str, Any], name: str) -> dict[str, Any]:
     return value
 
 
-def materialize(
-    profile_path: Path, *, source_root: Path | None = None
+def _materialize(
+    profile_path: Path,
+    *,
+    source_root: Path | None,
+    mode: _PromotionGenerationMode,
 ) -> dict[str, Any]:
     profile = _load_json(profile_path, "served-model profile")
     if profile.get("schema_version") != PROFILE_SCHEMA:
@@ -541,7 +665,7 @@ def materialize(
             raise GenerationError("profile.reasoning requires ullm.worker.v2")
     elif worker_profile.get("protocol") == "ullm.worker.v2":
         raise GenerationError("ullm.worker.v2 profile requires reasoning")
-    _validate_promotion_dispatch(profile, promotion_profile)
+    _validate_promotion_dispatch(profile, promotion_profile, mode=mode)
 
     tokenizer_root = Path(str(tokenizer_profile.get("root", ""))).resolve()
     tokenizer_config = _load_json(
@@ -649,17 +773,31 @@ def materialize(
         package_manifest_path=package_manifest_path,
         package_manifest_sha256=package_manifest_sha256,
         manifest=document,
+        mode=mode,
     )
     return document
 
 
-def generate(
+def materialize(
+    profile_path: Path, *, source_root: Path | None = None
+) -> dict[str, Any]:
+    """Materialize a normally admissible production or historical manifest."""
+
+    return _materialize(
+        profile_path,
+        source_root=source_root,
+        mode=_PromotionGenerationMode.FINAL,
+    )
+
+
+def _generate(
     profile_path: Path,
     output_path: Path,
     *,
-    source_root: Path | None = None,
+    source_root: Path | None,
+    mode: _PromotionGenerationMode,
 ) -> str:
-    document = materialize(profile_path, source_root=source_root)
+    document = _materialize(profile_path, source_root=source_root, mode=mode)
     if output_path.is_symlink():
         raise GenerationError("output path must not be a symlink")
     output_path = output_path.resolve()
@@ -690,6 +828,54 @@ def generate(
     finally:
         if temporary is not None:
             temporary.unlink(missing_ok=True)
+
+
+def generate(
+    profile_path: Path,
+    output_path: Path,
+    *,
+    source_root: Path | None = None,
+) -> str:
+    """Generate a normally admissible production or historical manifest."""
+
+    return _generate(
+        profile_path,
+        output_path,
+        source_root=source_root,
+        mode=_PromotionGenerationMode.FINAL,
+    )
+
+
+def generate_aq4_promotion_ephemeral(
+    profile_path: Path,
+    output_path: Path,
+    *,
+    source_root: Path | None = None,
+) -> str:
+    """Generate only an AQ4 pre-evidence manifest from its strict scaffold."""
+
+    return _generate(
+        profile_path,
+        output_path,
+        source_root=source_root,
+        mode=_PromotionGenerationMode.AQ4_EPHEMERAL,
+    )
+
+
+def generate_sq8_promotion_ephemeral(
+    profile_path: Path,
+    output_path: Path,
+    *,
+    source_root: Path | None = None,
+) -> str:
+    """Generate only an SQ8 pre-evidence manifest from its strict scaffold."""
+
+    return _generate(
+        profile_path,
+        output_path,
+        source_root=source_root,
+        mode=_PromotionGenerationMode.SQ8_EPHEMERAL,
+    )
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:

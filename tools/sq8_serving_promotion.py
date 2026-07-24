@@ -32,6 +32,9 @@ GENERATOR_PATH = ROOT / "tools/generate-served-model.py"
 
 EVIDENCE_SCHEMA = "ullm.sq8_serving_promotion_evidence.v1"
 RECEIPT_SCHEMA = "ullm.sq8_serving_promotion.v1"
+EPHEMERAL_RECEIPT_SCHEMA = (
+    "ullm.sq8_serving_promotion_ephemeral_receipt.v1"
+)
 BUILD_RECEIPT_SCHEMA_V1 = "ullm.sq8_worker_build_receipt.v1"
 BUILD_RECEIPT_SCHEMA = "ullm.sq8_worker_build_receipt.v2"
 BUILD_PROVENANCE_SCHEMA_V1 = "ullm.sq8_worker_build_provenance.v1"
@@ -2259,8 +2262,32 @@ def _manifest_semantics(
         Path(_text(promotion["receipt"], "SQ8 ephemeral receipt path")),
         "SQ8 ephemeral receipt path",
     )
-    if stable_hash(receipt_path, "SQ8 ephemeral receipt")[1] != _hash(
-        promotion["receipt_sha256"], "SQ8 ephemeral receipt SHA-256"
+    receipt, receipt_raw = _load_json_file(
+        receipt_path,
+        "SQ8 ephemeral receipt",
+        canonical=True,
+        required_mode=0o444,
+        required_nlink=1,
+    )
+    receipt_product = _exact(
+        receipt.get("product"),
+        {"artifact_content_sha256"},
+        "SQ8 ephemeral receipt product",
+    )
+    if (
+        set(receipt) != {"schema_version", "source_commit", "product"}
+        or receipt.get("schema_version") != EPHEMERAL_RECEIPT_SCHEMA
+        or receipt.get("source_commit") != promotion["source_commit"]
+        or _hash(
+            receipt_product["artifact_content_sha256"],
+            "SQ8 ephemeral receipt artifact content SHA-256",
+        )
+        != artifact["content_sha256"]
+        or hashlib.sha256(receipt_raw).hexdigest()
+        != _hash(
+            promotion["receipt_sha256"],
+            "SQ8 ephemeral receipt SHA-256",
+        )
     ):
         fail("SQ8 ephemeral promotion receipt binding differs")
     return {
@@ -2367,6 +2394,7 @@ def prepare_ephemeral_manifest(
     if product["model_revision"] != profile["public"]["revision"]:
         fail("SQ8 ephemeral product and profile revisions differ")
     scaffold = {
+        "schema_version": EPHEMERAL_RECEIPT_SCHEMA,
         "source_commit": build["source"]["commit"],
         "product": {"artifact_content_sha256": product["artifact"]["content_sha256"]},
     }
@@ -2376,6 +2404,7 @@ def prepare_ephemeral_manifest(
     profile_copy["promotion"] = {
         "receipt": os.fspath(receipt_output),
         "source_commit_from_receipt": ["source_commit"],
+        "required_schema_version": EPHEMERAL_RECEIPT_SCHEMA,
     }
     generator = _load_module("_ullm_sq8_ephemeral_generator", GENERATOR_PATH)
     with tempfile.TemporaryDirectory(
@@ -2386,7 +2415,7 @@ def prepare_ephemeral_manifest(
         temporary_manifest = temporary / "manifest.json"
         temporary_profile.write_bytes(_canonical_json(profile_copy))
         try:
-            generator.generate(
+            generator.generate_sq8_promotion_ephemeral(
                 temporary_profile,
                 temporary_manifest,
                 source_root=source_root,

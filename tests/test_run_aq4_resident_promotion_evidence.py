@@ -12,6 +12,9 @@ import pytest
 
 
 ROOT = Path(__file__).resolve().parents[1]
+FIXTURE_COMMIT = "a" * 40
+FIXTURE_V2_COMMIT = "b" * 40
+FIXTURE_V2_PIPELINE_COMMIT = "c" * 40
 TOOL_PATH = ROOT / "tools/run-aq4-resident-promotion-evidence.py"
 
 
@@ -192,7 +195,7 @@ def test_evidence_uses_ephemeral_bundle_and_sequential_processes(
         worker,
         ready_timeout_seconds=5.0,
         request_timeout_seconds=5.0,
-        source_commit="fixture-commit",
+        source_commit=FIXTURE_COMMIT,
     )
 
     assert output.is_file()
@@ -323,7 +326,7 @@ def test_evidence_accepts_v2_resident_and_keeps_legacy_v1(
         worker,
         ready_timeout_seconds=5.0,
         request_timeout_seconds=5.0,
-        source_commit="fixture-v2-commit",
+        source_commit=FIXTURE_V2_COMMIT,
     )
 
     assert document["ephemeral_bundle"]["manifest"]["worker"]["protocol"] == "ullm.worker.v2"
@@ -390,7 +393,7 @@ def test_v2_evidence_receipt_and_manifest_pipeline_is_bound(
         worker,
         ready_timeout_seconds=5.0,
         request_timeout_seconds=5.0,
-        source_commit="fixture-v2-pipeline",
+        source_commit=FIXTURE_V2_PIPELINE_COMMIT,
     )
     assert evidence["verified"] is True
     receipt = RECEIPT.write_receipt(profile, evidence_path, receipt_path)
@@ -398,7 +401,7 @@ def test_v2_evidence_receipt_and_manifest_pipeline_is_bound(
     manifest = GENERATOR.materialize(profile)
     assert manifest["schema_version"] == "ullm.served_model.v2"
     assert manifest["worker"]["protocol"] == "ullm.worker.v2"
-    assert manifest["promotion"]["source_commit"] == "fixture-v2-pipeline"
+    assert manifest["promotion"]["source_commit"] == FIXTURE_V2_PIPELINE_COMMIT
 
     for label, mutation in (
         (
