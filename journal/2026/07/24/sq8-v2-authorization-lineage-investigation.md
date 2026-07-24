@@ -54,8 +54,8 @@ workerとmanifest起動方式の証跡にならないことが判明していた
   bundle v2、事前発行authorizationのatomic claim、campaign全体を包む
   cross-model temporary window、locked rollback、実装順、admission
   checklistを追記した。
-- 実装コード、service、GPU、systemd、V620、active manifest、artifact、
-  candidate、worker binaryには変更を加えていない。
+- この調査時点では、実装コード、service、GPU、systemd、V620、active
+  manifest、artifact、candidate、worker binaryには変更を加えていない。
 
 ## 次の行動
 
@@ -81,3 +81,102 @@ workerとmanifest起動方式の証跡にならないことが判明していた
    parent-onlyでfresh SQ8 full campaignとreasoning/browser campaignを
    実行する。AQ4 exact bytesへの復旧成功後にcomplete bundle v2を組み、
    最終昇格だけを`--release-bundle`で行う。
+
+## 追記: v2実装完了後の状態
+
+上記は調査時点の記録である。その後、独立Qwen3-14B-FP8 `SQ8_0`向けに
+次を実装した。旧Qwen3.5 `AQ4_0`の48 QKV/Z tensor向けSQ8 overlay系統は
+取り込んでいない。
+
+- Qwen3 reasoning/accounting、worker-v2 discriminatorのexact一致、ratified
+  manifest/worker/session/acceptance/release specs。
+- strict SQ8 serving-promotion evidence/receipt、AQ4/SQ8 exact dispatch、
+  各stageの実`active.json` bytesとcandidate copy/claim/run/outputの束縛。
+- generic reasoning evidence v2、browser evidence v5、SQ8 full campaign
+  identity v2、およびAQ4 six-slot bundle v1と共存するSQ8 nine-slot
+  `ullm.generic_reasoning_release_bundle.v2`。browser v5はPlaywright
+  runner imageとOpenWebUI server imageを分離し、browser実行直前・直後の
+  fixed server image ID/config/name/running stateを記録する。
+- hash由来固定registryのatomic one-shot claim、source-bound fixed plan、
+  exact-six campaignと単一expiry deadline、pinned dirfdと
+  `renameat2(RENAME_EXCHANGE)`、subreaperを用いるlocked transaction。
+- claim SHA-256由来labelを全transient Docker containerへ強制する
+  source-bound wrapper、daemon遅延createを含むquiescence/一括cleanup、
+  AQ4復旧前と最終live proof前のzero-container証明。短縮/clustered
+  `-l`によるlabel上書き、producer単位のwrapper bypass、旧
+  `sudo`/`nsenter` gateway probeを拒否・除去した。
+- fresh SQ8 3 campaign後のexact AQ4復旧/reconciliation、続くfresh AQ4
+  reasoning/browser/bundle-v1 3 campaign、immutable outcome。旧AQ4
+  producerを含むevidence producerだけを固定service identityへdropし、
+  service-owned random private stagingへ隔離する。全descendant reap後に
+  rootがdescriptor-walk、adopt、freeze、validateし、authorized final
+  pathへno-replace発行する。AQ4/SQ8の異なるsource lineageは明示的に
+  分離した。
+- authorizationのOpenWebUI imageとfixed planを同一digestに固定し、
+  compose後のrunning container ID/image ID/config/name/running
+  state/PID/start timestampも各browser evidenceの直前・直後にread-only
+  検証する。
+- root実行toolの一時差替えを防ぐため、SQ8/AQ4双方のcampaign sourceを
+  protected ancestry配下のroot-owned standalone cloneに限定し、worktreeと
+  in-tree `.git`を再帰fingerprintする。linked worktree、symlink、ACL、
+  hardlink、object alternate、group/world writeを拒否し、runner自身も
+  sealed SQ8 cloneから起動する。recoveryは実行するsealed SQ8 code、
+  AQ4 backup runtime、shared unit/environment/credential/rollback operation
+  だけを要求し、旧AQ4 sourceやdisplaced SQ8 runtimeを要求しない。
+- manifestが参照するworker、promotion pair、tokenizer、product/package
+  manifestと全payloadもroot-owned protected ancestry下のruntime closure
+  としてsealし、transaction/recovery/final activationの全command境界で
+  repinする。現行AQ4 hash `5d015a...`のclosureはUID 1000のworker/
+  receipt/evidence、0664のtokenizer 4 files、package 1,044 files
+  （約7.70 GB）をuser-owned tree下に持つため、claim前preflightで意図的に
+  rejectされる。
+- signal defer、expiry後にも使えるlocked recovery。復旧成功にはAQ4
+  bytesに加え、service/boot epoch、gateway/worker
+  PID・PPID・starttime・executable hash、Gateway/OpenWebUI
+  health/modelsのstructured live proofを要求する。
+- candidate readiness後に最低900秒、authorization/claim、source、
+  candidate/runtime、実active bytes、service/gateway/worker epochを監視し、
+  drift無しを確認してからSQ8 fullを開始する。SQ8 fullの上限は21,600秒で、
+  authorization残時間が常にさらにcapする。
+- source-owned Pythonは`/usr/bin/python3.12 -I -S -B`、root-owned
+  sibling importが必要なROCm vendor scriptは
+  `/usr/bin/python3.12 -E -S -B`へ固定した。OS/Python/ROCm/ELF、
+  Git/Docker/systemd内部とcontainer runtimeは明示TCBである。
+- browser JWTをroot-owned parent
+  `/run/ullm-campaign-secrets`（`uid=0,gid=1000,mode=0750`）配下の
+  `openwebui-session.jwt`（`uid=0,gid=1000,mode=0640`）へ固定し、
+  same-UIDによるpathname差替えを拒否する。
+- `succeeded_restored` exact-six outcome、fresh AQ4 bundle v1、complete
+  SQ8 bundle v2、exact AQ4 rollbackを前提にしたfinal activation plan v2、
+  default read-only preflight、exact plan SHA/literal confirmation、および
+  locked rollback。final activation runner自身もmodule-derived
+  root-owned standalone source sealとしてplanへcommit/treeを固定する。
+
+実装はCPU/private-copy/mock testまでで、本番`active.json`、
+`ullm-openai.service`のlifecycle、systemd設定、GPU、V620は変更して
+いない。調査中に`systemctl show`相当のread-only metadata queryを一度
+実施したが、start/stop/restartやunit/environment変更は行っていない。
+production authorization/claim、fresh campaign、final
+activation/rollbackも未実行で、real OpenWebUI browser-session JWTは
+未用意である。
+
+この追記時点では、全実装を含む単一clean commitからの最終worker
+rebuild、build receipt、SHA-256、最終artifact pathは未確定である。既存の
+`uLLM-sq8-manifest-candidate-release-ee62d04e`はbaselineのまま保持し、
+最終identityとして再利用しない。
+
+次の人間作業順は、(1) 別authorization/lock/rollback/live proofを持つ
+AQ4-to-AQ4 runtime-hardening promotionを実施し、root-owned closure向けの
+fresh promotion pairと新しいAQ4 manifestを作る（GPU/service windowが
+必要）、(2) clean detached commitからfinal SQ8 workerを
+build/freeze、(3) SQ8 promotion pair/profile/candidateを別pathへ
+no-clobber発行してcomplete closureをroot-stage、(4) exact commitの
+SQ8/AQ4 standalone cloneを別のroot-owned pathへ封印してsealed SQ8側の
+runnerからpreflight、(5) JWTを用意してhardened AQ4を`before`にした
+exact-six v2 authorizationを事前発行、(6) 承認済みmaintenance windowで
+serviceを停止しfixed inactive setをread-only確認してから初めてclaimする、
+(7) locked transaction内でfresh SQ8 3 campaign、exact AQ4復旧、fresh
+AQ4 3 campaign（bundle v1を含む）を実行し`succeeded_restored`を確認、
+(8) SQ8 complete bundle v2を独立検証、(9) outcome由来AQ4 bundle v1と
+SQ8 bundle v2を再検証するfinal plan/read-only preflightをreview、
+(10) Claude+ユーザー明示承認後だけactivation実行、である。
