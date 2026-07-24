@@ -1456,3 +1456,91 @@ Human/operator order:
 9. prepare/review the final plan and read-only preflight; and
 10. execute activation only after explicit Claude+user approval, using the
    plan-bound rollback route if rollback is later needed.
+
+## 16. Final audit delta
+
+This section supersedes the admission and final-activation details in
+sections 15.1 and 15.3 where they refer to plan v2. It also supersedes the
+ordering of steps 1 and 2 in section 15.4: this task fixes the final SQ8
+release immediately after the last clean source commit, before the future
+live AQ4-to-AQ4 hardening window. It does not authorize a live campaign or
+activation.
+
+### 16.1 Final nine-step implementation state
+
+| Step | Final implementation state |
+|---|---|
+| 1. Qwen3 reasoning/accounting and worker-v2 equality | **Complete on CPU.** Exact worker-v2 discriminators, one-token Qwen3 delimiters, budget/forced-close/history/answer-reservation/cancellation/reset behavior, and both release counters are enforced. GPU worker startup remains a live hold. |
+| 2. V2 specifications | **Complete.** Manifest, worker, build release, session, acceptance, SQ8 OpenWebUI release, authorization, bundle, and final-route contracts are versioned and fail closed. |
+| 3. Promotion evidence and dispatch | **Complete.** Final AQ4/SQ8 worker-v2 generation requires the exact format selector. Dedicated promotion-only ephemeral APIs/schemas cannot be admitted as final SQ8 promotion receipts. The selectorless compatibility exception is limited to the historical SQ8 worker-v1 input. |
+| 4. Clean worker rebuild | **Prepared here; performed only after the final documentation commit.** The build uses a new detached clean clone and new release/build paths. The old `uLLM-sq8-manifest-candidate-release-ee62d04e` remains a baseline only. |
+| 5. Actual active bytes per stage | **Complete.** The generic-reasoning, browser, and SQ8-full active-binding evidence validators require the production path `/etc/ullm/served-models/active.json`; the transaction checks its exact bytes against the expected candidate or restored AQ4 state at every boundary. |
+| 6. Generic bundle v2 | **Complete and coexisting with v1.** Bundle v2 derives the claim only from the fixed registry/authorization hash and validates the three SQ8 campaigns plus final promotion lineage. AQ4 bundle v1 remains a separate unchanged admission input. Live complete bundles await fresh campaigns. |
+| 7. One-shot authorization | **Complete; not used live.** New campaign admission uses in-window `load_live_claim` with bound inputs. Archival bundle/outcome/recovery audit and restore/recovery repinning may load the expired consumed claim, but cannot authorize new work. Claim/outcome publication uses `renameat2(RENAME_NOREPLACE)`, parent `fsync`, and exact single-link re-open. |
+| 8. Locked transaction | **Complete in private/mock tests; not run live.** All v2 producers require transaction-private staging. Preflight, pre-switch, and repin perform full final SQ8 receipt/evidence/manifest validation. Protected root wrappers reject ambient interpreter/import state before loading campaign code. AQ4 restore and recovery retain only the archival authority needed after expiry. |
+| 9. Final activation route | **Prepared as plan v3; never executed.** Durable intent precedes the swap; credential seals precede intent; success receipt publication is the commit boundary. Explicit recovery covers an intent-only crash, `failed_restore`, and `rollback_incomplete`, without consuming the success pathname on a failed attempt. |
+
+### 16.2 Admission and publication invariants added by the final audit
+
+Normal worker-v2 generation is fail closed: AQ4 requires the final AQ4
+selector and SQ8 requires the final SQ8 selector. Promotion preparation calls
+separate non-CLI ephemeral generation functions with exact AQ4/SQ8 schemas;
+the SQ8 transaction's candidate validator always runs complete final
+promotion validation and generator-binding validation at preflight, before
+the switch, and on every relevant repin.
+
+All v2 evidence producers require their transaction-supplied staging
+directory. Each new campaign stage reloads the consumed authorization through
+`load_live_claim`, rechecking the current validity window and bound inputs.
+Post-campaign bundle/outcome/recovery audit and restore/recovery repinning are
+deliberately different: they may treat the claim as archival evidence, derive
+its pathname and required UID from the fixed production policy, and never
+authorize a new campaign mutation.
+
+The campaign issue/claim/run/recovery wrappers perform their exact
+root-owned `/usr/bin/python3.12 -I -S -B` and protected-source checks before
+local imports. Immutable claim, outcome, recovery, AQ4 backup, bundle, intent,
+activation, rollback, and recovery-success publication uses a one-name
+`renameat2(RENAME_NOREPLACE)` commit, parent-directory `fsync`, and
+format-specific exact post-commit validation. Policy-owned authorization and
+final receipts also verify owner; the bundle verifies exact bytes, mode, and
+`nlink == 1`. There is no temporary hard-link state.
+
+### 16.3 Final activation v3 and crash recovery
+
+`ullm.served_model.final_activation_plan.v3` binds operations v2, separate
+intent, activation-outcome, rollback-outcome, recovery-success, and dedicated
+recovery-proof destinations. Read-only preflight is not ready when either
+live credential cannot be sealed. Execution reacquires the same activation
+lock, repeats credential sealing, publishes
+`ullm.served_model.final_activation_intent.v1` durably, and only then performs
+the exact-current active-manifest exchange.
+
+`ullm.served_model.final_activation_outcome.v2` publication is the successful
+activation commit boundary. No fallible source recheck follows it before the
+termination guard is committed. A crash after intent with no activation
+outcome, an outcome with `failed_restore`, or an interrupted/incomplete
+manual rollback is handled only by:
+
+```text
+sudo -- /usr/bin/python3.12 -I -S -B /ABSOLUTE/ROOT-OWNED-SEALED-SQ8-SOURCE/tools/rollback-served-model.py \
+  --plan /ABSOLUTE/final-activation-plan.json \
+  --recover-failed-activation \
+  --execute \
+  --confirm-plan-sha256 EXACT-PRINTED-PLAN-SHA256 \
+  --confirmation RECOVER_FAILED_SQ8_0_TO_EXACT_AQ4
+```
+
+The recovery route accepts only exact plan-bound SQ8 candidate bytes or exact
+AQ4 rollback bytes, restores AQ4 when necessary, and requires reverse
+reconciliation plus its dedicated AQ4 live proof. A failed recovery writes
+an immutable attempt-specific audit/proof derived from the plan-bound base
+and a random 256-bit attempt ID. It does not occupy the one-shot success
+receipt, so a later explicitly reviewed invocation can retry.
+
+The final focused CPU/private/mock regressions passed for dispatch/promotion,
+bundle v1/v2, authorization/producers, locked transaction, final
+activation/recovery, SQ8 full campaign contracts, additional AQ4
+served-model compatibility, and the OpenAI gateway. No production
+`active.json`, service, systemd, Docker container, GPU, V620, JWT, campaign,
+activation, rollback, or recovery action was performed.

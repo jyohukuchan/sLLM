@@ -180,3 +180,77 @@ AQ4 3 campaign（bundle v1を含む）を実行し`succeeded_restored`を確認�
 (8) SQ8 complete bundle v2を独立検証、(9) outcome由来AQ4 bundle v1と
 SQ8 bundle v2を再検証するfinal plan/read-only preflightをreview、
 (10) Claude+ユーザー明示承認後だけactivation実行、である。
+
+## 追記: final admission / crash-recovery audit
+
+上の実装完了追記の後、production admission と final activation の
+failure boundaryをもう一度監査し、次を追加でhardeningした。ここでいう
+SQ8は独立`SQ8_0`だけであり、旧AQ4 partial-FP8 overlayとは無関係である。
+
+- 通常のserved-model generatorは、worker-v2のAQ4/SQ8について最終
+  format selectorを必須にしてfail closedとした。歴史互換は既存の
+  selector無しSQ8 worker-v1だけに限定した。promotion前の一時manifestは
+  AQ4/SQ8それぞれの専用non-CLI APIと厳密なephemeral receipt schemaへ
+  分離し、final candidate receiptとして流用できない。
+- v2 evidence producerはtransaction-private stagingを常に必須とし、
+  新規campaignの各admissionで期限・対象・入力を再検証する
+  `load_live_claim`を使う。完了済みbundle/outcome/recoveryのauditと、
+  expiry後にもAQ4を復旧させるrestore/recovery repinは、authorization
+  hashから導出した固定claim registry/UIDに対するarchival `load_claim`
+  を使えるが、それだけで新規campaignを認可しない。任意claim pathnameは
+  信頼しない。
+- 実`active.json`の観測対象は
+  `/etc/ullm/served-models/active.json`に固定した。transactionは
+  preflight、candidate switch直前、各repinでfinal SQ8 promotion
+  receipt/evidence/manifest bindingを完全再検証し、promotion前の
+  ephemeral scaffoldをcandidateとして拒否する。
+- root control wrapperは、campaign-local importとargument parsingより前に
+  exact root `/usr/bin/python3.12 -I -S -B` invocation、ambient interpreter
+  configuration、protected ancestry、single-link source filesを検査し、
+  clean sealed sourceからだけ実行する。
+- claim、outcome、recovery、AQ4 backup、bundle、activation receiptの
+  immutable publicationは、temporary hardlinkを作らず
+  `renameat2(RENAME_NOREPLACE)`、file/parent `fsync`、format固有の
+  post-commit再検証を使う。policy-owned authorization/final receiptは
+  ownerも検証し、bundleはexact bytes/mode/`nlink == 1`を検証する。
+  rename後のfaultを未commitと誤認して同じone-shot出力を再利用しない
+  fault testも追加した。
+- final activationは`ullm.served_model.final_activation_plan.v3`、
+  operations v2、outcome v2へ更新した。credential sealをswap前に完了し、
+  immutable `final_activation_intent.v1`をdurable publicationしてからだけ
+  candidate bytesへ交換する。成功receipt publicationがcommit boundaryで、
+  その後にAQ4へ戻し得るfallible source checkは存在しない。
+- intent後のSIGKILL/power-loss、`failed_restore`、および
+  `rollback_incomplete`には、同じlockとexact AQ4 bytesを使う明示確認付き
+  recovery routeを追加した。失敗したrecovery attemptはplan-bound baseと
+  random 256-bit attempt IDから導出した別のimmutable audit/proofへ残し、
+  成功receipt pathnameを消費しないため再試行できる。
+
+統合後のCPU/private/mock回帰では、dispatch/promotion 137件、
+bundle/validator 82件、authorization/producer 203件（22 subtests）、
+locked transaction 125件、final activation/recovery 100件、
+SQ8 full production contract 25件（16 subtests）、追加AQ4/served-model
+互換77件、gateway 241件が通過した。Rust側はこのfinal auditで変更して
+おらず、直前の全workspace回帰が通過済みである。全`tests/`一括実行は、
+現行AQ4 bootstrap identityと過去固定fixtureの既知の不一致を含むため、
+「全件green」の根拠には使っていない。
+
+この監査中もproduction GPU、service lifecycle、systemd設定、
+`active.json`、JWT、campaign、activationは変更・実行していない。
+既報のread-only systemd metadata queryに加え、transaction unit testの
+隔離修正前に一度だけtest固有labelでDocker inventoryをread-only照会した。
+該当containerは0件で、removeその他のmutationは無かった。その後のtestは
+daemonへ接続しない境界へ修正済みである。
+
+このjournalを含む最終clean commitを固定した直後、そのcommitのdetached
+clean cloneから新しい別pathへworker releaseをbuildし、release内のbuild
+receipt、seal、worker SHA-256を外部artifactとして固定する。build後には
+source commitを変える追記commitを作らず、exact path/hashはoperator報告と
+release receiptを正とする。既存
+`uLLM-sq8-manifest-candidate-release-ee62d04e`は引き続きread-only baseline
+であり、削除・上書き・最終identityへの流用をしない。
+
+このbuild順序は、上の暫定「次の人間作業順」にあったAQ4 hardeningとSQ8
+buildの順序を置き換える。今回SQ8 final releaseを先に固定し、以後の人間
+作業はAQ4-to-AQ4 hardeningから開始して、固定済みSQ8 releaseをその後の
+protected runtime stagingへ使う。
