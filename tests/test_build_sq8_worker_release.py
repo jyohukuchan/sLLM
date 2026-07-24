@@ -234,12 +234,15 @@ def test_build_rejects_existing_output_or_target_without_clobber(
     assert not output.exists()
 
 
-def test_build_rejects_ambient_compile_override(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("value", ["-C target-cpu=native", ""])
+def test_build_rejects_present_ambient_compile_override(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    value: str,
 ) -> None:
     repo = source_tree(tmp_path)
     runner = FakeRunner(repo)
-    monkeypatch.setenv("RUSTFLAGS", "-C target-cpu=native")
+    monkeypatch.setenv("RUSTFLAGS", value)
     with pytest.raises(TOOL.BuildError, match="ambient build override"):
         TOOL.build_release(
             repo,

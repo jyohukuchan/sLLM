@@ -208,6 +208,11 @@ both its byte length and SHA-256 to equal the provenance record. A resealed
 release cannot substitute internally consistent input metadata for the live
 source bytes.
 
+Every name in `ambient_compile_overrides_rejected` must be absent from the
+builder process environment. Presence with an empty string is still presence
+and is rejected; it may not be silently represented as an absent or `null`
+override in the receipt.
+
 ## 5. Hash inventory and seal
 
 `SHA256SUMS` is exact ASCII and contains these records in this order:

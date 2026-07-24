@@ -341,7 +341,7 @@ def build_release(
     _fresh_path(target_directory, "Cargo target directory")
     commit, tree, source_date_epoch, inputs = _source_identity(repo_root, runner)
     for name in DISALLOWED_BUILD_ENVIRONMENT:
-        if os.environ.get(name):
+        if name in os.environ:
             raise BuildError(f"ambient build override is forbidden: {name}")
     cargo = shutil.which("cargo")
     if cargo is None:
