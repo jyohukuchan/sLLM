@@ -125,6 +125,12 @@ Successful fresh AQ4 and SQ8 campaigns permit assembly of
 `ullm.generic_reasoning_release_bundle.v2`; they do not themselves perform
 final activation. Final SQ8 activation consumes that independently validated
 bundle through the explicit activation procedure only after human review.
+The bundle-v2 root and each of its nine referenced component files are
+regular, non-symlink, mode-`0444`, single-link files. The validator performs
+stable descriptor-backed reads and rejects a writable or hard-linked
+component even when its recorded digest and semantic contents would otherwise
+validate. This additional v2 publication boundary does not alter bundle-v1
+AQ4 behavior.
 
 The campaign and final activation are intentionally not executed while GPU
 approval or the real OpenWebUI JWT is unavailable.

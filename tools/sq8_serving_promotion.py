@@ -785,7 +785,32 @@ def validate_build_receipt(
         or build["result"] != "success"
     ):
         fail("SQ8 worker build command differs")
-    _validate_build_environment(build["environment"])
+    build_environment = _validate_build_environment(build["environment"])
+    if schema == BUILD_RECEIPT_SCHEMA and verify_live_source:
+        _, source_epoch_raw = _git(
+            source_root,
+            [
+                "show",
+                "-s",
+                "--format=%ct",
+                document["source"]["commit"],
+            ],
+            "worker build source commit timestamp",
+        )
+        try:
+            source_epoch = source_epoch_raw.strip().decode(
+                "ascii",
+                errors="strict",
+            )
+        except UnicodeError as error:
+            raise PromotionError(
+                "worker build source commit timestamp is invalid"
+            ) from error
+        if (
+            SOURCE_DATE_EPOCH_RE.fullmatch(source_epoch) is None
+            or build_environment["SOURCE_DATE_EPOCH"] != source_epoch
+        ):
+            fail("SOURCE_DATE_EPOCH differs from the source commit")
     inputs = document["inputs"]
     if type(inputs) is not list or not inputs:
         fail("SQ8 worker build inputs are empty")
@@ -842,6 +867,8 @@ def _validate_build_provenance(
     path: Path,
     *,
     receipt: dict[str, Any],
+    verify_live_source: bool,
+    source_root: Path | None,
 ) -> dict[str, Any]:
     provenance, _ = _load_json_file(
         path,
@@ -896,15 +923,32 @@ def _validate_build_provenance(
             {"bytes", "sha256"},
             f"SQ8 worker build provenance input {relative}",
         )
+        recorded_bytes = _integer(
+            entry["bytes"],
+            f"SQ8 worker build provenance input {relative} bytes",
+        )
         if (
-            _integer(
-                entry["bytes"],
-                f"SQ8 worker build provenance input {relative} bytes",
-            )
-            < 0
+            recorded_bytes < 0
             or entry["sha256"] != raw["sha256"]
         ):
             fail("SQ8 worker build provenance input identity differs")
+        if verify_live_source:
+            if source_root is None:
+                fail("live build provenance validation requires a source root")
+            input_path = _safe_repo_file(
+                source_root,
+                relative,
+                f"SQ8 worker build provenance input {relative}",
+            )
+            live_bytes, live_sha256 = stable_hash(
+                input_path,
+                f"SQ8 worker build provenance input {relative}",
+            )
+            if (
+                recorded_bytes != live_bytes
+                or entry["sha256"] != live_sha256
+            ):
+                fail("SQ8 worker build provenance input identity differs")
     if set(provenance_inputs) != {entry["path"] for entry in receipt["inputs"]}:
         fail("SQ8 worker build provenance input set differs")
     build = _exact(
@@ -1032,7 +1076,12 @@ def validate_build_release(
     ):
         fail("SQ8 worker build release locator differs")
     provenance_path = release_root / "build-provenance.json"
-    _validate_build_provenance(provenance_path, receipt=receipt)
+    _validate_build_provenance(
+        provenance_path,
+        receipt=receipt,
+        verify_live_source=verify_live_source,
+        source_root=source_root,
+    )
 
     member_hashes: dict[str, str] = {}
     for name in BUILD_SUMMED_MEMBERS:

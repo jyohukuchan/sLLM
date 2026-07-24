@@ -72,6 +72,12 @@ class Fixture:
         self._write_source()
         self.commit = self._git("rev-parse", "HEAD")
         self.tree = self._git("rev-parse", "HEAD^{tree}")
+        self.source_epoch = self._git(
+            "show",
+            "-s",
+            "--format=%ct",
+            self.commit,
+        )
         subprocess.run(
             ["git", "-C", self.source, "checkout", "--detach", "-q", self.commit],
             check=True,
@@ -202,7 +208,7 @@ class Fixture:
             "ROCM_PATH": "/opt/rocm",
             "ROCR_VISIBLE_DEVICES": "-1",
             "RUSTC_WRAPPER": None,
-            "SOURCE_DATE_EPOCH": "1784832416",
+            "SOURCE_DATE_EPOCH": self.source_epoch,
             "ULLM_HIP_VISIBLE_DEVICES": "-1",
         }
         build_argv = [
@@ -568,6 +574,39 @@ class Fixture:
             output_path=self.receipt,
             source_root=self.source,
         )
+
+
+def reseal_build_release(fixture: Fixture) -> None:
+    release = fixture.build_release
+    release.chmod(0o755)
+    sums_raw = "".join(
+        f"{sha(release / name)}  {name}\n"
+        for name in PROMOTION.BUILD_SUMMED_MEMBERS
+    ).encode("ascii")
+    sums = release / "SHA256SUMS"
+    sums.chmod(0o644)
+    sums.write_bytes(sums_raw)
+    sums.chmod(0o444)
+    receipt = json.loads(fixture.build_receipt.read_text(encoding="ascii"))
+    seal = release / "SEALED.json"
+    seal.chmod(0o644)
+    write_json(
+        seal,
+        {
+            "schema_version": PROMOTION.BUILD_RELEASE_SEAL_SCHEMA,
+            "source_commit": receipt["source"]["commit"],
+            "source_tree": receipt["source"]["tree"],
+            "worker_sha256": receipt["worker"]["sha256"],
+            "build_receipt_sha256": sha(fixture.build_receipt),
+            "build_provenance_sha256": sha(
+                release / "build-provenance.json"
+            ),
+            "sha256sums_sha256": hashlib.sha256(sums_raw).hexdigest(),
+            "complete": True,
+        },
+        mode=0o444,
+    )
+    release.chmod(0o555)
 
 
 def test_sq8_evidence_sources_bind_the_worker_release_builder() -> None:
@@ -1072,6 +1111,56 @@ def test_v2_complete_build_release_mutations_fail_closed(
     with pytest.raises(PROMOTION.PromotionError):
         PROMOTION.validate_build_release(
             release,
+            source_root=fixture.source,
+        )
+
+
+def test_v2_release_rejects_resealed_source_epoch_forgery(
+    tmp_path: Path,
+) -> None:
+    fixture = Fixture(tmp_path)
+    fixture.build_release.chmod(0o755)
+    receipt = json.loads(fixture.build_receipt.read_text(encoding="ascii"))
+    provenance_path = fixture.build_release / "build-provenance.json"
+    provenance = json.loads(provenance_path.read_text(encoding="ascii"))
+    forged_epoch = str(int(fixture.source_epoch) + 1)
+    receipt["build"]["environment"]["SOURCE_DATE_EPOCH"] = forged_epoch
+    provenance["build"]["environment"]["SOURCE_DATE_EPOCH"] = forged_epoch
+    fixture.build_receipt.chmod(0o644)
+    write_json(fixture.build_receipt, receipt, mode=0o444)
+    provenance_path.chmod(0o644)
+    write_json(provenance_path, provenance, mode=0o444)
+    reseal_build_release(fixture)
+
+    with pytest.raises(
+        PROMOTION.PromotionError,
+        match="SOURCE_DATE_EPOCH differs",
+    ):
+        PROMOTION.validate_build_release(
+            fixture.build_release,
+            source_root=fixture.source,
+        )
+
+
+def test_v2_release_rejects_resealed_provenance_input_size_forgery(
+    tmp_path: Path,
+) -> None:
+    fixture = Fixture(tmp_path)
+    fixture.build_release.chmod(0o755)
+    provenance_path = fixture.build_release / "build-provenance.json"
+    provenance = json.loads(provenance_path.read_text(encoding="ascii"))
+    relative = PROMOTION.BUILD_INPUTS_V2[0]
+    provenance["source"]["inputs"][relative]["bytes"] += 1
+    provenance_path.chmod(0o644)
+    write_json(provenance_path, provenance, mode=0o444)
+    reseal_build_release(fixture)
+
+    with pytest.raises(
+        PROMOTION.PromotionError,
+        match="provenance input identity differs",
+    ):
+        PROMOTION.validate_build_release(
+            fixture.build_release,
             source_root=fixture.source,
         )
 

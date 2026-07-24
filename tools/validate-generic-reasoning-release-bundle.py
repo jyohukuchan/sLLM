@@ -335,7 +335,12 @@ def _resolve_component_v2(
     except (OSError, ValueError) as error:
         raise ValidationError(f"{label}.path escapes the bundle directory") from error
     _hash(value["sha256"], f"{label}.sha256")
-    raw = _stable_read_regular(resolved, label, MAX_COMPONENT_BYTES)
+    raw = _stable_read_regular(
+        resolved,
+        label,
+        MAX_COMPONENT_BYTES,
+        require_immutable=True,
+    )
     digest = hashlib.sha256(raw).hexdigest()
     if digest != value["sha256"]:
         raise ValidationError(f"{label} SHA-256 differs")

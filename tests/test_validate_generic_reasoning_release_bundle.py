@@ -156,7 +156,17 @@ def seal_bundle_v2(path: Path) -> None:
     path.chmod(0o444)
 
 
+def seal_bundle_v2_components(path: Path, value: object) -> None:
+    assert isinstance(value, dict)
+    artifacts = value["artifacts"]
+    assert isinstance(artifacts, dict)
+    for artifact in artifacts.values():
+        assert isinstance(artifact, dict)
+        (path.parent / artifact["path"]).chmod(0o444)
+
+
 def rewrite_bundle_v2(path: Path, value: object) -> None:
+    seal_bundle_v2_components(path, value)
     path.chmod(0o644)
     try:
         write_json(path, value)
@@ -721,6 +731,10 @@ def make_v2_bundle(
                 "environment_sha256": rollback_sha,
             },
         },
+    )
+    seal_bundle_v2_components(
+        bundle_path,
+        json.loads(bundle_path.read_text(encoding="ascii")),
     )
     seal_bundle_v2(bundle_path)
 
@@ -1339,6 +1353,10 @@ def make_real_validator_v2_bundle(
             },
         },
     )
+    seal_bundle_v2_components(
+        bundle_path,
+        json.loads(bundle_path.read_text(encoding="ascii")),
+    )
     seal_bundle_v2(bundle_path)
     return bundle_path, promotion
 
@@ -1619,6 +1637,34 @@ def test_bundle_v2_root_rejects_hard_link(
         BUNDLE.validate(bundle)
 
 
+def test_bundle_v2_component_must_be_mode_0444(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bundle, fakes, _report = make_v2_bundle(tmp_path)
+    install_v2_fakes(monkeypatch, fakes)
+    document = json.loads(bundle.read_text(encoding="ascii"))
+    component = tmp_path / document["artifacts"]["release_validator"]["path"]
+    component.chmod(0o644)
+
+    with pytest.raises(BUNDLE.ValidationError, match="mode-0444 single-link"):
+        BUNDLE.validate(bundle)
+
+
+def test_bundle_v2_component_rejects_hard_link(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bundle, fakes, _report = make_v2_bundle(tmp_path)
+    install_v2_fakes(monkeypatch, fakes)
+    document = json.loads(bundle.read_text(encoding="ascii"))
+    component = tmp_path / document["artifacts"]["release_validator"]["path"]
+    os.link(component, tmp_path / "release-validator-hardlink.json")
+
+    with pytest.raises(BUNDLE.ValidationError, match="mode-0444 single-link"):
+        BUNDLE.validate(bundle)
+
+
 def test_bundle_v2_root_rejects_symlink(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1676,6 +1722,7 @@ def test_bundle_v2_does_not_reinterpret_release_v1_as_lineage_v2(
     release = json.loads(release_path.read_text(encoding="ascii"))
     release["schema_version"] = "ullm.generic_reasoning_release_evidence.v1"
     release.pop("campaign_lineage")
+    release_path.chmod(0o644)
     write_json(release_path, release)
     value["artifacts"]["release_evidence"]["sha256"] = digest(release_path)
     rewrite_bundle_v2(bundle, value)
@@ -1694,6 +1741,7 @@ def test_bundle_v2_rejects_cross_campaign_claim_mix(
     release_path = tmp_path / value["artifacts"]["release_evidence"]["path"]
     release = json.loads(release_path.read_text(encoding="ascii"))
     release["campaign_lineage"]["claim"]["sha256"] = "0" * 64
+    release_path.chmod(0o644)
     write_json(release_path, release)
     value["artifacts"]["release_evidence"]["sha256"] = digest(release_path)
     rewrite_bundle_v2(bundle, value)
@@ -1756,6 +1804,8 @@ def test_bundle_v2_rejects_alternate_valid_release_lineage_not_in_authorization(
         stages=stages,
     )
     write_immutable_directory(alternate_output, values)
+    release_path.chmod(0o644)
+    release_report_path.chmod(0o644)
     write_json(release_path, release)
     write_json(
         release_report_path,
@@ -1861,6 +1911,7 @@ def test_bundle_v2_rejects_candidate_receipt_hash_mismatch(
     receipt_path = tmp_path / value["artifacts"]["promotion_receipt"]["path"]
     receipt = json.loads(receipt_path.read_text(encoding="ascii"))
     receipt["product"] = {"mutated": True}
+    receipt_path.chmod(0o644)
     write_json(receipt_path, receipt)
     value["artifacts"]["promotion_receipt"]["sha256"] = digest(receipt_path)
     rewrite_bundle_v2(bundle, value)
@@ -1877,6 +1928,7 @@ def test_bundle_v2_rejects_forged_campaign_validator_report(
     install_v2_fakes(monkeypatch, fakes)
     value = json.loads(bundle.read_text(encoding="ascii"))
     report_path = tmp_path / value["artifacts"]["model_campaign_validator"]["path"]
+    report_path.chmod(0o644)
     write_json(
         report_path,
         {

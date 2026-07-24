@@ -102,8 +102,10 @@ ULLM_HIP_VISIBLE_DEVICES
 The isolation values are `CARGO_INCREMENTAL=0`, `GPU_ARCH=gfx1201`, all four
 recorded GPU visibility variables equal to `-1`, and `RUSTC_WRAPPER=null`.
 `CARGO_BUILD_JOBS` is a positive decimal integer. `SOURCE_DATE_EPOCH` is a
-decimal epoch derived from the source commit. `CARGO_TARGET_DIR` and
-`ROCM_PATH` are absolute build-audit paths, not deployed runtime locators.
+decimal epoch exactly equal to the `%ct` commit timestamp returned by Git for
+`source.commit`; a merely well-formed or self-consistent alternate value is
+invalid. `CARGO_TARGET_DIR` and `ROCM_PATH` are absolute build-audit paths, not
+deployed runtime locators.
 
 `inputs` is the bytewise-sorted, duplicate-free list of exactly these safe
 repository-relative paths and their lowercase SHA-256 values:
@@ -200,6 +202,11 @@ Its `worker` repeats every receipt worker field and adds exactly:
 ```
 
 The repeated receipt, provenance, and live file identities must be equal.
+When live-source verification is enabled, the validator independently reads
+each provenance input from the explicitly supplied source root and requires
+both its byte length and SHA-256 to equal the provenance record. A resealed
+release cannot substitute internally consistent input metadata for the live
+source bytes.
 
 ## 5. Hash inventory and seal
 
