@@ -2357,6 +2357,22 @@ def test_command_path_swap_after_descriptor_pin_never_executes_replacement(
         "open_runtime_artifact_seal",
         swap_after_open,
     )
+    cleanup_stages: list[str] = []
+
+    def fake_docker_cleanup(
+        _request: object,
+        _claim: object,
+        *,
+        runner: object,
+        stage: str,
+    ) -> None:
+        assert runner is subprocess.run
+        cleanup_stages.append(stage)
+
+    # This test needs the real subprocess path only to exercise execution from
+    # the pinned descriptor. Docker lease cleanup has its own fake-runner
+    # coverage and must never contact the host daemon from this unit test.
+    monkeypatch.setattr(TX, "_cleanup_docker_lease", fake_docker_cleanup)
     TX._run_commands(
         commands.candidate_checks,
         request=request,
@@ -2368,6 +2384,7 @@ def test_command_path_swap_after_descriptor_pin_never_executes_replacement(
 
     assert swapped is True
     assert marker.read_text(encoding="ascii") == "sealed"
+    assert cleanup_stages == ["candidate_checks:docker_lease_cleanup"]
 
 
 def test_runtime_artifacts_are_repinned_after_restoration_probe(
