@@ -1,0 +1,82 @@
+{
+  "attribution": {
+    "base_w8a8_to_w8a16_logit_l2_gap": 0.006688114819994449,
+    "bypass_to_w8a16_logit_l2_gap": 0.0,
+    "gap_fraction_removed": 1.0,
+    "numeric_gate_pass_with_upper_bound_bypass": false,
+    "promising_outlier_side_route": true,
+    "rule": "promising only if bypass passes all numeric W8A8 gates or removes >=50% of the W8A8-to-W8A16 aggregate-logit-L2 gap"
+  },
+  "base_w8a8_activation": {
+    "activation_value_error": {
+      "candidate_sumsq": 3057123608.3620706,
+      "cosine_similarity": 0.9999540439845868,
+      "error_sumsq": 281099.3702535994,
+      "maximum_absolute_error": 1.488723874092102,
+      "mean_absolute_error": 0.0029297059747656813,
+      "nonfinite_count": 0,
+      "reference_sumsq": 3055634528.244871,
+      "relative_l2_error": 0.009591338796144254,
+      "value_count": 5505417216
+    },
+    "block_count": 172044288,
+    "bypass_block_count": 0,
+    "bypass_block_rate": 0.0,
+    "edge_code_count": 162236639,
+    "edge_code_rate": 0.029468545731375865,
+    "nonfinite_scale_count": 0,
+    "outlier_bin_counts": {
+      "[0,1)": 11366400,
+      "[1,2)": 5995695,
+      "[2,4)": 129332746,
+      "[4,8)": 25349447,
+      "[8,inf)": 0
+    },
+    "outlier_bin_rates": {
+      "[0,1)": 0.06606670952074851,
+      "[1,2)": 0.03484971846319013,
+      "[2,4)": 0.7517410051997774,
+      "[4,8)": 0.14734256681628397,
+      "[8,inf)": 0.0
+    },
+    "true_clipping_count": 0,
+    "true_clipping_rate": 0.0,
+    "zero_source_block_count": 11366400
+  },
+  "outlier_bypass_ge4_activation": {
+    "activation_value_error": {
+      "candidate_sumsq": 3056641800.361258,
+      "cosine_similarity": 0.9999903934796615,
+      "error_sumsq": 58732.85353616403,
+      "maximum_absolute_error": 0.17191724479198456,
+      "mean_absolute_error": 0.0019016208047720636,
+      "nonfinite_count": 0,
+      "reference_sumsq": 3056317880.1213684,
+      "relative_l2_error": 0.004383704686548561,
+      "value_count": 5505417216
+    },
+    "block_count": 172044288,
+    "bypass_block_count": 25356417,
+    "bypass_block_rate": 0.14738307964051675,
+    "edge_code_count": 162239741,
+    "edge_code_rate": 0.0294691091764116,
+    "nonfinite_scale_count": 0,
+    "outlier_bin_counts": {
+      "[0,1)": 11366400,
+      "[1,2)": 6000358,
+      "[2,4)": 129321113,
+      "[4,8)": 25356417,
+      "[8,inf)": 0
+    },
+    "outlier_bin_rates": {
+      "[0,1)": 0.06606670952074851,
+      "[1,2)": 0.03487682194947385,
+      "[2,4)": 0.7516733888892609,
+      "[4,8)": 0.14738307964051675,
+      "[8,inf)": 0.0
+    },
+    "true_clipping_count": 0,
+    "true_clipping_rate": 0.0,
+    "zero_source_block_count": 11366400
+  }
+}

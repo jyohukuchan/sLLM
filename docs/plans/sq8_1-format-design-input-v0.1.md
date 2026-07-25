@@ -561,3 +561,138 @@ M={1,8,32,128} はすべて完走し、熱で測れなかった項目はない�
 batch/prefill implementation、profiler occupancy/DRAM traffic は熱以外の理由で未確認である。完全な
 raw/thermal/summary/static evidence は
 `benchmarks/results/2026-07-26/sq8_0-sq8_1-fair-comparison/` に保存した。
+
+
+## SQ8_1 W8A8 full-model FP32 quality gate（2026-07-26）
+
+### 判定
+
+**W8A8 は採用不可（No-Go）** とする。`SQ8_1` の runtime/artifact/release
+採用、または W8A8 prequant API への実装投資は開始しない。W8A16 はこの gate
+で事前定義した fallback L2 条件を通過したため、必須 fallback / default reference
+path のまま維持する。W8A8 は explicit-only の研究候補に留め、candidate、release、
+campaign、authorization、active manifest は変更しない。
+
+これは性能結果で相殺できない品質判定である。W8A8 は aggregate relative L2 / KL /
+top-10 / W8A16 比の条件は満たした一方、事前に凍結した logits max abs、final hidden
+max abs、greedy top-1 の三条件に独立して失格した。
+
+### 凍結した契約と測定範囲
+
+詳細な契約は
+`benchmarks/results/2026-07-26/sq8_1-w8a8-full-model-gate/gate-criteria.md`、
+機械可読結果は同 directory の `summary.json`、prompt 別値は
+`per-prompt.jsonl`、層別値は `layer-metrics.json`、mismatch margin は
+`top1-mismatches.jsonl` に保存した。
+
+- Qwen3.5-9B の local BF16 source weights を CPU 上で FP32 に読み、unmodified
+  FP32 Hugging Face forward を参照とした。R9700、V620、その他 GPU、サービスは未使用で
+  あり、GPU 温度履歴は **N/A (CPU-only)** である。
+- Primary scope は既存 SQ8_1 collector pattern の transformer projection 248
+  Linear。weight は一度だけ SQ8_1 K=32 signed symmetric int8（`[-127,127]`、
+  zero-point なし、RNE、upward-rounded FP16 scale）へ、W8A8 はその Linear
+  入力も同じ規約へ動的量子化した。codes/scale は FP32 に再構成して同じ FP32
+  `F.linear` boundary を通し、HIP accumulation order / throughput は主張しない。
+- `lm_head` は primary では unmodified FP32、249th Linear を加えた
+  all-Linear stress は別集計とした。
+- frozen `D_stats-shard-00.jsonl` を deterministic evenly spaced に 20 records
+  選び、chat/code/general/multilingual_ja/reasoning_math 各 4 records、4,243 valid
+  scored positions を測った。v0.1 の 256-token cap は 3,568 positions で既存
+  4,000-position coverage 条件を満たさず、raw evidence を
+  `attempt-1-coverage-incomplete/` に保存して非適格とした。threshold を緩めず、
+  同じ IDs の cap を 384 に拡張してから v0.2 の qualifying run を凍結した。
+- control は logits / final hidden の relative L2 と max abs が全て `0.0` で、
+  `1e-5` / `2e-5` の harness 条件を通過した。weight / activation は finite、
+  post-storage clipping 0、code range `[-127,127]` だった。
+
+事前合格条件は、W8A16 aggregate / worst-prompt logits relative L2
+`<=0.040` / `<=0.060`、W8A8 aggregate / worst-prompt logits relative L2
+`<=0.060` / `<=0.080`、logits max abs `<=1.0`、mean / worst-prompt KL
+`<=0.005` / `<=0.010`、W8A16 比 `<=1.60` かつ `+0.020`、max layer L2
+`<=0.080`、final hidden L2 / max abs `<=0.060` / `<=1.0`、top-10
+`>=0.950`、reference top-1 in candidate top-10 100%、top-1 `>=99.0%` /
+Wilson lower 95% `>=98.5%`、かつ全 swap が FP32 top-2 への margin
+`<=0.050` であることだった。詳細な全条項は artifact の契約を正とする。
+
+### Full-model 結果
+
+| scope / candidate | logits rel L2 | logits max abs | mean KL | top-1 agreement | top-10 overlap | final hidden rel L2 / max abs |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| W8A16 primary | 0.016971283 | 13.834223 | 0.000399046 | 4,218/4,243 (99.410794%) | 99.066698% | 0.024402447 / 14.862573 |
+| W8A8 primary | 0.023506802 | **7.889154** | 0.000665853 | **4,189/4,243 (98.727316%)** | 98.378506% | 0.031263589 / **13.696337** |
+| W8A8 `outlier_bypass_ge4` diagnostic | 0.015238139 | 8.991999 | 0.000264083 | 4,208/4,243 (99.175112%) | 98.920575% | 0.020038844 / 3.448392 |
+| all-Linear W8A8 stress | 0.024505412 | 7.878294 | 0.000727507 | 4,197/4,243 (98.915861%) | 98.286590% | 0.031263589 / 13.696337 |
+
+W8A16 は fallback に事前指定した two L2 gates を通過した（aggregate
+`0.016971283 <= 0.040`、worst prompt `0.056227554 <= 0.060`）。
+W8A16 の表中の max abs / top-1 は比較情報であり、W8A16 を exact-equivalent と
+主張するものではない。
+
+W8A8 は W8A16 に対する incremental logits penalty ratio `1.385093`、absolute
+delta `0.006535519`、final-hidden ratio `1.281166`、delta `0.006861142` を通過した。
+しかし logits max abs `7.889154 > 1.0`、final hidden max abs
+`13.696337 > 1.0`、top-1 `98.727316% < 99.0%`、Wilson lower
+`98.343243% < 98.5%` であるため No-Go となった。KL、aggregate / prompt L2、
+top-10、reference top-1 retention は pass であり、この結論は一つの単発 metric
+だけには依存しない。
+
+W8A8 の 54 top-1 mismatch のうち 38 は既知 AQ4 の許容と同じ、FP32 top-2
+への near-margin swap（margin `<=0.050`）だった。しかし 16 は事前規則を満たさず、
+そのため「near-margin quantization noise」で全体を許容することはできない。全 mismatch
+margin の min / median / p90 / max はそれぞれ `0.000068665` / `0.024856567` /
+`0.071977615` / `0.115995407` だった。reference top-1 は全 4,243 positions で
+W8A8 top-10 に残ったが、これは greedy agreement gate の代替ではない。
+
+### Hidden error の層別伝播
+
+relative L2 は前段から増え、W8A8 は layer 0 の `0.00796172` から layer 30 の
+最大 `0.03357130`、final norm `0.03126359` に達した。W8A16 は対応して
+`0.00381995`、layer 31 の最大 `0.02773978`、final norm `0.02440245` だった。
+
+| location | W8A16 relative L2 | W8A8 relative L2 | W8A16 max abs | W8A8 max abs |
+| --- | ---: | ---: | ---: | ---: |
+| layer 0 | 0.00381995 | 0.00796172 | 0.039909 | 0.067305 |
+| layer 8 | 0.00863527 | 0.01633916 | 0.279565 | 0.362812 |
+| layer 16 | 0.01425341 | 0.02543664 | 0.962643 | 1.496008 |
+| layer 24 | 0.01765943 | 0.03083318 | 7.105297 | 37.357048 |
+| layer 30 | 0.02350839 | **0.03357130** | 46.444366 | 57.469147 |
+| layer 31 | **0.02773978** | 0.03168793 | 65.010483 | 29.131115 |
+| final norm | 0.02440245 | 0.03126359 | 14.862573 | **13.696337** |
+
+これは late layers で relative L2 と rare max error の双方が増大するという観測であり、
+個別の internal mechanism はこの測定だけでは**未確認**である。
+
+### Outlier の寄与と救済見込み
+
+Primary W8A8 の K=32 activation blocks は `[4,8)` の
+`31,857,747 / 222,363,648 = 14.326868%`、`[8,inf)` は 0 だった。
+base activation relative L2 は `0.009489628`、clipping は 0 である。
+
+diagnostic `outlier_bypass_ge4` は `14.331775%` の blocks を source FP32 のまま通す
+**非 deployable な上限**である。この場合、activation L2 は `0.004431349` になり、
+W8A8-to-W8A16 aggregate-logit-L2 gap `0.006535519` は 0（100% removal）になった。
+凍結済み rule（50% 以上の gap removal）では outlier side route は
+**promising** である。
+
+ただしこの diagnostic 自体も logits max abs `8.991999`、final hidden max abs
+`3.448392`、disallowed top-1 mismatch 9 により numeric / overall gate を通過しない。
+従って outlier bypass は W8A8 の relative-L2 excess を説明する有力な寄与だが、この上限
+diagnostic 単独では全 gate を救えないことが確認された。per-channel scale / SmoothQuant が
+max-error と greedy failure も同時に解消するかは**未確認**である。
+
+### Next Actions
+
+1. W8A8 prequant API、runtime/artifact/release admission は開始しない。W8A16 を required
+   fallback / default reference path とし、W8A8 は explicit-only のままにする。
+2. 次の W8A8 mitigation prototype は、`max(abs)/RMS >= 4` K=32 blocks 用の明示的 mask と
+   compact FP16 side plane（cold blocks は existing W8 code + FP16 scale）にする。side
+   payload、mask/index overhead、latency を実測し、outlier threshold を探索したうえで同じ
+   20-record full-model gate を再実行する。上限 diagnostic の source FP32 bypass を
+   deployable result と取り違えない。
+3. 独立案として linear input-channel diagonal transform
+   `x'_j=x_j/s_j, W'_{ij}=W_{ij}s_j` を用いる per-channel / SmoothQuant calibration を
+   prototype 化する。calibration / held-out split、artifact semantics、weight re-quantization
+   を明示し、同一 max-abs / top-1 条件で再 gate する。救済可否は未確認である。
+4. 再 gate の admission 条件は v0.2 の全値を維持する。特に logits/final-hidden max abs
+   `<=1.0`、top-1 rate `>=99.0%`、Wilson `>=98.5%`、zero disallowed mismatch を満たさない
+   限り W8A8 を採用しない。
