@@ -5365,6 +5365,7 @@ extern "C" __global__ void ullm_matvec_f32_kernel(
     }
 
 #include "kernels/sq8_0/sq8_0_matvec_hiprtc.inc"
+#include "kernels/sq8_1/sq8_1_matvec_hiprtc.inc"
 
     static const char *matvec_bf16_kernel_source() {
         return R"(

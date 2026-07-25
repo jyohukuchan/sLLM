@@ -14,4 +14,5 @@ mod tests {
     include!("../test_parts/rmsnorm_shuffle_prototype.rs");
     include!("../test_parts/segmented_rmsnorm_silu_mul_shuffle_prototype.rs");
     include!("../test_parts/linear_attn_qkv_prepare_shuffle_prototype.rs");
+    include!("../test_parts/sq8_1_matvec.rs");
 }

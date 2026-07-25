@@ -1312,6 +1312,18 @@ public:
             error);
     }
 
+    bool compile_sq8_1_matvec_kernel(
+        const std::string &arch,
+        std::vector<char> *code,
+        std::string *error) {
+        return compile_kernel(
+            arch,
+            sq8_1_matvec_kernel_source(),
+            "ullm_sq8_1_matvec_f32.hip",
+            code,
+            error);
+    }
+
     bool compile_paged_decode_attn_kernel(const std::string &arch, std::vector<char> *code, std::string *error) {
         return compile_kernel(
             arch,
@@ -8174,6 +8186,7 @@ void matvec_f32_host(
 }
 
 #include "../kernels/sq8_0/sq8_0_matvec_runtime.inc"
+#include "../kernels/sq8_1/sq8_1_matvec_runtime.inc"
 
 float bf16_to_f32_host(uint16_t value) {
     const uint32_t bits = static_cast<uint32_t>(value) << 16;

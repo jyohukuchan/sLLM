@@ -748,6 +748,26 @@ unsafe extern "C" {
         third_output_buffer: *mut RawRuntimeBuffer,
         stream: *mut RawRuntimeStream,
     ) -> c_int;
+    fn ullm_runtime_sq8_1_matvec_w8a16_f32(
+        payload_buffer: *const RawRuntimeBuffer,
+        scale_buffer: *const RawRuntimeBuffer,
+        input_buffer: *const RawRuntimeBuffer,
+        rows: usize,
+        cols: usize,
+        payload_row_stride: usize,
+        output_buffer: *mut RawRuntimeBuffer,
+        stream: *mut RawRuntimeStream,
+    ) -> c_int;
+    fn ullm_runtime_sq8_1_matvec_w8a8_explicit_f32(
+        payload_buffer: *const RawRuntimeBuffer,
+        scale_buffer: *const RawRuntimeBuffer,
+        input_buffer: *const RawRuntimeBuffer,
+        rows: usize,
+        cols: usize,
+        payload_row_stride: usize,
+        output_buffer: *mut RawRuntimeBuffer,
+        stream: *mut RawRuntimeStream,
+    ) -> c_int;
     fn ullm_runtime_matvec_bf16_f32(
         matrix_buffer: *const RawRuntimeBuffer,
         input_buffer: *const RawRuntimeBuffer,
@@ -4394,6 +4414,8 @@ pub const SQ_FP8_SCALE_ROW: u32 = 1;
 pub const SQ_FP8_SCALE_ROW_BLOCK: u32 = 2;
 pub const SQ_FP8_EXECUTION_PATH_CPU_REFERENCE: i32 = 0;
 pub const SQ_FP8_EXECUTION_PATH_HIP_KERNEL: i32 = 1;
+pub const SQ8_1_GROUP_SIZE: usize = 32;
+pub const SQ8_1_PAYLOAD_ALIGNMENT_BYTES: usize = 16;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SqFp8ExecutionPath {
@@ -4471,6 +4493,143 @@ pub fn sq_fp8_matvec_f32(
             cols,
             scale_kind,
             scale_block_cols,
+            output_buffer.raw.as_ptr(),
+            stream,
+        )
+    })
+}
+
+pub fn sq8_1_payload_row_stride(cols: usize) -> Result<usize, String> {
+    if cols == 0 {
+        return Err("SQ8_1 cols must be greater than zero".to_string());
+    }
+    cols.checked_add(SQ8_1_PAYLOAD_ALIGNMENT_BYTES - 1)
+        .map(|value| value / SQ8_1_PAYLOAD_ALIGNMENT_BYTES * SQ8_1_PAYLOAD_ALIGNMENT_BYTES)
+        .ok_or_else(|| "SQ8_1 payload row stride overflows".to_string())
+}
+
+struct Sq8_1MatvecBufferLengths {
+    payload: usize,
+    scales: usize,
+    input: usize,
+    output: usize,
+}
+
+fn sq8_1_matvec_buffer_lengths(
+    rows: usize,
+    cols: usize,
+    payload_row_stride: usize,
+) -> Result<Sq8_1MatvecBufferLengths, String> {
+    if rows == 0 || cols == 0 {
+        return Err("SQ8_1 matvec rows and cols must be greater than zero".to_string());
+    }
+    let canonical_stride = sq8_1_payload_row_stride(cols)?;
+    if payload_row_stride != canonical_stride {
+        return Err("SQ8_1 payload row stride must equal round_up(cols, 16)".to_string());
+    }
+    let groups = cols
+        .checked_add(SQ8_1_GROUP_SIZE - 1)
+        .map(|value| value / SQ8_1_GROUP_SIZE)
+        .ok_or_else(|| "SQ8_1 group count overflows".to_string())?;
+    let payload = rows
+        .checked_mul(payload_row_stride)
+        .ok_or_else(|| "SQ8_1 payload byte size overflows".to_string())?;
+    let scales = rows
+        .checked_mul(groups)
+        .and_then(|value| value.checked_mul(std::mem::size_of::<u16>()))
+        .ok_or_else(|| "SQ8_1 scale byte size overflows".to_string())?;
+    let input = cols
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| "SQ8_1 activation byte size overflows".to_string())?;
+    let output = rows
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| "SQ8_1 output byte size overflows".to_string())?;
+    Ok(Sq8_1MatvecBufferLengths {
+        payload,
+        scales,
+        input,
+        output,
+    })
+}
+
+fn validate_sq8_1_matvec_buffers(
+    payload_buffer: &RuntimeBuffer,
+    scale_buffer: &RuntimeBuffer,
+    input_buffer: &RuntimeBuffer,
+    output_buffer: &RuntimeBuffer,
+    lengths: &Sq8_1MatvecBufferLengths,
+) -> Result<(), String> {
+    check_copy_range(0, lengths.payload, payload_buffer.size()?)?;
+    check_copy_range(0, lengths.scales, scale_buffer.size()?)?;
+    check_copy_range(0, lengths.input, input_buffer.size()?)?;
+    check_copy_range(0, lengths.output, output_buffer.size()?)?;
+    Ok(())
+}
+
+/// Default SQ8_1 path. Activations stay F32; only signed I8 weights are
+/// dequantized with their separate per-K32 FP16 scales.
+pub fn sq8_1_matvec_w8a16_f32(
+    payload_buffer: &RuntimeBuffer,
+    scale_buffer: &RuntimeBuffer,
+    input_buffer: &RuntimeBuffer,
+    rows: usize,
+    cols: usize,
+    payload_row_stride: usize,
+    output_buffer: &mut RuntimeBuffer,
+    stream: Option<&mut RuntimeStream>,
+) -> Result<(), String> {
+    let lengths = sq8_1_matvec_buffer_lengths(rows, cols, payload_row_stride)?;
+    validate_sq8_1_matvec_buffers(
+        payload_buffer,
+        scale_buffer,
+        input_buffer,
+        output_buffer,
+        &lengths,
+    )?;
+    let stream = stream.map_or(std::ptr::null_mut(), |stream| stream.raw.as_ptr());
+    status_to_result(unsafe {
+        ullm_runtime_sq8_1_matvec_w8a16_f32(
+            payload_buffer.raw.as_ptr(),
+            scale_buffer.raw.as_ptr(),
+            input_buffer.raw.as_ptr(),
+            rows,
+            cols,
+            payload_row_stride,
+            output_buffer.raw.as_ptr(),
+            stream,
+        )
+    })
+}
+
+/// Explicit-only SQ8_1 W8A8 path. The API name intentionally forces callers
+/// to opt in while full-model W8A8 quality remains outside the release path.
+pub fn sq8_1_matvec_w8a8_explicit_f32(
+    payload_buffer: &RuntimeBuffer,
+    scale_buffer: &RuntimeBuffer,
+    input_buffer: &RuntimeBuffer,
+    rows: usize,
+    cols: usize,
+    payload_row_stride: usize,
+    output_buffer: &mut RuntimeBuffer,
+    stream: Option<&mut RuntimeStream>,
+) -> Result<(), String> {
+    let lengths = sq8_1_matvec_buffer_lengths(rows, cols, payload_row_stride)?;
+    validate_sq8_1_matvec_buffers(
+        payload_buffer,
+        scale_buffer,
+        input_buffer,
+        output_buffer,
+        &lengths,
+    )?;
+    let stream = stream.map_or(std::ptr::null_mut(), |stream| stream.raw.as_ptr());
+    status_to_result(unsafe {
+        ullm_runtime_sq8_1_matvec_w8a8_explicit_f32(
+            payload_buffer.raw.as_ptr(),
+            scale_buffer.raw.as_ptr(),
+            input_buffer.raw.as_ptr(),
+            rows,
+            cols,
+            payload_row_stride,
             output_buffer.raw.as_ptr(),
             stream,
         )

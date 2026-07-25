@@ -830,6 +830,36 @@ ullm_status ullm_runtime_sq_fp8_matvec_triple_f32(
     ullm_runtime_buffer *third_output_buffer,
     ullm_runtime_stream *stream);
 
+/*
+ * SQ8_1 payload is signed I8 row-major with payload_row_stride=round_up(cols,16).
+ * Scale is a separate little-endian FP16 [rows,ceil(cols/32)] plane.  This is the
+ * default W8A16 path; it does not quantize activations.
+ */
+ullm_status ullm_runtime_sq8_1_matvec_w8a16_f32(
+    const ullm_runtime_buffer *payload_buffer,
+    const ullm_runtime_buffer *scale_buffer,
+    const ullm_runtime_buffer *input_buffer,
+    size_t rows,
+    size_t cols,
+    size_t payload_row_stride,
+    ullm_runtime_buffer *output_buffer,
+    ullm_runtime_stream *stream);
+
+/*
+ * Explicit-only SQ8_1 W8A8 reference path.  It quantizes input in K=32 blocks
+ * and applies signed-I32 dot * s_w * s_a.  It is intentionally separate from
+ * the default W8A16 entry point while full-model W8A8 quality remains gated.
+ */
+ullm_status ullm_runtime_sq8_1_matvec_w8a8_explicit_f32(
+    const ullm_runtime_buffer *payload_buffer,
+    const ullm_runtime_buffer *scale_buffer,
+    const ullm_runtime_buffer *input_buffer,
+    size_t rows,
+    size_t cols,
+    size_t payload_row_stride,
+    ullm_runtime_buffer *output_buffer,
+    ullm_runtime_stream *stream);
+
 ullm_status ullm_runtime_matvec_bf16_f32(
     const ullm_runtime_buffer *matrix_buffer,
     const ullm_runtime_buffer *input_buffer,
