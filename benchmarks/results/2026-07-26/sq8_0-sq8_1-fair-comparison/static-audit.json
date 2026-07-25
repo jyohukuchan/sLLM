@@ -1,0 +1,22 @@
+{
+  "schema": "ullm.sq8_0_gfx1030_static_audit.v1",
+  "compiler": "ROCm 7.2.1 / AMD clang 22 device-only",
+  "exact_runtime_hiprtc_source_sha256": "d1432840ef70ccb70d5484df415ea89e40f90583b0e298bf8608aa0d02463b38",
+  "gfx1201_non_interference": {
+    "normalized_disassembly_cmp_exit_code": 0,
+    "metadata_cmp_exit_code": 0,
+    "baseline_normalized_disassembly_sha256": "1a2da07ad10bbf0926366cf40925fb72440d5a488774baedf0f0915ab89b098a",
+    "final_normalized_disassembly_sha256": "1a2da07ad10bbf0926366cf40925fb72440d5a488774baedf0f0915ab89b098a"
+  },
+  "gfx1030_direct": {
+    "legacy": {"vgpr": 22, "sgpr": 42, "fixed_lds_bytes": 1024, "private_bytes": 0, "vgpr_spills": 0, "sgpr_spills": 0},
+    "final": {"vgpr": 31, "sgpr": 48, "fixed_lds_bytes": 32, "private_bytes": 0, "vgpr_spills": 0, "sgpr_spills": 0},
+    "isa_count_legacy": {"global_load_dwordx4": 0, "ds_bpermute": 0, "s_barrier": 2, "ds_read": 3, "ds_write": 2},
+    "isa_count_final": {"global_load_dwordx4": 1, "ds_bpermute": 5, "s_barrier": 1, "ds_read": 2, "ds_write": 1}
+  },
+  "gfx1030_batch": {
+    "legacy": {"vgpr": 22, "sgpr": 47, "fixed_lds_bytes": 1024, "private_bytes": 0, "vgpr_spills": 0, "sgpr_spills": 0},
+    "final": {"vgpr": 31, "sgpr": 52, "fixed_lds_bytes": 32, "private_bytes": 0, "vgpr_spills": 0, "sgpr_spills": 0}
+  },
+  "unmeasured": ["profiler occupancy", "wave residency", "cache behavior", "DRAM transactions"]
+}

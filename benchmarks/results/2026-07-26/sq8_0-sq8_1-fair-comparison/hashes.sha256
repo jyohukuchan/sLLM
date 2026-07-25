@@ -1,0 +1,11 @@
+1feb3582f128ec67a23ddb0cc9d88ec075ea8f5bd35a8fbd8be91b048fdb554c  runtime/src/kernels/sq8_0/sq8_0_matvec_hiprtc.inc
+6b8f626f3eab71c8fb4d07da651779d0b96868fa9c43f4657858669f1cef6c5e  tools/bench-sq8_0-sq8_1-fair-comparison-hip.cpp
+ede2b9464b2715350a278fbc49e6f232bc26d298aad0a3ac25d92c1181789e52  tools/sq8_0_gfx1030_matvec_prototype.hip.cpp
+03da241a4e826a41666561400c855c0bd585cc920631dc08232e18fc55a7139a  tools/extract-sq8_0-hiprtc-source.py
+9860c607a7e3aedc19103ddb9c70ae518d829c49e05763d7d42f3f2400a4f8c9  tests/test_sq8_0_gfx1030_matvec_source.py
+1c25428ea26c2b1aa41fbe5e77d5784849e7e5f463e13b00bfa1da1912447ba5  benchmarks/results/2026-07-26/sq8_0-sq8_1-fair-comparison/raw/final-row256-v4.jsonl
+7c2b74ace67309bc7d085445b3fa30846631dfb0cc71e67341a03edaccbe2f8e  benchmarks/results/2026-07-26/sq8_0-sq8_1-fair-comparison/raw/final-row256-v4-thermal.jsonl
+817f2db628ac21d4efbaea8aaf0647b903cec63a45a995a20fbc9fd9fa78dc5a  benchmarks/results/2026-07-26/sq8_0-sq8_1-fair-comparison/README.md
+4ae9a69937ad317ee2b51b21f1a0a728594734895ce6f8f02ca237abf27103e5  benchmarks/results/2026-07-26/sq8_0-sq8_1-fair-comparison/summary.json
+e82b80021243f1b8c61c7395e59dc60c49f5d0af84fff743e358dfaefd8cfe6d  benchmarks/results/2026-07-26/sq8_0-sq8_1-fair-comparison/static-audit.json
+474c6abfed2791b274170dfbd92c2b9d61a598671a205887b0b96dcd17efe592  benchmarks/results/2026-07-26/sq8_0-sq8_1-fair-comparison/static-analysis.md
