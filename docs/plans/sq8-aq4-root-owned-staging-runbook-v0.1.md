@@ -1,12 +1,42 @@
 # SQ8_0 worker release staging and AQ4_0 production-asset audit v0.1
 
-Status: preparation only.  **No command in the root-operation block has been
-executed.**
+Status: the SQ8_0 root-owned staging was completed on 2026-07-24 and
+read-only reverified on 2026-07-26.  **The SQ8 staging portion of the
+root-operation block was executed; AQ4_0 root operations remain unexecuted.**
+Neither a served-model manifest activation nor a final activation was performed.
 
 This runbook stages only the sealed SQ8_0 v2 worker release.  It does not
 activate a manifest, change `/etc`, restart a service, collect campaign
 evidence, use a GPU, or handle login/JWT material.  The current AQ4_0 active
 manifest and every existing SQ8/AQ4 candidate remain immutable inputs.
+
+## Execution record
+
+On 2026-07-24, the sealed SQ8_0 v2 worker release was published below
+`/opt/ullm/releases` as a root-owned, no-hardlink staging copy.  This was
+the SQ8-only staging operation; it did not activate a manifest, change an AQ4
+asset, or perform an AQ4 root operation.
+
+The 2026-07-26 read-only re-verification observed the following:
+
+| Check | Observed result |
+|---|---|
+| staged path | `/opt/ullm/releases/uLLM-sq8-v2-final-worker-release-3bc9078d` |
+| protected ancestry | `/opt`, `/opt/ullm`, and `/opt/ullm/releases` are root:root mode `0755`; the release is root:root mode `0555`, nlink 2 |
+| member metadata | five metadata files are root:root mode `0444`, nlink 1; `ullm-sq8-worker` is root:root mode `0555`, nlink 1 |
+| `sha256sum -c SHA256SUMS` | README, build provenance, build receipt, and worker all reported `OK` |
+| `SEALED.json` bindings | source commit `3bc9078d1ca5a49aad060d667aac19e2aa53ee86`, source tree `bd95c4f65168b05f4ed572a7f89e35be23ede975`, worker `0b9989c26e656123addef15ffbf96b1aadf866a6eca06f02af8cab9bccb18a83`, provenance `d4a123210ea9680e115f2af1ea8e2285bf6a5c36a18c5db7b8ec779231a0c19d`, receipt `986708497df09d4d7998f79c0e5fe29a0a69c8c37aa7ed2e28643c16faf69cd3`, and sums `ded0a829ef8ab67a19883b454621131a63ff036afe1181d931a5e39d1cd548c5` all matched the staged bytes |
+| source equality | `diff -r` against the user-owned release exited 0 with no output; corresponding staged and source members have distinct inodes |
+
+The active manifest SHA-256 was observed as
+`5d015a013dcf70cea13dd9ed569d89ed2a025a17e14a6192ca18ee4cdadd1c8a`
+during that re-verification.  This is an observation only: this staging did
+not replace `/etc/ullm/served-models/active.json`.
+
+AQ4_0 remains an audit failure requiring its separately reviewed
+AQ4-to-AQ4 runtime-hardening promotion.  No AQ4 copy, ownership change,
+staging, manifest activation, or other root operation has been performed by
+this runbook.
 
 ## 1. Read-only findings
 
@@ -83,35 +113,38 @@ AQ4-to-AQ4 runtime-hardening promotion with:
 Existing evidence binds the old paths and manifest hash and cannot be copied
 as fresh hardening evidence.
 
-## 2. Selected SQ8 staging destination
+## 2. Selected and staged SQ8 destination
 
-The proposed destination is:
+The completed destination is:
 
 ```text
 /opt/ullm/releases/uLLM-sq8-v2-final-worker-release-3bc9078d
 ```
 
-`/opt` is root:root `0755` on the root ext4 filesystem.  `/opt/ullm` does not
-currently exist.  The policy requires protected root-owned ancestry rather
-than a magic pathname; this destination follows the repository's `/opt/ullm`
-runtime examples while leaving `/var/lib/ullm` for the fixed campaign
-claim/outcome registries.
+`/opt` is root:root `0755` on the root ext4 filesystem.  Before the
+2026-07-24 staging, `/opt/ullm` was absent; the completed ancestry now has
+the protected root:root `0755` state recorded above.  The policy requires
+protected root-owned ancestry rather than a magic pathname; this destination
+follows the repository's `/opt/ullm` runtime examples while leaving
+`/var/lib/ullm` for the fixed campaign claim/outcome registries.
 
-The publication is an exact byte copy, not a hardlink, reflink, symlink, or
-in-place ownership change.  It first builds a root-owned temporary directory
-under the final parent, validates the complete v2 release and runtime tree,
-and then uses a same-directory no-clobber rename.
+The publication was an exact byte copy, not a hardlink, reflink, symlink, or
+in-place ownership change.  It built a root-owned temporary directory under
+the final parent, validated the complete v2 release and runtime tree, and then
+used a same-directory no-clobber rename.
 
 Staging this directory closes only the SQ8 worker-release portion.  The final
 SQ8 product, tokenizer, promotion pair, candidate manifest, and root-owned
 standalone source clone remain separate prerequisites.
 
-## 3. Root-operation block for Claude
+## 3. Executed SQ8 root-operation block (archival)
 
-The following commands are concrete but **unexecuted**.  Run them only after
-reviewing this file and confirming that `/opt/ullm` is still absent.  They do
-not use or stop the service and finish by proving that the AQ4 active manifest
-hash did not change.
+The following SQ8-only commands are the archival 2026-07-24 staging procedure
+that was executed.  They are **not** a current action list: the absence
+preconditions for `/opt/ullm` and the destination are now intentionally false,
+so do not rerun or adapt this block.  It did not use or stop the service and
+finished by proving that the AQ4 active-manifest hash did not change.  It did
+not authorize or perform an AQ4 root operation.
 
 ```bash
 set -euo pipefail

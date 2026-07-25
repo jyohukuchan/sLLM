@@ -135,6 +135,16 @@ not a resident production dependency. Its boot autostart was disabled on
 alternately with uLLM: concurrent requests compete for the same R9700. The
 llama.cpp service must not use or share uLLM's `/run/ullm/r9700.lock`.
 
+### LACT-managed R9700
+
+`lactd` manages the R9700 at DRM `card2` (PCI `0000:47:00.0`).  Its
+`/etc/lact/config.yaml` GPU key includes the PCI address, so a slot move or
+PCI re-enumeration requires re-keying the entry to the current
+`PCI_SLOT_NAME` before restarting `lactd`.  Preserve the effective power
+cap and the `performance_level: auto` and `fan_control_enabled: false`
+settings while re-keying, so that the address repair does not alter GPU
+behavior.
+
 The profile points at these existing files:
 
 ```text
