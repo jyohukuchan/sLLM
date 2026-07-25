@@ -30,6 +30,7 @@ use crate::sq8_layer_oracle::{
 };
 use crate::sq8_layer_runtime::{
     QWEN3_14B_SQ8_PREFILL_CHUNK_TOKENS, Qwen3Sq8LayerNormValues, validate_norm_values,
+    Sq8LayerExecutionProfile,
 };
 use crate::sq8_model_head_runtime::{
     QWEN3_14B_VOCAB_SIZE, Qwen3Sq8ModelHeadRuntime, Sq8ModelHeadDeviceIdentity,
@@ -836,6 +837,7 @@ pub struct Qwen3Sq8ServingSession {
     next_prepared_nonce: u64,
     state: Sq8ServingRuntimeStatus,
     failure_reason: Option<String>,
+    handwritten_wmma_prototype_enabled: bool,
 }
 
 impl Qwen3Sq8ServingSession {
@@ -1012,6 +1014,7 @@ impl Qwen3Sq8ServingSession {
                 next_prepared_nonce: 0,
                 state: Sq8ServingRuntimeStatus::Ready,
                 failure_reason: None,
+                handwritten_wmma_prototype_enabled: false,
             };
             session.validate_ready_baseline()?;
             Ok(session)
@@ -1038,6 +1041,34 @@ impl Qwen3Sq8ServingSession {
 
     pub fn prefill_mode(&self) -> Sq8ServingPrefillMode {
         self.load_report.prefill_mode
+    }
+
+    /// Enables the isolated M=1 handwritten projection probe for one test
+    /// session.  This is deliberately unavailable unless the dedicated Cargo
+    /// feature was compiled, requires the pristine Ready state, and leaves the
+    /// normal CK profile as the default for every caller.
+    #[doc(hidden)]
+    pub fn enable_handwritten_wmma_projection_prototype(&mut self) -> Result<(), Sq8ServingError> {
+        if !cfg!(feature = "rocm-handwritten-projection-gfx1201") {
+            return Err(Sq8ServingError::invalid_configuration(
+                "SQ8 handwritten WMMA prototype requires Cargo feature rocm-handwritten-projection-gfx1201",
+            ));
+        }
+        if self.state != Sq8ServingRuntimeStatus::Ready
+            || self.active.is_some()
+            || self.pending_token.is_some()
+        {
+            return Err(Sq8ServingError::invalid_state(
+                "SQ8 handwritten WMMA prototype can only be enabled on a fresh Ready session",
+            ));
+        }
+        self.handwritten_wmma_prototype_enabled = true;
+        Ok(())
+    }
+
+    #[doc(hidden)]
+    pub fn handwritten_wmma_projection_prototype_enabled(&self) -> bool {
+        self.handwritten_wmma_prototype_enabled
     }
 
     pub fn snapshot(&self) -> Sq8ServingSnapshot {
@@ -1715,19 +1746,35 @@ impl Qwen3Sq8ServingSession {
         if resident_report != &embedding_report {
             return Err("serving embedding report changed before M=1 execution".into());
         }
-        let report = self
-            .stack
-            .run_paged_m1_sequence_step_optimized_synchronized(
-                &mut self.decode,
-                embedding_output,
-                position,
-                &mut self.caches[..],
-                stream,
-            )?;
+        let expected_profile = if self.handwritten_wmma_prototype_enabled {
+            Sq8LayerExecutionProfile::Rdna4W8a8BlockHandwrittenWmmaPrototype
+        } else {
+            Sq8LayerExecutionProfile::Rdna4W8a8BlockCk
+        };
+        let report = if self.handwritten_wmma_prototype_enabled {
+            self.stack
+                .run_paged_m1_sequence_step_handwritten_wmma_prototype_synchronized(
+                    &mut self.decode,
+                    embedding_output,
+                    position,
+                    &mut self.caches[..],
+                    stream,
+                )?
+        } else {
+            self.stack
+                .run_paged_m1_sequence_step_optimized_synchronized(
+                    &mut self.decode,
+                    embedding_output,
+                    position,
+                    &mut self.caches[..],
+                    stream,
+                )?
+        };
         report.validate_contract()?;
         if report.phase != Sq8PagedStackPhase::Decode
             || report.position != position
             || report.stack.sequence_len != 1
+            || report.stack.profile != expected_profile
             || report.stack.artifact_content_sha256 != self.load_report.artifact_content_sha256
             || report
                 .cache_lengths

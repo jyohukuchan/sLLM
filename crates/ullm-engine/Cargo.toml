@@ -8,6 +8,7 @@ autoexamples = false
 [features]
 default = []
 rocm-ck-gfx1201 = ["ullm-runtime-sys/rocm-ck-gfx1201"]
+rocm-handwritten-projection-gfx1201 = ["rocm-ck-gfx1201", "ullm-runtime-sys/rocm-handwritten-projection-gfx1201"]
 rocm-ck-gfx942-aprime = ["ullm-runtime-sys/rocm-ck-gfx942-aprime"]
 
 [dependencies]

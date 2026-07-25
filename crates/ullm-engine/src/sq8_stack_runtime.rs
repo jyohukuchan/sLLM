@@ -44,7 +44,21 @@ pub struct Sq8PagedStackExecutionReport {
 
 impl Sq8PagedStackExecutionReport {
     pub fn validate_contract(&self) -> Result<(), String> {
-        self.stack.validate_optimized_promotion()?;
+        match self.stack.profile {
+            Sq8LayerExecutionProfile::Rdna4W8a8BlockHandwrittenWmmaPrototype => {
+                if self.phase != Sq8PagedStackPhase::Decode {
+                    return Err(
+                        "SQ8 handwritten WMMA prototype is valid only for paged M=1 decode".into(),
+                    );
+                }
+                self.stack.validate_m1_paged_decode_execution()?;
+            }
+            Sq8LayerExecutionProfile::ReferenceW8a16Block2d
+            | Sq8LayerExecutionProfile::Rdna4W8a8BlockCk => {
+                // Preserve the ordinary CK/reference validation path exactly.
+                self.stack.validate_optimized_promotion()?;
+            }
+        }
         if self.stack.host_staging_used || self.stack.host_readback_count != 0 {
             return Err("SQ8 paged stack report rejects host staging/readback".into());
         }
@@ -282,6 +296,12 @@ impl Sq8StackExecutionReport {
             .all(Sq8LayerExecutionReport::all_reference_hip)
     }
 
+    pub fn all_handwritten_wmma_prototype(&self) -> bool {
+        self.layer_reports
+            .iter()
+            .all(Sq8LayerExecutionReport::all_handwritten_wmma_prototype)
+    }
+
     pub fn validate_contract(&self) -> Result<(), String> {
         if !matches!(self.sequence_len, 1 | 2 | 4 | 8 | 16 | 32 | 128) {
             return Err(format!(
@@ -353,13 +373,22 @@ impl Sq8StackExecutionReport {
         }) {
             return Err("Qwen3-14B SQ8 stack contains an inconsistent layer report".into());
         }
-        if self.profile == Sq8LayerExecutionProfile::Rdna4W8a8BlockCk {
-            for (layer_index, report) in self.layer_reports.iter().enumerate() {
-                validate_measured_ck_dispatch(self.sequence_len, layer_index, report)?;
+        match self.profile {
+            Sq8LayerExecutionProfile::Rdna4W8a8BlockCk => {
+                for (layer_index, report) in self.layer_reports.iter().enumerate() {
+                    validate_measured_ck_dispatch(self.sequence_len, layer_index, report)?;
+                }
             }
+            Sq8LayerExecutionProfile::Rdna4W8a8BlockHandwrittenWmmaPrototype => {
+                for (layer_index, report) in self.layer_reports.iter().enumerate() {
+                    validate_handwritten_wmma_m1_dispatch(self.sequence_len, layer_index, report)?;
+                }
+            }
+            Sq8LayerExecutionProfile::ReferenceW8a16Block2d => {}
         }
         let expected_layer_quantizations = match self.profile {
-            Sq8LayerExecutionProfile::Rdna4W8a8BlockCk => {
+            Sq8LayerExecutionProfile::Rdna4W8a8BlockCk
+            | Sq8LayerExecutionProfile::Rdna4W8a8BlockHandwrittenWmmaPrototype => {
                 QWEN3_14B_SQ8_LAYER_ACTIVATION_QUANTIZATIONS
             }
             Sq8LayerExecutionProfile::ReferenceW8a16Block2d => 0,
@@ -419,8 +448,38 @@ impl Sq8StackExecutionReport {
                     );
                 }
             }
+            Sq8LayerExecutionProfile::Rdna4W8a8BlockHandwrittenWmmaPrototype => {
+                if self.sequence_len != 1
+                    || !self.all_handwritten_wmma_prototype()
+                    || self.activation_quantizations
+                        != QWEN3_14B_SQ8_STACK_ACTIVATION_QUANTIZATIONS
+                    || self.fallback_used
+                {
+                    return Err(
+                        "SQ8 handwritten WMMA prototype requires M=1, 280 private projections, 160 activation quantizations, and no fallback"
+                            .into(),
+                    );
+                }
+            }
         }
         Ok(())
+    }
+
+    /// Validates an M=1 paged-decode result that is safe to feed to the model
+    /// head but is intentionally ineligible for promotion.  The normal
+    /// optimized/promotion contract remains CK-only below.
+    pub(crate) fn validate_m1_paged_decode_execution(&self) -> Result<(), String> {
+        self.validate_contract()?;
+        if self.mode != Sq8StackExecutionMode::SynchronizedResident {
+            return Err("SQ8 paged decode requires synchronized resident execution".into());
+        }
+        match self.profile {
+            Sq8LayerExecutionProfile::Rdna4W8a8BlockCk
+            | Sq8LayerExecutionProfile::Rdna4W8a8BlockHandwrittenWmmaPrototype => Ok(()),
+            Sq8LayerExecutionProfile::ReferenceW8a16Block2d => {
+                Err("SQ8 paged decode rejects the reference profile".into())
+            }
+        }
     }
 
     pub fn validate_optimized_promotion(&self) -> Result<(), String> {
@@ -1242,7 +1301,14 @@ impl Qwen3Sq8StackRuntime {
         if self.paged_m1_sequence_active {
             return Err("P7 paged decode cannot run during a serving M=1 sequence".into());
         }
-        self.run_paged_decode_common_synchronized(decode, input, position, caches, stream)
+        self.run_paged_decode_common_synchronized(
+            decode,
+            input,
+            position,
+            caches,
+            Sq8LayerExecutionProfile::Rdna4W8a8BlockCk,
+            stream,
+        )
     }
 
     pub(crate) fn run_paged_m1_sequence_step_optimized_synchronized(
@@ -1257,7 +1323,39 @@ impl Qwen3Sq8StackRuntime {
         if !self.paged_m1_sequence_active {
             return Err("Qwen3-14B SQ8 serving paged M=1 sequence is not active".into());
         }
-        self.run_paged_decode_common_synchronized(decode, input, position, caches, stream)
+        self.run_paged_decode_common_synchronized(
+            decode,
+            input,
+            position,
+            caches,
+            Sq8LayerExecutionProfile::Rdna4W8a8BlockCk,
+            stream,
+        )
+    }
+
+    /// Explicit test-only route.  It does not alter the ordinary CK method or
+    /// any public C ABI/legacy dispatch.  Only serving's opt-in probe reaches
+    /// this method, and the layer profile rejects every M other than one.
+    pub(crate) fn run_paged_m1_sequence_step_handwritten_wmma_prototype_synchronized(
+        &mut self,
+        decode: &mut Qwen3Sq8PagedDecodeRuntime,
+        input: &RuntimeBuffer,
+        position: usize,
+        caches: &mut [PagedDecodeState],
+        stream: &mut RuntimeStream,
+    ) -> Result<Sq8PagedStackExecutionReport, String> {
+        self.validate_runtime_contract()?;
+        if !self.paged_m1_sequence_active {
+            return Err("Qwen3-14B SQ8 serving paged M=1 sequence is not active".into());
+        }
+        self.run_paged_decode_common_synchronized(
+            decode,
+            input,
+            position,
+            caches,
+            Sq8LayerExecutionProfile::Rdna4W8a8BlockHandwrittenWmmaPrototype,
+            stream,
+        )
     }
 
     fn run_paged_decode_common_synchronized(
@@ -1266,6 +1364,7 @@ impl Qwen3Sq8StackRuntime {
         input: &RuntimeBuffer,
         position: usize,
         caches: &mut [PagedDecodeState],
+        profile: Sq8LayerExecutionProfile,
         stream: &mut RuntimeStream,
     ) -> Result<Sq8PagedStackExecutionReport, String> {
         decode.ensure_usable()?;
@@ -1315,7 +1414,6 @@ impl Qwen3Sq8StackRuntime {
             return Err(error);
         }
 
-        let profile = Sq8LayerExecutionProfile::Rdna4W8a8BlockCk;
         let mut layer_reports = Vec::with_capacity(QWEN3_14B_SQ8_STACK_LAYERS);
         for (layer_index, cache) in caches.iter_mut().enumerate() {
             match self.enqueue_paged_decode_layer_and_copy(
@@ -1801,6 +1899,34 @@ fn validate_measured_ck_dispatch(
         if actual != expected {
             return Err(format!(
                 "Qwen3-14B SQ8 stack layer {layer_index} {projection} dispatch mismatch for M={m}: expected={expected:?} actual={actual:?}"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_handwritten_wmma_m1_dispatch(
+    m: usize,
+    layer_index: usize,
+    report: &Sq8LayerExecutionReport,
+) -> Result<(), String> {
+    if m != 1 {
+        return Err(format!(
+            "Qwen3-14B SQ8 handwritten WMMA dispatch only permits M=1, got M={m}"
+        ));
+    }
+    for (projection, actual) in [
+        ("q", report.q),
+        ("k", report.k),
+        ("v", report.v),
+        ("o", report.o),
+        ("gate", report.gate),
+        ("up", report.up),
+        ("down", report.down),
+    ] {
+        if actual != Sq8LayerProjectionExecution::HandwrittenWmmaPrototype {
+            return Err(format!(
+                "Qwen3-14B SQ8 handwritten WMMA layer {layer_index} {projection} dispatch mismatch: actual={actual:?}"
             ));
         }
     }

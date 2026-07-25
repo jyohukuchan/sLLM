@@ -47,6 +47,7 @@ struct Options {
     test_only_ignore_eos: bool,
     record_generated_timing: bool,
     performance_gate: bool,
+    handwritten_wmma_projection_prototype: bool,
     cancel_after_first_token: bool,
     cancel_after_prompt_progress: Option<usize>,
     oracle_capture_dir: Option<PathBuf>,
@@ -217,6 +218,7 @@ struct ServingSmokeResult {
     runner_worktree_clean: bool,
     runner_binary_sha256: String,
     passed: bool,
+    handwritten_wmma_projection_prototype: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     test_only_ignore_eos: Option<bool>,
     requests: Vec<ServingCaseResult>,
@@ -305,6 +307,12 @@ fn main() -> Result<(), String> {
     .map_err(|err| err.to_string())?;
     let load_seconds = load_start.elapsed().as_secs_f64();
 
+    if options.handwritten_wmma_projection_prototype {
+        session
+            .enable_handwritten_wmma_projection_prototype()
+            .map_err(|err| err.to_string())?;
+    }
+
     if options.performance_gate {
         return performance::run(
             &mut session,
@@ -353,18 +361,27 @@ fn main() -> Result<(), String> {
     let snapshot = reusable_snapshot(&session)?;
     let load_report = session.load_report();
     let result = ServingSmokeResult {
-        schema_version: match (options.test_only_ignore_eos, options.prefill_mode) {
-            (true, Sq8ServingPrefillMode::FixedM8Chunks) => "ullm.sq8.serving_deep_boundary.v1",
-            (true, Sq8ServingPrefillMode::FixedM128Chunks) => "ullm.sq8.serving_deep_boundary.v2",
-            (true, _) => {
-                return Err("deep-boundary evidence requires fixed M=8 or M=128 chunks".into());
+        schema_version: if options.handwritten_wmma_projection_prototype {
+            "ullm.sq8.serving_handwritten_wmma_prototype.v1"
+        } else {
+            match (options.test_only_ignore_eos, options.prefill_mode) {
+                (true, Sq8ServingPrefillMode::FixedM8Chunks) => {
+                    "ullm.sq8.serving_deep_boundary.v1"
+                }
+                (true, Sq8ServingPrefillMode::FixedM128Chunks) => {
+                    "ullm.sq8.serving_deep_boundary.v2"
+                }
+                (true, _) => {
+                    return Err("deep-boundary evidence requires fixed M=8 or M=128 chunks".into());
+                }
+                (false, Sq8ServingPrefillMode::SequentialM1) => "ullm.sq8.serving_smoke.v2",
+                (false, Sq8ServingPrefillMode::FixedM8Chunks) => "ullm.sq8.serving_chunks.v3",
+                (
+                    false,
+                    Sq8ServingPrefillMode::FixedM32Chunks
+                    | Sq8ServingPrefillMode::FixedM128Chunks,
+                ) => "ullm.sq8.serving_chunks.v4",
             }
-            (false, Sq8ServingPrefillMode::SequentialM1) => "ullm.sq8.serving_smoke.v2",
-            (false, Sq8ServingPrefillMode::FixedM8Chunks) => "ullm.sq8.serving_chunks.v3",
-            (
-                false,
-                Sq8ServingPrefillMode::FixedM32Chunks | Sq8ServingPrefillMode::FixedM128Chunks,
-            ) => "ullm.sq8.serving_chunks.v4",
         },
         prefill_mode: prefill_mode_name(options.prefill_mode),
         prefill_chunk_tokens: load_report.prefill_chunk_tokens,
@@ -377,6 +394,8 @@ fn main() -> Result<(), String> {
         runner_worktree_clean: runner_identity.worktree_clean,
         runner_binary_sha256: runner_identity.binary_sha256,
         passed: true,
+        handwritten_wmma_projection_prototype: session
+            .handwritten_wmma_projection_prototype_enabled(),
         test_only_ignore_eos: options.test_only_ignore_eos.then_some(true),
         requests,
         cancelled_request,
@@ -1306,6 +1325,7 @@ fn parse_options() -> Result<Options, String> {
     let mut test_only_ignore_eos = false;
     let mut record_generated_timing = false;
     let mut performance_gate = false;
+    let mut handwritten_wmma_projection_prototype = false;
     let mut prompt_token_ids_explicit = false;
     let mut max_new_tokens_explicit = false;
     let mut second_max_new_tokens_explicit = false;
@@ -1414,6 +1434,9 @@ fn parse_options() -> Result<Options, String> {
             Some("--test-only-ignore-eos") => test_only_ignore_eos = true,
             Some("--record-generated-timing") => record_generated_timing = true,
             Some("--performance-gate") => performance_gate = true,
+            Some("--handwritten-wmma-projection-prototype") => {
+                handwritten_wmma_projection_prototype = true
+            }
             Some("--cancel-after-first-token") => cancel_after_first_token = true,
             Some("--cancel-after-prompt-progress") => {
                 let value = args
@@ -1538,6 +1561,29 @@ fn parse_options() -> Result<Options, String> {
                 .into(),
         );
     }
+    if handwritten_wmma_projection_prototype
+        && (performance_gate
+            || test_only_ignore_eos
+            || !matches!(
+                prefill_mode,
+                Sq8ServingPrefillMode::FixedM8Chunks
+                    | Sq8ServingPrefillMode::FixedM32Chunks
+                    | Sq8ServingPrefillMode::FixedM128Chunks
+            )
+            || max_new_tokens < 3
+            || second_prompt_token_ids.is_some()
+            || cancel_after_first_token
+            || cancel_after_prompt_progress.is_some()
+            || decode_oracle_capture_dir.is_none()
+            || result_json.is_none())
+    {
+        return Err(
+            "--handwritten-wmma-projection-prototype requires a fixed chunk prefill, \
+             --max-new-tokens >= 3, --decode-oracle-capture-dir PATH, and --result-json PATH; \
+             it cannot be combined with performance/deep-boundary/second-request/cancellation modes"
+                .into(),
+        );
+    }
     Ok(Options {
         artifact: artifact.ok_or_else(|| "--artifact is required".to_string())?,
         package: package.ok_or_else(|| "--package is required".to_string())?,
@@ -1550,6 +1596,7 @@ fn parse_options() -> Result<Options, String> {
         test_only_ignore_eos,
         record_generated_timing,
         performance_gate,
+        handwritten_wmma_projection_prototype,
         cancel_after_first_token,
         cancel_after_prompt_progress,
         oracle_capture_dir,

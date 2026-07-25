@@ -370,8 +370,14 @@ pub(crate) struct Sq8ModelHeadM1ExecutionBinding {
 
 impl Sq8ModelHeadM1ExecutionBinding {
     fn validate_contract(&self) -> Result<(), String> {
-        if self.profile != Sq8LayerExecutionProfile::Rdna4W8a8BlockCk {
-            return Err("Qwen3-14B SQ8 M=1 model head requires the RDNA4 CK profile".into());
+        if !matches!(
+            self.profile,
+            Sq8LayerExecutionProfile::Rdna4W8a8BlockCk
+                | Sq8LayerExecutionProfile::Rdna4W8a8BlockHandwrittenWmmaPrototype
+        ) {
+            return Err(
+                "Qwen3-14B SQ8 M=1 model head requires an RDNA4 W8A8 profile".into(),
+            );
         }
         self.device.validate_r9700()?;
         validate_sha256(&self.package_manifest_sha256).map_err(|err| {

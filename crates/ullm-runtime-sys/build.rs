@@ -22,9 +22,12 @@ fn main() {
         root.join("runtime/src/ullm_runtime_api.inc"),
         root.join("runtime/src/ullm_runtime_api_core.inc"),
         root.join("runtime/src/ullm_runtime_api_sq8_ck.inc"),
+        root.join("runtime/src/ullm_runtime_api_sq8_handwritten_gfx1201.inc"),
         root.join("runtime/src/ullm_runtime_api_sq8_ck_gfx942_aprime.inc"),
         root.join("runtime/src/sq8_ck_gfx1201.h"),
         root.join("runtime/src/sq8_ck_gfx1201.hip.cpp"),
+        root.join("runtime/src/sq8_handwritten_gfx1201.h"),
+        root.join("runtime/src/sq8_handwritten_gfx1201.hip.cpp"),
         root.join("runtime/src/sq8_ck_gfx942_arch.h"),
         root.join("runtime/src/sq8_ck_gfx942_aprime.h"),
         root.join("runtime/src/sq8_ck_gfx942_aprime.hip.cpp"),
@@ -47,10 +50,17 @@ fn main() {
     }
 
     let ck_gfx1201_enabled = std::env::var_os("CARGO_FEATURE_ROCM_CK_GFX1201").is_some();
+    let handwritten_gfx1201_enabled =
+        std::env::var_os("CARGO_FEATURE_ROCM_HANDWRITTEN_PROJECTION_GFX1201").is_some();
     let ck_gfx942_aprime_enabled =
         std::env::var_os("CARGO_FEATURE_ROCM_CK_GFX942_APRIME").is_some();
     if ck_gfx1201_enabled && ck_gfx942_aprime_enabled {
         panic!("Cargo features rocm-ck-gfx1201 and rocm-ck-gfx942-aprime are mutually exclusive");
+    }
+    if handwritten_gfx1201_enabled && !ck_gfx1201_enabled {
+        panic!(
+            "Cargo feature rocm-handwritten-projection-gfx1201 requires rocm-ck-gfx1201 for canonical quantization"
+        );
     }
     let rocm_path =
         PathBuf::from(std::env::var_os("ROCM_PATH").unwrap_or_else(|| "/opt/rocm".into()));
@@ -71,6 +81,9 @@ fn main() {
     }
     if ck_gfx1201_enabled {
         runtime.define("ULLM_RUNTIME_ROCM_CK_GFX1201", "1");
+    }
+    if handwritten_gfx1201_enabled {
+        runtime.define("ULLM_RUNTIME_ROCM_HANDWRITTEN_PROJECTION_GFX1201", "1");
     }
     if ck_gfx942_aprime_enabled {
         runtime.define("ULLM_RUNTIME_ROCM_CK_GFX942_APRIME", "1");
@@ -115,6 +128,33 @@ fn main() {
         println!("cargo:rustc-link-lib=static=device_gemm_operations");
         println!("cargo:rustc-link-lib=dylib=amdhip64");
         println!("cargo:rustc-link-arg=-Wl,--gc-sections");
+    }
+
+    if handwritten_gfx1201_enabled {
+        let gpu_arch = std::env::var("GPU_ARCH").unwrap_or_else(|_| "gfx1201".to_string());
+        if gpu_arch != "gfx1201" {
+            panic!("Cargo feature rocm-handwritten-projection-gfx1201 requires GPU_ARCH=gfx1201");
+        }
+        let hipcc = rocm_path.join("bin/hipcc");
+        if !hipcc.is_file() {
+            panic!("ROCm hipcc was not found at {}", hipcc.display());
+        }
+
+        cc::Build::new()
+            .cpp(true)
+            .compiler(hipcc)
+            .include(root.join("runtime/src"))
+            .include(rocm_path.join("include"))
+            .file(root.join("runtime/src/sq8_handwritten_gfx1201.hip.cpp"))
+            .flag("-std=c++20")
+            .flag("-O3")
+            .flag("-Wall")
+            .flag("-Wextra")
+            .flag("-Wpedantic")
+            .flag("-ffunction-sections")
+            .flag("-fdata-sections")
+            .flag(&format!("--offload-arch={gpu_arch}"))
+            .compile("ullm_runtime_sq8_handwritten_gfx1201");
     }
 
     if ck_gfx942_aprime_enabled {

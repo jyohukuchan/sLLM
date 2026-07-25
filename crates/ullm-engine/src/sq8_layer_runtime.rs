@@ -13,7 +13,8 @@ use crate::sq8_layer_oracle::{
 use ullm_runtime_sys::{
     RuntimeBuffer, RuntimeContext, RuntimeStream, Sq8CkImplementation, Sq8CkQuantizedActivation,
     SqFp8ExecutionPath, add_f32, causal_attn_f32, rope_f32, segmented_rmsnorm_f32, silu_mul_f32,
-    sq_fp8_matvec_block2d_batch_f32, sq8_ck_projection_buffer_bytes, sq8_ck_projection_f32,
+    sq8_handwritten_gfx1201_m1_projection_f32, sq_fp8_matvec_block2d_batch_f32,
+    sq8_ck_projection_buffer_bytes, sq8_ck_projection_f32,
 };
 
 pub const QWEN3_14B_SQ8_LAYER_ACTIVATION_QUANTIZATIONS: usize = 4;
@@ -45,12 +46,27 @@ pub(crate) fn is_qwen3_14b_sq8_prefill_chunk_tokens(tokens: usize) -> bool {
 pub enum Sq8LayerExecutionProfile {
     ReferenceW8a16Block2d,
     Rdna4W8a8BlockCk,
+    /// Private M=1-only feasibility profile.  It is never selected by the
+    /// default or legacy dispatcher; serving enables it through an explicit
+    /// test-only API after loading the normal CK resident model.
+    Rdna4W8a8BlockHandwrittenWmmaPrototype,
+}
+
+impl Sq8LayerExecutionProfile {
+    pub(crate) const fn uses_sq8_activation_quantization(self) -> bool {
+        matches!(
+            self,
+            Self::Rdna4W8a8BlockCk | Self::Rdna4W8a8BlockHandwrittenWmmaPrototype
+        )
+    }
+
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Sq8LayerProjectionExecution {
     Reference(SqFp8ExecutionPath),
     Ck(Sq8CkImplementation),
+    HandwrittenWmmaPrototype,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -85,6 +101,14 @@ impl Sq8LayerExecutionReport {
         ]
         .into_iter()
         .all(|execution| matches!(execution, Sq8LayerProjectionExecution::Ck(_)))
+    }
+
+    pub fn all_handwritten_wmma_prototype(&self) -> bool {
+        [
+            self.q, self.k, self.v, self.o, self.gate, self.up, self.down,
+        ]
+        .into_iter()
+        .all(|execution| execution == Sq8LayerProjectionExecution::HandwrittenWmmaPrototype)
     }
 }
 
@@ -667,13 +691,12 @@ impl Qwen3Sq8LayerWorkspace {
             Some(&mut *stream),
         )?;
 
-        let quantization_count = match profile {
-            Sq8LayerExecutionProfile::ReferenceW8a16Block2d => 0,
-            Sq8LayerExecutionProfile::Rdna4W8a8BlockCk => {
-                self.qkv_activation
-                    .quantize_f32(&self.input_normed, Some(&mut *stream))?;
-                QWEN3_14B_SQ8_LAYER_ACTIVATION_QUANTIZATIONS
-            }
+        let quantization_count = if profile.uses_sq8_activation_quantization() {
+            self.qkv_activation
+                .quantize_f32(&self.input_normed, Some(&mut *stream))?;
+            QWEN3_14B_SQ8_LAYER_ACTIVATION_QUANTIZATIONS
+        } else {
+            0
         };
         let q = run_projection(
             profile,
@@ -833,7 +856,7 @@ impl Qwen3Sq8LayerWorkspace {
             }
         }
 
-        if profile == Sq8LayerExecutionProfile::Rdna4W8a8BlockCk {
+        if profile.uses_sq8_activation_quantization() {
             self.o_activation
                 .quantize_f32(&self.attention, Some(&mut *stream))?;
         }
@@ -864,7 +887,7 @@ impl Qwen3Sq8LayerWorkspace {
             Some(&mut *stream),
         )?;
 
-        if profile == Sq8LayerExecutionProfile::Rdna4W8a8BlockCk {
+        if profile.uses_sq8_activation_quantization() {
             self.gate_up_activation
                 .quantize_f32(&self.post_normed, Some(&mut *stream))?;
         }
@@ -896,7 +919,7 @@ impl Qwen3Sq8LayerWorkspace {
             Some(&mut *stream),
         )?;
 
-        if profile == Sq8LayerExecutionProfile::Rdna4W8a8BlockCk {
+        if profile.uses_sq8_activation_quantization() {
             self.down_activation
                 .quantize_f32(&self.mlp_activation, Some(&mut *stream))?;
         }
@@ -978,7 +1001,7 @@ impl Qwen3Sq8LayerWorkspace {
         let mlp_activation = read_f32_synchronized(&self.mlp_activation, intermediate, stream)?;
         let down_projected = read_f32_synchronized(&self.down_projected, hidden, stream)?;
         let output = read_f32_synchronized(&self.output, hidden, stream)?;
-        let activations = if profile == Sq8LayerExecutionProfile::Rdna4W8a8BlockCk {
+        let activations = if profile.uses_sq8_activation_quantization() {
             Some([
                 read_activation_synchronized(&self.qkv_activation, stream)?,
                 read_activation_synchronized(&self.o_activation, stream)?,
@@ -1231,6 +1254,38 @@ fn run_projection(
                 Some(stream),
             )?;
             Ok(Sq8LayerProjectionExecution::Ck(implementation))
+        }
+        Sq8LayerExecutionProfile::Rdna4W8a8BlockHandwrittenWmmaPrototype => {
+            if m != 1 {
+                return Err(format!(
+                    "SQ8 handwritten WMMA prototype only supports M=1, got M={m} for {}",
+                    weight.tensor_name
+                ));
+            }
+            let activation = activation.ok_or_else(|| {
+                format!(
+                    "SQ8 handwritten WMMA projection {} is missing quantized activation",
+                    weight.tensor_name
+                )
+            })?;
+            if activation.m() != 1 || activation.k() != weight.cols {
+                return Err(format!(
+                    "SQ8 handwritten WMMA projection {} activation shape mismatch: activation=[{},{}] expected=[1,{}]",
+                    weight.tensor_name,
+                    activation.m(),
+                    activation.k(),
+                    weight.cols
+                ));
+            }
+            sq8_handwritten_gfx1201_m1_projection_f32(
+                activation,
+                &weight.payload_buffer,
+                &weight.scale_buffer,
+                weight.rows,
+                output,
+                Some(stream),
+            )?;
+            Ok(Sq8LayerProjectionExecution::HandwrittenWmmaPrototype)
         }
     }
 }
@@ -1561,5 +1616,22 @@ mod tests {
         assert!(!projection_fallback_used(Sq8LayerProjectionExecution::Ck(
             Sq8CkImplementation::MemV1DefaultTile16x128x128
         )));
+        assert!(!projection_fallback_used(
+            Sq8LayerProjectionExecution::HandwrittenWmmaPrototype
+        ));
+    }
+
+    #[test]
+    fn handwritten_profile_keeps_sq8_quantization_but_is_never_ck() {
+        let profile = Sq8LayerExecutionProfile::Rdna4W8a8BlockHandwrittenWmmaPrototype;
+        assert!(profile.uses_sq8_activation_quantization());
+        assert!(matches!(
+            profile,
+            Sq8LayerExecutionProfile::Rdna4W8a8BlockHandwrittenWmmaPrototype
+        ));
+        assert!(!matches!(
+            Sq8LayerExecutionProfile::Rdna4W8a8BlockCk,
+            Sq8LayerExecutionProfile::Rdna4W8a8BlockHandwrittenWmmaPrototype
+        ));
     }
 }
