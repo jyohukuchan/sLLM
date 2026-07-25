@@ -32,6 +32,7 @@ mod performance;
 const UPLOAD_CHUNK_BYTES: usize = 16 * 1024 * 1024;
 const DEEP_BOUNDARY_PROMPT_TOKENS: usize = 3584;
 const DEEP_BOUNDARY_GENERATED_TOKENS: usize = 512;
+const SQ8_PAGED_DECODE_SPLIT_MULTI_TILE_POLICY: &str = "direct-fallback-exact-state.v1";
 
 #[derive(Debug)]
 struct Options {
@@ -50,6 +51,7 @@ struct Options {
     cancel_after_prompt_progress: Option<usize>,
     oracle_capture_dir: Option<PathBuf>,
     decode_oracle_capture_dir: Option<PathBuf>,
+    kv_cache_prefix_capture_dir: Option<PathBuf>,
     result_json: Option<PathBuf>,
 }
 
@@ -93,6 +95,8 @@ struct ServingCaseResult {
     oracle_capture: Option<OracleCaptureResult>,
     #[serde(skip_serializing_if = "Option::is_none")]
     decode_oracle_captures: Option<Vec<DecodeOracleCaptureResult>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    kv_cache_prefix_capture: Option<KvCachePrefixCaptureResult>,
 }
 
 #[derive(Debug, Serialize)]
@@ -154,6 +158,29 @@ struct DecodeOracleCaptureResult {
     logits_f32_le_sha256: String,
 }
 
+/// The full logical cache prefix after decode g0001.  Layer records are kept
+/// separate so differential tooling can identify the first layer at which
+/// state diverges without serializing the unwritten physical cache capacity.
+#[derive(Debug, Serialize)]
+struct KvCachePrefixCaptureResult {
+    schema_version: &'static str,
+    generated_index: usize,
+    cache_len: usize,
+    layer_count: usize,
+    layers: Vec<KvCachePrefixLayerResult>,
+}
+
+#[derive(Debug, Serialize)]
+struct KvCachePrefixLayerResult {
+    layer_index: usize,
+    k_elements: usize,
+    k_file: PathBuf,
+    k_f32_le_sha256: String,
+    v_elements: usize,
+    v_file: PathBuf,
+    v_f32_le_sha256: String,
+}
+
 #[derive(Debug, Serialize)]
 struct CancelledCaseResult {
     request_id: String,
@@ -185,6 +212,7 @@ struct ServingSmokeResult {
     prefill_chunk_tokens: usize,
     prefill_implementation: String,
     paged_decode_split_source_tile: Option<usize>,
+    paged_decode_split_multi_tile_policy: Option<String>,
     runner_git_commit: String,
     runner_worktree_clean: bool,
     runner_binary_sha256: String,
@@ -244,6 +272,14 @@ fn main() -> Result<(), String> {
         std::fs::create_dir(directory).map_err(|err| {
             format!(
                 "failed to create new decode oracle capture directory {}: {err}",
+                directory.display()
+            )
+        })?;
+    }
+    if let Some(directory) = &options.kv_cache_prefix_capture_dir {
+        std::fs::create_dir(directory).map_err(|err| {
+            format!(
+                "failed to create new KV cache prefix capture directory {}: {err}",
                 directory.display()
             )
         })?;
@@ -334,6 +370,9 @@ fn main() -> Result<(), String> {
         prefill_chunk_tokens: load_report.prefill_chunk_tokens,
         prefill_implementation: load_report.prefill_implementation.clone(),
         paged_decode_split_source_tile: load_report.paged_decode_split_source_tile,
+        paged_decode_split_multi_tile_policy: load_report
+            .paged_decode_split_source_tile
+            .map(|_| SQ8_PAGED_DECODE_SPLIT_MULTI_TILE_POLICY.to_string()),
         runner_git_commit: runner_identity.git_commit,
         runner_worktree_clean: runner_identity.worktree_clean,
         runner_binary_sha256: runner_identity.binary_sha256,
@@ -386,6 +425,7 @@ fn run_completed_request(
     let test_only_ignore_eos = options.test_only_ignore_eos;
     let oracle_capture_dir = options.oracle_capture_dir.as_deref();
     let decode_oracle_capture_dir = options.decode_oracle_capture_dir.as_deref();
+    let kv_cache_prefix_capture_dir = options.kv_cache_prefix_capture_dir.as_deref();
     let evidence_root = options.result_json.as_deref().and_then(Path::parent);
     let request = if test_only_ignore_eos {
         Sq8ServingRequest::greedy_ignore_eos_for_testing(
@@ -412,6 +452,7 @@ fn run_completed_request(
     let mut prefill_execution_units = Vec::new();
     let mut oracle_capture = None;
     let mut decode_oracle_captures = decode_oracle_capture_dir.map(|_| Vec::new());
+    let mut kv_cache_prefix_capture = None;
     let terminal_reason = loop {
         let prefill_before =
             (session.status() == Sq8ServingRuntimeStatus::Prefilling).then(|| session.snapshot());
@@ -523,6 +564,31 @@ fn run_completed_request(
                     )?);
                 } else if pending_decode_capture.is_some() {
                     return Err("serving decode oracle capture escaped its output directory".into());
+                }
+                if generated_index == 1 {
+                    if let Some(capture_directory) = kv_cache_prefix_capture_dir {
+                        if kv_cache_prefix_capture.is_some() {
+                            return Err(
+                                "serving KV prefix capture was recorded more than once".into()
+                            );
+                        }
+                        let capture = session
+                            .read_paged_kv_cache_prefix_synchronized(stream)
+                            .map_err(|err| err.to_string())?;
+                        if capture.cache_len != cache_len {
+                            return Err(format!(
+                                "serving KV prefix capture cache length {} differs from decode cache length {cache_len}",
+                                capture.cache_len
+                            ));
+                        }
+                        kv_cache_prefix_capture = Some(persist_kv_cache_prefix_capture(
+                            capture_directory,
+                            &request_id,
+                            generated_index,
+                            capture,
+                            evidence_root,
+                        )?);
+                    }
                 }
                 if let Some(steps) = generated_steps.as_mut() {
                     let expected_cache_len = prompt_token_ids
@@ -656,6 +722,18 @@ fn run_completed_request(
             ));
         }
     }
+    if let Some(capture) = &kv_cache_prefix_capture {
+        if capture.generated_index != 1
+            || capture.cache_len != prompt_token_ids.len().checked_add(1).unwrap_or(usize::MAX)
+            || capture.layer_count != capture.layers.len()
+        {
+            return Err(format!(
+                "serving KV prefix capture sequence mismatch: capture={capture:?}"
+            ));
+        }
+    } else if kv_cache_prefix_capture_dir.is_some() {
+        return Err("serving KV prefix capture omitted the first decode step".into());
+    }
     let terminal_last_cache_position = terminal_expected_cache_len - 1;
     let terminal_last_logical_block =
         terminal_last_cache_position / QWEN3_14B_SQ8_SERVING_BLOCK_TOKENS;
@@ -708,6 +786,7 @@ fn run_completed_request(
         reset_seconds,
         oracle_capture,
         decode_oracle_captures,
+        kv_cache_prefix_capture,
     })
 }
 
@@ -762,6 +841,44 @@ fn persist_decode_oracle_capture(
     })
 }
 
+fn persist_kv_cache_prefix_capture(
+    directory: &Path,
+    request_id: &str,
+    generated_index: usize,
+    capture: ullm_engine::sq8_serving_runtime::Sq8ServingKvCachePrefixCapture,
+    evidence_root: Option<&Path>,
+) -> Result<KvCachePrefixCaptureResult, String> {
+    let prefix = format!(
+        "{request_id}-decode-g{generated_index:04}-c{:04}-kv-prefix",
+        capture.cache_len
+    );
+    let mut layers = Vec::with_capacity(capture.layer_caches.len());
+    for (layer_index, layer) in capture.layer_caches.into_iter().enumerate() {
+        let k_file = directory.join(format!("{prefix}-layer{layer_index:02}-k.f32le"));
+        let v_file = directory.join(format!("{prefix}-layer{layer_index:02}-v.f32le"));
+        let k_f32_le_sha256 = f32_le_sha256(&layer.k);
+        let v_f32_le_sha256 = f32_le_sha256(&layer.v);
+        write_f32_le_create_new(&k_file, &layer.k)?;
+        write_f32_le_create_new(&v_file, &layer.v)?;
+        layers.push(KvCachePrefixLayerResult {
+            layer_index,
+            k_elements: layer.k.len(),
+            k_file: evidence_path(&k_file, evidence_root),
+            k_f32_le_sha256,
+            v_elements: layer.v.len(),
+            v_file: evidence_path(&v_file, evidence_root),
+            v_f32_le_sha256,
+        });
+    }
+    Ok(KvCachePrefixCaptureResult {
+        schema_version: "ullm.sq8_0.paged_decode_kv_prefix_capture.v1",
+        generated_index,
+        cache_len: capture.cache_len,
+        layer_count: layers.len(),
+        layers,
+    })
+}
+
 fn evidence_path(path: &Path, evidence_root: Option<&Path>) -> PathBuf {
     evidence_root
         .and_then(|root| path.strip_prefix(root).ok())
@@ -789,6 +906,14 @@ fn write_f32_le_create_new(path: &Path, values: &[f32]) -> Result<(), String> {
         .map_err(|err| format!("failed to finish {}: {err}", path.display()))?;
     file.sync_all()
         .map_err(|err| format!("failed to sync {}: {err}", path.display()))
+}
+
+fn f32_le_sha256(values: &[f32]) -> String {
+    let mut digest = Sha256::new();
+    for value in values {
+        digest.update(value.to_le_bytes());
+    }
+    format!("{:x}", digest.finalize())
 }
 
 fn write_bytes_create_new(path: &Path, payload: &[u8]) -> Result<(), String> {
@@ -1188,6 +1313,7 @@ fn parse_options() -> Result<Options, String> {
     let mut cancel_after_prompt_progress = None;
     let mut oracle_capture_dir = None;
     let mut decode_oracle_capture_dir = None;
+    let mut kv_cache_prefix_capture_dir = None;
     let mut result_json = None;
     let mut args = std::env::args_os().skip(1);
     while let Some(argument) = args.next() {
@@ -1313,6 +1439,12 @@ fn parse_options() -> Result<Options, String> {
                         "--decode-oracle-capture-dir requires a path".to_string()
                     })?));
             }
+            Some("--kv-cache-prefix-capture-dir") => {
+                kv_cache_prefix_capture_dir =
+                    Some(PathBuf::from(args.next().ok_or_else(|| {
+                        "--kv-cache-prefix-capture-dir requires a path".to_string()
+                    })?));
+            }
             Some("--result-json") => {
                 result_json =
                     Some(PathBuf::from(args.next().ok_or_else(|| {
@@ -1335,6 +1467,30 @@ fn parse_options() -> Result<Options, String> {
     if oracle_capture_dir.is_some() && oracle_capture_dir == decode_oracle_capture_dir {
         return Err("prefill and decode oracle capture directories must differ".into());
     }
+    if kv_cache_prefix_capture_dir.is_some() && decode_oracle_capture_dir.is_none() {
+        return Err("--kv-cache-prefix-capture-dir requires --decode-oracle-capture-dir".into());
+    }
+    if [
+        oracle_capture_dir.as_ref(),
+        decode_oracle_capture_dir.as_ref(),
+        kv_cache_prefix_capture_dir.as_ref(),
+    ]
+    .iter()
+    .flatten()
+    .enumerate()
+    .any(|(index, directory)| {
+        [
+            oracle_capture_dir.as_ref(),
+            decode_oracle_capture_dir.as_ref(),
+            kv_cache_prefix_capture_dir.as_ref(),
+        ]
+        .iter()
+        .flatten()
+        .skip(index + 1)
+        .any(|other| *other == *directory)
+    }) {
+        return Err("oracle and KV cache prefix capture directories must differ".into());
+    }
     if test_only_ignore_eos
         && (!matches!(
             prefill_mode,
@@ -1346,6 +1502,7 @@ fn parse_options() -> Result<Options, String> {
             || cancel_after_prompt_progress.is_some()
             || oracle_capture_dir.is_some()
             || decode_oracle_capture_dir.is_some()
+            || kv_cache_prefix_capture_dir.is_some()
             || record_generated_timing
             || result_json.is_none())
     {
@@ -1371,6 +1528,7 @@ fn parse_options() -> Result<Options, String> {
             || cancel_after_prompt_progress.is_some()
             || oracle_capture_dir.is_some()
             || decode_oracle_capture_dir.is_some()
+            || kv_cache_prefix_capture_dir.is_some()
             || result_json.is_none())
     {
         return Err(
@@ -1396,6 +1554,7 @@ fn parse_options() -> Result<Options, String> {
         cancel_after_prompt_progress,
         oracle_capture_dir,
         decode_oracle_capture_dir,
+        kv_cache_prefix_capture_dir,
         result_json,
     })
 }

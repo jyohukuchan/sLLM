@@ -2493,49 +2493,57 @@ impl PagedDecodeState {
         softmax_scale: f32,
     ) -> Result<(), String> {
         if let Some(split) = self.split_decode.as_mut() {
-            ullm_runtime_sys::paged_decode_attn_split_f32(
-                &self.q_buffer,
-                &self.k_cache_buffer,
-                &self.v_cache_buffer,
-                &self.block_table_buffer,
-                cache_len,
-                self.shape.block_size,
-                self.shape.cache_blocks,
-                self.shape.q_heads,
-                self.shape.kv_heads,
-                self.shape.head_dim,
-                self.shape.value_dim,
-                softmax_scale,
-                split.source_tile,
-                &mut split.buffer,
-                &mut self.output_buffer,
-                Some(stream),
-            )
-            .map_err(|err| {
-                format!(
-                    "failed to run paged decoder split attention source_tile={}: {err}",
-                    split.source_tile
+            if cache_len <= split.source_tile {
+                return ullm_runtime_sys::paged_decode_attn_split_f32(
+                    &self.q_buffer,
+                    &self.k_cache_buffer,
+                    &self.v_cache_buffer,
+                    &self.block_table_buffer,
+                    cache_len,
+                    self.shape.block_size,
+                    self.shape.cache_blocks,
+                    self.shape.q_heads,
+                    self.shape.kv_heads,
+                    self.shape.head_dim,
+                    self.shape.value_dim,
+                    softmax_scale,
+                    split.source_tile,
+                    &mut split.buffer,
+                    &mut self.output_buffer,
+                    Some(stream),
                 )
-            })
-        } else {
-            ullm_runtime_sys::paged_decode_attn_f32(
-                &self.q_buffer,
-                &self.k_cache_buffer,
-                &self.v_cache_buffer,
-                &self.block_table_buffer,
-                cache_len,
-                self.shape.block_size,
-                self.shape.cache_blocks,
-                self.shape.q_heads,
-                self.shape.kv_heads,
-                self.shape.head_dim,
-                self.shape.value_dim,
-                softmax_scale,
-                &mut self.output_buffer,
-                Some(stream),
-            )
-            .map_err(|err| format!("failed to run paged decoder direct attention: {err}"))
+                .map_err(|err| {
+                    format!(
+                        "failed to run paged decoder split attention source_tile={}: {err}",
+                        split.source_tile
+                    )
+                });
+            }
         }
+
+        // A multi-tile merge changes the online-softmax recurrence order.  Its
+        // standalone F32 error is tiny, but it becomes feedback state for the
+        // SQ8 activation quantizer and can select different subsequent values.
+        // Retain the experiment only for the one-tile case, where it follows
+        // the direct source order exactly; multi-tile requests deliberately
+        // reuse the established direct kernel until an exact-state merge exists.
+        ullm_runtime_sys::paged_decode_attn_f32(
+            &self.q_buffer,
+            &self.k_cache_buffer,
+            &self.v_cache_buffer,
+            &self.block_table_buffer,
+            cache_len,
+            self.shape.block_size,
+            self.shape.cache_blocks,
+            self.shape.q_heads,
+            self.shape.kv_heads,
+            self.shape.head_dim,
+            self.shape.value_dim,
+            softmax_scale,
+            &mut self.output_buffer,
+            Some(stream),
+        )
+        .map_err(|err| format!("failed to run paged decoder direct attention: {err}"))
     }
 
     pub(crate) fn output_buffer(&self) -> &RuntimeBuffer {
@@ -2549,6 +2557,102 @@ impl PagedDecodeState {
         let k = read_f32_buffer(&self.k_cache_buffer, stream, self.shape.k_cache_elements()?)?;
         let v = read_f32_buffer(&self.v_cache_buffer, stream, self.shape.v_cache_elements()?)?;
         Ok(PagedKvCacheReadback { k, v })
+    }
+
+    /// Reads the written logical K/V prefix rather than the whole physical
+    /// allocation.  This is intentionally a diagnostic readback: callers can
+    /// compare the state that a subsequent decode will consume without paying
+    /// to copy unwritten cache capacity or depending on physical block order.
+    pub fn read_written_cache_prefix_to_host(
+        &self,
+        stream: &mut RuntimeStream,
+    ) -> Result<PagedKvCacheReadback, String> {
+        if self.written_len == 0 {
+            return Err("paged decoder logical cache prefix is empty".to_string());
+        }
+
+        let cache_len = self.written_len;
+        let k_token_elements = self.shape.k_token_elements()?;
+        let v_token_elements = self.shape.v_token_elements()?;
+        let k_token_bytes = f32_bytes(k_token_elements);
+        let v_token_bytes = f32_bytes(v_token_elements);
+        let k_prefix_elements = cache_len
+            .checked_mul(k_token_elements)
+            .ok_or_else(|| "paged decoder logical K prefix element count overflows".to_string())?;
+        let v_prefix_elements = cache_len
+            .checked_mul(v_token_elements)
+            .ok_or_else(|| "paged decoder logical V prefix element count overflows".to_string())?;
+        let mut k_raw = vec![0_u8; f32_bytes(k_prefix_elements)];
+        let mut v_raw = vec![0_u8; f32_bytes(v_prefix_elements)];
+        let logical_blocks = cache_len.div_ceil(self.shape.block_size);
+
+        for logical_block in 0..logical_blocks {
+            let logical_start = logical_block
+                .checked_mul(self.shape.block_size)
+                .ok_or_else(|| "paged decoder logical prefix block offset overflows".to_string())?;
+            let token_count = (cache_len - logical_start).min(self.shape.block_size);
+            let physical_block = self
+                .block_table
+                .get(logical_block)
+                .copied()
+                .ok_or_else(|| {
+                    format!(
+                        "paged decoder logical prefix is missing block table entry {logical_block}"
+                    )
+                })? as usize;
+            if physical_block >= self.shape.cache_blocks {
+                return Err(format!(
+                    "paged decoder logical prefix block_table[{logical_block}]={physical_block} exceeds cache blocks {}",
+                    self.shape.cache_blocks
+                ));
+            }
+            let physical_start = physical_block
+                .checked_mul(self.shape.block_size)
+                .ok_or_else(|| {
+                    "paged decoder physical prefix block offset overflows".to_string()
+                })?;
+            let k_source_offset = physical_start.checked_mul(k_token_bytes).ok_or_else(|| {
+                "paged decoder physical K prefix byte offset overflows".to_string()
+            })?;
+            let v_source_offset = physical_start.checked_mul(v_token_bytes).ok_or_else(|| {
+                "paged decoder physical V prefix byte offset overflows".to_string()
+            })?;
+            let k_destination_offset =
+                logical_start.checked_mul(k_token_bytes).ok_or_else(|| {
+                    "paged decoder logical K prefix byte offset overflows".to_string()
+                })?;
+            let v_destination_offset =
+                logical_start.checked_mul(v_token_bytes).ok_or_else(|| {
+                    "paged decoder logical V prefix byte offset overflows".to_string()
+                })?;
+            let k_copy_bytes = token_count
+                .checked_mul(k_token_bytes)
+                .ok_or_else(|| "paged decoder K prefix copy byte count overflows".to_string())?;
+            let v_copy_bytes = token_count
+                .checked_mul(v_token_bytes)
+                .ok_or_else(|| "paged decoder V prefix copy byte count overflows".to_string())?;
+            self.k_cache_buffer
+                .copy_to_host(
+                    k_source_offset,
+                    &mut k_raw[k_destination_offset..k_destination_offset + k_copy_bytes],
+                    Some(&mut *stream),
+                )
+                .map_err(|err| format!("failed to read paged decoder logical K prefix: {err}"))?;
+            self.v_cache_buffer
+                .copy_to_host(
+                    v_source_offset,
+                    &mut v_raw[v_destination_offset..v_destination_offset + v_copy_bytes],
+                    Some(&mut *stream),
+                )
+                .map_err(|err| format!("failed to read paged decoder logical V prefix: {err}"))?;
+        }
+        stream.synchronize().map_err(|err| {
+            format!("failed to synchronize paged decoder logical prefix readback: {err}")
+        })?;
+        Ok(PagedKvCacheReadback {
+            k: le_bytes_to_f32s(&k_raw),
+            v: le_bytes_to_f32s(&v_raw),
+        })
     }
 
     fn validate_decode_input(&self, q: &[f32], softmax_scale: f32) -> Result<(), String> {
@@ -3402,6 +3506,11 @@ mod tests {
             pack_paged_kv_for_test(&logical_k, &logical_v, &block_table, cache_len, shape);
         assert_f32s_close(&readback.k, &expected_k, 1e-6);
         assert_f32s_close(&readback.v, &expected_v, 1e-6);
+        let logical_prefix = state
+            .read_written_cache_prefix_to_host(&mut stream)
+            .unwrap();
+        assert_f32s_close(&logical_prefix.k, &logical_k, 1e-6);
+        assert_f32s_close(&logical_prefix.v, &logical_v, 1e-6);
 
         let q = (0..shape.q_elements().unwrap())
             .map(|index| (index as f32 - 8.0) / 11.0)

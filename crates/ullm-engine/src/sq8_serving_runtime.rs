@@ -6,7 +6,7 @@
 //! This module is separate from `sq8_generation_runtime`: the P7 fixed request and its audited
 //! result schemas remain unchanged while serving gains variable prompt lengths and reusable state.
 
-use crate::decoder::{PagedDecodeShape, PagedDecodeState};
+use crate::decoder::{PagedDecodeShape, PagedDecodeState, PagedKvCacheReadback};
 use crate::inference_api::ReasoningUsage;
 pub use crate::inference_api::{
     CancellationToken as Sq8CancellationToken, FinishReason as Sq8FinishReason,
@@ -258,6 +258,15 @@ pub struct Sq8ServingOracleCapture {
 pub struct Sq8ServingOracleAdvance {
     pub advance: Sq8ServingAdvance,
     pub capture: Option<Sq8ServingOracleCapture>,
+}
+
+/// Logical, written-only K/V state for every layer of one active serving
+/// request.  This exists solely for differential diagnostics; it deliberately
+/// exposes neither physical cache capacity nor an execution selector.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Sq8ServingKvCachePrefixCapture {
+    pub cache_len: usize,
+    pub layer_caches: Vec<PagedKvCacheReadback>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1068,6 +1077,46 @@ impl Qwen3Sq8ServingSession {
             scheduler_waiting: self.scheduler.waiting_len(),
             allocator: self.scheduler.allocator_stats(),
         }
+    }
+
+    /// Synchronizes and captures the logical written K/V prefix for every
+    /// layer.  It is intended for a one-off differential after an actual
+    /// decode step, before `finish_and_reset_synchronized` clears the caches.
+    pub fn read_paged_kv_cache_prefix_synchronized(
+        &self,
+        stream: &mut RuntimeStream,
+    ) -> Result<Sq8ServingKvCachePrefixCapture, Sq8ServingError> {
+        let expected_cache_len = self
+            .caches
+            .first()
+            .map(PagedDecodeState::written_len)
+            .ok_or_else(|| Sq8ServingError::fatal_runtime("serving KV cache array is empty"))?;
+        if expected_cache_len == 0 {
+            return Err(Sq8ServingError::invalid_state(
+                "serving KV prefix capture requires written cache state",
+            ));
+        }
+        let mut layer_caches = Vec::with_capacity(self.caches.len());
+        for (layer_index, cache) in self.caches.iter().enumerate() {
+            if cache.written_len() != expected_cache_len {
+                return Err(Sq8ServingError::fatal_runtime(format!(
+                    "serving KV prefix capture layer {layer_index} length {} differs from expected {expected_cache_len}",
+                    cache.written_len()
+                )));
+            }
+            let readback = cache
+                .read_written_cache_prefix_to_host(stream)
+                .map_err(|err| {
+                    Sq8ServingError::fatal_runtime(format!(
+                        "failed to read serving KV prefix for layer {layer_index}: {err}"
+                    ))
+                })?;
+            layer_caches.push(readback);
+        }
+        Ok(Sq8ServingKvCachePrefixCapture {
+            cache_len: expected_cache_len,
+            layer_caches,
+        })
     }
 
     pub fn start(
