@@ -1,0 +1,6 @@
+908774b2a08b14bdbba702b9b0f1bd446260cf048756bdd34e71311cc9fe8b70  /home/homelab1/coding-local/ultimateLLM/uLLM-project/tools/sq9-q8-gfx1030-isa.hip.cpp
+f800faec1f276ab25e95b98e26a7f289f6b4c05920f3ee22fa8413c6ca5b89d1  /home/homelab1/coding-local/ultimateLLM/uLLM-project/tools/analyze-sq9-q8-gfx1030-isa.py
+eb47689716b1542d1fa23941f5c4b3a458799c09ab3e5329ddf5ac71a35b3b73  /home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-26/sq9_0-vs-q8_0-offline/isa/sq9-q8-gfx1030.bundle
+1049f356fab6bc41dd75e6ca0508aec33da5f64269aacda29c7cdaa65ff3e752  /home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-26/sq9_0-vs-q8_0-offline/isa/sq9-q8-gfx1030.hsaco
+0ca57b41702e050d1558d6fb47a6d4ccfe1dba1702190c6f70774b97bd8948d7  /home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-26/sq9_0-vs-q8_0-offline/isa/sq9-q8-gfx1030.disasm
+ef63bdc1efe1426b9219ca18530e14b9d02cfe182f6f40a7bcddaa1020209356  /home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-26/sq9_0-vs-q8_0-offline/isa/sq9-q8-gfx1030.notes.txt

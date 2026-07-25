@@ -509,3 +509,153 @@ all quality, bandwidth-efficiency, resident-memory, and fallback-disclosure gate
    loader/manifest integration, direct projection coverage, model-loop telemetry, and regression
    tests.  Any artifact/campaign/release/activation decision remains a later, separately approved
    action.
+
+## 2026-07-26 Offline Evaluation Result: discard SQ9_0
+
+This section is the disposition of the design input above. It supersedes the earlier SQ9_0
+evaluation and next-action direction; it does not rewrite the historical format definition.
+
+### Scope and evidence boundary
+
+All work in this section was CPU-only or offline compilation. No HIP runtime API, GPU kernel launch,
+R9700, V620, service, release, candidate, or activation state was used or changed.
+
+The source-correct reference is the local Qwen/Qwen3-14B-FP8 checkpoint. Each source value was
+reconstructed as OCP F8_E4M3FN payload times its BF16 [128,128] weight_scale_inv multiplier.
+The fixed, depth-balanced sample contains the Q/K/V/O and gate/up/down projections from layers 0,
+20, and 39: 21 real tensors and 990,904,320 reconstructed weights. This is a substantial real
+model sample, not a claim of a full-280-tensor measurement. Error is incremental relative to the
+already-FP8 source reconstruction; error relative to the unavailable pre-FP8 training checkpoint
+is unconfirmed.
+
+Raw error evidence is in
+../../benchmarks/results/2026-07-26/sq9_0-vs-q8_0-offline/quantization-error/.
+Raw gfx1030 code object, disassembly, compiler metadata, checksums, and count output are in
+../../benchmarks/results/2026-07-26/sq9_0-vs-q8_0-offline/isa/.
+
+### Static gfx1030 ISA result
+
+The probes have a fixed K=128, are fully unrolled at -O3, and compile with
+--offload-arch=gfx1030. They do not execute. The Q8_0 label below is the conventional
+int8-plus-block-scale baseline, not a uLLM public format ID. The proposed uLLM name is given
+later.
+
+| profile | emitted work per 128 weights | VALU / total instructions | VGPR / SGPR | LDS / private / spill |
+| --- | --- | ---: | ---: | --- |
+| Q8_0-style W8A8, g=32 | 32 v_dot4c_i32_i8, 4 int32-to-f32 conversions, 4 scale multiplications, 4 scale FMAs | 67 / 96 | 41 / 54 | 0 / 0 / 0 |
+| SQ9_0 W8A8, g=32 activation scale | 128 int8-to-f32 conversions, 132 FP32 mixed FMAs, 514 emitted bitfield-or-shift instructions | 813 / 985 | 28 / 18 | 0 / 0 / 0 |
+| Q8_0-style W8A16, g=32 | 128 int8-to-f32 conversions, 128 weight-scale multiplications, 128 FP32 mixed FMAs | 399 / 458 | 57 / 18 | 0 / 0 / 0 |
+| SQ9_0 W8A16 | 128 FP32 mixed FMAs, 514 emitted bitfield-or-shift instructions | 648 / 704 | 58 / 18 | 0 / 0 / 0 |
+
+The raw count output divides the named instruction classes by 128. Therefore, the decisive W8A8
+result is 0.25 dot4 instruction per element for the Q8_0-style path versus SQ9_0's 1.0
+int8-to-float conversion plus 1.03125 FMA/mixed-FMA instructions per element, before its
+4.015625 bitfield-or-shift instruction class per element. The bitfield-or-shift class includes
+some address arithmetic; the raw opcode histogram is retained so this is not misrepresented as
+plane assembly alone. It nevertheless shows the direction unambiguously: the supposed shift-only
+conversion does not compile into a shift-only inner loop.
+
+For W8A16, the Q8_0-style path does pay one int8-to-f32 conversion, one scale multiplication, and
+one mixed FMA per element. It is still not tied with SQ9_0: 399 emitted VALU instructions versus
+648, with essentially the same VGPR use and zero spills in both probes. Thus preserving FP16
+activations removes the direct dot advantage but does not reverse the static ALU result.
+
+The packed-FP16 companion probes provide the prefill arithmetic-rate check. Both produce 64
+v_pk_fma_f16 instructions for 128 weights, or 0.5 packed-F16 FMA instruction per element. The
+Q8_0-style packed W8A16 probe additionally emits 128 int8 conversions; the SQ9_0 packed probe
+emits 432 bitfield-or-shift instructions. In the W8A8 form relevant to an int8 activation path,
+v_dot4c_i32_i8 performs four MACs per instruction while a packed FP16 FMA performs two. This is
+an ISA structural advantage for the int8-dot path, not a measured GPU throughput claim.
+
+The compiler metadata reports no LDS, private memory, VGPR spill, or SGPR spill for any of the six
+probes. The absence of a spill does not rescue SQ9_0 because its W8A8 and W8A16 instruction mixes
+remain materially larger. Measured V620 timing, achieved bandwidth, occupancy, and end-to-end TPS
+remain unconfirmed because GPU execution is prohibited for this task.
+
+### Real-weight reconstruction error
+
+| format or ablation | persistent payload bpp | relative L2 | relative MSE | mean absolute error | maximum absolute error |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| SQ9_0, E5M3 no scale | 9.000000 | 0.0265181390 | 0.000703211698 | 0.000407516100 | 0.0625000000 |
+| Q8_0-style, signed int8 + FP16 scale per 32 | 8.500000 | 0.00562448658 | 0.0000316348493 | 0.000108919572 | 0.00988006592 |
+| signed int8 + FP16 scale per 128 ablation | 8.125000 | 0.00696264838 | 0.0000484784724 | 0.000136232033 | 0.00988006592 |
+
+The required Q8_0-style g=32 comparison is 4.7148 times lower in relative L2 and 22.2290 times
+lower in error SSE than SQ9_0. No source value saturated either format in this sample. SQ9_0
+rounded 130,179 nonzero values to zero and used 2,139,523 subnormal codes; these are observations,
+not a model-level acceptance result.
+
+Block distribution does affect int8 quality as expected, but not enough to change the conclusion.
+The Q8_0-style g=32 blocks with max-absolute-value/RMS in [1,2), [2,4), and [4,8) cover
+10.744%, 88.932%, and 0.325% of sampled values respectively. Their Q8_0-style relative MSE is
+0.0000187986, 0.0000325908, and 0.000113299; SQ9_0 is respectively 37.78x, 21.52x, and 7.55x
+higher in those bins. No sampled block fell in the two bins at or above 8. This is evidence for
+the block-scale trade-off on actual weights, not an inference from a synthetic distribution.
+
+### Byte allocation and the existing SQ8_0 source contract
+
+The actual source SQ8_0 contract uses one BF16 scale per [128,128] block. Its physical scale
+overhead is 16 / (128 * 128) = 0.0009765625 bpp, so its source-correct resident payload is
+8.0009765625 bpp before container metadata. The Q8_0-style g=32 payload is 8.5 bpp, and SQ9_0 is
+9 bpp.
+
+Consequently, Q8_0-style g=32 saves 0.5 bpp, or 5.56% of persistent weight bytes, versus SQ9_0.
+SQ9_0 spends one full bit per weight on its E5 exponent range, whereas a FP16 scale amortized over
+32 weights spends only 0.5 bpp. The measured 22.229x SSE improvement shows that this exchange is
+efficient for this source sample. The g=128 ablation saves another 0.375 bpp but worsens error,
+which supports g=32 as the initial int8 design point.
+
+SQ8_0 remains smaller than either alternative and preserves the source payload plus its source
+scale without an extra requantization error. Q8_0-style g=32 is 6.237% larger than source-correct
+SQ8_0; SQ9_0 is 12.486% larger. Therefore this decision does not replace SQ8_0 on RDNA4, where
+the existing source-preserving FP8 path remains the correct default. It only rejects SQ9_0 as the
+no-native-FP8 fallback proposed for gfx1030-class hardware.
+
+### W8A8 activation contract and quality boundary
+
+An int8 weight format gains its decisive dot instruction only when activations are also quantized.
+The initial design must use symmetric dynamic int8 activations per token and contiguous K=32
+block, with RNE code q_a = clamp(round(a / s_a), -127, 127) and an FP16 scale
+s_a = max(abs(a)) / 127. For each output row and K block, the kernel computes an int32 dot and
+applies s_w times s_a once to that block partial. It must not apply one scale after reducing across
+multiple K blocks, because the weight scale changes per block.
+
+This task has no retained raw activation corpus suitable for measuring activation quantization
+error, so W8A8 activation relative L2, saturation rate, and output/logit impact are unconfirmed.
+They must be measured with held-out prompt activations before any implementation adoption. This
+does not weaken the SQ9_0 disposition: the static W8A16 comparison already favors the int8
+block-scale path, and W8A8 adds the verified dot4 advantage.
+
+### Decision and replacement direction
+
+Decision: discard SQ9_0 as a runtime, artifact, or campaign candidate. Retain this document only
+as a rejected design record and conversion proof. Do not implement its packer, reader, GPU kernel,
+candidate, release, or activation path.
+
+The next candidate should be named SQ8_1. This is a proposal only, not a format-registry change:
+it follows the existing SQ8 category and exact-version naming convention while remaining
+wire-incompatible with SQ8_0.
+
+| field | proposed SQ8_1 direction |
+| --- | --- |
+| values | row-major signed int8, one byte per logical weight |
+| weight scale | one FP16 positive dequantization multiplier per contiguous K=32 weights; shape [rows, ceil(cols / 32)] |
+| quantization | symmetric RNE q_w = clamp(round(w / s_w), -127, 127), s_w = max(abs(w)) / 127, with zero tails only for physical K padding |
+| persistent density | 32 int8 values plus one FP16 scale = 34 bytes = 8.5 bpp before row-tail/container metadata |
+| W8A8 | dynamic per-token, K=32 signed-int8 activation plus FP16 scale; v_dot4c_i32_i8 into int32 partials and one scale product per K block |
+| W8A16 fallback | int8-to-float conversion plus weight-scale multiplication per value; required where activation quantization is not accepted |
+| SQ8_0 relationship | separate artifact and dispatch; preserve SQ8_0 raw F8_E4M3 plus BF16 [128,128] scale source contract and retain it on native-FP8 paths |
+| AQ4_0 relationship | unchanged compact format; SQ8_1 is a higher-fidelity / int8-dot fallback candidate, not an AQ4_0 replacement |
+
+### Replacement next actions
+
+1. Write a separate SQ8_1 design input and format-ID review; do not change the existing SQ8_0 or
+   AQ4_0 registry, artifacts, dispatch, campaigns, candidate files, releases, or service state.
+2. Add a bounded-memory CPU reference with pack/unpack, 1/31/32/33-column tails, deterministic
+   RNE, FP16-scale underflow/overflow accounting, and source-correct F8_E4M3-to-SQ8_1 error checks.
+3. Define an activation capture and held-out evaluation plan for the K=32 dynamic W8A8 scale,
+   including activation saturation, activation relative L2, linear-output error, and logit/prompt
+   gates. Until then W8A8 quality is unconfirmed.
+4. Only under a separately authorized GPU window, compare SQ8_1 W8A8, SQ8_1 W8A16, and the retained
+   SQ8_0 fallback on matched V620 inputs. Record transactions, occupancy, clocks, timing, and
+   numerical differentials; do not infer those measurements from this offline ISA evidence.
