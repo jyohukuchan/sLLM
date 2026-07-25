@@ -1,0 +1,1 @@
+Error: "--test-only-ignore-eos requires --prefill-mode m8-chunk8 or m128-chunk128 --prompt-lengths 3584 --max-new-tokens 512 --result-json PATH, without second request, cancellation, or oracle capture"

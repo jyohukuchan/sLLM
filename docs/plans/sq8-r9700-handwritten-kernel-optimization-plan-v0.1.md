@@ -1,6 +1,6 @@
 # `SQ8_0` R9700 Handwritten Kernel Optimization Plan v0.1
 
-- Status: Phase 0 and attention-path evidence complete; Flash2 staged-wave32 prototype evaluated NO-GO on full-model numerical gate; explicit paged split API measured; no production body or dispatch was changed.
+- Status: Phase 0 and attention-path evidence complete; Flash2 staged-wave32 prototype evaluated NO-GO on full-model numerical gate; explicit paged split API and a single-window full-model M=1 split opt-in were evaluated; no production body or default dispatch was changed.
 - Date: 2026-07-26
 - Scope: Qwen3-14B-FP8 independent `SQ8_0` execution on R9700 (`gfx1201`, PCI `0000:47:00.0`) only.
 - Boundary: preserve the external ABI and dispatch boundary exactly. This plan changes neither an activation file nor any campaign, candidate, release, unit file, `/opt/ullm` content, or existing build/release tree.
@@ -316,21 +316,54 @@ API-plus-stream timings:
 
 Tile 256 is marginally fastest among the two near-tied best results (2.822x
 lower isolated attention-call time than direct); tile 512 loses.  This supports
-the supply-limit hypothesis, but is not a full-model end-to-end claim and is
-not permission to change direct dispatch.  A future explicit split integration
-must preserve the legacy route and repeat a clean serving timing gate.
+the supply-limit hypothesis, but is not by itself a full-model end-to-end
+claim and is not permission to change direct dispatch.
+
+A follow-up leaves the normal direct route as the default and exposes the
+existing split API only behind the test-only
+`ULLM_EXPERIMENTAL_SQ8_PAGED_DECODE_SPLIT_TILE` selector.  The selector accepts
+only 128, 256, or 512; its absence retains the exact direct legacy path.  In a
+clean R9700-only `raw-p0512` run, the seven post-prefill M=1 generated steps
+(cache lengths 513--519) had synchronized whole-model times below.  Model
+load, the final M=128 prefill step, reset, and profiler overhead are excluded.
+
+| source tile | mean M=1 ms | median ms | speedup vs direct | partial-WG wave supply at C=513 |
+|---:|---:|---:|---:|---:|
+| direct | 53.519086 | 49.925305 | 1.0000x | 320 / 15.625% |
+| 128 | 43.282296 | 39.768787 | 1.2365x | 1600 / 78.125% |
+| 256 | 46.706832 | 43.168066 | 1.1459x | 960 / 46.875% |
+| 512 | 55.525563 | 51.986695 | 0.9639x | 640 / 31.25% |
+
+All four cases emitted the same eight greedy token IDs
+`[66, 198, 197, 197, 280, 197, 197, 280]`.  Tile 128 is therefore the best
+observed opt-in at this depth, and the ranking is consistent with recovering
+more of the direct path's 15.625% partial-workgroup supply.  This is an
+inference from one seven-step window, not a multi-window production performance
+claim.  The raw full-model decode-vector differential was not captured and
+remains **未確認**; the finite API-level F32 differentials above remain the
+numerical evidence for the split body.  No default-dispatch change follows from
+this result.
 
 ### Deferred work and operating record
 
 `uint4`/lane re-layout was not started because raw physical PMC values remain
 unusable.  `llama-qwen35-udq4.service` was verified inactive/disabled and
-`gdm3.service` inactive; R9700 pre/post telemetry was unthrottled.  In-run
-thermal peak is **未確認** because only pre/post samples were captured.
+`gdm3.service` inactive before each measurement window.  For the completed
+full-model window, R9700 was edge/hotspot/memory `37/37/34 C`, gfx `2434 MHz`,
+socket `16 W` before stop; immediately after the case sequence it was
+`45/51/48 C`, gfx `3307 MHz`, memory `1258 MHz`, socket `103 W`, with AMD SMI
+reporting `THROTTLED`.  The cause of that status and the in-kernel peak remain
+**未確認**.  After restore it was `44/44/42 C`, gfx `1193 MHz`, socket `13 W`,
+and `UNTHROTTLED`.
 
 The primary service stop began at 05:05:32+09:00 and the scripted restore was
 active at 05:07:48+09:00.  An accidental tool-lifecycle misread caused one
 brief manual start/compensating stop in between; it is retained in raw service
 logs and is why staged serving timing is discarded.  A later path-error retry
-restored immediately without launching a GPU kernel.  Final service state was
-active/running, `NRestarts=0`; no systemd unit content or active-model bytes
-were modified.
+and the first decode e2e CLI-contract rejection each restored immediately
+without launching a GPU kernel.  The completed decode window ran
+05:28:41--05:31:25.  These are five total `systemctl` stop/start pairs (the
+primary logical window plus the documented manual compensation, path-error
+retry, aborted decode attempt, and completed decode window).  Final service
+state was active/running, `NRestarts=0`; no systemd unit content or active-model
+bytes were modified.

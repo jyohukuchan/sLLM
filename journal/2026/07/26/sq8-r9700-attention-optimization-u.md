@@ -54,6 +54,19 @@
     tile 128/256/512 で 2880/1600/960 waves
     (140.625%/78.125%/46.875%)。これが 128/256 優位、512 後退と整合するが、
     full-model end-to-end claim ではない。
+  - 後続の R9700-only `full-model-m1-e2e-v0.2` では、既定 direct route を
+    残したまま、test-only の
+    `ULLM_EXPERIMENTAL_SQ8_PAGED_DECODE_SPLIT_TILE={128,256,512}` だけで既存
+    split API を opt-in した。`raw-p0512` の M=128 prefill 後、C=513--519 の
+    7 M=1 step は direct `53.519086 ms`、tile 128 `43.282296 ms` (1.2365x)、
+    tile 256 `46.706832 ms` (1.1459x)、tile 512 `55.525563 ms` (0.9639x) だった。
+    tile 128 の 1600 waves/78.125% が最良で、direct の 320 waves/15.625% から
+    供給を回復する仮説と整合する。
+  - 4 case の greedy token IDs はすべて
+    `[66, 198, 197, 197, 280, 197, 197, 280]` で一致した。ただし full-model
+    decode vector differential は採取しておらず**未確認**である。上記 F32 API
+    differential が split body の数値根拠であり、単一 seven-step window の
+    結果は production performance claim でも default dispatch 変更の根拠でもない。
 - `uint4` load/lane re-layout は着手しなかった。raw physical counter と
   lane/physical traffic validation が未成立である。
 
@@ -62,13 +75,20 @@
 - 実行は R9700 のみで、prototype / runner は `gfx1201` を検証してから起動した。
   V620 (`gfx1030`) は使用していない。
 - `llama-qwen35-udq4.service` は inactive/disabled、`gdm3.service` は
-  inactive を事前確認した。R9700 pre/post telemetry は unthrottled で、
-  in-run peak temperature/clock/power は未確認である。
+  inactive を事前確認した。完了した full-model window では、before-stop が
+  edge/hotspot/memory `37/37/34 C`、gfx `2434 MHz`、socket `16 W`、case 終了直後が
+  `45/51/48 C`、gfx `3307 MHz`、memory `1258 MHz`、socket `103 W`、AMD SMI 表示は
+  `THROTTLED` だった。原因と in-kernel peak は未確認である。restore 後は
+  `44/44/42 C`、gfx `1193 MHz`、socket `13 W`、`UNTHROTTLED` だった。
 - primary stop は 05:05:32+09:00、scripted restore は 05:07:48+09:00。
   tool lifecycle を誤読して 05:06:24 に manual start、05:06:51 に
   compensating stop を一度行ったため、staged serving timing は採用しない。
-  path-error retry は GPU kernel を launch せず即時復旧した。最終的に
-  `ullm-openai.service` は active/running、`NRestarts=0` だった。
+  path-error retry と最初の decode e2e CLI-contract rejection は GPU kernel を
+  launch せず即時復旧した。成功した decode window は 05:28:41--05:31:25。
+  合計は 5 回の `systemctl` stop/start pair（primary logical window、manual
+  compensation、path-error retry、aborted decode attempt、completed decode
+  window）である。最終的に `ullm-openai.service` は active/running、
+  `NRestarts=0` だった。
 - `/etc/ullm/served-models/active.json`、systemd unit 内容、campaign、
   authorization、candidate/release、`/opt/ullm`、external ABI、direct legacy
   dispatch、remote repository は変更していない。
@@ -80,7 +100,7 @@
 2. PMC root cause を再開する場合は、service start-limit interval を越えた別の
    approved window で root/non-root matched raw probe を一回ずつ取る。それまでは
    physical memory-bound claim をしない。
-3. tile 256 の split route を serving に統合する場合は、direct legacy route を
-   保存した explicit selector と clean full-model M=1 timing/differential を別途
-   gate する。
+3. tile 128 はこの一窓で最良の opt-in だが、default route に昇格するには direct
+   legacy route を保存した explicit selector のまま、full-model decode vector
+   differential と独立した複数 window の M=1 timing を別途 gate する。
 4. `uint4` は physical PMC と lane mapping が検証できるまで未判定のままにする。

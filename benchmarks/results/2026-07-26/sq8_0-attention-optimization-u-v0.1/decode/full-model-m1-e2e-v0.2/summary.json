@@ -1,0 +1,82 @@
+{
+  "schema_version": "ullm.sq8_0.r9700.paged_decode_full_model_m1.v0.2",
+  "target": {
+    "amd_smi_gpu": 2,
+    "architecture": "gfx1201",
+    "pci": "0000:47:00.0",
+    "hip_visible_devices": "1"
+  },
+  "fixture": "tests/fixtures/sq8-serving-v0.1/oracles/vllm-source-v0.1/inputs/raw-p0512.u32le",
+  "artifact_content_sha256": "2243acf1df627ff6ec13840c8ffcf35c77e89205eb36cef7561b85c9c98b9147",
+  "package_manifest_sha256": "c2133dfe392f3d5608bde17ed764ae8347c3096c500a58aa235adbeb63d1a0eb",
+  "runner": {
+    "git_commit": "d3a3c76fa4c6895dc06178276658ef575b3a34d7",
+    "binary_sha256": "7b4f420279a056f561a8e1654eb24e49e7c1360c98a78ac5a2ba4083bc4df1a0",
+    "worktree_clean": false
+  },
+  "timing_scope": "synchronized full-model generated-token execution after an M=128 prefill; load, generated_index=0 final-prefill token, and reset are excluded",
+  "m1_sample_geometry": {
+    "generated_indices": [1, 2, 3, 4, 5, 6, 7],
+    "cache_lengths": [513, 514, 515, 516, 517, 518, 519],
+    "samples_per_case": 7,
+    "generated_token_ids": [66, 198, 197, 197, 280, 197, 197, 280],
+    "all_cases_identical_tokens": true
+  },
+  "cases": [
+    {
+      "name": "direct_legacy",
+      "source_tile": null,
+      "mean_milliseconds": 53.519085857142855,
+      "median_milliseconds": 49.925305,
+      "population_standard_deviation_milliseconds": 8.817989177629645,
+      "speedup_vs_direct": 1.0,
+      "partial_workgroup_wave_supply_at_cache_len_513": "320 / 15.625%",
+      "result": "cases/direct.result.json"
+    },
+    {
+      "name": "tile128_explicit_opt_in",
+      "source_tile": 128,
+      "mean_milliseconds": 43.282296,
+      "median_milliseconds": 39.768787,
+      "population_standard_deviation_milliseconds": 8.635905264819317,
+      "speedup_vs_direct": 1.236512172,
+      "partial_workgroup_wave_supply_at_cache_len_513": "1600 / 78.125%",
+      "result": "cases/tile128.result.json"
+    },
+    {
+      "name": "tile256_explicit_opt_in",
+      "source_tile": 256,
+      "mean_milliseconds": 46.70683171428571,
+      "median_milliseconds": 43.168066,
+      "population_standard_deviation_milliseconds": 8.637323545477115,
+      "speedup_vs_direct": 1.145851343,
+      "partial_workgroup_wave_supply_at_cache_len_513": "960 / 46.875%",
+      "result": "cases/tile256.result.json"
+    },
+    {
+      "name": "tile512_explicit_opt_in",
+      "source_tile": 512,
+      "mean_milliseconds": 55.52556271428571,
+      "median_milliseconds": 51.986695,
+      "population_standard_deviation_milliseconds": 8.69633879946954,
+      "speedup_vs_direct": 0.963863908,
+      "partial_workgroup_wave_supply_at_cache_len_513": "640 / 31.25%",
+      "result": "cases/tile512.result.json"
+    }
+  ],
+  "correctness": {
+    "raw_api_differentials": "../split-bench.json",
+    "full_model_generated_token_sequences_identical": true,
+    "full_model_vector_differential": "not captured for decode tokens; unconfirmed"
+  },
+  "dispatch": {
+    "normal_direct_legacy_changed": false,
+    "experiment_selector": "ULLM_EXPERIMENTAL_SQ8_PAGED_DECODE_SPLIT_TILE",
+    "selector_absent_default": "direct legacy"
+  },
+  "service_window": {
+    "stop_observed_at": "2026-07-26T05:28:41+09:00",
+    "restore_active_at": "2026-07-26T05:31:25+09:00",
+    "final_nrestarts": 0
+  }
+}

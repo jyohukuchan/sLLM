@@ -91,8 +91,46 @@ synchronize timing and numerical differential were:
 
 All split outputs were finite.  Tile 256 is marginally fastest among the two
 near-tied best tiles (2.822x lower attention-call time than direct); tile 512
-regresses.  This supports the workgroup-supply hypothesis, but is not a full
-model end-to-end claim and is not an authorization to alter direct dispatch.
+regresses.  This isolated attention-call result is supplemented by the
+full-model M=1 result below; neither result authorizes an automatic change to
+direct legacy dispatch.
+
+### Full-model M=1 end-to-end follow-up
+
+The normal direct route remains the default.  A test-only,
+presence-free opt-in (`ULLM_EXPERIMENTAL_SQ8_PAGED_DECODE_SPLIT_TILE`) configures
+the existing split API on SQ8 serving cache states only when its value is
+exactly 128, 256, or 512.  Its absence leaves direct legacy dispatch unchanged.
+The R9700-only runner additionally requires the split HIP kernel; no host
+fallback is admissible.
+
+The clean `full-model-m1-e2e-v0.2` service window used the canonical
+`raw-p0512` vLLM-source fixture with M=128 prefill and eight normal greedy
+generated tokens.  Each case emitted the identical sequence
+`[66, 198, 197, 197, 280, 197, 197, 280]`.  For the seven post-prefill M=1
+steps (cache lengths 513–519), the table reports synchronized whole-model
+execution time; load, generated index 0 (the final M=128 prefill step), reset,
+and profiler overhead are excluded.
+
+| route | mean M=1 ms | median ms | speedup vs direct | wave supply at C=513 |
+|---|---:|---:|---:|---:|
+| direct legacy | 53.519086 | 49.925305 | 1.0000x | 320 / 15.625% |
+| explicit tile 128 | 43.282296 | 39.768787 | 1.2365x | 1600 / 78.125% |
+| explicit tile 256 | 46.706832 | 43.168066 | 1.1459x | 960 / 46.875% |
+| explicit tile 512 | 55.525563 | 51.986695 | 0.9639x | 640 / 31.25% |
+
+Thus tile 128 is the best observed full-model opt-in at this cache depth,
+tile 256 is also faster, and tile 512 regresses.  The ranking is consistent
+with recovering more of the direct path's 15.625% partial-workgroup supply;
+it is an inference from a single seven-step window, not a multi-window
+production performance claim.  Raw full-model decode-vector differential was
+not captured and remains **未確認**; the exact API-level F32 differential above
+remains the numerical evidence for the tile body.
+
+`full-model-m1-e2e-v0.1/` is retained as an aborted control record: its
+deep-boundary-only CLI flag rejected the requested short timing invocation
+before a HIP kernel launched.  It restored the service immediately and is not
+used in any timing or numerical conclusion.
 
 ## `uint4` and operating record
 
@@ -101,15 +139,23 @@ remain unusable, so the prerequisite lane/physical-traffic validation is
 unmet.
 
 `llama-qwen35-udq4.service` was recorded `inactive` and `disabled`, and
-`gdm3.service` was `inactive` before the measurement.  R9700 telemetry is in
-`telemetry/`; pre/post samples were unthrottled (for example, before the
-primary stop: edge/hotspot/memory `36/37/34 C`, gfx `81 MHz`, socket `13 W`).
-No in-kernel peak telemetry was captured, so in-run thermal peak is
-**未確認**.
+`gdm3.service` was `inactive` before each measurement window.  R9700 telemetry
+is in `telemetry/`.  The full-model window recorded before-stop
+edge/hotspot/memory `37/37/34 C`, gfx `2434 MHz`, socket `16 W`; immediately
+after the case sequence it recorded `45/51/48 C`, gfx `3307 MHz`, memory
+`1258 MHz`, socket `103 W`, and the AMD SMI string `THROTTLED`.  The cause of
+that status is **未確認** and no in-kernel peak sample was captured.  After
+restore it recorded `44/44/42 C`, gfx `1193 MHz`, socket `13 W`, and
+`UNTHROTTLED`.
 
 The primary test script stopped the service at 05:05:32+09:00 and restored it
 active at 05:07:48+09:00.  A tool-lifecycle misread caused one manual start at
 05:06:24 and a compensating stop at 05:06:51; this is why staged serving timing
 is discarded.  A later path-error attempt stopped/restored at 05:10:38 without
-running a GPU kernel.  Exact records are under `service/`, and the final state
-was `ullm-openai.service=active/running`, `NRestarts=0`.
+running a GPU kernel.  The first full-model decode attempt stopped/restored at
+05:27:26–05:27:27 but rejected its CLI contract before HIP work; the successful
+full-model M=1 window was 05:28:41–05:31:25.  This is five total systemctl
+stop/start pairs (one primary logical window plus the documented manual
+compensation, path-error retry, aborted decode attempt, and completed decode
+window).  Exact records are under `service/` and `decode/full-model-m1-e2e-*`;
+the final state was `ullm-openai.service=active/running`, `NRestarts=0`.
