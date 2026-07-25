@@ -1,0 +1,45 @@
+{
+  "candidate_profile": {
+    "path": "/opt/ullm/aq4-runtime-hardening-v0.1/promotion/aq4-fidelity-profile.json",
+    "sha256": "ee3d9d4374b79f03e402027a48c6e32601912f79429013893a023083a497439e"
+  },
+  "derivation_input": {
+    "path": "/etc/ullm/served-models/active.json",
+    "sha256": "5d015a013dcf70cea13dd9ed569d89ed2a025a17e14a6192ca18ee4cdadd1c8a",
+    "workspace_p3_profile_used": false
+  },
+  "frozen_candidate": {
+    "home_path_references": [],
+    "only_changed_json_pointers_from_active": [
+      "/product/root",
+      "/promotion/receipt",
+      "/promotion/receipt_sha256",
+      "/tokenizer/root",
+      "/worker/binary"
+    ],
+    "path": "/opt/ullm/aq4-runtime-hardening-v0.1/manifests/aq4-hardened-frozen.json",
+    "sha256": "c57a2b6c5827b8ddd102560b3f5efd879711705cf4d8a36f4d7872821d05fca4"
+  },
+  "guard_flags": {
+    "count": 30,
+    "exact_ordered_match_with_live_manifest": true,
+    "p3_only_keys_present": [],
+    "unique_count": 30
+  },
+  "normalized_profile_contract_checks": {
+    "candidate_package_binding_matches_live": true,
+    "candidate_tokenizer_hash_contract_matches_live": true,
+    "format_matches_live": true,
+    "generation_matches_live": true,
+    "product_artifact_matches_live": true,
+    "product_manifest_path_matches_live": true,
+    "public_matches_live": true,
+    "reasoning_matches_live": true,
+    "tokenizer_class_matches_live": true,
+    "tokenizer_file_names_match_live": true,
+    "tokenizer_template_options_match_live": true,
+    "tokenizer_transformers_version_matches_live": true,
+    "worker_contract_matches_live": true
+  },
+  "schema_version": "ullm.aq4_runtime_hardening_phase4_candidate_profile_verification.v1"
+}

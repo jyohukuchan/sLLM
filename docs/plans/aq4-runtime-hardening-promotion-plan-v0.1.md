@@ -1,6 +1,6 @@
 # AQ4_0 runtime hardening promotion plan v0.1
 
-Status: Phase 1–3 protected-closure preparation and the two formerly blocking control-path implementations are complete; Phase 4 candidate/evidence/freeze and every activation action remain pending. This document authorizes no final activation, authorization consumption, or replacement of <code>/etc/ullm/served-models/active.json</code>. In particular, this update did not change that file, a systemd unit, or service state.
+Status: Phase 1–4 protected-closure preparation, fresh candidate/evidence/freeze work, and Phase 5 activation-plan readiness are complete. Phase 6 final activation and Phase 7 fresh post-activation campaign/bundle work remain pending. This document authorizes no final activation, authorization consumption, or replacement of <code>/etc/ullm/served-models/active.json</code>. Phase 4 used one successful narrow evidence service window (and one earlier immediately restored preflight abort), but did not change that file or any systemd unit content.
 
 ## Goal
 
@@ -88,12 +88,16 @@ The AQ4 hardening root is deliberately separate from SQ8's existing <code>/opt/u
       promotion/
         aq4-fidelity-profile.json
         promotion-evidence.json
+        promotion-evidence-protected-path-binding.json
         promotion-receipt.json
       manifests/
         aq4-hardened-draft.json
         aq4-hardened-frozen.json
       activation/
         rollback-active-5d015a013dcf70ce.json
+        reviewed-operations.json
+        operation-bin/
+        operation-source/
         activation-plan.json
         activation-intent.json
         outcome.json
@@ -101,7 +105,7 @@ The AQ4 hardening root is deliberately separate from SQ8's existing <code>/opt/u
       campaigns/
         release-bundle-v1/
 
-The dedicated control-source commit is now fixed to <code>d11085c4e119361cf0dca78e6cbe81cafcb9af6b</code>. Its future protected clone basename is the 12-character prefix shown above; its plan must record and verify the full commit and Git tree. It remains a separately sealed standalone control-tool source, not the AQ4 promotion source and not a substitute for it. The clone has not yet been created at this path.
+The dedicated control-source commit is fixed to <code>d11085c4e119361cf0dca78e6cbe81cafcb9af6b</code>. Its protected clone at the 12-character-prefix path above is sealed, detached, clean, and bound by the plan to this full commit and tree <code>c41bf38138dad3a1091f6c2e45de835b713ef0b3</code>. It remains a separately sealed standalone control-tool source, not the AQ4 promotion source and not a substitute for it.
 
 | Class | Required ownership and mode after finalization | Additional invariant |
 | --- | --- | --- |
@@ -271,7 +275,7 @@ Create the manifest-freezer control source by the same standalone-clone and seal
 
     /opt/ullm/aq4-runtime-hardening-v0.1/control-source/manifest-freezer-f71bb2e534b/
 
-It must be detached at <code>f71bb2e534b12bbf0ab37e716da1090c485ab733</code> and contain <code>tools/freeze-served-model-manifest.py</code>. The activation-control source has the same seal requirements and is now pinned to <code>d11085c4e119361cf0dca78e6cbe81cafcb9af6b</code>, but its final protected clone is still pending.
+It must be detached at <code>f71bb2e534b12bbf0ab37e716da1090c485ab733</code> and contain <code>tools/freeze-served-model-manifest.py</code>. The activation-control source has the same seal requirements and is pinned to <code>d11085c4e119361cf0dca78e6cbe81cafcb9af6b</code>; its final protected clone is now sealed at the layout path above.
 
 Exit criterion: source seals pass for the promotion source and manifest-freezer control source. The promotion source commit remains <code>0cd76056...</code> everywhere that records AQ4 promotion provenance.
 
@@ -350,6 +354,8 @@ Its overall SHA-256 necessarily changes. The following must remain exactly the s
 
 Exit criterion: fresh evidence, receipt, and frozen candidate exist at protected paths, validate with their intended tools, and have not been activated.
 
+Execution record (2026-07-26 JST): the profile was mechanically derived from live <code>active.json</code>, has exactly 30 unique guard flags in live order, and has no P3-only key. Fresh evidence on R9700 / <code>gfx1201</code> / GPU index <code>1</code> passed both raw exact-token comparisons and clean-shutdown checks. Evidence SHA-256 is <code>4a604453abb6c7a672731d2b17d3333e471d6c5239b4fed1f6b338fe19a19adb</code>; the fresh receipt SHA-256 is <code>99ead62f6d5d6062690d78431dbb888949e100bf8951c55f9ff16c71545f1f24</code>; and protected-path binding SHA-256 is <code>e1b6158cddfab37b84afc2b85351a109d4530af7c4668adb932e5b94532ebe2b</code>. The freezer published <code>manifests/aq4-hardened-frozen.json</code> at SHA-256 <code>c57a2b6c5827b8ddd102560b3f5efd879711705cf4d8a36f4d7872821d05fca4</code>. Its only differences from live are the five fields listed above, and it has no <code>/home/</code> reference. No active-manifest bytes were replaced.
+
 GPU or service window: GPU index 1 and an <code>ullm-openai.service</code> maintenance window are required for evidence collection only. Manifest generation/freezing itself needs neither.
 
 ### Phase 5 — Implement and review the dedicated AQ4-to-AQ4 locked activation control route
@@ -369,7 +375,7 @@ Implementation is complete in <code>d11085c4e119361cf0dca78e6cbe81cafcb9af6b</co
 
 CPU/private-copy/mock fault tests cover pre-intent unit drift and stale plan hash, SIGKILL after intent before swap, SIGKILL after swap, post-rename fault recognition, candidate live-proof failure and exact restore, duplicate execution, failed-recovery retry/audit separation, concurrent lock acquisition, and receipt publication fault after commit. The dedicated test also asserts that the route does not reference the SQ8 final route, <code>llama-qwen35-udq4.service</code>, or <code>gdm3</code>. No GPU was used.
 
-The read-only pre-plan report at <code>benchmarks/results/2026-07-26/aq4-runtime-hardening-activation-v0.1/read-only-preplan-control-source-pin.json</code> rechecked the live active/unit/environment hashes and found the candidate manifest, immutable rollback copy, plan, reviewed operations, credential seal set, and pinned control-source clone still absent. It is intentionally <code>ready: false</code>; a complete plan-bound preflight cannot be run until Phase 4 inputs exist.
+Historical record: the pre-plan report at <code>benchmarks/results/2026-07-26/aq4-runtime-hardening-activation-v0.1/read-only-preplan-control-source-pin.json</code> correctly reported <code>ready: false</code> before Phase 4 created the candidate manifest, immutable rollback copy, plan, reviewed operations, credential seal set, and pinned control-source clone. It is superseded for current readiness by <code>benchmarks/results/2026-07-26/aq4-runtime-hardening-phase4/read-only-preflight.json</code>: the plan-bound default preflight is <code>ready: true</code>, has no blockers, and did not execute activation.
 
 The reviewed route must be stored in the separately sealed activation control source and must provide these capabilities:
 
@@ -384,7 +390,7 @@ The reviewed route must be stored in the separately sealed activation control so
 
 The implementation review must include fault injection for pre-intent failure, post-intent/pre-swap failure, post-swap/restart failure, live-proof failure, duplicate execution, stale plan hash, unit/env drift, and concurrent lock acquisition. It must demonstrate that it does not invoke the SQ8 final-activation route and that it never starts <code>llama-qwen35-udq4.service</code> or <code>gdm3</code>.
 
-Exit criterion: the reviewed code exists (complete), then its separately sealed control source and a complete immutable activation plan exist (pending Phase 3/4 inputs); only the latter plan-bound preflight may report <code>ready: true</code>. No active-manifest byte is changed in this phase. **Even at <code>ready: true</code>, this is not execution authority: the Phase 6 human approval gate remains mandatory.**
+Exit criterion: the reviewed code, separately sealed control source, complete immutable activation plan, reviewed operations, credential seal set, and plan-bound <code>ready: true</code> preflight now exist. No active-manifest byte was changed in this phase. **Even at <code>ready: true</code>, this is not execution authority: the Phase 6 human approval gate remains mandatory.**
 
 GPU or service window: code review/preflight needs neither. The eventual execute/rollback subcommand needs a service-maintenance window and normal gateway worker startup, but no P3 performance trial.
 
@@ -392,11 +398,11 @@ GPU or service window: code review/preflight needs neither. The eventual execute
 
 Purpose: perform the only operation that may replace <code>active.json</code>, after all artifacts and preflight are complete.
 
-1. Immediately before execution, capture a fresh root-owned immutable copy of the current active manifest bytes as:
+1. Phase 4 preparation has already published the root-owned immutable rollback copy:
 
        /opt/ullm/aq4-runtime-hardening-v0.1/activation/rollback-active-5d015a013dcf70ce.json
 
-   Require its SHA-256 to equal <code>5d015a013dcf70cea13dd9ed569d89ed2a025a17e14a6192ca18ee4cdadd1c8a</code>. If it does not, stop; this plan is obsolete and must not be adapted in place.
+   It equals the then-current active bytes and has SHA-256 <code>5d015a013dcf70cea13dd9ed569d89ed2a025a17e14a6192ca18ee4cdadd1c8a</code>. Immediately before execution, re-read <code>active.json</code> and require an exact byte/hash match with this sealed plan input; do not overwrite the published rollback copy. If it differs, stop and prepare a superseding reviewed plan rather than adapting this one in place.
 2. Run the dedicated route's non-mutating preflight and inspect its immutable plan, candidate seal report, rollback target, unit/env hashes, and output destinations.
 3. Schedule the narrow service-maintenance window. The only routine service action is the gateway operation controlled by the dedicated route. Keep <code>llama-qwen35-udq4.service</code> disabled/inactive and <code>gdm3</code> inactive.
 4. **ここで停止する。人間が、表示された activation-plan SHA-256・rollback SHA-256・候補 manifest SHA-256・service window を確認し、明示的に承認するまで、<code>/etc/ullm/served-models/active.json</code> の置換を一切実行しない。**
@@ -474,9 +480,7 @@ GPU or service window: GPU plus running gateway for the generic campaign; fronte
 
 ## Next Actions
 
-1. Create the separately sealed standalone control-source clone at exact <code>d11085c4e119361cf0dca78e6cbe81cafcb9af6b</code>, disable Git filemode sensitivity as required by the Phase 1–3 sealing record, and seal the four dedicated route tools. Do not copy from a mutable worktree into the final control source.
-2. Complete the still-pending Phase 4 profile/evidence/receipt/candidate/freeze work from protected AQ4 paths. The pre-plan evidence confirms that <code>aq4-hardened-frozen.json</code>, <code>rollback-active-5d015a013dcf70ce.json</code>, reviewed operations, and credential seal list do not exist yet.
-3. At execution start, perform Phase 0 again and reject active-manifest, unit, environment, worker, package, tokenizer, source, or service-state drift.
-4. Prepare the immutable AQ4 hardening plan with the sealed source; then run the plan-bound default read-only preflight and inspect its candidate/rollback hashes, output destinations, and <code>ready</code> result. No candidate bytes may be swapped in this step.
-5. **Stop for human approval.** Even if preflight reports <code>ready: true</code>, obtain explicit approval immediately before the locked execute command. Without it, <code>/etc/ullm/served-models/active.json</code> remains untouched.
-6. Only after candidate live proof succeeds, run Phase 7 and publish fresh AQ4 campaign/browser evidence and bundle v1 through the immutable v1 publication route. Treat those outputs as new protected-closure evidence, never as historical evidence reinterpretation.
+1. At a future execution start, repeat Phase 0 and the plan-bound default read-only preflight. Reject active-manifest, unit, environment, worker, package, tokenizer, source, credential-seal, or service-state drift. The short-lived OpenWebUI session credential is intentionally sealed in the plan; if it expires or changes, preflight must fail closed and a newly reviewed plan is required.
+2. Inspect the immutable plan SHA-256 <code>72140ff475b29e28f4ab6685459a344939bc54fcd12aa4f0b7c44cd7a8753194</code>, candidate SHA-256 <code>c57a2b6c5827b8ddd102560b3f5efd879711705cf4d8a36f4d7872821d05fca4</code>, rollback SHA-256 <code>5d015a013dcf70cea13dd9ed569d89ed2a025a17e14a6192ca18ee4cdadd1c8a</code>, output destinations, and the renewed <code>ready</code> result.
+3. **Stop for human approval.** Even if preflight remains <code>ready: true</code>, obtain explicit approval immediately before the locked execute command. Without it, <code>/etc/ullm/served-models/active.json</code> remains untouched.
+4. Only after that approval and successful candidate live proof, run Phase 7 and publish fresh AQ4 campaign/browser evidence and bundle v1 through the immutable v1 publication route. Treat those outputs as new protected-closure evidence, never as historical evidence reinterpretation.

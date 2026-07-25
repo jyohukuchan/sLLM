@@ -1,0 +1,62 @@
+{
+  "aborted_preflight_stop_restore_cycles": 1,
+  "gpu": {
+    "amd_smi_gpu": 2,
+    "architecture": "gfx1201",
+    "compute_gpu": "R9700",
+    "hip_gpu_index": 1,
+    "v620_compute_used": false
+  },
+  "pre_window_service_checks": {
+    "gdm3": "inactive",
+    "llama_qwen35_udq4_enabled": "disabled",
+    "llama_qwen35_udq4_state": "inactive"
+  },
+  "successful_evidence_window": {
+    "evidence_completed": true,
+    "post_restore": {
+      "gfx_clock_mhz": 49,
+      "socket_power_w": 15,
+      "temperature_c": {
+        "edge": 38,
+        "hotspot": 39,
+        "mem": 38
+      },
+      "throttle_status": "UNTHROTTLED",
+      "ullm_openai_service": "active/running"
+    },
+    "pre_stop": {
+      "gfx_clock_mhz": 46,
+      "socket_power_w": 11,
+      "temperature_c": {
+        "edge": 36,
+        "hotspot": 37,
+        "mem": 34
+      },
+      "throttle_status": "THROTTLED"
+    },
+    "restore": {
+      "reset_failed_required": false,
+      "ullm_openai_service": "active/running"
+    },
+    "telemetry": {
+      "file": "/opt/ullm/aq4-runtime-hardening-v0.1/.staging/phase4-r9700-telemetry.SbU15B.jsonl",
+      "first_sample_utc": "2026-07-25T20:52:21.060354Z",
+      "last_sample_utc": "2026-07-25T20:52:40.401425Z",
+      "ranges": {
+        "edge_temperature_c": [36, 38],
+        "gfx_clock_mhz": [6, 2835],
+        "hotspot_temperature_c": [37, 40],
+        "mem_temperature_c": [34, 38],
+        "socket_power_w": [13, 44]
+      },
+      "sample_count": 10,
+      "sha256": "1a8157751bb987408e5099b15ac023ebbe3d93c2d86c726c4e1b4e19f3f5e8d6",
+      "throttle_statuses_observed": ["THROTTLED", "UNTHROTTLED"]
+    },
+    "window_started_utc": "2026-07-25T20:52:19Z"
+  },
+  "throttle_cause": "unconfirmed",
+  "total_stop_restore_cycles_issued_by_this_phase": 2,
+  "schema_version": "ullm.aq4_runtime_hardening_phase4_service_window_record.v1"
+}

@@ -1,0 +1,52 @@
+{
+  "activation_control_source": {
+    "commit": "d11085c4e119361cf0dca78e6cbe81cafcb9af6b",
+    "path": "/opt/ullm/aq4-runtime-hardening-v0.1/control-source/aq4-hardening-activation-d11085c4e119",
+    "tree": "c41bf38138dad3a1091f6c2e45de835b713ef0b3"
+  },
+  "activation_executed": false,
+  "activation_plan": {
+    "operation_epoch": "9db9812fe02212ae0b978f26e515ff25f454f3ae3fb466ef4bbe7167534df893",
+    "path": "/opt/ullm/aq4-runtime-hardening-v0.1/activation/activation-plan.json",
+    "sha256": "72140ff475b29e28f4ab6685459a344939bc54fcd12aa4f0b7c44cd7a8753194"
+  },
+  "candidate_manifest": {
+    "path": "/opt/ullm/aq4-runtime-hardening-v0.1/manifests/aq4-hardened-frozen.json",
+    "sha256": "c57a2b6c5827b8ddd102560b3f5efd879711705cf4d8a36f4d7872821d05fca4"
+  },
+  "credential_seal_set": {
+    "configured": true,
+    "files": [
+      {
+        "mode": "0640",
+        "nlink": 1,
+        "path": "/etc/ullm/openai-api-key",
+        "uid": 0
+      },
+      {
+        "mode": "0640",
+        "nlink": 1,
+        "path": "/run/ullm-campaign-secrets/openwebui-session.jwt",
+        "uid": 0
+      }
+    ],
+    "raw_credential_values_recorded": false
+  },
+  "current_active_manifest": {
+    "path": "/etc/ullm/served-models/active.json",
+    "sha256": "5d015a013dcf70cea13dd9ed569d89ed2a025a17e14a6192ca18ee4cdadd1c8a"
+  },
+  "promotion_campaign_executed": false,
+  "promotion_campaign_authorization_consumed": false,
+  "reviewed_operations": {
+    "launcher_sha256": "baf0eabd3025e17079b0824158c08506d520a3a47cb6836db7efe73b6a4971de",
+    "path": "/opt/ullm/aq4-runtime-hardening-v0.1/activation/reviewed-operations.json",
+    "sha256": "b635793815792d2c75b95ac7b9824343f200a2025c4ad96eb90a717e5d779cef"
+  },
+  "rollback_manifest": {
+    "bytes": 4459,
+    "path": "/opt/ullm/aq4-runtime-hardening-v0.1/activation/rollback-active-5d015a013dcf70ce.json",
+    "sha256": "5d015a013dcf70cea13dd9ed569d89ed2a025a17e14a6192ca18ee4cdadd1c8a"
+  },
+  "schema_version": "ullm.aq4_runtime_hardening_phase4_activation_readiness.v1"
+}

@@ -1,0 +1,56 @@
+{
+  "evidence": {
+    "created_at_utc": "2026-07-25T20:52:41.287414Z",
+    "gpu_exclusive_preflight": {
+      "gpu_index": "1",
+      "positive_vram_processes": [],
+      "tool": "rocm-smi --showpids --json"
+    },
+    "legacy_clean_shutdown": true,
+    "path": "/opt/ullm/aq4-runtime-hardening-v0.1/promotion/promotion-evidence.json",
+    "raw_comparisons": [
+      {
+        "id": "raw-p0001-g0004",
+        "tokens_exact_match": true
+      },
+      {
+        "id": "raw-p0008-g0004",
+        "tokens_exact_match": true
+      }
+    ],
+    "resident_clean_shutdown": true,
+    "resident_device": "gfx1201",
+    "resident_execution_profile": "rdna4_aq4_resident",
+    "schema_version": "ullm.aq4_resident_promotion_evidence.v1",
+    "sha256": "4a604453abb6c7a672731d2b17d3333e471d6c5239b4fed1f6b338fe19a19adb",
+    "source_commit": "0cd760568e197e1adb4c4df3d6149591a912f709",
+    "verified": true,
+    "worker_binary": "/opt/ullm/aq4-runtime-hardening-v0.1/releases/aq4-fidelity-f1a3cf4c/ullm-aq4-worker",
+    "worker_binary_sha256": "1f93f21543af777adb0f00cc35d6857d0af432657ed74e7723636ace9dfca69b"
+  },
+  "protected_path_binding": {
+    "path": "/opt/ullm/aq4-runtime-hardening-v0.1/promotion/promotion-evidence-protected-path-binding.json",
+    "promotion_source": {
+      "alternates": false,
+      "clean": true,
+      "commit": "0cd760568e197e1adb4c4df3d6149591a912f709",
+      "detached": true,
+      "path": "/opt/ullm/aq4-runtime-hardening-v0.1/sources/aq4-promotion-0cd760568e197",
+      "tree": "bd372761d7e79b3d5db2b533cdd3fdfa77f125c2"
+    },
+    "runtime_paths": {
+      "legacy_engine": "/opt/ullm/aq4-runtime-hardening-v0.1/releases/aq4-fidelity-f1a3cf4c/ullm-engine",
+      "product_root": "/opt/ullm/aq4-runtime-hardening-v0.1/products/qwen35-9b-aq4-package-a790a033f57d",
+      "tokenizer_root": "/opt/ullm/aq4-runtime-hardening-v0.1/tokenizers/qwen35-9b-qwen2tokenizer-a4aee8afcf2e",
+      "worker": "/opt/ullm/aq4-runtime-hardening-v0.1/releases/aq4-fidelity-f1a3cf4c/ullm-aq4-worker"
+    },
+    "sha256": "e1b6158cddfab37b84afc2b85351a109d4530af7c4668adb932e5b94532ebe2b"
+  },
+  "receipt": {
+    "path": "/opt/ullm/aq4-runtime-hardening-v0.1/promotion/promotion-receipt.json",
+    "schema_version": "ullm.aq4_resident_promotion.v1",
+    "sha256": "99ead62f6d5d6062690d78431dbb888949e100bf8951c55f9ff16c71545f1f24",
+    "source_commit": "0cd760568e197e1adb4c4df3d6149591a912f709"
+  },
+  "schema_version": "ullm.aq4_runtime_hardening_phase4_fresh_evidence_verification.v1"
+}
