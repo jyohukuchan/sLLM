@@ -164,6 +164,7 @@ def _stable_read_regular(
     maximum: int,
     *,
     require_immutable: bool = False,
+    required_uid: int | None = None,
 ) -> bytes:
     """Read one named regular file without accepting links or byte races."""
 
@@ -191,6 +192,8 @@ def _stable_read_regular(
             raise ValidationError(
                 f"{label} must be an immutable mode-0444 single-link file"
             )
+        if require_immutable and required_uid is not None and before.st_uid != required_uid:
+            raise ValidationError(f"{label} immutable publication owner differs")
         raw = bytearray()
         while len(raw) <= maximum:
             chunk = os.read(
@@ -1341,11 +1344,49 @@ def validate(
     path: Path,
     *,
     authorization_policy: Any | None = None,
+    require_immutable_publication: bool = False,
+    required_uid: int | None = None,
 ) -> dict[str, Any]:
     document, _raw = _read_json(path, "release bundle", MAX_BUNDLE_BYTES)
     schema = document.get("schema_version")
     if schema == SCHEMA_VERSION_V1:
-        return _validate_v1(path)
+        if not require_immutable_publication:
+            return _validate_v1(path)
+        absolute = path.absolute()
+        try:
+            if absolute.resolve(strict=True) != absolute:
+                raise ValidationError("release bundle v1 path is not canonical")
+        except OSError as error:
+            raise ValidationError("release bundle v1 path is unavailable") from error
+        raw = _stable_read_regular(
+            absolute,
+            "release bundle v1",
+            MAX_BUNDLE_BYTES,
+            require_immutable=True,
+            required_uid=required_uid,
+        )
+        stable_document = _json_bytes(raw, "release bundle v1")
+        if stable_document.get("schema_version") != SCHEMA_VERSION_V1:
+            raise ValidationError("release bundle v1 changed before validation")
+        report = _validate_v1(absolute)
+        if (
+            _stable_read_regular(
+                absolute,
+                "release bundle v1",
+                MAX_BUNDLE_BYTES,
+                require_immutable=True,
+                required_uid=required_uid,
+            )
+            != raw
+        ):
+            raise ValidationError("release bundle v1 changed during validation")
+        report["bundle_sha256"] = hashlib.sha256(raw).hexdigest()
+        report["immutable_publication"] = {
+            "mode": "0444",
+            "nlink": 1,
+            "uid": required_uid,
+        }
+        return report
     if schema == SCHEMA_VERSION_V2:
         absolute = path.absolute()
         try:
@@ -1386,13 +1427,24 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("bundle", type=Path)
     parser.add_argument("--require-complete", action="store_true")
+    parser.add_argument("--require-immutable-publication", action="store_true")
+    parser.add_argument(
+        "--required-uid",
+        type=int,
+        default=0,
+        help="required owner when --require-immutable-publication is selected",
+    )
     return parser.parse_args(argv)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = parse_args(argv)
     try:
-        report = validate(args.bundle)
+        report = validate(
+            args.bundle,
+            require_immutable_publication=args.require_immutable_publication,
+            required_uid=(args.required_uid if args.require_immutable_publication else None),
+        )
     except Exception as error:
         print(f"Generic reasoning release bundle validation failed: {error}", file=sys.stderr)
         return 1

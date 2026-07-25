@@ -1410,6 +1410,32 @@ def test_bundle_recomputes_component_validators_and_bindings(tmp_path: Path) -> 
     assert report["artifact_count"] == 6
 
 
+def test_bundle_v1_immutable_publication_mode_requires_owner_mode_and_single_link(
+    tmp_path: Path,
+) -> None:
+    bundle = make_bundle(tmp_path)
+    bundle.chmod(0o444)
+
+    report = BUNDLE.validate(
+        bundle,
+        require_immutable_publication=True,
+        required_uid=os.geteuid(),
+    )
+
+    assert report["immutable_publication"] == {
+        "mode": "0444",
+        "nlink": 1,
+        "uid": os.geteuid(),
+    }
+    bundle.chmod(0o644)
+    with pytest.raises(BUNDLE.ValidationError, match="mode-0444 single-link"):
+        BUNDLE.validate(
+            bundle,
+            require_immutable_publication=True,
+            required_uid=os.geteuid(),
+        )
+
+
 def test_bundle_rejects_forged_validator_report(tmp_path: Path) -> None:
     bundle = make_bundle(tmp_path)
     value = json.loads(bundle.read_text(encoding="ascii"))

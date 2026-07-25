@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
+import stat
 import sys
 from pathlib import Path
 from types import ModuleType
@@ -66,6 +68,40 @@ def test_prepare_writes_valid_complete_bundle(tmp_path: Path) -> None:
     assert output.is_file()
     assert document["status"] == "complete"
     assert PREPARER._load_validator().validate(output)["gate_eligible"] is True
+
+
+def test_prepare_v1_publishes_owner_bound_immutable_six_slot_bundle(
+    tmp_path: Path,
+) -> None:
+    paths, _unused = inputs(tmp_path)
+    output = tmp_path / "bundle-v1.json"
+
+    document = PREPARER.prepare(
+        **paths,
+        output=output,
+        status="complete",
+        required_uid=os.geteuid(),
+    )
+
+    metadata = output.stat()
+    assert document["schema_version"] == "ullm.generic_reasoning_release_bundle.v1"
+    assert stat.S_IMODE(metadata.st_mode) == 0o444
+    assert metadata.st_nlink == 1
+    assert metadata.st_uid == os.geteuid()
+
+
+def test_prepare_v1_rejects_wrong_publication_owner(tmp_path: Path) -> None:
+    paths, _unused = inputs(tmp_path)
+    output = tmp_path / "bundle-v1.json"
+    wrong_uid = 1 if os.geteuid() == 0 else 0
+
+    with pytest.raises(PREPARER.BundleError, match="effective UID"):
+        PREPARER.prepare(
+            **paths,
+            output=output,
+            status="complete",
+            required_uid=wrong_uid,
+        )
 
 
 def test_prepare_accepts_complete_bundle_with_v2_no_switch_browser_evidence(

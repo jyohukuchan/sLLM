@@ -166,12 +166,26 @@ def _atomic_write(path: Path, document: dict[str, Any]) -> None:
             temporary.unlink(missing_ok=True)
 
 
-def _publish_immutable(path: Path, document: dict[str, Any]) -> None:
-    """Publish one mode-0444 bundle with atomic no-replace semantics."""
+def _publish_immutable(
+    path: Path,
+    document: dict[str, Any],
+    *,
+    required_uid: int | None = None,
+) -> None:
+    """Publish one owner-bound mode-0444 bundle with no-replace semantics.
 
+    Production CLI callers select UID 0.  The optional current-UID default is
+    retained for private-copy validation fixtures; it is not a production
+    publication mode.
+    """
+
+    owner = os.geteuid() if required_uid is None else required_uid
+    if type(owner) is not int or owner < 0 or os.geteuid() != owner:
+        raise BundleError("output bundle publisher effective UID differs")
     if path.is_symlink() or path.exists():
         raise BundleError("output bundle already exists or is a symlink")
-    path.parent.mkdir(parents=True, exist_ok=True)
+    if not path.is_absolute():
+        raise BundleError("output bundle path is not absolute")
     parent = path.parent.absolute()
     try:
         if parent.resolve(strict=True) != parent:
@@ -179,8 +193,13 @@ def _publish_immutable(path: Path, document: dict[str, Any]) -> None:
         metadata = parent.lstat()
     except OSError as error:
         raise BundleError("output bundle parent is unavailable") from error
-    if not stat.S_ISDIR(metadata.st_mode) or stat.S_ISLNK(metadata.st_mode):
-        raise BundleError("output bundle parent is not a real directory")
+    if (
+        not stat.S_ISDIR(metadata.st_mode)
+        or stat.S_ISLNK(metadata.st_mode)
+        or metadata.st_uid != owner
+        or stat.S_IMODE(metadata.st_mode) & 0o022
+    ):
+        raise BundleError("output bundle parent is not owner-sealed")
     temporary: Path | None = None
     try:
         descriptor, raw_path = tempfile.mkstemp(prefix=f".{path.name}.", dir=parent)
@@ -214,6 +233,7 @@ def _publish_immutable(path: Path, document: dict[str, Any]) -> None:
             not stat.S_ISREG(observed.st_mode)
             or stat.S_IMODE(observed.st_mode) != 0o444
             or observed.st_nlink != 1
+            or observed.st_uid != owner
         ):
             raise BundleError("published output bundle identity differs")
     finally:
@@ -293,6 +313,7 @@ def prepare(
     output: Path,
     *,
     status: str = "incomplete",
+    required_uid: int | None = None,
 ) -> dict[str, Any]:
     if status not in {"incomplete", "complete"}:
         raise BundleError("bundle status is invalid")
@@ -351,12 +372,15 @@ def prepare(
     validator = _load_validator()
     temporary = output.parent / f".{output.name}.validate"
     try:
-        _atomic_write(temporary, document)
+        _publish_immutable(temporary, document, required_uid=required_uid)
         report = validator.validate(temporary)
         if status == "complete" and report["gate_eligible"] is not True:
             raise BundleError("complete bundle is not production-gate eligible")
-        _atomic_write(output, document)
         temporary.unlink(missing_ok=True)
+        _publish_immutable(output, document, required_uid=required_uid)
+        observed = validator.validate(output)
+        if observed != report:
+            raise BundleError("published bundle v1 validation differs")
         return document
     except Exception:
         temporary.unlink(missing_ok=True)
@@ -379,6 +403,7 @@ def prepare_v2(
     output: Path,
     *,
     status: str = "incomplete",
+    required_uid: int | None = None,
 ) -> dict[str, Any]:
     """Assemble the exact nine-slot independent-SQ8 release envelope."""
 
@@ -446,7 +471,7 @@ def prepare_v2(
     validator = _load_validator()
     temporary = output.parent / f".{output.name}.validate"
     try:
-        _publish_immutable(temporary, document)
+        _publish_immutable(temporary, document, required_uid=required_uid)
         report = validator.validate(temporary)
         if (
             report.get("input_schema_version")
@@ -455,7 +480,7 @@ def prepare_v2(
         ):
             raise BundleError("bundle v2 is not production-gate eligible")
         temporary.unlink(missing_ok=True)
-        _publish_immutable(output, document)
+        _publish_immutable(output, document, required_uid=required_uid)
         observed = validator.validate(output)
         if observed != report:
             raise BundleError("published bundle v2 validation differs")
@@ -493,6 +518,12 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         parser.add_argument(f"--{name}", type=Path)
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--status", choices=("incomplete", "complete"), default="incomplete")
+    parser.add_argument(
+        "--required-uid",
+        type=int,
+        default=0,
+        help="publication owner; production AQ4 bundle v1 requires root (0)",
+    )
     return parser.parse_args(argv)
 
 
@@ -519,6 +550,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.environment_file,
                 args.output,
                 status=args.status,
+                required_uid=args.required_uid,
             )
         else:
             if any(value is None for value in campaign_values):
@@ -541,6 +573,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.environment_file,
                 args.output,
                 status=args.status,
+                required_uid=args.required_uid,
             )
     except Exception as error:
         print(f"Generic reasoning release bundle preparation failed: {error}", file=sys.stderr)
