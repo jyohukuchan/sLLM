@@ -1,0 +1,90 @@
+2026-07-26T06:34:57+09:00
+[    9.166623] amdgpu 0000:47:00.0: enabling device (0006 -> 0007)
+[    9.166746] amdgpu 0000:47:00.0: amdgpu: initializing kernel modesetting (IP DISCOVERY 0x1002:0x7551 0x1DA2:0xE499 0xC0).
+[    9.166795] amdgpu 0000:47:00.0: amdgpu: register mmio base: 0xF0E00000
+[    9.166799] amdgpu 0000:47:00.0: amdgpu: register mmio size: 524288
+[    9.171982] amdgpu 0000:47:00.0: amdgpu: detected ip block number 0 <common_v1_0_0> (soc24_common)
+[    9.171987] amdgpu 0000:47:00.0: amdgpu: detected ip block number 1 <gmc_v12_0_0> (gmc_v12_0)
+[    9.171991] amdgpu 0000:47:00.0: amdgpu: detected ip block number 2 <ih_v7_0_0> (ih_v7_0)
+[    9.171995] amdgpu 0000:47:00.0: amdgpu: detected ip block number 3 <psp_v14_0_0> (psp)
+[    9.171999] amdgpu 0000:47:00.0: amdgpu: detected ip block number 4 <smu_v14_0_0> (smu)
+[    9.172002] amdgpu 0000:47:00.0: amdgpu: detected ip block number 5 <dce_v1_0_0> (dm)
+[    9.172006] amdgpu 0000:47:00.0: amdgpu: detected ip block number 6 <gfx_v12_0_0> (gfx_v12_0)
+[    9.172010] amdgpu 0000:47:00.0: amdgpu: detected ip block number 7 <sdma_v7_0_0> (sdma_v7_0)
+[    9.172014] amdgpu 0000:47:00.0: amdgpu: detected ip block number 8 <vcn_v5_0_0> (vcn_v5_0_0)
+[    9.172018] amdgpu 0000:47:00.0: amdgpu: detected ip block number 9 <jpeg_v5_0_0> (jpeg_v5_0_0)
+[    9.172022] amdgpu 0000:47:00.0: amdgpu: detected ip block number 10 <mes_v12_0_0> (mes_v12_0)
+[    9.172061] amdgpu 0000:47:00.0: amdgpu: Fetched VBIOS from VFCT
+[    9.211251] amdgpu 0000:47:00.0: vgaarb: deactivate vga console
+[    9.211256] amdgpu 0000:47:00.0: amdgpu: Trusted Memory Zone (TMZ) feature not supported
+[    9.211316] amdgpu 0000:47:00.0: amdgpu: MEM ECC is active.
+[    9.211319] amdgpu 0000:47:00.0: amdgpu: SRAM ECC is not presented.
+[    9.211336] amdgpu 0000:47:00.0: amdgpu: RAS INFO: ras initialized successfully, hardware ability[101] ras_mask[101]
+[    9.211355] amdgpu 0000:47:00.0: amdgpu: vm size is 262144 GB, 4 levels, block size is 9-bit, fragment size is 9-bit
+[    9.211369] amdgpu 0000:47:00.0: amdgpu: VRAM: 32624M 0x0000008000000000 - 0x00000087F6FFFFFF (32624M used)
+[    9.211372] amdgpu 0000:47:00.0: amdgpu: GART: 512M 0x0000000000000000 - 0x000000001FFFFFFF
+[    9.211624] amdgpu 0000:47:00.0: amdgpu: amdgpu: 32624M of VRAM memory ready
+[    9.211628] amdgpu 0000:47:00.0: amdgpu: amdgpu: 56235M of GTT memory ready.
+[    9.211753] amdgpu 0000:47:00.0: amdgpu: PCIE GART of 512M enabled (table at 0x00000087D6B00000).
+[    9.212589] amdgpu 0000:47:00.0: amdgpu: [drm] Loading DMUB firmware via PSP: version=0x0A000601
+[    9.212972] amdgpu 0000:47:00.0: amdgpu: [VCN instance 0] Found VCN firmware Version ENC: 1.11 DEC: 9 VEP: 0 Revision: 1
+[    9.449053] amdgpu 0000:47:00.0: amdgpu: GECC is disabled, set amdgpu_ras_enable=1 to enable GECC in next boot cycle if needed
+[    9.454054] amdgpu 0000:47:00.0: amdgpu: RAP: optional rap ta ucode is not available
+[    9.454057] amdgpu 0000:47:00.0: amdgpu: SECUREDISPLAY: optional securedisplay ta ucode is not available
+[    9.454195] amdgpu 0000:47:00.0: amdgpu: smu driver if version = 0x0000002e, smu fw if version = 0x00000032, smu fw program = 0, smu fw version = 0x00684b00 (104.75.0)
+[    9.454199] amdgpu 0000:47:00.0: amdgpu: SMU driver if version not matched
+[    9.504534] amdgpu 0000:47:00.0: amdgpu: SMU is initialized successfully!
+[    9.505604] amdgpu 0000:47:00.0: amdgpu: [drm] Display Core v3.2.359 initialized on DCN 4.0.1
+[    9.505608] amdgpu 0000:47:00.0: amdgpu: [drm] DP-HDMI FRL PCON supported
+[    9.509910] amdgpu 0000:47:00.0: amdgpu: [drm] DMUB hardware initialized: version=0x0A000601
+[    9.566806] amdgpu 0000:47:00.0: amdgpu: [drm] PSR support 0, DC PSR ver -1, sink PSR ver 0 DPCD caps 0x0 su_y_granularity 0
+[    9.567054] amdgpu 0000:47:00.0: amdgpu: [drm] PSR support 0, DC PSR ver -1, sink PSR ver 0 DPCD caps 0x0 su_y_granularity 0
+[    9.567261] amdgpu 0000:47:00.0: amdgpu: [drm] PSR support 0, DC PSR ver -1, sink PSR ver 0 DPCD caps 0x0 su_y_granularity 0
+[    9.773923] amdgpu 0000:47:00.0: amdgpu: [drm] PSR support 0, DC PSR ver -1, sink PSR ver 0 DPCD caps 0x0 su_y_granularity 0
+[    9.774550] amdgpu 0000:47:00.0: amdgpu: program CP_MES_CNTL : 0x4000000
+[    9.774556] amdgpu 0000:47:00.0: amdgpu: program CP_MES_CNTL : 0xc000000
+[    9.775071] amdgpu 0000:47:00.0: amdgpu: MES FW version must be >= 0x82 to enable LR compute workaround.
+[   10.157192] amdgpu 0000:47:00.0: added peer-to-peer DMA memory 0x17800000000-0x17fffffffff
+[   10.157200] amdgpu 0000:47:00.0: amdgpu: AIS: registered 32624MB device memory
+[   10.157224] amdgpu 0000:47:00.0: amdgpu: SE 4, SH per SE 2, CU per SH 8, active_cu_number 64
+[   10.157233] amdgpu 0000:47:00.0: amdgpu: ring gfx_0.0.0 uses VM inv eng 0 on hub 0
+[   10.157236] amdgpu 0000:47:00.0: amdgpu: ring comp_1.0.0 uses VM inv eng 1 on hub 0
+[   10.157239] amdgpu 0000:47:00.0: amdgpu: ring comp_1.1.0 uses VM inv eng 4 on hub 0
+[   10.157242] amdgpu 0000:47:00.0: amdgpu: ring comp_1.0.1 uses VM inv eng 6 on hub 0
+[   10.157245] amdgpu 0000:47:00.0: amdgpu: ring comp_1.1.1 uses VM inv eng 7 on hub 0
+[   10.157248] amdgpu 0000:47:00.0: amdgpu: ring sdma0 uses VM inv eng 8 on hub 0
+[   10.157251] amdgpu 0000:47:00.0: amdgpu: ring sdma1 uses VM inv eng 9 on hub 0
+[   10.157254] amdgpu 0000:47:00.0: amdgpu: ring vcn_unified_0 uses VM inv eng 0 on hub 8
+[   10.157256] amdgpu 0000:47:00.0: amdgpu: ring jpeg_dec uses VM inv eng 1 on hub 8
+[   10.164035] amdgpu 0000:47:00.0: amdgpu: runtime pm is manually disabled
+[   10.164038] amdgpu 0000:47:00.0: amdgpu: Runtime PM not available
+[   10.165187] amdgpu 0000:47:00.0: [drm] Registered 4 planes with drm panic
+[   10.165190] [drm] Initialized amdgpu 3.64.0 for 0000:47:00.0 on minor 2
+[   10.402426] amdgpu 0000:47:00.0: [drm] fb0: amdgpudrmfb frame buffer device
+[15200.130114] amdgpu 0000:43:00.0: amdgpu: failed to disable PTL
+[15200.130129] amdgpu 0000:47:00.0: amdgpu: failed to disable PTL
+[15200.130134] amdgpu 0000:03:00.0: amdgpu: failed to disable PTL
+[15348.818910] amdgpu 0000:43:00.0: amdgpu: failed to disable PTL
+[15348.818927] amdgpu 0000:47:00.0: amdgpu: failed to disable PTL
+[15348.818932] amdgpu 0000:03:00.0: amdgpu: failed to disable PTL
+[17620.887559] amdgpu 0000:43:00.0: amdgpu: failed to disable PTL
+[17620.887582] amdgpu 0000:47:00.0: amdgpu: failed to disable PTL
+[17620.887590] amdgpu 0000:03:00.0: amdgpu: failed to disable PTL
+[17621.790281] amdgpu 0000:43:00.0: amdgpu: failed to disable PTL
+[17621.790299] amdgpu 0000:47:00.0: amdgpu: failed to disable PTL
+[17621.790304] amdgpu 0000:03:00.0: amdgpu: failed to disable PTL
+[17622.685109] amdgpu 0000:43:00.0: amdgpu: failed to disable PTL
+[17622.685128] amdgpu 0000:47:00.0: amdgpu: failed to disable PTL
+[17622.685133] amdgpu 0000:03:00.0: amdgpu: failed to disable PTL
+[17710.780319] amdgpu 0000:43:00.0: amdgpu: failed to disable PTL
+[17710.780336] amdgpu 0000:47:00.0: amdgpu: failed to disable PTL
+[17710.780341] amdgpu 0000:03:00.0: amdgpu: failed to disable PTL
+[17711.019780] amdgpu 0000:43:00.0: amdgpu: failed to disable PTL
+[17711.019799] amdgpu 0000:47:00.0: amdgpu: failed to disable PTL
+[17711.019805] amdgpu 0000:03:00.0: amdgpu: failed to disable PTL
+[17711.259698] amdgpu 0000:43:00.0: amdgpu: failed to disable PTL
+[17711.259715] amdgpu 0000:47:00.0: amdgpu: failed to disable PTL
+[17711.259720] amdgpu 0000:03:00.0: amdgpu: failed to disable PTL
+[17711.504092] amdgpu 0000:43:00.0: amdgpu: failed to disable PTL
+[17711.504107] amdgpu 0000:47:00.0: amdgpu: failed to disable PTL
+[17711.504113] amdgpu 0000:03:00.0: amdgpu: failed to disable PTL

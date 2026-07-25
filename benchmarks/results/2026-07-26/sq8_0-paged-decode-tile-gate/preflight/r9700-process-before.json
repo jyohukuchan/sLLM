@@ -1,0 +1,22 @@
+[
+    {
+        "gpu": 2,
+        "process_list": [
+            {
+                "process_info": {
+                    "name": "/home/homelab1/coding-local/ultimateLLM/uLLM-aq4-fidelity-promotion-release-f1a3cf4c/ullm-aq4-worker",
+                    "pid": 1526551,
+                    "mem_usage": {
+                        "value": 7351832576,
+                        "unit": "B"
+                    },
+                    "cu_occupancy": "N/A",
+                    "evicted_time": {
+                        "value": 367,
+                        "unit": "ms"
+                    }
+                }
+            }
+        ]
+    }
+]

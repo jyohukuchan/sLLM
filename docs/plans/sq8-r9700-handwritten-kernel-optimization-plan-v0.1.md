@@ -367,3 +367,56 @@ primary logical window plus the documented manual compensation, path-error
 retry, aborted decode attempt, and completed decode window).  Final service
 state was active/running, `NRestarts=0`; no systemd unit content or active-model
 bytes were modified.
+
+## Paged decode source-tile full-model gate — 2026-07-26 (NO-GO)
+
+The earlier M=1 timing advantage for source-tile 128 was not sufficient to
+change the default dispatch: a full-model decode feedback gate was frozen and
+run with direct as the reference.  The criterion is recorded in
+benchmarks/results/2026-07-26/sq8_0-paged-decode-tile-gate/gate-criteria.json
+(SHA-256 645df099030dcf3beca1289e0cc848f0f9c53c1725866896e06848631d962978).
+Every actual real-prompt decode capture must have exact greedy tokens, finite
+values, max abs <= 2e-5, relative L2 <= 1e-5, and cosine >= 0.999999.
+Missing captures, early EOS, or geometry/hash mismatch fail the route.  The
+thresholds were frozen before the measurement and were not relaxed.
+
+Prompt lengths 127/128 and 511/512 yielded decode cache lengths 128--131 and
+512--515 respectively, covering source-tile boundaries and non-multiple tails.
+For each request, three M=1 decode feedback steps captured final hidden state
+and logits as F32LE.  All tokens were exact and all values finite, but both
+candidates failed the vector gate:
+
+| candidate | passed pairs | failed pairs | worst max abs | worst relative L2 | minimum cosine | verdict |
+| --- | ---: | ---: | ---: | ---: | ---: | --- |
+| tile 128 | 4 / 24 | 20 / 24 | 2.317678451538086 | 0.08369554694605848 | 0.9965189313620728 | FAIL |
+| tile 256 | 12 / 24 | 12 / 24 | 1.9435234069824219 | 0.03318822738718883 | 0.9996737107487421 | FAIL |
+
+Tile 128 diverged after the first 128-boundary feedback in some shapes.  Tile
+256 passed the 128-group but diverged in the 512-group.  The source-level root
+cause remains **未確認**; the geometry/tail correlation is not a causal proof.
+Consequently direct remains the default dispatch, and the existing explicit
+source-tile opt-in remains investigation-only.  No external ABI, legacy direct
+dispatch, active-model manifest, or service deployment was changed.  Tile
+64/96 was not explored because the required numerical gate had already failed
+and a further service window was not justified.
+
+This gate used one stop/isolated/restore window: 06:34:54--06:39:36 JST.
+Preflight recorded R9700 gfx1201 as the sole execution GPU; V620 was not
+selected.  llama-qwen35-udq4.service was inactive/disabled and gdm3 inactive.
+The service restore was active/running with NRestarts=0.
+
+During 240 one-second samples, AMD SMI reported THROTTLED 119 times and
+UNTHROTTLED 121 times.  Raw GPU-metrics v1.3 throttle status contains hotspot
+thermal status in the sampled data and one dependent sample also carries PPT0;
+no TDC bit was observed.  AMD SMI per-reason fields are unsupported, sampled
+temperatures/powers stayed below the reported limits, and the two raw fields
+were read separately rather than atomically.  The sustained physical cause is
+therefore **未確認**.  Treat timing from this window as conditional pending an
+atomic telemetry/all-clear rerun.  This does not invalidate the numerical
+NO-GO: frequency/power throttling is a timing concern, not an expected cause
+of deterministic source-tile-correlated vector divergence.  No permanent
+power-cap/profile change was made.
+
+Raw captures, comparator results, service events, telemetry, and the decoded
+throttle caveats are retained under
+benchmarks/results/2026-07-26/sq8_0-paged-decode-tile-gate/.

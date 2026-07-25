@@ -1,0 +1,28 @@
+{
+  "cache_len": 514,
+  "candidate": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-26/sq8_0-paged-decode-tile-gate/cases/tile128/p0512-boundary-tail/oracle/serving-smoke-1-decode-g0003-c0514-final-hidden.f32le",
+  "generated_index": 3,
+  "group": "p0512-boundary-tail",
+  "metrics": {
+    "bit_mismatch_count": 5120,
+    "candidate_sha256": "e602d66397e7658fa1bac8d554fd66d82f14bc61c47e00c501776a3eec41fdaf",
+    "cosine_similarity": 0.9998809286008016,
+    "element_count": 5120,
+    "max_abs": 0.6085891723632812,
+    "max_abs_index": 4777,
+    "nonfinite_count": 0,
+    "passed": false,
+    "reference_sha256": "c43b6d27f459c250d5d13cb420311180c516dab980eb8b926696eb68a1322cb2",
+    "relative_l2": 0.0155289905870809,
+    "thresholds": {
+      "cosine_similarity": 0.999999,
+      "max_abs": 2e-05,
+      "relative_l2": 1e-05
+    }
+  },
+  "reference": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-26/sq8_0-paged-decode-tile-gate/cases/direct/p0512-boundary-tail/oracle/serving-smoke-1-decode-g0003-c0514-final-hidden.f32le",
+  "request_id": "serving-smoke-1",
+  "route": "tile128",
+  "schema_version": "ullm.sq8_0.paged_decode_tile_vector_gate.v1",
+  "vector": "hidden"
+}

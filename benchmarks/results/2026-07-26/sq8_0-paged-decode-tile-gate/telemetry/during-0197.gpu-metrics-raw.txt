@@ -1,0 +1,16 @@
+2026-07-26T06:38:46+09:00
+bdf=0000:47:00.0
+size=4096
+-- first-120-bytes-hex --
+ 78 00 01 03 36 00 37 00 36 00 32 00 31 00 34 00
+ 03 00 00 00 00 00 0e 00 00 00 00 00 00 00 00 00
+ 0d 7d 6d b7 1c 15 00 00 26 00 ff ff 06 00 19 00
+ 19 00 00 00 00 00 26 00 a1 01 60 00 19 00 19 00
+ 19 00 19 00 02 00 00 00 7d 03 10 00 a0 00 ff ff
+ ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff
+ ff ff ff ff ff ff ff ff 33 03 9e 02 f5 04 ff ff
+ 00 00 00 00 10 00 00 00
+-- u32-le-offset-68-throttle-status-current-v1.3-layout --
+          0
+-- u64-le-offset-112-independent-throttle-status-current-v1.3-layout --
+                    0
