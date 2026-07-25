@@ -3,8 +3,9 @@
 ## 前回の要点
 
 - `SQ9_0` は V620/gfx1030 の M=1 実測と独立した offline 比較の両方から、runtime/artifact/campaign
-  candidate としては非推奨と評価された。性能・容量・ISA・品質のその評価は保存するが、互換性を重視する
-  方針により、format reader/dequantization の将来対応を破棄する判定ではない。
+  candidate としては非推奨と評価された。性能・容量・ISA・品質のその評価は保存する。後続方針では
+  `SQ9_0` の reader/dequantization も current scope から外し、V100 または exact RDNA1 向けの
+  保留 future option とした。
 - 後継候補 `SQ8_1` の signed int8 block-scale は、W8A8 に必要な活性側の動的 int8 量子化誤差が未確認であり、
   実モデルでの確認が必要だった。
 - 並行セッションによる `docs/plans/sq9-format-design-input-v0.1.md` の V620 実測追記は、元の evidence と照合して

@@ -186,16 +186,29 @@ v_mfma_scale_f32_32x32x64_f8f6f4 a[0:15], v[0:7], v[8:15], a[0:15], v16, v17 op_
 
 | architecture | 推奨される最適化フォーマット | ISA に基づく理由と条件 | 互換・非推奨の扱い |
 | --- | --- | --- | --- |
-| gfx1030 | `SQ8_1`（実装・品質 gate 完了後） | 可搬基準 `v_dot4_i32_i8` と既存 `v_dot4c_i32_i8` を使える。WMMA/MFMA はない。 | `SQ8_0` は source-preserving/reference の扱いで、native FP8 matrix 最適化を前提にしない。`SQ9_0` は将来の explicit compatibility dequant のみ。`AQ4_0` はその厳密 artifact を要求する model の選択肢である。 |
-| gfx1100 | `SQ8_1`（実装・品質 gate 完了後） | VOP3P dot と `v_wmma_i32_16x16x16_iu8` を使える。FP8 WMMA はこの検証ではない。 | `SQ8_0` は generic/reference を許容しても native FP8 matrix の推奨対象ではない。`SQ9_0` は explicit compatibility のみ。`AQ4_0` は strict artifact choice のまま。 |
-| gfx1201 | **`SQ8_0`** | source FP8 payload を再量子化せず、`v_wmma_f32_16x16x16_fp8_fp8` を含む FP8/BF8 WMMA がある。実装ごとの数値・性能 gate は別途必要。 | `SQ8_1` は VOP3P dot と INT8 WMMA を使える有効な alternative だが、`SQ8_0` より優先しない。`SQ9_0` は explicit compatibility のみで最適化対象にしない。`AQ4_0` は strict artifact choice のまま。 |
-| gfx942 | `SQ8_0`（OCP-to-FNUZ gate と native MFMA gate 完了後） | INT8/FP8 MFMA がある。`SQ8_0` は canonical OCP payload を保持し、FNUZ は private prepack に限る。 | `SQ8_1` は `v_mfma_i32_*` に最適化できる候補だが別設計・品質・実機検証が必要。`SQ9_0` は generic compatibility に限る。`AQ4_0` は strict artifact choice のまま。 |
-| gfx950 | `SQ8_0`（format gate と native MFMA gate 完了後） | gfx942 の base FP8 MFMA に加え FP8 selectable MFMA がある。canonical payload compatibility は個別に証明する。 | `SQ8_1` は広い INT8 MFMA を使える候補だが別設計・品質・実機検証が必要。`SQ9_0` は generic compatibility に限る。`AQ4_0` は strict artifact choice のまま。 |
+| gfx1030 | `SQ8_1`（実装・品質 gate 完了後） | 可搬基準 `v_dot4_i32_i8` と既存 `v_dot4c_i32_i8` を使える。WMMA/MFMA はない。 | `SQ8_0` は source-preserving/reference の扱いで、native FP8 matrix 最適化を前提にしない。`SQ9_0` は**保留中の将来 option**であり選択不可。`AQ4_0` はその厳密 artifact を要求する model の選択肢である。 |
+| gfx1100 | `SQ8_1`（実装・品質 gate 完了後） | VOP3P dot と `v_wmma_i32_16x16x16_iu8` を使える。FP8 WMMA はこの検証ではない。 | `SQ8_0` は generic/reference を許容しても native FP8 matrix の推奨対象ではない。`SQ9_0` は**保留中の将来 option**であり選択不可。`AQ4_0` は strict artifact choice のまま。 |
+| gfx1201 | **`SQ8_0`** | source FP8 payload を再量子化せず、`v_wmma_f32_16x16x16_fp8_fp8` を含む FP8/BF8 WMMA がある。実装ごとの数値・性能 gate は別途必要。 | `SQ8_1` は VOP3P dot と INT8 WMMA を使える有効な alternative だが、`SQ8_0` より優先しない。`SQ9_0` は**保留中の将来 option**であり選択不可。`AQ4_0` は strict artifact choice のまま。 |
+| gfx942 | `SQ8_0`（OCP-to-FNUZ gate と native MFMA gate 完了後） | INT8/FP8 MFMA がある。`SQ8_0` は canonical OCP payload を保持し、FNUZ は private prepack に限る。 | `SQ8_1` は `v_mfma_i32_*` に最適化できる候補だが別設計・品質・実機検証が必要。`SQ9_0` は**保留中の将来 option**であり選択不可。`AQ4_0` は strict artifact choice のまま。 |
+| gfx950 | `SQ8_0`（format gate と native MFMA gate 完了後） | gfx942 の base FP8 MFMA に加え FP8 selectable MFMA がある。canonical payload compatibility は個別に証明する。 | `SQ8_1` は広い INT8 MFMA を使える候補だが別設計・品質・実機検証が必要。`SQ9_0` は**保留中の将来 option**であり選択不可。`AQ4_0` は strict artifact choice のまま。 |
 
-`SQ9_0` は対応する wire format と再定義したが、現在この task は実装しない。対応の正確な範囲は
-[sq9-format-design-input-v0.1.md](../plans/sq9-format-design-input-v0.1.md) の compatibility section を
-正とする。すべての architecture で将来 explicit に選べる generic dequant path を対象にする一方、
-default、auto-selection、matrix-instruction tuning、campaign promotion の対象にはしない。
+The current uLLM scope is the five INT8-capable targets in this table and the exact formats
+`AQ4_0`, `SQ8_0`, and `SQ8_1`.  `SQ9_0` is not a corresponding current format: it has no reader,
+kernel, selector, artifact, manifest profile, or availability on any row above.  It must not be
+added to default selection, explicit selection, matrix-instruction tuning, or campaign promotion.
+
+## `SQ9_0`：保留中の将来 option
+
+`SQ9_0` is reserved only for a possible future V100 or exact RDNA1 target that lacks both a useful
+FP8 route and a practical INT8 matrix/dot route for the intended workload.  This AMD-only reference
+cannot validate NVIDIA code generation or V100 hardware: local `llvm-mc` accepts AMD targets only.
+
+“RDNA1” alone is not an ISA target.  The local ROCm 7.2.1 `llvm-mc` check accepted
+`v_dot4c_i32_i8` and `v_dot4_i32_i8` for `gfx1011`/`gfx1012` but rejected them for `gfx1010`; it
+also rejected the selected FP8 WMMA mnemonic on all three.  Thus no generation-wide RDNA1
+no-INT8-dot claim is valid, and actual hardware performance remains unconfirmed.  The canonical
+entry conditions, V100 evidence boundary, and deferred component list are in
+[sq9-format-design-input-v0.1.md](../plans/sq9-format-design-input-v0.1.md).
 
 ## `SQ8_1` 設計側への申し送り
 
@@ -213,6 +226,7 @@ default、auto-selection、matrix-instruction tuning、campaign promotion の対
 ## 継続時の確認事項
 
 1. 新しい HIP kernel は、target ごとの direct `llvm-mc` probe と実際の generated ISA の両方を残す。
-2. `SQ8_1`、`SQ8_0`、`SQ9_0` の実装は CPU oracle、artifact validation、各 target の実機 differential
-   を通過するまで runtime selection を有効にしない。
+2. `SQ8_1`、`SQ8_0`、`AQ4_0` の新規/変更 runtime selection は CPU oracle、artifact validation、
+   各 target の実機 differential を通過するまで有効にしない。`SQ9_0` は保留のため、これらの
+   implementation work 自体を開始しない。
 3. final activation は別の人間による明示承認が必要であり、この ISA 検証からは導かれない。

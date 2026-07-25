@@ -1,4 +1,4 @@
-# ISA 事実訂正と `SQ9_0` 互換性方針
+# ISA 事実訂正と `SQ9_0` 互換性方針（後に保留へ訂正）
 
 ## 前回の要点
 
@@ -23,24 +23,27 @@
   local bare-target compile では gfx1100/gfx1201 が `dot1-insts` feature diagnostic となる一方、
   `__builtin_amdgcn_sudot4` は VOP3P `v_dot4_i32_iu8` を出力した。project の wrapper/分岐で
   scalarize しても、命令不存在の証拠にはならない。
-- `SQ9_0` の位置付けを訂正した。将来の packer、reader、validator、quantizer、generic dequant
-  kernel、runtime loader、served-model manifest の対応対象とする。ただし `SQ9_0` は推奨形式、
-  default、auto-selection、性能 campaign、matrix-instruction tuning の対象にはしない。
+- 当時は `SQ9_0` の位置付けを、将来の packer、reader、validator、quantizer、generic dequant
+  kernel、runtime loader、served-model manifest の対応対象へ訂正した。ただし `SQ9_0` は推奨形式、
+  default、auto-selection、性能 campaign、matrix-instruction tuning の対象にはしないとしていた。
+- この compatibility implementation scope は同日後続の方針で**保留**へ再訂正された。現在は全 component
+  が未実装・非選択であり、V100 または exact RDNA1 target の着手条件を満たすまで実装対象ではない。
 - 過去の V620 timing、offline error、static ISA count は変更していない。今回も GPU、service、
   active manifest、candidate、release、activation には触れていない。
 
 詳細な直接アセンブル証拠、正しい operand 構文、architecture 別フォーマット選択は
 `docs/reference/amd-low-precision-isa-and-format-selection-rocm7.2.1.md` に保存した。
 
-## 次の行動
+## 次の行動（保留）
 
-1. `SQ9_0` compatibility implementation plan を作成し、format validation、tail、malformed input、
-   CPU oracle、runtime fail-closed 条件を先に固定する。
-2. `SQ9_0` は generic dequant と explicit manifest selection だけを実装し、gfx1030、gfx1100、
-   gfx1201、gfx942、gfx950 で個別 differential が通るまで runtime capability を主張しない。
+1. `SQ9_0` compatibility implementation plan、generic dequant、explicit manifest selection は作成・実装
+   しない。current target `gfx1030` / `gfx1100` / `gfx1201` / `gfx942` / `gfx950` では選択不可のまま
+   とする。
+2. V100 または exact RDNA1 target が必要になり、target 固有の low-precision capability と
+   `AQ4_0` / `SQ8_0` / `SQ8_1` の matched comparison を確認してから、新しい plan を別途 review する。
 3. `SQ8_1` 設計側は `v_dot4_i32_i8` を portable baseline にし、gfx1100/gfx1201 の VOP3P dot と
    gfx1201 INT8 WMMA を反映する。別作業中の `docs/plans/sq8_1-format-design-input-v0.1.md` は
    この task では変更しない。
-4. gfx1201/RDNA4 の推奨最適化フォーマットは `SQ8_0` のままとする。`SQ8_1` と `SQ9_0` の
+4. gfx1201/RDNA4 の推奨最適化フォーマットは `SQ8_0` のままとする。`SQ8_1` の
    performance claim は、別途明示承認された GPU window と correctness gate が揃うまで行わない。
 5. final activation は人間の明示承認が必要であり、この訂正はそれを許可しない。

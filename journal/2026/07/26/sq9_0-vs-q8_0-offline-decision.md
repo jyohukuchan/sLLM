@@ -36,31 +36,34 @@
   記録した。これは性能単体の判定として保存するが、互換性を重視するユーザー方針により、
   runtime/artifact の対応範囲を否定する判定ではなくなった。
 
-## 判定の訂正
+## 判定の訂正（後に保留化）
 
-- `SQ9_0` は対応する。将来の実装対象は packer、reader、validator、deterministic RNE quantizer、
-  generic E5M3-to-FP16/FP32 dequant kernel、runtime load selector、served-model manifest の
-  explicit format/profile である。この journal 自体は実装を行わない。
+- 当時は `SQ9_0` を対応する future format とし、packer、reader、validator、deterministic RNE
+  quantizer、generic E5M3-to-FP16/FP32 dequant kernel、runtime load selector、served-model
+  manifest の explicit format/profile を将来の実装対象とした。この journal 自体は実装を行わない。
+- この implementation scope は同日後続の方針で**保留**になった。上記の全 component は現在
+  未実装・非選択であり、V100 または exact RDNA1 target の全着手条件が満たされるまで作業しない。
 - `SQ9_0` は推奨形式でも最適化主対象でもない。V620 M=1 の `SQ8_0` 比 +6.069% が
   package-plus-KV 採算条件 +7.29% を満たさないこと、INT8 block-scale が容量・ISA・品質で
   有利という測定/評価は、変更せずに非推奨の根拠として残す。
-- future generic compatibility path は gfx1030、gfx1100、gfx1201、gfx942、gfx950 で explicit に
-  選択可能にする。ただし実装と各 architecture の differential が完了するまでは current runtime
-  capability ではなく、unknown architecture は fail closed とする。
+- `gfx1030`、`gfx1100`、`gfx1201`、`gfx942`、`gfx950` は current INT8-capable scope であり、
+  `SQ9_0` を explicit にも選択しない。V100/RDNA1 は named future candidates だが、V100 の
+  DP4A 実用性と exact RDNA1 GFX capability は未確認である。
 - gfx1201/RDNA4 は INT8 dot と INT8/FP8 WMMA を持つ。`SQ8_1` の INT8 path は成立するが、
   source-preserving FP8 WMMA path を持つ `SQ8_0` が RDNA4 の推奨最適化フォーマットである。
   正確な ISA 表は `docs/reference/amd-low-precision-isa-and-format-selection-rocm7.2.1.md` を正とする。
 
-## 次の行動
+## 次の行動（保留）
 
-1. `SQ9_0` compatibility plan に packer/quantizer、reader/validator、CPU oracle、generic dequant、
-   runtime selector、manifest schema を分離して定義する。`SQ9_0` は default、auto-selection、
-   optimization campaign に入れない。
+1. `SQ9_0` compatibility plan、packer/quantizer、reader/validator、CPU oracle、generic dequant、
+   runtime selector、manifest schema はいずれも保留する。GPU 実験、artifact、campaign、release、
+   active manifest は作成しない。
 2. `SQ8_1` の設計入力は別作業で確定する。可搬 baseline は `v_dot4_i32_i8` とし、RDNA3/RDNA4
    は VOP3P `v_dot4_i32_iu8` と INT8 WMMA を個別に評価する。別作業中の
    `docs/plans/sq8_1-format-design-input-v0.1.md` はこの作業から変更しない。
-3. GPU 性能比較は別途明示承認された window でのみ行う。今回の ISA は timing, occupancy,
-   transaction, TPS の代替ではなく、この訂正でも GPU は使用しない。
+3. `SQ9_0` を保留解除するには、V100 または exact RDNA1 target の requirement、target 固有の
+   capability/hardware evidence、current formats との matched comparison、新しい reviewed plan、
+   および別途のユーザー承認が必要である。
 
 ## Evidence
 

@@ -1,8 +1,77 @@
 # SQ9_0 Format Design Input v0.1
 
-> Status: design input.  This document fixes the v0.1 payload, conversion, special-value, and
-> evaluation contracts, but does not authorize an artifact, runtime-kernel, campaign, release, or
-> activation implementation.
+> Status: **deferred future option**.  This document preserves a potential v0.1 payload,
+> conversion, and special-value design, but `SQ9_0` is not a supported runtime/artifact format and
+> does not authorize a packer, reader, validator, quantizer, kernel, runtime selector, campaign,
+> release, or activation implementation.
+
+## 2026-07-26 方針訂正：実装対象から保留へ
+
+Commit `e86c2e3c` temporarily reclassified `SQ9_0` as a future compatibility implementation
+obligation.  That classification is corrected here: `SQ9_0` is a **deferred future option**, not
+the current compatibility scope.  The E5M3 bit semantics and the historical evidence remain in
+this document as a design record; the exact name is reserved for that record only.  No current
+reader, manifest, selector, or artifact may claim `SQ9_0` support.
+
+This correction changes only position and implementation planning.  It does **not** rewrite the
+V620 M=1 result (+6.069% versus `SQ8_0`, below the +7.29% package-plus-KV condition), capacity,
+static-ISA, or quality evidence recorded below.
+
+### 現行ターゲット・スコープ
+
+uLLM's present target is generations with a practical INT8 execution path:
+`gfx1030`, `gfx1100`, `gfx1201`, `gfx942`, and `gfx950`.  The relevant exact-format scope there is
+`AQ4_0`, `SQ8_0`, and `SQ8_1`, each subject to its own implementation and quality gates.
+`SQ9_0` is excluded from current architecture selection, runtime selection, artifact production,
+and manifest handling on all five targets.
+
+Here, “INT8 execution path” means a usable INT8 dot or matrix route for the intended inference
+workload, not merely the existence of an integer ALU.  The AMD reference records a dot4 or stronger
+route for each of the five current targets.  This is why the prior V620/gfx1030 hypothesis is no
+longer a `SQ9_0` implementation target.
+
+### V100 / RDNA1 の確認済み事実と未確認事項
+
+The user's named future candidates are NVIDIA V100 and RDNA1.  The policy rationale is narrow:
+only a **specific** target that has neither a useful FP8 execution route nor a practical INT8
+matrix/dot route is a possible domain where E5M3's shift-only conversion could matter.  It is a
+future investigation rationale, not a claim that shift-only conversion is faster or the only
+possible implementation on every member of either generation.
+
+| candidate | confirmed before this correction | unconfirmed / resulting rule |
+| --- | --- | --- |
+| NVIDIA Tesla V100 / Volta SM 7.0 | NVIDIA documents V100 Tensor Cores as FP16-input/FP16-or-FP32-accumulate, and its TensorRT support matrix marks INT8 Tensor Cores as unavailable.  However, NVIDIA's PTX ISA says `dp4a` requires SM 6.1+, and the Volta SASS table lists `IDP4A`.  V100 therefore must **not** be described as having no INT8 dot instruction. | Whether DP4A is practical for uLLM's relevant shapes, whether an FP8 route useful to this design exists beyond the cited Tensor-Core descriptions, and any V100 `SQ9_0` throughput/quality result are **unconfirmed**.  This host has no NVIDIA-capable `llvm-mc` validation path and no V100 hardware; the local assembler evidence is AMD-only. |
+| RDNA1 | A generation-wide “no INT8 dot” statement is false.  Local ROCm 7.2.1 `llvm-mc` accepts `v_dot4c_i32_i8` and `v_dot4_i32_i8` for `gfx1011`/`gfx1012`, but rejects both for `gfx1010`.  The same local probe rejects the selected `v_wmma_f32_16x16x16_fp8_fp8` mnemonic for `gfx1010`, `gfx1011`, and `gfx1012`. | “RDNA1” is not a sufficiently exact target: the intended GPU model/GFX ID has not been specified.  The mnemonic result is compiler availability only; scalar FP8 coverage, generated ISA, actual hardware behavior, and practical INT8-dot performance are **unconfirmed**.  A future effort must identify the exact GFX target before making a format decision. |
+
+The NVIDIA facts above are from [NVIDIA's V100 Tensor Core
+documentation](https://developer.nvidia.com/blog/programming-tensor-cores-cuda-9/), its
+[TensorRT hardware support matrix](https://docs.nvidia.com/deeplearning/tensorrt/archives/tensorrt-861/support-matrix/),
+the [PTX `dp4a` reference](https://docs.nvidia.com/cuda/archive/11.8.0/parallel-thread-execution/index.html),
+and the [Volta SASS table](https://docs.nvidia.com/cuda/archive/11.4.4/cuda-binary-utilities/index.html).
+The RDNA1 split is additionally recorded by the local assembler command in the journal for this
+change.  The local `llvm-mc` can validate AMD targets only and cannot establish NVIDIA code
+generation or hardware behavior.  No GPU was used for this correction.
+
+### 着手条件（すべて満たすまで保留）
+
+The previously defined components—packer, deterministic RNE quantizer, reader, validator, CPU
+oracle, generic E5M3 dequant kernel, runtime selector, and exact manifest handling—remain
+**deferred**.  They may be planned and implemented only after all of the following are true:
+
+1. A real product/serving requirement names V100 or an exact RDNA1 GPU/GFX target; a generic
+   generation label is insufficient.
+2. That target has a documented, target-specific capability record showing no useful FP8 route and
+   no practical INT8 matrix/dot route for the required workload.  For V100 this requires a separate
+   NVIDIA toolchain/hardware check; for RDNA1 it requires the exact GFX ISA/codegen check.
+3. A matched comparison establishes that `AQ4_0`, `SQ8_0`, and `SQ8_1` cannot meet the requirement
+   without the proposed E5M3 route.  Historical V620 evidence cannot be substituted for this
+   comparison.
+4. A new, reviewed implementation plan fixes the CPU oracle, malformed-input and tail tests,
+   target-specific differential/quality gates, and the required benchmark evidence before code is
+   started.
+5. The user separately authorizes that implementation work and any necessary GPU-validation
+   window.  A later activation, campaign, authorization consumption, or active-manifest edit still
+   requires its own explicit approval.
 
 ## 前回の要点
 
@@ -23,26 +92,23 @@
   special-value decoder behavior are fixed below.
 - A CPU test now exhaustively verifies all 512 sign-inclusive patterns against independent binary16
   semantics.  It passed on 2026-07-26.
-- 2026-07-26 compatibility correction: `SQ9_0` is a supported future wire format, not a recommended
-  or optimization-primary format.  The earlier V620 timing and offline quality conclusions remain
-  evidence for non-recommendation; only the disposition changes because compatibility is a user
-  requirement.
+- 2026-07-26 deferred-scope correction: `SQ9_0` is not a current supported wire/runtime format.
+  It is reserved as a future option only for a named legacy target that meets every entry condition
+  above.  The earlier V620 timing and offline quality conclusions remain unchanged.
 
-## 次の行動
+## 現時点で行わない行動
 
-1. Define and then implement the compatibility-only `SQ9_0` packer, reader, validator, deterministic
-   RNE quantizer, and generic dequantization path.  This task defines the scope only; it implements
-   none of them.
-2. Keep `SQ8_0` as the recommended optimized format on gfx1201/RDNA4.  Treat the V620 timing,
-   quality, capacity, and ISA evidence below as a reason not to optimize or auto-select `SQ9_0`, not
-   as a reason to reject format compatibility.
-3. Complete separate `SQ8_1` design, activation-quality, and architecture-specific performance gates.
-   `SQ8_1` is the INT8 block-scale optimization candidate; this document does not change its
-   separately owned design file.
+1. Do not implement any `SQ9_0` component, run an `SQ9_0` GPU experiment, or create an
+   `SQ9_0` artifact, candidate, campaign, release, or manifest entry.
+2. Keep `SQ8_0`, `SQ8_1`, and `AQ4_0` within the current INT8-generation scope described above.
+   This document does not change the separately owned `SQ8_1` design file.
+3. Preserve the historical V620 timing, capacity, ISA, and quality evidence below without using it
+   to broaden `SQ9_0` support.
 
 ## Goal
 
-Define `SQ9_0` as a weight-only signed E5M3 format for GPUs that lack a useful FP8 execution path.
+Preserve `SQ9_0` as a potential weight-only signed E5M3 format for a future, explicitly named GPU
+that lacks both a useful FP8 execution route and a practical INT8 matrix/dot route.
 The stored nine-bit E5M3 code must become an IEEE binary16 bit pattern through shifts and masks only:
 
 ```text
@@ -54,10 +120,10 @@ The equality on the second line holds when `sq9_0_code` is the validated nine-bi
 `sign:exponent[4:0]:mantissa[2:0]`.  There is no exponent rebiasing, denormal normalization,
 codebook lookup, or scale multiplication in the normative `SQ9_0` dequantization path.
 
-The primary hardware hypothesis is Radeon Pro V620/gfx1030: it has no FP8 matrix instruction or
-FP8 conversion builtin path in the project capability reference, but can run ordinary integer,
-FP16, and FP32 instructions.  `SQ9_0` is not defined as an automatic replacement for `SQ8_0` on
-R9700/RDNA4 or a later GPU with native FP8 execution.
+V100 and an as-yet-unspecified RDNA1 member are the user's future candidates, subject to the
+capability caveats above.  V620/gfx1030 is retained below as historical evidence only, not as the
+primary target.  `SQ9_0` is not an automatic replacement for `SQ8_0`, `SQ8_1`, or `AQ4_0` on
+R9700/RDNA4, the other current targets, or a later GPU with a usable low-precision route.
 
 ## Success Criteria
 
@@ -408,45 +474,46 @@ the same equation.
 | --- | --- | ---: | --- | --- | --- | --- |
 | `AQ4_0` | 4-bit index | 4 bpp; existing policies include group-scale overhead | codebook plus group/tensor scale policy | nibble unpack, LUT, scale handling | primary compact path; current kernels use wide loads and wave reductions | calibrated existing policy; quality remains gated |
 | `SQ8_0` | FP8 E4M3 | 8 bpp before scale metadata | tensor/row/row-block scales | native FP8 path where available; fallback conversion otherwise | preferred on R9700/RDNA4, whose FP8 builtins/WMMA are documented | existing format with its own policy and regression gates |
-| `SQ9_0` | signed E5M3 in two planes | exactly 9 bpp before row-tail padding | none | low-byte + high-bit assembly, shift/bit-cast; no LUT/rebias/scale | primary experiment for V620/RDNA2 and other no-FP8-path GPUs | unmeasured; direct RNE must pass the planned quality gates |
+| `SQ9_0` | signed E5M3 in two planes | exactly 9 bpp before row-tail padding | none | low-byte + high-bit assembly, shift/bit-cast; no LUT/rebias/scale | **deferred future option** for an explicitly identified V100 or RDNA1 target that satisfies the entry conditions; not selected on current uLLM targets | unmeasured for those candidates; no implementation or quality gate is scheduled |
 
 `SQ9_0` has a plausible performance advantage over `SQ8_0` only on an architecture where E4M3
-cannot use native FP8 conversion/arithmetic and the fallback is materially conversion/scale-bound.
-V620/RDNA2/gfx1030 is the named primary case.  It is not expected to beat `SQ8_0` by default on
-R9700/RDNA4 or a later native-FP8 GPU: `SQ8_0` has lower weight traffic and documented native FP8
-support there.  On either class, the explicit bandwidth-efficiency and matched-quality gates—not
-the format label—decide the winner.
+cannot use a useful FP8 route **and** a practical INT8 matrix/dot route.  V100 and the exact
+RDNA1 subtarget to be named later are the candidate cases; V620/RDNA2/gfx1030 is not.  The
+qualification remains unmeasured for both candidates, so this is not a performance claim.  On the
+current targets, `SQ8_0`, `SQ8_1`, and `AQ4_0` retain their own selection and quality rules.
 
-## Kernel Implementation Implications
+## 保留中の実装考慮事項（現時点では着手しない）
 
-### What Can Be Reused
+The remainder of this section records what a **future, separately authorized** implementation would
+need to consider after every entry condition is met.  It is not a work queue, and none of its
+items authorizes code, hardware execution, artifact production, or manifest work now.
+
+### 条件充足後に検討できる再利用箇所
 
 - The resident-payload loader lifecycle, sidecar/manifest validation patterns, backend dispatch,
-  direct matvec launch plumbing, shape guards, and model-loop telemetry conventions can be adapted
-  from the existing AQ4/SQ8 work.
+  direct matvec launch plumbing, shape guards, and model-loop telemetry conventions could be
+  adapted from the existing AQ4/SQ8 work.
 - The AQ4 M=1 organization supplies relevant discipline: 16-byte alignment proofs, streaming
   `uint4` loads, row-tail guards, and a comparison of LDS versus wave-local reduction.  The current
-  width-8 shuffle result is gfx1201/RPB=32-specific, so V620 must measure its own reduction choice.
+  width-8 shuffle result is gfx1201/RPB=32-specific and cannot be projected onto V100 or RDNA1.
 - The benchmark result must keep direct execution distinct from any FP16/F32 materialized fallback,
   following the existing `SQ8_0` reporting rule.
 
-### What Requires New Code
+### 条件充足後に新規実装となる範囲
 
 - `SQ9_0` payload validation, plane offsets, padding logic, CPU reference pack/unpack, and RNE
-  encoder are new; no AQ4 nibble payload or `SQ8_0` byte payload reader is wire-compatible.
+  encoder would be new; no AQ4 nibble payload or `SQ8_0` byte payload reader is wire-compatible.
 - The dequant hot loop is new: it eliminates codebook/scale streams but combines the low byte and
   bit-plane byte before the binary16 bit-cast.
-- The kernel must not retain eight low-plane vectors plus the sign vector at once.  The initial
-  target is one current `uint4`, four sign dwords, a small number of activation values, and the
-  accumulator(s), followed by ISA/VGPR verification.
-- The direct decode kernel must derive its wave width from the compilation/runtime target rather
-  than assume CDNA wave64.  RDNA2 and RDNA4 tuning must be separate configurations.
-- Prefill/GEMM is deferred.  V620 has no WMMA, so its first `SQ9_0` implementation is a direct
-  decode/GEMV path; it must not pretend to have a native FP9 matrix instruction.
+- A future kernel must not retain eight low-plane vectors plus the sign vector at once.  Its actual
+  register and wave design must be derived from the named target, not inferred from V620, RDNA2,
+  or RDNA4.
+- No V100, RDNA1, GEMV, GEMM, prefill, or direct-decode implementation path is selected by this
+  document.  `SQ9_0` must not be presented as native FP9, INT8-dot, WMMA, or MFMA arithmetic.
 
-### Required Kernel Measurements
+### 条件充足後に必要な測定
 
-For every direct-kernel candidate, record:
+For every future direct-kernel candidate, record:
 
 - aligned versus deliberately guarded tail paths and their exact shape coverage;
 - global bytes/read transactions, VALU instruction count, VGPR count, LDS use, occupancy, and
@@ -455,38 +522,34 @@ For every direct-kernel candidate, record:
 - `D`, `TPS_theoretical`, and `decode_bandwidth_efficiency` from the preceding section; and
 - CPU/HIP numerical agreement plus a no-materialized-fallback assertion.
 
-## Design Questions And Evaluation Plan
+## 将来の評価条件（保留）
 
-| question | required experiment | pass decision |
+| question | future experiment after authorization | decision needed before implementation continues |
 | --- | --- | --- |
 | Does no-scale direct E5M3 preserve useful quality? | bounded chunk reconstruction, activation-weighted relative MSE, saturation/subnormal counts, then golden-prefix/logit and prompt-suite checks | no-scale `SQ9_0` must meet the predeclared quality floor; otherwise it is not promoted |
 | Does a scale recover enough quality to be worth it? | tensor, row, and K=128 scale ablations with identical RNE source and exact metadata bytes | report as a separate experimental exact format; never relabel it as `SQ9_0` |
-| Is the plane layout efficient on V620? | isolated 128-tile decode microbenchmark for both high-plane distribution choices, plus unaligned-36-byte control | chosen layout must retain aligned transactions and beat or match the control without higher VGPR pressure |
-| Does `SQ9_0` beat `SQ8_0` fallback? | same source/model subset, output quality, context, KV policy, and direct-only dispatch | measured `SQ9_0` TPS and bandwidth efficiency must exceed matched `SQ8_0`; otherwise retain `SQ8_0` |
+| Is the plane layout efficient on the named target? | isolated 128-tile decode microbenchmark for both high-plane distribution choices, plus unaligned-36-byte control | chosen layout must retain aligned transactions and beat or match the control without higher register pressure |
+| Does `SQ9_0` beat the applicable current-format route? | same source/model subset, output quality, context, KV policy, and direct-only dispatch | measured `SQ9_0` TPS and bandwidth efficiency must exceed the matched `SQ8_0`/`SQ8_1`/`AQ4_0` route; otherwise retain that route |
 | Is the full model path useful versus `AQ4_0`? | identical full-package workload and memory accounting | require quality pass and a documented memory/performance trade-off; `SQ9_0` is not expected to win on resident bytes |
 
-## Decision Tree
+## 将来の着手判断
 
 ```text
+all deferred-entry conditions at the top of this document met?
+  no  -> stop; SQ9_0 stays a design record and no artifact/runtime work starts
+  yes -> obtain separate implementation and target-hardware authorization
+
 source weight finite?
-  no  -> reject quantization with tensor/coordinate evidence
+  no  -> reject future quantization with tensor/coordinate evidence
   yes -> clamp finite magnitude to 61440; deterministic RNE to E5M3
 
-artifact declares exact SQ9_0 plane metadata and zero-valued tail padding?
-  no  -> reject reader input
+future artifact declares exact SQ9_0 plane metadata and zero-valued tail padding?
+  no  -> reject future reader input
   yes -> assemble low byte + high bit; fp16_bits = q << 7
 
-target has a validated native FP8 E4M3 path?
-  yes -> SQ8_0 is the default comparison; require SQ9_0 to overcome its byte penalty empirically
-  no  -> run the SQ9_0 direct FP16/FP32 decode microbenchmark
-
-no-scale SQ9_0 passes quality and direct-kernel gates?
-  no  -> stop; evaluate explicitly named scale-bearing experiments only if separately authorized
-  yes -> run matched V620 model-loop and full-package comparisons
-
-all quality, bandwidth-efficiency, resident-memory, and fallback-disclosure gates pass?
-  no  -> keep SQ9_0 as an unpromoted design candidate
-  yes -> write a separate implementation plan; no activation follows from this document
+target-specific quality, differential, and matched-current-format gates pass?
+  no  -> stop; retain AQ4_0/SQ8_0/SQ8_1 as applicable
+  yes -> a separate later decision may consider implementation continuation; no activation follows
 ```
 
 ## Risks
@@ -499,23 +562,24 @@ all quality, bandwidth-efficiency, resident-memory, and fallback-disclosure gate
 | row-tail padding grows storage on unusual shapes | actual bpp exceeds 9 | record logical/stored elements and reject an unjustified tail policy |
 | a scale is silently reintroduced during quality tuning | the shift-only claim becomes misleading | reserve no scale for `SQ9_0`; require a new exact ID for every scale-bearing variant |
 | NaN/inf is treated as finite range | corrupts IEEE mapping or hides source defects | reserve exp=31 and reject non-finite source weights |
-| RDNA2 assumptions are copied from RDNA4 | wrong wave/ISA or unsupported FP8/WMMA path | compile and profile per target; keep V620 direct path independent of WMMA |
+| a V100/RDNA1 decision is inferred from another GPU or another RDNA1 subtarget | wrong dot/FP8/wave assumption | name the exact device/GFX and validate its own toolchain, ISA, and hardware before implementation |
 | historical `SQ8_0` results are compared as if same workload | misleading performance conclusion | require matched source, context, KV policy, direct execution mode, and quality gate |
 
-## Next Actions
+## 保留解除後の作業順（現時点の action ではない）
 
-1. Add a CPU reference pack/unpack test for the adopted two-plane layout, including 1/31/32/33/127/
-   128/129-column tails, 16-byte offsets, and zero padding.  Do not change a runtime reader yet.
-2. Implement a bounded-memory RNE encoder prototype that records finite/saturation/subnormal
-   telemetry and re-reads chunks for verification.
-3. Run no-scale, tensor-scale, row-scale, and K=128-scale quality ablations on a fixed tensor set
-   using the AQ project's activation-weighted and prompt/logit evidence conventions.
-4. Build an isolated V620/gfx1030 M=1 direct decoder with both high-plane distribution choices;
-   compare it to a matched `SQ8_0` fallback and collect ISA/VGPR/profiler evidence.
-5. If the microbenchmark and quality gates pass, write a separate `SQ9_0` implementation plan for
-   loader/manifest integration, direct projection coverage, model-loop telemetry, and regression
-   tests.  Any artifact/campaign/release/activation decision remains a later, separately approved
-   action.
+If and only if the entry conditions are met, a newly approved plan must sequence:
+
+1. CPU reference pack/unpack and malformed-input tests for 1/31/32/33/127/128/129-column tails,
+   16-byte offsets, and zero padding.
+2. A bounded-memory RNE encoder prototype with finite/saturation/subnormal telemetry and chunk
+   reread verification.
+3. No-scale and explicitly named scale-bearing quality ablations using the project's
+   activation-weighted and prompt/logit evidence conventions.
+4. A target-specific direct decoder comparison against the applicable `SQ8_0`/`SQ8_1`/`AQ4_0`
+   route, with ISA, register, profiler, numerical-differential, and thermal evidence.
+5. Only after those gates pass, a separately reviewed implementation plan for loader/manifest
+   integration, direct projection coverage, and regression tests.  Artifact, campaign, release,
+   authorization consumption, and activation remain separately approved actions.
 
 ## V620 (gfx1030) 実機測定結果（2026-07-26、サーマルガード付き再実行）
 
@@ -574,13 +638,14 @@ full M=1 GEMV が純粋に ALU 律速であることを単独では証明しな�
 `benchmarks/results/2026-07-26/sq9-v620-viability/summary.md` とその `static/isa-analysis.md` に保存した。
 この追記は candidate、campaign、release、service、activation の承認ではない。
 
-## 2026-07-26 evaluation result and compatibility correction for `SQ9_0`
+## 2026-07-26 historical evaluation and deferred-scope correction for `SQ9_0`
 
 This section preserves the disposition evidence for the design input above and corrects its policy
 conclusion.  The historical measurement and evaluation data are not rewritten: the performance,
 quality, capacity, and ISA evidence still says that `SQ9_0` is not the recommended format or an
-optimization primary.  The corrected conclusion is that `SQ9_0` remains a compatibility-supported
-format whose implementation scope is defined below.
+optimization primary.  The corrected conclusion is that `SQ9_0` remains a deferred design record;
+its implementation components are not in the current scope and are listed below only with their
+future entry conditions.
 
 ### Scope and evidence boundary
 
@@ -679,7 +744,7 @@ scale without an extra requantization error. Q8_0-style g=32 is 6.237% larger th
 SQ8_0; SQ9_0 is 12.486% larger. Therefore this decision does not replace SQ8_0 on RDNA4, where
 the existing source-preserving FP8 path remains the correct default. On gfx1030-class hardware the
 same evidence makes SQ9_0 non-recommended relative to the INT8 block-scale direction; it does not
-remove the future compatibility reader/dequantization obligation for `SQ9_0`.
+create a current `SQ9_0` reader/dequantization obligation.
 
 ### W8A8 activation contract and quality boundary
 
@@ -695,35 +760,36 @@ error, so W8A8 activation relative L2, saturation rate, and output/logit impact 
 They must be measured with held-out prompt activations before any optimized INT8 implementation
 adoption. This does not change the `SQ9_0` non-recommendation: the static W8A16 comparison already
 favors the INT8 block-scale path, and W8A8 adds the verified dot4 advantage. It also does not
-override the separately defined compatibility implementation scope for `SQ9_0`.
+override `SQ9_0`'s deferred status.
 
-### Corrected decision, compatibility scope, and optimized replacement direction
+### Corrected decision: deferred option and current optimized direction
 
-The earlier decision to discard `SQ9_0` as a runtime/artifact/campaign candidate is superseded on
-2026-07-26 by the user's compatibility policy.  This correction does **not** change any number,
-measurement, quality result, or static-ISA conclusion above.  In particular, the guarded V620 M=1
-result remains +6.069% versus `SQ8_0`, below the +7.29% package-plus-KV condition, and the
-capacity/ISA/quality comparison still favors the INT8 block-scale direction.
+The earlier decision to discard `SQ9_0` as a runtime/artifact/campaign candidate was temporarily
+superseded by `e86c2e3c`'s compatibility policy.  This document corrects that policy to
+**deferred**.  The correction does **not** change any number, measurement, quality result, or
+static-ISA conclusion above.  In particular, the guarded V620 M=1 result remains +6.069% versus
+`SQ8_0`, below the +7.29% package-plus-KV condition, and the capacity/ISA/quality comparison still
+favors the INT8 block-scale direction.
 
 The corrected status is:
 
-- `SQ9_0` is a **supported compatibility format target**.  Its packer, reader, validator,
-  quantizer, dequantization kernel, runtime load path, and served-model manifest handling are
-  implementation obligations.
-- `SQ9_0` is **not** a recommended format, default, auto-selected format, performance campaign
-  target, or matrix-instruction optimization target.  It must never displace `SQ8_0` as the
-  recommended optimized format on gfx1201/RDNA4.
-- Current implementation status remains **not implemented**.  This task defines the required
-  scope and does not create an artifact, runtime path, campaign, candidate, release, or activation.
+- `SQ9_0` is **not implemented or supported** as a current wire/runtime/artifact format.  It is not
+  a recommended format, default, auto-selected format, performance campaign target, or
+  matrix-instruction optimization target.
+- Its only designated future domain is a real V100 or exact RDNA1 deployment that satisfies every
+  entry condition at the start of this document.  V620/gfx1030 and all current uLLM targets are
+  outside that domain.
+- No `SQ9_0` artifact, runtime path, campaign, candidate, release, authorization consumption, or
+  activation is created by this correction.
 
-| required compatibility component | required future behavior | explicit non-goal |
+| component defined by the prior compatibility plan | current state | condition before it may be implemented |
 | --- | --- | --- |
-| packer and quantizer | Deterministic RNE E5M3 encoding, source non-finite rejection, saturation accounting, two-plane payload construction, 128-element padding, and metadata exactly as specified in this document. | No format change, calibrated-compensation substitution, or implicit conversion from `SQ8_0`/`AQ4_0`. |
-| reader and validator | Validate exact `SQ9_0` ID, shapes, `stored_cols`, both plane lengths, `lo8_then_hi1` layout, LSB-first bit order, zero padding, and malformed metadata before execution. | No permissive reinterpretation of an unknown or differently versioned artifact. |
-| dequantization kernel | Provide a correctness-first `SQ9_0` E5M3-to-FP16/FP32 path that assembles `q` and uses the specified `q << 7` conversion.  Keep CPU/reference differential coverage. | No claim that this is a native FP9, INT8 dot, WMMA, or MFMA path; no performance tuning requirement. |
-| runtime loader and dispatch | Admit `SQ9_0` only through an explicit format selector and select the generic compatibility dequant path.  A missing reader/kernel/capability must fail closed. | No default selection, silent fallback to a different format, or replacement of a selected `SQ8_0`/`AQ4_0` path. |
-| served-model manifest | A future manifest must name `SQ9_0` exactly and declare a compatibility/reference execution profile.  It must be an explicit operator/model choice. | No edit to `/etc/ullm/served-models/active.json`, no service action, and no activation in this task. |
-| architecture availability | After the reader, kernel, and per-architecture differential gates exist, the generic compatibility route is selectable explicitly on gfx1030, gfx1100, gfx1201, gfx942, and gfx950.  Unknown architecture IDs fail closed to no `SQ9_0` selection. | No architecture-specific fast path is required or implied by compatibility support. |
+| packer and deterministic RNE quantizer | **Deferred; no current implementation target.** | A named target passes the capability comparison and a new plan retains finite-input handling, saturation accounting, two-plane packing, padding, and metadata rules. |
+| reader and validator | **Deferred; no current artifact may claim this reader.** | The new plan defines exact-ID, shape, plane-length, `lo8_then_hi1`, bit-order, padding, and malformed-input tests. |
+| CPU oracle and generic E5M3 dequant kernel | **Deferred; no current kernel path.** | Target-specific CPU/hardware differential and quality gates are approved, with `q << 7` semantics kept distinct from native FP9/INT8-dot/WMMA/MFMA claims. |
+| runtime loader and selector | **Deferred; `SQ9_0` is not selectable.** | A reader/kernel exists for the validated named target and explicit, fail-closed dispatch is reviewed; no default or silent format substitution is allowed. |
+| served-model manifest | **Deferred; no manifest schema or active-manifest change.** | A separately approved artifact/runtime integration plan exists.  Editing `/etc/ullm/served-models/active.json` remains outside this work. |
+| architecture availability | **None today.**  `gfx1030`, `gfx1100`, `gfx1201`, `gfx942`, and `gfx950` do not select `SQ9_0`. | V100 or an exact RDNA1 GFX target must independently pass the entry conditions; unknown targets remain unavailable. |
 
 The next optimized INT8 candidate remains `SQ8_1`.  This is a separate exact format direction, not a
 format-registry change in this document, and it remains wire-incompatible with `SQ8_0`.
@@ -742,19 +808,16 @@ format-registry change in this document, and it remains wire-incompatible with `
 The architecture-specific selection rule, including gfx1201 FP8/INT8 WMMA and the portable dot4
 baseline, is [AMD 低精度 ISA とフォーマット選択リファレンス](../reference/amd-low-precision-isa-and-format-selection-rocm7.2.1.md).
 
-### Next actions
+### Current next actions
 
-1. Write a compatibility implementation plan for `SQ9_0` that sequences the packer/quantizer,
-   reader/validator, CPU oracle, generic dequantization kernel, runtime selector, and manifest
-   schema.  It must include malformed-artifact and 1/31/32/33-column-tail tests.
-2. Implement the `SQ9_0` compatibility path only after that plan is reviewed.  Keep it explicit and
-   generic on gfx1030, gfx1100, gfx1201, gfx942, and gfx950; do not add it to an auto-selection,
-   optimization campaign, candidate, release, or activation path.
-3. Complete the separately owned `SQ8_1` design input, bounded-memory CPU reference, activation
+1. Leave every `SQ9_0` component deferred.  Do not create a compatibility implementation plan,
+   CPU oracle, reader, kernel, selector, manifest entry, or GPU experiment until the entry
+   conditions and separate authorization exist.
+2. Complete the separately owned `SQ8_1` design input, bounded-memory CPU reference, activation
    capture, and held-out W8A8 quality plan.  Do not modify
    `docs/plans/sq8_1-format-design-input-v0.1.md` from this work.
-4. Only under a separately authorized GPU window, compare optimized `SQ8_1` W8A8/W8A16 against the
+3. Only under a separately authorized GPU window, compare optimized `SQ8_1` W8A8/W8A16 against the
    retained `SQ8_0` path on matched inputs.  Record transactions, occupancy, clocks, timing, and
    numerical differentials; no GPU work is authorized by this document.
-5. Keep final activation outside this plan.  Any future active-manifest change remains a separate
+4. Keep final activation outside this plan.  Any future active-manifest change remains a separate
    human-approved action.

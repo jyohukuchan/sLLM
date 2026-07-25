@@ -16,6 +16,10 @@
 
 ## 次の行動
 
-1. Evaluate no-scale quality and explicit scale-bearing alternatives before implementing a reader.
-2. Profile a direct V620/gfx1030 decoder and compare it with matched `SQ8_0` fallback traffic.
-3. Keep artifacts, campaigns, releases, and activation outside this design-input change.
+1. `SQ9_0` は保留中の future option としてこの design record を保存し、reader、quantizer、
+   validator、kernel、runtime selector を実装しない。
+2. V620/gfx1030 の direct decoder profiling を次の action にしない。V100 または exact RDNA1
+   target の実 requirement と target 固有の capability confirmation が揃った場合だけ、別途 review
+   した plan で quality と matched current-format comparison を定義する。
+3. `AQ4_0` / `SQ8_0` / `SQ8_1` を当面の current scope とし、`SQ9_0` の artifact、campaign、
+   release、authorization、activation を行わない。
