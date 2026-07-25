@@ -23,6 +23,128 @@ __device__ float ullm_sq_fp8_e4m3fn_to_f32(unsigned char value) {
 #endif
 }
 
+#if defined(__gfx1030__)
+// The generic SQ8_0 path is a real V620 path: unlike gfx1201 it has no
+// admitted CK/native-FP8 replacement.  Preserve its public symbol, launch
+// ABI, and one-row workgroup geometry.  The legacy full LDS reduction tree is
+// replaced by wave32 shuffles plus eight LDS wave partials and one barrier.
+// Complete K=16 segments use aligned 128-bit payload loads; arbitrary scale
+// grids and unaligned/tail rows retain the scalar semantic fallback below.
+typedef unsigned int ullm_sq_fp8_uint4 __attribute__((ext_vector_type(4)));
+static_assert(sizeof(ullm_sq_fp8_uint4) == 16u, "SQ8_0 uint4 must be 16 bytes");
+static_assert(alignof(ullm_sq_fp8_uint4) == 16u, "SQ8_0 uint4 must be aligned");
+
+constexpr unsigned int kUllmSqFp8WaveSize = 32u;
+
+__device__ __forceinline__ float ullm_sq_fp8_wave32_sum(float value) {
+#pragma unroll
+    for (unsigned int offset = kUllmSqFp8WaveSize >> 1u; offset > 0u; offset >>= 1u) {
+        value += __shfl_down(value, offset, kUllmSqFp8WaveSize);
+    }
+    return value;
+}
+
+__device__ __forceinline__ float ullm_sq_fp8_scale_at(
+    const float *scales,
+    unsigned long long row,
+    unsigned long long col,
+    unsigned int scale_kind,
+    unsigned long long scale_block_rows,
+    unsigned long long scale_block_cols,
+    unsigned long long blocks_per_row) {
+    float scale = scales[0];
+    if (scale_kind == 1u) {
+        scale = scales[row];
+    } else if (scale_kind == 2u) {
+        scale = scales[(row / scale_block_rows) * blocks_per_row + (col / scale_block_cols)];
+    }
+    return scale;
+}
+
+// Keep the byte loop non-unrolled.  This retains a single E4M3 reconstruction
+// body in ISA while the enclosing `uint4` remains a 128-bit global load; fully
+// unrolling all 32 bytes raised VGPR pressure without adding payload width.
+__device__ __forceinline__ float ullm_sq_fp8_accumulate_uint4(
+    ullm_sq_fp8_uint4 packed,
+    const float *input,
+    float scale,
+    float sum) {
+    const unsigned int words[4] = {packed.x, packed.y, packed.z, packed.w};
+#pragma unroll 1
+    for (unsigned int word = 0u; word < 4u; ++word) {
+        unsigned int value = words[word];
+#pragma unroll 1
+        for (unsigned int byte = 0u; byte < 4u; ++byte) {
+            sum = fmaf(
+                ullm_sq_fp8_e4m3fn_to_f32(static_cast<unsigned char>(value & 0xffu)) * scale,
+                input[word * 4u + byte], sum);
+            value >>= 8u;
+        }
+    }
+    return sum;
+}
+
+extern "C" __global__ __launch_bounds__(256) void ullm_sq_fp8_matvec_f32_kernel(
+    const unsigned char *payload,
+    const float *scales,
+    const float *input,
+    unsigned long long rows,
+    unsigned long long cols,
+    unsigned int scale_kind,
+    unsigned long long scale_block_rows,
+    unsigned long long scale_block_cols,
+    float *output) {
+    const unsigned int tid = threadIdx.x;
+    const unsigned int lane = tid & (kUllmSqFp8WaveSize - 1u);
+    const unsigned int wave = tid >> 5u;
+    const unsigned long long row = static_cast<unsigned long long>(blockIdx.x);
+    __shared__ float wave_partial[8];
+    float sum = 0.0f;
+    if (row < rows) {
+        const unsigned char *const row_payload = payload + row * cols;
+        const unsigned long long blocks_per_row = scale_kind == 2u
+            ? 1ull + (cols - 1ull) / scale_block_cols
+            : 1ull;
+        const bool segment_scale = scale_kind != 2u ||
+            (scale_block_rows != 0ull && scale_block_cols >= 16ull &&
+             (scale_block_cols & 15ull) == 0ull);
+        const unsigned long long segments = (cols + 15ull) / 16ull;
+        for (unsigned long long segment = tid; segment < segments; segment += blockDim.x) {
+            const unsigned long long start = segment * 16ull;
+            const unsigned int count = static_cast<unsigned int>(
+                (cols - start) < 16ull ? (cols - start) : 16ull);
+            const bool wide_aligned = count == 16u &&
+                ((reinterpret_cast<unsigned long long>(row_payload + start) & 15ull) == 0ull);
+            if (segment_scale && wide_aligned) {
+                const float scale = ullm_sq_fp8_scale_at(
+                    scales, row, start, scale_kind, scale_block_rows, scale_block_cols, blocks_per_row);
+                const ullm_sq_fp8_uint4 packed =
+                    *reinterpret_cast<const ullm_sq_fp8_uint4 *>(row_payload + start);
+                sum = ullm_sq_fp8_accumulate_uint4(packed, input + start, scale, sum);
+            } else {
+                for (unsigned int index = 0u; index < count; ++index) {
+                    const unsigned long long col = start + index;
+                    const float scale = ullm_sq_fp8_scale_at(
+                        scales, row, col, scale_kind, scale_block_rows, scale_block_cols, blocks_per_row);
+                    sum = fmaf(
+                        ullm_sq_fp8_e4m3fn_to_f32(row_payload[col]) * scale, input[col], sum);
+                }
+            }
+        }
+    }
+    const float reduced = ullm_sq_fp8_wave32_sum(sum);
+    if (lane == 0u) {
+        wave_partial[wave] = reduced;
+    }
+    __syncthreads();
+    if (tid == 0u && row < rows) {
+        output[row] = wave_partial[0] + wave_partial[1] + wave_partial[2] + wave_partial[3] +
+            wave_partial[4] + wave_partial[5] + wave_partial[6] + wave_partial[7];
+    }
+}
+
+#else
+
 extern "C" __global__ void ullm_sq_fp8_matvec_f32_kernel(
     const unsigned char *payload,
     const float *scales,
@@ -68,6 +190,78 @@ extern "C" __global__ void ullm_sq_fp8_matvec_f32_kernel(
         output[row] = partial[0];
     }
 }
+
+#endif  // defined(__gfx1030__)
+
+#if defined(__gfx1030__)
+
+// Batched SQ8_0 retains its ABI and one-(row, batch)-per-workgroup geometry,
+// using the same wave32/uint4 reduction as the single-vector path.
+extern "C" __global__ __launch_bounds__(256) void ullm_sq_fp8_matvec_batch_f32_kernel(
+    const unsigned char *payload,
+    const float *scales,
+    const float *input,
+    unsigned long long rows,
+    unsigned long long cols,
+    unsigned int scale_kind,
+    unsigned long long scale_block_rows,
+    unsigned long long scale_block_cols,
+    unsigned long long batch_count,
+    float *output) {
+    const unsigned long long batch = static_cast<unsigned long long>(blockIdx.y);
+    const unsigned int tid = threadIdx.x;
+    const unsigned int lane = tid & (kUllmSqFp8WaveSize - 1u);
+    const unsigned int wave = tid >> 5u;
+    const unsigned long long row = static_cast<unsigned long long>(blockIdx.x);
+    __shared__ float wave_partial[8];
+    float sum = 0.0f;
+    if (row < rows && batch < batch_count) {
+        const unsigned char *const row_payload = payload + row * cols;
+        const float *const batch_input = input + batch * cols;
+        const unsigned long long blocks_per_row = scale_kind == 2u
+            ? 1ull + (cols - 1ull) / scale_block_cols
+            : 1ull;
+        const bool segment_scale = scale_kind != 2u ||
+            (scale_block_rows != 0ull && scale_block_cols >= 16ull &&
+             (scale_block_cols & 15ull) == 0ull);
+        const unsigned long long segments = (cols + 15ull) / 16ull;
+        for (unsigned long long segment = tid; segment < segments; segment += blockDim.x) {
+            const unsigned long long start = segment * 16ull;
+            const unsigned int count = static_cast<unsigned int>(
+                (cols - start) < 16ull ? (cols - start) : 16ull);
+            const bool wide_aligned = count == 16u &&
+                ((reinterpret_cast<unsigned long long>(row_payload + start) & 15ull) == 0ull);
+            if (segment_scale && wide_aligned) {
+                const float scale = ullm_sq_fp8_scale_at(
+                    scales, row, start, scale_kind, scale_block_rows, scale_block_cols, blocks_per_row);
+                const ullm_sq_fp8_uint4 packed =
+                    *reinterpret_cast<const ullm_sq_fp8_uint4 *>(row_payload + start);
+                sum = ullm_sq_fp8_accumulate_uint4(packed, batch_input + start, scale, sum);
+            } else {
+                for (unsigned int index = 0u; index < count; ++index) {
+                    const unsigned long long col = start + index;
+                    const float scale = ullm_sq_fp8_scale_at(
+                        scales, row, col, scale_kind, scale_block_rows, scale_block_cols, blocks_per_row);
+                    sum = fmaf(
+                        ullm_sq_fp8_e4m3fn_to_f32(row_payload[col]) * scale,
+                        batch_input[col],
+                        sum);
+                }
+            }
+        }
+    }
+    const float reduced = ullm_sq_fp8_wave32_sum(sum);
+    if (lane == 0u) {
+        wave_partial[wave] = reduced;
+    }
+    __syncthreads();
+    if (tid == 0u && row < rows && batch < batch_count) {
+        output[batch * rows + row] = wave_partial[0] + wave_partial[1] + wave_partial[2] + wave_partial[3] +
+            wave_partial[4] + wave_partial[5] + wave_partial[6] + wave_partial[7];
+    }
+}
+
+#else
 
 extern "C" __global__ void ullm_sq_fp8_matvec_batch_f32_kernel(
     const unsigned char *payload,
@@ -117,6 +311,8 @@ extern "C" __global__ void ullm_sq_fp8_matvec_batch_f32_kernel(
         output[static_cast<unsigned long long>(batch) * rows + row] = partial[0];
     }
 }
+
+#endif  // defined(__gfx1030__)
 
 extern "C" __global__ void ullm_sq_fp8_matvec_pair_f32_kernel(
     const unsigned char *left_payload,
