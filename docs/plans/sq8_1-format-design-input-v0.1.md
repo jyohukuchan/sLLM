@@ -386,3 +386,35 @@ artifact and target GPU selected
 6. **Dispatch admission.** Enable gfx1030/gfx942 selection only after numerical and performance
    gates. Keep gfx1201 on `SQ8_0` until a separately verified int8 route exists; do not change
    `SQ8_0` or `AQ4_0` release/campaign state in this work.
+
+## 実装・検証状況（2026-07-26）
+
+設計本文を置き換えず、reference implementation の到達点だけを追記する。
+
+- `tools/sq8_1_artifact.py` と `tools/build-sq8_1-artifact.py` は、検証済み canonical
+  `SQ8_0` v0.2 を row-by-row F32 に再構成して、別 namespace の `SQ8_1` artifact を生成する。
+  K=32、signed `[-127,127]`、zero-point なし、`ceil_fp16`、payload row stride
+  `round_up(cols,16)`、separate F16 scale plane、zero tail を packer/reader とも検証する。
+  row compensation は format-external のままであり、payload に書き込まない。
+- Rust reader は strict `SQ8_1` manifest だけを受け付け、legacy `sq` / `sq-fp8` aliases を
+  `SQ8_0` のまま維持する。runtime には W8A16 default C ABI と explicit-only W8A8 C ABI を
+  分離して追加した。W8A8 の暗黙 fallback/auto dispatch はない。
+- CPU tests は Python packer 5/5、Rust reader/reference 4/4、CPU runtime 2/2、existing
+  canonical SQ8_0 reader 14/14、format-ID/SQ8 policy Python tests 13/13 を通過した。Python
+  artifact を Rust reader が cross-check し、実 Qwen3-14B source の 1024x5120 K projection
+  （5,242,880 values）では reconstructed-SQ8_0 source に対する weight relative L2
+  `0.005592543546739809`、max abs `0.0017452239990234375`、post-storage clipping 0 を記録した。
+  この single-tensor measurement は既存の BF16/full-model gate の代替ではない。
+- V620 differential は HIP BDF `0000:03:00.0` → `card0` → own junction `temp2_input` を確認し、
+  85 °C guard 下で W8A16/W8A8 各8 launch を実行した。junction は 41–42 °C、CPU reference
+  に対する relative L2 は W8A16 `6.076546605e-08`、W8A8 `4.333164297e-08` だった。
+- offline static audit は runtime の HIPRTC source そのものを runtime whitelist 全五 target
+  （gfx1030/gfx1100/gfx1201/gfx942/gfx950）で compile した。W8A8 は gfx1030 で
+  `v_dot4c_i32_i8`、gfx1100/gfx1201 で `v_dot4_i32_iu8`、gfx942/gfx950 で
+  `v_dot4c_i32_i8_e32` を出した。gfx1201 instruction には `neg_lo:[1,1,0]` があり、同 target
+  の reference kernel は VGPR 53 / SGPR 59 / LDS 1024 B / private and spill 0 だった。これは
+  gfx1201 の VOP3P spelling が signed/signed dot semantics を実装できるという実装証拠である。
+
+Evidence は `benchmarks/results/2026-07-26/sq8_1/` に保存した。full-model W8A8 logits gate は
+未確認・未通過のままなので、W8A16 は default reference path、W8A8 は explicit-only のままとする。
+この実装は candidate/release/campaign/authorization/active manifest を変更していない。

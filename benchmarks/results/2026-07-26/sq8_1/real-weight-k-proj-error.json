@@ -1,0 +1,52 @@
+{
+  "artifact_verification": {
+    "content_sha256": "ca0d946be30ccf52a98ccb852e3d23742b699817c71b765ecf1cf8f54385a247",
+    "format_id": "SQ8_1",
+    "payload_bytes": 5242880,
+    "scale_bytes": 327680,
+    "schema_version": "sq8_1-artifact-v0.1",
+    "tensor_count": 1,
+    "total_bytes": 5570560
+  },
+  "measurement": "single_tensor_against_reconstructed_verified_sq8_0_source",
+  "quantization": {
+    "blocks": 163840,
+    "positive_scale_overflow_count": 0,
+    "positive_scale_underflow_count": 0,
+    "post_storage_clipping_count": 0,
+    "raw_scale_max": 0.0034987081307917833,
+    "raw_scale_min": 0.00012074868573108688,
+    "stored_scale_max": 0.0034999847412109375,
+    "stored_scale_min": 0.0001207590103149414,
+    "values": 5242880,
+    "zero_blocks": 0
+  },
+  "sampled_linear_output_error": {
+    "activation": "deterministic_f32_(i*19+7)%253-126_over_127",
+    "w8a16_default": {
+      "max_abs": 0.02850014202252593,
+      "relative_l2": 0.0054054985840511875
+    },
+    "w8a8_explicit": {
+      "max_abs": 0.029917301715542077,
+      "relative_l2": 0.006690563471747345
+    }
+  },
+  "scope_note": "not a full-model logit or release-quality gate",
+  "shape": [
+    1024,
+    5120
+  ],
+  "source_artifact": "/home/homelab1/datapool/ullm/product/qwen3-14b-fp8-sq8-v0.1/artifact",
+  "sq8_1_artifact": "/tmp/ullm-sq8_1-real-kproj-20260726",
+  "storage": {
+    "actual_bpp": 8.5,
+    "nominal_full_block_bpp": 8.5
+  },
+  "tensor": "model.layers.0.self_attn.k_proj.weight",
+  "values": 5242880,
+  "weight_error": {
+    "max_abs": 0.0017452239990234375,
+    "relative_l2": 0.005592543546739809
+  }
+}

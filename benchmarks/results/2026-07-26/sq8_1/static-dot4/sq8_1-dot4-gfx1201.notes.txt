@@ -1,0 +1,82 @@
+Displaying notes found in: .note
+  Owner                Data size 	Description
+  AMDGPU               0x00000531	NT_AMDGPU_METADATA (AMDGPU Metadata)
+    AMDGPU Metadata:
+        ---
+amdhsa.kernels:
+  - .args:
+      - .address_space:  global
+        .offset:         0
+        .size:           8
+        .value_kind:     global_buffer
+      - .address_space:  global
+        .offset:         8
+        .size:           8
+        .value_kind:     global_buffer
+      - .address_space:  global
+        .offset:         16
+        .size:           8
+        .value_kind:     global_buffer
+      - .offset:         24
+        .size:           4
+        .value_kind:     hidden_block_count_x
+      - .offset:         28
+        .size:           4
+        .value_kind:     hidden_block_count_y
+      - .offset:         32
+        .size:           4
+        .value_kind:     hidden_block_count_z
+      - .offset:         36
+        .size:           2
+        .value_kind:     hidden_group_size_x
+      - .offset:         38
+        .size:           2
+        .value_kind:     hidden_group_size_y
+      - .offset:         40
+        .size:           2
+        .value_kind:     hidden_group_size_z
+      - .offset:         42
+        .size:           2
+        .value_kind:     hidden_remainder_x
+      - .offset:         44
+        .size:           2
+        .value_kind:     hidden_remainder_y
+      - .offset:         46
+        .size:           2
+        .value_kind:     hidden_remainder_z
+      - .offset:         64
+        .size:           8
+        .value_kind:     hidden_global_offset_x
+      - .offset:         72
+        .size:           8
+        .value_kind:     hidden_global_offset_y
+      - .offset:         80
+        .size:           8
+        .value_kind:     hidden_global_offset_z
+      - .offset:         88
+        .size:           2
+        .value_kind:     hidden_grid_dims
+    .group_segment_fixed_size: 0
+    .kernarg_segment_align: 8
+    .kernarg_segment_size: 280
+    .language:       OpenCL C
+    .language_version:
+      - 2
+      - 0
+    .max_flat_workgroup_size: 1024
+    .name:           ullm_sq8_1_dot4_i32_i8_probe
+    .private_segment_fixed_size: 0
+    .sgpr_count:     10
+    .sgpr_spill_count: 0
+    .symbol:         ullm_sq8_1_dot4_i32_i8_probe.kd
+    .uniform_work_group_size: 1
+    .uses_dynamic_stack: false
+    .vgpr_count:     22
+    .vgpr_spill_count: 0
+    .wavefront_size: 32
+    .workgroup_processor_mode: 1
+amdhsa.target:   amdgcn-amd-amdhsa--gfx1201
+amdhsa.version:
+  - 1
+  - 2
+...

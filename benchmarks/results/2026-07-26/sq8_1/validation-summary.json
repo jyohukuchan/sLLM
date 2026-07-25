@@ -1,0 +1,56 @@
+{
+  "schema_version": "ullm.sq8_1.validation-summary.v0.1",
+  "format_id": "SQ8_1",
+  "status": "reference_implementation_validated_not_release_admitted",
+  "paths": {
+    "real_weight": "real-weight-k-proj-error.json",
+    "rust_reader_crosscheck": "rust-reader-crosscheck.json",
+    "gpu_differential": "v620-differential.jsonl",
+    "static_reference_kernel": "static-reference-kernel"
+  },
+  "cpu": {
+    "python_sq8_1_artifact_tests": 5,
+    "rust_sq8_1_reader_reference_tests": 4,
+    "runtime_cpu_sq8_1_tests": 2,
+    "existing_sq8_0_reader_tests": 14,
+    "existing_format_and_sq8_policy_python_tests": 13
+  },
+  "real_weight": {
+    "source": "verified SQ8_0 v0.2 reconstructed row-major F32",
+    "tensor": "model.layers.0.self_attn.k_proj.weight",
+    "values": 5242880,
+    "weight_relative_l2": 0.005592543546739809,
+    "weight_max_abs": 0.0017452239990234375,
+    "post_storage_clipping_count": 0,
+    "w8a16_sampled_linear_relative_l2": 0.0054054985840511875,
+    "w8a8_explicit_sampled_linear_relative_l2": 0.006690563471747345,
+    "scope": "single tensor; not a full-model logit or release-quality gate"
+  },
+  "gpu": {
+    "device": "AMD Radeon Pro V620",
+    "hip_pci_bus_id": "0000:03:00.0",
+    "drm_card": "card0",
+    "junction_sensor": "temp2_input",
+    "junction_celsius_min": 41,
+    "junction_celsius_max": 42,
+    "junction_guard_celsius": 85,
+    "w8a16_relative_l2": 6.076546605e-08,
+    "w8a8_explicit_relative_l2": 4.333164297e-08,
+    "max_abs": 0.0078125
+  },
+  "static_isa": {
+    "source": "exact HIPRTC source extracted for offline compilation",
+    "architectures": ["gfx1030", "gfx1100", "gfx1201", "gfx942", "gfx950"],
+    "gfx1030_w8a8_opcode": "v_dot4c_i32_i8",
+    "gfx1201_w8a8_opcode": "v_dot4_i32_iu8 neg_lo:[1,1,0]",
+    "w8a8_resources": {
+      "gfx1030": {"vgpr": 53, "sgpr": 59, "lds_bytes": 1024, "private_bytes": 0, "spills": 0},
+      "gfx1201": {"vgpr": 53, "sgpr": 59, "lds_bytes": 1024, "private_bytes": 0, "spills": 0}
+    },
+    "additional_legacy_targets": {
+      "gfx942_opcode": "v_dot4c_i32_i8_e32",
+      "gfx950_opcode": "v_dot4c_i32_i8_e32"
+    }
+  },
+  "admission_limit": "W8A8 remains explicit-only; no full-model logit gate was run or passed. W8A16 remains the default reference path."
+}

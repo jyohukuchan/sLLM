@@ -1,0 +1,179 @@
+Displaying notes found in: .note
+  Owner                Data size 	Description
+  AMDGPU               0x00000bac	NT_AMDGPU_METADATA (AMDGPU Metadata)
+    AMDGPU Metadata:
+        ---
+amdhsa.kernels:
+  - .args:
+      - .address_space:  global
+        .offset:         0
+        .size:           8
+        .value_kind:     global_buffer
+      - .address_space:  global
+        .offset:         8
+        .size:           8
+        .value_kind:     global_buffer
+      - .address_space:  global
+        .offset:         16
+        .size:           8
+        .value_kind:     global_buffer
+      - .offset:         24
+        .size:           8
+        .value_kind:     by_value
+      - .offset:         32
+        .size:           8
+        .value_kind:     by_value
+      - .offset:         40
+        .size:           8
+        .value_kind:     by_value
+      - .address_space:  global
+        .offset:         48
+        .size:           8
+        .value_kind:     global_buffer
+      - .offset:         56
+        .size:           4
+        .value_kind:     hidden_block_count_x
+      - .offset:         60
+        .size:           4
+        .value_kind:     hidden_block_count_y
+      - .offset:         64
+        .size:           4
+        .value_kind:     hidden_block_count_z
+      - .offset:         68
+        .size:           2
+        .value_kind:     hidden_group_size_x
+      - .offset:         70
+        .size:           2
+        .value_kind:     hidden_group_size_y
+      - .offset:         72
+        .size:           2
+        .value_kind:     hidden_group_size_z
+      - .offset:         74
+        .size:           2
+        .value_kind:     hidden_remainder_x
+      - .offset:         76
+        .size:           2
+        .value_kind:     hidden_remainder_y
+      - .offset:         78
+        .size:           2
+        .value_kind:     hidden_remainder_z
+      - .offset:         96
+        .size:           8
+        .value_kind:     hidden_global_offset_x
+      - .offset:         104
+        .size:           8
+        .value_kind:     hidden_global_offset_y
+      - .offset:         112
+        .size:           8
+        .value_kind:     hidden_global_offset_z
+      - .offset:         120
+        .size:           2
+        .value_kind:     hidden_grid_dims
+    .group_segment_fixed_size: 1024
+    .kernarg_segment_align: 8
+    .kernarg_segment_size: 312
+    .language:       OpenCL C
+    .language_version:
+      - 2
+      - 0
+    .max_flat_workgroup_size: 1024
+    .name:           ullm_sq8_1_matvec_w8a16_f32_kernel
+    .private_segment_fixed_size: 0
+    .sgpr_count:     28
+    .sgpr_spill_count: 0
+    .symbol:         ullm_sq8_1_matvec_w8a16_f32_kernel.kd
+    .uniform_work_group_size: 1
+    .uses_dynamic_stack: false
+    .vgpr_count:     55
+    .vgpr_spill_count: 0
+    .wavefront_size: 32
+    .workgroup_processor_mode: 1
+  - .args:
+      - .address_space:  global
+        .offset:         0
+        .size:           8
+        .value_kind:     global_buffer
+      - .address_space:  global
+        .offset:         8
+        .size:           8
+        .value_kind:     global_buffer
+      - .address_space:  global
+        .offset:         16
+        .size:           8
+        .value_kind:     global_buffer
+      - .offset:         24
+        .size:           8
+        .value_kind:     by_value
+      - .offset:         32
+        .size:           8
+        .value_kind:     by_value
+      - .offset:         40
+        .size:           8
+        .value_kind:     by_value
+      - .address_space:  global
+        .offset:         48
+        .size:           8
+        .value_kind:     global_buffer
+      - .offset:         56
+        .size:           4
+        .value_kind:     hidden_block_count_x
+      - .offset:         60
+        .size:           4
+        .value_kind:     hidden_block_count_y
+      - .offset:         64
+        .size:           4
+        .value_kind:     hidden_block_count_z
+      - .offset:         68
+        .size:           2
+        .value_kind:     hidden_group_size_x
+      - .offset:         70
+        .size:           2
+        .value_kind:     hidden_group_size_y
+      - .offset:         72
+        .size:           2
+        .value_kind:     hidden_group_size_z
+      - .offset:         74
+        .size:           2
+        .value_kind:     hidden_remainder_x
+      - .offset:         76
+        .size:           2
+        .value_kind:     hidden_remainder_y
+      - .offset:         78
+        .size:           2
+        .value_kind:     hidden_remainder_z
+      - .offset:         96
+        .size:           8
+        .value_kind:     hidden_global_offset_x
+      - .offset:         104
+        .size:           8
+        .value_kind:     hidden_global_offset_y
+      - .offset:         112
+        .size:           8
+        .value_kind:     hidden_global_offset_z
+      - .offset:         120
+        .size:           2
+        .value_kind:     hidden_grid_dims
+    .group_segment_fixed_size: 1024
+    .kernarg_segment_align: 8
+    .kernarg_segment_size: 312
+    .language:       OpenCL C
+    .language_version:
+      - 2
+      - 0
+    .max_flat_workgroup_size: 1024
+    .name:           ullm_sq8_1_matvec_w8a8_explicit_f32_kernel
+    .private_segment_fixed_size: 0
+    .sgpr_count:     59
+    .sgpr_spill_count: 0
+    .symbol:         ullm_sq8_1_matvec_w8a8_explicit_f32_kernel.kd
+    .uniform_work_group_size: 1
+    .uses_dynamic_stack: false
+    .vgpr_count:     53
+    .vgpr_spill_count: 0
+    .wavefront_size: 32
+    .workgroup_processor_mode: 1
+amdhsa.target:   amdgcn-amd-amdhsa--gfx1030
+amdhsa.version:
+  - 1
+  - 2
+...
