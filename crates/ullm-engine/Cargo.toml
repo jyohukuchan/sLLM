@@ -8,6 +8,7 @@ autoexamples = false
 [features]
 default = []
 rocm-ck-gfx1201 = ["ullm-runtime-sys/rocm-ck-gfx1201"]
+rocm-ck-gfx942-aprime = ["ullm-runtime-sys/rocm-ck-gfx942-aprime"]
 
 [dependencies]
 memchr = "2.7"
@@ -62,6 +63,10 @@ required-features = ["rocm-ck-gfx1201"]
 [[example]]
 name = "sq8_ck_serving"
 required-features = ["rocm-ck-gfx1201"]
+
+[[example]]
+name = "sq8_gfx942_aprime_physical_smoke"
+required-features = ["rocm-ck-gfx942-aprime"]
 
 [[example]]
 name = "sq8_optimized_fixture"

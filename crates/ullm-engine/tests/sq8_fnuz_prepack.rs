@@ -9,11 +9,12 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use ullm_engine::sq::fp8_e4m3fn_to_f32;
 use ullm_engine::sq_canonical::read_sq8_canonical_artifact;
 use ullm_engine::sq8_fnuz_prepack::{
-    Bf16ScaleTransformError, FnuzScaleCompensation, OcpE4m3FnuzByteError, OcpE4m3FnuzMapping,
-    Sq8FnuzPrepackError, bf16_bits_to_f32, fnuz_e4m3_to_f32, map_ocp_e4m3fn_byte_to_fnuz,
-    prepack_bf16_scale_bits_for_fnuz, prepack_bf16_scale_payload_for_fnuz,
-    prepack_ocp_e4m3fn_payload_to_fnuz, prepack_sq8_ocp_e4m3fn_tensor_to_fnuz,
-    scan_sq8_canonical_artifact_for_fnuz_prepack,
+    Bf16ScaleTransformError, F32ScaleTransformError, FnuzScaleCompensation, OcpE4m3FnuzByteError,
+    OcpE4m3FnuzMapping, Sq8FnuzPrepackError, bf16_bits_to_f32, fnuz_e4m3_to_f32,
+    map_ocp_e4m3fn_byte_to_fnuz, prepack_bf16_scale_bits_for_fnuz,
+    prepack_bf16_scale_payload_for_fnuz, prepack_f32_scale_for_fnuz,
+    prepack_f32_scale_payload_for_fnuz, prepack_ocp_e4m3fn_payload_to_fnuz,
+    prepack_sq8_ocp_e4m3fn_tensor_to_fnuz, scan_sq8_canonical_artifact_for_fnuz_prepack,
 };
 
 #[test]
@@ -100,6 +101,42 @@ fn scale_compensation_is_x2_per_operand_and_x4_for_a_pair() {
     )
     .unwrap();
     assert_eq!(scales, [0x40, 0x40, 0xc0, 0x3f]);
+}
+
+#[test]
+fn f32_activation_scale_companion_is_exact_and_fail_closed() {
+    assert_eq!(
+        prepack_f32_scale_for_fnuz(1.5, FnuzScaleCompensation::OneConvertedOperand),
+        Ok(3.0)
+    );
+    assert_eq!(
+        prepack_f32_scale_for_fnuz(0.75, FnuzScaleCompensation::TwoConvertedOperands),
+        Ok(3.0)
+    );
+    assert_eq!(
+        prepack_f32_scale_payload_for_fnuz(
+            &[0.5, 1.0, 2.0],
+            FnuzScaleCompensation::OneConvertedOperand,
+        ),
+        Ok(vec![1.0, 2.0, 4.0])
+    );
+    for invalid in [0.0, -0.0, -1.0, f32::INFINITY, f32::NAN] {
+        assert!(matches!(
+            prepack_f32_scale_for_fnuz(invalid, FnuzScaleCompensation::OneConvertedOperand),
+            Err(F32ScaleTransformError::InvalidSource { .. })
+        ));
+    }
+    assert!(matches!(
+        prepack_f32_scale_for_fnuz(f32::MAX, FnuzScaleCompensation::OneConvertedOperand),
+        Err(F32ScaleTransformError::Overflow { .. })
+    ));
+    assert_eq!(
+        prepack_f32_scale_for_fnuz(
+            f32::from_bits(1),
+            FnuzScaleCompensation::TwoConvertedOperands
+        ),
+        Ok(f32::from_bits(4))
+    );
 }
 
 #[test]

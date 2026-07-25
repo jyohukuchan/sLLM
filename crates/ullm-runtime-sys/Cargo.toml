@@ -8,6 +8,7 @@ links = "ullm_runtime"
 [features]
 default = []
 rocm-ck-gfx1201 = []
+rocm-ck-gfx942-aprime = []
 
 [build-dependencies]
 cc = "1.2"

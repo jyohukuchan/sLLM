@@ -189,6 +189,71 @@ impl fmt::Display for Bf16ScaleTransformError {
 
 impl std::error::Error for Bf16ScaleTransformError {}
 
+/// A rejection from the F32 scale companion used for derived activations and
+/// for BF16 scales after they have been losslessly expanded to F32 for CK.
+///
+/// The operation is still only an exact power-of-two scale adjustment.  It is
+/// intentionally separate from the BF16 gate because dynamic activation
+/// quantization currently produces F32 scales.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum F32ScaleTransformError {
+    /// A source scale must be finite and strictly positive.
+    InvalidSource { source_bits: u32 },
+    /// The x2/x4 result is not a finite F32 value.
+    Overflow {
+        source_bits: u32,
+        compensation: FnuzScaleCompensation,
+    },
+    /// A reducing future transform could produce zero.  x2/x4 of a valid
+    /// positive F32 cannot take this branch, but it remains fail-closed.
+    Underflow {
+        source_bits: u32,
+        compensation: FnuzScaleCompensation,
+    },
+    /// The result did not preserve the source under the inverse exact
+    /// power-of-two operation.
+    NonExact {
+        source_bits: u32,
+        result_bits: u32,
+        compensation: FnuzScaleCompensation,
+    },
+}
+
+impl fmt::Display for F32ScaleTransformError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidSource { source_bits } => write!(
+                formatter,
+                "F32 scale 0x{source_bits:08x} is not finite and strictly positive"
+            ),
+            Self::Overflow {
+                source_bits,
+                compensation,
+            } => write!(
+                formatter,
+                "F32 scale 0x{source_bits:08x} overflows under {compensation}"
+            ),
+            Self::Underflow {
+                source_bits,
+                compensation,
+            } => write!(
+                formatter,
+                "F32 scale 0x{source_bits:08x} underflows under {compensation}"
+            ),
+            Self::NonExact {
+                source_bits,
+                result_bits,
+                compensation,
+            } => write!(
+                formatter,
+                "F32 scale 0x{source_bits:08x} produced non-exact result 0x{result_bits:08x} under {compensation}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for F32ScaleTransformError {}
+
 /// Applies the required x2 or x4 compensation to a canonical BF16 scale.
 ///
 /// The transform is accepted only when the result remains a finite, strictly
@@ -239,6 +304,56 @@ pub fn prepack_bf16_scale_bits_for_fnuz(
         });
     }
     Ok(result_bits)
+}
+
+/// Applies x2 or x4 FNUZ compensation to one finite, positive F32 scale.
+///
+/// This is the activation-side companion to
+/// [`prepack_bf16_scale_bits_for_fnuz`].  The multiplication is exact for a
+/// surviving finite F32 power-of-two result; the inverse check is retained so
+/// a future change cannot silently turn this into a rounded transform.
+pub fn prepack_f32_scale_for_fnuz(
+    source: f32,
+    compensation: FnuzScaleCompensation,
+) -> Result<f32, F32ScaleTransformError> {
+    let source_bits = source.to_bits();
+    if !source.is_finite() || source <= 0.0 {
+        return Err(F32ScaleTransformError::InvalidSource { source_bits });
+    }
+    let transformed = source * compensation.factor();
+    if !transformed.is_finite() {
+        return Err(F32ScaleTransformError::Overflow {
+            source_bits,
+            compensation,
+        });
+    }
+    if transformed == 0.0 {
+        return Err(F32ScaleTransformError::Underflow {
+            source_bits,
+            compensation,
+        });
+    }
+    if transformed / compensation.factor() != source {
+        return Err(F32ScaleTransformError::NonExact {
+            source_bits,
+            result_bits: transformed.to_bits(),
+            compensation,
+        });
+    }
+    Ok(transformed)
+}
+
+/// Prepacks a complete F32 scale payload without returning a partially usable
+/// derived vector on failure.
+pub fn prepack_f32_scale_payload_for_fnuz(
+    scales: &[f32],
+    compensation: FnuzScaleCompensation,
+) -> Result<Vec<f32>, F32ScaleTransformError> {
+    scales
+        .iter()
+        .copied()
+        .map(|scale| prepack_f32_scale_for_fnuz(scale, compensation))
+        .collect()
 }
 
 /// An error while prepacking a canonical payload or its BF16 scale payload.

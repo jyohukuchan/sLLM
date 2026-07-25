@@ -629,3 +629,152 @@ infinity, finite-unrepresentable, or scale-range blocker.  The format gate is
 physical-gfx942 numerical validation, fragment/lane-map validation,
 occupancy/residency validation, performance validation, production dispatch,
 or final activation; all of those remain separate gates.
+
+### Phase 2 A′ isolated prototype and B control — offline result (2026-07-26)
+
+This phase adds an isolated `rocm-ck-gfx942-aprime` Cargo feature.  It does
+not modify `runtime/src/sq8_ck_gfx1201.hip.cpp`, the gfx1201 public header, or
+the existing gfx1201 dispatcher.  It adds the following separate components:
+
+- `runtime/src/sq8_ck_gfx942_aprime.hip.cpp`: an A′ wrapper whose byte-buffer
+  names, comments, and public Rust entry point all say `fnuz_prepacked`.  Its
+  only CK element type is the installed archive ABI `ck::f8_ocp_t`, aliased as
+  `OcpAbiOpaqueByte`; this is explicitly an opaque link ABI, not an OCP value
+  contract.  No A′ API accepts raw OCP bytes.
+- `runtime/src/sq8_ck_gfx942_control.hip.cpp`: B, a separate raw-OCP decoder
+  that dequantizes to BF16 and invokes hipBLAS GEMM with F32 accumulation.  It
+  does not call the FNUZ prepack or CK FP8 route.
+- `crates/ullm-engine/src/sq8_gfx942_aprime.rs`: CPU-only preparation and
+  references.  A′ activation and weight preparation use the established byte
+  oracle; F32 activation scales use its exact x2 companion, and canonical
+  BF16 weight scales use the established atomic BF16 payload-and-scale oracle
+  before lossless F32 expansion.  Thus each converted operand is x2 and the
+  CK A/B scale product is x4.  B deliberately remains direct OCP decode.
+- `crates/ullm-engine/examples/sq8_gfx942_aprime_physical_smoke.rs`: a
+  physical-only future test.  This host did not run it.
+
+#### Exact selector and isolation gates
+
+Runtime selection reads `hipDeviceProp_t::gcnArchName`; it accepts exactly
+`gfx942`, optionally followed only by nonempty, nonduplicated HIP
+`:xnack+`/`:xnack-` and `:sramecc+`/`:sramecc-` modifiers.  Prefixes,
+neighbors, empty modifiers, and unknown modifiers fail closed.  A′ and B also
+require exactly one `HIP_VISIBLE_DEVICES` token and internal HIP ordinal zero.
+
+The feature build rejects `GPU_ARCH` other than `gfx942`, and it is mutually
+exclusive with `rocm-ck-gfx1201`.  CPU-only tests cover selector acceptance
+and rejection, the isolated measured shape table, buffer contracts, feature
+off selection, and the invariant that neither the gfx1201 public header nor
+the gfx1201 dispatch/body contains gfx942 routing.  Two deliberate offline
+failure builds confirmed the gates:
+
+```text
+GPU_ARCH=gfx940 + rocm-ck-gfx942-aprime: exit 101
+  Cargo feature rocm-ck-gfx942-aprime requires GPU_ARCH=gfx942
+
+rocm-ck-gfx1201 + rocm-ck-gfx942-aprime: exit 101
+  Cargo features rocm-ck-gfx1201 and rocm-ck-gfx942-aprime are mutually exclusive
+```
+
+An isolated `GPU_ARCH=gfx1201` build also completed with no gfx942 device
+archive emitted; its existing `ullm_runtime_sq8_ck_projection_f32` and
+`ullm_runtime_sq8_ck_quantize_activation_f32` symbols remain present.  The
+new A′ wrappers are internal-only and deliberately absent from
+`runtime/include/ullm_runtime.h`.
+
+#### Measured model dispatch table and static code-object audit
+
+The A′ table is private to this feature and is not a reuse of the gfx1201
+dispatch.  It maps the known model dimensions as follows.
+
+| Projection family | M | N | K | A′ instance |
+|---|---:|---:|---:|---|
+| q/o | 1, 2, 4, 8, 16, 32, 128 | 5,120 | 5,120 | Default 16x128x128 |
+| k/v | 1, 2, 4, 8, 16, 32, 128 | 1,024 | 5,120 | Default 16x128x128 |
+| gate/up tail | 1, 2, 4, 8, 16, 32 | 17,408 | 5,120 | KPadding 16x128x256 |
+| gate/up full | 128 | 17,408 | 5,120 | Default 16x256x128 |
+| down tail | 1, 2, 4, 8, 16, 32 | 5,120 | 17,408 | Default 16x128x256 |
+| down full | 128 | 5,120 | 17,408 | Default 16x128x128 |
+
+The isolated build command below completed without a GPU launch.  It used a
+fresh `CARGO_TARGET_DIR` under `/tmp`, `HIP_VISIBLE_DEVICES=-1`, and ROCm
+7.2.1 (`HIP 7.2.53211`, AMD clang 22.0.0git).
+
+```text
+GPU_ARCH=gfx942 HIP_VISIBLE_DEVICES=-1 \
+  cargo build --offline -p ullm-engine \
+  --features rocm-ck-gfx942-aprime \
+  --example sq8_gfx942_aprime_physical_smoke
+```
+
+The linked physical-smoke binary was inspected offline by extracting its
+`.hip_fatbin`, expanding the CCOB zstd payload, selecting
+`hipv4-amdgcn-amd-amdhsa--gfx942` with `clang-offload-bundler`, and using
+`llvm-readelf` plus `llvm-objdump`.  The exact Default 16x128x128 main-K-loop
+symbol contains 24 `v_mfma_f32_16x16x32_fp8_fp8` instructions and zero
+`v_mfma_f32_32x32x16_fp8_fp8` instructions.  The full archive code object
+contains both forms (456 16x16x32 and 864 32x32x16 occurrences), so this
+per-symbol result is the relevant evidence for the selected q/o/k/v/down-full
+instance.
+
+For all model K values here, CK selects the main-K-loop variant.  Static
+metadata is:
+
+| A′ instance | VGPR | SGPR | AGPR | LDS | Private | VGPR/SGPR spill | Wave / workgroup |
+|---|---:|---:|---:|---:|---:|---:|---|
+| Default 16x128x128 | 83 | 50 | 0 | 18,432 B | 0 B | 0 / 0 | wave64 / 256 threads |
+| KPadding 16x128x256 | 250 | 50 | 30 | 36,864 B | 0 B | 0 / 0 | wave64 / 256 threads |
+| Default 16x256x128 | 158 | 50 | 26 | 34,816 B | 0 B | 0 / 0 | wave64 / 256 threads |
+| Default 16x128x256 | 166 | 50 | 30 | 36,864 B | 0 B | 0 / 0 | wave64 / 256 threads |
+
+Actual occupancy is **unconfirmed**.  These code objects have no compiler
+occupancy annotation, and active-block/wave occupancy depends on the actual
+gfx942 partition and HIP runtime query.  The physical test must record
+`hipModuleOccupancyMaxActiveBlocksPerMultiprocessor` before any performance
+claim; static register/LDS values are not relabeled as measured occupancy.
+
+#### CPU controls and future physical test
+
+The focused GPU-free checks completed:
+
+```text
+cargo test --offline -p ullm-engine --lib sq8_gfx942_aprime
+5 passed; 0 failed
+
+cargo test --offline -p ullm-engine --test sq8_fnuz_prepack
+7 passed; 0 failed
+
+cargo test --offline -p ullm-runtime-sys sq8_ck_gfx942_aprime_tests
+5 passed; 0 failed
+```
+
+The first test independently verifies the A′ x2-per-operand/x4-product CPU
+reference against canonical OCP F32, the direct B BF16 and FP16 dequant
+controls against the same representable fixture, canonical BF16 weight-scale
+prepack through the atomic oracle, and the fragment diagnostic fixture.  The
+separate prepack suite verifies the F32 activation-scale companion and the
+existing fail-closed byte/BF16 range gate.
+
+The future physical smoke requires one visible exact gfx942 and runs no model
+artifact.  It first launches a one-wave 16x16x32 FNUZ rocWMMA diagnostic with
+CPU-generated unique output values.  It checks the logical 16x16 matrix
+against the CPU expectation, dumps four raw accumulator slots for each of 64
+lanes, then infers `(lane, register) -> (row, column)` from the dump.  It does
+not embed an unverified fragment/lane layout into production code.  A failure
+therefore separates bad FNUZ operand semantics or matrix layout (logical
+matrix mismatch) from a raw fragment mapping mismatch (matrix passes but the
+dump cannot bijectively map all 256 coordinates).
+
+It then runs five sparse, deterministic real-shape projections, covering the
+four CK instance IDs and both logical-M tail and full paths.  The first and
+last K128 blocks are nonzero with distinct exact binary scales; all other
+elements are OCP negative zero so FNUZ normalization is exercised at scale.
+CPU expectation construction is analytic and O(M*N), while each GPU call
+still traverses the full real M/N/K shape.  For each case it compares A′,
+the direct-OCP-to-BF16 B control, and the precomputed CPU value.  B uses a
+`1e-5` absolute/relative tolerance; A′ receives a documented BF16-output
+allowance of `0.125` absolute or `0.008` relative.  This is a short
+correctness/fragment decision test, not a performance benchmark.
+
+No physical test, occupancy query, production dispatch, service action,
+release action, or final activation occurred in this phase.
