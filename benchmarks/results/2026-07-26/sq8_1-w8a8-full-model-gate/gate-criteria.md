@@ -116,3 +116,4 @@ and re-gated; this run may only identify it as a next experiment.
 `SQ8_1` W8A8 is adoptable for a prequantized projection API only if every
 primary-scope gate passes. A failure fixes W8A16 as the required fallback and
 keeps W8A8 explicit-only; it must not be offset by performance measurements.
+
