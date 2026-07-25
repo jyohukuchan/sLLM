@@ -470,3 +470,94 @@ profiler-derived occupancy/DRAM transactions は **未測定**である。W8A8 �
 W8A16 は default のままであり、candidate/release/campaign/authorization/active manifest は変更して
 いない。完全な raw/thermal/ISA evidence は
 `benchmarks/results/2026-07-26/sq8_1-v620-optimization/` に保存した。
+
+## `SQ8_0` 同等最適化後の公平比較と M sweep（2026-07-26）
+
+### 過去の 2.692x の解釈訂正
+
+上の historical table と測定値は書き換えない。ただし W8A16 の **2.692x** と W8A8 の
+**2.558x** は、最適化済み `SQ8_1` と未最適化 `SQ8_0` fallback の別 process 比較だったため、
+フォーマット差だけではなく最適化量の差を含んでいた。従って、それらを format-only speedup と
+引用してはならない。
+
+今回 `SQ8_0` の gfx1030-only generic body に、同じ 256-thread / eight wave32 reduction、aligned
+`uint4` payload load、32 B LDS wave-partial handoff を加えた。scale boundary、unaligned payload、
+tail は scalar fallback を維持し、公開 symbol/ABI/dispatch を変更していない。exact HIPRTC static
+audit は direct kernel で fixed LDS 1024 B -> 32 B、`s_barrier` 2 -> 1、`ds_write` 2 -> 1、
+`global_load_dwordx4` 0 -> 1、spill 0 の維持を確認した。最終 direct metadata は 31 VGPR / 48 SGPR /
+32 B LDS である。`__launch_bounds__(256,2)` の isolated static prototype は 30 VGPR / 48 SGPR /
+32 B LDS のままで追加の occupancy constraint を支持しなかった。profiler-derived occupancy と
+DRAM transaction は依然 **未測定**である。
+
+`#if defined(__gfx1030__)` の外側の legacy bodies は source hash で byte-stable に gate し、runtime
+HIPRTC source を gfx1201 へ device-only compile した normalized disassembly / metadata は baseline
+と `cmp=0` だった。R9700/gfx1201 は実行していない。
+
+### 同一 process M=1 比較
+
+V620/card0 を `HIP_VISIBLE_DEVICES=2`、`hipDeviceGetPCIBusId`=`0000:03:00.0`、同 BDF の own
+junction `hwmon5/temp2_input` で固定した。Qwen3-14B `self_attn.q_proj` と同じ 5120 x 5120 shape の
+deterministic common synthetic E4M3+block-scale source を用い、`SQ8_1` はその source を再量子化した。
+これは shape/kernel の公平比較であり、actual-model throughput/quality result ではない。
+
+各 run は <=42 C cooldown 後、32 warmups + 31 timed launches を `SQ8_0` / W8A16 / W8A8 の rotating
+order で一つの process 内に co-dispatch した。run 3 の全三経路は start temperature が同程度でも
+absolute latency が約 2.5x 小さい。原因は **未確認**であるため、absolute median を混ぜず、対応する
+run 内 ratio の median を公平な主値にする。
+
+| run | optimized `SQ8_0` ms | W8A16 ms | W8A8 ms | `SQ8_0` / W8A16 | `SQ8_0` / W8A8 |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 0.627807021 | 0.237481996 | 0.248962998 | 2.644x | 2.522x |
+| 2 | 0.628367007 | 0.238682002 | 0.249202996 | 2.633x | 2.522x |
+| 3 | 0.251682013 | 0.100920998 | 0.112040997 | 2.494x | 2.246x |
+| paired-ratio median | — | — | — | **2.633x** | **2.522x** |
+
+従って V620/gfx1030 のこの shape では、`SQ8_1` の優位は公平比較後も残る。ただし format-only 根拠は
+W8A16 **2.633x**、W8A8 **2.522x** であり、historical 2.692x/2.558x をそのまま再利用しない。優位は
+W8A16 で約 2.2%、W8A8 で約 1.4% 縮小した。これは gfx1201 の主張ではない。
+
+pre-timing numerical gate は optimized `SQ8_0` direct 8 rows で max abs
+`2.384185791e-07` / relative L2 `8.552191029e-07`、W8A16 で
+`1.132488251e-06` / `3.767329717e-06`、W8A8 で 0 / 0、exact `SQ8_0` batch symbol (2 x 8 rows)
+で `2.384185791e-07` / `3.869252278e-07` を全て pass した。
+
+### M={1,8,32,128}
+
+現行 runtime の exact direct API には batch ABI がないため、まず M independent direct matvec launches
+を一つの event に束ねた。これは deployed kernel semantics の測定であり、fused GEMM/new ABI の主張では
+ない。three cooldown-normalized runs の median-of-runs は次のとおりで、W8A8 は全点で W8A16 に負けた。
+
+| M | W8A16 ms | W8A8 ms | W8A16 / W8A8 paired-ratio median |
+| ---: | ---: | ---: | ---: |
+| 1 | 0.237403005 | 0.253161997 | 0.938x |
+| 8 | 0.423444003 | 0.483125001 | 0.876x |
+| 32 | 1.691699028 | 1.868780017 | 0.905x |
+| 128 | 7.008595943 | 7.329880238 | 0.958x |
+
+したがって **現行 direct path では M=128 まで W8A8 の逆転はない**。M を増やすだけでは、この API の
+activation plane を CTA 外へ hoist しない。
+
+活性量子化 reuse 自体を分離するため、runtime source/ABI/dispatch に触れず benchmark-only HIPRTC source
+で「input row ごとに一度だけ exact K=32 prequant、その後 2-D output grid」を実装した。2 batch x 全 5120
+output rows の CPU differential は W8A16 max abs `2.205371857e-06` / relative L2
+`3.989831230e-06`、W8A8 `1.788139343e-07` / `2.827435228e-07` で pass した。
+
+| M | W8A16 prototype ms | W8A8 prequant prototype ms | W8A16 / W8A8 paired-ratio median |
+| ---: | ---: | ---: | ---: |
+| 1 | 0.237802997 | 0.168281004 | 1.415x |
+| 8 | 1.562656999 | 0.460604996 | 3.393x |
+| 32 | 1.309733987 | 0.591805995 | 2.214x |
+| 128 | 5.224856853 | 2.095663071 | 2.493x |
+
+この isolated prototype では W8A8 はすでに **M=1** から速く、sampled M>1 crossover は存在しない。
+重要なのは M の数そのものではなく、activation quantization を eight-output-row CTA ごとの再実行から
+全 output tile に共有可能な prequant plane へ hoist したことである。この prototype は production
+prefill/batch path の performance potential を示すだけで、runtime ABI、dispatch、artifact/release
+selection の admission ではない。
+
+final suite の junction は全体で 40–54 C（M=1 co-dispatch 40–43 C、current direct M sweep 41–54 C、
+prequant prototype 41–50 C）で、85 C guard と cooldown timeout は 0 件だった。指定した
+M={1,8,32,128} はすべて完走し、熱で測れなかった項目はない。full-model W8A8 quality、production
+batch/prefill implementation、profiler occupancy/DRAM traffic は熱以外の理由で未確認である。完全な
+raw/thermal/summary/static evidence は
+`benchmarks/results/2026-07-26/sq8_0-sq8_1-fair-comparison/` に保存した。
