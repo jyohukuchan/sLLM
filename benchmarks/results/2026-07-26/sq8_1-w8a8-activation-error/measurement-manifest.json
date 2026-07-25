@@ -1,0 +1,118 @@
+{
+  "command": [
+    "tools/measure-sq8_1-w8a8-activation-error.py",
+    "--model-dir",
+    "/home/homelab1/datapool/ai_models/safetensors/Qwen/Qwen3.5-9B",
+    "--prompt-file",
+    "benchmarks/calibration/importance-score-formal-v0.1/frozen/D_stats-shard-00.jsonl",
+    "--corpus-manifest",
+    "benchmarks/calibration/importance-score-formal-v0.1/frozen/corpus-manifest.json",
+    "--output-dir",
+    "benchmarks/results/2026-07-26/sq8_1-w8a8-activation-error",
+    "--max-samples",
+    "8",
+    "--sequence-length",
+    "128",
+    "--group-sizes",
+    "16,32,64,128",
+    "--primary-group",
+    "32",
+    "--samples-per-module-call",
+    "8",
+    "--output-rows-per-module",
+    "16",
+    "--torch-threads",
+    "16",
+    "--torch-interop-threads",
+    "1",
+    "--seed",
+    "0",
+    "--logit-samples",
+    "1"
+  ],
+  "corpus": {
+    "corpus_manifest": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/calibration/importance-score-formal-v0.1/frozen/corpus-manifest.json",
+    "corpus_manifest_sha256": "024402309cb11571da7d131f79072be8dd36ad61e17ca64c9d3623ca5ce85c5e",
+    "prompt_file": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/calibration/importance-score-formal-v0.1/frozen/D_stats-shard-00.jsonl",
+    "prompt_file_sha256": "08e282a289f507a778f5f7b43b292abbc3a79ef63fc42f4bd60213dfd257fcad"
+  },
+  "cpu_only": true,
+  "cwd": "/home/homelab1/coding-local/ultimateLLM/uLLM-project",
+  "environment": {
+    "cuda_visible_devices": "",
+    "hip_visible_devices": "",
+    "platform": "Linux-6.17.0-35-generic-x86_64-with-glibc2.39",
+    "python": "3.12.3 (main, Jun 19 2026, 12:46:00) [GCC 13.3.0]",
+    "torch": "2.12.0+cpu",
+    "torch_cuda_available": false,
+    "torch_hip": null
+  },
+  "git_revision_at_finalize": "71dcf25ad1a9a14adf4a0ca4f620fb8299d32063",
+  "git_revision_at_start": "71dcf25ad1a9a14adf4a0ca4f620fb8299d32063",
+  "gpu_execution": "not used",
+  "measurement_tool": {
+    "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/tools/measure-sq8_1-w8a8-activation-error.py",
+    "sha256": "7da73873f46a24b5000075aa5f8e877398981d4db54bd2f59f99237fa763561a"
+  },
+  "model": {
+    "config_sha256": "d0883072e01861ed0b2d47be3c16c36a8e81c224c7ffaa310c6558fb3f932b05",
+    "path": "/home/homelab1/datapool/ai_models/safetensors/Qwen/Qwen3.5-9B",
+    "tokenizer_config_sha256": "316230d6a809701f4db5ea8f8fc862bc3a6f3229c937c174e674ff3ca0a64ac8",
+    "weight_index_sha256": "26d3539b516be613f39563617cb9d33b3f83d401298125be392c80cefb8f7fe5"
+  },
+  "quantization": {
+    "activation_scale": "per-token contiguous K block max(abs(x))/127, stored FP16 rounded upward unless table says otherwise",
+    "code_range": [
+      -127,
+      127
+    ],
+    "format": "SQ8_1 diagnostic W8A8",
+    "group_sizes_evaluated": [
+      16,
+      32,
+      64,
+      128
+    ],
+    "primary_group_size": 32,
+    "raw_activation_storage": "not retained; values are aggregated inside forward pre-hooks",
+    "rounding": "torch.round nearest-even (RNE)",
+    "symmetric": true,
+    "weight_scale": "per-output-row contiguous K=32 block max(abs(w))/127, stored FP16 rounded upward",
+    "zero_point": null
+  },
+  "reused_activation_collector": {
+    "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/tools/collect-activation-stats.py",
+    "reused_functions": [
+      "load_transformers_model",
+      "iter_examples",
+      "encode_examples",
+      "sha256_file",
+      "git_revision"
+    ],
+    "sha256": "e90f7d3d14ce9a9b51b335ab3a4100870d823af361839df6e8ca190bde64dd18"
+  },
+  "run": {
+    "domain_counts": {
+      "chat": 8
+    },
+    "module_count": 248,
+    "processed_record_ids_sha256": "2be139f7238979c544fc9d03e4d4ec9022280dace7eff48ca7d9b1a1334e34b9",
+    "samples_seen": 8,
+    "seed": 0,
+    "sequence_length": 128,
+    "tokens_seen": 962,
+    "torch_interop_threads": 1,
+    "torch_threads": 16
+  },
+  "sampling": {
+    "activation_row_selection": "evenly spaced valid flattened rows within each single-example forward",
+    "activation_token_rows_per_module_call": 8,
+    "linear_output_scope": "sampled matmul without bias; W8A8 uses exact int32 per-K partial dots then FP32 scale products",
+    "module_pattern": "(self_attn|linear_attn|mlp).*(q_proj|k_proj|v_proj|o_proj|in_proj(_qkv|_qkvz|_ba|_[abz])?|out_proj|gate_proj|up_proj|down_proj)$",
+    "output_row_selection": "evenly spaced output rows of each Linear weight matrix",
+    "output_rows_per_module": 16
+  },
+  "schema_version": "ullm.sq8_1-w8a8-activation-error.v0.1",
+  "status": "completed",
+  "timestamp_utc": "2026-07-25T19:09:13.504780+00:00"
+}
