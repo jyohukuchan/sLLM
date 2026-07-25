@@ -474,3 +474,146 @@ Phase impacts are:
   and /opt/rocm/include/ck/tensor_operation/gpu/block/blockwise_gemm_pipeline_xdlops_v1_ab_scale.hpp.
 - Concrete archive/code object: /opt/rocm/lib/libdevice_gemm_operations.a,
   linked and inspected only from the isolated directory named above.
+
+### Phase 1 format gate — CPU OCP E4M3FN to FNUZ prepack oracle (2026-07-26)
+
+This addendum closes the CPU-only byte/scale format gate for the canonical
+`SQ8_0` artifact.  It creates only an in-memory derived representation; it
+does not alter the canonical payload, `/opt/ullm`, an existing build/release
+tree, a service, or `/etc/ullm/served-models/active.json`.
+
+#### Confirmed source and target semantics
+
+The source contract is fixed by code, rather than inferred from the checkpoint
+name:
+
+- `crates/ullm-engine/src/sq.rs:794-807` decodes canonical OCP E4M3FN with
+  exponent bias 7, preserves `0x80` as negative zero, and returns NaN for
+  `0x7f` and `0xff`.
+- `crates/ullm-engine/src/sq_canonical.rs:15-27` and its manifest validator
+  require raw `F8_E4M3` weights, `BF16` `block_2d` dequant multipliers, and
+  `[128,128]` blocks.  Its streaming canonical validator already rejects the
+  two OCP NaN encodings and non-positive/non-finite BF16 scales.
+- Installed ROCm 7.2.1 `/opt/rocm/include/ck/utility/amd_ck_fp8.hpp:94-107,
+  197-255,1756-1764` makes the target distinction explicit: FNUZ reserves
+  only `0x80` for NaN, OCP E4M3 reserves `0x7f`/`0xff` for NaN, there is no
+  E4M3 infinity, FNUZ uses the one-lower exponent bias, and `ck::f8_t` is a
+  macro selection rather than an architecture selection.  The official AMD
+  [gfx942 instruction syntax](https://rocm.docs.amd.com/projects/llvm-project/en/latest/LLVM/llvm/html/AMDGPU/AMDGPUAsmGFX940.html)
+  lists `v_mfma_f32_16x16x32_fp8_fp8`; the official
+  [rocWMMA API reference](https://rocm.docs.amd.com/projects/rocWMMA/en/docs-7.1.1/api-reference/api-reference-guide.html)
+  identifies gfx942's optimized f8 representation as NANOO/FNUZ rather than
+  the otherwise-assumed OCP form.
+
+For an input raw byte `b`, the finalized mapping is therefore:
+
+| OCP input | FNUZ output / action | Rationale |
+|---|---|---|
+| `0x00..=0x7e`, `0x81..=0xfe` excluding `0xff` | retain `b` | Every such code is finite in both encodings.  The FNUZ value is exactly one half of the OCP value. |
+| `0x80` | normalize to `0x00` | OCP negative zero is finite; FNUZ `0x80` is NaN and FNUZ has one zero encoding. |
+| `0x7f`, `0xff` | reject | OCP E4M3FN NaNs; there is no clamp or reinterpretation path. |
+
+There are no OCP E4M3FN infinity codes and no finite OCP code that remains
+unrepresentable after the `0x80 -> 0x00` normalization.  Across all 256 raw
+codes, 254 are accepted and the oracle verifies with actual `f32` values that
+
+\[
+  \operatorname{OCP}(b)=2\,\operatorname{FNUZ}(\operatorname{map}(b))
+\]
+
+for each accepted code (mathematical equality, including normalized signed
+zero).  In particular, FNUZ `0x7f` is finite `240`, which is why an OCP NaN
+must never be directly reinterpreted.
+
+#### Scale compensation and range gate
+
+`crates/ullm-engine/src/sq8_fnuz_prepack.rs` supplies the CPU oracle:
+`prepack_ocp_e4m3fn_payload_to_fnuz`,
+`prepack_bf16_scale_payload_for_fnuz`, and the atomic
+`prepack_sq8_ocp_e4m3fn_tensor_to_fnuz`.  It maps the payload first and emits
+no usable derived tensor if either a payload or scale fails.  It emits BF16
+scales only when the power-of-two result is finite, positive, and exactly
+representable as BF16; it never clamps or silently rounds.
+
+For one converted operand, its scale is multiplied by two.  If both MFMA
+operands are converted, each operand scale is doubled, so the pair scale
+product is multiplied by four.  The tests use values, not only symbolic
+algebra: OCP `0x38=1` versus FNUZ `0x38=0.5` with BF16 `1.5 -> 3.0` confirms
+the one-side case; OCP `0x38 * 0x40 * 0.75 = 1.5` versus FNUZ
+`0.5 * 1.0 * 3.0 = 1.5` confirms the two-side case.
+
+The BF16 gate is exact and fail-closed:
+
+| Compensation | Largest accepted positive finite source | First overflowing source | Rejection condition |
+|---|---:|---:|---|
+| `x2` | `0x7eff` -> `0x7f7f` | `0x7f00` (`2^127`) | positive finite source `>= 2^127` |
+| `x4` | `0x7e7f` -> `0x7f7f` | `0x7e80` (`2^126`) | positive finite source `>= 2^126` |
+
+Zero, negative, infinity, and NaN source scales are rejected independently.
+There is no valid-input underflow range for x2/x4: the smallest positive BF16
+`0x0001 = 2^-133` becomes `0x0002` under x2 and `0x0004` under x4.  The
+implementation retains an explicit underflow rejection guard so a future
+non-power-of-two or reducing transform cannot silently produce zero.
+
+#### Exhaustive CPU tests
+
+`crates/ullm-engine/tests/sq8_fnuz_prepack.rs` contains the external test
+surface.  It enumerates every byte, lists the exact exceptional codes, tests
+negative-zero normalization and NaN rejection, verifies numerical x2/x4
+compensation, exhausts all valid BF16 bit patterns for the no-underflow and
+exactness properties, tests both overflow thresholds, and exercises a
+hash-checked canonical fixture scan.  The focused CPU command completed:
+
+```text
+cargo test -p ullm-engine --test sq8_fnuz_prepack
+6 passed; 0 failed
+```
+
+The independent scanner is available as the CPU-only example
+`sq8_fnuz_prepack_scan`; it first checks the canonical artifact and then
+performs a second streaming SHA-256-checked frequency/range pass.  Its JSON
+contains all 256 frequency bins, not merely a special-value sample.
+
+#### Real canonical `SQ8_0` artifact scan
+
+The active served-model manifest was read without modification and currently
+describes `AQ4_0` (`artifact: null`, product root
+`qwen35-9b-aq4-cli-v0.1`), so it is not an `SQ8_0` artifact source.  The
+repository's `deploy/served-models/qwen3-14b-sq8.profile.json` identifies the
+actual `SQ8_0` product root
+`/home/homelab1/datapool/ullm/product/qwen3-14b-fp8-sq8-v0.1`; its canonical
+artifact is `artifact/sq_manifest.json`.
+
+On 2026-07-26 the following CPU-only command completed its two hash-checked
+streaming passes without error:
+
+```text
+cargo run -p ullm-engine --example sq8_fnuz_prepack_scan -- \
+  --artifact /home/homelab1/datapool/ullm/product/qwen3-14b-fp8-sq8-v0.1/artifact \
+  --chunk-bytes 67108864
+```
+
+The artifact identity was `SQ8_0`, content SHA-256
+`2243acf1df627ff6ec13840c8ffcf35c77e89205eb36cef7561b85c9c98b9147`, with
+280 quantized tensors, 13,212,057,600 weight bytes, and 806,400 BF16 scales.
+The complete 256-bin output summed exactly to the declared weight byte count.
+The relevant observed bins and gates are:
+
+| Item | Observed count / value | Required prepack action |
+|---|---:|---|
+| OCP `0x00` | 208,061 | retain zero |
+| OCP negative zero `0x80` | 207,515 | normalize every occurrence to FNUZ `0x00` |
+| OCP NaN `0x7f` | 0 | reject if present; none observed |
+| OCP NaN `0xff` | 0 | reject if present; none observed |
+| finite but FNUZ-unrepresentable | 0 | not applicable: the proven finite-code set is empty after `0x80 -> 0x00` |
+| invalid BF16 scale | 0 | reject if present |
+| BF16 x2 overflow / underflow / non-exact | 0 / 0 / 0 | pass |
+| BF16 x4 overflow / underflow / non-exact | 0 / 0 / 0 | pass |
+| smallest / largest positive BF16 scale | `0.00012493134` / `0.005645752` | both far inside x2 and x4 ranges |
+
+Thus the real artifact requires negative-zero normalization but has no NaN,
+infinity, finite-unrepresentable, or scale-range blocker.  The format gate is
+**passed for an isolated A' FNUZ-prepacked prototype only**.  This is not
+physical-gfx942 numerical validation, fragment/lane-map validation,
+occupancy/residency validation, performance validation, production dispatch,
+or final activation; all of those remain separate gates.

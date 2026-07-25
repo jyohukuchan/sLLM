@@ -36,6 +36,7 @@ pub mod served_model;
 pub mod session_worker_backend;
 pub mod sq;
 pub mod sq8_embedding_runtime;
+pub mod sq8_fnuz_prepack;
 pub mod sq8_generation_runtime;
 pub mod sq8_layer_oracle;
 pub mod sq8_layer_runtime;

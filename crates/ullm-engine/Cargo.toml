@@ -67,6 +67,9 @@ required-features = ["rocm-ck-gfx1201"]
 name = "sq8_optimized_fixture"
 
 [[example]]
+name = "sq8_fnuz_prepack_scan"
+
+[[example]]
 name = "sq8_reference_batch_bench"
 
 [[example]]
