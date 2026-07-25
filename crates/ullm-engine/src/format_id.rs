@@ -3,6 +3,7 @@
 
 pub const FORMAT_AQ4_0: &str = "AQ4_0";
 pub const FORMAT_SQ8_0: &str = "SQ8_0";
+pub const FORMAT_SQ8_1: &str = "SQ8_1";
 
 pub fn canonical_format_id(value: &str) -> Option<&'static str> {
     let trimmed = value.trim();
@@ -16,6 +17,11 @@ pub fn canonical_format_id(value: &str) -> Option<&'static str> {
         || lower.starts_with("aq4_")
     {
         return Some(FORMAT_AQ4_0);
+    }
+    // SQ8_1 is intentionally a strict, isolated artifact family.  In
+    // particular, legacy "sq" / "sq-fp8" spellings continue to mean SQ8_0.
+    if lower == "sq8_1" {
+        return Some(FORMAT_SQ8_1);
     }
     if lower == "sq" || lower == "sq8_0" || lower == "sq-format-v0.1" || lower.starts_with("sq-fp8")
     {
@@ -63,6 +69,14 @@ mod tests {
             canonical_format_id("sq-fp8-w8a16-r9700-v0-qkv-layer23-k16"),
             Some(FORMAT_SQ8_0)
         );
+    }
+
+    #[test]
+    fn keeps_sq8_1_strict_and_separate_from_sq8_0_aliases() {
+        assert_eq!(canonical_format_id("SQ8_1"), Some(FORMAT_SQ8_1));
+        assert_eq!(canonical_format_id("sq8_1"), Some(FORMAT_SQ8_1));
+        assert_eq!(canonical_format_id("sq"), Some(FORMAT_SQ8_0));
+        assert_eq!(canonical_format_id("sq8_1-preview"), None);
     }
 
     #[test]

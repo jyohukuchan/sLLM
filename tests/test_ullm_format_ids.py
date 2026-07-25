@@ -41,6 +41,12 @@ class UllmFormatIdsTest(unittest.TestCase):
             "SQ8_0",
         )
 
+    def test_keeps_sq8_1_strict_and_separate(self):
+        self.assertEqual(FORMAT_IDS.canonical_format_id("SQ8_1"), "SQ8_1")
+        self.assertEqual(FORMAT_IDS.canonical_format_id("sq8_1"), "SQ8_1")
+        self.assertEqual(FORMAT_IDS.canonical_format_id("sq"), "SQ8_0")
+        self.assertIsNone(FORMAT_IDS.canonical_format_id("sq8_1-preview"))
+
     def test_unknown_ids_are_not_rewritten(self):
         self.assertIsNone(FORMAT_IDS.canonical_format_id("bf16"))
         self.assertEqual(FORMAT_IDS.canonical_or_original("bf16"), "bf16")

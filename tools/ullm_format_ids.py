@@ -5,6 +5,7 @@ from __future__ import annotations
 
 FORMAT_AQ4_0 = "AQ4_0"
 FORMAT_SQ8_0 = "SQ8_0"
+FORMAT_SQ8_1 = "SQ8_1"
 
 
 def canonical_format_id(value: str | None) -> str | None:
@@ -16,6 +17,10 @@ def canonical_format_id(value: str | None) -> str | None:
     lower = text.lower()
     if lower in {"aq4", "aq4_0", "aq4-prototype-current-runtime"} or lower.startswith("aq4_"):
         return FORMAT_AQ4_0
+    # SQ8_1 is an isolated artifact ABI.  Do not treat any former SQ8 alias
+    # or a preview suffix as SQ8_1: legacy names remain SQ8_0.
+    if lower == "sq8_1":
+        return FORMAT_SQ8_1
     if lower in {"sq", "sq8_0", "sq-format-v0.1"} or lower.startswith("sq-fp8"):
         return FORMAT_SQ8_0
     return None

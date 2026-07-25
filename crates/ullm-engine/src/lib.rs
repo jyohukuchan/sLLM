@@ -43,6 +43,7 @@ pub mod sq8_layer_oracle;
 pub mod sq8_layer_runtime;
 pub mod sq8_model_head_runtime;
 pub mod sq8_sampling;
+pub mod sq8_1;
 pub mod sq8_serving_runtime;
 pub mod sq8_stack_runtime;
 pub mod sq8_worker_backend;
