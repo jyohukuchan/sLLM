@@ -1,0 +1,4 @@
+"Domain","Function","Process_Id","Thread_Id","Correlation_Id","Start_Timestamp","End_Timestamp"
+"MARKER_CONTROL_API","roctxProfilerResume",957408,957408,1,13205193287418,13205193288638
+"MARKER_CORE_RANGE_API","ullm.sq8.phase0.prefill.m128.v1/repeat=0/prompt_tokens=1024",957408,957408,2,13205194176420,13208994607862
+"MARKER_CONTROL_API","roctxProfilerPause",957408,957408,317101,13208994615392,13208994615922

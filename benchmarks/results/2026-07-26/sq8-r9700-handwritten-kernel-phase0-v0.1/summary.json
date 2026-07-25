@@ -1,0 +1,55 @@
+{
+  "schema_version": "ullm.sq8_0.r9700.handwritten_phase0.summary.v1",
+  "date": "2026-07-26",
+  "device": {
+    "amd_smi_gpu": 2,
+    "gcn_arch_name": "gfx1201",
+    "pci_bdf": "0000:47:00.0",
+    "cu_count": 64,
+    "rocm_version": "7.2.1"
+  },
+  "scope": {
+    "decode": "ROCTx selected region; 16 M=1 steps; prompt=1024; warmup=4 excluded; cache=1028->1044",
+    "prefill": "ROCTx selected region; prompt=1024; M=128 chunks"
+  },
+  "decode": {
+    "unprofiled_repeats": 5,
+    "unprofiled_mean_seconds_per_16_steps": 1.046096521,
+    "unprofiled_tokens_per_second": 15.294955751028635,
+    "profile_marker_seconds": 1.127416757,
+    "profile_kernel_time_us": 962034.418,
+    "hot_path_kernel_time_share_percent": {
+      "ullm_paged_decode_attn_f32_kernel": 50.9968,
+      "ck_projection_total": 40.1305,
+      "ullm_matvec_bf16_f32_kernel": 4.0754,
+      "ullm_segmented_rmsnorm_f32_kernel": 1.9049,
+      "bf16_to_f32": 0.7336,
+      "quantize_activation_block128": 0.7022
+    }
+  },
+  "prefill": {
+    "unprofiled_tokens_per_second": null,
+    "unprofiled_tokens_per_second_status": "未確認",
+    "profile_marker_seconds": 3.800431442,
+    "profile_kernel_time_us": 2918473.188,
+    "hot_path_kernel_time_share_percent": {
+      "ullm_cached_prefix_attn_f32_flash2_kernel": 74.8409,
+      "ck_projection_total": 11.3154,
+      "ullm_paged_kv_write_f32_kernel": 3.4418,
+      "quantize_activation_block128": 1.5623,
+      "bf16_to_f32": 0.9188,
+      "ullm_segmented_rmsnorm_f32_kernel": 0.5434
+    }
+  },
+  "generic_sq8_0_matvec_symbols_in_selected_traces": 0,
+  "logical_bandwidth_efficiency": {
+    "context_midpoint": 1036,
+    "logical_bytes_per_token": 15109299200,
+    "r9700_peak_bytes_per_second": 640000000000,
+    "theoretical_tokens_per_second": 42.358020152,
+    "logical_stream_gb_per_second": 231.096063,
+    "eta_logical": 0.361087598,
+    "physical_hbm_counter_efficiency": null,
+    "physical_hbm_counter_efficiency_status": "未確認"
+  }
+}

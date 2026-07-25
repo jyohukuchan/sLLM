@@ -1,0 +1,8 @@
+timestamp=2026-07-26T03:42:50+09:00
+git_head=6b970ad71302fe4afcb000ee29cef6f495388e85
+profile_binary=/tmp/ullm-sq8-r9700-phase0-profile-20260726/target/release/ullm-sq8-r9700-phase0-profile
+profile_binary_sha256=2296551fa5eb77127e5d3f05f9aeef8784d60325b19819b53d44d5fcb370a8e3
+rocm_version=             version: 1.1.0         git_revision: e1a6bc5663304b9c586b3254b8920f2981057804         library_arch: x86_64-linux-gnu          system_name: Linux     system_processor: x86_64       system_version: 6.8.0-85-generic          compiler_id: GNU     compiler_version: 13.3.0         rocm_version: 7.2.1
+amd_smi_version=AMDSMI Tool: 26.2.2+e1a6bc5663 | AMDSMI Library version: 26.2.2 | ROCm version: 7.2.1 | amdgpu version: 6.16.13 | hsmp version: N/A
+artifact_sha256=23977f4e9bed4bac4cc64c177c35d7f83355861426bf32027a69cf7a241552e2
+package_manifest_sha256=c2133dfe392f3d5608bde17ed764ae8347c3096c500a58aa235adbeb63d1a0eb

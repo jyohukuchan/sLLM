@@ -1,0 +1,52 @@
+[
+    {
+        "gpu": 2,
+        "process_list": [
+            {
+                "process_info": {
+                    "name": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-26/sq9-v620-viability/build/bench-sq9-v620-viability-hip-thermal-v5",
+                    "pid": 912038,
+                    "mem_usage": {
+                        "value": 0,
+                        "unit": "B"
+                    },
+                    "cu_occupancy": "N/A",
+                    "evicted_time": {
+                        "value": 216,
+                        "unit": "ms"
+                    }
+                }
+            },
+            {
+                "process_info": {
+                    "name": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-26/sq9-v620-viability/build/bench-sq9-v620-viability-hip-thermal-v5",
+                    "pid": 916195,
+                    "mem_usage": {
+                        "value": 0,
+                        "unit": "B"
+                    },
+                    "cu_occupancy": "N/A",
+                    "evicted_time": {
+                        "value": 13,
+                        "unit": "ms"
+                    }
+                }
+            },
+            {
+                "process_info": {
+                    "name": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-26/sq9-v620-viability/build/bench-sq9-v620-viability-hip-thermal-v5",
+                    "pid": 918610,
+                    "mem_usage": {
+                        "value": 0,
+                        "unit": "B"
+                    },
+                    "cu_occupancy": "N/A",
+                    "evicted_time": {
+                        "value": 16,
+                        "unit": "ms"
+                    }
+                }
+            }
+        ]
+    }
+]
