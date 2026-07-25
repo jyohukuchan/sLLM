@@ -1,0 +1,11 @@
+{
+  "schema_version": "ullm.sq8_0.r9700.attention_prototype.v0.1",
+  "mode": "compile",
+  "target_architecture": "gfx1201",
+  "isolation": "HIPRTC separate prototype symbols; no runtime source or serving dispatch selected by this binary",
+  "module": "sq8_0_r9700_attention_prototype.hsaco",
+  "device": null,
+  "flash2_differential": [],
+  "flash2_kernel_timing_unprofiled": null,
+  "pmc_probe": {"ran": false,"kernel": "ullm_sq8_0_pmc_probe_kernel","elements": 67108864,"launches": 16}
+}

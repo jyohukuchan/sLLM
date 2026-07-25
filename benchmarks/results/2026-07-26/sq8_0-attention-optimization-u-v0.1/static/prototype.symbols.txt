@@ -1,0 +1,56 @@
+
+Symbol table '.dynsym' contains 12 entries:
+   Num:    Value          Size Type    Bind   Vis       Ndx Name
+     0: 0000000000000000     0 NOTYPE  LOCAL  DEFAULT   UND 
+     1: 0000000000003600  4156 FUNC    GLOBAL PROTECTED   7 ullm_sq8_0_flash2_legacy_reference_kernel
+     2: 0000000000002500    64 OBJECT  GLOBAL PROTECTED   6 ullm_sq8_0_flash2_qk_wave32_prototype_kernel.kd
+     3: 0000000000005900  4768 FUNC    GLOBAL PROTECTED   7 ullm_sq8_0_flash2_qk_max_wave32_prototype_kernel
+     4: 0000000000002580    64 OBJECT  GLOBAL PROTECTED   6 ullm_sq8_0_flash2_staged_wave32_prototype_kernel.kd
+     5: 00000000000025c0    64 OBJECT  GLOBAL PROTECTED   6 ullm_sq8_0_pmc_probe_kernel.kd
+     6: 000000000000a370     1 OBJECT  GLOBAL DEFAULT    10 __hip_cuid_e3e5ad9dd5e3d105
+     7: 00000000000024c0    64 OBJECT  GLOBAL PROTECTED   6 ullm_sq8_0_flash2_legacy_reference_kernel.kd
+     8: 0000000000004700  4452 FUNC    GLOBAL PROTECTED   7 ullm_sq8_0_flash2_qk_wave32_prototype_kernel
+     9: 0000000000002540    64 OBJECT  GLOBAL PROTECTED   6 ullm_sq8_0_flash2_qk_max_wave32_prototype_kernel.kd
+    10: 0000000000006c00  4888 FUNC    GLOBAL PROTECTED   7 ullm_sq8_0_flash2_staged_wave32_prototype_kernel
+    11: 0000000000008000   312 FUNC    GLOBAL PROTECTED   7 ullm_sq8_0_pmc_probe_kernel
+
+Symbol table '.symtab' contains 38 entries:
+   Num:    Value          Size Type    Bind   Vis       Ndx Name
+     0: 0000000000000000     0 NOTYPE  LOCAL  DEFAULT   UND 
+     1: 0000000000000000     0 NOTYPE  LOCAL  DEFAULT   ABS ullm_sq8_0_flash2_legacy_reference_kernel.private_seg_size
+     2: 0000000000000000     0 NOTYPE  LOCAL  DEFAULT   ABS ullm_sq8_0_flash2_legacy_reference_kernel.num_agpr
+     3: 0000000000000015     0 NOTYPE  LOCAL  DEFAULT   ABS ullm_sq8_0_flash2_legacy_reference_kernel.num_vgpr
+     4: 0000000000000000     0 NOTYPE  LOCAL  DEFAULT   ABS ullm_sq8_0_flash2_legacy_reference_kernel.has_dyn_sized_stack
+     5: 0000000000000000     0 NOTYPE  LOCAL  DEFAULT   ABS ullm_sq8_0_flash2_legacy_reference_kernel.has_recursion
+     6: 0000000000000000     0 NOTYPE  LOCAL  DEFAULT   ABS ullm_sq8_0_flash2_qk_wave32_prototype_kernel.private_seg_size
+     7: 0000000000000000     0 NOTYPE  LOCAL  DEFAULT   ABS ullm_sq8_0_flash2_qk_wave32_prototype_kernel.num_agpr
+     8: 000000000000001c     0 NOTYPE  LOCAL  DEFAULT   ABS ullm_sq8_0_flash2_qk_wave32_prototype_kernel.num_vgpr
+     9: 0000000000000000     0 NOTYPE  LOCAL  DEFAULT   ABS ullm_sq8_0_flash2_qk_wave32_prototype_kernel.has_dyn_sized_stack
+    10: 0000000000000000     0 NOTYPE  LOCAL  DEFAULT   ABS ullm_sq8_0_flash2_qk_wave32_prototype_kernel.has_recursion
+    11: 0000000000000000     0 NOTYPE  LOCAL  DEFAULT   ABS ullm_sq8_0_flash2_qk_max_wave32_prototype_kernel.private_seg_size
+    12: 0000000000000000     0 NOTYPE  LOCAL  DEFAULT   ABS ullm_sq8_0_flash2_qk_max_wave32_prototype_kernel.num_agpr
+    13: 000000000000001c     0 NOTYPE  LOCAL  DEFAULT   ABS ullm_sq8_0_flash2_qk_max_wave32_prototype_kernel.num_vgpr
+    14: 0000000000000000     0 NOTYPE  LOCAL  DEFAULT   ABS ullm_sq8_0_flash2_qk_max_wave32_prototype_kernel.has_dyn_sized_stack
+    15: 0000000000000000     0 NOTYPE  LOCAL  DEFAULT   ABS ullm_sq8_0_flash2_qk_max_wave32_prototype_kernel.has_recursion
+    16: 0000000000000000     0 NOTYPE  LOCAL  DEFAULT   ABS ullm_sq8_0_flash2_staged_wave32_prototype_kernel.private_seg_size
+    17: 0000000000000000     0 NOTYPE  LOCAL  DEFAULT   ABS ullm_sq8_0_flash2_staged_wave32_prototype_kernel.num_agpr
+    18: 000000000000001b     0 NOTYPE  LOCAL  DEFAULT   ABS ullm_sq8_0_flash2_staged_wave32_prototype_kernel.num_vgpr
+    19: 0000000000000000     0 NOTYPE  LOCAL  DEFAULT   ABS ullm_sq8_0_flash2_staged_wave32_prototype_kernel.has_dyn_sized_stack
+    20: 0000000000000000     0 NOTYPE  LOCAL  DEFAULT   ABS ullm_sq8_0_flash2_staged_wave32_prototype_kernel.has_recursion
+    21: 0000000000000000     0 NOTYPE  LOCAL  DEFAULT   ABS ullm_sq8_0_pmc_probe_kernel.private_seg_size
+    22: 0000000000000000     0 NOTYPE  LOCAL  DEFAULT   ABS ullm_sq8_0_pmc_probe_kernel.num_agpr
+    23: 000000000000000a     0 NOTYPE  LOCAL  DEFAULT   ABS ullm_sq8_0_pmc_probe_kernel.num_vgpr
+    24: 0000000000000000     0 NOTYPE  LOCAL  DEFAULT   ABS ullm_sq8_0_pmc_probe_kernel.has_dyn_sized_stack
+    25: 0000000000000000     0 NOTYPE  LOCAL  DEFAULT   ABS ullm_sq8_0_pmc_probe_kernel.has_recursion
+    26: 0000000000009300     0 NOTYPE  LOCAL  HIDDEN      8 _DYNAMIC
+    27: 0000000000003600  4156 FUNC    GLOBAL PROTECTED   7 ullm_sq8_0_flash2_legacy_reference_kernel
+    28: 00000000000024c0    64 OBJECT  GLOBAL PROTECTED   6 ullm_sq8_0_flash2_legacy_reference_kernel.kd
+    29: 0000000000004700  4452 FUNC    GLOBAL PROTECTED   7 ullm_sq8_0_flash2_qk_wave32_prototype_kernel
+    30: 0000000000002500    64 OBJECT  GLOBAL PROTECTED   6 ullm_sq8_0_flash2_qk_wave32_prototype_kernel.kd
+    31: 0000000000005900  4768 FUNC    GLOBAL PROTECTED   7 ullm_sq8_0_flash2_qk_max_wave32_prototype_kernel
+    32: 0000000000002540    64 OBJECT  GLOBAL PROTECTED   6 ullm_sq8_0_flash2_qk_max_wave32_prototype_kernel.kd
+    33: 0000000000006c00  4888 FUNC    GLOBAL PROTECTED   7 ullm_sq8_0_flash2_staged_wave32_prototype_kernel
+    34: 0000000000002580    64 OBJECT  GLOBAL PROTECTED   6 ullm_sq8_0_flash2_staged_wave32_prototype_kernel.kd
+    35: 0000000000008000   312 FUNC    GLOBAL PROTECTED   7 ullm_sq8_0_pmc_probe_kernel
+    36: 00000000000025c0    64 OBJECT  GLOBAL PROTECTED   6 ullm_sq8_0_pmc_probe_kernel.kd
+    37: 000000000000a370     1 OBJECT  GLOBAL DEFAULT    10 __hip_cuid_e3e5ad9dd5e3d105

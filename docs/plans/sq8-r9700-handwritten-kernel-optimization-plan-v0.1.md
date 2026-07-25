@@ -1,6 +1,6 @@
 # `SQ8_0` R9700 Handwritten Kernel Optimization Plan v0.1
 
-- Status: Phase 0 complete — R9700 (`gfx1201`) hot paths, scoped profiles, logical-bandwidth baseline, and offline resource audit captured; no production body was changed.
+- Status: Phase 0 and attention-path evidence complete; Flash2 staged-wave32 prototype evaluated NO-GO on full-model numerical gate; explicit paged split API measured; no production body or dispatch was changed.
 - Date: 2026-07-26
 - Scope: Qwen3-14B-FP8 independent `SQ8_0` execution on R9700 (`gfx1201`, PCI `0000:47:00.0`) only.
 - Boundary: preserve the external ABI and dispatch boundary exactly. This plan changes neither an activation file nor any campaign, candidate, release, unit file, `/opt/ullm` content, or existing build/release tree.
@@ -236,3 +236,101 @@ P3-proven techniques map cleanly: wave-shuffle is a P2 primitive; static VGPR/LD
 The common layer is canonical SQ8_0 payload/scale meaning, projection-to-attention input contract, F32 paged-KV and causal/online-softmax semantics, shape validation, adversarial/real-artifact vectors, differential harness, and timing evidence schema. It contains no lane map.
 
 The gfx1201 body remains a wave32 R9700 implementation with its own shuffle and LDS layout. The CDNA3 continuation is a separate wave64/MFMA body with separate fragment mapping, LDS layout, conversion/prepack boundary, code object, and ISA audit. Both compare against the same canonical vectors, but neither reuses the other's wave-level implementation. This preserves the intended CDNA3 案 A handoff without changing the external ABI or dispatch boundary.
+
+## Attention optimization execution addendum — 2026-07-26 (NO-GO for Flash2 body)
+
+Raw evidence for this addendum is retained in
+`benchmarks/results/2026-07-26/sq8_0-attention-optimization-u-v0.1/`.
+It is an isolated canonical-artifact process on R9700 only, not an observation
+of a live SQ8 service.
+
+### PMC diagnosis
+
+The installed ROCm 7.2.1 counter definitions explicitly contain gfx1201
+definitions for `FETCH_SIZE`, `VALUInsts`, `SQ_INSTS_VALU`, and
+`GL2C_EA_RDREQ_{32B,64B,128B}`.  A purpose-built R9700-only load+FMA kernel
+showed all raw instruction and GL2C request counters as zero, while
+`SQ_WAVES=32768` per dispatch was nonzero.  The derived probe remained
+`FETCH_SIZE=0`, `VALUInsts=0`, `Wavefronts=32768`.
+
+The actual selected Flash2 collection has the same property on all 160
+observed launches: `FETCH_SIZE=0`, `VALUInsts=0`, and
+`Wavefronts=40960` per launch.  Thus the prior zero values are not a typo or
+an unsupported derived-metric name; primitive counter collection is failing
+selectively.  The exact root cause below the profiler (permission,
+driver/firmware, or ROCm counter-programming behavior) is **未確認**.  A
+root-only retry was not opened after the service start-limit budget had been
+used.  Physical HBM efficiency and a final memory-bound/compute-bound verdict
+therefore remain **未確認**; logical KV rates, ISA, static resources, and
+workgroup-supply geometry remain the admissible evidence.
+
+### Flash2 staged wave32 result
+
+An isolated HIPRTC source creates separate legacy, QK-only, QK+max, and full
+QK+max+sum staged symbols.  The normal runtime symbol and its default selector
+remain unchanged.  Offline full-staged metadata is wave32, LDS 1296 B, VGPR
+27, SGPR 48, zero private/spill; the legacy reference is LDS 1296 B, VGPR 21,
+SGPR 46, zero private/spill.
+
+The separate-symbol attention differential had no non-finite values.  The
+full-staged maximum absolute differences against legacy were `1.1920929e-7`
+(short), `1.0430813e-7` (63→68 tail), `2.9802322e-8` (synthetic 896→1024
+M=128), and `2.6464462e-5` (adversarial score range).  The synthetic standalone
+kernel timing was 13.317192 ms legacy versus 12.876236 ms staged per launch;
+this 1.03425x result is not serving throughput.
+
+The unprofiled baseline on the canonical `raw-p0512` vLLM-source fixture ran
+four M=128 units in 1.167487403 s (438.548629 input tok/s).  However, the
+staged full-model output failed the frozen SQ8 vector gate:
+
+| capture | max abs | relative L2 | cosine | verdict |
+|---|---:|---:|---:|---|
+| final hidden | 0.7760314941 | 0.0145683599 | 0.9999164687 | fail |
+| logits | 0.2401080132 | 0.0084836396 | 0.9999792756 | fail |
+
+The frozen gate was `max_abs <= 2e-5`, `relative_l2 <= 1e-5`, and
+`cosine >= 0.999999`.  A temporary service lifecycle overlap additionally
+invalidated the staged serving timing, so it is not interpreted.  The quality
+failure alone is enough: **do not replace the production Flash2 body**.
+
+The follow-up generalized the prototype handoff from a fixed eight waves to
+`blockDim.x`; actual Flash2 records use a 256-thread/eight-wave workgroup, so
+this is behaviorally identical for the measured geometry and cannot reverse
+the NO-GO.  The normal source remains the selected body.  This failure also
+confirms the CDNA3 handoff rule: retain canonical semantics/vectors/harness as
+common assets, but keep R9700 wave32 and CDNA3 wave64/MFMA implementations
+separate.
+
+### Paged decode explicit source-tile result
+
+The direct legacy selector was not touched.  An explicit existing split API
+comparison at M=1/C=1036 reported finite outputs and the following attention
+API-plus-stream timings:
+
+| source tile | split count | mean ms | max abs vs direct | partial-WG wave supply |
+|---:|---:|---:|---:|---:|
+| direct | 1 | 0.643241770 | reference | 320 / 15.625% |
+| 128 | 9 | 0.228016370 | 1.34110e-7 | 2880 / 140.625% |
+| 256 | 5 | 0.227932360 | 1.26660e-7 | 1600 / 78.125% |
+| 512 | 3 | 0.383530140 | 1.34110e-7 | 960 / 46.875% |
+
+Tile 256 is marginally fastest among the two near-tied best results (2.822x
+lower isolated attention-call time than direct); tile 512 loses.  This supports
+the supply-limit hypothesis, but is not a full-model end-to-end claim and is
+not permission to change direct dispatch.  A future explicit split integration
+must preserve the legacy route and repeat a clean serving timing gate.
+
+### Deferred work and operating record
+
+`uint4`/lane re-layout was not started because raw physical PMC values remain
+unusable.  `llama-qwen35-udq4.service` was verified inactive/disabled and
+`gdm3.service` inactive; R9700 pre/post telemetry was unthrottled.  In-run
+thermal peak is **未確認** because only pre/post samples were captured.
+
+The primary service stop began at 05:05:32+09:00 and the scripted restore was
+active at 05:07:48+09:00.  An accidental tool-lifecycle misread caused one
+brief manual start/compensating stop in between; it is retained in raw service
+logs and is why staged serving timing is discarded.  A later path-error retry
+restored immediately without launching a GPU kernel.  Final service state was
+active/running, `NRestarts=0`; no systemd unit content or active-model bytes
+were modified.

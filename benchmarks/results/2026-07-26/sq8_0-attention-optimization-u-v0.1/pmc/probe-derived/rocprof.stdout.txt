@@ -1,0 +1,20 @@
+W20260726 05:05:35.542091 140280525504320 simple_timer.cpp:55] [rocprofv3] tool initialization ::     0.172003 sec
+W20260726 05:05:35.542186 140280525504320 simple_timer.cpp:55] [rocprofv3] '/tmp/ullm-sq8-attention-u-vUXXgE/sq8_0_r9700_attention_prototype --mode pmc-probe --output-dir /home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-26/sq8_0-attention-optimization-u-v0.1/pmc/probe-derived/app' ::     0.000000 sec
+W20260726 05:05:35.691757 140280525504320 tool.cpp:2422] HSA version 8.20.1 initialized (instance=0)
+W20260726 05:05:36.080011 140280525504320 simple_timer.cpp:55] [rocprofv3] '/tmp/ullm-sq8-attention-u-vUXXgE/sq8_0_r9700_attention_prototype --mode pmc-probe --output-dir /home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-26/sq8_0-attention-optimization-u-v0.1/pmc/probe-derived/app' ::     0.537825 sec
+E20260726 05:05:36.105487 140280525504320 output_stream.cpp:111] Opened result file: /home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-26/sq8_0-attention-optimization-u-v0.1/pmc/probe-derived/data/homelab1-WRX80-Creator/1323914_kernel_trace.csv
+E20260726 05:05:36.141561 140280525504320 output_stream.cpp:111] Opened result file: /home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-26/sq8_0-attention-optimization-u-v0.1/pmc/probe-derived/data/homelab1-WRX80-Creator/1323914_counter_collection.csv
+E20260726 05:05:36.151830 140280525504320 output_stream.cpp:111] Opened result file: /home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-26/sq8_0-attention-optimization-u-v0.1/pmc/probe-derived/data/homelab1-WRX80-Creator/1323914_agent_info.csv
+W20260726 05:05:36.158433 140280525504320 simple_timer.cpp:55] [rocprofv3] output generation ::     0.078198 sec
+W20260726 05:05:36.158481 140280525504320 simple_timer.cpp:55] [rocprofv3] tool finalization ::     0.078298 sec
+{
+  "schema_version": "ullm.sq8_0.r9700.attention_prototype.v0.1",
+  "mode": "pmc-probe",
+  "target_architecture": "gfx1201",
+  "isolation": "HIPRTC separate prototype symbols; no runtime source or serving dispatch selected by this binary",
+  "module": "sq8_0_r9700_attention_prototype.hsaco",
+  "device": {"runtime_device":0,"name":"AMD Radeon Graphics","gcn_arch_name":"gfx1201","multi_processor_count":32,"warp_size":32},
+  "flash2_differential": [],
+  "flash2_kernel_timing_unprofiled": null,
+  "pmc_probe": {"ran": true,"kernel": "ullm_sq8_0_pmc_probe_kernel","elements": 67108864,"launches": 16}
+}

@@ -1,0 +1,16 @@
+2026-07-26T05:06:24+09:00
+manual-recovery-after-trap-nonexecution
+[
+    {
+        "gpu": 2,
+        "process_list": [
+            {
+                "process_info": "No running processes detected"
+            }
+        ]
+    }
+]
+1323774 bash tools/run-sq8_0-r9700-attention-window.sh benchmarks/results/2026-07-26/sq8_0-attention-optimization-u-v0.1 /tmp/ullm-sq8-attention-u-vUXXgE/sq8_0_r9700_attention_prototype /tmp/ullm-sq8-attention-cargo-q4Go9z/release/examples/sq8_0_paged_decode_split_bench /tmp/ullm-sq8-attention-engine-u-v0.1/release/examples/sq8_ck_serving
+1327368 bash tools/run-sq8_0-r9700-attention-window.sh benchmarks/results/2026-07-26/sq8_0-attention-optimization-u-v0.1 /tmp/ullm-sq8-attention-u-vUXXgE/sq8_0_r9700_attention_prototype /tmp/ullm-sq8-attention-cargo-q4Go9z/release/examples/sq8_0_paged_decode_split_bench /tmp/ullm-sq8-attention-engine-u-v0.1/release/examples/sq8_ck_serving
+1327369 /tmp/ullm-sq8-attention-engine-u-v0.1/release/examples/sq8_ck_serving --artifact /home/homelab1/datapool/ullm/product/qwen3-14b-fp8-sq8-v0.1/artifact --package /home/homelab1/datapool/ullm/product/qwen3-14b-fp8-sq8-v0.1/package --prompt-token-ids-u32le /home/homelab1/coding-local/ultimateLLM/uLLM-project/tests/fixtures/sq8-serving-v0.1/oracles/vllm-source-v0.1/inputs/raw-p0512.u32le --max-new-tokens 1 --prefill-mode m128-chunk128 --oracle-capture-dir /home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-26/sq8_0-attention-optimization-u-v0.1/flash2/serving-staged/oracle --result-json /home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-26/sq8_0-attention-optimization-u-v0.1/flash2/serving-staged/result.json
+1327456 /bin/bash -c task_result=benchmarks/results/2026-07-26/sq8_0-attention-optimization-u-v0.1 {   date --iso-8601=seconds   echo 'manual-recovery-after-trap-nonexecution'   amd-smi process --gpu 2 --general --json || true   pgrep -af 'sq8_0_r9700_attention_prototype|sq8_0_paged_decode_split_bench|sq8_ck_serving' || true } > "$task_result/service/manual-recovery-precheck.txt" 2>&1 printf '%s\n' 'Threadripper' | sudo -S -p '' systemctl start ullm-openai.service > "$task_result/service/manual-recovery-start.txt" 2>&1 systemctl show ullm-openai.service -p ActiveState -p SubState -p Result -p MainPID -p NRestarts >> "$task_result/service/manual-recovery-start.txt" 2>&1 amd-smi metric --gpu 2 --temperature --clock --power --json > "$task_result/telemetry/manual-recovery-after-start.json" 2>&1 cat "$task_result/service/manual-recovery-start.txt"
