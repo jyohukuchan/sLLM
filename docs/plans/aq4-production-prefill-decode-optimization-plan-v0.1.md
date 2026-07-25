@@ -339,6 +339,26 @@ Gate:
 - device selectionは現在の構成をP0で再確認し、`ROCR_VISIBLE_DEVICES`を優先して記録する。固定indexを確認せず使わない。
 - OOMは成功結果で上書きせず、immutableな失敗artifactとして保存する。
 
+### 6.1.1 llama.cpp比較baselineの除外と過去P3の熱条件
+
+`llama-qwen35-udq4.service`はQwen3.5-9B UD-Q4_K_XLを使う比較用
+baselineであり、production dependencyではない。boot自動起動は2026-07-26に
+無効化したが、手動起動済みのunitには効かない。すべてのR9700 GPU計測窓では、
+uLLM service windowやR9700 lockより先に次を実行し、`inactive`を記録する。
+
+```bash
+sudo systemctl stop llama-qwen35-udq4.service
+systemctl is-active llama-qwen35-udq4.service
+# expected: inactive
+```
+
+過去P3のprefill `982 tok/s` / decode `56.6%`の計測は、このserviceがbootから
+常駐し、P3手順が`ullm-openai.service`だけを停止していた条件で取得された。
+その間R9700はjunction `85°C`、コアクロック最大固定、llama-serverによるVRAM
+`5.3 GB`占有だった。クロック固定によりラン間のばらつきが小さく相対比較の
+一貫性は保たれるが、絶対値の再現性にはこの熱条件を必ず注記する。以後のP3/P2
+および全GPU計測ではllama.cpp baselineを停止した温度・クロック条件を記録する。
+
 ### 6.2 shared file lock
 
 次は統合担当だけが直列編集する。

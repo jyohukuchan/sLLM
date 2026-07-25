@@ -25,6 +25,30 @@ The active manifest does not expose a product-promotion source commit.  Therefor
 
 The older `baseline-v0.1`, `baseline-v0.2`, and `baseline-v0.3` directories are superseded preparation receipts only; they contain no P2 GPU measurement evidence. Do not use them for an execution command or comparison.
 
+## Required llama.cpp comparison-baseline exclusion
+
+`llama-qwen35-udq4.service` is the manual Qwen3.5-9B UD-Q4_K_XL comparison
+baseline and is boot-disabled as of 2026-07-26. Boot-disabled does not prove
+that a unit started manually is inactive. Before every R9700 GPU window,
+including the guard rehearsal, stop it and record the required inactive state:
+
+```bash
+sudo systemctl stop llama-qwen35-udq4.service
+systemctl is-active llama-qwen35-udq4.service
+# expected: inactive
+```
+
+Do this before the service-window driver stops `ullm-openai.service` or
+acquires the R9700 lock. Do not restart the llama.cpp service as part of the
+window teardown; its lifecycle is separate from the driver.
+
+Historical P3 prefill `982 tok/s` / decode `56.6%` measurements were captured
+while this service was boot-resident, leaving R9700 at junction `85°C`, with
+the core clock pinned at maximum and `5.3 GB` of VRAM held by llama-server.
+The fixed clock kept relative-run variation small, but these values require the
+thermal-condition caveat for absolute reproducibility. P2 and all subsequent
+GPU windows must record the stopped-baseline temperature and clock condition.
+
 ## Matrix and safe window split
 
 - Cold prefill: prompt `128, 512, 1011, 1024, 1339, 2048, 3584`, with M `1, 8, 16, 32, 64, 128`.  The physical M=1 route is explicitly `all_m1`; its separately labelled production M=1 record is retained in the same run root.

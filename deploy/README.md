@@ -124,15 +124,16 @@ docker run --rm --network open-webui-network \
 The existing Qwen3.5 9B UD-Q4_K_XL GGUF and the existing RDNA4
 `llama-server` binary are used as-is; this step does not convert or rewrite
 the model. This is the text-only model path. Do not mount or pass an
-`mmproj` file: the Qwen3.5 9B text model does not need one. The resident
-runtime is fixed to `HIP_VISIBLE_DEVICES=1`, which makes the physical R9700
+`mmproj` file: the Qwen3.5 9B text model does not need one. The runtime is
+fixed to `HIP_VISIBLE_DEVICES=1`, which makes the physical R9700
 appear as `ROCm0` to this process. Exposing all three GPUs made
 `libamdhip64` fault with a GPF, so a three-GPU-visible launch is prohibited.
 Use `--ctx-size 4096`, `--parallel 1`, `--fit off`, and `--no-mmproj` exactly
-as in the unit. Keep the llama.cpp and uLLM workers resident together, but
-send comparison requests alternately: concurrent requests compete for the
-same R9700. The llama.cpp service must not use or share uLLM's
-`/run/ullm/r9700.lock`.
+as in the unit. `llama-qwen35-udq4.service` is a manual comparison baseline,
+not a resident production dependency. Its boot autostart was disabled on
+2026-07-26. When it is explicitly started for a comparison, send requests
+alternately with uLLM: concurrent requests compete for the same R9700. The
+llama.cpp service must not use or share uLLM's `/run/ullm/r9700.lock`.
 
 The profile points at these existing files:
 
@@ -173,7 +174,29 @@ sudo systemd-analyze verify \
 sudo systemctl daemon-reload
 sudo systemctl enable --now ullm-openai-firewall.service
 sudo /usr/local/libexec/ullm-openai-firewall install
-sudo systemctl enable --now ullm-openai.service llama-qwen35-udq4.service
+sudo systemctl enable --now ullm-openai.service
+sudo systemctl disable --now llama-qwen35-udq4.service
+```
+
+### Manual comparison-baseline lifecycle
+
+Start the llama.cpp baseline only for an intentional comparison, and stop it
+when the comparison is complete:
+
+```bash
+sudo systemctl start llama-qwen35-udq4.service
+sudo systemctl stop llama-qwen35-udq4.service
+```
+
+Every R9700 GPU measurement window must stop the baseline and confirm that it
+is inactive before acquiring the measurement lock or changing the uLLM service
+state. A boot-disabled unit can still have been started manually, so
+`is-enabled` is not a substitute for this check:
+
+```bash
+sudo systemctl stop llama-qwen35-udq4.service
+systemctl is-active llama-qwen35-udq4.service
+# expected: inactive
 ```
 
 The firewall table applies to both bridge-only ports. Check each authenticated
