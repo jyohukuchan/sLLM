@@ -1239,6 +1239,20 @@ public:
             error);
     }
 
+    bool compile_cached_prefix_attn_f32_flash2_staged_wave32_prototype_kernel(
+        const std::string &arch,
+        std::vector<char> *code,
+        std::string *error) {
+        const std::string source =
+            cached_prefix_flash2_f32_staged_wave32_prototype_kernel_source();
+        return compile_kernel(
+            arch,
+            source.c_str(),
+            "ullm_sq8_0_cached_prefix_attn_f32_flash2_staged_wave32_prototype.hip",
+            code,
+            error);
+    }
+
     bool compile_cached_prefix_attn_fp8_e4m3_flash2_kernel(
         const std::string &arch,
         std::vector<char> *code,

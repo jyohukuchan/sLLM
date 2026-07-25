@@ -7392,6 +7392,123 @@ extern "C" __global__ void ullm_cached_prefix_attn_f32_flash2_kernel(
 )";
     }
 
+    // This isolated R9700-only source is intentionally a separate symbol.  It
+    // keeps the public Flash2 launch contract and F32 KV layout unchanged while
+    // replacing the three 256-lane LDS trees with wave32 reductions plus the
+    // necessary LDS handoff.  The normal source above remains the
+    // default until its numerical/resource/timing gates have passed.
+    static std::string cached_prefix_flash2_f32_staged_wave32_prototype_kernel_source() {
+        std::string source = R"(
+__device__ float ullm_sq8_0_flash2_reduce_sum_wave32(float value, float *partial) {
+    const unsigned int tid = threadIdx.x;
+    const unsigned int lane = tid & 31u;
+    const unsigned int wave = tid >> 5u;
+    const unsigned int wave_count = (blockDim.x + 31u) >> 5u;
+    for (int offset = 16; offset > 0; offset >>= 1) {
+        value += __shfl_down(value, offset, 32);
+    }
+    if (lane == 0u) {
+        partial[wave] = value;
+    }
+    __syncthreads();
+    if (wave == 0u) {
+        value = lane < wave_count ? partial[lane] : 0.0f;
+        for (int offset = 16; offset > 0; offset >>= 1) {
+            value += __shfl_down(value, offset, 32);
+        }
+        if (lane == 0u) {
+            partial[0] = value;
+        }
+    }
+    __syncthreads();
+    return partial[0];
+}
+
+__device__ float ullm_sq8_0_flash2_reduce_max_wave32(float value, float *partial) {
+    const unsigned int tid = threadIdx.x;
+    const unsigned int lane = tid & 31u;
+    const unsigned int wave = tid >> 5u;
+    const unsigned int wave_count = (blockDim.x + 31u) >> 5u;
+    for (int offset = 16; offset > 0; offset >>= 1) {
+        const float other = __shfl_down(value, offset, 32);
+        value = value > other ? value : other;
+    }
+    if (lane == 0u) {
+        partial[wave] = value;
+    }
+    __syncthreads();
+    if (wave == 0u) {
+        value = lane < wave_count ? partial[lane] : -3.4028234663852886e38f;
+        for (int offset = 16; offset > 0; offset >>= 1) {
+            const float other = __shfl_down(value, offset, 32);
+            value = value > other ? value : other;
+        }
+        if (lane == 0u) {
+            partial[0] = value;
+        }
+    }
+    __syncthreads();
+    return partial[0];
+}
+)";
+        source += cached_prefix_flash2_f32_kernel_source();
+        replace_all_source_text(
+            &source,
+            "ullm_cached_prefix_attn_f32_flash2_kernel",
+            "ullm_sq8_0_cached_prefix_attn_f32_flash2_staged_wave32_prototype_kernel");
+        replace_all_source_text(
+            &source,
+            "            reduce[tid] = partial;\n"
+            "            __syncthreads();\n"
+            "            for (unsigned int stride = blockDim.x >> 1; stride > 0; stride >>= 1) {\n"
+            "                if (tid < stride) {\n"
+            "                    reduce[tid] += reduce[tid + stride];\n"
+            "                }\n"
+            "                __syncthreads();\n"
+            "            }\n"
+            "            if (tid == 0u) {\n"
+            "                scores[tile_offset] = reduce[0] * softmax_scale;\n"
+            "            }\n"
+            "            __syncthreads();",
+            "            const float score =\n"
+            "                ullm_sq8_0_flash2_reduce_sum_wave32(partial, reduce) * softmax_scale;\n"
+            "            if (tid == 0u) {\n"
+            "                scores[tile_offset] = score;\n"
+            "            }\n"
+            "            __syncthreads();");
+        replace_all_source_text(
+            &source,
+            "        reduce[tid] = local_max;\n"
+            "        __syncthreads();\n"
+            "        for (unsigned int stride = blockDim.x >> 1; stride > 0; stride >>= 1) {\n"
+            "            if (tid < stride) {\n"
+            "                reduce[tid] = reduce[tid] > reduce[tid + stride] ? reduce[tid] : reduce[tid + stride];\n"
+            "            }\n"
+            "            __syncthreads();\n"
+            "        }",
+            "        const float tile_max = ullm_sq8_0_flash2_reduce_max_wave32(local_max, reduce);");
+        replace_all_source_text(
+            &source,
+            "            shared_tile_max = reduce[0];",
+            "            shared_tile_max = tile_max;");
+        replace_all_source_text(
+            &source,
+            "        reduce[tid] = local_sum;\n"
+            "        __syncthreads();\n"
+            "        for (unsigned int stride = blockDim.x >> 1; stride > 0; stride >>= 1) {\n"
+            "            if (tid < stride) {\n"
+            "                reduce[tid] += reduce[tid + stride];\n"
+            "            }\n"
+            "            __syncthreads();\n"
+            "        }",
+            "        const float tile_sum = ullm_sq8_0_flash2_reduce_sum_wave32(local_sum, reduce);");
+        replace_all_source_text(
+            &source,
+            "            shared_tile_sum = reduce[0];",
+            "            shared_tile_sum = tile_sum;");
+        return source;
+    }
+
     static const char *cached_prefix_flash2_fp8_e4m3_kernel_source() {
         return R"(
 __device__ float ullm_flash2_fp8_e4m3_to_f32(unsigned char value) {

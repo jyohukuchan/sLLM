@@ -2883,10 +2883,14 @@ HipCachedPrefixAttnFp8E4m3KernelCache &hip_cached_prefix_attn_fp8_e4m3_kernel_ca
 
 class HipCachedPrefixAttnF32Flash2KernelCache {
 public:
-    void *function_for_device(int device_id, std::string *error) {
+    void *function_for_device(
+        int device_id,
+        bool use_staged_wave32_prototype,
+        std::string *error) {
         std::lock_guard<std::mutex> lock(mutex_);
-        auto found = modules_.find(device_id);
-        if (found != modules_.end()) {
+        auto &modules = use_staged_wave32_prototype ? staged_wave32_prototype_modules_ : modules_;
+        auto found = modules.find(device_id);
+        if (found != modules.end()) {
             return found->second->function;
         }
 
@@ -2898,12 +2902,24 @@ public:
 
         std::string compile_errors;
         for (const std::string &arch : candidates) {
+            if (use_staged_wave32_prototype && arch.rfind("gfx1201", 0) != 0) {
+                append_error(
+                    &compile_errors,
+                    "staged wave32 Flash2 prototype is restricted to gfx1201");
+                continue;
+            }
             std::vector<char> code;
             std::string compile_error;
-            if (!hiprtc_runtime().compile_cached_prefix_attn_f32_flash2_kernel(
+            const bool compiled = use_staged_wave32_prototype ?
+                hiprtc_runtime().compile_cached_prefix_attn_f32_flash2_staged_wave32_prototype_kernel(
                     arch,
                     &code,
-                    &compile_error)) {
+                    &compile_error) :
+                hiprtc_runtime().compile_cached_prefix_attn_f32_flash2_kernel(
+                    arch,
+                    &code,
+                    &compile_error);
+            if (!compiled) {
                 append_error(&compile_errors, compile_error);
                 continue;
             }
@@ -2914,10 +2930,13 @@ public:
                 continue;
             }
             void *function = nullptr;
+            const char *function_name = use_staged_wave32_prototype ?
+                "ullm_sq8_0_cached_prefix_attn_f32_flash2_staged_wave32_prototype_kernel" :
+                "ullm_cached_prefix_attn_f32_flash2_kernel";
             if (!hip_runtime().module_get_function(
                     &function,
                     module,
-                    "ullm_cached_prefix_attn_f32_flash2_kernel",
+                    function_name,
                     device_id)) {
                 hip_runtime().module_unload(module, device_id);
                 append_error(&compile_errors, "hipModuleGetFunction failed for " + arch);
@@ -2929,13 +2948,15 @@ public:
             loaded->function = function;
             loaded->arch = arch;
             void *result = loaded->function;
-            modules_.emplace(device_id, std::move(loaded));
+            modules.emplace(device_id, std::move(loaded));
             return result;
         }
         append_error(
             error,
             compile_errors.empty() ?
-                "failed to build f32 cached prefix flash2 attention HIP kernel" :
+                (use_staged_wave32_prototype ?
+                    "failed to build f32 cached prefix Flash2 staged wave32 prototype HIP kernel" :
+                    "failed to build f32 cached prefix flash2 attention HIP kernel") :
                 compile_errors);
         return nullptr;
     }
@@ -2959,6 +2980,7 @@ private:
 
     std::mutex mutex_;
     std::unordered_map<int, std::unique_ptr<LoadedModule>> modules_;
+    std::unordered_map<int, std::unique_ptr<LoadedModule>> staged_wave32_prototype_modules_;
 };
 
 HipCachedPrefixAttnF32Flash2KernelCache &hip_cached_prefix_attn_f32_flash2_kernel_cache() {
@@ -3226,8 +3248,15 @@ bool cached_prefix_attn_f32_flash2_hip_kernel(
     ullm_runtime_stream *stream,
     std::string *error) {
     const int device_id = q_buffer->hip_device_id;
-    void *function =
-        hip_cached_prefix_attn_f32_flash2_kernel_cache().function_for_device(device_id, error);
+    // Presence-only by design: this is an isolated prototype admission control,
+    // never a production default.  It keeps the public ABI and ordinary Flash2
+    // dispatch unchanged while an isolated process compares the distinct body.
+    const bool use_staged_wave32_prototype =
+        std::getenv("ULLM_USE_SQ8_0_FLASH2_STAGED_WAVE32_PROTOTYPE") != nullptr;
+    void *function = hip_cached_prefix_attn_f32_flash2_kernel_cache().function_for_device(
+        device_id,
+        use_staged_wave32_prototype,
+        error);
     if (function == nullptr) {
         return false;
     }

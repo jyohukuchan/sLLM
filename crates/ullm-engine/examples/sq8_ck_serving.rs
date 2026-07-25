@@ -96,6 +96,10 @@ struct PrefillExecutionUnitResult {
     width: usize,
     end_position: usize,
     final_prompt_unit: bool,
+    /// Wall time of the synchronized prefill advance.  This is deliberately
+    /// recorded per unit so an M=128 attention comparison excludes model
+    /// loading and does not mistake profiler range time for throughput.
+    synchronized_seconds: f64,
     cache_lengths: Vec<usize>,
     cache_lengths_all_expected: bool,
     last_cache_position: usize,
@@ -385,6 +389,7 @@ fn run_completed_request(
             }
             _ => None,
         };
+        let advance_start = Instant::now();
         let advance = if let Some(capture_directory) = capture_directory {
             let oracle = session
                 .advance_prefill_oracle_synchronized(stream)
@@ -403,6 +408,7 @@ fn run_completed_request(
                 .advance_synchronized(stream)
                 .map_err(|err| err.to_string())?
         };
+        let advance_seconds = advance_start.elapsed().as_secs_f64();
         execution_units += 1;
         if let Some(before) = prefill_before {
             let after = session.snapshot();
@@ -432,6 +438,7 @@ fn run_completed_request(
                 width,
                 end_position,
                 final_prompt_unit: end_position == prompt_token_ids.len(),
+                synchronized_seconds: advance_seconds,
                 cache_lengths: after.cache_lengths,
                 cache_lengths_all_expected,
                 last_cache_position,
@@ -1077,6 +1084,12 @@ fn parse_options() -> Result<Options, String> {
                 ));
             }
             Some("--prompt-token-ids") => {
+                if prompt_token_ids_explicit {
+                    return Err(
+                        "--prompt-token-ids and --prompt-token-ids-u32le are mutually exclusive"
+                            .into(),
+                    );
+                }
                 let value = args
                     .next()
                     .ok_or_else(|| "--prompt-token-ids requires a value".to_string())?;
@@ -1085,6 +1098,19 @@ fn parse_options() -> Result<Options, String> {
                         .to_str()
                         .ok_or_else(|| "prompt token IDs must be UTF-8".to_string())?,
                 )?;
+                prompt_token_ids_explicit = true;
+            }
+            Some("--prompt-token-ids-u32le") => {
+                if prompt_token_ids_explicit {
+                    return Err(
+                        "--prompt-token-ids and --prompt-token-ids-u32le are mutually exclusive"
+                            .into(),
+                    );
+                }
+                let path = PathBuf::from(args.next().ok_or_else(|| {
+                    "--prompt-token-ids-u32le requires a path".to_string()
+                })?);
+                prompt_token_ids = read_u32le_token_ids(&path)?;
                 prompt_token_ids_explicit = true;
             }
             Some("--max-new-tokens") => {
@@ -1289,6 +1315,26 @@ fn parse_token_ids(value: &str) -> Result<Vec<usize>, String> {
         .map(|part| {
             part.parse::<usize>()
                 .map_err(|err| format!("invalid prompt token ID {part:?}: {err}"))
+        })
+        .collect()
+}
+
+/// Read an existing oracle input without reserializing its token IDs through
+/// the shell.  SQ8 serving fixtures use canonical little-endian u32 values.
+fn read_u32le_token_ids(path: &Path) -> Result<Vec<usize>, String> {
+    let bytes = std::fs::read(path)
+        .map_err(|err| format!("failed to read prompt token file {}: {err}", path.display()))?;
+    if bytes.is_empty() || bytes.len() % std::mem::size_of::<u32>() != 0 {
+        return Err(format!(
+            "prompt token file {} must be a nonempty sequence of little-endian u32 values",
+            path.display()
+        ));
+    }
+    bytes
+        .chunks_exact(std::mem::size_of::<u32>())
+        .map(|chunk| {
+            usize::try_from(u32::from_le_bytes(chunk.try_into().expect("u32-sized chunk")))
+                .map_err(|_| format!("prompt token in {} does not fit usize", path.display()))
         })
         .collect()
 }
