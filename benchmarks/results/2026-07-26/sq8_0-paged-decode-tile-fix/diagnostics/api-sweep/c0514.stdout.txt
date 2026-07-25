@@ -1,0 +1,13 @@
+{
+  "schema_version": "ullm.sq8_0.r9700.paged_decode_split.v0.1",
+  "scope": "explicit existing split API comparison; direct legacy dispatch unchanged",
+  "device": {"runtime_device":1,"backend":"hip","gcn_arch_name":"gfx1201"},
+  "shape": {"cache_len":514,"block_size":16,"cache_blocks":256,"q_heads":40,"kv_heads":8,"head_dim":128,"value_dim":128},
+  "timing_scope": "host API call plus stream synchronize per M=1 attention invocation; excludes model layers and profiler",
+  "direct_legacy": {"mean_ms":0.379732666667,"min_ms":0.379026000000,"max_ms":0.380416000000},
+  "tiles": [
+    {"source_tile":128,"split_count":5,"workspace_bytes":104000,"differential_vs_direct":{"max_abs":0.000000104308,"max_rel":0.001056015792,"max_abs_index":771,"non_finite":0},"timing":{"mean_ms":0.149625666667,"min_ms":0.148852000000,"max_ms":0.150352000000}},
+    {"source_tile":256,"split_count":3,"workspace_bytes":62400,"differential_vs_direct":{"max_abs":0.000000104308,"max_rel":0.000801553512,"max_abs_index":1991,"non_finite":0},"timing":{"mean_ms":0.239860333333,"min_ms":0.238193000000,"max_ms":0.240924000000}},
+    {"source_tile":512,"split_count":2,"workspace_bytes":41600,"differential_vs_direct":{"max_abs":0.000000014901,"max_rel":0.000025792328,"max_abs_index":1197,"non_finite":0},"timing":{"mean_ms":0.442743666667,"min_ms":0.440187000000,"max_ms":0.445327000000}}
+  ]
+}

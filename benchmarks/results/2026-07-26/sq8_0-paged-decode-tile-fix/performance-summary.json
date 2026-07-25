@@ -1,0 +1,127 @@
+{
+  "result_dir": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-26/sq8_0-paged-decode-tile-fix",
+  "routes": {
+    "direct": {
+      "generated_token_ids": [
+        66,
+        198,
+        197,
+        197,
+        280,
+        197,
+        197,
+        280
+      ],
+      "m1_generated_indices": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7
+      ],
+      "m1_sample_count": 7,
+      "m1_samples_seconds": [
+        0.077483497,
+        0.050098355,
+        0.050737146,
+        0.050515862,
+        0.050089495,
+        0.05033901,
+        0.050677204
+      ],
+      "max_seconds": 0.077483497,
+      "mean_seconds": 0.05427722414285714,
+      "median_seconds": 0.050515862,
+      "min_seconds": 0.050089495,
+      "multi_tile_policy": null,
+      "result": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-26/sq8_0-paged-decode-tile-fix/performance/direct/result.json",
+      "speedup_vs_direct": 1.0,
+      "split_source_tile": null,
+      "token_exact_match_direct": true
+    },
+    "tile128": {
+      "generated_token_ids": [
+        66,
+        198,
+        197,
+        197,
+        280,
+        197,
+        197,
+        280
+      ],
+      "m1_generated_indices": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7
+      ],
+      "m1_sample_count": 7,
+      "m1_samples_seconds": [
+        0.085250767,
+        0.050438923,
+        0.050515455,
+        0.050587675,
+        0.05086802,
+        0.050755068,
+        0.050759489
+      ],
+      "max_seconds": 0.085250767,
+      "mean_seconds": 0.05559648528571428,
+      "median_seconds": 0.050755068,
+      "min_seconds": 0.050438923,
+      "multi_tile_policy": "direct-fallback-exact-state.v1",
+      "result": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-26/sq8_0-paged-decode-tile-fix/performance/tile128/result.json",
+      "speedup_vs_direct": 0.9762707815776958,
+      "split_source_tile": 128,
+      "token_exact_match_direct": true
+    },
+    "tile256": {
+      "generated_token_ids": [
+        66,
+        198,
+        197,
+        197,
+        280,
+        197,
+        197,
+        280
+      ],
+      "m1_generated_indices": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7
+      ],
+      "m1_sample_count": 7,
+      "m1_samples_seconds": [
+        0.076594888,
+        0.05013674,
+        0.050030728,
+        0.050095349,
+        0.050609098,
+        0.050337433,
+        0.050316713
+      ],
+      "max_seconds": 0.076594888,
+      "mean_seconds": 0.05401727842857142,
+      "median_seconds": 0.050316713,
+      "min_seconds": 0.050030728,
+      "multi_tile_policy": "direct-fallback-exact-state.v1",
+      "result": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-26/sq8_0-paged-decode-tile-fix/performance/tile256/result.json",
+      "speedup_vs_direct": 1.0048122697375332,
+      "split_source_tile": 256,
+      "token_exact_match_direct": true
+    }
+  },
+  "schema_version": "ullm.sq8_0.paged_decode_tile_performance_summary.v1",
+  "timing_scope": "synchronized whole-model M=1 generated indices 1..N; excludes model load, prefill, reset, and oracle capture"
+}

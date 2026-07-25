@@ -420,3 +420,51 @@ power-cap/profile change was made.
 Raw captures, comparator results, service events, telemetry, and the decoded
 throttle caveats are retained under
 benchmarks/results/2026-07-26/sq8_0-paged-decode-tile-gate/.
+
+## Paged decode source-tile containment fix — 2026-07-26
+
+The source-level cause of the preceding tile NO-GO is now localized. An
+unfixed direct-versus-tile128 capture after decode g0001 at cache length 129
+read the logical written KV prefix for all 40 layers: every K and V F32 value
+was bit-identical (132,096 elements per component per layer, worst max abs and
+relative L2 both zero). Therefore a g0001 KV write-position/range divergence
+does not explain the first large g0002 result.
+
+The R9700 API sweep instead has a precise onset when `split_count > 1`:
+tile128 is exact at C=128 and nonzero at C=129 (2 splits), while it is also
+nonzero at exact-multiple, no-source-tail C=256; tile256 is exact at C=256 and
+nonzero at C=257 (2 splits), and is nonzero at exact-multiple C=512. Thus a
+tail/page interaction is not required for the bug. The split body computes
+per-tile online-softmax max/denominator/numerator states and rescales them in
+a merge, whereas direct carries one online state through all sources. The two
+have different F32 association once there is more than one tile. The
+standalone difference is only about 1e-8--1e-7, but the SQ8 path has 160
+activation quantizations across its 40 layers; the real-prompt gate shows
+that this violates the direct numerical contract. The exact first
+quantizer-boundary crossing was not instrumented and remains **未確認**.
+
+The fix is deliberately a tile-experiment-only containment: one source tile
+still uses the split body, while every multi-tile invocation reuses the
+existing direct paged-decode kernel. Ordinary environment-absent direct
+dispatch, legacy dispatch, and runtime/kernel ABI are unchanged. A test-only
+logical KV-prefix capture/evaluator was added so later candidates can repeat
+this state check. A genuinely exact multi-tile merge is still required before
+the performance implementation can be reconsidered.
+
+The frozen gate criteria are byte-identical to the NO-GO criteria (SHA-256
+`645df099030dcf3beca1289e0cc848f0f9c53c1725866896e06848631d962978`). On
+R9700, tile128 and tile256 each pass all 24 full-model hidden/logit vector
+pairs with exact generated tokens, finite values, and `max_abs=0.0`. This is
+a containment pass, not evidence that multi-tile split is safe; direct remains
+the default and there is no default promotion.
+
+At raw-p0512 cache lengths 513--519, both candidates take the direct fallback.
+The new synchronized M=1 means are direct 54.277224 ms, tile128 55.596485 ms
+(0.9763x), and tile256 54.017278 ms (1.0048x). The earlier tile128 1.2365x
+is not retained, as expected when the unsafe multi-tile work is removed.
+Telemetry reported throttle states during this one-window timing series, so
+the near-1x timing values are conditional; they do not weaken the deterministic
+numerical diagnosis. The window stopped once at 07:09:42+09:00 and restored
+on the initial start at 07:19:21+09:00, with `NRestarts=0`,
+llama-qwen35-udq4 inactive/disabled, and gdm3 inactive. Evidence is retained
+under benchmarks/results/2026-07-26/sq8_0-paged-decode-tile-fix/.

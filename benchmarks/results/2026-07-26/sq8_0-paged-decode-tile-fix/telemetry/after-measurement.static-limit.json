@@ -1,0 +1,54 @@
+{
+    "gpu_data": [
+        {
+            "gpu": 2,
+            "limit": {
+                "ppt0": {
+                    "max_power_limit": {
+                        "value": 330,
+                        "unit": "W"
+                    },
+                    "min_power_limit": {
+                        "value": 210,
+                        "unit": "W"
+                    },
+                    "socket_power_limit": {
+                        "value": 300,
+                        "unit": "W"
+                    }
+                },
+                "ppt1": {
+                    "max_power_limit": "N/A",
+                    "min_power_limit": "N/A",
+                    "socket_power_limit": "N/A"
+                },
+                "slowdown_edge_temperature": {
+                    "value": 110,
+                    "unit": "C"
+                },
+                "slowdown_hotspot_temperature": {
+                    "value": 110,
+                    "unit": "C"
+                },
+                "slowdown_vram_temperature": {
+                    "value": 108,
+                    "unit": "C"
+                },
+                "shutdown_edge_temperature": {
+                    "value": 115,
+                    "unit": "C"
+                },
+                "shutdown_hotspot_temperature": {
+                    "value": 115,
+                    "unit": "C"
+                },
+                "shutdown_vram_temperature": {
+                    "value": 113,
+                    "unit": "C"
+                },
+                "ptl_state": "N/A",
+                "ptl_format": "N/A"
+            }
+        }
+    ]
+}

@@ -1,0 +1,436 @@
+{
+  "criteria": {
+    "acceptance_rule": "Every direct-vs-candidate paired real-prompt decode capture must be finite, token-exact, and meet all vector thresholds. Any missing capture, early EOS before four generated tokens, geometry mismatch, hash mismatch, or comparator failure fails the route.",
+    "candidate_routes": [
+      "tile128",
+      "tile256"
+    ],
+    "case_groups": [
+      {
+        "name": "p0128-boundary-tail",
+        "requests": [
+          {
+            "decode_cache_lengths": [
+              128,
+              129,
+              130
+            ],
+            "prompt_id": "raw-p0128-prefix127",
+            "prompt_tokens": 127,
+            "request_id": "serving-smoke-1"
+          },
+          {
+            "decode_cache_lengths": [
+              129,
+              130,
+              131
+            ],
+            "prompt_id": "raw-p0128",
+            "prompt_tokens": 128,
+            "request_id": "serving-smoke-2"
+          }
+        ]
+      },
+      {
+        "name": "p0512-boundary-tail",
+        "requests": [
+          {
+            "decode_cache_lengths": [
+              512,
+              513,
+              514
+            ],
+            "prompt_id": "raw-p0512-prefix511",
+            "prompt_tokens": 511,
+            "request_id": "serving-smoke-1"
+          },
+          {
+            "decode_cache_lengths": [
+              513,
+              514,
+              515
+            ],
+            "prompt_id": "raw-p0512",
+            "prompt_tokens": 512,
+            "request_id": "serving-smoke-2"
+          }
+        ]
+      }
+    ],
+    "frozen_before_measurement": true,
+    "generation": {
+      "captured_decode_indices": [
+        1,
+        2,
+        3
+      ],
+      "max_new_tokens": 4
+    },
+    "reference_route": "direct",
+    "schema_version": "ullm.sq8_0.paged_decode_tile_gate_criteria.v1",
+    "thresholds": {
+      "all_values_must_be_finite": true,
+      "cosine_similarity": 0.999999,
+      "max_abs": 2e-05,
+      "relative_l2": 1e-05,
+      "token_exact_match": true
+    }
+  },
+  "criteria_sha256": "645df099030dcf3beca1289e0cc848f0f9c53c1725866896e06848631d962978",
+  "failures": [],
+  "passed": true,
+  "result_dir": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-26/sq8_0-paged-decode-tile-fix",
+  "routes": {
+    "tile128": {
+      "passed": true,
+      "token_exact_match": true,
+      "vector_comparison_count": 24,
+      "vector_comparisons": [
+        {
+          "cosine_similarity": 1.0,
+          "max_abs": 0.0,
+          "passed": true,
+          "path": "comparisons/tile128/p0128-boundary-tail/serving-smoke-1/g0001-hidden.json",
+          "relative_l2": 0.0
+        },
+        {
+          "cosine_similarity": 1.0000000000000002,
+          "max_abs": 0.0,
+          "passed": true,
+          "path": "comparisons/tile128/p0128-boundary-tail/serving-smoke-1/g0001-logits.json",
+          "relative_l2": 0.0
+        },
+        {
+          "cosine_similarity": 1.0,
+          "max_abs": 0.0,
+          "passed": true,
+          "path": "comparisons/tile128/p0128-boundary-tail/serving-smoke-1/g0002-hidden.json",
+          "relative_l2": 0.0
+        },
+        {
+          "cosine_similarity": 1.0000000000000002,
+          "max_abs": 0.0,
+          "passed": true,
+          "path": "comparisons/tile128/p0128-boundary-tail/serving-smoke-1/g0002-logits.json",
+          "relative_l2": 0.0
+        },
+        {
+          "cosine_similarity": 1.0,
+          "max_abs": 0.0,
+          "passed": true,
+          "path": "comparisons/tile128/p0128-boundary-tail/serving-smoke-1/g0003-hidden.json",
+          "relative_l2": 0.0
+        },
+        {
+          "cosine_similarity": 1.0000000000000002,
+          "max_abs": 0.0,
+          "passed": true,
+          "path": "comparisons/tile128/p0128-boundary-tail/serving-smoke-1/g0003-logits.json",
+          "relative_l2": 0.0
+        },
+        {
+          "cosine_similarity": 1.0,
+          "max_abs": 0.0,
+          "passed": true,
+          "path": "comparisons/tile128/p0128-boundary-tail/serving-smoke-2/g0001-hidden.json",
+          "relative_l2": 0.0
+        },
+        {
+          "cosine_similarity": 1.0,
+          "max_abs": 0.0,
+          "passed": true,
+          "path": "comparisons/tile128/p0128-boundary-tail/serving-smoke-2/g0001-logits.json",
+          "relative_l2": 0.0
+        },
+        {
+          "cosine_similarity": 1.0,
+          "max_abs": 0.0,
+          "passed": true,
+          "path": "comparisons/tile128/p0128-boundary-tail/serving-smoke-2/g0002-hidden.json",
+          "relative_l2": 0.0
+        },
+        {
+          "cosine_similarity": 0.9999999999999998,
+          "max_abs": 0.0,
+          "passed": true,
+          "path": "comparisons/tile128/p0128-boundary-tail/serving-smoke-2/g0002-logits.json",
+          "relative_l2": 0.0
+        },
+        {
+          "cosine_similarity": 0.9999999999999999,
+          "max_abs": 0.0,
+          "passed": true,
+          "path": "comparisons/tile128/p0128-boundary-tail/serving-smoke-2/g0003-hidden.json",
+          "relative_l2": 0.0
+        },
+        {
+          "cosine_similarity": 1.0,
+          "max_abs": 0.0,
+          "passed": true,
+          "path": "comparisons/tile128/p0128-boundary-tail/serving-smoke-2/g0003-logits.json",
+          "relative_l2": 0.0
+        },
+        {
+          "cosine_similarity": 0.9999999999999998,
+          "max_abs": 0.0,
+          "passed": true,
+          "path": "comparisons/tile128/p0512-boundary-tail/serving-smoke-1/g0001-hidden.json",
+          "relative_l2": 0.0
+        },
+        {
+          "cosine_similarity": 0.9999999999999998,
+          "max_abs": 0.0,
+          "passed": true,
+          "path": "comparisons/tile128/p0512-boundary-tail/serving-smoke-1/g0001-logits.json",
+          "relative_l2": 0.0
+        },
+        {
+          "cosine_similarity": 1.0,
+          "max_abs": 0.0,
+          "passed": true,
+          "path": "comparisons/tile128/p0512-boundary-tail/serving-smoke-1/g0002-hidden.json",
+          "relative_l2": 0.0
+        },
+        {
+          "cosine_similarity": 1.0,
+          "max_abs": 0.0,
+          "passed": true,
+          "path": "comparisons/tile128/p0512-boundary-tail/serving-smoke-1/g0002-logits.json",
+          "relative_l2": 0.0
+        },
+        {
+          "cosine_similarity": 1.0,
+          "max_abs": 0.0,
+          "passed": true,
+          "path": "comparisons/tile128/p0512-boundary-tail/serving-smoke-1/g0003-hidden.json",
+          "relative_l2": 0.0
+        },
+        {
+          "cosine_similarity": 1.0,
+          "max_abs": 0.0,
+          "passed": true,
+          "path": "comparisons/tile128/p0512-boundary-tail/serving-smoke-1/g0003-logits.json",
+          "relative_l2": 0.0
+        },
+        {
+          "cosine_similarity": 1.0,
+          "max_abs": 0.0,
+          "passed": true,
+          "path": "comparisons/tile128/p0512-boundary-tail/serving-smoke-2/g0001-hidden.json",
+          "relative_l2": 0.0
+        },
+        {
+          "cosine_similarity": 0.9999999999999998,
+          "max_abs": 0.0,
+          "passed": true,
+          "path": "comparisons/tile128/p0512-boundary-tail/serving-smoke-2/g0001-logits.json",
+          "relative_l2": 0.0
+        },
+        {
+          "cosine_similarity": 1.0000000000000002,
+          "max_abs": 0.0,
+          "passed": true,
+          "path": "comparisons/tile128/p0512-boundary-tail/serving-smoke-2/g0002-hidden.json",
+          "relative_l2": 0.0
+        },
+        {
+          "cosine_similarity": 0.9999999999999998,
+          "max_abs": 0.0,
+          "passed": true,
+          "path": "comparisons/tile128/p0512-boundary-tail/serving-smoke-2/g0002-logits.json",
+          "relative_l2": 0.0
+        },
+        {
+          "cosine_similarity": 1.0000000000000002,
+          "max_abs": 0.0,
+          "passed": true,
+          "path": "comparisons/tile128/p0512-boundary-tail/serving-smoke-2/g0003-hidden.json",
+          "relative_l2": 0.0
+        },
+        {
+          "cosine_similarity": 1.0,
+          "max_abs": 0.0,
+          "passed": true,
+          "path": "comparisons/tile128/p0512-boundary-tail/serving-smoke-2/g0003-logits.json",
+          "relative_l2": 0.0
+        }
+      ]
+    },
+    "tile256": {
+      "passed": true,
+      "token_exact_match": true,
+      "vector_comparison_count": 24,
+      "vector_comparisons": [
+        {
+          "cosine_similarity": 1.0,
+          "max_abs": 0.0,
+          "passed": true,
+          "path": "comparisons/tile256/p0128-boundary-tail/serving-smoke-1/g0001-hidden.json",
+          "relative_l2": 0.0
+        },
+        {
+          "cosine_similarity": 1.0000000000000002,
+          "max_abs": 0.0,
+          "passed": true,
+          "path": "comparisons/tile256/p0128-boundary-tail/serving-smoke-1/g0001-logits.json",
+          "relative_l2": 0.0
+        },
+        {
+          "cosine_similarity": 1.0,
+          "max_abs": 0.0,
+          "passed": true,
+          "path": "comparisons/tile256/p0128-boundary-tail/serving-smoke-1/g0002-hidden.json",
+          "relative_l2": 0.0
+        },
+        {
+          "cosine_similarity": 1.0000000000000002,
+          "max_abs": 0.0,
+          "passed": true,
+          "path": "comparisons/tile256/p0128-boundary-tail/serving-smoke-1/g0002-logits.json",
+          "relative_l2": 0.0
+        },
+        {
+          "cosine_similarity": 1.0,
+          "max_abs": 0.0,
+          "passed": true,
+          "path": "comparisons/tile256/p0128-boundary-tail/serving-smoke-1/g0003-hidden.json",
+          "relative_l2": 0.0
+        },
+        {
+          "cosine_similarity": 1.0000000000000002,
+          "max_abs": 0.0,
+          "passed": true,
+          "path": "comparisons/tile256/p0128-boundary-tail/serving-smoke-1/g0003-logits.json",
+          "relative_l2": 0.0
+        },
+        {
+          "cosine_similarity": 1.0,
+          "max_abs": 0.0,
+          "passed": true,
+          "path": "comparisons/tile256/p0128-boundary-tail/serving-smoke-2/g0001-hidden.json",
+          "relative_l2": 0.0
+        },
+        {
+          "cosine_similarity": 1.0,
+          "max_abs": 0.0,
+          "passed": true,
+          "path": "comparisons/tile256/p0128-boundary-tail/serving-smoke-2/g0001-logits.json",
+          "relative_l2": 0.0
+        },
+        {
+          "cosine_similarity": 1.0,
+          "max_abs": 0.0,
+          "passed": true,
+          "path": "comparisons/tile256/p0128-boundary-tail/serving-smoke-2/g0002-hidden.json",
+          "relative_l2": 0.0
+        },
+        {
+          "cosine_similarity": 0.9999999999999998,
+          "max_abs": 0.0,
+          "passed": true,
+          "path": "comparisons/tile256/p0128-boundary-tail/serving-smoke-2/g0002-logits.json",
+          "relative_l2": 0.0
+        },
+        {
+          "cosine_similarity": 0.9999999999999999,
+          "max_abs": 0.0,
+          "passed": true,
+          "path": "comparisons/tile256/p0128-boundary-tail/serving-smoke-2/g0003-hidden.json",
+          "relative_l2": 0.0
+        },
+        {
+          "cosine_similarity": 1.0,
+          "max_abs": 0.0,
+          "passed": true,
+          "path": "comparisons/tile256/p0128-boundary-tail/serving-smoke-2/g0003-logits.json",
+          "relative_l2": 0.0
+        },
+        {
+          "cosine_similarity": 0.9999999999999998,
+          "max_abs": 0.0,
+          "passed": true,
+          "path": "comparisons/tile256/p0512-boundary-tail/serving-smoke-1/g0001-hidden.json",
+          "relative_l2": 0.0
+        },
+        {
+          "cosine_similarity": 0.9999999999999998,
+          "max_abs": 0.0,
+          "passed": true,
+          "path": "comparisons/tile256/p0512-boundary-tail/serving-smoke-1/g0001-logits.json",
+          "relative_l2": 0.0
+        },
+        {
+          "cosine_similarity": 1.0,
+          "max_abs": 0.0,
+          "passed": true,
+          "path": "comparisons/tile256/p0512-boundary-tail/serving-smoke-1/g0002-hidden.json",
+          "relative_l2": 0.0
+        },
+        {
+          "cosine_similarity": 1.0,
+          "max_abs": 0.0,
+          "passed": true,
+          "path": "comparisons/tile256/p0512-boundary-tail/serving-smoke-1/g0002-logits.json",
+          "relative_l2": 0.0
+        },
+        {
+          "cosine_similarity": 1.0,
+          "max_abs": 0.0,
+          "passed": true,
+          "path": "comparisons/tile256/p0512-boundary-tail/serving-smoke-1/g0003-hidden.json",
+          "relative_l2": 0.0
+        },
+        {
+          "cosine_similarity": 1.0,
+          "max_abs": 0.0,
+          "passed": true,
+          "path": "comparisons/tile256/p0512-boundary-tail/serving-smoke-1/g0003-logits.json",
+          "relative_l2": 0.0
+        },
+        {
+          "cosine_similarity": 1.0,
+          "max_abs": 0.0,
+          "passed": true,
+          "path": "comparisons/tile256/p0512-boundary-tail/serving-smoke-2/g0001-hidden.json",
+          "relative_l2": 0.0
+        },
+        {
+          "cosine_similarity": 0.9999999999999998,
+          "max_abs": 0.0,
+          "passed": true,
+          "path": "comparisons/tile256/p0512-boundary-tail/serving-smoke-2/g0001-logits.json",
+          "relative_l2": 0.0
+        },
+        {
+          "cosine_similarity": 1.0000000000000002,
+          "max_abs": 0.0,
+          "passed": true,
+          "path": "comparisons/tile256/p0512-boundary-tail/serving-smoke-2/g0002-hidden.json",
+          "relative_l2": 0.0
+        },
+        {
+          "cosine_similarity": 0.9999999999999998,
+          "max_abs": 0.0,
+          "passed": true,
+          "path": "comparisons/tile256/p0512-boundary-tail/serving-smoke-2/g0002-logits.json",
+          "relative_l2": 0.0
+        },
+        {
+          "cosine_similarity": 1.0000000000000002,
+          "max_abs": 0.0,
+          "passed": true,
+          "path": "comparisons/tile256/p0512-boundary-tail/serving-smoke-2/g0003-hidden.json",
+          "relative_l2": 0.0
+        },
+        {
+          "cosine_similarity": 1.0,
+          "max_abs": 0.0,
+          "passed": true,
+          "path": "comparisons/tile256/p0512-boundary-tail/serving-smoke-2/g0003-logits.json",
+          "relative_l2": 0.0
+        }
+      ]
+    }
+  },
+  "schema_version": "ullm.sq8_0.paged_decode_tile_gate_summary.v1"
+}
