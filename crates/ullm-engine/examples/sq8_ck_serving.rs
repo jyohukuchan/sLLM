@@ -49,6 +49,7 @@ struct Options {
     cancel_after_first_token: bool,
     cancel_after_prompt_progress: Option<usize>,
     oracle_capture_dir: Option<PathBuf>,
+    decode_oracle_capture_dir: Option<PathBuf>,
     result_json: Option<PathBuf>,
 }
 
@@ -90,6 +91,8 @@ struct ServingCaseResult {
     request_seconds: f64,
     reset_seconds: f64,
     oracle_capture: Option<OracleCaptureResult>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    decode_oracle_captures: Option<Vec<DecodeOracleCaptureResult>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -127,6 +130,21 @@ struct GeneratedStepResult {
 
 #[derive(Debug, Serialize)]
 struct OracleCaptureResult {
+    position: usize,
+    top1_token_id: usize,
+    top1_logit: f32,
+    final_hidden_file: PathBuf,
+    final_hidden_f32_le_sha256: String,
+    logits_file: PathBuf,
+    logits_f32_le_sha256: String,
+}
+
+/// A full-model oracle captured after an actual feedback-token M=1 decode
+/// step.  Unlike `OracleCaptureResult`, this is never the final prefill head.
+#[derive(Debug, Serialize)]
+struct DecodeOracleCaptureResult {
+    generated_index: usize,
+    cache_len: usize,
     position: usize,
     top1_token_id: usize,
     top1_logit: f32,
@@ -218,6 +236,14 @@ fn main() -> Result<(), String> {
         std::fs::create_dir(directory).map_err(|err| {
             format!(
                 "failed to create new oracle capture directory {}: {err}",
+                directory.display()
+            )
+        })?;
+    }
+    if let Some(directory) = &options.decode_oracle_capture_dir {
+        std::fs::create_dir(directory).map_err(|err| {
+            format!(
+                "failed to create new decode oracle capture directory {}: {err}",
                 directory.display()
             )
         })?;
@@ -359,6 +385,7 @@ fn run_completed_request(
     } = case;
     let test_only_ignore_eos = options.test_only_ignore_eos;
     let oracle_capture_dir = options.oracle_capture_dir.as_deref();
+    let decode_oracle_capture_dir = options.decode_oracle_capture_dir.as_deref();
     let evidence_root = options.result_json.as_deref().and_then(Path::parent);
     let request = if test_only_ignore_eos {
         Sq8ServingRequest::greedy_ignore_eos_for_testing(
@@ -384,6 +411,7 @@ fn run_completed_request(
     let mut execution_units = 0_usize;
     let mut prefill_execution_units = Vec::new();
     let mut oracle_capture = None;
+    let mut decode_oracle_captures = decode_oracle_capture_dir.map(|_| Vec::new());
     let terminal_reason = loop {
         let prefill_before =
             (session.status() == Sq8ServingRuntimeStatus::Prefilling).then(|| session.snapshot());
@@ -396,6 +424,10 @@ fn run_completed_request(
             }
             _ => None,
         };
+        let decode_capture_directory = (session.status() == Sq8ServingRuntimeStatus::Decoding)
+            .then_some(decode_oracle_capture_dir)
+            .flatten();
+        let mut pending_decode_capture = None;
         let advance_start = Instant::now();
         let advance = if let Some(capture_directory) = capture_directory {
             let oracle = session
@@ -409,6 +441,12 @@ fn run_completed_request(
                     evidence_root,
                 )?);
             }
+            oracle.advance
+        } else if decode_capture_directory.is_some() {
+            let oracle = session
+                .advance_decode_oracle_synchronized(stream)
+                .map_err(|err| err.to_string())?;
+            pending_decode_capture = oracle.capture;
             oracle.advance
         } else {
             session
@@ -460,6 +498,32 @@ fn run_completed_request(
                 cache_len,
                 terminal_reason,
             } => {
+                if let Some(capture_directory) = decode_capture_directory {
+                    let capture = pending_decode_capture.ok_or_else(|| {
+                        format!(
+                            "serving decode oracle omitted capture at generated index {generated_index}"
+                        )
+                    })?;
+                    if capture.position + 1 != cache_len {
+                        return Err(format!(
+                            "serving decode oracle position/cache mismatch: position={} cache_len={cache_len}",
+                            capture.position
+                        ));
+                    }
+                    let captures = decode_oracle_captures.as_mut().ok_or_else(|| {
+                        "serving decode oracle capture bookkeeping is unavailable".to_string()
+                    })?;
+                    captures.push(persist_decode_oracle_capture(
+                        capture_directory,
+                        &request_id,
+                        generated_index,
+                        cache_len,
+                        capture,
+                        evidence_root,
+                    )?);
+                } else if pending_decode_capture.is_some() {
+                    return Err("serving decode oracle capture escaped its output directory".into());
+                }
                 if let Some(steps) = generated_steps.as_mut() {
                     let expected_cache_len = prompt_token_ids
                         .len()
@@ -574,6 +638,24 @@ fn run_completed_request(
             "serving smoke terminal snapshot mismatch: snapshot={terminal_snapshot:?} "
         ));
     }
+    if let Some(captures) = &decode_oracle_captures {
+        if captures.len() != expected_decode_calls
+            || captures.iter().enumerate().any(|(offset, capture)| {
+                let generated_index = offset + 1;
+                capture.generated_index != generated_index
+                    || capture.cache_len
+                        != prompt_token_ids
+                            .len()
+                            .checked_add(generated_index)
+                            .unwrap_or(usize::MAX)
+                    || capture.position + 1 != capture.cache_len
+            })
+        {
+            return Err(format!(
+                "serving decode oracle capture sequence mismatch: captures={captures:?}"
+            ));
+        }
+    }
     let terminal_last_cache_position = terminal_expected_cache_len - 1;
     let terminal_last_logical_block =
         terminal_last_cache_position / QWEN3_14B_SQ8_SERVING_BLOCK_TOKENS;
@@ -625,6 +707,7 @@ fn run_completed_request(
         request_seconds,
         reset_seconds,
         oracle_capture,
+        decode_oracle_captures,
     })
 }
 
@@ -641,6 +724,34 @@ fn persist_oracle_capture(
     let recorded_final_hidden = evidence_path(&final_hidden_file, evidence_root);
     let recorded_logits = evidence_path(&logits_file, evidence_root);
     Ok(OracleCaptureResult {
+        position: capture.position,
+        top1_token_id: capture.top1.token_id,
+        top1_logit: capture.top1.logit,
+        final_hidden_file: recorded_final_hidden,
+        final_hidden_f32_le_sha256: capture.final_hidden_f32_le_sha256,
+        logits_file: recorded_logits,
+        logits_f32_le_sha256: capture.logits_f32_le_sha256,
+    })
+}
+
+fn persist_decode_oracle_capture(
+    directory: &Path,
+    request_id: &str,
+    generated_index: usize,
+    cache_len: usize,
+    capture: ullm_engine::sq8_serving_runtime::Sq8ServingOracleCapture,
+    evidence_root: Option<&Path>,
+) -> Result<DecodeOracleCaptureResult, String> {
+    let prefix = format!("{request_id}-decode-g{generated_index:04}-c{cache_len:04}");
+    let final_hidden_file = directory.join(format!("{prefix}-final-hidden.f32le"));
+    let logits_file = directory.join(format!("{prefix}-logits.f32le"));
+    write_f32_le_create_new(&final_hidden_file, &capture.final_hidden)?;
+    write_f32_le_create_new(&logits_file, &capture.logits)?;
+    let recorded_final_hidden = evidence_path(&final_hidden_file, evidence_root);
+    let recorded_logits = evidence_path(&logits_file, evidence_root);
+    Ok(DecodeOracleCaptureResult {
+        generated_index,
+        cache_len,
         position: capture.position,
         top1_token_id: capture.top1.token_id,
         top1_logit: capture.top1.logit,
@@ -1076,6 +1187,7 @@ fn parse_options() -> Result<Options, String> {
     let mut cancel_after_first_token = false;
     let mut cancel_after_prompt_progress = None;
     let mut oracle_capture_dir = None;
+    let mut decode_oracle_capture_dir = None;
     let mut result_json = None;
     let mut args = std::env::args_os().skip(1);
     while let Some(argument) = args.next() {
@@ -1195,6 +1307,12 @@ fn parse_options() -> Result<Options, String> {
                         "--oracle-capture-dir requires a path".to_string()
                     })?));
             }
+            Some("--decode-oracle-capture-dir") => {
+                decode_oracle_capture_dir =
+                    Some(PathBuf::from(args.next().ok_or_else(|| {
+                        "--decode-oracle-capture-dir requires a path".to_string()
+                    })?));
+            }
             Some("--result-json") => {
                 result_json =
                     Some(PathBuf::from(args.next().ok_or_else(|| {
@@ -1214,6 +1332,9 @@ fn parse_options() -> Result<Options, String> {
     if cancel_after_first_token && cancel_after_prompt_progress.is_some() {
         return Err("cancellation modes must be mutually exclusive".into());
     }
+    if oracle_capture_dir.is_some() && oracle_capture_dir == decode_oracle_capture_dir {
+        return Err("prefill and decode oracle capture directories must differ".into());
+    }
     if test_only_ignore_eos
         && (!matches!(
             prefill_mode,
@@ -1224,6 +1345,7 @@ fn parse_options() -> Result<Options, String> {
             || cancel_after_first_token
             || cancel_after_prompt_progress.is_some()
             || oracle_capture_dir.is_some()
+            || decode_oracle_capture_dir.is_some()
             || record_generated_timing
             || result_json.is_none())
     {
@@ -1248,6 +1370,7 @@ fn parse_options() -> Result<Options, String> {
             || cancel_after_first_token
             || cancel_after_prompt_progress.is_some()
             || oracle_capture_dir.is_some()
+            || decode_oracle_capture_dir.is_some()
             || result_json.is_none())
     {
         return Err(
@@ -1272,6 +1395,7 @@ fn parse_options() -> Result<Options, String> {
         cancel_after_first_token,
         cancel_after_prompt_progress,
         oracle_capture_dir,
+        decode_oracle_capture_dir,
         result_json,
     })
 }

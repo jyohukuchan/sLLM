@@ -1207,7 +1207,9 @@ impl Qwen3Sq8ServingSession {
             Sq8ServingRuntimeStatus::Prefilling => self
                 .prepare_prefill_synchronized(stream, false)
                 .map(|result| result.advance),
-            Sq8ServingRuntimeStatus::Decoding => self.prepare_decode_synchronized(stream),
+            Sq8ServingRuntimeStatus::Decoding => self
+                .prepare_decode_synchronized(stream, false)
+                .map(|result| result.advance),
             _ => unreachable!("state checked above"),
         };
         result.map_err(|err| self.fail_runtime(stream, err))
@@ -1306,6 +1308,66 @@ impl Qwen3Sq8ServingSession {
                 cache_len,
                 execution_width,
             },
+            Sq8PreparedAdvance::Token(token) => {
+                self.publish_prepared_token(token, stream, |_| Ok(()))?
+            }
+            Sq8PreparedAdvance::CancellationObserved => Sq8ServingAdvance::CancellationObserved,
+        };
+        Ok(Sq8ServingOracleAdvance {
+            capture: if matches!(advance, Sq8ServingAdvance::Token { .. }) {
+                prepared.capture
+            } else {
+                None
+            },
+            advance,
+        })
+    }
+
+    /// Captures final hidden/logits for one actual M=1 decode step.
+    ///
+    /// This is intentionally separate from the prefill oracle so differential
+    /// harnesses can prove the dispatch used after token feedback without
+    /// changing the normal lean serving path.
+    pub fn advance_decode_oracle_synchronized(
+        &mut self,
+        stream: &mut RuntimeStream,
+    ) -> Result<Sq8ServingOracleAdvance, Sq8ServingError> {
+        match self.state {
+            Sq8ServingRuntimeStatus::Decoding => {}
+            Sq8ServingRuntimeStatus::Ready => {
+                return Err(Sq8ServingError::invalid_state(
+                    "serving decode oracle requires an active request",
+                ));
+            }
+            Sq8ServingRuntimeStatus::Failed => return Err(self.failed_error()),
+            state => {
+                return Err(self.fail_runtime(
+                    stream,
+                    format!("serving decode oracle is invalid in state {state:?}"),
+                ));
+            }
+        }
+        let cancelled = match self.active_cancelled() {
+            Ok(cancelled) => cancelled,
+            Err(err) => return Err(self.fail_runtime(stream, err)),
+        };
+        if cancelled {
+            self.state = Sq8ServingRuntimeStatus::Cancelling;
+            return Ok(Sq8ServingOracleAdvance {
+                advance: Sq8ServingAdvance::CancellationObserved,
+                capture: None,
+            });
+        }
+        let prepared = self
+            .prepare_decode_synchronized(stream, true)
+            .map_err(|err| self.fail_runtime(stream, err))?;
+        let advance = match prepared.advance {
+            Sq8PreparedAdvance::PromptProgress { .. } => {
+                return Err(self.fail_runtime(
+                    stream,
+                    "serving decode oracle unexpectedly made prompt progress",
+                ));
+            }
             Sq8PreparedAdvance::Token(token) => {
                 self.publish_prepared_token(token, stream, |_| Ok(()))?
             }
@@ -1486,7 +1548,8 @@ impl Qwen3Sq8ServingSession {
     fn prepare_decode_synchronized(
         &mut self,
         stream: &mut RuntimeStream,
-    ) -> Result<Sq8PreparedAdvance, String> {
+        capture_oracle: bool,
+    ) -> Result<PreparedOracleAdvance, String> {
         let (prompt_tokens, generated_tokens, input_token_id, expected_position) = {
             let active = self
                 .active
@@ -1534,7 +1597,10 @@ impl Qwen3Sq8ServingSession {
         validate_cache_lengths(self.caches.as_ref(), expected_position + 1)?;
         if self.active_cancelled()? {
             self.state = Sq8ServingRuntimeStatus::Cancelling;
-            return Ok(Sq8PreparedAdvance::CancellationObserved);
+            return Ok(PreparedOracleAdvance {
+                advance: Sq8PreparedAdvance::CancellationObserved,
+                capture: None,
+            });
         }
         if let Some((token_id, reasoning_after)) = self
             .active
@@ -1550,25 +1616,32 @@ impl Qwen3Sq8ServingSession {
                     expected_position + 1,
                     GeneratedTokenCommit::Decode(ready),
                 )
-                .map(Sq8PreparedAdvance::Token);
+                .map(|token| PreparedOracleAdvance {
+                    advance: Sq8PreparedAdvance::Token(token),
+                    capture: None,
+                });
         }
         let head = self.run_head_synchronized(
             Sq8ModelHeadServingSource::M1PagedDecode,
             expected_position + 1,
             stream,
-            false,
+            capture_oracle,
         )?;
         match head {
-            HeadPreparation::Prepared { proposal, capture } => {
-                debug_assert!(capture.is_none());
-                self.prepare_generated_token(
+            HeadPreparation::Prepared { proposal, capture } => self
+                .prepare_generated_token(
                     proposal,
                     expected_position + 1,
                     GeneratedTokenCommit::Decode(ready),
                 )
-                .map(Sq8PreparedAdvance::Token)
-            }
-            HeadPreparation::CancellationObserved => Ok(Sq8PreparedAdvance::CancellationObserved),
+                .map(|token| PreparedOracleAdvance {
+                    advance: Sq8PreparedAdvance::Token(token),
+                    capture,
+                }),
+            HeadPreparation::CancellationObserved => Ok(PreparedOracleAdvance {
+                advance: Sq8PreparedAdvance::CancellationObserved,
+                capture: None,
+            }),
         }
     }
 
