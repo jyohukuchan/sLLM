@@ -18,10 +18,11 @@ use ullm_engine::sq8_model_head_runtime::{
     QWEN3_14B_SQ8_MODEL_HEAD_REQUIRED_HIP_KERNEL_ENV, validate_qwen3_14b_sq8_r9700_device_info,
 };
 use ullm_engine::sq8_serving_runtime::{
-    QWEN3_14B_SQ8_SERVING_BLOCK_TOKENS, QWEN3_14B_SQ8_SERVING_CACHE_BLOCKS,
-    QWEN3_14B_SQ8_SERVING_CONTEXT_TOKENS, Qwen3Sq8ServingSession, Sq8CancellationToken,
-    Sq8FinishReason, Sq8ReleaseOutcome, Sq8ServingAdvance, Sq8ServingPrefillMode,
-    Sq8ServingRequest, Sq8ServingRuntimeStatus, load_qwen3_14b_sq8_serving_norms,
+    QWEN3_14B_SQ8_PAGED_DECODE_SPLIT_EXPERIMENT_TILE_ENV, QWEN3_14B_SQ8_SERVING_BLOCK_TOKENS,
+    QWEN3_14B_SQ8_SERVING_CACHE_BLOCKS, QWEN3_14B_SQ8_SERVING_CONTEXT_TOKENS,
+    Qwen3Sq8ServingSession, Sq8CancellationToken, Sq8FinishReason, Sq8ReleaseOutcome,
+    Sq8ServingAdvance, Sq8ServingPrefillMode, Sq8ServingRequest, Sq8ServingRuntimeStatus,
+    load_qwen3_14b_sq8_serving_norms,
 };
 use ullm_runtime_sys::{RuntimeContext, device_count, device_info};
 
@@ -119,6 +120,8 @@ struct GeneratedStepResult {
     scheduler_waiting: usize,
     allocated_blocks: usize,
     terminal_reason: Option<&'static str>,
+    /// Synchronized end-to-end execution time for this generated token.
+    synchronized_seconds: f64,
 }
 
 #[derive(Debug, Serialize)]
@@ -162,6 +165,7 @@ struct ServingSmokeResult {
     prefill_mode: &'static str,
     prefill_chunk_tokens: usize,
     prefill_implementation: String,
+    paged_decode_split_source_tile: Option<usize>,
     runner_git_commit: String,
     runner_worktree_clean: bool,
     runner_binary_sha256: String,
@@ -302,6 +306,7 @@ fn main() -> Result<(), String> {
         prefill_mode: prefill_mode_name(options.prefill_mode),
         prefill_chunk_tokens: load_report.prefill_chunk_tokens,
         prefill_implementation: load_report.prefill_implementation.clone(),
+        paged_decode_split_source_tile: load_report.paged_decode_split_source_tile,
         runner_git_commit: runner_identity.git_commit,
         runner_worktree_clean: runner_identity.worktree_clean,
         runner_binary_sha256: runner_identity.binary_sha256,
@@ -501,6 +506,7 @@ fn run_completed_request(
                         scheduler_waiting: snapshot.scheduler_waiting,
                         allocated_blocks: snapshot.allocator.allocated_blocks,
                         terminal_reason: terminal_reason.map(finish_reason_name),
+                        synchronized_seconds: advance_seconds,
                     });
                 }
                 generated_token_ids.push(token_id);
@@ -1107,9 +1113,10 @@ fn parse_options() -> Result<Options, String> {
                             .into(),
                     );
                 }
-                let path = PathBuf::from(args.next().ok_or_else(|| {
-                    "--prompt-token-ids-u32le requires a path".to_string()
-                })?);
+                let path = PathBuf::from(
+                    args.next()
+                        .ok_or_else(|| "--prompt-token-ids-u32le requires a path".to_string())?,
+                );
                 prompt_token_ids = read_u32le_token_ids(&path)?;
                 prompt_token_ids_explicit = true;
             }
@@ -1333,8 +1340,10 @@ fn read_u32le_token_ids(path: &Path) -> Result<Vec<usize>, String> {
     bytes
         .chunks_exact(std::mem::size_of::<u32>())
         .map(|chunk| {
-            usize::try_from(u32::from_le_bytes(chunk.try_into().expect("u32-sized chunk")))
-                .map_err(|_| format!("prompt token in {} does not fit usize", path.display()))
+            usize::try_from(u32::from_le_bytes(
+                chunk.try_into().expect("u32-sized chunk"),
+            ))
+            .map_err(|_| format!("prompt token in {} does not fit usize", path.display()))
         })
         .collect()
 }
@@ -1396,6 +1405,9 @@ fn require_hip_kernel_guards(mode: Sq8ServingPrefillMode) -> Result<(), String> 
         .collect::<Vec<_>>();
     if mode != Sq8ServingPrefillMode::SequentialM1 {
         names.extend(QWEN3_14B_SQ8_PREFILL_CHUNK_REQUIRED_HIP_KERNEL_ENV);
+    }
+    if std::env::var_os(QWEN3_14B_SQ8_PAGED_DECODE_SPLIT_EXPERIMENT_TILE_ENV).is_some() {
+        names.push("ULLM_REQUIRE_HIP_PAGED_DECODE_SPLIT_KERNEL");
     }
     names.sort_unstable();
     names.dedup();

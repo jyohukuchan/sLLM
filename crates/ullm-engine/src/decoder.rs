@@ -94,6 +94,16 @@ pub struct PagedDecodeState {
     k_cache_buffer: RuntimeBuffer,
     v_cache_buffer: RuntimeBuffer,
     output_buffer: RuntimeBuffer,
+    // The normal direct paged-decode dispatch remains the default. This
+    // workspace is populated only by an explicit test caller using the
+    // existing source-tiled split API.
+    split_decode: Option<PagedDecodeSplitWorkspace>,
+}
+
+#[derive(Debug)]
+struct PagedDecodeSplitWorkspace {
+    source_tile: usize,
+    buffer: RuntimeBuffer,
 }
 
 #[derive(Debug)]
@@ -1988,7 +1998,45 @@ impl PagedDecodeState {
             k_cache_buffer,
             v_cache_buffer,
             output_buffer,
+            split_decode: None,
         })
+    }
+
+    /// Enables the existing source-tiled paged-decode API for this state.
+    /// The normal constructor does not call this method, preserving direct
+    /// legacy dispatch for all ordinary callers.
+    pub(crate) fn enable_source_tiled_decode_experiment(
+        &mut self,
+        context: &mut RuntimeContext,
+        source_tile: usize,
+    ) -> Result<(), String> {
+        if source_tile == 0 {
+            return Err("paged decode split source_tile must be greater than zero".into());
+        }
+        if self.written_len != 0 {
+            return Err(
+                "paged decode split experiment must be configured before cache population".into(),
+            );
+        }
+        if self.split_decode.is_some() {
+            return Err("paged decode split experiment is already configured".into());
+        }
+        let workspace_bytes = ullm_runtime_sys::paged_decode_attn_split_workspace_bytes(
+            self.shape.q_heads,
+            self.shape.value_dim,
+            self.shape.physical_tokens()?,
+            source_tile,
+        )?;
+        let buffer = context.alloc_buffer(workspace_bytes).map_err(|err| {
+            format!(
+                "failed to allocate paged decoder split workspace for source_tile={source_tile}: {err}"
+            )
+        })?;
+        self.split_decode = Some(PagedDecodeSplitWorkspace {
+            source_tile,
+            buffer,
+        });
+        Ok(())
     }
 
     pub fn shape(&self) -> PagedDecodeShape {
@@ -2334,23 +2382,7 @@ impl PagedDecodeState {
         self.written_len = self.written_len.max(cache_position + 1);
         let cache_len = self.written_len;
 
-        ullm_runtime_sys::paged_decode_attn_f32(
-            &self.q_buffer,
-            &self.k_cache_buffer,
-            &self.v_cache_buffer,
-            &self.block_table_buffer,
-            cache_len,
-            self.shape.block_size,
-            self.shape.cache_blocks,
-            self.shape.q_heads,
-            self.shape.kv_heads,
-            self.shape.head_dim,
-            self.shape.value_dim,
-            softmax_scale,
-            &mut self.output_buffer,
-            Some(stream),
-        )
-        .map_err(|err| format!("failed to run paged decoder decode attention: {err}"))?;
+        self.enqueue_decode_attention(stream, cache_len, softmax_scale)?;
         Ok(PagedDecodeDeviceStepOutput {
             cache_position,
             cache_len,
@@ -2417,23 +2449,7 @@ impl PagedDecodeState {
         .map_err(|err| format!("failed to run paged decoder device KV write: {err}"))?;
         self.written_len = cache_position + 1;
         let cache_len = self.written_len;
-        ullm_runtime_sys::paged_decode_attn_f32(
-            &self.q_buffer,
-            &self.k_cache_buffer,
-            &self.v_cache_buffer,
-            &self.block_table_buffer,
-            cache_len,
-            self.shape.block_size,
-            self.shape.cache_blocks,
-            self.shape.q_heads,
-            self.shape.kv_heads,
-            self.shape.head_dim,
-            self.shape.value_dim,
-            softmax_scale,
-            &mut self.output_buffer,
-            Some(&mut *stream),
-        )
-        .map_err(|err| format!("failed to run paged decoder device attention: {err}"))?;
+        self.enqueue_decode_attention(stream, cache_len, softmax_scale)?;
         Ok(PagedDecodeDeviceStepOutput {
             cache_position,
             cache_len,
@@ -2465,25 +2481,61 @@ impl PagedDecodeState {
         stream
             .synchronize()
             .map_err(|err| format!("failed to synchronize paged decoder q input: {err}"))?;
-        ullm_runtime_sys::paged_decode_attn_f32(
-            &self.q_buffer,
-            &self.k_cache_buffer,
-            &self.v_cache_buffer,
-            &self.block_table_buffer,
-            cache_len,
-            self.shape.block_size,
-            self.shape.cache_blocks,
-            self.shape.q_heads,
-            self.shape.kv_heads,
-            self.shape.head_dim,
-            self.shape.value_dim,
-            softmax_scale,
-            &mut self.output_buffer,
-            Some(stream),
-        )
-        .map_err(|err| format!("failed to run paged decoder decode attention: {err}"))?;
+        self.enqueue_decode_attention(stream, cache_len, softmax_scale)?;
 
         read_f32_buffer(&self.output_buffer, stream, self.shape.output_elements()?)
+    }
+
+    fn enqueue_decode_attention(
+        &mut self,
+        stream: &mut RuntimeStream,
+        cache_len: usize,
+        softmax_scale: f32,
+    ) -> Result<(), String> {
+        if let Some(split) = self.split_decode.as_mut() {
+            ullm_runtime_sys::paged_decode_attn_split_f32(
+                &self.q_buffer,
+                &self.k_cache_buffer,
+                &self.v_cache_buffer,
+                &self.block_table_buffer,
+                cache_len,
+                self.shape.block_size,
+                self.shape.cache_blocks,
+                self.shape.q_heads,
+                self.shape.kv_heads,
+                self.shape.head_dim,
+                self.shape.value_dim,
+                softmax_scale,
+                split.source_tile,
+                &mut split.buffer,
+                &mut self.output_buffer,
+                Some(stream),
+            )
+            .map_err(|err| {
+                format!(
+                    "failed to run paged decoder split attention source_tile={}: {err}",
+                    split.source_tile
+                )
+            })
+        } else {
+            ullm_runtime_sys::paged_decode_attn_f32(
+                &self.q_buffer,
+                &self.k_cache_buffer,
+                &self.v_cache_buffer,
+                &self.block_table_buffer,
+                cache_len,
+                self.shape.block_size,
+                self.shape.cache_blocks,
+                self.shape.q_heads,
+                self.shape.kv_heads,
+                self.shape.head_dim,
+                self.shape.value_dim,
+                softmax_scale,
+                &mut self.output_buffer,
+                Some(stream),
+            )
+            .map_err(|err| format!("failed to run paged decoder direct attention: {err}"))
+        }
     }
 
     pub(crate) fn output_buffer(&self) -> &RuntimeBuffer {
@@ -3368,6 +3420,67 @@ mod tests {
             softmax_scale,
         );
         assert_f32s_close(&output, &expected, 1e-5);
+    }
+
+    #[test]
+    fn source_tiled_decode_experiment_matches_direct_cpu() {
+        let mut context = RuntimeContext::create(0).unwrap();
+        let mut stream = context.create_stream().unwrap();
+        let shape = PagedDecodeShape {
+            block_size: 2,
+            cache_blocks: 4,
+            q_heads: 4,
+            kv_heads: 2,
+            head_dim: 3,
+            value_dim: 2,
+        };
+        let block_table = vec![3_u32, 0_u32, 2_u32, 1_u32];
+        let mut direct =
+            PagedDecodeState::new(&mut context, &mut stream, shape, block_table.clone()).unwrap();
+        let mut split =
+            PagedDecodeState::new(&mut context, &mut stream, shape, block_table.clone()).unwrap();
+        split
+            .enable_source_tiled_decode_experiment(&mut context, 2)
+            .unwrap();
+
+        let cache_len = 5_usize;
+        let logical_k = (0..cache_len * shape.k_token_elements().unwrap())
+            .map(|index| ((index * 3) as f32 - 7.0) / 13.0)
+            .collect::<Vec<_>>();
+        let logical_v = (0..cache_len * shape.v_token_elements().unwrap())
+            .map(|index| ((index * 5) as f32 - 9.0) / 17.0)
+            .collect::<Vec<_>>();
+        for timestep in 0..cache_len {
+            let k_start = timestep * shape.k_token_elements().unwrap();
+            let k_end = k_start + shape.k_token_elements().unwrap();
+            let v_start = timestep * shape.v_token_elements().unwrap();
+            let v_end = v_start + shape.v_token_elements().unwrap();
+            direct
+                .write_token(
+                    &mut stream,
+                    &logical_k[k_start..k_end],
+                    &logical_v[v_start..v_end],
+                )
+                .unwrap();
+            split
+                .write_token(
+                    &mut stream,
+                    &logical_k[k_start..k_end],
+                    &logical_v[v_start..v_end],
+                )
+                .unwrap();
+        }
+        let q = (0..shape.q_elements().unwrap())
+            .map(|index| (index as f32 - 8.0) / 11.0)
+            .collect::<Vec<_>>();
+        let softmax_scale = 1.0_f32 / (shape.head_dim as f32).sqrt();
+        let direct_output = direct
+            .decode_written(&mut stream, &q, softmax_scale)
+            .unwrap();
+        let split_output = split
+            .decode_written(&mut stream, &q, softmax_scale)
+            .unwrap();
+        assert_f32s_close(&split_output, &direct_output, 1e-5);
     }
 
     #[test]

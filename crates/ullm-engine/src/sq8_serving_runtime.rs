@@ -61,6 +61,10 @@ const SQ8_SEQUENTIAL_M1_PREFILL_IMPLEMENTATION: &str = "sq8.sequential-m1.v1";
 const SQ8_FIXED_M8_PREFILL_IMPLEMENTATION: &str = "sq8.fixed-m8-cached-prefix.v1";
 const SQ8_FIXED_M32_PREFILL_IMPLEMENTATION: &str = "sq8.fixed-m32-cached-prefix.v1";
 const SQ8_FIXED_M128_PREFILL_IMPLEMENTATION: &str = "sq8.fixed-m128-cached-prefix.v1";
+/// Test-only opt-in for the existing split API.  Absence preserves the
+/// ordinary direct paged-decode dispatch exactly.
+pub const QWEN3_14B_SQ8_PAGED_DECODE_SPLIT_EXPERIMENT_TILE_ENV: &str =
+    "ULLM_EXPERIMENTAL_SQ8_PAGED_DECODE_SPLIT_TILE";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Sq8ServingPrefillMode {
@@ -285,6 +289,7 @@ pub struct Sq8ServingLoadReport {
     pub prefill_chunk_tokens: usize,
     pub prefill_implementation: String,
     pub prompt_execution_width: usize,
+    pub paged_decode_split_source_tile: Option<usize>,
     pub embedding_payload_sha256: String,
     pub final_norm_payload_sha256: String,
     pub lm_head_payload_sha256: String,
@@ -316,12 +321,37 @@ impl Sq8ServingLoadReport {
             || self.prefill_chunk_tokens != self.prefill_mode.resident_stack_width()
             || self.prefill_implementation != self.prefill_mode.implementation_id()
             || self.prompt_execution_width != self.prefill_mode.execution_width()
+            || self
+                .paged_decode_split_source_tile
+                .is_some_and(|tile| !matches!(tile, 128 | 256 | 512))
         {
             return Err(Sq8ServingError::invalid_configuration(
                 "serving resident geometry/load report mismatch",
             ));
         }
         Ok(())
+    }
+}
+
+fn parse_paged_decode_split_source_tile(value: Option<&str>) -> Result<Option<usize>, String> {
+    match value {
+        None => Ok(None),
+        Some("128") => Ok(Some(128)),
+        Some("256") => Ok(Some(256)),
+        Some("512") => Ok(Some(512)),
+        Some(other) => Err(format!(
+            "{QWEN3_14B_SQ8_PAGED_DECODE_SPLIT_EXPERIMENT_TILE_ENV} must be exactly 128, 256, or 512, got {other:?}"
+        )),
+    }
+}
+
+fn read_paged_decode_split_source_tile() -> Result<Option<usize>, String> {
+    match std::env::var(QWEN3_14B_SQ8_PAGED_DECODE_SPLIT_EXPERIMENT_TILE_ENV) {
+        Ok(value) => parse_paged_decode_split_source_tile(Some(&value)),
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(std::env::VarError::NotUnicode(_)) => Err(format!(
+            "{QWEN3_14B_SQ8_PAGED_DECODE_SPLIT_EXPERIMENT_TILE_ENV} must be UTF-8"
+        )),
     }
 }
 
@@ -893,17 +923,27 @@ impl Qwen3Sq8ServingSession {
             let decode = Qwen3Sq8PagedDecodeRuntime::allocate(context)?;
             let cache_shape = qwen3_14b_sq8_serving_cache_shape();
             cache_shape.validate()?;
+            let paged_decode_split_source_tile = read_paged_decode_split_source_tile()?;
             let block_table = qwen3_14b_sq8_serving_block_table().map_err(|err| err.to_string())?;
             let mut cache_values = Vec::with_capacity(QWEN3_14B_SQ8_STACK_LAYERS);
             for layer_index in 0..QWEN3_14B_SQ8_STACK_LAYERS {
-                cache_values.push(
+                let mut cache =
                     PagedDecodeState::new(context, stream, cache_shape, block_table.clone())
                         .map_err(|err| {
                             format!(
                                 "failed to allocate serving layer {layer_index} KV cache: {err}"
                             )
-                        })?,
-                );
+                        })?;
+                if let Some(source_tile) = paged_decode_split_source_tile {
+                    cache
+                        .enable_source_tiled_decode_experiment(context, source_tile)
+                        .map_err(|err| {
+                            format!(
+                                "failed to configure serving layer {layer_index} paged decode split tile {source_tile}: {err}"
+                            )
+                        })?;
+                }
+                cache_values.push(cache);
             }
             let caches: [PagedDecodeState; QWEN3_14B_SQ8_STACK_LAYERS] = cache_values
                 .try_into()
@@ -938,6 +978,7 @@ impl Qwen3Sq8ServingSession {
                 prefill_chunk_tokens: resident_stack_width,
                 prefill_implementation: prefill_mode.implementation_id().to_string(),
                 prompt_execution_width: prefill_mode.execution_width(),
+                paged_decode_split_source_tile,
                 embedding_payload_sha256: embedding.load_report().payload.payload_sha256.clone(),
                 final_norm_payload_sha256: head.final_norm_identity().payload_sha256.clone(),
                 lm_head_payload_sha256: head.lm_head_identity().payload_sha256.clone(),
@@ -2422,6 +2463,26 @@ mod tests {
     use crate::sq8_stack_runtime::QWEN3_14B_SQ8_STACK_LAYERS;
     use std::sync::mpsc;
     use std::time::Duration;
+
+    #[test]
+    fn sq8_paged_decode_split_tile_parser_is_explicit_and_closed() {
+        assert_eq!(parse_paged_decode_split_source_tile(None).unwrap(), None);
+        assert_eq!(
+            parse_paged_decode_split_source_tile(Some("128")).unwrap(),
+            Some(128)
+        );
+        assert_eq!(
+            parse_paged_decode_split_source_tile(Some("256")).unwrap(),
+            Some(256)
+        );
+        assert_eq!(
+            parse_paged_decode_split_source_tile(Some("512")).unwrap(),
+            Some(512)
+        );
+        for invalid in ["", "0", "64", "1024", "256 ", "tile256"] {
+            assert!(parse_paged_decode_split_source_tile(Some(invalid)).is_err());
+        }
+    }
 
     fn qwen3_reasoning_dialect() -> ReasoningDialect {
         ReasoningDialect {
