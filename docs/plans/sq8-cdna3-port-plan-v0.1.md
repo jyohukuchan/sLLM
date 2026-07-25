@@ -778,3 +778,45 @@ correctness/fragment decision test, not a performance benchmark.
 
 No physical test, occupancy query, production dispatch, service action,
 release action, or final activation occurred in this phase.
+
+## Cross-architecture numerical constraint: split/merge requires multi-step proof (2026-07-26)
+
+The R9700 SQ8_0 paged-decode study established a portability constraint for
+CDNA3 plan A. Source-tile split computes independent online-softmax partial
+states (max, sum, weighted) and merges them, whereas the direct path carries
+one sequential state. For split_count=1 the experiment was exact; whenever
+split_count>1, finite-F32 association changed. Standalone deviations were only
+roughly 1e-8--1e-7, yet the 40-layer SQ8 stack's repeated activation
+quantization amplified them in multi-step decode. Equal single-shot or greedy
+token output was therefore not sufficient.
+
+MI300X/XCD partitioning makes the same attractive-looking design possible:
+divide a source range, K/reduction range, or projection work across XCDs and
+merge partials. A speed benefit does not make that numerically safe. This is
+also relevant to projection K128 scale-block work whenever an implementation
+changes the association/order of partial accumulation. The exact cross-XCD
+failure mechanism and an exact associative reconciliation remain **未確認**;
+the RDNA4 result must not be generalized into an assumption that an XCD merge
+is safe.
+
+Accordingly, plan A has the following non-negotiable gate:
+
+1. do not enable a split/XCD/K-reduction merge route from a single-shot
+   differential or from a split_count=1 pass;
+2. use actual canonical artifact weights and real dynamic F32 activation
+   scales, with a direct unsplit reference that preserves the intended SQ8
+   numerical contract;
+3. require a frozen multi-step full-model feedback-decode gate (at least two
+   captures) covering generated IDs, top-1 selection, final hidden state, and
+   logits. Exact comparison is the default decision bar unless a different
+   bound is explicitly frozen before measurement and justified for that route;
+4. treat a missing capture, non-finite value, or any predeclared gate failure
+   as a numerical failure; do not time, promote, or default-route the
+   candidate; and
+5. gate every partition count independently. A one-partition result gives no
+   evidence for two or more partitions.
+
+This rule applies before treating a native MFMA/XCD design as an optimization.
+It preserves the key lesson from R9700: a tiny partial-merge difference can be
+hidden by a standalone check and then become a full-model failure after
+quantized feedback.

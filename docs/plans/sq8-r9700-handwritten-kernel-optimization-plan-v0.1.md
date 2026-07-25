@@ -468,3 +468,137 @@ numerical diagnosis. The window stopped once at 07:09:42+09:00 and restored
 on the initial start at 07:19:21+09:00, with `NRestarts=0`,
 llama-qwen35-udq4 inactive/disabled, and gdm3 inactive. Evidence is retained
 under benchmarks/results/2026-07-26/sq8_0-paged-decode-tile-fix/.
+
+## SQ8_0 private handwritten WMMA projection feasibility — 2026-07-26 (numerical NO-GO)
+
+### Scope and unchanged contracts
+
+The projection study used a new **private** gfx1201 WMMA symbol and an explicit
+investigation profile. It did not modify runtime/src/sq8_ck_gfx1201.hip.cpp,
+the public runtime header, legacy dispatch, ordinary CK selection, the
+active-model manifest, campaigns, authorizations, releases, or /opt/ullm.
+The ordinary serving path therefore remains the existing CK path.
+
+The intended target was decode M=1. The real model mapping is fixed:
+
+| family | M / N / K | selected CK form | tail observation |
+| --- | --- | --- | --- |
+| q/o | 1 / 5,120 / 5,120 | Default 16x128x128 | M tail only |
+| k/v | 1 / 1,024 / 5,120 | Default 16x128x128 | M tail only |
+| gate/up | 1 / 17,408 / 5,120 | KPadding 16x128x256 | M tail only |
+| down | 1 / 5,120 / 17,408 | Default 16x128x256 | M tail only |
+
+Every N and K is a multiple of 128. Thus no N/K tail was observed; M=1 is a
+tail against CK's MPerBlock=16.
+
+The private body uses gfx1201 v_wmma_f32_16x16x16_fp8_fp8 through rocWMMA,
+raw OCP E4M3FN payload, and the same K128 scale-block meaning as CK. The
+artifact's weight scale is BF16 on the [128,128] grid; runtime activation scale
+is the existing canonical quantizer's F32 output for [M,128] blocks. The
+prototype reuses that quantizer rather than changing its semantics.
+
+### Static resource result
+
+Static code-object evidence is retained in
+benchmarks/results/2026-07-26/sq8_0-handwritten-projection/static/. The body
+is wave32, one 32-thread workgroup per N=16 tile, emits eight FP8 WMMA
+instructions, uses 1,280 B LDS, 47 VGPR/thread, 24 SGPR/wave, zero private
+bytes, and no VGPR/SGPR spill.
+
+This materially reduces the static resource footprint versus the selected CK
+forms: 36,864 B / VGPR 242 (KPadding 128x256), 36,864 B / VGPR 175 (Default
+128x256), 34,816 B / VGPR 154 (Default 256x128), and 18,432 B / VGPR 100
+(Default 128x128). Under the prior 64-KiB-LDS reference, the first three large
+forms have one 8-wave32 CTA (25% of a 32-wave reference), while 128x128 has
+three CTAs / 24 waves (75%). At 1,280 B per one-wave prototype block, 32
+blocks require only 40,960 B LDS, so LDS alone would not block a 32-wave
+reference. This is a static LDS conclusion, **not** a measured occupancy claim;
+VGPR/SGPR/hardware workgroup limits remain relevant.
+
+The attempt-2 runtime resource record has one known host-query defect:
+threads_per_block=1024 came from maxThreadsPerBlock, not the actual 32-thread
+launch. The private source was corrected afterwards, but not remeasured because
+another service window was not justified. Its active_blocks_per_cu=51 is HIP's
+own per-multiprocessor term; actual CU occupancy is therefore **unconfirmed**.
+
+### CK event baseline and its metric boundary
+
+HIP event timing measured the exact selected CK helper plus its BF16-to-F32
+workspace boundary. The rates below are logical route traffic divided by that
+time, with 640 GB/s as a nominal reference:
+
+| family (calls/layer) | us / launch | logical GB/s | logical/reference |
+| --- | ---: | ---: | ---: |
+| q/o (2) | 26.2118 | 1,001.72 | 1.5652 |
+| k/v (2) | 26.8975 | 195.39 | 0.3053 |
+| gate/up (2) | 158.3728 | 563.61 | 0.8806 |
+| down (1) | 148.9054 | 599.03 | 0.9360 |
+| seven projections / layer | 571.8696 total | 578.36 | 0.9037 |
+
+The 40-layer projection subtotal is 22,874.7830 us for 13,229,802,240 logical
+route bytes. These values are the reproducible CK comparison control, but they
+are **not physical achieved HBM bandwidth**: available PMC byte counters were
+unusable, and the q/o logical rate exceeding the nominal reference proves that
+the metric includes logical traffic rather than a physical bus reading.
+Physical HBM efficiency and a memory-versus-compute roofline classification
+remain **unconfirmed**.
+
+### Frozen numerical gates and result
+
+Before any candidate timing, the following non-relaxed policy was frozen:
+
+1. all four real M=1 shapes must be finite and F32-bitwise identical to CK
+   after the CK BF16 workspace boundary; and
+2. with the prototype as the actual full-model M=1 projection path, at least
+   two feedback-decode captures must have exact generated IDs, top-1 logits,
+   final hidden state, and full logits relative to CK.
+
+The isolated component gate passed all four shapes. That limited raw fixture
+used a finite OCP payload cycle and BF16-origin activation scales; source has
+since strengthened it to cover all finite payload codes and varied F32
+activation scales, but that stronger fixture was not rerun in order to avoid a
+third service action. The component result must therefore not be treated as
+more than its recorded boundary proof.
+
+The decisive full-model gate failed all three recorded feedback steps despite
+equal greedy IDs [66, 198, 197, 197]. Hidden mismatches were 5,120/5,120 with
+max abs 0.387939, 0.797844, and 1.287994. Logit mismatches were
+151,936/151,936, 151,935/151,936, and 151,936/151,936 with max abs 0.189508,
+0.183819, and 0.250601. All values were finite, but top-1 logits were not
+bitwise equal. Therefore the prototype is a **numerical NO-GO** and its event
+timing was intentionally not run. It has no measured performance comparison
+against CK and no eligibility for default replacement.
+
+The exact source-level cause is **未確認**. A difference in WMMA fragment/lane
+behavior or K128 scale-block accumulation association relative to CK is a
+testable hypothesis only; it is not established from this result. The resource
+reduction demonstrates a possible occupancy route, not a proven speed headroom.
+
+### Service and thermal record
+
+There were two stop/isolate/restore attempts. The first
+(08:30:12--08:30:48 JST) aborted before GPU work because AMD SMI's no-process
+sentinel was parsed as a process, then restored the service. The second
+(08:31:52--08:33:27 JST) did the R9700-only work and restored
+ullm-openai.service active/running with NRestarts=0. Preflight and final
+records show llama-qwen35-udq4.service inactive/disabled and gdm3 inactive.
+V620 was not selected.
+
+The second window's 93 AMD SMI samples recorded edge 36--46 C, hotspot 37--60
+C, memory 34--48 C, gfx 0--3421 MHz, memory 96--1258 MHz, socket power 7--204
+W, and 22 THROTTLED / 71 UNTHROTTLED states. The physical throttle cause is
+**未確認**; timing values are conditional on that limitation. No permanent GPU
+setting, service unit, activation, authorization, or remote state changed.
+
+### Next actions
+
+1. Capture the actual-artifact input/output around the first divergent
+   projection/layer and compare each K128 partial against CK, including
+   non-BF16 runtime activation scales.
+2. Make the private WMMA reduction/fragment and scale-block association match
+   CK's observed contract before considering any new timing window.
+3. Rerun the strengthened component fixture and the same multi-step full-model
+   gate first. Only a pass may justify one separately approved R9700 timing
+   window; default CK remains unchanged otherwise.
+4. If numerically exact, record an unambiguous HIP occupancy interpretation
+   alongside timing before attributing any gain to LDS headroom.
