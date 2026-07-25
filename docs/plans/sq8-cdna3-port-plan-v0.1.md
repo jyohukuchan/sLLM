@@ -287,3 +287,190 @@ Start: independent SQ8_0 Qwen3-14B-FP8 only
 
 - Local source and headers: `crates/ullm-engine/src/sq8_*.rs`, `runtime/src/sq8_ck_gfx1201.hip.cpp`, `runtime/src/kernels/sq8_0/*`, `runtime/src/ullm_runtime_*`, `/opt/rocm/include/hip/amd_detail/amd_hip_fp8.h`, `/opt/rocm/include/rocwmma/internal/{config,mfma_impl,constants}.hpp`, and local ROCm profiler gfx942 metadata.
 - AMD architecture/partition references: [AMD SMI GPU partition documentation](https://rocm.docs.amd.com/projects/amdsmi/en/develop/conceptual/partition.html), [AMD Instinct MI300 product specifications](https://www.amd.com/en/products/accelerators/instinct/mi300.html), and [HIP compiler architecture documentation](https://rocm.docs.amd.com/projects/HIP/en/latest/understand/compilers.html).
+
+## Evaluation G — CK gfx942 XDL instance reuse (2026-07-26)
+
+### Static conclusion
+
+The A′ route is **viable as a conditional, isolated CK-reuse prototype**, but it
+is not a native-f8_fnuz_t re-instantiation of the shipped ROCm 7.2.1 library.
+The exact DeviceGemmMultipleD_ABScale contract used by the gfx1201 path is
+present in /opt/rocm/lib/libdevice_gemm_operations.a; its linked gfx942 code
+object emits native FP8 MFMA.  However, the shipped concrete symbols use
+ck::f8_ocp_t, not ck::f8_fnuz_t.  A strict FNUZ-typed link fails.
+
+Consequently, the only evidence-supported A′ prototype shape is:
+
+1. Compile a *new*, gfx942-only private body with CK_USE_OCP_FP8=1 solely to
+   match the prebuilt CK C++ ABI.
+2. Use the same ABScale registry/type contract and pass only derived FNUZ
+   payload bytes through that opaque byte interface.
+3. Apply the established scale factor of two for each converted operand.
+
+This does **not** make canonical OCP E4M3FN raw bytes valid gfx942 MFMA inputs.
+f8_ocp_t in this route is a library ABI/template name, not an on-device format
+conversion.  Directly passing canonical payload bytes remains prohibited.  The
+canonical SQ8_0 artifact remains unchanged; FNUZ is a separately owned,
+disposable prepack/cache representation.
+
+This changes H3 only in a limited way: a hand-written CDNA3 MFMA body is no
+longer the only plausible native starting point.  It remains the fallback and
+the route with the most tile/layout tuning freedom.  No numerical, occupancy,
+or performance claim is made without a physical gfx942 device.
+
+### Exact CK contract audit
+
+The current gfx1201 source's DeviceOp is:
+
+    DeviceGemmMultipleD_ABScale<
+      RowMajor, ColumnMajor, Tuple<>, RowMajor,
+      f8_t, float, f8_t, float, Tuple<>, bhalf_t,
+      1, 128, 128, PassThrough, PassThrough, PassThrough>
+
+/opt/rocm/include/ck/tensor_operation/gpu/device/impl/
+device_gemm_multiple_d_xdl_cshuffle_v3_ab_scale.hpp carries those three
+scale-block template parameters through to the device operation.
+/opt/rocm/include/ck/library/tensor_operation_instance/gpu/gemm_universal/
+gemm_ab_scale.hpp declares the matching F8/F8/BF16, float-A-scale/
+float-B-scale, RowMajor/ColumnMajor/RowMajor registry functions.
+
+The following checks were made against the installed ROCm 7.2.1 headers and
+the concrete contents of libdevice_gemm_operations.a, rather than inferring
+support from the name “Xdl”.
+
+| Contract item | Evidence | Result for gfx942 reuse |
+|---|---|---|
+| Device interface | The existing DeviceGemmMultipleD_ABScale F8/F8/BF16 declaration with float A/B scales is in gemm_ab_scale.hpp; the exact existing source calls the mk_nk_mn_1_128_128_mem_v1 default and K-padding add-functions. | Exact interface and [1,128,128] scale-block contract are available. |
+| Concrete implementation | The archive contains the ABScale XDL CShuffle V3 instance object files and exports the exact add-functions.  Its type listing calls them DeviceGemmXdlUniversal<Default, RCR> or DeviceGemmXdlUniversal<KPadding, RCR>. | Same CK device-op family, not a substitute implementation. |
+| Selected tile strings | The OCP-ABI probe listed the current 16x256x128, 16x128x128, and 16x128x256 default instances and their K-padding counterparts.  The current selected 16x128x128 default instance is a 256-thread block, 16x128x128 block tile, 16x16 wave tile, and 1x2 WaveMap. | The existing measured selection set is present as a linkable CK configuration.  It is a starting point, not evidence that it is optimal on CDNA3. |
+| Per-scale arithmetic | blockwise_gemm_pipeline_xdlops_v1_ab_scale.hpp forces MFMA not to cross a scale block, assumes the selected K-per-block equals scale-block K, forms c_scale = a_scale * b_scale, and accumulates each MFMA partial after that multiplication. | With K-per-block = 128 and scale-block K = 128, scale application is correctly per [1,128,128] K block rather than after an entire K reduction. |
+| Nearest different interface | DeviceGemmMultipleD_BlockScale_BPreshuffle is also present but requires a B pre-shuffle and has a different data/layout contract. | It is not needed here and is not a fallback that preserves the current ABScale contract. |
+
+The archive therefore supplies the desired CK contract, but only under its
+OCP-typed symbol ABI.  It does not supply an equally shaped, prebuilt
+FNUZ-typed ABI instance.
+
+### ck::f8_t is macro-selected, not architecture-selected
+
+This was a necessary correction to the initial assumption.  In
+/opt/rocm/include/ck/utility/amd_ck_fp8.hpp, ck::f8_t is selected by
+CK_USE_OCP_FP8: it aliases f8_ocp_t when that macro is one, and f8_fnuz_t
+otherwise.  CK_USE_FNUZ_FP8 has a default, but it is not an architecture switch
+that overrides an enabled OCP selection.  ck/ck.hpp does recognize gfx942 as a
+gfx9/MFMA target and gfx1200/gfx1201 as gfx12; that architecture recognition
+does not choose the f8_t alias.
+
+| Build/type case | Observed ck::f8_t | Consequence |
+|---|---|---|
+| Current gfx1201 build flags and the matching shipped archive (CK_USE_OCP_FP8=1) | f8_ocp_t | This is the ABI of the existing registry symbols and the only linkable prebuilt ABScale instance. |
+| Explicit gfx942 FNUZ type probe (CK_USE_OCP_FP8=0, CK_USE_FNUZ_FP8=1) | f8_fnuz_t | The header can compile the declaration, but the final link cannot find the required FNUZ add-function/instance. |
+| gfx942 hardware instruction | FNUZ operand semantics | This is independent of the C++ alias.  The selected code object contains FP8 MFMA and no inserted OCP-to-FNUZ conversion. |
+
+An archive-symbol scan found ABScale f8_ocp_t symbols and zero ABScale
+f8_fnuz_t symbols.  That explains the strict FNUZ link failure; it is not a
+generic compiler architecture restriction.
+
+The format consequence is unchanged and applies to A, A′, and the control
+oracle.  Weights require the derived OCP-to-FNUZ prepack, including
+0x80 -> 0x00 normalization and a factor-two weight scale.  Activations must be
+quantized directly to FNUZ or converted into a transient FNUZ buffer with the
+corresponding factor-two activation scale.  CK multiplies its float A/B scales,
+so converting both operands produces the required factor-four product.
+Non-finite canonical payload rejection, actual artifact byte/scale scans, scale
+range, and real-device numerical validation remain open gates.
+
+### Isolated offline compilation and ISA evidence
+
+All experiments below used the isolated directory
+/tmp/ullm-sq8-cdna3-ck-gfx942.kwLrwP; no project build/release tree or
+production source was modified.  The common compile target was
+hipcc --offload-arch=gfx942 -std=c++20 -O3 with CK FP8/BF16 enabled.
+
+| Probe | Result | What it establishes |
+|---|---|---|
+| Exact ABScale declaration, FNUZ alias, compile only | Success | The gfx942 compiler accepts the CK declaration/type expression.  This alone does not materialize a library instance. |
+| Exact ABScale registry link, FNUZ alias | Failure: undefined add_device_gemm_ab_scale_xdl_f8_f8_bf16_mk_nk_mn_1_128_128_mem_v1_default_instances specialized with f8_fnuz_t. | The installed archive lacks the concrete FNUZ ABI instance. |
+| Same exact registry link, OCP alias | Success against libdevice_gemm_operations.a; the resulting executable embeds a gfx942 code object. | The prebuilt OCP-ABI instance is reusable by a separate gfx942 wrapper. |
+| OCP-ABI registry type enumeration | Success | Prints the current default/K-padding XDL variants, including the exact 16x128x128 default instance. |
+| Extracted gfx942 HSACO, exact 16x128x128 main-loop symbol | Success | The symbol contains 24 v_mfma_f32_16x16x32_fp8_fp8 instructions and zero FP8 conversion instructions. |
+
+The HSACO extraction used the linked fat binary's CCOB payload, zstd
+decompression, and clang-offload-bundler to select
+hipv4-amdgcn-amd-amdhsa--gfx942; a direct llvm-objdump --offloading attempt
+crashed in this local toolchain, so it was not used as evidence.  The extracted
+object is an AMDGPU ELF for gfx942.  Across the full code object both gfx942
+FP8 MFMA forms occur (864 v_mfma_f32_32x32x16_fp8_fp8 and 456
+v_mfma_f32_16x16x32_fp8_fp8); the exact selected 16x128x128 main-loop symbol
+uses the latter form.  Its lack of an FP8 conversion instruction is why
+OCP-to-FNUZ conversion cannot be delegated to CK.
+
+The exact selected instance had these code-object metadata variants:
+
+| 16x128x128 variant | VGPR | SGPR | AGPR | LDS | Private | VGPR/SGPR spill | Wave / workgroup |
+|---|---:|---:|---:|---:|---:|---:|---|
+| main K-loop, tail variant | 83 | 50 | 0 | 18,432 B | 0 B | 0 / 0 | wave64 / max 256 threads |
+| no main K-loop, tail variant | 65 | 38 | 0 | 18,432 B | 0 B | 0 / 0 | wave64 / max 256 threads |
+| no main K-loop, no-tail variant | 39 | 34 | 0 | 18,432 B | 0 B | 0 / 0 | wave64 / max 256 threads |
+
+The prebuilt CK code-object metadata does **not** contain a compiler
+Occupancy: annotation, so compiler occupancy for these instances is
+unconfirmed rather than inferred.  Actual active-block/wave occupancy also
+requires hipModuleOccupancyMaxActiveBlocksPerMultiprocessor on an actual
+gfx942.  The table records all available static resource facts and deliberately
+does not relabel them as measured occupancy.
+
+### A / A′ / B decision
+
+| Route | Implementation amount | Main risk | Performance outlook | Physical-gfx942 dependence | Current decision |
+|---|---|---|---|---|---|
+| A — new hand-written native MFMA body | Largest: new tile, fragment, lane-map, LDS and tail design. | Highest correctness/tuning surface, but no reliance on CK archive ABI. | Highest eventual tuning freedom; no measured prediction. | High for numerical and performance proof. | Keep as fallback and later optimization route. |
+| A′ — reuse CK gfx942 XDL instance | Smaller-to-medium: separate body/feature/dispatch, ABI lock test, FNUZ prepack/activation path, and instance selection; no new MFMA fragment body initially. | OCP-named ABI must never be mistaken for OCP operand semantics; fixed CK tile/resource choices and ROCm archive version coupling. | Promising first native candidate: an actual gfx942 MFMA code object already exists, but its performance is unmeasured. | High for numerical, actual occupancy, and timing proof. | **Proceed only as an isolated prototype after the format gate.** |
+| B — dequant to FP16/BF16 control | Medium: conversion plus a separately validated matrix/control path. | Lowest FP8-fragment semantic risk, but conversion/bandwidth can dominate. | Expected control/baseline rather than native-FP8 winner. | Still required for correctness/performance comparison. | Retain as mandatory control. |
+
+OCP-to-FNUZ prepack/oracle work is a common hard gate for A and A′.  B can
+decode canonical OCP directly, but must retain the same byte/scale oracle and
+derived-prepack comparison in this plan so that it remains a meaningful
+correctness control and does not bypass the artifact-format audit.
+
+### Addendum to the Decision Tree and phases
+
+The existing Decision Tree remains historical Phase 0 text.  Insert this
+logical branch after its OCP-to-FNUZ format gate when implementing the plan:
+
+    Does the ROCm-version-locked OCP-ABI ABScale link/type/ISA audit pass?
+      no  -> A′ is unavailable; continue with A or B only
+      yes -> prototype A′ with FNUZ-only derived buffers and adjusted scales
+    Does the first physical gfx942 differential prove that opaque-ABI route?
+      no  -> disable A′ and return to A/B; never pass raw OCP bytes
+      yes -> compare A′, A when available, and B on the same partition
+
+Phase impacts are:
+
+1. **Phase 1:** add an ABI-lock test that compiles/links the exact OCP-typed
+   CK registry under --offload-arch=gfx942, and make the FNUZ-only buffer and
+   scale ownership explicit.  A successful FNUZ *compile-only* test is not an
+   exit criterion.
+2. **Phase 2:** make A′ the first isolated native prototype.  It must live in
+   a new gfx942 source/body and feature; it may not modify
+   runtime/src/sq8_ck_gfx1201.hip.cpp.  Preserve A as an independent
+   hand-written prototype if A′ fails ABI, numerical, resource, or shape
+   gates.  Audit the linked CK code object for every selected instance rather
+   than treating the wrapper TU alone as proof.
+3. **Phases 3–4:** add A′ to the real-gfx942 differential, occupancy, residency
+   and timing comparison against B.  Keep A as the alternative if A′ is not
+   numerically valid or does not win under the partition-specific decision.
+4. **Phase 5:** no change in authority: only a validated winner can receive
+   guarded integration, and final activation remains a separate explicit
+   human-approved action.
+
+### Evaluation-G evidence sources
+
+- Existing integration: runtime/src/sq8_ck_gfx1201.hip.cpp and
+  crates/ullm-runtime-sys/build.rs.
+- CK headers: /opt/rocm/include/ck/utility/amd_ck_fp8.hpp,
+  /opt/rocm/include/ck/ck.hpp,
+  /opt/rocm/include/ck/library/tensor_operation_instance/gpu/gemm_universal/gemm_ab_scale.hpp,
+  /opt/rocm/include/ck/tensor_operation/gpu/device/impl/device_gemm_multiple_d_xdl_cshuffle_v3_ab_scale.hpp,
+  and /opt/rocm/include/ck/tensor_operation/gpu/block/blockwise_gemm_pipeline_xdlops_v1_ab_scale.hpp.
+- Concrete archive/code object: /opt/rocm/lib/libdevice_gemm_operations.a,
+  linked and inspected only from the isolated directory named above.
