@@ -170,13 +170,13 @@ run_case() {
         env "${extra_env[@]}" HIP_VISIBLE_DEVICES=1 "${kernel_guards[@]}" "$serving_bin" \
             --artifact "$artifact_dir" --package "$package_dir" \
             --prompt-token-ids-u32le "$prompt_u32le" --max-new-tokens 8 \
-            --prefill-mode m128-chunk128 --test-only-ignore-eos \
+            --prefill-mode m128-chunk128 --record-generated-timing \
             --result-json "$result_dir/cases/$name.result.json"
 }
 
-# Each request has one final M=128 prefill step and seven ensuing M=1 decode
-# steps.  The runner records synchronized_seconds for every generated step;
-# analysis uses generated_index 1..7 only.
+# Each request has one final M=128 prefill step and normally seven ensuing M=1
+# decode steps. The runner records synchronized_seconds for every generated
+# step; analysis uses generated_index 1..N only and records any early EOS.
 run_case direct
 run_case tile128 128
 run_case tile256 256

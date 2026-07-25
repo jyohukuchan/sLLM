@@ -44,6 +44,7 @@ struct Options {
     prompt_lengths: Option<Vec<usize>>,
     prefill_mode: Sq8ServingPrefillMode,
     test_only_ignore_eos: bool,
+    record_generated_timing: bool,
     performance_gate: bool,
     cancel_after_first_token: bool,
     cancel_after_prompt_progress: Option<usize>,
@@ -377,7 +378,8 @@ fn run_completed_request(
     let request_start = Instant::now();
     let prefill_mode = session.prefill_mode();
     let mut generated_token_ids = Vec::new();
-    let mut generated_steps = test_only_ignore_eos.then(Vec::new);
+    let mut generated_steps =
+        (test_only_ignore_eos || options.record_generated_timing).then(Vec::new);
     let mut prompt_progress_events = 0_usize;
     let mut execution_units = 0_usize;
     let mut prefill_execution_units = Vec::new();
@@ -1066,6 +1068,7 @@ fn parse_options() -> Result<Options, String> {
     let mut prompt_lengths = None;
     let mut prefill_mode = Sq8ServingPrefillMode::SequentialM1;
     let mut test_only_ignore_eos = false;
+    let mut record_generated_timing = false;
     let mut performance_gate = false;
     let mut prompt_token_ids_explicit = false;
     let mut max_new_tokens_explicit = false;
@@ -1171,6 +1174,7 @@ fn parse_options() -> Result<Options, String> {
                 )?;
             }
             Some("--test-only-ignore-eos") => test_only_ignore_eos = true,
+            Some("--record-generated-timing") => record_generated_timing = true,
             Some("--performance-gate") => performance_gate = true,
             Some("--cancel-after-first-token") => cancel_after_first_token = true,
             Some("--cancel-after-prompt-progress") => {
@@ -1220,6 +1224,7 @@ fn parse_options() -> Result<Options, String> {
             || cancel_after_first_token
             || cancel_after_prompt_progress.is_some()
             || oracle_capture_dir.is_some()
+            || record_generated_timing
             || result_json.is_none())
     {
         return Err(
@@ -1262,6 +1267,7 @@ fn parse_options() -> Result<Options, String> {
         prompt_lengths,
         prefill_mode,
         test_only_ignore_eos,
+        record_generated_timing,
         performance_gate,
         cancel_after_first_token,
         cancel_after_prompt_progress,
