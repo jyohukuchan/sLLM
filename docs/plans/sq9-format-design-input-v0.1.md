@@ -23,15 +23,22 @@
   special-value decoder behavior are fixed below.
 - A CPU test now exhaustively verifies all 512 sign-inclusive patterns against independent binary16
   semantics.  It passed on 2026-07-26.
+- 2026-07-26 compatibility correction: `SQ9_0` is a supported future wire format, not a recommended
+  or optimization-primary format.  The earlier V620 timing and offline quality conclusions remain
+  evidence for non-recommendation; only the disposition changes because compatibility is a user
+  requirement.
 
 ## 次の行動
 
-1. Implement a standalone `SQ9_0` pack/unpack reference and a deterministic RNE encoder only after
-   the evaluation gates in this document are accepted.
-2. Benchmark the no-scale direct decode path first on V620/gfx1030; do not infer its throughput from
-   the bit-conversion proof.
-3. Compare it against the same-shape `SQ8_0` fallback and `AQ4_0` path using the bandwidth and
-   quality gates defined below before considering a runtime integration plan.
+1. Define and then implement the compatibility-only `SQ9_0` packer, reader, validator, deterministic
+   RNE quantizer, and generic dequantization path.  This task defines the scope only; it implements
+   none of them.
+2. Keep `SQ8_0` as the recommended optimized format on gfx1201/RDNA4.  Treat the V620 timing,
+   quality, capacity, and ISA evidence below as a reason not to optimize or auto-select `SQ9_0`, not
+   as a reason to reject format compatibility.
+3. Complete separate `SQ8_1` design, activation-quality, and architecture-specific performance gates.
+   `SQ8_1` is the INT8 block-scale optimization candidate; this document does not change its
+   separately owned design file.
 
 ## Goal
 
@@ -567,15 +574,20 @@ full M=1 GEMV が純粋に ALU 律速であることを単独では証明しな�
 `benchmarks/results/2026-07-26/sq9-v620-viability/summary.md` とその `static/isa-analysis.md` に保存した。
 この追記は candidate、campaign、release、service、activation の承認ではない。
 
-## 2026-07-26 Offline Evaluation Result: discard SQ9_0
+## 2026-07-26 evaluation result and compatibility correction for `SQ9_0`
 
-This section is the disposition of the design input above. It supersedes the earlier SQ9_0
-evaluation and next-action direction; it does not rewrite the historical format definition.
+This section preserves the disposition evidence for the design input above and corrects its policy
+conclusion.  The historical measurement and evaluation data are not rewritten: the performance,
+quality, capacity, and ISA evidence still says that `SQ9_0` is not the recommended format or an
+optimization primary.  The corrected conclusion is that `SQ9_0` remains a compatibility-supported
+format whose implementation scope is defined below.
 
 ### Scope and evidence boundary
 
-All work in this section was CPU-only or offline compilation. No HIP runtime API, GPU kernel launch,
-R9700, V620, service, release, candidate, or activation state was used or changed.
+The reconstruction and static-ISA portions of this section were CPU-only or offline compilation.
+The V620 timing table above is a preserved historical hardware measurement; it is not rerun or
+changed by this correction.  The current correction uses no HIP runtime API, GPU kernel launch,
+R9700, V620, service, release, candidate, or activation state.
 
 The source-correct reference is the local Qwen/Qwen3-14B-FP8 checkpoint. Each source value was
 reconstructed as OCP F8_E4M3FN payload times its BF16 [128,128] weight_scale_inv multiplier.
@@ -665,8 +677,9 @@ which supports g=32 as the initial int8 design point.
 SQ8_0 remains smaller than either alternative and preserves the source payload plus its source
 scale without an extra requantization error. Q8_0-style g=32 is 6.237% larger than source-correct
 SQ8_0; SQ9_0 is 12.486% larger. Therefore this decision does not replace SQ8_0 on RDNA4, where
-the existing source-preserving FP8 path remains the correct default. It only rejects SQ9_0 as the
-no-native-FP8 fallback proposed for gfx1030-class hardware.
+the existing source-preserving FP8 path remains the correct default. On gfx1030-class hardware the
+same evidence makes SQ9_0 non-recommended relative to the INT8 block-scale direction; it does not
+remove the future compatibility reader/dequantization obligation for `SQ9_0`.
 
 ### W8A8 activation contract and quality boundary
 
@@ -679,40 +692,69 @@ multiple K blocks, because the weight scale changes per block.
 
 This task has no retained raw activation corpus suitable for measuring activation quantization
 error, so W8A8 activation relative L2, saturation rate, and output/logit impact are unconfirmed.
-They must be measured with held-out prompt activations before any implementation adoption. This
-does not weaken the SQ9_0 disposition: the static W8A16 comparison already favors the int8
-block-scale path, and W8A8 adds the verified dot4 advantage.
+They must be measured with held-out prompt activations before any optimized INT8 implementation
+adoption. This does not change the `SQ9_0` non-recommendation: the static W8A16 comparison already
+favors the INT8 block-scale path, and W8A8 adds the verified dot4 advantage. It also does not
+override the separately defined compatibility implementation scope for `SQ9_0`.
 
-### Decision and replacement direction
+### Corrected decision, compatibility scope, and optimized replacement direction
 
-Decision: discard SQ9_0 as a runtime, artifact, or campaign candidate. Retain this document only
-as a rejected design record and conversion proof. Do not implement its packer, reader, GPU kernel,
-candidate, release, or activation path.
+The earlier decision to discard `SQ9_0` as a runtime/artifact/campaign candidate is superseded on
+2026-07-26 by the user's compatibility policy.  This correction does **not** change any number,
+measurement, quality result, or static-ISA conclusion above.  In particular, the guarded V620 M=1
+result remains +6.069% versus `SQ8_0`, below the +7.29% package-plus-KV condition, and the
+capacity/ISA/quality comparison still favors the INT8 block-scale direction.
 
-The next candidate should be named SQ8_1. This is a proposal only, not a format-registry change:
-it follows the existing SQ8 category and exact-version naming convention while remaining
-wire-incompatible with SQ8_0.
+The corrected status is:
 
-| field | proposed SQ8_1 direction |
+- `SQ9_0` is a **supported compatibility format target**.  Its packer, reader, validator,
+  quantizer, dequantization kernel, runtime load path, and served-model manifest handling are
+  implementation obligations.
+- `SQ9_0` is **not** a recommended format, default, auto-selected format, performance campaign
+  target, or matrix-instruction optimization target.  It must never displace `SQ8_0` as the
+  recommended optimized format on gfx1201/RDNA4.
+- Current implementation status remains **not implemented**.  This task defines the required
+  scope and does not create an artifact, runtime path, campaign, candidate, release, or activation.
+
+| required compatibility component | required future behavior | explicit non-goal |
+| --- | --- | --- |
+| packer and quantizer | Deterministic RNE E5M3 encoding, source non-finite rejection, saturation accounting, two-plane payload construction, 128-element padding, and metadata exactly as specified in this document. | No format change, calibrated-compensation substitution, or implicit conversion from `SQ8_0`/`AQ4_0`. |
+| reader and validator | Validate exact `SQ9_0` ID, shapes, `stored_cols`, both plane lengths, `lo8_then_hi1` layout, LSB-first bit order, zero padding, and malformed metadata before execution. | No permissive reinterpretation of an unknown or differently versioned artifact. |
+| dequantization kernel | Provide a correctness-first `SQ9_0` E5M3-to-FP16/FP32 path that assembles `q` and uses the specified `q << 7` conversion.  Keep CPU/reference differential coverage. | No claim that this is a native FP9, INT8 dot, WMMA, or MFMA path; no performance tuning requirement. |
+| runtime loader and dispatch | Admit `SQ9_0` only through an explicit format selector and select the generic compatibility dequant path.  A missing reader/kernel/capability must fail closed. | No default selection, silent fallback to a different format, or replacement of a selected `SQ8_0`/`AQ4_0` path. |
+| served-model manifest | A future manifest must name `SQ9_0` exactly and declare a compatibility/reference execution profile.  It must be an explicit operator/model choice. | No edit to `/etc/ullm/served-models/active.json`, no service action, and no activation in this task. |
+| architecture availability | After the reader, kernel, and per-architecture differential gates exist, the generic compatibility route is selectable explicitly on gfx1030, gfx1100, gfx1201, gfx942, and gfx950.  Unknown architecture IDs fail closed to no `SQ9_0` selection. | No architecture-specific fast path is required or implied by compatibility support. |
+
+The next optimized INT8 candidate remains `SQ8_1`.  This is a separate exact format direction, not a
+format-registry change in this document, and it remains wire-incompatible with `SQ8_0`.
+
+| field | proposed `SQ8_1` direction |
 | --- | --- |
-| values | row-major signed int8, one byte per logical weight |
-| weight scale | one FP16 positive dequantization multiplier per contiguous K=32 weights; shape [rows, ceil(cols / 32)] |
-| quantization | symmetric RNE q_w = clamp(round(w / s_w), -127, 127), s_w = max(abs(w)) / 127, with zero tails only for physical K padding |
-| persistent density | 32 int8 values plus one FP16 scale = 34 bytes = 8.5 bpp before row-tail/container metadata |
-| W8A8 | dynamic per-token, K=32 signed-int8 activation plus FP16 scale; v_dot4c_i32_i8 into int32 partials and one scale product per K block |
-| W8A16 fallback | int8-to-float conversion plus weight-scale multiplication per value; required where activation quantization is not accepted |
-| SQ8_0 relationship | separate artifact and dispatch; preserve SQ8_0 raw F8_E4M3 plus BF16 [128,128] scale source contract and retain it on native-FP8 paths |
-| AQ4_0 relationship | unchanged compact format; SQ8_1 is a higher-fidelity / int8-dot fallback candidate, not an AQ4_0 replacement |
+| values | row-major signed INT8, one byte per logical weight |
+| weight scale | one FP16 positive dequantization multiplier per contiguous K=32 weights; shape `[rows, ceil(cols / 32)]` |
+| quantization | symmetric RNE `q_w = clamp(round(w / s_w), -127, 127)`, `s_w = max(abs(w)) / 127`, with zero tails only for physical K padding |
+| persistent density | 32 INT8 values plus one FP16 scale = 34 bytes = 8.5 bpp before row-tail/container metadata |
+| W8A8 | dynamic per-token K=32 signed-INT8 activation plus FP16 scale; portable baseline `v_dot4_i32_i8` into INT32 partials and one scale product per K block.  gfx1100/gfx1201 select VOP3P `v_dot4_i32_iu8`; architecture-specific WMMA/MFMA requires its own proof. |
+| W8A16 fallback | INT8-to-float conversion plus weight-scale multiplication per value; required where activation quantization is not accepted |
+| `SQ8_0` relationship | separate artifact and dispatch; preserve `SQ8_0` raw F8_E4M3 plus BF16 `[128,128]` scale source contract and retain it on native-FP8 paths |
+| `AQ4_0` relationship | unchanged compact format; `SQ8_1` is a higher-fidelity/INT8-dot candidate, not an `AQ4_0` replacement |
 
-### Replacement next actions
+The architecture-specific selection rule, including gfx1201 FP8/INT8 WMMA and the portable dot4
+baseline, is [AMD 低精度 ISA とフォーマット選択リファレンス](../reference/amd-low-precision-isa-and-format-selection-rocm7.2.1.md).
 
-1. Write a separate SQ8_1 design input and format-ID review; do not change the existing SQ8_0 or
-   AQ4_0 registry, artifacts, dispatch, campaigns, candidate files, releases, or service state.
-2. Add a bounded-memory CPU reference with pack/unpack, 1/31/32/33-column tails, deterministic
-   RNE, FP16-scale underflow/overflow accounting, and source-correct F8_E4M3-to-SQ8_1 error checks.
-3. Define an activation capture and held-out evaluation plan for the K=32 dynamic W8A8 scale,
-   including activation saturation, activation relative L2, linear-output error, and logit/prompt
-   gates. Until then W8A8 quality is unconfirmed.
-4. Only under a separately authorized GPU window, compare SQ8_1 W8A8, SQ8_1 W8A16, and the retained
-   SQ8_0 fallback on matched V620 inputs. Record transactions, occupancy, clocks, timing, and
-   numerical differentials; do not infer those measurements from this offline ISA evidence.
+### Next actions
+
+1. Write a compatibility implementation plan for `SQ9_0` that sequences the packer/quantizer,
+   reader/validator, CPU oracle, generic dequantization kernel, runtime selector, and manifest
+   schema.  It must include malformed-artifact and 1/31/32/33-column-tail tests.
+2. Implement the `SQ9_0` compatibility path only after that plan is reviewed.  Keep it explicit and
+   generic on gfx1030, gfx1100, gfx1201, gfx942, and gfx950; do not add it to an auto-selection,
+   optimization campaign, candidate, release, or activation path.
+3. Complete the separately owned `SQ8_1` design input, bounded-memory CPU reference, activation
+   capture, and held-out W8A8 quality plan.  Do not modify
+   `docs/plans/sq8_1-format-design-input-v0.1.md` from this work.
+4. Only under a separately authorized GPU window, compare optimized `SQ8_1` W8A8/W8A16 against the
+   retained `SQ8_0` path on matched inputs.  Record transactions, occupancy, clocks, timing, and
+   numerical differentials; no GPU work is authorized by this document.
+5. Keep final activation outside this plan.  Any future active-manifest change remains a separate
+   human-approved action.

@@ -20,6 +20,18 @@ The work follows the already established safety sequence:
 
 Phase 0 has completed only steps that do not require a gfx942 device. This host has gfx1030 and gfx1201 GPUs only; it must not be used to infer gfx942 numerical correctness or performance.
 
+## 2026-07-26 ISA 訂正の適用範囲
+
+この plan を再確認した結果、CDNA3 向けに「RDNA4 WMMA を移植せず MFMA を使う」とする結論は、
+wave64 と architecture 固有の fragment/format contract に基づくものであり、RDNA4/gfx1201 が
+INT8 dot を欠くという意味ではない。gfx1201 は VOP3P INT8 dot と INT8/FP8 WMMA を持つ。
+
+従ってこの plan の CDNA3 分離は、能力の欠落ではなく architecture ごとの ISA と format semantics の
+分離である。canonical `SQ8_0` の OCP-to-FNUZ prepack 条件、gfx942 の MFMA 検証、既存 gfx1201
+ABI の不変条件は変更しない。INT8 の architecture matrix と正しい gfx1100/gfx1201 WMMA 構文は
+[AMD 低精度 ISA とフォーマット選択リファレンス](../reference/amd-low-precision-isa-and-format-selection-rocm7.2.1.md)
+を正とする。`SQ8_1` の設計ファイルは別作業の所有物であり、この plan からは変更しない。
+
 ## Success Criteria
 
 ### Correctness and format

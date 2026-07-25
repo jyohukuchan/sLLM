@@ -3,7 +3,8 @@
 ## 前回の要点
 
 - `SQ9_0` は V620/gfx1030 の M=1 実測と独立した offline 比較の両方から、runtime/artifact/campaign
-  candidate として破棄済みだった。
+  candidate としては非推奨と評価された。性能・容量・ISA・品質のその評価は保存するが、互換性を重視する
+  方針により、format reader/dequantization の将来対応を破棄する判定ではない。
 - 後継候補 `SQ8_1` の signed int8 block-scale は、W8A8 に必要な活性側の動的 int8 量子化誤差が未確認であり、
   実モデルでの確認が必要だった。
 - 並行セッションによる `docs/plans/sq9-format-design-input-v0.1.md` の V620 実測追記は、元の evidence と照合して
@@ -29,7 +30,10 @@
   mean KL 0.000323955 だった。重みと活性を同時に量子化した full-model W8A8 logits は未確認である。
 - GPU を実行せず device-only compiler recheck を行い、gfx1030 は `v_dot4c_i32_i8`、gfx942 は
   `v_dot4c_i32_i8_e32` を出力した。gfx1201 は `__builtin_amdgcn_sdot4` を missing `dot1-insts` feature として
-  拒否した。これは ISA eligibility だけであり、性能実測ではない。
+  拒否した。しかしこれは旧 VOP2 累積 builtin の結果であり、gfx1201 の INT8 dot 不在を意味しない。
+  後続の direct `llvm-mc` 再検証では gfx1201 が `v_dot4_i32_i8` と VOP3P
+  `v_dot4_i32_iu8` を受理し、INT8 WMMA も確認された。正確な ISA 表は
+  `docs/reference/amd-low-precision-isa-and-format-selection-rocm7.2.1.md` を正とする。
 - `docs/plans/sq8_1-format-design-input-v0.1.md` に、K=32、FP16 upward scale、symmetric signed int8、
   separate payload/scale plane、W8A8/W8A16 policy、architecture dispatch rule、実装前の gate を記録した。
 

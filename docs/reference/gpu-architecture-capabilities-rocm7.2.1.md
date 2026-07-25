@@ -52,6 +52,23 @@ uLLMのHIPカーネル実装（Codex/Claude含む）が、CDNA(MI300系)向け�
 | BF16 | — | — | **1024** |
 | INT8 | — | 512 | **2048** |
 
+### 2-1a. 2026-07-26 ISA 訂正: RDNA4 の INT8 dot/WMMA
+
+**gfx1201/RDNA4 は INT8 dot を持つ。** `__builtin_amdgcn_sdot4` 一つの codegen に
+`v_dot4` が現れなかったことを根拠に「RDNA4 は INT8 dot を持たない」と結論してはならない。
+ROCm 7.2.1 同梱 `llvm-mc` による直接検証では、全対象 architecture 共通の
+`v_dot4_i32_i8` を gfx1201 でも受理し、gfx1100/gfx1201 では VOP3P の
+`v_dot4_i32_iu8` へ正規化して出力した。RDNA3/RDNA4 では旧 VOP2 累積形
+`v_dot4c_i32_i8` が使えず、VOP3P 形を選ぶ。
+
+また gfx1201 は、INT8 の `v_wmma_i32_16x16x16_iu8` と FP8/BF8 の
+`v_wmma_f32_16x16x16_{fp8,bf8}_{fp8,bf8}` を持つ。したがって `SQ8_1` の INT8
+経路は成立するが、source FP8 を再量子化しない `SQ8_0` が RDNA4 で推奨される最適化
+フォーマットであることは変わらない。正しい operand 構文、全五 architecture の結果、
+`__builtin_amdgcn_sdot4` の罠、フォーマット選択規則は
+[AMD 低精度 ISA とフォーマット選択リファレンス](amd-low-precision-isa-and-format-selection-rocm7.2.1.md)
+を正とする。
+
 ### 2-2. Wide-K WMMA(狭いdtypeでの帯域改善技法) `[公式]`
 
 出典: https://gpuopen.com/learn/wmma-guide-amd-rdna-4-gpus-part-2/

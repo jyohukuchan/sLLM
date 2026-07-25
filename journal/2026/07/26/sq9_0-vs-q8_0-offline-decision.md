@@ -1,4 +1,4 @@
-# SQ9_0 対 int8 ブロックスケールのオフライン決着
+# `SQ9_0` 対 INT8 ブロックスケールの評価記録と互換性方針訂正
 
 ## 前回の要点
 
@@ -8,6 +8,8 @@
   v_dot4c_i32_i8 を生成する。したがって、V620 は int8 dot を持つ。
 - 今回は GPU を一切起動せず、Qwen3-14B-FP8 の読み取り専用 CPU 評価と
   gfx1030 向け静的コンパイルだけを許可範囲とした。
+- この journal は当時の性能・品質・静的 ISA 評価を保存する。2026-07-26 の後続方針訂正では、
+  その数値や評価データを変更しない。
 
 ## 今回の変更点
 
@@ -30,18 +32,35 @@
   - packed FP16 companionも確認した。双方64 v_pk_fma_f16/128 weightsだが、SQ9_0は
     432 bitfield/shift classを伴い、W8A8 int8 dotの4 MAC/instructionには届かない。
 - raw results, code object, disassembly, notes, hash manifest, and reproducible tools were追加した。
-- SQ9_0 を runtime/artifact/campaign candidateとして破棄する判定を
-  docs/plans/sq9-format-design-input-v0.1.md に追記した。
+- 当時はこの結果から `SQ9_0` を runtime/artifact/campaign candidate として破棄すると
+  記録した。これは性能単体の判定として保存するが、互換性を重視するユーザー方針により、
+  runtime/artifact の対応範囲を否定する判定ではなくなった。
+
+## 判定の訂正
+
+- `SQ9_0` は対応する。将来の実装対象は packer、reader、validator、deterministic RNE quantizer、
+  generic E5M3-to-FP16/FP32 dequant kernel、runtime load selector、served-model manifest の
+  explicit format/profile である。この journal 自体は実装を行わない。
+- `SQ9_0` は推奨形式でも最適化主対象でもない。V620 M=1 の `SQ8_0` 比 +6.069% が
+  package-plus-KV 採算条件 +7.29% を満たさないこと、INT8 block-scale が容量・ISA・品質で
+  有利という測定/評価は、変更せずに非推奨の根拠として残す。
+- future generic compatibility path は gfx1030、gfx1100、gfx1201、gfx942、gfx950 で explicit に
+  選択可能にする。ただし実装と各 architecture の differential が完了するまでは current runtime
+  capability ではなく、unknown architecture は fail closed とする。
+- gfx1201/RDNA4 は INT8 dot と INT8/FP8 WMMA を持つ。`SQ8_1` の INT8 path は成立するが、
+  source-preserving FP8 WMMA path を持つ `SQ8_0` が RDNA4 の推奨最適化フォーマットである。
+  正確な ISA 表は `docs/reference/amd-low-precision-isa-and-format-selection-rocm7.2.1.md` を正とする。
 
 ## 次の行動
 
-1. int8 + FP16 scale/g32 の wire-incompatible exact candidateとして SQ8_1 の設計入力を
-   別タスクで作成する。SQ8_0/AQ4_0 の既存 format, artifact, dispatch, campaign, releaseは
-   変更しない。
-2. SQ8_1 の dynamic W8A8 activation quantizationを、保持された raw activationと
-   holdout promptで測る。activation error, saturation, linear output, logitsは現時点で未確認。
-3. GPU 性能比較は別途明示承認された windowでのみ行う。今回の ISA は timing, occupancy,
-   transaction, TPS の代替ではない。
+1. `SQ9_0` compatibility plan に packer/quantizer、reader/validator、CPU oracle、generic dequant、
+   runtime selector、manifest schema を分離して定義する。`SQ9_0` は default、auto-selection、
+   optimization campaign に入れない。
+2. `SQ8_1` の設計入力は別作業で確定する。可搬 baseline は `v_dot4_i32_i8` とし、RDNA3/RDNA4
+   は VOP3P `v_dot4_i32_iu8` と INT8 WMMA を個別に評価する。別作業中の
+   `docs/plans/sq8_1-format-design-input-v0.1.md` はこの作業から変更しない。
+3. GPU 性能比較は別途明示承認された window でのみ行う。今回の ISA は timing, occupancy,
+   transaction, TPS の代替ではなく、この訂正でも GPU は使用しない。
 
 ## Evidence
 
