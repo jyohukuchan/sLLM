@@ -120,3 +120,94 @@ fn cpu_sq8_1_rejects_nonzero_physical_tail_and_noncanonical_stride() {
             .contains("round_up")
     );
 }
+
+#[test]
+fn cpu_sq8_1_boundary_tail_zero_and_saturation_cases_match() {
+    // With every activation block max fixed at 127, ceil_fp16(max/127) is
+    // exactly one.  W8A8 therefore has an exact integer oracle against the
+    // W8A16 path while exercising signed endpoints, all-zero rows, and each
+    // physical K=16/K=32 tail boundary.
+    for cols in [1_usize, 15, 16, 17, 31, 32, 33, 65] {
+        const ROWS: usize = 2;
+        let stride = sq8_1_payload_row_stride(cols).unwrap();
+        let groups = (cols + 31) / 32;
+        let mut payload = vec![0_u8; ROWS * stride];
+        let mut expected = 0_i32;
+        let input = (0..cols)
+            .map(|col| match col % 3 {
+                0 => -127.0_f32,
+                1 => 0.0_f32,
+                _ => 127.0_f32,
+            })
+            .collect::<Vec<_>>();
+        for col in 0..cols {
+            let weight = match col % 4 {
+                0 => -127_i8,
+                1 => -1_i8,
+                2 => 1_i8,
+                _ => 127_i8,
+            };
+            payload[col] = weight as u8;
+            expected += i32::from(weight) * input[col] as i32;
+        }
+        // Row one stays all zero, including its physical tail padding.
+        let mut scales = vec![0_u8; ROWS * groups * 2];
+        for group in 0..ROWS * groups {
+            scales[group * 2 + 1] = 0x3c; // FP16 1.0, little endian.
+        }
+
+        let mut context = RuntimeContext::create(0).unwrap();
+        let mut stream = context.create_stream().unwrap();
+        let mut payload_buffer = context.alloc_buffer(payload.len()).unwrap();
+        let mut scale_buffer = context.alloc_buffer(scales.len()).unwrap();
+        let mut input_buffer = context
+            .alloc_buffer(cols * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut w8a16_output = context
+            .alloc_buffer(ROWS * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut w8a8_output = context
+            .alloc_buffer(ROWS * std::mem::size_of::<f32>())
+            .unwrap();
+        payload_buffer
+            .copy_from_host(0, &payload, Some(&mut stream))
+            .unwrap();
+        scale_buffer
+            .copy_from_host(0, &scales, Some(&mut stream))
+            .unwrap();
+        input_buffer
+            .copy_from_host(0, &f32s_to_le_bytes(&input), Some(&mut stream))
+            .unwrap();
+        stream.synchronize().unwrap();
+        sq8_1_matvec_w8a16_f32(
+            &payload_buffer,
+            &scale_buffer,
+            &input_buffer,
+            ROWS,
+            cols,
+            stride,
+            &mut w8a16_output,
+            Some(&mut stream),
+        )
+        .unwrap();
+        sq8_1_matvec_w8a8_explicit_f32(
+            &payload_buffer,
+            &scale_buffer,
+            &input_buffer,
+            ROWS,
+            cols,
+            stride,
+            &mut w8a8_output,
+            Some(&mut stream),
+        )
+        .unwrap();
+        stream.synchronize().unwrap();
+
+        for output in [&mut w8a16_output, &mut w8a8_output] {
+            let mut bytes = vec![0_u8; ROWS * std::mem::size_of::<f32>()];
+            output.copy_to_host(0, &mut bytes, Some(&mut stream)).unwrap();
+            stream.synchronize().unwrap();
+            assert_eq!(le_bytes_to_f32s(&bytes), vec![expected as f32, 0.0], "cols={cols}");
+        }
+    }
+}

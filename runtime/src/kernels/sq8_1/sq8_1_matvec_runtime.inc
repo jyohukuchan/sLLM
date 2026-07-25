@@ -4,6 +4,10 @@
 constexpr size_t kSq8_1GroupSize = 32u;
 constexpr size_t kSq8_1PayloadAlignmentBytes = 16u;
 constexpr unsigned int kSq8_1MatvecThreads = 256u;
+constexpr unsigned int kSq8_1MatvecRowsPerBlock = 8u;
+// Keep the tiled W8A8 path below half the conservative per-workgroup LDS
+// budget.  The fallback kernel remains available for arbitrary valid shapes.
+constexpr size_t kSq8_1W8A8TiledSharedLimitBytes = 48u * 1024u;
 
 size_t sq8_1_groups_per_row(size_t cols) {
     return cols == 0u ? 0u : 1u + (cols - 1u) / kSq8_1GroupSize;
@@ -16,6 +20,23 @@ bool sq8_1_payload_row_stride(size_t cols, size_t *stride) {
     }
     *stride = ((cols + kSq8_1PayloadAlignmentBytes - 1u) / kSq8_1PayloadAlignmentBytes) *
         kSq8_1PayloadAlignmentBytes;
+    return true;
+}
+
+bool sq8_1_w8a8_tiled_shared_bytes(size_t cols, size_t *bytes) {
+    if (bytes == nullptr) {
+        return false;
+    }
+    size_t activation_code_bytes = 0u;
+    if (!sq8_1_payload_row_stride(cols, &activation_code_bytes)) {
+        return false;
+    }
+    const size_t groups = sq8_1_groups_per_row(cols);
+    if (groups == 0u || groups >
+            (std::numeric_limits<size_t>::max() - activation_code_bytes) / sizeof(float)) {
+        return false;
+    }
+    *bytes = activation_code_bytes + groups * sizeof(float);
     return true;
 }
 
@@ -268,11 +289,15 @@ std::string sq8_1_exact_dot_arch_for_device(int device_id) {
 
 class HipSq8_1MatvecKernelCache {
 public:
-    void *function_for_device(int device_id, bool w8a8, std::string *error) {
+    void *function_for_device(int device_id, bool w8a8, bool w8a8_tiled, std::string *error) {
         std::lock_guard<std::mutex> lock(mutex_);
         const auto found = modules_.find(device_id);
         if (found != modules_.end()) {
-            return w8a8 ? found->second->w8a8_function : found->second->w8a16_function;
+            if (!w8a8) {
+                return found->second->w8a16_function;
+            }
+            return w8a8_tiled ? found->second->w8a8_tiled_function
+                              : found->second->w8a8_fallback_function;
         }
         const std::string arch = sq8_1_exact_dot_arch_for_device(device_id);
         if (arch.empty()) {
@@ -291,11 +316,17 @@ public:
             return nullptr;
         }
         void *w8a16_function = nullptr;
-        void *w8a8_function = nullptr;
+        void *w8a8_tiled_function = nullptr;
+        void *w8a8_fallback_function = nullptr;
         if (!hip_runtime().module_get_function(
                 &w8a16_function, module, "ullm_sq8_1_matvec_w8a16_f32_kernel", device_id) ||
             !hip_runtime().module_get_function(
-                &w8a8_function, module, "ullm_sq8_1_matvec_w8a8_explicit_f32_kernel", device_id)) {
+                &w8a8_tiled_function, module, "ullm_sq8_1_matvec_w8a8_explicit_f32_kernel", device_id) ||
+            !hip_runtime().module_get_function(
+                &w8a8_fallback_function,
+                module,
+                "ullm_sq8_1_matvec_w8a8_explicit_fallback_f32_kernel",
+                device_id)) {
             hip_runtime().module_unload(module, device_id);
             append_error(error, "hipModuleGetFunction failed for SQ8_1 " + arch);
             return nullptr;
@@ -303,8 +334,11 @@ public:
         auto loaded = std::make_unique<LoadedModule>();
         loaded->module = module;
         loaded->w8a16_function = w8a16_function;
-        loaded->w8a8_function = w8a8_function;
-        void *result = w8a8 ? loaded->w8a8_function : loaded->w8a16_function;
+        loaded->w8a8_tiled_function = w8a8_tiled_function;
+        loaded->w8a8_fallback_function = w8a8_fallback_function;
+        void *result = !w8a8 ? loaded->w8a16_function
+                              : (w8a8_tiled ? loaded->w8a8_tiled_function
+                                             : loaded->w8a8_fallback_function);
         modules_.emplace(device_id, std::move(loaded));
         return result;
     }
@@ -313,7 +347,8 @@ private:
     struct LoadedModule {
         void *module = nullptr;
         void *w8a16_function = nullptr;
-        void *w8a8_function = nullptr;
+        void *w8a8_tiled_function = nullptr;
+        void *w8a8_fallback_function = nullptr;
     };
 
     static void append_error(std::string *error, const std::string &message) {
@@ -359,7 +394,11 @@ bool sq8_1_matvec_f32_hip_kernel(
         return false;
     }
     const int device_id = payload_buffer->hip_device_id;
-    void *function = hip_sq8_1_matvec_kernel_cache().function_for_device(device_id, w8a8, error);
+    size_t w8a8_shared_bytes = 0u;
+    const bool use_w8a8_tiled = w8a8 && sq8_1_w8a8_tiled_shared_bytes(cols, &w8a8_shared_bytes) &&
+        w8a8_shared_bytes <= kSq8_1W8A8TiledSharedLimitBytes;
+    void *function = hip_sq8_1_matvec_kernel_cache().function_for_device(
+        device_id, w8a8, use_w8a8_tiled, error);
     if (function == nullptr) {
         return false;
     }
@@ -380,13 +419,19 @@ bool sq8_1_matvec_f32_hip_kernel(
         &output_ptr,
     };
     void *hip_stream = stream == nullptr ? nullptr : stream->stream;
+    const size_t rows_per_block = (w8a8 && !use_w8a8_tiled)
+        ? 1u
+        : static_cast<size_t>(kSq8_1MatvecRowsPerBlock);
+    const unsigned int grid_x = static_cast<unsigned int>(
+        1u + (rows - 1u) / rows_per_block);
     if (!hip_runtime().module_launch_kernel(
-            function,
-            static_cast<unsigned int>(rows),
-            kSq8_1MatvecThreads,
-            kernel_params,
-            hip_stream,
-            device_id)) {
+        function,
+        grid_x,
+        kSq8_1MatvecThreads,
+        kernel_params,
+        hip_stream,
+        device_id,
+        use_w8a8_tiled ? static_cast<unsigned int>(w8a8_shared_bytes) : 0u)) {
         if (error != nullptr) {
             *error = "hipModuleLaunchKernel failed for SQ8_1 matvec";
         }

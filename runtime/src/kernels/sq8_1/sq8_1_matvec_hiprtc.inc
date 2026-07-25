@@ -10,12 +10,8 @@ typedef unsigned int ullm_sq8_1_uint4 __attribute__((ext_vector_type(4)));
 static_assert(sizeof(ullm_sq8_1_uint4) == 16u, "SQ8_1 uint4 must be 16 bytes");
 static_assert(alignof(ullm_sq8_1_uint4) == 16u, "SQ8_1 uint4 must be aligned");
 
-__device__ unsigned int ullm_sq8_1_word_byte(ullm_sq8_1_uint4 words, unsigned int index) {
-    const unsigned int word_index = index >> 2u;
-    const unsigned int word = word_index == 0u ? words.x :
-        (word_index == 1u ? words.y : (word_index == 2u ? words.z : words.w));
-    return (word >> ((index & 3u) * 8u)) & 0xffu;
-}
+constexpr unsigned int kUllmSq8_1WaveSize = 32u;
+constexpr unsigned int kUllmSq8_1RowsPerBlock = 8u;
 
 __device__ int ullm_sq8_1_signed_byte(unsigned int value) {
     return value >= 128u ? static_cast<int>(value) - 256 : static_cast<int>(value);
@@ -112,19 +108,83 @@ __device__ __forceinline__ int ullm_sq8_1_dot4_i32_i8(int lhs, int rhs, int accu
 #endif
 }
 
-__device__ float ullm_sq8_1_reduce_sum(float value, float *partial) {
-    partial[threadIdx.x] = value;
-    __syncthreads();
-    for (unsigned int offset = blockDim.x >> 1u; offset > 0u; offset >>= 1u) {
-        if (threadIdx.x < offset) {
-            partial[threadIdx.x] += partial[threadIdx.x + offset];
-        }
-        __syncthreads();
+// The runtime launches 256 threads as eight logical wave32 rows.  Supplying a
+// fixed width keeps two logical rows independent when a CDNA target exposes a
+// wave64.  The caller uses this only for reductions within one logical row.
+__device__ __forceinline__ float ullm_sq8_1_wave32_sum(float value) {
+#pragma unroll
+    for (unsigned int offset = kUllmSq8_1WaveSize >> 1u; offset > 0u; offset >>= 1u) {
+        value += __shfl_down(value, offset, kUllmSq8_1WaveSize);
     }
-    return partial[0];
+    return value;
 }
 
-extern "C" __global__ void ullm_sq8_1_matvec_w8a16_f32_kernel(
+__device__ __forceinline__ float ullm_sq8_1_wave32_broadcast_lane0(float value) {
+    // readlane indexes the physical wave.  Offset a logical second half-wave
+    // on wave64 targets so it does not accidentally read physical lane zero.
+    const unsigned int hardware_lane = threadIdx.x & (static_cast<unsigned int>(warpSize) - 1u);
+    return __uint_as_float(__builtin_amdgcn_readlane(
+        __float_as_uint(value), static_cast<int>(hardware_lane & ~31u)));
+}
+
+__device__ __forceinline__ float ullm_sq8_1_dot4_w8a16(
+    unsigned int packed_weights,
+    float4 activation,
+    float accum) {
+    accum = fmaf(
+        static_cast<float>(static_cast<signed char>(packed_weights & 0xffu)), activation.x, accum);
+    accum = fmaf(
+        static_cast<float>(static_cast<signed char>((packed_weights >> 8u) & 0xffu)), activation.y, accum);
+    accum = fmaf(
+        static_cast<float>(static_cast<signed char>((packed_weights >> 16u) & 0xffu)), activation.z, accum);
+    return fmaf(
+        static_cast<float>(static_cast<signed char>((packed_weights >> 24u) & 0xffu)), activation.w, accum);
+}
+
+__device__ __forceinline__ float ullm_sq8_1_dot32_w8a16(
+    ullm_sq8_1_uint4 first,
+    ullm_sq8_1_uint4 second,
+    const float4 *activation) {
+    float dot = 0.0f;
+    dot = ullm_sq8_1_dot4_w8a16(first.x, activation[0], dot);
+    dot = ullm_sq8_1_dot4_w8a16(first.y, activation[1], dot);
+    dot = ullm_sq8_1_dot4_w8a16(first.z, activation[2], dot);
+    dot = ullm_sq8_1_dot4_w8a16(first.w, activation[3], dot);
+    dot = ullm_sq8_1_dot4_w8a16(second.x, activation[4], dot);
+    dot = ullm_sq8_1_dot4_w8a16(second.y, activation[5], dot);
+    dot = ullm_sq8_1_dot4_w8a16(second.z, activation[6], dot);
+    return ullm_sq8_1_dot4_w8a16(second.w, activation[7], dot);
+}
+
+__device__ __forceinline__ int ullm_sq8_1_dot32_w8a8(
+    ullm_sq8_1_uint4 weights_first,
+    ullm_sq8_1_uint4 weights_second,
+    ullm_sq8_1_uint4 activation_first,
+    ullm_sq8_1_uint4 activation_second) {
+    int dot = 0;
+    dot = ullm_sq8_1_dot4_i32_i8(
+        static_cast<int>(weights_first.x), static_cast<int>(activation_first.x), dot);
+    dot = ullm_sq8_1_dot4_i32_i8(
+        static_cast<int>(weights_first.y), static_cast<int>(activation_first.y), dot);
+    dot = ullm_sq8_1_dot4_i32_i8(
+        static_cast<int>(weights_first.z), static_cast<int>(activation_first.z), dot);
+    dot = ullm_sq8_1_dot4_i32_i8(
+        static_cast<int>(weights_first.w), static_cast<int>(activation_first.w), dot);
+    dot = ullm_sq8_1_dot4_i32_i8(
+        static_cast<int>(weights_second.x), static_cast<int>(activation_second.x), dot);
+    dot = ullm_sq8_1_dot4_i32_i8(
+        static_cast<int>(weights_second.y), static_cast<int>(activation_second.y), dot);
+    dot = ullm_sq8_1_dot4_i32_i8(
+        static_cast<int>(weights_second.z), static_cast<int>(activation_second.z), dot);
+    return ullm_sq8_1_dot4_i32_i8(
+        static_cast<int>(weights_second.w), static_cast<int>(activation_second.w), dot);
+}
+
+// Eight independent rows share one 256-thread workgroup.  Each logical
+// wave32 owns one row and walks five K=32 blocks for the common 5120-wide
+// decode shape.  This removes the reference LDS tree entirely while retaining
+// two aligned uint4 loads per complete K=32 block.
+extern "C" __global__ __launch_bounds__(256) void ullm_sq8_1_matvec_w8a16_f32_kernel(
     const unsigned char *payload,
     const unsigned short *weight_scales,
     const float *input,
@@ -132,48 +192,138 @@ extern "C" __global__ void ullm_sq8_1_matvec_w8a16_f32_kernel(
     unsigned long long cols,
     unsigned long long payload_row_stride,
     float *output) {
-    const unsigned long long row = blockIdx.x;
     const unsigned int tid = threadIdx.x;
-    __shared__ float partial[256];
-    float sum = 0.0f;
-    if (row < rows) {
-        const unsigned long long groups = (cols + 31ull) / 32ull;
-        const unsigned char *row_payload = payload + row * payload_row_stride;
-        for (unsigned long long group = tid; group < groups; group += blockDim.x) {
-            const unsigned long long start = group * 32ull;
-            const unsigned int count = static_cast<unsigned int>(
-                (cols - start) < 32ull ? (cols - start) : 32ull);
-            float dot = 0.0f;
-            if (count == 32u) {
-                // Two uint4 loads, each covering sixteen of this aligned K=32 block.
-                const ullm_sq8_1_uint4 first =
-                    *reinterpret_cast<const ullm_sq8_1_uint4 *>(row_payload + start);
-                const ullm_sq8_1_uint4 second =
-                    *reinterpret_cast<const ullm_sq8_1_uint4 *>(row_payload + start + 16ull);
-                for (unsigned int index = 0u; index < 16u; ++index) {
-                    dot += static_cast<float>(ullm_sq8_1_signed_byte(ullm_sq8_1_word_byte(first, index))) *
-                        input[start + index];
-                }
-                for (unsigned int index = 0u; index < 16u; ++index) {
-                    dot += static_cast<float>(ullm_sq8_1_signed_byte(ullm_sq8_1_word_byte(second, index))) *
-                        input[start + 16ull + index];
-                }
-            } else {
-                for (unsigned int index = 0u; index < count; ++index) {
-                    dot += static_cast<float>(ullm_sq8_1_signed_byte(row_payload[start + index])) *
-                        input[start + index];
-                }
-            }
-            sum += dot * ullm_sq8_1_f16_to_f32(weight_scales[row * groups + group]);
-        }
+    const unsigned int lane = tid & (kUllmSq8_1WaveSize - 1u);
+    const unsigned long long row = static_cast<unsigned long long>(blockIdx.x) *
+        static_cast<unsigned long long>(kUllmSq8_1RowsPerBlock) + (tid >> 5u);
+    if (row >= rows) {
+        return;
     }
-    const float reduced = ullm_sq8_1_reduce_sum(sum, partial);
-    if (tid == 0u && row < rows) {
+    float sum = 0.0f;
+    const unsigned long long groups = (cols + 31ull) / 32ull;
+    const unsigned char *row_payload = payload + row * payload_row_stride;
+    for (unsigned long long group = lane; group < groups; group += kUllmSq8_1WaveSize) {
+        const unsigned long long start = group * 32ull;
+        const unsigned int count = static_cast<unsigned int>(
+            (cols - start) < 32ull ? (cols - start) : 32ull);
+        float dot = 0.0f;
+        if (count == 32u) {
+            // Exactly two aligned 128-bit payload loads; input is also K=32 aligned.
+            const ullm_sq8_1_uint4 first =
+                *reinterpret_cast<const ullm_sq8_1_uint4 *>(row_payload + start);
+            const ullm_sq8_1_uint4 second =
+                *reinterpret_cast<const ullm_sq8_1_uint4 *>(row_payload + start + 16ull);
+            dot = ullm_sq8_1_dot32_w8a16(
+                first, second, reinterpret_cast<const float4 *>(input + start));
+        } else {
+            for (unsigned int index = 0u; index < count; ++index) {
+                dot = fmaf(
+                    static_cast<float>(ullm_sq8_1_signed_byte(row_payload[start + index])),
+                    input[start + index],
+                    dot);
+            }
+        }
+        sum += dot * ullm_sq8_1_f16_to_f32(weight_scales[row * groups + group]);
+    }
+    const float reduced = ullm_sq8_1_wave32_sum(sum);
+    if (lane == 0u) {
         output[row] = reduced;
     }
 }
 
-extern "C" __global__ void ullm_sq8_1_matvec_w8a8_explicit_f32_kernel(
+// W8A8 reuses one dynamically quantized K=32 activation plane for eight rows.
+// It turns the reference implementation's per-row activation quantization
+// into per-row-tile work while retaining its explicit-only public ABI.  The
+// host only selects this path when its dynamic LDS request is within the
+// conservative 48 KiB cap; otherwise the fallback below keeps all shapes valid.
+extern "C" __global__ __launch_bounds__(256) void ullm_sq8_1_matvec_w8a8_explicit_f32_kernel(
+    const unsigned char *payload,
+    const unsigned short *weight_scales,
+    const float *input,
+    unsigned long long rows,
+    unsigned long long cols,
+    unsigned long long payload_row_stride,
+    float *output) {
+    const unsigned int tid = threadIdx.x;
+    const unsigned int lane = tid & (kUllmSq8_1WaveSize - 1u);
+    const unsigned int logical_wave = tid >> 5u;
+    const unsigned long long groups = (cols + 31ull) / 32ull;
+    const unsigned long long activation_code_bytes = ((cols + 15ull) / 16ull) * 16ull;
+    extern __shared__ __attribute__((aligned(16))) unsigned char activation_storage[];
+    unsigned char *activation_codes = activation_storage;
+    float *activation_scales = reinterpret_cast<float *>(activation_storage + activation_code_bytes);
+
+    // Eight logical waves quantize eight independent blocks at a time.  Each
+    // lane owns one activation element, so scale reduction and packing require
+    // no LDS until the completed codes are consumed by all eight output rows.
+    for (unsigned long long group = logical_wave; group < groups;
+         group += kUllmSq8_1RowsPerBlock) {
+        const unsigned long long start = group * 32ull;
+        const unsigned int count = static_cast<unsigned int>(
+            (cols - start) < 32ull ? (cols - start) : 32ull);
+        const float value = lane < count ? input[start + lane] : 0.0f;
+        float maximum = fabsf(value);
+#pragma unroll
+        for (unsigned int offset = kUllmSq8_1WaveSize >> 1u; offset > 0u; offset >>= 1u) {
+            maximum = fmaxf(maximum, __shfl_down(maximum, offset, kUllmSq8_1WaveSize));
+        }
+        float activation_scale = lane == 0u
+            ? (maximum == 0.0f ? 1.0f : ullm_sq8_1_ceil_f16(maximum / 127.0f))
+            : 0.0f;
+        activation_scale = ullm_sq8_1_wave32_broadcast_lane0(activation_scale);
+        if (lane == 0u) {
+            activation_scales[group] = activation_scale;
+        }
+        if (lane < count) {
+            const int rounded = static_cast<int>(rintf(value / activation_scale));
+            const int clamped = rounded < -127 ? -127 : (rounded > 127 ? 127 : rounded);
+            activation_codes[start + lane] = static_cast<unsigned char>(static_cast<signed char>(clamped));
+        }
+    }
+    __syncthreads();
+
+    const unsigned long long row = static_cast<unsigned long long>(blockIdx.x) *
+        static_cast<unsigned long long>(kUllmSq8_1RowsPerBlock) + logical_wave;
+    float sum = 0.0f;
+    if (row < rows) {
+        const unsigned char *row_payload = payload + row * payload_row_stride;
+        for (unsigned long long group = lane; group < groups; group += kUllmSq8_1WaveSize) {
+            const unsigned long long start = group * 32ull;
+            const unsigned int count = static_cast<unsigned int>(
+                (cols - start) < 32ull ? (cols - start) : 32ull);
+            int dot = 0;
+            if (count == 32u) {
+                // Both planes are K=32/16-byte aligned: two uint4 loads each.
+                const ullm_sq8_1_uint4 weights_first =
+                    *reinterpret_cast<const ullm_sq8_1_uint4 *>(row_payload + start);
+                const ullm_sq8_1_uint4 weights_second =
+                    *reinterpret_cast<const ullm_sq8_1_uint4 *>(row_payload + start + 16ull);
+                const ullm_sq8_1_uint4 activation_first =
+                    *reinterpret_cast<const ullm_sq8_1_uint4 *>(activation_codes + start);
+                const ullm_sq8_1_uint4 activation_second =
+                    *reinterpret_cast<const ullm_sq8_1_uint4 *>(activation_codes + start + 16ull);
+                dot = ullm_sq8_1_dot32_w8a8(
+                    weights_first, weights_second, activation_first, activation_second);
+            } else {
+                for (unsigned int index = 0u; index < count; ++index) {
+                    dot += ullm_sq8_1_signed_byte(row_payload[start + index]) *
+                        static_cast<int>(static_cast<signed char>(activation_codes[start + index]));
+                }
+            }
+            const float weight_scale = ullm_sq8_1_f16_to_f32(weight_scales[row * groups + group]);
+            sum += static_cast<float>(dot) * weight_scale * activation_scales[group];
+        }
+    }
+    const float reduced = ullm_sq8_1_wave32_sum(sum);
+    if (lane == 0u && row < rows) {
+        output[row] = reduced;
+    }
+}
+
+// Shape-preserving fallback for W8A8 calls whose activation plane would exceed
+// the bounded dynamic LDS reservation.  It still uses wave reduction and
+// aligned payload loads, but intentionally retains per-row quantization.
+extern "C" __global__ __launch_bounds__(256) void ullm_sq8_1_matvec_w8a8_explicit_fallback_f32_kernel(
     const unsigned char *payload,
     const unsigned short *weight_scales,
     const float *input,
@@ -183,7 +333,9 @@ extern "C" __global__ void ullm_sq8_1_matvec_w8a8_explicit_f32_kernel(
     float *output) {
     const unsigned long long row = blockIdx.x;
     const unsigned int tid = threadIdx.x;
-    __shared__ float partial[256];
+    const unsigned int lane = tid & (kUllmSq8_1WaveSize - 1u);
+    const unsigned int logical_wave = tid >> 5u;
+    __shared__ float wave_sums[kUllmSq8_1RowsPerBlock];
     float sum = 0.0f;
     if (row < rows) {
         const unsigned long long groups = (cols + 31ull) / 32ull;
@@ -210,7 +362,6 @@ extern "C" __global__ void ullm_sq8_1_matvec_w8a8_explicit_f32_kernel(
             }
             int dot = 0;
             if (count == 32u) {
-                // The full logical block is two aligned uint4 payload loads.
                 const ullm_sq8_1_uint4 first =
                     *reinterpret_cast<const ullm_sq8_1_uint4 *>(row_payload + start);
                 const ullm_sq8_1_uint4 second =
@@ -246,9 +397,17 @@ extern "C" __global__ void ullm_sq8_1_matvec_w8a8_explicit_f32_kernel(
             sum += static_cast<float>(dot) * weight_scale * activation_scale;
         }
     }
-    const float reduced = ullm_sq8_1_reduce_sum(sum, partial);
-    if (tid == 0u && row < rows) {
-        output[row] = reduced;
+    const float reduced = ullm_sq8_1_wave32_sum(sum);
+    if (lane == 0u) {
+        wave_sums[logical_wave] = reduced;
+    }
+    __syncthreads();
+    if (tid < kUllmSq8_1WaveSize) {
+        const float block_sum = tid < kUllmSq8_1RowsPerBlock ? wave_sums[tid] : 0.0f;
+        const float final_sum = ullm_sq8_1_wave32_sum(block_sum);
+        if (tid == 0u && row < rows) {
+            output[row] = final_sum;
+        }
     }
 }
 )";
