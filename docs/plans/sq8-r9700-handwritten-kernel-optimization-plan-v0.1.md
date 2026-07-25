@@ -175,3 +175,64 @@ Start: scoped R9700 trace for independent SQ8_0
 3. Run the staged Flash2 experiment only after the low-risk helpers establish the prototype harness and numerical reporting format.
 4. In parallel only at the design level, freeze the architecture-neutral projection contract and gfx1201/gfx942-private backend split needed for the Phase 3 handwritten body and CDNA3 案 A MFMA handoff.
 5. Reconsider generic matvec wide-load/shuffle work only if a future scoped trace shows one of its exact symbols; otherwise preserve it as a reference path.
+
+## Attention-focused Phase 1 — execution evidence and quantified priority update (complete)
+
+This addendum records the direct runtime proof that Phase 0 lacked. It is appended rather than retroactively changing the Phase 0 record.
+
+### Scope, qualification, and direct conclusion
+
+The active ullm-openai.service process before the window was an AQ4 worker, not an SQ8_0 worker. Changing the active model is forbidden, so a literal observation of a live SQ8_0 service is unavailable. Instead, a fresh isolated process loaded the production SQ8_0 artifact/package, used the required HIP guards and R9700 only, emitted GPU_DUMP_CODE_OBJECT objects in its own CWD, and was traced in the same process. This is production-artifact, serving-equivalent SQ8_0 evidence; it must not be described as a live active-service SQ8_0 observation.
+
+The paged M=1 decode attention that ran is the wave-shuffle body:
+
+| condition | code-object SHA-256 | ISA of ullm_paged_decode_attn_f32_kernel | measured result |
+|---|---|---|---|
+| default; both disable variables absent | 26fa813c4b2d35e90361ff50c6648d1d9d5412da041658c189f2fcbc095b6bb1 | 10 ds_bpermute, two LDS rendezvous points | 640 selected launches, grid 10240 / block 256 |
+| explicit ULLM_DISABLE_PAGED_DECODE_WARP_REDUCE=1 control | b856136847c042ab6713f8dd4e30d14799a59ff580829993b2acb0156fb1e9fa | no ds_bpermute, nine LDS rendezvous points | same name/geometry, distinct JIT object |
+
+The default object is captured at benchmarks/results/2026-07-26/sq8-r9700-attention-phase1-v0.1/decode/code-objects/default-runtime-dump/_code_object0010.o. Its selected-symbol disassembly and metadata are retained under static/isa/. The trace selects the same symbol. Thus, the answer does not rely on source reachability or an offline-only object.
+
+### Exact selector, launch path, and fallback remediation
+
+- runtime/src/ullm_runtime_hiprtc_sources.inc constructs the paged source preamble by testing only whether ULLM_DISABLE_PAGED_DECODE_WARP_REDUCE is present. It ignores the value, so =0 is still fallback. The arch argument is explicitly unused here. The independent ULLM_DISABLE_PAGED_DECODE_ONLINE_SOFTMAX presence test selects two-pass softmax, not the reduction implementation.
+- runtime/src/ullm_runtime_parts/part_01.inc launches q_heads workgroups when head_dim and value_dim are at most 256. The measured SQ8_0 shape has 40 query heads, 8 KV heads, and 128/128 head/value dimensions; the trace's 10240-thread grid and 256-thread workgroup are exactly 40 workgroups and confirm this head-parallel branch.
+- crates/ullm-engine/src/decoder.rs calls the direct paged interface. No split partial or split merge kernel appears in the trace. The split interface exists as an explicit alternative but has no automatic selection in this execution.
+- ULLM_REQUIRE_HIP_PAGED_DECODE_ATTN_KERNEL makes an HIP failure fail closed rather than entering the staging path. It does not select shuffle versus LDS. It was set in the isolated environment; the direct JIT capture and trace show that HIP succeeded.
+
+No production remediation is required because the measured default already uses shuffle. If a future environment contains the disable variable, unset it entirely; do not set it to 0. The isolated negative control provides the recovery magnitude at the exact workload: default unprofiled decode is 15.367844 tok/s versus 14.674604 tok/s for fallback, a 4.724077% throughput recovery. The measured current incremental gain remains 0%.
+
+### Time, resource, and bottleneck decomposition
+
+| body | selected time | share | static resource metadata | runtime trace allocation |
+|---|---:|---:|---|---|
+| paged decode default | 492.371584 ms / 640 launches | 51.05% decode | LDS 1024 B, VGPR 25, SGPR 52, wave32, no private/spill | LDS 1024 B, VGPR 32, SGPR 128 |
+| paged decode forced fallback | 536.261934 ms / 640 launches | 53.20% decode | same aggregate metadata, but different JIT ISA | LDS 1024 B, VGPR 32, SGPR 128 |
+| Flash2 prefill | 2196.476598 ms / 320 launches | 75.63% prefill | LDS 1292 B, VGPR 21, SGPR 46, wave32, no private/spill | LDS 1536 B, VGPR 24, SGPR 128 |
+
+For every paged score at C=1036, default executes two source-level CTA rendezvous points (2072 per workgroup over the cache), while forced fallback executes nine (9324). Its 8.914070% profiler-domain penalty and 4.724077% unprofiled throughput penalty are direct measurements. Flash2 has 10 rendezvous points for each score, 10 for tile max, 10 for tile sum, and one final point: 661 for each full 64-token tile. Flash2 has no shuffle instruction in its selected code object.
+
+R9700 exposes 64 CU and 32 waves/CU. Decode supplies only 40 workgroups x 8 wave32 = 320 waves per layer dispatch, or 15.625% of the 2048-wave machine ceiling. Flash2 supplies 5120 workgroups/40960 waves per layer launch. The 64 KiB group-memory pool means the listed 1.0/1.292 KiB static LDS uses do not themselves reduce a four-workgroup/32-wave ceiling; achieved register-limited occupancy remains 未確認.
+
+The selected default paged body has static global_load_b32 instructions but no global b128; Flash2 likewise has global_load_b32 and its ds_load_b128 is LDS, not global. Adjacent lanes access adjacent head/value elements, so this mnemonic form is not proof of narrow physical memory transactions. A P3 uint4 approach is applicable only as a proved lane/tile redesign, not as a blind one-line replacement.
+
+The semantic F32 KV scan rate is 55.157770 GB/s at decode midpoint C=1036 (8.618402% of the 640 GB/s reference) and 391.459814 GB/s for causal prefill 1..1024 (61.165596%). This counts logical K/V vectors and does not claim physical HBM traffic. FETCH_SIZE and VALUInsts were zero in every PMC sample, although Wavefronts correctly reports 320 and 40960 per dispatch. The counter failure cause, physical HBM efficiency, and a final memory-bound/compute-bound classification are therefore **未確認**.
+
+### Priority update and measurable candidate gates
+
+The helper-first order is updated because quantizer plus RMSNorm have only a 2.6067% decode share, whereas attention has direct structural evidence.
+
+| new priority | candidate | confirmed numerical opportunity | performance claim permitted now | required decision experiment |
+|---|---|---|---|---|
+| P1 | preserve wave-shuffle admission for paged decode | 4.724077% recovered decode tok/s when removing the deliberately forced fallback | current incremental 0%; misconfiguration recovery measured | fresh-process environment admission test; do not modify production environment in this task |
+| P2 | Flash2 staged wave32 QK/max/sum reduction | 75.63% selected share and 661 full-tile rendezvous points | performance range **未確認**; reducing source barriers is not a speed estimate | distinct symbol, staged differential, metadata/ISA, selected trace, and unprofiled prefill |
+| P3 | paged source-tile split | source_tile=256 gives five splits, 200 partial workgroups/1600 waves and 104000 B workspace at C=1036 | 15.625% -> 78.125% is a work-supply envelope only; speed range **未確認** | direct-versus-split differential and timing for tiles 128/256/512 |
+| P4 | Flash2 lane/tile load re-layout or uint4 | no global-wide-load proof; no usable physical byte counter | speed range **未確認** | prove alignment/coalescing, VGPR/LDS impact, output differential, and physical counters before claiming a load win |
+
+P3-proven techniques map cleanly: wave-shuffle is a P2 primitive; static VGPR/LDS/ISA audit gates every candidate; uint4 is conditional P4 work. P2 and P3 are tile/algorithm changes and require their own softmax/order and workspace differentials. No numerical gain has been invented for an unprototyped candidate.
+
+### CDNA3 handoff contract
+
+The common layer is canonical SQ8_0 payload/scale meaning, projection-to-attention input contract, F32 paged-KV and causal/online-softmax semantics, shape validation, adversarial/real-artifact vectors, differential harness, and timing evidence schema. It contains no lane map.
+
+The gfx1201 body remains a wave32 R9700 implementation with its own shuffle and LDS layout. The CDNA3 continuation is a separate wave64/MFMA body with separate fragment mapping, LDS layout, conversion/prepack boundary, code object, and ISA audit. Both compare against the same canonical vectors, but neither reuses the other's wave-level implementation. This preserves the intended CDNA3 案 A handoff without changing the external ABI or dispatch boundary.

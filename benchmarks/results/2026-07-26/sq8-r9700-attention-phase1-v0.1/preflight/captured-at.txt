@@ -1,0 +1,2 @@
+captured_at=2026-07-26T04:19:39+09:00
+git_head=a897ab5681652db11e1b41bff66cb3e8e226645a

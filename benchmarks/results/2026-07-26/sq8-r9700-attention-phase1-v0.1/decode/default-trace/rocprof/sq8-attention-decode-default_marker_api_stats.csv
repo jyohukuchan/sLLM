@@ -1,0 +1,4 @@
+"Name","Calls","TotalDurationNs","AverageNs","Percentage","MinNs","MaxNs","StdDev"
+"ullm.sq8.phase0.decode.steady.v1/repeat=0/cache_start=1028/steps=16",1,1132048731,1132048731.000000,100.00,1132048731,1132048731,0.00000000e+00
+"roctxProfilerResume",1,1171,1171.000000,1.034e-04,1171,1171,0.00000000e+00
+"roctxProfilerPause",1,410,410.000000,3.622e-05,410,410,0.00000000e+00

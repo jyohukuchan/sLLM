@@ -1,0 +1,2 @@
+"Name","Calls","TotalDurationNs","AverageNs","Percentage","MinNs","MaxNs","StdDev"
+"MEMORY_COPY_DEVICE_TO_HOST",1,34160,34160.000000,100.00,34160,34160,0.00000000e+00

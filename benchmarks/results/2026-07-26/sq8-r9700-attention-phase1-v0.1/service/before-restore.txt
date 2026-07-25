@@ -1,0 +1,6 @@
+Result=success
+ExecMainPID=961738
+Id=ullm-openai.service
+ActiveState=inactive
+SubState=dead
+UnitFileState=enabled

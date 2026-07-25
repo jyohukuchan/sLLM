@@ -1,0 +1,17 @@
+--- static tool and input identities ---
+driver_path=/tmp/ullm-sq8-r9700-phase0-profile-20260726/target/release/ullm-sq8-r9700-phase0-profile
+075a780837f9f124aa32ed152fd6316edbfc83286df691bf92c661d33d198444  /tmp/ullm-sq8-r9700-phase0-profile-20260726/target/release/ullm-sq8-r9700-phase0-profile
+ad050da7137df13ba7f088099085f1539f9f1ea818e525306fc91e9a4f032b57  runtime/src/ullm_runtime_hiprtc_sources.inc
+8cda308313145aa68e9b309fcf0fcac5155f87d85f8a21967f96b8166dae5a4a  runtime/src/ullm_runtime_parts/part_00.inc
+dcc8832b88d9e26e5048a94618ae5c72edf81052e34a2a46a597cf717723927b  runtime/src/ullm_runtime_parts/part_01.inc
+89af8949a4d5a88565686c65374258ff904525378c0eebbfd84247d3c140f46d  runtime/src/ullm_runtime_api_attention.inc
+             version: 1.1.0
+        git_revision: e1a6bc5663304b9c586b3254b8920f2981057804
+        library_arch: x86_64-linux-gnu
+         system_name: Linux
+    system_processor: x86_64
+      system_version: 6.8.0-85-generic
+         compiler_id: GNU
+    compiler_version: 13.3.0
+        rocm_version: 7.2.1
+AMDSMI Tool: 26.2.2+e1a6bc5663 | AMDSMI Library version: 26.2.2 | ROCm version: 7.2.1 | amdgpu version: 6.16.13 | hsmp version: N/A
