@@ -418,3 +418,55 @@ artifact and target GPU selected
 Evidence は `benchmarks/results/2026-07-26/sq8_1/` に保存した。full-model W8A8 logits gate は
 未確認・未通過のままなので、W8A16 は default reference path、W8A8 は explicit-only のままとする。
 この実装は candidate/release/campaign/authorization/active manifest を変更していない。
+
+## V620 カーネル最適化と `SQ8_0` 比較（2026-07-26）
+
+reference implementation を置き換えずに、`SQ8_1` の HIPRTC kernel を次のように最適化した。
+
+- W8A16 は 256 threads を eight logical wave32 rows として使い、row ごとの LDS tree reduction
+  を wave shuffle に置換した。K=32 の payload は従来どおり aligned `uint4` 二回（32 B）であり、
+  完全 block あたり 1/16 本の 128-bit payload-load / element である。
+- explicit W8A8 は K=32 activation plane を eight output rows で一回だけ quantize して dynamic
+  LDS に置き、`v_dot4*` 経路で共有する。5,120 columns では code 5,120 B + scale 160 × F32 =
+  5,760 B で、runtime は 48 KiB の conservative cap を超える形状に fallback kernel を選ぶ。
+  必要な dot は依然 8 dot4 / K=32 = 0.25 dot4 / element であり、短縮したのは dot 数ではなく、
+  activation の scale/divide/round を eight rows 間で amortize した点である。1 output row あたりの
+  activation quantization は K=32 ごとに 32 values から amortized 4 values となる（8×削減）。
+- static device-only audit は runtime HIPRTC source そのものを全 whitelist target で compile した。
+  gfx1030 W8A16 は fixed LDS 1,024 B -> 0 B、`s_barrier` 2 -> 0、spill 0 のまま、W8A8 は
+  fixed LDS 1,024 B -> 0 B（上記 dynamic LDS）、barrier 2 -> 1、VGPR/SGPR 53/59 -> 39/32、
+  spill 0 である。gfx1030 の W8A8 は `v_dot4c_i32_i8` を emit し、RDNA3/RDNA4 は
+  `v_dot4_i32_iu8` signed-control path を emit する。実効 occupancy の profiler measurement は
+  **未測定**であり、resource table 以上の occupancy 数値は主張しない。
+
+V620 は `HIP_VISIBLE_DEVICES=2` で隔離し、実行時の `hipDeviceGetPCIBusId` で
+`0000:03:00.0` を確認した後、その BDF に属する DRM `card0` の own junction
+`hwmon5/temp2_input` を読むことを必須にした。R9700 は実行していない。Qwen3-14B FP8
+`self_attn.q_proj`（5120 × 5120、M=1）を 32 warmups + 31 timed launches、three independent
+runs、<=42 C cooldown で測った。次の値は各 run median の median である。
+
+| format / path | median ms | modeled GB/s | 512 GB/s 比 | `SQ8_0` 比 |
+| --- | ---: | ---: | ---: | ---: |
+| `SQ8_0` E4M3 + F32 block-scale V620 fallback | 0.639007 | 41.034 | 8.014% | baseline |
+| `SQ8_1` W8A16 wave32 × 8 rows | 0.237362 | 117.343 | 22.919% | **2.692× faster** |
+| `SQ8_1` explicit W8A8 tiled wave32 × 8 rows | 0.249762 | 111.517 | 21.781% | **2.558× faster** |
+
+従ってこの限定した V620 M=1 問いへの答えは **はい** である。`SQ8_1` の resident weights は
+27,852,800 B で `SQ8_0` fallback の 26,220,800 B より 6.224% 多いので、勝因を payload サイズの
+縮小と取り違えてはならない。比較対象 `SQ8_0` は
+`benchmarks/results/2026-07-26/sq9-v620-viability/raw/final-m1-r{1,2,3}-card0-v4.jsonl` の既存
+同一形状・同一 thermal/protocol evidence であり、一つの process 内で co-dispatch した A/B trace
+ではない。この制限は結論に付随する。
+
+CPU は 1/15/16/17/31/32/33/65 columns、signed endpoints、zero row、tail padding を含む
+`SQ8_1` 3/3 tests を通過した。GPU full-shape pre-timing gate は W8A16 relative L2 0、W8A8
+`2.331406575e-07`、K=65 runtime tail differential はそれぞれ `6.076546605e-08` と
+`4.333164297e-08` で全て pass した。`SQ8_0` CPU regression、`SQ8_0`/`SQ8_1` artifact separation、
+`AQ4_0` offline oracle も pass した。温度は final suite 全体で 41–43 C、85 C guard / cooldown timeout
+は 0 件だった。
+
+M>1/prefill、old reference `SQ8_1` の elapsed-time baseline、full-model W8A8 logits quality、
+profiler-derived occupancy/DRAM transactions は **未測定**である。W8A8 は従来どおり explicit-only、
+W8A16 は default のままであり、candidate/release/campaign/authorization/active manifest は変更して
+いない。完全な raw/thermal/ISA evidence は
+`benchmarks/results/2026-07-26/sq8_1-v620-optimization/` に保存した。
