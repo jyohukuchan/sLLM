@@ -510,6 +510,63 @@ all quality, bandwidth-efficiency, resident-memory, and fallback-disclosure gate
    tests.  Any artifact/campaign/release/activation decision remains a later, separately approved
    action.
 
+## V620 (gfx1030) 実機測定結果（2026-07-26、サーマルガード付き再実行）
+
+この節は設計本文を変更せず、同日に行った再実行の実測を追記するものである。対象は
+AMD Radeon Pro V620、`gcnArchName=gfx1030`、PCI BDF `0000:03:00.0`（DRM `card0`）だけである。
+HIP の可視 ordinal と DRM card 番号を混同しないため、ベンチマークは
+`hipDeviceGetPCIBusId` を `/sys/class/drm/card*/device` と照合し、その一致カードの
+`hwmon/hwmon5/temp2_input`（`temp2_label=junction`）を読んだ。R9700 では測定を実行していない。
+
+前回の card1（`0000:43:00.0`）で junction 100 C / 148 W に達した結果は履歴として保存したが、
+ここでの集計からは除外した。今回は junction `>= 85 C` を中断閾値とし、各 warmup と各 timed
+launch の前後に温度を採取し、各測定点を `<= 42 C` から始めた。使用した有効データの最高値は
+M=128 の 51 C で、85 C ガードおよび cooldown timeout は発動しなかった。M=512 は旧呼び出しで
+`--shape` が漏れて全 shape へ進み始めたため、58–59 C / 42 C 復帰待ち 43 C で SIGKILL して終了した。
+partial M=512 ログは残すが、以下の性能判断には使用しない。以後の実装は full suite に
+`--shape` と `--m-values` の両方を明示要求して fail closed とした。
+
+測定形状は Qwen3-14B FP8 `self_attn.q_proj`、5,120 x 5,120 である。実装から再現した
+`SQ8_0` は F8 E4M3 payload 26,214,400 B と 128x128 row-major BF16 scale 3,200 B の artifact
+であり、V620 fallback の resident scale は F32 なので合計 26,220,800 B である。`SQ9_0` は
+low plane 26,214,400 B と high/sign plane 3,276,800 B、計 29,491,200 B であった。従って実際の
+fallback resident layout に対する `SQ9_0` の増分は 12.4725408836% である。これは scale を含めた
+実数であり、単純な 12.5% 仮定ではない。両 `SQ9_0` high-plane 実装、`SQ8_0`、FP16 reference は
+タイミング前に CPU 参照との GPU 正当性確認を通過した。
+
+M=1 は 32 warmup、31 timed trial の独立 3 run の run-median 中央値で比較した。各 run の
+開始は 41–42 C、終了は 42–43 C、ピークは 43 C だった。帯域値はベンチマーク内の modeled weight
+stream であり、512 GB/s reference に対する比率はプロファイラ実測の物理トランザクション率ではない。
+
+| M=1 path | median ms | modeled GB/s | 512 GB/s 比 | `SQ8_0` 比 throughput |
+| --- | ---: | ---: | ---: | ---: |
+| `SQ8_0` E4M3 + F32 block scale fallback | 0.639007 | 41.034 | 8.014% | baseline |
+| `SQ9_0` lane high byte | 0.612567 | 48.144 | 9.403% | +4.316% |
+| `SQ9_0` cooperative LDS high plane | 0.602446 | 48.952 | 9.561% | +6.069% |
+| FP16 raw reference | 0.589446 | 88.946 | 17.372% | +8.408% |
+
+したがって、M=1 では両 `SQ9_0` path とも raw elapsed time は `SQ8_0` より短いが、最速でも
++6.069% に留まり、全 package + KV の採算条件 +7.29% を満たさない。decode replacement としては
+このデータで `SQ9_0` を採用しない。
+
+バッチ条件では lane `SQ9_0` に条件付きの優位性が観測された。M=8 は二つの 15-trial run median の
+平均で `SQ8_0` 1.241054 ms 対 0.989531 ms（+25.418%、peak 45/46 C）、M=32 は一つの 9-trial run
+で 5.861702 ms 対 4.631769 ms（+26.554%、peak 48 C）、M=128 は限定した 3-trial run で
+24.630720 ms 対 19.803831 ms（+24.374%、peak 51 C）だった。M=2–7、M=512 の統計、他 projection、
+固定 clock、quality、KV/context を含む model loop は未測定である。このため、M>=8 の結果は
+batched microbenchmark に限った条件付きの観測であり、decode 結論や format promotion には用いない。
+
+`SQ8_0` fallback dequant には大きな ALU/control 成分の証拠がある。guarded dequant-only では
+`SQ8_0` が 0.245603 ms、同 kernel の non-load-only raw control が 0.110122 ms であった。gfx1030
+ISA の `dequant_sum_kernel` は `SQ8_0` の static `v_*` 377 本に対し lane `SQ9_0` は 250 本である。
+lane `SQ9_0` は unroll 16 value ごとに 16 本の `v_lshlrev_b16`（仕様の `q << 7`）と 16 本の
+`v_cvt_f32_f16` を持つ。この静的・分離測定は `SQ8_0` fallback の変換/scale 負担を支持するが、
+full M=1 GEMV が純粋に ALU 律速であることを単独では証明しない。
+
+生データ、温度履歴、ISA resources/disassembly の再現手順、完全な制約は
+`benchmarks/results/2026-07-26/sq9-v620-viability/summary.md` とその `static/isa-analysis.md` に保存した。
+この追記は candidate、campaign、release、service、activation の承認ではない。
+
 ## 2026-07-26 Offline Evaluation Result: discard SQ9_0
 
 This section is the disposition of the design input above. It supersedes the earlier SQ9_0
@@ -659,61 +716,3 @@ wire-incompatible with SQ8_0.
 4. Only under a separately authorized GPU window, compare SQ8_1 W8A8, SQ8_1 W8A16, and the retained
    SQ8_0 fallback on matched V620 inputs. Record transactions, occupancy, clocks, timing, and
    numerical differentials; do not infer those measurements from this offline ISA evidence.
-
-## V620 (gfx1030) 実機測定結果（2026-07-26、サーマルガード付き再実行）
-
-この節は設計本文を変更せず、同日に行った再実行の実測を追記するものである。対象は
-AMD Radeon Pro V620、`gcnArchName=gfx1030`、PCI BDF `0000:03:00.0`（DRM `card0`）だけである。
-HIP の可視 ordinal と DRM card 番号を混同しないため、ベンチマークは
-`hipDeviceGetPCIBusId` を `/sys/class/drm/card*/device` と照合し、その一致カードの
-`hwmon/hwmon5/temp2_input`（`temp2_label=junction`）を読んだ。R9700 では測定を実行していない。
-
-前回の card1（`0000:43:00.0`）で junction 100 C / 148 W に達した結果は履歴として保存したが、
-ここでの集計からは除外した。今回は junction `>= 85 C` を中断閾値とし、各 warmup と各 timed
-launch の前後に温度を採取し、各測定点を `<= 42 C` から始めた。使用した有効データの最高値は
-M=128 の 51 C で、85 C ガードおよび cooldown timeout は発動しなかった。M=512 は旧呼び出しで
-`--shape` が漏れて全 shape へ進み始めたため、58–59 C / 42 C 復帰待ち 43 C で SIGKILL して終了した。
-partial M=512 ログは残すが、以下の性能判断には使用しない。以後の実装は full suite に
-`--shape` と `--m-values` の両方を明示要求して fail closed とした。
-
-測定形状は Qwen3-14B FP8 `self_attn.q_proj`、5,120 x 5,120 である。実装から再現した
-`SQ8_0` は F8 E4M3 payload 26,214,400 B と 128x128 row-major BF16 scale 3,200 B の artifact
-であり、V620 fallback の resident scale は F32 なので合計 26,220,800 B である。`SQ9_0` は
-low plane 26,214,400 B と high/sign plane 3,276,800 B、計 29,491,200 B であった。従って実際の
-fallback resident layout に対する `SQ9_0` の増分は 12.4725408836% である。これは scale を含めた
-実数であり、単純な 12.5% 仮定ではない。両 `SQ9_0` high-plane 実装、`SQ8_0`、FP16 reference は
-タイミング前に CPU 参照との GPU 正当性確認を通過した。
-
-M=1 は 32 warmup、31 timed trial の独立 3 run の run-median 中央値で比較した。各 run の
-開始は 41–42 C、終了は 42–43 C、ピークは 43 C だった。帯域値はベンチマーク内の modeled weight
-stream であり、512 GB/s reference に対する比率はプロファイラ実測の物理トランザクション率ではない。
-
-| M=1 path | median ms | modeled GB/s | 512 GB/s 比 | `SQ8_0` 比 throughput |
-| --- | ---: | ---: | ---: | ---: |
-| `SQ8_0` E4M3 + F32 block scale fallback | 0.639007 | 41.034 | 8.014% | baseline |
-| `SQ9_0` lane high byte | 0.612567 | 48.144 | 9.403% | +4.316% |
-| `SQ9_0` cooperative LDS high plane | 0.602446 | 48.952 | 9.561% | +6.069% |
-| FP16 raw reference | 0.589446 | 88.946 | 17.372% | +8.408% |
-
-したがって、M=1 では両 `SQ9_0` path とも raw elapsed time は `SQ8_0` より短いが、最速でも
-+6.069% に留まり、全 package + KV の採算条件 +7.29% を満たさない。decode replacement としては
-このデータで `SQ9_0` を採用しない。
-
-バッチ条件では lane `SQ9_0` に条件付きの優位性が観測された。M=8 は二つの 15-trial run median の
-平均で `SQ8_0` 1.241054 ms 対 0.989531 ms（+25.418%、peak 45/46 C）、M=32 は一つの 9-trial run
-で 5.861702 ms 対 4.631769 ms（+26.554%、peak 48 C）、M=128 は限定した 3-trial run で
-24.630720 ms 対 19.803831 ms（+24.374%、peak 51 C）だった。M=2–7、M=512 の統計、他 projection、
-固定 clock、quality、KV/context を含む model loop は未測定である。このため、M>=8 の結果は
-batched microbenchmark に限った条件付きの観測であり、decode 結論や format promotion には用いない。
-
-`SQ8_0` fallback dequant には大きな ALU/control 成分の証拠がある。guarded dequant-only では
-`SQ8_0` が 0.245603 ms、同 kernel の non-load-only raw control が 0.110122 ms であった。gfx1030
-ISA の `dequant_sum_kernel` は `SQ8_0` の static `v_*` 377 本に対し lane `SQ9_0` は 250 本である。
-lane `SQ9_0` は unroll 16 value ごとに 16 本の `v_lshlrev_b16`（仕様の `q << 7`）と 16 本の
-`v_cvt_f32_f16` を持つ。この静的・分離測定は `SQ8_0` fallback の変換/scale 負担を支持するが、
-full M=1 GEMV が純粋に ALU 律速であることを単独では証明しない。
-
-生データ、温度履歴、ISA resources/disassembly の再現手順、完全な制約は
-`benchmarks/results/2026-07-26/sq9-v620-viability/summary.md` とその `static/isa-analysis.md` に保存した。
-この追記は candidate、campaign、release、service、activation の承認ではない。
-
