@@ -8488,6 +8488,177 @@ extern "C" __global__ void ullm_paged_decode_attn_split_partial_f32_kernel(
         }
         return;
     }
+
+    // AQ4_0 Qwen3.5-9B decode shape: four query heads share one KV head and
+    // every head is 256-wide.  Four consumer waves retain eight contiguous
+    // values per lane while the other four waves cooperatively stage the 256
+    // K and 256 V elements once per source row.  This is a distinct geometry
+    // specialization; it intentionally does not reuse the SQ8_0 5x128 body.
+    if (blockDim.x == 256u && warpSize == 32u && gqa_q_per_kv == 4ull &&
+        head_dim == 256ull && value_dim == 256ull &&
+        static_cast<unsigned long long>(gridDim.x) == kv_heads * split_count) {
+        const unsigned int tid = threadIdx.x;
+        const unsigned int lane = tid % 32u;
+        const bool consumer = tid < 128u;
+        const unsigned long long grouped_index = blockIdx.x;
+        const unsigned long long kv_head = grouped_index / split_count;
+        const unsigned long long split_id = grouped_index - kv_head * split_count;
+        if (kv_head >= kv_heads) {
+            return;
+        }
+        const unsigned long long source_start = split_id * source_tile;
+        if (source_start >= cache_len) {
+            return;
+        }
+        const unsigned long long source_remaining = cache_len - source_start;
+        const unsigned long long source_count =
+            source_tile < source_remaining ? source_tile : source_remaining;
+        const unsigned long long stride = value_dim + 2ull;
+        const unsigned long long q_head =
+            kv_head * gqa_q_per_kv + static_cast<unsigned long long>(tid / 32u);
+
+        float q0 = 0.0f;
+        float q1 = 0.0f;
+        float q2 = 0.0f;
+        float q3 = 0.0f;
+        float q4 = 0.0f;
+        float q5 = 0.0f;
+        float q6 = 0.0f;
+        float q7 = 0.0f;
+        float weighted0 = 0.0f;
+        float weighted1 = 0.0f;
+        float weighted2 = 0.0f;
+        float weighted3 = 0.0f;
+        float weighted4 = 0.0f;
+        float weighted5 = 0.0f;
+        float weighted6 = 0.0f;
+        float weighted7 = 0.0f;
+        float max_score = -3.4028234663852886e38f;
+        float denominator = 0.0f;
+        bool invalid = false;
+        if (consumer) {
+            const unsigned long long q_base = q_head * 256ull;
+            q0 = q[q_base + lane];
+            q1 = q[q_base + 32ull + lane];
+            q2 = q[q_base + 64ull + lane];
+            q3 = q[q_base + 96ull + lane];
+            q4 = q[q_base + 128ull + lane];
+            q5 = q[q_base + 160ull + lane];
+            q6 = q[q_base + 192ull + lane];
+            q7 = q[q_base + 224ull + lane];
+        }
+
+        for (unsigned long long source_offset = 0ull;
+             source_offset < source_count;
+             ++source_offset) {
+            const unsigned long long source_timestep = source_start + source_offset;
+            const unsigned long long block_index = source_timestep / block_size;
+            const unsigned long long block_offset = source_timestep - block_index * block_size;
+            const unsigned long long block_id =
+                static_cast<unsigned long long>(block_table[block_index]);
+            const bool row_valid = block_id < cache_blocks;
+            if (tid == 0u) {
+                gqa_stage_valid[0] = row_valid ? 1 : 0;
+            }
+            const unsigned long long physical_timestep =
+                row_valid ? block_id * block_size + block_offset : 0ull;
+            for (unsigned int copy_index = tid;
+                 copy_index < 512u;
+                 copy_index += 256u) {
+                if (!row_valid) {
+                    gqa_stage[copy_index] = 0.0f;
+                } else if (copy_index < 256u) {
+                    gqa_stage[copy_index] =
+                        k_cache[(physical_timestep * kv_heads + kv_head) * 256ull + copy_index];
+                } else {
+                    gqa_stage[copy_index] = v_cache[
+                        (physical_timestep * kv_heads + kv_head) * 256ull +
+                        (copy_index - 256u)];
+                }
+            }
+            __syncthreads();
+
+            if (consumer) {
+                if (gqa_stage_valid[0] == 0) {
+                    invalid = true;
+                } else {
+                    float dot = q0 * gqa_stage[lane] +
+                        q1 * gqa_stage[32u + lane] +
+                        q2 * gqa_stage[64u + lane] +
+                        q3 * gqa_stage[96u + lane] +
+                        q4 * gqa_stage[128u + lane] +
+                        q5 * gqa_stage[160u + lane] +
+                        q6 * gqa_stage[192u + lane] +
+                        q7 * gqa_stage[224u + lane];
+                    for (int offset = 16; offset > 0; offset >>= 1) {
+                        dot += __shfl_down(dot, offset, warpSize);
+                    }
+                    const float score = __shfl(dot, 0, warpSize) * softmax_scale;
+                    float scale = 0.0f;
+                    float replaces_max = 0.0f;
+                    if (lane == 0u) {
+                        if (score > max_score) {
+                            scale = expf(max_score - score);
+                            denominator = denominator * scale + 1.0f;
+                            max_score = score;
+                            replaces_max = 1.0f;
+                        } else {
+                            scale = expf(score - max_score);
+                            denominator += scale;
+                        }
+                    }
+                    scale = __shfl(scale, 0, warpSize);
+                    replaces_max = __shfl(replaces_max, 0, warpSize);
+                    const float v0 = gqa_stage[256u + lane];
+                    const float v1 = gqa_stage[288u + lane];
+                    const float v2 = gqa_stage[320u + lane];
+                    const float v3 = gqa_stage[352u + lane];
+                    const float v4 = gqa_stage[384u + lane];
+                    const float v5 = gqa_stage[416u + lane];
+                    const float v6 = gqa_stage[448u + lane];
+                    const float v7 = gqa_stage[480u + lane];
+                    if (replaces_max != 0.0f) {
+                        weighted0 = weighted0 * scale + v0;
+                        weighted1 = weighted1 * scale + v1;
+                        weighted2 = weighted2 * scale + v2;
+                        weighted3 = weighted3 * scale + v3;
+                        weighted4 = weighted4 * scale + v4;
+                        weighted5 = weighted5 * scale + v5;
+                        weighted6 = weighted6 * scale + v6;
+                        weighted7 = weighted7 * scale + v7;
+                    } else {
+                        weighted0 += scale * v0;
+                        weighted1 += scale * v1;
+                        weighted2 += scale * v2;
+                        weighted3 += scale * v3;
+                        weighted4 += scale * v4;
+                        weighted5 += scale * v5;
+                        weighted6 += scale * v6;
+                        weighted7 += scale * v7;
+                    }
+                }
+            }
+            __syncthreads();
+        }
+
+        if (consumer) {
+            const unsigned long long workspace_base =
+                (q_head * split_count + split_id) * stride;
+            if (lane == 0u) {
+                workspace[workspace_base] = invalid ? 0.0f : max_score;
+                workspace[workspace_base + 1ull] = invalid ? -1.0f : denominator;
+            }
+            workspace[workspace_base + 2ull + lane] = invalid ? 0.0f : weighted0;
+            workspace[workspace_base + 2ull + 32ull + lane] = invalid ? 0.0f : weighted1;
+            workspace[workspace_base + 2ull + 64ull + lane] = invalid ? 0.0f : weighted2;
+            workspace[workspace_base + 2ull + 96ull + lane] = invalid ? 0.0f : weighted3;
+            workspace[workspace_base + 2ull + 128ull + lane] = invalid ? 0.0f : weighted4;
+            workspace[workspace_base + 2ull + 160ull + lane] = invalid ? 0.0f : weighted5;
+            workspace[workspace_base + 2ull + 192ull + lane] = invalid ? 0.0f : weighted6;
+            workspace[workspace_base + 2ull + 224ull + lane] = invalid ? 0.0f : weighted7;
+        }
+        return;
+    }
 #endif
 
     if (blockDim.x != 256u || head_dim > 256ull || value_dim > 256ull) {

@@ -3912,16 +3912,29 @@ bool paged_decode_attn_split_f32_hip_kernel(
     constexpr unsigned int launch_block_size = 256;
     const char *grouped_env = std::getenv("ULLM_EXPERIMENTAL_PAGED_DECODE_GQA_GROUPED_SPLIT");
     const char *pipelined_env = std::getenv("ULLM_EXPERIMENTAL_PAGED_DECODE_GQA_PIPELINED_SPLIT");
+    const bool pipelined_requested =
+        pipelined_env != nullptr && pipelined_env[0] == '1' && pipelined_env[1] == '\0';
     const bool grouped_requested =
         (grouped_env != nullptr && grouped_env[0] == '1' && grouped_env[1] == '\0') ||
-        (pipelined_env != nullptr && pipelined_env[0] == '1' && pipelined_env[1] == '\0');
+        pipelined_requested;
     const std::string device_arch = hip_runtime().device_arch_name(device_id);
     const bool is_gfx1201 =
         device_arch == "gfx1201" || device_arch.rfind("gfx1201:", 0) == 0;
-    const bool grouped_shape =
+    const bool sq8_grouped_shape =
         kv_heads != 0 && is_gfx1201 && q_heads % kv_heads == 0 &&
         q_heads / kv_heads == 5u && head_dim == 128u &&
         value_dim == 128u;
+    const bool aq4_grouped_shape =
+        kv_heads != 0 && is_gfx1201 && q_heads % kv_heads == 0 &&
+        q_heads / kv_heads == 4u && head_dim == 256u &&
+        value_dim == 256u;
+    if (pipelined_requested && aq4_grouped_shape) {
+        if (error != nullptr) {
+            *error = "paged decode GQA pipeline is not implemented for AQ4 Q=16/KV=4 dim=256";
+        }
+        return false;
+    }
+    const bool grouped_shape = sq8_grouped_shape || aq4_grouped_shape;
     const size_t partial_groups = grouped_requested && grouped_shape ? kv_heads : q_heads;
     if (split_count != 0 && partial_groups > std::numeric_limits<size_t>::max() / split_count) {
         if (error != nullptr) {
