@@ -185,7 +185,27 @@ fn hip_aq4_matvec_add_production_model_shapes_match_cpu_when_enabled() {
             rows,
             cols,
         );
+        let shuffle_baseline = aq4_matvec_add_run(
+            hip_device,
+            true,
+            &indices,
+            &scale_indices,
+            &codebook,
+            &scale_values,
+            &input,
+            &residual,
+            row_scales.as_deref(),
+            group_size,
+            0.75,
+            rows,
+            cols,
+        );
         aq4_matvec_add_assert_matches_cpu(&actual, &expected, family);
+        aq4_matvec_add_assert_matches_cpu(
+            &actual,
+            &shuffle_baseline,
+            &format!("{family} group-specialized versus shuffle baseline"),
+        );
         eprintln!(
             "AQ4 matvec-add production differential family={family} rows={rows} cols={cols} group{group_size}: ok"
         );
