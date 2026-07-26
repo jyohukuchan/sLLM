@@ -11,6 +11,7 @@ use ullm_engine::sq8_serving_runtime::{
 
 const RAW_SCHEMA_V1: &str = "ullm.sq8.serving_performance.raw.v1";
 const RAW_SCHEMA_V2: &str = "ullm.sq8.serving_performance.raw.v2";
+const RAW_SCHEMA_V3: &str = "ullm.sq8.serving_performance.raw.v3";
 const WARMUP_RUNS: usize = 2;
 const MEASURED_RUNS: usize = 5;
 const TTFT_MAX_NEW_TOKENS: usize = 512;
@@ -31,7 +32,7 @@ struct PerformanceResult {
     runner_git_commit: String,
     runner_worktree_clean: bool,
     runner_binary_sha256: String,
-    prefill_mode: &'static str,
+    prefill_mode: String,
     prefill_chunk_tokens: usize,
     prefill_implementation: String,
     warmup_runs: usize,
@@ -273,7 +274,11 @@ fn performance_schema_version(mode: Sq8ServingPrefillMode) -> Result<&'static st
     match mode {
         Sq8ServingPrefillMode::FixedM8Chunks => Ok(RAW_SCHEMA_V1),
         Sq8ServingPrefillMode::FixedM128Chunks => Ok(RAW_SCHEMA_V2),
-        _ => Err("performance gate requires the fixed M=8 or M=128 prefill mode".into()),
+        Sq8ServingPrefillMode::FixedChunkTokens(_) => Ok(RAW_SCHEMA_V3),
+        _ => Err(
+            "performance gate requires fixed M=8, M=128, or a scheduler-selected fixed width"
+                .into(),
+        ),
     }
 }
 

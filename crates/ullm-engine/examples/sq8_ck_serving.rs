@@ -209,7 +209,7 @@ struct CancelledCaseResult {
 #[derive(Debug, Serialize)]
 struct ServingSmokeResult {
     schema_version: &'static str,
-    prefill_mode: &'static str,
+    prefill_mode: String,
     prefill_chunk_tokens: usize,
     prefill_implementation: String,
     paged_decode_split_source_tile: Option<usize>,
@@ -381,6 +381,9 @@ fn main() -> Result<(), String> {
                     Sq8ServingPrefillMode::FixedM32Chunks
                     | Sq8ServingPrefillMode::FixedM128Chunks,
                 ) => "ullm.sq8.serving_chunks.v4",
+                (false, Sq8ServingPrefillMode::FixedChunkTokens(_)) => {
+                    "ullm.sq8.serving_chunks.v5"
+                }
             }
         },
         prefill_mode: prefill_mode_name(options.prefill_mode),
@@ -1517,7 +1520,8 @@ fn parse_options() -> Result<Options, String> {
     if test_only_ignore_eos
         && (!matches!(
             prefill_mode,
-            Sq8ServingPrefillMode::FixedM8Chunks | Sq8ServingPrefillMode::FixedM128Chunks
+            Sq8ServingPrefillMode::FixedM8Chunks
+                | Sq8ServingPrefillMode::FixedM128Chunks
         ) || prompt_lengths.as_deref() != Some(&[DEEP_BOUNDARY_PROMPT_TOKENS])
             || max_new_tokens != DEEP_BOUNDARY_GENERATED_TOKENS
             || second_prompt_token_ids.is_some()
@@ -1540,7 +1544,9 @@ fn parse_options() -> Result<Options, String> {
         && (test_only_ignore_eos
             || !matches!(
                 prefill_mode,
-                Sq8ServingPrefillMode::FixedM8Chunks | Sq8ServingPrefillMode::FixedM128Chunks
+                Sq8ServingPrefillMode::FixedM8Chunks
+                    | Sq8ServingPrefillMode::FixedM128Chunks
+                    | Sq8ServingPrefillMode::FixedChunkTokens(_)
             )
             || prompt_token_ids_explicit
             || max_new_tokens_explicit
@@ -1555,7 +1561,7 @@ fn parse_options() -> Result<Options, String> {
             || result_json.is_none())
     {
         return Err(
-            "--performance-gate requires --prefill-mode m8-chunk8 or m128-chunk128 \
+            "--performance-gate requires a fixed --prefill-mode m<N>-chunk<N> \
              --result-json PATH without prompt, generation, oracle, cancellation, \
              or deep-boundary options"
                 .into(),
@@ -1612,28 +1618,45 @@ fn parse_prefill_mode(value: &str) -> Result<Sq8ServingPrefillMode, String> {
         "m8-chunk8" => Ok(Sq8ServingPrefillMode::FixedM8Chunks),
         "m32-chunk32" => Ok(Sq8ServingPrefillMode::FixedM32Chunks),
         "m128-chunk128" => Ok(Sq8ServingPrefillMode::FixedM128Chunks),
-        _ => Err(format!(
-            "prefill mode must be all-m1, m8-chunk8, m32-chunk32, or m128-chunk128, got {value:?}"
-        )),
+        _ => {
+            let (m, chunk_tokens) = value
+                .strip_prefix('m')
+                .and_then(|suffix| suffix.split_once("-chunk"))
+                .ok_or_else(|| {
+                    format!(
+                        "prefill mode must be all-m1 or m<N>-chunk<N> (for example m256-chunk256), got {value:?}"
+                    )
+                })?;
+            let m = m
+                .parse::<usize>()
+                .map_err(|error| format!("invalid prefill M in {value:?}: {error}"))?;
+            let chunk_tokens = chunk_tokens
+                .parse::<usize>()
+                .map_err(|error| format!("invalid prefill chunk width in {value:?}: {error}"))?;
+            if m != chunk_tokens {
+                return Err(format!(
+                    "prefill mode requires matching M and chunk width, got M={m} chunk={chunk_tokens}"
+                ));
+            }
+            Sq8ServingPrefillMode::fixed_chunk_tokens(m).map_err(|error| error.to_string())
+        }
     }
 }
 
-fn prefill_mode_name(mode: Sq8ServingPrefillMode) -> &'static str {
+fn prefill_mode_name(mode: Sq8ServingPrefillMode) -> String {
     match mode {
-        Sq8ServingPrefillMode::SequentialM1 => "all-m1",
-        Sq8ServingPrefillMode::FixedM8Chunks => "m8-chunk8",
-        Sq8ServingPrefillMode::FixedM32Chunks => "m32-chunk32",
-        Sq8ServingPrefillMode::FixedM128Chunks => "m128-chunk128",
+        Sq8ServingPrefillMode::SequentialM1 => "all-m1".to_string(),
+        Sq8ServingPrefillMode::FixedM8Chunks => "m8-chunk8".to_string(),
+        Sq8ServingPrefillMode::FixedM32Chunks => "m32-chunk32".to_string(),
+        Sq8ServingPrefillMode::FixedM128Chunks => "m128-chunk128".to_string(),
+        Sq8ServingPrefillMode::FixedChunkTokens(chunk_tokens) => {
+            format!("m{chunk_tokens}-chunk{chunk_tokens}")
+        }
     }
 }
 
 fn prefill_chunk_tokens(mode: Sq8ServingPrefillMode) -> Option<usize> {
-    match mode {
-        Sq8ServingPrefillMode::SequentialM1 => None,
-        Sq8ServingPrefillMode::FixedM8Chunks => Some(8),
-        Sq8ServingPrefillMode::FixedM32Chunks => Some(32),
-        Sq8ServingPrefillMode::FixedM128Chunks => Some(128),
-    }
+    mode.chunk_tokens()
 }
 
 fn expected_prefill_execution_calls(

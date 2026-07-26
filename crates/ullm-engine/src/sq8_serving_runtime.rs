@@ -33,8 +33,9 @@ use crate::sq8_layer_oracle::{
     QWEN3_14B_VALUE_DIM,
 };
 use crate::sq8_layer_runtime::{
-    QWEN3_14B_SQ8_PREFILL_CHUNK_TOKENS, Qwen3Sq8LayerNormValues, Sq8LayerExecutionProfile,
-    Sq8LayerRuntimeTrace, validate_norm_values,
+    QWEN3_14B_SQ8_PREFILL_CHUNK_TOKEN_OPTIONS, QWEN3_14B_SQ8_PREFILL_CHUNK_TOKENS,
+    Qwen3Sq8LayerNormValues, Sq8LayerExecutionProfile, Sq8LayerRuntimeTrace,
+    is_qwen3_14b_sq8_prefill_chunk_tokens, validate_norm_values,
 };
 use crate::sq8_model_head_runtime::{
     QWEN3_14B_VOCAB_SIZE, Qwen3Sq8ModelHeadRuntime, Sq8ModelHeadDeviceIdentity,
@@ -46,6 +47,7 @@ use crate::sq8_stack_runtime::{
     Sq8PagedStackExecutionReport, Sq8PagedStackPhase, Sq8ServingChunkExecutionReport,
 };
 use sha2::{Digest, Sha256};
+use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use ullm_runtime_sys::{DeviceInfo, RuntimeBuffer, RuntimeContext, RuntimeStream};
 
@@ -82,16 +84,76 @@ pub enum Sq8ServingPrefillMode {
     FixedM8Chunks,
     FixedM32Chunks,
     FixedM128Chunks,
+    /// A scheduler-selected fixed resident width. Construction through
+    /// [`Self::fixed_chunk_tokens`] validates the scheduling contract; the
+    /// lower CK/layer/stack execution contract remains separately measured.
+    FixedChunkTokens(NonZeroUsize),
 }
 
 impl Sq8ServingPrefillMode {
-    fn chunk_tokens(self) -> Option<usize> {
+    /// Selects a fixed-width cached-prefix schedule without padding or
+    /// synthetic tokens. Runtime execution of a new width is admitted
+    /// separately, after the CK/layer/stack contract has measured it.
+    pub fn fixed_chunk_tokens(chunk_tokens: usize) -> Result<Self, Sq8ServingError> {
+        Self::validate_fixed_chunk_tokens(chunk_tokens)
+            .map_err(Sq8ServingError::invalid_configuration)?;
+        Ok(match chunk_tokens {
+            QWEN3_14B_SQ8_PREFILL_CHUNK_TOKENS => Self::FixedM8Chunks,
+            32 => Self::FixedM32Chunks,
+            128 => Self::FixedM128Chunks,
+            _ => Self::FixedChunkTokens(
+                NonZeroUsize::new(chunk_tokens)
+                    .expect("validated serving fixed chunk width is nonzero"),
+            ),
+        })
+    }
+
+    /// Returns the requested fixed width, or `None` for the sequential M=1
+    /// schedule. This is the scheduler contract; callers that load a model
+    /// still receive the lower-runtime admission check.
+    pub fn chunk_tokens(self) -> Option<usize> {
         match self {
             Self::SequentialM1 => None,
             Self::FixedM8Chunks => Some(QWEN3_14B_SQ8_PREFILL_CHUNK_TOKENS),
             Self::FixedM32Chunks => Some(32),
             Self::FixedM128Chunks => Some(128),
+            Self::FixedChunkTokens(chunk_tokens) => Some(chunk_tokens.get()),
         }
+    }
+
+    fn validate_fixed_chunk_tokens(chunk_tokens: usize) -> Result<(), String> {
+        if !(2..=QWEN3_14B_SQ8_SERVING_CONTEXT_TOKENS).contains(&chunk_tokens)
+            || !chunk_tokens.is_power_of_two()
+        {
+            return Err(format!(
+                "SQ8 serving fixed prefill chunk width must be a power of two in 2..={}, got M={chunk_tokens}",
+                QWEN3_14B_SQ8_SERVING_CONTEXT_TOKENS
+            ));
+        }
+        Ok(())
+    }
+
+    fn validate_scheduler_contract(self) -> Result<(), String> {
+        if let Some(chunk_tokens) = self.chunk_tokens() {
+            Self::validate_fixed_chunk_tokens(chunk_tokens)?;
+        }
+        Ok(())
+    }
+
+    /// Scheduler planning and resident execution have deliberately separate
+    /// admissions. Do not allocate a candidate model only to discover that
+    /// its unmeasured CK/layer/stack width cannot execute.
+    fn validate_runtime_contract(self) -> Result<(), String> {
+        self.validate_scheduler_contract()?;
+        if let Some(chunk_tokens) = self.chunk_tokens() {
+            if !is_qwen3_14b_sq8_prefill_chunk_tokens(chunk_tokens) {
+                return Err(format!(
+                    "SQ8 serving requested fixed prefill M={chunk_tokens}, but the current CK/layer/stack runtime admits only measured widths {:?}; wide-M scheduling is available but execution requires the lower-layer wide-M contract",
+                    QWEN3_14B_SQ8_PREFILL_CHUNK_TOKEN_OPTIONS
+                ));
+            }
+        }
+        Ok(())
     }
 
     fn resident_stack_width(self) -> usize {
@@ -103,12 +165,15 @@ impl Sq8ServingPrefillMode {
         self.chunk_tokens().unwrap_or(1)
     }
 
-    fn implementation_id(self) -> &'static str {
+    fn implementation_id(self) -> String {
         match self {
-            Self::SequentialM1 => SQ8_SEQUENTIAL_M1_PREFILL_IMPLEMENTATION,
-            Self::FixedM8Chunks => SQ8_FIXED_M8_PREFILL_IMPLEMENTATION,
-            Self::FixedM32Chunks => SQ8_FIXED_M32_PREFILL_IMPLEMENTATION,
-            Self::FixedM128Chunks => SQ8_FIXED_M128_PREFILL_IMPLEMENTATION,
+            Self::SequentialM1 => SQ8_SEQUENTIAL_M1_PREFILL_IMPLEMENTATION.to_string(),
+            Self::FixedM8Chunks => SQ8_FIXED_M8_PREFILL_IMPLEMENTATION.to_string(),
+            Self::FixedM32Chunks => SQ8_FIXED_M32_PREFILL_IMPLEMENTATION.to_string(),
+            Self::FixedM128Chunks => SQ8_FIXED_M128_PREFILL_IMPLEMENTATION.to_string(),
+            Self::FixedChunkTokens(chunk_tokens) => {
+                format!("sq8.fixed-m{}-cached-prefix.v1", chunk_tokens.get())
+            }
         }
     }
 
@@ -116,6 +181,11 @@ impl Sq8ServingPrefillMode {
         self.chunk_tokens().is_some()
     }
 }
+
+/// The production-compatible serving default. Explicit callers can select a
+/// different fixed width with [`Sq8ServingPrefillMode::fixed_chunk_tokens`].
+pub const QWEN3_14B_SQ8_SERVING_DEFAULT_PREFILL_MODE: Sq8ServingPrefillMode =
+    Sq8ServingPrefillMode::FixedM128Chunks;
 
 impl Sq8ServingRequest {
     pub fn new(
@@ -865,6 +935,7 @@ fn plan_prefill_units(
     prompt_tokens: usize,
     mode: Sq8ServingPrefillMode,
 ) -> Result<Vec<Sq8PrefillUnit>, String> {
+    mode.validate_scheduler_contract()?;
     if prompt_tokens == 0 || prompt_tokens > QWEN3_14B_SQ8_SERVING_CONTEXT_TOKENS {
         return Err(format!(
             "serving prefill planner prompt length must be in 1..={}, got {prompt_tokens}",
@@ -889,6 +960,7 @@ fn plan_next_prefill_unit(
     prompt_tokens: usize,
     mode: Sq8ServingPrefillMode,
 ) -> Result<Sq8PrefillUnit, String> {
+    mode.validate_scheduler_contract()?;
     if prompt_tokens == 0
         || prompt_tokens > QWEN3_14B_SQ8_SERVING_CONTEXT_TOKENS
         || logical_start_position >= prompt_tokens
@@ -975,7 +1047,7 @@ impl Qwen3Sq8ServingSession {
             package_path,
             norms,
             upload_chunk_bytes,
-            Sq8ServingPrefillMode::FixedM8Chunks,
+            QWEN3_14B_SQ8_SERVING_DEFAULT_PREFILL_MODE,
         )
     }
 
@@ -988,6 +1060,9 @@ impl Qwen3Sq8ServingSession {
         upload_chunk_bytes: usize,
         prefill_mode: Sq8ServingPrefillMode,
     ) -> Result<Self, Sq8ServingError> {
+        prefill_mode
+            .validate_runtime_contract()
+            .map_err(Sq8ServingError::invalid_configuration)?;
         if upload_chunk_bytes == 0 {
             return Err(Sq8ServingError::invalid_configuration(
                 "serving upload chunk size must be nonzero",
@@ -1118,7 +1193,7 @@ impl Qwen3Sq8ServingSession {
                 .map_err(|err| err.to_string())?,
                 prefill_mode,
                 prefill_chunk_tokens: resident_stack_width,
-                prefill_implementation: prefill_mode.implementation_id().to_string(),
+                prefill_implementation: prefill_mode.implementation_id(),
                 prompt_execution_width: prefill_mode.execution_width(),
                 paged_decode_split_source_tile,
                 embedding_payload_sha256: embedding.load_report().payload.payload_sha256.clone(),
@@ -4606,6 +4681,84 @@ mod tests {
                 mode.uses_chunks(),
                 mode != Sq8ServingPrefillMode::SequentialM1
             );
+        }
+        assert_eq!(
+            QWEN3_14B_SQ8_SERVING_DEFAULT_PREFILL_MODE.chunk_tokens(),
+            Some(128)
+        );
+    }
+
+    #[test]
+    fn serving_wide_chunk_scheduler_preserves_real_token_tail_replay() {
+        for (chunk_tokens, expected_units, expected_attention_calls) in [
+            (128_usize, 32_usize, 1_280_usize),
+            (256, 16, 640),
+            (512, 8, 320),
+            (1_024, 4, 160),
+            (2_048, 2, 80),
+        ] {
+            let mode = Sq8ServingPrefillMode::fixed_chunk_tokens(chunk_tokens).unwrap();
+            assert_eq!(mode.chunk_tokens(), Some(chunk_tokens));
+            assert_eq!(mode.resident_stack_width(), chunk_tokens);
+            assert_eq!(mode.execution_width(), chunk_tokens);
+            assert_eq!(
+                mode.implementation_id(),
+                format!("sq8.fixed-m{chunk_tokens}-cached-prefix.v1")
+            );
+
+            let units = plan_prefill_units(4095, mode).unwrap();
+            assert_eq!(units.len(), expected_units, "M={chunk_tokens}");
+            assert!(units
+                .iter()
+                .all(|unit| unit.execution_width == chunk_tokens));
+            assert_eq!(
+                units.len() * QWEN3_14B_SQ8_STACK_LAYERS,
+                expected_attention_calls,
+                "M={chunk_tokens}"
+            );
+
+            let tail = units.last().unwrap();
+            assert_eq!(
+                tail.logical_start_position,
+                (4095 / chunk_tokens) * chunk_tokens
+            );
+            assert_eq!(tail.execution_start_position, 4095 - chunk_tokens);
+            assert_eq!(tail.execution_width, chunk_tokens);
+            assert_eq!(tail.committed_tokens, chunk_tokens - 1);
+            assert_eq!(tail.execution_end().unwrap(), 4095);
+            assert!(tail.rewinds_cache());
+
+            if chunk_tokens <= 128 {
+                mode.validate_runtime_contract().unwrap();
+            } else {
+                assert!(mode.validate_runtime_contract().is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn serving_4096_chunk_never_fabricates_a_4095th_prefill_row() {
+        let mode = Sq8ServingPrefillMode::fixed_chunk_tokens(4096).unwrap();
+        let short = plan_prefill_units(4095, mode).unwrap();
+        assert_eq!(short.len(), 4095);
+        assert!(short.iter().all(|unit| {
+            unit.execution_width == 1
+                && unit.execution_start_position == unit.logical_start_position
+                && unit.committed_tokens == 1
+                && !unit.rewinds_cache()
+        }));
+
+        let exact = plan_prefill_units(4096, mode).unwrap();
+        assert_eq!(exact.len(), 1);
+        assert_eq!(exact[0].execution_width, 4096);
+        assert_eq!(exact[0].committed_tokens, 4096);
+        assert!(!exact[0].rewinds_cache());
+    }
+
+    #[test]
+    fn serving_fixed_chunk_selector_rejects_invalid_scheduler_widths() {
+        for chunk_tokens in [0, 1, 3, 129, 3_000, 4_097] {
+            assert!(Sq8ServingPrefillMode::fixed_chunk_tokens(chunk_tokens).is_err());
         }
     }
 
