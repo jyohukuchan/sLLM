@@ -12,7 +12,7 @@ The following targeted CPU tests completed after the typed ABI was added:
 
 ```text
 cargo test -p ullm-engine decoder::tests --lib
-36 passed; 0 failed
+37 passed; 0 failed
 
 cargo test -p ullm-engine kv_cache_dtype --lib
 4 passed; 0 failed
@@ -25,6 +25,8 @@ rejected by the parser. The K/V override precedence over the uniform selector
 is tested without mutating the process environment. The direct reader is also
 checked against a CPU reference over its exact decoded payload-plus-scale
 cache bytes; this is a semantic implementation check, not a quality threshold.
+A separate synthetic FP8 test spans all 4,096 tokens / 256 pages with a
+permuted page table. It is not a full-model throughput or generated-text test.
 
 ## Capacity ledger
 

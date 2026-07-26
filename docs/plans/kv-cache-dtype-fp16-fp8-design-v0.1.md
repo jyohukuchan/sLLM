@@ -260,6 +260,8 @@ CPU evidence is saved in
   payload-plus-scale cache bytes (implementation correctness only);
 - typed causal prefill fallback;
 - corrupt FP8 negative (including negative-zero) scale rejection in both readback and attention;
+- a synthetic FP8 4,096-token / 256-page / block-size-16 context with a
+  permuted block table (page/scale implementation check only);
 - all existing `decoder::tests` F32 cases.
 
 An accidental broad `ullm-runtime-sys --lib` invocation was discovered to
@@ -279,6 +281,10 @@ The old 20.002232 tok/s estimate is intentionally not used. BH has already
 reduced semantic K+V load from 42,434,560 B to 8,486,912 B, so cache-width
 ratios cannot substitute for an end-to-end speed result. Capacity accounting
 in section 2 remains independently valid.
+
+The synthetic 4,096-token CPU test above is deliberately not listed in this
+table: it validates page mapping and decoded-cache semantics, not a model's
+long-context generation quality or throughput.
 
 ## 6. Native-kernel handoff after BR
 
