@@ -39,3 +39,10 @@ The promotion and rollback wrappers did not need a schema-specific rewrite:
 they atomically exchange raw manifest bytes.  Their test covers a typed
 execution field across promotion and rollback, proving they do not parse and
 re-serialize it away.
+
+Validation for the change passed 99 gateway manifest/settings tests, 54
+generator/validator/promotion-wrapper tests, and 7 Rust served-model tests;
+the AQ4 full-model binary also passed `cargo check`.  These checks exercise
+unknown-key rejection, unsupported tiles, leaked selector rejection, selector
+scrubbing/injection, existing-manifest compatibility, and raw-byte
+promotion/rollback preservation.

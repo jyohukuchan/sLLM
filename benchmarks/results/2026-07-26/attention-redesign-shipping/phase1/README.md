@@ -17,6 +17,8 @@ It binds source `c4c9a9b344fc10e9a77ab0ded3293469d21b2f72` and the worker
 The served model config is
 `/home/homelab1/datapool/ai_models/safetensors/Qwen/Qwen3.5-9B/config.json`
 (SHA-256 `d0883072e01861ed0b2d47be3c16c36a8e81c224c7ffaa310c6558fb3f932b05`).
+`qwen35-9b-attention-structure.json` is the machine-readable derivation from
+that exact file.
 Its `text_config` has 32 layers, 16 query heads, 4 KV heads, and head/value
 dimension 256.  `layer_types` is exactly eight repetitions of three
 `linear_attention` layers followed by one `full_attention` layer: 24 linear
@@ -93,3 +95,4 @@ For scale only, if the `SQ8_0` full-model 1.790050x result could somehow apply
 to every one of the measured 8.97854% split-core share, Amdahl's-law ceiling
 would be `1 / ((1 - p) + p / 1.790050) = 1.0412625x` (+4.13%).  This is a
 conditional upper bound, not an `AQ4_0` speed prediction.
+`conditional-aq4-amdahl-bound.json` records the inputs and unrounded result.
