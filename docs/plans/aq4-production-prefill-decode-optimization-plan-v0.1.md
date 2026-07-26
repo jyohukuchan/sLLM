@@ -415,3 +415,18 @@ activation後に上記が発生した場合は、追加測定を続けず、P0/P
 - Git: 意味のある実装単位のcommit。evidence identityをcommitへbindingする
 
 prompt本文、response本文、prompt/generated token ID、API key、password、OpenWebUI DBの個人情報はtrace、release evidence、journalへ保存しない。公開fixture ID、hash、集計値だけを残す。局所診断でtoken IDが不可欠な場合もpromotion run rootとrelease bundleの外に隔離し、traceやbundleから参照しない。
+
+## 10. 2026-07-27 `matvec_add` 実行記録
+
+`ullm_aq4_matvec_add_f32_kernel` のg8/g16固定traversal候補を、C=1339の同一grouped
+workerで旧shuffle bodyと比較した。unprofiled full-model decodeはgrouped
+74.591159→78.284628 tok/s（1.049516×）、direct 73.895446→77.679674 tok/s
+（1.051211×）で、cold p=2048/M=128 prefillは974.984645→977.087601 tok/sだった。
+GPU/CPU differential、greedy runtime、292 module/64 add launch不変量を通過した。
+
+軽量昇格は実prompt suite 10件を完走し、blocking finding 0、exact match 10/10、
+`activated` outcomeを残した。workerはroot-owned `/opt/ullm/` releaseに置かれた。
+ただしtransaction後にactive manifestが既存BZ SHAへ戻ったため、その状態を上書きせず
+current serviceを既存workerで復旧した。詳細なtrace、counter limitation、thermal、quality、
+promotion記録は
+`benchmarks/results/2026-07-27/aq4-matvec-add-optimization/` に保存する。

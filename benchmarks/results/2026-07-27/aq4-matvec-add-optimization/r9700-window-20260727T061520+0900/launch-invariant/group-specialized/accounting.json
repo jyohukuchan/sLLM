@@ -1,0 +1,1044 @@
+{
+  "gpu_timeline": {
+    "all_dispatches": {
+      "activity_span": {
+        "count": 2,
+        "max_ns": 14110509,
+        "mean_ns": 13893381.5,
+        "min_ns": 13676254,
+        "total_ns": 27786763
+      },
+      "event_count_per_step": {
+        "max_count": 294,
+        "mean_count": 294.0,
+        "min_count": 294,
+        "sample_count": 2,
+        "total_count": 588
+      },
+      "gap_next_dispatch_api_relation": {
+        "categories": {
+          "next_api_completed_before_prior_gpu_end": {
+            "gap_count": 580,
+            "gap_duration": {
+              "max_ns": 172442,
+              "mean_ns": 4805.436206896552,
+              "min_ns": 4200,
+              "total_ns": 2787153
+            },
+            "next_api_functions": {
+              "hipModuleLaunchKernel": 580
+            }
+          },
+          "next_api_in_progress_at_prior_gpu_end": {
+            "gap_count": 3,
+            "gap_duration": {
+              "max_ns": 22520,
+              "mean_ns": 10453.333333333334,
+              "min_ns": 4400,
+              "total_ns": 31360
+            },
+            "next_api_functions": {
+              "hipMemcpyDtoHAsync": 2,
+              "hipModuleLaunchKernel": 1
+            }
+          },
+          "next_api_started_after_prior_gpu_end": {
+            "gap_count": 3,
+            "gap_duration": {
+              "max_ns": 215242,
+              "mean_ns": 96344.66666666667,
+              "min_ns": 35361,
+              "total_ns": 289034
+            },
+            "next_api_functions": {
+              "hipMemcpyDtoHAsync": 2,
+              "hipModuleLaunchKernel": 1
+            }
+          }
+        },
+        "interpretation": "Each all-dispatch GPU gap is partitioned by the temporal relation of its next dispatch's correlated HIP API to the preceding GPU interval. This is evidence about queue readiness, not a causal launch-overhead decomposition; rocprof API callbacks can perturb the relation.",
+        "next_dispatch_groups": {
+          "aq4_projection": {
+            "gap_count": 258,
+            "gap_duration": {
+              "max_ns": 22520,
+              "mean_ns": 4500.674418604651,
+              "min_ns": 4200,
+              "total_ns": 1161174
+            }
+          },
+          "attention": {
+            "gap_count": 32,
+            "gap_duration": {
+              "max_ns": 4920,
+              "mean_ns": 4503.75,
+              "min_ns": 4360,
+              "total_ns": 144120
+            }
+          },
+          "linear_attention": {
+            "gap_count": 96,
+            "gap_duration": {
+              "max_ns": 4920,
+              "mean_ns": 4432.125,
+              "min_ns": 4280,
+              "total_ns": 425484
+            }
+          },
+          "nonmodule:hipMemcpyDtoHAsync": {
+            "gap_count": 4,
+            "gap_duration": {
+              "max_ns": 38431,
+              "mean_ns": 20658.0,
+              "min_ns": 4400,
+              "total_ns": 82632
+            }
+          },
+          "normalization": {
+            "gap_count": 194,
+            "gap_duration": {
+              "max_ns": 215242,
+              "mean_ns": 6535.345360824742,
+              "min_ns": 4280,
+              "total_ns": 1267857
+            }
+          },
+          "other_ullm": {
+            "gap_count": 2,
+            "gap_duration": {
+              "max_ns": 13200,
+              "mean_ns": 13140.0,
+              "min_ns": 13080,
+              "total_ns": 26280
+            }
+          }
+        },
+        "per_step": [
+          {
+            "gap_count_by_relation": {
+              "next_api_completed_before_prior_gpu_end": 289,
+              "next_api_in_progress_at_prior_gpu_end": 2,
+              "next_api_started_after_prior_gpu_end": 2
+            },
+            "gap_ns_by_relation": {
+              "next_api_completed_before_prior_gpu_end": 1472018,
+              "next_api_in_progress_at_prior_gpu_end": 26920,
+              "next_api_started_after_prior_gpu_end": 250603
+            }
+          },
+          {
+            "gap_count_by_relation": {
+              "next_api_completed_before_prior_gpu_end": 291,
+              "next_api_in_progress_at_prior_gpu_end": 1,
+              "next_api_started_after_prior_gpu_end": 1
+            },
+            "gap_ns_by_relation": {
+              "next_api_completed_before_prior_gpu_end": 1315135,
+              "next_api_in_progress_at_prior_gpu_end": 4440,
+              "next_api_started_after_prior_gpu_end": 38431
+            }
+          }
+        ]
+      },
+      "inclusive_duration": {
+        "count": 2,
+        "max_ns": 12360968,
+        "mean_ns": 12339608.0,
+        "min_ns": 12318248,
+        "total_ns": 24679216
+      },
+      "inter_event_gap": {
+        "count": 2,
+        "max_ns": 1749541,
+        "mean_ns": 1553773.5,
+        "min_ns": 1358006,
+        "total_ns": 3107547
+      },
+      "interval_union": {
+        "count": 2,
+        "max_ns": 12360968,
+        "mean_ns": 12339608.0,
+        "min_ns": 12318248,
+        "total_ns": 24679216
+      },
+      "marker_duration": {
+        "count": 2,
+        "max_ns": 14219856,
+        "mean_ns": 13986422.5,
+        "min_ns": 13752989,
+        "total_ns": 27972845
+      },
+      "marker_leading_no_event": {
+        "count": 2,
+        "max_ns": 67515,
+        "mean_ns": 51487.0,
+        "min_ns": 35459,
+        "total_ns": 102974
+      },
+      "marker_trailing_no_event": {
+        "count": 2,
+        "max_ns": 41832,
+        "mean_ns": 41554.0,
+        "min_ns": 41276,
+        "total_ns": 83108
+      },
+      "overlap": {
+        "count": 2,
+        "max_ns": 0,
+        "mean_ns": 0.0,
+        "min_ns": 0,
+        "total_ns": 0
+      },
+      "per_step": [
+        {
+          "activity_span_ns": 14110509,
+          "cache_start": 1339,
+          "event_count": 294,
+          "inclusive_duration_ns": 12360968,
+          "index": 0,
+          "inter_event_gap_ns": 1749541,
+          "interval_union_ns": 12360968,
+          "marker_duration_ns": 14219856,
+          "marker_leading_no_event_ns": 67515,
+          "marker_trailing_no_event_ns": 41832,
+          "overlap_ns": 0
+        },
+        {
+          "activity_span_ns": 13676254,
+          "cache_start": 1340,
+          "event_count": 294,
+          "inclusive_duration_ns": 12318248,
+          "index": 1,
+          "inter_event_gap_ns": 1358006,
+          "interval_union_ns": 12318248,
+          "marker_duration_ns": 13752989,
+          "marker_leading_no_event_ns": 35459,
+          "marker_trailing_no_event_ns": 41276,
+          "overlap_ns": 0
+        }
+      ]
+    },
+    "dma_copy_dispatches": {
+      "activity_span": {
+        "count": 2,
+        "max_ns": 44671,
+        "mean_ns": 43436.0,
+        "min_ns": 42201,
+        "total_ns": 86872
+      },
+      "event_count_per_step": {
+        "max_count": 2,
+        "mean_count": 2.0,
+        "min_count": 2,
+        "sample_count": 2,
+        "total_count": 4
+      },
+      "inclusive_duration": {
+        "count": 2,
+        "max_ns": 6840,
+        "mean_ns": 6540.0,
+        "min_ns": 6240,
+        "total_ns": 13080
+      },
+      "inter_event_gap": {
+        "count": 2,
+        "max_ns": 38431,
+        "mean_ns": 36896.0,
+        "min_ns": 35361,
+        "total_ns": 73792
+      },
+      "interval_union": {
+        "count": 2,
+        "max_ns": 6840,
+        "mean_ns": 6540.0,
+        "min_ns": 6240,
+        "total_ns": 13080
+      },
+      "marker_duration": {
+        "count": 2,
+        "max_ns": 14219856,
+        "mean_ns": 13986422.5,
+        "min_ns": 13752989,
+        "total_ns": 27972845
+      },
+      "marker_leading_no_event": {
+        "count": 2,
+        "max_ns": 14135823,
+        "mean_ns": 13901432.5,
+        "min_ns": 13667042,
+        "total_ns": 27802865
+      },
+      "marker_trailing_no_event": {
+        "count": 2,
+        "max_ns": 41832,
+        "mean_ns": 41554.0,
+        "min_ns": 41276,
+        "total_ns": 83108
+      },
+      "overlap": {
+        "count": 2,
+        "max_ns": 0,
+        "mean_ns": 0.0,
+        "min_ns": 0,
+        "total_ns": 0
+      },
+      "per_step": [
+        {
+          "activity_span_ns": 42201,
+          "cache_start": 1339,
+          "event_count": 2,
+          "inclusive_duration_ns": 6840,
+          "index": 0,
+          "inter_event_gap_ns": 35361,
+          "interval_union_ns": 6840,
+          "marker_duration_ns": 14219856,
+          "marker_leading_no_event_ns": 14135823,
+          "marker_trailing_no_event_ns": 41832,
+          "overlap_ns": 0
+        },
+        {
+          "activity_span_ns": 44671,
+          "cache_start": 1340,
+          "event_count": 2,
+          "inclusive_duration_ns": 6240,
+          "index": 1,
+          "inter_event_gap_ns": 38431,
+          "interval_union_ns": 6240,
+          "marker_duration_ns": 13752989,
+          "marker_leading_no_event_ns": 13667042,
+          "marker_trailing_no_event_ns": 41276,
+          "overlap_ns": 0
+        }
+      ]
+    },
+    "module_launch_dispatches": {
+      "activity_span": {
+        "count": 2,
+        "max_ns": 14063908,
+        "mean_ns": 13845525.5,
+        "min_ns": 13627143,
+        "total_ns": 27691051
+      },
+      "event_count_per_step": {
+        "max_count": 292,
+        "mean_count": 292.0,
+        "min_count": 292,
+        "sample_count": 2,
+        "total_count": 584
+      },
+      "inclusive_duration": {
+        "count": 2,
+        "max_ns": 12354128,
+        "mean_ns": 12333068.0,
+        "min_ns": 12312008,
+        "total_ns": 24666136
+      },
+      "inter_event_gap": {
+        "count": 2,
+        "max_ns": 1709780,
+        "mean_ns": 1512457.5,
+        "min_ns": 1315135,
+        "total_ns": 3024915
+      },
+      "interval_union": {
+        "count": 2,
+        "max_ns": 12354128,
+        "mean_ns": 12333068.0,
+        "min_ns": 12312008,
+        "total_ns": 24666136
+      },
+      "marker_duration": {
+        "count": 2,
+        "max_ns": 14219856,
+        "mean_ns": 13986422.5,
+        "min_ns": 13752989,
+        "total_ns": 27972845
+      },
+      "marker_leading_no_event": {
+        "count": 2,
+        "max_ns": 67515,
+        "mean_ns": 51487.0,
+        "min_ns": 35459,
+        "total_ns": 102974
+      },
+      "marker_trailing_no_event": {
+        "count": 2,
+        "max_ns": 90387,
+        "mean_ns": 89410.0,
+        "min_ns": 88433,
+        "total_ns": 178820
+      },
+      "overlap": {
+        "count": 2,
+        "max_ns": 0,
+        "mean_ns": 0.0,
+        "min_ns": 0,
+        "total_ns": 0
+      },
+      "per_step": [
+        {
+          "activity_span_ns": 14063908,
+          "cache_start": 1339,
+          "event_count": 292,
+          "inclusive_duration_ns": 12354128,
+          "index": 0,
+          "inter_event_gap_ns": 1709780,
+          "interval_union_ns": 12354128,
+          "marker_duration_ns": 14219856,
+          "marker_leading_no_event_ns": 67515,
+          "marker_trailing_no_event_ns": 88433,
+          "overlap_ns": 0
+        },
+        {
+          "activity_span_ns": 13627143,
+          "cache_start": 1340,
+          "event_count": 292,
+          "inclusive_duration_ns": 12312008,
+          "index": 1,
+          "inter_event_gap_ns": 1315135,
+          "interval_union_ns": 12312008,
+          "marker_duration_ns": 13752989,
+          "marker_leading_no_event_ns": 35459,
+          "marker_trailing_no_event_ns": 90387,
+          "overlap_ns": 0
+        }
+      ]
+    }
+  },
+  "host_hip_api": {
+    "functions": {
+      "hipDeviceComputeCapability": {
+        "api_duration": {
+          "max_ns": 310,
+          "mean_ns": 95.89494163424125,
+          "min_ns": 70,
+          "total_ns": 49290
+        },
+        "call_count": 514,
+        "calls_per_step": {
+          "max_count": 257,
+          "mean_count": 257.0,
+          "min_count": 257,
+          "sample_count": 2,
+          "total_count": 514
+        }
+      },
+      "hipGetDevicePropertiesR0600": {
+        "api_duration": {
+          "max_ns": 730,
+          "mean_ns": 470.6212121212121,
+          "min_ns": 380,
+          "total_ns": 31061
+        },
+        "call_count": 66,
+        "calls_per_step": {
+          "max_count": 33,
+          "mean_count": 33.0,
+          "min_count": 33,
+          "sample_count": 2,
+          "total_count": 66
+        }
+      },
+      "hipMemcpyDtoHAsync": {
+        "api_duration": {
+          "max_ns": 1910893,
+          "mean_ns": 814884.25,
+          "min_ns": 36481,
+          "total_ns": 3259537
+        },
+        "call_count": 4,
+        "calls_per_step": {
+          "max_count": 2,
+          "mean_count": 2.0,
+          "min_count": 2,
+          "sample_count": 2,
+          "total_count": 4
+        }
+      },
+      "hipModuleLaunchKernel": {
+        "api_duration": {
+          "max_ns": 110272,
+          "mean_ns": 35976.892123287675,
+          "min_ns": 3510,
+          "total_ns": 21010505
+        },
+        "call_count": 584,
+        "calls_per_step": {
+          "max_count": 292,
+          "mean_count": 292.0,
+          "min_count": 292,
+          "sample_count": 2,
+          "total_count": 584
+        }
+      },
+      "hipSetDevice": {
+        "api_duration": {
+          "max_ns": 510,
+          "mean_ns": 102.27457627118645,
+          "min_ns": 90,
+          "total_ns": 60342
+        },
+        "call_count": 590,
+        "calls_per_step": {
+          "max_count": 295,
+          "mean_count": 295.0,
+          "min_count": 295,
+          "sample_count": 2,
+          "total_count": 590
+        }
+      },
+      "hipStreamSynchronize": {
+        "api_duration": {
+          "max_ns": 27950,
+          "mean_ns": 27755.5,
+          "min_ns": 27561,
+          "total_ns": 55511
+        },
+        "call_count": 2,
+        "calls_per_step": {
+          "max_count": 1,
+          "mean_count": 1.0,
+          "min_count": 1,
+          "sample_count": 2,
+          "total_count": 2
+        }
+      }
+    },
+    "non_additive_note": "HIP API durations can overlap asynchronous GPU execution; they must not be summed with GPU intervals to form wall time."
+  },
+  "inputs": {
+    "hip_api_trace": {
+      "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-27/aq4-matvec-add-optimization/r9700-window-20260727T061520+0900/launch-invariant/group-specialized/rocprof/homelab1-WRX80-Creator/1052462_hip_api_trace.csv",
+      "sha256": "6ff339a28fd00740a8c3a1704f76d988bf50072b8db974aa77821ede8be45f37"
+    },
+    "kernel_trace": {
+      "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-27/aq4-matvec-add-optimization/r9700-window-20260727T061520+0900/launch-invariant/group-specialized/rocprof/homelab1-WRX80-Creator/1052462_kernel_trace.csv",
+      "sha256": "2e3cee70c5bf71b4ce7b98f7a504f0029a8c95b61d3e78ebb8bab6c3ceb65feb"
+    },
+    "marker_trace": {
+      "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-27/aq4-matvec-add-optimization/r9700-window-20260727T061520+0900/launch-invariant/group-specialized/rocprof/homelab1-WRX80-Creator/1052462_marker_api_trace.csv",
+      "sha256": "bcea8c1770b8e980423751c669fa6ec50989dd96440e53d2afc58d9f2da3a376"
+    }
+  },
+  "kernel_geometry": {
+    "all_named_dispatches_single_observed_geometry": true,
+    "interpretation": "A single observed grid/workgroup shape across the marked range is structural evidence for graph-capture investigation only. Pointer and scalar updates, module capture support, and host synchronization remain separate requirements.",
+    "kernels": [
+      {
+        "dispatch_count": 4,
+        "name": "__amd_rocclr_copyBuffer",
+        "shape_variant_count": 1,
+        "shapes": [
+          {
+            "dispatch_count": 4,
+            "grid_size": [
+              512,
+              1,
+              1
+            ],
+            "workgroup_size": [
+              512,
+              1,
+              1
+            ]
+          }
+        ],
+        "single_observed_launch_geometry": true
+      },
+      {
+        "dispatch_count": 128,
+        "name": "ullm_aq4_matvec_add_f32_kernel",
+        "shape_variant_count": 1,
+        "shapes": [
+          {
+            "dispatch_count": 128,
+            "grid_size": [
+              131072,
+              1,
+              1
+            ],
+            "workgroup_size": [
+              256,
+              1,
+              1
+            ]
+          }
+        ],
+        "single_observed_launch_geometry": true
+      },
+      {
+        "dispatch_count": 2,
+        "name": "ullm_aq4_matvec_f32_kernel",
+        "shape_variant_count": 1,
+        "shapes": [
+          {
+            "dispatch_count": 2,
+            "grid_size": [
+              1986560,
+              1,
+              1
+            ],
+            "workgroup_size": [
+              256,
+              1,
+              1
+            ]
+          }
+        ],
+        "single_observed_launch_geometry": true
+      },
+      {
+        "dispatch_count": 48,
+        "name": "ullm_aq4_matvec_qkv_z_gate_beta_f32_kernel",
+        "shape_variant_count": 1,
+        "shapes": [
+          {
+            "dispatch_count": 48,
+            "grid_size": [
+              526336,
+              1,
+              1
+            ],
+            "workgroup_size": [
+              256,
+              1,
+              1
+            ]
+          }
+        ],
+        "single_observed_launch_geometry": true
+      },
+      {
+        "dispatch_count": 64,
+        "name": "ullm_aq4_matvec_silu_mul_f32_kernel",
+        "shape_variant_count": 1,
+        "shapes": [
+          {
+            "dispatch_count": 64,
+            "grid_size": [
+              393216,
+              1,
+              1
+            ],
+            "workgroup_size": [
+              256,
+              1,
+              1
+            ]
+          }
+        ],
+        "single_observed_launch_geometry": true
+      },
+      {
+        "dispatch_count": 16,
+        "name": "ullm_aq4_matvec_triple_f32_kernel",
+        "shape_variant_count": 1,
+        "shapes": [
+          {
+            "dispatch_count": 16,
+            "grid_size": [
+              262144,
+              1,
+              1
+            ],
+            "workgroup_size": [
+              256,
+              1,
+              1
+            ]
+          }
+        ],
+        "single_observed_launch_geometry": true
+      },
+      {
+        "dispatch_count": 2,
+        "name": "ullm_bf16_row_f32_kernel",
+        "shape_variant_count": 1,
+        "shapes": [
+          {
+            "dispatch_count": 2,
+            "grid_size": [
+              256,
+              1,
+              1
+            ],
+            "workgroup_size": [
+              256,
+              1,
+              1
+            ]
+          }
+        ],
+        "single_observed_launch_geometry": true
+      },
+      {
+        "dispatch_count": 48,
+        "name": "ullm_linear_attn_qkv_prepare_f32_kernel",
+        "shape_variant_count": 1,
+        "shapes": [
+          {
+            "dispatch_count": 48,
+            "grid_size": [
+              12288,
+              1,
+              1
+            ],
+            "workgroup_size": [
+              256,
+              1,
+              1
+            ]
+          }
+        ],
+        "single_observed_launch_geometry": true
+      },
+      {
+        "dispatch_count": 48,
+        "name": "ullm_linear_attn_recurrent_f32_kernel",
+        "shape_variant_count": 1,
+        "shapes": [
+          {
+            "dispatch_count": 48,
+            "grid_size": [
+              524288,
+              1,
+              1
+            ],
+            "workgroup_size": [
+              128,
+              1,
+              1
+            ]
+          }
+        ],
+        "single_observed_launch_geometry": true
+      },
+      {
+        "dispatch_count": 16,
+        "name": "ullm_paged_decode_attn_split_merge_f32_kernel",
+        "shape_variant_count": 1,
+        "shapes": [
+          {
+            "dispatch_count": 16,
+            "grid_size": [
+              4096,
+              1,
+              1
+            ],
+            "workgroup_size": [
+              256,
+              1,
+              1
+            ]
+          }
+        ],
+        "single_observed_launch_geometry": true
+      },
+      {
+        "dispatch_count": 16,
+        "name": "ullm_paged_decode_attn_split_partial_f32_kernel",
+        "shape_variant_count": 1,
+        "shapes": [
+          {
+            "dispatch_count": 16,
+            "grid_size": [
+              45056,
+              1,
+              1
+            ],
+            "workgroup_size": [
+              256,
+              1,
+              1
+            ]
+          }
+        ],
+        "single_observed_launch_geometry": true
+      },
+      {
+        "dispatch_count": 16,
+        "name": "ullm_qwen35_qk_norm_rope_paged_kv_write_f32_kernel",
+        "shape_variant_count": 1,
+        "shapes": [
+          {
+            "dispatch_count": 16,
+            "grid_size": [
+              6144,
+              1,
+              1
+            ],
+            "workgroup_size": [
+              256,
+              1,
+              1
+            ]
+          }
+        ],
+        "single_observed_launch_geometry": true
+      },
+      {
+        "dispatch_count": 130,
+        "name": "ullm_rmsnorm_f32_kernel",
+        "shape_variant_count": 1,
+        "shapes": [
+          {
+            "dispatch_count": 130,
+            "grid_size": [
+              256,
+              1,
+              1
+            ],
+            "workgroup_size": [
+              256,
+              1,
+              1
+            ]
+          }
+        ],
+        "single_observed_launch_geometry": true
+      },
+      {
+        "dispatch_count": 48,
+        "name": "ullm_segmented_rmsnorm_silu_mul_f32_kernel",
+        "shape_variant_count": 1,
+        "shapes": [
+          {
+            "dispatch_count": 48,
+            "grid_size": [
+              8192,
+              1,
+              1
+            ],
+            "workgroup_size": [
+              256,
+              1,
+              1
+            ]
+          }
+        ],
+        "single_observed_launch_geometry": true
+      },
+      {
+        "dispatch_count": 2,
+        "name": "ullm_top1_f32_kernel",
+        "shape_variant_count": 1,
+        "shapes": [
+          {
+            "dispatch_count": 2,
+            "grid_size": [
+              248320,
+              1,
+              1
+            ],
+            "workgroup_size": [
+              256,
+              1,
+              1
+            ]
+          }
+        ],
+        "single_observed_launch_geometry": true
+      }
+    ]
+  },
+  "measurement": {
+    "cache_end_exclusive": 1341,
+    "cache_start": 1339,
+    "decode_step_count": 2,
+    "ignored_kernel_dispatches": {
+      "outside_decode_marker": 20325
+    },
+    "queue_ids": [
+      "1"
+    ],
+    "steps": [
+      {
+        "cache_start": 1339,
+        "index": 0,
+        "marker_end_ns": 108441537171601,
+        "marker_start_ns": 108441522951745
+      },
+      {
+        "cache_start": 1340,
+        "index": 1,
+        "marker_end_ns": 108441550936770,
+        "marker_start_ns": 108441537183781
+      }
+    ],
+    "stream_ids": [
+      "1"
+    ]
+  },
+  "method": {
+    "dispatch_attribution": "The start timestamp of each correlated HIP API call must lie inside an outer AQ4_0 decode-step marker. GPU timestamp-only attribution is not used.",
+    "gpu_idle": "inter_event_gap is the direct sum of gaps between unioned KERNEL_DISPATCH GPU intervals inside each attributed step; it excludes marker lead/trail.",
+    "wall_clock": "Wall time comes only from the profiler driver's Instant measurements, never from a rocprof marker/range duration."
+  },
+  "module_kernel": {
+    "families": {
+      "aq4_projection": {
+        "fraction_of_module_kernel_time": 0.8037970357416337,
+        "inclusive_ns": 19826567,
+        "kernel_count": 258
+      },
+      "attention": {
+        "fraction_of_module_kernel_time": 0.09366144741924719,
+        "inclusive_ns": 2310266,
+        "kernel_count": 32
+      },
+      "linear_attention": {
+        "fraction_of_module_kernel_time": 0.04277812301043017,
+        "inclusive_ns": 1055171,
+        "kernel_count": 96
+      },
+      "normalization": {
+        "fraction_of_module_kernel_time": 0.058683370593594394,
+        "inclusive_ns": 1447492,
+        "kernel_count": 194
+      },
+      "other_ullm": {
+        "fraction_of_module_kernel_time": 0.001080023235094463,
+        "inclusive_ns": 26640,
+        "kernel_count": 4
+      }
+    },
+    "inclusive_ns": 24666136,
+    "kernels": [
+      {
+        "fraction_of_module_kernel_time": 0.2781299835531597,
+        "inclusive_ns": 6860392,
+        "kernel_count": 64,
+        "name": "ullm_aq4_matvec_silu_mul_f32_kernel"
+      },
+      {
+        "fraction_of_module_kernel_time": 0.2548021303377229,
+        "inclusive_ns": 6284984,
+        "kernel_count": 128,
+        "name": "ullm_aq4_matvec_add_f32_kernel"
+      },
+      {
+        "fraction_of_module_kernel_time": 0.13028688400972085,
+        "inclusive_ns": 3213674,
+        "kernel_count": 48,
+        "name": "ullm_aq4_matvec_qkv_z_gate_beta_f32_kernel"
+      },
+      {
+        "fraction_of_module_kernel_time": 0.0965366038685589,
+        "inclusive_ns": 2381185,
+        "kernel_count": 2,
+        "name": "ullm_aq4_matvec_f32_kernel"
+      },
+      {
+        "fraction_of_module_kernel_time": 0.09017800761335298,
+        "inclusive_ns": 2224343,
+        "kernel_count": 16,
+        "name": "ullm_paged_decode_attn_split_partial_f32_kernel"
+      },
+      {
+        "fraction_of_module_kernel_time": 0.05129181968347211,
+        "inclusive_ns": 1265171,
+        "kernel_count": 130,
+        "name": "ullm_rmsnorm_f32_kernel"
+      },
+      {
+        "fraction_of_module_kernel_time": 0.04404143397247141,
+        "inclusive_ns": 1086332,
+        "kernel_count": 16,
+        "name": "ullm_aq4_matvec_triple_f32_kernel"
+      },
+      {
+        "fraction_of_module_kernel_time": 0.0357010923802577,
+        "inclusive_ns": 880608,
+        "kernel_count": 48,
+        "name": "ullm_linear_attn_recurrent_f32_kernel"
+      },
+      {
+        "fraction_of_module_kernel_time": 0.0070770306301724765,
+        "inclusive_ns": 174563,
+        "kernel_count": 48,
+        "name": "ullm_linear_attn_qkv_prepare_f32_kernel"
+      },
+      {
+        "fraction_of_module_kernel_time": 0.005059608849963367,
+        "inclusive_ns": 124801,
+        "kernel_count": 48,
+        "name": "ullm_segmented_rmsnorm_silu_mul_f32_kernel"
+      },
+      {
+        "fraction_of_module_kernel_time": 0.0034834398058942026,
+        "inclusive_ns": 85923,
+        "kernel_count": 16,
+        "name": "ullm_paged_decode_attn_split_merge_f32_kernel"
+      },
+      {
+        "fraction_of_module_kernel_time": 0.0023319420601589157,
+        "inclusive_ns": 57520,
+        "kernel_count": 16,
+        "name": "ullm_qwen35_qk_norm_rope_paged_kv_write_f32_kernel"
+      },
+      {
+        "fraction_of_module_kernel_time": 0.0005464982435838349,
+        "inclusive_ns": 13480,
+        "kernel_count": 2,
+        "name": "ullm_top1_f32_kernel"
+      },
+      {
+        "fraction_of_module_kernel_time": 0.0005335249915106282,
+        "inclusive_ns": 13160,
+        "kernel_count": 2,
+        "name": "ullm_bf16_row_f32_kernel"
+      }
+    ]
+  },
+  "schema_version": "ullm.aq4_decode_walltime_accounting.v1",
+  "time_accounting": {
+    "all_gpu_dispatch": {
+      "fraction_of_wall": 0.8763036451661389,
+      "inclusive_ns": 24679216,
+      "per_token_ns": 12339608.0
+    },
+    "kernel_outside_wall": {
+      "definition": "matching per-step wall time minus module-launched GPU kernel inclusive time",
+      "fraction_of_wall": 0.12416079631687962,
+      "inclusive_ns": 3496723,
+      "per_token_ns": 1748361.5
+    },
+    "module_kernel": {
+      "fraction_of_wall": 0.8758392036831204,
+      "inclusive_ns": 24666136,
+      "per_token_ns": 12333068.0
+    },
+    "nonmodule_gpu_dispatch": {
+      "inclusive_ns": 13080,
+      "per_token_ns": 6540.0
+    },
+    "wall": {
+      "per_token_ns": 14081429.5,
+      "total_ns": 28162859
+    }
+  },
+  "wall_clock": {
+    "per_step_ns": [
+      14408900,
+      13753959
+    ],
+    "reported_summary": {
+      "event": "summary",
+      "max_step_seconds": 0.0144089,
+      "mean_step_seconds": 0.0140814295,
+      "mean_tokens_per_second": 71.01551728111127,
+      "measured_count": 2,
+      "min_step_seconds": 0.013753959,
+      "warmup_count": 1
+    },
+    "samples": {
+      "count": 2,
+      "max_ns": 14408900,
+      "mean_ns": 14081429.5,
+      "min_ns": 13753959,
+      "total_ns": 28162859
+    },
+    "source": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-27/aq4-matvec-add-optimization/r9700-window-20260727T061520+0900/launch-invariant/group-specialized/profile.stdout",
+    "source_sha256": "b9568daca49dd89e92aa946e1a1d6c017a207a5c4a0ee90c352fb41b1e43692e"
+  }
+}
