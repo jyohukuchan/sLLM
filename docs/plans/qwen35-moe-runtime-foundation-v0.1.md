@@ -368,3 +368,77 @@ Q output gate、weight residency、R9700実 allocation、service/promotion は�
 layer 39 `down_proj` の max-abs outlier `0.043730080` はこの生成文で個別に raw-passthrough
 ablation をしていないため、生成への因果的影響は **未確認** と記録した。文章品質の崩壊がなかった
 ため、codebook 方針や layer 39 passthrough を変える Phase 3 は実施しなかった。
+
+## BW: `AQ4_0` MoE resident loader wiring（2026-07-27）
+
+### 実装前の停止点と隙間
+
+`ullm-model-config-inspect --package
+/home/homelab1/datapool/ullm/product/qwen35-35b-a3b-aq4_0-g8-moe-v0.2/package`
+で descriptor が Qwen3.5 MoE text として正しく構成されることを確認した。一方で
+`model_config.rs` の `execution_status` は意図的に
+`Qwen35MoeExecutor` を要求し、理由を “top-k routing, gather/scatter,
+grouped expert GEMM, weighted reduction, and shared expert execution are not
+implemented” と返す。descriptor 側を変更せず、loader は
+`resident_descriptor()` を読み、その未実装 executor 判定を通らない独立の
+`Qwen35MoeAq4Runtime` とした。
+
+次の表が、descriptor と BI の MoE C ABI の間にあった実際の隙間である。
+
+| 項目 | 足りなかった結線 | BW での扱い |
+| --- | --- | --- |
+| loader / weight residency | `AQ4_0` rank-3 expert tensor を一括 resident にし、raw BF16 passthrough の router/shared/attention を同じ registry から参照する loader | `WeightRegistry` に 80 個の expert tensor を一度だけ載せ、expert 軸の byte slab を top-k 順へ stage する。`PackageAq4ResidentMatvec` は exact raw BF16 passthrough も resident matvec/row gather として読めるようにした。 |
+| routing / gather-scatter / GEMM | BI の API は存在したが、実モデルの router 出力・selected expert slab・local expert id を結ぶ呼出し側がなかった | post-norm hidden から raw BF16 router で top-8、`moe_gather`、stage/dequant、decode 専用 `moe_decode_gemm`、gated SiLU、down projection、`moe_scatter_weighted` を層ごとに接続した。 |
+| shared expert | routed result への raw shared MLP と sigmoid scalar gate の合流がなかった | 既存 layer の raw shared MLP placeholder を実行し、HF と同じ `routed + sigmoid(shared_gate) * shared` を外部 MLP residual へ渡す。 |
+| hybrid attention / KV state | MoE 専用 attention を新たに書く必要があるように見えた | 書かなかった。既存 Qwen3.5 `AQ4_0` layer の linear convolution/recurrent state と full paged-KV state を、post-attention RMSNorm まで動かす bridge として再利用した。 |
+| mRoPE / Q output gate | MoE loader が full attention の Q+gate projection、Q/K norm、mRoPE を持っていなかった | 既存 full-attention bridge を通す。純 text の三つの mRoPE position row は同じ text position なので scalar bridge を用いる。vision/multimodal position は本 executor の対象外であり未実装である。 |
+
+HF の根拠は、環境に導入済みの Transformers 5.12.1 の
+`transformers/models/qwen3_5_moe/modeling_qwen3_5_moe.py` で確認した。
+linear attention は `value_dim = num_v * head_v_dim` として qkv/conv/output
+の value stream を別に扱う（369--417 行）。full attention は Q projection を
+Q と output gate に分け、Q/K norm・RoPE・KV cache 更新の後に
+`attn_output *= sigmoid(gate)` を行う（683--717 行）。router は FP32
+softmax/top-k/正規化、expert は gate/up/down の SiLU product、shared branch は
+scalar sigmoid gate である（720--814 行）。RMSNorm は `output * (1 + weight)`
+（817--831 行）、mRoPE は interleaved section `[11,11,10]`（167--182 行）である。
+
+### Qwen3.5-9B `AQ4_0` からの再利用と互換性境界
+
+既存の `qwen35_aq4_layer_runtime.rs` を attention の唯一の実装として使った。
+したがって full attention の paged KV、Q output gate、Q/K norm、純 text mRoPE、
+1+weight RMSNorm と、linear attention の causal convolution/recurrent state は
+9B 経路と同じコードである。既存 dense `run_device_step` は変更せず、MoE のために
+`run_device_step_through_post_norm` / `finish_external_mlp` / shared-expert-only
+bridge を追加した。
+
+35B の linear geometry は 9B と同一ではない。35B config は hidden 2048,
+key heads 16, value heads 32, key/value head dim 128、従って attention value
+stream は 4096 要素である。既存 9B（hidden 4096, 16/32 heads, 128 dim）の
+default geometry を保存したまま、MoE bridge だけ descriptor の geometry を渡す
+ようにした。`linear_attention_geometry_keeps_the_9b_and_35b_value_streams_distinct`
+が両方の value stream を区別する回帰単体試験である。
+
+decode は一度に一 decoder layer しか MoE を実行しないため、selected-expert の
+stage/dequant/GEMM/scatter buffer は 40 層に複製しない。35B の top-k 8,
+hidden 2048, expert intermediate 512 から、共有 workspace は
+`116,605,032 B`（111.20 MiB）である。初版の per-layer scratch はその 40 倍
+`4,664,201,280 B`（4.344 GiB）になり、BN ledger の一層分 workspace reserve と
+整合しなかった。resident executor は最大 geometry の一つの workspace を全層で
+直列再利用するよう修正した。この値は要求 allocation byte 数であり、HIP allocator
+overhead を含む実測 telemetry は下記の R9700 実行で確認する。
+
+### loader/source の検証範囲
+
+`tools/architecture_hf_trace.py self-test` は意図的な layer-3 corruption を検出して
+成功した。完全な 35B HF capture は、checkpoint 66.965 GiB に対して shared host の
+available RAM が不足するため起動していない（**未確認**）。代わりに
+`benchmarks/results/2026-07-27/qwen35-moe-loader-wiring-v0.1/
+hf-streaming-source-control.json` で、source BF16 を一層ずつ読み出す bounded
+5-token/40-layer control を実行した。final hidden max-abs error と relative L2 は
+ともに 0、200 token-layer の ordered top-k は全て一致、peak RSS は
+6,017,904,640 B だった。これは loader への HF end-to-end 比較ではなく、
+不足する full capture を避けた source streaming control と明記する。
+
+実機生成、router read-back と VRAM telemetry は、R9700 排他ロックを取得してからこの節に
+追記する。サービスを起動・変更せず、`active.json` にも触れない。
