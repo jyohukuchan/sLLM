@@ -1,0 +1,297 @@
+{
+  "allow_quantized_reference": true,
+  "architectures": [
+    "Qwen3ForCausalLM"
+  ],
+  "compute_dtype": "bfloat16",
+  "config_sha256": "c5d7d0e8ee42088bd535101d13c71d38c20b5c2afd46ee8fdfba351956233793",
+  "device": "cpu",
+  "generated_token_ids": [
+    262
+  ],
+  "initial_token_ids": [
+    198
+  ],
+  "load_and_run_elapsed_seconds": 54.039658137000515,
+  "model_dir": "/home/homelab1/datapool/ai_models/safetensors/Qwen/Qwen3-14B-FP8",
+  "model_type": "qwen3",
+  "producer": "huggingface-cpu-reference",
+  "schema_version": "ullm.architecture_trace.v1",
+  "steps": [
+    {
+      "elapsed_seconds": 1.5333033170027193,
+      "greedy_next_token_id": 262,
+      "id": "step-0000",
+      "input_token_ids": [
+        198
+      ],
+      "tensor_names": [
+        "embedding",
+        "layer-0000",
+        "layer-0001",
+        "layer-0002",
+        "layer-0003",
+        "layer-0004",
+        "layer-0005",
+        "layer-0006",
+        "layer-0007",
+        "layer-0008",
+        "layer-0009",
+        "layer-0010",
+        "layer-0011",
+        "layer-0012",
+        "layer-0013",
+        "layer-0014",
+        "layer-0015",
+        "layer-0016",
+        "layer-0017",
+        "layer-0018",
+        "layer-0019",
+        "layer-0020",
+        "layer-0021",
+        "layer-0022",
+        "layer-0023",
+        "layer-0024",
+        "layer-0025",
+        "layer-0026",
+        "layer-0027",
+        "layer-0028",
+        "layer-0029",
+        "layer-0030",
+        "layer-0031",
+        "layer-0032",
+        "layer-0033",
+        "layer-0034",
+        "layer-0035",
+        "layer-0036",
+        "layer-0037",
+        "layer-0038",
+        "layer-0039",
+        "final-norm",
+        "logits-last"
+      ],
+      "tensor_shapes": {
+        "embedding": [
+          1,
+          1,
+          5120
+        ],
+        "final-norm": [
+          1,
+          1,
+          5120
+        ],
+        "layer-0000": [
+          1,
+          1,
+          5120
+        ],
+        "layer-0001": [
+          1,
+          1,
+          5120
+        ],
+        "layer-0002": [
+          1,
+          1,
+          5120
+        ],
+        "layer-0003": [
+          1,
+          1,
+          5120
+        ],
+        "layer-0004": [
+          1,
+          1,
+          5120
+        ],
+        "layer-0005": [
+          1,
+          1,
+          5120
+        ],
+        "layer-0006": [
+          1,
+          1,
+          5120
+        ],
+        "layer-0007": [
+          1,
+          1,
+          5120
+        ],
+        "layer-0008": [
+          1,
+          1,
+          5120
+        ],
+        "layer-0009": [
+          1,
+          1,
+          5120
+        ],
+        "layer-0010": [
+          1,
+          1,
+          5120
+        ],
+        "layer-0011": [
+          1,
+          1,
+          5120
+        ],
+        "layer-0012": [
+          1,
+          1,
+          5120
+        ],
+        "layer-0013": [
+          1,
+          1,
+          5120
+        ],
+        "layer-0014": [
+          1,
+          1,
+          5120
+        ],
+        "layer-0015": [
+          1,
+          1,
+          5120
+        ],
+        "layer-0016": [
+          1,
+          1,
+          5120
+        ],
+        "layer-0017": [
+          1,
+          1,
+          5120
+        ],
+        "layer-0018": [
+          1,
+          1,
+          5120
+        ],
+        "layer-0019": [
+          1,
+          1,
+          5120
+        ],
+        "layer-0020": [
+          1,
+          1,
+          5120
+        ],
+        "layer-0021": [
+          1,
+          1,
+          5120
+        ],
+        "layer-0022": [
+          1,
+          1,
+          5120
+        ],
+        "layer-0023": [
+          1,
+          1,
+          5120
+        ],
+        "layer-0024": [
+          1,
+          1,
+          5120
+        ],
+        "layer-0025": [
+          1,
+          1,
+          5120
+        ],
+        "layer-0026": [
+          1,
+          1,
+          5120
+        ],
+        "layer-0027": [
+          1,
+          1,
+          5120
+        ],
+        "layer-0028": [
+          1,
+          1,
+          5120
+        ],
+        "layer-0029": [
+          1,
+          1,
+          5120
+        ],
+        "layer-0030": [
+          1,
+          1,
+          5120
+        ],
+        "layer-0031": [
+          1,
+          1,
+          5120
+        ],
+        "layer-0032": [
+          1,
+          1,
+          5120
+        ],
+        "layer-0033": [
+          1,
+          1,
+          5120
+        ],
+        "layer-0034": [
+          1,
+          1,
+          5120
+        ],
+        "layer-0035": [
+          1,
+          1,
+          5120
+        ],
+        "layer-0036": [
+          1,
+          1,
+          5120
+        ],
+        "layer-0037": [
+          1,
+          1,
+          5120
+        ],
+        "layer-0038": [
+          1,
+          1,
+          5120
+        ],
+        "layer-0039": [
+          1,
+          1,
+          5120
+        ],
+        "logits-last": [
+          1,
+          151936
+        ]
+      }
+    }
+  ],
+  "tensors_file": "tensors.npz",
+  "tensors_sha256": "b3702b78a6f8bd3cdc3d6cec9aee7caffae9ab83b1233c65233d648108c636a9",
+  "torch_threads": 8,
+  "torch_version": "2.12.0+cpu",
+  "transformers_version": "5.12.1",
+  "weight_format": "quantized:fp8"
+}

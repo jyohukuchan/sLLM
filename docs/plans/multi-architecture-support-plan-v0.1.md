@@ -299,5 +299,155 @@ layer-level failure localization である。これは重い FP32 corpus を代�
    並行に完遂するのは現実的ではない。残り時間の一部しか architecture work に使えない
    条件では、三対象すべての実装完了を約束する判断材料はない。
 
+## BF: config 駆動ローダー設計と進捗
+
+更新日: 2026-07-26
+
+### 現行 Qwen3 前提の棚卸し
+
+`crates/ullm-engine/src/qwen3_loader.rs` には、config を読まずに Qwen3 block を
+組み立てる前提が **15 個**ある。ここでの個数は単なる型名やエラー文字列ではなく、重み
+名・形状・実行構成を Qwen3 として固定する独立した契約を数えたものである。
+
+| # | 箇所 | 固定されている前提 |
+| ---: | --- | --- |
+| 1 | `Qwen3PackageModelRuntime::{load,load_with_sq_overlay}` | 全 layer が同一 hidden/Q/KV head/head dim/value dim である。 |
+| 2 | 同上 | package の選択 layer を decoder layer とみなし、architecture を確認しない。 |
+| 3 | 同上 | attention scale は `1 / sqrt(head_dim)` である。 |
+| 4 | 同上 | decoder MLP 用 epsilon は `1e-5` である（既存互換値）。 |
+| 5 | `default_rotary_dim` | rotary dim は `head_dim / 4` を偶数化した値である。 |
+| 6 | `qwen3_package_decoder_layer_runtime_from_package_with_sq_overlay` | layer namespace は `model.language_model.layers.{i}` である。 |
+| 7 | 同上 | `input_layernorm → attention → post_attention_layernorm → MLP` の 2 residual-norm block である。 |
+| 8 | 同上 | attention projection は `q_proj/k_proj/v_proj/o_proj` の 4 本である。 |
+| 9 | 同上 | Q/K RMSNorm (`q_norm/k_norm`) が必ず存在する。 |
+| 10 | 同上 | input/Q/K/post norm は Qwen3 型 RMSNorm weight として materialize する。 |
+| 11 | 同上 | MLP は `gate_proj/up_proj/down_proj` の dense gated MLP である。 |
+| 12 | `qwen3_self_attn_runtime_weights_from_package_with_sq_overlay` | Q/K head dim は norm length から得る。 |
+| 13 | 同上 | KV head 数は K rows/head dim、value dim は V rows/KV head から得る。 |
+| 14 | 同上と `qwen3_self_attn_runtime_shape` | Q projection は plain Qwen3 又は Qwen3.5 output-gate の 2-D layout に限る。 |
+| 15 | `Qwen3PackageModelDecodePlan` と `decoder.rs` 呼出し | paged KV は全 layer 共通の full causal-attention layout で、local/linear/MoE state を持たない。 |
+
+隣接する Qwen3-only 実装もある。`qwen3_names.rs` は `model.` と
+`model.language_model.` の namespace alias に限り、`sq8_embedding_runtime.rs` と
+`sq8_model_head_runtime.rs` は Qwen3-14B の vocab/hidden/tensor 名を固定する。
+従って BF ではこれらの実行器を「汎用 executor」とは呼ばず、まず loader の入口を
+architecture contract で閉じる。
+
+### 読み取る config field（実 config に基づく）
+
+loader は top-level の `architectures` を必須かつ単一要素として読み、wrapper model では
+`text_config` を text decoder contract として読む。今回読み取る field は以下に限定する。
+
+| architecture | 必須 field |
+| --- | --- |
+| `Qwen3ForCausalLM` | `model_type`, `hidden_size`, `num_hidden_layers`, `num_attention_heads`, `num_key_value_heads`, `head_dim`, `intermediate_size`, `hidden_act`, `rms_norm_eps`, `rope_theta`, `vocab_size`, `tie_word_embeddings`, `attention_bias`, `attention_dropout` |
+| `Gemma4ForConditionalGeneration` | top-level `model_type` / `text_config`、text の `model_type`, width/layer/head/KV/head dim/intermediate/norm/activation/vocab/tied fields、`layer_types`, `sliding_window`, `rope_parameters`, `global_head_dim`, `num_kv_shared_layers`, `use_double_wide_mlp`, `hidden_size_per_layer_input`, `final_logit_softcapping` |
+| `Qwen3_5ForConditionalGeneration` | top-level `model_type` / `text_config`、text の width/layer/head/KV/head dim/intermediate/norm/activation/vocab fields、`layer_types`, `full_attention_interval`, `attn_output_gate`, linear-attention width/head/conv fields、`rope_parameters.{mrope_interleaved,mrope_section,rope_theta,partial_rotary_factor}`、`mlp_only_layers` |
+| `Qwen3_5MoeForConditionalGeneration` | Qwen3.5 dense の共通 field に加え、`num_experts`, `num_experts_per_tok`, `moe_intermediate_size`, `shared_expert_intermediate_size`, `router_aux_loss_coef` |
+
+実 config に無い値を既定値として発明しない。たとえば Qwen3.5 text config には
+`tie_word_embeddings` が無く、wrapper top-level の `false` を読む。Gemma4 の full/local
+RoPE は `rope_parameters` の layer kind ごとの object から読み、root の値へ平坦化しない。
+
+### 実装境界
+
+1. `model_config` module が package manifest の `source_model_dir/config.json`（又は明示的な
+   model directory）から config を読み、single-architecture contract に解決する。source
+   model directory/config が無い、JSON が壊れている、architecture が複数/未知、観測済み
+   architecture の必須 field が欠ける場合は fail-closed とする。
+2. 解決結果は `Qwen3`、`Gemma4Text`、`Qwen35DenseText`、`Qwen35MoeText` の明示的 enum
+   で表す。layer type、RoPE、norm convention、MLP/MoE/embedding/head の差は enum 内の
+   descriptor として保持する。文字列ベースの後段 switch は作らない。
+3. 既存 `Qwen3PackageModelRuntime` は Qwen3 contract だけを受け入れ、config の幅・head
+   数・layer count・activation・norm/embedding contract と package shape を照合する。
+   既存 Qwen3 の runtime epsilon/rotary default は出力回帰を避けるため互換値のままとし、
+   config の宣言値は contract として露出・検証する。実行セマンティクスを黙って変更しない。
+4. 既存 AQ4_0 `Qwen35Aq4ModelRuntime` は Qwen3.5 dense contract と package layer pattern
+   を照合する。これは新しい SQ8_0 executor を意味しない。
+5. Gemma4 text と Qwen3.5 MoE は config/layer descriptor まで作るが、構成後にそれぞれ
+   `Gemma4TextExecutor`、`Qwen35MoeExecutor` 未実装として明示的に停止する。MoE は
+   grouped GEMM/routing/gather-scatter が無いため、dense executor にフォールバックしない。
+
+この境界では kernel、SQ8_0 format、package conversion、multimodal processor を変更しない。
+特に config が Gemma4/MoE だからといって Qwen3 executor で重みを読む経路は一切作らない。
+
 この順序は「どれを入れるか」を決定するものではない。残り時間と発表で必要な demo 範囲を
 踏まえて、人間が scope を選ぶための事実とリスクの整理である。
+
+### 実装・検証結果（2026-07-26）
+
+`crates/ullm-engine/src/model_config.rs` を追加し、package manifest の
+`source_model_dir/config.json` から source config を SHA-256 とともに読み込むようにした。
+`architectures` は単一要素でなければならず、未知値、source model directory の欠落、必須
+field の欠落、未対応の Qwen3 `rope_scaling` はすべて fail-closed になる。既知の四系統は
+`Qwen3` / `Gemma4Text` / `Qwen35DenseText` / `Qwen35MoeText` の型付き contract に解決する。
+文字列を後段の既存 Qwen3 executor へ黙って流す fallback はない。
+
+- Qwen3 package loader と Qwen3-14B `SQ8_0` serving/generation loader は Qwen3 contract
+  と package/static geometry を device allocation より前に照合する。従来の Qwen3 runtime
+  rotary dim と MLP epsilon は出力回帰を避けるため変更していない。
+- Qwen3.5-9B `AQ4_0` の `Qwen35Aq4ModelRuntime` は Qwen3.5 dense config と package の
+  embedding shape / 32 layer の linear/full pattern を load 前に照合する。演算・量子化・
+  sampling path は変更していない。
+- Gemma4 E2B と Qwen3.5-35B-A3B MoE は実 config を完全に descriptor へ組み立てるが、
+  それぞれ `Gemma4TextExecutor` / `Qwen35MoeExecutor` が未実装として明示的に停止する。
+  Gemma は local/full mixed attention、追加 norm、PLE、tied head、soft-cap が、MoE は
+  routing / gather-scatter / grouped GEMM / weighted reduction / shared expert が停止理由である。
+
+実 package/config を使った inspect の結果は次の通りだった。
+
+| package / source config | architecture | 結果 |
+| --- | --- | --- |
+| Qwen3-14B `SQ8_0` | `Qwen3ForCausalLM`, config SHA `c5d7d0e8…233793` | existing Qwen3 full-attention executor を許可。5120 / 40 / 40Q / 8KV / 128 / 151936 を再現。 |
+| Qwen3.5-9B `AQ4_0` | `Qwen3_5ForConditionalGeneration`, config SHA `d0883072…932b05` | existing AQ4_0 text executor を許可。32 層 `[linear,linear,linear,full] * 8`、Q gate、mRoPE、`1 + weight` norm を再現。 |
+| Gemma4 E2B | `Gemma4ForConditionalGeneration`, config SHA `e5faef0d…ae73b8` | descriptor を組立て後、`Gemma4TextExecutor` 未実装で exit 2。 |
+| Qwen3.5-35B-A3B MoE | `Qwen3_5MoeForConditionalGeneration`, config SHA `5e4d7f74…bc7944` | descriptor を組立て後、`Qwen35MoeExecutor` 未実装で exit 2。 |
+
+unit / loader test は `model_config` 7件、`qwen3_loader` 9件、SQ8 trace writer 2件が
+pass した。前者には unknown architecture rejection、source model directory 欠落 rejection、
+Qwen3 rope-scaling rejection、Gemma/MoE の explicit unimplemented status を含む。
+
+#### 既存モデルの実行回帰
+
+- Qwen3.5-9B `AQ4_0` は `HIP_VISIBLE_DEVICES=1` の isolated R9700 上で既存
+  `ullm-aq4-decode-step-profile 2 --warmup 0 --measured 1` を実行した。config contract を
+  model load 前に通過し、M=2 prefill + M=1 decode は成功、次 token は **491**（local
+  tokenizer で `2 produce` → ` new`）、elapsed 13.429 ms / 74.466 tok/s だった。
+- Qwen3-14B `SQ8_0` は同じ R9700（HIP `gfx1201`、runtime device ID 0）で
+  `ullm-sq8-architecture-trace` を実行した。config contract を通過し、token 198 の 1-step
+  serving forward を正常に完了した。隔離を確認してから artifact を読む順序に直したため、
+  `HIP_VISIBLE_DEVICES` を指定しない誤実行は重量 payload の展開前に失敗する。
+
+#### HF trace との照合
+
+`tools/architecture_hf_trace.py capture-hf` で local Qwen3-14B-FP8 を CPU BF16 reference として
+token 198 / 1 step で採取し、43 tensor（embedding、40 layer、final norm、logits）を得た。
+HF と SQ8_0 candidate は config SHA、input、shape、greedy next token **262** が一致した。
+candidate は production/campaign/corpus を使わない diagnostic-only writer から採取し、GPU
+load + one step は 945.2 秒だった。
+
+strict compare（`atol=5e-5`, `rtol=5e-4`, `l2_relative_max=1e-4`）は **fail** だった。
+embedding は bit-exact だが、SQ8_0 candidate と FP8/BF16 reference の差は最初の因果的 decoder
+境界 `step-0000__layer-0000` から現れる（relative L2 `0.008560965`、max abs `0.05371094`、
+4904/5120 element）。最終 norm は L2 `0.01470678`、logits は L2 `0.00815878`、
+144625/151936 element が tolerance 外で、42/43 tensor が strict tolerance 外だった。
+compare report の `first_failure` は lexical sort の `final-norm` だが、layer number 順で
+局在化した最初の実行境界は layer 0 である。
+
+これは strict numerical equality の達成ではない。現行 comparison は SQ8_0 と FP8/BF16
+checkpoint を比較しており、unquantized uLLM Qwen3 diagnostic path は未実装のため、この差を
+量子化誤差と既存 executor 差へさらに分解することは今回確認できなかった。一方、config
+駆動化で新規に追加した経路は load-time validation のみであり、既存の数学演算を変更して
+いない。top-1 が同一であることはこの一入力での回帰確認であって、strict tensor match の
+代替合格条件ではない。
+
+保存した artifact は
+`benchmarks/results/2026-07-26/config-driven-loader-v0.1/` にある。ここには HF trace、SQ8
+candidate trace、comparison report を残した（FP32 corpus / numerical gate / campaign は使わない）。
+
+### 工数見積りへの影響
+
+Gemma4 E2B **48--72 h**、Qwen3.5 MoE **72--120 h** は据え置く。今回取り除けたのは
+architecture/config dispatch の共通前提だけであり、Gemma の layer composition と MoE の新規
+kernel/routing primitive の実装面積は変わらない。特に MoE の 3-D expert payload、top-8 routing、
+grouped GEMM、shared expert は config descriptor を持てても実行できないままである。
