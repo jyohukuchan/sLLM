@@ -3965,6 +3965,89 @@ mod tests {
     }
 
     #[test]
+    fn typed_fp8_paged_cache_spans_full_4096_token_context_cpu() {
+        // This intentionally uses the production page count and block size,
+        // with a non-identity permutation, to exercise all 256 pages and all
+        // per-token/head scale slots.  It is a storage/read correctness test,
+        // not a substitute for long-context generated-text review.
+        let shape = PagedDecodeShape {
+            block_size: 16,
+            cache_blocks: 256,
+            q_heads: 8,
+            kv_heads: 4,
+            head_dim: 16,
+            value_dim: 16,
+        };
+        let cache_len = shape.physical_tokens().unwrap();
+        let block_table = (0..shape.cache_blocks)
+            .map(|logical_block| ((logical_block * 73) % shape.cache_blocks) as u32)
+            .collect::<Vec<_>>();
+        let mut context = RuntimeContext::create(0).unwrap();
+        let mut stream = context.create_stream().unwrap();
+        let mut state = PagedDecodeState::new_with_kv_cache_dtypes(
+            &mut context,
+            &mut stream,
+            shape,
+            block_table.clone(),
+            KvCacheDtypes::uniform(KvCacheDtype::Fp8E4M3Fn),
+        )
+        .unwrap();
+
+        for token in 0..cache_len {
+            let k = (0..shape.k_token_elements().unwrap())
+                .map(|element| {
+                    let magnitude = 0.125 + ((token * 31 + element * 17) % 1021) as f32 / 4.0;
+                    if (token + element) % 2 == 0 {
+                        magnitude
+                    } else {
+                        -magnitude
+                    }
+                })
+                .collect::<Vec<_>>();
+            let v = (0..shape.v_token_elements().unwrap())
+                .map(|element| {
+                    let magnitude = 0.25 + ((token * 19 + element * 29) % 769) as f32 / 5.0;
+                    if (token * 3 + element) % 2 == 0 {
+                        magnitude
+                    } else {
+                        -magnitude
+                    }
+                })
+                .collect::<Vec<_>>();
+            state.write_token(&mut stream, &k, &v).unwrap();
+        }
+        assert_eq!(state.written_len(), cache_len);
+
+        let logical_prefix = state
+            .read_written_cache_prefix_to_host(&mut stream)
+            .unwrap();
+        assert_eq!(logical_prefix.k.len(), cache_len * shape.k_token_elements().unwrap());
+        assert_eq!(logical_prefix.v.len(), cache_len * shape.v_token_elements().unwrap());
+        assert!(logical_prefix.k.iter().all(|value| value.is_finite()));
+        assert!(logical_prefix.v.iter().all(|value| value.is_finite()));
+
+        let q = (0..shape.q_elements().unwrap())
+            .map(|element| (element as f32 - 43.0) / 19.0)
+            .collect::<Vec<_>>();
+        let softmax_scale = 1.0 / (shape.head_dim as f32).sqrt();
+        let output = state
+            .decode_written(&mut stream, &q, softmax_scale)
+            .unwrap();
+        assert!(output.iter().all(|value| value.is_finite()));
+        let physical_cache = state.read_cache_to_host(&mut stream).unwrap();
+        let expected = expected_paged_decode_attn(
+            &q,
+            &physical_cache.k,
+            &physical_cache.v,
+            &block_table,
+            cache_len,
+            shape,
+            softmax_scale,
+        );
+        assert_f32s_close(&output, &expected, 1e-4);
+    }
+
+    #[test]
     fn typed_paged_kv_write_rejects_nonfinite_token_without_partial_mutation_cpu() {
         let shape = PagedDecodeShape {
             block_size: 2,
