@@ -1,0 +1,15 @@
+{
+  "schema_version": "ullm.sq8_0.r9700.paged_decode_attention_probe.v0.1",
+  "mode": "experimental-wave-scalar-softmax",
+  "device": {"runtime_device":1,"backend":"hip","gcn_arch_name":"gfx1201"},
+  "shape": {"cache_len":1036,"block_size":16,"cache_blocks":256,"q_heads":40,"kv_heads":8,"head_dim":128,"value_dim":128,"source_tile":128,"split_count":9},
+  "page_table": "logical block i maps to (13*i+7) mod 256; unique for this probe capacity",
+  "cpu_reference": "F32 two-pass softmax reference; compares are diagnostic rather than bitwise GPU requirements",
+  "direct_vs_cpu": {"max_abs":0.000000096858,"max_rel":0.013206519148,"max_abs_index":3440,"bit_mismatches":4823,"non_finite":0},
+  "split_vs_cpu": {"max_abs":0.000000100583,"max_rel":0.005173503377,"max_abs_index":1964,"bit_mismatches":4918,"non_finite":0},
+  "split_vs_direct": {"max_abs":0.000000108033,"max_rel":0.008140523754,"max_abs_index":1964,"bit_mismatches":4934,"non_finite":0},
+  "direct_output": {"bytes":20480,"fnv1a64":"e7ddf1d5c0230f45"},
+  "timing_scope": "host API call plus stream synchronize per M=1 attention invocation; excludes model layers and profiler",
+  "direct_timing": {"mean_ms":0.678808700000,"min_ms":0.653661000000,"max_ms":0.841024000000},
+  "split_timing": {"mean_ms":0.224504900000,"min_ms":0.220013000000,"max_ms":0.241624000000}
+}

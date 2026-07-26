@@ -792,3 +792,73 @@ its measured geometry and timing.
 4. An exact-state merge that reproduces the direct recurrence would change this
    conclusion, but no such mechanism was identified in llama.cpp and none is
    established here. It remains research, not an implementation task.
+
+
+## SQ8_0 decode attention root-cause evidence — 2026-07-26
+
+### Direct launch is substantially under-supplied
+
+The production `ullm_paged_decode_attn_f32_kernel` direct fast path was
+measured on isolated R9700 (`gfx1201`) at the actual Qwen3.5 shape: 40 Q
+heads, 8 KV heads, head/value dimension 128, C=1,036. The launcher and raw
+rocprof dispatch agree on global `(10240, 1, 1)` and workgroup `(256, 1, 1)`:
+40 workgroups/layer and 320 wave32s/layer. Against 64 CUs x 32 waves/CU this
+is a 15.625% queued-wave supply proxy, not achieved occupancy.
+
+The direct body gives one workgroup a whole Q-head sequence: it serially
+resolves the page table and processes all 1,036 source positions. Each score
+reduction has two CTA barriers in the normal warp reduction, yielding 2,072
+CTA barriers/workgroup/layer. K and V lanes are contiguous and coalesced inside
+a page; page changes occur at the block boundary rather than as a per-lane
+scatter. The same KV head is semantically reread for each of five GQA Q heads.
+
+The existing llama.cpp capture is the relevant structural contrast: its vector
+FATTN main dispatch has 400 workgroups/layer (1,600 waves; 78.125% supply
+proxy), P=10 KV partials, followed by 40 combine workgroups/layer. This is
+strong evidence for insufficient uLLM workgroup supply and serial scan cost,
+but not a format-free comparison because llama.cpp uses F16 continuous KV
+whereas this uLLM route uses F32 paged KV.
+
+The C=1,036 unique KV footprint is 8,486,912 B. At a 640 GB/s reference roof
+it takes 13.2608 us; the observed 769.3306 us direct dispatch is 58.0154x
+larger. Counting the five GQA semantic re-reads gives 42,434,560 B and a
+66.304 us roof, still 11.6031x below observed. Neither byte number is a
+physical HBM observation. The root rocprof PMCs (`GL2C_EA_RDREQ_*`,
+`SQ_INSTS_VALU`, and `SQ_WAVES`) are unusable here: GL2/VALU were zero and
+SQ_WAVES contradicted the known geometry even under root. Thus achieved
+occupancy, physical bytes, cache hit rate, and physical bandwidth remain
+**unconfirmed**.
+
+The old 640-call trace gives 30.773224 ms attention/token across 40 layers.
+With the valid 15.294955751 tok/s baseline, this is 47.0675% of wall time. It
+is 40.2933x the recorded llama.cpp attention total of 0.763730 ms/token; full
+model throughput is a separate roughly 1.992x comparison (30.4680750229 vs
+15.294955751 tok/s).
+
+### Split diagnosis and safe implementation status
+
+An isolated minimal paged-KV probe established that a single 128-token tile is
+bit-identical to direct. With the same non-contiguous unique page table,
+C=130/P=2 differs by max abs 2.9802e-8 (2,250 / 5,120 F32 bits), and
+C=1,036/P=9 differs by 1.08033e-7 (4,934 / 5,120 bits), with no non-finite
+values. Inspection and these cases rule out the checked initialization,
+tail/empty-tile, causal/page-boundary, and obvious merge-scale fault classes;
+they do not prove no latent bug at every shape. The best supported explanation
+is finite-FP partial-softmax reassociation amplified by SQ8_0 sequential
+activation quantization. Existing full-model hard top-1 regressions keep
+multi-tile split in its direct-fallback containment.
+
+An opt-in direct-order experiment,
+`ULLM_EXPERIMENTAL_PAGED_DECODE_WAVE_SCALAR_SOFTMAX=1`, makes one lane per
+V-owning wave update duplicated scalar softmax state and broadcasts it locally.
+It preserves token order and produced byte-identical C=1,036 output, but is
+disabled by default. Its only collected host-call-plus-synchronize probe timing
+did not improve (0.678809 vs 0.666713 ms) and is not a model benchmark.
+
+An attempted full-model direct/candidate comparison is retained but excluded:
+`ullm-openai.service` restarted at 20:19:35 JST during the measurements. Its
+14.685730 / 14.959300 tok/s values are contaminated and must not be compared.
+No valid post-change full-model tok/s, promotion, or default change exists.
+The next action is one coordinated, fixed-HEAD isolated R9700 window that
+first records valid output quality and then the full-model throughput; no new
+split default is justified before that gate.
