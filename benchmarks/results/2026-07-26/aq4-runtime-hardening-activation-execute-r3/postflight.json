@@ -1,0 +1,58 @@
+{
+  "schema_version": "ullm.aq4_runtime_hardening_activation_execute_postflight.v1",
+  "captured_at": "2026-07-26T12:37:34+09:00",
+  "active_manifest": {
+    "path": "/etc/ullm/served-models/active.json",
+    "sha256": "c57a2b6c5827b8ddd102560b3f5efd879711705cf4d8a36f4d7872821d05fca4",
+    "format_id": "AQ4_0",
+    "model_id": "ullm-qwen3.5-9b-aq4"
+  },
+  "protected_bindings": {
+    "promotion_source_commit": "0cd760568e197e1adb4c4df3d6149591a912f709",
+    "worker_binary": "/opt/ullm/aq4-runtime-hardening-v0.1/releases/aq4-fidelity-f1a3cf4c/ullm-aq4-worker",
+    "product_root": "/opt/ullm/aq4-runtime-hardening-v0.1/products/qwen35-9b-aq4-package-a790a033f57d",
+    "tokenizer_root": "/opt/ullm/aq4-runtime-hardening-v0.1/tokenizers/qwen35-9b-qwen2tokenizer-a4aee8afcf2e",
+    "promotion_receipt": "/opt/ullm/aq4-runtime-hardening-v0.1/promotion/promotion-receipt.json"
+  },
+  "worker": {
+    "sha256_before": "1f93f21543af777adb0f00cc35d6857d0af432657ed74e7723636ace9dfca69b",
+    "sha256_after": "1f93f21543af777adb0f00cc35d6857d0af432657ed74e7723636ace9dfca69b",
+    "bytes": 4223912,
+    "owner": "root:root",
+    "mode": "0555",
+    "unchanged": true
+  },
+  "guard_contract": {
+    "required_environment_count": 30,
+    "required_environment_unique_count": 30,
+    "p3_only_intersection": []
+  },
+  "rollback_copy": {
+    "path": "/opt/ullm/aq4-runtime-hardening-v0.1/activation/rollback-active-5d015a013dcf70ce.json",
+    "sha256": "5d015a013dcf70cea13dd9ed569d89ed2a025a17e14a6192ca18ee4cdadd1c8a",
+    "still_preserved": true,
+    "different_from_new_active_bytes": true
+  },
+  "services": {
+    "ullm_openai": {
+      "active_state": "active",
+      "sub_state": "running",
+      "main_pid": 3757204,
+      "result": "success",
+      "automatic_restart_count": 0,
+      "start_limit_burst": 3,
+      "start_limit_interval": "15min"
+    },
+    "llama_qwen35_udq4": {
+      "active_state": "inactive",
+      "unit_file_state": "disabled"
+    }
+  },
+  "gpu_observation_after_activation_and_inference": {
+    "amd_smi_card": 2,
+    "vram_total_bytes": 34208743424,
+    "vram_used_bytes": 7426916352,
+    "vram_free_bytes": 26781827072,
+    "result": "no candidate-worker VRAM load failure observed"
+  }
+}

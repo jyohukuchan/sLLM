@@ -446,6 +446,18 @@ This is preparation only, not activation authority. It creates a fresh source se
 
 The human gate remains unchanged: do not invoke <code>--execute</code>, swap <code>active.json</code>, or treat this ready report as execution approval. A human must separately approve the final plan SHA-256 and a service-maintenance window immediately before any activation.
 
+### Phase 6 final activation execution record — readiness r3 (2026-07-26)
+
+The separately recorded human approval for the r3 plan was satisfied on 2026-07-26 JST. The locked command was invoked exactly once with plan SHA-256 <code>0e12fe09ad4d00578ee74f1bcc730a6b401e63a6fc91bb1d237346251e8f81f8</code> and literal confirmation <code>ACTIVATE AQ4_RUNTIME_HARDENING</code>. It published root-owned immutable intent <code>268ceb1b4fa78d80ffd2b9c7e191cea6fff5aa4e898a5c04b079b5183d5c1de1</code> and outcome <code>b022f91aa6118f379a79e59a6d35e30ba90b348511bdc789cfdd1c8c97f2d340</code> below <code>/opt/ullm/aq4-runtime-hardening-v0.1/activation-v0.2-r3/</code>. The outcome is <code>status: activated</code>; candidate reconciliation and candidate live proof passed, no failure stage was recorded, and no rollback was attempted.
+
+Immediately before the swap, a fresh default preflight again returned <code>ready: true</code>, no blockers, and <code>production_activation_performed: false</code>. The old active bytes and immutable rollback copy matched exactly at <code>5d015a013dcf70cea13dd9ed569d89ed2a025a17e14a6192ca18ee4cdadd1c8a</code>; the frozen candidate was <code>c57a2b6c5827b8ddd102560b3f5efd879711705cf4d8a36f4d7872821d05fca4</code>. The 4,223,912-byte protected worker remained SHA-256 <code>1f93f21543af777adb0f00cc35d6857d0af432657ed74e7723636ace9dfca69b</code> and was byte-identical to the prior live worker. The candidate preserved exactly 30 unique guard flags in live order and had an empty intersection with all six P3-only flags.
+
+The r3 candidate live proof is immutable at <code>proofs/candidate-live-proof.json</code> with SHA-256 <code>a5f623e238e55f7829818bea96c861a77b2305d6e2f58d3948f2bf910da7fbed</code>. It passed after two stable observations in 1,139 ms: active manifest, worker command, and worker environment all matched the candidate; worker PID/PPID/starttime/executable hash were recorded; gateway health/ready/models and OpenWebUI health/models each returned 200 with the expected model ID. One post-proof OpenAI-compatible non-stream chat completion also returned HTTP 200, the expected model, a nonempty assistant response, and <code>finish_reason: stop</code>. The response body and credentials were not recorded.
+
+There was one intentional <code>ullm-openai.service</code> stop/start pair and zero automatic restarts; final state is active/running with <code>Result=success</code>. <code>llama-qwen35-udq4.service</code> remained inactive/disabled. The new live <code>active.json</code> SHA-256 is the candidate SHA above; its worker, product, tokenizer, promotion receipt, and source commit bind only to protected AQ4 paths. The old rollback bytes remain preserved at <code>activation/rollback-active-5d015a013dcf70ce.json</code>.
+
+The strengthened isolated-worker receipt was revalidated via the locked wrapper before execution. Because it is a reusable no-replace immutable receipt, that revalidation intentionally did not launch a second worker; its recorded actual candidate launch passed on <code>gfx1201</code> in 3,195 ms and exited by deliberate SIGTERM. The detailed execution record is <code>benchmarks/results/2026-07-26/aq4-runtime-hardening-activation-execute-r3/</code>.
+
 ### Phase 7 — Fresh AQ4 campaign and complete bundle v1
 
 Purpose: replace old path-bound post-promotion evidence only after the hardened AQ4 manifest is live and proved.
@@ -514,6 +526,5 @@ GPU or service window: GPU plus running gateway for the generic campaign; fronte
 ## Next Actions
 
 1. Do not invoke activation, rollback, or recovery again from plan <code>72140ff475b29e28f4ab6685459a344939bc54fcd12aa4f0b7c44cd7a8753194</code>. Preserve its immutable outcome/audit as incident evidence.
-2. Treat plan <code>0e12fe09ad4d00578ee74f1bcc730a6b401e63a6fc91bb1d237346251e8f81f8</code> as prepared but unexecuted. Its <code>ready: true</code> report and isolated-worker receipt are not permission to invoke <code>--execute</code>.
-3. Before any future human-gated attempt, repeat the plan-bound read-only preflight and inspect active-manifest, unit, environment, worker, product, tokenizer, source, credential seals, service state, and the isolated-worker receipt. If any bound input (including a credential seal) has drifted, stop and prepare another reviewed plan instead of adapting this one in place.
-4. Only a new explicit approval, a service-maintenance window, and a successful candidate live proof can unlock Phase 7. Until then, do not collect or publish post-hardening campaign/browser/bundle evidence.
+2. Plan <code>0e12fe09ad4d00578ee74f1bcc730a6b401e63a6fc91bb1d237346251e8f81f8</code> is consumed successfully: its immutable outcome is <code>activated</code>. Do not invoke activation again from it, and do not invoke rollback or recovery without separate explicit authorization.
+3. The next functional step is Phase 7 fresh campaign/browser/bundle v1 evidence against the hardened active manifest. It is outside this activation approval; schedule it as a separate task with its own GPU/front-end authority and avoid reusing old path-bound evidence.
