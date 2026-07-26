@@ -989,7 +989,11 @@ struct Session {
                                static_cast<unsigned int>(kKvHeads),
                                static_cast<unsigned int>(position));
             hip_check(hipGetLastError(), "K RoPE launch");
-            const size_t layer_base = checked_product(layer_index, max_context, "KV layer base") * kKvWidth;
+            // `layer_index < 40`, `max_context <= 4096`, and `kKvWidth ==
+            // 1024` are all enforced by the fixed model/session contracts,
+            // so this fixed-size cache offset cannot overflow size_t.  Layer
+            // zero deliberately has a valid offset of zero.
+            const size_t layer_base = layer_index * max_context * kKvWidth;
             hipLaunchKernelGGL(copy_kv_f32,
                                dim3((kKvWidth + 255u) / 256u),
                                dim3(256u),

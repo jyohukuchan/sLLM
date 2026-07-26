@@ -84,6 +84,12 @@ struct TeacherSummary {
 
 fn main() -> Result<(), String> {
     let options = parse_options()?;
+    // Capture the executable identity before any long artifact upload or GPU
+    // work.  A concurrent Cargo rebuild can atomically replace the on-disk
+    // release path while this process continues from the old inode.
+    let executable = std::env::current_exe()
+        .map_err(|error| format!("failed to resolve current executable: {error}"))?;
+    let executable_sha256 = sha256_file(&executable)?;
     if options.output.exists() {
         return Err(format!(
             "output path already exists; refusing to clobber {}",
@@ -174,8 +180,6 @@ fn main() -> Result<(), String> {
         None
     };
 
-    let executable = std::env::current_exe()
-        .map_err(|error| format!("failed to resolve current executable: {error}"))?;
     let teacher_forcing_run_sha256 = options
         .teacher_forcing_run
         .as_ref()
@@ -187,7 +191,7 @@ fn main() -> Result<(), String> {
         execution_backend: "standalone_gfx1201_hipblas_f32_control",
         seed: 0,
         executable: executable.display().to_string(),
-        executable_sha256: sha256_file(&executable)?,
+        executable_sha256,
         hip_visible_devices: std::env::var("HIP_VISIBLE_DEVICES").ok(),
         ullm_hip_visible_devices: std::env::var("ULLM_HIP_VISIBLE_DEVICES").ok(),
         identity,
