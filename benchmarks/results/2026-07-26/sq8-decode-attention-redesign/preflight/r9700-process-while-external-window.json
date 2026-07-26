@@ -1,0 +1,22 @@
+[
+    {
+        "gpu": 2,
+        "process_list": [
+            {
+                "process_info": {
+                    "name": "/opt/ullm/aq4-runtime-hardening-v0.1/releases/aq4-fidelity-f1a3cf4c/ullm-aq4-worker",
+                    "pid": 2914875,
+                    "mem_usage": {
+                        "value": 7351832576,
+                        "unit": "B"
+                    },
+                    "cu_occupancy": "N/A",
+                    "evicted_time": {
+                        "value": 628,
+                        "unit": "ms"
+                    }
+                }
+            }
+        ]
+    }
+]

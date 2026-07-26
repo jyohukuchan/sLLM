@@ -793,6 +793,67 @@ its measured geometry and timing.
    conclusion, but no such mechanism was identified in llama.cpp and none is
    established here. It remains research, not an implementation task.
 
+## SQ8_0 decode-attention redesign — 2026-07-26
+
+### 旧 split の矛盾を解消した
+
+`1.236512x` の旧 full-model 値は C=513--519 / tile 128、すなわち 5 tile と
+200 partial workgroup の測定だった。C=1,036 / 9 tile の raw trace は
+`92160 / 256 = 360` partial workgroup を実際に起動しており、tile を一つの
+workgroup 内で逐次処理したわけではない。旧 C≈516 の attention を同じ
+unprofiled probe の 2.82103x で短縮する Amdahl 再計算は 1.227x となり、観測
+1.236512x に近い。短い context の attention 以外の残差が主因である。
+
+generic split は source row ごとの 2 CTA barrier も保持していた。separate
+merge dispatch の存在は trace で確認したが、profiler range 時間を throughput
+に使わず、merge が支配したとは結論していない。物理 HBM byte、L2 局所性、
+achieved occupancy、launch overhead の寄与は gfx1201 PMC が有効でないため
+未確認のままである。
+
+### 実装と個別効果
+
+実験経路は `b65e63c3` までの 3 commit で追加した。tile 20 generic split、
+5 Q head が同じ KV head を共有する GQA grouped split、そして double-buffer
+で source-row barrier を 2 から 1 へ減らす pipeline 版である。いずれも
+環境変数 opt-in であり、既定 direct path は変更していない。
+
+R9700/gfx1201 の isolated full-model M=1 decode（prompt 1,024、16 decode
+step × 5 repeat、load/prefill/warmup 除外）では次を得た。
+
+| step | full-model tok/s | 直前との比 | 解釈 |
+|---|---:|---:|---|
+| direct control | 15.228021012 | — | 有効既存 baseline 15.294955751 と -0.438% |
+| generic tile 128 | 22.412990396 | 1.471826x | KV split |
+| generic tile 20 | 23.872854841 | 1.065135x | より細かい KV split |
+| GQA grouped tile 20 | **27.378731052** | **1.146856x** | 最速。semantic K+V 42,434,560 B → 8,486,912 B |
+| grouped+pipelined tile 20 | 27.253516733 | 0.995427x | attention-only では速いが full model では採用しない |
+
+最速 grouped は既存 baseline の 1.790050x、llama.cpp 30.468075023 tok/s の
+89.8604% である。attention-only diagnostic は generic tile128→20 が 1.283039x、
+GQA grouped がさらに 2.138791x、pipeline barrier 削減がさらに 1.080422x
+だったが、これを full-model throughput としては扱わない。max abs
+split-vs-direct は最大 1.11759e-7、non-finite は全変種で 0 だった。
+
+### 数値、昇格、次段
+
+lightweight promotion policy に従い top-1/logit exact を gate にしていない。
+しかし current generic served-model manifest は `required_environment` に
+boolean 名しか表せず、必須の `ULLM_EXPERIMENTAL_SQ8_PAGED_DECODE_SPLIT_TILE=20`
+を表現できない。そのため redesign を実際の service candidate として起動できず、
+10 prompt の文章品質比較、generic promotion、rollback は未実施である。これは
+品質 failure ではなく、品質が未確認であるため昇格しないという記録である。
+
+F16/BF16 KV は semantic K+V byte を半減する余地がある。既存 direct attention
+30.773224 ms/token が完全に半減するという帯域上限だけなら 20.002232 tok/s
+（baseline 比 1.307767x）となるが、physical traffic と conversion cost は
+未測定であり、redesign の実効予測には使わない。
+
+証跡は `benchmarks/results/2026-07-26/sq8-decode-attention-redesign/` に保存した。
+2 回の計測窓のうち第 1 窓は汚染として無効化し、第 2 窓だけを有効とした。最後に
+verified start-limit から `reset-failed` と 1 回の start で
+`ullm-openai.service` を active/running に復旧し、`llama-qwen35-udq4.service`
+は inactive/disabled のまま維持した。
+
 
 ## SQ8_0 decode attention root-cause evidence — 2026-07-26
 
