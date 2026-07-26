@@ -182,28 +182,39 @@ extern "C" int ullm_sq8_ck_gfx942_control_dequant_ocp_bf16_projection(
         try {
             hipblas_check(hipblasSetStream(handle, static_cast<hipStream_t>(stream)),
                           "hipblasSetStream");
-            // Column-major hipBLAS sees row-major B[N,K] as KxN and row-major
-            // A[M,K] as KxM.  B * A^T therefore lands in C[N,M], whose memory
-            // is exactly the desired row-major C[M,N].
+            // `weight_bf16` holds row-major W[N,K].  As a column-major buffer it
+            // is W^T[K,N], so hipBLAS must transpose it with leading dimension K
+            // to recover W[N,K].  `activation_bf16` holds row-major A[M,K],
+            // which is already column-major A^T[K,M] with leading dimension K.
+            // Thus W * A^T lands in column-major C[N,M], whose memory is exactly
+            // the desired row-major C[M,N].  Using OP_N/lda=N here instead reads
+            // a strided permutation of W; on the physical tail fixture that
+            // preserved 0.03125 from K=0 while dropping the 0.5 final-K term.
             const float alpha = 1.0f;
             const float beta = 0.0f;
+            const int gemm_m = static_cast<int>(n); // C is column-major [N,M].
+            const int gemm_n = static_cast<int>(m);
+            const int gemm_k = static_cast<int>(k);
+            const int weight_lda = gemm_k;           // stored W^T has K rows.
+            const int activation_ldb = gemm_k;
+            const int output_ldc = gemm_m;
             hipblas_check(hipblasGemmEx(handle,
+                                        HIPBLAS_OP_T,
                                         HIPBLAS_OP_N,
-                                        HIPBLAS_OP_N,
-                                        static_cast<int>(n),
-                                        static_cast<int>(m),
-                                        static_cast<int>(k),
+                                        gemm_m,
+                                        gemm_n,
+                                        gemm_k,
                                         &alpha,
                                         weight_bf16,
                                         HIP_R_16BF,
-                                        static_cast<int>(n),
+                                        weight_lda,
                                         activation_bf16,
                                         HIP_R_16BF,
-                                        static_cast<int>(k),
+                                        activation_ldb,
                                         &beta,
                                         output_f32,
                                         HIP_R_32F,
-                                        static_cast<int>(n),
+                                        output_ldc,
                                         HIPBLAS_COMPUTE_32F,
                                         HIPBLAS_GEMM_DEFAULT),
                           "hipblasGemmEx SQ8_0 gfx942 B BF16 GEMM");

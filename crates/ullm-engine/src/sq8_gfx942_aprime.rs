@@ -597,6 +597,129 @@ pub fn infer_sq8_0_fragment_lane_map(
 mod tests {
     use super::*;
 
+    #[derive(Debug, Eq, PartialEq)]
+    struct HipblasBControlGemmContract {
+        column_major_m: usize,
+        column_major_n: usize,
+        column_major_k: usize,
+        weight_transposed: bool,
+        weight_leading_dimension: usize,
+        activation_leading_dimension: usize,
+        output_leading_dimension: usize,
+    }
+
+    fn hipblas_b_control_gemm_contract(
+        row_major_m: usize,
+        row_major_n: usize,
+        row_major_k: usize,
+    ) -> HipblasBControlGemmContract {
+        // C row-major [M,N] is C^T column-major [N,M].  The stored W[N,K]
+        // becomes W^T[K,N] in that convention, while stored A[M,K] already
+        // is A^T[K,M].
+        HipblasBControlGemmContract {
+            column_major_m: row_major_n,
+            column_major_n: row_major_m,
+            column_major_k: row_major_k,
+            weight_transposed: true,
+            weight_leading_dimension: row_major_k,
+            activation_leading_dimension: row_major_k,
+            output_leading_dimension: row_major_n,
+        }
+    }
+
+    /// The physical MI300X B-control failure was a hipBLAS storage-layout bug,
+    /// not an FP8/FNUZ scale conversion error.  This CPU oracle mirrors the
+    /// exact column-major address calculation for one logical row-major C[M,N]
+    /// result element.  It intentionally supports both the old broken call
+    /// (`OP_N`, `lda=N`) and the corrected one (`OP_T`, `lda=K`).
+    fn hipblas_b_control_row_major_output_at(
+        activation: Sq8_0OcpBlockScaledMatrix<'_>,
+        weight: Sq8_0OcpBlockScaledMatrix<'_>,
+        weight_transposed: bool,
+        weight_leading_dimension: usize,
+        row: usize,
+        column: usize,
+    ) -> Result<f32, String> {
+        validate_gemm_operands(activation, weight)?;
+        if row >= activation.rows || column >= weight.rows {
+            return Err("SQ8_0 B-control oracle output index is out of range".to_string());
+        }
+        let activation = dequantize_ocp_operand(activation, Sq8_0ControlDequantPrecision::Bf16)?;
+        let weight = dequantize_ocp_operand(weight, Sq8_0ControlDequantPrecision::Bf16)?;
+        let mut sum = 0.0_f32;
+        for k in 0..activation.cols {
+            // C row-major [row, column] is column-major C[column, row].
+            // The second hipBLAS operand is A^T[K,M] and is already represented
+            // by row-major A[M,K] at `k + row * K`.
+            let activation_value = activation.values[k + row * activation.cols];
+            // The first operand's raw storage is column-major.  With OP_N it is
+            // addressed as (column, k); with OP_T it is addressed as (k, column).
+            let weight_offset = if weight_transposed {
+                k + column * weight_leading_dimension
+            } else {
+                column + k * weight_leading_dimension
+            };
+            let weight_value = *weight.values.get(weight_offset).ok_or_else(|| {
+                format!(
+                    "SQ8_0 B-control hipBLAS oracle offset {weight_offset} exceeds {} values",
+                    weight.values.len()
+                )
+            })?;
+            sum += weight_value * activation_value;
+        }
+        Ok(sum)
+    }
+
+    fn physical_k_or_v_tail_id1_fixture() -> (Vec<u8>, Vec<f32>, Vec<u8>, Vec<f32>) {
+        const M: usize = 1;
+        const N: usize = 1024;
+        const K: usize = 5120;
+        let k_blocks = K / SQ8_0_BLOCK_K;
+        let n_blocks = N / SQ8_0_BLOCK_N;
+        let final_k = K - SQ8_0_BLOCK_K;
+        let mut activation = vec![0x80_u8; M * K];
+        let mut weight = vec![0x80_u8; N * K];
+        let mut activation_scales = vec![0.0_f32; M * k_blocks];
+        let mut weight_scales = vec![0.0_f32; n_blocks * k_blocks];
+
+        // This is the physical smoke fixture for M=1/N=1024/K=5120, copied
+        // here so the CPU oracle covers its full memory layout rather than a
+        // reduced mathematical equivalent.  All populated values are exactly
+        // representable in BF16, isolating the hipBLAS layout calculation.
+        activation[0] = 0x30; // 0.5
+        activation[final_k] = 0x30;
+        for k_block in 0..k_blocks {
+            activation_scales[k_block] = match k_block % 4 {
+                0 => 0.25,
+                1 => 0.5,
+                2 => 1.0,
+                _ => 2.0,
+            };
+        }
+        for n_block in 0..n_blocks {
+            for k_block in 0..k_blocks {
+                weight_scales[n_block * k_blocks + k_block] =
+                    match (2 * n_block + 3 * k_block + 1) % 4 {
+                        0 => 0.25,
+                        1 => 0.5,
+                        2 => 1.0,
+                        _ => 2.0,
+                    };
+            }
+            for column in n_block * SQ8_0_BLOCK_N..(n_block + 1) * SQ8_0_BLOCK_N {
+                let code = match column % 4 {
+                    0 => 0x30,
+                    1 => 0x38,
+                    2 => 0x40,
+                    _ => 0x48,
+                };
+                weight[column * K] = code;
+                weight[column * K + final_k] = code;
+            }
+        }
+        (activation, activation_scales, weight, weight_scales)
+    }
+
     fn fixture_matrices() -> (Vec<u8>, Vec<f32>, Vec<u8>, Vec<f32>) {
         let mut activation = vec![0_u8; 2 * 128];
         let mut weight = vec![0_u8; 128 * 128];
@@ -677,6 +800,58 @@ mod tests {
                 .unwrap(),
             reference
         );
+    }
+
+    #[test]
+    fn b_control_hipblas_layout_oracle_reproduces_the_mi300x_tail_delta() {
+        const M: usize = 1;
+        const N: usize = 1024;
+        const K: usize = 5120;
+        let (activation_bytes, activation_scales, weight_bytes, weight_scales) =
+            physical_k_or_v_tail_id1_fixture();
+        let activation =
+            Sq8_0OcpBlockScaledMatrix::activation(&activation_bytes, &activation_scales, M, K)
+                .unwrap();
+        let weight =
+            Sq8_0OcpBlockScaledMatrix::weight(&weight_bytes, &weight_scales, N, K).unwrap();
+        let corrected_call = hipblas_b_control_gemm_contract(M, N, K);
+        assert_eq!(
+            corrected_call,
+            HipblasBControlGemmContract {
+                column_major_m: N,
+                column_major_n: M,
+                column_major_k: K,
+                weight_transposed: true,
+                weight_leading_dimension: K,
+                activation_leading_dimension: K,
+                output_leading_dimension: N,
+            }
+        );
+
+        // This exactly models the former C++ call: OP_N on a row-major W[N,K]
+        // with lda=N.  It retains only the K=0 contribution: 0.5 * 0.25 *
+        // 0.5 * 0.5 = 0.03125.
+        let observed_with_old_layout =
+            hipblas_b_control_row_major_output_at(activation, weight, false, N, 0, 0).unwrap();
+        // The corrected call reads W by transposing its column-major view, with
+        // lda=K.  It includes both K=0 (0.03125) and final K128 (0.5).
+        let observed_with_fixed_layout = hipblas_b_control_row_major_output_at(
+            activation,
+            weight,
+            corrected_call.weight_transposed,
+            corrected_call.weight_leading_dimension,
+            0,
+            0,
+        )
+        .unwrap();
+        let expected =
+            sq8_0_control_dequant_gemm(activation, weight, Sq8_0ControlDequantPrecision::Bf16)
+                .unwrap();
+
+        assert_eq!(observed_with_old_layout, 0.03125);
+        assert_eq!(expected[0], 0.53125);
+        assert_eq!(observed_with_fixed_layout, expected[0]);
+        assert_eq!(expected[0] - observed_with_old_layout, 0.5);
     }
 
     #[test]
