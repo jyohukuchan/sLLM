@@ -1,0 +1,166 @@
+{
+  "backedges": [
+    {
+      "branch": "s_cbranch_execz",
+      "from": "0x1dec",
+      "inclusive_static_body": {
+        "arithmetic_operations": {
+          "v_and_b32_e32": 14,
+          "v_fma_f32": 1,
+          "v_fmac_f32_e32": 14,
+          "v_lshlrev_b32_e32": 3,
+          "v_lshrrev_b32_e32": 14,
+          "v_mul_f32_e32": 1
+        },
+        "loads": {
+          "global_load_b128": 4,
+          "global_load_b32": 17,
+          "global_load_b64": 2,
+          "global_load_u8": 2
+        },
+        "reduction_operations": {},
+        "salu": 50,
+        "static_load_width_bytes": 148,
+        "static_store_width_bytes": 0,
+        "stores": {},
+        "total": 137,
+        "valu": 62,
+        "vector_memory": 25
+      },
+      "to": "0x1ab8"
+    },
+    {
+      "branch": "s_branch",
+      "from": "0x202c",
+      "inclusive_static_body": {
+        "arithmetic_operations": {
+          "v_and_b32_e32": 28,
+          "v_fma_f32": 2,
+          "v_fmac_f32_e32": 28,
+          "v_lshlrev_b32_e32": 6,
+          "v_lshrrev_b32_e32": 28,
+          "v_mul_f32_e32": 2
+        },
+        "loads": {
+          "global_load_b128": 8,
+          "global_load_b32": 34,
+          "global_load_b64": 2,
+          "global_load_u8": 2
+        },
+        "reduction_operations": {},
+        "salu": 79,
+        "static_load_width_bytes": 280,
+        "static_store_width_bytes": 0,
+        "stores": {},
+        "total": 236,
+        "valu": 111,
+        "vector_memory": 46
+      },
+      "to": "0x1ab8"
+    },
+    {
+      "branch": "s_cbranch_execz",
+      "from": "0x2648",
+      "inclusive_static_body": {
+        "arithmetic_operations": {
+          "v_and_b32_e32": 21,
+          "v_fma_f32": 3,
+          "v_fmac_f32_e32": 18,
+          "v_lshlrev_b32_e32": 3,
+          "v_lshrrev_b32_e32": 21,
+          "v_mul_f32_e32": 3
+        },
+        "loads": {
+          "global_load_b128": 6,
+          "global_load_b32": 28,
+          "global_load_b96": 1,
+          "global_load_u8": 4
+        },
+        "reduction_operations": {},
+        "salu": 80,
+        "static_load_width_bytes": 220,
+        "static_store_width_bytes": 0,
+        "stores": {},
+        "total": 211,
+        "valu": 92,
+        "vector_memory": 39
+      },
+      "to": "0x2148"
+    },
+    {
+      "branch": "s_branch",
+      "from": "0x2780",
+      "inclusive_static_body": {
+        "arithmetic_operations": {
+          "v_and_b32_e32": 27,
+          "v_fma_f32": 4,
+          "v_fmac_f32_e32": 23,
+          "v_lshlrev_b32_e32": 4,
+          "v_lshrrev_b32_e32": 28,
+          "v_mul_f32_e32": 4
+        },
+        "loads": {
+          "global_load_b128": 8,
+          "global_load_b32": 37,
+          "global_load_b96": 1,
+          "global_load_u8": 4
+        },
+        "reduction_operations": {},
+        "salu": 97,
+        "static_load_width_bytes": 288,
+        "static_store_width_bytes": 0,
+        "stores": {},
+        "total": 263,
+        "valu": 116,
+        "vector_memory": 50
+      },
+      "to": "0x2148"
+    }
+  ],
+  "kernel": "ullm_aq4_matvec_add_f32_kernel",
+  "method_note": "These are static ISA counts. Runtime per-element instruction counts depend on the g8/g16 branch and loop trip counts; those conditions must be derived separately from the audited source and deployed shapes.",
+  "resources": {
+    "private_bytes_per_thread": 0,
+    "sgpr_per_wave": 38,
+    "sgpr_spills": 0,
+    "static_lds_bytes": 0,
+    "vgpr_per_thread": 49,
+    "vgpr_spills": 0,
+    "wavefront_size": 32
+  },
+  "schema_version": "ullm.aq4_projection_isa.v1",
+  "static_instruction_totals": {
+    "arithmetic_operations": {
+      "v_add_f32_e32": 6,
+      "v_and_b32_e32": 56,
+      "v_cndmask_b32_e64": 3,
+      "v_fma_f32": 6,
+      "v_fmac_f32_e32": 51,
+      "v_lshlrev_b32_e32": 15,
+      "v_lshlrev_b64_e32": 1,
+      "v_lshrrev_b32_e32": 57,
+      "v_lshrrev_b64": 1,
+      "v_mul_f32_e32": 7
+    },
+    "loads": {
+      "global_load_b128": 16,
+      "global_load_b32": 73,
+      "global_load_b64": 2,
+      "global_load_b96": 1,
+      "global_load_u8": 6
+    },
+    "reduction_operations": {
+      "ds_bpermute_b32": 5,
+      "v_add_f32_e32": 6
+    },
+    "salu": 395,
+    "static_load_width_bytes": 576,
+    "static_store_width_bytes": 4,
+    "stores": {
+      "global_store_b32": 1
+    },
+    "total": 820,
+    "valu": 321,
+    "vector_memory": 99
+  }
+}

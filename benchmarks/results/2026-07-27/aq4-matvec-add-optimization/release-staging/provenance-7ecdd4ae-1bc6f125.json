@@ -1,0 +1,25 @@
+{
+  "schema_version": "ullm.aq4_matvec_add.release_provenance.v1",
+  "created_at": "2026-07-27T06:31:23+09:00",
+  "source_commit": "7ecdd4ae858a94ffa6a5a1c5b6949bacc10c23ba",
+  "source_base_commit": "9d8643506a36659ecec3fc2d931deba26d29f574",
+  "source_patch_sha256": "ea9b40c28e80c9a21e1292cb356228e81981a4f8182fe647a248b2a89c92444e",
+  "worker_sha256": "1bc6f12548ea9c100830bd8b14bb15775457fad6fd8c324a814",
+  "worker_build_source": {
+    "runtime/src/ullm_runtime_hiprtc_sources.inc": "30fe6e92a8a01665a2f5cbd9cb1843624aa87577b16744f2e8828f62a4dfa128",
+    "crates/ullm-runtime-sys/src/test_parts/aq4_matvec_add_wide_load_prototype.rs": "d8cb5b9484e7792136d57ed78ff2a55af5c2c93ba028772bcc153b4b1dd28db9"
+  },
+  "baseline_grouped_equivalence": {
+    "active_source_commit": "c8074928e22b27801df78d65508fdd619d13a748",
+    "runtime_hiprtc_blob": "16b9793914417c14497e976d22de1550a258d245",
+    "runtime_part01_blob": "56d80284971148275564be09a4b7987fbe0c3936"
+  },
+  "r9700_window": "r9700-window-20260727T061520+0900",
+  "validation": {
+    "gpu_differential": "passed for g8 and g16 production shapes against CPU",
+    "greedy_runtime": "matched retained shuffle reference",
+    "launch_invariant": "292 module launches/token and 64 matvec_add launches/token for both bodies",
+    "full_model_grouped_speedup": 1.0495161768244459,
+    "prefill_candidate_over_reference": 1.0021569118136089
+  }
+}

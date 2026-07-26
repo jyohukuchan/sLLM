@@ -1,0 +1,31 @@
+{
+  "schema_version": "ullm.aq4_matvec_add.candidate_build.v1",
+  "source_head": "16d101e2d953d9fdbf03753912148ab5b17741fb",
+  "source_patch_sha256": "063e6c1e032a763d04961943ac90c35111154618a68f98899d80cce27e1cbf4c",
+  "source_inputs": {
+    "runtime/src/ullm_runtime_hiprtc_sources.inc": "f5de87b29c9c14898333e6e1875f529672696d32e867f48e3c29650c06ac87c8",
+    "crates/ullm-runtime-sys/src/test_parts/aq4_matvec_add_wide_load_prototype.rs": "d8cb5b9484e7792136d57ed78ff2a55af5c2c93ba028772bcc153b4b1dd28db9"
+  },
+  "staging_directory": "/tmp/ullm-aq4-add-candidate-target.lGvGFa",
+  "promotion_status": "staging_only_not_a_served_artifact",
+  "measurement_status": "rejected_before_window",
+  "rejection_reason": "built from current main, which lacks the active AQ4_0 4:1 grouped-split implementation; see grouped-baseline-rebuild.md",
+  "artifacts": {
+    "worker": {
+      "path": "/tmp/ullm-aq4-add-candidate-target.lGvGFa/release/ullm-aq4-worker",
+      "sha256": "bea00cc2341a46947e7127b53326697fb97bde6b57f6608dad65753b74aecf16"
+    },
+    "decode_profile": {
+      "path": "/tmp/ullm-aq4-add-candidate-target.lGvGFa/release/ullm-aq4-decode-step-profile",
+      "sha256": "30e870819915c6b583162992cbb1f2e95ce9e4eb158001f10e0718ba4a7b9106"
+    },
+    "prefill_profile": {
+      "path": "/tmp/ullm-aq4-add-candidate-target.lGvGFa/release/ullm-aq4-e2e-prefill-timing",
+      "sha256": "53f7822880fc084e468cd36b0aeae36b1347d6b3674ae71b4d8a88d195511671"
+    },
+    "direct_gpu_test": {
+      "path": "/tmp/ullm-aq4-add-candidate-target.lGvGFa/debug/deps/ullm_runtime_sys-b86242386060e7d6",
+      "sha256": "1682eee836690db26cd07fd50f93c2410337f9fb9284bc26da7f0f55b3acdbbe"
+    }
+  }
+}

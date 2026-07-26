@@ -1,0 +1,7 @@
+30fe6e92a8a01665a2f5cbd9cb1843624aa87577b16744f2e8828f62a4dfa128  /tmp/ullm-aq4-add-grouped-source-20260727T0416/runtime/src/ullm_runtime_hiprtc_sources.inc
+d8cb5b9484e7792136d57ed78ff2a55af5c2c93ba028772bcc153b4b1dd28db9  /tmp/ullm-aq4-add-grouped-source-20260727T0416/crates/ullm-runtime-sys/src/test_parts/aq4_matvec_add_wide_load_prototype.rs
+1bc6f12548ea9c100830bd8b14bb15775457f298783c57f57fad6fd8c324a814  /tmp/ullm-aq4-add-grouped-target-20260727T0416/release/ullm-aq4-worker
+4d3b2f5d7ed0abd5e7967677652191d90ab501f1636d1ba94b2385a8c40b0159  /tmp/ullm-aq4-add-grouped-target-20260727T0416/release/ullm-aq4-decode-step-profile
+acf02cc032e1cd871c00a6121c8b3e2f4d7c6ec7dbbf3d5d854179a92a45d677  /tmp/ullm-aq4-add-grouped-target-20260727T0416/release/ullm-aq4-e2e-prefill-timing
+492490b58dfd952fd8bc5ab2c01b2fbcd7947a8fd12d644b217bb052c688008a  /tmp/ullm-aq4-add-grouped-target-20260727T0416/debug/deps/ullm_runtime_sys-b86242386060e7d6
+12f8cefe21b53090ac45bc0193303ef9de22e9ec6d7c4c72befd2bd4a6ac9f05  /home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-27/aq4-matvec-add-optimization/candidate-grouped-build-provenance.json

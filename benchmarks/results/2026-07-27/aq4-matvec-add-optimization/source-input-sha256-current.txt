@@ -1,0 +1,2 @@
+f5de87b29c9c14898333e6e1875f529672696d32e867f48e3c29650c06ac87c8  runtime/src/ullm_runtime_hiprtc_sources.inc
+d8cb5b9484e7792136d57ed78ff2a55af5c2c93ba028772bcc153b4b1dd28db9  crates/ullm-runtime-sys/src/test_parts/aq4_matvec_add_wide_load_prototype.rs

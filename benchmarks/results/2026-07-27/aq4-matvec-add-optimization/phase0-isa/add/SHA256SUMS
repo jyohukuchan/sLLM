@@ -1,0 +1,11 @@
+f5de87b29c9c14898333e6e1875f529672696d32e867f48e3c29650c06ac87c8  /home/homelab1/coding-local/ultimateLLM/uLLM-project/runtime/src/ullm_runtime_hiprtc_sources.inc
+60d5d48c83b0f65ee0f86ab9d98b270bd8128ac6a69a23c2cf8fd6c5b6e2211f  /home/homelab1/coding-local/ultimateLLM/uLLM-project/tools/extract-aq4-projection-hiprtc-source.py
+1eb25162925737999aaf10f9e95e2f85531472f6eba3a53a7aa5db6c74192701  /home/homelab1/coding-local/ultimateLLM/uLLM-project/tools/analyze-aq4-projection-isa.py
+050d83cd4cd01718b143ef58febf2739f1658640257daea597c989231cbde97a  /home/homelab1/coding-local/ultimateLLM/uLLM-project/tools/build-aq4-projection-isa.sh
+751cabc11d2818d5119f3465a02d952ff048a7e4381b277c5f96ac8b71e5dcc1  /home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-27/aq4-matvec-add-optimization/phase0-isa/add/aq4-add-production-gfx1201.bundle
+3e0c7287c1c0f247a464848403b3e69d3ec2784ca3b0bf6ea92075330f196a6f  /home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-27/aq4-matvec-add-optimization/phase0-isa/add/aq4-add-production-gfx1201.disasm
+ad0db6a044845ead0a760095295481d625b68fabfa068a606a422e16377c3644  /home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-27/aq4-matvec-add-optimization/phase0-isa/add/aq4-add-production-gfx1201.hip.cpp
+1cc4ff5892eba75b504d116ab94fc6bff3a2ade3b68a20be254af7510115dd89  /home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-27/aq4-matvec-add-optimization/phase0-isa/add/aq4-add-production-gfx1201.hsaco
+4c6321419cccb87b48509f421a751a45639201a07cb2215afd1199fb949569e9  /home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-27/aq4-matvec-add-optimization/phase0-isa/add/aq4-add-production-gfx1201.notes.txt
+90568d4bfc315f426d6b02222e6223e9a94724b7f4975d8773e855c6be0546bf  /home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-27/aq4-matvec-add-optimization/phase0-isa/add/aq4-add-production-gfx1201.summary.json
+81e9037a85265ce83929f90d50368f5c32ea59a89e7b42164ea251ab2ace36dc  /home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-27/aq4-matvec-add-optimization/phase0-isa/add/compiler-version.txt
