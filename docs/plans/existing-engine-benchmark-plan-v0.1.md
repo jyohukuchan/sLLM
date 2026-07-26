@@ -92,3 +92,45 @@ On V620, do not spend time forcing vLLM, SGLang, ROCm/ATOM, or TensorRT-LLM to r
 - Summary tables include decode token/s, consumed VRAM GiB, and decode token/s x consumed VRAM GiB.
 - I-Quant, K-Quant, and UD results are split into separate comparison groups.
 - Results are sufficient to define the first uLLM throughput target.
+
+## R9700 controlled external baseline (2026-07-26)
+
+The first controlled R9700 decode position check is complete.  It used only
+the gfx1201 R9700, one stream, five unprofiled repetitions, 16 M=1 decode
+steps per repetition, and cache depth 1028 -> 1044 (midpoint 1036).
+
+| engine | weight format | KV | timing method | decode tok/s |
+| --- | --- | --- | --- | ---: |
+| uLLM Phase 0 reference | SQ8_0 (~8.0 bpp) | F32 | selected decode region | 15.294956 |
+| llama.cpp 68a5592 | GGUF Q8_0 (~8.5 bpp) | F32 | llama-bench decode-only | 30.468075 |
+| llama.cpp 68a5592 | GGUF Q8_0 (~8.5 bpp) | F16 | llama-bench decode-only | 34.885347 |
+| vLLM 0.21.0+rocm722 | Qwen3-14B-FP8 | auto (resolved dtype unconfirmed) | client SSE steady output | 15.455471 |
+| SGLang v0.5.15.post1-rocm720-mi30x | Qwen3-14B-FP8 | BF16 requested | startup failed | n/a |
+
+The llama.cpp source and documentation were inspected before selecting its
+method: -p is prompt-only, -n is generation-only, -pg adds a combined
+prompt-plus-generation row, -r repeats a selected row, and -d prefills/restores
+the KV state before the timed region.  Therefore -p 0 -n 16 -d 1028 -r 5
+matches the target decode shape; -pg would have included prompt work.  Both
+llama.cpp rows had all layers requested on the R9700 and flash attention on.
+
+The official fixed GGUF is
+Qwen/Qwen3-14B-GGUF@530227a7d994db8eca5ab5ced2fb692b614357fd,
+Qwen3-14B-Q8_0.gguf, SHA-256
+a0dfe649137410b7d82f06a209240508e218f32f5b6fd81b69d6932160cfcd9d.
+Its Hub metadata and the direct FP8 source both declare
+base_model:Qwen/Qwen3-14B.  Q8_0 and SQ8_0 are different formats, so this is
+speed positioning only, not a quality comparison.
+
+vLLM did start on gfx1201 and five requests each reported 1028 prompt plus 16
+completion tokens.  Its rate includes server scheduling and local HTTP/SSE
+overhead, unlike the uLLM/llama.cpp decode-loop timers.  SGLang loaded the FP8
+checkpoint and allocated BF16 KV, then segfaulted in
+sgl_kernel.elementwise.rotary_embedding during decode CUDA-graph capture; the
+standard bounded attempt stopped there rather than forcing a fallback.
+
+The complete raw data, commands, per-repeat statistics, R9700-only validation,
+thermal histories, image identities, and failure log are in
+[r9700-external-engine-baseline](../../benchmarks/results/2026-07-26/r9700-external-engine-baseline/).
+ullm-openai.service was stopped and restored in one 22 min 47 s isolation
+window; llama-qwen35-udq4.service stayed inactive/disabled.
