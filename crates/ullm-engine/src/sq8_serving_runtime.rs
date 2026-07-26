@@ -370,7 +370,7 @@ impl Sq8ServingLoadReport {
             || self.prompt_execution_width != self.prefill_mode.execution_width()
             || self
                 .paged_decode_split_source_tile
-                .is_some_and(|tile| !matches!(tile, 128 | 256 | 512))
+                .is_some_and(|tile| !matches!(tile, 20 | 128 | 256 | 512))
         {
             return Err(Sq8ServingError::invalid_configuration(
                 "serving resident geometry/load report mismatch",
@@ -383,11 +383,12 @@ impl Sq8ServingLoadReport {
 fn parse_paged_decode_split_source_tile(value: Option<&str>) -> Result<Option<usize>, String> {
     match value {
         None => Ok(None),
+        Some("20") => Ok(Some(20)),
         Some("128") => Ok(Some(128)),
         Some("256") => Ok(Some(256)),
         Some("512") => Ok(Some(512)),
         Some(other) => Err(format!(
-            "{QWEN3_14B_SQ8_PAGED_DECODE_SPLIT_EXPERIMENT_TILE_ENV} must be exactly 128, 256, or 512, got {other:?}"
+            "{QWEN3_14B_SQ8_PAGED_DECODE_SPLIT_EXPERIMENT_TILE_ENV} must be exactly 20, 128, 256, or 512, got {other:?}"
         )),
     }
 }
@@ -3267,6 +3268,10 @@ mod tests {
     #[test]
     fn sq8_paged_decode_split_tile_parser_is_explicit_and_closed() {
         assert_eq!(parse_paged_decode_split_source_tile(None).unwrap(), None);
+        assert_eq!(
+            parse_paged_decode_split_source_tile(Some("20")).unwrap(),
+            Some(20)
+        );
         assert_eq!(
             parse_paged_decode_split_source_tile(Some("128")).unwrap(),
             Some(128)
