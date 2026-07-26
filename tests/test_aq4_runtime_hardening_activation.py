@@ -366,7 +366,7 @@ class Runner:
                 )
             )
             observation = {
-                "schema_version": "ullm.aq4_runtime_hardening_live_observation.v2",
+                "schema_version": "ullm.aq4_runtime_hardening_live_observation.v3",
                 "plan_sha256": environment["ULLM_AQ4_RUNTIME_HARDENING_PLAN_SHA256"],
                 "operation_epoch": environment["ULLM_AQ4_RUNTIME_HARDENING_EPOCH"],
                 "active_manifest_sha256": environment["ULLM_AQ4_RUNTIME_HARDENING_ACTIVE_SHA256"],
@@ -389,7 +389,7 @@ class Runner:
                     "active_path": environment["ULLM_AQ4_RUNTIME_HARDENING_ACTIVE_MANIFEST"],
                     "active_manifest_sha256": environment["ULLM_AQ4_RUNTIME_HARDENING_ACTIVE_SHA256"],
                     "file_match": True,
-                    "service_environment_match": True,
+                    "worker_environment_match": True,
                     "worker_command_match": True,
                 },
                 "endpoints": {

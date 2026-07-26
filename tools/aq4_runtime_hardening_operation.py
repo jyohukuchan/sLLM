@@ -42,6 +42,7 @@ GATEWAY_CONTAINER = "open-webui"
 GATEWAY_URL = "http://172.20.0.1:8000"
 OPENWEBUI_HOST = "127.0.0.1"
 OPENWEBUI_PORT = 3000
+LIVE_ACTIVE_MANIFEST = Path("/etc/ullm/served-models/active.json")
 GATEWAY_API_KEY = Path("/etc/ullm/openai-api-key")
 OPENWEBUI_SESSION = Path("/run/ullm-campaign-secrets/openwebui-session.jwt")
 MODEL_ID = "ullm-qwen3.5-9b-aq4"
@@ -65,7 +66,7 @@ PROBE_TIMEOUT_SECONDS = 4.0
 ISOLATED_WORKER_TIMEOUT_SECONDS = 120.0
 ISOLATED_WORKER_TERMINATE_GRACE_SECONDS = 10.0
 
-LIVE_OBSERVATION_SCHEMA = "ullm.aq4_runtime_hardening_live_observation.v2"
+LIVE_OBSERVATION_SCHEMA = "ullm.aq4_runtime_hardening_live_observation.v3"
 READINESS_FAILURE_SCHEMA = "ullm.aq4_runtime_hardening_readiness_failure.v1"
 ISOLATED_WORKER_OBSERVATION_SCHEMA = (
     "ullm.aq4_runtime_hardening_isolated_worker_observation.v1"
@@ -336,7 +337,9 @@ def _command_line(pid: int) -> tuple[str, ...]:
     return values
 
 
-def _worker_command_matches(pid: int, *, worker: str, manifest: str) -> bool:
+def _find_worker_pid(pid: int, *, worker: str, manifest: str) -> int | None:
+    """Find the worker child that is actually bound to one manifest path."""
+
     pending = [pid]
     visited: set[int] = set()
     while pending and len(visited) < 32:
@@ -358,8 +361,8 @@ def _worker_command_matches(pid: int, *, worker: str, manifest: str) -> bool:
                 continue
             for index, item in enumerate(command[:-1]):
                 if item == "--served-model-manifest" and command[index + 1] == manifest:
-                    return True
-    return False
+                    return child
+    return None
 
 
 def _model_ids(raw: bytes) -> list[str]:
@@ -440,16 +443,22 @@ def _openwebui_get(
         connection.close()
 
 
-def _read_active(values: dict[str, str]) -> tuple[dict[str, Any], bytes]:
-    raw = _stable_read(Path(values["ULLM_AQ4_RUNTIME_HARDENING_ACTIVE_MANIFEST"]), maximum=4 * 1024 * 1024)
-    if hashlib.sha256(raw).hexdigest() != values["ULLM_AQ4_RUNTIME_HARDENING_ACTIVE_SHA256"]:
-        raise OperationError("active manifest hash differs")
+def _read_manifest(path: Path) -> tuple[dict[str, Any], bytes]:
+    raw = _stable_read(path, maximum=4 * 1024 * 1024)
     try:
         manifest = json.loads(raw)
     except (UnicodeError, json.JSONDecodeError) as error:
-        raise OperationError("active manifest JSON is invalid") from error
+        raise OperationError("served-model manifest JSON is invalid") from error
     if not isinstance(manifest, dict):
-        raise OperationError("active manifest root is invalid")
+        raise OperationError("served-model manifest root is invalid")
+    return manifest, raw
+
+
+def _read_active(values: dict[str, str]) -> tuple[dict[str, Any], bytes]:
+    raw_path = values["ULLM_AQ4_RUNTIME_HARDENING_ACTIVE_MANIFEST"]
+    manifest, raw = _read_manifest(Path(raw_path))
+    if hashlib.sha256(raw).hexdigest() != values["ULLM_AQ4_RUNTIME_HARDENING_ACTIVE_SHA256"]:
+        raise OperationError("active manifest hash differs")
     return manifest, raw
 
 
@@ -602,22 +611,27 @@ def _readiness_attempt(values: dict[str, str], *, deadline: float) -> dict[str, 
 
     before_identity: tuple[str, str, int] | None = None
     before_process: dict[str, Any] | None = None
-    service_environment_match = False
+    worker_environment_match = False
     worker_command_match = False
     try:
         before_identity = _service_identity()
-        before_process = _process_identity(before_identity[2])
         if contract is not None:
-            environment = _proc_environment(before_identity[2])
-            service_environment_match = (
-                environment.get("ULLM_SERVED_MODEL_MANIFEST")
-                == values["ULLM_AQ4_RUNTIME_HARDENING_ACTIVE_MANIFEST"]
-            )
-            worker_command_match = _worker_command_matches(
+            worker_pid = _find_worker_pid(
                 before_identity[2],
                 worker=contract["worker_path"],
                 manifest=values["ULLM_AQ4_RUNTIME_HARDENING_ACTIVE_MANIFEST"],
             )
+            worker_command_match = worker_pid is not None
+            if worker_pid is not None:
+                before_process = _process_identity(worker_pid)
+                worker_command_match = (
+                    before_process["executable_sha256"] == contract["worker_hash"]
+                )
+                environment = _proc_environment(worker_pid)
+                worker_environment_match = (
+                    environment.get("ULLM_SERVED_MODEL_MANIFEST")
+                    == values["ULLM_AQ4_RUNTIME_HARDENING_ACTIVE_MANIFEST"]
+                )
     except OperationError:
         before_identity = None
         before_process = None
@@ -630,7 +644,14 @@ def _readiness_attempt(values: dict[str, str], *, deadline: float) -> dict[str, 
     final_raw: bytes | None = None
     try:
         after_identity = _service_identity()
-        after_process = _process_identity(after_identity[2])
+        if contract is not None:
+            after_worker_pid = _find_worker_pid(
+                after_identity[2],
+                worker=contract["worker_path"],
+                manifest=values["ULLM_AQ4_RUNTIME_HARDENING_ACTIVE_MANIFEST"],
+            )
+            if after_worker_pid is not None:
+                after_process = _process_identity(after_worker_pid)
     except OperationError:
         pass
     try:
@@ -655,7 +676,7 @@ def _readiness_attempt(values: dict[str, str], *, deadline: float) -> dict[str, 
         contract is not None
         and file_match
         and process_match
-        and service_environment_match
+        and worker_environment_match
         and worker_command_match
         and endpoints_match
     )
@@ -665,7 +686,7 @@ def _readiness_attempt(values: dict[str, str], *, deadline: float) -> dict[str, 
         cause = "service_not_ready"
     elif not process_match:
         cause = "process_unstable"
-    elif not service_environment_match or not worker_command_match:
+    elif not worker_environment_match or not worker_command_match:
         cause = "process_manifest_mismatch"
     elif not endpoints_match:
         cause = "endpoints_incoherent"
@@ -678,7 +699,7 @@ def _readiness_attempt(values: dict[str, str], *, deadline: float) -> dict[str, 
             "active_path": values["ULLM_AQ4_RUNTIME_HARDENING_ACTIVE_MANIFEST"],
             "active_manifest_sha256": values["ULLM_AQ4_RUNTIME_HARDENING_ACTIVE_SHA256"],
             "file_match": file_match,
-            "service_environment_match": service_environment_match,
+            "worker_environment_match": worker_environment_match,
             "worker_command_match": worker_command_match,
         },
         "model_id": None if contract is None else contract["model_id"],
@@ -822,9 +843,33 @@ def _service_user_and_working_directory() -> tuple[pwd.struct_passwd, Path]:
     return account, working_directory
 
 
+def _live_worker_environment() -> dict[str, str]:
+    """Read only the effective environment of the current manifest-bound worker.
+
+    systemd's MainPID is the gateway process, not the worker process; the
+    worker is the authority for HIP guards, device binding, and the served
+    manifest.  Never inherit the gateway's complete environment because it may
+    contain credentials unrelated to the worker launch.
+    """
+
+    _active, _sub, service_pid = _service_identity()
+    live_manifest, _raw = _read_manifest(LIVE_ACTIVE_MANIFEST)
+    live_contract = _manifest_contract(live_manifest)
+    worker_pid = _find_worker_pid(
+        service_pid,
+        worker=live_contract["worker_path"],
+        manifest=os.fspath(LIVE_ACTIVE_MANIFEST),
+    )
+    if worker_pid is None:
+        raise OperationError("live manifest-bound worker is unavailable")
+    environment = _proc_environment(worker_pid)
+    if environment.get("ULLM_SERVED_MODEL_MANIFEST") != os.fspath(LIVE_ACTIVE_MANIFEST):
+        raise OperationError("live worker manifest environment differs")
+    return environment
+
+
 def _isolated_environment(contract: dict[str, Any], candidate_manifest: str) -> dict[str, str]:
-    _active, _sub, pid = _service_identity()
-    live = _proc_environment(pid)
+    live = _live_worker_environment()
     required = (
         "HOME",
         "XDG_CACHE_HOME",

@@ -34,7 +34,7 @@ OUTCOME_SCHEMA = "ullm.aq4_runtime_hardening_activation_outcome.v1"
 RECOVERY_SCHEMA = "ullm.aq4_runtime_hardening_activation_recovery.v1"
 ROLLBACK_SCHEMA = "ullm.aq4_runtime_hardening_rollback_outcome.v1"
 ATTEMPT_SCHEMA = "ullm.aq4_runtime_hardening_recovery_attempt.v1"
-LIVE_PROOF_SCHEMA = "ullm.aq4_runtime_hardening_live_proof.v2"
+LIVE_PROOF_SCHEMA = "ullm.aq4_runtime_hardening_live_proof.v3"
 LIVE_PROOF_AUDIT_SCHEMA = "ullm.aq4_runtime_hardening_live_proof_audit.v1"
 ISOLATED_PREFLIGHT_SCHEMA = "ullm.aq4_runtime_hardening_isolated_preflight.v1"
 PREFLIGHT_SCHEMA = "ullm.aq4_runtime_hardening_activation_preflight.v2"
@@ -2482,7 +2482,7 @@ def _live_observation(
         "AQ4 live observation",
     )
     if (
-        observation["schema_version"] != "ullm.aq4_runtime_hardening_live_observation.v2"
+        observation["schema_version"] != "ullm.aq4_runtime_hardening_live_observation.v3"
         or observation["plan_sha256"] != record.snapshot.sha256
         or observation["operation_epoch"] != record.document["operation_epoch"]
         or observation["active_manifest_sha256"] != active.sha256
@@ -2521,7 +2521,7 @@ def _live_observation(
             "active_path",
             "active_manifest_sha256",
             "file_match",
-            "service_environment_match",
+            "worker_environment_match",
             "worker_command_match",
         },
         "AQ4 live observation manifest",
@@ -2531,7 +2531,7 @@ def _live_observation(
         or manifest["active_manifest_sha256"] != active.sha256
         or any(
             manifest[name] is not True
-            for name in ("file_match", "service_environment_match", "worker_command_match")
+            for name in ("file_match", "worker_environment_match", "worker_command_match")
         )
     ):
         fail("AQ4 live observation manifest binding differs")

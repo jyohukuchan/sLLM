@@ -71,7 +71,7 @@ def attempt(
             "active_path": "/fixture/active.json",
             "active_manifest_sha256": "c" * 64,
             "file_match": True,
-            "service_environment_match": True,
+            "worker_environment_match": True,
             "worker_command_match": True,
         },
         "model_id": OPERATION.MODEL_ID,
@@ -165,18 +165,24 @@ def test_readiness_attempt_rejects_partial_endpoints_and_model_id_mismatch(
     contract = {
         "model_id": OPERATION.MODEL_ID,
         "worker_path": "/fixture/worker",
-        "worker_hash": "e" * 64,
+        "worker_hash": "d" * 64,
     }
     monkeypatch.setattr(OPERATION, "_read_active", lambda _values: ({}, b"fixture"))
     monkeypatch.setattr(OPERATION, "_manifest_contract", lambda _manifest: contract)
-    monkeypatch.setattr(OPERATION, "_service_identity", lambda: ("active", "running", 42))
+    monkeypatch.setattr(OPERATION, "_service_identity", lambda: ("active", "running", 7))
     monkeypatch.setattr(OPERATION, "_process_identity", lambda _pid: process)
     monkeypatch.setattr(
         OPERATION,
         "_proc_environment",
         lambda _pid: {"ULLM_SERVED_MODEL_MANIFEST": values["ULLM_AQ4_RUNTIME_HARDENING_ACTIVE_MANIFEST"]},
     )
-    monkeypatch.setattr(OPERATION, "_worker_command_matches", lambda *_args, **_kwargs: True)
+    worker_queries: list[int] = []
+
+    def find_worker(service_pid: int, **_kwargs: object) -> int:
+        worker_queries.append(service_pid)
+        return 42
+
+    monkeypatch.setattr(OPERATION, "_find_worker_pid", find_worker)
     monkeypatch.setattr(OPERATION, "_probe_endpoints", lambda _deadline: endpoint_states(ready=False))
 
     result = OPERATION._readiness_attempt(values, deadline=100.0)
@@ -184,6 +190,7 @@ def test_readiness_attempt_rejects_partial_endpoints_and_model_id_mismatch(
     assert result["coherent"] is False
     assert result["cause"] == "endpoints_incoherent"
     assert result["endpoints"]["gateway_ready"]["cause"] == "transport"
+    assert worker_queries == [7, 7]
     assert OPERATION._probe(
         lambda: (200, b'{"data":[{"id":"a-different-model"}]}'), require_model=True
     ) == {"ok": False, "status": 200, "cause": "model_id_mismatch"}
@@ -201,7 +208,7 @@ def test_readiness_attempt_rejects_process_that_changes_during_one_probe(
         lambda _manifest: {
             "model_id": OPERATION.MODEL_ID,
             "worker_path": "/fixture/worker",
-            "worker_hash": "e" * 64,
+            "worker_hash": "d" * 64,
         },
     )
     monkeypatch.setattr(OPERATION, "_service_identity", lambda: next(identities))
@@ -221,13 +228,49 @@ def test_readiness_attempt_rejects_process_that_changes_during_one_probe(
         "_proc_environment",
         lambda _pid: {"ULLM_SERVED_MODEL_MANIFEST": values["ULLM_AQ4_RUNTIME_HARDENING_ACTIVE_MANIFEST"]},
     )
-    monkeypatch.setattr(OPERATION, "_worker_command_matches", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(OPERATION, "_find_worker_pid", lambda _pid, **_kwargs: _pid)
     monkeypatch.setattr(OPERATION, "_probe_endpoints", lambda _deadline: endpoint_states(ready=True))
 
     result = OPERATION._readiness_attempt(values, deadline=100.0)
 
     assert result["coherent"] is False
     assert result["cause"] == "process_unstable"
+
+
+def test_isolated_environment_copies_only_the_live_worker_contract(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    live_contract = {
+        "model_id": OPERATION.MODEL_ID,
+        "worker_path": "/fixture/live-worker",
+        "worker_hash": "d" * 64,
+    }
+    candidate_contract = {"required_environment": ("ULLM_REQUIRE_HIP_FIXTURE",)}
+    worker_environment = {
+        "HOME": "/fixture/home",
+        "XDG_CACHE_HOME": "/fixture/cache",
+        "HF_HUB_OFFLINE": "1",
+        "TRANSFORMERS_OFFLINE": "1",
+        "HF_HUB_DISABLE_TELEMETRY": "1",
+        "HIP_VISIBLE_DEVICES": "1",
+        "ULLM_HIP_VISIBLE_DEVICES": "1",
+        "ULLM_GPU_LOCK_FILE": "/fixture/lock",
+        "ULLM_REQUIRE_HIP_FIXTURE": "1",
+        "UNRELATED_API_KEY": "must-not-be-copied",
+        "ULLM_SERVED_MODEL_MANIFEST": str(OPERATION.LIVE_ACTIVE_MANIFEST),
+    }
+    monkeypatch.setattr(OPERATION, "_service_identity", lambda: ("active", "running", 7))
+    monkeypatch.setattr(OPERATION, "_read_manifest", lambda _path: ({}, b"fixture"))
+    monkeypatch.setattr(OPERATION, "_manifest_contract", lambda _manifest: live_contract)
+    monkeypatch.setattr(OPERATION, "_find_worker_pid", lambda _pid, **_kwargs: 42)
+    monkeypatch.setattr(OPERATION, "_proc_environment", lambda pid: worker_environment if pid == 42 else {})
+
+    environment = OPERATION._isolated_environment(candidate_contract, "/fixture/candidate.json")
+
+    assert environment["ULLM_SERVED_MODEL_MANIFEST"] == "/fixture/candidate.json"
+    assert environment["ULLM_REQUIRE_HIP_FIXTURE"] == "1"
+    assert environment["HIP_VISIBLE_DEVICES"] == "1"
+    assert "UNRELATED_API_KEY" not in environment
 
 
 def test_unstable_pid_times_out_even_when_endpoints_are_coherent(
