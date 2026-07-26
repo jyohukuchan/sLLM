@@ -82,6 +82,28 @@ AQ4 resident path は別々の `RuntimeBuffer` を直接所有する。これは
 F32 allocation / page management のもう一つの経路だが、今回の変更禁止
 範囲である。そのため v0.1 の selector は AQ4 runtime には未伝播である。
 
+追加で確認した engine-side propagation / reporting path は以下である。
+
+- `crates/ullm-engine/src/sq8_generation_runtime.rs` の
+  `Qwen3Sq8GenerationRuntime::load` と
+  `crates/ullm-engine/src/sq8_serving_runtime.rs` の serving load は layer ごとに
+  `PagedDecodeState::new` を呼ぶ。したがって generic allocation 自体には
+  selector が伝わる。
+- ただし `sq8_serving_runtime.rs` の `Sq8ServingLoadReport` と
+  `qwen3_14b_sq8_serving_kv_cache_bytes_per_layer` /
+  `qwen3_14b_sq8_serving_total_kv_cache_bytes` は F32 byte count
+  33,554,432 B/layer を frozen contract として検証している。typed serving を
+  promoted path にする際は `KvCacheLayout` を report に伝え、K/V dtype と
+  scale bytes を表示・検証する必要がある。このファイルには同時作業の未コミット
+  変更があったため v0.1 では編集しなかった。
+- `crates/ullm-engine/src/main_parts/part_03.rs` の benchmark/report JSON は
+  `kv_cache_value_dtype: "f32"` と F32-only byte accounting を書く。typed
+  full-model integration 時には K/V を別々に report し、FP8 scale bytes を
+  `kv_cache_bytes` に含める必要がある。
+- `main_parts/part_00.rs` の runtime cached-prefix probe は既存の global-scale
+  FP8 experiment を扱う。これは dynamic per-token/head scale contract では
+  ないので、v0.1 typed cache の benchmark/quality report に流用してはいけない。
+
 ## 2. storage layout と VRAM 収支
 
 ### 2.1 一般形
@@ -274,7 +296,8 @@ Only a zero result permits the following work:
 4. In a separately authorized AQ4_0 production change, propagate `KvCacheDtypes`
    through resident layer allocation, operation registry plans, decode,
    cached-prefix, and paged causal GQA paths. Do not repurpose F32 buffers or
-   overwrite existing F32 behavior.
+   overwrite existing F32 behavior. Update serving/benchmark reports to use
+   `KvCacheLayout` rather than frozen F32 byte constants.
 5. With R9700 unlocked and the required preflight recorded, collect F32/F16/
    FP8 full-model decode and prefill at long contexts, plus side-by-side
    generated text. The promotion decision must be qualitative text review,
