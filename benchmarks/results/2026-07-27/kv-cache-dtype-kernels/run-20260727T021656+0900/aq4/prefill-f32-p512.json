@@ -1,0 +1,87 @@
+{
+  "backend": "hip",
+  "device_index": 1,
+  "device_name": "AMD Radeon Graphics",
+  "device_total_global_mem_bytes": 34208743424,
+  "format_id": "AQ4_0",
+  "geometry": {
+    "block_size": 256,
+    "cache_blocks": 16,
+    "context_length": 4096,
+    "hidden": 4096,
+    "self_attention": {
+      "head_dim": 256,
+      "kv_heads": 4,
+      "q_heads": 16,
+      "value_dim": 256
+    },
+    "vocab": 248320
+  },
+  "kv_cache_dtype": {
+    "key": "f32",
+    "value": "f32"
+  },
+  "mode": "prefill",
+  "package_dir": "/home/homelab1/datapool/ullm/product/qwen35-9b-aq4-cli-v0.1/package",
+  "prefill": {
+    "elapsed_seconds": [
+      0.502185645,
+      0.500448816,
+      0.501509174,
+      0.501833429,
+      0.501766939
+    ],
+    "max_elapsed_seconds": 0.502185645,
+    "mean_elapsed_seconds": 0.5015488006,
+    "min_elapsed_seconds": 0.500448816,
+    "prefill_width": 128,
+    "tokens_per_second_mean": 1020.8378514463544,
+    "topk_after_last_repeat": [
+      {
+        "logit": 8.184494018554688,
+        "token_id": 72
+      },
+      {
+        "logit": 7.807562351226807,
+        "token_id": 83
+      },
+      {
+        "logit": 7.47861909866333,
+        "token_id": 68
+      },
+      {
+        "logit": 7.075056076049805,
+        "token_id": 220
+      },
+      {
+        "logit": 6.733199119567871,
+        "token_id": 9945
+      },
+      {
+        "logit": 6.66270637512207,
+        "token_id": 94427
+      },
+      {
+        "logit": 6.556926727294922,
+        "token_id": 60492
+      },
+      {
+        "logit": 6.467319488525391,
+        "token_id": 275
+      },
+      {
+        "logit": 6.442561149597168,
+        "token_id": 286
+      },
+      {
+        "logit": 6.4233245849609375,
+        "token_id": 3266
+      }
+    ],
+    "warmup_elapsed_seconds": [
+      0.589898029
+    ],
+    "work_tokens": 512
+  },
+  "schema": "ullm.aq4_kv_cache_dtype_measure.v0.1"
+}

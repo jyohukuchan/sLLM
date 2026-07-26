@@ -396,6 +396,87 @@ Only a zero result permits the following work:
    overwrite existing F32 behavior. Update serving/benchmark reports to use
    `KvCacheLayout` rather than frozen F32 byte constants.
 7. With R9700 unlocked and the required preflight recorded, collect F32/F16/
-   FP8 full-model decode and prefill at long contexts, plus side-by-side
-   generated text. The promotion decision must be qualitative text review,
-   not a single numerical threshold.
+FP8 full-model decode and prefill at long contexts, plus side-by-side
+generated text. The promotion decision must be qualitative text review,
+not a single numerical threshold.
+
+## 7. 2026-07-27 native completion and measured result
+
+### 7.1 Landed native scope
+
+The handoff in section 6 is now implemented for AQ4_0 resident layers.
+F32/F32 retains its pre-existing symbols, source bodies, buffers, operation
+plans, WMMA prefill reader, and GQA-grouped split path. Only a non-F32 K or V
+selection takes the new typed ABI.
+
+- HIPRTC has eight ordered non-F32 `(K dtype, V dtype)` specializations for
+  fused Qwen Q/K-norm/RoPE token write, generic token write, chunk write,
+  direct paged decode, and split-partial paged decode.
+- The typed chunk writer and typed causal-GQA chunk reader supply the native
+  AQ4 prefill path. The split merge stays F32 so its F32 merge semantics are
+  unchanged. AQ4's grouped split selection remains in force for typed decode.
+- FP8 decode uses `__builtin_amdgcn_cvt_f32_fp8(..., 0)` on gfx1201; scale is
+  fetched once for the source-token/KV-head/plane row and shared by its GQA
+  work. K and V rows independently reduce, upward-round, and store FP16
+  scales before E4M3FN encode.
+- The typed resident layer allocates payload/scale buffers from `KvCacheLayout`,
+  resets both payload and FP8 scale storage, and requires native HIP in the
+  measurement route. No CPU/staging fallback can produce a measured result.
+
+`cached_prefix_attn_*` and `causal_attn_*` were not repurposed: as specified
+in section 1.2, they operate on global-scale or temporary contiguous K/V
+contracts rather than this persistent per-row-scale paged cache. The new
+typed paged causal chunk reader is the persistent-cache prefill implementation.
+
+### 7.2 R9700 full-model evidence
+
+Raw evidence is in
+`benchmarks/results/2026-07-27/kv-cache-dtype-kernels/run-20260727T021656+0900/`.
+All AQ4 timing rows use one same-length warm-up and five timed repeats; decode
+uses a 3,968-token prefix and measures 128 generated tokens.
+
+| prompt tokens | F32 prefill tok/s | F16 prefill tok/s | FP8 E4M3FN prefill tok/s |
+|---:|---:|---:|---:|
+| 128 | 1019.612 | 979.171 | 976.188 |
+| 512 | 1020.838 | 900.256 | 887.719 |
+| 1024 | 1004.636 | 799.390 | 776.468 |
+| 2048 | 966.915 | 648.768 | 631.446 |
+| 4095 | 899.934 | 464.278 | 440.562 |
+
+| long-context decode dtype | tok/s | ratio to F32 |
+|---|---:|---:|
+| F32 | 65.748 | 1.0000x |
+| F16 | 68.938 | 1.0485x |
+| FP8 E4M3FN | 68.358 | 1.0397x |
+
+Thus reduced payload traffic helps full-model long decode even after conversion
+and scale work, but the first typed causal-prefill reader does not yet match
+the existing F32 WMMA reader. This is an engineering observation, not a
+promotion gate.
+
+### 7.3 Actual capacity and quality
+
+Model loads succeeded at F32 4,096, F16 8,192, and FP8 16,256 requested
+logical tokens. The first two use exactly 256 MiB over the eight full-attention
+layers. FP8 uses 64 whole 256-token pages per layer: 16,384 physical tokens
+and 258 MiB. The requested 16,256 context is therefore achieved; the extra
+2 MiB versus the mathematical 256 MiB comparison is page rounding specific to
+the AQ4 block size, not FP8 scale overhead.
+
+The same tokenizer-produced 3,968-token natural-language prompt generated 64
+token IDs that were byte-for-byte identical after F32, F16, and FP8 cache
+attention. Its decoded text is stored side by side. The generation budget
+ends during the shared reasoning preamble, before the final short factual
+answer, so this is evidence of no observed FP8-specific degradation rather
+than a claim of answer-completion quality.
+
+F32 default regression was also rerun through the current-source SQ8 control:
+all 10 final-hidden/logit files for prompt lengths 128, 512, 1024, 2048, and
+4095 byte-match BR's serial-GQA oracle. Its decode mean is 27.576901 tok/s,
+versus the BH reference 27.378731 tok/s.
+
+No served-model promotion was made. This implementation does not add a
+fail-closed served-model `ULLM_KV_CACHE_DTYPE` selector, and activating it
+would also trade a clear prefill regression for capacity/decode gains. The
+decision relies on saved generated text and deployment contract state, not on a
+numerical quality threshold.

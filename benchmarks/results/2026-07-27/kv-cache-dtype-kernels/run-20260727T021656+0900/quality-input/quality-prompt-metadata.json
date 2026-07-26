@@ -1,0 +1,9 @@
+{
+  "schema": "ullm.kv_cache_dtype_quality_prompt.v0.1",
+  "tokenizer_root": "/home/homelab1/datapool/ai_models/safetensors/Qwen/Qwen3.5-9B",
+  "target_tokens": 3968,
+  "actual_tokens": 3968,
+  "token_ids_sha256_le_u64": "e7003674c8ad8e0c6f9b9e7b6bda3644aa7ec07ea3c6462e5e7bcb2df9baf165",
+  "semantic_question": "south archive card color and index",
+  "expected_factual_answer": "violet and 37"
+}

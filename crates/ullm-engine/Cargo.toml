@@ -83,6 +83,10 @@ required-features = ["rocm-moe-gfx1201"]
 name = "ullm-qwen35-aq4-baseline-probe"
 path = "src/bin/ullm-qwen35-aq4-baseline-probe.rs"
 
+[[bin]]
+name = "ullm-aq4-kv-cache-dtype-measure"
+path = "src/bin/ullm-aq4-kv-cache-dtype-measure.rs"
+
 [[example]]
 name = "sq8_ck_layer"
 required-features = ["rocm-ck-gfx1201"]

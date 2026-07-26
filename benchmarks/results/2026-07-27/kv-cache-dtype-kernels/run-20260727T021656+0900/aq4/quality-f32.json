@@ -1,0 +1,139 @@
+{
+  "backend": "hip",
+  "device_index": 1,
+  "device_name": "AMD Radeon Graphics",
+  "device_total_global_mem_bytes": 34208743424,
+  "format_id": "AQ4_0",
+  "generation": {
+    "generated_token_ids": [
+      90700,
+      8340,
+      25,
+      271,
+      16,
+      13,
+      220,
+      2972,
+      2014,
+      53983,
+      279,
+      5952,
+      64700,
+      198,
+      262,
+      348,
+      256,
+      5396,
+      25,
+      357,
+      1248,
+      1414,
+      8222,
+      5081,
+      328,
+      8839,
+      2121,
+      2424,
+      1,
+      10379,
+      318,
+      15,
+      15,
+      15,
+      310,
+      220,
+      15,
+      19,
+      18,
+      11,
+      1179,
+      220,
+      17,
+      20,
+      19,
+      11,
+      220,
+      17,
+      20,
+      20,
+      553,
+      198,
+      262,
+      348,
+      256,
+      8615,
+      314,
+      1754,
+      2424,
+      25,
+      3744,
+      53283,
+      17593,
+      7176
+    ],
+    "input_token_count": 3968,
+    "input_token_ids_sha256": "e7003674c8ad8e0c6f9b9e7b6bda3644aa7ec07ea3c6462e5e7bcb2df9baf165",
+    "topk_after_last_processed_token": [
+      {
+        "logit": 35.293941497802734,
+        "token_id": 7176
+      },
+      {
+        "logit": 28.425474166870117,
+        "token_id": 3575
+      },
+      {
+        "logit": 23.25201416015625,
+        "token_id": 7736
+      },
+      {
+        "logit": 20.602466583251953,
+        "token_id": 112095
+      },
+      {
+        "logit": 19.86277198791504,
+        "token_id": 9054
+      },
+      {
+        "logit": 19.613664627075195,
+        "token_id": 116127
+      },
+      {
+        "logit": 19.256711959838867,
+        "token_id": 54006
+      },
+      {
+        "logit": 18.496376037597656,
+        "token_id": 24231
+      },
+      {
+        "logit": 17.651412963867188,
+        "token_id": 96736
+      },
+      {
+        "logit": 17.420310974121094,
+        "token_id": 39990
+      }
+    ]
+  },
+  "geometry": {
+    "block_size": 256,
+    "cache_blocks": 16,
+    "context_length": 4096,
+    "hidden": 4096,
+    "self_attention": {
+      "head_dim": 256,
+      "kv_heads": 4,
+      "q_heads": 16,
+      "value_dim": 256
+    },
+    "vocab": 248320
+  },
+  "kv_cache_dtype": {
+    "key": "f32",
+    "value": "f32"
+  },
+  "mode": "generate",
+  "package_dir": "/home/homelab1/datapool/ullm/product/qwen35-9b-aq4-cli-v0.1/package",
+  "schema": "ullm.aq4_kv_cache_dtype_measure.v0.1"
+}
