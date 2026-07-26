@@ -20,6 +20,7 @@ pub mod gemma4_text_executor;
 pub mod golden;
 pub mod host_bytes;
 pub mod inference_api;
+pub mod kv_cache_dtype;
 pub mod loader;
 pub mod model_config;
 pub mod model_graph;

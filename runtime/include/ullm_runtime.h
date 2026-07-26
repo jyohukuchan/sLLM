@@ -45,6 +45,18 @@ typedef enum ullm_moe_weight_dtype {
 } ullm_moe_weight_dtype;
 
 /*
+ * Persistent paged K/V storage representation.  Q/K/V projection inputs,
+ * queries, attention accumulators, and outputs remain F32.  FP8 is OCP
+ * E4M3FN and carries one raw IEEE FP16 scale per physical token and KV head
+ * for each plane.  Q8_0 deliberately has no value in this ABI.
+ */
+typedef enum ullm_kv_cache_dtype {
+    ULLM_KV_CACHE_DTYPE_F32 = 0,
+    ULLM_KV_CACHE_DTYPE_F16 = 1,
+    ULLM_KV_CACHE_DTYPE_FP8_E4M3FN = 2,
+} ullm_kv_cache_dtype;
+
+/*
  * Stable, test-visible AQ4 batch dispatch classification. New values are additive;
  * the existing ABI remains version 1 because no function signature or prior value changed.
  */
@@ -1408,6 +1420,55 @@ ullm_status ullm_runtime_paged_kv_write_f32(
     size_t value_dim,
     ullm_runtime_buffer *k_cache_buffer,
     ullm_runtime_buffer *v_cache_buffer,
+    ullm_runtime_stream *stream);
+
+/*
+ * Typed variant of the F32-source paged K/V write.  `k_cache_dtype` and
+ * `v_cache_dtype` may be selected independently.  F32/F16 planes require a
+ * null scale buffer; FP8 E4M3FN planes require a raw IEEE FP16 scale buffer
+ * laid out as [cache_blocks * block_size, kv_heads].
+ */
+ullm_status ullm_runtime_paged_kv_write_typed_f32(
+    const ullm_runtime_buffer *k_buffer,
+    const ullm_runtime_buffer *v_buffer,
+    const ullm_runtime_buffer *block_table_buffer,
+    size_t cache_position,
+    size_t block_size,
+    size_t cache_blocks,
+    size_t kv_heads,
+    size_t head_dim,
+    size_t value_dim,
+    ullm_kv_cache_dtype k_cache_dtype,
+    ullm_kv_cache_dtype v_cache_dtype,
+    ullm_runtime_buffer *k_cache_buffer,
+    ullm_runtime_buffer *v_cache_buffer,
+    ullm_runtime_buffer *k_scale_buffer,
+    ullm_runtime_buffer *v_scale_buffer,
+    ullm_runtime_stream *stream);
+
+/*
+ * Typed paged decode attention.  Q and output stay F32.  Scale buffers use
+ * the same [physical_token, kv_head] layout as the typed write above and are
+ * null exactly for non-FP8 planes.
+ */
+ullm_status ullm_runtime_paged_decode_attn_typed_f32(
+    const ullm_runtime_buffer *q_buffer,
+    const ullm_runtime_buffer *k_cache_buffer,
+    const ullm_runtime_buffer *v_cache_buffer,
+    const ullm_runtime_buffer *block_table_buffer,
+    const ullm_runtime_buffer *k_scale_buffer,
+    const ullm_runtime_buffer *v_scale_buffer,
+    size_t cache_len,
+    size_t block_size,
+    size_t cache_blocks,
+    size_t q_heads,
+    size_t kv_heads,
+    size_t head_dim,
+    size_t value_dim,
+    float softmax_scale,
+    ullm_kv_cache_dtype k_cache_dtype,
+    ullm_kv_cache_dtype v_cache_dtype,
+    ullm_runtime_buffer *output_buffer,
     ullm_runtime_stream *stream);
 
 /*

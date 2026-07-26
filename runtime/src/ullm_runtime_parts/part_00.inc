@@ -10895,6 +10895,395 @@ void paged_kv_write_f32_host(
     }
 }
 
+// Persistent K/V cache helpers.  These intentionally live beside the F32
+// host reference so CPU execution and HIP staging share one exact storage
+// contract.  They are not SQ8_0 helpers: KV is dynamically appended and its
+// E4M3FN scale is independently stored for each (token, KV-head, plane).
+bool kv_cache_dtype_is_supported(ullm_kv_cache_dtype dtype) {
+    return dtype == ULLM_KV_CACHE_DTYPE_F32 || dtype == ULLM_KV_CACHE_DTYPE_F16 ||
+        dtype == ULLM_KV_CACHE_DTYPE_FP8_E4M3FN;
+}
+
+size_t kv_cache_dtype_payload_bytes(ullm_kv_cache_dtype dtype) {
+    switch (dtype) {
+        case ULLM_KV_CACHE_DTYPE_F32:
+            return sizeof(float);
+        case ULLM_KV_CACHE_DTYPE_F16:
+            return sizeof(uint16_t);
+        case ULLM_KV_CACHE_DTYPE_FP8_E4M3FN:
+            return sizeof(uint8_t);
+        default:
+            return 0u;
+    }
+}
+
+bool kv_cache_dtype_requires_scale(ullm_kv_cache_dtype dtype) {
+    return dtype == ULLM_KV_CACHE_DTYPE_FP8_E4M3FN;
+}
+
+float kv_cache_f16_to_f32(uint16_t bits) {
+    const float sign = (bits & 0x8000u) == 0u ? 1.0f : -1.0f;
+    const unsigned int exponent = (static_cast<unsigned int>(bits) >> 10u) & 0x1fu;
+    const unsigned int mantissa = static_cast<unsigned int>(bits) & 0x03ffu;
+    if (exponent == 0u) {
+        return mantissa == 0u ? sign * 0.0f : sign * std::ldexp(static_cast<float>(mantissa), -24);
+    }
+    if (exponent == 0x1fu) {
+        return mantissa == 0u ? sign * std::numeric_limits<float>::infinity()
+                              : std::numeric_limits<float>::quiet_NaN();
+    }
+    return sign * std::ldexp(1.0f + static_cast<float>(mantissa) / 1024.0f,
+                             static_cast<int>(exponent) - 15);
+}
+
+uint32_t kv_cache_round_shift_ties_even(uint32_t value, unsigned int shift) {
+    if (shift == 0u) {
+        return value;
+    }
+    const uint32_t quotient = value >> shift;
+    const uint32_t remainder = value & ((uint32_t{1} << shift) - 1u);
+    const uint32_t halfway = uint32_t{1} << (shift - 1u);
+    return remainder > halfway || (remainder == halfway && (quotient & 1u) != 0u)
+        ? quotient + 1u
+        : quotient;
+}
+
+uint16_t kv_cache_f32_to_f16_rne_bits(float value) {
+    uint32_t raw = 0u;
+    std::memcpy(&raw, &value, sizeof(raw));
+    const uint16_t sign = static_cast<uint16_t>((raw >> 16u) & 0x8000u);
+    const uint32_t exponent_bits = (raw >> 23u) & 0xffu;
+    const uint32_t mantissa = raw & 0x7fffffu;
+    if (exponent_bits == 0xffu) {
+        return static_cast<uint16_t>(sign | (mantissa == 0u ? 0x7c00u : 0x7e00u));
+    }
+    const int exponent = static_cast<int>(exponent_bits) - 127;
+    if (exponent > 15) {
+        return static_cast<uint16_t>(sign | 0x7c00u);
+    }
+    if (exponent >= -14) {
+        uint32_t rounded = kv_cache_round_shift_ties_even(mantissa, 13u);
+        uint32_t half_exponent = static_cast<uint32_t>(exponent + 15);
+        if (rounded == 0x400u) {
+            rounded = 0u;
+            ++half_exponent;
+            if (half_exponent >= 0x1fu) {
+                return static_cast<uint16_t>(sign | 0x7c00u);
+            }
+        }
+        return static_cast<uint16_t>(sign | (half_exponent << 10u) | rounded);
+    }
+    if (exponent < -25) {
+        return sign;
+    }
+    const uint32_t significand = mantissa | 0x800000u;
+    return static_cast<uint16_t>(
+        sign | kv_cache_round_shift_ties_even(significand, static_cast<unsigned int>(-exponent - 1)));
+}
+
+bool kv_cache_f32_to_positive_f16_ceil(float value, uint16_t *bits_out) {
+    if (bits_out == nullptr || !std::isfinite(value) || value <= 0.0f) {
+        return false;
+    }
+    uint16_t bits = kv_cache_f32_to_f16_rne_bits(value);
+    // Preserve a positive scale even below the smallest representable F16
+    // subnormal.  That is preferable to silently mapping a nonzero head to
+    // a zero-scale cache row.
+    if (bits == 0u) {
+        bits = 1u;
+    }
+    if (bits >= 0x7c00u) {
+        return false;
+    }
+    if (kv_cache_f16_to_f32(bits) < value) {
+        ++bits;
+        if (bits >= 0x7c00u) {
+            return false;
+        }
+    }
+    const float stored = kv_cache_f16_to_f32(bits);
+    if (!std::isfinite(stored) || stored <= 0.0f || stored < value) {
+        return false;
+    }
+    *bits_out = bits;
+    return true;
+}
+
+float kv_cache_fp8_e4m3fn_to_f32(uint8_t value) {
+    const unsigned int raw = static_cast<unsigned int>(value);
+    const unsigned int sign = raw >> 7u;
+    const unsigned int exponent = (raw >> 3u) & 0x0fu;
+    const unsigned int mantissa = raw & 0x07u;
+    // OCP E4M3FN reserves +/-0x7f as NaN; the dynamically-written encoder
+    // below never emits it for finite values.
+    if (exponent == 0x0fu && mantissa == 0x07u) {
+        return std::numeric_limits<float>::quiet_NaN();
+    }
+    const float magnitude = exponent == 0u
+        ? static_cast<float>(mantissa) * 0.001953125f
+        : std::ldexp(1.0f + static_cast<float>(mantissa) * 0.125f,
+                     static_cast<int>(exponent) - 7);
+    return sign == 0u ? magnitude : -magnitude;
+}
+
+uint8_t kv_cache_f32_to_fp8_e4m3fn_rne(float value, float scale) {
+    uint32_t raw = 0u;
+    std::memcpy(&raw, &value, sizeof(raw));
+    const unsigned int sign = (raw >> 24u) & 0x80u;
+    const float magnitude = std::fabs(value / scale);
+    if (magnitude == 0.0f) {
+        return static_cast<uint8_t>(sign);
+    }
+    if (magnitude >= 448.0f) {
+        return static_cast<uint8_t>(sign | 0x7eu);
+    }
+    unsigned int lower_bound = 0u;
+    unsigned int upper_bound = 126u;
+    while (lower_bound < upper_bound) {
+        const unsigned int middle = lower_bound + (upper_bound - lower_bound) / 2u;
+        if (std::fabs(kv_cache_fp8_e4m3fn_to_f32(static_cast<uint8_t>(middle))) < magnitude) {
+            lower_bound = middle + 1u;
+        } else {
+            upper_bound = middle;
+        }
+    }
+    const unsigned int upper = lower_bound;
+    const float upper_value = kv_cache_fp8_e4m3fn_to_f32(static_cast<uint8_t>(upper));
+    if (upper_value == magnitude) {
+        return static_cast<uint8_t>(sign | upper);
+    }
+    const unsigned int lower = upper - 1u;
+    const double lower_distance = static_cast<double>(magnitude) -
+        static_cast<double>(kv_cache_fp8_e4m3fn_to_f32(static_cast<uint8_t>(lower)));
+    const double upper_distance = static_cast<double>(upper_value) - static_cast<double>(magnitude);
+    const unsigned int encoded = lower_distance < upper_distance
+        ? lower
+        : (upper_distance < lower_distance ? upper : ((lower & 1u) == 0u ? lower : upper));
+    return static_cast<uint8_t>(sign | encoded);
+}
+
+bool kv_cache_write_typed_plane_f32(
+    const float *source,
+    size_t elements,
+    ullm_kv_cache_dtype dtype,
+    void *payload,
+    uint16_t *scale_slot) {
+    if (source == nullptr || payload == nullptr || !kv_cache_dtype_is_supported(dtype)) {
+        return false;
+    }
+    if (dtype == ULLM_KV_CACHE_DTYPE_F32) {
+        std::copy(source, source + elements, static_cast<float *>(payload));
+        return true;
+    }
+    if (dtype == ULLM_KV_CACHE_DTYPE_F16) {
+        auto *destination = static_cast<uint16_t *>(payload);
+        for (size_t index = 0; index < elements; ++index) {
+            if (!std::isfinite(source[index])) {
+                return false;
+            }
+            const uint16_t bits = kv_cache_f32_to_f16_rne_bits(source[index]);
+            if ((bits & 0x7c00u) == 0x7c00u) {
+                return false;
+            }
+            destination[index] = bits;
+        }
+        return true;
+    }
+    if (scale_slot == nullptr) {
+        return false;
+    }
+    float maximum = 0.0f;
+    for (size_t index = 0; index < elements; ++index) {
+        if (!std::isfinite(source[index])) {
+            return false;
+        }
+        maximum = std::max(maximum, std::fabs(source[index]));
+    }
+    uint16_t scale_bits = 0x3c00u; // exact 1.0 for an all-zero head.
+    if (maximum != 0.0f &&
+        !kv_cache_f32_to_positive_f16_ceil(maximum / 448.0f, &scale_bits)) {
+        return false;
+    }
+    const float scale = kv_cache_f16_to_f32(scale_bits);
+    auto *destination = static_cast<uint8_t *>(payload);
+    for (size_t index = 0; index < elements; ++index) {
+        destination[index] = kv_cache_f32_to_fp8_e4m3fn_rne(source[index], scale);
+    }
+    *scale_slot = scale_bits;
+    return true;
+}
+
+bool kv_cache_read_typed_value(
+    const void *payload,
+    ullm_kv_cache_dtype dtype,
+    const uint16_t *scale_slot,
+    size_t index,
+    float *value_out) {
+    if (payload == nullptr || value_out == nullptr || !kv_cache_dtype_is_supported(dtype)) {
+        return false;
+    }
+    float value = 0.0f;
+    if (dtype == ULLM_KV_CACHE_DTYPE_F32) {
+        value = static_cast<const float *>(payload)[index];
+    } else if (dtype == ULLM_KV_CACHE_DTYPE_F16) {
+        value = kv_cache_f16_to_f32(static_cast<const uint16_t *>(payload)[index]);
+    } else {
+        if (scale_slot == nullptr) {
+            return false;
+        }
+        const float scale = kv_cache_f16_to_f32(*scale_slot);
+        // A zero scale denotes a reset/unwritten row.  Its zero payload is
+        // semantically zero and must not turn diagnostic readback into NaN.
+        if (scale == 0.0f) {
+            *value_out = 0.0f;
+            return true;
+        }
+        value = kv_cache_fp8_e4m3fn_to_f32(static_cast<const uint8_t *>(payload)[index]) * scale;
+    }
+    if (!std::isfinite(value)) {
+        return false;
+    }
+    *value_out = value;
+    return true;
+}
+
+bool paged_kv_write_typed_f32_host(
+    const float *k,
+    const float *v,
+    const std::uint32_t *block_table,
+    size_t cache_position,
+    size_t block_size,
+    size_t kv_heads,
+    size_t head_dim,
+    size_t value_dim,
+    ullm_kv_cache_dtype k_dtype,
+    ullm_kv_cache_dtype v_dtype,
+    void *k_cache,
+    void *v_cache,
+    uint16_t *k_scales,
+    uint16_t *v_scales) {
+    const size_t block_index = cache_position / block_size;
+    const size_t block_offset = cache_position - block_index * block_size;
+    const size_t physical_timestep =
+        static_cast<size_t>(block_table[block_index]) * block_size + block_offset;
+    const size_t k_payload_bytes = kv_cache_dtype_payload_bytes(k_dtype);
+    const size_t v_payload_bytes = kv_cache_dtype_payload_bytes(v_dtype);
+    for (size_t kv_head = 0; kv_head < kv_heads; ++kv_head) {
+        const size_t physical_head = physical_timestep * kv_heads + kv_head;
+        const size_t k_source_offset = kv_head * head_dim;
+        const size_t v_source_offset = kv_head * value_dim;
+        auto *k_destination = static_cast<uint8_t *>(k_cache) +
+            physical_head * head_dim * k_payload_bytes;
+        auto *v_destination = static_cast<uint8_t *>(v_cache) +
+            physical_head * value_dim * v_payload_bytes;
+        uint16_t *k_scale = k_dtype == ULLM_KV_CACHE_DTYPE_FP8_E4M3FN
+            ? k_scales + physical_head
+            : nullptr;
+        uint16_t *v_scale = v_dtype == ULLM_KV_CACHE_DTYPE_FP8_E4M3FN
+            ? v_scales + physical_head
+            : nullptr;
+        if (!kv_cache_write_typed_plane_f32(
+                k + k_source_offset, head_dim, k_dtype, k_destination, k_scale) ||
+            !kv_cache_write_typed_plane_f32(
+                v + v_source_offset, value_dim, v_dtype, v_destination, v_scale)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool paged_decode_attn_typed_f32_host(
+    const float *q,
+    const void *k_cache,
+    const void *v_cache,
+    const std::uint32_t *block_table,
+    const uint16_t *k_scales,
+    const uint16_t *v_scales,
+    size_t cache_len,
+    size_t block_size,
+    size_t q_heads,
+    size_t kv_heads,
+    size_t head_dim,
+    size_t value_dim,
+    float softmax_scale,
+    ullm_kv_cache_dtype k_dtype,
+    ullm_kv_cache_dtype v_dtype,
+    float *output) {
+    const size_t q_per_kv = q_heads / kv_heads;
+    const size_t k_payload_bytes = kv_cache_dtype_payload_bytes(k_dtype);
+    const size_t v_payload_bytes = kv_cache_dtype_payload_bytes(v_dtype);
+    for (size_t q_head = 0; q_head < q_heads; ++q_head) {
+        const size_t kv_head = q_head / q_per_kv;
+        const size_t q_base = q_head * head_dim;
+        float max_score = -std::numeric_limits<float>::infinity();
+        for (size_t source = 0; source < cache_len; ++source) {
+            const size_t block_index = source / block_size;
+            const size_t block_offset = source - block_index * block_size;
+            const size_t physical =
+                static_cast<size_t>(block_table[block_index]) * block_size + block_offset;
+            const size_t physical_head = physical * kv_heads + kv_head;
+            const auto *k_plane = static_cast<const uint8_t *>(k_cache) +
+                physical_head * head_dim * k_payload_bytes;
+            const uint16_t *k_scale = k_dtype == ULLM_KV_CACHE_DTYPE_FP8_E4M3FN
+                ? k_scales + physical_head
+                : nullptr;
+            float score = 0.0f;
+            for (size_t dim = 0; dim < head_dim; ++dim) {
+                float key = 0.0f;
+                if (!kv_cache_read_typed_value(k_plane, k_dtype, k_scale, dim, &key)) {
+                    return false;
+                }
+                score += q[q_base + dim] * key;
+            }
+            max_score = std::max(max_score, score * softmax_scale);
+        }
+        float denominator = 0.0f;
+        std::vector<float> weighted(value_dim, 0.0f);
+        for (size_t source = 0; source < cache_len; ++source) {
+            const size_t block_index = source / block_size;
+            const size_t block_offset = source - block_index * block_size;
+            const size_t physical =
+                static_cast<size_t>(block_table[block_index]) * block_size + block_offset;
+            const size_t physical_head = physical * kv_heads + kv_head;
+            const auto *k_plane = static_cast<const uint8_t *>(k_cache) +
+                physical_head * head_dim * k_payload_bytes;
+            const auto *v_plane = static_cast<const uint8_t *>(v_cache) +
+                physical_head * value_dim * v_payload_bytes;
+            const uint16_t *k_scale = k_dtype == ULLM_KV_CACHE_DTYPE_FP8_E4M3FN
+                ? k_scales + physical_head
+                : nullptr;
+            const uint16_t *v_scale = v_dtype == ULLM_KV_CACHE_DTYPE_FP8_E4M3FN
+                ? v_scales + physical_head
+                : nullptr;
+            float score = 0.0f;
+            for (size_t dim = 0; dim < head_dim; ++dim) {
+                float key = 0.0f;
+                if (!kv_cache_read_typed_value(k_plane, k_dtype, k_scale, dim, &key)) {
+                    return false;
+                }
+                score += q[q_base + dim] * key;
+            }
+            const float weight = std::exp(score * softmax_scale - max_score);
+            denominator += weight;
+            for (size_t value = 0; value < value_dim; ++value) {
+                float cached_value = 0.0f;
+                if (!kv_cache_read_typed_value(v_plane, v_dtype, v_scale, value, &cached_value)) {
+                    return false;
+                }
+                weighted[value] += weight * cached_value;
+            }
+        }
+        if (!std::isfinite(denominator) || denominator <= 0.0f) {
+            return false;
+        }
+        const size_t output_base = q_head * value_dim;
+        for (size_t value = 0; value < value_dim; ++value) {
+            output[output_base + value] = weighted[value] / denominator;
+        }
+    }
+    return true;
+}
+
 void paged_kv_write_chunk_f32_host(
     const float *k,
     const float *v,

@@ -9,6 +9,10 @@
 
 use ullm_runtime_sys::{RuntimeBuffer, RuntimeContext, RuntimeStream};
 
+use crate::kv_cache_dtype::{
+    KvCacheDtype, KvCacheDtypes, KvCacheLayout, f16_bits_to_f32, fp8_e4m3fn_bits_to_f32,
+};
+
 /// Explicitly opt into the known-divergent multi-tile source-split path for
 /// isolated numerical evaluation.  It is deliberately not a production
 /// selector: absent (or any value other than exactly `1`) retains the direct
@@ -92,6 +96,8 @@ struct Qwen3SelfAttnBlockDeviceStepOutput {
 #[derive(Debug)]
 pub struct PagedDecodeState {
     shape: PagedDecodeShape,
+    kv_cache_dtypes: KvCacheDtypes,
+    kv_cache_layout: KvCacheLayout,
     block_table: Vec<u32>,
     written_len: usize,
     block_table_buffer: RuntimeBuffer,
@@ -100,6 +106,10 @@ pub struct PagedDecodeState {
     v_token_buffer: RuntimeBuffer,
     k_cache_buffer: RuntimeBuffer,
     v_cache_buffer: RuntimeBuffer,
+    // FP8 owns one independent FP16 scale per `(physical_token, kv_head)`.
+    // F32/F16 deliberately leave the corresponding option empty.
+    k_scale_buffer: Option<RuntimeBuffer>,
+    v_scale_buffer: Option<RuntimeBuffer>,
     output_buffer: RuntimeBuffer,
     // The normal direct paged-decode dispatch remains the default. This
     // workspace is populated only by an explicit test caller using the
@@ -1956,8 +1966,33 @@ impl PagedDecodeState {
         shape: PagedDecodeShape,
         block_table: Vec<u32>,
     ) -> Result<Self, String> {
+        let kv_cache_dtypes = KvCacheDtypes::from_env()?;
+        Self::new_with_kv_cache_dtypes(context, stream, shape, block_table, kv_cache_dtypes)
+    }
+
+    /// Builds a paged decoder with independently-selected persistent K/V
+    /// dtypes.  F32 inputs, queries, and attention outputs stay unchanged;
+    /// only the durable cache payload is encoded.
+    ///
+    /// This explicit constructor is useful for tests and embedding callers.
+    /// Ordinary callers use [`Self::new`], whose default is F32 and which
+    /// recognizes the opt-in `ULLM_KV_CACHE_*` selectors.
+    pub fn new_with_kv_cache_dtypes(
+        context: &mut RuntimeContext,
+        stream: &mut RuntimeStream,
+        shape: PagedDecodeShape,
+        block_table: Vec<u32>,
+        kv_cache_dtypes: KvCacheDtypes,
+    ) -> Result<Self, String> {
         shape.validate()?;
         validate_block_table(&block_table, shape.cache_blocks)?;
+        let kv_cache_layout = KvCacheLayout::new(
+            kv_cache_dtypes,
+            shape.physical_tokens()?,
+            shape.kv_heads,
+            shape.head_dim,
+            shape.value_dim,
+        )?;
 
         let block_table_bytes = u32s_to_le_bytes(&block_table);
         let mut block_table_buffer = context
@@ -1973,11 +2008,33 @@ impl PagedDecodeState {
             .alloc_buffer(f32_bytes(shape.v_token_elements()?))
             .map_err(|err| format!("failed to allocate paged decoder v token buffer: {err}"))?;
         let mut k_cache_buffer = context
-            .alloc_buffer(f32_bytes(shape.k_cache_elements()?))
+            .alloc_buffer(kv_cache_layout.k_payload_bytes)
             .map_err(|err| format!("failed to allocate paged decoder k cache: {err}"))?;
         let mut v_cache_buffer = context
-            .alloc_buffer(f32_bytes(shape.v_cache_elements()?))
+            .alloc_buffer(kv_cache_layout.v_payload_bytes)
             .map_err(|err| format!("failed to allocate paged decoder v cache: {err}"))?;
+        let mut k_scale_buffer = if kv_cache_layout.k_scale_bytes == 0 {
+            None
+        } else {
+            Some(
+                context
+                    .alloc_buffer(kv_cache_layout.k_scale_bytes)
+                    .map_err(|err| {
+                        format!("failed to allocate paged decoder K FP8 scales: {err}")
+                    })?,
+            )
+        };
+        let mut v_scale_buffer = if kv_cache_layout.v_scale_bytes == 0 {
+            None
+        } else {
+            Some(
+                context
+                    .alloc_buffer(kv_cache_layout.v_scale_bytes)
+                    .map_err(|err| {
+                        format!("failed to allocate paged decoder V FP8 scales: {err}")
+                    })?,
+            )
+        };
         let output_buffer = context
             .alloc_buffer(f32_bytes(shape.output_elements()?))
             .map_err(|err| format!("failed to allocate paged decoder output: {err}"))?;
@@ -1990,12 +2047,20 @@ impl PagedDecodeState {
         zero_buffer(&mut v_token_buffer, Some(stream))?;
         zero_buffer(&mut k_cache_buffer, Some(stream))?;
         zero_buffer(&mut v_cache_buffer, Some(stream))?;
+        if let Some(buffer) = k_scale_buffer.as_mut() {
+            zero_buffer(buffer, Some(stream))?;
+        }
+        if let Some(buffer) = v_scale_buffer.as_mut() {
+            zero_buffer(buffer, Some(stream))?;
+        }
         stream
             .synchronize()
             .map_err(|err| format!("failed to synchronize paged decoder setup: {err}"))?;
 
         Ok(Self {
             shape,
+            kv_cache_dtypes,
+            kv_cache_layout,
             block_table,
             written_len: 0,
             block_table_buffer,
@@ -2004,6 +2069,8 @@ impl PagedDecodeState {
             v_token_buffer,
             k_cache_buffer,
             v_cache_buffer,
+            k_scale_buffer,
+            v_scale_buffer,
             output_buffer,
             split_decode: None,
         })
@@ -2050,6 +2117,16 @@ impl PagedDecodeState {
         self.shape
     }
 
+    /// Selected persistent K/V formats.  The default remains `{ f32, f32 }`.
+    pub fn kv_cache_dtypes(&self) -> KvCacheDtypes {
+        self.kv_cache_dtypes
+    }
+
+    /// Exact payload-plus-scale allocation contract for this cache instance.
+    pub fn kv_cache_layout(&self) -> KvCacheLayout {
+        self.kv_cache_layout
+    }
+
     pub fn block_table(&self) -> &[u32] {
         &self.block_table
     }
@@ -2076,6 +2153,19 @@ impl PagedDecodeState {
             buffer
                 .zero(0, bytes, Some(&mut *stream))
                 .map_err(|err| format!("failed to enqueue serving paged {label} reset: {err}"))?;
+        }
+        for (label, buffer) in [
+            ("K FP8 scale", self.k_scale_buffer.as_mut()),
+            ("V FP8 scale", self.v_scale_buffer.as_mut()),
+        ] {
+            if let Some(buffer) = buffer {
+                let bytes = buffer.size().map_err(|err| {
+                    format!("failed to inspect serving paged {label} buffer: {err}")
+                })?;
+                buffer.zero(0, bytes, Some(&mut *stream)).map_err(|err| {
+                    format!("failed to enqueue serving paged {label} reset: {err}")
+                })?;
+            }
         }
         Ok(())
     }
@@ -2110,10 +2200,64 @@ impl PagedDecodeState {
     pub fn reset(&mut self, stream: &mut RuntimeStream) -> Result<(), String> {
         zero_buffer(&mut self.k_cache_buffer, Some(stream))?;
         zero_buffer(&mut self.v_cache_buffer, Some(stream))?;
+        if let Some(buffer) = self.k_scale_buffer.as_mut() {
+            zero_buffer(buffer, Some(stream))?;
+        }
+        if let Some(buffer) = self.v_scale_buffer.as_mut() {
+            zero_buffer(buffer, Some(stream))?;
+        }
         self.written_len = 0;
         stream
             .synchronize()
             .map_err(|err| format!("failed to synchronize paged decoder reset: {err}"))
+    }
+
+    fn uses_legacy_f32_kv_cache(&self) -> bool {
+        self.kv_cache_dtypes == KvCacheDtypes::default()
+    }
+
+    fn enqueue_kv_write(
+        &mut self,
+        stream: &mut RuntimeStream,
+        cache_position: usize,
+    ) -> Result<(), String> {
+        if self.uses_legacy_f32_kv_cache() {
+            return ullm_runtime_sys::paged_kv_write_f32(
+                &self.k_token_buffer,
+                &self.v_token_buffer,
+                &self.block_table_buffer,
+                cache_position,
+                self.shape.block_size,
+                self.shape.cache_blocks,
+                self.shape.kv_heads,
+                self.shape.head_dim,
+                self.shape.value_dim,
+                &mut self.k_cache_buffer,
+                &mut self.v_cache_buffer,
+                Some(stream),
+            )
+            .map_err(|err| format!("failed to run paged decoder KV write: {err}"));
+        }
+
+        ullm_runtime_sys::paged_kv_write_typed_f32(
+            &self.k_token_buffer,
+            &self.v_token_buffer,
+            &self.block_table_buffer,
+            cache_position,
+            self.shape.block_size,
+            self.shape.cache_blocks,
+            self.shape.kv_heads,
+            self.shape.head_dim,
+            self.shape.value_dim,
+            self.kv_cache_dtypes.key.ffi_code(),
+            self.kv_cache_dtypes.value.ffi_code(),
+            &mut self.k_cache_buffer,
+            &mut self.v_cache_buffer,
+            self.k_scale_buffer.as_mut(),
+            self.v_scale_buffer.as_mut(),
+            Some(stream),
+        )
+        .map_err(|err| format!("failed to run typed paged decoder KV write: {err}"))
     }
 
     pub fn write_token(
@@ -2160,21 +2304,7 @@ impl PagedDecodeState {
             .synchronize()
             .map_err(|err| format!("failed to synchronize paged decoder token input: {err}"))?;
 
-        ullm_runtime_sys::paged_kv_write_f32(
-            &self.k_token_buffer,
-            &self.v_token_buffer,
-            &self.block_table_buffer,
-            cache_position,
-            self.shape.block_size,
-            self.shape.cache_blocks,
-            self.shape.kv_heads,
-            self.shape.head_dim,
-            self.shape.value_dim,
-            &mut self.k_cache_buffer,
-            &mut self.v_cache_buffer,
-            Some(stream),
-        )
-        .map_err(|err| format!("failed to run paged decoder KV write: {err}"))?;
+        self.enqueue_kv_write(stream, cache_position)?;
         stream
             .synchronize()
             .map_err(|err| format!("failed to synchronize paged decoder KV write: {err}"))?;
@@ -2222,21 +2352,7 @@ impl PagedDecodeState {
             self.v_token_buffer
                 .copy_from_buffer(0, v_sequence, v_offset, v_token_bytes, Some(&mut *stream))
                 .map_err(|err| format!("failed to copy paged decoder device V token: {err}"))?;
-            ullm_runtime_sys::paged_kv_write_f32(
-                &self.k_token_buffer,
-                &self.v_token_buffer,
-                &self.block_table_buffer,
-                start + token_index,
-                self.shape.block_size,
-                self.shape.cache_blocks,
-                self.shape.kv_heads,
-                self.shape.head_dim,
-                self.shape.value_dim,
-                &mut self.k_cache_buffer,
-                &mut self.v_cache_buffer,
-                Some(&mut *stream),
-            )
-            .map_err(|err| format!("failed to run paged decoder device KV write: {err}"))?;
+            self.enqueue_kv_write(stream, start + token_index)?;
             self.written_len = start + token_index + 1;
         }
         Ok(start..end)
@@ -2317,6 +2433,43 @@ impl PagedDecodeState {
         )?;
 
         let written = self.write_sequence_from_device(stream, k, v, new_tokens)?;
+        if !self.uses_legacy_f32_kv_cache() {
+            // The fused cached-prefix reader is F32-only today.  Preserve it
+            // exactly for F32 and use the typed direct reader per causal
+            // query until a native batched typed prefill kernel lands.  All
+            // K/V rows have already been written, but each invocation is
+            // bounded to the token's causal prefix, so later rows are never
+            // observable to an earlier query.
+            let q_token_bytes = f32_bytes(self.shape.q_elements()?);
+            let output_token_bytes = f32_bytes(self.shape.output_elements()?);
+            for token_index in 0..new_tokens {
+                let q_offset = token_index
+                    .checked_mul(q_token_bytes)
+                    .ok_or_else(|| "paged decoder typed prefill Q offset overflows".to_string())?;
+                let output_offset =
+                    token_index.checked_mul(output_token_bytes).ok_or_else(|| {
+                        "paged decoder typed prefill output offset overflows".to_string()
+                    })?;
+                self.q_buffer
+                    .copy_from_buffer(0, q, q_offset, q_token_bytes, Some(&mut *stream))
+                    .map_err(|err| format!("failed to copy typed prefill Q token: {err}"))?;
+                self.enqueue_decode_attention(
+                    stream,
+                    cached_prefix_len + token_index + 1,
+                    softmax_scale,
+                )?;
+                output
+                    .copy_from_buffer(
+                        output_offset,
+                        &self.output_buffer,
+                        0,
+                        output_token_bytes,
+                        Some(&mut *stream),
+                    )
+                    .map_err(|err| format!("failed to copy typed prefill output token: {err}"))?;
+            }
+            return Ok(written);
+        }
         ullm_runtime_sys::cached_prefix_attn_f32_flash2(
             q,
             &self.k_cache_buffer,
@@ -2394,21 +2547,7 @@ impl PagedDecodeState {
             .synchronize()
             .map_err(|err| format!("failed to synchronize paged decoder token inputs: {err}"))?;
 
-        ullm_runtime_sys::paged_kv_write_f32(
-            &self.k_token_buffer,
-            &self.v_token_buffer,
-            &self.block_table_buffer,
-            cache_position,
-            self.shape.block_size,
-            self.shape.cache_blocks,
-            self.shape.kv_heads,
-            self.shape.head_dim,
-            self.shape.value_dim,
-            &mut self.k_cache_buffer,
-            &mut self.v_cache_buffer,
-            Some(stream),
-        )
-        .map_err(|err| format!("failed to run paged decoder KV write: {err}"))?;
+        self.enqueue_kv_write(stream, cache_position)?;
         self.written_len = self.written_len.max(cache_position + 1);
         let cache_len = self.written_len;
 
@@ -2462,21 +2601,7 @@ impl PagedDecodeState {
             )
             .map_err(|err| format!("failed to copy paged decoder device V token: {err}"))?;
 
-        ullm_runtime_sys::paged_kv_write_f32(
-            &self.k_token_buffer,
-            &self.v_token_buffer,
-            &self.block_table_buffer,
-            cache_position,
-            self.shape.block_size,
-            self.shape.cache_blocks,
-            self.shape.kv_heads,
-            self.shape.head_dim,
-            self.shape.value_dim,
-            &mut self.k_cache_buffer,
-            &mut self.v_cache_buffer,
-            Some(&mut *stream),
-        )
-        .map_err(|err| format!("failed to run paged decoder device KV write: {err}"))?;
+        self.enqueue_kv_write(stream, cache_position)?;
         self.written_len = cache_position + 1;
         let cache_len = self.written_len;
         self.enqueue_decode_attention(stream, cache_len, softmax_scale)?;
@@ -2522,6 +2647,32 @@ impl PagedDecodeState {
         cache_len: usize,
         softmax_scale: f32,
     ) -> Result<(), String> {
+        // Source-tiled split is currently an F32-only ABI.  Keep its exact
+        // legacy selection untouched and route typed storage through the
+        // direct reader, which knows the payload and FP8-scale layout.
+        if !self.uses_legacy_f32_kv_cache() {
+            return ullm_runtime_sys::paged_decode_attn_typed_f32(
+                &self.q_buffer,
+                &self.k_cache_buffer,
+                &self.v_cache_buffer,
+                &self.block_table_buffer,
+                self.k_scale_buffer.as_ref(),
+                self.v_scale_buffer.as_ref(),
+                cache_len,
+                self.shape.block_size,
+                self.shape.cache_blocks,
+                self.shape.q_heads,
+                self.shape.kv_heads,
+                self.shape.head_dim,
+                self.shape.value_dim,
+                softmax_scale,
+                self.kv_cache_dtypes.key.ffi_code(),
+                self.kv_cache_dtypes.value.ffi_code(),
+                &mut self.output_buffer,
+                Some(stream),
+            )
+            .map_err(|err| format!("failed to run typed paged decoder direct attention: {err}"));
+        }
         if let Some(split) = self.split_decode.as_mut() {
             let allow_multitile_evaluation = matches!(
                 std::env::var(SQ8_PAGED_DECODE_SPLIT_MULTITILE_EVALUATION_ENV).as_deref(),
@@ -2591,9 +2742,90 @@ impl PagedDecodeState {
         &self,
         stream: &mut RuntimeStream,
     ) -> Result<PagedKvCacheReadback, String> {
-        let k = read_f32_buffer(&self.k_cache_buffer, stream, self.shape.k_cache_elements()?)?;
-        let v = read_f32_buffer(&self.v_cache_buffer, stream, self.shape.v_cache_elements()?)?;
+        let k = self.read_cache_plane_to_host(
+            &self.k_cache_buffer,
+            self.k_scale_buffer.as_ref(),
+            self.kv_cache_dtypes.key,
+            self.shape.k_cache_elements()?,
+            self.shape.head_dim,
+            "K",
+            stream,
+        )?;
+        let v = self.read_cache_plane_to_host(
+            &self.v_cache_buffer,
+            self.v_scale_buffer.as_ref(),
+            self.kv_cache_dtypes.value,
+            self.shape.v_cache_elements()?,
+            self.shape.value_dim,
+            "V",
+            stream,
+        )?;
         Ok(PagedKvCacheReadback { k, v })
+    }
+
+    fn read_cache_plane_to_host(
+        &self,
+        buffer: &RuntimeBuffer,
+        scale_buffer: Option<&RuntimeBuffer>,
+        dtype: KvCacheDtype,
+        elements: usize,
+        plane_dim: usize,
+        plane_label: &str,
+        stream: &mut RuntimeStream,
+    ) -> Result<Vec<f32>, String> {
+        let payload_bytes = elements
+            .checked_mul(dtype.payload_bytes_per_value())
+            .ok_or_else(|| {
+                format!("paged decoder {plane_label} cache readback byte count overflows")
+            })?;
+        let payload = read_raw_buffer(buffer, stream, payload_bytes)?;
+        match dtype {
+            KvCacheDtype::F32 => Ok(le_bytes_to_f32s(&payload)),
+            KvCacheDtype::F16 => Ok(payload
+                .chunks_exact(std::mem::size_of::<u16>())
+                .map(|chunk| {
+                    f16_bits_to_f32(u16::from_le_bytes(
+                        chunk.try_into().expect("chunk size checked"),
+                    ))
+                })
+                .collect()),
+            KvCacheDtype::Fp8E4M3Fn => {
+                if plane_dim == 0 || !elements.is_multiple_of(plane_dim) {
+                    return Err(format!(
+                        "paged decoder {plane_label} FP8 readback dimensions are invalid"
+                    ));
+                }
+                let scale_buffer = scale_buffer.ok_or_else(|| {
+                    format!("paged decoder {plane_label} FP8 cache is missing its scale buffer")
+                })?;
+                let scale_values = elements / plane_dim;
+                let scale_bytes = scale_values
+                    .checked_mul(std::mem::size_of::<u16>())
+                    .ok_or_else(|| {
+                        format!(
+                            "paged decoder {plane_label} FP8 scale readback byte count overflows"
+                        )
+                    })?;
+                let scales = read_raw_buffer(scale_buffer, stream, scale_bytes)?;
+                let mut output = Vec::with_capacity(elements);
+                for (index, &bits) in payload.iter().enumerate() {
+                    let scale_offset = (index / plane_dim) * std::mem::size_of::<u16>();
+                    let scale = f16_bits_to_f32(u16::from_le_bytes(
+                        scales[scale_offset..scale_offset + std::mem::size_of::<u16>()]
+                            .try_into()
+                            .expect("scale slice size checked"),
+                    ));
+                    let value = fp8_e4m3fn_bits_to_f32(bits) * scale;
+                    if !value.is_finite() {
+                        return Err(format!(
+                            "paged decoder {plane_label} FP8 cache readback contains a non-finite value"
+                        ));
+                    }
+                    output.push(value);
+                }
+                Ok(output)
+            }
+        }
     }
 
     /// Reads the written logical K/V prefix rather than the whole physical
@@ -2606,6 +2838,48 @@ impl PagedDecodeState {
     ) -> Result<PagedKvCacheReadback, String> {
         if self.written_len == 0 {
             return Err("paged decoder logical cache prefix is empty".to_string());
+        }
+
+        if !self.uses_legacy_f32_kv_cache() {
+            let physical = self.read_cache_to_host(stream)?;
+            let k_token_elements = self.shape.k_token_elements()?;
+            let v_token_elements = self.shape.v_token_elements()?;
+            let mut k = Vec::with_capacity(self.written_len * k_token_elements);
+            let mut v = Vec::with_capacity(self.written_len * v_token_elements);
+            for logical_position in 0..self.written_len {
+                let logical_block = logical_position / self.shape.block_size;
+                let block_offset = logical_position % self.shape.block_size;
+                let physical_block = *self.block_table.get(logical_block).ok_or_else(|| {
+                    format!(
+                        "paged decoder logical prefix is missing block table entry {logical_block}"
+                    )
+                })? as usize;
+                if physical_block >= self.shape.cache_blocks {
+                    return Err(format!(
+                        "paged decoder logical prefix block_table[{logical_block}]={physical_block} exceeds cache blocks {}",
+                        self.shape.cache_blocks
+                    ));
+                }
+                let physical_position = physical_block
+                    .checked_mul(self.shape.block_size)
+                    .and_then(|value| value.checked_add(block_offset))
+                    .ok_or_else(|| {
+                        "paged decoder physical prefix position overflows".to_string()
+                    })?;
+                let k_start = physical_position
+                    .checked_mul(k_token_elements)
+                    .ok_or_else(|| {
+                        "paged decoder physical K prefix offset overflows".to_string()
+                    })?;
+                let v_start = physical_position
+                    .checked_mul(v_token_elements)
+                    .ok_or_else(|| {
+                        "paged decoder physical V prefix offset overflows".to_string()
+                    })?;
+                k.extend_from_slice(&physical.k[k_start..k_start + k_token_elements]);
+                v.extend_from_slice(&physical.v[v_start..v_start + v_token_elements]);
+            }
+            return Ok(PagedKvCacheReadback { k, v });
         }
 
         let cache_len = self.written_len;
@@ -3457,15 +3731,23 @@ fn read_f32_buffer(
     stream: &mut RuntimeStream,
     elements: usize,
 ) -> Result<Vec<f32>, String> {
-    let bytes = f32_bytes(elements);
+    let raw = read_raw_buffer(buffer, stream, f32_bytes(elements))?;
+    Ok(le_bytes_to_f32s(&raw))
+}
+
+fn read_raw_buffer(
+    buffer: &RuntimeBuffer,
+    stream: &mut RuntimeStream,
+    bytes: usize,
+) -> Result<Vec<u8>, String> {
     let mut raw = vec![0_u8; bytes];
     buffer
         .copy_to_host(0, &mut raw, Some(stream))
-        .map_err(|err| format!("failed to read paged decoder f32 buffer: {err}"))?;
+        .map_err(|err| format!("failed to read paged decoder buffer: {err}"))?;
     stream
         .synchronize()
         .map_err(|err| format!("failed to synchronize paged decoder readback: {err}"))?;
-    Ok(le_bytes_to_f32s(&raw))
+    Ok(raw)
 }
 
 fn f32_bytes(elements: usize) -> usize {
@@ -3566,6 +3848,93 @@ mod tests {
             softmax_scale,
         );
         assert_f32s_close(&output, &expected, 1e-5);
+    }
+
+    #[test]
+    fn typed_paged_decode_states_write_read_and_decode_cpu() {
+        let shape = PagedDecodeShape {
+            block_size: 2,
+            cache_blocks: 4,
+            q_heads: 4,
+            kv_heads: 2,
+            head_dim: 8,
+            value_dim: 8,
+        };
+        let block_table = vec![3_u32, 0_u32];
+        let cache_len = 3_usize;
+        let logical_k = (0..cache_len * shape.k_token_elements().unwrap())
+            .map(|index| ((index as f32 - 19.0) * 1.75) / 3.0)
+            .collect::<Vec<_>>();
+        let logical_v = (0..cache_len * shape.v_token_elements().unwrap())
+            .map(|index| ((index as f32 - 23.0) * 0.875) / 5.0)
+            .collect::<Vec<_>>();
+        let q = (0..shape.q_elements().unwrap())
+            .map(|index| (index as f32 - 11.0) / 7.0)
+            .collect::<Vec<_>>();
+        let softmax_scale = 1.0_f32 / (shape.head_dim as f32).sqrt();
+        let selections = [
+            KvCacheDtypes::uniform(KvCacheDtype::F16),
+            KvCacheDtypes::uniform(KvCacheDtype::Fp8E4M3Fn),
+            KvCacheDtypes {
+                key: KvCacheDtype::F16,
+                value: KvCacheDtype::Fp8E4M3Fn,
+            },
+        ];
+
+        for dtypes in selections {
+            let mut context = RuntimeContext::create(0).unwrap();
+            let mut stream = context.create_stream().unwrap();
+            let mut state = PagedDecodeState::new_with_kv_cache_dtypes(
+                &mut context,
+                &mut stream,
+                shape,
+                block_table.clone(),
+                dtypes,
+            )
+            .unwrap();
+            assert_eq!(state.kv_cache_dtypes(), dtypes);
+            assert_eq!(
+                state.kv_cache_layout().k_scale_bytes > 0,
+                dtypes.key == KvCacheDtype::Fp8E4M3Fn
+            );
+            assert_eq!(
+                state.kv_cache_layout().v_scale_bytes > 0,
+                dtypes.value == KvCacheDtype::Fp8E4M3Fn
+            );
+
+            for timestep in 0..cache_len {
+                let k_start = timestep * shape.k_token_elements().unwrap();
+                let v_start = timestep * shape.v_token_elements().unwrap();
+                state
+                    .write_token(
+                        &mut stream,
+                        &logical_k[k_start..k_start + shape.k_token_elements().unwrap()],
+                        &logical_v[v_start..v_start + shape.v_token_elements().unwrap()],
+                    )
+                    .unwrap();
+            }
+
+            let logical_prefix = state
+                .read_written_cache_prefix_to_host(&mut stream)
+                .unwrap();
+            assert!(logical_prefix.k.iter().all(|value| value.is_finite()));
+            assert!(logical_prefix.v.iter().all(|value| value.is_finite()));
+            // Values deliberately span more than one unit; this catches a
+            // missing FP8 scale application without pretending to be a
+            // generation-quality threshold.
+            assert!(logical_prefix.k.iter().any(|value| value.abs() > 8.0));
+            assert!(logical_prefix.v.iter().any(|value| value.abs() > 1.0));
+            if dtypes == KvCacheDtypes::uniform(KvCacheDtype::F16) {
+                assert_f32s_close(&logical_prefix.k, &logical_k, 0.02);
+                assert_f32s_close(&logical_prefix.v, &logical_v, 0.02);
+            }
+
+            let output = state
+                .decode_written(&mut stream, &q, softmax_scale)
+                .unwrap();
+            assert_eq!(output.len(), shape.output_elements().unwrap());
+            assert!(output.iter().all(|value| value.is_finite()));
+        }
     }
 
     #[test]
@@ -3910,6 +4279,98 @@ mod tests {
             ));
         }
         assert_f32s_close(&actual, &expected, 1e-5);
+    }
+
+    #[test]
+    fn typed_paged_decode_prefill_uses_causal_direct_reader_cpu() {
+        let mut context = RuntimeContext::create(0).unwrap();
+        let mut stream = context.create_stream().unwrap();
+        let shape = PagedDecodeShape {
+            block_size: 2,
+            cache_blocks: 4,
+            q_heads: 4,
+            kv_heads: 2,
+            head_dim: 4,
+            value_dim: 4,
+        };
+        let prefix_len = 2_usize;
+        let new_tokens = 3_usize;
+        let total_tokens = prefix_len + new_tokens;
+        let logical_k = (0..total_tokens * shape.k_token_elements().unwrap())
+            .map(|index| (index as f32 - 13.0) / 4.0)
+            .collect::<Vec<_>>();
+        let logical_v = (0..total_tokens * shape.v_token_elements().unwrap())
+            .map(|index| (index as f32 - 17.0) / 9.0)
+            .collect::<Vec<_>>();
+        let q = (0..new_tokens * shape.q_elements().unwrap())
+            .map(|index| (index as f32 - 7.0) / 6.0)
+            .collect::<Vec<_>>();
+        let prefix_k = upload_test_f32_buffer(
+            &mut context,
+            &mut stream,
+            &logical_k[..prefix_len * shape.k_token_elements().unwrap()],
+        );
+        let prefix_v = upload_test_f32_buffer(
+            &mut context,
+            &mut stream,
+            &logical_v[..prefix_len * shape.v_token_elements().unwrap()],
+        );
+        let chunk_k = upload_test_f32_buffer(
+            &mut context,
+            &mut stream,
+            &logical_k[prefix_len * shape.k_token_elements().unwrap()..],
+        );
+        let chunk_v = upload_test_f32_buffer(
+            &mut context,
+            &mut stream,
+            &logical_v[prefix_len * shape.v_token_elements().unwrap()..],
+        );
+        let q_buffer = upload_test_f32_buffer(&mut context, &mut stream, &q);
+        let mut output = context
+            .alloc_buffer(f32_bytes(new_tokens * shape.output_elements().unwrap()))
+            .unwrap();
+        let mut state = PagedDecodeState::new_with_kv_cache_dtypes(
+            &mut context,
+            &mut stream,
+            shape,
+            vec![0, 1, 2, 3],
+            KvCacheDtypes {
+                key: KvCacheDtype::F16,
+                value: KvCacheDtype::Fp8E4M3Fn,
+            },
+        )
+        .unwrap();
+
+        state
+            .write_sequence_from_device(&mut stream, &prefix_k, &prefix_v, prefix_len)
+            .unwrap();
+        assert_eq!(
+            state
+                .prefill_chunk_from_device(
+                    &mut stream,
+                    &q_buffer,
+                    &chunk_k,
+                    &chunk_v,
+                    new_tokens,
+                    1.0 / (shape.head_dim as f32).sqrt(),
+                    &mut output,
+                )
+                .unwrap(),
+            prefix_len..total_tokens
+        );
+        let output = read_f32_buffer(
+            &output,
+            &mut stream,
+            new_tokens * shape.output_elements().unwrap(),
+        )
+        .unwrap();
+        assert!(output.iter().all(|value| value.is_finite()));
+        assert!(output.iter().any(|value| value.abs() > 0.01));
+        let cache = state
+            .read_written_cache_prefix_to_host(&mut stream)
+            .unwrap();
+        assert!(cache.k.iter().all(|value| value.is_finite()));
+        assert!(cache.v.iter().all(|value| value.is_finite()));
     }
 
     #[test]

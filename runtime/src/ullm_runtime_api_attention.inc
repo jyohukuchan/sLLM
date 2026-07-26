@@ -2042,6 +2042,259 @@ ullm_status ullm_runtime_paged_decode_attn_f32(
         stream);
 }
 
+static ullm_status paged_decode_attn_typed_f32_hip_staging(
+    const ullm_runtime_buffer *q_buffer,
+    const ullm_runtime_buffer *k_cache_buffer,
+    const ullm_runtime_buffer *v_cache_buffer,
+    const ullm_runtime_buffer *block_table_buffer,
+    const ullm_runtime_buffer *k_scale_buffer,
+    const ullm_runtime_buffer *v_scale_buffer,
+    size_t cache_len,
+    size_t block_size,
+    size_t cache_blocks,
+    size_t q_heads,
+    size_t kv_heads,
+    size_t head_dim,
+    size_t value_dim,
+    float softmax_scale,
+    ullm_kv_cache_dtype k_dtype,
+    ullm_kv_cache_dtype v_dtype,
+    size_t q_bytes,
+    size_t k_cache_bytes,
+    size_t v_cache_bytes,
+    size_t table_bytes,
+    size_t k_scale_bytes,
+    size_t v_scale_bytes,
+    size_t output_bytes,
+    ullm_runtime_buffer *output_buffer,
+    ullm_runtime_stream *stream) {
+    std::vector<float> host_q(q_bytes / sizeof(float));
+    std::vector<uint8_t> host_k(k_cache_bytes);
+    std::vector<uint8_t> host_v(v_cache_bytes);
+    std::vector<uint32_t> host_table(table_bytes / sizeof(uint32_t));
+    std::vector<uint16_t> host_k_scales(k_scale_bytes / sizeof(uint16_t));
+    std::vector<uint16_t> host_v_scales(v_scale_bytes / sizeof(uint16_t));
+    std::vector<float> host_output(output_bytes / sizeof(float));
+    void *hip_stream = stream == nullptr ? nullptr : stream->stream;
+    const int device_id = q_buffer->hip_device_id;
+    bool copied = hip_runtime().copy_async(
+        host_q.data(), q_buffer->ptr, q_bytes, HIP_MEMCPY_DEVICE_TO_HOST, hip_stream, device_id) &&
+        hip_runtime().copy_async(
+            host_k.data(), k_cache_buffer->ptr, k_cache_bytes, HIP_MEMCPY_DEVICE_TO_HOST,
+            hip_stream, device_id) &&
+        hip_runtime().copy_async(
+            host_v.data(), v_cache_buffer->ptr, v_cache_bytes, HIP_MEMCPY_DEVICE_TO_HOST,
+            hip_stream, device_id) &&
+        hip_runtime().copy_async(
+            host_table.data(), block_table_buffer->ptr, table_bytes, HIP_MEMCPY_DEVICE_TO_HOST,
+            hip_stream, device_id);
+    if (copied && k_scale_buffer != nullptr) {
+        copied = hip_runtime().copy_async(
+            host_k_scales.data(), k_scale_buffer->ptr, k_scale_bytes, HIP_MEMCPY_DEVICE_TO_HOST,
+            hip_stream, device_id);
+    }
+    if (copied && v_scale_buffer != nullptr) {
+        copied = hip_runtime().copy_async(
+            host_v_scales.data(), v_scale_buffer->ptr, v_scale_bytes, HIP_MEMCPY_DEVICE_TO_HOST,
+            hip_stream, device_id);
+    }
+    if (!copied || !synchronize_hip_staging(stream, device_id)) {
+        set_error("failed to copy typed paged decode attention HIP inputs to host staging buffers");
+        return ULLM_STATUS_RUNTIME_ERROR;
+    }
+    for (uint32_t block_id : host_table) {
+        if (static_cast<size_t>(block_id) >= cache_blocks) {
+            set_error("typed paged decode attention block table contains an out-of-range block id");
+            return ULLM_STATUS_INVALID_ARGUMENT;
+        }
+    }
+    if (!paged_decode_attn_typed_f32_host(
+            host_q.data(),
+            host_k.data(),
+            host_v.data(),
+            host_table.data(),
+            k_dtype == ULLM_KV_CACHE_DTYPE_FP8_E4M3FN ? host_k_scales.data() : nullptr,
+            v_dtype == ULLM_KV_CACHE_DTYPE_FP8_E4M3FN ? host_v_scales.data() : nullptr,
+            cache_len,
+            block_size,
+            q_heads,
+            kv_heads,
+            head_dim,
+            value_dim,
+            softmax_scale,
+            k_dtype,
+            v_dtype,
+            host_output.data())) {
+        set_error("typed paged decode attention encountered invalid cache values or scales");
+        return ULLM_STATUS_RUNTIME_ERROR;
+    }
+    if (!hip_runtime().copy_async(
+            output_buffer->ptr, host_output.data(), output_bytes, HIP_MEMCPY_HOST_TO_DEVICE,
+            hip_stream, device_id) ||
+        !synchronize_hip_staging(stream, device_id)) {
+        set_error("failed to copy typed paged decode attention output back to HIP buffer");
+        return ULLM_STATUS_RUNTIME_ERROR;
+    }
+    set_error("");
+    return ULLM_STATUS_OK;
+}
+
+ullm_status ullm_runtime_paged_decode_attn_typed_f32(
+    const ullm_runtime_buffer *q_buffer,
+    const ullm_runtime_buffer *k_cache_buffer,
+    const ullm_runtime_buffer *v_cache_buffer,
+    const ullm_runtime_buffer *block_table_buffer,
+    const ullm_runtime_buffer *k_scale_buffer,
+    const ullm_runtime_buffer *v_scale_buffer,
+    size_t cache_len,
+    size_t block_size,
+    size_t cache_blocks,
+    size_t q_heads,
+    size_t kv_heads,
+    size_t head_dim,
+    size_t value_dim,
+    float softmax_scale,
+    ullm_kv_cache_dtype k_dtype,
+    ullm_kv_cache_dtype v_dtype,
+    ullm_runtime_buffer *output_buffer,
+    ullm_runtime_stream *stream) {
+    if (q_buffer == nullptr || k_cache_buffer == nullptr || v_cache_buffer == nullptr ||
+        block_table_buffer == nullptr || output_buffer == nullptr) {
+        set_error("typed paged decode attention received a null payload or block-table pointer");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (cache_len == 0 || block_size == 0 || cache_blocks == 0 || q_heads == 0 ||
+        kv_heads == 0 || head_dim == 0 || value_dim == 0 || (q_heads % kv_heads) != 0 ||
+        !std::isfinite(softmax_scale) || softmax_scale <= 0.0f) {
+        set_error("typed paged decode attention dimensions or softmax scale are invalid");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (!kv_cache_dtype_is_supported(k_dtype) || !kv_cache_dtype_is_supported(v_dtype) ||
+        (kv_cache_dtype_requires_scale(k_dtype) != (k_scale_buffer != nullptr)) ||
+        (kv_cache_dtype_requires_scale(v_dtype) != (v_scale_buffer != nullptr))) {
+        set_error("typed paged decode attention cache dtype and FP8 scale buffers disagree");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (!buffers_share_backend(q_buffer, k_cache_buffer) ||
+        !buffers_share_backend(q_buffer, v_cache_buffer) ||
+        !buffers_share_backend(q_buffer, block_table_buffer) ||
+        !buffers_share_backend(q_buffer, output_buffer) ||
+        (k_scale_buffer != nullptr && !buffers_share_backend(q_buffer, k_scale_buffer)) ||
+        (v_scale_buffer != nullptr && !buffers_share_backend(q_buffer, v_scale_buffer))) {
+        set_error("typed paged decode attention buffers belong to different backends or devices");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (!stream_matches_buffer(output_buffer, stream) ||
+        (k_scale_buffer != nullptr && !stream_matches_buffer(k_scale_buffer, stream)) ||
+        (v_scale_buffer != nullptr && !stream_matches_buffer(v_scale_buffer, stream))) {
+        set_error("typed paged decode attention stream belongs to a different backend or device");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+
+    const size_t max_size = std::numeric_limits<size_t>::max();
+    if (cache_blocks > max_size / block_size || q_heads > max_size / head_dim) {
+        set_error("typed paged decode attention physical cache or query size overflows");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t physical_tokens = cache_blocks * block_size;
+    const size_t table_entries = (cache_len - 1u) / block_size + 1u;
+    if (cache_len > physical_tokens || table_entries > cache_blocks ||
+        kv_heads > max_size / physical_tokens || value_dim > max_size / q_heads) {
+        set_error("typed paged decode attention cache capacity or output size is invalid");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t q_values = q_heads * head_dim;
+    const size_t output_values = q_heads * value_dim;
+    const size_t physical_heads = physical_tokens * kv_heads;
+    if (head_dim > max_size / physical_heads || value_dim > max_size / physical_heads) {
+        set_error("typed paged decode attention cache element count overflows");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t k_cache_values = physical_heads * head_dim;
+    const size_t v_cache_values = physical_heads * value_dim;
+    const size_t k_payload_width = kv_cache_dtype_payload_bytes(k_dtype);
+    const size_t v_payload_width = kv_cache_dtype_payload_bytes(v_dtype);
+    if (q_values > max_size / sizeof(float) || output_values > max_size / sizeof(float) ||
+        k_cache_values > max_size / k_payload_width || v_cache_values > max_size / v_payload_width ||
+        physical_heads > max_size / sizeof(uint16_t) || table_entries > max_size / sizeof(uint32_t)) {
+        set_error("typed paged decode attention byte size overflows");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t q_bytes = q_values * sizeof(float);
+    const size_t output_bytes = output_values * sizeof(float);
+    const size_t k_cache_bytes = k_cache_values * k_payload_width;
+    const size_t v_cache_bytes = v_cache_values * v_payload_width;
+    const size_t table_bytes = table_entries * sizeof(uint32_t);
+    const size_t scale_bytes = physical_heads * sizeof(uint16_t);
+    if (q_buffer->bytes < q_bytes || k_cache_buffer->bytes < k_cache_bytes ||
+        v_cache_buffer->bytes < v_cache_bytes || block_table_buffer->bytes < table_bytes ||
+        output_buffer->bytes < output_bytes ||
+        (k_scale_buffer != nullptr && k_scale_buffer->bytes < scale_bytes) ||
+        (v_scale_buffer != nullptr && v_scale_buffer->bytes < scale_bytes)) {
+        set_error("typed paged decode attention buffer is too small");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+
+    if (q_buffer->backend == BackendKind::Cpu) {
+        const auto *table = static_cast<const uint32_t *>(block_table_buffer->ptr);
+        for (size_t index = 0; index < table_entries; ++index) {
+            if (static_cast<size_t>(table[index]) >= cache_blocks) {
+                set_error("typed paged decode attention block table contains an out-of-range block id");
+                return ULLM_STATUS_INVALID_ARGUMENT;
+            }
+        }
+        if (!paged_decode_attn_typed_f32_host(
+                static_cast<const float *>(q_buffer->ptr),
+                k_cache_buffer->ptr,
+                v_cache_buffer->ptr,
+                table,
+                k_scale_buffer == nullptr ? nullptr : static_cast<const uint16_t *>(k_scale_buffer->ptr),
+                v_scale_buffer == nullptr ? nullptr : static_cast<const uint16_t *>(v_scale_buffer->ptr),
+                cache_len,
+                block_size,
+                q_heads,
+                kv_heads,
+                head_dim,
+                value_dim,
+                softmax_scale,
+                k_dtype,
+                v_dtype,
+                static_cast<float *>(output_buffer->ptr))) {
+            set_error("typed paged decode attention encountered invalid cache values or scales");
+            return ULLM_STATUS_RUNTIME_ERROR;
+        }
+        set_error("");
+        return ULLM_STATUS_OK;
+    }
+
+    return paged_decode_attn_typed_f32_hip_staging(
+        q_buffer,
+        k_cache_buffer,
+        v_cache_buffer,
+        block_table_buffer,
+        k_scale_buffer,
+        v_scale_buffer,
+        cache_len,
+        block_size,
+        cache_blocks,
+        q_heads,
+        kv_heads,
+        head_dim,
+        value_dim,
+        softmax_scale,
+        k_dtype,
+        v_dtype,
+        q_bytes,
+        k_cache_bytes,
+        v_cache_bytes,
+        table_bytes,
+        k_scale_buffer == nullptr ? 0u : scale_bytes,
+        v_scale_buffer == nullptr ? 0u : scale_bytes,
+        output_bytes,
+        output_buffer,
+        stream);
+}
+
 ullm_status ullm_runtime_paged_decode_attn_sigmoid_gate_f32(
     const ullm_runtime_buffer *q_buffer,
     const ullm_runtime_buffer *gate_buffer,
@@ -2560,6 +2813,265 @@ ullm_status ullm_runtime_paged_kv_write_f32(
         v_cache_bytes,
         k_cache_buffer,
         v_cache_buffer,
+        stream);
+}
+
+static ullm_status paged_kv_write_typed_f32_hip_staging(
+    const ullm_runtime_buffer *k_buffer,
+    const ullm_runtime_buffer *v_buffer,
+    const ullm_runtime_buffer *block_table_buffer,
+    size_t cache_position,
+    size_t block_size,
+    size_t cache_blocks,
+    size_t kv_heads,
+    size_t head_dim,
+    size_t value_dim,
+    ullm_kv_cache_dtype k_dtype,
+    ullm_kv_cache_dtype v_dtype,
+    size_t k_bytes,
+    size_t v_bytes,
+    size_t table_bytes,
+    size_t k_cache_bytes,
+    size_t v_cache_bytes,
+    size_t k_scale_bytes,
+    size_t v_scale_bytes,
+    ullm_runtime_buffer *k_cache_buffer,
+    ullm_runtime_buffer *v_cache_buffer,
+    ullm_runtime_buffer *k_scale_buffer,
+    ullm_runtime_buffer *v_scale_buffer,
+    ullm_runtime_stream *stream) {
+    std::vector<float> host_k(k_bytes / sizeof(float));
+    std::vector<float> host_v(v_bytes / sizeof(float));
+    std::vector<std::uint32_t> host_table(table_bytes / sizeof(std::uint32_t));
+    std::vector<uint8_t> host_k_cache(k_cache_bytes);
+    std::vector<uint8_t> host_v_cache(v_cache_bytes);
+    std::vector<uint16_t> host_k_scales(k_scale_bytes / sizeof(uint16_t));
+    std::vector<uint16_t> host_v_scales(v_scale_bytes / sizeof(uint16_t));
+    void *hip_stream = stream == nullptr ? nullptr : stream->stream;
+    const int device_id = k_buffer->hip_device_id;
+
+    bool copied = hip_runtime().copy_async(
+        host_k.data(), k_buffer->ptr, k_bytes, HIP_MEMCPY_DEVICE_TO_HOST, hip_stream, device_id) &&
+        hip_runtime().copy_async(
+            host_v.data(), v_buffer->ptr, v_bytes, HIP_MEMCPY_DEVICE_TO_HOST, hip_stream, device_id) &&
+        hip_runtime().copy_async(
+            host_table.data(), block_table_buffer->ptr, table_bytes, HIP_MEMCPY_DEVICE_TO_HOST,
+            hip_stream, device_id) &&
+        hip_runtime().copy_async(
+            host_k_cache.data(), k_cache_buffer->ptr, k_cache_bytes, HIP_MEMCPY_DEVICE_TO_HOST,
+            hip_stream, device_id) &&
+        hip_runtime().copy_async(
+            host_v_cache.data(), v_cache_buffer->ptr, v_cache_bytes, HIP_MEMCPY_DEVICE_TO_HOST,
+            hip_stream, device_id);
+    if (copied && k_scale_buffer != nullptr) {
+        copied = hip_runtime().copy_async(
+            host_k_scales.data(), k_scale_buffer->ptr, k_scale_bytes, HIP_MEMCPY_DEVICE_TO_HOST,
+            hip_stream, device_id);
+    }
+    if (copied && v_scale_buffer != nullptr) {
+        copied = hip_runtime().copy_async(
+            host_v_scales.data(), v_scale_buffer->ptr, v_scale_bytes, HIP_MEMCPY_DEVICE_TO_HOST,
+            hip_stream, device_id);
+    }
+    if (!copied || !synchronize_hip_staging(stream, device_id)) {
+        set_error("failed to copy typed paged KV write HIP inputs to host staging buffers");
+        return ULLM_STATUS_RUNTIME_ERROR;
+    }
+    const size_t block_index = cache_position / block_size;
+    if (static_cast<size_t>(host_table[block_index]) >= cache_blocks) {
+        set_error("typed paged KV write block table contains an out-of-range block id");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (!paged_kv_write_typed_f32_host(
+            host_k.data(),
+            host_v.data(),
+            host_table.data(),
+            cache_position,
+            block_size,
+            kv_heads,
+            head_dim,
+            value_dim,
+            k_dtype,
+            v_dtype,
+            host_k_cache.data(),
+            host_v_cache.data(),
+            k_dtype == ULLM_KV_CACHE_DTYPE_FP8_E4M3FN ? host_k_scales.data() : nullptr,
+            v_dtype == ULLM_KV_CACHE_DTYPE_FP8_E4M3FN ? host_v_scales.data() : nullptr)) {
+        set_error("typed paged KV write encountered a non-finite or unrepresentable value");
+        return ULLM_STATUS_RUNTIME_ERROR;
+    }
+    copied = hip_runtime().copy_async(
+        k_cache_buffer->ptr, host_k_cache.data(), k_cache_bytes, HIP_MEMCPY_HOST_TO_DEVICE,
+        hip_stream, device_id) &&
+        hip_runtime().copy_async(
+            v_cache_buffer->ptr, host_v_cache.data(), v_cache_bytes, HIP_MEMCPY_HOST_TO_DEVICE,
+            hip_stream, device_id);
+    if (copied && k_scale_buffer != nullptr) {
+        copied = hip_runtime().copy_async(
+            k_scale_buffer->ptr, host_k_scales.data(), k_scale_bytes, HIP_MEMCPY_HOST_TO_DEVICE,
+            hip_stream, device_id);
+    }
+    if (copied && v_scale_buffer != nullptr) {
+        copied = hip_runtime().copy_async(
+            v_scale_buffer->ptr, host_v_scales.data(), v_scale_bytes, HIP_MEMCPY_HOST_TO_DEVICE,
+            hip_stream, device_id);
+    }
+    if (!copied || !synchronize_hip_staging(stream, device_id)) {
+        set_error("failed to copy typed paged KV write caches back to HIP buffers");
+        return ULLM_STATUS_RUNTIME_ERROR;
+    }
+    set_error("");
+    return ULLM_STATUS_OK;
+}
+
+ullm_status ullm_runtime_paged_kv_write_typed_f32(
+    const ullm_runtime_buffer *k_buffer,
+    const ullm_runtime_buffer *v_buffer,
+    const ullm_runtime_buffer *block_table_buffer,
+    size_t cache_position,
+    size_t block_size,
+    size_t cache_blocks,
+    size_t kv_heads,
+    size_t head_dim,
+    size_t value_dim,
+    ullm_kv_cache_dtype k_dtype,
+    ullm_kv_cache_dtype v_dtype,
+    ullm_runtime_buffer *k_cache_buffer,
+    ullm_runtime_buffer *v_cache_buffer,
+    ullm_runtime_buffer *k_scale_buffer,
+    ullm_runtime_buffer *v_scale_buffer,
+    ullm_runtime_stream *stream) {
+    if (k_buffer == nullptr || v_buffer == nullptr || block_table_buffer == nullptr ||
+        k_cache_buffer == nullptr || v_cache_buffer == nullptr) {
+        set_error("typed paged KV write received a null payload or block-table pointer");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (block_size == 0 || cache_blocks == 0 || kv_heads == 0 || head_dim == 0 || value_dim == 0) {
+        set_error("typed paged KV write dimensions must be greater than zero");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (!kv_cache_dtype_is_supported(k_dtype) || !kv_cache_dtype_is_supported(v_dtype)) {
+        set_error("typed paged KV write received an unsupported cache dtype");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if ((kv_cache_dtype_requires_scale(k_dtype) != (k_scale_buffer != nullptr)) ||
+        (kv_cache_dtype_requires_scale(v_dtype) != (v_scale_buffer != nullptr))) {
+        set_error("typed paged KV write FP8 planes require exactly one FP16 scale buffer per plane");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (!buffers_share_backend(k_buffer, v_buffer) ||
+        !buffers_share_backend(k_buffer, block_table_buffer) ||
+        !buffers_share_backend(k_buffer, k_cache_buffer) ||
+        !buffers_share_backend(k_buffer, v_cache_buffer) ||
+        (k_scale_buffer != nullptr && !buffers_share_backend(k_buffer, k_scale_buffer)) ||
+        (v_scale_buffer != nullptr && !buffers_share_backend(k_buffer, v_scale_buffer))) {
+        set_error("typed paged KV write buffers belong to different backends or devices");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (!stream_matches_buffer(k_cache_buffer, stream) ||
+        !stream_matches_buffer(v_cache_buffer, stream) ||
+        (k_scale_buffer != nullptr && !stream_matches_buffer(k_scale_buffer, stream)) ||
+        (v_scale_buffer != nullptr && !stream_matches_buffer(v_scale_buffer, stream))) {
+        set_error("typed paged KV write stream belongs to a different backend or device");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+
+    const size_t max_size = std::numeric_limits<size_t>::max();
+    if (cache_blocks > max_size / block_size) {
+        set_error("typed paged KV write physical cache size overflows");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t physical_tokens = cache_blocks * block_size;
+    if (cache_position >= physical_tokens || kv_heads > max_size / physical_tokens ||
+        kv_heads > max_size / head_dim || kv_heads > max_size / value_dim) {
+        set_error("typed paged KV write cache position or element count is invalid");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t block_index = cache_position / block_size;
+    const size_t table_entries = block_index + 1u;
+    const size_t k_values = kv_heads * head_dim;
+    const size_t v_values = kv_heads * value_dim;
+    const size_t physical_heads = physical_tokens * kv_heads;
+    if (head_dim > max_size / physical_heads || value_dim > max_size / physical_heads) {
+        set_error("typed paged KV write cache payload element count overflows");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t k_cache_values = physical_heads * head_dim;
+    const size_t v_cache_values = physical_heads * value_dim;
+    const size_t k_payload_width = kv_cache_dtype_payload_bytes(k_dtype);
+    const size_t v_payload_width = kv_cache_dtype_payload_bytes(v_dtype);
+    if (k_values > max_size / sizeof(float) || v_values > max_size / sizeof(float) ||
+        k_cache_values > max_size / k_payload_width || v_cache_values > max_size / v_payload_width ||
+        physical_heads > max_size / sizeof(uint16_t) || table_entries > max_size / sizeof(uint32_t)) {
+        set_error("typed paged KV write byte size overflows");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t k_bytes = k_values * sizeof(float);
+    const size_t v_bytes = v_values * sizeof(float);
+    const size_t table_bytes = table_entries * sizeof(uint32_t);
+    const size_t k_cache_bytes = k_cache_values * k_payload_width;
+    const size_t v_cache_bytes = v_cache_values * v_payload_width;
+    const size_t scale_bytes = physical_heads * sizeof(uint16_t);
+    if (k_buffer->bytes < k_bytes || v_buffer->bytes < v_bytes ||
+        block_table_buffer->bytes < table_bytes || k_cache_buffer->bytes < k_cache_bytes ||
+        v_cache_buffer->bytes < v_cache_bytes ||
+        (k_scale_buffer != nullptr && k_scale_buffer->bytes < scale_bytes) ||
+        (v_scale_buffer != nullptr && v_scale_buffer->bytes < scale_bytes)) {
+        set_error("typed paged KV write buffer is too small");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+
+    if (k_buffer->backend == BackendKind::Cpu) {
+        const auto *table = static_cast<const uint32_t *>(block_table_buffer->ptr);
+        if (static_cast<size_t>(table[block_index]) >= cache_blocks) {
+            set_error("typed paged KV write block table contains an out-of-range block id");
+            return ULLM_STATUS_INVALID_ARGUMENT;
+        }
+        if (!paged_kv_write_typed_f32_host(
+                static_cast<const float *>(k_buffer->ptr),
+                static_cast<const float *>(v_buffer->ptr),
+                table,
+                cache_position,
+                block_size,
+                kv_heads,
+                head_dim,
+                value_dim,
+                k_dtype,
+                v_dtype,
+                k_cache_buffer->ptr,
+                v_cache_buffer->ptr,
+                k_scale_buffer == nullptr ? nullptr : static_cast<uint16_t *>(k_scale_buffer->ptr),
+                v_scale_buffer == nullptr ? nullptr : static_cast<uint16_t *>(v_scale_buffer->ptr))) {
+            set_error("typed paged KV write encountered a non-finite or unrepresentable value");
+            return ULLM_STATUS_RUNTIME_ERROR;
+        }
+        set_error("");
+        return ULLM_STATUS_OK;
+    }
+
+    return paged_kv_write_typed_f32_hip_staging(
+        k_buffer,
+        v_buffer,
+        block_table_buffer,
+        cache_position,
+        block_size,
+        cache_blocks,
+        kv_heads,
+        head_dim,
+        value_dim,
+        k_dtype,
+        v_dtype,
+        k_bytes,
+        v_bytes,
+        table_bytes,
+        k_cache_bytes,
+        v_cache_bytes,
+        k_scale_buffer == nullptr ? 0u : scale_bytes,
+        v_scale_buffer == nullptr ? 0u : scale_bytes,
+        k_cache_buffer,
+        v_cache_buffer,
+        k_scale_buffer,
+        v_scale_buffer,
         stream);
 }
 
