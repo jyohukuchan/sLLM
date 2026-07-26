@@ -33,7 +33,9 @@ The same-model `SQ8_0` ten-prompt capture had no automated blocking failure,
 but human review holds approval: the grouped output omitted requested Python
 code, contained a JavaScript explanation error, and ended the Japanese
 multiturn response incompletely. Exact-match observations are diagnostic only;
-the hold is based on generated text quality.
+the hold is based on generated text quality. Some direct controls also reached
+the fixed response-token limit, so this evidence does not attribute every
+incompleteness causally to the grouped route.
 
 ## Source provenance
 
