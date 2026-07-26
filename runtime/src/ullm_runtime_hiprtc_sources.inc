@@ -702,6 +702,14 @@ extern "C" __global__ void ullm_aq4_row_f32_kernel(
             "ULLM_AQ4_MATVEC_ADD_RPB");
         const std::string preamble = aq4_rows_per_block_preamble_for_rows(rows_per_block);
         if (arch == "gfx1201" && rows_per_block == 8u) {
+            // Test-only rollback selector for an in-process-identical full-model A/B.  The
+            // HIPRTC module cache is process-local, so a clean profile process can select the
+            // retained pre-specialization shuffle body without changing the served default.
+            // No manifest sets this; unset always means the production specialized body.
+            if (const char *reference = std::getenv("ULLM_AQ4_MATVEC_ADD_USE_SHUFFLE_REFERENCE");
+                reference != nullptr && reference[0] == '1' && reference[1] == '\0') {
+                return preamble + aq4_matvec_add_shuffle_reference_kernel_source();
+            }
             return preamble + aq4_matvec_add_kernel_source();
         }
         return preamble + aq4_matvec_add_wide_load_reference_kernel_source();
@@ -3177,11 +3185,11 @@ extern "C" __global__ void ullm_aq4_matvec_add_f32_kernel(
 )";
     }
 
-    // Production AQ4 matvec-add body. The host ABI and HIPRTC entry-point name remain unchanged,
-    // so package resident decode continues through its existing direct aq4_matvec_add_f32 dispatch.
-    // It retains the wide-load traversal and residual-add epilogue, replacing only the RPB=8
-    // per-row LDS tree with the validated gfx1201 wave32 shuffle reduction.
-    static std::string aq4_matvec_add_kernel_source() {
+    // This is the retained gfx1201/RPB=8 baseline: the promoted uint4 traversal with the
+    // wave32 reduction, but before group-size-specialized traversal.  Keep it available through
+    // the direct-only shuffle prototype so a candidate remains directly comparable to the exact
+    // production predecessor rather than to the older LDS body.
+    static std::string aq4_matvec_add_shuffle_reference_kernel_source() {
         std::string production = aq4_matvec_add_wide_load_reference_kernel_source();
 
         const std::string lds_setup = R"(    const unsigned int partial_offset = row_in_block * threads_per_row;
@@ -3220,6 +3228,120 @@ extern "C" __global__ void ullm_aq4_matvec_add_f32_kernel(
         return production;
     }
 
+    // Specialize the only two shapes accepted by aq4_matvec_add_f32_hip_kernel: g8 and g16,
+    // both with complete 32-element uint4 chunks.  The retained generic body walks four group
+    // slots and eight byte slots dynamically.  In this body the uniform group-size dispatch
+    // selects g8/g16 once per row, then each word and byte position is statically bounded.
+    //
+    // The arithmetic order is intentionally preserved: each byte contributes low nibble first,
+    // then high nibble; g16 consumes x,y before z,w; a group is scaled only after all of its
+    // elements are accumulated.  The residual/row-scale output epilogue is inherited unchanged.
+    static std::string aq4_matvec_add_group_specialized_kernel_source() {
+        std::string production = aq4_matvec_add_shuffle_reference_kernel_source();
+        const std::string traversal_start = R"(    if (row < rows) {
+        const unsigned long long row_offset = row * cols;
+)";
+        const std::string reduction_start =
+            "    for (unsigned int offset = threads_per_row >> 1; offset > 0; offset >>= 1) {";
+        const size_t start = production.find(traversal_start);
+        if (start == std::string::npos) {
+            return "";
+        }
+        const size_t end = production.find(reduction_start, start);
+        if (end == std::string::npos || end < start || end < 6u ||
+            production.compare(end - 6u, 6u, "    }\n") != 0) {
+            return "";
+        }
+        const std::string specialized_traversal = R"(    if (row < rows) {
+        const unsigned long long row_offset = row * cols;
+        const unsigned long long row_byte_offset = row_offset >> 1;
+        const unsigned long long chunks_per_row = cols / 32ull;
+        if (group_size == 8ull) {
+            const unsigned long long groups_per_row = cols >> 3;
+            for (unsigned long long chunk = lane; chunk < chunks_per_row;
+                 chunk += threads_per_row) {
+                const uint4 packed = *reinterpret_cast<const uint4 *>(
+                    indices + row_byte_offset + chunk * 16ull);
+                const unsigned long long col_base = chunk * 32ull;
+                const unsigned long long group_base = row * groups_per_row + chunk * 4ull;
+#pragma unroll
+                for (unsigned int group_in_chunk = 0u; group_in_chunk < 4u; ++group_in_chunk) {
+                    const unsigned int scale_index =
+                        static_cast<unsigned int>(scale_indices[group_base + group_in_chunk]);
+                    if (scale_index >= scale_count) {
+                        continue;
+                    }
+                    const unsigned int word = group_in_chunk == 0u ? packed.x :
+                        (group_in_chunk == 1u ? packed.y :
+                            (group_in_chunk == 2u ? packed.z : packed.w));
+                    float raw_sum = 0.0f;
+#pragma unroll
+                    for (unsigned int byte_offset = 0u; byte_offset < 4u; ++byte_offset) {
+                        const unsigned int packed_byte =
+                            (word >> (8u * byte_offset)) & 0xffu;
+                        const unsigned long long col = col_base +
+                            static_cast<unsigned long long>(group_in_chunk * 8u + byte_offset * 2u);
+                        raw_sum += codebook[packed_byte & 0x0fu] * input[col];
+                        raw_sum += codebook[(packed_byte >> 4) & 0x0fu] * input[col + 1ull];
+                    }
+                    sum += raw_sum * scale_values[scale_index] * tensor_scale;
+                }
+            }
+        } else if (group_size == 16ull) {
+            const unsigned long long groups_per_row = cols >> 4;
+            for (unsigned long long chunk = lane; chunk < chunks_per_row;
+                 chunk += threads_per_row) {
+                const uint4 packed = *reinterpret_cast<const uint4 *>(
+                    indices + row_byte_offset + chunk * 16ull);
+                const unsigned long long col_base = chunk * 32ull;
+                const unsigned long long group_base = row * groups_per_row + chunk * 2ull;
+#pragma unroll
+                for (unsigned int group_in_chunk = 0u; group_in_chunk < 2u; ++group_in_chunk) {
+                    const unsigned int scale_index =
+                        static_cast<unsigned int>(scale_indices[group_base + group_in_chunk]);
+                    if (scale_index >= scale_count) {
+                        continue;
+                    }
+                    const unsigned int first_word =
+                        group_in_chunk == 0u ? packed.x : packed.z;
+                    const unsigned int second_word =
+                        group_in_chunk == 0u ? packed.y : packed.w;
+                    float raw_sum = 0.0f;
+#pragma unroll
+                    for (unsigned int byte_offset = 0u; byte_offset < 4u; ++byte_offset) {
+                        const unsigned int packed_byte =
+                            (first_word >> (8u * byte_offset)) & 0xffu;
+                        const unsigned long long col = col_base +
+                            static_cast<unsigned long long>(group_in_chunk * 16u + byte_offset * 2u);
+                        raw_sum += codebook[packed_byte & 0x0fu] * input[col];
+                        raw_sum += codebook[(packed_byte >> 4) & 0x0fu] * input[col + 1ull];
+                    }
+#pragma unroll
+                    for (unsigned int byte_offset = 0u; byte_offset < 4u; ++byte_offset) {
+                        const unsigned int packed_byte =
+                            (second_word >> (8u * byte_offset)) & 0xffu;
+                        const unsigned long long col = col_base +
+                            static_cast<unsigned long long>(
+                                group_in_chunk * 16u + 8u + byte_offset * 2u);
+                        raw_sum += codebook[packed_byte & 0x0fu] * input[col];
+                        raw_sum += codebook[(packed_byte >> 4) & 0x0fu] * input[col + 1ull];
+                    }
+                    sum += raw_sum * scale_values[scale_index] * tensor_scale;
+                }
+            }
+        }
+    }
+)";
+        production.replace(start, end - start, specialized_traversal);
+        return production;
+    }
+
+    // Production AQ4 matvec-add body. The host ABI and HIPRTC entry-point name remain unchanged,
+    // so package resident decode continues through its existing direct aq4_matvec_add_f32 dispatch.
+    static std::string aq4_matvec_add_kernel_source() {
+        return aq4_matvec_add_group_specialized_kernel_source();
+    }
+
     // Keep the direct-only prototype ABI available for historical differential/timing comparison.
     // It compiles the wide-load rollback body under its original, isolated entry-point name.
     static std::string aq4_matvec_add_wide_load_prototype_kernel_source() {
@@ -3236,10 +3358,10 @@ extern "C" __global__ void ullm_aq4_matvec_add_f32_kernel(
         return source;
     }
 
-    // Keep the direct-only prototype ABI available for historical differential/timing comparison.
-    // It compiles the same validated body under its original, isolated entry-point name.
+    // Keep the direct-only prototype ABI available as the exact pre-specialization gfx1201/RPB=8
+    // baseline for differential and timing comparisons.
     static std::string aq4_matvec_add_shuffle_prototype_kernel_source() {
-        std::string source = aq4_matvec_add_kernel_source();
+        std::string source = aq4_matvec_add_shuffle_reference_kernel_source();
         constexpr const char production_name[] = "ullm_aq4_matvec_add_f32_kernel";
         const size_t name_offset = source.find(production_name);
         if (name_offset == std::string::npos) {
