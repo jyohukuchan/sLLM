@@ -26,7 +26,7 @@ This is intentionally a runtime-hardening promotion, not the P3 performance opti
 5. The AQ4 promotion source is a clean detached standalone clone at <code>0cd760568e197e1adb4c4df3d6149591a912f709</code>; it is not a linked worktree and has no alternates, symlinks, ACLs, hardlinks, or group/world-writable content.
 6. Promotion evidence and receipt are newly collected from the protected worker/product/tokenizer/source paths. No old AQ4 evidence, receipt, or manifest hash is copied, rebased, or cited as candidate evidence.
 7. The frozen candidate manifest differs from the current active manifest only in the documented path-bound fields and fresh receipt hash. It contains no <code>/home/</code> path.
-8. A reviewed AQ4-to-AQ4 locked activation route verifies runtime and source seals, preserves exact rollback bytes, atomically swaps only after explicit human approval, and produces durable candidate or rollback live proof.
+8. The historical AQ4-to-AQ4 locked activation route verifies runtime and source seals, preserves exact rollback bytes, atomically swaps, and produces durable candidate or rollback live proof. Future routine promotions use the generic lightweight route instead of creating another candidate-specific control path.
 9. The current active manifest bytes, SHA-256, systemd unit, environment file, SQ8 assets, <code>llama-qwen35-udq4.service</code>, and <code>gdm3</code> are not modified as part of planning or preparation. Final activation remains the sole operation that may replace active-manifest bytes.
 10. After a successful hardening activation, a fresh AQ4 generic release campaign, browser campaign, and complete bundle v1 are collected from the hardened live runtime before any later workflow relies on them.
 
@@ -39,7 +39,7 @@ This is intentionally a runtime-hardening promotion, not the P3 performance opti
 - Do not place AQ4 material in <code>/opt/ullm/releases</code>; that namespace is already the SQ8 release namespace.
 - Do not modify, restart, enable, or otherwise operate <code>llama-qwen35-udq4.service</code>; it remains disabled and inactive. Do not start <code>gdm3</code>; it remains inactive.
 - Do not treat the historical active-manifest SHA-256 <code>feb3190d...</code> or historical worker SHA-256 <code>177f3106...</code> as a rollback target for this promotion.
-- Do not activate a candidate merely because it passes a file seal. Activation requires the dedicated locked control route, a service window, and an explicit human approval immediately before the active-manifest byte swap.
+- Do not activate a candidate merely because it passes a file seal. Activation requires a service window, the lightweight generation-quality evidence, and a transaction that preserves exact rollback bytes.
 
 ## Confirmed Inputs and Fixed Invariants
 
@@ -380,7 +380,7 @@ Historical record: the pre-plan report at <code>benchmarks/results/2026-07-26/aq
 The reviewed route must be stored in the separately sealed activation control source and must provide these capabilities:
 
 1. A root-owned, immutable activation plan schema, such as <code>ullm.aq4_runtime_hardening_activation_plan.v1</code>, that records the promotion source seal/tree/commit, frozen candidate SHA/path, candidate runtime seals, exact legacy active bytes/SHA, systemd/env hashes, executable hashes, proof destinations, and operation epoch.
-2. A default non-mutating preflight that re-seals all candidate inputs, confirms no path/inode/hash drift, validates the frozen manifest, and reports <code>ready: true</code> only when it is safe to request approval.
+2. A default non-mutating preflight that re-seals all candidate inputs, confirms no path/inode/hash drift, validates the frozen manifest, and reports <code>ready: true</code> only when it is safe to continue the transaction.
 3. A dedicated lock at or equivalent to <code>/etc/ullm/served-models/.active.json.activation.lock</code>. Under that lock, recheck the exact active bytes, activation plan hash, protected candidate paths, unit/env hashes, and source/runtime seals before a mutation.
 4. Durable no-replace activation intent written and fsynced before the swap; an atomic compare-and-swap/rename operation for active-manifest bytes; and a durable outcome record. It must never mutate the frozen candidate file.
 5. Checked gateway reconciliation and candidate live proof. The proof must bind the activation-plan hash/epoch and record active-manifest exact bytes/hash, model ID, worker path/hash, systemd state, boot ID, PID/PPID/starttime/executable hashes, and all five live endpoints: gateway health, gateway ready, gateway models, OpenWebUI health, and OpenWebUI models.
@@ -390,11 +390,11 @@ The reviewed route must be stored in the separately sealed activation control so
 
 The implementation review must include fault injection for pre-intent failure, post-intent/pre-swap failure, post-swap/restart failure, live-proof failure, duplicate execution, stale plan hash, unit/env drift, and concurrent lock acquisition. It must demonstrate that it does not invoke the SQ8 final-activation route and that it never starts <code>llama-qwen35-udq4.service</code> or <code>gdm3</code>.
 
-Exit criterion: the reviewed code, separately sealed control source, complete immutable activation plan, reviewed operations, credential seal set, and plan-bound <code>ready: true</code> preflight now exist. No active-manifest byte was changed in this phase. **Even at <code>ready: true</code>, this is not execution authority: the Phase 6 human approval gate remains mandatory.**
+Exit criterion: the reviewed code, separately sealed control source, complete immutable activation plan, reviewed operations, credential seal set, and plan-bound <code>ready: true</code> preflight now exist. No active-manifest byte was changed in this phase. **Even at <code>ready: true</code>, the old route still needs its correctly bound transaction inputs; future routine activation is governed by the lightweight promotion policy.**
 
 GPU or service window: code review/preflight needs neither. The eventual execute/rollback subcommand needs a service-maintenance window and normal gateway worker startup, but no P3 performance trial.
 
-### Phase 6 — Human-gated locked activation and rollback readiness
+### Phase 6 — Locked activation and rollback readiness
 
 Purpose: perform the only operation that may replace <code>active.json</code>, after all artifacts and preflight are complete.
 
@@ -405,8 +405,8 @@ Purpose: perform the only operation that may replace <code>active.json</code>, a
    It equals the then-current active bytes and has SHA-256 <code>5d015a013dcf70cea13dd9ed569d89ed2a025a17e14a6192ca18ee4cdadd1c8a</code>. Immediately before execution, re-read <code>active.json</code> and require an exact byte/hash match with this sealed plan input; do not overwrite the published rollback copy. If it differs, stop and prepare a superseding reviewed plan rather than adapting this one in place.
 2. Run the dedicated route's non-mutating preflight and inspect its immutable plan, candidate seal report, rollback target, unit/env hashes, and output destinations.
 3. Schedule the narrow service-maintenance window. The only routine service action is the gateway operation controlled by the dedicated route. Keep <code>llama-qwen35-udq4.service</code> disabled/inactive and <code>gdm3</code> inactive.
-4. **ここで停止する。人間が、表示された activation-plan SHA-256・rollback SHA-256・候補 manifest SHA-256・service window を確認し、明示的に承認するまで、<code>/etc/ullm/served-models/active.json</code> の置換を一切実行しない。**
-5. Only after that approval, invoke the dedicated locked execute action with the exact plan SHA-256 and required confirmation string.
+4. Continue only when the displayed activation-plan SHA-256, rollback SHA-256, candidate manifest SHA-256, and service window still match the current transaction inputs.
+5. Invoke the dedicated locked execute action with the exact plan SHA-256 and its legacy confirmation string. This historical route is not the route for future routine promotions.
 6. Accept activation only if the route writes immutable outcome/candidate-proof records and every candidate live-proof check passes. On any failure, require its same-lock rollback procedure and inspect rollback live proof before reopening normal operation.
 
 Exit criterion: either protected AQ4 is active with validated live proof, or the exact pre-activation bytes are restored with validated rollback live proof. No ambiguous state may be handed off.
@@ -502,7 +502,7 @@ GPU or service window: GPU plus running gateway for the generic campaign; fronte
 | Fresh evidence/receipt validation | Generate/freeze candidate. | Keep the old active runtime. Fix only evidence inputs/tooling; old evidence cannot bridge the gap. |
 | Candidate manifest diff/freeze/seal | Build activation plan. | Return to profile generation. Any unexpected field change, <code>/home</code> reference, or P3 flag is a hard stop. |
 | Dedicated activation-route implementation/review | Run non-mutating preflight. | No activation. Complete a separately reviewed control-tool task; do not use SQ8 or generic bootstrap routes. |
-| Locked preflight / human approval | Execute once under lock. | Without readiness or explicit human approval, stop with the old active manifest untouched. |
+| Locked preflight / transaction readiness | Execute once under lock. | Without readiness, stop with the old active manifest untouched. |
 | Candidate live proof | Mark hardened AQ4 active and begin Phase 7. | Route must restore exact rollback bytes under the same lock and obtain rollback live proof; if that proof fails, enter incident recovery rather than making a health claim. |
 | Fresh campaign/browser/bundle v1 | Publish downstream-ready AQ4 evidence. | Keep hardened AQ4 live if live proof remains healthy; repair campaign/bundle tooling or prerequisites separately. Do not reactivate old evidence. |
 
@@ -526,5 +526,5 @@ GPU or service window: GPU plus running gateway for the generic campaign; fronte
 ## Next Actions
 
 1. Do not invoke activation, rollback, or recovery again from plan <code>72140ff475b29e28f4ab6685459a344939bc54fcd12aa4f0b7c44cd7a8753194</code>. Preserve its immutable outcome/audit as incident evidence.
-2. Plan <code>0e12fe09ad4d00578ee74f1bcc730a6b401e63a6fc91bb1d237346251e8f81f8</code> is consumed successfully: its immutable outcome is <code>activated</code>. Do not invoke activation again from it, and do not invoke rollback or recovery without separate explicit authorization.
-3. The next functional step is Phase 7 fresh campaign/browser/bundle v1 evidence against the hardened active manifest. It is outside this activation approval; schedule it as a separate task with its own GPU/front-end authority and avoid reusing old path-bound evidence.
+2. Plan <code>0e12fe09ad4d00578ee74f1bcc730a6b401e63a6fc91bb1d237346251e8f81f8</code> is consumed successfully: its immutable outcome is <code>activated</code>. Do not invoke activation, rollback, or recovery again from that consumed plan; use the generic rollback route for a later operational rollback.
+3. The next functional step is Phase 7 fresh campaign/browser/bundle v1 evidence against the hardened active manifest. It is outside this consumed activation record; schedule it as a separate task with its own GPU/front-end resources and avoid reusing old path-bound evidence.

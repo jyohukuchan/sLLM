@@ -8,6 +8,12 @@ differing-worker-bootstrap route, and has stayed active, healthy
 (`NRestarts=0`, `readyz` consistently `ready`) throughout Section 8's
 evidence collection. The fidelity fix is genuinely deployed and serving.
 
+> Status update (2026-07-26 JST): frozen historical runbook. The detailed
+> temporary-route approvals, bundle gates, and parent-only steps below record
+> the earlier AQ4_0 fidelity deployment and are not requirements for a new
+> candidate. Future promotions use the lightweight-promotion policy and its
+> generic rollback route.
+
 What is NOT done: the formal Section 9/10 bundle-gated activation. Assembling
 a `--status complete` release bundle requires `--browser-evidence` /
 `--browser-validator`, which requires a working OpenWebUI browser-automation

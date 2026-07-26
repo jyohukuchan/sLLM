@@ -379,7 +379,7 @@ artifact and target GPU selected
    int32-dot kernel with two aligned `uint4` payload loads/block and one FP16 scale product/block.
    Compile/disassemble each for gfx1030 and gfx942. Admission: CPU/GPU differential, tail guards,
    and compiler evidence of the intended dot instruction all pass.
-5. **GPU validation.** Under separately authorized windows only, measure W8A8/W8A16/`SQ8_0` on
+5. **GPU validation.** In separately scheduled shared-resource windows, measure W8A8/W8A16/`SQ8_0` on
    matched workloads. For V620, select `0000:03:00.0` through `hipDeviceGetPCIBusId`, read its own
    junction `temp2_input`, sample during runs, and abort/cool down at >=85 C. Measure M=1 and
    prefill/batch separately; do not extrapolate either direction from the other.

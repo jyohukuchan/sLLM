@@ -241,7 +241,7 @@ Hardware exit gate: Candidate A is numerically valid and is the chosen performan
 
 1. Wire the already-validated internal CDNA3 body/profile behind exact gfx942 selection while preserving every existing gfx1201 symbol body/ABI/dispatch result.
 2. Re-run gfx1201 regression tests and CDNA3 differentials/timing on the same manifested device/partition.
-3. Stage the candidate using existing safety procedures. A production activation, including any byte change to `/etc/ullm/served-models/active.json`, remains a separate human-approved action and is outside this plan.
+3. Stage the candidate using the lightweight promotion policy. A production activation, including any byte change to `/etc/ullm/served-models/active.json`, remains outside this porting plan and uses that generic route when it is scheduled.
 
 ## Decision Tree
 
@@ -293,7 +293,7 @@ Start: independent SQ8_0 Qwen3-14B-FP8 only
 2. Scan the actual independent `SQ8_0` artifact for `0x80`, non-finite OCP codes, scale range, and `[128,128]` tail behavior; save a reproducible manifest.
 3. Build Phase 2's standalone FNUZ-prepack/MFMA and dequant-control prototypes, then repeat the existing isolated gfx942 metadata/ISA audit for every selected tile.
 4. Obtain access to a physical gfx942 system before beginning Phase 3. Its exact SKU and XCD/NPS partition are hard prerequisites, not optional benchmarking detail.
-5. Keep final activation out of scope. Any future change to `/etc/ullm/served-models/active.json` requires explicit human approval after the Phase 3–5 gates.
+5. Keep final activation out of scope. Any future change to `/etc/ullm/served-models/active.json` follows the lightweight promotion policy after the applicable Phase 3–5 evidence is recorded.
 
 ### Sources consulted in Phase 0
 
@@ -471,9 +471,9 @@ Phase impacts are:
 3. **Phases 3–4:** add A′ to the real-gfx942 differential, occupancy, residency
    and timing comparison against B.  Keep A as the alternative if A′ is not
    numerically valid or does not win under the partition-specific decision.
-4. **Phase 5:** no change in authority: only a validated winner can receive
-   guarded integration, and final activation remains a separate explicit
-   human-approved action.
+4. **Phase 5:** no change in scope: only a validated winner can receive
+   guarded integration, and any final activation follows the lightweight
+   promotion policy with its preserved rollback path.
 
 ### Evaluation-G evidence sources
 

@@ -1,7 +1,7 @@
 # SQ8_0 Qwen3-14B-FP8 production promotion runbook v0.1
 
-Status (2026-07-24): **v2 implementation is prepared; cutover is not
-authorized yet.** The
+Status (2026-07-24): **v2 implementation was prepared; cutover was not
+executed in this legacy route.** The
 immutable SQ8_0 product artifact and the complete 2026-07-12 historical
 campaign have both been revalidated, but that campaign is bound to an
 unavailable historical worker binary, `ullm.worker.v1`, and a legacy worker
@@ -11,6 +11,13 @@ v2 decision. Sections 12 through 14 retain the investigation/design history;
 section 15 records the implemented state. This runbook still stops before an
 `active.json` change because the final clean worker build and fresh,
 identity-bound candidate-active campaigns have not completed.
+
+> Status update (2026-07-26 JST): this is a frozen legacy recovery/campaign
+> design, retained as a technical and historical reference. It is not a
+> binding procedure for a new candidate. The user-directed lightweight
+> promotion policy supersedes its campaign authorization, sealed-plan, and
+> human-decision requirements for future promotions; use the generic promotion
+> and rollback tools instead.
 
 This concerns the independent `SQ8_0` FP8 E4M3 format for
 `Qwen/Qwen3-14B-FP8`. It is not AQ4_0 with FP8 applied to selected tensors.
@@ -1188,7 +1195,7 @@ Steps 1 through 9 are implementation or CPU-only preparation. Steps 10 and
 12 are the only service/GPU/systemd windows and were not performed during
 this investigation.
 
-## 14. Admission checklist and remaining human decisions
+## 14. Legacy admission checklist and remaining route prerequisites
 
 Cutover remains fail-closed until every item below is true:
 
@@ -1216,7 +1223,7 @@ Cutover remains fail-closed until every item below is true:
       current user-owned bootstrap closure with a root-owned protected
       closure, fresh promotion pair, new frozen manifest, and immutable
       locked-transaction outcome.
-- [ ] A human pre-issues the narrow AQ4-v2 to SQ8-v2 campaign authorization;
+- [ ] The legacy route has a pre-issued narrow AQ4-v2 to SQ8-v2 campaign authorization;
       its fixed-registry claim is atomically consumed exactly once.
 - [ ] The exact SQ8 and AQ4 campaign commits are separately materialized as
       root-owned, non-writable standalone clones with in-tree `.git`
@@ -1239,7 +1246,7 @@ Cutover remains fail-closed until every item below is true:
 - [ ] Post-activation `active.json` bytes equal the frozen candidate exactly;
       any later rollback uses the locked rollback subcommand.
 
-The remaining human decisions are operational: review the final clean
+The remaining legacy route prerequisites are operational: inspect the final clean
 worker/build receipt and exact candidate/rollback/run/output/expiry
 identities; pre-issue the narrow campaign authorization; then review the
 complete bundle-v2 and final-activation plan hashes before execution.
@@ -1424,14 +1431,14 @@ read-only unless the exact plan SHA-256 and respectively
 `ACTIVATE_SQ8_0_FROM_RESTORED_AQ4` or
 `ROLLBACK_SQ8_0_TO_EXACT_AQ4` are supplied. Neither was run here.
 
-### 15.4 Live holds and human order
+### 15.4 Historical live holds and route order
 
 Still prohibited or unavailable: production `active.json` writes;
 `ullm-openai.service` start/stop/restart; systemd changes; production GPU
 campaign or GPU worker launch; V620 access; obtaining/using the real
 OpenWebUI browser-login JWT; production claim; and activation/rollback.
 
-Human/operator order:
+Legacy route order:
 
 1. prepare and execute the separately reviewed AQ4-to-AQ4 runtime-hardening
    promotion; this future step requires its own GPU/service window and must
@@ -1449,7 +1456,7 @@ Human/operator order:
    from the sealed SQ8 clone;
 5. provision the real browser-session JWT and pre-issue the exact,
    sufficiently unexpired authorization;
-6. enter the separately approved maintenance window, explicitly stop
+6. enter the scheduled maintenance window, explicitly stop
    `ullm-openai.service`, and read-only verify that every fixed
    `inactive_services` member is inactive **before** invoking any command
    that claims the authorization; this is a future operator action and was
@@ -1462,8 +1469,8 @@ Human/operator order:
 8. assemble and independently validate the SQ8 `status: complete` bundle v2,
    retaining the outcome-bound AQ4 bundle v1 as a separate admission input;
 9. prepare/review the final plan and read-only preflight; and
-10. execute activation only after explicit Claude+user approval, using the
-   plan-bound rollback route if rollback is later needed.
+10. retain the plan-bound rollback route for historical reproducibility. A new
+   activation uses the generic lightweight route and its rollback tool.
 
 ## 16. Final audit delta
 

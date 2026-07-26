@@ -457,7 +457,7 @@ prefill token batchingとrequest continuous batchingを別機能として実装�
 
 同一hardware、binary、model、product、power条件で比較する。
 
-既存承認cellに対し、prefill p50 5%超、p95 10%超の悪化、VRAM上限超過、または新規OOMがあればpromotionを停止する。
+prefill p50/p95、VRAM、OOMは昇格証跡として記録する。新規OOMなど「動かない」状態は昇格を止めるが、性能しきい値だけで通常の昇格を止めない。実際の生成文の明白な崩壊とロールバック可能性は、軽量昇格方針に従う。
 
 ### 5.3 production gate
 

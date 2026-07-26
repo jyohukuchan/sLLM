@@ -14,7 +14,7 @@ The goal is not to assume that the generic `SQ8_0` matvec source is serving. It 
 1. isolated prototype under a non-production symbol;
 2. offline HIPRTC/HIP code-object metadata and ISA audit;
 3. R9700 differential plus scoped timing/thermal measurement; and
-4. only in a separately approved later task, a body replacement behind the unchanged external ABI and dispatch.
+4. only in a separately scoped later task, a body replacement behind the unchanged external ABI and dispatch.
 
 ## Success Criteria
 
@@ -38,7 +38,7 @@ The goal is not to assume that the generic `SQ8_0` matvec source is serving. It 
 
 ## Non-Goals
 
-- Do not replace a production symbol, alter an external ABI or dispatch decision, or activate any served model. In particular, `/etc/ullm/served-models/active.json` is outside scope and requires separate human approval.
+- Do not replace a production symbol, alter an external ABI or dispatch decision, or activate any served model. In particular, `/etc/ullm/served-models/active.json` is outside this optimization scope; a later promotion uses the lightweight promotion policy and its rollback transaction.
 - Do not treat the generic `ullm_sq_fp8_matvec_{f32,batch,pair,triple}_kernel` family as a current hot path: none appears in either Phase 0 selected trace. A wide-load/shuffle rewrite there is conditional future work, not the first implementation.
 - Do not rewrite the currently selected paged-decode reduction merely because a full LDS fallback exists in source. The normal source uses wave shuffle; whether the fallback environment variable was set during Phase 0 is **未確認**.
 - Do not infer physical HBM traffic, achieved occupancy, or prefill unprofiled tok/s from static metadata or a profiler trace. Those values are **未確認** until separately measured.
@@ -122,7 +122,7 @@ The gfx942 branch inherits the hand-written MFMA objective from the CDNA3 plan, 
 
 ### Phase 5 — guarded body replacement (not authorized by Phase 0)
 
-Only after one isolated candidate meets all correctness, resource, timing, and regression gates may a separate task propose replacing an internal production body. That task must re-run source/ABI checks, R9700 scoped profiles, unprofiled timing, and service lifecycle checks. Activation remains a distinct human-approved operation.
+Only after one isolated candidate meets the applicable correctness, resource, timing, and regression evidence may a separate task propose replacing an internal production body. That task must re-run source/ABI checks, R9700 scoped profiles, unprofiled timing, and service lifecycle checks. Activation remains a distinct lightweight promotion operation with automatic rollback on a failed live check.
 
 ## Decision Tree
 

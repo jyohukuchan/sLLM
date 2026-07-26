@@ -385,5 +385,5 @@ bundle v1 routeを維持し、SQ8 bundle v2を導入しない。
 3. 新candidate identityで、29以上の既定R9700測定/service窓、fidelity例外の明示記録、
    direct worker/Gateway/SSE/OpenWebUI/rollback検証を行う。各窓でllama comparison baselineの
    `inactive`、温度、clockを記録する。
-4. release bundle/rollback bindingを独立検証し、人間の明示承認を得るまで
-   `active.json`の実バイトを差し替えない。
+4. release bundle/rollback bindingを独立検証し、軽量昇格方針の生成品質確認と
+   ロールバック準備が完了するまで`active.json`の実バイトを差し替えない。

@@ -1,7 +1,12 @@
 # SQ8_0 final activation and exact AQ4_0 rollback runbook v0.1
 
-Status: implementation-only preparation. **Do not execute the activation or
-rollback commands during the current work.**
+Status: frozen legacy reproducibility route. **Do not use this runbook for a
+new promotion.** It preserves the former sealed SQ8_0 route and its artifacts,
+but the 2026-07-26 user-directed lightweight-promotion policy supersedes its
+campaign, authorization, plan-hash, and confirmation requirements for future
+work. New candidates use
+[`lightweight-promotion-policy-v0.1.md`](lightweight-promotion-policy-v0.1.md)
+and the generic promotion/rollback tools.
 
 This runbook applies only to the independent Qwen3-14B-FP8 `SQ8_0` served
 model. It does not apply to the historical AQ4 SQ8 overlay.
@@ -36,7 +41,7 @@ detached AQ4 source tree; they must not be relabeled as SQ8-source artifacts.
    worker/legacy-engine executable, promotion input, tokenizer member,
    product/package manifest, and package payload, below protected ancestry;
    and
-10. a human-reviewed operations document as described below.
+10. a root-owned canonical operations document as described below.
 
 The fresh browser campaigns require a real private OpenWebUI browser-session
 JWT and the full campaigns require the production GPU/service window. Those
@@ -70,7 +75,7 @@ The current AQ4 bootstrap manifest
 also does not satisfy runtime admission: its worker, promotion inputs,
 tokenizer, and 1,044 package payloads are below user-owned/writable `/home`
 and product trees. Do not issue the exact-six authorization from that
-baseline. First complete a separately reviewed and authorized AQ4-to-AQ4
+baseline. First complete a separately prepared AQ4-to-AQ4
 runtime-hardening promotion: no-hardlink root-stage the complete closure
 outside `/home`, collect fresh path-bound AQ4 promotion evidence/receipt,
 freeze a new manifest, and activate it through its own locked rollback/live
@@ -86,10 +91,10 @@ SQ8 worker staging commands and corresponding AQ4 asset audit are in
 `docs/plans/sq8-aq4-root-owned-staging-runbook-v0.1.md`. Neither document
 waives this AQ4-to-AQ4 prerequisite.
 
-## Reviewed operations document
+## Legacy operations document
 
 The final tools do not accept command JSON on their command line. The five
-operational stages are instead fixed in a separately reviewed, canonical JSON
+operational stages are instead fixed in a separately prepared, canonical JSON
 file, made read-only (`0444`), owned by root, and linked exactly once:
 
 ```json
@@ -97,7 +102,7 @@ file, made read-only (`0444`), owned by root, and linked exactly once:
   "schema_version": "ullm.served_model.final_activation_operations.v2",
   "review_id": "REVIEWED-ID",
   "reviewed_at": "YYYY-MM-DDTHH:MM:SSZ",
-  "reviewed_by": "HUMAN-REVIEWER",
+  "reviewed_by": "LEGACY-ROUTE-RECORD",
   "timeout_seconds": 300,
   "active_window_timeout_seconds": 1800,
   "live_proofs": {
@@ -285,7 +290,8 @@ backup. It inventories and seals the complete AQ4 and SQ8 runtime closures;
 missing or empty seals, user-owned ancestry, ACLs, symlinks, hardlinks, and
 writable entries are rejected. The active path, service unit, unit file, and
 environment file are fixed by production policy; alternate same-byte copies
-are rejected. Record the printed plan SHA-256 in the human review record.
+are rejected. Record the printed plan SHA-256 in the append-only legacy route
+record.
 
 ## Read-only final preflight
 
@@ -302,10 +308,11 @@ performs the expensive complete-bundle validation and campaign-output
 re-inventory. It does not acquire a campaign authorization, alter
 `active.json`, or run an operation executable.
 
-## Final activation (future operator window only)
+## Final activation (legacy route only)
 
-After Claude and the user jointly review the exact plan hash and approve the
-live window, the only executable form is:
+The following form is retained solely to reproduce this historical sealed
+route. It is not an approval workflow and is not the route for a new
+promotion; use the generic lightweight route instead:
 
 ```text
 sudo -- /usr/bin/python3.12 -I -S -B /ABSOLUTE/ROOT-OWNED-SEALED-SQ8-SOURCE/tools/run-served-model-final-activation.py \

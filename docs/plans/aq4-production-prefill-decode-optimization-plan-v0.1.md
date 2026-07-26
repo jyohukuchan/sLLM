@@ -1,6 +1,6 @@
 # AQ4 production prefill/decode optimization plan v0.1
 
-Status: P0 complete; P1 schema/mechanics gate complete; P2 normal-window (13/14) and detailed-profile (6/6) capture complete on commit b4d42d9f (decode-c16 has 3/6 structurally unsupported M>context cases, accepted as a known measurement-matrix limitation, see `journal/2026/07/18/aq4-p2-production-baseline-window-execution-v0.1.md`); P2 path-oracle windows (8) not started; baseline JSONL sealing deferred (blocked on decode-c16 status, would require full re-capture to fix); active product remains unchanged until P6 unless the explicit P4 prefill-only exception is approved
+Status: P0 complete; P1 schema/mechanics gate complete; P2 normal-window (13/14) and detailed-profile (6/6) capture complete on commit b4d42d9f (decode-c16 has 3/6 structurally unsupported M>context cases, accepted as a known measurement-matrix limitation, see `journal/2026/07/18/aq4-p2-production-baseline-window-execution-v0.1.md`); P2 path-oracle windows (8) not started; baseline JSONL sealing deferred (blocked on decode-c16 status, would require full re-capture to fix); active product remains unchanged until P6 unless the P4 prefill-only candidate passes the lightweight-promotion route
 
 ## 前回の要点
 
@@ -381,7 +381,7 @@ systemctl is-active llama-qwen35-udq4.service
 | topology | Qwen3 dense full-model control、Qwen3.5 hybrid production target。fixture/componentだけでは代替不可 |
 | format | AQ4_0 target、SQ8_0 cross-format control、利用可能なBF16/FP16/F32 reference/source oracle |
 | prefill M | 1、8、16、32、64、128 |
-| prefill mode | all-M=1、cold batched、cached-prefix chunked。unsupportedはimmutable evidenceとして記録するが、明示的に適用外とするapproved policyがない限りpromotion coverageを満たさない |
+| prefill mode | all-M=1、cold batched、cached-prefix chunked。unsupportedはimmutable evidenceとして記録するが、明示的に適用外とする事前記述済みの方針がない限りpromotion coverageを満たさない |
 | prompt/context | 1、8、32、128、512、1011、1024、1339、2048、3584、context edge |
 | decode start | 16、128、512、1024、1339、2048、3584 |
 | scope | component、full_model、production_server |

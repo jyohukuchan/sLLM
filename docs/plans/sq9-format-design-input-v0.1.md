@@ -66,12 +66,12 @@ oracle, generic E5M3 dequant kernel, runtime selector, and exact manifest handli
 3. A matched comparison establishes that `AQ4_0`, `SQ8_0`, and `SQ8_1` cannot meet the requirement
    without the proposed E5M3 route.  Historical V620 evidence cannot be substituted for this
    comparison.
-4. A new, reviewed implementation plan fixes the CPU oracle, malformed-input and tail tests,
+4. A new, scoped implementation plan fixes the CPU oracle, malformed-input and tail tests,
    target-specific differential/quality gates, and the required benchmark evidence before code is
    started.
-5. The user separately authorizes that implementation work and any necessary GPU-validation
-   window.  A later activation, campaign, authorization consumption, or active-manifest edit still
-   requires its own explicit approval.
+5. Schedule any necessary GPU-validation window around shared-resource constraints. A later
+   activation follows the lightweight promotion policy; campaign and authorization mechanisms are
+   not routine promotion prerequisites.
 
 ## 前回の要点
 
@@ -484,7 +484,7 @@ current targets, `SQ8_0`, `SQ8_1`, and `AQ4_0` retain their own selection and qu
 
 ## 保留中の実装考慮事項（現時点では着手しない）
 
-The remainder of this section records what a **future, separately authorized** implementation would
+The remainder of this section records what a **future, separately scoped** implementation would
 need to consider after every entry condition is met.  It is not a work queue, and none of its
 items authorizes code, hardware execution, artifact production, or manifest work now.
 
@@ -524,7 +524,7 @@ For every future direct-kernel candidate, record:
 
 ## 将来の評価条件（保留）
 
-| question | future experiment after authorization | decision needed before implementation continues |
+| question | future scoped experiment | decision needed before implementation continues |
 | --- | --- | --- |
 | Does no-scale direct E5M3 preserve useful quality? | bounded chunk reconstruction, activation-weighted relative MSE, saturation/subnormal counts, then golden-prefix/logit and prompt-suite checks | no-scale `SQ9_0` must meet the predeclared quality floor; otherwise it is not promoted |
 | Does a scale recover enough quality to be worth it? | tensor, row, and K=128 scale ablations with identical RNE source and exact metadata bytes | report as a separate experimental exact format; never relabel it as `SQ9_0` |
@@ -537,7 +537,7 @@ For every future direct-kernel candidate, record:
 ```text
 all deferred-entry conditions at the top of this document met?
   no  -> stop; SQ9_0 stays a design record and no artifact/runtime work starts
-  yes -> obtain separate implementation and target-hardware authorization
+  yes -> scope the implementation and obtain the target-hardware access needed for measurement
 
 source weight finite?
   no  -> reject future quantization with tensor/coordinate evidence
@@ -567,7 +567,7 @@ target-specific quality, differential, and matched-current-format gates pass?
 
 ## 保留解除後の作業順（現時点の action ではない）
 
-If and only if the entry conditions are met, a newly approved plan must sequence:
+If and only if the entry conditions are met, a newly scoped plan must sequence:
 
 1. CPU reference pack/unpack and malformed-input tests for 1/31/32/33/127/128/129-column tails,
    16-byte offsets, and zero padding.
@@ -577,9 +577,9 @@ If and only if the entry conditions are met, a newly approved plan must sequence
    activation-weighted and prompt/logit evidence conventions.
 4. A target-specific direct decoder comparison against the applicable `SQ8_0`/`SQ8_1`/`AQ4_0`
    route, with ISA, register, profiler, numerical-differential, and thermal evidence.
-5. Only after those gates pass, a separately reviewed implementation plan for loader/manifest
-   integration, direct projection coverage, and regression tests.  Artifact, campaign, release,
-   authorization consumption, and activation remain separately approved actions.
+5. Only after those gates pass, a separately scoped implementation plan for loader/manifest
+   integration, direct projection coverage, and regression tests. Artifact, campaign, release,
+   and activation use the lightweight promotion policy rather than separate approval actions.
 
 ## V620 (gfx1030) 実機測定結果（2026-07-26、サーマルガード付き再実行）
 
@@ -788,7 +788,7 @@ The corrected status is:
 | reader and validator | **Deferred; no current artifact may claim this reader.** | The new plan defines exact-ID, shape, plane-length, `lo8_then_hi1`, bit-order, padding, and malformed-input tests. |
 | CPU oracle and generic E5M3 dequant kernel | **Deferred; no current kernel path.** | Target-specific CPU/hardware differential and quality gates are approved, with `q << 7` semantics kept distinct from native FP9/INT8-dot/WMMA/MFMA claims. |
 | runtime loader and selector | **Deferred; `SQ9_0` is not selectable.** | A reader/kernel exists for the validated named target and explicit, fail-closed dispatch is reviewed; no default or silent format substitution is allowed. |
-| served-model manifest | **Deferred; no manifest schema or active-manifest change.** | A separately approved artifact/runtime integration plan exists.  Editing `/etc/ullm/served-models/active.json` remains outside this work. |
+| served-model manifest | **Deferred; no manifest schema or active-manifest change.** | A separately scoped artifact/runtime integration plan exists. Editing `/etc/ullm/served-models/active.json` remains outside this work. |
 | architecture availability | **None today.**  `gfx1030`, `gfx1100`, `gfx1201`, `gfx942`, and `gfx950` do not select `SQ9_0`. | V100 or an exact RDNA1 GFX target must independently pass the entry conditions; unknown targets remain unavailable. |
 
 The next optimized INT8 candidate remains `SQ8_1`.  This is a separate exact format direction, not a
@@ -812,12 +812,12 @@ baseline, is [AMD 低精度 ISA とフォーマット選択リファレンス](.
 
 1. Leave every `SQ9_0` component deferred.  Do not create a compatibility implementation plan,
    CPU oracle, reader, kernel, selector, manifest entry, or GPU experiment until the entry
-   conditions and separate authorization exist.
+   conditions and a concrete implementation scope exist.
 2. Complete the separately owned `SQ8_1` design input, bounded-memory CPU reference, activation
    capture, and held-out W8A8 quality plan.  Do not modify
    `docs/plans/sq8_1-format-design-input-v0.1.md` from this work.
-3. Only under a separately authorized GPU window, compare optimized `SQ8_1` W8A8/W8A16 against the
+3. Only in a separately scheduled GPU window, compare optimized `SQ8_1` W8A8/W8A16 against the
    retained `SQ8_0` path on matched inputs.  Record transactions, occupancy, clocks, timing, and
-   numerical differentials; no GPU work is authorized by this document.
-4. Keep final activation outside this plan.  Any future active-manifest change remains a separate
-   human-approved action.
+   numerical differentials; this document does not schedule GPU work.
+4. Keep final activation outside this plan. Any future active-manifest change follows the
+   lightweight promotion policy and its rollback transaction.
