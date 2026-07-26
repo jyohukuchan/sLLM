@@ -1,0 +1,16 @@
+{
+  "engine": "llama.cpp Q8_0",
+  "id": "llama-cpp-q8_0-f32-kv-p128",
+  "kv_dtype": "f32",
+  "prompt_tokens": 128,
+  "repeats": 5,
+  "result": {
+    "monotonic_ended_ns": 68546306718918,
+    "monotonic_started_ns": 68539931283779,
+    "pid": 501437,
+    "returncode": 0,
+    "utc_ended": "2026-07-26T19:14:19.437+09:00",
+    "utc_started": "2026-07-26T19:14:13.061+09:00",
+    "wall_seconds": 6.375435139
+  }
+}

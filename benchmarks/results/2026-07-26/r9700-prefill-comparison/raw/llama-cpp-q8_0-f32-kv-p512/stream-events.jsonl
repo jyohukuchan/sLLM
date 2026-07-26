@@ -1,0 +1,786 @@
+{"line": "ggml_cuda_init: found 1 ROCm devices (Total VRAM: 32624 MiB):", "monotonic_ns": 68780048649188, "stream": "stderr", "utc": "2026-07-26T19:18:13.179+09:00"}
+{"line": "  Device 0: AMD Radeon Graphics, gfx1201 (0x1201), VMM: no, Wave Size: 32, VRAM: 32624 MiB", "monotonic_ns": 68780048947893, "stream": "stderr", "utc": "2026-07-26T19:18:13.179+09:00"}
+{"line": "llama-bench: benchmark 1/1: starting", "monotonic_ns": 68780052665409, "stream": "stderr", "utc": "2026-07-26T19:18:13.183+09:00"}
+{"line": "llama_model_loader: loaded meta data with 28 key-value pairs and 443 tensors from /home/homelab1/datapool/ai_models/gguf/Qwen/Qwen3-14B-GGUF-530227a7/Qwen3-14B-Q8_0.gguf (version GGUF V3 (latest))", "monotonic_ns": 68780107253368, "stream": "stderr", "utc": "2026-07-26T19:18:13.237+09:00"}
+{"line": "llama_model_loader: Dumping metadata keys/values. Note: KV overrides do not apply in this output.", "monotonic_ns": 68780107477632, "stream": "stderr", "utc": "2026-07-26T19:18:13.238+09:00"}
+{"line": "llama_model_loader: - kv   0:                       general.architecture str              = qwen3", "monotonic_ns": 68780107549963, "stream": "stderr", "utc": "2026-07-26T19:18:13.238+09:00"}
+{"line": "llama_model_loader: - kv   1:                               general.type str              = model", "monotonic_ns": 68780107609324, "stream": "stderr", "utc": "2026-07-26T19:18:13.238+09:00"}
+{"line": "llama_model_loader: - kv   2:                               general.name str              = Qwen3 14B Instruct", "monotonic_ns": 68780107666225, "stream": "stderr", "utc": "2026-07-26T19:18:13.238+09:00"}
+{"line": "llama_model_loader: - kv   3:                           general.finetune str              = Instruct", "monotonic_ns": 68780107723186, "stream": "stderr", "utc": "2026-07-26T19:18:13.238+09:00"}
+{"line": "llama_model_loader: - kv   4:                           general.basename str              = Qwen3", "monotonic_ns": 68780107777937, "stream": "stderr", "utc": "2026-07-26T19:18:13.238+09:00"}
+{"line": "llama_model_loader: - kv   5:                         general.size_label str              = 14B", "monotonic_ns": 68780107833218, "stream": "stderr", "utc": "2026-07-26T19:18:13.238+09:00"}
+{"line": "llama_model_loader: - kv   6:                          qwen3.block_count u32              = 40", "monotonic_ns": 68780107888379, "stream": "stderr", "utc": "2026-07-26T19:18:13.238+09:00"}
+{"line": "llama_model_loader: - kv   7:                       qwen3.context_length u32              = 40960", "monotonic_ns": 68780107942290, "stream": "stderr", "utc": "2026-07-26T19:18:13.238+09:00"}
+{"line": "llama_model_loader: - kv   8:                     qwen3.embedding_length u32              = 5120", "monotonic_ns": 68780107996201, "stream": "stderr", "utc": "2026-07-26T19:18:13.238+09:00"}
+{"line": "llama_model_loader: - kv   9:                  qwen3.feed_forward_length u32              = 17408", "monotonic_ns": 68780108061922, "stream": "stderr", "utc": "2026-07-26T19:18:13.238+09:00"}
+{"line": "llama_model_loader: - kv  10:                 qwen3.attention.head_count u32              = 40", "monotonic_ns": 68780108116063, "stream": "stderr", "utc": "2026-07-26T19:18:13.238+09:00"}
+{"line": "llama_model_loader: - kv  11:              qwen3.attention.head_count_kv u32              = 8", "monotonic_ns": 68780108170334, "stream": "stderr", "utc": "2026-07-26T19:18:13.238+09:00"}
+{"line": "llama_model_loader: - kv  12:                       qwen3.rope.freq_base f32              = 1000000.000000", "monotonic_ns": 68780108225695, "stream": "stderr", "utc": "2026-07-26T19:18:13.238+09:00"}
+{"line": "llama_model_loader: - kv  13:     qwen3.attention.layer_norm_rms_epsilon f32              = 0.000001", "monotonic_ns": 68780108279496, "stream": "stderr", "utc": "2026-07-26T19:18:13.238+09:00"}
+{"line": "llama_model_loader: - kv  14:                 qwen3.attention.key_length u32              = 128", "monotonic_ns": 68780108333547, "stream": "stderr", "utc": "2026-07-26T19:18:13.238+09:00"}
+{"line": "llama_model_loader: - kv  15:               qwen3.attention.value_length u32              = 128", "monotonic_ns": 68780108386528, "stream": "stderr", "utc": "2026-07-26T19:18:13.238+09:00"}
+{"line": "llama_model_loader: - kv  16:                       tokenizer.ggml.model str              = gpt2", "monotonic_ns": 68780108466629, "stream": "stderr", "utc": "2026-07-26T19:18:13.239+09:00"}
+{"line": "llama_model_loader: - kv  17:                         tokenizer.ggml.pre str              = qwen2", "monotonic_ns": 68780108521600, "stream": "stderr", "utc": "2026-07-26T19:18:13.239+09:00"}
+{"line": "llama_model_loader: - kv  18:                      tokenizer.ggml.tokens arr[str,151936]  = [\"!\", \"\\\"\", \"#\", \"$\", \"%\", \"&\", \"'\", ...", "monotonic_ns": 68780133559560, "stream": "stderr", "utc": "2026-07-26T19:18:13.263+09:00"}
+{"line": "llama_model_loader: - kv  19:                  tokenizer.ggml.token_type arr[i32,151936]  = [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, ...", "monotonic_ns": 68780139657827, "stream": "stderr", "utc": "2026-07-26T19:18:13.270+09:00"}
+{"line": "llama_model_loader: - kv  20:                      tokenizer.ggml.merges arr[str,151387]  = [\"\u0120 \u0120\", \"\u0120\u0120 \u0120\u0120\", \"i n\", \"\u0120 t\",...", "monotonic_ns": 68780163771931, "stream": "stderr", "utc": "2026-07-26T19:18:13.294+09:00"}
+{"line": "llama_model_loader: - kv  21:                tokenizer.ggml.eos_token_id u32              = 151645", "monotonic_ns": 68780163918104, "stream": "stderr", "utc": "2026-07-26T19:18:13.294+09:00"}
+{"line": "llama_model_loader: - kv  22:            tokenizer.ggml.padding_token_id u32              = 151643", "monotonic_ns": 68780163971225, "stream": "stderr", "utc": "2026-07-26T19:18:13.294+09:00"}
+{"line": "llama_model_loader: - kv  23:                tokenizer.ggml.bos_token_id u32              = 151643", "monotonic_ns": 68780164039906, "stream": "stderr", "utc": "2026-07-26T19:18:13.294+09:00"}
+{"line": "llama_model_loader: - kv  24:               tokenizer.ggml.add_bos_token bool             = false", "monotonic_ns": 68780164096797, "stream": "stderr", "utc": "2026-07-26T19:18:13.294+09:00"}
+{"line": "llama_model_loader: - kv  25:                    tokenizer.chat_template str              = {%- if tools %}\\n    {{- '<|im_start|>...", "monotonic_ns": 68780164145598, "stream": "stderr", "utc": "2026-07-26T19:18:13.294+09:00"}
+{"line": "llama_model_loader: - kv  26:               general.quantization_version u32              = 2", "monotonic_ns": 68780164200909, "stream": "stderr", "utc": "2026-07-26T19:18:13.294+09:00"}
+{"line": "llama_model_loader: - kv  27:                          general.file_type u32              = 7", "monotonic_ns": 68780164249400, "stream": "stderr", "utc": "2026-07-26T19:18:13.294+09:00"}
+{"line": "llama_model_loader: - type  f32:  161 tensors", "monotonic_ns": 68780164296270, "stream": "stderr", "utc": "2026-07-26T19:18:13.294+09:00"}
+{"line": "llama_model_loader: - type q8_0:  282 tensors", "monotonic_ns": 68780164344041, "stream": "stderr", "utc": "2026-07-26T19:18:13.294+09:00"}
+{"line": "print_info: file format = GGUF V3 (latest)", "monotonic_ns": 68780164391062, "stream": "stderr", "utc": "2026-07-26T19:18:13.294+09:00"}
+{"line": "print_info: file type   = Q8_0", "monotonic_ns": 68780164439133, "stream": "stderr", "utc": "2026-07-26T19:18:13.295+09:00"}
+{"line": "print_info: file size   = 14.61 GiB (8.50 BPW) ", "monotonic_ns": 68780164487134, "stream": "stderr", "utc": "2026-07-26T19:18:13.295+09:00"}
+{"line": "llama_prepare_model_devices: using device ROCm0 (AMD Radeon Graphics) (0000:47:00.0) - 32554 MiB free", "monotonic_ns": 68780164534025, "stream": "stderr", "utc": "2026-07-26T19:18:13.295+09:00"}
+{"line": "init_tokenizer: initializing tokenizer for type 2", "monotonic_ns": 68780297765166, "stream": "stderr", "utc": "2026-07-26T19:18:13.428+09:00"}
+{"line": "load: 0 unused tokens", "monotonic_ns": 68780348594339, "stream": "stderr", "utc": "2026-07-26T19:18:13.479+09:00"}
+{"line": "load: control token: 151660 '<|fim_middle|>' is not marked as EOG", "monotonic_ns": 68780348871494, "stream": "stderr", "utc": "2026-07-26T19:18:13.479+09:00"}
+{"line": "load: control token: 151659 '<|fim_prefix|>' is not marked as EOG", "monotonic_ns": 68780348977576, "stream": "stderr", "utc": "2026-07-26T19:18:13.479+09:00"}
+{"line": "load: control token: 151653 '<|vision_end|>' is not marked as EOG", "monotonic_ns": 68780349059807, "stream": "stderr", "utc": "2026-07-26T19:18:13.479+09:00"}
+{"line": "load: control token: 151648 '<|box_start|>' is not marked as EOG", "monotonic_ns": 68780349120378, "stream": "stderr", "utc": "2026-07-26T19:18:13.479+09:00"}
+{"line": "load: control token: 151646 '<|object_ref_start|>' is not marked as EOG", "monotonic_ns": 68780349196559, "stream": "stderr", "utc": "2026-07-26T19:18:13.479+09:00"}
+{"line": "load: control token: 151649 '<|box_end|>' is not marked as EOG", "monotonic_ns": 68780349255941, "stream": "stderr", "utc": "2026-07-26T19:18:13.479+09:00"}
+{"line": "load: control-looking token: 128247 '</s>' was not control-type; this is probably a bug in the model. its type will be overridden", "monotonic_ns": 68780351282186, "stream": "stderr", "utc": "2026-07-26T19:18:13.481+09:00"}
+{"line": "load: control token: 151655 '<|image_pad|>' is not marked as EOG", "monotonic_ns": 68780352840293, "stream": "stderr", "utc": "2026-07-26T19:18:13.483+09:00"}
+{"line": "load: control token: 151651 '<|quad_end|>' is not marked as EOG", "monotonic_ns": 68780353373953, "stream": "stderr", "utc": "2026-07-26T19:18:13.483+09:00"}
+{"line": "load: control token: 151647 '<|object_ref_end|>' is not marked as EOG", "monotonic_ns": 68780357790581, "stream": "stderr", "utc": "2026-07-26T19:18:13.488+09:00"}
+{"line": "load: control token: 151652 '<|vision_start|>' is not marked as EOG", "monotonic_ns": 68780365494156, "stream": "stderr", "utc": "2026-07-26T19:18:13.496+09:00"}
+{"line": "load: control token: 151654 '<|vision_pad|>' is not marked as EOG", "monotonic_ns": 68780371920479, "stream": "stderr", "utc": "2026-07-26T19:18:13.502+09:00"}
+{"line": "load: control token: 151656 '<|video_pad|>' is not marked as EOG", "monotonic_ns": 68780377350774, "stream": "stderr", "utc": "2026-07-26T19:18:13.507+09:00"}
+{"line": "load: control token: 151644 '<|im_start|>' is not marked as EOG", "monotonic_ns": 68780378088877, "stream": "stderr", "utc": "2026-07-26T19:18:13.508+09:00"}
+{"line": "load: control token: 151661 '<|fim_suffix|>' is not marked as EOG", "monotonic_ns": 68780379777327, "stream": "stderr", "utc": "2026-07-26T19:18:13.510+09:00"}
+{"line": "load: control token: 151650 '<|quad_start|>' is not marked as EOG", "monotonic_ns": 68780381066619, "stream": "stderr", "utc": "2026-07-26T19:18:13.511+09:00"}
+{"line": "load: printing all EOG tokens:", "monotonic_ns": 68780389977396, "stream": "stderr", "utc": "2026-07-26T19:18:13.520+09:00"}
+{"line": "load:   - 128247 ('</s>')", "monotonic_ns": 68780390066758, "stream": "stderr", "utc": "2026-07-26T19:18:13.520+09:00"}
+{"line": "load:   - 151643 ('<|endoftext|>')", "monotonic_ns": 68780390112498, "stream": "stderr", "utc": "2026-07-26T19:18:13.520+09:00"}
+{"line": "load:   - 151645 ('<|im_end|>')", "monotonic_ns": 68780390156159, "stream": "stderr", "utc": "2026-07-26T19:18:13.520+09:00"}
+{"line": "load:   - 151662 ('<|fim_pad|>')", "monotonic_ns": 68780390205800, "stream": "stderr", "utc": "2026-07-26T19:18:13.520+09:00"}
+{"line": "load:   - 151663 ('<|repo_name|>')", "monotonic_ns": 68780390250941, "stream": "stderr", "utc": "2026-07-26T19:18:13.520+09:00"}
+{"line": "load:   - 151664 ('<|file_sep|>')", "monotonic_ns": 68780390294542, "stream": "stderr", "utc": "2026-07-26T19:18:13.520+09:00"}
+{"line": "load: special tokens cache size = 27", "monotonic_ns": 68780390493215, "stream": "stderr", "utc": "2026-07-26T19:18:13.521+09:00"}
+{"line": "load: token to piece cache size = 0.9311 MB", "monotonic_ns": 68780457662545, "stream": "stderr", "utc": "2026-07-26T19:18:13.588+09:00"}
+{"line": "print_info: arch                  = qwen3", "monotonic_ns": 68780458205175, "stream": "stderr", "utc": "2026-07-26T19:18:13.588+09:00"}
+{"line": "print_info: vocab_only            = 0", "monotonic_ns": 68780458276726, "stream": "stderr", "utc": "2026-07-26T19:18:13.588+09:00"}
+{"line": "print_info: no_alloc              = 0", "monotonic_ns": 68780458358218, "stream": "stderr", "utc": "2026-07-26T19:18:13.588+09:00"}
+{"line": "print_info: n_ctx_train           = 40960", "monotonic_ns": 68780458420989, "stream": "stderr", "utc": "2026-07-26T19:18:13.588+09:00"}
+{"line": "print_info: n_embd_inp            = 5120", "monotonic_ns": 68780458480400, "stream": "stderr", "utc": "2026-07-26T19:18:13.589+09:00"}
+{"line": "print_info: n_embd                = 5120", "monotonic_ns": 68780458539251, "stream": "stderr", "utc": "2026-07-26T19:18:13.589+09:00"}
+{"line": "print_info: n_embd_out            = 5120", "monotonic_ns": 68780458598192, "stream": "stderr", "utc": "2026-07-26T19:18:13.589+09:00"}
+{"line": "print_info: n_layer               = 40", "monotonic_ns": 68780458654583, "stream": "stderr", "utc": "2026-07-26T19:18:13.589+09:00"}
+{"line": "print_info: n_layer_all           = 40", "monotonic_ns": 68780458712014, "stream": "stderr", "utc": "2026-07-26T19:18:13.589+09:00"}
+{"line": "print_info: n_head                = 40", "monotonic_ns": 68780458768775, "stream": "stderr", "utc": "2026-07-26T19:18:13.589+09:00"}
+{"line": "print_info: n_head_kv             = 8", "monotonic_ns": 68780458826896, "stream": "stderr", "utc": "2026-07-26T19:18:13.589+09:00"}
+{"line": "print_info: n_rot                 = 128", "monotonic_ns": 68780458883517, "stream": "stderr", "utc": "2026-07-26T19:18:13.589+09:00"}
+{"line": "print_info: n_swa                 = 0", "monotonic_ns": 68780458941358, "stream": "stderr", "utc": "2026-07-26T19:18:13.589+09:00"}
+{"line": "print_info: is_swa_any            = 0", "monotonic_ns": 68780459019619, "stream": "stderr", "utc": "2026-07-26T19:18:13.589+09:00"}
+{"line": "print_info: n_embd_head_k         = 128", "monotonic_ns": 68780459085140, "stream": "stderr", "utc": "2026-07-26T19:18:13.589+09:00"}
+{"line": "print_info: n_embd_head_v         = 128", "monotonic_ns": 68780459144691, "stream": "stderr", "utc": "2026-07-26T19:18:13.589+09:00"}
+{"line": "print_info: n_gqa                 = 5", "monotonic_ns": 68780459202752, "stream": "stderr", "utc": "2026-07-26T19:18:13.589+09:00"}
+{"line": "print_info: n_embd_k_gqa          = 1024", "monotonic_ns": 68780459259783, "stream": "stderr", "utc": "2026-07-26T19:18:13.589+09:00"}
+{"line": "print_info: n_embd_v_gqa          = 1024", "monotonic_ns": 68780459317084, "stream": "stderr", "utc": "2026-07-26T19:18:13.589+09:00"}
+{"line": "print_info: f_norm_eps            = 0.0e+00", "monotonic_ns": 68780459374976, "stream": "stderr", "utc": "2026-07-26T19:18:13.589+09:00"}
+{"line": "print_info: f_norm_rms_eps        = 1.0e-06", "monotonic_ns": 68780459432677, "stream": "stderr", "utc": "2026-07-26T19:18:13.589+09:00"}
+{"line": "print_info: f_clamp_kqv           = 0.0e+00", "monotonic_ns": 68780459491958, "stream": "stderr", "utc": "2026-07-26T19:18:13.590+09:00"}
+{"line": "print_info: f_max_alibi_bias      = 0.0e+00", "monotonic_ns": 68780459549049, "stream": "stderr", "utc": "2026-07-26T19:18:13.590+09:00"}
+{"line": "print_info: f_logit_scale         = 0.0e+00", "monotonic_ns": 68780459605420, "stream": "stderr", "utc": "2026-07-26T19:18:13.590+09:00"}
+{"line": "print_info: f_attn_scale          = 0.0e+00", "monotonic_ns": 68780459663291, "stream": "stderr", "utc": "2026-07-26T19:18:13.590+09:00"}
+{"line": "print_info: f_attn_value_scale    = 0.0000", "monotonic_ns": 68780459719672, "stream": "stderr", "utc": "2026-07-26T19:18:13.590+09:00"}
+{"line": "print_info: n_ff                  = 17408", "monotonic_ns": 68780459776523, "stream": "stderr", "utc": "2026-07-26T19:18:13.590+09:00"}
+{"line": "print_info: n_expert              = 0", "monotonic_ns": 68780459832874, "stream": "stderr", "utc": "2026-07-26T19:18:13.590+09:00"}
+{"line": "print_info: n_expert_used         = 0", "monotonic_ns": 68780459890685, "stream": "stderr", "utc": "2026-07-26T19:18:13.590+09:00"}
+{"line": "print_info: n_expert_groups       = 0", "monotonic_ns": 68780459948036, "stream": "stderr", "utc": "2026-07-26T19:18:13.590+09:00"}
+{"line": "print_info: n_group_used          = 0", "monotonic_ns": 68780460027677, "stream": "stderr", "utc": "2026-07-26T19:18:13.590+09:00"}
+{"line": "print_info: causal attn           = 1", "monotonic_ns": 68780460088748, "stream": "stderr", "utc": "2026-07-26T19:18:13.590+09:00"}
+{"line": "print_info: pooling type          = -1", "monotonic_ns": 68780460145719, "stream": "stderr", "utc": "2026-07-26T19:18:13.590+09:00"}
+{"line": "print_info: rope type             = 2", "monotonic_ns": 68780460209040, "stream": "stderr", "utc": "2026-07-26T19:18:13.590+09:00"}
+{"line": "print_info: rope scaling          = linear", "monotonic_ns": 68780460266571, "stream": "stderr", "utc": "2026-07-26T19:18:13.590+09:00"}
+{"line": "print_info: freq_base_train       = 1000000.0", "monotonic_ns": 68780460324192, "stream": "stderr", "utc": "2026-07-26T19:18:13.590+09:00"}
+{"line": "print_info: freq_scale_train      = 1", "monotonic_ns": 68780460381323, "stream": "stderr", "utc": "2026-07-26T19:18:13.590+09:00"}
+{"line": "print_info: n_ctx_orig_yarn       = 40960", "monotonic_ns": 68780460437754, "stream": "stderr", "utc": "2026-07-26T19:18:13.590+09:00"}
+{"line": "print_info: rope_yarn_log_mul     = 0.0000", "monotonic_ns": 68780460494035, "stream": "stderr", "utc": "2026-07-26T19:18:13.591+09:00"}
+{"line": "print_info: rope_finetuned        = unknown", "monotonic_ns": 68780460550526, "stream": "stderr", "utc": "2026-07-26T19:18:13.591+09:00"}
+{"line": "print_info: model type            = 14B", "monotonic_ns": 68780460607047, "stream": "stderr", "utc": "2026-07-26T19:18:13.591+09:00"}
+{"line": "print_info: model params          = 14.77 B", "monotonic_ns": 68780460664328, "stream": "stderr", "utc": "2026-07-26T19:18:13.591+09:00"}
+{"line": "print_info: general.name          = Qwen3 14B Instruct", "monotonic_ns": 68780460720849, "stream": "stderr", "utc": "2026-07-26T19:18:13.591+09:00"}
+{"line": "print_info: vocab type            = BPE", "monotonic_ns": 68780460779090, "stream": "stderr", "utc": "2026-07-26T19:18:13.591+09:00"}
+{"line": "print_info: n_vocab               = 151936", "monotonic_ns": 68780460836621, "stream": "stderr", "utc": "2026-07-26T19:18:13.591+09:00"}
+{"line": "print_info: n_merges              = 151387", "monotonic_ns": 68780460894822, "stream": "stderr", "utc": "2026-07-26T19:18:13.591+09:00"}
+{"line": "print_info: BOS token             = 151643 '<|endoftext|>'", "monotonic_ns": 68780460953223, "stream": "stderr", "utc": "2026-07-26T19:18:13.591+09:00"}
+{"line": "print_info: EOS token             = 151645 '<|im_end|>'", "monotonic_ns": 68780461026235, "stream": "stderr", "utc": "2026-07-26T19:18:13.591+09:00"}
+{"line": "print_info: EOT token             = 151645 '<|im_end|>'", "monotonic_ns": 68780461088966, "stream": "stderr", "utc": "2026-07-26T19:18:13.591+09:00"}
+{"line": "print_info: PAD token             = 151643 '<|endoftext|>'", "monotonic_ns": 68780461145837, "stream": "stderr", "utc": "2026-07-26T19:18:13.591+09:00"}
+{"line": "print_info: LF token              = 198 '\u010a'", "monotonic_ns": 68780461212518, "stream": "stderr", "utc": "2026-07-26T19:18:13.591+09:00"}
+{"line": "print_info: FIM PRE token         = 151659 '<|fim_prefix|>'", "monotonic_ns": 68780461273169, "stream": "stderr", "utc": "2026-07-26T19:18:13.591+09:00"}
+{"line": "print_info: FIM SUF token         = 151661 '<|fim_suffix|>'", "monotonic_ns": 68780461334360, "stream": "stderr", "utc": "2026-07-26T19:18:13.591+09:00"}
+{"line": "print_info: FIM MID token         = 151660 '<|fim_middle|>'", "monotonic_ns": 68780461394651, "stream": "stderr", "utc": "2026-07-26T19:18:13.591+09:00"}
+{"line": "print_info: FIM PAD token         = 151662 '<|fim_pad|>'", "monotonic_ns": 68780461455072, "stream": "stderr", "utc": "2026-07-26T19:18:13.592+09:00"}
+{"line": "print_info: FIM REP token         = 151663 '<|repo_name|>'", "monotonic_ns": 68780461514293, "stream": "stderr", "utc": "2026-07-26T19:18:13.592+09:00"}
+{"line": "print_info: FIM SEP token         = 151664 '<|file_sep|>'", "monotonic_ns": 68780461574574, "stream": "stderr", "utc": "2026-07-26T19:18:13.592+09:00"}
+{"line": "print_info: EOG token             = 128247 '</s>'", "monotonic_ns": 68780461645285, "stream": "stderr", "utc": "2026-07-26T19:18:13.592+09:00"}
+{"line": "print_info: EOG token             = 151643 '<|endoftext|>'", "monotonic_ns": 68780461706536, "stream": "stderr", "utc": "2026-07-26T19:18:13.592+09:00"}
+{"line": "print_info: EOG token             = 151645 '<|im_end|>'", "monotonic_ns": 68780461765307, "stream": "stderr", "utc": "2026-07-26T19:18:13.592+09:00"}
+{"line": "print_info: EOG token             = 151662 '<|fim_pad|>'", "monotonic_ns": 68780461825508, "stream": "stderr", "utc": "2026-07-26T19:18:13.592+09:00"}
+{"line": "print_info: EOG token             = 151663 '<|repo_name|>'", "monotonic_ns": 68780461882919, "stream": "stderr", "utc": "2026-07-26T19:18:13.592+09:00"}
+{"line": "print_info: EOG token             = 151664 '<|file_sep|>'", "monotonic_ns": 68780461940650, "stream": "stderr", "utc": "2026-07-26T19:18:13.592+09:00"}
+{"line": "print_info: max token length      = 256", "monotonic_ns": 68780462025422, "stream": "stderr", "utc": "2026-07-26T19:18:13.592+09:00"}
+{"line": "load_tensors: loading model tensors, this can take a while... (mmap = true, direct_io = false)", "monotonic_ns": 68780462092283, "stream": "stderr", "utc": "2026-07-26T19:18:13.592+09:00"}
+{"line": "load_tensors: layer   0 assigned to device ROCm0, is_swa = 0", "monotonic_ns": 68780462170595, "stream": "stderr", "utc": "2026-07-26T19:18:13.592+09:00"}
+{"line": "load_tensors: layer   1 assigned to device ROCm0, is_swa = 0", "monotonic_ns": 68780462240326, "stream": "stderr", "utc": "2026-07-26T19:18:13.592+09:00"}
+{"line": "load_tensors: layer   2 assigned to device ROCm0, is_swa = 0", "monotonic_ns": 68780462300497, "stream": "stderr", "utc": "2026-07-26T19:18:13.592+09:00"}
+{"line": "load_tensors: layer   3 assigned to device ROCm0, is_swa = 0", "monotonic_ns": 68780462361868, "stream": "stderr", "utc": "2026-07-26T19:18:13.592+09:00"}
+{"line": "load_tensors: layer   4 assigned to device ROCm0, is_swa = 0", "monotonic_ns": 68780462422419, "stream": "stderr", "utc": "2026-07-26T19:18:13.592+09:00"}
+{"line": "load_tensors: layer   5 assigned to device ROCm0, is_swa = 0", "monotonic_ns": 68780462482900, "stream": "stderr", "utc": "2026-07-26T19:18:13.593+09:00"}
+{"line": "load_tensors: layer   6 assigned to device ROCm0, is_swa = 0", "monotonic_ns": 68780462544261, "stream": "stderr", "utc": "2026-07-26T19:18:13.593+09:00"}
+{"line": "load_tensors: layer   7 assigned to device ROCm0, is_swa = 0", "monotonic_ns": 68780462614032, "stream": "stderr", "utc": "2026-07-26T19:18:13.593+09:00"}
+{"line": "load_tensors: layer   8 assigned to device ROCm0, is_swa = 0", "monotonic_ns": 68780462676393, "stream": "stderr", "utc": "2026-07-26T19:18:13.593+09:00"}
+{"line": "load_tensors: layer   9 assigned to device ROCm0, is_swa = 0", "monotonic_ns": 68780462738555, "stream": "stderr", "utc": "2026-07-26T19:18:13.593+09:00"}
+{"line": "load_tensors: layer  10 assigned to device ROCm0, is_swa = 0", "monotonic_ns": 68780462800906, "stream": "stderr", "utc": "2026-07-26T19:18:13.593+09:00"}
+{"line": "load_tensors: layer  11 assigned to device ROCm0, is_swa = 0", "monotonic_ns": 68780462863987, "stream": "stderr", "utc": "2026-07-26T19:18:13.593+09:00"}
+{"line": "load_tensors: layer  12 assigned to device ROCm0, is_swa = 0", "monotonic_ns": 68780462924788, "stream": "stderr", "utc": "2026-07-26T19:18:13.593+09:00"}
+{"line": "load_tensors: layer  13 assigned to device ROCm0, is_swa = 0", "monotonic_ns": 68780462988769, "stream": "stderr", "utc": "2026-07-26T19:18:13.593+09:00"}
+{"line": "load_tensors: layer  14 assigned to device ROCm0, is_swa = 0", "monotonic_ns": 68780463087821, "stream": "stderr", "utc": "2026-07-26T19:18:13.593+09:00"}
+{"line": "load_tensors: layer  15 assigned to device ROCm0, is_swa = 0", "monotonic_ns": 68780463147842, "stream": "stderr", "utc": "2026-07-26T19:18:13.593+09:00"}
+{"line": "load_tensors: layer  16 assigned to device ROCm0, is_swa = 0", "monotonic_ns": 68780463217133, "stream": "stderr", "utc": "2026-07-26T19:18:13.593+09:00"}
+{"line": "load_tensors: layer  17 assigned to device ROCm0, is_swa = 0", "monotonic_ns": 68780463285214, "stream": "stderr", "utc": "2026-07-26T19:18:13.593+09:00"}
+{"line": "load_tensors: layer  18 assigned to device ROCm0, is_swa = 0", "monotonic_ns": 68780463347125, "stream": "stderr", "utc": "2026-07-26T19:18:13.593+09:00"}
+{"line": "load_tensors: layer  19 assigned to device ROCm0, is_swa = 0", "monotonic_ns": 68780463406426, "stream": "stderr", "utc": "2026-07-26T19:18:13.593+09:00"}
+{"line": "load_tensors: layer  20 assigned to device ROCm0, is_swa = 0", "monotonic_ns": 68780463464977, "stream": "stderr", "utc": "2026-07-26T19:18:13.594+09:00"}
+{"line": "load_tensors: layer  21 assigned to device ROCm0, is_swa = 0", "monotonic_ns": 68780463524768, "stream": "stderr", "utc": "2026-07-26T19:18:13.594+09:00"}
+{"line": "load_tensors: layer  22 assigned to device ROCm0, is_swa = 0", "monotonic_ns": 68780463583379, "stream": "stderr", "utc": "2026-07-26T19:18:13.594+09:00"}
+{"line": "load_tensors: layer  23 assigned to device ROCm0, is_swa = 0", "monotonic_ns": 68780463642230, "stream": "stderr", "utc": "2026-07-26T19:18:13.594+09:00"}
+{"line": "load_tensors: layer  24 assigned to device ROCm0, is_swa = 0", "monotonic_ns": 68780463700541, "stream": "stderr", "utc": "2026-07-26T19:18:13.594+09:00"}
+{"line": "load_tensors: layer  25 assigned to device ROCm0, is_swa = 0", "monotonic_ns": 68780463758662, "stream": "stderr", "utc": "2026-07-26T19:18:13.594+09:00"}
+{"line": "load_tensors: layer  26 assigned to device ROCm0, is_swa = 0", "monotonic_ns": 68780463816863, "stream": "stderr", "utc": "2026-07-26T19:18:13.594+09:00"}
+{"line": "load_tensors: layer  27 assigned to device ROCm0, is_swa = 0", "monotonic_ns": 68780463875195, "stream": "stderr", "utc": "2026-07-26T19:18:13.594+09:00"}
+{"line": "load_tensors: layer  28 assigned to device ROCm0, is_swa = 0", "monotonic_ns": 68780463932926, "stream": "stderr", "utc": "2026-07-26T19:18:13.594+09:00"}
+{"line": "load_tensors: layer  29 assigned to device ROCm0, is_swa = 0", "monotonic_ns": 68780463991127, "stream": "stderr", "utc": "2026-07-26T19:18:13.594+09:00"}
+{"line": "load_tensors: layer  30 assigned to device ROCm0, is_swa = 0", "monotonic_ns": 68780464071748, "stream": "stderr", "utc": "2026-07-26T19:18:13.594+09:00"}
+{"line": "load_tensors: layer  31 assigned to device ROCm0, is_swa = 0", "monotonic_ns": 68780464131389, "stream": "stderr", "utc": "2026-07-26T19:18:13.594+09:00"}
+{"line": "load_tensors: layer  32 assigned to device ROCm0, is_swa = 0", "monotonic_ns": 68780464193430, "stream": "stderr", "utc": "2026-07-26T19:18:13.594+09:00"}
+{"line": "load_tensors: layer  33 assigned to device ROCm0, is_swa = 0", "monotonic_ns": 68780464256511, "stream": "stderr", "utc": "2026-07-26T19:18:13.594+09:00"}
+{"line": "load_tensors: layer  34 assigned to device ROCm0, is_swa = 0", "monotonic_ns": 68780464315292, "stream": "stderr", "utc": "2026-07-26T19:18:13.594+09:00"}
+{"line": "load_tensors: layer  35 assigned to device ROCm0, is_swa = 0", "monotonic_ns": 68780464374033, "stream": "stderr", "utc": "2026-07-26T19:18:13.594+09:00"}
+{"line": "load_tensors: layer  36 assigned to device ROCm0, is_swa = 0", "monotonic_ns": 68780464432644, "stream": "stderr", "utc": "2026-07-26T19:18:13.594+09:00"}
+{"line": "load_tensors: layer  37 assigned to device ROCm0, is_swa = 0", "monotonic_ns": 68780464491425, "stream": "stderr", "utc": "2026-07-26T19:18:13.595+09:00"}
+{"line": "load_tensors: layer  38 assigned to device ROCm0, is_swa = 0", "monotonic_ns": 68780464550126, "stream": "stderr", "utc": "2026-07-26T19:18:13.595+09:00"}
+{"line": "load_tensors: layer  39 assigned to device ROCm0, is_swa = 0", "monotonic_ns": 68780464609237, "stream": "stderr", "utc": "2026-07-26T19:18:13.595+09:00"}
+{"line": "load_tensors: layer  40 assigned to device ROCm0, is_swa = 0", "monotonic_ns": 68780464668028, "stream": "stderr", "utc": "2026-07-26T19:18:13.595+09:00"}
+{"line": "create_tensor: loading tensor token_embd.weight", "monotonic_ns": 68780464726679, "stream": "stderr", "utc": "2026-07-26T19:18:13.595+09:00"}
+{"line": "create_tensor: loading tensor output_norm.weight", "monotonic_ns": 68780464792931, "stream": "stderr", "utc": "2026-07-26T19:18:13.595+09:00"}
+{"line": "create_tensor: loading tensor output.weight", "monotonic_ns": 68780464853842, "stream": "stderr", "utc": "2026-07-26T19:18:13.595+09:00"}
+{"line": "create_tensor: loading tensor blk.0.attn_norm.weight", "monotonic_ns": 68780464913633, "stream": "stderr", "utc": "2026-07-26T19:18:13.595+09:00"}
+{"line": "create_tensor: loading tensor blk.0.attn_q.weight", "monotonic_ns": 68780464973414, "stream": "stderr", "utc": "2026-07-26T19:18:13.595+09:00"}
+{"line": "create_tensor: loading tensor blk.0.attn_k.weight", "monotonic_ns": 68780465046875, "stream": "stderr", "utc": "2026-07-26T19:18:13.595+09:00"}
+{"line": "create_tensor: loading tensor blk.0.attn_v.weight", "monotonic_ns": 68780465108196, "stream": "stderr", "utc": "2026-07-26T19:18:13.595+09:00"}
+{"line": "create_tensor: loading tensor blk.0.attn_output.weight", "monotonic_ns": 68780465177987, "stream": "stderr", "utc": "2026-07-26T19:18:13.595+09:00"}
+{"line": "create_tensor: loading tensor blk.0.attn_k_norm.weight", "monotonic_ns": 68780465244959, "stream": "stderr", "utc": "2026-07-26T19:18:13.595+09:00"}
+{"line": "create_tensor: loading tensor blk.0.attn_q_norm.weight", "monotonic_ns": 68780465305780, "stream": "stderr", "utc": "2026-07-26T19:18:13.595+09:00"}
+{"line": "create_tensor: loading tensor blk.0.ffn_norm.weight", "monotonic_ns": 68780465366261, "stream": "stderr", "utc": "2026-07-26T19:18:13.595+09:00"}
+{"line": "create_tensor: loading tensor blk.0.ffn_gate.weight", "monotonic_ns": 68780465426202, "stream": "stderr", "utc": "2026-07-26T19:18:13.595+09:00"}
+{"line": "create_tensor: loading tensor blk.0.ffn_down.weight", "monotonic_ns": 68780465486233, "stream": "stderr", "utc": "2026-07-26T19:18:13.596+09:00"}
+{"line": "create_tensor: loading tensor blk.0.ffn_up.weight", "monotonic_ns": 68780465546174, "stream": "stderr", "utc": "2026-07-26T19:18:13.596+09:00"}
+{"line": "create_tensor: loading tensor blk.1.attn_norm.weight", "monotonic_ns": 68780465606745, "stream": "stderr", "utc": "2026-07-26T19:18:13.596+09:00"}
+{"line": "create_tensor: loading tensor blk.1.attn_q.weight", "monotonic_ns": 68780465666726, "stream": "stderr", "utc": "2026-07-26T19:18:13.596+09:00"}
+{"line": "create_tensor: loading tensor blk.1.attn_k.weight", "monotonic_ns": 68780465726957, "stream": "stderr", "utc": "2026-07-26T19:18:13.596+09:00"}
+{"line": "create_tensor: loading tensor blk.1.attn_v.weight", "monotonic_ns": 68780465786878, "stream": "stderr", "utc": "2026-07-26T19:18:13.596+09:00"}
+{"line": "create_tensor: loading tensor blk.1.attn_output.weight", "monotonic_ns": 68780465846509, "stream": "stderr", "utc": "2026-07-26T19:18:13.596+09:00"}
+{"line": "create_tensor: loading tensor blk.1.attn_k_norm.weight", "monotonic_ns": 68780465906040, "stream": "stderr", "utc": "2026-07-26T19:18:13.596+09:00"}
+{"line": "create_tensor: loading tensor blk.1.attn_q_norm.weight", "monotonic_ns": 68780465965831, "stream": "stderr", "utc": "2026-07-26T19:18:13.596+09:00"}
+{"line": "create_tensor: loading tensor blk.1.ffn_norm.weight", "monotonic_ns": 68780466038843, "stream": "stderr", "utc": "2026-07-26T19:18:13.596+09:00"}
+{"line": "create_tensor: loading tensor blk.1.ffn_gate.weight", "monotonic_ns": 68780466101224, "stream": "stderr", "utc": "2026-07-26T19:18:13.596+09:00"}
+{"line": "create_tensor: loading tensor blk.1.ffn_down.weight", "monotonic_ns": 68780466161425, "stream": "stderr", "utc": "2026-07-26T19:18:13.596+09:00"}
+{"line": "create_tensor: loading tensor blk.1.ffn_up.weight", "monotonic_ns": 68780466230696, "stream": "stderr", "utc": "2026-07-26T19:18:13.596+09:00"}
+{"line": "create_tensor: loading tensor blk.2.attn_norm.weight", "monotonic_ns": 68780466291847, "stream": "stderr", "utc": "2026-07-26T19:18:13.596+09:00"}
+{"line": "create_tensor: loading tensor blk.2.attn_q.weight", "monotonic_ns": 68780466353518, "stream": "stderr", "utc": "2026-07-26T19:18:13.596+09:00"}
+{"line": "create_tensor: loading tensor blk.2.attn_k.weight", "monotonic_ns": 68780466422859, "stream": "stderr", "utc": "2026-07-26T19:18:13.596+09:00"}
+{"line": "create_tensor: loading tensor blk.2.attn_v.weight", "monotonic_ns": 68780466486190, "stream": "stderr", "utc": "2026-07-26T19:18:13.597+09:00"}
+{"line": "create_tensor: loading tensor blk.2.attn_output.weight", "monotonic_ns": 68780466548032, "stream": "stderr", "utc": "2026-07-26T19:18:13.597+09:00"}
+{"line": "create_tensor: loading tensor blk.2.attn_k_norm.weight", "monotonic_ns": 68780466616753, "stream": "stderr", "utc": "2026-07-26T19:18:13.597+09:00"}
+{"line": "create_tensor: loading tensor blk.2.attn_q_norm.weight", "monotonic_ns": 68780466680664, "stream": "stderr", "utc": "2026-07-26T19:18:13.597+09:00"}
+{"line": "create_tensor: loading tensor blk.2.ffn_norm.weight", "monotonic_ns": 68780466742715, "stream": "stderr", "utc": "2026-07-26T19:18:13.597+09:00"}
+{"line": "create_tensor: loading tensor blk.2.ffn_gate.weight", "monotonic_ns": 68780466804146, "stream": "stderr", "utc": "2026-07-26T19:18:13.597+09:00"}
+{"line": "create_tensor: loading tensor blk.2.ffn_down.weight", "monotonic_ns": 68780466865857, "stream": "stderr", "utc": "2026-07-26T19:18:13.597+09:00"}
+{"line": "create_tensor: loading tensor blk.2.ffn_up.weight", "monotonic_ns": 68780466927128, "stream": "stderr", "utc": "2026-07-26T19:18:13.597+09:00"}
+{"line": "create_tensor: loading tensor blk.3.attn_norm.weight", "monotonic_ns": 68780466989159, "stream": "stderr", "utc": "2026-07-26T19:18:13.597+09:00"}
+{"line": "create_tensor: loading tensor blk.3.attn_q.weight", "monotonic_ns": 68780467064531, "stream": "stderr", "utc": "2026-07-26T19:18:13.597+09:00"}
+{"line": "create_tensor: loading tensor blk.3.attn_k.weight", "monotonic_ns": 68780467127432, "stream": "stderr", "utc": "2026-07-26T19:18:13.597+09:00"}
+{"line": "create_tensor: loading tensor blk.3.attn_v.weight", "monotonic_ns": 68780467194053, "stream": "stderr", "utc": "2026-07-26T19:18:13.597+09:00"}
+{"line": "create_tensor: loading tensor blk.3.attn_output.weight", "monotonic_ns": 68780467258244, "stream": "stderr", "utc": "2026-07-26T19:18:13.597+09:00"}
+{"line": "create_tensor: loading tensor blk.3.attn_k_norm.weight", "monotonic_ns": 68780467320195, "stream": "stderr", "utc": "2026-07-26T19:18:13.597+09:00"}
+{"line": "create_tensor: loading tensor blk.3.attn_q_norm.weight", "monotonic_ns": 68780467382466, "stream": "stderr", "utc": "2026-07-26T19:18:13.597+09:00"}
+{"line": "create_tensor: loading tensor blk.3.ffn_norm.weight", "monotonic_ns": 68780467444277, "stream": "stderr", "utc": "2026-07-26T19:18:13.598+09:00"}
+{"line": "create_tensor: loading tensor blk.3.ffn_gate.weight", "monotonic_ns": 68780467505398, "stream": "stderr", "utc": "2026-07-26T19:18:13.598+09:00"}
+{"line": "create_tensor: loading tensor blk.3.ffn_down.weight", "monotonic_ns": 68780467567189, "stream": "stderr", "utc": "2026-07-26T19:18:13.598+09:00"}
+{"line": "create_tensor: loading tensor blk.3.ffn_up.weight", "monotonic_ns": 68780467629131, "stream": "stderr", "utc": "2026-07-26T19:18:13.598+09:00"}
+{"line": "create_tensor: loading tensor blk.4.attn_norm.weight", "monotonic_ns": 68780467691132, "stream": "stderr", "utc": "2026-07-26T19:18:13.598+09:00"}
+{"line": "create_tensor: loading tensor blk.4.attn_q.weight", "monotonic_ns": 68780467753833, "stream": "stderr", "utc": "2026-07-26T19:18:13.598+09:00"}
+{"line": "create_tensor: loading tensor blk.4.attn_k.weight", "monotonic_ns": 68780467816714, "stream": "stderr", "utc": "2026-07-26T19:18:13.598+09:00"}
+{"line": "create_tensor: loading tensor blk.4.attn_v.weight", "monotonic_ns": 68780467879435, "stream": "stderr", "utc": "2026-07-26T19:18:13.598+09:00"}
+{"line": "create_tensor: loading tensor blk.4.attn_output.weight", "monotonic_ns": 68780467941506, "stream": "stderr", "utc": "2026-07-26T19:18:13.598+09:00"}
+{"line": "create_tensor: loading tensor blk.4.attn_k_norm.weight", "monotonic_ns": 68780468021047, "stream": "stderr", "utc": "2026-07-26T19:18:13.598+09:00"}
+{"line": "create_tensor: loading tensor blk.4.attn_q_norm.weight", "monotonic_ns": 68780468096599, "stream": "stderr", "utc": "2026-07-26T19:18:13.598+09:00"}
+{"line": "create_tensor: loading tensor blk.4.ffn_norm.weight", "monotonic_ns": 68780468161150, "stream": "stderr", "utc": "2026-07-26T19:18:13.598+09:00"}
+{"line": "create_tensor: loading tensor blk.4.ffn_gate.weight", "monotonic_ns": 68780468231271, "stream": "stderr", "utc": "2026-07-26T19:18:13.598+09:00"}
+{"line": "create_tensor: loading tensor blk.4.ffn_down.weight", "monotonic_ns": 68780468294162, "stream": "stderr", "utc": "2026-07-26T19:18:13.598+09:00"}
+{"line": "create_tensor: loading tensor blk.4.ffn_up.weight", "monotonic_ns": 68780468357003, "stream": "stderr", "utc": "2026-07-26T19:18:13.598+09:00"}
+{"line": "create_tensor: loading tensor blk.5.attn_norm.weight", "monotonic_ns": 68780468420234, "stream": "stderr", "utc": "2026-07-26T19:18:13.598+09:00"}
+{"line": "create_tensor: loading tensor blk.5.attn_q.weight", "monotonic_ns": 68780468482936, "stream": "stderr", "utc": "2026-07-26T19:18:13.599+09:00"}
+{"line": "create_tensor: loading tensor blk.5.attn_k.weight", "monotonic_ns": 68780468544897, "stream": "stderr", "utc": "2026-07-26T19:18:13.599+09:00"}
+{"line": "create_tensor: loading tensor blk.5.attn_v.weight", "monotonic_ns": 68780468606898, "stream": "stderr", "utc": "2026-07-26T19:18:13.599+09:00"}
+{"line": "create_tensor: loading tensor blk.5.attn_output.weight", "monotonic_ns": 68780468668809, "stream": "stderr", "utc": "2026-07-26T19:18:13.599+09:00"}
+{"line": "create_tensor: loading tensor blk.5.attn_k_norm.weight", "monotonic_ns": 68780468730780, "stream": "stderr", "utc": "2026-07-26T19:18:13.599+09:00"}
+{"line": "create_tensor: loading tensor blk.5.attn_q_norm.weight", "monotonic_ns": 68780468792781, "stream": "stderr", "utc": "2026-07-26T19:18:13.599+09:00"}
+{"line": "create_tensor: loading tensor blk.5.ffn_norm.weight", "monotonic_ns": 68780468855072, "stream": "stderr", "utc": "2026-07-26T19:18:13.599+09:00"}
+{"line": "create_tensor: loading tensor blk.5.ffn_gate.weight", "monotonic_ns": 68780468916213, "stream": "stderr", "utc": "2026-07-26T19:18:13.599+09:00"}
+{"line": "create_tensor: loading tensor blk.5.ffn_down.weight", "monotonic_ns": 68780468977334, "stream": "stderr", "utc": "2026-07-26T19:18:13.599+09:00"}
+{"line": "create_tensor: loading tensor blk.5.ffn_up.weight", "monotonic_ns": 68780469054706, "stream": "stderr", "utc": "2026-07-26T19:18:13.599+09:00"}
+{"line": "create_tensor: loading tensor blk.6.attn_norm.weight", "monotonic_ns": 68780469118427, "stream": "stderr", "utc": "2026-07-26T19:18:13.599+09:00"}
+{"line": "create_tensor: loading tensor blk.6.attn_q.weight", "monotonic_ns": 68780469180838, "stream": "stderr", "utc": "2026-07-26T19:18:13.599+09:00"}
+{"line": "create_tensor: loading tensor blk.6.attn_k.weight", "monotonic_ns": 68780469242999, "stream": "stderr", "utc": "2026-07-26T19:18:13.599+09:00"}
+{"line": "create_tensor: loading tensor blk.6.attn_v.weight", "monotonic_ns": 68780469304560, "stream": "stderr", "utc": "2026-07-26T19:18:13.599+09:00"}
+{"line": "create_tensor: loading tensor blk.6.attn_output.weight", "monotonic_ns": 68780469366001, "stream": "stderr", "utc": "2026-07-26T19:18:13.599+09:00"}
+{"line": "create_tensor: loading tensor blk.6.attn_k_norm.weight", "monotonic_ns": 68780469427712, "stream": "stderr", "utc": "2026-07-26T19:18:13.599+09:00"}
+{"line": "create_tensor: loading tensor blk.6.attn_q_norm.weight", "monotonic_ns": 68780469489533, "stream": "stderr", "utc": "2026-07-26T19:18:13.600+09:00"}
+{"line": "create_tensor: loading tensor blk.6.ffn_norm.weight", "monotonic_ns": 68780469551334, "stream": "stderr", "utc": "2026-07-26T19:18:13.600+09:00"}
+{"line": "create_tensor: loading tensor blk.6.ffn_gate.weight", "monotonic_ns": 68780469613675, "stream": "stderr", "utc": "2026-07-26T19:18:13.600+09:00"}
+{"line": "create_tensor: loading tensor blk.6.ffn_down.weight", "monotonic_ns": 68780469677147, "stream": "stderr", "utc": "2026-07-26T19:18:13.600+09:00"}
+{"line": "create_tensor: loading tensor blk.6.ffn_up.weight", "monotonic_ns": 68780469740908, "stream": "stderr", "utc": "2026-07-26T19:18:13.600+09:00"}
+{"line": "create_tensor: loading tensor blk.7.attn_norm.weight", "monotonic_ns": 68780469811689, "stream": "stderr", "utc": "2026-07-26T19:18:13.600+09:00"}
+{"line": "create_tensor: loading tensor blk.7.attn_q.weight", "monotonic_ns": 68780469876740, "stream": "stderr", "utc": "2026-07-26T19:18:13.600+09:00"}
+{"line": "create_tensor: loading tensor blk.7.attn_k.weight", "monotonic_ns": 68780469940831, "stream": "stderr", "utc": "2026-07-26T19:18:13.600+09:00"}
+{"line": "create_tensor: loading tensor blk.7.attn_v.weight", "monotonic_ns": 68780470016073, "stream": "stderr", "utc": "2026-07-26T19:18:13.600+09:00"}
+{"line": "create_tensor: loading tensor blk.7.attn_output.weight", "monotonic_ns": 68780470083774, "stream": "stderr", "utc": "2026-07-26T19:18:13.600+09:00"}
+{"line": "create_tensor: loading tensor blk.7.attn_k_norm.weight", "monotonic_ns": 68780470147665, "stream": "stderr", "utc": "2026-07-26T19:18:13.600+09:00"}
+{"line": "create_tensor: loading tensor blk.7.attn_q_norm.weight", "monotonic_ns": 68780470219106, "stream": "stderr", "utc": "2026-07-26T19:18:13.600+09:00"}
+{"line": "create_tensor: loading tensor blk.7.ffn_norm.weight", "monotonic_ns": 68780470282867, "stream": "stderr", "utc": "2026-07-26T19:18:13.600+09:00"}
+{"line": "create_tensor: loading tensor blk.7.ffn_gate.weight", "monotonic_ns": 68780470346598, "stream": "stderr", "utc": "2026-07-26T19:18:13.600+09:00"}
+{"line": "create_tensor: loading tensor blk.7.ffn_down.weight", "monotonic_ns": 68780470409389, "stream": "stderr", "utc": "2026-07-26T19:18:13.600+09:00"}
+{"line": "create_tensor: loading tensor blk.7.ffn_up.weight", "monotonic_ns": 68780470471551, "stream": "stderr", "utc": "2026-07-26T19:18:13.601+09:00"}
+{"line": "create_tensor: loading tensor blk.8.attn_norm.weight", "monotonic_ns": 68780470534982, "stream": "stderr", "utc": "2026-07-26T19:18:13.601+09:00"}
+{"line": "create_tensor: loading tensor blk.8.attn_q.weight", "monotonic_ns": 68780470597473, "stream": "stderr", "utc": "2026-07-26T19:18:13.601+09:00"}
+{"line": "create_tensor: loading tensor blk.8.attn_k.weight", "monotonic_ns": 68780470659774, "stream": "stderr", "utc": "2026-07-26T19:18:13.601+09:00"}
+{"line": "create_tensor: loading tensor blk.8.attn_v.weight", "monotonic_ns": 68780470722185, "stream": "stderr", "utc": "2026-07-26T19:18:13.601+09:00"}
+{"line": "create_tensor: loading tensor blk.8.attn_output.weight", "monotonic_ns": 68780470784726, "stream": "stderr", "utc": "2026-07-26T19:18:13.601+09:00"}
+{"line": "create_tensor: loading tensor blk.8.attn_k_norm.weight", "monotonic_ns": 68780470847907, "stream": "stderr", "utc": "2026-07-26T19:18:13.601+09:00"}
+{"line": "create_tensor: loading tensor blk.8.attn_q_norm.weight", "monotonic_ns": 68780470911478, "stream": "stderr", "utc": "2026-07-26T19:18:13.601+09:00"}
+{"line": "create_tensor: loading tensor blk.8.ffn_norm.weight", "monotonic_ns": 68780470975339, "stream": "stderr", "utc": "2026-07-26T19:18:13.601+09:00"}
+{"line": "create_tensor: loading tensor blk.8.ffn_gate.weight", "monotonic_ns": 68780471058081, "stream": "stderr", "utc": "2026-07-26T19:18:13.601+09:00"}
+{"line": "create_tensor: loading tensor blk.8.ffn_down.weight", "monotonic_ns": 68780471123572, "stream": "stderr", "utc": "2026-07-26T19:18:13.601+09:00"}
+{"line": "create_tensor: loading tensor blk.8.ffn_up.weight", "monotonic_ns": 68780471189543, "stream": "stderr", "utc": "2026-07-26T19:18:13.601+09:00"}
+{"line": "create_tensor: loading tensor blk.9.attn_norm.weight", "monotonic_ns": 68780471252354, "stream": "stderr", "utc": "2026-07-26T19:18:13.601+09:00"}
+{"line": "create_tensor: loading tensor blk.9.attn_q.weight", "monotonic_ns": 68780471314715, "stream": "stderr", "utc": "2026-07-26T19:18:13.601+09:00"}
+{"line": "create_tensor: loading tensor blk.9.attn_k.weight", "monotonic_ns": 68780471376606, "stream": "stderr", "utc": "2026-07-26T19:18:13.601+09:00"}
+{"line": "create_tensor: loading tensor blk.9.attn_v.weight", "monotonic_ns": 68780471438327, "stream": "stderr", "utc": "2026-07-26T19:18:13.601+09:00"}
+{"line": "create_tensor: loading tensor blk.9.attn_output.weight", "monotonic_ns": 68780471507989, "stream": "stderr", "utc": "2026-07-26T19:18:13.602+09:00"}
+{"line": "create_tensor: loading tensor blk.9.attn_k_norm.weight", "monotonic_ns": 68780471571900, "stream": "stderr", "utc": "2026-07-26T19:18:13.602+09:00"}
+{"line": "create_tensor: loading tensor blk.9.attn_q_norm.weight", "monotonic_ns": 68780471634171, "stream": "stderr", "utc": "2026-07-26T19:18:13.602+09:00"}
+{"line": "create_tensor: loading tensor blk.9.ffn_norm.weight", "monotonic_ns": 68780471702922, "stream": "stderr", "utc": "2026-07-26T19:18:13.602+09:00"}
+{"line": "create_tensor: loading tensor blk.9.ffn_gate.weight", "monotonic_ns": 68780471768213, "stream": "stderr", "utc": "2026-07-26T19:18:13.602+09:00"}
+{"line": "create_tensor: loading tensor blk.9.ffn_down.weight", "monotonic_ns": 68780471831944, "stream": "stderr", "utc": "2026-07-26T19:18:13.602+09:00"}
+{"line": "create_tensor: loading tensor blk.9.ffn_up.weight", "monotonic_ns": 68780471895925, "stream": "stderr", "utc": "2026-07-26T19:18:13.602+09:00"}
+{"line": "create_tensor: loading tensor blk.10.attn_norm.weight", "monotonic_ns": 68780471959407, "stream": "stderr", "utc": "2026-07-26T19:18:13.602+09:00"}
+{"line": "create_tensor: loading tensor blk.10.attn_q.weight", "monotonic_ns": 68780472035258, "stream": "stderr", "utc": "2026-07-26T19:18:13.602+09:00"}
+{"line": "create_tensor: loading tensor blk.10.attn_k.weight", "monotonic_ns": 68780472100979, "stream": "stderr", "utc": "2026-07-26T19:18:13.602+09:00"}
+{"line": "create_tensor: loading tensor blk.10.attn_v.weight", "monotonic_ns": 68780472164020, "stream": "stderr", "utc": "2026-07-26T19:18:13.602+09:00"}
+{"line": "create_tensor: loading tensor blk.10.attn_output.weight", "monotonic_ns": 68780472226981, "stream": "stderr", "utc": "2026-07-26T19:18:13.602+09:00"}
+{"line": "create_tensor: loading tensor blk.10.attn_k_norm.weight", "monotonic_ns": 68780472289522, "stream": "stderr", "utc": "2026-07-26T19:18:13.602+09:00"}
+{"line": "create_tensor: loading tensor blk.10.attn_q_norm.weight", "monotonic_ns": 68780472351933, "stream": "stderr", "utc": "2026-07-26T19:18:13.602+09:00"}
+{"line": "create_tensor: loading tensor blk.10.ffn_norm.weight", "monotonic_ns": 68780472414265, "stream": "stderr", "utc": "2026-07-26T19:18:13.602+09:00"}
+{"line": "create_tensor: loading tensor blk.10.ffn_gate.weight", "monotonic_ns": 68780472476236, "stream": "stderr", "utc": "2026-07-26T19:18:13.603+09:00"}
+{"line": "create_tensor: loading tensor blk.10.ffn_down.weight", "monotonic_ns": 68780472537907, "stream": "stderr", "utc": "2026-07-26T19:18:13.603+09:00"}
+{"line": "create_tensor: loading tensor blk.10.ffn_up.weight", "monotonic_ns": 68780472600818, "stream": "stderr", "utc": "2026-07-26T19:18:13.603+09:00"}
+{"line": "create_tensor: loading tensor blk.11.attn_norm.weight", "monotonic_ns": 68780472663199, "stream": "stderr", "utc": "2026-07-26T19:18:13.603+09:00"}
+{"line": "create_tensor: loading tensor blk.11.attn_q.weight", "monotonic_ns": 68780472724980, "stream": "stderr", "utc": "2026-07-26T19:18:13.603+09:00"}
+{"line": "create_tensor: loading tensor blk.11.attn_k.weight", "monotonic_ns": 68780472786421, "stream": "stderr", "utc": "2026-07-26T19:18:13.603+09:00"}
+{"line": "create_tensor: loading tensor blk.11.attn_v.weight", "monotonic_ns": 68780472848212, "stream": "stderr", "utc": "2026-07-26T19:18:13.603+09:00"}
+{"line": "create_tensor: loading tensor blk.11.attn_output.weight", "monotonic_ns": 68780472910763, "stream": "stderr", "utc": "2026-07-26T19:18:13.603+09:00"}
+{"line": "create_tensor: loading tensor blk.11.attn_k_norm.weight", "monotonic_ns": 68780472973084, "stream": "stderr", "utc": "2026-07-26T19:18:13.603+09:00"}
+{"line": "create_tensor: loading tensor blk.11.attn_q_norm.weight", "monotonic_ns": 68780473048436, "stream": "stderr", "utc": "2026-07-26T19:18:13.603+09:00"}
+{"line": "create_tensor: loading tensor blk.11.ffn_norm.weight", "monotonic_ns": 68780473113627, "stream": "stderr", "utc": "2026-07-26T19:18:13.603+09:00"}
+{"line": "create_tensor: loading tensor blk.11.ffn_gate.weight", "monotonic_ns": 68780473207098, "stream": "stderr", "utc": "2026-07-26T19:18:13.603+09:00"}
+{"line": "create_tensor: loading tensor blk.11.ffn_down.weight", "monotonic_ns": 68780473272300, "stream": "stderr", "utc": "2026-07-26T19:18:13.603+09:00"}
+{"line": "create_tensor: loading tensor blk.11.ffn_up.weight", "monotonic_ns": 68780473335561, "stream": "stderr", "utc": "2026-07-26T19:18:13.603+09:00"}
+{"line": "create_tensor: loading tensor blk.12.attn_norm.weight", "monotonic_ns": 68780473398142, "stream": "stderr", "utc": "2026-07-26T19:18:13.603+09:00"}
+{"line": "create_tensor: loading tensor blk.12.attn_q.weight", "monotonic_ns": 68780473461393, "stream": "stderr", "utc": "2026-07-26T19:18:13.604+09:00"}
+{"line": "create_tensor: loading tensor blk.12.attn_k.weight", "monotonic_ns": 68780473523914, "stream": "stderr", "utc": "2026-07-26T19:18:13.604+09:00"}
+{"line": "create_tensor: loading tensor blk.12.attn_v.weight", "monotonic_ns": 68780473586635, "stream": "stderr", "utc": "2026-07-26T19:18:13.604+09:00"}
+{"line": "create_tensor: loading tensor blk.12.attn_output.weight", "monotonic_ns": 68780473649036, "stream": "stderr", "utc": "2026-07-26T19:18:13.604+09:00"}
+{"line": "create_tensor: loading tensor blk.12.attn_k_norm.weight", "monotonic_ns": 68780473711567, "stream": "stderr", "utc": "2026-07-26T19:18:13.604+09:00"}
+{"line": "create_tensor: loading tensor blk.12.attn_q_norm.weight", "monotonic_ns": 68780473773768, "stream": "stderr", "utc": "2026-07-26T19:18:13.604+09:00"}
+{"line": "create_tensor: loading tensor blk.12.ffn_norm.weight", "monotonic_ns": 68780473836490, "stream": "stderr", "utc": "2026-07-26T19:18:13.604+09:00"}
+{"line": "create_tensor: loading tensor blk.12.ffn_gate.weight", "monotonic_ns": 68780473899271, "stream": "stderr", "utc": "2026-07-26T19:18:13.604+09:00"}
+{"line": "create_tensor: loading tensor blk.12.ffn_down.weight", "monotonic_ns": 68780473962372, "stream": "stderr", "utc": "2026-07-26T19:18:13.604+09:00"}
+{"line": "create_tensor: loading tensor blk.12.ffn_up.weight", "monotonic_ns": 68780474038313, "stream": "stderr", "utc": "2026-07-26T19:18:13.604+09:00"}
+{"line": "create_tensor: loading tensor blk.13.attn_norm.weight", "monotonic_ns": 68780474104554, "stream": "stderr", "utc": "2026-07-26T19:18:13.604+09:00"}
+{"line": "create_tensor: loading tensor blk.13.attn_q.weight", "monotonic_ns": 68780474167705, "stream": "stderr", "utc": "2026-07-26T19:18:13.604+09:00"}
+{"line": "create_tensor: loading tensor blk.13.attn_k.weight", "monotonic_ns": 68780474233127, "stream": "stderr", "utc": "2026-07-26T19:18:13.604+09:00"}
+{"line": "create_tensor: loading tensor blk.13.attn_v.weight", "monotonic_ns": 68780474295898, "stream": "stderr", "utc": "2026-07-26T19:18:13.604+09:00"}
+{"line": "create_tensor: loading tensor blk.13.attn_output.weight", "monotonic_ns": 68780474357749, "stream": "stderr", "utc": "2026-07-26T19:18:13.604+09:00"}
+{"line": "create_tensor: loading tensor blk.13.attn_k_norm.weight", "monotonic_ns": 68780474419950, "stream": "stderr", "utc": "2026-07-26T19:18:13.604+09:00"}
+{"line": "create_tensor: loading tensor blk.13.attn_q_norm.weight", "monotonic_ns": 68780474481901, "stream": "stderr", "utc": "2026-07-26T19:18:13.605+09:00"}
+{"line": "create_tensor: loading tensor blk.13.ffn_norm.weight", "monotonic_ns": 68780474543332, "stream": "stderr", "utc": "2026-07-26T19:18:13.605+09:00"}
+{"line": "create_tensor: loading tensor blk.13.ffn_gate.weight", "monotonic_ns": 68780474604193, "stream": "stderr", "utc": "2026-07-26T19:18:13.605+09:00"}
+{"line": "create_tensor: loading tensor blk.13.ffn_down.weight", "monotonic_ns": 68780474664664, "stream": "stderr", "utc": "2026-07-26T19:18:13.605+09:00"}
+{"line": "create_tensor: loading tensor blk.13.ffn_up.weight", "monotonic_ns": 68780474725825, "stream": "stderr", "utc": "2026-07-26T19:18:13.605+09:00"}
+{"line": "create_tensor: loading tensor blk.14.attn_norm.weight", "monotonic_ns": 68780474786406, "stream": "stderr", "utc": "2026-07-26T19:18:13.605+09:00"}
+{"line": "create_tensor: loading tensor blk.14.attn_q.weight", "monotonic_ns": 68780474855917, "stream": "stderr", "utc": "2026-07-26T19:18:13.605+09:00"}
+{"line": "create_tensor: loading tensor blk.14.attn_k.weight", "monotonic_ns": 68780474918809, "stream": "stderr", "utc": "2026-07-26T19:18:13.605+09:00"}
+{"line": "create_tensor: loading tensor blk.14.attn_v.weight", "monotonic_ns": 68780474979820, "stream": "stderr", "utc": "2026-07-26T19:18:13.605+09:00"}
+{"line": "create_tensor: loading tensor blk.14.attn_output.weight", "monotonic_ns": 68780475056271, "stream": "stderr", "utc": "2026-07-26T19:18:13.605+09:00"}
+{"line": "create_tensor: loading tensor blk.14.attn_k_norm.weight", "monotonic_ns": 68780475135392, "stream": "stderr", "utc": "2026-07-26T19:18:13.605+09:00"}
+{"line": "create_tensor: loading tensor blk.14.attn_q_norm.weight", "monotonic_ns": 68780475201574, "stream": "stderr", "utc": "2026-07-26T19:18:13.605+09:00"}
+{"line": "create_tensor: loading tensor blk.14.ffn_norm.weight", "monotonic_ns": 68780475263295, "stream": "stderr", "utc": "2026-07-26T19:18:13.605+09:00"}
+{"line": "create_tensor: loading tensor blk.14.ffn_gate.weight", "monotonic_ns": 68780475323636, "stream": "stderr", "utc": "2026-07-26T19:18:13.605+09:00"}
+{"line": "create_tensor: loading tensor blk.14.ffn_down.weight", "monotonic_ns": 68780475383927, "stream": "stderr", "utc": "2026-07-26T19:18:13.605+09:00"}
+{"line": "create_tensor: loading tensor blk.14.ffn_up.weight", "monotonic_ns": 68780475444368, "stream": "stderr", "utc": "2026-07-26T19:18:13.606+09:00"}
+{"line": "create_tensor: loading tensor blk.15.attn_norm.weight", "monotonic_ns": 68780475504669, "stream": "stderr", "utc": "2026-07-26T19:18:13.606+09:00"}
+{"line": "create_tensor: loading tensor blk.15.attn_q.weight", "monotonic_ns": 68780475565180, "stream": "stderr", "utc": "2026-07-26T19:18:13.606+09:00"}
+{"line": "create_tensor: loading tensor blk.15.attn_k.weight", "monotonic_ns": 68780475625221, "stream": "stderr", "utc": "2026-07-26T19:18:13.606+09:00"}
+{"line": "create_tensor: loading tensor blk.15.attn_v.weight", "monotonic_ns": 68780475684802, "stream": "stderr", "utc": "2026-07-26T19:18:13.606+09:00"}
+{"line": "create_tensor: loading tensor blk.15.attn_output.weight", "monotonic_ns": 68780475745203, "stream": "stderr", "utc": "2026-07-26T19:18:13.606+09:00"}
+{"line": "create_tensor: loading tensor blk.15.attn_k_norm.weight", "monotonic_ns": 68780475808154, "stream": "stderr", "utc": "2026-07-26T19:18:13.606+09:00"}
+{"line": "create_tensor: loading tensor blk.15.attn_q_norm.weight", "monotonic_ns": 68780475874355, "stream": "stderr", "utc": "2026-07-26T19:18:13.606+09:00"}
+{"line": "create_tensor: loading tensor blk.15.ffn_norm.weight", "monotonic_ns": 68780475937657, "stream": "stderr", "utc": "2026-07-26T19:18:13.606+09:00"}
+{"line": "create_tensor: loading tensor blk.15.ffn_gate.weight", "monotonic_ns": 68780476016248, "stream": "stderr", "utc": "2026-07-26T19:18:13.606+09:00"}
+{"line": "create_tensor: loading tensor blk.15.ffn_down.weight", "monotonic_ns": 68780476086449, "stream": "stderr", "utc": "2026-07-26T19:18:13.606+09:00"}
+{"line": "create_tensor: loading tensor blk.15.ffn_up.weight", "monotonic_ns": 68780476151640, "stream": "stderr", "utc": "2026-07-26T19:18:13.606+09:00"}
+{"line": "create_tensor: loading tensor blk.16.attn_norm.weight", "monotonic_ns": 68780476223792, "stream": "stderr", "utc": "2026-07-26T19:18:13.606+09:00"}
+{"line": "create_tensor: loading tensor blk.16.attn_q.weight", "monotonic_ns": 68780476299333, "stream": "stderr", "utc": "2026-07-26T19:18:13.606+09:00"}
+{"line": "create_tensor: loading tensor blk.16.attn_k.weight", "monotonic_ns": 68780476362914, "stream": "stderr", "utc": "2026-07-26T19:18:13.606+09:00"}
+{"line": "create_tensor: loading tensor blk.16.attn_v.weight", "monotonic_ns": 68780476423645, "stream": "stderr", "utc": "2026-07-26T19:18:13.606+09:00"}
+{"line": "create_tensor: loading tensor blk.16.attn_output.weight", "monotonic_ns": 68780476483446, "stream": "stderr", "utc": "2026-07-26T19:18:13.607+09:00"}
+{"line": "create_tensor: loading tensor blk.16.attn_k_norm.weight", "monotonic_ns": 68780476552037, "stream": "stderr", "utc": "2026-07-26T19:18:13.607+09:00"}
+{"line": "create_tensor: loading tensor blk.16.attn_q_norm.weight", "monotonic_ns": 68780476614558, "stream": "stderr", "utc": "2026-07-26T19:18:13.607+09:00"}
+{"line": "create_tensor: loading tensor blk.16.ffn_norm.weight", "monotonic_ns": 68780476681810, "stream": "stderr", "utc": "2026-07-26T19:18:13.607+09:00"}
+{"line": "create_tensor: loading tensor blk.16.ffn_gate.weight", "monotonic_ns": 68780476743281, "stream": "stderr", "utc": "2026-07-26T19:18:13.607+09:00"}
+{"line": "create_tensor: loading tensor blk.16.ffn_down.weight", "monotonic_ns": 68780476804662, "stream": "stderr", "utc": "2026-07-26T19:18:13.607+09:00"}
+{"line": "create_tensor: loading tensor blk.16.ffn_up.weight", "monotonic_ns": 68780476865133, "stream": "stderr", "utc": "2026-07-26T19:18:13.607+09:00"}
+{"line": "create_tensor: loading tensor blk.17.attn_norm.weight", "monotonic_ns": 68780476925104, "stream": "stderr", "utc": "2026-07-26T19:18:13.607+09:00"}
+{"line": "create_tensor: loading tensor blk.17.attn_q.weight", "monotonic_ns": 68780476983645, "stream": "stderr", "utc": "2026-07-26T19:18:13.607+09:00"}
+{"line": "create_tensor: loading tensor blk.17.attn_k.weight", "monotonic_ns": 68780477108527, "stream": "stderr", "utc": "2026-07-26T19:18:13.607+09:00"}
+{"line": "create_tensor: loading tensor blk.17.attn_v.weight", "monotonic_ns": 68780477181398, "stream": "stderr", "utc": "2026-07-26T19:18:13.607+09:00"}
+{"line": "create_tensor: loading tensor blk.17.attn_output.weight", "monotonic_ns": 68780477244239, "stream": "stderr", "utc": "2026-07-26T19:18:13.607+09:00"}
+{"line": "create_tensor: loading tensor blk.17.attn_k_norm.weight", "monotonic_ns": 68780477302971, "stream": "stderr", "utc": "2026-07-26T19:18:13.607+09:00"}
+{"line": "create_tensor: loading tensor blk.17.attn_q_norm.weight", "monotonic_ns": 68780477361852, "stream": "stderr", "utc": "2026-07-26T19:18:13.607+09:00"}
+{"line": "create_tensor: loading tensor blk.17.ffn_norm.weight", "monotonic_ns": 68780477420813, "stream": "stderr", "utc": "2026-07-26T19:18:13.607+09:00"}
+{"line": "create_tensor: loading tensor blk.17.ffn_gate.weight", "monotonic_ns": 68780477481424, "stream": "stderr", "utc": "2026-07-26T19:18:13.608+09:00"}
+{"line": "create_tensor: loading tensor blk.17.ffn_down.weight", "monotonic_ns": 68780477539625, "stream": "stderr", "utc": "2026-07-26T19:18:13.608+09:00"}
+{"line": "create_tensor: loading tensor blk.17.ffn_up.weight", "monotonic_ns": 68780477598316, "stream": "stderr", "utc": "2026-07-26T19:18:13.608+09:00"}
+{"line": "create_tensor: loading tensor blk.18.attn_norm.weight", "monotonic_ns": 68780477657567, "stream": "stderr", "utc": "2026-07-26T19:18:13.608+09:00"}
+{"line": "create_tensor: loading tensor blk.18.attn_q.weight", "monotonic_ns": 68780477717328, "stream": "stderr", "utc": "2026-07-26T19:18:13.608+09:00"}
+{"line": "create_tensor: loading tensor blk.18.attn_k.weight", "monotonic_ns": 68780477775359, "stream": "stderr", "utc": "2026-07-26T19:18:13.608+09:00"}
+{"line": "create_tensor: loading tensor blk.18.attn_v.weight", "monotonic_ns": 68780477834230, "stream": "stderr", "utc": "2026-07-26T19:18:13.608+09:00"}
+{"line": "create_tensor: loading tensor blk.18.attn_output.weight", "monotonic_ns": 68780477895551, "stream": "stderr", "utc": "2026-07-26T19:18:13.608+09:00"}
+{"line": "create_tensor: loading tensor blk.18.attn_k_norm.weight", "monotonic_ns": 68780477959302, "stream": "stderr", "utc": "2026-07-26T19:18:13.608+09:00"}
+{"line": "create_tensor: loading tensor blk.18.attn_q_norm.weight", "monotonic_ns": 68780478032723, "stream": "stderr", "utc": "2026-07-26T19:18:13.608+09:00"}
+{"line": "create_tensor: loading tensor blk.18.ffn_norm.weight", "monotonic_ns": 68780478098265, "stream": "stderr", "utc": "2026-07-26T19:18:13.608+09:00"}
+{"line": "create_tensor: loading tensor blk.18.ffn_gate.weight", "monotonic_ns": 68780478160126, "stream": "stderr", "utc": "2026-07-26T19:18:13.608+09:00"}
+{"line": "create_tensor: loading tensor blk.18.ffn_down.weight", "monotonic_ns": 68780478232097, "stream": "stderr", "utc": "2026-07-26T19:18:13.608+09:00"}
+{"line": "create_tensor: loading tensor blk.18.ffn_up.weight", "monotonic_ns": 68780478293688, "stream": "stderr", "utc": "2026-07-26T19:18:13.608+09:00"}
+{"line": "create_tensor: loading tensor blk.19.attn_norm.weight", "monotonic_ns": 68780478352229, "stream": "stderr", "utc": "2026-07-26T19:18:13.608+09:00"}
+{"line": "create_tensor: loading tensor blk.19.attn_q.weight", "monotonic_ns": 68780478410830, "stream": "stderr", "utc": "2026-07-26T19:18:13.608+09:00"}
+{"line": "create_tensor: loading tensor blk.19.attn_k.weight", "monotonic_ns": 68780478469651, "stream": "stderr", "utc": "2026-07-26T19:18:13.609+09:00"}
+{"line": "create_tensor: loading tensor blk.19.attn_v.weight", "monotonic_ns": 68780478528072, "stream": "stderr", "utc": "2026-07-26T19:18:13.609+09:00"}
+{"line": "create_tensor: loading tensor blk.19.attn_output.weight", "monotonic_ns": 68780478586983, "stream": "stderr", "utc": "2026-07-26T19:18:13.609+09:00"}
+{"line": "create_tensor: loading tensor blk.19.attn_k_norm.weight", "monotonic_ns": 68780478645244, "stream": "stderr", "utc": "2026-07-26T19:18:13.609+09:00"}
+{"line": "create_tensor: loading tensor blk.19.attn_q_norm.weight", "monotonic_ns": 68780478710235, "stream": "stderr", "utc": "2026-07-26T19:18:13.609+09:00"}
+{"line": "create_tensor: loading tensor blk.19.ffn_norm.weight", "monotonic_ns": 68780478768766, "stream": "stderr", "utc": "2026-07-26T19:18:13.609+09:00"}
+{"line": "create_tensor: loading tensor blk.19.ffn_gate.weight", "monotonic_ns": 68780478826587, "stream": "stderr", "utc": "2026-07-26T19:18:13.609+09:00"}
+{"line": "create_tensor: loading tensor blk.19.ffn_down.weight", "monotonic_ns": 68780478885368, "stream": "stderr", "utc": "2026-07-26T19:18:13.609+09:00"}
+{"line": "create_tensor: loading tensor blk.19.ffn_up.weight", "monotonic_ns": 68780478943799, "stream": "stderr", "utc": "2026-07-26T19:18:13.609+09:00"}
+{"line": "create_tensor: loading tensor blk.20.attn_norm.weight", "monotonic_ns": 68780479011551, "stream": "stderr", "utc": "2026-07-26T19:18:13.609+09:00"}
+{"line": "create_tensor: loading tensor blk.20.attn_q.weight", "monotonic_ns": 68780479074752, "stream": "stderr", "utc": "2026-07-26T19:18:13.609+09:00"}
+{"line": "create_tensor: loading tensor blk.20.attn_k.weight", "monotonic_ns": 68780479132763, "stream": "stderr", "utc": "2026-07-26T19:18:13.609+09:00"}
+{"line": "create_tensor: loading tensor blk.20.attn_v.weight", "monotonic_ns": 68780479191474, "stream": "stderr", "utc": "2026-07-26T19:18:13.609+09:00"}
+{"line": "create_tensor: loading tensor blk.20.attn_output.weight", "monotonic_ns": 68780479249805, "stream": "stderr", "utc": "2026-07-26T19:18:13.609+09:00"}
+{"line": "create_tensor: loading tensor blk.20.attn_k_norm.weight", "monotonic_ns": 68780479308776, "stream": "stderr", "utc": "2026-07-26T19:18:13.609+09:00"}
+{"line": "create_tensor: loading tensor blk.20.attn_q_norm.weight", "monotonic_ns": 68780479363487, "stream": "stderr", "utc": "2026-07-26T19:18:13.609+09:00"}
+{"line": "create_tensor: loading tensor blk.20.ffn_norm.weight", "monotonic_ns": 68780479419638, "stream": "stderr", "utc": "2026-07-26T19:18:13.609+09:00"}
+{"line": "create_tensor: loading tensor blk.20.ffn_gate.weight", "monotonic_ns": 68780479474639, "stream": "stderr", "utc": "2026-07-26T19:18:13.610+09:00"}
+{"line": "create_tensor: loading tensor blk.20.ffn_down.weight", "monotonic_ns": 68780479530660, "stream": "stderr", "utc": "2026-07-26T19:18:13.610+09:00"}
+{"line": "create_tensor: loading tensor blk.20.ffn_up.weight", "monotonic_ns": 68780479587201, "stream": "stderr", "utc": "2026-07-26T19:18:13.610+09:00"}
+{"line": "create_tensor: loading tensor blk.21.attn_norm.weight", "monotonic_ns": 68780479642442, "stream": "stderr", "utc": "2026-07-26T19:18:13.610+09:00"}
+{"line": "create_tensor: loading tensor blk.21.attn_q.weight", "monotonic_ns": 68780479698483, "stream": "stderr", "utc": "2026-07-26T19:18:13.610+09:00"}
+{"line": "create_tensor: loading tensor blk.21.attn_k.weight", "monotonic_ns": 68780479765064, "stream": "stderr", "utc": "2026-07-26T19:18:13.610+09:00"}
+{"line": "create_tensor: loading tensor blk.21.attn_v.weight", "monotonic_ns": 68780479821335, "stream": "stderr", "utc": "2026-07-26T19:18:13.610+09:00"}
+{"line": "create_tensor: loading tensor blk.21.attn_output.weight", "monotonic_ns": 68780479876746, "stream": "stderr", "utc": "2026-07-26T19:18:13.610+09:00"}
+{"line": "create_tensor: loading tensor blk.21.attn_k_norm.weight", "monotonic_ns": 68780479933067, "stream": "stderr", "utc": "2026-07-26T19:18:13.610+09:00"}
+{"line": "create_tensor: loading tensor blk.21.attn_q_norm.weight", "monotonic_ns": 68780479988468, "stream": "stderr", "utc": "2026-07-26T19:18:13.610+09:00"}
+{"line": "create_tensor: loading tensor blk.21.ffn_norm.weight", "monotonic_ns": 68780480059519, "stream": "stderr", "utc": "2026-07-26T19:18:13.610+09:00"}
+{"line": "create_tensor: loading tensor blk.21.ffn_gate.weight", "monotonic_ns": 68780480115320, "stream": "stderr", "utc": "2026-07-26T19:18:13.610+09:00"}
+{"line": "create_tensor: loading tensor blk.21.ffn_down.weight", "monotonic_ns": 68780480170231, "stream": "stderr", "utc": "2026-07-26T19:18:13.610+09:00"}
+{"line": "create_tensor: loading tensor blk.21.ffn_up.weight", "monotonic_ns": 68780480227152, "stream": "stderr", "utc": "2026-07-26T19:18:13.610+09:00"}
+{"line": "create_tensor: loading tensor blk.22.attn_norm.weight", "monotonic_ns": 68780480279953, "stream": "stderr", "utc": "2026-07-26T19:18:13.610+09:00"}
+{"line": "create_tensor: loading tensor blk.22.attn_q.weight", "monotonic_ns": 68780480333264, "stream": "stderr", "utc": "2026-07-26T19:18:13.610+09:00"}
+{"line": "create_tensor: loading tensor blk.22.attn_k.weight", "monotonic_ns": 68780480386305, "stream": "stderr", "utc": "2026-07-26T19:18:13.610+09:00"}
+{"line": "create_tensor: loading tensor blk.22.attn_v.weight", "monotonic_ns": 68780480441566, "stream": "stderr", "utc": "2026-07-26T19:18:13.611+09:00"}
+{"line": "create_tensor: loading tensor blk.22.attn_output.weight", "monotonic_ns": 68780480496237, "stream": "stderr", "utc": "2026-07-26T19:18:13.611+09:00"}
+{"line": "create_tensor: loading tensor blk.22.attn_k_norm.weight", "monotonic_ns": 68780480549758, "stream": "stderr", "utc": "2026-07-26T19:18:13.611+09:00"}
+{"line": "create_tensor: loading tensor blk.22.attn_q_norm.weight", "monotonic_ns": 68780480603288, "stream": "stderr", "utc": "2026-07-26T19:18:13.611+09:00"}
+{"line": "create_tensor: loading tensor blk.22.ffn_norm.weight", "monotonic_ns": 68780480657849, "stream": "stderr", "utc": "2026-07-26T19:18:13.611+09:00"}
+{"line": "create_tensor: loading tensor blk.22.ffn_gate.weight", "monotonic_ns": 68780480711200, "stream": "stderr", "utc": "2026-07-26T19:18:13.611+09:00"}
+{"line": "create_tensor: loading tensor blk.22.ffn_down.weight", "monotonic_ns": 68780480765031, "stream": "stderr", "utc": "2026-07-26T19:18:13.611+09:00"}
+{"line": "create_tensor: loading tensor blk.22.ffn_up.weight", "monotonic_ns": 68780480818582, "stream": "stderr", "utc": "2026-07-26T19:18:13.611+09:00"}
+{"line": "create_tensor: loading tensor blk.23.attn_norm.weight", "monotonic_ns": 68780480871503, "stream": "stderr", "utc": "2026-07-26T19:18:13.611+09:00"}
+{"line": "create_tensor: loading tensor blk.23.attn_q.weight", "monotonic_ns": 68780480925334, "stream": "stderr", "utc": "2026-07-26T19:18:13.611+09:00"}
+{"line": "create_tensor: loading tensor blk.23.attn_k.weight", "monotonic_ns": 68780480980145, "stream": "stderr", "utc": "2026-07-26T19:18:13.611+09:00"}
+{"line": "create_tensor: loading tensor blk.23.attn_v.weight", "monotonic_ns": 68780481047716, "stream": "stderr", "utc": "2026-07-26T19:18:13.611+09:00"}
+{"line": "create_tensor: loading tensor blk.23.attn_output.weight", "monotonic_ns": 68780481103817, "stream": "stderr", "utc": "2026-07-26T19:18:13.611+09:00"}
+{"line": "create_tensor: loading tensor blk.23.attn_k_norm.weight", "monotonic_ns": 68780481159068, "stream": "stderr", "utc": "2026-07-26T19:18:13.611+09:00"}
+{"line": "create_tensor: loading tensor blk.23.attn_q_norm.weight", "monotonic_ns": 68780481224539, "stream": "stderr", "utc": "2026-07-26T19:18:13.611+09:00"}
+{"line": "create_tensor: loading tensor blk.23.ffn_norm.weight", "monotonic_ns": 68780481287540, "stream": "stderr", "utc": "2026-07-26T19:18:13.611+09:00"}
+{"line": "create_tensor: loading tensor blk.23.ffn_gate.weight", "monotonic_ns": 68780481342881, "stream": "stderr", "utc": "2026-07-26T19:18:13.611+09:00"}
+{"line": "create_tensor: loading tensor blk.23.ffn_down.weight", "monotonic_ns": 68780481395112, "stream": "stderr", "utc": "2026-07-26T19:18:13.611+09:00"}
+{"line": "create_tensor: loading tensor blk.23.ffn_up.weight", "monotonic_ns": 68780481449523, "stream": "stderr", "utc": "2026-07-26T19:18:13.612+09:00"}
+{"line": "create_tensor: loading tensor blk.24.attn_norm.weight", "monotonic_ns": 68780481502094, "stream": "stderr", "utc": "2026-07-26T19:18:13.612+09:00"}
+{"line": "create_tensor: loading tensor blk.24.attn_q.weight", "monotonic_ns": 68780481554475, "stream": "stderr", "utc": "2026-07-26T19:18:13.612+09:00"}
+{"line": "create_tensor: loading tensor blk.24.attn_k.weight", "monotonic_ns": 68780481607586, "stream": "stderr", "utc": "2026-07-26T19:18:13.612+09:00"}
+{"line": "create_tensor: loading tensor blk.24.attn_v.weight", "monotonic_ns": 68780481659907, "stream": "stderr", "utc": "2026-07-26T19:18:13.612+09:00"}
+{"line": "create_tensor: loading tensor blk.24.attn_output.weight", "monotonic_ns": 68780481712268, "stream": "stderr", "utc": "2026-07-26T19:18:13.612+09:00"}
+{"line": "create_tensor: loading tensor blk.24.attn_k_norm.weight", "monotonic_ns": 68780481764839, "stream": "stderr", "utc": "2026-07-26T19:18:13.612+09:00"}
+{"line": "create_tensor: loading tensor blk.24.attn_q_norm.weight", "monotonic_ns": 68780481816850, "stream": "stderr", "utc": "2026-07-26T19:18:13.612+09:00"}
+{"line": "create_tensor: loading tensor blk.24.ffn_norm.weight", "monotonic_ns": 68780481869261, "stream": "stderr", "utc": "2026-07-26T19:18:13.612+09:00"}
+{"line": "create_tensor: loading tensor blk.24.ffn_gate.weight", "monotonic_ns": 68780481921512, "stream": "stderr", "utc": "2026-07-26T19:18:13.612+09:00"}
+{"line": "create_tensor: loading tensor blk.24.ffn_down.weight", "monotonic_ns": 68780481974203, "stream": "stderr", "utc": "2026-07-26T19:18:13.612+09:00"}
+{"line": "create_tensor: loading tensor blk.24.ffn_up.weight", "monotonic_ns": 68780482042134, "stream": "stderr", "utc": "2026-07-26T19:18:13.612+09:00"}
+{"line": "create_tensor: loading tensor blk.25.attn_norm.weight", "monotonic_ns": 68780482097735, "stream": "stderr", "utc": "2026-07-26T19:18:13.612+09:00"}
+{"line": "create_tensor: loading tensor blk.25.attn_q.weight", "monotonic_ns": 68780482150916, "stream": "stderr", "utc": "2026-07-26T19:18:13.612+09:00"}
+{"line": "create_tensor: loading tensor blk.25.attn_k.weight", "monotonic_ns": 68780482206277, "stream": "stderr", "utc": "2026-07-26T19:18:13.612+09:00"}
+{"line": "create_tensor: loading tensor blk.25.attn_v.weight", "monotonic_ns": 68780482257578, "stream": "stderr", "utc": "2026-07-26T19:18:13.612+09:00"}
+{"line": "create_tensor: loading tensor blk.25.attn_output.weight", "monotonic_ns": 68780482308818, "stream": "stderr", "utc": "2026-07-26T19:18:13.612+09:00"}
+{"line": "create_tensor: loading tensor blk.25.attn_k_norm.weight", "monotonic_ns": 68780482360379, "stream": "stderr", "utc": "2026-07-26T19:18:13.612+09:00"}
+{"line": "create_tensor: loading tensor blk.25.attn_q_norm.weight", "monotonic_ns": 68780482411900, "stream": "stderr", "utc": "2026-07-26T19:18:13.612+09:00"}
+{"line": "create_tensor: loading tensor blk.25.ffn_norm.weight", "monotonic_ns": 68780482463171, "stream": "stderr", "utc": "2026-07-26T19:18:13.613+09:00"}
+{"line": "create_tensor: loading tensor blk.25.ffn_gate.weight", "monotonic_ns": 68780482515122, "stream": "stderr", "utc": "2026-07-26T19:18:13.613+09:00"}
+{"line": "create_tensor: loading tensor blk.25.ffn_down.weight", "monotonic_ns": 68780482568523, "stream": "stderr", "utc": "2026-07-26T19:18:13.613+09:00"}
+{"line": "create_tensor: loading tensor blk.25.ffn_up.weight", "monotonic_ns": 68780482628224, "stream": "stderr", "utc": "2026-07-26T19:18:13.613+09:00"}
+{"line": "create_tensor: loading tensor blk.26.attn_norm.weight", "monotonic_ns": 68780482681385, "stream": "stderr", "utc": "2026-07-26T19:18:13.613+09:00"}
+{"line": "create_tensor: loading tensor blk.26.attn_q.weight", "monotonic_ns": 68780482732996, "stream": "stderr", "utc": "2026-07-26T19:18:13.613+09:00"}
+{"line": "create_tensor: loading tensor blk.26.attn_k.weight", "monotonic_ns": 68780482784917, "stream": "stderr", "utc": "2026-07-26T19:18:13.613+09:00"}
+{"line": "create_tensor: loading tensor blk.26.attn_v.weight", "monotonic_ns": 68780482835968, "stream": "stderr", "utc": "2026-07-26T19:18:13.613+09:00"}
+{"line": "create_tensor: loading tensor blk.26.attn_output.weight", "monotonic_ns": 68780482887169, "stream": "stderr", "utc": "2026-07-26T19:18:13.613+09:00"}
+{"line": "create_tensor: loading tensor blk.26.attn_k_norm.weight", "monotonic_ns": 68780482938689, "stream": "stderr", "utc": "2026-07-26T19:18:13.613+09:00"}
+{"line": "create_tensor: loading tensor blk.26.attn_q_norm.weight", "monotonic_ns": 68780482990060, "stream": "stderr", "utc": "2026-07-26T19:18:13.613+09:00"}
+{"line": "create_tensor: loading tensor blk.26.ffn_norm.weight", "monotonic_ns": 68780483052231, "stream": "stderr", "utc": "2026-07-26T19:18:13.613+09:00"}
+{"line": "create_tensor: loading tensor blk.26.ffn_gate.weight", "monotonic_ns": 68780483107262, "stream": "stderr", "utc": "2026-07-26T19:18:13.613+09:00"}
+{"line": "create_tensor: loading tensor blk.26.ffn_down.weight", "monotonic_ns": 68780483159123, "stream": "stderr", "utc": "2026-07-26T19:18:13.613+09:00"}
+{"line": "create_tensor: loading tensor blk.26.ffn_up.weight", "monotonic_ns": 68780483213434, "stream": "stderr", "utc": "2026-07-26T19:18:13.613+09:00"}
+{"line": "create_tensor: loading tensor blk.27.attn_norm.weight", "monotonic_ns": 68780483263695, "stream": "stderr", "utc": "2026-07-26T19:18:13.613+09:00"}
+{"line": "create_tensor: loading tensor blk.27.attn_q.weight", "monotonic_ns": 68780483314296, "stream": "stderr", "utc": "2026-07-26T19:18:13.613+09:00"}
+{"line": "create_tensor: loading tensor blk.27.attn_k.weight", "monotonic_ns": 68780483365267, "stream": "stderr", "utc": "2026-07-26T19:18:13.613+09:00"}
+{"line": "create_tensor: loading tensor blk.27.attn_v.weight", "monotonic_ns": 68780483415618, "stream": "stderr", "utc": "2026-07-26T19:18:13.613+09:00"}
+{"line": "create_tensor: loading tensor blk.27.attn_output.weight", "monotonic_ns": 68780483465799, "stream": "stderr", "utc": "2026-07-26T19:18:13.614+09:00"}
+{"line": "create_tensor: loading tensor blk.27.attn_k_norm.weight", "monotonic_ns": 68780483515900, "stream": "stderr", "utc": "2026-07-26T19:18:13.614+09:00"}
+{"line": "create_tensor: loading tensor blk.27.attn_q_norm.weight", "monotonic_ns": 68780483566131, "stream": "stderr", "utc": "2026-07-26T19:18:13.614+09:00"}
+{"line": "create_tensor: loading tensor blk.27.ffn_norm.weight", "monotonic_ns": 68780483615851, "stream": "stderr", "utc": "2026-07-26T19:18:13.614+09:00"}
+{"line": "create_tensor: loading tensor blk.27.ffn_gate.weight", "monotonic_ns": 68780483666682, "stream": "stderr", "utc": "2026-07-26T19:18:13.614+09:00"}
+{"line": "create_tensor: loading tensor blk.27.ffn_down.weight", "monotonic_ns": 68780483716723, "stream": "stderr", "utc": "2026-07-26T19:18:13.614+09:00"}
+{"line": "create_tensor: loading tensor blk.27.ffn_up.weight", "monotonic_ns": 68780483767094, "stream": "stderr", "utc": "2026-07-26T19:18:13.614+09:00"}
+{"line": "create_tensor: loading tensor blk.28.attn_norm.weight", "monotonic_ns": 68780483817205, "stream": "stderr", "utc": "2026-07-26T19:18:13.614+09:00"}
+{"line": "create_tensor: loading tensor blk.28.attn_q.weight", "monotonic_ns": 68780483866926, "stream": "stderr", "utc": "2026-07-26T19:18:13.614+09:00"}
+{"line": "create_tensor: loading tensor blk.28.attn_k.weight", "monotonic_ns": 68780483916837, "stream": "stderr", "utc": "2026-07-26T19:18:13.614+09:00"}
+{"line": "create_tensor: loading tensor blk.28.attn_v.weight", "monotonic_ns": 68780483975758, "stream": "stderr", "utc": "2026-07-26T19:18:13.614+09:00"}
+{"line": "create_tensor: loading tensor blk.28.attn_output.weight", "monotonic_ns": 68780484052649, "stream": "stderr", "utc": "2026-07-26T19:18:13.614+09:00"}
+{"line": "create_tensor: loading tensor blk.28.attn_k_norm.weight", "monotonic_ns": 68780484144721, "stream": "stderr", "utc": "2026-07-26T19:18:13.614+09:00"}
+{"line": "create_tensor: loading tensor blk.28.attn_q_norm.weight", "monotonic_ns": 68780484200362, "stream": "stderr", "utc": "2026-07-26T19:18:13.614+09:00"}
+{"line": "create_tensor: loading tensor blk.28.ffn_norm.weight", "monotonic_ns": 68780484250563, "stream": "stderr", "utc": "2026-07-26T19:18:13.614+09:00"}
+{"line": "create_tensor: loading tensor blk.28.ffn_gate.weight", "monotonic_ns": 68780484300503, "stream": "stderr", "utc": "2026-07-26T19:18:13.614+09:00"}
+{"line": "create_tensor: loading tensor blk.28.ffn_down.weight", "monotonic_ns": 68780484349904, "stream": "stderr", "utc": "2026-07-26T19:18:13.614+09:00"}
+{"line": "create_tensor: loading tensor blk.28.ffn_up.weight", "monotonic_ns": 68780484399625, "stream": "stderr", "utc": "2026-07-26T19:18:13.614+09:00"}
+{"line": "create_tensor: loading tensor blk.29.attn_norm.weight", "monotonic_ns": 68780484449946, "stream": "stderr", "utc": "2026-07-26T19:18:13.615+09:00"}
+{"line": "create_tensor: loading tensor blk.29.attn_q.weight", "monotonic_ns": 68780484501467, "stream": "stderr", "utc": "2026-07-26T19:18:13.615+09:00"}
+{"line": "create_tensor: loading tensor blk.29.attn_k.weight", "monotonic_ns": 68780484551798, "stream": "stderr", "utc": "2026-07-26T19:18:13.615+09:00"}
+{"line": "create_tensor: loading tensor blk.29.attn_v.weight", "monotonic_ns": 68780484600529, "stream": "stderr", "utc": "2026-07-26T19:18:13.615+09:00"}
+{"line": "create_tensor: loading tensor blk.29.attn_output.weight", "monotonic_ns": 68780484649630, "stream": "stderr", "utc": "2026-07-26T19:18:13.615+09:00"}
+{"line": "create_tensor: loading tensor blk.29.attn_k_norm.weight", "monotonic_ns": 68780484705761, "stream": "stderr", "utc": "2026-07-26T19:18:13.615+09:00"}
+{"line": "create_tensor: loading tensor blk.29.attn_q_norm.weight", "monotonic_ns": 68780484853923, "stream": "stderr", "utc": "2026-07-26T19:18:13.615+09:00"}
+{"line": "create_tensor: loading tensor blk.29.ffn_norm.weight", "monotonic_ns": 68780484965045, "stream": "stderr", "utc": "2026-07-26T19:18:13.615+09:00"}
+{"line": "create_tensor: loading tensor blk.29.ffn_gate.weight", "monotonic_ns": 68780485141138, "stream": "stderr", "utc": "2026-07-26T19:18:13.615+09:00"}
+{"line": "create_tensor: loading tensor blk.29.ffn_down.weight", "monotonic_ns": 68780485292001, "stream": "stderr", "utc": "2026-07-26T19:18:13.615+09:00"}
+{"line": "create_tensor: loading tensor blk.29.ffn_up.weight", "monotonic_ns": 68780485405883, "stream": "stderr", "utc": "2026-07-26T19:18:13.615+09:00"}
+{"line": "create_tensor: loading tensor blk.30.attn_norm.weight", "monotonic_ns": 68780485575536, "stream": "stderr", "utc": "2026-07-26T19:18:13.616+09:00"}
+{"line": "create_tensor: loading tensor blk.30.attn_q.weight", "monotonic_ns": 68780485692528, "stream": "stderr", "utc": "2026-07-26T19:18:13.616+09:00"}
+{"line": "create_tensor: loading tensor blk.30.attn_k.weight", "monotonic_ns": 68780485860831, "stream": "stderr", "utc": "2026-07-26T19:18:13.616+09:00"}
+{"line": "create_tensor: loading tensor blk.30.attn_v.weight", "monotonic_ns": 68780485997073, "stream": "stderr", "utc": "2026-07-26T19:18:13.616+09:00"}
+{"line": "create_tensor: loading tensor blk.30.attn_output.weight", "monotonic_ns": 68780486144656, "stream": "stderr", "utc": "2026-07-26T19:18:13.616+09:00"}
+{"line": "create_tensor: loading tensor blk.30.attn_k_norm.weight", "monotonic_ns": 68780486256178, "stream": "stderr", "utc": "2026-07-26T19:18:13.616+09:00"}
+{"line": "create_tensor: loading tensor blk.30.attn_q_norm.weight", "monotonic_ns": 68780486384210, "stream": "stderr", "utc": "2026-07-26T19:18:13.616+09:00"}
+{"line": "create_tensor: loading tensor blk.30.ffn_norm.weight", "monotonic_ns": 68780486505412, "stream": "stderr", "utc": "2026-07-26T19:18:13.617+09:00"}
+{"line": "create_tensor: loading tensor blk.30.ffn_gate.weight", "monotonic_ns": 68780486623604, "stream": "stderr", "utc": "2026-07-26T19:18:13.617+09:00"}
+{"line": "create_tensor: loading tensor blk.30.ffn_down.weight", "monotonic_ns": 68780486747446, "stream": "stderr", "utc": "2026-07-26T19:18:13.617+09:00"}
+{"line": "create_tensor: loading tensor blk.30.ffn_up.weight", "monotonic_ns": 68780486902289, "stream": "stderr", "utc": "2026-07-26T19:18:13.617+09:00"}
+{"line": "create_tensor: loading tensor blk.31.attn_norm.weight", "monotonic_ns": 68780487055482, "stream": "stderr", "utc": "2026-07-26T19:18:13.617+09:00"}
+{"line": "create_tensor: loading tensor blk.31.attn_q.weight", "monotonic_ns": 68780487172804, "stream": "stderr", "utc": "2026-07-26T19:18:13.617+09:00"}
+{"line": "create_tensor: loading tensor blk.31.attn_k.weight", "monotonic_ns": 68780487292056, "stream": "stderr", "utc": "2026-07-26T19:18:13.617+09:00"}
+{"line": "create_tensor: loading tensor blk.31.attn_v.weight", "monotonic_ns": 68780487434739, "stream": "stderr", "utc": "2026-07-26T19:18:13.617+09:00"}
+{"line": "create_tensor: loading tensor blk.31.attn_output.weight", "monotonic_ns": 68780487528090, "stream": "stderr", "utc": "2026-07-26T19:18:13.618+09:00"}
+{"line": "create_tensor: loading tensor blk.31.attn_k_norm.weight", "monotonic_ns": 68780487608652, "stream": "stderr", "utc": "2026-07-26T19:18:13.618+09:00"}
+{"line": "create_tensor: loading tensor blk.31.attn_q_norm.weight", "monotonic_ns": 68780487739284, "stream": "stderr", "utc": "2026-07-26T19:18:13.618+09:00"}
+{"line": "create_tensor: loading tensor blk.31.ffn_norm.weight", "monotonic_ns": 68780487868066, "stream": "stderr", "utc": "2026-07-26T19:18:13.618+09:00"}
+{"line": "create_tensor: loading tensor blk.31.ffn_gate.weight", "monotonic_ns": 68780488018469, "stream": "stderr", "utc": "2026-07-26T19:18:13.618+09:00"}
+{"line": "create_tensor: loading tensor blk.31.ffn_down.weight", "monotonic_ns": 68780488108390, "stream": "stderr", "utc": "2026-07-26T19:18:13.618+09:00"}
+{"line": "create_tensor: loading tensor blk.31.ffn_up.weight", "monotonic_ns": 68780488198872, "stream": "stderr", "utc": "2026-07-26T19:18:13.618+09:00"}
+{"line": "create_tensor: loading tensor blk.32.attn_norm.weight", "monotonic_ns": 68780488293664, "stream": "stderr", "utc": "2026-07-26T19:18:13.618+09:00"}
+{"line": "create_tensor: loading tensor blk.32.attn_q.weight", "monotonic_ns": 68780488385745, "stream": "stderr", "utc": "2026-07-26T19:18:13.618+09:00"}
+{"line": "create_tensor: loading tensor blk.32.attn_k.weight", "monotonic_ns": 68780488475667, "stream": "stderr", "utc": "2026-07-26T19:18:13.619+09:00"}
+{"line": "create_tensor: loading tensor blk.32.attn_v.weight", "monotonic_ns": 68780488615579, "stream": "stderr", "utc": "2026-07-26T19:18:13.619+09:00"}
+{"line": "create_tensor: loading tensor blk.32.attn_output.weight", "monotonic_ns": 68780488717731, "stream": "stderr", "utc": "2026-07-26T19:18:13.619+09:00"}
+{"line": "create_tensor: loading tensor blk.32.attn_k_norm.weight", "monotonic_ns": 68780488768462, "stream": "stderr", "utc": "2026-07-26T19:18:13.619+09:00"}
+{"line": "create_tensor: loading tensor blk.32.attn_q_norm.weight", "monotonic_ns": 68780488811033, "stream": "stderr", "utc": "2026-07-26T19:18:13.619+09:00"}
+{"line": "create_tensor: loading tensor blk.32.ffn_norm.weight", "monotonic_ns": 68780488851843, "stream": "stderr", "utc": "2026-07-26T19:18:13.619+09:00"}
+{"line": "create_tensor: loading tensor blk.32.ffn_gate.weight", "monotonic_ns": 68780488892704, "stream": "stderr", "utc": "2026-07-26T19:18:13.619+09:00"}
+{"line": "create_tensor: loading tensor blk.32.ffn_down.weight", "monotonic_ns": 68780488933365, "stream": "stderr", "utc": "2026-07-26T19:18:13.619+09:00"}
+{"line": "create_tensor: loading tensor blk.32.ffn_up.weight", "monotonic_ns": 68780488974286, "stream": "stderr", "utc": "2026-07-26T19:18:13.619+09:00"}
+{"line": "create_tensor: loading tensor blk.33.attn_norm.weight", "monotonic_ns": 68780489039977, "stream": "stderr", "utc": "2026-07-26T19:18:13.619+09:00"}
+{"line": "create_tensor: loading tensor blk.33.attn_q.weight", "monotonic_ns": 68780489088368, "stream": "stderr", "utc": "2026-07-26T19:18:13.619+09:00"}
+{"line": "create_tensor: loading tensor blk.33.attn_k.weight", "monotonic_ns": 68780489130348, "stream": "stderr", "utc": "2026-07-26T19:18:13.619+09:00"}
+{"line": "create_tensor: loading tensor blk.33.attn_v.weight", "monotonic_ns": 68780489172509, "stream": "stderr", "utc": "2026-07-26T19:18:13.619+09:00"}
+{"line": "create_tensor: loading tensor blk.33.attn_output.weight", "monotonic_ns": 68780489218300, "stream": "stderr", "utc": "2026-07-26T19:18:13.619+09:00"}
+{"line": "create_tensor: loading tensor blk.33.attn_k_norm.weight", "monotonic_ns": 68780489259701, "stream": "stderr", "utc": "2026-07-26T19:18:13.619+09:00"}
+{"line": "create_tensor: loading tensor blk.33.attn_q_norm.weight", "monotonic_ns": 68780489300831, "stream": "stderr", "utc": "2026-07-26T19:18:13.619+09:00"}
+{"line": "create_tensor: loading tensor blk.33.ffn_norm.weight", "monotonic_ns": 68780489342072, "stream": "stderr", "utc": "2026-07-26T19:18:13.619+09:00"}
+{"line": "create_tensor: loading tensor blk.33.ffn_gate.weight", "monotonic_ns": 68780489383043, "stream": "stderr", "utc": "2026-07-26T19:18:13.619+09:00"}
+{"line": "create_tensor: loading tensor blk.33.ffn_down.weight", "monotonic_ns": 68780489424394, "stream": "stderr", "utc": "2026-07-26T19:18:13.619+09:00"}
+{"line": "create_tensor: loading tensor blk.33.ffn_up.weight", "monotonic_ns": 68780489465404, "stream": "stderr", "utc": "2026-07-26T19:18:13.620+09:00"}
+{"line": "create_tensor: loading tensor blk.34.attn_norm.weight", "monotonic_ns": 68780489506365, "stream": "stderr", "utc": "2026-07-26T19:18:13.620+09:00"}
+{"line": "create_tensor: loading tensor blk.34.attn_q.weight", "monotonic_ns": 68780489547526, "stream": "stderr", "utc": "2026-07-26T19:18:13.620+09:00"}
+{"line": "create_tensor: loading tensor blk.34.attn_k.weight", "monotonic_ns": 68780489588336, "stream": "stderr", "utc": "2026-07-26T19:18:13.620+09:00"}
+{"line": "create_tensor: loading tensor blk.34.attn_v.weight", "monotonic_ns": 68780489628677, "stream": "stderr", "utc": "2026-07-26T19:18:13.620+09:00"}
+{"line": "create_tensor: loading tensor blk.34.attn_output.weight", "monotonic_ns": 68780489669258, "stream": "stderr", "utc": "2026-07-26T19:18:13.620+09:00"}
+{"line": "create_tensor: loading tensor blk.34.attn_k_norm.weight", "monotonic_ns": 68780489709919, "stream": "stderr", "utc": "2026-07-26T19:18:13.620+09:00"}
+{"line": "create_tensor: loading tensor blk.34.attn_q_norm.weight", "monotonic_ns": 68780489750149, "stream": "stderr", "utc": "2026-07-26T19:18:13.620+09:00"}
+{"line": "create_tensor: loading tensor blk.34.ffn_norm.weight", "monotonic_ns": 68780489790740, "stream": "stderr", "utc": "2026-07-26T19:18:13.620+09:00"}
+{"line": "create_tensor: loading tensor blk.34.ffn_gate.weight", "monotonic_ns": 68780489831191, "stream": "stderr", "utc": "2026-07-26T19:18:13.620+09:00"}
+{"line": "create_tensor: loading tensor blk.34.ffn_down.weight", "monotonic_ns": 68780489871871, "stream": "stderr", "utc": "2026-07-26T19:18:13.620+09:00"}
+{"line": "create_tensor: loading tensor blk.34.ffn_up.weight", "monotonic_ns": 68780489912462, "stream": "stderr", "utc": "2026-07-26T19:18:13.620+09:00"}
+{"line": "create_tensor: loading tensor blk.35.attn_norm.weight", "monotonic_ns": 68780489953113, "stream": "stderr", "utc": "2026-07-26T19:18:13.620+09:00"}
+{"line": "create_tensor: loading tensor blk.35.attn_q.weight", "monotonic_ns": 68780489993454, "stream": "stderr", "utc": "2026-07-26T19:18:13.620+09:00"}
+{"line": "create_tensor: loading tensor blk.35.attn_k.weight", "monotonic_ns": 68780490055855, "stream": "stderr", "utc": "2026-07-26T19:18:13.620+09:00"}
+{"line": "create_tensor: loading tensor blk.35.attn_v.weight", "monotonic_ns": 68780490111406, "stream": "stderr", "utc": "2026-07-26T19:18:13.620+09:00"}
+{"line": "create_tensor: loading tensor blk.35.attn_output.weight", "monotonic_ns": 68780490161807, "stream": "stderr", "utc": "2026-07-26T19:18:13.620+09:00"}
+{"line": "create_tensor: loading tensor blk.35.attn_k_norm.weight", "monotonic_ns": 68780490210757, "stream": "stderr", "utc": "2026-07-26T19:18:13.620+09:00"}
+{"line": "create_tensor: loading tensor blk.35.attn_q_norm.weight", "monotonic_ns": 68780490252348, "stream": "stderr", "utc": "2026-07-26T19:18:13.620+09:00"}
+{"line": "create_tensor: loading tensor blk.35.ffn_norm.weight", "monotonic_ns": 68780490293629, "stream": "stderr", "utc": "2026-07-26T19:18:13.620+09:00"}
+{"line": "create_tensor: loading tensor blk.35.ffn_gate.weight", "monotonic_ns": 68780490334880, "stream": "stderr", "utc": "2026-07-26T19:18:13.620+09:00"}
+{"line": "create_tensor: loading tensor blk.35.ffn_down.weight", "monotonic_ns": 68780490376020, "stream": "stderr", "utc": "2026-07-26T19:18:13.620+09:00"}
+{"line": "create_tensor: loading tensor blk.35.ffn_up.weight", "monotonic_ns": 68780490417141, "stream": "stderr", "utc": "2026-07-26T19:18:13.620+09:00"}
+{"line": "create_tensor: loading tensor blk.36.attn_norm.weight", "monotonic_ns": 68780490459262, "stream": "stderr", "utc": "2026-07-26T19:18:13.621+09:00"}
+{"line": "create_tensor: loading tensor blk.36.attn_q.weight", "monotonic_ns": 68780490500402, "stream": "stderr", "utc": "2026-07-26T19:18:13.621+09:00"}
+{"line": "create_tensor: loading tensor blk.36.attn_k.weight", "monotonic_ns": 68780490541123, "stream": "stderr", "utc": "2026-07-26T19:18:13.621+09:00"}
+{"line": "create_tensor: loading tensor blk.36.attn_v.weight", "monotonic_ns": 68780490582044, "stream": "stderr", "utc": "2026-07-26T19:18:13.621+09:00"}
+{"line": "create_tensor: loading tensor blk.36.attn_output.weight", "monotonic_ns": 68780490622875, "stream": "stderr", "utc": "2026-07-26T19:18:13.621+09:00"}
+{"line": "create_tensor: loading tensor blk.36.attn_k_norm.weight", "monotonic_ns": 68780490664205, "stream": "stderr", "utc": "2026-07-26T19:18:13.621+09:00"}
+{"line": "create_tensor: loading tensor blk.36.attn_q_norm.weight", "monotonic_ns": 68780490705386, "stream": "stderr", "utc": "2026-07-26T19:18:13.621+09:00"}
+{"line": "create_tensor: loading tensor blk.36.ffn_norm.weight", "monotonic_ns": 68780490746167, "stream": "stderr", "utc": "2026-07-26T19:18:13.621+09:00"}
+{"line": "create_tensor: loading tensor blk.36.ffn_gate.weight", "monotonic_ns": 68780490787167, "stream": "stderr", "utc": "2026-07-26T19:18:13.621+09:00"}
+{"line": "create_tensor: loading tensor blk.36.ffn_down.weight", "monotonic_ns": 68780490828428, "stream": "stderr", "utc": "2026-07-26T19:18:13.621+09:00"}
+{"line": "create_tensor: loading tensor blk.36.ffn_up.weight", "monotonic_ns": 68780490869259, "stream": "stderr", "utc": "2026-07-26T19:18:13.621+09:00"}
+{"line": "create_tensor: loading tensor blk.37.attn_norm.weight", "monotonic_ns": 68780490910340, "stream": "stderr", "utc": "2026-07-26T19:18:13.621+09:00"}
+{"line": "create_tensor: loading tensor blk.37.attn_q.weight", "monotonic_ns": 68780490951200, "stream": "stderr", "utc": "2026-07-26T19:18:13.621+09:00"}
+{"line": "create_tensor: loading tensor blk.37.attn_k.weight", "monotonic_ns": 68780490991761, "stream": "stderr", "utc": "2026-07-26T19:18:13.621+09:00"}
+{"line": "create_tensor: loading tensor blk.37.attn_v.weight", "monotonic_ns": 68780491068392, "stream": "stderr", "utc": "2026-07-26T19:18:13.621+09:00"}
+{"line": "create_tensor: loading tensor blk.37.attn_output.weight", "monotonic_ns": 68780491111693, "stream": "stderr", "utc": "2026-07-26T19:18:13.621+09:00"}
+{"line": "create_tensor: loading tensor blk.37.attn_k_norm.weight", "monotonic_ns": 68780491153244, "stream": "stderr", "utc": "2026-07-26T19:18:13.621+09:00"}
+{"line": "create_tensor: loading tensor blk.37.attn_q_norm.weight", "monotonic_ns": 68780491199805, "stream": "stderr", "utc": "2026-07-26T19:18:13.621+09:00"}
+{"line": "create_tensor: loading tensor blk.37.ffn_norm.weight", "monotonic_ns": 68780491251076, "stream": "stderr", "utc": "2026-07-26T19:18:13.621+09:00"}
+{"line": "create_tensor: loading tensor blk.37.ffn_gate.weight", "monotonic_ns": 68780491299096, "stream": "stderr", "utc": "2026-07-26T19:18:13.621+09:00"}
+{"line": "create_tensor: loading tensor blk.37.ffn_down.weight", "monotonic_ns": 68780491346647, "stream": "stderr", "utc": "2026-07-26T19:18:13.621+09:00"}
+{"line": "create_tensor: loading tensor blk.37.ffn_up.weight", "monotonic_ns": 68780491389658, "stream": "stderr", "utc": "2026-07-26T19:18:13.621+09:00"}
+{"line": "create_tensor: loading tensor blk.38.attn_norm.weight", "monotonic_ns": 68780491431599, "stream": "stderr", "utc": "2026-07-26T19:18:13.621+09:00"}
+{"line": "create_tensor: loading tensor blk.38.attn_q.weight", "monotonic_ns": 68780491472809, "stream": "stderr", "utc": "2026-07-26T19:18:13.622+09:00"}
+{"line": "create_tensor: loading tensor blk.38.attn_k.weight", "monotonic_ns": 68780491513690, "stream": "stderr", "utc": "2026-07-26T19:18:13.622+09:00"}
+{"line": "create_tensor: loading tensor blk.38.attn_v.weight", "monotonic_ns": 68780491554971, "stream": "stderr", "utc": "2026-07-26T19:18:13.622+09:00"}
+{"line": "create_tensor: loading tensor blk.38.attn_output.weight", "monotonic_ns": 68780491596032, "stream": "stderr", "utc": "2026-07-26T19:18:13.622+09:00"}
+{"line": "create_tensor: loading tensor blk.38.attn_k_norm.weight", "monotonic_ns": 68780491637542, "stream": "stderr", "utc": "2026-07-26T19:18:13.622+09:00"}
+{"line": "create_tensor: loading tensor blk.38.attn_q_norm.weight", "monotonic_ns": 68780491679153, "stream": "stderr", "utc": "2026-07-26T19:18:13.622+09:00"}
+{"line": "create_tensor: loading tensor blk.38.ffn_norm.weight", "monotonic_ns": 68780491720774, "stream": "stderr", "utc": "2026-07-26T19:18:13.622+09:00"}
+{"line": "create_tensor: loading tensor blk.38.ffn_gate.weight", "monotonic_ns": 68780491761815, "stream": "stderr", "utc": "2026-07-26T19:18:13.622+09:00"}
+{"line": "create_tensor: loading tensor blk.38.ffn_down.weight", "monotonic_ns": 68780491803035, "stream": "stderr", "utc": "2026-07-26T19:18:13.622+09:00"}
+{"line": "create_tensor: loading tensor blk.38.ffn_up.weight", "monotonic_ns": 68780491844326, "stream": "stderr", "utc": "2026-07-26T19:18:13.622+09:00"}
+{"line": "create_tensor: loading tensor blk.39.attn_norm.weight", "monotonic_ns": 68780491885787, "stream": "stderr", "utc": "2026-07-26T19:18:13.622+09:00"}
+{"line": "create_tensor: loading tensor blk.39.attn_q.weight", "monotonic_ns": 68780491927337, "stream": "stderr", "utc": "2026-07-26T19:18:13.622+09:00"}
+{"line": "create_tensor: loading tensor blk.39.attn_k.weight", "monotonic_ns": 68780491968848, "stream": "stderr", "utc": "2026-07-26T19:18:13.622+09:00"}
+{"line": "create_tensor: loading tensor blk.39.attn_v.weight", "monotonic_ns": 68780492020089, "stream": "stderr", "utc": "2026-07-26T19:18:13.622+09:00"}
+{"line": "create_tensor: loading tensor blk.39.attn_output.weight", "monotonic_ns": 68780492073690, "stream": "stderr", "utc": "2026-07-26T19:18:13.622+09:00"}
+{"line": "create_tensor: loading tensor blk.39.attn_k_norm.weight", "monotonic_ns": 68780492123611, "stream": "stderr", "utc": "2026-07-26T19:18:13.622+09:00"}
+{"line": "create_tensor: loading tensor blk.39.attn_q_norm.weight", "monotonic_ns": 68780492169222, "stream": "stderr", "utc": "2026-07-26T19:18:13.622+09:00"}
+{"line": "create_tensor: loading tensor blk.39.ffn_norm.weight", "monotonic_ns": 68780492216653, "stream": "stderr", "utc": "2026-07-26T19:18:13.622+09:00"}
+{"line": "create_tensor: loading tensor blk.39.ffn_gate.weight", "monotonic_ns": 68780492258263, "stream": "stderr", "utc": "2026-07-26T19:18:13.622+09:00"}
+{"line": "create_tensor: loading tensor blk.39.ffn_down.weight", "monotonic_ns": 68780492299894, "stream": "stderr", "utc": "2026-07-26T19:18:13.622+09:00"}
+{"line": "create_tensor: loading tensor blk.39.ffn_up.weight", "monotonic_ns": 68780492341605, "stream": "stderr", "utc": "2026-07-26T19:18:13.622+09:00"}
+{"line": "done_getting_tensors: tensor 'token_embd.weight' (q8_0) (and 0 others) cannot be used with preferred buffer type ROCm_Host, using CPU instead", "monotonic_ns": 68780492383555, "stream": "stderr", "utc": "2026-07-26T19:18:13.622+09:00"}
+{"line": "load_tensors: offloading output layer to GPU", "monotonic_ns": 68782491616345, "stream": "stderr", "utc": "2026-07-26T19:18:15.622+09:00"}
+{"line": "load_tensors: offloading 39 repeating layers to GPU", "monotonic_ns": 68782492142514, "stream": "stderr", "utc": "2026-07-26T19:18:15.622+09:00"}
+{"line": "load_tensors: offloaded 41/41 layers to GPU", "monotonic_ns": 68782492222146, "stream": "stderr", "utc": "2026-07-26T19:18:15.622+09:00"}
+{"line": "load_tensors:   CPU_Mapped model buffer size =   788.24 MiB", "monotonic_ns": 68782492292867, "stream": "stderr", "utc": "2026-07-26T19:18:15.622+09:00"}
+{"line": "load_tensors:        ROCm0 model buffer size = 14177.36 MiB", "monotonic_ns": 68782492357148, "stream": "stderr", "utc": "2026-07-26T19:18:15.622+09:00"}
+{"line": "............................................................................................", "monotonic_ns": 68785151413010, "stream": "stderr", "utc": "2026-07-26T19:18:18.281+09:00"}
+{"line": "llama_context: constructing llama_context", "monotonic_ns": 68785154600696, "stream": "stderr", "utc": "2026-07-26T19:18:18.285+09:00"}
+{"line": "llama_context: n_seq_max     = 1", "monotonic_ns": 68785154714718, "stream": "stderr", "utc": "2026-07-26T19:18:18.285+09:00"}
+{"line": "llama_context: n_ctx         = 512", "monotonic_ns": 68785154777429, "stream": "stderr", "utc": "2026-07-26T19:18:18.285+09:00"}
+{"line": "llama_context: n_ctx_seq     = 512", "monotonic_ns": 68785154834750, "stream": "stderr", "utc": "2026-07-26T19:18:18.285+09:00"}
+{"line": "llama_context: n_batch       = 512", "monotonic_ns": 68785154890931, "stream": "stderr", "utc": "2026-07-26T19:18:18.285+09:00"}
+{"line": "llama_context: n_ubatch      = 128", "monotonic_ns": 68785154945902, "stream": "stderr", "utc": "2026-07-26T19:18:18.285+09:00"}
+{"line": "llama_context: causal_attn   = 1", "monotonic_ns": 68785155077464, "stream": "stderr", "utc": "2026-07-26T19:18:18.285+09:00"}
+{"line": "llama_context: flash_attn    = enabled", "monotonic_ns": 68785155146055, "stream": "stderr", "utc": "2026-07-26T19:18:18.285+09:00"}
+{"line": "llama_context: kv_unified    = false", "monotonic_ns": 68785155203146, "stream": "stderr", "utc": "2026-07-26T19:18:18.285+09:00"}
+{"line": "llama_context: freq_base     = 1000000.0", "monotonic_ns": 68785155257957, "stream": "stderr", "utc": "2026-07-26T19:18:18.285+09:00"}
+{"line": "llama_context: freq_scale    = 1", "monotonic_ns": 68785155312198, "stream": "stderr", "utc": "2026-07-26T19:18:18.285+09:00"}
+{"line": "llama_context: n_rs_seq      = 0", "monotonic_ns": 68785155368309, "stream": "stderr", "utc": "2026-07-26T19:18:18.285+09:00"}
+{"line": "llama_context: n_outputs_max = 512", "monotonic_ns": 68785155421420, "stream": "stderr", "utc": "2026-07-26T19:18:18.285+09:00"}
+{"line": "llama_context: n_ctx_seq (512) < n_ctx_train (40960) -- the full capacity of the model will not be utilized", "monotonic_ns": 68785155476161, "stream": "stderr", "utc": "2026-07-26T19:18:18.286+09:00"}
+{"line": "set_abort_callback: call", "monotonic_ns": 68785155531592, "stream": "stderr", "utc": "2026-07-26T19:18:18.286+09:00"}
+{"line": "llama_context:  ROCm_Host  output buffer size =     0.58 MiB", "monotonic_ns": 68785218798754, "stream": "stderr", "utc": "2026-07-26T19:18:18.349+09:00"}
+{"line": "llama_kv_cache: layer   0: dev = ROCm0", "monotonic_ns": 68785219090999, "stream": "stderr", "utc": "2026-07-26T19:18:18.349+09:00"}
+{"line": "llama_kv_cache: layer   1: dev = ROCm0", "monotonic_ns": 68785219156870, "stream": "stderr", "utc": "2026-07-26T19:18:18.349+09:00"}
+{"line": "llama_kv_cache: layer   2: dev = ROCm0", "monotonic_ns": 68785219216381, "stream": "stderr", "utc": "2026-07-26T19:18:18.349+09:00"}
+{"line": "llama_kv_cache: layer   3: dev = ROCm0", "monotonic_ns": 68785219272872, "stream": "stderr", "utc": "2026-07-26T19:18:18.349+09:00"}
+{"line": "llama_kv_cache: layer   4: dev = ROCm0", "monotonic_ns": 68785219330913, "stream": "stderr", "utc": "2026-07-26T19:18:18.349+09:00"}
+{"line": "llama_kv_cache: layer   5: dev = ROCm0", "monotonic_ns": 68785219385984, "stream": "stderr", "utc": "2026-07-26T19:18:18.349+09:00"}
+{"line": "llama_kv_cache: layer   6: dev = ROCm0", "monotonic_ns": 68785219464195, "stream": "stderr", "utc": "2026-07-26T19:18:18.350+09:00"}
+{"line": "llama_kv_cache: layer   7: dev = ROCm0", "monotonic_ns": 68785219520816, "stream": "stderr", "utc": "2026-07-26T19:18:18.350+09:00"}
+{"line": "llama_kv_cache: layer   8: dev = ROCm0", "monotonic_ns": 68785219575607, "stream": "stderr", "utc": "2026-07-26T19:18:18.350+09:00"}
+{"line": "llama_kv_cache: layer   9: dev = ROCm0", "monotonic_ns": 68785219630168, "stream": "stderr", "utc": "2026-07-26T19:18:18.350+09:00"}
+{"line": "llama_kv_cache: layer  10: dev = ROCm0", "monotonic_ns": 68785219685059, "stream": "stderr", "utc": "2026-07-26T19:18:18.350+09:00"}
+{"line": "llama_kv_cache: layer  11: dev = ROCm0", "monotonic_ns": 68785219740110, "stream": "stderr", "utc": "2026-07-26T19:18:18.350+09:00"}
+{"line": "llama_kv_cache: layer  12: dev = ROCm0", "monotonic_ns": 68785219795821, "stream": "stderr", "utc": "2026-07-26T19:18:18.350+09:00"}
+{"line": "llama_kv_cache: layer  13: dev = ROCm0", "monotonic_ns": 68785219850582, "stream": "stderr", "utc": "2026-07-26T19:18:18.350+09:00"}
+{"line": "llama_kv_cache: layer  14: dev = ROCm0", "monotonic_ns": 68785219904693, "stream": "stderr", "utc": "2026-07-26T19:18:18.350+09:00"}
+{"line": "llama_kv_cache: layer  15: dev = ROCm0", "monotonic_ns": 68785219958814, "stream": "stderr", "utc": "2026-07-26T19:18:18.350+09:00"}
+{"line": "llama_kv_cache: layer  16: dev = ROCm0", "monotonic_ns": 68785220029235, "stream": "stderr", "utc": "2026-07-26T19:18:18.350+09:00"}
+{"line": "llama_kv_cache: layer  17: dev = ROCm0", "monotonic_ns": 68785220096387, "stream": "stderr", "utc": "2026-07-26T19:18:18.350+09:00"}
+{"line": "llama_kv_cache: layer  18: dev = ROCm0", "monotonic_ns": 68785220151817, "stream": "stderr", "utc": "2026-07-26T19:18:18.350+09:00"}
+{"line": "llama_kv_cache: layer  19: dev = ROCm0", "monotonic_ns": 68785220206078, "stream": "stderr", "utc": "2026-07-26T19:18:18.350+09:00"}
+{"line": "llama_kv_cache: layer  20: dev = ROCm0", "monotonic_ns": 68785220260279, "stream": "stderr", "utc": "2026-07-26T19:18:18.350+09:00"}
+{"line": "llama_kv_cache: layer  21: dev = ROCm0", "monotonic_ns": 68785220315890, "stream": "stderr", "utc": "2026-07-26T19:18:18.350+09:00"}
+{"line": "llama_kv_cache: layer  22: dev = ROCm0", "monotonic_ns": 68785220370961, "stream": "stderr", "utc": "2026-07-26T19:18:18.350+09:00"}
+{"line": "llama_kv_cache: layer  23: dev = ROCm0", "monotonic_ns": 68785220424762, "stream": "stderr", "utc": "2026-07-26T19:18:18.350+09:00"}
+{"line": "llama_kv_cache: layer  24: dev = ROCm0", "monotonic_ns": 68785220478203, "stream": "stderr", "utc": "2026-07-26T19:18:18.351+09:00"}
+{"line": "llama_kv_cache: layer  25: dev = ROCm0", "monotonic_ns": 68785220531504, "stream": "stderr", "utc": "2026-07-26T19:18:18.351+09:00"}
+{"line": "llama_kv_cache: layer  26: dev = ROCm0", "monotonic_ns": 68785220585155, "stream": "stderr", "utc": "2026-07-26T19:18:18.351+09:00"}
+{"line": "llama_kv_cache: layer  27: dev = ROCm0", "monotonic_ns": 68785220638136, "stream": "stderr", "utc": "2026-07-26T19:18:18.351+09:00"}
+{"line": "llama_kv_cache: layer  28: dev = ROCm0", "monotonic_ns": 68785220691637, "stream": "stderr", "utc": "2026-07-26T19:18:18.351+09:00"}
+{"line": "llama_kv_cache: layer  29: dev = ROCm0", "monotonic_ns": 68785220744808, "stream": "stderr", "utc": "2026-07-26T19:18:18.351+09:00"}
+{"line": "llama_kv_cache: layer  30: dev = ROCm0", "monotonic_ns": 68785220798229, "stream": "stderr", "utc": "2026-07-26T19:18:18.351+09:00"}
+{"line": "llama_kv_cache: layer  31: dev = ROCm0", "monotonic_ns": 68785220851540, "stream": "stderr", "utc": "2026-07-26T19:18:18.351+09:00"}
+{"line": "llama_kv_cache: layer  32: dev = ROCm0", "monotonic_ns": 68785220904891, "stream": "stderr", "utc": "2026-07-26T19:18:18.351+09:00"}
+{"line": "llama_kv_cache: layer  33: dev = ROCm0", "monotonic_ns": 68785220957832, "stream": "stderr", "utc": "2026-07-26T19:18:18.351+09:00"}
+{"line": "llama_kv_cache: layer  34: dev = ROCm0", "monotonic_ns": 68785221033723, "stream": "stderr", "utc": "2026-07-26T19:18:18.351+09:00"}
+{"line": "llama_kv_cache: layer  35: dev = ROCm0", "monotonic_ns": 68785221092714, "stream": "stderr", "utc": "2026-07-26T19:18:18.351+09:00"}
+{"line": "llama_kv_cache: layer  36: dev = ROCm0", "monotonic_ns": 68785221147175, "stream": "stderr", "utc": "2026-07-26T19:18:18.351+09:00"}
+{"line": "llama_kv_cache: layer  37: dev = ROCm0", "monotonic_ns": 68785221201186, "stream": "stderr", "utc": "2026-07-26T19:18:18.351+09:00"}
+{"line": "llama_kv_cache: layer  38: dev = ROCm0", "monotonic_ns": 68785221255337, "stream": "stderr", "utc": "2026-07-26T19:18:18.351+09:00"}
+{"line": "llama_kv_cache: layer  39: dev = ROCm0", "monotonic_ns": 68785221309558, "stream": "stderr", "utc": "2026-07-26T19:18:18.351+09:00"}
+{"line": "llama_kv_cache:      ROCm0 KV buffer size =   160.00 MiB", "monotonic_ns": 68785221388359, "stream": "stderr", "utc": "2026-07-26T19:18:18.351+09:00"}
+{"line": "llama_kv_cache: size =  160.00 MiB (   512 cells,  40 layers,  1/1 seqs), K (f32):   80.00 MiB, V (f32):   80.00 MiB", "monotonic_ns": 68785221450160, "stream": "stderr", "utc": "2026-07-26T19:18:18.352+09:00"}
+{"line": "llama_kv_cache: attn_rot_k = 0, n_embd_head_k_all = 128", "monotonic_ns": 68785221508761, "stream": "stderr", "utc": "2026-07-26T19:18:18.352+09:00"}
+{"line": "llama_kv_cache: attn_rot_v = 0, n_embd_head_k_all = 128", "monotonic_ns": 68785221565762, "stream": "stderr", "utc": "2026-07-26T19:18:18.352+09:00"}
+{"line": "llama_context: enumerating backends", "monotonic_ns": 68785221622393, "stream": "stderr", "utc": "2026-07-26T19:18:18.352+09:00"}
+{"line": "llama_context: backend_ptrs.size() = 2", "monotonic_ns": 68785221679504, "stream": "stderr", "utc": "2026-07-26T19:18:18.352+09:00"}
+{"line": "sched_reserve: reserving ...", "monotonic_ns": 68785221734725, "stream": "stderr", "utc": "2026-07-26T19:18:18.352+09:00"}
+{"line": "sched_reserve: max_nodes = 3544", "monotonic_ns": 68785221793056, "stream": "stderr", "utc": "2026-07-26T19:18:18.352+09:00"}
+{"line": "sched_reserve: reserving full memory module", "monotonic_ns": 68785222144122, "stream": "stderr", "utc": "2026-07-26T19:18:18.352+09:00"}
+{"line": "sched_reserve: worst-case: n_tokens = 128, n_seqs = 1, n_outputs = 1", "monotonic_ns": 68785222206283, "stream": "stderr", "utc": "2026-07-26T19:18:18.352+09:00"}
+{"line": "sched_reserve: resolving fused Gated Delta Net support:", "monotonic_ns": 68785222261584, "stream": "stderr", "utc": "2026-07-26T19:18:18.352+09:00"}
+{"line": "graph_reserve: reserving a graph for ubatch with n_tokens =    1, n_seqs =  1, n_outputs =    1", "monotonic_ns": 68785222316165, "stream": "stderr", "utc": "2026-07-26T19:18:18.352+09:00"}
+{"line": "sched_reserve: fused Gated Delta Net (autoregressive) enabled", "monotonic_ns": 68785222960137, "stream": "stderr", "utc": "2026-07-26T19:18:18.353+09:00"}
+{"line": "graph_reserve: reserving a graph for ubatch with n_tokens =   16, n_seqs =  1, n_outputs =   16", "monotonic_ns": 68785223036708, "stream": "stderr", "utc": "2026-07-26T19:18:18.353+09:00"}
+{"line": "sched_reserve: fused Gated Delta Net (chunked) enabled", "monotonic_ns": 68785223485106, "stream": "stderr", "utc": "2026-07-26T19:18:18.354+09:00"}
+{"line": "graph_reserve: reserving a graph for ubatch with n_tokens =  128, n_seqs =  1, n_outputs =  128", "monotonic_ns": 68785223544267, "stream": "stderr", "utc": "2026-07-26T19:18:18.354+09:00"}
+{"line": "graph_reserve: reserving a graph for ubatch with n_tokens =    1, n_seqs =  1, n_outputs =    1", "monotonic_ns": 68785237050824, "stream": "stderr", "utc": "2026-07-26T19:18:18.367+09:00"}
+{"line": "graph_reserve: reserving a graph for ubatch with n_tokens =  128, n_seqs =  1, n_outputs =  128", "monotonic_ns": 68785237985701, "stream": "stderr", "utc": "2026-07-26T19:18:18.368+09:00"}
+{"line": "sched_reserve:      ROCm0 compute buffer size =    76.69 MiB", "monotonic_ns": 68785238793325, "stream": "stderr", "utc": "2026-07-26T19:18:18.369+09:00"}
+{"line": "sched_reserve:  ROCm_Host compute buffer size =     5.13 MiB", "monotonic_ns": 68785238871716, "stream": "stderr", "utc": "2026-07-26T19:18:18.369+09:00"}
+{"line": "sched_reserve: graph nodes  = 1486", "monotonic_ns": 68785238929657, "stream": "stderr", "utc": "2026-07-26T19:18:18.369+09:00"}
+{"line": "sched_reserve: graph splits = 2", "monotonic_ns": 68785238984558, "stream": "stderr", "utc": "2026-07-26T19:18:18.369+09:00"}
+{"line": "sched_reserve: reserve took 17.52 ms, sched copies = 1", "monotonic_ns": 68785239079180, "stream": "stderr", "utc": "2026-07-26T19:18:18.369+09:00"}
+{"line": "attach_threadpool: call", "monotonic_ns": 68785239271373, "stream": "stderr", "utc": "2026-07-26T19:18:18.369+09:00"}
+{"line": "llama-bench: benchmark 1/1: warmup prompt run", "monotonic_ns": 68785239337494, "stream": "stderr", "utc": "2026-07-26T19:18:18.369+09:00"}
+{"line": "set_n_threads: n_threads = 1, n_threads_batch = 1", "monotonic_ns": 68785239394545, "stream": "stderr", "utc": "2026-07-26T19:18:18.369+09:00"}
+{"line": "CUDA Graph id 18 reused", "monotonic_ns": 68785420104371, "stream": "stderr", "utc": "2026-07-26T19:18:18.550+09:00"}
+{"line": "ggml_backend_cuda_graph_compute: CUDA graph warmup complete", "monotonic_ns": 68785420302744, "stream": "stderr", "utc": "2026-07-26T19:18:18.550+09:00"}
+{"line": "ggml_backend_cuda_graph_compute: CUDA graph warmup reset", "monotonic_ns": 68785545991263, "stream": "stderr", "utc": "2026-07-26T19:18:18.676+09:00"}
+{"line": "llama-bench: benchmark 1/1: prompt run 1/5", "monotonic_ns": 68785756501491, "stream": "stderr", "utc": "2026-07-26T19:18:18.887+09:00"}
+{"line": "set_n_threads: n_threads = 1, n_threads_batch = 1", "monotonic_ns": 68785756737295, "stream": "stderr", "utc": "2026-07-26T19:18:18.887+09:00"}
+{"line": "CUDA Graph id 27 reused", "monotonic_ns": 68785861154350, "stream": "stderr", "utc": "2026-07-26T19:18:18.991+09:00"}
+{"line": "ggml_backend_cuda_graph_compute: CUDA graph warmup complete", "monotonic_ns": 68785861435025, "stream": "stderr", "utc": "2026-07-26T19:18:18.991+09:00"}
+{"line": "ggml_backend_cuda_graph_compute: CUDA graph warmup reset", "monotonic_ns": 68785972307703, "stream": "stderr", "utc": "2026-07-26T19:18:19.102+09:00"}
+{"line": "llama-bench: benchmark 1/1: prompt run 2/5", "monotonic_ns": 68786183528024, "stream": "stderr", "utc": "2026-07-26T19:18:19.314+09:00"}
+{"line": "set_n_threads: n_threads = 1, n_threads_batch = 1", "monotonic_ns": 68786184248387, "stream": "stderr", "utc": "2026-07-26T19:18:19.314+09:00"}
+{"line": "CUDA Graph id 36 reused", "monotonic_ns": 68786290790739, "stream": "stderr", "utc": "2026-07-26T19:18:19.421+09:00"}
+{"line": "ggml_backend_cuda_graph_compute: CUDA graph warmup complete", "monotonic_ns": 68786291133995, "stream": "stderr", "utc": "2026-07-26T19:18:19.421+09:00"}
+{"line": "ggml_backend_cuda_graph_compute: CUDA graph warmup reset", "monotonic_ns": 68786408476426, "stream": "stderr", "utc": "2026-07-26T19:18:19.538+09:00"}
+{"line": "llama-bench: benchmark 1/1: prompt run 3/5", "monotonic_ns": 68786619185519, "stream": "stderr", "utc": "2026-07-26T19:18:19.749+09:00"}
+{"line": "set_n_threads: n_threads = 1, n_threads_batch = 1", "monotonic_ns": 68786619440633, "stream": "stderr", "utc": "2026-07-26T19:18:19.749+09:00"}
+{"line": "CUDA Graph id 45 reused", "monotonic_ns": 68786724817434, "stream": "stderr", "utc": "2026-07-26T19:18:19.855+09:00"}
+{"line": "ggml_backend_cuda_graph_compute: CUDA graph warmup complete", "monotonic_ns": 68786725508057, "stream": "stderr", "utc": "2026-07-26T19:18:19.856+09:00"}
+{"line": "ggml_backend_cuda_graph_compute: CUDA graph warmup reset", "monotonic_ns": 68786836135080, "stream": "stderr", "utc": "2026-07-26T19:18:19.966+09:00"}
+{"line": "llama-bench: benchmark 1/1: prompt run 4/5", "monotonic_ns": 68787045486929, "stream": "stderr", "utc": "2026-07-26T19:18:20.176+09:00"}
+{"line": "set_n_threads: n_threads = 1, n_threads_batch = 1", "monotonic_ns": 68787045735423, "stream": "stderr", "utc": "2026-07-26T19:18:20.176+09:00"}
+{"line": "CUDA Graph id 54 reused", "monotonic_ns": 68787149464785, "stream": "stderr", "utc": "2026-07-26T19:18:20.279+09:00"}
+{"line": "ggml_backend_cuda_graph_compute: CUDA graph warmup complete", "monotonic_ns": 68787149721190, "stream": "stderr", "utc": "2026-07-26T19:18:20.280+09:00"}
+{"line": "ggml_backend_cuda_graph_compute: CUDA graph warmup reset", "monotonic_ns": 68787260306003, "stream": "stderr", "utc": "2026-07-26T19:18:20.390+09:00"}
+{"line": "llama-bench: benchmark 1/1: prompt run 5/5", "monotonic_ns": 68787469059770, "stream": "stderr", "utc": "2026-07-26T19:18:20.599+09:00"}
+{"line": "set_n_threads: n_threads = 1, n_threads_batch = 1", "monotonic_ns": 68787469241854, "stream": "stderr", "utc": "2026-07-26T19:18:20.599+09:00"}
+{"line": "CUDA Graph id 63 reused", "monotonic_ns": 68787573156979, "stream": "stderr", "utc": "2026-07-26T19:18:20.703+09:00"}
+{"line": "ggml_backend_cuda_graph_compute: CUDA graph warmup complete", "monotonic_ns": 68787573678369, "stream": "stderr", "utc": "2026-07-26T19:18:20.704+09:00"}
+{"line": "ggml_backend_cuda_graph_compute: CUDA graph warmup reset", "monotonic_ns": 68787688693019, "stream": "stderr", "utc": "2026-07-26T19:18:20.819+09:00"}
+{"line": "[", "monotonic_ns": 68787898126329, "stream": "stdout", "utc": "2026-07-26T19:18:21.028+09:00"}
+{"line": "llama_perf_context_print:        load time =    5592.43 ms", "monotonic_ns": 68787898407644, "stream": "stderr", "utc": "2026-07-26T19:18:21.028+09:00"}
+{"line": "llama_perf_context_print: prompt eval time =       0.00 ms /  3072 tokens (    0.00 ms per token,      inf tokens per second)", "monotonic_ns": 68787898500996, "stream": "stderr", "utc": "2026-07-26T19:18:21.029+09:00"}
+{"line": "llama_perf_context_print:        eval time =       0.00 ms /     1 runs   (    0.00 ms per token,      inf tokens per second)", "monotonic_ns": 68787898563647, "stream": "stderr", "utc": "2026-07-26T19:18:21.029+09:00"}
+{"line": "llama_perf_context_print:       total time =    7734.08 ms /  3073 tokens", "monotonic_ns": 68787898617078, "stream": "stderr", "utc": "2026-07-26T19:18:21.029+09:00"}
+{"line": "llama_perf_context_print:    graphs reused =          6", "monotonic_ns": 68787898668718, "stream": "stderr", "utc": "2026-07-26T19:18:21.029+09:00"}
+{"line": "~llama_context:      ROCm0 compute buffer size is  76.6875 MiB, matches expectation of  76.6875 MiB", "monotonic_ns": 68787898720229, "stream": "stderr", "utc": "2026-07-26T19:18:21.029+09:00"}
+{"line": "  {", "monotonic_ns": 68787898786691, "stream": "stdout", "utc": "2026-07-26T19:18:21.029+09:00"}
+{"line": "    \"build_commit\": \"68a5592\",", "monotonic_ns": 68787898849952, "stream": "stdout", "utc": "2026-07-26T19:18:21.029+09:00"}
+{"line": "    \"build_number\": 3,", "monotonic_ns": 68787898904263, "stream": "stdout", "utc": "2026-07-26T19:18:21.029+09:00"}
+{"line": "    \"cpu_info\": \"AMD Ryzen Threadripper PRO 3995WX 64-Cores\",", "monotonic_ns": 68787898955654, "stream": "stdout", "utc": "2026-07-26T19:18:21.029+09:00"}
+{"line": "    \"gpu_info\": \"AMD Radeon Graphics\",", "monotonic_ns": 68787899017765, "stream": "stdout", "utc": "2026-07-26T19:18:21.029+09:00"}
+{"line": "~llama_context:  ROCm_Host compute buffer size is   5.1284 MiB, matches expectation of   5.1284 MiB", "monotonic_ns": 68787899077106, "stream": "stderr", "utc": "2026-07-26T19:18:21.029+09:00"}
+{"line": "    \"backends\": \"ROCm\",", "monotonic_ns": 68787899140797, "stream": "stdout", "utc": "2026-07-26T19:18:21.029+09:00"}
+{"line": "    \"model_filename\": \"/home/homelab1/datapool/ai_models/gguf/Qwen/Qwen3-14B-GGUF-530227a7/Qwen3-14B-Q8_0.gguf\",", "monotonic_ns": 68787899193888, "stream": "stdout", "utc": "2026-07-26T19:18:21.029+09:00"}
+{"line": "    \"model_type\": \"qwen3 14B Q8_0\",", "monotonic_ns": 68787899244099, "stream": "stdout", "utc": "2026-07-26T19:18:21.029+09:00"}
+{"line": "    \"model_size\": 15692574720,", "monotonic_ns": 68787899292449, "stream": "stdout", "utc": "2026-07-26T19:18:21.029+09:00"}
+{"line": "    \"model_n_params\": 14768307200,", "monotonic_ns": 68787899340270, "stream": "stdout", "utc": "2026-07-26T19:18:21.029+09:00"}
+{"line": "    \"n_batch\": 512,", "monotonic_ns": 68787899396841, "stream": "stdout", "utc": "2026-07-26T19:18:21.029+09:00"}
+{"line": "    \"n_ubatch\": 128,", "monotonic_ns": 68787899447672, "stream": "stdout", "utc": "2026-07-26T19:18:21.030+09:00"}
+{"line": "    \"n_threads\": 1,", "monotonic_ns": 68787899495203, "stream": "stdout", "utc": "2026-07-26T19:18:21.030+09:00"}
+{"line": "    \"cpu_mask\": \"0x0\",", "monotonic_ns": 68787899541414, "stream": "stdout", "utc": "2026-07-26T19:18:21.030+09:00"}
+{"line": "    \"cpu_strict\": false,", "monotonic_ns": 68787899587705, "stream": "stdout", "utc": "2026-07-26T19:18:21.030+09:00"}
+{"line": "    \"poll\": 50,", "monotonic_ns": 68787899633985, "stream": "stdout", "utc": "2026-07-26T19:18:21.030+09:00"}
+{"line": "    \"type_k\": \"f32\",", "monotonic_ns": 68787899681176, "stream": "stdout", "utc": "2026-07-26T19:18:21.030+09:00"}
+{"line": "    \"type_v\": \"f32\",", "monotonic_ns": 68787899727447, "stream": "stdout", "utc": "2026-07-26T19:18:21.030+09:00"}
+{"line": "    \"n_gpu_layers\": 999,", "monotonic_ns": 68787899774268, "stream": "stdout", "utc": "2026-07-26T19:18:21.030+09:00"}
+{"line": "    \"n_cpu_moe\": 0,", "monotonic_ns": 68787899821069, "stream": "stdout", "utc": "2026-07-26T19:18:21.030+09:00"}
+{"line": "    \"split_mode\": \"none\",", "monotonic_ns": 68787899867900, "stream": "stdout", "utc": "2026-07-26T19:18:21.030+09:00"}
+{"line": "    \"main_gpu\": 0,", "monotonic_ns": 68787899915780, "stream": "stdout", "utc": "2026-07-26T19:18:21.030+09:00"}
+{"line": "    \"no_kv_offload\": false,", "monotonic_ns": 68787899962381, "stream": "stdout", "utc": "2026-07-26T19:18:21.030+09:00"}
+{"line": "    \"flash_attn\": 1,", "monotonic_ns": 68787900047803, "stream": "stdout", "utc": "2026-07-26T19:18:21.030+09:00"}
+{"line": "    \"devices\": \"ROCm0\",", "monotonic_ns": 68787900139424, "stream": "stdout", "utc": "2026-07-26T19:18:21.030+09:00"}
+{"line": "    \"tensor_split\": \"0.00\",", "monotonic_ns": 68787900194785, "stream": "stdout", "utc": "2026-07-26T19:18:21.030+09:00"}
+{"line": "    \"tensor_buft_overrides\": \"none\",", "monotonic_ns": 68787900244646, "stream": "stdout", "utc": "2026-07-26T19:18:21.030+09:00"}
+{"line": "    \"use_mmap\": true,", "monotonic_ns": 68787900292547, "stream": "stdout", "utc": "2026-07-26T19:18:21.030+09:00"}
+{"line": "    \"use_direct_io\": false,", "monotonic_ns": 68787900339718, "stream": "stdout", "utc": "2026-07-26T19:18:21.030+09:00"}
+{"line": "    \"embeddings\": false,", "monotonic_ns": 68787900386759, "stream": "stdout", "utc": "2026-07-26T19:18:21.030+09:00"}
+{"line": "    \"no_op_offload\": 0,", "monotonic_ns": 68787900435120, "stream": "stdout", "utc": "2026-07-26T19:18:21.030+09:00"}
+{"line": "    \"no_host\": false,", "monotonic_ns": 68787900481440, "stream": "stdout", "utc": "2026-07-26T19:18:21.031+09:00"}
+{"line": "    \"fit_target\": 0,", "monotonic_ns": 68787900527621, "stream": "stdout", "utc": "2026-07-26T19:18:21.031+09:00"}
+{"line": "    \"fit_min_ctx\": 0,", "monotonic_ns": 68787900573942, "stream": "stdout", "utc": "2026-07-26T19:18:21.031+09:00"}
+{"line": "    \"n_prompt\": 512,", "monotonic_ns": 68787900620203, "stream": "stdout", "utc": "2026-07-26T19:18:21.031+09:00"}
+{"line": "    \"n_gen\": 0,", "monotonic_ns": 68787900665814, "stream": "stdout", "utc": "2026-07-26T19:18:21.031+09:00"}
+{"line": "    \"n_depth\": 0,", "monotonic_ns": 68787900711504, "stream": "stdout", "utc": "2026-07-26T19:18:21.031+09:00"}
+{"line": "    \"test_time\": \"2026-07-26T10:18:18Z\",", "monotonic_ns": 68787900757235, "stream": "stdout", "utc": "2026-07-26T19:18:21.031+09:00"}
+{"line": "    \"avg_ns\": 428193267,", "monotonic_ns": 68787900804426, "stream": "stdout", "utc": "2026-07-26T19:18:21.031+09:00"}
+{"line": "    \"stddev_ns\": 4663321,", "monotonic_ns": 68787900850647, "stream": "stdout", "utc": "2026-07-26T19:18:21.031+09:00"}
+{"line": "    \"avg_ts\": 1195.834229,", "monotonic_ns": 68787900896508, "stream": "stdout", "utc": "2026-07-26T19:18:21.031+09:00"}
+{"line": "    \"stddev_ts\": 12.911246,", "monotonic_ns": 68787900942478, "stream": "stdout", "utc": "2026-07-26T19:18:21.031+09:00"}
+{"line": "    \"samples_ns\": [ 426533904, 435810707, 426243909, 423508271, 428869545 ],", "monotonic_ns": 68787900998079, "stream": "stdout", "utc": "2026-07-26T19:18:21.031+09:00"}
+{"line": "    \"samples_ts\": [ 1200.37, 1174.82, 1201.19, 1208.95, 1193.84 ]", "monotonic_ns": 68787901065071, "stream": "stdout", "utc": "2026-07-26T19:18:21.031+09:00"}
+{"line": "  }", "monotonic_ns": 68788094665622, "stream": "stdout", "utc": "2026-07-26T19:18:21.225+09:00"}
+{"line": "]", "monotonic_ns": 68788094913366, "stream": "stdout", "utc": "2026-07-26T19:18:21.225+09:00"}

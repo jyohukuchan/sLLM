@@ -1,0 +1,17 @@
+2026-07-26T19:59:57+09:00
+restore command: sudo -n systemctl start ullm-openai.service
+sudo: a password is required
+start_returncode: 1
+MainPID=4144512
+NRestarts=0
+ActiveState=active
+SubState=running
+UnitFileState=enabled
+show_returncode: 0
+MainPID=0
+NRestarts=0
+ActiveState=inactive
+SubState=dead
+UnitFileState=disabled
+llama_qwen35_show_returncode: 0
+2026-07-26T20:00:25+09:00

@@ -1,0 +1,8 @@
+{
+  "argv": [
+    "sha256sum",
+    "/tmp/ullm-prefill-clean-0216b131/target/release/ullm-sq8-r9700-phase0-profile"
+  ],
+  "returncode": 0,
+  "utc": "2026-07-26T19:12:40.443+09:00"
+}

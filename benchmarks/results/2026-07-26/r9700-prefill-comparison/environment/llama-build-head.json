@@ -1,0 +1,11 @@
+{
+  "argv": [
+    "git",
+    "-C",
+    "/home/homelab1/llama.cpp-src",
+    "rev-parse",
+    "HEAD"
+  ],
+  "returncode": 0,
+  "utc": "2026-07-26T19:12:40.513+09:00"
+}

@@ -1,0 +1,13 @@
+2026-07-26T19:12:23+09:00
+command: amd-smi process --gpu 2 --json
+[
+    {
+        "gpu": 2,
+        "process_list": [
+            {
+                "process_info": "No running processes detected"
+            }
+        ]
+    }
+]
+returncode: 0

@@ -1,0 +1,48 @@
+{
+  "argv": [
+    "/home/homelab1/llama.cpp-src/build-rdna4/bin/llama-bench",
+    "-m",
+    "/home/homelab1/datapool/ai_models/gguf/Qwen/Qwen3-14B-GGUF-530227a7/Qwen3-14B-Q8_0.gguf",
+    "-o",
+    "json",
+    "-r",
+    "5",
+    "-p",
+    "1024",
+    "-n",
+    "0",
+    "-b",
+    "1024",
+    "-ub",
+    "128",
+    "-ctk",
+    "f32",
+    "-ctv",
+    "f32",
+    "-ngl",
+    "999",
+    "-sm",
+    "none",
+    "-mg",
+    "0",
+    "-dev",
+    "ROCm0",
+    "-nkvo",
+    "0",
+    "-fa",
+    "on",
+    "-t",
+    "1",
+    "-mmp",
+    "1",
+    "--progress",
+    "-v"
+  ],
+  "cwd": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-26/r9700-prefill-comparison",
+  "environment_overrides": {
+    "HIP_VISIBLE_DEVICES": "1"
+  },
+  "unset_environment": [
+    "ROCR_VISIBLE_DEVICES"
+  ]
+}

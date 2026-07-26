@@ -1,0 +1,3 @@
+2026-07-26T19:12:23+09:00
+command: sudo -n systemctl stop ullm-openai.service
+returncode: 0

@@ -1,0 +1,11 @@
+{
+  "argv": [
+    "git",
+    "-C",
+    "/tmp/ullm-prefill-clean-0216b131",
+    "rev-parse",
+    "HEAD"
+  ],
+  "returncode": 0,
+  "utc": "2026-07-26T19:12:40.447+09:00"
+}
