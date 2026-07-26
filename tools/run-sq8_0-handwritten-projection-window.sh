@@ -434,6 +434,7 @@ if [[ $speed_first -eq 1 ]]; then
                 --artifact "$artifact_dir" --package "$package_dir" \
                 --prompt-lengths 1028 --max-new-tokens 16 \
                 --prefill-mode m8-chunk8 --record-generated-timing \
+                --decode-oracle-capture-dir "$result_dir/timing/ck/${timing_id}.decode" \
                 --result-json "$result_dir/timing/ck/${timing_id}.json"
         capture_telemetry "after-timing-ck-${timing_id}"
 
@@ -447,6 +448,7 @@ if [[ $speed_first -eq 1 ]]; then
                 --prompt-lengths 1028 --max-new-tokens 16 \
                 --prefill-mode m8-chunk8 --record-generated-timing \
                 --handwritten-wmma-projection-prototype \
+                --decode-oracle-capture-dir "$result_dir/timing/handwritten/${timing_id}.decode" \
                 --result-json "$result_dir/timing/handwritten/${timing_id}.json"
         capture_telemetry "after-timing-handwritten-${timing_id}"
     done
