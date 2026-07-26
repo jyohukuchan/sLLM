@@ -44,6 +44,10 @@
   `start` は、当初 inactive だった service の起動と rate-limit 復旧の 2 回である。最終的に成功した
   generic promotion + rollback 経路そのものは restart 各 1 回、計 2 回であり、systemd の
   `NRestarts` は 0 のままである。
+- `/etc/ullm/served-models/candidates/` は読み取りで inventory した。AQ4_0 の既存 manifest は
+  5 件あり、4 件は static validator を通り、`qwen35-9b-aq4.json` は validation failure だった。
+  ただしどれも BA Phase 1 の bitwise-identical candidate であることを示す manifest/evidence では
+  ないため、この inventory だけで次の昇格対象とはしない。
 
 検証証跡は
 `benchmarks/results/2026-07-26/lightweight-promotion-selftest-v0.1-README.md`、および同 README が
@@ -54,7 +58,7 @@
 1. 新しい AQ4_0、SQ8_0、または別 architecture の candidate が manifest と worker validation を
    満たしたら、固定 prompt suite とこの generic route を使って昇格する。重い FP32 corpus、bitwise
    gate、campaign/authorization は通常昇格の前提にしない。
-2. 依頼 BA Phase 1 の bitwise-identical candidate は、この作業時点では manifest と evidence を
-   確認できていない。候補として実在・検証済みになるまでは、次の昇格対象とは記録しない。
+2. 依頼 BA Phase 1 の bitwise-identical candidate は、登録済み 5 manifest のどれとも確認できて
+   いない。candidate 固有の manifest と evidence が揃うまでは、次の昇格対象とは記録しない。
 3. 次の service 操作前にも共有 GPU の計測 process と StartLimit 状態を確認する。rate-limit recovery
    が evidence に出た場合は、候補品質とは独立した運用事象として記録する。
