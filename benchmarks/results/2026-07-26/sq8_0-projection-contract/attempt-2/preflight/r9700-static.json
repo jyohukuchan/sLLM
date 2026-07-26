@@ -1,0 +1,44 @@
+{
+    "gpu_data": [
+        {
+            "gpu": 2,
+            "asic": {
+                "market_name": "AMD Radeon Graphics",
+                "vendor_id": "0x1002",
+                "vendor_name": "Advanced Micro Devices Inc. [AMD/ATI]",
+                "subvendor_id": "0x1da2",
+                "device_id": "0x7551",
+                "subsystem_id": "0xe499",
+                "rev_id": "0xc0",
+                "asic_serial": "0xA8E9DDEFA2D60F55",
+                "oam_id": "N/A",
+                "num_compute_units": 64,
+                "target_graphics_version": "gfx1201"
+            },
+            "bus": {
+                "bdf": "0000:47:00.0",
+                "max_pcie_width": 16,
+                "max_pcie_speed": {
+                    "value": 32,
+                    "unit": "GT/s"
+                },
+                "pcie_levels": {
+                    "0": [
+                        "2.5 GT/s",
+                        "16"
+                    ],
+                    "1": [
+                        "16.0 GT/s",
+                        "16"
+                    ],
+                    "2": [
+                        "16.0 GT/s",
+                        "16"
+                    ]
+                },
+                "pcie_interface_version": "Gen 5",
+                "slot_type": "CEM"
+            }
+        }
+    ]
+}

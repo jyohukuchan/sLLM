@@ -602,3 +602,91 @@ setting, service unit, activation, authorization, or remote state changed.
    window; default CK remains unchanged otherwise.
 4. If numerically exact, record an unambiguous HIP occupancy interpretation
    alongside timing before attributing any gain to LDS headroom.
+
+
+## SQ8_0 handwritten WMMA projection cumulative-contract diagnosis — 2026-07-26 (NO-GO retained)
+
+### Actual-serving localization
+
+The prior component gate was insufficient to characterize SQ8_0's feedback
+contract: it covered four synthetic one-projection cases at the BF16 boundary,
+not the actual artifact's per-K128 activation sequence or a complete M=1
+serving step. A private terminal-only tracing API was therefore added. It runs
+the same 512-token raw-p0512 fixture and M8-chunked prefill as the frozen gate,
+then executes the ordinary first M=1 feedback decode through all 40 layers
+while reading each layer workspace before head/token commit.
+
+The valid isolated run is
+benchmarks/results/2026-07-26/sq8_0-projection-contract/attempt-3/. Both
+routes entered decode with token 66 at position 512. Layers 0--2 were bitwise
+equal at every captured stage. The first difference is layer 3
+down_projected: 2 / 5,120 values differ, first index 1,954, max abs
+6.1035156e-5. The layer output has exactly the same two differences. A direct
+replay of the actual down projection (M=1, N=5,120, K=17,408) matches the
+layer trace for both routes and has the same 2 / 5,120 difference. This
+establishes the projection call as the first observed divergence.
+
+### K128 evidence and contract boundary
+
+For the actual layer-3 activation, each replay reuses the existing
+block-local quantizer and observes CK's real BF16-workspace-to-F32 boundary.
+
+- Cumulative K128 prefixes are non-monotonic: prefixes 1--5 are exact, prefix
+  6 first differs, prefix 8 is exact again, and the full prefix differs.
+  The reason for that cancellation/non-monotonicity is **unconfirmed**.
+- Isolated K128 blocks locate a mismatch already in block 1 (K=128--255):
+  1 / 5,120 at output 1,986, max abs 9.536743e-7. Fifteen isolated blocks
+  differ. Hence association among separate K128 blocks is not the sole cause.
+- In isolated block 1, K16 prefixes 1--7 are exact; only adding the eighth
+  K16 contribution (offsets 112--127) produces the mismatch.
+- A one-hot lane probe for K lanes 0--15 of the first output tile passes 16/16.
+  This excludes a gross transpose/lane fault for that restricted probe only.
+
+CK source confirms the same high-level scale policy: it zeroes a raw
+ScaleBlockK=128 accumulator, executes its XDL operations, then adds
+raw × (activation scale × weight scale) to FP32 C. The private body also
+holds eight K16 WMMA operations in a K128 raw accumulator before applying the
+scale. The selected down CK form is a 256-thread 16x128x256 block; the private
+body is a 32-thread N=16 wave, and the inspected gfx1201 CK object has
+interleaved WMMA and FP32-FMAC register sequences.
+
+The confirmed result is therefore an **inside-K128 contract discrepancy**.
+The exact unique cause remains **unconfirmed**: the eighth K16 operand/
+fragment mapping, the WMMA reduction/issue association, or both remain
+possible. There is no evidence that an inter-K128 scale-add order alone
+explains the failure, and no exact CK register/lane mapping was decoded.
+
+### Decision and performance
+
+No contract-aligned handwritten implementation was made. Accordingly the
+unchanged component and multi-step full-model gates could not be rerun as a
+pass, candidate event timing was not run, and no default change is eligible.
+
+For the evaluated wave32 handwritten route, CK's contract cannot currently be
+kept while claiming a speedup: it is numerically ineligible. Whether a
+different handwritten implementation can reproduce CK's exact fragment/
+schedule contract and still beat CK is **unconfirmed**. Such a claim requires
+an exact mapping implementation, the unchanged component gate, the unchanged
+full-model gate, and only then a fresh timing window.
+
+### Evidence hygiene and service record
+
+attempt-1 is a valid but inconclusive isolated layer-0 reconstruction.
+attempt-2 is retained but excluded: ullm-openai.service restarted at 09:12:48
+while diagnostic artifacts were still written at 09:13:06--09:13:08.
+attempt-3 is the sole numerical authority.
+
+There were three stop/isolate/restore cycles. The final valid window was
+09:19:29--09:20:46 JST. It used AMD SMI GPU 2 only (R9700 gfx1201,
+0000:47:00.0) with HIP_VISIBLE_DEVICES=1; V620 was not selected. After the
+no-process sentinel, the diagnostic completed at 09:20:45 and the service was
+then restored by a single start. Final state was active/running with
+NRestarts=0. llama-qwen35-udq4.service remained inactive/disabled and gdm3
+inactive. Endpoint telemetry was 38/38/36 C to 46/47/46 C
+(edge/hotspot/memory), 2,833 MHz to 49 MHz gfx, and 16 W to 14 W socket
+power; THROTTLED appeared in the post-stop snapshot. The physical throttle
+cause is **unconfirmed**. No systemd unit, power setting, active manifest,
+campaign, authorization, release, /opt/ullm content, or remote state changed.
+
+Machine-readable evidence and the read-only CK analysis are retained in
+benchmarks/results/2026-07-26/sq8_0-projection-contract/.

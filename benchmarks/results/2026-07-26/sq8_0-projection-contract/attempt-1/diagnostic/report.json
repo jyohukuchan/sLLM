@@ -1,0 +1,408 @@
+{
+  "schema_version": "ullm.sq8_0.handwritten_projection_contract.v1",
+  "scope": "private R9700/gfx1201 diagnostic; no default dispatch, manifest, campaign, authorization, or release mutation",
+  "source": {
+    "artifact_content_sha256": "2243acf1df627ff6ec13840c8ffcf35c77e89205eb36cef7561b85c9c98b9147",
+    "layer_index": 0,
+    "package_embedding_dtype": "BF16",
+    "package_embedding_shape": [
+      151936,
+      5120
+    ],
+    "embedding_f32_le_sha256": "d30840b2f9f2902d64cccd32ef3169acdef7c6ef729bb78a2bd048dd11f4a4e1"
+  },
+  "device": {
+    "runtime_index": 1,
+    "backend_device_id": 0,
+    "backend": "hip",
+    "name": "AMD Radeon Graphics",
+    "gcn_arch_name": "gfx1201",
+    "compute_major": 12,
+    "compute_minor": 0
+  },
+  "decode_reconstruction": {
+    "feedback_token_id": 66,
+    "basis": "The prior frozen full-model gate generated token 66 before decode g0001. Layer-0 input RMSNorm and Q/K/V projection occur before RoPE or cache-dependent attention, so an M=1 layer-0 replay of that embedding reproduces their projection input exactly.",
+    "exact_for_projection_input": true,
+    "limitation": "This isolated replay does not assert equality for later cache-dependent attention stages at the serving position; it only localizes the earlier projection boundary."
+  },
+  "layer_stage_differential": [
+    {
+      "stage": "input_normed",
+      "elements": 5120,
+      "bitwise_mismatches": 0,
+      "first_mismatch": null,
+      "max_abs": 0.0,
+      "max_rel": 0.0,
+      "ck_sha256": "7ccd4af98779c734b0e40975a2c0e7fcf637323ef323bda9d6c8fbb6eb122f35",
+      "handwritten_sha256": "7ccd4af98779c734b0e40975a2c0e7fcf637323ef323bda9d6c8fbb6eb122f35"
+    },
+    {
+      "stage": "q_projected",
+      "elements": 5120,
+      "bitwise_mismatches": 0,
+      "first_mismatch": null,
+      "max_abs": 0.0,
+      "max_rel": 0.0,
+      "ck_sha256": "a07ddb9490d0dcfa1220d9bb69c28683a5e577c511df335231359d3e69a39a15",
+      "handwritten_sha256": "a07ddb9490d0dcfa1220d9bb69c28683a5e577c511df335231359d3e69a39a15"
+    },
+    {
+      "stage": "k_projected",
+      "elements": 1024,
+      "bitwise_mismatches": 0,
+      "first_mismatch": null,
+      "max_abs": 0.0,
+      "max_rel": 0.0,
+      "ck_sha256": "047aee040f09f575ff40e336de0c672cf0da1b7d33a299cc421926b20cc38653",
+      "handwritten_sha256": "047aee040f09f575ff40e336de0c672cf0da1b7d33a299cc421926b20cc38653"
+    },
+    {
+      "stage": "v_projected",
+      "elements": 1024,
+      "bitwise_mismatches": 0,
+      "first_mismatch": null,
+      "max_abs": 0.0,
+      "max_rel": 0.0,
+      "ck_sha256": "11167c549e6d8e6b65a9202aba8c439cd06144325cfb2cc9f073648480ba3e16",
+      "handwritten_sha256": "11167c549e6d8e6b65a9202aba8c439cd06144325cfb2cc9f073648480ba3e16"
+    },
+    {
+      "stage": "q_normed",
+      "elements": 5120,
+      "bitwise_mismatches": 0,
+      "first_mismatch": null,
+      "max_abs": 0.0,
+      "max_rel": 0.0,
+      "ck_sha256": "ed61f0930b8d69376b245baf2943536fb0e8118a581eef2149343cc4c4d4c517",
+      "handwritten_sha256": "ed61f0930b8d69376b245baf2943536fb0e8118a581eef2149343cc4c4d4c517"
+    },
+    {
+      "stage": "k_normed",
+      "elements": 1024,
+      "bitwise_mismatches": 0,
+      "first_mismatch": null,
+      "max_abs": 0.0,
+      "max_rel": 0.0,
+      "ck_sha256": "ed32686e0a6772257a82a46fe687d46464772396477a1c75c10b587a1e611ac9",
+      "handwritten_sha256": "ed32686e0a6772257a82a46fe687d46464772396477a1c75c10b587a1e611ac9"
+    },
+    {
+      "stage": "q_rope",
+      "elements": 5120,
+      "bitwise_mismatches": 0,
+      "first_mismatch": null,
+      "max_abs": 0.0,
+      "max_rel": 0.0,
+      "ck_sha256": "ed61f0930b8d69376b245baf2943536fb0e8118a581eef2149343cc4c4d4c517",
+      "handwritten_sha256": "ed61f0930b8d69376b245baf2943536fb0e8118a581eef2149343cc4c4d4c517"
+    },
+    {
+      "stage": "k_rope",
+      "elements": 1024,
+      "bitwise_mismatches": 0,
+      "first_mismatch": null,
+      "max_abs": 0.0,
+      "max_rel": 0.0,
+      "ck_sha256": "ed32686e0a6772257a82a46fe687d46464772396477a1c75c10b587a1e611ac9",
+      "handwritten_sha256": "ed32686e0a6772257a82a46fe687d46464772396477a1c75c10b587a1e611ac9"
+    },
+    {
+      "stage": "attention",
+      "elements": 5120,
+      "bitwise_mismatches": 0,
+      "first_mismatch": null,
+      "max_abs": 0.0,
+      "max_rel": 0.0,
+      "ck_sha256": "eef41debf7104dd3dc49851c32ffd7305d9c22f38c42d1e5502b833e9c7ae678",
+      "handwritten_sha256": "eef41debf7104dd3dc49851c32ffd7305d9c22f38c42d1e5502b833e9c7ae678"
+    },
+    {
+      "stage": "o_projected",
+      "elements": 5120,
+      "bitwise_mismatches": 0,
+      "first_mismatch": null,
+      "max_abs": 0.0,
+      "max_rel": 0.0,
+      "ck_sha256": "95b34608ce1f686c537382105bf3209dd2970735fa5151213bbb93c5bdc5dd08",
+      "handwritten_sha256": "95b34608ce1f686c537382105bf3209dd2970735fa5151213bbb93c5bdc5dd08"
+    },
+    {
+      "stage": "attention_residual",
+      "elements": 5120,
+      "bitwise_mismatches": 0,
+      "first_mismatch": null,
+      "max_abs": 0.0,
+      "max_rel": 0.0,
+      "ck_sha256": "2ffaeb9d454eaeefdcc1dc0e02ec040fadcbbc8b9f391c4557c10a1ff056480c",
+      "handwritten_sha256": "2ffaeb9d454eaeefdcc1dc0e02ec040fadcbbc8b9f391c4557c10a1ff056480c"
+    },
+    {
+      "stage": "post_normed",
+      "elements": 5120,
+      "bitwise_mismatches": 0,
+      "first_mismatch": null,
+      "max_abs": 0.0,
+      "max_rel": 0.0,
+      "ck_sha256": "eca36b600d8a66b436c23d2b2c8854b287d9e06cca2b1aefc6b857ac0f79b594",
+      "handwritten_sha256": "eca36b600d8a66b436c23d2b2c8854b287d9e06cca2b1aefc6b857ac0f79b594"
+    },
+    {
+      "stage": "gate_projected",
+      "elements": 17408,
+      "bitwise_mismatches": 0,
+      "first_mismatch": null,
+      "max_abs": 0.0,
+      "max_rel": 0.0,
+      "ck_sha256": "6f568ea762e6100dcb3a45e11c4ae7c577f47cb59a65da4ff453972e54fbc610",
+      "handwritten_sha256": "6f568ea762e6100dcb3a45e11c4ae7c577f47cb59a65da4ff453972e54fbc610"
+    },
+    {
+      "stage": "up_projected",
+      "elements": 17408,
+      "bitwise_mismatches": 0,
+      "first_mismatch": null,
+      "max_abs": 0.0,
+      "max_rel": 0.0,
+      "ck_sha256": "b5883a0f8172339a0f0b5610a048e9ec834ea18d9fc7824f99f37c35bf7fffda",
+      "handwritten_sha256": "b5883a0f8172339a0f0b5610a048e9ec834ea18d9fc7824f99f37c35bf7fffda"
+    },
+    {
+      "stage": "mlp_activation",
+      "elements": 17408,
+      "bitwise_mismatches": 0,
+      "first_mismatch": null,
+      "max_abs": 0.0,
+      "max_rel": 0.0,
+      "ck_sha256": "028b9a6b0e15db9a15085f0c7ff568de7b639382c719abc16c1e108c9f478439",
+      "handwritten_sha256": "028b9a6b0e15db9a15085f0c7ff568de7b639382c719abc16c1e108c9f478439"
+    },
+    {
+      "stage": "down_projected",
+      "elements": 5120,
+      "bitwise_mismatches": 0,
+      "first_mismatch": null,
+      "max_abs": 0.0,
+      "max_rel": 0.0,
+      "ck_sha256": "d947e66f920613764953dccefd12f813e7a5ff9c9ce63d8cf7cd2cb3a70490c5",
+      "handwritten_sha256": "d947e66f920613764953dccefd12f813e7a5ff9c9ce63d8cf7cd2cb3a70490c5"
+    },
+    {
+      "stage": "output",
+      "elements": 5120,
+      "bitwise_mismatches": 0,
+      "first_mismatch": null,
+      "max_abs": 0.0,
+      "max_rel": 0.0,
+      "ck_sha256": "5e49e881300b2351c9d15a14ea668803be621ae8ddd76473e1c580bda8a328cc",
+      "handwritten_sha256": "5e49e881300b2351c9d15a14ea668803be621ae8ddd76473e1c580bda8a328cc"
+    }
+  ],
+  "first_projection_divergence": null,
+  "selected_projection": null,
+  "fragment_lane_probe": {
+    "method": "For each K lane 0..15, dynamically quantize an otherwise zero M=1 input with exactly that lane nonzero. A synthetic N=5120/K=5120 weight has distinct finite FP8 values in output rows 0..15 at that same K lane and zero elsewhere; F32-expanded [128,128] scales are one. Compare CK and handwritten BF16-boundary output bitwise.",
+    "cases": [
+      {
+        "k_lane": 0,
+        "differential": {
+          "elements": 5120,
+          "bitwise_mismatches": 0,
+          "first_mismatch": null,
+          "max_abs": 0.0,
+          "max_rel": 0.0,
+          "ck_sha256": "5ff3ecaf3dd149b1354a1b06aa1d540bf6405ef384334979fc5802b758e8b55d",
+          "handwritten_sha256": "5ff3ecaf3dd149b1354a1b06aa1d540bf6405ef384334979fc5802b758e8b55d"
+        }
+      },
+      {
+        "k_lane": 1,
+        "differential": {
+          "elements": 5120,
+          "bitwise_mismatches": 0,
+          "first_mismatch": null,
+          "max_abs": 0.0,
+          "max_rel": 0.0,
+          "ck_sha256": "5ff3ecaf3dd149b1354a1b06aa1d540bf6405ef384334979fc5802b758e8b55d",
+          "handwritten_sha256": "5ff3ecaf3dd149b1354a1b06aa1d540bf6405ef384334979fc5802b758e8b55d"
+        }
+      },
+      {
+        "k_lane": 2,
+        "differential": {
+          "elements": 5120,
+          "bitwise_mismatches": 0,
+          "first_mismatch": null,
+          "max_abs": 0.0,
+          "max_rel": 0.0,
+          "ck_sha256": "5ff3ecaf3dd149b1354a1b06aa1d540bf6405ef384334979fc5802b758e8b55d",
+          "handwritten_sha256": "5ff3ecaf3dd149b1354a1b06aa1d540bf6405ef384334979fc5802b758e8b55d"
+        }
+      },
+      {
+        "k_lane": 3,
+        "differential": {
+          "elements": 5120,
+          "bitwise_mismatches": 0,
+          "first_mismatch": null,
+          "max_abs": 0.0,
+          "max_rel": 0.0,
+          "ck_sha256": "5ff3ecaf3dd149b1354a1b06aa1d540bf6405ef384334979fc5802b758e8b55d",
+          "handwritten_sha256": "5ff3ecaf3dd149b1354a1b06aa1d540bf6405ef384334979fc5802b758e8b55d"
+        }
+      },
+      {
+        "k_lane": 4,
+        "differential": {
+          "elements": 5120,
+          "bitwise_mismatches": 0,
+          "first_mismatch": null,
+          "max_abs": 0.0,
+          "max_rel": 0.0,
+          "ck_sha256": "5ff3ecaf3dd149b1354a1b06aa1d540bf6405ef384334979fc5802b758e8b55d",
+          "handwritten_sha256": "5ff3ecaf3dd149b1354a1b06aa1d540bf6405ef384334979fc5802b758e8b55d"
+        }
+      },
+      {
+        "k_lane": 5,
+        "differential": {
+          "elements": 5120,
+          "bitwise_mismatches": 0,
+          "first_mismatch": null,
+          "max_abs": 0.0,
+          "max_rel": 0.0,
+          "ck_sha256": "5ff3ecaf3dd149b1354a1b06aa1d540bf6405ef384334979fc5802b758e8b55d",
+          "handwritten_sha256": "5ff3ecaf3dd149b1354a1b06aa1d540bf6405ef384334979fc5802b758e8b55d"
+        }
+      },
+      {
+        "k_lane": 6,
+        "differential": {
+          "elements": 5120,
+          "bitwise_mismatches": 0,
+          "first_mismatch": null,
+          "max_abs": 0.0,
+          "max_rel": 0.0,
+          "ck_sha256": "5ff3ecaf3dd149b1354a1b06aa1d540bf6405ef384334979fc5802b758e8b55d",
+          "handwritten_sha256": "5ff3ecaf3dd149b1354a1b06aa1d540bf6405ef384334979fc5802b758e8b55d"
+        }
+      },
+      {
+        "k_lane": 7,
+        "differential": {
+          "elements": 5120,
+          "bitwise_mismatches": 0,
+          "first_mismatch": null,
+          "max_abs": 0.0,
+          "max_rel": 0.0,
+          "ck_sha256": "5ff3ecaf3dd149b1354a1b06aa1d540bf6405ef384334979fc5802b758e8b55d",
+          "handwritten_sha256": "5ff3ecaf3dd149b1354a1b06aa1d540bf6405ef384334979fc5802b758e8b55d"
+        }
+      },
+      {
+        "k_lane": 8,
+        "differential": {
+          "elements": 5120,
+          "bitwise_mismatches": 0,
+          "first_mismatch": null,
+          "max_abs": 0.0,
+          "max_rel": 0.0,
+          "ck_sha256": "5ff3ecaf3dd149b1354a1b06aa1d540bf6405ef384334979fc5802b758e8b55d",
+          "handwritten_sha256": "5ff3ecaf3dd149b1354a1b06aa1d540bf6405ef384334979fc5802b758e8b55d"
+        }
+      },
+      {
+        "k_lane": 9,
+        "differential": {
+          "elements": 5120,
+          "bitwise_mismatches": 0,
+          "first_mismatch": null,
+          "max_abs": 0.0,
+          "max_rel": 0.0,
+          "ck_sha256": "5ff3ecaf3dd149b1354a1b06aa1d540bf6405ef384334979fc5802b758e8b55d",
+          "handwritten_sha256": "5ff3ecaf3dd149b1354a1b06aa1d540bf6405ef384334979fc5802b758e8b55d"
+        }
+      },
+      {
+        "k_lane": 10,
+        "differential": {
+          "elements": 5120,
+          "bitwise_mismatches": 0,
+          "first_mismatch": null,
+          "max_abs": 0.0,
+          "max_rel": 0.0,
+          "ck_sha256": "5ff3ecaf3dd149b1354a1b06aa1d540bf6405ef384334979fc5802b758e8b55d",
+          "handwritten_sha256": "5ff3ecaf3dd149b1354a1b06aa1d540bf6405ef384334979fc5802b758e8b55d"
+        }
+      },
+      {
+        "k_lane": 11,
+        "differential": {
+          "elements": 5120,
+          "bitwise_mismatches": 0,
+          "first_mismatch": null,
+          "max_abs": 0.0,
+          "max_rel": 0.0,
+          "ck_sha256": "5ff3ecaf3dd149b1354a1b06aa1d540bf6405ef384334979fc5802b758e8b55d",
+          "handwritten_sha256": "5ff3ecaf3dd149b1354a1b06aa1d540bf6405ef384334979fc5802b758e8b55d"
+        }
+      },
+      {
+        "k_lane": 12,
+        "differential": {
+          "elements": 5120,
+          "bitwise_mismatches": 0,
+          "first_mismatch": null,
+          "max_abs": 0.0,
+          "max_rel": 0.0,
+          "ck_sha256": "5ff3ecaf3dd149b1354a1b06aa1d540bf6405ef384334979fc5802b758e8b55d",
+          "handwritten_sha256": "5ff3ecaf3dd149b1354a1b06aa1d540bf6405ef384334979fc5802b758e8b55d"
+        }
+      },
+      {
+        "k_lane": 13,
+        "differential": {
+          "elements": 5120,
+          "bitwise_mismatches": 0,
+          "first_mismatch": null,
+          "max_abs": 0.0,
+          "max_rel": 0.0,
+          "ck_sha256": "5ff3ecaf3dd149b1354a1b06aa1d540bf6405ef384334979fc5802b758e8b55d",
+          "handwritten_sha256": "5ff3ecaf3dd149b1354a1b06aa1d540bf6405ef384334979fc5802b758e8b55d"
+        }
+      },
+      {
+        "k_lane": 14,
+        "differential": {
+          "elements": 5120,
+          "bitwise_mismatches": 0,
+          "first_mismatch": null,
+          "max_abs": 0.0,
+          "max_rel": 0.0,
+          "ck_sha256": "5ff3ecaf3dd149b1354a1b06aa1d540bf6405ef384334979fc5802b758e8b55d",
+          "handwritten_sha256": "5ff3ecaf3dd149b1354a1b06aa1d540bf6405ef384334979fc5802b758e8b55d"
+        }
+      },
+      {
+        "k_lane": 15,
+        "differential": {
+          "elements": 5120,
+          "bitwise_mismatches": 0,
+          "first_mismatch": null,
+          "max_abs": 0.0,
+          "max_rel": 0.0,
+          "ck_sha256": "5ff3ecaf3dd149b1354a1b06aa1d540bf6405ef384334979fc5802b758e8b55d",
+          "handwritten_sha256": "5ff3ecaf3dd149b1354a1b06aa1d540bf6405ef384334979fc5802b758e8b55d"
+        }
+      }
+    ],
+    "passed": true
+  },
+  "interpretation": {
+    "ck_scale_contract_from_source": "CK blockwise_gemm_pipeline_xdlops_v1_ab_scale accumulates each ScaleBlockK=128 raw fragment, multiplies that partial by activation_scale * weight_scale in FP32, then adds it to the FP32 C accumulator.",
+    "observation_boundary": "Every CK comparison is taken after CK's real BF16 workspace boundary and BF16-to-F32 conversion. K128 prefixes are independently replayed with all later input K128 blocks quantized as zero, which preserves the active prefix and observes its cumulative result at that boundary.",
+    "fragment_lane_conclusion": "The lane probe is evidence only for the tested 16 source-K lanes and first output tile; a passing result rules out a gross fragment/lane transpose for that tile but does not prove the opaque hardware reduction association.",
+    "k128_conclusion": "A mismatch at prefix 1 implicates the within-K128 WMMA/fragment reduction contract rather than K128-to-K128 accumulation. A first mismatch after prefix 1 implicates a K128 cumulative association or scale-application difference.",
+    "full_model_status": "Candidate timing and default promotion remain prohibited unless the unchanged full-model multi-step gate passes."
+  }
+}
