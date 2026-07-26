@@ -1,6 +1,6 @@
 # AQ4_0 runtime-hardening locked activation v0.1
 
-Status: implemented control-path contract. This document authorizes no active-manifest mutation, authorization consumption, service window, or promotion campaign.
+Status: corrected readiness/audit control-path contract. This document authorizes no active-manifest mutation, authorization consumption, service window, or promotion campaign.
 
 ## Scope
 
@@ -14,18 +14,21 @@ Unlike SQ8, no cross-model campaign authorization is consumed. Fresh AQ4 bundle 
 
 | Purpose | Schema |
 | --- | --- |
-| Plan | `ullm.aq4_runtime_hardening_activation_plan.v1` |
+| Plan | `ullm.aq4_runtime_hardening_activation_plan.v2` |
 | Intent | `ullm.aq4_runtime_hardening_activation_intent.v1` |
 | Outcome | `ullm.aq4_runtime_hardening_activation_outcome.v1` |
 | Recovery | `ullm.aq4_runtime_hardening_activation_recovery.v1` |
 | Manual rollback | `ullm.aq4_runtime_hardening_rollback_outcome.v1` |
 | Failed-attempt audit | `ullm.aq4_runtime_hardening_recovery_attempt.v1` |
-| Live proof | `ullm.aq4_runtime_hardening_live_proof.v1` |
-| Plan preflight | `ullm.aq4_runtime_hardening_activation_preflight.v1` |
+| Live proof | `ullm.aq4_runtime_hardening_live_proof.v3` |
+| Failed live-proof audit | `ullm.aq4_runtime_hardening_live_proof_audit.v1` |
+| Isolated candidate preflight | `ullm.aq4_runtime_hardening_isolated_preflight.v1` |
+| Plan preflight | `ullm.aq4_runtime_hardening_activation_preflight.v2` |
 
 The plan binds control-source commit/tree/tool bytes, promotion source commit/tree, protected runtime seals, saved rollback bytes, legacy hashes, credential/unit/environment seals, operation executable hashes, lock identity, epoch, and every output destination. The detached clean standalone control source seals exactly these tools:
 
 - `tools/aq4_runtime_hardening_activation.py`
+- `tools/aq4_runtime_hardening_operation.py`
 - `tools/prepare-aq4-runtime-hardening-activation.py`
 - `tools/run-aq4-runtime-hardening-activation.py`
 - `tools/rollback-aq4-runtime-hardening-activation.py`
@@ -40,9 +43,15 @@ Under `/etc/ullm/served-models/.active.json.activation.lock`, candidate bytes ar
 
 Credential, source, operations, unit/environment, candidate runtime, and exact active/rollback seals are checked before intent and again immediately before exchange. The immutable successful outcome is the commit boundary; no fallible source/runtime check follows it.
 
-## Operations and recovery
+## Operations, readiness, and recovery
 
-The sealed operations document is `ullm.aq4_runtime_hardening_activation_operations.v1` with `candidate_reconcile`, `candidate_live_proof`, `rollback_reconcile`, and `rollback_live_proof`. A live observation binds plan SHA and epoch to active bytes, AQ4 model and worker path/hash, `ullm-openai.service` active/running state, boot/PID/PPID/starttime/executable identity, and all five gateway/OpenWebUI endpoints.
+The sealed operations document is `ullm.aq4_runtime_hardening_activation_operations.v2` with `candidate_reconcile`, `candidate_live_proof`, `rollback_reconcile`, `rollback_live_proof`, and `candidate_isolated_preflight`. Reconciliation and live observation use the same bounded contract: a 120-second deadline, at most 15 attempts, 0.5/1/2/4-second exponential backoff capped at 8 seconds, and two consecutive coherent observations of the same manifest-bound worker process identity.
+
+A coherent live observation requires the active manifest to remain unchanged through the probe, the actual worker command and effective worker environment to bind that manifest, active/running systemd state, and all five gateway/OpenWebUI endpoints to return coherent success with the exact AQ4 model ID. A deadline or partial success is not ready. Candidate, rollback, and recovery reconciliation all use this contract before proof can pass.
+
+The default preflight also requires an immutable isolated-candidate-worker receipt. It runs only the candidate worker as the gateway user with a whitelisted offline/cache/HIP/lock environment copied from the current manifest-bound worker, requires its ready record, and terminates it. It neither restarts `ullm-openai.service` nor writes the active manifest.
+
+Failed candidate or rollback proof publishes a unique immutable audit with explicit failed stage, timestamps, sanitized return code/stderr/cause, stdout/stderr digests, and each endpoint state. Endpoint results already obtained before a deadline are retained. The audit never stores response bodies or stdout content, bounds stderr, and redacts bearer/API-key/token/JWT/session/secret/password forms.
 
 Before success receipt, failure restores exact saved AQ4 bytes under the same lock and requires rollback reconciliation/live proof. Legacy worker/product/tokenizer/receipt hashes must still validate before a rollback-health claim. SIGKILL/power loss after intent, `failed_restore`, and `rollback_incomplete` require exact plan SHA plus literal `RECOVER AQ4_RUNTIME_HARDENING`. Failed recovery attempts write unique audits only, preserving the successful receipt pathname for retry. Manual rollback additionally requires exact candidate-active bytes and `ROLLBACK AQ4_RUNTIME_HARDENING`.
 
