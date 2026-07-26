@@ -173,7 +173,8 @@ restore() {
     fi
     record_required_preflight after-restore
     record_service after-restore
-    sha256sum "$driver" "$serving" "$active_manifest" > "$out/input-sha256-after.txt" || true
+    sha256sum "$driver" "$serving" "$active_manifest" "$oracle_compare" "$trace_analyzer" \
+        "$summary_tool" "$generation_summary" > "$out/input-sha256-after.txt" || true
     if ! cmp -s "$out/input-sha256-before.txt" "$out/input-sha256-after.txt"; then
         event input-identity-changed-during-window
         status=1
