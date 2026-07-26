@@ -281,7 +281,7 @@ layer-level failure localization である。これは重い FP32 corpus を代�
 | --- | --- | --- | ---: | --- |
 | Qwen3.5-9B **AQ4_0**（既存） | diagnostic trace exporter との接続、HF-uLLM layer 比較、既存 text-only 範囲の確認 | 不要 | 2--6 h | architecture/runtime は既に専用 AQ4_0 path があり、残るのは独立照合である。multimodal/MTP は含まない。 |
 | Qwen3.5-9B **SQ8_0**（新規） | BF16→SQ8_0 artifact contract、Qwen3.5 package/loader、hybrid linear/full attention、Q gate、mRoPE、1+weight norm、head/tokenizer contract、trace | grouped GEMM は不要。ただし SQ8_0 dispatch/path の追加が必要 | 28--48 h | 現在の SQ8_0 は Qwen3 FP8 2-D source と Qwen3-14B 固定形状に限られ、AQ4_0 の演算をそのまま利用できない。 |
-| Gemma4 E2B text-only | source-BF16/F32 diagnostic executor、local/full mixed attention、mixed head width、Q/K/V norm、4 residual norm、PLE、tied head、soft-cap、trace は実装済み。package/loader、継続的 serving、SQ8_0 量子化は残る | MoE primitive は不要。既存 SQ8_0 dispatch は Qwen3-14B 固定のため、そのままは使えない | diagnostic 16--28 h / package・量子化・serving 48--72 h | 35 layers の複数 residual/norm と PLE/KV-sharing semantics は実装確認済み。ただし source matrix を都度 stream する診断 path と resident quantized serving path は別物である。vision/audio は含めない。 |
+| Gemma4 E2B text-only | source-BF16/F32 diagnostic executor に加え、complete-checkpoint resident BF16 weight、device K/V cache、prefill/decode、trace と throughput evidence は実装済み。package/loader、継続的 serving、SQ8_0 量子化は残る | MoE primitive は不要。既存 SQ8_0 dispatch は Qwen3-14B 固定のため、そのままは使えない | diagnostic 16--28 h / package・量子化・serving 48--72 h | 35 layers の複数 residual/norm と PLE/KV-sharing semantics は実装確認済み。streaming diagnostic path と resident BF16 path は分離した。vision/audio は resident payload に含めるが実行対象には含めない。 |
 | Qwen3.5-35B-A3B MoE text-only | Qwen3.5 hybrid base に加え、3-D expert package、FP32 router softmax/top-k/renormalization、gather/scatter、grouped GEMM、weighted reduce、shared expert、trace | **必要** | 72--120 h | 256 experts/top-8 と shared expert があり、現行 executor/package に MoE 表現がない。性能ではなく正しい routing path だけでも新規面積が大きい。 |
 
 ### 推奨する順序
@@ -537,6 +537,54 @@ prefill/decode、KV cache、tokenizer/serving integration、実用速度を含�
 scopeとしては据え置く。今回の実装は後者を完了したという主張ではない。Qwen3.5 MoE
 **72--120 h** も据え置く。MoEの3-D expert payload、top-8 routing、grouped GEMM、shared
 expert は config descriptorを持てても実行できないままである。
+
+#### BO: Gemma4 E2B resident BF16 text execution（2026-07-26）
+
+上の BL 時点の「resident executor が別途必要」という状態を更新した。量子化 artifact を
+挟まず、`model.safetensors` の全 2,011 BF16 tensor / 10,246,357,958 B payload を R9700
+へ一度だけ upload する `Gemma4TextExecutor::load_resident` と
+`ullm-gemma4-resident` を追加した。vision/audio tensor も allocation には含めるが、本段階の
+forward は text decoder のみであり、serving 統合はしない。
+
+実 config からの resident plan は R9700 reported 31.859 GiB に対し、config maximum の
+131,072 token で weight 10,246,357,958 B、shared-aware K/V 1,624,817,664 B、temporary
+1,170,432 B、合計 11,872,346,054 B (11.056984 GiB) だった。local source 12層は
+window 512 の固定 F32 ring、full source 3層だけは最大 context まで確保する。layer 15--34
+には重複 K/V allocation を置かず、HF と同じ local source 13 / full source 14 を参照する。
+source file header も含む conservative total 11,872,610,014 B も fit する。算術的には残り
+VRAM がさらに full-KV 約 1.95M token 分あるが、実 config の max position が 131,072 なので
+support する最大文脈は 131,072 token と記録する。
+
+resident path は existing BF16×F32 matvec と既存 paged F32 K/V write/decode-attention を
+使い、host fallback を environment gate で拒否する。新 kernel は追加していない。そのため
+BH が編集中の `runtime/src/ullm_runtime_parts/part_01.inc` と
+`runtime/src/ullm_runtime_hiprtc_sources.inc`、BK が編集中の
+`crates/ullm-engine/src/sq8_serving_runtime.rs`、既存 `AQ4_0` / `SQ8_0` production path に
+触れていない。prefill API は M=N、decode API は M=1 だが、既存 primitive は matvec のため
+prefill projection は因果 token 順に M=1 launch を N 回発行する。これは semantic/KV
+transition の fallback ではなく、batch GEMM 未実装という明示した性能上の残項である。
+
+resident validation は BL の4-step greedy trace を正確に再現した。`The capital of France is`
+は `9079,236761,108,818` (`Paris.\n\nThe`)、`Once upon a time,` は
+`528,496,1902,1298` (`in a world where`) であり、cached M=1 decode と毎 step token 0 からの
+full re-prefill が双方で一致した。window 512 を越える 513 token boundary では両 route が
+top-1 `184` / logit `14.404961585998535` となり、12 local cache は各々
+`capacity/cache_len/absolute_len=512/512/513` を示した。20 shared layer の snapshot は
+13/14 mapping を全て示し、対照として shared layer の physical K/V を誤って再投影する
+diagnostic は別 token 列 `506,236789,500,236772` となった。
+
+R9700 only、service 非稼働、cooldown 後の wall-clock measurement は six-token prefill
+18.296336 tok/s、four-token decode 15.613216 tok/s だった。load/warmup/profiler range は
+除外し、logical BF16 weight + F32 K/V read/write 下限も artifact に保存した。llama.cpp
+ROCm commit `68a5592` は BF16 GGUF を `gemma4 E2B BF16` と認識し、F32 K/V、flash attention
+off、同じ 6/4 token/3 repeat 条件で prefill 218.955938 tok/s、decode 69.959983 tok/s を
+示した。GGUF は text-only export なので complete source checkpoint との VRAM footprint
+比較には用いない。温度、clock、aggregate throttle state と live VRAM を各 measurement
+artifact に保存した。aggregate throttle state の原因別 field は `N/A` のため原因は未確認とする。
+
+証跡は `benchmarks/results/2026-07-26/gemma4-e2b-resident-v0.1/` にある。ここでは軽量昇格
+policy の文章品質原則を参照したが、serving は task scope 外なので promotion / manifest / service
+操作は行っていない。FP32 reference corpus、bitwise gate、campaign も使っていない。
 
 ## BI: Qwen3.5-35B-A3B MoE ランタイム基盤（2026-07-26）
 
