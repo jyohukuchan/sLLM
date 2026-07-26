@@ -417,6 +417,14 @@ norm site に渡す。public dense entrypoint の default は変更していな�
 `AQ4_0` の既存数値経路を変更しない。この修正は推測ではなく、上記 HF source と
 source `config.json`（SHA-256 `5e4d7f74…9bfbc7944`）の双方に基づく。
 
+full-attention の native fused Q/K-norm/RoPE/KV writer は operation plan の geometry
+にも epsilon bit を binding する。そこで MoE loader は
+`load_moe_shared_with_registry_with_rms_epsilon` で descriptor 値をその binding にも
+渡す。これにより F32 KV fallback でも `1e-6` の実行値と plan が一致する。F16 typed
+KV branch は native typed writer を直接選ぶが、loader の admission contract を古い
+`1e-5` と偽らない。この MoE 専用 binding 変更でも dense 9B loader は従来の `1e-5`
+binding のままである。
+
 ### Qwen3.5-9B `AQ4_0` からの再利用と互換性境界
 
 既存の `qwen35_aq4_layer_runtime.rs` を attention の唯一の実装として使った。
