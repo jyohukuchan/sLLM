@@ -51,16 +51,6 @@ if [[ -s "$output_dir/gpu-lock-before.txt" ]]; then
     exit 75
 fi
 
-# Compilation targets gfx1201 but does not execute a GPU workload.  Do this
-# before taking the shared GPU lock so the exclusive window contains only
-# instrumentation and the two paired model runs.
-probe_dir="$output_dir/module-launch-probe"
-mkdir -p "$probe_dir"
-hipcc --genco --offload-arch=gfx1201 "$module_probe_kernel" -o "$probe_dir/noop-gfx1201.co"
-hipcc -O3 -std=c++20 "$module_probe_source" -o "$probe_dir/hip-module-launch-overhead"
-sha256sum "$module_probe_source" "$module_probe_kernel" "$probe_dir/noop-gfx1201.co" \
-    "$probe_dir/hip-module-launch-overhead" >"$output_dir/module-launch-probe-sha256.txt"
-
 exec 9>/run/ullm/r9700.lock
 if ! flock -n 9; then
     echo "R9700 lock became held before capture; no GPU work was started" >&2
@@ -83,6 +73,17 @@ if ! rg -qx 'ActiveState=inactive' "$output_dir/ullm-openai-service-held.txt"; t
     echo "ullm-openai.service became active before GPU work; refusing capture" >&2
     exit 75
 fi
+# Compile after the non-blocking lock succeeds.  It is CPU-only, but keeping
+# it in the same exclusive window prevents another R9700 user from winning the
+# several-second compile-to-capture race.  No HIP runtime is initialized until
+# after this point.
+probe_dir="$output_dir/module-launch-probe"
+mkdir -p "$probe_dir"
+hipcc --genco --offload-arch=gfx1201 "$module_probe_kernel" -o "$probe_dir/noop-gfx1201.co"
+hipcc -O3 -std=c++20 "$module_probe_source" -o "$probe_dir/hip-module-launch-overhead"
+sha256sum "$module_probe_source" "$module_probe_kernel" "$probe_dir/noop-gfx1201.co" \
+    "$probe_dir/hip-module-launch-overhead" >"$output_dir/module-launch-probe-sha256.txt"
+
 sha256sum "$active_manifest" "$worker_binary" "$profile_binary" >"$output_dir/input-sha256-before.txt"
 jq '{format, worker: {binary: .worker.binary, binary_sha256: .worker.binary_sha256, required_environment: .worker.required_environment}}' \
     "$active_manifest" >"$output_dir/active-manifest-identity-before.json"
