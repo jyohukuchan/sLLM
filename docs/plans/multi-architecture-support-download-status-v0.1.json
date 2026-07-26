@@ -1,0 +1,58 @@
+{
+  "schema_version": "ullm.multi_architecture_download_status.v1",
+  "checked_on": "2026-07-26",
+  "storage": {
+    "root": "/home/homelab1/datapool",
+    "available_bytes": 9026977660928,
+    "total_bytes": 15085404553216
+  },
+  "targets": [
+    {
+      "priority": 1,
+      "hub_id": "google/gemma-4-E2B",
+      "revision": "d29ff6b45f081a49ee2733a859c9c9c2d95d1a6f",
+      "gated": false,
+      "local_path": "/home/homelab1/datapool/ai_models/safetensors/gemma-4-E2B",
+      "config_sha256": "e5faef0dd1a8f2437f6010721146b85433eaa90e679ef011e803c7ffefae73b8",
+      "safetensor_shards": 1,
+      "safetensor_bytes": 10246621918,
+      "local_config_matches_remote": true,
+      "status": "complete_already_present",
+      "new_download_started": false
+    },
+    {
+      "priority": 2,
+      "hub_id": "Qwen/Qwen3.5-9B",
+      "revision": "c202236235762e1c871ad0ccb60c8ee5ba337b9a",
+      "gated": false,
+      "local_path": "/home/homelab1/datapool/ai_models/safetensors/Qwen/Qwen3.5-9B",
+      "config_sha256": "d0883072e01861ed0b2d47be3c16c36a8e81c224c7ffaa310c6558fb3f932b05",
+      "safetensor_shards": 4,
+      "safetensor_bytes": 19306310880,
+      "local_config_matches_remote": true,
+      "status": "complete_already_present",
+      "new_download_started": false
+    },
+    {
+      "priority": 3,
+      "hub_id": "Qwen/Qwen3.5-35B-A3B",
+      "revision": "59d61f3ce65a6d9863b86d2e96597125219dc754",
+      "gated": false,
+      "local_path": "/home/homelab1/datapool/ai_models/safetensors/Qwen3.5-35B-A3B-BF16",
+      "config_sha256": "5e4d7f74fec2f360eb9cfbfcd6ec0c4c76e684d3a11caaed259d9fd9bfbc7944",
+      "safetensor_shards": 14,
+      "safetensor_bytes": 71903878016,
+      "local_config_matches_remote": true,
+      "status": "complete_already_present",
+      "new_download_started": false
+    }
+  ],
+  "related_existing_model": {
+    "hub_id": "Qwen/Qwen3-Coder-Next-FP8",
+    "local_path": "/home/homelab1/datapool/ai_models/safetensors/Qwen3-Coder-Next-FP8",
+    "safetensor_shards": 40,
+    "safetensor_bytes": 80381394600,
+    "status": "complete_already_present"
+  },
+  "decision": "All three requested target checkpoints were complete locally and their config.json files matched the remote revisions, so no redundant transfer was started."
+}
