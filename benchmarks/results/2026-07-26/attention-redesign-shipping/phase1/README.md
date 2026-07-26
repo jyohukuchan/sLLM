@@ -103,30 +103,28 @@ rather than a throughput measurement.
 
 ## Applicability verdict
 
-**BH's `SQ8_0` grouped tile-20 implementation cannot be applied directly to
-`AQ4_0`; `AQ4_0` must not be promoted for it.**
+**BH's literal `SQ8_0` 5:1×128, tile-20 body cannot be directly reused by
+`AQ4_0`; a new 4:1×256 specialization can.**
 
-The trace shows that `AQ4_0` does not use
-`ullm_paged_decode_attn_f32_kernel` in real C=1339 decode; it uses the generic
-split partial/merge path.  The active `c4c9a9b3` source predates the BH grouped
-implementation and only accepts the AQ4 experimental split tiles 128 or 256.
-In the redesign source, the grouped body is explicitly guarded by
-`q_heads / kv_heads == 5`, `head_dim == 128`, and `value_dim == 128`.
-`AQ4_0` is 4:1 with dimensions 256, so enabling the selector would take the
-generic fallback rather than the grouped body.  The 24 linear-attention layers
-are also outside this full-attention GQA/KV-split optimization.
+The trace proves that `AQ4_0` does not use
+`ullm_paged_decode_attn_f32_kernel` in real C=1339 decode; it uses the split
+partial/merge route.  The old BH body has hard 5:1 / 128×128 geometry guards,
+whereas the served Qwen3.5-9B full-attention layers are 4:1 / 256×256 and use
+the established 128-token split configuration.  The 24 linear-attention
+layers remain outside this optimization.
 
-Extending the kernel to the 4:1/256 shape would be a new implementation, not
-an application of BH's redesign.  It was intentionally not started here:
-`runtime/src/ullm_runtime_parts/part_01.inc` and
-`runtime/src/ullm_runtime_hiprtc_sources.inc` are concurrently owned by the
-prefill-attention workstream, and no full-model AQ4 validation exists for such
-a new kernel.
+An isolated 4:1×256 GQA-cooperative prototype has now been built and traced
+without editing the concurrently owned prefill source files.  It reduces the
+partial grid from 45,056 to 11,264 at C=1339, confirms the grouped body through
+ROCprof, and gives a stable full-model result of 73.842 → 74.239 tok/s
+(1.005378x).  This replaces the earlier 1.0417747x conditional Amdahl ceiling
+as the useful estimate: the actual benefit is modest because split attention
+is only about 9.09% of decode kernel time and the 4:1×256 body uses more
+LDS/VGPR resources.  The first, cold-contaminated repeat measured 1.04155x and
+is retained as evidence but explicitly excluded from the estimate.
 
-For scale only, if the `SQ8_0` full-model 1.790050x result could somehow apply
-to every one of the current measured 9.08552% split-core share, Amdahl's-law
-ceiling would be `1 / ((1 - p) + p / 1.790050) = 1.0417747x` (+4.18%).  This is
-a conditional upper bound, not an `AQ4_0` speed prediction.
-`current-aq4-amdahl-bound-20260726T160603Z.json` records the current inputs
-and unrounded result; `conditional-aq4-amdahl-bound.json` retains the earlier
-historical calculation.
+The detailed geometry, provenance, trace accounting, collision decision and
+promotion prerequisites are in `../aq4_0-grouped-prototype-analysis.md`.
+At this point the result is a prototype, not a production promotion: it still
+requires integration against the prefill owner version, typed candidate
+manifest validation, and a same-model ten-prompt text-quality comparison.
