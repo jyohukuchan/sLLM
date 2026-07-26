@@ -123,7 +123,7 @@ tokenizer は Qwen2Tokenizer で chat template を持つ。
 | normalization | RMSNorm epsilon 1e-6、HF 実装は weight を直接 scale（+1 ではない）。Q/K norm、V RMS norm、input/post-attn/pre-FF/post-FF/PLE post norm | Qwen3 の二つの residual norm より多い。正規化の位置を落とすと layer trace で即座に不一致になる。 |
 | MLP | intermediate 6144、gelu_pytorch_tanh、use_double_wide_mlp=true | KV-shared layer は checkpoint 上 12288 wide MLP で、通常 layer の 6144 と異なる。 |
 | PLE / residual | per-layer input size 256、embedding [262144, 8960]、projection [8960, 1536]、layer scalar | 各 decoder layer に PLE residual があり、embedding scale sqrt(1536) も必要。Qwen3 loader には対応する state がない。 |
-| KV sharing | config num_kv_shared_layers=20 | Transformers 5.12.1 source は layer 15 以降を shared と扱う一方、checkpoint は layer 15/19/34 の physical K/V tensor も含む。この release の「どの K/V を実際に使うか」は HF trace で確認してから実装する必要があり、physical tensor の存在だけから推測してはならない。 |
+| KV sharing | config num_kv_shared_layers=20 | Transformers 5.12.1 source は layer 15 以降を shared と扱う。各 attention kind の最後の非共有層（この E2B では sliding=13、full=14）が full-length K/V を保持し、layer 15 以降はそれを再利用する。checkpoint に残る shared 層の physical K/V tensor は HF module がロードしない。 |
 | head / embedding | tied embedding true、final logit soft-cap 30 | lm head を別 weight として要求する Qwen3 path と異なる。最後に 30 * tanh(logits / 30) が必要。 |
 | tokenizer/template | GemmaTokenizer。tokenizer config に chat template は無い。現環境の AutoProcessor は Gemma4Processor の optional dependency 不足で読めなかった。 | text tokenizer は確認済み、multimodal processor と chat prompt は未確認のため初回 support の範囲に含めない。 |
 
@@ -281,7 +281,7 @@ layer-level failure localization である。これは重い FP32 corpus を代�
 | --- | --- | --- | ---: | --- |
 | Qwen3.5-9B **AQ4_0**（既存） | diagnostic trace exporter との接続、HF-uLLM layer 比較、既存 text-only 範囲の確認 | 不要 | 2--6 h | architecture/runtime は既に専用 AQ4_0 path があり、残るのは独立照合である。multimodal/MTP は含まない。 |
 | Qwen3.5-9B **SQ8_0**（新規） | BF16→SQ8_0 artifact contract、Qwen3.5 package/loader、hybrid linear/full attention、Q gate、mRoPE、1+weight norm、head/tokenizer contract、trace | grouped GEMM は不要。ただし SQ8_0 dispatch/path の追加が必要 | 28--48 h | 現在の SQ8_0 は Qwen3 FP8 2-D source と Qwen3-14B 固定形状に限られ、AQ4_0 の演算をそのまま利用できない。 |
-| Gemma4 E2B text-only | text package/loader、local/full mixed attention、mixed head width、Q/K/V norm、4 residual norm、PLE、tied head、soft-cap、tokenizer contract、trace | MoE primitive は不要。既存 dispatch で十分かは未確認で、新しい composition/dispatch は必要 | 48--72 h | 35 layers の複数 residual/norm と PLE/KV-sharing semantics が Qwen3 block と大きく異なる。vision/audio は含めない。 |
+| Gemma4 E2B text-only | source-BF16/F32 diagnostic executor、local/full mixed attention、mixed head width、Q/K/V norm、4 residual norm、PLE、tied head、soft-cap、trace は実装済み。package/loader、継続的 serving、SQ8_0 量子化は残る | MoE primitive は不要。既存 SQ8_0 dispatch は Qwen3-14B 固定のため、そのままは使えない | diagnostic 16--28 h / package・量子化・serving 48--72 h | 35 layers の複数 residual/norm と PLE/KV-sharing semantics は実装確認済み。ただし source matrix を都度 stream する診断 path と resident quantized serving path は別物である。vision/audio は含めない。 |
 | Qwen3.5-35B-A3B MoE text-only | Qwen3.5 hybrid base に加え、3-D expert package、FP32 router softmax/top-k/renormalization、gather/scatter、grouped GEMM、weighted reduce、shared expert、trace | **必要** | 72--120 h | 256 experts/top-8 と shared expert があり、現行 executor/package に MoE 表現がない。性能ではなく正しい routing path だけでも新規面積が大きい。 |
 
 ### 推奨する順序
@@ -364,8 +364,10 @@ RoPE は `rope_parameters` の layer kind ごとの object から読み、root �
    config の宣言値は contract として露出・検証する。実行セマンティクスを黙って変更しない。
 4. 既存 AQ4_0 `Qwen35Aq4ModelRuntime` は Qwen3.5 dense contract と package layer pattern
    を照合する。これは新しい SQ8_0 executor を意味しない。
-5. Gemma4 text と Qwen3.5 MoE は config/layer descriptor まで作るが、構成後にそれぞれ
-   `Gemma4TextExecutor`、`Qwen35MoeExecutor` 未実装として明示的に停止する。MoE は
+5. Gemma4 text は source BF16 weight / F32 activation の diagnostic-only
+   `Gemma4TextExecutor` を持つ。これは package、SQ8_0/AQ4_0、multimodal、serving の
+   fallback ではなく、HF layer trace と生成の architecture bring-up 専用である。
+   Qwen3.5 MoE は引き続き `Qwen35MoeExecutor` 未実装として明示停止する。MoE は
    grouped GEMM/routing/gather-scatter が無いため、dense executor にフォールバックしない。
 
 この境界では kernel、SQ8_0 format、package conversion、multimodal processor を変更しない。
@@ -389,10 +391,12 @@ field の欠落、未対応の Qwen3 `rope_scaling` はすべて fail-closed に
 - Qwen3.5-9B `AQ4_0` の `Qwen35Aq4ModelRuntime` は Qwen3.5 dense config と package の
   embedding shape / 32 layer の linear/full pattern を load 前に照合する。演算・量子化・
   sampling path は変更していない。
-- Gemma4 E2B と Qwen3.5-35B-A3B MoE は実 config を完全に descriptor へ組み立てるが、
-  それぞれ `Gemma4TextExecutor` / `Qwen35MoeExecutor` が未実装として明示的に停止する。
-  Gemma は local/full mixed attention、追加 norm、PLE、tied head、soft-cap が、MoE は
-  routing / gather-scatter / grouped GEMM / weighted reduction / shared expert が停止理由である。
+- Gemma4 E2B は実 config を完全に descriptor へ組み立て、source BF16 weight / F32
+  activation の diagnostic-only `Gemma4TextExecutor` を許可する。これは local/full mixed
+  attention、追加 norm、PLE、tied head、soft-cap をHF実装どおり合成する独立 path であり、
+  既存の量子化 serving path には接続しない。Qwen3.5-35B-A3B MoE は引き続き
+  `Qwen35MoeExecutor` 未実装として停止し、routing / gather-scatter / grouped GEMM /
+  weighted reduction / shared expert が停止理由である。
 
 実 package/config を使った inspect の結果は次の通りだった。
 
@@ -400,12 +404,13 @@ field の欠落、未対応の Qwen3 `rope_scaling` はすべて fail-closed に
 | --- | --- | --- |
 | Qwen3-14B `SQ8_0` | `Qwen3ForCausalLM`, config SHA `c5d7d0e8…233793` | existing Qwen3 full-attention executor を許可。5120 / 40 / 40Q / 8KV / 128 / 151936 を再現。 |
 | Qwen3.5-9B `AQ4_0` | `Qwen3_5ForConditionalGeneration`, config SHA `d0883072…932b05` | existing AQ4_0 text executor を許可。32 層 `[linear,linear,linear,full] * 8`、Q gate、mRoPE、`1 + weight` norm を再現。 |
-| Gemma4 E2B | `Gemma4ForConditionalGeneration`, config SHA `e5faef0d…ae73b8` | descriptor を組立て後、`Gemma4TextExecutor` 未実装で exit 2。 |
+| Gemma4 E2B | `Gemma4ForConditionalGeneration`, config SHA `e5faef0d…ae73b8` | diagnostic-only `Gemma4TextExecutor` を許可。35層、`[sliding×4, full]×7`、PLE/KV共有/tied head/soft-cap の source-BF16/F32 path を選択。 |
 | Qwen3.5-35B-A3B MoE | `Qwen3_5MoeForConditionalGeneration`, config SHA `5e4d7f74…bc7944` | descriptor を組立て後、`Qwen35MoeExecutor` 未実装で exit 2。 |
 
-unit / loader test は `model_config` 7件、`qwen3_loader` 9件、SQ8 trace writer 2件が
-pass した。前者には unknown architecture rejection、source model directory 欠落 rejection、
-Qwen3 rope-scaling rejection、Gemma/MoE の explicit unimplemented status を含む。
+unit / loader test は、unknown architecture rejection、source model directory 欠落 rejection、
+Qwen3 rope-scaling rejection、Gemma diagnostic contract、MoE の explicit unimplemented
+status を含めて実行した。Gemma executor 側では BF16 展開、direct-weight RMSNorm、proportional
+RoPE の非回転 channel、sliding window を個別に検証した。
 
 #### 既存モデルの実行回帰
 
@@ -445,12 +450,93 @@ checkpoint を比較しており、unquantized uLLM Qwen3 diagnostic path は未
 `benchmarks/results/2026-07-26/config-driven-loader-v0.1/` にある。ここには HF trace、SQ8
 candidate trace、comparison report を残した（FP32 corpus / numerical gate / campaign は使わない）。
 
+#### BL: Gemma4 E2B text-only non-quantized executor（2026-07-26）
+
+`google/gemma-4-E2B` の local source directory
+`/home/homelab1/datapool/ai_models/safetensors/gemma-4-E2B` を直接読んだ。`config.json` は
+SHA-256 `e5faef0dd1a8f2437f6010721146b85433eaa90e679ef011e803c7ffefae73b8`、単一 shard
+`model.safetensors` は 10,246,621,918 bytes / SHA-256
+`76dc84a5a805a2c8b91e9ccc00b8dbf8f4a99bf0d56ab25832f6e6addd4f7f57` だった。
+`ullm-model-config-inspect --require-executor` は `Gemma4ForConditionalGeneration` を
+diagnostic-only の `Gemma4TextExecutor` として受理し、35層、hidden 1536、8Q/1KV、
+local/global head 256/512、`[sliding×4, full]×7`、window 512、KV共有20、PLE 256、tied
+embedding、final soft-cap 30 を実configどおり出力した。
+
+HF の唯一の基準は local environment の Transformers 5.12.1、
+`transformers/models/gemma4/modeling_gemma4.py` とした。以下は名前からの推測ではなく、
+実際に読んだコード位置とその適用内容である。
+
+| 項目 | HF code location | 実装した意味論 |
+| --- | --- | --- |
+| local/full attention | `Gemma4TextAttention.__init__` L1180--1204、`forward` L1243--1289 | `layer_types` から sliding を判定し、sliding は window 512 / head 256、full は head 512。attention scale は L1194 の **1.0**。local/full の各最後の非共有層だけが L1201--1204 の規則で shared K/V を保存し、L1248--1270 の規則で共有層が再利用する。E2B では source layers 13/14 がそれぞれ local/full K/V を供給する。 |
+| local/full RoPE | `Gemma4TextRotaryEmbedding` L1087--1174、`modeling_rope_utils.py::_compute_proportional_rope_parameters` L187--254 | sliding は default theta 10,000 の full-width RoPE。full は `global_head_dim` を明示して proportional theta 1,000,000 / partial 0.25 とし、512-wide head の前半64 pairだけを回す。HF の float32 frequency construction と `rotate_half` と同じ half-split 回転を実装した。 |
+| attention soft-cap | `eager_attention_forward` L821--852、`Gemma4TextAttention.forward` L1272--1285 | eager attention 自体は optional `softcap` を持つが、Gemma4 text attention は `scaling` と `sliding_window` だけを渡し softcap を渡さない。従って E2B text attention logits には soft-cap を掛けない。 |
+| RMSNorm と residual 配置 | `Gemma4RMSNorm` L193--211、`Gemma4TextDecoderLayer.forward` L1409--1455 | norm は F32 variance / eps `1e-6` の後に weight を**直接**掛ける（`1 + weight` ではない）。input norm → attention → post-attention norm → residual、pre-FF norm → MLP → post-FF norm → residual、PLE residual → `layer_scalar` の順である。Q/K は weight付き head RMSNorm、V は `with_scale=False` の RMSNorm。 |
+| MLP | `Gemma4TextMLP` L1068--1084、`activations.py::GELUTanh` L110--114 | `gelu_pytorch_tanh(gate) * up` を down projection する。`num_hidden_layers - num_kv_shared_layers = 15` 以降は L1071--1079 の double-wide 条件で 12,288、前段は6,144。GELU literal / 演算順もHFに合わせた。 |
+| PLE | text model init L1612--1630、`get_per_layer_inputs` L1737--1779、`project_per_layer_inputs` L1781--1815、layer apply L1445--1452 | token PLE `[vocab, layers×256]` を sqrt(256) でscaleし、main embeddingからの projection を 1/sqrt(1536) でscale、per-layer direct RMSNorm後に `(projection + token_identity) / sqrt(2)`。各layerで gate → GELU → PLE multiply → projection → norm → residual を適用する。 |
+| embedding/head/final cap | `Gemma4TextScaledWordEmbedding` L1458--1470、text init L1600--1603、conditional head L2445--2454 / L2528--2535 | input embedding は sqrt(1536) でscaleする。conditional wrapper の `lm_head.weight` は `model.language_model.embed_tokens.weight` と tied。final logits のみ `30 * tanh(logits / 30)` を掛ける。 |
+
+checkpoint 形状も上の分岐を検証した。layer 0 local Q/K/V/O は
+`[2048,1536] / [256,1536] / [256,1536] / [1536,2048]`、layer 4 full は
+`[4096,1536] / [512,1536] / [512,1536] / [1536,4096]`、layer 15以降の MLP
+gate/up は `[12288,1536]`、PLE embedding/projection は `[262144,8960]` /
+`[8960,1536]` である。HF text model が L1632--1638 で shared-layer K/V projection
+weight を unexpected keys として無視することも確認し、executor は physical tensor の存在を
+実行根拠にしていない。
+
+実装は `crates/ullm-engine/src/gemma4_text_executor.rs` と
+`ullm-gemma4-text-trace` である。safetensors source BF16を直接読み、既存の
+`ullm_runtime_matvec_bf16_f32`（`runtime/src/ullm_runtime_api_primitives.inc` L122--214）へ
+streamし、activation/attention/softmax/norm/PLE/logitsはF32で保持する。CPU staging fallbackは
+`ULLM_REQUIRE_HIP_BF16_MATVEC_KERNEL=1` を要求して拒否し、runtime identity は HIP
+`AMD Radeon Graphics` / `gfx1201` / compute 12.0 / 30--34 GiB のR9700だけを受理する。
+V620 (`gfx1030`) は明示的に選択しない。新カーネルは不要だったため、BHが編集中の
+`runtime/src/ullm_runtime_parts/part_01.inc` と
+`runtime/src/ullm_runtime_hiprtc_sources.inc` は変更していない。BKの
+`sq8_serving_runtime.rs` と既存 `AQ4_0` / `SQ8_0` production codeにも変更はない。
+
+`model_config.rs` は executor が source semantics を fail-closed に確認するため、
+`max_position_embeddings`、`use_bidirectional_attention`、
+`num_global_key_value_heads` と `Gemma4TextNonquantized` status を追加した。これはBFの
+config descriptorを変更する必要があった唯一の理由であり、non-null bidirectional mode、MoE、
+attention bias/dropout、alternate K=V attention、異なる norm/RoPE/activation は受理しない。
+
+非量子化の層比較は CPU F32 HF reference（Torch 2.12.0+cpu、threads=8）対 R9700の
+BF16 source/F32 activation candidate で行った。これは promotion / bit-exact gate ではなく、
+architecture解釈の局在化専用である。結果 artifact は
+`benchmarks/results/2026-07-26/gemma4-e2b-nonquantized-v0.1/` にある。
+
+| 入力 / scope | 生成 token | 比較した tensor | 観測された最大差 | 局在化結果 |
+| --- | --- | ---: | --- | --- |
+| token `2` / 1 step | `184` | 38 | final norm abs `3.9100647e-5`、relative L2 `1.4548e-6` | layer 0--34すべてF32丸め範囲で連続し、構造的な最初の乖離なし。 |
+| token `2` / 2 decode steps | `184, 3910` | 76 | step1 final norm abs `3.2901764e-5`、relative L2 `1.2634e-6` | shared local/full K/Vを含むdecodeも同じ。 |
+| `The capital of France is` / 4 steps | `9079, 236761, 108, 818` | 152 | abs max `1.0681152e-4`、最大 relative L2 `2.0131e-6` | 同じ各step/layerを通過。両者のdecodeは `The capital of France is Paris.\n\nThe`。 |
+| `Once upon a time,` / 4 steps | `528, 496, 1902, 1298` | 152 | abs max `1.1825562e-4`、最大 relative L2 `2.6786e-6` | 同じ各step/layerを通過。両者のdecodeは `Once upon a time, in a world where`。 |
+
+comparison JSONの `pass` は tool の既定表示であり、ここでは採否閾値として使用していない。
+すべての layer output、final norm、soft-capped logits の実測値を確認し、最初の構造的乖離層が
+無いことを示す診断に限定した。`The capital ...` を8 tokenまで伸ばすとHF/uLLMともに入力を
+反復したが、これは base checkpoint のgreedy continuationそのもので、uLLM固有の壊れ方では
+ない。文章品質の確認には上記の一致した物語導入も併用した。
+
+Phase 4は、Phase 3を通過した後に read-only で既存SQ8_0の境界を確認した。
+`sq8_layer_runtime.rs` L115--175 / L349--385 と `sq8_stack_runtime.rs` L267--275 は
+`Qwen3Sq8LayerConfig::qwen3_14b`、Qwen3-14Bのfixed hidden/KV/head/intermediate、
+fixed norm/RoPE、固定layer arrayを要求する。Gemmaのlocal/full mixed width、scale=1.0、
+PLE、shared K/V、tied source head、final capを表せないため、既存SQ8_0 production codeを
+変更せず流用することはできない。したがってこの変更では量子化artifactや serving を作らず、
+Phase 4は「専用 artifact/descriptor + resident executor が別途必要」と記録した段階に留めた。
+非量子化の原因切り分けを量子化誤差で汚さないという順序は守られている。
+
 ### 工数見積りへの影響
 
-Gemma4 E2B **48--72 h**、Qwen3.5 MoE **72--120 h** は据え置く。今回取り除けたのは
-architecture/config dispatch の共通前提だけであり、Gemma の layer composition と MoE の新規
-kernel/routing primitive の実装面積は変わらない。特に MoE の 3-D expert payload、top-8 routing、
-grouped GEMM、shared expert は config descriptor を持てても実行できないままである。
+Gemma4 E2Bの見積りは scopeを分けて更新する。既存BF16×F32 matvecを使う
+diagnostic-only source executor / trace / short greedy generationは **16--28 h** が妥当だった。
+一方、BCの **48--72 h** は source-to-quantized package、resident weight管理、mixed-width
+prefill/decode、KV cache、tokenizer/serving integration、実用速度を含むtext-only production
+scopeとしては据え置く。今回の実装は後者を完了したという主張ではない。Qwen3.5 MoE
+**72--120 h** も据え置く。MoEの3-D expert payload、top-8 routing、grouped GEMM、shared
+expert は config descriptorを持てても実行できないままである。
 
 ## BI: Qwen3.5-35B-A3B MoE ランタイム基盤（2026-07-26）
 
