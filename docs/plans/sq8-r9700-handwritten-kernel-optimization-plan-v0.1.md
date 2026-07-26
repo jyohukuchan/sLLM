@@ -690,3 +690,105 @@ campaign, authorization, release, /opt/ullm content, or remote state changed.
 
 Machine-readable evidence and the read-only CK analysis are retained in
 benchmarks/results/2026-07-26/sq8_0-projection-contract/.
+
+## llama.cpp decode split-KV comparative evidence — 2026-07-26
+
+### Direct answer and measured geometry
+
+The external llama.cpp Q8_0 F16-KV baseline does use flash-decoding-style KV
+parallelism for this exact single-token Qwen3-14B workload. This was not
+inferred from a source name: an isolated R9700-only rocprofv3 capture of
+`llama-bench -d 1028 -n 16 -ctk f16 -ctv f16 -fa on` recorded, for every one
+of the 16 generated tokens, 40 vector-FATTN main dispatches and 40 distinct
+combine dispatches. The raw capture, selection script, and aggregate CSV/JSON
+are retained in
+`benchmarks/results/2026-07-26/llamacpp-attention-analysis/`.
+
+| per layer attention dispatch | raw global grid / workgroup | workgroups | wave32s | 64 CU × 32-wave supply proxy |
+|---|---|---:|---:|---:|
+| llama.cpp vector FATTN main | `(32, 40, 40)` / `(32, 4, 1)` | 400 | 1,600 | 78.125% |
+| llama.cpp FATTN combine | `(128, 40, 1)` / `(128, 1, 1)` | 40 | 160 | 7.8125% |
+| uLLM phase1 direct paged attention | `(10240, 1, 1)` / `(256, 1, 1)` | 40 | 320 | 15.625% |
+
+The profiler records global work items, so the first llama.cpp row is
+`1 × (40 / 4) × 40 = 400` workgroups, not 32×40×40 workgroups. Its P value is
+therefore `Grid_Y / Workgroup_Y = 10`. With a 1280-token internally padded KV
+length and a 128-token vector tile, each partial covers one contiguous tile
+in this capture. Across the 40 layers, llama.cpp emits 17,600 attention
+workgroups per decoded token (16,000 main plus 1,600 combine), versus uLLM
+direct's 1,600. The relevant main-dispatch supply grows tenfold; the total
+attention workgroup count grows elevenfold because llama.cpp also pays the
+merge dispatch.
+
+The 78.125% and 15.625% figures are deliberately only queued-wave supply
+proxies. They are not achieved occupancy, concurrent residency, or physical
+HBM bandwidth. Those runtime quantities remain **unconfirmed** for this
+comparison.
+
+### Structure and format boundaries
+
+The selected llama.cpp body is `flash_attn_ext_vec<128,1,...>`, not its WMMA
+body, despite the gfx1201 build having ROCWMMA FATTN enabled. It maps Q head
+to KV head with `head / gqa_ratio`; the Qwen shape is 40 Q heads / 8 KV heads
+(GQA ratio five). `blockIdx.y` chooses the KV partial and advances at
+`gridDim.y * 128` tokens. Each partial produces an online-softmax max,
+denominator, and unnormalised weighted-V state; the combine body takes the
+global max, reweights every partial by `exp(partial_max - global_max)`, sums,
+and divides.
+
+This is the same category of reassociation as uLLM's explicit source-tile
+partial/merge API. llama.cpp's cache is a continuous per-layer K/V tensor,
+whereas uLLM resolves logical source positions through its paged
+`block_table`. This layout difference may affect address overhead and cache
+behavior, but it does not by itself create the observed 40-to-400 main
+workgroup expansion. The expansion is P=10 KV split.
+
+The external profile used F16 K/V. llama.cpp casts F32 K/V to F16 immediately
+before FATTN as well, so its published F32-KV row is not a pure F32 attention
+body. uLLM phase1 used F32 paged K/V and SQ8_0 weights. Thus, the measured
+0.763730 ms/token llama.cpp attention sum and the uLLM 30.773224 ms/token
+attention sum are strong mechanism evidence, but they are not a format-free
+throughput substitution. In the respective selected traces attention accounts
+for 2.7628% and 51.05% of summed kernel duration.
+
+### Numerical contract consequence
+
+llama.cpp's source does not preserve direct online-softmax association when
+`parallel_blocks > 1`; the captured default is P=10. It exposes no public
+knob to vary P, and llama-bench has no output/tensor comparator, so the actual
+end-to-end numerical difference when P is changed is **unconfirmed**. It is
+valid to conclude that llama.cpp operates normally with the split arithmetic;
+it is not valid to claim that a particular output difference or tolerance has
+been measured.
+
+For SQ8_0, the corresponding uLLM multi-tile route already failed the frozen
+bitwise full-model gate: a partial online-softmax merge changes finite-precision
+association, and the sequential activation quantizer amplifies the difference
+in feedback decode. The existing containment deliberately uses direct fallback
+for multi-tile requests. Consequently, copying llama.cpp's P>1 body or its
+merge policy cannot satisfy the current bitwise contract.
+
+The current uLLM source remains useful for structural explanation but is not
+whole-file-identical to the phase1 runtime snapshot: phase1 records HIPRTC /
+launcher hashes `ad050…032b57` / `dcc883…723927`; current files hash
+`1600d2…798f3` / `daee4e…a0bbe`. The phase1 raw trace remains the authority for
+its measured geometry and timing.
+
+### Resulting implementation policy
+
+1. Keep direct paged decode as the only eligible route under the existing
+   bitwise gate. Do not implement llama.cpp-style P>1 split/merge as a default
+   or represent it as a semantics-preserving optimization.
+2. A direct-order-preserving candidate may still improve page-address work,
+   load/coalescing, GQA reuse, or launch overhead. Such work can preserve the
+   current contract, but it will not reproduce the central 40-to-400
+   workgroup-supply effect by itself.
+3. If split is revisited, it must be an explicit non-bitwise candidate under
+   the frozen v0.2 artifact-FP32-relative gate, JSON SHA-256
+   `64a43c032570bed8086e3c441b0774cc470c5ab1e8c67f99e02af2b6307f72bf`.
+   It must demonstrate candidate error no worse than matched direct control on
+   the frozen all-layer/hidden/logit/top-k and feedback-decode criteria before
+   performance is considered. Whether it can pass is **unconfirmed**.
+4. An exact-state merge that reproduces the direct recurrence would change this
+   conclusion, but no such mechanism was identified in llama.cpp and none is
+   established here. It remains research, not an implementation task.
