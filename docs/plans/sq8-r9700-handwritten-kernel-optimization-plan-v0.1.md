@@ -934,15 +934,16 @@ of `linear_attention` ×3 then `full_attention` ×1: 24 linear and 8 full
 attention layers.  Full attention is 16 Q heads / 4 KV heads (GQA 4:1) with
 head/value dimension 256.
 
-The C=1339, 32-step P3-compatible ROCprof trace in
-`benchmarks/results/2026-07-26/attention-redesign-shipping/phase1/` attributes
-module-launched GPU dispatches to decode markers via correlated
+The current C=1339, 32-step P3 ROCprof trace in
+`benchmarks/results/2026-07-26/attention-redesign-shipping/phase1/current-p3-compatible-c1339-20260726T160603Z/`
+attributes module-launched GPU dispatches to decode markers via correlated
 `hipModuleLaunchKernel` launch time.  It finds no marker-contained
-`ullm_paged_decode_attn_f32_kernel`; the split partial/merge core is 37.016296
-ms of 412.275120 ms inclusive kernel time, or **8.97854%**.  The 16
-partial/merge dispatches per step match the eight full-attention layers; the
-partial grid confirms a 128-token source tile.  This is kernel time
-composition, explicitly not profiler-range throughput.
+`ullm_paged_decode_attn_f32_kernel`; the split partial/merge core is 37.378910
+ms of 411.411732 ms inclusive kernel time, or **9.08552%**.  The 16
+partial/merge dispatches per step match the eight full-attention layers.  This
+is current physical trace evidence and kernel-time composition, explicitly not
+profiler-range throughput.  The earlier 8.97854% P3-compatible trace remains
+as historical corroboration in the same evidence root.
 
 BH's grouped tile-20 body is restricted to gfx1201, 5 Q heads per KV head, and
 128-dimensional K/V.  `AQ4_0` therefore takes its generic fallback even if a
@@ -951,8 +952,9 @@ the separate AQ4 split tiles 128 or 256.  The linear layers are outside this
 optimization.  A 4:1/256 variant would be a new kernel implementation and
 needs a new full-model validation, so it is deliberately not called an
 application of BH's redesign.  The conditional Amdahl ceiling obtained by
-pretending the 1.790050x SQ8 result accelerated all 8.97854% is only 1.0412625x
-(+4.13%), not an AQ4 performance forecast.  No `AQ4_0` promotion is justified.
+pretending the 1.790050x SQ8 result accelerated all current 9.08552% is only
+1.0417747x (+4.18%), not an AQ4 performance forecast.  No `AQ4_0` promotion
+is justified.
 
 ### Service-candidate execution contract
 
@@ -982,13 +984,21 @@ P3 manifest validates unchanged with `execution: null` and SHA-256
 Promotion/rollback retain typed fields because they atomically swap raw bytes;
 the round-trip test covers this.
 
-### Pending isolated text evidence
+### Isolated text evidence and result
 
-The resulting direct and grouped tile-20 `SQ8_0` manifests pin the same
-Qwen3-14B product, tokenizer, worker, source commit, guard set, and fixed
-ten-prompt suite.  They differ only in the worker execution contract (apart
-from human-readable display labels).  They must be run through isolated
-loopback gateways and compared using actual generated text under the lightweight
-promotion policy; exact match is an observation, never the gate.  This is a
-service-candidate evidence run only.  It must not use the promotion tool:
-promoting `SQ8_0` would replace the active `AQ4_0` product model.
+The direct and grouped tile-20 `SQ8_0` manifests pin the same Qwen3-14B
+product, tokenizer, worker, source commit, guard set, and fixed ten-prompt
+suite.  They differ only in the worker execution contract (apart from
+human-readable display labels).  In a single isolated window both completed
+all ten real requests; `comparison-20260726T160603Z/` records no automated
+request/empty/repetition/garble/length finding.  The zero exact-match rate is
+only an observation, never a threshold.
+
+Human reading nevertheless holds quality approval: the grouped Python case
+does not provide the requested code, its JavaScript explanation says
+`Boolean(NaN)` is true, and its Japanese multiturn answer stops incomplete.
+Some direct controls are also truncated by the fixed response budgets, so this
+does not prove every difference is caused by attention, but it is not evidence
+to call the candidate text-quality-approved.  This stays a service-candidate
+record only.  It must not use the promotion tool: promoting `SQ8_0` would
+replace the active `AQ4_0` product model.

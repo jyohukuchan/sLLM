@@ -16,13 +16,22 @@ the worker command or generation request.
 
 The manifests and their validator outputs were produced before the capture;
 `build-provenance.json` pins the clean source worktree, built worker SHA-256,
-and prompt-suite SHA-256.  Runtime captures will be placed below `direct/`
-and `gqa-grouped-tile20/`, then compared with
-`tools/compare-lightweight-suite-captures.py`.  The comparison records exact
-match only as an observation.  Per the lightweight-promotion policy, the
-decision is based on actual readable output and absence of blocking failures
-(request failure, empty response, repetition loop, corruption, extreme length
-pathology, or code-request abandonment).
+and prompt-suite SHA-256.  The physical captures are
+`direct/capture-20260726T160603Z/` and
+`gqa-grouped-tile20/capture-20260726T160603Z/`; their comparison is
+`comparison-20260726T160603Z/`.  Both workers became ready and completed all
+ten requests, with no automated request/empty/repetition/garble/length
+finding.  Exact-match rate is 0.000 and is an observation only.
+
+Per the lightweight-promotion policy, the decision is based on actual readable
+output and absence of blocking failures rather than exact matching.  The
+human-readable audit in `quality-review-20260726T160603Z.md` therefore holds
+quality approval: the grouped `python_code` answer provides no Python code,
+its JavaScript explanation has a factual error, and its Japanese multiturn
+answer is incomplete.  Some control outputs are also limited by the fixed
+96/128-token response budgets, so the evidence does not attribute every
+incompleteness to attention; it does establish that this candidate must not be
+called text-quality-approved.
 
 This is an isolated service-candidate experiment only.  It must not call the
 promotion tool or replace the active `AQ4_0` manifest: promoting this `SQ8_0`

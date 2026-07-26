@@ -30,15 +30,26 @@ served-model manifest は tile 20 のような typed execution setting を表現
 - 同一 source commit と worker binary を固定した direct / grouped-tile-20 `SQ8_0`
   manifest と、固定 ten-prompt suite capture の隔離実行を準備した。比較は exact match
   を閾値にせず、実生成文と blocking failure を読む。
+- 2026-07-27 01:06--01:09 JST の一つの owned window で、service を一度 stop/start
+  して current `AQ4_0` P3 C=1339 ROCprof、active P3 の隔離 10-prompt smoke、`SQ8_0`
+  direct と grouped tile-20 の各 10-prompt capture を連続実行した。service は
+  `NRestarts=0` のまま active に復帰し、active manifest SHA-256 は開始前後で
+  `a98910dc5bf59dc768e5bcd20bcf58968699540eb1b33df33066dcb6f274fe49` だった。
+- current trace は direct paged-attention kernel 0 回、split partial/merge 512 launches、
+  37.378910 ms / 411.411732 ms = 9.08552% を確認した。BH body の 5:1/128 条件とは
+  `AQ4_0` の 4:1/256 が異なるため、直接適用不可・実装なし・本番昇格なしの結論を維持する。
+- `AQ4_0` P3 は unchanged manifest で全 10 request を完走した。`SQ8_0` two-arm
+  capture も全 request 成功かつ自動 blocking なしだったが、grouped 側の Python code
+  response はコードを出さず、JavaScript 説明には誤り、Japanese multiturn は不完全だった。
+  したがって exact-match 0% を閾値にせず、実文章を読んだ結果として quality approval は hold
+  とした。`SQ8_0` はいずれにせよ active `AQ4_0` を置換するため昇格しない。
 
 ## 次の行動
 
-- R9700 lock の current owner が完了した後、non-blocking `flock` で P3-compatible
-  C=1339 ROCprof trace を一度だけ取得し、historical trace の route/割合を current
-  package binding でも確認する。lock が held のときは実行しない。短い release/reacquire
-  gap で三回試みたが、実行直前の lock check が busy を返したため GPU work は開始していない。
-- active `AQ4_0` P3 manifest を loopback gateway で smoke し、direct と grouped
-  `SQ8_0` を別々の isolated gateway で fixed suite 実行後に並置比較する。systemd、
-  active manifest、`/opt/ullm` は変更しない。`SQ8_0` は昇格しない。
-- trace / capture / postflight をこの日付の evidence directory に追加してから、plan と
-  本 journal を結果で更新する。
+- `AQ4_0` の 4:1/256 full-attention shape 用の新 kernel が必要なら、BH redesign の
+  「適用」ではなく新規設計として別 task で扱い、full-model validation を先に要求する。
+  prefill-attention workstream が所有する kernel source は本件では変更しない。
+- `SQ8_0` grouped tile-20 は service-candidate evidence として保持するが、今回の fixed
+  suite の実文章品質は hold のままとする。将来再評価するなら、同じ model/control で
+  code/multiturn completion を十分に観察できる prompt contract を別証跡で設計する。
+- active manifest は現行 `AQ4_0` P3 のまま維持する。`SQ8_0` promotion は実行しない。

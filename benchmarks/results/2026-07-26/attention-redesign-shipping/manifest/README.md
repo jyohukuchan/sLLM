@@ -34,6 +34,11 @@ than silently selecting a different body.
 current production manifest.  It validates with unchanged SHA-256
 `a98910dc5bf59dc768e5bcd20bcf58968699540eb1b33df33066dcb6f274fe49` and
 `worker.execution: null`, so the old `AQ4_0` P3 worker receives no new selector.
+`active-aq4-p3-isolated-20260726T160603Z/` is the physical complement: the
+unchanged active manifest started the exact P3 worker through an isolated
+loopback gateway and completed all ten fixed real-generation requests with no
+blocking finding.  The active manifest SHA-256 is identical before and after
+that one service window.
 
 The promotion and rollback wrappers did not need a schema-specific rewrite:
 they atomically exchange raw manifest bytes.  Their test covers a typed
