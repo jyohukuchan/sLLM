@@ -402,6 +402,11 @@ Q と output gate に分け、Q/K norm・RoPE・KV cache 更新の後に
 softmax/top-k/正規化、expert は gate/up/down の SiLU product、shared branch は
 scalar sigmoid gate である（720--814 行）。RMSNorm は `output * (1 + weight)`
 （817--831 行）、mRoPE は interleaved section `[11,11,10]`（167--182 行）である。
+同じ HF text model の default position-id path は scalar text positions を四行へ expand
+した後、先頭の causal-mask row を外して rotary embedding へ三行を渡す
+（1279--1303 行）。従って pure-text decode では三つの mRoPE row は同じ position であり、
+resident scalar bridge の根拠になる。画像・動画 token の `get_rope_index` が作る異なる
+temporal/height/width row（1414 行以降）はこの text-only executor には含めない。
 
 ### Qwen3.5-9B `AQ4_0` からの再利用と互換性境界
 
@@ -442,3 +447,11 @@ hf-streaming-source-control.json` で、source BF16 を一層ずつ読み出す 
 
 実機生成、router read-back と VRAM telemetry は、R9700 排他ロックを取得してからこの節に
 追記する。サービスを起動・変更せず、`active.json` にも触れない。
+
+実機待機中の 01:48 JST の read-only `amd-smi process --gpu 2 --json` では、既存本番
+Qwen3.5-9B `AQ4_0` worker（PID 4044361）が `7,119,884,000 B` VRAM を保持し、同時刻の
+`amd-smi metric` free VRAM は `25,542 MiB = 26,782,728,192 B` だった。これは 262,144-token
+ledger `30,858,010,436 B` より `4,075,282,244 B` 少ない。さらに worker は
+`/run/ullm/r9700.lock` を保持していた。このため lock を奪う、又は本番 service を止める
+代わりに、明示的な解放を待つ。これは MoE loader の allocation failure ではなく、既存本番が
+占有中のため安全に試行していない状態である。

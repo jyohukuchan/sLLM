@@ -30,6 +30,10 @@
 - 確認済み: `cargo check`（default と `rocm-moe-gfx1201`）、MoE runtime unit tests、
   35B/9B linear geometry test。実機 R9700 実行は未完了。
 - 実装コミット: `286ddc6d`（loader wiring）、`8146c7c3`（shared decode workspace）。
+- 01:48 JST の read-only telemetry では、既存本番 Qwen3.5-9B `AQ4_0` worker が
+  R9700 に `7,119,884,000 B` を保持し、free VRAM は `26,782,728,192 B` だった。
+  262,144-token ledger `30,858,010,436 B` より `4,075,282,244 B` 少なく、同 worker が
+  `/run/ullm/r9700.lock` も保持している。競合実行・service 停止は行わない。
 
 ## 次の行動
 
