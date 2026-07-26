@@ -1,0 +1,51 @@
+
+
+============================ ROCm System Management Interface ============================
+======================================= Unique ID ========================================
+GPU[0]		: Unique ID: 0x76a08c022586fed6
+GPU[1]		: Unique ID: 0x8b2ddcbd6e6b36c
+GPU[2]		: Unique ID: 0xa8e9ddefa2d60f55
+==========================================================================================
+=================================== % time GPU is busy ===================================
+GPU[0]		: GPU use (%): 0
+GPU[1]		: GPU use (%): 0
+GPU[2]		: GPU use (%): 3
+==========================================================================================
+================================== Memory Usage (Bytes) ==================================
+GPU[0]		: VRAM Total Memory (B): 32195477504
+GPU[0]		: VRAM Total Used Memory (B): 17256448
+GPU[1]		: VRAM Total Memory (B): 32195477504
+GPU[1]		: VRAM Total Used Memory (B): 17256448
+GPU[2]		: VRAM Total Memory (B): 34208743424
+GPU[2]		: VRAM Total Used Memory (B): 7426830336
+==========================================================================================
+====================================== Product Info ======================================
+GPU[0]		: Card Series: 		AMD Radeon Pro V620
+GPU[0]		: Card Model: 		0x73a1
+GPU[0]		: Card Vendor: 		Advanced Micro Devices, Inc. [AMD/ATI]
+GPU[0]		: Card SKU: 		D6030500
+GPU[0]		: Subsystem ID: 	0x0e34
+GPU[0]		: Device Rev: 		0x00
+GPU[0]		: Node ID: 		3
+GPU[0]		: GUID: 		8042
+GPU[0]		: GFX Version: 		gfx1030
+GPU[1]		: Card Series: 		AMD Radeon Pro V620
+GPU[1]		: Card Model: 		0x73a1
+GPU[1]		: Card Vendor: 		Advanced Micro Devices, Inc. [AMD/ATI]
+GPU[1]		: Card SKU: 		D6030500
+GPU[1]		: Subsystem ID: 	0x0e34
+GPU[1]		: Device Rev: 		0x00
+GPU[1]		: Node ID: 		1
+GPU[1]		: GUID: 		61275
+GPU[1]		: GFX Version: 		gfx1030
+GPU[2]		: Card Series: 		AMD Radeon Graphics
+GPU[2]		: Card Model: 		0x7551
+GPU[2]		: Card Vendor: 		Advanced Micro Devices, Inc. [AMD/ATI]
+GPU[2]		: Card SKU: 		1E4990U
+GPU[2]		: Subsystem ID: 	-0x1b67
+GPU[2]		: Device Rev: 		0xc0
+GPU[2]		: Node ID: 		2
+GPU[2]		: GUID: 		51545
+GPU[2]		: GFX Version: 		gfx1201
+==========================================================================================
+================================== End of ROCm SMI Log ===================================
