@@ -19,9 +19,10 @@ served-model manifest は tile 20 のような typed execution setting を表現
   `a98910dc5bf59dc768e5bcd20bcf58968699540eb1b33df33066dcb6f274fe49` は
   `worker.execution: null` のまま validator を通過した。promotion / rollback は raw
   manifest bytes を swap する既存方式で typed field を保持し、往復 test も追加した。
-- `AQ4_0` の既存 C=1339 ROCprof trace を marker と `hipModuleLaunchKernel`
-  correlation で再集計した。`ullm_paged_decode_attn_f32_kernel` は decode marker 内で
-  0 回、split partial/merge の合計は inclusive kernel time の 8.97854% だった。
+- `AQ4_0` の初回 P3-compatible C=1339 ROCprof trace を marker と
+  `hipModuleLaunchKernel` correlation で再集計した。`ullm_paged_decode_attn_f32_kernel`
+  は decode marker 内で 0 回、split partial/merge の合計は inclusive kernel time の
+  8.97854% だった（最終の current-P3 trace は後述の 9.08552%）。
   Qwen3.5-9B config は 32 層（linear 24、full 8）、Q/KV=16/4、head/value dim=256
   の GQA 4:1 である。
 - BH grouped body の 5:1 / 128 shape と異なるため、`AQ4_0` への直接適用は不可と
