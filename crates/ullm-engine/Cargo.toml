@@ -27,6 +27,11 @@ path = "src/bin/ullm-sq8-worker.rs"
 required-features = ["rocm-ck-gfx1201"]
 
 [[bin]]
+name = "ullm-sq8-gate-capture"
+path = "src/bin/ullm-sq8-gate-capture.rs"
+required-features = ["rocm-ck-gfx1201"]
+
+[[bin]]
 name = "ullm-aq4-worker"
 path = "src/bin/ullm-aq4-worker.rs"
 

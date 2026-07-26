@@ -6,7 +6,10 @@
 //! This module is separate from `sq8_generation_runtime`: the P7 fixed request and its audited
 //! result schemas remain unchanged while serving gains variable prompt lengths and reusable state.
 
-use crate::decoder::{PagedDecodeShape, PagedDecodeState, PagedKvCacheReadback};
+use crate::decoder::{
+    PagedDecodeShape, PagedDecodeState, PagedKvCacheReadback,
+    SQ8_PAGED_DECODE_SPLIT_MULTITILE_EVALUATION_ENV,
+};
 use crate::inference_api::ReasoningUsage;
 pub use crate::inference_api::{
     CancellationToken as Sq8CancellationToken, FinishReason as Sq8FinishReason,
@@ -66,6 +69,11 @@ const SQ8_FIXED_M128_PREFILL_IMPLEMENTATION: &str = "sq8.fixed-m128-cached-prefi
 /// ordinary direct paged-decode dispatch exactly.
 pub const QWEN3_14B_SQ8_PAGED_DECODE_SPLIT_EXPERIMENT_TILE_ENV: &str =
     "ULLM_EXPERIMENTAL_SQ8_PAGED_DECODE_SPLIT_TILE";
+/// Test-only bypass for the multi-tile containment fallback. It is only read
+/// when the source-tile experiment itself has already been explicitly
+/// enabled, and must be exactly `1` to take effect.
+pub const QWEN3_14B_SQ8_PAGED_DECODE_SPLIT_MULTITILE_EVALUATION_ENV: &str =
+    SQ8_PAGED_DECODE_SPLIT_MULTITILE_EVALUATION_ENV;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Sq8ServingPrefillMode {
@@ -271,6 +279,22 @@ pub struct Sq8ServingDecodeLayerTraceCapture {
     pub position: usize,
     pub profile: Sq8LayerExecutionProfile,
     pub layers: Vec<Sq8LayerRuntimeTrace>,
+}
+
+/// One host-side record from the isolated v0.2 teacher-forced capture path.
+/// `layers`, when requested, holds one post-layer residual vector per
+/// transformer layer. This is intentionally separate from normal serving:
+/// it can force an externally supplied next token and it resets after the
+/// final observed forward rather than publishing a sampled response.
+#[derive(Debug, Clone, PartialEq)]
+#[doc(hidden)]
+pub struct Sq8ServingTeacherForcedCapture {
+    pub input_token_id: usize,
+    pub position: usize,
+    pub top1: Sq8GenerationTopLogit,
+    pub final_hidden: Vec<f32>,
+    pub logits: Vec<f32>,
+    pub layers: Option<Vec<Vec<f32>>>,
 }
 
 /// Logical, written-only K/V state for every layer of one active serving
@@ -1185,6 +1209,43 @@ impl Qwen3Sq8ServingSession {
         reasoning_dialect: Option<&ReasoningDialect>,
         stream: &mut RuntimeStream,
     ) -> Result<(), Sq8ServingError> {
+        self.start_internal(request, cancel, reasoning_dialect, false, stream)
+    }
+
+    /// Starts the isolated teacher-forced capture state machine used only by
+    /// the numerical-gate harness. The last observed forward is not committed
+    /// as a new input token, so the normal reservation is intentionally one
+    /// token larger than the highest forward position. This permits the
+    /// frozen `p4095/g1` tail without weakening ordinary request validation.
+    #[doc(hidden)]
+    pub fn start_teacher_forced_capture_for_testing(
+        &mut self,
+        request_id: impl Into<String>,
+        prompt_token_ids: Vec<usize>,
+        decode_positions: usize,
+        stream: &mut RuntimeStream,
+    ) -> Result<(), Sq8ServingError> {
+        if decode_positions == 0 {
+            return Err(Sq8ServingError::invalid_request(
+                "teacher-forced capture requires at least one decode position",
+            ));
+        }
+        let max_new_tokens = decode_positions.checked_add(1).ok_or_else(|| {
+            Sq8ServingError::invalid_request("teacher-forced capture length overflows")
+        })?;
+        let request = Sq8ServingRequest::greedy(request_id, prompt_token_ids, max_new_tokens)
+            .ignore_eos_for_testing();
+        self.start_internal(request, Sq8CancellationToken::new(), None, true, stream)
+    }
+
+    fn start_internal(
+        &mut self,
+        request: Sq8ServingRequest,
+        cancel: Sq8CancellationToken,
+        reasoning_dialect: Option<&ReasoningDialect>,
+        teacher_forced_capture: bool,
+        stream: &mut RuntimeStream,
+    ) -> Result<(), Sq8ServingError> {
         match self.state {
             Sq8ServingRuntimeStatus::Ready => {}
             Sq8ServingRuntimeStatus::Failed => return Err(self.failed_error()),
@@ -1195,7 +1256,29 @@ impl Qwen3Sq8ServingSession {
                 ));
             }
         }
-        request.validate()?;
+        if teacher_forced_capture {
+            // Validate all ordinary request fields while permitting exactly
+            // one uncommitted final token beyond the serving reservation.
+            request.validate_for_worker(
+                QWEN3_14B_SQ8_SERVING_CONTEXT_TOKENS + 1,
+                QWEN3_14B_SQ8_SERVING_CONTEXT_TOKENS + 1,
+                QWEN3_14B_VOCAB_SIZE,
+                &QWEN3_14B_SQ8_SERVING_EOS_TOKEN_IDS,
+                QWEN3_14B_SQ8_SERVING_TOP_K,
+            )?;
+            let highest_forward_count = request
+                .prompt_token_ids
+                .len()
+                .checked_add(request.max_new_tokens.saturating_sub(1))
+                .ok_or_else(|| Sq8ServingError::invalid_request("teacher-forced context overflows"))?;
+            if highest_forward_count > QWEN3_14B_SQ8_SERVING_CONTEXT_TOKENS {
+                return Err(Sq8ServingError::invalid_request(format!(
+                    "teacher-forced capture exceeds context: forwards={highest_forward_count} context={QWEN3_14B_SQ8_SERVING_CONTEXT_TOKENS}"
+                )));
+            }
+        } else {
+            request.validate()?;
+        }
         if let Err(err) = self.validate_ready_baseline() {
             return Err(
                 self.fail_runtime(stream, format!("serving baseline validation failed: {err}"))
@@ -1251,6 +1334,342 @@ impl Qwen3Sq8ServingSession {
         self.active = Some(active);
         self.state = Sq8ServingRuntimeStatus::Prefilling;
         Ok(())
+    }
+
+    /// Advance one unit of the isolated teacher-forced capture state machine.
+    ///
+    /// `forced_next_token` is the already-materialized artifact-FP32 token to
+    /// use on the following forward. Passing `None` records the final forward
+    /// and resets the session without publishing an extra input token. This
+    /// method is deliberately diagnostic-only and never changes the ordinary
+    /// sampling or serving path.
+    #[doc(hidden)]
+    pub fn advance_teacher_forced_capture_for_testing(
+        &mut self,
+        forced_next_token: Option<usize>,
+        capture_output: bool,
+        capture_layers: bool,
+        stream: &mut RuntimeStream,
+    ) -> Result<Option<Sq8ServingTeacherForcedCapture>, Sq8ServingError> {
+        if capture_layers && !capture_output {
+            return Err(Sq8ServingError::invalid_configuration(
+                "teacher-forced layer capture requires final-hidden/logit capture",
+            ));
+        }
+        match self.state {
+            Sq8ServingRuntimeStatus::Prefilling | Sq8ServingRuntimeStatus::Decoding => {}
+            Sq8ServingRuntimeStatus::Ready => {
+                return Err(Sq8ServingError::invalid_state(
+                    "teacher-forced capture requires an active request",
+                ));
+            }
+            Sq8ServingRuntimeStatus::Failed => return Err(self.failed_error()),
+            state => {
+                return Err(self.fail_runtime(
+                    stream,
+                    format!("teacher-forced capture is invalid in state {state:?}"),
+                ));
+            }
+        }
+        let cancelled = match self.active_cancelled() {
+            Ok(cancelled) => cancelled,
+            Err(err) => return Err(self.fail_runtime(stream, err)),
+        };
+        if cancelled {
+            self.state = Sq8ServingRuntimeStatus::Cancelling;
+            return Err(Sq8ServingError::invalid_state(
+                "teacher-forced capture was cancelled",
+            ));
+        }
+        let result = match self.state {
+            Sq8ServingRuntimeStatus::Prefilling => self.advance_teacher_forced_prefill(
+                forced_next_token,
+                capture_output,
+                capture_layers,
+                stream,
+            ),
+            Sq8ServingRuntimeStatus::Decoding => self.advance_teacher_forced_decode(
+                forced_next_token,
+                capture_output,
+                capture_layers,
+                stream,
+            ),
+            _ => unreachable!("state was checked above"),
+        };
+        result.map_err(|err| self.fail_runtime(stream, err))
+    }
+
+    fn advance_teacher_forced_prefill(
+        &mut self,
+        forced_next_token: Option<usize>,
+        capture_output: bool,
+        capture_layers: bool,
+        stream: &mut RuntimeStream,
+    ) -> Result<Option<Sq8ServingTeacherForcedCapture>, String> {
+        let (unit, prompt_tokens, token_ids) = {
+            let active = self
+                .active
+                .as_ref()
+                .ok_or_else(|| "teacher-forced prefill has no active request".to_string())?;
+            let position = active.prompt_tokens_processed;
+            let prompt_tokens = active.request.prompt_token_ids.len();
+            let unit =
+                plan_next_prefill_unit(position, prompt_tokens, self.load_report.prefill_mode)?;
+            let end = unit
+                .start_position
+                .checked_add(unit.width)
+                .ok_or_else(|| "teacher-forced prompt execution range overflows".to_string())?;
+            let token_ids = active
+                .request
+                .prompt_token_ids
+                .get(unit.start_position..end)
+                .ok_or_else(|| "teacher-forced prompt range exceeds request".to_string())?
+                .to_vec();
+            (unit, prompt_tokens, token_ids)
+        };
+        let (source, input_token_id, position, layer_traces) = if unit.width == 1 {
+            let (report, traces) = self.execute_m1_stack_token_inner(
+                token_ids[0],
+                unit.start_position,
+                capture_layers,
+                stream,
+            )?;
+            if report.position != unit.start_position {
+                return Err("teacher-forced M=1 prefill report position mismatch".into());
+            }
+            (
+                Sq8ModelHeadServingSource::M1PagedDecode,
+                token_ids[0],
+                unit.start_position,
+                traces,
+            )
+        } else if Some(unit.width) == self.load_report.prefill_mode.chunk_tokens() {
+            let (report, traces) = if capture_layers {
+                self.execute_stack_chunk_with_layer_trace(&token_ids, unit.start_position, stream)?
+            } else {
+                (self.execute_stack_chunk(&token_ids, unit.start_position, stream)?, Vec::new())
+            };
+            if report.prefix_position != unit.start_position || report.chunk_len != unit.width {
+                return Err("teacher-forced chunk prefill report geometry mismatch".into());
+            }
+            (
+                Sq8ModelHeadServingSource::CachedPrefixChunk,
+                *token_ids
+                    .last()
+                    .ok_or_else(|| "teacher-forced chunk has no final input token".to_string())?,
+                unit.start_position + unit.width - 1,
+                traces,
+            )
+        } else {
+            return Err(format!(
+                "teacher-forced prefill planner produced unsupported width {}",
+                unit.width
+            ));
+        };
+        let scheduler_cached = self.commit_prompt_progress(unit.start_position, unit.width)?;
+        let capture = self.capture_teacher_forced_head(
+            source,
+            scheduler_cached,
+            input_token_id,
+            position,
+            unit.width,
+            capture_output,
+            capture_layers,
+            layer_traces,
+            stream,
+        )?;
+
+        if !unit.is_final {
+            if forced_next_token.is_some() {
+                return Err("teacher-forced token supplied before final prompt unit".into());
+            }
+            if scheduler_cached >= prompt_tokens {
+                return Err("teacher-forced non-final prefill reached prompt boundary".into());
+            }
+            return Ok(capture);
+        }
+        if scheduler_cached != prompt_tokens {
+            return Err(format!(
+                "teacher-forced final prefill cache mismatch: expected={prompt_tokens} actual={scheduler_cached}"
+            ));
+        }
+        self.commit_teacher_forced_or_finish(
+            forced_next_token,
+            scheduler_cached,
+            GeneratedTokenCommit::Prefill,
+            stream,
+        )?;
+        Ok(capture)
+    }
+
+    fn advance_teacher_forced_decode(
+        &mut self,
+        forced_next_token: Option<usize>,
+        capture_output: bool,
+        capture_layers: bool,
+        stream: &mut RuntimeStream,
+    ) -> Result<Option<Sq8ServingTeacherForcedCapture>, String> {
+        let DecodeStepPlan {
+            input_token_id,
+            expected_position,
+            ready,
+        } = self.decode_step_plan()?;
+        let (report, layer_traces) = self.execute_m1_stack_token_inner(
+            input_token_id,
+            expected_position,
+            capture_layers,
+            stream,
+        )?;
+        if report.position != expected_position {
+            return Err("teacher-forced decode report position mismatch".into());
+        }
+        validate_cache_lengths(self.caches.as_ref(), expected_position + 1)?;
+        let capture = self.capture_teacher_forced_head(
+            Sq8ModelHeadServingSource::M1PagedDecode,
+            expected_position + 1,
+            input_token_id,
+            expected_position,
+            1,
+            capture_output,
+            capture_layers,
+            layer_traces,
+            stream,
+        )?;
+        self.commit_teacher_forced_or_finish(
+            forced_next_token,
+            expected_position + 1,
+            GeneratedTokenCommit::Decode(ready),
+            stream,
+        )?;
+        Ok(capture)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn capture_teacher_forced_head(
+        &mut self,
+        source: Sq8ModelHeadServingSource,
+        expected_cache_len: usize,
+        input_token_id: usize,
+        position: usize,
+        execution_width: usize,
+        capture_output: bool,
+        capture_layers: bool,
+        layer_traces: Vec<Sq8LayerRuntimeTrace>,
+        stream: &mut RuntimeStream,
+    ) -> Result<Option<Sq8ServingTeacherForcedCapture>, String> {
+        if !capture_output {
+            if capture_layers || !layer_traces.is_empty() {
+                return Err("teacher-forced layer trace was produced without an output capture".into());
+            }
+            return Ok(None);
+        }
+        let capture = match self.run_head_synchronized(source, expected_cache_len, stream, true)? {
+            HeadPreparation::Prepared {
+                capture: Some(capture),
+                ..
+            } => capture,
+            HeadPreparation::Prepared { capture: None, .. } => {
+                return Err("teacher-forced oracle head omitted its capture".into());
+            }
+            HeadPreparation::CancellationObserved => {
+                return Err("teacher-forced oracle head observed cancellation".into());
+            }
+        };
+        if capture.position != position {
+            return Err(format!(
+                "teacher-forced head position mismatch: expected={position} actual={}",
+                capture.position
+            ));
+        }
+        let layers = if capture_layers {
+            if layer_traces.len() != QWEN3_14B_SQ8_STACK_LAYERS {
+                return Err(format!(
+                    "teacher-forced layer trace count mismatch: expected={} actual={}",
+                    QWEN3_14B_SQ8_STACK_LAYERS,
+                    layer_traces.len()
+                ));
+            }
+            let row_start = execution_width
+                .checked_sub(1)
+                .and_then(|row| row.checked_mul(QWEN3_14B_HIDDEN_SIZE))
+                .ok_or_else(|| "teacher-forced layer trace row offset overflows".to_string())?;
+            let row_end = row_start
+                .checked_add(QWEN3_14B_HIDDEN_SIZE)
+                .ok_or_else(|| "teacher-forced layer trace row end overflows".to_string())?;
+            let mut outputs = Vec::with_capacity(layer_traces.len());
+            for (layer_index, trace) in layer_traces.into_iter().enumerate() {
+                if trace.output.len() != execution_width * QWEN3_14B_HIDDEN_SIZE {
+                    return Err(format!(
+                        "teacher-forced layer {layer_index} output length mismatch: expected={} actual={}",
+                        execution_width * QWEN3_14B_HIDDEN_SIZE,
+                        trace.output.len()
+                    ));
+                }
+                outputs.push(trace.output[row_start..row_end].to_vec());
+            }
+            Some(outputs)
+        } else {
+            if !layer_traces.is_empty() {
+                return Err("teacher-forced unexpected layer traces".into());
+            }
+            None
+        };
+        Ok(Some(Sq8ServingTeacherForcedCapture {
+            input_token_id,
+            position,
+            top1: capture.top1,
+            final_hidden: capture.final_hidden,
+            logits: capture.logits,
+            layers,
+        }))
+    }
+
+    fn commit_teacher_forced_or_finish(
+        &mut self,
+        forced_next_token: Option<usize>,
+        cache_len: usize,
+        commit: GeneratedTokenCommit,
+        stream: &mut RuntimeStream,
+    ) -> Result<(), String> {
+        let Some(token_id) = forced_next_token else {
+            // The final output needs no following input. Reset instead of
+            // publishing a fabricated token; this is what makes the final
+            // context-boundary forward executable without extending KV state.
+            self.state = Sq8ServingRuntimeStatus::Cancelling;
+            self.reset_active_synchronized(Sq8ReleaseOutcome::Cancelled, stream)
+                .map_err(|err| err.to_string())?;
+            return Ok(());
+        };
+        if token_id >= QWEN3_14B_VOCAB_SIZE {
+            return Err(format!(
+                "teacher-forced next token exceeds vocabulary: {token_id}"
+            ));
+        }
+        let prepared = self.prepare_selected_token(
+            token_id,
+            PendingTokenSource::Forced,
+            None,
+            cache_len,
+            commit,
+        )?;
+        let published = self
+            .publish_prepared_token(prepared, stream, |_| Ok(()))
+            .map_err(|err| err.to_string())?;
+        match published {
+            Sq8ServingAdvance::Token {
+                terminal_reason: None,
+                ..
+            } => Ok(()),
+            Sq8ServingAdvance::Token {
+                terminal_reason: Some(reason),
+                ..
+            } => Err(format!(
+                "teacher-forced capture reached terminal state before final forward: {reason:?}"
+            )),
+            other => Err(format!(
+                "teacher-forced token publication did not commit a token: {other:?}"
+            )),
+        }
     }
 
     pub fn advance_synchronized(
@@ -1930,6 +2349,26 @@ impl Qwen3Sq8ServingSession {
         prefix_position: usize,
         stream: &mut RuntimeStream,
     ) -> Result<Sq8ServingChunkExecutionReport, String> {
+        self.execute_stack_chunk_inner(token_ids, prefix_position, false, stream)
+            .map(|(report, _)| report)
+    }
+
+    fn execute_stack_chunk_with_layer_trace(
+        &mut self,
+        token_ids: &[usize],
+        prefix_position: usize,
+        stream: &mut RuntimeStream,
+    ) -> Result<(Sq8ServingChunkExecutionReport, Vec<Sq8LayerRuntimeTrace>), String> {
+        self.execute_stack_chunk_inner(token_ids, prefix_position, true, stream)
+    }
+
+    fn execute_stack_chunk_inner(
+        &mut self,
+        token_ids: &[usize],
+        prefix_position: usize,
+        capture_layer_trace: bool,
+        stream: &mut RuntimeStream,
+    ) -> Result<(Sq8ServingChunkExecutionReport, Vec<Sq8LayerRuntimeTrace>), String> {
         let chunk_tokens = self
             .load_report
             .prefill_mode
@@ -1991,12 +2430,25 @@ impl Qwen3Sq8ServingSession {
                 })?;
         }
 
-        let report = self.stack.run_paged_serving_chunk_optimized_synchronized(
-            &self.prompt_chunk_hidden,
-            prefix_position,
-            &mut self.caches[..],
-            stream,
-        )?;
+        let (report, layer_traces) = if capture_layer_trace {
+            self.stack
+                .run_paged_serving_chunk_with_layer_trace_synchronized(
+                    &self.prompt_chunk_hidden,
+                    prefix_position,
+                    &mut self.caches[..],
+                    stream,
+                )?
+        } else {
+            (
+                self.stack.run_paged_serving_chunk_optimized_synchronized(
+                    &self.prompt_chunk_hidden,
+                    prefix_position,
+                    &mut self.caches[..],
+                    stream,
+                )?,
+                Vec::new(),
+            )
+        };
         report.validate_contract()?;
         if report.prefix_position != prefix_position
             || report.chunk_len != chunk_tokens
@@ -2009,7 +2461,7 @@ impl Qwen3Sq8ServingSession {
                 "serving chunk stack report failed at prefix {prefix_position}: {report:?}"
             ));
         }
-        Ok(report)
+        Ok((report, layer_traces))
     }
 
     fn run_head_synchronized(

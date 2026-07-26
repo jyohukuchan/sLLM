@@ -1165,6 +1165,43 @@ impl Qwen3Sq8StackRuntime {
         caches: &mut [PagedDecodeState],
         stream: &mut RuntimeStream,
     ) -> Result<Sq8ServingChunkExecutionReport, String> {
+        self.run_paged_serving_chunk_common_synchronized(
+            input,
+            prefix_position,
+            caches,
+            false,
+            stream,
+        )
+        .map(|(report, _)| report)
+    }
+
+    /// Test-only counterpart of the fixed-width cached-prefix chunk path.
+    /// It reads each post-layer residual to the host after that layer runs;
+    /// ordinary prefill continues through the method above with no readback.
+    pub(crate) fn run_paged_serving_chunk_with_layer_trace_synchronized(
+        &mut self,
+        input: &RuntimeBuffer,
+        prefix_position: usize,
+        caches: &mut [PagedDecodeState],
+        stream: &mut RuntimeStream,
+    ) -> Result<(Sq8ServingChunkExecutionReport, Vec<Sq8LayerRuntimeTrace>), String> {
+        self.run_paged_serving_chunk_common_synchronized(
+            input,
+            prefix_position,
+            caches,
+            true,
+            stream,
+        )
+    }
+
+    fn run_paged_serving_chunk_common_synchronized(
+        &mut self,
+        input: &RuntimeBuffer,
+        prefix_position: usize,
+        caches: &mut [PagedDecodeState],
+        capture_layer_trace: bool,
+        stream: &mut RuntimeStream,
+    ) -> Result<(Sq8ServingChunkExecutionReport, Vec<Sq8LayerRuntimeTrace>), String> {
         self.validate_runtime_contract()?;
         self.state.ensure_usable()?;
         if !self.paged_m1_sequence_active {
@@ -1229,6 +1266,8 @@ impl Qwen3Sq8StackRuntime {
 
         let profile = Sq8LayerExecutionProfile::Rdna4W8a8BlockCk;
         let mut layer_reports = Vec::with_capacity(QWEN3_14B_SQ8_STACK_LAYERS);
+        let mut layer_traces =
+            Vec::with_capacity(usize::from(capture_layer_trace) * QWEN3_14B_SQ8_STACK_LAYERS);
         for (layer_index, cache) in caches.iter_mut().enumerate() {
             match self.enqueue_layer_and_copy_cached_prefix_chunk(
                 layer_index,
@@ -1239,6 +1278,12 @@ impl Qwen3Sq8StackRuntime {
             ) {
                 Ok(report) => layer_reports.push(report),
                 Err(err) => return Err(self.poison_after_stream_recovery(stream, err)),
+            }
+            if capture_layer_trace {
+                match self.workspace.read_trace(stream) {
+                    Ok(trace) => layer_traces.push(trace),
+                    Err(err) => return Err(self.poison_after_stream_recovery(stream, err)),
+                }
             }
         }
         if let Err(err) = stream.synchronize() {
@@ -1284,7 +1329,7 @@ impl Qwen3Sq8StackRuntime {
         self.last_execution_report = Some(stack);
         self.last_serving_chunk_report = Some(report.clone());
         self.next_paged_decode_position = Some(next_position);
-        Ok(report)
+        Ok((report, layer_traces))
     }
 
     pub(crate) fn run_paged_decode_optimized_synchronized(

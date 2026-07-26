@@ -9,6 +9,13 @@
 
 use ullm_runtime_sys::{RuntimeBuffer, RuntimeContext, RuntimeStream};
 
+/// Explicitly opt into the known-divergent multi-tile source-split path for
+/// isolated numerical evaluation.  It is deliberately not a production
+/// selector: absent (or any value other than exactly `1`) retains the direct
+/// containment fallback.
+pub const SQ8_PAGED_DECODE_SPLIT_MULTITILE_EVALUATION_ENV: &str =
+    "ULLM_EXPERIMENTAL_SQ8_PAGED_DECODE_SPLIT_ALLOW_MULTITILE";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PagedDecodeShape {
     pub block_size: usize,
@@ -2493,7 +2500,11 @@ impl PagedDecodeState {
         softmax_scale: f32,
     ) -> Result<(), String> {
         if let Some(split) = self.split_decode.as_mut() {
-            if cache_len <= split.source_tile {
+            let allow_multitile_evaluation = matches!(
+                std::env::var(SQ8_PAGED_DECODE_SPLIT_MULTITILE_EVALUATION_ENV).as_deref(),
+                Ok("1")
+            );
+            if cache_len <= split.source_tile || allow_multitile_evaluation {
                 return ullm_runtime_sys::paged_decode_attn_split_f32(
                     &self.q_buffer,
                     &self.k_cache_buffer,
@@ -2527,6 +2538,9 @@ impl PagedDecodeState {
         // Retain the experiment only for the one-tile case, where it follows
         // the direct source order exactly; multi-tile requests deliberately
         // reuse the established direct kernel until an exact-state merge exists.
+        // The one exception is the exact-`1` test-only environment above,
+        // whose sole purpose is to make the known-divergent path capturable
+        // by the v0.2 numerical harness without changing any default.
         ullm_runtime_sys::paged_decode_attn_f32(
             &self.q_buffer,
             &self.k_cache_buffer,
