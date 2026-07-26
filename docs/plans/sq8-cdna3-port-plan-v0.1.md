@@ -875,3 +875,52 @@ recovered, so whether the 10--20 minute estimate was achieved is unconfirmed.
 The rental did establish the A′ physical fragment and CPU-differential
 sub-gates. It did not close the Phase 3 or Phase 4 exit gates and changes
 nothing about Phase 5 authority.
+
+## 2026-07-26 offline closure for the next MI300X rental
+
+The B-control discrepancy is now identified offline. It was not an OCP/FNUZ
+scale compensation issue: B does not prepack to FNUZ. The hipBLAS call was
+viewing row-major `W[N,K]` as column-major with `OP_N, lda=N`, so it read a
+strided permutation rather than `W`. For the retained `k_or_v_tail_id1`
+fixture this retained the K=0 term `0.03125` and read zero instead of the
+final-K term `0.5`, exactly explaining the observed `0.5` delta. The control
+now uses the row/column contract `OP_T/OP_N`, `m=N,n=M,k=K`,
+`lda=ldb=K,ldc=N`. A CPU oracle copies the full physical fixture, reproduces
+the old `0.03125`, and verifies the corrected `0.53125`; the repaired path is
+still **unverified on gfx942 hardware**.
+
+Offline scope was widened without a GPU launch. The native
+`rocm-ck-gfx942-aprime` feature now builds the A′ and repaired B wrappers for
+`GPU_ARCH=gfx942`; an exact `HipRtcRuntime` audit compiled all 27 current
+generic SQ8_0 attention, normalization, activation, matvec, paged, and
+Qwen3.5 source programs for gfx942. The linked A′ binary contains the four
+selected CK contracts and static disassembly reports 912
+`v_mfma_f32_16x16x32_fp8_fp8` instructions over two embedded gfx942 code
+objects. Its CK resource metadata has no private allocation or register
+spills and a largest observed LDS allocation of 49,152 B below the installed
+ROCm 65,536 B limit. This is a static single-workgroup feasibility result, not
+an active-block/CU measurement; occupancy/residency remains a rental-only
+gate.
+
+The present SQ8_0 full-model integration continues to fail closed on the
+R9700/gfx1201 identity and has no gfx942 A′ model profile. Generic HIPRTC
+compile success is therefore not a full-model gfx942 claim. No attempt was
+made to change that dispatch boundary or any service/activation state.
+
+`tools/run-sq8-cdna3-mi300x-validation.sh` is the resumable P0 runner for
+the next rental. It records per-stage timing and source fingerprint, uses a
+rental-only Cargo linker/rustflags override rather than changing the local
+clang+mold configuration, runs all nonphysical stages with
+`HIP_VISIBLE_DEVICES=-1`, and unsets `ULLM_SMOKE_SKIP_B_CONTROL` for the only
+physical stage. Its P0 order is preflight, CPU oracle, HIPRTC, build, ISA,
+then physical A′/B; model/image downloads, external-engine sweeps, profiler
+work, full-model work, and handwritten A are explicitly deferred. With a
+prewarmed checkout/cache the conservative P0 estimate is 45--90 minutes
+(60--100 minutes if the remote build is cold). The prior rental's per-stage
+timestamps were not preserved, so this is a forecast rather than a measured
+replacement for its approximately two-hour lease/operational five-hour
+setup history.
+
+Plan A remains the intended production direction, but no hand-written CDNA3
+MFMA skeleton was started in this offline pass. The A′/B physical decision and
+the missing full-model integration gate take precedence.
