@@ -7,16 +7,17 @@
 //! `HIP_VISIBLE_DEVICES=2`; this binary then requires that runtime-visible
 //! device 0 reports `gfx1201`.  It never starts or contacts a serving service.
 
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use std::env;
 use std::fs;
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Instant;
 
+use ullm_engine::kv_cache_dtype::KvCacheDtypes;
 use ullm_engine::qwen35_moe_aq4_runtime::{
-    QWEN35_MOE_DEFAULT_CONTEXT_LENGTH, QWEN35_MOE_DEFAULT_KV_BLOCK_SIZE,
-    Qwen35MoeAq4ModelLoadConfig, Qwen35MoeAq4Runtime,
+    Qwen35MoeAq4ModelLoadConfig, Qwen35MoeAq4Runtime, QWEN35_MOE_DEFAULT_CONTEXT_LENGTH,
+    QWEN35_MOE_DEFAULT_KV_BLOCK_SIZE,
 };
 
 const DEFAULT_PACKAGE: &str =
@@ -46,6 +47,11 @@ fn main() -> ExitCode {
 
 fn run() -> Result<(), String> {
     let args = parse_args()?;
+    // Parse the exact environment contract once for the evidence record.  The
+    // resident full-attention layers read the same selectors while allocating
+    // their persistent K/V cache, so an invalid request fails before any
+    // weight residency attempt.
+    let kv_cache_dtypes = KvCacheDtypes::from_env()?;
     let load_started = Instant::now();
     let mut config =
         Qwen35MoeAq4ModelLoadConfig::production_sized(args.package_dir.clone(), args.device_index);
@@ -77,6 +83,10 @@ fn run() -> Result<(), String> {
             "required_architecture": "gfx1201"
         },
         "package_dir": args.package_dir,
+        "kv_cache": {
+            "key_dtype": kv_cache_dtypes.key.as_str(),
+            "value_dtype": kv_cache_dtypes.value.as_str(),
+        },
         "load_wall_ms": load_wall_ms,
         "residency": {
             "declared_package_bytes": residency.declared_package_bytes,
