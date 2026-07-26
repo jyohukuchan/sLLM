@@ -1,0 +1,1 @@
+throughput_source=full-model wall-clock JSON from profile binaries; no profiler range is used as throughput

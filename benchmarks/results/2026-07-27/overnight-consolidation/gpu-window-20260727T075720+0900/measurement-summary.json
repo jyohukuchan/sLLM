@@ -1,0 +1,29 @@
+{
+  "schema_version": "ullm.overnight_consolidation.measurement.v0.1",
+  "device": "R9700 (gfx1201)",
+  "candidate_worker_sha256": "5a274733710d9b80a24d34a31ec6a99ac0b2d1e8fcce45904e906926a0e2e903",
+  "runtime_selection": {
+    "format_id": "AQ4_0",
+    "paged_decode_attention": {
+      "kernel": "aq4_gqa_grouped_split",
+      "split_tile": 128
+    },
+    "kv_cache_dtype": "F32 (default; all ULLM_KV_CACHE_* selectors absent)"
+  },
+  "throughput_method": "Full-model profile wall-clock JSON; no profiler range time was used as throughput.",
+  "decode": {
+    "context_length": 1339,
+    "warmup_steps": 6,
+    "measured_steps_per_run": 32,
+    "runs_tokens_per_second": [77.90883285135399, 77.76399168012772],
+    "mean_tokens_per_second": 77.83641226574085,
+    "weighted_tokens_per_second": 77.83634488415082
+  },
+  "prefill": {
+    "tokens": 2048,
+    "chunk_width": 128,
+    "elapsed_seconds": 2.099604805,
+    "tokens_per_second": 975.4216579819649
+  },
+  "result": "Measured decode is approximately 78 tok/s and prefill is within the 970-1020 tok/s reference band. These values are recorded evidence, not a numeric promotion gate."
+}

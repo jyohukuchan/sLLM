@@ -1,0 +1,34 @@
+{
+  "schema_version": "ullm.aq4.overnight_consolidation_provenance.v0.1",
+  "recorded_at": "2026-07-27T07:57:20+09:00",
+  "base_commit": "840a1c7a2fecef6063433b7ffc96b9298840154f",
+  "integrated_main_commits": [
+    "cd7c1768",
+    "f6b58e6c",
+    "2031e968",
+    "b46cc8ac",
+    "d8389e59",
+    "1c660223"
+  ],
+  "build": {
+    "source_worktree": "/tmp/ullm-overnight-consolidation-source-840a1c7a",
+    "target_directory": "/tmp/ullm-overnight-consolidation-target-840a1c7a",
+    "worker_sha256": "5a274733710d9b80a24d34a31ec6a99ac0b2d1e8fcce45904e906926a0e2e903"
+  },
+  "release": {
+    "id": "aq4-consolidated-840a1c7a-5a274733",
+    "worker": "/opt/ullm/aq4-overnight-consolidation-v0.1/releases/aq4-consolidated-840a1c7a-5a274733/ullm-aq4-worker",
+    "owner": "root:root",
+    "mode": "0555"
+  },
+  "runtime_selection": {
+    "format_id": "AQ4_0",
+    "device": "gfx1201",
+    "paged_decode_attention": {
+      "kernel": "aq4_gqa_grouped_split",
+      "split_tile": 128
+    },
+    "kv_cache_dtype": "F32",
+    "fp16_or_fp8_kv_enabled": false
+  }
+}
