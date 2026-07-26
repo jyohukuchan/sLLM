@@ -38,11 +38,14 @@ fn main() {
         root.join("runtime/src/ullm_runtime_api_aq4.inc"),
         root.join("runtime/src/ullm_runtime_api_linear_attn_prepare.inc"),
         root.join("runtime/src/ullm_runtime_api_primitives.inc"),
+        root.join("runtime/src/ullm_runtime_api_moe.inc"),
         root.join("runtime/src/ullm_runtime_api_sq8_0.inc"),
         root.join("runtime/src/ullm_runtime_api_sq8_1.inc"),
         root.join("runtime/src/ullm_runtime_api_attention.inc"),
         root.join("runtime/src/ullm_runtime_api_linear_attn.inc"),
         root.join("runtime/src/ullm_runtime_api_smoke.inc"),
+        root.join("runtime/src/moe_gfx1201.h"),
+        root.join("runtime/src/moe_gfx1201.hip.cpp"),
     ];
 
     println!("cargo:rerun-if-changed={}", header.display());
@@ -58,6 +61,7 @@ fn main() {
         std::env::var_os("CARGO_FEATURE_ROCM_CK_GFX942_APRIME").is_some();
     let fp32_reference_gfx1201_enabled =
         std::env::var_os("CARGO_FEATURE_ROCM_FP32_REFERENCE_GFX1201").is_some();
+    let moe_gfx1201_enabled = std::env::var_os("CARGO_FEATURE_ROCM_MOE_GFX1201").is_some();
     if ck_gfx1201_enabled && ck_gfx942_aprime_enabled {
         panic!("Cargo features rocm-ck-gfx1201 and rocm-ck-gfx942-aprime are mutually exclusive");
     }
@@ -91,6 +95,9 @@ fn main() {
     }
     if ck_gfx942_aprime_enabled {
         runtime.define("ULLM_RUNTIME_ROCM_CK_GFX942_APRIME", "1");
+    }
+    if moe_gfx1201_enabled {
+        runtime.define("ULLM_RUNTIME_ROCM_MOE_GFX1201", "1");
     }
     runtime.compile("ullm_runtime");
 
@@ -246,6 +253,40 @@ fn main() {
         );
         println!("cargo:rustc-link-lib=dylib=amdhip64");
         println!("cargo:rustc-link-lib=dylib=hipblas");
+        println!("cargo:rustc-link-arg=-Wl,--gc-sections");
+    }
+
+    if moe_gfx1201_enabled {
+        let gpu_arch = std::env::var("GPU_ARCH").unwrap_or_else(|_| "gfx1201".to_string());
+        if gpu_arch != "gfx1201" {
+            panic!("Cargo feature rocm-moe-gfx1201 requires GPU_ARCH=gfx1201");
+        }
+        let hipcc = rocm_path.join("bin/hipcc");
+        if !hipcc.is_file() {
+            panic!("ROCm hipcc was not found at {}", hipcc.display());
+        }
+
+        cc::Build::new()
+            .cpp(true)
+            .compiler(hipcc)
+            .include(root.join("runtime/src"))
+            .include(rocm_path.join("include"))
+            .file(root.join("runtime/src/moe_gfx1201.hip.cpp"))
+            .flag("-std=c++20")
+            .flag("-O2")
+            .flag("-Wall")
+            .flag("-Wextra")
+            .flag("-Wpedantic")
+            .flag("-ffunction-sections")
+            .flag("-fdata-sections")
+            .flag(&format!("--offload-arch={gpu_arch}"))
+            .compile("ullm_runtime_moe_gfx1201");
+
+        println!(
+            "cargo:rustc-link-search=native={}",
+            rocm_path.join("lib").display()
+        );
+        println!("cargo:rustc-link-lib=dylib=amdhip64");
         println!("cargo:rustc-link-arg=-Wl,--gc-sections");
     }
 

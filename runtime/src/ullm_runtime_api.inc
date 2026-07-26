@@ -8,6 +8,7 @@
 #include "ullm_runtime_api_aq4.inc"
 #include "ullm_runtime_api_linear_attn_prepare.inc"
 #include "ullm_runtime_api_primitives.inc"
+#include "ullm_runtime_api_moe.inc"
 #include "ullm_runtime_api_sq8_0.inc"
 #include "ullm_runtime_api_sq8_1.inc"
 #include "ullm_runtime_api_attention.inc"

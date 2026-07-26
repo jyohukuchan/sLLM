@@ -34,6 +34,17 @@ typedef enum ullm_sq8_ck_implementation {
 } ullm_sq8_ck_implementation;
 
 /*
+ * Storage type for MoE matrix tensors. MoE activations, routing scores, and
+ * outputs are always F32 in the correctness-first ABI; only the checkpoint
+ * weights use this selector. The BF16 value is raw IEEE BF16, little-endian,
+ * exactly as stored in safetensors.
+ */
+typedef enum ullm_moe_weight_dtype {
+    ULLM_MOE_WEIGHT_DTYPE_F32 = 0,
+    ULLM_MOE_WEIGHT_DTYPE_BF16 = 1,
+} ullm_moe_weight_dtype;
+
+/*
  * Stable, test-visible AQ4 batch dispatch classification. New values are additive;
  * the existing ABI remains version 1 because no function signature or prior value changed.
  */
@@ -873,6 +884,85 @@ ullm_status ullm_runtime_bf16_row_f32(
     size_t rows,
     size_t cols,
     size_t row_index,
+    ullm_runtime_buffer *output_buffer,
+    ullm_runtime_stream *stream);
+
+/*
+ * Qwen3.5 MoE correctness-first primitives.
+ *
+ * The router weight layout is [num_experts, hidden_size]. `routing_scores`
+ * and `selected_expert_ids` are [tokens, top_k], row-major. IDs are int32.
+ * `boundary_tie_flags` is [tokens] uint32: zero means the kth boundary was
+ * unique; one means that the kth probability tied with an unselected expert.
+ * HF/PyTorch does not specify a stable tie order, so full forward execution
+ * must fail closed when this flag is nonzero instead of assigning a private
+ * semantic tie-break.
+ */
+ullm_status ullm_runtime_moe_route_f32(
+    const ullm_runtime_buffer *hidden_buffer,
+    const ullm_runtime_buffer *router_weight_buffer,
+    ullm_moe_weight_dtype router_weight_dtype,
+    size_t tokens,
+    size_t hidden_size,
+    size_t num_experts,
+    size_t top_k,
+    ullm_runtime_buffer *routing_scores_buffer,
+    ullm_runtime_buffer *selected_expert_ids_buffer,
+    ullm_runtime_buffer *boundary_tie_flags_buffer,
+    ullm_runtime_stream *stream);
+
+/* Repeats each token row `top_k` times, producing assignment-major [tokens*top_k, hidden_size]. */
+ullm_status ullm_runtime_moe_gather_f32(
+    const ullm_runtime_buffer *hidden_buffer,
+    size_t tokens,
+    size_t hidden_size,
+    size_t top_k,
+    ullm_runtime_buffer *gathered_hidden_buffer,
+    ullm_runtime_stream *stream);
+
+/*
+ * Generic variable-group GEMM. `weight_buffer` is row-major
+ * [num_experts, rows_per_expert, cols]. `expert_ids_buffer` is int32
+ * [assignments]. Input is [assignments, cols], output is
+ * [assignments, rows_per_expert]. Empty expert groups are valid because no
+ * assignment names them.
+ */
+ullm_status ullm_runtime_moe_grouped_gemm_f32(
+    const ullm_runtime_buffer *weight_buffer,
+    ullm_moe_weight_dtype weight_dtype,
+    const ullm_runtime_buffer *expert_ids_buffer,
+    const ullm_runtime_buffer *input_buffer,
+    size_t assignments,
+    size_t num_experts,
+    size_t rows_per_expert,
+    size_t cols,
+    ullm_runtime_buffer *output_buffer,
+    ullm_runtime_stream *stream);
+
+/* Splits [assignments, 2*intermediate_size] into gate/up halves and writes SiLU(gate)*up. */
+ullm_status ullm_runtime_moe_gated_silu_f32(
+    const ullm_runtime_buffer *gate_up_buffer,
+    size_t assignments,
+    size_t intermediate_size,
+    ullm_runtime_buffer *output_buffer,
+    ullm_runtime_stream *stream);
+
+/* Reduces assignment-major [tokens*top_k, hidden_size] using [tokens, top_k] routing scores. */
+ullm_status ullm_runtime_moe_scatter_weighted_f32(
+    const ullm_runtime_buffer *expert_output_buffer,
+    const ullm_runtime_buffer *routing_scores_buffer,
+    size_t tokens,
+    size_t top_k,
+    size_t hidden_size,
+    ullm_runtime_buffer *output_buffer,
+    ullm_runtime_stream *stream);
+
+/* Broadcasts one shared-expert gate per token: sigmoid(gate[t]) * input[t,:]. */
+ullm_status ullm_runtime_moe_sigmoid_gate_f32(
+    const ullm_runtime_buffer *gate_buffer,
+    const ullm_runtime_buffer *input_buffer,
+    size_t tokens,
+    size_t hidden_size,
     ullm_runtime_buffer *output_buffer,
     ullm_runtime_stream *stream);
 
