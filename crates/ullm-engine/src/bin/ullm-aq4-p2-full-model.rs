@@ -3117,6 +3117,7 @@ mod tests {
                     device: "cpu".into(),
                     execution_profile: "fixture".into(),
                 },
+                execution: None,
             },
             product: ullm_engine::served_model::ProductContract {
                 root: PathBuf::from("."),

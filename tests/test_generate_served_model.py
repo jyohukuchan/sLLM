@@ -225,6 +225,21 @@ def test_generate_hashes_live_files_and_passes_strict_loader(tmp_path: Path) -> 
 
 def test_generator_materializes_v2_reasoning_profile(tmp_path: Path) -> None:
     profile_path = write_sq8_v2_ephemeral_profile(tmp_path)
+    profile = json.loads(profile_path.read_text(encoding="utf-8"))
+    profile["worker"]["identity"] = {
+        "device": "gfx1201",
+        "execution_profile": "rdna4_w8a8_block_ck",
+    }
+    profile["worker"]["required_environment"] = [
+        "ULLM_REQUIRE_HIP_PAGED_DECODE_SPLIT_KERNEL"
+    ]
+    profile["worker"]["execution"] = {
+        "paged_decode_attention": {
+            "kernel": "gqa_grouped_split",
+            "split_tile": 20,
+        }
+    }
+    profile_path.write_text(json.dumps(profile), encoding="utf-8")
     output = tmp_path / "served-model-v2.json"
 
     GENERATOR.generate_sq8_promotion_ephemeral(profile_path, output)
@@ -232,6 +247,7 @@ def test_generator_materializes_v2_reasoning_profile(tmp_path: Path) -> None:
 
     assert document["schema_version"] == "ullm.served_model.v2"
     assert document["worker"]["protocol"] == "ullm.worker.v2"
+    assert document["worker"]["execution"] == profile["worker"]["execution"]
     assert document["reasoning"]["dialect_id"] == "synthetic.single-token.v1"
 
 
@@ -305,6 +321,21 @@ def test_v2_generator_profile_requires_reasoning(tmp_path: Path) -> None:
     profile_path.write_text(json.dumps(profile), encoding="utf-8")
 
     with pytest.raises(GENERATOR.GenerationError, match="requires reasoning"):
+        GENERATOR.materialize(profile_path)
+
+
+def test_generator_rejects_execution_settings_on_a_v1_profile(tmp_path: Path) -> None:
+    profile_path = write_profile(tmp_path)
+    profile = json.loads(profile_path.read_text(encoding="utf-8"))
+    profile["worker"]["execution"] = {
+        "paged_decode_attention": {
+            "kernel": "gqa_grouped_split",
+            "split_tile": 20,
+        }
+    }
+    profile_path.write_text(json.dumps(profile), encoding="utf-8")
+
+    with pytest.raises(GENERATOR.GenerationError, match="requires ullm.worker.v2"):
         GENERATOR.materialize(profile_path)
 
 

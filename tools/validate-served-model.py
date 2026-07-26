@@ -51,6 +51,7 @@ def validation_summary(manifest: Path) -> dict[str, Any]:
     loader = load_gateway_validator()
     model = loader.load_served_model(manifest)
     artifact = model.product.artifact
+    execution = model.worker.execution
     return {
         "schema_version": SUMMARY_SCHEMA,
         "validated": True,
@@ -63,6 +64,16 @@ def validation_summary(manifest: Path) -> dict[str, Any]:
             "protocol": model.worker.protocol,
             "device": model.worker.identity.device,
             "execution_profile": model.worker.identity.execution_profile,
+            "execution": (
+                None
+                if execution is None
+                else {
+                    "paged_decode_attention": {
+                        "kernel": execution.paged_decode_attention.kernel,
+                        "split_tile": execution.paged_decode_attention.split_tile,
+                    }
+                }
+            ),
         },
         "product": {
             "root": os.fspath(model.product.root),

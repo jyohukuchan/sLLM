@@ -77,6 +77,39 @@ def _write(path: Path, value: dict[str, Any]) -> None:
     )
 
 
+def _v2_reasoning() -> dict[str, Any]:
+    return {
+        "enabled_by_default": False,
+        "dialect_id": "synthetic.single-token.v1",
+        "start_token_ids": [151667],
+        "end_token_ids": [151668],
+        "forced_end_token_ids": [151668],
+        "initial_phase": "reasoning",
+        "eos_policy": "close",
+        "effort_budgets": {"low": 32, "medium": 64, "high": 128},
+        "max_budget_tokens": 128,
+        "reserved_answer_tokens": 1,
+        "history_reasoning_policy": "omit",
+    }
+
+
+def _sq8_v2_grouped_execution_document(path: Path) -> dict[str, Any]:
+    value = _document(path)
+    value["schema_version"] = "ullm.served_model.v2"
+    value["worker"]["protocol"] = "ullm.worker.v2"
+    value["worker"]["required_environment"].append(
+        "ULLM_REQUIRE_HIP_PAGED_DECODE_SPLIT_KERNEL"
+    )
+    value["worker"]["execution"] = {
+        "paged_decode_attention": {
+            "kernel": "gqa_grouped_split",
+            "split_tile": 20,
+        }
+    }
+    value["reasoning"] = _v2_reasoning()
+    return value
+
+
 def test_virtual_format_changes_only_public_and_format_contracts() -> None:
     existing = _document(FIXTURES / "sq8/served-model.json")
     virtual = _document(FIXTURES / "sq8/served-model-fq6.json")
@@ -126,6 +159,104 @@ def test_v2_manifest_loads_reasoning_dialect_without_changing_v1_loader() -> Non
     assert loaded.reasoning_dialect is not None
     assert loaded.reasoning_dialect.identity == "synthetic.single-token.v1"
     assert loaded.reasoning_dialect.effort_budgets[-1] == ("high", 128)
+
+
+def test_v2_grouped_decode_execution_is_typed_and_binds_the_split_guard(
+    tmp_path: Path,
+) -> None:
+    path = _copy_fixture(tmp_path)
+    _write(path, _sq8_v2_grouped_execution_document(path))
+
+    loaded = load_served_model(path)
+
+    assert loaded.worker.execution is not None
+    assert loaded.worker.execution.paged_decode_attention.kernel == "gqa_grouped_split"
+    assert loaded.worker.execution.paged_decode_attention.split_tile == 20
+    assert loaded.worker.execution.environment == {
+        "ULLM_EXPERIMENTAL_SQ8_PAGED_DECODE_SPLIT_TILE": "20",
+        "ULLM_EXPERIMENTAL_PAGED_DECODE_GQA_GROUPED_SPLIT": "1",
+        "ULLM_EXPERIMENTAL_SQ8_PAGED_DECODE_SPLIT_ALLOW_MULTITILE": "1",
+    }
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda value: value["worker"]["execution"].__setitem__("unknown", True),
+        lambda value: value["worker"]["execution"][
+            "paged_decode_attention"
+        ].__setitem__("kernel", "direct"),
+        lambda value: value["worker"]["execution"][
+            "paged_decode_attention"
+        ].__setitem__("split_tile", 21),
+        lambda value: value["worker"]["execution"][
+            "paged_decode_attention"
+        ].__setitem__("split_tile", True),
+    ],
+)
+def test_v2_grouped_decode_execution_rejects_unknown_and_invalid_values(
+    tmp_path: Path, mutate: Callable[[dict[str, Any]], Any]
+) -> None:
+    path = _copy_fixture(tmp_path)
+    value = _sq8_v2_grouped_execution_document(path)
+    mutate(value)
+    _write(path, value)
+
+    with pytest.raises(ServedModelError):
+        load_served_model(path)
+
+
+def test_execution_is_rejected_by_v1_and_non_sq8_v2_manifests(tmp_path: Path) -> None:
+    path = _copy_fixture(tmp_path)
+    value = _document(path)
+    value["worker"]["execution"] = {
+        "paged_decode_attention": {"kernel": "gqa_grouped_split", "split_tile": 20}
+    }
+    _write(path, value)
+    with pytest.raises(ServedModelError):
+        load_served_model(path)
+
+    path = _copy_fixture(tmp_path, "aq4")
+    value = _document(path)
+    value["schema_version"] = "ullm.served_model.v2"
+    value["worker"]["protocol"] = "ullm.worker.v2"
+    value["worker"]["required_environment"].append(
+        "ULLM_REQUIRE_HIP_PAGED_DECODE_SPLIT_KERNEL"
+    )
+    value["worker"]["execution"] = {
+        "paged_decode_attention": {"kernel": "gqa_grouped_split", "split_tile": 20}
+    }
+    value["reasoning"] = {
+        **_v2_reasoning(),
+        "start_token_ids": [248068],
+        "end_token_ids": [248069],
+        "forced_end_token_ids": [248069],
+    }
+    _write(path, value)
+    with pytest.raises(ServedModelError, match="SQ8_0"):
+        load_served_model(path)
+
+
+def test_required_environment_cannot_select_manifest_execution(tmp_path: Path) -> None:
+    path = _copy_fixture(tmp_path)
+    value = _sq8_v2_grouped_execution_document(path)
+    value["worker"]["required_environment"].append(
+        "ULLM_EXPERIMENTAL_PAGED_DECODE_GQA_PIPELINED_SPLIT"
+    )
+    _write(path, value)
+
+    with pytest.raises(ServedModelError, match="cannot select manifest execution"):
+        load_served_model(path)
+
+
+def test_execution_requires_the_admitted_sq8_worker_profile(tmp_path: Path) -> None:
+    path = _copy_fixture(tmp_path)
+    value = _sq8_v2_grouped_execution_document(path)
+    value["worker"]["identity"]["execution_profile"] = "other"
+    _write(path, value)
+
+    with pytest.raises(ServedModelError, match="rdna4_w8a8_block_ck"):
+        load_served_model(path)
 
 
 @pytest.mark.parametrize("schema,worker_protocol", [("ullm.served_model.v1", "ullm.worker.v2"), ("ullm.served_model.v2", "ullm.worker.v1")])

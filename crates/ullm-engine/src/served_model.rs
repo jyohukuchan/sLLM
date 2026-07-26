@@ -27,6 +27,20 @@ const MAX_ARGUMENTS: usize = 128;
 const MAX_REQUIRED_ENVIRONMENT: usize = 128;
 const HASH_CHUNK_BYTES: usize = 1024 * 1024;
 
+/// Process selectors owned by the served-model execution contract.
+///
+/// The gateway clears all of these before it spawns a manifest-mode worker;
+/// the worker independently checks them so direct invocation cannot silently
+/// select a different attention body.
+pub const MANIFEST_EXECUTION_ENVIRONMENT: [&str; 4] = [
+    "ULLM_EXPERIMENTAL_SQ8_PAGED_DECODE_SPLIT_TILE",
+    "ULLM_EXPERIMENTAL_PAGED_DECODE_GQA_GROUPED_SPLIT",
+    "ULLM_EXPERIMENTAL_PAGED_DECODE_GQA_PIPELINED_SPLIT",
+    "ULLM_EXPERIMENTAL_SQ8_PAGED_DECODE_SPLIT_ALLOW_MULTITILE",
+];
+const PAGED_DECODE_SPLIT_GUARD: &str = "ULLM_REQUIRE_HIP_PAGED_DECODE_SPLIT_KERNEL";
+const PAGED_DECODE_SPLIT_EXECUTION_PROFILE: &str = "rdna4_w8a8_block_ck";
+
 pub const LEGACY_MODEL_ENVIRONMENT: &[&str] = &[
     "ULLM_MODEL_ID",
     "ULLM_MODEL_REVISION",
@@ -109,6 +123,17 @@ pub struct WorkerIdentity {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PagedDecodeAttentionExecution {
+    pub kernel: String,
+    pub split_tile: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkerExecution {
+    pub paged_decode_attention: PagedDecodeAttentionExecution,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkerContract {
     pub protocol: String,
     pub binary: PathBuf,
@@ -116,6 +141,7 @@ pub struct WorkerContract {
     pub arguments: Vec<String>,
     pub required_environment: Vec<String>,
     pub identity: WorkerIdentity,
+    pub execution: Option<WorkerExecution>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -271,6 +297,8 @@ impl ServedModel {
                 "manifest format/product shape does not match worker backend".into(),
             ));
         }
+        validate_execution_contract(&self.worker, kind)?;
+        validate_execution_environment(self.worker.execution.as_ref())?;
         for name in &self.worker.required_environment {
             if std::env::var(name).ok().as_deref() != Some("1") {
                 return Err(ServedModelError(format!(
@@ -374,6 +402,7 @@ pub fn load_served_model_bytes(manifest_path: impl AsRef<Path>, raw: &[u8]) -> R
             "manifest schema_version and worker.protocol must be version aligned".into(),
         ));
     }
+    validate_execution_manifest_contract(&worker, &format)?;
     let product = parse_product(raw_manifest.product, base)?;
     let promotion = parse_promotion(raw_manifest.promotion, base)?;
     Ok(ServedModel {
@@ -483,6 +512,7 @@ struct RawWorker {
     arguments: Vec<String>,
     required_environment: Vec<String>,
     identity: RawWorkerIdentity,
+    execution: Option<RawWorkerExecution>,
 }
 
 #[derive(Deserialize)]
@@ -490,6 +520,19 @@ struct RawWorker {
 struct RawWorkerIdentity {
     device: String,
     execution_profile: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawWorkerExecution {
+    paged_decode_attention: RawPagedDecodeAttentionExecution,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawPagedDecodeAttentionExecution {
+    kernel: String,
+    split_tile: usize,
 }
 
 #[derive(Deserialize)]
@@ -719,6 +762,7 @@ fn parse_worker(raw: RawWorker, base: &Path) -> Result<WorkerContract> {
             ));
         }
     }
+    let execution = raw.execution.map(parse_worker_execution).transpose()?;
     Ok(WorkerContract {
         protocol: bounded_text(raw.protocol, "worker.protocol", 128)?,
         binary,
@@ -733,7 +777,136 @@ fn parse_worker(raw: RawWorker, base: &Path) -> Result<WorkerContract> {
                 256,
             )?,
         },
+        execution,
     })
+}
+
+fn parse_worker_execution(raw: RawWorkerExecution) -> Result<WorkerExecution> {
+    let kernel = bounded_text(
+        raw.paged_decode_attention.kernel,
+        "worker.execution.paged_decode_attention.kernel",
+        128,
+    )?;
+    if kernel != "gqa_grouped_split" {
+        return Err(ServedModelError(
+            "worker.execution.paged_decode_attention.kernel is unsupported".into(),
+        ));
+    }
+    let split_tile = raw.paged_decode_attention.split_tile;
+    if !matches!(split_tile, 20 | 128 | 256 | 512) {
+        return Err(ServedModelError(
+            "worker.execution.paged_decode_attention.split_tile is unsupported".into(),
+        ));
+    }
+    Ok(WorkerExecution {
+        paged_decode_attention: PagedDecodeAttentionExecution { kernel, split_tile },
+    })
+}
+
+fn validate_execution_manifest_contract(
+    worker: &WorkerContract,
+    format: &FormatContract,
+) -> Result<()> {
+    if worker
+        .required_environment
+        .iter()
+        .any(|name| MANIFEST_EXECUTION_ENVIRONMENT.contains(&name.as_str()))
+    {
+        return Err(ServedModelError(
+            "worker.required_environment cannot select manifest execution".into(),
+        ));
+    }
+    if worker.execution.is_none() {
+        return Ok(());
+    }
+    if format.format_id != "SQ8_0" {
+        return Err(ServedModelError(
+            "worker.execution is currently supported only for SQ8_0".into(),
+        ));
+    }
+    if worker.identity.device != "gfx1201" {
+        return Err(ServedModelError(
+            "worker.execution requires the gfx1201 SQ8_0 worker identity".into(),
+        ));
+    }
+    if worker.identity.execution_profile != PAGED_DECODE_SPLIT_EXECUTION_PROFILE {
+        return Err(ServedModelError(
+            "worker.execution requires the rdna4_w8a8_block_ck worker profile".into(),
+        ));
+    }
+    if !worker
+        .required_environment
+        .iter()
+        .any(|name| name == PAGED_DECODE_SPLIT_GUARD)
+    {
+        return Err(ServedModelError(
+            "worker.execution requires the paged-decode split HIP guard".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_execution_contract(worker: &WorkerContract, kind: WorkerBackendKind) -> Result<()> {
+    if worker.execution.is_some() && kind != WorkerBackendKind::Sq8 {
+        return Err(ServedModelError(
+            "worker.execution is not supported by this worker backend".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn execution_environment_values(
+    execution: Option<&WorkerExecution>,
+) -> BTreeMap<&'static str, String> {
+    let mut values = BTreeMap::new();
+    if let Some(execution) = execution {
+        let attention = &execution.paged_decode_attention;
+        values.insert(
+            "ULLM_EXPERIMENTAL_SQ8_PAGED_DECODE_SPLIT_TILE",
+            attention.split_tile.to_string(),
+        );
+        values.insert(
+            "ULLM_EXPERIMENTAL_PAGED_DECODE_GQA_GROUPED_SPLIT",
+            "1".into(),
+        );
+        values.insert(
+            "ULLM_EXPERIMENTAL_SQ8_PAGED_DECODE_SPLIT_ALLOW_MULTITILE",
+            "1".into(),
+        );
+    }
+    values
+}
+
+fn validate_execution_environment_with<F>(
+    execution: Option<&WorkerExecution>,
+    mut lookup: F,
+) -> Result<()>
+where
+    F: FnMut(&str) -> Option<std::ffi::OsString>,
+{
+    let expected = execution_environment_values(execution);
+    for name in MANIFEST_EXECUTION_ENVIRONMENT {
+        match (expected.get(name), lookup(name)) {
+            (None, None) => {}
+            (None, Some(_)) => {
+                return Err(ServedModelError(
+                    "manifest execution selector is set without authorization".into(),
+                ));
+            }
+            (Some(expected_value), Some(actual))
+                if actual == std::ffi::OsStr::new(expected_value) => {}
+            (Some(_), _) => {
+                return Err(ServedModelError(
+                    "manifest execution selector does not match its contract".into(),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_execution_environment(execution: Option<&WorkerExecution>) -> Result<()> {
+    validate_execution_environment_with(execution, |name| std::env::var_os(name))
 }
 
 fn parse_product(raw: RawProduct, base: &Path) -> Result<ProductContract> {
@@ -858,23 +1031,35 @@ fn validate_exact_shape(value: &Value) -> Result<()> {
         &["add_generation_prompt", "enable_thinking"],
         "tokenizer.template_options",
     )?;
-    exact_keys(
-        &value["worker"],
-        &[
-            "protocol",
-            "binary",
-            "binary_sha256",
-            "arguments",
-            "required_environment",
-            "identity",
-        ],
-        "worker",
-    )?;
+    let mut worker_keys = vec![
+        "protocol",
+        "binary",
+        "binary_sha256",
+        "arguments",
+        "required_environment",
+        "identity",
+    ];
+    if schema == SERVED_MODEL_SCHEMA_VERSION_V2 && value["worker"].get("execution").is_some() {
+        worker_keys.push("execution");
+    }
+    exact_keys(&value["worker"], &worker_keys, "worker")?;
     exact_keys(
         &value["worker"]["identity"],
         &["device", "execution_profile"],
         "worker.identity",
     )?;
+    if value["worker"].get("execution").is_some() {
+        exact_keys(
+            &value["worker"]["execution"],
+            &["paged_decode_attention"],
+            "worker.execution",
+        )?;
+        exact_keys(
+            &value["worker"]["execution"]["paged_decode_attention"],
+            &["kernel", "split_tile"],
+            "worker.execution.paged_decode_attention",
+        )?;
+    }
     exact_keys(
         &value["product"],
         &["root", "artifact", "package"],
@@ -1234,6 +1419,21 @@ mod tests {
         value
     }
 
+    fn v2_manifest_with_grouped_decode_execution() -> Value {
+        let mut value = v2_manifest_value("sq8");
+        value["worker"]["required_environment"]
+            .as_array_mut()
+            .unwrap()
+            .push(Value::String(PAGED_DECODE_SPLIT_GUARD.into()));
+        value["worker"]["execution"] = serde_json::json!({
+            "paged_decode_attention": {
+                "kernel": "gqa_grouped_split",
+                "split_tile": 20
+            }
+        });
+        value
+    }
+
     fn fixture(name: &str) -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../services/openai-gateway/tests/fixtures/served-model")
@@ -1330,5 +1530,169 @@ mod tests {
             let error = load_served_model_bytes(fixture("sq8"), &raw).unwrap_err();
             assert!(error.0.contains("exactly one token"));
         }
+    }
+
+    #[test]
+    fn v2_grouped_decode_execution_is_typed_and_fail_closed() {
+        let valid = serde_json::to_vec(&v2_manifest_with_grouped_decode_execution()).unwrap();
+        let loaded = load_served_model_bytes(fixture("sq8"), &valid).unwrap();
+        assert_eq!(
+            loaded
+                .worker
+                .execution
+                .as_ref()
+                .unwrap()
+                .paged_decode_attention,
+            PagedDecodeAttentionExecution {
+                kernel: "gqa_grouped_split".into(),
+                split_tile: 20,
+            }
+        );
+
+        let mut invalid_unknown = v2_manifest_with_grouped_decode_execution();
+        invalid_unknown["worker"]["execution"]["unknown"] = Value::Null;
+        let mut invalid_kernel = v2_manifest_with_grouped_decode_execution();
+        invalid_kernel["worker"]["execution"]["paged_decode_attention"]["kernel"] =
+            Value::String("direct".into());
+        let mut invalid_tile = v2_manifest_with_grouped_decode_execution();
+        invalid_tile["worker"]["execution"]["paged_decode_attention"]["split_tile"] =
+            Value::from(21);
+        for invalid in [invalid_unknown, invalid_kernel, invalid_tile] {
+            let raw = serde_json::to_vec(&invalid).unwrap();
+            assert!(load_served_model_bytes(fixture("sq8"), &raw).is_err());
+        }
+
+        let mut v1 = serde_json::from_slice::<Value>(
+            &bounded_read(&fixture("sq8"), MAX_MANIFEST_BYTES, "fixture").unwrap(),
+        )
+        .unwrap();
+        v1["worker"]["execution"] = serde_json::json!({
+            "paged_decode_attention": {
+                "kernel": "gqa_grouped_split",
+                "split_tile": 20
+            }
+        });
+        assert!(
+            load_served_model_bytes(fixture("sq8"), &serde_json::to_vec(&v1).unwrap()).is_err()
+        );
+    }
+
+    #[test]
+    fn grouped_decode_execution_requires_sq8_and_exact_environment() {
+        let value = v2_manifest_with_grouped_decode_execution();
+        let raw = serde_json::to_vec(&value).unwrap();
+        let loaded = load_served_model_bytes(fixture("sq8"), &raw).unwrap();
+        let execution = loaded.worker.execution.as_ref();
+        let expected = execution_environment_values(execution);
+        assert_eq!(
+            expected.get("ULLM_EXPERIMENTAL_SQ8_PAGED_DECODE_SPLIT_TILE"),
+            Some(&"20".to_string())
+        );
+        assert_eq!(
+            expected.get("ULLM_EXPERIMENTAL_PAGED_DECODE_GQA_GROUPED_SPLIT"),
+            Some(&"1".to_string())
+        );
+        assert_eq!(
+            expected.get("ULLM_EXPERIMENTAL_SQ8_PAGED_DECODE_SPLIT_ALLOW_MULTITILE"),
+            Some(&"1".to_string())
+        );
+        assert!(
+            validate_execution_environment_with(execution, |name| {
+                expected
+                    .get(name)
+                    .map(|value| std::ffi::OsString::from(value.as_str()))
+            })
+            .is_ok()
+        );
+        assert!(validate_execution_environment_with(None, |_| None).is_ok());
+        assert!(
+            validate_execution_environment_with(None, |name| {
+                (name == "ULLM_EXPERIMENTAL_PAGED_DECODE_GQA_GROUPED_SPLIT")
+                    .then(|| std::ffi::OsString::from("1"))
+            })
+            .is_err()
+        );
+        assert!(
+            validate_execution_environment_with(execution, |name| {
+                if name == "ULLM_EXPERIMENTAL_SQ8_PAGED_DECODE_SPLIT_TILE" {
+                    Some(std::ffi::OsString::from("128"))
+                } else {
+                    expected
+                        .get(name)
+                        .map(|value| std::ffi::OsString::from(value.as_str()))
+                }
+            })
+            .is_err()
+        );
+        assert!(
+            validate_execution_environment_with(execution, |name| {
+                if name == "ULLM_EXPERIMENTAL_SQ8_PAGED_DECODE_SPLIT_ALLOW_MULTITILE" {
+                    None
+                } else {
+                    expected
+                        .get(name)
+                        .map(|value| std::ffi::OsString::from(value.as_str()))
+                }
+            })
+            .is_err()
+        );
+        assert!(
+            validate_execution_environment_with(execution, |name| {
+                if name == "ULLM_EXPERIMENTAL_PAGED_DECODE_GQA_PIPELINED_SPLIT" {
+                    Some(std::ffi::OsString::from("1"))
+                } else {
+                    expected
+                        .get(name)
+                        .map(|value| std::ffi::OsString::from(value.as_str()))
+                }
+            })
+            .is_err()
+        );
+
+        let mut aq4 = v2_manifest_value("aq4");
+        aq4["worker"]["required_environment"]
+            .as_array_mut()
+            .unwrap()
+            .push(Value::String(PAGED_DECODE_SPLIT_GUARD.into()));
+        aq4["worker"]["execution"] = value["worker"]["execution"].clone();
+        assert!(
+            load_served_model_bytes(fixture("aq4"), &serde_json::to_vec(&aq4).unwrap()).is_err()
+        );
+
+        let mut wrong_device = v2_manifest_with_grouped_decode_execution();
+        wrong_device["worker"]["identity"]["device"] = Value::String("gfx1030".into());
+        assert!(
+            load_served_model_bytes(fixture("sq8"), &serde_json::to_vec(&wrong_device).unwrap())
+                .is_err()
+        );
+
+        let mut wrong_profile = v2_manifest_with_grouped_decode_execution();
+        wrong_profile["worker"]["identity"]["execution_profile"] = Value::String("other".into());
+        assert!(
+            load_served_model_bytes(fixture("sq8"), &serde_json::to_vec(&wrong_profile).unwrap())
+                .is_err()
+        );
+
+        let mut missing_guard = v2_manifest_with_grouped_decode_execution();
+        missing_guard["worker"]["required_environment"] = Value::Array(Vec::new());
+        assert!(
+            load_served_model_bytes(fixture("sq8"), &serde_json::to_vec(&missing_guard).unwrap())
+                .is_err()
+        );
+
+        let mut selector_as_guard = v2_manifest_value("sq8");
+        selector_as_guard["worker"]["required_environment"]
+            .as_array_mut()
+            .unwrap()
+            .push(Value::String(
+                "ULLM_EXPERIMENTAL_PAGED_DECODE_GQA_PIPELINED_SPLIT".into(),
+            ));
+        assert!(
+            load_served_model_bytes(
+                fixture("sq8"),
+                &serde_json::to_vec(&selector_as_guard).unwrap()
+            )
+            .is_err()
+        );
     }
 }

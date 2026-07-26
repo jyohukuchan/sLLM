@@ -28,6 +28,19 @@ MAX_REQUIRED_ENVIRONMENT = 128
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 _ENVIRONMENT_NAME = re.compile(r"[A-Z_][A-Z0-9_]*\Z")
 
+# These are the only process-environment selectors a served-model manifest is
+# allowed to control.  Keep the complete set here so manifest mode can clear a
+# parent process's stale experiment state before it launches a worker.
+MANIFEST_EXECUTION_ENVIRONMENT = (
+    "ULLM_EXPERIMENTAL_SQ8_PAGED_DECODE_SPLIT_TILE",
+    "ULLM_EXPERIMENTAL_PAGED_DECODE_GQA_GROUPED_SPLIT",
+    "ULLM_EXPERIMENTAL_PAGED_DECODE_GQA_PIPELINED_SPLIT",
+    "ULLM_EXPERIMENTAL_SQ8_PAGED_DECODE_SPLIT_ALLOW_MULTITILE",
+)
+_PAGED_DECODE_SPLIT_GUARD = "ULLM_REQUIRE_HIP_PAGED_DECODE_SPLIT_KERNEL"
+_PAGED_DECODE_SPLIT_TILES = frozenset({20, 128, 256, 512})
+_PAGED_DECODE_SPLIT_EXECUTION_PROFILE = "rdna4_w8a8_block_ck"
+
 
 class ServedModelError(RuntimeError):
     """Raised when a served-model manifest or one of its resources is unsafe."""
@@ -92,6 +105,36 @@ class WorkerIdentity:
 
 
 @dataclass(frozen=True, slots=True)
+class PagedDecodeAttentionExecution:
+    """One admitted served-model decode-attention implementation.
+
+    The grouped split body is the only selector currently promoted through
+    this contract.  The pipelined variant intentionally has no representation
+    here because its full-model result was not selected.
+    """
+
+    kernel: str
+    split_tile: int
+
+    @property
+    def environment(self) -> dict[str, str]:
+        return {
+            "ULLM_EXPERIMENTAL_SQ8_PAGED_DECODE_SPLIT_TILE": str(self.split_tile),
+            "ULLM_EXPERIMENTAL_PAGED_DECODE_GQA_GROUPED_SPLIT": "1",
+            "ULLM_EXPERIMENTAL_SQ8_PAGED_DECODE_SPLIT_ALLOW_MULTITILE": "1",
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class WorkerExecution:
+    paged_decode_attention: PagedDecodeAttentionExecution
+
+    @property
+    def environment(self) -> dict[str, str]:
+        return self.paged_decode_attention.environment
+
+
+@dataclass(frozen=True, slots=True)
 class WorkerContract:
     protocol: str
     binary: Path
@@ -99,6 +142,7 @@ class WorkerContract:
     arguments: tuple[str, ...]
     required_environment: tuple[str, ...]
     identity: WorkerIdentity
+    execution: WorkerExecution | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -180,7 +224,11 @@ def load_served_model(path: Path) -> ServedModel:
     generation = _parse_generation(document["generation"], public)
     format_contract = _parse_format(document["format"])
     tokenizer = _parse_tokenizer(document["tokenizer"], manifest_path.parent)
-    worker = _parse_worker(document["worker"], manifest_path.parent)
+    worker = _parse_worker(
+        document["worker"],
+        manifest_path.parent,
+        allow_execution=(schema_version == SCHEMA_VERSION_V2),
+    )
     expected_worker_schema = (
         "ullm.worker.v2" if schema_version == SCHEMA_VERSION_V2 else "ullm.worker.v1"
     )
@@ -188,6 +236,27 @@ def load_served_model(path: Path) -> ServedModel:
         raise ServedModelError(
             "manifest schema_version and worker.protocol must be version aligned"
         )
+    if any(name in MANIFEST_EXECUTION_ENVIRONMENT for name in worker.required_environment):
+        raise ServedModelError(
+            "worker.required_environment cannot select manifest execution"
+        )
+    if worker.execution is not None:
+        if format_contract.format_id != "SQ8_0":
+            raise ServedModelError(
+                "worker.execution is currently supported only for SQ8_0"
+            )
+        if worker.identity.device != "gfx1201":
+            raise ServedModelError(
+                "worker.execution requires the gfx1201 SQ8_0 worker identity"
+            )
+        if worker.identity.execution_profile != _PAGED_DECODE_SPLIT_EXECUTION_PROFILE:
+            raise ServedModelError(
+                "worker.execution requires the rdna4_w8a8_block_ck worker profile"
+            )
+        if _PAGED_DECODE_SPLIT_GUARD not in worker.required_environment:
+            raise ServedModelError(
+                "worker.execution requires the paged-decode split HIP guard"
+            )
     product = _parse_product(document["product"], manifest_path.parent)
     promotion = _parse_promotion(document["promotion"], manifest_path.parent)
     reasoning_dialect = (
@@ -435,18 +504,22 @@ def _parse_tokenizer(value: Any, base: Path) -> TokenizerContract:
     )
 
 
-def _parse_worker(value: Any, base: Path) -> WorkerContract:
+def _parse_worker(value: Any, base: Path, *, allow_execution: bool) -> WorkerContract:
     item = _mapping(value, "worker")
+    expected_keys = {
+        "protocol",
+        "binary",
+        "binary_sha256",
+        "arguments",
+        "required_environment",
+        "identity",
+    }
+    has_execution = "execution" in item
+    if allow_execution and has_execution:
+        expected_keys.add("execution")
     _exact_keys(
         item,
-        {
-            "protocol",
-            "binary",
-            "binary_sha256",
-            "arguments",
-            "required_environment",
-            "identity",
-        },
+        expected_keys,
         "worker",
     )
     binary = _safe_regular_file(
@@ -485,6 +558,7 @@ def _parse_worker(value: Any, base: Path) -> WorkerContract:
 
     identity_item = _mapping(item["identity"], "worker.identity")
     _exact_keys(identity_item, {"device", "execution_profile"}, "worker.identity")
+    execution = _parse_worker_execution(item["execution"]) if has_execution else None
     return WorkerContract(
         protocol=_text(item["protocol"], "worker.protocol", maximum=128),
         binary=binary,
@@ -501,6 +575,42 @@ def _parse_worker(value: Any, base: Path) -> WorkerContract:
                 maximum=256,
             ),
         ),
+        execution=execution,
+    )
+
+
+def _parse_worker_execution(value: Any) -> WorkerExecution:
+    item = _mapping(value, "worker.execution")
+    _exact_keys(item, {"paged_decode_attention"}, "worker.execution")
+    attention = _mapping(
+        item["paged_decode_attention"], "worker.execution.paged_decode_attention"
+    )
+    _exact_keys(
+        attention,
+        {"kernel", "split_tile"},
+        "worker.execution.paged_decode_attention",
+    )
+    kernel = _text(
+        attention["kernel"],
+        "worker.execution.paged_decode_attention.kernel",
+        maximum=128,
+    )
+    if kernel != "gqa_grouped_split":
+        raise ServedModelError(
+            "worker.execution.paged_decode_attention.kernel is unsupported"
+        )
+    split_tile = _positive_integer(
+        attention["split_tile"], "worker.execution.paged_decode_attention.split_tile"
+    )
+    if split_tile not in _PAGED_DECODE_SPLIT_TILES:
+        raise ServedModelError(
+            "worker.execution.paged_decode_attention.split_tile is unsupported"
+        )
+    return WorkerExecution(
+        paged_decode_attention=PagedDecodeAttentionExecution(
+            kernel=kernel,
+            split_tile=split_tile,
+        )
     )
 
 

@@ -19,6 +19,7 @@ from typing import Any, Callable
 
 from .schemas import EOS_TOKEN_IDS, MODEL_ID, TOP_K
 from .reasoning import ReasoningDialect, ReasoningRequest
+from .served_model import MANIFEST_EXECUTION_ENVIRONMENT
 from .settings import GatewaySettings
 
 
@@ -150,6 +151,13 @@ class WorkerConfig:
                 if name.startswith("ULLM_REQUIRE_HIP_"):
                     environment.pop(name)
             contract = settings.served_model.worker
+            # Manifest mode owns every selector that can change the admitted
+            # paged-decode body.  Do not let a process-manager experiment leak
+            # into a different candidate, especially the rejected pipeline.
+            for name in MANIFEST_EXECUTION_ENVIRONMENT:
+                environment.pop(name, None)
+            if contract.execution is not None:
+                environment.update(contract.execution.environment)
             if contract.protocol not in SUPPORTED_WORKER_SCHEMAS:
                 raise WorkerProtocolError("served-model worker protocol is unsupported")
             command = (

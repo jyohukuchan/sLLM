@@ -224,6 +224,10 @@ def test_manifest_mode_builds_v2_worker_and_reasoning_contract(
     manifest.write_text(json.dumps(value), encoding="utf-8")
     monkeypatch.setenv("ULLM_SERVED_MODEL_MANIFEST", str(manifest))
     monkeypatch.setenv("ULLM_HIP_VISIBLE_DEVICES", "0")
+    monkeypatch.setenv("ULLM_EXPERIMENTAL_SQ8_PAGED_DECODE_SPLIT_TILE", "20")
+    monkeypatch.setenv("ULLM_EXPERIMENTAL_PAGED_DECODE_GQA_GROUPED_SPLIT", "1")
+    monkeypatch.setenv("ULLM_EXPERIMENTAL_PAGED_DECODE_GQA_PIPELINED_SPLIT", "1")
+    monkeypatch.setenv("ULLM_EXPERIMENTAL_SQ8_PAGED_DECODE_SPLIT_ALLOW_MULTITILE", "1")
 
     settings = GatewaySettings.from_env()
     config = WorkerConfig.from_settings(settings)
@@ -232,6 +236,72 @@ def test_manifest_mode_builds_v2_worker_and_reasoning_contract(
     assert config.reasoning_dialect is not None
     assert config.reasoning_dialect.identity == "synthetic.single-token.v1"
     assert config.command[-2:] == ("--served-model-manifest", str(manifest.resolve()))
+    assert settings.served_model is not None
+    assert settings.served_model.worker.execution is None
+    for name in (
+        "ULLM_EXPERIMENTAL_SQ8_PAGED_DECODE_SPLIT_TILE",
+        "ULLM_EXPERIMENTAL_PAGED_DECODE_GQA_GROUPED_SPLIT",
+        "ULLM_EXPERIMENTAL_PAGED_DECODE_GQA_PIPELINED_SPLIT",
+        "ULLM_EXPERIMENTAL_SQ8_PAGED_DECODE_SPLIT_ALLOW_MULTITILE",
+    ):
+        assert name not in config.environment
+
+
+def test_manifest_execution_settings_replace_stale_attention_selectors(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    for name in LEGACY_MODEL_ENVIRONMENT:
+        monkeypatch.delenv(name, raising=False)
+    root = tmp_path / "sq8-v2-grouped"
+    shutil.copytree(MANIFEST_FIXTURES / "sq8", root)
+    manifest = root / "served-model.json"
+    value = json.loads(manifest.read_text(encoding="utf-8"))
+    value["schema_version"] = "ullm.served_model.v2"
+    value["worker"]["protocol"] = "ullm.worker.v2"
+    value["worker"]["required_environment"].append(
+        "ULLM_REQUIRE_HIP_PAGED_DECODE_SPLIT_KERNEL"
+    )
+    value["worker"]["execution"] = {
+        "paged_decode_attention": {
+            "kernel": "gqa_grouped_split",
+            "split_tile": 20,
+        }
+    }
+    value["reasoning"] = {
+        "enabled_by_default": False,
+        "dialect_id": "synthetic.single-token.v1",
+        "start_token_ids": [151667],
+        "end_token_ids": [151668],
+        "forced_end_token_ids": [151668],
+        "initial_phase": "reasoning",
+        "eos_policy": "close",
+        "effort_budgets": {"low": 32, "medium": 64, "high": 128},
+        "max_budget_tokens": 128,
+        "reserved_answer_tokens": 1,
+        "history_reasoning_policy": "omit",
+    }
+    manifest.write_text(json.dumps(value), encoding="utf-8")
+    monkeypatch.setenv("ULLM_SERVED_MODEL_MANIFEST", str(manifest))
+    monkeypatch.setenv("ULLM_HIP_VISIBLE_DEVICES", "0")
+    monkeypatch.setenv("ULLM_EXPERIMENTAL_SQ8_PAGED_DECODE_SPLIT_TILE", "256")
+    monkeypatch.setenv("ULLM_EXPERIMENTAL_PAGED_DECODE_GQA_GROUPED_SPLIT", "0")
+    monkeypatch.setenv("ULLM_EXPERIMENTAL_PAGED_DECODE_GQA_PIPELINED_SPLIT", "1")
+    monkeypatch.setenv("ULLM_EXPERIMENTAL_SQ8_PAGED_DECODE_SPLIT_ALLOW_MULTITILE", "0")
+
+    settings = GatewaySettings.from_env()
+    config = WorkerConfig.from_settings(settings)
+
+    assert settings.served_model is not None
+    assert settings.served_model.worker.execution is not None
+    assert config.environment["ULLM_EXPERIMENTAL_SQ8_PAGED_DECODE_SPLIT_TILE"] == "20"
+    assert config.environment["ULLM_EXPERIMENTAL_PAGED_DECODE_GQA_GROUPED_SPLIT"] == "1"
+    assert (
+        config.environment["ULLM_EXPERIMENTAL_SQ8_PAGED_DECODE_SPLIT_ALLOW_MULTITILE"]
+        == "1"
+    )
+    assert (
+        "ULLM_EXPERIMENTAL_PAGED_DECODE_GQA_PIPELINED_SPLIT" not in config.environment
+    )
 
 
 @pytest.mark.parametrize("legacy_name", sorted(LEGACY_MODEL_ENVIRONMENT))

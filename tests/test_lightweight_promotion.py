@@ -4,6 +4,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -14,6 +15,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 TOOL = ROOT / "tools/lightweight_promotion.py"
+SERVED_MODEL_FIXTURES = ROOT / "services/openai-gateway/tests/fixtures/served-model"
 
 
 def load_module(name: str, path: Path) -> ModuleType:
@@ -53,6 +55,48 @@ def test_strict_json_rejects_duplicate_keys_and_nonfinite_values() -> None:
         PROMOTION.strict_object(b'{"same":1,"same":2}', "fixture")
     with pytest.raises(PROMOTION.PromotionError, match="non-finite"):
         PROMOTION.strict_object(b'{"value":NaN}', "fixture")
+
+
+def test_promotion_preflight_validator_preserves_typed_execution_settings(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "sq8-v2-grouped"
+    shutil.copytree(SERVED_MODEL_FIXTURES / "sq8", root)
+    manifest = root / "served-model.json"
+    document = json.loads(manifest.read_text(encoding="utf-8"))
+    document["schema_version"] = "ullm.served_model.v2"
+    document["worker"]["protocol"] = "ullm.worker.v2"
+    document["worker"]["identity"] = {
+        "device": "gfx1201",
+        "execution_profile": "rdna4_w8a8_block_ck",
+    }
+    document["worker"]["required_environment"].append(
+        "ULLM_REQUIRE_HIP_PAGED_DECODE_SPLIT_KERNEL"
+    )
+    document["worker"]["execution"] = {
+        "paged_decode_attention": {
+            "kernel": "gqa_grouped_split",
+            "split_tile": 20,
+        }
+    }
+    document["reasoning"] = {
+        "enabled_by_default": False,
+        "dialect_id": "synthetic.single-token.v1",
+        "start_token_ids": [151667],
+        "end_token_ids": [151668],
+        "forced_end_token_ids": [151668],
+        "initial_phase": "reasoning",
+        "eos_policy": "close",
+        "effort_budgets": {"low": 32, "medium": 64, "high": 128},
+        "max_budget_tokens": 128,
+        "reserved_answer_tokens": 1,
+        "history_reasoning_policy": "omit",
+    }
+    manifest.write_text(json.dumps(document), encoding="utf-8")
+
+    summary = PROMOTION.validate_manifest(manifest)
+
+    assert summary["worker"]["execution"] == document["worker"]["execution"]
 
 
 def test_container_gateway_transport_keeps_bearer_token_out_of_process_arguments(
@@ -174,6 +218,28 @@ def test_atomic_exchange_preserves_exact_bytes_and_rejects_wrong_expected_bytes(
         PROMOTION.atomic_switch(active, b"not-the-active-bytes", new)
     assert active.read_bytes() == old
     assert not list(tmp_path.glob(".active.json.lightweight-stage-*"))
+
+
+def test_promotion_and_rollback_preserve_execution_contract_bytes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Both directions use atomic raw-byte exchange, never JSON reserialization."""
+
+    active = tmp_path / "active.json"
+    rollback = b'{\n  "worker" : { "execution" : null }\n}\n'
+    candidate = (
+        b'{"worker":{"execution":{"paged_decode_attention":'
+        b'{"kernel":"gqa_grouped_split","split_tile":20}}}}\n'
+    )
+    active.write_bytes(rollback)
+    monkeypatch.setattr(PROMOTION, "_require_active_parent", lambda _path: None)
+
+    assert PROMOTION.atomic_switch(active, rollback, candidate) is True
+    assert active.read_bytes() == candidate
+    assert b'"split_tile":20' in active.read_bytes()
+
+    assert PROMOTION.atomic_switch(active, candidate, rollback) is True
+    assert active.read_bytes() == rollback
 
 
 def test_rollback_preflight_requires_candidate_bytes_to_differ_from_saved_rollback(

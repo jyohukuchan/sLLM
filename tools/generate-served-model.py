@@ -658,6 +658,7 @@ def _materialize(
     product_profile = _required_object(profile, "product")
     promotion_profile = _required_object(profile, "promotion")
     reasoning_profile = profile.get("reasoning")
+    execution_profile = worker_profile.get("execution")
     if reasoning_profile is not None:
         if not isinstance(reasoning_profile, dict):
             raise GenerationError("profile.reasoning must be an object")
@@ -665,6 +666,11 @@ def _materialize(
             raise GenerationError("profile.reasoning requires ullm.worker.v2")
     elif worker_profile.get("protocol") == "ullm.worker.v2":
         raise GenerationError("ullm.worker.v2 profile requires reasoning")
+    if execution_profile is not None:
+        if reasoning_profile is None:
+            raise GenerationError("profile.worker.execution requires ullm.worker.v2")
+        if not isinstance(execution_profile, dict):
+            raise GenerationError("profile.worker.execution must be an object")
     _validate_promotion_dispatch(profile, promotion_profile, mode=mode)
 
     tokenizer_root = Path(str(tokenizer_profile.get("root", ""))).resolve()
@@ -716,6 +722,17 @@ def _materialize(
     else:
         raise GenerationError("profile.product.artifact must be an object or null")
 
+    worker = {
+        "protocol": worker_profile.get("protocol"),
+        "binary": os.fspath(worker_binary),
+        "binary_sha256": worker_sha256,
+        "arguments": worker_profile.get("arguments"),
+        "required_environment": worker_profile.get("required_environment"),
+        "identity": worker_profile.get("identity"),
+    }
+    if execution_profile is not None:
+        worker["execution"] = execution_profile
+
     document = {
         "schema_version": (
             "ullm.served_model.v2"
@@ -735,14 +752,7 @@ def _materialize(
             "files": tokenizer_files,
             "template_options": tokenizer_profile.get("template_options"),
         },
-        "worker": {
-            "protocol": worker_profile.get("protocol"),
-            "binary": os.fspath(worker_binary),
-            "binary_sha256": worker_sha256,
-            "arguments": worker_profile.get("arguments"),
-            "required_environment": worker_profile.get("required_environment"),
-            "identity": worker_profile.get("identity"),
-        },
+        "worker": worker,
         "product": {
             "root": os.fspath(product_root),
             "artifact": artifact,
