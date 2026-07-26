@@ -1,0 +1,41 @@
+{
+  "chat_template_arguments": {
+    "add_generation_prompt": true,
+    "enable_thinking": false
+  },
+  "complete_record_repetitions": 68,
+  "final_messages": [
+    {
+      "content": "Answer in concise English.",
+      "role": "system"
+    },
+    {
+      "content": "Based on the context, explain why processing a long prefill in fewer real-token chunks can reduce repeated work. Mention one verification step.",
+      "role": "user"
+    }
+  ],
+  "final_prompt_token_count": 49,
+  "model_dir": "/home/homelab1/datapool/ai_models/safetensors/Qwen/Qwen3-14B-FP8",
+  "real_token_prefix_from_next_record": 7,
+  "record_token_count": 58,
+  "repeated_record_messages": [
+    {
+      "content": "Keep the following engineering record as factual context.",
+      "role": "system"
+    },
+    {
+      "content": "A synchronized prefill step committed only real token rows and retained a rollback record.",
+      "role": "user"
+    },
+    {
+      "content": "Recorded: use the same evidence and preserve the service recovery path.",
+      "role": "assistant"
+    }
+  ],
+  "schema_version": "ullm.sq8.prefill_chunk_width.long_real_token_input.v1",
+  "scope": "real tokenizer-rendered chat records; no padding, mask, or fabricated token rows",
+  "target_tokens": 4000,
+  "token_file": "long-prefill-p4000.u32le",
+  "token_file_sha256": "105835f0aa58e12ea1ab2ce7a86dae6c07225fd7d6a32c30e8c6111985295a87",
+  "transformers_version": "5.12.1"
+}

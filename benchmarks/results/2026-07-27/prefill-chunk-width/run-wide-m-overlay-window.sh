@@ -25,10 +25,12 @@ artifact="/home/homelab1/datapool/ullm/product/qwen3-14b-fp8-sq8-v0.1/artifact"
 package="/home/homelab1/datapool/ullm/product/qwen3-14b-fp8-sq8-v0.1/package"
 tokenizer_model="/home/homelab1/datapool/ai_models/safetensors/Qwen/Qwen3-14B-FP8"
 generation_input="$result_root/generation-input"
+long_generation_input="$result_root/generation-input-long"
 oracle_compare="$root/benchmarks/results/2026-07-26/prefill-attention-redesign/compare_oracles.py"
 trace_analyzer="$root/benchmarks/results/2026-07-26/prefill-attention-redesign/analyze_kernel_trace.py"
 summary_tool="$result_root/summarize-wide-m-overlay.py"
 generation_summary="$result_root/summarize-wide-m-generation.py"
+long_generation_summary="$result_root/summarize-long-real-token-generation.py"
 tokenizer_python="$root/services/openai-gateway/.venv/bin/python3"
 rocprof="/opt/rocm/bin/rocprofv3"
 
@@ -174,7 +176,9 @@ restore() {
     record_required_preflight after-restore
     record_service after-restore
     sha256sum "$driver" "$serving" "$active_manifest" "$oracle_compare" "$trace_analyzer" \
-        "$summary_tool" "$generation_summary" > "$out/input-sha256-after.txt" || true
+        "$summary_tool" "$generation_summary" "$long_generation_summary" \
+        "$long_generation_input/manifest.json" "$long_generation_input/long-prefill-p4000.u32le" \
+        > "$out/input-sha256-after.txt" || true
     if ! cmp -s "$out/input-sha256-before.txt" "$out/input-sha256-after.txt"; then
         event input-identity-changed-during-window
         status=1
@@ -192,13 +196,16 @@ amd-smi static --gpu "$gpu_index" --json > "$out/service/r9700-static.json"
 amd-smi process --gpu "$gpu_index" --json > "$out/service/r9700-process-before-stop.json" || true
 metric > "$out/thermal/before-stop.json"
 sha256sum "$driver" "$serving" "$active_manifest" "$oracle_compare" "$trace_analyzer" \
-    "$summary_tool" "$generation_summary" > "$out/input-sha256-before.txt"
+    "$summary_tool" "$generation_summary" "$long_generation_summary" \
+    "$long_generation_input/manifest.json" "$long_generation_input/long-prefill-p4000.u32le" \
+    > "$out/input-sha256-before.txt"
 
 if [[ ! -d "$overlay_root" || ! -x "$driver" || ! -x "$serving" ]]; then
     echo "wide-M overlay source or executables are missing" >&2
     exit 1
 fi
-if [[ ! -d "$artifact" || ! -d "$package" || ! -d "$tokenizer_model" || ! -f "$generation_input/suite.json" ]]; then
+if [[ ! -d "$artifact" || ! -d "$package" || ! -d "$tokenizer_model" || ! -f "$generation_input/suite.json" ||
+    ! -f "$long_generation_input/manifest.json" || ! -f "$long_generation_input/long-prefill-p4000.u32le" ]]; then
     echo "SQ8_0 artifact/package/tokenizer or generation input is missing" >&2
     exit 1
 fi
@@ -352,6 +359,28 @@ done
     --generation-input "$generation_input" --model-dir "$tokenizer_model" \
     --output-json "$out/generation/summary.json" \
     --output-markdown "$out/generation/summary.md"
+
+# The fixed policy suite has short prompts and therefore reaches M=1 under
+# wide residents.  This additional N=4000 real-token run exercises each M's
+# actual prefill schedule while retaining a genuine final chat generation
+# header and enough context room for 96 decoded tokens.
+for width in "${widths[@]}"; do
+    condition="generation-long-m${width}-p4000"
+    generation_dir="$out/generation-long/m${width}"
+    mkdir -p "$generation_dir"
+    thermal_gate "$condition"
+    event "${condition}-begin"
+    run_sq8 "$serving" --artifact "$artifact" --package "$package" \
+        --prompt-token-ids-u32le "$long_generation_input/long-prefill-p4000.u32le" \
+        --max-new-tokens 96 --prefill-mode "m${width}-chunk${width}" \
+        --result-json "$generation_dir/result.json" \
+        > "$generation_dir/stdout.log" 2> "$generation_dir/stderr.log"
+    event "${condition}-complete"
+done
+"$tokenizer_python" "$long_generation_summary" --run-root "$out" \
+    --model-dir "$tokenizer_model" \
+    --output-json "$out/generation-long/summary.json" \
+    --output-markdown "$out/generation-long/summary.md"
 
 python3 "$summary_tool" --run-root "$out" \
     --output-json "$out/summary.json" --output-markdown "$out/summary.md"

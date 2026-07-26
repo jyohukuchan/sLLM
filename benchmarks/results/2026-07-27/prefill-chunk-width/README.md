@@ -35,6 +35,8 @@ its limits are in [`memory-accounting.md`](memory-accounting.md).
 | `summarize-wide-m-overlay.py` | derives tok/s only from the unprofiled driver, plus trace/count and numerical summaries |
 | `generation-input/` | frozen local Qwen3-14B rendering of the 10-case lightweight prompt suite, including auditable u32le token IDs |
 | `summarize-wide-m-generation.py` | decodes and retains direct local M=128/wide-M completions with policy-defined obvious-collapse diagnostics |
+| `generation-input-long/` | N=4000 real-token chat input that preserves a final generation header without padding or a fabricated row |
+| `prepare-long-real-token-generation.py` / `summarize-long-real-token-generation.py` | creates and records the long real-token generation comparison for every executable M |
 
 ## Reproduction boundary
 
