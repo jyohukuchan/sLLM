@@ -504,7 +504,11 @@ fn capture_case(
         .map_err(|err| err.to_string())?;
     let mut prompt_cursor = 0_usize;
     while prompt_cursor < case.prompt_token_ids.len() {
-        let width = prefill_width(&case.mode, case.prompt_token_ids.len() - prompt_cursor)?;
+        let width = prefill_logical_width(
+            &case.mode,
+            prompt_cursor,
+            case.prompt_token_ids.len(),
+        )?;
         let ordinal = prompt_cursor + width - 1;
         let planned = plans_by_ordinal.get(&ordinal).copied();
         let forced = if ordinal + 1 == case.prompt_token_ids.len() {
@@ -576,11 +580,48 @@ fn capture_case(
     Ok(())
 }
 
-fn prefill_width(mode: &str, remaining: usize) -> Result<usize, String> {
+/// Returns the logical prompt advance for the next execution unit.
+///
+/// A fixed M=128 suffix after at least one full chunk is executed as an
+/// overlapping M=128 chunk, but commits only its remaining real tokens.
+fn prefill_logical_width(
+    mode: &str,
+    prompt_tokens_processed: usize,
+    prompt_tokens: usize,
+) -> Result<usize, String> {
+    let remaining = prompt_tokens
+        .checked_sub(prompt_tokens_processed)
+        .ok_or_else(|| "capture prompt cursor exceeds the prompt length".to_string())?;
+    if remaining == 0 {
+        return Err("capture prefill width requires a nonempty remaining prompt".to_string());
+    }
     match mode {
         "sequential_m1" => Ok(1),
-        "m128_chunks_with_declared_tail" => Ok(if remaining >= 128 { 128 } else { 1 }),
+        "m128_chunks_with_declared_tail" if remaining >= 128 => Ok(128),
+        "m128_chunks_with_declared_tail" if prompt_tokens_processed >= 128 => Ok(remaining),
+        "m128_chunks_with_declared_tail" => Ok(1),
         other => Err(format!("unsupported capture mode {other:?}")),
+    }
+}
+
+#[cfg(test)]
+mod prefill_logical_width_tests {
+    use super::prefill_logical_width;
+
+    #[test]
+    fn fixed_m128_tail_commits_the_remaining_tokens_in_one_execution() {
+        assert_eq!(
+            prefill_logical_width("m128_chunks_with_declared_tail", 3968, 4095).unwrap(),
+            127
+        );
+        assert_eq!(
+            prefill_logical_width("m128_chunks_with_declared_tail", 896, 1000).unwrap(),
+            104
+        );
+        assert_eq!(
+            prefill_logical_width("m128_chunks_with_declared_tail", 128, 129).unwrap(),
+            1
+        );
     }
 }
 

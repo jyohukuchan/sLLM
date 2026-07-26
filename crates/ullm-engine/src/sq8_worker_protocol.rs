@@ -3654,7 +3654,13 @@ mod tests {
         let mut processed = 0;
         while processed < prompt_tokens {
             let remaining = prompt_tokens - processed;
-            let width = if remaining >= 128 { 128 } else { 1 };
+            let width = if remaining >= 128 {
+                128
+            } else if processed >= 128 {
+                remaining
+            } else {
+                1
+            };
             if processed + width == prompt_tokens {
                 break;
             }

@@ -88,12 +88,11 @@ def result_document(
 ) -> dict:
     chunk_config = CHUNK_MODES[chunk_mode]
     chunk_tokens = chunk_config["prefill_chunk_tokens"]
-    widths = (
-        [1] * prompt_tokens
-        if mode == "all-m1"
-        else [chunk_tokens] * (prompt_tokens // chunk_tokens)
-        + [1] * (prompt_tokens % chunk_tokens)
-    )
+    if mode == "all-m1" or prompt_tokens < chunk_tokens:
+        widths = [1] * prompt_tokens
+    else:
+        chunks, tail = divmod(prompt_tokens, chunk_tokens)
+        widths = [chunk_tokens] * chunks + ([tail] if tail else [])
     schema = (
         "ullm.sq8.serving_smoke.v2"
         if mode == "all-m1"
@@ -266,10 +265,10 @@ def test_chunk_validator_accepts_candidate_modes_and_source_gates(
     assert chunk_document["requests"][0]["prefill_execution_units"][0]["width"] == chunk_tokens
 
 
-def test_candidate_widths_use_selected_chunk_and_m1_tail():
+def test_candidate_widths_use_selected_chunk_and_one_logical_tail_unit():
     tool = load_tool()
-    assert tool.expected_widths(35, "m32-chunk32") == [32, 1, 1, 1]
-    assert tool.expected_widths(131, "m128-chunk128") == [128, 1, 1, 1]
+    assert tool.expected_widths(35, "m32-chunk32") == [32, 3]
+    assert tool.expected_widths(131, "m128-chunk128") == [128, 3]
     assert tool.expected_widths(4, "all-m1") == [1, 1, 1, 1]
 
 

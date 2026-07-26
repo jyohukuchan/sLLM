@@ -83,9 +83,10 @@ def prefill_mode_config(mode: str) -> dict[str, Any]:
 def expected_prefill_widths(prompt_tokens: int, chunk_tokens: int) -> list[int]:
     if prompt_tokens <= 0 or chunk_tokens <= 0:
         fail("prefill widths require positive prompt and chunk lengths")
-    return [chunk_tokens] * (prompt_tokens // chunk_tokens) + [1] * (
-        prompt_tokens % chunk_tokens
-    )
+    if prompt_tokens < chunk_tokens:
+        return [1] * prompt_tokens
+    chunks, tail = divmod(prompt_tokens, chunk_tokens)
+    return [chunk_tokens] * chunks + ([tail] if tail else [])
 
 
 def reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:

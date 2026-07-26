@@ -86,9 +86,10 @@ def expected_widths(prompt_tokens: int, mode: str) -> list[int]:
     if mode == M1_MODE:
         return [1] * prompt_tokens
     chunk_tokens = chunk_mode_config(mode)["prefill_chunk_tokens"]
-    return [chunk_tokens] * (prompt_tokens // chunk_tokens) + [1] * (
-        prompt_tokens % chunk_tokens
-    )
+    if prompt_tokens < chunk_tokens:
+        return [1] * prompt_tokens
+    chunks, tail = divmod(prompt_tokens, chunk_tokens)
+    return [chunk_tokens] * chunks + ([tail] if tail else [])
 
 
 def resolve_capture(

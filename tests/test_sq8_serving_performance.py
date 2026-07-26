@@ -60,7 +60,9 @@ def prefill_config(module, prefill_mode: str):
 
 
 def prompt_execution_calls(prompt_tokens: int, chunk_tokens: int) -> int:
-    return prompt_tokens // chunk_tokens + prompt_tokens % chunk_tokens
+    if prompt_tokens < chunk_tokens:
+        return prompt_tokens
+    return -(-prompt_tokens // chunk_tokens)
 
 
 def active_snapshot(

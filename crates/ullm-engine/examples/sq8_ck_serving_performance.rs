@@ -284,9 +284,11 @@ fn performance_prompt_execution_calls(
     if prompt_tokens == 0 || prefill_chunk_tokens == 0 {
         return Err("performance prompt execution count requires nonzero dimensions".into());
     }
-    (prompt_tokens / prefill_chunk_tokens)
-        .checked_add(prompt_tokens % prefill_chunk_tokens)
-        .ok_or_else(|| "performance prompt execution call count overflows".to_string())
+    if prompt_tokens < prefill_chunk_tokens {
+        return Ok(prompt_tokens);
+    }
+    // A partial suffix is one overlapping fixed-width execution, not an M=1 loop.
+    Ok(prompt_tokens.div_ceil(prefill_chunk_tokens))
 }
 
 #[allow(clippy::too_many_arguments)]

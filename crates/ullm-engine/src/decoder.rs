@@ -2084,6 +2084,29 @@ impl PagedDecodeState {
         self.written_len = 0;
     }
 
+    /// Rewinds the logical append cursor for a synchronized serving prefill retry.
+    ///
+    /// This intentionally does not clear the device cache.  The caller must overwrite every
+    /// position in `new_written_len..old_written_len` before issuing an attention operation that
+    /// observes the restored suffix.  Cached-prefix attention receives `written_len` explicitly,
+    /// so entries after the rewound cursor are outside its logical prefix until that overwrite
+    /// completes.  It is therefore suitable for a fixed-width overlapping tail chunk, but not
+    /// for arbitrary cache reuse.
+    pub(crate) fn rewind_serving_write_cursor(
+        &mut self,
+        new_written_len: usize,
+    ) -> Result<(), String> {
+        let old_written_len = self.written_len;
+        if new_written_len >= old_written_len {
+            return Err(format!(
+                "paged decoder serving rewind must move backwards: old={old_written_len} new={new_written_len}"
+            ));
+        }
+        self.validate_cache_position(new_written_len)?;
+        self.written_len = new_written_len;
+        Ok(())
+    }
+
     pub fn reset(&mut self, stream: &mut RuntimeStream) -> Result<(), String> {
         zero_buffer(&mut self.k_cache_buffer, Some(stream))?;
         zero_buffer(&mut self.v_cache_buffer, Some(stream))?;
@@ -3882,6 +3905,125 @@ mod tests {
                 &cache.v,
                 &block_table,
                 prefix_len + chunk_index + 1,
+                shape,
+                1.0 / (shape.head_dim as f32).sqrt(),
+            ));
+        }
+        assert_f32s_close(&actual, &expected, 1e-5);
+    }
+
+    #[test]
+    fn paged_decode_state_rewind_replays_a_real_suffix_without_stale_prefix_reads_cpu() {
+        let mut context = RuntimeContext::create(0).unwrap();
+        let mut stream = context.create_stream().unwrap();
+        let shape = PagedDecodeShape {
+            block_size: 2,
+            cache_blocks: 4,
+            q_heads: 2,
+            kv_heads: 1,
+            head_dim: 2,
+            value_dim: 2,
+        };
+        let block_table = vec![0_u32, 1, 2, 3];
+        let original_tokens = 5_usize;
+        let preserved_prefix_tokens = 2_usize;
+        let replay_tokens = original_tokens - preserved_prefix_tokens;
+        let k_elements = shape.k_token_elements().unwrap();
+        let v_elements = shape.v_token_elements().unwrap();
+        let original_k = (0..original_tokens * k_elements)
+            .map(|index| (index as f32 - 5.0) / 7.0)
+            .collect::<Vec<_>>();
+        let original_v = (0..original_tokens * v_elements)
+            .map(|index| (index as f32 + 3.0) / 11.0)
+            .collect::<Vec<_>>();
+        // Use values far outside the original range so the cache readback proves that positions
+        // 2..5 were overwritten, not merely hidden behind the logical length.
+        let replay_k = (0..replay_tokens * k_elements)
+            .map(|index| 100.0 + index as f32)
+            .collect::<Vec<_>>();
+        let replay_v = (0..replay_tokens * v_elements)
+            .map(|index| -100.0 - index as f32)
+            .collect::<Vec<_>>();
+        let q = (0..replay_tokens * shape.q_elements().unwrap())
+            .map(|index| (index as f32 - 2.0) / 5.0)
+            .collect::<Vec<_>>();
+        let original_k_buffer = upload_test_f32_buffer(&mut context, &mut stream, &original_k);
+        let original_v_buffer = upload_test_f32_buffer(&mut context, &mut stream, &original_v);
+        let replay_k_buffer = upload_test_f32_buffer(&mut context, &mut stream, &replay_k);
+        let replay_v_buffer = upload_test_f32_buffer(&mut context, &mut stream, &replay_v);
+        let q_buffer = upload_test_f32_buffer(&mut context, &mut stream, &q);
+        let mut output = context
+            .alloc_buffer(f32_bytes(replay_tokens * shape.output_elements().unwrap()))
+            .unwrap();
+        let mut state =
+            PagedDecodeState::new(&mut context, &mut stream, shape, block_table.clone()).unwrap();
+
+        assert_eq!(
+            state
+                .write_sequence_from_device(
+                    &mut stream,
+                    &original_k_buffer,
+                    &original_v_buffer,
+                    original_tokens,
+                )
+                .unwrap(),
+            0..original_tokens
+        );
+        assert!(state.rewind_serving_write_cursor(original_tokens).is_err());
+        state
+            .rewind_serving_write_cursor(preserved_prefix_tokens)
+            .unwrap();
+        assert_eq!(state.written_len(), preserved_prefix_tokens);
+
+        assert_eq!(
+            state
+                .prefill_chunk_from_device(
+                    &mut stream,
+                    &q_buffer,
+                    &replay_k_buffer,
+                    &replay_v_buffer,
+                    replay_tokens,
+                    1.0 / (shape.head_dim as f32).sqrt(),
+                    &mut output,
+                )
+                .unwrap(),
+            preserved_prefix_tokens..original_tokens
+        );
+        assert_eq!(state.written_len(), original_tokens);
+
+        let expected_k = original_k[..preserved_prefix_tokens * k_elements]
+            .iter()
+            .copied()
+            .chain(replay_k.iter().copied())
+            .collect::<Vec<_>>();
+        let expected_v = original_v[..preserved_prefix_tokens * v_elements]
+            .iter()
+            .copied()
+            .chain(replay_v.iter().copied())
+            .collect::<Vec<_>>();
+        let logical = state
+            .read_written_cache_prefix_to_host(&mut stream)
+            .unwrap();
+        assert_f32s_close(&logical.k, &expected_k, 1e-6);
+        assert_f32s_close(&logical.v, &expected_v, 1e-6);
+
+        let physical = state.read_cache_to_host(&mut stream).unwrap();
+        let actual = read_f32_buffer(
+            &output,
+            &mut stream,
+            replay_tokens * shape.output_elements().unwrap(),
+        )
+        .unwrap();
+        let mut expected = Vec::with_capacity(actual.len());
+        for replay_index in 0..replay_tokens {
+            let q_start = replay_index * shape.q_elements().unwrap();
+            let q_end = q_start + shape.q_elements().unwrap();
+            expected.extend(expected_paged_decode_attn(
+                &q[q_start..q_end],
+                &physical.k,
+                &physical.v,
+                &block_table,
+                preserved_prefix_tokens + replay_index + 1,
                 shape,
                 1.0 / (shape.head_dim as f32).sqrt(),
             ));

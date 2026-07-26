@@ -45,9 +45,10 @@ def prefill_config(module, prefill_mode: str):
 
 
 def prefill_widths(prompt_tokens: int, chunk_tokens: int) -> list[int]:
-    return [chunk_tokens] * (prompt_tokens // chunk_tokens) + [1] * (
-        prompt_tokens % chunk_tokens
-    )
+    if prompt_tokens < chunk_tokens:
+        return [1] * prompt_tokens
+    chunks, tail = divmod(prompt_tokens, chunk_tokens)
+    return [chunk_tokens] * chunks + ([tail] if tail else [])
 
 
 def valid_document(module, *, prefill_mode=None) -> dict:

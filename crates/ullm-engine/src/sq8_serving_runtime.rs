@@ -830,9 +830,34 @@ fn commit_pending_token_state(
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Sq8PrefillUnit {
-    start_position: usize,
-    width: usize,
+    /// Logical prompt cursor before this unit. Scheduler and request metadata advance from here.
+    logical_start_position: usize,
+    /// First real token supplied to the fixed-width resident stack.
+    execution_start_position: usize,
+    /// Resident-stack width used by this execution. It is always 1 or the selected fixed width.
+    execution_width: usize,
+    /// Number of newly committed prompt tokens. An overlapping tail commits fewer tokens than it
+    /// executes because its leading real tokens are deliberately recomputed.
+    committed_tokens: usize,
     is_final: bool,
+}
+
+impl Sq8PrefillUnit {
+    fn rewinds_cache(self) -> bool {
+        self.execution_start_position < self.logical_start_position
+    }
+
+    fn execution_end(self) -> Result<usize, String> {
+        self.execution_start_position
+            .checked_add(self.execution_width)
+            .ok_or_else(|| "serving prefill execution range overflows".to_string())
+    }
+
+    fn logical_end(self) -> Result<usize, String> {
+        self.logical_start_position
+            .checked_add(self.committed_tokens)
+            .ok_or_else(|| "serving prefill logical range overflows".to_string())
+    }
 }
 
 #[cfg(test)]
@@ -847,44 +872,72 @@ fn plan_prefill_units(
         ));
     }
     let mut units = Vec::with_capacity(prompt_tokens);
-    let mut start_position = 0_usize;
-    while start_position < prompt_tokens {
-        let unit = plan_next_prefill_unit(start_position, prompt_tokens, mode)?;
-        start_position = unit
-            .start_position
-            .checked_add(unit.width)
-            .ok_or_else(|| "serving prefill planner position overflows".to_string())?;
+    let mut logical_start_position = 0_usize;
+    while logical_start_position < prompt_tokens {
+        let unit = plan_next_prefill_unit(logical_start_position, prompt_tokens, mode)?;
+        if unit.logical_start_position != logical_start_position {
+            return Err("serving prefill planner returned a stale logical cursor".into());
+        }
+        logical_start_position = unit.logical_end()?;
         units.push(unit);
     }
     Ok(units)
 }
 
 fn plan_next_prefill_unit(
-    start_position: usize,
+    logical_start_position: usize,
     prompt_tokens: usize,
     mode: Sq8ServingPrefillMode,
 ) -> Result<Sq8PrefillUnit, String> {
     if prompt_tokens == 0
         || prompt_tokens > QWEN3_14B_SQ8_SERVING_CONTEXT_TOKENS
-        || start_position >= prompt_tokens
+        || logical_start_position >= prompt_tokens
     {
         return Err(format!(
-            "serving prefill planner position {start_position} is invalid for prompt length {prompt_tokens}"
+            "serving prefill planner position {logical_start_position} is invalid for prompt length {prompt_tokens}"
         ));
     }
-    let remaining = prompt_tokens - start_position;
-    let width = mode
-        .chunk_tokens()
-        .filter(|chunk_tokens| remaining >= *chunk_tokens)
-        .unwrap_or(1);
-    let end = start_position
-        .checked_add(width)
-        .ok_or_else(|| "serving prefill planner position overflows".to_string())?;
-    Ok(Sq8PrefillUnit {
-        start_position,
-        width,
-        is_final: end == prompt_tokens,
-    })
+    let remaining = prompt_tokens - logical_start_position;
+    let (execution_start_position, execution_width, committed_tokens) = match mode.chunk_tokens() {
+        Some(chunk_tokens) if remaining >= chunk_tokens => {
+            (logical_start_position, chunk_tokens, chunk_tokens)
+        }
+        // The fixed resident stack cannot accept a ragged M. Rather than pad (which would
+        // need a separate masking proof), replay a suffix made entirely of real tokens. The
+        // cache cursor is rewound only across the overlapping prefix, then the M-wide chunk
+        // rewrites it and advances through the prompt boundary.
+        Some(chunk_tokens) if logical_start_position >= chunk_tokens => {
+            let overlap_tokens = chunk_tokens
+                .checked_sub(remaining)
+                .ok_or_else(|| "serving prefill tail overlap underflows".to_string())?;
+            let execution_start_position = logical_start_position
+                .checked_sub(overlap_tokens)
+                .ok_or_else(|| {
+                    "serving prefill tail overlap exceeds processed prompt".to_string()
+                })?;
+            (execution_start_position, chunk_tokens, remaining)
+        }
+        // A prompt shorter than the first fixed chunk has no real-token prefix to overlap.
+        // Keep the audited M=1 seed path rather than introduce unmasked padding.
+        _ => (logical_start_position, 1, 1),
+    };
+    let unit = Sq8PrefillUnit {
+        logical_start_position,
+        execution_start_position,
+        execution_width,
+        committed_tokens,
+        is_final: logical_start_position
+            .checked_add(committed_tokens)
+            .ok_or_else(|| "serving prefill planner position overflows".to_string())?
+            == prompt_tokens,
+    };
+    if unit.execution_end()? != unit.logical_end()? {
+        return Err("serving prefill unit does not end at its logical prompt cursor".into());
+    }
+    if unit.execution_width == 0 || unit.committed_tokens == 0 {
+        return Err("serving prefill unit has zero execution or commit width".into());
+    }
+    Ok(unit)
 }
 
 /// Owns one resident Qwen3-14B SQ8 model and one reusable active1/waiting0 session.
@@ -1457,41 +1510,48 @@ impl Qwen3Sq8ServingSession {
             let prompt_tokens = active.request.prompt_token_ids.len();
             let unit =
                 plan_next_prefill_unit(position, prompt_tokens, self.load_report.prefill_mode)?;
-            let end = unit
-                .start_position
-                .checked_add(unit.width)
-                .ok_or_else(|| "teacher-forced prompt execution range overflows".to_string())?;
+            let end = unit.execution_end()?;
             let token_ids = active
                 .request
                 .prompt_token_ids
-                .get(unit.start_position..end)
+                .get(unit.execution_start_position..end)
                 .ok_or_else(|| "teacher-forced prompt range exceeds request".to_string())?
                 .to_vec();
             (unit, prompt_tokens, token_ids)
         };
-        let (source, input_token_id, position, layer_traces) = if unit.width == 1 {
+        self.rewind_prefill_tail_for_execution(unit)?;
+        let (source, input_token_id, position, layer_traces) = if unit.execution_width == 1 {
             let (report, traces) = self.execute_m1_stack_token_inner(
                 token_ids[0],
-                unit.start_position,
+                unit.execution_start_position,
                 capture_layers,
                 stream,
             )?;
-            if report.position != unit.start_position {
+            if report.position != unit.execution_start_position {
                 return Err("teacher-forced M=1 prefill report position mismatch".into());
             }
             (
                 Sq8ModelHeadServingSource::M1PagedDecode,
                 token_ids[0],
-                unit.start_position,
+                unit.execution_start_position,
                 traces,
             )
-        } else if Some(unit.width) == self.load_report.prefill_mode.chunk_tokens() {
+        } else if Some(unit.execution_width) == self.load_report.prefill_mode.chunk_tokens() {
             let (report, traces) = if capture_layers {
-                self.execute_stack_chunk_with_layer_trace(&token_ids, unit.start_position, stream)?
+                self.execute_stack_chunk_with_layer_trace(
+                    &token_ids,
+                    unit.execution_start_position,
+                    stream,
+                )?
             } else {
-                (self.execute_stack_chunk(&token_ids, unit.start_position, stream)?, Vec::new())
+                (
+                    self.execute_stack_chunk(&token_ids, unit.execution_start_position, stream)?,
+                    Vec::new(),
+                )
             };
-            if report.prefix_position != unit.start_position || report.chunk_len != unit.width {
+            if report.prefix_position != unit.execution_start_position
+                || report.chunk_len != unit.execution_width
+            {
                 return Err("teacher-forced chunk prefill report geometry mismatch".into());
             }
             (
@@ -1499,22 +1559,23 @@ impl Qwen3Sq8ServingSession {
                 *token_ids
                     .last()
                     .ok_or_else(|| "teacher-forced chunk has no final input token".to_string())?,
-                unit.start_position + unit.width - 1,
+                unit.execution_end()? - 1,
                 traces,
             )
         } else {
             return Err(format!(
                 "teacher-forced prefill planner produced unsupported width {}",
-                unit.width
+                unit.execution_width
             ));
         };
-        let scheduler_cached = self.commit_prompt_progress(unit.start_position, unit.width)?;
+        let scheduler_cached =
+            self.commit_prompt_progress(unit.logical_start_position, unit.committed_tokens)?;
         let capture = self.capture_teacher_forced_head(
             source,
             scheduler_cached,
             input_token_id,
             position,
-            unit.width,
+            unit.execution_width,
             capture_output,
             capture_layers,
             layer_traces,
@@ -2062,6 +2123,43 @@ impl Qwen3Sq8ServingSession {
 }
 
 impl Qwen3Sq8ServingSession {
+    /// Makes an overlapping fixed-width tail visible as a contiguous scheduler advance.
+    ///
+    /// The prior chunk has already synchronized, so moving these logical cursors does not reorder
+    /// GPU work. The immediately following chunk overwrites every rewound cache entry with real
+    /// tokens before cached-prefix attention uses the new logical length.
+    fn rewind_prefill_tail_for_execution(&mut self, unit: Sq8PrefillUnit) -> Result<(), String> {
+        if !unit.rewinds_cache() {
+            return Ok(());
+        }
+        let chunk_tokens = self
+            .load_report
+            .prefill_mode
+            .chunk_tokens()
+            .ok_or_else(|| "serving prefill tail rewind requires a fixed chunk mode".to_string())?;
+        if unit.execution_width != chunk_tokens
+            || unit.execution_end()? != unit.logical_end()?
+            || unit.committed_tokens >= unit.execution_width
+        {
+            return Err("serving prefill overlap geometry is invalid".into());
+        }
+        validate_cache_lengths(self.caches.as_ref(), unit.logical_start_position)?;
+        self.stack.rewind_paged_serving_cursor(
+            unit.logical_start_position,
+            unit.execution_start_position,
+        )?;
+        for (layer_index, cache) in self.caches.iter_mut().enumerate() {
+            cache
+                .rewind_serving_write_cursor(unit.execution_start_position)
+                .map_err(|error| {
+                    format!(
+                        "serving prefill tail failed to rewind layer {layer_index} cache: {error}"
+                    )
+                })?;
+        }
+        validate_cache_lengths(self.caches.as_ref(), unit.execution_start_position)
+    }
+
     fn prepare_prefill_synchronized(
         &mut self,
         stream: &mut RuntimeStream,
@@ -2076,34 +2174,33 @@ impl Qwen3Sq8ServingSession {
             let prompt_tokens = active.request.prompt_token_ids.len();
             let unit =
                 plan_next_prefill_unit(position, prompt_tokens, self.load_report.prefill_mode)?;
-            let end = unit
-                .start_position
-                .checked_add(unit.width)
-                .ok_or_else(|| "serving prompt execution range overflows".to_string())?;
+            let end = unit.execution_end()?;
             let token_ids = active
                 .request
                 .prompt_token_ids
-                .get(unit.start_position..end)
+                .get(unit.execution_start_position..end)
                 .ok_or_else(|| {
                     format!(
                         "serving prompt range {}..{end} exceeds prompt length {prompt_tokens}",
-                        unit.start_position
+                        unit.execution_start_position
                     )
                 })?
                 .to_vec();
             (unit, prompt_tokens, token_ids)
         };
-        if unit.width == 1 {
-            self.execute_m1_stack_token(token_ids[0], unit.start_position, stream)?;
-        } else if Some(unit.width) == self.load_report.prefill_mode.chunk_tokens() {
-            self.execute_stack_chunk(&token_ids, unit.start_position, stream)?;
+        self.rewind_prefill_tail_for_execution(unit)?;
+        if unit.execution_width == 1 {
+            self.execute_m1_stack_token(token_ids[0], unit.execution_start_position, stream)?;
+        } else if Some(unit.execution_width) == self.load_report.prefill_mode.chunk_tokens() {
+            self.execute_stack_chunk(&token_ids, unit.execution_start_position, stream)?;
         } else {
             return Err(format!(
                 "serving prefill planner produced unsupported execution width {}",
-                unit.width
+                unit.execution_width
             ));
         }
-        let scheduler_cached = self.commit_prompt_progress(unit.start_position, unit.width)?;
+        let scheduler_cached =
+            self.commit_prompt_progress(unit.logical_start_position, unit.committed_tokens)?;
         if self.active_cancelled()? {
             self.state = Sq8ServingRuntimeStatus::Cancelling;
             return Ok(PreparedOracleAdvance {
@@ -2119,7 +2216,7 @@ impl Qwen3Sq8ServingSession {
                 advance: Sq8PreparedAdvance::PromptProgress {
                     prompt_tokens_processed: scheduler_cached,
                     cache_len: scheduler_cached,
-                    execution_width: unit.width,
+                    execution_width: unit.execution_width,
                 },
                 capture: None,
             });
@@ -2130,7 +2227,7 @@ impl Qwen3Sq8ServingSession {
             ));
         }
 
-        let source = match unit.width {
+        let source = match unit.execution_width {
             1 => Sq8ModelHeadServingSource::M1PagedDecode,
             _ => Sq8ModelHeadServingSource::CachedPrefixChunk,
         };
@@ -4343,43 +4440,62 @@ mod tests {
     }
 
     #[test]
-    fn serving_prefill_planner_covers_prompt_once_with_m8_chunks_and_m1_tail() {
+    fn serving_prefill_planner_uses_real_token_overlap_for_m8_tails() {
         for prompt_tokens in [1, 7, 8, 9, 15, 16, 17, 32, 128, 512, 4095] {
             let units =
                 plan_prefill_units(prompt_tokens, Sq8ServingPrefillMode::FixedM8Chunks).unwrap();
-            let expected_chunks = prompt_tokens / QWEN3_14B_SQ8_PREFILL_CHUNK_TOKENS;
-            let expected_tail = prompt_tokens % QWEN3_14B_SQ8_PREFILL_CHUNK_TOKENS;
+            let chunk_tokens = QWEN3_14B_SQ8_PREFILL_CHUNK_TOKENS;
+            let expected_chunks = prompt_tokens / chunk_tokens
+                + usize::from(
+                    prompt_tokens >= chunk_tokens && !prompt_tokens.is_multiple_of(chunk_tokens),
+                );
+            let expected_m1 = if prompt_tokens < chunk_tokens {
+                prompt_tokens
+            } else {
+                0
+            };
             assert_eq!(
-                units.iter().filter(|unit| unit.width == 8).count(),
+                units
+                    .iter()
+                    .filter(|unit| unit.execution_width == chunk_tokens)
+                    .count(),
                 expected_chunks,
                 "prompt={prompt_tokens}"
             );
             assert_eq!(
-                units.iter().filter(|unit| unit.width == 1).count(),
-                expected_tail,
+                units
+                    .iter()
+                    .filter(|unit| unit.execution_width == 1)
+                    .count(),
+                expected_m1,
                 "prompt={prompt_tokens}"
             );
-            let mut expected_position = 0_usize;
+            let mut expected_logical_position = 0_usize;
             for (index, unit) in units.iter().enumerate() {
-                assert_eq!(unit.start_position, expected_position);
-                assert!(matches!(unit.width, 1 | 8));
-                expected_position += unit.width;
+                assert_eq!(unit.logical_start_position, expected_logical_position);
+                assert!(matches!(unit.execution_width, 1 | 8));
+                assert!(unit.execution_start_position <= unit.logical_start_position);
+                assert_eq!(unit.execution_end().unwrap(), unit.logical_end().unwrap());
+                expected_logical_position = unit.logical_end().unwrap();
                 assert_eq!(unit.is_final, index + 1 == units.len());
             }
-            assert_eq!(expected_position, prompt_tokens);
+            assert_eq!(expected_logical_position, prompt_tokens);
         }
 
         let deepest = plan_prefill_units(4095, Sq8ServingPrefillMode::FixedM8Chunks).unwrap();
-        assert_eq!(deepest.len(), 518);
-        assert_eq!(deepest[510].start_position, 4080);
-        assert_eq!(deepest[510].width, 8);
-        assert_eq!(deepest[511].start_position, 4088);
-        assert_eq!(deepest.last().unwrap().start_position, 4094);
+        assert_eq!(deepest.len(), 512);
+        assert!(deepest.iter().all(|unit| unit.execution_width == 8));
+        let tail = deepest.last().unwrap();
+        assert_eq!(tail.logical_start_position, 4088);
+        assert_eq!(tail.execution_start_position, 4087);
+        assert_eq!(tail.execution_width, 8);
+        assert_eq!(tail.committed_tokens, 7);
+        assert!(tail.rewinds_cache());
         assert!(deepest.last().unwrap().is_final);
     }
 
     #[test]
-    fn serving_prefill_planner_covers_m32_and_m128_boundaries_without_mixing_chunks() {
+    fn serving_prefill_planner_covers_m32_and_m128_boundaries_without_m1_tail() {
         for (mode, chunk_tokens) in [
             (Sq8ServingPrefillMode::FixedM32Chunks, 32_usize),
             (Sq8ServingPrefillMode::FixedM128Chunks, 128_usize),
@@ -4388,31 +4504,77 @@ mod tests {
             assert_eq!(mode.resident_stack_width(), chunk_tokens);
             for prompt_tokens in [31, 32, 33, 127, 128, 129, 255, 256, 257, 4095] {
                 let units = plan_prefill_units(prompt_tokens, mode).unwrap();
-                let chunks = prompt_tokens / chunk_tokens;
-                let tail = prompt_tokens % chunk_tokens;
+                let chunks = prompt_tokens / chunk_tokens
+                    + usize::from(
+                        prompt_tokens >= chunk_tokens
+                            && !prompt_tokens.is_multiple_of(chunk_tokens),
+                    );
+                let m1_units = if prompt_tokens < chunk_tokens {
+                    prompt_tokens
+                } else {
+                    0
+                };
                 assert_eq!(
                     units
                         .iter()
-                        .filter(|unit| unit.width == chunk_tokens)
+                        .filter(|unit| unit.execution_width == chunk_tokens)
                         .count(),
                     chunks,
                     "mode={mode:?} prompt={prompt_tokens}"
                 );
                 assert_eq!(
-                    units.iter().filter(|unit| unit.width == 1).count(),
-                    tail,
+                    units
+                        .iter()
+                        .filter(|unit| unit.execution_width == 1)
+                        .count(),
+                    m1_units,
                     "mode={mode:?} prompt={prompt_tokens}"
                 );
-                assert_eq!(units.len(), chunks + tail);
-                let mut expected_position = 0_usize;
+                assert_eq!(units.len(), chunks + m1_units);
+                let mut expected_logical_position = 0_usize;
                 for (index, unit) in units.iter().enumerate() {
-                    assert_eq!(unit.start_position, expected_position);
-                    assert!(unit.width == 1 || unit.width == chunk_tokens);
-                    expected_position += unit.width;
+                    assert_eq!(unit.logical_start_position, expected_logical_position);
+                    assert!(unit.execution_width == 1 || unit.execution_width == chunk_tokens);
+                    assert!(unit.execution_start_position <= unit.logical_start_position);
+                    assert_eq!(unit.execution_end().unwrap(), unit.logical_end().unwrap());
+                    expected_logical_position = unit.logical_end().unwrap();
                     assert_eq!(unit.is_final, index + 1 == units.len());
                 }
-                assert_eq!(expected_position, prompt_tokens);
+                assert_eq!(expected_logical_position, prompt_tokens);
             }
+        }
+    }
+
+    #[test]
+    fn serving_m128_overlap_tail_geometry_and_divisible_geometry_are_explicit() {
+        for prompt_tokens in [128, 512, 1024, 2048] {
+            let units =
+                plan_prefill_units(prompt_tokens, Sq8ServingPrefillMode::FixedM128Chunks).unwrap();
+            assert_eq!(units.len(), prompt_tokens / 128);
+            for (index, unit) in units.iter().enumerate() {
+                assert_eq!(unit.logical_start_position, index * 128);
+                assert_eq!(unit.execution_start_position, index * 128);
+                assert_eq!(unit.execution_width, 128);
+                assert_eq!(unit.committed_tokens, 128);
+                assert!(!unit.rewinds_cache());
+            }
+        }
+
+        for (prompt_tokens, logical_start, execution_start, committed_tokens) in [
+            (129, 128, 1, 1),
+            (1000, 896, 872, 104),
+            (4095, 3968, 3967, 127),
+        ] {
+            let units =
+                plan_prefill_units(prompt_tokens, Sq8ServingPrefillMode::FixedM128Chunks).unwrap();
+            let tail = units.last().unwrap();
+            assert_eq!(tail.logical_start_position, logical_start);
+            assert_eq!(tail.execution_start_position, execution_start);
+            assert_eq!(tail.execution_width, 128);
+            assert_eq!(tail.committed_tokens, committed_tokens);
+            assert_eq!(tail.execution_end().unwrap(), prompt_tokens);
+            assert!(tail.rewinds_cache());
+            assert!(units.iter().all(|unit| unit.execution_width == 128));
         }
     }
 
@@ -4460,8 +4622,15 @@ mod tests {
             let units =
                 plan_prefill_units(prompt_tokens, Sq8ServingPrefillMode::SequentialM1).unwrap();
             assert_eq!(units.len(), prompt_tokens);
-            assert!(units.iter().all(|unit| unit.width == 1));
-            assert_eq!(units.last().unwrap().start_position, prompt_tokens - 1);
+            assert!(units.iter().all(|unit| {
+                unit.execution_width == 1
+                    && unit.execution_start_position == unit.logical_start_position
+                    && unit.committed_tokens == 1
+            }));
+            assert_eq!(
+                units.last().unwrap().logical_start_position,
+                prompt_tokens - 1
+            );
             assert!(units.last().unwrap().is_final);
         }
     }

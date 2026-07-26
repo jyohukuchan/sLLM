@@ -102,7 +102,10 @@ def prefill_mode_config(mode: str) -> dict[str, Any]:
 def expected_prompt_execution_calls(prompt_tokens: int, chunk_tokens: int) -> int:
     if prompt_tokens <= 0 or chunk_tokens <= 0:
         fail("prompt execution call count requires positive prompt and chunk lengths")
-    return prompt_tokens // chunk_tokens + prompt_tokens % chunk_tokens
+    if prompt_tokens < chunk_tokens:
+        return prompt_tokens
+    chunks, tail = divmod(prompt_tokens, chunk_tokens)
+    return chunks + bool(tail)
 
 
 def reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:

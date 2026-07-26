@@ -1645,7 +1645,10 @@ fn expected_prefill_execution_calls(
     }
     Ok(match prefill_chunk_tokens(mode) {
         None => prompt_tokens,
-        Some(chunk_tokens) => prompt_tokens / chunk_tokens + prompt_tokens % chunk_tokens,
+        Some(chunk_tokens) if prompt_tokens < chunk_tokens => prompt_tokens,
+        // A partial suffix after at least one fixed chunk is replayed as one real-token
+        // overlap chunk, rather than becoming one M=1 execution per remaining token.
+        Some(chunk_tokens) => prompt_tokens.div_ceil(chunk_tokens),
     })
 }
 
