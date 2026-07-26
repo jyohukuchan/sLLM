@@ -2470,19 +2470,47 @@ mod tests {
             .unwrap();
         assert_eq!(descriptor.architecture, ModelArchitectureKind::Gemma4Text);
         assert_eq!(descriptor.layers.len(), 35);
+        assert!(descriptor.embedding.tied_to_output);
         assert_eq!(descriptor.embedding.scale, Some((1536.0_f32).sqrt()));
+        assert!(descriptor.output.tied_to_embedding);
         assert_eq!(descriptor.output.logit_soft_cap, Some(30.0));
         assert_eq!(
             descriptor.layers[0].attention.kind,
             DecoderLayerKind::SlidingAttention
         );
+        assert_eq!(descriptor.layers[0].attention.q_heads, 8);
+        assert_eq!(descriptor.layers[0].attention.kv_heads, 1);
         assert_eq!(descriptor.layers[0].attention.head_dim, 256);
+        assert_eq!(
+            descriptor.layers[0].attention.scale,
+            ResidentAttentionScale::One
+        );
         assert_eq!(descriptor.layers[0].attention.sliding_window, Some(512));
+        assert!(matches!(
+            descriptor.layers[0].attention.rope.as_ref(),
+            Some(ResidentRopeDescriptor {
+                kind: ResidentRopeKind::Default,
+                theta,
+                rotary_dim: Some(256),
+                partial_rotary_factor: None,
+                ..
+            }) if theta.to_bits() == 10_000.0_f32.to_bits()
+        ));
         assert_eq!(
             descriptor.layers[4].attention.kind,
             DecoderLayerKind::FullAttention
         );
         assert_eq!(descriptor.layers[4].attention.head_dim, 512);
+        assert!(matches!(
+            descriptor.layers[4].attention.rope.as_ref(),
+            Some(ResidentRopeDescriptor {
+                kind: ResidentRopeKind::Proportional,
+                theta,
+                rotary_dim: None,
+                partial_rotary_factor: Some(0.25),
+                ..
+            }) if theta.to_bits() == 1_000_000.0_f32.to_bits()
+        ));
         assert!(matches!(
             descriptor.layers[15].attention.kv_cache,
             ResidentKvCacheMode::SharedFrom {
@@ -2542,6 +2570,14 @@ mod tests {
             ]
         );
         assert!(descriptor.layers[0].per_layer_embedding.is_some());
+        assert!(matches!(
+            descriptor.layers[0].per_layer_embedding.as_ref(),
+            Some(ResidentPerLayerEmbeddingDescriptor {
+                input_size: 256,
+                vocabulary_size: 262_144,
+                ..
+            })
+        ));
         descriptor.require_gemma4_resident_bf16().unwrap();
         assert!(descriptor.require_qwen3_14b_sq8_0().is_err());
     }
