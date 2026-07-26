@@ -19,6 +19,7 @@ Options:
   --hip-visible-devices TOKEN       One GPU token; default: $HIP_VISIBLE_DEVICES or 0.
   --stage NAME                      all, preflight, cpu, hiprtc, build, isa, or physical.
   --allow-network                   Permit Cargo to fetch missing dependencies; default is offline.
+  --rehearsal-no-gfx942             Permit offline rehearsal without gfx942; physical remains an expected failure.
   --dry-run                         Validate arguments and print the ordered plan without writing/running.
   --help                            Show this help.
 
@@ -36,6 +37,7 @@ jobs=${ULLM_RENTAL_JOBS:-8}
 hip_visible_devices=${HIP_VISIBLE_DEVICES:-0}
 requested_stage=all
 allow_network=0
+rehearsal_no_gfx942=0
 dry_run=0
 
 while [[ $# -gt 0 ]]; do
@@ -67,6 +69,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --allow-network)
       allow_network=1
+      shift
+      ;;
+    --rehearsal-no-gfx942)
+      rehearsal_no_gfx942=1
       shift
       ;;
     --dry-run)
@@ -105,6 +111,7 @@ case "$requested_stage" in
 esac
 
 rocm_path=${ROCM_PATH:-/opt/rocm}
+rental_linker=${ULLM_RENTAL_LINKER:-cc}
 target_dir="$results_dir/cargo-target"
 state_dir="$results_dir/state"
 logs_dir="$results_dir/logs"
@@ -177,6 +184,25 @@ run_step() {
   return "$status"
 }
 
+command_is_available() {
+  local candidate=$1
+  if [[ $candidate == */* ]]; then
+    [[ -x $candidate ]]
+  else
+    command -v "$candidate" >/dev/null 2>&1
+  fi
+}
+
+optional_tool_status() {
+  local candidate=$1
+  local resolved
+  if resolved=$(command -v "$candidate" 2>/dev/null); then
+    printf 'optional_%s=%s (not required by the rental runner)\n' "$candidate" "$resolved"
+  else
+    printf 'optional_%s=unavailable (not required by the rental runner)\n' "$candidate"
+  fi
+}
+
 rental_cargo() {
   local -a cargo_args=("$@")
   if (( ! allow_network )); then
@@ -191,7 +217,7 @@ rental_cargo() {
     GPU_ARCH=gfx942 \
     ROCM_PATH="$rocm_path" \
     CARGO_BUILD_JOBS="$jobs" \
-    CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER="${ULLM_RENTAL_LINKER:-cc}" \
+    CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER="$rental_linker" \
     CARGO_ENCODED_RUSTFLAGS="${ULLM_RENTAL_ENCODED_RUSTFLAGS:-}" \
     CARGO_TARGET_DIR="$target_dir" \
     cargo "${cargo_args[@]}"
@@ -199,27 +225,56 @@ rental_cargo() {
 
 stage_preflight() {
   cd -- "$repo_dir"
-  for command in cargo git c++ "$rocm_path/bin/hipcc" "$rocm_path/llvm/bin/llvm-objdump" \
+  for command in cargo rustc git c++ "$rocm_path/bin/hipcc" "$rocm_path/llvm/bin/llvm-objdump" \
     "$rocm_path/llvm/bin/llvm-readelf" "$rocm_path/llvm/bin/llvm-objcopy" \
     "$rocm_path/llvm/bin/clang-offload-bundler" rocminfo zstd; do
-    if ! command -v "$command" >/dev/null 2>&1 && [[ ! -x $command ]]; then
+    if ! command_is_available "$command"; then
       printf 'required command is unavailable: %s\n' "$command" >&2
       return 1
     fi
   done
-  rocminfo >"$results_dir/rocminfo.txt"
-  if ! grep -q 'gfx942' "$results_dir/rocminfo.txt"; then
-    printf 'rocminfo did not report gfx942\n' >&2
+  if ! command_is_available "$rental_linker"; then
+    printf 'required rental linker is unavailable: %s (set ULLM_RENTAL_LINKER to an executable C linker)\n' \
+      "$rental_linker" >&2
     return 1
+  fi
+  rocminfo >"$results_dir/rocminfo.txt"
+  local observed_arches
+  observed_arches=$(grep -oE 'gfx[0-9]+' "$results_dir/rocminfo.txt" | sort -u | paste -sd, - || true)
+  if [[ -z $observed_arches ]]; then
+    observed_arches=none
   fi
   {
     printf 'revision=%s\n' "$fingerprint"
     printf 'HIP_VISIBLE_DEVICES=%s\n' "$hip_visible_devices"
     printf 'ROCM_PATH=%s\n' "$rocm_path"
+    printf 'rental_linker=%s\n' "$rental_linker"
+    if [[ -z ${ULLM_RENTAL_ENCODED_RUSTFLAGS:-} ]]; then
+      printf 'rental_rustflags=cleared (overrides .cargo/config.toml)\n'
+    else
+      printf 'rental_rustflags=custom ULLM_RENTAL_ENCODED_RUSTFLAGS\n'
+    fi
+    printf 'rocminfo_arches=%s\n' "$observed_arches"
     "$rocm_path/bin/hipcc" --version
     cargo --version
+    rustc --version
+    optional_tool_status clang
+    optional_tool_status mold
+    optional_tool_status rustup
   } >"$results_dir/environment.txt"
+  cat "$results_dir/environment.txt"
   rental_cargo metadata --format-version 1 --no-deps >/dev/null
+  if ! grep -q 'gfx942' "$results_dir/rocminfo.txt"; then
+    if (( rehearsal_no_gfx942 )); then
+      printf '%s\n' "$observed_arches" >"$state_dir/gfx942-missing.rehearsal"
+      printf 'REHEARSAL: rocminfo did not report required gfx942 (observed: %s); continuing only so physical can fail closed without touching a GPU. This cannot pass P0.\n' \
+        "$observed_arches"
+      return 0
+    fi
+    printf 'rocminfo did not report required gfx942 (observed: %s); this host cannot run the physical P0 gate.\n' \
+      "$observed_arches" >&2
+    return 1
+  fi
 }
 
 stage_cpu() {
@@ -258,11 +313,22 @@ stage_physical() {
   local prerequisite
   for prerequisite in preflight cpu hiprtc build isa; do
     if [[ ! -f $state_dir/$prerequisite.done ]]; then
+      if [[ $prerequisite == preflight && -f $results_dir/rocminfo.txt ]] && \
+        ! grep -q 'gfx942' "$results_dir/rocminfo.txt"; then
+        printf 'physical is blocked because preflight found no required gfx942 device; inspect %s/rocminfo.txt. This is a fail-closed non-success.\n' \
+          "$results_dir" >&2
+        return 1
+      fi
       printf 'physical requires completed P0 stage %s; run --stage all to preserve the gate order\n' \
         "$prerequisite" >&2
       return 1
     fi
   done
+  if [[ -f $state_dir/gfx942-missing.rehearsal ]]; then
+    printf 'physical is deliberately blocked: --rehearsal-no-gfx942 observed no gfx942 (%s). This expected local failure is not a P0 pass.\n' \
+      "$(<"$state_dir/gfx942-missing.rehearsal")" >&2
+    return 1
+  fi
   test -x "$smoke_binary"
   # Do not permit the historical skip switch to turn a green A′ result into a
   # false overall pass.  This is the only stage that touches the rented GPU.
