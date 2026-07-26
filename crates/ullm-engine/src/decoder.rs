@@ -2810,12 +2810,20 @@ impl PagedDecodeState {
                 let mut output = Vec::with_capacity(elements);
                 for (index, &bits) in payload.iter().enumerate() {
                     let scale_offset = (index / plane_dim) * std::mem::size_of::<u16>();
-                    let scale = f16_bits_to_f32(u16::from_le_bytes(
+                    let scale_bits = u16::from_le_bytes(
                         scales[scale_offset..scale_offset + std::mem::size_of::<u16>()]
                             .try_into()
                             .expect("scale slice size checked"),
-                    ));
-                    if !scale.is_finite() || scale < 0.0 {
+                    );
+                    // Match the runtime reader: raw +0 is the reset/unwritten
+                    // row marker, so its payload is semantically zero without
+                    // decoding potentially stale payload bits.
+                    if scale_bits == 0 {
+                        output.push(0.0);
+                        continue;
+                    }
+                    let scale = f16_bits_to_f32(scale_bits);
+                    if !scale.is_finite() || scale <= 0.0 {
                         return Err(format!(
                             "paged decoder {plane_label} FP8 cache contains an invalid scale"
                         ));
@@ -4004,21 +4012,23 @@ mod tests {
             .write_token(&mut stream, &[1.0, -2.0], &[0.5, -1.0])
             .unwrap();
 
-        // Raw FP16 -1.0 in the K scale slot.  A valid FP8 row always has a
-        // positive scale (or an all-zero, reset scale), so both diagnostic
-        // readback and attention must reject this corruption instead of
-        // silently negating every key.
-        state
-            .k_scale_buffer
-            .as_mut()
-            .unwrap()
-            .copy_from_host(0, &[0x00, 0xbc], Some(&mut stream))
-            .unwrap();
-        stream.synchronize().unwrap();
-        assert!(state.read_cache_to_host(&mut stream).is_err());
-        assert!(state
-            .decode_written(&mut stream, &[0.25, -0.5], 1.0 / 2.0_f32.sqrt())
-            .is_err());
+        // Raw FP16 -1.0 and negative zero in the K scale slot.  A valid FP8
+        // row always has a positive scale (or raw +0 for an all-zero reset
+        // row), so both diagnostic readback and attention must reject this
+        // corruption instead of silently negating or suppressing every key.
+        for corrupt_scale in [[0x00, 0xbc], [0x00, 0x80]] {
+            state
+                .k_scale_buffer
+                .as_mut()
+                .unwrap()
+                .copy_from_host(0, &corrupt_scale, Some(&mut stream))
+                .unwrap();
+            stream.synchronize().unwrap();
+            assert!(state.read_cache_to_host(&mut stream).is_err());
+            assert!(state
+                .decode_written(&mut stream, &[0.25, -0.5], 1.0 / 2.0_f32.sqrt())
+                .is_err());
+        }
     }
 
     #[test]

@@ -11167,10 +11167,11 @@ bool kv_cache_read_typed_value(
         if (scale_slot == nullptr) {
             return false;
         }
-        const float scale = kv_cache_f16_to_f32(*scale_slot);
+        const uint16_t scale_bits = *scale_slot;
+        const float scale = kv_cache_f16_to_f32(scale_bits);
         // A zero scale denotes a reset/unwritten row.  Its zero payload is
         // semantically zero and must not turn diagnostic readback into NaN.
-        if (scale == 0.0f) {
+        if (scale_bits == 0u) {
             *value_out = 0.0f;
             return true;
         }
@@ -11178,7 +11179,7 @@ bool kv_cache_read_typed_value(
         // not silently accept a corrupted negative, infinite, or NaN FP16
         // scale: negative scales would flip values without an observable
         // failure, which violates the cache's encoding contract.
-        if (!std::isfinite(scale) || scale < 0.0f) {
+        if (!std::isfinite(scale) || scale <= 0.0f) {
             return false;
         }
         value = kv_cache_fp8_e4m3fn_to_f32(static_cast<const uint8_t *>(payload)[index]) * scale;
