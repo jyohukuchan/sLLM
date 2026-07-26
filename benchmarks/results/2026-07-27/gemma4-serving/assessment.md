@@ -41,8 +41,8 @@ threshold:
 - The Japanese explanation repeats the user prompt.
 - The Japanese multi-turn answer enters a repeated `1.` sequence.
 - The English multi-turn answer repeats the same sentence.
-- The Japanese summary emits `<unused56>`; translation and structured-reasoning completions
-  are empty.
+- The Japanese summary emits `<unused56>`; translation and structured-reasoning only echo the
+  prompt rather than answer it.
 
 The France prompt did include “The capital of France is Paris,” confirming that the endpoint
 does generate text, but that does not outweigh the clear failures above. The next work item is

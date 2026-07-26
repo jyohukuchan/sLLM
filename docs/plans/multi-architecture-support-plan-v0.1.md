@@ -813,7 +813,8 @@ BL/BO の greedy path を変えていないことの確認である。
 - `ja_explanation` は user prompt を繰り返した。
 - `ja_multiturn` は `1.` の反復ループになった。
 - `en_multiturn` は同一文を繰り返した。
-- `ja_long_summary` には `<unused56>` が現れ、translation と structured-reasoning は空になった。
+- `ja_long_summary` には `<unused56>` が現れ、translation と structured-reasoning は prompt echo
+  のみで要求への回答を出さなかった。
 
 これは数値しきい値ではなく、保存済み応答を読んだ品質判定である。一方、France prompt は
 `The capital of France is Paris.` を含む応答を返しており、HTTP/wire/tokenizer path の失敗とは

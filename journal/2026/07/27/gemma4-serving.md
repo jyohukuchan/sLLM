@@ -24,8 +24,8 @@
   `[9079,236761,108,818]`、Once は `[528,496,1902,1298]` であり、各 request は
   `reset_complete=true` だった。
 - gateway transport は全 request HTTP 200 / nonempty completion まで到達したが、生成文には prompt
-  echo、反復、`<unused56>`、空 completion があり、actual-text policy により Gemma candidate は
-  **promotion 不可**とした。base E2B 用の upstream-supported chat interface 又は
+  echo、反復、`<unused56>`、回答を持たない echo があり、actual-text policy により Gemma candidate
+  は **promotion 不可**とした。base E2B 用の upstream-supported chat interface 又は
   instruction-tuned checkpoint が次の前提であり、template を推測で差し替えない。
 - 隔離中に外部 session が AQ4 active manifest を `d3d9…` へ変更したため、trusted protected
   source から atomic restore した。最終 snapshot は
