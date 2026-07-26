@@ -8031,8 +8031,9 @@ extern "C" __global__ void ullm_paged_decode_attn_split_partial_f32_kernel(
     // the remaining three waves stage a single K+V row for all five.  Thus
     // K/V have one semantic global load per KV head rather than five.  This
     // says nothing about physical HBM traffic or cache hit rate.
-    const unsigned long long q_per_kv = kv_heads == 0ull ? 0ull : q_heads / kv_heads;
-    if (blockDim.x == 256u && warpSize == 32u && q_per_kv == 5ull &&
+    const unsigned long long gqa_q_per_kv =
+        kv_heads == 0ull ? 0ull : q_heads / kv_heads;
+    if (blockDim.x == 256u && warpSize == 32u && gqa_q_per_kv == 5ull &&
         head_dim == 128ull && value_dim == 128ull &&
         static_cast<unsigned long long>(gridDim.x) == kv_heads * split_count) {
         const unsigned int tid = threadIdx.x;
@@ -8050,7 +8051,7 @@ extern "C" __global__ void ullm_paged_decode_attn_split_partial_f32_kernel(
             source_tile < source_remaining ? source_tile : source_remaining;
         const unsigned long long stride = value_dim + 2ull;
         const unsigned long long q_head =
-            kv_head * q_per_kv + static_cast<unsigned long long>(tid / 32u);
+            kv_head * gqa_q_per_kv + static_cast<unsigned long long>(tid / 32u);
 
         float q0 = 0.0f;
         float q1 = 0.0f;
