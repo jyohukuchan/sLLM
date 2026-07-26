@@ -1,0 +1,110 @@
+{
+  "affinities": [
+    "40-47",
+    "8-15",
+    "32-39",
+    "0-7",
+    "16-23",
+    "24-31",
+    "48-55",
+    "56-63"
+  ],
+  "artifact": "/home/homelab1/datapool/ullm/product/qwen3-14b-fp8-sq8-v0.1/artifact",
+  "execution_backend": "cpu_only_no_runtime_context",
+  "frozen_gate": {
+    "path": "docs/plans/sq8-numerical-gate-v0.2-relative-to-fp32-reference.json",
+    "sha256": "64a43c032570bed8086e3c441b0774cc470c5ab1e8c67f99e02af2b6307f72bf"
+  },
+  "gpu_environment": {
+    "CUDA_VISIBLE_DEVICES": "",
+    "HIP_VISIBLE_DEVICES": "-1",
+    "ROCR_VISIBLE_DEVICES": "-1",
+    "ULLM_HIP_VISIBLE_DEVICES": "-1"
+  },
+  "jobs": [
+    {
+      "case_id": "chat-p3584-g512",
+      "mode": "m128_chunks_with_declared_tail"
+    },
+    {
+      "case_id": "raw-p4095-g1",
+      "mode": "m128_chunks_with_declared_tail"
+    },
+    {
+      "case_id": "chat-p3584-g512",
+      "mode": "sequential_m1"
+    },
+    {
+      "case_id": "raw-p4095-g1",
+      "mode": "sequential_m1"
+    },
+    {
+      "case_id": "chat-p2048-g512",
+      "mode": "m128_chunks_with_declared_tail"
+    },
+    {
+      "case_id": "chat-p2048-g512",
+      "mode": "sequential_m1"
+    },
+    {
+      "case_id": "raw-p1023-g4",
+      "mode": "sequential_m1"
+    },
+    {
+      "case_id": "raw-p0001-g1024",
+      "mode": "sequential_m1"
+    },
+    {
+      "case_id": "raw-p0512-g512",
+      "mode": "m128_chunks_with_declared_tail"
+    },
+    {
+      "case_id": "raw-p0512-g512",
+      "mode": "sequential_m1"
+    },
+    {
+      "case_id": "raw-p0128-g512",
+      "mode": "m128_chunks_with_declared_tail"
+    },
+    {
+      "case_id": "raw-p0128-g512",
+      "mode": "sequential_m1"
+    },
+    {
+      "case_id": "raw-p0032-g512",
+      "mode": "sequential_m1"
+    },
+    {
+      "case_id": "raw-p0008-g512",
+      "mode": "sequential_m1"
+    },
+    {
+      "case_id": "raw-p0511-g4",
+      "mode": "sequential_m1"
+    },
+    {
+      "case_id": "raw-p0255-g4",
+      "mode": "sequential_m1"
+    },
+    {
+      "case_id": "raw-p0127-g4",
+      "mode": "sequential_m1"
+    }
+  ],
+  "memory_preflight": {
+    "reserve_kib": 16777216,
+    "rss_budget_kib_per_process": 786432,
+    "workers_rss_budget_kib": 6291456
+  },
+  "nice": 10,
+  "package": "/home/homelab1/datapool/ullm/product/qwen3-14b-fp8-sq8-v0.1/package",
+  "physical_cpu_set": "0-63",
+  "processes": 8,
+  "schema_version": "ullm.sq8.artifact_fp32_reference.parallel_launcher.v1",
+  "seed": 0,
+  "threads_per_process": 8,
+  "worker_binary": {
+    "path": "target/release/ullm-sq8-fp32-reference-corpus",
+    "sha256": "045889c565f6c22331715cb73e8dff3b1424e22fdcb392ebb921bc5488a775c6"
+  }
+}

@@ -546,3 +546,81 @@ GPU 9-position capture は logits/final/40 layer hidden、token ID、content has
 [`14b-gpu-fp32-control-SHA256SUMS`](../../benchmarks/results/2026-07-26/sq8-fp32-reference/14b-gpu-fp32-control-SHA256SUMS)
 は run receipt、9 metadata receipt、比較 receipt、性能 receipt を束縛する。これは失格診断を
 再検証可能に保存するものであり、v0.2 control の追加・置換ではない。
+
+## 2026-07-26 CPU strict-F32 のプロセス並列 throughput と全 coverage capture
+
+この追記は凍結済み
+[`sq8-numerical-gate-v0.2-relative-to-fp32-reference.json`](sq8-numerical-gate-v0.2-relative-to-fp32-reference.json)
+を変更しない。CPU strict-F32 artifact reference だけを使い、GPU、`ullm-openai.service`、
+active manifest、activation/campaign、`/opt/ullm` には触れない。
+
+### CPU-only 実測と選択
+
+ホストは AMD Ryzen Threadripper PRO 3995WX、64 physical core / 128 logical CPU だった。
+SMT を使わず logical CPU 0--63 の physical-core set 上で、disjoint affinity、nice 10、seed 0
+の artifact-F32 runner を position 0--3 の四 forward / worker で測った。steady aggregate rate は
+初期化を除く各 worker の四 forward 合計の最長 critical path、wall rate は full artifact/package
+verification と初期化を含む。生の receipt は
+[`cpu-parallel-throughput-v1/summary.json`](../../benchmarks/results/2026-07-26/sq8-fp32-reference/cpu-parallel-throughput-v1/summary.json)
+に保存した。
+
+| threads x processes | steady aggregate forward/s | critical 4-forward s | RSS x processes KiB | 17 case の early-position ECT |
+| --- | ---: | ---: | ---: | ---: |
+| 64 x 1 | 0.118987 | 33.617 | 561,416 | 67.358 h |
+| 32 x 2 | 0.234869 | 34.062 | 596,888 | 34.241 h |
+| 16 x 4 | 0.383692 | 41.700 | 667,716 | 19.286 h |
+| 12 x 5 | 0.563547 | 35.489 | 670,676 | 13.888 h |
+| 10 x 6 | 0.489846 | 48.995 | 706,020 | 16.077 h |
+| 8 x 8 | 0.599971 | 53.336 | 809,792 | **13.444 h** |
+| 6 x 10 | 0.620157 | 64.500 | 969,584 | 15.777 h |
+| 4 x 16 | **0.679429** | 94.197 | 1,556,784 | 21.447 h |
+
+4 x 16 は aggregate forward/s 最大だが、case 内の causal dependency を短縮しないため、4,096
+forward case の makespan が長い。frozen 17 case を largest-forward-count-first で配列し、worker
+ごとの実測四 forward mean による earliest-completion-time assignment を行うと 8 x 8 が最小だった。
+従って capture は 8 threads x 8 processes を選んだ。launch preflight では 768 MiB x 8 の worker
+budget と 16 GiB reserve を要求し、`MemAvailable` 60,398,608 KiB から budget 後 37,329,936 KiB
+が残った。benchmark RSS x 8 は 809,792 KiB であり、測定時・launch 時とも memory constraint を
+満たした。
+
+### coverage、所要時間、基準の扱い
+
+frozen corpus の seven primary stream は合計 4,096 forced-decode position である（「各 stream
+4,096」ではない）。prompt forward を加えると primary は 10,409 forward、boundary は 6,028、
+sequential M=1 は 16,437、required M=128 chunks/tails は 12,416、合計 28,853 forward になる。
+各 forward について logits、final hidden、40 layer hidden と token ID を保存する。F32 raw tensor
+payload だけの見積もりは 41,762,524,672 B (38.894 GiB) で、JSON/hash/filesystem overhead は未確認
+である。
+
+選択構成の 13.444 h は early position forward-only の計算であり、後半 context の CPU cost、queued
+job initialization、capture/hash I/O、filesystem contention は含まない。よって **8--12 h の一晩に
+収まることは確認できない**。12 h を既に超えており、long-context CPU cost は未確認なので、この
+数字を上限や完走保証としては使わない。
+
+削減案は判断材料としてだけ記録する。M=128 全量を外せば 12,416 forward (43.03%)、long M=128
+二 case を外せば 8,192 (28.39%)、primary decode を 4,096 から 1,024 / 512 に短縮しても
+3,072 (10.65%) / 3,584 (12.42%) である。前二者は mandatory M=128 coverage を失い、後二者は
+one-sided 95% Wilson lower bound を frozen 4,096 sample の `99.934%` から `99.737%` / `99.474%`
+へ下げる。primary-only は 18,444 (63.92%) 削減するが boundary/M=128 を失う。いずれも v0.2
+条件からの逸脱であり、基準を改訂せず non-qualifying と扱う。
+
+### capture の保全と並列決定性
+
+`ullm-sq8-fp32-reference-corpus` は各 independent case を所有する CPU-only worker である。各
+position は `.staging` に content hash 付きで書いた後、atomic rename で publish し、`progress.json`
+を position 単位で atomic update する。completion 時には case-local `SHA256SUMS` が全 capture,
+token stream, plan, receipt を束縛し、`run.json` が manifest hash を記録する。`--resume` は immutable
+launcher plan/binary/gate hash の一致を要求し、既存 capture の hash を検証して KV state を replay
+復元するが、capture を再書込みしない。従って中断後に最初から output capture をやり直す必要はない。
+
+8-thread serial (CPU 40--47) と、同時に八 worker を走らせた 8-thread parallel (CPU 56--63) で
+`raw-p0001-g1024` の最初の四 causal forward を比較した。metadata 四 file と logits/final/40 layer
+hidden の 168 payload、計 172 file は byte-identical (mismatch 0) であり、token は
+`1 -> 25 -> 330 -> 16 -> 13` で一致した。receipt は
+[`parallel-vs-serial-t8-v1.json`](../../benchmarks/results/2026-07-26/sq8-fp32-reference/cpu-f32-parallel-reference-v1/parallel-vs-serial-t8-v1.json)
+に保存した。これは process parallelism が fixed 8-thread serial output を変えていない実測証拠である。
+
+実 capture root は
+[`cpu-f32-parallel-reference-v1/`](../../benchmarks/results/2026-07-26/sq8-fp32-reference/cpu-f32-parallel-reference-v1/)
+である。全 17 case が `run.json` の `status=complete` を持つまで v0.2 full reference は未完成であり、
+途中で終了した場合は completed case/position と hash manifest を明記して non-qualifying のままとする。
