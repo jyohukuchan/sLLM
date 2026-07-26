@@ -1070,3 +1070,82 @@ condition.  Evidence, source provenance, service/thermal records, and raw
 traces are under
 `benchmarks/results/2026-07-26/prefill-attention-redesign/`.  No manifest or
 service configuration was changed and no `SQ8_0` promotion was attempted.
+
+## `SQ8_0` prefill resident-width expansion — 2026-07-27
+
+The M=128 limit was split into two different contracts.  The serving
+`resident_stack_width()` is not an attention tile size: it is the common M
+used to allocate the resident stack's layer workspace and hidden buffer, the
+serving prompt-chunk hidden buffer, and CK activation/projection workspaces.
+The fixed width is therefore a real allocation/shape contract, but its use of
+M=128 is not inherently required by Flash2.
+
+`Sq8ServingPrefillMode::fixed_chunk_tokens(M)` now lets the serving scheduler
+select a power-of-two width from 2 through the 4096-token context limit.  The
+default loader remains M=128.  The `sq8_ck_serving` CLI accepts the same
+selection as `m<N>-chunk<N>`.  Short tails retain BK's real-token cursor
+rewind: the final M-wide execution overlaps already processed real tokens and
+commits only the outstanding suffix.  It never creates a fake token, padding,
+or an attention mask.
+
+This is intentionally two-stage admission.  The scheduler accepts and tests
+M=256/512/1024/2048/4096, while model loading still requires the measured
+lower runtime contract.  At this point
+`Qwen3Sq8LayerConfig::validate`, the stack, Rust CK wrapper, and
+`ullm_runtime_api_sq8_ck.inc` only admit `{1,2,4,8,16,32,128}`.  A requested
+wide M therefore fails before model allocation with an explicit diagnostic;
+it is not misreported as a completed GPU run.
+
+For N=4095, the scheduler has the following consequences across 40 layers:
+
+| M | fixed execution units/layer | planned Flash2 calls | tail execution / logical commit |
+| ---: | ---: | ---: | --- |
+| 128 | 32 | 1,280 | `3967..4094` / 127 |
+| 256 | 16 | 640 | `3839..4094` / 255 |
+| 512 | 8 | 320 | `3583..4094` / 511 |
+| 1024 | 4 | 160 | `3071..4094` / 1,023 |
+| 2048 | 2 | 80 | `2047..4094` / 2,047 |
+| 4096 | no legal fixed replay at N=4095 | 163,800 M=1 calls | no synthetic row permitted |
+
+These rows are scheduler-unit-test results, not a trace of dispatches.  The
+full model cannot reach a wider Flash2 dispatch until the lower contract is
+extended.  M=2048 is the largest useful no-padding candidate at N=4095;
+M=4096 is capacity-valid only for an exact 4096-token prompt.
+
+The allocation calculation at
+`benchmarks/results/2026-07-27/prefill-chunk-width/memory-accounting.md`
+shows 539,648 B per resident token.  Even M=4096 gives a requested SQ8_0
+total of 18.519 GiB and leaves 6.424 GiB analytically after adding the
+observed 7.426 GiB AQ4_0 Qwen3.5-9B allocation to the 31.859 GiB R9700.
+Allocator/module overhead and a true co-resident load remain unmeasured, so
+this is capacity evidence rather than a production co-residency claim.
+
+No BX-owned Flash2 source change is required by this width extension.  The
+F32 cached-prefix launcher already passes `new_tokens` dynamically and uses
+no persistent M-sized attention scratch; its relevant Qwen3-14B restriction
+is `value_dim <= 256`, not M=128.  The generic CTA uses 1,296 B LDS and the
+selected grouped-GQA CTA uses 12,624 B LDS, both independent of M.  The next
+owner should instead make the following lower-runtime change after the direct
+CK shape probe and a full-model M=256 smoke both succeed:
+
+1. extend the layer and stack measured-M validation/list to the selected
+   widths (start with 256, then 512/1024/2048);
+2. extend the Rust CK and C++ API M whitelists in lockstep, preserving their
+   existing generic `m,n,k` CK argument construction;
+3. load a fresh resident model at each M and run hidden/logit diagnostics plus
+   actual generated text under the lightweight policy; and
+4. trace the completed full-model runs and time the five prescribed prompt
+   lengths using the existing non-profiled, five-repeat accounting.
+
+The direct CK prerequisite has completed: in one short R9700 locked window,
+the existing helper accepted M=256/512/1024/2048/4096 for all four
+Qwen3-14B projection shapes, including activation quantization and output
+conversion.  `wide-m-ck-shape-probe.jsonl` has all 24 zero-buffer shape rows.
+This does not remove the need for the M=256 full-model smoke: the layer/stack
+and public API gate still intentionally reject the unlisted widths, and the
+probe neither uses real weights nor evaluates numerical fidelity.
+
+The width scheduler tests, allocation accounting, direct CK probe source, and
+explicit unmeasured status are retained under
+`benchmarks/results/2026-07-27/prefill-chunk-width/`.  No kernel-only speedup
+is used as an acceptance decision.
