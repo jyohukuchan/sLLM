@@ -2,8 +2,9 @@
 """Launch the CPU-only resumable SQ8 artifact-FP32 corpus workers.
 
 Each worker owns one causally dependent corpus case.  This launcher only
-parallelizes independent cases and pins every process to distinct physical
-Threadripper cores (logical CPUs 0--63); it does not start, stop, or query a
+parallelizes independent cases, keeps every CPU set disjoint, and defaults to
+physical Threadripper cores (logical CPUs 0--63).  An explicit opt-in permits
+SMT siblings (logical CPUs 64--127).  It does not start, stop, or query a
 service and it never invokes a GPU binary.
 """
 
@@ -25,6 +26,7 @@ from typing import Any
 FROZEN_GATE_SHA256 = "64a43c032570bed8086e3c441b0774cc470c5ab1e8c67f99e02af2b6307f72bf"
 LAUNCHER_SCHEMA_VERSION = "ullm.sq8.artifact_fp32_reference.parallel_launcher.v1"
 PHYSICAL_CPU_COUNT = 64
+LOGICAL_CPU_COUNT = 128
 
 
 @dataclasses.dataclass(frozen=True)
@@ -150,8 +152,8 @@ def affinity_sets(args: argparse.Namespace) -> list[str]:
             raise ValueError(
                 f"CPU set {value!r} has {len(members)} CPUs, expected {args.threads}"
             )
-        if any(cpu < 0 or cpu >= PHYSICAL_CPU_COUNT for cpu in members):
-            raise ValueError(f"CPU set {value!r} is outside physical CPU range 0--63")
+        if any(cpu < 0 or cpu >= LOGICAL_CPU_COUNT for cpu in members):
+            raise ValueError(f"CPU set {value!r} is outside logical CPU range 0--127")
         if used.intersection(members):
             raise ValueError(f"CPU set {value!r} overlaps another requested worker set")
         used.update(members)
@@ -188,25 +190,40 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--rss-budget-kib-per-process", type=int, default=786_432)
     parser.add_argument("--memory-reserve-kib", type=int, default=16 * 1024 * 1024)
     parser.add_argument("--resume", action="store_true")
+    parser.add_argument(
+        "--allow-smt",
+        action="store_true",
+        help="permit explicitly supplied SMT sibling logical CPUs 64--127",
+    )
+    parser.add_argument(
+        "--verify-resume",
+        action="store_true",
+        help="read-only validation of a --resume invocation; writes no launcher files",
+    )
     parser.add_argument("--dry-run", action="store_true")
     return parser.parse_args()
 
 
 def validate_args(args: argparse.Namespace) -> None:
-    if not 1 <= args.threads <= PHYSICAL_CPU_COUNT:
-        raise ValueError(f"--threads must be within 1..={PHYSICAL_CPU_COUNT}")
-    if not 1 <= args.processes <= PHYSICAL_CPU_COUNT:
-        raise ValueError(f"--processes must be within 1..={PHYSICAL_CPU_COUNT}")
-    if args.threads * args.processes > PHYSICAL_CPU_COUNT:
+    if not 1 <= args.threads <= LOGICAL_CPU_COUNT:
+        raise ValueError(f"--threads must be within 1..={LOGICAL_CPU_COUNT}")
+    if not 1 <= args.processes <= LOGICAL_CPU_COUNT:
+        raise ValueError(f"--processes must be within 1..={LOGICAL_CPU_COUNT}")
+    if args.cpu_sets is None and args.threads * args.processes > PHYSICAL_CPU_COUNT:
         raise ValueError(
-            "workers would oversubscribe the physical-core set 0--63: "
+            "workers would oversubscribe the default physical-core set 0--63: "
             f"{args.threads} threads × {args.processes} processes"
         )
     if args.poll_seconds < 10:
         raise ValueError("--poll-seconds must be at least 10")
     if not -20 <= args.nice <= 19:
         raise ValueError("--nice must be in -20..19")
-    affinity_sets(args)
+    requested_cpu_sets = affinity_sets(args)
+    uses_smt = any(cpu >= PHYSICAL_CPU_COUNT for value in requested_cpu_sets for cpu in expand_cpu_set(value))
+    if uses_smt and not args.allow_smt:
+        raise ValueError("SMT logical CPUs 64--127 require explicit --allow-smt")
+    if args.verify_resume and not args.resume:
+        raise ValueError("--verify-resume requires --resume")
     for name in ("artifact", "package", "binary", "gate"):
         path = getattr(args, name)
         if not path.exists():
@@ -250,6 +267,8 @@ def make_plan(args: argparse.Namespace) -> dict[str, Any]:
         "threads_per_process": args.threads,
         "processes": args.processes,
         "physical_cpu_set": "0-63",
+        "logical_cpu_set": "0-127",
+        "allow_smt": args.allow_smt,
         "affinities": affinity_sets(args),
         "nice": args.nice,
         "memory_preflight": {
@@ -261,6 +280,54 @@ def make_plan(args: argparse.Namespace) -> dict[str, Any]:
     }
 
 
+def resume_identity(plan: dict[str, Any]) -> dict[str, Any]:
+    """Return only fields that can change corpus bytes or worker checkpoint validity.
+
+    Process count, CPU placement, niceness, and the conservative RSS preflight
+    are scheduling controls.  They are recorded per invocation but deliberately
+    do not invalidate a checkpoint.  Thread count remains immutable because a
+    case worker binds it into its own exact ``plan.json``.
+    """
+
+    fields = (
+        "execution_backend",
+        "gpu_environment",
+        "frozen_gate",
+        "artifact",
+        "package",
+        "worker_binary",
+        "seed",
+        "threads_per_process",
+        "jobs",
+    )
+    try:
+        return {field: plan[field] for field in fields}
+    except KeyError as error:
+        raise ValueError(f"launcher plan is missing resume identity field {error.args[0]!r}") from error
+
+
+def validate_existing_case_thread_counts(args: argparse.Namespace) -> int:
+    """Fail before launching if a checkpoint binds a different thread count."""
+
+    checked = 0
+    for job in ORDERED_JOBS:
+        path = case_output(args.output, job) / "plan.json"
+        if not path.exists():
+            continue
+        try:
+            plan = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as error:
+            raise ValueError(f"cannot read existing case plan {path}: {error}") from error
+        thread_count = plan.get("thread_count")
+        if thread_count != args.threads:
+            raise ValueError(
+                f"existing case plan {path} binds thread_count={thread_count!r}, "
+                f"requested --threads={args.threads}"
+            )
+        checked += 1
+    return checked
+
+
 def prepare_plan(args: argparse.Namespace) -> dict[str, Any]:
     plan = make_plan(args)
     plan_path = args.output / "launcher-plan.json"
@@ -270,9 +337,13 @@ def prepare_plan(args: argparse.Namespace) -> dict[str, Any]:
                 f"output already has a launcher plan: {plan_path}; use --resume after reviewing it"
             )
         existing = json.loads(plan_path.read_text(encoding="utf-8"))
-        if existing != plan:
-            raise ValueError("existing launcher plan does not match this resume invocation")
+        if resume_identity(existing) != resume_identity(plan):
+            raise ValueError(
+                "existing launcher corpus identity does not match this resume invocation"
+            )
     else:
+        if args.verify_resume:
+            raise ValueError(f"cannot verify resume without existing launcher plan: {plan_path}")
         if args.output.exists() and any(args.output.iterdir()):
             raise ValueError(
                 f"output exists and is nonempty without launcher plan: {args.output}"
@@ -280,6 +351,33 @@ def prepare_plan(args: argparse.Namespace) -> dict[str, Any]:
         args.output.mkdir(parents=True, exist_ok=True)
         write_new_json(plan_path, plan)
     return plan
+
+
+def record_execution_invocation(args: argparse.Namespace, plan: dict[str, Any]) -> Path:
+    """Keep an immutable audit record when a compatible resume changes scheduling."""
+
+    directory = args.output / "launcher-invocations"
+    sequence = f"invocation-{time.time_ns()}-pid-{os.getpid()}.json"
+    path = directory / sequence
+    write_new_json(
+        path,
+        {
+            "schema_version": "ullm.sq8.artifact_fp32_reference.parallel_launcher.invocation.v1",
+            "created_unix_seconds": int(time.time()),
+            "resume": args.resume,
+            "resume_identity": resume_identity(plan),
+            "execution": {
+                "threads_per_process": args.threads,
+                "processes": args.processes,
+                "logical_cpu_set": "0-127",
+                "allow_smt": args.allow_smt,
+                "affinities": affinity_sets(args),
+                "nice": args.nice,
+                "memory_preflight": plan["memory_preflight"],
+            },
+        },
+    )
+    return path
 
 
 def worker_command(args: argparse.Namespace, job: Job, slot: int, resume_case: bool) -> list[str]:
@@ -350,9 +448,23 @@ def main() -> int:
     try:
         validate_args(args)
         plan = prepare_plan(args)
+        checked_case_plans = validate_existing_case_thread_counts(args) if args.resume else 0
     except (OSError, ValueError, RuntimeError) as error:
         print(f"error: {error}", file=sys.stderr)
         return 2
+    if args.verify_resume:
+        print(
+            json.dumps(
+                {
+                    "status": "resume_compatible",
+                    "checked_case_plans": checked_case_plans,
+                    "resume_identity": resume_identity(plan),
+                },
+                sort_keys=True,
+            )
+        )
+        return 0
+    record_execution_invocation(args, plan)
     available = memory_available_kib()
     atomic_json(
         args.output / "launcher-preflight.json",
