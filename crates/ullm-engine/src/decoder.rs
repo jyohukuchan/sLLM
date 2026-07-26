@@ -3947,6 +3947,20 @@ mod tests {
                 .unwrap();
             assert_eq!(output.len(), shape.output_elements().unwrap());
             assert!(output.iter().all(|value| value.is_finite()));
+            // This validates the typed reader against the exact decoded
+            // payload+scale bytes it wrote.  It is an implementation
+            // correctness check, not a quality acceptance threshold.
+            let physical_cache = state.read_cache_to_host(&mut stream).unwrap();
+            let expected = expected_paged_decode_attn(
+                &q,
+                &physical_cache.k,
+                &physical_cache.v,
+                &block_table,
+                cache_len,
+                shape,
+                softmax_scale,
+            );
+            assert_f32s_close(&output, &expected, 1e-5);
         }
     }
 
