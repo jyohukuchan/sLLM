@@ -85,6 +85,13 @@ fn summary_json(loaded: &LoadedModelConfig) -> serde_json::Value {
             "status": "implemented",
             "executor": "Qwen35Aq4Text"
         }),
+        ModelExecutionStatus::Gemma4TextNonquantized => serde_json::json!({
+            "status": "implemented_diagnostic_only",
+            "executor": "Gemma4TextExecutor",
+            "weight_path": "BF16 source safetensors",
+            "activation_path": "F32",
+            "quantized_serving": false
+        }),
         ModelExecutionStatus::Unimplemented {
             required_executor,
             reason,
@@ -133,6 +140,7 @@ fn decoder_summary(config: &ModelConfig) -> serde_json::Value {
             "num_key_value_heads": config.decoder.num_key_value_heads,
             "local_head_dim": config.local_head_dim,
             "global_head_dim": config.global_head_dim,
+            "num_global_key_value_heads": config.num_global_key_value_heads,
             "intermediate_size": config.dense_mlp.intermediate_size,
             "hidden_activation": &config.dense_mlp.activation,
             "layer_types": config.layer_types.iter().map(|kind| kind.as_str()).collect::<Vec<_>>(),
@@ -144,6 +152,8 @@ fn decoder_summary(config: &ModelConfig) -> serde_json::Value {
             "hidden_size_per_layer_input": config.hidden_size_per_layer_input,
             "vocab_size_per_layer_input": config.vocab_size_per_layer_input,
             "final_logit_softcapping": config.final_logit_softcapping,
+            "max_position_embeddings": config.max_position_embeddings,
+            "use_bidirectional_attention": &config.use_bidirectional_attention,
             "tie_word_embeddings": config.decoder.tie_word_embeddings,
         }),
         ModelConfig::Qwen35DenseText(config) => qwen35_summary(

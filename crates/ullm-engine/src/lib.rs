@@ -16,6 +16,7 @@ pub mod decoder;
 pub mod execution_batch;
 pub mod execution_trace;
 pub mod format_id;
+pub mod gemma4_text_executor;
 pub mod golden;
 pub mod host_bytes;
 pub mod inference_api;

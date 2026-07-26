@@ -41,6 +41,9 @@ pub enum ModelExecutionStatus {
     Qwen3FullAttention,
     /// The existing text-only Qwen3.5 AQ4_0 runtime can consume this contract.
     Qwen35Aq4Text,
+    /// The diagnostic-only non-quantized Gemma4 text executor can consume this
+    /// contract. It streams BF16 source weights and keeps activations in F32.
+    Gemma4TextNonquantized,
     /// Config was decoded, but intentionally has no executor fallback.
     Unimplemented {
         required_executor: &'static str,
@@ -73,13 +76,17 @@ impl LoadedModelConfig {
         self.model.require_qwen35_aq4_text()
     }
 
+    pub fn require_gemma4_text_executor(&self) -> Result<&Gemma4TextConfig, String> {
+        self.model.require_gemma4_text_executor()
+    }
+
     /// Returns a descriptive error after config assembly for executors that
     /// have intentionally not been implemented yet.
     pub fn require_implemented_executor(&self) -> Result<(), String> {
         match self.execution_status() {
-            ModelExecutionStatus::Qwen3FullAttention | ModelExecutionStatus::Qwen35Aq4Text => {
-                Ok(())
-            }
+            ModelExecutionStatus::Qwen3FullAttention
+            | ModelExecutionStatus::Qwen35Aq4Text
+            | ModelExecutionStatus::Gemma4TextNonquantized => Ok(()),
             ModelExecutionStatus::Unimplemented {
                 required_executor,
                 reason,
@@ -117,10 +124,7 @@ impl ModelConfig {
         match self {
             Self::Qwen3(_) => ModelExecutionStatus::Qwen3FullAttention,
             Self::Qwen35DenseText(_) => ModelExecutionStatus::Qwen35Aq4Text,
-            Self::Gemma4Text(_) => ModelExecutionStatus::Unimplemented {
-                required_executor: "Gemma4TextExecutor",
-                reason: "local/full attention, mixed head widths, extra norms, PLE, tied embedding, and logit soft-cap are not implemented",
-            },
+            Self::Gemma4Text(_) => ModelExecutionStatus::Gemma4TextNonquantized,
             Self::Qwen35MoeText(_) => ModelExecutionStatus::Unimplemented {
                 required_executor: "Qwen35MoeExecutor",
                 reason: "top-k routing, gather/scatter, grouped expert GEMM, weighted reduction, and shared expert execution are not implemented",
@@ -149,6 +153,18 @@ impl ModelConfig {
             ));
         };
         config.validate_existing_aq4_executor()?;
+        Ok(config)
+    }
+
+    pub fn require_gemma4_text_executor(&self) -> Result<&Gemma4TextConfig, String> {
+        let Self::Gemma4Text(config) = self else {
+            return Err(format!(
+                "Gemma4TextExecutor requires {}, got {}",
+                ModelArchitectureKind::Gemma4Text.architecture_name(),
+                self.kind().architecture_name()
+            ));
+        };
+        config.validate_nonquantized_executor()?;
         Ok(config)
     }
 }
@@ -388,6 +404,7 @@ pub struct Gemma4TextConfig {
     pub layer_types: Vec<DecoderLayerKind>,
     pub local_head_dim: usize,
     pub global_head_dim: usize,
+    pub num_global_key_value_heads: Option<usize>,
     pub sliding_window: usize,
     pub sliding_rope: GemmaRopeConfig,
     pub full_rope: GemmaRopeConfig,
@@ -397,8 +414,110 @@ pub struct Gemma4TextConfig {
     pub hidden_size_per_layer_input: usize,
     pub vocab_size_per_layer_input: usize,
     pub final_logit_softcapping: f32,
+    pub max_position_embeddings: usize,
+    /// `None` is the causal text-only mode used by the inspected E2B
+    /// checkpoint. A non-null value is not silently interpreted as causal.
+    pub use_bidirectional_attention: Option<String>,
     pub enable_moe_block: bool,
     pub norm_weight_convention: RmsNormWeightConvention,
+}
+
+impl Gemma4TextConfig {
+    /// Validates the exact subset implemented by `Gemma4TextExecutor`.
+    ///
+    /// This is a non-quantized architecture diagnostic contract, not a
+    /// serving/quantization compatibility promise. Every rejection below
+    /// corresponds to a distinct Hugging Face text-decoder branch that this
+    /// executor would otherwise have to guess about.
+    pub fn validate_nonquantized_executor(&self) -> Result<(), String> {
+        if self.dense_mlp.activation != "gelu_pytorch_tanh" {
+            return Err(format!(
+                "Gemma4TextExecutor supports hidden_activation=gelu_pytorch_tanh, got {:?}",
+                self.dense_mlp.activation
+            ));
+        }
+        if self.attention.bias {
+            return Err("Gemma4TextExecutor does not implement attention bias".into());
+        }
+        if self.attention.dropout != 0.0 {
+            return Err(format!(
+                "Gemma4TextExecutor requires attention_dropout=0, got {}",
+                self.attention.dropout
+            ));
+        }
+        if !self.decoder.tie_word_embeddings {
+            return Err("Gemma4TextExecutor requires tied input embedding and LM head".into());
+        }
+        if self.norm_weight_convention != RmsNormWeightConvention::DirectWeight {
+            return Err("Gemma4TextExecutor requires direct RMSNorm weights".into());
+        }
+        if self.attention_k_eq_v {
+            return Err(
+                "Gemma4TextExecutor does not implement attention_k_eq_v=true alternate attention"
+                    .into(),
+            );
+        }
+        if self.use_bidirectional_attention.is_some() {
+            return Err(format!(
+                "Gemma4TextExecutor implements causal text attention only, got use_bidirectional_attention={:?}",
+                self.use_bidirectional_attention
+            ));
+        }
+        if self.enable_moe_block {
+            return Err("Gemma4TextExecutor does not implement Gemma4 MoE blocks".into());
+        }
+        if self.num_kv_shared_layers > self.decoder.num_hidden_layers {
+            return Err(format!(
+                "Gemma4 num_kv_shared_layers={} exceeds num_hidden_layers={}",
+                self.num_kv_shared_layers, self.decoder.num_hidden_layers
+            ));
+        }
+        if self.layer_types.len() != self.decoder.num_hidden_layers {
+            return Err(format!(
+                "Gemma4 layer_types length {} differs from num_hidden_layers={}",
+                self.layer_types.len(),
+                self.decoder.num_hidden_layers
+            ));
+        }
+        if !self
+            .decoder
+            .num_attention_heads
+            .is_multiple_of(self.decoder.num_key_value_heads)
+        {
+            return Err(format!(
+                "Gemma4 q heads must be divisible by KV heads: {} / {}",
+                self.decoder.num_attention_heads, self.decoder.num_key_value_heads
+            ));
+        }
+        if self.local_head_dim != self.decoder.head_dim {
+            return Err("Gemma4 local head dimension disagrees with decoder head_dim".into());
+        }
+        if self.sliding_rope.rope_type != "default"
+            || self.sliding_rope.partial_rotary_factor.is_some()
+        {
+            return Err(format!(
+                "Gemma4TextExecutor requires default full-width sliding RoPE, got type={:?} partial={:?}",
+                self.sliding_rope.rope_type, self.sliding_rope.partial_rotary_factor
+            ));
+        }
+        if self.full_rope.rope_type != "proportional" {
+            return Err(format!(
+                "Gemma4TextExecutor requires proportional full-attention RoPE, got {:?}",
+                self.full_rope.rope_type
+            ));
+        }
+        if let Some(partial) = self.full_rope.partial_rotary_factor
+            && !(partial > 0.0 && partial <= 1.0)
+        {
+            return Err(format!(
+                "Gemma4 full RoPE partial_rotary_factor must be in (0,1], got {partial}"
+            ));
+        }
+        self.hidden_size_per_layer_input
+            .checked_mul(self.decoder.num_hidden_layers)
+            .ok_or_else(|| "Gemma4 PLE packed width overflows usize".to_string())?;
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -744,6 +863,11 @@ fn parse_gemma4_text(root: &Value) -> Result<Gemma4TextConfig, String> {
         layer_types,
         local_head_dim,
         global_head_dim,
+        num_global_key_value_heads: optional_usize(
+            text,
+            "num_global_key_value_heads",
+            "text_config",
+        )?,
         sliding_window: required_usize(text, "sliding_window", "text_config")?,
         sliding_rope,
         full_rope,
@@ -761,6 +885,12 @@ fn parse_gemma4_text(root: &Value) -> Result<Gemma4TextConfig, String> {
             "text_config",
         )?,
         final_logit_softcapping: required_f32(text, "final_logit_softcapping", "text_config")?,
+        max_position_embeddings: required_usize(text, "max_position_embeddings", "text_config")?,
+        use_bidirectional_attention: optional_string(
+            text,
+            "use_bidirectional_attention",
+            "text_config",
+        )?,
         enable_moe_block: required_bool(text, "enable_moe_block", "text_config")?,
         norm_weight_convention: RmsNormWeightConvention::DirectWeight,
     })
@@ -1063,6 +1193,22 @@ fn optional_f32(object: &Value, field: &str, scope: &str) -> Result<Option<f32>,
     Ok(Some(value))
 }
 
+fn optional_string(object: &Value, field: &str, scope: &str) -> Result<Option<String>, String> {
+    let Some(value) = object.get(field) else {
+        return Err(format!(
+            "{scope}.{field} must be a non-empty string or null"
+        ));
+    };
+    if value.is_null() {
+        return Ok(None);
+    }
+    let value = value
+        .as_str()
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| format!("{scope}.{field} must be a non-empty string or null"))?;
+    Ok(Some(value.to_string()))
+}
+
 fn optional_usize(object: &Value, field: &str, scope: &str) -> Result<Option<usize>, String> {
     let Some(value) = object.get(field) else {
         return Err(format!(
@@ -1182,6 +1328,7 @@ mod tests {
                 "num_key_value_heads": 1,
                 "head_dim": 256,
                 "global_head_dim": 512,
+                "num_global_key_value_heads": null,
                 "intermediate_size": 6144,
                 "hidden_activation": "gelu_pytorch_tanh",
                 "rms_norm_eps": 0.000001,
@@ -1193,6 +1340,7 @@ mod tests {
                 "attention_k_eq_v": false,
                 "layer_types": layer_types,
                 "sliding_window": 512,
+                "max_position_embeddings": 131072,
                 "rope_parameters": {
                     "sliding_attention": {"rope_type": "default", "rope_theta": 10000},
                     "full_attention": {"rope_type": "proportional", "rope_theta": 1000000, "partial_rotary_factor": 0.25}
@@ -1201,6 +1349,7 @@ mod tests {
                 "use_double_wide_mlp": true,
                 "hidden_size_per_layer_input": 256,
                 "final_logit_softcapping": 30.0,
+                "use_bidirectional_attention": null,
                 "enable_moe_block": false
             }
         })
@@ -1300,7 +1449,7 @@ mod tests {
     }
 
     #[test]
-    fn gemma4_config_assembles_but_reports_unimplemented_executor() {
+    fn gemma4_config_assembles_nonquantized_executor_contract() {
         let config = parse_model_config_value(&gemma4_config()).unwrap();
         let ModelConfig::Gemma4Text(config) = &config else {
             panic!("expected Gemma4 text config");
@@ -1310,13 +1459,11 @@ mod tests {
         assert_eq!(config.layer_types[0], DecoderLayerKind::SlidingAttention);
         assert_eq!(config.layer_types[4], DecoderLayerKind::FullAttention);
         assert_eq!(config.full_rope.partial_rotary_factor, Some(0.25));
-        assert!(matches!(
+        assert_eq!(
             ModelConfig::Gemma4Text(config.clone()).execution_status(),
-            ModelExecutionStatus::Unimplemented {
-                required_executor: "Gemma4TextExecutor",
-                ..
-            }
-        ));
+            ModelExecutionStatus::Gemma4TextNonquantized
+        );
+        config.validate_nonquantized_executor().unwrap();
     }
 
     #[test]
