@@ -14,7 +14,7 @@ use crate::sq8_layer_runtime::{
     QWEN3_14B_SQ8_PREFILL_CHUNK_REQUIRED_HIP_KERNEL_ENV, QWEN3_14B_SQ8_REQUIRED_HIP_KERNEL_ENV,
     Qwen3Sq8LayerConfig, Qwen3Sq8LayerNormValues, Qwen3Sq8LayerWeights, Qwen3Sq8LayerWorkspace,
     Sq8LayerExecutionProfile, Sq8LayerExecutionReport, Sq8LayerProjectionExecution,
-    is_qwen3_14b_sq8_prefill_chunk_tokens, load_qwen3_14b_sq8_layer_weights,
+    Sq8LayerRuntimeTrace, is_qwen3_14b_sq8_prefill_chunk_tokens, load_qwen3_14b_sq8_layer_weights,
     qwen3_sq8_layer_tensor_names, validate_norm_values,
 };
 use ullm_runtime_sys::{RuntimeBuffer, RuntimeContext, RuntimeStream, Sq8CkImplementation};
@@ -451,8 +451,7 @@ impl Sq8StackExecutionReport {
             Sq8LayerExecutionProfile::Rdna4W8a8BlockHandwrittenWmmaPrototype => {
                 if self.sequence_len != 1
                     || !self.all_handwritten_wmma_prototype()
-                    || self.activation_quantizations
-                        != QWEN3_14B_SQ8_STACK_ACTIVATION_QUANTIZATIONS
+                    || self.activation_quantizations != QWEN3_14B_SQ8_STACK_ACTIVATION_QUANTIZATIONS
                     || self.fallback_used
                 {
                     return Err(
@@ -1307,8 +1306,10 @@ impl Qwen3Sq8StackRuntime {
             position,
             caches,
             Sq8LayerExecutionProfile::Rdna4W8a8BlockCk,
+            false,
             stream,
         )
+        .map(|(report, _)| report)
     }
 
     pub(crate) fn run_paged_m1_sequence_step_optimized_synchronized(
@@ -1329,8 +1330,10 @@ impl Qwen3Sq8StackRuntime {
             position,
             caches,
             Sq8LayerExecutionProfile::Rdna4W8a8BlockCk,
+            false,
             stream,
         )
+        .map(|(report, _)| report)
     }
 
     /// Explicit test-only route.  It does not alter the ordinary CK method or
@@ -1354,7 +1357,39 @@ impl Qwen3Sq8StackRuntime {
             position,
             caches,
             Sq8LayerExecutionProfile::Rdna4W8a8BlockHandwrittenWmmaPrototype,
+            false,
             stream,
+        )
+        .map(|(report, _)| report)
+    }
+
+    /// Runs an actual paged M=1 decode while reading the layer workspace after
+    /// each layer. This is deliberately diagnostic-only: every readback
+    /// synchronizes the stream and is excluded from all performance paths.
+    pub(crate) fn run_paged_m1_sequence_step_with_layer_trace_synchronized(
+        &mut self,
+        decode: &mut Qwen3Sq8PagedDecodeRuntime,
+        input: &RuntimeBuffer,
+        position: usize,
+        caches: &mut [PagedDecodeState],
+        profile: Sq8LayerExecutionProfile,
+        stream: &mut RuntimeStream,
+    ) -> Result<(Sq8PagedStackExecutionReport, Vec<Sq8LayerRuntimeTrace>), String> {
+        self.validate_runtime_contract()?;
+        if !self.paged_m1_sequence_active {
+            return Err("Qwen3-14B SQ8 serving paged M=1 sequence is not active".into());
+        }
+        if !matches!(
+            profile,
+            Sq8LayerExecutionProfile::Rdna4W8a8BlockCk
+                | Sq8LayerExecutionProfile::Rdna4W8a8BlockHandwrittenWmmaPrototype
+        ) {
+            return Err(
+                "SQ8 paged M=1 layer trace only supports the CK or handwritten WMMA profile".into(),
+            );
+        }
+        self.run_paged_decode_common_synchronized(
+            decode, input, position, caches, profile, true, stream,
         )
     }
 
@@ -1365,8 +1400,9 @@ impl Qwen3Sq8StackRuntime {
         position: usize,
         caches: &mut [PagedDecodeState],
         profile: Sq8LayerExecutionProfile,
+        capture_layer_trace: bool,
         stream: &mut RuntimeStream,
-    ) -> Result<Sq8PagedStackExecutionReport, String> {
+    ) -> Result<(Sq8PagedStackExecutionReport, Vec<Sq8LayerRuntimeTrace>), String> {
         decode.ensure_usable()?;
         validate_paged_cache_layer_count(caches)?;
         validate_paged_hip_only_guards()?;
@@ -1415,6 +1451,8 @@ impl Qwen3Sq8StackRuntime {
         }
 
         let mut layer_reports = Vec::with_capacity(QWEN3_14B_SQ8_STACK_LAYERS);
+        let mut layer_traces =
+            Vec::with_capacity(usize::from(capture_layer_trace) * QWEN3_14B_SQ8_STACK_LAYERS);
         for (layer_index, cache) in caches.iter_mut().enumerate() {
             match self.enqueue_paged_decode_layer_and_copy(
                 decode,
@@ -1429,6 +1467,16 @@ impl Qwen3Sq8StackRuntime {
                     let error = self.poison_after_stream_recovery(stream, err);
                     decode.poison(error.clone());
                     return Err(error);
+                }
+            }
+            if capture_layer_trace {
+                match decode.workspace.read_trace(stream) {
+                    Ok(trace) => layer_traces.push(trace),
+                    Err(err) => {
+                        let error = self.poison_after_stream_recovery(stream, err);
+                        decode.poison(error.clone());
+                        return Err(error);
+                    }
                 }
             }
         }
@@ -1478,7 +1526,7 @@ impl Qwen3Sq8StackRuntime {
         decode.output_ready = true;
         decode.last_execution_report = Some(report.clone());
         self.next_paged_decode_position = Some(position + 1);
-        Ok(report)
+        Ok((report, layer_traces))
     }
 
     /// Runs a non-timed audit and returns every layer output on the host.

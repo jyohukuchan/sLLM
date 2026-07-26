@@ -29,8 +29,8 @@ use crate::sq8_layer_oracle::{
     QWEN3_14B_VALUE_DIM,
 };
 use crate::sq8_layer_runtime::{
-    QWEN3_14B_SQ8_PREFILL_CHUNK_TOKENS, Qwen3Sq8LayerNormValues, validate_norm_values,
-    Sq8LayerExecutionProfile,
+    QWEN3_14B_SQ8_PREFILL_CHUNK_TOKENS, Qwen3Sq8LayerNormValues, Sq8LayerExecutionProfile,
+    Sq8LayerRuntimeTrace, validate_norm_values,
 };
 use crate::sq8_model_head_runtime::{
     QWEN3_14B_VOCAB_SIZE, Qwen3Sq8ModelHeadRuntime, Sq8ModelHeadDeviceIdentity,
@@ -259,6 +259,18 @@ pub struct Sq8ServingOracleCapture {
 pub struct Sq8ServingOracleAdvance {
     pub advance: Sq8ServingAdvance,
     pub capture: Option<Sq8ServingOracleCapture>,
+}
+
+/// Host readback from every layer of one actual M=1 serving decode. This is
+/// intentionally test-only instrumentation: each layer readback synchronizes
+/// the stream and is never part of the ordinary serving or timing paths.
+#[derive(Debug, Clone, PartialEq)]
+#[doc(hidden)]
+pub struct Sq8ServingDecodeLayerTraceCapture {
+    pub input_token_id: usize,
+    pub position: usize,
+    pub profile: Sq8LayerExecutionProfile,
+    pub layers: Vec<Sq8LayerRuntimeTrace>,
 }
 
 /// Logical, written-only K/V state for every layer of one active serving
@@ -627,6 +639,13 @@ struct PendingServingToken {
 struct PreparedOracleAdvance {
     advance: Sq8PreparedAdvance,
     capture: Option<Sq8ServingOracleCapture>,
+}
+
+#[derive(Debug)]
+struct DecodeStepPlan {
+    input_token_id: usize,
+    expected_position: usize,
+    ready: Vec<SchedulerDecodeRequest>,
 }
 
 #[derive(Debug)]
@@ -1463,6 +1482,72 @@ impl Qwen3Sq8ServingSession {
         })
     }
 
+    /// Executes exactly the next serving M=1 decode and captures each layer
+    /// workspace immediately after it runs.
+    ///
+    /// This terminal diagnostic intentionally does not run the model head or
+    /// commit a generated token. The caller must drop the session afterwards;
+    /// it must not resume ordinary serving from this partially advanced state.
+    #[doc(hidden)]
+    pub fn trace_next_decode_layers_for_testing_synchronized(
+        &mut self,
+        stream: &mut RuntimeStream,
+    ) -> Result<Sq8ServingDecodeLayerTraceCapture, Sq8ServingError> {
+        match self.state {
+            Sq8ServingRuntimeStatus::Decoding => {}
+            Sq8ServingRuntimeStatus::Ready => {
+                return Err(Sq8ServingError::invalid_state(
+                    "serving decode layer trace requires an active request",
+                ));
+            }
+            Sq8ServingRuntimeStatus::Failed => return Err(self.failed_error()),
+            state => {
+                return Err(self.fail_runtime(
+                    stream,
+                    format!("serving decode layer trace is invalid in state {state:?}"),
+                ));
+            }
+        }
+        let cancelled = match self.active_cancelled() {
+            Ok(cancelled) => cancelled,
+            Err(err) => return Err(self.fail_runtime(stream, err)),
+        };
+        if cancelled {
+            self.state = Sq8ServingRuntimeStatus::Cancelling;
+            return Err(Sq8ServingError::invalid_state(
+                "serving decode layer trace was cancelled before execution",
+            ));
+        }
+        let plan = self
+            .decode_step_plan()
+            .map_err(|err| self.fail_runtime(stream, err))?;
+        let (report, layers) = self
+            .execute_m1_stack_token_with_layer_trace(
+                plan.input_token_id,
+                plan.expected_position,
+                stream,
+            )
+            .map_err(|err| self.fail_runtime(stream, err))?;
+        validate_cache_lengths(self.caches.as_ref(), plan.expected_position + 1)
+            .map_err(|err| self.fail_runtime(stream, err))?;
+        if layers.len() != QWEN3_14B_SQ8_STACK_LAYERS {
+            return Err(self.fail_runtime(
+                stream,
+                format!(
+                    "serving decode layer trace count mismatch: expected={} actual={}",
+                    QWEN3_14B_SQ8_STACK_LAYERS,
+                    layers.len()
+                ),
+            ));
+        }
+        Ok(Sq8ServingDecodeLayerTraceCapture {
+            input_token_id: plan.input_token_id,
+            position: plan.expected_position,
+            profile: report.stack.profile,
+            layers,
+        })
+    }
+
     pub fn finish_and_reset_synchronized(
         &mut self,
         stream: &mut RuntimeStream,
@@ -1625,11 +1710,7 @@ impl Qwen3Sq8ServingSession {
         }
     }
 
-    fn prepare_decode_synchronized(
-        &mut self,
-        stream: &mut RuntimeStream,
-        capture_oracle: bool,
-    ) -> Result<PreparedOracleAdvance, String> {
+    fn decode_step_plan(&self) -> Result<DecodeStepPlan, String> {
         let (prompt_tokens, generated_tokens, input_token_id, expected_position) = {
             let active = self
                 .active
@@ -1673,6 +1754,23 @@ impl Qwen3Sq8ServingSession {
             ));
         }
 
+        Ok(DecodeStepPlan {
+            input_token_id,
+            expected_position,
+            ready,
+        })
+    }
+
+    fn prepare_decode_synchronized(
+        &mut self,
+        stream: &mut RuntimeStream,
+        capture_oracle: bool,
+    ) -> Result<PreparedOracleAdvance, String> {
+        let DecodeStepPlan {
+            input_token_id,
+            expected_position,
+            ready,
+        } = self.decode_step_plan()?;
         self.execute_m1_stack_token(input_token_id, expected_position, stream)?;
         validate_cache_lengths(self.caches.as_ref(), expected_position + 1)?;
         if self.active_cancelled()? {
@@ -1731,6 +1829,26 @@ impl Qwen3Sq8ServingSession {
         position: usize,
         stream: &mut RuntimeStream,
     ) -> Result<Sq8PagedStackExecutionReport, String> {
+        self.execute_m1_stack_token_inner(token_id, position, false, stream)
+            .map(|(report, _)| report)
+    }
+
+    fn execute_m1_stack_token_with_layer_trace(
+        &mut self,
+        token_id: usize,
+        position: usize,
+        stream: &mut RuntimeStream,
+    ) -> Result<(Sq8PagedStackExecutionReport, Vec<Sq8LayerRuntimeTrace>), String> {
+        self.execute_m1_stack_token_inner(token_id, position, true, stream)
+    }
+
+    fn execute_m1_stack_token_inner(
+        &mut self,
+        token_id: usize,
+        position: usize,
+        capture_layer_trace: bool,
+        stream: &mut RuntimeStream,
+    ) -> Result<(Sq8PagedStackExecutionReport, Vec<Sq8LayerRuntimeTrace>), String> {
         if token_id >= QWEN3_14B_VOCAB_SIZE {
             return Err(format!(
                 "serving M=1 input token exceeds vocabulary: {token_id}"
@@ -1751,24 +1869,40 @@ impl Qwen3Sq8ServingSession {
         } else {
             Sq8LayerExecutionProfile::Rdna4W8a8BlockCk
         };
-        let report = if self.handwritten_wmma_prototype_enabled {
+        let (report, layer_traces) = if capture_layer_trace {
             self.stack
-                .run_paged_m1_sequence_step_handwritten_wmma_prototype_synchronized(
+                .run_paged_m1_sequence_step_with_layer_trace_synchronized(
                     &mut self.decode,
                     embedding_output,
                     position,
                     &mut self.caches[..],
+                    expected_profile,
                     stream,
                 )?
+        } else if self.handwritten_wmma_prototype_enabled {
+            (
+                self.stack
+                    .run_paged_m1_sequence_step_handwritten_wmma_prototype_synchronized(
+                        &mut self.decode,
+                        embedding_output,
+                        position,
+                        &mut self.caches[..],
+                        stream,
+                    )?,
+                Vec::new(),
+            )
         } else {
-            self.stack
-                .run_paged_m1_sequence_step_optimized_synchronized(
-                    &mut self.decode,
-                    embedding_output,
-                    position,
-                    &mut self.caches[..],
-                    stream,
-                )?
+            (
+                self.stack
+                    .run_paged_m1_sequence_step_optimized_synchronized(
+                        &mut self.decode,
+                        embedding_output,
+                        position,
+                        &mut self.caches[..],
+                        stream,
+                    )?,
+                Vec::new(),
+            )
         };
         report.validate_contract()?;
         if report.phase != Sq8PagedStackPhase::Decode
@@ -1787,7 +1921,7 @@ impl Qwen3Sq8ServingSession {
                 "serving M=1 stack report failed at position {position}: {report:?}"
             ));
         }
-        Ok(report)
+        Ok((report, layer_traces))
     }
 
     fn execute_stack_chunk(

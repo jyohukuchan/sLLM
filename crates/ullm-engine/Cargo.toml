@@ -66,6 +66,10 @@ name = "sq8_ck_serving"
 required-features = ["rocm-ck-gfx1201"]
 
 [[example]]
+name = "sq8_handwritten_projection_contract"
+required-features = ["rocm-handwritten-projection-gfx1201"]
+
+[[example]]
 name = "sq8_gfx942_aprime_physical_smoke"
 required-features = ["rocm-ck-gfx942-aprime"]
 
