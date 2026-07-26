@@ -129,4 +129,7 @@ worker is the root-owned, mode-0555 `/opt/ullm/.../ullm-aq4-worker` and whose
 `split_tile: 128`. This task changes the SQ8_0 serving path; replacing that
 active AQ4_0 model with SQ8_0 merely to publish the implementation would not
 preserve the active model/execution configuration, so no promotion manifest
-was created or applied.
+was created or applied. Consequently the policy's candidate-manifest gateway
+validator, `/readyz`, model-list, and post-switch completion checks are
+**unverified** for this SQ8_0 change; direct runner results above are not
+presented as a substitute for an actual served-model promotion transaction.
