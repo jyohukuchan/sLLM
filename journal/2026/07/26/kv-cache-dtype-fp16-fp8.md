@@ -28,6 +28,9 @@
 - generic `PagedDecodeState` に typed allocation, writer, direct reader,
   scale-aware readback, typed causal prefill fallback を接続した。F32/F32 は従来の
   F32 writer/reader API をそのまま選ぶ。
+- `decode_runner`、batch block-table validation、AQ4_0 operation registry、
+  session operation audit、runtime smoke harness まで control-plane consumer を
+  棚卸しし、typed migration で必要な report/plan 更新を設計書に明記した。
 - CPU host reference と同一 ABI の HIP staging fallback を追加した。これは
   correctness fallback であり、native HIP performance path ではない。
 - CPU targeted tests は decoder 37 件と layout 4 件が成功した。FP8 scale は
@@ -41,6 +44,7 @@
 - `41c4bd43 test(kv): span full 4096-token FP8 cache` を作成した。
 - `fbe04660 test(kv): use Qwen35 full-attention geometry` を作成した。
 - `be316422 test(kv): cover F16 across full cache context` を作成した。
+- `798cbc56 docs(kv): complete control-plane route audit` を作成した。
 - 実行後に、broad `ullm-runtime-sys --lib` に opportunistic HIP tests が含まれる
   ことを発見した。R9700 lock preflight 前の実行だったため、GPU evidence としては
   採用しない。以後 GPU を使う全テスト/計測は lock/service preflight 後だけにする。
