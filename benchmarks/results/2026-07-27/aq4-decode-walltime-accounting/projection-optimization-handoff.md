@@ -56,6 +56,12 @@ These figures assume the historical projection duration transfers unchanged,
 all non-projection work stays fixed, and no extra traffic is introduced.  The
 last condition is deliberately unrealistic; it is a ceiling.
 
+On the same assumptions, a smaller 10% / 20% projection-time reduction would
+save 1.044817 / 2.089634 ms/token, respectively.  Against the supplied direct
+wall those are 7.67% / 15.35% latency reductions, or 1.0831x / 1.1813x
+throughput.  These are the more useful decision-scale estimates for a P3
+kernel that is already optimized, not promises of attainable bandwidth.
+
 ## Experiment design
 
 For each candidate change, collect a minimal three-way evidence set:
@@ -83,7 +89,7 @@ captured with HIP API tracing and is not an unprofiled launch-overhead budget.
 separate fusion investigation, but it must be measured against the paired
 no-op launch probe before claiming a gain.  HIP Graph capture is plausible
 only after verifying fixed node shapes/addresses across C=1339..1370 and
-handling the mandatory final direct-top1 D2H/synchronization boundary.  Neither
+handling the mandatory final GPU-resident-top1 D2H/synchronization boundary.  Neither
 fusion nor HIP Graph work is implemented by this handoff.
 
 The historical trace supplies a positive first check: all 15 named dispatch

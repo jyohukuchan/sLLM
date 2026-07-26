@@ -31,6 +31,13 @@ The raw outer marker ranges are contiguous `step_index=0..31`, with
 `cache_start=1339..1370` and exclusive end 1371.  The kernel cardinalities
 independently give the same count:
 
+The checked topology is 32 layers arranged as eight `linear × 3 → full`
+cycles (24 linear and 8 full layers), with 16 Q heads, 4 KV heads and
+head_dim 256.  The head geometry does not multiply the number of launches in
+this M=1 path because the relevant Q/K/V work is fused per layer; it explains
+why there are eight full-attention Q/K/V triple and split/merge pairs rather
+than a launch per head.
+
 | Per decode token | Per 32-token trace | Why |
 |---|---:|---|
 | AQ4_0 projection: 129 | 4,128 | 2 `matvec_add` + 1 `silu_mul` for each of 32 layers; 24 linear-attention fused qkv/z/a/b; 8 full-attention q/k/v triples; one final LM head |
@@ -85,6 +92,14 @@ overlap in this capture.
 | marker leading/trailing non-GPU time | 2.765875 ms | 0.086434 ms |
 | D2H copy GPU execution | 0.199241 ms | 0.006226 ms |
 
+For the **paired historical profiled wall** (14.503771 ms/token), these pieces
+close exactly: 12.883598 ms module kernels + 1.514498 ms GPU gaps + 0.006226
+ms D2H GPU execution + 0.086434 ms marker lead/trail with no GPU dispatch +
+0.013015 ms outside the outer marker in the driver's `Instant` scope.  The
+last two buckets identify a small host/runtime boundary, but they are not a
+breakdown of every HIP API duration because those API calls overlap device
+execution.
+
 The gaps are a direct trace fact, but their magnitude must not be projected
 unchanged to the unprofiled service: the trace enables HIP API callbacks and
 shows a mean 37.151 microseconds per `hipModuleLaunchKernel` API call.  API
@@ -116,7 +131,7 @@ split full-attention kernels, had exactly one observed grid/workgroup shape.
 The launch count was also constant at 294 all-GPU dispatches/token.  That
 makes a fixed-node graph worth testing for this narrow range.  It does **not**
 prove graph capture is valid: position/cache scalar updates, module-kernel
-capture support, and the final direct-top1 D2H/synchronization boundary still
+capture support, and the final GPU-resident-top1 D2H/synchronization boundary still
 need a separate experiment.
 
 ## Identified kernel-external work in this driver
@@ -125,12 +140,14 @@ This is evidence about the direct profile driver only.  It intentionally has
 no HTTP gateway, request scheduler, or prompt tokenization inside a measured
 decode step.
 
-- Exactly two asynchronous D2H copies/token occur after GPU direct top-1:
+- Exactly two asynchronous D2H copies/token occur after GPU-resident top-1:
   partial values and partial indices.  Their GPU time is only 6.226
-  microseconds/token in the historical trace.
+  microseconds/token in the historical trace.  The 248,320-token vocabulary
+  uses 256-value top-1 blocks, hence 970 f32 values + 970 u32 indices:
+  3,880 bytes per copy and **7,760 bytes/token** in total.
 - Exactly one `hipStreamSynchronize`/token follows those copies.  The profile
   source states that there is no per-layer decode synchronization; source
-  locations are `qwen35_aq4_head_runtime.rs` (direct top-1 readback and
+  locations are `qwen35_aq4_head_runtime.rs` (GPU-resident top-1 readback and
   synchronization) and `ullm-aq4-decode-step-profile.rs` (measurement scope).
 - The long historical `hipMemcpyDtoHAsync` API durations are mostly waiting
   while the final LM-head kernel runs.  They overlap GPU time and must not be

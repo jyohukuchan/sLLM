@@ -79,6 +79,10 @@ trap cleanup EXIT
 fuser -v /run/ullm/r9700.lock >"$output_dir/gpu-lock-held.txt" 2>&1 || true
 systemctl show ullm-openai.service -p ActiveState -p NRestarts \
     >"$output_dir/ullm-openai-service-held.txt"
+if ! rg -qx 'ActiveState=inactive' "$output_dir/ullm-openai-service-held.txt"; then
+    echo "ullm-openai.service became active before GPU work; refusing capture" >&2
+    exit 75
+fi
 sha256sum "$active_manifest" "$worker_binary" "$profile_binary" >"$output_dir/input-sha256-before.txt"
 jq '{format, worker: {binary: .worker.binary, binary_sha256: .worker.binary_sha256, required_environment: .worker.required_environment}}' \
     "$active_manifest" >"$output_dir/active-manifest-identity-before.json"
@@ -119,6 +123,14 @@ amd-smi metric -g 2 -t -c -p --json >"$output_dir/r9700-metrics-after.json"
 sha256sum "$active_manifest" "$worker_binary" "$profile_binary" >"$output_dir/input-sha256-after.txt"
 systemctl show ullm-openai.service -p ActiveState -p NRestarts \
     >"$output_dir/ullm-openai-service-after.txt"
+if ! cmp -s "$output_dir/input-sha256-before.txt" "$output_dir/input-sha256-after.txt"; then
+    echo "active manifest, worker, or profile binary changed during capture; refusing mixed provenance" >&2
+    exit 1
+fi
+if ! rg -qx 'ActiveState=inactive' "$output_dir/ullm-openai-service-after.txt"; then
+    echo "ullm-openai.service changed state during capture; refusing concurrent timing evidence" >&2
+    exit 1
+fi
 
 kernel_trace="$(find "$output_dir/rocprof" -type f -name '*kernel_trace.csv' -print -quit)"
 hip_trace="$(find "$output_dir/rocprof" -type f -name '*hip_api_trace.csv' -print -quit)"
