@@ -306,8 +306,9 @@ for 238/320 checks and, more importantly, changes the selected expert set for
 105/320 checks; final hidden relative L2 is `0.076012410`.  This is caused by
 accumulated lossy routed-expert output changing later router inputs, despite
 the router weights themselves being raw and exact.  Product metadata records
-this qualification as `not_passed`; the candidate is not connected to a
-loader, service, or promotion path.
+this historical qualification as `not_passed`; the generated-text
+reclassification below supersedes that status.  The candidate is not connected
+to a loader, service, or promotion path.
 
 For batch 1, the exact packed-artifact ledger plus source-derived cache/state
 and conservative gather/workspace reserves stays within R9700 VRAM at each
@@ -320,3 +321,50 @@ a Qwen3.5 MoE loader/residency integration does not yet exist, so empirical
 R9700 allocation and serving remain unconfirmed.  No service, active manifest,
 `/opt/ullm` content, FP32 reference corpus, bitwise gate, or campaign was
 used or changed.
+
+## BS: `AQ4_0` MoE package の生成品質による再分類（2026-07-26）
+
+BN 時点の `not_passed` は package の破損を示すものではなかった。旧判定は
+「source と量子化後で end-to-end の selected expert set が完全一致すること」を必須にしていた。
+これは raw router の正しさと、上流 expert 出力の量子化誤差が後段 router 入力へ伝播することを
+混同した誤った quality gate だった。raw router は全 40 tensor の SHA-256 が source と一致し、
+1,280 条件付き入力の top-8 は 0 変化のままである。一方、同一 8-token prefill の CPU
+streaming 観測は source 対 `AQ4_0` で selected set `105/320`、ordered top-k `238/320`
+変化した（source 対 source は両方 0/320）。この値は消さず、**非 gate の観測値**として
+product metadata に保持した。
+
+正しい判定対象である生成文を、拡張した
+`tools/validate-qwen35-moe-aq4-streaming-forward.py` の CPU-only streaming generator で
+確認した。tokenizer の official chat template（`add_generation_prompt=true`,
+`enable_thinking=false`）を使い、全 40 decoder layer を one-layer-at-a-time で通し、raw
+passthrough final RMSNorm / `lm_head` から greedy token を読んだ。source は BF16 checkpoint
+値を F32 演算へ変換し、`AQ4_0` 側だけが routed expert row を package の
+idx4/E4M3/codebook から復元する。同 generator の v0.1 source-vs-source control は 3 ケース
+38 greedy step で token、route、initial/final hidden の全てが 0 差だった。
+
+quality evidence は
+`benchmarks/results/2026-07-26/qwen35-moe-aq4-quality-reclassification-v0.1/`
+にある。CPU 時間を抑えるため、通常の 10-case lightweight promotion suite から日本語、英語、
+コード生成の 3 ケースに短縮した v0.2 suite を用いた（prose は最大 24、code は最大 16 token）。
+source 対 `AQ4_0` の実際の出力は次の通りで、両 prose は意図した 24-token cap に達したため
+末尾の句読点を要求しなかった。
+
+| case | source | `AQ4_0` | quality judgement |
+| --- | --- | --- | --- |
+| Japanese rollback recovery | 「…事前に定義された手順に従って迅速かつ確実に元の状態に戻す」 | 「…事前に定義された安全な手順に従って元の状態に迅速に」 | 同じ復旧内容を意味的に維持。`AQ4_0` の句は cap で終わるが、混線・文字化け・放棄なし。 |
+| English rollback recovery | 「…minimizing downtime and mitigating potential」 | 「…minimizing downtime and preventing service disruption」 | 同じ rollback 説明を英語で保持。`AQ4_0` は自然な完結句。 |
+| Python `is_even` | `is_even = lambda n: n % 2 == 0` | `is_even = lambda n: n % 2 == 0` | 完全一致し、要求どおりの一行コード。 |
+
+自動 screen は両経路の全ケースで空応答、replacement character、非許可 control character、
+三重連続反復を検出しなかった。source/`AQ4_0` の生成 token 数はそれぞれ `24/24`、`24/24`、
+`14/14` で極端な長さ偏りもない。greedy match は `47/62`、source-greedy conditional NLL は
+source より `AQ4_0` で大きかったが、いずれも quality threshold には使わない。実際、生成途中で
+token が違えば以後の route 入力も違うため、この path の selected-set `2276/6040`、ordered
+`4285/6040` は同一入力比較ではなく、品質 pass/fail に用いない。
+
+従って product metadata の `generation_quality_validation.status` を **`passed`** に更新した。
+この pass は CPU streaming の生成品質に限る。MoE loader、hybrid attention、mRoPE/KV state、
+Q output gate、weight residency、R9700実 allocation、service/promotion は依然として未確認である。
+layer 39 `down_proj` の max-abs outlier `0.043730080` はこの生成文で個別に raw-passthrough
+ablation をしていないため、生成への因果的影響は **未確認** と記録した。文章品質の崩壊がなかった
+ため、codebook 方針や layer 39 passthrough を変える Phase 3 は実施しなかった。
