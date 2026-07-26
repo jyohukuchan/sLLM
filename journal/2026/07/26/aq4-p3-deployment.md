@@ -36,6 +36,10 @@
 - activation 後に BJ の SQ8_0 projection measurement が gateway を一時停止した。candidate manifest
   は不変で、BJ restore 後に `/readyz` HTTP 200、新 P3 worker path / SHA `ba8c46…e265`、
   active/running / `Result=success` / `NRestarts=0` を最終確認した。
+- その後 22:35:50 JST に BJ が second `--speed-first` SQ8_0 window を開始し、22:35:52 から R9700
+  lock と gateway stop を保持している。22:41 JST handoff 時の manifest は `a98910dc…fe49` のまま、
+  gateway は意図的に inactive/dead だった。AQ4 deployment は競合 start を行わず、この window の
+  restore trap に委ねた。これは P3 activation の失敗や rollback ではない。
 
 ## 次の行動
 

@@ -48,3 +48,10 @@ gateway without changing the active manifest.  Its restore completed successfull
 post-window confirmation found `/readyz` HTTP 200, the P3 worker executable SHA-256 equal to
 `ba8c46d6eee81d508f4b2e744ec05d8743a46bf44100ec66257c8d8ae739e265`, and
 `ullm-openai.service` active/running with `NRestarts=0`.
+
+At the 22:41 JST handoff check, BJ had started a second independent SQ8_0 window at 22:35:50
+JST.  It deliberately held the R9700 lock and had stopped the gateway at 22:35:52 JST.  The
+manifest remained the activated P3 manifest, but the gateway was therefore intentionally
+`inactive/dead` while that other window ran.  This deployment did not issue a conflicting start;
+the concurrent window's restore trap owns recovery.  See
+`operations/handoff-concurrent-window.json`.

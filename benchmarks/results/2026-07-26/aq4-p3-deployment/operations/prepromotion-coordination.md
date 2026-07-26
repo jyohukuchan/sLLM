@@ -86,3 +86,14 @@ drift.  BJ's trap restored the gateway; the final independent check observed `/r
 the running P3 worker executable SHA-256
 `ba8c46d6eee81d508f4b2e744ec05d8743a46bf44100ec66257ed74e7723636ace9dfca69b`,
 and `active/running`, `Result=success`, `NRestarts=0`.
+
+## Handoff-only concurrent window
+
+At 22:35:50 JST, after the preceding BJ window had restored the gateway and after the P3
+activation had already completed, BJ began a second `--speed-first` SQ8_0 window.  It stopped the
+gateway at 22:35:52 JST and held `/run/ullm/r9700.lock`.  At the 22:41 JST handoff observation,
+the manifest was still `a98910dc5bf59dc768e5bcd20bcf58968699540eb1b33df33066dcb6f274fe49`, while
+the gateway was intentionally `inactive/dead` with `Result=success` and `NRestarts=0`.  No AQ4
+deployment service command was issued during this lock-held window; its trap owns the eventual
+gateway restore.  The historical post-activation response/ready check remains valid and this
+later stop is not a rollback or a P3 promotion failure.

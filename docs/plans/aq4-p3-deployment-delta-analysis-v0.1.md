@@ -466,3 +466,10 @@ candidate readiness は health/ready/models がすべて200になるまで bound
 manifest は不変で、BJ の restore 後に `/readyz` HTTP 200、running worker の executable hash
 `ba8c46d6…e265`、active/running / `Result=success` / `NRestarts=0` を再確認した。この後続 stop は
 P3 promotion の failure や rollback ではない。
+
+さらに 22:35:50 JST に、前記 restore 後の別 BJ `SQ8_0` `--speed-first` window が開始し、22:35:52
+JST に gateway を停止して R9700 lock を保持した。22:41 JST の handoff 観測では manifest は依然
+`a98910dc5bf59dc768e5bcd20bcf58968699540eb1b33df33066dcb6f274fe49` だが、gateway はその他 window
+の所有下で意図的に `inactive/dead` / `Result=success` / `NRestarts=0` だった。AQ4 deployment は lock と
+競合する start を行わず、この window の trap が restore を担当する。これは既に完了した P3 activation、
+text quality 判定、rollback preflight の結果を変更しない。
