@@ -1,0 +1,40 @@
+{
+  "schema_version": "ullm.sq8.prefill_tail_fix.summary.v1",
+  "date": "2026-07-26",
+  "device": {
+    "amd_smi_gpu": 2,
+    "gfx": "gfx1201",
+    "pci_bdf": "0000:47:00.0",
+    "r9700_only": true
+  },
+  "candidate": {
+    "base_commit": "0216b131cf5377d90125abd9c1c49c5a8a210511",
+    "patch_sha256": "d8270d1cf4c2a30369f673eaa26932836246fbe66dc5815edda689aa7331194b",
+    "prefill_driver_sha256": "84e4cb70e2ff3359c39788f4aef1527d46532700072687b5e5d50cb4a94eac26",
+    "oracle_binary_sha256": "467484c8bbfe2770c8e3a63f0938a7c21762f4f21cd4763b7a479af60655eed6",
+    "prefill_mode": "m128-chunk128",
+    "format_id": "SQ8_0"
+  },
+  "measurements": [
+    {"prompt_tokens": 128, "old_tok_s": 851.6590443270914, "new_tok_s": 865.2778350817789, "llama_cpp_q8_0_f32_kv_tok_s": 1165.7558094366082, "old_calls": 1, "new_calls": 1},
+    {"prompt_tokens": 512, "old_tok_s": 513.6757213625106, "new_tok_s": 519.8720802109593, "llama_cpp_q8_0_f32_kv_tok_s": 1195.7217434735041, "old_calls": 4, "new_calls": 4},
+    {"prompt_tokens": 1024, "old_tok_s": 335.995862855641, "new_tok_s": 337.89564773159185, "llama_cpp_q8_0_f32_kv_tok_s": 1145.3512554047134, "old_calls": 8, "new_calls": 8},
+    {"prompt_tokens": 2048, "old_tok_s": 188.4254001268676, "new_tok_s": 189.68492164266624, "llama_cpp_q8_0_f32_kv_tok_s": 1058.3793175925873, "old_calls": 16, "new_calls": 16},
+    {"prompt_tokens": 4095, "old_tok_s": 71.57592350883942, "new_tok_s": 99.53219700862694, "llama_cpp_q8_0_f32_kv_tok_s": 1008.6825675605679, "old_calls": 158, "new_calls": 32}
+  ],
+  "numerical": {
+    "exact_multiple_prompts": [128, 512, 1024, 2048],
+    "exact_multiple_final_hidden_and_logits": true,
+    "tail_prompts": [129, 1000, 4095],
+    "tail_top1_and_generated_token_exact": true,
+    "comparison_path": "numerical/comparison.json"
+  },
+  "service": {
+    "isolated_windows": 1,
+    "task_issued_stop": false,
+    "restore_start_return": 0,
+    "post_restore_active": true,
+    "active_manifest_sha256": "c57a2b6c5827b8ddd102560b3f5efd879711705cf4d8a36f4d7872821d05fca4",
+    "promotion_attempted": false
+  }
+}

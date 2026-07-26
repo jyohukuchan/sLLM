@@ -1,0 +1,26 @@
+{
+  "comparison_condition_reference": "../r9700-prefill-comparison/conditions.md",
+  "driver": "/tmp/ullm-prefill-tail-fix-target/release/ullm-sq8-r9700-prefill-tail-fix-profile",
+  "gpu": {
+    "amd_smi_index": 2,
+    "expected_bdf": "0000:47:00.0",
+    "expected_gfx": "gfx1201"
+  },
+  "prompt_lengths": [
+    128,
+    512,
+    1024,
+    2048,
+    4095
+  ],
+  "repeats": 5,
+  "thermal_gate": {
+    "edge_c_max": 40.0,
+    "hotspot_c_max": 42.0,
+    "poll_seconds": 5.0,
+    "socket_power_w_max": 35.0,
+    "timeout_seconds": 900.0
+  },
+  "timer": "driver std::time::Instant around prefill advances; not a profiler range duration",
+  "utc_started": "2026-07-26T21:15:17.463+09:00"
+}

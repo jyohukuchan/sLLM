@@ -1,0 +1,761 @@
+{
+  "baseline": {
+    "prefill_implementation": "sq8.fixed-m128-cached-prefix.v1",
+    "prefill_mode": "m128-chunk128",
+    "result": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-26/prefill-tail-fix/numerical/baseline/result.json",
+    "runner_binary_sha256": "da792beeb36e9025f27775e6c0344f03d53babf87a9af0c14fe93c00c1ad7a0a",
+    "runner_git_commit": "0216b131cf5377d90125abd9c1c49c5a8a210511"
+  },
+  "candidate": {
+    "prefill_implementation": "sq8.fixed-m128-cached-prefix.v1",
+    "prefill_mode": "m128-chunk128",
+    "result": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-26/prefill-tail-fix/numerical/candidate/result.json",
+    "runner_binary_sha256": "467484c8bbfe2770c8e3a63f0938a7c21762f4f21cd4763b7a479af60655eed6",
+    "runner_git_commit": "0216b131cf5377d90125abd9c1c49c5a8a210511"
+  },
+  "comparisons": [
+    {
+      "baseline_schedule": {
+        "execution_calls": 1,
+        "last_logical_width": 128,
+        "logical_width_sum": 128,
+        "logical_widths": [
+          128
+        ]
+      },
+      "candidate_schedule": {
+        "execution_calls": 1,
+        "last_logical_width": 128,
+        "logical_width_sum": 128,
+        "logical_widths": [
+          128
+        ]
+      },
+      "final_hidden": {
+        "baseline_sha256": "15436f4b2d7420793830463e1b1591f783cb028242283a99d8979bedca33cced",
+        "candidate_sha256": "15436f4b2d7420793830463e1b1591f783cb028242283a99d8979bedca33cced",
+        "cosine_similarity": 1.0,
+        "elements": 5120,
+        "exact_f32_le_bytes": true,
+        "max_abs": 0.0,
+        "nonfinite_count": 0,
+        "relative_l2": 0.0
+      },
+      "generated_token_ids": {
+        "baseline": [
+          115
+        ],
+        "candidate": [
+          115
+        ],
+        "exact": true
+      },
+      "logits": {
+        "baseline_sha256": "5585bf2f62e9149fc15babb2de98ce9e7f29b0860dae6e0899be75f0a7cb3bc8",
+        "candidate_sha256": "5585bf2f62e9149fc15babb2de98ce9e7f29b0860dae6e0899be75f0a7cb3bc8",
+        "cosine_similarity": 1.0,
+        "elements": 151936,
+        "exact_f32_le_bytes": true,
+        "max_abs": 0.0,
+        "nonfinite_count": 0,
+        "relative_l2": 0.0
+      },
+      "prompt_tokens": 128,
+      "top1": {
+        "baseline_logit": 19.84341,
+        "baseline_token_id": 115,
+        "candidate_logit": 19.84341,
+        "candidate_token_id": 115,
+        "exact_token": true
+      }
+    },
+    {
+      "baseline_schedule": {
+        "execution_calls": 2,
+        "last_logical_width": 1,
+        "logical_width_sum": 129,
+        "logical_widths": [
+          128,
+          1
+        ]
+      },
+      "candidate_schedule": {
+        "execution_calls": 2,
+        "last_logical_width": 1,
+        "logical_width_sum": 129,
+        "logical_widths": [
+          128,
+          1
+        ]
+      },
+      "final_hidden": {
+        "baseline_sha256": "1c16a698135b977684e4504d23972cc42d72180e4bf8e393ef89914ba1c3a584",
+        "candidate_sha256": "3e13b7f7622a28b131ebd00809bfe165923fcf4f28b4bb5fb2e27aae2245c891",
+        "cosine_similarity": 0.9977630841799527,
+        "elements": 5120,
+        "exact_f32_le_bytes": false,
+        "max_abs": 1.1758079528808594,
+        "nonfinite_count": 0,
+        "relative_l2": 0.06728441905092142
+      },
+      "generated_token_ids": {
+        "baseline": [
+          110
+        ],
+        "candidate": [
+          110
+        ],
+        "exact": true
+      },
+      "logits": {
+        "baseline_sha256": "172a6a7a004873cc6d569f864f1fed0dde427e2030a08c7ae5016e9bc1160327",
+        "candidate_sha256": "4c7d77886f82351984426238d43b3678a2df9b8e712a63ac95a73fab205def23",
+        "cosine_similarity": 0.9988833170863489,
+        "elements": 151936,
+        "exact_f32_le_bytes": false,
+        "max_abs": 1.0223026275634766,
+        "nonfinite_count": 0,
+        "relative_l2": 0.05321421035390052
+      },
+      "prompt_tokens": 129,
+      "top1": {
+        "baseline_logit": 32.122566,
+        "baseline_token_id": 110,
+        "candidate_logit": 32.034252,
+        "candidate_token_id": 110,
+        "exact_token": true
+      }
+    },
+    {
+      "baseline_schedule": {
+        "execution_calls": 4,
+        "last_logical_width": 128,
+        "logical_width_sum": 512,
+        "logical_widths": [
+          128,
+          128,
+          128,
+          128
+        ]
+      },
+      "candidate_schedule": {
+        "execution_calls": 4,
+        "last_logical_width": 128,
+        "logical_width_sum": 512,
+        "logical_widths": [
+          128,
+          128,
+          128,
+          128
+        ]
+      },
+      "final_hidden": {
+        "baseline_sha256": "000c3a285506ce07ba388fe22819ee0f1da2a4576e824c18e9339908ceea8f4a",
+        "candidate_sha256": "000c3a285506ce07ba388fe22819ee0f1da2a4576e824c18e9339908ceea8f4a",
+        "cosine_similarity": 1.0,
+        "elements": 5120,
+        "exact_f32_le_bytes": true,
+        "max_abs": 0.0,
+        "nonfinite_count": 0,
+        "relative_l2": 0.0
+      },
+      "generated_token_ids": {
+        "baseline": [
+          66
+        ],
+        "candidate": [
+          66
+        ],
+        "exact": true
+      },
+      "logits": {
+        "baseline_sha256": "fc9275d622b7b896a4df4a1050c24282e36f8e61bfe04442d2d045281db52acd",
+        "candidate_sha256": "fc9275d622b7b896a4df4a1050c24282e36f8e61bfe04442d2d045281db52acd",
+        "cosine_similarity": 1.0,
+        "elements": 151936,
+        "exact_f32_le_bytes": true,
+        "max_abs": 0.0,
+        "nonfinite_count": 0,
+        "relative_l2": 0.0
+      },
+      "prompt_tokens": 512,
+      "top1": {
+        "baseline_logit": 5.5553684,
+        "baseline_token_id": 66,
+        "candidate_logit": 5.5553684,
+        "candidate_token_id": 66,
+        "exact_token": true
+      }
+    },
+    {
+      "baseline_schedule": {
+        "execution_calls": 111,
+        "last_logical_width": 1,
+        "logical_width_sum": 1000,
+        "logical_widths": [
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1
+        ]
+      },
+      "candidate_schedule": {
+        "execution_calls": 8,
+        "last_logical_width": 104,
+        "logical_width_sum": 1000,
+        "logical_widths": [
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          104
+        ]
+      },
+      "final_hidden": {
+        "baseline_sha256": "7af07864a9576237e51aa9775e63f2bdbd94fa0e858d028adf3180cf88cb12e6",
+        "candidate_sha256": "c0ef15366e972eb063cdffb6ea8e41f16064c4944c778c060e4353a756bd81c8",
+        "cosine_similarity": 0.9999083685180846,
+        "elements": 5120,
+        "exact_f32_le_bytes": false,
+        "max_abs": 0.8690910339355469,
+        "nonfinite_count": 0,
+        "relative_l2": 0.013615891245628592
+      },
+      "generated_token_ids": {
+        "baseline": [
+          198
+        ],
+        "candidate": [
+          198
+        ],
+        "exact": true
+      },
+      "logits": {
+        "baseline_sha256": "a24db185955c56e89d7ea7aec657644afe246296c516f30bfe4e6ab67d5201be",
+        "candidate_sha256": "b283a93bea2090f89856e70cb66b708215201dea4ae8ec0614471a7dcea0dcb7",
+        "cosine_similarity": 0.9999815419940095,
+        "elements": 151936,
+        "exact_f32_le_bytes": false,
+        "max_abs": 0.16158485412597656,
+        "nonfinite_count": 0,
+        "relative_l2": 0.007530838759039843
+      },
+      "prompt_tokens": 1000,
+      "top1": {
+        "baseline_logit": 6.3089623,
+        "baseline_token_id": 198,
+        "candidate_logit": 6.3522067,
+        "candidate_token_id": 198,
+        "exact_token": true
+      }
+    },
+    {
+      "baseline_schedule": {
+        "execution_calls": 8,
+        "last_logical_width": 128,
+        "logical_width_sum": 1024,
+        "logical_widths": [
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128
+        ]
+      },
+      "candidate_schedule": {
+        "execution_calls": 8,
+        "last_logical_width": 128,
+        "logical_width_sum": 1024,
+        "logical_widths": [
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128
+        ]
+      },
+      "final_hidden": {
+        "baseline_sha256": "9efc94be1664b2699c22643f40f12285257b2d4dc905b5c420b62c2478d1add1",
+        "candidate_sha256": "9efc94be1664b2699c22643f40f12285257b2d4dc905b5c420b62c2478d1add1",
+        "cosine_similarity": 1.0,
+        "elements": 5120,
+        "exact_f32_le_bytes": true,
+        "max_abs": 0.0,
+        "nonfinite_count": 0,
+        "relative_l2": 0.0
+      },
+      "generated_token_ids": {
+        "baseline": [
+          198
+        ],
+        "candidate": [
+          198
+        ],
+        "exact": true
+      },
+      "logits": {
+        "baseline_sha256": "273c25d6f9beb3cbe9a182edc607682d87933f28748ecce140c5bbb9f9540d9f",
+        "candidate_sha256": "273c25d6f9beb3cbe9a182edc607682d87933f28748ecce140c5bbb9f9540d9f",
+        "cosine_similarity": 1.0,
+        "elements": 151936,
+        "exact_f32_le_bytes": true,
+        "max_abs": 0.0,
+        "nonfinite_count": 0,
+        "relative_l2": 0.0
+      },
+      "prompt_tokens": 1024,
+      "top1": {
+        "baseline_logit": 5.6425548,
+        "baseline_token_id": 198,
+        "candidate_logit": 5.6425548,
+        "candidate_token_id": 198,
+        "exact_token": true
+      }
+    },
+    {
+      "baseline_schedule": {
+        "execution_calls": 16,
+        "last_logical_width": 128,
+        "logical_width_sum": 2048,
+        "logical_widths": [
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128
+        ]
+      },
+      "candidate_schedule": {
+        "execution_calls": 16,
+        "last_logical_width": 128,
+        "logical_width_sum": 2048,
+        "logical_widths": [
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128
+        ]
+      },
+      "final_hidden": {
+        "baseline_sha256": "b73faa7ad442def1ccaec50567f87e6455f45345e81a2cf36d492f5abba049e9",
+        "candidate_sha256": "b73faa7ad442def1ccaec50567f87e6455f45345e81a2cf36d492f5abba049e9",
+        "cosine_similarity": 1.0,
+        "elements": 5120,
+        "exact_f32_le_bytes": true,
+        "max_abs": 0.0,
+        "nonfinite_count": 0,
+        "relative_l2": 0.0
+      },
+      "generated_token_ids": {
+        "baseline": [
+          85
+        ],
+        "candidate": [
+          85
+        ],
+        "exact": true
+      },
+      "logits": {
+        "baseline_sha256": "56344b7a97174e1e3d9fb831f22f0945d0e1f004b27365d4cdf20d6d9c5edb53",
+        "candidate_sha256": "56344b7a97174e1e3d9fb831f22f0945d0e1f004b27365d4cdf20d6d9c5edb53",
+        "cosine_similarity": 1.0,
+        "elements": 151936,
+        "exact_f32_le_bytes": true,
+        "max_abs": 0.0,
+        "nonfinite_count": 0,
+        "relative_l2": 0.0
+      },
+      "prompt_tokens": 2048,
+      "top1": {
+        "baseline_logit": 6.4169393,
+        "baseline_token_id": 85,
+        "candidate_logit": 6.4169393,
+        "candidate_token_id": 85,
+        "exact_token": true
+      }
+    },
+    {
+      "baseline_schedule": {
+        "execution_calls": 158,
+        "last_logical_width": 1,
+        "logical_width_sum": 4095,
+        "logical_widths": [
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1
+        ]
+      },
+      "candidate_schedule": {
+        "execution_calls": 32,
+        "last_logical_width": 127,
+        "logical_width_sum": 4095,
+        "logical_widths": [
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          127
+        ]
+      },
+      "final_hidden": {
+        "baseline_sha256": "98da6f0aa80d9f081b6fff564121c52cfd1e17a658c8b2625b316f8267474372",
+        "candidate_sha256": "420865a3beaba4212704aecc6c827be8aedbe906e827202b938dee86439e7537",
+        "cosine_similarity": 0.9999281287065833,
+        "elements": 5120,
+        "exact_f32_le_bytes": false,
+        "max_abs": 0.6924400329589844,
+        "nonfinite_count": 0,
+        "relative_l2": 0.012593517923424183
+      },
+      "generated_token_ids": {
+        "baseline": [
+          291
+        ],
+        "candidate": [
+          291
+        ],
+        "exact": true
+      },
+      "logits": {
+        "baseline_sha256": "b078501953d97a24392a15e73afeeed96339a6f9bab2677502c75d5eca1fbaed",
+        "candidate_sha256": "a34d8ecba06c766bd17f8fabe5f5ac70d81840b3e20555900cecaca650abd077",
+        "cosine_similarity": 0.9999841794773583,
+        "elements": 151936,
+        "exact_f32_le_bytes": false,
+        "max_abs": 0.25989723205566406,
+        "nonfinite_count": 0,
+        "relative_l2": 0.0071814281469662474
+      },
+      "prompt_tokens": 4095,
+      "top1": {
+        "baseline_logit": 5.672957,
+        "baseline_token_id": 291,
+        "candidate_logit": 5.75211,
+        "candidate_token_id": 291,
+        "exact_token": true
+      }
+    }
+  ],
+  "schema_version": "ullm.sq8.prefill_tail_fix.oracle_comparison.v1"
+}
