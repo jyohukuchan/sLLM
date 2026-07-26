@@ -47,6 +47,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--plan", required=True, type=Path)
     parser.add_argument("--execute", action="store_true")
+    parser.add_argument("--isolated-candidate-preflight", action="store_true")
     parser.add_argument("--confirm-plan-sha256")
     parser.add_argument("--confirmation")
     return parser.parse_args(argv)
@@ -61,6 +62,8 @@ def _require_mode(args: argparse.Namespace, observed_sha256: str) -> None:
             raise activation.ActivationError("execute requires exact plan SHA-256 and literal confirmation")
     elif args.confirm_plan_sha256 is not None or args.confirmation is not None:
         raise activation.ActivationError("confirmation arguments require --execute")
+    if args.execute and args.isolated_candidate_preflight:
+        raise activation.ActivationError("isolated candidate preflight cannot accompany --execute")
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -79,6 +82,13 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "status": result.status,
                 "outcome_path": os.fspath(result.path),
                 "outcome_sha256": result.sha256,
+            }
+        elif args.isolated_candidate_preflight:
+            receipt = activation.run_isolated_candidate_preflight(record)
+            report = activation.preflight_report(record)
+            report["isolated_candidate_preflight"] = {
+                "path": os.fspath(receipt.path),
+                "sha256": receipt.sha256,
             }
         else:
             report = activation.preflight_report(record)

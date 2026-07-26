@@ -21,22 +21,23 @@ import re
 import secrets
 import stat
 import subprocess
-import time
 from collections.abc import Callable, Iterable, Sequence
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, NoReturn
 
 
-PLAN_SCHEMA = "ullm.aq4_runtime_hardening_activation_plan.v1"
-OPERATIONS_SCHEMA = "ullm.aq4_runtime_hardening_activation_operations.v1"
+PLAN_SCHEMA = "ullm.aq4_runtime_hardening_activation_plan.v2"
+OPERATIONS_SCHEMA = "ullm.aq4_runtime_hardening_activation_operations.v2"
 INTENT_SCHEMA = "ullm.aq4_runtime_hardening_activation_intent.v1"
 OUTCOME_SCHEMA = "ullm.aq4_runtime_hardening_activation_outcome.v1"
 RECOVERY_SCHEMA = "ullm.aq4_runtime_hardening_activation_recovery.v1"
 ROLLBACK_SCHEMA = "ullm.aq4_runtime_hardening_rollback_outcome.v1"
 ATTEMPT_SCHEMA = "ullm.aq4_runtime_hardening_recovery_attempt.v1"
-LIVE_PROOF_SCHEMA = "ullm.aq4_runtime_hardening_live_proof.v1"
-PREFLIGHT_SCHEMA = "ullm.aq4_runtime_hardening_activation_preflight.v1"
+LIVE_PROOF_SCHEMA = "ullm.aq4_runtime_hardening_live_proof.v2"
+LIVE_PROOF_AUDIT_SCHEMA = "ullm.aq4_runtime_hardening_live_proof_audit.v1"
+ISOLATED_PREFLIGHT_SCHEMA = "ullm.aq4_runtime_hardening_isolated_preflight.v1"
+PREFLIGHT_SCHEMA = "ullm.aq4_runtime_hardening_activation_preflight.v2"
 PREPLAN_PREFLIGHT_SCHEMA = "ullm.aq4_runtime_hardening_preplan_preflight.v1"
 
 SERVED_MODEL_SCHEMA = "ullm.served_model.v2"
@@ -73,8 +74,11 @@ STAGES = (
     "rollback_reconcile",
     "rollback_live_proof",
 )
+ISOLATED_PREFLIGHT_STAGE = "candidate_isolated_preflight"
+OPERATION_STAGES = (*STAGES, ISOLATED_PREFLIGHT_STAGE)
 CONTROL_TOOL_RELATIVE_PATHS = (
     Path("tools/aq4_runtime_hardening_activation.py"),
+    Path("tools/aq4_runtime_hardening_operation.py"),
     Path("tools/prepare-aq4-runtime-hardening-activation.py"),
     Path("tools/run-aq4-runtime-hardening-activation.py"),
     Path("tools/rollback-aq4-runtime-hardening-activation.py"),
@@ -91,6 +95,15 @@ class ImmutablePublicationCommittedError(ActivationError):
 
 class AtomicExchangeCommittedError(ActivationError):
     """An exchange happened, but its post-exchange verification failed."""
+
+
+class LiveProofFailure(ActivationError):
+    """A live operation failed with a sanitized immutable-audit payload."""
+
+    def __init__(self, stage: str, document: dict[str, Any]) -> None:
+        super().__init__(f"AQ4 live proof {stage} failed")
+        self.stage = stage
+        self.document = document
 
 
 @dataclasses.dataclass(frozen=True)
@@ -1159,9 +1172,13 @@ def _capture_operations(
     _exact(document, {"schema_version", "stages"}, "reviewed AQ4 activation operations")
     if document["schema_version"] != OPERATIONS_SCHEMA:
         fail("reviewed AQ4 activation operations schema differs")
-    stages = _exact(document["stages"], set(STAGES), "reviewed AQ4 activation operation stages")
+    stages = _exact(
+        document["stages"],
+        set(OPERATION_STAGES),
+        "reviewed AQ4 activation operation stages",
+    )
     captured: dict[str, dict[str, Any]] = {}
-    for stage in STAGES:
+    for stage in OPERATION_STAGES:
         operation = _exact(
             stages[stage],
             {"argv", "executable_sha256", "timeout_seconds"},
@@ -1366,10 +1383,16 @@ def _output_document_paths(outputs: dict[str, Any]) -> list[Path]:
         "rollback_outcome_path",
         "candidate_live_proof_path",
         "rollback_live_proof_path",
+        "candidate_isolated_preflight_path",
     }
     _exact(
         outputs,
-        names | {"recovery_audit_directory", "rollback_audit_directory"},
+        names
+        | {
+            "recovery_audit_directory",
+            "rollback_audit_directory",
+            "live_proof_audit_directory",
+        },
         "activation output destinations",
     )
     return [Path(outputs[name]) for name in sorted(names)]
@@ -1397,8 +1420,10 @@ def prepare_plan(
     rollback_outcome: Path,
     candidate_live_proof: Path,
     rollback_live_proof: Path,
+    candidate_isolated_preflight: Path,
     recovery_audit_directory: Path,
     rollback_audit_directory: Path,
+    live_proof_audit_directory: Path,
     output: Path,
     expected_model_id: str = AQ4_MODEL_ID,
     expected_worker_sha256: str = EXPECTED_AQ4_WORKER_SHA256,
@@ -1474,8 +1499,10 @@ def prepare_plan(
         "rollback_outcome_path": rollback_outcome,
         "candidate_live_proof_path": candidate_live_proof,
         "rollback_live_proof_path": rollback_live_proof,
+        "candidate_isolated_preflight_path": candidate_isolated_preflight,
         "recovery_audit_directory": recovery_audit_directory,
         "rollback_audit_directory": rollback_audit_directory,
+        "live_proof_audit_directory": live_proof_audit_directory,
     }
     outputs = {
         name: os.fspath(_absolute(value, name, exists=None))
@@ -1487,7 +1514,11 @@ def prepare_plan(
     for path in output_paths:
         _require_below(path, protected_root, "activation output")
         _validate_output_path(path, "activation output", required_uid=required_uid)
-    for name in ("recovery_audit_directory", "rollback_audit_directory"):
+    for name in (
+        "recovery_audit_directory",
+        "rollback_audit_directory",
+        "live_proof_audit_directory",
+    ):
         directory = _validate_audit_directory(
             Path(outputs[name]), name, required_uid=required_uid
         )
@@ -1665,7 +1696,11 @@ def _verify_plan_inputs(
     for path in _output_document_paths(document["outcomes"]):
         _require_below(path, protected_root, "activation output")
         _validate_output_path_or_committed(path, required_uid=required_uid)
-    for name in ("recovery_audit_directory", "rollback_audit_directory"):
+    for name in (
+        "recovery_audit_directory",
+        "rollback_audit_directory",
+        "live_proof_audit_directory",
+    ):
         directory = _validate_audit_directory(
             Path(document["outcomes"][name]), name, required_uid=required_uid
         )
@@ -1737,6 +1772,19 @@ def _preflight_checks(record: PlanRecord, *, required_uid: int) -> dict[str, Any
                 required_uid=required_uid,
                 include_candidate=False,
                 include_legacy=True,
+            ),
+        ),
+        (
+            "candidate_isolated_preflight",
+            lambda: _load_isolated_preflight(
+                record,
+                candidate=_verify_plan_inputs(
+                    record,
+                    required_uid=required_uid,
+                    include_candidate=True,
+                    include_legacy=False,
+                )[2],
+                required_uid=required_uid,
             ),
         ),
     )
@@ -2201,8 +2249,9 @@ def _run_operation(
     *,
     active: Snapshot,
     runner: CommandRunner,
+    allow_failure: bool = False,
 ) -> subprocess.CompletedProcess[str]:
-    if stage not in STAGES:
+    if stage not in OPERATION_STAGES:
         fail("AQ4 activation stage differs")
     operation = record.document["operations"]["stages"][stage]
     _exact(operation, {"argv", "timeout_seconds", "executable"}, f"operation {stage}")
@@ -2242,9 +2291,166 @@ def _run_operation(
         )
     except (OSError, subprocess.SubprocessError) as error:
         raise ActivationError(f"AQ4 activation operation {stage} could not run") from error
-    if completed.returncode != 0:
+    if completed.returncode != 0 and not allow_failure:
         fail(f"AQ4 activation operation {stage} failed")
     return completed
+
+
+_AUDIT_ENDPOINT_CAUSES = frozenset(
+    {
+        "credential_unavailable",
+        "deadline_elapsed",
+        "endpoints_incoherent",
+        "http_status",
+        "invalid_response",
+        "transport",
+        "model_id_mismatch",
+        "unavailable",
+    }
+)
+_AUDIT_FAILURE_CAUSES = _AUDIT_ENDPOINT_CAUSES | frozenset(
+    {
+        "manifest_mismatch",
+        "pid_not_stable",
+        "process_manifest_mismatch",
+        "process_unstable",
+        "service_not_ready",
+        "invalid_operation_output",
+        "operation_unavailable",
+    }
+)
+_AUDIT_BEARER_RE = re.compile(r"(?i)(bearer\s+)[A-Za-z0-9._~+/=-]+")
+_AUDIT_ASSIGNMENT_RE = re.compile(
+    r"(?i)\b(api[_-]?key|access[_-]?token|token|jwt|session|secret|password)\b"
+    r"(\s*[:=]\s*)([^\s,;\"']+)"
+)
+_AUDIT_JWT_RE = re.compile(r"\beyJ[A-Za-z0-9_-]*\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b")
+MAX_AUDIT_STDERR_BYTES = 16 * 1024
+
+
+def _sanitize_audit_stderr(value: object) -> str:
+    """Retain bounded diagnostics while redacting common credential encodings."""
+
+    raw = value if isinstance(value, str) else ""
+    raw = raw.replace("\x00", "")
+    raw = _AUDIT_BEARER_RE.sub(r"\1[REDACTED]", raw)
+    raw = _AUDIT_ASSIGNMENT_RE.sub(r"\1\2[REDACTED]", raw)
+    raw = _AUDIT_JWT_RE.sub("[REDACTED_JWT]", raw)
+    encoded = raw.encode("utf-8", errors="replace")
+    if len(encoded) <= MAX_AUDIT_STDERR_BYTES:
+        return raw
+    return encoded[:MAX_AUDIT_STDERR_BYTES].decode("utf-8", errors="ignore") + "[truncated]"
+
+
+def _audit_cause(value: object, *, fallback: str) -> str:
+    if isinstance(value, str) and value in _AUDIT_FAILURE_CAUSES:
+        return value
+    return fallback
+
+
+def _audit_endpoint_states(value: object) -> dict[str, dict[str, Any]]:
+    fallback = {"ok": False, "status": None, "cause": "unavailable"}
+    if not isinstance(value, dict):
+        return {name: dict(fallback) for name in LIVE_ENDPOINTS}
+    states: dict[str, dict[str, Any]] = {}
+    for name in LIVE_ENDPOINTS:
+        item = value.get(name)
+        if not isinstance(item, dict):
+            states[name] = dict(fallback)
+            continue
+        status = item.get("status")
+        valid_status = status if type(status) is int and 100 <= status <= 599 else None
+        ok = item.get("ok") is True
+        cause = item.get("cause")
+        states[name] = {
+            "ok": ok,
+            "status": valid_status,
+            "cause": None if ok and cause is None else _audit_cause(cause, fallback="unavailable"),
+        }
+    return states
+
+
+def _operation_failure_diagnostic(
+    completed: subprocess.CompletedProcess[str] | None,
+) -> tuple[str, dict[str, dict[str, Any]]]:
+    if completed is None:
+        return "operation_unavailable", _audit_endpoint_states(None)
+    stdout = completed.stdout if isinstance(completed.stdout, str) else ""
+    if len(stdout.encode("utf-8", errors="replace")) > MAX_DOCUMENT_BYTES:
+        return "invalid_operation_output", _audit_endpoint_states(None)
+    try:
+        document = _strict_object(stdout.encode("utf-8"), "AQ4 readiness failure output")
+    except ActivationError:
+        return "invalid_operation_output", _audit_endpoint_states(None)
+    if document.get("schema_version") != "ullm.aq4_runtime_hardening_readiness_failure.v1":
+        return "invalid_operation_output", _audit_endpoint_states(None)
+    return _audit_cause(document.get("cause"), fallback="invalid_operation_output"), _audit_endpoint_states(
+        document.get("endpoints")
+    )
+
+
+def _live_proof_failure_document(
+    record: PlanRecord,
+    *,
+    stage: str,
+    active: Snapshot,
+    completed: subprocess.CompletedProcess[str] | None,
+    started_at: datetime,
+    failed_at: datetime,
+    cause: str | None = None,
+) -> dict[str, Any]:
+    inferred_cause, endpoints = _operation_failure_diagnostic(completed)
+    stderr = "" if completed is None else _sanitize_audit_stderr(completed.stderr)
+    raw_stderr = "" if completed is None or not isinstance(completed.stderr, str) else completed.stderr
+    raw_stdout = "" if completed is None or not isinstance(completed.stdout, str) else completed.stdout
+    returncode = None if completed is None else completed.returncode
+    if type(returncode) is not int:
+        returncode = None
+    operation = record.document["operations"]["stages"][stage]
+    return {
+        "schema_version": LIVE_PROOF_AUDIT_SCHEMA,
+        "plan_path": os.fspath(record.snapshot.path),
+        "plan_sha256": record.snapshot.sha256,
+        "operation_epoch": record.document["operation_epoch"],
+        "stage": stage,
+        "stage_status": "failed",
+        "started_at": utc_timestamp(started_at),
+        "failed_at": utc_timestamp(failed_at),
+        "active_manifest_sha256": active.sha256,
+        "operation": {
+            "argv": operation["argv"],
+            "executable_sha256": operation["executable"]["sha256"],
+            "return_code": returncode,
+            "stderr": stderr,
+            "stderr_sha256": _sha256(raw_stderr.encode("utf-8", errors="replace")),
+            "stdout_sha256": _sha256(raw_stdout.encode("utf-8", errors="replace")),
+            "cause": _audit_cause(cause, fallback=inferred_cause),
+        },
+        "endpoints": endpoints,
+    }
+
+
+def _record_live_proof_failure(
+    record: PlanRecord,
+    failure: LiveProofFailure,
+    *,
+    required_uid: int,
+    clock: Clock,
+) -> Snapshot | None:
+    try:
+        directory = _validate_audit_directory(
+            Path(record.document["outcomes"]["live_proof_audit_directory"]),
+            "live_proof_audit_directory",
+            required_uid=required_uid,
+        )
+        name = (
+            f"{failure.stage}-attempt-"
+            f"{utc_timestamp(clock()).replace(':', '').replace('+', '').replace('.', '')}-"
+            f"{secrets.token_hex(8)}.json"
+        )
+        return _publish_immutable(directory / name, failure.document, required_uid=required_uid)
+    except Exception:
+        return None
 
 
 def _live_observation(
@@ -2269,12 +2475,14 @@ def _live_observation(
             "worker_binary_sha256",
             "systemd",
             "process",
+            "manifest",
             "endpoints",
+            "readiness",
         },
         "AQ4 live observation",
     )
     if (
-        observation["schema_version"] != "ullm.aq4_runtime_hardening_live_observation.v1"
+        observation["schema_version"] != "ullm.aq4_runtime_hardening_live_observation.v2"
         or observation["plan_sha256"] != record.snapshot.sha256
         or observation["operation_epoch"] != record.document["operation_epoch"]
         or observation["active_manifest_sha256"] != active.sha256
@@ -2307,9 +2515,52 @@ def _live_observation(
     ):
         fail("AQ4 live observation process identity differs")
     _hash(process["executable_sha256"], "AQ4 live observation executable SHA-256")
+    manifest = _exact(
+        observation["manifest"],
+        {
+            "active_path",
+            "active_manifest_sha256",
+            "file_match",
+            "service_environment_match",
+            "worker_command_match",
+        },
+        "AQ4 live observation manifest",
+    )
+    if (
+        manifest["active_path"] != os.fspath(active.path)
+        or manifest["active_manifest_sha256"] != active.sha256
+        or any(
+            manifest[name] is not True
+            for name in ("file_match", "service_environment_match", "worker_command_match")
+        )
+    ):
+        fail("AQ4 live observation manifest binding differs")
     endpoints = _exact(observation["endpoints"], set(LIVE_ENDPOINTS), "AQ4 live observation endpoints")
-    if any(value is not True for value in endpoints.values()):
-        fail("AQ4 live observation endpoint check failed")
+    for name, value in endpoints.items():
+        endpoint = _exact(value, {"ok", "status", "cause"}, f"AQ4 live endpoint {name}")
+        if endpoint["ok"] is not True or endpoint["status"] != 200 or endpoint["cause"] is not None:
+            fail("AQ4 live observation endpoint check failed")
+    readiness = _exact(
+        observation["readiness"],
+        {
+            "timeout_seconds",
+            "max_attempts",
+            "attempts",
+            "stable_pid_observations",
+            "elapsed_milliseconds",
+        },
+        "AQ4 live observation readiness",
+    )
+    if (
+        readiness["timeout_seconds"] != 120
+        or readiness["max_attempts"] != 15
+        or type(readiness["attempts"]) is not int
+        or not 2 <= readiness["attempts"] <= readiness["max_attempts"]
+        or readiness["stable_pid_observations"] != 2
+        or type(readiness["elapsed_milliseconds"]) is not int
+        or readiness["elapsed_milliseconds"] < 0
+    ):
+        fail("AQ4 live observation readiness contract differs")
     return observation
 
 
@@ -2413,8 +2664,55 @@ def _run_live_stage(
         )
         _validate_live_proof(existing, record, stage=stage, active=active)
         return existing
-    completed = _run_operation(record, stage, active=active, runner=runner)
-    observation = _live_observation(completed, record=record, active=active)
+    started_at = clock()
+    try:
+        completed = _run_operation(
+            record,
+            stage,
+            active=active,
+            runner=runner,
+            allow_failure=True,
+        )
+    except ActivationError:
+        raise LiveProofFailure(
+            stage,
+            _live_proof_failure_document(
+                record,
+                stage=stage,
+                active=active,
+                completed=None,
+                started_at=started_at,
+                failed_at=clock(),
+                cause="operation_unavailable",
+            ),
+        ) from None
+    if completed.returncode != 0:
+        raise LiveProofFailure(
+            stage,
+            _live_proof_failure_document(
+                record,
+                stage=stage,
+                active=active,
+                completed=completed,
+                started_at=started_at,
+                failed_at=clock(),
+            ),
+        )
+    try:
+        observation = _live_observation(completed, record=record, active=active)
+    except ActivationError:
+        raise LiveProofFailure(
+            stage,
+            _live_proof_failure_document(
+                record,
+                stage=stage,
+                active=active,
+                completed=completed,
+                started_at=started_at,
+                failed_at=clock(),
+                cause="invalid_operation_output",
+            ),
+        ) from None
     document = _live_proof_document(
         record,
         stage=stage,
@@ -2424,6 +2722,247 @@ def _run_live_stage(
         checked_at=clock(),
     )
     return _publish_immutable(output, document, required_uid=required_uid)
+
+
+def _isolated_worker_observation(
+    completed: subprocess.CompletedProcess[str],
+    *,
+    record: PlanRecord,
+    candidate: Snapshot,
+) -> dict[str, Any]:
+    stdout = completed.stdout if isinstance(completed.stdout, str) else ""
+    if len(stdout.encode("utf-8", errors="replace")) > MAX_DOCUMENT_BYTES:
+        fail("isolated worker observation exceeds its byte bound")
+    observation = _strict_object(stdout.encode("utf-8"), "AQ4 isolated worker observation")
+    _exact(
+        observation,
+        {
+            "schema_version",
+            "plan_sha256",
+            "operation_epoch",
+            "candidate_manifest_sha256",
+            "stage",
+            "checked_at",
+            "status",
+            "cause",
+            "worker",
+            "operation",
+            "timing",
+            "cleanup",
+            "production_activation_performed",
+        },
+        "AQ4 isolated worker observation",
+    )
+    if (
+        observation["schema_version"]
+        != "ullm.aq4_runtime_hardening_isolated_worker_observation.v1"
+        or observation["plan_sha256"] != record.snapshot.sha256
+        or observation["operation_epoch"] != record.document["operation_epoch"]
+        or observation["candidate_manifest_sha256"] != candidate.sha256
+        or observation["stage"] != ISOLATED_PREFLIGHT_STAGE
+        or observation["status"] != "passed"
+        or observation["cause"] is not None
+        or observation["production_activation_performed"] is not False
+    ):
+        fail("AQ4 isolated worker observation binding differs")
+    candidate_identity = _manifest_identity(candidate.raw, "candidate isolated manifest")
+    worker = _exact(
+        observation["worker"],
+        {"model_id", "package_manifest_sha256", "device", "execution_profile"},
+        "AQ4 isolated worker observation worker",
+    )
+    if (
+        worker["model_id"] != record.document["expected"]["model_id"]
+        or worker["package_manifest_sha256"] != candidate_identity["package_manifest_sha256"]
+        or not isinstance(worker["device"], str)
+        or not worker["device"]
+        or not isinstance(worker["execution_profile"], str)
+        or not worker["execution_profile"]
+    ):
+        fail("AQ4 isolated worker ready identity differs")
+    operation = _exact(
+        observation["operation"],
+        {
+            "argv_sha256",
+            "stdout_sha256",
+            "stderr_sha256",
+            "stdout_bytes",
+            "stderr_bytes",
+            "returncode",
+        },
+        "AQ4 isolated worker observation operation",
+    )
+    for name in ("argv_sha256", "stdout_sha256", "stderr_sha256"):
+        _hash(operation[name], f"AQ4 isolated worker observation operation.{name}")
+    if (
+        type(operation["stdout_bytes"]) is not int
+        or operation["stdout_bytes"] < 1
+        or type(operation["stderr_bytes"]) is not int
+        or operation["stderr_bytes"] < 0
+        or type(operation["returncode"]) is not int
+    ):
+        fail("AQ4 isolated worker observation operation differs")
+    timing = _exact(
+        observation["timing"],
+        {"timeout_seconds", "ready_after_milliseconds", "elapsed_milliseconds"},
+        "AQ4 isolated worker observation timing",
+    )
+    if (
+        timing["timeout_seconds"] != 120
+        or type(timing["ready_after_milliseconds"]) is not int
+        or timing["ready_after_milliseconds"] < 0
+        or type(timing["elapsed_milliseconds"]) is not int
+        or timing["elapsed_milliseconds"] < timing["ready_after_milliseconds"]
+    ):
+        fail("AQ4 isolated worker observation timing differs")
+    cleanup = _exact(
+        observation["cleanup"],
+        {"terminated", "returncode"},
+        "AQ4 isolated worker observation cleanup",
+    )
+    if cleanup["terminated"] is not True or type(cleanup["returncode"]) is not int:
+        fail("AQ4 isolated worker cleanup differs")
+    return observation
+
+
+def _isolated_preflight_document(
+    record: PlanRecord,
+    *,
+    candidate: Snapshot,
+    observation: dict[str, Any],
+    completed: subprocess.CompletedProcess[str],
+    checked_at: datetime,
+) -> dict[str, Any]:
+    stdout = completed.stdout if isinstance(completed.stdout, str) else ""
+    stderr = completed.stderr if isinstance(completed.stderr, str) else ""
+    operation = record.document["operations"]["stages"][ISOLATED_PREFLIGHT_STAGE]
+    return {
+        "schema_version": ISOLATED_PREFLIGHT_SCHEMA,
+        "plan_path": os.fspath(record.snapshot.path),
+        "plan_sha256": record.snapshot.sha256,
+        "operation_epoch": record.document["operation_epoch"],
+        "stage": ISOLATED_PREFLIGHT_STAGE,
+        "checked_at": utc_timestamp(checked_at),
+        "candidate_manifest": {
+            "path": os.fspath(candidate.path),
+            "sha256": candidate.sha256,
+            "bytes": candidate.identity.size,
+        },
+        "operation": {
+            "argv": operation["argv"],
+            "executable_sha256": operation["executable"]["sha256"],
+            "stdout_sha256": _sha256(stdout.encode("utf-8")),
+            "stderr_sha256": _sha256(stderr.encode("utf-8")),
+        },
+        "observation": observation,
+        "production_activation_performed": False,
+    }
+
+
+def _validate_isolated_preflight(
+    snapshot: Snapshot,
+    record: PlanRecord,
+    *,
+    candidate: Snapshot,
+) -> None:
+    document = _strict_object(snapshot.raw, "AQ4 isolated candidate preflight")
+    if _canonical_json(document) != snapshot.raw:
+        fail("AQ4 isolated candidate preflight is not canonical JSON")
+    _exact(
+        document,
+        {
+            "schema_version",
+            "plan_path",
+            "plan_sha256",
+            "operation_epoch",
+            "stage",
+            "checked_at",
+            "candidate_manifest",
+            "operation",
+            "observation",
+            "production_activation_performed",
+        },
+        "AQ4 isolated candidate preflight",
+    )
+    if (
+        document["schema_version"] != ISOLATED_PREFLIGHT_SCHEMA
+        or document["plan_path"] != os.fspath(record.snapshot.path)
+        or document["plan_sha256"] != record.snapshot.sha256
+        or document["operation_epoch"] != record.document["operation_epoch"]
+        or document["stage"] != ISOLATED_PREFLIGHT_STAGE
+        or document["candidate_manifest"]
+        != {"path": os.fspath(candidate.path), "sha256": candidate.sha256, "bytes": candidate.identity.size}
+        or document["production_activation_performed"] is not False
+    ):
+        fail("AQ4 isolated candidate preflight binding differs")
+    operation = _exact(
+        document["operation"],
+        {"argv", "executable_sha256", "stdout_sha256", "stderr_sha256"},
+        "AQ4 isolated candidate preflight operation",
+    )
+    expected = record.document["operations"]["stages"][ISOLATED_PREFLIGHT_STAGE]
+    if operation["argv"] != expected["argv"] or operation["executable_sha256"] != expected["executable"]["sha256"]:
+        fail("AQ4 isolated candidate preflight operation binding differs")
+    _hash(operation["stdout_sha256"], "AQ4 isolated candidate preflight stdout SHA-256")
+    _hash(operation["stderr_sha256"], "AQ4 isolated candidate preflight stderr SHA-256")
+    observation = document["observation"]
+    if not isinstance(observation, dict):
+        fail("AQ4 isolated candidate preflight observation differs")
+    probe = subprocess.CompletedProcess([], 0, _canonical_json(observation).decode("ascii"), "")
+    _isolated_worker_observation(probe, record=record, candidate=candidate)
+
+
+def _load_isolated_preflight(
+    record: PlanRecord,
+    *,
+    candidate: Snapshot,
+    required_uid: int,
+) -> Snapshot:
+    path = Path(record.document["outcomes"]["candidate_isolated_preflight_path"])
+    if not path.exists() and not path.is_symlink():
+        fail("candidate isolated worker preflight is not recorded")
+    snapshot = _snapshot(
+        path,
+        "AQ4 isolated candidate preflight",
+        maximum=MAX_DOCUMENT_BYTES,
+        required_uid=required_uid,
+        immutable=True,
+    )
+    _validate_isolated_preflight(snapshot, record, candidate=candidate)
+    return snapshot
+
+
+def run_isolated_candidate_preflight(
+    record: PlanRecord,
+    *,
+    required_uid: int = 0,
+    runner: CommandRunner = subprocess.run,
+    clock: Clock = utc_now,
+) -> Snapshot:
+    """Run only the candidate worker and publish a reusable immutable receipt."""
+
+    _active, _rollback, candidate = _verify_plan_inputs(record, required_uid=required_uid)
+    path = Path(record.document["outcomes"]["candidate_isolated_preflight_path"])
+    if path.exists() or path.is_symlink():
+        return _load_isolated_preflight(record, candidate=candidate, required_uid=required_uid)
+    completed = _run_operation(
+        record,
+        ISOLATED_PREFLIGHT_STAGE,
+        active=candidate,
+        runner=runner,
+        allow_failure=True,
+    )
+    if completed.returncode != 0:
+        fail("candidate isolated worker preflight failed")
+    observation = _isolated_worker_observation(completed, record=record, candidate=candidate)
+    document = _isolated_preflight_document(
+        record,
+        candidate=candidate,
+        observation=observation,
+        completed=completed,
+        checked_at=clock(),
+    )
+    return _publish_immutable(path, document, required_uid=required_uid)
 
 
 def _proof_reference(snapshot: Snapshot) -> dict[str, Any]:
@@ -2681,6 +3220,7 @@ def execute_activation(
         record = load_plan(plan_path, required_uid=required_uid)
         _require_same_plan(initial, record, expected_plan_sha256)
         active, rollback, candidate = _verify_plan_inputs(record, required_uid=required_uid)
+        _load_isolated_preflight(record, candidate=candidate, required_uid=required_uid)
         _output_unused(Path(record.document["outcomes"]["activation_intent_path"]), "activation intent")
         _output_unused(Path(record.document["outcomes"]["activation_outcome_path"]), "activation outcome")
         active_path = active.path
@@ -2698,6 +3238,7 @@ def execute_activation(
             fault_hook("after_intent")
         # Re-seal credentials and source/runtime inputs after intent, immediately before swap.
         active, rollback, candidate = _verify_plan_inputs(record, required_uid=required_uid)
+        _load_isolated_preflight(record, candidate=candidate, required_uid=required_uid)
         try:
             _switch_to_candidate(
                 parent_fd,
@@ -2773,6 +3314,15 @@ def execute_activation(
             raise
         if rollback is None or candidate is None:
             raise
+        if failure_stage in STAGES and stages[failure_stage] == "pending":
+            stages[failure_stage] = "failed"
+        if isinstance(error, LiveProofFailure):
+            _record_live_proof_failure(
+                record,
+                error,
+                required_uid=required_uid,
+                clock=clock,
+            )
         active_path = Path(record.document["active_manifest"]["path"])
         observed_hash: str | None = None
         restoration_attempted = False
@@ -2796,7 +3346,16 @@ def execute_activation(
                 stages["rollback_reconcile"] = "passed"
                 stages["rollback_live_proof"] = "passed"
                 status = "failed_restored"
-            except Exception:
+            except Exception as restore_error:
+                if isinstance(restore_error, LiveProofFailure):
+                    _record_live_proof_failure(
+                        record,
+                        restore_error,
+                        required_uid=required_uid,
+                        clock=clock,
+                    )
+                    if stages[restore_error.stage] == "pending":
+                        stages[restore_error.stage] = "failed"
                 try:
                     observed_hash = _active_snapshot(record, required_uid=required_uid).sha256
                 except Exception:
@@ -3034,6 +3593,13 @@ def execute_activation_recovery(
         return ExecutionResult(published.path, published.sha256, "recovered")
     except Exception as error:
         if record is not None:
+            if isinstance(error, LiveProofFailure):
+                _record_live_proof_failure(
+                    record,
+                    error,
+                    required_uid=required_uid,
+                    clock=clock,
+                )
             _record_attempt(
                 record,
                 kind="recovery",
@@ -3123,6 +3689,13 @@ def execute_rollback(
         return ExecutionResult(published.path, published.sha256, "rolled_back")
     except Exception as error:
         if record is not None:
+            if isinstance(error, LiveProofFailure):
+                _record_live_proof_failure(
+                    record,
+                    error,
+                    required_uid=required_uid,
+                    clock=clock,
+                )
             _record_attempt(
                 record,
                 kind="rollback",

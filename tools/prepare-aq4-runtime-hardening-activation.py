@@ -70,8 +70,10 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--rollback-outcome", required=True, type=Path)
     parser.add_argument("--candidate-live-proof", required=True, type=Path)
     parser.add_argument("--rollback-live-proof", required=True, type=Path)
+    parser.add_argument("--candidate-isolated-preflight", required=True, type=Path)
     parser.add_argument("--recovery-audit-directory", required=True, type=Path)
     parser.add_argument("--rollback-audit-directory", required=True, type=Path)
+    parser.add_argument("--live-proof-audit-directory", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--expected-model-id", default=activation.AQ4_MODEL_ID)
     parser.add_argument(
@@ -104,8 +106,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             rollback_outcome=args.rollback_outcome,
             candidate_live_proof=args.candidate_live_proof,
             rollback_live_proof=args.rollback_live_proof,
+            candidate_isolated_preflight=args.candidate_isolated_preflight,
             recovery_audit_directory=args.recovery_audit_directory,
             rollback_audit_directory=args.rollback_audit_directory,
+            live_proof_audit_directory=args.live_proof_audit_directory,
             output=args.output,
             expected_model_id=args.expected_model_id,
             expected_worker_sha256=args.expected_worker_sha256,

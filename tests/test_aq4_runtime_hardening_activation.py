@@ -67,8 +67,10 @@ class Fixture:
         self.activation.mkdir(mode=0o755)
         self.recovery_audits = self.activation / "recovery-attempts"
         self.rollback_audits = self.activation / "rollback-attempts"
+        self.live_proof_audits = self.activation / "live-proof-attempts"
         self.recovery_audits.mkdir(mode=0o755)
         self.rollback_audits.mkdir(mode=0o755)
+        self.live_proof_audits.mkdir(mode=0o755)
         self.control_source, self.control_commit = self._source("control-source")
         self.promotion_source, self.commit = self._source("promotion-source")
         self.control_tools = [
@@ -130,7 +132,7 @@ class Fixture:
                     "executable_sha256": digest(self.executable.read_bytes()),
                     "timeout_seconds": 10,
                 }
-                for stage in AQ4.STAGES
+                for stage in AQ4.OPERATION_STAGES
             },
         }
         write(self.operations, canonical(operations), 0o444)
@@ -141,6 +143,7 @@ class Fixture:
         self.rollback_outcome = self.activation / "rollback-outcome.json"
         self.candidate_proof = self.activation / "candidate-live-proof.json"
         self.rollback_proof = self.activation / "rollback-live-proof.json"
+        self.candidate_isolated_preflight = self.activation / "candidate-isolated-preflight.json"
 
     def _source(self, name: str) -> tuple[Path, str]:
         source = self.root / "sources" / name
@@ -242,14 +245,26 @@ class Fixture:
             rollback_outcome=self.rollback_outcome,
             candidate_live_proof=self.candidate_proof,
             rollback_live_proof=self.rollback_proof,
+            candidate_isolated_preflight=self.candidate_isolated_preflight,
             recovery_audit_directory=self.recovery_audits,
             rollback_audit_directory=self.rollback_audits,
+            live_proof_audit_directory=self.live_proof_audits,
             output=self.plan,
             expected_worker_sha256=self.worker_sha,
             required_uid=self.uid,
         )
 
+    def isolated_preflight(self, runner: "Runner") -> object:
+        record = AQ4.load_plan(self.plan, required_uid=self.uid)
+        return AQ4.run_isolated_candidate_preflight(
+            record,
+            required_uid=self.uid,
+            runner=runner,
+        )
+
     def execute(self, runner: "Runner", **kwargs: object) -> object:
+        if not self.candidate_isolated_preflight.exists():
+            self.isolated_preflight(runner)
         return AQ4.execute_activation(
             self.plan,
             expected_plan_sha256=digest(self.plan.read_bytes()),
@@ -279,8 +294,14 @@ class Fixture:
 
 
 class Runner:
-    def __init__(self, *, fail_stage: str | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        fail_stage: str | None = None,
+        failure_stderr: str = "fixture failure",
+    ) -> None:
         self.fail_stage = fail_stage
+        self.failure_stderr = failure_stderr
         self.stages: list[str] = []
 
     def __call__(self, argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
@@ -289,7 +310,55 @@ class Runner:
         stage = str(environment["ULLM_AQ4_RUNTIME_HARDENING_STAGE"])
         self.stages.append(stage)
         if stage == self.fail_stage:
-            return subprocess.CompletedProcess(argv, 1, "", "fixture failure")
+            endpoints = {
+                name: {"ok": name != "gateway_ready", "status": 200 if name != "gateway_ready" else None,
+                       "cause": None if name != "gateway_ready" else "transport"}
+                for name in AQ4.LIVE_ENDPOINTS
+            }
+            diagnostic = {
+                "schema_version": "ullm.aq4_runtime_hardening_readiness_failure.v1",
+                "cause": "endpoints_incoherent",
+                "endpoints": endpoints,
+            }
+            return subprocess.CompletedProcess(argv, 1, json.dumps(diagnostic), self.failure_stderr)
+        if stage == AQ4.ISOLATED_PREFLIGHT_STAGE:
+            manifest = json.loads(
+                Path(str(environment["ULLM_AQ4_RUNTIME_HARDENING_ACTIVE_MANIFEST"])).read_text(
+                    encoding="ascii"
+                )
+            )
+            observation = {
+                "schema_version": "ullm.aq4_runtime_hardening_isolated_worker_observation.v1",
+                "plan_sha256": environment["ULLM_AQ4_RUNTIME_HARDENING_PLAN_SHA256"],
+                "operation_epoch": environment["ULLM_AQ4_RUNTIME_HARDENING_EPOCH"],
+                "candidate_manifest_sha256": environment["ULLM_AQ4_RUNTIME_HARDENING_ACTIVE_SHA256"],
+                "stage": AQ4.ISOLATED_PREFLIGHT_STAGE,
+                "checked_at": "2026-07-26T00:00:00.000000Z",
+                "status": "passed",
+                "cause": None,
+                "worker": {
+                    "model_id": manifest["public"]["id"],
+                    "package_manifest_sha256": manifest["product"]["package"]["manifest_sha256"],
+                    "device": "fixture-device",
+                    "execution_profile": "fixture-profile",
+                },
+                "operation": {
+                    "argv_sha256": "a" * 64,
+                    "stdout_sha256": "b" * 64,
+                    "stderr_sha256": "c" * 64,
+                    "stdout_bytes": 1,
+                    "stderr_bytes": 0,
+                    "returncode": -15,
+                },
+                "timing": {
+                    "timeout_seconds": 120,
+                    "ready_after_milliseconds": 10,
+                    "elapsed_milliseconds": 11,
+                },
+                "cleanup": {"terminated": True, "returncode": -15},
+                "production_activation_performed": False,
+            }
+            return subprocess.CompletedProcess(argv, 0, json.dumps(observation), "")
         if stage.endswith("live_proof"):
             manifest = json.loads(
                 Path(str(environment["ULLM_AQ4_RUNTIME_HARDENING_ACTIVE_MANIFEST"])).read_text(
@@ -297,7 +366,7 @@ class Runner:
                 )
             )
             observation = {
-                "schema_version": "ullm.aq4_runtime_hardening_live_observation.v1",
+                "schema_version": "ullm.aq4_runtime_hardening_live_observation.v2",
                 "plan_sha256": environment["ULLM_AQ4_RUNTIME_HARDENING_PLAN_SHA256"],
                 "operation_epoch": environment["ULLM_AQ4_RUNTIME_HARDENING_EPOCH"],
                 "active_manifest_sha256": environment["ULLM_AQ4_RUNTIME_HARDENING_ACTIVE_SHA256"],
@@ -316,7 +385,24 @@ class Runner:
                     "starttime": 17,
                     "executable_sha256": "f" * 64,
                 },
-                "endpoints": {name: True for name in AQ4.LIVE_ENDPOINTS},
+                "manifest": {
+                    "active_path": environment["ULLM_AQ4_RUNTIME_HARDENING_ACTIVE_MANIFEST"],
+                    "active_manifest_sha256": environment["ULLM_AQ4_RUNTIME_HARDENING_ACTIVE_SHA256"],
+                    "file_match": True,
+                    "service_environment_match": True,
+                    "worker_command_match": True,
+                },
+                "endpoints": {
+                    name: {"ok": True, "status": 200, "cause": None}
+                    for name in AQ4.LIVE_ENDPOINTS
+                },
+                "readiness": {
+                    "timeout_seconds": 120,
+                    "max_attempts": 15,
+                    "attempts": 2,
+                    "stable_pid_observations": 2,
+                    "elapsed_milliseconds": 1,
+                },
             }
             return subprocess.CompletedProcess(argv, 0, json.dumps(observation), "")
         return subprocess.CompletedProcess(argv, 0, "", "")
@@ -326,6 +412,10 @@ def test_preflight_activate_and_manual_rollback(tmp_path: Path) -> None:
     fixture = Fixture(tmp_path)
     fixture.prepare()
     record = AQ4.load_plan(fixture.plan, required_uid=fixture.uid)
+    report = AQ4.preflight_report(record, required_uid=fixture.uid)
+    assert report["ready"] is False
+    assert any("candidate_isolated_preflight" in blocker for blocker in report["blockers"])
+    fixture.isolated_preflight(Runner())
     report = AQ4.preflight_report(record, required_uid=fixture.uid)
     assert report["ready"] is True
     assert fixture.active.read_bytes() == fixture.rollback_raw
@@ -461,6 +551,62 @@ def test_candidate_live_proof_failure_restores_exact_aq4(tmp_path: Path) -> None
     assert outcome["failure_stage"] == "candidate_live_proof"
     assert outcome["stages"]["rollback_reconcile"] == "passed"
     assert outcome["stages"]["rollback_live_proof"] == "passed"
+    assert fixture.active.read_bytes() == fixture.rollback_raw
+
+
+def test_live_proof_failure_audit_preserves_safe_diagnostics_and_redacts_credentials(
+    tmp_path: Path,
+) -> None:
+    fixture = Fixture(tmp_path)
+    fixture.prepare()
+    leaked_api_key = "aq4-api-key-should-not-be-published"
+    leaked_jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJmaXh0dXJlIn0.signature"
+    stderr = (
+        "safe readiness diagnostic; "
+        f"Authorization: Bearer {leaked_api_key}; "
+        f"api_key={leaked_api_key}; session={leaked_jwt}"
+    )
+
+    with pytest.raises(AQ4.ActivationError):
+        fixture.execute(Runner(fail_stage="candidate_live_proof", failure_stderr=stderr))
+
+    audits = sorted(fixture.live_proof_audits.glob("candidate_live_proof-attempt-*.json"))
+    assert len(audits) == 1
+    audit_path = audits[0]
+    audit = json.loads(audit_path.read_text(encoding="ascii"))
+    serialized = audit_path.read_text(encoding="ascii")
+    assert audit["stage"] == "candidate_live_proof"
+    assert audit["stage_status"] == "failed"
+    assert audit["operation"]["return_code"] == 1
+    assert audit["operation"]["cause"] == "endpoints_incoherent"
+    assert "safe readiness diagnostic" in audit["operation"]["stderr"]
+    assert audit["endpoints"]["gateway_ready"] == {
+        "ok": False,
+        "status": None,
+        "cause": "transport",
+    }
+    assert audit["endpoints"]["gateway_health"]["ok"] is True
+    assert leaked_api_key not in serialized
+    assert leaked_jwt not in serialized
+    assert "[REDACTED]" in audit["operation"]["stderr"]
+    assert audit_path.stat().st_mode & 0o777 == 0o444
+    assert audit_path.stat().st_nlink == 1
+
+
+def test_failed_candidate_readiness_enters_rollback_before_returning_failure(tmp_path: Path) -> None:
+    fixture = Fixture(tmp_path)
+    fixture.prepare()
+    runner = Runner(fail_stage="candidate_live_proof")
+
+    with pytest.raises(AQ4.ActivationError):
+        fixture.execute(runner)
+
+    outcome = json.loads(fixture.outcome.read_text(encoding="ascii"))
+    assert outcome["failure_stage"] == "candidate_live_proof"
+    assert outcome["stages"]["candidate_live_proof"] == "failed"
+    assert outcome["stages"]["rollback_reconcile"] == "passed"
+    assert outcome["stages"]["rollback_live_proof"] == "passed"
+    assert runner.stages[-2:] == ["rollback_reconcile", "rollback_live_proof"]
     assert fixture.active.read_bytes() == fixture.rollback_raw
 
 
