@@ -1,0 +1,1 @@
+[{"at":"2026-07-26T13:26:02.242962Z","before":{"ActiveState":"active","MainPID":"3216978","NRestarts":"0","Result":"success","SubState":"running"},"restart_command_succeeded":true,"service":"ullm-openai.service","start_limit_recovery":false,"systemctl_commands":["restart"]}]

@@ -1,0 +1,20 @@
+{
+  "schema_version": "ullm.aq4_p3_qwen35_config_check.v1",
+  "format_id": "AQ4_0",
+  "config_path": "/home/homelab1/datapool/ai_models/safetensors/Qwen/Qwen3.5-9B/config.json",
+  "config_sha256": "d0883072e01861ed0b2d47be3c16c36a8e81c224c7ffaa310c6558fb3f932b05",
+  "architecture": "Qwen3_5ForConditionalGeneration",
+  "text_model_type": "qwen3_5_text",
+  "num_hidden_layers": 32,
+  "full_attention_interval": 4,
+  "layer_pattern": [
+    "linear_attention",
+    "linear_attention",
+    "linear_attention",
+    "full_attention"
+  ],
+  "pattern_repetitions": 8,
+  "pattern_match": true,
+  "verification": "independently derived from served Qwen3.5-9B config.json; this confirms BF's loader-layout report but is not used as a promotion quality gate",
+  "candidate_dependency_decision": "b21b2723/b3d78b42 are intentionally excluded from P3-only candidate source c4c9a9b"
+}

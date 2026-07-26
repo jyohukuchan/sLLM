@@ -1,0 +1,18 @@
+{
+  "schema_version": "ullm.lightweight_promotion_receipt.v1",
+  "format_id": "AQ4_0",
+  "source_commit": "c4c9a9b344fc10e9a77ab0ded3293469d21b2f72",
+  "worker": {
+    "binary": "/opt/ullm/aq4-p3-deployment-v0.1/releases/aq4-p3-c4c9a9b3/ullm-aq4-worker",
+    "sha256": "ba8c46d6eee81d508f4b2e744ec05d8743a46bf44100ec66257c8d8ae739e265"
+  },
+  "product": {
+    "root": "/opt/ullm/aq4-runtime-hardening-v0.1/products/qwen35-9b-aq4-package-a790a033f57d",
+    "manifest_path": "package/manifest.json",
+    "manifest_sha256": "a790a033f57d9c5b9ae0d731a463c26b86aec691f771ce88bb543d676f08e5ad"
+  },
+  "build": {
+    "source_worktree_commit": "c4c9a9b344fc10e9a77ab0ded3293469d21b2f72",
+    "command": "CARGO_BUILD_JOBS=16 CARGO_TARGET_DIR=/home/homelab1/coding-local/ultimateLLM/uLLM-aq4-p3-deployment-build-target-c4c9a9b3 cargo build --release -p ullm-engine --bin ullm-aq4-worker --bin ullm-aq4-e2e-prefill-timing --bin ullm-aq4-decode-step-profile"
+  }
+}

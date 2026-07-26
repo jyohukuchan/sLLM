@@ -387,3 +387,82 @@ bundle v1 routeを維持し、SQ8 bundle v2を導入しない。
    `inactive`、温度、clockを記録する。
 4. release bundle/rollback bindingを独立検証し、軽量昇格方針の生成品質確認と
    ロールバック準備が完了するまで`active.json`の実バイトを差し替えない。
+
+## 2026-07-26 P3 deployment execution record
+
+この記録では、共有 worktree の動く `HEAD` を候補にせず、上記推奨どおり P3 終端
+`c4c9a9b344fc10e9a77ab0ded3293469d21b2f72` を選んだ。`0cd76056..0455b119` の
+255-commit snapshot を再確認し、47 本の連続 P3 commit（prefill 28、decode 19）が
+この endpoint に入ることを確認した。AQ5/importance と後続の SQ8 実験は含めていない。
+新しい detached worktree から `ullm-aq4-worker`、prefill timing、decode profile のみを
+`CARGO_BUILD_JOBS=16` で build し、共有 HEAD は移動していない。
+
+候補 worker SHA-256 は
+`ba8c46d6eee81d508f4b2e744ec05d8743a46bf44100ec66257c8d8ae739e265`、候補 manifest
+SHA-256 は `a98910dc5bf59dc768e5bcd20bcf58968699540eb1b33df33066dcb6f274fe49` である。
+新しい release は既存 release を上書きせず
+`/opt/ullm/aq4-p3-deployment-v0.1/releases/aq4-p3-c4c9a9b3/` に作成した。候補は active
+production と同一の protected product package manifest
+`a790a033f57d9c5b9ae0d731a463c26b86aec691f771ce88bb543d676f08e5ad` を使用し、36 guard
+contract（旧 active の 30 に P3 の 6 guard を追加）を validation 済みである。
+
+BF の config-driven loader 系も独立に再確認した。Qwen3.5-9B `config.json`
+（SHA-256 `d0883072e01861ed0b2d47be3c16c36a8e81c224c7ffaa310c6558fb3f932b05`）は
+`Qwen3_5ForConditionalGeneration` / `qwen3_5_text`、32 layer、
+`linear_attention, linear_attention, linear_attention, full_attention` の 8 回反復である。
+`b21b2723` は AQ4 load path に届くが、P3-only release には意図的に含めず、BF の実行成功は
+互換性の裏付けとして扱った。SQ8 側が完全に無関係とはいえず、`82d3658`、`7c888c6`、
+`90869be` の v2 shared worker/reasoning runtime は AQ4 worker にも到達し得る。しかしこれらは
+選択 source より後なので candidate には入らない。残る SQ8_0 tile/probe/gate 実験も同様に除外した。
+
+R9700 (`gfx1201`) だけを使う isolated direct timing は、prefill 2,048 token / chunk 128 で
+**970.6107 tok/s**（既報 982.3835 より -1.198%）、decode C=1339 / 32 measured step で
+**73.4568 tok/s**（既報 74.29 より -1.122%）だった。したがって 982.4 tok/s の厳密再現では
+ないが、同一 product/package/profile で近傍の P3 水準は再現した。歴史測定は junction 約85°C、
+最大固定 clock、5.3 GB の llama comparison 常駐という別条件であり、絶対値同一の主張はしない。
+historic decode 56.6% の raw theoretical denominator は保存されていないため未確認であり、
+昇格 gate に用いない。
+
+軽量昇格の初回は generic `tools/promote-served-model.py` の preflight と baseline readiness を
+通過したが、baseline third request 中の 21:45:59.160 JST に別 session の
+`systemctl stop ullm-openai.service` が割り込んだ。worker EOF/HTTP 500 と残る transport failure は
+この teardown に対応する。tool は `baseline_failed_before_mutation` で fail-closed となり、
+candidate bytes は一度も active にならなかった。初回 evidence は
+`benchmarks/results/2026-07-26/aq4-p3-deployment/lightweight-promotion-attempt-1/` に保存した。
+
+この中断後、BH が 21:46:18 JST から `/run/ullm/r9700.lock` を保持する decode-attention window を
+開始した。service をその lock と競合して起動すると `WorkerBusy` になり StartLimit を浪費する。実際に
+別 session の 21:57:48 JST start と systemd retry 2 回がこの lock に衝突し、21:58:28 JST に
+`StartLimitBurst=3` が尽きた。したがって lock 解放と 15 分 StartLimit window（保守的に
+22:13:29 JST 以降）の経過、active manifest SHA が期待値
+`c57a2b6c5827b8ddd102560b3f5efd879711705cf4d8a36f4d7872821d05fca4` のままであることを確認するまで
+generic route を再実行しない。最終昇格または no-go の結果はこの条件後の actual text comparison に
+基づき追記する。
+
+### Final promotion outcome
+
+BH が lock を解放し、StartLimit の時間窓を越えた後、active SHA が依然
+`c57a2b6c5827b8ddd102560b3f5efd879711705cf4d8a36f4d7872821d05fca4` であることを再確認して
+fresh evidence directory で generic route を再実行した。old active から固定 10 prompt の実生成を
+すべて保存し、atomic swap、成功した service restart 1 回、bounded readiness retry、candidate から
+同じ 10 prompt の実生成をすべて完了した。
+
+比較は `blocking_findings: []`、10/10 nonempty response で PASS だった。日本語/英語説明、Python/
+JavaScript code、要約、multi-turn、翻訳、reasoning のいずれにも空応答、文字化け、反復、code 要求の
+放棄、途中 abandon は検出されなかった。今回の deterministic suite では診断上 exact output match
+1.000 になったが、これは top-1/logits gate として用いず、保存された actual text の品質で判定した。
+candidate readiness は health/ready/models がすべて200になるまで bounded retry を10回行い、最終 probe
+で成功した。service event は `restart` 1 回、`start_limit_recovery: false` である。
+
+したがって `AQ4_0` P3 candidate は **activated** である。新 active manifest SHA-256 は
+`a98910dc5bf59dc768e5bcd20bcf58968699540eb1b33df33066dcb6f274fe49`、worker SHA-256 は
+`ba8c46d6eee81d508f4b2e744ec05d8743a46bf44100ec66257c8d8ae739e265` である。post-activation の
+`ullm-openai.service` は active/running / `Result=success` / `NRestarts=0`。rollback tool を
+`--yes` なしで実行し、旧 manifest `c57a2b6…fca4` への strict-byte rollback preflight `ready: true` を
+確認した。rollback は不要なので実行していない。生成文、comparison、transaction、rollback preflight は
+`benchmarks/results/2026-07-26/aq4-p3-deployment/lightweight-promotion-attempt-2/` に保存した。
+
+なお、activation 完了後に BJ の SQ8_0 isolated measurement が service を一時停止したが、candidate
+manifest は不変で、BJ の restore 後に `/readyz` HTTP 200、running worker の executable hash
+`ba8c46d6…e265`、active/running / `Result=success` / `NRestarts=0` を再確認した。この後続 stop は
+P3 promotion の failure や rollback ではない。
