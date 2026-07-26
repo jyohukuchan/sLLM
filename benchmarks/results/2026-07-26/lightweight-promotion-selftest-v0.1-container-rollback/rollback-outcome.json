@@ -1,0 +1,1 @@
+{"activation_outcome_path":"/var/lib/ullm/lightweight-promotions/20260726T110811398563Z-fd080ab7ca150340/activation-outcome.json","bytes_equal_rollback":true,"completed_at":"2026-07-26T11:09:06.814371Z","failure":"gateway service restart failed","schema_version":"ullm.lightweight_promotion.rollback_outcome.v1","service_restart_commands":0,"status":"rollback_incomplete"}
