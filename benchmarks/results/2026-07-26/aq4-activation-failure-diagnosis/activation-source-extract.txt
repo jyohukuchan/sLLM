@@ -1,0 +1,381 @@
+sealed_control_source=/opt/ullm/aq4-runtime-hardening-v0.1/control-source/aq4-hardening-activation-d11085c4e119/tools/aq4_runtime_hardening_activation.py
+operation_source=/opt/ullm/aq4-runtime-hardening-v0.1/activation/operation-source/aq4-runtime-hardening-operation.py
+-- operation observe/reconcile implementation --
+def observe(values: dict[str, str]) -> None:
+    stage = values["ULLM_AQ4_RUNTIME_HARDENING_STAGE"]
+    if stage not in {"candidate_live_proof", "rollback_live_proof"}:
+        raise OperationError("observation stage differs")
+    manifest, raw = _read_active(values)
+    public = manifest.get("public")
+    worker = manifest.get("worker")
+    if not isinstance(public, dict) or not isinstance(worker, dict):
+        raise OperationError("active manifest identity is invalid")
+    model_id = public.get("id")
+    worker_path = worker.get("binary")
+    worker_hash = worker.get("binary_sha256")
+    if (
+        model_id != MODEL_ID
+        or not isinstance(worker_path, str)
+        or not Path(worker_path).is_absolute()
+        or not isinstance(worker_hash, str)
+        or HASH_RE.fullmatch(worker_hash) is None
+        or _sha256_path(Path(worker_path)) != worker_hash
+    ):
+        raise OperationError("active manifest worker identity differs")
+    active_state, sub_state, pid = _service_identity()
+    before_process = _process_identity(pid)
+    gateway_key = _read_secret(GATEWAY_API_KEY)
+    session = _read_secret(OPENWEBUI_SESSION)
+    try:
+        gateway_health, _ = _docker_gateway_get("/healthz", None)
+        gateway_ready, _ = _docker_gateway_get("/readyz", None)
+        gateway_models, gateway_models_body = _docker_gateway_get("/v1/models", gateway_key)
+        openwebui_health, _ = _openwebui_get("/health", None)
+        openwebui_models, openwebui_models_body = _openwebui_get("/api/models", session)
+    finally:
+        gateway_key[:] = b"\x00" * len(gateway_key)
+        session[:] = b"\x00" * len(session)
+    after_active, after_sub, after_pid = _service_identity()
+    after_process = _process_identity(after_pid)
+    final_manifest, final_raw = _read_active(values)
+    endpoints = {
+        "gateway_health": gateway_health == 200,
+        "gateway_ready": gateway_ready == 200,
+        "gateway_models": gateway_models == 200 and _model_ids(gateway_models_body) == [MODEL_ID],
+        "openwebui_health": openwebui_health == 200,
+        "openwebui_models": openwebui_models == 200 and _model_ids(openwebui_models_body) == [MODEL_ID],
+    }
+    if (
+        before_process != after_process
+        or pid != after_pid
+        or active_state != after_active
+        or sub_state != after_sub
+        or raw != final_raw
+        or manifest != final_manifest
+        or not all(endpoints.values())
+    ):
+        raise OperationError("live observation does not meet the AQ4 proof contract")
+    document = {
+        "schema_version": "ullm.aq4_runtime_hardening_live_observation.v1",
+        "plan_sha256": values["ULLM_AQ4_RUNTIME_HARDENING_PLAN_SHA256"],
+        "operation_epoch": values["ULLM_AQ4_RUNTIME_HARDENING_EPOCH"],
+        "active_manifest_sha256": values["ULLM_AQ4_RUNTIME_HARDENING_ACTIVE_SHA256"],
+        "model_id": model_id,
+        "worker_binary_path": worker_path,
+        "worker_binary_sha256": worker_hash,
+        "systemd": {"unit": SERVICE, "active_state": active_state, "sub_state": sub_state},
+        "process": before_process,
+        "endpoints": endpoints,
+    }
+    print(json.dumps(document, ensure_ascii=True, allow_nan=False, separators=(",", ":"), sort_keys=True))
+
+
+def reconcile(values: dict[str, str]) -> None:
+    stage = values["ULLM_AQ4_RUNTIME_HARDENING_STAGE"]
+    if stage not in {"candidate_reconcile", "rollback_reconcile"}:
+        raise OperationError("reconciliation stage differs")
+    _run([SYSTEMCTL, "restart", SERVICE], timeout=600)
+    for _ in range(120):
+        try:
+            active, sub, _pid = _service_identity()
+        except OperationError:
+            active = sub = ""
+        if active == "active" and sub == "running":
+            return
+        time.sleep(5)
+    raise OperationError("gateway did not reconcile")
+
+
+def main() -> int:
+    try:
+        if os.geteuid() != 0 or len(sys.argv) != 2:
+            raise OperationError("operation invocation is invalid")
+        values = _require_environment()
+        if sys.argv[1] == "observe":
+            observe(values)
+        elif sys.argv[1] == "reconcile":
+            reconcile(values)
+        else:
+            raise OperationError("operation action differs")
+    except Exception:
+        print("AQ4 hardening operation failed", file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+-- activation live-stage implementation --
+def _run_live_stage(
+    record: PlanRecord,
+    stage: str,
+    *,
+    active: Snapshot,
+    output: Path,
+    runner: CommandRunner,
+    required_uid: int,
+    clock: Clock,
+    reuse_existing: bool = False,
+) -> Snapshot:
+    if output.exists() or output.is_symlink():
+        if not reuse_existing:
+            fail("AQ4 live-proof output is already consumed")
+        existing = _snapshot(
+            output,
+            "AQ4 live proof",
+            maximum=MAX_DOCUMENT_BYTES,
+            required_uid=required_uid,
+            immutable=True,
+        )
+        _validate_live_proof(existing, record, stage=stage, active=active)
+        return existing
+    completed = _run_operation(record, stage, active=active, runner=runner)
+    observation = _live_observation(completed, record=record, active=active)
+    document = _live_proof_document(
+        record,
+        stage=stage,
+        active=active,
+        observation=observation,
+        completed=completed,
+        checked_at=clock(),
+    )
+    return _publish_immutable(output, document, required_uid=required_uid)
+
+
+def _proof_reference(snapshot: Snapshot) -> dict[str, Any]:
+    return {"path": os.fspath(snapshot.path), "sha256": snapshot.sha256}
+
+
+def _outcome_document(
+    record: PlanRecord,
+    *,
+    intent: Snapshot,
+    started_at: datetime,
+    completed_at: datetime,
+    status: str,
+    failure_stage: str | None,
+    stages: dict[str, str],
+    observed_active_sha256: str | None,
+    candidate_proof: Snapshot | None,
+    rollback_proof: Snapshot | None,
+    restoration_attempted: bool,
+    legacy_assets_checked: bool,
+) -> dict[str, Any]:
+    if status not in {"activated", "failed_restored", "failed_restore", "aborted_before_swap"}:
+        fail("AQ4 activation outcome status differs")
+    return {
+-- recovery-audit writer implementation --
+def _record_attempt(
+    record: PlanRecord,
+    *,
+    kind: str,
+    error: BaseException,
+    active_sha256: str | None,
+    directory_key: str,
+    required_uid: int,
+    clock: Clock,
+) -> Snapshot | None:
+    directory = Path(record.document["outcomes"][directory_key])
+    try:
+        _validate_audit_directory(directory, directory_key, required_uid=required_uid)
+        name = f"{kind}-attempt-{utc_timestamp(clock()).replace(':', '').replace('+', '').replace('.', '')}-{secrets.token_hex(8)}.json"
+        document = {
+            "schema_version": ATTEMPT_SCHEMA,
+            "plan_path": os.fspath(record.snapshot.path),
+            "plan_sha256": record.snapshot.sha256,
+            "operation_epoch": record.document["operation_epoch"],
+            "kind": kind,
+            "recorded_at": utc_timestamp(clock()),
+            "active_manifest_sha256": active_sha256,
+            "error": type(error).__name__,
+        }
+        return _publish_immutable(directory / name, document, required_uid=required_uid)
+    except Exception:
+        return None
+
+
+def _published_outcome_or_none(
+    path: Path,
+    document: dict[str, Any],
+    *,
+    required_uid: int,
+) -> Snapshot | None:
+    raw = _canonical_json(document)
+    try:
+        return _publish_immutable(path, document, required_uid=required_uid)
+    except ImmutablePublicationCommittedError:
+        return _committed_immutable(path, raw, required_uid=required_uid)
+
+
+def _restore_and_prove(
+-- activation candidate live-proof call and failure path --
+            switched = True
+        except AtomicExchangeCommittedError:
+            switched = True
+            raise
+        if fault_hook is not None:
+            fault_hook("after_swap")
+        active = _active_snapshot(record, required_uid=required_uid)
+        if active.raw != candidate.raw:
+            fail("candidate bytes are not active after exchange")
+        _verify_protected_runtime(record.document["candidate_runtime"], required_uid=required_uid)
+        failure_stage = "candidate_reconcile"
+        _run_operation(record, "candidate_reconcile", active=active, runner=runner)
+        stages["candidate_reconcile"] = "passed"
+        active = _active_snapshot(record, required_uid=required_uid)
+        if active.raw != candidate.raw:
+            fail("active manifest drifted during candidate reconciliation")
+        failure_stage = "candidate_live_proof"
+        candidate_proof = _run_live_stage(
+            record,
+            "candidate_live_proof",
+            active=active,
+            output=Path(record.document["outcomes"]["candidate_live_proof_path"]),
+            runner=runner,
+            required_uid=required_uid,
+            clock=clock,
+        )
+        stages["candidate_live_proof"] = "passed"
+        _verify_protected_runtime(record.document["candidate_runtime"], required_uid=required_uid)
+        _remove_staging(parent_fd, intent_document["staging_name"], rollback.raw)
+        if fault_hook is not None:
+            fault_hook("before_outcome_publication")
+        stages["rollback_reconcile"] = "skipped"
+        stages["rollback_live_proof"] = "skipped"
+        failure_stage = "outcome_publication"
+        assert intent_snapshot is not None
+        outcome = _outcome_document(
+            record,
+            intent=intent_snapshot,
+            started_at=started_at,
+            completed_at=clock(),
+            status="activated",
+            failure_stage=None,
+            stages=stages,
+            observed_active_sha256=active.sha256,
+            candidate_proof=candidate_proof,
+            rollback_proof=None,
+            restoration_attempted=False,
+            legacy_assets_checked=False,
+        )
+        outcome_path = Path(record.document["outcomes"]["activation_outcome_path"])
+        published = _published_outcome_or_none(
+            outcome_path, outcome, required_uid=required_uid
+        )
+        if published is None:
+            raise ActivationError("activation outcome publication did not commit")
+        # This immutable receipt is the commit boundary.  Do not add fallible
+        # source checks, process checks, or output operations after this point.
+        outcome_committed = True
+        return ExecutionResult(published.path, published.sha256, "activated")
+    except Exception as error:
+        if record is None or intent_snapshot is None or intent_document is None:
+            raise
+        if outcome_committed:
+            raise
+        if rollback is None or candidate is None:
+            raise
+        active_path = Path(record.document["active_manifest"]["path"])
+        observed_hash: str | None = None
+        restoration_attempted = False
+        legacy_checked = False
+        if switched and parent_fd >= 0:
+            restoration_attempted = True
+            try:
+                restored, rollback_proof, legacy_checked = _restore_and_prove(
+                    record,
+                    intent_document,
+                    parent_fd=parent_fd,
+                    active_path=active_path,
+                    rollback=rollback,
+-- recovery implementation --
+def execute_activation_recovery(
+    plan_path: Path,
+    *,
+    expected_plan_sha256: str,
+    confirmation: str,
+    required_uid: int = 0,
+    runner: CommandRunner = subprocess.run,
+    clock: Clock = utc_now,
+) -> ExecutionResult:
+    """Recover an intent-only crash, failed restore, or incomplete rollback.
+
+    Failed attempts are only recorded in unique audit files.  The fixed
+    immutable recovery receipt is published only after exact AQ4 bytes and the
+    rollback live proof both succeed, so it remains available for a retry.
+    """
+
+    _require_confirmation(expected_plan_sha256, confirmation, RECOVERY_CONFIRMATION)
+    initial = load_plan(plan_path, required_uid=required_uid)
+    if initial.snapshot.sha256 != expected_plan_sha256:
+        fail("confirmed AQ4 hardening plan SHA-256 differs")
+    lock_fd = -1
+    parent_fd = -1
+    record: PlanRecord | None = None
+    active_hash: str | None = None
+    try:
+        lock_fd = _open_locked_activation_lock(initial, required_uid=required_uid)
+        record = load_plan(plan_path, required_uid=required_uid)
+        _require_same_plan(initial, record, expected_plan_sha256)
+        existing = _load_completed_recovery(record, required_uid=required_uid)
+        if existing is not None:
+            return ExecutionResult(existing.path, existing.sha256, "recovered")
+        intent, intent_document = _load_intent(record, required_uid=required_uid)
+        outcome_path = Path(record.document["outcomes"]["activation_outcome_path"])
+        reason = "intent_incomplete"
+        if outcome_path.exists() or outcome_path.is_symlink():
+            _unused, outcome = _load_activation_outcome(record, required_uid=required_uid)
+            if outcome["status"] == "activated":
+                rollback_audits = Path(record.document["outcomes"]["rollback_audit_directory"])
+                if not _audit_exists(rollback_audits):
+                    fail("successful activation has no incomplete rollback to recover")
+                reason = "rollback_incomplete"
+            elif outcome["status"] == "failed_restore":
+                reason = "failed_restore"
+            elif outcome["status"] == "failed_restored":
+                reason = "failed_restored_proof_recheck"
+            else:
+                reason = "aborted_before_swap"
+        rollback = _recovery_inputs(record, required_uid=required_uid)
+        active = _active_snapshot(record, required_uid=required_uid)
+        active_hash = active.sha256
+        candidate_hash = record.document["candidate_runtime"]["manifest"]["sha256"]
+        if active.raw == rollback.raw:
+            candidate = active
+        elif active.sha256 == candidate_hash:
+            candidate = active
+        else:
+            fail("recovery active bytes do not match exact candidate or rollback")
+        parent_fd = _open_parent(active.path, "active manifest", required_uid=required_uid)
+        restored, proof, _legacy = _restore_and_prove(
+            record,
+            intent_document,
+            parent_fd=parent_fd,
+            active_path=active.path,
+            rollback=rollback,
+            candidate=candidate,
+            runner=runner,
+            required_uid=required_uid,
+            clock=clock,
+            reuse_existing_proof=True,
+        )
+        active_hash = restored.sha256
+        assert proof is not None
+        receipt = _recovery_document(
+            record,
+            intent=intent,
+            reason=reason,
+            rollback_proof=proof,
+            completed_at=clock(),
+        )
+        path = Path(record.document["outcomes"]["activation_recovery_path"])
+        published = _published_outcome_or_none(path, receipt, required_uid=required_uid)
+        if published is None:
+            fail("AQ4 recovery receipt publication did not commit")
+        return ExecutionResult(published.path, published.sha256, "recovered")
+    except Exception as error:
+        if record is not None:
+            _record_attempt(
+                record,
+                kind="recovery",
+                error=error,

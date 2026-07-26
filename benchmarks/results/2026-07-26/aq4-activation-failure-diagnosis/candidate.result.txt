@@ -1,0 +1,8 @@
+candidate_direct_start_utc=2026-07-26T02:08:03Z
+user=homelab1
+cwd=/home/homelab1/coding-local/ultimateLLM/uLLM-project/services/openai-gateway
+timeout_seconds=120
+command=/opt/ullm/aq4-runtime-hardening-v0.1/releases/aq4-fidelity-f1a3cf4c/ullm-aq4-worker --served-model-manifest /opt/ullm/aq4-runtime-hardening-v0.1/manifests/aq4-hardened-frozen.json
+candidate_direct_end_utc=2026-07-26T02:10:03Z
+exit_code=124
+signal=timeout_sent_TERM_or_KILL

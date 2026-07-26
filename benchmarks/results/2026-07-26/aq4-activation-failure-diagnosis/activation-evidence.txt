@@ -1,0 +1,41 @@
+schema=ullm.aq4_activation_failure.evidence.v1
+-- activation outcome --
+{
+  "candidate_live_proof": null,
+  "candidate_manifest_sha256": "c57a2b6c5827b8ddd102560b3f5efd879711705cf4d8a36f4d7872821d05fca4",
+  "completed_at": "2026-07-26T01:59:50.861094Z",
+  "failure_stage": "candidate_live_proof",
+  "intent_path": "/opt/ullm/aq4-runtime-hardening-v0.1/activation/activation-intent.json",
+  "intent_sha256": "1bc93663f87a639f73cf2c4d079c48db1634c3716c22a67282f02fba235a7ddb",
+  "observed_active_manifest_sha256": "5d015a013dcf70cea13dd9ed569d89ed2a025a17e14a6192ca18ee4cdadd1c8a",
+  "operation_epoch": "9db9812fe02212ae0b978f26e515ff25f454f3ae3fb466ef4bbe7167534df893",
+  "plan_id": "aq4-runtime-hardening-phase4-20260726",
+  "plan_path": "/opt/ullm/aq4-runtime-hardening-v0.1/activation/activation-plan.json",
+  "plan_sha256": "72140ff475b29e28f4ab6685459a344939bc54fcd12aa4f0b7c44cd7a8753194",
+  "restoration": {
+    "attempted": true,
+    "legacy_assets_checked": false
+  },
+  "rollback_live_proof": null,
+  "rollback_manifest_sha256": "5d015a013dcf70cea13dd9ed569d89ed2a025a17e14a6192ca18ee4cdadd1c8a",
+  "schema_version": "ullm.aq4_runtime_hardening_activation_outcome.v1",
+  "stages": {
+    "candidate_live_proof": "not_run",
+    "candidate_reconcile": "passed",
+    "rollback_live_proof": "failed",
+    "rollback_reconcile": "failed"
+  },
+  "started_at": "2026-07-26T01:59:48.800323Z",
+  "status": "failed_restore"
+}
+-- locked recovery audit --
+{
+  "active_manifest_sha256": "5d015a013dcf70cea13dd9ed569d89ed2a025a17e14a6192ca18ee4cdadd1c8a",
+  "error": "ActivationError",
+  "kind": "recovery",
+  "operation_epoch": "9db9812fe02212ae0b978f26e515ff25f454f3ae3fb466ef4bbe7167534df893",
+  "plan_path": "/opt/ullm/aq4-runtime-hardening-v0.1/activation/activation-plan.json",
+  "plan_sha256": "72140ff475b29e28f4ab6685459a344939bc54fcd12aa4f0b7c44cd7a8753194",
+  "recorded_at": "2026-07-26T02:00:28.387893Z",
+  "schema_version": "ullm.aq4_runtime_hardening_recovery_attempt.v1"
+}

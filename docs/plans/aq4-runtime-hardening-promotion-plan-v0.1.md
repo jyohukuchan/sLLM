@@ -1,6 +1,6 @@
 # AQ4_0 runtime hardening promotion plan v0.1
 
-Status: Phase 1–4 protected-closure preparation, fresh candidate/evidence/freeze work, and Phase 5 activation-plan readiness are complete. Phase 6 final activation and Phase 7 fresh post-activation campaign/bundle work remain pending. This document authorizes no final activation, authorization consumption, or replacement of <code>/etc/ullm/served-models/active.json</code>. Phase 4 used one successful narrow evidence service window (and one earlier immediately restored preflight abort), but did not change that file or any systemd unit content.
+Status: Phase 1–5 preparation was completed. One Phase 6 activation attempt on 2026-07-26 failed at candidate live proof before the candidate gateway reached readiness; the exact original active-manifest bytes were restored, but the route did not complete rollback live proof and therefore did not declare a healthy rollback. Direct diagnosis later proved that the candidate worker and its minimal closures load correctly. The current service is observed active/running on the original manifest, but this consumed plan is not retry authority. No further activation, authorization consumption, or replacement of <code>/etc/ullm/served-models/active.json</code> is authorized by this document.
 
 ## Goal
 
@@ -413,6 +413,24 @@ Exit criterion: either protected AQ4 is active with validated live proof, or the
 
 GPU or service window: required for the locked execute/rollback operation. It is a correctness/reconciliation window, not a P3 benchmark or tuning window.
 
+### Phase 6 execution record — readiness-proof failure (2026-07-26)
+
+This section supersedes the future-tense execution wording above for plan <code>72140ff475b29e28f4ab6685459a344939bc54fcd12aa4f0b7c44cd7a8753194</code>. It is an incident record, not permission to repeat the operation.
+
+- The immutable outcome records <code>status: failed_restore</code>, <code>failure_stage: candidate_live_proof</code>, candidate manifest SHA-256 <code>c57a2b6c5827b8ddd102560b3f5efd879711705cf4d8a36f4d7872821d05fca4</code>, and observed/restored active SHA-256 <code>5d015a013dcf70cea13dd9ed569d89ed2a025a17e14a6192ca18ee4cdadd1c8a</code>. The subsequent recovery audit records only <code>error: ActivationError</code>.
+- The journal establishes that the candidate service was reported started at 10:59:50.004 JST and was stopped at 10:59:50.286 JST: 282 ms later. It never emitted <code>Started server process</code>, <code>Application startup complete</code>, or a candidate <code>worker_fatal</code> event. For comparison, the restored gateway first emitted <code>Started server process</code> 464 ms after systemd reported it started and completed application startup roughly 2.8 seconds later.
+- The 11:00:27 JST <code>unexpected worker stdout EOF</code> belongs to the already restored live gateway process and follows systemd's 11:00:27.613 stop request. It is shutdown-induced stdout closure, not a candidate model-load crash. The earlier 10:59:49 EOF likewise belongs to the pre-existing gateway being stopped for the activation attempt.
+- Direct worker controls as user <code>homelab1</code>, in the gateway working directory with the service environment and all 30 <code>ULLM_REQUIRE_HIP_*</code> guards, loaded both candidate and live manifests. Both wrote the same ready record; their full stdout and 192-line / 223,428-byte stderr files are byte-identical. The candidate stderr contains only <code>ullm.backend_operation.load.v1</code> traces, with no error/fatal/panic text. Both workers stayed alive until the deliberate 120-second test timeout.
+- The candidate product has all 1,045 source-package members, and all 1,044 package-manifest payload references resolve within it. The 122 omitted source-product files are history/SQ8 sidecars outside <code>package/</code>. The five tokenizer files load through the actual gateway tokenizer contract. The absent <code>artifact -&gt; package</code> symlink is correct because AQ4 manifests declare <code>product.artifact: null</code> and the AQ4 worker rejects an artifact directory.
+
+Root cause: the sealed route's reconciliation operation returns as soon as systemd says <code>active/running</code>. Its immediately following observation performs one un-retried pass over gateway health/ready/models and OpenWebUI health/models. It ran before the candidate gateway had started its server process, so the live observation failed and the route stopped the candidate to restore the original manifest. This is an activation-control readiness race, not a worker, permission, closure, tokenizer, symlink, path-length, or mount-boundary failure.
+
+The audit cannot identify which individual endpoint call failed: the operation catches all inner exceptions and prints only a generic message, while the activation wrapper records an <code>ActivationError</code> class name but discards the child stderr/cause. The outcome's <code>candidate_live_proof: not_run</code> stage value does not contradict <code>failure_stage: candidate_live_proof</code>; exception cleanup converts an unfinished <code>pending</code> stage to <code>not_run</code> before publishing the outcome.
+
+Required future correction (not implemented here): create and review a new sealed activation-control source and new immutable plan. Its reconciliation/live-proof logic must use a bounded, recorded readiness loop that waits for a stable gateway process and a coherent successful pass of all five required endpoints/model-ID checks before declaring candidate or rollback proof. On failure it must preserve sanitized operation return code, stderr/cause, timestamps, and per-endpoint state in a root-only audit, without recording credentials. It must represent the attempted live-proof stage as failed rather than pending/not-run. The protected candidate closure and its manifest do not need to be rebuilt or changed; they may be revalidated as immutable inputs to the new plan. This consumed plan must not be retried.
+
+Full diagnosis evidence is stored in <code>benchmarks/results/2026-07-26/aq4-activation-failure-diagnosis/</code>.
+
 ### Phase 7 — Fresh AQ4 campaign and complete bundle v1
 
 Purpose: replace old path-bound post-promotion evidence only after the hardened AQ4 manifest is live and proved.
@@ -480,7 +498,7 @@ GPU or service window: GPU plus running gateway for the generic campaign; fronte
 
 ## Next Actions
 
-1. At a future execution start, repeat Phase 0 and the plan-bound default read-only preflight. Reject active-manifest, unit, environment, worker, package, tokenizer, source, credential-seal, or service-state drift. The short-lived OpenWebUI session credential is intentionally sealed in the plan; if it expires or changes, preflight must fail closed and a newly reviewed plan is required.
-2. Inspect the immutable plan SHA-256 <code>72140ff475b29e28f4ab6685459a344939bc54fcd12aa4f0b7c44cd7a8753194</code>, candidate SHA-256 <code>c57a2b6c5827b8ddd102560b3f5efd879711705cf4d8a36f4d7872821d05fca4</code>, rollback SHA-256 <code>5d015a013dcf70cea13dd9ed569d89ed2a025a17e14a6192ca18ee4cdadd1c8a</code>, output destinations, and the renewed <code>ready</code> result.
-3. **Stop for human approval.** Even if preflight remains <code>ready: true</code>, obtain explicit approval immediately before the locked execute command. Without it, <code>/etc/ullm/served-models/active.json</code> remains untouched.
-4. Only after that approval and successful candidate live proof, run Phase 7 and publish fresh AQ4 campaign/browser evidence and bundle v1 through the immutable v1 publication route. Treat those outputs as new protected-closure evidence, never as historical evidence reinterpretation.
+1. Do not invoke activation, rollback, or recovery again from plan <code>72140ff475b29e28f4ab6685459a344939bc54fcd12aa4f0b7c44cd7a8753194</code>. Preserve its immutable outcome/audit as incident evidence.
+2. In a separately authorized task, fix and test the activation-control readiness/audit behavior described in the Phase 6 execution record. Generate a new sealed control source and a new reviewed immutable plan; do not modify this consumed plan or its protected candidate closure.
+3. Before any future human-gated attempt, repeat all read-only input/seal checks against the new plan, including active-manifest, unit, environment, worker, product, tokenizer, source, credentials, and service state. The current plan's short-lived OpenWebUI credential must not be reused if it has changed or expired.
+4. Only a new explicit approval after that corrective work and a new successful candidate live proof can unlock Phase 7. Until then, do not collect or publish post-hardening campaign/browser/bundle evidence.

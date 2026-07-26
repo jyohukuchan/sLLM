@@ -1,0 +1,41 @@
+schema=ullm.aq4_activation_failure.direct_worker_comparison.v1
+candidate_run_user=homelab1
+live_control_run_user=homelab1
+working_directory=/home/homelab1/coding-local/ultimateLLM/uLLM-project/services/openai-gateway
+required_hip_guard_flag_count=30
+candidate_stdout_sha256=12179085c067ef6d5645251c0052e447603161e0c35841ef2005d6d1f10bafd1
+live_stdout_sha256=12179085c067ef6d5645251c0052e447603161e0c35841ef2005d6d1f10bafd1
+candidate_stderr_sha256=1e4eb40769bf54c774669a986690189fd7571eba67b3b4c309a77c8b0d6a49cd
+live_stderr_sha256=1e4eb40769bf54c774669a986690189fd7571eba67b3b4c309a77c8b0d6a49cd
+stdout_identical=true
+stderr_identical=true
+candidate_stdout_lines=1
+live_stdout_lines=1
+candidate_stderr_lines=192
+live_stderr_lines=192
+candidate_stderr_bytes=223428
+live_stderr_bytes=223428
+candidate_ready_stdout_mtime=2026-07-26 11:08:07.844606040 +0900
+live_ready_stdout_mtime=2026-07-26 11:11:04.062716253 +0900
+candidate_stderr_schema_versions=ullm.backend_operation.load.v1
+candidate_stderr_error_or_fatal_keyword_count=0
+-- candidate ready message --
+{"type":"ready","schema_version":"ullm.worker.v2","model":"ullm-qwen3.5-9b-aq4","model_revision":"aq4-reasoning-fidelity-f1a3cf4c-candidate","artifact_content_sha256":"a790a033f57d9c5b9ae0d731a463c26b86aec691f771ce88bb543d676f08e5ad","package_manifest_sha256":"a790a033f57d9c5b9ae0d731a463c26b86aec691f771ce88bb543d676f08e5ad","device":"gfx1201","execution_profile":"rdna4_aq4_resident","context_length":4096,"max_new_tokens":512}
+-- candidate direct timeout result --
+candidate_direct_start_utc=2026-07-26T02:08:03Z
+user=homelab1
+cwd=/home/homelab1/coding-local/ultimateLLM/uLLM-project/services/openai-gateway
+timeout_seconds=120
+command=/opt/ullm/aq4-runtime-hardening-v0.1/releases/aq4-fidelity-f1a3cf4c/ullm-aq4-worker --served-model-manifest /opt/ullm/aq4-runtime-hardening-v0.1/manifests/aq4-hardened-frozen.json
+candidate_direct_end_utc=2026-07-26T02:10:03Z
+exit_code=124
+signal=timeout_sent_TERM_or_KILL
+-- live direct timeout result --
+live_direct_start_utc=2026-07-26T02:10:58Z
+user=homelab1
+cwd=/home/homelab1/coding-local/ultimateLLM/uLLM-project/services/openai-gateway
+timeout_seconds=120
+command=/home/homelab1/coding-local/ultimateLLM/uLLM-aq4-fidelity-promotion-release-f1a3cf4c/ullm-aq4-worker --served-model-manifest /etc/ullm/served-models/active.json
+live_direct_end_utc=2026-07-26T02:12:59Z
+exit_code=124
+signal=timeout_sent_TERM_or_KILL

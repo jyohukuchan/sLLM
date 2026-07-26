@@ -1,0 +1,40 @@
+2026-07-26T10:59:49.503326+09:00 homelab1-WRX80-Creator systemd[1]: Stopping ullm-openai.service - uLLM single-worker OpenAI gateway...
+2026-07-26T10:59:49.519398+09:00 homelab1-WRX80-Creator ullm-openai[2332724]: INFO:     Shutting down
+2026-07-26T10:59:49.539125+09:00 homelab1-WRX80-Creator ullm-openai[2332724]: INFO:     {"admit_to_fatal_ns":null,"completion_id":null,"event":"worker_fatal","observed_monotonic_ns":38876408369376,"reason":"unexpected worker stdout EOF","request_id":null,"schema_version":"ullm.gateway.lifecycle.v1"}
+2026-07-26T10:59:49.620481+09:00 homelab1-WRX80-Creator ullm-openai[2332724]: INFO:     Waiting for application shutdown.
+2026-07-26T10:59:49.620742+09:00 homelab1-WRX80-Creator ullm-openai[2332724]: INFO:     Application shutdown complete.
+2026-07-26T10:59:49.620827+09:00 homelab1-WRX80-Creator ullm-openai[2332724]: INFO:     Finished server process [2332724]
+2026-07-26T10:59:49.674885+09:00 homelab1-WRX80-Creator systemd[1]: ullm-openai.service: Deactivated successfully.
+2026-07-26T10:59:49.675355+09:00 homelab1-WRX80-Creator systemd[1]: Stopped ullm-openai.service - uLLM single-worker OpenAI gateway.
+2026-07-26T10:59:49.675402+09:00 homelab1-WRX80-Creator systemd[1]: ullm-openai.service: Consumed 26.548s CPU time, 604.9M memory peak, 0B memory swap peak.
+2026-07-26T10:59:49.698806+09:00 homelab1-WRX80-Creator systemd[1]: Starting ullm-openai.service - uLLM single-worker OpenAI gateway...
+2026-07-26T10:59:49.976531+09:00 homelab1-WRX80-Creator ullm-openai[2691493]: {"format_id":"AQ4_0","manifest_sha256":"c57a2b6c5827b8ddd102560b3f5efd879711705cf4d8a36f4d7872821d05fca4","model_id":"ullm-qwen3.5-9b-aq4","product":{"artifact":null,"package":{"manifest_path":"package/manifest.json","manifest_sha256":"a790a033f57d9c5b9ae0d731a463c26b86aec691f771ce88bb543d676f08e5ad"},"root":"/opt/ullm/aq4-runtime-hardening-v0.1/products/qwen35-9b-aq4-package-a790a033f57d"},"schema_version":"ullm.served_model.validation.v1","validated":true,"worker":{"binary":"/opt/ullm/aq4-runtime-hardening-v0.1/releases/aq4-fidelity-f1a3cf4c/ullm-aq4-worker","binary_sha256":"1f93f21543af777adb0f00cc35d6857d0af432657ed74e7723636ace9dfca69b","device":"gfx1201","execution_profile":"rdna4_aq4_resident","protocol":"ullm.worker.v2"}}
+2026-07-26T10:59:50.004706+09:00 homelab1-WRX80-Creator systemd[1]: Started ullm-openai.service - uLLM single-worker OpenAI gateway.
+2026-07-26T10:59:50.286744+09:00 homelab1-WRX80-Creator systemd[1]: Stopping ullm-openai.service - uLLM single-worker OpenAI gateway...
+2026-07-26T10:59:50.291418+09:00 homelab1-WRX80-Creator systemd[1]: ullm-openai.service: Deactivated successfully.
+2026-07-26T10:59:50.291835+09:00 homelab1-WRX80-Creator systemd[1]: Stopped ullm-openai.service - uLLM single-worker OpenAI gateway.
+2026-07-26T10:59:50.312788+09:00 homelab1-WRX80-Creator systemd[1]: Starting ullm-openai.service - uLLM single-worker OpenAI gateway...
+2026-07-26T10:59:50.600171+09:00 homelab1-WRX80-Creator ullm-openai[2691842]: {"format_id":"AQ4_0","manifest_sha256":"5d015a013dcf70cea13dd9ed569d89ed2a025a17e14a6192ca18ee4cdadd1c8a","model_id":"ullm-qwen3.5-9b-aq4","product":{"artifact":null,"package":{"manifest_path":"package/manifest.json","manifest_sha256":"a790a033f57d9c5b9ae0d731a463c26b86aec691f771ce88bb543d676f08e5ad"},"root":"/home/homelab1/datapool/ullm/product/qwen35-9b-aq4-cli-v0.1"},"schema_version":"ullm.served_model.validation.v1","validated":true,"worker":{"binary":"/home/homelab1/coding-local/ultimateLLM/uLLM-aq4-fidelity-promotion-release-f1a3cf4c/ullm-aq4-worker","binary_sha256":"1f93f21543af777adb0f00cc35d6857d0af432657ed74e7723636ace9dfca69b","device":"gfx1201","execution_profile":"rdna4_aq4_resident","protocol":"ullm.worker.v2"}}
+2026-07-26T10:59:50.632732+09:00 homelab1-WRX80-Creator systemd[1]: Started ullm-openai.service - uLLM single-worker OpenAI gateway.
+2026-07-26T10:59:51.096316+09:00 homelab1-WRX80-Creator ullm-openai[2691844]: INFO:     Started server process [2691844]
+2026-07-26T10:59:51.096887+09:00 homelab1-WRX80-Creator ullm-openai[2691844]: INFO:     Waiting for application startup.
+2026-07-26T10:59:51.754099+09:00 homelab1-WRX80-Creator ullm-openai[2691844]: [transformers] PyTorch was not found. Models won't be available and only tokenizers, configuration and file/data utilities can be used.
+2026-07-26T10:59:53.434702+09:00 homelab1-WRX80-Creator ullm-openai[2691844]: INFO:     Application startup complete.
+2026-07-26T10:59:53.435167+09:00 homelab1-WRX80-Creator ullm-openai[2691844]: INFO:     Uvicorn running on http://172.20.0.1:8000 (Press CTRL+C to quit)
+2026-07-26T11:00:27.613077+09:00 homelab1-WRX80-Creator systemd[1]: Stopping ullm-openai.service - uLLM single-worker OpenAI gateway...
+2026-07-26T11:00:27.647326+09:00 homelab1-WRX80-Creator ullm-openai[2691844]: INFO:     {"admit_to_fatal_ns":null,"completion_id":null,"event":"worker_fatal","observed_monotonic_ns":38914516508598,"reason":"unexpected worker stdout EOF","request_id":null,"schema_version":"ullm.gateway.lifecycle.v1"}
+2026-07-26T11:00:27.653659+09:00 homelab1-WRX80-Creator ullm-openai[2691844]: INFO:     Shutting down
+2026-07-26T11:00:27.753943+09:00 homelab1-WRX80-Creator ullm-openai[2691844]: INFO:     Waiting for application shutdown.
+2026-07-26T11:00:27.754133+09:00 homelab1-WRX80-Creator ullm-openai[2691844]: INFO:     Application shutdown complete.
+2026-07-26T11:00:27.754212+09:00 homelab1-WRX80-Creator ullm-openai[2691844]: INFO:     Finished server process [2691844]
+2026-07-26T11:00:27.809440+09:00 homelab1-WRX80-Creator systemd[1]: ullm-openai.service: Deactivated successfully.
+2026-07-26T11:00:27.809863+09:00 homelab1-WRX80-Creator systemd[1]: Stopped ullm-openai.service - uLLM single-worker OpenAI gateway.
+2026-07-26T11:00:27.809912+09:00 homelab1-WRX80-Creator systemd[1]: ullm-openai.service: Consumed 14.337s CPU time, 605.8M memory peak, 0B memory swap peak.
+2026-07-26T11:00:27.836072+09:00 homelab1-WRX80-Creator systemd[1]: Starting ullm-openai.service - uLLM single-worker OpenAI gateway...
+2026-07-26T11:00:28.123164+09:00 homelab1-WRX80-Creator ullm-openai[2694274]: {"format_id":"AQ4_0","manifest_sha256":"5d015a013dcf70cea13dd9ed569d89ed2a025a17e14a6192ca18ee4cdadd1c8a","model_id":"ullm-qwen3.5-9b-aq4","product":{"artifact":null,"package":{"manifest_path":"package/manifest.json","manifest_sha256":"a790a033f57d9c5b9ae0d731a463c26b86aec691f771ce88bb543d676f08e5ad"},"root":"/home/homelab1/datapool/ullm/product/qwen35-9b-aq4-cli-v0.1"},"schema_version":"ullm.served_model.validation.v1","validated":true,"worker":{"binary":"/home/homelab1/coding-local/ultimateLLM/uLLM-aq4-fidelity-promotion-release-f1a3cf4c/ullm-aq4-worker","binary_sha256":"1f93f21543af777adb0f00cc35d6857d0af432657ed74e7723636ace9dfca69b","device":"gfx1201","execution_profile":"rdna4_aq4_resident","protocol":"ullm.worker.v2"}}
+2026-07-26T11:00:28.152724+09:00 homelab1-WRX80-Creator systemd[1]: Started ullm-openai.service - uLLM single-worker OpenAI gateway.
+2026-07-26T11:00:28.623899+09:00 homelab1-WRX80-Creator ullm-openai[2694276]: INFO:     Started server process [2694276]
+2026-07-26T11:00:28.623899+09:00 homelab1-WRX80-Creator ullm-openai[2694276]: INFO:     Waiting for application startup.
+2026-07-26T11:00:29.283884+09:00 homelab1-WRX80-Creator ullm-openai[2694276]: [transformers] PyTorch was not found. Models won't be available and only tokenizers, configuration and file/data utilities can be used.
+2026-07-26T11:00:31.034537+09:00 homelab1-WRX80-Creator ullm-openai[2694276]: INFO:     Application startup complete.
+2026-07-26T11:00:31.034946+09:00 homelab1-WRX80-Creator ullm-openai[2694276]: INFO:     Uvicorn running on http://172.20.0.1:8000 (Press CTRL+C to quit)

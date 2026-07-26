@@ -1,0 +1,145 @@
+-- systemctl cat ullm-openai.service (read-only) --
+# /etc/systemd/system/ullm-openai.service
+[Unit]
+Description=uLLM single-worker OpenAI gateway
+Documentation=file:///home/homelab1/coding-local/ultimateLLM/uLLM-project/deploy/README.md
+Wants=network-online.target
+After=network-online.target docker.service ullm-openai-firewall.service
+Requires=docker.service ullm-openai-firewall.service
+RequiresMountsFor=/home/homelab1/datapool
+StartLimitIntervalSec=900
+StartLimitBurst=3
+
+[Service]
+Type=simple
+User=homelab1
+Group=homelab1
+SupplementaryGroups=video render
+WorkingDirectory=/home/homelab1/coding-local/ultimateLLM/uLLM-project/services/openai-gateway
+EnvironmentFile=/etc/ullm/openai-gateway.env
+Environment=HOME=/var/cache/ullm
+Environment=XDG_CACHE_HOME=/var/cache/ullm
+Environment=PYTHONUNBUFFERED=1
+Environment=HF_HUB_OFFLINE=1
+Environment=TRANSFORMERS_OFFLINE=1
+RuntimeDirectory=ullm
+RuntimeDirectoryMode=0750
+CacheDirectory=ullm
+CacheDirectoryMode=0750
+ExecStartPre=/usr/bin/test -x /home/homelab1/coding-local/ultimateLLM/uLLM-project/services/openai-gateway/.venv/bin/ullm-openai-gateway
+ExecStart=/home/homelab1/coding-local/ultimateLLM/uLLM-project/services/openai-gateway/.venv/bin/ullm-openai-gateway
+Restart=on-failure
+RestartSec=10s
+TimeoutStartSec=650s
+TimeoutStopSec=15s
+KillMode=control-group
+SendSIGKILL=yes
+OOMPolicy=stop
+UMask=0077
+LimitNOFILE=65536
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/run/ullm /var/cache/ullm
+ProtectClock=yes
+ProtectControlGroups=yes
+ProtectKernelLogs=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ullm-openai
+
+[Install]
+WantedBy=multi-user.target
+
+# /etc/systemd/system/ullm-openai.service.d/10-served-model.conf
+[Service]
+# Replace the legacy model environment instead of layering manifest mode over it.
+EnvironmentFile=
+EnvironmentFile=/etc/ullm/openai-gateway-manifest.env
+
+# Preserve the base executable check and add fail-closed manifest validation.
+ExecStartPre=
+ExecStartPre=/usr/bin/test -x /home/homelab1/coding-local/ultimateLLM/uLLM-project/services/openai-gateway/.venv/bin/ullm-openai-gateway
+ExecStartPre=/usr/bin/python3 /home/homelab1/coding-local/ultimateLLM/uLLM-project/tools/validate-served-model.py --manifest ${ULLM_SERVED_MODEL_MANIFEST}
+
+# /etc/systemd/system/ullm-openai.service.d/20-runtime-directory-preserve.conf
+[Service]
+RuntimeDirectoryPreserve=yes
+-- /etc/ullm/openai-gateway-manifest.env (read-only) --
+# Manifest mode contains slot operations settings only. Model identity, paths,
+# hashes, tokenizer details, and worker arguments come exclusively from this
+# validated active manifest.
+ULLM_SERVED_MODEL_MANIFEST=/etc/ullm/served-models/active.json
+
+ULLM_API_KEY_FILE=/etc/ullm/openai-api-key
+ULLM_GPU_LOCK_FILE=/run/ullm/r9700.lock
+ULLM_BIND_HOST=172.20.0.1
+ULLM_BIND_PORT=8000
+ULLM_HIP_VISIBLE_DEVICES=1
+
+# deploy/openwebui/configure.py consumes this slot setting as well.
+ULLM_OPENAI_BASE_URL=http://172.20.0.1:8000/v1
+-- service child environment used as direct-test source --
+CACHE_DIRECTORY=/var/cache/ullm
+HF_HUB_DISABLE_TELEMETRY=1
+HF_HUB_OFFLINE=1
+HIP_VISIBLE_DEVICES=1
+HOME=/var/cache/ullm
+INVOCATION_ID=2ef5bfb479794de9a4de93879c3ba4a8
+JOURNAL_STREAM=9:2979017
+LANG=ja_JP.UTF-8
+LOGNAME=homelab1
+MEMORY_PRESSURE_WATCH=/sys/fs/cgroup/system.slice/ullm-openai.service/memory.pressure
+MEMORY_PRESSURE_WRITE=c29tZSAyMDAwMDAgMjAwMDAwMAA=
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/snap/bin
+PYTHONUNBUFFERED=1
+RUNTIME_DIRECTORY=/run/ullm
+SHELL=/bin/bash
+SYSTEMD_EXEC_PID=2694276
+TRANSFORMERS_OFFLINE=1
+ULLM_API_KEY_FILE=/etc/ullm/openai-api-key
+ULLM_BIND_HOST=172.20.0.1
+ULLM_BIND_PORT=8000
+ULLM_GPU_LOCK_FILE=/run/ullm/r9700.lock
+ULLM_HIP_VISIBLE_DEVICES=1
+ULLM_OPENAI_BASE_URL=http://172.20.0.1:8000/v1
+ULLM_REQUIRE_HIP_ADD_KERNEL=1
+ULLM_REQUIRE_HIP_AQ4_KERNEL=1
+ULLM_REQUIRE_HIP_AQ4_MATVEC_ADD_KERNEL=1
+ULLM_REQUIRE_HIP_AQ4_MATVEC_BATCH_KERNEL=1
+ULLM_REQUIRE_HIP_AQ4_MATVEC_KERNEL=1
+ULLM_REQUIRE_HIP_AQ4_MATVEC_PAIR_KERNEL=1
+ULLM_REQUIRE_HIP_AQ4_MATVEC_QKV_Z_GATE_BETA_KERNEL=1
+ULLM_REQUIRE_HIP_AQ4_MATVEC_TRIPLE_KERNEL=1
+ULLM_REQUIRE_HIP_AQ4_REGISTER_BM8_KERNEL=1
+ULLM_REQUIRE_HIP_BF16_MATVEC_KERNEL=1
+ULLM_REQUIRE_HIP_BF16_ROW_KERNEL=1
+ULLM_REQUIRE_HIP_LINEAR_ATTN_GATE_BETA_KERNEL=1
+ULLM_REQUIRE_HIP_LINEAR_ATTN_KERNEL=1
+ULLM_REQUIRE_HIP_LINEAR_ATTN_QKV_PREPARE_BATCH_KERNEL=1
+ULLM_REQUIRE_HIP_LINEAR_ATTN_RECURRENT_KERNEL=1
+ULLM_REQUIRE_HIP_LINEAR_ATTN_RECURRENT_SEQUENCE_KERNEL=1
+ULLM_REQUIRE_HIP_PAGED_CAUSAL_GQA_CHUNK_KERNEL=1
+ULLM_REQUIRE_HIP_PAGED_DECODE_ATTN_KERNEL=1
+ULLM_REQUIRE_HIP_PAGED_DECODE_SPLIT_KERNEL=1
+ULLM_REQUIRE_HIP_PAGED_KV_WRITE_CHUNK_KERNEL=1
+ULLM_REQUIRE_HIP_PAGED_KV_WRITE_KERNEL=1
+ULLM_REQUIRE_HIP_QWEN35_QK_NORM_ROPE_BATCH_KERNEL=1
+ULLM_REQUIRE_HIP_QWEN35_QK_NORM_ROPE_PAGED_KV_WRITE_KERNEL=1
+ULLM_REQUIRE_HIP_QWEN35_Q_SPLIT_KERNEL=1
+ULLM_REQUIRE_HIP_RMSNORM_KERNEL=1
+ULLM_REQUIRE_HIP_ROPE_KERNEL=1
+ULLM_REQUIRE_HIP_SEGMENTED_RMSNORM_SILU_MUL_KERNEL=1
+ULLM_REQUIRE_HIP_SIGMOID_MUL_KERNEL=1
+ULLM_REQUIRE_HIP_SILU_MUL_KERNEL=1
+ULLM_REQUIRE_HIP_TOP1_KERNEL=1
+ULLM_SERVED_MODEL_MANIFEST=/etc/ullm/served-models/active.json
+USER=homelab1
+XDG_CACHE_HOME=/var/cache/ullm
