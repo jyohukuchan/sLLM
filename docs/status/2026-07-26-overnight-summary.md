@@ -183,4 +183,3 @@ diagnostic/scalarization になっても命令不存在の証拠ではない。t
 | W8A8 rescue | `outlier_bypass_ge4` は 14.331775% の activation block を FP32 bypass し、W8A8-to-W8A16 aggregate-logit-L2 gap を 100% 除去した。しかし max-abs/top-1 gate はなお不合格。 | compact FP16 side plane/mask または calibration を別 task で追うか、それとも W8A16 default を維持して停止するか。 |
 | P3 performance deployment | 推奨 source cut は `c4c9a9b344fc10e9a77ab0ded3293469d21b2f72`。47 P3 commits を含み、HEAD の余分な SQ8 v2 shared-runtime surface を含まない。P3 candidate は 36 guards、新 worker/manifest/receipt、identity-bound fidelity/integration evidence、**29 以上**の既定 R9700 measurement/service window を必要とする。 | hardening と分離した P3 candidate/deployment programme を開始するか。開始しても active-manifest replacement は別の人間承認まで行わない。 |
 | CDNA3 physical smoke | A′/B と MI300X checklist は準備済みで、最短 fragment go/no-go は 10--20 分。 | isolated MI300X/gfx942 smoke を別途承認するか。実機結果が出るまで performance/deployment conclusion は出さない。 |
-
