@@ -3976,6 +3976,53 @@ mod tests {
     }
 
     #[test]
+    fn typed_paged_kv_payload_encodings_are_canonical_cpu() {
+        let mut context = RuntimeContext::create(0).unwrap();
+        let mut stream = context.create_stream().unwrap();
+        let shape = PagedDecodeShape {
+            block_size: 1,
+            cache_blocks: 1,
+            q_heads: 1,
+            kv_heads: 1,
+            head_dim: 4,
+            value_dim: 4,
+        };
+        let mut state = PagedDecodeState::new_with_kv_cache_dtypes(
+            &mut context,
+            &mut stream,
+            shape,
+            vec![0],
+            KvCacheDtypes {
+                key: KvCacheDtype::F16,
+                value: KvCacheDtype::Fp8E4M3Fn,
+            },
+        )
+        .unwrap();
+        state
+            .write_token(
+                &mut stream,
+                &[1.0, -2.0, 0.5, 0.0],
+                &[448.0, -448.0, 1.0, 0.0],
+            )
+            .unwrap();
+
+        let k_payload = read_raw_buffer(&state.k_cache_buffer, &mut stream, 8).unwrap();
+        assert_eq!(
+            k_payload,
+            vec![0x00, 0x3c, 0x00, 0xc0, 0x00, 0x38, 0x00, 0x00]
+        );
+        let v_payload = read_raw_buffer(&state.v_cache_buffer, &mut stream, 4).unwrap();
+        assert_eq!(v_payload, vec![0x7e, 0xfe, 0x38, 0x00]);
+        let v_scale = read_raw_buffer(
+            state.v_scale_buffer.as_ref().unwrap(),
+            &mut stream,
+            std::mem::size_of::<u16>(),
+        )
+        .unwrap();
+        assert_eq!(v_scale, vec![0x00, 0x3c]);
+    }
+
+    #[test]
     fn source_tiled_decode_experiment_matches_direct_cpu() {
         let mut context = RuntimeContext::create(0).unwrap();
         let mut stream = context.create_stream().unwrap();
