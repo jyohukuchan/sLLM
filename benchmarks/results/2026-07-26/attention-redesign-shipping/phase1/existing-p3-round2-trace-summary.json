@@ -1,0 +1,163 @@
+{
+  "kernel": {
+    "attention_fraction_of_inclusive_kernel_time": 0.0897854228991553,
+    "attention_inclusive_ns": 37016296,
+    "attention_kernels": {
+      "ullm_paged_decode_attn_f32_kernel": {
+        "fraction_of_inclusive_kernel_time": 0.0,
+        "inclusive_ns": 0,
+        "kernel_count": 0
+      },
+      "ullm_paged_decode_attn_split_merge_f32_kernel": {
+        "fraction_of_inclusive_kernel_time": 0.0033324737131845356,
+        "inclusive_ns": 1373896,
+        "kernel_count": 256
+      },
+      "ullm_paged_decode_attn_split_partial_f32_kernel": {
+        "fraction_of_inclusive_kernel_time": 0.08645294918597077,
+        "inclusive_ns": 35642400,
+        "kernel_count": 256
+      }
+    },
+    "families": {
+      "aq4_projection": {
+        "fraction_of_inclusive_kernel_time": 0.8109666646874059,
+        "inclusive_ns": 334341379,
+        "kernel_count": 4128
+      },
+      "attention": {
+        "fraction_of_inclusive_kernel_time": 0.0897854228991553,
+        "inclusive_ns": 37016296,
+        "kernel_count": 512
+      },
+      "linear_attention": {
+        "fraction_of_inclusive_kernel_time": 0.04067487991999129,
+        "inclusive_ns": 16769241,
+        "kernel_count": 1536
+      },
+      "normalization": {
+        "fraction_of_inclusive_kernel_time": 0.057294459098089646,
+        "inclusive_ns": 23621080,
+        "kernel_count": 3104
+      },
+      "other_ullm": {
+        "fraction_of_inclusive_kernel_time": 0.0012785733953579348,
+        "inclusive_ns": 527124,
+        "kernel_count": 64
+      }
+    },
+    "inclusive_ns": 412275120,
+    "top_kernels": [
+      {
+        "fraction_of_inclusive_kernel_time": 0.29337268521078835,
+        "inclusive_ns": 120950259,
+        "kernel_count": 2048,
+        "name": "ullm_aq4_matvec_add_f32_kernel"
+      },
+      {
+        "fraction_of_inclusive_kernel_time": 0.26415197453583905,
+        "inclusive_ns": 108903287,
+        "kernel_count": 1024,
+        "name": "ullm_aq4_matvec_silu_mul_f32_kernel"
+      },
+      {
+        "fraction_of_inclusive_kernel_time": 0.11978871536075231,
+        "inclusive_ns": 49385907,
+        "kernel_count": 768,
+        "name": "ullm_aq4_matvec_qkv_z_gate_beta_f32_kernel"
+      },
+      {
+        "fraction_of_inclusive_kernel_time": 0.09214918668873348,
+        "inclusive_ns": 37990817,
+        "kernel_count": 32,
+        "name": "ullm_aq4_matvec_f32_kernel"
+      },
+      {
+        "fraction_of_inclusive_kernel_time": 0.08645294918597077,
+        "inclusive_ns": 35642400,
+        "kernel_count": 256,
+        "name": "ullm_paged_decode_attn_split_partial_f32_kernel"
+      },
+      {
+        "fraction_of_inclusive_kernel_time": 0.050238442717571705,
+        "inclusive_ns": 20712060,
+        "kernel_count": 2080,
+        "name": "ullm_rmsnorm_f32_kernel"
+      },
+      {
+        "fraction_of_inclusive_kernel_time": 0.04150410289129259,
+        "inclusive_ns": 17111109,
+        "kernel_count": 256,
+        "name": "ullm_aq4_matvec_triple_f32_kernel"
+      },
+      {
+        "fraction_of_inclusive_kernel_time": 0.03393833224765055,
+        "inclusive_ns": 13991930,
+        "kernel_count": 768,
+        "name": "ullm_linear_attn_recurrent_f32_kernel"
+      },
+      {
+        "fraction_of_inclusive_kernel_time": 0.006736547672340742,
+        "inclusive_ns": 2777311,
+        "kernel_count": 768,
+        "name": "ullm_linear_attn_qkv_prepare_f32_kernel"
+      },
+      {
+        "fraction_of_inclusive_kernel_time": 0.00482689811599594,
+        "inclusive_ns": 1990010,
+        "kernel_count": 768,
+        "name": "ullm_segmented_rmsnorm_silu_mul_f32_kernel"
+      },
+      {
+        "fraction_of_inclusive_kernel_time": 0.0033324737131845356,
+        "inclusive_ns": 1373896,
+        "kernel_count": 256,
+        "name": "ullm_paged_decode_attn_split_merge_f32_kernel"
+      },
+      {
+        "fraction_of_inclusive_kernel_time": 0.0022291182645220015,
+        "inclusive_ns": 919010,
+        "kernel_count": 256,
+        "name": "ullm_qwen35_qk_norm_rope_paged_kv_write_f32_kernel"
+      },
+      {
+        "fraction_of_inclusive_kernel_time": 0.0007588185287533238,
+        "inclusive_ns": 312842,
+        "kernel_count": 32,
+        "name": "ullm_bf16_row_f32_kernel"
+      },
+      {
+        "fraction_of_inclusive_kernel_time": 0.000519754866604611,
+        "inclusive_ns": 214282,
+        "kernel_count": 32,
+        "name": "ullm_top1_f32_kernel"
+      },
+      {
+        "fraction_of_inclusive_kernel_time": 0.0,
+        "inclusive_ns": 0,
+        "kernel_count": 0,
+        "name": "ullm_paged_decode_attn_f32_kernel"
+      }
+    ]
+  },
+  "measurement": {
+    "attribution": "hipModuleLaunchKernel correlation start inside an outer AQ4_0 decode-step marker",
+    "cache_end_exclusive": 1371,
+    "cache_start": 1339,
+    "decode_step_count": 32,
+    "ignored_kernel_dispatches_outside_decode_markers": 16618,
+    "ignored_kernel_dispatches_without_hip_module_launch": 5241,
+    "kind": "marker_attributed_module_launch_inclusive_kernel_time",
+    "matched_kernel_dispatches": 9344,
+    "throughput_derived_from_profiler": false
+  },
+  "schema_version": "ullm.aq4_decode_attention_trace_summary.v1",
+  "trace": {
+    "hip_api_trace": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-20/aq4-decode-step-profile-post-p3-round2-20260719T230555Z/rocprof/decode-profile-round2_hip_api_trace.csv",
+    "hip_api_trace_sha256": "e9db9ab6fece5321b9276f16af75921a167d5c573d728a3c2b6c172d845ecc83",
+    "kernel_trace": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-20/aq4-decode-step-profile-post-p3-round2-20260719T230555Z/rocprof/decode-profile-round2_kernel_trace.csv",
+    "kernel_trace_sha256": "a529527d36b61b5a2cfbe232c13111f42fac282b4ff29e6d8006fa30e53f7646",
+    "marker_trace": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-20/aq4-decode-step-profile-post-p3-round2-20260719T230555Z/rocprof/decode-profile-round2_marker_api_trace.csv",
+    "marker_trace_sha256": "ee37adb4cce04364646ae54b4106311bf0d0710b2684d851e228f1d54f36e137"
+  }
+}

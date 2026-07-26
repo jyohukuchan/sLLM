@@ -923,3 +923,72 @@ No valid post-change full-model tok/s, promotion, or default change exists.
 The next action is one coordinated, fixed-HEAD isolated R9700 window that
 first records valid output quality and then the full-model throughput; no new
 split default is justified before that gate.
+
+## `SQ8_0` attention redesign shipping follow-up — 2026-07-26
+
+### `AQ4_0` applicability is a no-go, not a deferred promotion
+
+The served production model is `AQ4_0` Qwen3.5-9B, not this Qwen3-14B
+`SQ8_0` product.  Its source config has 32 layers arranged as eight repetitions
+of `linear_attention` ×3 then `full_attention` ×1: 24 linear and 8 full
+attention layers.  Full attention is 16 Q heads / 4 KV heads (GQA 4:1) with
+head/value dimension 256.
+
+The C=1339, 32-step P3-compatible ROCprof trace in
+`benchmarks/results/2026-07-26/attention-redesign-shipping/phase1/` attributes
+module-launched GPU dispatches to decode markers via correlated
+`hipModuleLaunchKernel` launch time.  It finds no marker-contained
+`ullm_paged_decode_attn_f32_kernel`; the split partial/merge core is 37.016296
+ms of 412.275120 ms inclusive kernel time, or **8.97854%**.  The 16
+partial/merge dispatches per step match the eight full-attention layers; the
+partial grid confirms a 128-token source tile.  This is kernel time
+composition, explicitly not profiler-range throughput.
+
+BH's grouped tile-20 body is restricted to gfx1201, 5 Q heads per KV head, and
+128-dimensional K/V.  `AQ4_0` therefore takes its generic fallback even if a
+selector could be supplied; its deployed c4 source additionally accepts only
+the separate AQ4 split tiles 128 or 256.  The linear layers are outside this
+optimization.  A 4:1/256 variant would be a new kernel implementation and
+needs a new full-model validation, so it is deliberately not called an
+application of BH's redesign.  The conditional Amdahl ceiling obtained by
+pretending the 1.790050x SQ8 result accelerated all 8.97854% is only 1.0412625x
+(+4.13%), not an AQ4 performance forecast.  No `AQ4_0` promotion is justified.
+
+### Service-candidate execution contract
+
+Commit `bfc76a72` adds an optional, fail-closed v2 manifest contract:
+
+```json
+{
+  "worker": {
+    "execution": {
+      "paged_decode_attention": {
+        "kernel": "gqa_grouped_split",
+        "split_tile": 20
+      }
+    }
+  }
+}
+```
+
+Unknown keys and unsupported values fail validation.  It is currently limited
+to `SQ8_0`, gfx1201, `rdna4_w8a8_block_ck`, and the paged-decode split HIP
+guard; selectors cannot enter through `required_environment`.  Manifest-mode
+gateway startup clears inherited experimental selectors, injects only the
+admitted grouped/tile/allow-multitile set, and leaves pipeline unrepresentable.
+The worker independently checks the exact state.  The existing active `AQ4_0`
+P3 manifest validates unchanged with `execution: null` and SHA-256
+`a98910dc5bf59dc768e5bcd20bcf58968699540eb1b33df33066dcb6f274fe49`.
+Promotion/rollback retain typed fields because they atomically swap raw bytes;
+the round-trip test covers this.
+
+### Pending isolated text evidence
+
+The resulting direct and grouped tile-20 `SQ8_0` manifests pin the same
+Qwen3-14B product, tokenizer, worker, source commit, guard set, and fixed
+ten-prompt suite.  They differ only in the worker execution contract (apart
+from human-readable display labels).  They must be run through isolated
+loopback gateways and compared using actual generated text under the lightweight
+promotion policy; exact match is an observation, never the gate.  This is a
+service-candidate evidence run only.  It must not use the promotion tool:
+promoting `SQ8_0` would replace the active `AQ4_0` product model.

@@ -1,0 +1,7 @@
+{
+  "schema_version": "ullm.sq8_serving_promotion_ephemeral_receipt.v1",
+  "source_commit": "bfc76a72aeee31ca1558c5367cef941689e2047e",
+  "product": {
+    "artifact_content_sha256": "2243acf1df627ff6ec13840c8ffcf35c77e89205eb36cef7561b85c9c98b9147"
+  }
+}
