@@ -1,0 +1,198 @@
+{
+  "schema_version": "ullm.sq8.gate-v0.2.preliminary-result.v1",
+  "date": "2026-07-26",
+  "status": "preliminary",
+  "preliminary_outcome": "fail_metric_subset",
+  "admission_status": "not_qualified",
+  "admission_claim": "none",
+  "frozen_gate": {
+    "path": "docs/plans/sq8-numerical-gate-v0.2-relative-to-fp32-reference.json",
+    "sha256": "64a43c032570bed8086e3c441b0774cc470c5ab1e8c67f99e02af2b6307f72bf",
+    "verified_at_evaluation_time": true
+  },
+  "reference_snapshot": {
+    "read_only_source_root": "benchmarks/results/2026-07-26/sq8-fp32-reference/cpu-f32-parallel-reference-v1",
+    "snapshot_path": "benchmarks/results/2026-07-26/sq8-gate-v0.2-preliminary/reference-snapshot-2160.json",
+    "snapshot_sha256": "d0ac40dfc5d911f7356b7d93d7469f35439d5b823fa92c3b4231aad9d7baa540",
+    "source_position_manifest_sha256": "967a85d76cc64594de0ae6a071bf082babfb56b8ebf9ef4fe6b0925844ae318c",
+    "source_position_count": 2160,
+    "candidate_executable_position_count": 1290,
+    "m128_interior_source_positions_not_captureable": 870,
+    "case_counts": [
+      {"mode": "m128_chunks_with_declared_tail", "case_id": "chat-p2048-g512", "source_positions": 228, "candidate_executable_positions": 1},
+      {"mode": "m128_chunks_with_declared_tail", "case_id": "chat-p3584-g512", "source_positions": 328, "candidate_executable_positions": 2},
+      {"mode": "m128_chunks_with_declared_tail", "case_id": "raw-p4095-g1", "source_positions": 319, "candidate_executable_positions": 2},
+      {"mode": "sequential_m1", "case_id": "chat-p2048-g512", "source_positions": 242, "candidate_executable_positions": 242},
+      {"mode": "sequential_m1", "case_id": "chat-p3584-g512", "source_positions": 246, "candidate_executable_positions": 246},
+      {"mode": "sequential_m1", "case_id": "raw-p0001-g1024", "source_positions": 226, "candidate_executable_positions": 226},
+      {"mode": "sequential_m1", "case_id": "raw-p1023-g4", "source_positions": 251, "candidate_executable_positions": 251},
+      {"mode": "sequential_m1", "case_id": "raw-p4095-g1", "source_positions": 320, "candidate_executable_positions": 320}
+    ]
+  },
+  "evaluation_revision": {
+    "authoritative_directory": "attempt-3/evaluations-recomputed",
+    "superseded_directory": "attempt-3/evaluations",
+    "reason": "The first preliminary receipts counted source-tile exposure only for phase=decode. PagedDecodeState also executes sequential_m1 prompt positions, so the evaluator was rerun with all sequential_m1 positions. The numerical result objects are byte-for-byte equivalent after selector_exposure is removed.",
+    "authoritative_sha256": {
+      "tile128.json": "02d9dce30bb4d0c9466be9756367670a218b10287c3737b8209863f460fa9e09",
+      "tile256.json": "b0caf58dc2d2ab6528e33a106866ee85ef7ba9de7b9f4997667981b2c29f6df6"
+    },
+    "superseded_sha256": {
+      "tile128.json": "0c6cbee415cbbd2e989e4baddf9b5c39d41f71771f9d241fe8e9aedecfcde67b",
+      "tile256.json": "b7d9a5e5af4230ac2dec276ccfd500f940569ffca8decc5fddefd3ed4ed88e69"
+    },
+    "numerical_result_equivalent_when_selector_exposure_is_removed": true
+  },
+  "execution": {
+    "route": "private evaluation child process",
+    "production_default_changed": false,
+    "active_manifest_touched": false,
+    "activation_or_campaign_or_push": false,
+    "gpu": {
+      "gpu_index": 2,
+      "bdf": "0000:47:00.0",
+      "gcn_arch_name": "gfx1201",
+      "v620_used": false
+    },
+    "capture_repetitions": {
+      "control": 1,
+      "tile128": 1,
+      "tile256": 1,
+      "formal_requirement": {"control": 3, "candidate": 2},
+      "effect": "The formal repeat envelope is unavailable; the preliminary evaluator uses the single control as its median and records repeat_envelope=0. This result is not an admission evaluation."
+    },
+    "service_windows": {
+      "count": 3,
+      "attempt_1": "Stopped and restored after the teacher-forced harness exposed forced-end accounting mismatch; no candidate result.",
+      "attempt_2": "Stopped and restored after the capture manifest compared mode-specific runtime identity as device identity; no candidate result.",
+      "attempt_3": "One integrated control + tile128 + tile256 window, 2026-07-26T16:41:32+09:00 through 2026-07-26T17:16:36+09:00; service restored by initial start.",
+      "post_restore": {"ActiveState": "active", "SubState": "running", "Result": "success", "NRestarts": 0}
+    }
+  },
+  "wilson": {
+    "confidence": "one-sided 95 percent",
+    "zero_error_lower_bound_for_2160_source_positions": 0.9987490005459668,
+    "zero_error_lower_bound_for_4096_formal_primary_positions": 0.999339902946086,
+    "difference_percentage_points": 0.05909024001193,
+    "interpretation": "2,160 source positions would only support 99.8749001% under the zero-error calculation, versus 99.9339903% for the formal 4,096-primary-position calculation. The actual GPU-capture set is smaller (1,290) because 870 M=128 interior positions are not captureable by this route."
+  },
+  "candidates": [
+    {
+      "id": "paged-decode-source-tile-128",
+      "status": "preliminary",
+      "preliminary_outcome": "fail_metric_subset",
+      "admission_status": "not_qualified",
+      "failure_count": 90,
+      "capture_manifest_sha256": "8493d0a3fe7357cbf45803f6633590c5be0693919dc408c57bbbe79876c1131f",
+      "selector_exposure": {"multi_tile_exercised": true, "sequential_m1_positions": 645, "by_phase": {"prompt": 547, "decode": 98}},
+      "key_failures": [
+        {
+          "tensor": "logits",
+          "metric": "max_abs",
+          "scope": "case:sequential_m1:raw-p0001-g1024",
+          "candidate": 2.543147087097168,
+          "control": 1.89583158493042,
+          "threshold": 1.990684199333191,
+          "candidate_position": "sequential_m1:raw-p0001-g1024:decode:00188"
+        },
+        {
+          "tensor": "logits",
+          "metric": "mean_kl_nats",
+          "scope": "case:sequential_m1:raw-p1023-g4",
+          "candidate": 0.008644590284960051,
+          "control": 0.008153263909994211,
+          "threshold": 0.008561880779810328,
+          "candidate_position": "sequential_m1:raw-p1023-g4:prompt:00119"
+        },
+        {
+          "tensor": "final_hidden",
+          "metric": "p99_position_relative_l2",
+          "scope": "all_candidate_executable_snapshot_positions",
+          "candidate": 0.20372229973103717,
+          "control": 0.16535549181749415,
+          "threshold": 0.17362422008268527,
+          "candidate_position": "sequential_m1:raw-p0001-g1024:decode:00188"
+        },
+        {
+          "tensor": "layer_hidden",
+          "metric": "p99_position_relative_l2",
+          "scope": "all_candidate_executable_snapshot_positions:layer-05",
+          "candidate": 0.049163201595474076,
+          "control": 0.046487694669222646,
+          "threshold": 0.04881303307700018,
+          "candidate_position": "sequential_m1:raw-p1023-g4:prompt:00094"
+        },
+        {
+          "tensor": "logits",
+          "metric": "top1_wilson",
+          "scope": "all_candidate_executable_snapshot_positions",
+          "candidate": 0.9678961737926518,
+          "control": 0.9741245214414421,
+          "threshold": 0.9731245214414421
+        }
+      ],
+      "hard_top1_regressions": [
+        "sequential_m1:raw-p1023-g4:prompt:00140",
+        "sequential_m1:raw-p1023-g4:prompt:00162",
+        "sequential_m1:raw-p1023-g4:prompt:00183",
+        "sequential_m1:raw-p4095-g1:prompt:00140",
+        "sequential_m1:raw-p4095-g1:prompt:00162",
+        "sequential_m1:raw-p4095-g1:prompt:00183",
+        "sequential_m1:raw-p4095-g1:prompt:00262",
+        "sequential_m1:raw-p4095-g1:prompt:00265",
+        "sequential_m1:raw-p4095-g1:prompt:00294",
+        "sequential_m1:raw-p4095-g1:prompt:00299",
+        "sequential_m1:raw-p4095-g1:prompt:00304",
+        "sequential_m1:raw-p4095-g1:prompt:00312",
+        "sequential_m1:raw-p4095-g1:prompt:00317"
+      ],
+      "performance": {"status": "not_run", "reason": "Numerical preliminary gate failed; user instruction prohibits speed measurement for a failed candidate.", "direct_decode_speed_ratio": null},
+      "authoritative_evaluation": "attempt-3/evaluations-recomputed/tile128.json"
+    },
+    {
+      "id": "paged-decode-source-tile-256",
+      "status": "preliminary",
+      "preliminary_outcome": "fail_metric_subset",
+      "admission_status": "not_qualified",
+      "failure_count": 10,
+      "capture_manifest_sha256": "9f795505b1c3033919a73fa7ca2e5c3aa1069de82ebb6ac57834761ae69b74a6",
+      "selector_exposure": {"multi_tile_exercised": true, "sequential_m1_positions": 64, "by_phase": {"prompt": 64, "decode": 0}},
+      "key_failures": [
+        {
+          "tensor": "layer_hidden",
+          "metric": "p99_position_relative_l2",
+          "scope": "all_candidate_executable_snapshot_positions:layer-05",
+          "candidate": 0.04898892478442091,
+          "control": 0.046487694669222646,
+          "threshold": 0.04881303307700018,
+          "candidate_position": "sequential_m1:raw-p4095-g1:prompt:00287"
+        },
+        {
+          "tensor": "logits",
+          "metric": "top1_wilson",
+          "scope": "all_candidate_executable_snapshot_positions",
+          "candidate": 0.9696649304986341,
+          "control": 0.9741245214414421,
+          "threshold": 0.9731245214414421
+        }
+      ],
+      "hard_top1_regressions": [
+        "sequential_m1:raw-p4095-g1:prompt:00262",
+        "sequential_m1:raw-p4095-g1:prompt:00294",
+        "sequential_m1:raw-p4095-g1:prompt:00299",
+        "sequential_m1:raw-p4095-g1:prompt:00302",
+        "sequential_m1:raw-p4095-g1:prompt:00304",
+        "sequential_m1:raw-p4095-g1:prompt:00318"
+      ],
+      "performance": {"status": "not_run", "reason": "Numerical preliminary gate failed; user instruction prohibits speed measurement for a failed candidate.", "direct_decode_speed_ratio": null},
+      "authoritative_evaluation": "attempt-3/evaluations-recomputed/tile256.json"
+    },
+    {"id": "flash2-staged-wave32", "status": "not_run", "reason": "Time was spent on tile128 and tile256 in the requested priority order."}
+  ],
+  "interpretation": {
+    "result": "Neither source-tile candidate passed the v0.2 preliminary metric subset, so no 1.2xx× speed claim is supported by this run.",
+    "llamacpp_comparison": "llama.cpp's partial (max, sum, weighted-V) rescale/merge shows that this algorithm class can be viable. It does not establish that this uLLM implementation meets the frozen FP32-relative contract. Here the candidate is measurably worse than the matched direct control against the same reference.",
+    "likely_mechanism": "The known split association change is consistent with the failures: per-tile online-softmax partials are rescaled and merged while direct uses one ordered online state, and SQ8 activation quantization can amplify a small difference. The first quantizer or lane-level step that creates the observed regression is unconfirmed.",
+    "formal_limit": "This is not formal admission: it lacks the 4,096 primary decode positions across seven streams, required M=128/boundary coverage, and the 3-control/2-candidate repeat envelope."
+  }
+}

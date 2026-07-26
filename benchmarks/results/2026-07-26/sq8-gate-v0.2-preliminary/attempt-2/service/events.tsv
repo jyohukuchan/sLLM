@@ -1,0 +1,6 @@
+timestamp	event
+2026-07-26T16:27:27+09:00	window-start
+2026-07-26T16:27:28+09:00	preflight-passed-r9700-bdf-and-service-state
+2026-07-26T16:27:28+09:00	service-stopped
+2026-07-26T16:27:29+09:00	r9700-holder-check-passed
+2026-07-26T16:37:46+09:00	service-restored-initial-start

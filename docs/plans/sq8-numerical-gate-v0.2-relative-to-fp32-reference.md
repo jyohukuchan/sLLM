@@ -763,3 +763,37 @@ receipt [`intentional-failure-final-index/result.json`](../../benchmarks/results
 partial index から plan を作ろうとした receipt
 [`reference-incomplete-blocked.json`](../../benchmarks/results/2026-07-26/sq8-gate-v0.2-harness/reference-incomplete-blocked.json)
 も、GPU を起動せず `blocked_reference_or_capture` を返す。
+
+### 2026-07-26: 2,160-position preliminary evaluation（admission ではない）
+
+reference 完走を待たず、進行中 root を read-only のまま固定した snapshot を作った。canonical input は
+[`reference-snapshot-2160.json`](../../benchmarks/results/2026-07-26/sq8-gate-v0.2-preliminary/reference-snapshot-2160.json)
+で、SHA-256 は `d0ac40dfc5d911f7356b7d93d7469f35439d5b823fa92c3b4231aad9d7baa540`、position
+manifest SHA-256 は `967a85d76cc64594de0ae6a071bf082babfb56b8ebf9ef4fe6b0925844ae318c` である。
+8 case の source position は 2,160、capture route が個別に materialize できた position は 1,290 である。
+M=128 内部の 870 position は個別 capture 不可なので、この差を coverage として明示し、補完扱いにはしない。
+
+R9700 GPU 2（`0000:47:00.0` / `gfx1201`）だけを使い、private child-process selector で shared
+control 1、tile128 1、tile256 1 を同じ最終 isolation window で取得した。凍結 JSON の runtime SHA-256
+検証は通った。formal の control 3 / candidate 2 repetition は使っていないため、repeat envelope は
+推定不能（preliminary receipt では 0 と記録）である。default、active manifest、activation/campaign は
+変更していない。
+
+| candidate | multi-tile exposure | preliminary result | 代表的な不合格 |
+| --- | ---: | --- | --- |
+| tile128 | 645 M=1（prompt 547, decode 98） | `fail_metric_subset`（90 failure） | logits max-abs `2.543147087097168 > 1.990684199333191` at `raw-p0001-g1024:decode:00188`; final-hidden P99 relative-L2 `0.20372229973103717 > 0.17362422008268527`; top-1 Wilson `0.9678961737926518 < 0.9731245214414421` |
+| tile256 | 64 M=1 prompt | `fail_metric_subset`（10 failure） | layer-05 P99 relative-L2 `0.04898892478442091 > 0.04881303307700018` at `raw-p4095-g1:prompt:00287`; top-1 Wilson `0.9696649304986341 < 0.9731245214414421`; hard top-1 regressions at 262/294/299/302/304/318 |
+
+両候補とも数値不合格のため、ユーザー指定により end-to-end decode speed は**測定しなかった**。従って過去の
+`1.2365×` を今回の候補に再現・支持するデータはない。Flash2 も時間優先順位により未実施である。
+
+2,160 source position が error 0 だった場合の one-sided 95% Wilson 下限は `99.8749001%`、formal primary
+4,096 の場合は `99.9339903%` であり、`0.0590902` percentage point 足りない。さらに正式 v0.2 は
+4,096 primary decode / 7 stream、M=128 と boundary coverage、control 3 / candidate 2 を要求するので、
+本結果の status は必ず `preliminary`、admission は `not_qualified` である。
+
+authoritative receipt は
+[`attempt-3/evaluations-recomputed/`](../../benchmarks/results/2026-07-26/sq8-gate-v0.2-preliminary/attempt-3/evaluations-recomputed/)
+である。最初の `evaluations/` は source-tile exposure を decode phase のみで集計していたため保管するが
+superseded とする。`PagedDecodeState` が実行する M=1 prompt も含めて再集計しただけで、
+`selector_exposure` を除く数値結果は同一である。
