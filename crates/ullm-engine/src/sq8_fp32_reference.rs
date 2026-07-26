@@ -12,19 +12,19 @@
 //! small non-SQ parameters stay resident.
 
 use crate::loader::{
-    read_named_passthrough_f32, read_named_passthrough_f32_rows, verify_named_passthrough_payload,
-    PassthroughPayloadVerification,
+    PassthroughPayloadVerification, read_named_passthrough_f32, read_named_passthrough_f32_rows,
+    verify_named_passthrough_payload,
 };
-use crate::package::{list_passthrough_payload_bundles, PassthroughPayloadBundle};
+use crate::package::{PassthroughPayloadBundle, list_passthrough_payload_bundles};
 use crate::sq::fp8_e4m3fn_to_f32;
+use crate::sq_canonical::{Sq8CanonicalArtifact, read_sq8_canonical_artifact};
+use crate::sq_reference::{
+    Sq8CorrectnessMetrics, compare_sq8_correctness, run_sq8_reference_projection, sq8_f32_le_sha256,
+};
 use crate::sq8_fnuz_prepack::{bf16_bits_to_f32, scan_sq8_canonical_artifact_for_fnuz_prepack};
 use crate::sq8_layer_oracle::{
     QWEN3_14B_HEAD_DIM, QWEN3_14B_HIDDEN_SIZE, QWEN3_14B_INTERMEDIATE_SIZE, QWEN3_14B_KV_HEADS,
     QWEN3_14B_Q_HEADS, QWEN3_14B_RMS_NORM_EPSILON, QWEN3_14B_ROPE_THETA, QWEN3_14B_VALUE_DIM,
-};
-use crate::sq_canonical::{read_sq8_canonical_artifact, Sq8CanonicalArtifact};
-use crate::sq_reference::{
-    compare_sq8_correctness, run_sq8_reference_projection, sq8_f32_le_sha256, Sq8CorrectnessMetrics,
 };
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -173,6 +173,64 @@ impl LayerKv {
     }
 }
 
+/// Integrity-verified raw inputs shared by the CPU and GPU F32 controls.
+///
+/// This intentionally shares only canonical artifact/package admission and
+/// immutable raw payload locations.  It does not expose CPU-decoded FP8,
+/// BF16, scale, norm, or activation values, so a GPU control must perform its
+/// own numerical reconstruction from raw bytes.
+#[derive(Debug)]
+pub(crate) struct ArtifactFp32VerifiedInputs {
+    pub(crate) artifact: Sq8CanonicalArtifact,
+    pub(crate) package_dir: PathBuf,
+    pub(crate) package_verification: ArtifactFp32PackageVerification,
+    pub(crate) bundles: BTreeMap<String, PassthroughPayloadBundle>,
+}
+
+impl ArtifactFp32VerifiedInputs {
+    pub(crate) fn open(
+        artifact_dir: impl AsRef<Path>,
+        package_dir: impl AsRef<Path>,
+    ) -> Result<Self, String> {
+        let artifact = read_sq8_canonical_artifact(artifact_dir)
+            .map_err(|err| format!("artifact-FP32 canonical artifact validation failed: {err}"))?;
+        validate_canonical_model_binding(&artifact)?;
+
+        // This reuses the independent whole-artifact CPU integrity decoder.
+        // It is admission-only: consumers below still decode numerical values
+        // independently from raw canonical bytes.
+        let integrity_scan =
+            scan_sq8_canonical_artifact_for_fnuz_prepack(&artifact, PACKAGE_VERIFY_CHUNK_BYTES)
+                .map_err(|err| format!("artifact-FP32 canonical integrity scan failed: {err}"))?;
+        if integrity_scan.ocp_nan_0x7f_count != 0
+            || integrity_scan.ocp_nan_0xff_count != 0
+            || integrity_scan.invalid_bf16_scale_count != 0
+        {
+            return Err(format!(
+                "artifact-FP32 canonical integrity scan rejected non-finite data: fp8_0x7f={} fp8_0xff={} invalid_scales={}",
+                integrity_scan.ocp_nan_0x7f_count,
+                integrity_scan.ocp_nan_0xff_count,
+                integrity_scan.invalid_bf16_scale_count
+            ));
+        }
+
+        let package_dir = package_dir.as_ref().to_path_buf();
+        let (bundles, package_verification) = verify_bound_package(&package_dir, &artifact)?;
+        Ok(Self {
+            artifact,
+            package_dir,
+            package_verification,
+            bundles,
+        })
+    }
+
+    pub(crate) fn bundle(&self, tensor_name: &str) -> Result<&PassthroughPayloadBundle, String> {
+        self.bundles
+            .get(tensor_name)
+            .ok_or_else(|| format!("artifact-FP32 bound package misses raw payload {tensor_name}"))
+    }
+}
+
 /// A validated model whose large matrix weights are streamed from the immutable
 /// canonical artifact/package for every forward pass.
 #[derive(Debug)]
@@ -204,30 +262,12 @@ impl ArtifactFp32ReferenceModel {
             return Err("artifact-FP32 thread_count must not exceed 128".into());
         }
 
-        let artifact = read_sq8_canonical_artifact(artifact_dir)
-            .map_err(|err| format!("artifact-FP32 canonical artifact validation failed: {err}"))?;
-        validate_canonical_model_binding(&artifact)?;
-
-        // This reuses the independent whole-artifact CPU integrity decoder.  It
-        // is intentionally separate from normal manifest checks so every FP8
-        // byte and BF16 scale is scanned before the forward path is admitted.
-        let integrity_scan =
-            scan_sq8_canonical_artifact_for_fnuz_prepack(&artifact, PACKAGE_VERIFY_CHUNK_BYTES)
-                .map_err(|err| format!("artifact-FP32 canonical integrity scan failed: {err}"))?;
-        if integrity_scan.ocp_nan_0x7f_count != 0
-            || integrity_scan.ocp_nan_0xff_count != 0
-            || integrity_scan.invalid_bf16_scale_count != 0
-        {
-            return Err(format!(
-                "artifact-FP32 canonical integrity scan rejected non-finite data: fp8_0x7f={} fp8_0xff={} invalid_scales={}",
-                integrity_scan.ocp_nan_0x7f_count,
-                integrity_scan.ocp_nan_0xff_count,
-                integrity_scan.invalid_bf16_scale_count
-            ));
-        }
-
-        let package_dir = package_dir.as_ref().to_path_buf();
-        let (bundles, package_verification) = verify_bound_package(&package_dir, &artifact)?;
+        let ArtifactFp32VerifiedInputs {
+            artifact,
+            package_dir,
+            package_verification,
+            bundles,
+        } = ArtifactFp32VerifiedInputs::open(artifact_dir, package_dir)?;
 
         let mut decode_table = [0.0_f32; 256];
         for (index, value) in decode_table.iter_mut().enumerate() {
@@ -788,7 +828,7 @@ pub fn process_peak_rss_kib() -> Result<Option<u64>, String> {
         Err(error) => {
             return Err(format!(
                 "artifact-FP32 failed to read /proc/self/status: {error}"
-            ))
+            ));
         }
     };
     for line in status.lines() {
@@ -1472,7 +1512,7 @@ fn silu_mul_f32(gate: &mut [f32], up: &[f32]) -> Result<(), String> {
     Ok(())
 }
 
-fn greedy_token(logits: &[f32]) -> Result<u32, String> {
+pub(crate) fn greedy_token(logits: &[f32]) -> Result<u32, String> {
     if logits.len() != QWEN3_14B_FP32_REFERENCE_VOCAB_SIZE {
         return Err(format!(
             "artifact-FP32 logits length mismatch: expected={} actual={}",
@@ -1506,7 +1546,7 @@ fn zeroed_f32(elements: usize, label: &str) -> Result<Vec<f32>, String> {
     Ok(values)
 }
 
-fn validate_finite(values: &[f32], label: &str) -> Result<(), String> {
+pub(crate) fn validate_finite(values: &[f32], label: &str) -> Result<(), String> {
     if let Some((index, value)) = values
         .iter()
         .copied()
@@ -1520,7 +1560,7 @@ fn validate_finite(values: &[f32], label: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn f32_le_sha256(values: &[f32], label: &str) -> Result<String, String> {
+pub(crate) fn f32_le_sha256(values: &[f32], label: &str) -> Result<String, String> {
     validate_finite(values, label)?;
     let mut digest = Sha256::new();
     for value in values {
@@ -1529,7 +1569,11 @@ fn f32_le_sha256(values: &[f32], label: &str) -> Result<String, String> {
     Ok(format!("{:x}", digest.finalize()))
 }
 
-fn write_f32le_create_new(path: &Path, values: &[f32], label: &str) -> Result<String, String> {
+pub(crate) fn write_f32le_create_new(
+    path: &Path,
+    values: &[f32],
+    label: &str,
+) -> Result<String, String> {
     validate_finite(values, label)?;
     let file = OpenOptions::new()
         .write(true)
@@ -1551,7 +1595,7 @@ fn write_f32le_create_new(path: &Path, values: &[f32], label: &str) -> Result<St
     Ok(format!("{:x}", digest.finalize()))
 }
 
-fn write_json_create_new(path: &Path, value: &impl Serialize) -> Result<(), String> {
+pub(crate) fn write_json_create_new(path: &Path, value: &impl Serialize) -> Result<(), String> {
     let serialized = serde_json::to_vec_pretty(value)
         .map_err(|err| format!("artifact-FP32 failed to serialize capture metadata: {err}"))?;
     let mut file = OpenOptions::new()

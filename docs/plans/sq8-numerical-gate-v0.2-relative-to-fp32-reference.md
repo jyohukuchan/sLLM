@@ -414,3 +414,41 @@ capture scheduler も未実装である。v0.2 の status は `blocked_reference
 - F64、layer-only、GPU reference は主参照の scalar arithmetic、full-model observables、または
   CPU-only 条件を変える。今回の single projection で F64-vs-F32 max-abs は上記
   `2.742e-6` だったが、これは full-model 差の上限ではなく、代替主参照を正当化しない。
+
+## 2026-07-26 GPU F32 control の位置づけと測定前比較契約
+
+この節は凍結済み v0.2 JSON を変更しない。`artifact_fp32_strict_v1`（CPU）を真値として
+GPU F32 control の適格性を検証するための実装・比較契約であり、候補 kernel の評価ではない。
+GPU control が CPU と一致しなければ control として使わず、候補の v0.2 判定にも使わない。
+
+- control は `runtime/src/sq8_fp32_gpu_reference_gfx1201.hip.cpp` に隔離する。canonical
+  `SQ8_0` の raw OCP E4M3FN byte と raw BF16 scale/parameter byte を GPU 上で直接 F32
+  decode し、projection は標準 `hipBLAS SGEMM` の F32 のみ、KV cache も F32 とする。
+  CK、WMMA、HIPRTC、production SQ8 dispatcher の API・buffer・kernel は呼ばない。RMSNorm、
+  RoPE、GQA causal softmax、residual、SiLU はそれぞれ単純な独立 kernel であり、融合・
+  タイル化・candidate kernel の再利用はしない。
+- CPU/GPU は同じ immutable input の admission/hash/finite scan だけを共有する。CPU が
+  decode した F32 scale、norm、activation は GPU に渡さない。GPU upload は raw file の
+  SHA-256 を再確認しつつ行うため、数値 decoder の共有による循環参照にはしない。
+- 実行は `HIP_VISIBLE_DEVICES=1` と `ULLM_HIP_VISIBLE_DEVICES=1` を必須とし、filtered
+  ordinal 0 の exact `gfx1201` 以外なら fail closed とする。これは R9700 を指す pinned
+  token であり、V620/gfx1030 と production service には触れない。
+
+GPU の結果を測る**前**に、比較器
+`tools/compare-sq8-fp32-reference-runs.py` の次の契約を固定した。
+
+| 対象 | 判定 |
+|---|---|
+| input token ID | CPU capture と完全一致 |
+| greedy token ID | 全 position で完全一致 |
+| logits、final hidden、layer 0–39 hidden | 全 position・全 tensor を個別比較、nonfinite 0 |
+| `max_abs` | `<= 2.0e-5` |
+| `relative_l2` | `<= 1.0e-5` |
+| cosine | `>= 0.999999` |
+
+この数値は既存 SQ8 F32LE GPU differential control と同じ事前値である。CPU strict-F32 と
+CPU F64 の実 artifact projection cross-check（max-abs `2.742e-6`、relative-L2
+`1.037e-6`）より余裕を持たせ、CPU の K 昇順 FMA と hipBLAS の F32 reduction 順序の差だけを
+許す。一方で量子化品質 gate より桁違いに厳しく、layer 間の誤差伝播や input/token の不一致を
+平均値で隠せない。測定結果を見てこの値を緩めない。比較結果、GPU capture、CPU capture の
+content hash はすべて `benchmarks/results/2026-07-26/sq8-fp32-reference/` に保存する。

@@ -33,6 +33,8 @@ fn main() {
         root.join("runtime/src/sq8_ck_gfx942_aprime.hip.cpp"),
         root.join("runtime/src/sq8_ck_gfx942_control.h"),
         root.join("runtime/src/sq8_ck_gfx942_control.hip.cpp"),
+        root.join("runtime/src/sq8_fp32_gpu_reference_gfx1201.h"),
+        root.join("runtime/src/sq8_fp32_gpu_reference_gfx1201.hip.cpp"),
         root.join("runtime/src/ullm_runtime_api_aq4.inc"),
         root.join("runtime/src/ullm_runtime_api_linear_attn_prepare.inc"),
         root.join("runtime/src/ullm_runtime_api_primitives.inc"),
@@ -54,6 +56,8 @@ fn main() {
         std::env::var_os("CARGO_FEATURE_ROCM_HANDWRITTEN_PROJECTION_GFX1201").is_some();
     let ck_gfx942_aprime_enabled =
         std::env::var_os("CARGO_FEATURE_ROCM_CK_GFX942_APRIME").is_some();
+    let fp32_reference_gfx1201_enabled =
+        std::env::var_os("CARGO_FEATURE_ROCM_FP32_REFERENCE_GFX1201").is_some();
     if ck_gfx1201_enabled && ck_gfx942_aprime_enabled {
         panic!("Cargo features rocm-ck-gfx1201 and rocm-ck-gfx942-aprime are mutually exclusive");
     }
@@ -202,6 +206,44 @@ fn main() {
             rocm_path.join("lib").display()
         );
         println!("cargo:rustc-link-lib=static=device_gemm_operations");
+        println!("cargo:rustc-link-lib=dylib=amdhip64");
+        println!("cargo:rustc-link-lib=dylib=hipblas");
+        println!("cargo:rustc-link-arg=-Wl,--gc-sections");
+    }
+
+    if fp32_reference_gfx1201_enabled {
+        let gpu_arch = std::env::var("GPU_ARCH").unwrap_or_else(|_| "gfx1201".to_string());
+        if gpu_arch != "gfx1201" {
+            panic!("Cargo feature rocm-fp32-reference-gfx1201 requires GPU_ARCH=gfx1201");
+        }
+        let hipcc = rocm_path.join("bin/hipcc");
+        if !hipcc.is_file() {
+            panic!("ROCm hipcc was not found at {}", hipcc.display());
+        }
+
+        // This source is an intentionally standalone F32 control.  Keep it
+        // out of the CK/WMMA build and link only the standard HIP/hipBLAS
+        // facilities it explicitly calls.
+        cc::Build::new()
+            .cpp(true)
+            .compiler(&hipcc)
+            .include(root.join("runtime/src"))
+            .include(rocm_path.join("include"))
+            .file(root.join("runtime/src/sq8_fp32_gpu_reference_gfx1201.hip.cpp"))
+            .flag("-std=c++20")
+            .flag("-O2")
+            .flag("-Wall")
+            .flag("-Wextra")
+            .flag("-Wpedantic")
+            .flag("-ffunction-sections")
+            .flag("-fdata-sections")
+            .flag(&format!("--offload-arch={gpu_arch}"))
+            .compile("ullm_runtime_sq8_fp32_gpu_reference_gfx1201");
+
+        println!(
+            "cargo:rustc-link-search=native={}",
+            rocm_path.join("lib").display()
+        );
         println!("cargo:rustc-link-lib=dylib=amdhip64");
         println!("cargo:rustc-link-lib=dylib=hipblas");
         println!("cargo:rustc-link-arg=-Wl,--gc-sections");

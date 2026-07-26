@@ -10,6 +10,9 @@ default = []
 rocm-ck-gfx1201 = []
 rocm-handwritten-projection-gfx1201 = ["rocm-ck-gfx1201"]
 rocm-ck-gfx942-aprime = []
+# Independent F32-only correctness control.  It deliberately has no CK,
+# WMMA, or production runtime feature dependency.
+rocm-fp32-reference-gfx1201 = []
 
 [build-dependencies]
 cc = "1.2"
