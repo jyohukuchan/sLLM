@@ -4023,8 +4023,14 @@ mod tests {
         let logical_prefix = state
             .read_written_cache_prefix_to_host(&mut stream)
             .unwrap();
-        assert_eq!(logical_prefix.k.len(), cache_len * shape.k_token_elements().unwrap());
-        assert_eq!(logical_prefix.v.len(), cache_len * shape.v_token_elements().unwrap());
+        assert_eq!(
+            logical_prefix.k.len(),
+            cache_len * shape.k_token_elements().unwrap()
+        );
+        assert_eq!(
+            logical_prefix.v.len(),
+            cache_len * shape.v_token_elements().unwrap()
+        );
         assert!(logical_prefix.k.iter().all(|value| value.is_finite()));
         assert!(logical_prefix.v.iter().all(|value| value.is_finite()));
 
@@ -4124,9 +4130,11 @@ mod tests {
                 .unwrap();
             stream.synchronize().unwrap();
             assert!(state.read_cache_to_host(&mut stream).is_err());
-            assert!(state
-                .decode_written(&mut stream, &[0.25, -0.5], 1.0 / 2.0_f32.sqrt())
-                .is_err());
+            assert!(
+                state
+                    .decode_written(&mut stream, &[0.25, -0.5], 1.0 / 2.0_f32.sqrt())
+                    .is_err()
+            );
         }
     }
 

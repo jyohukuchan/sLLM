@@ -313,20 +313,18 @@ mod tests {
             KvCacheDtypes::uniform(KvCacheDtype::F16)
         );
         assert_eq!(
-            KvCacheDtypes::from_optional_values(
-                Some("f16"),
-                Some("fp8_e4m3fn"),
-                Some("f32"),
-            )
-            .unwrap(),
+            KvCacheDtypes::from_optional_values(Some("f16"), Some("fp8_e4m3fn"), Some("f32"),)
+                .unwrap(),
             KvCacheDtypes {
                 key: KvCacheDtype::Fp8E4M3Fn,
                 value: KvCacheDtype::F32,
             }
         );
-        assert!(KvCacheDtypes::from_optional_values(None, Some("Q8_0"), None)
-            .unwrap_err()
-            .contains(KV_CACHE_TYPE_K_ENV));
+        assert!(
+            KvCacheDtypes::from_optional_values(None, Some("Q8_0"), None)
+                .unwrap_err()
+                .contains(KV_CACHE_TYPE_K_ENV)
+        );
     }
 
     #[test]
