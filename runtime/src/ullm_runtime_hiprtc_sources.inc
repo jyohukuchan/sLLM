@@ -7685,6 +7685,9 @@ extern "C" __global__ void ullm_cached_prefix_attn_fp8_e4m3_flash2_kernel(
         if (std::getenv("ULLM_DISABLE_PAGED_DECODE_ONLINE_SOFTMAX") != nullptr) {
             preamble += "#define ULLM_PAGED_DECODE_USE_TWO_PASS_SOFTMAX 1\n";
         }
+        if (std::getenv("ULLM_EXPERIMENTAL_PAGED_DECODE_WAVE_SCALAR_SOFTMAX") != nullptr) {
+            preamble += "#define ULLM_PAGED_DECODE_USE_WAVE_SCALAR_SOFTMAX 1\n";
+        }
         return preamble + paged_decode_attn_kernel_source();
     }
 
@@ -7750,6 +7753,10 @@ extern "C" __global__ void ullm_paged_decode_attn_f32_kernel(
         value_dim <= 256ull) {
         const unsigned long long q_head = blockIdx.x;
         const unsigned int tid = threadIdx.x;
+#if defined(ULLM_PAGED_DECODE_USE_WAVE_SCALAR_SOFTMAX) && !defined(ULLM_PAGED_DECODE_USE_TWO_PASS_SOFTMAX)
+        const unsigned int lane = tid % warpSize;
+        const unsigned int wave = tid / warpSize;
+#endif
         const unsigned long long q_per_kv = q_heads / kv_heads;
         const unsigned long long kv_head = q_head / q_per_kv;
         const unsigned long long q_base = q_head * head_dim;
@@ -7835,6 +7842,41 @@ extern "C" __global__ void ullm_paged_decode_attn_f32_kernel(
                 tid < head_dim ? q[q_base + tid] * k_cache[k_base + tid] : 0.0f;
             const float score =
                 ullm_paged_decode_reduce_sum_256(local, partial) * softmax_scale;
+#if defined(ULLM_PAGED_DECODE_USE_WAVE_SCALAR_SOFTMAX) && !defined(ULLM_PAGED_DECODE_USE_TWO_PASS_SOFTMAX)
+            const bool value_active = tid < value_dim;
+            float v = 0.0f;
+            if (value_active) {
+                const unsigned long long v_index =
+                    (physical_timestep * kv_heads + kv_head) * value_dim + tid;
+                v = v_cache[v_index];
+            }
+            const bool wave_has_value =
+                static_cast<unsigned long long>(wave) * static_cast<unsigned long long>(warpSize) < value_dim;
+            if (wave_has_value) {
+                float wave_scale = 0.0f;
+                float wave_replaces_max = 0.0f;
+                if (lane == 0u) {
+                    if (score > max_score) {
+                        wave_scale = expf(max_score - score);
+                        denominator = denominator * wave_scale + 1.0f;
+                        max_score = score;
+                        wave_replaces_max = 1.0f;
+                    } else {
+                        wave_scale = expf(score - max_score);
+                        denominator += wave_scale;
+                    }
+                }
+                wave_scale = __shfl(wave_scale, 0, warpSize);
+                wave_replaces_max = __shfl(wave_replaces_max, 0, warpSize);
+                if (value_active) {
+                    if (wave_replaces_max != 0.0f) {
+                        weighted = weighted * wave_scale + v;
+                    } else {
+                        weighted += wave_scale * v;
+                    }
+                }
+            }
+#else
             if (tid < value_dim) {
                 const unsigned long long v_index =
                     (physical_timestep * kv_heads + kv_head) * value_dim + tid;
@@ -7850,9 +7892,24 @@ extern "C" __global__ void ullm_paged_decode_attn_f32_kernel(
                     denominator += weight;
                 }
             }
+#endif
             ++physical_timestep;
         }
 #endif
+#if defined(ULLM_PAGED_DECODE_USE_WAVE_SCALAR_SOFTMAX) && !defined(ULLM_PAGED_DECODE_USE_TWO_PASS_SOFTMAX)
+        const float final_denominator = __shfl(denominator, 0, warpSize);
+        if (tid < value_dim) {
+            const unsigned long long output_index = q_head * value_dim + tid;
+            const float decoded = weighted / final_denominator;
+            if (gate != nullptr) {
+                const float gate_value = gate[output_index];
+                const float sigmoid = 1.0f / (1.0f + expf(-gate_value));
+                output[output_index] = sigmoid * decoded;
+            } else {
+                output[output_index] = decoded;
+            }
+        }
+#else
         if (tid < value_dim) {
             const unsigned long long output_index = q_head * value_dim + tid;
             const float decoded = weighted / denominator;
@@ -7864,6 +7921,7 @@ extern "C" __global__ void ullm_paged_decode_attn_f32_kernel(
                 output[output_index] = decoded;
             }
         }
+#endif
         return;
     }
 

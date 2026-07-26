@@ -85,6 +85,10 @@ name = "sq8_ck_serving"
 required-features = ["rocm-ck-gfx1201"]
 
 [[example]]
+name = "sq8_0_paged_decode_steady_bench"
+required-features = ["rocm-ck-gfx1201"]
+
+[[example]]
 name = "sq8_handwritten_projection_contract"
 required-features = ["rocm-handwritten-projection-gfx1201"]
 
