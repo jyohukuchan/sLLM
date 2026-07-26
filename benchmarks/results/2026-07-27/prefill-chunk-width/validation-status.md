@@ -29,6 +29,18 @@ cargo test -p ullm-engine --lib --features rocm-ck-gfx1201 \
   sq8_serving_runtime::tests::serving_prefill_modes_bind_fixed_resident_widths_and_implementation_ids -- --exact
 ```
 
+Afterward the complete serving-runtime test module was rerun at the same
+source boundary:
+
+```text
+cargo test -p ullm-engine --lib --features rocm-ck-gfx1201 \
+  sq8_serving_runtime::tests -- --nocapture
+```
+
+It passed all 44 selected tests (0 failed).  This includes the pre-existing
+request lifecycle, cancellation, reset, cache, and M=128 tail cases as well
+as the new width-selection tests.
+
 The source-level runtime gate was also exercised by the scheduler test: M=128
 is admitted; M=256/512/1024/2048 is rejected before allocation until the
 existing lower measured-M list is extended.

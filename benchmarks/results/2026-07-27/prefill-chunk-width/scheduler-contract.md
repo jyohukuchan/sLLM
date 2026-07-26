@@ -66,6 +66,30 @@ The old M=128 value is the BR trace baseline.  The lower-layer contract stops
 a full-model trace for the new widths before execution, so an actual M=256+
 attention-dispatch count is **unconfirmed** in this evidence set.
 
+## Consequence for every requested throughput prompt
+
+The resident stack has one fixed M.  It cannot execute an initial prompt
+shorter than that M as a smaller fixed chunk without allocating a second
+resident workspace; doing so would violate the allocation/shape contract.
+It also cannot invent rows.  The table therefore records the actual
+*planned execution units per layer* for the requested rate grid, where `M1×N`
+means N audited singleton seeds rather than a wide attention dispatch.
+
+| resident M | N=128 | N=512 | N=1024 | N=2048 | N=4095 |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 128 | 1×128 | 4×128 | 8×128 | 16×128 | 32×128 (last overlaps) |
+| 256 | M1×128 | 2×256 | 4×256 | 8×256 | 16×256 (last overlaps) |
+| 512 | M1×128 | 1×512 | 2×512 | 4×512 | 8×512 (last overlaps) |
+| 1024 | M1×128 | M1×512 | 1×1024 | 2×1024 | 4×1024 (last overlaps) |
+| 2048 | M1×128 | M1×512 | M1×1024 | 1×2048 | 2×2048 (last overlaps) |
+| 4096 | M1×128 | M1×512 | M1×1024 | M1×2048 | M1×4095 |
+
+This is why a future full-model table must report every M/prompt pair rather
+than assuming that a wider resident allocation is monotonically faster.  For
+the N=4095 target, M=2048 is the largest useful no-padding width; M=4096 is a
+capacity shape for an exact N=4096 prompt, not a viable replacement for the
+required N=4095 measurement.
+
 ## CK and attention-kernel finding
 
 `wide_m_ck_shape_probe.cpp` bypassed only the public measured-M gates and
