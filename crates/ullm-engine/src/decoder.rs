@@ -2815,6 +2815,11 @@ impl PagedDecodeState {
                             .try_into()
                             .expect("scale slice size checked"),
                     ));
+                    if !scale.is_finite() || scale < 0.0 {
+                        return Err(format!(
+                            "paged decoder {plane_label} FP8 cache contains an invalid scale"
+                        ));
+                    }
                     let value = fp8_e4m3fn_bits_to_f32(bits) * scale;
                     if !value.is_finite() {
                         return Err(format!(
@@ -3973,6 +3978,47 @@ mod tests {
             assert_eq!(cache.k, vec![0.0; shape.k_cache_elements().unwrap()]);
             assert_eq!(cache.v, vec![0.0; shape.v_cache_elements().unwrap()]);
         }
+    }
+
+    #[test]
+    fn typed_fp8_cache_rejects_corrupt_negative_scale_cpu() {
+        let shape = PagedDecodeShape {
+            block_size: 1,
+            cache_blocks: 1,
+            q_heads: 1,
+            kv_heads: 1,
+            head_dim: 2,
+            value_dim: 2,
+        };
+        let mut context = RuntimeContext::create(0).unwrap();
+        let mut stream = context.create_stream().unwrap();
+        let mut state = PagedDecodeState::new_with_kv_cache_dtypes(
+            &mut context,
+            &mut stream,
+            shape,
+            vec![0],
+            KvCacheDtypes::uniform(KvCacheDtype::Fp8E4M3Fn),
+        )
+        .unwrap();
+        state
+            .write_token(&mut stream, &[1.0, -2.0], &[0.5, -1.0])
+            .unwrap();
+
+        // Raw FP16 -1.0 in the K scale slot.  A valid FP8 row always has a
+        // positive scale (or an all-zero, reset scale), so both diagnostic
+        // readback and attention must reject this corruption instead of
+        // silently negating every key.
+        state
+            .k_scale_buffer
+            .as_mut()
+            .unwrap()
+            .copy_from_host(0, &[0x00, 0xbc], Some(&mut stream))
+            .unwrap();
+        stream.synchronize().unwrap();
+        assert!(state.read_cache_to_host(&mut stream).is_err());
+        assert!(state
+            .decode_written(&mut stream, &[0.25, -0.5], 1.0 / 2.0_f32.sqrt())
+            .is_err());
     }
 
     #[test]

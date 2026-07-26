@@ -11174,6 +11174,13 @@ bool kv_cache_read_typed_value(
             *value_out = 0.0f;
             return true;
         }
+        // Writer-produced FP8 scales are finite and strictly positive.  Do
+        // not silently accept a corrupted negative, infinite, or NaN FP16
+        // scale: negative scales would flip values without an observable
+        // failure, which violates the cache's encoding contract.
+        if (!std::isfinite(scale) || scale < 0.0f) {
+            return false;
+        }
         value = kv_cache_fp8_e4m3fn_to_f32(static_cast<const uint8_t *>(payload)[index]) * scale;
     }
     if (!std::isfinite(value)) {
