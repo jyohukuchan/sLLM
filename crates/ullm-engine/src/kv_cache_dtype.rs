@@ -143,31 +143,47 @@ impl KvCacheDtypes {
         }
     }
 
+    fn parse_selector(name: &str, value: &str) -> Result<KvCacheDtype, String> {
+        value
+            .parse()
+            .map_err(|error: String| format!("{name}={value:?}: {error}"))
+    }
+
+    fn from_optional_values(
+        uniform: Option<&str>,
+        key: Option<&str>,
+        value: Option<&str>,
+    ) -> Result<Self, String> {
+        let mut dtypes = match uniform {
+            Some(value) => Self::uniform(Self::parse_selector(KV_CACHE_DTYPE_ENV, value)?),
+            None => Self::default(),
+        };
+        if let Some(value) = key {
+            dtypes.key = Self::parse_selector(KV_CACHE_TYPE_K_ENV, value)?;
+        }
+        if let Some(value) = value {
+            dtypes.value = Self::parse_selector(KV_CACHE_TYPE_V_ENV, value)?;
+        }
+        Ok(dtypes)
+    }
+
     /// Reads the opt-in process environment without changing the F32 default.
     ///
     /// `ULLM_KV_CACHE_DTYPE` sets both planes.  `ULLM_KV_CACHE_TYPE_K` and
     /// `ULLM_KV_CACHE_TYPE_V` then override only their respective plane.
     pub fn from_env() -> Result<Self, String> {
-        let mut dtypes = match std::env::var(KV_CACHE_DTYPE_ENV) {
-            Ok(value) => Self::uniform(
-                value
-                    .parse()
-                    .map_err(|error: String| format!("{KV_CACHE_DTYPE_ENV}={value:?}: {error}"))?,
-            ),
-            Err(std::env::VarError::NotPresent) => Self::default(),
-            Err(error) => return Err(format!("failed to read {KV_CACHE_DTYPE_ENV}: {error}")),
-        };
-        if let Ok(value) = std::env::var(KV_CACHE_TYPE_K_ENV) {
-            dtypes.key = value
-                .parse()
-                .map_err(|error: String| format!("{KV_CACHE_TYPE_K_ENV}={value:?}: {error}"))?;
+        fn read_optional_env(name: &str) -> Result<Option<String>, String> {
+            match std::env::var(name) {
+                Ok(value) => Ok(Some(value)),
+                Err(std::env::VarError::NotPresent) => Ok(None),
+                Err(error) => Err(format!("failed to read {name}: {error}")),
+            }
         }
-        if let Ok(value) = std::env::var(KV_CACHE_TYPE_V_ENV) {
-            dtypes.value = value
-                .parse()
-                .map_err(|error: String| format!("{KV_CACHE_TYPE_V_ENV}={value:?}: {error}"))?;
-        }
-        Ok(dtypes)
+
+        let uniform = read_optional_env(KV_CACHE_DTYPE_ENV)?;
+        let key = read_optional_env(KV_CACHE_TYPE_K_ENV)?;
+        let value = read_optional_env(KV_CACHE_TYPE_V_ENV)?;
+        Self::from_optional_values(uniform.as_deref(), key.as_deref(), value.as_deref())
     }
 }
 
@@ -288,6 +304,29 @@ mod tests {
                 .unwrap_err()
                 .contains("not an implemented")
         );
+    }
+
+    #[test]
+    fn kv_selectors_allow_kv_override_without_process_environment_mutation() {
+        assert_eq!(
+            KvCacheDtypes::from_optional_values(Some("f16"), None, None).unwrap(),
+            KvCacheDtypes::uniform(KvCacheDtype::F16)
+        );
+        assert_eq!(
+            KvCacheDtypes::from_optional_values(
+                Some("f16"),
+                Some("fp8_e4m3fn"),
+                Some("f32"),
+            )
+            .unwrap(),
+            KvCacheDtypes {
+                key: KvCacheDtype::Fp8E4M3Fn,
+                value: KvCacheDtype::F32,
+            }
+        );
+        assert!(KvCacheDtypes::from_optional_values(None, Some("Q8_0"), None)
+            .unwrap_err()
+            .contains(KV_CACHE_TYPE_K_ENV));
     }
 
     #[test]
