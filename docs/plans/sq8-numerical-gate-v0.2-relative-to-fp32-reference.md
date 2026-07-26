@@ -278,9 +278,52 @@ relative criteria を**後から変更せず**全て通れば、別の意味論�
    tensor capture を一回作る。
 4. GPU 窓ではまず matched control を 3 repetition、その後 5 候補を一候補ずつ 2
    repetition で測る。候補が v0.2 pass した場合だけ、独立 confirmation を一回行う。
+
 5. したがって必要な GPU 窓は、最低 **6 窓**（control 1 + 5 candidate）である。
    pass confirmation まで行うなら **6〜11 窓**。各窓の実時間は runner 未実装・未測定の
    ため **未確認**である。
 
 この文書の作成時点では上記 Step 1 以降、GPU capture、候補再評価、activation、campaign、
 `git push` は実行していない。
+
+## 2026-07-26 実現可能性 preflight（基準本文は不変）
+
+この節は frozen JSON を変更しない実測前提の確認記録であり、v0.2 の閾値、corpus、
+reference 意味論、判定順序を改訂するものではない。詳細な機械可読 receipt は
+[`benchmarks/results/2026-07-26/sq8-fp32-reference/feasibility.json`](../../benchmarks/results/2026-07-26/sq8-fp32-reference/feasibility.json)
+に保存した。
+
+- frozen JSON（SHA-256
+  `64a43c032570bed8086e3c441b0774cc470c5ab1e8c67f99e02af2b6307f72bf`）の
+  `scope.model_family` は `Qwen3-14B-FP8` である。本文の 40 layer、vocab
+  151,936、4,096 logits の約 2.32 GiB という記述も、この binding と一致する。
+- ローカルで v0.2 の artifact predicate を通った唯一の実体は
+  `Qwen3-14B-FP8` の canonical `sq-fp8-artifact-v0.2` と同 product の raw
+  passthrough package だった。`SQ8_0`、`full_model` coverage、280 pair、163
+  passthrough payload、`[128,128]` `BF16` block scale、40 layer を満たすが、9B
+  artifact ではない。
+- 既存 canonical decoder を CPU-only で実行し、Qwen3-14B artifact の 280 weight/scale
+  payload（weight 13,212,057,600 bytes、scale 1,612,800 bytes）を hash 検証した。
+  `model.layers.0.mlp.down_proj.weight` の block `[0,0]` を F32 復元した値の SHA-256 は
+  `7f48464a20b4ca17092c193a914a344be9b495fba09f9c5a572670136621b391` だった。これは
+  decoder の再利用可能性の確認であり、9B full-model forward の測定値ではない。
+- ローカルの Qwen3.5-9B artifact は
+  `sq-fp8-artifact-v0.1` の部分 overlay であり、48 FP8 tensor、`row_block`、
+  256-column、F32 scale である。Qwen3.5-9B text config は 32 layer / vocab
+  248,320 で、v0.2 の model family、40-layer reference、canonical block-scale
+  意味論と一致しない。従ってこれを入力にした CPU runner は v0.2 主参照にならない。
+- このため、要求された 9B の 1-token strict-FP32 full-model forward、8-step
+  pilot、peak RSS、4,096 position × 7 stream の外挿は**未実行・未確認**である。
+  値を proxy や source model で補っていない。snapshot 時点の host
+  `MemAvailable` は 83,132,428,288 bytes であり、Qwen3.5 package の宣言 element
+  count から計算した F32 bytes は language model が 31,746,738,176 bytes、全 tensor
+  が 38,612,417,472 bytes だが、これは allocation/RSS の実測値ではない。
+
+結論は CPU 性能による可否判定の前段で `blocked_reference_or_capture` である。9B を
+v0.2 として評価するには、同 model 用の canonical full-model SQ8_0 artifact と、その
+32-layer / vocab 248,320 semantics を固定した新しい gate version が必要である。
+既存の Qwen3-14B-FP8 canonical artifact を使う場合は v0.2 の model binding に整合するが、
+本 task の「9B」対象を 14B へ変更する明示的な承認が必要である。部分 overlay を用いた
+engineering-only CPU pilot、F64 主参照、layer-only reference、GPU reference、または
+positions/streams の削減はいずれも v0.2 の適格 capture を満たさず、採るなら新 version の
+freeze が必要である。
