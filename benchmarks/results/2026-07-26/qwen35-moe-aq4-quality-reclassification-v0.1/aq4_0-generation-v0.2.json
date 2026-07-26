@@ -1,0 +1,423 @@
+{
+  "arithmetic": {
+    "final_norm_and_lm_head": "raw source/passthrough tensors, evaluated in F32",
+    "nonexpert_weights": "source BF16 tensors converted to F32 for both tracks; completed package verifier establishes raw-passthrough identity",
+    "right_routed_experts": "selected AQ4_0 rows decoded from idx4/E4M3/codebook package payload",
+    "source_routed_experts": "selected BF16 expert rows streamed from safetensors and converted to F32"
+  },
+  "cases": [
+    {
+      "category": "japanese_prose",
+      "comparison": {
+        "final_decode_hidden_relative_l2": 1.1153744459152222,
+        "greedy_steps_compared": 24,
+        "greedy_token_matches": 14,
+        "initial_final_hidden_relative_l2": 0.0627666711807251,
+        "source_greedy_nll_mean_right": 5.087652126948039,
+        "source_greedy_nll_mean_source": 0.3015123208363851
+      },
+      "expect": {
+        "kind": "one concise prose answer",
+        "language": "ja"
+      },
+      "id": "ja_rollback_recovery",
+      "max_completion_tokens": 24,
+      "messages": [
+        {
+          "content": "日本語で一文だけ答えてください。ロールバック手順を残すと、失敗した変更からどのように復旧できますか？",
+          "role": "user"
+        }
+      ],
+      "prompt_token_count": 36,
+      "prompt_token_ids": [
+        248045,
+        846,
+        198,
+        247359,
+        15685,
+        123070,
+        149130,
+        96517,
+        149657,
+        68798,
+        1710,
+        163410,
+        156195,
+        247688,
+        223761,
+        197549,
+        5205,
+        121528,
+        148344,
+        247210,
+        52122,
+        195030,
+        99370,
+        97660,
+        152228,
+        30031,
+        10992,
+        248046,
+        198,
+        248045,
+        74455,
+        198,
+        248068,
+        271,
+        248069,
+        271
+      ],
+      "rendered_prompt": "<|im_start|>user\n日本語で一文だけ答えてください。ロールバック手順を残すと、失敗した変更からどのように復旧できますか？<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n",
+      "right": {
+        "generated_text": "ロールバック手順を残すことで、失敗した変更を事前に定義された安全な手順に従って元の状態に迅速に",
+        "generated_token_ids": [
+          163410,
+          156195,
+          247688,
+          223761,
+          16711,
+          170801,
+          5205,
+          121528,
+          148344,
+          247210,
+          28452,
+          201604,
+          124185,
+          170521,
+          96520,
+          24950,
+          247688,
+          209404,
+          73256,
+          96287,
+          216955,
+          19054,
+          100587,
+          19054
+        ],
+        "screen": {
+          "characters": 47,
+          "control_characters": [],
+          "empty": false,
+          "replacement_character": false,
+          "threefold_consecutive_fragment": null
+        }
+      },
+      "route_observation": {
+        "tokens_checked": 2400,
+        "topk_order_changed_tokens": 1728,
+        "topk_selected_set_changed_tokens": 948
+      },
+      "source": {
+        "generated_text": "ロールバック手順を残すことで、失敗した変更を事前に定義された手順に従って迅速かつ確実に元の状態に戻す",
+        "generated_token_ids": [
+          163410,
+          156195,
+          247688,
+          223761,
+          16711,
+          170801,
+          5205,
+          121528,
+          148344,
+          247210,
+          28452,
+          201604,
+          124185,
+          170521,
+          247688,
+          209404,
+          73256,
+          100587,
+          162109,
+          212746,
+          96287,
+          216955,
+          183150,
+          16711
+        ],
+        "screen": {
+          "characters": 50,
+          "control_characters": [],
+          "empty": false,
+          "replacement_character": false,
+          "threefold_consecutive_fragment": null
+        }
+      },
+      "stop_reason": "max_completion_tokens"
+    },
+    {
+      "category": "english_prose",
+      "comparison": {
+        "final_decode_hidden_relative_l2": 1.0393271446228027,
+        "greedy_steps_compared": 24,
+        "greedy_token_matches": 19,
+        "initial_final_hidden_relative_l2": 0.06478546559810638,
+        "source_greedy_nll_mean_right": 2.0722349484761557,
+        "source_greedy_nll_mean_source": 0.23231172561645508
+      },
+      "expect": {
+        "kind": "one concise prose answer",
+        "language": "en"
+      },
+      "id": "en_rollback_recovery",
+      "max_completion_tokens": 24,
+      "messages": [
+        {
+          "content": "Answer in one concise English sentence: How does a rollback path help after a failed change?",
+          "role": "user"
+        }
+      ],
+      "prompt_token_count": 30,
+      "prompt_token_ids": [
+        248045,
+        846,
+        198,
+        15666,
+        303,
+        799,
+        61446,
+        6163,
+        11316,
+        25,
+        2500,
+        1503,
+        264,
+        58377,
+        1752,
+        1438,
+        1238,
+        264,
+        4490,
+        2222,
+        30,
+        248046,
+        198,
+        248045,
+        74455,
+        198,
+        248068,
+        271,
+        248069,
+        271
+      ],
+      "rendered_prompt": "<|im_start|>user\nAnswer in one concise English sentence: How does a rollback path help after a failed change?<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n",
+      "right": {
+        "generated_text": "A rollback path restores a system to its previous stable state by reversing a failed change, thereby minimizing downtime and preventing service disruption",
+        "generated_token_ids": [
+          32,
+          58377,
+          1752,
+          84728,
+          264,
+          1785,
+          310,
+          1141,
+          3555,
+          14733,
+          1528,
+          539,
+          72622,
+          264,
+          4490,
+          2222,
+          11,
+          26600,
+          73681,
+          72306,
+          321,
+          25325,
+          2393,
+          41696
+        ],
+        "screen": {
+          "characters": 154,
+          "control_characters": [],
+          "empty": false,
+          "replacement_character": false,
+          "threefold_consecutive_fragment": null
+        }
+      },
+      "route_observation": {
+        "tokens_checked": 2160,
+        "topk_order_changed_tokens": 1608,
+        "topk_selected_set_changed_tokens": 899
+      },
+      "source": {
+        "generated_text": "A rollback path restores the system to its previous stable state by reversing the failed change, thereby minimizing downtime and mitigating potential",
+        "generated_token_ids": [
+          32,
+          58377,
+          1752,
+          84728,
+          279,
+          1785,
+          310,
+          1141,
+          3555,
+          14733,
+          1528,
+          539,
+          72622,
+          279,
+          4490,
+          2222,
+          11,
+          26600,
+          73681,
+          72306,
+          321,
+          33832,
+          1060,
+          4499
+        ],
+        "screen": {
+          "characters": 149,
+          "control_characters": [],
+          "empty": false,
+          "replacement_character": false,
+          "threefold_consecutive_fragment": null
+        }
+      },
+      "stop_reason": "max_completion_tokens"
+    },
+    {
+      "category": "code_generation",
+      "comparison": {
+        "final_decode_hidden_relative_l2": 0.07315706461668015,
+        "greedy_steps_compared": 14,
+        "greedy_token_matches": 14,
+        "initial_final_hidden_relative_l2": 0.061888448894023895,
+        "source_greedy_nll_mean_right": 0.01043633052280971,
+        "source_greedy_nll_mean_source": 0.0065321241106305805
+      },
+      "expect": {
+        "kind": "one-line Python code",
+        "language": "en"
+      },
+      "id": "python_is_even",
+      "max_completion_tokens": 16,
+      "messages": [
+        {
+          "content": "Write only a one-line Python definition of is_even(n).",
+          "role": "user"
+        }
+      ],
+      "prompt_token_count": 24,
+      "prompt_token_ids": [
+        248045,
+        846,
+        198,
+        7734,
+        1132,
+        264,
+        799,
+        8187,
+        12654,
+        7044,
+        314,
+        369,
+        66034,
+        1393,
+        553,
+        248046,
+        198,
+        248045,
+        74455,
+        198,
+        248068,
+        271,
+        248069,
+        271
+      ],
+      "rendered_prompt": "<|im_start|>user\nWrite only a one-line Python definition of is_even(n).<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n",
+      "right": {
+        "generated_text": "is_even = lambda n: n % 2 == 0",
+        "generated_token_ids": [
+          284,
+          66034,
+          283,
+          12102,
+          307,
+          25,
+          307,
+          984,
+          220,
+          17,
+          606,
+          220,
+          15,
+          248046
+        ],
+        "screen": {
+          "characters": 30,
+          "control_characters": [],
+          "empty": false,
+          "replacement_character": false,
+          "threefold_consecutive_fragment": null
+        }
+      },
+      "route_observation": {
+        "tokens_checked": 1480,
+        "topk_order_changed_tokens": 949,
+        "topk_selected_set_changed_tokens": 429
+      },
+      "source": {
+        "generated_text": "is_even = lambda n: n % 2 == 0",
+        "generated_token_ids": [
+          284,
+          66034,
+          283,
+          12102,
+          307,
+          25,
+          307,
+          984,
+          220,
+          17,
+          606,
+          220,
+          15,
+          248046
+        ],
+        "screen": {
+          "characters": 30,
+          "control_characters": [],
+          "empty": false,
+          "replacement_character": false,
+          "threefold_consecutive_fragment": null
+        }
+      },
+      "stop_reason": "source_eos"
+    }
+  ],
+  "model_dir": "/home/homelab1/datapool/ai_models/safetensors/Qwen3.5-35B-A3B-BF16",
+  "package_dir": "/home/homelab1/datapool/ullm/product/qwen35-35b-a3b-aq4_0-g8-moe-v0.2/package",
+  "package_manifest_sha256": "6c0f754e39fab2403fac096d6c106d48bb3c1baf0b01c2daafa04c85b05d5054",
+  "peak_rss_bytes": 29498937344,
+  "quality_policy": {
+    "not_quality_gates": [
+      "greedy token exact match",
+      "expert selected-set/top-k equality",
+      "conditional NLL observations"
+    ],
+    "primary_criterion": "human-readable generated-text quality"
+  },
+  "right_mode": "aq4_0",
+  "schema_version": "ullm.qwen35_moe_aq4_streaming_generation.v1",
+  "scope": "CPU-only, one-layer-at-a-time decoder streaming with tokenizer-rendered text and greedy decode; no full checkpoint materialization, no uLLM loader, no service",
+  "source_config_sha256": "5e4d7f74fec2f360eb9cfbfcd6ec0c4c76e684d3a11caaed259d9fd9bfbc7944",
+  "suite": {
+    "chat_template_arguments": {
+      "add_generation_prompt": true,
+      "enable_thinking": false
+    },
+    "declared_schema_version": "ullm.qwen35_moe_aq4_short_generation_suite.v2",
+    "path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-26/qwen35-moe-aq4-quality-reclassification-v0.1/prompt-suite-short-v0.2.json",
+    "sha256": "65d81c87577f32716a39d50f6b471407e386ddf88b143376ede31d5e64722838",
+    "shortened_for_cpu": true
+  },
+  "threads": 12,
+  "wall_seconds": 1503.7778175290005
+}

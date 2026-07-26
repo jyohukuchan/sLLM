@@ -1,0 +1,54 @@
+{
+  "schema_version": "ullm.qwen35_moe_aq4_short_generation_suite.v1",
+  "title": "CPU-bounded Qwen3.5-35B-A3B AQ4_0 generation reclassification suite",
+  "shortened_for_cpu": true,
+  "source_suite": "docs/plans/lightweight-promotion-prompt-suite-v0.1.json",
+  "shortening_rationale": "The source-vs-AQ4_0 implementation streams all 40 decoder layers and selected expert rows on CPU. This three-case subset preserves Japanese prose, English prose, and code response coverage while limiting completions to 8-16 greedy tokens. It is explicitly not the full ten-case service promotion suite.",
+  "cases": [
+    {
+      "id": "ja_concise_rollback",
+      "category": "japanese_prose",
+      "max_completion_tokens": 12,
+      "expect": {
+        "language": "ja",
+        "kind": "concise prose"
+      },
+      "messages": [
+        {
+          "role": "user",
+          "content": "次の文を自然な日本語で一文だけ続けてください。ロールバック手順を残す利点は"
+        }
+      ]
+    },
+    {
+      "id": "en_concise_rollback",
+      "category": "english_prose",
+      "max_completion_tokens": 12,
+      "expect": {
+        "language": "en",
+        "kind": "concise prose"
+      },
+      "messages": [
+        {
+          "role": "user",
+          "content": "Complete this sentence in one concise English sentence: Keeping a rollback path is useful because"
+        }
+      ]
+    },
+    {
+      "id": "python_is_even",
+      "category": "code_generation",
+      "max_completion_tokens": 16,
+      "expect": {
+        "language": "en",
+        "kind": "one-line Python code"
+      },
+      "messages": [
+        {
+          "role": "user",
+          "content": "Write only a one-line Python definition of is_even(n)."
+        }
+      ]
+    }
+  ]
+}

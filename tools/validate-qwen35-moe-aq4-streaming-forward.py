@@ -26,6 +26,7 @@ import json
 import math
 import resource
 import time
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -58,6 +59,26 @@ def parse_args() -> argparse.Namespace:
         help="Use source as the right-hand control, or decode AQ4_0 expert rows.",
     )
     parser.add_argument("--threads", type=int, default=8)
+    parser.add_argument(
+        "--generation-suite",
+        type=Path,
+        help=(
+            "Run a bounded greedy generation suite instead of the fixed-token "
+            "forward diagnostic. The JSON object must contain a cases array with "
+            "id, messages, and max_completion_tokens fields."
+        ),
+    )
+    parser.add_argument(
+        "--generation-markdown",
+        type=Path,
+        help="Human-readable side-by-side generation evidence (required with --generation-suite).",
+    )
+    parser.add_argument(
+        "--generation-max-prompt-tokens",
+        type=int,
+        default=64,
+        help="Fail rather than truncate a rendered generation prompt above this token count.",
+    )
     return parser.parse_args()
 
 
@@ -72,6 +93,13 @@ def sha256_file(path: Path) -> str:
 def write_json(path: Path, value: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def write_new_text(path: Path, value: str) -> None:
+    """Write an evidence file once; generation runs must not replace prior evidence."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("x", encoding="utf-8") as handle:
+        handle.write(value)
 
 
 def parse_token_ids(value: str, vocab_size: int) -> list[int]:
@@ -249,11 +277,18 @@ def load_base_layer(layer, source: SourceReader, layer_idx: int) -> None:
         )
 
 
-def causal_mask(sequence_length: int):
+def causal_mask(sequence_length: int, past_tokens: int = 0):
     import torch
 
-    blocked = torch.full((sequence_length, sequence_length), torch.finfo(torch.float32).min)
-    return torch.triu(blocked, diagonal=1).view(1, 1, sequence_length, sequence_length)
+    if sequence_length < 1 or past_tokens < 0:
+        raise ValidationError("causal mask dimensions must be non-negative with at least one query token")
+    key_length = past_tokens + sequence_length
+    key_positions = torch.arange(key_length).view(1, key_length)
+    query_positions = (past_tokens + torch.arange(sequence_length)).view(sequence_length, 1)
+    blocked = torch.full((sequence_length, key_length), torch.finfo(torch.float32).min)
+    return torch.where(key_positions > query_positions, blocked, torch.zeros_like(blocked)).view(
+        1, 1, sequence_length, key_length
+    )
 
 
 def relative_l2(left, right) -> float:
@@ -262,6 +297,498 @@ def relative_l2(left, right) -> float:
     numerator = torch.linalg.vector_norm((left - right).reshape(-1))
     denominator = torch.linalg.vector_norm(left.reshape(-1))
     return float((numerator / denominator).item()) if float(denominator) else 0.0
+
+
+def normalize_token_ids(value: Any) -> list[int]:
+    """Accept the list / one-batch shapes returned by the local tokenizer."""
+    if isinstance(value, Mapping):
+        value = value.get("input_ids")
+    if hasattr(value, "tolist"):
+        value = value.tolist()
+    if isinstance(value, tuple):
+        value = list(value)
+    if not isinstance(value, list):
+        raise ValidationError("chat template did not return a token-ID list")
+    if value and isinstance(value[0], list):
+        if len(value) != 1:
+            raise ValidationError("chat template returned multiple token sequences")
+        value = value[0]
+    token_ids: list[int] = []
+    for index, token_id in enumerate(value):
+        if isinstance(token_id, bool) or not isinstance(token_id, int):
+            raise ValidationError(f"chat template token {index} is not an integer")
+        token_ids.append(token_id)
+    if not token_ids:
+        raise ValidationError("chat template returned no tokens")
+    return token_ids
+
+
+def load_generation_suite(path: Path) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Load a deliberately small local prompt suite without applying policy judgement."""
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValidationError(f"cannot read generation suite {path}: {exc}") from exc
+    if not isinstance(raw, dict) or not isinstance(raw.get("cases"), list):
+        raise ValidationError("generation suite must be a JSON object with a cases array")
+    cases: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
+    for row in raw["cases"]:
+        if not isinstance(row, dict):
+            raise ValidationError("generation suite contains a non-object case")
+        case_id = row.get("id")
+        messages = row.get("messages")
+        max_completion_tokens = row.get("max_completion_tokens")
+        if not isinstance(case_id, str) or not case_id or case_id in seen_ids:
+            raise ValidationError("generation suite case IDs must be non-empty and unique")
+        if not isinstance(messages, list) or not messages or not all(isinstance(item, dict) for item in messages):
+            raise ValidationError(f"{case_id}: messages must be a non-empty array of objects")
+        if not isinstance(max_completion_tokens, int) or not 1 <= max_completion_tokens <= 32:
+            raise ValidationError(f"{case_id}: max_completion_tokens must be between 1 and 32")
+        seen_ids.add(case_id)
+        cases.append(
+            {
+                "id": case_id,
+                "category": str(row.get("category", "unspecified")),
+                "expect": row.get("expect", {}),
+                "messages": messages,
+                "max_completion_tokens": max_completion_tokens,
+            }
+        )
+    if not cases:
+        raise ValidationError("generation suite contains no cases")
+    return raw, cases
+
+
+class RouteStatistics:
+    """Aggregate path-dependent route changes as an observation, never a gate."""
+
+    def __init__(self):
+        self.tokens_checked = 0
+        self.ordered_changes = 0
+        self.selected_set_changes = 0
+
+    def add(self, source_ids: list[list[int]], right_ids: list[list[int]]) -> None:
+        if len(source_ids) != len(right_ids):
+            raise ValidationError("source/right route trackers produced different token counts")
+        self.tokens_checked += len(source_ids)
+        self.ordered_changes += sum(int(left != right) for left, right in zip(source_ids, right_ids))
+        self.selected_set_changes += sum(
+            int(set(left) != set(right)) for left, right in zip(source_ids, right_ids)
+        )
+
+    def result(self) -> dict[str, Any]:
+        return {
+            "tokens_checked": self.tokens_checked,
+            "topk_order_changed_tokens": self.ordered_changes,
+            "topk_selected_set_changed_tokens": self.selected_set_changes,
+        }
+
+
+def text_screen(text: str) -> dict[str, Any]:
+    """Record only high-confidence text symptoms; semantic judgement stays human-readable."""
+    controls = sorted(
+        {f"U+{ord(char):04X}" for char in text if ord(char) < 32 and char not in "\n\r\t"}
+    )
+    repeated: str | None = None
+    compact = " ".join(text.split())
+    # A three-times-consecutive substring is an intentionally conservative loop signal.
+    for width in range(2, min(17, len(compact) // 3 + 1)):
+        for start in range(0, len(compact) - width * 3 + 1):
+            fragment = compact[start : start + width]
+            if fragment.strip() and compact[start : start + width * 3] == fragment * 3:
+                repeated = fragment
+                break
+        if repeated is not None:
+            break
+    return {
+        "empty": not text.strip(),
+        "replacement_character": "\ufffd" in text,
+        "control_characters": controls,
+        "threefold_consecutive_fragment": repeated,
+        "characters": len(text),
+    }
+
+
+def generation_markdown(result: dict[str, Any]) -> str:
+    """Create the audit-facing side-by-side view from the machine-readable result."""
+    right_name = "AQ4_0" if result["right_mode"] == "aq4_0" else "source control"
+    lines = [
+        "# Qwen3.5-35B-A3B source vs AQ4_0 CPU streaming generation",
+        "",
+        "This is a bounded CPU-only, one-decoder-layer-at-a-time greedy generation check. "
+        "It uses source BF16 checkpoint values converted to F32 arithmetic on both tracks; "
+        "only the right track's routed experts are decoded from the `AQ4_0` package. "
+        "The final RMSNorm and `lm_head` are raw source/passthrough weights.",
+        "",
+        "The suite is intentionally shortened from the 10-case lightweight-promotion suite "
+        "for CPU feasibility. It is evidence for package reclassification, not a serving or promotion run. "
+        "Greedy-token equality and route-set equality are recorded as observations, not pass/fail rules.",
+        "",
+        f"- right track: `{right_name}`",
+        f"- threads: `{result['threads']}`",
+        f"- wall time: `{result['wall_seconds']:.3f} s`",
+        "",
+        "## Side-by-side outputs",
+    ]
+    for case in result["cases"]:
+        lines.extend(["", f"### {case['id']} ({case['category']})", "", "Prompt messages:", "", "```text"])
+        for message in case["messages"]:
+            lines.append(f"[{message.get('role', 'unknown')}] {message.get('content', '')}")
+        lines.extend(
+            [
+                "```",
+                "",
+                "Source (nonquantized routed experts):",
+                "",
+                "`````text",
+                case["source"]["generated_text"],
+                "`````",
+                "",
+                f"{right_name}:",
+                "",
+                "`````text",
+                case["right"]["generated_text"],
+                "`````",
+                "",
+                "Observations (not thresholds):",
+                "",
+                f"- generated tokens: source `{len(case['source']['generated_token_ids'])}`, "
+                f"{right_name} `{len(case['right']['generated_token_ids'])}`",
+                f"- source-greedy token matches: `{case['comparison']['greedy_token_matches']}`/"
+                f"`{case['comparison']['greedy_steps_compared']}`",
+                f"- route observations during this path: selected-set "
+                f"`{case['route_observation']['topk_selected_set_changed_tokens']}`/"
+                f"`{case['route_observation']['tokens_checked']}`, ordered "
+                f"`{case['route_observation']['topk_order_changed_tokens']}`/"
+                f"`{case['route_observation']['tokens_checked']}`",
+                f"- source-greedy conditional NLL: source "
+                f"`{case['comparison']['source_greedy_nll_mean_source']:.6f}`, {right_name} "
+                f"`{case['comparison']['source_greedy_nll_mean_right']:.6f}` (descriptive only)",
+                f"- automatic symptom screen: source `{json.dumps(case['source']['screen'], ensure_ascii=False)}`, "
+                f"{right_name} `{json.dumps(case['right']['screen'], ensure_ascii=False)}`",
+            ]
+        )
+    lines.extend(
+        [
+            "",
+            "## Important retained observation",
+            "",
+            "The original same-input 8-token × 40-layer prefill evidence remains the canonical route observation: "
+            "selected expert sets changed 105/320 and ordered top-k changed 238/320 for source vs `AQ4_0`; "
+            "the source-vs-source control changed 0/320. This generation record does not treat those rates as a quality gate.",
+            "",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def stream_decoder_pair(
+    *,
+    config,
+    source: SourceReader,
+    package_dir: Path,
+    package_tensors: dict[str, Any],
+    right_mode: str,
+    rope,
+    source_hidden,
+    right_hidden,
+    source_cache,
+    right_cache,
+    past_tokens: int,
+    route_stats: RouteStatistics,
+):
+    """Execute one prefill/decode chunk for both tracks without full-model materialization."""
+    import torch
+    from transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import Qwen3_5MoeDecoderLayer
+
+    if source_hidden.shape != right_hidden.shape or source_hidden.ndim != 3:
+        raise ValidationError("source/right generation hidden tensors must share [batch, tokens, hidden] shape")
+    sequence_length = int(source_hidden.shape[1])
+    position_ids = (
+        torch.arange(past_tokens, past_tokens + sequence_length, dtype=torch.long)
+        .view(1, 1, -1)
+        .expand(3, 1, -1)
+    )
+    full_attention_mask = causal_mask(sequence_length, past_tokens)
+    for layer_idx, layer_type in enumerate(config.layer_types):
+        gate_name = f"model.language_model.layers.{layer_idx}.mlp.experts.gate_up_proj"
+        down_name = f"model.language_model.layers.{layer_idx}.mlp.experts.down_proj"
+        try:
+            package_gate = Aq4Tensor(package_dir, package_tensors[gate_name])
+            package_down = Aq4Tensor(package_dir, package_tensors[down_name])
+        except KeyError as exc:
+            raise ValidationError(f"package lacks routed tensor {exc.args[0]}") from exc
+        layer = Qwen3_5MoeDecoderLayer(config, layer_idx)
+        # Avoid retaining the constructor's full rank-3 expert Parameters.
+        layer.mlp.experts = streamed_experts_module(
+            ExpertProvider("source", source, layer_idx, package_gate, package_down), RouteTracker()
+        )
+        layer.eval()
+        load_base_layer(layer, source, layer_idx)
+        attention_mask = full_attention_mask if layer_type == "full_attention" else None
+
+        source_tracker = RouteTracker()
+        layer.mlp.experts = streamed_experts_module(
+            ExpertProvider("source", source, layer_idx, package_gate, package_down), source_tracker
+        )
+        source_output = layer(
+            source_hidden,
+            position_embeddings=rope(source_hidden, position_ids),
+            attention_mask=attention_mask,
+            position_ids=position_ids,
+            past_key_values=source_cache,
+        )
+        right_tracker = RouteTracker()
+        layer.mlp.experts = streamed_experts_module(
+            ExpertProvider(right_mode, source, layer_idx, package_gate, package_down), right_tracker
+        )
+        right_output = layer(
+            right_hidden,
+            position_embeddings=rope(right_hidden, position_ids),
+            attention_mask=attention_mask,
+            position_ids=position_ids,
+            past_key_values=right_cache,
+        )
+        if source_tracker.selected_ids is None or right_tracker.selected_ids is None:
+            raise ValidationError(f"layer {layer_idx} did not execute its MoE router")
+        route_stats.add(source_tracker.selected_ids, right_tracker.selected_ids)
+        source_hidden = source_output.detach()
+        right_hidden = right_output.detach()
+        del layer
+    return source_hidden, right_hidden
+
+
+def logits_from_hidden(final_norm, lm_head, hidden):
+    import torch.nn.functional as functional
+
+    logits = functional.linear(final_norm(hidden[:, -1:, :]), lm_head)[0, 0]
+    if not bool(logits.isfinite().all()):
+        raise ValidationError("generation produced non-finite logits")
+    return logits
+
+
+def token_nll(logits, token_id: int) -> float:
+    import torch
+
+    return float((torch.logsumexp(logits, dim=-1) - logits[token_id]).item())
+
+
+def run_generation(args: argparse.Namespace) -> int:
+    """Run the package-quality evidence path with actual tokenizer-rendered text."""
+    if args.generation_suite is None or args.generation_markdown is None:
+        raise ValidationError("--generation-suite and --generation-markdown must be provided together")
+    if args.generation_max_prompt_tokens < 1:
+        raise ValidationError("--generation-max-prompt-tokens must be positive")
+    args.generation_suite = args.generation_suite.resolve()
+    args.generation_markdown = args.generation_markdown.resolve()
+    if args.generation_markdown.exists():
+        raise ValidationError(f"refusing to overwrite generation Markdown {args.generation_markdown}")
+    suite_raw, suite_cases = load_generation_suite(args.generation_suite)
+
+    import torch
+    from transformers import AutoTokenizer
+    from transformers.cache_utils import DynamicCache
+    from transformers.models.qwen3_5_moe.configuration_qwen3_5_moe import Qwen3_5MoeTextConfig
+    from transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import (
+        Qwen3_5MoeRMSNorm,
+        Qwen3_5MoeTextRotaryEmbedding,
+    )
+
+    torch.set_num_threads(args.threads)
+    try:
+        torch.set_num_interop_threads(1)
+    except RuntimeError:
+        pass
+    root_config = json.loads((args.model_dir / "config.json").read_text(encoding="utf-8"))
+    text_config_raw = root_config.get("text_config")
+    if root_config.get("architectures") != ["Qwen3_5MoeForConditionalGeneration"] or not isinstance(
+        text_config_raw, dict
+    ):
+        raise ValidationError("source model is not the expected Qwen3.5-35B-A3B MoE text checkpoint")
+    config = Qwen3_5MoeTextConfig(**text_config_raw)
+    config._attn_implementation = "eager"
+    index = json.loads((args.model_dir / "model.safetensors.index.json").read_text(encoding="utf-8"))
+    weight_map = index.get("weight_map")
+    if not isinstance(weight_map, dict):
+        raise ValidationError("source safetensors index lacks weight_map")
+    package_manifest = json.loads((args.package_dir / "manifest.json").read_text(encoding="utf-8"))
+    package_tensors = {str(row["name"]): row for row in package_manifest.get("tensors", [])}
+    if len(package_tensors) != 80:
+        raise ValidationError("package does not have exactly 80 quantized routed tensors")
+    source = SourceReader(args.model_dir, {str(key): str(value) for key, value in weight_map.items()})
+    tokenizer = AutoTokenizer.from_pretrained(args.model_dir, local_files_only=True)
+    embedding_name = "model.language_model.embed_tokens.weight"
+    final_norm = Qwen3_5MoeRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+    final_norm.load_state_dict({"weight": source.tensor("model.language_model.norm.weight").float()}, strict=True)
+    final_norm.eval()
+    # This is a raw passthrough tensor in the completed package. Keeping one F32 copy avoids
+    # an additional 1-GiB BF16 safetensors read at every generated token.
+    lm_head = source.tensor("lm_head.weight").float()
+    rope = Qwen3_5MoeTextRotaryEmbedding(config)
+    eos_ids = set(tokenizer.eos_token_id if isinstance(tokenizer.eos_token_id, list) else [tokenizer.eos_token_id])
+    eos_ids.discard(None)
+    cases: list[dict[str, Any]] = []
+    started = time.monotonic()
+
+    with torch.inference_mode():
+        for case in suite_cases:
+            try:
+                rendered_prompt = tokenizer.apply_chat_template(
+                    case["messages"], tokenize=False, add_generation_prompt=True, enable_thinking=False
+                )
+                raw_ids = tokenizer.apply_chat_template(
+                    case["messages"], tokenize=True, add_generation_prompt=True, enable_thinking=False
+                )
+            except Exception as exc:  # pragma: no cover - tokenizer implementation detail
+                raise ValidationError(f"{case['id']}: local chat-template rendering failed: {exc}") from exc
+            if not isinstance(rendered_prompt, str) or not rendered_prompt:
+                raise ValidationError(f"{case['id']}: chat template returned an empty rendered prompt")
+            prompt_ids = normalize_token_ids(raw_ids)
+            if len(prompt_ids) > args.generation_max_prompt_tokens:
+                raise ValidationError(
+                    f"{case['id']}: rendered prompt has {len(prompt_ids)} tokens, above "
+                    f"--generation-max-prompt-tokens={args.generation_max_prompt_tokens}; refusing to truncate"
+                )
+            source_cache = DynamicCache(config=config)
+            right_cache = DynamicCache(config=config)
+            source_hidden = source.embedding_rows(embedding_name, prompt_ids).float().unsqueeze(0)
+            right_hidden = source_hidden.clone()
+            route_stats = RouteStatistics()
+            source_hidden, right_hidden = stream_decoder_pair(
+                config=config,
+                source=source,
+                package_dir=args.package_dir,
+                package_tensors=package_tensors,
+                right_mode=args.right_mode,
+                rope=rope,
+                source_hidden=source_hidden,
+                right_hidden=right_hidden,
+                source_cache=source_cache,
+                right_cache=right_cache,
+                past_tokens=0,
+                route_stats=route_stats,
+            )
+            initial_hidden_relative_l2 = relative_l2(source_hidden, right_hidden)
+            source_generated: list[int] = []
+            right_generated: list[int] = []
+            source_nll: list[float] = []
+            right_nll_on_source: list[float] = []
+            greedy_matches = 0
+            stop_reason = "max_completion_tokens"
+            past_tokens = len(prompt_ids)
+            for _ in range(case["max_completion_tokens"]):
+                source_logits = logits_from_hidden(final_norm, lm_head, source_hidden)
+                right_logits = logits_from_hidden(final_norm, lm_head, right_hidden)
+                source_token = int(torch.argmax(source_logits).item())
+                right_token = int(torch.argmax(right_logits).item())
+                source_generated.append(source_token)
+                right_generated.append(right_token)
+                source_nll.append(token_nll(source_logits, source_token))
+                right_nll_on_source.append(token_nll(right_logits, source_token))
+                greedy_matches += int(source_token == right_token)
+                if source_token in eos_ids or right_token in eos_ids:
+                    stop_reason = "source_eos" if source_token in eos_ids else "right_eos"
+                    break
+                source_hidden = source.embedding_rows(embedding_name, [source_token]).float().unsqueeze(0)
+                right_hidden = source.embedding_rows(embedding_name, [right_token]).float().unsqueeze(0)
+                source_hidden, right_hidden = stream_decoder_pair(
+                    config=config,
+                    source=source,
+                    package_dir=args.package_dir,
+                    package_tensors=package_tensors,
+                    right_mode=args.right_mode,
+                    rope=rope,
+                    source_hidden=source_hidden,
+                    right_hidden=right_hidden,
+                    source_cache=source_cache,
+                    right_cache=right_cache,
+                    past_tokens=past_tokens,
+                    route_stats=route_stats,
+                )
+                past_tokens += 1
+            source_text = tokenizer.decode(
+                source_generated, skip_special_tokens=True, clean_up_tokenization_spaces=False
+            )
+            right_text = tokenizer.decode(right_generated, skip_special_tokens=True, clean_up_tokenization_spaces=False)
+            cases.append(
+                {
+                    "id": case["id"],
+                    "category": case["category"],
+                    "expect": case["expect"],
+                    "messages": case["messages"],
+                    "rendered_prompt": rendered_prompt,
+                    "prompt_token_ids": prompt_ids,
+                    "prompt_token_count": len(prompt_ids),
+                    "max_completion_tokens": case["max_completion_tokens"],
+                    "stop_reason": stop_reason,
+                    "source": {
+                        "generated_token_ids": source_generated,
+                        "generated_text": source_text,
+                        "screen": text_screen(source_text),
+                    },
+                    "right": {
+                        "generated_token_ids": right_generated,
+                        "generated_text": right_text,
+                        "screen": text_screen(right_text),
+                    },
+                    "comparison": {
+                        "greedy_token_matches": greedy_matches,
+                        "greedy_steps_compared": len(source_generated),
+                        "source_greedy_nll_mean_source": sum(source_nll) / len(source_nll),
+                        "source_greedy_nll_mean_right": sum(right_nll_on_source) / len(right_nll_on_source),
+                        "initial_final_hidden_relative_l2": initial_hidden_relative_l2,
+                        "final_decode_hidden_relative_l2": relative_l2(source_hidden, right_hidden),
+                    },
+                    "route_observation": route_stats.result(),
+                }
+            )
+    result = {
+        "schema_version": "ullm.qwen35_moe_aq4_streaming_generation.v1",
+        "scope": (
+            "CPU-only, one-layer-at-a-time decoder streaming with tokenizer-rendered text and greedy decode; "
+            "no full checkpoint materialization, no uLLM loader, no service"
+        ),
+        "quality_policy": {
+            "primary_criterion": "human-readable generated-text quality",
+            "not_quality_gates": [
+                "greedy token exact match",
+                "expert selected-set/top-k equality",
+                "conditional NLL observations",
+            ],
+        },
+        "model_dir": str(args.model_dir),
+        "source_config_sha256": sha256_file(args.model_dir / "config.json"),
+        "package_dir": str(args.package_dir),
+        "package_manifest_sha256": sha256_file(args.package_dir / "manifest.json"),
+        "right_mode": args.right_mode,
+        "arithmetic": {
+            "nonexpert_weights": "source BF16 tensors converted to F32 for both tracks; completed package verifier establishes raw-passthrough identity",
+            "source_routed_experts": "selected BF16 expert rows streamed from safetensors and converted to F32",
+            "right_routed_experts": (
+                "selected AQ4_0 rows decoded from idx4/E4M3/codebook package payload"
+                if args.right_mode == "aq4_0"
+                else "selected BF16 expert rows streamed from the same safetensors source"
+            ),
+            "final_norm_and_lm_head": "raw source/passthrough tensors, evaluated in F32",
+        },
+        "suite": {
+            "path": str(args.generation_suite),
+            "sha256": sha256_file(args.generation_suite),
+            "declared_schema_version": suite_raw.get("schema_version"),
+            "shortened_for_cpu": bool(suite_raw.get("shortened_for_cpu", False)),
+            "chat_template_arguments": {"add_generation_prompt": True, "enable_thinking": False},
+        },
+        "cases": cases,
+        "threads": args.threads,
+        "wall_seconds": time.monotonic() - started,
+        "peak_rss_bytes": int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss) * 1024,
+    }
+    write_json(args.output, result)
+    write_new_text(args.generation_markdown, generation_markdown(result))
+    print(args.output)
+    print(args.generation_markdown)
+    return 0
 
 
 def main() -> int:
@@ -277,6 +804,8 @@ def main() -> int:
         raise ValidationError("--model-dir must contain config.json and model.safetensors.index.json")
     if not (args.package_dir / "manifest.json").is_file():
         raise ValidationError("--package-dir must contain manifest.json")
+    if args.generation_suite is not None or args.generation_markdown is not None:
+        return run_generation(args)
 
     import torch
     from transformers.cache_utils import DynamicCache
