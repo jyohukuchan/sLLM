@@ -27,8 +27,10 @@
 - BN の 262,144-token ledger の full-attention KV は 2 B/value（合計 5 GiB）である一方、
   BW 初版 binary は F32 KV（10 GiB）だった。初版の静的 262k 合計は
   `36,226,719,556 B` となり、R9700 より `2,017,976,132 B` 超過する。この値は未実行の
-  byte 計算であり、allocation failure を示すものではない。BR の typed KV cache が確定したら
-  F16 2 B/value 設定で ledger 条件を実測する（数値的 BF16 同一性は主張しない）。
+  byte 計算であり、allocation failure を示すものではない。`d8389e59` の typed KV cache は
+  R9700 9B `AQ4_0` で F16 8,192-token load と 3,968-token prompt/64-token exact generation
+  を確認済みだが、35B の証拠には転用しない。35B は F16 2 B/value 設定で別途 ledger 条件を
+  実測する（数値的 BF16 同一性は主張しない）。
 - CPU の source streaming control は 5 token × 40 層で final hidden/ordered route とも
   0 差。`architecture_hf_trace.py self-test` は corruption を検出した。完全 HF capture は
   66.965 GiB checkpoint に対する host RAM 不足のため未実行である。

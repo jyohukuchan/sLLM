@@ -439,11 +439,15 @@ KV residency にはもう一つ byte-contract の境界がある。BN ledger の
 full-attention bridge は F32 cache を確保していたため、同じ 262,144 token で
 さらに `5,368,709,120 B` を要求する。したがって初版の静的見積りは
 `36,226,719,556 B`、R9700 `34,208,743,424 B` より `2,017,976,132 B` 超過する。
-これはまだ allocation を試みた結果ではない。BR が実装・検証中の typed KV cache が
-確定した後、MoE executor は `ULLM_KV_CACHE_DTYPE=f16` を明示した 2 B/value
-capacity run で BN ledger と同じ byte budget を実測する予定である。F16 storage は
-capacity のための runtime 選択であり、BF16 source cache と数値的に同一だという主張は
-しない。
+これはまだ allocation を試みた結果ではない。typed KV cache はその後
+`d8389e59` で確定した。R9700 上の既存 Qwen3.5-9B `AQ4_0` では native F16 cache の
+8,192 logical token（8 full layer で 256 MiB）を、F32 cache の 4,096 token と同じ
+allocation byte で実 load し、3,968-token prompt からの 64 token は F32 と token ID/text
+が完全一致した（`benchmarks/results/2026-07-27/kv-cache-dtype-kernels/summary.json`）。
+これは typed native path の根拠であって 35B MoE の証明ではない。MoE executor は
+`ULLM_KV_CACHE_DTYPE=f16` を明示した 2 B/value capacity run で BN ledger と同じ byte
+budget を実測する。F16 storage は capacity のための runtime 選択であり、BF16 source
+cache と数値的に同一だという主張はしない。
 
 ### loader/source の検証範囲
 
