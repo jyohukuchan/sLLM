@@ -41,6 +41,15 @@ It passed all 44 selected tests (0 failed).  This includes the pre-existing
 request lifecycle, cancellation, reset, cache, and M=128 tail cases as well
 as the new width-selection tests.
 
+The production worker selection surface was also compiled and tested without
+starting a worker or touching the GPU.  Its pure
+`ULLM_SQ8_PREFILL_CHUNK_TOKENS` parser defaults to M=128, accepts M=256, and
+rejects malformed/non-power-of-two/out-of-context values.  The complete
+`sq8_worker_backend::tests` group passed 10/10; the worker binary's five CLI
+tests passed 5/5; and `cargo check -p ullm-engine --bin ullm-sq8-worker
+--features rocm-ck-gfx1201` passed.  This verifies the opt-in wiring only;
+it does not turn an unadmitted wide M into a GPU result.
+
 The source-level runtime gate was also exercised by the scheduler test: M=128
 is admitted; M=256/512/1024/2048 is rejected before allocation until the
 existing lower measured-M list is extended.
