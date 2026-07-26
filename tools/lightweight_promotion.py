@@ -765,6 +765,8 @@ def service_state(service: str) -> dict[str, str]:
             "-p",
             "SubState",
             "-p",
+            "Result",
+            "-p",
             "NRestarts",
             "-p",
             "MainPID",
@@ -785,23 +787,65 @@ def service_state(service: str) -> dict[str, str]:
     return result
 
 
-def restart_service(service: str) -> dict[str, Any]:
-    before = service_state(service)
-    completed = subprocess.run(
-        [os.fspath(SYSTEMCTL), "restart", service],
+def _run_systemctl(action: str, service: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [os.fspath(SYSTEMCTL), action, service],
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         check=False,
         timeout=45,
     )
-    if completed.returncode != 0:
+
+
+def _is_start_limit_hit(
+    completed: subprocess.CompletedProcess[str], after: dict[str, str]
+) -> bool:
+    diagnostic = f"{completed.stdout}\n{completed.stderr}".lower()
+    return after.get("Result") == "start-limit-hit" or "start-limit" in diagnostic
+
+
+def restart_service(service: str) -> dict[str, Any]:
+    """Restart once, with bounded recovery only for systemd's start limit.
+
+    A swap has already made the bytes durable when this function is reached.
+    If systemd rejects the immediate restart solely because its historical
+    start-rate counter is full, clear that failed state once and issue one
+    start. The recovery is deliberately narrow and recorded; all other
+    restart failures remain failures rather than being retried blindly.
+    """
+
+    before = service_state(service)
+    completed = _run_systemctl("restart", service)
+    if completed.returncode == 0:
+        return {
+            "at": utc_now(),
+            "service": service,
+            "before": before,
+            "restart_command_succeeded": True,
+            "start_limit_recovery": False,
+            "systemctl_commands": ["restart"],
+        }
+
+    after_failure = service_state(service)
+    if not _is_start_limit_hit(completed, after_failure):
         fail("gateway service restart failed")
+
+    reset = _run_systemctl("reset-failed", service)
+    if reset.returncode != 0:
+        fail("gateway service start-limit reset failed")
+    started = _run_systemctl("start", service)
+    if started.returncode != 0:
+        fail("gateway service start-limit recovery failed")
     return {
         "at": utc_now(),
         "service": service,
         "before": before,
-        "restart_command_succeeded": True,
+        "restart_command_succeeded": False,
+        "start_limit_recovery": True,
+        "start_limit_failure": after_failure,
+        "recovery_start_succeeded": True,
+        "systemctl_commands": ["restart", "reset-failed", "start"],
     }
 
 

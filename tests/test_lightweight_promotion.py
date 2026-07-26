@@ -94,6 +94,37 @@ def test_container_gateway_transport_keeps_bearer_token_out_of_process_arguments
         PROMOTION.normalize_gateway_container("not/a-container")
 
 
+def test_restart_service_recovers_once_from_systemd_start_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+    states = iter(
+        [
+            {"ActiveState": "active", "Result": "success"},
+            {"ActiveState": "failed", "Result": "start-limit-hit"},
+        ]
+    )
+
+    def fake_state(_service: str) -> dict[str, str]:
+        return next(states)
+
+    def fake_run(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(command[1])
+        if command[1] == "restart":
+            return subprocess.CompletedProcess(command, 1, "", "start request repeated too quickly")
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(PROMOTION, "service_state", fake_state)
+    monkeypatch.setattr(PROMOTION.subprocess, "run", fake_run)
+
+    event = PROMOTION.restart_service("fixture.service")
+
+    assert calls == ["restart", "reset-failed", "start"]
+    assert event["restart_command_succeeded"] is False
+    assert event["start_limit_recovery"] is True
+    assert event["recovery_start_succeeded"] is True
+
+
 def test_text_collapse_and_response_abandonment_are_blocking() -> None:
     code_case = PROMOTION.SuiteCase(
         case_id="code",

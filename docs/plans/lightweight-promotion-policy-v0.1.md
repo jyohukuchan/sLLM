@@ -109,3 +109,8 @@ Docker bridge にのみ bind された gateway は host から直接 probe で�
 HTTP を実行する。これは候補固有の apparatus ではなく transport の選択であり、別の配置では
 <code>--gateway-container direct</code> を指定できる。bearer token と request body は container の
 curl process argument に渡さず、stdin の一時 config 経由で渡す。
+
+service の start-rate limit を消費している場合は、tool が <code>start-limit-hit</code> を
+明示的に確認したときに限り、<code>reset-failed</code> と 1 回の <code>start</code> で復旧する。
+これは無制限 retry ではなく、切替済みの manifest を応答可能な状態へ戻すための一度だけの recovery
+であり、発生の有無と systemctl command 列を evidence に記録する。他の再起動失敗はそのまま失敗とする。
