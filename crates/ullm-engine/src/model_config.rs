@@ -2495,6 +2495,41 @@ mod tests {
                 source_layer_index: 14
             }
         ));
+        let shared_sources = descriptor
+            .layers
+            .iter()
+            .filter_map(|layer| match layer.attention.kv_cache {
+                ResidentKvCacheMode::SharedFrom { source_layer_index } => {
+                    Some((layer.layer_index, source_layer_index))
+                }
+                ResidentKvCacheMode::Own | ResidentKvCacheMode::LinearState => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            shared_sources,
+            vec![
+                (15, 13),
+                (16, 13),
+                (17, 13),
+                (18, 13),
+                (19, 14),
+                (20, 13),
+                (21, 13),
+                (22, 13),
+                (23, 13),
+                (24, 14),
+                (25, 13),
+                (26, 13),
+                (27, 13),
+                (28, 13),
+                (29, 14),
+                (30, 13),
+                (31, 13),
+                (32, 13),
+                (33, 13),
+                (34, 14),
+            ]
+        );
         assert_eq!(descriptor.layers[14].mlp.intermediate_size(), 6144);
         assert_eq!(descriptor.layers[15].mlp.intermediate_size(), 12288);
         assert_eq!(
