@@ -7679,6 +7679,10 @@ extern "C" __global__ void ullm_cached_prefix_attn_fp8_e4m3_flash2_kernel(
     static std::string paged_decode_attn_kernel_source_for_arch(const std::string &arch) {
         (void)arch;
         std::string preamble;
+        const auto experimental_flag_is_one = [](const char *name) {
+            const char *value = std::getenv(name);
+            return value != nullptr && value[0] == '1' && value[1] == '\0';
+        };
         if (std::getenv("ULLM_DISABLE_PAGED_DECODE_WARP_REDUCE") != nullptr) {
             preamble += "#define ULLM_PAGED_DECODE_USE_SHARED_REDUCE 1\n";
         }
@@ -7687,6 +7691,19 @@ extern "C" __global__ void ullm_cached_prefix_attn_fp8_e4m3_flash2_kernel(
         }
         if (std::getenv("ULLM_EXPERIMENTAL_PAGED_DECODE_WAVE_SCALAR_SOFTMAX") != nullptr) {
             preamble += "#define ULLM_PAGED_DECODE_USE_WAVE_SCALAR_SOFTMAX 1\n";
+        }
+        // These two selectors are intentionally test-only.  The grouped body is
+        // shape-guarded in the device source and the host launcher, so an
+        // unsupported geometry continues to use the canonical split body.
+        const bool gqa_grouped =
+            experimental_flag_is_one("ULLM_EXPERIMENTAL_PAGED_DECODE_GQA_GROUPED_SPLIT");
+        const bool gqa_pipelined =
+            experimental_flag_is_one("ULLM_EXPERIMENTAL_PAGED_DECODE_GQA_PIPELINED_SPLIT");
+        if (gqa_grouped || gqa_pipelined) {
+            preamble += "#define ULLM_PAGED_DECODE_USE_GQA_GROUPED_SPLIT 1\n";
+        }
+        if (gqa_pipelined) {
+            preamble += "#define ULLM_PAGED_DECODE_USE_GQA_PIPELINED_SPLIT 1\n";
         }
         return preamble + paged_decode_attn_kernel_source();
     }
@@ -8005,6 +8022,261 @@ extern "C" __global__ void ullm_paged_decode_attn_split_partial_f32_kernel(
     unsigned long long split_count,
     float *workspace) {
     __shared__ float partial[256];
+#if defined(ULLM_PAGED_DECODE_USE_GQA_GROUPED_SPLIT)
+    __shared__ float gqa_stage[512];
+    __shared__ int gqa_stage_valid[2];
+    // R9700 SQ8_0 decode shape: five query heads share one KV head.  One
+    // workgroup owns those five heads for one source tile.  The first five
+    // waves hold one Q head each (four dimensions/value elements per lane);
+    // the remaining three waves stage a single K+V row for all five.  Thus
+    // K/V have one semantic global load per KV head rather than five.  This
+    // says nothing about physical HBM traffic or cache hit rate.
+    const unsigned long long q_per_kv = kv_heads == 0ull ? 0ull : q_heads / kv_heads;
+    if (blockDim.x == 256u && warpSize == 32u && q_per_kv == 5ull &&
+        head_dim == 128ull && value_dim == 128ull &&
+        static_cast<unsigned long long>(gridDim.x) == kv_heads * split_count) {
+        const unsigned int tid = threadIdx.x;
+        const unsigned int lane = tid % 32u;
+        const bool consumer = tid < 160u;
+        const unsigned long long grouped_index = blockIdx.x;
+        const unsigned long long kv_head = grouped_index / split_count;
+        const unsigned long long split_id = grouped_index - kv_head * split_count;
+        if (kv_head >= kv_heads) {
+            return;
+        }
+        const unsigned long long source_start = split_id * source_tile;
+        const unsigned long long source_remaining = cache_len - source_start;
+        const unsigned long long source_count =
+            source_tile < source_remaining ? source_tile : source_remaining;
+        const unsigned long long stride = value_dim + 2ull;
+        const unsigned long long q_head =
+            kv_head * q_per_kv + static_cast<unsigned long long>(tid / 32u);
+
+        float q0 = 0.0f;
+        float q1 = 0.0f;
+        float q2 = 0.0f;
+        float q3 = 0.0f;
+        float weighted0 = 0.0f;
+        float weighted1 = 0.0f;
+        float weighted2 = 0.0f;
+        float weighted3 = 0.0f;
+        float max_score = -3.4028234663852886e38f;
+        float denominator = 0.0f;
+        bool invalid = false;
+        if (consumer) {
+            const unsigned long long q_base = q_head * 128ull;
+            q0 = q[q_base + lane];
+            q1 = q[q_base + 32ull + lane];
+            q2 = q[q_base + 64ull + lane];
+            q3 = q[q_base + 96ull + lane];
+        }
+
+        // Two K/V rows are needed only by the pipelined body.  Keeping the
+        // same allocation in the non-pipelined body makes the resource delta
+        // explicit and keeps the two experiments ABI-identical.
+#if defined(ULLM_PAGED_DECODE_USE_GQA_PIPELINED_SPLIT)
+        // Prime stage zero with all eight waves.  Subsequent rows are loaded
+        // by waves 5--7 while waves 0--4 consume the other buffer; the sole
+        // bottom barrier both protects the old buffer and publishes the next.
+        const unsigned long long initial_block_index = source_start / block_size;
+        const unsigned long long initial_block_offset =
+            source_start - initial_block_index * block_size;
+        const unsigned long long initial_block_id =
+            static_cast<unsigned long long>(block_table[initial_block_index]);
+        const bool initial_valid = initial_block_id < cache_blocks;
+        if (tid == 0u) {
+            gqa_stage_valid[0] = initial_valid ? 1 : 0;
+        }
+        if (initial_valid) {
+            const unsigned long long physical_timestep =
+                initial_block_id * block_size + initial_block_offset;
+            if (tid < 128u) {
+                gqa_stage[tid] =
+                    k_cache[(physical_timestep * kv_heads + kv_head) * 128ull + tid];
+            } else {
+                gqa_stage[tid] =
+                    v_cache[(physical_timestep * kv_heads + kv_head) * 128ull + (tid - 128u)];
+            }
+        } else {
+            gqa_stage[tid] = 0.0f;
+        }
+        __syncthreads();
+
+        for (unsigned long long source_offset = 0ull;
+             source_offset < source_count;
+             ++source_offset) {
+            const unsigned int current_stage = static_cast<unsigned int>(source_offset & 1ull);
+            const unsigned int next_stage = current_stage ^ 1u;
+            if (source_offset + 1ull < source_count && tid >= 160u) {
+                const unsigned long long next_source = source_start + source_offset + 1ull;
+                const unsigned long long next_block_index = next_source / block_size;
+                const unsigned long long next_block_offset =
+                    next_source - next_block_index * block_size;
+                const unsigned long long next_block_id =
+                    static_cast<unsigned long long>(block_table[next_block_index]);
+                const bool next_valid = next_block_id < cache_blocks;
+                if (tid == 160u) {
+                    gqa_stage_valid[next_stage] = next_valid ? 1 : 0;
+                }
+                const unsigned long long next_physical_timestep =
+                    next_block_id * block_size + next_block_offset;
+                for (unsigned int copy_index = tid - 160u;
+                     copy_index < 256u;
+                     copy_index += 96u) {
+                    const unsigned int destination = next_stage * 256u + copy_index;
+                    if (!next_valid) {
+                        gqa_stage[destination] = 0.0f;
+                    } else if (copy_index < 128u) {
+                        gqa_stage[destination] = k_cache[
+                            (next_physical_timestep * kv_heads + kv_head) * 128ull + copy_index];
+                    } else {
+                        gqa_stage[destination] = v_cache[
+                            (next_physical_timestep * kv_heads + kv_head) * 128ull +
+                            (copy_index - 128u)];
+                    }
+                }
+            }
+
+            if (consumer) {
+                const unsigned int stage_base = current_stage * 256u;
+                if (gqa_stage_valid[current_stage] == 0) {
+                    invalid = true;
+                } else {
+                    float dot = q0 * gqa_stage[stage_base + lane] +
+                        q1 * gqa_stage[stage_base + 32u + lane] +
+                        q2 * gqa_stage[stage_base + 64u + lane] +
+                        q3 * gqa_stage[stage_base + 96u + lane];
+                    for (int offset = 16; offset > 0; offset >>= 1) {
+                        dot += __shfl_down(dot, offset, warpSize);
+                    }
+                    const float score = __shfl(dot, 0, warpSize) * softmax_scale;
+                    float scale = 0.0f;
+                    float replaces_max = 0.0f;
+                    if (lane == 0u) {
+                        if (score > max_score) {
+                            scale = expf(max_score - score);
+                            denominator = denominator * scale + 1.0f;
+                            max_score = score;
+                            replaces_max = 1.0f;
+                        } else {
+                            scale = expf(score - max_score);
+                            denominator += scale;
+                        }
+                    }
+                    scale = __shfl(scale, 0, warpSize);
+                    replaces_max = __shfl(replaces_max, 0, warpSize);
+                    const float v0 = gqa_stage[stage_base + 128u + lane];
+                    const float v1 = gqa_stage[stage_base + 160u + lane];
+                    const float v2 = gqa_stage[stage_base + 192u + lane];
+                    const float v3 = gqa_stage[stage_base + 224u + lane];
+                    if (replaces_max != 0.0f) {
+                        weighted0 = weighted0 * scale + v0;
+                        weighted1 = weighted1 * scale + v1;
+                        weighted2 = weighted2 * scale + v2;
+                        weighted3 = weighted3 * scale + v3;
+                    } else {
+                        weighted0 += scale * v0;
+                        weighted1 += scale * v1;
+                        weighted2 += scale * v2;
+                        weighted3 += scale * v3;
+                    }
+                }
+            }
+            __syncthreads();
+        }
+#else
+        // Baseline grouped form: shared K/V reuse without changing the
+        // original two CTA barriers per source row.  This isolates the GQA
+        // reuse effect from the pipelined-barrier experiment above.
+        for (unsigned long long source_offset = 0ull;
+             source_offset < source_count;
+             ++source_offset) {
+            const unsigned long long source_timestep = source_start + source_offset;
+            const unsigned long long block_index = source_timestep / block_size;
+            const unsigned long long block_offset = source_timestep - block_index * block_size;
+            const unsigned long long block_id =
+                static_cast<unsigned long long>(block_table[block_index]);
+            const bool row_valid = block_id < cache_blocks;
+            if (tid == 0u) {
+                gqa_stage_valid[0] = row_valid ? 1 : 0;
+            }
+            if (row_valid) {
+                const unsigned long long physical_timestep =
+                    block_id * block_size + block_offset;
+                if (tid < 128u) {
+                    gqa_stage[tid] =
+                        k_cache[(physical_timestep * kv_heads + kv_head) * 128ull + tid];
+                } else {
+                    gqa_stage[tid] =
+                        v_cache[(physical_timestep * kv_heads + kv_head) * 128ull + (tid - 128u)];
+                }
+            } else {
+                gqa_stage[tid] = 0.0f;
+            }
+            __syncthreads();
+
+            if (consumer) {
+                if (gqa_stage_valid[0] == 0) {
+                    invalid = true;
+                } else {
+                    float dot = q0 * gqa_stage[lane] + q1 * gqa_stage[32u + lane] +
+                        q2 * gqa_stage[64u + lane] + q3 * gqa_stage[96u + lane];
+                    for (int offset = 16; offset > 0; offset >>= 1) {
+                        dot += __shfl_down(dot, offset, warpSize);
+                    }
+                    const float score = __shfl(dot, 0, warpSize) * softmax_scale;
+                    float scale = 0.0f;
+                    float replaces_max = 0.0f;
+                    if (lane == 0u) {
+                        if (score > max_score) {
+                            scale = expf(max_score - score);
+                            denominator = denominator * scale + 1.0f;
+                            max_score = score;
+                            replaces_max = 1.0f;
+                        } else {
+                            scale = expf(score - max_score);
+                            denominator += scale;
+                        }
+                    }
+                    scale = __shfl(scale, 0, warpSize);
+                    replaces_max = __shfl(replaces_max, 0, warpSize);
+                    const float v0 = gqa_stage[128u + lane];
+                    const float v1 = gqa_stage[160u + lane];
+                    const float v2 = gqa_stage[192u + lane];
+                    const float v3 = gqa_stage[224u + lane];
+                    if (replaces_max != 0.0f) {
+                        weighted0 = weighted0 * scale + v0;
+                        weighted1 = weighted1 * scale + v1;
+                        weighted2 = weighted2 * scale + v2;
+                        weighted3 = weighted3 * scale + v3;
+                    } else {
+                        weighted0 += scale * v0;
+                        weighted1 += scale * v1;
+                        weighted2 += scale * v2;
+                        weighted3 += scale * v3;
+                    }
+                }
+            }
+            __syncthreads();
+        }
+#endif
+
+        if (consumer) {
+            const unsigned long long workspace_base =
+                (q_head * split_count + split_id) * stride;
+            if (lane == 0u) {
+                workspace[workspace_base] = invalid ? 0.0f : max_score;
+                workspace[workspace_base + 1ull] = invalid ? -1.0f : denominator;
+            }
+            workspace[workspace_base + 2ull + lane] = invalid ? 0.0f : weighted0;
+            workspace[workspace_base + 2ull + 32ull + lane] = invalid ? 0.0f : weighted1;
+            workspace[workspace_base + 2ull + 64ull + lane] = invalid ? 0.0f : weighted2;
+            workspace[workspace_base + 2ull + 96ull + lane] = invalid ? 0.0f : weighted3;
+        }
+        return;
+    }
+#endif
+
     if (blockDim.x != 256u || head_dim > 256ull || value_dim > 256ull) {
         return;
     }

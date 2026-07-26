@@ -3864,13 +3864,26 @@ bool paged_decode_attn_split_f32_hip_kernel(
     }
 
     constexpr unsigned int launch_block_size = 256;
-    if (split_count != 0 && q_heads > std::numeric_limits<size_t>::max() / split_count) {
+    const char *grouped_env = std::getenv("ULLM_EXPERIMENTAL_PAGED_DECODE_GQA_GROUPED_SPLIT");
+    const char *pipelined_env = std::getenv("ULLM_EXPERIMENTAL_PAGED_DECODE_GQA_PIPELINED_SPLIT");
+    const bool grouped_requested =
+        (grouped_env != nullptr && grouped_env[0] == '1' && grouped_env[1] == '\0') ||
+        (pipelined_env != nullptr && pipelined_env[0] == '1' && pipelined_env[1] == '\0');
+    const std::string device_arch = hip_runtime().device_arch_name(device_id);
+    const bool is_gfx1201 =
+        device_arch == "gfx1201" || device_arch.rfind("gfx1201:", 0) == 0;
+    const bool grouped_shape =
+        kv_heads != 0 && is_gfx1201 && q_heads % kv_heads == 0 &&
+        q_heads / kv_heads == 5u && head_dim == 128u &&
+        value_dim == 128u;
+    const size_t partial_groups = grouped_requested && grouped_shape ? kv_heads : q_heads;
+    if (split_count != 0 && partial_groups > std::numeric_limits<size_t>::max() / split_count) {
         if (error != nullptr) {
             *error = "paged decode split attention partial grid overflows";
         }
         return false;
     }
-    const size_t partial_grid_size = q_heads * split_count;
+    const size_t partial_grid_size = partial_groups * split_count;
     if (partial_grid_size > static_cast<size_t>(std::numeric_limits<unsigned int>::max()) ||
         q_heads > static_cast<size_t>(std::numeric_limits<unsigned int>::max())) {
         if (error != nullptr) {

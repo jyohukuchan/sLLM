@@ -330,6 +330,20 @@ fn fnv1a64(bytes: &[u8]) -> u64 {
     state
 }
 
+fn experimental_flag_is_one(name: &str) -> bool {
+    matches!(env::var(name).as_deref(), Ok("1"))
+}
+
+fn selected_split_mode() -> &'static str {
+    if experimental_flag_is_one("ULLM_EXPERIMENTAL_PAGED_DECODE_GQA_PIPELINED_SPLIT") {
+        "gqa-grouped-pipelined"
+    } else if experimental_flag_is_one("ULLM_EXPERIMENTAL_PAGED_DECODE_GQA_GROUPED_SPLIT") {
+        "gqa-grouped"
+    } else {
+        "generic-per-q-head"
+    }
+}
+
 fn diff_json(value: Diff) -> String {
     format!(
         "{{\"max_abs\":{:.12},\"max_rel\":{:.12},\"max_abs_index\":{},\"bit_mismatches\":{},\"non_finite\":{}}}",
@@ -520,6 +534,25 @@ fn run(options: Options) -> Result<(), String> {
     if let Some(path) = &options.direct_output {
         write_file(path, &direct_bytes)?;
     }
+    let split_mode = selected_split_mode();
+    let split_count = options.cache_len.div_ceil(options.source_tile);
+    let grouped = split_mode != "generic-per-q-head";
+    let partial_workgroups = if grouped {
+        KV_HEADS * split_count
+    } else {
+        Q_HEADS * split_count
+    };
+    let semantic_kv_load_bytes = if grouped {
+        KV_HEADS * options.cache_len * (HEAD_DIM + VALUE_DIM) * std::mem::size_of::<f32>()
+    } else {
+        Q_HEADS * options.cache_len * (HEAD_DIM + VALUE_DIM) * std::mem::size_of::<f32>()
+    };
+    let per_source_cta_barriers = if split_mode == "gqa-grouped-pipelined" {
+        1
+    } else {
+        2
+    };
+    let initial_cta_barriers_per_partial = usize::from(split_mode == "gqa-grouped-pipelined");
     let experimental_wave_scalar =
         env::var_os("ULLM_EXPERIMENTAL_PAGED_DECODE_WAVE_SCALAR_SOFTMAX").is_some();
     let summary = format!(
@@ -527,8 +560,10 @@ fn run(options: Options) -> Result<(), String> {
             "{{\n",
             "  \"schema_version\": \"ullm.sq8_0.r9700.paged_decode_attention_probe.v0.1\",\n",
             "  \"mode\": \"{}\",\n",
+            "  \"split_mode\": \"{}\",\n",
             "  \"device\": {{\"runtime_device\":{},\"backend\":\"{}\",\"gcn_arch_name\":\"{}\"}},\n",
             "  \"shape\": {{\"cache_len\":{},\"block_size\":{},\"cache_blocks\":{},\"q_heads\":{},\"kv_heads\":{},\"head_dim\":{},\"value_dim\":{},\"source_tile\":{},\"split_count\":{}}},\n",
+            "  \"selected_split_geometry\": {{\"partial_workgroups\":{},\"merge_workgroups\":{},\"workgroup_threads\":256,\"semantic_kv_load_bytes\":{},\"semantic_kv_load_scope\":\"algorithmic K+V accesses; not a physical HBM measurement\",\"cta_barriers_per_source_row\":{},\"initial_cta_barriers_per_partial\":{}}},\n",
             "  \"page_table\": \"logical block i maps to (13*i+7) mod 256; unique for this probe capacity\",\n",
             "  \"cpu_reference\": \"F32 two-pass softmax reference; compares are diagnostic rather than bitwise GPU requirements\",\n",
             "  \"direct_vs_cpu\": {},\n",
@@ -545,6 +580,7 @@ fn run(options: Options) -> Result<(), String> {
         } else {
             "legacy-direct-softmax"
         },
+        split_mode,
         options.runtime_device,
         info.backend,
         info.gcn_arch_name,
@@ -556,7 +592,12 @@ fn run(options: Options) -> Result<(), String> {
         HEAD_DIM,
         VALUE_DIM,
         options.source_tile,
-        options.cache_len.div_ceil(options.source_tile),
+        split_count,
+        partial_workgroups,
+        Q_HEADS,
+        semantic_kv_load_bytes,
+        per_source_cta_barriers,
+        initial_cta_barriers_per_partial,
         diff_json(direct_cpu),
         diff_json(split_cpu),
         diff_json(split_direct),
