@@ -1,0 +1,15 @@
+# This manifest binds the retained GPU F32-control receipts, not an admissible
+# v0.2 control.  Each listed forward metadata.json in turn binds its logits,
+# final hidden, and all 40 layer-hidden F32LE payloads by SHA-256.
+8bf3fd4996a9859a9f15a03195d9ef2303ef4eeed43767557fdccbff53ecf8e0  14b-gpu-fp32-cpu9-teacher-v1/run.json
+34c2a9b4fed3481c0c6c9a86cec8802bf795eaa87069cab4dcae6cd7974325cf  14b-gpu-fp32-cpu9-teacher-v1/forward-0000/metadata.json
+ee37b712636d930381289d36070de613c5e02f52e173be0378433572b53c4a55  14b-gpu-fp32-cpu9-teacher-v1/forward-0001/metadata.json
+a49af2e294a1acb31489279557254fa5b5722a0fc1f843a5b8dc16c996c54684  14b-gpu-fp32-cpu9-teacher-v1/forward-0002/metadata.json
+78cec2a10660ad9daad2395e0d675044423180848795ae491b5acaca24ef9b76  14b-gpu-fp32-cpu9-teacher-v1/forward-0003/metadata.json
+caaa686847a2d97cfd5e2095c8823e7e08969fc48bfe2c5108e52d4b8795e0ac  14b-gpu-fp32-cpu9-teacher-v1/forward-0004/metadata.json
+ae839db6e94aaa96acdd4d634b9890952bc9882ae42bdc0a7677ee8a1cd267c0  14b-gpu-fp32-cpu9-teacher-v1/forward-0005/metadata.json
+4ae0629cfff62b138f95f6cbe7f78c84776869d21626a776608f6c8fdca31d25  14b-gpu-fp32-cpu9-teacher-v1/forward-0006/metadata.json
+c93666c3dcf69fe5e5f9070ee5cd4bc5c709d7446fb3bbd841b2166184e2b82c  14b-gpu-fp32-cpu9-teacher-v1/forward-0007/metadata.json
+80801b44f2fe5a6b37bf3308d801465cbb7f3e0208491ebedcf3cf5a632a8bcf  14b-gpu-fp32-cpu9-teacher-v1/forward-0008/metadata.json
+aea6640282e5ca78b16f7e145f77598ee4456142c5e46cd6298ead556db51d43  14b-gpu-fp32-cpu9-teacher-v1-vs-cpu-r1.json
+45f1868e42e13f8be46d1a3cb5a44b5be4ce1aef0b2453bc116510f5645e42ea  14b-gpu-fp32-sgemm-performance-p100-v1/run.json

@@ -452,3 +452,97 @@ CPU F64 の実 artifact projection cross-check（max-abs `2.742e-6`、relative-L
 許す。一方で量子化品質 gate より桁違いに厳しく、layer 間の誤差伝播や input/token の不一致を
 平均値で隠せない。測定結果を見てこの値を緩めない。比較結果、GPU capture、CPU capture の
 content hash はすべて `benchmarks/results/2026-07-26/sq8-fp32-reference/` に保存する。
+
+## 2026-07-26 gfx1201 GPU F32 control 実装・CPU 突合（非適格）
+
+この追記も凍結済み v0.2 JSON には変更を加えない。結果は **GPU F32 control は v0.2
+control として使えない** である。以下の CPU/GPU 比較契約は GPU 実測前に上節で固定済みであり、
+失格後に値を緩めて通すことはしなかった。
+
+### 実装と隔離
+
+- 実装は `runtime/src/sq8_fp32_gpu_reference_gfx1201.hip.cpp`、Rust wrapper
+  `crates/ullm-engine/src/sq8_gpu_fp32_reference.rs`、専用 runner
+  `ullm-sq8-gpu-fp32-reference` に隔離した。optimized SQ8 runtime、CK、WMMA、HIPRTC、
+  production dispatcher、candidate kernel を呼ばないことを source test でも確認する。
+- canonical artifact の raw OCP E4M3FN payload と raw BF16 scale を GPU 上で直接 F32 に戻し、
+  projection は `hipblasSgemm` の標準 F32 のみで行う。raw BF16 passthrough parameter も GPU
+  で直接 F32 化する。CPU が decode した値は GPU に渡さない。
+- RMSNorm、RoPE、GQA causal attention の score/max、exp/sum、value の各 pass、residual、SiLU は
+  simple な別 kernel にした。attention は query head ごとの serial F32 reduction、KV cache は
+  device-resident F32 である。projection を融合・tile 化せず、被験経路と構造を共有しない。
+- 実行前の device guard は `HIP_VISIBLE_DEVICES=1` と `ULLM_HIP_VISIBLE_DEVICES=1`、visible device
+  count 1、filtered ordinal 0、exact `gfx1201` を要求する。実測した device は R9700
+  `0000:47:00.0`、total `34,208,743,424` B、GPU upload/finalize 後 free
+  `6,689,914,880` B だった。V620/gfx1030、service、active manifest、activation は操作していない。
+
+### 事前固定の CPU strict-F32 比較と結果
+
+CPU `14b-raw-p0001-g8-r1` の 9 position（prompt 1 + feedback 8）を同じ teacher-forced input に
+GPU で再生した。比較範囲は各 position の logits、final hidden、layer 0--39 hidden、計
+`9 × 42 = 378` tensor である。事前固定の判定は input/greedy token ID exact、nonfinite 0、
+各 tensor の `max_abs <= 2e-5`、`relative_l2 <= 1e-5`、cosine `>= 0.999999` だった。根拠は
+CPU の K 昇順 FMA と standard hipBLAS F32 reduction のみを許し、CPU F32/F64 projection
+cross-check より余裕を持たせる、という測定前の契約である。
+
+- input token と greedy token は全 9 position で完全一致した。GPU replay も 9 position の
+  logits/final/layer output hash が完全一致し、nonfinite は 0 件だった。
+- しかし各 position に少なくとも 23 tensor の失格があり、全 9 position が不合格となった。
+  aggregate は max-abs 最大 `0.0048828125`（position 0 / layer 19）、relative-L2 最大
+  `1.4888965980100416e-05`（position 2 / layer 23）、cosine 最小
+  `0.9999999998906846`（同じ position/layer）、bit mismatch `3,210,190` である。
+- 誤差は layer 0 の max-abs `1.192092896e-7`、relative-L2 `2.963378064e-8` から始まり、
+  position 0 では layer 2 の max-abs `2.288818359e-5` で固定 max-abs 条件を初めて超え、
+  layer 19 では `0.0048828125` になった。後者は CPU value `12539.7529296875` に対して
+  GPU value `12539.748046875`、F32 spacing で 5 ULP である。一方、position 2/layer 23 の
+  relative-L2 は上限も超えている。したがって static absolute threshold だけの見掛けの問題
+  ではない。
+
+最初の layer が極小差で、residual layers を通ると差が増幅する形は、CPU の固定 K-order FMA と
+hipBLAS の内部 reduction order の差と整合する。`hipblasSgemv` に置換した診断は aggregate
+max-abs `0.02978515625`、relative-L2 `2.3621352547551214e-05` とさらに悪化した。ただし、
+GPU/CPU の libm（RoPE/exp/sqrt）差もあり、**reduction order だけが原因であることは未確認**
+である。この原因を完全に分離できていないため、GPU result を CPU 真値の代替にしたり、
+比較閾値を結果に合わせて再定義したりはしていない。
+
+ゆえに「9 position では一致しない GPU control を 100 position / full corpus へ拡張しても
+適格化の根拠にならない」という停止条件を適用した。CPU の追加 100 position も生成していない。
+これは CPU reference の欠陥を意味せず、GPU control が事前の CPU-oracle contract を満たさなかった
+ためである。
+
+比較 receipt は
+[`14b-gpu-fp32-cpu9-teacher-v1-vs-cpu-r1.json`](../../benchmarks/results/2026-07-26/sq8-fp32-reference/14b-gpu-fp32-cpu9-teacher-v1-vs-cpu-r1.json)
+（SHA-256 `aea6640282e5ca78b16f7e145f77598ee4456142c5e46cd6298ead556db51d43`）、
+GPU run receipt は
+[`14b-gpu-fp32-cpu9-teacher-v1/run.json`](../../benchmarks/results/2026-07-26/sq8-fp32-reference/14b-gpu-fp32-cpu9-teacher-v1/run.json)
+（SHA-256 `8bf3fd4996a9859a9f15a03195d9ef2303ef4eeed43767557fdccbff53ecf8e0`）に保存した。
+
+### 性能診断と full coverage の見積り
+
+これは capture を伴わない、非適格 control の性能診断であり、reference 生成ではない。
+R9700 だけで 100 forward（position 0--99）を測った。初期化は `60.506401280` s、position 0
+forward は `0.614119774` s、position 1--99 に対する最小二乗 fit は
+`t(position) = 0.374549014 + 0.000497507391 × position` 秒（R² `0.996947573`、RMSE
+`0.000786699` s）だった。実測平均は position 1--9 `0.376705886` s、75--99
+`0.417650849` s であり、context cost を position-0 rate だけで無視していない。
+
+28,853 forward を最大 context 4,096 の sequence に配置する場合、position 0 を毎回測った
+rate でのみ掛ける context-free scenario は `4.922` h、7 × 4,096 + 181 の最長 sequence に
+上の fit を当てる compute-only model は `11.118` h になる。後者の position 4,095 予測は
+`2.411842` s である。ただし position 100 以降は未測定で、capture I/O も測っていないため、
+この `4.922--11.118` h は保証値ではない。full capture の raw F32 payload は少なくとも
+`38.894` GiB（metadata/JSON を除く）で、filesystem overhead は未確認である。空き容量
+`2,716,785,868,800` B には収まる。
+
+性能 receipt は
+[`14b-gpu-fp32-sgemm-performance-p100-v1/run.json`](../../benchmarks/results/2026-07-26/sq8-fp32-reference/14b-gpu-fp32-sgemm-performance-p100-v1/run.json)
+（SHA-256 `45f1868e42e13f8be46d1a3cb5a44b5be4ce1aef0b2453bc116510f5645e42ea`）に保存した。計算だけなら
+実用的な見込みはあるが、CPU 突合に不合格なため full coverage reference は生成していない。
+
+### 保存状態
+
+GPU 9-position capture は logits/final/40 layer hidden、token ID、content hash を含み、各
+`metadata.json` が全 F32LE payload を hash で束縛する。上位 manifest
+[`14b-gpu-fp32-control-SHA256SUMS`](../../benchmarks/results/2026-07-26/sq8-fp32-reference/14b-gpu-fp32-control-SHA256SUMS)
+は run receipt、9 metadata receipt、比較 receipt、性能 receipt を束縛する。これは失格診断を
+再検証可能に保存するものであり、v0.2 control の追加・置換ではない。
