@@ -32,7 +32,9 @@ const HASH_CHUNK_BYTES: usize = 1024 * 1024;
 /// The gateway clears all of these before it spawns a manifest-mode worker;
 /// the worker independently checks them so direct invocation cannot silently
 /// select a different attention body.
-pub const MANIFEST_EXECUTION_ENVIRONMENT: [&str; 4] = [
+pub const MANIFEST_EXECUTION_ENVIRONMENT: [&str; 6] = [
+    "ULLM_EXPERIMENTAL_HIP_PAGED_DECODE_SPLIT_TILE",
+    "ULLM_EXPERIMENTAL_HIP_PAGED_DECODE_SPLIT_MIN_CACHE_LEN",
     "ULLM_EXPERIMENTAL_SQ8_PAGED_DECODE_SPLIT_TILE",
     "ULLM_EXPERIMENTAL_PAGED_DECODE_GQA_GROUPED_SPLIT",
     "ULLM_EXPERIMENTAL_PAGED_DECODE_GQA_PIPELINED_SPLIT",
@@ -40,6 +42,7 @@ pub const MANIFEST_EXECUTION_ENVIRONMENT: [&str; 4] = [
 ];
 const PAGED_DECODE_SPLIT_GUARD: &str = "ULLM_REQUIRE_HIP_PAGED_DECODE_SPLIT_KERNEL";
 const PAGED_DECODE_SPLIT_EXECUTION_PROFILE: &str = "rdna4_w8a8_block_ck";
+const AQ4_PAGED_DECODE_SPLIT_EXECUTION_PROFILE: &str = "rdna4_aq4_resident";
 
 pub const LEGACY_MODEL_ENVIRONMENT: &[&str] = &[
     "ULLM_MODEL_ID",
@@ -787,13 +790,24 @@ fn parse_worker_execution(raw: RawWorkerExecution) -> Result<WorkerExecution> {
         "worker.execution.paged_decode_attention.kernel",
         128,
     )?;
-    if kernel != "gqa_grouped_split" {
+    if !matches!(
+        kernel.as_str(),
+        "gqa_grouped_split" | "aq4_gqa_grouped_split"
+    ) {
         return Err(ServedModelError(
             "worker.execution.paged_decode_attention.kernel is unsupported".into(),
         ));
     }
     let split_tile = raw.paged_decode_attention.split_tile;
-    if !matches!(split_tile, 20 | 128 | 256 | 512) {
+    let supported_tile = match kernel.as_str() {
+        "gqa_grouped_split" => matches!(split_tile, 20 | 128 | 256 | 512),
+        // AQ4_0 uses its existing production source-tile dispatch (128,
+        // crossover 256).  The manifest describes that closed implementation,
+        // rather than admitting the SQ8_0 multi-tile experiment here.
+        "aq4_gqa_grouped_split" => split_tile == 128,
+        _ => false,
+    };
+    if !supported_tile {
         return Err(ServedModelError(
             "worker.execution.paged_decode_attention.split_tile is unsupported".into(),
         ));
@@ -816,24 +830,9 @@ fn validate_execution_manifest_contract(
             "worker.required_environment cannot select manifest execution".into(),
         ));
     }
-    if worker.execution.is_none() {
+    let Some(execution) = worker.execution.as_ref() else {
         return Ok(());
-    }
-    if format.format_id != "SQ8_0" {
-        return Err(ServedModelError(
-            "worker.execution is currently supported only for SQ8_0".into(),
-        ));
-    }
-    if worker.identity.device != "gfx1201" {
-        return Err(ServedModelError(
-            "worker.execution requires the gfx1201 SQ8_0 worker identity".into(),
-        ));
-    }
-    if worker.identity.execution_profile != PAGED_DECODE_SPLIT_EXECUTION_PROFILE {
-        return Err(ServedModelError(
-            "worker.execution requires the rdna4_w8a8_block_ck worker profile".into(),
-        ));
-    }
+    };
     if !worker
         .required_environment
         .iter()
@@ -843,14 +842,47 @@ fn validate_execution_manifest_contract(
             "worker.execution requires the paged-decode split HIP guard".into(),
         ));
     }
-    Ok(())
+    match execution.paged_decode_attention.kernel.as_str() {
+        "gqa_grouped_split"
+            if format.format_id == "SQ8_0"
+                && worker.identity.device == "gfx1201"
+                && worker.identity.execution_profile == PAGED_DECODE_SPLIT_EXECUTION_PROFILE =>
+        {
+            Ok(())
+        }
+        "aq4_gqa_grouped_split"
+            if format.format_id == "AQ4_0"
+                && worker.identity.device == "gfx1201"
+                && worker.identity.execution_profile
+                    == AQ4_PAGED_DECODE_SPLIT_EXECUTION_PROFILE =>
+        {
+            Ok(())
+        }
+        "gqa_grouped_split" => Err(ServedModelError(
+            "worker.execution requires the gfx1201 SQ8_0 rdna4_w8a8_block_ck worker identity"
+                .into(),
+        )),
+        "aq4_gqa_grouped_split" => Err(ServedModelError(
+            "worker.execution requires the gfx1201 AQ4_0 rdna4_aq4_resident worker identity".into(),
+        )),
+        _ => Err(ServedModelError(
+            "worker.execution.paged_decode_attention.kernel is unsupported".into(),
+        )),
+    }
 }
 
 fn validate_execution_contract(worker: &WorkerContract, kind: WorkerBackendKind) -> Result<()> {
-    if worker.execution.is_some() && kind != WorkerBackendKind::Sq8 {
-        return Err(ServedModelError(
-            "worker.execution is not supported by this worker backend".into(),
-        ));
+    if let Some(execution) = worker.execution.as_ref() {
+        let supported = matches!(
+            (kind, execution.paged_decode_attention.kernel.as_str()),
+            (WorkerBackendKind::Sq8, "gqa_grouped_split")
+                | (WorkerBackendKind::Aq4, "aq4_gqa_grouped_split")
+        );
+        if !supported {
+            return Err(ServedModelError(
+                "worker.execution is not supported by this worker backend".into(),
+            ));
+        }
     }
     Ok(())
 }
@@ -861,18 +893,29 @@ fn execution_environment_values(
     let mut values = BTreeMap::new();
     if let Some(execution) = execution {
         let attention = &execution.paged_decode_attention;
-        values.insert(
-            "ULLM_EXPERIMENTAL_SQ8_PAGED_DECODE_SPLIT_TILE",
-            attention.split_tile.to_string(),
-        );
-        values.insert(
-            "ULLM_EXPERIMENTAL_PAGED_DECODE_GQA_GROUPED_SPLIT",
-            "1".into(),
-        );
-        values.insert(
-            "ULLM_EXPERIMENTAL_SQ8_PAGED_DECODE_SPLIT_ALLOW_MULTITILE",
-            "1".into(),
-        );
+        match attention.kernel.as_str() {
+            "gqa_grouped_split" => {
+                values.insert(
+                    "ULLM_EXPERIMENTAL_SQ8_PAGED_DECODE_SPLIT_TILE",
+                    attention.split_tile.to_string(),
+                );
+                values.insert(
+                    "ULLM_EXPERIMENTAL_PAGED_DECODE_GQA_GROUPED_SPLIT",
+                    "1".into(),
+                );
+                values.insert(
+                    "ULLM_EXPERIMENTAL_SQ8_PAGED_DECODE_SPLIT_ALLOW_MULTITILE",
+                    "1".into(),
+                );
+            }
+            "aq4_gqa_grouped_split" => {
+                values.insert(
+                    "ULLM_EXPERIMENTAL_PAGED_DECODE_GQA_GROUPED_SPLIT",
+                    "1".into(),
+                );
+            }
+            _ => {}
+        }
     }
     values
 }
@@ -1434,6 +1477,21 @@ mod tests {
         value
     }
 
+    fn v2_manifest_with_aq4_grouped_decode_execution() -> Value {
+        let mut value = v2_manifest_value("aq4");
+        value["worker"]["required_environment"]
+            .as_array_mut()
+            .unwrap()
+            .push(Value::String(PAGED_DECODE_SPLIT_GUARD.into()));
+        value["worker"]["execution"] = serde_json::json!({
+            "paged_decode_attention": {
+                "kernel": "aq4_gqa_grouped_split",
+                "split_tile": 128
+            }
+        });
+        value
+    }
+
     fn fixture(name: &str) -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../services/openai-gateway/tests/fixtures/served-model")
@@ -1693,6 +1751,79 @@ mod tests {
                 &serde_json::to_vec(&selector_as_guard).unwrap()
             )
             .is_err()
+        );
+    }
+
+    #[test]
+    fn aq4_grouped_decode_execution_is_geometry_bound_and_fail_closed() {
+        let value = v2_manifest_with_aq4_grouped_decode_execution();
+        let raw = serde_json::to_vec(&value).unwrap();
+        let loaded = load_served_model_bytes(fixture("aq4"), &raw).unwrap();
+        let execution = loaded.worker.execution.as_ref();
+        assert_eq!(
+            execution.unwrap().paged_decode_attention,
+            PagedDecodeAttentionExecution {
+                kernel: "aq4_gqa_grouped_split".into(),
+                split_tile: 128,
+            }
+        );
+        assert!(validate_execution_contract(&loaded.worker, WorkerBackendKind::Aq4).is_ok());
+        assert!(validate_execution_contract(&loaded.worker, WorkerBackendKind::Sq8).is_err());
+
+        let expected = execution_environment_values(execution);
+        assert_eq!(
+            expected.get("ULLM_EXPERIMENTAL_PAGED_DECODE_GQA_GROUPED_SPLIT"),
+            Some(&"1".to_string())
+        );
+        assert_eq!(expected.len(), 1);
+        assert!(validate_execution_environment_with(execution, |name| {
+            expected
+                .get(name)
+                .map(|value| std::ffi::OsString::from(value.as_str()))
+        })
+        .is_ok());
+        for unexpected in [
+            "ULLM_EXPERIMENTAL_HIP_PAGED_DECODE_SPLIT_TILE",
+            "ULLM_EXPERIMENTAL_HIP_PAGED_DECODE_SPLIT_MIN_CACHE_LEN",
+            "ULLM_EXPERIMENTAL_SQ8_PAGED_DECODE_SPLIT_TILE",
+            "ULLM_EXPERIMENTAL_SQ8_PAGED_DECODE_SPLIT_ALLOW_MULTITILE",
+            "ULLM_EXPERIMENTAL_PAGED_DECODE_GQA_PIPELINED_SPLIT",
+        ] {
+            assert!(validate_execution_environment_with(execution, |name| {
+                if name == unexpected {
+                    Some(std::ffi::OsString::from("1"))
+                } else {
+                    expected
+                        .get(name)
+                        .map(|value| std::ffi::OsString::from(value.as_str()))
+                }
+            })
+            .is_err());
+        }
+
+        let mut wrong_tile = v2_manifest_with_aq4_grouped_decode_execution();
+        wrong_tile["worker"]["execution"]["paged_decode_attention"]["split_tile"] =
+            Value::from(256);
+        assert!(
+            load_served_model_bytes(fixture("aq4"), &serde_json::to_vec(&wrong_tile).unwrap())
+                .is_err()
+        );
+
+        let mut wrong_profile = v2_manifest_with_aq4_grouped_decode_execution();
+        wrong_profile["worker"]["identity"]["execution_profile"] =
+            Value::String("rdna4_w8a8_block_ck".into());
+        assert!(load_served_model_bytes(
+            fixture("aq4"),
+            &serde_json::to_vec(&wrong_profile).unwrap()
+        )
+        .is_err());
+
+        let mut sq8 = v2_manifest_with_grouped_decode_execution();
+        sq8["worker"]["execution"]["paged_decode_attention"]["kernel"] =
+            Value::String("aq4_gqa_grouped_split".into());
+        sq8["worker"]["execution"]["paged_decode_attention"]["split_tile"] = Value::from(128);
+        assert!(
+            load_served_model_bytes(fixture("sq8"), &serde_json::to_vec(&sq8).unwrap()).is_err()
         );
     }
 }

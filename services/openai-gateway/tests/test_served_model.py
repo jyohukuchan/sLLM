@@ -110,6 +110,28 @@ def _sq8_v2_grouped_execution_document(path: Path) -> dict[str, Any]:
     return value
 
 
+def _aq4_v2_grouped_execution_document(path: Path) -> dict[str, Any]:
+    value = _document(path)
+    value["schema_version"] = "ullm.served_model.v2"
+    value["worker"]["protocol"] = "ullm.worker.v2"
+    value["worker"]["required_environment"].append(
+        "ULLM_REQUIRE_HIP_PAGED_DECODE_SPLIT_KERNEL"
+    )
+    value["worker"]["execution"] = {
+        "paged_decode_attention": {
+            "kernel": "aq4_gqa_grouped_split",
+            "split_tile": 128,
+        }
+    }
+    value["reasoning"] = {
+        **_v2_reasoning(),
+        "start_token_ids": [248068],
+        "end_token_ids": [248069],
+        "forced_end_token_ids": [248069],
+    }
+    return value
+
+
 def test_virtual_format_changes_only_public_and_format_contracts() -> None:
     existing = _document(FIXTURES / "sq8/served-model.json")
     virtual = _document(FIXTURES / "sq8/served-model-fq6.json")
@@ -179,6 +201,22 @@ def test_v2_grouped_decode_execution_is_typed_and_binds_the_split_guard(
     }
 
 
+def test_aq4_grouped_decode_execution_is_typed_and_binds_the_split_guard(
+    tmp_path: Path,
+) -> None:
+    path = _copy_fixture(tmp_path, "aq4")
+    _write(path, _aq4_v2_grouped_execution_document(path))
+
+    loaded = load_served_model(path)
+
+    assert loaded.worker.execution is not None
+    assert loaded.worker.execution.paged_decode_attention.kernel == "aq4_gqa_grouped_split"
+    assert loaded.worker.execution.paged_decode_attention.split_tile == 128
+    assert loaded.worker.execution.environment == {
+        "ULLM_EXPERIMENTAL_PAGED_DECODE_GQA_GROUPED_SPLIT": "1"
+    }
+
+
 @pytest.mark.parametrize(
     "mutate",
     [
@@ -206,7 +244,9 @@ def test_v2_grouped_decode_execution_rejects_unknown_and_invalid_values(
         load_served_model(path)
 
 
-def test_execution_is_rejected_by_v1_and_non_sq8_v2_manifests(tmp_path: Path) -> None:
+def test_execution_is_rejected_by_v1_and_mismatched_v2_manifests(
+    tmp_path: Path,
+) -> None:
     path = _copy_fixture(tmp_path)
     value = _document(path)
     value["worker"]["execution"] = {
@@ -256,6 +296,30 @@ def test_execution_requires_the_admitted_sq8_worker_profile(tmp_path: Path) -> N
     _write(path, value)
 
     with pytest.raises(ServedModelError, match="rdna4_w8a8_block_ck"):
+        load_served_model(path)
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda value: value["worker"]["execution"][
+            "paged_decode_attention"
+        ].__setitem__("split_tile", 256),
+        lambda value: value["worker"]["identity"].__setitem__(
+            "execution_profile", "rdna4_w8a8_block_ck"
+        ),
+        lambda value: value["worker"]["identity"].__setitem__("device", "gfx1030"),
+    ],
+)
+def test_aq4_grouped_decode_execution_is_geometry_bound_and_fail_closed(
+    tmp_path: Path, mutate: Callable[[dict[str, Any]], Any]
+) -> None:
+    path = _copy_fixture(tmp_path, "aq4")
+    value = _aq4_v2_grouped_execution_document(path)
+    mutate(value)
+    _write(path, value)
+
+    with pytest.raises(ServedModelError):
         load_served_model(path)
 
 
