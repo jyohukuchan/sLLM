@@ -662,17 +662,17 @@ plan はすべての selector を unset にして `enabled: false` を receipt �
 `/etc/ullm/served-models/active.json`、systemd、production default は変更しない。
 
 capture manifest は plan SHA-256、capture executable SHA-256/git commit、artifact/fixture/reference
-hash、selector fingerprint、device、Cargo feature、HIP guard environment と mode 別 elapsed time を
+hash、candidate ID、implementation symbol、selector fingerprint、device、Cargo feature、HIP guard environment と mode 別 elapsed time を
 記録する。evaluator は selector 以外の executable/device/compiler/guard configuration が control と
 candidate の全 repetition で一致しなければ fail とする。
 
-| 候補 | capture selector | v0.2 status |
-|---|---|---|
-| Flash2 staged wave32 | `ULLM_USE_SQ8_0_FLASH2_STAGED_WAVE32_PROTOTYPE=1` | full v0.2 capture 可 |
-| paged source-tile 128 | tile `128` と `ULLM_EXPERIMENTAL_SQ8_PAGED_DECODE_SPLIT_ALLOW_MULTITILE=1` | full v0.2 capture 可 |
-| paged source-tile 256 | tile `256` と同じ evaluation-only bypass | full v0.2 capture 可 |
-| handwritten WMMA projection | `rocm-handwritten-projection-gfx1201` + fresh private session | 現状 M=1-only。required M=128 を満たせず blocked/non-qualifying |
-| `SQ8_1` W8A8 | なし | frozen scope が `SQ8_0` のため v0.2 対象外。別 quality gate のまま |
+| 候補 | capture selector / implementation symbol | build feature | v0.2 status |
+|---|---|---|---|
+| Flash2 staged wave32 | `ULLM_USE_SQ8_0_FLASH2_STAGED_WAVE32_PROTOTYPE=1` / `ullm_sq8_0_cached_prefix_attn_f32_flash2_staged_wave32_prototype_kernel` | `rocm-ck-gfx1201` | full v0.2 capture 可 |
+| paged source-tile 128 | tile `128` + evaluation bypass / `ullm_runtime_paged_decode_attn_split_f32` | `rocm-ck-gfx1201` | full v0.2 capture 可 |
+| paged source-tile 256 | tile `256` + evaluation bypass / `ullm_runtime_paged_decode_attn_split_f32` | `rocm-ck-gfx1201` | full v0.2 capture 可 |
+| handwritten WMMA projection | fresh private session / `enable_handwritten_wmma_projection_prototype` | `rocm-handwritten-projection-gfx1201` | 現状 M=1-only。required M=128 を満たせず blocked/non-qualifying |
+| `SQ8_1` W8A8 | なし（frozen scope 外なので v0.2 capture/build はしない） | 未記録 | 別 quality gate のまま |
 
 source-tile の bypass は `decoder.rs` の exact-`1` opt-in だけである。tile selector 自体が
 設定されていない場合には無効で、unset/`1` 以外では従来の direct containment fallback を保つ。

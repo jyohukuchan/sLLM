@@ -157,6 +157,25 @@ class Sq8GateV02EvaluatorTests(unittest.TestCase):
         self.assertEqual(len(errors), 1)
         self.assertIn("hip_guard_environment", errors[0])
 
+    def test_candidate_selector_provenance_records_symbol_and_feature(self) -> None:
+        flash = PREPARER.selector_definition("flash2-staged-wave32", "candidate")
+        flash_configuration = flash["configuration"]
+        self.assertEqual(flash_configuration["build_feature"], "rocm-ck-gfx1201")
+        self.assertIn(
+            "ullm_sq8_0_cached_prefix_attn_f32_flash2_staged_wave32_prototype_kernel",
+            flash_configuration["implementation_symbols"],
+        )
+        tile = PREPARER.selector_definition("paged-decode-source-tile-128", "candidate")
+        self.assertIn(
+            "ullm_runtime_paged_decode_attn_split_f32",
+            tile["configuration"]["implementation_symbols"],
+        )
+        handwritten = PREPARER.selector_definition("handwritten-wmma-projection", "candidate")
+        self.assertEqual(
+            handwritten["configuration"]["build_feature"],
+            "rocm-handwritten-projection-gfx1201",
+        )
+
     def test_frozen_gate_hash_rejection(self) -> None:
         value = json.loads(GATE_PATH.read_text(encoding="utf-8"))
         value["status"] = "tampered-for-test"

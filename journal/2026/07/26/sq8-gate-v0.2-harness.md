@@ -26,6 +26,8 @@ Date: 2026-07-26
   明示した。基準 JSON の数値はコードに複製していない。
 - `ullm-sq8-gate-capture` と plan launcher を追加した。private teacher-forced API が CPU reference
   token stream だけを次 input に使い、必要 position の logits/final/layer trace を F32LE で保存する。
+  candidate ID、implementation symbol、build feature、capture executable の commit/hash を selector と
+  manifest に残す。
   source-tile 128/256 は exact `ULLM_EXPERIMENTAL_SQ8_PAGED_DECODE_SPLIT_ALLOW_MULTITILE=1` の
   child-process opt-in 時だけ direct containment fallback を迂回する。unset/default は従来通り
   direct dispatch である。plan は incomplete reference index を `blocked_reference_or_capture` として
@@ -49,7 +51,7 @@ Date: 2026-07-26
   `benchmarks/results/2026-07-26/sq8-gate-v0.2-harness/intentional-failure-final-index/result.json`。
 - partial index に対する Flash2 plan preparation は、4,063 required position不足を示す
   `blocked_reference_or_capture` receipt で停止した。GPU subprocess は起動していない。
-- Python unit test 8 件、default Rust type check、`rocm-ck-gfx1201` と
+- Python unit test 9 件、default Rust type check、`rocm-ck-gfx1201` と
   `rocm-handwritten-projection-gfx1201` の capture binary type check を通した。
   GPU execution、systemd、active manifest、`/opt/ullm`、activation/campaign は実施していない。
 

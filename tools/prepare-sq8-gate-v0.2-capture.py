@@ -94,6 +94,9 @@ def selector_definition(candidate: str, role: str) -> dict[str, Any]:
             "kind": "flash2_staged_wave32_reduction",
             "environment": {"ULLM_USE_SQ8_0_FLASH2_STAGED_WAVE32_PROTOTYPE": "1"},
             "build_feature": "rocm-ck-gfx1201",
+            "implementation_symbols": [
+                "ullm_sq8_0_cached_prefix_attn_f32_flash2_staged_wave32_prototype_kernel",
+            ],
             "scope": "SQ8_0 full-model; isolated process environment",
         },
         "paged-decode-source-tile-128": {
@@ -103,6 +106,11 @@ def selector_definition(candidate: str, role: str) -> dict[str, Any]:
                 "ULLM_EXPERIMENTAL_SQ8_PAGED_DECODE_SPLIT_ALLOW_MULTITILE": "1",
             },
             "build_feature": "rocm-ck-gfx1201",
+            "implementation_symbols": [
+                "ullm_runtime_paged_decode_attn_split_f32",
+                "ullm_runtime_sys::paged_decode_attn_split_f32",
+                "PagedDecodeState::apply_attention",
+            ],
             "scope": "SQ8_0 full-model; explicit evaluation-only containment bypass",
         },
         "paged-decode-source-tile-256": {
@@ -112,12 +120,21 @@ def selector_definition(candidate: str, role: str) -> dict[str, Any]:
                 "ULLM_EXPERIMENTAL_SQ8_PAGED_DECODE_SPLIT_ALLOW_MULTITILE": "1",
             },
             "build_feature": "rocm-ck-gfx1201",
+            "implementation_symbols": [
+                "ullm_runtime_paged_decode_attn_split_f32",
+                "ullm_runtime_sys::paged_decode_attn_split_f32",
+                "PagedDecodeState::apply_attention",
+            ],
             "scope": "SQ8_0 full-model; explicit evaluation-only containment bypass",
         },
         "handwritten-wmma-projection": {
             "kind": "handwritten_wmma_projection_prototype",
             "environment": {},
             "build_feature": "rocm-handwritten-projection-gfx1201",
+            "implementation_symbols": [
+                "Qwen3Sq8ServingSession::enable_handwritten_wmma_projection_prototype",
+                "Qwen3Sq8StackRuntime::run_paged_m1_sequence_step_handwritten_wmma_prototype_synchronized",
+            ],
             "scope": "SQ8_0 M=1-only private session selector",
         },
     }
@@ -131,6 +148,7 @@ def selector_definition(candidate: str, role: str) -> dict[str, Any]:
         "configuration": {
             "candidate_id": candidate,
             "build_feature": chosen["build_feature"],
+            "implementation_symbols": chosen["implementation_symbols"],
             "scope": chosen["scope"],
             "all_other_experimental_selectors": "disabled",
         },
@@ -292,9 +310,16 @@ def build_plan(args: argparse.Namespace) -> int:
                 "frozen_gate_sha256": gate_sha,
                 "candidate_id": candidate,
                 "reason": "v0.2 scope.format_id is SQ8_0; SQ8_1 W8A8 is a separate quality gate.",
+                "candidate_provenance": {
+                    "candidate_id": candidate,
+                    "capture_route": "not_applicable_under_frozen_sq8_0_scope",
+                    "build_feature": "not_recorded: v0.2 does not build or capture SQ8_1",
+                    "implementation_symbols": [],
+                },
             },
         )
         return 0
+    selector = selector_definition(candidate, args.role)
     reference_qualification = reference_index_qualification(gate, index)
     if not reference_qualification["complete"]:
         write_json_new(
@@ -307,6 +332,7 @@ def build_plan(args: argparse.Namespace) -> int:
                 "role": args.role,
                 "reason": "reference index does not yet contain every frozen v0.2 capture position; no GPU plan was prepared",
                 "coverage": reference_qualification,
+                "selector": selector,
             },
         )
         return 0
@@ -322,6 +348,7 @@ def build_plan(args: argparse.Namespace) -> int:
                 "role": args.role,
                 "reason": "reference index records an incomplete strict-F32 reference qualification; no GPU plan was prepared",
                 "reference_qualification": recorded_reference_completion,
+                "selector": selector,
             },
         )
         return 0
@@ -338,10 +365,10 @@ def build_plan(args: argparse.Namespace) -> int:
                 "frozen_gate_sha256": gate_sha,
                 "candidate_id": candidate,
                 "reason": "The private handwritten WMMA selector is M=1-only and cannot satisfy required M=128 prefill coverage. Use --diagnostic-only only for non-qualifying M=1 evidence.",
+                "selector": selector,
             },
         )
         return 0
-    selector = selector_definition(candidate, args.role)
     if args.role == "control":
         candidate_identity = "matched-ck-or-direct-control"
     else:
