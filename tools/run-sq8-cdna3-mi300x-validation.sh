@@ -148,6 +148,7 @@ run_step() {
   shift
   local stamp="$state_dir/$name.done"
   local log="$logs_dir/$name.log"
+  local status
   if [[ -f $stamp ]]; then
     printf 'SKIP %s (already complete)\n' "$name"
     return 0
@@ -164,8 +165,9 @@ run_step() {
       "$name" "$started_at" "$finished_at" "$duration_seconds" >>"$timings_file"
     printf 'PASS %s\n' "$name"
     return 0
+  else
+    status=$?
   fi
-  local status=$?
   finished_at=$(date -Is)
   duration_seconds=$(( $(date +%s) - started_epoch ))
   printf '%s\t%s\t%s\t%s\tfail:%s\n' \
