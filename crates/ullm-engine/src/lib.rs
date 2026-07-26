@@ -20,6 +20,7 @@ pub mod golden;
 pub mod host_bytes;
 pub mod inference_api;
 pub mod loader;
+pub mod model_config;
 pub mod model_graph;
 pub mod package;
 pub mod qwen35_aq4_head_runtime;

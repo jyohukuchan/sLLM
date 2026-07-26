@@ -18,6 +18,7 @@ pub use crate::inference_api::{
     ReleaseSummary as Sq8ReleaseSummary, SamplingParams as Sq8SamplingParams,
 };
 use crate::loader::{read_named_passthrough_f32, verify_named_passthrough_payload};
+use crate::model_config::load_model_config_from_package;
 use crate::reasoning::{ReasoningDialect, ReasoningPhase, ReasoningState};
 use crate::scheduler::{
     KvBlockAllocatorStats, Request, RequestId, SchedulerDecodeRequest, SchedulerState,
@@ -948,6 +949,25 @@ impl Qwen3Sq8ServingSession {
             )));
         }
         let package_path = package_path.as_ref();
+        load_model_config_from_package(package_path)
+            .and_then(|loaded| {
+                loaded.require_qwen3_full_attention().and_then(|config| {
+                    config.validate_static_runtime_shape(
+                        QWEN3_14B_HIDDEN_SIZE,
+                        QWEN3_14B_SQ8_STACK_LAYERS,
+                        QWEN3_14B_Q_HEADS,
+                        QWEN3_14B_KV_HEADS,
+                        QWEN3_14B_HEAD_DIM,
+                        QWEN3_14B_VALUE_DIM,
+                        QWEN3_14B_VOCAB_SIZE,
+                    )
+                })
+            })
+            .map_err(|error| {
+                Sq8ServingError::invalid_configuration(format!(
+                    "Qwen3-14B SQ8_0 model config rejection: {error}"
+                ))
+            })?;
         let load_result = (|| {
             let device_info = context.device_info()?;
             validate_qwen3_14b_sq8_r9700_device_info(&device_info)?;

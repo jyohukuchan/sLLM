@@ -20,6 +20,7 @@ use crate::loader::{
     PassthroughF32Data, WeightRegistry, effective_rmsnorm_weight_values,
     materialize_selected_aq4_matrix, read_named_passthrough_f32,
 };
+use crate::model_config::{Qwen3ModelConfig, load_model_config_from_package};
 use crate::scheduler::{RequestId, SchedulerDecodeRequest, SchedulerState};
 use crate::sq::{SqFp8Artifact, materialize_named_sq_fp8_tensor_to_runtime_f32};
 use ullm_runtime_sys::{RuntimeBuffer, RuntimeContext, RuntimeStream};
@@ -46,6 +47,8 @@ pub struct Qwen3PackageDecoderLayerRuntime {
 }
 
 pub struct Qwen3PackageModelRuntime {
+    /// The fail-closed architecture contract used to build this runtime.
+    pub architecture_config: Qwen3ModelConfig,
     pub layers: Vec<Qwen3PackageDecoderLayerRuntime>,
     pub hidden: usize,
     pub q_heads: usize,
@@ -265,30 +268,24 @@ impl Qwen3PackageModelRuntime {
         layer_indices: &[usize],
         sq_overlay: Option<&Qwen3PackageSqOverlay<'_>>,
     ) -> Result<Self, String> {
-        if layer_indices.is_empty() {
-            return Err(
-                "Qwen3 package model runtime requires at least one layer index".to_string(),
-            );
-        }
-        let mut unique_layers = BTreeSet::new();
-        for &layer_index in layer_indices {
-            if !unique_layers.insert(layer_index) {
-                return Err(format!(
-                    "Qwen3 package model runtime layer index {layer_index} is duplicated"
-                ));
-            }
-        }
+        validate_qwen3_model_layer_indices(layer_indices)?;
+        let loaded_config = load_model_config_from_package(path)?;
+        let architecture_config = loaded_config
+            .require_qwen3_full_attention()
+            .map_err(|err| format!("Qwen3 package model runtime config rejection: {err}"))?
+            .clone();
 
         let mut layers = Vec::with_capacity(layer_indices.len());
         for &layer_index in layer_indices {
             layers.push(
-                qwen3_package_decoder_layer_runtime_from_package_with_sq_overlay(
+                qwen3_package_decoder_layer_runtime_from_package_with_sq_overlay_and_config(
                     context,
                     stream,
                     path,
                     chunk_bytes,
                     layer_index,
                     sq_overlay,
+                    &architecture_config,
                 )?,
             );
         }
@@ -336,6 +333,7 @@ impl Qwen3PackageModelRuntime {
         }
 
         Ok(Self {
+            architecture_config,
             layers,
             hidden,
             q_heads,
@@ -356,19 +354,7 @@ impl Qwen3PackageModelRuntime {
     }
 
     pub fn default_rotary_dim(&self) -> Result<usize, String> {
-        let candidate = if self.head_dim >= 4 {
-            self.head_dim / 4
-        } else {
-            self.head_dim
-        };
-        let rotary_dim = candidate - (candidate % 2);
-        if rotary_dim == 0 {
-            return Err(format!(
-                "default rotary_dim is zero for head_dim={}",
-                self.head_dim
-            ));
-        }
-        Ok(rotary_dim)
+        self.architecture_config.legacy_runtime_rotary_dim()
     }
 
     pub fn decode_shape(&self, block_size: usize, cache_blocks: usize) -> PagedDecodeShape {
@@ -453,6 +439,31 @@ pub fn qwen3_package_decoder_layer_runtime_from_package_with_sq_overlay(
     layer_index: usize,
     sq_overlay: Option<&Qwen3PackageSqOverlay<'_>>,
 ) -> Result<Qwen3PackageDecoderLayerRuntime, String> {
+    let loaded_config = load_model_config_from_package(path)?;
+    let architecture_config = loaded_config
+        .require_qwen3_full_attention()
+        .map_err(|err| format!("Qwen3 package decoder layer config rejection: {err}"))?;
+    qwen3_package_decoder_layer_runtime_from_package_with_sq_overlay_and_config(
+        context,
+        stream,
+        path,
+        chunk_bytes,
+        layer_index,
+        sq_overlay,
+        architecture_config,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn qwen3_package_decoder_layer_runtime_from_package_with_sq_overlay_and_config(
+    context: &mut RuntimeContext,
+    stream: &mut RuntimeStream,
+    path: &str,
+    chunk_bytes: usize,
+    layer_index: usize,
+    sq_overlay: Option<&Qwen3PackageSqOverlay<'_>>,
+    architecture_config: &Qwen3ModelConfig,
+) -> Result<Qwen3PackageDecoderLayerRuntime, String> {
     let input_norm_tensor =
         format!("model.language_model.layers.{layer_index}.input_layernorm.weight");
     let q_tensor = format!("model.language_model.layers.{layer_index}.self_attn.q_proj.weight");
@@ -501,6 +512,15 @@ pub fn qwen3_package_decoder_layer_runtime_from_package_with_sq_overlay(
             runtime_shape.hidden, weights.post_attention.hidden
         ));
     }
+    architecture_config.validate_runtime_layer_shape(
+        layer_index,
+        runtime_shape.hidden,
+        runtime_shape.q_heads,
+        runtime_shape.kv_heads,
+        runtime_shape.head_dim,
+        runtime_shape.value_dim,
+        weights.post_attention.intermediate,
+    )?;
     Ok(Qwen3PackageDecoderLayerRuntime {
         layer_index,
         input_norm_tensor,
@@ -521,6 +541,21 @@ pub fn qwen3_package_decoder_layer_runtime_from_package_with_sq_overlay(
         weights,
         runtime_shape,
     })
+}
+
+fn validate_qwen3_model_layer_indices(layer_indices: &[usize]) -> Result<(), String> {
+    if layer_indices.is_empty() {
+        return Err("Qwen3 package model runtime requires at least one layer index".to_string());
+    }
+    let mut unique_layers = BTreeSet::new();
+    for &layer_index in layer_indices {
+        if !unique_layers.insert(layer_index) {
+            return Err(format!(
+                "Qwen3 package model runtime layer index {layer_index} is duplicated"
+            ));
+        }
+    }
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -892,6 +927,9 @@ fn materialize_package_projection_matrix(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model_config::{
+        AttentionConfig, DecoderShapeConfig, DenseMlpConfig, RmsNormWeightConvention,
+    };
     use crate::scheduler::Request;
 
     fn passthrough(values: Vec<f32>) -> PassthroughF32Data {
@@ -899,6 +937,36 @@ mod tests {
             shape: vec![values.len() as u64],
             dtype: "F32".to_string(),
             values,
+        }
+    }
+
+    fn qwen3_test_config() -> Qwen3ModelConfig {
+        Qwen3ModelConfig {
+            decoder: DecoderShapeConfig {
+                model_type: "qwen3".to_string(),
+                hidden_size: 1,
+                num_hidden_layers: 1,
+                num_attention_heads: 1,
+                num_key_value_heads: 1,
+                head_dim: 1,
+                rms_norm_eps: 1e-6,
+                vocab_size: 1,
+                tie_word_embeddings: false,
+            },
+            attention: AttentionConfig {
+                bias: false,
+                dropout: 0.0,
+            },
+            dense_mlp: DenseMlpConfig {
+                activation: "silu".to_string(),
+                intermediate_size: 1,
+            },
+            rope_theta: 1_000_000.0,
+            max_position_embeddings: 1,
+            max_window_layers: 1,
+            use_sliding_window: false,
+            sliding_window: None,
+            norm_weight_convention: RmsNormWeightConvention::DirectWeight,
         }
     }
 
@@ -981,6 +1049,7 @@ mod tests {
         let mut context = RuntimeContext::create(0).expect("create CPU runtime context");
         let mut stream = context.create_stream().expect("create CPU runtime stream");
         let model = Qwen3PackageModelRuntime {
+            architecture_config: qwen3_test_config(),
             layers: Vec::new(),
             hidden: 1,
             q_heads: 1,

@@ -16,6 +16,7 @@ use crate::execution_batch::WorkspacePlan;
 use crate::loader::{
     PassthroughF32Data, effective_qwen35_rmsnorm_weight_values, read_named_passthrough_f32,
 };
+use crate::model_config::{DecoderLayerKind, load_model_config_from_package};
 use crate::package::TensorSelector;
 use crate::qwen35_aq4_head_runtime::{
     PackageEmbeddingRuntime, PackageFinalNormRuntime, PackageLmHeadMode, PackageLmHeadRuntime,
@@ -798,10 +799,29 @@ impl Qwen35Aq4ModelRuntime {
         if config.chunk_bytes == 0 {
             return Err("Qwen3.5 AQ4 load chunk bytes must be positive".to_string());
         }
+        // Resolve architecture before inspecting any package tensor.  In
+        // particular, a Qwen3/Gemma/MoE package must never be allowed to
+        // reach the Qwen3.5 AQ4_0 weight loader merely because its manifest
+        // happens to use familiar tensor names.
+        let loaded_model_config = load_model_config_from_package(&config.package_dir)?;
+        let architecture_config = loaded_model_config
+            .require_qwen35_aq4_text()
+            .map_err(|err| format!("Qwen3.5 AQ4_0 model config rejection: {err}"))?;
         let path = package_path_text(&config.package_dir)?;
         let manifest_layers = package_manifest_layer_entries(&config.package_dir)?;
         let layers = select_manifest_layers(&manifest_layers, config.layer_indices.as_deref())?;
         let (vocab, hidden) = package_embedding_shape(path)?;
+        let config_layer_kinds = manifest_layers
+            .iter()
+            .map(|entry| {
+                let kind = match entry.kind {
+                    PackageDecoderLayerKind::SelfAttention => DecoderLayerKind::FullAttention,
+                    PackageDecoderLayerKind::LinearAttention => DecoderLayerKind::LinearAttention,
+                };
+                (entry.layer_index, kind)
+            })
+            .collect::<Vec<_>>();
+        architecture_config.validate_package_layers(vocab, hidden, &config_layer_kinds)?;
         let mut geometry = Qwen35Aq4ModelGeometry::new(
             vocab,
             hidden,
