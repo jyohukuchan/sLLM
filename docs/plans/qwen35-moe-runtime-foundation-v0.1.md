@@ -72,7 +72,8 @@ The primitive ABI is split into these operations:
 | --- | --- | --- |
 | `moe_route` | `[M,H]` hidden, `[E,H]` router | `[M,K]` scores, `[M,K]` expert IDs, `[M]` boundary-tie flags |
 | `moe_gather` | `[M,H]`, `K` | `[M*K,H]` assignment-major activations |
-| `moe_grouped_gemm` | assignment-major activations, IDs, `[E,R,C]` weight | `[M*K,R]` |
+| `moe_decode_gemm` | one token's `[K,C]` selected activations, selected IDs, `[E,R,C]` weight | `[K,R]` |
+| `moe_grouped_gemm` | prefill assignment-major activations, IDs, `[E,R,C]` weight | `[M*K,R]` |
 | `moe_gated_silu` | `[M*K,2I]` | `[M*K,I]` |
 | `moe_scatter_weighted` | `[M*K,H]`, scores | `[M,H]` routed reduction |
 | `moe_sigmoid_gate` | `[M]` shared gates, `[M,H]` shared output | `[M,H]` |
@@ -80,8 +81,8 @@ The primitive ABI is split into these operations:
 The layout exactly preserves the safetensors row-major layout:
 `expert * rows_per_expert * cols + row * cols + col`. Thus routed gate/up
 uses `R=2I=1024, C=H=2048`, and routed down uses `R=H=2048, C=I=512`.
-The shared expert uses the same generic grouped GEMM with `E=1`; it does not
-need a special dense-only implementation.
+The shared expert uses `E=1`: on decode it uses the decode GEMM path; on
+prefill it uses the grouped path. It does not need a dense-only implementation.
 
 ## Data flow
 
@@ -101,24 +102,31 @@ hidden[M,H] -- shared gate projection --> shared_gate[M]
 sigmoid(shared_gate) * shared + routed --> output[M,H]
 ```
 
-The CPU reference composes the same materialized stages. The GPU baseline uses
-one simple kernel per primitive and uses the same assignment-major layout;
-correctness and inspectability take priority over reuse/tiling efficiency.
+The CPU reference composes the same materialized stages. The GPU baseline has
+separate decode and prefill GEMM launch boundaries plus simple kernels for the
+other primitives. Prefill retains assignment-major rows for direct reference
+comparison; correctness and inspectability take priority over tiling
+efficiency. It therefore has seven correctness kernels: route, activation
+gather, decode GEMM, prefill grouped GEMM, gated-SiLU, weighted scatter, and
+shared sigmoid gate.
 
 ## Decode and prefill are distinct plans
 
 ### Decode (`M=1`)
 
 There are exactly eight routed assignments plus one shared expert. The
-baseline performs routing then gathers only the eight expert slices. A future
-decode specialization should collect those eight BF16 expert weight slabs
-before launching the small GEMMs. The complete routed reservoir is 1.5 GiB
-per text layer, while the eight selected routed slabs are 48 MiB per token
+baseline has a separate `moe_decode_gemm` ABI and HIP kernel, which accepts
+only the selected expert IDs and `K` activation rows; it is never dispatched
+through the prefill grouped kernel. Physical collection of the eight BF16
+expert slabs belongs to the later residency layer: this correctness substrate
+indexes the selected slabs in a provided `[E,R,C]` buffer and deliberately
+does not invent an offload/copy policy. The complete routed reservoir is 1.5
+GiB per text layer, while the eight selected routed slabs are 48 MiB per token
 (`8 * (1024*2048 + 2048*512) * 2`); the shared gate/up/down adds about 6 MiB.
 Thus even decode's approximately 54 MiB of selected MLP weight traffic per
-layer is bandwidth-dominated, not arithmetic-dominated.
-It must remain separate from prefill’s grouped plan; no universal kernel is
-assumed.
+layer is bandwidth-dominated, not arithmetic-dominated. A later residency
+implementation must physically gather those slabs before the decode GEMMs;
+it must remain separate from prefill’s grouped plan.
 
 ### Prefill (`M=N`)
 
@@ -179,18 +187,20 @@ weight policy as an explicit later integration decision.
 ## Implemented baseline and evidence
 
 The public runtime C ABI now has loader-independent `moe_route`, `moe_gather`,
-`moe_grouped_gemm`, `moe_gated_silu`, `moe_scatter_weighted`, and
+`moe_decode_gemm`, `moe_grouped_gemm`, `moe_gated_silu`, `moe_scatter_weighted`, and
 `moe_sigmoid_gate` operations. Their CPU implementation is the reference;
 the optional `rocm-moe-gfx1201` feature compiles simple static HIP kernels
 only for the permitted gfx1201 device. The GPU path fails closed when that
 feature is absent or the selected device is not gfx1201.
 
 `moe_runtime_verify` exercises every materialized stage on both F32 and raw
-BF16 weight storage. CPU C ABI versus the Rust reference is bit-identical for
-all stages. On the R9700, the largest F32-stage absolute difference was
-`2.384185791e-7`; the largest raw-BF16-stage absolute difference was
-`3.576278687e-7` (shared gate/up), with final-output difference
-`2.384185791e-7`. This is a correctness check, not a timing measurement.
+BF16 weight storage through two synthetic paths: prefill (`M=5`) uses
+`moe_grouped_gemm`, and decode (`M=1`) uses only `moe_decode_gemm`. CPU C ABI
+versus the Rust reference is bit-identical for all stages in both paths. On
+the R9700, each path's final-output maximum absolute difference was
+`2.384185791e-7`; the largest raw-BF16-stage difference was
+`3.576278687e-7` (prefill shared gate/up). This is a correctness check, not a
+timing measurement.
 
 For the real layer-0 router fixture, generated directly with the installed
 HF `Qwen3_5MoeTopKRouter`, three BF16 inputs selected:
@@ -207,11 +217,14 @@ not claimed as an HF ordering match. The compact result reports are under
 `benchmarks/results/2026-07-26/qwen35-moe-runtime-v0.1/`; raw fixture tensors
 remain local because they duplicate checkpoint weights.
 
-The same fixture generator also captures a compact real 3-D slice of layer-0
-`gate_up_proj`: source experts `[52,148]`, raw BF16 shape `[2,37,71]`, with
-assignment IDs deliberately ordered `[1,0,1]`. HF F32 expected values, the
-raw-BF16 CPU reference, CPU C ABI, and R9700 grouped GEMM all agreed exactly
-(`max_abs = 0`). This validates the expert-axis/row/column addressing without
+The same fixture generator captures two compact real 3-D layer-0
+`gate_up_proj` slices. The prefill slice uses source experts `[52,148]`, raw
+BF16 shape `[2,37,71]`, and deliberately reordered local IDs `[1,0,1]`.
+The decode slice uses the real first-token top-8 source experts
+`[52,148,101,178,151,128,116,166]`, raw BF16 `[8,37,71]`, and local IDs
+`[0,1,2,3,4,5,6,7]`. In both cases HF F32 expected values, the raw-BF16 CPU
+reference, CPU C ABI, and the respective R9700 GEMM kernel agreed exactly
+(`max_abs = 0`). This validates expert-axis/row/column addressing without
 checking a copied full 1.5-GiB expert reservoir into source control.
 
 `tools/architecture_hf_trace.py self-test` was also run unchanged and rejected

@@ -486,3 +486,10 @@ policy が未実装なので、35B の end-to-end 生成は未到達である。
 完了した。72--120 h は full text-only runtime と実推論まで含む見積りとして据え置く。一方、
 ここで実装した substrate 単体はおよそ 16--28 h 規模に分解でき、残る工数の主因は attention
 integration、streaming/quantization residency、prefill specialization、trace writer である。
+
+追補: decode を prefill の可変 group kernel に流用しないため、`moe_decode_gemm` の独立 ABI と
+gfx1201 kernel を追加した。synthetic `M=1` decode と `M=5` prefill はそれぞれ CPU reference と
+CPU ABI で全段 0 差、R9700 では final output が各々最大 `2.384185791e-7` 差だった。さらに実
+layer-0 top-8 `[52,148,101,178,151,128,116,166]` の BF16 `[8,37,71]` slice は HF F32 expected/
+CPU/R9700 decode GEMM で 0 差である。実 weight slab の物理 gather と prefill
+histogram/prefix-sum compaction は residency/最適化段階として未実装のまま明示している。

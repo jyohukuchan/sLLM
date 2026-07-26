@@ -22,10 +22,11 @@ Date: 2026-07-26
   raw F32/BF16 grouped GEMM、gated-SiLU、weighted scatter、shared sigmoid gate であり、
   assignment-major layout を明示している。CPU reference は raw BF16 matrix bytes も
   safetensors と同じ形で読める。
-- gfx1201/R9700 専用の correctness-first HIP kernels を追加した。decode と prefill は
-  同じ ABI を使うが別の将来最適化方針にした。decode は selected weight gather、prefill は
-  expert histogram/prefix-sum/grouped GEMM を後続の専門化対象とし、一つの kernel に無理に
-  統合していない。
+- gfx1201/R9700 専用の correctness-first HIP kernels を追加した。decode は
+  `moe_decode_gemm` ABI/専用 kernel、prefill は `moe_grouped_gemm` ABI/可変 group kernel
+  として実装上も分離した。decode の物理的な selected-weight slab gather は residency layer
+  の責務として残し、現段階では提供された 3-D buffer を selected ID で参照する。prefill の
+  histogram/prefix-sum/compaction は後続の専門化対象である。
 - HF `Qwen3_5MoeTopKRouter` を直接呼ぶ fixture generator を追加した。実 BF16 layer-0
   router の 3 token × top-8 は CPU reference / CPU C ABI / R9700 C ABI で ID と score が
   完全一致した。F32 dot のみでは一つの expert 順が入れ替わることを検出し、HF の BF16
@@ -34,9 +35,13 @@ Date: 2026-07-26
   採取し、local assignment ID `[1,0,1]` の grouped GEMM を実行した。HF F32 expected、
   CPU reference、CPU C ABI、R9700 はすべて 0 差であり、3-D expert axis/row/column の
   layout を小さい実 weight slice で直接検証した。
-- synthetic full MoE block は F32 と raw BF16 の双方で CPU C ABI が全 stage 0 差、R9700
-  の final output は最大 `2.384185791e-7` 差だった。BF16 の stage 全体最大は shared
-  gate/up の `3.576278687e-7`。これは timing ではない。
+- 実 decode の first-token top-8 source expert
+  `[52,148,101,178,151,128,116,166]` から raw BF16 `[8,37,71]` slice も採取した。HF F32
+  expected、CPU reference、CPU C ABI、R9700 decode GEMM はすべて 0 差だった。
+- synthetic full MoE block は prefill (`M=5`) と decode (`M=1`) を別 ABI で通した。CPU C ABI
+  は F32/raw BF16 とも全 stage 0 差、R9700 の各 path の final output は最大
+  `2.384185791e-7` 差、prefill BF16 stage 全体最大は shared gate/up の
+  `3.576278687e-7` だった。これは timing ではない。
 - R9700 は 31.859 GiB。text decoder raw BF16 63.613 GiB（31.754 GiB 不足）、complete
   checkpoint 66.965 GiB（35.106 GiB 不足）であり、full resident inference は実施不能と
   判定した。量子化/offload を暗黙に導入して生成成功と見なすことはしていない。
