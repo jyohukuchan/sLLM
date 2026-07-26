@@ -134,3 +134,55 @@ thermal histories, image identities, and failure log are in
 [r9700-external-engine-baseline](../../benchmarks/results/2026-07-26/r9700-external-engine-baseline/).
 ullm-openai.service was stopped and restored in one 22 min 47 s isolation
 window; llama-qwen35-udq4.service stayed inactive/disabled.
+
+## R9700 controlled prefill comparison (2026-07-26)
+
+The matching prefill sweep is complete on the R9700 only.  It uses one stream,
+five timed repeats after a same-length warm-up, 128-token internal projection
+units, all requested llama.cpp layers on GPU, and flash attention enabled.
+uLLM SQ8_0 uses F32 KV; llama.cpp Q8_0 is reported with both F32 and F16 KV.
+The uLLM measurement driver is an `Instant`-timed synchronized prefill loop,
+not a profiler-range duration.  `llama-bench -p N -n 0 -r 5` was source-checked:
+its load and warm-up precede `t_start`, and its prompt test synchronizes.
+
+| prompt tokens | uLLM SQ8_0 F32 KV tok/s | llama.cpp Q8_0 F32 KV tok/s | llama.cpp Q8_0 F16 KV tok/s |
+| ---: | ---: | ---: | ---: |
+| 128 | 851.659 | 1165.756 | 1189.076 |
+| 512 | 513.676 | 1195.722 | 1187.016 |
+| 1024 | 335.996 | 1145.351 | 1174.539 |
+| 2048 | 188.425 | 1058.379 | 1127.775 |
+| 4095* | 71.576 | 1008.683 | 1054.871 |
+
+*4095 is the operational 4096-point.  The uLLM serving request reserves one
+output token, and its fixed-M128 planner takes 31 M=128 advances followed by
+127 M=1 tail advances.  llama.cpp reports 32 internal 128-token ubatches.
+This boundary behavior must not be generalized to a divisible M128 prompt.
+
+uLLM wins no measured length.  llama.cpp F32 is 1.369x, 2.328x, 3.409x,
+5.617x, and 14.092x faster across the listed lengths; F16 is 1.396x, 2.311x,
+3.496x, 5.985x, and 14.738x.  The common SQ8 logical numerator reports
+uLLM 188.550--335.936 logical GB/s and 2.011--22.560 lower-bound TFLOP/s,
+while llama.cpp reports 258.088--3649.230 logical GB/s and 28.346--31.851
+lower-bound TFLOP/s.  The llama logical rate exceeds the 640 GB/s nominal roof
+at longer prompts because the common denominator deliberately counts
+Q-head-expanded logical GQA KV consumption; it is therefore **not** a
+physical HBM efficiency.  Actual HBM counter evidence was not captured, so
+the strict physical bandwidth-versus-compute bottleneck is unconfirmed.
+Within the common work mix, causal KV traffic is 79.8--97.0% at N=512--4095,
+so the long-prompt uLLM shape is logically attention/KV dominated rather than
+a pure dense-projection FLOPS result.
+
+All processes passed a cold pre-process gate (edge 38--40 C, hotspot 38--42 C,
+socket 7--16 W).  A strictly matched timed-start temperature was not verified:
+at N=2048 the nearest post-warm-up uLLM sample was 57/78 C edge/hotspot versus
+llama F32 46/62 C; at N=4095 it was 69/90 C versus 49/66 C.  This is retained
+as a limitation rather than interpreting the long-prompt values as
+temperature-normalized.  One intentional service isolation window was used.
+The explicit restoration at 20:06:13 was followed during normal service
+operation by further worker-EOF/restart events; their cause is unconfirmed.
+The 20:16:26 audit was active/running, and `llama-qwen35-udq4.service`
+remained inactive/disabled.
+
+The complete raw data, full commands, source timing excerpts, accounting,
+thermal history, service audit, and normalized rows are in
+[r9700-prefill-comparison](../../benchmarks/results/2026-07-26/r9700-prefill-comparison/).
