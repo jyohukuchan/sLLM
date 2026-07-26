@@ -661,3 +661,84 @@ selected set を 105/320、ordered top-k を 238/320 変えた。従って packa
 読み替えない。軽量昇格 policy に基づく promotion、service 操作、FP32 corpus/campaign/bitwise
 gate は行っていない。次段には、top-k stability requirement を満たす容量内の既存 format policy
 又は requirement 自体の再判断と、MoE loader/residency integration が必要である。
+
+## BP: `SQ8_0` resident runtime の descriptor 境界（2026-07-26）
+
+### Phase 1: Qwen3-14B 固定契約の棚卸し
+
+BF が数えた `qwen3_loader.rs` の 15 契約とは別に、実際に resident `SQ8_0` を
+load/execute/serve する経路を読んだ。ここでは単なる定数参照ではなく、別の
+architecture を通すと誤った重み・workspace・KV state・出力契約を選ぶ **15 個の
+独立した固定契約**を数える。
+
+| # | file / function | 現在固定されているもの | 一般化時に必要な descriptor 情報 |
+| ---: | --- | --- | --- |
+| 1 | `sq8_layer_runtime.rs::Qwen3Sq8LayerConfig::{qwen3_14b,validate}` | hidden=5120、Q/KV=40/8、head/value dim=128、I=17408、eps=1e-6、theta=1,000,000、Qwen3 の position/sequence 制限。 | decoder shape、層ごとの attention geometry、norm convention、RoPE と context contract。 |
+| 2 | `load_qwen3_14b_sq8_layer_weights` と `qwen3_sq8_layer_tensor_names` | Q/K/V/O + gate/up/down の seven-projection、固定 tensor namespace と 2-D shape。 | layer ごとの projection set、tensor name mapping、dense/MoE、physical K/V の有無。Gemma shared layer は K/V を要求してはならない。 |
+| 3 | `Qwen3Sq8LayerWorkspace::{allocate,validate_synchronized_preconditions}` | hidden/KV/intermediate activation と 4 個の activation quantizer が全層同じ幅。 | per-layer workspace plan。mixed local/full width、double-wide MLP、PLE scratch、linear state を別に会計する。 |
+| 4 | `Qwen3Sq8LayerWorkspace::enqueue_with_attention` | input/post residual norm、Q/K norm、SiLU MLP、`1/sqrt(128)` full causal attention、single RoPE の順序。 | 明示的な architecture/layer composer。residual norm の位置と数、Q/K/V norm、activation、attention scale、output gate、RoPE kind を表す。 |
+| 5 | `enqueue_{prefill_with_paged_kv,paged_decode,cached_prefix_chunk_with_paged_kv}` と `validate_paged_cache_contract` | 全 layer が独立した full causal paged K/V、identity block table、40Q/8KV/128 の同一 cache shape。 | `Own` / `SharedFrom` / `LinearState` の state mode、shared source layer、sliding window と cache retention policy。 |
+| 6 | `Sq8LayerRuntimeTrace` と layer execution report | trace tensor の hidden/KV/I width と seven projection/4 quantization の counter。 | layer-dependent tensor shape と operation list。比較 writer は dynamic layer count/shape を記録する。 |
+| 7 | `sq8_stack_runtime.rs::Qwen3Sq8StackRuntime::load` | `QWEN3_14B_SQ8_STACK_LAYERS=40` の boxed array、40 個の norm、同一 artifact layout。 | descriptor の layer vector を dispatch 前に検証し、architecture 固有 backend を選ぶ。既存 `SQ8_0` は legacy backend として明示保持する。 |
+| 8 | `Qwen3Sq8PagedDecodeRuntime` と `Sq8PagedStackExecutionReport` | M=1 decode workspace、40 cache lengths、全層一様な K/V write / attention count。 | cache owner 層だけを数える state-aware report。shared/local/linear 層には別の counter/shape が必要。 |
+| 9 | `sq8_embedding_runtime.rs::Qwen3Sq8EmbeddingRuntime::load` | `model.embed_tokens.weight`、151936×5120、独立 embedding、scale なし。 | embedding tensor mapping、vocab/hidden、tied flag、embedding scale。Gemma4 は tied source weight と `sqrt(hidden)` scale を使う。 |
+| 10 | `sq8_model_head_runtime.rs::Qwen3Sq8ModelHeadRuntime::{load,run_*}` | `model.norm.weight` と独立 `lm_head.weight`、151936×5120、fixed final norm、logit cap なし。 | output tie、final norm convention、vocab/hidden、logit soft-cap。Gemma4 は embedding から投影し最後に cap=30 を掛ける。 |
+| 11 | `sq8_generation_runtime.rs::Qwen3Sq8GenerationRuntime::{load,generation_cache_shape}` | 40-element cache array、8-token fixed prompt/16-token context、Qwen3 vocab/EOS、full attention only。 | architecture-specific request plan、tokenizer/profile、dynamic layer cache set、context and EOS contract。 |
+| 12 | `sq8_serving_runtime.rs::Qwen3Sq8ServingSession::{load_with_prefill_mode,qwen3_14b_sq8_serving_cache_shape,load_qwen3_14b_sq8_serving_norms}` | 40 layers、4096 context、16-token blocks、fixed artifact/package SHA、Qwen3 norms/cache/sampler。 | served architecture profile と descriptor-bound package/artifact identity。multi-architecture serving はこの profile dispatch を別 task で持つ。 |
+| 13 | `sq8_worker_backend.rs` と `sq8_worker_protocol.rs::Sq8WorkerProfile` | `Qwen3Sq8*` backend、R9700 kernel guard、Qwen3 vocab/EOS/reasoning default、artifact/package identity。 | backend selection と per-model tokenizer/reasoning profile。worker protocol を Qwen3 default から黙って流用しない。 |
+| 14 | `sq_canonical.rs::{validate_manifest,validate_source_contract}` | `SQ8_0`、FP8 E4M3 dynamic source、BF16 128×128 2-D block scale、`fp8_checkpoint` import。 | artifact format id と source model/config SHA、tensor rank/layout、per-layer quantization metadata、tied aliases、MoE expert axis を schema に追加する。 |
+| 15 | `tools/sq8_canonical_artifact.py::{load_source_contract,pair_fp8_weights}` と SQ8 build tools | Qwen3 FP8 shard、2-D paired weight/scale、fixed block assumptionsを conversion 時にも強制。 | descriptor-aware source importer。BF16 Gemma4、rank-3 MoE、shared/tied tensorsを別 format path で明示対応する。 |
+
+したがって、ここで「全固定値を一つの汎用 kernel parameter struct にする」設計は採らない。
+`SQ8_0` の seven-projection kernel/artifact は Qwen3-14B の production contract として残し、
+descriptor は *どの resident composition が選べるか* と *その composition に必要な state* を
+選ぶ境界にする。新しい kernel が必要なら BH が編集中の
+`runtime/src/ullm_runtime_parts/part_01.inc` と
+`runtime/src/ullm_runtime_hiprtc_sources.inc` には追加せず、新規 source に分ける判断を維持する。
+この BP 実装では新 kernel を必要としなかった。
+
+### Phase 2: 実装した境界と優先順位
+
+`model_config.rs` に `ResidentModelDescriptor` を追加した。これは config SHA-256、decoder、
+embedding/output、layer vector を持つ closed typed descriptor である。layer は attention
+kind/heads/head dim/value dim/scale/RoPE/window/KV mode/norm、dense または MoE MLP、PLE を
+明示する。`SharedFrom { source_layer_index }` は Gemma4 E2B の layer 15 以降を local source
+13 / full source 14 に結ぶ。Qwen3.5 は hybrid linear/full、mRoPE、MoE expert/top-k/shared
+expert metadata まで表すが、未実装の executor を実行可能とは表示しない。
+
+- Qwen3-14B `SQ8_0` は `require_qwen3_14b_sq8_0` を通る exact legacy backend にした。
+  serving/generation/architecture trace の入口と stack load は descriptor と artifact source
+  config SHA の一致を device allocation 前に確認する。既存の projection/KV/kernel math は
+  変更しない。
+- Gemma4 `Gemma4TextExecutor` は descriptor から checkpoint contract、resident memory plan、
+  device K/V allocation、shared-source snapshot、input/PLE/layer/attention/MLP/head を選ぶ。
+  local/full の width、window、RoPE、four residual norms、double-wide MLP、PLE、tied head/
+  embedding scale/soft-cap の個別分岐を保持した。
+- `SQ8_0` artifact schema 自体を Gemma4/MoE まで拡張した、という主張はしない。現行 schema
+  は #14--15 の制約のままであり、MoE の実 quantized end-to-end は AQ4_0 package/residency
+  integration 待ちである。
+
+artifact の一般化境界も同じである。現行 `sq-fp8-artifact-v0.2` / `SQ8_0` は
+`source.config_sha256` を既に持つが、Qwen3 の FP8 E4M3 2-D block weight/scale と
+seven-projection import を前提にする。Gemma4 又は MoE を量子化 resident に載せる時は
+この format id を緩めない。別の strict format に、少なくとも architecture、source config
+SHA、layer descriptor binding、tensor role/alias（tied embedding と shared K/V を含む）、
+rank/axis-aware quantization layout、MoE expert axis と router/shared-expert passthrough を
+記録させる。これにより legacy `SQ8_0` loader が未知の tensor layout を解釈することはない。
+
+最初に通す新 architecture は **Gemma4 E2B resident BF16** と決めた。raw source BF16 weight は
+約 9.54 GiB（complete resident allocation は既存 evidence で約 11.06 GiB）で R9700 に載り、
+既に greedy/KV/window の実行器がある。対して Qwen3.5-35B-A3B text BF16 は 63.613 GiB で
+R9700 に載らず、量子化が前提であり、AQ4_0 package を進める BN の作業とも依存する。
+Gemma4 を先に descriptor-connected execution で確認し、MoE は descriptor で state を表現して
+も quantized residency/executor が揃うまで fail-closed にする順序が最小の曖昧さである。
+
+### Phase 3: 検証方針
+
+Qwen3-14B `SQ8_0` は config SHA
+`c5d7d0e8ee42088bd535101d13c71d38c20b5c2afd46ee8fdfba351956233793` と canonical artifact の
+`source.config_sha256` が同じであることを read-only で確認した。descriptor unit test は legacy
+5120/40/40Q/8KV/128/I=17408/151936/eps/RoPE/seven-projection contract を通過する。GPU の
+greedy regression と Gemma4 resident greedy re-run は、共有 R9700 lock が空いてから
+`tools/architecture_hf_trace.py` の既存 trace と BL/BO の token/text 証跡を使って追記する。
+数値閾値、FP32 corpus、bitwise gate、campaign は合否に使用しない。
