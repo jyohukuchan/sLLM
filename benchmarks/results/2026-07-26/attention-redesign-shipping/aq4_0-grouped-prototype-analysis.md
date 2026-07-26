@@ -96,6 +96,13 @@ The fresh four-run C=1339 control is 74.110977 tok/s direct and 74.509830 tok/s
 grouped (1.005382×).  It confirms the earlier stable result rather than the
 cold-contaminated first repeat.
 
+The current-main integration equivalent is
+`9d8643506a36659ecec3fc2d931deba26d29f574` on
+`bq-aq4-grouped-integration`, and its release build completed successfully.
+It remains separate only because the shared main worktree has concurrent,
+uncommitted edits to the two same runtime source files; no owner edit was
+overwritten.
+
 Manifest `69a5e1eb2e7713a1d017332539a587b9a13cf925cbfb28d7c89719ba6709ec2e`
 binds `AQ4_0` / gfx1201 / `rdna4_aq4_resident` to
 `aq4_gqa_grouped_split`, tile 128, and the new worker hash.  The generic

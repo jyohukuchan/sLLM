@@ -967,6 +967,12 @@ row in LDS.  The existing split workspace and merge body remain unchanged;
 every other geometry takes the existing path.  This avoids incorrectly
 describing the 5:1×128 tile-20 body as reusable for the 4:1×256 model.
 
+For reviewable integration against the current main base, the same two-file
+patch is also commit `9d8643506a36659ecec3fc2d931deba26d29f574` on local branch
+`bq-aq4-grouped-integration`; its release worker/profile build succeeded.
+The shared main worktree still contains a concurrent owner’s uncommitted edits
+to those same files, so this branch intentionally avoids overwriting them.
+
 The candidate full-model control at C=1339, six warmup steps and two alternating
 32-step measured repeats was 74.110977 tok/s direct versus 74.509830 tok/s
 grouped: **1.005382×** (+0.398854 tok/s).  These are profile-driver timed

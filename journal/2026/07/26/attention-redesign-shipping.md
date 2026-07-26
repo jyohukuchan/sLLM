@@ -57,9 +57,10 @@ served-model manifest は tile 20 のような typed execution setting を表現
 ## 次の行動
 
 - active `AQ4_0` candidate の source commit `c8074928` は local branch
-  `bq-aq4-grouped-c807` に固定した。共有 runtime source の owner が未確定差分を commit
-  した後、同じ shape-gated patch を main に統合する。service を再起動して取り直す必要は
-  ない限り、新たな service window は使わない。
+  `bq-aq4-grouped-c807` に固定した。current-main base への clean integration は
+  `bq-aq4-grouped-integration` の `9d864350`（release build 成功）としても保持した。
+  共有 runtime source の owner が未確定差分を commit した後に main へ統合する。service を
+  再起動して取り直す必要はない限り、新たな service window は使わない。
 - `SQ8_0` grouped tile-20 は service-candidate evidence として保持するが、今回の fixed
   suite の実文章品質は hold のままとする。将来再評価するなら、同じ model/control で
   code/multiturn completion を十分に観察できる prompt contract を別証跡で設計する。
