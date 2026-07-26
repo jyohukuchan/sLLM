@@ -152,9 +152,9 @@ synchronize timing was 0.666713 ms default and 0.678809 ms candidate; that is
 not a model benchmark and shows no standalone speed claim.
 
 `phase2-full-model/` contains an attempted five-repeat, 16-step steady decode
-comparison. It must be **excluded**: `ullm-openai.service` was externally
-started at 20:19:35 JST while the direct run's tail and all of the candidate
-run were active. The stored 14.685730 and 14.959300 tok/s values are therefore
+comparison. It must be **excluded**: `ullm-openai.service` became active at
+20:19:35 JST while the direct run's tail and all of the candidate run were
+active. The stored 14.685730 and 14.959300 tok/s values are therefore
 not valid candidate/control measurements, even though their generated token
 sequences match. HEAD also advanced between the two runners in the shared
 worktree. No valid post-change full-model decode tok/s exists, no default was
@@ -173,10 +173,11 @@ unisolated probe invocation only queried device information, saw `gfx1030`,
 and refused before context creation or a kernel launch; no V620 compute was
 performed.
 
-`ullm-openai.service` was stopped at 20:17:27 JST for the planned isolated
-window. Another session started it at 20:19:35 JST; the source of that start
-is unconfirmed. The service is now active/running again, so no additional
-stop/start was performed after the collision, avoiding further
+`systemctl stop ullm-openai.service` was issued at 20:17:27 JST for the
+planned isolated window. A start request hit the limiter at 20:19:18, and the
+service became active at 20:19:35; the journal does not attribute that start
+to a particular concurrent task. The service is now active/running again, so
+no additional stop/start was performed after the collision, avoiding further
 `StartLimitBurst=3` consumption. `llama-qwen35-udq4.service` remained
 inactive and disabled throughout. No unit file, `/opt/ullm` content, active
 model manifest, or V620 workload was changed.

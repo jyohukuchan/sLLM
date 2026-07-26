@@ -11,7 +11,7 @@
 - C=1,036のunique KV常駐量8,486,912 Bに対する640 GB/s roofは13.2608 us、観測769.3306 usは58.0154倍であり、依頼元の概算は正しかった。GQAの5回再走査を含むsemantic load量は42,434,560 Bで、physical HBM byteではない。root rocprofのGL2 request counterは0、SQ_WAVESも不整合で、物理帯域・cache hit・achieved occupancyは未確認として残した。
 - source-tile splitの最小R9700試験では、C=128/tile=128の一タイル退化はdirectとbit一致した。C=130の2タイルでmax abs 2.9802e-8 / 2,250 bit差、C=1,036の9タイルで1.08033e-7 / 4,934 bit差となった。初期化、tail/empty tile、ページ、merge scaleの明白なバグ経路はこの範囲で否定され、有限精度のreassociationとSQ8_0逐次量子化による増幅が最も支持される。full-modelのhard top-1 regression記録があるためmulti-tile default化は行わない。
 - direct順序を保つ実験的 `ULLM_EXPERIMENTAL_PAGED_DECODE_WAVE_SCALAR_SOFTMAX` を追加した。Vを持つ各waveのlane 0だけがmax/denominatorを更新するが、トークン順序は変えない。C=1,036でデフォルトと20,480 bytesがbit一致した。既定は無効のままである。
-- full-modelのcandidate/control測定を試みたが、20:19:35 JSTに外部セッションが `ullm-openai.service` を起動したため、候補側全区間とdirect末尾がAQ4_0 workerと競合した。14.685730 / 14.959300 tok/sは無効化し、性能改善とは報告しない。サービスはactive/runningへ復旧済みで、StartLimit窓を追加消費する再停止はしなかった。`llama-qwen35-udq4.service`はinactive/disabledのまま。V620 (`gfx1030`) はdevice infoで拒否した一度を除きGPU計算に使っていない。
+- full-modelのcandidate/control測定を試みたが、20:19:35 JSTに `ullm-openai.service` がactiveとなったため、候補側全区間とdirect末尾がAQ4_0 workerと競合した。journalはこのstartを特定の並行タスクへ帰属していない。14.685730 / 14.959300 tok/sは無効化し、性能改善とは報告しない。サービスはactive/runningへ復旧済みで、StartLimit窓を追加消費する再停止はしなかった。`llama-qwen35-udq4.service`はinactive/disabledのまま。V620 (`gfx1030`) はdevice infoで拒否した一度を除きGPU計算に使っていない。
 
 ## 次の行動
 
