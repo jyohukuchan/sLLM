@@ -418,7 +418,9 @@ pub const fn runtime_feature_environment(feature: RuntimeFeature) -> &'static st
         }
         RuntimeFeature::HipAq4GemmWmmaGroup8 => "ULLM_REQUIRE_HIP_AQ4_WMMA_GEMM_GROUP8_KERNEL",
         RuntimeFeature::HipAq4GemmWmmaRaggedM => "ULLM_REQUIRE_HIP_AQ4_WMMA_GEMM_RAGGED_M_KERNEL",
-        RuntimeFeature::HipAq4GemmWmmaGroup8RaggedM => "ULLM_REQUIRE_HIP_AQ4_WMMA_GEMM_GROUP8_RAGGED_M_KERNEL",
+        RuntimeFeature::HipAq4GemmWmmaGroup8RaggedM => {
+            "ULLM_REQUIRE_HIP_AQ4_WMMA_GEMM_GROUP8_RAGGED_M_KERNEL"
+        }
     }
 }
 
@@ -1121,13 +1123,37 @@ impl DeviceCapabilities {
         }
         if policy.contains(RuntimeFeature::HipAq4GemmWmmaGroup8RaggedM) {
             let binding = aq4_wmma_group8_probe_binding(127);
-            let packed_indices = aq4_probe_packed_indices(binding)?; let scale_indices = aq4_probe_scale_indices(binding)?;
-            let mut index = context.alloc_buffer(packed_indices.len())?; index.copy_from_host(0, &packed_indices, Some(stream))?;
-            let mut scale = context.alloc_buffer(scale_indices.len())?; scale.copy_from_host(0, &scale_indices, Some(stream))?;
-            let codebook_bytes = aq4_probe_codebook_bytes(); let mut codebook = context.alloc_buffer(codebook_bytes.len())?; codebook.copy_from_host(0, &codebook_bytes, Some(stream))?;
-            let scale_value_bytes = aq4_probe_scale_value_bytes(); let mut scale_values = context.alloc_buffer(scale_value_bytes.len())?; scale_values.copy_from_host(0, &scale_value_bytes, Some(stream))?;
-            let input = zeros(context, stream, binding.input_elements()?)?; let mut output = zeros(context, stream, binding.output_elements()?)?;
-            ullm_runtime_sys::aq4_matvec_batch_wmma_group8_ragged_m_prototype_f32(&index, &scale, &codebook, &scale_values, &input, None, binding.scale_count, binding.group_size, f32::from_bits(binding.tensor_scale_bits), binding.row_scale_count, binding.rows, binding.cols, binding.batch_count, &mut output, Some(stream))?;
+            let packed_indices = aq4_probe_packed_indices(binding)?;
+            let scale_indices = aq4_probe_scale_indices(binding)?;
+            let mut index = context.alloc_buffer(packed_indices.len())?;
+            index.copy_from_host(0, &packed_indices, Some(stream))?;
+            let mut scale = context.alloc_buffer(scale_indices.len())?;
+            scale.copy_from_host(0, &scale_indices, Some(stream))?;
+            let codebook_bytes = aq4_probe_codebook_bytes();
+            let mut codebook = context.alloc_buffer(codebook_bytes.len())?;
+            codebook.copy_from_host(0, &codebook_bytes, Some(stream))?;
+            let scale_value_bytes = aq4_probe_scale_value_bytes();
+            let mut scale_values = context.alloc_buffer(scale_value_bytes.len())?;
+            scale_values.copy_from_host(0, &scale_value_bytes, Some(stream))?;
+            let input = zeros(context, stream, binding.input_elements()?)?;
+            let mut output = zeros(context, stream, binding.output_elements()?)?;
+            ullm_runtime_sys::aq4_matvec_batch_wmma_group8_ragged_m_prototype_f32(
+                &index,
+                &scale,
+                &codebook,
+                &scale_values,
+                &input,
+                None,
+                binding.scale_count,
+                binding.group_size,
+                f32::from_bits(binding.tensor_scale_bits),
+                binding.row_scale_count,
+                binding.rows,
+                binding.cols,
+                binding.batch_count,
+                &mut output,
+                Some(stream),
+            )?;
             probe_fault_checkpoint(22, "aq4-gemm-wmma-group8-ragged-m")?;
             proven = proven.with(RuntimeFeature::HipAq4GemmWmmaGroup8RaggedM);
         }
@@ -2675,12 +2701,71 @@ impl StartedOperationPlan<'_> {
         .map_err(|error| error.to_string())
     }
 
-    pub fn execute_aq4_gemm_wmma_group8_ragged_m_f32(self, index: &ullm_runtime_sys::RuntimeBuffer, scale: &ullm_runtime_sys::RuntimeBuffer, codebook: &ullm_runtime_sys::RuntimeBuffer, scale_values: &ullm_runtime_sys::RuntimeBuffer, input: &ullm_runtime_sys::RuntimeBuffer, row_scale: Option<&ullm_runtime_sys::RuntimeBuffer>, output: &mut ullm_runtime_sys::RuntimeBuffer, stream: &mut ullm_runtime_sys::RuntimeStream) -> Result<(), String> {
+    pub fn execute_aq4_gemm_wmma_group8_ragged_m_f32(
+        self,
+        index: &ullm_runtime_sys::RuntimeBuffer,
+        scale: &ullm_runtime_sys::RuntimeBuffer,
+        codebook: &ullm_runtime_sys::RuntimeBuffer,
+        scale_values: &ullm_runtime_sys::RuntimeBuffer,
+        input: &ullm_runtime_sys::RuntimeBuffer,
+        row_scale: Option<&ullm_runtime_sys::RuntimeBuffer>,
+        output: &mut ullm_runtime_sys::RuntimeBuffer,
+        stream: &mut ullm_runtime_sys::RuntimeStream,
+    ) -> Result<(), String> {
         let plan = self.plan();
-        let OperationGeometry::Aq4MatvecBatch { rows, cols, group_size, scale_count, row_scale_count, tensor_scale_bits } = plan.geometry else { return Err("resolved AQ4 group8 ragged-M WMMA GEMM operation has incompatible geometry".into()); };
-        if plan.executable != ExecutableOperation::HipAq4GemmWmmaGroup8RaggedMF32 || plan.device.backend != OperationBackend::Hip || plan.device.architecture.as_deref() != Some("gfx1201") || !(65..=127).contains(&plan.batch_width) || group_size != 8 || rows == 0 || !rows.is_multiple_of(16) || cols == 0 || !cols.is_multiple_of(32) || scale_count == 0 { return Err(format!("resolved backend operation {} is not a gfx1201/group8/M=65..=127 AQ4 ragged-M WMMA GEMM operation", plan.implementation_id)); }
-        if row_scale_count == 0 && row_scale.is_some() || row_scale_count != 0 && row_scale.is_none() { return Err("resolved AQ4 group8 ragged-M WMMA row scale state is invalid".into()); }
-        ullm_runtime_sys::aq4_matvec_batch_wmma_group8_ragged_m_prototype_f32(index, scale, codebook, scale_values, input, row_scale, scale_count, group_size, f32::from_bits(tensor_scale_bits), row_scale_count, rows, cols, usize::try_from(plan.batch_width).map_err(|_| "AQ4 group8 ragged-M width exceeds usize")?, output, Some(stream)).map_err(|error| error.to_string())
+        let OperationGeometry::Aq4MatvecBatch {
+            rows,
+            cols,
+            group_size,
+            scale_count,
+            row_scale_count,
+            tensor_scale_bits,
+        } = plan.geometry
+        else {
+            return Err(
+                "resolved AQ4 group8 ragged-M WMMA GEMM operation has incompatible geometry".into(),
+            );
+        };
+        if plan.executable != ExecutableOperation::HipAq4GemmWmmaGroup8RaggedMF32
+            || plan.device.backend != OperationBackend::Hip
+            || plan.device.architecture.as_deref() != Some("gfx1201")
+            || !(65..=127).contains(&plan.batch_width)
+            || group_size != 8
+            || rows == 0
+            || !rows.is_multiple_of(16)
+            || cols == 0
+            || !cols.is_multiple_of(32)
+            || scale_count == 0
+        {
+            return Err(format!(
+                "resolved backend operation {} is not a gfx1201/group8/M=65..=127 AQ4 ragged-M WMMA GEMM operation",
+                plan.implementation_id
+            ));
+        }
+        if row_scale_count == 0 && row_scale.is_some()
+            || row_scale_count != 0 && row_scale.is_none()
+        {
+            return Err("resolved AQ4 group8 ragged-M WMMA row scale state is invalid".into());
+        }
+        ullm_runtime_sys::aq4_matvec_batch_wmma_group8_ragged_m_prototype_f32(
+            index,
+            scale,
+            codebook,
+            scale_values,
+            input,
+            row_scale,
+            scale_count,
+            group_size,
+            f32::from_bits(tensor_scale_bits),
+            row_scale_count,
+            rows,
+            cols,
+            usize::try_from(plan.batch_width)
+                .map_err(|_| "AQ4 group8 ragged-M width exceeds usize")?,
+            output,
+            Some(stream),
+        )
+        .map_err(|error| error.to_string())
     }
 
     /// Executes the production gfx1201/group8 rocWMMA AQ4 GEMM ABI selected at load time.

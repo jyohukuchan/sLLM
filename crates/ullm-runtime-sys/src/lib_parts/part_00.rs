@@ -299,11 +299,20 @@ unsafe extern "C" {
         stream: *mut RawRuntimeStream,
     ) -> c_int;
     fn ullm_runtime_aq4_matvec_batch_wmma_group8_ragged_m_prototype_f32(
-        index_buffer: *const RawRuntimeBuffer, scale_buffer: *const RawRuntimeBuffer,
-        codebook_buffer: *const RawRuntimeBuffer, scale_values_buffer: *const RawRuntimeBuffer,
-        input_buffer: *const RawRuntimeBuffer, row_scale_buffer: *const RawRuntimeBuffer,
-        scale_count: usize, group_size: usize, tensor_scale: f32, row_scale_count: usize,
-        rows: usize, cols: usize, m_actual: usize, output_buffer: *mut RawRuntimeBuffer,
+        index_buffer: *const RawRuntimeBuffer,
+        scale_buffer: *const RawRuntimeBuffer,
+        codebook_buffer: *const RawRuntimeBuffer,
+        scale_values_buffer: *const RawRuntimeBuffer,
+        input_buffer: *const RawRuntimeBuffer,
+        row_scale_buffer: *const RawRuntimeBuffer,
+        scale_count: usize,
+        group_size: usize,
+        tensor_scale: f32,
+        row_scale_count: usize,
+        rows: usize,
+        cols: usize,
+        m_actual: usize,
+        output_buffer: *mut RawRuntimeBuffer,
         stream: *mut RawRuntimeStream,
     ) -> c_int;
     fn ullm_runtime_aq4_matvec_batch_dispatch_kind_for_shape(
@@ -536,45 +545,103 @@ unsafe extern "C" {
         stream: *mut RawRuntimeStream,
     ) -> c_int;
     fn ullm_runtime_aq4_matvec_qkv_z_gate_beta_wide_load_prototype_f32(
-        qkv_index_buffer: *const RawRuntimeBuffer, qkv_scale_buffer: *const RawRuntimeBuffer,
-        qkv_codebook_buffer: *const RawRuntimeBuffer, qkv_scale_values_buffer: *const RawRuntimeBuffer,
-        qkv_row_scale_buffer: *const RawRuntimeBuffer, qkv_scale_count: usize, qkv_group_size: usize,
-        qkv_tensor_scale: f32, qkv_row_scale_count: usize, z_index_buffer: *const RawRuntimeBuffer,
-        z_scale_buffer: *const RawRuntimeBuffer, z_codebook_buffer: *const RawRuntimeBuffer,
-        z_scale_values_buffer: *const RawRuntimeBuffer, z_row_scale_buffer: *const RawRuntimeBuffer,
-        z_scale_count: usize, z_group_size: usize, z_tensor_scale: f32, z_row_scale_count: usize,
-        a_index_buffer: *const RawRuntimeBuffer, a_scale_buffer: *const RawRuntimeBuffer,
-        a_codebook_buffer: *const RawRuntimeBuffer, a_scale_values_buffer: *const RawRuntimeBuffer,
-        a_row_scale_buffer: *const RawRuntimeBuffer, a_scale_count: usize, a_group_size: usize,
-        a_tensor_scale: f32, a_row_scale_count: usize, b_index_buffer: *const RawRuntimeBuffer,
-        b_scale_buffer: *const RawRuntimeBuffer, b_codebook_buffer: *const RawRuntimeBuffer,
-        b_scale_values_buffer: *const RawRuntimeBuffer, b_row_scale_buffer: *const RawRuntimeBuffer,
-        b_scale_count: usize, b_group_size: usize, b_tensor_scale: f32, b_row_scale_count: usize,
-        input_buffer: *const RawRuntimeBuffer, a_log_buffer: *const RawRuntimeBuffer,
-        dt_bias_buffer: *const RawRuntimeBuffer, qkv_rows: usize, z_rows: usize, heads: usize,
-        cols: usize, qkv_output_buffer: *mut RawRuntimeBuffer, z_output_buffer: *mut RawRuntimeBuffer,
-        gate_output_buffer: *mut RawRuntimeBuffer, beta_output_buffer: *mut RawRuntimeBuffer,
+        qkv_index_buffer: *const RawRuntimeBuffer,
+        qkv_scale_buffer: *const RawRuntimeBuffer,
+        qkv_codebook_buffer: *const RawRuntimeBuffer,
+        qkv_scale_values_buffer: *const RawRuntimeBuffer,
+        qkv_row_scale_buffer: *const RawRuntimeBuffer,
+        qkv_scale_count: usize,
+        qkv_group_size: usize,
+        qkv_tensor_scale: f32,
+        qkv_row_scale_count: usize,
+        z_index_buffer: *const RawRuntimeBuffer,
+        z_scale_buffer: *const RawRuntimeBuffer,
+        z_codebook_buffer: *const RawRuntimeBuffer,
+        z_scale_values_buffer: *const RawRuntimeBuffer,
+        z_row_scale_buffer: *const RawRuntimeBuffer,
+        z_scale_count: usize,
+        z_group_size: usize,
+        z_tensor_scale: f32,
+        z_row_scale_count: usize,
+        a_index_buffer: *const RawRuntimeBuffer,
+        a_scale_buffer: *const RawRuntimeBuffer,
+        a_codebook_buffer: *const RawRuntimeBuffer,
+        a_scale_values_buffer: *const RawRuntimeBuffer,
+        a_row_scale_buffer: *const RawRuntimeBuffer,
+        a_scale_count: usize,
+        a_group_size: usize,
+        a_tensor_scale: f32,
+        a_row_scale_count: usize,
+        b_index_buffer: *const RawRuntimeBuffer,
+        b_scale_buffer: *const RawRuntimeBuffer,
+        b_codebook_buffer: *const RawRuntimeBuffer,
+        b_scale_values_buffer: *const RawRuntimeBuffer,
+        b_row_scale_buffer: *const RawRuntimeBuffer,
+        b_scale_count: usize,
+        b_group_size: usize,
+        b_tensor_scale: f32,
+        b_row_scale_count: usize,
+        input_buffer: *const RawRuntimeBuffer,
+        a_log_buffer: *const RawRuntimeBuffer,
+        dt_bias_buffer: *const RawRuntimeBuffer,
+        qkv_rows: usize,
+        z_rows: usize,
+        heads: usize,
+        cols: usize,
+        qkv_output_buffer: *mut RawRuntimeBuffer,
+        z_output_buffer: *mut RawRuntimeBuffer,
+        gate_output_buffer: *mut RawRuntimeBuffer,
+        beta_output_buffer: *mut RawRuntimeBuffer,
         stream: *mut RawRuntimeStream,
     ) -> c_int;
     fn ullm_runtime_aq4_matvec_qkv_z_gate_beta_shuffle_prototype_f32(
-        qkv_index_buffer: *const RawRuntimeBuffer, qkv_scale_buffer: *const RawRuntimeBuffer,
-        qkv_codebook_buffer: *const RawRuntimeBuffer, qkv_scale_values_buffer: *const RawRuntimeBuffer,
-        qkv_row_scale_buffer: *const RawRuntimeBuffer, qkv_scale_count: usize, qkv_group_size: usize,
-        qkv_tensor_scale: f32, qkv_row_scale_count: usize, z_index_buffer: *const RawRuntimeBuffer,
-        z_scale_buffer: *const RawRuntimeBuffer, z_codebook_buffer: *const RawRuntimeBuffer,
-        z_scale_values_buffer: *const RawRuntimeBuffer, z_row_scale_buffer: *const RawRuntimeBuffer,
-        z_scale_count: usize, z_group_size: usize, z_tensor_scale: f32, z_row_scale_count: usize,
-        a_index_buffer: *const RawRuntimeBuffer, a_scale_buffer: *const RawRuntimeBuffer,
-        a_codebook_buffer: *const RawRuntimeBuffer, a_scale_values_buffer: *const RawRuntimeBuffer,
-        a_row_scale_buffer: *const RawRuntimeBuffer, a_scale_count: usize, a_group_size: usize,
-        a_tensor_scale: f32, a_row_scale_count: usize, b_index_buffer: *const RawRuntimeBuffer,
-        b_scale_buffer: *const RawRuntimeBuffer, b_codebook_buffer: *const RawRuntimeBuffer,
-        b_scale_values_buffer: *const RawRuntimeBuffer, b_row_scale_buffer: *const RawRuntimeBuffer,
-        b_scale_count: usize, b_group_size: usize, b_tensor_scale: f32, b_row_scale_count: usize,
-        input_buffer: *const RawRuntimeBuffer, a_log_buffer: *const RawRuntimeBuffer,
-        dt_bias_buffer: *const RawRuntimeBuffer, qkv_rows: usize, z_rows: usize, heads: usize,
-        cols: usize, qkv_output_buffer: *mut RawRuntimeBuffer, z_output_buffer: *mut RawRuntimeBuffer,
-        gate_output_buffer: *mut RawRuntimeBuffer, beta_output_buffer: *mut RawRuntimeBuffer,
+        qkv_index_buffer: *const RawRuntimeBuffer,
+        qkv_scale_buffer: *const RawRuntimeBuffer,
+        qkv_codebook_buffer: *const RawRuntimeBuffer,
+        qkv_scale_values_buffer: *const RawRuntimeBuffer,
+        qkv_row_scale_buffer: *const RawRuntimeBuffer,
+        qkv_scale_count: usize,
+        qkv_group_size: usize,
+        qkv_tensor_scale: f32,
+        qkv_row_scale_count: usize,
+        z_index_buffer: *const RawRuntimeBuffer,
+        z_scale_buffer: *const RawRuntimeBuffer,
+        z_codebook_buffer: *const RawRuntimeBuffer,
+        z_scale_values_buffer: *const RawRuntimeBuffer,
+        z_row_scale_buffer: *const RawRuntimeBuffer,
+        z_scale_count: usize,
+        z_group_size: usize,
+        z_tensor_scale: f32,
+        z_row_scale_count: usize,
+        a_index_buffer: *const RawRuntimeBuffer,
+        a_scale_buffer: *const RawRuntimeBuffer,
+        a_codebook_buffer: *const RawRuntimeBuffer,
+        a_scale_values_buffer: *const RawRuntimeBuffer,
+        a_row_scale_buffer: *const RawRuntimeBuffer,
+        a_scale_count: usize,
+        a_group_size: usize,
+        a_tensor_scale: f32,
+        a_row_scale_count: usize,
+        b_index_buffer: *const RawRuntimeBuffer,
+        b_scale_buffer: *const RawRuntimeBuffer,
+        b_codebook_buffer: *const RawRuntimeBuffer,
+        b_scale_values_buffer: *const RawRuntimeBuffer,
+        b_row_scale_buffer: *const RawRuntimeBuffer,
+        b_scale_count: usize,
+        b_group_size: usize,
+        b_tensor_scale: f32,
+        b_row_scale_count: usize,
+        input_buffer: *const RawRuntimeBuffer,
+        a_log_buffer: *const RawRuntimeBuffer,
+        dt_bias_buffer: *const RawRuntimeBuffer,
+        qkv_rows: usize,
+        z_rows: usize,
+        heads: usize,
+        cols: usize,
+        qkv_output_buffer: *mut RawRuntimeBuffer,
+        z_output_buffer: *mut RawRuntimeBuffer,
+        gate_output_buffer: *mut RawRuntimeBuffer,
+        beta_output_buffer: *mut RawRuntimeBuffer,
         stream: *mut RawRuntimeStream,
     ) -> c_int;
     fn ullm_runtime_aq4_matvec_silu_mul_f32(
@@ -603,25 +670,53 @@ unsafe extern "C" {
         stream: *mut RawRuntimeStream,
     ) -> c_int;
     fn ullm_runtime_aq4_matvec_silu_mul_wide_load_prototype_f32(
-        gate_index_buffer: *const RawRuntimeBuffer, gate_scale_buffer: *const RawRuntimeBuffer,
-        gate_codebook_buffer: *const RawRuntimeBuffer, gate_scale_values_buffer: *const RawRuntimeBuffer,
-        gate_row_scale_buffer: *const RawRuntimeBuffer, gate_scale_count: usize, gate_group_size: usize,
-        gate_tensor_scale: f32, gate_row_scale_count: usize, up_index_buffer: *const RawRuntimeBuffer,
-        up_scale_buffer: *const RawRuntimeBuffer, up_codebook_buffer: *const RawRuntimeBuffer,
-        up_scale_values_buffer: *const RawRuntimeBuffer, up_row_scale_buffer: *const RawRuntimeBuffer,
-        up_scale_count: usize, up_group_size: usize, up_tensor_scale: f32, up_row_scale_count: usize,
-        input_buffer: *const RawRuntimeBuffer, rows: usize, cols: usize, output_buffer: *mut RawRuntimeBuffer,
+        gate_index_buffer: *const RawRuntimeBuffer,
+        gate_scale_buffer: *const RawRuntimeBuffer,
+        gate_codebook_buffer: *const RawRuntimeBuffer,
+        gate_scale_values_buffer: *const RawRuntimeBuffer,
+        gate_row_scale_buffer: *const RawRuntimeBuffer,
+        gate_scale_count: usize,
+        gate_group_size: usize,
+        gate_tensor_scale: f32,
+        gate_row_scale_count: usize,
+        up_index_buffer: *const RawRuntimeBuffer,
+        up_scale_buffer: *const RawRuntimeBuffer,
+        up_codebook_buffer: *const RawRuntimeBuffer,
+        up_scale_values_buffer: *const RawRuntimeBuffer,
+        up_row_scale_buffer: *const RawRuntimeBuffer,
+        up_scale_count: usize,
+        up_group_size: usize,
+        up_tensor_scale: f32,
+        up_row_scale_count: usize,
+        input_buffer: *const RawRuntimeBuffer,
+        rows: usize,
+        cols: usize,
+        output_buffer: *mut RawRuntimeBuffer,
         stream: *mut RawRuntimeStream,
     ) -> c_int;
     fn ullm_runtime_aq4_matvec_silu_mul_shuffle_prototype_f32(
-        gate_index_buffer: *const RawRuntimeBuffer, gate_scale_buffer: *const RawRuntimeBuffer,
-        gate_codebook_buffer: *const RawRuntimeBuffer, gate_scale_values_buffer: *const RawRuntimeBuffer,
-        gate_row_scale_buffer: *const RawRuntimeBuffer, gate_scale_count: usize, gate_group_size: usize,
-        gate_tensor_scale: f32, gate_row_scale_count: usize, up_index_buffer: *const RawRuntimeBuffer,
-        up_scale_buffer: *const RawRuntimeBuffer, up_codebook_buffer: *const RawRuntimeBuffer,
-        up_scale_values_buffer: *const RawRuntimeBuffer, up_row_scale_buffer: *const RawRuntimeBuffer,
-        up_scale_count: usize, up_group_size: usize, up_tensor_scale: f32, up_row_scale_count: usize,
-        input_buffer: *const RawRuntimeBuffer, rows: usize, cols: usize, output_buffer: *mut RawRuntimeBuffer,
+        gate_index_buffer: *const RawRuntimeBuffer,
+        gate_scale_buffer: *const RawRuntimeBuffer,
+        gate_codebook_buffer: *const RawRuntimeBuffer,
+        gate_scale_values_buffer: *const RawRuntimeBuffer,
+        gate_row_scale_buffer: *const RawRuntimeBuffer,
+        gate_scale_count: usize,
+        gate_group_size: usize,
+        gate_tensor_scale: f32,
+        gate_row_scale_count: usize,
+        up_index_buffer: *const RawRuntimeBuffer,
+        up_scale_buffer: *const RawRuntimeBuffer,
+        up_codebook_buffer: *const RawRuntimeBuffer,
+        up_scale_values_buffer: *const RawRuntimeBuffer,
+        up_row_scale_buffer: *const RawRuntimeBuffer,
+        up_scale_count: usize,
+        up_group_size: usize,
+        up_tensor_scale: f32,
+        up_row_scale_count: usize,
+        input_buffer: *const RawRuntimeBuffer,
+        rows: usize,
+        cols: usize,
+        output_buffer: *mut RawRuntimeBuffer,
         stream: *mut RawRuntimeStream,
     ) -> c_int;
     fn ullm_runtime_aq4_matvec_gate_beta_f32(
@@ -1887,24 +1982,46 @@ pub fn aq4_matvec_wide_load_prototype_f32(
     stream: Option<&mut RuntimeStream>,
 ) -> Result<(), String> {
     if scale_count == 0 || rows == 0 || cols == 0 {
-        return Err("AQ4 wide-load matvec prototype requires nonzero scale_count, rows, and cols".into());
+        return Err(
+            "AQ4 wide-load matvec prototype requires nonzero scale_count, rows, and cols".into(),
+        );
     }
-    if !matches!(group_size, 8 | 16) || !cols.is_multiple_of(32) || !cols.is_multiple_of(group_size) {
-        return Err("AQ4 wide-load matvec prototype requires group8/group16 and cols divisible by 32".into());
+    if !matches!(group_size, 8 | 16) || !cols.is_multiple_of(32) || !cols.is_multiple_of(group_size)
+    {
+        return Err(
+            "AQ4 wide-load matvec prototype requires group8/group16 and cols divisible by 32"
+                .into(),
+        );
     }
     if row_scale_count != 0 && row_scale_count != rows {
         return Err("AQ4 wide-load matvec prototype row_scale_count must be zero or rows".into());
     }
     if !tensor_scale.is_finite() || tensor_scale <= 0.0 {
-        return Err("AQ4 wide-load matvec prototype tensor_scale must be finite and positive".into());
+        return Err(
+            "AQ4 wide-load matvec prototype tensor_scale must be finite and positive".into(),
+        );
     }
-    let elements = rows.checked_mul(cols).ok_or_else(|| "AQ4 wide-load matvec prototype matrix element count overflows".to_string())?;
+    let elements = rows.checked_mul(cols).ok_or_else(|| {
+        "AQ4 wide-load matvec prototype matrix element count overflows".to_string()
+    })?;
     let index_bytes = elements / 2;
     let groups = elements / group_size;
-    let scale_value_bytes = scale_count.checked_mul(std::mem::size_of::<f32>()).ok_or_else(|| "AQ4 wide-load matvec prototype scale value byte size overflows".to_string())?;
-    let input_bytes = cols.checked_mul(std::mem::size_of::<f32>()).ok_or_else(|| "AQ4 wide-load matvec prototype input byte size overflows".to_string())?;
-    let output_bytes = rows.checked_mul(std::mem::size_of::<f32>()).ok_or_else(|| "AQ4 wide-load matvec prototype output byte size overflows".to_string())?;
-    let row_scale_bytes = row_scale_count.checked_mul(std::mem::size_of::<f32>()).ok_or_else(|| "AQ4 wide-load matvec prototype row scale byte size overflows".to_string())?;
+    let scale_value_bytes = scale_count
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| {
+            "AQ4 wide-load matvec prototype scale value byte size overflows".to_string()
+        })?;
+    let input_bytes = cols
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| "AQ4 wide-load matvec prototype input byte size overflows".to_string())?;
+    let output_bytes = rows
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| "AQ4 wide-load matvec prototype output byte size overflows".to_string())?;
+    let row_scale_bytes = row_scale_count
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| {
+            "AQ4 wide-load matvec prototype row scale byte size overflows".to_string()
+        })?;
     check_copy_range(0, index_bytes, index_buffer.size()?)?;
     check_copy_range(0, groups, scale_buffer.size()?)?;
     check_copy_range(0, 16 * std::mem::size_of::<f32>(), codebook_buffer.size()?)?;
@@ -1915,13 +2032,25 @@ pub fn aq4_matvec_wide_load_prototype_f32(
     }
     check_copy_range(0, output_bytes, output_buffer.size()?)?;
     let stream = stream.map_or(std::ptr::null_mut(), |stream| stream.raw.as_ptr());
-    let row_scale_raw = row_scale_buffer.map(|buffer| buffer.raw.as_ptr()).unwrap_or(std::ptr::null_mut());
+    let row_scale_raw = row_scale_buffer
+        .map(|buffer| buffer.raw.as_ptr())
+        .unwrap_or(std::ptr::null_mut());
     status_to_result(unsafe {
         ullm_runtime_aq4_matvec_wide_load_prototype_f32(
-            index_buffer.raw.as_ptr(), scale_buffer.raw.as_ptr(), codebook_buffer.raw.as_ptr(),
-            scale_values_buffer.raw.as_ptr(), input_buffer.raw.as_ptr(), row_scale_raw,
-            scale_count, group_size, tensor_scale, row_scale_count, rows, cols,
-            output_buffer.raw.as_ptr(), stream,
+            index_buffer.raw.as_ptr(),
+            scale_buffer.raw.as_ptr(),
+            codebook_buffer.raw.as_ptr(),
+            scale_values_buffer.raw.as_ptr(),
+            input_buffer.raw.as_ptr(),
+            row_scale_raw,
+            scale_count,
+            group_size,
+            tensor_scale,
+            row_scale_count,
+            rows,
+            cols,
+            output_buffer.raw.as_ptr(),
+            stream,
         )
     })
 }
@@ -2668,22 +2797,91 @@ pub fn aq4_matvec_batch_wmma_prototype_v3_f32(
 /// nonzero group8 shapes with rows divisible by 16 and cols divisible by 32.
 #[allow(clippy::too_many_arguments)]
 pub fn aq4_matvec_batch_wmma_group8_ragged_m_prototype_f32(
-    index_buffer: &RuntimeBuffer, scale_buffer: &RuntimeBuffer, codebook_buffer: &RuntimeBuffer,
-    scale_values_buffer: &RuntimeBuffer, input_buffer: &RuntimeBuffer,
-    row_scale_buffer: Option<&RuntimeBuffer>, scale_count: usize, group_size: usize,
-    tensor_scale: f32, row_scale_count: usize, rows: usize, cols: usize, m_actual: usize,
-    output_buffer: &mut RuntimeBuffer, stream: Option<&mut RuntimeStream>,
+    index_buffer: &RuntimeBuffer,
+    scale_buffer: &RuntimeBuffer,
+    codebook_buffer: &RuntimeBuffer,
+    scale_values_buffer: &RuntimeBuffer,
+    input_buffer: &RuntimeBuffer,
+    row_scale_buffer: Option<&RuntimeBuffer>,
+    scale_count: usize,
+    group_size: usize,
+    tensor_scale: f32,
+    row_scale_count: usize,
+    rows: usize,
+    cols: usize,
+    m_actual: usize,
+    output_buffer: &mut RuntimeBuffer,
+    stream: Option<&mut RuntimeStream>,
 ) -> Result<(), String> {
-    if scale_count == 0 || group_size != 8 || !(1..=128).contains(&m_actual) || rows == 0 || cols == 0 || !rows.is_multiple_of(16) || !cols.is_multiple_of(32) || !tensor_scale.is_finite() || tensor_scale <= 0.0 { return Err("AQ4 group8 ragged-M WMMA prototype parameters are invalid".to_string()); }
-    let elements = rows.checked_mul(cols).ok_or_else(|| "AQ4 group8 ragged-M WMMA prototype matrix element count overflows".to_string())?;
-    let input_bytes = m_actual.checked_mul(cols).and_then(|v| v.checked_mul(std::mem::size_of::<f32>())).ok_or_else(|| "AQ4 group8 ragged-M WMMA prototype input byte size overflows".to_string())?;
-    let output_bytes = m_actual.checked_mul(rows).and_then(|v| v.checked_mul(std::mem::size_of::<f32>())).ok_or_else(|| "AQ4 group8 ragged-M WMMA prototype output byte size overflows".to_string())?;
-    let scale_value_bytes = scale_count.checked_mul(std::mem::size_of::<f32>()).ok_or_else(|| "AQ4 group8 ragged-M WMMA prototype scale value byte size overflows".to_string())?;
-    let row_scale_bytes = row_scale_count.checked_mul(std::mem::size_of::<f32>()).ok_or_else(|| "AQ4 group8 ragged-M WMMA prototype row scale byte size overflows".to_string())?;
-    check_copy_range(0, elements / 2, index_buffer.size()?)?; check_copy_range(0, elements / 8, scale_buffer.size()?)?; check_copy_range(0, 16 * std::mem::size_of::<f32>(), codebook_buffer.size()?)?; check_copy_range(0, scale_value_bytes, scale_values_buffer.size()?)?; check_copy_range(0, input_bytes, input_buffer.size()?)?; if let Some(row_scale_buffer) = row_scale_buffer { check_copy_range(0, row_scale_bytes, row_scale_buffer.size()?)?; } check_copy_range(0, output_bytes, output_buffer.size()?)?;
+    if scale_count == 0
+        || group_size != 8
+        || !(1..=128).contains(&m_actual)
+        || rows == 0
+        || cols == 0
+        || !rows.is_multiple_of(16)
+        || !cols.is_multiple_of(32)
+        || !tensor_scale.is_finite()
+        || tensor_scale <= 0.0
+    {
+        return Err("AQ4 group8 ragged-M WMMA prototype parameters are invalid".to_string());
+    }
+    let elements = rows.checked_mul(cols).ok_or_else(|| {
+        "AQ4 group8 ragged-M WMMA prototype matrix element count overflows".to_string()
+    })?;
+    let input_bytes = m_actual
+        .checked_mul(cols)
+        .and_then(|v| v.checked_mul(std::mem::size_of::<f32>()))
+        .ok_or_else(|| {
+            "AQ4 group8 ragged-M WMMA prototype input byte size overflows".to_string()
+        })?;
+    let output_bytes = m_actual
+        .checked_mul(rows)
+        .and_then(|v| v.checked_mul(std::mem::size_of::<f32>()))
+        .ok_or_else(|| {
+            "AQ4 group8 ragged-M WMMA prototype output byte size overflows".to_string()
+        })?;
+    let scale_value_bytes = scale_count
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| {
+            "AQ4 group8 ragged-M WMMA prototype scale value byte size overflows".to_string()
+        })?;
+    let row_scale_bytes = row_scale_count
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| {
+            "AQ4 group8 ragged-M WMMA prototype row scale byte size overflows".to_string()
+        })?;
+    check_copy_range(0, elements / 2, index_buffer.size()?)?;
+    check_copy_range(0, elements / 8, scale_buffer.size()?)?;
+    check_copy_range(0, 16 * std::mem::size_of::<f32>(), codebook_buffer.size()?)?;
+    check_copy_range(0, scale_value_bytes, scale_values_buffer.size()?)?;
+    check_copy_range(0, input_bytes, input_buffer.size()?)?;
+    if let Some(row_scale_buffer) = row_scale_buffer {
+        check_copy_range(0, row_scale_bytes, row_scale_buffer.size()?)?;
+    }
+    check_copy_range(0, output_bytes, output_buffer.size()?)?;
     let stream = stream.map_or(std::ptr::null_mut(), |stream| stream.raw.as_ptr());
-    let row_scale_raw = row_scale_buffer.map(|buffer| buffer.raw.as_ptr()).unwrap_or(std::ptr::null_mut());
-    status_to_result(unsafe { ullm_runtime_aq4_matvec_batch_wmma_group8_ragged_m_prototype_f32(index_buffer.raw.as_ptr(), scale_buffer.raw.as_ptr(), codebook_buffer.raw.as_ptr(), scale_values_buffer.raw.as_ptr(), input_buffer.raw.as_ptr(), row_scale_raw, scale_count, group_size, tensor_scale, row_scale_count, rows, cols, m_actual, output_buffer.raw.as_ptr(), stream) })
+    let row_scale_raw = row_scale_buffer
+        .map(|buffer| buffer.raw.as_ptr())
+        .unwrap_or(std::ptr::null_mut());
+    status_to_result(unsafe {
+        ullm_runtime_aq4_matvec_batch_wmma_group8_ragged_m_prototype_f32(
+            index_buffer.raw.as_ptr(),
+            scale_buffer.raw.as_ptr(),
+            codebook_buffer.raw.as_ptr(),
+            scale_values_buffer.raw.as_ptr(),
+            input_buffer.raw.as_ptr(),
+            row_scale_raw,
+            scale_count,
+            group_size,
+            tensor_scale,
+            row_scale_count,
+            rows,
+            cols,
+            m_actual,
+            output_buffer.raw.as_ptr(),
+            stream,
+        )
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2741,15 +2939,13 @@ pub fn aq4_matvec_batch_wmma_group8_prototype_f32(
     let groups = elements / group_size;
     let scale_value_bytes = scale_count
         .checked_mul(std::mem::size_of::<f32>())
-        .ok_or_else(|| {
-            "AQ4 group8 WMMA prototype scale value byte size overflows".to_string()
-        })?;
+        .ok_or_else(|| "AQ4 group8 WMMA prototype scale value byte size overflows".to_string())?;
     let input_elements = batch_count
         .checked_mul(cols)
         .ok_or_else(|| "AQ4 group8 WMMA prototype input element count overflows".to_string())?;
-    let output_elements = batch_count.checked_mul(rows).ok_or_else(|| {
-        "AQ4 group8 WMMA prototype output element count overflows".to_string()
-    })?;
+    let output_elements = batch_count
+        .checked_mul(rows)
+        .ok_or_else(|| "AQ4 group8 WMMA prototype output element count overflows".to_string())?;
     let input_bytes = input_elements
         .checked_mul(std::mem::size_of::<f32>())
         .ok_or_else(|| "AQ4 group8 WMMA prototype input byte size overflows".to_string())?;
@@ -2837,13 +3033,8 @@ pub fn aq4_matvec_batch_dispatch_tiled_for_shape(
     cols: usize,
     batch_count: usize,
 ) -> bool {
-    aq4_matvec_batch_dispatch_kind_for_shape(
-        device_index,
-        group_size,
-        rows,
-        cols,
-        batch_count,
-    ) == Aq4MatvecBatchDispatchKind::TiledLdsBm8
+    aq4_matvec_batch_dispatch_kind_for_shape(device_index, group_size, rows, cols, batch_count)
+        == Aq4MatvecBatchDispatchKind::TiledLdsBm8
 }
 
 pub fn aq4_matvec_top1_partial_count(rows: usize) -> Result<usize, String> {
@@ -3055,34 +3246,53 @@ pub fn aq4_matvec_add_wide_load_prototype_f32(
     stream: Option<&mut RuntimeStream>,
 ) -> Result<(), String> {
     if scale_count == 0 || rows == 0 || cols == 0 {
-        return Err("AQ4 matvec add wide-load prototype requires nonzero scale_count, rows, and cols".into());
+        return Err(
+            "AQ4 matvec add wide-load prototype requires nonzero scale_count, rows, and cols"
+                .into(),
+        );
     }
-    if !matches!(group_size, 8 | 16) || !cols.is_multiple_of(32) || !cols.is_multiple_of(group_size) {
-        return Err("AQ4 matvec add wide-load prototype requires group8/group16 and cols divisible by 32".into());
+    if !matches!(group_size, 8 | 16) || !cols.is_multiple_of(32) || !cols.is_multiple_of(group_size)
+    {
+        return Err(
+            "AQ4 matvec add wide-load prototype requires group8/group16 and cols divisible by 32"
+                .into(),
+        );
     }
     if row_scale_count != 0 && row_scale_count != rows {
-        return Err("AQ4 matvec add wide-load prototype row_scale_count must be zero or rows".into());
+        return Err(
+            "AQ4 matvec add wide-load prototype row_scale_count must be zero or rows".into(),
+        );
     }
     if !tensor_scale.is_finite() || tensor_scale <= 0.0 {
-        return Err("AQ4 matvec add wide-load prototype tensor_scale must be finite and positive".into());
+        return Err(
+            "AQ4 matvec add wide-load prototype tensor_scale must be finite and positive".into(),
+        );
     }
     let elements = rows.checked_mul(cols).ok_or_else(|| {
         "AQ4 matvec add wide-load prototype matrix element count overflows".to_string()
     })?;
     let index_bytes = elements / 2;
     let groups = elements / group_size;
-    let scale_value_bytes = scale_count.checked_mul(std::mem::size_of::<f32>()).ok_or_else(|| {
-        "AQ4 matvec add wide-load prototype scale value byte size overflows".to_string()
-    })?;
-    let input_bytes = cols.checked_mul(std::mem::size_of::<f32>()).ok_or_else(|| {
-        "AQ4 matvec add wide-load prototype input byte size overflows".to_string()
-    })?;
-    let output_bytes = rows.checked_mul(std::mem::size_of::<f32>()).ok_or_else(|| {
-        "AQ4 matvec add wide-load prototype output byte size overflows".to_string()
-    })?;
-    let row_scale_bytes = row_scale_count.checked_mul(std::mem::size_of::<f32>()).ok_or_else(|| {
-        "AQ4 matvec add wide-load prototype row scale byte size overflows".to_string()
-    })?;
+    let scale_value_bytes = scale_count
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| {
+            "AQ4 matvec add wide-load prototype scale value byte size overflows".to_string()
+        })?;
+    let input_bytes = cols
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| {
+            "AQ4 matvec add wide-load prototype input byte size overflows".to_string()
+        })?;
+    let output_bytes = rows
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| {
+            "AQ4 matvec add wide-load prototype output byte size overflows".to_string()
+        })?;
+    let row_scale_bytes = row_scale_count
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| {
+            "AQ4 matvec add wide-load prototype row scale byte size overflows".to_string()
+        })?;
     check_copy_range(0, index_bytes, index_buffer.size()?)?;
     check_copy_range(0, groups, scale_buffer.size()?)?;
     check_copy_range(0, 16 * std::mem::size_of::<f32>(), codebook_buffer.size()?)?;
@@ -3141,9 +3351,7 @@ pub fn aq4_matvec_add_shuffle_prototype_f32(
             "AQ4 matvec add shuffle prototype requires nonzero scale_count, rows, and cols".into(),
         );
     }
-    if !matches!(group_size, 8 | 16)
-        || !cols.is_multiple_of(32)
-        || !cols.is_multiple_of(group_size)
+    if !matches!(group_size, 8 | 16) || !cols.is_multiple_of(32) || !cols.is_multiple_of(group_size)
     {
         return Err(
             "AQ4 matvec add shuffle prototype requires group8/group16 and cols divisible by 32"
@@ -3159,32 +3367,34 @@ pub fn aq4_matvec_add_shuffle_prototype_f32(
         );
     }
     if !tensor_scale.is_finite() || tensor_scale <= 0.0 {
-        return Err("AQ4 matvec add shuffle prototype tensor_scale must be finite and positive".into());
+        return Err(
+            "AQ4 matvec add shuffle prototype tensor_scale must be finite and positive".into(),
+        );
     }
     let elements = rows.checked_mul(cols).ok_or_else(|| {
         "AQ4 matvec add shuffle prototype matrix element count overflows".to_string()
     })?;
     let index_bytes = elements / 2;
     let groups = elements / group_size;
-    let scale_value_bytes = scale_count.checked_mul(std::mem::size_of::<f32>()).ok_or_else(|| {
-        "AQ4 matvec add shuffle prototype scale value byte size overflows".to_string()
-    })?;
-    let input_bytes = cols.checked_mul(std::mem::size_of::<f32>()).ok_or_else(|| {
-        "AQ4 matvec add shuffle prototype input byte size overflows".to_string()
-    })?;
-    let output_bytes = rows.checked_mul(std::mem::size_of::<f32>()).ok_or_else(|| {
-        "AQ4 matvec add shuffle prototype output byte size overflows".to_string()
-    })?;
+    let scale_value_bytes = scale_count
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| {
+            "AQ4 matvec add shuffle prototype scale value byte size overflows".to_string()
+        })?;
+    let input_bytes = cols
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| "AQ4 matvec add shuffle prototype input byte size overflows".to_string())?;
+    let output_bytes = rows
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| "AQ4 matvec add shuffle prototype output byte size overflows".to_string())?;
     let row_scale_bytes = row_scale_count
         .checked_mul(std::mem::size_of::<f32>())
-        .ok_or_else(|| "AQ4 matvec add shuffle prototype row scale byte size overflows".to_string())?;
+        .ok_or_else(|| {
+            "AQ4 matvec add shuffle prototype row scale byte size overflows".to_string()
+        })?;
     check_copy_range(0, index_bytes, index_buffer.size()?)?;
     check_copy_range(0, groups, scale_buffer.size()?)?;
-    check_copy_range(
-        0,
-        16 * std::mem::size_of::<f32>(),
-        codebook_buffer.size()?,
-    )?;
+    check_copy_range(0, 16 * std::mem::size_of::<f32>(), codebook_buffer.size()?)?;
     check_copy_range(0, scale_value_bytes, scale_values_buffer.size()?)?;
     check_copy_range(0, input_bytes, input_buffer.size()?)?;
     check_copy_range(0, output_bytes, residual_buffer.size()?)?;
@@ -3915,46 +4125,129 @@ pub fn aq4_matvec_qkv_z_gate_beta_f32(
 #[allow(clippy::too_many_arguments)]
 /// Direct-only gfx1201 fused M=1 experiment. Production dispatch never selects it.
 pub fn aq4_matvec_qkv_z_gate_beta_wide_load_prototype_f32(
-    qkv_index: &RuntimeBuffer, qkv_scale: &RuntimeBuffer, qkv_codebook: &RuntimeBuffer,
-    qkv_scale_values: &RuntimeBuffer, qkv_row_scale: Option<&RuntimeBuffer>, qkv_scale_count: usize,
-    qkv_group_size: usize, qkv_tensor_scale: f32, qkv_row_scale_count: usize,
-    z_index: &RuntimeBuffer, z_scale: &RuntimeBuffer, z_codebook: &RuntimeBuffer,
-    z_scale_values: &RuntimeBuffer, z_row_scale: Option<&RuntimeBuffer>, z_scale_count: usize,
-    z_group_size: usize, z_tensor_scale: f32, z_row_scale_count: usize,
-    a_index: &RuntimeBuffer, a_scale: &RuntimeBuffer, a_codebook: &RuntimeBuffer,
-    a_scale_values: &RuntimeBuffer, a_row_scale: Option<&RuntimeBuffer>, a_scale_count: usize,
-    a_group_size: usize, a_tensor_scale: f32, a_row_scale_count: usize,
-    b_index: &RuntimeBuffer, b_scale: &RuntimeBuffer, b_codebook: &RuntimeBuffer,
-    b_scale_values: &RuntimeBuffer, b_row_scale: Option<&RuntimeBuffer>, b_scale_count: usize,
-    b_group_size: usize, b_tensor_scale: f32, b_row_scale_count: usize,
-    input: &RuntimeBuffer, a_log: &RuntimeBuffer, dt_bias: &RuntimeBuffer,
-    qkv_rows: usize, z_rows: usize, heads: usize, cols: usize,
-    qkv_output: &mut RuntimeBuffer, z_output: &mut RuntimeBuffer,
-    gate_output: &mut RuntimeBuffer, beta_output: &mut RuntimeBuffer,
+    qkv_index: &RuntimeBuffer,
+    qkv_scale: &RuntimeBuffer,
+    qkv_codebook: &RuntimeBuffer,
+    qkv_scale_values: &RuntimeBuffer,
+    qkv_row_scale: Option<&RuntimeBuffer>,
+    qkv_scale_count: usize,
+    qkv_group_size: usize,
+    qkv_tensor_scale: f32,
+    qkv_row_scale_count: usize,
+    z_index: &RuntimeBuffer,
+    z_scale: &RuntimeBuffer,
+    z_codebook: &RuntimeBuffer,
+    z_scale_values: &RuntimeBuffer,
+    z_row_scale: Option<&RuntimeBuffer>,
+    z_scale_count: usize,
+    z_group_size: usize,
+    z_tensor_scale: f32,
+    z_row_scale_count: usize,
+    a_index: &RuntimeBuffer,
+    a_scale: &RuntimeBuffer,
+    a_codebook: &RuntimeBuffer,
+    a_scale_values: &RuntimeBuffer,
+    a_row_scale: Option<&RuntimeBuffer>,
+    a_scale_count: usize,
+    a_group_size: usize,
+    a_tensor_scale: f32,
+    a_row_scale_count: usize,
+    b_index: &RuntimeBuffer,
+    b_scale: &RuntimeBuffer,
+    b_codebook: &RuntimeBuffer,
+    b_scale_values: &RuntimeBuffer,
+    b_row_scale: Option<&RuntimeBuffer>,
+    b_scale_count: usize,
+    b_group_size: usize,
+    b_tensor_scale: f32,
+    b_row_scale_count: usize,
+    input: &RuntimeBuffer,
+    a_log: &RuntimeBuffer,
+    dt_bias: &RuntimeBuffer,
+    qkv_rows: usize,
+    z_rows: usize,
+    heads: usize,
+    cols: usize,
+    qkv_output: &mut RuntimeBuffer,
+    z_output: &mut RuntimeBuffer,
+    gate_output: &mut RuntimeBuffer,
+    beta_output: &mut RuntimeBuffer,
     stream: Option<&mut RuntimeStream>,
 ) -> Result<(), String> {
     if qkv_rows == 0 || z_rows == 0 || heads == 0 || cols == 0 || !cols.is_multiple_of(32) {
-        return Err("AQ4 wide-load fused qkv/z gate/beta requires nonzero rows and cols divisible by 32".into());
+        return Err(
+            "AQ4 wide-load fused qkv/z gate/beta requires nonzero rows and cols divisible by 32"
+                .into(),
+        );
     }
-    let matrix_layout = |label: &str, rows: usize, group_size: usize, scale_count: usize,
-                         tensor_scale: f32, row_scale_count: usize| -> Result<(usize, usize, usize, usize), String> {
-        if !matches!(group_size, 8 | 16) || scale_count == 0 || !tensor_scale.is_finite() || tensor_scale <= 0.0 {
+    let matrix_layout = |label: &str,
+                         rows: usize,
+                         group_size: usize,
+                         scale_count: usize,
+                         tensor_scale: f32,
+                         row_scale_count: usize|
+     -> Result<(usize, usize, usize, usize), String> {
+        if !matches!(group_size, 8 | 16)
+            || scale_count == 0
+            || !tensor_scale.is_finite()
+            || tensor_scale <= 0.0
+        {
             return Err(format!("AQ4 wide-load fused qkv/z gate/beta {label} requires a positive scale table, tensor scale, and group8/group16"));
         }
         if row_scale_count > rows {
-            return Err(format!("AQ4 wide-load fused qkv/z gate/beta {label} row_scale_count exceeds rows"));
+            return Err(format!(
+                "AQ4 wide-load fused qkv/z gate/beta {label} row_scale_count exceeds rows"
+            ));
         }
-        let elements = rows.checked_mul(cols).ok_or_else(|| format!("AQ4 wide-load fused qkv/z gate/beta {label} element count overflows"))?;
+        let elements = rows.checked_mul(cols).ok_or_else(|| {
+            format!("AQ4 wide-load fused qkv/z gate/beta {label} element count overflows")
+        })?;
         let index_bytes = elements / 2;
         let groups = elements / group_size;
-        let scale_value_bytes = scale_count.checked_mul(std::mem::size_of::<f32>()).ok_or_else(|| format!("AQ4 wide-load fused qkv/z gate/beta {label} scale value bytes overflow"))?;
-        let row_scale_bytes = row_scale_count.checked_mul(std::mem::size_of::<f32>()).ok_or_else(|| format!("AQ4 wide-load fused qkv/z gate/beta {label} row scale bytes overflow"))?;
+        let scale_value_bytes = scale_count
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| {
+                format!("AQ4 wide-load fused qkv/z gate/beta {label} scale value bytes overflow")
+            })?;
+        let row_scale_bytes = row_scale_count
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| {
+                format!("AQ4 wide-load fused qkv/z gate/beta {label} row scale bytes overflow")
+            })?;
         Ok((index_bytes, groups, scale_value_bytes, row_scale_bytes))
     };
-    let qkv_layout = matrix_layout("qkv", qkv_rows, qkv_group_size, qkv_scale_count, qkv_tensor_scale, qkv_row_scale_count)?;
-    let z_layout = matrix_layout("z", z_rows, z_group_size, z_scale_count, z_tensor_scale, z_row_scale_count)?;
-    let a_layout = matrix_layout("a", heads, a_group_size, a_scale_count, a_tensor_scale, a_row_scale_count)?;
-    let b_layout = matrix_layout("b", heads, b_group_size, b_scale_count, b_tensor_scale, b_row_scale_count)?;
+    let qkv_layout = matrix_layout(
+        "qkv",
+        qkv_rows,
+        qkv_group_size,
+        qkv_scale_count,
+        qkv_tensor_scale,
+        qkv_row_scale_count,
+    )?;
+    let z_layout = matrix_layout(
+        "z",
+        z_rows,
+        z_group_size,
+        z_scale_count,
+        z_tensor_scale,
+        z_row_scale_count,
+    )?;
+    let a_layout = matrix_layout(
+        "a",
+        heads,
+        a_group_size,
+        a_scale_count,
+        a_tensor_scale,
+        a_row_scale_count,
+    )?;
+    let b_layout = matrix_layout(
+        "b",
+        heads,
+        b_group_size,
+        b_scale_count,
+        b_tensor_scale,
+        b_row_scale_count,
+    )?;
     for (label, row_scale, row_scale_count) in [
         ("qkv", qkv_row_scale, qkv_row_scale_count),
         ("z", z_row_scale, z_row_scale_count),
@@ -3968,31 +4261,117 @@ pub fn aq4_matvec_qkv_z_gate_beta_wide_load_prototype_f32(
         }
     }
     for (index, scale, codebook, scale_values, row_scale, layout) in [
-        (qkv_index, qkv_scale, qkv_codebook, qkv_scale_values, qkv_row_scale, qkv_layout),
-        (z_index, z_scale, z_codebook, z_scale_values, z_row_scale, z_layout),
-        (a_index, a_scale, a_codebook, a_scale_values, a_row_scale, a_layout),
-        (b_index, b_scale, b_codebook, b_scale_values, b_row_scale, b_layout),
+        (
+            qkv_index,
+            qkv_scale,
+            qkv_codebook,
+            qkv_scale_values,
+            qkv_row_scale,
+            qkv_layout,
+        ),
+        (
+            z_index,
+            z_scale,
+            z_codebook,
+            z_scale_values,
+            z_row_scale,
+            z_layout,
+        ),
+        (
+            a_index,
+            a_scale,
+            a_codebook,
+            a_scale_values,
+            a_row_scale,
+            a_layout,
+        ),
+        (
+            b_index,
+            b_scale,
+            b_codebook,
+            b_scale_values,
+            b_row_scale,
+            b_layout,
+        ),
     ] {
         check_copy_range(0, layout.0, index.size()?)?;
         check_copy_range(0, layout.1, scale.size()?)?;
         check_copy_range(0, 16 * std::mem::size_of::<f32>(), codebook.size()?)?;
         check_copy_range(0, layout.2, scale_values.size()?)?;
-        if let Some(row_scale) = row_scale { check_copy_range(0, layout.3, row_scale.size()?)?; }
+        if let Some(row_scale) = row_scale {
+            check_copy_range(0, layout.3, row_scale.size()?)?;
+        }
     }
-    let input_bytes = cols.checked_mul(std::mem::size_of::<f32>()).ok_or("AQ4 wide-load fused qkv/z gate/beta input bytes overflow")?;
+    let input_bytes = cols
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or("AQ4 wide-load fused qkv/z gate/beta input bytes overflow")?;
     check_copy_range(0, input_bytes, input.size()?)?;
-    for (buffer, rows) in [(a_log, heads), (dt_bias, heads), (qkv_output, qkv_rows), (z_output, z_rows), (gate_output, heads), (beta_output, heads)] {
-        check_copy_range(0, rows.checked_mul(std::mem::size_of::<f32>()).ok_or("AQ4 wide-load fused qkv/z gate/beta output bytes overflow")?, buffer.size()?)?;
+    for (buffer, rows) in [
+        (a_log, heads),
+        (dt_bias, heads),
+        (qkv_output, qkv_rows),
+        (z_output, z_rows),
+        (gate_output, heads),
+        (beta_output, heads),
+    ] {
+        check_copy_range(
+            0,
+            rows.checked_mul(std::mem::size_of::<f32>())
+                .ok_or("AQ4 wide-load fused qkv/z gate/beta output bytes overflow")?,
+            buffer.size()?,
+        )?;
     }
     let stream_raw = stream.map_or(std::ptr::null_mut(), |value| value.raw.as_ptr());
     status_to_result(unsafe {
         ullm_runtime_aq4_matvec_qkv_z_gate_beta_wide_load_prototype_f32(
-            qkv_index.raw.as_ptr(), qkv_scale.raw.as_ptr(), qkv_codebook.raw.as_ptr(), qkv_scale_values.raw.as_ptr(), qkv_row_scale.map_or(std::ptr::null_mut(), |v| v.raw.as_ptr()), qkv_scale_count, qkv_group_size, qkv_tensor_scale, qkv_row_scale_count,
-            z_index.raw.as_ptr(), z_scale.raw.as_ptr(), z_codebook.raw.as_ptr(), z_scale_values.raw.as_ptr(), z_row_scale.map_or(std::ptr::null_mut(), |v| v.raw.as_ptr()), z_scale_count, z_group_size, z_tensor_scale, z_row_scale_count,
-            a_index.raw.as_ptr(), a_scale.raw.as_ptr(), a_codebook.raw.as_ptr(), a_scale_values.raw.as_ptr(), a_row_scale.map_or(std::ptr::null_mut(), |v| v.raw.as_ptr()), a_scale_count, a_group_size, a_tensor_scale, a_row_scale_count,
-            b_index.raw.as_ptr(), b_scale.raw.as_ptr(), b_codebook.raw.as_ptr(), b_scale_values.raw.as_ptr(), b_row_scale.map_or(std::ptr::null_mut(), |v| v.raw.as_ptr()), b_scale_count, b_group_size, b_tensor_scale, b_row_scale_count,
-            input.raw.as_ptr(), a_log.raw.as_ptr(), dt_bias.raw.as_ptr(), qkv_rows, z_rows, heads, cols,
-            qkv_output.raw.as_ptr(), z_output.raw.as_ptr(), gate_output.raw.as_ptr(), beta_output.raw.as_ptr(), stream_raw,
+            qkv_index.raw.as_ptr(),
+            qkv_scale.raw.as_ptr(),
+            qkv_codebook.raw.as_ptr(),
+            qkv_scale_values.raw.as_ptr(),
+            qkv_row_scale.map_or(std::ptr::null_mut(), |v| v.raw.as_ptr()),
+            qkv_scale_count,
+            qkv_group_size,
+            qkv_tensor_scale,
+            qkv_row_scale_count,
+            z_index.raw.as_ptr(),
+            z_scale.raw.as_ptr(),
+            z_codebook.raw.as_ptr(),
+            z_scale_values.raw.as_ptr(),
+            z_row_scale.map_or(std::ptr::null_mut(), |v| v.raw.as_ptr()),
+            z_scale_count,
+            z_group_size,
+            z_tensor_scale,
+            z_row_scale_count,
+            a_index.raw.as_ptr(),
+            a_scale.raw.as_ptr(),
+            a_codebook.raw.as_ptr(),
+            a_scale_values.raw.as_ptr(),
+            a_row_scale.map_or(std::ptr::null_mut(), |v| v.raw.as_ptr()),
+            a_scale_count,
+            a_group_size,
+            a_tensor_scale,
+            a_row_scale_count,
+            b_index.raw.as_ptr(),
+            b_scale.raw.as_ptr(),
+            b_codebook.raw.as_ptr(),
+            b_scale_values.raw.as_ptr(),
+            b_row_scale.map_or(std::ptr::null_mut(), |v| v.raw.as_ptr()),
+            b_scale_count,
+            b_group_size,
+            b_tensor_scale,
+            b_row_scale_count,
+            input.raw.as_ptr(),
+            a_log.raw.as_ptr(),
+            dt_bias.raw.as_ptr(),
+            qkv_rows,
+            z_rows,
+            heads,
+            cols,
+            qkv_output.raw.as_ptr(),
+            z_output.raw.as_ptr(),
+            gate_output.raw.as_ptr(),
+            beta_output.raw.as_ptr(),
+            stream_raw,
         )
     })
 }
@@ -4000,22 +4379,106 @@ pub fn aq4_matvec_qkv_z_gate_beta_wide_load_prototype_f32(
 #[allow(clippy::too_many_arguments)]
 /// Direct-only gfx1201 scalar-load experiment. The C++ ABI performs full prototype shape/buffer validation before launch.
 pub fn aq4_matvec_qkv_z_gate_beta_shuffle_prototype_f32(
-    qkv_index: &RuntimeBuffer, qkv_scale: &RuntimeBuffer, qkv_codebook: &RuntimeBuffer, qkv_scale_values: &RuntimeBuffer, qkv_row_scale: Option<&RuntimeBuffer>, qkv_scale_count: usize, qkv_group_size: usize, qkv_tensor_scale: f32, qkv_row_scale_count: usize,
-    z_index: &RuntimeBuffer, z_scale: &RuntimeBuffer, z_codebook: &RuntimeBuffer, z_scale_values: &RuntimeBuffer, z_row_scale: Option<&RuntimeBuffer>, z_scale_count: usize, z_group_size: usize, z_tensor_scale: f32, z_row_scale_count: usize,
-    a_index: &RuntimeBuffer, a_scale: &RuntimeBuffer, a_codebook: &RuntimeBuffer, a_scale_values: &RuntimeBuffer, a_row_scale: Option<&RuntimeBuffer>, a_scale_count: usize, a_group_size: usize, a_tensor_scale: f32, a_row_scale_count: usize,
-    b_index: &RuntimeBuffer, b_scale: &RuntimeBuffer, b_codebook: &RuntimeBuffer, b_scale_values: &RuntimeBuffer, b_row_scale: Option<&RuntimeBuffer>, b_scale_count: usize, b_group_size: usize, b_tensor_scale: f32, b_row_scale_count: usize,
-    input: &RuntimeBuffer, a_log: &RuntimeBuffer, dt_bias: &RuntimeBuffer, qkv_rows: usize, z_rows: usize, heads: usize, cols: usize,
-    qkv_output: &mut RuntimeBuffer, z_output: &mut RuntimeBuffer, gate_output: &mut RuntimeBuffer, beta_output: &mut RuntimeBuffer, stream: Option<&mut RuntimeStream>,
+    qkv_index: &RuntimeBuffer,
+    qkv_scale: &RuntimeBuffer,
+    qkv_codebook: &RuntimeBuffer,
+    qkv_scale_values: &RuntimeBuffer,
+    qkv_row_scale: Option<&RuntimeBuffer>,
+    qkv_scale_count: usize,
+    qkv_group_size: usize,
+    qkv_tensor_scale: f32,
+    qkv_row_scale_count: usize,
+    z_index: &RuntimeBuffer,
+    z_scale: &RuntimeBuffer,
+    z_codebook: &RuntimeBuffer,
+    z_scale_values: &RuntimeBuffer,
+    z_row_scale: Option<&RuntimeBuffer>,
+    z_scale_count: usize,
+    z_group_size: usize,
+    z_tensor_scale: f32,
+    z_row_scale_count: usize,
+    a_index: &RuntimeBuffer,
+    a_scale: &RuntimeBuffer,
+    a_codebook: &RuntimeBuffer,
+    a_scale_values: &RuntimeBuffer,
+    a_row_scale: Option<&RuntimeBuffer>,
+    a_scale_count: usize,
+    a_group_size: usize,
+    a_tensor_scale: f32,
+    a_row_scale_count: usize,
+    b_index: &RuntimeBuffer,
+    b_scale: &RuntimeBuffer,
+    b_codebook: &RuntimeBuffer,
+    b_scale_values: &RuntimeBuffer,
+    b_row_scale: Option<&RuntimeBuffer>,
+    b_scale_count: usize,
+    b_group_size: usize,
+    b_tensor_scale: f32,
+    b_row_scale_count: usize,
+    input: &RuntimeBuffer,
+    a_log: &RuntimeBuffer,
+    dt_bias: &RuntimeBuffer,
+    qkv_rows: usize,
+    z_rows: usize,
+    heads: usize,
+    cols: usize,
+    qkv_output: &mut RuntimeBuffer,
+    z_output: &mut RuntimeBuffer,
+    gate_output: &mut RuntimeBuffer,
+    beta_output: &mut RuntimeBuffer,
+    stream: Option<&mut RuntimeStream>,
 ) -> Result<(), String> {
     let stream_raw = stream.map_or(std::ptr::null_mut(), |value| value.raw.as_ptr());
     status_to_result(unsafe {
         ullm_runtime_aq4_matvec_qkv_z_gate_beta_shuffle_prototype_f32(
-            qkv_index.raw.as_ptr(),qkv_scale.raw.as_ptr(),qkv_codebook.raw.as_ptr(),qkv_scale_values.raw.as_ptr(),qkv_row_scale.map_or(std::ptr::null_mut(),|v|v.raw.as_ptr()),qkv_scale_count,qkv_group_size,qkv_tensor_scale,qkv_row_scale_count,
-            z_index.raw.as_ptr(),z_scale.raw.as_ptr(),z_codebook.raw.as_ptr(),z_scale_values.raw.as_ptr(),z_row_scale.map_or(std::ptr::null_mut(),|v|v.raw.as_ptr()),z_scale_count,z_group_size,z_tensor_scale,z_row_scale_count,
-            a_index.raw.as_ptr(),a_scale.raw.as_ptr(),a_codebook.raw.as_ptr(),a_scale_values.raw.as_ptr(),a_row_scale.map_or(std::ptr::null_mut(),|v|v.raw.as_ptr()),a_scale_count,a_group_size,a_tensor_scale,a_row_scale_count,
-            b_index.raw.as_ptr(),b_scale.raw.as_ptr(),b_codebook.raw.as_ptr(),b_scale_values.raw.as_ptr(),b_row_scale.map_or(std::ptr::null_mut(),|v|v.raw.as_ptr()),b_scale_count,b_group_size,b_tensor_scale,b_row_scale_count,
-            input.raw.as_ptr(),a_log.raw.as_ptr(),dt_bias.raw.as_ptr(),qkv_rows,z_rows,heads,cols,
-            qkv_output.raw.as_ptr(),z_output.raw.as_ptr(),gate_output.raw.as_ptr(),beta_output.raw.as_ptr(),stream_raw,
+            qkv_index.raw.as_ptr(),
+            qkv_scale.raw.as_ptr(),
+            qkv_codebook.raw.as_ptr(),
+            qkv_scale_values.raw.as_ptr(),
+            qkv_row_scale.map_or(std::ptr::null_mut(), |v| v.raw.as_ptr()),
+            qkv_scale_count,
+            qkv_group_size,
+            qkv_tensor_scale,
+            qkv_row_scale_count,
+            z_index.raw.as_ptr(),
+            z_scale.raw.as_ptr(),
+            z_codebook.raw.as_ptr(),
+            z_scale_values.raw.as_ptr(),
+            z_row_scale.map_or(std::ptr::null_mut(), |v| v.raw.as_ptr()),
+            z_scale_count,
+            z_group_size,
+            z_tensor_scale,
+            z_row_scale_count,
+            a_index.raw.as_ptr(),
+            a_scale.raw.as_ptr(),
+            a_codebook.raw.as_ptr(),
+            a_scale_values.raw.as_ptr(),
+            a_row_scale.map_or(std::ptr::null_mut(), |v| v.raw.as_ptr()),
+            a_scale_count,
+            a_group_size,
+            a_tensor_scale,
+            a_row_scale_count,
+            b_index.raw.as_ptr(),
+            b_scale.raw.as_ptr(),
+            b_codebook.raw.as_ptr(),
+            b_scale_values.raw.as_ptr(),
+            b_row_scale.map_or(std::ptr::null_mut(), |v| v.raw.as_ptr()),
+            b_scale_count,
+            b_group_size,
+            b_tensor_scale,
+            b_row_scale_count,
+            input.raw.as_ptr(),
+            a_log.raw.as_ptr(),
+            dt_bias.raw.as_ptr(),
+            qkv_rows,
+            z_rows,
+            heads,
+            cols,
+            qkv_output.raw.as_ptr(),
+            z_output.raw.as_ptr(),
+            gate_output.raw.as_ptr(),
+            beta_output.raw.as_ptr(),
+            stream_raw,
         )
     })
 }
@@ -4023,86 +4486,225 @@ pub fn aq4_matvec_qkv_z_gate_beta_shuffle_prototype_f32(
 #[allow(clippy::too_many_arguments)]
 /// Direct-only gfx1201 fused M=1 SiLU-mul experiment. Production dispatch never selects it.
 pub fn aq4_matvec_silu_mul_wide_load_prototype_f32(
-    gate_index: &RuntimeBuffer, gate_scale: &RuntimeBuffer, gate_codebook: &RuntimeBuffer,
-    gate_scale_values: &RuntimeBuffer, gate_row_scale: Option<&RuntimeBuffer>, gate_scale_count: usize,
-    gate_group_size: usize, gate_tensor_scale: f32, gate_row_scale_count: usize,
-    up_index: &RuntimeBuffer, up_scale: &RuntimeBuffer, up_codebook: &RuntimeBuffer,
-    up_scale_values: &RuntimeBuffer, up_row_scale: Option<&RuntimeBuffer>, up_scale_count: usize,
-    up_group_size: usize, up_tensor_scale: f32, up_row_scale_count: usize,
-    input: &RuntimeBuffer, rows: usize, cols: usize, output: &mut RuntimeBuffer,
+    gate_index: &RuntimeBuffer,
+    gate_scale: &RuntimeBuffer,
+    gate_codebook: &RuntimeBuffer,
+    gate_scale_values: &RuntimeBuffer,
+    gate_row_scale: Option<&RuntimeBuffer>,
+    gate_scale_count: usize,
+    gate_group_size: usize,
+    gate_tensor_scale: f32,
+    gate_row_scale_count: usize,
+    up_index: &RuntimeBuffer,
+    up_scale: &RuntimeBuffer,
+    up_codebook: &RuntimeBuffer,
+    up_scale_values: &RuntimeBuffer,
+    up_row_scale: Option<&RuntimeBuffer>,
+    up_scale_count: usize,
+    up_group_size: usize,
+    up_tensor_scale: f32,
+    up_row_scale_count: usize,
+    input: &RuntimeBuffer,
+    rows: usize,
+    cols: usize,
+    output: &mut RuntimeBuffer,
     stream: Option<&mut RuntimeStream>,
 ) -> Result<(), String> {
-    if !matches!(gate_group_size, 8 | 16) || !matches!(up_group_size, 8 | 16)
-        || rows == 0 || cols == 0 || !cols.is_multiple_of(32) || gate_scale_count == 0 || up_scale_count == 0
-        || !gate_tensor_scale.is_finite() || gate_tensor_scale <= 0.0
-        || !up_tensor_scale.is_finite() || up_tensor_scale <= 0.0
-        || gate_row_scale_count > rows || up_row_scale_count > rows {
+    if !matches!(gate_group_size, 8 | 16)
+        || !matches!(up_group_size, 8 | 16)
+        || rows == 0
+        || cols == 0
+        || !cols.is_multiple_of(32)
+        || gate_scale_count == 0
+        || up_scale_count == 0
+        || !gate_tensor_scale.is_finite()
+        || gate_tensor_scale <= 0.0
+        || !up_tensor_scale.is_finite()
+        || up_tensor_scale <= 0.0
+        || gate_row_scale_count > rows
+        || up_row_scale_count > rows
+    {
         return Err("AQ4 wide-load fused SiLU-mul requires nonzero group8/group16 matrices with cols divisible by 32".into());
     }
     if (gate_row_scale_count != 0 && gate_row_scale.is_none())
         || (up_row_scale_count != 0 && up_row_scale.is_none())
     {
-        return Err("AQ4 wide-load fused SiLU-mul row_scale_count requires its row-scale buffer".into());
+        return Err(
+            "AQ4 wide-load fused SiLU-mul row_scale_count requires its row-scale buffer".into(),
+        );
     }
-    let elements = rows.checked_mul(cols).ok_or("AQ4 wide-load fused SiLU-mul element count overflows")?;
+    let elements = rows
+        .checked_mul(cols)
+        .ok_or("AQ4 wide-load fused SiLU-mul element count overflows")?;
     let bytes = elements / 2;
-    let input_bytes = cols.checked_mul(4).ok_or("AQ4 wide-load fused SiLU-mul input bytes overflow")?;
-    let output_bytes = rows.checked_mul(4).ok_or("AQ4 wide-load fused SiLU-mul output bytes overflow")?;
-    for buffer in [gate_index, up_index] { check_copy_range(0, bytes, buffer.size()?)?; }
-    for (buffer, groups) in [(gate_scale, elements / gate_group_size), (up_scale, elements / up_group_size)] { check_copy_range(0, groups, buffer.size()?)?; }
-    for (buffer, count) in [(gate_codebook, 16usize), (up_codebook, 16usize)] { check_copy_range(0, count * 4, buffer.size()?)?; }
-    check_copy_range(0, gate_scale_count * 4, gate_scale_values.size()?)?; check_copy_range(0, up_scale_count * 4, up_scale_values.size()?)?;
-    check_copy_range(0, input_bytes, input.size()?)?; check_copy_range(0, output_bytes, output.size()?)?;
-    if let Some(buffer) = gate_row_scale { check_copy_range(0, gate_row_scale_count * 4, buffer.size()?)?; }
-    if let Some(buffer) = up_row_scale { check_copy_range(0, up_row_scale_count * 4, buffer.size()?)?; }
+    let input_bytes = cols
+        .checked_mul(4)
+        .ok_or("AQ4 wide-load fused SiLU-mul input bytes overflow")?;
+    let output_bytes = rows
+        .checked_mul(4)
+        .ok_or("AQ4 wide-load fused SiLU-mul output bytes overflow")?;
+    for buffer in [gate_index, up_index] {
+        check_copy_range(0, bytes, buffer.size()?)?;
+    }
+    for (buffer, groups) in [
+        (gate_scale, elements / gate_group_size),
+        (up_scale, elements / up_group_size),
+    ] {
+        check_copy_range(0, groups, buffer.size()?)?;
+    }
+    for (buffer, count) in [(gate_codebook, 16usize), (up_codebook, 16usize)] {
+        check_copy_range(0, count * 4, buffer.size()?)?;
+    }
+    check_copy_range(0, gate_scale_count * 4, gate_scale_values.size()?)?;
+    check_copy_range(0, up_scale_count * 4, up_scale_values.size()?)?;
+    check_copy_range(0, input_bytes, input.size()?)?;
+    check_copy_range(0, output_bytes, output.size()?)?;
+    if let Some(buffer) = gate_row_scale {
+        check_copy_range(0, gate_row_scale_count * 4, buffer.size()?)?;
+    }
+    if let Some(buffer) = up_row_scale {
+        check_copy_range(0, up_row_scale_count * 4, buffer.size()?)?;
+    }
     let stream_raw = stream.map_or(std::ptr::null_mut(), |value| value.raw.as_ptr());
-    status_to_result(unsafe { ullm_runtime_aq4_matvec_silu_mul_wide_load_prototype_f32(
-        gate_index.raw.as_ptr(), gate_scale.raw.as_ptr(), gate_codebook.raw.as_ptr(), gate_scale_values.raw.as_ptr(), gate_row_scale.map_or(std::ptr::null_mut(), |v| v.raw.as_ptr()), gate_scale_count, gate_group_size, gate_tensor_scale, gate_row_scale_count,
-        up_index.raw.as_ptr(), up_scale.raw.as_ptr(), up_codebook.raw.as_ptr(), up_scale_values.raw.as_ptr(), up_row_scale.map_or(std::ptr::null_mut(), |v| v.raw.as_ptr()), up_scale_count, up_group_size, up_tensor_scale, up_row_scale_count,
-        input.raw.as_ptr(), rows, cols, output.raw.as_ptr(), stream_raw,
-    ) })
+    status_to_result(unsafe {
+        ullm_runtime_aq4_matvec_silu_mul_wide_load_prototype_f32(
+            gate_index.raw.as_ptr(),
+            gate_scale.raw.as_ptr(),
+            gate_codebook.raw.as_ptr(),
+            gate_scale_values.raw.as_ptr(),
+            gate_row_scale.map_or(std::ptr::null_mut(), |v| v.raw.as_ptr()),
+            gate_scale_count,
+            gate_group_size,
+            gate_tensor_scale,
+            gate_row_scale_count,
+            up_index.raw.as_ptr(),
+            up_scale.raw.as_ptr(),
+            up_codebook.raw.as_ptr(),
+            up_scale_values.raw.as_ptr(),
+            up_row_scale.map_or(std::ptr::null_mut(), |v| v.raw.as_ptr()),
+            up_scale_count,
+            up_group_size,
+            up_tensor_scale,
+            up_row_scale_count,
+            input.raw.as_ptr(),
+            rows,
+            cols,
+            output.raw.as_ptr(),
+            stream_raw,
+        )
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
 /// Direct-only gfx1201 fused M=1 SiLU-mul experiment with scalar packed loads and wave32 reductions.
 pub fn aq4_matvec_silu_mul_shuffle_prototype_f32(
-    gate_index: &RuntimeBuffer, gate_scale: &RuntimeBuffer, gate_codebook: &RuntimeBuffer,
-    gate_scale_values: &RuntimeBuffer, gate_row_scale: Option<&RuntimeBuffer>, gate_scale_count: usize,
-    gate_group_size: usize, gate_tensor_scale: f32, gate_row_scale_count: usize,
-    up_index: &RuntimeBuffer, up_scale: &RuntimeBuffer, up_codebook: &RuntimeBuffer,
-    up_scale_values: &RuntimeBuffer, up_row_scale: Option<&RuntimeBuffer>, up_scale_count: usize,
-    up_group_size: usize, up_tensor_scale: f32, up_row_scale_count: usize,
-    input: &RuntimeBuffer, rows: usize, cols: usize, output: &mut RuntimeBuffer,
+    gate_index: &RuntimeBuffer,
+    gate_scale: &RuntimeBuffer,
+    gate_codebook: &RuntimeBuffer,
+    gate_scale_values: &RuntimeBuffer,
+    gate_row_scale: Option<&RuntimeBuffer>,
+    gate_scale_count: usize,
+    gate_group_size: usize,
+    gate_tensor_scale: f32,
+    gate_row_scale_count: usize,
+    up_index: &RuntimeBuffer,
+    up_scale: &RuntimeBuffer,
+    up_codebook: &RuntimeBuffer,
+    up_scale_values: &RuntimeBuffer,
+    up_row_scale: Option<&RuntimeBuffer>,
+    up_scale_count: usize,
+    up_group_size: usize,
+    up_tensor_scale: f32,
+    up_row_scale_count: usize,
+    input: &RuntimeBuffer,
+    rows: usize,
+    cols: usize,
+    output: &mut RuntimeBuffer,
     stream: Option<&mut RuntimeStream>,
 ) -> Result<(), String> {
-    if !matches!(gate_group_size, 8 | 16) || !matches!(up_group_size, 8 | 16)
-        || rows == 0 || cols == 0 || !cols.is_multiple_of(32) || gate_scale_count == 0 || up_scale_count == 0
-        || !gate_tensor_scale.is_finite() || gate_tensor_scale <= 0.0
-        || !up_tensor_scale.is_finite() || up_tensor_scale <= 0.0
-        || gate_row_scale_count > rows || up_row_scale_count > rows {
+    if !matches!(gate_group_size, 8 | 16)
+        || !matches!(up_group_size, 8 | 16)
+        || rows == 0
+        || cols == 0
+        || !cols.is_multiple_of(32)
+        || gate_scale_count == 0
+        || up_scale_count == 0
+        || !gate_tensor_scale.is_finite()
+        || gate_tensor_scale <= 0.0
+        || !up_tensor_scale.is_finite()
+        || up_tensor_scale <= 0.0
+        || gate_row_scale_count > rows
+        || up_row_scale_count > rows
+    {
         return Err("AQ4 shuffle fused SiLU-mul requires nonzero group8/group16 matrices with cols divisible by 32".into());
     }
     if (gate_row_scale_count != 0 && gate_row_scale.is_none())
-        || (up_row_scale_count != 0 && up_row_scale.is_none()) {
-        return Err("AQ4 shuffle fused SiLU-mul row_scale_count requires its row-scale buffer".into());
+        || (up_row_scale_count != 0 && up_row_scale.is_none())
+    {
+        return Err(
+            "AQ4 shuffle fused SiLU-mul row_scale_count requires its row-scale buffer".into(),
+        );
     }
-    let elements = rows.checked_mul(cols).ok_or("AQ4 shuffle fused SiLU-mul element count overflows")?;
+    let elements = rows
+        .checked_mul(cols)
+        .ok_or("AQ4 shuffle fused SiLU-mul element count overflows")?;
     let bytes = elements / 2;
-    let input_bytes = cols.checked_mul(4).ok_or("AQ4 shuffle fused SiLU-mul input bytes overflow")?;
-    let output_bytes = rows.checked_mul(4).ok_or("AQ4 shuffle fused SiLU-mul output bytes overflow")?;
-    for buffer in [gate_index, up_index] { check_copy_range(0, bytes, buffer.size()?)?; }
-    for (buffer, groups) in [(gate_scale, elements / gate_group_size), (up_scale, elements / up_group_size)] { check_copy_range(0, groups, buffer.size()?)?; }
-    for (buffer, count) in [(gate_codebook, 16usize), (up_codebook, 16usize)] { check_copy_range(0, count * 4, buffer.size()?)?; }
-    check_copy_range(0, gate_scale_count * 4, gate_scale_values.size()?)?; check_copy_range(0, up_scale_count * 4, up_scale_values.size()?)?;
-    check_copy_range(0, input_bytes, input.size()?)?; check_copy_range(0, output_bytes, output.size()?)?;
-    if let Some(buffer) = gate_row_scale { check_copy_range(0, gate_row_scale_count * 4, buffer.size()?)?; }
-    if let Some(buffer) = up_row_scale { check_copy_range(0, up_row_scale_count * 4, buffer.size()?)?; }
+    let input_bytes = cols
+        .checked_mul(4)
+        .ok_or("AQ4 shuffle fused SiLU-mul input bytes overflow")?;
+    let output_bytes = rows
+        .checked_mul(4)
+        .ok_or("AQ4 shuffle fused SiLU-mul output bytes overflow")?;
+    for buffer in [gate_index, up_index] {
+        check_copy_range(0, bytes, buffer.size()?)?;
+    }
+    for (buffer, groups) in [
+        (gate_scale, elements / gate_group_size),
+        (up_scale, elements / up_group_size),
+    ] {
+        check_copy_range(0, groups, buffer.size()?)?;
+    }
+    for (buffer, count) in [(gate_codebook, 16usize), (up_codebook, 16usize)] {
+        check_copy_range(0, count * 4, buffer.size()?)?;
+    }
+    check_copy_range(0, gate_scale_count * 4, gate_scale_values.size()?)?;
+    check_copy_range(0, up_scale_count * 4, up_scale_values.size()?)?;
+    check_copy_range(0, input_bytes, input.size()?)?;
+    check_copy_range(0, output_bytes, output.size()?)?;
+    if let Some(buffer) = gate_row_scale {
+        check_copy_range(0, gate_row_scale_count * 4, buffer.size()?)?;
+    }
+    if let Some(buffer) = up_row_scale {
+        check_copy_range(0, up_row_scale_count * 4, buffer.size()?)?;
+    }
     let stream_raw = stream.map_or(std::ptr::null_mut(), |value| value.raw.as_ptr());
-    status_to_result(unsafe { ullm_runtime_aq4_matvec_silu_mul_shuffle_prototype_f32(
-        gate_index.raw.as_ptr(), gate_scale.raw.as_ptr(), gate_codebook.raw.as_ptr(), gate_scale_values.raw.as_ptr(), gate_row_scale.map_or(std::ptr::null_mut(), |v| v.raw.as_ptr()), gate_scale_count, gate_group_size, gate_tensor_scale, gate_row_scale_count,
-        up_index.raw.as_ptr(), up_scale.raw.as_ptr(), up_codebook.raw.as_ptr(), up_scale_values.raw.as_ptr(), up_row_scale.map_or(std::ptr::null_mut(), |v| v.raw.as_ptr()), up_scale_count, up_group_size, up_tensor_scale, up_row_scale_count,
-        input.raw.as_ptr(), rows, cols, output.raw.as_ptr(), stream_raw,
-    ) })
+    status_to_result(unsafe {
+        ullm_runtime_aq4_matvec_silu_mul_shuffle_prototype_f32(
+            gate_index.raw.as_ptr(),
+            gate_scale.raw.as_ptr(),
+            gate_codebook.raw.as_ptr(),
+            gate_scale_values.raw.as_ptr(),
+            gate_row_scale.map_or(std::ptr::null_mut(), |v| v.raw.as_ptr()),
+            gate_scale_count,
+            gate_group_size,
+            gate_tensor_scale,
+            gate_row_scale_count,
+            up_index.raw.as_ptr(),
+            up_scale.raw.as_ptr(),
+            up_codebook.raw.as_ptr(),
+            up_scale_values.raw.as_ptr(),
+            up_row_scale.map_or(std::ptr::null_mut(), |v| v.raw.as_ptr()),
+            up_scale_count,
+            up_group_size,
+            up_tensor_scale,
+            up_row_scale_count,
+            input.raw.as_ptr(),
+            rows,
+            cols,
+            output.raw.as_ptr(),
+            stream_raw,
+        )
+    })
 }
 
 pub fn aq4_matvec_silu_mul_f32(
@@ -4427,7 +5029,9 @@ fn sq_fp8_execution_path(raw: c_int) -> Result<SqFp8ExecutionPath, String> {
     match raw {
         SQ_FP8_EXECUTION_PATH_CPU_REFERENCE => Ok(SqFp8ExecutionPath::CpuReference),
         SQ_FP8_EXECUTION_PATH_HIP_KERNEL => Ok(SqFp8ExecutionPath::HipKernel),
-        _ => Err(format!("SQ FP8 runtime returned unknown execution path {raw}")),
+        _ => Err(format!(
+            "SQ FP8 runtime returned unknown execution path {raw}"
+        )),
     }
 }
 
@@ -4736,8 +5340,7 @@ fn sq_fp8_block2d_buffer_lengths(
     }
     if scale_block_rows == 0 || scale_block_cols == 0 {
         return Err(
-            "SQ FP8 block2d matvec scale block rows and cols must be greater than zero"
-                .to_string(),
+            "SQ FP8 block2d matvec scale block rows and cols must be greater than zero".to_string(),
         );
     }
     let payload = rows
@@ -4796,8 +5399,7 @@ pub fn sq_fp8_matvec_block2d_f32(
     output_buffer: &mut RuntimeBuffer,
     stream: Option<&mut RuntimeStream>,
 ) -> Result<SqFp8ExecutionPath, String> {
-    let lengths =
-        sq_fp8_block2d_buffer_lengths(rows, cols, scale_block_rows, scale_block_cols, 1)?;
+    let lengths = sq_fp8_block2d_buffer_lengths(rows, cols, scale_block_rows, scale_block_cols, 1)?;
     validate_sq_fp8_block2d_buffers(
         payload_buffer,
         scale_buffer,
@@ -4836,13 +5438,8 @@ pub fn sq_fp8_matvec_block2d_batch_f32(
     output_buffer: &mut RuntimeBuffer,
     stream: Option<&mut RuntimeStream>,
 ) -> Result<SqFp8ExecutionPath, String> {
-    let lengths = sq_fp8_block2d_buffer_lengths(
-        rows,
-        cols,
-        scale_block_rows,
-        scale_block_cols,
-        batch_count,
-    )?;
+    let lengths =
+        sq_fp8_block2d_buffer_lengths(rows, cols, scale_block_rows, scale_block_cols, batch_count)?;
     validate_sq_fp8_block2d_buffers(
         payload_buffer,
         scale_buffer,
@@ -7441,9 +8038,9 @@ pub fn paged_decode_attn_split_workspace_bytes(
         .checked_div(source_tile)
         .and_then(|value| value.checked_add(1))
         .ok_or_else(|| "f32 paged decode split attention split count overflows".to_string())?;
-    let stride = value_dim.checked_add(2).ok_or_else(|| {
-        "f32 paged decode split attention workspace stride overflows".to_string()
-    })?;
+    let stride = value_dim
+        .checked_add(2)
+        .ok_or_else(|| "f32 paged decode split attention workspace stride overflows".to_string())?;
     q_heads
         .checked_mul(split_count)
         .and_then(|value| value.checked_mul(stride))
@@ -7678,7 +8275,9 @@ pub fn paged_kv_write_chunk_f32(
         .checked_add(m)
         .ok_or_else(|| "f32 paged KV write chunk logical range overflows".to_string())?;
     if end > physical_tokens {
-        return Err("f32 paged KV write chunk logical range exceeds physical cache capacity".to_string());
+        return Err(
+            "f32 paged KV write chunk logical range exceeds physical cache capacity".to_string(),
+        );
     }
     let table_entries = (end - 1) / block_size + 1;
     let k_row = kv_heads
@@ -7748,14 +8347,24 @@ fn paged_causal_gqa_chunk_sizes(
     if m == 0 || m > 128 {
         return Err("f32 paged causal GQA chunk m must be in 1..=128".to_string());
     }
-    if block_size == 0 || cache_blocks == 0 || q_heads == 0 || kv_heads == 0 || head_dim == 0 || value_dim == 0 {
+    if block_size == 0
+        || cache_blocks == 0
+        || q_heads == 0
+        || kv_heads == 0
+        || head_dim == 0
+        || value_dim == 0
+    {
         return Err("f32 paged causal GQA chunk dimensions must be greater than zero".to_string());
     }
     if !q_heads.is_multiple_of(kv_heads) {
-        return Err("f32 paged causal GQA chunk q_heads must be a multiple of kv_heads".to_string());
+        return Err(
+            "f32 paged causal GQA chunk q_heads must be a multiple of kv_heads".to_string(),
+        );
     }
     if head_dim > 256 || value_dim > 256 {
-        return Err("f32 paged causal GQA chunk head_dim/value_dim must be at most 256".to_string());
+        return Err(
+            "f32 paged causal GQA chunk head_dim/value_dim must be at most 256".to_string(),
+        );
     }
     let total_context = cached_prefix_len
         .checked_add(m)
@@ -7764,7 +8373,9 @@ fn paged_causal_gqa_chunk_sizes(
         .checked_mul(block_size)
         .ok_or_else(|| "f32 paged causal GQA chunk physical cache size overflows".to_string())?;
     if total_context > physical_tokens {
-        return Err("f32 paged causal GQA chunk context exceeds physical cache capacity".to_string());
+        return Err(
+            "f32 paged causal GQA chunk context exceeds physical cache capacity".to_string(),
+        );
     }
     let table_entries = (total_context - 1) / block_size + 1;
     let q_elements = m
@@ -7799,7 +8410,14 @@ fn paged_causal_gqa_chunk_sizes(
     let table_bytes = table_entries
         .checked_mul(std::mem::size_of::<u32>())
         .ok_or_else(|| "f32 paged causal GQA chunk table byte size overflows".to_string())?;
-    Ok((q_bytes, output_bytes, q_bytes, k_bytes, v_bytes, table_bytes))
+    Ok((
+        q_bytes,
+        output_bytes,
+        q_bytes,
+        k_bytes,
+        v_bytes,
+        table_bytes,
+    ))
 }
 
 fn paged_causal_gqa_chunk_wmma_shape_is_supported(
@@ -7831,10 +8449,20 @@ pub fn paged_causal_gqa_chunk_f32(
     stream: Option<&mut RuntimeStream>,
 ) -> Result<(), String> {
     if !softmax_scale.is_finite() || softmax_scale <= 0.0 {
-        return Err("f32 paged causal GQA chunk softmax scale must be finite and greater than zero".to_string());
+        return Err(
+            "f32 paged causal GQA chunk softmax scale must be finite and greater than zero"
+                .to_string(),
+        );
     }
     let (q_bytes, output_bytes, _, k_bytes, v_bytes, table_bytes) = paged_causal_gqa_chunk_sizes(
-        cached_prefix_len, m, block_size, cache_blocks, q_heads, kv_heads, head_dim, value_dim,
+        cached_prefix_len,
+        m,
+        block_size,
+        cache_blocks,
+        q_heads,
+        kv_heads,
+        head_dim,
+        value_dim,
     )?;
     check_copy_range(0, q_bytes, q.size()?)?;
     check_copy_range(0, k_bytes, k_cache.size()?)?;
@@ -7883,14 +8511,27 @@ pub fn paged_causal_gqa_chunk_sigmoid_gate_f32(
     stream: Option<&mut RuntimeStream>,
 ) -> Result<(), String> {
     if head_dim != value_dim {
-        return Err("f32 paged causal GQA chunk gated ABI requires head_dim == value_dim".to_string());
+        return Err(
+            "f32 paged causal GQA chunk gated ABI requires head_dim == value_dim".to_string(),
+        );
     }
     if !softmax_scale.is_finite() || softmax_scale <= 0.0 {
-        return Err("f32 paged causal GQA chunk softmax scale must be finite and greater than zero".to_string());
+        return Err(
+            "f32 paged causal GQA chunk softmax scale must be finite and greater than zero"
+                .to_string(),
+        );
     }
-    let (q_bytes, output_bytes, gate_bytes, k_bytes, v_bytes, table_bytes) = paged_causal_gqa_chunk_sizes(
-        cached_prefix_len, m, block_size, cache_blocks, q_heads, kv_heads, head_dim, value_dim,
-    )?;
+    let (q_bytes, output_bytes, gate_bytes, k_bytes, v_bytes, table_bytes) =
+        paged_causal_gqa_chunk_sizes(
+            cached_prefix_len,
+            m,
+            block_size,
+            cache_blocks,
+            q_heads,
+            kv_heads,
+            head_dim,
+            value_dim,
+        )?;
     check_copy_range(0, q_bytes, q.size()?)?;
     check_copy_range(0, gate_bytes, gate.size()?)?;
     check_copy_range(0, k_bytes, k_cache.size()?)?;
@@ -7953,12 +8594,18 @@ pub fn paged_causal_gqa_chunk_wmma_f32(
     }
     if !softmax_scale.is_finite() || softmax_scale <= 0.0 {
         return Err(
-            "paged causal GQA WMMA softmax scale must be finite and greater than zero"
-                .to_string(),
+            "paged causal GQA WMMA softmax scale must be finite and greater than zero".to_string(),
         );
     }
     let (q_bytes, output_bytes, _, k_bytes, v_bytes, table_bytes) = paged_causal_gqa_chunk_sizes(
-        cached_prefix_len, m, block_size, cache_blocks, q_heads, kv_heads, head_dim, value_dim,
+        cached_prefix_len,
+        m,
+        block_size,
+        cache_blocks,
+        q_heads,
+        kv_heads,
+        head_dim,
+        value_dim,
     )?;
     check_copy_range(0, q_bytes, q.size()?)?;
     check_copy_range(0, k_bytes, k_cache.size()?)?;
@@ -8019,8 +8666,7 @@ pub fn paged_causal_gqa_chunk_wmma_sigmoid_gate_f32(
     }
     if !softmax_scale.is_finite() || softmax_scale <= 0.0 {
         return Err(
-            "paged causal GQA WMMA softmax scale must be finite and greater than zero"
-                .to_string(),
+            "paged causal GQA WMMA softmax scale must be finite and greater than zero".to_string(),
         );
     }
     let (q_bytes, output_bytes, gate_bytes, k_bytes, v_bytes, table_bytes) =
@@ -8068,8 +8714,7 @@ pub fn paged_causal_gqa_chunk_wmma_sigmoid_gate_f32(
 pub use paged_causal_gqa_chunk_wmma_f32 as paged_causal_gqa_chunk_wmma_prototype_f32;
 /// Compatibility alias for the gated validate-first direct ABI name; it now invokes the
 /// production M=1..=128 WMMA-QK implementation.
-pub use paged_causal_gqa_chunk_wmma_sigmoid_gate_f32
-    as paged_causal_gqa_chunk_wmma_prototype_sigmoid_gate_f32;
+pub use paged_causal_gqa_chunk_wmma_sigmoid_gate_f32 as paged_causal_gqa_chunk_wmma_prototype_sigmoid_gate_f32;
 
 #[allow(clippy::too_many_arguments)]
 pub fn linear_attn_qkv_prepare_f32(

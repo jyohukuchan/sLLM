@@ -2,10 +2,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::package::{
-    list_tensor_payload_bundles, select_exact_passthrough_payload_bundle,
-    select_passthrough_payload_bundle, select_tensor_payload_bundle, PackageSummary,
-    PassthroughPayloadBundle, ReferencedFile, ReferencedFileRole, RowScaleOverrideEntry,
-    TensorPayloadBundle, TensorSelector,
+    PackageSummary, PassthroughPayloadBundle, ReferencedFile, ReferencedFileRole,
+    RowScaleOverrideEntry, TensorPayloadBundle, TensorSelector, list_tensor_payload_bundles,
+    select_exact_passthrough_payload_bundle, select_passthrough_payload_bundle,
+    select_tensor_payload_bundle,
 };
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
@@ -1991,7 +1991,7 @@ fn load_payload_file(
 mod tests {
     use super::*;
     use crate::host_bytes::{decode_f32_le_values, encode_f32_to_bytes};
-    use crate::package::{select_tensor_payload_bundle, TensorSelector};
+    use crate::package::{TensorSelector, select_tensor_payload_bundle};
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -2861,7 +2861,9 @@ mod tests {
         assert_eq!(rows.columns, 4);
         assert_eq!(
             rows.values,
-            vec![4.5_f32, 5.0, 5.5, 6.0, 0.5, 1.0, 1.5, 2.0, 25.0, 30.0, 35.0, 40.0]
+            vec![
+                4.5_f32, 5.0, 5.5, 6.0, 0.5, 1.0, 1.5, 2.0, 25.0, 30.0, 35.0, 40.0
+            ]
         );
 
         fs::remove_dir_all(root).unwrap();
@@ -3014,14 +3016,18 @@ mod tests {
         assert_eq!(loaded.registry().len(), 1);
         assert_eq!(loaded.registry().total_payload_bytes(), 7);
         assert_eq!(loaded.registry().resident_payload_bytes(), 7);
-        assert!(loaded
-            .registry()
-            .get_by_name("layer.0.attn.q_proj.weight")
-            .is_some());
-        assert!(loaded
-            .registry()
-            .get_by_name("layer.0.attn.k_proj.weight")
-            .is_none());
+        assert!(
+            loaded
+                .registry()
+                .get_by_name("layer.0.attn.q_proj.weight")
+                .is_some()
+        );
+        assert!(
+            loaded
+                .registry()
+                .get_by_name("layer.0.attn.k_proj.weight")
+                .is_none()
+        );
 
         fs::remove_dir_all(root).unwrap();
     }
@@ -3145,16 +3151,22 @@ mod tests {
         );
         assert!(all.next().is_none());
 
-        assert!(registry
-            .tensor_by_name("layer.0.attn.q_proj.weight")
-            .is_some());
-        assert!(registry
-            .find_by_family_candidate("attn_k", "ak4_small")
-            .iter()
-            .any(|bundle| bundle.tensor_name == "layer.1.attn.k_proj.weight"));
-        assert!(registry
-            .find_by_family_candidate("attn_k", "aq4_small")
-            .is_empty());
+        assert!(
+            registry
+                .tensor_by_name("layer.0.attn.q_proj.weight")
+                .is_some()
+        );
+        assert!(
+            registry
+                .find_by_family_candidate("attn_k", "ak4_small")
+                .iter()
+                .any(|bundle| bundle.tensor_name == "layer.1.attn.k_proj.weight")
+        );
+        assert!(
+            registry
+                .find_by_family_candidate("attn_k", "aq4_small")
+                .is_empty()
+        );
 
         let t0_index = registry
             .get_loaded_payload(
@@ -3178,15 +3190,19 @@ mod tests {
             .unwrap();
         assert_eq!(t0_codebook.bytes, 2);
 
-        assert!(registry
-            .get_loaded_payload(
-                "layer.0.attn.q_proj.weight",
-                ReferencedFileRole::Passthrough
-            )
-            .is_none());
-        assert!(registry
-            .get_loaded_payload("missing", ReferencedFileRole::TensorIndex)
-            .is_none());
+        assert!(
+            registry
+                .get_loaded_payload(
+                    "layer.0.attn.q_proj.weight",
+                    ReferencedFileRole::Passthrough
+                )
+                .is_none()
+        );
+        assert!(
+            registry
+                .get_loaded_payload("missing", ReferencedFileRole::TensorIndex)
+                .is_none()
+        );
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -3249,9 +3265,11 @@ mod tests {
         )
         .unwrap();
 
-        assert!(loaded
-            .tensor_by_name("layer.0.attn.q_proj.weight")
-            .is_some());
+        assert!(
+            loaded
+                .tensor_by_name("layer.0.attn.q_proj.weight")
+                .is_some()
+        );
         assert_eq!(
             loaded.find_by_family_candidate("attn_k", "ak4_small").len(),
             1
@@ -3264,12 +3282,14 @@ mod tests {
             .unwrap();
         assert_eq!(payload.bytes, 1);
 
-        assert!(loaded
-            .payload_by_name_and_role(
-                "layer.0.attn.q_proj.weight",
-                ReferencedFileRole::Passthrough
-            )
-            .is_none());
+        assert!(
+            loaded
+                .payload_by_name_and_role(
+                    "layer.0.attn.q_proj.weight",
+                    ReferencedFileRole::Passthrough
+                )
+                .is_none()
+        );
         assert!(loaded.tensor_by_name("missing.tensor.weight").is_none());
 
         fs::remove_dir_all(root).unwrap();

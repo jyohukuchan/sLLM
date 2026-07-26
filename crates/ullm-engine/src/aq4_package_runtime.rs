@@ -1090,9 +1090,14 @@ impl PackageAq4ResidentMatvec {
                         ),
                     ExecutableOperation::HipAq4GemmWmmaGroup8RaggedMF32 => started
                         .execute_aq4_gemm_wmma_group8_ragged_m_f32(
-                            aq4.index_buffer, aq4.scale_buffer, aq4.codebook_buffer,
-                            aq4.scale_values_buffer, input_buffer, aq4.row_scale_buffer,
-                            output_buffer, stream,
+                            aq4.index_buffer,
+                            aq4.scale_buffer,
+                            aq4.codebook_buffer,
+                            aq4.scale_values_buffer,
+                            input_buffer,
+                            aq4.row_scale_buffer,
+                            output_buffer,
+                            stream,
                         ),
                     ExecutableOperation::HipAq4GemmWmmaGroup8F32 => started
                         .execute_aq4_gemm_wmma_group8_f32(

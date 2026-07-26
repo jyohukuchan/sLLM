@@ -7599,8 +7599,10 @@ mod linear_attn_step_state_tests {
             RuntimeFeature::HipLinearAttentionQkvPrepareBatch,
         ] {
             assert!(QWEN35_AQ4_M1_LINEAR_LOAD_FEATURES.contains(feature));
-            assert!(QWEN35_AQ4_M1_LINEAR_STAGE_REQUIRED_ENV
-                .contains(&runtime_feature_environment(feature)));
+            assert!(
+                QWEN35_AQ4_M1_LINEAR_STAGE_REQUIRED_ENV
+                    .contains(&runtime_feature_environment(feature))
+            );
         }
         assert_eq!(QWEN35_AQ4_M1_LINEAR_STAGE_REQUIRED_ENV.len(), 9);
         for name in [
