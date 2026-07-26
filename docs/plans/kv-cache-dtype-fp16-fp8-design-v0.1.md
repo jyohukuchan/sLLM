@@ -125,6 +125,7 @@ scale[physical_token * kv_heads + kv_head]
 を FP16 に上向き丸めし、E4M3FN finite maximum 448 に収まるようにする。
 all-zero head は exact 1.0 scale と zero payload を書く。reset/unwritten row
 の zero scale + zero payload は diagnostic readback で zero と扱う。
+読み出しはそれ以外の負値・NaN・infinity scale を破損として拒否する。
 
 F16 payload と FP8 scale は 2-byte alignment を必要とする。v0.1 は
 `RuntimeBuffer` の独立 allocation（CPU `malloc`、HIP `hipMalloc`）だけを
@@ -254,6 +255,7 @@ CPU evidence is saved in
 - exact F32/F16/FP8 allocation accounting;
 - F16, FP8, and mixed K/V physical page write/readback/direct decode;
 - typed causal prefill fallback;
+- corrupt FP8 negative-scale rejection in both readback and attention;
 - all existing `decoder::tests` F32 cases.
 
 An accidental broad `ullm-runtime-sys --lib` invocation was discovered to

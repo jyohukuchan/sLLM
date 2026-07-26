@@ -12,15 +12,16 @@ The following targeted CPU tests completed after the typed ABI was added:
 
 ```text
 cargo test -p ullm-engine decoder::tests --lib
-35 passed; 0 failed
+36 passed; 0 failed
 
 cargo test -p ullm-engine kv_cache_dtype --lib
 3 passed; 0 failed
 ```
 
 Coverage includes F32 regression, F16, FP8 E4M3FN, mixed K/V dtypes, physical
-block-table placement, scale-aware readback, direct decode, and typed causal
-prefill fallback. `Q8_0` is rejected by the parser.
+block-table placement, scale-aware readback, direct decode, typed causal
+prefill fallback, and rejection of corrupted negative FP8 scales. `Q8_0` is
+rejected by the parser.
 
 ## Capacity ledger
 
