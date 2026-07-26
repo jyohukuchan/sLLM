@@ -1,33 +1,38 @@
 # Isolated wide-M execution overlay
 
-## Purpose
+## Purpose and boundary
 
-The shared checkout has protected in-flight work in the layer/stack/model-head
-and KV runtime files.  To determine whether the remaining bounds are real
-kernel limits without editing those files, a source-only copy was built under
-`/tmp/ullm-sq8-wide-m-overlay.9JkzMM`.  It is not a committed product change.
+The shared checkout has protected in-flight BP/BX work in the layer, stack,
+model-head, CK, and KV runtime files.  To distinguish a real kernel limit
+from their conservative M=128 validation lists, a source-only copy was built
+under `/tmp/ullm-sq8-wide-m-overlay.9JkzMM`.  It is not a committed product
+change and no overlay artifact was promoted or served.
 
-## Temporary changes
+## Temporary admissions
 
 The overlay raises the selected M set through 4096 in the layer, stack,
 model-head, Rust CK, and CK C++ validation paths; raises the layer-oracle
 shape ceiling; and changes only the F32/typed paged-KV **API validation** from
-`m <= 128` to `m <= 4096`.  It does not alter either BX-owned file:
+`m <= 128` to `m <= 4096`.  It does not alter either BX-owned kernel source:
 
 - `runtime/src/ullm_runtime_parts/part_01.inc`
 - `runtime/src/ullm_runtime_hiprtc_sources.inc`
 
-The temporary build also contains a derivative of the historical prefill
-driver that accepts `--chunk-tokens`; it writes the selected width and its
-40-layer-expanded cached-prefix call count in its JSONL records.
+The temporary driver writes its width and 40-layer-expanded cached-prefix
+call count to JSONL.  The overlay serving executable and driver compiled for
+`gfx1201` into `/tmp/ullm-sq8-wide-m-target`.
 
-## Build result
+## Full-model outcome
 
-Both the overlay serving executable and width-aware driver compiled with
-`GPU_ARCH=gfx1201` and `rocm-ck-gfx1201` into the isolated target directory
-`/tmp/ullm-sq8-wide-m-target`.  This is a build/admission check only.  No
-overlay GPU execution has begun: at the preflight the production gateway held
-`/run/ullm/r9700.lock`, so the task is waiting rather than taking the R9700.
+The overlay ran all M=128/256/512/1024/2048 throughput conditions and actual
+N=4095 traces in `run-20260727T024801+0900`.  It then ran hidden/logit,
+decode, fixed-suite generation, and real-token N=4000 generation in
+`run-20260727T044042+0900`.  The latter completed `status=0`, released the
+R9700 lock, and restored `ullm-openai.service`.
 
-The overlay is evidence for the next synchronized implementation, not an
-authorization to copy its temporary whitelist changes into protected files.
+The overlay proves the lower M=128 bounds are not an execution limit for
+M=256..2048.  It does **not** authorize copying its temporary whitelist edits
+into protected product files.  Permanent integration needs the atomic
+owner-reviewed changes in [`lower-runtime-handoff.md`](lower-runtime-handoff.md).
+The actual rate/trace/fidelity result is in
+[`measurement-summary.md`](measurement-summary.md).

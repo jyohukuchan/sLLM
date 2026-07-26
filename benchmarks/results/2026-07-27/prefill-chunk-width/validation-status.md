@@ -1,96 +1,88 @@
 # Validation status
 
-## Executed non-GPU checks
+## Scheduler, build, and admission tests
 
-The focused serving-runtime unit tests exercise the new scheduler contract:
+The committed scheduler tests cover M=128/256/512/1024/2048 at N=4095,
+including the real-token cursor rewind, logical suffix commit, planned
+1,280/640/320/160/80 layer-expanded attention calls, and the rule that
+N=4095/M=4096 must not fabricate a 4096th row.  The fixed-width selector
+also rejects invalid or non-power-of-two values.
 
-- `serving_wide_chunk_scheduler_preserves_real_token_tail_replay` covers
-  M=128/256/512/1024/2048 at N=4095 and checks the exact 1,280/640/320/160/80
-  layer-expanded call counts, rewind locations, and real-token tail commits.
-- `serving_4096_chunk_never_fabricates_a_4095th_prefill_row` proves that the
-  N=4095/M=4096 case remains M=1 rather than padding a nonexistent row.
-- `serving_fixed_chunk_selector_rejects_invalid_scheduler_widths` checks the
-  bounds and power-of-two requirement.
-- the existing M=128 tail replay test remains in the same test module and
-  passed in the focused test executable.
+Focused tests passed with `rocm-ck-gfx1201`, followed by the complete
+`sq8_serving_runtime::tests` module: 44 passed, 0 failed.  The worker parser
+and binary wiring were additionally checked: 10/10 worker-backend tests,
+5/5 worker CLI tests, and `cargo check -p ullm-engine --bin ullm-sq8-worker
+--features rocm-ck-gfx1201` passed.  The worker defaults to M=128 and accepts
+`ULLM_SQ8_PREFILL_CHUNK_TOKENS=<M>` only after the same selector validation.
 
-The five focused tests passed with the `rocm-ck-gfx1201` feature enabled:
+The direct gfx1201 CK helper probe accepted all four SQ8_0 projection shapes
+at M=256/512/1024/2048/4096.  It is a zero-buffer shape-admission result,
+not a substitute for the full-model evidence below.
 
-```text
-cargo test -p ullm-engine --lib --features rocm-ck-gfx1201 \
-  sq8_serving_runtime::tests::serving_wide_chunk_scheduler_preserves_real_token_tail_replay -- --exact
-cargo test -p ullm-engine --lib --features rocm-ck-gfx1201 \
-  sq8_serving_runtime::tests::serving_4096_chunk_never_fabricates_a_4095th_prefill_row -- --exact
-cargo test -p ullm-engine --lib --features rocm-ck-gfx1201 \
-  sq8_serving_runtime::tests::serving_fixed_chunk_selector_rejects_invalid_scheduler_widths -- --exact
-cargo test -p ullm-engine --lib --features rocm-ck-gfx1201 \
-  sq8_serving_runtime::tests::serving_m128_overlap_tail_geometry_and_divisible_geometry_are_explicit -- --exact
-cargo test -p ullm-engine --lib --features rocm-ck-gfx1201 \
-  sq8_serving_runtime::tests::serving_prefill_modes_bind_fixed_resident_widths_and_implementation_ids -- --exact
-```
+## Isolated full-model overlay
 
-Afterward the complete serving-runtime test module was rerun at the same
-source boundary:
+The product source still rejects M>128 at the BP/BX-owned lower validation
+boundary.  To test whether that boundary hid a kernel limit, an isolated
+source overlay lifted only the validation lists, layer-oracle ceiling,
+model-head row validation, and F32/typed paged-KV API bound.  It left
+`runtime/src/ullm_runtime_parts/part_01.inc` and
+`runtime/src/ullm_runtime_hiprtc_sources.inc` unchanged.
 
-```text
-cargo test -p ullm-engine --lib --features rocm-ck-gfx1201 \
-  sq8_serving_runtime::tests -- --nocapture
-```
+The performance/trace run
+`run-20260727T024801+0900` completed the full five-width sweep and real
+traces.  It then failed closed at the first numerical smoke because
+`ULLM_REQUIRE_HIP_PAGED_DECODE_SPLIT_KERNEL=1` was missing.  No timing value
+is derived from a trace or affected by this later guard failure.  Commit
+`88607fe0` corrected the guard; `43cd16dd` made a one-window
+validation-only continuation.  `run-20260727T044042+0900` completed it with
+`window-finished status=0`, released the lock, and restored the service.
 
-It passed all 44 selected tests (0 failed).  This includes the pre-existing
-request lifecycle, cancellation, reset, cache, and M=128 tail cases as well
-as the new width-selection tests.
+## Numerical fidelity
 
-The production worker selection surface was also compiled and tested without
-starting a worker or touching the GPU.  Its pure
-`ULLM_SQ8_PREFILL_CHUNK_TOKENS` parser defaults to M=128, accepts M=256, and
-rejects malformed/non-power-of-two/out-of-context values.  The complete
-`sq8_worker_backend::tests` group passed 10/10; the worker binary's five CLI
-tests passed 5/5; and `cargo check -p ullm-engine --bin ullm-sq8-worker
---features rocm-ck-gfx1201` passed.  This verifies the opt-in wiring only;
-it does not turn an unadmitted wide M into a GPU result.
+Every candidate prompt for which the selected resident M actually ran was
+F32-byte-exact for final hidden state and logits (`max_abs=0`, non-finite
+count 0).  The one-token greedy IDs matched in every comparison.
 
-The source-level runtime gate was also exercised by the scheduler test: M=128
-is admitted; M=256/512/1024/2048 is rejected before allocation until the
-existing lower measured-M list is extended.
+| M | non-byte-exact prompts | max hidden `max_abs` | max logits `max_abs` | cause |
+| ---: | --- | ---: | ---: | --- |
+| 256 | 128 | 1.435986 | 1.100868 | N<M, audited M=1 fallback |
+| 512 | 128 | 1.435986 | 1.100868 | N<M, audited M=1 fallback |
+| 1024 | 128, 512 | 1.435986 | 1.100868 | N<M, audited M=1 fallback |
+| 2048 | 128, 512, 1024 | 1.601738 | 1.100868 | N<M, audited M=1 fallback |
 
-The direct gfx1201 CK helper shape probe was then run under the R9700 lock.
-Every M=256/512/1024/2048/4096 × Q/O, K/V, gate/up, down row quantized and
-projected successfully. It uses zeroed buffers and bypasses only the public
-measured-M whitelist, so it supports extension of that whitelist but is not a
-model-level numerical proof. See `wide-m-ck-shape-probe.jsonl`.
+These recorded scalar differences are descriptive only.  They are not an
+accept/reject threshold; text evidence below follows the lightweight
+promotion policy.
 
-## Numerical and text fidelity
+## Generated text
 
-There is no M=256+ full-model execution in this evidence set, hence no new
-hidden-state/logit comparison, non-finite observation, greedy token sequence,
-or generated-text comparison. They are **unconfirmed**, not inferred from the
-unit tests.
+The fixed 10-case suite ran M=128 plus all four candidates because the
+fallback cases were not byte-exact.  Each candidate had 9/10 exact decoded
+texts and token IDs.  The only different case was `ja_long_summary`, a short
+semantic-preserving wording variation; all policy obvious-collapse diagnostics
+were empty.
 
-The relevant M=128 control remains BR's F32-byte-exact generic-versus-grouped
-comparison at prompt lengths 128, 512, 1024, 2048, and 4095 (`max_abs=0`, no
-non-finite values, same top-1/generated token). That evidence does not prove
-the wider reduction partition; the next owner must compare it and then assess
-actual generated text according to the lightweight-promotion policy rather
-than apply a new numeric cutoff.
+The additional real-token N=4000 prompt exercises the actual M=256/512/1024/
+2048 schedules and a genuine final generation header.  All five widths
+produced exactly the same 83 token IDs and 467-character completion.  It does
+not use padding, a mask, or a fabricated row.  Retained direct outputs are in
+`run-20260727T044042+0900/generation*/summary.{json,md}`.
 
 ## Attention trace and decode
 
-The M=128 control trace records 1,280 cached-prefix Flash2 calls at N=4095.
-The wider values in `scheduler-contract.md` are planned unit-test counts only;
-no M=256+ full-model GPU trace exists yet because the layer/stack/API
-measured-M contract still blocks allocation and dispatch.
+At N=4095, real traces observe 1,280/640/320/160/80 cached-prefix Flash2
+dispatches for M=128/256/512/1024/2048.  The corresponding attention shares
+are 93.005%/92.505%/92.018%/91.016%/90.134%.  Thus M=2048 genuinely removes
+15 of every 16 M=128 dispatches, but attention remains the bottleneck.
 
-No decode path was changed. The closest compatible full-model control is BR's
-post-change rerun: 27.411786 tok/s versus the BH reference 27.378731 tok/s.
-It is retained as regression context, not falsely labelled as a new decode
-measurement for the scheduler-only change.
+Fresh M=128 decode at prompt 1024 is **27.552769 tok/s**, above the
+27.378731 reference and BR's 27.411786 rerun.  The wide-M generation jobs
+also completed their post-prefill M=1 decode paths.
 
-## Build integration
+## Service and thermal outcome
 
-`cargo check -p ullm-engine --example sq8_ck_serving --features
-rocm-ck-gfx1201` passed after this change, compiling both the main serving
-example and its `sq8_ck_serving_performance.rs` module. An earlier retry had
-seen a transient compile error in BX-owned `runtime/src/ullm_runtime_parts/
-part_01.inc` while that independent KV-dtype work was in flight; this task did
-not modify that file, and the subsequent check passed without changing it.
+Both windows used R9700 only and an edge <=45 C gate.  The successful
+continuation's event log records `service-restore-start-return=0`,
+`service-restore-active`, and `window-finished status=0`; postflight shows
+`ActiveState=active`, `NRestarts=0`.  `llama-qwen35-udq4.service` remained
+inactive and disabled.

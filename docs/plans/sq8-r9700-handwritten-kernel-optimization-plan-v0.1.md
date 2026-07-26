@@ -1196,3 +1196,54 @@ now includes that API guard plus the layer-oracle ceiling and model-head
 wide-row validation, in addition to the original layer/stack/CK whitelists.
 An isolated source overlay with just those admissions raised compiled
 successfully; it will only be GPU-run after the shared R9700 lock is free.
+
+## Prefill chunk-width execution result — 2026-07-27
+
+The isolated overlay subsequently obtained the R9700 lock, ran the full-model
+M=128/256/512/1024/2048 sweep, and restored `ullm-openai.service` after its
+successful validation continuation.  It changes no production admission and
+does not edit either BX-owned Flash2 source file.  Raw evidence is retained at
+`benchmarks/results/2026-07-27/prefill-chunk-width/`.
+
+### Confirmed structural gain
+
+N=4095 cached-prefix attention dispatches across 40 layers are now observed,
+not merely planned: 1,280 (M=128), 640 (M=256), 320 (M=512), 160 (M=1024),
+and **80 (M=2048)**.  The M=2048 no-padding tail replays real tokens
+`2047..4094` and commits logical tokens `2048..4094`; no padding, fabricated
+row, or mask is used.  M=4096 is allocation-valid but cannot form a real
+4,096-token unit for N=4095, so M=2048 is the maximum useful width there.
+
+The full-model N=4095 rate rises from 104.965 tok/s at M=128 to **126.686
+tok/s** at M=2048 (1.207x), reducing the llama.cpp Q8_0/F32-KV gap from 9.610x
+to 7.962x.  This is a genuine dispatch-count win, but not a solution to the
+llama.cpp gap.
+
+### Revised Flash2 priority
+
+The selected grouped Flash2 kernel remains dominant at every tested width:
+93.005% of selected kernel time at M=128 and **90.134%** at M=2048.  Its
+aggregate trace time drops only from 35,734.130 ms to 28,598.954 ms despite a
+16x dispatch reduction.  The evidence therefore changes the next action from
+"remove M=128 admission" to "design and validate a wide-M Flash2 body".
+
+The required continuation is not a blind tile-size edit.  It must preserve
+runtime M/new-token launch behavior, causal online-softmax, F32 paged-KV
+meaning, and the real-token rewind suffix; it must differential hidden/logit
+results and generated text before timing; and it must report five-repeat
+full-model throughput plus an actual N=4095 trace.  A kernel-only speedup or
+profiler-range duration is not an acceptance result.  The precise BX handoff
+is `benchmarks/results/2026-07-27/prefill-chunk-width/lower-runtime-handoff.md`.
+
+### Correctness and resource result
+
+At every prompt that actually executes the selected wide M, final hidden and
+logit F32 bytes are identical to M=128 (`max_abs=0`, no non-finite values).
+M=1 fallback cases are recorded separately; their greedy token matches and
+the fixed 10-case text suite has no obvious-collapse finding.  A real-token
+N=4000 continuation produces identical 83-token text for M=128..2048.
+Fresh decode is 27.552769 tok/s versus the 27.378731 reference.
+
+Resident memory grows by 539,648 B/token.  The allocation calculation permits
+M=4096 alongside the observed AQ4_0 allocation with 6.424 GiB analytical
+headroom on the 31.859 GiB R9700; a true co-resident load remains unmeasured.
