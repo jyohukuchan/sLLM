@@ -3,7 +3,7 @@
 - Date: 2026-07-26
 - Status: オフラインの P0 準備は完了。B control の根因は CPU oracle で特定・修正済みだが、**修正後の gfx942 実機確認は未実施**である。
 - Scope: `SQ8_0` の gfx942 A′ bring-up と、その独立 B control の再検証を、次の MI300X 借用で 1--2 時間以内に判定するための手順。
-- Out of scope: hand-written MFMA の経路 A、本番 dispatch、full-model enable、serving、release、campaign、authorization、`/etc/ullm/served-models/active.json`、systemd 操作。activation は明示的な人間承認が必要であり、本手順では行わない。
+- Out of scope: hand-written MFMA の経路 A、本番 dispatch、full-model enable、serving、release、campaign、authorization、`/etc/ullm/served-models/active.json`、systemd 操作。activation は本手順の範囲外であり、候補ができた場合は lightweight promotion policy に従う。
 
 v0.1 は初回レンタルの設計・実測記録として残す。本書はその未解決点を
 再試験するための実行可能な v0.2 runbook である。A′ は gfx942 bring-up
