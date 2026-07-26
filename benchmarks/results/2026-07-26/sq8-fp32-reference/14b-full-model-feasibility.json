@@ -1,0 +1,136 @@
+{
+  "schema_version": "ullm.sq8.fp32_reference.feasibility.v2",
+  "status": "full_frozen_corpus_not_generated_after_measured_multiday_serialized_estimate",
+  "scope": {
+    "reference_id": "artifact_fp32_strict_v1",
+    "model_family": "Qwen3-14B-FP8",
+    "format_id": "SQ8_0",
+    "artifact_path": "/home/homelab1/datapool/ullm/product/qwen3-14b-fp8-sq8-v0.1/artifact",
+    "package_path": "/home/homelab1/datapool/ullm/product/qwen3-14b-fp8-sq8-v0.1/package",
+    "artifact_content_sha256": "2243acf1df627ff6ec13840c8ffcf35c77e89205eb36cef7561b85c9c98b9147",
+    "package_manifest_sha256": "c2133dfe392f3d5608bde17ed764ae8347c3096c500a58aa235adbeb63d1a0eb",
+    "frozen_gate_json_modified": false,
+    "activation_or_service_operation_performed": false,
+    "gpu_execution_performed": false
+  },
+  "artifact_contract": {
+    "artifact_schema_version": "sq-fp8-artifact-v0.2",
+    "coverage": "full_model",
+    "layer_count": 40,
+    "quantized_tensor_pairs": 280,
+    "passthrough_tensors": 163,
+    "quantized_weight_payload_bytes": 13212057600,
+    "bf16_scale_payload_bytes": 1612800,
+    "bound_package_bf16_payload_bytes": 3112499200,
+    "bound_package_finite_parameter_values": 1556249600,
+    "block_scale_layout": "[128,128] BF16",
+    "fp8_payload": "OCP E4M3FN"
+  },
+  "runner": {
+    "execution_backend": "cpu_only_no_runtime_context",
+    "cpu_model": "AMD Ryzen Threadripper PRO 3995WX 64-Cores",
+    "cpu_affinity": "0-127",
+    "thread_count": 64,
+    "seed": 0,
+    "executable_sha256": "581bdc5222ef4c080adeaea5f7248e0cea23ca96e0eee43873f18e0f5fa19b97",
+    "matrix_reduction": "fixed increasing-K binary32 mul_add",
+    "residency": "layer_streaming_f32_reconstruction"
+  },
+  "one_token_measurement": {
+    "case": "raw-p0001 token ID 1 at position 0",
+    "input_sha256": "67abdd721024f0ff4e0b3f4c2fc13bc5bad42d0b7851d456d88d203d15aaa450",
+    "initialization_elapsed_seconds": 45.190505324,
+    "forward_elapsed_seconds": 8.742120321,
+    "greedy_token_id": 25,
+    "runner_peak_rss_kib_proc_status_vmhwm": 560384,
+    "external_peak_rss_kib_usr_bin_time": 528100,
+    "external_elapsed_seconds_including_init_and_cross_check": 54.5,
+    "external_swaps": 0,
+    "external_major_page_faults": 0,
+    "receipt": "14b-one-token-r2-crosscheck/run.json",
+    "receipt_sha256": "3c86a42681b0d649fb13132a2b488367ff3d263b62e8b91fe320eafc7f4569c2",
+    "capture_metadata_sha256": "3e4196df41326ca326c816cfe8a3df024afdf796297e65b97d3f5f1d5d067376",
+    "logits_f32le_sha256": "d580df77e720e385209cbd0d15d3eec3a60435763f3e569c5e0ae5a0017ac7d5",
+    "final_hidden_f32le_sha256": "12bee7365482f10aea3fc607722ed8ac25d4eaff542cb55bb432c206b0320512"
+  },
+  "memory": {
+    "preflight_memavailable_bytes": 83205074944,
+    "post_pilot_memavailable_bytes": 82427998208,
+    "logical_full_f32_weight_bytes": 59073228800,
+    "logical_full_f32_weight_gib": 55.016231537,
+    "preflight_logical_headroom_bytes": 24131846144,
+    "preflight_logical_headroom_gib": 22.474533081,
+    "all_f32_resident_execution_rss_measured": false,
+    "all_f32_resident_assessment": "Logical byte arithmetic fit the preflight MemAvailable snapshot, but an all-resident allocation was intentionally not attempted on the live development host. Its actual RSS and stability are unconfirmed.",
+    "implemented_decision": "Use layer streaming. The measured strict-FP32 runner remains about 0.50 GiB RSS rather than materializing roughly 55.02 GiB of reconstructed weights."
+  },
+  "correctness_validation": {
+    "canonical_decoder_all_256_payload_bytes_test": "PASS",
+    "runner_open_validation": "Every canonical weight/scale payload and every bound BF16 package payload was hash-verified and finite-scanned before forward execution.",
+    "small_analytic_tests": [
+      "F32 fused multiply-add primitive",
+      "RoPE position zero identity",
+      "one-token GQA causal attention",
+      "lower-token-ID tie break",
+      "[128,128] scale-boundary matvec: rows 0 and 128 produce 130 and 388",
+      "BF16 streamed matvec: rows produce 17 and 39"
+    ],
+    "existing_cpu_projection_cross_check": {
+      "tensor": "model.layers.0.self_attn.q_proj.weight",
+      "input_token_id": 1,
+      "strict_f32_output_f32le_sha256": "6e3d65ee7243628dbc18342689bae399bcfe15549d022c3cdffd6f0ed47380c0",
+      "existing_cpu_f64_output_f32le_sha256": "932450a4e9e87b98501e24b6a2ab8b73c81d26b878816d9efe4e067c250122d1",
+      "element_count": 5120,
+      "nonfinite_count": 0,
+      "max_abs": 0.0000027418136596679688,
+      "relative_l2": 0.0000010365190732913615,
+      "cosine_similarity": 0.9999999999994604,
+      "result": "Within the existing projection comparison thresholds. It is a semantic cross-check only; the F64 projection path is not the v0.2 primary reference."
+    },
+    "unconfirmed": [
+      "A separate source-model or other independent full-40-layer numerical oracle comparison was not available and was not substituted for the artifact-FP32 reference.",
+      "Full frozen-corpus and M=128 checkpoint capture correctness is unconfirmed because that capture was not run."
+    ]
+  },
+  "determinism_pilot": {
+    "case": "raw-p0001, initial token 1, 9 sequential forwards (prompt plus 8 generated teacher-forcing steps)",
+    "teacher_forcing_tokens": [1, 25, 330, 16, 13, 15, 13, 15, 756],
+    "generated_tokens": [25, 330, 16, 13, 15, 13, 15, 756, 262],
+    "captured_repetitions": [
+      "14b-raw-p0001-g8-r1",
+      "14b-raw-p0001-g8-r2"
+    ],
+    "final_binary_repetitions": [
+      "14b-raw-p0001-g8-r3-final",
+      "14b-raw-p0001-g8-r4-final"
+    ],
+    "result": "All 9 logits hashes, final-hidden hashes, and 40 layer-hidden hashes per step were byte-identical between r1/r2 and between final-binary r3/r4. The r3 summaries also match r1 exactly.",
+    "r1_external_peak_rss_kib": 538192,
+    "r2_external_peak_rss_kib": 534140,
+    "r1_per_forward_seconds": [8.997240723, 9.027846772, 9.087294754, 9.083723874, 9.108360936, 9.209964711, 8.811231758, 9.002077986, 9.136673794],
+    "r2_per_forward_seconds": [8.933706907, 8.940259551, 9.010081963, 9.051068746, 8.964637489, 9.061490451, 9.032847297, 9.137443311, 9.051203015]
+  },
+  "extrapolation": {
+    "basis": "Direct multiplication of the isolated position-0 8.742120321-second forward. It excludes longer-context causal-attention growth and is therefore optimistic, not a measured full-corpus duration.",
+    "frozen_primary_decode_positions_total": 4096,
+    "frozen_primary_decode_direct_seconds": 35807.724834816,
+    "frozen_primary_decode_direct_hours": 9.946590232,
+    "literal_7_streams_times_4096_positions": 28672,
+    "literal_7_streams_times_4096_direct_seconds": 250654.073843712,
+    "literal_7_streams_times_4096_direct_hours": 69.626131623,
+    "literal_7_streams_times_4096_direct_days": 2.901088818,
+    "frozen_sequential_m1_primary_and_boundary_token_forwards": 16437,
+    "frozen_m128_case_token_forward_equivalent": 12416,
+    "current_runner_serialized_full_coverage_token_forward_equivalent": 28853,
+    "current_runner_serialized_full_coverage_direct_seconds": 252236.397621813,
+    "current_runner_serialized_full_coverage_direct_hours": 70.065666006,
+    "current_runner_serialized_full_coverage_direct_days": 2.91940275,
+    "decision": "The literal requested 7 x 4096 workload is a multi-day direct estimate. The frozen primary decode alone is roughly ten optimistic hours; prompt, boundary, and M=128 coverage bring the current sequential-runner estimate back to roughly three optimistic days. Full capture was therefore not started."
+  },
+  "capture": {
+    "created": "raw-p0001 position 0 plus 8 generated sequential positions, twice",
+    "contents_per_captured_forward": "F32 little-endian logits, final hidden, all 40 post-layer residual hidden vectors, and metadata with content hashes",
+    "not_created": "The 7-stream / 4096-position frozen primary corpus, boundary cases, and M=128 checkpoint corpus",
+    "v0_2_qualification_status": "not_qualified; no frozen threshold or JSON was changed"
+  }
+}

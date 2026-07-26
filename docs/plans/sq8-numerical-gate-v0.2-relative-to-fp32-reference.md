@@ -327,3 +327,90 @@ v0.2 として評価するには、同 model 用の canonical full-model SQ8_0 a
 engineering-only CPU pilot、F64 主参照、layer-only reference、GPU reference、または
 positions/streams の削減はいずれも v0.2 の適格 capture を満たさず、採るなら新 version の
 freeze が必要である。
+
+## 2026-07-26 14B canonical artifact strict-FP32 実測（基準本文は不変）
+
+その後の明示的な対象確定に従い、この節では 9B proxy を一切使わず、v0.2 が bind する
+Qwen3-14B-FP8 の既存 canonical artifact をそのまま測定した。frozen JSON、閾値、corpus、
+activation、service、GPU は変更・操作していない。機械可読 receipt と content-hash manifest は
+[`14b-full-model-feasibility.json`](../../benchmarks/results/2026-07-26/sq8-fp32-reference/14b-full-model-feasibility.json)
+および
+[`14b-full-model-SHA256SUMS`](../../benchmarks/results/2026-07-26/sq8-fp32-reference/14b-full-model-SHA256SUMS)
+に保存した。
+
+### 対象と実装
+
+- artifact は `sq-fp8-artifact-v0.2` / `SQ8_0` / `full_model`、40 layer、280
+  quantized pair、163 BF16 passthrough、`[128,128]` BF16 scale であり、content SHA-256 は
+  `2243acf1df627ff6ec13840c8ffcf35c77e89205eb36cef7561b85c9c98b9147` である。manifest の
+  source model は `Qwen3-14B-FP8`、vocab は 151,936 である。
+- `crates/ullm-engine/src/sq8_fp32_reference.rs` と
+  `ullm-sq8-fp32-reference` を追加した。runtime context、HIP、BLAS、activation
+  quantization を呼ばない CPU-only path である。canonical E4M3FN を F32 に decode し、
+  declared BF16 `[128,128]` scale を F32 にして各 element に掛け、K 昇順の F32
+  `mul_add` で reduction する。F32 causal KV、RoPE、GQA、RMSNorm、residual、SiLU、final
+  norm、BF16 LM-head まで 40 layer を実行する。
+- 大行列は output-row partition ごとに artifact/package から stream する。保存する
+  forward capture は logits、final hidden、全 40 layer post-residual hidden、greedy token と
+  各 F32 little-endian payload hash である。seed は 0、thread 数は 64、final executable
+  SHA-256 は `581bdc5222ef4c080adeaea5f7248e0cea23ca96e0eee43873f18e0f5fa19b97` である。
+
+### 実測
+
+- isolated `raw-p0001`（token ID 1、position 0）の full-model forward は
+  **8.742120321 秒**だった。artifact/package 全 payload hash・finite scan を含む初期化は
+  45.190505324 秒、同 process の `/proc/self/status` `VmHWM` は 560,384 KiB、外部
+  `/usr/bin/time -v` の maximum RSS は **528,100 KiB**だった。二つは異なる計測器なので、
+  片方で置換していない。swap と major page fault は 0 だった。
+- `raw-p0001` の prompt 1 token + greedy feedback 8 token を二回 capture した。各 run は
+  9 forward、各 forward は 8.81–9.21 秒（r1）および 8.93–9.14 秒（r2）だった。9 position
+  全てについて logits、final hidden、40 layer hidden の SHA-256 が byte-identical だった。
+  final build でも独立に二回（r3/r4）同じ 9 summary hash を得た。これは full corpus
+  coverage ではなく、frozen JSON の feasibility pilot 要件だけを満たす。
+- 実行前に artifact 280 pair と bound package 163 payload を全量 hash/finite scan した。
+  全 256 E4M3FN byte と canonical finite scanner の一致 test、F32 FMA、RoPE position 0、
+  1-token GQA、tie-break、`[128,128]` block boundary、BF16 matvec の解析解 test は PASS。
+  さらに real artifact の layer 0 Q projection を既存 CPU F64 projection reference と比較し、
+  5,120 values で nonfinite 0、max-abs `2.7418136596679688e-6`、relative-L2
+  `1.0365190732913615e-6`、cosine `0.9999999999994604`（既存 projection threshold 内）だった。
+  F64 path はここで decoder/scale semantics の cross-check にのみ使い、primary reference には
+  使っていない。
+
+### メモリ判定
+
+quantized matrix 13,212,057,600 element と passthrough 1,556,249,600 element を全て F32 に
+復元すると論理 weight size は **59,073,228,800 bytes（55.016 GiB）**である。preflight の
+`MemAvailable` は 83,205,074,944 bytes（77.491 GiB）だったため、論理 byte 数だけなら
+22.475 GiB の差はある。しかし all-resident allocation/RSS は live 開発 host では試しておらず、
+実測済みではない。従って「常駐可能」は未確認であり、安全な実装判断は layer streaming である。
+実際の strict runner RSS は上記の約 0.50 GiB だった。
+
+### 時間外挿と判定
+
+8.742120321 秒を position 0 の直接率として掛けた値であり、長 context の causal attention 増加、
+filesystem contention、capture I/O は含まない。このため以下は全て**楽観値**である。
+
+- 質問文を文字どおり `7 stream × 4,096 position = 28,672` forward とすると、
+  **69.626 時間（2.901 日）**である。従ってこの解釈では「数日」であり、実行は不可と判断する。
+- frozen v0.2 の実際の primary decode は 7 stream **合計** 4,096 position である。この部分だけの
+  直接値は **9.947 時間**である。初期化、長 context、capture を足すため、数時間ではない。
+- frozen corpus の prompt prefill + boundary を `sequential_m1` で展開すると 16,437 token-forward、
+  要求された M=128 cases を現在の逐次 runner の token-forward 相当で数えるとさらに 12,416、計
+  28,853 になる。同じ直接率では **70.066 時間（2.919 日）**である。これは M=128 batch を
+  測った時間ではなく、現在の runner を逐次利用する場合の楽観的な規模見積りである。
+
+よって strict artifact-FP32 reference は 1-token/full-model と 8-step feasibility pilot までは
+実装・検証できたが、full frozen corpus capture をこの task で開始していない。M=128 checkpoint
+capture scheduler も未実装である。v0.2 の status は `blocked_reference_or_capture` のままであり、
+この結論は gate の改訂ではない。
+
+### v0.2 外の代替案（提案のみ）
+
+- primary 4,096 decode だけに絞ると prompt/boundary/M=128 相当の 24,757 forward を省く。これで
+  4096 sample の Wilson lower bound `99.934%` は保てても coverage が変わるため、v0.2 pass には
+  使えない。
+- 1,024 / 512 position に縮めると、完全一致時の片側 Wilson lower bound はそれぞれ `99.737%` /
+  `99.474%`（4,096 の `99.934%` から低下）であり、stream/position 条件の新 freeze が必要である。
+- F64、layer-only、GPU reference は主参照の scalar arithmetic、full-model observables、または
+  CPU-only 条件を変える。今回の single projection で F64-vs-F32 max-abs は上記
+  `2.742e-6` だったが、これは full-model 差の上限ではなく、代替主参照を正当化しない。

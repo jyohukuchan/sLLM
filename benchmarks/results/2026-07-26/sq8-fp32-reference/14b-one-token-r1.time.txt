@@ -1,0 +1,23 @@
+	Command being timed: "target/release/ullm-sq8-fp32-reference /home/homelab1/datapool/ullm/product/qwen3-14b-fp8-sq8-v0.1/artifact /home/homelab1/datapool/ullm/product/qwen3-14b-fp8-sq8-v0.1/package benchmarks/results/2026-07-26/sq8-fp32-reference/14b-one-token-r1 --token-id 1 --forwards 1 --threads 64 --max-context 4096"
+	User time (seconds): 68.57
+	System time (seconds): 369.60
+	Percent of CPU this job got: 777%
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 0:56.35
+	Average shared text size (kbytes): 0
+	Average unshared data size (kbytes): 0
+	Average stack size (kbytes): 0
+	Average total size (kbytes): 0
+	Maximum resident set size (kbytes): 518340
+	Average resident set size (kbytes): 0
+	Major (requiring I/O) page faults: 0
+	Minor (reclaiming a frame) page faults: 2138386
+	Voluntary context switches: 48112
+	Involuntary context switches: 12752
+	Swaps: 0
+	File system inputs: 0
+	File system outputs: 2872
+	Socket messages sent: 0
+	Socket messages received: 0
+	Signals delivered: 0
+	Page size (bytes): 4096
+	Exit status: 0
