@@ -1,0 +1,168 @@
+=== docker containers (pre-window) ===
+firecrawl-foundationdb-init-1	foundationdb/foundationdb:7.3.63	Exited (1) 13 hours ago
+firecrawl-foundationdb-1	foundationdb/foundationdb:7.3.63	Up 13 hours
+open-webui	ullm/open-webui:0.9.4-ullm.1	Up 13 hours (healthy)
+firecrawl-playwright-service-1	firecrawl-playwright-service	Up 13 hours
+firecrawl-rabbitmq-1	rabbitmq:3-management	Up 13 hours (healthy)
+firecrawl-redis-1	redis:alpine	Up 13 hours
+firecrawl-api-1	firecrawl-api	Up 13 hours
+firecrawl-nuq-postgres-1	firecrawl-nuq-postgres	Up 13 hours
+saxo-token-refresher	token-saxo-refresher	Up 13 hours
+hardware-monitor	hardware_monitor-hardware-monitor	Up 13 hours
+glances	nicolargo/glances:latest-full	Up 13 hours
+searxng	searxng/searxng	Up 13 hours
+
+=== vLLM AITER environment references ===
+/usr/local/lib/python3.12/dist-packages/vllm/compilation/passes/fusion/allreduce_rms_fusion.py:915:        use_aiter_rmsnorm: bool = True,
+/usr/local/lib/python3.12/dist-packages/vllm/compilation/passes/fusion/allreduce_rms_fusion.py:960:        use_aiter_rmsnorm: bool = True,
+/usr/local/lib/python3.12/dist-packages/vllm/compilation/passes/fusion/allreduce_rms_fusion.py:1044:        _AITER_OLD_FUSED_AR_RMS_HIDDEN = (512, 1024, 2048, 4096)
+/usr/local/lib/python3.12/dist-packages/vllm/compilation/passes/fusion/allreduce_rms_fusion.py:1048:            and hidden_dim not in _AITER_OLD_FUSED_AR_RMS_HIDDEN
+/usr/local/lib/python3.12/dist-packages/vllm/compilation/passes/fusion/allreduce_rms_fusion.py:1054:                _AITER_OLD_FUSED_AR_RMS_HIDDEN,
+/usr/local/lib/python3.12/dist-packages/vllm/v1/spec_decode/llm_base_proposer.py:254:            # auto-discovery when VLLM_ROCM_USE_AITER=0, which would trigger aiter
+/usr/local/lib/python3.12/dist-packages/vllm/platforms/rocm.py:699:        use_aiter_fused_moe = rocm_aiter_ops.is_fused_moe_enabled()
+/usr/local/lib/python3.12/dist-packages/vllm/platforms/rocm.py:700:        use_aiter_fp8_linear = rocm_aiter_ops.is_linear_fp8_enabled()
+/usr/local/lib/python3.12/dist-packages/vllm/platforms/rocm.py:701:        use_aiter_fused_se = rocm_aiter_ops.is_fusion_moe_shared_experts_enabled()
+/usr/local/lib/python3.12/dist-packages/vllm/platforms/rocm.py:703:        if use_aiter_fp8_linear and "-quant_fp8" not in compilation_config.custom_ops:
+/usr/local/lib/python3.12/dist-packages/vllm/platforms/rocm.py:706:        if use_aiter_fused_se and "-grouped_topk" in compilation_config.custom_ops:
+/usr/local/lib/python3.12/dist-packages/vllm/platforms/rocm.py:708:                "VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS is enabled, which "
+/usr/local/lib/python3.12/dist-packages/vllm/platforms/rocm.py:716:            use_aiter_fused_moe
+/usr/local/lib/python3.12/dist-packages/vllm/platforms/rocm.py:947:            and envs.VLLM_ROCM_USE_AITER
+/usr/local/lib/python3.12/dist-packages/vllm/platforms/rocm.py:948:            and envs.VLLM_ROCM_USE_AITER_RMSNORM
+/usr/local/lib/python3.12/dist-packages/vllm/envs.py:111:    VLLM_ROCM_USE_AITER: bool = False
+/usr/local/lib/python3.12/dist-packages/vllm/envs.py:112:    VLLM_ROCM_USE_AITER_PAGED_ATTN: bool = False
+/usr/local/lib/python3.12/dist-packages/vllm/envs.py:113:    VLLM_ROCM_USE_AITER_LINEAR: bool = True
+/usr/local/lib/python3.12/dist-packages/vllm/envs.py:114:    VLLM_ROCM_USE_AITER_MOE: bool = True
+/usr/local/lib/python3.12/dist-packages/vllm/envs.py:115:    VLLM_ROCM_USE_AITER_RMSNORM: bool = True
+/usr/local/lib/python3.12/dist-packages/vllm/envs.py:116:    VLLM_ROCM_USE_AITER_MLA: bool = True
+/usr/local/lib/python3.12/dist-packages/vllm/envs.py:117:    VLLM_ROCM_USE_AITER_MHA: bool = True
+/usr/local/lib/python3.12/dist-packages/vllm/envs.py:118:    VLLM_ROCM_USE_AITER_FP4_ASM_GEMM: bool = False
+/usr/local/lib/python3.12/dist-packages/vllm/envs.py:119:    VLLM_ROCM_USE_AITER_TRITON_ROPE: bool = False
+/usr/local/lib/python3.12/dist-packages/vllm/envs.py:120:    VLLM_ROCM_USE_AITER_FP8BMM: bool = True
+/usr/local/lib/python3.12/dist-packages/vllm/envs.py:121:    VLLM_ROCM_USE_AITER_FP4BMM: bool = True
+/usr/local/lib/python3.12/dist-packages/vllm/envs.py:122:    VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION: bool = False
+/usr/local/lib/python3.12/dist-packages/vllm/envs.py:123:    VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS: bool = False
+/usr/local/lib/python3.12/dist-packages/vllm/envs.py:124:    VLLM_ROCM_USE_AITER_TRITON_GEMM: bool = True
+/usr/local/lib/python3.12/dist-packages/vllm/envs.py:998:    "VLLM_ROCM_USE_AITER": lambda: (
+/usr/local/lib/python3.12/dist-packages/vllm/envs.py:999:        os.getenv("VLLM_ROCM_USE_AITER", "False").lower() in ("true", "1")
+/usr/local/lib/python3.12/dist-packages/vllm/envs.py:1003:    "VLLM_ROCM_USE_AITER_PAGED_ATTN": lambda: (
+/usr/local/lib/python3.12/dist-packages/vllm/envs.py:1004:        os.getenv("VLLM_ROCM_USE_AITER_PAGED_ATTN", "False").lower() in ("true", "1")
+/usr/local/lib/python3.12/dist-packages/vllm/envs.py:1010:    "VLLM_ROCM_USE_AITER_LINEAR": lambda: (
+/usr/local/lib/python3.12/dist-packages/vllm/envs.py:1011:        os.getenv("VLLM_ROCM_USE_AITER_LINEAR", "True").lower() in ("true", "1")
+/usr/local/lib/python3.12/dist-packages/vllm/envs.py:1015:    "VLLM_ROCM_USE_AITER_MOE": lambda: (
+/usr/local/lib/python3.12/dist-packages/vllm/envs.py:1016:        os.getenv("VLLM_ROCM_USE_AITER_MOE", "True").lower() in ("true", "1")
+/usr/local/lib/python3.12/dist-packages/vllm/envs.py:1019:    "VLLM_ROCM_USE_AITER_RMSNORM": lambda: (
+/usr/local/lib/python3.12/dist-packages/vllm/envs.py:1020:        os.getenv("VLLM_ROCM_USE_AITER_RMSNORM", "True").lower() in ("true", "1")
+/usr/local/lib/python3.12/dist-packages/vllm/envs.py:1024:    "VLLM_ROCM_USE_AITER_MLA": lambda: (
+/usr/local/lib/python3.12/dist-packages/vllm/envs.py:1025:        os.getenv("VLLM_ROCM_USE_AITER_MLA", "True").lower() in ("true", "1")
+/usr/local/lib/python3.12/dist-packages/vllm/envs.py:1029:    "VLLM_ROCM_USE_AITER_MHA": lambda: (
+/usr/local/lib/python3.12/dist-packages/vllm/envs.py:1030:        os.getenv("VLLM_ROCM_USE_AITER_MHA", "True").lower() in ("true", "1")
+/usr/local/lib/python3.12/dist-packages/vllm/envs.py:1034:    "VLLM_ROCM_USE_AITER_FP4_ASM_GEMM": lambda: (
+/usr/local/lib/python3.12/dist-packages/vllm/envs.py:1035:        os.getenv("VLLM_ROCM_USE_AITER_FP4_ASM_GEMM", "False").lower() in ("true", "1")
+/usr/local/lib/python3.12/dist-packages/vllm/envs.py:1039:    "VLLM_ROCM_USE_AITER_TRITON_ROPE": lambda: (
+/usr/local/lib/python3.12/dist-packages/vllm/envs.py:1040:        os.getenv("VLLM_ROCM_USE_AITER_TRITON_ROPE", "False").lower() in ("true", "1")
+/usr/local/lib/python3.12/dist-packages/vllm/envs.py:1044:    "VLLM_ROCM_USE_AITER_FP8BMM": lambda: (
+/usr/local/lib/python3.12/dist-packages/vllm/envs.py:1045:        os.getenv("VLLM_ROCM_USE_AITER_FP8BMM", "True").lower() in ("true", "1")
+/usr/local/lib/python3.12/dist-packages/vllm/envs.py:1049:    "VLLM_ROCM_USE_AITER_FP4BMM": lambda: (
+/usr/local/lib/python3.12/dist-packages/vllm/envs.py:1050:        os.getenv("VLLM_ROCM_USE_AITER_FP4BMM", "True").lower() in ("true", "1")
+/usr/local/lib/python3.12/dist-packages/vllm/envs.py:1053:    "VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION": lambda: (
+/usr/local/lib/python3.12/dist-packages/vllm/envs.py:1054:        os.getenv("VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION", "False").lower()
+/usr/local/lib/python3.12/dist-packages/vllm/envs.py:1059:    "VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS": lambda: (
+/usr/local/lib/python3.12/dist-packages/vllm/envs.py:1060:        os.getenv("VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS", "False").lower()
+/usr/local/lib/python3.12/dist-packages/vllm/envs.py:1065:    "VLLM_ROCM_USE_AITER_TRITON_GEMM": lambda: (
+/usr/local/lib/python3.12/dist-packages/vllm/envs.py:1066:        os.getenv("VLLM_ROCM_USE_AITER_TRITON_GEMM", "True").lower() in ("true", "1")
+/usr/local/lib/python3.12/dist-packages/vllm/model_executor/kernels/linear/scaled_mm/aiter.py:50:                "requires setting `VLLM_ROCM_USE_AITER=1` "
+/usr/local/lib/python3.12/dist-packages/vllm/model_executor/kernels/linear/scaled_mm/aiter.py:51:                "and `VLLM_ROCM_USE_AITER_LINEAR=1`. "
+/usr/local/lib/python3.12/dist-packages/vllm/model_executor/kernels/linear/scaled_mm/aiter.py:52:                "`VLLM_ROCM_USE_AITER_LINEAR` default is True.",
+/usr/local/lib/python3.12/dist-packages/vllm/model_executor/kernels/linear/scaled_mm/aiter.py:138:                "requires setting `VLLM_ROCM_USE_AITER=1` "
+/usr/local/lib/python3.12/dist-packages/vllm/model_executor/kernels/linear/scaled_mm/aiter.py:139:                "and `VLLM_ROCM_USE_AITER_LINEAR=1`. "
+/usr/local/lib/python3.12/dist-packages/vllm/model_executor/kernels/linear/scaled_mm/aiter.py:140:                "`VLLM_ROCM_USE_AITER_LINEAR` default is True.",
+/usr/local/lib/python3.12/dist-packages/vllm/model_executor/layers/rotary_embedding/base.py:50:        self.use_aiter = (
+/usr/local/lib/python3.12/dist-packages/vllm/model_executor/layers/rotary_embedding/base.py:53:        if self.use_aiter:
+/usr/local/lib/python3.12/dist-packages/vllm/model_executor/layers/rotary_embedding/base.py:239:        if self.use_aiter:
+/usr/local/lib/python3.12/dist-packages/vllm/model_executor/layers/fused_moe/oracle/fp8.py:383:    if envs.is_set("VLLM_ROCM_USE_AITER") or envs.is_set("VLLM_ROCM_USE_AITER_MOE"):
+/usr/local/lib/python3.12/dist-packages/vllm/model_executor/layers/fused_moe/oracle/fp8.py:384:        if not envs.VLLM_ROCM_USE_AITER or not envs.VLLM_ROCM_USE_AITER_MOE:
+/usr/local/lib/python3.12/dist-packages/vllm/model_executor/layers/fused_moe/oracle/unquantized.py:274:    if envs.is_set("VLLM_ROCM_USE_AITER") or envs.is_set("VLLM_ROCM_USE_AITER_MOE"):
+/usr/local/lib/python3.12/dist-packages/vllm/model_executor/layers/fused_moe/oracle/unquantized.py:275:        if not envs.VLLM_ROCM_USE_AITER or not envs.VLLM_ROCM_USE_AITER_MOE:
+/usr/local/lib/python3.12/dist-packages/vllm/model_executor/layers/fused_moe/layer.py:382:                "VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS is enabled"
+/usr/local/lib/python3.12/dist-packages/vllm/model_executor/layers/fused_moe/layer.py:529:                "Turn it off by setting VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS=0"
+/usr/local/lib/python3.12/dist-packages/vllm/model_executor/layers/quantization/compressed_tensors/schemes/compressed_tensors_w8a8_fp8.py:67:            self.use_aiter_and_is_supported = rocm_aiter_ops.is_linear_fp8_enabled()
+/usr/local/lib/python3.12/dist-packages/vllm/model_executor/layers/quantization/quark/schemes/quark_w4a8_mxfp4_fp8.py:71:        self.use_aiter_kernel = (
+/usr/local/lib/python3.12/dist-packages/vllm/model_executor/layers/quantization/quark/schemes/quark_w4a8_mxfp4_fp8.py:77:        if not self.use_aiter_kernel:
+/usr/local/lib/python3.12/dist-packages/vllm/model_executor/layers/quantization/quark/schemes/quark_w4a8_mxfp4_fp8.py:169:        if self.use_aiter_kernel:
+/usr/local/lib/python3.12/dist-packages/vllm/model_executor/layers/quantization/quark/schemes/quark_ocp_mx.py:56:        rocm_use_aiter_fp4_asm_gemm: bool = False,
+/usr/local/lib/python3.12/dist-packages/vllm/model_executor/layers/quantization/quark/schemes/quark_ocp_mx.py:63:        if rocm_use_aiter_fp4_asm_gemm:
+/usr/local/lib/python3.12/dist-packages/vllm/model_executor/layers/quantization/quark/schemes/quark_ocp_mx.py:126:        rocm_use_aiter_fp4_asm_gemm: bool = False,
+/usr/local/lib/python3.12/dist-packages/vllm/model_executor/layers/quantization/quark/schemes/quark_ocp_mx.py:210:        self.rocm_use_aiter_fp4_asm_gemm = (
+/usr/local/lib/python3.12/dist-packages/vllm/model_executor/layers/quantization/quark/schemes/quark_ocp_mx.py:281:            elif self.rocm_use_aiter_fp4_asm_gemm:
+/usr/local/lib/python3.12/dist-packages/vllm/model_executor/layers/quantization/quark/schemes/quark_ocp_mx.py:374:            self.rocm_use_aiter_fp4_asm_gemm,
+/usr/local/lib/python3.12/dist-packages/vllm/model_executor/layers/quantization/input_quant_fp8.py:70:        self.use_aiter = rocm_aiter_ops.is_linear_fp8_enabled()
+/usr/local/lib/python3.12/dist-packages/vllm/model_executor/layers/quantization/input_quant_fp8.py:146:        use_aiter_quant = self.use_aiter and scale_ub is None and x.is_contiguous()
+/usr/local/lib/python3.12/dist-packages/vllm/model_executor/layers/quantization/input_quant_fp8.py:147:        use_aiter_per_tensor_quant = (
+/usr/local/lib/python3.12/dist-packages/vllm/model_executor/layers/quantization/input_quant_fp8.py:148:            use_aiter_quant and self.group_shape.is_per_tensor()
+/usr/local/lib/python3.12/dist-packages/vllm/model_executor/layers/quantization/input_quant_fp8.py:150:        use_aiter_per_token_quant = use_aiter_quant and self.group_shape.is_per_token()
+/usr/local/lib/python3.12/dist-packages/vllm/model_executor/layers/quantization/input_quant_fp8.py:152:        use_aiter_per_group_quant = use_aiter_quant and self.group_shape.is_per_group()
+/usr/local/lib/python3.12/dist-packages/vllm/model_executor/layers/quantization/input_quant_fp8.py:154:        if use_aiter_per_group_quant:
+/usr/local/lib/python3.12/dist-packages/vllm/model_executor/layers/quantization/input_quant_fp8.py:156:        if use_aiter_per_tensor_quant:
+/usr/local/lib/python3.12/dist-packages/vllm/model_executor/layers/quantization/input_quant_fp8.py:158:        if use_aiter_per_token_quant:
+/usr/local/lib/python3.12/dist-packages/vllm/model_executor/layers/utils.py:101:def use_aiter_triton_gemm(n, m, k, dtype):
+/usr/local/lib/python3.12/dist-packages/vllm/model_executor/layers/utils.py:166:    if use_aiter_triton_gemm(n, m, k, x.dtype):
+/usr/local/lib/python3.12/dist-packages/vllm/_aiter_ops.py:80:    VLLM_ROCM_USE_AITER=0, while preventing unwanted JIT warnings for auto-discovery.
+/usr/local/lib/python3.12/dist-packages/vllm/_aiter_ops.py:413:_AITER_HAS_FUSED_QK_RMSNORM: bool | None = None
+/usr/local/lib/python3.12/dist-packages/vllm/_aiter_ops.py:418:    global _AITER_HAS_FUSED_QK_RMSNORM
+/usr/local/lib/python3.12/dist-packages/vllm/_aiter_ops.py:419:    if _AITER_HAS_FUSED_QK_RMSNORM is None:
+/usr/local/lib/python3.12/dist-packages/vllm/_aiter_ops.py:425:            _AITER_HAS_FUSED_QK_RMSNORM = True
+/usr/local/lib/python3.12/dist-packages/vllm/_aiter_ops.py:427:            _AITER_HAS_FUSED_QK_RMSNORM = False
+/usr/local/lib/python3.12/dist-packages/vllm/_aiter_ops.py:428:    return _AITER_HAS_FUSED_QK_RMSNORM
+/usr/local/lib/python3.12/dist-packages/vllm/_aiter_ops.py:1152:        VLLM_ROCM_USE_AITER: Main toggle for all AITER operations.
+/usr/local/lib/python3.12/dist-packages/vllm/_aiter_ops.py:1153:        VLLM_ROCM_USE_AITER_LINEAR: Controls GEMM and quantization ops.
+/usr/local/lib/python3.12/dist-packages/vllm/_aiter_ops.py:1154:        VLLM_ROCM_USE_AITER_RMSNORM: Controls RMSNorm operations.
+/usr/local/lib/python3.12/dist-packages/vllm/_aiter_ops.py:1155:        VLLM_ROCM_USE_AITER_MOE: Controls MoE (Mixture of Experts) ops.
+/usr/local/lib/python3.12/dist-packages/vllm/_aiter_ops.py:1156:        VLLM_ROCM_USE_AITER_MLA: Controls MLA (Multi-head Latent Attention) ops.
+/usr/local/lib/python3.12/dist-packages/vllm/_aiter_ops.py:1157:        VLLM_ROCM_USE_AITER_MHA: Controls MHA ops including flash_attn_varlen.
+/usr/local/lib/python3.12/dist-packages/vllm/_aiter_ops.py:1158:        VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION: Controls Triton unified attention.
+/usr/local/lib/python3.12/dist-packages/vllm/_aiter_ops.py:1159:        VLLM_ROCM_USE_AITER_FP8BMM: Controls FP8 batched matrix multiply.
+/usr/local/lib/python3.12/dist-packages/vllm/_aiter_ops.py:1160:        VLLM_ROCM_USE_AITER_FP4_ASM_GEMM: Controls FP4 assembly GEMM.
+/usr/local/lib/python3.12/dist-packages/vllm/_aiter_ops.py:1161:        VLLM_ROCM_USE_AITER_TRITON_ROPE: Controls Triton rotary embeddings.
+/usr/local/lib/python3.12/dist-packages/vllm/_aiter_ops.py:1162:        VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS: Controls shared expert fusion.
+/usr/local/lib/python3.12/dist-packages/vllm/_aiter_ops.py:1163:        VLLM_ROCM_USE_AITER_TRITON_GEMM: Controls Triton unquantized GEMM.
+/usr/local/lib/python3.12/dist-packages/vllm/_aiter_ops.py:1183:                        cls._AITER_ENABLED   -----> Check by the logic in `is_enabled()`
+/usr/local/lib/python3.12/dist-packages/vllm/_aiter_ops.py:1202:    _AITER_ENABLED = envs.VLLM_ROCM_USE_AITER
+/usr/local/lib/python3.12/dist-packages/vllm/_aiter_ops.py:1203:    _LINEAR_ENABLED = envs.VLLM_ROCM_USE_AITER_LINEAR
+/usr/local/lib/python3.12/dist-packages/vllm/_aiter_ops.py:1204:    _FMOE_ENABLED = envs.VLLM_ROCM_USE_AITER_MOE
+/usr/local/lib/python3.12/dist-packages/vllm/_aiter_ops.py:1205:    _MLA_ENABLED = envs.VLLM_ROCM_USE_AITER_MLA
+/usr/local/lib/python3.12/dist-packages/vllm/_aiter_ops.py:1206:    _MHA_ENABLED = envs.VLLM_ROCM_USE_AITER_MHA
+/usr/local/lib/python3.12/dist-packages/vllm/_aiter_ops.py:1208:    _TRITON_UNIFIED_ATTN_ENABLED = envs.VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION
+/usr/local/lib/python3.12/dist-packages/vllm/_aiter_ops.py:1210:    _FP8BMM_ENABLED = envs.VLLM_ROCM_USE_AITER_FP8BMM
+/usr/local/lib/python3.12/dist-packages/vllm/_aiter_ops.py:1211:    _FP4BMM_ENABLED = envs.VLLM_ROCM_USE_AITER_FP4BMM
+/usr/local/lib/python3.12/dist-packages/vllm/_aiter_ops.py:1213:    _FP4_GEMM_DYNAMIC_QUANT_ASM = envs.VLLM_ROCM_USE_AITER_FP4_ASM_GEMM
+/usr/local/lib/python3.12/dist-packages/vllm/_aiter_ops.py:1214:    # TODO: Consolidate under VLLM_ROCM_USE_AITER_ROPE
+/usr/local/lib/python3.12/dist-packages/vllm/_aiter_ops.py:1215:    _TRITON_ROTARY_EMBED = envs.VLLM_ROCM_USE_AITER_TRITON_ROPE
+/usr/local/lib/python3.12/dist-packages/vllm/_aiter_ops.py:1216:    _MOE_SHARED_EXPERTS_ENABLED = envs.VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS
+/usr/local/lib/python3.12/dist-packages/vllm/_aiter_ops.py:1218:    _TRITON_UNQUANT_GEMM = envs.VLLM_ROCM_USE_AITER_TRITON_GEMM
+/usr/local/lib/python3.12/dist-packages/vllm/_aiter_ops.py:1235:        cls._AITER_ENABLED = envs.VLLM_ROCM_USE_AITER
+/usr/local/lib/python3.12/dist-packages/vllm/_aiter_ops.py:1236:        cls._LINEAR_ENABLED = envs.VLLM_ROCM_USE_AITER_LINEAR
+/usr/local/lib/python3.12/dist-packages/vllm/_aiter_ops.py:1237:        cls._FMOE_ENABLED = envs.VLLM_ROCM_USE_AITER_MOE
+/usr/local/lib/python3.12/dist-packages/vllm/_aiter_ops.py:1238:        cls._MLA_ENABLED = envs.VLLM_ROCM_USE_AITER_MLA
+/usr/local/lib/python3.12/dist-packages/vllm/_aiter_ops.py:1239:        cls._MHA_ENABLED = envs.VLLM_ROCM_USE_AITER_MHA
+/usr/local/lib/python3.12/dist-packages/vllm/_aiter_ops.py:1241:        cls._TRITON_UNIFIED_ATTN_ENABLED = envs.VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION
+/usr/local/lib/python3.12/dist-packages/vllm/_aiter_ops.py:1242:        cls._FP8BMM_ENABLED = envs.VLLM_ROCM_USE_AITER_FP8BMM
+/usr/local/lib/python3.12/dist-packages/vllm/_aiter_ops.py:1243:        cls._FP4BMM_ENABLED = envs.VLLM_ROCM_USE_AITER_FP4BMM
+/usr/local/lib/python3.12/dist-packages/vllm/_aiter_ops.py:1244:        cls._FP4_GEMM_DYNAMIC_QUANT_ASM = envs.VLLM_ROCM_USE_AITER_FP4_ASM_GEMM
+/usr/local/lib/python3.12/dist-packages/vllm/_aiter_ops.py:1245:        cls._TRITON_ROTARY_EMBED = envs.VLLM_ROCM_USE_AITER_TRITON_ROPE
+/usr/local/lib/python3.12/dist-packages/vllm/_aiter_ops.py:1246:        cls._MOE_SHARED_EXPERTS_ENABLED = envs.VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS
+/usr/local/lib/python3.12/dist-packages/vllm/_aiter_ops.py:1247:        cls._TRITON_UNQUANT_GEMM = envs.VLLM_ROCM_USE_AITER_TRITON_GEMM
+/usr/local/lib/python3.12/dist-packages/vllm/_aiter_ops.py:1316:        return cls._AITER_ENABLED
+/usr/local/lib/python3.12/dist-packages/vllm/_aiter_ops.py:1321:        return cls._AITER_ENABLED and cls._LINEAR_ENABLED
+/usr/local/lib/python3.12/dist-packages/vllm/_aiter_ops.py:1331:        return cls._AITER_ENABLED and cls._FMOE_ENABLED
+/usr/local/lib/python3.12/dist-packages/vllm/_aiter_ops.py:1387:        return cls._AITER_ENABLED and cls._MLA_ENABLED
+/usr/local/lib/python3.12/dist-packages/vllm/_aiter_ops.py:1392:        return cls._AITER_ENABLED and cls._MHA_ENABLED
+/usr/local/lib/python3.12/dist-packages/vllm/_aiter_ops.py:1402:        return cls._AITER_ENABLED and cls._TRITON_UNIFIED_ATTN_ENABLED
+/usr/local/lib/python3.12/dist-packages/vllm/_aiter_ops.py:1407:        return cls._AITER_ENABLED and cls._FP8BMM_ENABLED
+/usr/local/lib/python3.12/dist-packages/vllm/_aiter_ops.py:1414:        return cls._AITER_ENABLED and cls._FP4BMM_ENABLED and on_gfx950()
+/usr/local/lib/python3.12/dist-packages/vllm/_aiter_ops.py:1421:        return cls._AITER_ENABLED and cls._FP4_GEMM_DYNAMIC_QUANT_ASM and on_gfx950()
+/usr/local/lib/python3.12/dist-packages/vllm/_aiter_ops.py:1426:        return cls._AITER_ENABLED and cls._TRITON_ROTARY_EMBED
+/usr/local/lib/python3.12/dist-packages/vllm/_aiter_ops.py:1431:        return cls._AITER_ENABLED and cls._TRITON_UNQUANT_GEMM
+/usr/local/lib/python3.12/dist-packages/vllm/_aiter_ops.py:1478:        if not cls._AITER_ENABLED:
+/usr/local/lib/python3.12/dist-packages/vllm/_aiter_ops.py:2288:        even when VLLM_ROCM_USE_AITER=0.
+/usr/local/lib/python3.12/dist-packages/vllm/_aiter_ops.py:2329:        even when VLLM_ROCM_USE_AITER=0.
+/usr/local/lib/python3.12/dist-packages/vllm/_aiter_ops.py:2372:        even when VLLM_ROCM_USE_AITER=0.

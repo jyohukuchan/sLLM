@@ -1,0 +1,30 @@
+=== inspect ===
+["-lc","unset ROCR_VISIBLE_DEVICES; exec python3 -m sglang.launch_server --model-path /model --served-model-name qwen3-14b-fp8 --tp-size 1 --context-length 1044 --dtype bfloat16 --quantization fp8 --kv-cache-dtype bfloat16 --mem-fraction-static 0.80 --max-running-requests 1 --max-total-tokens 1044 --disable-radix-cache --host 0.0.0.0 --port 30000"] ["/bin/bash"] running 3360168
+=== container ps ===
+UID          PID    PPID  C STIME TTY          TIME CMD
+root           1       0 46 04:58 ?        00:00:21 python3 -m sglang.launch_server --model-path /model --served-model-name qwen3-14b-fp8 --tp-size 1 --context-length 1044 --dtype bfloat16 --quantization fp8 --kv-cache-dtype bfloat16 --mem-fraction-static 0.80 --max-running-requests 1 --max-total-tokens 1044 --disable-radix-cache --host 0.0.0.0 --port 30000
+root         144       1 24 04:58 ?        00:00:08 /opt/venv/bin/python3 /opt/venv/lib/python3.10/site-packages/tvm_ffi/utils/_build_optional_torch_c_dlpack.py --output-dir /root/.cache/tvm-ffi --libname libtorch_c_dlpack_addon_torch29-rocm.so --build-with-rocm
+root         208     144  0 04:58 ?        00:00:00 c++ -std=c++17 -fPIC -O3 -fvisibility=hidden -D__HIP_PLATFORM_AMD__=1 -DUSE_ROCM=1 -DHIPBLAS_V2 -fPIC -DBUILD_WITH_ROCM -D_GLIBCXX_USE_CXX11_ABI=1 -I /opt/venv/lib/python3.10/site-packages/tvm_ffi/include -I /usr/include/python3.10 -I /opt/venv/lib/python3.10/site-packages/torch/include -I /opt/venv/lib/python3.10/site-packages/torch/include/torch/csrc/api/include -I /opt/venv/lib/python3.10/site-packages/torch/include/THH -I /opt/rocm-7.2.0/include /tmp/tvm-ffi-torch-c-dlpack-yipkjc5g/addon.cc -shared -Wl,-rpath,$ORIGIN -L /opt/venv/lib/python3.10/site-packages/torch/lib -lc10 -ltorch -ltorch_cpu -ltorch_python -o /tmp/tvm-ffi-torch-c-dlpack-yipkjc5g/libtorch_c_dlpack_addon_torch29-rocm.so.tmp
+root         209     208 98 04:58 ?        00:00:31 /usr/lib/gcc/x86_64-linux-gnu/11/cc1plus -quiet -I /opt/venv/lib/python3.10/site-packages/tvm_ffi/include -I /usr/include/python3.10 -I /opt/venv/lib/python3.10/site-packages/torch/include -I /opt/venv/lib/python3.10/site-packages/torch/include/torch/csrc/api/include -I /opt/venv/lib/python3.10/site-packages/torch/include/THH -I /opt/rocm-7.2.0/include -imultiarch x86_64-linux-gnu -D_GNU_SOURCE -D __HIP_PLATFORM_AMD__=1 -D USE_ROCM=1 -D HIPBLAS_V2 -D BUILD_WITH_ROCM -D _GLIBCXX_USE_CXX11_ABI=1 /tmp/tvm-ffi-torch-c-dlpack-yipkjc5g/addon.cc -quiet -dumpdir /tmp/tvm-ffi-torch-c-dlpack-yipkjc5g/libtorch_c_dlpack_addon_torch29-rocm.so.tmp- -dumpbase addon.cc -dumpbase-ext .cc -mtune=generic -march=x86-64 -O3 -std=c++17 -fvisibility=hidden -fPIC -fasynchronous-unwind-tables -fstack-protector-strong -Wformat -Wformat-security -fstack-clash-protection -fcf-protection -o /tmp/ccAJlXdg.s
+root         210       0  0 04:58 ?        00:00:00 /bin/bash -lc ps -ef; echo; ss -lntp 2>/dev/null || true; echo; env | sort | grep -E "HIP|ROCR|SGLANG|AITER|GPU_ARCH|PYTORCH" || true
+root         218     210  0 04:58 ?        00:00:00 ps -ef
+
+State Recv-Q Send-Q Local Address:Port Peer Address:PortProcess
+
+AITER_COMMIT=9127c94a18e4398e1eba91f6639e910f0994ad02
+AITER_COMMIT_DEFAULT=9127c94a18e4398e1eba91f6639e910f0994ad02
+AITER_USE_SYSTEM_TRITON=1
+BUILD_AITER_ALL=1
+GPU_ARCH_LIST=gfx942
+HIP_FORCE_DEV_KERNARG=1
+HIP_VISIBLE_DEVICES=0
+PYTORCH_ROCM_ARCH=gfx942;gfx950
+SGLANG_ALLOW_OVERWRITE_LONGER_CONTEXT_LEN=1
+SGLANG_DISABLE_CUDNN_CHECK=1
+SGLANG_INT4_WEIGHT=0
+SGLANG_MOE_PADDING=1
+SGLANG_ROCM_DISABLE_LINEARQUANT=0
+SGLANG_ROCM_FUSED_DECODE_MLA=1
+SGLANG_SET_CPU_AFFINITY=1
+SGLANG_USE_AITER=1
+SGLANG_USE_ROCM700A=1

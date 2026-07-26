@@ -1,0 +1,162 @@
+{
+  "schema_version": "ullm.r9700.external-engine-baseline.summary.v1",
+  "date": "2026-07-26",
+  "device": {
+    "amd_smi_gpu": 2,
+    "pci_bdf": "0000:47:00.0",
+    "name": "SAPPHIRE RADEON AI 32GB",
+    "gfx": "gfx1201",
+    "compute_units": 64,
+    "vram_bytes": 32624000000,
+    "driver": "6.16.13",
+    "rocm": "7.2"
+  },
+  "workload": {
+    "single_stream": true,
+    "repetitions": 5,
+    "profiled": false,
+    "cache_length_start": 1028,
+    "cache_length_end": 1044,
+    "cache_length_midpoint": 1036,
+    "generated_tokens_per_repeat": 16,
+    "decode_batch_size": 1
+  },
+  "artifact_identity": {
+    "base_model": "Qwen/Qwen3-14B",
+    "gguf": {
+      "repository": "Qwen/Qwen3-14B-GGUF",
+      "revision": "530227a7d994db8eca5ab5ced2fb692b614357fd",
+      "path": "/home/homelab1/datapool/ai_models/gguf/Qwen/Qwen3-14B-GGUF-530227a7/Qwen3-14B-Q8_0.gguf",
+      "sha256": "a0dfe649137410b7d82f06a209240508e218f32f5b6fd81b69d6932160cfcd9d",
+      "size_bytes": 15698533728,
+      "format": "GGUF Q8_0",
+      "approximate_bits_per_weight": 8.5
+    },
+    "fp8_source": {
+      "repository": "Qwen/Qwen3-14B-FP8",
+      "revision": "9a283b4a5efbc09ce247e0ae5b02b744739e525a",
+      "format": "OCP E4M3FN with [128,128] BF16 block scales (SQ8_0 source representation)",
+      "approximate_bits_per_weight": 8
+    },
+    "same_base_model_confirmed": true,
+    "evidence": "environment/hf-model-info.json; environment/gguf-metadata.txt"
+  },
+  "results": [
+    {
+      "id": "ullm-sq8_0-f32-kv-reference",
+      "status": "ok",
+      "engine": "uLLM Phase 0 handwritten kernel",
+      "weight_format": "SQ8_0",
+      "kv_dtype": "f32",
+      "timing_method": "selected M=1 decode region",
+      "mean_duration_tokens_per_second": 15.294955751028635,
+      "median_tokens_per_second": 15.308831019,
+      "sample_variance_tokens_per_second": 0.002970326844146606,
+      "thermal": {
+        "before": "37 C / 1015 MHz / 16 W",
+        "sampled_load": "73 C / 3298 MHz / 250 W",
+        "after": "66 C / 3439 MHz / 123 W"
+      },
+      "evidence": "../sq8-r9700-handwritten-kernel-phase0-v0.1/summary.json"
+    },
+    {
+      "id": "llama-cpp-q8_0-f32-kv-fa-on",
+      "status": "ok",
+      "engine": "llama.cpp",
+      "engine_commit": "68a5592c10666d4d89b8480b5b9e8f8068b2f64c",
+      "weight_format": "GGUF Q8_0",
+      "kv_dtype": "f32",
+      "flash_attention": "on",
+      "timing_method": "llama-bench decode-only; depth prefill excluded",
+      "mean_duration_tokens_per_second": 30.468075022941136,
+      "median_tokens_per_second": 31.089354504479058,
+      "sample_variance_tokens_per_second": 1.2648318877631861,
+      "ratio_to_ullm_mean": 1.9920342051916073,
+      "thermal": {
+        "before": "37 C / 41 MHz / 13 W",
+        "after": "42 C / 41 MHz / 16 W",
+        "process_envelope": "36-61 C / 4-3391 MHz / 8-288 W",
+        "sampled_throttle_statuses": [
+          "THROTTLED",
+          "UNTHROTTLED"
+        ]
+      },
+      "evidence": "raw/llama-cpp-q8_0-f32-kv-fa-on-retry/summary.json"
+    },
+    {
+      "id": "llama-cpp-q8_0-f16-kv-fa-on",
+      "status": "ok",
+      "engine": "llama.cpp",
+      "engine_commit": "68a5592c10666d4d89b8480b5b9e8f8068b2f64c",
+      "weight_format": "GGUF Q8_0",
+      "kv_dtype": "f16",
+      "flash_attention": "on",
+      "timing_method": "llama-bench decode-only; depth prefill excluded",
+      "mean_duration_tokens_per_second": 34.88534681556867,
+      "median_tokens_per_second": 35.05329097055486,
+      "sample_variance_tokens_per_second": 0.2502630226074629,
+      "ratio_to_ullm_mean": 2.2808399961028005,
+      "thermal": {
+        "before": "40 C / 41 MHz / 15 W",
+        "after": "46 C / 41 MHz / 13 W",
+        "process_envelope": "39-61 C / 41-3460 MHz / 12-263 W",
+        "sampled_throttle_statuses": [
+          "THROTTLED",
+          "UNTHROTTLED"
+        ]
+      },
+      "evidence": "raw/llama-cpp-q8_0-f16-kv-fa-on/summary.json"
+    },
+    {
+      "id": "vllm-fp8-kv-auto-client-stream",
+      "status": "ok_with_timer_caveat",
+      "engine": "vLLM",
+      "engine_version": "0.21.0+rocm722",
+      "image_digest": "sha256:98a77b20df03adeb1cfc0ced009b4df6dd52b0a994ab99a32421f30876a9ae0c",
+      "weight_format": "Qwen3-14B-FP8 E4M3",
+      "kv_dtype": "auto; actual resolved allocation dtype unconfirmed",
+      "timing_method": "client-visible OpenAI SSE inter-content intervals, TTFT excluded",
+      "mean_duration_tokens_per_second": 15.455471222284269,
+      "median_tokens_per_second": 15.443856068227063,
+      "sample_variance_tokens_per_second": 0.03531921706703444,
+      "ratio_to_ullm_mean": 1.0104946672529493,
+      "thermal": {
+        "before": "40 C / 1635 MHz / 13 W",
+        "after": "45 C / 41 MHz / 13 W",
+        "process_envelope": "40-59 C / 6-3404 MHz / 11-329 W",
+        "sampled_throttle_statuses": [
+          "THROTTLED",
+          "UNTHROTTLED"
+        ]
+      },
+      "evidence": "raw/vllm-openai-fp8-kv-auto/client/summary.json"
+    },
+    {
+      "id": "sglang-fp8-bf16-kv-standard-start",
+      "status": "failed",
+      "engine": "SGLang",
+      "image": "lmsysorg/sglang-rocm:v0.5.15.post1-rocm720-mi30x-20260724",
+      "image_digest": "sha256:598cc3417792a9e182516bdd835181e3e53254e505747d664fd24ee57f527204",
+      "weight_format": "Qwen3-14B-FP8 E4M3",
+      "kv_dtype": "bfloat16 requested and allocated",
+      "error": "Segmentation fault in sgl_kernel.elementwise.rotary_embedding during decode CUDA-graph capture; scheduler exited -11",
+      "evidence": "attempts/sglang-r9700-start-default-logcapture-rerun/logs-final.txt"
+    }
+  ],
+  "methodology": {
+    "llama_bench": "-p 0 -n 16 -d 1028 -r 5; source inspection confirms -d prefill/restore precedes timed generation and test_gen synchronizes each M=1 step",
+    "llama_cpp_f32_parser_patch": "Local external-source parser mapping f32 to GGML_TYPE_F32; see environment/llama-bench-f32-parser-patch.diff",
+    "vllm": "Five requests had server-reported usage 1028 prompt + 16 completion = 1044 total; rate includes local HTTP/SSE and server scheduling",
+    "quality": "not measured; Q8_0 and SQ8_0 are different formats"
+  },
+  "isolation": {
+    "r9700_only": true,
+    "host_hip_visible_devices": "1",
+    "container_render_node": "/dev/dri/renderD129",
+    "service_windows": 1,
+    "ullm_openai_stopped_at": "2026-07-26T13:47:11+09:00",
+    "ullm_openai_restored_at": "2026-07-26T14:09:58+09:00",
+    "ullm_openai_final_state": "active/enabled/NRestarts=0",
+    "llama_qwen35_udq4_final_state": "inactive/disabled/NRestarts=0"
+  }
+}

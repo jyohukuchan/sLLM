@@ -1,0 +1,7 @@
+docker run -d --rm --name r9700-external-vllm \
+  --device=/dev/kfd --device=/dev/dri/renderD129 --group-add video --ipc=host --shm-size=16g --security-opt seccomp=unconfined \
+  -e HIP_VISIBLE_DEVICES=0 \
+  -v /home/homelab1/datapool/ai_models/safetensors/Qwen/Qwen3-14B-FP8:/model:ro \
+  -p 127.0.0.1:18000:8000 \
+  --entrypoint /bin/bash vllm/vllm-openai-rocm:latest \
+  -lc 'unset ROCR_VISIBLE_DEVICES; exec vllm serve /model --served-model-name qwen3-14b-fp8 --tensor-parallel-size 1 --pipeline-parallel-size 1 --quantization fp8 --dtype bfloat16 --kv-cache-dtype auto --max-model-len 1044 --max-num-seqs 1 --max-num-batched-tokens 1044 --gpu-memory-utilization 0.80'

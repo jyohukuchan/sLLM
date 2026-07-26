@@ -1,0 +1,61 @@
+{
+  "Qwen/Qwen3-14B-GGUF": {
+    "sha": "530227a7d994db8eca5ab5ced2fb692b614357fd",
+    "id": "Qwen/Qwen3-14B-GGUF",
+    "tags": [
+      "gguf",
+      "text-generation",
+      "arxiv:2309.00071",
+      "base_model:Qwen/Qwen3-14B",
+      "base_model:quantized:Qwen/Qwen3-14B",
+      "license:apache-2.0",
+      "endpoints_compatible",
+      "region:us",
+      "conversational"
+    ],
+    "siblings": [
+      {
+        "rfilename": "Qwen3-14B-Q8_0.gguf",
+        "size": 15698533728,
+        "lfs": "BlobLfsInfo(size=15698533728, sha256='a0dfe649137410b7d82f06a209240508e218f32f5b6fd81b69d6932160cfcd9d', pointer_size=136)"
+      },
+      {
+        "rfilename": "README.md",
+        "size": 7497,
+        "lfs": "None"
+      }
+    ]
+  },
+  "Qwen/Qwen3-14B-FP8": {
+    "sha": "9a283b4a5efbc09ce247e0ae5b02b744739e525a",
+    "id": "Qwen/Qwen3-14B-FP8",
+    "tags": [
+      "transformers",
+      "safetensors",
+      "qwen3",
+      "text-generation",
+      "conversational",
+      "arxiv:2309.00071",
+      "arxiv:2505.09388",
+      "base_model:Qwen/Qwen3-14B",
+      "base_model:quantized:Qwen/Qwen3-14B",
+      "license:apache-2.0",
+      "text-generation-inference",
+      "endpoints_compatible",
+      "fp8",
+      "region:us"
+    ],
+    "siblings": [
+      {
+        "rfilename": "README.md",
+        "size": 17498,
+        "lfs": "None"
+      },
+      {
+        "rfilename": "config.json",
+        "size": 896,
+        "lfs": "None"
+      }
+    ]
+  }
+}

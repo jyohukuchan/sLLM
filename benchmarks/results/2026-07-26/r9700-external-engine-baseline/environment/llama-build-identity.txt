@@ -1,0 +1,5 @@
+source_git_commit=68a5592c10666d4d89b8480b5b9e8f8068b2f64c
+source_subject=chore: Step 1 — llama.cpp built for RDNA4 (gfx1201) with ROCm 7.2
+build_date=2026-06-24T03:22:21+09:00
+binary_sha256=50a7e67db3fad77f18f9310e486c8547c2e53fe85b96af093b5910a3d07a8481
+binary=/home/homelab1/llama.cpp-src/build-rdna4/bin/llama-bench

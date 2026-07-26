@@ -1,0 +1,13 @@
+[  1%] Built target llama-common-base
+[  1%] Built target cpp-httplib
+[  3%] Built target ggml-base
+[ 41%] Built target ggml-hip
+[ 44%] Built target ggml-cpu
+[ 46%] Built target ggml
+[ 89%] Built target llama
+[ 98%] Built target llama-common
+[ 98%] Building CXX object tools/llama-bench/CMakeFiles/llama-bench-impl.dir/llama-bench.cpp.o
+[100%] Linking CXX shared library ../../bin/libllama-bench-impl.so
+[100%] Built target llama-bench-impl
+[100%] Linking CXX executable ../../bin/llama-bench
+[100%] Built target llama-bench

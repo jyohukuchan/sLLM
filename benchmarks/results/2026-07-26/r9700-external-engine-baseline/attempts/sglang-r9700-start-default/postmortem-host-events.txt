@@ -1,0 +1,4 @@
+=== docker events surrounding SGLang exit ===
+Error parsing format: template: :1:12: executing "" at <.Status>: can't evaluate field Status in type *events.Message
+
+=== host recent kernel messages mentioning GPU/ROCm ===

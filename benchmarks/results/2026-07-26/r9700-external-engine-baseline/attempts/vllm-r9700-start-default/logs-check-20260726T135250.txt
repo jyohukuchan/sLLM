@@ -1,0 +1,14 @@
+(APIServer pid=1) INFO 07-26 04:52:09 [utils.py:306] 
+(APIServer pid=1) INFO 07-26 04:52:09 [utils.py:306]        █     █     █▄   ▄█
+(APIServer pid=1) INFO 07-26 04:52:09 [utils.py:306]  ▄▄ ▄█ █     █     █ ▀▄▀ █  version 0.21.0
+(APIServer pid=1) INFO 07-26 04:52:09 [utils.py:306]   █▄█▀ █     █     █     █  model   /model
+(APIServer pid=1) INFO 07-26 04:52:09 [utils.py:306]    ▀▀  ▀▀▀▀▀ ▀▀▀▀▀ ▀     ▀
+(APIServer pid=1) INFO 07-26 04:52:09 [utils.py:306] 
+(APIServer pid=1) INFO 07-26 04:52:09 [utils.py:240] non-default args: {'model_tag': '/model', 'model': '/model', 'dtype': 'bfloat16', 'max_model_len': 1044, 'quantization': 'fp8', 'served_model_name': ['qwen3-14b-fp8'], 'gpu_memory_utilization': 0.8, 'max_num_batched_tokens': 1044, 'max_num_seqs': 1}
+(APIServer pid=1) INFO 07-26 04:52:29 [model.py:568] Resolved architecture: Qwen3ForCausalLM
+(APIServer pid=1) INFO 07-26 04:52:29 [model.py:1697] Using max model len 1044
+(APIServer pid=1) [aiter] import [module_aiter_core] under /usr/local/lib/python3.12/dist-packages/aiter/jit/module_aiter_core.so
+(APIServer pid=1) INFO 07-26 04:52:33 [scheduler.py:239] Chunked prefill is enabled with max_num_batched_tokens=1044.
+(APIServer pid=1) INFO 07-26 04:52:33 [vllm.py:886] Asynchronous scheduling is enabled.
+(APIServer pid=1) INFO 07-26 04:52:33 [kernel.py:212] Final IR op priority after setting platform defaults: IrOpPriorityConfig(rms_norm=['native'], fused_add_rms_norm=['native'])
+(APIServer pid=1) INFO 07-26 04:52:33 [compilation.py:303] Enabled custom fusions: norm_quant, act_quant

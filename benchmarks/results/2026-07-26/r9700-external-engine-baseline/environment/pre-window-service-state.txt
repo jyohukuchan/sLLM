@@ -1,0 +1,14 @@
+=== service state before isolated window ===
+active
+enabled
+NRestarts=0
+ActiveState=active
+SubState=running
+StartLimitIntervalUSec=15min
+StartLimitBurst=3
+
+inactive
+disabled
+NRestarts=0
+ActiveState=inactive
+SubState=dead

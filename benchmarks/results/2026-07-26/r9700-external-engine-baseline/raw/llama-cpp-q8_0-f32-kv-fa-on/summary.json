@@ -1,0 +1,83 @@
+{
+  "benchmark_returncode": 1,
+  "command": "env -u ROCR_VISIBLE_DEVICES HIP_VISIBLE_DEVICES=1 /home/homelab1/llama.cpp-src/build-rdna4/bin/llama-bench -m /home/homelab1/datapool/ai_models/gguf/Qwen/Qwen3-14B-GGUF-530227a7/Qwen3-14B-Q8_0.gguf -o json -r 5 -p 0 -n 16 -d 1028 -b 128 -ub 128 -ctk f32 -ctv f32 -ngl 999 -sm none -mg 0 -dev ROCm0 -nkvo 0 -fa on -t 64 -mmp 1",
+  "device_selection": {
+    "command": "env -u ROCR_VISIBLE_DEVICES HIP_VISIBLE_DEVICES=1 /home/homelab1/llama.cpp-src/build-rdna4/bin/llama-bench --list-devices",
+    "expected_gfx": "gfx1201",
+    "forbidden_gfx": "gfx1030",
+    "returncode": 0,
+    "valid": true
+  },
+  "engine": "llama.cpp",
+  "finished_utc": "2026-07-26T04:47:17.186225+00:00",
+  "llama_bench_row": null,
+  "measurement": {
+    "cache_length_end": 1044,
+    "cache_length_midpoint": 1036,
+    "cache_length_start": 1028,
+    "decode_batch_size": 1,
+    "flash_attention_requested": "on",
+    "generated_tokens_per_repeat": 16,
+    "gpu_devices_requested": "ROCm0",
+    "gpu_layers_requested": 999,
+    "kv_type_k": "f32",
+    "kv_type_v": "f32",
+    "llama_bench_default_warmup_enabled": true,
+    "prefill_batch_size": 128,
+    "prefill_ubatch_size": 128,
+    "profiled": false,
+    "prompt_tokens_in_timed_region": 0,
+    "repetitions": 5,
+    "single_stream": true,
+    "split_mode": "none",
+    "timing_excludes": [
+      "depth_prefill",
+      "tokenization",
+      "sampling",
+      "model_load"
+    ]
+  },
+  "process_elapsed_seconds": 0.6763137369998731,
+  "schema_version": "ullm.r9700.external-engine.llama-decode.v1",
+  "started_utc": "2026-07-26T04:47:16.509869+00:00",
+  "statistics": null,
+  "status": "failed",
+  "telemetry": {
+    "amd_smi_gpu": "2",
+    "interval_seconds": 0.25,
+    "raw_jsonl": "telemetry.jsonl",
+    "sample_count": 2,
+    "summary": {
+      "after": {
+        "gfx_clock_mhz": 41,
+        "hotspot_celsius": 37,
+        "socket_power_watts": 13,
+        "throttle_status": "THROTTLED",
+        "vram_used_bytes": null
+      },
+      "before": {
+        "gfx_clock_mhz": 41,
+        "hotspot_celsius": 38,
+        "socket_power_watts": 13,
+        "throttle_status": "UNTHROTTLED",
+        "vram_used_bytes": null
+      },
+      "maximum": {
+        "gfx_clock_mhz": 41.0,
+        "hotspot_celsius": 38.0,
+        "socket_power_watts": 13.0,
+        "vram_used_bytes": null
+      },
+      "minimum": {
+        "gfx_clock_mhz": 41.0,
+        "hotspot_celsius": 37.0,
+        "socket_power_watts": 13.0,
+        "vram_used_bytes": null
+      },
+      "throttle_status_values": [
+        "THROTTLED",
+        "UNTHROTTLED"
+      ]
+    }
+  }
+}

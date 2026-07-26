@@ -1,0 +1,1 @@
+docker run --rm --name r9700-external-sglang-preflight --device=/dev/kfd --device=/dev/dri/renderD129 --group-add video --ipc=host --security-opt seccomp=unconfined -e HIP_VISIBLE_DEVICES=0 --entrypoint /bin/bash lmsysorg/sglang-rocm:v0.5.15.post1-rocm720-mi30x-20260724 -lc "unset ROCR_VISIBLE_DEVICES; python3 -c ..."

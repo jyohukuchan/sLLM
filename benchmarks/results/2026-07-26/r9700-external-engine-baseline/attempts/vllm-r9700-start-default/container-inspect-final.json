@@ -1,0 +1,258 @@
+[
+    {
+        "Id": "f3d81107e205637f63326ca2ca17ff7bd0683b2a56b2b5207713214f23dc1b4f",
+        "Created": "2026-07-26T04:51:14.737932461Z",
+        "Path": "/bin/bash",
+        "Args": [
+            "-lc",
+            "unset ROCR_VISIBLE_DEVICES; exec vllm serve /model --served-model-name qwen3-14b-fp8 --tensor-parallel-size 1 --pipeline-parallel-size 1 --quantization fp8 --dtype bfloat16 --kv-cache-dtype auto --max-model-len 1044 --max-num-seqs 1 --max-num-batched-tokens 1044 --gpu-memory-utilization 0.80"
+        ],
+        "State": {
+            "Status": "running",
+            "Running": true,
+            "Paused": false,
+            "Restarting": false,
+            "OOMKilled": false,
+            "Dead": false,
+            "Pid": 2922589,
+            "ExitCode": 0,
+            "Error": "",
+            "StartedAt": "2026-07-26T04:51:14.903787665Z",
+            "FinishedAt": "0001-01-01T00:00:00Z"
+        },
+        "Image": "sha256:950cac5145672c33bfee958f8b3d93457c5963a6ba77df5ab7a5905f92967d6b",
+        "ResolvConfPath": "/var/lib/docker/containers/f3d81107e205637f63326ca2ca17ff7bd0683b2a56b2b5207713214f23dc1b4f/resolv.conf",
+        "HostnamePath": "/var/lib/docker/containers/f3d81107e205637f63326ca2ca17ff7bd0683b2a56b2b5207713214f23dc1b4f/hostname",
+        "HostsPath": "/var/lib/docker/containers/f3d81107e205637f63326ca2ca17ff7bd0683b2a56b2b5207713214f23dc1b4f/hosts",
+        "LogPath": "/var/lib/docker/containers/f3d81107e205637f63326ca2ca17ff7bd0683b2a56b2b5207713214f23dc1b4f/f3d81107e205637f63326ca2ca17ff7bd0683b2a56b2b5207713214f23dc1b4f-json.log",
+        "Name": "/r9700-external-vllm",
+        "RestartCount": 0,
+        "Driver": "overlay2",
+        "Platform": "linux",
+        "MountLabel": "",
+        "ProcessLabel": "",
+        "AppArmorProfile": "docker-default",
+        "ExecIDs": null,
+        "HostConfig": {
+            "Binds": [
+                "/home/homelab1/datapool/ai_models/safetensors/Qwen/Qwen3-14B-FP8:/model:ro"
+            ],
+            "ContainerIDFile": "",
+            "LogConfig": {
+                "Type": "json-file",
+                "Config": {}
+            },
+            "NetworkMode": "bridge",
+            "PortBindings": {
+                "8000/tcp": [
+                    {
+                        "HostIp": "127.0.0.1",
+                        "HostPort": "18000"
+                    }
+                ]
+            },
+            "RestartPolicy": {
+                "Name": "no",
+                "MaximumRetryCount": 0
+            },
+            "AutoRemove": true,
+            "VolumeDriver": "",
+            "VolumesFrom": null,
+            "ConsoleSize": [
+                0,
+                0
+            ],
+            "CapAdd": null,
+            "CapDrop": null,
+            "CgroupnsMode": "private",
+            "Dns": null,
+            "DnsOptions": [],
+            "DnsSearch": [],
+            "ExtraHosts": null,
+            "GroupAdd": [
+                "video"
+            ],
+            "IpcMode": "host",
+            "Cgroup": "",
+            "Links": null,
+            "OomScoreAdj": 0,
+            "PidMode": "",
+            "Privileged": false,
+            "PublishAllPorts": false,
+            "ReadonlyRootfs": false,
+            "SecurityOpt": [
+                "seccomp=unconfined",
+                "label=disable"
+            ],
+            "UTSMode": "",
+            "UsernsMode": "",
+            "ShmSize": 17179869184,
+            "Runtime": "runc",
+            "Isolation": "",
+            "CpuShares": 0,
+            "Memory": 0,
+            "NanoCpus": 0,
+            "CgroupParent": "",
+            "BlkioWeight": 0,
+            "BlkioWeightDevice": [],
+            "BlkioDeviceReadBps": [],
+            "BlkioDeviceWriteBps": [],
+            "BlkioDeviceReadIOps": [],
+            "BlkioDeviceWriteIOps": [],
+            "CpuPeriod": 0,
+            "CpuQuota": 0,
+            "CpuRealtimePeriod": 0,
+            "CpuRealtimeRuntime": 0,
+            "CpusetCpus": "",
+            "CpusetMems": "",
+            "Devices": [
+                {
+                    "PathOnHost": "/dev/kfd",
+                    "PathInContainer": "/dev/kfd",
+                    "CgroupPermissions": "rwm"
+                },
+                {
+                    "PathOnHost": "/dev/dri/renderD129",
+                    "PathInContainer": "/dev/dri/renderD129",
+                    "CgroupPermissions": "rwm"
+                }
+            ],
+            "DeviceCgroupRules": null,
+            "DeviceRequests": null,
+            "MemoryReservation": 0,
+            "MemorySwap": 0,
+            "MemorySwappiness": null,
+            "OomKillDisable": null,
+            "PidsLimit": null,
+            "Ulimits": [],
+            "CpuCount": 0,
+            "CpuPercent": 0,
+            "IOMaximumIOps": 0,
+            "IOMaximumBandwidth": 0,
+            "MaskedPaths": [
+                "/proc/acpi",
+                "/proc/asound",
+                "/proc/interrupts",
+                "/proc/kcore",
+                "/proc/keys",
+                "/proc/latency_stats",
+                "/proc/sched_debug",
+                "/proc/scsi",
+                "/proc/timer_list",
+                "/proc/timer_stats",
+                "/sys/devices/virtual/powercap",
+                "/sys/firmware"
+            ],
+            "ReadonlyPaths": [
+                "/proc/bus",
+                "/proc/fs",
+                "/proc/irq",
+                "/proc/sys",
+                "/proc/sysrq-trigger"
+            ]
+        },
+        "GraphDriver": {
+            "Data": {
+                "ID": "f3d81107e205637f63326ca2ca17ff7bd0683b2a56b2b5207713214f23dc1b4f",
+                "LowerDir": "/var/lib/docker/overlay2/7733a90bea81ae022125434f8c8d57e657a9bed285de3e69cec925de757fe955-init/diff:/var/lib/docker/overlay2/cbf3ec926333b2a72b98d98283de5d687b049512d94c5cf7f675d645a0f5d7d8/diff:/var/lib/docker/overlay2/87f84deb1b8464e58ebb459613801c54aaf8a6a8939afb8bf444162abf19a764/diff:/var/lib/docker/overlay2/f53557546287aa0b6b4f574c93e3bba6ad980116d98128800e9debd33477a00f/diff:/var/lib/docker/overlay2/824e68af118738e9cd5162bf045427a05ecc055e336915cb6157cfe9ea34bc36/diff:/var/lib/docker/overlay2/c482128d98cd5bd750ebdd5c25a49f4ed2d2db1fd05609c5b4a60a5a9d7db77c/diff:/var/lib/docker/overlay2/8992762a49d49c1f475d44fcb9d425abaa09ad31a766bf229a4d883011e55512/diff:/var/lib/docker/overlay2/654c7e7ea1f935b8ac0a9b1ae00e861733047099b95520ad365e52b18768d867/diff:/var/lib/docker/overlay2/f6fd465fcc561825636b7de84cf7f5116e7522189bbbcfaa49fd0015d0b3c590/diff:/var/lib/docker/overlay2/60fa33d285364fd5a25effb243cd9ec2233d4c0cdb5e390d1d980bdd0dc32558/diff:/var/lib/docker/overlay2/7783788ca633dd3b31ec31d81d18dd512e43e15301298517f417047c0fd26d76/diff:/var/lib/docker/overlay2/711edba2d4f7501482df935f39cd71923ae51e26366bdf80cf69762864ab0de1/diff:/var/lib/docker/overlay2/8611f31b6950874073d878bdfe05e8b90cbaa5526a6f2e6229f1d6fbe93a4bce/diff:/var/lib/docker/overlay2/f39ecf9cca3cb87d7ae960ff1b7feaf2693e2f2409eeda6f8e90d228b1cac847/diff:/var/lib/docker/overlay2/3fe364d5805a54fb89570754302e9f144083b03432b40ea216837146ba75b611/diff:/var/lib/docker/overlay2/0e6db4459da3eb1a849faeb96f5d228647a37a0c1ce444474a872a76cf9fc559/diff:/var/lib/docker/overlay2/397084e38a5151be803c4c910aab7720d9c7a066145b7522aa66a78aaba9ac7f/diff:/var/lib/docker/overlay2/9b92882b619e658dcd2dc806e429a68e71a4c2fcfce3bab074f849e67ecb24ee/diff:/var/lib/docker/overlay2/9a4841d781bb16c25e55ab744568037d06e9559735a1b86cb2e5fca75d0ea88d/diff:/var/lib/docker/overlay2/01cb807dc0e94fc0b4b2c866148b0c5ea0f8fe27c9e9eb63af4021bb45a96690/diff:/var/lib/docker/overlay2/3fad98f41a3a05da32eeba46d42325c243178894c7c3c927176d7c39b8333041/diff:/var/lib/docker/overlay2/1a9acd0523640edf4a57bc2b4bab89c6147f06db40ec3b361379bd4e873f69eb/diff:/var/lib/docker/overlay2/060df56a4d77dda620a0236789db519086d71427bdf61469594050c55594cd00/diff:/var/lib/docker/overlay2/3bf87ca6047db17d00444ab0f002521c940f0952b3f09a398ff61900ab8936e1/diff:/var/lib/docker/overlay2/70bb0bbd2f66f489afe2ee78f81be32b45a5e09cad4455e45a41838fe84d8a19/diff:/var/lib/docker/overlay2/456faf4551318244cc21dfe4e09a1a4d266257cab0c268839bc5be8127c2f8ac/diff:/var/lib/docker/overlay2/f7d69a6807b54296a15104917ee0b78d4d8a23fdd332e999838d56ce7edc2670/diff:/var/lib/docker/overlay2/957dc7332d90107f2a73fa0371ec52c3ed3f8184316f38a336b4d0f1414919ac/diff:/var/lib/docker/overlay2/012daf973518854d0c290fb845fd938bf6937a84ad74018f62aad34c8a84fc3e/diff:/var/lib/docker/overlay2/be635669a7df00700085eea3956d09497078b2fd1523028e3a776761b4d4f9b0/diff:/var/lib/docker/overlay2/799db6a56c84eadfaa6ea46071a7118f953a08cb8bf524ae0262dc99134f363a/diff:/var/lib/docker/overlay2/071a83c8b5fdcf5c9cab51f6224ae4dddf7c319e94f0cfdc3cb2385d5cc57fd9/diff:/var/lib/docker/overlay2/fd9509d7ddd303eb40a93dc23a19005cf1cebe3015a24ec6c19913156c8d1452/diff:/var/lib/docker/overlay2/c80059771da3c3cc1c7973256ecff522af2a4520a19eaf189ef0573a1c0400be/diff:/var/lib/docker/overlay2/e52190c8a05735f8c66cc2c13ec920c81c637b66c810ca3149be8f15040c79a0/diff",
+                "MergedDir": "/var/lib/docker/overlay2/7733a90bea81ae022125434f8c8d57e657a9bed285de3e69cec925de757fe955/merged",
+                "UpperDir": "/var/lib/docker/overlay2/7733a90bea81ae022125434f8c8d57e657a9bed285de3e69cec925de757fe955/diff",
+                "WorkDir": "/var/lib/docker/overlay2/7733a90bea81ae022125434f8c8d57e657a9bed285de3e69cec925de757fe955/work"
+            },
+            "Name": "overlay2"
+        },
+        "Mounts": [
+            {
+                "Type": "bind",
+                "Source": "/home/homelab1/datapool/ai_models/safetensors/Qwen/Qwen3-14B-FP8",
+                "Destination": "/model",
+                "Mode": "ro",
+                "RW": false,
+                "Propagation": "rprivate"
+            }
+        ],
+        "Config": {
+            "Hostname": "f3d81107e205",
+            "Domainname": "",
+            "User": "",
+            "AttachStdin": false,
+            "AttachStdout": false,
+            "AttachStderr": false,
+            "ExposedPorts": {
+                "8000/tcp": {}
+            },
+            "Tty": false,
+            "OpenStdin": false,
+            "StdinOnce": false,
+            "Env": [
+                "HIP_VISIBLE_DEVICES=0",
+                "PATH=/opt/rocm/llvm/bin:/opt/rocm/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+                "ROCM_PATH=/opt/rocm",
+                "LD_LIBRARY_PATH=/opt/rocm/lib:/usr/local/lib:",
+                "PYTORCH_ROCM_ARCH=gfx90a;gfx942;gfx950;gfx1100;gfx1101;gfx1200;gfx1201;gfx1150;gfx1151",
+                "AITER_ROCM_ARCH=gfx942;gfx950",
+                "MORI_GPU_ARCHS=gfx942;gfx950",
+                "HSA_NO_SCRATCH_RECLAIM=1",
+                "PYTHON_VERSION=3.12",
+                "DEBIAN_FRONTEND=noninteractive",
+                "SCCACHE_BUCKET=",
+                "SCCACHE_REGION=",
+                "SCCACHE_S3_NO_CREDENTIALS=",
+                "SCCACHE_IDLE_TIMEOUT=",
+                "UV_HTTP_TIMEOUT=500",
+                "UV_INDEX_STRATEGY=unsafe-best-match",
+                "UV_LINK_MODE=copy",
+                "HSA_ENABLE_IPC_MODE_LEGACY=1",
+                "TOKENIZERS_PARALLELISM=false",
+                "SAFETENSORS_FAST_GPU=1",
+                "HIP_FORCE_DEV_KERNARG=1",
+                "KINETO_CONFIG=/app/libkineto.conf"
+            ],
+            "Cmd": [
+                "-lc",
+                "unset ROCR_VISIBLE_DEVICES; exec vllm serve /model --served-model-name qwen3-14b-fp8 --tensor-parallel-size 1 --pipeline-parallel-size 1 --quantization fp8 --dtype bfloat16 --kv-cache-dtype auto --max-model-len 1044 --max-num-seqs 1 --max-num-batched-tokens 1044 --gpu-memory-utilization 0.80"
+            ],
+            "Image": "vllm/vllm-openai-rocm:latest",
+            "Volumes": null,
+            "WorkingDir": "/app",
+            "Entrypoint": [
+                "/bin/bash"
+            ],
+            "Labels": {
+                "maintainer": "dl.mlsedevops@amd.com",
+                "org.opencontainers.image.version": "22.04"
+            }
+        },
+        "NetworkSettings": {
+            "SandboxID": "297601c3fa3e1bbec6c8ec16735d7fd980d2a5381da52a4f354ad4e668848f9e",
+            "SandboxKey": "/var/run/docker/netns/297601c3fa3e",
+            "Ports": {
+                "8000/tcp": [
+                    {
+                        "HostIp": "127.0.0.1",
+                        "HostPort": "18000"
+                    }
+                ]
+            },
+            "Networks": {
+                "bridge": {
+                    "IPAMConfig": null,
+                    "Links": null,
+                    "Aliases": null,
+                    "DriverOpts": null,
+                    "GwPriority": 0,
+                    "NetworkID": "8757469b803053f3491a592930448bd12c28c462665fdb996ab1053a6385905e",
+                    "EndpointID": "aff2e111fa2e9eaf7ab1f1d3693a58566f9b5a5b2e99847bc45803ad7c2c84cf",
+                    "Gateway": "172.17.0.1",
+                    "IPAddress": "172.17.0.3",
+                    "MacAddress": "ee:ff:0f:bc:8a:fb",
+                    "IPPrefixLen": 16,
+                    "IPv6Gateway": "",
+                    "GlobalIPv6Address": "",
+                    "GlobalIPv6PrefixLen": 0,
+                    "DNSNames": null
+                }
+            }
+        }
+    }
+]

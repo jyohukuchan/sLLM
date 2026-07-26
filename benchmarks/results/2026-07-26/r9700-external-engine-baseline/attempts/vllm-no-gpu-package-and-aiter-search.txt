@@ -1,0 +1,252 @@
+Name: vllm
+Version: 0.21.0+rocm722
+Summary: A high-throughput and memory-efficient inference and serving engine for LLMs
+Home-page: https://github.com/vllm-project/vllm
+Author: vLLM Team
+Author-email: 
+License-Expression: Apache-2.0
+Location: /usr/local/lib/python3.12/dist-packages
+Requires: aiohttp, amd-quark, anthropic, blake3, cachetools, cbor2, cloudpickle, compressed-tensors, conch-triton-kernels, datasets, depyf, diskcache, einops, fastapi, filelock, gguf, grpcio, grpcio-reflection, ijson, lark, llguidance, lm-format-enforcer, mcp, mistral_common, model-hosting-container-standards, msgspec, ninja, numba, numpy, openai, openai-harmony, opencv-python-headless, opentelemetry-api, opentelemetry-exporter-otlp, opentelemetry-sdk, opentelemetry-semantic-conventions-ai, outlines_core, packaging, partial-json-parser, peft, pillow, prometheus-fastapi-instrumentator, prometheus_client, protobuf, psutil, py-cpuinfo, pybase64, pydantic, pytest-asyncio, python-json-logger, pyyaml, pyzmq, regex, requests, runai-model-streamer, sentencepiece, setproctitle, setuptools, setuptools-scm, six, tensorizer, tiktoken, tilelang, timm, tokenizers, tqdm, transformers, typing_extensions, watchfiles, xgrammar
+Required-by: 
+---
+Name: torch
+Version: 2.10.0+git8514f05
+Summary: Tensors and Dynamic neural networks in Python with strong GPU acceleration
+Home-page: https://pytorch.org
+Author: 
+Author-email: PyTorch Team <packages@pytorch.org>
+License: BSD-3-Clause
+Location: /usr/local/lib/python3.12/dist-packages
+Requires: filelock, fsspec, jinja2, networkx, setuptools, sympy, typing-extensions
+Required-by: accelerate, compressed-tensors, flash_attn, peft, rixl, runai-model-streamer, tensorizer, tilelang, timm, torch_c_dlpack_ext, torchaudio, torchvision, xgrammar
+---
+Name: amd-aiter
+Version: 0.1.13
+Summary: 
+Home-page: 
+Author: 
+Author-email: 
+License: 
+Location: /usr/local/lib/python3.12/dist-packages
+Requires: einops, flydsl, ninja, packaging, pandas, psutil, pybind11
+Required-by: 
+/usr/local/lib/python3.12/dist-packages/vllm/utils/import_utils.py:459:def has_aiter() -> bool:
+/usr/local/lib/python3.12/dist-packages/vllm/utils/import_utils.py:460:    """Whether the optional `aiter` package is available."""
+/usr/local/lib/python3.12/dist-packages/vllm/utils/import_utils.py:461:    return _has_module("aiter")
+/usr/local/lib/python3.12/dist-packages/vllm/compilation/passes/fusion/act_quant_fusion.py:193:        match_aiter: bool = False,
+/usr/local/lib/python3.12/dist-packages/vllm/compilation/passes/fusion/allreduce_rms_fusion.py:15:from vllm._aiter_ops import rocm_aiter_ops
+/usr/local/lib/python3.12/dist-packages/vllm/compilation/passes/fusion/allreduce_rms_fusion.py:915:        use_aiter_rmsnorm: bool = True,
+/usr/local/lib/python3.12/dist-packages/vllm/compilation/passes/fusion/allreduce_rms_fusion.py:920:        self.FUSED_AR_RMSNORM_OP = rocm_aiter_ops.get_fused_allreduce_rmsnorm_op()
+/usr/local/lib/python3.12/dist-packages/vllm/compilation/passes/fusion/allreduce_rms_fusion.py:960:        use_aiter_rmsnorm: bool = True,
+/usr/local/lib/python3.12/dist-packages/vllm/compilation/passes/fusion/allreduce_rms_fusion.py:965:        self.FUSED_AR_RMSNORM_OP = rocm_aiter_ops.get_fused_allreduce_rmsnorm_op()
+/usr/local/lib/python3.12/dist-packages/vllm/compilation/passes/fusion/allreduce_rms_fusion.py:1002:        super().__init__(config, "rocm_aiter_allreduce_fusion_pass")
+/usr/local/lib/python3.12/dist-packages/vllm/compilation/passes/fusion/allreduce_rms_fusion.py:1029:        rocm_aiter_ops.initialize_aiter_allreduce(group, self.device)
+/usr/local/lib/python3.12/dist-packages/vllm/compilation/passes/fusion/allreduce_rms_fusion.py:1032:        max_size = rocm_aiter_ops.get_aiter_allreduce_max_size()
+/usr/local/lib/python3.12/dist-packages/vllm/compilation/passes/fusion/allreduce_rms_fusion.py:1034:            logger.warning("AITER allreduce fusion must be initialized")
+/usr/local/lib/python3.12/dist-packages/vllm/compilation/passes/fusion/allreduce_rms_fusion.py:1038:        # Before aiter v0.1.12 the launcher was template-specialized on HIDDEN_DIM
+/usr/local/lib/python3.12/dist-packages/vllm/compilation/passes/fusion/allreduce_rms_fusion.py:1042:        # Ref (old kernel): https://github.com/ROCm/aiter/blob/6a0e7b26ccf33164785531212cc2ec2cde0b9243/csrc/include/custom_all_reduce.cuh#L2590
+/usr/local/lib/python3.12/dist-packages/vllm/compilation/passes/fusion/allreduce_rms_fusion.py:1043:        aiter_ar = rocm_aiter_ops.get_aiter_allreduce()
+/usr/local/lib/python3.12/dist-packages/vllm/compilation/passes/fusion/allreduce_rms_fusion.py:1044:        _AITER_OLD_FUSED_AR_RMS_HIDDEN = (512, 1024, 2048, 4096)
+/usr/local/lib/python3.12/dist-packages/vllm/compilation/passes/fusion/allreduce_rms_fusion.py:1046:            aiter_ar is not None
+/usr/local/lib/python3.12/dist-packages/vllm/compilation/passes/fusion/allreduce_rms_fusion.py:1047:            and not hasattr(aiter_ar, "_pool")
+/usr/local/lib/python3.12/dist-packages/vllm/compilation/passes/fusion/allreduce_rms_fusion.py:1048:            and hidden_dim not in _AITER_OLD_FUSED_AR_RMS_HIDDEN
+/usr/local/lib/python3.12/dist-packages/vllm/compilation/passes/fusion/allreduce_rms_fusion.py:1051:                "AITER allreduce-rmsnorm fusion disabled: aiter<0.1.12 "
+/usr/local/lib/python3.12/dist-packages/vllm/compilation/passes/fusion/allreduce_rms_fusion.py:1052:                "only supports hidden_dim in %s; got %d. Upgrade aiter to "
+/usr/local/lib/python3.12/dist-packages/vllm/compilation/passes/fusion/allreduce_rms_fusion.py:1054:                _AITER_OLD_FUSED_AR_RMS_HIDDEN,
+/usr/local/lib/python3.12/dist-packages/vllm/compilation/passes/fusion/allreduce_rms_fusion.py:1057:            # Tear down aiter's custom-allreduce so its IPC handles don't
+/usr/local/lib/python3.12/dist-packages/vllm/compilation/passes/fusion/allreduce_rms_fusion.py:1060:                rocm_aiter_ops.destroy_aiter_allreduce()
+/usr/local/lib/python3.12/dist-packages/vllm/compilation/passes/fusion/allreduce_rms_fusion.py:1103:            rocm_aiter_ops.destroy_aiter_allreduce()
+/usr/local/lib/python3.12/dist-packages/vllm/compilation/passes/fusion/matcher_utils.py:10:from vllm._aiter_ops import rocm_aiter_ops
+/usr/local/lib/python3.12/dist-packages/vllm/compilation/passes/fusion/matcher_utils.py:90:        match_rocm_aiter: bool | None = None,
+/usr/local/lib/python3.12/dist-packages/vllm/compilation/passes/fusion/matcher_utils.py:95:        if match_rocm_aiter is None:
+/usr/local/lib/python3.12/dist-packages/vllm/compilation/passes/fusion/matcher_utils.py:96:            match_rocm_aiter = rocm_aiter_ops.is_triton_rotary_embed_enabled()
+/usr/local/lib/python3.12/dist-packages/vllm/compilation/passes/fusion/matcher_utils.py:108:        elif match_rocm_aiter:
+/usr/local/lib/python3.12/dist-packages/vllm/compilation/passes/fusion/matcher_utils.py:109:            self.rotary_op = rocm_aiter_ops.get_triton_rotary_embedding_op()
+/usr/local/lib/python3.12/dist-packages/vllm/compilation/passes/fusion/matcher_utils.py:168:        match_rocm_aiter: bool = False,
+/usr/local/lib/python3.12/dist-packages/vllm/compilation/passes/fusion/matcher_utils.py:178:        self.match_rocm_aiter = match_rocm_aiter
+/usr/local/lib/python3.12/dist-packages/vllm/compilation/passes/fusion/matcher_utils.py:181:        if match_rocm_aiter:
+/usr/local/lib/python3.12/dist-packages/vllm/compilation/passes/fusion/matcher_utils.py:183:                "ROCm aiter fusion pass does not support per tensor quantization"
+/usr/local/lib/python3.12/dist-packages/vllm/compilation/passes/fusion/matcher_utils.py:186:                self.QUANT_OP = rocm_aiter_ops.get_per_token_quant_op()
+/usr/local/lib/python3.12/dist-packages/vllm/compilation/passes/fusion/matcher_utils.py:189:                    "ROCm aiter fusion pass currently supports "
+/usr/local/lib/python3.12/dist-packages/vllm/compilation/passes/fusion/matcher_utils.py:193:                    self.QUANT_OP = rocm_aiter_ops.get_group_quant_op()
+/usr/local/lib/python3.12/dist-packages/vllm/compilation/passes/fusion/matcher_utils.py:219:    def forward_rocm_aiter(
+/usr/local/lib/python3.12/dist-packages/vllm/compilation/passes/fusion/matcher_utils.py:239:        if self.match_rocm_aiter:
+/usr/local/lib/python3.12/dist-packages/vllm/compilation/passes/fusion/matcher_utils.py:240:            return self.forward_rocm_aiter(input, scale)
+/usr/local/lib/python3.12/dist-packages/vllm/compilation/passes/fusion/rocm_aiter_fusion.py:13:from vllm._aiter_ops import rocm_aiter_ops
+/usr/local/lib/python3.12/dist-packages/vllm/compilation/passes/fusion/rocm_aiter_fusion.py:45:        self, epsilon: float, key: FusedRMSQuantKey, match_aiter_quant: bool = True
+/usr/local/lib/python3.12/dist-packages/vllm/compilation/passes/fusion/rocm_aiter_fusion.py:53:            match_rocm_aiter=match_aiter_quant,
+/usr/local/lib/python3.12/dist-packages/vllm/compilation/passes/fusion/rocm_aiter_fusion.py:64:    """AITER RMSNorm + Dynamic Quantization pattern."""
+/usr/local/lib/python3.12/dist-packages/vllm/compilation/passes/fusion/rocm_aiter_fusion.py:66:    FUSED_OP = rocm_aiter_ops.get_rmsnorm_fused_dynamic_quant_op()
+/usr/local/lib/python3.12/dist-packages/vllm/compilation/passes/fusion/rocm_aiter_fusion.py:72:        match_aiter_quant: bool = True,
+/usr/local/lib/python3.12/dist-packages/vllm/compilation/passes/fusion/rocm_aiter_fusion.py:82:        super().__init__(epsilon, key, match_aiter_quant)
+/usr/local/lib/python3.12/dist-packages/vllm/compilation/passes/fusion/rocm_aiter_fusion.py:117:    """AITER RMSNorm Fused Add + Dynamic Quantization pattern."""
+/usr/local/lib/python3.12/dist-packages/vllm/compilation/passes/fusion/rocm_aiter_fusion.py:119:    FUSED_OP = rocm_aiter_ops.get_rmsnorm_fused_add_dynamic_quant_op()
+/usr/local/lib/python3.12/dist-packages/vllm/compilation/passes/fusion/rocm_aiter_fusion.py:125:        match_aiter_quant: bool = True,
+/usr/local/lib/python3.12/dist-packages/vllm/compilation/passes/fusion/rocm_aiter_fusion.py:135:        super().__init__(epsilon, key, match_aiter_quant)
+/usr/local/lib/python3.12/dist-packages/vllm/compilation/passes/fusion/rocm_aiter_fusion.py:180:    This pattern fuses aiter rms_norm & group fp8 quant custom
+/usr/local/lib/python3.12/dist-packages/vllm/compilation/passes/fusion/rocm_aiter_fusion.py:181:    ops into an aiter rms_norm_group_fp8_quant op.
+/usr/local/lib/python3.12/dist-packages/vllm/compilation/passes/fusion/rocm_aiter_fusion.py:184:    FUSED_OP = rocm_aiter_ops.get_rmsnorm_group_fused_quant_op()
+/usr/local/lib/python3.12/dist-packages/vllm/compilation/passes/fusion/rocm_aiter_fusion.py:191:        match_aiter_quant: bool = True,
+/usr/local/lib/python3.12/dist-packages/vllm/compilation/passes/fusion/rocm_aiter_fusion.py:200:        super().__init__(epsilon, key, match_aiter_quant)
+/usr/local/lib/python3.12/dist-packages/vllm/compilation/passes/fusion/rocm_aiter_fusion.py:236:    This pattern fuses aiter rms_norm_with_add & group fp8 quant custom ops
+/usr/local/lib/python3.12/dist-packages/vllm/compilation/passes/fusion/rocm_aiter_fusion.py:237:    into a aiter rms_norm_with_add_group_fp8_quant op.
+/usr/local/lib/python3.12/dist-packages/vllm/compilation/passes/fusion/rocm_aiter_fusion.py:240:    FUSED_OP = rocm_aiter_ops.get_rmsnorm_group_add_fused_quant_op()
+/usr/local/lib/python3.12/dist-packages/vllm/compilation/passes/fusion/rocm_aiter_fusion.py:247:        match_aiter_quant: bool = True,
+/usr/local/lib/python3.12/dist-packages/vllm/compilation/passes/fusion/rocm_aiter_fusion.py:256:        super().__init__(epsilon, key, match_aiter_quant)
+/usr/local/lib/python3.12/dist-packages/vllm/compilation/passes/fusion/rocm_aiter_fusion.py:298:    This pass fuses aiter rms_norm & vllm/aiter quant custom ops
+/usr/local/lib/python3.12/dist-packages/vllm/compilation/passes/fusion/rocm_aiter_fusion.py:308:            pass_name="rocm_aiter_rms_norm_quant_fusion_pass"
+/usr/local/lib/python3.12/dist-packages/vllm/compilation/passes/fusion/rocm_aiter_fusion.py:314:            #  Fuse aiter rms_norm + aiter dynamic group fp8 quant
+/usr/local/lib/python3.12/dist-packages/vllm/compilation/passes/fusion/rocm_aiter_fusion.py:319:            # Fuse aiter fused_add_rms_norm + aiter dynamic group fp8 quant
+/usr/local/lib/python3.12/dist-packages/vllm/compilation/passes/fusion/rocm_aiter_fusion.py:324:            # When quant_fp8 custom ops are disabled, both AITER and native
+/usr/local/lib/python3.12/dist-packages/vllm/compilation/passes/fusion/rocm_aiter_fusion.py:331:            match_aiter_quant_options = (
+/usr/local/lib/python3.12/dist-packages/vllm/compilation/passes/fusion/rocm_aiter_fusion.py:335:            for match_aiter_quant in match_aiter_quant_options:
+/usr/local/lib/python3.12/dist-packages/vllm/compilation/passes/fusion/rocm_aiter_fusion.py:336:                # Fuse aiter rms_norm + (aiter / vllm built-in)
+/usr/local/lib/python3.12/dist-packages/vllm/compilation/passes/fusion/rocm_aiter_fusion.py:339:                    epsilon, FP8_DTYPE, match_aiter_quant=match_aiter_quant
+/usr/local/lib/python3.12/dist-packages/vllm/compilation/passes/fusion/rocm_aiter_fusion.py:342:                # Fuse aiter fused_add_rms_norm + (aiter / vllm built-in)
+/usr/local/lib/python3.12/dist-packages/vllm/compilation/passes/fusion/rocm_aiter_fusion.py:345:                    epsilon, FP8_DTYPE, match_aiter_quant=match_aiter_quant
+/usr/local/lib/python3.12/dist-packages/vllm/compilation/passes/fusion/rocm_aiter_fusion.py:369:    This pattern fuses aiter silu_and_mul & group fp8 quant custom
+/usr/local/lib/python3.12/dist-packages/vllm/compilation/passes/fusion/rocm_aiter_fusion.py:370:    ops into an aiter silu_and_mul_group_fp8_quant op.
+/usr/local/lib/python3.12/dist-packages/vllm/compilation/passes/fusion/rocm_aiter_fusion.py:373:    FUSED_SILU_MUL_QUANT_OP = rocm_aiter_ops.get_act_mul_fused_fp8_group_quant_op()
+/usr/local/lib/python3.12/dist-packages/vllm/compilation/passes/fusion/rocm_aiter_fusion.py:378:            quant_key=kFp8Dynamic128Sym, match_rocm_aiter=True
+/usr/local/lib/python3.12/dist-packages/vllm/compilation/passes/fusion/rocm_aiter_fusion.py:419:        super().__init__(config, "rocm_aiter_silu_mul_fp8_group_quant_fusion_pass")
+/usr/local/lib/python3.12/dist-packages/vllm/compilation/passes/fusion/rocm_aiter_fusion.py:428:    This pattern replaces an aiter_rmsnorm_with_add & a pad op
+/usr/local/lib/python3.12/dist-packages/vllm/compilation/passes/fusion/rocm_aiter_fusion.py:429:    with a custom triton_add_rmsnorm_pad op from AITER.
+/usr/local/lib/python3.12/dist-packages/vllm/compilation/passes/fusion/rocm_aiter_fusion.py:432:    AITER_TRITON_ADD_RMSNORM_PAD_OP = rocm_aiter_ops.get_triton_add_rmsnorm_pad_op()
+/usr/local/lib/python3.12/dist-packages/vllm/compilation/passes/fusion/rocm_aiter_fusion.py:483:            at = self.AITER_TRITON_ADD_RMSNORM_PAD_OP(
+/usr/local/lib/python3.12/dist-packages/vllm/compilation/passes/fusion/rocm_aiter_fusion.py:504:    This pass replaces an AITER CK RMSNorm + residual add and a pad op
+/usr/local/lib/python3.12/dist-packages/vllm/compilation/passes/fusion/rocm_aiter_fusion.py:505:    with an triton_add_rmsnorm_pad op from AITER.
+/usr/local/lib/python3.12/dist-packages/vllm/compilation/passes/fusion/rocm_aiter_fusion.py:511:            pass_name="rocm_aiter_triton_add_rmsnorm_pad_fusion_pass"
+/usr/local/lib/python3.12/dist-packages/vllm/compilation/passes/fusion/rocm_aiter_fusion.py:539:    AITER's ``fused_qk_rmsnorm`` HIP kernel.
+/usr/local/lib/python3.12/dist-packages/vllm/compilation/passes/fusion/rocm_aiter_fusion.py:621:    MLA attention into ``fused_mla_dual_rms_norm`` backed by aiter's
+/usr/local/lib/python3.12/dist-packages/vllm/compilation/passes/pass_manager.py:10:from vllm._aiter_ops import rocm_aiter_ops
+/usr/local/lib/python3.12/dist-packages/vllm/compilation/passes/pass_manager.py:21:if rocm_aiter_ops.is_enabled():
+/usr/local/lib/python3.12/dist-packages/vllm/compilation/passes/pass_manager.py:25:    from .fusion.rocm_aiter_fusion import (
+/usr/local/lib/python3.12/dist-packages/vllm/compilation/passes/pass_manager.py:146:                if rocm_aiter_ops.is_enabled():
+/usr/local/lib/python3.12/dist-packages/vllm/compilation/passes/pass_manager.py:155:                if rocm_aiter_ops.is_enabled():
+/usr/local/lib/python3.12/dist-packages/vllm/compilation/passes/pass_manager.py:163:                if rocm_aiter_ops.is_enabled():
+/usr/local/lib/python3.12/dist-packages/vllm/compilation/passes/pass_manager.py:166:            if self.pass_config.fuse_act_padding and rocm_aiter_ops.is_enabled():
+/usr/local/lib/python3.12/dist-packages/vllm/compilation/passes/pass_manager.py:169:            if self.pass_config.fuse_mla_dual_rms_norm and rocm_aiter_ops.is_enabled():
+/usr/local/lib/python3.12/dist-packages/vllm/compilation/passes/utility/scatter_split_replace.py:64:        if hasattr(torch.ops.vllm, "rocm_aiter_triton_rotary_embedding"):
+/usr/local/lib/python3.12/dist-packages/vllm/compilation/passes/utility/scatter_split_replace.py:65:            target_ops.append(torch.ops.vllm.rocm_aiter_triton_rotary_embedding.default)
+/usr/local/lib/python3.12/dist-packages/vllm/compilation/passes/utility/fix_functionalization.py:43:        if hasattr(torch.ops.vllm, "rocm_aiter_triton_rotary_embedding"):
+/usr/local/lib/python3.12/dist-packages/vllm/compilation/passes/utility/fix_functionalization.py:45:                torch.ops.vllm.rocm_aiter_triton_rotary_embedding.default
+/usr/local/lib/python3.12/dist-packages/vllm/distributed/kv_transfer/kv_connector/v1/moriio/moriio_connector.py:623:        logging.getLogger("aiter").disabled = True
+/usr/local/lib/python3.12/dist-packages/vllm/distributed/parallel_state.py:475:        maybe_aiter_context = nullcontext()
+/usr/local/lib/python3.12/dist-packages/vllm/distributed/parallel_state.py:486:            from vllm._aiter_ops import rocm_aiter_ops
+/usr/local/lib/python3.12/dist-packages/vllm/distributed/parallel_state.py:488:            if rocm_aiter_ops.is_enabled():
+/usr/local/lib/python3.12/dist-packages/vllm/distributed/parallel_state.py:489:                aiter_ar = rocm_aiter_ops.get_aiter_allreduce()
+/usr/local/lib/python3.12/dist-packages/vllm/distributed/parallel_state.py:490:                if aiter_ar is not None:
+/usr/local/lib/python3.12/dist-packages/vllm/distributed/parallel_state.py:491:                    maybe_aiter_context = aiter_ar.capture()  # type: ignore
+/usr/local/lib/python3.12/dist-packages/vllm/distributed/parallel_state.py:499:        with torch.cuda.stream(stream), maybe_ca_context, maybe_aiter_context:
+/usr/local/lib/python3.12/dist-packages/vllm/distributed/parallel_state.py:1916:    # Reset rocm_aiter_ops class variables to match current os.environ.
+/usr/local/lib/python3.12/dist-packages/vllm/distributed/parallel_state.py:1922:        from vllm._aiter_ops import rocm_aiter_ops
+/usr/local/lib/python3.12/dist-packages/vllm/distributed/parallel_state.py:1924:        rocm_aiter_ops.refresh_env_variables()
+/usr/local/lib/python3.12/dist-packages/vllm/config/kernel.py:123:    "aiter",
+/usr/local/lib/python3.12/dist-packages/vllm/config/kernel.py:155:    - "aiter": Use AMD AITer kernels (ROCm only)
+/usr/local/lib/python3.12/dist-packages/vllm/config/vllm.py:125:        from vllm._aiter_ops import rocm_aiter_ops
+/usr/local/lib/python3.12/dist-packages/vllm/config/vllm.py:128:            rocm_aiter_ops.is_enabled() and cfg.parallel_config.tensor_parallel_size > 1
+/usr/local/lib/python3.12/dist-packages/vllm/config/vllm.py:146:    from vllm._aiter_ops import rocm_aiter_ops
+/usr/local/lib/python3.12/dist-packages/vllm/config/vllm.py:149:        rocm_aiter_ops.is_enabled()
+/usr/local/lib/python3.12/dist-packages/vllm/config/vllm.py:159:    """Enable if using AITER RMSNorm and hidden size is 2880 i.e. gpt-oss."""
+/usr/local/lib/python3.12/dist-packages/vllm/config/vllm.py:162:        cfg.kernel_config.ir_op_priority.fused_add_rms_norm[0] == "aiter"
+/usr/local/lib/python3.12/dist-packages/vllm/config/vllm.py:170:    from vllm._aiter_ops import check_aiter_fused_qk_rmsnorm, rocm_aiter_ops
+/usr/local/lib/python3.12/dist-packages/vllm/config/vllm.py:172:    return rocm_aiter_ops.is_enabled() and check_aiter_fused_qk_rmsnorm()
+/usr/local/lib/python3.12/dist-packages/vllm/config/vllm.py:1660:        # Add the compile ranges for flashinfer/aiter.
+/usr/local/lib/python3.12/dist-packages/vllm/config/vllm.py:1663:            from vllm._aiter_ops import rocm_aiter_ops
+/usr/local/lib/python3.12/dist-packages/vllm/config/vllm.py:1665:            if rocm_aiter_ops.is_enabled():
+/usr/local/lib/python3.12/dist-packages/vllm/config/vllm.py:1666:                max_size = rocm_aiter_ops.get_aiter_allreduce_max_size()
+/usr/local/lib/python3.12/dist-packages/vllm/config/compilation.py:142:    # ROCm/AITER specific fusions
+/usr/local/lib/python3.12/dist-packages/vllm/config/compilation.py:151:    """The threshold for ROCm AITER RoPE+KVCache fusion e.g. for small batch decode.
+/usr/local/lib/python3.12/dist-packages/vllm/config/compilation.py:278:                "MLA dual RMS norm fusion requires ROCm/AITER. "
+/usr/local/lib/python3.12/dist-packages/vllm/config/compilation.py:751:        "vllm::rocm_aiter_sparse_attn_indexer",
+/usr/local/lib/python3.12/dist-packages/vllm/v1/spec_decode/llm_base_proposer.py:241:            from vllm.v1.attention.backends.mla.rocm_aiter_mla_sparse import (
+/usr/local/lib/python3.12/dist-packages/vllm/v1/spec_decode/llm_base_proposer.py:252:            # ROCM_AITER_FA is an optional backend
+/usr/local/lib/python3.12/dist-packages/vllm/v1/spec_decode/llm_base_proposer.py:254:            # auto-discovery when VLLM_ROCM_USE_AITER=0, which would trigger aiter
+/usr/local/lib/python3.12/dist-packages/vllm/v1/spec_decode/llm_base_proposer.py:260:                AttentionBackendEnum.ROCM_AITER_FA.get_path(include_classname=False)
+/usr/local/lib/python3.12/dist-packages/vllm/v1/spec_decode/llm_base_proposer.py:262:                from vllm.v1.attention.backends.rocm_aiter_fa import (
+/usr/local/lib/python3.12/dist-packages/vllm/v1/sample/ops/topk_topp_sampler.py:10:from vllm._aiter_ops import rocm_aiter_ops
+/usr/local/lib/python3.12/dist-packages/vllm/v1/sample/ops/topk_topp_sampler.py:92:            and rocm_aiter_ops.is_enabled()
+/usr/local/lib/python3.12/dist-packages/vllm/v1/sample/ops/topk_topp_sampler.py:95:                import aiter.ops.sampling  # noqa: F401
+/usr/local/lib/python3.12/dist-packages/vllm/v1/sample/ops/topk_topp_sampler.py:97:                self.aiter_ops = torch.ops.aiter
+/usr/local/lib/python3.12/dist-packages/vllm/v1/sample/ops/topk_topp_sampler.py:99:                    "Using aiter sampler on ROCm (lazy import, sampling-only)."
+/usr/local/lib/python3.12/dist-packages/vllm/v1/sample/ops/topk_topp_sampler.py:104:                    "aiter.ops.sampling is not available on ROCm. "
+/usr/local/lib/python3.12/dist-packages/vllm/v1/sample/ops/topk_topp_sampler.py:196:        # FIXME: Fix aiter_sampler's accuracy issue and remove this flag
+/usr/local/lib/python3.12/dist-packages/vllm/v1/sample/ops/topk_topp_sampler.py:197:        DISABLE_AITER_SAMPLER = True
+/usr/local/lib/python3.12/dist-packages/vllm/v1/sample/ops/topk_topp_sampler.py:198:        """Optimized ROCm/aiter path (same structure as forward_cuda)."""
+/usr/local/lib/python3.12/dist-packages/vllm/v1/sample/ops/topk_topp_sampler.py:202:                    "aiter sampler does not support per-request generators; "
+/usr/local/lib/python3.12/dist-packages/vllm/v1/sample/ops/topk_topp_sampler.py:209:        ), "aiter sampler does not support returning logits/logprobs."
+/usr/local/lib/python3.12/dist-packages/vllm/v1/sample/ops/topk_topp_sampler.py:210:        if DISABLE_AITER_SAMPLER:
+/usr/local/lib/python3.12/dist-packages/vllm/v1/sample/ops/topk_topp_sampler.py:212:        return self.aiter_sample(logits, k, p, generators), None
+/usr/local/lib/python3.12/dist-packages/vllm/v1/sample/ops/topk_topp_sampler.py:214:    def aiter_sample(
+/usr/local/lib/python3.12/dist-packages/vllm/v1/sample/ops/topk_topp_sampler.py:221:        """Sample from logits using aiter ops."""
+/usr/local/lib/python3.12/dist-packages/vllm/v1/sample/ops/topk_topp_sampler.py:227:            next_token_ids = self.aiter_ops.top_k_top_p_sampling_from_probs(
+/usr/local/lib/python3.12/dist-packages/vllm/v1/sample/ops/topk_topp_sampler.py:238:            next_token_ids = self.aiter_ops.top_p_sampling_from_probs(
+/usr/local/lib/python3.12/dist-packages/vllm/v1/sample/ops/topk_topp_sampler.py:245:            renorm_probs = self.aiter_ops.top_k_renorm_probs(
+/usr/local/lib/python3.12/dist-packages/vllm/v1/sample/ops/topk_topp_sampler.py:249:        raise RuntimeError("aiter_sample was called with no active top-k or top-p.")
+/usr/local/lib/python3.12/dist-packages/vllm/v1/attention/ops/vit_attn_wrappers.py:28:    is_rocm_aiter: bool,
+/usr/local/lib/python3.12/dist-packages/vllm/v1/attention/ops/vit_attn_wrappers.py:35:    if is_rocm_aiter:
+/usr/local/lib/python3.12/dist-packages/vllm/v1/attention/ops/vit_attn_wrappers.py:36:        from aiter import flash_attn_varlen_func
+/usr/local/lib/python3.12/dist-packages/vllm/v1/attention/ops/vit_attn_wrappers.py:73:    is_rocm_aiter: bool,
+/usr/local/lib/python3.12/dist-packages/vllm/v1/attention/ops/vit_attn_wrappers.py:94:    is_rocm_aiter: bool,
+/usr/local/lib/python3.12/dist-packages/vllm/v1/attention/ops/vit_attn_wrappers.py:105:        is_rocm_aiter,
+/usr/local/lib/python3.12/dist-packages/vllm/v1/attention/ops/rocm_aiter_mla_sparse.py:333:    if find_spec("aiter.ops.triton.pa_mqa_logits") is not None:
+/usr/local/lib/python3.12/dist-packages/vllm/v1/attention/ops/rocm_aiter_mla_sparse.py:334:        paged_mqa_logits_module_path = "aiter.ops.triton.pa_mqa_logits"
+/usr/local/lib/python3.12/dist-packages/vllm/v1/attention/ops/rocm_aiter_mla_sparse.py:335:    elif find_spec("aiter.ops.triton.attention.pa_mqa_logits") is not None:
+/usr/local/lib/python3.12/dist-packages/vllm/v1/attention/ops/rocm_aiter_mla_sparse.py:336:        paged_mqa_logits_module_path = "aiter.ops.triton.attention.pa_mqa_logits"
+/usr/local/lib/python3.12/dist-packages/vllm/v1/attention/ops/rocm_aiter_mla_sparse.py:377:    from vllm._aiter_ops import rocm_aiter_ops
+/usr/local/lib/python3.12/dist-packages/vllm/v1/attention/ops/rocm_aiter_mla_sparse.py:379:    aiter_paged_mqa_logits_module = None
+/usr/local/lib/python3.12/dist-packages/vllm/v1/attention/ops/rocm_aiter_mla_sparse.py:380:    # if rocm_aiter_ops.is_enabled():
+/usr/local/lib/python3.12/dist-packages/vllm/v1/attention/ops/rocm_aiter_mla_sparse.py:384:    if rocm_aiter_ops.is_enabled():
+/usr/local/lib/python3.12/dist-packages/vllm/v1/attention/ops/rocm_aiter_mla_sparse.py:385:        aiter_paged_mqa_logits_module = paged_mqa_logits_module()
+/usr/local/lib/python3.12/dist-packages/vllm/v1/attention/ops/rocm_aiter_mla_sparse.py:387:    if aiter_paged_mqa_logits_module is not None:
+/usr/local/lib/python3.12/dist-packages/vllm/v1/attention/ops/rocm_aiter_mla_sparse.py:390:                aiter_paged_mqa_logits_module.deepgemm_fp8_paged_mqa_logits
+/usr/local/lib/python3.12/dist-packages/vllm/v1/attention/ops/rocm_aiter_mla_sparse.py:414:            aiter_paged_mqa_logits_module.deepgemm_fp8_paged_mqa_logits_stage1
+/usr/local/lib/python3.12/dist-packages/vllm/v1/attention/ops/rocm_aiter_mla_sparse.py:488:    if find_spec("aiter.ops.triton.fp8_mqa_logits") is not None:
+/usr/local/lib/python3.12/dist-packages/vllm/v1/attention/ops/rocm_aiter_mla_sparse.py:489:        mqa_logits_module_path = "aiter.ops.triton.fp8_mqa_logits"
+/usr/local/lib/python3.12/dist-packages/vllm/v1/attention/ops/rocm_aiter_mla_sparse.py:490:    elif find_spec("aiter.ops.triton.attention.fp8_mqa_logits") is not None:
+/usr/local/lib/python3.12/dist-packages/vllm/v1/attention/ops/rocm_aiter_mla_sparse.py:491:        mqa_logits_module_path = "aiter.ops.triton.attention.fp8_mqa_logits"
+/usr/local/lib/python3.12/dist-packages/vllm/v1/attention/ops/rocm_aiter_mla_sparse.py:528:    # path after aiter merge this kernel into main
+/usr/local/lib/python3.12/dist-packages/vllm/v1/attention/ops/rocm_aiter_mla_sparse.py:529:    from vllm._aiter_ops import rocm_aiter_ops
+/usr/local/lib/python3.12/dist-packages/vllm/v1/attention/ops/rocm_aiter_mla_sparse.py:531:    aiter_mqa_logits_module = None
+/usr/local/lib/python3.12/dist-packages/vllm/v1/attention/ops/rocm_aiter_mla_sparse.py:532:    if rocm_aiter_ops.is_enabled():
+/usr/local/lib/python3.12/dist-packages/vllm/v1/attention/ops/rocm_aiter_mla_sparse.py:533:        aiter_mqa_logits_module = mqa_logits_module()
+/usr/local/lib/python3.12/dist-packages/vllm/v1/attention/ops/rocm_aiter_mla_sparse.py:535:    if aiter_mqa_logits_module is not None:
+/usr/local/lib/python3.12/dist-packages/vllm/v1/attention/ops/rocm_aiter_mla_sparse.py:536:        fp8_mqa_logits = aiter_mqa_logits_module.fp8_mqa_logits
+/usr/local/lib/python3.12/dist-packages/vllm/v1/attention/ops/rocm_aiter_mla_sparse.py:564:def rocm_aiter_sparse_attn_indexer_fake(
+/usr/local/lib/python3.12/dist-packages/vllm/v1/attention/ops/rocm_aiter_mla_sparse.py:592:def rocm_aiter_sparse_attn_indexer_native(
+/usr/local/lib/python3.12/dist-packages/vllm/v1/attention/ops/rocm_aiter_mla_sparse.py:617:        return rocm_aiter_sparse_attn_indexer_fake(
+/usr/local/lib/python3.12/dist-packages/vllm/v1/attention/ops/rocm_aiter_mla_sparse.py:765:def rocm_aiter_sparse_attn_indexer(
+/usr/local/lib/python3.12/dist-packages/vllm/v1/attention/ops/rocm_aiter_mla_sparse.py:780:    return rocm_aiter_sparse_attn_indexer_native(
+/usr/local/lib/python3.12/dist-packages/vllm/v1/attention/backends/registry.py:50:    ROCM_AITER_MLA = "vllm.v1.attention.backends.mla.rocm_aiter_mla.AiterMLABackend"
+/usr/local/lib/python3.12/dist-packages/vllm/v1/attention/backends/registry.py:51:    ROCM_AITER_TRITON_MLA = (
+/usr/local/lib/python3.12/dist-packages/vllm/v1/attention/backends/registry.py:52:        "vllm.v1.attention.backends.mla.aiter_triton_mla.AiterTritonMLABackend"
+/usr/local/lib/python3.12/dist-packages/vllm/v1/attention/backends/registry.py:54:    ROCM_AITER_FA = (
+/usr/local/lib/python3.12/dist-packages/vllm/v1/attention/backends/registry.py:55:        "vllm.v1.attention.backends.rocm_aiter_fa.AiterFlashAttentionBackend"
+/usr/local/lib/python3.12/dist-packages/vllm/v1/attention/backends/registry.py:57:    ROCM_AITER_MLA_SPARSE = (
+/usr/local/lib/python3.12/dist-packages/vllm/v1/attention/backends/registry.py:58:        "vllm.v1.attention.backends.mla.rocm_aiter_mla_sparse.ROCMAiterMLASparseBackend"
+/usr/local/lib/python3.12/dist-packages/vllm/v1/attention/backends/registry.py:82:    ROCM_AITER_UNIFIED_ATTN = (
+/usr/local/lib/python3.12/dist-packages/vllm/v1/attention/backends/registry.py:83:        "vllm.v1.attention.backends.rocm_aiter_unified_attn."
+/usr/local/lib/python3.12/dist-packages/vllm/v1/attention/backends/triton_attn.py:10:from vllm._aiter_ops import rocm_aiter_ops
+/usr/local/lib/python3.12/dist-packages/vllm/v1/attention/backends/triton_attn.py:738:        return rocm_aiter_ops.is_enabled()
+/usr/local/lib/python3.12/dist-packages/vllm/v1/attention/backends/triton_attn.py:760:        rocm_aiter_ops.triton_rope_and_cache(
+/usr/local/lib/python3.12/dist-packages/vllm/v1/attention/backends/rocm_aiter_unified_attn.py:8:from vllm._aiter_ops import rocm_aiter_ops
+/usr/local/lib/python3.12/dist-packages/vllm/v1/attention/backends/rocm_aiter_unified_attn.py:34:            "[ROCM_AITER_UNIFIED_ATTN]: Setting kv cache block size to 64."
+/usr/local/lib/python3.12/dist-packages/vllm/v1/attention/backends/rocm_aiter_unified_attn.py:64:        return "ROCM_AITER_UNIFIED_ATTN"
+/usr/local/lib/python3.12/dist-packages/vllm/v1/attention/backends/rocm_aiter_unified_attn.py:133:            "Using aiter unified attention for RocmAiterUnifiedAttentionImpl"
+/usr/local/lib/python3.12/dist-packages/vllm/v1/attention/backends/rocm_aiter_unified_attn.py:135:        from aiter.ops.triton.unified_attention import unified_attention
+/usr/local/lib/python3.12/dist-packages/vllm/v1/attention/backends/rocm_aiter_unified_attn.py:264:        return rocm_aiter_ops.is_enabled()
+/usr/local/lib/python3.12/dist-packages/vllm/v1/attention/backends/rocm_aiter_unified_attn.py:290:        rocm_aiter_ops.triton_rope_and_cache(
+/usr/local/lib/python3.12/dist-packages/vllm/v1/attention/backends/rocm_attn.py:10:from vllm._aiter_ops import rocm_aiter_ops
+/usr/local/lib/python3.12/dist-packages/vllm/v1/attention/backends/rocm_attn.py:503:        return rocm_aiter_ops.is_enabled()
+/usr/local/lib/python3.12/dist-packages/vllm/v1/attention/backends/rocm_attn.py:531:        rocm_aiter_ops.triton_rope_and_cache(
+/usr/local/lib/python3.12/dist-packages/vllm/v1/attention/backends/mla/rocm_aiter_mla.py:9:from vllm._aiter_ops import rocm_aiter_ops
+/usr/local/lib/python3.12/dist-packages/vllm/v1/attention/backends/mla/rocm_aiter_mla.py:47:        # The aiter MLA decode kernel always operates with page_size=1
+/usr/local/lib/python3.12/dist-packages/vllm/v1/attention/backends/mla/rocm_aiter_mla.py:55:        return "ROCM_AITER_MLA"
+/usr/local/lib/python3.12/dist-packages/vllm/v1/attention/backends/mla/rocm_aiter_mla.py:118:        # flat indices since the aiter kernel always uses page_size=1 internally.
+/usr/local/lib/python3.12/dist-packages/vllm/v1/attention/backends/mla/rocm_aiter_mla.py:133:        # paged_kv_last_page_len is always 1s (the aiter kernel always sees
+/usr/local/lib/python3.12/dist-packages/vllm/v1/attention/backends/mla/rocm_aiter_mla.py:146:        from aiter import dtypes, get_mla_metadata_info_v1
+/usr/local/lib/python3.12/dist-packages/vllm/v1/attention/backends/mla/rocm_aiter_mla.py:218:        # The aiter kernel always operates with page_size=1 (the wrapper
+/usr/local/lib/python3.12/dist-packages/vllm/v1/attention/backends/mla/rocm_aiter_mla.py:272:        # The aiter MLA ASM kernel only supports qseqlen=1 (single-token
+/usr/local/lib/python3.12/dist-packages/vllm/v1/attention/backends/mla/rocm_aiter_mla.py:281:            from aiter import get_mla_metadata_v1
+/usr/local/lib/python3.12/dist-packages/vllm/v1/attention/backends/mla/rocm_aiter_mla.py:353:    The aiter MLA kernel always operates with page_size=1 internally
+/usr/local/lib/python3.12/dist-packages/vllm/v1/attention/backends/mla/rocm_aiter_mla.py:394:    AITER MLA implementation requires num_heads >= 16. If num_heads < 16 and
