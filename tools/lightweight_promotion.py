@@ -1451,9 +1451,16 @@ def _load_rollback_inputs(
     if outcome.get("schema_version") != PROMOTION_OUTCOME_SCHEMA or outcome.get("status") != "activated":
         fail("activation outcome is not a successful lightweight promotion")
     transaction_path = outcome.get("transaction_path")
-    if not isinstance(transaction_path, str):
+    transaction_hash = outcome.get("transaction_sha256")
+    if (
+        not isinstance(transaction_path, str)
+        or not isinstance(transaction_hash, str)
+        or HASH_RE.fullmatch(transaction_hash) is None
+    ):
         fail("activation outcome lacks transaction path")
     transaction_snapshot = read_snapshot(Path(transaction_path), "promotion transaction")
+    if transaction_snapshot.sha256 != transaction_hash:
+        fail("promotion transaction hash differs from activation outcome")
     transaction = strict_object(transaction_snapshot.raw, "promotion transaction")
     if transaction.get("schema_version") != PROMOTION_TRANSACTION_SCHEMA:
         fail("promotion transaction schema is unsupported")
@@ -1474,6 +1481,10 @@ def _load_rollback_inputs(
     rollback_snapshot = read_snapshot(Path(rollback_value), "saved rollback manifest")
     if rollback_snapshot.sha256 != rollback_hash:
         fail("saved rollback manifest hash differs from transaction")
+    if outcome.get("candidate_manifest_sha256") != candidate_hash:
+        fail("candidate manifest hash differs between outcome and transaction")
+    if outcome.get("rollback_manifest_sha256") != rollback_hash:
+        fail("rollback manifest hash differs between outcome and transaction")
     current = read_snapshot(active_path, "active manifest")
     return (
         outcome_snapshot,

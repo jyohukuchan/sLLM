@@ -140,6 +140,8 @@ def test_rollback_preflight_requires_candidate_bytes_to_differ_from_saved_rollba
                 "status": "activated",
                 "transaction_path": os.fspath(transaction),
                 "transaction_sha256": transaction_hash,
+                "candidate_manifest_sha256": candidate_hash,
+                "rollback_manifest_sha256": rollback_hash,
             }
         )
     )
@@ -153,6 +155,12 @@ def test_rollback_preflight_requires_candidate_bytes_to_differ_from_saved_rollba
     rejected = PROMOTION.rollback(args)
     assert rejected["ready"] is False
     assert rejected["strict_byte_difference"] is False
+
+    tampered = json.loads(outcome.read_text(encoding="utf-8"))
+    tampered["transaction_sha256"] = "0" * 64
+    outcome.write_bytes(canonical(tampered))
+    with pytest.raises(PROMOTION.PromotionError, match="transaction hash"):
+        PROMOTION.rollback(args)
 
 
 def test_semantic_self_test_is_machine_confirmed() -> None:
