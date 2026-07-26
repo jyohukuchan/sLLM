@@ -1,0 +1,937 @@
+// Copyright 2026 uLLM contributors
+// SPDX-License-Identifier: Apache-2.0
+
+//! Resident-BF16 Gemma4 E2B validation and throughput evidence driver.
+//!
+//! This is deliberately separate from serving and from the architecture trace
+//! writer.  It loads the text-decoder weights once, refuses an occupied GPU
+//! measurement window, and records the exact cache/no-cache and sliding-window
+//! checks used for the resident execution path.
+
+use serde_json::{Value, json};
+use std::env;
+use std::fs::{self, File};
+use std::io::Write;
+use std::path::PathBuf;
+use std::process::{Command, ExitCode};
+use std::thread;
+use std::time::{Duration, Instant};
+use ullm_engine::gemma4_text_executor::{
+    Gemma4ResidentKvCacheSnapshot, Gemma4ResidentLogicalBytes, Gemma4TextExecutor,
+};
+
+const R9700_AMD_SMI_INDEX: &str = "2";
+const AMD_SMI: &str = "/opt/rocm/bin/amd-smi";
+const DEFAULT_COOLDOWN_HOTSPOT_C: f64 = 55.0;
+const DEFAULT_COOLDOWN_TIMEOUT_SECONDS: u64 = 900;
+const DEFAULT_BENCHMARK_REPEATS: usize = 3;
+const DECODE_TOKENS_PER_REPEAT: usize = 4;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Mode {
+    Validation,
+    SlidingBoundary,
+    Benchmark,
+}
+
+impl Mode {
+    fn parse(raw: &str) -> Result<Self, String> {
+        match raw {
+            "validation" => Ok(Self::Validation),
+            "sliding-boundary" => Ok(Self::SlidingBoundary),
+            "benchmark" => Ok(Self::Benchmark),
+            _ => Err(format!(
+                "--mode must be validation, sliding-boundary, or benchmark, got {raw:?}"
+            )),
+        }
+    }
+
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Validation => "validation",
+            Self::SlidingBoundary => "sliding-boundary",
+            Self::Benchmark => "benchmark",
+        }
+    }
+}
+
+#[derive(Debug)]
+struct Options {
+    model_dir: PathBuf,
+    output: PathBuf,
+    mode: Mode,
+    benchmark_repeats: usize,
+    cooldown_hotspot_c: f64,
+    cooldown_timeout_seconds: u64,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct TraceCase {
+    name: &'static str,
+    initial_token_ids: &'static [u32],
+    expected_generated_token_ids: &'static [u32],
+    expected_text: &'static str,
+}
+
+const CAPITAL_FRANCE: TraceCase = TraceCase {
+    name: "capital-france",
+    initial_token_ids: &[2, 818, 5279, 529, 7001, 563],
+    expected_generated_token_ids: &[9079, 236761, 108, 818],
+    expected_text: "The capital of France is Paris.\\n\\nThe",
+};
+
+const ONCE_UPON_A_TIME: TraceCase = TraceCase {
+    name: "once-upon-a-time",
+    initial_token_ids: &[2, 14946, 3324, 496, 990, 236764],
+    expected_generated_token_ids: &[528, 496, 1902, 1298],
+    expected_text: "Once upon a time, in a world where",
+};
+
+fn usage() -> &'static str {
+    "usage: ullm-gemma4-resident --model-dir PATH --output PATH --mode validation|sliding-boundary|benchmark [--benchmark-repeats N] [--cooldown-hotspot-c C] [--cooldown-timeout-seconds N]"
+}
+
+fn main() -> ExitCode {
+    match parse_options().and_then(run) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("ullm-gemma4-resident: {error}");
+            ExitCode::from(2)
+        }
+    }
+}
+
+fn parse_options() -> Result<Options, String> {
+    let mut model_dir = None;
+    let mut output = None;
+    let mut mode = None;
+    let mut benchmark_repeats = DEFAULT_BENCHMARK_REPEATS;
+    let mut cooldown_hotspot_c = DEFAULT_COOLDOWN_HOTSPOT_C;
+    let mut cooldown_timeout_seconds = DEFAULT_COOLDOWN_TIMEOUT_SECONDS;
+    let mut arguments = env::args().skip(1);
+    while let Some(argument) = arguments.next() {
+        match argument.as_str() {
+            "--model-dir" => {
+                if model_dir
+                    .replace(PathBuf::from(next_argument("--model-dir", &mut arguments)?))
+                    .is_some()
+                {
+                    return Err(format!(
+                        "--model-dir was supplied more than once; {}",
+                        usage()
+                    ));
+                }
+            }
+            "--output" => {
+                if output
+                    .replace(PathBuf::from(next_argument("--output", &mut arguments)?))
+                    .is_some()
+                {
+                    return Err(format!("--output was supplied more than once; {}", usage()));
+                }
+            }
+            "--mode" => {
+                let value = Mode::parse(&next_argument("--mode", &mut arguments)?)?;
+                if mode.replace(value).is_some() {
+                    return Err(format!("--mode was supplied more than once; {}", usage()));
+                }
+            }
+            "--benchmark-repeats" => {
+                benchmark_repeats = parse_positive_usize(
+                    "--benchmark-repeats",
+                    &next_argument("--benchmark-repeats", &mut arguments)?,
+                )?;
+            }
+            "--cooldown-hotspot-c" => {
+                let raw = next_argument("--cooldown-hotspot-c", &mut arguments)?;
+                cooldown_hotspot_c = raw.parse::<f64>().map_err(|_| {
+                    format!("--cooldown-hotspot-c must be a finite positive number, got {raw:?}")
+                })?;
+                if !cooldown_hotspot_c.is_finite() || cooldown_hotspot_c <= 0.0 {
+                    return Err(format!(
+                        "--cooldown-hotspot-c must be a finite positive number, got {cooldown_hotspot_c}"
+                    ));
+                }
+            }
+            "--cooldown-timeout-seconds" => {
+                cooldown_timeout_seconds = parse_positive_u64(
+                    "--cooldown-timeout-seconds",
+                    &next_argument("--cooldown-timeout-seconds", &mut arguments)?,
+                )?;
+            }
+            "--help" | "-h" => return Err(usage().to_string()),
+            _ => return Err(format!("unknown argument {argument:?}; {}", usage())),
+        }
+    }
+    Ok(Options {
+        model_dir: model_dir.ok_or_else(|| format!("--model-dir is required; {}", usage()))?,
+        output: output.ok_or_else(|| format!("--output is required; {}", usage()))?,
+        mode: mode.ok_or_else(|| format!("--mode is required; {}", usage()))?,
+        benchmark_repeats,
+        cooldown_hotspot_c,
+        cooldown_timeout_seconds,
+    })
+}
+
+fn next_argument(
+    name: &str,
+    arguments: &mut impl Iterator<Item = String>,
+) -> Result<String, String> {
+    arguments
+        .next()
+        .ok_or_else(|| format!("{name} requires a value; {}", usage()))
+}
+
+fn parse_positive_usize(name: &str, raw: &str) -> Result<usize, String> {
+    let value = raw
+        .parse::<usize>()
+        .map_err(|_| format!("{name} must be a positive integer, got {raw:?}"))?;
+    if value == 0 {
+        return Err(format!("{name} must be greater than zero"));
+    }
+    Ok(value)
+}
+
+fn parse_positive_u64(name: &str, raw: &str) -> Result<u64, String> {
+    let value = raw
+        .parse::<u64>()
+        .map_err(|_| format!("{name} must be a positive integer, got {raw:?}"))?;
+    if value == 0 {
+        return Err(format!("{name} must be greater than zero"));
+    }
+    Ok(value)
+}
+
+fn run(options: Options) -> Result<(), String> {
+    if options.output.exists() {
+        return Err(format!(
+            "output already exists; refusing to overwrite {}",
+            options.output.display()
+        ));
+    }
+    if let Some(parent) = options.output.parent() {
+        fs::create_dir_all(parent).map_err(|error| {
+            format!(
+                "failed to create output directory {}: {error}",
+                parent.display()
+            )
+        })?;
+    }
+
+    let preflight = preflight()?;
+    let launch_started = Instant::now();
+    let load_started = Instant::now();
+    let mut executor = Gemma4TextExecutor::load_resident(&options.model_dir)?;
+    let load_elapsed_seconds = load_started.elapsed().as_secs_f64();
+    let plan = executor
+        .resident_memory_plan()
+        .cloned()
+        .ok_or_else(|| "resident Gemma4 executor did not return a memory plan".to_string())?;
+    let after_load_telemetry = capture_telemetry();
+    let cooldown = wait_for_cooldown(options.cooldown_hotspot_c, options.cooldown_timeout_seconds)?;
+    let before_workload_telemetry = capture_telemetry();
+
+    let workload = match options.mode {
+        Mode::Validation => validation_workload(&mut executor)?,
+        Mode::SlidingBoundary => sliding_boundary_workload(&mut executor)?,
+        Mode::Benchmark => benchmark_workload(&mut executor, options.benchmark_repeats)?,
+    };
+    let after_workload_telemetry = capture_telemetry();
+    let snapshot = executor.resident_kv_cache_snapshot()?;
+    let actual_weight_bytes = executor
+        .resident_weight_bytes()
+        .ok_or_else(|| "resident Gemma4 executor did not retain weights".to_string())?;
+    let actual_kv_bytes = executor
+        .device_kv_bytes()?
+        .ok_or_else(|| "resident Gemma4 executor did not retain device K/V".to_string())?;
+    let actual_transient_bytes = executor
+        .device_transient_bytes()?
+        .ok_or_else(|| "resident Gemma4 executor did not expose transient buffers".to_string())?;
+    let actual_total_bytes = executor
+        .resident_device_allocation_bytes()?
+        .ok_or_else(|| {
+            "resident Gemma4 executor did not expose allocation accounting".to_string()
+        })?;
+    let device = executor.device();
+    let report = json!({
+        "schema_version": "ullm.gemma4_e2b_resident.v0.1",
+        "producer": "ullm-gemma4-resident",
+        "mode": options.mode.as_str(),
+        "model": {
+            "model_dir": executor.source_model_dir(),
+            "config_sha256": executor.config_sha256(),
+            "weight_format": "source BF16 safetensors, resident text decoder",
+            "activation_dtype": "F32",
+        },
+        "device": {
+            "runtime_index": device.runtime_index,
+            "device_id": device.device_id,
+            "backend": device.backend,
+            "name": device.name,
+            "gcn_arch_name": device.gcn_arch_name,
+            "compute": [device.compute_major, device.compute_minor],
+            "total_global_mem_bytes": device.total_global_mem,
+        },
+        "environment": {
+            "HIP_VISIBLE_DEVICES": env::var("HIP_VISIBLE_DEVICES").ok(),
+            "ULLM_HIP_VISIBLE_DEVICES": env::var("ULLM_HIP_VISIBLE_DEVICES").ok(),
+            "ULLM_REQUIRE_HIP_BF16_MATVEC_KERNEL": env::var("ULLM_REQUIRE_HIP_BF16_MATVEC_KERNEL").ok(),
+            "ULLM_REQUIRE_HIP_PAGED_DECODE_ATTN_KERNEL": env::var("ULLM_REQUIRE_HIP_PAGED_DECODE_ATTN_KERNEL").ok(),
+            "ULLM_REQUIRE_HIP_PAGED_KV_WRITE_KERNEL": env::var("ULLM_REQUIRE_HIP_PAGED_KV_WRITE_KERNEL").ok(),
+        },
+        "preflight": preflight,
+        "cooldown": cooldown,
+        "telemetry": {
+            "after_resident_load": after_load_telemetry,
+            "before_workload": before_workload_telemetry,
+            "after_workload": after_workload_telemetry,
+        },
+        "resident_memory": memory_json(&plan, device.total_global_mem, actual_weight_bytes, actual_kv_bytes, actual_transient_bytes, actual_total_bytes)?,
+        "final_kv_snapshot": snapshot_json(snapshot),
+        "workload": workload,
+        "timing": {
+            "resident_load_seconds": load_elapsed_seconds,
+            "wall_seconds_including_load_and_workload": launch_started.elapsed().as_secs_f64(),
+            "clock": "std::time::Instant monotonic wall clock; no profiler range is used as throughput",
+        },
+    });
+    write_json_new(&options.output, &report)?;
+    println!(
+        "Gemma4 resident {} evidence written to {} (load {:.1}s)",
+        options.mode.as_str(),
+        options.output.display(),
+        load_elapsed_seconds,
+    );
+    Ok(())
+}
+
+fn preflight() -> Result<Value, String> {
+    let pgrep = capture_command(
+        "pgrep",
+        [
+            "-af",
+            "ullm-sq8-r9700|run_measurements.py|llama-bench|llama-server|promote-served-model|ullm-aq4-worker",
+        ],
+    );
+    let service = capture_command("systemctl", ["is-active", "ullm-openai.service"]);
+    let service_state = service
+        .get("stdout")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or_default();
+    if !matches!(service_state, "inactive" | "failed") {
+        return Err(format!(
+            "refusing GPU work while ullm-openai.service is {service_state:?}; wait for inactive or failed"
+        ));
+    }
+    let process = capture_command(
+        AMD_SMI,
+        [
+            "process",
+            "--gpu",
+            R9700_AMD_SMI_INDEX,
+            "--general",
+            "--json",
+        ],
+    );
+    let process_text = process
+        .get("stdout")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if !process_text.contains("No running processes detected") {
+        return Err(
+            "refusing GPU work because amd-smi reports one or more R9700 processes".to_string(),
+        );
+    }
+    Ok(json!({
+        "required_pgrep": pgrep_summary(&pgrep),
+        "ullm_openai_service": service,
+        "r9700_process": process,
+        "decision": "accepted: service is not running (inactive or failed) and amd-smi reported no R9700 process",
+        "note": "The required pgrep command was executed. Its raw output is deliberately summarized because its broad pattern can match an orchestration prompt rather than an executable workload; amd-smi process state is the authoritative R9700 occupancy check.",
+    }))
+}
+
+fn pgrep_summary(capture: &Value) -> Value {
+    let stdout = capture
+        .get("stdout")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let executable_like_matches = stdout
+        .lines()
+        .filter(|line| !line.contains("codex exec") && !line.contains("/bin/bash -c"))
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    json!({
+        "program": capture.get("program"),
+        "args": capture.get("args"),
+        "exit_code": capture.get("exit_code"),
+        "raw_match_line_count": stdout.lines().count(),
+        "non_orchestrator_match_lines": executable_like_matches,
+    })
+}
+
+fn capture_telemetry() -> Value {
+    capture_command(
+        AMD_SMI,
+        [
+            "metric",
+            "--gpu",
+            R9700_AMD_SMI_INDEX,
+            "--temperature",
+            "--clock",
+            "--power",
+            "--violation",
+            "--mem-usage",
+            "--json",
+        ],
+    )
+}
+
+fn wait_for_cooldown(threshold_c: f64, timeout_seconds: u64) -> Result<Value, String> {
+    let started = Instant::now();
+    let mut samples = Vec::new();
+    loop {
+        let sample = capture_telemetry();
+        let hotspot_c = hotspot_celsius(&sample);
+        samples.push(sample);
+        if let Some(hotspot_c) = hotspot_c {
+            if hotspot_c <= threshold_c {
+                return Ok(json!({
+                    "threshold_hotspot_c": threshold_c,
+                    "samples": samples,
+                    "elapsed_seconds": started.elapsed().as_secs_f64(),
+                    "decision": "temperature at or below threshold before measured work",
+                }));
+            }
+        }
+        if started.elapsed() >= Duration::from_secs(timeout_seconds) {
+            return Err(format!(
+                "R9700 hotspot did not cool to {threshold_c:.1} C within {timeout_seconds}s"
+            ));
+        }
+        thread::sleep(Duration::from_secs(5));
+    }
+}
+
+fn hotspot_celsius(capture: &Value) -> Option<f64> {
+    capture
+        .get("parsed_stdout")?
+        .get("gpu_data")?
+        .as_array()?
+        .iter()
+        .find_map(|gpu| {
+            gpu.get("temperature")?
+                .get("hotspot")?
+                .get("value")?
+                .as_f64()
+        })
+}
+
+fn capture_command<const N: usize>(program: &str, args: [&str; N]) -> Value {
+    let json_args = args.to_vec();
+    match Command::new(program).args(args).output() {
+        Ok(output) => {
+            let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+            let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+            let parsed_stdout = serde_json::from_str::<Value>(&stdout).ok();
+            json!({
+                "program": program,
+                "args": json_args,
+                "exit_code": output.status.code(),
+                "stdout": stdout,
+                "stderr": stderr,
+                "parsed_stdout": parsed_stdout,
+            })
+        }
+        Err(error) => json!({
+            "program": program,
+            "args": json_args,
+            "spawn_error": error.to_string(),
+        }),
+    }
+}
+
+fn validation_workload(executor: &mut Gemma4TextExecutor) -> Result<Value, String> {
+    let mut cases = Vec::new();
+    let mut capital_cached_ids = None;
+    for case in [CAPITAL_FRANCE, ONCE_UPON_A_TIME] {
+        let cached = cached_generation(
+            executor,
+            case.initial_token_ids,
+            case.expected_generated_token_ids.len(),
+        )?;
+        if cached.generated_token_ids != case.expected_generated_token_ids {
+            return Err(format!(
+                "resident cached {} greedy IDs differ from BL trace: expected {:?}, got {:?}",
+                case.name, case.expected_generated_token_ids, cached.generated_token_ids
+            ));
+        }
+        let reprefill = full_reprefill_generation(
+            executor,
+            case.initial_token_ids,
+            case.expected_generated_token_ids.len(),
+        )?;
+        if reprefill.generated_token_ids != cached.generated_token_ids {
+            return Err(format!(
+                "resident cache/no-cache greedy IDs differ for {}: cached {:?}, full-reprefill {:?}",
+                case.name, cached.generated_token_ids, reprefill.generated_token_ids
+            ));
+        }
+        if case.name == CAPITAL_FRANCE.name {
+            capital_cached_ids = Some(cached.generated_token_ids.clone());
+        }
+        cases.push(json!({
+            "case": case.name,
+            "initial_token_ids": case.initial_token_ids,
+            "expected_generated_token_ids_from_bl_trace": case.expected_generated_token_ids,
+            "expected_decoded_text_from_bl_trace": case.expected_text,
+            "cached_decode": cached.json,
+            "full_reprefill_without_cross_step_cache": reprefill.json,
+            "greedy_ids_match_bl_trace": true,
+            "cache_and_full_reprefill_match": true,
+        }));
+    }
+    let snapshot = executor
+        .resident_kv_cache_snapshot()?
+        .ok_or_else(|| "validation requires a resident K/V snapshot".to_string())?;
+    assert_e2b_shared_sources(&snapshot)?;
+    let capital_cached_ids = capital_cached_ids
+        .ok_or_else(|| "validation did not retain the capital-France cached result".to_string())?;
+    let unshared = executor.unshared_kv_reference_generation(
+        CAPITAL_FRANCE.initial_token_ids,
+        CAPITAL_FRANCE.expected_generated_token_ids.len(),
+    )?;
+    let unshared_ids_equal_shared = unshared.generated_token_ids == capital_cached_ids;
+    Ok(json!({
+        "kind": "resident-greedy-and-cache-equivalence",
+        "cases": cases,
+        "shared_kv_source_check": {
+            "result": "passed",
+            "method": "device-cache snapshot contains only non-sharing source layers; every layer 15..34 maps by attention kind to layer 13 (local) or layer 14 (full).",
+            "snapshot": snapshot_json(Some(snapshot)),
+        },
+        "sharing_disabled_physical_kv_reference": {
+            "method": "The diagnostic temporarily replaces the resident source-cache topology with independent host K/V caches for all layers and evaluates physical K/V projections for shared layers. HF does not use this topology; it is included only to make the source selection contrast explicit.",
+            "normal_shared_generated_token_ids": capital_cached_ids,
+            "physical_kv_reprojected_generated_token_ids": unshared.generated_token_ids,
+            "physical_kv_reprojected_top1_logits": unshared.top1_logits,
+            "generated_ids_equal_to_normal_shared_path": unshared_ids_equal_shared,
+        },
+    }))
+}
+
+struct GenerationResult {
+    generated_token_ids: Vec<u32>,
+    json: Value,
+}
+
+fn cached_generation(
+    executor: &mut Gemma4TextExecutor,
+    initial: &[u32],
+    new_tokens: usize,
+) -> Result<GenerationResult, String> {
+    executor.reset();
+    executor.reset_resident_logical_bytes();
+    let mut generated_token_ids = Vec::with_capacity(new_tokens);
+    let mut steps = Vec::with_capacity(new_tokens);
+    let mut started = Instant::now();
+    let trace = executor.prefill(initial)?;
+    steps.push(json!({
+        "operation": "prefill",
+        "input_token_count": initial.len(),
+        "top1_token_id": trace.top1.token_id,
+        "top1_logit": trace.top1.logit,
+        "elapsed_seconds": started.elapsed().as_secs_f64(),
+    }));
+    generated_token_ids.push(trace.top1.token_id);
+    for _ in 1..new_tokens {
+        let input_token_id = *generated_token_ids
+            .last()
+            .ok_or_else(|| "cached generation lost its previous token".to_string())?;
+        started = Instant::now();
+        let trace = executor.decode(input_token_id)?;
+        steps.push(json!({
+            "operation": "decode",
+            "input_token_id": input_token_id,
+            "top1_token_id": trace.top1.token_id,
+            "top1_logit": trace.top1.logit,
+            "elapsed_seconds": started.elapsed().as_secs_f64(),
+        }));
+        generated_token_ids.push(trace.top1.token_id);
+    }
+    let logical = executor.resident_logical_bytes().ok_or_else(|| {
+        "cached generation did not expose resident logical accounting".to_string()
+    })?;
+    Ok(GenerationResult {
+        generated_token_ids: generated_token_ids.clone(),
+        json: json!({
+            "generated_token_ids": generated_token_ids,
+            "steps": steps,
+            "logical_lower_bound": logical_bytes_json(logical)?,
+            "final_position": executor.position(),
+        }),
+    })
+}
+
+fn full_reprefill_generation(
+    executor: &mut Gemma4TextExecutor,
+    initial: &[u32],
+    new_tokens: usize,
+) -> Result<GenerationResult, String> {
+    let mut prefix = initial.to_vec();
+    let mut generated_token_ids = Vec::with_capacity(new_tokens);
+    let mut steps = Vec::with_capacity(new_tokens);
+    executor.reset_resident_logical_bytes();
+    for _ in 0..new_tokens {
+        executor.reset();
+        let started = Instant::now();
+        let trace = executor.prefill(&prefix)?;
+        steps.push(json!({
+            "operation": "prefill-from-token-zero",
+            "input_token_count": prefix.len(),
+            "top1_token_id": trace.top1.token_id,
+            "top1_logit": trace.top1.logit,
+            "elapsed_seconds": started.elapsed().as_secs_f64(),
+        }));
+        generated_token_ids.push(trace.top1.token_id);
+        prefix.push(trace.top1.token_id);
+    }
+    let logical = executor
+        .resident_logical_bytes()
+        .ok_or_else(|| "full re-prefill did not expose resident logical accounting".to_string())?;
+    Ok(GenerationResult {
+        generated_token_ids: generated_token_ids.clone(),
+        json: json!({
+            "generated_token_ids": generated_token_ids,
+            "steps": steps,
+            "logical_lower_bound": logical_bytes_json(logical)?,
+            "cache_reset_before_each_step": true,
+        }),
+    })
+}
+
+fn sliding_boundary_workload(executor: &mut Gemma4TextExecutor) -> Result<Value, String> {
+    let window = executor.config().sliding_window;
+    let sequence_len = window
+        .checked_add(1)
+        .ok_or_else(|| "sliding-window boundary sequence length overflows usize".to_string())?;
+    let boundary_tokens = vec![2_u32; sequence_len];
+
+    executor.reset();
+    executor.reset_resident_logical_bytes();
+    let cached_started = Instant::now();
+    let mut trace = executor.prefill(&boundary_tokens[..1])?;
+    for _ in 1..sequence_len {
+        trace = executor.decode(2)?;
+    }
+    let cached_elapsed_seconds = cached_started.elapsed().as_secs_f64();
+    let cached_top1 = trace.top1;
+    let cached_snapshot = executor
+        .resident_kv_cache_snapshot()?
+        .ok_or_else(|| "sliding-boundary cached route has no device K/V snapshot".to_string())?;
+    assert_sliding_boundary_state(&cached_snapshot, window, sequence_len)?;
+    let cached_logical = executor
+        .resident_logical_bytes()
+        .ok_or_else(|| "sliding-boundary cached route has no logical accounting".to_string())?;
+
+    executor.reset();
+    executor.reset_resident_logical_bytes();
+    let reprefill_started = Instant::now();
+    let reprefill_trace = executor.prefill(&boundary_tokens)?;
+    let reprefill_elapsed_seconds = reprefill_started.elapsed().as_secs_f64();
+    let reprefill_snapshot = executor.resident_kv_cache_snapshot()?.ok_or_else(|| {
+        "sliding-boundary re-prefill route has no device K/V snapshot".to_string()
+    })?;
+    assert_sliding_boundary_state(&reprefill_snapshot, window, sequence_len)?;
+    if reprefill_trace.top1.token_id != cached_top1.token_id {
+        return Err(format!(
+            "sliding-window boundary cache/no-cache top1 differs at length {sequence_len}: cached={} reprefill={}",
+            cached_top1.token_id, reprefill_trace.top1.token_id
+        ));
+    }
+    let reprefill_logical = executor
+        .resident_logical_bytes()
+        .ok_or_else(|| "sliding-boundary re-prefill has no logical accounting".to_string())?;
+    Ok(json!({
+        "kind": "sliding-window-boundary",
+        "sliding_window_from_config": window,
+        "sequence_length": sequence_len,
+        "input_token_pattern": {"token_id": 2, "description": "BOS token repeated so position/RoPE and cache order, not tokenizer variability, exercise the boundary"},
+        "cached_m1_route": {
+            "top1_token_id": cached_top1.token_id,
+            "top1_logit": cached_top1.logit,
+            "elapsed_seconds": cached_elapsed_seconds,
+            "logical_lower_bound": logical_bytes_json(cached_logical)?,
+            "kv_snapshot": snapshot_json(Some(cached_snapshot)),
+        },
+        "full_mn_reprefill_route": {
+            "top1_token_id": reprefill_trace.top1.token_id,
+            "top1_logit": reprefill_trace.top1.logit,
+            "elapsed_seconds": reprefill_elapsed_seconds,
+            "logical_lower_bound": logical_bytes_json(reprefill_logical)?,
+            "kv_snapshot": snapshot_json(Some(reprefill_snapshot)),
+        },
+        "cache_and_full_reprefill_top1_match": true,
+    }))
+}
+
+fn benchmark_workload(executor: &mut Gemma4TextExecutor, repeats: usize) -> Result<Value, String> {
+    let prompt = CAPITAL_FRANCE.initial_token_ids;
+    executor.reset();
+    let warmup = executor.prefill(prompt)?;
+    let mut prefill_runs = Vec::with_capacity(repeats);
+    let mut prefill_tokens = 0_usize;
+    let mut prefill_seconds = 0.0_f64;
+    for _ in 0..repeats {
+        executor.reset();
+        executor.reset_resident_logical_bytes();
+        let started = Instant::now();
+        let trace = executor.prefill(prompt)?;
+        let elapsed_seconds = started.elapsed().as_secs_f64();
+        let logical = executor
+            .resident_logical_bytes()
+            .ok_or_else(|| "prefill run has no logical accounting".to_string())?;
+        prefill_tokens = prefill_tokens
+            .checked_add(prompt.len())
+            .ok_or_else(|| "prefill token count overflows usize".to_string())?;
+        prefill_seconds += elapsed_seconds;
+        prefill_runs.push(json!({
+            "input_tokens": prompt.len(),
+            "elapsed_seconds": elapsed_seconds,
+            "top1_token_id": trace.top1.token_id,
+            "logical_lower_bound": logical_bytes_json(logical)?,
+        }));
+    }
+
+    let mut decode_runs = Vec::with_capacity(repeats);
+    let mut decode_tokens = 0_usize;
+    let mut decode_seconds = 0.0_f64;
+    for _ in 0..repeats {
+        executor.reset();
+        let prefill_trace = executor.prefill(prompt)?;
+        let mut input_token_id = prefill_trace.top1.token_id;
+        executor.reset_resident_logical_bytes();
+        let started = Instant::now();
+        let mut context_lengths_after_append = Vec::with_capacity(DECODE_TOKENS_PER_REPEAT);
+        let mut generated = Vec::with_capacity(DECODE_TOKENS_PER_REPEAT);
+        for _ in 0..DECODE_TOKENS_PER_REPEAT {
+            let trace = executor.decode(input_token_id)?;
+            context_lengths_after_append.push(executor.position());
+            input_token_id = trace.top1.token_id;
+            generated.push(input_token_id);
+        }
+        let elapsed_seconds = started.elapsed().as_secs_f64();
+        let logical = executor
+            .resident_logical_bytes()
+            .ok_or_else(|| "decode run has no logical accounting".to_string())?;
+        decode_tokens = decode_tokens
+            .checked_add(DECODE_TOKENS_PER_REPEAT)
+            .ok_or_else(|| "decode token count overflows usize".to_string())?;
+        decode_seconds += elapsed_seconds;
+        decode_runs.push(json!({
+            "generated_tokens": generated,
+            "context_lengths_after_append": context_lengths_after_append,
+            "elapsed_seconds": elapsed_seconds,
+            "logical_lower_bound": logical_bytes_json(logical)?,
+        }));
+    }
+    let prefill_tok_s = (prefill_tokens as f64) / prefill_seconds;
+    let decode_tok_s = (decode_tokens as f64) / decode_seconds;
+    Ok(json!({
+        "kind": "resident-throughput",
+        "warmup": {
+            "prompt_token_count": prompt.len(),
+            "top1_token_id": warmup.top1.token_id,
+            "excluded_from_timing": true,
+        },
+        "prefill": {
+            "runs": prefill_runs,
+            "accounting": "Each timed operation is a M=N prefill of the six-token BL capital-France prompt after resident load. Total input tokens divided by total monotonic wall time; load, cooldown, warmup, and profiler time are excluded.",
+            "total_tokens": prefill_tokens,
+            "total_elapsed_seconds": prefill_seconds,
+            "tok_per_second": prefill_tok_s,
+            "milliseconds_per_token": 1000.0 / prefill_tok_s,
+        },
+        "decode": {
+            "runs": decode_runs,
+            "accounting": "Each timed operation is M=1 decode after an untimed six-token resident prefill. Four generated tokens per repeat are divided by total monotonic wall time; load, the setup prefill, cooldown, warmup, and profiler time are excluded.",
+            "total_tokens": decode_tokens,
+            "total_elapsed_seconds": decode_seconds,
+            "tok_per_second": decode_tok_s,
+            "milliseconds_per_token": 1000.0 / decode_tok_s,
+        },
+        "logical_stream_definition": "For each timed run, BF16 source weights read by each resident matvec or BF16 row operation plus F32 K/V writes and unique K+V cache reads per attention invocation. It is a logical lower bound, not a physical-HBM counter; activation transfers, output writes, page tables, allocator traffic, L2 reuse, and kernel-launch overhead are excluded.",
+    }))
+}
+
+fn assert_e2b_shared_sources(snapshot: &Gemma4ResidentKvCacheSnapshot) -> Result<(), String> {
+    if snapshot.shared_layer_sources.len() != 20 {
+        return Err(format!(
+            "E2B expected 20 shared K/V layers, observed {}",
+            snapshot.shared_layer_sources.len()
+        ));
+    }
+    for shared in &snapshot.shared_layer_sources {
+        let expected = match shared.layer_kind.as_str() {
+            "sliding_attention" => 13,
+            "full_attention" => 14,
+            other => {
+                return Err(format!(
+                    "E2B shared layer {} has unsupported kind {other}",
+                    shared.layer_index
+                ));
+            }
+        };
+        if shared.layer_index < 15 || shared.source_layer_index != expected {
+            return Err(format!(
+                "E2B shared K/V source mismatch at layer {}: kind={} source={} expected={expected}",
+                shared.layer_index, shared.layer_kind, shared.source_layer_index
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn assert_sliding_boundary_state(
+    snapshot: &Gemma4ResidentKvCacheSnapshot,
+    window: usize,
+    sequence_len: usize,
+) -> Result<(), String> {
+    for source in &snapshot.source_layers {
+        if source.layer_kind == "sliding_attention"
+            && (source.capacity_tokens != window
+                || source.cache_len != window
+                || source.absolute_len != sequence_len)
+        {
+            return Err(format!(
+                "sliding source layer {} state is capacity={} cache_len={} absolute_len={}, expected {window}/{window}/{sequence_len}",
+                source.layer_index, source.capacity_tokens, source.cache_len, source.absolute_len
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn logical_bytes_json(bytes: Gemma4ResidentLogicalBytes) -> Result<Value, String> {
+    Ok(json!({
+        "bf16_weight_bytes": bytes.bf16_weight_bytes,
+        "kv_read_bytes": bytes.kv_read_bytes,
+        "kv_write_bytes": bytes.kv_write_bytes,
+        "total_bytes": bytes.total_bytes()?,
+        "matvec_calls": bytes.matvec_calls,
+        "bf16_row_reads": bytes.bf16_row_reads,
+        "attention_calls": bytes.attention_calls,
+    }))
+}
+
+fn snapshot_json(snapshot: Option<Gemma4ResidentKvCacheSnapshot>) -> Value {
+    let Some(snapshot) = snapshot else {
+        return Value::Null;
+    };
+    json!({
+        "source_layers": snapshot.source_layers.iter().map(|source| json!({
+            "layer_index": source.layer_index,
+            "layer_kind": source.layer_kind,
+            "capacity_tokens": source.capacity_tokens,
+            "cache_len": source.cache_len,
+            "absolute_len": source.absolute_len,
+            "allocated_bytes": source.allocated_bytes,
+        })).collect::<Vec<_>>(),
+        "shared_layer_sources": snapshot.shared_layer_sources.iter().map(|shared| json!({
+            "layer_index": shared.layer_index,
+            "layer_kind": shared.layer_kind,
+            "source_layer_index": shared.source_layer_index,
+        })).collect::<Vec<_>>(),
+    })
+}
+
+fn memory_json(
+    plan: &ullm_engine::gemma4_text_executor::Gemma4ResidentMemoryPlan,
+    device_total_bytes: u64,
+    actual_weight_bytes: u64,
+    actual_kv_bytes: u64,
+    actual_transient_bytes: u64,
+    actual_total_bytes: u64,
+) -> Result<Value, String> {
+    let mut contexts = vec![1_usize, plan.local_kv_capacity_tokens, 4096, 32_768];
+    if !contexts.contains(&plan.max_context_tokens) {
+        contexts.push(plan.max_context_tokens);
+    }
+    contexts.sort_unstable();
+    contexts.dedup();
+    let context_table = contexts
+        .into_iter()
+        .map(|context_tokens| {
+            let kv_bytes = plan.estimated_kv_bytes(context_tokens)?;
+            let device_bytes = plan.estimated_device_bytes(context_tokens)?;
+            let headroom_bytes = device_total_bytes
+                .checked_sub(device_bytes)
+                .ok_or_else(|| {
+                    format!("Gemma4 planned device bytes exceed R9700 at context {context_tokens}")
+                })?;
+            Ok(json!({
+                "context_tokens": context_tokens,
+                "demand_kv_bytes": kv_bytes,
+                "demand_total_device_bytes": device_bytes,
+                "headroom_to_reported_total_vram_bytes": headroom_bytes,
+                "fits": true,
+            }))
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    let max_kv = plan.estimated_kv_bytes(plan.max_context_tokens)?;
+    let full_file_plus_max = plan
+        .source_model_file_bytes
+        .checked_add(max_kv)
+        .and_then(|bytes| bytes.checked_add(plan.device_transient_bytes))
+        .ok_or_else(|| "Gemma4 full-source fit calculation overflows u64".to_string())?;
+    Ok(json!({
+        "source_model_file_bytes": plan.source_model_file_bytes,
+        "source_payload_bytes": plan.source_payload_bytes,
+        "resident_checkpoint_weight_bytes_planned": plan.resident_checkpoint_weight_bytes,
+        "resident_checkpoint_tensor_count_planned": plan.resident_checkpoint_tensor_count,
+        "text_decoder_weight_bytes_executed": plan.text_weight_bytes,
+        "text_decoder_tensor_count_executed": plan.text_tensor_count,
+        "ple_weight_bytes_included_in_text_resident_plan": plan.ple_weight_bytes,
+        "unexecuted_multimodal_payload_bytes": plan.unexecuted_multimodal_weight_bytes,
+        "kv_geometry": {
+            "local_kv_source_layers": plan.local_kv_source_layers,
+            "full_kv_source_layers": plan.full_kv_source_layers,
+            "local_kv_capacity_tokens": plan.local_kv_capacity_tokens,
+            "local_kv_fixed_bytes_including_tables": plan.local_kv_bytes,
+            "full_kv_bytes_per_token": plan.full_kv_bytes_per_token,
+            "full_kv_page_table_bytes_per_token": plan.page_table_bytes_per_full_token,
+        },
+        "transient_device_bytes_planned": plan.device_transient_bytes,
+        "context_demand_table": context_table,
+        "config_max_context_tokens": plan.max_context_tokens,
+        "full_source_file_plus_max_context_kv_and_planned_transient_bytes": full_file_plus_max,
+        "full_source_file_plus_max_context_fits_reported_vram": full_file_plus_max <= device_total_bytes,
+        "actual_runtimebuffer_accounting": {
+            "resident_checkpoint_weight_bytes": actual_weight_bytes,
+            "device_kv_bytes_at_config_max_capacity": actual_kv_bytes,
+            "temporary_buffer_bytes_after_workload": actual_transient_bytes,
+            "total_runtimebuffer_bytes": actual_total_bytes,
+            "reported_total_vram_bytes": device_total_bytes,
+            "headroom_to_reported_total_vram_bytes": device_total_bytes.checked_sub(actual_total_bytes),
+            "scope_note": "RuntimeBuffer accounting excludes HIP context/allocator overhead. amd-smi telemetry is captured while the resident allocation is live.",
+        },
+    }))
+}
+
+fn write_json_new(path: &PathBuf, value: &Value) -> Result<(), String> {
+    let encoded = serde_json::to_vec_pretty(value)
+        .map_err(|error| format!("failed to serialize resident evidence JSON: {error}"))?;
+    let mut file = File::options()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .map_err(|error| format!("failed to create evidence {}: {error}", path.display()))?;
+    file.write_all(&encoded)
+        .map_err(|error| format!("failed to write evidence {}: {error}", path.display()))?;
+    file.write_all(b"\n")
+        .map_err(|error| format!("failed to finish evidence {}: {error}", path.display()))?;
+    file.sync_all()
+        .map_err(|error| format!("failed to sync evidence {}: {error}", path.display()))?;
+    Ok(())
+}
