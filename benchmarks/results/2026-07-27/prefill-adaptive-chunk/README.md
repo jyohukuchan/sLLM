@@ -42,7 +42,7 @@ remaining 2047 real tokens.
 
 ## Prefill throughput
 
-| N | selected M | adaptive median tok/s | five-sample mean tok/s | BY measured winner tok/s | comparison |
+| N | selected M | adaptive median tok/s | five-sample aggregate tok/s | BY measured winner tok/s | comparison |
 | ---: | ---: | ---: | ---: | ---: | --- |
 | 128 | 128 | **887.490** | 886.246 | 883.091 | maintains short-prompt result |
 | 512 | 512 | **566.458** | 566.358 | 565.624 | matches measured winner |
