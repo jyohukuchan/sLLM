@@ -49,6 +49,11 @@ at 4,096 tokens. Within the fixed 256 MiB F32 KV allocation alone, F16 fits
 8,192 tokens and FP8 fits 16,256 tokens; this excludes weights/workspaces and
 does not claim a whole-process VRAM admission result.
 
+BH's post-redesign semantic K+V load of 8,486,912 B corresponds to 4,243,456 B
+for F16 payload and 2,138,304 B for FP8 payload plus one FP16 scale per
+256-value row, **if** a native GQA reader reuses each scale correctly. These
+are storage-byte ledgers only, not throughput estimates.
+
 ## Full-model / quality status
 
 | dtype | decode | prefill | long-context generated text |

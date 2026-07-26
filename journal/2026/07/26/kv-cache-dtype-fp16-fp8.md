@@ -21,6 +21,10 @@
 - served Qwen3.5-9B source config の 8 full-attention layers まで合算すると
   4,096 token 時に F32 256 MiB、F16 128 MiB、FP8 64.5 MiB となる。これは
   KV slice の収支であり、全 process VRAM admission の主張ではない。
+- BH 後の semantic K+V load 8,486,912 B からは、同一 logical access 時の
+  storage-byte ledger として F16 4,243,456 B、FP8 payload+scale 2,138,304 B を
+  算出した。ただし conversion/reduction と GQA scale reuse があるので tok/s
+  予測には使わない。
 - generic `PagedDecodeState` に typed allocation, writer, direct reader,
   scale-aware readback, typed causal prefill fallback を接続した。F32/F32 は従来の
   F32 writer/reader API をそのまま選ぶ。

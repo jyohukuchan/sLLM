@@ -239,6 +239,32 @@ not an eligible throughput path. Only a full-model run with native writer and
 reader can answer whether reduced traffic beats conversion and scale loads
 after the BH GQA-cooperative redesign.
 
+### 3.5 BH-path semantic byte ledger (not a speed model)
+
+BH recorded 8,486,912 B of semantic F32 K+V load per decode after its GQA
+cooperative redesign. Holding the same logical element accesses fixed gives
+the following storage-byte accounting:
+
+| cache representation | payload bytes | FP8 scale bytes if one scale is loaded once per 256-value row | total semantic bytes | relative to F32 |
+|---|---:|---:|---:|---:|
+| F32 | 8,486,912 | 0 | 8,486,912 | 1.000x |
+| F16 | 4,243,456 | 0 | 4,243,456 | 0.500x |
+| FP8 E4M3FN + FP16 scale | 2,121,728 | 16,576 | 2,138,304 | 0.251953125x |
+
+The FP8 scale term is `(8,486,912 / 4 values-per-F32 / 256 values-per-row)
+* 2 B = 16,576 B`. It assumes the native reader loads one scale per
+`(source token, KV head, plane)` and shares it across the GQA work that shares
+that row. Reloading scale per query head would be a kernel defect and needs
+to be checked in the native implementation.
+
+This ledger excludes query/output, page-table, instruction fetch, cache-hit
+effects, writer work, conversion latency, reductions, synchronization, and
+all non-attention model time. It therefore does **not** imply a 2x or 3.97x
+tok/s result. FP8 specifically adds one E4M3FN-to-F32 conversion per payload
+value, an FP16-scale conversion per row, scale multiply in the F32
+accumulation path, and a 256-value max/requantize operation on every write.
+Native measurements remain mandatory.
+
 ## 4. ABI and implementation status
 
 `runtime/include/ullm_runtime.h` adds:
