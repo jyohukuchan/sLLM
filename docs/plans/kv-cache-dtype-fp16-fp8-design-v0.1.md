@@ -345,20 +345,31 @@ pgrep -af 'codex exec' | grep -c '依頼BR'
 
 Only a zero result permits the following work:
 
-1. Add direct typed paged writer and reader kernel caches/launchers. Compile
-   separate F32/F16/FP8 K/V specializations or a verified equivalent; do not
-   add a runtime inner-loop type branch to the hot path.
-2. For FP8 reader, load the scale once per `(source token, kv head)` and use
-   gfx1201 E4M3 conversion. Preserve GQA cooperative mapping and online
-   softmax order from BR's redesign.
-3. Add fused Qwen Q/K norm/RoPE typed writer and typed chunk writer/reader,
+1. Land native **F16 first**: plain paged writer and direct decode reader,
+   then the Qwen fused Q/K-norm/RoPE writer and typed causal/prefix prefill
+   reader. F32/F32 must remain on its current symbols and kernels.
+2. Add direct typed paged writer and reader kernel caches/launchers. The
+   dispatch key needs the ordered `(K dtype, V dtype)` pair. `F32/F32` keeps
+   the legacy path; the remaining eight ordered pairs need compiled
+   specializations (or verified equivalent specialization), never a runtime
+   inner-loop type branch.
+3. For each FP8 writer plane, map one workgroup to one
+   `(physical token, KV head)` row: reduce max-abs over its 256 values, make
+   the upward-rounded positive F16 scale, store `scale[physical_head]`, then
+   encode that row. K and V scale reductions must be independent. For F16,
+   write binary16 payload directly and pass no scale argument.
+4. For the FP8 reader, load the scale once per `(source token, kv head, plane)`
+   and use gfx1201 E4M3 conversion. Preserve the BR GQA-cooperative mapping
+   and online-softmax order; specifically, share the loaded scale over all
+   query work that shares that KV row rather than reloading it per Q head.
+5. Add fused Qwen Q/K norm/RoPE typed writer and typed chunk writer/reader,
    then expose matching FFI APIs.
-4. In a separately authorized AQ4_0 production change, propagate `KvCacheDtypes`
+6. In a separately authorized AQ4_0 production change, propagate `KvCacheDtypes`
    through resident layer allocation, operation registry plans, decode,
    cached-prefix, and paged causal GQA paths. Do not repurpose F32 buffers or
    overwrite existing F32 behavior. Update serving/benchmark reports to use
    `KvCacheLayout` rather than frozen F32 byte constants.
-5. With R9700 unlocked and the required preflight recorded, collect F32/F16/
+7. With R9700 unlocked and the required preflight recorded, collect F32/F16/
    FP8 full-model decode and prefill at long contexts, plus side-by-side
    generated text. The promotion decision must be qualitative text review,
    not a single numerical threshold.

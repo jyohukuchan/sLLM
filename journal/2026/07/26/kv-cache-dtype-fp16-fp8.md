@@ -48,9 +48,10 @@
 
 - BR 完了を `pgrep -af 'codex exec' | grep -c '依頼BR'` で確認するまで
   `part_01.inc` / HIPRTC source を編集しない。
-- 完了後に native typed paged writer/decode reader、fused Qwen writer、paged
-  causal GQA / cached-prefix typed readers を追加する。GQA cooperative mapping と
-  online softmax order を保つ。
+- 完了後に native **F16 first** typed paged writer/decode reader、fused Qwen
+  writer、paged causal GQA / cached-prefix typed readers を追加する。次に FP8 の
+  per-token/head scale reduction/reader を足し、GQA cooperative mapping と online
+  softmax order を保つ。
 - AQ4_0 resident production path の typed allocation/operation registry 接続は
   今回の禁止範囲であり、別途許可された変更として扱う。
 - R9700 lock が空き、native path と production integration が揃ってからのみ、
