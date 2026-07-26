@@ -1,0 +1,17 @@
+revision=82a9b5b843a9fdeef2cd6ec692c11baf6599857f+8f7643df6caa6a7e6685c44b0eb6f1e3d438f6092d45a033fa24e33713264c00
+HIP_VISIBLE_DEVICES=-1
+ROCM_PATH=/opt/rocm
+rental_linker=cc
+rental_rustflags=cleared (overrides .cargo/config.toml)
+rocminfo_arches=gfx10,gfx1030,gfx12,gfx1201
+HIP version: 7.2.53211-e1a6bc5663
+AMD clang version 22.0.0git (https://github.com/RadeonOpenCompute/llvm-project roc-7.2.1 26084 f58b06dce1f9c15707c5f808fd002e18c2accf7e)
+Target: x86_64-unknown-linux-gnu
+Thread model: posix
+InstalledDir: /opt/rocm-7.2.1/lib/llvm/bin
+Configuration file: /opt/rocm-7.2.1/lib/llvm/bin/clang++.cfg
+cargo 1.96.0 (30a34c682 2026-05-25)
+rustc 1.96.0 (ac68faa20 2026-05-25)
+optional_clang=/usr/bin/clang (not required by the rental runner)
+optional_mold=/usr/bin/mold (not required by the rental runner)
+optional_rustup=/usr/bin/rustup (not required by the rental runner)

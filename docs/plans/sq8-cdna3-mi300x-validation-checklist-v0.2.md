@@ -1,13 +1,39 @@
 # SQ8_0 CDNA3 MI300X A′/B 再検証チェックリスト v0.2
 
-- Date: 2026-07-26
-- Status: オフラインの P0 準備は完了。B control の根因は CPU oracle で特定・修正済みだが、**修正後の gfx942 実機確認は未実施**である。
+- Date: 2026-07-26（2026-07-27 rehearsal 更新）
+- Status: gfx942 非搭載 host で runner の offline stages・fail-closed physical・冪等性・中断再開を実行確認済み。B control の根因は CPU oracle で特定・修正済みだが、**修正後の gfx942 実機確認は未実施**である。
 - Scope: `SQ8_0` の gfx942 A′ bring-up と、その独立 B control の再検証を、次の MI300X 借用で 1--2 時間以内に判定するための手順。
 - Out of scope: hand-written MFMA の経路 A、本番 dispatch、full-model enable、serving、release、campaign、authorization、`/etc/ullm/served-models/active.json`、systemd 操作。activation は本手順の範囲外であり、候補ができた場合は lightweight promotion policy に従う。
 
 v0.1 は初回レンタルの設計・実測記録として残す。本書はその未解決点を
 再試験するための実行可能な v0.2 runbook である。A′ は gfx942 bring-up
 用の CK XDL 再利用経路であり、CDNA3 本番目標の経路 A を承認するものではない。
+
+## 0. 2026-07-27 の実行 rehearsal
+
+実行 receipts は
+[`mi300x-rental-rehearsal`](../../benchmarks/results/2026-07-27/mi300x-rental-rehearsal/)
+にある。gfx942 はない host なので、これは physical success の証明ではない。
+ただし runner 自身を実行し、次を確認した。
+
+| stage | local 実測（jobs=32、新規 target） | 結果 |
+| --- | ---: | --- |
+| preflight | 0 s | rehearsal mode では gfx942 不在を記録して offline continuation。normal mode は fail-closed。 |
+| CPU | 79 s | pass |
+| generic `SQ8_0` HIPRTC | 18 s | 27/27 pass |
+| gfx942 feature release build | 54 s | pass |
+| ISA/resource audit | 6 s | 2 CCOB、MFMA 912、pass |
+| physical | 0 s | gfx942 不在を理由に expected fail、P0 非成功 |
+
+offline pass 部分は 157 s だった。これは Threadripper の local measurement であり、
+13 vCPU の rental host の wall-clock をそのまま表さない。一方、初回 rental の
+successful release build は 52.57 s で、今回の 54 s と矛盾しない。
+
+同じ results directory の rerun は complete stage を `SKIP` し、physical だけを
+再試行した。さらに clean worktree で CPU compile 中に SIGTERM を送り、
+`preflight.done` だけが残った後に再実行した。resume run は preflight を skip し、
+CPU 73 s、HIPRTC 18 s、build 53 s、ISA 6 s を通過して expected physical failure
+まで到達した。従って resume は記述だけでなく実地確認済みである。
 
 ## 1. 初回レンタルから確定していること
 
@@ -166,7 +192,19 @@ CARGO_ENCODED_RUSTFLAGS=
 する手作業は不要である。`--locked` と default `--offline` も runner が付ける。
 
 この override を使う runner の local `build` stage は gfx942 feature build を
-完走した（新規 target directory、jobs=8、GPU 実行なし）。
+54 s で完走した（新規 target directory、jobs=32、GPU 実行なし）。verbose Rust
+invocation は `-C linker=cc` であり、`-fuse-ld=mold` は含まなかった。対照として
+override なしの local build も 53 s で pass し、`-C linker=clang` と
+`-C link-arg=-fuse-ld=mold` の両方を確認した。従って rental process は local の
+clang+mold 設定を変更しない。
+
+preflight は `cargo`、`rustc`、選択された `ULLM_RENTAL_LINKER`、C++/ROCm/LLVM/
+`rocminfo`/`zstd` を必須検査する。`clang`、mold、`rustup` は optional status として
+environment receipt に記録する。runner は `cc` と既存 Rust toolchain を使うため、
+この三つの不在自体は P0 の blocker ではない。`ULLM_RENTAL_LINKER` が存在しない
+simulation は build 前に `required rental linker is unavailable` で fail した。
+さらに `clang`、mold、`rustup` を PATH から外した preflight は pass し、三つを
+`unavailable (not required by the rental runner)` と receipt に出力した。
 
 ## 5. 次回レンタルの 1 本 runner
 
@@ -186,6 +224,8 @@ bash tools/run-sq8-cdna3-mi300x-validation.sh \
 
 1. `preflight -> cpu -> hiprtc -> build -> isa -> physical` の P0 順で実行する。
    physical 単独実行は、前 5 stage の `.done` stamp がなければ fail-closed する。
+   normal preflight が gfx942 不在で拒否した場合、physical もその device admission
+   を明記して非成功にする。
 2. stage ごとに `logs/<stage>.log`、`state/<stage>.done`、`stage-timings.tsv` を
    保存する。失敗後に同じ command を再実行すると pass 済み stage は skip し、
    failure stage から再開する。
@@ -198,22 +238,42 @@ bash tools/run-sq8-cdna3-mi300x-validation.sh \
 6. runner は model download、container pull、pip/rustup、server 起動、`/etc`、
    service、activation を行わない。ネットワークは既定で禁止し、必要時だけ
    `--allow-network` を人間が明示する。
+7. `--rehearsal-no-gfx942` は local rehearsal 専用である。gfx942 不在を state に
+   記録して offline stage を通すが、physical は GPU binary を起動せず expected
+   failure とする。この option を使った run は P0 pass ではない。
 
-構文・引数 dry-run、HIPRTC stage、gfx942 build stage は gfx942 非搭載のローカルで
-実行済みである。physical stage は実機が無いため未実行である。
+normal mode と rehearsal mode の preflight、CPU、HIPRTC、build、ISA、physical stage
+は gfx942 非搭載の local host で実行済みである。physical は実機がないため成功を
+試しておらず、明示的な fail-closed behavior だけを確認した。
 
 ### 5.2 GPU lease 前に行うこと
 
-- fixed commit の clean checkout を作り、`cargo fetch --locked` と feature build
-  を GPU lease 外で済ませる。cache/registry が無ければ runner は default offline
-  で早く失敗する。
+- fixed commit の clean checkout を作り、`cargo fetch --locked` の直後に
+  `cargo fetch --locked --offline` を pass させ、feature build も GPU lease 外で
+  済ませる。2026-07-27 の lockfile は 29 registry archive、合計 2,590,666 B
+  (2.471 MiB) だった。local fetch は 1 s 未満だったが remote transfer time は
+  未確認である。cache/registry が無ければ runner は default offline で早く失敗する。
 - Rust/ROCm/hipBLAS/CK、`rocminfo`、LLVM tools、zstd を provider image 上で
-  CPU-only staging できるなら先に確認する。`cc` または
-  `ULLM_RENTAL_LINKER` の値もここで決める。
+  CPU-only staging できるなら先に確認する。`cargo`/`rustc` と `cc` または
+  `ULLM_RENTAL_LINKER` の値もここで決める。clang、mold、rustup を install する
+  必要はない。
 - model、GGUF、Docker image、external engine、full 13.2 GB artifact は P0 に
   不要である。P0 results を決めるために借用中に取得しない。
 - source/lockfile/binary と fixture の hash を保存する。dirty 開発 worktree を
   そのまま rental host へ持ち込まない。
+
+### 5.3 借用中に取得しない artifact
+
+P0 runner の network contract は Cargo dependency だけであり、default は
+`--offline` である。source checkout 自体は runner が clone しないため、lease 前に
+用意する。local tracked source tree は 24,217,770 B だったが、remote clone transfer
+size は未確認である。
+
+初回 evidence に残る下記は P0 に不要で、download time も保存されていない。Qwen3-
+14B-Q8_0.gguf は 15,698,533,728 B、Qwen3-Coder-Next-FP8 は 80.4 GB、Qwen3-
+30B-A3B-FP8 は 32.5 GB、Qwen3.6-35B-A3B-FP8 は 37.5 GB である。container image と
+Qwen3-14B-FP8 の exact byte size は保存 evidence からは**未確認**であり、推測で
+埋めない。これらを借用開始後に取得すると 1--2 時間 P0 の時間を侵食する。
 
 ## 6. 優先順位、過去の時間、次回見積り
 
@@ -228,23 +288,32 @@ bash tools/run-sq8-cdna3-mi300x-validation.sh \
 | model/image/download | pull/download logs はあるが stage 時間はない。 | P0 から完全に外す。必要なら別承認・別 timebox。 |
 | B failure | B skip により A′だけが通った。 | CPU oracle と B non-skip physical gate を最優先にする。 |
 
-cache を温めた前提の P0 forecast は次である。これは計測値ではなく、次回 runner が
-`stage-timings.tsv` に置き換える見積りである。
+cache を温めた前提の P0 forecast は、local rehearsal と初回 remote build receipt
+を反映して次へ更新する。local offline baseline は 2 min 37 s だが、physical と
+remote vCPU/ROCm 差は含まないため、その数字だけで booking を短縮しない。
 
 | P0 stage | 目安 | 根拠 |
 | --- | ---: | --- |
-| preflight | 3--5 min | device/toolchain/evidence admission |
-| CPU oracle/tests | 5--10 min | cache warm、jobs=8 |
-| generic HIPRTC audit | 2--5 min | 27 programs、GPU launch なし |
-| clean gfx942 release build | 10--30 min | initial remote cache/CPU の余裕。保存済み warm build は 52.57 s |
-| ISA/resource audit | 2--5 min | fatbin extract/unbundle/disassemble |
+| preflight | 1--3 min | device/toolchain/evidence admission。local は 0--1 s。 |
+| CPU oracle/tests | 2--5 min | local 73--79 s、remote vCPU の余裕。 |
+| generic HIPRTC audit | 1--3 min | local 18 s、27 programs、GPU launch なし。 |
+| clean gfx942 release build | 1--5 min | local 53--54 s、保存済み remote warm build 52.57 s。 |
+| ISA/resource audit | 1--3 min | local 6 s、fatbin extract/unbundle/disassemble。 |
 | physical A′/B 5 case | 5--15 min | fragment + five-shape differential |
-| evidence/retry reserve | 15--30 min | 同一条件の再現を 1 回まで |
+| evidence/retry reserve | 10--20 min | 同一条件の再現を 1 回まで |
 
-合計は pre-provision 済みなら **45--90 分**、remote build が cold なら保守的に
-**60--100 分**である。P0 が失敗したら profiler、full-model、artifact transfer、
-timing sweep、external engine、手書き A は捨てて lease を止める。P0 が全 pass
-して初めて、occupancy query と限定的な additional evidence を P1 として検討する。
+pre-provision 済みなら stage budget は **30--60 分**、一回の同条件再現を含む
+conservative booking は従来どおり **45--90 分**とする。従って **2 時間**は P0
+判定に十分と判断する。**1 時間**は toolchain admission が即時に通り、physical が
+初回または一回の再現で結論を出す場合だけ可能で、保証しない。source/Cargo cache/
+toolchain を借用後に作る cold start は 1 時間では不可、2 時間でも保証しない。
+
+時間切れでは P0 の preflight、CPU、HIPRTC、build、ISA、B を skip しない physical
+A′/B を捨てない。profiler/occupancy query、full-model、artifact transfer、model/
+container download、external engine、timing sweep、hand-written A の順に捨てる。P0 が
+失敗したら source を借用中に書き換えず、同一条件の evidence を一回だけ取り lease
+を止める。P0 が全 pass して初めて、occupancy query と限定的な additional evidence
+を P1 として検討する。
 
 ## 7. レンタル時の exit gate
 
