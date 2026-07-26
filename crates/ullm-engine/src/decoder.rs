@@ -3938,6 +3938,44 @@ mod tests {
     }
 
     #[test]
+    fn typed_paged_kv_write_rejects_nonfinite_token_without_partial_mutation_cpu() {
+        let shape = PagedDecodeShape {
+            block_size: 2,
+            cache_blocks: 1,
+            q_heads: 1,
+            kv_heads: 1,
+            head_dim: 2,
+            value_dim: 2,
+        };
+        for dtypes in [
+            KvCacheDtypes::uniform(KvCacheDtype::F16),
+            KvCacheDtypes::uniform(KvCacheDtype::Fp8E4M3Fn),
+        ] {
+            let mut context = RuntimeContext::create(0).unwrap();
+            let mut stream = context.create_stream().unwrap();
+            let mut state = PagedDecodeState::new_with_kv_cache_dtypes(
+                &mut context,
+                &mut stream,
+                shape,
+                vec![0],
+                dtypes,
+            )
+            .unwrap();
+            let error = state
+                .write_token(&mut stream, &[1.0, f32::NAN], &[2.0, 3.0])
+                .unwrap_err();
+            assert!(
+                error.contains("non-finite") || error.contains("unrepresentable"),
+                "{error}"
+            );
+            assert_eq!(state.written_len(), 0);
+            let cache = state.read_cache_to_host(&mut stream).unwrap();
+            assert_eq!(cache.k, vec![0.0; shape.k_cache_elements().unwrap()]);
+            assert_eq!(cache.v, vec![0.0; shape.v_cache_elements().unwrap()]);
+        }
+    }
+
+    #[test]
     fn source_tiled_decode_experiment_matches_direct_cpu() {
         let mut context = RuntimeContext::create(0).unwrap();
         let mut stream = context.create_stream().unwrap();

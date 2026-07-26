@@ -11113,6 +11113,42 @@ bool kv_cache_write_typed_plane_f32(
     return true;
 }
 
+// Validate before mutating either plane.  A K/V cache row is one logical
+// transaction: if V cannot be represented after K has been accepted, callers
+// must not observe a half-written token.  F32 intentionally retains its
+// legacy pass-through behavior; the non-F32 formats reject non-finite values
+// and F16 overflow before any payload or scale store occurs.
+bool kv_cache_validate_typed_plane_f32(
+    const float *source,
+    size_t elements,
+    ullm_kv_cache_dtype dtype) {
+    if (source == nullptr || !kv_cache_dtype_is_supported(dtype)) {
+        return false;
+    }
+    if (dtype == ULLM_KV_CACHE_DTYPE_F32) {
+        return true;
+    }
+    float maximum = 0.0f;
+    for (size_t index = 0; index < elements; ++index) {
+        if (!std::isfinite(source[index])) {
+            return false;
+        }
+        if (dtype == ULLM_KV_CACHE_DTYPE_F16) {
+            const uint16_t bits = kv_cache_f32_to_f16_rne_bits(source[index]);
+            if ((bits & 0x7c00u) == 0x7c00u) {
+                return false;
+            }
+        } else {
+            maximum = std::max(maximum, std::fabs(source[index]));
+        }
+    }
+    if (dtype != ULLM_KV_CACHE_DTYPE_FP8_E4M3FN || maximum == 0.0f) {
+        return true;
+    }
+    uint16_t scale_bits = 0u;
+    return kv_cache_f32_to_positive_f16_ceil(maximum / 448.0f, &scale_bits);
+}
+
 bool kv_cache_read_typed_value(
     const void *payload,
     ullm_kv_cache_dtype dtype,
@@ -11168,6 +11204,14 @@ bool paged_kv_write_typed_f32_host(
         static_cast<size_t>(block_table[block_index]) * block_size + block_offset;
     const size_t k_payload_bytes = kv_cache_dtype_payload_bytes(k_dtype);
     const size_t v_payload_bytes = kv_cache_dtype_payload_bytes(v_dtype);
+    for (size_t kv_head = 0; kv_head < kv_heads; ++kv_head) {
+        if (!kv_cache_validate_typed_plane_f32(
+                k + kv_head * head_dim, head_dim, k_dtype) ||
+            !kv_cache_validate_typed_plane_f32(
+                v + kv_head * value_dim, value_dim, v_dtype)) {
+            return false;
+        }
+    }
     for (size_t kv_head = 0; kv_head < kv_heads; ++kv_head) {
         const size_t physical_head = physical_timestep * kv_heads + kv_head;
         const size_t k_source_offset = kv_head * head_dim;

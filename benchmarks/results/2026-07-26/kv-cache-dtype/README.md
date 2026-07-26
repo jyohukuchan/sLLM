@@ -12,7 +12,7 @@ The following targeted CPU tests completed after the typed ABI was added:
 
 ```text
 cargo test -p ullm-engine decoder::tests --lib
-33 passed; 0 failed
+34 passed; 0 failed
 
 cargo test -p ullm-engine kv_cache_dtype --lib
 3 passed; 0 failed
