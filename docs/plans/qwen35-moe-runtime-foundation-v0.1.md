@@ -507,3 +507,17 @@ uLLM runtime `--device-index 1`** である。HIP ordinal 2 は禁止された V
 この試行も architecture check の直後に停止したため、V620 には context 選択以外の package weight
 allocation と kernel dispatch を行っていない。再現レシピはこの対応へ訂正し、full MoE 実行は
 `gfx1201` architecture admission を通ってからのみ開始する。
+
+次の R9700 index-corrected probe は `Qwen3.5 AQ4 linear layer 0: required backend operation
+runtime feature/guard is unavailable` で weight load 前に停止した。`Qwen35MoeAq4Runtime` が
+attention を再実装せず既存 9B bridge を使う以上、これは同 bridge の production HIP guard
+contract を offline driver へ渡していなかった結線欠落である。`qwen35_aq4_layer_runtime.rs` の
+linear load は `HipLinearAttentionRecurrent`、`HipLinearAttentionQkvPrepare`、
+`HipAq4MatvecBatch`、`HipLinearAttentionQkvPrepareBatch` の capability probe を要求する。
+これらの probe は対応する `ULLM_REQUIRE_HIP_*` 環境変数が `1` のときだけ実行する。
+
+推測で subset を選ばず、既存 resident 9B worker が正規 contract とする
+`QWEN35_AQ4_REQUIRED_HIP_KERNEL_ENV` の全 36 guard を offline 9B baseline と MoE driver の
+両方へ渡すよう再現レシピを補正した。MoE にはこれに F16 capacity run の typed paged
+decode/split/KV-write 3 guard を加える。script は guard assignment を artifact に記録する。
+この 36-guard corrected run は lock の次の安全 window で未再試行であり、成功は未確認である。

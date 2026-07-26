@@ -53,6 +53,10 @@
   `HIP_VISIBLE_DEVICES=2` は V620 (`gfx1030`) を選ぶため、architecture guard が重み読込前に
   fail-closed した。R9700 の再試行には `HIP_VISIBLE_DEVICES=1` と runtime index 1 を使う。
   V620 には context 選択以外の allocation / kernel dispatch を行っていない。
+- index-corrected probe は既存 9B linear bridge の feature guard が absent で load 前に停止した。
+  推測の subset ではなく、9B resident worker が正規 contract とする
+  `QWEN35_AQ4_REQUIRED_HIP_KERNEL_ENV` の全 36 guard を offline baseline/MoE driver に渡す
+  よう修正した。MoE には F16 typed paged-KV 用の 3 guard も加える。corrected run は未実施。
 
 ## 次の行動
 
@@ -70,3 +74,5 @@
 - R9700 の AMD SMI GPU 2 と HIP ordinal 1 を混同しない。実行時は
   `HIP_VISIBLE_DEVICES=1` / `ULLM_HIP_VISIBLE_DEVICES=1` / uLLM runtime index 1 を固定し、
   `gfx1201` admission を成功条件に含める。
+- 9B/MoE とも既存 worker の全 36 HIP guard を `1` で渡し、MoE では F16 typed paged-KV
+  guard も追加する。最初の guard-corrected R9700 run で baseline top-1 と full loader を検証する。

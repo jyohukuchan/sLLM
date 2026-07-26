@@ -30,6 +30,48 @@ capture_inner_preflight() {
 run_window() {
     printf 'acquired_at='; date --iso-8601=seconds
     capture_inner_preflight > "$result_dir/qwen35-moe-attempt2-inner-preflight.txt"
+    # Keep the offline loader on the same guarded operation contract as the
+    # existing Qwen3.5-9B AQ4_0 resident worker.  These are the exact names in
+    # QWEN35_AQ4_REQUIRED_HIP_KERNEL_ENV, not a guessed subset.
+    local -a aq4_guard_env=(
+        ULLM_REQUIRE_HIP_AQ4_KERNEL=1
+        ULLM_REQUIRE_HIP_AQ4_MATVEC_KERNEL=1
+        ULLM_REQUIRE_HIP_AQ4_MATVEC_BATCH_KERNEL=1
+        ULLM_REQUIRE_HIP_AQ4_REGISTER_BM8_KERNEL=1
+        ULLM_REQUIRE_HIP_AQ4_REGISTER_BM8_GROUP8_KERNEL=1
+        ULLM_REQUIRE_HIP_AQ4_WMMA_GEMM_KERNEL=1
+        ULLM_REQUIRE_HIP_AQ4_WMMA_GEMM_GROUP8_KERNEL=1
+        ULLM_REQUIRE_HIP_AQ4_WMMA_GEMM_RAGGED_M_KERNEL=1
+        ULLM_REQUIRE_HIP_AQ4_WMMA_GEMM_GROUP8_RAGGED_M_KERNEL=1
+        ULLM_REQUIRE_HIP_AQ4_MATVEC_ADD_KERNEL=1
+        ULLM_REQUIRE_HIP_AQ4_MATVEC_PAIR_KERNEL=1
+        ULLM_REQUIRE_HIP_AQ4_MATVEC_TRIPLE_KERNEL=1
+        ULLM_REQUIRE_HIP_AQ4_MATVEC_QKV_Z_GATE_BETA_KERNEL=1
+        ULLM_REQUIRE_HIP_ADD_KERNEL=1
+        ULLM_REQUIRE_HIP_BF16_MATVEC_KERNEL=1
+        ULLM_REQUIRE_HIP_BF16_ROW_KERNEL=1
+        ULLM_REQUIRE_HIP_LINEAR_ATTN_GATE_BETA_KERNEL=1
+        ULLM_REQUIRE_HIP_LINEAR_ATTN_KERNEL=1
+        ULLM_REQUIRE_HIP_LINEAR_ATTN_QKV_PREPARE_BATCH_KERNEL=1
+        ULLM_REQUIRE_HIP_LINEAR_ATTN_RECURRENT_KERNEL=1
+        ULLM_REQUIRE_HIP_LINEAR_ATTN_RECURRENT_SEQUENCE_KERNEL=1
+        ULLM_REQUIRE_HIP_PAGED_KV_WRITE_CHUNK_KERNEL=1
+        ULLM_REQUIRE_HIP_PAGED_CAUSAL_GQA_CHUNK_KERNEL=1
+        ULLM_REQUIRE_HIP_PAGED_CAUSAL_GQA_WMMA_KERNEL=1
+        ULLM_REQUIRE_HIP_PAGED_DECODE_ATTN_KERNEL=1
+        ULLM_REQUIRE_HIP_PAGED_DECODE_SPLIT_KERNEL=1
+        ULLM_REQUIRE_HIP_PAGED_KV_WRITE_KERNEL=1
+        ULLM_REQUIRE_HIP_QWEN35_Q_SPLIT_KERNEL=1
+        ULLM_REQUIRE_HIP_QWEN35_QK_NORM_ROPE_BATCH_KERNEL=1
+        ULLM_REQUIRE_HIP_QWEN35_QK_NORM_ROPE_PAGED_KV_WRITE_KERNEL=1
+        ULLM_REQUIRE_HIP_RMSNORM_KERNEL=1
+        ULLM_REQUIRE_HIP_ROPE_KERNEL=1
+        ULLM_REQUIRE_HIP_SEGMENTED_RMSNORM_SILU_MUL_KERNEL=1
+        ULLM_REQUIRE_HIP_SIGMOID_MUL_KERNEL=1
+        ULLM_REQUIRE_HIP_SILU_MUL_KERNEL=1
+        ULLM_REQUIRE_HIP_TOP1_KERNEL=1
+    )
+    printf '%s\n' "${aq4_guard_env[@]}" > "$result_dir/qwen35-aq4-guard-contract-attempt2.txt"
     if systemctl is-active --quiet ullm-openai.service; then
         printf '%s\n' 'ullm-openai.service became active after lock acquisition' >&2
         return 73
@@ -46,6 +88,7 @@ run_window() {
 
     env -u ROCR_VISIBLE_DEVICES -u CUDA_VISIBLE_DEVICES \
         HIP_VISIBLE_DEVICES="$r9700_hip_ordinal" ULLM_HIP_VISIBLE_DEVICES="$r9700_hip_ordinal" \
+        "${aq4_guard_env[@]}" \
         target/release/ullm-qwen35-aq4-baseline-probe \
         --token-ids "$baseline_ids" \
         --device-index 1 \
@@ -57,6 +100,7 @@ run_window() {
     : > "$result_dir/qwen35-moe-vram-telemetry-attempt2.jsonl"
     env -u ROCR_VISIBLE_DEVICES -u CUDA_VISIBLE_DEVICES \
         HIP_VISIBLE_DEVICES="$r9700_hip_ordinal" ULLM_HIP_VISIBLE_DEVICES="$r9700_hip_ordinal" \
+        "${aq4_guard_env[@]}" \
         ULLM_KV_CACHE_DTYPE=f16 \
         ULLM_REQUIRE_HIP_TYPED_PAGED_DECODE_KERNEL=1 \
         ULLM_REQUIRE_HIP_TYPED_PAGED_DECODE_SPLIT_KERNEL=1 \
