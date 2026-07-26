@@ -228,6 +228,8 @@ def test_manifest_mode_builds_v2_worker_and_reasoning_contract(
     monkeypatch.setenv("ULLM_EXPERIMENTAL_PAGED_DECODE_GQA_GROUPED_SPLIT", "1")
     monkeypatch.setenv("ULLM_EXPERIMENTAL_PAGED_DECODE_GQA_PIPELINED_SPLIT", "1")
     monkeypatch.setenv("ULLM_EXPERIMENTAL_SQ8_PAGED_DECODE_SPLIT_ALLOW_MULTITILE", "1")
+    monkeypatch.setenv("ULLM_EXPERIMENTAL_HIP_PAGED_DECODE_SPLIT_TILE", "256")
+    monkeypatch.setenv("ULLM_EXPERIMENTAL_HIP_PAGED_DECODE_SPLIT_MIN_CACHE_LEN", "1")
 
     settings = GatewaySettings.from_env()
     config = WorkerConfig.from_settings(settings)
@@ -239,6 +241,8 @@ def test_manifest_mode_builds_v2_worker_and_reasoning_contract(
     assert settings.served_model is not None
     assert settings.served_model.worker.execution is None
     for name in (
+        "ULLM_EXPERIMENTAL_HIP_PAGED_DECODE_SPLIT_TILE",
+        "ULLM_EXPERIMENTAL_HIP_PAGED_DECODE_SPLIT_MIN_CACHE_LEN",
         "ULLM_EXPERIMENTAL_SQ8_PAGED_DECODE_SPLIT_TILE",
         "ULLM_EXPERIMENTAL_PAGED_DECODE_GQA_GROUPED_SPLIT",
         "ULLM_EXPERIMENTAL_PAGED_DECODE_GQA_PIPELINED_SPLIT",
@@ -287,6 +291,8 @@ def test_manifest_execution_settings_replace_stale_attention_selectors(
     monkeypatch.setenv("ULLM_EXPERIMENTAL_PAGED_DECODE_GQA_GROUPED_SPLIT", "0")
     monkeypatch.setenv("ULLM_EXPERIMENTAL_PAGED_DECODE_GQA_PIPELINED_SPLIT", "1")
     monkeypatch.setenv("ULLM_EXPERIMENTAL_SQ8_PAGED_DECODE_SPLIT_ALLOW_MULTITILE", "0")
+    monkeypatch.setenv("ULLM_EXPERIMENTAL_HIP_PAGED_DECODE_SPLIT_TILE", "256")
+    monkeypatch.setenv("ULLM_EXPERIMENTAL_HIP_PAGED_DECODE_SPLIT_MIN_CACHE_LEN", "1")
 
     settings = GatewaySettings.from_env()
     config = WorkerConfig.from_settings(settings)
@@ -302,6 +308,70 @@ def test_manifest_execution_settings_replace_stale_attention_selectors(
     assert (
         "ULLM_EXPERIMENTAL_PAGED_DECODE_GQA_PIPELINED_SPLIT" not in config.environment
     )
+    assert "ULLM_EXPERIMENTAL_HIP_PAGED_DECODE_SPLIT_TILE" not in config.environment
+    assert (
+        "ULLM_EXPERIMENTAL_HIP_PAGED_DECODE_SPLIT_MIN_CACHE_LEN"
+        not in config.environment
+    )
+
+
+def test_aq4_manifest_execution_settings_replace_stale_attention_selectors(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    for name in LEGACY_MODEL_ENVIRONMENT:
+        monkeypatch.delenv(name, raising=False)
+    root = tmp_path / "aq4-v2-grouped"
+    shutil.copytree(MANIFEST_FIXTURES / "aq4", root)
+    manifest = root / "served-model.json"
+    value = json.loads(manifest.read_text(encoding="utf-8"))
+    value["schema_version"] = "ullm.served_model.v2"
+    value["worker"]["protocol"] = "ullm.worker.v2"
+    value["worker"]["required_environment"].append(
+        "ULLM_REQUIRE_HIP_PAGED_DECODE_SPLIT_KERNEL"
+    )
+    value["worker"]["execution"] = {
+        "paged_decode_attention": {
+            "kernel": "aq4_gqa_grouped_split",
+            "split_tile": 128,
+        }
+    }
+    value["reasoning"] = {
+        "enabled_by_default": False,
+        "dialect_id": "synthetic.single-token.v1",
+        "start_token_ids": [248068],
+        "end_token_ids": [248069],
+        "forced_end_token_ids": [248069],
+        "initial_phase": "reasoning",
+        "eos_policy": "close",
+        "effort_budgets": {"low": 32, "medium": 64, "high": 128},
+        "max_budget_tokens": 128,
+        "reserved_answer_tokens": 1,
+        "history_reasoning_policy": "omit",
+    }
+    manifest.write_text(json.dumps(value), encoding="utf-8")
+    monkeypatch.setenv("ULLM_SERVED_MODEL_MANIFEST", str(manifest))
+    monkeypatch.setenv("ULLM_HIP_VISIBLE_DEVICES", "0")
+    monkeypatch.setenv("ULLM_EXPERIMENTAL_HIP_PAGED_DECODE_SPLIT_TILE", "256")
+    monkeypatch.setenv("ULLM_EXPERIMENTAL_HIP_PAGED_DECODE_SPLIT_MIN_CACHE_LEN", "1")
+    monkeypatch.setenv("ULLM_EXPERIMENTAL_SQ8_PAGED_DECODE_SPLIT_TILE", "20")
+    monkeypatch.setenv("ULLM_EXPERIMENTAL_PAGED_DECODE_GQA_GROUPED_SPLIT", "0")
+    monkeypatch.setenv("ULLM_EXPERIMENTAL_PAGED_DECODE_GQA_PIPELINED_SPLIT", "1")
+    monkeypatch.setenv("ULLM_EXPERIMENTAL_SQ8_PAGED_DECODE_SPLIT_ALLOW_MULTITILE", "1")
+
+    settings = GatewaySettings.from_env()
+    config = WorkerConfig.from_settings(settings)
+
+    assert settings.served_model is not None
+    assert settings.served_model.worker.execution is not None
+    assert config.environment["ULLM_EXPERIMENTAL_PAGED_DECODE_GQA_GROUPED_SPLIT"] == "1"
+    for name in (
+        "ULLM_EXPERIMENTAL_HIP_PAGED_DECODE_SPLIT_TILE",
+        "ULLM_EXPERIMENTAL_HIP_PAGED_DECODE_SPLIT_MIN_CACHE_LEN",
+        "ULLM_EXPERIMENTAL_SQ8_PAGED_DECODE_SPLIT_TILE",
+        "ULLM_EXPERIMENTAL_PAGED_DECODE_GQA_PIPELINED_SPLIT",
+        "ULLM_EXPERIMENTAL_SQ8_PAGED_DECODE_SPLIT_ALLOW_MULTITILE",
+    ):
+        assert name not in config.environment
 
 
 @pytest.mark.parametrize("legacy_name", sorted(LEGACY_MODEL_ENVIRONMENT))

@@ -32,6 +32,8 @@ _ENVIRONMENT_NAME = re.compile(r"[A-Z_][A-Z0-9_]*\Z")
 # allowed to control.  Keep the complete set here so manifest mode can clear a
 # parent process's stale experiment state before it launches a worker.
 MANIFEST_EXECUTION_ENVIRONMENT = (
+    "ULLM_EXPERIMENTAL_HIP_PAGED_DECODE_SPLIT_TILE",
+    "ULLM_EXPERIMENTAL_HIP_PAGED_DECODE_SPLIT_MIN_CACHE_LEN",
     "ULLM_EXPERIMENTAL_SQ8_PAGED_DECODE_SPLIT_TILE",
     "ULLM_EXPERIMENTAL_PAGED_DECODE_GQA_GROUPED_SPLIT",
     "ULLM_EXPERIMENTAL_PAGED_DECODE_GQA_PIPELINED_SPLIT",
@@ -40,6 +42,7 @@ MANIFEST_EXECUTION_ENVIRONMENT = (
 _PAGED_DECODE_SPLIT_GUARD = "ULLM_REQUIRE_HIP_PAGED_DECODE_SPLIT_KERNEL"
 _PAGED_DECODE_SPLIT_TILES = frozenset({20, 128, 256, 512})
 _PAGED_DECODE_SPLIT_EXECUTION_PROFILE = "rdna4_w8a8_block_ck"
+_AQ4_PAGED_DECODE_SPLIT_EXECUTION_PROFILE = "rdna4_aq4_resident"
 
 
 class ServedModelError(RuntimeError):
@@ -118,11 +121,17 @@ class PagedDecodeAttentionExecution:
 
     @property
     def environment(self) -> dict[str, str]:
-        return {
-            "ULLM_EXPERIMENTAL_SQ8_PAGED_DECODE_SPLIT_TILE": str(self.split_tile),
-            "ULLM_EXPERIMENTAL_PAGED_DECODE_GQA_GROUPED_SPLIT": "1",
-            "ULLM_EXPERIMENTAL_SQ8_PAGED_DECODE_SPLIT_ALLOW_MULTITILE": "1",
-        }
+        if self.kernel == "gqa_grouped_split":
+            return {
+                "ULLM_EXPERIMENTAL_SQ8_PAGED_DECODE_SPLIT_TILE": str(self.split_tile),
+                "ULLM_EXPERIMENTAL_PAGED_DECODE_GQA_GROUPED_SPLIT": "1",
+                "ULLM_EXPERIMENTAL_SQ8_PAGED_DECODE_SPLIT_ALLOW_MULTITILE": "1",
+            }
+        if self.kernel == "aq4_gqa_grouped_split":
+            return {"ULLM_EXPERIMENTAL_PAGED_DECODE_GQA_GROUPED_SPLIT": "1"}
+        raise ServedModelError(
+            "worker.execution.paged_decode_attention.kernel is unsupported"
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -241,21 +250,34 @@ def load_served_model(path: Path) -> ServedModel:
             "worker.required_environment cannot select manifest execution"
         )
     if worker.execution is not None:
-        if format_contract.format_id != "SQ8_0":
-            raise ServedModelError(
-                "worker.execution is currently supported only for SQ8_0"
-            )
-        if worker.identity.device != "gfx1201":
-            raise ServedModelError(
-                "worker.execution requires the gfx1201 SQ8_0 worker identity"
-            )
-        if worker.identity.execution_profile != _PAGED_DECODE_SPLIT_EXECUTION_PROFILE:
-            raise ServedModelError(
-                "worker.execution requires the rdna4_w8a8_block_ck worker profile"
-            )
         if _PAGED_DECODE_SPLIT_GUARD not in worker.required_environment:
             raise ServedModelError(
                 "worker.execution requires the paged-decode split HIP guard"
+            )
+        kernel = worker.execution.paged_decode_attention.kernel
+        is_sq8 = (
+            kernel == "gqa_grouped_split"
+            and format_contract.format_id == "SQ8_0"
+            and worker.identity.device == "gfx1201"
+            and worker.identity.execution_profile
+            == _PAGED_DECODE_SPLIT_EXECUTION_PROFILE
+        )
+        is_aq4 = (
+            kernel == "aq4_gqa_grouped_split"
+            and format_contract.format_id == "AQ4_0"
+            and worker.identity.device == "gfx1201"
+            and worker.identity.execution_profile
+            == _AQ4_PAGED_DECODE_SPLIT_EXECUTION_PROFILE
+        )
+        if not is_sq8 and kernel == "gqa_grouped_split":
+            raise ServedModelError(
+                "worker.execution requires the gfx1201 SQ8_0 rdna4_w8a8_block_ck "
+                "worker identity"
+            )
+        if not is_aq4 and kernel == "aq4_gqa_grouped_split":
+            raise ServedModelError(
+                "worker.execution requires the gfx1201 AQ4_0 rdna4_aq4_resident "
+                "worker identity"
             )
     product = _parse_product(document["product"], manifest_path.parent)
     promotion = _parse_promotion(document["promotion"], manifest_path.parent)
@@ -595,14 +617,19 @@ def _parse_worker_execution(value: Any) -> WorkerExecution:
         "worker.execution.paged_decode_attention.kernel",
         maximum=128,
     )
-    if kernel != "gqa_grouped_split":
+    if kernel not in {"gqa_grouped_split", "aq4_gqa_grouped_split"}:
         raise ServedModelError(
             "worker.execution.paged_decode_attention.kernel is unsupported"
         )
     split_tile = _positive_integer(
         attention["split_tile"], "worker.execution.paged_decode_attention.split_tile"
     )
-    if split_tile not in _PAGED_DECODE_SPLIT_TILES:
+    supported_tile = (
+        split_tile in _PAGED_DECODE_SPLIT_TILES
+        if kernel == "gqa_grouped_split"
+        else split_tile == 128
+    )
+    if not supported_tile:
         raise ServedModelError(
             "worker.execution.paged_decode_attention.split_tile is unsupported"
         )
