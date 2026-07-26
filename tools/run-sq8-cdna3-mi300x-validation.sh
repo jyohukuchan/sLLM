@@ -284,8 +284,9 @@ if [[ $requested_stage == all ]]; then
   for stage in "${stages[@]}"; do
     run_named_stage "$stage"
   done
+  printf 'PASS P0 A′/B rental gate; logs and resume state: %s\n' "$results_dir"
+  printf 'UNCONFIRMED by this runner: full-model gfx942 integration, runtime occupancy/residency, and hand-written A.\n'
 else
   run_named_stage "$requested_stage"
+  printf 'PASS requested P0 validation stage; logs and resume state: %s\n' "$results_dir"
 fi
-
-printf 'PASS requested CDNA3 validation stages; logs and resume state: %s\n' "$results_dir"
