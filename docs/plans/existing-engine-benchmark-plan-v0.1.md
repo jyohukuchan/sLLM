@@ -11,7 +11,7 @@ Before implementing Qwen3 in uLLM or stabilizing `aq` / `sq`, measure existing i
 | llama.cpp | run locally | primary V620/R9700 baseline |
 | vLLM | do not force on V620; try R9700 with Qwen3-14B-FP8 | R9700 smoke/representative baseline, MI300X later |
 | SGLang | do not force on V620; try R9700 with Qwen3-14B-FP8 | R9700 smoke/representative baseline, MI300X later |
-| ROCm/ATOM | do not force on V620; try R9700 with Qwen3-14B-FP8 | R9700 smoke/representative baseline, MI300X later |
+| ROCm/ATOM | do not force on V620; try R9700 with Qwen3-14B-FP8 | R9700 smoke/representative baseline, MI300X later; see [AMD ATOM MI300X feasibility research (2026-07-26)](../research/amd-atom-mi300x-feasibility-2026-07-26.md) before allocating rental time |
 | TensorRT-LLM | not for AMD GPUs | harness and unsupported records now, NVIDIA later |
 
 ## Measurement Grid
