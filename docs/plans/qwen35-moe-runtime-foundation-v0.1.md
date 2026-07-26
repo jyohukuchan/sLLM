@@ -433,6 +433,18 @@ hidden 2048, expert intermediate 512 から、共有 workspace は
 直列再利用するよう修正した。この値は要求 allocation byte 数であり、HIP allocator
 overhead を含む実測 telemetry は下記の R9700 実行で確認する。
 
+KV residency にはもう一つ byte-contract の境界がある。BN ledger の
+`full_attention_kv_bytes_per_token=20,480 B` は、10 full-attention layer × K/V
+× 2 KV head × 256 dim × **2 B**（BF16 source cache）である。BW 初版 binary の
+full-attention bridge は F32 cache を確保していたため、同じ 262,144 token で
+さらに `5,368,709,120 B` を要求する。したがって初版の静的見積りは
+`36,226,719,556 B`、R9700 `34,208,743,424 B` より `2,017,976,132 B` 超過する。
+これはまだ allocation を試みた結果ではない。BR が実装・検証中の typed KV cache が
+確定した後、MoE executor は `ULLM_KV_CACHE_DTYPE=f16` を明示した 2 B/value
+capacity run で BN ledger と同じ byte budget を実測する予定である。F16 storage は
+capacity のための runtime 選択であり、BF16 source cache と数値的に同一だという主張は
+しない。
+
 ### loader/source の検証範囲
 
 `tools/architecture_hf_trace.py self-test` は意図的な layer-3 corruption を検出して

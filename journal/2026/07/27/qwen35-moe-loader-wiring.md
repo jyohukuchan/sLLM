@@ -24,6 +24,11 @@
   渡し、9B default geometry を保った。
 - MoE decode scratch は 40 層に複製せず、111.20 MiB の shared workspace とした。初版の
   4.344 GiB の重複確保を避け、BN ledger の一層分 workspace 前提と整合させた。
+- BN の 262,144-token ledger の full-attention KV は 2 B/value（合計 5 GiB）である一方、
+  BW 初版 binary は F32 KV（10 GiB）だった。初版の静的 262k 合計は
+  `36,226,719,556 B` となり、R9700 より `2,017,976,132 B` 超過する。この値は未実行の
+  byte 計算であり、allocation failure を示すものではない。BR の typed KV cache が確定したら
+  F16 2 B/value 設定で ledger 条件を実測する（数値的 BF16 同一性は主張しない）。
 - CPU の source streaming control は 5 token × 40 層で final hidden/ordered route とも
   0 差。`architecture_hf_trace.py self-test` は corruption を検出した。完全 HF capture は
   66.965 GiB checkpoint に対する host RAM 不足のため未実行である。
@@ -39,8 +44,10 @@
 
 - `/run/ullm/r9700.lock` が解放され、外部 `ullm-openai.service` が GPU を保持していない
   ことを確認してから、`HIP_VISIBLE_DEVICES=2` / runtime device 0 で 262,144 token の
-  resident load、短い greedy generation、AMD SMI telemetry を取る。ロックの奪取、
-  サービス停止・起動、`active.json` 変更はしない。
+  resident load、短い greedy generation、AMD SMI telemetry を取る。typed KV cache が
+  確定していれば `ULLM_KV_CACHE_DTYPE=f16` を明示し、確定前なら初版 F32 の 262k overflow
+  見積りと 131,072-token fallback を区別して記録する。ロックの奪取、サービス停止・起動、
+  `active.json` 変更はしない。
 - 同じ条件で既存 Qwen3.5-9B `AQ4_0` baseline probe を走らせ、既知 top-1 token 220 と
   一致することを確認する。
 - 生成 token を official tokenizer で文字列化し、最終 token の全 40 層で runtime route と
