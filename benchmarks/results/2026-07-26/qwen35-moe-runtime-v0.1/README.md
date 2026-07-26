@@ -11,7 +11,7 @@ Source checkpoint contract:
 - layer-0 router raw BF16 SHA-256:
   `d55bd73f2cfdb0bd87a2228e6b1894757b9ca3a6fdd6ecac7418cb2a829fbac3`.
 
-`hf-routing-v4/metadata.json` records the HF-selected IDs and scores for three
+`hf-routing-v5/metadata.json` records the HF-selected IDs and scores for three
 inputs. Regenerate its local raw fixture with:
 
 ```bash
@@ -23,17 +23,22 @@ python3 tools/qwen35_moe_hf_routing_reference.py \
 
 The reports show:
 
-- `cpu-runtime-full-verify-v3.json`: every F32 and raw-BF16 synthetic MoE
-  stage is bit-identical between the Rust CPU reference and CPU C ABI;
-- `gpu-runtime-full-verify-v3.json`: the same stages on R9700/gfx1201 versus
+- `cpu-runtime-full-verify-v5.json`: every F32 and raw-BF16 synthetic MoE
+  stage is bit-identical between the Rust CPU reference and CPU C ABI on both
+  the prefill grouped-GEMM path and the separate decode GEMM path;
+- `gpu-runtime-full-verify-v5.json`: the same stages on R9700/gfx1201 versus
   the CPU reference;
-- `cpu-hf-routing-verify-v3.json` and `gpu-hf-routing-verify-v3.json`: the
+- `cpu-hf-routing-verify-v5.json` and `gpu-hf-routing-verify-v5.json`: the
   real HF router IDs/scores match exactly;
-- `cpu-hf-grouped-gemm-verify-v4.json` and
-  `gpu-hf-grouped-gemm-verify-v4.json`: a real source expert 3-D BF16 slice,
+- `cpu-hf-prefill-grouped-gemm-verify-v5.json` and
+  `gpu-hf-prefill-grouped-gemm-verify-v5.json`: a real source expert 3-D BF16 slice,
   deliberately reordered by local grouped IDs, matches HF F32 expected values
-  and both ABIs exactly;
-- `cpu-hf-routing-exact-tie-v3.json`: an intentional all-tie diagnostic is
+  and the prefill ABI exactly;
+- `cpu-hf-decode-gemm-verify-v5.json` and
+  `gpu-hf-decode-gemm-verify-v5.json`: all eight real first-token selected
+  expert slabs from the layer-0 BF16 tensor match HF F32 expected values and
+  the separate decode ABI exactly;
+- `cpu-hf-routing-exact-tie-v5.json`: an intentional all-tie diagnostic is
   flagged rather than treated as an ordering contract;
 - `architecture-hf-trace-self-test/`: the existing trace harness rejects the
   intentional layer-3 corruption at its first affected layer.

@@ -7,7 +7,9 @@
 //! - default: runs a synthetic complete MoE block through every CPU-reference
 //!   stage and, with `--gpu`, every gfx1201 primitive;
 //! - `--route-fixture DIR`: consumes an HF-produced real-router fixture and
-//!   compares top-k IDs before optionally checking the GPU routing primitive.
+//!   compares top-k IDs before optionally checking the GPU routing primitive;
+//! - `--grouped-gemm-fixture DIR` / `--decode-gemm-fixture DIR`: consume a
+//!   compact real 3-D BF16 expert slice through the prefill or decode path.
 
 use std::env;
 use std::fs;
@@ -15,11 +17,11 @@ use std::path::{Path, PathBuf};
 
 use ullm_runtime_sys::{
     MoeRouting, MoeShape, MoeWeightDtype, RuntimeBuffer, RuntimeContext, RuntimeStream, add_f32,
-    device_count, moe_gated_silu_f32, moe_gated_silu_reference_f32, moe_gather_f32,
-    moe_gather_reference_f32, moe_grouped_gemm_f32, moe_grouped_gemm_reference_f32,
-    moe_grouped_gemm_reference_raw_f32, moe_route_f32, moe_route_reference_with_weight_dtype_f32,
-    moe_scatter_weighted_f32, moe_scatter_weighted_reference_f32, moe_sigmoid_gate_f32,
-    moe_sigmoid_gate_reference_f32,
+    device_count, moe_decode_gemm_f32, moe_decode_gemm_reference_raw_f32, moe_gated_silu_f32,
+    moe_gated_silu_reference_f32, moe_gather_f32, moe_gather_reference_f32, moe_grouped_gemm_f32,
+    moe_grouped_gemm_reference_f32, moe_grouped_gemm_reference_raw_f32, moe_route_f32,
+    moe_route_reference_with_weight_dtype_f32, moe_scatter_weighted_f32,
+    moe_scatter_weighted_reference_f32, moe_sigmoid_gate_f32, moe_sigmoid_gate_reference_f32,
 };
 
 #[derive(Debug)]
@@ -29,11 +31,12 @@ struct Options {
     report: PathBuf,
     route_fixture: Option<PathBuf>,
     grouped_gemm_fixture: Option<PathBuf>,
+    decode_gemm_fixture: Option<PathBuf>,
     expect_boundary_tie: bool,
 }
 
 fn usage() -> &'static str {
-    "usage: moe_runtime_verify --report PATH [--gpu] [--device N] [--route-fixture DIR | --grouped-gemm-fixture DIR] [--expect-boundary-tie]"
+    "usage: moe_runtime_verify --report PATH [--gpu] [--device N] [--route-fixture DIR | --grouped-gemm-fixture DIR | --decode-gemm-fixture DIR] [--expect-boundary-tie]"
 }
 
 fn parse_options() -> Result<Options, String> {
@@ -42,6 +45,7 @@ fn parse_options() -> Result<Options, String> {
     let mut report = None;
     let mut route_fixture = None;
     let mut grouped_gemm_fixture = None;
+    let mut decode_gemm_fixture = None;
     let mut expect_boundary_tie = false;
     let mut args = env::args_os().skip(1);
     while let Some(arg) = args.next() {
@@ -76,6 +80,12 @@ fn parse_options() -> Result<Options, String> {
                         "--grouped-gemm-fixture requires a directory".to_string()
                     })?));
             }
+            "--decode-gemm-fixture" => {
+                decode_gemm_fixture =
+                    Some(PathBuf::from(args.next().ok_or_else(|| {
+                        "--decode-gemm-fixture requires a directory".to_string()
+                    })?));
+            }
             "--expect-boundary-tie" => expect_boundary_tie = true,
             "--help" | "-h" => return Err(usage().to_string()),
             other => return Err(format!("unknown argument {other:?}; {}", usage())),
@@ -87,11 +97,16 @@ fn parse_options() -> Result<Options, String> {
         report: report.ok_or_else(|| "--report is required".to_string())?,
         route_fixture,
         grouped_gemm_fixture,
+        decode_gemm_fixture,
         expect_boundary_tie,
     };
-    if options.route_fixture.is_some() && options.grouped_gemm_fixture.is_some() {
+    let fixture_count = usize::from(options.route_fixture.is_some())
+        + usize::from(options.grouped_gemm_fixture.is_some())
+        + usize::from(options.decode_gemm_fixture.is_some());
+    if fixture_count > 1 {
         return Err(
-            "--route-fixture and --grouped-gemm-fixture are mutually exclusive".to_string(),
+            "--route-fixture, --grouped-gemm-fixture, and --decode-gemm-fixture are mutually exclusive"
+                .to_string(),
         );
     }
     if options.expect_boundary_tie && options.route_fixture.is_none() {
@@ -540,6 +555,54 @@ struct RuntimeGroupedGemm {
     output: Vec<f32>,
 }
 
+#[derive(Clone, Copy, Debug)]
+enum GemmPath {
+    Decode,
+    Prefill,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn runtime_gemm(
+    path: GemmPath,
+    weight_buffer: &RuntimeBuffer,
+    weight_dtype: MoeWeightDtype,
+    expert_ids_buffer: &RuntimeBuffer,
+    input_buffer: &RuntimeBuffer,
+    assignments: usize,
+    num_experts: usize,
+    rows_per_expert: usize,
+    cols: usize,
+    output_buffer: &mut RuntimeBuffer,
+    stream: &mut RuntimeStream,
+) -> Result<(), String> {
+    match path {
+        GemmPath::Decode => moe_decode_gemm_f32(
+            weight_buffer,
+            weight_dtype,
+            expert_ids_buffer,
+            input_buffer,
+            assignments,
+            num_experts,
+            rows_per_expert,
+            cols,
+            output_buffer,
+            Some(stream),
+        ),
+        GemmPath::Prefill => moe_grouped_gemm_f32(
+            weight_buffer,
+            weight_dtype,
+            expert_ids_buffer,
+            input_buffer,
+            assignments,
+            num_experts,
+            rows_per_expert,
+            cols,
+            output_buffer,
+            Some(stream),
+        ),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn execute_runtime_grouped_gemm(
     weights: &[u8],
@@ -550,6 +613,7 @@ fn execute_runtime_grouped_gemm(
     rows_per_expert: usize,
     cols: usize,
     runtime_device_index: u32,
+    path: GemmPath,
 ) -> Result<RuntimeGroupedGemm, String> {
     let mut context = RuntimeContext::create(runtime_device_index)?;
     let info = context.device_info()?;
@@ -563,7 +627,8 @@ fn execute_runtime_grouped_gemm(
             .checked_mul(rows_per_expert)
             .ok_or_else(|| "grouped-GEMM output element count overflows".to_string())?,
     )?;
-    moe_grouped_gemm_f32(
+    runtime_gemm(
+        path,
         &weight_buffer,
         MoeWeightDtype::Bf16,
         &ids_buffer,
@@ -573,7 +638,7 @@ fn execute_runtime_grouped_gemm(
         rows_per_expert,
         cols,
         &mut output_buffer,
-        Some(&mut stream),
+        &mut stream,
     )?;
     Ok(RuntimeGroupedGemm {
         runtime_device_index,
@@ -590,6 +655,7 @@ fn verify_runtime_synthetic(
     weights: &SyntheticWeights,
     cpu: &CpuStages,
     weight_dtype: MoeWeightDtype,
+    gemm_path: GemmPath,
     device: u32,
     require_gfx1201: bool,
 ) -> Result<String, String> {
@@ -677,7 +743,8 @@ fn verify_runtime_synthetic(
         &mut gathered,
         Some(&mut stream),
     )?;
-    moe_grouped_gemm_f32(
+    runtime_gemm(
+        gemm_path,
         &expert_gate_up_weight,
         weight_dtype,
         &selected_ids,
@@ -687,7 +754,7 @@ fn verify_runtime_synthetic(
         2 * shape.intermediate_size,
         shape.hidden_size,
         &mut expert_gate_up,
-        Some(&mut stream),
+        &mut stream,
     )?;
     moe_gated_silu_f32(
         &expert_gate_up,
@@ -696,7 +763,8 @@ fn verify_runtime_synthetic(
         &mut activated,
         Some(&mut stream),
     )?;
-    moe_grouped_gemm_f32(
+    runtime_gemm(
+        gemm_path,
         &expert_down_weight,
         weight_dtype,
         &selected_ids,
@@ -706,7 +774,7 @@ fn verify_runtime_synthetic(
         shape.hidden_size,
         shape.intermediate_size,
         &mut expert_output,
-        Some(&mut stream),
+        &mut stream,
     )?;
     moe_scatter_weighted_f32(
         &expert_output,
@@ -717,7 +785,8 @@ fn verify_runtime_synthetic(
         &mut routed,
         Some(&mut stream),
     )?;
-    moe_grouped_gemm_f32(
+    runtime_gemm(
+        gemm_path,
         &shared_gate_up_weight,
         weight_dtype,
         &shared_ids,
@@ -727,7 +796,7 @@ fn verify_runtime_synthetic(
         2 * shape.shared_intermediate_size,
         shape.hidden_size,
         &mut shared_gate_up,
-        Some(&mut stream),
+        &mut stream,
     )?;
     moe_gated_silu_f32(
         &shared_gate_up,
@@ -736,7 +805,8 @@ fn verify_runtime_synthetic(
         &mut shared_active,
         Some(&mut stream),
     )?;
-    moe_grouped_gemm_f32(
+    runtime_gemm(
+        gemm_path,
         &shared_down_weight,
         weight_dtype,
         &shared_ids,
@@ -746,9 +816,10 @@ fn verify_runtime_synthetic(
         shape.hidden_size,
         shape.shared_intermediate_size,
         &mut shared_output,
-        Some(&mut stream),
+        &mut stream,
     )?;
-    moe_grouped_gemm_f32(
+    runtime_gemm(
+        gemm_path,
         &shared_gate_weight,
         weight_dtype,
         &shared_ids,
@@ -758,7 +829,7 @@ fn verify_runtime_synthetic(
         1,
         shape.hidden_size,
         &mut shared_gate_values,
-        Some(&mut stream),
+        &mut stream,
     )?;
     moe_sigmoid_gate_f32(
         &shared_gate_values,
@@ -884,16 +955,13 @@ fn verify_runtime_synthetic(
     ))
 }
 
-fn run_synthetic(options: &Options) -> Result<String, String> {
-    let shape = MoeShape {
-        tokens: 5,
-        hidden_size: 16,
-        num_experts: 7,
-        top_k: 3,
-        intermediate_size: 9,
-        shared_intermediate_size: 7,
-    };
-    let hidden = values(shape.tokens * shape.hidden_size, 0.1);
+fn run_synthetic_path(
+    options: &Options,
+    shape: MoeShape,
+    phase: f32,
+    gemm_path: GemmPath,
+) -> Result<String, String> {
+    let hidden = values(shape.tokens * shape.hidden_size, phase);
     let weights = make_synthetic_weights(shape);
     let f32_cpu = cpu_stages(shape, &hidden, &weights, MoeWeightDtype::F32)?;
     let bf16_cpu = cpu_stages(shape, &hidden, &weights, MoeWeightDtype::Bf16)?;
@@ -906,6 +974,7 @@ fn run_synthetic(options: &Options) -> Result<String, String> {
         &weights,
         &f32_cpu,
         MoeWeightDtype::F32,
+        gemm_path,
         0,
         false,
     )?;
@@ -915,6 +984,7 @@ fn run_synthetic(options: &Options) -> Result<String, String> {
         &weights,
         &bf16_cpu,
         MoeWeightDtype::Bf16,
+        gemm_path,
         0,
         false,
     )?;
@@ -927,6 +997,7 @@ fn run_synthetic(options: &Options) -> Result<String, String> {
                 &weights,
                 &f32_cpu,
                 MoeWeightDtype::F32,
+                gemm_path,
                 device,
                 true,
             )?,
@@ -936,6 +1007,7 @@ fn run_synthetic(options: &Options) -> Result<String, String> {
                 &weights,
                 &bf16_cpu,
                 MoeWeightDtype::Bf16,
+                gemm_path,
                 device,
                 true,
             )?,
@@ -944,7 +1016,7 @@ fn run_synthetic(options: &Options) -> Result<String, String> {
         ("null".to_string(), "null".to_string())
     };
     Ok(format!(
-        "{{\"schema\":\"ullm.moe_runtime_verify.v1\",\"mode\":\"synthetic-full\",\"passed\":true,\"shape\":{{\"tokens\":{},\"hidden_size\":{},\"num_experts\":{},\"top_k\":{},\"intermediate_size\":{},\"shared_intermediate_size\":{}}},\"f32\":{{\"cpu_reference\":{{\"routing_boundary_tie\":false,\"output_elements\":{}}},\"cpu_runtime\":{f32_cpu_runtime},\"gpu\":{f32_gpu}}},\"bf16\":{{\"cpu_reference\":{{\"routing_boundary_tie\":false,\"output_elements\":{}}},\"cpu_runtime\":{bf16_cpu_runtime},\"gpu\":{bf16_gpu}}}}}\n",
+        "{{\"shape\":{{\"tokens\":{},\"hidden_size\":{},\"num_experts\":{},\"top_k\":{},\"intermediate_size\":{},\"shared_intermediate_size\":{}}},\"f32\":{{\"cpu_reference\":{{\"routing_boundary_tie\":false,\"output_elements\":{}}},\"cpu_runtime\":{f32_cpu_runtime},\"gpu\":{f32_gpu}}},\"bf16\":{{\"cpu_reference\":{{\"routing_boundary_tie\":false,\"output_elements\":{}}},\"cpu_runtime\":{bf16_cpu_runtime},\"gpu\":{bf16_gpu}}}}}",
         shape.tokens,
         shape.hidden_size,
         shape.num_experts,
@@ -953,6 +1025,30 @@ fn run_synthetic(options: &Options) -> Result<String, String> {
         shape.shared_intermediate_size,
         f32_cpu.final_output.len(),
         bf16_cpu.final_output.len(),
+    ))
+}
+
+fn run_synthetic(options: &Options) -> Result<String, String> {
+    let prefill_shape = MoeShape {
+        tokens: 5,
+        hidden_size: 16,
+        num_experts: 7,
+        top_k: 3,
+        intermediate_size: 9,
+        shared_intermediate_size: 7,
+    };
+    let decode_shape = MoeShape {
+        tokens: 1,
+        hidden_size: 16,
+        num_experts: 7,
+        top_k: 3,
+        intermediate_size: 9,
+        shared_intermediate_size: 7,
+    };
+    let prefill = run_synthetic_path(options, prefill_shape, 0.1, GemmPath::Prefill)?;
+    let decode = run_synthetic_path(options, decode_shape, 0.73, GemmPath::Decode)?;
+    Ok(format!(
+        "{{\"schema\":\"ullm.moe_runtime_verify.v1\",\"mode\":\"synthetic-full\",\"passed\":true,\"prefill\":{prefill},\"decode\":{decode}}}\n"
     ))
 }
 
@@ -988,7 +1084,11 @@ fn read_grouped_gemm_shape(dir: &Path) -> Result<(usize, usize, usize, usize), S
     Ok((values[0], values[1], values[2], values[3]))
 }
 
-fn run_grouped_gemm_fixture(options: &Options, dir: &Path) -> Result<String, String> {
+fn run_grouped_gemm_fixture(
+    options: &Options,
+    dir: &Path,
+    path: GemmPath,
+) -> Result<String, String> {
     let (assignments, num_experts, rows_per_expert, cols) = read_grouped_gemm_shape(dir)?;
     let weights = fs::read(dir.join("weights.bf16"))
         .map_err(|error| format!("cannot read raw BF16 grouped-GEMM weights: {error}"))?;
@@ -1004,20 +1104,36 @@ fn run_grouped_gemm_fixture(options: &Options, dir: &Path) -> Result<String, Str
         &fs::read(dir.join("expected.f32")).map_err(|error| error.to_string())?,
         "grouped-GEMM HF expected output",
     )?;
-    let reference = moe_grouped_gemm_reference_raw_f32(
-        &weights,
-        MoeWeightDtype::Bf16,
-        &expert_ids,
-        &input,
-        assignments,
-        num_experts,
-        rows_per_expert,
-        cols,
-    )?;
-    let expected_error = max_abs(&reference, &expected, "HF grouped-GEMM expected output")?;
+    let reference = match path {
+        GemmPath::Decode => moe_decode_gemm_reference_raw_f32(
+            &weights,
+            MoeWeightDtype::Bf16,
+            &expert_ids,
+            &input,
+            assignments,
+            num_experts,
+            rows_per_expert,
+            cols,
+        )?,
+        GemmPath::Prefill => moe_grouped_gemm_reference_raw_f32(
+            &weights,
+            MoeWeightDtype::Bf16,
+            &expert_ids,
+            &input,
+            assignments,
+            num_experts,
+            rows_per_expert,
+            cols,
+        )?,
+    };
+    let path_label = match path {
+        GemmPath::Decode => "decode-GEMM",
+        GemmPath::Prefill => "prefill grouped-GEMM",
+    };
+    let expected_error = max_abs(&reference, &expected, "HF GEMM expected output")?;
     if expected_error > 2.0e-5 {
         return Err(format!(
-            "CPU reference differs from HF grouped-GEMM fixture by {expected_error:e}, exceeds 2e-5"
+            "CPU reference differs from HF {path_label} fixture by {expected_error:e}, exceeds 2e-5"
         ));
     }
     let cpu_runtime = execute_runtime_grouped_gemm(
@@ -1029,14 +1145,11 @@ fn run_grouped_gemm_fixture(options: &Options, dir: &Path) -> Result<String, Str
         rows_per_expert,
         cols,
         0,
+        path,
     )?;
-    let cpu_error = max_abs(
-        &cpu_runtime.output,
-        &reference,
-        "CPU C ABI grouped-GEMM output",
-    )?;
+    let cpu_error = max_abs(&cpu_runtime.output, &reference, "CPU C ABI GEMM output")?;
     if cpu_error != 0.0 {
-        return Err(format!("CPU C ABI grouped-GEMM differs by {cpu_error:e}"));
+        return Err(format!("CPU C ABI {path_label} differs by {cpu_error:e}"));
     }
     let gpu = if options.gpu {
         let runtime = execute_runtime_grouped_gemm(
@@ -1048,16 +1161,17 @@ fn run_grouped_gemm_fixture(options: &Options, dir: &Path) -> Result<String, Str
             rows_per_expert,
             cols,
             gfx1201_runtime_device(options.device)?,
+            path,
         )?;
         if runtime.backend != "hip" || !runtime.arch.starts_with("gfx1201") {
             return Err(format!(
-                "--gpu grouped-GEMM fixture selected non-gfx1201 runtime device {} {}",
+                "--gpu {path_label} fixture selected non-gfx1201 runtime device {} {}",
                 runtime.backend, runtime.arch
             ));
         }
-        let error = max_abs(&runtime.output, &reference, "GPU grouped-GEMM output")?;
+        let error = max_abs(&runtime.output, &reference, "GPU GEMM output")?;
         if error > 2.0e-5 {
-            return Err(format!("GPU grouped-GEMM error {error:e} exceeds 2e-5"));
+            return Err(format!("GPU {path_label} error {error:e} exceeds 2e-5"));
         }
         format!(
             "{{\"runtime_device_index\":{},\"device_id\":{},\"max_abs\":{error:.9e}}}",
@@ -1067,7 +1181,11 @@ fn run_grouped_gemm_fixture(options: &Options, dir: &Path) -> Result<String, Str
         "null".to_string()
     };
     Ok(format!(
-        "{{\"schema\":\"ullm.moe_runtime_verify.v1\",\"mode\":\"hf-grouped-gemm-fixture\",\"passed\":true,\"weight_dtype\":\"bf16\",\"shape\":{{\"assignments\":{},\"num_experts\":{},\"rows_per_expert\":{},\"cols\":{}}},\"hf_expected_max_abs\":{expected_error:.9e},\"cpu_runtime\":{{\"runtime_device_index\":{},\"device_id\":{},\"backend\":{:?},\"max_abs\":{cpu_error:.9e}}},\"gpu\":{gpu}}}\n",
+        "{{\"schema\":\"ullm.moe_runtime_verify.v1\",\"mode\":{:?},\"passed\":true,\"weight_dtype\":\"bf16\",\"shape\":{{\"assignments\":{},\"num_experts\":{},\"rows_per_expert\":{},\"cols\":{}}},\"hf_expected_max_abs\":{expected_error:.9e},\"cpu_runtime\":{{\"runtime_device_index\":{},\"device_id\":{},\"backend\":{:?},\"max_abs\":{cpu_error:.9e}}},\"gpu\":{gpu}}}\n",
+        match path {
+            GemmPath::Decode => "hf-decode-gemm-fixture",
+            GemmPath::Prefill => "hf-prefill-grouped-gemm-fixture",
+        },
         assignments,
         num_experts,
         rows_per_expert,
@@ -1209,8 +1327,11 @@ fn main() {
         let report = match &options.route_fixture {
             Some(dir) => run_route_fixture(&options, dir)?,
             None => match &options.grouped_gemm_fixture {
-                Some(dir) => run_grouped_gemm_fixture(&options, dir)?,
-                None => run_synthetic(&options)?,
+                Some(dir) => run_grouped_gemm_fixture(&options, dir, GemmPath::Prefill)?,
+                None => match &options.decode_gemm_fixture {
+                    Some(dir) => run_grouped_gemm_fixture(&options, dir, GemmPath::Decode)?,
+                    None => run_synthetic(&options)?,
+                },
             },
         };
         write_report(&options.report, &report)?;

@@ -41,7 +41,22 @@ int ullm_moe_gfx1201_gather_f32(
     char* error,
     size_t error_capacity);
 
-int ullm_moe_gfx1201_grouped_gemm_f32(
+int ullm_moe_gfx1201_decode_gemm_f32(
+    const void* weights,
+    uint32_t weight_dtype,
+    const void* selected_expert_ids_i32,
+    const void* input_f32,
+    size_t top_k,
+    size_t num_experts,
+    size_t rows_per_expert,
+    size_t cols,
+    void* output_f32,
+    void* stream,
+    int device_id,
+    char* error,
+    size_t error_capacity);
+
+int ullm_moe_gfx1201_prefill_grouped_gemm_f32(
     const void* weights,
     uint32_t weight_dtype,
     const void* expert_ids_i32,

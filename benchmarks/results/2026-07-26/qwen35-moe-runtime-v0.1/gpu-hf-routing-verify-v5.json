@@ -1,0 +1,1 @@
+{"schema":"ullm.moe_runtime_verify.v1","mode":"hf-route-fixture","passed":true,"hf_indices_match_cpu":true,"hf_score_max_abs":0.000000000e0,"boundary_tie_detected":false,"cpu_runtime":{"runtime_device_index":0,"device_id":0,"backend":"cpu","score_max_abs":0.000000000e0},"gpu":{"runtime_device_index":1,"device_id":0,"score_max_abs":0.000000000e0} }

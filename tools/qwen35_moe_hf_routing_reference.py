@@ -134,6 +134,59 @@ def write_grouped_gemm_fixture(
     }
 
 
+def write_decode_gemm_fixture(
+    directory: Path,
+    hidden,
+    gate_up_slice,
+    source_expert_ids,
+    *,
+    rows: int,
+    cols: int,
+    top_k: int,
+) -> dict[str, object]:
+    """Write one token's complete top-k selected BF16 slabs for decode.
+
+    The local expert axis is in router-rank order `[0..top_k)`, while the
+    metadata retains the real checkpoint expert IDs. This validates the
+    decode-only ABI with Qwen3.5's actual top-8 selection without copying an
+    entire 256-expert reservoir.
+    """
+    import torch
+
+    if tuple(gate_up_slice.shape) != (top_k, rows, cols):
+        raise FixtureError(
+            f"decode slice shape {tuple(gate_up_slice.shape)} != {(top_k, rows, cols)}"
+        )
+    if len(set(int(value) for value in source_expert_ids)) != top_k:
+        raise FixtureError("real router top-k unexpectedly repeated an expert")
+    assignment_ids = torch.arange(top_k, dtype=torch.int32)
+    input_rows = (
+        hidden[:1, :cols]
+        .to(dtype=torch.float32)
+        .expand(top_k, -1)
+        .contiguous()
+    )
+    expected = torch.bmm(
+        gate_up_slice.to(dtype=torch.float32), input_rows.unsqueeze(-1)
+    ).squeeze(-1)
+    directory.mkdir(parents=True, exist_ok=False)
+    directory.joinpath("shape.txt").write_text(
+        f"{top_k} {top_k} {rows} {cols}\n", encoding="utf-8"
+    )
+    write_array(directory / "weights.bf16", gate_up_slice.view(torch.uint16).numpy(), "<u2")
+    write_array(directory / "expert_ids.i32", assignment_ids.numpy(), "<i4")
+    write_array(directory / "input.f32", input_rows.numpy(), "<f4")
+    write_array(directory / "expected.f32", expected.numpy(), "<f4")
+    return {
+        "source_expert_ids": [int(value) for value in source_expert_ids],
+        "local_assignment_expert_ids": assignment_ids.tolist(),
+        "shape": [top_k, top_k, rows, cols],
+        "weight_dtype": str(gate_up_slice.dtype),
+        "weights_raw_bf16_sha256": array_sha256(gate_up_slice.view(torch.uint16).numpy(), "<u2"),
+        "expected_f32_sha256": array_sha256(expected.numpy(), "<f4"),
+    }
+
+
 def main() -> int:
     args = parse_args()
     if args.layer < 0:
@@ -227,8 +280,10 @@ def main() -> int:
     if gate_up_name not in weight_map:
         raise FixtureError(f"missing expert tensor {gate_up_name}")
     source_expert_ids = selected_indices[0, :2].to(dtype=torch.long).tolist()
+    decode_source_expert_ids = selected_indices[0, :top_k].to(dtype=torch.long).tolist()
     with safe_open(model_dir / str(weight_map[gate_up_name]), framework="pt", device="cpu") as handle:
         gate_up = handle.get_slice(gate_up_name)[source_expert_ids]
+        decode_gate_up = handle.get_slice(gate_up_name)[decode_source_expert_ids]
     grouped_metadata = write_grouped_gemm_fixture(
         output / "expert-grouped-gemm",
         hidden,
@@ -236,6 +291,15 @@ def main() -> int:
         source_expert_ids,
         rows=args.grouped_rows,
         cols=args.grouped_cols,
+    )
+    decode_metadata = write_decode_gemm_fixture(
+        output / "expert-decode-gemm",
+        hidden,
+        decode_gate_up[:, : args.grouped_rows, : args.grouped_cols].contiguous(),
+        decode_source_expert_ids,
+        rows=args.grouped_rows,
+        cols=args.grouped_cols,
+        top_k=top_k,
     )
     write_fixture(
         output / "exact-tie",
@@ -275,6 +339,11 @@ def main() -> int:
             "source_tensor": gate_up_name,
             "source_tensor_shape": [num_experts, 2 * moe_intermediate_size, hidden_size],
             **grouped_metadata,
+        },
+        "expert_decode_gemm": {
+            "source_tensor": gate_up_name,
+            "source_tensor_shape": [num_experts, 2 * moe_intermediate_size, hidden_size],
+            **decode_metadata,
         },
         "tie_note": "PyTorch topk tie ordering is not stable; exact-tie is diagnostic only.",
     }

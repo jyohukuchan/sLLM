@@ -174,7 +174,60 @@ bool moe_gpu_gather(
 #endif
 }
 
-bool moe_gpu_grouped_gemm(
+bool moe_gpu_decode_gemm(
+    const ullm_runtime_buffer *weight_buffer,
+    ullm_moe_weight_dtype weight_dtype,
+    const ullm_runtime_buffer *selected_expert_ids_buffer,
+    const ullm_runtime_buffer *input_buffer,
+    size_t top_k,
+    size_t num_experts,
+    size_t rows_per_expert,
+    size_t cols,
+    ullm_runtime_buffer *output_buffer,
+    ullm_runtime_stream *stream,
+    std::string *error) {
+#if defined(ULLM_RUNTIME_ROCM_MOE_GFX1201)
+    char gpu_error[1024]{};
+    const int launched = ullm_moe_gfx1201_decode_gemm_f32(
+        weight_buffer->ptr,
+        static_cast<uint32_t>(weight_dtype),
+        selected_expert_ids_buffer->ptr,
+        input_buffer->ptr,
+        top_k,
+        num_experts,
+        rows_per_expert,
+        cols,
+        output_buffer->ptr,
+        stream == nullptr ? nullptr : stream->stream,
+        weight_buffer->hip_device_id,
+        gpu_error,
+        sizeof(gpu_error));
+    if (launched != 0) {
+        return true;
+    }
+    if (error != nullptr) {
+        *error = gpu_error[0] == '\0' ? "MoE decode GEMM gfx1201 kernel launch failed" : gpu_error;
+    }
+    return false;
+#else
+    (void)weight_buffer;
+    (void)weight_dtype;
+    (void)selected_expert_ids_buffer;
+    (void)input_buffer;
+    (void)top_k;
+    (void)num_experts;
+    (void)rows_per_expert;
+    (void)cols;
+    (void)output_buffer;
+    (void)stream;
+    if (error != nullptr) {
+        *error = "MoE GPU support requires the rocm-moe-gfx1201 runtime feature";
+    }
+    return false;
+#endif
+}
+
+bool moe_gpu_prefill_grouped_gemm(
     const ullm_runtime_buffer *weight_buffer,
     ullm_moe_weight_dtype weight_dtype,
     const ullm_runtime_buffer *expert_ids_buffer,
@@ -188,7 +241,7 @@ bool moe_gpu_grouped_gemm(
     std::string *error) {
 #if defined(ULLM_RUNTIME_ROCM_MOE_GFX1201)
     char gpu_error[1024]{};
-    const int launched = ullm_moe_gfx1201_grouped_gemm_f32(
+    const int launched = ullm_moe_gfx1201_prefill_grouped_gemm_f32(
         weight_buffer->ptr,
         static_cast<uint32_t>(weight_dtype),
         expert_ids_buffer->ptr,
@@ -206,7 +259,7 @@ bool moe_gpu_grouped_gemm(
         return true;
     }
     if (error != nullptr) {
-        *error = gpu_error[0] == '\0' ? "MoE grouped GEMM gfx1201 kernel launch failed" : gpu_error;
+        *error = gpu_error[0] == '\0' ? "MoE prefill grouped GEMM gfx1201 kernel launch failed" : gpu_error;
     }
     return false;
 #else
@@ -557,7 +610,11 @@ ullm_status ullm_runtime_moe_gather_f32(
     return ULLM_STATUS_OK;
 }
 
-ullm_status ullm_runtime_moe_grouped_gemm_f32(
+// The two public paths share host arithmetic solely because it is the
+// correctness reference. GPU dispatch is intentionally separate: decode has
+// exactly one token's selected slabs, while prefill has a variable assignment
+// population that will be compacted/grouped by a production caller.
+static ullm_status moe_gemm_f32_impl(
     const ullm_runtime_buffer *weight_buffer,
     ullm_moe_weight_dtype weight_dtype,
     const ullm_runtime_buffer *expert_ids_buffer,
@@ -567,13 +624,16 @@ ullm_status ullm_runtime_moe_grouped_gemm_f32(
     size_t rows_per_expert,
     size_t cols,
     ullm_runtime_buffer *output_buffer,
-    ullm_runtime_stream *stream) {
+    ullm_runtime_stream *stream,
+    bool decode_path) {
     if (weight_buffer == nullptr || expert_ids_buffer == nullptr || input_buffer == nullptr ||
         output_buffer == nullptr || !moe_weight_dtype_is_valid(weight_dtype) || assignments == 0u ||
         num_experts == 0u || rows_per_expert == 0u || cols == 0u ||
+        (decode_path && assignments > num_experts) ||
         !moe_buffers_and_stream_match(weight_buffer, expert_ids_buffer, input_buffer, nullptr, nullptr,
                                       output_buffer, stream)) {
-        set_error("MoE grouped GEMM received invalid arguments, buffers, or stream");
+        set_error(decode_path ? "MoE decode GEMM received invalid arguments, buffers, or stream"
+                              : "MoE prefill grouped GEMM received invalid arguments, buffers, or stream");
         return ULLM_STATUS_INVALID_ARGUMENT;
     }
     size_t weight_elements = 0u;
@@ -591,12 +651,14 @@ ullm_status ullm_runtime_moe_grouped_gemm_f32(
         !moe_checked_bytes(assignments, sizeof(int32_t), &ids_bytes) ||
         !moe_checked_bytes(input_elements, sizeof(float), &input_bytes) ||
         !moe_checked_bytes(output_elements, sizeof(float), &output_bytes)) {
-        set_error("MoE grouped GEMM byte size overflows");
+        set_error(decode_path ? "MoE decode GEMM byte size overflows"
+                              : "MoE prefill grouped GEMM byte size overflows");
         return ULLM_STATUS_INVALID_ARGUMENT;
     }
     if (weight_buffer->bytes < weight_bytes || expert_ids_buffer->bytes < ids_bytes ||
         input_buffer->bytes < input_bytes || output_buffer->bytes < output_bytes) {
-        set_error("MoE grouped GEMM buffer is too small");
+        set_error(decode_path ? "MoE decode GEMM buffer is too small"
+                              : "MoE prefill grouped GEMM buffer is too small");
         return ULLM_STATUS_BUFFER_TOO_SMALL;
     }
     if (weight_buffer->backend == BackendKind::Cpu) {
@@ -607,7 +669,8 @@ ullm_status ullm_runtime_moe_grouped_gemm_f32(
         for (size_t assignment = 0u; assignment < assignments; ++assignment) {
             const int32_t expert = ids[assignment];
             if (expert < 0 || static_cast<size_t>(expert) >= num_experts) {
-                set_error("MoE grouped GEMM received an expert ID out of range");
+                set_error(decode_path ? "MoE decode GEMM received an expert ID out of range"
+                                      : "MoE prefill grouped GEMM received an expert ID out of range");
                 return ULLM_STATUS_INVALID_ARGUMENT;
             }
             for (size_t row = 0u; row < rows_per_expert; ++row) {
@@ -626,14 +689,50 @@ ullm_status ullm_runtime_moe_grouped_gemm_f32(
         return ULLM_STATUS_OK;
     }
     std::string gpu_error;
-    if (!moe_gpu_grouped_gemm(weight_buffer, weight_dtype, expert_ids_buffer, input_buffer,
+    const bool launched = decode_path
+        ? moe_gpu_decode_gemm(weight_buffer, weight_dtype, expert_ids_buffer, input_buffer,
                               assignments, num_experts, rows_per_expert, cols, output_buffer,
-                              stream, &gpu_error)) {
+                              stream, &gpu_error)
+        : moe_gpu_prefill_grouped_gemm(weight_buffer, weight_dtype, expert_ids_buffer, input_buffer,
+                                        assignments, num_experts, rows_per_expert, cols, output_buffer,
+                                        stream, &gpu_error);
+    if (!launched) {
         set_error(gpu_error.c_str());
         return ULLM_STATUS_RUNTIME_ERROR;
     }
     set_error("");
     return ULLM_STATUS_OK;
+}
+
+ullm_status ullm_runtime_moe_decode_gemm_f32(
+    const ullm_runtime_buffer *weight_buffer,
+    ullm_moe_weight_dtype weight_dtype,
+    const ullm_runtime_buffer *selected_expert_ids_buffer,
+    const ullm_runtime_buffer *input_buffer,
+    size_t top_k,
+    size_t num_experts,
+    size_t rows_per_expert,
+    size_t cols,
+    ullm_runtime_buffer *output_buffer,
+    ullm_runtime_stream *stream) {
+    return moe_gemm_f32_impl(weight_buffer, weight_dtype, selected_expert_ids_buffer, input_buffer,
+                             top_k, num_experts, rows_per_expert, cols, output_buffer, stream, true);
+}
+
+ullm_status ullm_runtime_moe_grouped_gemm_f32(
+    const ullm_runtime_buffer *weight_buffer,
+    ullm_moe_weight_dtype weight_dtype,
+    const ullm_runtime_buffer *expert_ids_buffer,
+    const ullm_runtime_buffer *input_buffer,
+    size_t assignments,
+    size_t num_experts,
+    size_t rows_per_expert,
+    size_t cols,
+    ullm_runtime_buffer *output_buffer,
+    ullm_runtime_stream *stream) {
+    return moe_gemm_f32_impl(weight_buffer, weight_dtype, expert_ids_buffer, input_buffer,
+                             assignments, num_experts, rows_per_expert, cols, output_buffer, stream,
+                             false);
 }
 
 ullm_status ullm_runtime_moe_gated_silu_f32(

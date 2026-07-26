@@ -921,11 +921,33 @@ ullm_status ullm_runtime_moe_gather_f32(
     ullm_runtime_stream *stream);
 
 /*
- * Generic variable-group GEMM. `weight_buffer` is row-major
+ * Decode-only selected-expert GEMM. `selected_expert_ids_buffer` is int32
+ * [top_k] for a single token, and input/output are [top_k, cols] /
+ * [top_k, rows_per_expert]. This is deliberately a distinct execution path
+ * from prefill grouped GEMM: it preserves the small selected-weight gather
+ * boundary instead of treating M=1 as a degenerate variable-size group.
+ * `weight_buffer` is row-major [num_experts, rows_per_expert, cols].
+ */
+ullm_status ullm_runtime_moe_decode_gemm_f32(
+    const ullm_runtime_buffer *weight_buffer,
+    ullm_moe_weight_dtype weight_dtype,
+    const ullm_runtime_buffer *selected_expert_ids_buffer,
+    const ullm_runtime_buffer *input_buffer,
+    size_t top_k,
+    size_t num_experts,
+    size_t rows_per_expert,
+    size_t cols,
+    ullm_runtime_buffer *output_buffer,
+    ullm_runtime_stream *stream);
+
+/*
+ * Prefill variable-group GEMM. `weight_buffer` is row-major
  * [num_experts, rows_per_expert, cols]. `expert_ids_buffer` is int32
  * [assignments]. Input is [assignments, cols], output is
  * [assignments, rows_per_expert]. Empty expert groups are valid because no
- * assignment names them.
+ * assignment names them. Callers performing production prefill compact by
+ * expert before this operation; the correctness-first ABI keeps the original
+ * assignment order so it can be compared against the CPU reference.
  */
 ullm_status ullm_runtime_moe_grouped_gemm_f32(
     const ullm_runtime_buffer *weight_buffer,

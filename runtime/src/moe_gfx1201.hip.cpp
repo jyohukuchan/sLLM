@@ -220,7 +220,49 @@ extern "C" __global__ void ullm_moe_gather_f32_kernel(
     gathered_hidden[element] = hidden[token * hidden_size + column];
 }
 
-extern "C" __global__ void ullm_moe_grouped_gemm_f32_kernel(
+// Decode is deliberately separate from prefill: its work domain is the
+// top-k selected slabs of one token, not an arbitrary number of prefill
+// assignments. The arithmetic is intentionally simple in this correctness
+// baseline, but the distinct launch boundary lets a decode implementation
+// gather only the selected slabs without inheriting prefill grouping policy.
+extern "C" __global__ void ullm_moe_decode_gemm_f32_kernel(
+    const void* weights,
+    uint32_t weight_dtype,
+    const int32_t* selected_expert_ids,
+    const float* input,
+    unsigned long long top_k,
+    unsigned int num_experts,
+    unsigned long long rows_per_expert,
+    unsigned long long cols,
+    float* output) {
+    const unsigned long long element =
+        static_cast<unsigned long long>(blockIdx.x) * blockDim.x + threadIdx.x;
+    const unsigned long long total = top_k * rows_per_expert;
+    if (element >= total) {
+        return;
+    }
+    const unsigned long long selected = element / rows_per_expert;
+    const unsigned long long row = element % rows_per_expert;
+    const int32_t expert = selected_expert_ids[selected];
+    if (expert < 0 || static_cast<unsigned int>(expert) >= num_experts) {
+        output[element] = nanf("");
+        return;
+    }
+    const unsigned long long weight_base =
+        (static_cast<unsigned long long>(expert) * rows_per_expert + row) * cols;
+    const unsigned long long input_base = selected * cols;
+    float total_value = 0.0f;
+    for (unsigned long long column = 0ull; column < cols; ++column) {
+        total_value += weight_at(weights, weight_dtype, weight_base + column) *
+                       input[input_base + column];
+    }
+    output[element] = total_value;
+}
+
+// Prefill keeps a variable number of assignment rows. Production callers can
+// compact those rows by expert before this launch; the baseline deliberately
+// keeps the original assignment order for direct reference comparison.
+extern "C" __global__ void ullm_moe_prefill_grouped_gemm_f32_kernel(
     const void* weights,
     uint32_t weight_dtype,
     const int32_t* expert_ids,
@@ -412,7 +454,49 @@ extern "C" int ullm_moe_gfx1201_gather_f32(
     }, error, error_capacity);
 }
 
-extern "C" int ullm_moe_gfx1201_grouped_gemm_f32(
+extern "C" int ullm_moe_gfx1201_decode_gemm_f32(
+    const void* weights,
+    uint32_t weight_dtype,
+    const void* selected_expert_ids_i32,
+    const void* input_f32,
+    size_t top_k,
+    size_t num_experts,
+    size_t rows_per_expert,
+    size_t cols,
+    void* output_f32,
+    void* stream,
+    int device_id,
+    char* error,
+    size_t error_capacity) {
+    return launch_with_error([&] {
+        if (weights == nullptr || selected_expert_ids_i32 == nullptr || input_f32 == nullptr || output_f32 == nullptr) {
+            throw std::runtime_error("MoE decode GEMM received a null device pointer");
+        }
+        validate_weight_dtype(weight_dtype);
+        if (top_k == 0u || top_k > num_experts || num_experts == 0u || num_experts > kMaxExperts ||
+            rows_per_expert == 0u || cols == 0u) {
+            throw std::runtime_error("MoE decode GEMM dimensions are unsupported by the gfx1201 baseline");
+        }
+        const size_t elements = checked_mul(top_k, rows_per_expert, "MoE decode GEMM elements");
+        validate_device(device_id);
+        hipLaunchKernelGGL(ullm_moe_decode_gemm_f32_kernel,
+                           dim3(grid_for(elements)),
+                           dim3(kThreads),
+                           0u,
+                           static_cast<hipStream_t>(stream),
+                           weights,
+                           weight_dtype,
+                           static_cast<const int32_t*>(selected_expert_ids_i32),
+                           static_cast<const float*>(input_f32),
+                           static_cast<unsigned long long>(top_k),
+                           static_cast<unsigned int>(num_experts),
+                           static_cast<unsigned long long>(rows_per_expert),
+                           static_cast<unsigned long long>(cols),
+                           static_cast<float*>(output_f32));
+    }, error, error_capacity);
+}
+
+extern "C" int ullm_moe_gfx1201_prefill_grouped_gemm_f32(
     const void* weights,
     uint32_t weight_dtype,
     const void* expert_ids_i32,
@@ -428,16 +512,16 @@ extern "C" int ullm_moe_gfx1201_grouped_gemm_f32(
     size_t error_capacity) {
     return launch_with_error([&] {
         if (weights == nullptr || expert_ids_i32 == nullptr || input_f32 == nullptr || output_f32 == nullptr) {
-            throw std::runtime_error("MoE grouped GEMM received a null device pointer");
+            throw std::runtime_error("MoE prefill grouped GEMM received a null device pointer");
         }
         validate_weight_dtype(weight_dtype);
         if (assignments == 0u || num_experts == 0u || num_experts > kMaxExperts ||
             rows_per_expert == 0u || cols == 0u) {
-            throw std::runtime_error("MoE grouped GEMM dimensions are unsupported by the gfx1201 baseline");
+            throw std::runtime_error("MoE prefill grouped GEMM dimensions are unsupported by the gfx1201 baseline");
         }
-        const size_t elements = checked_mul(assignments, rows_per_expert, "MoE grouped GEMM elements");
+        const size_t elements = checked_mul(assignments, rows_per_expert, "MoE prefill grouped GEMM elements");
         validate_device(device_id);
-        hipLaunchKernelGGL(ullm_moe_grouped_gemm_f32_kernel,
+        hipLaunchKernelGGL(ullm_moe_prefill_grouped_gemm_f32_kernel,
                            dim3(grid_for(elements)),
                            dim3(kThreads),
                            0u,

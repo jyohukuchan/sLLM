@@ -226,7 +226,33 @@ pub fn moe_gather_reference_f32(
     Ok(output)
 }
 
-/// Reference grouped GEMM with row-major `[expert, row, column]` weight
+/// Decode-only reference GEMM for one token's selected expert rows. It shares
+/// the mathematical operation with prefill but retains a separate API so
+/// callers cannot silently route decode through the variable-group plan.
+pub fn moe_decode_gemm_reference_f32(
+    weights: &[f32],
+    selected_expert_ids: &[i32],
+    input: &[f32],
+    top_k: usize,
+    num_experts: usize,
+    rows_per_expert: usize,
+    cols: usize,
+) -> Result<Vec<f32>, String> {
+    if top_k == 0 || top_k > num_experts {
+        return Err("MoE decode GEMM requires 0 < top_k <= num_experts".to_string());
+    }
+    moe_grouped_gemm_reference_f32(
+        weights,
+        selected_expert_ids,
+        input,
+        top_k,
+        num_experts,
+        rows_per_expert,
+        cols,
+    )
+}
+
+/// Reference prefill grouped GEMM with row-major `[expert, row, column]` weight
 /// storage. `expert_ids` may name groups with arbitrary (including zero) hit
 /// counts, but every assignment ID must be in range.
 pub fn moe_grouped_gemm_reference_f32(
@@ -326,6 +352,32 @@ pub fn moe_grouped_gemm_reference_raw_f32(
         expert_ids,
         input,
         assignments,
+        num_experts,
+        rows_per_expert,
+        cols,
+    )
+}
+
+/// Raw checkpoint-storage variant of [`moe_decode_gemm_reference_f32`].
+pub fn moe_decode_gemm_reference_raw_f32(
+    weights: &[u8],
+    weight_dtype: MoeWeightDtype,
+    selected_expert_ids: &[i32],
+    input: &[f32],
+    top_k: usize,
+    num_experts: usize,
+    rows_per_expert: usize,
+    cols: usize,
+) -> Result<Vec<f32>, String> {
+    if top_k == 0 || top_k > num_experts {
+        return Err("MoE decode GEMM requires 0 < top_k <= num_experts".to_string());
+    }
+    moe_grouped_gemm_reference_raw_f32(
+        weights,
+        weight_dtype,
+        selected_expert_ids,
+        input,
+        top_k,
         num_experts,
         rows_per_expert,
         cols,
@@ -598,6 +650,18 @@ unsafe extern "C" {
         gathered_hidden_buffer: *mut RawRuntimeBuffer,
         stream: *mut RawRuntimeStream,
     ) -> c_int;
+    fn ullm_runtime_moe_decode_gemm_f32(
+        weight_buffer: *const RawRuntimeBuffer,
+        weight_dtype: c_int,
+        selected_expert_ids_buffer: *const RawRuntimeBuffer,
+        input_buffer: *const RawRuntimeBuffer,
+        top_k: usize,
+        num_experts: usize,
+        rows_per_expert: usize,
+        cols: usize,
+        output_buffer: *mut RawRuntimeBuffer,
+        stream: *mut RawRuntimeStream,
+    ) -> c_int;
     fn ullm_runtime_moe_grouped_gemm_f32(
         weight_buffer: *const RawRuntimeBuffer,
         weight_dtype: c_int,
@@ -750,6 +814,69 @@ pub fn moe_gather_f32(
             hidden_size,
             top_k,
             gathered_hidden_buffer.raw.as_ptr(),
+            stream,
+        )
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn moe_decode_gemm_f32(
+    weight_buffer: &RuntimeBuffer,
+    weight_dtype: MoeWeightDtype,
+    selected_expert_ids_buffer: &RuntimeBuffer,
+    input_buffer: &RuntimeBuffer,
+    top_k: usize,
+    num_experts: usize,
+    rows_per_expert: usize,
+    cols: usize,
+    output_buffer: &mut RuntimeBuffer,
+    stream: Option<&mut RuntimeStream>,
+) -> Result<(), String> {
+    if top_k == 0 || top_k > num_experts || num_experts == 0 || rows_per_expert == 0 || cols == 0 {
+        return Err(
+            "MoE decode GEMM requires nonzero dimensions and top_k <= num_experts".to_string(),
+        );
+    }
+    let rows = checked_mul(num_experts, rows_per_expert, "MoE decode GEMM rows")?;
+    let weight_elements = checked_mul(rows, cols, "MoE decode GEMM weight elements")?;
+    let input_elements = checked_mul(top_k, cols, "MoE decode GEMM input elements")?;
+    let output_elements = checked_mul(top_k, rows_per_expert, "MoE decode GEMM output elements")?;
+    let weight_bytes = checked_mul(
+        weight_elements,
+        match weight_dtype {
+            MoeWeightDtype::F32 => std::mem::size_of::<f32>(),
+            MoeWeightDtype::Bf16 => std::mem::size_of::<u16>(),
+        },
+        "MoE decode GEMM weight bytes",
+    )?;
+    check_copy_range(0, weight_bytes, weight_buffer.size()?)?;
+    check_copy_range(
+        0,
+        i32_bytes(top_k, "MoE decode GEMM ID bytes")?,
+        selected_expert_ids_buffer.size()?,
+    )?;
+    check_copy_range(
+        0,
+        f32_bytes(input_elements, "MoE decode GEMM input bytes")?,
+        input_buffer.size()?,
+    )?;
+    check_copy_range(
+        0,
+        f32_bytes(output_elements, "MoE decode GEMM output bytes")?,
+        output_buffer.size()?,
+    )?;
+    let stream = stream.map_or(std::ptr::null_mut(), |stream| stream.raw.as_ptr());
+    status_to_result(unsafe {
+        ullm_runtime_moe_decode_gemm_f32(
+            weight_buffer.raw.as_ptr(),
+            weight_dtype as c_int,
+            selected_expert_ids_buffer.raw.as_ptr(),
+            input_buffer.raw.as_ptr(),
+            top_k,
+            num_experts,
+            rows_per_expert,
+            cols,
+            output_buffer.raw.as_ptr(),
             stream,
         )
     })
@@ -1050,5 +1177,16 @@ mod moe_tests {
         let expected =
             moe_grouped_gemm_reference_f32(&rounded_weights, &ids, &input, 2, 2, 2, 3).unwrap();
         assert_eq!(raw, expected);
+    }
+
+    #[test]
+    fn decode_reference_keeps_topk_contract_separate_from_prefill() {
+        let weights = [1.0_f32, 2.0, -1.0, 0.5, 3.0, -2.0, 0.25, 4.0];
+        let ids = [1_i32, 0_i32];
+        let input = [0.5_f32, -1.0, 2.0, 0.25];
+        let decode = moe_decode_gemm_reference_f32(&weights, &ids, &input, 2, 2, 2, 2).unwrap();
+        let prefill = moe_grouped_gemm_reference_f32(&weights, &ids, &input, 2, 2, 2, 2).unwrap();
+        assert_eq!(decode, prefill);
+        assert!(moe_decode_gemm_reference_f32(&weights, &ids, &input, 3, 2, 2, 2).is_err());
     }
 }
