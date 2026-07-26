@@ -205,6 +205,73 @@ def write_sq8_v2_ephemeral_profile(root: Path) -> Path:
     return profile_path
 
 
+def write_gemma4_e2b_profile(root: Path) -> Path:
+    profile_path = write_profile(root)
+    profile = json.loads(profile_path.read_text(encoding="utf-8"))
+    profile["public"] = {
+        "id": "ullm-gemma4-e2b-bf16",
+        "name": "uLLM Gemma4 E2B BF16",
+        "description": "Gemma4 E2B text decoder served locally by uLLM.",
+        "upstream_id": "google/gemma-4-E2B",
+        "revision": "d29ff6b45f081a49ee2733a859c9c9c2d95d1a6f",
+        "context_length": 4096,
+    }
+    profile["generation"] = {
+        "max_completion_tokens": 512,
+        "vocab_size": 262144,
+        "eos_token_ids": [1],
+        "sampling": {"top_k": 1, "temperature": False, "top_p": False},
+    }
+    profile["format"] = {
+        "format_id": "BF16_0",
+        "implementation_id": "gemma4_e2b_bf16_rdna4_v1",
+    }
+    profile["tokenizer"]["class"] = "GemmaTokenizer"
+    tokenizer_config_path = root / "tokenizer/tokenizer_config.json"
+    tokenizer_config_path.write_text(
+        json.dumps(
+            {
+                "chat_template": "{{ messages }}",
+                "tokenizer_class": "GemmaTokenizer",
+            }
+        ),
+        encoding="utf-8",
+    )
+    profile["worker"] = {
+        "protocol": "ullm.worker.v1",
+        "binary": os.fspath(root / "worker"),
+        "arguments": ["--served-model-manifest", "{manifest}"],
+        "required_environment": [
+            "ULLM_REQUIRE_HIP_BF16_MATVEC_KERNEL",
+            "ULLM_REQUIRE_HIP_PAGED_DECODE_ATTN_KERNEL",
+            "ULLM_REQUIRE_HIP_PAGED_KV_WRITE_KERNEL",
+        ],
+        "identity": {
+            "device": "gfx1201",
+            "execution_profile": "rdna4_gemma4_e2b_bf16_resident",
+        },
+    }
+    profile["product"]["artifact"] = None
+    receipt_path = root / "promotion.json"
+    receipt = {
+        "schema_version": GENERATOR.GEMMA4_E2B_SERVING_RECEIPT_SCHEMA,
+        "source_commit": EPHEMERAL_COMMIT,
+        "worker_binary_sha256": sha256((root / "worker").read_bytes()),
+        "package_manifest_sha256": sha256(
+            (root / "product/package/manifest.json").read_bytes()
+        ),
+        "tokenizer_chat_template_sha256": sha256(b"{{ messages }}"),
+    }
+    receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
+    profile["promotion"] = {
+        "receipt": os.fspath(receipt_path),
+        "source_commit_from_receipt": ["source_commit"],
+        "required_schema_version": GENERATOR.GEMMA4_E2B_SERVING_RECEIPT_SCHEMA,
+    }
+    profile_path.write_text(json.dumps(profile), encoding="utf-8")
+    return profile_path
+
+
 def test_generate_hashes_live_files_and_passes_strict_loader(tmp_path: Path) -> None:
     profile = write_profile(tmp_path)
     output = tmp_path / "served-model.json"
@@ -286,6 +353,22 @@ def test_normal_generator_rejects_selectorless_sq8_worker_v2(
     profile_path.write_text(json.dumps(profile), encoding="utf-8")
 
     with pytest.raises(GENERATOR.GenerationError, match="schema/format/protocol"):
+        GENERATOR.materialize(profile_path)
+
+
+def test_generator_admits_only_the_bound_gemma4_bf16_receipt(tmp_path: Path) -> None:
+    profile_path = write_gemma4_e2b_profile(tmp_path)
+    document = GENERATOR.materialize(profile_path)
+
+    assert document["format"]["format_id"] == "BF16_0"
+    assert document["worker"]["protocol"] == "ullm.worker.v1"
+    assert document["promotion"]["source_commit"] == EPHEMERAL_COMMIT
+
+    receipt_path = tmp_path / "promotion.json"
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    receipt["package_manifest_sha256"] = "0" * 64
+    receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
+    with pytest.raises(GENERATOR.GenerationError, match="Gemma4 promotion receipt"):
         GENERATOR.materialize(profile_path)
 
 

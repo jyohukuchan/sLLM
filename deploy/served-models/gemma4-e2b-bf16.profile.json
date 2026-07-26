@@ -1,0 +1,57 @@
+{
+  "schema_version": "ullm.served_model.profile.v1",
+  "public": {
+    "id": "ullm-gemma4-e2b-bf16",
+    "name": "uLLM Gemma4 E2B BF16",
+    "description": "Gemma4 E2B base text decoder served locally in resident BF16 mode with a pinned Google Gemma4 chat-template overlay.",
+    "upstream_id": "google/gemma-4-E2B",
+    "revision": "d29ff6b45f081a49ee2733a859c9c9c2d95d1a6f",
+    "context_length": 4096
+  },
+  "generation": {
+    "max_completion_tokens": 512,
+    "vocab_size": 262144,
+    "eos_token_ids": [1],
+    "sampling": {"top_k": 1, "temperature": false, "top_p": false}
+  },
+  "format": {
+    "format_id": "BF16_0",
+    "implementation_id": "gemma4_e2b_bf16_rdna4_v1"
+  },
+  "tokenizer": {
+    "root": "/opt/ullm/gemma4-e2b-serving-v0.1/products/gemma4-e2b-bf16-e5faef0d/tokenizer",
+    "transformers_version": "5.12.1",
+    "class": "GemmaTokenizer",
+    "files": [
+      "tokenizer.json",
+      "tokenizer_config.json",
+      "chat_template.jinja",
+      "provenance.json"
+    ],
+    "template_options": {"add_generation_prompt": true, "enable_thinking": false}
+  },
+  "worker": {
+    "protocol": "ullm.worker.v1",
+    "binary": "/opt/ullm/gemma4-e2b-serving-v0.1/releases/gemma4-e2b-bf16/ullm-gemma4-worker",
+    "arguments": ["--served-model-manifest", "{manifest}"],
+    "required_environment": [
+      "ULLM_REQUIRE_HIP_BF16_MATVEC_KERNEL",
+      "ULLM_REQUIRE_HIP_PAGED_DECODE_ATTN_KERNEL",
+      "ULLM_REQUIRE_HIP_PAGED_KV_WRITE_KERNEL"
+    ],
+    "identity": {
+      "device": "gfx1201",
+      "execution_profile": "rdna4_gemma4_e2b_bf16_resident"
+    }
+  },
+  "product": {
+    "root": "/opt/ullm/gemma4-e2b-serving-v0.1/products/gemma4-e2b-bf16-e5faef0d",
+    "artifact": null,
+    "package": {"manifest_path": "package/manifest.json"}
+  },
+  "promotion": {
+    "receipt": "/opt/ullm/gemma4-e2b-serving-v0.1/promotion/gemma4-e2b-serving-v0.1.json",
+    "source_commit_from_receipt": ["source_commit"],
+    "required_schema_version": "ullm.gemma4_e2b_serving_receipt.v1"
+  }
+}

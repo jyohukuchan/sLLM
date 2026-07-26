@@ -42,6 +42,10 @@ name = "ullm-aq4-worker"
 path = "src/bin/ullm-aq4-worker.rs"
 
 [[bin]]
+name = "ullm-gemma4-worker"
+path = "src/bin/ullm-gemma4-worker.rs"
+
+[[bin]]
 name = "ullm-aq4-p2-full-model"
 path = "src/bin/ullm-aq4-p2-full-model.rs"
 

@@ -229,6 +229,7 @@ pub struct ServedModel {
 pub enum WorkerBackendKind {
     Sq8,
     Aq4,
+    Gemma4E2b,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -292,6 +293,11 @@ impl ServedModel {
         let (format_id, requires_artifact) = match kind {
             WorkerBackendKind::Sq8 => ("SQ8_0", true),
             WorkerBackendKind::Aq4 => ("AQ4_0", false),
+            // Gemma4 E2B is a text-only resident BF16 package.  Keep this
+            // mapping local to its dedicated backend: the generic manifest
+            // parser intentionally remains able to inspect future formats,
+            // but no existing worker may claim this package shape.
+            WorkerBackendKind::Gemma4E2b => ("BF16_0", false),
         };
         if self.format.format_id != format_id
             || self.product.artifact.is_some() != requires_artifact

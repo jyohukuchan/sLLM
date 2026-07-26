@@ -30,6 +30,7 @@ SQ8_PROMOTION_SCHEMA = "ullm.sq8_serving_promotion.v1"
 SQ8_EPHEMERAL_RECEIPT_SCHEMA = (
     "ullm.sq8_serving_promotion_ephemeral_receipt.v1"
 )
+GEMMA4_E2B_SERVING_RECEIPT_SCHEMA = "ullm.gemma4_e2b_serving_receipt.v1"
 
 
 class GenerationError(RuntimeError):
@@ -398,7 +399,64 @@ def _validate_promotion_evidence(
                 "SQ8 serving promotion evidence validation failed"
             ) from error
         return
+    if pairing == ("BF16_0", GEMMA4_E2B_SERVING_RECEIPT_SCHEMA):
+        _validate_gemma4_e2b_receipt(
+            promotion_profile=promotion_profile,
+            receipt=receipt,
+            source_commit=source_commit,
+            worker_sha256=worker_sha256,
+            package_manifest_sha256=package_manifest_sha256,
+            tokenizer_chat_template_sha256=manifest["tokenizer"][
+                "chat_template_sha256"
+            ],
+        )
+        return
     raise GenerationError("profile promotion receipt schema/format pairing is unsupported")
+
+
+def _validate_gemma4_e2b_receipt(
+    *,
+    promotion_profile: dict[str, Any],
+    receipt: dict[str, Any],
+    source_commit: str,
+    worker_sha256: str,
+    package_manifest_sha256: str,
+    tokenizer_chat_template_sha256: str,
+) -> None:
+    """Bind the text-only Gemma4 package without admitting a generic BF16 path."""
+
+    if set(promotion_profile) != {
+        "receipt",
+        "source_commit_from_receipt",
+        "required_schema_version",
+    }:
+        raise GenerationError("Gemma4 promotion profile fields differ")
+    if (
+        promotion_profile["required_schema_version"]
+        != GEMMA4_E2B_SERVING_RECEIPT_SCHEMA
+        or promotion_profile["source_commit_from_receipt"] != ["source_commit"]
+    ):
+        raise GenerationError("Gemma4 promotion profile contract differs")
+    if set(receipt) != {
+        "schema_version",
+        "source_commit",
+        "worker_binary_sha256",
+        "package_manifest_sha256",
+        "tokenizer_chat_template_sha256",
+    }:
+        raise GenerationError("Gemma4 promotion receipt fields differ")
+    if (
+        receipt.get("schema_version") != GEMMA4_E2B_SERVING_RECEIPT_SCHEMA
+        or not isinstance(source_commit, str)
+        or len(source_commit) != 40
+        or any(character not in "0123456789abcdef" for character in source_commit)
+        or receipt.get("source_commit") != source_commit
+        or receipt.get("worker_binary_sha256") != worker_sha256
+        or receipt.get("package_manifest_sha256") != package_manifest_sha256
+        or receipt.get("tokenizer_chat_template_sha256")
+        != tokenizer_chat_template_sha256
+    ):
+        raise GenerationError("Gemma4 promotion receipt identity differs")
 
 
 def _validate_promotion_dispatch(
@@ -443,6 +501,11 @@ def _validate_promotion_dispatch(
                 ("AQ4_0", "ullm.worker.v1", AQ4_PROMOTION_SCHEMA),
                 ("AQ4_0", "ullm.worker.v2", AQ4_PROMOTION_SCHEMA),
                 ("SQ8_0", "ullm.worker.v2", SQ8_PROMOTION_SCHEMA),
+                (
+                    "BF16_0",
+                    "ullm.worker.v1",
+                    GEMMA4_E2B_SERVING_RECEIPT_SCHEMA,
+                ),
             }
         )
     if not admitted:
