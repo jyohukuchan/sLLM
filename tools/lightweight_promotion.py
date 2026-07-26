@@ -1028,6 +1028,19 @@ def _write_input_evidence(
     suite: tuple[SuiteCase, ...],
     prompt_suite_path: Path,
 ) -> None:
+    # Keep the exact input bytes beside the readable output comparison. The
+    # root-owned state copy remains the rollback authority; these evidence
+    # copies let later readers independently audit what was compared.
+    write_new(
+        evidence_dir / "active-manifest-before.json",
+        active.raw,
+        "active manifest evidence copy",
+    )
+    write_new(
+        evidence_dir / "candidate-manifest.json",
+        candidate.raw,
+        "candidate manifest evidence copy",
+    )
     write_json_new(evidence_dir / "active-validation.json", active_validation, "active validation")
     write_json_new(evidence_dir / "candidate-validation.json", candidate_validation, "candidate validation")
     write_new(
@@ -1522,6 +1535,16 @@ def rollback(args: argparse.Namespace) -> dict[str, Any]:
     if preflight["ready"] is not True:
         fail("rollback preflight rejects current active bytes")
     evidence_dir = _prepare_evidence_directory(Path(args.evidence_dir))
+    write_new(
+        evidence_dir / "active-manifest-before-rollback.json",
+        current.raw,
+        "active manifest before rollback evidence copy",
+    )
+    write_new(
+        evidence_dir / "saved-rollback-manifest.json",
+        rollback_snapshot.raw,
+        "saved rollback manifest evidence copy",
+    )
     base_url = _validate_base_url(str(transaction["base_url"]))
     token = read_token(Path(args.token_file).absolute())
     suite = load_suite(Path(args.prompt_suite).absolute())
