@@ -53,6 +53,8 @@ Future MI300X grid:
 - concurrent requests: `1`, `4`, `16`, `64`
 - context length: up to hardware limit
 
+For the MI300X×1 command-level extension—uLLM A′ ordering, same-source FP8 vLLM/SGLang rows, Q8_0 GGUF llama.cpp qualification, and the `1..128` concurrency sweep—use [mi300x-external-engine-benchmark-plan-v0.1.md](mi300x-external-engine-benchmark-plan-v0.1.md). That document is authoritative for the single-GPU rental run; this parent plan retains the broader R9700 and future multi-GPU grid.
+
 ## Output
 
 Write JSONL records matching `docs/specs/inference-benchmark-result-v0.1.md`.
