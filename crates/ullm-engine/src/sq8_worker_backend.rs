@@ -17,8 +17,9 @@ use crate::sq8_model_head_runtime::{
     QWEN3_14B_SQ8_MODEL_HEAD_REQUIRED_HIP_KERNEL_ENV, validate_qwen3_14b_sq8_r9700_device_info,
 };
 use crate::sq8_serving_runtime::{
-    Qwen3Sq8ServingSession, Sq8PreparedAdvance, Sq8PreparedToken, Sq8ServingAdvance,
-    Sq8ServingPrefillMode, Sq8ServingRuntimeStatus, load_qwen3_14b_sq8_serving_norms,
+    QWEN3_14B_SQ8_SERVING_DEFAULT_PREFILL_MODE, Qwen3Sq8ServingSession, Sq8PreparedAdvance,
+    Sq8PreparedToken, Sq8ServingAdvance, Sq8ServingPrefillMode, Sq8ServingRuntimeStatus,
+    load_qwen3_14b_sq8_serving_norms,
 };
 use crate::worker_driver::{InferenceSession, PublishedAdvance, SessionAdvance};
 #[cfg(test)]
@@ -30,12 +31,54 @@ use std::path::{Path, PathBuf};
 use ullm_runtime_sys::{RuntimeContext, RuntimeStream, device_count, device_info};
 
 pub const SQ8_WORKER_UPLOAD_CHUNK_BYTES: usize = 16 * 1024 * 1024;
+/// Opt-in worker override for the fixed resident prefill width.
+///
+/// The default remains the measured M=128 serving configuration.  A selected
+/// wider width still has to pass the layer/stack/CK runtime admission during
+/// session loading; this environment variable only makes the scheduler choice
+/// explicit at the actual worker entry point.
+pub const SQ8_WORKER_PREFILL_CHUNK_TOKENS_ENV: &str = "ULLM_SQ8_PREFILL_CHUNK_TOKENS";
+
+/// Resolves the worker's fixed resident prefill mode from an optional textual
+/// environment value without reading global process state.
+///
+/// Keeping parsing pure makes the M=128 default and invalid-value behavior
+/// testable without mutating environment variables in parallel unit tests.
+pub fn sq8_worker_prefill_mode_from_value(
+    value: Option<&str>,
+) -> Result<Sq8ServingPrefillMode, String> {
+    let Some(value) = value else {
+        return Ok(QWEN3_14B_SQ8_SERVING_DEFAULT_PREFILL_MODE);
+    };
+    let chunk_tokens = value.parse::<usize>().map_err(|error| {
+        format!(
+            "{SQ8_WORKER_PREFILL_CHUNK_TOKENS_ENV} must be a decimal fixed prefill width, got {value:?}: {error}"
+        )
+    })?;
+    Sq8ServingPrefillMode::fixed_chunk_tokens(chunk_tokens).map_err(|error| {
+        format!(
+            "{SQ8_WORKER_PREFILL_CHUNK_TOKENS_ENV}={value:?} is not a valid fixed prefill width: {error}"
+        )
+    })
+}
+
+/// Resolves the worker prefill mode from its process environment.
+pub fn sq8_worker_prefill_mode_from_environment() -> Result<Sq8ServingPrefillMode, String> {
+    match std::env::var(SQ8_WORKER_PREFILL_CHUNK_TOKENS_ENV) {
+        Ok(value) => sq8_worker_prefill_mode_from_value(Some(&value)),
+        Err(std::env::VarError::NotPresent) => sq8_worker_prefill_mode_from_value(None),
+        Err(std::env::VarError::NotUnicode(_)) => Err(format!(
+            "{SQ8_WORKER_PREFILL_CHUNK_TOKENS_ENV} must be valid UTF-8"
+        )),
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Qwen3Sq8WorkerBackendConfig {
     artifact: PathBuf,
     package: PathBuf,
     reasoning_dialect: Option<crate::reasoning::ReasoningDialect>,
+    prefill_mode: Sq8ServingPrefillMode,
 }
 
 impl Qwen3Sq8WorkerBackendConfig {
@@ -44,6 +87,7 @@ impl Qwen3Sq8WorkerBackendConfig {
             artifact: artifact.into(),
             package: package.into(),
             reasoning_dialect: None,
+            prefill_mode: QWEN3_14B_SQ8_SERVING_DEFAULT_PREFILL_MODE,
         };
         if config.artifact.as_os_str().is_empty() || config.package.as_os_str().is_empty() {
             return Err("SQ8 worker artifact and package paths must be nonempty".into());
@@ -57,6 +101,22 @@ impl Qwen3Sq8WorkerBackendConfig {
 
     pub fn package(&self) -> &Path {
         &self.package
+    }
+
+    /// Returns the selected fixed resident prefill mode for this worker.
+    pub fn prefill_mode(&self) -> Sq8ServingPrefillMode {
+        self.prefill_mode
+    }
+
+    /// Replaces the fixed resident prefill mode while preserving the M=128
+    /// default for configurations that do not call this opt-in builder.
+    ///
+    /// The serving loader performs the lower layer/stack/CK admission before
+    /// allocating a model, so an unmeasured wide M fails explicitly and safely
+    /// at load time rather than silently falling back to a different width.
+    pub fn with_prefill_mode(mut self, prefill_mode: Sq8ServingPrefillMode) -> Self {
+        self.prefill_mode = prefill_mode;
+        self
     }
 
     pub fn with_reasoning_dialect(
@@ -102,7 +162,7 @@ impl SessionInferenceBackend<Qwen3Sq8InferenceSession> {
             config.package(),
             norms,
             SQ8_WORKER_UPLOAD_CHUNK_BYTES,
-            Sq8ServingPrefillMode::FixedM128Chunks,
+            config.prefill_mode(),
         )
         .map_err(|error| error.to_string())?;
         let session = Qwen3Sq8InferenceSession {
@@ -1356,10 +1416,39 @@ mod tests {
         let config = Qwen3Sq8WorkerBackendConfig::new("artifact", "package").unwrap();
         assert_eq!(config.artifact(), Path::new("artifact"));
         assert_eq!(config.package(), Path::new("package"));
+        assert_eq!(
+            config.prefill_mode(),
+            QWEN3_14B_SQ8_SERVING_DEFAULT_PREFILL_MODE
+        );
+        assert_eq!(
+            config
+                .clone()
+                .with_prefill_mode(Sq8ServingPrefillMode::fixed_chunk_tokens(256).unwrap())
+                .prefill_mode(),
+            Sq8ServingPrefillMode::fixed_chunk_tokens(256).unwrap()
+        );
         assert_eq!(SQ8_WORKER_UPLOAD_CHUNK_BYTES, 16 * 1024 * 1024);
         assert_eq!(
             require_sq8_worker_build_feature().is_ok(),
             cfg!(feature = "rocm-ck-gfx1201")
         );
+    }
+
+    #[test]
+    fn worker_prefill_width_env_value_defaults_and_rejects_invalid_values() {
+        assert_eq!(
+            sq8_worker_prefill_mode_from_value(None).unwrap(),
+            QWEN3_14B_SQ8_SERVING_DEFAULT_PREFILL_MODE
+        );
+        assert_eq!(
+            sq8_worker_prefill_mode_from_value(Some("256")).unwrap(),
+            Sq8ServingPrefillMode::fixed_chunk_tokens(256).unwrap()
+        );
+        for value in ["", "all-m1", "129", "4097"] {
+            assert!(
+                sq8_worker_prefill_mode_from_value(Some(value)).is_err(),
+                "{value:?} must be rejected"
+            );
+        }
     }
 }

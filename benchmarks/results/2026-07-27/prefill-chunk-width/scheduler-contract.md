@@ -30,7 +30,9 @@ resident workspace.
 `Sq8ServingPrefillMode::fixed_chunk_tokens(M)` now accepts power-of-two
 fixed widths from 2 through 4096 and retains the legacy variants for 8, 32,
 and 128.  The selector is also accepted by the `sq8_ck_serving` CLI as
-`m<N>-chunk<N>`.  It has two deliberate admissions:
+`m<N>-chunk<N>`.  The actual JSONL worker has the same opt-in via
+`ULLM_SQ8_PREFILL_CHUNK_TOKENS=<M>`; with that variable absent it still loads
+the existing M=128 mode.  It has two deliberate admissions:
 
 - scheduler admission validates the power-of-two/context contract and plans
   a no-padding schedule;

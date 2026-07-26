@@ -8,7 +8,9 @@ use std::io::{BufReader, BufWriter, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
 use ullm_engine::served_model::{WorkerBackendKind, load_served_model};
-use ullm_engine::sq8_worker_backend::{Qwen3Sq8WorkerBackend, Qwen3Sq8WorkerBackendConfig};
+use ullm_engine::sq8_worker_backend::{
+    Qwen3Sq8WorkerBackend, Qwen3Sq8WorkerBackendConfig, sq8_worker_prefill_mode_from_environment,
+};
 use ullm_engine::sq8_worker_protocol::configured_worker_profile;
 use ullm_engine::sq8_worker_runtime::run_sq8_worker_process_with_profile;
 
@@ -81,8 +83,16 @@ fn run_worker(source: WorkerSource) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    let prefill_mode = match sq8_worker_prefill_mode_from_environment() {
+        Ok(prefill_mode) => prefill_mode,
+        Err(_) => {
+            write_process_log("error", "cli_failed", Some("invalid_cli"), None);
+            return ExitCode::FAILURE;
+        }
+    };
     let config = match Qwen3Sq8WorkerBackendConfig::new(artifact, package)
         .and_then(|config| config.with_reasoning_dialect(profile.reasoning.clone()))
+        .map(|config| config.with_prefill_mode(prefill_mode))
     {
         Ok(config) => config,
         Err(_) => {

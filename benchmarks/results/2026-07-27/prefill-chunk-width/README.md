@@ -9,7 +9,7 @@ throughput result before the layer/stack/CK execution contract accepts that M.
 | question | result in this run |
 | --- | --- |
 | why `resident_stack_width()` was fixed | It binds the resident stack, prompt hidden buffer, and CK workspaces to one M; it is an allocation/shape contract, not a Flash2 tile restriction. |
-| scheduler-selectable widths | implemented for power-of-two M=2..4096; default remains M=128 |
+| scheduler-selectable widths | implemented for power-of-two M=2..4096; default remains M=128; `ULLM_SQ8_PREFILL_CHUNK_TOKENS=<M>` opt-in reaches the JSONL worker |
 | executable widths today | existing measured lower contract only: M in `{1,2,4,8,16,32,128}` |
 | no-padding tail | unit-tested for M=128/256/512/1024/2048; every replay contains only real tokens |
 | direct M=256+ CK shape probe | passed: M=256/512/1024/2048/4096 each accepted all four SQ8_0 projection shapes; raw JSONL retained |

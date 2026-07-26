@@ -16,6 +16,11 @@ M=128 のままである。M=256/512/1024/2048 の N=4095 tail は、順に 16/8
 40 layer で 640/320/160/80 の予定 attention call となる。unit test は cursor
 rewind、論理 commit、M=4096/N=4095 で偽トークンを作らないことを確認した。
 
+実際の JSONL worker にも `ULLM_SQ8_PREFILL_CHUNK_TOKENS=<M>` の opt-in を接続した。
+未設定なら M=128 を使い、設定値は同じ fixed-width validator を通る。wide M がまだ
+lower contract に未登録の場合は、別の幅へ黙って fallback せず model allocation 前に
+load error になる。
+
 ただし `resident_stack_width()` は単なる attention tile ではない。resident stack
 workspace、resident hidden、prompt hidden、CK activation/projection workspace を同じ M
 で確保する shape contract である。さらに layer/stack/Rust CK/C++ API の measured-M
