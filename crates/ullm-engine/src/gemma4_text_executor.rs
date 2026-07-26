@@ -17,7 +17,9 @@
 
 use crate::host_bytes::{decode_f32_le_values, encode_f32_to_bytes, encode_u32_to_bytes};
 use crate::model_config::{
-    DecoderLayerKind, Gemma4TextConfig, LoadedModelConfig, load_model_config_from_dir,
+    DecoderLayerKind, Gemma4TextConfig, LoadedModelConfig, ResidentKvCacheMode,
+    ResidentMlpDescriptor, ResidentModelDescriptor, ResidentRopeDescriptor, ResidentRopeKind,
+    load_model_config_from_dir,
 };
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -223,8 +225,9 @@ impl Gemma4ResidentLogicalBytes {
 impl Gemma4ResidentMemoryPlan {
     fn from_checkpoint(
         reader: &SafeTensorReader,
-        config: &Gemma4TextConfig,
+        descriptor: &ResidentModelDescriptor,
     ) -> Result<Self, String> {
+        descriptor.require_gemma4_resident_bf16()?;
         let mut resident_checkpoint_weight_bytes = 0_u64;
         let mut resident_checkpoint_tensor_count = 0_usize;
         let mut text_weight_bytes = 0_u64;
@@ -276,25 +279,83 @@ impl Gemma4ResidentMemoryPlan {
                 reader.payload_bytes()
             ));
         }
-        let first_shared = config
-            .decoder
-            .num_hidden_layers
-            .checked_sub(config.num_kv_shared_layers)
-            .ok_or_else(|| "Gemma4 KV shared layer count exceeds layer count".to_string())?;
         let mut local_kv_source_layers = 0_usize;
         let mut full_kv_source_layers = 0_usize;
-        for layer_kind in &config.layer_types[..first_shared] {
-            match layer_kind {
+        let mut local_kv_capacity_tokens = 0_usize;
+        let mut local_kv_bytes = 0_u64;
+        let mut full_kv_bytes_per_token = 0_u64;
+        let mut page_table_bytes_per_full_token = 0_u64;
+        let f32_bytes = u64::try_from(std::mem::size_of::<f32>())
+            .map_err(|_| "Gemma4 F32 byte width exceeds u64".to_string())?;
+        let u32_bytes = u64::try_from(std::mem::size_of::<u32>())
+            .map_err(|_| "Gemma4 U32 byte width exceeds u64".to_string())?;
+        for layer in descriptor
+            .layers
+            .iter()
+            .filter(|layer| matches!(layer.attention.kv_cache, ResidentKvCacheMode::Own))
+        {
+            let attention = &layer.attention;
+            let kv_width = attention
+                .kv_heads
+                .checked_mul(attention.head_dim)
+                .ok_or_else(|| "Gemma4 KV width overflows usize".to_string())?;
+            let kv_width =
+                u64::try_from(kv_width).map_err(|_| "Gemma4 KV width exceeds u64".to_string())?;
+            match attention.kind {
                 DecoderLayerKind::SlidingAttention => {
                     local_kv_source_layers =
                         local_kv_source_layers.checked_add(1).ok_or_else(|| {
                             "Gemma4 local KV source layer count overflows usize".to_string()
                         })?;
+                    let capacity = attention.sliding_window.ok_or_else(|| {
+                        format!(
+                            "Gemma4 descriptor local layer {} has no sliding-window capacity",
+                            layer.layer_index
+                        )
+                    })?;
+                    local_kv_capacity_tokens = local_kv_capacity_tokens.max(capacity);
+                    let capacity = u64::try_from(capacity)
+                        .map_err(|_| "Gemma4 local KV capacity exceeds u64".to_string())?;
+                    let elements = capacity
+                        .checked_mul(kv_width)
+                        .ok_or_else(|| "Gemma4 local KV element count overflows u64".to_string())?;
+                    let cache_bytes = elements
+                        .checked_mul(2)
+                        .and_then(|elements| elements.checked_mul(f32_bytes))
+                        .ok_or_else(|| "Gemma4 local KV byte count overflows u64".to_string())?;
+                    // Local source caches have both identity write and ordered
+                    // read page tables in addition to F32 K and V.
+                    let table_bytes = capacity
+                        .checked_mul(u32_bytes)
+                        .and_then(|bytes| bytes.checked_mul(2))
+                        .ok_or_else(|| {
+                            "Gemma4 local KV table byte count overflows u64".to_string()
+                        })?;
+                    local_kv_bytes = local_kv_bytes
+                        .checked_add(cache_bytes)
+                        .and_then(|bytes| bytes.checked_add(table_bytes))
+                        .ok_or_else(|| "Gemma4 local KV byte count overflows u64".to_string())?;
                 }
                 DecoderLayerKind::FullAttention => {
                     full_kv_source_layers =
                         full_kv_source_layers.checked_add(1).ok_or_else(|| {
                             "Gemma4 full KV source layer count overflows usize".to_string()
+                        })?;
+                    let bytes_per_token = kv_width
+                        .checked_mul(2)
+                        .and_then(|elements| elements.checked_mul(f32_bytes))
+                        .ok_or_else(|| {
+                            "Gemma4 full KV bytes-per-token overflows u64".to_string()
+                        })?;
+                    full_kv_bytes_per_token = full_kv_bytes_per_token
+                        .checked_add(bytes_per_token)
+                        .ok_or_else(|| {
+                            "Gemma4 full KV bytes-per-token overflows u64".to_string()
+                        })?;
+                    page_table_bytes_per_full_token = page_table_bytes_per_full_token
+                        .checked_add(u32_bytes)
+                        .ok_or_else(|| {
+                            "Gemma4 full KV page-table bytes-per-token overflows u64".to_string()
                         })?;
                 }
                 DecoderLayerKind::LinearAttention => {
@@ -302,93 +363,67 @@ impl Gemma4ResidentMemoryPlan {
                 }
             }
         }
-        let local_kv_width = config
-            .decoder
-            .num_key_value_heads
-            .checked_mul(config.local_head_dim)
-            .ok_or_else(|| "Gemma4 local KV width overflows usize".to_string())?;
-        let full_kv_width = config
-            .decoder
-            .num_key_value_heads
-            .checked_mul(config.global_head_dim)
-            .ok_or_else(|| "Gemma4 full KV width overflows usize".to_string())?;
-        let f32_bytes = u64::try_from(std::mem::size_of::<f32>())
-            .map_err(|_| "Gemma4 F32 byte width exceeds u64".to_string())?;
-        let local_kv_bytes = u64::try_from(local_kv_source_layers)
-            .ok()
-            .and_then(|layers| {
-                u64::try_from(config.sliding_window)
-                    .ok()
-                    .and_then(|window| layers.checked_mul(window))
+        let max_projection_input = descriptor
+            .layers
+            .iter()
+            .map(|layer| match &layer.mlp {
+                ResidentMlpDescriptor::Dense {
+                    intermediate_size, ..
+                } => Ok(*intermediate_size),
+                ResidentMlpDescriptor::MoE { .. } => Err(format!(
+                    "Gemma4 resident plan cannot allocate MoE layer {}",
+                    layer.layer_index
+                )),
             })
-            .and_then(|tokens| {
-                u64::try_from(local_kv_width)
-                    .ok()
-                    .and_then(|width| tokens.checked_mul(width))
-            })
-            .and_then(|elements| elements.checked_mul(2))
-            .and_then(|elements| elements.checked_mul(f32_bytes))
-            // A local source needs both an identity write table and an ordered
-            // read table.  The cache itself is F32 K plus V.
-            .and_then(|cache_bytes| {
-                u64::try_from(local_kv_source_layers)
-                    .ok()
-                    .and_then(|layers| {
-                        u64::try_from(config.sliding_window)
-                            .ok()
-                            .and_then(|window| layers.checked_mul(window))
-                    })
-                    .and_then(|entries| {
-                        entries.checked_mul(u64::try_from(std::mem::size_of::<u32>()).ok()?)
-                    })
-                    .and_then(|one_table| one_table.checked_mul(2))
-                    .and_then(|tables| cache_bytes.checked_add(tables))
-            })
-            .ok_or_else(|| "Gemma4 local KV byte count overflows u64".to_string())?;
-        let full_kv_bytes_per_token = u64::try_from(full_kv_source_layers)
-            .ok()
-            .and_then(|layers| {
-                u64::try_from(full_kv_width)
-                    .ok()
-                    .and_then(|width| layers.checked_mul(width))
-            })
-            .and_then(|elements| elements.checked_mul(2))
-            .and_then(|elements| elements.checked_mul(f32_bytes))
-            .ok_or_else(|| "Gemma4 full KV bytes-per-token overflows u64".to_string())?;
-        let page_table_bytes_per_full_token = u64::try_from(full_kv_source_layers)
-            .ok()
-            .and_then(|layers| layers.checked_mul(u64::try_from(std::mem::size_of::<u32>()).ok()?))
-            .ok_or_else(|| "Gemma4 full KV page-table bytes-per-token overflows u64".to_string())?;
-        let max_projection_input = config
-            .dense_mlp
-            .intermediate_size
-            .checked_mul(2)
-            .ok_or_else(|| "Gemma4 maximum projection input width overflows usize".to_string())?;
-        let max_projection_output = config.decoder.vocab_size;
-        let packed_ple = config
-            .decoder
-            .num_hidden_layers
-            .checked_mul(config.hidden_size_per_layer_input)
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .max()
+            .ok_or_else(|| "Gemma4 descriptor has no MLP width".to_string())?;
+        let max_projection_output = descriptor.decoder.vocab_size;
+        let ple = descriptor
+            .layers
+            .first()
+            .and_then(|layer| layer.per_layer_embedding.as_ref())
+            .ok_or_else(|| "Gemma4 descriptor has no PLE contract".to_string())?;
+        let packed_ple = descriptor
+            .layers
+            .len()
+            .checked_mul(ple.input_size)
             .ok_or_else(|| "Gemma4 packed PLE width overflows usize".to_string())?;
-        let max_attention_width = config
-            .decoder
-            .num_attention_heads
-            .checked_mul(config.global_head_dim)
-            .ok_or_else(|| "Gemma4 maximum attention width overflows usize".to_string())?;
+        let max_attention_width = descriptor
+            .layers
+            .iter()
+            .map(|layer| {
+                layer
+                    .attention
+                    .q_heads
+                    .checked_mul(layer.attention.head_dim)
+                    .ok_or_else(|| "Gemma4 maximum attention width overflows usize".to_string())
+            })
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .max()
+            .ok_or_else(|| "Gemma4 descriptor has no attention width".to_string())?;
+        let max_kv_width = descriptor
+            .layers
+            .iter()
+            .map(|layer| {
+                layer
+                    .attention
+                    .kv_heads
+                    .checked_mul(layer.attention.head_dim)
+                    .ok_or_else(|| "Gemma4 maximum KV width overflows usize".to_string())
+            })
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .max()
+            .ok_or_else(|| "Gemma4 descriptor has no KV width".to_string())?;
         let device_transient_bytes = [
             max_projection_input,
             max_projection_output,
             packed_ple,
-            config
-                .decoder
-                .num_key_value_heads
-                .checked_mul(config.global_head_dim)
-                .ok_or_else(|| "Gemma4 KV staging width overflows usize".to_string())?,
-            config
-                .decoder
-                .num_key_value_heads
-                .checked_mul(config.global_head_dim)
-                .ok_or_else(|| "Gemma4 KV staging width overflows usize".to_string())?,
+            max_kv_width,
+            max_kv_width,
             max_attention_width,
             max_attention_width,
         ]
@@ -414,12 +449,12 @@ impl Gemma4ResidentMemoryPlan {
                 .ok_or_else(|| "Gemma4 source payload is smaller than text tensors".to_string())?,
             local_kv_source_layers,
             full_kv_source_layers,
-            local_kv_capacity_tokens: config.sliding_window,
+            local_kv_capacity_tokens,
             local_kv_bytes,
             full_kv_bytes_per_token,
             page_table_bytes_per_full_token,
             device_transient_bytes,
-            max_context_tokens: config.max_position_embeddings,
+            max_context_tokens: descriptor.decoder.max_position_embeddings,
         })
     }
 
@@ -1515,7 +1550,11 @@ struct Gemma4DeviceKvCaches {
 }
 
 impl Gemma4DeviceKvCaches {
-    fn new(config: &Gemma4TextConfig, runtime: &mut Bf16MatvecRuntime) -> Result<Self, String> {
+    fn new(
+        descriptor: &ResidentModelDescriptor,
+        runtime: &mut Bf16MatvecRuntime,
+    ) -> Result<Self, String> {
+        descriptor.require_gemma4_resident_bf16()?;
         for required in [
             GEMMA4_TEXT_REQUIRED_HIP_PAGED_DECODE_ENV,
             GEMMA4_TEXT_REQUIRED_HIP_PAGED_KV_WRITE_ENV,
@@ -1526,23 +1565,28 @@ impl Gemma4DeviceKvCaches {
                 ));
             }
         }
-        let first_shared = config
-            .decoder
-            .num_hidden_layers
-            .checked_sub(config.num_kv_shared_layers)
-            .ok_or_else(|| "Gemma4 KV shared layer count exceeds layer count".to_string())?;
-        let mut per_layer = (0..config.decoder.num_hidden_layers)
+        let mut per_layer = (0..descriptor.layers.len())
             .map(|_| None)
             .collect::<Vec<Option<Gemma4DeviceKvCache>>>();
-        for layer_index in 0..first_shared {
-            let layer_kind = config.layer_types[layer_index];
+        for layer in descriptor
+            .layers
+            .iter()
+            .filter(|layer| matches!(layer.attention.kv_cache, ResidentKvCacheMode::Own))
+        {
+            let layer_index = layer.layer_index;
+            let attention = &layer.attention;
+            let layer_kind = attention.kind;
             let (head_dim, capacity_tokens) = match layer_kind {
-                DecoderLayerKind::SlidingAttention => {
-                    (config.local_head_dim, config.sliding_window)
-                }
-                DecoderLayerKind::FullAttention => {
-                    (config.global_head_dim, config.max_position_embeddings)
-                }
+                DecoderLayerKind::SlidingAttention => (
+                    attention.head_dim,
+                    attention.sliding_window.ok_or_else(|| {
+                        format!("Gemma4 descriptor layer {layer_index} is missing a sliding window")
+                    })?,
+                ),
+                DecoderLayerKind::FullAttention => (
+                    attention.head_dim,
+                    descriptor.decoder.max_position_embeddings,
+                ),
                 DecoderLayerKind::LinearAttention => {
                     return Err("Gemma4 resident KV does not support linear attention".into());
                 }
@@ -1550,7 +1594,7 @@ impl Gemma4DeviceKvCaches {
             if capacity_tokens == 0 {
                 return Err(format!("Gemma4 layer {layer_index} has zero KV capacity"));
             }
-            let kv_heads = config.decoder.num_key_value_heads;
+            let kv_heads = attention.kv_heads;
             let width = kv_heads
                 .checked_mul(head_dim)
                 .ok_or_else(|| "Gemma4 device KV width overflows usize".to_string())?;
@@ -1845,6 +1889,7 @@ enum Gemma4KvSharingMode {
 pub struct Gemma4TextExecutor {
     source_model_dir: PathBuf,
     config_sha256: String,
+    resident_descriptor: ResidentModelDescriptor,
     config: Gemma4TextConfig,
     weights: Gemma4WeightStorage,
     matvec: Bf16MatvecRuntime,
@@ -1861,14 +1906,17 @@ impl Gemma4TextExecutor {
     }
 
     pub fn from_loaded_config(loaded: LoadedModelConfig) -> Result<Self, String> {
+        let resident_descriptor = loaded.resident_descriptor()?;
+        resident_descriptor.require_gemma4_resident_bf16()?;
         let config = loaded.require_gemma4_text_executor()?.clone();
         let model_path = loaded.source_model_dir.join(GEMMA4_TEXT_MODEL_FILE);
         let weights = SafeTensorReader::open(&model_path)?;
-        validate_checkpoint_contract(&weights, &config)?;
+        validate_checkpoint_contract(&weights, &resident_descriptor)?;
         let matvec = Bf16MatvecRuntime::create()?;
         Ok(Self {
             source_model_dir: loaded.source_model_dir,
             config_sha256: loaded.config_sha256,
+            resident_descriptor,
             caches: Gemma4KvStorage::Host(Gemma4KvCaches::new(config.decoder.num_hidden_layers)),
             config,
             weights: Gemma4WeightStorage::Streamed(weights),
@@ -1889,11 +1937,14 @@ impl Gemma4TextExecutor {
     }
 
     pub fn from_loaded_config_resident(loaded: LoadedModelConfig) -> Result<Self, String> {
+        let resident_descriptor = loaded.resident_descriptor()?;
+        resident_descriptor.require_gemma4_resident_bf16()?;
         let config = loaded.require_gemma4_text_executor()?.clone();
         let model_path = loaded.source_model_dir.join(GEMMA4_TEXT_MODEL_FILE);
         let mut source_weights = SafeTensorReader::open(&model_path)?;
-        validate_checkpoint_contract(&source_weights, &config)?;
-        let memory_plan = Gemma4ResidentMemoryPlan::from_checkpoint(&source_weights, &config)?;
+        validate_checkpoint_contract(&source_weights, &resident_descriptor)?;
+        let memory_plan =
+            Gemma4ResidentMemoryPlan::from_checkpoint(&source_weights, &resident_descriptor)?;
         let mut matvec = Bf16MatvecRuntime::create()?;
         let resident_weights =
             ResidentGemma4Weights::upload_checkpoint(&mut source_weights, &mut matvec)?;
@@ -1908,7 +1959,7 @@ impl Gemma4TextExecutor {
                 memory_plan.resident_checkpoint_tensor_count,
             ));
         }
-        let device_caches = Gemma4DeviceKvCaches::new(&config, &mut matvec)?;
+        let device_caches = Gemma4DeviceKvCaches::new(&resident_descriptor, &mut matvec)?;
         let actual_kv_bytes = device_caches.allocated_bytes()?;
         let planned_kv_bytes = memory_plan.estimated_kv_bytes(config.max_position_embeddings)?;
         if actual_kv_bytes != planned_kv_bytes {
@@ -1919,6 +1970,7 @@ impl Gemma4TextExecutor {
         Ok(Self {
             source_model_dir: loaded.source_model_dir,
             config_sha256: loaded.config_sha256,
+            resident_descriptor,
             caches: Gemma4KvStorage::Device(device_caches),
             config,
             weights: Gemma4WeightStorage::Resident(resident_weights),
@@ -1931,6 +1983,13 @@ impl Gemma4TextExecutor {
 
     pub fn config(&self) -> &Gemma4TextConfig {
         &self.config
+    }
+
+    /// The config-derived topology actually selected for this executor.  The
+    /// legacy config accessor remains for callers that need source metadata;
+    /// execution semantics below read this descriptor for layer geometry.
+    pub fn resident_descriptor(&self) -> &ResidentModelDescriptor {
+        &self.resident_descriptor
     }
 
     pub fn source_model_dir(&self) -> &Path {
@@ -2021,21 +2080,21 @@ impl Gemma4TextExecutor {
         let Gemma4KvStorage::Device(caches) = &self.caches else {
             return Ok(None);
         };
-        let first_shared = self
-            .config
-            .decoder
-            .num_hidden_layers
-            .checked_sub(self.config.num_kv_shared_layers)
-            .ok_or_else(|| "Gemma4 KV shared layer count exceeds layer count".to_string())?;
-        let mut shared_layer_sources = Vec::new();
-        for layer_index in first_shared..self.config.decoder.num_hidden_layers {
-            let layer_kind = self.config.layer_types[layer_index];
-            shared_layer_sources.push(Gemma4SharedKvSource {
-                layer_index,
-                layer_kind: layer_kind.as_str().to_string(),
-                source_layer_index: self.shared_kv_source_layer(layer_index, layer_kind)?,
-            });
-        }
+        let shared_layer_sources = self
+            .resident_descriptor
+            .layers
+            .iter()
+            .filter_map(|layer| match layer.attention.kv_cache {
+                ResidentKvCacheMode::SharedFrom { source_layer_index } => {
+                    Some(Gemma4SharedKvSource {
+                        layer_index: layer.layer_index,
+                        layer_kind: layer.attention.kind.as_str().to_string(),
+                        source_layer_index,
+                    })
+                }
+                ResidentKvCacheMode::Own | ResidentKvCacheMode::LinearState => None,
+            })
+            .collect();
         Ok(Some(Gemma4ResidentKvCacheSnapshot {
             source_layers: caches.source_layer_states()?,
             shared_layer_sources,
@@ -2062,7 +2121,7 @@ impl Gemma4TextExecutor {
         }
         let saved_caches = std::mem::replace(
             &mut self.caches,
-            Gemma4KvStorage::Host(Gemma4KvCaches::new(self.config.decoder.num_hidden_layers)),
+            Gemma4KvStorage::Host(Gemma4KvCaches::new(self.resident_descriptor.layers.len())),
         );
         let saved_mode = std::mem::replace(
             &mut self.kv_sharing_mode,
@@ -2101,7 +2160,7 @@ impl Gemma4TextExecutor {
     pub fn reset(&mut self) {
         match &mut self.caches {
             Gemma4KvStorage::Host(caches) => {
-                *caches = Gemma4KvCaches::new(self.config.decoder.num_hidden_layers);
+                *caches = Gemma4KvCaches::new(self.resident_descriptor.layers.len());
             }
             Gemma4KvStorage::Device(caches) => caches.reset(),
         }
@@ -2121,6 +2180,23 @@ impl Gemma4TextExecutor {
         self.execute_step(&[token_id])
     }
 
+    fn layer_descriptor(
+        &self,
+        layer_index: usize,
+    ) -> Result<&crate::model_config::ResidentLayerDescriptor, String> {
+        self.resident_descriptor.layer(layer_index)
+    }
+
+    fn ple_descriptor(
+        &self,
+    ) -> Result<&crate::model_config::ResidentPerLayerEmbeddingDescriptor, String> {
+        self.resident_descriptor
+            .layers
+            .first()
+            .and_then(|layer| layer.per_layer_embedding.as_ref())
+            .ok_or_else(|| "Gemma4 resident descriptor has no per-layer embedding contract".into())
+    }
+
     /// Executes one causal input chunk. The chunk is evaluated token-by-token
     /// to preserve a simple explicit KV cache, but returned rows are laid out
     /// exactly as `[batch=1, tokens, width]` for the trace writer.
@@ -2132,14 +2208,15 @@ impl Gemma4TextExecutor {
             .position
             .checked_add(input_token_ids.len())
             .ok_or_else(|| "Gemma4 sequence position overflows usize".to_string())?;
-        if next_position > self.config.max_position_embeddings {
+        if next_position > self.resident_descriptor.decoder.max_position_embeddings {
             return Err(format!(
                 "Gemma4 input reaches position {next_position}, beyond max_position_embeddings={}",
-                self.config.max_position_embeddings
+                self.resident_descriptor.decoder.max_position_embeddings
             ));
         }
-        let hidden = self.config.decoder.hidden_size;
-        let layers = self.config.decoder.num_hidden_layers;
+        let hidden = self.resident_descriptor.decoder.hidden_size;
+        let layers = self.resident_descriptor.layers.len();
+        let ple_vocabulary = self.ple_descriptor()?.vocabulary_size;
         let mut embedding = Vec::with_capacity(
             input_token_ids
                 .len()
@@ -2154,16 +2231,16 @@ impl Gemma4TextExecutor {
         for token_id in input_token_ids {
             let token_index = usize::try_from(*token_id)
                 .map_err(|_| "Gemma4 token ID does not fit usize".to_string())?;
-            if token_index >= self.config.decoder.vocab_size {
+            if token_index >= self.resident_descriptor.decoder.vocab_size {
                 return Err(format!(
                     "Gemma4 token ID {token_id} is outside vocabulary 0..{}",
-                    self.config.decoder.vocab_size
+                    self.resident_descriptor.decoder.vocab_size
                 ));
             }
-            if token_index >= self.config.vocab_size_per_layer_input {
+            if token_index >= ple_vocabulary {
                 return Err(format!(
                     "Gemma4 token ID {token_id} is outside PLE vocabulary 0..{}",
-                    self.config.vocab_size_per_layer_input
+                    ple_vocabulary
                 ));
             }
             let token = self.forward_token(*token_id)?;
@@ -2190,13 +2267,17 @@ impl Gemma4TextExecutor {
     fn forward_token(&mut self, token_id: u32) -> Result<TokenForward, String> {
         let token_index = usize::try_from(token_id)
             .map_err(|_| "Gemma4 token ID does not fit usize".to_string())?;
-        let hidden = self.config.decoder.hidden_size;
-        let layers = self.config.decoder.num_hidden_layers;
-        let ple_dim = self.config.hidden_size_per_layer_input;
-        let embedding_scale = (hidden as f32).sqrt();
+        let decoder = self.resident_descriptor.decoder.clone();
+        let ple = self.ple_descriptor()?.clone();
+        let hidden = decoder.hidden_size;
+        let layers = self.resident_descriptor.layers.len();
+        let ple_dim = ple.input_size;
+        let embedding_scale = self.resident_descriptor.embedding.scale.ok_or_else(|| {
+            "Gemma4 resident descriptor is missing the token embedding scale".to_string()
+        })?;
         let mut embedding = self.read_weight_row(
             GEMMA4_TEXT_EMBED_TOKENS,
-            self.config.decoder.vocab_size,
+            decoder.vocab_size,
             hidden,
             token_index,
         )?;
@@ -2227,7 +2308,7 @@ impl Gemma4TextExecutor {
         let final_norm = rms_norm(
             &hidden_states,
             Some(&final_weight),
-            self.config.decoder.rms_norm_eps,
+            decoder.rms_norm_epsilon,
         )?;
         self.position = self
             .position
@@ -2241,36 +2322,37 @@ impl Gemma4TextExecutor {
     }
 
     fn compute_ple(&mut self, token_index: usize, embedding: &[f32]) -> Result<Vec<f32>, String> {
-        let layers = self.config.decoder.num_hidden_layers;
-        let ple_dim = self.config.hidden_size_per_layer_input;
+        let decoder = self.resident_descriptor.decoder.clone();
+        let ple = self.ple_descriptor()?.clone();
+        let layers = self.resident_descriptor.layers.len();
+        let ple_dim = ple.input_size;
         let packed_width = layers
             .checked_mul(ple_dim)
             .ok_or_else(|| "Gemma4 PLE packed width overflows".to_string())?;
         let mut token_identity = self.read_weight_row(
             GEMMA4_TEXT_EMBED_TOKENS_PER_LAYER,
-            self.config.vocab_size_per_layer_input,
+            ple.vocabulary_size,
             packed_width,
             token_index,
         )?;
         scale_in_place(
             &mut token_identity,
-            (ple_dim as f32).sqrt(),
+            ple.token_embedding_scale,
             "Gemma4 PLE token embedding scale",
         )?;
         let mut projected = self.matmul_named(
             GEMMA4_TEXT_PER_LAYER_MODEL_PROJECTION,
             packed_width,
-            self.config.decoder.hidden_size,
+            decoder.hidden_size,
             embedding,
         )?;
         scale_in_place(
             &mut projected,
-            (self.config.decoder.hidden_size as f32).sqrt().recip(),
+            ple.model_projection_scale,
             "Gemma4 PLE model projection scale",
         )?;
         let norm_weight =
             self.read_weight_vector(GEMMA4_TEXT_PER_LAYER_PROJECTION_NORM, ple_dim)?;
-        let combine_scale = 2.0_f32.powf(-0.5);
         for layer_index in 0..layers {
             let start = layer_index
                 .checked_mul(ple_dim)
@@ -2281,10 +2363,11 @@ impl Gemma4TextExecutor {
             let normalized = rms_norm(
                 &projected[start..end],
                 Some(&norm_weight),
-                self.config.decoder.rms_norm_eps,
+                decoder.rms_norm_epsilon,
             )?;
             for (index, value) in projected[start..end].iter_mut().enumerate() {
-                *value = (normalized[index] + token_identity[start + index]) * combine_scale;
+                *value = (normalized[index] + token_identity[start + index])
+                    * ple.residual_combine_scale;
             }
         }
         finite_slice(&projected, "Gemma4 PLE")?;
@@ -2298,17 +2381,23 @@ impl Gemma4TextExecutor {
         per_layer_input: &[f32],
         position: usize,
     ) -> Result<Vec<f32>, String> {
-        let hidden = self.config.decoder.hidden_size;
+        let decoder = self.resident_descriptor.decoder.clone();
+        let layer = self.layer_descriptor(layer_index)?.clone();
+        let ple = layer
+            .per_layer_embedding
+            .as_ref()
+            .ok_or_else(|| format!("Gemma4 descriptor layer {layer_index} is missing PLE"))?;
+        let hidden = decoder.hidden_size;
         if hidden_states.len() != hidden {
             return Err(format!(
                 "Gemma4 layer {layer_index} input width mismatch: expected {hidden}, got {}",
                 hidden_states.len()
             ));
         }
-        if per_layer_input.len() != self.config.hidden_size_per_layer_input {
+        if per_layer_input.len() != ple.input_size {
             return Err(format!(
                 "Gemma4 layer {layer_index} PLE width mismatch: expected {}, got {}",
-                self.config.hidden_size_per_layer_input,
+                ple.input_size,
                 per_layer_input.len()
             ));
         }
@@ -2318,7 +2407,7 @@ impl Gemma4TextExecutor {
         let input_norm = rms_norm(
             hidden_states,
             Some(&input_norm_weight),
-            self.config.decoder.rms_norm_eps,
+            decoder.rms_norm_epsilon,
         )?;
         let attention = self.forward_attention(layer_index, &input_norm, position)?;
         let post_attention_weight = self.read_weight_vector(
@@ -2328,7 +2417,7 @@ impl Gemma4TextExecutor {
         let post_attention = rms_norm(
             &attention,
             Some(&post_attention_weight),
-            self.config.decoder.rms_norm_eps,
+            decoder.rms_norm_epsilon,
         )?;
         let attention_residual = add_vectors(
             &residual_attention,
@@ -2344,7 +2433,7 @@ impl Gemma4TextExecutor {
         let feedforward_input = rms_norm(
             &attention_residual,
             Some(&pre_feedforward_weight),
-            self.config.decoder.rms_norm_eps,
+            decoder.rms_norm_epsilon,
         )?;
         let mlp = self.forward_mlp(layer_index, &feedforward_input)?;
         let post_feedforward_weight = self.read_weight_vector(
@@ -2354,13 +2443,13 @@ impl Gemma4TextExecutor {
         let post_feedforward = rms_norm(
             &mlp,
             Some(&post_feedforward_weight),
-            self.config.decoder.rms_norm_eps,
+            decoder.rms_norm_epsilon,
         )?;
         let mlp_residual = add_vectors(&residual_mlp, &post_feedforward, "Gemma4 MLP residual")?;
 
         let ple_gate = self.matmul_named(
             &layer_tensor(layer_index, "per_layer_input_gate.weight"),
-            self.config.hidden_size_per_layer_input,
+            ple.input_size,
             hidden,
             &mlp_residual,
         )?;
@@ -2369,7 +2458,7 @@ impl Gemma4TextExecutor {
         let ple_projection = self.matmul_named(
             &layer_tensor(layer_index, "per_layer_projection.weight"),
             hidden,
-            self.config.hidden_size_per_layer_input,
+            ple.input_size,
             &ple_product,
         )?;
         let post_ple_weight = self.read_weight_vector(
@@ -2379,7 +2468,7 @@ impl Gemma4TextExecutor {
         let post_ple = rms_norm(
             &ple_projection,
             Some(&post_ple_weight),
-            self.config.decoder.rms_norm_eps,
+            decoder.rms_norm_epsilon,
         )?;
         let mut output = add_vectors(&mlp_residual, &post_ple, "Gemma4 PLE residual")?;
         let layer_scalar =
@@ -2394,27 +2483,27 @@ impl Gemma4TextExecutor {
         hidden_states: &[f32],
         position: usize,
     ) -> Result<Vec<f32>, String> {
-        let layer_kind = *self
-            .config
-            .layer_types
-            .get(layer_index)
-            .ok_or_else(|| format!("Gemma4 layer type missing at {layer_index}"))?;
-        let head_dim = match layer_kind {
-            DecoderLayerKind::SlidingAttention => self.config.local_head_dim,
-            DecoderLayerKind::FullAttention => self.config.global_head_dim,
-            DecoderLayerKind::LinearAttention => {
-                return Err("Gemma4TextExecutor does not implement linear attention".into());
-            }
-        };
-        let q_heads = self.config.decoder.num_attention_heads;
-        let kv_heads = self.config.decoder.num_key_value_heads;
+        let decoder = self.resident_descriptor.decoder.clone();
+        let layer = self.layer_descriptor(layer_index)?.clone();
+        let attention = layer.attention;
+        let layer_kind = attention.kind;
+        if matches!(layer_kind, DecoderLayerKind::LinearAttention) {
+            return Err("Gemma4TextExecutor does not implement linear attention".into());
+        }
+        let head_dim = attention.head_dim;
+        let q_heads = attention.q_heads;
+        let kv_heads = attention.kv_heads;
+        let rope = attention
+            .rope
+            .clone()
+            .ok_or_else(|| format!("Gemma4 descriptor layer {layer_index} is missing RoPE"))?;
         let q_width = q_heads
             .checked_mul(head_dim)
             .ok_or_else(|| "Gemma4 q width overflows".to_string())?;
         let kv_width = kv_heads
             .checked_mul(head_dim)
             .ok_or_else(|| "Gemma4 KV width overflows".to_string())?;
-        let hidden = self.config.decoder.hidden_size;
+        let hidden = decoder.hidden_size;
         let q_raw = self.matmul_named(
             &layer_tensor(layer_index, "self_attn.q_proj.weight"),
             q_width,
@@ -2430,28 +2519,23 @@ impl Gemma4TextExecutor {
             q_heads,
             head_dim,
             Some(&q_norm_weight),
-            self.config.decoder.rms_norm_eps,
+            decoder.rms_norm_epsilon,
         )?;
-        apply_gemma4_rope_in_place(
-            &mut query,
-            q_heads,
-            head_dim,
-            layer_kind,
-            position,
-            &self.config,
-        )?;
+        apply_gemma4_rope_in_place(&mut query, q_heads, head_dim, &rope, position)?;
 
-        let first_shared = self
-            .config
-            .decoder
-            .num_hidden_layers
-            .checked_sub(self.config.num_kv_shared_layers)
-            .ok_or_else(|| "Gemma4 KV shared layer count exceeds layer count".to_string())?;
-        let is_shared_layer = layer_index >= first_shared && self.config.num_kv_shared_layers > 0;
-        let shared_source_layer = (is_shared_layer
-            && matches!(self.kv_sharing_mode, Gemma4KvSharingMode::SourceCache))
-        .then(|| self.shared_kv_source_layer(layer_index, layer_kind))
-        .transpose()?;
+        let shared_source_layer = match (attention.kv_cache, self.kv_sharing_mode) {
+            (
+                ResidentKvCacheMode::SharedFrom { source_layer_index },
+                Gemma4KvSharingMode::SourceCache,
+            ) => Some(source_layer_index),
+            (ResidentKvCacheMode::Own, _) => None,
+            (ResidentKvCacheMode::SharedFrom { .. }, Gemma4KvSharingMode::ReprojectPhysical) => {
+                None
+            }
+            (ResidentKvCacheMode::LinearState, _) => {
+                return Err("Gemma4TextExecutor cannot use linear-attention state".into());
+            }
+        };
         let source_kv = if shared_source_layer.is_some() {
             None
         } else {
@@ -2476,22 +2560,15 @@ impl Gemma4TextExecutor {
                 kv_heads,
                 head_dim,
                 Some(&k_norm_weight),
-                self.config.decoder.rms_norm_eps,
+                decoder.rms_norm_epsilon,
             )?;
-            apply_gemma4_rope_in_place(
-                &mut key,
-                kv_heads,
-                head_dim,
-                layer_kind,
-                position,
-                &self.config,
-            )?;
+            apply_gemma4_rope_in_place(&mut key, kv_heads, head_dim, &rope, position)?;
             let value = rms_norm_heads(
                 &value_raw,
                 kv_heads,
                 head_dim,
                 None,
-                self.config.decoder.rms_norm_eps,
+                decoder.rms_norm_epsilon,
             )?;
             Some((key, value))
         };
@@ -2517,11 +2594,10 @@ impl Gemma4TextExecutor {
                         .get_mut(layer_index)
                         .ok_or_else(|| format!("Gemma4 KV cache has no layer {layer_index}"))?
                         .get_or_insert_with(KvSequence::default);
-                    if matches!(layer_kind, DecoderLayerKind::SlidingAttention) {
-                        let retained =
-                            self.config.sliding_window.checked_sub(1).ok_or_else(|| {
-                                "Gemma4 sliding window must be nonzero".to_string()
-                            })?;
+                    if let Some(window) = attention.sliding_window {
+                        let retained = window.checked_sub(1).ok_or_else(|| {
+                            "Gemma4 descriptor sliding window must be nonzero".to_string()
+                        })?;
                         // Retain W-1 historical rows before appending this token.  After
                         // append the source cache has W rows and is deliberately left
                         // intact for later shared local-attention layers of this token.
@@ -2536,8 +2612,7 @@ impl Gemma4TextExecutor {
                     q_heads,
                     kv_heads,
                     head_dim,
-                    matches!(layer_kind, DecoderLayerKind::SlidingAttention)
-                        .then_some(self.config.sliding_window),
+                    attention.sliding_window,
                 )?
             }
             Gemma4KvStorage::Device(caches) => {
@@ -2565,49 +2640,19 @@ impl Gemma4TextExecutor {
         )
     }
 
-    fn shared_kv_source_layer(
-        &self,
-        layer_index: usize,
-        layer_kind: DecoderLayerKind,
-    ) -> Result<usize, String> {
-        let first_shared = self
-            .config
-            .decoder
-            .num_hidden_layers
-            .checked_sub(self.config.num_kv_shared_layers)
-            .ok_or_else(|| "Gemma4 KV shared layer count exceeds layer count".to_string())?;
-        if self.config.num_kv_shared_layers == 0 || layer_index < first_shared {
-            return Err(format!(
-                "Gemma4 layer {layer_index} is not a KV-shared layer"
-            ));
-        }
-        (0..first_shared)
-            .rev()
-            .find(|candidate| self.config.layer_types[*candidate] == layer_kind)
-            .ok_or_else(|| {
-                format!(
-                    "Gemma4 shared layer {layer_index} has no non-sharing {} source layer",
-                    layer_kind.as_str()
-                )
-            })
-    }
-
     fn forward_mlp(&mut self, layer_index: usize, input: &[f32]) -> Result<Vec<f32>, String> {
-        let first_shared = self
-            .config
-            .decoder
-            .num_hidden_layers
-            .checked_sub(self.config.num_kv_shared_layers)
-            .ok_or_else(|| "Gemma4 KV shared layer count exceeds layer count".to_string())?;
-        let use_double_wide =
-            self.config.use_double_wide_mlp && layer_index >= first_shared && first_shared > 0;
-        let intermediate = self
-            .config
-            .dense_mlp
-            .intermediate_size
-            .checked_mul(if use_double_wide { 2 } else { 1 })
-            .ok_or_else(|| "Gemma4 MLP intermediate width overflows".to_string())?;
-        let hidden = self.config.decoder.hidden_size;
+        let layer = self.layer_descriptor(layer_index)?.clone();
+        let intermediate = match layer.mlp {
+            ResidentMlpDescriptor::Dense {
+                intermediate_size, ..
+            } => intermediate_size,
+            ResidentMlpDescriptor::MoE { .. } => {
+                return Err(format!(
+                    "Gemma4 resident executor cannot execute MoE MLP at layer {layer_index}"
+                ));
+            }
+        };
+        let hidden = self.resident_descriptor.decoder.hidden_size;
         let gate = self.matmul_named(
             &layer_tensor(layer_index, "mlp.gate_proj.weight"),
             intermediate,
@@ -2631,13 +2676,19 @@ impl Gemma4TextExecutor {
     }
 
     fn project_tied_logits(&mut self, final_hidden: &[f32]) -> Result<Vec<f32>, String> {
+        let output = self.resident_descriptor.output.clone();
+        if !output.tied_to_embedding || !self.resident_descriptor.embedding.tied_to_output {
+            return Err("Gemma4 resident descriptor does not tie embedding and output head".into());
+        }
+        let cap = output.logit_soft_cap.ok_or_else(|| {
+            "Gemma4 resident descriptor is missing final-logit soft-cap".to_string()
+        })?;
         let mut logits = self.matmul_named(
             GEMMA4_TEXT_EMBED_TOKENS,
-            self.config.decoder.vocab_size,
-            self.config.decoder.hidden_size,
+            self.resident_descriptor.decoder.vocab_size,
+            self.resident_descriptor.decoder.hidden_size,
             final_hidden,
         )?;
-        let cap = self.config.final_logit_softcapping;
         for value in &mut logits {
             *value = (*value / cap).tanh() * cap;
         }
@@ -2706,22 +2757,27 @@ struct TokenForward {
 
 fn validate_checkpoint_contract(
     weights: &SafeTensorReader,
-    config: &Gemma4TextConfig,
+    descriptor: &ResidentModelDescriptor,
 ) -> Result<(), String> {
-    config.validate_nonquantized_executor()?;
-    let hidden = config.decoder.hidden_size;
-    let layers = config.decoder.num_hidden_layers;
-    let ple_dim = config.hidden_size_per_layer_input;
+    descriptor.require_gemma4_resident_bf16()?;
+    let hidden = descriptor.decoder.hidden_size;
+    let layers = descriptor.layers.len();
+    let ple = descriptor
+        .layers
+        .first()
+        .and_then(|layer| layer.per_layer_embedding.as_ref())
+        .ok_or_else(|| "Gemma4 descriptor has no PLE contract".to_string())?;
+    let ple_dim = ple.input_size;
     let packed_ple = layers
         .checked_mul(ple_dim)
         .ok_or_else(|| "Gemma4 PLE packed width overflows".to_string())?;
     weights.require_bf16_shape(
         GEMMA4_TEXT_EMBED_TOKENS,
-        &[config.decoder.vocab_size, hidden],
+        &[descriptor.decoder.vocab_size, hidden],
     )?;
     weights.require_bf16_shape(
         GEMMA4_TEXT_EMBED_TOKENS_PER_LAYER,
-        &[config.vocab_size_per_layer_input, packed_ple],
+        &[ple.vocabulary_size, packed_ple],
     )?;
     weights.require_bf16_shape(
         GEMMA4_TEXT_PER_LAYER_MODEL_PROJECTION,
@@ -2730,27 +2786,29 @@ fn validate_checkpoint_contract(
     weights.require_bf16_shape(GEMMA4_TEXT_PER_LAYER_PROJECTION_NORM, &[ple_dim])?;
     weights.require_bf16_shape(GEMMA4_TEXT_FINAL_NORM, &[hidden])?;
 
-    let first_shared = layers
-        .checked_sub(config.num_kv_shared_layers)
-        .ok_or_else(|| "Gemma4 KV shared layer count exceeds layer count".to_string())?;
-    for layer_index in 0..layers {
-        let layer_kind = config.layer_types[layer_index];
-        let head_dim = match layer_kind {
-            DecoderLayerKind::SlidingAttention => config.local_head_dim,
-            DecoderLayerKind::FullAttention => config.global_head_dim,
-            DecoderLayerKind::LinearAttention => {
-                return Err("Gemma4 checkpoint has unsupported linear-attention layer".into());
-            }
-        };
-        let q_width = config
-            .decoder
-            .num_attention_heads
-            .checked_mul(head_dim)
+    for layer in &descriptor.layers {
+        let layer_index = layer.layer_index;
+        let attention = &layer.attention;
+        if matches!(attention.kind, DecoderLayerKind::LinearAttention) {
+            return Err("Gemma4 checkpoint has unsupported linear-attention layer".into());
+        }
+        if layer
+            .per_layer_embedding
+            .as_ref()
+            .filter(|candidate| *candidate == ple)
+            .is_none()
+        {
+            return Err(format!(
+                "Gemma4 descriptor layer {layer_index} has a PLE contract different from layer 0"
+            ));
+        }
+        let q_width = attention
+            .q_heads
+            .checked_mul(attention.head_dim)
             .ok_or_else(|| "Gemma4 q width overflows".to_string())?;
-        let kv_width = config
-            .decoder
-            .num_key_value_heads
-            .checked_mul(head_dim)
+        let kv_width = attention
+            .kv_heads
+            .checked_mul(attention.value_dim)
             .ok_or_else(|| "Gemma4 KV width overflows".to_string())?;
         for norm in [
             "input_layernorm.weight",
@@ -2768,15 +2826,15 @@ fn validate_checkpoint_contract(
         )?;
         weights.require_bf16_shape(
             &layer_tensor(layer_index, "self_attn.q_norm.weight"),
-            &[head_dim],
+            &[attention.head_dim],
         )?;
         weights.require_bf16_shape(
             &layer_tensor(layer_index, "self_attn.o_proj.weight"),
             &[hidden, q_width],
         )?;
         // HF ignores the physical K/V tensors of shared layers.  Require the
-        // tensors only for layers whose modules actually own those projections.
-        if layer_index < first_shared {
+        // tensors only for layers whose descriptor says they own K/V.
+        if matches!(attention.kv_cache, ResidentKvCacheMode::Own) {
             weights.require_bf16_shape(
                 &layer_tensor(layer_index, "self_attn.k_proj.weight"),
                 &[kv_width, hidden],
@@ -2787,16 +2845,19 @@ fn validate_checkpoint_contract(
             )?;
             weights.require_bf16_shape(
                 &layer_tensor(layer_index, "self_attn.k_norm.weight"),
-                &[head_dim],
+                &[attention.head_dim],
             )?;
         }
-        let double_wide =
-            config.use_double_wide_mlp && layer_index >= first_shared && first_shared > 0;
-        let intermediate = config
-            .dense_mlp
-            .intermediate_size
-            .checked_mul(if double_wide { 2 } else { 1 })
-            .ok_or_else(|| "Gemma4 MLP intermediate width overflows".to_string())?;
+        let intermediate = match &layer.mlp {
+            ResidentMlpDescriptor::Dense {
+                intermediate_size, ..
+            } => *intermediate_size,
+            ResidentMlpDescriptor::MoE { .. } => {
+                return Err(format!(
+                    "Gemma4 descriptor layer {layer_index} unexpectedly selected an MoE MLP"
+                ));
+            }
+        };
         weights.require_bf16_shape(
             &layer_tensor(layer_index, "mlp.gate_proj.weight"),
             &[intermediate, hidden],
@@ -2984,9 +3045,8 @@ fn apply_gemma4_rope_in_place(
     values: &mut [f32],
     heads: usize,
     head_dim: usize,
-    layer_kind: DecoderLayerKind,
+    rope: &ResidentRopeDescriptor,
     position: usize,
-    config: &Gemma4TextConfig,
 ) -> Result<(), String> {
     if !head_dim.is_multiple_of(2) {
         return Err(format!("Gemma4 RoPE head_dim must be even, got {head_dim}"));
@@ -3000,21 +3060,16 @@ fn apply_gemma4_rope_in_place(
             values.len()
         ));
     }
-    let rope = match layer_kind {
-        DecoderLayerKind::SlidingAttention => &config.sliding_rope,
-        DecoderLayerKind::FullAttention => &config.full_rope,
-        DecoderLayerKind::LinearAttention => {
-            return Err("Gemma4 does not implement linear-attention RoPE".into());
-        }
-    };
     let half = head_dim / 2;
-    let active_pairs = match layer_kind {
-        DecoderLayerKind::SlidingAttention => half,
-        DecoderLayerKind::FullAttention => {
+    let active_pairs = match rope.kind {
+        ResidentRopeKind::Default => rope.rotary_dim.unwrap_or(head_dim) / 2,
+        ResidentRopeKind::Proportional => {
             let partial = rope.partial_rotary_factor.unwrap_or(1.0);
             ((partial * head_dim as f32) / 2.0).floor() as usize
         }
-        DecoderLayerKind::LinearAttention => unreachable!("rejected above"),
+        ResidentRopeKind::Mrope => {
+            return Err("Gemma4 resident executor does not implement mRoPE".into());
+        }
     };
     if active_pairs > half {
         return Err(format!(
@@ -3026,7 +3081,7 @@ fn apply_gemma4_rope_in_place(
     for pair in 0..half {
         let inverse_frequency = if pair < active_pairs {
             let exponent = (2 * pair) as f32 / head_dim as f32;
-            rope.rope_theta.powf(exponent).recip()
+            rope.theta.powf(exponent).recip()
         } else {
             0.0
         };
@@ -3160,62 +3215,6 @@ fn top1_from_logits(logits: &[f32]) -> Result<Gemma4TextTop1, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model_config::{
-        AttentionConfig, DecoderShapeConfig, DenseMlpConfig, GemmaRopeConfig,
-        RmsNormWeightConvention,
-    };
-
-    fn config() -> Gemma4TextConfig {
-        Gemma4TextConfig {
-            decoder: DecoderShapeConfig {
-                model_type: "gemma4_text".into(),
-                hidden_size: 8,
-                num_hidden_layers: 2,
-                num_attention_heads: 2,
-                num_key_value_heads: 1,
-                head_dim: 4,
-                rms_norm_eps: 1e-6,
-                vocab_size: 16,
-                tie_word_embeddings: true,
-            },
-            attention: AttentionConfig {
-                bias: false,
-                dropout: 0.0,
-            },
-            dense_mlp: DenseMlpConfig {
-                activation: "gelu_pytorch_tanh".into(),
-                intermediate_size: 16,
-            },
-            layer_types: vec![
-                DecoderLayerKind::SlidingAttention,
-                DecoderLayerKind::FullAttention,
-            ],
-            local_head_dim: 4,
-            global_head_dim: 4,
-            num_global_key_value_heads: None,
-            sliding_window: 2,
-            sliding_rope: GemmaRopeConfig {
-                rope_type: "default".into(),
-                rope_theta: 10_000.0,
-                partial_rotary_factor: None,
-            },
-            full_rope: GemmaRopeConfig {
-                rope_type: "proportional".into(),
-                rope_theta: 1_000_000.0,
-                partial_rotary_factor: Some(0.25),
-            },
-            attention_k_eq_v: false,
-            num_kv_shared_layers: 1,
-            use_double_wide_mlp: true,
-            hidden_size_per_layer_input: 2,
-            vocab_size_per_layer_input: 16,
-            final_logit_softcapping: 30.0,
-            max_position_embeddings: 64,
-            use_bidirectional_attention: None,
-            enable_moe_block: false,
-            norm_weight_convention: RmsNormWeightConvention::DirectWeight,
-        }
-    }
 
     #[test]
     fn bf16_conversion_preserves_expected_values() {
@@ -3233,17 +3232,16 @@ mod tests {
 
     #[test]
     fn proportional_rope_leaves_unrotated_channels_unchanged() {
-        let config = config();
         let mut values = vec![1.0, 2.0, 3.0, 4.0];
-        apply_gemma4_rope_in_place(
-            &mut values,
-            1,
-            4,
-            DecoderLayerKind::FullAttention,
-            7,
-            &config,
-        )
-        .unwrap();
+        let rope = ResidentRopeDescriptor {
+            kind: ResidentRopeKind::Proportional,
+            theta: 1_000_000.0,
+            rotary_dim: None,
+            partial_rotary_factor: Some(0.25),
+            mrope_interleaved: false,
+            mrope_sections: Vec::new(),
+        };
+        apply_gemma4_rope_in_place(&mut values, 1, 4, &rope, 7).unwrap();
         // 25% of a four-wide head yields zero active pairs under HF's
         // `int(partial * head_dim // 2)` rule.
         assert_eq!(values, vec![1.0, 2.0, 3.0, 4.0]);

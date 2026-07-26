@@ -80,6 +80,15 @@ impl LoadedModelConfig {
         self.model.require_gemma4_text_executor()
     }
 
+    /// Lowers the inspected source config into the topology consumed by a
+    /// resident runtime.  This is intentionally distinct from an executor
+    /// selection: a descriptor can faithfully describe a recognized model
+    /// before a particular weight format or kernel composition exists.
+    pub fn resident_descriptor(&self) -> Result<ResidentModelDescriptor, String> {
+        self.model
+            .resident_descriptor_with_config_sha256(self.config_sha256.clone())
+    }
+
     /// Returns a descriptive error after config assembly for executors that
     /// have intentionally not been implemented yet.
     pub fn require_implemented_executor(&self) -> Result<(), String> {
@@ -166,6 +175,27 @@ impl ModelConfig {
         };
         config.validate_nonquantized_executor()?;
         Ok(config)
+    }
+
+    /// Builds a fail-closed resident topology from this typed config.  The
+    /// SHA-256 is carried with the descriptor so a later artifact/runtime
+    /// binding cannot silently pair it with a different source config.
+    pub fn resident_descriptor_with_config_sha256(
+        &self,
+        config_sha256: String,
+    ) -> Result<ResidentModelDescriptor, String> {
+        let descriptor = match self {
+            Self::Qwen3(config) => resident_descriptor_for_qwen3(config, config_sha256)?,
+            Self::Gemma4Text(config) => resident_descriptor_for_gemma4(config, config_sha256)?,
+            Self::Qwen35DenseText(config) => {
+                resident_descriptor_for_qwen35_dense(config, config_sha256)?
+            }
+            Self::Qwen35MoeText(config) => {
+                resident_descriptor_for_qwen35_moe(config, config_sha256)?
+            }
+        };
+        descriptor.validate()?;
+        Ok(descriptor)
     }
 }
 
@@ -550,6 +580,7 @@ pub struct Qwen35HybridTextConfig {
     pub decoder: DecoderShapeConfig,
     pub attention: AttentionConfig,
     pub activation: String,
+    pub max_position_embeddings: usize,
     pub layer_types: Vec<DecoderLayerKind>,
     pub full_attention_interval: usize,
     pub attn_output_gate: bool,
@@ -664,6 +695,954 @@ pub struct Qwen35MoeConfig {
 pub struct Qwen35MoeTextConfig {
     pub hybrid: Qwen35HybridTextConfig,
     pub moe: Qwen35MoeConfig,
+}
+
+/// Runtime-neutral description of the decoder geometry and semantics that
+/// affect resident allocation and layer composition.  It is deliberately a
+/// closed set of inspected architectures, not a free-form model graph.
+///
+/// `SQ8_0` is one possible consumer of a descriptor, but it is not the
+/// descriptor's schema.  In particular, a descriptor can describe Gemma4's
+/// BF16 resident path or Qwen3.5 MoE's future quantized path without claiming
+/// that the legacy Qwen3-14B `SQ8_0` kernels can execute either one.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ResidentModelDescriptor {
+    /// SHA-256 of the exact `config.json` that produced this descriptor.
+    pub source_config_sha256: String,
+    pub architecture: ModelArchitectureKind,
+    pub decoder: ResidentDecoderDescriptor,
+    pub embedding: ResidentEmbeddingDescriptor,
+    pub output: ResidentOutputDescriptor,
+    pub layers: Vec<ResidentLayerDescriptor>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ResidentDecoderDescriptor {
+    pub hidden_size: usize,
+    pub vocab_size: usize,
+    pub max_position_embeddings: usize,
+    pub rms_norm_epsilon: f32,
+    pub norm_weight_convention: RmsNormWeightConvention,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ResidentEmbeddingDescriptor {
+    pub tied_to_output: bool,
+    /// A runtime multiplier applied immediately after the token embedding.
+    /// Qwen3 and Qwen3.5 omit it; Gemma4 uses `sqrt(hidden_size)`.
+    pub scale: Option<f32>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ResidentOutputDescriptor {
+    pub tied_to_embedding: bool,
+    /// A final-logit soft-cap applied after the output projection.
+    pub logit_soft_cap: Option<f32>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResidentAttentionScale {
+    InverseSqrtHeadDim,
+    One,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResidentKvCacheMode {
+    /// This layer owns K/V storage and projects new K/V values.
+    Own,
+    /// This layer consumes the source layer's K/V storage and must not load
+    /// its physical K/V projection tensors as a substitute.
+    SharedFrom { source_layer_index: usize },
+    /// Qwen3.5 hybrid linear attention has recurrent state rather than a
+    /// paged attention K/V cache.
+    LinearState,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResidentRopeKind {
+    Default,
+    Proportional,
+    Mrope,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ResidentRopeDescriptor {
+    pub kind: ResidentRopeKind,
+    pub theta: f32,
+    /// Number of rotary channels. `None` means the layer contract supplies
+    /// its own rule (for example proportional partial RoPE).
+    pub rotary_dim: Option<usize>,
+    pub partial_rotary_factor: Option<f32>,
+    pub mrope_interleaved: bool,
+    pub mrope_sections: Vec<usize>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ResidentAttentionDescriptor {
+    pub kind: DecoderLayerKind,
+    pub q_heads: usize,
+    pub kv_heads: usize,
+    pub head_dim: usize,
+    pub value_dim: usize,
+    pub scale: ResidentAttentionScale,
+    pub rope: Option<ResidentRopeDescriptor>,
+    pub sliding_window: Option<usize>,
+    pub kv_cache: ResidentKvCacheMode,
+    pub q_norm: bool,
+    pub k_norm: bool,
+    pub v_norm: bool,
+    pub output_gate: bool,
+    pub linear_attention: Option<ResidentLinearAttentionDescriptor>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ResidentLinearAttentionDescriptor {
+    pub conv_kernel_dim: usize,
+    pub key_head_dim: usize,
+    pub num_key_heads: usize,
+    pub num_value_heads: usize,
+    pub value_head_dim: usize,
+    pub state_dtype: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResidentResidualNorm {
+    Input,
+    PostAttention,
+    PreFeedForward,
+    PostFeedForward,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResidentLayerNormDescriptor {
+    /// Norms that sit on a residual path, in execution order.
+    pub residual_norms: Vec<ResidentResidualNorm>,
+    pub q_norm: bool,
+    pub k_norm: bool,
+    pub v_norm: bool,
+    /// Gemma4's PLE residual has an additional post-projection norm.
+    pub post_per_layer_input_norm: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum ResidentMlpDescriptor {
+    Dense {
+        intermediate_size: usize,
+        activation: String,
+    },
+    MoE {
+        num_experts: usize,
+        experts_per_token: usize,
+        expert_intermediate_size: usize,
+        shared_expert_intermediate_size: usize,
+        activation: String,
+    },
+}
+
+impl ResidentMlpDescriptor {
+    pub fn activation(&self) -> &str {
+        match self {
+            Self::Dense { activation, .. } | Self::MoE { activation, .. } => activation,
+        }
+    }
+
+    pub fn intermediate_size(&self) -> usize {
+        match self {
+            Self::Dense {
+                intermediate_size, ..
+            } => *intermediate_size,
+            Self::MoE {
+                expert_intermediate_size,
+                ..
+            } => *expert_intermediate_size,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ResidentPerLayerEmbeddingDescriptor {
+    pub input_size: usize,
+    pub vocabulary_size: usize,
+    pub token_embedding_scale: f32,
+    pub model_projection_scale: f32,
+    pub residual_combine_scale: f32,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ResidentLayerDescriptor {
+    pub layer_index: usize,
+    pub attention: ResidentAttentionDescriptor,
+    pub norms: ResidentLayerNormDescriptor,
+    pub mlp: ResidentMlpDescriptor,
+    pub per_layer_embedding: Option<ResidentPerLayerEmbeddingDescriptor>,
+}
+
+impl ResidentModelDescriptor {
+    pub fn layer(&self, layer_index: usize) -> Result<&ResidentLayerDescriptor, String> {
+        self.layers.get(layer_index).ok_or_else(|| {
+            format!(
+                "resident {} descriptor has no layer {layer_index}",
+                self.architecture.architecture_name()
+            )
+        })
+    }
+
+    /// The legacy `SQ8_0` artifact and kernels still have one intentional,
+    /// exact implementation contract.  Keeping that contract here makes the
+    /// dispatch boundary explicit instead of allowing fixed Qwen3-14B values
+    /// to leak into a generic architecture selection path.
+    pub fn require_qwen3_14b_sq8_0(&self) -> Result<(), String> {
+        const HIDDEN: usize = 5_120;
+        const LAYERS: usize = 40;
+        const Q_HEADS: usize = 40;
+        const KV_HEADS: usize = 8;
+        const HEAD_DIM: usize = 128;
+        const INTERMEDIATE: usize = 17_408;
+        const VOCAB: usize = 151_936;
+        const EPSILON: f32 = 1.0e-6;
+        const ROPE_THETA: f32 = 1_000_000.0;
+
+        if self.architecture != ModelArchitectureKind::Qwen3 {
+            return Err(format!(
+                "SQ8_0 Qwen3-14B resident backend requires {}, got {}",
+                ModelArchitectureKind::Qwen3.architecture_name(),
+                self.architecture.architecture_name()
+            ));
+        }
+        let decoder = &self.decoder;
+        if (
+            decoder.hidden_size,
+            decoder.vocab_size,
+            self.layers.len(),
+            decoder.norm_weight_convention,
+            decoder.rms_norm_epsilon.to_bits(),
+        ) != (
+            HIDDEN,
+            VOCAB,
+            LAYERS,
+            RmsNormWeightConvention::DirectWeight,
+            EPSILON.to_bits(),
+        ) || self.embedding.tied_to_output
+            || self.embedding.scale.is_some()
+            || self.output.tied_to_embedding
+            || self.output.logit_soft_cap.is_some()
+        {
+            return Err(
+                "SQ8_0 resident backend only accepts the inspected Qwen3-14B decoder topology"
+                    .into(),
+            );
+        }
+        for (index, layer) in self.layers.iter().enumerate() {
+            let attention = &layer.attention;
+            let exact_attention = attention.kind == DecoderLayerKind::FullAttention
+                && attention.q_heads == Q_HEADS
+                && attention.kv_heads == KV_HEADS
+                && attention.head_dim == HEAD_DIM
+                && attention.value_dim == HEAD_DIM
+                && attention.scale == ResidentAttentionScale::InverseSqrtHeadDim
+                && attention.sliding_window.is_none()
+                && attention.kv_cache == ResidentKvCacheMode::Own
+                && attention.q_norm
+                && attention.k_norm
+                && !attention.v_norm
+                && !attention.output_gate
+                && attention.linear_attention.is_none()
+                && matches!(
+                    attention.rope.as_ref(),
+                    Some(rope)
+                        if rope.kind == ResidentRopeKind::Default
+                            && rope.theta.to_bits() == ROPE_THETA.to_bits()
+                            && rope.rotary_dim == Some(32)
+                            && rope.partial_rotary_factor.is_none()
+                            && !rope.mrope_interleaved
+                            && rope.mrope_sections.is_empty()
+                );
+            let exact_norms = layer.norms.residual_norms
+                == [
+                    ResidentResidualNorm::Input,
+                    ResidentResidualNorm::PostAttention,
+                ]
+                && layer.norms.q_norm
+                && layer.norms.k_norm
+                && !layer.norms.v_norm
+                && !layer.norms.post_per_layer_input_norm;
+            let exact_mlp = matches!(
+                &layer.mlp,
+                ResidentMlpDescriptor::Dense {
+                    intermediate_size,
+                    activation,
+                } if *intermediate_size == INTERMEDIATE && activation == "silu"
+            );
+            if layer.layer_index != index
+                || !exact_attention
+                || !exact_norms
+                || !exact_mlp
+                || layer.per_layer_embedding.is_some()
+            {
+                return Err(format!(
+                    "SQ8_0 Qwen3-14B resident backend rejects descriptor layer {index}: its topology differs from the legacy seven-projection full-attention block"
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// Validates the subset consumed by the existing Gemma4 resident BF16
+    /// executor.  It remains separate from `SQ8_0`: the weights are source
+    /// BF16 and the layer composition includes operations absent from the
+    /// legacy seven-projection Qwen3 block.
+    pub fn require_gemma4_resident_bf16(&self) -> Result<(), String> {
+        if self.architecture != ModelArchitectureKind::Gemma4Text {
+            return Err(format!(
+                "Gemma4 resident BF16 executor requires {}, got {}",
+                ModelArchitectureKind::Gemma4Text.architecture_name(),
+                self.architecture.architecture_name()
+            ));
+        }
+        if !self.embedding.tied_to_output
+            || !self.output.tied_to_embedding
+            || self.embedding.scale.is_none()
+            || self.output.logit_soft_cap.is_none()
+        {
+            return Err("Gemma4 resident BF16 descriptor is missing tied embedding/head, embedding scale, or final logit soft-cap".into());
+        }
+        for (index, layer) in self.layers.iter().enumerate() {
+            let gemma_attention = &layer.attention;
+            let gemma_rope = gemma_attention.rope.as_ref();
+            let gemma_dense_mlp = matches!(
+                &layer.mlp,
+                ResidentMlpDescriptor::Dense { activation, .. }
+                    if activation == "gelu_pytorch_tanh"
+            );
+            if layer.layer_index != index
+                || !matches!(
+                    gemma_attention.kind,
+                    DecoderLayerKind::SlidingAttention | DecoderLayerKind::FullAttention
+                )
+                || gemma_attention.value_dim != gemma_attention.head_dim
+                || gemma_attention.scale != ResidentAttentionScale::One
+                || !gemma_attention.q_norm
+                || !gemma_attention.k_norm
+                || !gemma_attention.v_norm
+                || !matches!(
+                    gemma_rope.map(|rope| rope.kind),
+                    Some(ResidentRopeKind::Default | ResidentRopeKind::Proportional)
+                )
+                || layer.per_layer_embedding.is_none()
+                || layer.norms.residual_norms
+                    != [
+                        ResidentResidualNorm::Input,
+                        ResidentResidualNorm::PostAttention,
+                        ResidentResidualNorm::PreFeedForward,
+                        ResidentResidualNorm::PostFeedForward,
+                    ]
+                || !layer.norms.post_per_layer_input_norm
+                || !layer.norms.q_norm
+                || !layer.norms.k_norm
+                || !layer.norms.v_norm
+                || !gemma_dense_mlp
+            {
+                return Err(format!(
+                    "Gemma4 resident BF16 descriptor layer {index} is missing supported attention/norm/RoPE/MLP/PLE semantics"
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        if !is_sha256_hex(&self.source_config_sha256) {
+            return Err("resident descriptor source config SHA-256 is invalid".into());
+        }
+        if self.decoder.hidden_size == 0
+            || self.decoder.vocab_size == 0
+            || self.decoder.max_position_embeddings == 0
+            || !self.decoder.rms_norm_epsilon.is_finite()
+            || self.decoder.rms_norm_epsilon <= 0.0
+            || self.layers.is_empty()
+        {
+            return Err("resident descriptor has an invalid decoder shape or epsilon".into());
+        }
+        if self.embedding.tied_to_output != self.output.tied_to_embedding {
+            return Err("resident descriptor embedding/head tie contract disagrees".into());
+        }
+        if let Some(scale) = self.embedding.scale
+            && (!scale.is_finite() || scale <= 0.0)
+        {
+            return Err("resident descriptor embedding scale must be finite and positive".into());
+        }
+        if let Some(cap) = self.output.logit_soft_cap
+            && (!cap.is_finite() || cap <= 0.0)
+        {
+            return Err("resident descriptor logit soft-cap must be finite and positive".into());
+        }
+        for (index, layer) in self.layers.iter().enumerate() {
+            if layer.layer_index != index {
+                return Err(format!(
+                    "resident descriptor layer order mismatch: slot={index} layer_index={}",
+                    layer.layer_index
+                ));
+            }
+            validate_resident_layer(self, layer)?;
+        }
+        Ok(())
+    }
+}
+
+fn validate_resident_layer(
+    model: &ResidentModelDescriptor,
+    layer: &ResidentLayerDescriptor,
+) -> Result<(), String> {
+    let attention = &layer.attention;
+    if attention.q_heads == 0
+        || attention.kv_heads == 0
+        || attention.head_dim == 0
+        || attention.value_dim == 0
+        || !attention.q_heads.is_multiple_of(attention.kv_heads)
+    {
+        return Err(format!(
+            "resident descriptor layer {} has invalid attention geometry",
+            layer.layer_index
+        ));
+    }
+    match attention.kind {
+        DecoderLayerKind::SlidingAttention => {
+            if attention.sliding_window.is_none_or(|window| window == 0) {
+                return Err(format!(
+                    "resident descriptor sliding layer {} needs a nonzero window",
+                    layer.layer_index
+                ));
+            }
+            if attention.linear_attention.is_some() {
+                return Err(format!(
+                    "resident descriptor sliding layer {} carries linear-attention state",
+                    layer.layer_index
+                ));
+            }
+        }
+        DecoderLayerKind::FullAttention => {
+            if attention.sliding_window.is_some() || attention.linear_attention.is_some() {
+                return Err(format!(
+                    "resident descriptor full-attention layer {} has incompatible state",
+                    layer.layer_index
+                ));
+            }
+        }
+        DecoderLayerKind::LinearAttention => {
+            if attention.sliding_window.is_some()
+                || attention.rope.is_some()
+                || !matches!(attention.kv_cache, ResidentKvCacheMode::LinearState)
+                || attention.linear_attention.is_none()
+            {
+                return Err(format!(
+                    "resident descriptor linear-attention layer {} has an invalid state contract",
+                    layer.layer_index
+                ));
+            }
+        }
+    }
+    match attention.kv_cache {
+        ResidentKvCacheMode::Own => {
+            if attention.kind == DecoderLayerKind::LinearAttention {
+                return Err(format!(
+                    "resident descriptor linear layer {} cannot own paged K/V",
+                    layer.layer_index
+                ));
+            }
+        }
+        ResidentKvCacheMode::SharedFrom { source_layer_index } => {
+            let source = model.layers.get(source_layer_index).ok_or_else(|| {
+                format!(
+                    "resident descriptor layer {} shares K/V from missing layer {source_layer_index}",
+                    layer.layer_index
+                )
+            })?;
+            if source_layer_index >= layer.layer_index
+                || source.attention.kind != attention.kind
+                || source.attention.q_heads != attention.q_heads
+                || source.attention.kv_heads != attention.kv_heads
+                || source.attention.head_dim != attention.head_dim
+                || source.attention.value_dim != attention.value_dim
+                || !matches!(source.attention.kv_cache, ResidentKvCacheMode::Own)
+            {
+                return Err(format!(
+                    "resident descriptor layer {} has an invalid shared K/V source {source_layer_index}",
+                    layer.layer_index
+                ));
+            }
+        }
+        ResidentKvCacheMode::LinearState => {
+            if attention.kind != DecoderLayerKind::LinearAttention {
+                return Err(format!(
+                    "resident descriptor non-linear layer {} cannot use linear state",
+                    layer.layer_index
+                ));
+            }
+        }
+    }
+    if let Some(rope) = &attention.rope {
+        if !rope.theta.is_finite() || rope.theta <= 1.0 {
+            return Err(format!(
+                "resident descriptor layer {} has an invalid RoPE theta",
+                layer.layer_index
+            ));
+        }
+        if let Some(rotary_dim) = rope.rotary_dim
+            && (rotary_dim == 0 || rotary_dim > attention.head_dim || !rotary_dim.is_multiple_of(2))
+        {
+            return Err(format!(
+                "resident descriptor layer {} has an invalid rotary width",
+                layer.layer_index
+            ));
+        }
+        if let Some(partial) = rope.partial_rotary_factor
+            && (!partial.is_finite() || partial <= 0.0 || partial > 1.0)
+        {
+            return Err(format!(
+                "resident descriptor layer {} has an invalid partial RoPE factor",
+                layer.layer_index
+            ));
+        }
+    } else if attention.kind != DecoderLayerKind::LinearAttention {
+        return Err(format!(
+            "resident descriptor attention layer {} is missing RoPE",
+            layer.layer_index
+        ));
+    }
+    match &layer.mlp {
+        ResidentMlpDescriptor::Dense {
+            intermediate_size,
+            activation,
+        } => {
+            if *intermediate_size == 0 || activation.is_empty() {
+                return Err(format!(
+                    "resident descriptor dense MLP at layer {} is invalid",
+                    layer.layer_index
+                ));
+            }
+        }
+        ResidentMlpDescriptor::MoE {
+            num_experts,
+            experts_per_token,
+            expert_intermediate_size,
+            shared_expert_intermediate_size,
+            activation,
+        } => {
+            if *num_experts == 0
+                || *experts_per_token == 0
+                || *experts_per_token > *num_experts
+                || *expert_intermediate_size == 0
+                || *shared_expert_intermediate_size == 0
+                || activation.is_empty()
+            {
+                return Err(format!(
+                    "resident descriptor MoE MLP at layer {} is invalid",
+                    layer.layer_index
+                ));
+            }
+        }
+    }
+    if let Some(ple) = &layer.per_layer_embedding
+        && (ple.input_size == 0
+            || ple.vocabulary_size == 0
+            || !ple.token_embedding_scale.is_finite()
+            || ple.token_embedding_scale <= 0.0
+            || !ple.model_projection_scale.is_finite()
+            || ple.model_projection_scale <= 0.0
+            || !ple.residual_combine_scale.is_finite()
+            || ple.residual_combine_scale <= 0.0)
+    {
+        return Err(format!(
+            "resident descriptor PLE at layer {} is invalid",
+            layer.layer_index
+        ));
+    }
+    Ok(())
+}
+
+fn resident_descriptor_for_qwen3(
+    config: &Qwen3ModelConfig,
+    source_config_sha256: String,
+) -> Result<ResidentModelDescriptor, String> {
+    config.validate_existing_executor()?;
+    let rotary_dim = config.legacy_runtime_rotary_dim()?;
+    let decoder = &config.decoder;
+    let layers = (0..decoder.num_hidden_layers)
+        .map(|layer_index| ResidentLayerDescriptor {
+            layer_index,
+            attention: ResidentAttentionDescriptor {
+                kind: DecoderLayerKind::FullAttention,
+                q_heads: decoder.num_attention_heads,
+                kv_heads: decoder.num_key_value_heads,
+                head_dim: decoder.head_dim,
+                value_dim: decoder.head_dim,
+                scale: ResidentAttentionScale::InverseSqrtHeadDim,
+                rope: Some(ResidentRopeDescriptor {
+                    kind: ResidentRopeKind::Default,
+                    theta: config.rope_theta,
+                    rotary_dim: Some(rotary_dim),
+                    partial_rotary_factor: None,
+                    mrope_interleaved: false,
+                    mrope_sections: Vec::new(),
+                }),
+                sliding_window: None,
+                kv_cache: ResidentKvCacheMode::Own,
+                q_norm: true,
+                k_norm: true,
+                v_norm: false,
+                output_gate: false,
+                linear_attention: None,
+            },
+            norms: ResidentLayerNormDescriptor {
+                residual_norms: vec![
+                    ResidentResidualNorm::Input,
+                    ResidentResidualNorm::PostAttention,
+                ],
+                q_norm: true,
+                k_norm: true,
+                v_norm: false,
+                post_per_layer_input_norm: false,
+            },
+            mlp: ResidentMlpDescriptor::Dense {
+                intermediate_size: config.dense_mlp.intermediate_size,
+                activation: config.dense_mlp.activation.clone(),
+            },
+            per_layer_embedding: None,
+        })
+        .collect();
+    Ok(ResidentModelDescriptor {
+        source_config_sha256,
+        architecture: ModelArchitectureKind::Qwen3,
+        decoder: ResidentDecoderDescriptor {
+            hidden_size: decoder.hidden_size,
+            vocab_size: decoder.vocab_size,
+            max_position_embeddings: config.max_position_embeddings,
+            rms_norm_epsilon: decoder.rms_norm_eps,
+            norm_weight_convention: config.norm_weight_convention,
+        },
+        embedding: ResidentEmbeddingDescriptor {
+            tied_to_output: decoder.tie_word_embeddings,
+            scale: None,
+        },
+        output: ResidentOutputDescriptor {
+            tied_to_embedding: decoder.tie_word_embeddings,
+            logit_soft_cap: None,
+        },
+        layers,
+    })
+}
+
+fn resident_descriptor_for_gemma4(
+    config: &Gemma4TextConfig,
+    source_config_sha256: String,
+) -> Result<ResidentModelDescriptor, String> {
+    config.validate_nonquantized_executor()?;
+    let first_shared = config
+        .decoder
+        .num_hidden_layers
+        .checked_sub(config.num_kv_shared_layers)
+        .ok_or_else(|| "Gemma4 descriptor KV shared layer count exceeds layer count".to_string())?;
+    let ple = ResidentPerLayerEmbeddingDescriptor {
+        input_size: config.hidden_size_per_layer_input,
+        vocabulary_size: config.vocab_size_per_layer_input,
+        token_embedding_scale: (config.hidden_size_per_layer_input as f32).sqrt(),
+        model_projection_scale: (config.decoder.hidden_size as f32).sqrt().recip(),
+        residual_combine_scale: 2.0_f32.powf(-0.5),
+    };
+    let mut layers = Vec::with_capacity(config.decoder.num_hidden_layers);
+    for (layer_index, kind) in config.layer_types.iter().copied().enumerate() {
+        let (head_dim, kv_heads, rope, sliding_window) = match kind {
+            DecoderLayerKind::SlidingAttention => (
+                config.local_head_dim,
+                config.decoder.num_key_value_heads,
+                resident_rope_from_gemma(&config.sliding_rope, Some(config.local_head_dim))?,
+                Some(config.sliding_window),
+            ),
+            DecoderLayerKind::FullAttention => (
+                config.global_head_dim,
+                config
+                    .num_global_key_value_heads
+                    .unwrap_or(config.decoder.num_key_value_heads),
+                resident_rope_from_gemma(&config.full_rope, None)?,
+                None,
+            ),
+            DecoderLayerKind::LinearAttention => {
+                return Err("Gemma4 descriptor does not support linear-attention layers".into());
+            }
+        };
+        let kv_cache = if layer_index < first_shared {
+            ResidentKvCacheMode::Own
+        } else {
+            let source_layer_index = (0..first_shared)
+                .rev()
+                .find(|candidate| config.layer_types[*candidate] == kind)
+                .ok_or_else(|| {
+                    format!(
+                        "Gemma4 shared layer {layer_index} has no non-sharing {} K/V source",
+                        kind.as_str()
+                    )
+                })?;
+            ResidentKvCacheMode::SharedFrom { source_layer_index }
+        };
+        let intermediate_multiplier =
+            if config.use_double_wide_mlp && layer_index >= first_shared && first_shared > 0 {
+                2
+            } else {
+                1
+            };
+        let intermediate_size = config
+            .dense_mlp
+            .intermediate_size
+            .checked_mul(intermediate_multiplier)
+            .ok_or_else(|| "Gemma4 descriptor MLP intermediate width overflows".to_string())?;
+        layers.push(ResidentLayerDescriptor {
+            layer_index,
+            attention: ResidentAttentionDescriptor {
+                kind,
+                q_heads: config.decoder.num_attention_heads,
+                kv_heads,
+                head_dim,
+                value_dim: head_dim,
+                scale: ResidentAttentionScale::One,
+                rope: Some(rope),
+                sliding_window,
+                kv_cache,
+                q_norm: true,
+                k_norm: true,
+                v_norm: true,
+                output_gate: false,
+                linear_attention: None,
+            },
+            norms: ResidentLayerNormDescriptor {
+                residual_norms: vec![
+                    ResidentResidualNorm::Input,
+                    ResidentResidualNorm::PostAttention,
+                    ResidentResidualNorm::PreFeedForward,
+                    ResidentResidualNorm::PostFeedForward,
+                ],
+                q_norm: true,
+                k_norm: true,
+                v_norm: true,
+                post_per_layer_input_norm: true,
+            },
+            mlp: ResidentMlpDescriptor::Dense {
+                intermediate_size,
+                activation: config.dense_mlp.activation.clone(),
+            },
+            per_layer_embedding: Some(ple.clone()),
+        });
+    }
+    Ok(ResidentModelDescriptor {
+        source_config_sha256,
+        architecture: ModelArchitectureKind::Gemma4Text,
+        decoder: ResidentDecoderDescriptor {
+            hidden_size: config.decoder.hidden_size,
+            vocab_size: config.decoder.vocab_size,
+            max_position_embeddings: config.max_position_embeddings,
+            rms_norm_epsilon: config.decoder.rms_norm_eps,
+            norm_weight_convention: config.norm_weight_convention,
+        },
+        embedding: ResidentEmbeddingDescriptor {
+            tied_to_output: true,
+            scale: Some((config.decoder.hidden_size as f32).sqrt()),
+        },
+        output: ResidentOutputDescriptor {
+            tied_to_embedding: true,
+            logit_soft_cap: Some(config.final_logit_softcapping),
+        },
+        layers,
+    })
+}
+
+fn resident_rope_from_gemma(
+    rope: &GemmaRopeConfig,
+    rotary_dim: Option<usize>,
+) -> Result<ResidentRopeDescriptor, String> {
+    let kind = match rope.rope_type.as_str() {
+        "default" => ResidentRopeKind::Default,
+        "proportional" => ResidentRopeKind::Proportional,
+        other => {
+            return Err(format!(
+                "Gemma4 descriptor has unsupported RoPE type {other:?}"
+            ));
+        }
+    };
+    Ok(ResidentRopeDescriptor {
+        kind,
+        theta: rope.rope_theta,
+        rotary_dim,
+        partial_rotary_factor: rope.partial_rotary_factor,
+        mrope_interleaved: false,
+        mrope_sections: Vec::new(),
+    })
+}
+
+fn resident_descriptor_for_qwen35_dense(
+    config: &Qwen35DenseTextConfig,
+    source_config_sha256: String,
+) -> Result<ResidentModelDescriptor, String> {
+    config.validate_existing_aq4_executor()?;
+    resident_descriptor_for_qwen35_hybrid(
+        &config.hybrid,
+        source_config_sha256,
+        ModelArchitectureKind::Qwen35DenseText,
+        |_: usize| ResidentMlpDescriptor::Dense {
+            intermediate_size: config.dense_mlp.intermediate_size,
+            activation: config.dense_mlp.activation.clone(),
+        },
+    )
+}
+
+fn resident_descriptor_for_qwen35_moe(
+    config: &Qwen35MoeTextConfig,
+    source_config_sha256: String,
+) -> Result<ResidentModelDescriptor, String> {
+    let moe = &config.moe;
+    resident_descriptor_for_qwen35_hybrid(
+        &config.hybrid,
+        source_config_sha256,
+        ModelArchitectureKind::Qwen35MoeText,
+        |_| ResidentMlpDescriptor::MoE {
+            num_experts: moe.num_experts,
+            experts_per_token: moe.num_experts_per_tok,
+            expert_intermediate_size: moe.expert_intermediate_size,
+            shared_expert_intermediate_size: moe.shared_expert_intermediate_size,
+            activation: config.hybrid.activation.clone(),
+        },
+    )
+}
+
+fn resident_descriptor_for_qwen35_hybrid(
+    config: &Qwen35HybridTextConfig,
+    source_config_sha256: String,
+    architecture: ModelArchitectureKind,
+    mut mlp: impl FnMut(usize) -> ResidentMlpDescriptor,
+) -> Result<ResidentModelDescriptor, String> {
+    if config.layer_types.len() != config.decoder.num_hidden_layers {
+        return Err("Qwen3.5 resident descriptor layer count disagrees with config".into());
+    }
+    if !config
+        .decoder
+        .num_attention_heads
+        .is_multiple_of(config.decoder.num_key_value_heads)
+    {
+        return Err("Qwen3.5 resident descriptor has invalid full-attention geometry".into());
+    }
+    let rope = resident_rope_from_qwen35(&config.rope)?;
+    let linear = ResidentLinearAttentionDescriptor {
+        conv_kernel_dim: config.linear_attention.conv_kernel_dim,
+        key_head_dim: config.linear_attention.key_head_dim,
+        num_key_heads: config.linear_attention.num_key_heads,
+        num_value_heads: config.linear_attention.num_value_heads,
+        value_head_dim: config.linear_attention.value_head_dim,
+        state_dtype: config.linear_attention.state_dtype.clone(),
+    };
+    let layers = config
+        .layer_types
+        .iter()
+        .copied()
+        .enumerate()
+        .map(|(layer_index, kind)| {
+            let (q_heads, kv_heads, head_dim, value_dim, rope, kv_cache, linear_attention) =
+                match kind {
+                    DecoderLayerKind::FullAttention => (
+                        config.decoder.num_attention_heads,
+                        config.decoder.num_key_value_heads,
+                        config.decoder.head_dim,
+                        config.decoder.head_dim,
+                        Some(rope.clone()),
+                        ResidentKvCacheMode::Own,
+                        None,
+                    ),
+                    DecoderLayerKind::LinearAttention => (
+                        config.linear_attention.num_value_heads,
+                        config.linear_attention.num_key_heads,
+                        config.linear_attention.value_head_dim,
+                        config.linear_attention.value_head_dim,
+                        None,
+                        ResidentKvCacheMode::LinearState,
+                        Some(linear.clone()),
+                    ),
+                    DecoderLayerKind::SlidingAttention => {
+                        return Err(format!(
+                            "Qwen3.5 resident descriptor does not accept sliding layer {layer_index}"
+                        ));
+                    }
+                };
+            Ok(ResidentLayerDescriptor {
+                layer_index,
+                attention: ResidentAttentionDescriptor {
+                    kind,
+                    q_heads,
+                    kv_heads,
+                    head_dim,
+                    value_dim,
+                    scale: ResidentAttentionScale::InverseSqrtHeadDim,
+                    rope,
+                    sliding_window: None,
+                    kv_cache,
+                    q_norm: matches!(kind, DecoderLayerKind::FullAttention),
+                    k_norm: matches!(kind, DecoderLayerKind::FullAttention),
+                    v_norm: false,
+                    output_gate: config.attn_output_gate,
+                    linear_attention,
+                },
+                norms: ResidentLayerNormDescriptor {
+                    residual_norms: vec![
+                        ResidentResidualNorm::Input,
+                        ResidentResidualNorm::PostAttention,
+                    ],
+                    q_norm: matches!(kind, DecoderLayerKind::FullAttention),
+                    k_norm: matches!(kind, DecoderLayerKind::FullAttention),
+                    v_norm: false,
+                    post_per_layer_input_norm: false,
+                },
+                mlp: mlp(layer_index),
+                per_layer_embedding: None,
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    Ok(ResidentModelDescriptor {
+        source_config_sha256,
+        architecture,
+        decoder: ResidentDecoderDescriptor {
+            hidden_size: config.decoder.hidden_size,
+            vocab_size: config.decoder.vocab_size,
+            max_position_embeddings: config.max_position_embeddings,
+            rms_norm_epsilon: config.decoder.rms_norm_eps,
+            norm_weight_convention: config.norm_weight_convention,
+        },
+        embedding: ResidentEmbeddingDescriptor {
+            tied_to_output: config.decoder.tie_word_embeddings,
+            scale: None,
+        },
+        output: ResidentOutputDescriptor {
+            tied_to_embedding: config.decoder.tie_word_embeddings,
+            logit_soft_cap: None,
+        },
+        layers,
+    })
+}
+
+fn resident_rope_from_qwen35(rope: &Qwen35RopeConfig) -> Result<ResidentRopeDescriptor, String> {
+    if rope.rope_type != "default" {
+        return Err(format!(
+            "Qwen3.5 resident descriptor requires default mRoPE base, got {:?}",
+            rope.rope_type
+        ));
+    }
+    Ok(ResidentRopeDescriptor {
+        kind: ResidentRopeKind::Mrope,
+        theta: rope.rope_theta,
+        rotary_dim: None,
+        partial_rotary_factor: Some(rope.partial_rotary_factor),
+        mrope_interleaved: rope.mrope_interleaved,
+        mrope_sections: rope.mrope_sections.clone(),
+    })
+}
+
+fn is_sha256_hex(value: &str) -> bool {
+    value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 /// Reads and resolves `model_dir/config.json`.
@@ -991,6 +1970,7 @@ fn parse_qwen35_hybrid_text(
         decoder,
         attention,
         activation,
+        max_position_embeddings: required_usize(text, "max_position_embeddings", "text_config")?,
         layer_types,
         full_attention_interval: required_usize(text, "full_attention_interval", "text_config")?,
         attn_output_gate: required_bool(text, "attn_output_gate", "text_config")?,
@@ -1377,6 +2357,7 @@ mod tests {
             "hidden_act": "silu",
             "rms_norm_eps": 0.000001,
             "vocab_size": 248320,
+            "max_position_embeddings": 262144,
             "attention_bias": false,
             "attention_dropout": 0.0,
             "layer_types": if moe { vec!["linear_attention", "full_attention"] } else { vec!["linear_attention", "full_attention"] },
@@ -1467,6 +2448,70 @@ mod tests {
     }
 
     #[test]
+    fn resident_descriptor_preserves_qwen3_14b_sq8_0_legacy_contract() {
+        let config = parse_model_config_value(&qwen3_config()).unwrap();
+        let descriptor = config
+            .resident_descriptor_with_config_sha256("a".repeat(64))
+            .unwrap();
+        assert_eq!(descriptor.architecture, ModelArchitectureKind::Qwen3);
+        assert_eq!(descriptor.layers.len(), 40);
+        assert_eq!(descriptor.layers[0].attention.q_heads, 40);
+        assert_eq!(descriptor.layers[0].attention.kv_heads, 8);
+        assert_eq!(descriptor.layers[0].attention.head_dim, 128);
+        assert_eq!(descriptor.layers[0].mlp.intermediate_size(), 17_408);
+        descriptor.require_qwen3_14b_sq8_0().unwrap();
+    }
+
+    #[test]
+    fn resident_descriptor_represents_gemma4_layer_specific_state() {
+        let config = parse_model_config_value(&gemma4_config()).unwrap();
+        let descriptor = config
+            .resident_descriptor_with_config_sha256("b".repeat(64))
+            .unwrap();
+        assert_eq!(descriptor.architecture, ModelArchitectureKind::Gemma4Text);
+        assert_eq!(descriptor.layers.len(), 35);
+        assert_eq!(descriptor.embedding.scale, Some((1536.0_f32).sqrt()));
+        assert_eq!(descriptor.output.logit_soft_cap, Some(30.0));
+        assert_eq!(
+            descriptor.layers[0].attention.kind,
+            DecoderLayerKind::SlidingAttention
+        );
+        assert_eq!(descriptor.layers[0].attention.head_dim, 256);
+        assert_eq!(descriptor.layers[0].attention.sliding_window, Some(512));
+        assert_eq!(
+            descriptor.layers[4].attention.kind,
+            DecoderLayerKind::FullAttention
+        );
+        assert_eq!(descriptor.layers[4].attention.head_dim, 512);
+        assert!(matches!(
+            descriptor.layers[15].attention.kv_cache,
+            ResidentKvCacheMode::SharedFrom {
+                source_layer_index: 13
+            }
+        ));
+        assert!(matches!(
+            descriptor.layers[19].attention.kv_cache,
+            ResidentKvCacheMode::SharedFrom {
+                source_layer_index: 14
+            }
+        ));
+        assert_eq!(descriptor.layers[14].mlp.intermediate_size(), 6144);
+        assert_eq!(descriptor.layers[15].mlp.intermediate_size(), 12288);
+        assert_eq!(
+            descriptor.layers[0].norms.residual_norms,
+            vec![
+                ResidentResidualNorm::Input,
+                ResidentResidualNorm::PostAttention,
+                ResidentResidualNorm::PreFeedForward,
+                ResidentResidualNorm::PostFeedForward,
+            ]
+        );
+        assert!(descriptor.layers[0].per_layer_embedding.is_some());
+        descriptor.require_gemma4_resident_bf16().unwrap();
+        assert!(descriptor.require_qwen3_14b_sq8_0().is_err());
+    }
+
+    #[test]
     fn qwen35_dense_config_assembles_existing_aq4_text_contract() {
         let config = parse_model_config_value(&qwen35_config(false)).unwrap();
         let ModelConfig::Qwen35DenseText(config) = config else {
@@ -1514,6 +2559,38 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn resident_descriptor_represents_qwen35_moe_without_claiming_execution() {
+        let config = parse_model_config_value(&qwen35_config(true)).unwrap();
+        let descriptor = config
+            .resident_descriptor_with_config_sha256("c".repeat(64))
+            .unwrap();
+        assert_eq!(
+            descriptor.architecture,
+            ModelArchitectureKind::Qwen35MoeText
+        );
+        assert_eq!(descriptor.layers.len(), 40);
+        assert!(matches!(
+            descriptor.layers[0].attention.kv_cache,
+            ResidentKvCacheMode::LinearState
+        ));
+        assert!(matches!(
+            descriptor.layers[3].attention.kind,
+            DecoderLayerKind::FullAttention
+        ));
+        assert!(matches!(
+            &descriptor.layers[0].mlp,
+            ResidentMlpDescriptor::MoE {
+                num_experts: 256,
+                experts_per_token: 8,
+                expert_intermediate_size: 512,
+                shared_expert_intermediate_size: 512,
+                ..
+            }
+        ));
+        assert!(descriptor.require_qwen3_14b_sq8_0().is_err());
     }
 
     #[test]

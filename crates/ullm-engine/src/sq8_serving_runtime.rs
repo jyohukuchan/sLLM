@@ -1003,19 +1003,11 @@ impl Qwen3Sq8ServingSession {
             )));
         }
         let package_path = package_path.as_ref();
-        load_model_config_from_package(package_path)
-            .and_then(|loaded| {
-                loaded.require_qwen3_full_attention().and_then(|config| {
-                    config.validate_static_runtime_shape(
-                        QWEN3_14B_HIDDEN_SIZE,
-                        QWEN3_14B_SQ8_STACK_LAYERS,
-                        QWEN3_14B_Q_HEADS,
-                        QWEN3_14B_KV_HEADS,
-                        QWEN3_14B_HEAD_DIM,
-                        QWEN3_14B_VALUE_DIM,
-                        QWEN3_14B_VOCAB_SIZE,
-                    )
-                })
+        let resident_descriptor = load_model_config_from_package(package_path)
+            .and_then(|loaded| loaded.resident_descriptor())
+            .and_then(|descriptor| {
+                descriptor.require_qwen3_14b_sq8_0()?;
+                Ok(descriptor)
             })
             .map_err(|error| {
                 Sq8ServingError::invalid_configuration(format!(
@@ -1026,10 +1018,11 @@ impl Qwen3Sq8ServingSession {
             let device_info = context.device_info()?;
             validate_qwen3_14b_sq8_r9700_device_info(&device_info)?;
             let resident_stack_width = prefill_mode.resident_stack_width();
-            let stack = Qwen3Sq8StackRuntime::load(
+            let stack = Qwen3Sq8StackRuntime::load_for_resident_descriptor(
                 context,
                 stream,
                 artifact,
+                &resident_descriptor,
                 resident_stack_width,
                 norms,
                 upload_chunk_bytes,

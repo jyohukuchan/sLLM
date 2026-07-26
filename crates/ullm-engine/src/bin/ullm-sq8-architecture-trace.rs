@@ -165,18 +165,14 @@ fn run(options: Options) -> Result<(), String> {
     require_hip_kernel_guards()?;
 
     let loaded_config = load_model_config_from_package(&options.package)?;
-    let qwen3_config = loaded_config
-        .require_qwen3_full_attention()
+    let resident_descriptor = loaded_config
+        .resident_descriptor()
+        .and_then(|descriptor| {
+            descriptor.require_qwen3_14b_sq8_0()?;
+            Ok(descriptor)
+        })
         .map_err(|error| format!("Qwen3 SQ8_0 trace config rejection: {error}"))?;
-    qwen3_config.validate_static_runtime_shape(
-        QWEN3_14B_HIDDEN_SIZE,
-        LAYER_COUNT,
-        40,
-        8,
-        128,
-        128,
-        QWEN3_14B_VOCAB_SIZE,
-    )?;
+    debug_assert_eq!(resident_descriptor.layers.len(), LAYER_COUNT);
     let model_type = match &loaded_config.model {
         ModelConfig::Qwen3(config) => config.decoder.model_type.clone(),
         _ => unreachable!("require_qwen3_full_attention returned a non-Qwen3 config"),

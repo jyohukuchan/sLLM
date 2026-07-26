@@ -3,6 +3,7 @@
 
 use crate::decoder::PagedDecodeState;
 use crate::host_bytes::{decode_f32_le_values, encode_f32_to_bytes};
+use crate::model_config::ResidentModelDescriptor;
 use crate::sq_canonical::Sq8CanonicalArtifact;
 use crate::sq8_layer_oracle::{
     QWEN3_14B_HEAD_DIM, QWEN3_14B_HIDDEN_SIZE, QWEN3_14B_INTERMEDIATE_SIZE, QWEN3_14B_KV_HEADS,
@@ -619,6 +620,38 @@ impl Qwen3Sq8PagedDecodeRuntime {
 }
 
 impl Qwen3Sq8StackRuntime {
+    /// Descriptor-gated entry point for the legacy `SQ8_0` Qwen3-14B
+    /// resident implementation.  The stack itself intentionally remains a
+    /// fixed-kernel backend; this boundary prevents a config for another
+    /// architecture from reaching its fixed arrays and binds the artifact to
+    /// the exact source config that selected the descriptor.
+    pub fn load_for_resident_descriptor(
+        context: &mut RuntimeContext,
+        stream: &mut RuntimeStream,
+        artifact: &Sq8CanonicalArtifact,
+        descriptor: &ResidentModelDescriptor,
+        sequence_len: usize,
+        norms: Vec<Qwen3Sq8LayerNormValues>,
+        upload_chunk_bytes: usize,
+    ) -> Result<Self, String> {
+        descriptor.require_qwen3_14b_sq8_0()?;
+        let artifact_config_sha256 = &artifact.manifest().source.config_sha256;
+        if artifact_config_sha256 != &descriptor.source_config_sha256 {
+            return Err(format!(
+                "SQ8_0 artifact/config binding mismatch: artifact={} descriptor={}",
+                artifact_config_sha256, descriptor.source_config_sha256
+            ));
+        }
+        Self::load(
+            context,
+            stream,
+            artifact,
+            sequence_len,
+            norms,
+            upload_chunk_bytes,
+        )
+    }
+
     /// Loads the fixed 40-layer stack one layer at a time.
     ///
     /// `norms` is consumed in layer order. Each layer's host norms are dropped immediately after

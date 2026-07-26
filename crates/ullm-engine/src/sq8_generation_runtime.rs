@@ -785,25 +785,21 @@ impl Qwen3Sq8GenerationRuntime {
         }
         let package_path = package_path.as_ref();
         let source_config = load_model_config_from_package(package_path)?;
-        source_config
-            .require_qwen3_full_attention()?
-            .validate_static_runtime_shape(
-                QWEN3_14B_HIDDEN_SIZE,
-                QWEN3_14B_SQ8_STACK_LAYERS,
-                QWEN3_14B_Q_HEADS,
-                QWEN3_14B_KV_HEADS,
-                QWEN3_14B_HEAD_DIM,
-                QWEN3_14B_VALUE_DIM,
-                QWEN3_14B_VOCAB_SIZE,
-            )
+        let resident_descriptor = source_config
+            .resident_descriptor()
+            .and_then(|descriptor| {
+                descriptor.require_qwen3_14b_sq8_0()?;
+                Ok(descriptor)
+            })
             .map_err(|error| format!("Qwen3-14B SQ8_0 model config rejection: {error}"))?;
         let load_result = (|| {
             let device_info = context.device_info()?;
             validate_qwen3_14b_sq8_r9700_device_info(&device_info)?;
-            let stack = Qwen3Sq8StackRuntime::load(
+            let stack = Qwen3Sq8StackRuntime::load_for_resident_descriptor(
                 context,
                 stream,
                 artifact,
+                &resident_descriptor,
                 QWEN3_14B_SQ8_GENERATION_PROMPT_TOKENS,
                 norms,
                 upload_chunk_bytes,
