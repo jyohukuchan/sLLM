@@ -15,6 +15,7 @@ use crate::backend_operation_registry::{
 use crate::decoder::PagedDecodeShape;
 use crate::execution_batch::ExecutionPhase;
 use crate::host_bytes::{decode_f32_le_values, encode_f32_to_bytes, encode_u32_to_bytes};
+use crate::kv_cache_dtype::{KvCacheDtypes, KvCacheLayout};
 use crate::loader::{
     WeightRegistry, effective_qwen35_rmsnorm_weight_values, read_named_passthrough_f32,
 };
@@ -1110,6 +1111,8 @@ pub enum PackageSelfAttnAttentionProjectionInput {
 pub struct PackageSelfAttnResidentStepWeights {
     sync_component_timing: bool,
     use_paged_decode_sigmoid_gate: bool,
+    kv_cache_dtypes: KvCacheDtypes,
+    kv_cache_layout: KvCacheLayout,
     pub hidden: usize,
     pub q_heads: usize,
     pub kv_heads: usize,
@@ -1324,6 +1327,8 @@ pub struct PackageSelfAttnResidentStepLayer {
     k_rope_buffer: ullm_runtime_sys::RuntimeBuffer,
     k_cache_buffer: ullm_runtime_sys::RuntimeBuffer,
     v_cache_buffer: ullm_runtime_sys::RuntimeBuffer,
+    k_scale_buffer: Option<ullm_runtime_sys::RuntimeBuffer>,
+    v_scale_buffer: Option<ullm_runtime_sys::RuntimeBuffer>,
     attention_output_buffer: ullm_runtime_sys::RuntimeBuffer,
     attention_projection_input_buffer: ullm_runtime_sys::RuntimeBuffer,
     attention_block_output_buffer: ullm_runtime_sys::RuntimeBuffer,
@@ -1837,6 +1842,14 @@ impl PackageSelfAttnResidentStepLayer {
             value_dim,
         };
         decode_shape.validate()?;
+        let kv_cache_dtypes = KvCacheDtypes::from_env()?;
+        let kv_cache_layout = KvCacheLayout::new(
+            kv_cache_dtypes,
+            decode_shape.physical_tokens()?,
+            kv_heads,
+            head_dim,
+            value_dim,
+        )?;
 
         let hidden_bytes = checked_f32_byte_len(hidden, "self-attn resident hidden")?;
         let q_projected_bytes =
@@ -1921,17 +1934,33 @@ impl PackageSelfAttnResidentStepLayer {
             .alloc_buffer(k_bytes)
             .map_err(|err| format!("failed to allocate self-attn resident k RoPE: {err}"))?;
         let mut k_cache_buffer = context
-            .alloc_buffer(checked_f32_byte_len(
-                k_cache_elements,
-                "self-attn resident k cache",
-            )?)
+            .alloc_buffer(kv_cache_layout.k_payload_bytes)
             .map_err(|err| format!("failed to allocate self-attn resident k cache: {err}"))?;
         let mut v_cache_buffer = context
-            .alloc_buffer(checked_f32_byte_len(
-                v_cache_elements,
-                "self-attn resident v cache",
-            )?)
+            .alloc_buffer(kv_cache_layout.v_payload_bytes)
             .map_err(|err| format!("failed to allocate self-attn resident v cache: {err}"))?;
+        let mut k_scale_buffer = if kv_cache_layout.k_scale_bytes == 0 {
+            None
+        } else {
+            Some(
+                context
+                    .alloc_buffer(kv_cache_layout.k_scale_bytes)
+                    .map_err(|err| {
+                        format!("failed to allocate self-attn resident K FP8 scales: {err}")
+                    })?,
+            )
+        };
+        let mut v_scale_buffer = if kv_cache_layout.v_scale_bytes == 0 {
+            None
+        } else {
+            Some(
+                context
+                    .alloc_buffer(kv_cache_layout.v_scale_bytes)
+                    .map_err(|err| {
+                        format!("failed to allocate self-attn resident V FP8 scales: {err}")
+                    })?,
+            )
+        };
         let attention_output_buffer = context.alloc_buffer(attention_bytes).map_err(|err| {
             format!("failed to allocate self-attn resident attention output: {err}")
         })?;
@@ -1980,20 +2009,39 @@ impl PackageSelfAttnResidentStepLayer {
         block_table_buffer
             .copy_from_host(0, &encode_u32_to_bytes(block_table), Some(stream))
             .map_err(|err| format!("failed to copy self-attn resident block table: {err}"))?;
-        k_cache_buffer
-            .copy_from_host(
-                0,
-                &encode_f32_to_bytes(&vec![0.0_f32; k_cache_elements]),
-                Some(stream),
-            )
-            .map_err(|err| format!("failed to initialize self-attn resident k cache: {err}"))?;
-        v_cache_buffer
-            .copy_from_host(
-                0,
-                &encode_f32_to_bytes(&vec![0.0_f32; v_cache_elements]),
-                Some(stream),
-            )
-            .map_err(|err| format!("failed to initialize self-attn resident v cache: {err}"))?;
+        if kv_cache_dtypes == KvCacheDtypes::default() {
+            k_cache_buffer
+                .copy_from_host(
+                    0,
+                    &encode_f32_to_bytes(&vec![0.0_f32; k_cache_elements]),
+                    Some(stream),
+                )
+                .map_err(|err| format!("failed to initialize self-attn resident k cache: {err}"))?;
+            v_cache_buffer
+                .copy_from_host(
+                    0,
+                    &encode_f32_to_bytes(&vec![0.0_f32; v_cache_elements]),
+                    Some(stream),
+                )
+                .map_err(|err| format!("failed to initialize self-attn resident v cache: {err}"))?;
+        } else {
+            zero_entire_runtime_buffer(
+                &mut k_cache_buffer,
+                stream,
+                "self-attn resident typed k cache",
+            )?;
+            zero_entire_runtime_buffer(
+                &mut v_cache_buffer,
+                stream,
+                "self-attn resident typed v cache",
+            )?;
+            if let Some(buffer) = k_scale_buffer.as_mut() {
+                zero_entire_runtime_buffer(buffer, stream, "self-attn resident K FP8 scales")?;
+            }
+            if let Some(buffer) = v_scale_buffer.as_mut() {
+                zero_entire_runtime_buffer(buffer, stream, "self-attn resident V FP8 scales")?;
+            }
+        }
         stream.synchronize().map_err(|err| {
             format!("failed to synchronize self-attn resident layer setup: {err}")
         })?;
@@ -2028,10 +2076,12 @@ impl PackageSelfAttnResidentStepLayer {
                 "self-attn resident AQ4 q/k pair projection",
             )?;
         }
-        if matches!(
-            q_projection_layout,
-            PackageSelfAttnQProjectionLayout::Qwen35Gated
-        ) {
+        if kv_cache_dtypes == KvCacheDtypes::default()
+            && matches!(
+                q_projection_layout,
+                PackageSelfAttnQProjectionLayout::Qwen35Gated
+            )
+        {
             prewarm_qwen35_qk_norm_rope_paged_kv_write_once(
                 stream,
                 writer_operation_plans.for_phase(ExecutionPhase::Decode),
@@ -2058,6 +2108,8 @@ impl PackageSelfAttnResidentStepLayer {
         let weights = std::sync::Arc::new(PackageSelfAttnResidentStepWeights {
             sync_component_timing: env_flag_enabled("ULLM_SYNC_SELF_ATTN_COMPONENTS_FOR_TIMING"),
             use_paged_decode_sigmoid_gate,
+            kv_cache_dtypes,
+            kv_cache_layout,
             hidden,
             q_heads,
             kv_heads,
@@ -2103,6 +2155,8 @@ impl PackageSelfAttnResidentStepLayer {
             k_rope_buffer,
             k_cache_buffer,
             v_cache_buffer,
+            k_scale_buffer,
+            v_scale_buffer,
             attention_output_buffer,
             attention_projection_input_buffer,
             attention_block_output_buffer,
@@ -2150,6 +2204,7 @@ impl PackageSelfAttnResidentStepLayer {
             value_dim: weights.value_dim,
         };
         decode_shape.validate()?;
+        let kv_cache_layout = weights.kv_cache_layout;
 
         let hidden_bytes = checked_f32_byte_len(weights.hidden, "self-attn resident hidden")?;
         let q_projected_bytes =
@@ -2205,17 +2260,25 @@ impl PackageSelfAttnResidentStepLayer {
             .alloc_buffer(k_bytes)
             .map_err(|err| format!("failed to allocate self-attn resident k RoPE: {err}"))?;
         let mut k_cache_buffer = context
-            .alloc_buffer(checked_f32_byte_len(
-                k_cache_elements,
-                "self-attn resident k cache",
-            )?)
+            .alloc_buffer(kv_cache_layout.k_payload_bytes)
             .map_err(|err| format!("failed to allocate self-attn resident k cache: {err}"))?;
         let mut v_cache_buffer = context
-            .alloc_buffer(checked_f32_byte_len(
-                v_cache_elements,
-                "self-attn resident v cache",
-            )?)
+            .alloc_buffer(kv_cache_layout.v_payload_bytes)
             .map_err(|err| format!("failed to allocate self-attn resident v cache: {err}"))?;
+        let mut k_scale_buffer = if kv_cache_layout.k_scale_bytes == 0 {
+            None
+        } else {
+            Some(context.alloc_buffer(kv_cache_layout.k_scale_bytes).map_err(|err| {
+                format!("failed to allocate self-attn resident shared-weight K FP8 scales: {err}")
+            })?)
+        };
+        let mut v_scale_buffer = if kv_cache_layout.v_scale_bytes == 0 {
+            None
+        } else {
+            Some(context.alloc_buffer(kv_cache_layout.v_scale_bytes).map_err(|err| {
+                format!("failed to allocate self-attn resident shared-weight V FP8 scales: {err}")
+            })?)
+        };
         let attention_output_buffer = context.alloc_buffer(attention_bytes).map_err(|err| {
             format!("failed to allocate self-attn resident attention output: {err}")
         })?;
@@ -2276,20 +2339,47 @@ impl PackageSelfAttnResidentStepLayer {
             .map_err(|err| {
                 format!("failed to copy self-attn resident shared-weight block table: {err}")
             })?;
-        k_cache_buffer
-            .copy_from_host(
-                0,
-                &encode_f32_to_bytes(&vec![0.0_f32; k_cache_elements]),
-                Some(stream),
-            )
-            .map_err(|err| format!("failed to initialize self-attn resident k cache: {err}"))?;
-        v_cache_buffer
-            .copy_from_host(
-                0,
-                &encode_f32_to_bytes(&vec![0.0_f32; v_cache_elements]),
-                Some(stream),
-            )
-            .map_err(|err| format!("failed to initialize self-attn resident v cache: {err}"))?;
+        if weights.kv_cache_dtypes == KvCacheDtypes::default() {
+            k_cache_buffer
+                .copy_from_host(
+                    0,
+                    &encode_f32_to_bytes(&vec![0.0_f32; k_cache_elements]),
+                    Some(stream),
+                )
+                .map_err(|err| format!("failed to initialize self-attn resident k cache: {err}"))?;
+            v_cache_buffer
+                .copy_from_host(
+                    0,
+                    &encode_f32_to_bytes(&vec![0.0_f32; v_cache_elements]),
+                    Some(stream),
+                )
+                .map_err(|err| format!("failed to initialize self-attn resident v cache: {err}"))?;
+        } else {
+            zero_entire_runtime_buffer(
+                &mut k_cache_buffer,
+                stream,
+                "self-attn resident shared-weight typed k cache",
+            )?;
+            zero_entire_runtime_buffer(
+                &mut v_cache_buffer,
+                stream,
+                "self-attn resident shared-weight typed v cache",
+            )?;
+            if let Some(buffer) = k_scale_buffer.as_mut() {
+                zero_entire_runtime_buffer(
+                    buffer,
+                    stream,
+                    "self-attn resident shared-weight K FP8 scales",
+                )?;
+            }
+            if let Some(buffer) = v_scale_buffer.as_mut() {
+                zero_entire_runtime_buffer(
+                    buffer,
+                    stream,
+                    "self-attn resident shared-weight V FP8 scales",
+                )?;
+            }
+        }
         stream.synchronize().map_err(|err| {
             format!("failed to synchronize self-attn resident shared-weight state setup: {err}")
         })?;
@@ -2314,6 +2404,8 @@ impl PackageSelfAttnResidentStepLayer {
             k_rope_buffer,
             k_cache_buffer,
             v_cache_buffer,
+            k_scale_buffer,
+            v_scale_buffer,
             attention_output_buffer,
             attention_projection_input_buffer,
             attention_block_output_buffer,
@@ -2572,6 +2664,12 @@ impl PackageSelfAttnResidentStepLayer {
             stream,
             "self-attn resident v cache",
         )?;
+        if let Some(buffer) = self.k_scale_buffer.as_mut() {
+            zero_entire_runtime_buffer(buffer, stream, "self-attn resident K FP8 scales")?;
+        }
+        if let Some(buffer) = self.v_scale_buffer.as_mut() {
+            zero_entire_runtime_buffer(buffer, stream, "self-attn resident V FP8 scales")?;
+        }
         stream.synchronize().map_err(|err| {
             format!("failed to synchronize self-attn resident request state reset: {err}")
         })?;
@@ -2829,7 +2927,9 @@ impl PackageSelfAttnResidentStepLayer {
         let q_heads = self.weights.q_heads;
         let kv_heads = self.weights.kv_heads;
         let head_dim = self.weights.head_dim;
+        let value_dim = self.weights.value_dim;
         let attention_elements = self.weights.attention_elements;
+        let kv_cache_dtypes = self.weights.kv_cache_dtypes;
         let finish_component = |stream: &mut ullm_runtime_sys::RuntimeStream,
                                 started: Instant,
                                 component_label: &str|
@@ -2897,15 +2997,36 @@ impl PackageSelfAttnResidentStepLayer {
                     .for_phase(self.operation_phase);
                 self.last_operation_executions[0] =
                     Some(writer_plan.execution_record(OperationExecutionStatus::Started));
-                let result = writer_plan.attempt().start().execute_paged_kv_write_f32(
-                    &self.k_rope_buffer,
-                    &self.v_projected_buffer,
-                    &self.block_table_buffer,
-                    cache_position,
-                    &mut self.k_cache_buffer,
-                    &mut self.v_cache_buffer,
-                    stream,
-                );
+                let result = if kv_cache_dtypes == KvCacheDtypes::default() {
+                    writer_plan.attempt().start().execute_paged_kv_write_f32(
+                        &self.k_rope_buffer,
+                        &self.v_projected_buffer,
+                        &self.block_table_buffer,
+                        cache_position,
+                        &mut self.k_cache_buffer,
+                        &mut self.v_cache_buffer,
+                        stream,
+                    )
+                } else {
+                    ullm_runtime_sys::paged_kv_write_typed_f32(
+                        &self.k_rope_buffer,
+                        &self.v_projected_buffer,
+                        &self.block_table_buffer,
+                        cache_position,
+                        self.weights.block_size,
+                        self.weights.cache_blocks,
+                        kv_heads,
+                        head_dim,
+                        value_dim,
+                        kv_cache_dtypes.key.ffi_code(),
+                        kv_cache_dtypes.value.ffi_code(),
+                        &mut self.k_cache_buffer,
+                        &mut self.v_cache_buffer,
+                        self.k_scale_buffer.as_mut(),
+                        self.v_scale_buffer.as_mut(),
+                        Some(stream),
+                    )
+                };
                 self.last_operation_executions[0] =
                     Some(writer_plan.execution_record(if result.is_ok() {
                         OperationExecutionStatus::Succeeded
@@ -2926,27 +3047,58 @@ impl PackageSelfAttnResidentStepLayer {
                     .for_phase(self.operation_phase);
                 self.last_operation_executions[0] =
                     Some(writer_plan.execution_record(OperationExecutionStatus::Started));
-                let result = writer_plan
-                    .attempt()
-                    .start()
-                    .execute_fused_qk_norm_rope_paged_kv_write_f32(
+                let result = if kv_cache_dtypes == KvCacheDtypes::default() {
+                    writer_plan
+                        .attempt()
+                        .start()
+                        .execute_fused_qk_norm_rope_paged_kv_write_f32(
+                            &self.q_projected_buffer,
+                            &self.k_projected_buffer,
+                            &self.v_projected_buffer,
+                            self.weights.q_norm_weight_buffer.as_ref(),
+                            self.weights.k_norm_weight_buffer.as_ref(),
+                            &self.block_table_buffer,
+                            rotary_dim,
+                            rope_position,
+                            rope_base,
+                            1e-5_f32,
+                            cache_position,
+                            &mut self.q_gate_buffer,
+                            &mut self.q_rope_buffer,
+                            &mut self.k_cache_buffer,
+                            &mut self.v_cache_buffer,
+                            stream,
+                        )
+                } else {
+                    ullm_runtime_sys::qwen35_qk_norm_rope_paged_kv_write_typed_f32(
                         &self.q_projected_buffer,
                         &self.k_projected_buffer,
                         &self.v_projected_buffer,
                         self.weights.q_norm_weight_buffer.as_ref(),
                         self.weights.k_norm_weight_buffer.as_ref(),
                         &self.block_table_buffer,
+                        q_heads,
+                        kv_heads,
+                        head_dim,
+                        value_dim,
                         rotary_dim,
                         rope_position,
                         rope_base,
                         1e-5_f32,
                         cache_position,
+                        self.weights.block_size,
+                        self.weights.cache_blocks,
+                        kv_cache_dtypes.key.ffi_code(),
+                        kv_cache_dtypes.value.ffi_code(),
                         &mut self.q_gate_buffer,
                         &mut self.q_rope_buffer,
                         &mut self.k_cache_buffer,
                         &mut self.v_cache_buffer,
-                        stream,
-                    );
+                        self.k_scale_buffer.as_mut(),
+                        self.v_scale_buffer.as_mut(),
+                        Some(stream),
+                    )
+                };
                 self.last_operation_executions[0] =
                     Some(writer_plan.execution_record(if result.is_ok() {
                         OperationExecutionStatus::Succeeded
@@ -2984,7 +3136,133 @@ impl PackageSelfAttnResidentStepLayer {
             selected_executable,
             ExecutableOperation::HipPagedDecodeAttentionSplitSigmoidGateF32(_)
         );
-        let result = if let Some(source_tile) = split_tile {
+        let result = if kv_cache_dtypes != KvCacheDtypes::default() {
+            self.last_operation_executions[1] =
+                Some(read_plan.execution_record(OperationExecutionStatus::Started));
+            let result = if let Some(source_tile) = split_tile {
+                let config = self.weights.paged_decode_dispatch_plans.config;
+                if config.is_none_or(|config| {
+                    config.source_tile != source_tile || self.written_len < config.min_cache_len
+                }) {
+                    self.request_state.mark_execution_failed();
+                    return Err(format!(
+                        "{label} self-attn typed split paged decode selected without matching configuration"
+                    ));
+                }
+                if split_gated != self.weights.use_paged_decode_sigmoid_gate {
+                    self.request_state.mark_execution_failed();
+                    return Err(format!(
+                        "{label} self-attn typed split paged decode gate/layout mismatch"
+                    ));
+                }
+                let Some(workspace) = self.paged_decode_split_workspace.as_mut() else {
+                    self.request_state.mark_execution_failed();
+                    return Err(format!(
+                        "{label} self-attn typed split paged decode selected without resident workspace"
+                    ));
+                };
+                if self.weights.use_paged_decode_sigmoid_gate {
+                    ullm_runtime_sys::paged_decode_attn_split_sigmoid_gate_typed_f32(
+                        &self.q_rope_buffer,
+                        &self.q_gate_buffer,
+                        &self.k_cache_buffer,
+                        &self.v_cache_buffer,
+                        &self.block_table_buffer,
+                        self.k_scale_buffer.as_ref(),
+                        self.v_scale_buffer.as_ref(),
+                        self.written_len,
+                        self.weights.block_size,
+                        self.weights.cache_blocks,
+                        q_heads,
+                        kv_heads,
+                        head_dim,
+                        value_dim,
+                        1.0_f32 / (head_dim as f32).sqrt(),
+                        source_tile.as_usize(),
+                        kv_cache_dtypes.key.ffi_code(),
+                        kv_cache_dtypes.value.ffi_code(),
+                        workspace,
+                        &mut self.attention_output_buffer,
+                        Some(stream),
+                    )
+                } else {
+                    ullm_runtime_sys::paged_decode_attn_split_typed_f32(
+                        &self.q_rope_buffer,
+                        &self.k_cache_buffer,
+                        &self.v_cache_buffer,
+                        &self.block_table_buffer,
+                        self.k_scale_buffer.as_ref(),
+                        self.v_scale_buffer.as_ref(),
+                        self.written_len,
+                        self.weights.block_size,
+                        self.weights.cache_blocks,
+                        q_heads,
+                        kv_heads,
+                        head_dim,
+                        value_dim,
+                        1.0_f32 / (head_dim as f32).sqrt(),
+                        source_tile.as_usize(),
+                        kv_cache_dtypes.key.ffi_code(),
+                        kv_cache_dtypes.value.ffi_code(),
+                        workspace,
+                        &mut self.attention_output_buffer,
+                        Some(stream),
+                    )
+                }
+            } else {
+                if self
+                    .weights
+                    .paged_decode_dispatch_plans
+                    .config
+                    .is_some_and(|config| self.written_len >= config.min_cache_len)
+                {
+                    self.request_state.mark_execution_failed();
+                    return Err(format!(
+                        "{label} self-attn typed split paged decode threshold selected a non-split executable"
+                    ));
+                }
+                let result = ullm_runtime_sys::paged_decode_attn_typed_f32(
+                    &self.q_rope_buffer,
+                    &self.k_cache_buffer,
+                    &self.v_cache_buffer,
+                    &self.block_table_buffer,
+                    self.k_scale_buffer.as_ref(),
+                    self.v_scale_buffer.as_ref(),
+                    self.written_len,
+                    self.weights.block_size,
+                    self.weights.cache_blocks,
+                    q_heads,
+                    kv_heads,
+                    head_dim,
+                    value_dim,
+                    1.0_f32 / (head_dim as f32).sqrt(),
+                    kv_cache_dtypes.key.ffi_code(),
+                    kv_cache_dtypes.value.ffi_code(),
+                    &mut self.attention_output_buffer,
+                    Some(stream),
+                );
+                if result.is_ok() && self.weights.use_paged_decode_sigmoid_gate {
+                    ullm_runtime_sys::sigmoid_mul_f32_in_place(
+                        &self.q_gate_buffer,
+                        &mut self.attention_output_buffer,
+                        attention_elements,
+                        Some(stream),
+                    )
+                } else {
+                    result
+                }
+            };
+            self.last_operation_executions[1] =
+                Some(read_plan.execution_record(if result.is_ok() {
+                    OperationExecutionStatus::Succeeded
+                } else {
+                    OperationExecutionStatus::Failed
+                }));
+            if result.is_err() {
+                self.request_state.mark_execution_failed();
+            }
+            result
+        } else if let Some(source_tile) = split_tile {
             let config = self.weights.paged_decode_dispatch_plans.config;
             if config.is_none_or(|config| {
                 config.source_tile != source_tile || self.written_len < config.min_cache_len
@@ -3307,6 +3585,7 @@ impl PackageSelfAttnResidentStepLayer {
         label: &str,
     ) -> Result<[OperationExecutionRecord; 2], String> {
         self.request_state.ensure_ready(label)?;
+        let kv_cache_dtypes = self.weights.kv_cache_dtypes;
         if !(2..=128).contains(&sequence_len) || sequence_len > workspace.max_width {
             return Err(format!(
                 "{label} self-attn sequence width must be in 2..={} and workspace capacity, got {sequence_len}",
@@ -3501,18 +3780,40 @@ impl PackageSelfAttnResidentStepLayer {
         };
         self.last_operation_executions[0] =
             Some(writer_plan.execution_record(OperationExecutionStatus::Started));
-        let writer_result = writer_plan
-            .attempt()
-            .start()
-            .execute_paged_kv_write_chunk_f32(
+        let writer_result = if kv_cache_dtypes == KvCacheDtypes::default() {
+            writer_plan
+                .attempt()
+                .start()
+                .execute_paged_kv_write_chunk_f32(
+                    &workspace.k_rope,
+                    &workspace.v_projected,
+                    &self.block_table_buffer,
+                    cache_start,
+                    &mut self.k_cache_buffer,
+                    &mut self.v_cache_buffer,
+                    stream,
+                )
+        } else {
+            ullm_runtime_sys::paged_kv_write_chunk_typed_f32(
                 &workspace.k_rope,
                 &workspace.v_projected,
                 &self.block_table_buffer,
                 cache_start,
+                sequence_len,
+                self.weights.block_size,
+                self.weights.cache_blocks,
+                self.weights.kv_heads,
+                self.weights.head_dim,
+                self.weights.value_dim,
+                kv_cache_dtypes.key.ffi_code(),
+                kv_cache_dtypes.value.ffi_code(),
                 &mut self.k_cache_buffer,
                 &mut self.v_cache_buffer,
-                stream,
-            );
+                self.k_scale_buffer.as_mut(),
+                self.v_scale_buffer.as_mut(),
+                Some(stream),
+            )
+        };
         self.last_operation_executions[0] =
             Some(writer_plan.execution_record(if writer_result.is_ok() {
                 OperationExecutionStatus::Succeeded
@@ -3578,36 +3879,61 @@ impl PackageSelfAttnResidentStepLayer {
         self.last_operation_executions[1] =
             Some(reader_plan.execution_record(OperationExecutionStatus::Started));
         let reader_executable = reader_plan.trace().executable;
-        let reader_result = match reader_executable {
-            ExecutableOperation::HipPagedCausalGqaChunkSigmoidGateF32 => reader_plan
-                .attempt()
-                .start()
-                .execute_paged_causal_gqa_chunk_sigmoid_gate_f32(
-                    &workspace.q_rope,
-                    &workspace.q_gate,
-                    &self.k_cache_buffer,
-                    &self.v_cache_buffer,
-                    &self.block_table_buffer,
-                    cache_start,
-                    &mut workspace.attention_output,
-                    stream,
-                ),
-            ExecutableOperation::HipPagedCausalGqaChunkWmmaSigmoidGateF32 => reader_plan
-                .attempt()
-                .start()
-                .execute_paged_causal_gqa_chunk_wmma_sigmoid_gate_f32(
-                    &workspace.q_rope,
-                    &workspace.q_gate,
-                    &self.k_cache_buffer,
-                    &self.v_cache_buffer,
-                    &self.block_table_buffer,
-                    cache_start,
-                    &mut workspace.attention_output,
-                    stream,
-                ),
-            other => Err(format!(
-                "{label} self-attn chunk reader selected incompatible executable {other:?}"
-            )),
+        let reader_result = if kv_cache_dtypes != KvCacheDtypes::default() {
+            ullm_runtime_sys::paged_causal_gqa_chunk_sigmoid_gate_typed_f32(
+                &workspace.q_rope,
+                &workspace.q_gate,
+                &self.k_cache_buffer,
+                &self.v_cache_buffer,
+                &self.block_table_buffer,
+                self.k_scale_buffer.as_ref(),
+                self.v_scale_buffer.as_ref(),
+                cache_start,
+                sequence_len,
+                self.weights.block_size,
+                self.weights.cache_blocks,
+                self.weights.q_heads,
+                self.weights.kv_heads,
+                self.weights.head_dim,
+                self.weights.value_dim,
+                1.0_f32 / (self.weights.head_dim as f32).sqrt(),
+                kv_cache_dtypes.key.ffi_code(),
+                kv_cache_dtypes.value.ffi_code(),
+                &mut workspace.attention_output,
+                Some(stream),
+            )
+        } else {
+            match reader_executable {
+                ExecutableOperation::HipPagedCausalGqaChunkSigmoidGateF32 => reader_plan
+                    .attempt()
+                    .start()
+                    .execute_paged_causal_gqa_chunk_sigmoid_gate_f32(
+                        &workspace.q_rope,
+                        &workspace.q_gate,
+                        &self.k_cache_buffer,
+                        &self.v_cache_buffer,
+                        &self.block_table_buffer,
+                        cache_start,
+                        &mut workspace.attention_output,
+                        stream,
+                    ),
+                ExecutableOperation::HipPagedCausalGqaChunkWmmaSigmoidGateF32 => reader_plan
+                    .attempt()
+                    .start()
+                    .execute_paged_causal_gqa_chunk_wmma_sigmoid_gate_f32(
+                        &workspace.q_rope,
+                        &workspace.q_gate,
+                        &self.k_cache_buffer,
+                        &self.v_cache_buffer,
+                        &self.block_table_buffer,
+                        cache_start,
+                        &mut workspace.attention_output,
+                        stream,
+                    ),
+                other => Err(format!(
+                    "{label} self-attn chunk reader selected incompatible executable {other:?}"
+                )),
+            }
         };
         self.last_operation_executions[1] =
             Some(reader_plan.execution_record(if reader_result.is_ok() {

@@ -1029,6 +1029,34 @@ unsafe extern "C" {
         v_cache_buffer: *mut RawRuntimeBuffer,
         stream: *mut RawRuntimeStream,
     ) -> c_int;
+    fn ullm_runtime_qwen35_qk_norm_rope_paged_kv_write_typed_f32(
+        q_projected_buffer: *const RawRuntimeBuffer,
+        k_projected_buffer: *const RawRuntimeBuffer,
+        v_projected_buffer: *const RawRuntimeBuffer,
+        q_weight_buffer: *const RawRuntimeBuffer,
+        k_weight_buffer: *const RawRuntimeBuffer,
+        block_table_buffer: *const RawRuntimeBuffer,
+        q_heads: usize,
+        kv_heads: usize,
+        head_dim: usize,
+        value_dim: usize,
+        rotary_dim: usize,
+        position_offset: usize,
+        rope_base: f32,
+        epsilon: f32,
+        cache_position: usize,
+        block_size: usize,
+        cache_blocks: usize,
+        k_dtype: c_int,
+        v_dtype: c_int,
+        q_gate_output_buffer: *mut RawRuntimeBuffer,
+        q_rope_output_buffer: *mut RawRuntimeBuffer,
+        k_cache_buffer: *mut RawRuntimeBuffer,
+        v_cache_buffer: *mut RawRuntimeBuffer,
+        k_scale_buffer: *mut RawRuntimeBuffer,
+        v_scale_buffer: *mut RawRuntimeBuffer,
+        stream: *mut RawRuntimeStream,
+    ) -> c_int;
     fn ullm_runtime_add_f32(
         lhs_buffer: *const RawRuntimeBuffer,
         rhs_buffer: *const RawRuntimeBuffer,
@@ -1298,6 +1326,51 @@ unsafe extern "C" {
         output: *mut RawRuntimeBuffer,
         stream: *mut RawRuntimeStream,
     ) -> c_int;
+    fn ullm_runtime_paged_decode_attn_split_typed_f32(
+        q: *const RawRuntimeBuffer,
+        k_cache: *const RawRuntimeBuffer,
+        v_cache: *const RawRuntimeBuffer,
+        block_table: *const RawRuntimeBuffer,
+        k_scale: *const RawRuntimeBuffer,
+        v_scale: *const RawRuntimeBuffer,
+        cache_len: usize,
+        block_size: usize,
+        cache_blocks: usize,
+        q_heads: usize,
+        kv_heads: usize,
+        head_dim: usize,
+        value_dim: usize,
+        softmax_scale: f32,
+        source_tile: usize,
+        k_dtype: c_int,
+        v_dtype: c_int,
+        workspace: *mut RawRuntimeBuffer,
+        output: *mut RawRuntimeBuffer,
+        stream: *mut RawRuntimeStream,
+    ) -> c_int;
+    fn ullm_runtime_paged_decode_attn_split_sigmoid_gate_typed_f32(
+        q: *const RawRuntimeBuffer,
+        gate: *const RawRuntimeBuffer,
+        k_cache: *const RawRuntimeBuffer,
+        v_cache: *const RawRuntimeBuffer,
+        block_table: *const RawRuntimeBuffer,
+        k_scale: *const RawRuntimeBuffer,
+        v_scale: *const RawRuntimeBuffer,
+        cache_len: usize,
+        block_size: usize,
+        cache_blocks: usize,
+        q_heads: usize,
+        kv_heads: usize,
+        head_dim: usize,
+        value_dim: usize,
+        softmax_scale: f32,
+        source_tile: usize,
+        k_dtype: c_int,
+        v_dtype: c_int,
+        workspace: *mut RawRuntimeBuffer,
+        output: *mut RawRuntimeBuffer,
+        stream: *mut RawRuntimeStream,
+    ) -> c_int;
     fn ullm_runtime_paged_kv_write_f32(
         k: *const RawRuntimeBuffer,
         v: *const RawRuntimeBuffer,
@@ -1345,6 +1418,25 @@ unsafe extern "C" {
         v_cache: *mut RawRuntimeBuffer,
         stream: *mut RawRuntimeStream,
     ) -> c_int;
+    fn ullm_runtime_paged_kv_write_chunk_typed_f32(
+        k: *const RawRuntimeBuffer,
+        v: *const RawRuntimeBuffer,
+        block_table: *const RawRuntimeBuffer,
+        cache_start: usize,
+        m: usize,
+        block_size: usize,
+        cache_blocks: usize,
+        kv_heads: usize,
+        head_dim: usize,
+        value_dim: usize,
+        k_dtype: c_int,
+        v_dtype: c_int,
+        k_cache: *mut RawRuntimeBuffer,
+        v_cache: *mut RawRuntimeBuffer,
+        k_scale: *mut RawRuntimeBuffer,
+        v_scale: *mut RawRuntimeBuffer,
+        stream: *mut RawRuntimeStream,
+    ) -> c_int;
     fn ullm_runtime_paged_causal_gqa_chunk_f32(
         q: *const RawRuntimeBuffer,
         k_cache: *const RawRuntimeBuffer,
@@ -1377,6 +1469,49 @@ unsafe extern "C" {
         head_dim: usize,
         value_dim: usize,
         softmax_scale: f32,
+        output: *mut RawRuntimeBuffer,
+        stream: *mut RawRuntimeStream,
+    ) -> c_int;
+    fn ullm_runtime_paged_causal_gqa_chunk_typed_f32(
+        q: *const RawRuntimeBuffer,
+        k_cache: *const RawRuntimeBuffer,
+        v_cache: *const RawRuntimeBuffer,
+        block_table: *const RawRuntimeBuffer,
+        k_scale: *const RawRuntimeBuffer,
+        v_scale: *const RawRuntimeBuffer,
+        cached_prefix_len: usize,
+        m: usize,
+        block_size: usize,
+        cache_blocks: usize,
+        q_heads: usize,
+        kv_heads: usize,
+        head_dim: usize,
+        value_dim: usize,
+        softmax_scale: f32,
+        k_dtype: c_int,
+        v_dtype: c_int,
+        output: *mut RawRuntimeBuffer,
+        stream: *mut RawRuntimeStream,
+    ) -> c_int;
+    fn ullm_runtime_paged_causal_gqa_chunk_sigmoid_gate_typed_f32(
+        q: *const RawRuntimeBuffer,
+        gate: *const RawRuntimeBuffer,
+        k_cache: *const RawRuntimeBuffer,
+        v_cache: *const RawRuntimeBuffer,
+        block_table: *const RawRuntimeBuffer,
+        k_scale: *const RawRuntimeBuffer,
+        v_scale: *const RawRuntimeBuffer,
+        cached_prefix_len: usize,
+        m: usize,
+        block_size: usize,
+        cache_blocks: usize,
+        q_heads: usize,
+        kv_heads: usize,
+        head_dim: usize,
+        value_dim: usize,
+        softmax_scale: f32,
+        k_dtype: c_int,
+        v_dtype: c_int,
         output: *mut RawRuntimeBuffer,
         stream: *mut RawRuntimeStream,
     ) -> c_int;
@@ -6569,6 +6704,153 @@ pub fn qwen35_qk_norm_rope_paged_kv_write_f32(
     })
 }
 
+/// Native fused Qwen3.5 RMSNorm/RoPE writer with independently selected
+/// persistent K/V payload dtypes. FP8 E4M3FN planes carry one FP16 scale for
+/// every physical-token/KV-head row.
+#[allow(clippy::too_many_arguments)]
+pub fn qwen35_qk_norm_rope_paged_kv_write_typed_f32(
+    q_projected_buffer: &RuntimeBuffer,
+    k_projected_buffer: &RuntimeBuffer,
+    v_projected_buffer: &RuntimeBuffer,
+    q_weight_buffer: &RuntimeBuffer,
+    k_weight_buffer: &RuntimeBuffer,
+    block_table_buffer: &RuntimeBuffer,
+    q_heads: usize,
+    kv_heads: usize,
+    head_dim: usize,
+    value_dim: usize,
+    rotary_dim: usize,
+    position_offset: usize,
+    rope_base: f32,
+    epsilon: f32,
+    cache_position: usize,
+    block_size: usize,
+    cache_blocks: usize,
+    k_dtype: u32,
+    v_dtype: u32,
+    q_gate_output_buffer: &mut RuntimeBuffer,
+    q_rope_output_buffer: &mut RuntimeBuffer,
+    k_cache_buffer: &mut RuntimeBuffer,
+    v_cache_buffer: &mut RuntimeBuffer,
+    k_scale_buffer: Option<&mut RuntimeBuffer>,
+    v_scale_buffer: Option<&mut RuntimeBuffer>,
+    stream: Option<&mut RuntimeStream>,
+) -> Result<(), String> {
+    if q_heads == 0
+        || kv_heads == 0
+        || head_dim == 0
+        || value_dim == 0
+        || block_size == 0
+        || cache_blocks == 0
+        || rotary_dim == 0
+        || rotary_dim > head_dim
+        || !rotary_dim.is_multiple_of(2)
+    {
+        return Err("typed Qwen3.5 q/k norm RoPE paged KV write geometry is invalid".into());
+    }
+    if !rope_base.is_finite() || rope_base <= 1.0 || !epsilon.is_finite() || epsilon <= 0.0 {
+        return Err(
+            "typed Qwen3.5 q/k norm RoPE paged KV write RoPE parameters are invalid".into(),
+        );
+    }
+    let k_needs_scale = kv_cache_dtype_needs_scale(k_dtype)?;
+    let v_needs_scale = kv_cache_dtype_needs_scale(v_dtype)?;
+    if k_needs_scale != k_scale_buffer.is_some() || v_needs_scale != v_scale_buffer.is_some() {
+        return Err(
+            "typed Qwen3.5 paged KV write requires scale buffers exactly for FP8_E4M3FN planes"
+                .into(),
+        );
+    }
+    let (physical_tokens, _, k_cache_bytes, v_cache_bytes, scale_bytes) = typed_paged_cache_sizes(
+        cache_blocks,
+        block_size,
+        kv_heads,
+        head_dim,
+        value_dim,
+        k_dtype,
+        v_dtype,
+    )?;
+    if cache_position >= physical_tokens {
+        return Err("typed Qwen3.5 paged KV write cache_position exceeds capacity".into());
+    }
+    let q_values = q_heads
+        .checked_mul(head_dim)
+        .ok_or_else(|| "typed Qwen3.5 paged KV write Q elements overflow".to_string())?;
+    let k_values = kv_heads
+        .checked_mul(head_dim)
+        .ok_or_else(|| "typed Qwen3.5 paged KV write K elements overflow".to_string())?;
+    let v_values = kv_heads
+        .checked_mul(value_dim)
+        .ok_or_else(|| "typed Qwen3.5 paged KV write V elements overflow".to_string())?;
+    let q_bytes = q_values
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| "typed Qwen3.5 paged KV write Q bytes overflow".to_string())?;
+    let q_projected_bytes = q_bytes
+        .checked_mul(2)
+        .ok_or_else(|| "typed Qwen3.5 paged KV write projected Q bytes overflow".to_string())?;
+    let k_bytes = k_values
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| "typed Qwen3.5 paged KV write K bytes overflow".to_string())?;
+    let v_bytes = v_values
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| "typed Qwen3.5 paged KV write V bytes overflow".to_string())?;
+    let weight_bytes = head_dim
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| "typed Qwen3.5 paged KV write weight bytes overflow".to_string())?;
+    let table_bytes = (cache_position / block_size + 1)
+        .checked_mul(std::mem::size_of::<u32>())
+        .ok_or_else(|| "typed Qwen3.5 paged KV write table bytes overflow".to_string())?;
+    check_copy_range(0, q_projected_bytes, q_projected_buffer.size()?)?;
+    check_copy_range(0, k_bytes, k_projected_buffer.size()?)?;
+    check_copy_range(0, v_bytes, v_projected_buffer.size()?)?;
+    check_copy_range(0, weight_bytes, q_weight_buffer.size()?)?;
+    check_copy_range(0, weight_bytes, k_weight_buffer.size()?)?;
+    check_copy_range(0, table_bytes, block_table_buffer.size()?)?;
+    check_copy_range(0, q_bytes, q_gate_output_buffer.size()?)?;
+    check_copy_range(0, q_bytes, q_rope_output_buffer.size()?)?;
+    check_copy_range(0, k_cache_bytes, k_cache_buffer.size()?)?;
+    check_copy_range(0, v_cache_bytes, v_cache_buffer.size()?)?;
+    if let Some(scale) = k_scale_buffer.as_deref() {
+        check_copy_range(0, scale_bytes, scale.size()?)?;
+    }
+    if let Some(scale) = v_scale_buffer.as_deref() {
+        check_copy_range(0, scale_bytes, scale.size()?)?;
+    }
+    let k_scale_raw = k_scale_buffer.map_or(std::ptr::null_mut(), |buffer| buffer.raw.as_ptr());
+    let v_scale_raw = v_scale_buffer.map_or(std::ptr::null_mut(), |buffer| buffer.raw.as_ptr());
+    let stream = stream.map_or(std::ptr::null_mut(), |stream| stream.raw.as_ptr());
+    status_to_result(unsafe {
+        ullm_runtime_qwen35_qk_norm_rope_paged_kv_write_typed_f32(
+            q_projected_buffer.raw.as_ptr(),
+            k_projected_buffer.raw.as_ptr(),
+            v_projected_buffer.raw.as_ptr(),
+            q_weight_buffer.raw.as_ptr(),
+            k_weight_buffer.raw.as_ptr(),
+            block_table_buffer.raw.as_ptr(),
+            q_heads,
+            kv_heads,
+            head_dim,
+            value_dim,
+            rotary_dim,
+            position_offset,
+            rope_base,
+            epsilon,
+            cache_position,
+            block_size,
+            cache_blocks,
+            k_dtype as c_int,
+            v_dtype as c_int,
+            q_gate_output_buffer.raw.as_ptr(),
+            q_rope_output_buffer.raw.as_ptr(),
+            k_cache_buffer.raw.as_ptr(),
+            v_cache_buffer.raw.as_ptr(),
+            k_scale_raw,
+            v_scale_raw,
+            stream,
+        )
+    })
+}
+
 pub fn add_f32(
     lhs_buffer: &RuntimeBuffer,
     rhs_buffer: &RuntimeBuffer,
@@ -8458,6 +8740,236 @@ pub fn paged_decode_attn_split_sigmoid_gate_f32(
     })
 }
 
+/// Typed split decode.  Persistent K/V payloads can be independently F16 or
+/// FP8 E4M3FN while the query, workspace, merge, and output remain F32.
+#[allow(clippy::too_many_arguments)]
+pub fn paged_decode_attn_split_typed_f32(
+    q: &RuntimeBuffer,
+    k_cache: &RuntimeBuffer,
+    v_cache: &RuntimeBuffer,
+    block_table: &RuntimeBuffer,
+    k_scale: Option<&RuntimeBuffer>,
+    v_scale: Option<&RuntimeBuffer>,
+    cache_len: usize,
+    block_size: usize,
+    cache_blocks: usize,
+    q_heads: usize,
+    kv_heads: usize,
+    head_dim: usize,
+    value_dim: usize,
+    softmax_scale: f32,
+    source_tile: usize,
+    k_dtype: u32,
+    v_dtype: u32,
+    workspace: &mut RuntimeBuffer,
+    output: &mut RuntimeBuffer,
+    stream: Option<&mut RuntimeStream>,
+) -> Result<(), String> {
+    if head_dim > 256 || value_dim > 256 {
+        return Err(
+            "typed paged decode split attention head_dim/value_dim must be at most 256".into(),
+        );
+    }
+    let k_needs_scale = kv_cache_dtype_needs_scale(k_dtype)?;
+    let v_needs_scale = kv_cache_dtype_needs_scale(v_dtype)?;
+    if k_needs_scale != k_scale.is_some() || v_needs_scale != v_scale.is_some() {
+        return Err("typed paged decode split attention requires scale buffers exactly for FP8_E4M3FN planes".into());
+    }
+    let (physical_tokens, _, k_cache_bytes, v_cache_bytes, scale_bytes) = typed_paged_cache_sizes(
+        cache_blocks,
+        block_size,
+        kv_heads,
+        head_dim,
+        value_dim,
+        k_dtype,
+        v_dtype,
+    )?;
+    if cache_len == 0 || cache_len > physical_tokens || !q_heads.is_multiple_of(kv_heads) {
+        return Err("typed paged decode split attention cache geometry is invalid".into());
+    }
+    if !softmax_scale.is_finite() || softmax_scale <= 0.0 {
+        return Err(
+            "typed paged decode split attention softmax scale must be finite and positive".into(),
+        );
+    }
+    let q_bytes = q_heads
+        .checked_mul(head_dim)
+        .and_then(|n| n.checked_mul(std::mem::size_of::<f32>()))
+        .ok_or_else(|| "typed paged decode split attention Q byte count overflows".to_string())?;
+    let output_bytes = q_heads
+        .checked_mul(value_dim)
+        .and_then(|n| n.checked_mul(std::mem::size_of::<f32>()))
+        .ok_or_else(|| {
+            "typed paged decode split attention output byte count overflows".to_string()
+        })?;
+    let table_bytes = (cache_len - 1)
+        .checked_div(block_size)
+        .and_then(|n| n.checked_add(1))
+        .and_then(|n| n.checked_mul(std::mem::size_of::<u32>()))
+        .ok_or_else(|| {
+            "typed paged decode split attention table byte count overflows".to_string()
+        })?;
+    let workspace_bytes =
+        paged_decode_attn_split_workspace_bytes(q_heads, value_dim, cache_len, source_tile)?;
+    check_copy_range(0, q_bytes, q.size()?)?;
+    check_copy_range(0, k_cache_bytes, k_cache.size()?)?;
+    check_copy_range(0, v_cache_bytes, v_cache.size()?)?;
+    check_copy_range(0, table_bytes, block_table.size()?)?;
+    check_copy_range(0, workspace_bytes, workspace.size()?)?;
+    check_copy_range(0, output_bytes, output.size()?)?;
+    if let Some(scale) = k_scale {
+        check_copy_range(0, scale_bytes, scale.size()?)?;
+    }
+    if let Some(scale) = v_scale {
+        check_copy_range(0, scale_bytes, scale.size()?)?;
+    }
+    let k_scale_raw = k_scale.map_or(std::ptr::null(), |scale| scale.raw.as_ptr());
+    let v_scale_raw = v_scale.map_or(std::ptr::null(), |scale| scale.raw.as_ptr());
+    let stream = stream.map_or(std::ptr::null_mut(), |stream| stream.raw.as_ptr());
+    status_to_result(unsafe {
+        ullm_runtime_paged_decode_attn_split_typed_f32(
+            q.raw.as_ptr(),
+            k_cache.raw.as_ptr(),
+            v_cache.raw.as_ptr(),
+            block_table.raw.as_ptr(),
+            k_scale_raw,
+            v_scale_raw,
+            cache_len,
+            block_size,
+            cache_blocks,
+            q_heads,
+            kv_heads,
+            head_dim,
+            value_dim,
+            softmax_scale,
+            source_tile,
+            k_dtype as c_int,
+            v_dtype as c_int,
+            workspace.raw.as_ptr(),
+            output.raw.as_ptr(),
+            stream,
+        )
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn paged_decode_attn_split_sigmoid_gate_typed_f32(
+    q: &RuntimeBuffer,
+    gate: &RuntimeBuffer,
+    k_cache: &RuntimeBuffer,
+    v_cache: &RuntimeBuffer,
+    block_table: &RuntimeBuffer,
+    k_scale: Option<&RuntimeBuffer>,
+    v_scale: Option<&RuntimeBuffer>,
+    cache_len: usize,
+    block_size: usize,
+    cache_blocks: usize,
+    q_heads: usize,
+    kv_heads: usize,
+    head_dim: usize,
+    value_dim: usize,
+    softmax_scale: f32,
+    source_tile: usize,
+    k_dtype: u32,
+    v_dtype: u32,
+    workspace: &mut RuntimeBuffer,
+    output: &mut RuntimeBuffer,
+    stream: Option<&mut RuntimeStream>,
+) -> Result<(), String> {
+    if head_dim != value_dim {
+        return Err(
+            "typed paged decode split sigmoid-gate ABI requires head_dim == value_dim".into(),
+        );
+    }
+    let k_needs_scale = kv_cache_dtype_needs_scale(k_dtype)?;
+    let v_needs_scale = kv_cache_dtype_needs_scale(v_dtype)?;
+    if k_needs_scale != k_scale.is_some() || v_needs_scale != v_scale.is_some() {
+        return Err("typed paged decode split attention requires scale buffers exactly for FP8_E4M3FN planes".into());
+    }
+    let (physical_tokens, _, k_cache_bytes, v_cache_bytes, scale_bytes) = typed_paged_cache_sizes(
+        cache_blocks,
+        block_size,
+        kv_heads,
+        head_dim,
+        value_dim,
+        k_dtype,
+        v_dtype,
+    )?;
+    if cache_len == 0
+        || cache_len > physical_tokens
+        || !q_heads.is_multiple_of(kv_heads)
+        || head_dim > 256
+        || value_dim > 256
+    {
+        return Err("typed paged decode split attention cache geometry is invalid".into());
+    }
+    if !softmax_scale.is_finite() || softmax_scale <= 0.0 {
+        return Err(
+            "typed paged decode split attention softmax scale must be finite and positive".into(),
+        );
+    }
+    let q_bytes = q_heads
+        .checked_mul(head_dim)
+        .and_then(|n| n.checked_mul(std::mem::size_of::<f32>()))
+        .ok_or_else(|| "typed paged decode split attention Q byte count overflows".to_string())?;
+    let output_bytes = q_heads
+        .checked_mul(value_dim)
+        .and_then(|n| n.checked_mul(std::mem::size_of::<f32>()))
+        .ok_or_else(|| {
+            "typed paged decode split attention output byte count overflows".to_string()
+        })?;
+    let table_bytes = (cache_len - 1)
+        .checked_div(block_size)
+        .and_then(|n| n.checked_add(1))
+        .and_then(|n| n.checked_mul(std::mem::size_of::<u32>()))
+        .ok_or_else(|| {
+            "typed paged decode split attention table byte count overflows".to_string()
+        })?;
+    let workspace_bytes =
+        paged_decode_attn_split_workspace_bytes(q_heads, value_dim, cache_len, source_tile)?;
+    check_copy_range(0, q_bytes, q.size()?)?;
+    check_copy_range(0, output_bytes, gate.size()?)?;
+    check_copy_range(0, k_cache_bytes, k_cache.size()?)?;
+    check_copy_range(0, v_cache_bytes, v_cache.size()?)?;
+    check_copy_range(0, table_bytes, block_table.size()?)?;
+    check_copy_range(0, workspace_bytes, workspace.size()?)?;
+    check_copy_range(0, output_bytes, output.size()?)?;
+    if let Some(scale) = k_scale {
+        check_copy_range(0, scale_bytes, scale.size()?)?;
+    }
+    if let Some(scale) = v_scale {
+        check_copy_range(0, scale_bytes, scale.size()?)?;
+    }
+    let k_scale_raw = k_scale.map_or(std::ptr::null(), |scale| scale.raw.as_ptr());
+    let v_scale_raw = v_scale.map_or(std::ptr::null(), |scale| scale.raw.as_ptr());
+    let stream = stream.map_or(std::ptr::null_mut(), |stream| stream.raw.as_ptr());
+    status_to_result(unsafe {
+        ullm_runtime_paged_decode_attn_split_sigmoid_gate_typed_f32(
+            q.raw.as_ptr(),
+            gate.raw.as_ptr(),
+            k_cache.raw.as_ptr(),
+            v_cache.raw.as_ptr(),
+            block_table.raw.as_ptr(),
+            k_scale_raw,
+            v_scale_raw,
+            cache_len,
+            block_size,
+            cache_blocks,
+            q_heads,
+            kv_heads,
+            head_dim,
+            value_dim,
+            softmax_scale,
+            source_tile,
+            k_dtype as c_int,
+            v_dtype as c_int,
+            workspace.raw.as_ptr(),
+            output.raw.as_ptr(),
+            stream,
+        )
+    })
+}
+
 pub fn paged_kv_write_f32(
     k: &RuntimeBuffer,
     v: &RuntimeBuffer,
@@ -8639,6 +9151,112 @@ pub fn paged_kv_write_chunk_f32(
             value_dim,
             k_cache.raw.as_ptr(),
             v_cache.raw.as_ptr(),
+            stream,
+        )
+    })
+}
+
+/// Writes an F32 K/V chunk into independently selected persistent cache
+/// payload dtypes. FP8 E4M3FN planes use one FP16 scale per
+/// physical-token/KV-head row.
+#[allow(clippy::too_many_arguments)]
+pub fn paged_kv_write_chunk_typed_f32(
+    k: &RuntimeBuffer,
+    v: &RuntimeBuffer,
+    block_table: &RuntimeBuffer,
+    cache_start: usize,
+    m: usize,
+    block_size: usize,
+    cache_blocks: usize,
+    kv_heads: usize,
+    head_dim: usize,
+    value_dim: usize,
+    k_dtype: u32,
+    v_dtype: u32,
+    k_cache: &mut RuntimeBuffer,
+    v_cache: &mut RuntimeBuffer,
+    k_scale: Option<&mut RuntimeBuffer>,
+    v_scale: Option<&mut RuntimeBuffer>,
+    stream: Option<&mut RuntimeStream>,
+) -> Result<(), String> {
+    if m == 0 || m > 128 {
+        return Err("typed paged KV write chunk m must be in 1..=128".to_string());
+    }
+    if block_size == 0 || cache_blocks == 0 || kv_heads == 0 || head_dim == 0 || value_dim == 0 {
+        return Err("typed paged KV write chunk dimensions must be greater than zero".to_string());
+    }
+    let k_needs_scale = kv_cache_dtype_needs_scale(k_dtype)?;
+    let v_needs_scale = kv_cache_dtype_needs_scale(v_dtype)?;
+    if k_needs_scale != k_scale.is_some() || v_needs_scale != v_scale.is_some() {
+        return Err(
+            "typed paged KV write chunk requires scale buffers exactly for FP8_E4M3FN planes"
+                .to_string(),
+        );
+    }
+    let (physical_tokens, _, k_cache_bytes, v_cache_bytes, scale_bytes) = typed_paged_cache_sizes(
+        cache_blocks,
+        block_size,
+        kv_heads,
+        head_dim,
+        value_dim,
+        k_dtype,
+        v_dtype,
+    )?;
+    let end = cache_start
+        .checked_add(m)
+        .ok_or_else(|| "typed paged KV write chunk logical range overflows".to_string())?;
+    if end > physical_tokens {
+        return Err(
+            "typed paged KV write chunk logical range exceeds physical cache capacity".to_string(),
+        );
+    }
+    let k_bytes = m
+        .checked_mul(kv_heads)
+        .and_then(|value| value.checked_mul(head_dim))
+        .and_then(|value| value.checked_mul(std::mem::size_of::<f32>()))
+        .ok_or_else(|| "typed paged KV write chunk K input byte count overflows".to_string())?;
+    let v_bytes = m
+        .checked_mul(kv_heads)
+        .and_then(|value| value.checked_mul(value_dim))
+        .and_then(|value| value.checked_mul(std::mem::size_of::<f32>()))
+        .ok_or_else(|| "typed paged KV write chunk V input byte count overflows".to_string())?;
+    let table_bytes = (end - 1)
+        .checked_div(block_size)
+        .and_then(|value| value.checked_add(1))
+        .and_then(|value| value.checked_mul(std::mem::size_of::<u32>()))
+        .ok_or_else(|| "typed paged KV write chunk block-table byte count overflows".to_string())?;
+    check_copy_range(0, k_bytes, k.size()?)?;
+    check_copy_range(0, v_bytes, v.size()?)?;
+    check_copy_range(0, table_bytes, block_table.size()?)?;
+    check_copy_range(0, k_cache_bytes, k_cache.size()?)?;
+    check_copy_range(0, v_cache_bytes, v_cache.size()?)?;
+    if let Some(scale) = k_scale.as_deref() {
+        check_copy_range(0, scale_bytes, scale.size()?)?;
+    }
+    if let Some(scale) = v_scale.as_deref() {
+        check_copy_range(0, scale_bytes, scale.size()?)?;
+    }
+    let k_scale_raw = k_scale.map_or(std::ptr::null_mut(), |scale| scale.raw.as_ptr());
+    let v_scale_raw = v_scale.map_or(std::ptr::null_mut(), |scale| scale.raw.as_ptr());
+    let stream = stream.map_or(std::ptr::null_mut(), |stream| stream.raw.as_ptr());
+    status_to_result(unsafe {
+        ullm_runtime_paged_kv_write_chunk_typed_f32(
+            k.raw.as_ptr(),
+            v.raw.as_ptr(),
+            block_table.raw.as_ptr(),
+            cache_start,
+            m,
+            block_size,
+            cache_blocks,
+            kv_heads,
+            head_dim,
+            value_dim,
+            k_dtype as c_int,
+            v_dtype as c_int,
+            k_cache.raw.as_ptr(),
+            v_cache.raw.as_ptr(),
+            k_scale_raw,
+            v_scale_raw,
             stream,
         )
     })
@@ -8870,6 +9488,232 @@ pub fn paged_causal_gqa_chunk_sigmoid_gate_f32(
             stream,
         )
     })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn paged_causal_gqa_chunk_typed_f32_impl(
+    q: &RuntimeBuffer,
+    gate: Option<&RuntimeBuffer>,
+    k_cache: &RuntimeBuffer,
+    v_cache: &RuntimeBuffer,
+    block_table: &RuntimeBuffer,
+    k_scale: Option<&RuntimeBuffer>,
+    v_scale: Option<&RuntimeBuffer>,
+    cached_prefix_len: usize,
+    m: usize,
+    block_size: usize,
+    cache_blocks: usize,
+    q_heads: usize,
+    kv_heads: usize,
+    head_dim: usize,
+    value_dim: usize,
+    softmax_scale: f32,
+    k_dtype: u32,
+    v_dtype: u32,
+    output: &mut RuntimeBuffer,
+    stream: Option<&mut RuntimeStream>,
+) -> Result<(), String> {
+    if !softmax_scale.is_finite() || softmax_scale <= 0.0 {
+        return Err(
+            "typed paged causal GQA chunk softmax scale must be finite and greater than zero"
+                .to_string(),
+        );
+    }
+    if gate.is_some() && head_dim != value_dim {
+        return Err(
+            "typed paged causal GQA chunk gated ABI requires head_dim == value_dim".to_string(),
+        );
+    }
+    let k_needs_scale = kv_cache_dtype_needs_scale(k_dtype)?;
+    let v_needs_scale = kv_cache_dtype_needs_scale(v_dtype)?;
+    if k_needs_scale != k_scale.is_some() || v_needs_scale != v_scale.is_some() {
+        return Err(
+            "typed paged causal GQA chunk requires scale buffers exactly for FP8_E4M3FN planes"
+                .to_string(),
+        );
+    }
+    let (q_bytes, output_bytes, gate_bytes, _, _, table_bytes) = paged_causal_gqa_chunk_sizes(
+        cached_prefix_len,
+        m,
+        block_size,
+        cache_blocks,
+        q_heads,
+        kv_heads,
+        head_dim,
+        value_dim,
+    )?;
+    let (_, _, k_cache_bytes, v_cache_bytes, scale_bytes) = typed_paged_cache_sizes(
+        cache_blocks,
+        block_size,
+        kv_heads,
+        head_dim,
+        value_dim,
+        k_dtype,
+        v_dtype,
+    )?;
+    check_copy_range(0, q_bytes, q.size()?)?;
+    if let Some(gate) = gate {
+        check_copy_range(0, gate_bytes, gate.size()?)?;
+    }
+    check_copy_range(0, k_cache_bytes, k_cache.size()?)?;
+    check_copy_range(0, v_cache_bytes, v_cache.size()?)?;
+    check_copy_range(0, table_bytes, block_table.size()?)?;
+    check_copy_range(0, output_bytes, output.size()?)?;
+    if let Some(scale) = k_scale {
+        check_copy_range(0, scale_bytes, scale.size()?)?;
+    }
+    if let Some(scale) = v_scale {
+        check_copy_range(0, scale_bytes, scale.size()?)?;
+    }
+    let gate_raw = gate.map_or(std::ptr::null(), |gate| gate.raw.as_ptr());
+    let k_scale_raw = k_scale.map_or(std::ptr::null(), |scale| scale.raw.as_ptr());
+    let v_scale_raw = v_scale.map_or(std::ptr::null(), |scale| scale.raw.as_ptr());
+    let stream = stream.map_or(std::ptr::null_mut(), |stream| stream.raw.as_ptr());
+    let status = unsafe {
+        if gate_raw.is_null() {
+            ullm_runtime_paged_causal_gqa_chunk_typed_f32(
+                q.raw.as_ptr(),
+                k_cache.raw.as_ptr(),
+                v_cache.raw.as_ptr(),
+                block_table.raw.as_ptr(),
+                k_scale_raw,
+                v_scale_raw,
+                cached_prefix_len,
+                m,
+                block_size,
+                cache_blocks,
+                q_heads,
+                kv_heads,
+                head_dim,
+                value_dim,
+                softmax_scale,
+                k_dtype as c_int,
+                v_dtype as c_int,
+                output.raw.as_ptr(),
+                stream,
+            )
+        } else {
+            ullm_runtime_paged_causal_gqa_chunk_sigmoid_gate_typed_f32(
+                q.raw.as_ptr(),
+                gate_raw,
+                k_cache.raw.as_ptr(),
+                v_cache.raw.as_ptr(),
+                block_table.raw.as_ptr(),
+                k_scale_raw,
+                v_scale_raw,
+                cached_prefix_len,
+                m,
+                block_size,
+                cache_blocks,
+                q_heads,
+                kv_heads,
+                head_dim,
+                value_dim,
+                softmax_scale,
+                k_dtype as c_int,
+                v_dtype as c_int,
+                output.raw.as_ptr(),
+                stream,
+            )
+        }
+    };
+    status_to_result(status)
+}
+
+/// Reads a typed persistent cache for an ungated causal GQA prefill chunk.
+#[allow(clippy::too_many_arguments)]
+pub fn paged_causal_gqa_chunk_typed_f32(
+    q: &RuntimeBuffer,
+    k_cache: &RuntimeBuffer,
+    v_cache: &RuntimeBuffer,
+    block_table: &RuntimeBuffer,
+    k_scale: Option<&RuntimeBuffer>,
+    v_scale: Option<&RuntimeBuffer>,
+    cached_prefix_len: usize,
+    m: usize,
+    block_size: usize,
+    cache_blocks: usize,
+    q_heads: usize,
+    kv_heads: usize,
+    head_dim: usize,
+    value_dim: usize,
+    softmax_scale: f32,
+    k_dtype: u32,
+    v_dtype: u32,
+    output: &mut RuntimeBuffer,
+    stream: Option<&mut RuntimeStream>,
+) -> Result<(), String> {
+    paged_causal_gqa_chunk_typed_f32_impl(
+        q,
+        None,
+        k_cache,
+        v_cache,
+        block_table,
+        k_scale,
+        v_scale,
+        cached_prefix_len,
+        m,
+        block_size,
+        cache_blocks,
+        q_heads,
+        kv_heads,
+        head_dim,
+        value_dim,
+        softmax_scale,
+        k_dtype,
+        v_dtype,
+        output,
+        stream,
+    )
+}
+
+/// Reads a typed persistent cache and applies the Qwen3.5 sigmoid attention
+/// gate for a causal GQA prefill chunk.
+#[allow(clippy::too_many_arguments)]
+pub fn paged_causal_gqa_chunk_sigmoid_gate_typed_f32(
+    q: &RuntimeBuffer,
+    gate: &RuntimeBuffer,
+    k_cache: &RuntimeBuffer,
+    v_cache: &RuntimeBuffer,
+    block_table: &RuntimeBuffer,
+    k_scale: Option<&RuntimeBuffer>,
+    v_scale: Option<&RuntimeBuffer>,
+    cached_prefix_len: usize,
+    m: usize,
+    block_size: usize,
+    cache_blocks: usize,
+    q_heads: usize,
+    kv_heads: usize,
+    head_dim: usize,
+    value_dim: usize,
+    softmax_scale: f32,
+    k_dtype: u32,
+    v_dtype: u32,
+    output: &mut RuntimeBuffer,
+    stream: Option<&mut RuntimeStream>,
+) -> Result<(), String> {
+    paged_causal_gqa_chunk_typed_f32_impl(
+        q,
+        Some(gate),
+        k_cache,
+        v_cache,
+        block_table,
+        k_scale,
+        v_scale,
+        cached_prefix_len,
+        m,
+        block_size,
+        cache_blocks,
+        q_heads,
+        kv_heads,
+        head_dim,
+        value_dim,
+        softmax_scale,
+        k_dtype,
+        v_dtype,
+        output,
+        stream,
+    )
 }
 
 /// Production gfx1201 Qwen3.5 paged cold-prefill WMMA-QK ABI. It stages Q/K through FP16

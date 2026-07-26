@@ -851,6 +851,29 @@ public:
             auto loaded = std::make_unique<LoadedModule>();
             loaded->module = module;
             loaded->function = function;
+            bool typed_loaded = true;
+            for (int k_dtype = 0; k_dtype < 3 && typed_loaded; ++k_dtype) {
+                for (int v_dtype = 0; v_dtype < 3; ++v_dtype) {
+                    if (k_dtype == 0 && v_dtype == 0) {
+                        continue;
+                    }
+                    if (!hip_runtime().module_get_function(
+                            &loaded->typed[k_dtype][v_dtype],
+                            module,
+                            typed_symbol_name(k_dtype, v_dtype),
+                            device_id)) {
+                        typed_loaded = false;
+                        break;
+                    }
+                }
+            }
+            if (!typed_loaded) {
+                hip_runtime().module_unload(module, device_id);
+                append_error(
+                    &compile_errors,
+                    "hipModuleGetFunction typed Qwen3.5 paged KV write failed for " + arch);
+                continue;
+            }
             loaded->arch = arch;
             void *result = loaded->function;
             modules_.emplace(device_id, std::move(loaded));
@@ -862,12 +885,53 @@ public:
         return nullptr;
     }
 
+    void *typed_function_for_device(
+        int device_id,
+        ullm_kv_cache_dtype k_dtype,
+        ullm_kv_cache_dtype v_dtype,
+        std::string *error) {
+        const int k_index = static_cast<int>(k_dtype);
+        const int v_index = static_cast<int>(v_dtype);
+        if (k_index < 0 || k_index > 2 || v_index < 0 || v_index > 2) {
+            append_error(error, "typed Qwen3.5 paged KV writer received an unsupported cache dtype");
+            return nullptr;
+        }
+        void *legacy = function_for_device(device_id, error);
+        if (legacy == nullptr) {
+            return nullptr;
+        }
+        std::lock_guard<std::mutex> lock(mutex_);
+        const auto found = modules_.find(device_id);
+        if (found == modules_.end()) {
+            append_error(error, "typed Qwen3.5 paged KV HIP module disappeared after load");
+            return nullptr;
+        }
+        return k_index == 0 && v_index == 0 ? found->second->function
+                                             : found->second->typed[k_index][v_index];
+    }
+
 private:
     struct LoadedModule {
         void *module = nullptr;
         void *function = nullptr;
+        void *typed[3][3] = {};
         std::string arch;
     };
+
+    static const char *typed_symbol_name(int k_dtype, int v_dtype) {
+        static const char *const names[3][3] = {
+            {nullptr,
+             "ullm_qwen35_qk_norm_rope_paged_kv_write_typed_kf32_vf16_kernel",
+             "ullm_qwen35_qk_norm_rope_paged_kv_write_typed_kf32_vfp8_kernel"},
+            {"ullm_qwen35_qk_norm_rope_paged_kv_write_typed_kf16_vf32_kernel",
+             "ullm_qwen35_qk_norm_rope_paged_kv_write_typed_kf16_vf16_kernel",
+             "ullm_qwen35_qk_norm_rope_paged_kv_write_typed_kf16_vfp8_kernel"},
+            {"ullm_qwen35_qk_norm_rope_paged_kv_write_typed_kfp8_vf32_kernel",
+             "ullm_qwen35_qk_norm_rope_paged_kv_write_typed_kfp8_vf16_kernel",
+             "ullm_qwen35_qk_norm_rope_paged_kv_write_typed_kfp8_vfp8_kernel"},
+        };
+        return names[k_dtype][v_dtype];
+    }
 
     static void append_error(std::string *error, const std::string &message) {
         if (error == nullptr || message.empty()) {
@@ -980,6 +1044,136 @@ bool qwen35_qk_norm_rope_paged_kv_write_f32_hip_kernel(
             device_id)) {
         if (error != nullptr) {
             *error = "hipModuleLaunchKernel failed for Qwen3.5 q/k norm RoPE paged KV write";
+        }
+        return false;
+    }
+    return true;
+}
+
+bool qwen35_qk_norm_rope_paged_kv_write_typed_f32_hip_kernel(
+    const ullm_runtime_buffer *q_projected_buffer,
+    const ullm_runtime_buffer *k_projected_buffer,
+    const ullm_runtime_buffer *v_projected_buffer,
+    const ullm_runtime_buffer *q_weight_buffer,
+    const ullm_runtime_buffer *k_weight_buffer,
+    const ullm_runtime_buffer *block_table_buffer,
+    size_t q_heads,
+    size_t kv_heads,
+    size_t head_dim,
+    size_t value_dim,
+    size_t rotary_dim,
+    size_t position_offset,
+    float rope_base,
+    float epsilon,
+    size_t cache_position,
+    size_t block_size,
+    size_t cache_blocks,
+    ullm_kv_cache_dtype k_dtype,
+    ullm_kv_cache_dtype v_dtype,
+    ullm_runtime_buffer *q_gate_output_buffer,
+    ullm_runtime_buffer *q_rope_output_buffer,
+    ullm_runtime_buffer *k_cache_buffer,
+    ullm_runtime_buffer *v_cache_buffer,
+    ullm_runtime_buffer *k_scale_buffer,
+    ullm_runtime_buffer *v_scale_buffer,
+    ullm_runtime_stream *stream,
+    std::string *error) {
+    if (k_dtype == ULLM_KV_CACHE_DTYPE_F32 && v_dtype == ULLM_KV_CACHE_DTYPE_F32) {
+        return qwen35_qk_norm_rope_paged_kv_write_f32_hip_kernel(
+            q_projected_buffer,
+            k_projected_buffer,
+            v_projected_buffer,
+            q_weight_buffer,
+            k_weight_buffer,
+            block_table_buffer,
+            q_heads,
+            kv_heads,
+            head_dim,
+            value_dim,
+            rotary_dim,
+            position_offset,
+            rope_base,
+            epsilon,
+            cache_position,
+            block_size,
+            cache_blocks,
+            q_gate_output_buffer,
+            q_rope_output_buffer,
+            k_cache_buffer,
+            v_cache_buffer,
+            stream,
+            error);
+    }
+    const int device_id = q_projected_buffer->hip_device_id;
+    void *function = hip_qwen35_qk_norm_rope_paged_kv_write_kernel_cache()
+        .typed_function_for_device(device_id, k_dtype, v_dtype, error);
+    if (function == nullptr) {
+        return false;
+    }
+    const size_t segments = q_heads + kv_heads + kv_heads;
+    if (segments > static_cast<size_t>(std::numeric_limits<unsigned int>::max())) {
+        if (error != nullptr) {
+            *error = "typed Qwen3.5 q/k norm RoPE paged KV write segment count exceeds HIP grid limit";
+        }
+        return false;
+    }
+    constexpr unsigned int launch_block_size = 256;
+    unsigned long long kernel_q_heads = static_cast<unsigned long long>(q_heads);
+    unsigned long long kernel_kv_heads = static_cast<unsigned long long>(kv_heads);
+    unsigned long long kernel_head_dim = static_cast<unsigned long long>(head_dim);
+    unsigned long long kernel_value_dim = static_cast<unsigned long long>(value_dim);
+    unsigned long long kernel_rotary_dim = static_cast<unsigned long long>(rotary_dim);
+    unsigned long long kernel_position_offset = static_cast<unsigned long long>(position_offset);
+    unsigned long long kernel_cache_position = static_cast<unsigned long long>(cache_position);
+    unsigned long long kernel_block_size = static_cast<unsigned long long>(block_size);
+    unsigned long long kernel_cache_blocks = static_cast<unsigned long long>(cache_blocks);
+    void *q_projected_ptr = q_projected_buffer->ptr;
+    void *k_projected_ptr = k_projected_buffer->ptr;
+    void *v_projected_ptr = v_projected_buffer->ptr;
+    void *q_weight_ptr = q_weight_buffer->ptr;
+    void *k_weight_ptr = k_weight_buffer->ptr;
+    void *block_table_ptr = block_table_buffer->ptr;
+    void *q_gate_output_ptr = q_gate_output_buffer->ptr;
+    void *q_rope_output_ptr = q_rope_output_buffer->ptr;
+    void *k_cache_ptr = k_cache_buffer->ptr;
+    void *v_cache_ptr = v_cache_buffer->ptr;
+    void *k_scale_ptr = k_scale_buffer == nullptr ? nullptr : k_scale_buffer->ptr;
+    void *v_scale_ptr = v_scale_buffer == nullptr ? nullptr : v_scale_buffer->ptr;
+    void *kernel_params[] = {
+        &q_projected_ptr,
+        &k_projected_ptr,
+        &v_projected_ptr,
+        &q_weight_ptr,
+        &k_weight_ptr,
+        &block_table_ptr,
+        &kernel_q_heads,
+        &kernel_kv_heads,
+        &kernel_head_dim,
+        &kernel_value_dim,
+        &kernel_rotary_dim,
+        &kernel_position_offset,
+        &rope_base,
+        &epsilon,
+        &kernel_cache_position,
+        &kernel_block_size,
+        &kernel_cache_blocks,
+        &q_gate_output_ptr,
+        &q_rope_output_ptr,
+        &k_cache_ptr,
+        &v_cache_ptr,
+        &k_scale_ptr,
+        &v_scale_ptr,
+    };
+    void *hip_stream = stream == nullptr ? nullptr : stream->stream;
+    if (!hip_runtime().module_launch_kernel(
+            function,
+            static_cast<unsigned int>(segments),
+            launch_block_size,
+            kernel_params,
+            hip_stream,
+            device_id)) {
+        if (error != nullptr) {
+            *error = "hipModuleLaunchKernel failed for typed Qwen3.5 q/k norm RoPE paged KV write";
         }
         return false;
     }
@@ -3676,6 +3870,57 @@ public:
         return functions.legacy;
     }
 
+    void *typed_function_for_device(
+        int device_id,
+        ullm_kv_cache_dtype k_dtype,
+        ullm_kv_cache_dtype v_dtype,
+        std::string *error) {
+        const int k_index = static_cast<int>(k_dtype);
+        const int v_index = static_cast<int>(v_dtype);
+        if (k_index < 0 || k_index > 2 || v_index < 0 || v_index > 2) {
+            append_error(error, "typed paged decode received an unsupported cache dtype");
+            return nullptr;
+        }
+        Functions ignored;
+        if (!functions_for_device(device_id, &ignored, error)) {
+            return nullptr;
+        }
+        std::lock_guard<std::mutex> lock(mutex_);
+        const auto found = modules_.find(device_id);
+        if (found == modules_.end()) {
+            append_error(error, "typed paged decode HIP module disappeared after load");
+            return nullptr;
+        }
+        // Keep F32/F32 bound to the unmodified legacy body.
+        return k_index == 0 && v_index == 0 ? found->second->legacy_function
+                                             : found->second->typed[k_index][v_index];
+    }
+
+    void *typed_split_partial_function_for_device(
+        int device_id,
+        ullm_kv_cache_dtype k_dtype,
+        ullm_kv_cache_dtype v_dtype,
+        std::string *error) {
+        const int k_index = static_cast<int>(k_dtype);
+        const int v_index = static_cast<int>(v_dtype);
+        if (k_index < 0 || k_index > 2 || v_index < 0 || v_index > 2) {
+            append_error(error, "typed paged decode split received an unsupported cache dtype");
+            return nullptr;
+        }
+        Functions ignored;
+        if (!functions_for_device(device_id, &ignored, error)) {
+            return nullptr;
+        }
+        std::lock_guard<std::mutex> lock(mutex_);
+        const auto found = modules_.find(device_id);
+        if (found == modules_.end()) {
+            append_error(error, "typed paged decode split HIP module disappeared after load");
+            return nullptr;
+        }
+        return k_index == 0 && v_index == 0 ? found->second->split_partial_function
+                                             : found->second->typed_split[k_index][v_index];
+    }
+
     bool functions_for_device(int device_id, Functions *functions, std::string *error) {
         std::lock_guard<std::mutex> lock(mutex_);
         auto found = modules_.find(device_id);
@@ -3744,6 +3989,35 @@ public:
             loaded->legacy_function = legacy_function;
             loaded->split_partial_function = split_partial_function;
             loaded->split_merge_function = split_merge_function;
+            bool typed_loaded = true;
+            for (int k_dtype = 0; k_dtype < 3 && typed_loaded; ++k_dtype) {
+                for (int v_dtype = 0; v_dtype < 3; ++v_dtype) {
+                    if (k_dtype == 0 && v_dtype == 0) {
+                        continue;
+                    }
+                    if (!hip_runtime().module_get_function(
+                            &loaded->typed[k_dtype][v_dtype],
+                            module,
+                            typed_symbol_name(k_dtype, v_dtype),
+                            device_id)) {
+                        typed_loaded = false;
+                        break;
+                    }
+                    if (!hip_runtime().module_get_function(
+                            &loaded->typed_split[k_dtype][v_dtype],
+                            module,
+                            typed_split_symbol_name(k_dtype, v_dtype),
+                            device_id)) {
+                        typed_loaded = false;
+                        break;
+                    }
+                }
+            }
+            if (!typed_loaded) {
+                hip_runtime().module_unload(module, device_id);
+                append_error(&compile_errors, "hipModuleGetFunction typed paged decode failed for " + arch);
+                continue;
+            }
             loaded->arch = arch;
             assign_functions(*loaded, functions);
             modules_.emplace(device_id, std::move(loaded));
@@ -3761,8 +4035,40 @@ private:
         void *legacy_function = nullptr;
         void *split_partial_function = nullptr;
         void *split_merge_function = nullptr;
+        void *typed[3][3] = {};
+        void *typed_split[3][3] = {};
         std::string arch;
     };
+
+    static const char *typed_symbol_name(int k_dtype, int v_dtype) {
+        static const char *const names[3][3] = {
+            {nullptr,
+             "ullm_paged_decode_attn_typed_kf32_vf16_kernel",
+             "ullm_paged_decode_attn_typed_kf32_vfp8_kernel"},
+            {"ullm_paged_decode_attn_typed_kf16_vf32_kernel",
+             "ullm_paged_decode_attn_typed_kf16_vf16_kernel",
+             "ullm_paged_decode_attn_typed_kf16_vfp8_kernel"},
+            {"ullm_paged_decode_attn_typed_kfp8_vf32_kernel",
+             "ullm_paged_decode_attn_typed_kfp8_vf16_kernel",
+             "ullm_paged_decode_attn_typed_kfp8_vfp8_kernel"},
+        };
+        return names[k_dtype][v_dtype];
+    }
+
+    static const char *typed_split_symbol_name(int k_dtype, int v_dtype) {
+        static const char *const names[3][3] = {
+            {nullptr,
+             "ullm_paged_decode_attn_split_typed_kf32_vf16_partial_kernel",
+             "ullm_paged_decode_attn_split_typed_kf32_vfp8_partial_kernel"},
+            {"ullm_paged_decode_attn_split_typed_kf16_vf32_partial_kernel",
+             "ullm_paged_decode_attn_split_typed_kf16_vf16_partial_kernel",
+             "ullm_paged_decode_attn_split_typed_kf16_vfp8_partial_kernel"},
+            {"ullm_paged_decode_attn_split_typed_kfp8_vf32_partial_kernel",
+             "ullm_paged_decode_attn_split_typed_kfp8_vf16_partial_kernel",
+             "ullm_paged_decode_attn_split_typed_kfp8_vfp8_partial_kernel"},
+        };
+        return names[k_dtype][v_dtype];
+    }
 
     static void assign_functions(const LoadedModule &loaded, Functions *functions) {
         if (functions == nullptr) {
@@ -3868,6 +4174,111 @@ bool paged_decode_attn_f32_hip_kernel(
             device_id)) {
         if (error != nullptr) {
             *error = "hipModuleLaunchKernel failed for f32 paged decode attention";
+        }
+        return false;
+    }
+    return true;
+}
+
+bool paged_decode_attn_typed_f32_hip_kernel(
+    const ullm_runtime_buffer *q_buffer,
+    const ullm_runtime_buffer *k_cache_buffer,
+    const ullm_runtime_buffer *v_cache_buffer,
+    const ullm_runtime_buffer *block_table_buffer,
+    const ullm_runtime_buffer *k_scale_buffer,
+    const ullm_runtime_buffer *v_scale_buffer,
+    size_t cache_len,
+    size_t block_size,
+    size_t cache_blocks,
+    size_t q_heads,
+    size_t kv_heads,
+    size_t head_dim,
+    size_t value_dim,
+    float softmax_scale,
+    ullm_kv_cache_dtype k_dtype,
+    ullm_kv_cache_dtype v_dtype,
+    ullm_runtime_buffer *output_buffer,
+    ullm_runtime_stream *stream,
+    std::string *error) {
+    if (k_dtype == ULLM_KV_CACHE_DTYPE_F32 && v_dtype == ULLM_KV_CACHE_DTYPE_F32) {
+        return paged_decode_attn_f32_hip_kernel(
+            q_buffer,
+            nullptr,
+            k_cache_buffer,
+            v_cache_buffer,
+            block_table_buffer,
+            cache_len,
+            block_size,
+            cache_blocks,
+            q_heads,
+            kv_heads,
+            head_dim,
+            value_dim,
+            softmax_scale,
+            output_buffer,
+            stream,
+            error);
+    }
+    const int device_id = q_buffer->hip_device_id;
+    void *function = hip_paged_decode_attn_kernel_cache().typed_function_for_device(
+        device_id, k_dtype, v_dtype, error);
+    if (function == nullptr) {
+        return false;
+    }
+    constexpr unsigned int launch_block_size = 256;
+    const size_t output_elements = q_heads * value_dim;
+    const bool use_head_parallel_kernel =
+        head_dim <= launch_block_size && value_dim <= launch_block_size;
+    const size_t grid_size = use_head_parallel_kernel
+                                 ? q_heads
+                                 : (output_elements + launch_block_size - 1u) / launch_block_size;
+    if (grid_size > static_cast<size_t>(std::numeric_limits<unsigned int>::max())) {
+        if (error != nullptr) {
+            *error = "typed paged decode attention launch grid exceeds HIP grid limit";
+        }
+        return false;
+    }
+    unsigned long long kernel_cache_len = static_cast<unsigned long long>(cache_len);
+    unsigned long long kernel_block_size = static_cast<unsigned long long>(block_size);
+    unsigned long long kernel_cache_blocks = static_cast<unsigned long long>(cache_blocks);
+    unsigned long long kernel_q_heads = static_cast<unsigned long long>(q_heads);
+    unsigned long long kernel_kv_heads = static_cast<unsigned long long>(kv_heads);
+    unsigned long long kernel_head_dim = static_cast<unsigned long long>(head_dim);
+    unsigned long long kernel_value_dim = static_cast<unsigned long long>(value_dim);
+    void *q_ptr = q_buffer->ptr;
+    void *k_ptr = k_cache_buffer->ptr;
+    void *v_ptr = v_cache_buffer->ptr;
+    void *block_table_ptr = block_table_buffer->ptr;
+    void *k_scale_ptr = k_scale_buffer == nullptr ? nullptr : k_scale_buffer->ptr;
+    void *v_scale_ptr = v_scale_buffer == nullptr ? nullptr : v_scale_buffer->ptr;
+    void *output_ptr = output_buffer->ptr;
+    void *kernel_params[] = {
+        &q_ptr,
+        &k_ptr,
+        &v_ptr,
+        &block_table_ptr,
+        &k_scale_ptr,
+        &v_scale_ptr,
+        &kernel_cache_len,
+        &kernel_block_size,
+        &kernel_cache_blocks,
+        &kernel_q_heads,
+        &kernel_kv_heads,
+        &kernel_head_dim,
+        &kernel_value_dim,
+        &softmax_scale,
+        &output_ptr,
+    };
+    void *hip_stream = stream == nullptr ? nullptr : stream->stream;
+    if (!hip_runtime().module_launch_kernel(
+            function,
+            static_cast<unsigned int>(grid_size),
+            launch_block_size,
+            kernel_params,
+            hip_stream,
+            device_id)) {
+        if (error != nullptr) {
+            *error = "hipModuleLaunchKernel failed for typed paged decode attention";
         }
         return false;
     }
@@ -4008,6 +4419,157 @@ bool paged_decode_attn_split_f32_hip_kernel(
     return true;
 }
 
+bool paged_decode_attn_split_typed_f32_hip_kernel(
+    const ullm_runtime_buffer *q_buffer,
+    const ullm_runtime_buffer *gate_buffer,
+    const ullm_runtime_buffer *k_cache_buffer,
+    const ullm_runtime_buffer *v_cache_buffer,
+    const ullm_runtime_buffer *block_table_buffer,
+    const ullm_runtime_buffer *k_scale_buffer,
+    const ullm_runtime_buffer *v_scale_buffer,
+    size_t cache_len,
+    size_t block_size,
+    size_t cache_blocks,
+    size_t q_heads,
+    size_t kv_heads,
+    size_t head_dim,
+    size_t value_dim,
+    float softmax_scale,
+    size_t source_tile,
+    size_t split_count,
+    ullm_kv_cache_dtype k_dtype,
+    ullm_kv_cache_dtype v_dtype,
+    ullm_runtime_buffer *workspace_buffer,
+    ullm_runtime_buffer *output_buffer,
+    ullm_runtime_stream *stream,
+    std::string *error) {
+    if (k_dtype == ULLM_KV_CACHE_DTYPE_F32 && v_dtype == ULLM_KV_CACHE_DTYPE_F32) {
+        return paged_decode_attn_split_f32_hip_kernel(
+            q_buffer,
+            gate_buffer,
+            k_cache_buffer,
+            v_cache_buffer,
+            block_table_buffer,
+            cache_len,
+            block_size,
+            cache_blocks,
+            q_heads,
+            kv_heads,
+            head_dim,
+            value_dim,
+            softmax_scale,
+            source_tile,
+            split_count,
+            workspace_buffer,
+            output_buffer,
+            stream,
+            error);
+    }
+    const int device_id = q_buffer->hip_device_id;
+    void *partial_function =
+        hip_paged_decode_attn_kernel_cache().typed_split_partial_function_for_device(
+            device_id, k_dtype, v_dtype, error);
+    HipPagedDecodeAttnKernelCache::Functions functions;
+    if (partial_function == nullptr ||
+        !hip_paged_decode_attn_kernel_cache().functions_for_device(device_id, &functions, error) ||
+        functions.split_merge == nullptr) {
+        if (error != nullptr && error->empty()) {
+            *error = "typed paged decode split HIP functions are unavailable";
+        }
+        return false;
+    }
+    constexpr unsigned int launch_block_size = 256;
+    const bool grouped_qwen35_shape =
+        kv_heads != 0u && q_heads % kv_heads == 0u && q_heads / kv_heads == 4u &&
+        head_dim == 256u && value_dim == 256u;
+    const size_t partial_groups = grouped_qwen35_shape ? kv_heads : q_heads;
+    if (split_count != 0u && partial_groups > std::numeric_limits<size_t>::max() / split_count) {
+        if (error != nullptr) {
+            *error = "typed paged decode split partial grid overflows";
+        }
+        return false;
+    }
+    const size_t partial_grid_size = partial_groups * split_count;
+    if (partial_grid_size > static_cast<size_t>(std::numeric_limits<unsigned int>::max()) ||
+        q_heads > static_cast<size_t>(std::numeric_limits<unsigned int>::max())) {
+        if (error != nullptr) {
+            *error = "typed paged decode split launch grid exceeds HIP grid limit";
+        }
+        return false;
+    }
+    unsigned long long kernel_cache_len = static_cast<unsigned long long>(cache_len);
+    unsigned long long kernel_block_size = static_cast<unsigned long long>(block_size);
+    unsigned long long kernel_cache_blocks = static_cast<unsigned long long>(cache_blocks);
+    unsigned long long kernel_q_heads = static_cast<unsigned long long>(q_heads);
+    unsigned long long kernel_kv_heads = static_cast<unsigned long long>(kv_heads);
+    unsigned long long kernel_head_dim = static_cast<unsigned long long>(head_dim);
+    unsigned long long kernel_value_dim = static_cast<unsigned long long>(value_dim);
+    unsigned long long kernel_source_tile = static_cast<unsigned long long>(source_tile);
+    unsigned long long kernel_split_count = static_cast<unsigned long long>(split_count);
+    void *q_ptr = q_buffer->ptr;
+    void *k_ptr = k_cache_buffer->ptr;
+    void *v_ptr = v_cache_buffer->ptr;
+    void *table_ptr = block_table_buffer->ptr;
+    void *k_scale_ptr = k_scale_buffer == nullptr ? nullptr : k_scale_buffer->ptr;
+    void *v_scale_ptr = v_scale_buffer == nullptr ? nullptr : v_scale_buffer->ptr;
+    void *workspace_ptr = workspace_buffer->ptr;
+    void *gate_ptr = gate_buffer == nullptr ? nullptr : gate_buffer->ptr;
+    void *output_ptr = output_buffer->ptr;
+    void *partial_params[] = {
+        &q_ptr,
+        &k_ptr,
+        &v_ptr,
+        &table_ptr,
+        &k_scale_ptr,
+        &v_scale_ptr,
+        &kernel_cache_len,
+        &kernel_block_size,
+        &kernel_cache_blocks,
+        &kernel_q_heads,
+        &kernel_kv_heads,
+        &kernel_head_dim,
+        &kernel_value_dim,
+        &softmax_scale,
+        &kernel_source_tile,
+        &kernel_split_count,
+        &workspace_ptr,
+    };
+    void *hip_stream = stream == nullptr ? nullptr : stream->stream;
+    if (!hip_runtime().module_launch_kernel(
+            partial_function,
+            static_cast<unsigned int>(partial_grid_size),
+            launch_block_size,
+            partial_params,
+            hip_stream,
+            device_id)) {
+        if (error != nullptr) {
+            *error = "hipModuleLaunchKernel failed for typed paged decode split partial attention";
+        }
+        return false;
+    }
+    void *merge_params[] = {
+        &gate_ptr,
+        &kernel_q_heads,
+        &kernel_value_dim,
+        &kernel_split_count,
+        &workspace_ptr,
+        &output_ptr,
+    };
+    if (!hip_runtime().module_launch_kernel(
+            functions.split_merge,
+            static_cast<unsigned int>(q_heads),
+            launch_block_size,
+            merge_params,
+            hip_stream,
+            device_id)) {
+        if (error != nullptr) {
+            *error = "hipModuleLaunchKernel failed for typed paged decode split merge attention";
+        }
+        return false;
+    }
+    return true;
+}
+
 ullm_status paged_decode_attn_f32_hip_staging(
     const ullm_runtime_buffer *q_buffer,
     const ullm_runtime_buffer *gate_buffer,
@@ -4133,9 +4695,58 @@ class HipPagedKvWriteKernelCache {
 public:
     void *function_for_device(int device_id, std::string *error) {
         std::lock_guard<std::mutex> lock(mutex_);
+        LoadedModule *loaded = ensure_device_locked(device_id, error);
+        return loaded == nullptr ? nullptr : loaded->function;
+    }
+
+    void *typed_function_for_device(
+        int device_id,
+        ullm_kv_cache_dtype k_dtype,
+        ullm_kv_cache_dtype v_dtype,
+        std::string *error) {
+        const int k_index = static_cast<int>(k_dtype);
+        const int v_index = static_cast<int>(v_dtype);
+        if (k_index < 0 || k_index > 2 || v_index < 0 || v_index > 2) {
+            append_error(error, "typed paged KV write received an unsupported cache dtype");
+            return nullptr;
+        }
+        std::lock_guard<std::mutex> lock(mutex_);
+        LoadedModule *loaded = ensure_device_locked(device_id, error);
+        if (loaded == nullptr) {
+            return nullptr;
+        }
+        // F32/F32 is intentionally the existing legacy symbol.  The typed
+        // ABI may ask for it, but it must never replace the F32 fast path.
+        return k_index == 0 && v_index == 0 ? loaded->function : loaded->typed[k_index][v_index];
+    }
+
+private:
+    struct LoadedModule {
+        void *module = nullptr;
+        void *function = nullptr;
+        void *typed[3][3] = {};
+        std::string arch;
+    };
+
+    static const char *typed_symbol_name(int k_dtype, int v_dtype) {
+        static const char *const names[3][3] = {
+            {nullptr,
+             "ullm_paged_kv_write_typed_kf32_vf16_kernel",
+             "ullm_paged_kv_write_typed_kf32_vfp8_kernel"},
+            {"ullm_paged_kv_write_typed_kf16_vf32_kernel",
+             "ullm_paged_kv_write_typed_kf16_vf16_kernel",
+             "ullm_paged_kv_write_typed_kf16_vfp8_kernel"},
+            {"ullm_paged_kv_write_typed_kfp8_vf32_kernel",
+             "ullm_paged_kv_write_typed_kfp8_vf16_kernel",
+             "ullm_paged_kv_write_typed_kfp8_vfp8_kernel"},
+        };
+        return names[k_dtype][v_dtype];
+    }
+
+    LoadedModule *ensure_device_locked(int device_id, std::string *error) {
         auto found = modules_.find(device_id);
         if (found != modules_.end()) {
-            return found->second->function;
+            return found->second.get();
         }
 
         const std::vector<std::string> candidates = hip_arch_candidates(device_id);
@@ -4172,8 +4783,27 @@ public:
             auto loaded = std::make_unique<LoadedModule>();
             loaded->module = module;
             loaded->function = function;
+            bool typed_loaded = true;
+            for (int k_dtype = 0; k_dtype < 3 && typed_loaded; ++k_dtype) {
+                for (int v_dtype = 0; v_dtype < 3; ++v_dtype) {
+                    if (k_dtype == 0 && v_dtype == 0) {
+                        continue;
+                    }
+                    const char *symbol = typed_symbol_name(k_dtype, v_dtype);
+                    if (!hip_runtime().module_get_function(
+                            &loaded->typed[k_dtype][v_dtype], module, symbol, device_id)) {
+                        typed_loaded = false;
+                        break;
+                    }
+                }
+            }
+            if (!typed_loaded) {
+                hip_runtime().module_unload(module, device_id);
+                append_error(&compile_errors, "hipModuleGetFunction failed for typed paged KV write kernels");
+                continue;
+            }
             loaded->arch = arch;
-            void *result = loaded->function;
+            LoadedModule *result = loaded.get();
             modules_.emplace(device_id, std::move(loaded));
             return result;
         }
@@ -4182,13 +4812,6 @@ public:
             compile_errors.empty() ? "failed to build paged KV write HIP kernel" : compile_errors);
         return nullptr;
     }
-
-private:
-    struct LoadedModule {
-        void *module = nullptr;
-        void *function = nullptr;
-        std::string arch;
-    };
 
     static void append_error(std::string *error, const std::string &message) {
         if (error == nullptr || message.empty()) {
@@ -4273,6 +4896,98 @@ bool paged_kv_write_f32_hip_kernel(
             device_id)) {
         if (error != nullptr) {
             *error = "hipModuleLaunchKernel failed for f32 paged KV write";
+        }
+        return false;
+    }
+    return true;
+}
+
+bool paged_kv_write_typed_f32_hip_kernel(
+    const ullm_runtime_buffer *k_buffer,
+    const ullm_runtime_buffer *v_buffer,
+    const ullm_runtime_buffer *block_table_buffer,
+    size_t cache_position,
+    size_t block_size,
+    size_t cache_blocks,
+    size_t kv_heads,
+    size_t head_dim,
+    size_t value_dim,
+    ullm_kv_cache_dtype k_dtype,
+    ullm_kv_cache_dtype v_dtype,
+    ullm_runtime_buffer *k_cache_buffer,
+    ullm_runtime_buffer *v_cache_buffer,
+    ullm_runtime_buffer *k_scale_buffer,
+    ullm_runtime_buffer *v_scale_buffer,
+    ullm_runtime_stream *stream,
+    std::string *error) {
+    if (k_dtype == ULLM_KV_CACHE_DTYPE_F32 && v_dtype == ULLM_KV_CACHE_DTYPE_F32) {
+        return paged_kv_write_f32_hip_kernel(
+            k_buffer,
+            v_buffer,
+            block_table_buffer,
+            cache_position,
+            block_size,
+            cache_blocks,
+            kv_heads,
+            head_dim,
+            value_dim,
+            k_cache_buffer,
+            v_cache_buffer,
+            stream,
+            error);
+    }
+    const int device_id = k_buffer->hip_device_id;
+    void *function = hip_paged_kv_write_kernel_cache().typed_function_for_device(
+        device_id, k_dtype, v_dtype, error);
+    if (function == nullptr) {
+        return false;
+    }
+    constexpr unsigned int launch_block_size = 256;
+    if (kv_heads > static_cast<size_t>(std::numeric_limits<unsigned int>::max() / 2u)) {
+        if (error != nullptr) {
+            *error = "typed paged KV write head count exceeds HIP grid limit";
+        }
+        return false;
+    }
+    const unsigned int grid_size = static_cast<unsigned int>(kv_heads * 2u);
+    unsigned long long kernel_cache_position = static_cast<unsigned long long>(cache_position);
+    unsigned long long kernel_block_size = static_cast<unsigned long long>(block_size);
+    unsigned long long kernel_cache_blocks = static_cast<unsigned long long>(cache_blocks);
+    unsigned long long kernel_kv_heads = static_cast<unsigned long long>(kv_heads);
+    unsigned long long kernel_head_dim = static_cast<unsigned long long>(head_dim);
+    unsigned long long kernel_value_dim = static_cast<unsigned long long>(value_dim);
+    void *k_ptr = k_buffer->ptr;
+    void *v_ptr = v_buffer->ptr;
+    void *block_table_ptr = block_table_buffer->ptr;
+    void *k_cache_ptr = k_cache_buffer->ptr;
+    void *v_cache_ptr = v_cache_buffer->ptr;
+    void *k_scale_ptr = k_scale_buffer == nullptr ? nullptr : k_scale_buffer->ptr;
+    void *v_scale_ptr = v_scale_buffer == nullptr ? nullptr : v_scale_buffer->ptr;
+    void *kernel_params[] = {
+        &k_ptr,
+        &v_ptr,
+        &block_table_ptr,
+        &kernel_cache_position,
+        &kernel_block_size,
+        &kernel_cache_blocks,
+        &kernel_kv_heads,
+        &kernel_head_dim,
+        &kernel_value_dim,
+        &k_cache_ptr,
+        &v_cache_ptr,
+        &k_scale_ptr,
+        &v_scale_ptr,
+    };
+    void *hip_stream = stream == nullptr ? nullptr : stream->stream;
+    if (!hip_runtime().module_launch_kernel(
+            function,
+            grid_size,
+            launch_block_size,
+            kernel_params,
+            hip_stream,
+            device_id)) {
+        if (error != nullptr) {
+            *error = "hipModuleLaunchKernel failed for typed paged KV write";
         }
         return false;
     }
@@ -4407,13 +5122,87 @@ public:
         return found == modules_.end() ? nullptr : found->second->reader;
     }
 
+    void *typed_writer_for_device(
+        int device_id,
+        ullm_kv_cache_dtype k_dtype,
+        ullm_kv_cache_dtype v_dtype,
+        std::string *error) {
+        const int k_index = static_cast<int>(k_dtype);
+        const int v_index = static_cast<int>(v_dtype);
+        if (k_index < 0 || k_index > 2 || v_index < 0 || v_index > 2) {
+            append_error(error, "typed paged chunk writer received an unsupported cache dtype");
+            return nullptr;
+        }
+        ensure_device(device_id, error);
+        std::lock_guard<std::mutex> lock(mutex_);
+        const auto found = modules_.find(device_id);
+        if (found == modules_.end()) {
+            return nullptr;
+        }
+        return k_index == 0 && v_index == 0 ? found->second->writer
+                                             : found->second->typed_writer[k_index][v_index];
+    }
+
+    void *typed_reader_for_device(
+        int device_id,
+        ullm_kv_cache_dtype k_dtype,
+        ullm_kv_cache_dtype v_dtype,
+        std::string *error) {
+        const int k_index = static_cast<int>(k_dtype);
+        const int v_index = static_cast<int>(v_dtype);
+        if (k_index < 0 || k_index > 2 || v_index < 0 || v_index > 2) {
+            append_error(error, "typed paged chunk reader received an unsupported cache dtype");
+            return nullptr;
+        }
+        ensure_device(device_id, error);
+        std::lock_guard<std::mutex> lock(mutex_);
+        const auto found = modules_.find(device_id);
+        if (found == modules_.end()) {
+            return nullptr;
+        }
+        return k_index == 0 && v_index == 0 ? found->second->reader
+                                             : found->second->typed_reader[k_index][v_index];
+    }
+
 private:
     struct LoadedModule {
         void *module = nullptr;
         void *writer = nullptr;
         void *reader = nullptr;
+        void *typed_writer[3][3] = {};
+        void *typed_reader[3][3] = {};
         std::string arch;
     };
+
+    static const char *typed_writer_symbol_name(int k_dtype, int v_dtype) {
+        static const char *const names[3][3] = {
+            {nullptr,
+             "ullm_paged_kv_write_chunk_typed_kf32_vf16_kernel",
+             "ullm_paged_kv_write_chunk_typed_kf32_vfp8_kernel"},
+            {"ullm_paged_kv_write_chunk_typed_kf16_vf32_kernel",
+             "ullm_paged_kv_write_chunk_typed_kf16_vf16_kernel",
+             "ullm_paged_kv_write_chunk_typed_kf16_vfp8_kernel"},
+            {"ullm_paged_kv_write_chunk_typed_kfp8_vf32_kernel",
+             "ullm_paged_kv_write_chunk_typed_kfp8_vf16_kernel",
+             "ullm_paged_kv_write_chunk_typed_kfp8_vfp8_kernel"},
+        };
+        return names[k_dtype][v_dtype];
+    }
+
+    static const char *typed_reader_symbol_name(int k_dtype, int v_dtype) {
+        static const char *const names[3][3] = {
+            {nullptr,
+             "ullm_paged_causal_gqa_chunk_typed_kf32_vf16_kernel",
+             "ullm_paged_causal_gqa_chunk_typed_kf32_vfp8_kernel"},
+            {"ullm_paged_causal_gqa_chunk_typed_kf16_vf32_kernel",
+             "ullm_paged_causal_gqa_chunk_typed_kf16_vf16_kernel",
+             "ullm_paged_causal_gqa_chunk_typed_kf16_vfp8_kernel"},
+            {"ullm_paged_causal_gqa_chunk_typed_kfp8_vf32_kernel",
+             "ullm_paged_causal_gqa_chunk_typed_kfp8_vf16_kernel",
+             "ullm_paged_causal_gqa_chunk_typed_kfp8_vfp8_kernel"},
+        };
+        return names[k_dtype][v_dtype];
+    }
 
     static void append_error(std::string *error, const std::string &message) {
         if (error == nullptr || message.empty()) {
@@ -4462,6 +5251,32 @@ private:
             loaded->module = module;
             loaded->writer = writer;
             loaded->reader = reader;
+            bool typed_loaded = true;
+            for (int k_dtype = 0; k_dtype < 3 && typed_loaded; ++k_dtype) {
+                for (int v_dtype = 0; v_dtype < 3; ++v_dtype) {
+                    if (k_dtype == 0 && v_dtype == 0) {
+                        continue;
+                    }
+                    if (!hip_runtime().module_get_function(
+                            &loaded->typed_writer[k_dtype][v_dtype],
+                            module,
+                            typed_writer_symbol_name(k_dtype, v_dtype),
+                            device_id) ||
+                        !hip_runtime().module_get_function(
+                            &loaded->typed_reader[k_dtype][v_dtype],
+                            module,
+                            typed_reader_symbol_name(k_dtype, v_dtype),
+                            device_id)) {
+                        typed_loaded = false;
+                        break;
+                    }
+                }
+            }
+            if (!typed_loaded) {
+                hip_runtime().module_unload(module, device_id);
+                append_error(&compile_errors, "hipModuleGetFunction typed paged chunk kernel failed for " + arch);
+                continue;
+            }
             loaded->arch = arch;
             modules_.emplace(device_id, std::move(loaded));
             return;
@@ -4643,6 +5458,73 @@ bool paged_kv_write_chunk_f32_hip_kernel(
     return true;
 }
 
+bool paged_kv_write_chunk_typed_f32_hip_kernel(
+    const ullm_runtime_buffer *k_buffer,
+    const ullm_runtime_buffer *v_buffer,
+    const ullm_runtime_buffer *block_table_buffer,
+    size_t cache_start,
+    size_t m,
+    size_t block_size,
+    size_t cache_blocks,
+    size_t block_table_entries,
+    size_t kv_heads,
+    size_t head_dim,
+    size_t value_dim,
+    ullm_kv_cache_dtype k_dtype,
+    ullm_kv_cache_dtype v_dtype,
+    ullm_runtime_buffer *k_cache_buffer,
+    ullm_runtime_buffer *v_cache_buffer,
+    ullm_runtime_buffer *k_scale_buffer,
+    ullm_runtime_buffer *v_scale_buffer,
+    ullm_runtime_stream *stream,
+    std::string *error) {
+    if (k_dtype == ULLM_KV_CACHE_DTYPE_F32 && v_dtype == ULLM_KV_CACHE_DTYPE_F32) {
+        return paged_kv_write_chunk_f32_hip_kernel(
+            k_buffer, v_buffer, block_table_buffer, cache_start, m, block_size, cache_blocks,
+            block_table_entries, kv_heads, head_dim, value_dim, k_cache_buffer, v_cache_buffer,
+            stream, error);
+    }
+    const int device_id = k_buffer->hip_device_id;
+    void *function = hip_paged_chunk_kernel_cache().typed_writer_for_device(
+        device_id, k_dtype, v_dtype, error);
+    if (function == nullptr) return false;
+    constexpr unsigned int launch_block_size = 256;
+    const size_t rows = m * kv_heads * 2u;
+    if (rows > static_cast<size_t>(std::numeric_limits<unsigned int>::max())) {
+        if (error != nullptr) *error = "typed paged KV write chunk grid exceeds HIP grid limit";
+        return false;
+    }
+    unsigned long long kernel_cache_start = static_cast<unsigned long long>(cache_start);
+    unsigned long long kernel_m = static_cast<unsigned long long>(m);
+    unsigned long long kernel_block_size = static_cast<unsigned long long>(block_size);
+    unsigned long long kernel_cache_blocks = static_cast<unsigned long long>(cache_blocks);
+    unsigned long long kernel_table_entries = static_cast<unsigned long long>(block_table_entries);
+    unsigned long long kernel_kv_heads = static_cast<unsigned long long>(kv_heads);
+    unsigned long long kernel_head_dim = static_cast<unsigned long long>(head_dim);
+    unsigned long long kernel_value_dim = static_cast<unsigned long long>(value_dim);
+    void *k_ptr = k_buffer->ptr;
+    void *v_ptr = v_buffer->ptr;
+    void *table_ptr = block_table_buffer->ptr;
+    void *k_cache_ptr = k_cache_buffer->ptr;
+    void *v_cache_ptr = v_cache_buffer->ptr;
+    void *k_scale_ptr = k_scale_buffer == nullptr ? nullptr : k_scale_buffer->ptr;
+    void *v_scale_ptr = v_scale_buffer == nullptr ? nullptr : v_scale_buffer->ptr;
+    void *kernel_params[] = {
+        &k_ptr, &v_ptr, &table_ptr, &kernel_cache_start, &kernel_m,
+        &kernel_block_size, &kernel_cache_blocks, &kernel_table_entries,
+        &kernel_kv_heads, &kernel_head_dim, &kernel_value_dim, &k_cache_ptr,
+        &v_cache_ptr, &k_scale_ptr, &v_scale_ptr,
+    };
+    void *hip_stream = stream == nullptr ? nullptr : stream->stream;
+    if (!hip_runtime().module_launch_kernel(
+            function, static_cast<unsigned int>(rows), launch_block_size,
+            kernel_params, hip_stream, device_id)) {
+        if (error != nullptr) *error = "hipModuleLaunchKernel failed for typed paged KV write chunk";
+        return false;
+    }
+    return true;
+}
+
 bool paged_causal_gqa_chunk_f32_hip_kernel(
     const ullm_runtime_buffer *q_buffer,
     const ullm_runtime_buffer *gate_buffer,
@@ -4719,6 +5601,78 @@ bool paged_causal_gqa_chunk_f32_hip_kernel(
         if (error != nullptr) {
             *error = "hipModuleLaunchKernel failed for f32 paged causal GQA chunk";
         }
+        return false;
+    }
+    return true;
+}
+
+bool paged_causal_gqa_chunk_typed_f32_hip_kernel(
+    const ullm_runtime_buffer *q_buffer,
+    const ullm_runtime_buffer *gate_buffer,
+    const ullm_runtime_buffer *k_cache_buffer,
+    const ullm_runtime_buffer *v_cache_buffer,
+    const ullm_runtime_buffer *block_table_buffer,
+    const ullm_runtime_buffer *k_scale_buffer,
+    const ullm_runtime_buffer *v_scale_buffer,
+    size_t cached_prefix_len,
+    size_t m,
+    size_t block_size,
+    size_t cache_blocks,
+    size_t block_table_entries,
+    size_t q_heads,
+    size_t kv_heads,
+    size_t head_dim,
+    size_t value_dim,
+    float softmax_scale,
+    ullm_kv_cache_dtype k_dtype,
+    ullm_kv_cache_dtype v_dtype,
+    ullm_runtime_buffer *output_buffer,
+    ullm_runtime_stream *stream,
+    std::string *error) {
+    if (k_dtype == ULLM_KV_CACHE_DTYPE_F32 && v_dtype == ULLM_KV_CACHE_DTYPE_F32) {
+        return paged_causal_gqa_chunk_f32_hip_kernel(
+            q_buffer, gate_buffer, k_cache_buffer, v_cache_buffer, block_table_buffer,
+            cached_prefix_len, m, block_size, cache_blocks, block_table_entries, q_heads,
+            kv_heads, head_dim, value_dim, softmax_scale, output_buffer, stream, error);
+    }
+    const int device_id = q_buffer->hip_device_id;
+    void *function = hip_paged_chunk_kernel_cache().typed_reader_for_device(
+        device_id, k_dtype, v_dtype, error);
+    if (function == nullptr) return false;
+    constexpr unsigned int launch_block_size = 256;
+    const size_t grid_size = m * q_heads;
+    if (grid_size > static_cast<size_t>(std::numeric_limits<unsigned int>::max())) {
+        if (error != nullptr) *error = "typed paged causal GQA chunk grid exceeds HIP grid limit";
+        return false;
+    }
+    unsigned long long kernel_cached_prefix_len = static_cast<unsigned long long>(cached_prefix_len);
+    unsigned long long kernel_m = static_cast<unsigned long long>(m);
+    unsigned long long kernel_block_size = static_cast<unsigned long long>(block_size);
+    unsigned long long kernel_cache_blocks = static_cast<unsigned long long>(cache_blocks);
+    unsigned long long kernel_table_entries = static_cast<unsigned long long>(block_table_entries);
+    unsigned long long kernel_q_heads = static_cast<unsigned long long>(q_heads);
+    unsigned long long kernel_kv_heads = static_cast<unsigned long long>(kv_heads);
+    unsigned long long kernel_head_dim = static_cast<unsigned long long>(head_dim);
+    unsigned long long kernel_value_dim = static_cast<unsigned long long>(value_dim);
+    void *q_ptr = q_buffer->ptr;
+    void *gate_ptr = gate_buffer == nullptr ? nullptr : gate_buffer->ptr;
+    void *k_ptr = k_cache_buffer->ptr;
+    void *v_ptr = v_cache_buffer->ptr;
+    void *table_ptr = block_table_buffer->ptr;
+    void *k_scale_ptr = k_scale_buffer == nullptr ? nullptr : k_scale_buffer->ptr;
+    void *v_scale_ptr = v_scale_buffer == nullptr ? nullptr : v_scale_buffer->ptr;
+    void *output_ptr = output_buffer->ptr;
+    void *kernel_params[] = {
+        &q_ptr, &gate_ptr, &k_ptr, &v_ptr, &table_ptr, &k_scale_ptr, &v_scale_ptr,
+        &kernel_cached_prefix_len, &kernel_m, &kernel_block_size, &kernel_cache_blocks,
+        &kernel_table_entries, &kernel_q_heads, &kernel_kv_heads, &kernel_head_dim,
+        &kernel_value_dim, &softmax_scale, &output_ptr,
+    };
+    void *hip_stream = stream == nullptr ? nullptr : stream->stream;
+    if (!hip_runtime().module_launch_kernel(
+            function, static_cast<unsigned int>(grid_size), launch_block_size,
+            kernel_params, hip_stream, device_id)) {
+        if (error != nullptr) *error = "hipModuleLaunchKernel failed for typed paged causal GQA chunk";
         return false;
     }
     return true;

@@ -1150,6 +1150,37 @@ ullm_status ullm_runtime_qwen35_qk_norm_rope_paged_kv_write_f32(
     ullm_runtime_buffer *v_cache_buffer,
     ullm_runtime_stream *stream);
 
+/* Fused Qwen3.5 Q/K RMSNorm + RoPE + typed paged KV write.  Q-side outputs
+ * remain F32; only persistent K/V planes use the selected payload dtypes.
+ * FP8 E4M3FN planes require their independent FP16 scale buffers. */
+ullm_status ullm_runtime_qwen35_qk_norm_rope_paged_kv_write_typed_f32(
+    const ullm_runtime_buffer *q_projected_buffer,
+    const ullm_runtime_buffer *k_projected_buffer,
+    const ullm_runtime_buffer *v_projected_buffer,
+    const ullm_runtime_buffer *q_weight_buffer,
+    const ullm_runtime_buffer *k_weight_buffer,
+    const ullm_runtime_buffer *block_table_buffer,
+    size_t q_heads,
+    size_t kv_heads,
+    size_t head_dim,
+    size_t value_dim,
+    size_t rotary_dim,
+    size_t position_offset,
+    float rope_base,
+    float epsilon,
+    size_t cache_position,
+    size_t block_size,
+    size_t cache_blocks,
+    ullm_kv_cache_dtype k_cache_dtype,
+    ullm_kv_cache_dtype v_cache_dtype,
+    ullm_runtime_buffer *q_gate_output_buffer,
+    ullm_runtime_buffer *q_rope_output_buffer,
+    ullm_runtime_buffer *k_cache_buffer,
+    ullm_runtime_buffer *v_cache_buffer,
+    ullm_runtime_buffer *k_scale_buffer,
+    ullm_runtime_buffer *v_scale_buffer,
+    ullm_runtime_stream *stream);
+
 ullm_status ullm_runtime_add_f32(
     const ullm_runtime_buffer *lhs_buffer,
     const ullm_runtime_buffer *rhs_buffer,
@@ -1408,6 +1439,56 @@ ullm_status ullm_runtime_paged_decode_attn_split_sigmoid_gate_f32(
     ullm_runtime_buffer *output_buffer,
     ullm_runtime_stream *stream);
 
+/* Typed counterpart of the split decode ABI. Q, merge workspace, and output
+ * remain F32. F32/F32 is dispatched to the existing F32 split kernels; each
+ * non-F32 K/V pair has a compiled HIP partial specialization and shares the
+ * reviewed F32 merge body. FP8 E4M3FN scale buffers follow the typed direct
+ * decode [physical_token,kv_head] FP16 layout. */
+ullm_status ullm_runtime_paged_decode_attn_split_typed_f32(
+    const ullm_runtime_buffer *q_buffer,
+    const ullm_runtime_buffer *k_cache_buffer,
+    const ullm_runtime_buffer *v_cache_buffer,
+    const ullm_runtime_buffer *block_table_buffer,
+    const ullm_runtime_buffer *k_scale_buffer,
+    const ullm_runtime_buffer *v_scale_buffer,
+    size_t cache_len,
+    size_t block_size,
+    size_t cache_blocks,
+    size_t q_heads,
+    size_t kv_heads,
+    size_t head_dim,
+    size_t value_dim,
+    float softmax_scale,
+    size_t source_tile,
+    ullm_kv_cache_dtype k_cache_dtype,
+    ullm_kv_cache_dtype v_cache_dtype,
+    ullm_runtime_buffer *workspace_buffer,
+    ullm_runtime_buffer *output_buffer,
+    ullm_runtime_stream *stream);
+
+ullm_status ullm_runtime_paged_decode_attn_split_sigmoid_gate_typed_f32(
+    const ullm_runtime_buffer *q_buffer,
+    const ullm_runtime_buffer *gate_buffer,
+    const ullm_runtime_buffer *k_cache_buffer,
+    const ullm_runtime_buffer *v_cache_buffer,
+    const ullm_runtime_buffer *block_table_buffer,
+    const ullm_runtime_buffer *k_scale_buffer,
+    const ullm_runtime_buffer *v_scale_buffer,
+    size_t cache_len,
+    size_t block_size,
+    size_t cache_blocks,
+    size_t q_heads,
+    size_t kv_heads,
+    size_t head_dim,
+    size_t value_dim,
+    float softmax_scale,
+    size_t source_tile,
+    ullm_kv_cache_dtype k_cache_dtype,
+    ullm_kv_cache_dtype v_cache_dtype,
+    ullm_runtime_buffer *workspace_buffer,
+    ullm_runtime_buffer *output_buffer,
+    ullm_runtime_stream *stream);
+
 ullm_status ullm_runtime_paged_kv_write_f32(
     const ullm_runtime_buffer *k_buffer,
     const ullm_runtime_buffer *v_buffer,
@@ -1491,6 +1572,25 @@ ullm_status ullm_runtime_paged_kv_write_chunk_f32(
     ullm_runtime_buffer *v_cache_buffer,
     ullm_runtime_stream *stream);
 
+ullm_status ullm_runtime_paged_kv_write_chunk_typed_f32(
+    const ullm_runtime_buffer *k_buffer,
+    const ullm_runtime_buffer *v_buffer,
+    const ullm_runtime_buffer *block_table_buffer,
+    size_t cache_start,
+    size_t m,
+    size_t block_size,
+    size_t cache_blocks,
+    size_t kv_heads,
+    size_t head_dim,
+    size_t value_dim,
+    ullm_kv_cache_dtype k_cache_dtype,
+    ullm_kv_cache_dtype v_cache_dtype,
+    ullm_runtime_buffer *k_cache_buffer,
+    ullm_runtime_buffer *v_cache_buffer,
+    ullm_runtime_buffer *k_scale_buffer,
+    ullm_runtime_buffer *v_scale_buffer,
+    ullm_runtime_stream *stream);
+
 /*
  * Computes causal GQA attention for an M-token query chunk against a paged
  * cache. Query row i attends to logical source positions
@@ -1532,6 +1632,51 @@ ullm_status ullm_runtime_paged_causal_gqa_chunk_sigmoid_gate_f32(
     size_t head_dim,
     size_t value_dim,
     float softmax_scale,
+    ullm_runtime_buffer *output_buffer,
+    ullm_runtime_stream *stream);
+
+/* Typed persistent-cache causal GQA reader. Q, gate, and output stay F32;
+ * optional FP8 E4M3FN scales are laid out [physical_token,kv_head]. */
+ullm_status ullm_runtime_paged_causal_gqa_chunk_typed_f32(
+    const ullm_runtime_buffer *q_buffer,
+    const ullm_runtime_buffer *k_cache_buffer,
+    const ullm_runtime_buffer *v_cache_buffer,
+    const ullm_runtime_buffer *block_table_buffer,
+    const ullm_runtime_buffer *k_scale_buffer,
+    const ullm_runtime_buffer *v_scale_buffer,
+    size_t cached_prefix_len,
+    size_t m,
+    size_t block_size,
+    size_t cache_blocks,
+    size_t q_heads,
+    size_t kv_heads,
+    size_t head_dim,
+    size_t value_dim,
+    float softmax_scale,
+    ullm_kv_cache_dtype k_cache_dtype,
+    ullm_kv_cache_dtype v_cache_dtype,
+    ullm_runtime_buffer *output_buffer,
+    ullm_runtime_stream *stream);
+
+ullm_status ullm_runtime_paged_causal_gqa_chunk_sigmoid_gate_typed_f32(
+    const ullm_runtime_buffer *q_buffer,
+    const ullm_runtime_buffer *gate_buffer,
+    const ullm_runtime_buffer *k_cache_buffer,
+    const ullm_runtime_buffer *v_cache_buffer,
+    const ullm_runtime_buffer *block_table_buffer,
+    const ullm_runtime_buffer *k_scale_buffer,
+    const ullm_runtime_buffer *v_scale_buffer,
+    size_t cached_prefix_len,
+    size_t m,
+    size_t block_size,
+    size_t cache_blocks,
+    size_t q_heads,
+    size_t kv_heads,
+    size_t head_dim,
+    size_t value_dim,
+    float softmax_scale,
+    ullm_kv_cache_dtype k_cache_dtype,
+    ullm_kv_cache_dtype v_cache_dtype,
     ullm_runtime_buffer *output_buffer,
     ullm_runtime_stream *stream);
 

@@ -6209,6 +6209,341 @@ extern "C" __global__ void ullm_qwen35_qk_norm_rope_paged_kv_write_f32_kernel(
         }
     }
 }
+
+// Typed Qwen3.5 writer specializations.  The F32 symbol above is deliberately
+// retained verbatim; typed cache selections enter only one of the eight
+// wrappers below.  FP8 scales are independent per physical token, KV head,
+// and K/V plane.
+enum {
+    ULLM_FUSED_TYPED_KV_F32 = 0,
+    ULLM_FUSED_TYPED_KV_F16 = 1,
+    ULLM_FUSED_TYPED_KV_FP8_E4M3FN = 2,
+};
+
+__device__ __forceinline__ unsigned int ullm_fused_typed_kv_round_shift_ties_even(
+    unsigned int value, unsigned int shift) {
+    if (shift == 0u) return value;
+    const unsigned int quotient = value >> shift;
+    const unsigned int remainder = value & ((1u << shift) - 1u);
+    const unsigned int halfway = 1u << (shift - 1u);
+    return remainder > halfway || (remainder == halfway && (quotient & 1u) != 0u)
+        ? quotient + 1u : quotient;
+}
+
+__device__ __forceinline__ unsigned short ullm_fused_typed_kv_f32_to_f16_rne(float value) {
+    const unsigned int raw = __float_as_uint(value);
+    const unsigned short sign = static_cast<unsigned short>((raw >> 16u) & 0x8000u);
+    const unsigned int exponent_bits = (raw >> 23u) & 0xffu;
+    const unsigned int mantissa = raw & 0x7fffffu;
+    if (exponent_bits == 0xffu) {
+        return static_cast<unsigned short>(sign | (mantissa == 0u ? 0x7c00u : 0x7e00u));
+    }
+    const int exponent = static_cast<int>(exponent_bits) - 127;
+    if (exponent > 15) return static_cast<unsigned short>(sign | 0x7c00u);
+    if (exponent >= -14) {
+        unsigned int rounded = ullm_fused_typed_kv_round_shift_ties_even(mantissa, 13u);
+        unsigned int half_exponent = static_cast<unsigned int>(exponent + 15);
+        if (rounded == 0x400u) {
+            rounded = 0u;
+            ++half_exponent;
+            if (half_exponent >= 0x1fu) return static_cast<unsigned short>(sign | 0x7c00u);
+        }
+        return static_cast<unsigned short>(sign | (half_exponent << 10u) | rounded);
+    }
+    if (exponent < -25) return sign;
+    return static_cast<unsigned short>(sign | ullm_fused_typed_kv_round_shift_ties_even(
+        mantissa | 0x800000u, static_cast<unsigned int>(-exponent - 1)));
+}
+
+__device__ __forceinline__ float ullm_fused_typed_kv_f16_to_f32(unsigned short bits) {
+    const float sign = (bits & 0x8000u) == 0u ? 1.0f : -1.0f;
+    const unsigned int exponent = (static_cast<unsigned int>(bits) >> 10u) & 0x1fu;
+    const unsigned int mantissa = static_cast<unsigned int>(bits) & 0x03ffu;
+    if (exponent == 0u) return mantissa == 0u ? sign * 0.0f : sign * ldexpf(static_cast<float>(mantissa), -24);
+    if (exponent == 0x1fu) return mantissa == 0u ? sign * __int_as_float(0x7f800000) : __int_as_float(0x7fc00000);
+    return sign * ldexpf(1.0f + static_cast<float>(mantissa) * 0.0009765625f,
+                         static_cast<int>(exponent) - 15);
+}
+
+__device__ __forceinline__ bool ullm_fused_typed_kv_positive_f16_ceil(
+    float value, unsigned short *bits_out) {
+    if (bits_out == nullptr || !isfinite(value) || value <= 0.0f) return false;
+    unsigned short bits = ullm_fused_typed_kv_f32_to_f16_rne(value);
+    if (bits == 0u) bits = 1u;
+    if (bits >= 0x7c00u) return false;
+    if (ullm_fused_typed_kv_f16_to_f32(bits) < value) {
+        ++bits;
+        if (bits >= 0x7c00u) return false;
+    }
+    const float stored = ullm_fused_typed_kv_f16_to_f32(bits);
+    if (!isfinite(stored) || stored <= 0.0f || stored < value) return false;
+    *bits_out = bits;
+    return true;
+}
+
+__device__ __forceinline__ float ullm_fused_typed_kv_fp8_to_f32(unsigned char value) {
+#if defined(__gfx1200__) || defined(__gfx1201__)
+    return __builtin_amdgcn_cvt_f32_fp8(static_cast<unsigned int>(value), 0);
+#else
+    const unsigned int raw = static_cast<unsigned int>(value);
+    const unsigned int sign = raw >> 7u;
+    const unsigned int exponent = (raw >> 3u) & 0x0fu;
+    const unsigned int mantissa = raw & 0x07u;
+    if (exponent == 0x0fu && mantissa == 0x07u) return __uint_as_float(0x7fc00000u);
+    const float magnitude = exponent == 0u ? static_cast<float>(mantissa) * 0.001953125f
+        : ldexpf(1.0f + static_cast<float>(mantissa) * 0.125f, static_cast<int>(exponent) - 7);
+    return sign == 0u ? magnitude : -magnitude;
+#endif
+}
+
+__device__ __forceinline__ unsigned char ullm_fused_typed_kv_f32_to_fp8_rne(
+    float value, float scale) {
+    const unsigned int sign = (__float_as_uint(value) >> 24u) & 0x80u;
+    const float magnitude = fabsf(value / scale);
+    if (magnitude == 0.0f) return static_cast<unsigned char>(sign);
+    if (magnitude >= 448.0f) return static_cast<unsigned char>(sign | 0x7eu);
+    unsigned int low = 0u;
+    unsigned int high = 126u;
+    while (low < high) {
+        const unsigned int middle = low + (high - low) / 2u;
+        if (fabsf(ullm_fused_typed_kv_fp8_to_f32(static_cast<unsigned char>(middle))) < magnitude)
+            low = middle + 1u;
+        else high = middle;
+    }
+    const unsigned int upper = low;
+    const float upper_value = ullm_fused_typed_kv_fp8_to_f32(static_cast<unsigned char>(upper));
+    if (upper_value == magnitude) return static_cast<unsigned char>(sign | upper);
+    const unsigned int lower = upper - 1u;
+    const double low_distance = static_cast<double>(magnitude) -
+        static_cast<double>(ullm_fused_typed_kv_fp8_to_f32(static_cast<unsigned char>(lower)));
+    const double high_distance = static_cast<double>(upper_value) - static_cast<double>(magnitude);
+    const unsigned int encoded = low_distance < high_distance ? lower
+        : (high_distance < low_distance ? upper : ((lower & 1u) == 0u ? lower : upper));
+    return static_cast<unsigned char>(sign | encoded);
+}
+
+template <int DTYPE>
+__device__ __forceinline__ void ullm_fused_typed_kv_store_row(
+    const float *source, unsigned long long elements, unsigned long long physical_head,
+    unsigned long long row_dim, void *payload, unsigned short *scales, float *partial) {
+    const unsigned int tid = threadIdx.x;
+    float local_maximum = 0.0f;
+    bool finite = true;
+    if constexpr (DTYPE != ULLM_FUSED_TYPED_KV_F32) {
+        for (unsigned long long index = tid; index < elements; index += blockDim.x) {
+            const float value = source[index];
+            finite = finite && isfinite(value);
+            local_maximum = fmaxf(local_maximum, fabsf(value));
+        }
+    }
+    partial[tid] = finite ? local_maximum : __int_as_float(0x7f800000);
+    __syncthreads();
+    for (unsigned int offset = blockDim.x >> 1u; offset > 0u; offset >>= 1u) {
+        if (tid < offset) partial[tid] = fmaxf(partial[tid], partial[tid + offset]);
+        __syncthreads();
+    }
+    unsigned short scale_bits = 0x3c00u;
+    bool valid = true;
+    if constexpr (DTYPE == ULLM_FUSED_TYPED_KV_F16) {
+        valid = isfinite(partial[0]) && partial[0] <= 65504.0f;
+    } else if constexpr (DTYPE == ULLM_FUSED_TYPED_KV_FP8_E4M3FN) {
+        if (!isfinite(partial[0])) valid = false;
+        else if (partial[0] != 0.0f)
+            valid = ullm_fused_typed_kv_positive_f16_ceil(partial[0] / 448.0f, &scale_bits);
+    }
+    if (tid == 0u) partial[0] = valid ? static_cast<float>(scale_bits) : -1.0f;
+    __syncthreads();
+    if (partial[0] < 0.0f) return;
+    scale_bits = static_cast<unsigned short>(partial[0]);
+    if constexpr (DTYPE == ULLM_FUSED_TYPED_KV_FP8_E4M3FN) {
+        if (tid == 0u) scales[physical_head] = scale_bits;
+    }
+    const float scale = ullm_fused_typed_kv_f16_to_f32(scale_bits);
+    const unsigned long long base = physical_head * row_dim;
+    for (unsigned long long index = tid; index < elements; index += blockDim.x) {
+        if constexpr (DTYPE == ULLM_FUSED_TYPED_KV_F32)
+            static_cast<float *>(payload)[base + index] = source[index];
+        else if constexpr (DTYPE == ULLM_FUSED_TYPED_KV_F16)
+            static_cast<unsigned short *>(payload)[base + index] = ullm_fused_typed_kv_f32_to_f16_rne(source[index]);
+        else
+            static_cast<unsigned char *>(payload)[base + index] = ullm_fused_typed_kv_f32_to_fp8_rne(source[index], scale);
+    }
+}
+
+template <int DTYPE>
+__device__ __forceinline__ void ullm_fused_typed_kv_store_rope_k_row(
+    const float *k_projected, const float *k_weight, unsigned long long source_base,
+    unsigned long long head_dim, unsigned long long rotary_dim, float position, float rope_base,
+    float inv_rms, unsigned long long physical_head, void *payload, unsigned short *scales,
+    float *partial) {
+    const unsigned int tid = threadIdx.x;
+    const unsigned long long half = rotary_dim >> 1u;
+    float local_maximum = 0.0f;
+    bool finite = true;
+    if constexpr (DTYPE != ULLM_FUSED_TYPED_KV_F32) {
+        for (unsigned long long dim = tid; dim < head_dim; dim += blockDim.x) {
+            float value;
+            if (dim < half) {
+                const float exponent = 2.0f * static_cast<float>(dim) / static_cast<float>(rotary_dim);
+                const float theta = position / powf(rope_base, exponent);
+                const float first = k_projected[source_base + dim] * inv_rms * k_weight[dim];
+                const float second = k_projected[source_base + half + dim] * inv_rms * k_weight[half + dim];
+                value = first * cosf(theta) - second * sinf(theta);
+            } else if (dim < rotary_dim) {
+                const unsigned long long pair = dim - half;
+                const float exponent = 2.0f * static_cast<float>(pair) / static_cast<float>(rotary_dim);
+                const float theta = position / powf(rope_base, exponent);
+                const float first = k_projected[source_base + pair] * inv_rms * k_weight[pair];
+                const float second = k_projected[source_base + dim] * inv_rms * k_weight[dim];
+                value = second * cosf(theta) + first * sinf(theta);
+            } else {
+                value = k_projected[source_base + dim] * inv_rms * k_weight[dim];
+            }
+            finite = finite && isfinite(value);
+            local_maximum = fmaxf(local_maximum, fabsf(value));
+        }
+    }
+    partial[tid] = finite ? local_maximum : __int_as_float(0x7f800000);
+    __syncthreads();
+    for (unsigned int offset = blockDim.x >> 1u; offset > 0u; offset >>= 1u) {
+        if (tid < offset) partial[tid] = fmaxf(partial[tid], partial[tid + offset]);
+        __syncthreads();
+    }
+    unsigned short scale_bits = 0x3c00u;
+    bool valid = true;
+    if constexpr (DTYPE == ULLM_FUSED_TYPED_KV_F16) valid = isfinite(partial[0]) && partial[0] <= 65504.0f;
+    else if constexpr (DTYPE == ULLM_FUSED_TYPED_KV_FP8_E4M3FN) {
+        if (!isfinite(partial[0])) valid = false;
+        else if (partial[0] != 0.0f)
+            valid = ullm_fused_typed_kv_positive_f16_ceil(partial[0] / 448.0f, &scale_bits);
+    }
+    if (tid == 0u) partial[0] = valid ? static_cast<float>(scale_bits) : -1.0f;
+    __syncthreads();
+    if (partial[0] < 0.0f) return;
+    scale_bits = static_cast<unsigned short>(partial[0]);
+    if constexpr (DTYPE == ULLM_FUSED_TYPED_KV_FP8_E4M3FN) if (tid == 0u) scales[physical_head] = scale_bits;
+    const float scale = ullm_fused_typed_kv_f16_to_f32(scale_bits);
+    const unsigned long long base = physical_head * head_dim;
+    for (unsigned long long dim = tid; dim < head_dim; dim += blockDim.x) {
+        float value;
+        if (dim < half) {
+            const float exponent = 2.0f * static_cast<float>(dim) / static_cast<float>(rotary_dim);
+            const float theta = position / powf(rope_base, exponent);
+            const float first = k_projected[source_base + dim] * inv_rms * k_weight[dim];
+            const float second = k_projected[source_base + half + dim] * inv_rms * k_weight[half + dim];
+            value = first * cosf(theta) - second * sinf(theta);
+        } else if (dim < rotary_dim) {
+            const unsigned long long pair = dim - half;
+            const float exponent = 2.0f * static_cast<float>(pair) / static_cast<float>(rotary_dim);
+            const float theta = position / powf(rope_base, exponent);
+            const float first = k_projected[source_base + pair] * inv_rms * k_weight[pair];
+            const float second = k_projected[source_base + dim] * inv_rms * k_weight[dim];
+            value = second * cosf(theta) + first * sinf(theta);
+        } else value = k_projected[source_base + dim] * inv_rms * k_weight[dim];
+        if constexpr (DTYPE == ULLM_FUSED_TYPED_KV_F32) static_cast<float *>(payload)[base + dim] = value;
+        else if constexpr (DTYPE == ULLM_FUSED_TYPED_KV_F16) static_cast<unsigned short *>(payload)[base + dim] = ullm_fused_typed_kv_f32_to_f16_rne(value);
+        else static_cast<unsigned char *>(payload)[base + dim] = ullm_fused_typed_kv_f32_to_fp8_rne(value, scale);
+    }
+}
+
+template <int K_DTYPE, int V_DTYPE>
+__device__ __forceinline__ void ullm_qwen35_qk_norm_rope_paged_kv_write_typed_impl(
+    const float *q_projected, const float *k_projected, const float *v_projected,
+    const float *q_weight, const float *k_weight, const unsigned int *block_table,
+    unsigned long long q_heads, unsigned long long kv_heads, unsigned long long head_dim,
+    unsigned long long value_dim, unsigned long long rotary_dim, unsigned long long position_offset,
+    float rope_base, float epsilon, unsigned long long cache_position, unsigned long long block_size,
+    unsigned long long cache_blocks, float *q_gate_output, float *q_rope_output,
+    void *k_cache, void *v_cache, unsigned short *k_scales, unsigned short *v_scales,
+    float *partial) {
+    const unsigned long long segment = blockIdx.x;
+    const unsigned int tid = threadIdx.x;
+    const unsigned long long k_segment_start = q_heads;
+    const unsigned long long v_segment_start = q_heads + kv_heads;
+    if (segment >= q_heads + kv_heads + kv_heads) return;
+    const unsigned long long block_index = cache_position / block_size;
+    const unsigned long long block_offset = cache_position - block_index * block_size;
+    const unsigned long long block_id = static_cast<unsigned long long>(block_table[block_index]);
+    if (block_id >= cache_blocks) return;
+    const unsigned long long physical = block_id * block_size + block_offset;
+    if (segment >= v_segment_start) {
+        const unsigned long long kv_head = segment - v_segment_start;
+        ullm_fused_typed_kv_store_row<V_DTYPE>(v_projected + kv_head * value_dim, value_dim,
+            physical * kv_heads + kv_head, value_dim, v_cache, v_scales, partial);
+        return;
+    }
+    float sum_squares = 0.0f;
+    if (segment < q_heads) {
+        const unsigned long long source_base = segment * 2ull * head_dim;
+        for (unsigned long long dim = tid; dim < head_dim; dim += blockDim.x) {
+            const float value = q_projected[source_base + dim];
+            q_gate_output[segment * head_dim + dim] = q_projected[source_base + head_dim + dim];
+            sum_squares += value * value;
+        }
+    } else {
+        const unsigned long long kv_head = segment - k_segment_start;
+        const unsigned long long source_base = kv_head * head_dim;
+        for (unsigned long long dim = tid; dim < head_dim; dim += blockDim.x) {
+            const float value = k_projected[source_base + dim];
+            sum_squares += value * value;
+        }
+    }
+    partial[tid] = sum_squares;
+    __syncthreads();
+    for (unsigned int offset = blockDim.x >> 1u; offset > 0u; offset >>= 1u) {
+        if (tid < offset) partial[tid] += partial[tid + offset];
+        __syncthreads();
+    }
+    const float inv_rms = rsqrtf(partial[0] / static_cast<float>(head_dim) + epsilon);
+    const unsigned long long half = rotary_dim >> 1u;
+    const float position = static_cast<float>(position_offset);
+    if (segment < q_heads) {
+        const unsigned long long source_base = segment * 2ull * head_dim;
+        const unsigned long long output_base = segment * head_dim;
+        for (unsigned long long pair_dim = tid; pair_dim < half; pair_dim += blockDim.x) {
+            const float exponent = 2.0f * static_cast<float>(pair_dim) / static_cast<float>(rotary_dim);
+            const float theta = position / powf(rope_base, exponent);
+            const float first = q_projected[source_base + pair_dim] * inv_rms * q_weight[pair_dim];
+            const unsigned long long second_dim = half + pair_dim;
+            const float second = q_projected[source_base + second_dim] * inv_rms * q_weight[second_dim];
+            q_rope_output[output_base + pair_dim] = first * cosf(theta) - second * sinf(theta);
+            q_rope_output[output_base + second_dim] = second * cosf(theta) + first * sinf(theta);
+        }
+        for (unsigned long long dim = rotary_dim + tid; dim < head_dim; dim += blockDim.x)
+            q_rope_output[output_base + dim] = q_projected[source_base + dim] * inv_rms * q_weight[dim];
+    } else {
+        const unsigned long long kv_head = segment - k_segment_start;
+        ullm_fused_typed_kv_store_rope_k_row<K_DTYPE>(
+            k_projected, k_weight, kv_head * head_dim, head_dim, rotary_dim, position, rope_base,
+            inv_rms, physical * kv_heads + kv_head, k_cache, k_scales, partial);
+    }
+}
+
+#define ULLM_DEFINE_TYPED_QWEN35_PAGED_KV_WRITE(K_DTYPE, V_DTYPE, K_NAME, V_NAME) \
+extern "C" __global__ void ullm_qwen35_qk_norm_rope_paged_kv_write_typed_k##K_NAME##_v##V_NAME##_kernel( \
+    const float *q_projected, const float *k_projected, const float *v_projected, \
+    const float *q_weight, const float *k_weight, const unsigned int *block_table, \
+    unsigned long long q_heads, unsigned long long kv_heads, unsigned long long head_dim, \
+    unsigned long long value_dim, unsigned long long rotary_dim, unsigned long long position_offset, \
+    float rope_base, float epsilon, unsigned long long cache_position, unsigned long long block_size, \
+    unsigned long long cache_blocks, float *q_gate_output, float *q_rope_output, \
+    void *k_cache, void *v_cache, unsigned short *k_scales, unsigned short *v_scales) { \
+    __shared__ float partial[256]; \
+    ullm_qwen35_qk_norm_rope_paged_kv_write_typed_impl<K_DTYPE, V_DTYPE>( \
+        q_projected, k_projected, v_projected, q_weight, k_weight, block_table, q_heads, kv_heads, \
+        head_dim, value_dim, rotary_dim, position_offset, rope_base, epsilon, cache_position, \
+        block_size, cache_blocks, q_gate_output, q_rope_output, k_cache, v_cache, k_scales, v_scales, partial); \
+}
+
+ULLM_DEFINE_TYPED_QWEN35_PAGED_KV_WRITE(ULLM_FUSED_TYPED_KV_F32, ULLM_FUSED_TYPED_KV_F16, f32, f16)
+ULLM_DEFINE_TYPED_QWEN35_PAGED_KV_WRITE(ULLM_FUSED_TYPED_KV_F32, ULLM_FUSED_TYPED_KV_FP8_E4M3FN, f32, fp8)
+ULLM_DEFINE_TYPED_QWEN35_PAGED_KV_WRITE(ULLM_FUSED_TYPED_KV_F16, ULLM_FUSED_TYPED_KV_F32, f16, f32)
+ULLM_DEFINE_TYPED_QWEN35_PAGED_KV_WRITE(ULLM_FUSED_TYPED_KV_F16, ULLM_FUSED_TYPED_KV_F16, f16, f16)
+ULLM_DEFINE_TYPED_QWEN35_PAGED_KV_WRITE(ULLM_FUSED_TYPED_KV_F16, ULLM_FUSED_TYPED_KV_FP8_E4M3FN, f16, fp8)
+ULLM_DEFINE_TYPED_QWEN35_PAGED_KV_WRITE(ULLM_FUSED_TYPED_KV_FP8_E4M3FN, ULLM_FUSED_TYPED_KV_F32, fp8, f32)
+ULLM_DEFINE_TYPED_QWEN35_PAGED_KV_WRITE(ULLM_FUSED_TYPED_KV_FP8_E4M3FN, ULLM_FUSED_TYPED_KV_F16, fp8, f16)
+ULLM_DEFINE_TYPED_QWEN35_PAGED_KV_WRITE(ULLM_FUSED_TYPED_KV_FP8_E4M3FN, ULLM_FUSED_TYPED_KV_FP8_E4M3FN, fp8, fp8)
+#undef ULLM_DEFINE_TYPED_QWEN35_PAGED_KV_WRITE
 )";
     }
 
@@ -8626,6 +8961,486 @@ extern "C" __global__ void ullm_paged_decode_attn_split_merge_f32_kernel(
         }
     }
 }
+
+// Typed direct decode is compiled as one body per ordered K/V pair.  The
+// legacy F32 kernel above remains the F32/F32 implementation and is not
+// textually changed by this addition.
+enum {
+    ULLM_TYPED_DECODE_F32 = 0,
+    ULLM_TYPED_DECODE_F16 = 1,
+    ULLM_TYPED_DECODE_FP8_E4M3FN = 2,
+};
+
+__device__ __forceinline__ float ullm_typed_decode_f16_to_f32(unsigned short bits) {
+    const float sign = (bits & 0x8000u) == 0u ? 1.0f : -1.0f;
+    const unsigned int exponent = (static_cast<unsigned int>(bits) >> 10u) & 0x1fu;
+    const unsigned int mantissa = static_cast<unsigned int>(bits) & 0x03ffu;
+    if (exponent == 0u) {
+        return mantissa == 0u ? sign * 0.0f : sign * ldexpf(static_cast<float>(mantissa), -24);
+    }
+    if (exponent == 0x1fu) {
+        return mantissa == 0u ? sign * __int_as_float(0x7f800000) : __int_as_float(0x7fc00000);
+    }
+    return sign * ldexpf(1.0f + static_cast<float>(mantissa) * 0.0009765625f,
+                         static_cast<int>(exponent) - 15);
+}
+
+__device__ __forceinline__ float ullm_typed_decode_fp8_e4m3fn_to_f32(unsigned char value) {
+#if defined(__gfx1200__) || defined(__gfx1201__)
+    return __builtin_amdgcn_cvt_f32_fp8(static_cast<unsigned int>(value), 0);
+#else
+    const unsigned int raw = static_cast<unsigned int>(value);
+    const unsigned int sign = raw >> 7u;
+    const unsigned int exponent = (raw >> 3u) & 0x0fu;
+    const unsigned int mantissa = raw & 0x07u;
+    if (exponent == 0x0fu && mantissa == 0x07u) {
+        return __uint_as_float(0x7fc00000u);
+    }
+    const float magnitude = exponent == 0u
+        ? static_cast<float>(mantissa) * 0.001953125f
+        : ldexpf(1.0f + static_cast<float>(mantissa) * 0.125f,
+                 static_cast<int>(exponent) - 7);
+    return sign == 0u ? magnitude : -magnitude;
+#endif
+}
+
+template <int DTYPE>
+__device__ __forceinline__ float ullm_typed_decode_row_scale(
+    const unsigned short *scales,
+    unsigned long long physical_head) {
+    if constexpr (DTYPE == ULLM_TYPED_DECODE_FP8_E4M3FN) {
+        const unsigned short bits = scales[physical_head];
+        // A raw +0 is the reset marker.  Normal writers never emit a
+        // negative/non-finite scale, but avoiding a non-finite accumulator
+        // here keeps an unwritten row semantically zero on device as on CPU.
+        const float scale = ullm_typed_decode_f16_to_f32(bits);
+        return bits == 0u || !isfinite(scale) || scale <= 0.0f ? 0.0f : scale;
+    }
+    (void)scales;
+    (void)physical_head;
+    return 1.0f;
+}
+
+template <int DTYPE>
+__device__ __forceinline__ float ullm_typed_decode_load(
+    const void *payload,
+    unsigned long long index,
+    float row_scale) {
+    if constexpr (DTYPE == ULLM_TYPED_DECODE_F32) {
+        return static_cast<const float *>(payload)[index];
+    } else if constexpr (DTYPE == ULLM_TYPED_DECODE_F16) {
+        return ullm_typed_decode_f16_to_f32(static_cast<const unsigned short *>(payload)[index]);
+    } else {
+        return ullm_typed_decode_fp8_e4m3fn_to_f32(
+                   static_cast<const unsigned char *>(payload)[index]) * row_scale;
+    }
+}
+
+template <int K_DTYPE, int V_DTYPE>
+__device__ __forceinline__ void ullm_paged_decode_attn_typed_kernel_impl(
+    const float *q,
+    const void *k_cache,
+    const void *v_cache,
+    const unsigned int *block_table,
+    const unsigned short *k_scales,
+    const unsigned short *v_scales,
+    unsigned long long cache_len,
+    unsigned long long block_size,
+    unsigned long long cache_blocks,
+    unsigned long long q_heads,
+    unsigned long long kv_heads,
+    unsigned long long head_dim,
+    unsigned long long value_dim,
+    float softmax_scale,
+    float *output,
+    float *partial,
+    float *shared_scales) {
+    if (gridDim.x == q_heads && blockDim.x == 256u && head_dim <= 256ull &&
+        value_dim <= 256ull) {
+        const unsigned long long q_head = blockIdx.x;
+        const unsigned int tid = threadIdx.x;
+        const unsigned long long q_per_kv = q_heads / kv_heads;
+        const unsigned long long kv_head = q_head / q_per_kv;
+        const unsigned long long q_base = q_head * head_dim;
+        float max_score = -3.4028234663852886e38f;
+        float denominator = 0.0f;
+        float weighted = 0.0f;
+        unsigned long long block_index = 0ull;
+        unsigned long long block_end = block_size;
+        unsigned long long block_id = static_cast<unsigned long long>(block_table[0]);
+        if (block_id >= cache_blocks) {
+            if (tid < value_dim) {
+                output[q_head * value_dim + tid] = 0.0f;
+            }
+            return;
+        }
+        unsigned long long physical = block_id * block_size;
+        for (unsigned long long source = 0ull; source < cache_len; ++source) {
+            if (source == block_end) {
+                ++block_index;
+                block_end += block_size;
+                block_id = static_cast<unsigned long long>(block_table[block_index]);
+                if (block_id >= cache_blocks) {
+                    if (tid < value_dim) {
+                        output[q_head * value_dim + tid] = 0.0f;
+                    }
+                    return;
+                }
+                physical = block_id * block_size;
+            }
+            const unsigned long long physical_head = physical * kv_heads + kv_head;
+            // One lane loads each FP8 row scale; every thread in the CTA
+            // shares it for QK/AV.  This is intentionally outside the
+            // payload loops and avoids one scale global load per element.
+            if (tid == 0u) {
+                shared_scales[0] = ullm_typed_decode_row_scale<K_DTYPE>(k_scales, physical_head);
+                shared_scales[1] = ullm_typed_decode_row_scale<V_DTYPE>(v_scales, physical_head);
+            }
+            __syncthreads();
+            const unsigned long long k_base = physical_head * head_dim;
+            const float local = tid < head_dim
+                ? q[q_base + tid] * ullm_typed_decode_load<K_DTYPE>(
+                    k_cache, k_base + tid, shared_scales[0])
+                : 0.0f;
+            const float score = ullm_paged_decode_reduce_sum_256(local, partial) * softmax_scale;
+            if (tid < value_dim) {
+                const unsigned long long v_index = physical_head * value_dim + tid;
+                const float value = ullm_typed_decode_load<V_DTYPE>(
+                    v_cache, v_index, shared_scales[1]);
+                if (score > max_score) {
+                    const float scale = expf(max_score - score);
+                    weighted = weighted * scale + value;
+                    denominator = denominator * scale + 1.0f;
+                    max_score = score;
+                } else {
+                    const float weight = expf(score - max_score);
+                    weighted += weight * value;
+                    denominator += weight;
+                }
+            }
+            // Do not let lane zero overwrite the two row scales while a
+            // sibling lane is still consuming the V value from this row.
+            __syncthreads();
+            ++physical;
+        }
+        if (tid < value_dim) {
+            output[q_head * value_dim + tid] = weighted / denominator;
+        }
+        return;
+    }
+
+    // Shape-generic fallback.  Each output element owns its scalar online
+    // softmax state; dtype selection is still compile-time specialization.
+    const unsigned long long index =
+        static_cast<unsigned long long>(blockIdx.x) * blockDim.x + threadIdx.x;
+    const unsigned long long output_elements = q_heads * value_dim;
+    if (index >= output_elements) {
+        return;
+    }
+    const unsigned long long value_dim_index = index % value_dim;
+    const unsigned long long q_head = index / value_dim;
+    const unsigned long long kv_head = q_head / (q_heads / kv_heads);
+    const unsigned long long q_base = q_head * head_dim;
+    float max_score = -3.4028234663852886e38f;
+    for (unsigned long long source = 0ull; source < cache_len; ++source) {
+        const unsigned long long block_index = source / block_size;
+        const unsigned long long block_offset = source - block_index * block_size;
+        const unsigned long long block_id = static_cast<unsigned long long>(block_table[block_index]);
+        if (block_id >= cache_blocks) {
+            output[index] = 0.0f;
+            return;
+        }
+        const unsigned long long physical = block_id * block_size + block_offset;
+        const unsigned long long physical_head = physical * kv_heads + kv_head;
+        const float k_scale = ullm_typed_decode_row_scale<K_DTYPE>(k_scales, physical_head);
+        float score = 0.0f;
+        const unsigned long long k_base = physical_head * head_dim;
+        for (unsigned long long dim = 0ull; dim < head_dim; ++dim) {
+            score += q[q_base + dim] * ullm_typed_decode_load<K_DTYPE>(
+                k_cache, k_base + dim, k_scale);
+        }
+        max_score = fmaxf(max_score, score * softmax_scale);
+    }
+    float denominator = 0.0f;
+    float weighted = 0.0f;
+    for (unsigned long long source = 0ull; source < cache_len; ++source) {
+        const unsigned long long block_index = source / block_size;
+        const unsigned long long block_offset = source - block_index * block_size;
+        const unsigned long long block_id = static_cast<unsigned long long>(block_table[block_index]);
+        if (block_id >= cache_blocks) {
+            output[index] = 0.0f;
+            return;
+        }
+        const unsigned long long physical = block_id * block_size + block_offset;
+        const unsigned long long physical_head = physical * kv_heads + kv_head;
+        const float k_scale = ullm_typed_decode_row_scale<K_DTYPE>(k_scales, physical_head);
+        const float v_scale = ullm_typed_decode_row_scale<V_DTYPE>(v_scales, physical_head);
+        float score = 0.0f;
+        const unsigned long long k_base = physical_head * head_dim;
+        for (unsigned long long dim = 0ull; dim < head_dim; ++dim) {
+            score += q[q_base + dim] * ullm_typed_decode_load<K_DTYPE>(
+                k_cache, k_base + dim, k_scale);
+        }
+        const float weight = expf(score * softmax_scale - max_score);
+        denominator += weight;
+        weighted += weight * ullm_typed_decode_load<V_DTYPE>(
+            v_cache, physical_head * value_dim + value_dim_index, v_scale);
+    }
+    output[index] = weighted / denominator;
+}
+
+#define ULLM_DEFINE_TYPED_PAGED_DECODE(K_DTYPE, V_DTYPE, K_NAME, V_NAME) \
+extern "C" __global__ void ullm_paged_decode_attn_typed_k##K_NAME##_v##V_NAME##_kernel( \
+    const float *q, const void *k_cache, const void *v_cache, const unsigned int *block_table, \
+    const unsigned short *k_scales, const unsigned short *v_scales, \
+    unsigned long long cache_len, unsigned long long block_size, unsigned long long cache_blocks, \
+    unsigned long long q_heads, unsigned long long kv_heads, unsigned long long head_dim, \
+    unsigned long long value_dim, float softmax_scale, float *output) { \
+    __shared__ float partial[256]; \
+    __shared__ float shared_scales[2]; \
+    ullm_paged_decode_attn_typed_kernel_impl<K_DTYPE, V_DTYPE>( \
+        q, k_cache, v_cache, block_table, k_scales, v_scales, cache_len, block_size, cache_blocks, \
+        q_heads, kv_heads, head_dim, value_dim, softmax_scale, output, partial, shared_scales); \
+}
+
+ULLM_DEFINE_TYPED_PAGED_DECODE(ULLM_TYPED_DECODE_F32, ULLM_TYPED_DECODE_F16, f32, f16)
+ULLM_DEFINE_TYPED_PAGED_DECODE(ULLM_TYPED_DECODE_F32, ULLM_TYPED_DECODE_FP8_E4M3FN, f32, fp8)
+ULLM_DEFINE_TYPED_PAGED_DECODE(ULLM_TYPED_DECODE_F16, ULLM_TYPED_DECODE_F32, f16, f32)
+ULLM_DEFINE_TYPED_PAGED_DECODE(ULLM_TYPED_DECODE_F16, ULLM_TYPED_DECODE_F16, f16, f16)
+ULLM_DEFINE_TYPED_PAGED_DECODE(ULLM_TYPED_DECODE_F16, ULLM_TYPED_DECODE_FP8_E4M3FN, f16, fp8)
+ULLM_DEFINE_TYPED_PAGED_DECODE(ULLM_TYPED_DECODE_FP8_E4M3FN, ULLM_TYPED_DECODE_F32, fp8, f32)
+ULLM_DEFINE_TYPED_PAGED_DECODE(ULLM_TYPED_DECODE_FP8_E4M3FN, ULLM_TYPED_DECODE_F16, fp8, f16)
+ULLM_DEFINE_TYPED_PAGED_DECODE(ULLM_TYPED_DECODE_FP8_E4M3FN, ULLM_TYPED_DECODE_FP8_E4M3FN, fp8, fp8)
+#undef ULLM_DEFINE_TYPED_PAGED_DECODE
+
+// Typed split partials retain the reviewed F32 merge kernel.  The 16Q/4KV,
+// 256-wide Qwen3.5 path is deliberately grouped: a CTA stages one dequantized
+// K/V row and its two FP8 scales once for all four query heads sharing that KV
+// head.  Other valid geometries use the scalar one-query-head body below.
+template <int K_DTYPE, int V_DTYPE>
+__device__ __forceinline__ void ullm_paged_decode_attn_split_typed_kernel_impl(
+    const float *q, const void *k_cache, const void *v_cache,
+    const unsigned int *block_table, const unsigned short *k_scales,
+    const unsigned short *v_scales, unsigned long long cache_len,
+    unsigned long long block_size, unsigned long long cache_blocks,
+    unsigned long long q_heads, unsigned long long kv_heads,
+    unsigned long long head_dim, unsigned long long value_dim,
+    float softmax_scale, unsigned long long source_tile,
+    unsigned long long split_count, float *workspace, float *partial,
+    float *shared_scales, float *gqa_stage, float *gqa_state) {
+    const unsigned int tid = threadIdx.x;
+    const unsigned long long q_per_kv = kv_heads == 0ull ? 0ull : q_heads / kv_heads;
+
+    // Qwen3.5 AQ4_0 decode: four query heads share a KV head.  The host only
+    // selects this grid form for this exact geometry, keeping the legacy F32
+    // grouped (5x128) experiment completely isolated.
+    if (blockDim.x == 256u && q_per_kv == 4ull && head_dim == 256ull &&
+        value_dim == 256ull && static_cast<unsigned long long>(gridDim.x) ==
+            kv_heads * split_count) {
+        const unsigned long long grouped_index = blockIdx.x;
+        const unsigned long long kv_head = grouped_index / split_count;
+        const unsigned long long split_id = grouped_index - kv_head * split_count;
+        if (kv_head >= kv_heads) {
+            return;
+        }
+        const unsigned long long source_start = split_id * source_tile;
+        const unsigned long long source_remaining =
+            source_start < cache_len ? cache_len - source_start : 0ull;
+        const unsigned long long source_count =
+            source_tile < source_remaining ? source_tile : source_remaining;
+        const unsigned int group = tid >> 6u;
+        const unsigned int lane = tid & 63u;
+        const unsigned long long q_head = kv_head * 4ull + static_cast<unsigned long long>(group);
+        const unsigned long long q_base = q_head * 256ull;
+        float q0 = q[q_base + lane];
+        float q1 = q[q_base + 64ull + lane];
+        float q2 = q[q_base + 128ull + lane];
+        float q3 = q[q_base + 192ull + lane];
+        float weighted0 = 0.0f;
+        float weighted1 = 0.0f;
+        float weighted2 = 0.0f;
+        float weighted3 = 0.0f;
+        float max_score = -3.4028234663852886e38f;
+        float denominator = 0.0f;
+        bool invalid = false;
+        for (unsigned long long offset = 0ull; offset < source_count; ++offset) {
+            const unsigned long long source = source_start + offset;
+            const unsigned long long logical_block = source / block_size;
+            const unsigned long long block_offset = source - logical_block * block_size;
+            const unsigned long long block_id =
+                static_cast<unsigned long long>(block_table[logical_block]);
+            const bool row_valid = block_id < cache_blocks;
+            if (tid == 0u) {
+                gqa_state[0] = row_valid ? 1.0f : 0.0f;
+                if (row_valid) {
+                    const unsigned long long physical = block_id * block_size + block_offset;
+                    const unsigned long long physical_head = physical * kv_heads + kv_head;
+                    shared_scales[0] = ullm_typed_decode_row_scale<K_DTYPE>(
+                        k_scales, physical_head);
+                    shared_scales[1] = ullm_typed_decode_row_scale<V_DTYPE>(
+                        v_scales, physical_head);
+                }
+            }
+            __syncthreads();
+            if (gqa_state[0] == 0.0f) {
+                invalid = true;
+                break;
+            }
+            const unsigned long long physical = block_id * block_size + block_offset;
+            const unsigned long long physical_head = physical * kv_heads + kv_head;
+            for (unsigned int element = tid; element < 512u; element += blockDim.x) {
+                if (element < 256u) {
+                    gqa_stage[element] = ullm_typed_decode_load<K_DTYPE>(
+                        k_cache, physical_head * 256ull + element, shared_scales[0]);
+                } else {
+                    gqa_stage[element] = ullm_typed_decode_load<V_DTYPE>(
+                        v_cache, physical_head * 256ull + (element - 256u), shared_scales[1]);
+                }
+            }
+            __syncthreads();
+            partial[tid] = q0 * gqa_stage[lane] + q1 * gqa_stage[64u + lane] +
+                q2 * gqa_stage[128u + lane] + q3 * gqa_stage[192u + lane];
+            for (unsigned int reduce = 32u; reduce > 0u; reduce >>= 1u) {
+                if (lane < reduce) {
+                    partial[tid] += partial[tid + reduce];
+                }
+                __syncthreads();
+            }
+            if (lane == 0u) {
+                const float score = partial[tid] * softmax_scale;
+                const float new_max = fmaxf(max_score, score);
+                gqa_state[4u + group] =
+                    max_score <= -3.0e38f ? 0.0f : expf(max_score - new_max);
+                gqa_state[8u + group] = expf(score - new_max);
+                gqa_state[12u + group] = new_max;
+                denominator = denominator * gqa_state[4u + group] + gqa_state[8u + group];
+                gqa_state[16u + group] = denominator;
+                max_score = new_max;
+            }
+            __syncthreads();
+            const float previous = gqa_state[4u + group];
+            const float weight = gqa_state[8u + group];
+            weighted0 = weighted0 * previous + weight * gqa_stage[256u + lane];
+            weighted1 = weighted1 * previous + weight * gqa_stage[320u + lane];
+            weighted2 = weighted2 * previous + weight * gqa_stage[384u + lane];
+            weighted3 = weighted3 * previous + weight * gqa_stage[448u + lane];
+            __syncthreads();
+        }
+        const unsigned long long stride = value_dim + 2ull;
+        const unsigned long long workspace_base = (q_head * split_count + split_id) * stride;
+        if (lane == 0u) {
+            workspace[workspace_base] = invalid ? 0.0f : max_score;
+            workspace[workspace_base + 1ull] = invalid ? -1.0f : denominator;
+        }
+        workspace[workspace_base + 2ull + lane] = invalid ? 0.0f : weighted0;
+        workspace[workspace_base + 66ull + lane] = invalid ? 0.0f : weighted1;
+        workspace[workspace_base + 130ull + lane] = invalid ? 0.0f : weighted2;
+        workspace[workspace_base + 194ull + lane] = invalid ? 0.0f : weighted3;
+        return;
+    }
+
+    if (blockDim.x != 256u || head_dim > 256ull || value_dim > 256ull) {
+        return;
+    }
+    const unsigned long long partial_index = blockIdx.x;
+    const unsigned long long q_head = partial_index / split_count;
+    const unsigned long long split_id = partial_index - q_head * split_count;
+    if (q_head >= q_heads) {
+        return;
+    }
+    const unsigned long long stride = value_dim + 2ull;
+    const unsigned long long workspace_base = partial_index * stride;
+    const unsigned long long source_start = split_id * source_tile;
+    const unsigned long long source_remaining =
+        source_start < cache_len ? cache_len - source_start : 0ull;
+    const unsigned long long source_count =
+        source_tile < source_remaining ? source_tile : source_remaining;
+    const unsigned long long q_head_kv = q_head / q_per_kv;
+    const unsigned long long q_base = q_head * head_dim;
+    float max_score = -3.4028234663852886e38f;
+    float denominator = 0.0f;
+    float weighted = 0.0f;
+    for (unsigned long long offset = 0ull; offset < source_count; ++offset) {
+        const unsigned long long source = source_start + offset;
+        const unsigned long long logical_block = source / block_size;
+        const unsigned long long block_offset = source - logical_block * block_size;
+        const unsigned long long block_id =
+            static_cast<unsigned long long>(block_table[logical_block]);
+        if (block_id >= cache_blocks) {
+            if (tid == 0u) {
+                workspace[workspace_base] = 0.0f;
+                workspace[workspace_base + 1ull] = -1.0f;
+            }
+            if (tid < value_dim) {
+                workspace[workspace_base + 2ull + tid] = 0.0f;
+            }
+            return;
+        }
+        const unsigned long long physical = block_id * block_size + block_offset;
+        const unsigned long long physical_head = physical * kv_heads + q_head_kv;
+        if (tid == 0u) {
+            shared_scales[0] = ullm_typed_decode_row_scale<K_DTYPE>(k_scales, physical_head);
+            shared_scales[1] = ullm_typed_decode_row_scale<V_DTYPE>(v_scales, physical_head);
+        }
+        __syncthreads();
+        float dot = 0.0f;
+        for (unsigned long long dim = tid; dim < head_dim; dim += blockDim.x) {
+            dot += q[q_base + dim] * ullm_typed_decode_load<K_DTYPE>(
+                k_cache, physical_head * head_dim + dim, shared_scales[0]);
+        }
+        const float score = ullm_paged_decode_reduce_sum_256(dot, partial) * softmax_scale;
+        if (tid < value_dim) {
+            const float value = ullm_typed_decode_load<V_DTYPE>(
+                v_cache, physical_head * value_dim + tid, shared_scales[1]);
+            if (score > max_score) {
+                const float rescale = expf(max_score - score);
+                weighted = weighted * rescale + value;
+                denominator = denominator * rescale + 1.0f;
+                max_score = score;
+            } else {
+                const float weight = expf(score - max_score);
+                weighted += weight * value;
+                denominator += weight;
+            }
+        }
+        __syncthreads();
+    }
+    if (tid == 0u) {
+        workspace[workspace_base] = max_score;
+        workspace[workspace_base + 1ull] = denominator;
+    }
+    if (tid < value_dim) {
+        workspace[workspace_base + 2ull + tid] = weighted;
+    }
+}
+
+#define ULLM_DEFINE_TYPED_PAGED_DECODE_SPLIT(K_DTYPE, V_DTYPE, K_NAME, V_NAME) \
+extern "C" __global__ void ullm_paged_decode_attn_split_typed_k##K_NAME##_v##V_NAME##_partial_kernel( \
+    const float *q, const void *k_cache, const void *v_cache, const unsigned int *block_table, \
+    const unsigned short *k_scales, const unsigned short *v_scales, \
+    unsigned long long cache_len, unsigned long long block_size, unsigned long long cache_blocks, \
+    unsigned long long q_heads, unsigned long long kv_heads, unsigned long long head_dim, \
+    unsigned long long value_dim, float softmax_scale, unsigned long long source_tile, \
+    unsigned long long split_count, float *workspace) { \
+    __shared__ float partial[256]; \
+    __shared__ float shared_scales[2]; \
+    __shared__ float gqa_stage[512]; \
+    __shared__ float gqa_state[20]; \
+    ullm_paged_decode_attn_split_typed_kernel_impl<K_DTYPE, V_DTYPE>( \
+        q, k_cache, v_cache, block_table, k_scales, v_scales, cache_len, block_size, cache_blocks, \
+        q_heads, kv_heads, head_dim, value_dim, softmax_scale, source_tile, split_count, workspace, \
+        partial, shared_scales, gqa_stage, gqa_state); \
+}
+
+ULLM_DEFINE_TYPED_PAGED_DECODE_SPLIT(ULLM_TYPED_DECODE_F32, ULLM_TYPED_DECODE_F16, f32, f16)
+ULLM_DEFINE_TYPED_PAGED_DECODE_SPLIT(ULLM_TYPED_DECODE_F32, ULLM_TYPED_DECODE_FP8_E4M3FN, f32, fp8)
+ULLM_DEFINE_TYPED_PAGED_DECODE_SPLIT(ULLM_TYPED_DECODE_F16, ULLM_TYPED_DECODE_F32, f16, f32)
+ULLM_DEFINE_TYPED_PAGED_DECODE_SPLIT(ULLM_TYPED_DECODE_F16, ULLM_TYPED_DECODE_F16, f16, f16)
+ULLM_DEFINE_TYPED_PAGED_DECODE_SPLIT(ULLM_TYPED_DECODE_F16, ULLM_TYPED_DECODE_FP8_E4M3FN, f16, fp8)
+ULLM_DEFINE_TYPED_PAGED_DECODE_SPLIT(ULLM_TYPED_DECODE_FP8_E4M3FN, ULLM_TYPED_DECODE_F32, fp8, f32)
+ULLM_DEFINE_TYPED_PAGED_DECODE_SPLIT(ULLM_TYPED_DECODE_FP8_E4M3FN, ULLM_TYPED_DECODE_F16, fp8, f16)
+ULLM_DEFINE_TYPED_PAGED_DECODE_SPLIT(ULLM_TYPED_DECODE_FP8_E4M3FN, ULLM_TYPED_DECODE_FP8_E4M3FN, fp8, fp8)
+#undef ULLM_DEFINE_TYPED_PAGED_DECODE_SPLIT
 )";
     }
 
@@ -8669,6 +9484,302 @@ extern "C" __global__ void ullm_paged_kv_write_f32_kernel(
     const unsigned long long dim = v_index - kv_head * value_dim;
     v_cache[(physical_timestep * kv_heads + kv_head) * value_dim + dim] = v[v_index];
 }
+
+// The typed kernels deliberately live alongside (rather than replacing) the
+// F32 writer above.  F32/F32 therefore retains its old symbol, launch shape,
+// and generated body.  Every non-F32 ordered K/V pair below has a separately
+// instantiated body: there is no dtype branch in a payload loop.
+enum {
+    ULLM_TYPED_KV_F32 = 0,
+    ULLM_TYPED_KV_F16 = 1,
+    ULLM_TYPED_KV_FP8_E4M3FN = 2,
+};
+
+__device__ __forceinline__ unsigned int ullm_typed_kv_round_shift_ties_even(
+    unsigned int value,
+    unsigned int shift) {
+    if (shift == 0u) {
+        return value;
+    }
+    const unsigned int quotient = value >> shift;
+    const unsigned int remainder = value & ((1u << shift) - 1u);
+    const unsigned int halfway = 1u << (shift - 1u);
+    return remainder > halfway || (remainder == halfway && (quotient & 1u) != 0u)
+        ? quotient + 1u
+        : quotient;
+}
+
+__device__ __forceinline__ unsigned short ullm_typed_kv_f32_to_f16_rne(float value) {
+    const unsigned int raw = __float_as_uint(value);
+    const unsigned short sign = static_cast<unsigned short>((raw >> 16u) & 0x8000u);
+    const unsigned int exponent_bits = (raw >> 23u) & 0xffu;
+    const unsigned int mantissa = raw & 0x7fffffu;
+    if (exponent_bits == 0xffu) {
+        return static_cast<unsigned short>(sign | (mantissa == 0u ? 0x7c00u : 0x7e00u));
+    }
+    const int exponent = static_cast<int>(exponent_bits) - 127;
+    if (exponent > 15) {
+        return static_cast<unsigned short>(sign | 0x7c00u);
+    }
+    if (exponent >= -14) {
+        unsigned int rounded = ullm_typed_kv_round_shift_ties_even(mantissa, 13u);
+        unsigned int half_exponent = static_cast<unsigned int>(exponent + 15);
+        if (rounded == 0x400u) {
+            rounded = 0u;
+            ++half_exponent;
+            if (half_exponent >= 0x1fu) {
+                return static_cast<unsigned short>(sign | 0x7c00u);
+            }
+        }
+        return static_cast<unsigned short>(sign | (half_exponent << 10u) | rounded);
+    }
+    if (exponent < -25) {
+        return sign;
+    }
+    const unsigned int significand = mantissa | 0x800000u;
+    return static_cast<unsigned short>(
+        sign | ullm_typed_kv_round_shift_ties_even(
+                   significand, static_cast<unsigned int>(-exponent - 1)));
+}
+
+__device__ __forceinline__ float ullm_typed_kv_f16_to_f32(unsigned short bits) {
+    const float sign = (bits & 0x8000u) == 0u ? 1.0f : -1.0f;
+    const unsigned int exponent = (static_cast<unsigned int>(bits) >> 10u) & 0x1fu;
+    const unsigned int mantissa = static_cast<unsigned int>(bits) & 0x03ffu;
+    if (exponent == 0u) {
+        return mantissa == 0u ? sign * 0.0f : sign * ldexpf(static_cast<float>(mantissa), -24);
+    }
+    if (exponent == 0x1fu) {
+        return mantissa == 0u ? sign * __int_as_float(0x7f800000) : __int_as_float(0x7fc00000);
+    }
+    return sign * ldexpf(1.0f + static_cast<float>(mantissa) * 0.0009765625f,
+                         static_cast<int>(exponent) - 15);
+}
+
+__device__ __forceinline__ bool ullm_typed_kv_positive_f16_ceil(
+    float value,
+    unsigned short *bits_out) {
+    if (bits_out == nullptr || !isfinite(value) || value <= 0.0f) {
+        return false;
+    }
+    unsigned short bits = ullm_typed_kv_f32_to_f16_rne(value);
+    if (bits == 0u) {
+        bits = 1u;
+    }
+    if (bits >= 0x7c00u) {
+        return false;
+    }
+    if (ullm_typed_kv_f16_to_f32(bits) < value) {
+        ++bits;
+        if (bits >= 0x7c00u) {
+            return false;
+        }
+    }
+    const float stored = ullm_typed_kv_f16_to_f32(bits);
+    if (!isfinite(stored) || stored <= 0.0f || stored < value) {
+        return false;
+    }
+    *bits_out = bits;
+    return true;
+}
+
+__device__ __forceinline__ float ullm_typed_kv_fp8_e4m3fn_to_f32(unsigned char value) {
+#if defined(__gfx1200__) || defined(__gfx1201__)
+    // OCP E4M3FN, format selector 0.  This is the native RDNA4 conversion
+    // used by the SQ8_0 HIPRTC path as well.
+    return __builtin_amdgcn_cvt_f32_fp8(static_cast<unsigned int>(value), 0);
+#else
+    const unsigned int raw = static_cast<unsigned int>(value);
+    const unsigned int sign = raw >> 7u;
+    const unsigned int exponent = (raw >> 3u) & 0x0fu;
+    const unsigned int mantissa = raw & 0x07u;
+    if (exponent == 0x0fu && mantissa == 0x07u) {
+        return __uint_as_float(0x7fc00000u);
+    }
+    const float magnitude = exponent == 0u
+        ? static_cast<float>(mantissa) * 0.001953125f
+        : ldexpf(1.0f + static_cast<float>(mantissa) * 0.125f,
+                 static_cast<int>(exponent) - 7);
+    return sign == 0u ? magnitude : -magnitude;
+#endif
+}
+
+__device__ __forceinline__ unsigned char ullm_typed_kv_f32_to_fp8_e4m3fn_rne(
+    float value,
+    float scale) {
+    const unsigned int sign = (__float_as_uint(value) >> 24u) & 0x80u;
+    const float magnitude = fabsf(value / scale);
+    if (magnitude == 0.0f) {
+        return static_cast<unsigned char>(sign);
+    }
+    if (magnitude >= 448.0f) {
+        return static_cast<unsigned char>(sign | 0x7eu);
+    }
+    unsigned int lower_bound = 0u;
+    unsigned int upper_bound = 126u;
+    while (lower_bound < upper_bound) {
+        const unsigned int middle = lower_bound + (upper_bound - lower_bound) / 2u;
+        if (fabsf(ullm_typed_kv_fp8_e4m3fn_to_f32(static_cast<unsigned char>(middle))) < magnitude) {
+            lower_bound = middle + 1u;
+        } else {
+            upper_bound = middle;
+        }
+    }
+    const unsigned int upper = lower_bound;
+    const float upper_value = ullm_typed_kv_fp8_e4m3fn_to_f32(static_cast<unsigned char>(upper));
+    if (upper_value == magnitude) {
+        return static_cast<unsigned char>(sign | upper);
+    }
+    const unsigned int lower = upper - 1u;
+    const double lower_distance = static_cast<double>(magnitude) -
+        static_cast<double>(ullm_typed_kv_fp8_e4m3fn_to_f32(static_cast<unsigned char>(lower)));
+    const double upper_distance = static_cast<double>(upper_value) - static_cast<double>(magnitude);
+    const unsigned int encoded = lower_distance < upper_distance
+        ? lower
+        : (upper_distance < lower_distance ? upper : ((lower & 1u) == 0u ? lower : upper));
+    return static_cast<unsigned char>(sign | encoded);
+}
+
+template <int DTYPE>
+__device__ __forceinline__ void ullm_typed_kv_store_row(
+    const float *source,
+    unsigned long long elements,
+    unsigned long long physical_head,
+    unsigned long long row_dim,
+    void *payload,
+    unsigned short *scales,
+    float *reduction) {
+    const unsigned int tid = threadIdx.x;
+    float local_maximum = 0.0f;
+    bool finite = true;
+    if constexpr (DTYPE != ULLM_TYPED_KV_F32) {
+        for (unsigned long long index = tid; index < elements; index += blockDim.x) {
+            const float value = source[index];
+            finite = finite && isfinite(value);
+            local_maximum = fmaxf(local_maximum, fabsf(value));
+        }
+    }
+    reduction[tid] = finite ? local_maximum : __int_as_float(0x7f800000);
+    __syncthreads();
+    for (unsigned int offset = blockDim.x >> 1u; offset > 0u; offset >>= 1u) {
+        if (tid < offset) {
+            reduction[tid] = fmaxf(reduction[tid], reduction[tid + offset]);
+        }
+        __syncthreads();
+    }
+
+    unsigned short scale_bits = 0x3c00u;
+    bool valid = true;
+    if constexpr (DTYPE == ULLM_TYPED_KV_F16) {
+        valid = isfinite(reduction[0]) && reduction[0] <= 65504.0f;
+    } else if constexpr (DTYPE == ULLM_TYPED_KV_FP8_E4M3FN) {
+        if (!isfinite(reduction[0])) {
+            valid = false;
+        } else if (reduction[0] != 0.0f) {
+            valid = ullm_typed_kv_positive_f16_ceil(reduction[0] / 448.0f, &scale_bits);
+        }
+    }
+    if (tid == 0u) {
+        reduction[0] = valid ? static_cast<float>(scale_bits) : -1.0f;
+    }
+    __syncthreads();
+    if (reduction[0] < 0.0f) {
+        return;
+    }
+    scale_bits = static_cast<unsigned short>(reduction[0]);
+    if constexpr (DTYPE == ULLM_TYPED_KV_FP8_E4M3FN) {
+        if (tid == 0u) {
+            scales[physical_head] = scale_bits;
+        }
+    }
+    const float scale = ullm_typed_kv_f16_to_f32(scale_bits);
+    const unsigned long long destination = physical_head * row_dim;
+    for (unsigned long long index = tid; index < elements; index += blockDim.x) {
+        if constexpr (DTYPE == ULLM_TYPED_KV_F32) {
+            static_cast<float *>(payload)[destination + index] = source[index];
+        } else if constexpr (DTYPE == ULLM_TYPED_KV_F16) {
+            static_cast<unsigned short *>(payload)[destination + index] =
+                ullm_typed_kv_f32_to_f16_rne(source[index]);
+        } else {
+            static_cast<unsigned char *>(payload)[destination + index] =
+                ullm_typed_kv_f32_to_fp8_e4m3fn_rne(source[index], scale);
+        }
+    }
+}
+
+template <int K_DTYPE, int V_DTYPE>
+__device__ __forceinline__ void ullm_paged_kv_write_typed_kernel_impl(
+    const float *k,
+    const float *v,
+    const unsigned int *block_table,
+    unsigned long long cache_position,
+    unsigned long long block_size,
+    unsigned long long cache_blocks,
+    unsigned long long kv_heads,
+    unsigned long long head_dim,
+    unsigned long long value_dim,
+    void *k_cache,
+    void *v_cache,
+    unsigned short *k_scales,
+    unsigned short *v_scales,
+    float *reduction) {
+    const unsigned long long plane_head = static_cast<unsigned long long>(blockIdx.x);
+    const bool is_k = plane_head < kv_heads;
+    const unsigned long long kv_head = is_k ? plane_head : plane_head - kv_heads;
+    if (kv_head >= kv_heads) {
+        return;
+    }
+    const unsigned long long block_index = cache_position / block_size;
+    const unsigned long long block_offset = cache_position - block_index * block_size;
+    const unsigned long long block_id = static_cast<unsigned long long>(block_table[block_index]);
+    if (block_id >= cache_blocks) {
+        return;
+    }
+    const unsigned long long physical = block_id * block_size + block_offset;
+    const unsigned long long physical_head = physical * kv_heads + kv_head;
+    if (is_k) {
+        ullm_typed_kv_store_row<K_DTYPE>(
+            k + kv_head * head_dim,
+            head_dim,
+            physical_head,
+            head_dim,
+            k_cache,
+            k_scales,
+            reduction);
+    } else {
+        ullm_typed_kv_store_row<V_DTYPE>(
+            v + kv_head * value_dim,
+            value_dim,
+            physical_head,
+            value_dim,
+            v_cache,
+            v_scales,
+            reduction);
+    }
+}
+
+#define ULLM_DEFINE_TYPED_PAGED_KV_WRITE(K_DTYPE, V_DTYPE, K_NAME, V_NAME) \
+extern "C" __global__ void ullm_paged_kv_write_typed_k##K_NAME##_v##V_NAME##_kernel( \
+    const float *k, const float *v, const unsigned int *block_table, \
+    unsigned long long cache_position, unsigned long long block_size, \
+    unsigned long long cache_blocks, unsigned long long kv_heads, \
+    unsigned long long head_dim, unsigned long long value_dim, \
+    void *k_cache, void *v_cache, unsigned short *k_scales, unsigned short *v_scales) { \
+    __shared__ float reduction[256]; \
+    ullm_paged_kv_write_typed_kernel_impl<K_DTYPE, V_DTYPE>( \
+        k, v, block_table, cache_position, block_size, cache_blocks, kv_heads, head_dim, value_dim, \
+        k_cache, v_cache, k_scales, v_scales, reduction); \
+}
+
+ULLM_DEFINE_TYPED_PAGED_KV_WRITE(ULLM_TYPED_KV_F32, ULLM_TYPED_KV_F16, f32, f16)
+ULLM_DEFINE_TYPED_PAGED_KV_WRITE(ULLM_TYPED_KV_F32, ULLM_TYPED_KV_FP8_E4M3FN, f32, fp8)
+ULLM_DEFINE_TYPED_PAGED_KV_WRITE(ULLM_TYPED_KV_F16, ULLM_TYPED_KV_F32, f16, f32)
+ULLM_DEFINE_TYPED_PAGED_KV_WRITE(ULLM_TYPED_KV_F16, ULLM_TYPED_KV_F16, f16, f16)
+ULLM_DEFINE_TYPED_PAGED_KV_WRITE(ULLM_TYPED_KV_F16, ULLM_TYPED_KV_FP8_E4M3FN, f16, fp8)
+ULLM_DEFINE_TYPED_PAGED_KV_WRITE(ULLM_TYPED_KV_FP8_E4M3FN, ULLM_TYPED_KV_F32, fp8, f32)
+ULLM_DEFINE_TYPED_PAGED_KV_WRITE(ULLM_TYPED_KV_FP8_E4M3FN, ULLM_TYPED_KV_F16, fp8, f16)
+ULLM_DEFINE_TYPED_PAGED_KV_WRITE(ULLM_TYPED_KV_FP8_E4M3FN, ULLM_TYPED_KV_FP8_E4M3FN, fp8, fp8)
+#undef ULLM_DEFINE_TYPED_PAGED_KV_WRITE
 )";
     }
 
@@ -8814,6 +9925,323 @@ extern "C" __global__ void ullm_paged_causal_gqa_chunk_f32_kernel(
         output[output_index] = result;
     }
 }
+
+// Typed chunk write/read specializations.  F32 remains the two legacy symbols
+// above; non-F32 pairs have compile-time payload paths and FP8 E4M3FN uses an
+// independent FP16 scale for every physical-token/KV-head/plane row.
+enum {
+    ULLM_TYPED_CHUNK_F32 = 0,
+    ULLM_TYPED_CHUNK_F16 = 1,
+    ULLM_TYPED_CHUNK_FP8_E4M3FN = 2,
+};
+
+__device__ __forceinline__ unsigned int ullm_typed_chunk_round_shift_ties_even(
+    unsigned int value, unsigned int shift) {
+    if (shift == 0u) return value;
+    const unsigned int quotient = value >> shift;
+    const unsigned int remainder = value & ((1u << shift) - 1u);
+    const unsigned int halfway = 1u << (shift - 1u);
+    return remainder > halfway || (remainder == halfway && (quotient & 1u) != 0u)
+        ? quotient + 1u : quotient;
+}
+
+__device__ __forceinline__ unsigned short ullm_typed_chunk_f32_to_f16_rne(float value) {
+    const unsigned int raw = __float_as_uint(value);
+    const unsigned short sign = static_cast<unsigned short>((raw >> 16u) & 0x8000u);
+    const unsigned int exponent_bits = (raw >> 23u) & 0xffu;
+    const unsigned int mantissa = raw & 0x7fffffu;
+    if (exponent_bits == 0xffu) return static_cast<unsigned short>(sign | (mantissa == 0u ? 0x7c00u : 0x7e00u));
+    const int exponent = static_cast<int>(exponent_bits) - 127;
+    if (exponent > 15) return static_cast<unsigned short>(sign | 0x7c00u);
+    if (exponent >= -14) {
+        unsigned int rounded = ullm_typed_chunk_round_shift_ties_even(mantissa, 13u);
+        unsigned int half_exponent = static_cast<unsigned int>(exponent + 15);
+        if (rounded == 0x400u) {
+            rounded = 0u;
+            ++half_exponent;
+            if (half_exponent >= 0x1fu) return static_cast<unsigned short>(sign | 0x7c00u);
+        }
+        return static_cast<unsigned short>(sign | (half_exponent << 10u) | rounded);
+    }
+    if (exponent < -25) return sign;
+    return static_cast<unsigned short>(sign | ullm_typed_chunk_round_shift_ties_even(
+        mantissa | 0x800000u, static_cast<unsigned int>(-exponent - 1)));
+}
+
+__device__ __forceinline__ float ullm_typed_chunk_f16_to_f32(unsigned short bits) {
+    const float sign = (bits & 0x8000u) == 0u ? 1.0f : -1.0f;
+    const unsigned int exponent = (static_cast<unsigned int>(bits) >> 10u) & 0x1fu;
+    const unsigned int mantissa = static_cast<unsigned int>(bits) & 0x03ffu;
+    if (exponent == 0u) return mantissa == 0u ? sign * 0.0f : sign * ldexpf(static_cast<float>(mantissa), -24);
+    if (exponent == 0x1fu) return mantissa == 0u ? sign * __int_as_float(0x7f800000) : __int_as_float(0x7fc00000);
+    return sign * ldexpf(1.0f + static_cast<float>(mantissa) * 0.0009765625f,
+                         static_cast<int>(exponent) - 15);
+}
+
+__device__ __forceinline__ float ullm_typed_chunk_fp8_to_f32(unsigned char value) {
+#if defined(__gfx1200__) || defined(__gfx1201__)
+    return __builtin_amdgcn_cvt_f32_fp8(static_cast<unsigned int>(value), 0);
+#else
+    const unsigned int raw = static_cast<unsigned int>(value);
+    const unsigned int sign = raw >> 7u;
+    const unsigned int exponent = (raw >> 3u) & 0x0fu;
+    const unsigned int mantissa = raw & 0x07u;
+    if (exponent == 0x0fu && mantissa == 0x07u) return __uint_as_float(0x7fc00000u);
+    const float magnitude = exponent == 0u ? static_cast<float>(mantissa) * 0.001953125f
+        : ldexpf(1.0f + static_cast<float>(mantissa) * 0.125f, static_cast<int>(exponent) - 7);
+    return sign == 0u ? magnitude : -magnitude;
+#endif
+}
+
+__device__ __forceinline__ bool ullm_typed_chunk_positive_f16_ceil(
+    float value, unsigned short *bits_out) {
+    if (bits_out == nullptr || !isfinite(value) || value <= 0.0f) return false;
+    unsigned short bits = ullm_typed_chunk_f32_to_f16_rne(value);
+    if (bits == 0u) bits = 1u;
+    if (bits >= 0x7c00u) return false;
+    if (ullm_typed_chunk_f16_to_f32(bits) < value) {
+        ++bits;
+        if (bits >= 0x7c00u) return false;
+    }
+    if (!isfinite(ullm_typed_chunk_f16_to_f32(bits)) ||
+        ullm_typed_chunk_f16_to_f32(bits) < value) return false;
+    *bits_out = bits;
+    return true;
+}
+
+__device__ __forceinline__ unsigned char ullm_typed_chunk_f32_to_fp8_rne(
+    float value, float scale) {
+    const unsigned int sign = (__float_as_uint(value) >> 24u) & 0x80u;
+    const float magnitude = fabsf(value / scale);
+    if (magnitude == 0.0f) return static_cast<unsigned char>(sign);
+    if (magnitude >= 448.0f) return static_cast<unsigned char>(sign | 0x7eu);
+    unsigned int low = 0u;
+    unsigned int high = 126u;
+    while (low < high) {
+        const unsigned int middle = low + (high - low) / 2u;
+        if (fabsf(ullm_typed_chunk_fp8_to_f32(static_cast<unsigned char>(middle))) < magnitude)
+            low = middle + 1u;
+        else high = middle;
+    }
+    const unsigned int upper = low;
+    const float upper_value = ullm_typed_chunk_fp8_to_f32(static_cast<unsigned char>(upper));
+    if (upper_value == magnitude) return static_cast<unsigned char>(sign | upper);
+    const unsigned int lower = upper - 1u;
+    const double lower_distance = static_cast<double>(magnitude) -
+        static_cast<double>(ullm_typed_chunk_fp8_to_f32(static_cast<unsigned char>(lower)));
+    const double upper_distance = static_cast<double>(upper_value) - static_cast<double>(magnitude);
+    const unsigned int encoded = lower_distance < upper_distance ? lower :
+        (upper_distance < lower_distance ? upper : ((lower & 1u) == 0u ? lower : upper));
+    return static_cast<unsigned char>(sign | encoded);
+}
+
+template <int DTYPE>
+__device__ __forceinline__ float ullm_typed_chunk_row_scale(
+    const unsigned short *scales, unsigned long long physical_head) {
+    if constexpr (DTYPE == ULLM_TYPED_CHUNK_FP8_E4M3FN)
+        return ullm_typed_chunk_f16_to_f32(scales[physical_head]);
+    return 1.0f;
+}
+
+template <int DTYPE>
+__device__ __forceinline__ float ullm_typed_chunk_load(
+    const void *payload, unsigned long long index, float scale) {
+    if constexpr (DTYPE == ULLM_TYPED_CHUNK_F32)
+        return static_cast<const float *>(payload)[index];
+    else if constexpr (DTYPE == ULLM_TYPED_CHUNK_F16)
+        return ullm_typed_chunk_f16_to_f32(static_cast<const unsigned short *>(payload)[index]);
+    else
+        return ullm_typed_chunk_fp8_to_f32(static_cast<const unsigned char *>(payload)[index]) * scale;
+}
+
+template <int DTYPE>
+__device__ __forceinline__ void ullm_typed_chunk_store_row(
+    const float *source, unsigned long long elements, unsigned long long physical_head,
+    unsigned long long row_dim, void *payload, unsigned short *scales, float *partial) {
+    const unsigned int tid = threadIdx.x;
+    float local_maximum = 0.0f;
+    bool finite = true;
+    if constexpr (DTYPE != ULLM_TYPED_CHUNK_F32) {
+        for (unsigned long long index = tid; index < elements; index += blockDim.x) {
+            const float value = source[index];
+            finite = finite && isfinite(value);
+            local_maximum = fmaxf(local_maximum, fabsf(value));
+        }
+    }
+    partial[tid] = finite ? local_maximum : __int_as_float(0x7f800000);
+    __syncthreads();
+    for (unsigned int stride = blockDim.x >> 1u; stride > 0u; stride >>= 1u) {
+        if (tid < stride) partial[tid] = fmaxf(partial[tid], partial[tid + stride]);
+        __syncthreads();
+    }
+    unsigned short scale_bits = 0x3c00u;
+    bool valid = true;
+    if constexpr (DTYPE == ULLM_TYPED_CHUNK_F16) valid = isfinite(partial[0]) && partial[0] <= 65504.0f;
+    else if constexpr (DTYPE == ULLM_TYPED_CHUNK_FP8_E4M3FN) {
+        valid = isfinite(partial[0]) &&
+            (partial[0] == 0.0f || ullm_typed_chunk_positive_f16_ceil(partial[0] / 448.0f, &scale_bits));
+    }
+    if (tid == 0u) partial[0] = valid ? static_cast<float>(scale_bits) : -1.0f;
+    __syncthreads();
+    if (partial[0] < 0.0f) return;
+    scale_bits = static_cast<unsigned short>(partial[0]);
+    if constexpr (DTYPE == ULLM_TYPED_CHUNK_FP8_E4M3FN) if (tid == 0u) scales[physical_head] = scale_bits;
+    const float scale = ullm_typed_chunk_f16_to_f32(scale_bits);
+    const unsigned long long destination = physical_head * row_dim;
+    for (unsigned long long index = tid; index < elements; index += blockDim.x) {
+        if constexpr (DTYPE == ULLM_TYPED_CHUNK_F32)
+            static_cast<float *>(payload)[destination + index] = source[index];
+        else if constexpr (DTYPE == ULLM_TYPED_CHUNK_F16)
+            static_cast<unsigned short *>(payload)[destination + index] = ullm_typed_chunk_f32_to_f16_rne(source[index]);
+        else
+            static_cast<unsigned char *>(payload)[destination + index] = ullm_typed_chunk_f32_to_fp8_rne(source[index], scale);
+    }
+}
+
+template <int K_DTYPE, int V_DTYPE>
+__device__ __forceinline__ void ullm_paged_kv_write_chunk_typed_kernel_impl(
+    const float *k, const float *v, const unsigned int *block_table,
+    unsigned long long cache_start, unsigned long long m, unsigned long long block_size,
+    unsigned long long cache_blocks, unsigned long long table_entries,
+    unsigned long long kv_heads, unsigned long long head_dim, unsigned long long value_dim,
+    void *k_cache, void *v_cache, unsigned short *k_scales, unsigned short *v_scales,
+    float *partial) {
+    const unsigned long long row_plane_head = blockIdx.x;
+    const unsigned long long heads_per_plane = m * kv_heads;
+    const bool is_k = row_plane_head < heads_per_plane;
+    const unsigned long long packed = is_k ? row_plane_head : row_plane_head - heads_per_plane;
+    const unsigned long long row = packed / kv_heads;
+    const unsigned long long kv_head = packed - row * kv_heads;
+    if (row >= m || kv_head >= kv_heads) return;
+    const unsigned long long logical = cache_start + row;
+    const unsigned long long block_index = logical / block_size;
+    if (block_index >= table_entries) return;
+    const unsigned long long block_id = static_cast<unsigned long long>(block_table[block_index]);
+    if (block_id >= cache_blocks) return;
+    const unsigned long long physical = block_id * block_size + (logical - block_index * block_size);
+    const unsigned long long physical_head = physical * kv_heads + kv_head;
+    if (is_k) {
+        ullm_typed_chunk_store_row<K_DTYPE>(
+            k + (row * kv_heads + kv_head) * head_dim, head_dim, physical_head,
+            head_dim, k_cache, k_scales, partial);
+    } else {
+        ullm_typed_chunk_store_row<V_DTYPE>(
+            v + (row * kv_heads + kv_head) * value_dim, value_dim, physical_head,
+            value_dim, v_cache, v_scales, partial);
+    }
+}
+
+template <int K_DTYPE, int V_DTYPE>
+__device__ __forceinline__ void ullm_paged_causal_gqa_chunk_typed_kernel_impl(
+    const float *q, const float *gate, const void *k_cache, const void *v_cache,
+    const unsigned int *block_table, const unsigned short *k_scales,
+    const unsigned short *v_scales, unsigned long long cached_prefix_len,
+    unsigned long long m, unsigned long long block_size, unsigned long long cache_blocks,
+    unsigned long long table_entries, unsigned long long q_heads,
+    unsigned long long kv_heads, unsigned long long head_dim,
+    unsigned long long value_dim, float softmax_scale, float *output,
+    float *partial, float *shared_scales, float *state) {
+    const unsigned long long q_head_index = blockIdx.x;
+    if (q_head_index >= m * q_heads || q_heads == 0ull || kv_heads == 0ull ||
+        blockDim.x != 256u || head_dim > 256ull || value_dim > 256ull) return;
+    const unsigned int tid = threadIdx.x;
+    const unsigned long long row = q_head_index / q_heads;
+    const unsigned long long q_head = q_head_index - row * q_heads;
+    const unsigned long long kv_head = q_head / (q_heads / kv_heads);
+    const unsigned long long q_base = (row * q_heads + q_head) * head_dim;
+    const unsigned long long cache_len = cached_prefix_len + row + 1ull;
+    float weighted = 0.0f;
+    float denominator = 0.0f;
+    float max_score = -3.4028234663852886e38f;
+    for (unsigned long long source = 0ull; source < cache_len; ++source) {
+        const unsigned long long block_index = source / block_size;
+        if (block_index >= table_entries) {
+            if (tid < value_dim) output[q_head_index * value_dim + tid] = 0.0f;
+            return;
+        }
+        const unsigned long long block_id = static_cast<unsigned long long>(block_table[block_index]);
+        if (block_id >= cache_blocks) {
+            if (tid < value_dim) output[q_head_index * value_dim + tid] = 0.0f;
+            return;
+        }
+        const unsigned long long physical = block_id * block_size + (source - block_index * block_size);
+        const unsigned long long physical_head = physical * kv_heads + kv_head;
+        if (tid == 0u) {
+            shared_scales[0] = ullm_typed_chunk_row_scale<K_DTYPE>(k_scales, physical_head);
+            shared_scales[1] = ullm_typed_chunk_row_scale<V_DTYPE>(v_scales, physical_head);
+        }
+        __syncthreads();
+        float dot = 0.0f;
+        for (unsigned long long dim = tid; dim < head_dim; dim += blockDim.x)
+            dot += q[q_base + dim] * ullm_typed_chunk_load<K_DTYPE>(
+                k_cache, physical_head * head_dim + dim, shared_scales[0]);
+        partial[tid] = dot;
+        __syncthreads();
+        for (unsigned int stride = 128u; stride > 0u; stride >>= 1u) {
+            if (tid < stride) partial[tid] += partial[tid + stride];
+            __syncthreads();
+        }
+        if (tid == 0u) {
+            const float score = partial[0] * softmax_scale;
+            const float new_max = fmaxf(max_score, score);
+            state[0] = max_score <= -3.0e38f ? 0.0f : expf(max_score - new_max);
+            state[1] = expf(score - new_max);
+            state[2] = new_max;
+        }
+        __syncthreads();
+        if (tid < value_dim) {
+            weighted = weighted * state[0] + state[1] * ullm_typed_chunk_load<V_DTYPE>(
+                v_cache, physical_head * value_dim + tid, shared_scales[1]);
+        }
+        denominator = denominator * state[0] + state[1];
+        max_score = state[2];
+        __syncthreads();
+    }
+    if (tid < value_dim) {
+        const unsigned long long output_index = q_head_index * value_dim + tid;
+        float result = weighted / denominator;
+        if (gate != nullptr) result *= 1.0f / (1.0f + expf(-gate[output_index]));
+        output[output_index] = result;
+    }
+}
+
+#define ULLM_DEFINE_TYPED_PAGED_CHUNK(K_DTYPE, V_DTYPE, K_NAME, V_NAME) \
+extern "C" __global__ void ullm_paged_kv_write_chunk_typed_k##K_NAME##_v##V_NAME##_kernel( \
+    const float *k, const float *v, const unsigned int *block_table, \
+    unsigned long long cache_start, unsigned long long m, unsigned long long block_size, \
+    unsigned long long cache_blocks, unsigned long long table_entries, \
+    unsigned long long kv_heads, unsigned long long head_dim, unsigned long long value_dim, \
+    void *k_cache, void *v_cache, unsigned short *k_scales, unsigned short *v_scales) { \
+    __shared__ float partial[256]; \
+    ullm_paged_kv_write_chunk_typed_kernel_impl<K_DTYPE, V_DTYPE>( \
+        k, v, block_table, cache_start, m, block_size, cache_blocks, table_entries, kv_heads, \
+        head_dim, value_dim, k_cache, v_cache, k_scales, v_scales, partial); \
+} \
+extern "C" __global__ void ullm_paged_causal_gqa_chunk_typed_k##K_NAME##_v##V_NAME##_kernel( \
+    const float *q, const float *gate, const void *k_cache, const void *v_cache, \
+    const unsigned int *block_table, const unsigned short *k_scales, const unsigned short *v_scales, \
+    unsigned long long cached_prefix_len, unsigned long long m, unsigned long long block_size, \
+    unsigned long long cache_blocks, unsigned long long table_entries, unsigned long long q_heads, \
+    unsigned long long kv_heads, unsigned long long head_dim, unsigned long long value_dim, \
+    float softmax_scale, float *output) { \
+    __shared__ float partial[256]; \
+    __shared__ float shared_scales[2]; \
+    __shared__ float state[3]; \
+    ullm_paged_causal_gqa_chunk_typed_kernel_impl<K_DTYPE, V_DTYPE>( \
+        q, gate, k_cache, v_cache, block_table, k_scales, v_scales, cached_prefix_len, m, \
+        block_size, cache_blocks, table_entries, q_heads, kv_heads, head_dim, value_dim, \
+        softmax_scale, output, partial, shared_scales, state); \
+}
+
+ULLM_DEFINE_TYPED_PAGED_CHUNK(ULLM_TYPED_CHUNK_F32, ULLM_TYPED_CHUNK_F16, f32, f16)
+ULLM_DEFINE_TYPED_PAGED_CHUNK(ULLM_TYPED_CHUNK_F32, ULLM_TYPED_CHUNK_FP8_E4M3FN, f32, fp8)
+ULLM_DEFINE_TYPED_PAGED_CHUNK(ULLM_TYPED_CHUNK_F16, ULLM_TYPED_CHUNK_F32, f16, f32)
+ULLM_DEFINE_TYPED_PAGED_CHUNK(ULLM_TYPED_CHUNK_F16, ULLM_TYPED_CHUNK_F16, f16, f16)
+ULLM_DEFINE_TYPED_PAGED_CHUNK(ULLM_TYPED_CHUNK_F16, ULLM_TYPED_CHUNK_FP8_E4M3FN, f16, fp8)
+ULLM_DEFINE_TYPED_PAGED_CHUNK(ULLM_TYPED_CHUNK_FP8_E4M3FN, ULLM_TYPED_CHUNK_F32, fp8, f32)
+ULLM_DEFINE_TYPED_PAGED_CHUNK(ULLM_TYPED_CHUNK_FP8_E4M3FN, ULLM_TYPED_CHUNK_F16, fp8, f16)
+ULLM_DEFINE_TYPED_PAGED_CHUNK(ULLM_TYPED_CHUNK_FP8_E4M3FN, ULLM_TYPED_CHUNK_FP8_E4M3FN, fp8, fp8)
+#undef ULLM_DEFINE_TYPED_PAGED_CHUNK
 )";
     }
 

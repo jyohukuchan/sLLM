@@ -1845,6 +1845,160 @@ ullm_status ullm_runtime_qwen35_qk_norm_rope_paged_kv_write_f32(
         stream);
 }
 
+ullm_status ullm_runtime_qwen35_qk_norm_rope_paged_kv_write_typed_f32(
+    const ullm_runtime_buffer *q_projected_buffer,
+    const ullm_runtime_buffer *k_projected_buffer,
+    const ullm_runtime_buffer *v_projected_buffer,
+    const ullm_runtime_buffer *q_weight_buffer,
+    const ullm_runtime_buffer *k_weight_buffer,
+    const ullm_runtime_buffer *block_table_buffer,
+    size_t q_heads,
+    size_t kv_heads,
+    size_t head_dim,
+    size_t value_dim,
+    size_t rotary_dim,
+    size_t position_offset,
+    float rope_base,
+    float epsilon,
+    size_t cache_position,
+    size_t block_size,
+    size_t cache_blocks,
+    ullm_kv_cache_dtype k_dtype,
+    ullm_kv_cache_dtype v_dtype,
+    ullm_runtime_buffer *q_gate_output_buffer,
+    ullm_runtime_buffer *q_rope_output_buffer,
+    ullm_runtime_buffer *k_cache_buffer,
+    ullm_runtime_buffer *v_cache_buffer,
+    ullm_runtime_buffer *k_scale_buffer,
+    ullm_runtime_buffer *v_scale_buffer,
+    ullm_runtime_stream *stream) {
+    // The legacy F32 symbol and its validation path stay byte-for-byte the
+    // default behavior.  Only an explicitly typed plane reaches this body.
+    if (k_dtype == ULLM_KV_CACHE_DTYPE_F32 && v_dtype == ULLM_KV_CACHE_DTYPE_F32 &&
+        k_scale_buffer == nullptr && v_scale_buffer == nullptr) {
+        return ullm_runtime_qwen35_qk_norm_rope_paged_kv_write_f32(
+            q_projected_buffer, k_projected_buffer, v_projected_buffer,
+            q_weight_buffer, k_weight_buffer, block_table_buffer, q_heads, kv_heads,
+            head_dim, value_dim, rotary_dim, position_offset, rope_base, epsilon,
+            cache_position, block_size, cache_blocks, q_gate_output_buffer,
+            q_rope_output_buffer, k_cache_buffer, v_cache_buffer, stream);
+    }
+    if (q_projected_buffer == nullptr || k_projected_buffer == nullptr ||
+        v_projected_buffer == nullptr || q_weight_buffer == nullptr ||
+        k_weight_buffer == nullptr || block_table_buffer == nullptr ||
+        q_gate_output_buffer == nullptr || q_rope_output_buffer == nullptr ||
+        k_cache_buffer == nullptr || v_cache_buffer == nullptr) {
+        set_error("typed Qwen3.5 q/k norm RoPE paged KV write received a null pointer");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (q_heads == 0u || kv_heads == 0u || head_dim == 0u || value_dim == 0u ||
+        block_size == 0u || cache_blocks == 0u || rotary_dim == 0u ||
+        rotary_dim > head_dim || rotary_dim % 2u != 0u || !std::isfinite(rope_base) ||
+        rope_base <= 1.0f || !std::isfinite(epsilon) || epsilon <= 0.0f ||
+        !kv_cache_dtype_is_supported(k_dtype) || !kv_cache_dtype_is_supported(v_dtype) ||
+        (kv_cache_dtype_requires_scale(k_dtype) != (k_scale_buffer != nullptr)) ||
+        (kv_cache_dtype_requires_scale(v_dtype) != (v_scale_buffer != nullptr))) {
+        set_error("typed Qwen3.5 q/k norm RoPE paged KV write geometry, dtype, or scales are invalid");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (!buffers_share_backend(q_projected_buffer, k_projected_buffer) ||
+        !buffers_share_backend(q_projected_buffer, v_projected_buffer) ||
+        !buffers_share_backend(q_projected_buffer, q_weight_buffer) ||
+        !buffers_share_backend(q_projected_buffer, k_weight_buffer) ||
+        !buffers_share_backend(q_projected_buffer, block_table_buffer) ||
+        !buffers_share_backend(q_projected_buffer, q_gate_output_buffer) ||
+        !buffers_share_backend(q_projected_buffer, q_rope_output_buffer) ||
+        !buffers_share_backend(q_projected_buffer, k_cache_buffer) ||
+        !buffers_share_backend(q_projected_buffer, v_cache_buffer) ||
+        (k_scale_buffer != nullptr && !buffers_share_backend(q_projected_buffer, k_scale_buffer)) ||
+        (v_scale_buffer != nullptr && !buffers_share_backend(q_projected_buffer, v_scale_buffer))) {
+        set_error("typed Qwen3.5 q/k norm RoPE paged KV write buffers belong to different backends or devices");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (!stream_matches_buffer(q_gate_output_buffer, stream) ||
+        !stream_matches_buffer(q_rope_output_buffer, stream) ||
+        !stream_matches_buffer(k_cache_buffer, stream) ||
+        !stream_matches_buffer(v_cache_buffer, stream) ||
+        (k_scale_buffer != nullptr && !stream_matches_buffer(k_scale_buffer, stream)) ||
+        (v_scale_buffer != nullptr && !stream_matches_buffer(v_scale_buffer, stream))) {
+        set_error("typed Qwen3.5 q/k norm RoPE paged KV write stream belongs to a different backend or device");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t max_size = std::numeric_limits<size_t>::max();
+    if (cache_blocks > max_size / block_size) {
+        set_error("typed Qwen3.5 q/k norm RoPE paged KV write physical cache size overflows");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t physical_tokens = cache_blocks * block_size;
+    if (cache_position >= physical_tokens || head_dim > max_size / q_heads ||
+        head_dim > max_size / kv_heads || value_dim > max_size / kv_heads ||
+        kv_heads > max_size / physical_tokens) {
+        set_error("typed Qwen3.5 q/k norm RoPE paged KV write cache geometry overflows");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t q_values = q_heads * head_dim;
+    const size_t k_values = kv_heads * head_dim;
+    const size_t v_values = kv_heads * value_dim;
+    const size_t physical_heads = physical_tokens * kv_heads;
+    if (head_dim > max_size / physical_heads || value_dim > max_size / physical_heads) {
+        set_error("typed Qwen3.5 q/k norm RoPE paged KV write cache element count overflows");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t k_cache_values = physical_heads * head_dim;
+    const size_t v_cache_values = physical_heads * value_dim;
+    const size_t k_width = kv_cache_dtype_payload_bytes(k_dtype);
+    const size_t v_width = kv_cache_dtype_payload_bytes(v_dtype);
+    const size_t block_table_entries = cache_position / block_size + 1u;
+    if (q_values > max_size / 2u || q_values > max_size / sizeof(float) ||
+        k_values > max_size / sizeof(float) || v_values > max_size / sizeof(float) ||
+        k_cache_values > max_size / k_width || v_cache_values > max_size / v_width ||
+        physical_heads > max_size / sizeof(uint16_t) ||
+        block_table_entries > max_size / sizeof(uint32_t)) {
+        set_error("typed Qwen3.5 q/k norm RoPE paged KV write byte size overflows");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t q_bytes = q_values * sizeof(float);
+    const size_t q_projected_bytes = q_bytes * 2u;
+    const size_t k_projected_bytes = k_values * sizeof(float);
+    const size_t v_projected_bytes = v_values * sizeof(float);
+    const size_t weight_bytes = head_dim * sizeof(float);
+    const size_t table_bytes = block_table_entries * sizeof(uint32_t);
+    const size_t k_cache_bytes = k_cache_values * k_width;
+    const size_t v_cache_bytes = v_cache_values * v_width;
+    const size_t scale_bytes = physical_heads * sizeof(uint16_t);
+    if (q_projected_buffer->bytes < q_projected_bytes ||
+        k_projected_buffer->bytes < k_projected_bytes ||
+        v_projected_buffer->bytes < v_projected_bytes ||
+        q_weight_buffer->bytes < weight_bytes || k_weight_buffer->bytes < weight_bytes ||
+        block_table_buffer->bytes < table_bytes || q_gate_output_buffer->bytes < q_bytes ||
+        q_rope_output_buffer->bytes < q_bytes || k_cache_buffer->bytes < k_cache_bytes ||
+        v_cache_buffer->bytes < v_cache_bytes ||
+        (k_scale_buffer != nullptr && k_scale_buffer->bytes < scale_bytes) ||
+        (v_scale_buffer != nullptr && v_scale_buffer->bytes < scale_bytes)) {
+        set_error("typed Qwen3.5 q/k norm RoPE paged KV write buffer is too small");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (q_projected_buffer->backend == BackendKind::Cpu) {
+        set_error("typed Qwen3.5 fused paged KV write currently requires the native HIP kernel; use split norm/RoPE plus typed KV write for CPU reference validation");
+        return ULLM_STATUS_RUNTIME_ERROR;
+    }
+    std::string hip_kernel_error;
+    if (qwen35_qk_norm_rope_paged_kv_write_typed_f32_hip_kernel(
+            q_projected_buffer, k_projected_buffer, v_projected_buffer,
+            q_weight_buffer, k_weight_buffer, block_table_buffer, q_heads, kv_heads,
+            head_dim, value_dim, rotary_dim, position_offset, rope_base, epsilon,
+            cache_position, block_size, cache_blocks, k_dtype, v_dtype,
+            q_gate_output_buffer, q_rope_output_buffer, k_cache_buffer, v_cache_buffer,
+            k_scale_buffer, v_scale_buffer, stream, &hip_kernel_error)) {
+        set_error("");
+        return ULLM_STATUS_OK;
+    }
+    set_error(hip_kernel_error.empty()
+        ? "typed Qwen3.5 q/k norm RoPE paged KV write HIP kernel is unavailable"
+        : hip_kernel_error.c_str());
+    return ULLM_STATUS_RUNTIME_ERROR;
+}
+
 ullm_status ullm_runtime_add_f32(
     const ullm_runtime_buffer *lhs_buffer,
     const ullm_runtime_buffer *rhs_buffer,
