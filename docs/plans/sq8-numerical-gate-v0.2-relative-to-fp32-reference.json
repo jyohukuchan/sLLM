@@ -1,0 +1,390 @@
+{
+  "schema_version": "ullm.sq8.numerical_gate.relative_fp32.v0.2",
+  "status": "frozen_pre_evaluation",
+  "frozen_at_utc": "2026-07-26T02:07:16Z",
+  "title": "SQ8_0 numerical admission relative to an artifact-FP32 reference",
+  "freeze_attestation": {
+    "candidate_evaluation_performed_before_freeze": false,
+    "candidate_results_used_for_threshold_selection": false,
+    "threshold_basis": [
+      "IEEE-754 binary32 representation and rounding scale",
+      "fixed, candidate-independent corpus coverage",
+      "a non-inferiority rule against the matched CK/direct control",
+      "a fixed position and block-count statistical design"
+    ],
+    "required_order": [
+      "freeze_this_file_and_record_its_sha256",
+      "qualify_and_capture_the_artifact_fp32_reference",
+      "capture_the_matched_control",
+      "capture_one_candidate",
+      "evaluate_without_editing_this_file"
+    ],
+    "amendment_rule": "Any change to this file, reference semantics, corpus, threshold, metric, or decision rule creates a new version and a new SHA-256. It may not be applied to an already-captured candidate as v0.2."
+  },
+  "scope": {
+    "format_id": "SQ8_0",
+    "model_family": "Qwen3-14B-FP8",
+    "target_execution": "full-model causal decode with a bound immutable artifact and a candidate-specific isolated selector",
+    "admission_statement": "A candidate is admissible only when it is no worse than its matched CK/direct control against the same artifact-FP32 reference under every required metric and scope.",
+    "excluded": [
+      "performance qualification",
+      "activation, campaign, release, or deployment",
+      "retrospective reclassification of earlier gate results",
+      "using the pre-quantization source model as the primary kernel-quality oracle"
+    ]
+  },
+  "reference": {
+    "primary": {
+      "id": "artifact_fp32_strict_v1",
+      "meaning": "Execute the exact immutable SQ8_0 artifact with every SQ8 FP8 payload decoded and every stored scale converted to binary32; do not apply runtime activation quantization.",
+      "why_primary": "It holds the serialized SQ8_0 format fixed, so it measures the execution-path error rather than conflating that error with loss incurred when creating the artifact.",
+      "weight_decode": {
+        "payload": "canonical OCP E4M3 finite decode to binary32",
+        "scale": "read the stored scale representation exactly, then convert it to binary32",
+        "reconstruction": "binary32(payload_value) * binary32(scale_value) at each declared scale block",
+        "integrity": [
+          "bind the canonical artifact content SHA-256",
+          "verify every weight and scale file hash, shape, block layout, and finiteness before execution",
+          "reject a non-finite payload, scale, parameter, activation, hidden state, KV value, or logit"
+        ]
+      },
+      "other_parameters": "Materialize every non-SQ parameter from the bound artifact/package into binary32 using its declared storage conversion; no original source checkpoint is substituted.",
+      "arithmetic": {
+        "scalar_format": "IEEE-754 binary32, roundTiesToEven",
+        "matrix_reduction": "fixed increasing-K order with one declared binary32 multiply-accumulate primitive for the entire reference build",
+        "parallelism": "Fixed output-row partitioning is allowed, but no cross-thread reduction is allowed. The actual CPU thread count and partitioning implementation hash are recorded.",
+        "transcendentals": "The pinned reference implementation and its test-vector hashes define exp, log, reciprocal, rsqrt, and sqrt behavior. A library/version change requires a new reference qualification.",
+        "forbidden": [
+          "GPU or HIP execution",
+          "runtime SQ8 activation quantization",
+          "candidate, CK, direct, BLAS, or GPU kernel output as a reference value",
+          "F64 accumulation as the reference arithmetic"
+        ]
+      },
+      "full_model_semantics": [
+        "same tokenizer, token IDs, RoPE positions, causal mask, KV layout semantics, residual ordering, RMSNorm convention, and LM-head meaning as the evaluated runtime",
+        "F32 causal KV state",
+        "teacher-forced decode tokens supplied only by this reference before any control or candidate run"
+      ],
+      "qualification_before_any_gpu_capture": [
+        "projection decoder conformance over all 256 FP8 bytes and declared scale block boundaries",
+        "full 40-layer model path plus final norm and LM head executes the frozen corpus without non-finite values",
+        "two CPU-only executions with identical binary, artifact, corpus, and thread configuration have byte-identical reference output hashes",
+        "record executable/source hash, compiler and CPU details, thread configuration, artifact content hash, corpus hash, elapsed time, and output hashes"
+      ],
+      "cpu_feasibility_pilot": {
+        "required_before_full_capture": true,
+        "case": "raw-p0001 with 8 teacher-forced decode steps",
+        "repetitions": 2,
+        "record": [
+          "per-step elapsed time",
+          "peak resident memory",
+          "reference output hashes",
+          "CPU/thread configuration"
+        ],
+        "rule": "This is a CPU-only feasibility measurement and decoder/determinism check. It does not satisfy any coverage requirement and may not change a v0.2 threshold."
+      },
+      "current_repository_status": "not_available_for_full_model: crates/ullm-engine/src/sq_reference.rs is projection-only and accumulates in F64; crates/ullm-engine/src/sq_optimized_reference.rs is also projection-only and accumulates in F64 after dynamic activation quantization; cpu_reference_executor.rs is bounded to small F32 ModelGraph inputs and does not materialize SQ8 weights."
+    },
+    "secondary_source_model_audit": {
+      "meaning": "Run the bound pre-quantization source model in F32 after its declared source-dtype conversion (FP16/BF16 when that is the bound source) only to report end-to-end artifact-plus-runtime loss.",
+      "role": "diagnostic/release-quality evidence only",
+      "not_a_primary_gate": "A candidate must not pass or fail this v0.2 kernel gate because of a comparison whose error includes the irreversible SQ8 artifact quantization."
+    }
+  },
+  "corpus": {
+    "fixture_root": "tests/fixtures/sq8-serving-v0.1",
+    "fixture_manifest_sha256": "3b6362fd472debbbfb30fb5616325703dd52e90e82319280490a0d84fcd6bf83",
+    "context_limit_tokens": 4096,
+    "token_construction": "Raw range prompts contain the unsigned little-endian token IDs [1, 2, ..., N]. Exact chat fixtures are re-materialized from their checked-in token_ids after their fixture SHA-256 is verified.",
+    "teacher_forcing": {
+      "token_source": "artifact_fp32_strict_v1 greedy top-1 output",
+      "tie_break": "larger logit first, then lower token ID",
+      "capture_order": "Reference token streams are written and hashed before any CK/direct or candidate execution. Control and candidate runs consume those exact streams and never feed back their own sampled token.",
+      "eos": "ignored for the fixed requested decode length; this is a numerical probe, not a generation-quality test"
+    },
+    "primary_decode_streams": [
+      {
+        "id": "raw-p0001-g1024",
+        "input": "raw/prompt-0001.u32le",
+        "input_sha256": "67abdd721024f0ff4e0b3f4c2fc13bc5bad42d0b7851d456d88d203d15aaa450",
+        "prompt_tokens": 1,
+        "forced_decode_tokens": 1024
+      },
+      {
+        "id": "raw-p0008-g512",
+        "input": "raw/prompt-0008.u32le",
+        "input_sha256": "8b4b2444e57aed8c2d05a1293255da1b048c63224317d4666230760935fa4a18",
+        "prompt_tokens": 8,
+        "forced_decode_tokens": 512
+      },
+      {
+        "id": "raw-p0032-g512",
+        "input": "raw/prompt-0032.u32le",
+        "input_sha256": "473a07e1d68b01e24d3e8aac95bc72de9100bc60efe8d53ea900e54386360b93",
+        "prompt_tokens": 32,
+        "forced_decode_tokens": 512
+      },
+      {
+        "id": "raw-p0128-g512",
+        "input": "raw/prompt-0128.u32le",
+        "input_sha256": "24f9ac547baae524ba0ea5220692d48f7526cdb1df5e99edcbb1f32239a8d5f5",
+        "prompt_tokens": 128,
+        "forced_decode_tokens": 512
+      },
+      {
+        "id": "raw-p0512-g512",
+        "input": "raw/prompt-0512.u32le",
+        "input_sha256": "8ab9b2cf36ec9e9d68711df73334731d2fee0552f5d95d76538b1d2cdcefd564",
+        "prompt_tokens": 512,
+        "forced_decode_tokens": 512
+      },
+      {
+        "id": "chat-p2048-g512",
+        "input": "chat-template/fixtures/exact-p2048.json",
+        "input_sha256": "cd04c3339542f07731074ac0e00740a83061e620f6caff9c2a7e5316df1ccdcf",
+        "prompt_tokens": 2048,
+        "forced_decode_tokens": 512
+      },
+      {
+        "id": "chat-p3584-g512",
+        "input": "chat-template/fixtures/exact-p3584.json",
+        "input_sha256": "e3cd6c722302f73d688492b73a182298f34cc0a1498def209c262e5e9aa92912",
+        "prompt_tokens": 3584,
+        "forced_decode_tokens": 512
+      }
+    ],
+    "primary_decode_position_count": 4096,
+    "required_boundary_cases": [
+      {
+        "id": "raw-p0127-g4",
+        "prompt_tokens": 127,
+        "forced_decode_tokens": 4,
+        "purpose": "cross 127/128"
+      },
+      {
+        "id": "raw-p0255-g4",
+        "prompt_tokens": 255,
+        "forced_decode_tokens": 4,
+        "purpose": "cross 255/256"
+      },
+      {
+        "id": "raw-p0511-g4",
+        "prompt_tokens": 511,
+        "forced_decode_tokens": 4,
+        "purpose": "cross 511/512"
+      },
+      {
+        "id": "raw-p1023-g4",
+        "prompt_tokens": 1023,
+        "forced_decode_tokens": 4,
+        "purpose": "cross 1023/1024"
+      },
+      {
+        "id": "raw-p4095-g1",
+        "input": "raw/prompt-4095.u32le",
+        "input_sha256": "06e0e09cf3e6e53e104945292875ba644ae885315061d7e0f15b8dafbfdf8ad1",
+        "prompt_tokens": 4095,
+        "forced_decode_tokens": 1,
+        "purpose": "final context-boundary and tail admission"
+      }
+    ],
+    "prefill_coverage": {
+      "required_modes": [
+        "sequential_m1",
+        "m128_chunks_with_declared_tail"
+      ],
+      "m128_inputs": [
+        "raw-p0128-g512",
+        "raw-p0512-g512",
+        "chat-p2048-g512",
+        "chat-p3584-g512",
+        "raw-p4095-g1"
+      ],
+      "capture_points": "At every complete M=128 chunk boundary and at each final tail, capture final hidden state and logits. These checkpoints are mandatory but are not used to inflate the 4096 decode-position sample size."
+    },
+    "hidden_layer_probe": {
+      "probe_count": 512,
+      "mandatory_positions": "first and final decode position of every primary stream; all required boundary-case positions; every prefill checkpoint",
+      "remaining_selection": "Select the remaining primary decode positions by ascending SHA-256 of `ullm.sq8.gate.v0.2.hidden-probe\\0` + case_id + `\\0` + zero-padded decode_index. Candidate output is never an input to selection.",
+      "capture": "post-layer residual hidden state for every transformer layer, plus final-norm hidden state"
+    }
+  },
+  "capture_contract": {
+    "control": {
+      "id": "matched_ck_or_direct_control",
+      "repetitions": 3,
+      "selector_rule": "Same artifact, corpus, prefill/decode mode, runtime build, and device configuration as the candidate, with only the candidate-specific isolated selector disabled.",
+      "baseline_for_upper_error_metrics": "median of the three control values; its excess over the median is added only as a repeatability envelope",
+      "baseline_for_lower_quality_metrics": "median of the three lower-bound values; its shortfall to the median is the lower-quality repeatability envelope"
+    },
+    "candidate": {
+      "repetitions": 2,
+      "selector_rule": "Exactly one isolated candidate selector may differ from the control. All other experimental selectors are disabled.",
+      "value_for_upper_error_metrics": "worst of the two candidate values",
+      "value_for_lower_quality_metrics": "worst of the two candidate values"
+    },
+    "required_identity_fields": [
+      "artifact content SHA-256",
+      "reference executable/source hash",
+      "control/candidate executable hash",
+      "candidate selector and configuration fingerprint",
+      "fixture manifest and materialized-token hashes",
+      "device identity and runtime/compiler versions",
+      "all output tensor shape, dtype, finiteness, byte count, and SHA-256 values"
+    ],
+    "storage_rule": "Reference logits, final hidden states, and layer probes are retained as immutable F32 little-endian inputs to the consumer-side evaluator. The evaluator recomputes every metric and ignores producer pass/fail fields."
+  },
+  "metric_definitions": {
+    "calculation_precision": "Metric sums, norms, logsumexp, KL, quantiles, Wilson intervals, and bootstrap resampling are calculated in F64 from finite captured F32 values.",
+    "relative_l2": "sqrt(sum_i((actual_i-reference_i)^2) / max(sum_i(reference_i^2), 1e-30))",
+    "max_abs": "max_i(abs(actual_i-reference_i))",
+    "kl_reference_to_actual": "sum_i softmax(reference)_i * (log_softmax(reference)_i - log_softmax(actual)_i), using stable F64 logsumexp",
+    "top1": "argmax with larger logit first and lower token ID as the tie-break",
+    "top10_retention": "whether the reference top-1 token is present in the actual top 10, using the same tie-break",
+    "near_margin_swap": {
+      "reference_margin": "reference_top1_logit - reference_top2_logit",
+      "control_envelope": "2 * (control_position_logit_max_abs + 16 * ulp(max(1, max_abs(reference_logits_at_position))))",
+      "control_position_logit_max_abs": "maximum over the three control repetitions at that position",
+      "allowed_only_when": [
+        "candidate top-1 is exactly the reference top-2 token",
+        "reference_margin is less than or equal to control_envelope",
+        "all continuous and top-10 gates still pass"
+      ],
+      "otherwise": "A candidate-only mismatch is a hard regression."
+    }
+  },
+  "noninferiority_rule": {
+    "continuous": {
+      "formula": "worst_candidate_metric <= median_control_metric * 1.05 + control_repeat_envelope + absolute_floor",
+      "relative_noninferiority_factor": 1.05,
+      "rationale": "A candidate may consume at most five percent more of an already-observed control error (about 0.42 dB), not five percent absolute output error. The factor is fixed before candidate evaluation.",
+      "absolute_floors": {
+        "relative_l2": 9.5367431640625e-7,
+        "mean_kl_nats": 9.5367431640625e-7,
+        "p99_kl_nats": 9.5367431640625e-7,
+        "max_abs": "16 * ulp(max(1, max_abs(reference vector or tensor group)))"
+      }
+    },
+    "discrete": {
+      "position_wilson": {
+        "confidence": 0.95,
+        "sidedness": "one_sided_lower",
+        "candidate_requirement": "worst_candidate_lower_bound >= median_control_lower_bound - lower_quality_repeatability_envelope - 0.001",
+        "noninferiority_margin": 0.001,
+        "rationale": "0.001 is 0.1 percentage point: at the frozen 4096 primary positions it is no more than roughly four ambiguous positions, while a non-near-margin candidate-only regression is still forbidden."
+      },
+      "hard_top1_regressions": {
+        "definition": "control top-1 equals reference top-1, candidate top-1 differs, and the mismatch is not an allowed near-margin swap",
+        "maximum": 0
+      },
+      "block_bootstrap": {
+        "metric": "candidate minus control policy-aware top-1 agreement rate",
+        "block_size_decode_positions": 64,
+        "primary_block_count": 64,
+        "method": "stratified non-overlapping block bootstrap; sample with replacement within each primary stream while preserving that stream's number of blocks",
+        "replicates": 10000,
+        "seed_domain": "ullm.sq8.gate.v0.2.block-bootstrap\\0",
+        "confidence": 0.95,
+        "require_lower_bound_at_least": -0.001,
+        "rationale": "The teacher-forced positions are autocorrelated. The position Wilson interval remains a required reported diagnostic, while this fixed block calculation prevents treating all 4096 tokens as independent evidence."
+      }
+    }
+  },
+  "required_metric_gates": {
+    "logits": {
+      "scopes": [
+        "aggregate_primary_decode",
+        "each_primary_decode_stream",
+        "each_required_boundary_case",
+        "prefill_checkpoint_set"
+      ],
+      "upper_error_metrics": [
+        "aggregate_relative_l2",
+        "p99_position_relative_l2",
+        "max_abs",
+        "mean_kl_nats",
+        "p99_kl_nats"
+      ],
+      "lower_quality_metrics": [
+        "policy_aware_top1_agreement_wilson_lower_bound",
+        "reference_top1_retained_in_top10_wilson_lower_bound"
+      ],
+      "additional": [
+        "zero non-finite values",
+        "zero hard_top1_regressions",
+        "required block-bootstrap non-inferiority"
+      ]
+    },
+    "final_hidden": {
+      "scopes": [
+        "aggregate_primary_decode",
+        "each_primary_decode_stream",
+        "each_required_boundary_case",
+        "prefill_checkpoint_set"
+      ],
+      "upper_error_metrics": [
+        "aggregate_relative_l2",
+        "p99_position_relative_l2",
+        "max_abs"
+      ],
+      "additional": [
+        "zero non-finite values"
+      ]
+    },
+    "layer_hidden": {
+      "layers": "every transformer layer and final-norm hidden state",
+      "scope": "all 512 frozen hidden-layer probe positions plus mandatory prefill and boundary positions",
+      "upper_error_metrics_per_layer": [
+        "aggregate_relative_l2",
+        "p99_position_relative_l2",
+        "max_abs"
+      ],
+      "additional": [
+        "zero non-finite values",
+        "every layer must pass independently; no cross-layer average or composite score is accepted"
+      ]
+    }
+  },
+  "qualification_and_decision": {
+    "minimum_coverage": {
+      "primary_decode_positions": 4096,
+      "primary_decode_streams": 7,
+      "decode_blocks_of_64": 64,
+      "hidden_layer_probe_positions": 512,
+      "mandatory_boundary_cases": 5
+    },
+    "coverage_rationale": "If all 4096 primary positions agree, the one-sided 95% Wilson lower bound is approximately 99.934%. The 64 fixed decode blocks add a dependence-aware non-inferiority check. A shorter run is non-qualifying; it does not justify relaxing a threshold.",
+    "pass": "All reference-qualification, integrity, coverage, continuous, discrete, logits, final-hidden, and every-layer hidden gates pass for both candidate repetitions.",
+    "fail": "Any required gate fails, any required identity is absent or differs unexpectedly, any output is non-finite, or the consumer-side evaluator cannot reproduce a metric.",
+    "blocked": "The strict artifact-FP32 full-model reference is unavailable or unqualified, a required corpus element cannot be materialized/hashed, or a required GPU capture cannot be performed. Blocked is not pass.",
+    "candidate_result_statuses": [
+      "pass_relative_fp32_v0_2",
+      "fail_relative_fp32_v0_2",
+      "blocked_reference_or_capture"
+    ]
+  },
+  "relationship_to_existing_gates": {
+    "bitwise_ck_direct": "Retain as a separate Tier-S diagnostic: it is the strongest assurance for an implementation intended to preserve the exact selected CK/direct operation order. Record pass, fail, or not_applicable. A v0.2 pass does not claim bitwise equivalence, and a prior bitwise failure is not retroactively changed.",
+    "aq4_p2_style": "Follow the useful AQ4 pattern of independent per-metric gates, one-sided Wilson reporting, and explicitly bounded near-margin handling. Do not import AQ4 absolute thresholds or collapse metrics into a compensating composite score.",
+    "promotion": "This is a numerical admission gate only. A pass still requires separately authorized performance, resource, ABI, and deployment gates."
+  },
+  "evaluation_sequence": [
+    "Verify this file's recorded SHA-256 before preparing any evaluation input.",
+    "Implement and qualify artifact_fp32_strict_v1 CPU-only; capture and hash reference teacher-forcing streams and tensors.",
+    "Capture the three-repeat matched CK/direct control without modifying this file.",
+    "For one candidate selector only, capture two repetitions against the pre-existing reference stream.",
+    "Run the consumer-side evaluator and write an immutable result receipt that references this specification SHA-256.",
+    "Repeat the candidate step independently for each remaining candidate; do not use a prior candidate result to alter this protocol.",
+    "Run any performance or promotion work only after a numerical pass and separate authorization."
+  ],
+  "current_task_noninterference": {
+    "gpu_used": false,
+    "activation_performed": false,
+    "campaign_performed": false,
+    "systemd_touched": false,
+    "active_manifest_touched": false,
+    "opt_ullm_touched": false,
+    "existing_measurement_evidence_modified": false
+  }
+}
