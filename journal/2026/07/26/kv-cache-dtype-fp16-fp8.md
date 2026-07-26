@@ -40,6 +40,7 @@
 - `481a6078 test(kv): check typed attention against decoded cache` を作成した。
 - `41c4bd43 test(kv): span full 4096-token FP8 cache` を作成した。
 - `fbe04660 test(kv): use Qwen35 full-attention geometry` を作成した。
+- `be316422 test(kv): cover F16 across full cache context` を作成した。
 - 実行後に、broad `ullm-runtime-sys --lib` に opportunistic HIP tests が含まれる
   ことを発見した。R9700 lock preflight 前の実行だったため、GPU evidence としては
   採用しない。以後 GPU を使う全テスト/計測は lock/service preflight 後だけにする。

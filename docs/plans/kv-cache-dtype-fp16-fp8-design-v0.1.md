@@ -307,9 +307,9 @@ CPU evidence is saved in
   payload-plus-scale cache bytes (implementation correctness only);
 - typed causal prefill fallback;
 - corrupt FP8 negative (including negative-zero) scale rejection in both readback and attention;
-- a synthetic FP8 4,096-token / 256-page / block-size-16 context at the
-  served Qwen3.5 full-attention geometry, with a permuted block table
-  (page/scale implementation check only);
+- synthetic F16 and FP8 4,096-token / 256-page / block-size-16 contexts at
+  the served Qwen3.5 full-attention geometry, with a permuted block table
+  (page/scale implementation checks only);
 - all existing `decoder::tests` F32 cases.
 
 An accidental broad `ullm-runtime-sys --lib` invocation was discovered to

@@ -25,9 +25,9 @@ rejected by the parser. The K/V override precedence over the uniform selector
 is tested without mutating the process environment. The direct reader is also
 checked against a CPU reference over its exact decoded payload-plus-scale
 cache bytes; this is a semantic implementation check, not a quality threshold.
-A separate synthetic FP8 test spans all 4,096 tokens / 256 pages at the served
-Qwen3.5 full-attention geometry with a permuted page table. It is not a
-full-model throughput or generated-text test.
+Separate synthetic F16 and FP8 tests span all 4,096 tokens / 256 pages at the
+served Qwen3.5 full-attention geometry with a permuted page table. They are
+not full-model throughput or generated-text tests.
 
 ## Capacity ledger
 
