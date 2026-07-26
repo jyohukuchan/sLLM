@@ -234,3 +234,89 @@ capture was not launched on this shared host: the raw checkpoint needs
 at validation time was about 43 GiB. There is no complete uLLM hybrid-attention
 candidate to compare yet in any case; the direct HF router fixture is the
 numeric source for this loader-independent layer of the work.
+
+## BN: AQ4_0 MoE text-package manufacturing (2026-07-26)
+
+The source audit independently reproduces BI's residency numbers exactly:
+the complete safetensors payload is `71,903,655,008 B` / `66.965497 GiB`, the
+text decoder without `lm_head` is `68,304,112,256 B` / `63.613162 GiB`, and
+routed plus shared experts are `64,676,331,520 B` / `60.234528 GiB`.  Thus the
+R9700's reported `34,208,743,424 B` / `31.859375 GiB` cannot hold raw BF16.
+All 40 text layers contain MoE; there is no dense replacement layer.  Each
+routed payload is rank-3 BF16: `gate_up_proj [256,1024,2048]` and `down_proj
+[256,2048,512]`.
+
+The manufactured text-only candidate is
+`/home/homelab1/datapool/ullm/product/qwen35-35b-a3b-aq4_0-g8-moe-v0.2/`.
+It uses the already defined strict `AQ4_0` candidate
+`aq4_e4m3_g8_ts_flloyd16` (4-bit indices plus one E4M3 scale index per eight
+values, 5 effective bits/value).  G8 was selected over the existing G16
+candidate because it is the highest-fidelity existing `AQ4_0` choice while
+remaining inside the R9700 byte ledger; no format was invented.  `SQ8_0` was
+not selected: routed experts alone would need about 30 GiB at 8 bits before
+the 4.56 GiB text passthrough and cache/workspace, and the existing `SQ8_0`
+BF16-source route does not support this rank-3 MoE contract.
+
+Only 80 routed rank-3 expert tensors are `AQ4_0`.  Router weights, shared
+experts, attention, embeddings, norms, `lm_head`, and other text tensors are
+raw passthrough (613 tensors).  The resulting exact payload ledger is
+`20,132,659,200 B` AQ4 indices/scales + `4,896,721,536 B` raw passthrough +
+`128 B` for two codebooks = `25,029,380,864 B` / `23.310427 GiB`.
+The package excludes the source checkpoint's vision/MTP-only payload because
+this is a text decoder artifact, not a multimodal serving integration.
+
+Codebooks are not fit per expert.  A held-out cross-validation compared one
+global routed-projection-family codebook with per-layer and per-expert Lloyd16
+fits.  For `down_proj`, the global median/p95/max relative MSE were
+`0.003997/0.004244/0.005328`, versus per-expert
+`0.004125/0.004516/0.008668`; for `gate_up_proj`, global was
+`0.003943/0.004103/0.004369`, while per-expert has unstable tails (max
+`1.448716`).  Per-layer fitting also creates worse layer-0 tails.  The product
+therefore has one globally shared codebook for each routed projection family
+(two codebooks total), across all `40 * 256` experts.  The study is retained
+under the candidate work directory as `codebook-granularity-study.json`.
+
+The converter is deliberately narrow and restartable: it streams a
+safetensors tensor at a time, uses bounded chunks, writes per-tensor staging
+directories, rereads/dequantizes each completed tensor, and records a
+`quantization-state.json`.  It completed all 80 tensors without materializing
+the checkpoint; a subsequent `--resume` quantize invocation completed in
+`0.282 s` without reconversion.  Full package verification reread every
+index/scale/codebook and raw passthrough payload.  The per-tensor error record
+is `evidence/tensor-errors.json`: relative MSE is
+`0.003603673..0.004363885` (mean `0.003634245`) and max-absolute error is
+`0.005326890..0.043730080` (mean `0.013711253`).  Robust outliers are not
+silently ignored: relative-MSE outliers are layer 0 `down_proj`, layer 32 and
+33 `gate_up_proj`, and layer 39 `down_proj`; layer 39 `down_proj` is also the
+sole max-absolute outlier (`0.043730080`).
+
+Router payloads are intact: all 40 source/package SHA-256 values match, and
+the installed PyTorch BF16-linear/FP32-softmax/top-8 arithmetic gives zero
+conditional route changes over 1,280 inputs (92 boundary ties are recorded,
+not hidden).  The raw shared-expert path is separately hash-verified.  A
+four-token layer-0 MoE MLP check gives relative MSE `0.000451407`, RMS
+`5.1263e-6`, and max-absolute error `2.0772e-5`.
+
+However, this does **not** establish end-to-end routing invariance.  The
+bounded CPU-only one-layer-at-a-time 8-token prefill executes all 40 real
+decoder layers without loading the full checkpoint.  Its source-vs-source
+control is exactly zero for all 320 token-layer route checks and final hidden
+state.  Source versus this `AQ4_0` candidate changes strict ordered top-k IDs
+for 238/320 checks and, more importantly, changes the selected expert set for
+105/320 checks; final hidden relative L2 is `0.076012410`.  This is caused by
+accumulated lossy routed-expert output changing later router inputs, despite
+the router weights themselves being raw and exact.  Product metadata records
+this qualification as `not_passed`; the candidate is not connected to a
+loader, service, or promotion path.
+
+For batch 1, the exact packed-artifact ledger plus source-derived cache/state
+and conservative gather/workspace reserves stays within R9700 VRAM at each
+recorded context: 4,096 tokens `25,240,265,156 B` (headroom
+`8,968,478,268 B`), 32,768 `25,864,459,076 B` (headroom `8,344,284,348 B`),
+131,072 `28,004,552,516 B` (headroom `6,204,190,908 B`), and the configured
+262,144 maximum `30,858,010,436 B` (headroom `3,350,732,988 B`).  This is an
+actual artifact-byte/KV ledger, not a `hipMemGetInfo` allocation measurement:
+a Qwen3.5 MoE loader/residency integration does not yet exist, so empirical
+R9700 allocation and serving remain unconfirmed.  No service, active manifest,
+`/opt/ullm` content, FP32 reference corpus, bitwise gate, or campaign was
+used or changed.

@@ -627,3 +627,37 @@ CPU ABI で全段 0 差、R9700 では final output が各々最大 `2.384185791
 layer-0 top-8 `[52,148,101,178,151,128,116,166]` の BF16 `[8,37,71]` slice は HF F32 expected/
 CPU/R9700 decode GEMM で 0 差である。実 weight slab の物理 gather と prefill
 histogram/prefix-sum compaction は residency/最適化段階として未実装のまま明示している。
+
+## BN: Qwen3.5-35B-A3B AQ4_0 text package (2026-07-26)
+
+BI の raw-residency audit を safetensors header から追認した。R9700 は 31.859375 GiB に
+対し、text decoder は 63.613162 GiB、routed + shared experts は 60.234528 GiB、complete
+checkpoint は 66.965497 GiB であり、expert 圧縮なしの architecture support は成立しない。
+対象の40 text layer はすべて MoE で、routed tensors は rank-3
+`[256,1024,2048]` gate/up と `[256,2048,512]` down である。dense-layer fallback は検出されず、
+rank-3 を単純な dense plan に落とす実装は採らなかった。
+
+新規の text-only candidate package を
+`/home/homelab1/datapool/ullm/product/qwen35-35b-a3b-aq4_0-g8-moe-v0.2/` に製造した。
+既存 `AQ4_0` の higher-fidelity `aq4_e4m3_g8_ts_flloyd16` を使い、80 routed expert
+tensors のみ量子化し、router/shared expert/attention/embedding/norm/`lm_head` は raw
+passthrough とした。per-expert codebook は held-out test で quality benefit がなく不安定な
+tail を持ったため、routed down と gate/up に各一つ、全 40×256 expert で共有する global
+codebook を採用した。`SQ8_0` は experts だけで約30 GiBを消費して KV と非expertを残せず、既存
+pipeline もこの BF16 rank-3 source contract を扱わないため採らない。
+
+streaming/resume conversion は tensor ごとの staging/再読込検証を行い、完成 package を全量
+再検証した。80 tensor の relative MSE は `0.003603673..0.004363885`、max-absolute outlier は
+layer 39 `down_proj` の `0.043730080` である。router は全40 tensor SHA一致、1,280 条件付き
+router input で top-8 0変化だった。batch 1 の artifact/KV/workspace byte ledger は 262,144
+token でも `30,858,010,436 B`、headroom `3,350,732,988 B` と算出する。ただし loader が未結線
+なのでこれは R9700 実 allocation ではなく、empirical residency は未確認である。
+
+重要な quality boundary も確認した。CPU で one-layer-at-a-time に全40層・8 token を実行する
+source-vs-source control は 320/320 の selected expert set と final hidden state が完全一致した。
+同じ入力の `AQ4_0` candidate は router weight が raw でも upstream expert error により
+selected set を 105/320、ordered top-k を 238/320 変えた。従って package metadata は
+`not_passed` であり、architecture descriptor/runtime ABI の正しさを量子化 serving 品質に
+読み替えない。軽量昇格 policy に基づく promotion、service 操作、FP32 corpus/campaign/bitwise
+gate は行っていない。次段には、top-k stability requirement を満たす容量内の既存 format policy
+又は requirement 自体の再判断と、MoE loader/residency integration が必要である。
