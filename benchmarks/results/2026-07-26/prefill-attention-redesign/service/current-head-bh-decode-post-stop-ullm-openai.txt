@@ -1,0 +1,7 @@
+MainPID=0
+NRestarts=0
+ActiveState=inactive
+SubState=dead
+UnitFileState=enabled
+StartLimitIntervalUSec=15min
+StartLimitBurst=3

@@ -1,0 +1,12 @@
+2026-07-27T01:10:18+09:00	preflight-begin
+2026-07-27T01:10:19+09:00	stop-attempt
+2026-07-27T01:10:19+09:00	stop-complete
+2026-07-27T01:10:20+09:00	window-begin-lock-acquired-after-service-stop
+2026-07-27T01:10:20+09:00	decode-bh-grouped-tile20-begin
+2026-07-27T01:11:19+09:00	decode-bh-grouped-tile20-complete
+2026-07-27T01:11:19+09:00	measurement-complete
+2026-07-27T01:11:19+09:00	r9700-lock-released
+2026-07-27T01:11:19+09:00	restore-attempt
+2026-07-27T01:11:20+09:00	restore-start-return=0
+2026-07-27T01:11:20+09:00	restore-active
+2026-07-27T01:11:20+09:00	window-finished

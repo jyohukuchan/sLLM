@@ -1,0 +1,488 @@
+{
+  "aggregate": {
+    "attention_dispatches": 160,
+    "attention_kernel_duration_ns_sum": 568718784,
+    "attention_kernel_duration_share_percent": 59.87317297380549,
+    "kernel_dispatches": 67111,
+    "kernel_duration_ms_sum": 949.872465,
+    "kernel_duration_ns_sum": 949872465
+  },
+  "device_assumptions": {
+    "compute_units": 64,
+    "gpu": "R9700 gfx1201",
+    "machine_wave_slots": 2048,
+    "max_waves_per_cu": 32,
+    "wavefront_size": 32
+  },
+  "inputs": {
+    "kernel_trace": "benchmarks/results/2026-07-26/prefill-attention-redesign/raw/profiles/ullm-prefill-p512/rocprof/ullm-prefill-p512_kernel_trace.csv",
+    "kernel_trace_sha256": "7c125eb5b3c297ae1cec11f8e89648aeb2c04c671d141c7a5b5e5de748f7e860"
+  },
+  "kernels": [
+    {
+      "attention_family": true,
+      "dispatches": 160,
+      "kernel_duration_ms_sum": 568.718784,
+      "kernel_duration_ns_sum": 568718784,
+      "kernel_duration_share_percent": 59.87317297380549,
+      "kernel_name": "ullm_cached_prefix_attn_f32_flash2_kernel",
+      "launch_geometries": [
+        {
+          "dispatches": 160,
+          "grid_size_x": 1310720,
+          "grid_size_y": 1,
+          "grid_size_z": 1,
+          "threads_per_workgroup": 256,
+          "wave32_per_dispatch": 40960,
+          "wave_supply_percent_of_machine_slots": 2000.0,
+          "workgroup_size_x": 256,
+          "workgroup_size_y": 1,
+          "workgroup_size_z": 1,
+          "workgroups_per_dispatch": 5120
+        }
+      ],
+      "wave32_sum": 6553600,
+      "workgroups_sum": 819200
+    },
+    {
+      "attention_family": false,
+      "dispatches": 41637,
+      "kernel_duration_ms_sum": 95.84446,
+      "kernel_duration_ns_sum": 95844460,
+      "kernel_duration_share_percent": 10.090245115169225,
+      "kernel_name": "__amd_rocclr_copyBuffer",
+      "launch_geometries": [
+        {
+          "dispatches": 40960,
+          "grid_size_x": 512,
+          "grid_size_y": 1,
+          "grid_size_z": 1,
+          "threads_per_workgroup": 512,
+          "wave32_per_dispatch": 16,
+          "wave_supply_percent_of_machine_slots": 0.78125,
+          "workgroup_size_x": 512,
+          "workgroup_size_y": 1,
+          "workgroup_size_z": 1,
+          "workgroups_per_dispatch": 1
+        },
+        {
+          "dispatches": 513,
+          "grid_size_x": 1536,
+          "grid_size_y": 1,
+          "grid_size_z": 1,
+          "threads_per_workgroup": 512,
+          "wave32_per_dispatch": 48,
+          "wave_supply_percent_of_machine_slots": 2.34375,
+          "workgroup_size_x": 512,
+          "workgroup_size_y": 1,
+          "workgroup_size_z": 1,
+          "workgroups_per_dispatch": 3
+        },
+        {
+          "dispatches": 164,
+          "grid_size_x": 16384,
+          "grid_size_y": 1,
+          "grid_size_z": 1,
+          "threads_per_workgroup": 512,
+          "wave32_per_dispatch": 512,
+          "wave_supply_percent_of_machine_slots": 25.0,
+          "workgroup_size_x": 512,
+          "workgroup_size_y": 1,
+          "workgroup_size_z": 1,
+          "workgroups_per_dispatch": 32
+        }
+      ],
+      "wave32_sum": 763952,
+      "workgroups_sum": 47747
+    },
+    {
+      "attention_family": false,
+      "dispatches": 800,
+      "kernel_duration_ms_sum": 81.044539,
+      "kernel_duration_ns_sum": 81044539,
+      "kernel_duration_share_percent": 8.532149523883714,
+      "kernel_name": "void ck::kernel_gemm_xdl_cshuffle_v3<ck::GridwiseGemmMultiD_ABScale_xdl_cshuffle_v3<ck::tensor_layout::gemm::RowMajor, ck::tensor_layout::gemm::ColumnMajor, ck::Tuple<>, ck::tensor_layout::gemm::RowMajor, ck::f8_ocp_t, ck::f8_ocp_t, float, float, ck::Tuple<>, unsigned short, ck::tensor_operation::element_wise::PassThrough, ck::tensor_operation::element_wise::PassThrough, ck::tensor_operation::element_wise::PassThrough, (ck::tensor_operation::device::GemmSpecialization)0, 256, 1, 128, 128, 16, 128, 128, 8, 16, 16, 16, 1, 1, ck::Sequence<16, 16, 1>, ck::Sequence<1, 0, 2>, ck::Sequence<1, 0, 2>, 2, 8, 8, false, 0, ck::Sequence<8, 32, 1>, ck::Sequence<1, 0, 2>, ck::Sequence<1, 0, 2>, 2, 16, 16, false, 0, 1, 1, ck::Sequence<1, 16, 1, 16>, ck::Sequence<8>, (ck::BlockGemmPipelineScheduler)0, (ck::BlockGemmPipelineVersion)0, ck::f8_ocp_t, ck::f8_ocp_t, ck::f8_ocp_t, ck::f8_ocp_t>, true, (ck::InMemoryDataOperationEnum)0, 2, (ck::TailNumber)10>(ck::GridwiseGemmMultiD_ABScale_xdl_cshuffle_v3<ck::tensor_layout::gemm::RowMajor, ck::tensor_layout::gemm::ColumnMajor, ck::Tuple<>, ck::tensor_layout::gemm::RowMajor, ck::f8_ocp_t, ck::f8_ocp_t, float, float, ck::Tuple<>, unsigned short, ck::tensor_operation::element_wise::PassThrough, ck::tensor_operation::element_wise::PassThrough, ck::tensor_operation::element_wise::PassThrough, (ck::tensor_operation::device::GemmSpecialization)0, 256, 1, 128, 128, 16, 128, 128, 8, 16, 16, 16, 1, 1, ck::Sequence<16, 16, 1>, ck::Sequence<1, 0, 2>, ck::Sequence<1, 0, 2>, 2, 8, 8, false, 0, ck::Sequence<8, 32, 1>, ck::Sequence<1, 0, 2>, ck::Sequence<1, 0, 2>, 2, 16, 16, false, 0, 1, 1, ck::Sequence<1, 16, 1, 16>, ck::Sequence<8>, (ck::BlockGemmPipelineScheduler)0, (ck::BlockGemmPipelineVersion)0, ck::f8_ocp_t, ck::f8_ocp_t, ck::f8_ocp_t, ck::f8_ocp_t>::Argument)",
+      "launch_geometries": [
+        {
+          "dispatches": 320,
+          "grid_size_x": 16384,
+          "grid_size_y": 1,
+          "grid_size_z": 1,
+          "threads_per_workgroup": 256,
+          "wave32_per_dispatch": 512,
+          "wave_supply_percent_of_machine_slots": 25.0,
+          "workgroup_size_x": 256,
+          "workgroup_size_y": 1,
+          "workgroup_size_z": 1,
+          "workgroups_per_dispatch": 64
+        },
+        {
+          "dispatches": 480,
+          "grid_size_x": 81920,
+          "grid_size_y": 1,
+          "grid_size_z": 1,
+          "threads_per_workgroup": 256,
+          "wave32_per_dispatch": 2560,
+          "wave_supply_percent_of_machine_slots": 125.0,
+          "workgroup_size_x": 256,
+          "workgroup_size_y": 1,
+          "workgroup_size_z": 1,
+          "workgroups_per_dispatch": 320
+        }
+      ],
+      "wave32_sum": 1392640,
+      "workgroups_sum": 174080
+    },
+    {
+      "attention_family": false,
+      "dispatches": 320,
+      "kernel_duration_ms_sum": 80.145599,
+      "kernel_duration_ns_sum": 80145599,
+      "kernel_duration_share_percent": 8.437511555827655,
+      "kernel_name": "void ck::kernel_gemm_xdl_cshuffle_v3<ck::GridwiseGemmMultiD_ABScale_xdl_cshuffle_v3<ck::tensor_layout::gemm::RowMajor, ck::tensor_layout::gemm::ColumnMajor, ck::Tuple<>, ck::tensor_layout::gemm::RowMajor, ck::f8_ocp_t, ck::f8_ocp_t, float, float, ck::Tuple<>, unsigned short, ck::tensor_operation::element_wise::PassThrough, ck::tensor_operation::element_wise::PassThrough, ck::tensor_operation::element_wise::PassThrough, (ck::tensor_operation::device::GemmSpecialization)0, 256, 1, 128, 128, 16, 256, 128, 8, 16, 16, 16, 1, 2, ck::Sequence<16, 16, 1>, ck::Sequence<1, 0, 2>, ck::Sequence<1, 0, 2>, 2, 8, 8, false, 0, ck::Sequence<8, 32, 1>, ck::Sequence<1, 0, 2>, ck::Sequence<1, 0, 2>, 2, 16, 16, false, 0, 1, 2, ck::Sequence<1, 16, 1, 16>, ck::Sequence<8>, (ck::BlockGemmPipelineScheduler)0, (ck::BlockGemmPipelineVersion)0, ck::f8_ocp_t, ck::f8_ocp_t, ck::f8_ocp_t, ck::f8_ocp_t>, true, (ck::InMemoryDataOperationEnum)0, 2, (ck::TailNumber)10>(ck::GridwiseGemmMultiD_ABScale_xdl_cshuffle_v3<ck::tensor_layout::gemm::RowMajor, ck::tensor_layout::gemm::ColumnMajor, ck::Tuple<>, ck::tensor_layout::gemm::RowMajor, ck::f8_ocp_t, ck::f8_ocp_t, float, float, ck::Tuple<>, unsigned short, ck::tensor_operation::element_wise::PassThrough, ck::tensor_operation::element_wise::PassThrough, ck::tensor_operation::element_wise::PassThrough, (ck::tensor_operation::device::GemmSpecialization)0, 256, 1, 128, 128, 16, 256, 128, 8, 16, 16, 16, 1, 2, ck::Sequence<16, 16, 1>, ck::Sequence<1, 0, 2>, ck::Sequence<1, 0, 2>, 2, 8, 8, false, 0, ck::Sequence<8, 32, 1>, ck::Sequence<1, 0, 2>, ck::Sequence<1, 0, 2>, 2, 16, 16, false, 0, 1, 2, ck::Sequence<1, 16, 1, 16>, ck::Sequence<8>, (ck::BlockGemmPipelineScheduler)0, (ck::BlockGemmPipelineVersion)0, ck::f8_ocp_t, ck::f8_ocp_t, ck::f8_ocp_t, ck::f8_ocp_t>::Argument)",
+      "launch_geometries": [
+        {
+          "dispatches": 320,
+          "grid_size_x": 139264,
+          "grid_size_y": 1,
+          "grid_size_z": 1,
+          "threads_per_workgroup": 256,
+          "wave32_per_dispatch": 4352,
+          "wave_supply_percent_of_machine_slots": 212.5,
+          "workgroup_size_x": 256,
+          "workgroup_size_y": 1,
+          "workgroup_size_z": 1,
+          "workgroups_per_dispatch": 544
+        }
+      ],
+      "wave32_sum": 1392640,
+      "workgroups_sum": 174080
+    },
+    {
+      "attention_family": false,
+      "dispatches": 20480,
+      "kernel_duration_ms_sum": 57.070917,
+      "kernel_duration_ns_sum": 57070917,
+      "kernel_duration_share_percent": 6.008271542011696,
+      "kernel_name": "ullm_paged_kv_write_f32_kernel",
+      "launch_geometries": [
+        {
+          "dispatches": 20480,
+          "grid_size_x": 2048,
+          "grid_size_y": 1,
+          "grid_size_z": 1,
+          "threads_per_workgroup": 256,
+          "wave32_per_dispatch": 64,
+          "wave_supply_percent_of_machine_slots": 3.125,
+          "workgroup_size_x": 256,
+          "workgroup_size_y": 1,
+          "workgroup_size_z": 1,
+          "workgroups_per_dispatch": 8
+        }
+      ],
+      "wave32_sum": 1310720,
+      "workgroups_sum": 163840
+    },
+    {
+      "attention_family": false,
+      "dispatches": 640,
+      "kernel_duration_ms_sum": 23.176901,
+      "kernel_duration_ns_sum": 23176901,
+      "kernel_duration_share_percent": 2.4400013532342997,
+      "kernel_name": "(anonymous namespace)::quantize_activation_block128(float const*, unsigned char*, float*, unsigned long long)",
+      "launch_geometries": [
+        {
+          "dispatches": 480,
+          "grid_size_x": 655360,
+          "grid_size_y": 1,
+          "grid_size_z": 1,
+          "threads_per_workgroup": 128,
+          "wave32_per_dispatch": 20480,
+          "wave_supply_percent_of_machine_slots": 1000.0,
+          "workgroup_size_x": 128,
+          "workgroup_size_y": 1,
+          "workgroup_size_z": 1,
+          "workgroups_per_dispatch": 5120
+        },
+        {
+          "dispatches": 160,
+          "grid_size_x": 2228224,
+          "grid_size_y": 1,
+          "grid_size_z": 1,
+          "threads_per_workgroup": 128,
+          "wave32_per_dispatch": 69632,
+          "wave_supply_percent_of_machine_slots": 3400.0,
+          "workgroup_size_x": 128,
+          "workgroup_size_y": 1,
+          "workgroup_size_z": 1,
+          "workgroups_per_dispatch": 17408
+        }
+      ],
+      "wave32_sum": 20971520,
+      "workgroups_sum": 5242880
+    },
+    {
+      "attention_family": false,
+      "dispatches": 1120,
+      "kernel_duration_ms_sum": 13.589715,
+      "kernel_duration_ns_sum": 13589715,
+      "kernel_duration_share_percent": 1.4306883819397798,
+      "kernel_name": "(anonymous namespace)::bf16_to_f32(unsigned short const*, float*, unsigned long long)",
+      "launch_geometries": [
+        {
+          "dispatches": 320,
+          "grid_size_x": 131072,
+          "grid_size_y": 1,
+          "grid_size_z": 1,
+          "threads_per_workgroup": 256,
+          "wave32_per_dispatch": 4096,
+          "wave_supply_percent_of_machine_slots": 200.0,
+          "workgroup_size_x": 256,
+          "workgroup_size_y": 1,
+          "workgroup_size_z": 1,
+          "workgroups_per_dispatch": 512
+        },
+        {
+          "dispatches": 480,
+          "grid_size_x": 655360,
+          "grid_size_y": 1,
+          "grid_size_z": 1,
+          "threads_per_workgroup": 256,
+          "wave32_per_dispatch": 20480,
+          "wave_supply_percent_of_machine_slots": 1000.0,
+          "workgroup_size_x": 256,
+          "workgroup_size_y": 1,
+          "workgroup_size_z": 1,
+          "workgroups_per_dispatch": 2560
+        },
+        {
+          "dispatches": 320,
+          "grid_size_x": 2228224,
+          "grid_size_y": 1,
+          "grid_size_z": 1,
+          "threads_per_workgroup": 256,
+          "wave32_per_dispatch": 69632,
+          "wave_supply_percent_of_machine_slots": 3400.0,
+          "workgroup_size_x": 256,
+          "workgroup_size_y": 1,
+          "workgroup_size_z": 1,
+          "workgroups_per_dispatch": 8704
+        }
+      ],
+      "wave32_sum": 33423360,
+      "workgroups_sum": 4177920
+    },
+    {
+      "attention_family": false,
+      "dispatches": 641,
+      "kernel_duration_ms_sum": 8.037845,
+      "kernel_duration_ns_sum": 8037845,
+      "kernel_duration_share_percent": 0.8462025478336189,
+      "kernel_name": "ullm_segmented_rmsnorm_f32_kernel",
+      "launch_geometries": [
+        {
+          "dispatches": 1,
+          "grid_size_x": 256,
+          "grid_size_y": 1,
+          "grid_size_z": 1,
+          "threads_per_workgroup": 256,
+          "wave32_per_dispatch": 8,
+          "wave_supply_percent_of_machine_slots": 0.390625,
+          "workgroup_size_x": 256,
+          "workgroup_size_y": 1,
+          "workgroup_size_z": 1,
+          "workgroups_per_dispatch": 1
+        },
+        {
+          "dispatches": 320,
+          "grid_size_x": 32768,
+          "grid_size_y": 1,
+          "grid_size_z": 1,
+          "threads_per_workgroup": 256,
+          "wave32_per_dispatch": 1024,
+          "wave_supply_percent_of_machine_slots": 50.0,
+          "workgroup_size_x": 256,
+          "workgroup_size_y": 1,
+          "workgroup_size_z": 1,
+          "workgroups_per_dispatch": 128
+        },
+        {
+          "dispatches": 160,
+          "grid_size_x": 262144,
+          "grid_size_y": 1,
+          "grid_size_z": 1,
+          "threads_per_workgroup": 256,
+          "wave32_per_dispatch": 8192,
+          "wave_supply_percent_of_machine_slots": 400.0,
+          "workgroup_size_x": 256,
+          "workgroup_size_y": 1,
+          "workgroup_size_z": 1,
+          "workgroups_per_dispatch": 1024
+        },
+        {
+          "dispatches": 160,
+          "grid_size_x": 1310720,
+          "grid_size_y": 1,
+          "grid_size_z": 1,
+          "threads_per_workgroup": 256,
+          "wave32_per_dispatch": 40960,
+          "wave_supply_percent_of_machine_slots": 2000.0,
+          "workgroup_size_x": 256,
+          "workgroup_size_y": 1,
+          "workgroup_size_z": 1,
+          "workgroups_per_dispatch": 5120
+        }
+      ],
+      "wave32_sum": 8192008,
+      "workgroups_sum": 1024001
+    },
+    {
+      "attention_family": false,
+      "dispatches": 320,
+      "kernel_duration_ms_sum": 6.459233,
+      "kernel_duration_ns_sum": 6459233,
+      "kernel_duration_share_percent": 0.6800105527851047,
+      "kernel_name": "ullm_rope_f32_kernel",
+      "launch_geometries": [
+        {
+          "dispatches": 160,
+          "grid_size_x": 65536,
+          "grid_size_y": 1,
+          "grid_size_z": 1,
+          "threads_per_workgroup": 256,
+          "wave32_per_dispatch": 2048,
+          "wave_supply_percent_of_machine_slots": 100.0,
+          "workgroup_size_x": 256,
+          "workgroup_size_y": 1,
+          "workgroup_size_z": 1,
+          "workgroups_per_dispatch": 256
+        },
+        {
+          "dispatches": 160,
+          "grid_size_x": 327680,
+          "grid_size_y": 1,
+          "grid_size_z": 1,
+          "threads_per_workgroup": 256,
+          "wave32_per_dispatch": 10240,
+          "wave_supply_percent_of_machine_slots": 500.0,
+          "workgroup_size_x": 256,
+          "workgroup_size_y": 1,
+          "workgroup_size_z": 1,
+          "workgroups_per_dispatch": 1280
+        }
+      ],
+      "wave32_sum": 1966080,
+      "workgroups_sum": 245760
+    },
+    {
+      "attention_family": false,
+      "dispatches": 160,
+      "kernel_duration_ms_sum": 5.190014,
+      "kernel_duration_ns_sum": 5190014,
+      "kernel_duration_share_percent": 0.5463906146600428,
+      "kernel_name": "ullm_silu_mul_f32_kernel",
+      "launch_geometries": [
+        {
+          "dispatches": 160,
+          "grid_size_x": 2228224,
+          "grid_size_y": 1,
+          "grid_size_z": 1,
+          "threads_per_workgroup": 256,
+          "wave32_per_dispatch": 69632,
+          "wave_supply_percent_of_machine_slots": 3400.0,
+          "workgroup_size_x": 256,
+          "workgroup_size_y": 1,
+          "workgroup_size_z": 1,
+          "workgroups_per_dispatch": 8704
+        }
+      ],
+      "wave32_sum": 11141120,
+      "workgroups_sum": 1392640
+    },
+    {
+      "attention_family": false,
+      "dispatches": 512,
+      "kernel_duration_ms_sum": 4.649298,
+      "kernel_duration_ns_sum": 4649298,
+      "kernel_duration_share_percent": 0.48946549892884833,
+      "kernel_name": "ullm_bf16_row_f32_kernel",
+      "launch_geometries": [
+        {
+          "dispatches": 512,
+          "grid_size_x": 256,
+          "grid_size_y": 1,
+          "grid_size_z": 1,
+          "threads_per_workgroup": 256,
+          "wave32_per_dispatch": 8,
+          "wave_supply_percent_of_machine_slots": 0.390625,
+          "workgroup_size_x": 256,
+          "workgroup_size_y": 1,
+          "workgroup_size_z": 1,
+          "workgroups_per_dispatch": 1
+        }
+      ],
+      "wave32_sum": 4096,
+      "workgroups_sum": 512
+    },
+    {
+      "attention_family": false,
+      "dispatches": 320,
+      "kernel_duration_ms_sum": 3.482332,
+      "kernel_duration_ns_sum": 3482332,
+      "kernel_duration_share_percent": 0.36661047965002336,
+      "kernel_name": "ullm_add_f32_kernel",
+      "launch_geometries": [
+        {
+          "dispatches": 320,
+          "grid_size_x": 655360,
+          "grid_size_y": 1,
+          "grid_size_z": 1,
+          "threads_per_workgroup": 256,
+          "wave32_per_dispatch": 20480,
+          "wave_supply_percent_of_machine_slots": 1000.0,
+          "workgroup_size_x": 256,
+          "workgroup_size_y": 1,
+          "workgroup_size_z": 1,
+          "workgroups_per_dispatch": 2560
+        }
+      ],
+      "wave32_sum": 6553600,
+      "workgroups_sum": 819200
+    },
+    {
+      "attention_family": false,
+      "dispatches": 1,
+      "kernel_duration_ms_sum": 2.462828,
+      "kernel_duration_ns_sum": 2462828,
+      "kernel_duration_share_percent": 0.2592798602705048,
+      "kernel_name": "ullm_matvec_bf16_f32_kernel",
+      "launch_geometries": [
+        {
+          "dispatches": 1,
+          "grid_size_x": 9723904,
+          "grid_size_y": 1,
+          "grid_size_z": 1,
+          "threads_per_workgroup": 64,
+          "wave32_per_dispatch": 303872,
+          "wave_supply_percent_of_machine_slots": 14837.5,
+          "workgroup_size_x": 64,
+          "workgroup_size_y": 1,
+          "workgroup_size_z": 1,
+          "workgroups_per_dispatch": 151936
+        }
+      ],
+      "wave32_sum": 303872,
+      "workgroups_sum": 151936
+    }
+  ],
+  "label": "uLLM-SQ8_0-prefill-p512",
+  "limitations": [
+    "Summed kernel dispatch duration is not wall-clock elapsed time and is never used as throughput.",
+    "Wave32 supply is a launch-envelope calculation, not measured residency or achieved occupancy.",
+    "Name-based attention classification is trace attribution; algorithm details require source or ISA evidence."
+  ],
+  "schema_version": "ullm.prefill_attention_redesign.kernel_trace.v1",
+  "selection": {
+    "method": "all kernel rows in supplied trace"
+  }
+}

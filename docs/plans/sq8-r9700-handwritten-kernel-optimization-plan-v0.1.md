@@ -1002,3 +1002,71 @@ does not prove every difference is caused by attention, but it is not evidence
 to call the candidate text-quality-approved.  This stays a service-candidate
 record only.  It must not use the promotion tool: promoting `SQ8_0` would
 replace the active `AQ4_0` product model.
+
+## `SQ8_0` prefill cached-prefix Flash2 GQA staging — 2026-07-26/27
+
+The prefill investigation begins with actual selected kernel traces rather
+than assuming that the decode remedy transfers.  On the R9700 F32-KV, M=128
+path, `ullm_cached_prefix_attn_f32_flash2_kernel` accounts for 59.873173% of
+uLLM summed selected kernel duration at prompt 512, 86.318790% at 2048, and
+93.069535% at 4095.  It has 160/640/1280 calls respectively.  Each actual
+dispatch is grid 1,310,720, block 256: 5,120 workgroups and 40,960 wave32s,
+or 2,000% of the 64 CU x 32-wave queued-supply proxy.  This is not resident
+occupancy, but it rules out treating prefill as the decode-like 15.625%
+under-supply case.
+
+The matching llama.cpp Q8_0 F32-KV trace emits 40 `flash_attn_ext_f16<...>`
+calls at each size, with grid `(128,4,40)`, block `(32,4,1)`: 160 workgroups,
+640 wave32s, and a 31.25% queued-supply proxy.  Its attention composition is
+3.767997% / 11.275091% / 19.279610%, while `mul_mat_q` is
+85.364380% / 75.717628% / 65.722592%.  The symbol name does not override the
+recorded F32-KV configuration.  The distinct trace selections and summed
+kernel durations are composition evidence only, never tok/s.  Physical HBM
+bytes, cache-hit behavior, achieved occupancy, and a memory-bound conclusion
+remain **未確認**.
+
+The retained prefill fast path is therefore GQA reuse without a decode-style
+split-C reduction: on gfx1201 only, with F32 KV, 5 Q heads per KV head, and
+128-dimensional K/V, one CTA owns `(new token, KV head)`.  It stages each
+20-token K segment, then each V segment, once in LDS and serially processes
+the five Q heads.  Each head retains generic Flash2's 256-thread score/max/sum
+trees, token order, and 64-token online-softmax boundary.  K and V reuse one
+staging allocation rather than co-residing.  Other shapes/GPU paths retain
+generic Flash2; the pre-existing staged-wave32 body remains a separate
+explicit opt-in experiment.  `ULLM_DISABLE_SQ8_0_FLASH2_GQA_GROUPED=1` is the
+A/B fallback.  This is semantic K/V reuse; it is not a claim that physical HBM
+traffic became exactly one fifth.
+
+The same candidate executable, with only that fallback setting changed for
+control, gives the following five-repeat full-model prefill rates:
+
+| prompt | generic tok/s | serial GQA tok/s | ratio |
+| ---: | ---: | ---: | ---: |
+| 128 | 865.157 | 883.021 | 1.020648x |
+| 512 | 520.351 | 561.905 | 1.079858x |
+| 1024 | 338.308 | 358.745 | 1.060409x |
+| 2048 | 189.737 | 196.585 | 1.036094x |
+| 4095 | 100.586 | 105.040 | 1.044275x |
+
+The 128/4095 ratio improves only 8.601136x -> 8.406534x.  Thus the result is
+a retained local improvement, not a claim that the long-prefix curve is flat:
+the same-condition llama.cpp Q8_0/F32-KV reference remains 1,165.756,
+1,195.722, 1,145.351, 1,058.379, and 1,008.683 tok/s, leaving a 9.603x gap at
+4095.  It was selected on full-model data, not an attention-only probe.
+
+The generic/candidate full-model oracle is F32-byte exact for hidden state and
+logits at all five prompt sizes (`max_abs=0`, `relative_l2=0`, no non-finite,
+same top-1/generated token).  This is recorded as review evidence under the
+lightweight policy, not as a new scalar numerical gate.  The BK cursor-rewind
+tail implementation is untouched; the 4095 oracle records expected cache
+lengths and 32 prefill advances.  The earlier wave32/exact-tile64 direction
+was rejected after a real arithmetic-path difference in the full-model oracle,
+not by an arbitrary threshold, and its partial timing is not used here.
+
+The BH grouped tile-20 decode selector was rerun against the current BR
+worktree build and reached 27.411786 tok/s versus the 27.378731 reference
+(1.001207x), so this prefill source change did not regress the measured decode
+condition.  Evidence, source provenance, service/thermal records, and raw
+traces are under
+`benchmarks/results/2026-07-26/prefill-attention-redesign/`.  No manifest or
+service configuration was changed and no `SQ8_0` promotion was attempted.
