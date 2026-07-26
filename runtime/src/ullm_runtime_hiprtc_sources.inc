@@ -7392,6 +7392,218 @@ extern "C" __global__ void ullm_cached_prefix_attn_f32_flash2_kernel(
 )";
     }
 
+    // This variant keeps the generic Flash2 arithmetic schedule for every
+    // individual Q head.  One CTA owns a (token, KV-head) group and stages a
+    // 20-token K or V segment only once, then visits the five Q heads in a
+    // deterministic sequence.  The five heads therefore reuse the same K/V
+    // staging, while score, max, sum, and weighted-value reductions retain the
+    // generic 256-thread tree and 64-token online-softmax boundary.
+    static const char *cached_prefix_flash2_f32_gqa_grouped_serial_kernel_source() {
+        return R"(
+extern "C" __global__ void ullm_cached_prefix_attn_f32_flash2_gqa_grouped_kernel(
+    const float *q,
+    const float *k_cache,
+    const float *v_cache,
+    unsigned long long cached_prefix_len,
+    unsigned long long new_tokens,
+    unsigned long long q_heads,
+    unsigned long long kv_heads,
+    unsigned long long head_dim,
+    unsigned long long value_dim,
+    float softmax_scale,
+    float *output) {
+    constexpr unsigned int kStageTokens = 20u;
+    constexpr unsigned int kFlashTileTokens = 64u;
+    constexpr unsigned int kQHeadsPerKv = 5u;
+    constexpr unsigned int kHeadDim = 128u;
+
+    if (blockDim.x != 256u || kv_heads == 0u || head_dim != kHeadDim ||
+        value_dim != kHeadDim || q_heads != kv_heads * kQHeadsPerKv) {
+        return;
+    }
+    const unsigned long long grouped_index = static_cast<unsigned long long>(blockIdx.x);
+    const unsigned long long grouped_count = new_tokens * kv_heads;
+    if (grouped_index >= grouped_count) {
+        return;
+    }
+
+    const unsigned long long token_index = grouped_index / kv_heads;
+    const unsigned long long kv_head = grouped_index % kv_heads;
+    const unsigned long long cache_len = cached_prefix_len + token_index + 1u;
+    const unsigned int tid = threadIdx.x;
+    const unsigned long long value = static_cast<unsigned long long>(tid);
+    const bool value_active = value < value_dim;
+
+    __shared__ float staged_kv[kStageTokens * kHeadDim];
+    __shared__ float reduce[256];
+    __shared__ float scores[kQHeadsPerKv * kFlashTileTokens];
+    __shared__ float shared_tile_max[kQHeadsPerKv];
+    __shared__ float shared_tile_sum[kQHeadsPerKv];
+    __shared__ float shared_m_new[kQHeadsPerKv];
+    __shared__ float shared_alpha[kQHeadsPerKv];
+
+    float max_score[kQHeadsPerKv] = {
+        -3.4028234663852886e38f,
+        -3.4028234663852886e38f,
+        -3.4028234663852886e38f,
+        -3.4028234663852886e38f,
+        -3.4028234663852886e38f,
+    };
+    float denominator[kQHeadsPerKv] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+    float weighted[kQHeadsPerKv] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+
+    for (unsigned long long tile_start = 0u; tile_start < cache_len; tile_start += kFlashTileTokens) {
+        const unsigned long long remaining = cache_len - tile_start;
+        const unsigned int tile_count =
+            remaining < static_cast<unsigned long long>(kFlashTileTokens) ?
+                static_cast<unsigned int>(remaining) : kFlashTileTokens;
+
+        // Stage K once per KV head.  For each Q head, the score calculation
+        // below is deliberately the generic Flash2 body with only the source
+        // load redirected to the exact staged float.
+        for (unsigned int stage_start = 0u; stage_start < tile_count; stage_start += kStageTokens) {
+            const unsigned int stage_count =
+                tile_count - stage_start < kStageTokens ? tile_count - stage_start : kStageTokens;
+            const unsigned int stage_elements = stage_count * kHeadDim;
+            for (unsigned int index = tid; index < stage_elements; index += blockDim.x) {
+                const unsigned int token_offset = index / kHeadDim;
+                const unsigned int dim = index % kHeadDim;
+                const unsigned long long source_timestep =
+                    tile_start + static_cast<unsigned long long>(stage_start + token_offset);
+                staged_kv[index] =
+                    k_cache[(source_timestep * kv_heads + kv_head) * head_dim + dim];
+            }
+            __syncthreads();
+
+            for (unsigned int q_slot = 0u; q_slot < kQHeadsPerKv; ++q_slot) {
+                const unsigned long long q_head =
+                    kv_head * kQHeadsPerKv + static_cast<unsigned long long>(q_slot);
+                const unsigned long long q_base = (token_index * q_heads + q_head) * head_dim;
+                const unsigned int score_base = q_slot * kFlashTileTokens;
+                for (unsigned int token_offset = 0u; token_offset < stage_count; ++token_offset) {
+                    float partial = 0.0f;
+                    for (unsigned long long dim = tid; dim < head_dim; dim += blockDim.x) {
+                        partial += q[q_base + dim] * staged_kv[token_offset * kHeadDim + dim];
+                    }
+                    reduce[tid] = partial;
+                    __syncthreads();
+                    for (unsigned int stride = blockDim.x >> 1; stride > 0; stride >>= 1) {
+                        if (tid < stride) {
+                            reduce[tid] += reduce[tid + stride];
+                        }
+                        __syncthreads();
+                    }
+                    if (tid == 0u) {
+                        scores[score_base + stage_start + token_offset] = reduce[0] * softmax_scale;
+                    }
+                    __syncthreads();
+                }
+            }
+            __syncthreads();
+        }
+
+        // Preserve generic Flash2's max and sum trees separately for every
+        // Q head.  Only the inter-head schedule changed; a head's own score
+        // order and online state update are unchanged.
+        for (unsigned int q_slot = 0u; q_slot < kQHeadsPerKv; ++q_slot) {
+            const unsigned int score_base = q_slot * kFlashTileTokens;
+            float local_max = -3.4028234663852886e38f;
+            for (unsigned int tile_offset = tid; tile_offset < tile_count; tile_offset += blockDim.x) {
+                const float score = scores[score_base + tile_offset];
+                local_max = score > local_max ? score : local_max;
+            }
+            reduce[tid] = local_max;
+            __syncthreads();
+            for (unsigned int stride = blockDim.x >> 1; stride > 0; stride >>= 1) {
+                if (tid < stride) {
+                    reduce[tid] = reduce[tid] > reduce[tid + stride] ? reduce[tid] : reduce[tid + stride];
+                }
+                __syncthreads();
+            }
+            if (tid == 0u) {
+                shared_tile_max[q_slot] = reduce[0];
+                const float m_new = max_score[q_slot] > shared_tile_max[q_slot] ?
+                    max_score[q_slot] : shared_tile_max[q_slot];
+                shared_m_new[q_slot] = m_new;
+                shared_alpha[q_slot] = max_score[q_slot] <= -3.0e38f ?
+                    0.0f : expf(max_score[q_slot] - m_new);
+            }
+            __syncthreads();
+
+            const float m_new = shared_m_new[q_slot];
+            float local_sum = 0.0f;
+            for (unsigned int tile_offset = tid; tile_offset < tile_count; tile_offset += blockDim.x) {
+                const float weight = expf(scores[score_base + tile_offset] - m_new);
+                scores[score_base + tile_offset] = weight;
+                local_sum += weight;
+            }
+            reduce[tid] = local_sum;
+            __syncthreads();
+            for (unsigned int stride = blockDim.x >> 1; stride > 0; stride >>= 1) {
+                if (tid < stride) {
+                    reduce[tid] += reduce[tid + stride];
+                }
+                __syncthreads();
+            }
+            if (tid == 0u) {
+                shared_tile_sum[q_slot] = reduce[0];
+            }
+            __syncthreads();
+        }
+
+        float tile_weighted[kQHeadsPerKv] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+        // Reuse the K staging allocation for V.  The V loop has the generic
+        // token order for each Q head even though q slots are interleaved.
+        for (unsigned int stage_start = 0u; stage_start < tile_count; stage_start += kStageTokens) {
+            const unsigned int stage_count =
+                tile_count - stage_start < kStageTokens ? tile_count - stage_start : kStageTokens;
+            const unsigned int stage_elements = stage_count * kHeadDim;
+            for (unsigned int index = tid; index < stage_elements; index += blockDim.x) {
+                const unsigned int token_offset = index / kHeadDim;
+                const unsigned int dim = index % kHeadDim;
+                const unsigned long long source_timestep =
+                    tile_start + static_cast<unsigned long long>(stage_start + token_offset);
+                staged_kv[index] =
+                    v_cache[(source_timestep * kv_heads + kv_head) * value_dim + dim];
+            }
+            __syncthreads();
+            if (value_active) {
+                for (unsigned int q_slot = 0u; q_slot < kQHeadsPerKv; ++q_slot) {
+                    const unsigned int score_base = q_slot * kFlashTileTokens + stage_start;
+                    float current = tile_weighted[q_slot];
+                    for (unsigned int token_offset = 0u; token_offset < stage_count; ++token_offset) {
+                        current += scores[score_base + token_offset] *
+                            staged_kv[token_offset * kHeadDim + value];
+                    }
+                    tile_weighted[q_slot] = current;
+                }
+            }
+            __syncthreads();
+        }
+
+        for (unsigned int q_slot = 0u; q_slot < kQHeadsPerKv; ++q_slot) {
+            if (value_active) {
+                weighted[q_slot] = weighted[q_slot] * shared_alpha[q_slot] + tile_weighted[q_slot];
+            }
+            denominator[q_slot] = denominator[q_slot] * shared_alpha[q_slot] + shared_tile_sum[q_slot];
+            max_score[q_slot] = shared_m_new[q_slot];
+        }
+        __syncthreads();
+    }
+
+    if (value_active) {
+        for (unsigned int q_slot = 0u; q_slot < kQHeadsPerKv; ++q_slot) {
+            const unsigned long long q_head =
+                kv_head * kQHeadsPerKv + static_cast<unsigned long long>(q_slot);
+            const unsigned long long output_base =
+                (token_index * q_heads + q_head) * value_dim + value;
+            output[output_base] = weighted[q_slot] / denominator[q_slot];
+        }
+    }
+}
+)";
+    }
+
     // This isolated R9700-only source is intentionally a separate symbol.  It
     // keeps the public Flash2 launch contract and F32 KV layout unchanged while
     // replacing the three 256-lane LDS trees with wave32 reductions plus the

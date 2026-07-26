@@ -2881,16 +2881,27 @@ HipCachedPrefixAttnFp8E4m3KernelCache &hip_cached_prefix_attn_fp8_e4m3_kernel_ca
     return cache;
 }
 
+enum class CachedPrefixAttnF32Flash2KernelVariant {
+    Generic,
+    StagedWave32Prototype,
+    GqaGrouped,
+};
+
 class HipCachedPrefixAttnF32Flash2KernelCache {
 public:
     void *function_for_device(
         int device_id,
-        bool use_staged_wave32_prototype,
+        CachedPrefixAttnF32Flash2KernelVariant variant,
         std::string *error) {
         std::lock_guard<std::mutex> lock(mutex_);
-        auto &modules = use_staged_wave32_prototype ? staged_wave32_prototype_modules_ : modules_;
-        auto found = modules.find(device_id);
-        if (found != modules.end()) {
+        auto *modules = &modules_;
+        if (variant == CachedPrefixAttnF32Flash2KernelVariant::StagedWave32Prototype) {
+            modules = &staged_wave32_prototype_modules_;
+        } else if (variant == CachedPrefixAttnF32Flash2KernelVariant::GqaGrouped) {
+            modules = &gqa_grouped_modules_;
+        }
+        auto found = modules->find(device_id);
+        if (found != modules->end()) {
             return found->second->function;
         }
 
@@ -2902,23 +2913,33 @@ public:
 
         std::string compile_errors;
         for (const std::string &arch : candidates) {
-            if (use_staged_wave32_prototype && arch.rfind("gfx1201", 0) != 0) {
+            if (variant != CachedPrefixAttnF32Flash2KernelVariant::Generic &&
+                arch.rfind("gfx1201", 0) != 0) {
                 append_error(
                     &compile_errors,
-                    "staged wave32 Flash2 prototype is restricted to gfx1201");
+                    "f32 cached prefix Flash2 specialized kernel is restricted to gfx1201");
                 continue;
             }
             std::vector<char> code;
             std::string compile_error;
-            const bool compiled = use_staged_wave32_prototype ?
-                hiprtc_runtime().compile_cached_prefix_attn_f32_flash2_staged_wave32_prototype_kernel(
-                    arch,
-                    &code,
-                    &compile_error) :
-                hiprtc_runtime().compile_cached_prefix_attn_f32_flash2_kernel(
+            bool compiled = false;
+            if (variant == CachedPrefixAttnF32Flash2KernelVariant::StagedWave32Prototype) {
+                compiled =
+                    hiprtc_runtime().compile_cached_prefix_attn_f32_flash2_staged_wave32_prototype_kernel(
+                        arch,
+                        &code,
+                        &compile_error);
+            } else if (variant == CachedPrefixAttnF32Flash2KernelVariant::GqaGrouped) {
+                compiled = hiprtc_runtime().compile_cached_prefix_attn_f32_flash2_gqa_grouped_kernel(
                     arch,
                     &code,
                     &compile_error);
+            } else {
+                compiled = hiprtc_runtime().compile_cached_prefix_attn_f32_flash2_kernel(
+                    arch,
+                    &code,
+                    &compile_error);
+            }
             if (!compiled) {
                 append_error(&compile_errors, compile_error);
                 continue;
@@ -2930,9 +2951,13 @@ public:
                 continue;
             }
             void *function = nullptr;
-            const char *function_name = use_staged_wave32_prototype ?
-                "ullm_sq8_0_cached_prefix_attn_f32_flash2_staged_wave32_prototype_kernel" :
-                "ullm_cached_prefix_attn_f32_flash2_kernel";
+            const char *function_name = "ullm_cached_prefix_attn_f32_flash2_kernel";
+            if (variant == CachedPrefixAttnF32Flash2KernelVariant::StagedWave32Prototype) {
+                function_name =
+                    "ullm_sq8_0_cached_prefix_attn_f32_flash2_staged_wave32_prototype_kernel";
+            } else if (variant == CachedPrefixAttnF32Flash2KernelVariant::GqaGrouped) {
+                function_name = "ullm_cached_prefix_attn_f32_flash2_gqa_grouped_kernel";
+            }
             if (!hip_runtime().module_get_function(
                     &function,
                     module,
@@ -2948,15 +2973,18 @@ public:
             loaded->function = function;
             loaded->arch = arch;
             void *result = loaded->function;
-            modules.emplace(device_id, std::move(loaded));
+            modules->emplace(device_id, std::move(loaded));
             return result;
+        }
+        const char *build_failure = "failed to build f32 cached prefix flash2 attention HIP kernel";
+        if (variant == CachedPrefixAttnF32Flash2KernelVariant::StagedWave32Prototype) {
+            build_failure = "failed to build f32 cached prefix Flash2 staged wave32 prototype HIP kernel";
+        } else if (variant == CachedPrefixAttnF32Flash2KernelVariant::GqaGrouped) {
+            build_failure = "failed to build f32 cached prefix Flash2 GQA grouped HIP kernel";
         }
         append_error(
             error,
-            compile_errors.empty() ?
-                (use_staged_wave32_prototype ?
-                    "failed to build f32 cached prefix Flash2 staged wave32 prototype HIP kernel" :
-                    "failed to build f32 cached prefix flash2 attention HIP kernel") :
+            compile_errors.empty() ? build_failure :
                 compile_errors);
         return nullptr;
     }
@@ -2981,6 +3009,7 @@ private:
     std::mutex mutex_;
     std::unordered_map<int, std::unique_ptr<LoadedModule>> modules_;
     std::unordered_map<int, std::unique_ptr<LoadedModule>> staged_wave32_prototype_modules_;
+    std::unordered_map<int, std::unique_ptr<LoadedModule>> gqa_grouped_modules_;
 };
 
 HipCachedPrefixAttnF32Flash2KernelCache &hip_cached_prefix_attn_f32_flash2_kernel_cache() {
@@ -3248,14 +3277,30 @@ bool cached_prefix_attn_f32_flash2_hip_kernel(
     ullm_runtime_stream *stream,
     std::string *error) {
     const int device_id = q_buffer->hip_device_id;
-    // Presence-only by design: this is an isolated prototype admission control,
-    // never a production default.  It keeps the public ABI and ordinary Flash2
-    // dispatch unchanged while an isolated process compares the distinct body.
+    // Keep the existing isolated staged-wave32 experiment opt-in.  The GQA
+    // mapping below is the normal fast path only for the exact validated
+    // Qwen3-14B F32-KV shape on gfx1201; every other layout retains generic
+    // Flash2.  An explicit disable remains available for A/B diagnostics.
     const bool use_staged_wave32_prototype =
         std::getenv("ULLM_USE_SQ8_0_FLASH2_STAGED_WAVE32_PROTOTYPE") != nullptr;
+    const bool disable_gqa_grouped =
+        std::getenv("ULLM_DISABLE_SQ8_0_FLASH2_GQA_GROUPED") != nullptr;
+    const std::string device_arch = hip_runtime().device_arch_name(device_id);
+    const bool is_gfx1201 =
+        device_arch == "gfx1201" || device_arch.rfind("gfx1201:", 0) == 0;
+    const bool use_gqa_grouped = !use_staged_wave32_prototype && !disable_gqa_grouped &&
+        is_gfx1201 && kv_heads != 0u && q_heads % kv_heads == 0u &&
+        q_heads / kv_heads == 5u && head_dim == 128u && value_dim == 128u;
+    CachedPrefixAttnF32Flash2KernelVariant variant =
+        CachedPrefixAttnF32Flash2KernelVariant::Generic;
+    if (use_staged_wave32_prototype) {
+        variant = CachedPrefixAttnF32Flash2KernelVariant::StagedWave32Prototype;
+    } else if (use_gqa_grouped) {
+        variant = CachedPrefixAttnF32Flash2KernelVariant::GqaGrouped;
+    }
     void *function = hip_cached_prefix_attn_f32_flash2_kernel_cache().function_for_device(
         device_id,
-        use_staged_wave32_prototype,
+        variant,
         error);
     if (function == nullptr) {
         return false;
@@ -3268,7 +3313,8 @@ bool cached_prefix_attn_f32_flash2_hip_kernel(
         }
         return false;
     }
-    const size_t grid_size = new_tokens * q_heads;
+    const size_t launch_heads = use_gqa_grouped ? kv_heads : q_heads;
+    const size_t grid_size = new_tokens * launch_heads;
     if (grid_size > static_cast<size_t>(std::numeric_limits<unsigned int>::max())) {
         if (error != nullptr) {
             *error =
