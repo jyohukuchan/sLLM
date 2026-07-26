@@ -1401,6 +1401,7 @@ impl PackageSelfAttnResidentStepLayer {
             cache_blocks,
             sq_overlay,
             false,
+            1e-5_f32,
         )
     }
 
@@ -1423,6 +1424,41 @@ impl PackageSelfAttnResidentStepLayer {
         cache_blocks: usize,
         sq_overlay: Option<&Qwen3PackageSqOverlay<'_>>,
     ) -> Result<Self, String> {
+        Self::load_moe_shared_with_registry_with_rms_epsilon(
+            context,
+            stream,
+            registry,
+            shared_buffers,
+            path,
+            chunk_bytes,
+            layer_index,
+            block_table,
+            block_size,
+            cache_blocks,
+            sq_overlay,
+            1e-5_f32,
+        )
+    }
+
+    /// MoE bridge load whose fused Q/K-norm/RoPE/KV operation plan is bound
+    /// to the epsilon decoded from the model descriptor.  This matters for
+    /// Qwen3.5-35B-A3B (`1e-6`) while retaining the old bridge default above
+    /// for any existing caller.
+    #[allow(clippy::too_many_arguments)]
+    pub fn load_moe_shared_with_registry_with_rms_epsilon(
+        context: &mut ullm_runtime_sys::RuntimeContext,
+        stream: &mut ullm_runtime_sys::RuntimeStream,
+        registry: &mut WeightRegistry,
+        shared_buffers: Option<&mut PackageResidentSharedBufferRegistry>,
+        path: &str,
+        chunk_bytes: usize,
+        layer_index: usize,
+        block_table: &[u32],
+        block_size: usize,
+        cache_blocks: usize,
+        sq_overlay: Option<&Qwen3PackageSqOverlay<'_>>,
+        rms_norm_epsilon: f32,
+    ) -> Result<Self, String> {
         Self::load_with_registry_mlp(
             context,
             stream,
@@ -1436,6 +1472,7 @@ impl PackageSelfAttnResidentStepLayer {
             cache_blocks,
             sq_overlay,
             true,
+            rms_norm_epsilon,
         )
     }
 
@@ -1453,7 +1490,13 @@ impl PackageSelfAttnResidentStepLayer {
         cache_blocks: usize,
         sq_overlay: Option<&Qwen3PackageSqOverlay<'_>>,
         use_moe_shared_expert: bool,
+        qk_norm_rms_epsilon: f32,
     ) -> Result<Self, String> {
+        if !qk_norm_rms_epsilon.is_finite() || qk_norm_rms_epsilon <= 0.0 {
+            return Err(
+                "self-attn resident Q/K RMSNorm epsilon must be finite and positive".into(),
+            );
+        }
         if block_table.len() != cache_blocks {
             return Err(format!(
                 "self-attn resident block table length {} does not match cache blocks {cache_blocks}",
@@ -1650,7 +1693,7 @@ impl PackageSelfAttnResidentStepLayer {
                     value_dim,
                     rotary_dim: 64,
                     rope_base_bits: 10_000_000.0_f32.to_bits(),
-                    norm_epsilon_bits: 1e-5_f32.to_bits(),
+                    norm_epsilon_bits: qk_norm_rms_epsilon.to_bits(),
                     block_size,
                     cache_blocks,
                 },

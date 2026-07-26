@@ -1385,7 +1385,7 @@ impl Qwen35MoeAq4Runtime {
                 },
                 DecoderLayerKind::FullAttention => Qwen35MoeResidentLayer::Full {
                     layer_index,
-                    attention: PackageSelfAttnResidentStepLayer::load_moe_shared_with_registry(
+                    attention: PackageSelfAttnResidentStepLayer::load_moe_shared_with_registry_with_rms_epsilon(
                         &mut context,
                         &mut stream,
                         &mut expert_registry,
@@ -1397,6 +1397,7 @@ impl Qwen35MoeAq4Runtime {
                         config.kv_block_size,
                         cache_blocks,
                         None,
+                        descriptor.decoder.rms_norm_epsilon,
                     )
                     .map_err(|error| {
                         format!(
