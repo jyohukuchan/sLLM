@@ -41,3 +41,9 @@ measured-M contract をまず M=256 に広げ、fresh resident full-model smoke 
 成功後に 512/1024/2048 を段階的に広げる。同一五 prompt・五 repeat の full-model
 prefill、actual trace、hidden/logit 記録、greedy/生成文比較、decode 再測を実施する。
 数値しきい値で止めず、軽量昇格方針に従って実際の生成の破綻を判定する。
+
+追調査では paged KV-write の公開 API にも `m <= 128` guard が見つかった。ただし F32
+writer の既存 HIP launcher と HIPRTC body は runtime `m` と dynamic grid を使用しており、
+Flash2 と同様に M=128 専用の kernel tile は確認できなかった。BX が KV dtype 対応で同 API
+を編集中のため共有 checkout は変更せず、同じ lower guards だけを上げた隔離 source overlay
+を build した。R9700 lock は gateway が保持中なので、実機実行は奪わず待機する。

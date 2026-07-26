@@ -1178,3 +1178,15 @@ The width scheduler tests, allocation accounting, direct CK probe source, and
 explicit unmeasured status are retained under
 `benchmarks/results/2026-07-27/prefill-chunk-width/`.  No kernel-only speedup
 is used as an acceptance decision.
+
+Follow-up source audit found a separate F32 paged-KV chunk API admission in
+`runtime/src/ullm_runtime_api_attention.inc`: both the F32 and typed entry
+points reject `m > 128`.  This is not presently evidence of an M=128 kernel
+tile: the existing F32 HIP launcher computes a dynamic grid from `m`, and its
+HIPRTC writer receives runtime `m` with bounds checks.  The cached-prefix
+Flash2 launch is likewise dynamic.  The API file is dirty under BX's KV-dtype
+work, so this task does not modify it.  The required synchronized M=256 change
+now includes that API guard plus the layer-oracle ceiling and model-head
+wide-row validation, in addition to the original layer/stack/CK whitelists.
+An isolated source overlay with just those admissions raised compiled
+successfully; it will only be GPU-run after the shared R9700 lock is free.

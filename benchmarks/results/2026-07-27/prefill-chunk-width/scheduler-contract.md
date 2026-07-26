@@ -89,3 +89,22 @@ required next implementation work is the lower CK/layer/stack admission
 contract, documented in the plan handoff; Flash2 should remain untouched
 unless a full-model wide-M trace exposes a separate correctness or launch
 limit.
+
+## Paged KV-write finding after the initial handoff
+
+The full cached-prefix path has one additional M=128 admission that is not an
+attention restriction: `ullm_runtime_paged_kv_write_chunk_f32` and its typed
+entry point in `runtime/src/ullm_runtime_api_attention.inc` reject `m > 128`.
+The F32 implementation's existing HIP launcher is already dynamic: it passes
+`m` to the kernel and launches `ceil(m * (kv_heads * head_dim + kv_heads *
+value_dim) / 256)` CTAs.  Its HIPRTC writer likewise uses runtime `m` and
+global bounds, rather than a 128-row tile.  Thus the source read finds an API
+validation bound, not an identified need to edit either BX-owned HIPRTC or
+launcher source.
+
+This file is currently being edited as part of BX's KV-dtype work, so this
+task deliberately does not modify it.  The synchronized wide-M change must
+raise the two chunk-writer checks to the selected context-safe maximum and
+then demonstrate real F32-KV writes at M=256 before admitting larger widths.
+The usual overflow, cache-range, and block-table checks already scale with
+`m` and must remain intact.
