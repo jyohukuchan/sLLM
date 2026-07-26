@@ -624,3 +624,142 @@ hidden の 168 payload、計 172 file は byte-identical (mismatch 0) であり�
 [`cpu-f32-parallel-reference-v1/`](../../benchmarks/results/2026-07-26/sq8-fp32-reference/cpu-f32-parallel-reference-v1/)
 である。全 17 case が `run.json` の `status=complete` を持つまで v0.2 full reference は未完成であり、
 途中で終了した場合は completed case/position と hash manifest を明記して non-qualifying のままとする。
+
+## 2026-07-26 v0.2 consumer harness と GPU capture 手順
+
+この節は凍結 JSON を変更しない。CPU reference が完了した直後に、同じ artifact-FP32
+reference と teacher-forced token stream を control/candidate が再利用できるよう、以下を追加した。
+
+- `tools/evaluate-sq8-gate-v0.2.py` は frozen JSON を**実行のたびに** bytes で SHA-256
+  検証する。期待値 `64a43c03…07f72bf`、schema、capture identity、tensor shape/dtype/byte
+  count/SHA-256、finite 性のいずれかが違えば拒否する。進行中 reference root は read-only
+  で、`index-reference` が外部に index を作る。consumer と launcher は frozen corpus から
+  **4,210** position（4,096 primary + 17 boundary + 97 M=128 checkpoint）を再導出して
+  set equality を要求するため、途中 index から GPU plan を作らない。
+- evaluator は reference に対して control 3 repetition と candidate 2 repetition の logits,
+  final hidden、40 layer hidden と final-norm hidden を F64 で再計算する。各 metric/scope の
+  worst/threshold と P99/max-abs の position を JSON と Markdown に残すため、失格した tensor
+  scope と position を後から追跡できる。Wilson/top-10/hard-top-1 の不一致 position も
+  candidate repetition ごとに保存する。
+- upper repeat envelope は frozen JSON の “median を超える excess” を
+  `max(control) - median(control)`、lower envelope は “median への shortfall” を
+  `median(control) - min(control)` として実装した。P99 の補間、bootstrap PRNG、median-control
+  tie break は JSON に指定がないため、nearest-rank F64 / SHA-256 seed の NumPy PCG64 / lower
+  repetition index を明示的に receipt に記録する。これは JSON の値を補う仮定であり、基準値を
+  コードへ焼き込むものではない。
+- `ullm-sq8-gate-capture` は private teacher-forced session API を使い、reference が保存した
+  token stream のみを次 input にする。通常 serving の sampled token/default selector は変更しない。
+  one capture process は sequential M=1 と M=128 chunk/tail の両方を走らせ、必要な 4,210
+  position（4,096 primary + 17 boundary + 97 prefill checkpoint）で logits/final hidden、626
+  layer-required position で 40 layer + final norm を保存する。raw F32 payload は一 repetition
+  あたり 3,157,642,240 B（約 2.94 GiB、JSON/filesystem overhead を除く）である。
+
+### 候補 selector と default 非干渉
+
+`tools/prepare-sq8-gate-v0.2-capture.py` は plan を create-new で書き、`run` は子 process
+だけの環境で既知の candidate selector をいったん scrub して plan の値だけを再設定する。control
+plan はすべての selector を unset にして `enabled: false` を receipt に残す。従って
+`/etc/ullm/served-models/active.json`、systemd、production default は変更しない。
+
+capture manifest は plan SHA-256、capture executable SHA-256/git commit、artifact/fixture/reference
+hash、selector fingerprint、device、Cargo feature、HIP guard environment と mode 別 elapsed time を
+記録する。evaluator は selector 以外の executable/device/compiler/guard configuration が control と
+candidate の全 repetition で一致しなければ fail とする。
+
+| 候補 | capture selector | v0.2 status |
+|---|---|---|
+| Flash2 staged wave32 | `ULLM_USE_SQ8_0_FLASH2_STAGED_WAVE32_PROTOTYPE=1` | full v0.2 capture 可 |
+| paged source-tile 128 | tile `128` と `ULLM_EXPERIMENTAL_SQ8_PAGED_DECODE_SPLIT_ALLOW_MULTITILE=1` | full v0.2 capture 可 |
+| paged source-tile 256 | tile `256` と同じ evaluation-only bypass | full v0.2 capture 可 |
+| handwritten WMMA projection | `rocm-handwritten-projection-gfx1201` + fresh private session | 現状 M=1-only。required M=128 を満たせず blocked/non-qualifying |
+| `SQ8_1` W8A8 | なし | frozen scope が `SQ8_0` のため v0.2 対象外。別 quality gate のまま |
+
+source-tile の bypass は `decoder.rs` の exact-`1` opt-in だけである。tile selector 自体が
+設定されていない場合には無効で、unset/`1` 以外では従来の direct containment fallback を保つ。
+これは既知の multi-tile divergence を再評価するための私有経路であり、default を変更しない。
+
+### 完了後の実行順序
+
+全 reference case の `run.json: status=complete` と token stream hash を確認してから、次の順で走らせる。
+artifact/package path は reference plan と同じ immutable input を指定する。
+
+```bash
+python3 tools/evaluate-sq8-gate-v0.2.py index-reference \
+  --gate docs/plans/sq8-numerical-gate-v0.2-relative-to-fp32-reference.json \
+  --reference-root benchmarks/results/2026-07-26/sq8-fp32-reference/cpu-f32-parallel-reference-v1 \
+  --output benchmarks/results/2026-07-26/sq8-gate-v0.2-harness/reference-index.json
+
+CARGO_BUILD_JOBS=8 cargo build -p ullm-engine --release \
+  --features rocm-ck-gfx1201 --bin ullm-sq8-gate-capture
+```
+
+各 repetition は `prepare` で plan を作り、`run` で一つの create-new capture directory を作る。
+既存 HIP guard は caller が `1` に設定したものだけを受け入れ、tool は guard/service を変更しない。
+
+```bash
+python3 tools/prepare-sq8-gate-v0.2-capture.py prepare \
+  --gate docs/plans/sq8-numerical-gate-v0.2-relative-to-fp32-reference.json \
+  --reference benchmarks/results/2026-07-26/sq8-gate-v0.2-harness/reference-index.json \
+  --artifact /immutable/artifact --package /immutable/package \
+  --role candidate --candidate paged-decode-source-tile-128 \
+  --output /capture-plans/tile128-r1.json
+
+python3 tools/prepare-sq8-gate-v0.2-capture.py run \
+  --plan /capture-plans/tile128-r1.json \
+  --capture-binary target/release/ullm-sq8-gate-capture \
+  --output /capture-results/tile128-r1
+```
+
+最後に capture manifest を evaluator へ渡す。`--allow-incomplete-test-coverage` は current
+partial-reference self-test 専用で、full admission には使えない。
+
+```bash
+python3 tools/evaluate-sq8-gate-v0.2.py evaluate \
+  --gate docs/plans/sq8-numerical-gate-v0.2-relative-to-fp32-reference.json \
+  --reference benchmarks/results/2026-07-26/sq8-gate-v0.2-harness/reference-index.json \
+  --control /capture-results/control-r1/capture-manifest.json \
+  --control /capture-results/control-r2/capture-manifest.json \
+  --control /capture-results/control-r3/capture-manifest.json \
+  --candidate /capture-results/tile128-r1/capture-manifest.json \
+  --candidate /capture-results/tile128-r2/capture-manifest.json \
+  --output-json /capture-results/tile128-v0.2-result.json \
+  --output-markdown /capture-results/tile128-v0.2-result.md
+```
+
+### GPU window の整理
+
+Flash2/tile128/tile256 は同じ `rocm-ck-gfx1201` executable/device/pre-fill configuration で、
+candidate selector をすべて disabled にした control output は同一である。従って frozen
+control rule を満たす限り control 3 repetition を三候補で共有できる。共有する場合は control
+window にも `ULLM_REQUIRE_HIP_PAGED_DECODE_SPLIT_KERNEL=1` を含む全 HIP guard を設定する。
+これは selector を有効化せず、tile candidate と guard configuration だけを一致させる。
+
+- admission 最小は **4 isolation window**: standard control triplet 1、Flash2 candidate pair 1、
+  tile128 candidate pair 1、tile256 candidate pair 1。各 candidate window 内で二 process repetition、
+  control window 内で三 process repetition を連続実行する。
+- handwritten M=1 diagnostic を必要とする場合だけ別 build/control を要するため **+1 window**。ただし
+  M=128 不足のため v0.2 pass を出せない。`SQ8_1` は +0 window。
+- pass した standard candidate が `P` 件なら、独立 confirmation は新しい standard control triplet
+  1 window と candidate `P` window、すなわち **+1+P**。従って standard admission + confirmation は
+  `4`（pass 0 件）から `8`（3 件すべて pass）window、handwritten diagnostic を含めれば `5`--`9`。
+
+標準 admission は control 3 + candidate 6、すなわち **9 full capture repetition**（raw F32 payload
+だけで 28,418,780,160 B / 約 26.47 GiB）である。時間の数値は**未確認**である。新 harness 固有の
+full capture は reference 完成前に GPU を使わない方針のため、layer readback と write を含む実測はまだ
+ない。既存 p512/g4 serving timing はこの full capture と同じ output/readback 条件ではないので、そこから
+時間を推測しない。capture manifest の process total/mode 別 `elapsed_seconds` を使い、最初の standard
+control repetitionを追加 window なしの calibration として残りの reservation を更新する。confirmation
+追加分は control 3 + candidate `2P` repetition（payload 約 `8.82 + 5.88P` GiB）である。
+
+### reference 完成前の harness verification
+
+GPU は使わず、進行中 reference の read-only partial index（179 position）を control 3/candidate 2 の
+test-only alias として consumer に入力した。最新 receipt
+[`self-consistency-final-index/result.json`](../../benchmarks/results/2026-07-26/sq8-gate-v0.2-harness/self-consistency-final-index/result.json)
+は failure 0 であるが、coverage 179/4,210 のため status は
+`test_only_harness_verification` であり admission ではない。最初の candidate logits を意図的に壊した
+receipt [`intentional-failure-final-index/result.json`](../../benchmarks/results/2026-07-26/sq8-gate-v0.2-harness/intentional-failure-final-index/result.json)
+は expected failure（7 gate）となり、`chat-p2048-g512` M=128 prompt position 127 を明示している。
+partial index から plan を作ろうとした receipt
+[`reference-incomplete-blocked.json`](../../benchmarks/results/2026-07-26/sq8-gate-v0.2-harness/reference-incomplete-blocked.json)
+も、GPU を起動せず `blocked_reference_or_capture` を返す。

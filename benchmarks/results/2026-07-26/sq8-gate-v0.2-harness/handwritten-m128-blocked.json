@@ -1,0 +1,7 @@
+{
+  "candidate_id": "handwritten-wmma-projection",
+  "frozen_gate_sha256": "64a43c032570bed8086e3c441b0774cc470c5ab1e8c67f99e02af2b6307f72bf",
+  "reason": "The private handwritten WMMA selector is M=1-only and cannot satisfy required M=128 prefill coverage. Use --diagnostic-only only for non-qualifying M=1 evidence.",
+  "schema_version": "ullm.sq8.gate.v0.2.capture-plan-blocked.v1",
+  "status": "blocked_reference_or_capture"
+}

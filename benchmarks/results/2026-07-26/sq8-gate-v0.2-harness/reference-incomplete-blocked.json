@@ -1,0 +1,23 @@
+{
+  "candidate_id": "flash2-staged-wave32",
+  "coverage": {
+    "actual_positions": 147,
+    "complete": false,
+    "missing_examples": [
+      "m128_chunks_with_declared_tail:chat-p2048-g512:decode:00127",
+      "m128_chunks_with_declared_tail:chat-p2048-g512:decode:00255",
+      "m128_chunks_with_declared_tail:chat-p2048-g512:decode:00383",
+      "m128_chunks_with_declared_tail:chat-p2048-g512:decode:00511",
+      "m128_chunks_with_declared_tail:chat-p2048-g512:prompt:00255"
+    ],
+    "missing_positions": 4063,
+    "required_positions": 4210,
+    "unexpected_examples": [],
+    "unexpected_positions": 0
+  },
+  "frozen_gate_sha256": "64a43c032570bed8086e3c441b0774cc470c5ab1e8c67f99e02af2b6307f72bf",
+  "reason": "reference index does not yet contain every frozen v0.2 capture position; no GPU plan was prepared",
+  "role": "candidate",
+  "schema_version": "ullm.sq8.gate.v0.2.capture-plan-blocked.v1",
+  "status": "blocked_reference_or_capture"
+}
