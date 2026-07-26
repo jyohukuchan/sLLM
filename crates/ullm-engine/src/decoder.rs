@@ -3973,10 +3973,12 @@ mod tests {
         let shape = PagedDecodeShape {
             block_size: 16,
             cache_blocks: 256,
-            q_heads: 8,
+            // Qwen3.5-9B full-attention geometry: 16 query heads, four
+            // KV heads, and 256-value K/V head rows.
+            q_heads: 16,
             kv_heads: 4,
-            head_dim: 16,
-            value_dim: 16,
+            head_dim: 256,
+            value_dim: 256,
         };
         let cache_len = shape.physical_tokens().unwrap();
         let block_table = (0..shape.cache_blocks)
