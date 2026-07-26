@@ -21,9 +21,97 @@ It never treats a rocprof marker duration as throughput.
 The raw historical P3 rocprof capture is retained as an input because it is
 the only pre-existing trace with kernel start/end timestamps.  Its source
 predates the active worker, so every number from it is labelled *historical*
-below.  The paired current capture script in
-`capture-current-p3-c4c9a9b3.sh` is the required validation before treating
-those trace-derived numbers as current-production quantities.
+below.  The current paired capture described next is the validation that keeps
+the historical numbers as a cross-check rather than treating them as the
+current production partition.
+
+## Current paired capture: final accounting
+
+The validation capture completed in
+`current-p3-c4c9a9b3-service-window-20260727T011830+0900/capture/`.  It used
+the exact active manifest, worker and profile-binary hashes before and after
+the capture (the three values above), `gfx1201` only, and C=1339 for 32
+measured steps.  All 32 greedy tokens were again `4445`.  The profile trace
+has one queue and one stream, no overlapping GPU dispatch intervals, and the
+same 292 module launches / 294 all-GPU dispatches per token as the historical
+trace.
+
+The two rows below answer different but necessary questions.  The first is a
+physically matching rocprof run: its CPU `Instant` samples and its kernel
+timestamps are from the same 32 steps.  The second uses an immediately
+adjacent **unprofiled** direct run and the current trace's kernel sum; that is
+the closest production-mode normalization, but it is still a cross-run
+comparison rather than a literal partition of one execution.
+
+| Basis | Wall ms/token | Module-kernel ms/token | Kernel-external ms/token | Kernel share |
+|---|---:|---:|---:|---:|
+| Current paired rocprof run | 14.419178 | 12.831467 | 1.587711 | **88.9889%** |
+| Current same-window unprofiled direct run, normalized by current kernel sum | 13.458181 | 12.831467 | 0.626714 | **95.3432%** |
+| Supplied 13.613453 direct wall, normalized by current kernel sum | 13.613453 | 12.831467 | 0.781986 | 94.2558% |
+
+The supplied original figures answer the narrow literal arithmetic question as
+`412,275,120 ns / 32 / 13.613452656 ms = **94.6387%**` (12.883598 ms kernel,
+0.729855 ms residual).  That number mixes the older trace with a later direct
+run.  The current capture removes the source/build ambiguity and shows the
+same conclusion: **AQ4_0 decode is kernel dominated, not
+kernel-external dominated.**  The 88.99% and 95.34% values are observed
+instrumented and unprofiled-normalized modes, respectively; they are not a
+confidence interval and must not be collapsed into one fabricated percentage.
+
+The unprofiled direct run was 74.3042 tok/s (13.458181 ms/token), versus the
+promotion record's 73.4568 tok/s (13.613453 ms/token).  It is a fresh
+same-binary run, not a claim that serving throughput changed.
+
+### Current profiled-run closure and GPU idle time
+
+The 32 current rocprof steps close exactly, with all terms in ms/token:
+
+| Term | ms/token | Evidence / interpretation |
+|---|---:|---|
+| module-launched GPU kernels | 12.831467 | 9,344 module dispatches / 32 |
+| GPU gaps between every dispatch | **1.487833** | Direct sum of 47.610653 ms of timestamp holes; GPU idle in this profiled timeline |
+| D2H copy GPU execution | 0.006270 | Two `__amd_rocclr_copyBuffer` dispatches/token |
+| marker leading + trailing no-GPU time | 0.081632 | 0.034309 + 0.047323; host/runtime boundary around the marked step |
+| outer `Instant` scope outside marker | 0.011976 | Difference after the four timestamp-derived terms |
+| **paired profiled wall** | **14.419178** | Exact sum |
+
+The gap total is not a host-launch accounting shortcut.  Of the 1.487833
+ms/token, 1.317145 ms/token (88.53%) precedes a dispatch whose correlated
+`hipModuleLaunchKernel` call had **already returned** before the prior GPU
+dispatch finished.  Only 0.163308 ms/token has the next API start after the
+prior GPU end, and 0.007380 ms/token has the next API still in progress.
+Thus the dominant holes are already queued work waiting on GPU/runtime or
+profiling behavior; the trace does not identify a causal split between those
+two possibilities.
+
+### What is actually outside the kernels
+
+- `hipModuleLaunchKernel` is called exactly 292 times/token.  A standalone
+  `gfx1201` module-launch probe measured **1.553198 microseconds/call mean**
+  (1.568368 microseconds median) without rocprof.  Multiplied by 292, its
+  base API enqueue cost is 0.453534 ms/token.  This is a useful scale, not an
+  additive attribution: enqueue normally overlaps preceding GPU work.
+- The same probe under rocprof measures 9.238779 microseconds/call mean; the
+  current full trace reports 37.444526 microseconds/call for the API.  Both
+  are profiler-instrumented durations and must not be summed into wall time.
+- There are exactly two `hipMemcpyDtoHAsync` calls and one
+  `hipStreamSynchronize` per token.  The D2H API calls average 982.533
+  microseconds in the trace because they overlap the final LM-head execution;
+  their actual GPU copy execution is only 6.270 microseconds/token.  The
+  one stream synchronization averages 28.921 microseconds in the trace and
+  occurs after those copies.
+- The measured direct driver contains neither HTTP handling, request
+  scheduling, nor tokenizer work in a decode step.  Its remaining CPU work is
+  greedy top-1 partial-pair decoding plus CPU-only publish/advance bookkeeping.
+  That CPU portion has no separate unprofiled timer, so it remains
+  **unattributed** rather than guessed.
+
+HIP Graph work is therefore not the first optimization: even an unrealistically
+perfect removal of all 292 measured base enqueue costs would be only a 3.37%
+latency scale against the fresh direct wall, and it has not been shown to be on
+the critical path.  Similarly, gaps immediately before the 97 normalization
+dispatches are 0.463949 ms/token, a 3.45%-of-direct-wall **profiled-timeline
+ceiling** for perfect adjacent fusion, not a predicted speedup.
 
 ## Trace token count: 32, independently established
 
@@ -50,7 +138,7 @@ than a launch per head.
 Thus the 9,280 figure in the request is an approximation that omits the
 64 final/head-support dispatches; it is not the trace's actual total.
 
-## What the existing trace can, and cannot, say
+## Historical trace cross-check
 
 `historical-p3-round2-walltime-accounting.json` is generated directly from
 the raw kernel, HIP API, and marker CSVs.  Kernel intervals are attributed by
@@ -71,11 +159,13 @@ gaps, already larger than that cross-run 0.729855 ms residual.  That is
 evidence of profiling/run-condition perturbation, not evidence for a
 negative host cost.
 
-The result that is already safe to state is therefore:
+The result that was already safe to state before the current capture was:
 
 > The available trace bounds AQ4_0 decode as kernel-dominated, not
-> kernel-external-dominated.  A same-build paired capture is still required
-> to publish a production wall-time percentage and launch-overhead estimate.
+> kernel-external-dominated.
+
+The current capture above has now confirmed that conclusion with the exact
+active P3 diagnostic binary and a direct module-launch measurement.
 
 ## Direct GPU-gap evidence from the raw trace
 
@@ -153,13 +243,13 @@ decode step.
   while the final LM-head kernel runs.  They overlap GPU time and must not be
   added to the residual.
 - The remaining host work is the greedy top-1 partial-pair decode and
-  CPU-only publish/advance bookkeeping.  Its exact unprofiled duration is
-  **not yet separately measured**; it must remain unattributed until the
-  paired capture completes.
+  CPU-only publish/advance bookkeeping.  Its exact unprofiled duration has
+  no separate timer even after the paired capture, so it remains
+  **unattributed** rather than guessed.
 
 ## Roofline from AQ4_0 physical weight payload
 
-`historical-p3-round2-projection-roofline.json` parses the active product
+`current-projection-roofline.json` parses the active product
 package rather than assuming nominal 4 bpp.  AQ4_0 uses a 4-bit index plus an
 8-bit scale-table index per group: g16 tensors are 4.5 bpp and g8 tensors are
 5 bpp.  The normal decode path has 249 quantized tensors (MTP excluded),
@@ -167,30 +257,46 @@ package rather than assuming nominal 4 bpp.  AQ4_0 uses a 4-bit index plus an
 weight reads (4.60214 effective bpp).
 
 At the requested R9700 640 GB/s bandwidth, the payload-only lower bound is
-7.132979 ms/token.  Historical AQ4_0 projection is 10.448168 ms/token, i.e.
-436.929 GB/s effective payload bandwidth or 68.270% of that lower-bound
+7.132979 ms/token.  Current AQ4_0 projection is 10.382780 ms/token, i.e.
+439.681 GB/s effective payload bandwidth or 68.700% of that lower-bound
 roofline.  This does *not* count codebook, activation, output, or cache
 traffic, so it is an optimistic upper bound on available improvement.
 
-| Projection kernel | Historical ms/token | Payload efficiency of 640 GB/s lower bound |
+| Projection kernel | Current ms/token | Payload efficiency of 640 GB/s lower bound |
 |---|---:|---:|
-| `ullm_aq4_matvec_add_f32_kernel` | 3.779696 | 51.32% |
-| `ullm_aq4_matvec_silu_mul_f32_kernel` | 3.403228 | 83.19% |
-| `ullm_aq4_matvec_qkv_z_gate_beta_f32_kernel` | 1.543310 | 69.15% |
-| `ullm_aq4_matvec_f32_kernel` (LM head) | 1.187213 | 83.66% |
-| `ullm_aq4_matvec_triple_f32_kernel` | 0.534722 | 56.38% |
+| `ullm_aq4_matvec_add_f32_kernel` | 3.697842 | 52.46% |
+| `ullm_aq4_matvec_silu_mul_f32_kernel` | 3.402800 | 83.20% |
+| `ullm_aq4_matvec_qkv_z_gate_beta_f32_kernel` | 1.551461 | 68.79% |
+| `ullm_aq4_matvec_f32_kernel` (LM head) | 1.186687 | 83.70% |
+| `ullm_aq4_matvec_triple_f32_kernel` | 0.543989 | 55.42% |
 
-The two low payload-efficiency families (`matvec_add`, then `matvec_triple`)
-are the first profiling targets if the current capture preserves this shape.
+The payload-only floor is a 1.4556x maximum **projection-kernel** speedup;
+holding all non-projection work fixed, it is only a 1.3183x end-to-end ceiling
+against this direct wall.  A conditional 10% / 20% projection-time reduction
+would save 1.038278 / 2.076556 ms/token (7.71% / 15.43% latency; 1.0836x /
+1.1824x).  `matvec_add` remains the first target because it combines the
+largest absolute time with the weakest large-family payload efficiency;
+`matvec_triple` is a separate low-efficiency shape but has much less absolute
+time.
+
 No AQ4_0 projection source was changed in this audit: their implementation is
 owned by the protected runtime source files.  The handoff specification is
 `projection-optimization-handoff.md`.
 
 ## Current-capture status
 
-At this point another measurement owns `/run/ullm/r9700.lock`; no GPU workload
-has been started by this audit while it is held.  The capture script records
-pre/post lock/service state, active manifest and binary hashes, R9700
-temperature/power/actual clocks (`amd-smi` ID 2), and verifies the visible
-HIP device as `gfx1201` inside both diagnostic binaries.  It does not start
-`ullm-openai.service` or modify `active.json`.
+One owned service window ran from 01:18:30 to 01:19:03 JST.  The gateway was
+the verified lock owner before the stop; the capture took the flock itself and
+the service stayed inactive through both direct runs.  The first restoration
+attempt encountered a pre-existing `start-limit-hit`; a recorded
+`systemctl reset-failed` followed by one start restored the service to
+`ActiveState=active`, `NRestarts=0` (MainPID 4004158).  No service start was
+attempted while another lock holder existed.
+
+The R9700 watcher captured 24 samples: max actual gfx clock 3,242 MHz, memory
+clock 1,258 MHz, fabric clock 2,016 MHz, socket power 319 W, and hotspot 76 C
+(edge 53 C, memory 52 C).  `THROTTLED` appeared in sampled status, but the
+actual clocks remained high and the status alone is not interpreted as a
+clock-loss event.  The capture scripts verify `gfx1201`, record the hashes and
+service/lock states, never change `active.json`, and do not start
+`llama-qwen35-udq4.service`.

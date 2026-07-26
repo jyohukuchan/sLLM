@@ -1,0 +1,6 @@
+MainPID=0
+NRestarts=0
+ActiveState=inactive
+SubState=dead
+StartLimitIntervalUSec=15min
+StartLimitBurst=3

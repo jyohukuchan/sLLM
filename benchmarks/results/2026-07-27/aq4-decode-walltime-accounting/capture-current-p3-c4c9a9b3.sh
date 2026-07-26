@@ -38,8 +38,11 @@ mkdir -p "$output_dir"
 # This preflight is deliberately outside the lock.  If another owner wins the
 # race, flock below fails rather than taking or waiting for its lock.
 fuser -v /run/ullm/r9700.lock >"$output_dir/gpu-lock-before.txt" 2>&1 || true
+# Run the required command but retain only PIDs: another task's full prompt
+# can be arbitrarily large and is not useful provenance for this capture.
 pgrep -af 'ullm-sq8-r9700|run_measurements.py|llama-bench|llama-server|promote-served-model' \
-    >"$output_dir/gpu-processes-before.txt" 2>&1 || true
+    | awk -v self="$$" '$1 != self {print $1}' \
+    >"$output_dir/gpu-processes-before-pids.txt" || true
 systemctl show ullm-openai.service -p ActiveState -p NRestarts \
     >"$output_dir/ullm-openai-service-before.txt"
 if ! rg -qx 'ActiveState=inactive' "$output_dir/ullm-openai-service-before.txt"; then
