@@ -521,3 +521,19 @@ linear load は `HipLinearAttentionRecurrent`、`HipLinearAttentionQkvPrepare`�
 両方へ渡すよう再現レシピを補正した。MoE にはこれに F16 capacity run の typed paged
 decode/split/KV-write 3 guard を加える。script は guard assignment を artifact に記録する。
 この 36-guard corrected run は lock の次の安全 window で未再試行であり、成功は未確認である。
+
+### 実機 window の外部占有（2026-07-27 08:00 JST）
+
+BR の prefill sweep は 07:38 JST に正常終了し、同じジョブが `ullm-openai.service` を正常に
+復旧した。その後の read-only preflight では、`fuser -v /run/ullm/r9700.lock` は gateway PID
+1371668 を lock owner として返し、`ActiveState=active`、R9700 worker PID 1371800 の VRAM は
+`7,119,872,000 B`（AMD SMI metric は `7,082 MB`）、edge は 37 C だった。したがって package
+payload `25,029,380,864 B` と 262,144-token ledger `30,858,010,436 B` を同居させる安全な
+free window ではない。
+
+BW は service の停止・起動、worker kill、lock の奪取、`active.json` の変更を行わない。
+このため full 36-guard corrected 9B baseline / 35B MoE run は **未実行**であり、これは
+AQ4_0 allocation failure や生成失敗を示す観測ではない。R9700 が外部から解放され、service
+inactive、GPU process なし、edge <=45 C を同時に満たした時点で、隔離 release binary により
+9B baseline → 35B 262,144-token F16-KV resident load → 8-token generation → router read-back / VRAM
+telemetry を一つの flock window で実施する。

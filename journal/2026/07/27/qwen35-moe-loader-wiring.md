@@ -57,6 +57,11 @@
   推測の subset ではなく、9B resident worker が正規 contract とする
   `QWEN35_AQ4_REQUIRED_HIP_KERNEL_ENV` の全 36 guard を offline baseline/MoE driver に渡す
   よう修正した。MoE には F16 typed paged-KV 用の 3 guard も加える。corrected run は未実施。
+- BR の R9700 sweep は 07:38 JST に成功終了し、外部ジョブが `ullm-openai.service` を復旧した。
+  08:00 JST の read-only preflight では gateway PID 1371668 が `/run/ullm/r9700.lock` を保持、
+  R9700 worker PID 1371800 が `7,119,872,000 B`（metric `7,082 MB`）を使用していた。
+  `ActiveState=active` の本番を停止・起動・kill せず、35B corrected run は安全な空き window
+  を待つ。これは OOM / loader failure の証拠ではない。
 
 ## 次の行動
 
@@ -77,3 +82,5 @@
   `gfx1201` admission を成功条件に含める。
 - 9B/MoE とも既存 worker の全 36 HIP guard を `1` で渡し、MoE では F16 typed paged-KV
   guard も追加する。最初の guard-corrected R9700 run で baseline top-1 と full loader を検証する。
+- 実行時は外部 service が `inactive`、`fuser` に lock owner がなく、AMD SMI に R9700 process が
+  なく、edge <=45 C の全条件を満たすまで待つ。service / worker / `active.json` は操作しない。
