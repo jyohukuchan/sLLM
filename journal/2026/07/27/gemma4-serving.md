@@ -35,6 +35,9 @@
 - この task が明示的に発行した service 操作は `stop` 2 回、`reset-failed` 2 回、`start` 3 回。
   途中で観測した lock-conflict / manifest promotion / additional stop-start は他 session 起点として
   evidence に分けた。Gemma candidate を service に設定又は start したことはない。
+- その後の shared `prefill-adaptive-chunk` window も AQ4 を一時停止したが、window 自身が
+  07:38 JST に restore した。最終 `aq4-final-external-restore-stability.txt` は 4 / 8 / 16 s
+  の全観測で `350710…b3e7` と `active/running` を確認している。
 
 ## 次の行動
 

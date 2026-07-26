@@ -846,3 +846,7 @@ isolated run の間に別セッションが active manifest を `d3d9c454…6038
 service の start-limit は共有操作による lock-conflict で二度 fail 状態になった。明示的な
 `Start request repeated too quickly` を確認した時だけ `reset-failed` と一回の `start` を使い、
 Gemma candidate を service に向けた start/restart は一度も行っていない。
+
+その後に shared `prefill-adaptive-chunk` window が AQ4 service を停止して R9700 を使ったが、
+window 自身の restore が成功した。最終 `aq4-final-external-restore-stability.txt` は 4 / 8 / 16 s
+すべてで protected AQ4 SHA と `active/running` を記録する。
