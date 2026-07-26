@@ -143,6 +143,25 @@ capture_service_state() {
     } >"$result_dir/service/$name.txt"
 }
 
+wait_for_service_stop() {
+    local attempt
+    local active_state
+    local main_pid
+    for attempt in $(seq 1 15); do
+        active_state="$(systemctl show ullm-openai.service -p ActiveState --value 2>/dev/null || true)"
+        main_pid="$(systemctl show ullm-openai.service -p MainPID --value 2>/dev/null || true)"
+        # A deliberate `systemctl stop` can leave this unit in failed state
+        # when its worker exits nonzero.  It is nevertheless stopped only
+        # once systemd reports no main process; R9700 idleness is checked
+        # separately before any isolated workload begins.
+        if [[ "$main_pid" == 0 && ( "$active_state" == inactive || "$active_state" == failed ) ]]; then
+            return 0
+        fi
+        sleep 1
+    done
+    return 1
+}
+
 capture_telemetry() {
     local name=$1
     amd-smi metric --gpu "$r9700_amd_smi_gpu" --temperature --clock --power --violation --json \
@@ -255,6 +274,7 @@ PY
 service_was_active=0
 restored=0
 telemetry_pid=''
+r9700_lock_held=0
 
 stop_telemetry_watcher() {
     if [[ -n "$telemetry_pid" ]]; then
@@ -264,10 +284,42 @@ stop_telemetry_watcher() {
     fi
 }
 
+release_r9700_lock() {
+    if [[ $r9700_lock_held -eq 1 ]]; then
+        flock -u 9 2>/dev/null || true
+        exec 9>&-
+        r9700_lock_held=0
+    fi
+}
+
+acquire_r9700_lock() {
+    {
+        date --iso-8601=seconds
+        printf 'path=/run/ullm/r9700.lock\n'
+        printf 'mode=nonblocking-exclusive-flock-after-service-stop\n'
+    } >"$result_dir/service/r9700-lock-acquire.txt"
+    if ! exec 9</run/ullm/r9700.lock; then
+        printf 'result=failed-to-open\n' >>"$result_dir/service/r9700-lock-acquire.txt"
+        return 1
+    fi
+    if ! flock -n 9; then
+        printf 'result=busy\n' >>"$result_dir/service/r9700-lock-acquire.txt"
+        lsof /run/ullm/r9700.lock >>"$result_dir/service/r9700-lock-acquire.txt" 2>&1 || true
+        exec 9>&-
+        return 1
+    fi
+    r9700_lock_held=1
+    printf 'result=held\n' >>"$result_dir/service/r9700-lock-acquire.txt"
+    lsof /run/ullm/r9700.lock >>"$result_dir/service/r9700-lock-acquire.txt" 2>&1 || true
+}
+
 restore_service() {
     local original_status=$?
     trap - EXIT
     stop_telemetry_watcher
+    # The gateway itself takes this flock. Release our isolated window before
+    # attempting its restart, otherwise the restore would fail by design.
+    release_r9700_lock
     if [[ $service_was_active -eq 1 && $restored -eq 0 ]]; then
         {
             date --iso-8601=seconds
@@ -293,6 +345,7 @@ restore_service() {
     fi
     capture_telemetry after-restore || true
     capture_service_state after-restore || true
+    capture service/active-manifest-after-restore.sha256 sha256sum /etc/ullm/served-models/active.json || true
     date --iso-8601=seconds >"$result_dir/service/window-end.txt"
     if [[ $restored -eq 0 && $service_was_active -eq 1 ]]; then
         original_status=1
@@ -306,11 +359,13 @@ date --iso-8601=seconds >"$result_dir/service/window-start.txt"
 capture_service_state before-stop
 capture preflight/required-pgrep-before.txt bash -c "pgrep -af 'ullm-sq8-r9700|run_measurements.py|llama-bench|llama-server|promote-served-model|ullm-aq4-worker' || true"
 capture preflight/required-service-before.txt systemctl is-active ullm-openai.service
+capture preflight/active-manifest-before.sha256 sha256sum /etc/ullm/served-models/active.json
 capture preflight/binary-sha256.txt sha256sum "$component_bin" "$serving_bin"
 capture preflight/git-head.txt git rev-parse HEAD
 capture preflight/amd-smi-list.json amd-smi list --json
 capture preflight/r9700-static.json amd-smi static --gpu "$r9700_amd_smi_gpu" --asic --bus --json
 capture preflight/r9700-process-before.json amd-smi process --gpu "$r9700_amd_smi_gpu" --general --json
+capture preflight/r9700-lock-before.txt bash -c 'lsof /run/ullm/r9700.lock || true'
 capture_telemetry before-stop
 
 if [[ "$(systemctl is-active ullm-openai.service || true)" != active ]]; then
@@ -334,12 +389,16 @@ fi
 capture_optional service/stop.txt sudo_service systemctl stop ullm-openai.service
 capture_service_state after-stop
 capture preflight/required-pgrep-after-stop.txt bash -c "pgrep -af 'ullm-sq8-r9700|run_measurements.py|llama-bench|llama-server|promote-served-model|ullm-aq4-worker' || true"
-if [[ "$(systemctl is-active ullm-openai.service || true)" != inactive ]]; then
-    printf '%s\n' 'ullm-openai.service did not reach inactive after stop request' >&2
+if ! wait_for_service_stop; then
+    printf '%s\n' 'ullm-openai.service did not reach a no-main-PID stopped state after stop request' >&2
     exit 1
 fi
 if ! wait_for_r9700_idle service/r9700-process-after-stop.json; then
     printf '%s\n' 'R9700 still has a process after service stop; not starting isolated work' >&2
+    exit 1
+fi
+if ! acquire_r9700_lock; then
+    printf '%s\n' 'R9700 exclusive flock is busy after service stop; not starting isolated work' >&2
     exit 1
 fi
 capture_telemetry after-stop
@@ -388,7 +447,6 @@ if [[ $speed_first -eq 1 ]]; then
                 --prompt-lengths 1028 --max-new-tokens 16 \
                 --prefill-mode m8-chunk8 --record-generated-timing \
                 --handwritten-wmma-projection-prototype \
-                --decode-oracle-capture-dir "$result_dir/timing/handwritten/${timing_id}-decode" \
                 --result-json "$result_dir/timing/handwritten/${timing_id}.json"
         capture_telemetry "after-timing-handwritten-${timing_id}"
     done
@@ -487,7 +545,6 @@ if [[ $speed_first -eq 1 ]]; then
                     --artifact "$artifact_dir" --package "$package_dir" \
                     --prompt-token-ids-u32le "$prompt_file" --max-new-tokens "$max_completion_tokens" \
                     --prefill-mode m8-chunk8 --handwritten-wmma-projection-prototype \
-                    --decode-oracle-capture-dir "$result_dir/lightweight/handwritten/${case_id}-decode" \
                     --result-json "$result_dir/lightweight/handwritten/${case_id}.json"
             capture_telemetry "after-lightweight-handwritten-${case_id}"
             if [[ ! -f "$result_dir/lightweight/ck/${case_id}.json" \
