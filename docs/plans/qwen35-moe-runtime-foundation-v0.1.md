@@ -408,6 +408,15 @@ scalar sigmoid gate である（720--814 行）。RMSNorm は `output * (1 + wei
 resident scalar bridge の根拠になる。画像・動画 token の `get_rope_index` が作る異なる
 temporal/height/width row（1414 行以降）はこの text-only executor には含めない。
 
+同じ inspected `text_config` の `rms_norm_eps` は正確に `0.000001` であり、HF は
+decoder input/post-attention RMSNorm、linear-attention gated RMSNorm、full-attention
+Q/K RMSNorm のいずれにもこの config 値を渡す。既存 dense bridge の歴史的な
+post/QK `1e-5` default を MoE に混ぜないよう、BW は MoE 専用
+`*_with_rms_epsilon` bridge を追加し、descriptor の `rms_norm_epsilon` を全 MoE
+norm site に渡す。public dense entrypoint の default は変更していないため、9B
+`AQ4_0` の既存数値経路を変更しない。この修正は推測ではなく、上記 HF source と
+source `config.json`（SHA-256 `5e4d7f74…9bfbc7944`）の双方に基づく。
+
 ### Qwen3.5-9B `AQ4_0` からの再利用と互換性境界
 
 既存の `qwen35_aq4_layer_runtime.rs` を attention の唯一の実装として使った。

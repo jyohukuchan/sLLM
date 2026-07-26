@@ -2689,7 +2689,35 @@ impl PackageSelfAttnResidentStepLayer {
         component_step_ms: &mut PackageSelfAttnComponentStepMs,
         label: &str,
     ) -> Result<(), String> {
+        self.run_device_step_input_with_rms_epsilon(
+            stream,
+            input,
+            1e-6_f32,
+            sync_component_timing,
+            component_step_ms,
+            label,
+        )
+    }
+
+    /// Variant used by an architecture-specific bridge which has already
+    /// decoded the checkpoint's RMSNorm epsilon.  The public dense entrypoint
+    /// above deliberately retains its historical `1e-6` contract.
+    #[allow(clippy::too_many_arguments)]
+    fn run_device_step_input_with_rms_epsilon(
+        &mut self,
+        stream: &mut ullm_runtime_sys::RuntimeStream,
+        input: PackageSelfAttnResidentStepInput<'_>,
+        rms_norm_epsilon: f32,
+        sync_component_timing: bool,
+        component_step_ms: &mut PackageSelfAttnComponentStepMs,
+        label: &str,
+    ) -> Result<(), String> {
         self.request_state.ensure_ready(label)?;
+        if !rms_norm_epsilon.is_finite() || rms_norm_epsilon <= 0.0 {
+            return Err(format!(
+                "{label} self-attn input RMSNorm epsilon must be finite and positive"
+            ));
+        }
         let hidden = self.weights.hidden;
         let finish_component = |stream: &mut ullm_runtime_sys::RuntimeStream,
                                 started: Instant,
@@ -2710,7 +2738,7 @@ impl PackageSelfAttnResidentStepLayer {
                 &self.input_buffer,
                 self.weights.input_norm_weight_buffer.as_ref(),
                 hidden,
-                1e-6_f32,
+                rms_norm_epsilon,
                 &mut self.input_normed_buffer,
                 Some(stream),
             ),
@@ -2719,7 +2747,7 @@ impl PackageSelfAttnResidentStepLayer {
                     buffer,
                     self.weights.input_norm_weight_buffer.as_ref(),
                     hidden,
-                    1e-6_f32,
+                    rms_norm_epsilon,
                     &mut self.input_normed_buffer,
                     Some(stream),
                 )
@@ -2922,7 +2950,41 @@ impl PackageSelfAttnResidentStepLayer {
         component_step_ms: &mut PackageSelfAttnComponentStepMs,
         label: &str,
     ) -> Result<PackageSelfAttnAttentionProjectionInput, String> {
+        self.run_device_step_after_qkv_projection_input_with_rms_epsilon(
+            stream,
+            rotary_dim,
+            rope_base,
+            rope_position,
+            cache_position,
+            1e-5_f32,
+            sync_component_timing,
+            component_step_ms,
+            label,
+        )
+    }
+
+    /// Applies Q/K normalization with a descriptor-specified epsilon before
+    /// the native Qwen3.5 RoPE/KV path.  The dense public entrypoint above
+    /// remains pinned to its established `1e-5` behavior.
+    #[allow(clippy::too_many_arguments)]
+    fn run_device_step_after_qkv_projection_input_with_rms_epsilon(
+        &mut self,
+        stream: &mut ullm_runtime_sys::RuntimeStream,
+        rotary_dim: usize,
+        rope_base: f32,
+        rope_position: usize,
+        cache_position: usize,
+        rms_norm_epsilon: f32,
+        sync_component_timing: bool,
+        component_step_ms: &mut PackageSelfAttnComponentStepMs,
+        label: &str,
+    ) -> Result<PackageSelfAttnAttentionProjectionInput, String> {
         self.request_state.ensure_ready(label)?;
+        if !rms_norm_epsilon.is_finite() || rms_norm_epsilon <= 0.0 {
+            return Err(format!(
+                "{label} self-attn q/k RMSNorm epsilon must be finite and positive"
+            ));
+        }
         let q_projection_layout = self.weights.q_projection_layout;
         let q_heads = self.weights.q_heads;
         let kv_heads = self.weights.kv_heads;
@@ -2952,7 +3014,7 @@ impl PackageSelfAttnResidentStepLayer {
                     self.weights.q_norm_weight_buffer.as_ref(),
                     q_heads,
                     head_dim,
-                    1e-5_f32,
+                    rms_norm_epsilon,
                     &mut self.q_normed_buffer,
                     Some(stream),
                 )
@@ -2962,7 +3024,7 @@ impl PackageSelfAttnResidentStepLayer {
                     self.weights.k_norm_weight_buffer.as_ref(),
                     kv_heads,
                     head_dim,
-                    1e-5_f32,
+                    rms_norm_epsilon,
                     &mut self.k_normed_buffer,
                     Some(stream),
                 )
@@ -3061,7 +3123,7 @@ impl PackageSelfAttnResidentStepLayer {
                             rotary_dim,
                             rope_position,
                             rope_base,
-                            1e-5_f32,
+                            rms_norm_epsilon,
                             cache_position,
                             &mut self.q_gate_buffer,
                             &mut self.q_rope_buffer,
@@ -3084,7 +3146,7 @@ impl PackageSelfAttnResidentStepLayer {
                         rotary_dim,
                         rope_position,
                         rope_base,
-                        1e-5_f32,
+                        rms_norm_epsilon,
                         cache_position,
                         self.weights.block_size,
                         self.weights.cache_blocks,
@@ -3444,7 +3506,39 @@ impl PackageSelfAttnResidentStepLayer {
         cache_position: usize,
         label: &str,
     ) -> Result<(), String> {
+        self.run_device_step_through_post_norm_with_rms_epsilon(
+            stream,
+            input,
+            rotary_dim,
+            rope_base,
+            rope_position,
+            cache_position,
+            1e-5_f32,
+            label,
+        )
+    }
+
+    /// MoE-only bridge with the RMSNorm epsilon decoded from the model
+    /// descriptor.  Keeping this separate preserves the dense 9B bridge's
+    /// existing numerical contract above.
+    #[allow(clippy::too_many_arguments)]
+    pub fn run_device_step_through_post_norm_with_rms_epsilon(
+        &mut self,
+        stream: &mut ullm_runtime_sys::RuntimeStream,
+        input: PackageSelfAttnResidentStepInput<'_>,
+        rotary_dim: usize,
+        rope_base: f32,
+        rope_position: usize,
+        cache_position: usize,
+        rms_norm_epsilon: f32,
+        label: &str,
+    ) -> Result<(), String> {
         self.request_state.ensure_ready(label)?;
+        if !rms_norm_epsilon.is_finite() || rms_norm_epsilon <= 0.0 {
+            return Err(format!(
+                "{label} self-attn MoE RMSNorm epsilon must be finite and positive"
+            ));
+        }
         if cache_position != self.written_len {
             return Err(format!(
                 "{label} self-attn resident cache_position {cache_position} does not match written_len {}",
@@ -3455,9 +3549,10 @@ impl PackageSelfAttnResidentStepLayer {
         let mut component_step_ms = PackageSelfAttnComponentStepMs::default();
         self.last_component_step_ms = None;
         self.last_operation_executions = [None, None];
-        self.run_device_step_input(
+        self.run_device_step_input_with_rms_epsilon(
             stream,
             input,
+            rms_norm_epsilon,
             sync_component_timing,
             &mut component_step_ms,
             label,
@@ -3468,16 +3563,18 @@ impl PackageSelfAttnResidentStepLayer {
             &mut component_step_ms,
             label,
         )?;
-        let projection_input_buffer = self.run_device_step_after_qkv_projection_input(
-            stream,
-            rotary_dim,
-            rope_base,
-            rope_position,
-            cache_position,
-            sync_component_timing,
-            &mut component_step_ms,
-            label,
-        )?;
+        let projection_input_buffer = self
+            .run_device_step_after_qkv_projection_input_with_rms_epsilon(
+                stream,
+                rotary_dim,
+                rope_base,
+                rope_position,
+                cache_position,
+                rms_norm_epsilon,
+                sync_component_timing,
+                &mut component_step_ms,
+                label,
+            )?;
         let attention_projection_input_buffer = match projection_input_buffer {
             PackageSelfAttnAttentionProjectionInput::AttentionOutput => {
                 &self.attention_output_buffer
@@ -3505,7 +3602,7 @@ impl PackageSelfAttnResidentStepLayer {
             &self.attention_block_output_buffer,
             self.weights.post_norm_weight_buffer.as_ref(),
             self.weights.hidden,
-            1e-5_f32,
+            rms_norm_epsilon,
             &mut self.post_normed_buffer,
             Some(stream),
         )
@@ -5880,7 +5977,7 @@ impl PackageLinearAttnResidentStepLayer {
         input: PackageLinearAttnResidentStepInput<'_>,
         label: &str,
     ) -> Result<(), String> {
-        self.run_device_step_inner(stream, input, label, true)
+        self.run_device_step_inner(stream, input, label, true, None)
     }
 
     /// Runs the existing convolution/recurrent linear-attention path through
@@ -5893,7 +5990,25 @@ impl PackageLinearAttnResidentStepLayer {
         input: PackageLinearAttnResidentStepInput<'_>,
         label: &str,
     ) -> Result<(), String> {
-        self.run_device_step_inner(stream, input, label, false)
+        self.run_device_step_inner(stream, input, label, false, None)
+    }
+
+    /// MoE-only bridge with all linear-attention RMSNorm sites bound to the
+    /// inspected decoder epsilon.  The dense entrypoints retain their
+    /// established `1e-6` / `1e-5` split by passing `None` above.
+    pub fn run_device_step_through_post_norm_with_rms_epsilon(
+        &mut self,
+        stream: &mut ullm_runtime_sys::RuntimeStream,
+        input: PackageLinearAttnResidentStepInput<'_>,
+        rms_norm_epsilon: f32,
+        label: &str,
+    ) -> Result<(), String> {
+        if !rms_norm_epsilon.is_finite() || rms_norm_epsilon <= 0.0 {
+            return Err(format!(
+                "{label} linear-attn MoE RMSNorm epsilon must be finite and positive"
+            ));
+        }
+        self.run_device_step_inner(stream, input, label, false, Some(rms_norm_epsilon))
     }
 
     fn run_device_step_inner(
@@ -5902,6 +6017,7 @@ impl PackageLinearAttnResidentStepLayer {
         input: PackageLinearAttnResidentStepInput<'_>,
         label: &str,
         run_dense_mlp: bool,
+        moe_rms_norm_epsilon: Option<f32>,
     ) -> Result<(), String> {
         self.request_state.ensure_ready(label)?;
         self.last_component_step_ms = None;
@@ -5911,6 +6027,9 @@ impl PackageLinearAttnResidentStepLayer {
         let value_heads = weights.value_heads;
         let value_dim = weights.value_dim;
         let sync_component_timing = weights.sync_component_timing;
+        let input_rms_norm_epsilon = moe_rms_norm_epsilon.unwrap_or(1e-6_f32);
+        let attention_rms_norm_epsilon = moe_rms_norm_epsilon.unwrap_or(1e-6_f32);
+        let post_rms_norm_epsilon = moe_rms_norm_epsilon.unwrap_or(1e-5_f32);
         let mut component_step_ms = PackageLinearAttnComponentStepMs::default();
         macro_rules! component_started {
             () => {
@@ -5939,7 +6058,7 @@ impl PackageLinearAttnResidentStepLayer {
                     &self.input_buffer,
                     weights.input_norm_weight_buffer.as_ref(),
                     hidden,
-                    1e-6_f32,
+                    input_rms_norm_epsilon,
                     &mut self.input_normed_buffer,
                     Some(stream),
                 )
@@ -5949,7 +6068,7 @@ impl PackageLinearAttnResidentStepLayer {
                     buffer,
                     weights.input_norm_weight_buffer.as_ref(),
                     hidden,
-                    1e-6_f32,
+                    input_rms_norm_epsilon,
                     &mut self.input_normed_buffer,
                     Some(stream),
                 )
@@ -6086,7 +6205,7 @@ impl PackageLinearAttnResidentStepLayer {
             &self.z_buffer,
             value_heads,
             value_dim,
-            1e-6_f32,
+            attention_rms_norm_epsilon,
             &mut self.attn_projection_input_buffer,
             Some(stream),
         )
@@ -6125,7 +6244,7 @@ impl PackageLinearAttnResidentStepLayer {
             &self.attn_block_output_buffer,
             weights.post_norm_weight_buffer.as_ref(),
             hidden,
-            1e-5_f32,
+            post_rms_norm_epsilon,
             &mut self.post_normed_buffer,
             Some(stream),
         )

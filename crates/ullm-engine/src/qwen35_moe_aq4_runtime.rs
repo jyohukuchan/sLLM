@@ -1068,13 +1068,15 @@ impl Qwen35MoeResidentLayer {
         input: &ullm_runtime_sys::RuntimeBuffer,
         rope_position: usize,
         cache_position: usize,
+        rms_norm_epsilon: f32,
         label: &str,
     ) -> Result<Qwen35MoeRouteTrace, String> {
         match self {
             Self::Linear { attention, moe, .. } => {
-                attention.run_device_step_through_post_norm(
+                attention.run_device_step_through_post_norm_with_rms_epsilon(
                     stream,
                     PackageLinearAttnResidentStepInput::ExternalBuffer(input),
+                    rms_norm_epsilon,
                     label,
                 )?;
                 let route =
@@ -1085,13 +1087,14 @@ impl Qwen35MoeResidentLayer {
                 Ok(route)
             }
             Self::Full { attention, moe, .. } => {
-                attention.run_device_step_through_post_norm(
+                attention.run_device_step_through_post_norm_with_rms_epsilon(
                     stream,
                     PackageSelfAttnResidentStepInput::ExternalBuffer(input),
                     QWEN35_MOE_TEXT_ROTARY_DIM,
                     QWEN35_MOE_TEXT_ROPE_BASE,
                     rope_position,
                     cache_position,
+                    rms_norm_epsilon,
                     label,
                 )?;
                 let route =
@@ -1542,6 +1545,7 @@ impl Qwen35MoeAq4Runtime {
                 &self.ping_buffers[current],
                 self.position,
                 self.position,
+                self.descriptor.decoder.rms_norm_epsilon,
                 &layer_label,
             )?;
             let output = self.layers[layer_position].output_buffer();

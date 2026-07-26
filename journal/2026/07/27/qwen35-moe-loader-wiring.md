@@ -20,6 +20,10 @@
 - Qwen3.5-9B `AQ4_0` の full attention（mRoPE、Q output gate、paged KV、Q/K norm）、
   linear attention（conv/recurrent state）、1+weight RMSNorm を bridge 経由で流用した。
   9B の dense `run_device_step` は変更していない。
+- HF `Qwen3_5MoeRMSNorm` と source `text_config.rms_norm_eps=1e-6` を再照合し、
+  MoE bridge だけは input/post/QK/linear gated norm 全てに descriptor の epsilon を
+  渡すよう補正した。historical dense bridge の post/QK `1e-5` default は public dense
+  entrypoint に残し、9B `AQ4_0` の数値経路を変えていない。
 - 35B linear attention の hidden 2048 と value stream 4096 を descriptor geometry として
   渡し、9B default geometry を保った。
 - MoE decode scratch は 40 層に複製せず、111.20 MiB の shared workspace とした。初版の
