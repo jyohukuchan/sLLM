@@ -31,6 +31,10 @@ its limits are in [`memory-accounting.md`](memory-accounting.md).
 | `wide_m_ck_shape_probe.cpp` | direct GPU shape-admission probe for the four SQ8_0 projection shapes |
 | `wide-m-ck-shape-probe.jsonl` | 24 successful direct-CK shape-admission rows |
 | `lower-runtime-handoff.md` | exact BP/CK/API follow-on contract and validation sequence |
+| `run-wide-m-overlay-window.sh` | one-lock, one-service-window full-model overlay protocol; restores the gateway on every exit path |
+| `summarize-wide-m-overlay.py` | derives tok/s only from the unprofiled driver, plus trace/count and numerical summaries |
+| `generation-input/` | frozen local Qwen3-14B rendering of the 10-case lightweight prompt suite, including auditable u32le token IDs |
+| `summarize-wide-m-generation.py` | decodes and retains direct local M=128/wide-M completions with policy-defined obvious-collapse diagnostics |
 
 ## Reproduction boundary
 
@@ -43,5 +47,8 @@ range duration or a kernel-only timing for throughput.
 
 Before any GPU operation, the owner must check `/run/ullm/r9700.lock`, the
 listed benchmark processes, and `ullm-openai.service`; a held lock is never
-stolen. The run was deliberately paused while the gateway held that lock, so
-no service start/stop or active-manifest change was made here.
+stolen. `run-wide-m-overlay-window.sh` refuses to inherit an inactive
+service window, refuses a lock holder outside the active gateway process tree,
+and checks again for an empty lock after a graceful service stop before it
+uses `flock`. It neither starts llama-qwen35-udq4.service nor changes an
+active manifest.

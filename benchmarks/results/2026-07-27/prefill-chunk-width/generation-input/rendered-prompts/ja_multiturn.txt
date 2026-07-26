@@ -1,0 +1,13 @@
+<|im_start|>system
+簡潔で具体的に答えてください。<|im_end|>
+<|im_start|>user
+サービス起動直後に ready endpoint が失敗することがあります。<|im_end|>
+<|im_start|>assistant
+固定時間だけ待つより、期限付きの再試行が有用です。<|im_end|>
+<|im_start|>user
+その理由と、実装時の注意点を2項目で教えてください。<|im_end|>
+<|im_start|>assistant
+<think>
+
+</think>
+

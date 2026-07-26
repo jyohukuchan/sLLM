@@ -1,0 +1,7 @@
+<|im_start|>user
+A service becomes ready after about 3.2 seconds. Give a bounded exponential-backoff schedule with at least four probes and explain why it is better than one fixed sleep.<|im_end|>
+<|im_start|>assistant
+<think>
+
+</think>
+

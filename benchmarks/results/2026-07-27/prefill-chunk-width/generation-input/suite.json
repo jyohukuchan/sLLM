@@ -1,0 +1,221 @@
+{
+  "cases": [
+    {
+      "case_id": "ja_explanation",
+      "category": "japanese",
+      "expected_kind": "prose",
+      "expected_language": "ja",
+      "max_completion_tokens": 96,
+      "messages": [
+        {
+          "content": "量子化推論で「ロールバックを残して素早く試す」利点を、日本語で3点に分けて説明してください。",
+          "role": "user"
+        }
+      ],
+      "prompt_token_count": 46,
+      "prompt_u32le_file": "tokens/ja_explanation.u32le",
+      "prompt_u32le_sha256": "fd636cee420fb528ebd5229969419e26f9a6d6762c3553ece5b505944d3d7ccf",
+      "rendered_prompt_file": "rendered-prompts/ja_explanation.txt",
+      "rendered_prompt_sha256": "18596e47fc12c9bbfa91e166bd4f8a0244b8aeb6982c1e13a383313444021d53"
+    },
+    {
+      "case_id": "en_explanation",
+      "category": "english",
+      "expected_kind": "prose",
+      "expected_language": "en",
+      "max_completion_tokens": 96,
+      "messages": [
+        {
+          "content": "Explain in English why an atomic manifest swap is useful for a local inference service. Use a short paragraph.",
+          "role": "user"
+        }
+      ],
+      "prompt_token_count": 34,
+      "prompt_u32le_file": "tokens/en_explanation.u32le",
+      "prompt_u32le_sha256": "8ae418b25c091ab5e98b348019bd0c25953e17edcf43858a1e267ad3101c5d4e",
+      "rendered_prompt_file": "rendered-prompts/en_explanation.txt",
+      "rendered_prompt_sha256": "f31d17494b9beb776902f38a1dcb5af2d9e52004fc9c44a9cbdbb493de6b06a9"
+    },
+    {
+      "case_id": "python_code",
+      "category": "code_generation",
+      "expected_kind": "code",
+      "expected_language": "en",
+      "max_completion_tokens": 128,
+      "messages": [
+        {
+          "content": "Write a Python function named retry_delays that returns exponential retry delays capped at a maximum. Include a small example call.",
+          "role": "user"
+        }
+      ],
+      "prompt_token_count": 36,
+      "prompt_u32le_file": "tokens/python_code.u32le",
+      "prompt_u32le_sha256": "4fd3884312fe7ae41787df163118ddb4d0f51a67e44e94b7bd4c7ba913048f47",
+      "rendered_prompt_file": "rendered-prompts/python_code.txt",
+      "rendered_prompt_sha256": "3d0eaa22e59dc571e8a4c5d3bec377f671d3a3b6483c4a4887d86a90e86bbf75"
+    },
+    {
+      "case_id": "javascript_debug",
+      "category": "code_generation",
+      "expected_kind": "code",
+      "expected_language": "en",
+      "max_completion_tokens": 128,
+      "messages": [
+        {
+          "content": "Fix this JavaScript so it counts only finite numbers, then explain the bug briefly:\nconst values = [1, NaN, Infinity, 2];\nconst count = values.filter(Boolean).length;",
+          "role": "user"
+        }
+      ],
+      "prompt_token_count": 50,
+      "prompt_u32le_file": "tokens/javascript_debug.u32le",
+      "prompt_u32le_sha256": "7aaa3dd359d9828089449eec3c172cdbc6dbd00f7991d95cc77e3b2e2e211537",
+      "rendered_prompt_file": "rendered-prompts/javascript_debug.txt",
+      "rendered_prompt_sha256": "af377efdbecedd5dcf14b06029afef174ffc0c5487c9a9bf25b188fb200bdb5d"
+    },
+    {
+      "case_id": "ja_long_summary",
+      "category": "long_summary",
+      "expected_kind": "summary",
+      "expected_language": "ja",
+      "max_completion_tokens": 128,
+      "messages": [
+        {
+          "content": "次のメモを日本語で4文以内に要約してください。\n\n候補Aは起動に成功した。候補Aは固定プロンプトで日本語、英語、コード生成、要約を実行した。現行出力との完全一致は要求しないが、反復、文字化け、空応答、コード要求の放棄は失敗として扱う。切替前のmanifest生バイト列を保存し、応答確認が失敗した場合は原子的に戻す。性能指標は記録するが、速度だけで昇格を止めない。重い参照コーパスは後追い検証として扱う。",
+          "role": "user"
+        }
+      ],
+      "prompt_token_count": 163,
+      "prompt_u32le_file": "tokens/ja_long_summary.u32le",
+      "prompt_u32le_sha256": "7284aa1baddb76c1de13cfb8cefede07696a592cabe87e6e668bfe948673f802",
+      "rendered_prompt_file": "rendered-prompts/ja_long_summary.txt",
+      "rendered_prompt_sha256": "353bcfe7db68930d19680cdcc92e800cebbd2960b22c3dcbceb0503c100da46f"
+    },
+    {
+      "case_id": "en_long_summary",
+      "category": "long_summary",
+      "expected_kind": "summary",
+      "expected_language": "en",
+      "max_completion_tokens": 128,
+      "messages": [
+        {
+          "content": "Summarize this note in four sentences or fewer:\n\nA candidate worker must start and answer real requests. Save both baseline and candidate text. Exact output equality is not required. Detect empty answers, repetition loops, garbled text, and response abandonment automatically. Preserve the exact old manifest before the swap. If readiness or a real response fails after the swap, restore the old bytes and verify the restored service.",
+          "role": "user"
+        }
+      ],
+      "prompt_token_count": 93,
+      "prompt_u32le_file": "tokens/en_long_summary.u32le",
+      "prompt_u32le_sha256": "a4496fd51e0aa46f1187e065849c1fc7adb35030fd097da846161ea2f53b2ed4",
+      "rendered_prompt_file": "rendered-prompts/en_long_summary.txt",
+      "rendered_prompt_sha256": "abb60796315f627c2ee24b683db518ead82407e118736f83baabc65a06336165"
+    },
+    {
+      "case_id": "ja_multiturn",
+      "category": "multi_turn",
+      "expected_kind": "prose",
+      "expected_language": "ja",
+      "max_completion_tokens": 96,
+      "messages": [
+        {
+          "content": "簡潔で具体的に答えてください。",
+          "role": "system"
+        },
+        {
+          "content": "サービス起動直後に ready endpoint が失敗することがあります。",
+          "role": "user"
+        },
+        {
+          "content": "固定時間だけ待つより、期限付きの再試行が有用です。",
+          "role": "assistant"
+        },
+        {
+          "content": "その理由と、実装時の注意点を2項目で教えてください。",
+          "role": "user"
+        }
+      ],
+      "prompt_token_count": 83,
+      "prompt_u32le_file": "tokens/ja_multiturn.u32le",
+      "prompt_u32le_sha256": "28d0c3a6af90d70156f1c23ebc0dacee4b23fe87b417d5b253b5878c00b86854",
+      "rendered_prompt_file": "rendered-prompts/ja_multiturn.txt",
+      "rendered_prompt_sha256": "e86f9c26b11ea613d3600fab2c103fa5b38a0b682e2629df082252fa81895e57"
+    },
+    {
+      "case_id": "en_multiturn",
+      "category": "multi_turn",
+      "expected_kind": "prose",
+      "expected_language": "en",
+      "max_completion_tokens": 96,
+      "messages": [
+        {
+          "content": "Answer in concise English.",
+          "role": "system"
+        },
+        {
+          "content": "I need to compare a candidate model with the currently active model.",
+          "role": "user"
+        },
+        {
+          "content": "Use the same fixed prompts and save both outputs.",
+          "role": "assistant"
+        },
+        {
+          "content": "What should I preserve if the candidate fails after activation?",
+          "role": "user"
+        }
+      ],
+      "prompt_token_count": 66,
+      "prompt_u32le_file": "tokens/en_multiturn.u32le",
+      "prompt_u32le_sha256": "e024c1f937488e0ceca5a76543d46b64e9781286e60b8229d42f58985567c804",
+      "rendered_prompt_file": "rendered-prompts/en_multiturn.txt",
+      "rendered_prompt_sha256": "a745f18df5a30bc1f541e029ada5d0cbcc999bdd34534b2c591174ebd86b3ae3"
+    },
+    {
+      "case_id": "translation",
+      "category": "translation",
+      "expected_kind": "prose",
+      "expected_language": "ja",
+      "max_completion_tokens": 96,
+      "messages": [
+        {
+          "content": "Translate this into natural Japanese: A rollback path makes rapid experimentation safer because a failed live check can return to known-good manifest bytes.",
+          "role": "user"
+        }
+      ],
+      "prompt_token_count": 38,
+      "prompt_u32le_file": "tokens/translation.u32le",
+      "prompt_u32le_sha256": "18cc05c350d06a9d770fd5b914caac939ddf91e8ca34baa4a3cb351d0bbb480c",
+      "rendered_prompt_file": "rendered-prompts/translation.txt",
+      "rendered_prompt_sha256": "e2a00e1879ca0353875adaeeb1367b2845cd9629e58724a3f00f8b6d084f86ec"
+    },
+    {
+      "case_id": "structured_reasoning",
+      "category": "reasoning",
+      "expected_kind": "prose",
+      "expected_language": "en",
+      "max_completion_tokens": 96,
+      "messages": [
+        {
+          "content": "A service becomes ready after about 3.2 seconds. Give a bounded exponential-backoff schedule with at least four probes and explain why it is better than one fixed sleep.",
+          "role": "user"
+        }
+      ],
+      "prompt_token_count": 47,
+      "prompt_u32le_file": "tokens/structured_reasoning.u32le",
+      "prompt_u32le_sha256": "3710a7b278a91ee0fc73aba9d5cba39949370643be28882d85b7393e9f6b7fab",
+      "rendered_prompt_file": "rendered-prompts/structured_reasoning.txt",
+      "rendered_prompt_sha256": "0862e22d695d3b043f77aa056ffac8216c5a8591d3e1bd6df1f858e01e38082b"
+    }
+  ],
+  "chat_template_arguments": {
+    "add_generation_prompt": true,
+    "enable_thinking": false
+  },
+  "model_dir": "/home/homelab1/datapool/ai_models/safetensors/Qwen/Qwen3-14B-FP8",
+  "prompt_suite": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/docs/plans/lightweight-promotion-prompt-suite-v0.1.json",
+  "prompt_suite_sha256": "cdc84ddb056dc41d57c96fbcf5fb0d560233fa73023079313bd7ab683c5a7df0",
+  "schema_version": "ullm.qwen_lightweight_token_suite.v1",
+  "scope": "offline Qwen tokenizer rendering for isolated local runtime input",
+  "tokenizer_files_sha256": {
+    "tokenizer.json": "aeb13307a71acd8fe81861d94ad54ab689df773318809eed3cbe794b4492dae4",
+    "tokenizer_config.json": "d5d09f07b48c3086c508b30d1c9114bd1189145b74e982a265350c923acd8101"
+  }
+}

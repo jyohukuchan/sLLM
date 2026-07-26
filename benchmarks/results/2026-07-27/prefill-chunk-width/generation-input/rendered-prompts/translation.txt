@@ -1,0 +1,7 @@
+<|im_start|>user
+Translate this into natural Japanese: A rollback path makes rapid experimentation safer because a failed live check can return to known-good manifest bytes.<|im_end|>
+<|im_start|>assistant
+<think>
+
+</think>
+
