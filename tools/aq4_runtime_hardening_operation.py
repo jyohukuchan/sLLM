@@ -507,10 +507,6 @@ def _endpoint_state(*, ok: bool, status: int | None, cause: str | None) -> dict[
     return {"ok": ok, "status": status, "cause": cause}
 
 
-def _unprobed_endpoints(cause: str) -> dict[str, dict[str, Any]]:
-    return {name: _endpoint_state(ok=False, status=None, cause=cause) for name in ENDPOINTS}
-
-
 def _probe(
     callback: Callable[[], tuple[int, bytes]], *, require_model: bool = False
 ) -> dict[str, Any]:
@@ -540,6 +536,21 @@ def _probe_timeout(deadline: float) -> float:
     return min(PROBE_TIMEOUT_SECONDS, max(0.1, remaining))
 
 
+def _bounded_probe(
+    callback: Callable[[], tuple[int, bytes]],
+    *,
+    deadline: float,
+    require_model: bool = False,
+) -> dict[str, Any]:
+    """Avoid erasing earlier endpoint results when the overall deadline expires."""
+
+    try:
+        _probe_timeout(deadline)
+    except OperationError:
+        return _endpoint_state(ok=False, status=None, cause="deadline_elapsed")
+    return _probe(callback, require_model=require_model)
+
+
 def _probe_endpoints(deadline: float) -> dict[str, dict[str, Any]]:
     gateway_key: bytearray | None = None
     session: bytearray | None = None
@@ -553,38 +564,41 @@ def _probe_endpoints(deadline: float) -> dict[str, dict[str, Any]]:
         except OperationError:
             session = None
         endpoints = {
-            "gateway_health": _probe(
-                lambda: _docker_gateway_get("/healthz", None, timeout=_probe_timeout(deadline))
+            "gateway_health": _bounded_probe(
+                lambda: _docker_gateway_get("/healthz", None, timeout=_probe_timeout(deadline)),
+                deadline=deadline,
             ),
-            "gateway_ready": _probe(
-                lambda: _docker_gateway_get("/readyz", None, timeout=_probe_timeout(deadline))
+            "gateway_ready": _bounded_probe(
+                lambda: _docker_gateway_get("/readyz", None, timeout=_probe_timeout(deadline)),
+                deadline=deadline,
             ),
             "gateway_models": (
                 _endpoint_state(ok=False, status=None, cause="credential_unavailable")
                 if gateway_key is None
-                else _probe(
+                else _bounded_probe(
                     lambda: _docker_gateway_get(
                         "/v1/models", gateway_key, timeout=_probe_timeout(deadline)
                     ),
+                    deadline=deadline,
                     require_model=True,
                 )
             ),
-            "openwebui_health": _probe(
-                lambda: _openwebui_get("/health", None, timeout=_probe_timeout(deadline))
+            "openwebui_health": _bounded_probe(
+                lambda: _openwebui_get("/health", None, timeout=_probe_timeout(deadline)),
+                deadline=deadline,
             ),
             "openwebui_models": (
                 _endpoint_state(ok=False, status=None, cause="credential_unavailable")
                 if session is None
-                else _probe(
+                else _bounded_probe(
                     lambda: _openwebui_get(
                         "/api/models", session, timeout=_probe_timeout(deadline)
                     ),
+                    deadline=deadline,
                     require_model=True,
                 )
             ),
         }
-    except OperationError:
-        endpoints = _unprobed_endpoints("deadline_elapsed")
     finally:
         if gateway_key is not None:
             gateway_key[:] = b"\x00" * len(gateway_key)

@@ -273,6 +273,24 @@ def test_isolated_environment_copies_only_the_live_worker_contract(
     assert "UNRELATED_API_KEY" not in environment
 
 
+def test_endpoint_deadline_preserves_prior_success_state(monkeypatch: pytest.MonkeyPatch) -> None:
+    moments = iter((0.0, 0.0, 1.0, 1.0, 1.0, 1.0))
+    monkeypatch.setattr(OPERATION.time, "monotonic", lambda: next(moments))
+    monkeypatch.setattr(OPERATION, "_read_secret", lambda _path: bytearray(b"fixture"))
+    monkeypatch.setattr(OPERATION, "_docker_gateway_get", lambda *_args, **_kwargs: (200, b"{}"))
+    monkeypatch.setattr(OPERATION, "_openwebui_get", lambda *_args, **_kwargs: (200, b"{}"))
+
+    endpoints = OPERATION._probe_endpoints(1.0)
+
+    assert endpoints["gateway_health"] == {"ok": True, "status": 200, "cause": None}
+    for name in OPERATION.ENDPOINTS[1:]:
+        assert endpoints[name] == {
+            "ok": False,
+            "status": None,
+            "cause": "deadline_elapsed",
+        }
+
+
 def test_unstable_pid_times_out_even_when_endpoints_are_coherent(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
