@@ -1,6 +1,6 @@
 # SQ8_0 CDNA3 MI300X A′ 実機検証チェックリスト v0.1
 
-- Status: 実行準備のみ。クラウドの MI300X を借りる前に固定し、借用中はこの順序だけを消化する。
+- Status: 2026-07-26 に MI300X×1 で Stage 1 を pass、Stage 2 の A′ 対 CPU は 5 形状を pass した。B control は failure のため skip しており、occupancy/residency と performance gate は未確認である。A′ bring-up 全体の完了ではない。第 9 節を正とする。
 - Date: 2026-07-26
 - Scope: 独立した `SQ8_0` の CDNA3/gfx942 A′ bring-up。A′ は installed CK gfx942 XDL instance を使う立ち上げ用の足場であり、raw OCP E4M3FN を直接 MFMA に渡さない。
 - Out of scope: hand-written MFMA の案 A、本番 dispatch/serving、release、campaign、authorization、`/etc/ullm/served-models/active.json`、サービス操作。案 A の実機検証は、R9700 側 `SQ8_0` 手書き最適化の成果が固まり次第、別の計画として追加する。
@@ -115,7 +115,7 @@ cargo build --locked -p ullm-engine \
   --example sq8_gfx942_aprime_physical_smoke
 ```
 
-- `HIP_VISIBLE_DEVICES` は空文字列でも comma 区切りでもない 1 token でなければならない。physical smoke、A′、B は internal HIP ordinal 0 と visible device 1 台を要求する。
+- `HIP_VISIBLE_DEVICES` は空文字列でも comma 区切りでもない 1 token でなければならない。runtime は CPU device を index 0 に常設するため、physical smoke は全 runtime device から fail-closed gfx942 selector が受理する唯一の候補を選ぶ。visible GPU 1 台を runtime index 0 と仮定しない。
 - `rocm-ck-gfx1201` を同時に指定しない。`GPU_ARCH=gfx1201`、`gfx940`、`gfx950` は A′ feature では失敗が期待値である。
 - 依存する runtime component は HIP runtime (`amdhip64`)、hipcc/header、CK `libdevice_gemm_operations.a`、hipBLAS、`libdl`、Rust/Cargo と lockfile の依存物である。各 path/version/hash を evidence に残す。
 - `LD_LIBRARY_PATH`、provider 固有 profiler 設定、clock/power 設定は現時点で**未確認**である。cloud の公式 image が要求する値だけを使い、値を推測して export しない。
@@ -321,3 +321,57 @@ run を終えたら、次のいずれかを `manifest.json` の明示的な stat
 5. `aprime_bringup_complete`: 第一〜第四段の準備済み gate を通過し、partition ごとの raw evidence を回収済み。これは A′ の bring-up record であり、案 A、本番 `SQ8_0` dispatch、release、activation の承認ではない。
 
 このチェックリストの終点は「次のオフライン判断に必要な生データを持ち帰ること」である。課金中に新しい実装・campaign・authorization・activation を実行しない。
+
+## 9. 2026-07-26 MI300X 実施結果
+
+生データは
+[mi300x-rental-v1](../../benchmarks/results/2026-07-26/mi300x-rental-v1/README.md)
+に保全した。対象は AMD Instinct MI300X VF、gfx942:sramecc+:xnack-、
+ROCm 7.2.4、NPS1/SPX、VRAM 196,288 MB である。
+
+### 9.1 Stage ごとの結果
+
+| stage | 結果 | 根拠と残る境界 |
+| --- | --- | --- |
+| 3.0 preflight | 部分確認 | exact gfx942 modifier、GPU 名、ROCm、NPS1/SPX、VRAM は記録された。firmware、PCI BDF、visible CU、CK/hipBLAS hash、process isolation、raw recorder manifest は未確認。 |
+| 3.1 fragment/lane | pass | logical max_abs=0.007812、max_rel=0.000000、256 lane/register coordinate の全単射を確認。 |
+| 3.2 A′ 5 shape | A′ 対 CPU は pass | k_or_v_tail_id1、q_or_o_full_id1、gate_or_up_tail_id2、gate_or_up_full_id3、down_tail_id4 の A′ 対 CPU はすべて max_abs=0.000000。 |
+| 3.2 B control | failure、未修正 | k_or_v_tail_id1 で期待 0.53125、観測 0.03125、差 0.5。成功 log は ULLM_SMOKE_SKIP_B_CONTROL による B skip を使った。 |
+| 3.3 occupancy/residency | 未確認 | HIP occupancy query、active wave/block、clock、resource residency を回収していない。 |
+| 3.4 partition / HBM / L2 | 未完 | A′ projection の 200 repeat timing はあるが、counter、empirical HBM peak、thermal、他 partition、A/B 比較はない。 |
+
+fragment/lane と A′ 対 CPU の pass は、この MI300X VF / NPS1-SPX の
+deterministic fixture に限定する。full-model logits、prefill/decode、
+artifact prepack/cache、B との正常な differential、production dispatch は
+検証していない。
+
+### 9.2 device guard の修正
+
+実機で smoke の旧 device_count()==1 guard が構造的に通らないことが分かった。
+uLLM runtime は CPU device を index 0 に常設するので、GPU が 1 枚だけでも
+runtime count は 2 になる。
+
+本体の physical smoke は、保存済みの rental patch と一致する修正を取り込む。
+HIP_VISIBLE_DEVICES の 1 token を確認した後、全 runtime device を列挙し、
+fail-closed gfx942 selector が受理する device がちょうど 1 台であることを
+要求し、その index を使う。複数候補・候補なしは fail closed のままである。
+
+### 9.3 B control の扱い
+
+B の tail 処理取りこぼしが疑われるが、根因は**未確認**である。B は未修正で
+あり、ULLM_SMOKE_SKIP_B_CONTROL は A′ 対 CPU を観測するためだけの escape
+hatch である。B=0 や A′-B=0 と表示された skip run の値は self-comparison
+であり、B pass ではない。
+
+このため、この checklist 全体の status は aprime_bringup_complete ではなく
+differential_rejected である。ただし A′ の fragment/lane と A′ 対 CPU の
+物理 sub-gate は pass した。B を直して skip なしで 5 形状を再実行し、
+occupancy/residency と partition-specific performance を回収するまで、次の
+Phase や production integration へ進めない。
+
+### 9.4 時間見積もりとの対比
+
+計画の最短 go/no-go は preflight 5--10 分と fragment/lane 2--5 分を合わせて
+約 10--20 分だった。借用全体は約 2 時間だが、stage 開始・終了時刻は
+回収ログからは**未確認**である。したがって、最短 go/no-go の見積もりを
+実測で満たしたとは記録しない。

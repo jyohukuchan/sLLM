@@ -1,6 +1,6 @@
 # MI300X×1 外部エンジン推論速度比較 実行計画 v0.1
 
-- Status: 実行準備のみ。GPU を使用しない予約前作業と、MI300X×1 借用中の実行を分離する。
+- Status: 2026-07-26 に MI300X×1 で一部実施済み。外部 engine の 14B sweep は回収したが、実測 contract はこの計画の 1,024/20、3 trial、telemetry 要件を満たしたと確認できない。実績と未確認事項は第 10 節を正とする。
 - Date: 2026-07-26
 - Parent: [existing-engine-benchmark-plan-v0.1.md](existing-engine-benchmark-plan-v0.1.md) の `Future MI300X grid` を、単一 MI300X 用に具体化する付属計画である。
 - uLLM gate: [sq8-cdna3-mi300x-validation-checklist-v0.1.md](sq8-cdna3-mi300x-validation-checklist-v0.1.md) を先に実行する。この文書は同チェックリストを置換しない。
@@ -780,3 +780,64 @@ du -sh "$RESULTS" | tee "$RESULTS/result-size.txt"
 - [ ] 各 engine で cache 無効化、1024 prompt token、20 output token、stream boundary、C=128 capacity を admission する。
 - [ ] C=1..128、prefill/decode、3 trial、48 raw HTTP trial/engine を残す。
 - [ ] format 差、KV dtype、logical-vs-physical bandwidth の境界、unconfirmed 項目を結果に明記する。
+
+## 10. 2026-07-26 MI300X レンタルの実施結果
+
+詳細な environment、image digest、artifact/revision、全 sweep 行、MoE 結果、
+限界は
+[mi300x-rental-v1 README](../../benchmarks/results/2026-07-26/mi300x-rental-v1/README.md)
+に保全した。この節は計画に対する実績だけを記録する。
+
+### 10.1 計画との差分
+
+| 項目 | 計画 | 実績 | 判定 |
+| --- | --- | --- | --- |
+| workload | 1,024 prompt / 20 output token | 1,010 prompt / 16 output token | 同一 contract ではない。 |
+| C=1 | warmup と 3 trial median | warmup 5 + measured 10 の p50 | C=1 の clean 値のみ取得。個別 10 observation は未回収。 |
+| C=2..128 | 各 C 3 trial と outlier 手順 | 各 C 1 回の aggregate sweep | 計画した median ではない。 |
+| prefill/decode 分離 | prefill、TTFT、ITL、総 throughput | output token / wall time | decode 専用値ではない。 |
+| cache / raw HTTP / telemetry | evidence として保存 | 回収済み 30 file からは未確認 | 実施済みとみなさない。 |
+| partition / thermal | partition ごと、thermal/power を記録 | NPS1/SPX の 1 条件。thermal/power telemetry は未確認 | partition 横断比較は不可。 |
+
+vLLM は --enforce-eager（torch.compile 無効）であり、vLLM の数字を
+過小評価する条件だった。llama.cpp は Q8_0 GGUF、vLLM/SGLang は FP8
+safetensors なので、format を揃えた比較でもない。
+
+### 10.2 14B の結果
+
+同一クライアントの C=1 clean p50 は、vLLM eager 41.16 tok/s、SGLang
+35.45 tok/s、llama.cpp 49.06 tok/s だった。C=128 の aggregate sweep は
+それぞれ 2,526.96、1,158.50、140.09 tok/s だった。C=1 の raw sweep は
+vLLM 4.20、SGLang 0.12 tok/s と JIT に汚染しており、clean p50 を主値に
+した。
+
+llama.cpp は C<=8 で最速だが、C>=16 で約 140 tok/s 台に飽和した。vLLM は
+C=128 まで伸びた。ただし各 request は長い prefill を含むため、この結論を
+decode 専用性能へ読み替えない。
+
+### 10.3 追加 MoE / AITER 調査
+
+- Qwen3-Coder-Next-FP8 は vLLM で load 後の request が全て HTTP 500 となった。
+  hybrid attention の block size=544 と Triton の power-of-two arange 制約が
+  原因としてログに記録されている。SGLang は動作し、C=1 clean 52.17 tok/s、
+  C=128 sweep 526.84 tok/s だった。
+- Qwen3-30B-A3B-FP8 は vLLM で動作した。既定 Rocm Attention は C=1 clean
+  27.35 tok/s、C=128 sweep 1,745.92 tok/s。明示 AITER Flash Attention は
+  23.71、1,387.78 tok/s で、全 C で約 12--35% 遅かった。既定を reference
+  とする。
+- Qwen3.6-35B-A3B-FP8 は transformers 5.14.1 が認識した一方、vLLM
+  0.11.2.dev は architecture 未対応だった。MTP は未検証である。
+
+### 10.4 時間見積もりとの対比
+
+計画上の最短 uLLM go/no-go は 10--20 分、A′ continuation を含む外部
+engine 実行は 152--287 分と見積もっていた。借用全体は約 2 時間だったが、
+回収ログには stage ごとの timestamp がない。従って、最短 go/no-go が
+10--20 分で終わったか、各 hard cap を守れたかは**未確認**である。
+
+2 時間内に fragment/lane、A′ 対 CPU の 5 形状、14B external sweep、MoE
+調査を回収した一方、occupancy/residency、HBM/L2 counter、thermal、他
+partition、計画どおりの prefill/decode 分離と 3 trial は未完である。
+
+ATOM はこの借用で再調査していない。No-go の根拠は commit a646804f
+（docs: research AMD ATOM MI300X feasibility）を参照する。

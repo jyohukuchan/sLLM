@@ -1,6 +1,6 @@
 # Independent SQ8_0 CDNA3 (gfx942) Port Plan v0.1
 
-- Status: Phase 0 complete for source/static evidence; all execution, numerical, and timing claims remain blocked on a physical gfx942 device
+- Status: Phases 0--2 are complete. Phase 3 is partially complete: A′ fragment/lane and five A′-versus-CPU shape checks passed on one MI300X VF / NPS1-SPX, but B control, full-model differential, and occupancy/residency remain open. Phase 4 has isolated A′ timings only; no memory-hierarchy decision was made. Phase 5 has not started. See the 2026-07-26 rental update.
 - Date: 2026-07-26
 - Scope: Qwen3-14B-FP8's independent `SQ8_0` execution path on CDNA3 (`gfx942`: MI300X / MI300A / MI325X)
 - Boundary: this is not the Qwen3.5 `AQ4_0` legacy 48-QKV/Z tensor overlay lineage. No `AQ4_0` implementation, campaign, candidate, release, or activation is in scope.
@@ -216,7 +216,7 @@ Offline exit gate: exact arch routing tests, byte oracle, artifact scan, and pre
 
 Offline exit gate: all code objects target gfx942/wave64, native candidates contain the intended MFMA ISA, no unexplained spills/resource regressions exist, and all host/CPU oracle tests pass. This still does not prove fragment correctness.
 
-### Phase 3 — physical gfx942 differential and residency gate (hardware-required)
+### Phase 3 — physical gfx942 differential and residency gate (hardware-required; partially complete)
 
 Required hardware: an MI300X, MI300A, or MI325X that reports exact `gfx942`; no other local GPU substitutes.
 
@@ -228,7 +228,7 @@ Required hardware: an MI300X, MI300A, or MI325X that reports exact `gfx942`; no 
 
 Hardware exit gate: zero unexplained numerical mismatch, stable repeated execution, and a captured partition-specific residency manifest. Failure returns the path to Phase 2; it does not authorize a body swap.
 
-### Phase 4 — physical performance and memory-hierarchy decision (hardware-required)
+### Phase 4 — physical performance and memory-hierarchy decision (hardware-required; isolated A′ timing only)
 
 1. Establish a per-SKU/partition empirical HBM peak and record the benchmark method.
 2. Measure prefill/decode at fixed M and context lengths, including weight-prepack warm/cold state, F32 KV cache, cache-hit behavior, HBM/L2 counters, TCC bytes, XCD balance, clocks, temperatures, and power.
@@ -237,7 +237,7 @@ Hardware exit gate: zero unexplained numerical mismatch, stable repeated executi
 
 Hardware exit gate: Candidate A is numerically valid and is the chosen performance implementation under the predeclared rule, or Candidate B/reference remains the only supported CDNA3 route.
 
-### Phase 5 — guarded production integration (hardware-required after Phases 3–4)
+### Phase 5 — guarded production integration (hardware-required after Phases 3–4; not started)
 
 1. Wire the already-validated internal CDNA3 body/profile behind exact gfx942 selection while preserving every existing gfx1201 symbol body/ABI/dispatch result.
 2. Re-run gfx1201 regression tests and CDNA3 differentials/timing on the same manifested device/partition.
@@ -658,8 +658,11 @@ the existing gfx1201 dispatcher.  It adds the following separate components:
 Runtime selection reads `hipDeviceProp_t::gcnArchName`; it accepts exactly
 `gfx942`, optionally followed only by nonempty, nonduplicated HIP
 `:xnack+`/`:xnack-` and `:sramecc+`/`:sramecc-` modifiers.  Prefixes,
-neighbors, empty modifiers, and unknown modifiers fail closed.  A′ and B also
-require exactly one `HIP_VISIBLE_DEVICES` token and internal HIP ordinal zero.
+neighbors, empty modifiers, and unknown modifiers fail closed.  A′ and B
+require exactly one `HIP_VISIBLE_DEVICES` token.  The physical smoke then
+selects the unique accepted runtime device rather than assuming that the
+visible GPU is runtime index zero, because the runtime registers CPU at index
+zero.
 
 The feature build rejects `GPU_ARCH` other than `gfx942`, and it is mutually
 exclusive with `rocm-ck-gfx1201`.  CPU-only tests cover selector acceptance
@@ -733,7 +736,7 @@ gfx942 partition and HIP runtime query.  The physical test must record
 `hipModuleOccupancyMaxActiveBlocksPerMultiprocessor` before any performance
 claim; static register/LDS values are not relabeled as measured occupancy.
 
-#### CPU controls and future physical test
+#### CPU controls and physical-test design
 
 The focused GPU-free checks completed:
 
@@ -777,7 +780,8 @@ allowance of `0.125` absolute or `0.008` relative.  This is a short
 correctness/fragment decision test, not a performance benchmark.
 
 No physical test, occupancy query, production dispatch, service action,
-release action, or final activation occurred in this phase.
+release action, or final activation occurred in this offline phase. The later
+rental-only physical result is recorded in the 2026-07-26 update below.
 
 ## Cross-architecture numerical constraint: split/merge requires multi-step proof (2026-07-26)
 
@@ -820,3 +824,54 @@ This rule applies before treating a native MFMA/XCD design as an optimization.
 It preserves the key lesson from R9700: a tiny partial-merge difference can be
 hidden by a standalone check and then become a full-model failure after
 quantized feedback.
+
+## 2026-07-26 MI300X rental update
+
+The physical result is preserved in
+[mi300x-rental-v1 README](../../benchmarks/results/2026-07-26/mi300x-rental-v1/README.md).
+It was one AMD Instinct MI300X VF reporting gfx942:sramecc+:xnack- under ROCm
+7.2.4, NPS1/SPX, and 196,288 MB VRAM. It does not generalize to another
+MI300 variant, ROCm build, partition, or thermal state.
+
+### Phase status
+
+| Phase | Rental evidence | Status |
+| --- | --- | --- |
+| 1--2 | Existing isolated selector, prepack, A′, and B prototype work remained the basis of the run. | Complete before the rental. |
+| 3 fragment/lane | The one-wave probe passed with max_abs=0.007812, max_rel=0.000000, and a bijection across 256 lane/register coordinates. | A′ sub-gate passed. |
+| 3 five-shape numerical | A′ versus the CPU expectation was max_abs=0.000000 for all five real M/N/K shapes. | A′ sub-gate passed. |
+| 3 B control / full differential | B produced 0.03125 instead of expected 0.53125 for k_or_v_tail_id1. The successful A′ run skipped B comparison; full-model logits and prefill/decode were not run. | Open; the Phase 3 exit gate is not met. |
+| 3 residency | No HIP occupancy or active-wave/block evidence was retained. | Unconfirmed. |
+| 4 timing | A′ projection-only 200-repeat timing reached 249.415 TFLOPS at M=128 and 3,019.8 GB/s for the M=1 gate/up tail. | Partial timing evidence only. |
+| 4 decision | There is no B comparison, empirical HBM peak, counter-derived HBM/L2 traffic, prepack cost, clock/thermal record, or other-partition run. | No performance/memory-hierarchy decision. |
+| 5 | No dispatch, service, release, activation, or production integration occurred. | Not started. |
+
+The 3,019.8 GB/s figure is about 57% only when divided by the published
+5.3 TB/s MI300X peak. It is not a measured partition-specific HBM efficiency.
+Likewise, the A′ timing is not a full-model decode result.
+
+### Device-selection correction and B-control boundary
+
+The rental exposed a structural smoke-test guard defect. The old
+device_count()==1 condition could never pass when one GPU was visible because
+the uLLM runtime always adds a CPU device at index zero. The source now matches
+the archived rental patch: after enforcing one HIP_VISIBLE_DEVICES token, it
+enumerates all runtime devices and accepts exactly one candidate that passes
+the strict gfx942 selector. Zero or multiple candidates remain fail closed.
+This corrected selector was used successfully on the rental system.
+
+The B OCP-to-BF16 control defect is deliberately not folded into that fix. A
+tail omission is suspected but unconfirmed. ULLM_SMOKE_SKIP_B_CONTROL permits
+an A′-versus-CPU observation only; it makes the printed B and A′-versus-B
+statistics self-comparisons and must not be considered a B pass. The next
+hardware run must reproduce and repair k_or_v_tail_id1 without this escape
+hatch before B can return as A′'s independent control.
+
+### Scope and timebox outcome
+
+The planned shortest physical go/no-go was 10--20 minutes. The reported
+lease lasted about two hours, but no per-stage start/end timestamps were
+recovered, so whether the 10--20 minute estimate was achieved is unconfirmed.
+The rental did establish the A′ physical fragment and CPU-differential
+sub-gates. It did not close the Phase 3 or Phase 4 exit gates and changes
+nothing about Phase 5 authority.
