@@ -84,7 +84,8 @@ fn run() -> Result<(), String> {
             "context_length": residency.context_length,
             "kv_block_size": residency.kv_block_size,
             "cache_blocks": residency.cache_blocks,
-            "resident_expert_payload_bytes": residency.resident_expert_payload_bytes
+            "resident_expert_payload_bytes": residency.resident_expert_payload_bytes,
+            "shared_moe_decode_workspace_bytes": residency.shared_moe_decode_workspace_bytes
         },
         "generation": {
             "prompt_token_ids": generation.prompt_token_ids,

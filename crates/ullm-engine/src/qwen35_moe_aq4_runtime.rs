@@ -123,6 +123,9 @@ pub struct Qwen35MoeAq4Residency {
     pub kv_block_size: usize,
     pub cache_blocks: usize,
     pub resident_expert_payload_bytes: u64,
+    /// One reusable decode workspace for all serial MoE layers; it is not
+    /// forty per-layer copies of staged/dequantized expert slabs.
+    pub shared_moe_decode_workspace_bytes: u64,
 }
 
 struct RawBf16Matrix {
@@ -394,6 +397,7 @@ struct MoEExecutionBuffers {
     shared_gate: ullm_runtime_sys::RuntimeBuffer,
     shared_gated_output: ullm_runtime_sys::RuntimeBuffer,
     total_output: ullm_runtime_sys::RuntimeBuffer,
+    allocated_bytes: usize,
 }
 
 struct MoELayer {
@@ -407,8 +411,22 @@ struct MoELayer {
     shared_expert_gate: RawBf16Matrix,
     gate_up: Aq4MoeTensor,
     down: Aq4MoeTensor,
-    buffers: MoEExecutionBuffers,
     last_route: Option<Qwen35MoeRouteTrace>,
+}
+
+#[derive(Debug, Default)]
+struct MoEExecutionBufferRequirements {
+    top_k: usize,
+    hidden: usize,
+    gate_up_elements: usize,
+    gate_up_output_elements: usize,
+    activation_elements: usize,
+    down_elements: usize,
+    expert_output_elements: usize,
+    gate_up_index_staging_bytes: usize,
+    gate_up_scale_staging_bytes: usize,
+    down_index_staging_bytes: usize,
+    down_scale_staging_bytes: usize,
 }
 
 fn f32_bytes(elements: usize, label: &str) -> Result<usize, String> {
@@ -474,6 +492,210 @@ fn encode_i32(values: &[i32]) -> Vec<u8> {
         .iter()
         .flat_map(|value| value.to_le_bytes())
         .collect()
+}
+
+impl MoEExecutionBufferRequirements {
+    fn include(&mut self, layer: &MoELayer) -> Result<(), String> {
+        let assignments = layer.top_k;
+        let gate_up_elements = layer.gate_up.selected_elements(assignments)?;
+        let down_elements = layer.down.selected_elements(assignments)?;
+        let gate_up_output_elements = assignments
+            .checked_mul(layer.gate_up.rows_per_expert)
+            .ok_or_else(|| "shared MoE gate/up output element count overflows".to_string())?;
+        let activation_elements = assignments
+            .checked_mul(layer.intermediate)
+            .ok_or_else(|| "shared MoE activation element count overflows".to_string())?;
+        let expert_output_elements = assignments
+            .checked_mul(layer.hidden)
+            .ok_or_else(|| "shared MoE expert output element count overflows".to_string())?;
+        let gate_up_index_staging_bytes = assignments
+            .checked_mul(layer.gate_up.index_bytes_per_expert)
+            .ok_or_else(|| "shared MoE gate/up index staging bytes overflow".to_string())?;
+        let gate_up_scale_staging_bytes = assignments
+            .checked_mul(layer.gate_up.scale_bytes_per_expert)
+            .ok_or_else(|| "shared MoE gate/up scale staging bytes overflow".to_string())?;
+        let down_index_staging_bytes =
+            assignments
+                .checked_mul(layer.down.index_bytes_per_expert)
+                .ok_or_else(|| "shared MoE down index staging bytes overflow".to_string())?;
+        let down_scale_staging_bytes =
+            assignments
+                .checked_mul(layer.down.scale_bytes_per_expert)
+                .ok_or_else(|| "shared MoE down scale staging bytes overflow".to_string())?;
+        self.top_k = self.top_k.max(assignments);
+        self.hidden = self.hidden.max(layer.hidden);
+        self.gate_up_elements = self.gate_up_elements.max(gate_up_elements);
+        self.gate_up_output_elements = self.gate_up_output_elements.max(gate_up_output_elements);
+        self.activation_elements = self.activation_elements.max(activation_elements);
+        self.down_elements = self.down_elements.max(down_elements);
+        self.expert_output_elements = self.expert_output_elements.max(expert_output_elements);
+        self.gate_up_index_staging_bytes = self
+            .gate_up_index_staging_bytes
+            .max(gate_up_index_staging_bytes);
+        self.gate_up_scale_staging_bytes = self
+            .gate_up_scale_staging_bytes
+            .max(gate_up_scale_staging_bytes);
+        self.down_index_staging_bytes = self.down_index_staging_bytes.max(down_index_staging_bytes);
+        self.down_scale_staging_bytes = self.down_scale_staging_bytes.max(down_scale_staging_bytes);
+        Ok(())
+    }
+
+    fn validate(&self) -> Result<(), String> {
+        if self.top_k == 0
+            || self.hidden == 0
+            || self.gate_up_elements == 0
+            || self.down_elements == 0
+        {
+            return Err("cannot allocate an empty shared MoE decode workspace".into());
+        }
+        Ok(())
+    }
+}
+
+impl MoEExecutionBuffers {
+    /// All decoder layers execute serially for batch-1 decode, so their routed
+    /// expert staging/dequant/output buffers are one reusable workspace rather
+    /// than forty simultaneous allocations.  This follows the package ledger's
+    /// one active MoE gather/workspace reserve.
+    fn allocate(
+        context: &mut ullm_runtime_sys::RuntimeContext,
+        stream: &mut ullm_runtime_sys::RuntimeStream,
+        requirements: &MoEExecutionBufferRequirements,
+    ) -> Result<Self, String> {
+        requirements.validate()?;
+        let routing_scores_bytes = f32_bytes(requirements.top_k, "shared MoE routing scores")?;
+        let selected_expert_ids_bytes =
+            i32_bytes(requirements.top_k, "shared MoE selected expert IDs")?;
+        let boundary_tie_flags_bytes = u32_bytes(1, "shared MoE boundary tie flags")?;
+        let local_expert_ids_bytes = i32_bytes(requirements.top_k, "shared local MoE expert IDs")?;
+        let gathered_hidden_bytes = f32_bytes(
+            requirements.expert_output_elements,
+            "shared MoE gathered hidden",
+        )?;
+        let gate_up_dequantized_bytes =
+            f32_bytes(requirements.gate_up_elements, "shared MoE gate/up dequant")?;
+        let gate_up_output_bytes = f32_bytes(
+            requirements.gate_up_output_elements,
+            "shared MoE gate/up output",
+        )?;
+        let activation_bytes =
+            f32_bytes(requirements.activation_elements, "shared MoE activation")?;
+        let down_dequantized_bytes =
+            f32_bytes(requirements.down_elements, "shared MoE down dequant")?;
+        let expert_output_bytes = f32_bytes(
+            requirements.expert_output_elements,
+            "shared MoE expert output",
+        )?;
+        let hidden_bytes = f32_bytes(requirements.hidden, "shared MoE hidden")?;
+        let allocated_bytes = [
+            routing_scores_bytes,
+            selected_expert_ids_bytes,
+            boundary_tie_flags_bytes,
+            local_expert_ids_bytes,
+            gathered_hidden_bytes,
+            requirements.gate_up_index_staging_bytes,
+            requirements.gate_up_scale_staging_bytes,
+            gate_up_dequantized_bytes,
+            gate_up_output_bytes,
+            activation_bytes,
+            requirements.down_index_staging_bytes,
+            requirements.down_scale_staging_bytes,
+            down_dequantized_bytes,
+            expert_output_bytes,
+            hidden_bytes,
+            hidden_bytes,
+            std::mem::size_of::<f32>(),
+            hidden_bytes,
+            hidden_bytes,
+        ]
+        .into_iter()
+        .try_fold(0_usize, |total, bytes| {
+            total
+                .checked_add(bytes)
+                .ok_or_else(|| "shared MoE decode workspace byte count overflows".to_string())
+        })?;
+        let local_ids = (0..requirements.top_k)
+            .map(|rank| i32::try_from(rank).map_err(|_| "local expert ID exceeds i32".to_string()))
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut local_expert_ids = context
+            .alloc_buffer(local_expert_ids_bytes)
+            .map_err(|error| format!("failed to allocate shared local MoE expert IDs: {error}"))?;
+        local_expert_ids
+            .copy_from_host(0, &encode_i32(&local_ids), Some(stream))
+            .map_err(|error| format!("failed to upload shared local MoE expert IDs: {error}"))?;
+        Ok(Self {
+            routing_scores: context
+                .alloc_buffer(routing_scores_bytes)
+                .map_err(|error| {
+                    format!("failed to allocate shared MoE routing scores: {error}")
+                })?,
+            selected_expert_ids: context.alloc_buffer(selected_expert_ids_bytes).map_err(
+                |error| format!("failed to allocate shared MoE selected expert IDs: {error}"),
+            )?,
+            boundary_tie_flags: context
+                .alloc_buffer(boundary_tie_flags_bytes)
+                .map_err(|error| format!("failed to allocate shared MoE tie flags: {error}"))?,
+            local_expert_ids,
+            gathered_hidden: context
+                .alloc_buffer(gathered_hidden_bytes)
+                .map_err(|error| {
+                    format!("failed to allocate shared MoE gathered hidden: {error}")
+                })?,
+            gate_up_index_staging: context
+                .alloc_buffer(requirements.gate_up_index_staging_bytes)
+                .map_err(|error| {
+                    format!("failed to allocate shared MoE gate/up index staging: {error}")
+                })?,
+            gate_up_scale_staging: context
+                .alloc_buffer(requirements.gate_up_scale_staging_bytes)
+                .map_err(|error| {
+                    format!("failed to allocate shared MoE gate/up scale staging: {error}")
+                })?,
+            gate_up_dequantized: context.alloc_buffer(gate_up_dequantized_bytes).map_err(
+                |error| format!("failed to allocate shared MoE gate/up dequant: {error}"),
+            )?,
+            gate_up_output: context
+                .alloc_buffer(gate_up_output_bytes)
+                .map_err(|error| {
+                    format!("failed to allocate shared MoE gate/up output: {error}")
+                })?,
+            activation: context
+                .alloc_buffer(activation_bytes)
+                .map_err(|error| format!("failed to allocate shared MoE activation: {error}"))?,
+            down_index_staging: context
+                .alloc_buffer(requirements.down_index_staging_bytes)
+                .map_err(|error| {
+                    format!("failed to allocate shared MoE down index staging: {error}")
+                })?,
+            down_scale_staging: context
+                .alloc_buffer(requirements.down_scale_staging_bytes)
+                .map_err(|error| {
+                    format!("failed to allocate shared MoE down scale staging: {error}")
+                })?,
+            down_dequantized: context
+                .alloc_buffer(down_dequantized_bytes)
+                .map_err(|error| format!("failed to allocate shared MoE down dequant: {error}"))?,
+            expert_output: context
+                .alloc_buffer(expert_output_bytes)
+                .map_err(|error| format!("failed to allocate shared MoE expert output: {error}"))?,
+            routed_output: context
+                .alloc_buffer(hidden_bytes)
+                .map_err(|error| format!("failed to allocate shared MoE routed output: {error}"))?,
+            shared_output: context
+                .alloc_buffer(hidden_bytes)
+                .map_err(|error| format!("failed to allocate shared MoE shared output: {error}"))?,
+            shared_gate: context
+                .alloc_buffer(std::mem::size_of::<f32>())
+                .map_err(|error| format!("failed to allocate shared MoE shared gate: {error}"))?,
+            shared_gated_output: context.alloc_buffer(hidden_bytes).map_err(|error| {
+                format!("failed to allocate shared MoE gated shared output: {error}")
+            })?,
+            total_output: context
+                .alloc_buffer(hidden_bytes)
+                .map_err(|error| format!("failed to allocate shared MoE total output: {error}"))?,
+            allocated_bytes,
+        })
+    }
 }
 
 impl MoELayer {
@@ -549,90 +771,6 @@ impl MoELayer {
             chunk_bytes,
         )?;
 
-        let assignments = top_k;
-        let gate_up_elements = assignments
-            .checked_mul(gate_rows)
-            .and_then(|value| value.checked_mul(hidden))
-            .ok_or_else(|| format!("layer {layer_index} gate/up staging elements overflow"))?;
-        let down_elements = assignments
-            .checked_mul(hidden)
-            .and_then(|value| value.checked_mul(intermediate))
-            .ok_or_else(|| format!("layer {layer_index} down staging elements overflow"))?;
-        let gathered_elements = assignments
-            .checked_mul(hidden)
-            .ok_or_else(|| format!("layer {layer_index} gathered elements overflow"))?;
-        let gate_up_output_elements = assignments
-            .checked_mul(gate_rows)
-            .ok_or_else(|| format!("layer {layer_index} gate/up output elements overflow"))?;
-        let activation_elements = assignments
-            .checked_mul(intermediate)
-            .ok_or_else(|| format!("layer {layer_index} activation elements overflow"))?;
-        let expert_output_elements = assignments
-            .checked_mul(hidden)
-            .ok_or_else(|| format!("layer {layer_index} expert output elements overflow"))?;
-        let local_ids = (0..top_k)
-            .map(|rank| i32::try_from(rank).map_err(|_| "local expert ID exceeds i32".to_string()))
-            .collect::<Result<Vec<_>, _>>()?;
-        let mut local_expert_ids = context
-            .alloc_buffer(i32_bytes(top_k, "local MoE expert IDs")?)
-            .map_err(|error| format!("failed to allocate local MoE expert IDs: {error}"))?;
-        local_expert_ids
-            .copy_from_host(0, &encode_i32(&local_ids), Some(stream))
-            .map_err(|error| format!("failed to upload local MoE expert IDs: {error}"))?;
-        let buffers = MoEExecutionBuffers {
-            routing_scores: allocate_f32(context, top_k, "MoE routing scores")?,
-            selected_expert_ids: context
-                .alloc_buffer(i32_bytes(top_k, "MoE selected expert IDs")?)
-                .map_err(|error| format!("failed to allocate MoE selected expert IDs: {error}"))?,
-            boundary_tie_flags: context
-                .alloc_buffer(u32_bytes(1, "MoE boundary tie flags")?)
-                .map_err(|error| format!("failed to allocate MoE boundary tie flags: {error}"))?,
-            local_expert_ids,
-            gathered_hidden: allocate_f32(context, gathered_elements, "MoE gathered hidden")?,
-            gate_up_index_staging: context
-                .alloc_buffer(
-                    top_k
-                        .checked_mul(gate_up.index_bytes_per_expert)
-                        .ok_or_else(|| "MoE gate/up index staging bytes overflow".to_string())?,
-                )
-                .map_err(|error| {
-                    format!("failed to allocate MoE gate/up index staging: {error}")
-                })?,
-            gate_up_scale_staging: context
-                .alloc_buffer(
-                    top_k
-                        .checked_mul(gate_up.scale_bytes_per_expert)
-                        .ok_or_else(|| "MoE gate/up scale staging bytes overflow".to_string())?,
-                )
-                .map_err(|error| {
-                    format!("failed to allocate MoE gate/up scale staging: {error}")
-                })?,
-            gate_up_dequantized: allocate_f32(context, gate_up_elements, "MoE gate/up dequant")?,
-            gate_up_output: allocate_f32(context, gate_up_output_elements, "MoE gate/up output")?,
-            activation: allocate_f32(context, activation_elements, "MoE activation")?,
-            down_index_staging: context
-                .alloc_buffer(
-                    top_k
-                        .checked_mul(down.index_bytes_per_expert)
-                        .ok_or_else(|| "MoE down index staging bytes overflow".to_string())?,
-                )
-                .map_err(|error| format!("failed to allocate MoE down index staging: {error}"))?,
-            down_scale_staging: context
-                .alloc_buffer(
-                    top_k
-                        .checked_mul(down.scale_bytes_per_expert)
-                        .ok_or_else(|| "MoE down scale staging bytes overflow".to_string())?,
-                )
-                .map_err(|error| format!("failed to allocate MoE down scale staging: {error}"))?,
-            down_dequantized: allocate_f32(context, down_elements, "MoE down dequant")?,
-            expert_output: allocate_f32(context, expert_output_elements, "MoE expert output")?,
-            routed_output: allocate_f32(context, hidden, "MoE routed output")?,
-            shared_output: allocate_f32(context, hidden, "MoE shared expert output")?,
-            shared_gate: allocate_f32(context, 1, "MoE shared expert gate")?,
-            shared_gated_output: allocate_f32(context, hidden, "MoE gated shared expert output")?,
-            total_output: allocate_f32(context, hidden, "MoE total output")?,
-        };
-        let _ = shared_intermediate;
         Ok(Self {
             layer_index,
             hidden,
@@ -644,13 +782,13 @@ impl MoELayer {
             shared_expert_gate,
             gate_up,
             down,
-            buffers,
             last_route: None,
         })
     }
 
     fn run_routed(
         &mut self,
+        buffers: &mut MoEExecutionBuffers,
         stream: &mut ullm_runtime_sys::RuntimeStream,
         post_normed: &ullm_runtime_sys::RuntimeBuffer,
         label: &str,
@@ -663,9 +801,9 @@ impl MoELayer {
             self.hidden,
             self.num_experts,
             self.top_k,
-            &mut self.buffers.routing_scores,
-            &mut self.buffers.selected_expert_ids,
-            &mut self.buffers.boundary_tie_flags,
+            &mut buffers.routing_scores,
+            &mut buffers.selected_expert_ids,
+            &mut buffers.boundary_tie_flags,
             Some(stream),
         )
         .map_err(|error| {
@@ -676,17 +814,17 @@ impl MoELayer {
         })?;
 
         let mut ids_bytes = vec![0_u8; i32_bytes(self.top_k, "MoE route IDs")?];
-        self.buffers
+        buffers
             .selected_expert_ids
             .copy_to_host(0, &mut ids_bytes, Some(stream))
             .map_err(|error| format!("failed to copy {label} MoE route IDs: {error}"))?;
         let mut scores_bytes = vec![0_u8; f32_bytes(self.top_k, "MoE route scores")?];
-        self.buffers
+        buffers
             .routing_scores
             .copy_to_host(0, &mut scores_bytes, Some(stream))
             .map_err(|error| format!("failed to copy {label} MoE route scores: {error}"))?;
         let mut ties_bytes = vec![0_u8; u32_bytes(1, "MoE route ties")?];
-        self.buffers
+        buffers
             .boundary_tie_flags
             .copy_to_host(0, &mut ties_bytes, Some(stream))
             .map_err(|error| format!("failed to copy {label} MoE route ties: {error}"))?;
@@ -711,16 +849,16 @@ impl MoELayer {
         }
         self.gate_up.stage_and_dequant_selected(
             &route.selected_expert_ids,
-            &mut self.buffers.gate_up_index_staging,
-            &mut self.buffers.gate_up_scale_staging,
-            &mut self.buffers.gate_up_dequantized,
+            &mut buffers.gate_up_index_staging,
+            &mut buffers.gate_up_scale_staging,
+            &mut buffers.gate_up_dequantized,
             stream,
         )?;
         self.down.stage_and_dequant_selected(
             &route.selected_expert_ids,
-            &mut self.buffers.down_index_staging,
-            &mut self.buffers.down_scale_staging,
-            &mut self.buffers.down_dequantized,
+            &mut buffers.down_index_staging,
+            &mut buffers.down_scale_staging,
+            &mut buffers.down_dequantized,
             stream,
         )?;
         ullm_runtime_sys::moe_gather_f32(
@@ -728,51 +866,51 @@ impl MoELayer {
             1,
             self.hidden,
             self.top_k,
-            &mut self.buffers.gathered_hidden,
+            &mut buffers.gathered_hidden,
             Some(stream),
         )
         .map_err(|error| format!("failed to gather {label} MoE hidden: {error}"))?;
         ullm_runtime_sys::moe_decode_gemm_f32(
-            &self.buffers.gate_up_dequantized,
+            &buffers.gate_up_dequantized,
             ullm_runtime_sys::MoeWeightDtype::F32,
-            &self.buffers.local_expert_ids,
-            &self.buffers.gathered_hidden,
+            &buffers.local_expert_ids,
+            &buffers.gathered_hidden,
             self.top_k,
             self.top_k,
             self.gate_up.rows_per_expert,
             self.hidden,
-            &mut self.buffers.gate_up_output,
+            &mut buffers.gate_up_output,
             Some(stream),
         )
         .map_err(|error| format!("failed to run {label} MoE gate/up decode GEMM: {error}"))?;
         ullm_runtime_sys::moe_gated_silu_f32(
-            &self.buffers.gate_up_output,
+            &buffers.gate_up_output,
             self.top_k,
             self.intermediate,
-            &mut self.buffers.activation,
+            &mut buffers.activation,
             Some(stream),
         )
         .map_err(|error| format!("failed to activate {label} MoE gate/up output: {error}"))?;
         ullm_runtime_sys::moe_decode_gemm_f32(
-            &self.buffers.down_dequantized,
+            &buffers.down_dequantized,
             ullm_runtime_sys::MoeWeightDtype::F32,
-            &self.buffers.local_expert_ids,
-            &self.buffers.activation,
+            &buffers.local_expert_ids,
+            &buffers.activation,
             self.top_k,
             self.top_k,
             self.hidden,
             self.intermediate,
-            &mut self.buffers.expert_output,
+            &mut buffers.expert_output,
             Some(stream),
         )
         .map_err(|error| format!("failed to run {label} MoE down decode GEMM: {error}"))?;
         ullm_runtime_sys::moe_scatter_weighted_f32(
-            &self.buffers.expert_output,
-            &self.buffers.routing_scores,
+            &buffers.expert_output,
+            &buffers.routing_scores,
             1,
             self.top_k,
             self.hidden,
-            &mut self.buffers.routed_output,
+            &mut buffers.routed_output,
             Some(stream),
         )
         .map_err(|error| format!("failed to scatter {label} MoE expert output: {error}"))?;
@@ -782,6 +920,7 @@ impl MoELayer {
 
     fn gate_shared_output(
         &mut self,
+        buffers: &mut MoEExecutionBuffers,
         stream: &mut ullm_runtime_sys::RuntimeStream,
         post_normed: &ullm_runtime_sys::RuntimeBuffer,
         label: &str,
@@ -791,24 +930,24 @@ impl MoELayer {
             post_normed,
             1,
             self.hidden,
-            &mut self.buffers.shared_gate,
+            &mut buffers.shared_gate,
             Some(stream),
         )
         .map_err(|error| format!("failed to project {label} shared-expert gate: {error}"))?;
         ullm_runtime_sys::moe_sigmoid_gate_f32(
-            &self.buffers.shared_gate,
-            &self.buffers.shared_output,
+            &buffers.shared_gate,
+            &buffers.shared_output,
             1,
             self.hidden,
-            &mut self.buffers.shared_gated_output,
+            &mut buffers.shared_gated_output,
             Some(stream),
         )
         .map_err(|error| format!("failed to gate {label} shared-expert output: {error}"))?;
         ullm_runtime_sys::add_f32(
-            &self.buffers.routed_output,
-            &self.buffers.shared_gated_output,
+            &buffers.routed_output,
+            &buffers.shared_gated_output,
             self.hidden,
-            &mut self.buffers.total_output,
+            &mut buffers.total_output,
             Some(stream),
         )
         .map_err(|error| format!("failed to combine {label} routed/shared MoE outputs: {error}"))
@@ -903,6 +1042,12 @@ enum Qwen35MoeResidentLayer {
 }
 
 impl Qwen35MoeResidentLayer {
+    fn moe(&self) -> &MoELayer {
+        match self {
+            Self::Linear { moe, .. } | Self::Full { moe, .. } => moe,
+        }
+    }
+
     fn layer_index(&self) -> usize {
         match self {
             Self::Linear { layer_index, .. } | Self::Full { layer_index, .. } => *layer_index,
@@ -918,6 +1063,7 @@ impl Qwen35MoeResidentLayer {
 
     fn run(
         &mut self,
+        buffers: &mut MoEExecutionBuffers,
         stream: &mut ullm_runtime_sys::RuntimeStream,
         input: &ullm_runtime_sys::RuntimeBuffer,
         rope_position: usize,
@@ -931,10 +1077,11 @@ impl Qwen35MoeResidentLayer {
                     PackageLinearAttnResidentStepInput::ExternalBuffer(input),
                     label,
                 )?;
-                let route = moe.run_routed(stream, attention.post_normed_buffer(), label)?;
-                attention.run_moe_shared_expert(stream, &mut moe.buffers.shared_output, label)?;
-                moe.gate_shared_output(stream, attention.post_normed_buffer(), label)?;
-                attention.finish_external_mlp(stream, &moe.buffers.total_output, label)?;
+                let route =
+                    moe.run_routed(buffers, stream, attention.post_normed_buffer(), label)?;
+                attention.run_moe_shared_expert(stream, &mut buffers.shared_output, label)?;
+                moe.gate_shared_output(buffers, stream, attention.post_normed_buffer(), label)?;
+                attention.finish_external_mlp(stream, &buffers.total_output, label)?;
                 Ok(route)
             }
             Self::Full { attention, moe, .. } => {
@@ -947,10 +1094,11 @@ impl Qwen35MoeResidentLayer {
                     cache_position,
                     label,
                 )?;
-                let route = moe.run_routed(stream, attention.post_normed_buffer(), label)?;
-                attention.run_moe_shared_expert(stream, &mut moe.buffers.shared_output, label)?;
-                moe.gate_shared_output(stream, attention.post_normed_buffer(), label)?;
-                attention.finish_external_mlp(stream, &moe.buffers.total_output, label)?;
+                let route =
+                    moe.run_routed(buffers, stream, attention.post_normed_buffer(), label)?;
+                attention.run_moe_shared_expert(stream, &mut buffers.shared_output, label)?;
+                moe.gate_shared_output(buffers, stream, attention.post_normed_buffer(), label)?;
+                attention.finish_external_mlp(stream, &buffers.total_output, label)?;
                 Ok(route)
             }
         }
@@ -996,6 +1144,7 @@ pub struct Qwen35MoeAq4Runtime {
     final_norm: PackageFinalNormRuntime,
     lm_head: PackageLmHeadRuntime,
     ping_buffers: [ullm_runtime_sys::RuntimeBuffer; 2],
+    moe_buffers: MoEExecutionBuffers,
     _expert_registry: WeightRegistry,
     stream: ullm_runtime_sys::RuntimeStream,
     _context: ullm_runtime_sys::RuntimeContext,
@@ -1008,6 +1157,7 @@ pub struct Qwen35MoeAq4Runtime {
     declared_package_bytes: u64,
     device_total_global_mem_bytes: u64,
     resident_expert_payload_bytes: u64,
+    shared_moe_decode_workspace_bytes: u64,
     position: usize,
 }
 
@@ -1256,6 +1406,14 @@ impl Qwen35MoeAq4Runtime {
             };
             layers.push(resident);
         }
+        let mut moe_workspace_requirements = MoEExecutionBufferRequirements::default();
+        for layer in &layers {
+            moe_workspace_requirements.include(layer.moe())?;
+        }
+        let moe_buffers =
+            MoEExecutionBuffers::allocate(&mut context, &mut stream, &moe_workspace_requirements)?;
+        let shared_moe_decode_workspace_bytes = u64::try_from(moe_buffers.allocated_bytes)
+            .map_err(|_| "shared MoE decode workspace bytes exceed u64".to_string())?;
         let mut final_norm =
             read_named_passthrough_f32(&package_path, QWEN3_FINAL_NORM_TENSOR, config.chunk_bytes)?;
         final_norm.values =
@@ -1298,6 +1456,7 @@ impl Qwen35MoeAq4Runtime {
             final_norm,
             lm_head,
             ping_buffers,
+            moe_buffers,
             _expert_registry: expert_registry,
             stream,
             _context: context,
@@ -1310,6 +1469,7 @@ impl Qwen35MoeAq4Runtime {
             declared_package_bytes,
             device_total_global_mem_bytes: device.total_global_mem,
             resident_expert_payload_bytes,
+            shared_moe_decode_workspace_bytes,
             position: 0,
         })
     }
@@ -1330,6 +1490,7 @@ impl Qwen35MoeAq4Runtime {
             kv_block_size: self.kv_block_size,
             cache_blocks: self.cache_blocks,
             resident_expert_payload_bytes: self.resident_expert_payload_bytes,
+            shared_moe_decode_workspace_bytes: self.shared_moe_decode_workspace_bytes,
         }
     }
 
@@ -1376,6 +1537,7 @@ impl Qwen35MoeAq4Runtime {
                 self.layers[layer_position].layer_index()
             );
             let route = self.layers[layer_position].run(
+                &mut self.moe_buffers,
                 &mut self.stream,
                 &self.ping_buffers[current],
                 self.position,
