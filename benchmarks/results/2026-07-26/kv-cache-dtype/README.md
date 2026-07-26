@@ -15,13 +15,14 @@ cargo test -p ullm-engine decoder::tests --lib
 36 passed; 0 failed
 
 cargo test -p ullm-engine kv_cache_dtype --lib
-3 passed; 0 failed
+4 passed; 0 failed
 ```
 
 Coverage includes F32 regression, F16, FP8 E4M3FN, mixed K/V dtypes, physical
 block-table placement, scale-aware readback, direct decode, typed causal
 prefill fallback, and rejection of corrupted negative FP8 scales. `Q8_0` is
-rejected by the parser.
+rejected by the parser. The K/V override precedence over the uniform selector
+is tested without mutating the process environment.
 
 ## Capacity ledger
 

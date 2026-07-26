@@ -23,11 +23,12 @@
   F32 writer/reader API をそのまま選ぶ。
 - CPU host reference と同一 ABI の HIP staging fallback を追加した。これは
   correctness fallback であり、native HIP performance path ではない。
-- CPU targeted tests は decoder 36 件と layout 3 件が成功した。FP8 scale は
+- CPU targeted tests は decoder 36 件と layout 4 件が成功した。FP8 scale は
   all-zero reset row の zero だけを許し、負値・NaN・infinity は readback と
   attention の双方で破損として拒否する。
 - `ed641675 feat(runtime): add typed paged KV cache ABI` を作成した。
 - `1c7cc3f3 fix(kv): reject invalid FP8 cache scales` を作成した。
+- `4f283c96 test(kv): verify K and V cache selectors` を作成した。
 - 実行後に、broad `ullm-runtime-sys --lib` に opportunistic HIP tests が含まれる
   ことを発見した。R9700 lock preflight 前の実行だったため、GPU evidence としては
   採用しない。以後 GPU を使う全テスト/計測は lock/service preflight 後だけにする。

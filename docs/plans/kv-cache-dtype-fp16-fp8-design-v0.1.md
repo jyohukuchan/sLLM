@@ -252,6 +252,7 @@ CPU evidence is saved in
 `benchmarks/results/2026-07-26/kv-cache-dtype/`. The targeted tests cover:
 
 - F32 default and rejection of `Q8_0`;
+- uniform selector plus K/V override precedence without process-environment mutation;
 - exact F32/F16/FP8 allocation accounting;
 - F16, FP8, and mixed K/V physical page write/readback/direct decode;
 - typed causal prefill fallback;
