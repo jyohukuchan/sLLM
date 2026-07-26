@@ -30,6 +30,7 @@
 - `1c7cc3f3 fix(kv): reject invalid FP8 cache scales` を作成した。
 - `4f283c96 test(kv): verify K and V cache selectors` を作成した。
 - `327e34f5 fix(kv): reserve raw zero FP8 scale for reset` を作成した。
+- `481a6078 test(kv): check typed attention against decoded cache` を作成した。
 - 実行後に、broad `ullm-runtime-sys --lib` に opportunistic HIP tests が含まれる
   ことを発見した。R9700 lock preflight 前の実行だったため、GPU evidence としては
   採用しない。以後 GPU を使う全テスト/計測は lock/service preflight 後だけにする。

@@ -22,7 +22,9 @@ Coverage includes F32 regression, F16, FP8 E4M3FN, mixed K/V dtypes, physical
 block-table placement, scale-aware readback, direct decode, typed causal
 prefill fallback, and rejection of corrupted negative FP8 scales. `Q8_0` is
 rejected by the parser. The K/V override precedence over the uniform selector
-is tested without mutating the process environment.
+is tested without mutating the process environment. The direct reader is also
+checked against a CPU reference over its exact decoded payload-plus-scale
+cache bytes; this is a semantic implementation check, not a quality threshold.
 
 ## Capacity ledger
 

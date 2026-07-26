@@ -256,6 +256,8 @@ CPU evidence is saved in
 - uniform selector plus K/V override precedence without process-environment mutation;
 - exact F32/F16/FP8 allocation accounting;
 - F16, FP8, and mixed K/V physical page write/readback/direct decode;
+- typed direct-attention output against a CPU reference over the exact decoded
+  payload-plus-scale cache bytes (implementation correctness only);
 - typed causal prefill fallback;
 - corrupt FP8 negative (including negative-zero) scale rejection in both readback and attention;
 - all existing `decoder::tests` F32 cases.
