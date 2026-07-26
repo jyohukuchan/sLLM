@@ -22,8 +22,13 @@ use crate::backend_operation_registry::{
 use crate::execution_batch::ExecutionPhase;
 use crate::format_id::FORMAT_SQ8_0;
 use crate::host_bytes::{decode_f32_le_values, encode_f32_to_bytes};
-use crate::loader::{LoadOptions, WeightRegistry, materialize_config, matrix_shape_rows_cols};
-use crate::package::{TensorSelector, select_tensor_payload_bundle};
+use crate::loader::{
+    LoadOptions, WeightRegistry, load_named_passthrough_bf16_resident, materialize_config,
+    matrix_shape_rows_cols,
+};
+use crate::package::{
+    TensorSelector, select_exact_passthrough_payload_bundle, select_tensor_payload_bundle,
+};
 use crate::qwen3_loader::Qwen3PackageSqOverlay;
 use crate::sq::fp8_e4m3fn_to_f32;
 use crate::sq_runtime::{Sq8ResidentRuntimeTensorRef, load_sq8_resident_tensor};
@@ -251,6 +256,16 @@ enum PackageResidentMatvecStorage {
     },
     #[allow(dead_code)]
     F32 {
+        matrix_buffer: Arc<ullm_runtime_sys::RuntimeBuffer>,
+    },
+    /// Raw BF16 passthrough tensors are kept resident exactly as packaged.
+    ///
+    /// Qwen3.5 MoE deliberately leaves attention/router/shared-expert tensors
+    /// unquantized while expert tensors use AQ4_0.  Keeping this variant in the
+    /// common projection wrapper lets the resident hybrid-attention path retain
+    /// its existing ownership and state handling instead of duplicating it for
+    /// the mixed-format package.
+    Bf16 {
         matrix_buffer: Arc<ullm_runtime_sys::RuntimeBuffer>,
     },
     SqFp8 {
@@ -632,6 +647,57 @@ impl PackageAq4ResidentMatvec {
                 }
             }
         }
+        // An AQ4_0 package can intentionally carry a raw BF16 projection.
+        // This is the Qwen3.5 MoE layout for the hybrid-attention and shared
+        // expert weights.  Only fall back when no AQ4 payload exists; a present
+        // but malformed AQ4 payload must still fail through the normal loader.
+        let selector = TensorSelector::Name(tensor_name.to_string());
+        if select_tensor_payload_bundle(path, &selector).is_err() {
+            let passthrough = select_exact_passthrough_payload_bundle(path, tensor_name).map_err(
+                |raw_error| {
+                    format!(
+                        "failed to select {tensor_name} as AQ4_0 or raw BF16 passthrough: {raw_error}"
+                    )
+                },
+            )?;
+            let [rows, cols] = passthrough.shape.as_slice() else {
+                return Err(format!(
+                    "raw BF16 projection {tensor_name} must have rank 2, got {:?}",
+                    passthrough.shape
+                ));
+            };
+            let rows = usize::try_from(*rows)
+                .map_err(|_| format!("raw BF16 projection {tensor_name} rows do not fit usize"))?;
+            let cols = usize::try_from(*cols).map_err(|_| {
+                format!("raw BF16 projection {tensor_name} columns do not fit usize")
+            })?;
+            if rows == 0 || cols == 0 {
+                return Err(format!(
+                    "raw BF16 projection {tensor_name} has a zero dimension"
+                ));
+            }
+            let resident = load_named_passthrough_bf16_resident(
+                context,
+                stream,
+                path,
+                tensor_name,
+                &passthrough.shape,
+                chunk_bytes,
+            )?;
+            return Ok(Self {
+                rows,
+                cols,
+                group_size: 0,
+                tensor_scale: 1.0,
+                scale_count: 0,
+                row_scale_count: 0,
+                aq4_batch_plans: None,
+                projection_dispatches,
+                storage: PackageResidentMatvecStorage::Bf16 {
+                    matrix_buffer: Arc::new(resident.buffer),
+                },
+            });
+        }
         Self::load_with_shared_buffers(
             context,
             stream,
@@ -660,8 +726,9 @@ impl PackageAq4ResidentMatvec {
                 scale_values_buffer: scale_values_buffer.as_ref(),
                 row_scale_buffer: row_scale_buffer.as_deref(),
             }),
-            PackageResidentMatvecStorage::F32 { .. } => Err(format!(
-                "{label} requested AQ4 storage for SQ/F32 resident matrix"
+            PackageResidentMatvecStorage::F32 { .. }
+            | PackageResidentMatvecStorage::Bf16 { .. } => Err(format!(
+                "{label} requested AQ4 storage for SQ/F32/BF16 resident matrix"
             )),
             PackageResidentMatvecStorage::SqFp8 { .. } => Err(format!(
                 "{label} requested AQ4 storage for SQ FP8 resident matrix"
@@ -686,9 +753,9 @@ impl PackageAq4ResidentMatvec {
                 scale_kind: *scale_kind,
                 scale_block_cols: *scale_block_cols,
             }),
-            PackageResidentMatvecStorage::Aq4 { .. } | PackageResidentMatvecStorage::F32 { .. } => {
-                None
-            }
+            PackageResidentMatvecStorage::Aq4 { .. }
+            | PackageResidentMatvecStorage::F32 { .. }
+            | PackageResidentMatvecStorage::Bf16 { .. } => None,
         }
     }
 
@@ -744,6 +811,15 @@ impl PackageAq4ResidentMatvec {
                     .copy_from_host(0, &bytes, Some(stream))
                     .map_err(|err| format!("failed to copy {label} F32 row to runtime: {err}"))
             }
+            PackageResidentMatvecStorage::Bf16 { matrix_buffer } => ullm_runtime_sys::bf16_row_f32(
+                matrix_buffer.as_ref(),
+                self.rows,
+                self.cols,
+                row_index,
+                output_buffer,
+                Some(stream),
+            )
+            .map_err(|err| format!("failed to gather {label} BF16 row: {err}")),
             PackageResidentMatvecStorage::SqFp8 {
                 payload_buffer,
                 scale_buffer,
@@ -906,6 +982,17 @@ impl PackageAq4ResidentMatvec {
                 Some(stream),
             )
             .map_err(|err| format!("failed to run {label} F32 matvec: {err}")),
+            PackageResidentMatvecStorage::Bf16 { matrix_buffer } => {
+                ullm_runtime_sys::matvec_bf16_f32(
+                    matrix_buffer.as_ref(),
+                    input_buffer,
+                    self.rows,
+                    self.cols,
+                    output_buffer,
+                    Some(stream),
+                )
+                .map_err(|err| format!("failed to run {label} BF16 matvec: {err}"))
+            }
             PackageResidentMatvecStorage::SqFp8 {
                 payload_buffer,
                 scale_buffer,
@@ -1140,8 +1227,9 @@ impl PackageAq4ResidentMatvec {
                 record_sq_fp8_projection_dispatch(dispatch);
                 Ok(())
             }
-            PackageResidentMatvecStorage::F32 { .. } => {
-                Err(format!("{label} F32 matvec batch is not implemented"))
+            PackageResidentMatvecStorage::F32 { .. }
+            | PackageResidentMatvecStorage::Bf16 { .. } => {
+                Err(format!("{label} F32/BF16 matvec batch is not implemented"))
             }
         }
     }
@@ -1206,6 +1294,7 @@ impl PackageAq4ResidentMatvec {
                 .map_err(|err| format!("failed to run {label} AQ4 matvec add: {err}"))
             }
             PackageResidentMatvecStorage::F32 { .. }
+            | PackageResidentMatvecStorage::Bf16 { .. }
             | PackageResidentMatvecStorage::SqFp8 { .. } => {
                 self.matvec(input_buffer, output_buffer, stream, label)?;
                 let mut projected =

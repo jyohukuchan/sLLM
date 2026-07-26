@@ -29,6 +29,7 @@ pub mod qwen35_aq4_head_runtime;
 pub mod qwen35_aq4_layer_runtime;
 pub mod qwen35_aq4_model_runtime;
 pub mod qwen35_aq4_session;
+pub mod qwen35_moe_aq4_runtime;
 pub mod qwen35_package_contract;
 pub mod qwen3_loader;
 pub mod qwen3_names;

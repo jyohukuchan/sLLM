@@ -11,6 +11,7 @@ rocm-ck-gfx1201 = ["ullm-runtime-sys/rocm-ck-gfx1201"]
 rocm-handwritten-projection-gfx1201 = ["rocm-ck-gfx1201", "ullm-runtime-sys/rocm-handwritten-projection-gfx1201"]
 rocm-ck-gfx942-aprime = ["ullm-runtime-sys/rocm-ck-gfx942-aprime"]
 rocm-fp32-reference-gfx1201 = ["ullm-runtime-sys/rocm-fp32-reference-gfx1201"]
+rocm-moe-gfx1201 = ["ullm-runtime-sys/rocm-moe-gfx1201"]
 
 [dependencies]
 memchr = "2.7"
@@ -72,6 +73,15 @@ path = "src/bin/ullm-aq4-differential-trace.rs"
 [[bin]]
 name = "ullm-aq4-p2-resident-driver"
 path = "src/bin/ullm-aq4-p2-resident-driver.rs"
+
+[[bin]]
+name = "ullm-qwen35-moe-aq4-generate"
+path = "src/bin/ullm-qwen35-moe-aq4-generate.rs"
+required-features = ["rocm-moe-gfx1201"]
+
+[[bin]]
+name = "ullm-qwen35-aq4-baseline-probe"
+path = "src/bin/ullm-qwen35-aq4-baseline-probe.rs"
 
 [[example]]
 name = "sq8_ck_layer"

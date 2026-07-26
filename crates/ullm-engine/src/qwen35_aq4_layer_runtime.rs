@@ -18,7 +18,9 @@ use crate::host_bytes::{decode_f32_le_values, encode_f32_to_bytes, encode_u32_to
 use crate::loader::{
     WeightRegistry, effective_qwen35_rmsnorm_weight_values, read_named_passthrough_f32,
 };
-use crate::package::{TensorSelector, select_tensor_payload_bundle};
+use crate::package::{
+    TensorSelector, select_exact_passthrough_payload_bundle, select_tensor_payload_bundle,
+};
 use crate::qwen3_loader::Qwen3PackageSqOverlay;
 use crate::scheduler::RequestId;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -183,18 +185,36 @@ fn format_u64_shape(shape: &[u64]) -> String {
 }
 
 fn package_aq4_matrix_shape(path: &str, tensor_name: &str) -> Result<(usize, usize), String> {
-    let bundle = select_tensor_payload_bundle(path, &TensorSelector::Name(tensor_name.into()))
-        .map_err(|error| {
-            format!("failed to inspect {tensor_name} before device allocation: {error}")
-        })?;
-    let [rows, cols] = bundle.shape.as_slice() else {
-        return Err(format!("AQ4 tensor {tensor_name} must have rank 2"));
+    let selector = TensorSelector::Name(tensor_name.into());
+    let (shape, declared_elements, storage_label) = match select_tensor_payload_bundle(
+        path, &selector,
+    ) {
+        Ok(bundle) => (bundle.shape, bundle.elements, "AQ4_0"),
+        Err(aq4_error) => {
+            let passthrough = select_exact_passthrough_payload_bundle(path, tensor_name).map_err(
+                |raw_error| {
+                    format!(
+                        "failed to inspect {tensor_name} as AQ4_0 ({aq4_error}) or raw passthrough ({raw_error}) before device allocation"
+                    )
+                },
+            )?;
+            (
+                passthrough.shape,
+                passthrough.elements,
+                "raw BF16 passthrough",
+            )
+        }
+    };
+    let [rows, cols] = shape.as_slice() else {
+        return Err(format!(
+            "{storage_label} tensor {tensor_name} must have rank 2"
+        ));
     };
     let rows = usize::try_from(*rows)
         .map_err(|_| format!("AQ4 tensor {tensor_name} rows do not fit usize"))?;
     let cols = usize::try_from(*cols)
         .map_err(|_| format!("AQ4 tensor {tensor_name} columns do not fit usize"))?;
-    let elements = u64::try_from(rows)
+    let computed_elements = u64::try_from(rows)
         .ok()
         .and_then(|rows| {
             u64::try_from(cols)
@@ -202,9 +222,9 @@ fn package_aq4_matrix_shape(path: &str, tensor_name: &str) -> Result<(usize, usi
                 .and_then(|cols| rows.checked_mul(cols))
         })
         .ok_or_else(|| format!("AQ4 tensor {tensor_name} shape overflows"))?;
-    if rows == 0 || cols == 0 || elements != bundle.elements {
+    if rows == 0 || cols == 0 || computed_elements != declared_elements {
         return Err(format!(
-            "AQ4 tensor {tensor_name} has inconsistent shape metadata"
+            "{storage_label} tensor {tensor_name} has inconsistent shape metadata"
         ));
     }
     Ok((rows, cols))
@@ -1354,6 +1374,71 @@ impl PackageSelfAttnResidentStepLayer {
         context: &mut ullm_runtime_sys::RuntimeContext,
         stream: &mut ullm_runtime_sys::RuntimeStream,
         registry: &mut WeightRegistry,
+        shared_buffers: Option<&mut PackageResidentSharedBufferRegistry>,
+        path: &str,
+        chunk_bytes: usize,
+        layer_index: usize,
+        block_table: &[u32],
+        block_size: usize,
+        cache_blocks: usize,
+        sq_overlay: Option<&Qwen3PackageSqOverlay<'_>>,
+    ) -> Result<Self, String> {
+        Self::load_with_registry_mlp(
+            context,
+            stream,
+            registry,
+            shared_buffers,
+            path,
+            chunk_bytes,
+            layer_index,
+            block_table,
+            block_size,
+            cache_blocks,
+            sq_overlay,
+            false,
+        )
+    }
+
+    /// Loads the existing Qwen3.5 hybrid-attention state with the MoE shared
+    /// expert projections as its resident MLP placeholder.  The caller must
+    /// use [`Self::run_device_step_through_post_norm`] and supply the complete
+    /// routed-plus-shared MoE result through [`Self::finish_external_mlp`];
+    /// `run_device_step` remains the dense-Qwen3.5 path.
+    #[allow(clippy::too_many_arguments)]
+    pub fn load_moe_shared_with_registry(
+        context: &mut ullm_runtime_sys::RuntimeContext,
+        stream: &mut ullm_runtime_sys::RuntimeStream,
+        registry: &mut WeightRegistry,
+        shared_buffers: Option<&mut PackageResidentSharedBufferRegistry>,
+        path: &str,
+        chunk_bytes: usize,
+        layer_index: usize,
+        block_table: &[u32],
+        block_size: usize,
+        cache_blocks: usize,
+        sq_overlay: Option<&Qwen3PackageSqOverlay<'_>>,
+    ) -> Result<Self, String> {
+        Self::load_with_registry_mlp(
+            context,
+            stream,
+            registry,
+            shared_buffers,
+            path,
+            chunk_bytes,
+            layer_index,
+            block_table,
+            block_size,
+            cache_blocks,
+            sq_overlay,
+            true,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn load_with_registry_mlp(
+        context: &mut ullm_runtime_sys::RuntimeContext,
+        stream: &mut ullm_runtime_sys::RuntimeStream,
+        registry: &mut WeightRegistry,
         mut shared_buffers: Option<&mut PackageResidentSharedBufferRegistry>,
         path: &str,
         chunk_bytes: usize,
@@ -1362,6 +1447,7 @@ impl PackageSelfAttnResidentStepLayer {
         block_size: usize,
         cache_blocks: usize,
         sq_overlay: Option<&Qwen3PackageSqOverlay<'_>>,
+        use_moe_shared_expert: bool,
     ) -> Result<Self, String> {
         if block_table.len() != cache_blocks {
             return Err(format!(
@@ -1389,9 +1475,17 @@ impl PackageSelfAttnResidentStepLayer {
             format!("model.language_model.layers.{layer_index}.self_attn.k_norm.weight");
         let post_norm_tensor =
             format!("model.language_model.layers.{layer_index}.post_attention_layernorm.weight");
-        let gate_tensor = format!("model.language_model.layers.{layer_index}.mlp.gate_proj.weight");
-        let up_tensor = format!("model.language_model.layers.{layer_index}.mlp.up_proj.weight");
-        let down_tensor = format!("model.language_model.layers.{layer_index}.mlp.down_proj.weight");
+        let mlp_prefix = if use_moe_shared_expert {
+            "mlp.shared_expert"
+        } else {
+            "mlp"
+        };
+        let gate_tensor =
+            format!("model.language_model.layers.{layer_index}.{mlp_prefix}.gate_proj.weight");
+        let up_tensor =
+            format!("model.language_model.layers.{layer_index}.{mlp_prefix}.up_proj.weight");
+        let down_tensor =
+            format!("model.language_model.layers.{layer_index}.{mlp_prefix}.down_proj.weight");
 
         let mut input_norm = read_named_passthrough_f32(path, &input_norm_tensor, chunk_bytes)?;
         input_norm.values =
@@ -2364,6 +2458,66 @@ impl PackageSelfAttnResidentStepLayer {
         &self.layer_output_buffer
     }
 
+    /// Post-attention RMSNorm output for an external MLP implementation.
+    ///
+    /// The buffer is valid after [`Self::run_device_step_through_post_norm`]
+    /// and remains owned by this layer.  It is intentionally exposed as a
+    /// borrow so the MoE loader can reuse the proven hybrid-attention path
+    /// without duplicating KV, mRoPE, or Q-output-gate logic.
+    pub fn post_normed_buffer(&self) -> &ullm_runtime_sys::RuntimeBuffer {
+        &self.post_normed_buffer
+    }
+
+    /// Attention residual (`x + o(attention(x))`) used by the external MLP
+    /// final residual add.
+    pub fn attention_residual_buffer(&self) -> &ullm_runtime_sys::RuntimeBuffer {
+        &self.attention_block_output_buffer
+    }
+
+    /// Finishes a decoder layer whose MLP was evaluated outside the dense
+    /// resident path.  `mlp_output_buffer` must contain the full MLP result,
+    /// including Qwen3.5 MoE's routed and gated shared-expert branches.
+    pub fn finish_external_mlp(
+        &mut self,
+        stream: &mut ullm_runtime_sys::RuntimeStream,
+        mlp_output_buffer: &ullm_runtime_sys::RuntimeBuffer,
+        label: &str,
+    ) -> Result<(), String> {
+        self.request_state.ensure_ready(label)?;
+        ullm_runtime_sys::add_f32(
+            mlp_output_buffer,
+            &self.attention_block_output_buffer,
+            self.weights.hidden,
+            &mut self.layer_output_buffer,
+            Some(stream),
+        )
+        .map_err(|error| format!("failed to finish {label} external MLP residual: {error}"))
+    }
+
+    /// Evaluates the shared-expert MLP projections loaded by
+    /// [`Self::load_moe_shared_with_registry`] without a residual add.
+    pub fn run_moe_shared_expert(
+        &mut self,
+        stream: &mut ullm_runtime_sys::RuntimeStream,
+        output_buffer: &mut ullm_runtime_sys::RuntimeBuffer,
+        label: &str,
+    ) -> Result<(), String> {
+        self.request_state.ensure_ready(label)?;
+        self.weights.mlp_gate_matrix.matvec_silu_mul_with(
+            &self.weights.mlp_up_matrix,
+            &self.post_normed_buffer,
+            &mut self.mlp_activation_buffer,
+            stream,
+            &format!("{label} shared expert gate/up"),
+        )?;
+        self.weights.mlp_down_matrix.matvec(
+            &self.mlp_activation_buffer,
+            output_buffer,
+            stream,
+            &format!("{label} shared expert down"),
+        )
+    }
+
     pub fn sequence_geometry(&self) -> PackageSelfAttnSequenceGeometry {
         PackageSelfAttnSequenceGeometry {
             hidden: self.weights.hidden,
@@ -2995,6 +3149,97 @@ impl PackageSelfAttnResidentStepLayer {
         Ok(projection_input_buffer)
     }
 
+    /// Runs the native Qwen3.5 full-attention portion through post-attention
+    /// RMSNorm, leaving the MLP residual for [`Self::finish_external_mlp`].
+    ///
+    /// This is a decode-only bridge for the MoE executor.  Dense callers keep
+    /// using [`Self::run_device_step`], so their projection/MLP execution is
+    /// unchanged.
+    #[allow(clippy::too_many_arguments)]
+    pub fn run_device_step_through_post_norm(
+        &mut self,
+        stream: &mut ullm_runtime_sys::RuntimeStream,
+        input: PackageSelfAttnResidentStepInput<'_>,
+        rotary_dim: usize,
+        rope_base: f32,
+        rope_position: usize,
+        cache_position: usize,
+        label: &str,
+    ) -> Result<(), String> {
+        self.request_state.ensure_ready(label)?;
+        if cache_position != self.written_len {
+            return Err(format!(
+                "{label} self-attn resident cache_position {cache_position} does not match written_len {}",
+                self.written_len
+            ));
+        }
+        let sync_component_timing = self.weights.sync_component_timing;
+        let mut component_step_ms = PackageSelfAttnComponentStepMs::default();
+        self.last_component_step_ms = None;
+        self.last_operation_executions = [None, None];
+        self.run_device_step_input(
+            stream,
+            input,
+            sync_component_timing,
+            &mut component_step_ms,
+            label,
+        )?;
+        self.run_device_step_qkv_projection(
+            stream,
+            sync_component_timing,
+            &mut component_step_ms,
+            label,
+        )?;
+        let projection_input_buffer = self.run_device_step_after_qkv_projection_input(
+            stream,
+            rotary_dim,
+            rope_base,
+            rope_position,
+            cache_position,
+            sync_component_timing,
+            &mut component_step_ms,
+            label,
+        )?;
+        let attention_projection_input_buffer = match projection_input_buffer {
+            PackageSelfAttnAttentionProjectionInput::AttentionOutput => {
+                &self.attention_output_buffer
+            }
+            PackageSelfAttnAttentionProjectionInput::AttentionProjectionInput => {
+                &self.attention_projection_input_buffer
+            }
+        };
+        self.weights
+            .o_matrix
+            .matvec_add(
+                attention_projection_input_buffer,
+                match input {
+                    PackageSelfAttnResidentStepInput::InternalInputBuffer => &self.input_buffer,
+                    PackageSelfAttnResidentStepInput::ExternalBuffer(buffer) => buffer,
+                },
+                &mut self.attention_block_output_buffer,
+                stream,
+                "self-attn resident external-MLP o projection residual",
+            )
+            .map_err(|error| {
+                format!("failed to run {label} self-attn external-MLP o residual: {error}")
+            })?;
+        ullm_runtime_sys::rmsnorm_f32(
+            &self.attention_block_output_buffer,
+            self.weights.post_norm_weight_buffer.as_ref(),
+            self.weights.hidden,
+            1e-5_f32,
+            &mut self.post_normed_buffer,
+            Some(stream),
+        )
+        .map_err(|error| {
+            format!("failed to run {label} self-attn external-MLP post RMSNorm: {error}")
+        })?;
+        if sync_component_timing {
+            self.last_component_step_ms = Some(component_step_ms);
+        }
+        Ok(())
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn run_device_step(
         &mut self,
@@ -3547,6 +3792,9 @@ pub struct PackageLinearAttnResidentStepWeights {
     key_dim: usize,
     value_dim: usize,
     pub hidden: usize,
+    /// Size of the recurrent/value stream before `linear_attn.out_proj`.
+    /// Qwen3.5-9B happens to make this equal to `hidden`; 35B-A3B does not.
+    attention_elements: usize,
     kernel_size: usize,
     operation_plans: ResolvedPhasePlans,
     prepare_operation_plans: ResolvedPhasePlans,
@@ -3655,9 +3903,69 @@ pub enum PackageLinearAttnResidentStepInput<'a> {
     ExternalBuffer(&'a ullm_runtime_sys::RuntimeBuffer),
 }
 
+/// Package-derived Qwen3.5 linear-attention dimensions.
+///
+/// The dense 9B path uses equal model and value-stream widths, whereas the
+/// 35B-A3B MoE text decoder has H=2048 and a 32×128=4096 value stream.
+/// Keeping both explicit prevents the 9B geometry from leaking into MoE.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PackageLinearAttnGeometry {
+    pub hidden: usize,
+    pub key_heads: usize,
+    pub value_heads: usize,
+    pub key_dim: usize,
+    pub value_dim: usize,
+    pub kernel_size: usize,
+}
+
+impl PackageLinearAttnGeometry {
+    pub const QWEN35_9B: Self = Self {
+        hidden: 4096,
+        key_heads: 16,
+        value_heads: 32,
+        key_dim: 128,
+        value_dim: 128,
+        kernel_size: 4,
+    };
+
+    fn attention_elements(self) -> Result<usize, String> {
+        self.value_heads
+            .checked_mul(self.value_dim)
+            .ok_or_else(|| "linear-attn value stream element count overflows".to_string())
+    }
+
+    fn qkv_elements(self) -> Result<usize, String> {
+        let key_elements = self
+            .key_heads
+            .checked_mul(self.key_dim)
+            .ok_or_else(|| "linear-attn key stream element count overflows".to_string())?;
+        let attention_elements = self.attention_elements()?;
+        key_elements
+            .checked_mul(2)
+            .and_then(|value| value.checked_add(attention_elements))
+            .ok_or_else(|| "linear-attn QKV stream element count overflows".to_string())
+    }
+
+    fn validate(self) -> Result<(), String> {
+        if self.hidden == 0
+            || self.key_heads == 0
+            || self.value_heads == 0
+            || self.key_dim == 0
+            || self.value_dim == 0
+            || self.kernel_size == 0
+        {
+            return Err("linear-attn geometry dimensions must be positive".into());
+        }
+        let _ = self.attention_elements()?;
+        let _ = self.qkv_elements()?;
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PackageLinearAttnSequenceGeometry {
     pub hidden: usize,
+    pub attention_elements: usize,
     pub channels: usize,
     pub key_elements: usize,
     pub value_heads: usize,
@@ -3706,6 +4014,7 @@ impl PackageLinearAttnSequenceWorkspace {
         }
         for (name, value) in [
             ("hidden", geometry.hidden),
+            ("attention elements", geometry.attention_elements),
             ("channels", geometry.channels),
             ("key elements", geometry.key_elements),
             ("value heads", geometry.value_heads),
@@ -3735,18 +4044,21 @@ impl PackageLinearAttnSequenceWorkspace {
             geometry,
             input_normed: alloc(geometry.hidden, "linear-attn sequence input normed")?,
             qkv: alloc(geometry.channels, "linear-attn sequence qkv")?,
-            z: alloc(geometry.hidden, "linear-attn sequence z")?,
+            z: alloc(geometry.attention_elements, "linear-attn sequence z")?,
             a: alloc(geometry.value_heads, "linear-attn sequence a")?,
             b: alloc(geometry.value_heads, "linear-attn sequence b")?,
             conv_output: alloc(geometry.channels, "linear-attn sequence conv output")?,
             q: alloc(geometry.key_elements, "linear-attn sequence q")?,
             k: alloc(geometry.key_elements, "linear-attn sequence k")?,
-            v: alloc(geometry.hidden, "linear-attn sequence v")?,
+            v: alloc(geometry.attention_elements, "linear-attn sequence v")?,
             gate: alloc(geometry.value_heads, "linear-attn sequence gate")?,
             beta: alloc(geometry.value_heads, "linear-attn sequence beta")?,
-            recurrent_output: alloc(geometry.hidden, "linear-attn sequence recurrent output")?,
+            recurrent_output: alloc(
+                geometry.attention_elements,
+                "linear-attn sequence recurrent output",
+            )?,
             attn_projection_input: alloc(
-                geometry.hidden,
+                geometry.attention_elements,
                 "linear-attn sequence attention projection input",
             )?,
             projected: alloc(geometry.hidden, "linear-attn sequence projected")?,
@@ -3816,7 +4128,7 @@ impl PackageLinearAttnResidentStepLayer {
             (
                 PackageLinearAttnIntermediateTraceStage::RecurrentOutput,
                 &self.recurrent_output_buffer,
-                self.weights.hidden,
+                self.weights.attention_elements,
             ),
             (
                 PackageLinearAttnIntermediateTraceStage::AttentionResidual,
@@ -3864,6 +4176,7 @@ impl PackageLinearAttnResidentStepLayer {
     pub fn sequence_geometry(&self) -> PackageLinearAttnSequenceGeometry {
         PackageLinearAttnSequenceGeometry {
             hidden: self.weights.hidden,
+            attention_elements: self.weights.attention_elements,
             channels: self.weights.qkv_matrix.rows,
             key_elements: self.weights.key_heads * self.weights.key_dim,
             value_heads: self.weights.value_heads,
@@ -3895,25 +4208,109 @@ impl PackageLinearAttnResidentStepLayer {
         context: &mut ullm_runtime_sys::RuntimeContext,
         stream: &mut ullm_runtime_sys::RuntimeStream,
         registry: &mut WeightRegistry,
-        mut shared_buffers: Option<&mut PackageResidentSharedBufferRegistry>,
+        shared_buffers: Option<&mut PackageResidentSharedBufferRegistry>,
         path: &str,
         chunk_bytes: usize,
         layer_index: usize,
         sq_overlay: Option<&Qwen3PackageSqOverlay<'_>>,
     ) -> Result<Self, String> {
-        let key_heads = 16_usize;
-        let value_heads = 32_usize;
-        let key_dim = 128_usize;
-        let value_dim = 128_usize;
-        let hidden = value_heads * value_dim;
+        Self::load_with_registry_mlp(
+            context,
+            stream,
+            registry,
+            shared_buffers,
+            path,
+            chunk_bytes,
+            layer_index,
+            sq_overlay,
+            false,
+            PackageLinearAttnGeometry::QWEN35_9B,
+        )
+    }
+
+    /// See [`PackageSelfAttnResidentStepLayer::load_moe_shared_with_registry`].
+    /// This retains the native Qwen3.5 convolution/recurrent state while the
+    /// MoE executor owns the final routed-plus-shared MLP reduction.
+    pub fn load_moe_shared_with_registry(
+        context: &mut ullm_runtime_sys::RuntimeContext,
+        stream: &mut ullm_runtime_sys::RuntimeStream,
+        registry: &mut WeightRegistry,
+        shared_buffers: Option<&mut PackageResidentSharedBufferRegistry>,
+        path: &str,
+        chunk_bytes: usize,
+        layer_index: usize,
+        sq_overlay: Option<&Qwen3PackageSqOverlay<'_>>,
+    ) -> Result<Self, String> {
+        Self::load_moe_shared_with_registry_geometry(
+            context,
+            stream,
+            registry,
+            shared_buffers,
+            path,
+            chunk_bytes,
+            layer_index,
+            sq_overlay,
+            PackageLinearAttnGeometry::QWEN35_9B,
+        )
+    }
+
+    /// MoE bridge load with dimensions taken from the inspected descriptor.
+    /// This is needed by Qwen3.5-35B-A3B, whose model width and recurrent
+    /// value-stream width differ.
+    #[allow(clippy::too_many_arguments)]
+    pub fn load_moe_shared_with_registry_geometry(
+        context: &mut ullm_runtime_sys::RuntimeContext,
+        stream: &mut ullm_runtime_sys::RuntimeStream,
+        registry: &mut WeightRegistry,
+        shared_buffers: Option<&mut PackageResidentSharedBufferRegistry>,
+        path: &str,
+        chunk_bytes: usize,
+        layer_index: usize,
+        sq_overlay: Option<&Qwen3PackageSqOverlay<'_>>,
+        geometry: PackageLinearAttnGeometry,
+    ) -> Result<Self, String> {
+        Self::load_with_registry_mlp(
+            context,
+            stream,
+            registry,
+            shared_buffers,
+            path,
+            chunk_bytes,
+            layer_index,
+            sq_overlay,
+            true,
+            geometry,
+        )
+    }
+
+    fn load_with_registry_mlp(
+        context: &mut ullm_runtime_sys::RuntimeContext,
+        stream: &mut ullm_runtime_sys::RuntimeStream,
+        registry: &mut WeightRegistry,
+        mut shared_buffers: Option<&mut PackageResidentSharedBufferRegistry>,
+        path: &str,
+        chunk_bytes: usize,
+        layer_index: usize,
+        sq_overlay: Option<&Qwen3PackageSqOverlay<'_>>,
+        use_moe_shared_expert: bool,
+        geometry: PackageLinearAttnGeometry,
+    ) -> Result<Self, String> {
+        geometry.validate()?;
+        let key_heads = geometry.key_heads;
+        let value_heads = geometry.value_heads;
+        let key_dim = geometry.key_dim;
+        let value_dim = geometry.value_dim;
+        let hidden = geometry.hidden;
+        let attention_elements = geometry.attention_elements()?;
         let sync_component_timing = env_flag_enabled("ULLM_SYNC_LINEAR_ATTN_COMPONENTS_FOR_TIMING");
         let use_qkv_z_gate_beta_fusion_requested =
             !env_flag_enabled("ULLM_DISABLE_AQ4_MATVEC_QKV_Z_GATE_BETA");
         let use_qkv_z_pair = !env_flag_enabled("ULLM_DISABLE_AQ4_MATVEC_PAIR_QKV_Z");
-        let q_elements_per_step = key_heads * key_dim;
+        let q_elements_per_step = key_heads
+            .checked_mul(key_dim)
+            .ok_or_else(|| "linear-attn resident Q element count overflows".to_string())?;
         let k_elements_per_step = q_elements_per_step;
-        let v_elements_per_step = hidden;
-        let qkv_step_elements = q_elements_per_step + k_elements_per_step + v_elements_per_step;
+        let qkv_step_elements = geometry.qkv_elements()?;
 
         let input_norm_tensor =
             format!("model.language_model.layers.{layer_index}.input_layernorm.weight");
@@ -3936,9 +4333,17 @@ impl PackageLinearAttnResidentStepLayer {
             format!("model.language_model.layers.{layer_index}.linear_attn.out_proj.weight");
         let post_norm_tensor =
             format!("model.language_model.layers.{layer_index}.post_attention_layernorm.weight");
-        let gate_tensor = format!("model.language_model.layers.{layer_index}.mlp.gate_proj.weight");
-        let up_tensor = format!("model.language_model.layers.{layer_index}.mlp.up_proj.weight");
-        let down_tensor = format!("model.language_model.layers.{layer_index}.mlp.down_proj.weight");
+        let mlp_prefix = if use_moe_shared_expert {
+            "mlp.shared_expert"
+        } else {
+            "mlp"
+        };
+        let gate_tensor =
+            format!("model.language_model.layers.{layer_index}.{mlp_prefix}.gate_proj.weight");
+        let up_tensor =
+            format!("model.language_model.layers.{layer_index}.{mlp_prefix}.up_proj.weight");
+        let down_tensor =
+            format!("model.language_model.layers.{layer_index}.{mlp_prefix}.down_proj.weight");
 
         let input_norm = read_named_passthrough_f32(path, &input_norm_tensor, chunk_bytes)?;
         if input_norm.values.len() != hidden {
@@ -3958,6 +4363,12 @@ impl PackageLinearAttnResidentStepLayer {
             .map_err(|_| "linear-attn resident conv channels are too large".to_string())?;
         let kernel_size = usize::try_from(conv.shape[2])
             .map_err(|_| "linear-attn resident conv kernel is too large".to_string())?;
+        if kernel_size != geometry.kernel_size {
+            return Err(format!(
+                "linear-attn resident conv kernel mismatch: got {kernel_size} expected {}",
+                geometry.kernel_size
+            ));
+        }
         if conv_channels != qkv_step_elements {
             return Err(format!(
                 "linear-attn resident conv channels mismatch: got {conv_channels} expected {qkv_step_elements}"
@@ -4141,13 +4552,13 @@ impl PackageLinearAttnResidentStepLayer {
                 a_matrix.rows, a_matrix.cols, b_matrix.rows, b_matrix.cols
             ));
         }
-        if z_matrix.rows != hidden
+        if z_matrix.rows != attention_elements
             || z_matrix.cols != hidden
             || out_matrix.rows != hidden
-            || out_matrix.cols != hidden
+            || out_matrix.cols != attention_elements
         {
             return Err(format!(
-                "linear-attn resident z/out shape mismatch: z=[{},{}] out=[{},{}] expected [{hidden},{hidden}]",
+                "linear-attn resident z/out shape mismatch: z=[{},{}] out=[{},{}] expected z=[{attention_elements},{hidden}] out=[{hidden},{attention_elements}]",
                 z_matrix.rows, z_matrix.cols, out_matrix.rows, out_matrix.cols
             ));
         }
@@ -4169,6 +4580,8 @@ impl PackageLinearAttnResidentStepLayer {
         let intermediate = mlp_gate_matrix.rows;
 
         let hidden_bytes = checked_f32_byte_len(hidden, "linear-attn resident hidden")?;
+        let attention_bytes =
+            checked_f32_byte_len(attention_elements, "linear-attn resident value stream")?;
         let qkv_step_bytes =
             checked_f32_byte_len(qkv_step_elements, "linear-attn resident qkv step")?;
         let gate_beta_step_bytes =
@@ -4254,7 +4667,7 @@ impl PackageLinearAttnResidentStepLayer {
             format!("failed to allocate linear-attn resident qkv conv output: {err}")
         })?;
         let mut z_buffer = context
-            .alloc_buffer(hidden_bytes)
+            .alloc_buffer(attention_bytes)
             .map_err(|err| format!("failed to allocate linear-attn resident z: {err}"))?;
         let mut recurrent_q_buffer = context
             .alloc_buffer(checked_f32_byte_len(
@@ -4269,7 +4682,7 @@ impl PackageLinearAttnResidentStepLayer {
             )?)
             .map_err(|err| format!("failed to allocate linear-attn resident k: {err}"))?;
         let mut recurrent_v_buffer = context
-            .alloc_buffer(hidden_bytes)
+            .alloc_buffer(attention_bytes)
             .map_err(|err| format!("failed to allocate linear-attn resident v: {err}"))?;
         let mut recurrent_gate_buffer = context
             .alloc_buffer(gate_beta_step_bytes)
@@ -4280,11 +4693,11 @@ impl PackageLinearAttnResidentStepLayer {
         let mut recurrent_state_buffer = context
             .alloc_buffer(state_bytes)
             .map_err(|err| format!("failed to allocate linear-attn resident state: {err}"))?;
-        let mut recurrent_output_buffer = context.alloc_buffer(hidden_bytes).map_err(|err| {
+        let mut recurrent_output_buffer = context.alloc_buffer(attention_bytes).map_err(|err| {
             format!("failed to allocate linear-attn resident recurrent output: {err}")
         })?;
         let mut attn_projection_input_buffer =
-            context.alloc_buffer(hidden_bytes).map_err(|err| {
+            context.alloc_buffer(attention_bytes).map_err(|err| {
                 format!("failed to allocate linear-attn resident attention projection input: {err}")
             })?;
         let mut attn_block_output_buffer = context.alloc_buffer(hidden_bytes).map_err(|err| {
@@ -4429,6 +4842,7 @@ impl PackageLinearAttnResidentStepLayer {
             key_dim,
             value_dim,
             hidden,
+            attention_elements,
             kernel_size,
             operation_plans,
             prepare_operation_plans,
@@ -4490,12 +4904,16 @@ impl PackageLinearAttnResidentStepLayer {
             .checked_mul(weights.key_dim)
             .ok_or_else(|| "linear-attn resident q element count overflows".to_string())?;
         let k_elements_per_step = q_elements_per_step;
-        let v_elements_per_step = weights.hidden;
+        let v_elements_per_step = weights.attention_elements;
         let qkv_step_elements = q_elements_per_step
             .checked_add(k_elements_per_step)
             .and_then(|value| value.checked_add(v_elements_per_step))
             .ok_or_else(|| "linear-attn resident qkv step element count overflows".to_string())?;
         let hidden_bytes = checked_f32_byte_len(weights.hidden, "linear-attn resident hidden")?;
+        let attention_bytes = checked_f32_byte_len(
+            weights.attention_elements,
+            "linear-attn resident value stream",
+        )?;
         let qkv_step_bytes =
             checked_f32_byte_len(qkv_step_elements, "linear-attn resident qkv step")?;
         let gate_beta_step_bytes =
@@ -4536,7 +4954,7 @@ impl PackageLinearAttnResidentStepLayer {
             format!("failed to allocate linear-attn resident qkv conv output: {err}")
         })?;
         let z_buffer = context
-            .alloc_buffer(hidden_bytes)
+            .alloc_buffer(attention_bytes)
             .map_err(|err| format!("failed to allocate linear-attn resident z: {err}"))?;
         let recurrent_q_buffer = context
             .alloc_buffer(checked_f32_byte_len(
@@ -4551,7 +4969,7 @@ impl PackageLinearAttnResidentStepLayer {
             )?)
             .map_err(|err| format!("failed to allocate linear-attn resident k: {err}"))?;
         let recurrent_v_buffer = context
-            .alloc_buffer(hidden_bytes)
+            .alloc_buffer(attention_bytes)
             .map_err(|err| format!("failed to allocate linear-attn resident v: {err}"))?;
         let recurrent_gate_buffer = context
             .alloc_buffer(gate_beta_step_bytes)
@@ -4562,12 +4980,13 @@ impl PackageLinearAttnResidentStepLayer {
         let mut recurrent_state_buffer = context
             .alloc_buffer(state_bytes)
             .map_err(|err| format!("failed to allocate linear-attn resident state: {err}"))?;
-        let recurrent_output_buffer = context.alloc_buffer(hidden_bytes).map_err(|err| {
+        let recurrent_output_buffer = context.alloc_buffer(attention_bytes).map_err(|err| {
             format!("failed to allocate linear-attn resident recurrent output: {err}")
         })?;
-        let attn_projection_input_buffer = context.alloc_buffer(hidden_bytes).map_err(|err| {
-            format!("failed to allocate linear-attn resident attention projection input: {err}")
-        })?;
+        let attn_projection_input_buffer =
+            context.alloc_buffer(attention_bytes).map_err(|err| {
+                format!("failed to allocate linear-attn resident attention projection input: {err}")
+            })?;
         let attn_block_output_buffer = context.alloc_buffer(hidden_bytes).map_err(|err| {
             format!("failed to allocate linear-attn resident attention block: {err}")
         })?;
@@ -4717,6 +5136,60 @@ impl PackageLinearAttnResidentStepLayer {
 
     pub fn output_buffer(&self) -> &ullm_runtime_sys::RuntimeBuffer {
         &self.layer_output_buffer
+    }
+
+    /// Post-attention RMSNorm output for the externally evaluated MoE block.
+    pub fn post_normed_buffer(&self) -> &ullm_runtime_sys::RuntimeBuffer {
+        &self.post_normed_buffer
+    }
+
+    /// Attention residual (`x + out(linear_attention(x))`) for the final MoE
+    /// residual add.
+    pub fn attention_residual_buffer(&self) -> &ullm_runtime_sys::RuntimeBuffer {
+        &self.attn_block_output_buffer
+    }
+
+    /// Adds an externally evaluated MoE result to the native linear-attention
+    /// residual and makes it the next layer input.
+    pub fn finish_external_mlp(
+        &mut self,
+        stream: &mut ullm_runtime_sys::RuntimeStream,
+        mlp_output_buffer: &ullm_runtime_sys::RuntimeBuffer,
+        label: &str,
+    ) -> Result<(), String> {
+        self.request_state.ensure_ready(label)?;
+        ullm_runtime_sys::add_f32(
+            mlp_output_buffer,
+            &self.attn_block_output_buffer,
+            self.weights.hidden,
+            &mut self.layer_output_buffer,
+            Some(stream),
+        )
+        .map_err(|error| format!("failed to finish {label} external MLP residual: {error}"))
+    }
+
+    /// Evaluates the shared-expert MLP projections loaded by
+    /// [`Self::load_moe_shared_with_registry`] without a residual add.
+    pub fn run_moe_shared_expert(
+        &mut self,
+        stream: &mut ullm_runtime_sys::RuntimeStream,
+        output_buffer: &mut ullm_runtime_sys::RuntimeBuffer,
+        label: &str,
+    ) -> Result<(), String> {
+        self.request_state.ensure_ready(label)?;
+        self.weights.mlp_gate_matrix.matvec_silu_mul_with(
+            &self.weights.mlp_up_matrix,
+            &self.post_normed_buffer,
+            &mut self.mlp_activation_buffer,
+            stream,
+            &format!("{label} shared expert gate/up"),
+        )?;
+        self.weights.mlp_down_matrix.matvec(
+            &self.mlp_activation_buffer,
+            output_buffer,
+            stream,
+            &format!("{label} shared expert down"),
+        )
     }
 
     pub fn run_device_sequence_for_phase(
@@ -5081,6 +5554,29 @@ impl PackageLinearAttnResidentStepLayer {
         input: PackageLinearAttnResidentStepInput<'_>,
         label: &str,
     ) -> Result<(), String> {
+        self.run_device_step_inner(stream, input, label, true)
+    }
+
+    /// Runs the existing convolution/recurrent linear-attention path through
+    /// post-attention RMSNorm.  It deliberately skips the placeholder shared
+    /// expert MLP so the MoE executor can add the complete routed-plus-shared
+    /// result with [`Self::finish_external_mlp`].
+    pub fn run_device_step_through_post_norm(
+        &mut self,
+        stream: &mut ullm_runtime_sys::RuntimeStream,
+        input: PackageLinearAttnResidentStepInput<'_>,
+        label: &str,
+    ) -> Result<(), String> {
+        self.run_device_step_inner(stream, input, label, false)
+    }
+
+    fn run_device_step_inner(
+        &mut self,
+        stream: &mut ullm_runtime_sys::RuntimeStream,
+        input: PackageLinearAttnResidentStepInput<'_>,
+        label: &str,
+        run_dense_mlp: bool,
+    ) -> Result<(), String> {
         self.request_state.ensure_ready(label)?;
         self.last_component_step_ms = None;
         self.last_operation_executions = [None, None];
@@ -5309,6 +5805,12 @@ impl PackageLinearAttnResidentStepLayer {
         )
         .map_err(|err| format!("failed to run linear-attn resident post RMSNorm: {err}"))?;
         finish_component!(component_started, post_rmsnorm_ms, "post RMSNorm");
+        if !run_dense_mlp {
+            if sync_component_timing {
+                self.last_component_step_ms = Some(component_step_ms);
+            }
+            return Ok(());
+        }
         let component_started = component_started!();
         weights.mlp_gate_matrix.matvec_silu_mul_with(
             &weights.mlp_up_matrix,
@@ -7917,6 +8419,28 @@ mod linear_attn_step_state_tests {
     }
 
     #[test]
+    fn linear_attention_geometry_keeps_the_9b_and_35b_value_streams_distinct() {
+        let dense = PackageLinearAttnGeometry::QWEN35_9B;
+        assert_eq!(dense.attention_elements().unwrap(), 4096);
+        assert_eq!(dense.qkv_elements().unwrap(), 8192);
+        dense.validate().unwrap();
+
+        let moe = PackageLinearAttnGeometry {
+            hidden: 2048,
+            key_heads: 16,
+            value_heads: 32,
+            key_dim: 128,
+            value_dim: 128,
+            kernel_size: 4,
+        };
+        // The 35B-A3B linear path has the same QKV channel count but a
+        // 4096-wide recurrent value stream feeding a 2048-wide out projection.
+        assert_eq!(moe.attention_elements().unwrap(), 4096);
+        assert_eq!(moe.qkv_elements().unwrap(), 8192);
+        moe.validate().unwrap();
+    }
+
+    #[test]
     fn resident_request_state_reset_is_fail_closed_and_reusable_after_success() {
         let mut state = ResidentRequestState::Ready;
         state.ensure_ready("test").unwrap();
@@ -7963,6 +8487,7 @@ mod linear_attn_step_state_tests {
         let mut context = ullm_runtime_sys::RuntimeContext::create(0).unwrap();
         let geometry = PackageLinearAttnSequenceGeometry {
             hidden: 8,
+            attention_elements: 8,
             channels: 16,
             key_elements: 4,
             value_heads: 2,
