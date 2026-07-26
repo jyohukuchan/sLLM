@@ -1,0 +1,22 @@
+[
+    {
+        "gpu": 2,
+        "process_list": [
+            {
+                "process_info": {
+                    "name": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/target/release/examples/sq8_ck_serving",
+                    "pid": 1356068,
+                    "mem_usage": {
+                        "value": 18527924224,
+                        "unit": "B"
+                    },
+                    "cu_occupancy": "N/A",
+                    "evicted_time": {
+                        "value": 0,
+                        "unit": "ms"
+                    }
+                }
+            }
+        ]
+    }
+]

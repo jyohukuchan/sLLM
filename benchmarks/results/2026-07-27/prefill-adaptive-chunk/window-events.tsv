@@ -1,0 +1,20 @@
+2026-07-27T06:43:30+09:00	service-stop-attempt
+2026-07-27T06:43:31+09:00	service-stop-complete
+2026-07-27T06:43:31+09:00	r9700-lock-acquired
+2026-07-27T06:43:32+09:00	thermal-gate-wait condition=adaptive-prefill-p128 edge_c=49 limit_c=45 attempt=1
+2026-07-27T06:43:37+09:00	thermal-gate-wait condition=adaptive-prefill-p128 edge_c=49 limit_c=45 attempt=2
+2026-07-27T06:43:42+09:00	thermal-gate-wait condition=adaptive-prefill-p128 edge_c=49 limit_c=45 attempt=3
+2026-07-27T06:43:47+09:00	thermal-gate-wait condition=adaptive-prefill-p128 edge_c=48 limit_c=45 attempt=4
+2026-07-27T06:43:52+09:00	thermal-gate-wait condition=adaptive-prefill-p128 edge_c=47 limit_c=45 attempt=5
+2026-07-27T06:43:57+09:00	thermal-gate-wait condition=adaptive-prefill-p128 edge_c=47 limit_c=45 attempt=6
+2026-07-27T06:44:02+09:00	thermal-gate-wait condition=adaptive-prefill-p128 edge_c=47 limit_c=45 attempt=7
+2026-07-27T06:44:08+09:00	thermal-gate-wait condition=adaptive-prefill-p128 edge_c=46 limit_c=45 attempt=8
+2026-07-27T06:44:13+09:00	thermal-gate-wait condition=adaptive-prefill-p128 edge_c=47 limit_c=45 attempt=9
+2026-07-27T06:44:18+09:00	thermal-gate-wait condition=adaptive-prefill-p128 edge_c=46 limit_c=45 attempt=10
+2026-07-27T06:44:23+09:00	thermal-gate-wait condition=adaptive-prefill-p128 edge_c=46 limit_c=45 attempt=11
+2026-07-27T06:44:28+09:00	thermal-gate-pass condition=adaptive-prefill-p128 edge_c=45 limit_c=45
+2026-07-27T06:44:28+09:00	adaptive-prefill-p128-begin
+2026-07-27T06:44:28+09:00	r9700-lock-released
+2026-07-27T06:44:28+09:00	service-restore-attempt
+2026-07-27T06:44:28+09:00	service-restore-start-return=nonzero
+2026-07-27T06:45:24+09:00	window-finished status=1

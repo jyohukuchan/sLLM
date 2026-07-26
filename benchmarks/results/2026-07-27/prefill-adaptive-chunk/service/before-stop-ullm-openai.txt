@@ -1,0 +1,8 @@
+MainPID=1155953
+Result=success
+NRestarts=0
+ActiveState=active
+SubState=running
+UnitFileState=enabled
+StartLimitIntervalUSec=15min
+StartLimitBurst=3
