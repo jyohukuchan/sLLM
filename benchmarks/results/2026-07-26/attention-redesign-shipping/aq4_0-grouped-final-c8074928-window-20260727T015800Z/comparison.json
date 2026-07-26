@@ -3,6 +3,8 @@
   "format_id": "AQ4_0",
   "source_commit": "c8074928e22b27801df78d65508fdd619d13a748",
   "worker_sha256": "7e34eed1c3aa2bef80e248b3446ff6668300d0aa4e99e03dc3ff9c7a8d238fa3",
+  "package_manifest_sha256": "a790a033f57d9c5b9ae0d731a463c26b86aec691f771ce88bb543d676f08e5ad",
+  "profile_package_manifest_matches_active_product": true,
   "device": "gfx1201",
   "context_length": 1339,
   "warmup_steps": 6,

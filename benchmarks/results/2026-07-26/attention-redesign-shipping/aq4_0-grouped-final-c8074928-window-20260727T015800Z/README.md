@@ -7,6 +7,11 @@ GQA grouped split implementation in source commit
 run.  The profile driver's timed decode interval supplies tok/s; no ROCprof
 range is presented as throughput.
 
+The profile package manifest is byte-identical to the active product package:
+SHA-256 `a790a033f57d9c5b9ae0d731a463c26b86aec691f771ce88bb543d676f08e5ad`.
+Thus the A/B uses the production `AQ4_0` weights/package contract, not a
+different model artifact.
+
 | mode | run A tok/s | run B tok/s | paired mean tok/s |
 | --- | ---: | ---: | ---: |
 | direct | 74.230040 | 73.991913 | 74.110977 |
