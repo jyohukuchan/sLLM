@@ -42,6 +42,10 @@ name = "ullm-aq4-p2-calibration"
 path = "src/bin/ullm-aq4-p2-calibration.rs"
 
 [[bin]]
+name = "ullm-sq8-fp32-reference"
+path = "src/bin/ullm-sq8-fp32-reference.rs"
+
+[[bin]]
 name = "ullm-aq4-differential-trace"
 path = "src/bin/ullm-aq4-differential-trace.rs"
 
