@@ -7,7 +7,7 @@
 //! `HIP_VISIBLE_DEVICES=2`; this binary then requires that runtime-visible
 //! device 0 reports `gfx1201`.  It never starts or contacts a serving service.
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::env;
 use std::fs;
 use std::path::PathBuf;
@@ -16,8 +16,8 @@ use std::time::Instant;
 
 use ullm_engine::kv_cache_dtype::KvCacheDtypes;
 use ullm_engine::qwen35_moe_aq4_runtime::{
-    Qwen35MoeAq4ModelLoadConfig, Qwen35MoeAq4Runtime, QWEN35_MOE_DEFAULT_CONTEXT_LENGTH,
-    QWEN35_MOE_DEFAULT_KV_BLOCK_SIZE,
+    QWEN35_MOE_DEFAULT_CONTEXT_LENGTH, QWEN35_MOE_DEFAULT_KV_BLOCK_SIZE,
+    Qwen35MoeAq4ModelLoadConfig, Qwen35MoeAq4Runtime,
 };
 
 const DEFAULT_PACKAGE: &str =
