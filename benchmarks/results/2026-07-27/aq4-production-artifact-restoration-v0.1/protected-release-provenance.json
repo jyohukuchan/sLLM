@@ -1,0 +1,47 @@
+{
+  "schema_version": "ullm.aq4.protected_release_provenance.v0.1",
+  "recorded_at": "2026-07-27T02:25:03+09:00",
+  "selection": {
+    "option": "A",
+    "reason": "The already quality-gated grouped AQ4_0 worker is intact and was copied byte-for-byte into root-owned protected storage. This removes the mutable-worktree deletion risk without discarding the measured 1.005382x decode result or changing runtime behavior."
+  },
+  "release": {
+    "id": "aq4-gqa-grouped-c8074928-7e34eed1",
+    "protected_worker": "/opt/ullm/aq4-gqa-grouped-deployment-v0.1/releases/aq4-gqa-grouped-c8074928-7e34eed1/ullm-aq4-worker",
+    "worker_sha256": "7e34eed1c3aa2bef80e248b3446ff6668300d0aa4e99e03dc3ff9c7a8d238fa3",
+    "owner": "root:root",
+    "mode": "0555",
+    "copied_from": "/home/homelab1/coding-local/ultimateLLM/uLLM-bq-aq4-grouped-stage-target-4d669eee/release/ullm-aq4-worker",
+    "source_worker_sha256": "7e34eed1c3aa2bef80e248b3446ff6668300d0aa4e99e03dc3ff9c7a8d238fa3"
+  },
+  "runtime_selection": {
+    "paged_decode_attention": {
+      "kernel": "aq4_gqa_grouped_split",
+      "split_tile": 128
+    }
+  },
+  "served_source_provenance": {
+    "served_source_branch": "bq-aq4-grouped-c807",
+    "served_source_commit": "c8074928e22b27801df78d65508fdd619d13a748",
+    "served_source_commit_on_main_at_recording": false,
+    "not_merged_reason": "The two shared runtime source files had concurrent uncommitted edits owned by other sessions, so their changes were intentionally not overwritten or merged into main.",
+    "equivalent_current_main_base_integration": {
+      "branch": "bq-aq4-grouped-integration",
+      "commit": "9d8643506a36659ecec3fc2d931deba26d29f574",
+      "parent": "8db863e511573e89c7d206cc25bdff3f2e17b65e",
+      "parent_is_ancestor_of_main_at_recording": true,
+      "runtime_patch_id": "f69740849b7bd56b065f7b8f1842ba95ed72b042",
+      "release_build": {
+        "result": "success",
+        "worker_sha256": "1f6d9ab35dbe81b39d40ed63da9f50290d639d827ec2bea85c41486205e597f9"
+      },
+      "byte_identical_rebuild_verified": false,
+      "note": "The reviewed integration branch contains the same two-file runtime patch. Its successful release build has a different worker SHA-256, so byte-identical reproduction of the served c807 artifact was not verified."
+    }
+  },
+  "prior_promotion": {
+    "active_manifest_sha256_before_restoration": "69a5e1eb2e7713a1d017332539a587b9a13cf925cbfb28d7c89719ba6709ec2e",
+    "p3_rollback_manifest_sha256": "a98910dc5bf59dc768e5bcd20bcf58968699540eb1b33df33066dcb6f274fe49",
+    "quality_gate": "The fixed 10-prompt lightweight promotion suite passed before this placement-only restoration."
+  }
+}
