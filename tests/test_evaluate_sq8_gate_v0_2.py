@@ -142,6 +142,18 @@ class Sq8GateV02EvaluatorTests(unittest.TestCase):
         identity = {
             "executable_sha256": "a" * 64,
             "device_identity": {"device_id": 0},
+            "mode_runtime": [
+                {
+                    "mode": "sequential_m1",
+                    "prefill_implementation": "m1",
+                    "paged_decode_split_source_tile": None,
+                },
+                {
+                    "mode": "m128_chunks_with_declared_tail",
+                    "prefill_implementation": "m128",
+                    "paged_decode_split_source_tile": None,
+                },
+            ],
             "runtime_compiler_versions": {"feature": "rocm-ck-gfx1201"},
             "hip_guard_environment": {"ULLM_REQUIRE_HIP_PAGED_DECODE_SPLIT_KERNEL": "1"},
         }
@@ -149,6 +161,17 @@ class Sq8GateV02EvaluatorTests(unittest.TestCase):
             [("control-0", {"identity": identity}), ("candidate-0", {"identity": dict(identity)})]
         )
         self.assertEqual(matching, [])
+        selected = dict(identity)
+        selected["mode_runtime"] = [
+            {**mode, "paged_decode_split_source_tile": 128}
+            for mode in identity["mode_runtime"]
+        ]
+        self.assertEqual(
+            EVALUATOR.check_matched_capture_configuration(
+                [("control-0", {"identity": identity}), ("candidate-0", {"identity": selected})]
+            ),
+            [],
+        )
         different = dict(identity)
         different["hip_guard_environment"] = {"ULLM_REQUIRE_HIP_PAGED_DECODE_SPLIT_KERNEL": None}
         errors = EVALUATOR.check_matched_capture_configuration(
@@ -175,6 +198,25 @@ class Sq8GateV02EvaluatorTests(unittest.TestCase):
             handwritten["configuration"]["build_feature"],
             "rocm-handwritten-projection-gfx1201",
         )
+
+    def test_preliminary_selector_exposure_counts_m1_prompt_and_decode(self) -> None:
+        candidate = {
+            "candidate": {"id": "paged-decode-source-tile-256"},
+            "selector": {
+                "environment": {"ULLM_EXPERIMENTAL_SQ8_PAGED_DECODE_SPLIT_TILE": "256"}
+            },
+        }
+        positions = {
+            "prompt-before": {"mode": "sequential_m1", "phase": "prompt", "ordinal": 255},
+            "prompt-after": {"mode": "sequential_m1", "phase": "prompt", "ordinal": 256},
+            "decode-after": {"mode": "sequential_m1", "phase": "decode", "ordinal": 300},
+            "m128": {"mode": "m128_chunks_with_declared_tail", "phase": "prompt", "ordinal": 300},
+        }
+        exposure = EVALUATOR.preliminary_selector_exposure(candidate, positions)
+        self.assertTrue(exposure["multi_tile_exercised"])
+        self.assertEqual(exposure["multi_tile_m1_position_count"], 2)
+        self.assertEqual(exposure["multi_tile_m1_position_count_by_phase"], {"decode": 1, "prompt": 1})
+        self.assertEqual(exposure["multi_tile_decode_position_count"], 1)
 
     def test_frozen_gate_hash_rejection(self) -> None:
         value = json.loads(GATE_PATH.read_text(encoding="utf-8"))

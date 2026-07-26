@@ -47,6 +47,27 @@ VOCAB_SIZE = 151936
 LAYER_COUNT = 40
 
 
+# This is deliberately a *snapshot selection*, not an amendment to the
+# frozen v0.2 corpus.  The CPU corpus writer keeps running while this limited
+# deadline evaluation is prepared, so the requested, already-materialized
+# prefix must be pinned rather than silently absorbing later positions.
+#
+# The counts were supplied with the preliminary-evaluation request on
+# 2026-07-26.  They name the first N immutable forward directories in each
+# active case.  Any later reference output is intentionally outside this
+# snapshot.
+PRELIMINARY_SNAPSHOT_CASE_COUNTS: dict[tuple[str, str], int] = {
+    ("m128_chunks_with_declared_tail", "chat-p2048-g512"): 228,
+    ("m128_chunks_with_declared_tail", "chat-p3584-g512"): 328,
+    ("m128_chunks_with_declared_tail", "raw-p4095-g1"): 319,
+    ("sequential_m1", "chat-p2048-g512"): 242,
+    ("sequential_m1", "chat-p3584-g512"): 246,
+    ("sequential_m1", "raw-p0001-g1024"): 226,
+    ("sequential_m1", "raw-p1023-g4"): 251,
+    ("sequential_m1", "raw-p4095-g1"): 320,
+}
+
+
 class GateError(RuntimeError):
     """An input-integrity or consumer-evaluation failure."""
 
@@ -424,6 +445,177 @@ def index_reference(args: argparse.Namespace) -> int:
     return 0
 
 
+def preliminary_source_payload_hash(record: Mapping[str, Any]) -> str:
+    """Bind every tensor hash for one immutable source forward compactly."""
+
+    parts = [str(record["logits"]["sha256"]), str(record["final_hidden"]["sha256"])]
+    parts.extend(str(layer["sha256"]) for layer in record["layers"])
+    return sha256_bytes("\n".join(parts).encode("ascii"))
+
+
+def snapshot_preliminary_reference(args: argparse.Namespace) -> int:
+    """Pin the requested partial CPU reference without writing below it.
+
+    The strict-F32 producer writes each forward atomically, but continues to
+    add forwards after this command returns.  This consumer-only snapshot
+    fixes the requested first-N prefixes and separately records which entries
+    can be captured by the M=128 GPU execution-unit contract.
+    """
+
+    gate, gate_sha = load_frozen_gate(args.gate)
+    root = args.reference_root.resolve()
+    if not root.is_dir():
+        raise GateError(f"reference root is not a directory: {root}")
+    cases = required_case_map(gate)
+    source_positions: list[dict[str, Any]] = []
+    eligible_positions: list[dict[str, Any]] = []
+    materialized_hashes: dict[str, str] = {}
+    reference_identity: dict[str, Any] | None = None
+    case_receipts: list[dict[str, Any]] = []
+
+    for (mode, case_id), count in sorted(PRELIMINARY_SNAPSHOT_CASE_COUNTS.items()):
+        case = cases.get(case_id)
+        if case is None:
+            raise GateError(f"preliminary snapshot case is absent from frozen corpus: {case_id}")
+        case_root = root / "cases" / mode / case_id
+        plan_path = case_root / "plan.json"
+        if not plan_path.is_file():
+            raise GateError(f"preliminary snapshot plan is unavailable: {plan_path}")
+        plan = load_json(plan_path)
+        if plan.get("mode") != mode:
+            raise GateError(f"preliminary snapshot mode differs at {plan_path}")
+        materialized = plan.get("case", {}).get("materialized_input_sha256")
+        if not isinstance(materialized, str):
+            raise GateError(f"preliminary snapshot has no materialized input hash: {plan_path}")
+        materialized_hashes[f"{mode}:{case_id}"] = materialized
+        identity = discover_reference_identity(case_root)
+        if reference_identity is None:
+            reference_identity = identity
+        elif identity != reference_identity:
+            raise GateError(f"preliminary reference identity differs across cases at {case_root}")
+
+        prompt_tokens = int(case["prompt_tokens"])
+        raw_case_records: list[dict[str, Any]] = []
+        eligible_case_records: list[dict[str, Any]] = []
+        for ordinal in range(count):
+            phase = "prompt" if ordinal < prompt_tokens else "decode"
+            phase_index = ordinal if phase == "prompt" else ordinal - prompt_tokens
+            record = load_reference_position(
+                case_root,
+                case_id,
+                mode,
+                ordinal,
+                phase,
+                phase_index,
+                [
+                    "preliminary_snapshot_source",
+                    f"preliminary_case:{case_id}",
+                    f"preliminary_mode:{mode}",
+                    f"preliminary_phase:{phase}",
+                ],
+                True,
+            )
+            if record is None:
+                raise GateError(
+                    "preliminary snapshot source is not complete at "
+                    f"{mode}:{case_id}: ordinal={ordinal}"
+                )
+            compact = {
+                "id": record["id"],
+                "mode": mode,
+                "case_id": case_id,
+                "ordinal": ordinal,
+                "phase": phase,
+                "phase_index": phase_index,
+                "input_token_id": record["input_token_id"],
+                "capture_metadata_sha256": record["capture_metadata_sha256"],
+                "payload_set_sha256": preliminary_source_payload_hash(record),
+            }
+            raw_case_records.append(compact)
+            source_positions.append(compact)
+
+            # The GPU M=128 capture surface exposes only completed execution
+            # units.  Keeping an interior token would make the producer fail
+            # rather than fabricate a capture from a different prefill mode.
+            native_endpoint = mode == "sequential_m1" or ordinal % 128 == 127
+            if native_endpoint:
+                candidate_record = dict(record)
+                candidate_record["scope_tags"] = [
+                    "preliminary_snapshot",
+                    f"preliminary_case:{case_id}",
+                    f"preliminary_mode:{mode}",
+                    f"preliminary_phase:{phase}",
+                ]
+                if mode == "m128_chunks_with_declared_tail":
+                    candidate_record["scope_tags"].append("preliminary_m128_native_endpoint")
+                eligible_case_records.append(candidate_record)
+                eligible_positions.append(candidate_record)
+        case_receipts.append(
+            {
+                "mode": mode,
+                "case_id": case_id,
+                "source_position_count": len(raw_case_records),
+                "candidate_executable_position_count": len(eligible_case_records),
+                "source_positions": raw_case_records,
+                "candidate_executable_position_ids": [record["id"] for record in eligible_case_records],
+            }
+        )
+
+    if reference_identity is None:
+        raise GateError("preliminary snapshot found no reference identity")
+    source_positions.sort(key=lambda item: item["id"])
+    eligible_positions.sort(key=lambda item: item["id"])
+    source_manifest_sha = sha256_bytes(
+        json.dumps(source_positions, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    )
+    index = {
+        "schema_version": REFERENCE_INDEX_SCHEMA,
+        "frozen_gate": {"path": relative_path_or_absolute(args.gate), "sha256": gate_sha},
+        "reference_root": relative_path_or_absolute(root),
+        "identity": {
+            **reference_identity,
+            "materialized_token_hashes": materialized_hashes,
+            "device_identity": {"backend": "cpu_only_strict_f32"},
+            "runtime_compiler_versions": {"status": "recorded_by_reference_plan"},
+        },
+        "reference_qualification": {
+            "complete": False,
+            "reason": "preliminary snapshot intentionally precedes full strict-F32 corpus completion",
+            "required_case_count": len(expected_reference_case_keys(gate)),
+            "completed_case_count": 0,
+            "missing_cases": sorted(expected_reference_case_keys(gate)),
+        },
+        "preliminary_snapshot": {
+            "status": "fixed_read_only_partial_reference",
+            "selection_kind": "first_n_atomic_forwards_per_named_active_case",
+            "source_position_count": len(source_positions),
+            "source_position_manifest_sha256": source_manifest_sha,
+            "candidate_executable_position_count": len(eligible_positions),
+            "m128_interior_source_positions_not_captureable": len(source_positions) - len(eligible_positions),
+            "m128_interior_reason": (
+                "The isolated M=128 capture API emits a tensor only at an execution-unit endpoint; "
+                "interior positions are retained in this source snapshot but excluded from the GPU comparison."
+            ),
+            "cases": case_receipts,
+        },
+        "positions": eligible_positions,
+        "indexed_at": "consumer_side_read_only_preliminary_snapshot",
+    }
+    write_json_new(args.output, index)
+    print(
+        json.dumps(
+            {
+                "output": str(args.output),
+                "source_positions": len(source_positions),
+                "candidate_executable_positions": len(eligible_positions),
+                "source_position_manifest_sha256": source_manifest_sha,
+            },
+            sort_keys=True,
+        )
+    )
+    return 0
+
+
 def ensure_capture_manifest(value: Any, path: Path, role: str, gate_sha: str) -> dict[str, Any]:
     if not isinstance(value, dict) or value.get("schema_version") != CAPTURE_SCHEMA:
         raise GateError(f"{role} capture has unsupported schema at {path}")
@@ -474,6 +666,7 @@ def check_identity(reference: Mapping[str, Any], runs: Sequence[Mapping[str, Any
             "executable_sha256",
             "selector_configuration_fingerprint",
             "device_identity",
+            "mode_runtime",
             "runtime_compiler_versions",
         ):
             if key not in identity:
@@ -493,18 +686,40 @@ def check_matched_capture_configuration(runs: Sequence[tuple[str, Mapping[str, A
     keys = (
         "executable_sha256",
         "device_identity",
+        "mode_runtime",
         "runtime_compiler_versions",
         "hip_guard_environment",
     )
+
+    def comparable(key: str, value: Any) -> Any:
+        # This field is the explicitly permitted candidate selector itself,
+        # not an ambient device setting.  Comparing it verbatim would make a
+        # correctly selected tile candidate fail the control/candidate match
+        # before any tensor is read.
+        if key == "device_identity" and isinstance(value, dict):
+            normalized = dict(value)
+            normalized.pop("paged_decode_split_source_tile", None)
+            return normalized
+        if key == "mode_runtime" and isinstance(value, list):
+            normalized_modes = []
+            for mode in value:
+                if not isinstance(mode, dict):
+                    return value
+                normalized = dict(mode)
+                normalized.pop("paged_decode_split_source_tile", None)
+                normalized_modes.append(normalized)
+            return normalized_modes
+        return value
+
     errors: list[str] = []
     for key in keys:
-        expected = baseline_identity.get(key)
+        expected = comparable(key, baseline_identity.get(key))
         if expected is None:
             errors.append(f"{baseline_label} does not record matched runtime field {key}")
             continue
         for label, run in runs[1:]:
             identity = run.get("identity")
-            actual = identity.get(key) if isinstance(identity, dict) else None
+            actual = comparable(key, identity.get(key)) if isinstance(identity, dict) else None
             if actual is None:
                 errors.append(f"{label} does not record matched runtime field {key}")
             elif actual != expected:
@@ -1020,6 +1235,28 @@ def aggregate_metric_relative_l2(
     return math.sqrt(squared_error / max(reference_squared_l2, 1.0e-30))
 
 
+def aggregate_layer_continuous(
+    per_position: Mapping[str, Mapping[str, Any]], position_ids: Sequence[str], layer_index: int
+) -> dict[str, Any]:
+    values = [per_position[position_id]["layers"][layer_index] for position_id in position_ids]
+    if not values:
+        raise GateError(f"scope has no positions for layer {layer_index}")
+    rel_values = [metric.relative_l2 for metric in values]
+    max_values = [metric.max_abs for metric in values]
+    p99_rel, p99_index = nearest_rank(rel_values, 0.99)
+    max_index = max(range(len(max_values)), key=max_values.__getitem__)
+    squared_error = sum(metric.squared_error for metric in values)
+    reference_squared_l2 = sum(metric.reference_squared_l2 for metric in values)
+    return {
+        "aggregate_relative_l2": math.sqrt(squared_error / max(reference_squared_l2, 1.0e-30)),
+        "p99_position_relative_l2": p99_rel,
+        "p99_position_relative_l2_position": position_ids[p99_index],
+        "max_abs": max(max_values),
+        "max_abs_position": position_ids[max_index],
+        "reference_scale": max(metric.reference_scale for metric in values),
+    }
+
+
 def policy_agreement(
     ref_metric: VectorMetrics,
     candidate_metric: VectorMetrics,
@@ -1162,6 +1399,502 @@ def bootstrap_lower_bound(
         "rng": "numpy.PCG64",
         "control_minus_candidate_definition": "candidate policy-aware top1 agreement rate minus median-control-run policy-aware agreement rate",
     }
+
+
+def preliminary_upper_gate(control: float, candidate: float, factor: float, floor: float) -> dict[str, Any]:
+    """One-control/one-candidate analogue, explicitly not the frozen repeat rule."""
+
+    threshold = control * factor + floor
+    return {
+        "control_values": [control],
+        "candidate_values": [candidate],
+        "control_median": control,
+        "repeat_envelope": 0.0,
+        "candidate_worst": candidate,
+        "absolute_floor": floor,
+        "threshold": threshold,
+        "passed": candidate <= threshold,
+        "preliminary_repetition_note": (
+            "One control and one candidate were captured; the formal three-control/two-candidate "
+            "repeat envelope is unavailable and is not estimated."
+        ),
+    }
+
+
+def preliminary_lower_gate(control: float, candidate: float, margin: float) -> dict[str, Any]:
+    """One-control/one-candidate analogue, explicitly not the frozen repeat rule."""
+
+    threshold = control - margin
+    return {
+        "control_values": [control],
+        "candidate_values": [candidate],
+        "control_median": control,
+        "repeat_envelope": 0.0,
+        "candidate_worst": candidate,
+        "noninferiority_margin": margin,
+        "threshold": threshold,
+        "passed": candidate >= threshold,
+        "preliminary_repetition_note": (
+            "One control and one candidate were captured; the formal three-control/two-candidate "
+            "repeat envelope is unavailable and is not estimated."
+        ),
+    }
+
+
+def preliminary_scope_definitions(positions: Mapping[str, Mapping[str, Any]]) -> dict[str, list[str]]:
+    values: dict[str, list[str]] = {"all_candidate_executable_snapshot_positions": sorted(positions)}
+    groups: dict[str, list[str]] = defaultdict(list)
+    for position_id, record in positions.items():
+        mode = str(record["mode"])
+        case_id = str(record["case_id"])
+        phase = str(record["phase"])
+        groups[f"mode:{mode}"].append(position_id)
+        groups[f"case:{mode}:{case_id}"].append(position_id)
+        groups[f"phase:{mode}:{phase}"].append(position_id)
+    for name, position_ids in sorted(groups.items()):
+        values[name] = sorted(position_ids)
+    return values
+
+
+def preliminary_continuous_scope(
+    control: Mapping[str, Mapping[str, Any]],
+    candidate: Mapping[str, Mapping[str, Any]],
+    position_ids: Sequence[str],
+    tensor_key: str,
+    factor: float,
+    floors: Mapping[str, Any],
+) -> dict[str, Any]:
+    control_summary = aggregate_continuous(control, position_ids, tensor_key, tensor_key == "logits")
+    candidate_summary = aggregate_continuous(candidate, position_ids, tensor_key, tensor_key == "logits")
+    control_summary["aggregate_relative_l2"] = aggregate_metric_relative_l2(control, position_ids, tensor_key)
+    candidate_summary["aggregate_relative_l2"] = aggregate_metric_relative_l2(candidate, position_ids, tensor_key)
+    scale = max(control_summary["reference_scale"], candidate_summary["reference_scale"])
+    result: dict[str, Any] = {
+        "aggregate_relative_l2": preliminary_upper_gate(
+            control_summary["aggregate_relative_l2"],
+            candidate_summary["aggregate_relative_l2"],
+            factor,
+            float(floors["relative_l2"]),
+        ),
+        "p99_position_relative_l2": preliminary_upper_gate(
+            control_summary["p99_position_relative_l2"],
+            candidate_summary["p99_position_relative_l2"],
+            factor,
+            float(floors["relative_l2"]),
+        ),
+        "max_abs": preliminary_upper_gate(
+            control_summary["max_abs"], candidate_summary["max_abs"], factor, 16.0 * ulp_f32(scale)
+        ),
+        "locations": {
+            "control": {
+                "p99_position_relative_l2": control_summary["p99_position_relative_l2_position"],
+                "max_abs": control_summary["max_abs_position"],
+            },
+            "candidate": {
+                "p99_position_relative_l2": candidate_summary["p99_position_relative_l2_position"],
+                "max_abs": candidate_summary["max_abs_position"],
+            },
+        },
+    }
+    if tensor_key == "logits":
+        result["mean_kl_nats"] = preliminary_upper_gate(
+            control_summary["mean_kl_nats"],
+            candidate_summary["mean_kl_nats"],
+            factor,
+            float(floors["mean_kl_nats"]),
+        )
+        result["p99_kl_nats"] = preliminary_upper_gate(
+            control_summary["p99_kl_nats"],
+            candidate_summary["p99_kl_nats"],
+            factor,
+            float(floors["p99_kl_nats"]),
+        )
+        result["locations"]["control"]["p99_kl_nats"] = control_summary["p99_kl_nats_position"]
+        result["locations"]["candidate"]["p99_kl_nats"] = candidate_summary["p99_kl_nats_position"]
+    return result
+
+
+def preliminary_layer_scope(
+    control: Mapping[str, Mapping[str, Any]],
+    candidate: Mapping[str, Mapping[str, Any]],
+    position_ids: Sequence[str],
+    layer_index: int,
+    factor: float,
+    floors: Mapping[str, Any],
+) -> dict[str, Any]:
+    control_summary = aggregate_layer_continuous(control, position_ids, layer_index)
+    candidate_summary = aggregate_layer_continuous(candidate, position_ids, layer_index)
+    scale = max(control_summary["reference_scale"], candidate_summary["reference_scale"])
+    return {
+        "aggregate_relative_l2": preliminary_upper_gate(
+            control_summary["aggregate_relative_l2"],
+            candidate_summary["aggregate_relative_l2"],
+            factor,
+            float(floors["relative_l2"]),
+        ),
+        "p99_position_relative_l2": preliminary_upper_gate(
+            control_summary["p99_position_relative_l2"],
+            candidate_summary["p99_position_relative_l2"],
+            factor,
+            float(floors["relative_l2"]),
+        ),
+        "max_abs": preliminary_upper_gate(
+            control_summary["max_abs"], candidate_summary["max_abs"], factor, 16.0 * ulp_f32(scale)
+        ),
+        "locations": {
+            "control": {
+                "p99_position_relative_l2": control_summary["p99_position_relative_l2_position"],
+                "max_abs": control_summary["max_abs_position"],
+            },
+            "candidate": {
+                "p99_position_relative_l2": candidate_summary["p99_position_relative_l2_position"],
+                "max_abs": candidate_summary["max_abs_position"],
+            },
+        },
+    }
+
+
+def preliminary_top10_scope(
+    gate: Mapping[str, Any],
+    control: Mapping[str, Mapping[str, Any]],
+    candidate: Mapping[str, Mapping[str, Any]],
+    position_ids: Sequence[str],
+) -> dict[str, Any]:
+    confidence = float(gate["noninferiority_rule"]["discrete"]["position_wilson"]["confidence"])
+    margin = float(gate["noninferiority_rule"]["discrete"]["position_wilson"]["noninferiority_margin"])
+    control_values = [
+        int(bool(control[position_id]["logits"].top10_contains_reference_top1)) for position_id in position_ids
+    ]
+    candidate_values = [
+        int(bool(candidate[position_id]["logits"].top10_contains_reference_top1)) for position_id in position_ids
+    ]
+    control_lower = wilson_lower(sum(control_values), len(control_values), confidence)
+    candidate_lower = wilson_lower(sum(candidate_values), len(candidate_values), confidence)
+    return {
+        "top10_wilson": preliminary_lower_gate(control_lower, candidate_lower, margin),
+        "control_successes": sum(control_values),
+        "candidate_successes": sum(candidate_values),
+        "total_positions": len(position_ids),
+        "candidate_top10_mismatch_positions": [
+            position_id for position_id, value in zip(position_ids, candidate_values, strict=True) if not value
+        ],
+    }
+
+
+def preliminary_top1_scope(
+    gate: Mapping[str, Any],
+    control: Mapping[str, Mapping[str, Any]],
+    candidate: Mapping[str, Mapping[str, Any]],
+    position_ids: Sequence[str],
+    allow_near_margin: bool,
+) -> dict[str, Any]:
+    confidence = float(gate["noninferiority_rule"]["discrete"]["position_wilson"]["confidence"])
+    margin = float(gate["noninferiority_rule"]["discrete"]["position_wilson"]["noninferiority_margin"])
+    control_values: list[int] = []
+    candidate_values: list[int] = []
+    policy_mismatches: list[str] = []
+    hard_regressions: list[dict[str, Any]] = []
+    for position_id in position_ids:
+        reference_metric = control[position_id]["logits"]
+        candidate_metric = candidate[position_id]["logits"]
+        control_values.append(int(reference_metric.top1 == reference_metric.reference_top1))
+        allowed, was_near = policy_agreement(
+            reference_metric, candidate_metric, [reference_metric], allow_near_margin
+        )
+        candidate_values.append(int(allowed))
+        if not allowed:
+            policy_mismatches.append(position_id)
+        if candidate_metric.top1 != reference_metric.reference_top1 and control_values[-1] and not was_near:
+            hard_regressions.append(
+                {
+                    "position": position_id,
+                    "reference_top1": reference_metric.reference_top1,
+                    "candidate_top1": candidate_metric.top1,
+                    "reference_top2": reference_metric.reference_top2,
+                    "reference_margin": reference_metric.reference_margin,
+                }
+            )
+    control_lower = wilson_lower(sum(control_values), len(control_values), confidence)
+    candidate_lower = wilson_lower(sum(candidate_values), len(candidate_values), confidence)
+    return {
+        "top1_wilson": preliminary_lower_gate(control_lower, candidate_lower, margin),
+        "control_successes": sum(control_values),
+        "candidate_successes": sum(candidate_values),
+        "total_positions": len(position_ids),
+        "candidate_policy_mismatch_positions": policy_mismatches,
+        "hard_top1_regressions": hard_regressions,
+    }
+
+
+def preliminary_plan_binding_errors(
+    manifest: Mapping[str, Any], reference_path: Path, label: str
+) -> list[str]:
+    producer = manifest.get("producer")
+    if not isinstance(producer, dict) or not isinstance(producer.get("plan_path"), str):
+        return [f"{label} capture does not record a readable plan path"]
+    path = Path(producer["plan_path"])
+    if not path.is_file():
+        return [f"{label} capture plan is unavailable: {path}"]
+    plan = load_json(path)
+    qualification = plan.get("qualification")
+    if not isinstance(qualification, dict) or qualification.get("preliminary") is not True:
+        return [f"{label} capture was not prepared as an explicit preliminary plan"]
+    if qualification.get("preliminary_reference_snapshot_sha256") != sha256_file(reference_path):
+        return [f"{label} plan does not bind the supplied preliminary reference snapshot"]
+    return []
+
+
+def preliminary_selector_exposure(
+    candidate: Mapping[str, Any], positions: Mapping[str, Mapping[str, Any]]
+) -> dict[str, Any]:
+    """State whether the selected implementation actually ran its multi-tile branch."""
+
+    candidate_id = candidate.get("candidate", {}).get("id")
+    environment = candidate.get("selector", {}).get("environment", {})
+    if candidate_id not in {"paged-decode-source-tile-128", "paged-decode-source-tile-256"}:
+        return {"applicable": False, "reason": "candidate is not a source-tile split"}
+    try:
+        tile = int(environment["ULLM_EXPERIMENTAL_SQ8_PAGED_DECODE_SPLIT_TILE"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise GateError("source-tile candidate has no valid selector tile") from exc
+    # Sequential M=1 prompt units and decode units both execute through
+    # PagedDecodeState. The input at ordinal N sees N+1 cached tokens, so a
+    # multi-tile split requires N+1 > tile regardless of the session phase.
+    positions_exercised = sorted(
+        position_id
+        for position_id, record in positions.items()
+        if record.get("mode") == "sequential_m1"
+        and int(record["ordinal"]) + 1 > tile
+    )
+    phase_counts: dict[str, int] = {}
+    for position_id in positions_exercised:
+        phase = str(positions[position_id].get("phase"))
+        phase_counts[phase] = phase_counts.get(phase, 0) + 1
+    decode_positions = [
+        position_id
+        for position_id in positions_exercised
+        if positions[position_id].get("phase") == "decode"
+    ]
+    return {
+        "applicable": True,
+        "tile": tile,
+        "multi_tile_m1_position_count": len(positions_exercised),
+        "multi_tile_m1_position_examples": positions_exercised[:5],
+        "multi_tile_m1_position_count_by_phase": phase_counts,
+        "multi_tile_decode_position_count": len(decode_positions),
+        "multi_tile_decode_position_examples": decode_positions[:5],
+        "multi_tile_exercised": bool(positions_exercised),
+    }
+
+
+def evaluate_preliminary(args: argparse.Namespace) -> int:
+    """Evaluate a pinned partial reference without claiming a v0.2 admission."""
+
+    gate, gate_sha = load_frozen_gate(args.gate)
+    reference_value = load_json(args.reference)
+    if reference_value.get("schema_version") != REFERENCE_INDEX_SCHEMA:
+        raise GateError(f"reference index has unsupported schema: {args.reference}")
+    if reference_value.get("frozen_gate", {}).get("sha256") != gate_sha:
+        raise GateError("reference index does not bind this frozen gate")
+    snapshot = reference_value.get("preliminary_snapshot")
+    if not isinstance(snapshot, dict) or snapshot.get("status") != "fixed_read_only_partial_reference":
+        raise GateError("evaluate-preliminary requires an explicit pinned preliminary reference snapshot")
+    control_value = ensure_capture_manifest(load_json(args.control), args.control, "control", gate_sha)
+    candidate_value = ensure_capture_manifest(load_json(args.candidate), args.candidate, "candidate", gate_sha)
+    identity_errors = check_identity(reference_value, [control_value, candidate_value])
+    identity_errors.extend(
+        check_matched_capture_configuration([("control-0", control_value), ("candidate-0", candidate_value)])
+    )
+    identity_errors.extend(preliminary_plan_binding_errors(control_value, args.reference, "control-0"))
+    identity_errors.extend(preliminary_plan_binding_errors(candidate_value, args.reference, "candidate-0"))
+    if control_value.get("selector", {}).get("enabled") is not False:
+        identity_errors.append("control selector is not explicitly disabled")
+    if candidate_value.get("selector", {}).get("enabled") is not True:
+        identity_errors.append("candidate selector is not explicitly enabled")
+
+    reference_positions = index_positions(reference_value, "reference")
+    control_positions = index_positions(control_value, "control-0")
+    candidate_positions = index_positions(candidate_value, "candidate-0")
+    required_ids = sorted(reference_positions)
+    for label, positions in (("control-0", control_positions), ("candidate-0", candidate_positions)):
+        missing = sorted(set(required_ids) - set(positions))
+        unexpected = sorted(set(positions) - set(required_ids))
+        if missing:
+            identity_errors.append(f"{label} is missing snapshot positions: {missing[:5]} (total={len(missing)})")
+        if unexpected:
+            identity_errors.append(
+                f"{label} has positions outside the snapshot: {unexpected[:5]} (total={len(unexpected)})"
+            )
+    expected_capture_count = snapshot.get("candidate_executable_position_count")
+    if len(required_ids) != expected_capture_count:
+        identity_errors.append(
+            f"snapshot candidate position count differs: index={len(required_ids)} receipt={expected_capture_count!r}"
+        )
+
+    formal_coverage = expected_coverage(gate, reference_positions)
+    coverage = {
+        "status": "preliminary_not_admission",
+        "source_snapshot_positions": snapshot.get("source_position_count"),
+        "source_position_manifest_sha256": snapshot.get("source_position_manifest_sha256"),
+        "candidate_executable_positions": len(required_ids),
+        "m128_interior_source_positions_not_captureable": snapshot.get(
+            "m128_interior_source_positions_not_captureable"
+        ),
+        "control_repetitions": 1,
+        "candidate_repetitions": 1,
+        "formal_v0_2_coverage": formal_coverage,
+        "wilson_zero_error_lower_bounds": {
+            "one_sided_95_percent_for_2160_source_positions": wilson_lower(2160, 2160, 0.95),
+            "one_sided_95_percent_for_4096_formal_primary_positions": wilson_lower(4096, 4096, 0.95),
+        },
+    }
+    if identity_errors:
+        result = {
+            "schema_version": RESULT_SCHEMA,
+            "status": "preliminary",
+            "preliminary_outcome": "invalid_input",
+            "admission_status": "not_qualified",
+            "frozen_gate_sha256": gate_sha,
+            "coverage": coverage,
+            "identity_errors": identity_errors,
+            "failures": [],
+        }
+        write_json_new(args.output_json, result)
+        write_markdown(args.output_markdown, result)
+        return 1
+
+    reader = TensorReader(verify_hashes=not args.skip_payload_hash_verification)
+    control_metrics = collect_run_metrics(reader, reference_positions, control_positions, required_ids, True)
+    candidate_metrics = collect_run_metrics(reader, reference_positions, candidate_positions, required_ids, True)
+    scopes = preliminary_scope_definitions(reference_positions)
+    continuous_config = gate["noninferiority_rule"]["continuous"]
+    factor = float(continuous_config["relative_noninferiority_factor"])
+    floors = continuous_config["absolute_floors"]
+    metric_results: dict[str, Any] = {"logits": {}, "final_hidden": {}, "layer_hidden": {}, "discrete": {}}
+    all_continuous_pass = True
+    for scope_name, scope_ids in scopes.items():
+        for tensor_key, output_key in (("logits", "logits"), ("final_hidden", "final_hidden")):
+            result = preliminary_continuous_scope(
+                control_metrics, candidate_metrics, scope_ids, tensor_key, factor, floors
+            )
+            metric_results[output_key][scope_name] = result
+            for value in result.values():
+                if isinstance(value, dict) and "passed" in value:
+                    all_continuous_pass &= bool(value["passed"])
+        for layer_index in range(LAYER_COUNT):
+            layer_result = preliminary_layer_scope(
+                control_metrics, candidate_metrics, scope_ids, layer_index, factor, floors
+            )
+            metric_results["layer_hidden"][f"{scope_name}:layer-{layer_index:02}"] = layer_result
+            for value in layer_result.values():
+                if isinstance(value, dict) and "passed" in value:
+                    all_continuous_pass &= bool(value["passed"])
+
+    top10_results = {
+        scope_name: preliminary_top10_scope(gate, control_metrics, candidate_metrics, scope_ids)
+        for scope_name, scope_ids in scopes.items()
+    }
+    all_top10_pass = all(bool(value["top10_wilson"]["passed"]) for value in top10_results.values())
+    for scope_name, value in top10_results.items():
+        metric_results["discrete"][scope_name] = value
+    near_margin_allowed = all_continuous_pass and all_top10_pass
+    for scope_name, scope_ids in scopes.items():
+        metric_results["discrete"][scope_name].update(
+            preliminary_top1_scope(
+                gate, control_metrics, candidate_metrics, scope_ids, near_margin_allowed
+            )
+        )
+
+    failures: list[dict[str, Any]] = []
+    for tensor_name in ("logits", "final_hidden", "layer_hidden"):
+        for scope_name, metrics in metric_results[tensor_name].items():
+            for metric_name, value in metrics.items():
+                if isinstance(value, dict) and "passed" in value and not value["passed"]:
+                    failures.append(
+                        {
+                            "tensor": tensor_name,
+                            "scope": scope_name,
+                            "metric": metric_name,
+                            "detail": value,
+                            "locations": metrics.get("locations"),
+                        }
+                    )
+    for scope_name, metrics in metric_results["discrete"].items():
+        for metric_name in ("top1_wilson", "top10_wilson"):
+            if not metrics[metric_name]["passed"]:
+                failures.append(
+                    {
+                        "tensor": "logits",
+                        "scope": scope_name,
+                        "metric": metric_name,
+                        "detail": metrics[metric_name],
+                        "candidate_policy_mismatch_positions": metrics.get(
+                            "candidate_policy_mismatch_positions", []
+                        ),
+                        "candidate_top10_mismatch_positions": metrics.get(
+                            "candidate_top10_mismatch_positions", []
+                        ),
+                    }
+                )
+        if metrics["hard_top1_regressions"]:
+            failures.append(
+                {
+                    "tensor": "logits",
+                    "scope": scope_name,
+                    "metric": "hard_top1_regressions",
+                    "detail": metrics["hard_top1_regressions"],
+                }
+            )
+
+    aggregate_discrete = metric_results["discrete"]["all_candidate_executable_snapshot_positions"]
+    coverage["actual_candidate_executable_top1_wilson_lower"] = aggregate_discrete["top1_wilson"][
+        "candidate_worst"
+    ]
+    coverage["actual_candidate_executable_top10_wilson_lower"] = aggregate_discrete["top10_wilson"][
+        "candidate_worst"
+    ]
+    selector_exposure = preliminary_selector_exposure(candidate_value, reference_positions)
+    no_metric_failures = not failures
+    if no_metric_failures and selector_exposure.get("applicable") and not selector_exposure.get(
+        "multi_tile_exercised"
+    ):
+        preliminary_outcome = "inconclusive_selector_not_exercised"
+    else:
+        preliminary_outcome = "pass_metric_subset" if no_metric_failures else "fail_metric_subset"
+    result = {
+        "schema_version": RESULT_SCHEMA,
+        "status": "preliminary",
+        "preliminary_outcome": preliminary_outcome,
+        "admission_status": "not_qualified",
+        "admission_reasons": [
+            "The frozen v0.2 corpus requires 4,096 primary decode positions, all boundary and M=128 coverage, and a qualified complete reference.",
+            "This deadline snapshot has one control and one candidate, so no formal repeat envelope or independent confirmation is available.",
+            "M=128 chunk-interior source positions are retained and hashed in the snapshot but cannot be emitted by the existing M=128 capture execution-unit API.",
+        ],
+        "frozen_gate_sha256": gate_sha,
+        "candidate_id": candidate_value.get("candidate", {}).get("id"),
+        "capture_provenance": {
+            "control": {"capture_manifest": relative_path_or_absolute(args.control), "identity": control_value.get("identity")},
+            "candidate": {
+                "capture_manifest": relative_path_or_absolute(args.candidate),
+                "selector": candidate_value.get("selector"),
+                "identity": candidate_value.get("identity"),
+            },
+        },
+        "coverage": coverage,
+        "selector_exposure": selector_exposure,
+        "scope_position_ids": scopes,
+        "repeat_envelope": {
+            "formal_contract": "three controls and two candidates",
+            "preliminary_capture": "one control and one candidate; envelope is not estimated",
+        },
+        "metrics": metric_results,
+        "failures": failures,
+        "identity_errors": [],
+    }
+    write_json_new(args.output_json, result)
+    write_markdown(args.output_markdown, result)
+    return 0 if not failures else 1
 
 
 def evaluate(args: argparse.Namespace) -> int:
@@ -1640,6 +2373,8 @@ def write_markdown(path: Path, result: Mapping[str, Any]) -> None:
         "# SQ8 numerical gate v0.2 consumer result",
         "",
         f"- Status: `{result.get('status')}`",
+        f"- Preliminary outcome: `{result.get('preliminary_outcome', 'not_applicable')}`",
+        f"- Admission status: `{result.get('admission_status', 'not_recorded')}`",
         f"- Frozen JSON SHA-256: `{result.get('frozen_gate_sha256')}`",
     ]
     coverage = result.get("coverage")
@@ -1672,6 +2407,13 @@ def write_markdown(path: Path, result: Mapping[str, Any]) -> None:
             [
                 "",
                 "All measured metrics passed, but this is explicitly not an admission result because it uses incomplete coverage and/or test-only capture manifests.",
+            ]
+        )
+    elif result.get("status") == "preliminary":
+        lines.extend(
+            [
+                "",
+                "All evaluated metric-subset gates passed, but this is explicitly a preliminary result and not a v0.2 admission pass.",
             ]
         )
     else:
@@ -1712,6 +2454,7 @@ def clone_manifest(args: argparse.Namespace) -> int:
             "executable_sha256": "test_only_reference_alias",
             "selector_configuration_fingerprint": f"test-only:{role}:{args.candidate_id}",
             "device_identity": {"backend": "test_only_reference_alias"},
+            "mode_runtime": [{"backend": "test_only_reference_alias"}],
             "runtime_compiler_versions": {"backend": "test_only_reference_alias"},
             "hip_guard_environment": {"backend": "test_only_reference_alias"},
         },
@@ -1759,6 +2502,15 @@ def parser() -> argparse.ArgumentParser:
     index.add_argument("--output", type=Path, required=True)
     index.set_defaults(function=index_reference)
 
+    preliminary_index = sub.add_parser(
+        "snapshot-preliminary-reference",
+        help="pin the requested partial CPU reference outside its active writer root",
+    )
+    preliminary_index.add_argument("--gate", type=Path, required=True)
+    preliminary_index.add_argument("--reference-root", type=Path, required=True)
+    preliminary_index.add_argument("--output", type=Path, required=True)
+    preliminary_index.set_defaults(function=snapshot_preliminary_reference)
+
     evaluate_parser = sub.add_parser("evaluate", help="evaluate controls and one candidate")
     evaluate_parser.add_argument("--gate", type=Path, required=True)
     evaluate_parser.add_argument("--reference", type=Path, required=True)
@@ -1769,6 +2521,19 @@ def parser() -> argparse.ArgumentParser:
     evaluate_parser.add_argument("--allow-incomplete-test-coverage", action="store_true")
     evaluate_parser.add_argument("--skip-payload-hash-verification", action="store_true")
     evaluate_parser.set_defaults(function=evaluate)
+
+    preliminary_evaluate = sub.add_parser(
+        "evaluate-preliminary",
+        help="evaluate one control and one candidate against a pinned incomplete snapshot without admission status",
+    )
+    preliminary_evaluate.add_argument("--gate", type=Path, required=True)
+    preliminary_evaluate.add_argument("--reference", type=Path, required=True)
+    preliminary_evaluate.add_argument("--control", type=Path, required=True)
+    preliminary_evaluate.add_argument("--candidate", type=Path, required=True)
+    preliminary_evaluate.add_argument("--output-json", type=Path, required=True)
+    preliminary_evaluate.add_argument("--output-markdown", type=Path, required=True)
+    preliminary_evaluate.add_argument("--skip-payload-hash-verification", action="store_true")
+    preliminary_evaluate.set_defaults(function=evaluate_preliminary)
 
     clone = sub.add_parser("clone-manifest", help="test-only reference alias manifest")
     clone.add_argument("--reference", type=Path, required=True)

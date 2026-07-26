@@ -293,6 +293,65 @@ def read_teacher_inputs(reference_root: Path, mode: str, case_id: str, forced: i
     return values[:forced], actual
 
 
+def sha256_u32le(values: list[int]) -> str:
+    raw = b"".join(int(value).to_bytes(4, "little", signed=False) for value in values)
+    return hashlib.sha256(raw).hexdigest()
+
+
+def preliminary_case_inputs(
+    full_prompt: list[int], positions: list[Mapping[str, Any]], case_id: str
+) -> tuple[list[int], list[int], dict[str, Any]]:
+    """Construct the smallest teacher-forced prefix that reaches this snapshot.
+
+    A partial reference is not allowed to borrow unrecorded CPU decode tokens.
+    Prompt-prefix values are frozen fixture inputs; decode-prefix values must be
+    present in the pinned source position records.  The one final unobserved
+    forced value after a prompt-only prefix is the next frozen prompt token and
+    is only needed to make the isolated capture state machine finish cleanly.
+    """
+
+    ordered = sorted(positions, key=lambda item: int(item["ordinal"]))
+    if not ordered:
+        raise PlanError(f"preliminary snapshot case {case_id} has no positions")
+    max_ordinal = int(ordered[-1]["ordinal"])
+    by_ordinal = {int(item["ordinal"]): item for item in ordered}
+    if len(by_ordinal) != len(ordered):
+        raise PlanError(f"preliminary snapshot case {case_id} repeats an ordinal")
+    if max_ordinal < len(full_prompt):
+        prompt = full_prompt[: max_ordinal + 1]
+        if max_ordinal + 1 < len(full_prompt):
+            teacher = [full_prompt[max_ordinal + 1]]
+            terminal_source = "next_frozen_prompt_token"
+        else:
+            # This branch is not expected for the active snapshot.  It remains
+            # deterministic and is explicitly recorded because the value is
+            # consumed only after the final captured prompt output.
+            teacher = [full_prompt[-1]]
+            terminal_source = "deterministic_terminal_prompt_repeat"
+    else:
+        prompt = list(full_prompt)
+        teacher = []
+        for ordinal in range(len(prompt), max_ordinal + 1):
+            record = by_ordinal.get(ordinal)
+            if record is None:
+                raise PlanError(
+                    f"preliminary snapshot case {case_id} lacks contiguous source input at ordinal={ordinal}"
+                )
+            teacher.append(int(record["input_token_id"]))
+        terminal_source = "pinned_reference_input_tokens"
+    if not teacher:
+        raise PlanError(f"preliminary snapshot case {case_id} produced an empty teacher prefix")
+    return prompt, teacher, {
+        "full_frozen_prompt_tokens": len(full_prompt),
+        "execution_prompt_tokens": len(prompt),
+        "execution_teacher_forced_tokens": len(teacher),
+        "last_captured_ordinal": max_ordinal,
+        "terminal_teacher_source": terminal_source,
+        "execution_prompt_u32le_sha256": sha256_u32le(prompt),
+        "execution_teacher_forced_u32le_sha256": sha256_u32le(teacher),
+    }
+
+
 def build_plan(args: argparse.Namespace) -> int:
     gate, gate_sha = frozen_gate(args.gate)
     index = load_json(args.reference)
@@ -321,7 +380,13 @@ def build_plan(args: argparse.Namespace) -> int:
         return 0
     selector = selector_definition(candidate, args.role)
     reference_qualification = reference_index_qualification(gate, index)
-    if not reference_qualification["complete"]:
+    preliminary = bool(getattr(args, "preliminary", False))
+    preliminary_snapshot = index.get("preliminary_snapshot")
+    if preliminary and not isinstance(preliminary_snapshot, dict):
+        raise PlanError("--preliminary requires a pinned preliminary_snapshot reference index")
+    if preliminary and preliminary_snapshot.get("status") != "fixed_read_only_partial_reference":
+        raise PlanError("--preliminary reference snapshot has an unexpected status")
+    if not preliminary and not reference_qualification["complete"]:
         write_json_new(
             args.output,
             {
@@ -337,7 +402,11 @@ def build_plan(args: argparse.Namespace) -> int:
         )
         return 0
     recorded_reference_completion = index.get("reference_qualification")
-    if isinstance(recorded_reference_completion, dict) and recorded_reference_completion.get("complete") is not True:
+    if (
+        not preliminary
+        and isinstance(recorded_reference_completion, dict)
+        and recorded_reference_completion.get("complete") is not True
+    ):
         write_json_new(
             args.output,
             {
@@ -391,16 +460,23 @@ def build_plan(args: argparse.Namespace) -> int:
             *gate["corpus"]["required_boundary_cases"],
         ]
     }
-    reference_root = Path(str(index["reference_root"]))
     cases: list[dict[str, Any]] = []
     teacher_hashes: dict[str, str] = {}
+    preliminary_case_execution: dict[str, Any] = {}
     for (mode, case_id), positions in sorted(case_specs.items()):
         case = frozen_cases.get(case_id)
         if case is None:
             raise PlanError(f"reference index case is not frozen: {case_id}")
-        forced = int(case["forced_decode_tokens"])
-        prompt = materialize_prompt(gate, case, args.gate)
-        teacher_inputs, teacher_hash = read_teacher_inputs(reference_root, mode, case_id, forced)
+        full_prompt = materialize_prompt(gate, case, args.gate)
+        if preliminary:
+            prompt, teacher_inputs, execution = preliminary_case_inputs(full_prompt, positions, case_id)
+            teacher_hash = sha256_u32le(teacher_inputs)
+            preliminary_case_execution[f"{mode}:{case_id}"] = execution
+        else:
+            forced = int(case["forced_decode_tokens"])
+            prompt = full_prompt
+            reference_root = Path(str(index["reference_root"]))
+            teacher_inputs, teacher_hash = read_teacher_inputs(reference_root, mode, case_id, forced)
         teacher_hashes[f"{mode}:{case_id}"] = teacher_hash
         compact_positions = []
         for position in sorted(positions, key=lambda item: (int(item["ordinal"]), str(item["id"]))):
@@ -467,6 +543,15 @@ def build_plan(args: argparse.Namespace) -> int:
             "reference_index_coverage": reference_qualification,
             "diagnostic_only": bool(args.diagnostic_only),
             "handwritten_m128_unavailable": candidate == "handwritten-wmma-projection",
+            "preliminary": preliminary,
+            "preliminary_reference_snapshot_sha256": sha256_file(args.reference) if preliminary else None,
+            "preliminary_source_position_count": (
+                preliminary_snapshot.get("source_position_count") if preliminary else None
+            ),
+            "preliminary_candidate_executable_position_count": (
+                preliminary_snapshot.get("candidate_executable_position_count") if preliminary else None
+            ),
+            "preliminary_case_execution": preliminary_case_execution if preliminary else {},
         },
         "cases": cases,
     }
@@ -512,6 +597,11 @@ def parser() -> argparse.ArgumentParser:
         required=True,
     )
     prepare.add_argument("--diagnostic-only", action="store_true")
+    prepare.add_argument(
+        "--preliminary",
+        action="store_true",
+        help="allow only an explicitly pinned incomplete reference snapshot; never an admission plan",
+    )
     prepare.add_argument("--output", type=Path, required=True)
     prepare.set_defaults(function=build_plan)
     run = sub.add_parser("run", help="launch a prepared plan in an isolated subprocess")

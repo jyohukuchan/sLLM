@@ -423,6 +423,10 @@ struct ActiveServingRequest {
     prompt_tokens_processed: usize,
     generated_tokens: usize,
     sampled_tokens: usize,
+    // This counter exists only for the isolated numerical-gate state machine.
+    // It records materialized oracle tokens that deliberately bypass sampling
+    // and must therefore remain distinct from reasoning forced-end tokens.
+    teacher_forced_tokens: usize,
     last_generated_token: Option<usize>,
     finish_reason: Option<Sq8FinishReason>,
     sampler: Sq8CpuSampler,
@@ -512,6 +516,7 @@ impl ActiveServingRequest {
             prompt_tokens_processed: 0,
             generated_tokens: 0,
             sampled_tokens: 0,
+            teacher_forced_tokens: 0,
             last_generated_token: None,
             finish_reason: None,
             sampler,
@@ -648,7 +653,14 @@ enum GeneratedTokenCommit {
 #[derive(Debug)]
 enum PendingTokenSource {
     Sampled(Sq8SamplingProposal),
-    Forced,
+    /// A token injected by the numerical-gate harness.  This is deliberately
+    /// distinct from a reasoning close token: it must not affect the serving
+    /// request's reasoning forced-end accounting.
+    TeacherForced,
+    /// A token selected by the reasoning state machine while closing a
+    /// reasoning span.  Unlike a teacher-forced diagnostic token, this must
+    /// advance `forced_end_tokens` exactly once.
+    ReasoningForced,
 }
 
 #[derive(Debug)]
@@ -731,7 +743,7 @@ fn commit_pending_token_state(
         PendingTokenSource::Sampled(_) => {
             return Err("serving sampling proposal changed before commit".into());
         }
-        PendingTokenSource::Forced => {}
+        PendingTokenSource::TeacherForced | PendingTokenSource::ReasoningForced => {}
     }
     let next_generated_tokens = prepared
         .generated_index
@@ -755,7 +767,7 @@ fn commit_pending_token_state(
         PendingTokenSource::Sampled(_) if forced_after != forced_before => {
             return Err("serving sampled token changed forced-end accounting".into());
         }
-        PendingTokenSource::Forced
+        PendingTokenSource::ReasoningForced
             if forced_after
                 != forced_before
                     .checked_add(1)
@@ -774,18 +786,27 @@ fn commit_pending_token_state(
     let active = active
         .as_mut()
         .ok_or_else(|| "serving token commit has no active request".to_string())?;
-    if let PendingTokenSource::Sampled(proposal) = pending.source {
-        let sampled = proposal.sampled();
-        let committed = active.sampler.commit(proposal)?;
-        if committed.token_id != prepared.token_id
-            || committed.logit.to_bits() != sampled.logit.to_bits()
-        {
-            return Err("serving sampler commit did not match prepared token".into());
+    match pending.source {
+        PendingTokenSource::Sampled(proposal) => {
+            let sampled = proposal.sampled();
+            let committed = active.sampler.commit(proposal)?;
+            if committed.token_id != prepared.token_id
+                || committed.logit.to_bits() != sampled.logit.to_bits()
+            {
+                return Err("serving sampler commit did not match prepared token".into());
+            }
+            active.sampled_tokens = active
+                .sampled_tokens
+                .checked_add(1)
+                .ok_or_else(|| "serving sampled token counter overflows".to_string())?;
         }
-        active.sampled_tokens = active
-            .sampled_tokens
-            .checked_add(1)
-            .ok_or_else(|| "serving sampled token counter overflows".to_string())?;
+        PendingTokenSource::TeacherForced => {
+            active.teacher_forced_tokens = active
+                .teacher_forced_tokens
+                .checked_add(1)
+                .ok_or_else(|| "serving teacher-forced token counter overflows".to_string())?;
+        }
+        PendingTokenSource::ReasoningForced => {}
     }
     active.generated_tokens = next_generated_tokens;
     active.last_generated_token = Some(prepared.token_id);
@@ -1647,7 +1668,7 @@ impl Qwen3Sq8ServingSession {
         }
         let prepared = self.prepare_selected_token(
             token_id,
-            PendingTokenSource::Forced,
+            PendingTokenSource::TeacherForced,
             None,
             cache_len,
             commit,
@@ -2100,7 +2121,7 @@ impl Qwen3Sq8ServingSession {
         {
             let prepared = self.prepare_selected_token(
                 token_id,
-                PendingTokenSource::Forced,
+                PendingTokenSource::ReasoningForced,
                 Some(reasoning_after),
                 scheduler_cached,
                 GeneratedTokenCommit::Prefill,
@@ -2208,7 +2229,7 @@ impl Qwen3Sq8ServingSession {
             return self
                 .prepare_selected_token(
                     token_id,
-                    PendingTokenSource::Forced,
+                    PendingTokenSource::ReasoningForced,
                     Some(reasoning_after),
                     expected_position + 1,
                     GeneratedTokenCommit::Decode(ready),
@@ -2611,7 +2632,7 @@ impl Qwen3Sq8ServingSession {
             .ok_or_else(|| "serving generated token has no active request".to_string())?
             .sampled_reasoning_transition(sampled.token_id)?;
         let source = if forced {
-            PendingTokenSource::Forced
+            PendingTokenSource::ReasoningForced
         } else {
             PendingTokenSource::Sampled(proposal)
         };
@@ -3196,10 +3217,14 @@ fn validate_active_sampling_progress(active: &ActiveServingRequest) -> Result<()
         .reasoning
         .as_ref()
         .map_or(0, |reasoning| reasoning.forced_end_tokens);
-    if active.sampled_tokens.checked_add(forced_tokens) != Some(active.generated_tokens) {
+    let accounted_tokens = active
+        .sampled_tokens
+        .checked_add(forced_tokens)
+        .and_then(|count| count.checked_add(active.teacher_forced_tokens));
+    if accounted_tokens != Some(active.generated_tokens) {
         return Err(format!(
-            "serving generated-token accounting mismatch: generated={} sampled={} forced={forced_tokens}",
-            active.generated_tokens, active.sampled_tokens
+            "serving generated-token accounting mismatch: generated={} sampled={} forced={} teacher_forced={}",
+            active.generated_tokens, active.sampled_tokens, forced_tokens, active.teacher_forced_tokens
         ));
     }
     if active.sampler.draws() != expected_draws {
@@ -3407,7 +3432,7 @@ mod tests {
         };
         let pending_token = Some(PendingServingToken {
             prepared: prepared.clone(),
-            source: PendingTokenSource::Forced,
+            source: PendingTokenSource::ReasoningForced,
             reasoning_after,
             commit: GeneratedTokenCommit::Prefill,
         });
@@ -3780,6 +3805,7 @@ mod tests {
         let active = fixture.active.as_ref().unwrap();
         assert_eq!(active.generated_tokens, 1);
         assert_eq!(active.sampled_tokens, 0);
+        assert_eq!(active.teacher_forced_tokens, 0);
         assert_eq!(active.sampler.draws(), 0);
         assert_eq!(
             active.reasoning_usage(),
@@ -3792,6 +3818,31 @@ mod tests {
             active.reasoning.as_ref().unwrap().phase,
             ReasoningPhase::Answer
         );
+    }
+
+    #[test]
+    fn teacher_forced_capture_token_does_not_mutate_reasoning_accounting() {
+        let mut fixture = serving_token_transaction_fixture();
+        fixture.pending_token.as_mut().unwrap().source = PendingTokenSource::TeacherForced;
+
+        let result = publish_prepared_token_transaction(
+            &mut fixture.state,
+            &mut fixture.pending_token,
+            &mut fixture.active,
+            &mut fixture.scheduler,
+            &fixture.cancel,
+            &fixture.prepared,
+            |_| Ok(()),
+        )
+        .unwrap();
+
+        assert!(matches!(result, Sq8ServingAdvance::Token { .. }));
+        let active = fixture.active.as_ref().unwrap();
+        assert_eq!(active.generated_tokens, 1);
+        assert_eq!(active.sampled_tokens, 0);
+        assert_eq!(active.teacher_forced_tokens, 1);
+        assert_eq!(active.sampler.draws(), 0);
+        assert!(active.reasoning.is_none());
     }
 
     #[test]

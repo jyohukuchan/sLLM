@@ -198,6 +198,7 @@ fn run(options: Options) -> Result<(), String> {
     let mut captured_positions = Vec::new();
     let mut seen_position_ids = HashSet::new();
     let mut mode_timing = Vec::new();
+    let mut mode_runtime = Vec::new();
 
     for mode in ["sequential_m1", "m128_chunks_with_declared_tail"] {
         let mode_cases = plan
@@ -238,9 +239,6 @@ fn run(options: Options) -> Result<(), String> {
             "compute_major": report.device.compute_major,
             "compute_minor": report.device.compute_minor,
             "total_global_mem": report.device.total_global_mem,
-            "prefill_mode": format!("{prefill_mode:?}"),
-            "prefill_implementation": report.prefill_implementation,
-            "paged_decode_split_source_tile": report.paged_decode_split_source_tile,
         });
         if let Some(previous) = &device_identity {
             if previous != &current_device {
@@ -249,6 +247,15 @@ fn run(options: Options) -> Result<(), String> {
         } else {
             device_identity = Some(current_device);
         }
+        // A plan intentionally loads the same physical R9700 once for each
+        // required prefill mode.  Keep mode-specific implementation metadata
+        // as provenance, but do not mistake it for mutable device identity.
+        mode_runtime.push(json!({
+            "mode": mode,
+            "prefill_mode": format!("{prefill_mode:?}"),
+            "prefill_implementation": report.prefill_implementation,
+            "paged_decode_split_source_tile": report.paged_decode_split_source_tile,
+        }));
         for case in mode_cases {
             capture_case(
                 &mut session,
@@ -288,6 +295,7 @@ fn run(options: Options) -> Result<(), String> {
         "executable_sha256": runner.binary_sha256,
         "selector_configuration_fingerprint": selector_fingerprint,
         "device_identity": device_identity.ok_or_else(|| "capture did not load a device".to_string())?,
+        "mode_runtime": mode_runtime,
         "runtime_compiler_versions": {
             "capture_binary_git_commit": runner.git_commit,
             "capture_binary_worktree_clean": runner.worktree_clean,
