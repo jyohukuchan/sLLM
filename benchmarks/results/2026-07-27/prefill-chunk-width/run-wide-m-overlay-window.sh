@@ -33,12 +33,18 @@ generation_summary="$result_root/summarize-wide-m-generation.py"
 long_generation_summary="$result_root/summarize-long-real-token-generation.py"
 tokenizer_python="$root/services/openai-gateway/.venv/bin/python3"
 rocprof="/opt/rocm/bin/rocprofv3"
+phase="${ULLM_SQ8_WIDE_M_PHASES:-all}"
 
 # M=4096 fits the allocation arithmetic, but N=4095 cannot execute its
 # cached-prefix path without inventing a 4096th token.  The real-token tail
 # contract therefore makes M=2048 the largest useful width in this grid.
 widths=(128 256 512 1024 2048)
 prompts=(128 512 1024 2048 4095)
+
+if [[ "$phase" != "all" && "$phase" != "validation" ]]; then
+    echo "ULLM_SQ8_WIDE_M_PHASES must be all or validation, got: $phase" >&2
+    exit 2
+fi
 
 mkdir "$out"
 mkdir -p "$out/service" "$out/thermal" "$out/throughput" "$out/traces" \
@@ -191,6 +197,7 @@ trap restore EXIT
 
 cd "$root"
 event preflight-begin
+event "phase=${phase}"
 record_required_preflight before-stop
 record_service before-stop
 amd-smi static --gpu "$gpu_index" --json > "$out/service/r9700-static.json"
@@ -263,35 +270,37 @@ event r9700-lock-acquired
 record_required_preflight lock-held
 amd-smi process --gpu "$gpu_index" --json > "$out/service/r9700-process-lock-held.json" || true
 
-for width in "${widths[@]}"; do
-    for prompt in "${prompts[@]}"; do
-        condition="throughput-m${width}-p${prompt}"
+if [[ "$phase" == "all" ]]; then
+    for width in "${widths[@]}"; do
+        for prompt in "${prompts[@]}"; do
+            condition="throughput-m${width}-p${prompt}"
+            thermal_gate "$condition"
+            event "${condition}-begin"
+            run_sq8 "$driver" --phase prefill --prompt-tokens "$prompt" \
+                --chunk-tokens "$width" --repeats 5 \
+                > "$out/throughput/m${width}-p${prompt}.jsonl" \
+                2> "$out/throughput/m${width}-p${prompt}.stderr"
+            event "${condition}-complete"
+        done
+    done
+
+    for width in "${widths[@]}"; do
+        condition="trace-m${width}-p4095"
+        trace_dir="$out/traces/m${width}-p4095"
+        mkdir -p "$trace_dir/rocprof"
         thermal_gate "$condition"
         event "${condition}-begin"
-        run_sq8 "$driver" --phase prefill --prompt-tokens "$prompt" \
-            --chunk-tokens "$width" --repeats 5 \
-            > "$out/throughput/m${width}-p${prompt}.jsonl" \
-            2> "$out/throughput/m${width}-p${prompt}.stderr"
+        run_sq8 "$rocprof" --runtime-trace --stats --selected-regions --output-format csv \
+            --output-directory "$trace_dir/rocprof" --output-file "m${width}-p4095" -- \
+            "$driver" --phase prefill --prompt-tokens 4095 --chunk-tokens "$width" --repeats 1 \
+            > "$trace_dir/stdout.log" 2> "$trace_dir/stderr.log"
+        python3 "$trace_analyzer" \
+            --kernel-trace "$trace_dir/rocprof/m${width}-p4095_kernel_trace.csv" \
+            --output "$out/traces/m${width}-p4095-analysis.json" \
+            --label "wide-m-overlay-m${width}-p4095"
         event "${condition}-complete"
     done
-done
-
-for width in "${widths[@]}"; do
-    condition="trace-m${width}-p4095"
-    trace_dir="$out/traces/m${width}-p4095"
-    mkdir -p "$trace_dir/rocprof"
-    thermal_gate "$condition"
-    event "${condition}-begin"
-    run_sq8 "$rocprof" --runtime-trace --stats --selected-regions --output-format csv \
-        --output-directory "$trace_dir/rocprof" --output-file "m${width}-p4095" -- \
-        "$driver" --phase prefill --prompt-tokens 4095 --chunk-tokens "$width" --repeats 1 \
-        > "$trace_dir/stdout.log" 2> "$trace_dir/stderr.log"
-    python3 "$trace_analyzer" \
-        --kernel-trace "$trace_dir/rocprof/m${width}-p4095_kernel_trace.csv" \
-        --output "$out/traces/m${width}-p4095-analysis.json" \
-        --label "wide-m-overlay-m${width}-p4095"
-    event "${condition}-complete"
-done
+fi
 
 for width in "${widths[@]}"; do
     condition="numerical-m${width}"
@@ -383,8 +392,12 @@ done
     --output-json "$out/generation-long/summary.json" \
     --output-markdown "$out/generation-long/summary.md"
 
-python3 "$summary_tool" --run-root "$out" \
-    --output-json "$out/summary.json" --output-markdown "$out/summary.md"
+if [[ "$phase" == "all" ]]; then
+    python3 "$summary_tool" --run-root "$out" \
+        --output-json "$out/summary.json" --output-markdown "$out/summary.md"
+else
+    event summary-skipped-validation-phase
+fi
 
 metric > "$out/thermal/before-restore.json"
 amd-smi process --gpu "$gpu_index" --json > "$out/service/r9700-process-before-restore.json" || true
