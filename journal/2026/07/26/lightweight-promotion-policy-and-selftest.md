@@ -40,10 +40,15 @@
   `ullm-openai.service` は active/running、`llama-qwen35-udq4.service` は inactive/disabled である。
   self-test 実行前には R9700 prefill measurement、`llama-bench`、`llama-server` が動いていないことを
   確認し、V620 は使っていない。
-- service control は本作業全体で `restart` を 4 回発行した（3 回成功、1 回は start-limit で拒否）。
+- self-test の service control は `restart` を 4 回発行した（3 回成功、1 回は start-limit で拒否）。
   `start` は、当初 inactive だった service の起動と rate-limit 復旧の 2 回である。最終的に成功した
   generic promotion + rollback 経路そのものは restart 各 1 回、計 2 回であり、systemd の
   `NRestarts` は 0 のままである。
+- その後の共有状態確認で、active bytes が正しいまま `ullm-openai.service` が再び
+  `start-limit-hit` になっていることを検出した。原因はこの記録だけでは未確認である。GPU measurement
+  process がないことを確認して `reset-failed` と 1 回の `start` で復旧し、6 回の bounded readiness
+  probe と HTTP 200・131 文字・blocking なしの実生成を確認した。この post-self-test recovery により
+  本作業で発行した `start` は合計 3 回になったが、`restart` 回数は増えていない。
 - `/etc/ullm/served-models/candidates/` は読み取りで inventory した。AQ4_0 の既存 manifest は
   5 件あり、4 件は static validator を通り、`qwen35-9b-aq4.json` は validation failure だった。
   ただしどれも BA Phase 1 の bitwise-identical candidate であることを示す manifest/evidence では
