@@ -488,3 +488,22 @@ ledger `30,858,010,436 B` より `4,075,282,244 B` 少ない。さらに worker 
 `/run/ullm/r9700.lock` を保持していた。このため lock を奪う、又は本番 service を止める
 代わりに、明示的な解放を待つ。これは MoE loader の allocation failure ではなく、既存本番が
 占有中のため安全に試行していない状態である。
+
+### 実機隔離の index 契約（2026-07-27）
+
+空き window での最初の 9B baseline probe は、`--device-index 0` が
+`expected=gfx1201 actual=unavailable` で fail-closed した。これはモデル loader の失敗ではなく、
+`ullm_runtime_sys` が runtime index 0 を CPU fallback に予約しているためである。HIP を一台に
+隔離した後も、最初の HIP device は runtime index **1** である。probe は architecture check の前で
+停止しており、重みは読んでいない。
+
+次に runtime index 1 へ直したが、AMD SMI の物理 GPU index をそのまま
+`HIP_VISIBLE_DEVICES=2` に渡すと `actual=gfx1030` で fail-closed した。read-only topology
+照合の結果、AMD SMI は `0=gfx1030 (03:00.0)`, `1=gfx1030 (43:00.0)`,
+`2=gfx1201/R9700 (47:00.0)` である一方、ROCm/HIP の順序は
+`0=gfx1030 (43:00.0)`, `1=gfx1201 (47:00.0)`, `2=gfx1030 (03:00.0)` だった。
+従って R9700 の安全な実行契約は **`HIP_VISIBLE_DEVICES=1` / `ULLM_HIP_VISIBLE_DEVICES=1` /
+uLLM runtime `--device-index 1`** である。HIP ordinal 2 は禁止された V620 である。
+この試行も architecture check の直後に停止したため、V620 には context 選択以外の package weight
+allocation と kernel dispatch を行っていない。再現レシピはこの対応へ訂正し、full MoE 実行は
+`gfx1201` architecture admission を通ってからのみ開始する。

@@ -47,6 +47,12 @@
   R9700 に `7,119,884,000 B` を保持し、free VRAM は `26,782,728,192 B` だった。
   262,144-token ledger `30,858,010,436 B` より `4,075,282,244 B` 少なく、同 worker が
   `/run/ullm/r9700.lock` も保持している。競合実行・service 停止は行わない。
+- 空き window の probe で runtime index 0 が CPU fallback であることを確認した。HIP を
+  一台に絞っても uLLM の first HIP device は runtime index 1 である。
+- AMD SMI の physical R9700 は GPU 2 だが、ROCm/HIP ordinal は 1 だった。
+  `HIP_VISIBLE_DEVICES=2` は V620 (`gfx1030`) を選ぶため、architecture guard が重み読込前に
+  fail-closed した。R9700 の再試行には `HIP_VISIBLE_DEVICES=1` と runtime index 1 を使う。
+  V620 には context 選択以外の allocation / kernel dispatch を行っていない。
 
 ## 次の行動
 
@@ -61,3 +67,6 @@
 - 生成 token を official tokenizer で文字列化し、最終 token の全 40 層で runtime route と
   raw BF16 router の独立再計算を比較する。tie-free layer は厳密一致、boundary tie は
   非断定として記録する。
+- R9700 の AMD SMI GPU 2 と HIP ordinal 1 を混同しない。実行時は
+  `HIP_VISIBLE_DEVICES=1` / `ULLM_HIP_VISIBLE_DEVICES=1` / uLLM runtime index 1 を固定し、
+  `gfx1201` admission を成功条件に含める。

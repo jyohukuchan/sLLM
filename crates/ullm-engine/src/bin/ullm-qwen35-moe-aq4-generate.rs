@@ -79,7 +79,7 @@ fn run() -> Result<(), String> {
         "format_id": "AQ4_0",
         "model": "Qwen3.5-35B-A3B",
         "device": {
-            "runtime_visible_index": args.device_index,
+            "ullm_runtime_index": args.device_index,
             "required_architecture": "gfx1201"
         },
         "package_dir": args.package_dir,
@@ -154,7 +154,10 @@ fn parse_args() -> Result<Args, String> {
     let mut package_dir = PathBuf::from(DEFAULT_PACKAGE);
     let mut prompt_token_ids = None;
     let mut max_new_tokens = 8_usize;
-    let mut device_index = 0_u32;
+    // `ullm_runtime_sys` reserves runtime index 0 for the CPU fallback.  With
+    // HIP isolated to the R9700, the one visible HIP device is therefore
+    // runtime index 1, never 0.
+    let mut device_index = 1_u32;
     let mut context_length = QWEN35_MOE_DEFAULT_CONTEXT_LENGTH;
     let mut kv_block_size = QWEN35_MOE_DEFAULT_KV_BLOCK_SIZE;
     let mut output = None;

@@ -103,7 +103,10 @@ fn run() -> Result<(), String> {
 fn parse_args() -> Result<Args, String> {
     let mut package_dir = PathBuf::from(DEFAULT_PACKAGE);
     let mut token_ids = None;
-    let mut device_index = 0_u32;
+    // `ullm_runtime_sys` reserves runtime index 0 for the CPU fallback.  With
+    // HIP isolated to the R9700, the one visible HIP device is therefore
+    // runtime index 1, never 0.
+    let mut device_index = 1_u32;
     let mut context_length = 256_usize;
     let mut expected_top1 = None;
     let mut arguments = env::args().skip(1);
