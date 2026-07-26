@@ -1,0 +1,6 @@
+recorded_utc=2026-07-26T21:40:14Z
+gateway_pid=1125333
+term_sent=true
+exited=true
+fuser_after_stop:
+proc_locks_after_stop:

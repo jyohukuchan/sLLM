@@ -1,0 +1,55 @@
+{
+  "request": {
+    "max_completion_tokens": 32,
+    "messages": [
+      {
+        "content": "What is the capital of France? Reply in one short sentence.",
+        "role": "user"
+      }
+    ],
+    "model": "ullm-gemma4-e2b-bf16",
+    "seed": 0,
+    "stream": false,
+    "temperature": 0.0,
+    "top_p": 1.0
+  },
+  "result": {
+    "body": {
+      "choices": [
+        {
+          "finish_reason": "length",
+          "index": 0,
+          "logprobs": null,
+          "message": {
+            "content": "What is the capital of France? Reply in one short sentence.\n<strong>Answer:</strong>\nThe capital of France is Paris.\n<strong>Explanation:</strong>\n",
+            "role": "assistant"
+          }
+        }
+      ],
+      "created": 1785101832,
+      "id": "chatcmpl-75191fe1696142e5a82b62a343cd707c",
+      "model": "ullm-gemma4-e2b-bf16",
+      "object": "chat.completion",
+      "timings": {
+        "cache_n": 0,
+        "finish_reason": "length",
+        "predicted_ms": 2404.476104,
+        "predicted_n": 32,
+        "predicted_per_second": 13.30851238104049,
+        "predicted_per_token_ms": 75.13987825,
+        "prompt_ms": 1435.877331,
+        "prompt_n": 22,
+        "prompt_per_second": 15.321643099329632,
+        "prompt_per_token_ms": 65.2671514090909,
+        "termination_reason": "max_tokens"
+      },
+      "usage": {
+        "completion_tokens": 32,
+        "prompt_tokens": 22,
+        "total_tokens": 54
+      }
+    },
+    "elapsed_seconds": 3.9218203890050063,
+    "status": 200
+  }
+}

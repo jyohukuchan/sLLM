@@ -1,0 +1,650 @@
+{
+  "cases": [
+    {
+      "category": "japanese",
+      "completion_nonempty": true,
+      "expect": {
+        "kind": "prose",
+        "language": "ja"
+      },
+      "id": "ja_explanation",
+      "request": {
+        "max_completion_tokens": 96,
+        "messages": [
+          {
+            "content": "量子化推論で「ロールバックを残して素早く試す」利点を、日本語で3点に分けて説明してください。",
+            "role": "user"
+          }
+        ],
+        "model": "ullm-gemma4-e2b-bf16",
+        "seed": 0,
+        "stream": false,
+        "temperature": 0.0,
+        "top_p": 1.0
+      },
+      "result": {
+        "body": {
+          "choices": [
+            {
+              "finish_reason": "length",
+              "index": 0,
+              "logprobs": null,
+              "message": {
+                "content": "量子化推論で「ロールバックを残して素早く試す」利点を、日本語で3点に分けて説明してください。\n量子化推論で「ロールバックを残して素早く試す」利点を、日本語で3点に分けて説明してください。\n量子化推論で「ロールバックを残して素早く試す」利点を、日本語で3点に分けて説明してください。\n量子化推論で「ロールバックを残して素早く",
+                "role": "assistant"
+              }
+            }
+          ],
+          "created": 1785101839,
+          "id": "chatcmpl-af97baecec594868b0c241e16b0dddb3",
+          "model": "ullm-gemma4-e2b-bf16",
+          "object": "chat.completion",
+          "timings": {
+            "cache_n": 0,
+            "finish_reason": "length",
+            "predicted_ms": 9422.475410000001,
+            "predicted_n": 96,
+            "predicted_per_second": 10.188405469131386,
+            "predicted_per_token_ms": 98.15078552083334,
+            "prompt_ms": 2142.8206219999997,
+            "prompt_n": 36,
+            "prompt_per_second": 16.800286328399917,
+            "prompt_per_token_ms": 59.52279505555555,
+            "termination_reason": "max_tokens"
+          },
+          "usage": {
+            "completion_tokens": 96,
+            "prompt_tokens": 36,
+            "total_tokens": 132
+          }
+        },
+        "elapsed_seconds": 11.568490471996483,
+        "status": 200
+      }
+    },
+    {
+      "category": "english",
+      "completion_nonempty": true,
+      "expect": {
+        "kind": "prose",
+        "language": "en"
+      },
+      "id": "en_explanation",
+      "request": {
+        "max_completion_tokens": 96,
+        "messages": [
+          {
+            "content": "Explain in English why an atomic manifest swap is useful for a local inference service. Use a short paragraph.",
+            "role": "user"
+          }
+        ],
+        "model": "ullm-gemma4-e2b-bf16",
+        "seed": 0,
+        "stream": false,
+        "temperature": 0.0,
+        "top_p": 1.0
+      },
+      "result": {
+        "body": {
+          "choices": [
+            {
+              "finish_reason": "length",
+              "index": 0,
+              "logprobs": null,
+              "message": {
+                "content": "Explain in English why an atomic manifest swap is useful for a local inference service. Use a short paragraph.\nThe atomic manifest swap is useful for a local inference service because it allows for the efficient and secure exchange of data between different components of the system. In a local inference service, multiple components may need to access and update the same data, and the atomic manifest swap ensures that all components are working with the most up-to-date version of the data. This is important",
+                "role": "assistant"
+              }
+            }
+          ],
+          "created": 1785101851,
+          "id": "chatcmpl-1e6d48ad32674c14a5d3046f83bfc1ea",
+          "model": "ullm-gemma4-e2b-bf16",
+          "object": "chat.completion",
+          "timings": {
+            "cache_n": 0,
+            "finish_reason": "length",
+            "predicted_ms": 9027.454654,
+            "predicted_n": 96,
+            "predicted_per_second": 10.634226775923278,
+            "predicted_per_token_ms": 94.03598597916665,
+            "prompt_ms": 1765.493327,
+            "prompt_n": 30,
+            "prompt_per_second": 16.992417666611775,
+            "prompt_per_token_ms": 58.84977756666667,
+            "termination_reason": "max_tokens"
+          },
+          "usage": {
+            "completion_tokens": 96,
+            "prompt_tokens": 30,
+            "total_tokens": 126
+          }
+        },
+        "elapsed_seconds": 10.796497716990416,
+        "status": 200
+      }
+    },
+    {
+      "category": "code_generation",
+      "completion_nonempty": true,
+      "expect": {
+        "kind": "code",
+        "language": "en"
+      },
+      "id": "python_code",
+      "request": {
+        "max_completion_tokens": 128,
+        "messages": [
+          {
+            "content": "Write a Python function named retry_delays that returns exponential retry delays capped at a maximum. Include a small example call.",
+            "role": "user"
+          }
+        ],
+        "model": "ullm-gemma4-e2b-bf16",
+        "seed": 0,
+        "stream": false,
+        "temperature": 0.0,
+        "top_p": 1.0
+      },
+      "result": {
+        "body": {
+          "choices": [
+            {
+              "finish_reason": "length",
+              "index": 0,
+              "logprobs": null,
+              "message": {
+                "content": "Write a Python function named retry_delays that returns exponential retry delays capped at a maximum. Include a small example call.\n```python\ndef retry_delays(max_delay=10, base_delay=0.1):\n    def decorator(func):\n        @functools.wraps(func)\n        def wrapper(*args, **kwargs):\n            retries = 0\n            while retries < max_delay:\n                try:\n                    return func(*args, **kwargs)\n                except Exception as e:\n                    retries += 1\n                    if retries",
+                "role": "assistant"
+              }
+            }
+          ],
+          "created": 1785101862,
+          "id": "chatcmpl-52d66f1e9cad4219a4e5744d5a18ef59",
+          "model": "ullm-gemma4-e2b-bf16",
+          "object": "chat.completion",
+          "timings": {
+            "cache_n": 0,
+            "finish_reason": "length",
+            "predicted_ms": 13539.547427000001,
+            "predicted_n": 128,
+            "predicted_per_second": 9.453787188244396,
+            "predicted_per_token_ms": 105.77771427343751,
+            "prompt_ms": 2021.6955269999999,
+            "prompt_n": 34,
+            "prompt_per_second": 16.817567010425503,
+            "prompt_per_token_ms": 59.46163314705882,
+            "termination_reason": "max_tokens"
+          },
+          "usage": {
+            "completion_tokens": 128,
+            "prompt_tokens": 34,
+            "total_tokens": 162
+          }
+        },
+        "elapsed_seconds": 15.56473856100638,
+        "status": 200
+      }
+    },
+    {
+      "category": "code_generation",
+      "completion_nonempty": true,
+      "expect": {
+        "kind": "code",
+        "language": "en"
+      },
+      "id": "javascript_debug",
+      "request": {
+        "max_completion_tokens": 128,
+        "messages": [
+          {
+            "content": "Fix this JavaScript so it counts only finite numbers, then explain the bug briefly:\nconst values = [1, NaN, Infinity, 2];\nconst count = values.filter(Boolean).length;",
+            "role": "user"
+          }
+        ],
+        "model": "ullm-gemma4-e2b-bf16",
+        "seed": 0,
+        "stream": false,
+        "temperature": 0.0,
+        "top_p": 1.0
+      },
+      "result": {
+        "body": {
+          "choices": [
+            {
+              "finish_reason": "length",
+              "index": 0,
+              "logprobs": null,
+              "message": {
+                "content": "Fix this JavaScript so it counts only finite numbers, then explain the bug briefly:\nconst values = [1, NaN, Infinity, 2];\nconst count = values.filter(Boolean).length;\n// Expected output: 2\n// Actual output: 3\n// Explanation: The filter function is returning true for NaN, Infinity, and 2, which are not finite numbers.\n// To fix this, we can use the isFinite function to check if a number is finite before using it in the filter function.\nconst values = [1, NaN, Infinity, 2];\nconst count = values",
+                "role": "assistant"
+              }
+            }
+          ],
+          "created": 1785101877,
+          "id": "chatcmpl-09410ae07bd5408ab6515a31e5261877",
+          "model": "ullm-gemma4-e2b-bf16",
+          "object": "chat.completion",
+          "timings": {
+            "cache_n": 0,
+            "finish_reason": "length",
+            "predicted_ms": 14556.855518,
+            "predicted_n": 128,
+            "predicted_per_second": 8.793107813821745,
+            "predicted_per_token_ms": 113.725433734375,
+            "prompt_ms": 3227.750067,
+            "prompt_n": 51,
+            "prompt_per_second": 15.80047988269471,
+            "prompt_per_token_ms": 63.289217,
+            "termination_reason": "max_tokens"
+          },
+          "usage": {
+            "completion_tokens": 128,
+            "prompt_tokens": 51,
+            "total_tokens": 179
+          }
+        },
+        "elapsed_seconds": 17.78819852200104,
+        "status": 200
+      }
+    },
+    {
+      "category": "long_summary",
+      "completion_nonempty": true,
+      "expect": {
+        "kind": "summary",
+        "language": "ja"
+      },
+      "id": "ja_long_summary",
+      "request": {
+        "max_completion_tokens": 128,
+        "messages": [
+          {
+            "content": "次のメモを日本語で4文以内に要約してください。\n\n候補Aは起動に成功した。候補Aは固定プロンプトで日本語、英語、コード生成、要約を実行した。現行出力との完全一致は要求しないが、反復、文字化け、空応答、コード要求の放棄は失敗として扱う。切替前のmanifest生バイト列を保存し、応答確認が失敗した場合は原子的に戻す。性能指標は記録するが、速度だけで昇格を止めない。重い参照コーパスは後追い検証として扱う。",
+            "role": "user"
+          }
+        ],
+        "model": "ullm-gemma4-e2b-bf16",
+        "seed": 0,
+        "stream": false,
+        "temperature": 0.0,
+        "top_p": 1.0
+      },
+      "result": {
+        "body": {
+          "choices": [
+            {
+              "finish_reason": "stop",
+              "index": 0,
+              "logprobs": null,
+              "message": {
+                "content": "次のメモを日本語で4文以内に要約してください。\n\n候補Aは起動に成功した。候補Aは固定プロンプトで日本語、英語、コード生成、要約を実行した。現行出力との完全一致は要求しないが、反復、文字化け、空応答、コード要求の放棄は失敗として扱う。切替前のmanifest生バイト列を保存し、応答確認が失敗した場合は原子的に戻す。性能指標は記録するが、速度だけで昇格を止めない。重い参照コーパスは後追い検証として扱う。\n<unused56>",
+                "role": "assistant"
+              }
+            }
+          ],
+          "created": 1785101895,
+          "id": "chatcmpl-586a3dde505749ac9b99ef5fee6165c5",
+          "model": "ullm-gemma4-e2b-bf16",
+          "object": "chat.completion",
+          "timings": {
+            "cache_n": 0,
+            "finish_reason": "stop",
+            "predicted_ms": 19083.837187,
+            "predicted_n": 123,
+            "predicted_per_second": 6.445244674576672,
+            "predicted_per_token_ms": 155.15314786178863,
+            "prompt_ms": 10879.996717999999,
+            "prompt_n": 129,
+            "prompt_per_second": 11.856621223660927,
+            "prompt_per_token_ms": 84.34105982945735,
+            "termination_reason": "eos_token"
+          },
+          "usage": {
+            "completion_tokens": 123,
+            "prompt_tokens": 129,
+            "total_tokens": 252
+          }
+        },
+        "elapsed_seconds": 29.967808529007016,
+        "status": 200
+      }
+    },
+    {
+      "category": "long_summary",
+      "completion_nonempty": true,
+      "expect": {
+        "kind": "summary",
+        "language": "en"
+      },
+      "id": "en_long_summary",
+      "request": {
+        "max_completion_tokens": 128,
+        "messages": [
+          {
+            "content": "Summarize this note in four sentences or fewer:\n\nA candidate worker must start and answer real requests. Save both baseline and candidate text. Exact output equality is not required. Detect empty answers, repetition loops, garbled text, and response abandonment automatically. Preserve the exact old manifest before the swap. If readiness or a real response fails after the swap, restore the old bytes and verify the restored service.",
+            "role": "user"
+          }
+        ],
+        "model": "ullm-gemma4-e2b-bf16",
+        "seed": 0,
+        "stream": false,
+        "temperature": 0.0,
+        "top_p": 1.0
+      },
+      "result": {
+        "body": {
+          "choices": [
+            {
+              "finish_reason": "stop",
+              "index": 0,
+              "logprobs": null,
+              "message": {
+                "content": "Summarize this note in four sentences or fewer:\n\nA candidate worker must start and answer real requests. Save both baseline and candidate text. Exact output equality is not required. Detect empty answers, repetition loops, garbled text, and response abandonment automatically. Preserve the exact old manifest before the swap. If readiness or a real response fails after the swap, restore the old bytes and verify the restored service.\n",
+                "role": "assistant"
+              }
+            }
+          ],
+          "created": 1785101925,
+          "id": "chatcmpl-ecfd23e9e2cc4abba3883a76cad81249",
+          "model": "ullm-gemma4-e2b-bf16",
+          "object": "chat.completion",
+          "timings": {
+            "cache_n": 0,
+            "finish_reason": "stop",
+            "predicted_ms": 9957.502527999999,
+            "predicted_n": 83,
+            "predicted_per_second": 8.335423442435305,
+            "predicted_per_token_ms": 119.9699099759036,
+            "prompt_ms": 6597.256607,
+            "prompt_n": 90,
+            "prompt_per_second": 13.642034160760968,
+            "prompt_per_token_ms": 73.3028511888889,
+            "termination_reason": "eos_token"
+          },
+          "usage": {
+            "completion_tokens": 83,
+            "prompt_tokens": 90,
+            "total_tokens": 173
+          }
+        },
+        "elapsed_seconds": 16.55828658999235,
+        "status": 200
+      }
+    },
+    {
+      "category": "multi_turn",
+      "completion_nonempty": true,
+      "expect": {
+        "kind": "prose",
+        "language": "ja"
+      },
+      "id": "ja_multiturn",
+      "request": {
+        "max_completion_tokens": 96,
+        "messages": [
+          {
+            "content": "簡潔で具体的に答えてください。",
+            "role": "system"
+          },
+          {
+            "content": "サービス起動直後に ready endpoint が失敗することがあります。",
+            "role": "user"
+          },
+          {
+            "content": "固定時間だけ待つより、期限付きの再試行が有用です。",
+            "role": "assistant"
+          },
+          {
+            "content": "その理由と、実装時の注意点を2項目で教えてください。",
+            "role": "user"
+          }
+        ],
+        "model": "ullm-gemma4-e2b-bf16",
+        "seed": 0,
+        "stream": false,
+        "temperature": 0.0,
+        "top_p": 1.0
+      },
+      "result": {
+        "body": {
+          "choices": [
+            {
+              "finish_reason": "length",
+              "index": 0,
+              "logprobs": null,
+              "message": {
+                "content": "その理由と、実装時の注意点を2項目で教えてください。\n1. 1. 1. 1. 1. 1. 1. 1. 1. 1. 1. 1. 1. 1. 1. 1. 1. 1. 1. 1. 1. 1. 1. 1. 1. 1. 1. ",
+                "role": "assistant"
+              }
+            }
+          ],
+          "created": 1785101942,
+          "id": "chatcmpl-a0fd2b86d3854ef88537a8909cf724de",
+          "model": "ullm-gemma4-e2b-bf16",
+          "object": "chat.completion",
+          "timings": {
+            "cache_n": 0,
+            "finish_reason": "length",
+            "predicted_ms": 11325.239991,
+            "predicted_n": 96,
+            "predicted_per_second": 8.476641561352322,
+            "predicted_per_token_ms": 117.97124990625001,
+            "prompt_ms": 5218.955529999999,
+            "prompt_n": 75,
+            "prompt_per_second": 14.370691524171697,
+            "prompt_per_token_ms": 69.58607373333332,
+            "termination_reason": "max_tokens"
+          },
+          "usage": {
+            "completion_tokens": 96,
+            "prompt_tokens": 75,
+            "total_tokens": 171
+          }
+        },
+        "elapsed_seconds": 16.54804961400805,
+        "status": 200
+      }
+    },
+    {
+      "category": "multi_turn",
+      "completion_nonempty": true,
+      "expect": {
+        "kind": "prose",
+        "language": "en"
+      },
+      "id": "en_multiturn",
+      "request": {
+        "max_completion_tokens": 96,
+        "messages": [
+          {
+            "content": "Answer in concise English.",
+            "role": "system"
+          },
+          {
+            "content": "I need to compare a candidate model with the currently active model.",
+            "role": "user"
+          },
+          {
+            "content": "Use the same fixed prompts and save both outputs.",
+            "role": "assistant"
+          },
+          {
+            "content": "What should I preserve if the candidate fails after activation?",
+            "role": "user"
+          }
+        ],
+        "model": "ullm-gemma4-e2b-bf16",
+        "seed": 0,
+        "stream": false,
+        "temperature": 0.0,
+        "top_p": 1.0
+      },
+      "result": {
+        "body": {
+          "choices": [
+            {
+              "finish_reason": "length",
+              "index": 0,
+              "logprobs": null,
+              "message": {
+                "content": "If the candidate fails, you should preserve the current model. This ensures that the system can revert to the previous model if needed.\nIf the candidate fails, you should preserve the current model. This ensures that the system can revert to the previous model if needed.\nIf the candidate fails, you should preserve the current model. This ensures that the system can revert to the previous model if needed.\nIf the candidate fails, you should preserve the current model. This ensures that",
+                "role": "assistant"
+              }
+            }
+          ],
+          "created": 1785101958,
+          "id": "chatcmpl-2d548a12c3d548b2ad276cded410486b",
+          "model": "ullm-gemma4-e2b-bf16",
+          "object": "chat.completion",
+          "timings": {
+            "cache_n": 0,
+            "finish_reason": "length",
+            "predicted_ms": 10732.700883,
+            "predicted_n": 96,
+            "predicted_per_second": 8.944626431549832,
+            "predicted_per_token_ms": 111.79896753125,
+            "prompt_ms": 4309.465905,
+            "prompt_n": 63,
+            "prompt_per_second": 14.6189809569917,
+            "prompt_per_token_ms": 68.40422071428571,
+            "termination_reason": "max_tokens"
+          },
+          "usage": {
+            "completion_tokens": 96,
+            "prompt_tokens": 63,
+            "total_tokens": 159
+          }
+        },
+        "elapsed_seconds": 15.046292975006509,
+        "status": 200
+      }
+    },
+    {
+      "category": "translation",
+      "completion_nonempty": true,
+      "expect": {
+        "kind": "prose",
+        "language": "ja"
+      },
+      "id": "translation",
+      "request": {
+        "max_completion_tokens": 96,
+        "messages": [
+          {
+            "content": "Translate this into natural Japanese: A rollback path makes rapid experimentation safer because a failed live check can return to known-good manifest bytes.",
+            "role": "user"
+          }
+        ],
+        "model": "ullm-gemma4-e2b-bf16",
+        "seed": 0,
+        "stream": false,
+        "temperature": 0.0,
+        "top_p": 1.0
+      },
+      "result": {
+        "body": {
+          "choices": [
+            {
+              "finish_reason": "stop",
+              "index": 0,
+              "logprobs": null,
+              "message": {
+                "content": "Translate this into natural Japanese: A rollback path makes rapid experimentation safer because a failed live check can return to known-good manifest bytes.\n",
+                "role": "assistant"
+              }
+            }
+          ],
+          "created": 1785101973,
+          "id": "chatcmpl-685158989e654651a26018c012749715",
+          "model": "ullm-gemma4-e2b-bf16",
+          "object": "chat.completion",
+          "timings": {
+            "cache_n": 0,
+            "finish_reason": "stop",
+            "predicted_ms": 2292.204462,
+            "predicted_n": 29,
+            "predicted_per_second": 12.651576454352089,
+            "predicted_per_token_ms": 79.04153317241379,
+            "prompt_ms": 2156.761319,
+            "prompt_n": 36,
+            "prompt_per_second": 16.69169401493703,
+            "prompt_per_token_ms": 59.9100366388889,
+            "termination_reason": "eos_token"
+          },
+          "usage": {
+            "completion_tokens": 29,
+            "prompt_tokens": 36,
+            "total_tokens": 65
+          }
+        },
+        "elapsed_seconds": 4.452039700001478,
+        "status": 200
+      }
+    },
+    {
+      "category": "reasoning",
+      "completion_nonempty": true,
+      "expect": {
+        "kind": "prose",
+        "language": "en"
+      },
+      "id": "structured_reasoning",
+      "request": {
+        "max_completion_tokens": 96,
+        "messages": [
+          {
+            "content": "A service becomes ready after about 3.2 seconds. Give a bounded exponential-backoff schedule with at least four probes and explain why it is better than one fixed sleep.",
+            "role": "user"
+          }
+        ],
+        "model": "ullm-gemma4-e2b-bf16",
+        "seed": 0,
+        "stream": false,
+        "temperature": 0.0,
+        "top_p": 1.0
+      },
+      "result": {
+        "body": {
+          "choices": [
+            {
+              "finish_reason": "stop",
+              "index": 0,
+              "logprobs": null,
+              "message": {
+                "content": "A service becomes ready after about 3.2 seconds. Give a bounded exponential-backoff schedule with at least four probes and explain why it is better than one fixed sleep.\n",
+                "role": "assistant"
+              }
+            }
+          ],
+          "created": 1785101978,
+          "id": "chatcmpl-40156d611b2f446cb3d35f188f008f54",
+          "model": "ullm-gemma4-e2b-bf16",
+          "object": "chat.completion",
+          "timings": {
+            "cache_n": 0,
+            "finish_reason": "stop",
+            "predicted_ms": 3273.795377,
+            "predicted_n": 38,
+            "predicted_per_second": 11.607322884920796,
+            "predicted_per_token_ms": 86.15250992105263,
+            "prompt_ms": 2786.6103559999997,
+            "prompt_n": 45,
+            "prompt_per_second": 16.148651677514977,
+            "prompt_per_token_ms": 61.92467457777777,
+            "termination_reason": "eos_token"
+          },
+          "usage": {
+            "completion_tokens": 38,
+            "prompt_tokens": 45,
+            "total_tokens": 83
+          }
+        },
+        "elapsed_seconds": 6.064728563011158,
+        "status": 200
+      }
+    }
+  ],
+  "failures": [],
+  "schema_version": "ullm.gemma4_serving_gateway_suite.v1"
+}

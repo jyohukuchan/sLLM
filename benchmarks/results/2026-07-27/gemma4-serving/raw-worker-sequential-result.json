@@ -1,0 +1,87 @@
+{
+  "actual_tokens": {
+    "gemma-capital-france": [
+      9079,
+      236761,
+      108,
+      818
+    ],
+    "gemma-once-upon": [
+      528,
+      496,
+      1902,
+      1298
+    ]
+  },
+  "duration_seconds": 10.072512149810791,
+  "exact_match": true,
+  "expected_tokens": {
+    "gemma-capital-france": [
+      9079,
+      236761,
+      108,
+      818
+    ],
+    "gemma-once-upon": [
+      528,
+      496,
+      1902,
+      1298
+    ]
+  },
+  "reference_evidence": [
+    "benchmarks/results/2026-07-26/gemma4-e2b-nonquantized-v0.1/",
+    "benchmarks/results/2026-07-26/gemma4-e2b-resident-v0.1/"
+  ],
+  "requests": [
+    {
+      "eos_token_ids": [
+        1
+      ],
+      "max_new_tokens": 4,
+      "prompt_token_ids": [
+        2,
+        818,
+        5279,
+        529,
+        7001,
+        563
+      ],
+      "request_id": "gemma-capital-france",
+      "sampling": {
+        "seed": 0,
+        "temperature": 0.0,
+        "top_k": 1,
+        "top_p": 1.0
+      },
+      "schema_version": "ullm.worker.v1",
+      "type": "generate"
+    },
+    {
+      "eos_token_ids": [
+        1
+      ],
+      "max_new_tokens": 4,
+      "prompt_token_ids": [
+        2,
+        14946,
+        3324,
+        496,
+        990,
+        236764
+      ],
+      "request_id": "gemma-once-upon",
+      "sampling": {
+        "seed": 0,
+        "temperature": 0.0,
+        "top_k": 1,
+        "top_p": 1.0
+      },
+      "schema_version": "ullm.worker.v1",
+      "type": "generate"
+    }
+  ],
+  "schema_version": "ullm.gemma4_serving_raw_trace.v1",
+  "started_unix_seconds": 1785101743.2226064,
+  "worker_exit_status": 0
+}

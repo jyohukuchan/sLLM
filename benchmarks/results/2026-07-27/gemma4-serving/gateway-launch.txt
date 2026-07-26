@@ -1,0 +1,4 @@
+gateway_pid=1125333
+started_utc=2026-07-26T21:36:27Z
+manifest=/opt/ullm/gemma4-e2b-serving-v0.1/manifests/gemma4-e2b-bf16.manifest.json
+port=18080

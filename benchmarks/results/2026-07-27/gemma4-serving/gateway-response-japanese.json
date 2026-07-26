@@ -1,0 +1,55 @@
+{
+  "request": {
+    "max_completion_tokens": 32,
+    "messages": [
+      {
+        "content": "日本の首都を一文で答えてください。",
+        "role": "user"
+      }
+    ],
+    "model": "ullm-gemma4-e2b-bf16",
+    "seed": 0,
+    "stream": false,
+    "temperature": 0.0,
+    "top_p": 1.0
+  },
+  "result": {
+    "body": {
+      "choices": [
+        {
+          "finish_reason": "length",
+          "index": 0,
+          "logprobs": null,
+          "message": {
+            "content": "日本の首都を一文で答えてください。\n日本の首都は東京です。\n日本の首都は東京です。\n日本の首都は東京です。\n日本の",
+            "role": "assistant"
+          }
+        }
+      ],
+      "created": 1785101836,
+      "id": "chatcmpl-67fe7607b89648ada31cdc5f66b028d2",
+      "model": "ullm-gemma4-e2b-bf16",
+      "object": "chat.completion",
+      "timings": {
+        "cache_n": 0,
+        "finish_reason": "length",
+        "predicted_ms": 2299.227089,
+        "predicted_n": 32,
+        "predicted_per_second": 13.917720504031518,
+        "predicted_per_token_ms": 71.85084653125,
+        "prompt_ms": 1057.9273600000001,
+        "prompt_n": 18,
+        "prompt_per_second": 17.01440068626262,
+        "prompt_per_token_ms": 58.77374222222223,
+        "termination_reason": "max_tokens"
+      },
+      "usage": {
+        "completion_tokens": 32,
+        "prompt_tokens": 18,
+        "total_tokens": 50
+      }
+    },
+    "elapsed_seconds": 3.3608233370032394,
+    "status": 200
+  }
+}

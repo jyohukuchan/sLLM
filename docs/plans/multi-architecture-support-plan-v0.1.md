@@ -742,3 +742,106 @@ Qwen3-14B `SQ8_0` は config SHA
 greedy regression と Gemma4 resident greedy re-run は、共有 R9700 lock が空いてから
 `tools/architecture_hf_trace.py` の既存 trace と BL/BO の token/text 証跡を使って追記する。
 数値閾値、FP32 corpus、bitwise gate、campaign は合否に使用しない。
+
+## CB: Gemma4 E2B BF16 served-model integration（2026-07-27）
+
+### Phase 1: serving に不足していた閉包
+
+BL/BO の `Gemma4TextExecutor` は raw BF16 source と resident K/V を正しく実行できたが、
+served-model として起動するには次の境界が未接続だった。
+
+| 領域 | 不足していたもの | 今回の閉じ方 |
+| --- | --- | --- |
+| format / worker | `SQ8_0` と `AQ4_0` の worker しかなく、Gemma が generic loader に暗黙に流れることを拒否する入口が無かった。 | 新しい **`BF16_0`** と `ullm-gemma4-worker` を追加。worker は `gemma4_e2b_bf16_rdna4_v1`、`gfx1201`、resident profile、greedy top-k=1、EOS=1、v1/no-reasoning を exact match で要求する。既存 SQ8/AQ4 の許可集合は変更していない。 |
+| product / package | source directory を worker に直接渡す strict product/package closure が無かった。 | `ullm.gemma4_e2b_bf16_package.v1` が `Gemma4ForConditionalGeneration` / `gemma4` / `gemma4_text` / vocab 262144 と `config.json` / `model.safetensors` の byte SHA-256 を bind する。worker は package の hash と executor の config/tensor contract の双方を確認する。 |
+| worker guard | BO の BF16 fallback rejection を serving manifest に表す contract が無かった。 | `ULLM_REQUIRE_HIP_BF16_MATVEC_KERNEL`、`ULLM_REQUIRE_HIP_PAGED_DECODE_ATTN_KERNEL`、`ULLM_REQUIRE_HIP_PAGED_KV_WRITE_KERNEL` の完全一致を必須にした。余分な guard、execution selector、artifact、別 architecture は拒否する。 |
+| tokenizer | base `google/gemma-4-E2B` の local `tokenizer_config.json` は `GemmaTokenizer` / BOS=2 / EOS=1 / PAD=0 だが **`chat_template` を持たない**。従ってそのまま gateway に載せると `apply_chat_template` が失敗する。 | base tokenizer を上書きせず、Google `gemma-4-E2B-it` revision `3e22461f65e89153144f8adb70e3b8c2cc9845a7` の `chat_template.jinja`（SHA-256 `0a2c8073…c5b5`）を明示入力にした overlay を作る。base tokenizer JSON/config の SHA と template source/revision を `provenance.json` に bind し、native template が既にある source への上書きは拒否する。 |
+| manifest / gateway | v2 は reasoning dialect を必須にするが、Gemma base E2B の reasoning token protocol は確認していない。 | `ullm.served_model.v1` / `ullm.worker.v1` を選んだ。BQ の v2 execution selector は使わず、環境変数での selector 混入を既存 gateway/worker loader が拒否する。Python gateway の tokenizer contract は class/hash/template を generic に検証するため、`GemmaTokenizer` を新たな profile shortcut に偽装しない。 |
+
+`tools/generate-served-model.py` には、任意 BF16 を許可せず
+`BF16_0 × ullm.worker.v1 × ullm.gemma4_e2b_serving_receipt.v1` だけを明示的に受理する
+dispatch を追加した。receipt は source commit、worker binary、package manifest、template hash を
+相互に bind する。
+
+### 配置と host-side 検証
+
+candidate は active manifest と独立して次へ配置した。
+
+- product: `/opt/ullm/gemma4-e2b-serving-v0.1/products/gemma4-e2b-bf16-e5faef0d`
+- worker: `/opt/ullm/gemma4-e2b-serving-v0.1/releases/gemma4-e2b-bf16/ullm-gemma4-worker`
+- immutable manifest: `/opt/ullm/gemma4-e2b-serving-v0.1/manifests/gemma4-e2b-bf16.manifest.json`
+  (`e01fa275a8e682c44606df2f1549cb0676df04d7b55b29e7f238ec7ec43fc8c9`)
+
+全 product / worker / manifest / receipt は `root:root`、ディレクトリ 0555、内容 0444
+（worker は 0555）にした。`tools/validate-served-model.py` はこの snapshot を受理し、
+Transformers 5.12.1 は overlay を `GemmaTokenizer` として読み、基本 user prompt を
+`<bos><|turn>user ... <|turn>model` へ render できた。なお IT tokenizer JSON 自体の SHA は
+base E2B と異なるので、template と base vocabulary が同一であるとは仮定せず、実際の template
+render と gateway generation をこの後の runtime evidence で確認する。
+
+runtime / gateway / raw greedy evidence は
+`benchmarks/results/2026-07-27/gemma4-serving/` に追記する。候補検証では
+`/etc/ullm/served-models/active.json` を一切切り替えず、R9700 lock が空いた時だけ隔離 port の
+gateway を起動する。
+
+### Phase 3: isolated worker / gateway evidence
+
+candidate は `127.0.0.1:18080` の手動 gateway として起動し、active manifest を Gemma4
+へ切り替えなかった。起動直後の固定 sleep で成功と見なさず、最初の probe を 3.25 s 後にして
+bounded exponential backoff を行った。`/readyz` は 1 回目、実測 3.276 s で `200
+{"status":"ready"}`、`/v1/models` は candidate model ID を返した。英日 2 request と
+lightweight policy の 10-case suite は全件 HTTP 200・nonempty completion まで到達した。生の
+request/response は `gateway-*.json` に保存している。
+
+worker wire protocol は一要求ずつの single-active contract なので、raw comparison も逐次に
+行った。Gemma4 resident worker の token は、BL/BO の read-only trace と以下の通り完全一致した。
+
+| input label | generated token IDs | BL/BO との比較 |
+| --- | --- | --- |
+| `gemma-capital-france` | `[9079, 236761, 108, 818]` | exact |
+| `gemma-once-upon` | `[528, 496, 1902, 1298]` | exact |
+
+各 request は `released.outcome=length` と `reset_complete=true` で終了した。これは単に raw
+executor が動くことではなく、manifest-bound `BF16_0` worker、wire protocol、resident reset が
+BL/BO の greedy path を変えていないことの確認である。
+
+### Chat quality decision
+
+**この E2B candidate は active promotion の対象にしない。** service/gateway transport は動作したが、
+`docs/plans/lightweight-promotion-policy-v0.1.md` の「実際の文章」基準では明白な崩壊を確認した。
+
+- `ja_explanation` は user prompt を繰り返した。
+- `ja_multiturn` は `1.` の反復ループになった。
+- `en_multiturn` は同一文を繰り返した。
+- `ja_long_summary` には `<unused56>` が現れ、translation と structured-reasoning は空になった。
+
+これは数値しきい値ではなく、保存済み応答を読んだ品質判定である。一方、France prompt は
+`The capital of France is Paris.` を含む応答を返しており、HTTP/wire/tokenizer path の失敗とは
+区別する必要がある。
+
+tokenizer contract 自体は mechanical に通った。overlay は Transformers 5.12.1 で
+`GemmaTokenizer` として読み込まれ、BOS/EOS/PAD (`2/1/0`)、template hash、rendered
+`<|turn>user ... <|turn>model`、vocabulary range を検証し、gateway の実 request にも使用された。
+しかし base `google/gemma-4-E2B` には upstream chat template がなく、E2B-it の template を
+明示 provenance 付き overlay として試しただけである。上記の文章品質により、**base E2B に対して
+この chat template が semantic に正しいとは確認できなかった**。次に必要なのは、base checkpoint
+用に upstream が根拠を与える chat interface、または instruction-tuned E2B checkpoint を対象にした
+別の source/package/manifest であり、推測による template の置換は行わない。
+
+candidate の immutable manifest (`e01fa275…c8c9`) と product/worker は保存したまま、AQ4_0
+active manifest は `3507102…b3e7` へ戻す運用を別証跡に記録する。速度改善や Gemma4 の量子化は
+この task の対象外である。
+
+### AQ4_0 restoration boundary
+
+isolated run の間に別セッションが active manifest を `d3d9c454…6038c2` へ切り替えたことを
+観測した。この task はその manifest を採用せず、trusted protected source
+`/opt/ullm/aq4-gqa-grouped-deployment-v0.1/manifests/aq4-gqa-grouped-protected-c8074928-7e34eed1.json`
+を SHA-256 検証後に root-owned temporary file 経由で atomic rename した。最終 snapshot は
+`3507102fd3015f47204a4f3256b818c58788eadb5573e5d5fe727a076cb1b3e7`、`root:root 0644`、
+`ullm-openai.service` は `active/running` である。`aq4-final-restore-stability.txt` は 4, 5,
+8, 12 s の全観測で同じ SHA と `is-active=active` を記録する。
+
+service の start-limit は共有操作による lock-conflict で二度 fail 状態になった。明示的な
+`Start request repeated too quickly` を確認した時だけ `reset-failed` と一回の `start` を使い、
+Gemma candidate を service に向けた start/restart は一度も行っていない。
