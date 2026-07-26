@@ -155,6 +155,27 @@ of its one-byte payload. The page rounding matters: the byte ratio is about
 16,256 rather than a fractional-token result. This is a capacity statement,
 not a throughput prediction.
 
+### 2.3 served Qwen3.5-9B full-attention cache total
+
+The local source configuration at
+`/home/homelab1/datapool/ai_models/safetensors/Qwen/Qwen3.5-9B/config.json`
+was read on 2026-07-26: it has 32 layers, 16 Q heads, 4 KV heads, head dim
+256, and eight `full_attention` layers (one every four layers). The table
+below totals only those eight paged-KV-owning layers; it is **not** a claim
+about total process VRAM, which also contains resident weights, workspaces,
+and hybrid linear-attention state.
+
+| storage | eight full-attention layers at 4,096 tokens | same 256 MiB F32-KV budget | context enabled by that KV budget |
+|---|---:|---:|---:|
+| F32 | 256 MiB | 256 MiB | 4,096 |
+| F16 | 128 MiB | 256 MiB | 8,192 |
+| FP8 E4M3FN + FP16 scales | 64.5 MiB | 255.984375 MiB (1,016 blocks/layer) | 16,256 |
+
+The context columns require a future cache-block-count configuration change;
+v0.1 deliberately preserves the existing 256-block default. They express the
+independent KV-capacity benefit, not a measured available-VRAM admission limit
+or speed prediction.
+
 ## 3. FP8 format selection
 
 ### 3.1 E4M3FN for both K and V
@@ -260,8 +281,9 @@ CPU evidence is saved in
   payload-plus-scale cache bytes (implementation correctness only);
 - typed causal prefill fallback;
 - corrupt FP8 negative (including negative-zero) scale rejection in both readback and attention;
-- a synthetic FP8 4,096-token / 256-page / block-size-16 context with a
-  permuted block table (page/scale implementation check only);
+- a synthetic FP8 4,096-token / 256-page / block-size-16 context at the
+  served Qwen3.5 full-attention geometry, with a permuted block table
+  (page/scale implementation check only);
 - all existing `decoder::tests` F32 cases.
 
 An accidental broad `ullm-runtime-sys --lib` invocation was discovered to

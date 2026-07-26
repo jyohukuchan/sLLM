@@ -18,6 +18,9 @@
 - FP16 payload と、FP8 E4M3FN + `(physical_token, kv_head, plane)` FP16 scale
   の exact allocation/ABI を実装した。Qwen3.5 指定 geometry では layer あたり
   F32 32 MiB、F16 16 MiB、FP8 8.0625 MiB である。
+- served Qwen3.5-9B source config の 8 full-attention layers まで合算すると
+  4,096 token 時に F32 256 MiB、F16 128 MiB、FP8 64.5 MiB となる。これは
+  KV slice の収支であり、全 process VRAM admission の主張ではない。
 - generic `PagedDecodeState` に typed allocation, writer, direct reader,
   scale-aware readback, typed causal prefill fallback を接続した。F32/F32 は従来の
   F32 writer/reader API をそのまま選ぶ。
@@ -32,6 +35,7 @@
 - `327e34f5 fix(kv): reserve raw zero FP8 scale for reset` を作成した。
 - `481a6078 test(kv): check typed attention against decoded cache` を作成した。
 - `41c4bd43 test(kv): span full 4096-token FP8 cache` を作成した。
+- `fbe04660 test(kv): use Qwen35 full-attention geometry` を作成した。
 - 実行後に、broad `ullm-runtime-sys --lib` に opportunistic HIP tests が含まれる
   ことを発見した。R9700 lock preflight 前の実行だったため、GPU evidence としては
   採用しない。以後 GPU を使う全テスト/計測は lock/service preflight 後だけにする。

@@ -25,8 +25,9 @@ rejected by the parser. The K/V override precedence over the uniform selector
 is tested without mutating the process environment. The direct reader is also
 checked against a CPU reference over its exact decoded payload-plus-scale
 cache bytes; this is a semantic implementation check, not a quality threshold.
-A separate synthetic FP8 test spans all 4,096 tokens / 256 pages with a
-permuted page table. It is not a full-model throughput or generated-text test.
+A separate synthetic FP8 test spans all 4,096 tokens / 256 pages at the served
+Qwen3.5 full-attention geometry with a permuted page table. It is not a
+full-model throughput or generated-text test.
 
 ## Capacity ledger
 
@@ -41,6 +42,12 @@ layer.
 
 The FP8 result includes 64 KiB of scales: two `[4096, 4]` FP16 planes. This
 is capacity accounting, not a speed estimate.
+
+For the served Qwen3.5-9B source configuration, there are eight paged
+full-attention layers. Thus the same rows total 256 MiB, 128 MiB, and 64.5 MiB
+at 4,096 tokens. Within the fixed 256 MiB F32 KV allocation alone, F16 fits
+8,192 tokens and FP8 fits 16,256 tokens; this excludes weights/workspaces and
+does not claim a whole-process VRAM admission result.
 
 ## Full-model / quality status
 
