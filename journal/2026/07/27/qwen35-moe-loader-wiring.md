@@ -61,8 +61,9 @@
 ## 次の行動
 
 - `/run/ullm/r9700.lock` が解放され、外部 `ullm-openai.service` が GPU を保持していない
-  ことを確認してから、`HIP_VISIBLE_DEVICES=2` / runtime device 0 で 262,144 token の
-  resident load、短い greedy generation、AMD SMI telemetry を取る。typed KV cache が
+  ことを確認してから、`HIP_VISIBLE_DEVICES=1` / `ULLM_HIP_VISIBLE_DEVICES=1` /
+  uLLM runtime device 1 で 262,144 token の resident load、短い greedy generation、AMD SMI
+  telemetry を取る。AMD SMI physical GPU 2 を HIP ordinal と取り違えない。typed KV cache が
   確定していれば `ULLM_KV_CACHE_DTYPE=f16` を明示し、確定前なら初版 F32 の 262k overflow
   見積りと 131,072-token fallback を区別して記録する。ロックの奪取、サービス停止・起動、
   `active.json` 変更はしない。
