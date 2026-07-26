@@ -104,6 +104,32 @@ F32 allocation / page management のもう一つの経路だが、今回の変�
   FP8 experiment を扱う。これは dynamic per-token/head scale contract では
   ないので、v0.1 typed cache の benchmark/quality report に流用してはいけない。
 
+追加の control-plane / diagnostic consumer も確認した。
+
+- `crates/ullm-engine/src/decode_runner.rs` の
+  `Qwen3SelfAttnRequestDecodeRunner::{insert_request,run_ready_batch}` と
+  `Qwen3DecoderLayerRequestDecodeRunner::{insert_request,run_ready_batch}` は
+  generic `Qwen3*DecodeState` を保持する。各 state が `PagedDecodeState::new` を
+  呼ぶため selector はここにも伝播するが、request の block table と
+  `written_len` 一致検証は dtype 非依存のまま維持する。
+- `crates/ullm-engine/src/execution_batch.rs` の `BatchStateBinding::uses_paged_kv`
+  と batch validation は block table の存在を検査するだけである。payload dtype や
+  scale buffer を batch metadata に混ぜず、physical page id / logical length の
+  contract を変えない。
+- AQ4_0 dispatch は `backend_operation_registry.rs` の
+  `execute_paged_kv_write_f32`, `execute_paged_kv_write_chunk_f32`,
+  `execute_fused_qk_norm_rope_paged_kv_write_f32`,
+  `execute_paged_decode_attention_*_f32`,
+  `execute_paged_causal_gqa_chunk*_f32` に集約される。別途許可された AQ4_0 change
+  では typed plan/binding/executor をこの一組へ追加し、既存 F32 method を
+  repurpose してはならない。
+- `crates/ullm-engine/src/session_worker_backend.rs` の operation-execution
+  audit は F32 operation labels を列挙する。typed AQ4_0 が実装された際は
+  K/V dtype と typed operation label を audit/report に足す必要がある。
+- `main_parts/part_01.rs` / `part_05.rs` は paged-KV smoke/verification harness
+  を持つ。production routing ではないが、native typed ABI が完成したら F16/FP8
+  smoke をここへ追加し、既存 F32 oracle を変更しない。
+
 ## 2. storage layout と VRAM 収支
 
 ### 2.1 一般形
