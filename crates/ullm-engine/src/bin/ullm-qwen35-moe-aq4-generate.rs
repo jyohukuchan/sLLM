@@ -3,9 +3,10 @@
 
 //! Offline, decode-first Qwen3.5-35B-A3B AQ4_0 MoE generation driver.
 //!
-//! The caller is responsible for isolating the R9700, for example with
-//! `HIP_VISIBLE_DEVICES=2`; this binary then requires that runtime-visible
-//! device 0 reports `gfx1201`.  It never starts or contacts a serving service.
+//! The caller is responsible for isolating the R9700 with HIP ordinal 1
+//! (`HIP_VISIBLE_DEVICES=1`). `ullm_runtime_sys` reserves runtime index 0 for
+//! its CPU fallback, so this binary uses runtime-visible device 1 for the
+//! isolated R9700. It never starts or contacts a serving service.
 
 use serde_json::{Value, json};
 use std::env;
