@@ -1,0 +1,4 @@
+2026-07-26T22:48:47+09:00
+label=handwritten-r03
+accepted_sample=telemetry/cooldown-handwritten-r03-074.json
+criteria=edge<=42C hotspot<=45C socket_power<=30W throttle=UNTHROTTLED

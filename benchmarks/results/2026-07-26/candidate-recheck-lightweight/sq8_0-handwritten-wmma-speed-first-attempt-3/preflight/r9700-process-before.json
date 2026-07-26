@@ -1,0 +1,22 @@
+[
+    {
+        "gpu": 2,
+        "process_list": [
+            {
+                "process_info": {
+                    "name": "/opt/ullm/aq4-p3-deployment-v0.1/releases/aq4-p3-c4c9a9b3/ullm-aq4-worker",
+                    "pid": 3264619,
+                    "mem_usage": {
+                        "value": 7351963648,
+                        "unit": "B"
+                    },
+                    "cu_occupancy": "N/A",
+                    "evicted_time": {
+                        "value": 178,
+                        "unit": "ms"
+                    }
+                }
+            }
+        ]
+    }
+]

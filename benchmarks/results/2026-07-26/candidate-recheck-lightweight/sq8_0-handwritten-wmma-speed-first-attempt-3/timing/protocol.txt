@@ -1,0 +1,6 @@
+method=synchronized full-model generated-step timing
+repeats=5
+prompt_tokens=1028
+max_new_tokens=16
+included_decode_indices=1_and_later
+excluded=model_load,prefill,generated_index_0,profiler_ranges,gpu_event_timing

@@ -1,0 +1,4 @@
+2026-07-26T22:56:09+09:00
+label=ck-r05
+accepted_sample=telemetry/cooldown-ck-r05-085.json
+criteria=edge<=42C hotspot<=45C socket_power<=30W throttle=UNTHROTTLED

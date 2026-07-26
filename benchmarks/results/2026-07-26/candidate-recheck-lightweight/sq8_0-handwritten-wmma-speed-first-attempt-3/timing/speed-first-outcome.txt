@@ -1,0 +1,3 @@
+decision=stop-after-speed
+reason=handwritten WMMA pooled full-model feedback decode throughput did not exceed CK
+quality_capture=not_run because the candidate is not faster

@@ -1,0 +1,50 @@
+2026-07-26T22:35:52+09:00
+path=/run/ullm/r9700.lock
+mode=nonblocking-exclusive-flock-after-service-stop
+result=held
+lsof: WARNING: can't stat() overlay file system /var/lib/docker/overlay2/083cba4b4dbffde3bd0f661c0448412e31a6e0cafbf962259df75fc9c874424a/merged
+      Output information may be incomplete.
+lsof: WARNING: can't stat() overlay file system /var/lib/docker/overlay2/3e6051487243ed09eeafe6e1597fea3ed72076c9695ca88596458e732a800b15/merged
+      Output information may be incomplete.
+lsof: WARNING: can't stat() overlay file system /var/lib/docker/overlay2/403309108dfb5b807b2241022eed1a4e45e638159ffb8ff5f2f49a101dee3800/merged
+      Output information may be incomplete.
+lsof: WARNING: can't stat() overlay file system /var/lib/docker/overlay2/044ac32a6ac7ad19bd38b18c64a02218acfba61b28e625fa09e2850985b2012d/merged
+      Output information may be incomplete.
+lsof: WARNING: can't stat() nsfs file system /run/docker/netns/default
+      Output information may be incomplete.
+lsof: WARNING: can't stat() nsfs file system /run/docker/netns/b8a56f3f8cf8
+      Output information may be incomplete.
+lsof: WARNING: can't stat() nsfs file system /run/docker/netns/ef7795d6d3ef
+      Output information may be incomplete.
+lsof: WARNING: can't stat() nsfs file system /run/docker/netns/68a4beffa619
+      Output information may be incomplete.
+lsof: WARNING: can't stat() overlay file system /var/lib/docker/overlay2/b81483427b113b6dfe614ae80dc50d306c16d6f8fd214e0b5a1e78c30210d806/merged
+      Output information may be incomplete.
+lsof: WARNING: can't stat() nsfs file system /run/docker/netns/656f59553b34
+      Output information may be incomplete.
+lsof: WARNING: can't stat() overlay file system /var/lib/docker/overlay2/7187a74e3f9ee3ec6ab6e962c1e3a6976b6e8905b5dc29435a87bfa9757c9d24/merged
+      Output information may be incomplete.
+lsof: WARNING: can't stat() overlay file system /var/lib/docker/overlay2/dc62364a12538d679086a8015cb66fd94fd1f5302c1d28217c58965de543bdb4/merged
+      Output information may be incomplete.
+lsof: WARNING: can't stat() overlay file system /var/lib/docker/overlay2/1204f362b24989f196a98e9846a4d4ee1a2cb69d74f0fccc43ad070097db3995/merged
+      Output information may be incomplete.
+lsof: WARNING: can't stat() overlay file system /var/lib/docker/overlay2/49c656c6f75033e8bde2f3818e3a565f5a89b9c68244859bc01e733a9d360cd2/merged
+      Output information may be incomplete.
+lsof: WARNING: can't stat() overlay file system /var/lib/docker/overlay2/4b2991042bf4edc1d4d70aad17defffbcd23ed07e0c4d700faba2651ee50fca2/merged
+      Output information may be incomplete.
+lsof: WARNING: can't stat() nsfs file system /run/docker/netns/e4fd8dd4441d
+      Output information may be incomplete.
+lsof: WARNING: can't stat() nsfs file system /run/docker/netns/886614f38efc
+      Output information may be incomplete.
+lsof: WARNING: can't stat() nsfs file system /run/docker/netns/976eecde9dee
+      Output information may be incomplete.
+lsof: WARNING: can't stat() nsfs file system /run/docker/netns/78e8674dac37
+      Output information may be incomplete.
+lsof: WARNING: can't stat() nsfs file system /run/docker/netns/01ba3084a71e
+      Output information may be incomplete.
+lsof: WARNING: can't stat() overlay file system /var/lib/docker/overlay2/21049097bb87d17b376488e36a70d4f91e7679dc965c101b6fb9fa08ba9b3e94/merged
+      Output information may be incomplete.
+lsof: WARNING: can't stat() nsfs file system /run/docker/netns/07f1a75a16a4
+      Output information may be incomplete.
+COMMAND     PID     USER   FD   TYPE DEVICE SIZE/OFF NODE NAME
+bash    3270193 homelab1    9r   REG   0,27        0 3987 /run/ullm/r9700.lock
