@@ -1,0 +1,17 @@
+2026-07-26T20:20:10+09:00
+recovery action: approved `systemctl reset-failed ullm-openai.service`, then one `systemctl start ullm-openai.service`; credential omitted
+
+command: systemctl show ullm-openai.service -p ActiveState -p SubState -p MainPID -p NRestarts -p UnitFileState -p ActiveEnterTimestamp -p Result
+MainPID=1480646
+Result=success
+NRestarts=0
+ActiveState=active
+SubState=running
+UnitFileState=enabled
+ActiveEnterTimestamp=Sun 2026-07-26 20:19:35 JST
+
+command: systemctl show llama-qwen35-udq4.service -p ActiveState -p SubState -p MainPID -p UnitFileState
+MainPID=0
+ActiveState=inactive
+SubState=dead
+UnitFileState=disabled

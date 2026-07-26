@@ -60,9 +60,11 @@ Date: 2026-07-26
   start initiator は未確認だった。さらに 20:05:57 に worker stdout EOF で
   service が停止したため、20:06:13 に明示的に start し、20:06:14 に
   active/running を確認した。その後の通常 service operation 中にも
-  20:08:11 / 20:09:06 / 20:11:56 / 20:12:42 に worker EOF/restart が
-  journal に出たが、原因は未確認である。20:16:26 の audit は active/running。
-  測定の追加実行・二度目の stop は行っていない。`llama-qwen35-udq4.service` は
+  20:08:11 / 20:09:06 / 20:11:56 / 20:12:42 / 20:17:27 に worker EOF/restart が
+  journal に出たが、原因は未確認である。最後の EOF は `start-limit-hit` を残したため、
+  20:19:34--35 に承認済みの `reset-failed` と一回の start を発行し、20:20:10 の
+  audit で active/running を確認した。測定の追加実行・二度目の stop は行っていない。
+  `llama-qwen35-udq4.service` は
   終始 inactive/disabled で起動していない。
 
 ## 保存先

@@ -114,6 +114,8 @@ after the sudo credential expired.  The service was observed active at
 20:00:24, then stopped at 20:05:57 after an `unexpected worker stdout EOF`
 record.  An approved explicit start at 20:06:13 restored it to active/running
 at 20:06:14.  Further worker-EOF/restart events occurred during later normal
-service operation; a 20:16:26 audit was active/running.  This did not add an
-isolation window: no second stop and no further benchmark process occurred.
-No active manifest, systemd unit, `/opt/ullm`, or V620 is modified.
+service operation.  The 20:17:27 EOF left the unit `start-limit-hit`; one
+approved `reset-failed` plus explicit start at 20:19:34--20:19:35 restored it,
+and the 20:20:10 audit was active/running.  This did not add an isolation
+window: no second stop and no further benchmark process occurred.  No active
+manifest, systemd unit, `/opt/ullm`, or V620 is modified.

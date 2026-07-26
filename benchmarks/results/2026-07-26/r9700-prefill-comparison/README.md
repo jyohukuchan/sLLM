@@ -126,9 +126,11 @@ because its credential timestamp had expired.  systemd subsequently showed
 the service active at 20:00:24, but the gateway then stopped at 20:05:57 after
 recording `unexpected worker stdout EOF`.  An approved explicit start was
 issued at 20:06:13.  During later normal service operation, the journal showed
-further worker-EOF/restart events at 20:08:11, 20:09:06, 20:11:56, and
-20:12:42; their cause is unconfirmed.  A 20:16:26 pre-commit audit observed
-active/running/enabled, MainPID 954753, NRestarts=0.  No second stop or
+further worker-EOF/restart events at 20:08:11, 20:09:06, 20:11:56, 20:12:42,
+and 20:17:27; their cause is unconfirmed.  The final EOF left the unit
+`start-limit-hit`.  An approved `reset-failed` plus one explicit start at
+20:19:34--20:19:35 restored it; the 20:20:10 audit observed
+active/running/enabled, MainPID 1480646, NRestarts=0.  No second stop or
 measurement window was opened.  `llama-qwen35-udq4.service` remained
 inactive/disabled and was never started.
 

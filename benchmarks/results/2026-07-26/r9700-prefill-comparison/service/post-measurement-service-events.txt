@@ -50,3 +50,10 @@
 2026-07-26T20:12:43+09:00 homelab1-WRX80-Creator systemd[1]: Started ullm-openai.service - uLLM single-worker OpenAI gateway.
 2026-07-26T20:12:44+09:00 homelab1-WRX80-Creator ullm-openai[954753]: INFO:     Started server process [954753]
 2026-07-26T20:12:47+09:00 homelab1-WRX80-Creator ullm-openai[954753]: INFO:     Application startup complete.
+2026-07-26T20:17:27+09:00 homelab1-WRX80-Creator systemd[1]: Stopping ullm-openai.service - uLLM single-worker OpenAI gateway...
+2026-07-26T20:17:27+09:00 homelab1-WRX80-Creator ullm-openai[954753]: INFO:     worker_fatal reason: unexpected worker stdout EOF
+2026-07-26T20:17:27+09:00 homelab1-WRX80-Creator systemd[1]: ullm-openai.service: Deactivated successfully.
+2026-07-26T20:19:18+09:00 homelab1-WRX80-Creator systemd[1]: ullm-openai.service: Failed with result 'start-limit-hit'.
+2026-07-26T20:19:34+09:00 homelab1-WRX80-Creator systemd[1]: Starting ullm-openai.service - uLLM single-worker OpenAI gateway...
+2026-07-26T20:19:35+09:00 homelab1-WRX80-Creator systemd[1]: Started ullm-openai.service - uLLM single-worker OpenAI gateway.
+2026-07-26T20:19:38+09:00 homelab1-WRX80-Creator ullm-openai[1480646]: INFO:     Application startup complete.

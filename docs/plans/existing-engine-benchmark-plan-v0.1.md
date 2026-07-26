@@ -180,8 +180,10 @@ as a limitation rather than interpreting the long-prompt values as
 temperature-normalized.  One intentional service isolation window was used.
 The explicit restoration at 20:06:13 was followed during normal service
 operation by further worker-EOF/restart events; their cause is unconfirmed.
-The 20:16:26 audit was active/running, and `llama-qwen35-udq4.service`
-remained inactive/disabled.
+The 20:17:27 EOF left the unit `start-limit-hit`; one approved
+`reset-failed` plus explicit start at 20:19:34--20:19:35 restored it, and the
+20:20:10 audit was active/running.  `llama-qwen35-udq4.service` remained
+inactive/disabled.
 
 The complete raw data, full commands, source timing excerpts, accounting,
 thermal history, service audit, and normalized rows are in
