@@ -451,3 +451,38 @@ Gemma4 E2B **48--72 h**、Qwen3.5 MoE **72--120 h** は据え置く。今回取�
 architecture/config dispatch の共通前提だけであり、Gemma の layer composition と MoE の新規
 kernel/routing primitive の実装面積は変わらない。特に MoE の 3-D expert payload、top-8 routing、
 grouped GEMM、shared expert は config descriptor を持てても実行できないままである。
+
+## BI: Qwen3.5-35B-A3B MoE ランタイム基盤（2026-07-26）
+
+loader の変更とは独立に、MoE の実行プリミティブを runtime ABI として追加した。対象の
+実 checkpoint を直接読んだ結果、text decoder は 40 層すべて MoE、`256 experts / top-8 /
+I=512 / shared I=512` であり、routed `gate_up_proj` は BF16 `[256,1024,2048]`、`down_proj`
+は BF16 `[256,2048,512]`、router は BF16 `[256,2048]` だった。shared expert とその
+sigmoid gate も全層に存在する。詳細な source contract、decode/prefill を別経路とする設計、
+workspace と VRAM 計算は
+`docs/plans/qwen35-moe-runtime-foundation-v0.1.md` に記録した。
+
+- CPU reference と public ABI は routing / gather / raw-BF16-or-F32 grouped GEMM /
+  gated-SiLU / weighted scatter / shared sigmoid gate を段階ごとに保持する。gfx1201 用の
+  correctness-first HIP 実装も同じ ABI を実装し、非 gfx1201 と feature 未指定を
+  fail-closed にする。
+- HF `Qwen3_5MoeTopKRouter` で実 layer-0 BF16 router fixture を生成した。3 token × top-8
+  の expert ID と normalized score は CPU と R9700 の双方で **完全一致**（最大絶対誤差 0）。
+  exact-tie は PyTorch の不安定 ordering を契約にせず、boundary tie として明示的に検出する。
+- 実 layer-0 3-D `gate_up_proj` から source expert `[52,148]` の raw BF16 `[2,37,71]` slice
+  を取り、local assignment `[1,0,1]` を通した。HF F32 expected、CPU reference、CPU ABI、
+  R9700 grouped GEMM は **完全一致**（最大絶対誤差 0）であり、expert-axis/row/column layout
+  も直接照合した。
+- synthetic full MoE block では CPU C ABI は F32/BF16 とも全段 0 差、R9700 は最終出力
+  `2.384185791e-7` 以内（BF16 の全段最大は shared gate/up `3.576278687e-7`）だった。これは
+  timing ではなく correctness check である。
+- R9700 は 31.859 GiB、text decoder の raw BF16 は 63.613 GiB（不足 31.754 GiB）、
+  complete checkpoint は 66.965 GiB（不足 35.106 GiB）であり、full resident inference は
+  実施不能である。量子化や CPU offload を暗黙に導入して代替しない。
+
+この時点では hybrid linear/full attention、mRoPE、KV state、loader 結線、weight residency
+policy が未実装なので、35B の end-to-end 生成は未到達である。従って `Qwen35MoeExecutor`
+を実行可能とする変更ではなく、後続が利用する正しさ優先の MoE execution substrate までを
+完了した。72--120 h は full text-only runtime と実推論まで含む見積りとして据え置く。一方、
+ここで実装した substrate 単体はおよそ 16--28 h 規模に分解でき、残る工数の主因は attention
+integration、streaming/quantization residency、prefill specialization、trace writer である。

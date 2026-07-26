@@ -9,8 +9,31 @@
 
 set -euo pipefail
 
+speed_first=0
+lightweight_prompt_dir=''
+while [[ "$#" -gt 0 ]]; do
+    case "$1" in
+        --speed-first)
+            speed_first=1
+            shift
+            ;;
+        --lightweight-prompt-dir)
+            shift
+            if [[ "$#" -eq 0 ]]; then
+                printf '%s\n' '--lightweight-prompt-dir requires a directory' >&2
+                exit 2
+            fi
+            lightweight_prompt_dir="$(realpath -e "$1")"
+            shift
+            ;;
+        *)
+            break
+            ;;
+    esac
+done
+
 if [[ "$#" -ne 3 ]]; then
-    printf '%s\n' "usage: $0 RESULT_DIR COMPONENT_BIN SERVING_BIN" >&2
+    printf '%s\n' "usage: $0 [--speed-first] [--lightweight-prompt-dir DIR] RESULT_DIR COMPONENT_BIN SERVING_BIN" >&2
     exit 2
 fi
 
@@ -40,12 +63,16 @@ if [[ ! -d "$artifact_dir" || ! -d "$package_dir" || ! -f "$prompt_u32le" ]]; th
     printf '%s\n' 'canonical SQ8_0 artifact, package, or raw-p0512 fixture is unavailable' >&2
     exit 2
 fi
+if [[ -n "$lightweight_prompt_dir" && ! -f "$lightweight_prompt_dir/suite.json" ]]; then
+    printf '%s\n' 'lightweight prompt directory must contain suite.json' >&2
+    exit 2
+fi
 if [[ -e "$result_dir/service/window-start.txt" ]]; then
     printf '%s\n' "refusing to overwrite existing window evidence: $result_dir/service/window-start.txt" >&2
     exit 2
 fi
 
-mkdir -p "$result_dir"/{component,serving/ck,serving/handwritten,full-model-multistep,service,telemetry,preflight}
+mkdir -p "$result_dir"/{component,serving/ck,serving/handwritten,full-model-multistep,service,telemetry,preflight,timing/ck,timing/handwritten}
 
 capture() {
     local relative=$1
@@ -118,8 +145,59 @@ capture_service_state() {
 
 capture_telemetry() {
     local name=$1
-    amd-smi metric --gpu "$r9700_amd_smi_gpu" --temperature --clock --power --json \
+    amd-smi metric --gpu "$r9700_amd_smi_gpu" --temperature --clock --power --violation --json \
         >"$result_dir/telemetry/$name.json" 2>&1
+}
+
+thermal_sample_is_ready() {
+    python3 - "$1" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as source:
+    document = json.load(source)
+rows = document.get("gpu_data")
+if not isinstance(rows, list):
+    raise SystemExit(1)
+row = next((item for item in rows if item.get("gpu") == 2), None)
+if not isinstance(row, dict):
+    raise SystemExit(1)
+temperature = row.get("temperature")
+power = row.get("power")
+if not isinstance(temperature, dict) or not isinstance(power, dict):
+    raise SystemExit(1)
+edge = temperature.get("edge", {}).get("value")
+hotspot = temperature.get("hotspot", {}).get("value")
+socket_power = power.get("socket_power", {}).get("value")
+throttle = power.get("throttle_status")
+if not all(isinstance(value, (int, float)) for value in (edge, hotspot, socket_power)):
+    raise SystemExit(1)
+if edge <= 42 and hotspot <= 45 and socket_power <= 30 and throttle == "UNTHROTTLED":
+    raise SystemExit(0)
+raise SystemExit(1)
+PY
+}
+
+wait_for_cooldown() {
+    local label=$1
+    local attempt
+    local sample
+    for attempt in $(seq 1 300); do
+        sample="telemetry/cooldown-${label}-$(printf '%03d' "$attempt").json"
+        amd-smi metric --gpu "$r9700_amd_smi_gpu" --temperature --clock --power --violation --json \
+            >"$result_dir/$sample" 2>&1 || true
+        if thermal_sample_is_ready "$result_dir/$sample"; then
+            {
+                date --iso-8601=seconds
+                printf 'label=%s\n' "$label"
+                printf 'accepted_sample=%s\n' "$sample"
+                printf 'criteria=edge<=42C hotspot<=45C socket_power<=30W throttle=UNTHROTTLED\n'
+            } >"$result_dir/timing/cooldown-${label}.txt"
+            return 0
+        fi
+        sleep 1
+    done
+    return 1
 }
 
 json_has_no_r9700_processes() {
@@ -226,6 +304,10 @@ trap restore_service EXIT
 
 date --iso-8601=seconds >"$result_dir/service/window-start.txt"
 capture_service_state before-stop
+capture preflight/required-pgrep-before.txt bash -c "pgrep -af 'ullm-sq8-r9700|run_measurements.py|llama-bench|llama-server|promote-served-model|ullm-aq4-worker' || true"
+capture preflight/required-service-before.txt systemctl is-active ullm-openai.service
+capture preflight/binary-sha256.txt sha256sum "$component_bin" "$serving_bin"
+capture preflight/git-head.txt git rev-parse HEAD
 capture preflight/amd-smi-list.json amd-smi list --json
 capture preflight/r9700-static.json amd-smi static --gpu "$r9700_amd_smi_gpu" --asic --bus --json
 capture preflight/r9700-process-before.json amd-smi process --gpu "$r9700_amd_smi_gpu" --general --json
@@ -251,6 +333,7 @@ fi
 
 capture_optional service/stop.txt sudo_service systemctl stop ullm-openai.service
 capture_service_state after-stop
+capture preflight/required-pgrep-after-stop.txt bash -c "pgrep -af 'ullm-sq8-r9700|run_measurements.py|llama-bench|llama-server|promote-served-model|ullm-aq4-worker' || true"
 if [[ "$(systemctl is-active ullm-openai.service || true)" != inactive ]]; then
     printf '%s\n' 'ullm-openai.service did not reach inactive after stop request' >&2
     exit 1
@@ -263,9 +346,178 @@ capture_telemetry after-stop
 
 # Record power/clock/temperature/throttle status once per second throughout
 # the isolated process sequence. The raw watch output is retained verbatim.
-amd-smi metric --gpu "$r9700_amd_smi_gpu" --temperature --clock --power --watch 1 --watch_time 1800 --json \
+amd-smi metric --gpu "$r9700_amd_smi_gpu" --temperature --clock --power --violation --watch 1 --watch_time 1800 --json \
     >"$result_dir/telemetry/during-window.watch.txt" 2>&1 &
 telemetry_pid=$!
+
+# New lightweight-promotion policy: collect matched, real full-model decode
+# timing before examining numerical differences.  ``generated_index=0`` is
+# the prefill/first-token transition; the summarizer intentionally includes
+# only feedback decode indices 1 and later.
+if [[ $speed_first -eq 1 ]]; then
+    timing_repeats=5
+    {
+        printf 'method=synchronized full-model generated-step timing\n'
+        printf 'repeats=%s\n' "$timing_repeats"
+        printf 'prompt_tokens=1028\n'
+        printf 'max_new_tokens=16\n'
+        printf 'included_decode_indices=1_and_later\n'
+        printf 'excluded=model_load,prefill,generated_index_0,profiler_ranges,gpu_event_timing\n'
+    } >"$result_dir/timing/protocol.txt"
+    for timing_repeat in $(seq 1 "$timing_repeats"); do
+        timing_id=$(printf 'r%02d' "$timing_repeat")
+        if ! wait_for_cooldown "ck-${timing_id}"; then
+            printf '%s\n' "R9700 thermal cooldown timed out before CK ${timing_id}" >&2
+            exit 1
+        fi
+        capture_optional "timing/ck/${timing_id}.stdout.txt" \
+            run_r9700 "$serving_bin" \
+                --artifact "$artifact_dir" --package "$package_dir" \
+                --prompt-lengths 1028 --max-new-tokens 16 \
+                --prefill-mode m8-chunk8 --record-generated-timing \
+                --result-json "$result_dir/timing/ck/${timing_id}.json"
+        capture_telemetry "after-timing-ck-${timing_id}"
+
+        if ! wait_for_cooldown "handwritten-${timing_id}"; then
+            printf '%s\n' "R9700 thermal cooldown timed out before handwritten ${timing_id}" >&2
+            exit 1
+        fi
+        capture_optional "timing/handwritten/${timing_id}.stdout.txt" \
+            run_r9700 "$serving_bin" \
+                --artifact "$artifact_dir" --package "$package_dir" \
+                --prompt-lengths 1028 --max-new-tokens 16 \
+                --prefill-mode m8-chunk8 --record-generated-timing \
+                --handwritten-wmma-projection-prototype \
+                --decode-oracle-capture-dir "$result_dir/timing/handwritten/${timing_id}-decode" \
+                --result-json "$result_dir/timing/handwritten/${timing_id}.json"
+        capture_telemetry "after-timing-handwritten-${timing_id}"
+    done
+
+    timing_summary_ready=1
+    for timing_repeat in $(seq 1 "$timing_repeats"); do
+        timing_id=$(printf 'r%02d' "$timing_repeat")
+        if [[ ! -f "$result_dir/timing/ck/${timing_id}.json" \
+            || ! -f "$result_dir/timing/handwritten/${timing_id}.json" ]]; then
+            timing_summary_ready=0
+        fi
+    done
+    if [[ $timing_summary_ready -eq 1 ]]; then
+        ck_summary=(python3 "$repo_root/tools/summarize-synchronized-decode-timing.py" \
+            --label sq8_0_ck --output "$result_dir/timing/ck-summary.json")
+        handwritten_summary=(python3 "$repo_root/tools/summarize-synchronized-decode-timing.py" \
+            --label sq8_0_handwritten_wmma --output "$result_dir/timing/handwritten-summary.json")
+        for timing_repeat in $(seq 1 "$timing_repeats"); do
+            timing_id=$(printf 'r%02d' "$timing_repeat")
+            ck_summary+=(--result-json "$result_dir/timing/ck/${timing_id}.json")
+            handwritten_summary+=(--result-json "$result_dir/timing/handwritten/${timing_id}.json")
+        done
+        capture_required timing/ck-summary.stdout.txt "${ck_summary[@]}"
+        capture_required timing/handwritten-summary.stdout.txt "${handwritten_summary[@]}"
+
+        capture_required timing/speed-decision.stdout.txt \
+            python3 "$repo_root/tools/compare-synchronized-decode-timing.py" \
+                --baseline-summary "$result_dir/timing/ck-summary.json" \
+                --candidate-summary "$result_dir/timing/handwritten-summary.json" \
+                --output "$result_dir/timing/speed-decision.json"
+
+        # The lightweight policy deliberately separates throughput from
+        # quality.  Do not run the superseded exact-logit/component gates in
+        # speed-first mode.  A non-faster candidate stops here; a faster one
+        # gets actual fixed-prompt generations in this same isolation window.
+        if ! json_field_is_true "$result_dir/timing/speed-decision.json" candidate_faster; then
+            {
+                printf 'decision=stop-after-speed\n'
+                printf 'reason=handwritten WMMA pooled full-model feedback decode throughput did not exceed CK\n'
+                printf 'quality_capture=not_run because the candidate is not faster\n'
+            } >"$result_dir/timing/speed-first-outcome.txt"
+            date --iso-8601=seconds >"$result_dir/service/isolation-complete.txt"
+            exit 0
+        fi
+
+        if [[ -z "$lightweight_prompt_dir" ]]; then
+            {
+                printf 'decision=stop-after-speed\n'
+                printf 'reason=candidate was faster but no fixed prompt suite was supplied\n'
+                printf 'quality_capture=not_run\n'
+            } >"$result_dir/timing/speed-first-outcome.txt"
+            date --iso-8601=seconds >"$result_dir/service/isolation-complete.txt"
+            exit 1
+        fi
+
+        mkdir -p "$result_dir/lightweight/ck" "$result_dir/lightweight/handwritten"
+        mapfile -t lightweight_cases < <(
+            jq -r '.cases[] | [.case_id, .max_completion_tokens, .prompt_u32le_file] | @tsv' \
+                "$lightweight_prompt_dir/suite.json"
+        )
+        if [[ "${#lightweight_cases[@]}" -eq 0 ]]; then
+            printf '%s\n' 'the supplied lightweight prompt suite contains no cases' >&2
+            exit 1
+        fi
+        lightweight_complete=1
+        for lightweight_case in "${lightweight_cases[@]}"; do
+            IFS=$'\t' read -r case_id max_completion_tokens prompt_relative <<<"$lightweight_case"
+            if [[ ! "$case_id" =~ ^[a-z][a-z0-9_]{0,63}$ ]] \
+                || [[ ! "$max_completion_tokens" =~ ^[0-9]+$ ]] \
+                || [[ "$max_completion_tokens" -lt 3 ]] \
+                || [[ -z "$prompt_relative" ]]; then
+                printf '%s\n' "invalid lightweight suite case record: $lightweight_case" >&2
+                exit 1
+            fi
+            prompt_file="$(realpath -e "$lightweight_prompt_dir/$prompt_relative")"
+            case "$prompt_file" in
+                "$lightweight_prompt_dir"/*) ;;
+                *)
+                    printf '%s\n' "lightweight suite input escapes its directory: $case_id" >&2
+                    exit 1
+                    ;;
+            esac
+            if [[ ! -f "$prompt_file" ]]; then
+                printf '%s\n' "lightweight suite input is not a regular file: $case_id" >&2
+                exit 1
+            fi
+            capture_optional "lightweight/ck/${case_id}.stdout.txt" \
+                run_r9700 "$serving_bin" \
+                    --artifact "$artifact_dir" --package "$package_dir" \
+                    --prompt-token-ids-u32le "$prompt_file" --max-new-tokens "$max_completion_tokens" \
+                    --prefill-mode m8-chunk8 \
+                    --result-json "$result_dir/lightweight/ck/${case_id}.json"
+            capture_telemetry "after-lightweight-ck-${case_id}"
+            capture_optional "lightweight/handwritten/${case_id}.stdout.txt" \
+                run_r9700 "$serving_bin" \
+                    --artifact "$artifact_dir" --package "$package_dir" \
+                    --prompt-token-ids-u32le "$prompt_file" --max-new-tokens "$max_completion_tokens" \
+                    --prefill-mode m8-chunk8 --handwritten-wmma-projection-prototype \
+                    --decode-oracle-capture-dir "$result_dir/lightweight/handwritten/${case_id}-decode" \
+                    --result-json "$result_dir/lightweight/handwritten/${case_id}.json"
+            capture_telemetry "after-lightweight-handwritten-${case_id}"
+            if [[ ! -f "$result_dir/lightweight/ck/${case_id}.json" \
+                || ! -f "$result_dir/lightweight/handwritten/${case_id}.json" ]]; then
+                lightweight_complete=0
+            fi
+        done
+        if [[ $lightweight_complete -ne 1 ]]; then
+            {
+                printf 'decision=quality-capture-incomplete\n'
+                printf 'reason=at least one fixed-prompt CK or handwritten result JSON is absent\n'
+                printf 'suite_dir=%s\n' "$lightweight_prompt_dir"
+            } >"$result_dir/timing/speed-first-outcome.txt"
+            date --iso-8601=seconds >"$result_dir/service/isolation-complete.txt"
+            exit 1
+        fi
+        {
+            printf 'decision=continue-to-lightweight-output-capture\n'
+            printf 'reason=handwritten WMMA pooled full-model feedback decode throughput exceeded CK\n'
+            printf 'suite_dir=%s\n' "$lightweight_prompt_dir"
+        } >"$result_dir/timing/speed-first-outcome.txt"
+        date --iso-8601=seconds >"$result_dir/service/isolation-complete.txt"
+        exit 0
+    else
+        printf '%s\n' 'not summarized: at least one CK or handwritten timing result is absent' \
+            >"$result_dir/timing/summary-not-run.txt"
+        date --iso-8601=seconds >"$result_dir/service/isolation-complete.txt"
+        exit 1
+    fi
+fi
 
 # First numerical component gate: no HIP event timing is performed in gate mode.
 capture_optional component/gate.stdout.txt \
