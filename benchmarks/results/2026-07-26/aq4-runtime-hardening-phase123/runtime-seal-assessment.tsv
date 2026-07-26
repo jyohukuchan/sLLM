@@ -1,0 +1,9 @@
+assessment	status	basis
+phase123_closure_seal	PASS	all five final closures have root:root required modes, zero symlink/special/hardlink/group-world-write/extended-ACL/capability violations; full member inventory recorded
+protected_ancestry	PASS	/opt through each Phase 1-3 final leaf parent is root:root and non-group/world-writable; ACL/capability checks are zero
+worker_bit_identity	PASS	cmp + SHA-256 + size passed against live worker; source/destination inode pairs differ
+product_closure	PASS	1,045 regular files, 5 directories, 7,700,872,459 logical bytes; per-member source-to-destination SHA-256 verification passed
+tokenizer_closure	PASS	five selected members cmp/hash passed; no cache/model shard included
+promotion_source_clone	PASS	detached exact commit/tree, clean, direct .git directory, no alternates, no symlink/hardlink/ACL/capability, fsck passed
+manifest_freezer_control_source	PASS	detached exact commit/tree, clean, freezer tool present, same source-clone seals, fsck passed
+full_runtime_seal_and_activation_readiness	NOT_READY_EXPECTED	Phase 4+ deliberately not executed: no fresh evidence/receipt/profile/frozen candidate/activation plan or reviewed activation control source; active.json unchanged
