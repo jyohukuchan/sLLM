@@ -259,6 +259,7 @@ fn run(options: Options) -> Result<(), String> {
         for case in mode_cases {
             capture_case(
                 &mut session,
+                &mut context,
                 &mut stream,
                 case,
                 &output,
@@ -456,6 +457,7 @@ fn validate_selector_binding(plan: &CapturePlan) -> Result<(), String> {
 
 fn capture_case(
     session: &mut Qwen3Sq8ServingSession,
+    context: &mut RuntimeContext,
     stream: &mut RuntimeStream,
     case: &CasePlan,
     output: &Path,
@@ -496,6 +498,7 @@ fn capture_case(
     }
     session
         .start_teacher_forced_capture_for_testing(
+            context,
             format!("sq8-gate-v0.2:{}:{}", case.mode, case.case_id),
             case.prompt_token_ids.clone(),
             case.teacher_forced_input_tokens.len(),

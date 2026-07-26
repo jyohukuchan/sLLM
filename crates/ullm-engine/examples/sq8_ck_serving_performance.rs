@@ -334,6 +334,7 @@ fn validate_performance_prompt_progress(
 
 pub(super) fn run(
     session: &mut Qwen3Sq8ServingSession,
+    context: &mut ullm_runtime_sys::RuntimeContext,
     stream: &mut ullm_runtime_sys::RuntimeStream,
     options: &Options,
     runner_identity: RunnerIdentity,
@@ -356,6 +357,7 @@ pub(super) fn run(
             for sample_index in 0..count {
                 samples.push(run_ttft_sample(
                     session,
+                    context,
                     stream,
                     &origin,
                     prompt_tokens,
@@ -385,6 +387,7 @@ pub(super) fn run(
         for sample_index in 0..count {
             decode_samples.push(run_decode_sample(
                 session,
+                context,
                 stream,
                 &origin,
                 prefill_chunk_tokens,
@@ -476,6 +479,7 @@ pub(super) fn run(
 
 fn run_ttft_sample(
     session: &mut Qwen3Sq8ServingSession,
+    context: &mut ullm_runtime_sys::RuntimeContext,
     stream: &mut ullm_runtime_sys::RuntimeStream,
     origin: &Instant,
     prompt_tokens: usize,
@@ -497,7 +501,7 @@ fn run_ttft_sample(
     let mut expected_prompt_tokens_processed = 0_usize;
     let request_start_elapsed_ns = elapsed_ns(origin)?;
     session
-        .start(request, cancel.clone(), stream)
+        .start(context, request, cancel.clone(), stream)
         .map_err(|error| error.to_string())?;
     let (first_token_id, first_token_cache_len, first_token_elapsed_ns) = loop {
         let advance = session
@@ -629,6 +633,7 @@ fn run_ttft_sample(
 
 fn run_decode_sample(
     session: &mut Qwen3Sq8ServingSession,
+    context: &mut ullm_runtime_sys::RuntimeContext,
     stream: &mut ullm_runtime_sys::RuntimeStream,
     origin: &Instant,
     prefill_chunk_tokens: usize,
@@ -650,7 +655,7 @@ fn run_decode_sample(
     let mut generated = Vec::with_capacity(DECODE_GENERATED_TOKENS);
     let request_start_elapsed_ns = elapsed_ns(origin)?;
     session
-        .start(request, cancel, stream)
+        .start(context, request, cancel, stream)
         .map_err(|error| error.to_string())?;
     while generated.len() < DECODE_GENERATED_TOKENS {
         let advance = session

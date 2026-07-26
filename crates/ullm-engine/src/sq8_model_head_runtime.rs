@@ -259,7 +259,10 @@ impl Sq8ModelHeadExecutionReport {
                     .into(),
             );
         }
-        if !matches!(self.sequence_len, 1 | 2 | 4 | 8 | 16 | 32 | 128) {
+        if !matches!(
+            self.sequence_len,
+            1 | 2 | 4 | 8 | 16 | 32 | 128 | 256 | 512 | 1024 | 2048 | 4096
+        ) {
             return Err(format!(
                 "Qwen3-14B SQ8 model-head report has unmeasured sequence length {}",
                 self.sequence_len
@@ -1889,7 +1892,10 @@ fn checked_elements(rows: usize, cols: usize, label: &str) -> Result<usize, Stri
 }
 
 fn selected_row_offset_bytes(sequence_len: usize) -> Result<usize, String> {
-    if !matches!(sequence_len, 1 | 2 | 4 | 8 | 16 | 32 | 128) {
+    if !matches!(
+        sequence_len,
+        1 | 2 | 4 | 8 | 16 | 32 | 128 | 256 | 512 | 1024 | 2048 | 4096
+    ) {
         return Err(format!(
             "Qwen3-14B SQ8 model-head selected row has unmeasured sequence length {sequence_len}"
         ));
@@ -2503,7 +2509,7 @@ mod tests {
 
     #[test]
     fn selected_row_offset_uses_the_last_prompt_row() {
-        for sequence_len in [1, 2, 4, 8, 16, 32, 128] {
+        for sequence_len in [1, 2, 4, 8, 16, 32, 128, 256, 512, 1024, 2048, 4096] {
             assert_eq!(
                 selected_row_offset_bytes(sequence_len).unwrap(),
                 (sequence_len - 1) * QWEN3_14B_HIDDEN_SIZE * std::mem::size_of::<f32>()

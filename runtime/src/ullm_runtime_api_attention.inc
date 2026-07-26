@@ -3449,9 +3449,9 @@ ullm_status ullm_runtime_paged_kv_write_chunk_f32(
         set_error("f32 paged KV write chunk received a null pointer");
         return ULLM_STATUS_INVALID_ARGUMENT;
     }
-    if (m == 0 || m > 128 || block_size == 0 || cache_blocks == 0 || kv_heads == 0 ||
+    if (m == 0 || m > 4096 || block_size == 0 || cache_blocks == 0 || kv_heads == 0 ||
         head_dim == 0 || value_dim == 0) {
-        set_error("f32 paged KV write chunk width must be in 1..128 and dimensions nonzero");
+        set_error("f32 paged KV write chunk width must be in 1..4096 and dimensions nonzero");
         return ULLM_STATUS_INVALID_ARGUMENT;
     }
     if (!buffers_share_backend(k_buffer, v_buffer) ||
@@ -3602,7 +3602,7 @@ ullm_status ullm_runtime_paged_kv_write_chunk_typed_f32(
         set_error("typed paged KV write chunk received a null pointer");
         return ULLM_STATUS_INVALID_ARGUMENT;
     }
-    if (m == 0u || m > 128u || block_size == 0u || cache_blocks == 0u || kv_heads == 0u ||
+    if (m == 0u || m > 4096u || block_size == 0u || cache_blocks == 0u || kv_heads == 0u ||
         head_dim == 0u || value_dim == 0u || !kv_cache_dtype_is_supported(k_dtype) ||
         !kv_cache_dtype_is_supported(v_dtype) ||
         (kv_cache_dtype_requires_scale(k_dtype) != (k_scale_buffer != nullptr)) ||

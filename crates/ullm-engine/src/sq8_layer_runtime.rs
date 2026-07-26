@@ -32,7 +32,8 @@ pub const QWEN3_14B_SQ8_PAGED_REQUIRED_HIP_KERNEL_ENV: [&str; 2] = [
     "ULLM_REQUIRE_HIP_PAGED_DECODE_ATTN_KERNEL",
 ];
 pub const QWEN3_14B_SQ8_PREFILL_CHUNK_TOKENS: usize = 8;
-pub const QWEN3_14B_SQ8_PREFILL_CHUNK_TOKEN_OPTIONS: [usize; 3] = [8, 32, 128];
+pub const QWEN3_14B_SQ8_PREFILL_CHUNK_TOKEN_OPTIONS: [usize; 8] =
+    [8, 32, 128, 256, 512, 1024, 2048, 4096];
 pub const QWEN3_14B_SQ8_PREFILL_CHUNK_REQUIRED_HIP_KERNEL_ENV: [&str; 2] = [
     "ULLM_REQUIRE_HIP_PAGED_KV_WRITE_KERNEL",
     "ULLM_REQUIRE_HIP_CACHED_PREFIX_ATTN_F32_FLASH2_KERNEL",
@@ -133,7 +134,10 @@ impl Qwen3Sq8LayerConfig {
     }
 
     pub fn validate(self) -> Result<(), String> {
-        if !matches!(self.sequence_len, 1 | 2 | 4 | 8 | 16 | 32 | 128) {
+        if !matches!(
+            self.sequence_len,
+            1 | 2 | 4 | 8 | 16 | 32 | 128 | 256 | 512 | 1024 | 2048 | 4096
+        ) {
             return Err(format!(
                 "Qwen3-14B SQ8 layer sequence_len must be a measured M value, got {}",
                 self.sequence_len
@@ -1535,7 +1539,7 @@ mod tests {
 
     #[test]
     fn qwen3_14b_layer_config_accepts_only_measured_sequence_lengths() {
-        for m in [1, 2, 4, 8, 16, 32, 128] {
+        for m in [1, 2, 4, 8, 16, 32, 128, 256, 512, 1024, 2048, 4096] {
             assert!(Qwen3Sq8LayerConfig::qwen3_14b(m, 0).is_ok());
         }
         for m in [0, 3, 64, 129] {

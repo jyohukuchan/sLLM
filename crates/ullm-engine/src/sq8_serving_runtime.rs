@@ -68,6 +68,7 @@ const SQ8_SEQUENTIAL_M1_PREFILL_IMPLEMENTATION: &str = "sq8.sequential-m1.v1";
 const SQ8_FIXED_M8_PREFILL_IMPLEMENTATION: &str = "sq8.fixed-m8-cached-prefix.v1";
 const SQ8_FIXED_M32_PREFILL_IMPLEMENTATION: &str = "sq8.fixed-m32-cached-prefix.v1";
 const SQ8_FIXED_M128_PREFILL_IMPLEMENTATION: &str = "sq8.fixed-m128-cached-prefix.v1";
+const SQ8_ADAPTIVE_PREFILL_IMPLEMENTATION: &str = "sq8.adaptive-measured-width.v1";
 /// Test-only opt-in for the existing split API.  Absence preserves the
 /// ordinary direct paged-decode dispatch exactly.
 pub const QWEN3_14B_SQ8_PAGED_DECODE_SPLIT_EXPERIMENT_TILE_ENV: &str =
@@ -80,6 +81,10 @@ pub const QWEN3_14B_SQ8_PAGED_DECODE_SPLIT_MULTITILE_EVALUATION_ENV: &str =
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Sq8ServingPrefillMode {
+    /// Selects a measured fixed resident width from the prompt length at the
+    /// beginning of each Ready-to-Prefilling transition. The selected width
+    /// is then kept fixed for the entire request.
+    Adaptive,
     SequentialM1,
     FixedM8Chunks,
     FixedM32Chunks,
@@ -113,7 +118,7 @@ impl Sq8ServingPrefillMode {
     /// still receive the lower-runtime admission check.
     pub fn chunk_tokens(self) -> Option<usize> {
         match self {
-            Self::SequentialM1 => None,
+            Self::Adaptive | Self::SequentialM1 => None,
             Self::FixedM8Chunks => Some(QWEN3_14B_SQ8_PREFILL_CHUNK_TOKENS),
             Self::FixedM32Chunks => Some(32),
             Self::FixedM128Chunks => Some(128),
@@ -122,12 +127,15 @@ impl Sq8ServingPrefillMode {
     }
 
     fn validate_fixed_chunk_tokens(chunk_tokens: usize) -> Result<(), String> {
-        if !(2..=QWEN3_14B_SQ8_SERVING_CONTEXT_TOKENS).contains(&chunk_tokens)
+        // The worker must reserve at least one decode position, so a 4096-row
+        // prefill can never be an all-real serving unit. Keep the direct
+        // lower-runtime admission separate, but reject this unusable serving
+        // override instead of silently falling back to M=1 for every request.
+        if !(2..=2048).contains(&chunk_tokens)
             || !chunk_tokens.is_power_of_two()
         {
             return Err(format!(
-                "SQ8 serving fixed prefill chunk width must be a power of two in 2..={}, got M={chunk_tokens}",
-                QWEN3_14B_SQ8_SERVING_CONTEXT_TOKENS
+                "SQ8 serving fixed prefill chunk width must be a power of two in 2..=2048, got M={chunk_tokens}",
             ));
         }
         Ok(())
@@ -145,28 +153,82 @@ impl Sq8ServingPrefillMode {
     /// its unmeasured CK/layer/stack width cannot execute.
     fn validate_runtime_contract(self) -> Result<(), String> {
         self.validate_scheduler_contract()?;
-        if let Some(chunk_tokens) = self.chunk_tokens() {
+        let validate_width = |chunk_tokens| {
             if !is_qwen3_14b_sq8_prefill_chunk_tokens(chunk_tokens) {
                 return Err(format!(
                     "SQ8 serving requested fixed prefill M={chunk_tokens}, but the current CK/layer/stack runtime admits only measured widths {:?}; wide-M scheduling is available but execution requires the lower-layer wide-M contract",
                     QWEN3_14B_SQ8_PREFILL_CHUNK_TOKEN_OPTIONS
                 ));
             }
+            Ok(())
+        };
+        match self {
+            Self::Adaptive => {
+                for chunk_tokens in [128, 512, 1024, 2048] {
+                    validate_width(chunk_tokens)?;
+                }
+            }
+            _ => {
+                if let Some(chunk_tokens) = self.chunk_tokens() {
+                    validate_width(chunk_tokens)?;
+                }
+            }
         }
         Ok(())
     }
 
+    /// Resolves the width that owns the resident stack and prompt-buffer
+    /// allocation before the first request. Adaptive mode deliberately starts
+    /// at M=128; it widens only after a long request has been validated.
+    fn initial_resident_mode(self) -> Self {
+        match self {
+            Self::Adaptive => Self::FixedM128Chunks,
+            _ => self,
+        }
+    }
+
+    /// Selects the empirical winner for a valid Qwen3-14B SQ8 prompt length.
+    ///
+    /// The measured grid makes M=256 deliberately ineligible: at the nearest
+    /// measured long prompt it loses to M=128. M=4096 is likewise excluded:
+    /// N=4095 has no legal all-real 4096-row unit. The boundaries are the
+    /// measured N columns, so this policy does not infer that merely taking
+    /// the largest power of two below N is optimal.
+    pub fn selected_for_prompt_tokens(self, prompt_tokens: usize) -> Result<Self, String> {
+        if !(1..=QWEN3_14B_SQ8_SERVING_CONTEXT_TOKENS).contains(&prompt_tokens) {
+            return Err(format!(
+                "SQ8 adaptive prefill selection requires N in 1..={}, got N={prompt_tokens}",
+                QWEN3_14B_SQ8_SERVING_CONTEXT_TOKENS
+            ));
+        }
+        Ok(match self {
+            Self::Adaptive => match prompt_tokens {
+                1..=511 => Self::FixedM128Chunks,
+                512..=1023 => Self::fixed_chunk_tokens(512)
+                    .expect("adaptive M=512 is a static valid scheduler width"),
+                1024..=2047 => Self::fixed_chunk_tokens(1024)
+                    .expect("adaptive M=1024 is a static valid scheduler width"),
+                2048..=QWEN3_14B_SQ8_SERVING_CONTEXT_TOKENS => Self::fixed_chunk_tokens(2048)
+                    .expect("adaptive M=2048 is a static valid scheduler width"),
+                _ => unreachable!("adaptive prompt length was validated above"),
+            },
+            fixed => fixed,
+        })
+    }
+
     fn resident_stack_width(self) -> usize {
-        self.chunk_tokens()
+        self.initial_resident_mode()
+            .chunk_tokens()
             .unwrap_or(QWEN3_14B_SQ8_PREFILL_CHUNK_TOKENS)
     }
 
     fn execution_width(self) -> usize {
-        self.chunk_tokens().unwrap_or(1)
+        self.initial_resident_mode().chunk_tokens().unwrap_or(1)
     }
 
     fn implementation_id(self) -> String {
         match self {
+            Self::Adaptive => SQ8_ADAPTIVE_PREFILL_IMPLEMENTATION.to_string(),
             Self::SequentialM1 => SQ8_SEQUENTIAL_M1_PREFILL_IMPLEMENTATION.to_string(),
             Self::FixedM8Chunks => SQ8_FIXED_M8_PREFILL_IMPLEMENTATION.to_string(),
             Self::FixedM32Chunks => SQ8_FIXED_M32_PREFILL_IMPLEMENTATION.to_string(),
@@ -178,14 +240,14 @@ impl Sq8ServingPrefillMode {
     }
 
     fn uses_chunks(self) -> bool {
-        self.chunk_tokens().is_some()
+        matches!(self, Self::Adaptive) || self.chunk_tokens().is_some()
     }
 }
 
-/// The production-compatible serving default. Explicit callers can select a
-/// different fixed width with [`Sq8ServingPrefillMode::fixed_chunk_tokens`].
+/// The production-compatible serving default. Explicit callers can pin a
+/// fixed resident width with [`Sq8ServingPrefillMode::fixed_chunk_tokens`].
 pub const QWEN3_14B_SQ8_SERVING_DEFAULT_PREFILL_MODE: Sq8ServingPrefillMode =
-    Sq8ServingPrefillMode::FixedM128Chunks;
+    Sq8ServingPrefillMode::Adaptive;
 
 impl Sq8ServingRequest {
     pub fn new(
@@ -935,6 +997,7 @@ fn plan_prefill_units(
     prompt_tokens: usize,
     mode: Sq8ServingPrefillMode,
 ) -> Result<Vec<Sq8PrefillUnit>, String> {
+    let mode = mode.selected_for_prompt_tokens(prompt_tokens)?;
     mode.validate_scheduler_contract()?;
     if prompt_tokens == 0 || prompt_tokens > QWEN3_14B_SQ8_SERVING_CONTEXT_TOKENS {
         return Err(format!(
@@ -960,6 +1023,7 @@ fn plan_next_prefill_unit(
     prompt_tokens: usize,
     mode: Sq8ServingPrefillMode,
 ) -> Result<Sq8PrefillUnit, String> {
+    let mode = mode.selected_for_prompt_tokens(prompt_tokens)?;
     mode.validate_scheduler_contract()?;
     if prompt_tokens == 0
         || prompt_tokens > QWEN3_14B_SQ8_SERVING_CONTEXT_TOKENS
@@ -1015,6 +1079,9 @@ fn plan_next_prefill_unit(
 /// Owns one resident Qwen3-14B SQ8 model and one reusable active1/waiting0 session.
 #[derive(Debug)]
 pub struct Qwen3Sq8ServingSession {
+    /// User-selected policy. For adaptive serving this is distinct from the
+    /// fixed mode currently represented by `load_report` and resident buffers.
+    prefill_policy: Sq8ServingPrefillMode,
     load_report: Sq8ServingLoadReport,
     stack: Qwen3Sq8StackRuntime,
     decode: Qwen3Sq8PagedDecodeRuntime,
@@ -1092,7 +1159,8 @@ impl Qwen3Sq8ServingSession {
         let load_result = (|| {
             let device_info = context.device_info()?;
             validate_qwen3_14b_sq8_r9700_device_info(&device_info)?;
-            let resident_stack_width = prefill_mode.resident_stack_width();
+            let resident_prefill_mode = prefill_mode.initial_resident_mode();
+            let resident_stack_width = resident_prefill_mode.resident_stack_width();
             let stack = Qwen3Sq8StackRuntime::load_for_resident_descriptor(
                 context,
                 stream,
@@ -1191,10 +1259,10 @@ impl Qwen3Sq8ServingSession {
                     QWEN3_14B_SQ8_STACK_LAYERS,
                 )
                 .map_err(|err| err.to_string())?,
-                prefill_mode,
+                prefill_mode: resident_prefill_mode,
                 prefill_chunk_tokens: resident_stack_width,
-                prefill_implementation: prefill_mode.implementation_id(),
-                prompt_execution_width: prefill_mode.execution_width(),
+                prefill_implementation: resident_prefill_mode.implementation_id(),
+                prompt_execution_width: resident_prefill_mode.execution_width(),
                 paged_decode_split_source_tile,
                 embedding_payload_sha256: embedding.load_report().payload.payload_sha256.clone(),
                 final_norm_payload_sha256: head.final_norm_identity().payload_sha256.clone(),
@@ -1202,6 +1270,7 @@ impl Qwen3Sq8ServingSession {
             };
             load_report.validate().map_err(|err| err.to_string())?;
             let session = Self {
+                prefill_policy: prefill_mode,
                 load_report,
                 stack,
                 decode,
@@ -1247,6 +1316,53 @@ impl Qwen3Sq8ServingSession {
 
     pub fn prefill_mode(&self) -> Sq8ServingPrefillMode {
         self.load_report.prefill_mode
+    }
+
+    /// Returns the configured selection policy rather than the fixed width
+    /// currently resident for the last (or next) request.
+    pub fn prefill_policy(&self) -> Sq8ServingPrefillMode {
+        self.prefill_policy
+    }
+
+    /// Materializes the width selected by the configured policy without
+    /// retaining a larger prompt workspace for a short request. The stack
+    /// weights, embedding, head, decode workspace, and K/V caches remain
+    /// resident; only the M-dependent prefill workspace and prompt buffer are
+    /// exchanged at the Ready baseline.
+    fn select_prefill_mode_for_request(
+        &mut self,
+        context: &mut RuntimeContext,
+        prompt_tokens: usize,
+        stream: &mut RuntimeStream,
+    ) -> Result<(), String> {
+        let selected = self.prefill_policy.selected_for_prompt_tokens(prompt_tokens)?;
+        selected.validate_runtime_contract()?;
+        if selected == self.load_report.prefill_mode {
+            return Ok(());
+        }
+        self.validate_ready_baseline()?;
+        let width = selected
+            .chunk_tokens()
+            .ok_or_else(|| "SQ8 adaptive selection did not resolve a fixed chunk width".to_string())?;
+        let prompt_bytes = qwen3_14b_sq8_serving_prompt_chunk_bytes(width)?;
+        let mut prompt_chunk_hidden = context
+            .alloc_buffer(prompt_bytes)
+            .map_err(|error| format!("failed to allocate adaptive serving prompt chunk: {error}"))?;
+        prompt_chunk_hidden
+            .zero(0, prompt_bytes, Some(&mut *stream))
+            .map_err(|error| format!("failed to initialize adaptive serving prompt chunk: {error}"))?;
+        stream
+            .synchronize()
+            .map_err(|error| format!("failed to synchronize adaptive serving prompt chunk: {error}"))?;
+
+        self.stack
+            .reconfigure_serving_prefill_width(context, stream, width)?;
+        self.prompt_chunk_hidden = prompt_chunk_hidden;
+        self.load_report.prefill_mode = selected;
+        self.load_report.prefill_chunk_tokens = width;
+        self.load_report.prefill_implementation = selected.implementation_id();
+        self.load_report.prompt_execution_width = selected.execution_width();
+        self.load_report.validate().map_err(|error| error.to_string())
     }
 
     /// Enables the isolated M=1 handwritten projection probe for one test
@@ -1358,21 +1474,23 @@ impl Qwen3Sq8ServingSession {
 
     pub fn start(
         &mut self,
+        context: &mut RuntimeContext,
         request: Sq8ServingRequest,
         cancel: Sq8CancellationToken,
         stream: &mut RuntimeStream,
     ) -> Result<(), Sq8ServingError> {
-        self.start_with_reasoning_dialect(request, cancel, None, stream)
+        self.start_with_reasoning_dialect(context, request, cancel, None, stream)
     }
 
     pub fn start_with_reasoning_dialect(
         &mut self,
+        context: &mut RuntimeContext,
         request: Sq8ServingRequest,
         cancel: Sq8CancellationToken,
         reasoning_dialect: Option<&ReasoningDialect>,
         stream: &mut RuntimeStream,
     ) -> Result<(), Sq8ServingError> {
-        self.start_internal(request, cancel, reasoning_dialect, false, stream)
+        self.start_internal(context, request, cancel, reasoning_dialect, false, stream)
     }
 
     /// Starts the isolated teacher-forced capture state machine used only by
@@ -1383,6 +1501,7 @@ impl Qwen3Sq8ServingSession {
     #[doc(hidden)]
     pub fn start_teacher_forced_capture_for_testing(
         &mut self,
+        context: &mut RuntimeContext,
         request_id: impl Into<String>,
         prompt_token_ids: Vec<usize>,
         decode_positions: usize,
@@ -1398,11 +1517,19 @@ impl Qwen3Sq8ServingSession {
         })?;
         let request = Sq8ServingRequest::greedy(request_id, prompt_token_ids, max_new_tokens)
             .ignore_eos_for_testing();
-        self.start_internal(request, Sq8CancellationToken::new(), None, true, stream)
+        self.start_internal(
+            context,
+            request,
+            Sq8CancellationToken::new(),
+            None,
+            true,
+            stream,
+        )
     }
 
     fn start_internal(
         &mut self,
+        context: &mut RuntimeContext,
         request: Sq8ServingRequest,
         cancel: Sq8CancellationToken,
         reasoning_dialect: Option<&ReasoningDialect>,
@@ -1441,6 +1568,16 @@ impl Qwen3Sq8ServingSession {
             }
         } else {
             request.validate()?;
+        }
+        if let Err(err) = self.select_prefill_mode_for_request(
+            context,
+            request.prompt_token_ids.len(),
+            stream,
+        ) {
+            return Err(self.fail_runtime(
+                stream,
+                format!("serving adaptive prefill selection failed: {err}"),
+            ));
         }
         if let Err(err) = self.validate_ready_baseline() {
             return Err(
@@ -4650,6 +4787,12 @@ mod tests {
     fn serving_prefill_modes_bind_fixed_resident_widths_and_implementation_ids() {
         for (mode, resident_width, execution_width, implementation) in [
             (
+                Sq8ServingPrefillMode::Adaptive,
+                128,
+                128,
+                SQ8_ADAPTIVE_PREFILL_IMPLEMENTATION,
+            ),
+            (
                 Sq8ServingPrefillMode::SequentialM1,
                 8,
                 1,
@@ -4682,10 +4825,54 @@ mod tests {
                 mode != Sq8ServingPrefillMode::SequentialM1
             );
         }
+        assert_eq!(QWEN3_14B_SQ8_SERVING_DEFAULT_PREFILL_MODE, Sq8ServingPrefillMode::Adaptive);
         assert_eq!(
-            QWEN3_14B_SQ8_SERVING_DEFAULT_PREFILL_MODE.chunk_tokens(),
-            Some(128)
+            QWEN3_14B_SQ8_SERVING_DEFAULT_PREFILL_MODE.initial_resident_mode(),
+            Sq8ServingPrefillMode::FixedM128Chunks
         );
+    }
+
+    #[test]
+    fn serving_adaptive_prefill_selects_only_measured_empirical_winners() {
+        let adaptive = Sq8ServingPrefillMode::Adaptive;
+        for (prompt_tokens, expected_width) in [
+            (1_usize, 128_usize),
+            (128, 128),
+            (256, 128),
+            (511, 128),
+            (512, 512),
+            (1023, 512),
+            (1024, 1024),
+            (2047, 1024),
+            (2048, 2048),
+            (4095, 2048),
+        ] {
+            let selected = adaptive.selected_for_prompt_tokens(prompt_tokens).unwrap();
+            assert_eq!(selected.chunk_tokens(), Some(expected_width), "N={prompt_tokens}");
+            selected.validate_runtime_contract().unwrap();
+
+            let units = plan_prefill_units(prompt_tokens, adaptive).unwrap();
+            assert!(units.iter().all(|unit| {
+                unit.execution_width == expected_width
+                    || (prompt_tokens < expected_width && unit.execution_width == 1)
+            }));
+            assert!(units.iter().all(|unit| {
+                unit.execution_start_position <= unit.logical_start_position
+                    && unit.execution_end().unwrap() == unit.logical_end().unwrap()
+            }));
+            assert_eq!(units.last().unwrap().logical_end().unwrap(), prompt_tokens);
+        }
+
+        let tail = plan_prefill_units(4095, adaptive).unwrap();
+        assert_eq!(tail.len(), 2);
+        assert_eq!(tail[0].execution_width, 2048);
+        assert_eq!(tail[1].execution_width, 2048);
+        assert_eq!(tail[1].logical_start_position, 2048);
+        assert_eq!(tail[1].execution_start_position, 2047);
+        assert_eq!(tail[1].committed_tokens, 2047);
+        assert!(tail[1].rewinds_cache());
+        assert!(adaptive.selected_for_prompt_tokens(0).is_err());
+        assert!(adaptive.selected_for_prompt_tokens(4097).is_err());
     }
 
     #[test]
@@ -4728,36 +4915,18 @@ mod tests {
             assert_eq!(tail.execution_end().unwrap(), 4095);
             assert!(tail.rewinds_cache());
 
-            if chunk_tokens <= 128 {
-                mode.validate_runtime_contract().unwrap();
-            } else {
-                assert!(mode.validate_runtime_contract().is_err());
-            }
+            mode.validate_runtime_contract().unwrap();
         }
     }
 
     #[test]
-    fn serving_4096_chunk_never_fabricates_a_4095th_prefill_row() {
-        let mode = Sq8ServingPrefillMode::fixed_chunk_tokens(4096).unwrap();
-        let short = plan_prefill_units(4095, mode).unwrap();
-        assert_eq!(short.len(), 4095);
-        assert!(short.iter().all(|unit| {
-            unit.execution_width == 1
-                && unit.execution_start_position == unit.logical_start_position
-                && unit.committed_tokens == 1
-                && !unit.rewinds_cache()
-        }));
-
-        let exact = plan_prefill_units(4096, mode).unwrap();
-        assert_eq!(exact.len(), 1);
-        assert_eq!(exact[0].execution_width, 4096);
-        assert_eq!(exact[0].committed_tokens, 4096);
-        assert!(!exact[0].rewinds_cache());
+    fn serving_4096_chunk_is_rejected_because_no_4096_row_prompt_is_servable() {
+        assert!(Sq8ServingPrefillMode::fixed_chunk_tokens(4096).is_err());
     }
 
     #[test]
     fn serving_fixed_chunk_selector_rejects_invalid_scheduler_widths() {
-        for chunk_tokens in [0, 1, 3, 129, 3_000, 4_097] {
+        for chunk_tokens in [0, 1, 3, 129, 3_000, 4_096, 4_097] {
             assert!(Sq8ServingPrefillMode::fixed_chunk_tokens(chunk_tokens).is_err());
         }
     }

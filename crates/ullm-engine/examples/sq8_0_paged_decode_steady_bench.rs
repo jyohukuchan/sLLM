@@ -124,7 +124,7 @@ fn main() -> Result<(), String> {
     let mut samples = Vec::with_capacity(options.repeats);
     let mut canonical_tokens = None;
     for repeat_index in 0..options.repeats {
-        let sample = run_sample(&mut session, &mut stream, &options, repeat_index)?;
+        let sample = run_sample(&mut session, &mut context, &mut stream, &options, repeat_index)?;
         if let Some(expected) = &canonical_tokens {
             if expected != &sample.generated_token_ids {
                 return Err(format!(
@@ -183,6 +183,7 @@ fn main() -> Result<(), String> {
 
 fn run_sample(
     session: &mut Qwen3Sq8ServingSession,
+    context: &mut RuntimeContext,
     stream: &mut RuntimeStream,
     options: &Options,
     repeat_index: usize,
@@ -197,7 +198,7 @@ fn run_sample(
         total_generated,
     );
     session
-        .start(request, Sq8CancellationToken::new(), stream)
+        .start(context, request, Sq8CancellationToken::new(), stream)
         .map_err(|error| error.to_string())?;
 
     let mut generated_token_ids = Vec::with_capacity(total_generated);

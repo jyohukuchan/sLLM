@@ -9085,8 +9085,8 @@ pub fn paged_kv_write_chunk_f32(
     v_cache: &mut RuntimeBuffer,
     stream: Option<&mut RuntimeStream>,
 ) -> Result<(), String> {
-    if m == 0 || m > 128 {
-        return Err("f32 paged KV write chunk m must be in 1..=128".to_string());
+    if m == 0 || m > 4096 {
+        return Err("f32 paged KV write chunk m must be in 1..=4096".to_string());
     }
     if block_size == 0 || cache_blocks == 0 || kv_heads == 0 || head_dim == 0 || value_dim == 0 {
         return Err("f32 paged KV write chunk dimensions must be greater than zero".to_string());
@@ -9179,8 +9179,8 @@ pub fn paged_kv_write_chunk_typed_f32(
     v_scale: Option<&mut RuntimeBuffer>,
     stream: Option<&mut RuntimeStream>,
 ) -> Result<(), String> {
-    if m == 0 || m > 128 {
-        return Err("typed paged KV write chunk m must be in 1..=128".to_string());
+    if m == 0 || m > 4096 {
+        return Err("typed paged KV write chunk m must be in 1..=4096".to_string());
     }
     if block_size == 0 || cache_blocks == 0 || kv_heads == 0 || head_dim == 0 || value_dim == 0 {
         return Err("typed paged KV write chunk dimensions must be greater than zero".to_string());

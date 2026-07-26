@@ -216,6 +216,7 @@ fn run(options: Options) -> Result<(), String> {
     .map_err(|error| error.to_string())?;
     session
         .start_teacher_forced_capture_for_testing(
+            &mut context,
             "architecture-trace-step-0000",
             vec![options.token_id],
             1,

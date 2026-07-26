@@ -130,7 +130,7 @@ impl Sq8CkQuantizedActivation {
 pub fn sq8_ck_activation_buffer_bytes(m: usize, k: usize) -> Result<(usize, usize), String> {
     if !sq8_ck_m_is_measured(m) || k == 0 || !k.is_multiple_of(128) {
         return Err(
-            "SQ8 CK activation requires M in {1,2,4,8,16,32,128} and K divisible by 128"
+            "SQ8 CK activation requires M in {1,2,4,8,16,32,128,256,512,1024,2048,4096} and K divisible by 128"
                 .to_string(),
         );
     }
@@ -237,7 +237,7 @@ pub fn sq8_ck_projection_f32(
 }
 
 fn sq8_ck_m_is_measured(m: usize) -> bool {
-    matches!(m, 1 | 2 | 4 | 8 | 16 | 32 | 128)
+    matches!(m, 1 | 2 | 4 | 8 | 16 | 32 | 128 | 256 | 512 | 1024 | 2048 | 4096)
 }
 
 #[cfg(test)]

@@ -303,7 +303,10 @@ impl Sq8StackExecutionReport {
     }
 
     pub fn validate_contract(&self) -> Result<(), String> {
-        if !matches!(self.sequence_len, 1 | 2 | 4 | 8 | 16 | 32 | 128) {
+        if !matches!(
+            self.sequence_len,
+            1 | 2 | 4 | 8 | 16 | 32 | 128 | 256 | 512 | 1024 | 2048 | 4096
+        ) {
             return Err(format!(
                 "Qwen3-14B SQ8 stack report has unmeasured M {}",
                 self.sequence_len
@@ -723,6 +726,67 @@ impl Qwen3Sq8StackRuntime {
 
     pub fn config(&self) -> Qwen3Sq8LayerConfig {
         self.config
+    }
+
+    /// Replaces only the width-dependent serving allocations while retaining
+    /// the resident layer weights. The caller must hold the active1/waiting0
+    /// session at its completely reset baseline; this method never changes a
+    /// live prefill cursor or cache.
+    pub(crate) fn reconfigure_serving_prefill_width(
+        &mut self,
+        context: &mut RuntimeContext,
+        stream: &mut RuntimeStream,
+        sequence_len: usize,
+    ) -> Result<(), String> {
+        let config = Qwen3Sq8LayerConfig::qwen3_14b(sequence_len, 0)?;
+        if !is_qwen3_14b_sq8_prefill_chunk_tokens(sequence_len) {
+            return Err(format!(
+                "Qwen3-14B SQ8 serving reconfiguration requires a measured chunk width, got M={sequence_len}"
+            ));
+        }
+        if self.config == config {
+            return Ok(());
+        }
+        self.validate_runtime_contract()?;
+        self.workspace.validate_serving_baseline()?;
+        if self.status() != Sq8StackRuntimeStatus::NeedsInput
+            || self.last_execution_report.is_some()
+            || self.last_serving_chunk_report.is_some()
+            || self.next_paged_decode_position.is_some()
+            || self.paged_m1_sequence_active
+        {
+            return Err("Qwen3-14B SQ8 serving reconfiguration requires a reset stack".into());
+        }
+
+        // Allocate and initialize the replacement before dropping the current
+        // buffers. This keeps a failed allocation transactional with respect
+        // to the last known-good resident geometry and leaves all weights in
+        // place. The simultaneous old/new workspace peak is bounded by the
+        // two selected resident widths, not by another copy of the model.
+        let mut workspace = Qwen3Sq8LayerWorkspace::allocate(context, config)
+            .map_err(|error| format!("failed to allocate reconfigured SQ8 stack workspace: {error}"))?;
+        let mut resident_hidden = context
+            .alloc_buffer(hidden_bytes(config)?)
+            .map_err(|error| format!("failed to allocate reconfigured SQ8 stack hidden state: {error}"))?;
+        workspace.enqueue_serving_reset(stream)?;
+        let bytes = resident_hidden.size()?;
+        resident_hidden
+            .zero(0, bytes, Some(&mut *stream))
+            .map_err(|error| format!("failed to initialize reconfigured SQ8 stack hidden state: {error}"))?;
+        stream
+            .synchronize()
+            .map_err(|error| format!("failed to synchronize SQ8 stack reconfiguration: {error}"))?;
+        workspace.commit_serving_reset();
+
+        self.config = config;
+        self.workspace = workspace;
+        self.resident_hidden = resident_hidden;
+        self.state = Sq8StackResidentState::NeedsInput;
+        self.last_execution_report = None;
+        self.last_serving_chunk_report = None;
+        self.next_paged_decode_position = None;
+        self.paged_m1_sequence_active = false;
+        Ok(())
     }
 
     pub fn artifact_content_sha256(&self) -> &str {
@@ -2021,7 +2085,7 @@ fn validate_measured_ck_dispatch(
     layer_index: usize,
     report: &Sq8LayerExecutionReport,
 ) -> Result<(), String> {
-    if !matches!(m, 1 | 2 | 4 | 8 | 16 | 32 | 128) {
+    if !matches!(m, 1 | 2 | 4 | 8 | 16 | 32 | 128 | 256 | 512 | 1024 | 2048 | 4096) {
         return Err(format!(
             "Qwen3-14B SQ8 stack CK dispatch has unmeasured M {m}"
         ));

@@ -516,6 +516,7 @@ fn capture_actual_decode(
     }
     session
         .start(
+            &mut context,
             Sq8ServingRequest::greedy(
                 if handwritten {
                     "sq8-projection-contract-handwritten"

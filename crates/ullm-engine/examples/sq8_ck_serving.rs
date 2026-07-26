@@ -20,6 +20,7 @@ use ullm_engine::sq8_model_head_runtime::{
 use ullm_engine::sq8_serving_runtime::{
     QWEN3_14B_SQ8_PAGED_DECODE_SPLIT_EXPERIMENT_TILE_ENV, QWEN3_14B_SQ8_SERVING_BLOCK_TOKENS,
     QWEN3_14B_SQ8_SERVING_CACHE_BLOCKS, QWEN3_14B_SQ8_SERVING_CONTEXT_TOKENS,
+    QWEN3_14B_SQ8_SERVING_DEFAULT_PREFILL_MODE,
     Qwen3Sq8ServingSession, Sq8CancellationToken, Sq8FinishReason, Sq8ReleaseOutcome,
     Sq8ServingAdvance, Sq8ServingPrefillMode, Sq8ServingRequest, Sq8ServingRuntimeStatus,
     load_qwen3_14b_sq8_serving_norms,
@@ -316,6 +317,7 @@ fn main() -> Result<(), String> {
     if options.performance_gate {
         return performance::run(
             &mut session,
+            &mut context,
             &mut stream,
             &options,
             runner_identity,
@@ -333,6 +335,7 @@ fn main() -> Result<(), String> {
     for case in cases {
         requests.push(run_completed_request(
             &mut session,
+            &mut context,
             &mut stream,
             case,
             &options,
@@ -344,12 +347,14 @@ fn main() -> Result<(), String> {
     ) {
         (true, None) => Some(run_cancel_after_first_token(
             &mut session,
+            &mut context,
             &mut stream,
             "serving-smoke-cancel",
             cancellation_prompt,
         )?),
         (false, Some(prompt_progress)) => Some(run_cancel_during_prefill(
             &mut session,
+            &mut context,
             &mut stream,
             "serving-smoke-prefill-cancel",
             cancellation_prompt,
@@ -375,6 +380,9 @@ fn main() -> Result<(), String> {
                     return Err("deep-boundary evidence requires fixed M=8 or M=128 chunks".into());
                 }
                 (false, Sq8ServingPrefillMode::SequentialM1) => "ullm.sq8.serving_smoke.v2",
+                (false, Sq8ServingPrefillMode::Adaptive) => {
+                    "ullm.sq8.serving_adaptive_chunks.v1"
+                }
                 (false, Sq8ServingPrefillMode::FixedM8Chunks) => "ullm.sq8.serving_chunks.v3",
                 (
                     false,
@@ -435,6 +443,7 @@ fn main() -> Result<(), String> {
 
 fn run_completed_request(
     session: &mut Qwen3Sq8ServingSession,
+    context: &mut RuntimeContext,
     stream: &mut ullm_runtime_sys::RuntimeStream,
     case: ServingCase,
     options: &Options,
@@ -462,7 +471,7 @@ fn run_completed_request(
         return Err("serving smoke test-only EOS policy mismatch".into());
     }
     session
-        .start(request, Sq8CancellationToken::new(), stream)
+        .start(context, request, Sq8CancellationToken::new(), stream)
         .map_err(|err| err.to_string())?;
     let request_start = Instant::now();
     let prefill_mode = session.prefill_mode();
@@ -1023,6 +1032,7 @@ fn runner_identity() -> Result<RunnerIdentity, String> {
 
 fn run_cancel_after_first_token(
     session: &mut Qwen3Sq8ServingSession,
+    context: &mut RuntimeContext,
     stream: &mut ullm_runtime_sys::RuntimeStream,
     request_id: &str,
     prompt_token_ids: Vec<usize>,
@@ -1033,6 +1043,7 @@ fn run_cancel_after_first_token(
     let cancel = Sq8CancellationToken::new();
     session
         .start(
+            context,
             Sq8ServingRequest::greedy(request_id, prompt_token_ids, 8),
             cancel.clone(),
             stream,
@@ -1142,6 +1153,7 @@ fn run_cancel_after_first_token(
 
 fn run_cancel_during_prefill(
     session: &mut Qwen3Sq8ServingSession,
+    context: &mut RuntimeContext,
     stream: &mut ullm_runtime_sys::RuntimeStream,
     request_id: &str,
     prompt_token_ids: Vec<usize>,
@@ -1156,6 +1168,7 @@ fn run_cancel_during_prefill(
     let cancel = Sq8CancellationToken::new();
     session
         .start(
+            context,
             Sq8ServingRequest::greedy(request_id, prompt_token_ids, 1),
             cancel.clone(),
             stream,
@@ -1292,9 +1305,23 @@ fn serving_cases(options: &Options) -> Result<Vec<ServingCase>, String> {
         return lengths
             .iter()
             .copied()
-            .map(|prompt_tokens| {
+            .enumerate()
+            .map(|(case_index, prompt_tokens)| {
+                // A repeated length is useful for timing samples.  The legacy
+                // request ID remains stable for a unique length, while each
+                // repeat gets a deterministic distinct ID for scheduler and
+                // result accounting.
+                let repeated = lengths
+                    .iter()
+                    .filter(|&&length| length == prompt_tokens)
+                    .nth(1)
+                    .is_some();
                 Ok(ServingCase {
-                    request_id: format!("serving-smoke-p{prompt_tokens:04}"),
+                    request_id: if repeated {
+                        format!("serving-smoke-p{prompt_tokens:04}-r{case_index:02}")
+                    } else {
+                        format!("serving-smoke-p{prompt_tokens:04}")
+                    },
                     prompt_token_ids: (1..=prompt_tokens).collect(),
                     max_new_tokens: options.max_new_tokens,
                 })
@@ -1324,7 +1351,7 @@ fn parse_options() -> Result<Options, String> {
     let mut second_prompt_token_ids = None;
     let mut second_max_new_tokens = 1_usize;
     let mut prompt_lengths = None;
-    let mut prefill_mode = Sq8ServingPrefillMode::SequentialM1;
+    let mut prefill_mode = QWEN3_14B_SQ8_SERVING_DEFAULT_PREFILL_MODE;
     let mut test_only_ignore_eos = false;
     let mut record_generated_timing = false;
     let mut performance_gate = false;
@@ -1614,6 +1641,7 @@ fn parse_options() -> Result<Options, String> {
 
 fn parse_prefill_mode(value: &str) -> Result<Sq8ServingPrefillMode, String> {
     match value {
+        "adaptive" => Ok(Sq8ServingPrefillMode::Adaptive),
         "all-m1" => Ok(Sq8ServingPrefillMode::SequentialM1),
         "m8-chunk8" => Ok(Sq8ServingPrefillMode::FixedM8Chunks),
         "m32-chunk32" => Ok(Sq8ServingPrefillMode::FixedM32Chunks),
@@ -1645,6 +1673,7 @@ fn parse_prefill_mode(value: &str) -> Result<Sq8ServingPrefillMode, String> {
 
 fn prefill_mode_name(mode: Sq8ServingPrefillMode) -> String {
     match mode {
+        Sq8ServingPrefillMode::Adaptive => "adaptive".to_string(),
         Sq8ServingPrefillMode::SequentialM1 => "all-m1".to_string(),
         Sq8ServingPrefillMode::FixedM8Chunks => "m8-chunk8".to_string(),
         Sq8ServingPrefillMode::FixedM32Chunks => "m32-chunk32".to_string(),
@@ -1666,6 +1695,7 @@ fn expected_prefill_execution_calls(
     if prompt_tokens == 0 {
         return Err("prefill execution call count requires a nonempty prompt".into());
     }
+    let mode = mode.selected_for_prompt_tokens(prompt_tokens)?;
     Ok(match prefill_chunk_tokens(mode) {
         None => prompt_tokens,
         Some(chunk_tokens) if prompt_tokens < chunk_tokens => prompt_tokens,
@@ -1724,9 +1754,8 @@ fn parse_prompt_lengths(value: &str) -> Result<Vec<usize>, String> {
                 "prompt length must be in 1..={QWEN3_14B_SQ8_SERVING_CONTEXT_TOKENS}, got {length}"
             ));
         }
-        if lengths.contains(&length) {
-            return Err(format!("duplicate prompt length: {length}"));
-        }
+        // Repetition deliberately represents independent timing samples.
+        // `serving_cases` gives those samples distinct request IDs.
         lengths.push(length);
     }
     Ok(lengths)

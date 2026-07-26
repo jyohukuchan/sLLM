@@ -8,7 +8,8 @@ namespace {
 #if defined(ULLM_RUNTIME_ROCM_CK_GFX1201)
 
 bool sq8_ck_m_is_measured(size_t m) {
-    return m == 1u || m == 2u || m == 4u || m == 8u || m == 16u || m == 32u || m == 128u;
+    return m == 1u || m == 2u || m == 4u || m == 8u || m == 16u || m == 32u ||
+        m == 128u || m == 256u || m == 512u || m == 1024u || m == 2048u || m == 4096u;
 }
 
 bool sq8_ck_checked_mul(size_t lhs, size_t rhs, size_t *out) {

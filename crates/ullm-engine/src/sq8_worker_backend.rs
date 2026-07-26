@@ -31,18 +31,17 @@ use std::path::{Path, PathBuf};
 use ullm_runtime_sys::{RuntimeContext, RuntimeStream, device_count, device_info};
 
 pub const SQ8_WORKER_UPLOAD_CHUNK_BYTES: usize = 16 * 1024 * 1024;
-/// Opt-in worker override for the fixed resident prefill width.
+/// Opt-in worker override for a fixed resident prefill width.
 ///
-/// The default remains the measured M=128 serving configuration.  A selected
-/// wider width still has to pass the layer/stack/CK runtime admission during
-/// session loading; this environment variable only makes the scheduler choice
-/// explicit at the actual worker entry point.
+/// With no value the worker uses the measured prompt-length adaptive policy.
+/// A numeric value pins one resident width instead, and still has to pass the
+/// layer/stack/CK runtime admission during session loading.
 pub const SQ8_WORKER_PREFILL_CHUNK_TOKENS_ENV: &str = "ULLM_SQ8_PREFILL_CHUNK_TOKENS";
 
-/// Resolves the worker's fixed resident prefill mode from an optional textual
-/// environment value without reading global process state.
+/// Resolves the worker's adaptive-or-fixed prefill mode from an optional
+/// textual environment value without reading global process state.
 ///
-/// Keeping parsing pure makes the M=128 default and invalid-value behavior
+/// Keeping parsing pure makes the adaptive default and invalid-value behavior
 /// testable without mutating environment variables in parallel unit tests.
 pub fn sq8_worker_prefill_mode_from_value(
     value: Option<&str>,
@@ -103,13 +102,12 @@ impl Qwen3Sq8WorkerBackendConfig {
         &self.package
     }
 
-    /// Returns the selected fixed resident prefill mode for this worker.
+    /// Returns the configured adaptive policy or fixed resident override.
     pub fn prefill_mode(&self) -> Sq8ServingPrefillMode {
         self.prefill_mode
     }
 
-    /// Replaces the fixed resident prefill mode while preserving the M=128
-    /// default for configurations that do not call this opt-in builder.
+    /// Replaces the adaptive default with a fixed resident override.
     ///
     /// The serving loader performs the lower layer/stack/CK admission before
     /// allocating a model, so an unmeasured wide M fails explicitly and safely
@@ -141,7 +139,7 @@ pub struct Qwen3Sq8InferenceSession {
     session: Qwen3Sq8ServingSession,
     reasoning_dialect: Option<crate::reasoning::ReasoningDialect>,
     stream: RuntimeStream,
-    _context: RuntimeContext,
+    context: RuntimeContext,
 }
 
 impl SessionInferenceBackend<Qwen3Sq8InferenceSession> {
@@ -169,7 +167,7 @@ impl SessionInferenceBackend<Qwen3Sq8InferenceSession> {
             session,
             reasoning_dialect: config.reasoning_dialect,
             stream,
-            _context: context,
+            context,
         };
         Ok(Self::new(session))
     }
@@ -193,6 +191,7 @@ impl InferenceSession for Qwen3Sq8InferenceSession {
     ) -> Result<(), String> {
         self.session
             .start_with_reasoning_dialect(
+                &mut self.context,
                 request,
                 cancel,
                 self.reasoning_dialect.as_ref(),
@@ -1444,7 +1443,7 @@ mod tests {
             sq8_worker_prefill_mode_from_value(Some("256")).unwrap(),
             Sq8ServingPrefillMode::fixed_chunk_tokens(256).unwrap()
         );
-        for value in ["", "all-m1", "129", "4097"] {
+        for value in ["", "all-m1", "129", "4096", "4097"] {
             assert!(
                 sq8_worker_prefill_mode_from_value(Some(value)).is_err(),
                 "{value:?} must be rejected"
