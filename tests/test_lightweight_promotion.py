@@ -4,6 +4,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import subprocess
 import sys
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
@@ -52,6 +53,45 @@ def test_strict_json_rejects_duplicate_keys_and_nonfinite_values() -> None:
         PROMOTION.strict_object(b'{"same":1,"same":2}', "fixture")
     with pytest.raises(PROMOTION.PromotionError, match="non-finite"):
         PROMOTION.strict_object(b'{"value":NaN}', "fixture")
+
+
+def test_container_gateway_transport_keeps_bearer_token_out_of_process_arguments(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        captured["command"] = command
+        captured["input"] = kwargs["input"]
+        return subprocess.CompletedProcess(command, 0, b'{"status":"ok"}\n200', b"")
+
+    monkeypatch.setattr(PROMOTION.subprocess, "run", fake_run)
+
+    status, response, error = PROMOTION._http_json(
+        "http://172.20.0.1:8000/v1/example",
+        token="fixture-token",
+        payload={"message": "hello"},
+        timeout_seconds=2.0,
+        gateway_container="open-webui",
+    )
+
+    assert (status, response, error) == (200, {"status": "ok"}, None)
+    assert captured["command"] == [
+        "/usr/bin/docker",
+        "exec",
+        "-i",
+        "open-webui",
+        "/usr/bin/curl",
+        "--config",
+        "-",
+    ]
+    config = bytes(captured["input"]).decode("utf-8")
+    assert "fixture-token" in config
+    assert "fixture-token" not in " ".join(captured["command"])
+    assert 'data-binary = "{\\\"message\\\":\\\"hello\\\"}\\n"' in config
+    assert PROMOTION.normalize_gateway_container("direct") is None
+    with pytest.raises(PROMOTION.PromotionError, match="container"):
+        PROMOTION.normalize_gateway_container("not/a-container")
 
 
 def test_text_collapse_and_response_abandonment_are_blocking() -> None:

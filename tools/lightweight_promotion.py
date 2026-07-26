@@ -41,6 +41,7 @@ DEFAULT_PROMPT_SUITE = ROOT / "docs" / "plans" / "lightweight-promotion-prompt-s
 DEFAULT_ACTIVE_MANIFEST = Path("/etc/ullm/served-models/active.json")
 DEFAULT_SERVICE = "ullm-openai.service"
 DEFAULT_BASE_URL = "http://172.20.0.1:8000"
+DEFAULT_GATEWAY_CONTAINER = "open-webui"
 DEFAULT_TOKEN_FILE = Path("/etc/ullm/openai-api-key")
 DEFAULT_STATE_DIR = Path("/var/lib/ullm/lightweight-promotions")
 
@@ -55,7 +56,9 @@ MAX_SUITE_BYTES = 4 * 1024 * 1024
 HASH_RE = re.compile(r"[0-9a-f]{64}\Z")
 CASE_ID_RE = re.compile(r"[a-z][a-z0-9_]{0,63}\Z")
 SYSTEMCTL = Path("/usr/bin/systemctl")
+DOCKER = Path("/usr/bin/docker")
 RENAME_EXCHANGE = 2
+CONTAINER_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}\Z")
 
 
 class PromotionError(RuntimeError):
@@ -535,6 +538,16 @@ def _validate_base_url(base_url: str) -> str:
     return base_url.rstrip("/")
 
 
+def normalize_gateway_container(value: str) -> str | None:
+    """Return the local probe container, or ``None`` for direct HTTP."""
+
+    if value == "direct":
+        return None
+    if CONTAINER_NAME_RE.fullmatch(value) is None:
+        fail("gateway container must be a Docker container name or 'direct'")
+    return value
+
+
 def read_token(path: Path) -> str:
     snapshot = read_snapshot(path, "gateway token", maximum=MAX_TOKEN_BYTES)
     try:
@@ -546,13 +559,105 @@ def read_token(path: Path) -> str:
     return token
 
 
+def _decode_gateway_response(
+    status: int, body: bytes
+) -> tuple[int, dict[str, Any] | None, str | None]:
+    if len(body) > MAX_RESPONSE_BYTES:
+        return status, None, "response_too_large"
+    try:
+        value = strict_json(body, "gateway response")
+    except PromotionError:
+        return status, None, "invalid_json"
+    if not isinstance(value, dict):
+        return status, None, "invalid_json_root"
+    return status, value, None
+
+
+def _container_http_json(
+    url: str,
+    *,
+    token: str | None,
+    payload: dict[str, Any] | None,
+    timeout_seconds: float,
+    gateway_container: str,
+) -> tuple[int, dict[str, Any] | None, str | None]:
+    """Probe the bridge-bound gateway from a configured local container.
+
+    The deployment firewall intentionally prevents a host-originated request to
+    the Docker bridge listener.  Curl receives URL, body, and bearer token via
+    stdin config, so the token is not exposed in a process argument or saved
+    to an on-disk temporary file.
+    """
+
+    if not DOCKER.is_file():
+        return 0, None, "docker_unavailable"
+    config_lines = [
+        f"url = {json.dumps(url, ensure_ascii=False)}",
+        "silent",
+        "show-error",
+        f"max-time = {max(1, int(timeout_seconds + 0.999))}",
+    ]
+    if token is not None:
+        config_lines.append(
+            f"header = {json.dumps(f'Authorization: Bearer {token}', ensure_ascii=False)}"
+        )
+    if payload is not None:
+        config_lines.extend(
+            [
+                'request = "POST"',
+                'header = "Content-Type: application/json"',
+                f"data-binary = {json.dumps(canonical_json(payload).decode('utf-8'), ensure_ascii=False)}",
+            ]
+        )
+    config_lines.append('write-out = "\\n%{http_code}"')
+    config = ("\n".join(config_lines) + "\n").encode("utf-8")
+    try:
+        completed = subprocess.run(
+            [
+                os.fspath(DOCKER),
+                "exec",
+                "-i",
+                gateway_container,
+                "/usr/bin/curl",
+                "--config",
+                "-",
+            ],
+            input=config,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+            timeout=max(0.1, timeout_seconds) + 3.0,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return 0, None, "container_transport"
+    if completed.returncode != 0:
+        return 0, None, "container_transport"
+    body, separator, status_raw = completed.stdout.rpartition(b"\n")
+    if not separator:
+        return 0, None, "container_protocol"
+    try:
+        status = int(status_raw)
+    except ValueError:
+        return 0, None, "container_protocol"
+    return _decode_gateway_response(status, body)
+
+
 def _http_json(
     url: str,
     *,
     token: str | None,
     payload: dict[str, Any] | None,
     timeout_seconds: float,
+    gateway_container: str | None,
 ) -> tuple[int, dict[str, Any] | None, str | None]:
+    if gateway_container is not None:
+        return _container_http_json(
+            url,
+            token=token,
+            payload=payload,
+            timeout_seconds=timeout_seconds,
+            gateway_container=gateway_container,
+        )
     encoded = None if payload is None else canonical_json(payload)
     request = urllib.request.Request(
         url,
@@ -572,15 +677,7 @@ def _http_json(
         return error.code, None, f"http_{error.code}"
     except (urllib.error.URLError, TimeoutError, OSError) as error:
         return 0, None, type(error).__name__.lower()
-    if len(body) > MAX_RESPONSE_BYTES:
-        return status, None, "response_too_large"
-    try:
-        value = strict_json(body, "gateway response")
-    except PromotionError:
-        return status, None, "invalid_json"
-    if not isinstance(value, dict):
-        return status, None, "invalid_json_root"
-    return status, value, None
+    return _decode_gateway_response(status, body)
 
 
 def _model_listing_has_model(value: dict[str, Any], model_id: str) -> bool:
@@ -596,6 +693,7 @@ def wait_for_live_gateway(
     token: str,
     model_id: str,
     timeout_seconds: float,
+    gateway_container: str | None,
 ) -> list[dict[str, Any]]:
     deadline = time.monotonic() + timeout_seconds
     delay = 0.20
@@ -606,13 +704,25 @@ def wait_for_live_gateway(
             fail("gateway did not become ready before the bounded deadline")
         probe_timeout = min(5.0, remaining)
         health_status, health, health_error = _http_json(
-            f"{base_url}/healthz", token=None, payload=None, timeout_seconds=probe_timeout
+            f"{base_url}/healthz",
+            token=None,
+            payload=None,
+            timeout_seconds=probe_timeout,
+            gateway_container=gateway_container,
         )
         ready_status, ready, ready_error = _http_json(
-            f"{base_url}/readyz", token=None, payload=None, timeout_seconds=probe_timeout
+            f"{base_url}/readyz",
+            token=None,
+            payload=None,
+            timeout_seconds=probe_timeout,
+            gateway_container=gateway_container,
         )
         model_status, models, model_error = _http_json(
-            f"{base_url}/v1/models", token=token, payload=None, timeout_seconds=probe_timeout
+            f"{base_url}/v1/models",
+            token=token,
+            payload=None,
+            timeout_seconds=probe_timeout,
+            gateway_container=gateway_container,
         )
         passed = (
             health_status == 200
@@ -763,6 +873,7 @@ def run_suite(
     token: str,
     request_timeout_seconds: float,
     output_dir: Path,
+    gateway_container: str | None,
 ) -> list[dict[str, Any]]:
     create_directory(output_dir, "suite output directory", mode=0o750)
     records: list[dict[str, Any]] = []
@@ -782,6 +893,7 @@ def run_suite(
             token=token,
             payload=payload,
             timeout_seconds=request_timeout_seconds,
+            gateway_container=gateway_container,
         )
         record: dict[str, Any] = {
             "case_id": case.case_id,
@@ -938,6 +1050,7 @@ def _response_probe(
     base_url: str,
     token: str,
     request_timeout_seconds: float,
+    gateway_container: str | None,
 ) -> dict[str, Any]:
     reasoning_enabled = isinstance(manifest_document.get("reasoning"), dict)
     payload: dict[str, Any] = {
@@ -953,6 +1066,7 @@ def _response_probe(
         token=token,
         payload=payload,
         timeout_seconds=request_timeout_seconds,
+        gateway_container=gateway_container,
     )
     if status != 200 or response is None or error is not None:
         fail("post-rollback response probe failed")
@@ -1068,6 +1182,7 @@ def _prepare_transaction(
     candidate: Snapshot,
     service: str,
     base_url: str,
+    gateway_container: str | None,
     prompt_suite: Path,
     evidence_dir: Path,
 ) -> tuple[Path, Snapshot, Snapshot]:
@@ -1091,6 +1206,7 @@ def _prepare_transaction(
         "rollback_manifest_sha256": rollback_snapshot.sha256,
         "service": service,
         "base_url": base_url,
+        "gateway_container": gateway_container,
         "prompt_suite": os.fspath(prompt_suite),
         "evidence_directory": os.fspath(evidence_dir),
     }
@@ -1164,6 +1280,7 @@ def promote(args: argparse.Namespace) -> dict[str, Any]:
     candidate_path = Path(args.candidate_manifest).absolute()
     prompt_suite_path = Path(args.prompt_suite).absolute()
     base_url = _validate_base_url(args.base_url)
+    gateway_container = normalize_gateway_container(args.gateway_container)
     suite = load_suite(prompt_suite_path)
     active = read_snapshot(active_path, "active manifest")
     if not args.yes:
@@ -1214,6 +1331,7 @@ def promote(args: argparse.Namespace) -> dict[str, Any]:
         token=token,
         model_id=str(active_validation["model_id"]),
         timeout_seconds=args.startup_timeout_seconds,
+        gateway_container=gateway_container,
     )
     write_json_new(evidence_dir / "baseline-readiness.json", baseline_attempts, "baseline readiness")
     baseline = run_suite(
@@ -1224,6 +1342,7 @@ def promote(args: argparse.Namespace) -> dict[str, Any]:
         token=token,
         request_timeout_seconds=args.request_timeout_seconds,
         output_dir=evidence_dir / "active-output",
+        gateway_container=gateway_container,
     )
     if any(item.get("analysis", {}).get("blocking") for item in baseline):
         write_json_new(
@@ -1244,6 +1363,7 @@ def promote(args: argparse.Namespace) -> dict[str, Any]:
         candidate=candidate,
         service=args.service,
         base_url=base_url,
+        gateway_container=gateway_container,
         prompt_suite=prompt_suite_path,
         evidence_dir=evidence_dir,
     )
@@ -1258,6 +1378,7 @@ def promote(args: argparse.Namespace) -> dict[str, Any]:
         suite=suite,
         token=token,
         base_url=base_url,
+        gateway_container=gateway_container,
         baseline=baseline,
         evidence_dir=evidence_dir,
         state_dir=state_dir,
@@ -1277,6 +1398,7 @@ def _automatic_rollback(
     suite: tuple[SuiteCase, ...],
     token: str,
     base_url: str,
+    gateway_container: str | None,
     service_events: list[dict[str, Any]],
 ) -> dict[str, Any]:
     detail: dict[str, Any] = {
@@ -1299,6 +1421,7 @@ def _automatic_rollback(
                 token=token,
                 model_id=str(active_validation["model_id"]),
                 timeout_seconds=args.startup_timeout_seconds,
+                gateway_container=gateway_container,
             )
             detail["readiness_attempts"] = attempts
             detail["response_probe"] = _response_probe(
@@ -1308,6 +1431,7 @@ def _automatic_rollback(
                 base_url=base_url,
                 token=token,
                 request_timeout_seconds=args.request_timeout_seconds,
+                gateway_container=gateway_container,
             )
             detail["service_response_verified"] = True
     except BaseException as error:
@@ -1327,6 +1451,7 @@ def _execute_promotion(
     suite: tuple[SuiteCase, ...],
     token: str,
     base_url: str,
+    gateway_container: str | None,
     baseline: list[dict[str, Any]],
     evidence_dir: Path,
     state_dir: Path,
@@ -1353,6 +1478,7 @@ def _execute_promotion(
                 token=token,
                 model_id=str(candidate_validation["model_id"]),
                 timeout_seconds=args.startup_timeout_seconds,
+                gateway_container=gateway_container,
             )
             write_json_new(
                 evidence_dir / "candidate-readiness.json",
@@ -1367,6 +1493,7 @@ def _execute_promotion(
                 token=token,
                 request_timeout_seconds=args.request_timeout_seconds,
                 output_dir=evidence_dir / "candidate-output",
+                gateway_container=gateway_container,
             )
             comparison = compare_suites(suite, baseline, candidate_records)
             write_json_new(evidence_dir / "comparison.json", comparison, "generation comparison")
@@ -1390,6 +1517,7 @@ def _execute_promotion(
                 suite=suite,
                 token=token,
                 base_url=base_url,
+                gateway_container=gateway_container,
                 service_events=service_events,
             )
             if switched
@@ -1521,6 +1649,14 @@ def rollback(args: argparse.Namespace) -> dict[str, Any]:
         active_path,
     ) = _load_rollback_inputs(Path(args.activation_outcome))
     candidate_hash = str(transaction["candidate_manifest_sha256"])
+    gateway_container_value = transaction.get("gateway_container", DEFAULT_GATEWAY_CONTAINER)
+    if gateway_container_value is not None and not isinstance(gateway_container_value, str):
+        fail("promotion transaction gateway container is invalid")
+    gateway_container = (
+        None
+        if gateway_container_value is None
+        else normalize_gateway_container(gateway_container_value)
+    )
     preflight = {
         "schema_version": "ullm.lightweight_promotion.rollback_preflight.v1",
         "ready": current.sha256 == candidate_hash and current.raw != rollback_snapshot.raw,
@@ -1565,6 +1701,7 @@ def rollback(args: argparse.Namespace) -> dict[str, Any]:
                 token=token,
                 model_id=str(rollback_validation["model_id"]),
                 timeout_seconds=args.startup_timeout_seconds,
+                gateway_container=gateway_container,
             )
             probe = _response_probe(
                 case=suite[0],
@@ -1573,6 +1710,7 @@ def rollback(args: argparse.Namespace) -> dict[str, Any]:
                 base_url=base_url,
                 token=token,
                 request_timeout_seconds=args.request_timeout_seconds,
+                gateway_container=gateway_container,
             )
     except BaseException as error:
         failed = {
@@ -1645,6 +1783,11 @@ def add_promotion_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--active-manifest", type=Path, default=DEFAULT_ACTIVE_MANIFEST)
     parser.add_argument("--service", default=DEFAULT_SERVICE)
     parser.add_argument("--base-url", default=DEFAULT_BASE_URL)
+    parser.add_argument(
+        "--gateway-container",
+        default=DEFAULT_GATEWAY_CONTAINER,
+        help="local Docker container used to reach the bridge-bound gateway; use 'direct' for host HTTP",
+    )
     parser.add_argument("--token-file", type=Path, default=DEFAULT_TOKEN_FILE)
     parser.add_argument("--prompt-suite", type=Path, default=DEFAULT_PROMPT_SUITE)
     parser.add_argument("--state-dir", type=Path, default=DEFAULT_STATE_DIR)
@@ -1661,6 +1804,10 @@ def parse_promotion_args(argv: Sequence[str] | None = None) -> argparse.Namespac
     args = parser.parse_args(argv)
     if args.startup_timeout_seconds <= 0 or args.request_timeout_seconds <= 0:
         parser.error("timeouts must be positive")
+    try:
+        normalize_gateway_container(args.gateway_container)
+    except PromotionError as error:
+        parser.error(str(error))
     if args.semantic_self_test and not args.yes:
         parser.error("--semantic-self-test requires --yes")
     return args

@@ -103,3 +103,9 @@ evidence directory、state directory を引数で与え、<code>--yes</code> を
 
 どちらの tool も active manifest と service を操作するため、GPU を使う他の計測がある場合は
 その計測が終わるまで待つ。これは承認ではなく共有資源の衝突回避である。
+
+Docker bridge にのみ bind された gateway は host から直接 probe できないことがある。その場合は
+既定の <code>--gateway-container open-webui</code> により、同じローカル network の container から
+HTTP を実行する。これは候補固有の apparatus ではなく transport の選択であり、別の配置では
+<code>--gateway-container direct</code> を指定できる。bearer token と request body は container の
+curl process argument に渡さず、stdin の一時 config 経由で渡す。
