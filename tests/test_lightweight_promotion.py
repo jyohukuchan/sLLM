@@ -99,6 +99,44 @@ def test_promotion_preflight_validator_preserves_typed_execution_settings(
     assert summary["worker"]["execution"] == document["worker"]["execution"]
 
 
+def test_promotion_preflight_validator_preserves_aq4_grouped_execution_settings(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "aq4-v2-grouped"
+    shutil.copytree(SERVED_MODEL_FIXTURES / "aq4", root)
+    manifest = root / "served-model.json"
+    document = json.loads(manifest.read_text(encoding="utf-8"))
+    document["schema_version"] = "ullm.served_model.v2"
+    document["worker"]["protocol"] = "ullm.worker.v2"
+    document["worker"]["required_environment"].append(
+        "ULLM_REQUIRE_HIP_PAGED_DECODE_SPLIT_KERNEL"
+    )
+    document["worker"]["execution"] = {
+        "paged_decode_attention": {
+            "kernel": "aq4_gqa_grouped_split",
+            "split_tile": 128,
+        }
+    }
+    document["reasoning"] = {
+        "enabled_by_default": False,
+        "dialect_id": "synthetic.single-token.v1",
+        "start_token_ids": [248068],
+        "end_token_ids": [248069],
+        "forced_end_token_ids": [248069],
+        "initial_phase": "reasoning",
+        "eos_policy": "close",
+        "effort_budgets": {"low": 32, "medium": 64, "high": 128},
+        "max_budget_tokens": 128,
+        "reserved_answer_tokens": 1,
+        "history_reasoning_policy": "omit",
+    }
+    manifest.write_text(json.dumps(document), encoding="utf-8")
+
+    summary = PROMOTION.validate_manifest(manifest)
+
+    assert summary["worker"]["execution"] == document["worker"]["execution"]
+
+
 def test_container_gateway_transport_keeps_bearer_token_out_of_process_arguments(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -237,6 +275,29 @@ def test_promotion_and_rollback_preserve_execution_contract_bytes(
     assert PROMOTION.atomic_switch(active, rollback, candidate) is True
     assert active.read_bytes() == candidate
     assert b'"split_tile":20' in active.read_bytes()
+
+    assert PROMOTION.atomic_switch(active, candidate, rollback) is True
+    assert active.read_bytes() == rollback
+
+
+def test_promotion_and_rollback_preserve_aq4_execution_contract_bytes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The raw-byte exchange must not reserialize the AQ4_0 selector."""
+
+    active = tmp_path / "active.json"
+    rollback = b'{\n  "worker" : { "execution" : null }\n}\n'
+    candidate = (
+        b'{"worker":{"execution":{"paged_decode_attention":'
+        b'{"kernel":"aq4_gqa_grouped_split","split_tile":128}}}}\n'
+    )
+    active.write_bytes(rollback)
+    monkeypatch.setattr(PROMOTION, "_require_active_parent", lambda _path: None)
+
+    assert PROMOTION.atomic_switch(active, rollback, candidate) is True
+    assert active.read_bytes() == candidate
+    assert b'"kernel":"aq4_gqa_grouped_split"' in active.read_bytes()
+    assert b'"split_tile":128' in active.read_bytes()
 
     assert PROMOTION.atomic_switch(active, candidate, rollback) is True
     assert active.read_bytes() == rollback
