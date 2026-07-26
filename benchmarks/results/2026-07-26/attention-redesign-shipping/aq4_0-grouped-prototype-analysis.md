@@ -85,3 +85,22 @@ source, a typed served-model manifest, a fresh worker binary, the same-model
 ten-prompt quality comparison, and the promotion/rollback tooling.  `SQ8_0`
 remains a separately evaluated candidate and must never replace the active
 `AQ4_0` product through `active.json`.
+
+## Shipping outcome
+
+The final candidate was rebuilt from the current committed BQ base plus the
+same shape-gated source patch as
+`c8074928e22b27801df78d65508fdd619d13a748`.  Its worker SHA-256 is
+`7e34eed1c3aa2bef80e248b3446ff6668300d0aa4e99e03dc3ff9c7a8d238fa3`.
+The fresh four-run C=1339 control is 74.110977 tok/s direct and 74.509830 tok/s
+grouped (1.005382×).  It confirms the earlier stable result rather than the
+cold-contaminated first repeat.
+
+Manifest `69a5e1eb2e7713a1d017332539a587b9a13cf925cbfb28d7c89719ba6709ec2e`
+binds `AQ4_0` / gfx1201 / `rdna4_aq4_resident` to
+`aq4_gqa_grouped_split`, tile 128, and the new worker hash.  The generic
+promotion tool captured actual P3 and candidate responses for the fixed ten
+prompt suite, found no blocking finding, performed one successful restart, and
+left the candidate active.  All ten responses matched the P3 controls in this
+deterministic capture; equality is recorded diagnostically rather than treated
+as the criterion.  The active model is still `AQ4_0`, never `SQ8_0`.

@@ -954,7 +954,34 @@ needs a new full-model validation, so it is deliberately not called an
 application of BH's redesign.  The conditional Amdahl ceiling obtained by
 pretending the 1.790050x SQ8 result accelerated all current 9.08552% is only
 1.0417747x (+4.18%), not an AQ4 performance forecast.  No `AQ4_0` promotion
-is justified.
+was justified at this initial-audit point.
+
+### `AQ4_0` 4:1×256 specialization and promotion
+
+The literal `SQ8_0` body remains inapplicable, but its GQA-cooperative idea
+was implemented as a separate, shape-closed `AQ4_0` body in source commit
+`c8074928e22b27801df78d65508fdd619d13a748` (local branch
+`bq-aq4-grouped-c807`).  Four consumer wave32s calculate the four query heads
+of one KV head while four loader wave32s stage the one 256-wide K row and V
+row in LDS.  The existing split workspace and merge body remain unchanged;
+every other geometry takes the existing path.  This avoids incorrectly
+describing the 5:1×128 tile-20 body as reusable for the 4:1×256 model.
+
+The candidate full-model control at C=1339, six warmup steps and two alternating
+32-step measured repeats was 74.110977 tok/s direct versus 74.509830 tok/s
+grouped: **1.005382×** (+0.398854 tok/s).  These are profile-driver timed
+decode intervals, not ROCprof range times.  All four 32-token greedy sequences
+were identical; that is a narrow diagnostic, not the quality criterion.
+
+Candidate manifest `69a5e1eb2e7713a1d017332539a587b9a13cf925cbfb28d7c89719ba6709ec2e`
+then passed the same-model lightweight promotion suite.  All ten candidate
+requests completed without automated blocking findings and their generated
+text matched the P3 control in this deterministic suite.  `tools/promote-served-model.py`
+performed one successful service restart and atomically promoted it.  The
+active model remains `AQ4_0` Qwen3.5-9B; `SQ8_0` was not promoted.  Full raw
+evidence is under
+`benchmarks/results/2026-07-26/attention-redesign-shipping/aq4_0-grouped-final-c8074928-window-20260727T015800Z/`
+and `aq4_0-grouped-promotion-c8074928-20260727T020500Z/`.
 
 ### Service-candidate execution contract
 
@@ -973,13 +1000,15 @@ Commit `bfc76a72` adds an optional, fail-closed v2 manifest contract:
 }
 ```
 
-Unknown keys and unsupported values fail validation.  It is currently limited
-to `SQ8_0`, gfx1201, `rdna4_w8a8_block_ck`, and the paged-decode split HIP
-guard; selectors cannot enter through `required_environment`.  Manifest-mode
-gateway startup clears inherited experimental selectors, injects only the
-admitted grouped/tile/allow-multitile set, and leaves pipeline unrepresentable.
-The worker independently checks the exact state.  The existing active `AQ4_0`
-P3 manifest validates unchanged with `execution: null` and SHA-256
+Unknown keys and unsupported values fail validation.  `gqa_grouped_split`
+remains limited to `SQ8_0`, gfx1201, `rdna4_w8a8_block_ck`, and tiles
+`20|128|256|512`.  The separate `aq4_gqa_grouped_split` is limited to
+`AQ4_0`, gfx1201, `rdna4_aq4_resident`, the split-HIP guard, and tile `128`.
+Selectors cannot enter through `required_environment`.  Manifest-mode gateway
+startup clears inherited experimental selectors and injects only the admitted
+setting; the worker independently validates the exact state, and pipeline is
+not representable.  The original P3 manifest validates unchanged with
+`execution: null` and SHA-256
 `a98910dc5bf59dc768e5bcd20bcf58968699540eb1b33df33066dcb6f274fe49`.
 Promotion/rollback retain typed fields because they atomically swap raw bytes;
 the round-trip test covers this.

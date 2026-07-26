@@ -25,8 +25,9 @@ served-model manifest は tile 20 のような typed execution setting を表現
   Qwen3.5-9B config は 32 層（linear 24、full 8）、Q/KV=16/4、head/value dim=256
   の GQA 4:1 である。
 - BH grouped body の 5:1 / 128 shape と異なるため、`AQ4_0` への直接適用は不可と
-  判定した。4:1 / 256 用の新 kernel は prefill-attention 作業が所有する runtime source
-  を変更する必要があり、本タスクでは実装・昇格しない。
+  判定した。ただし GQA 協調の原理は適用可能なので、共有 source を上書きせず隔離
+  worktree で 4:1 / 256 専用 body を実装した。これは BH の literal tile-20 body の流用
+  ではなく、新規の shape-closed specialization である。
 - 同一 source commit と worker binary を固定した direct / grouped-tile-20 `SQ8_0`
   manifest と、固定 ten-prompt suite capture の隔離実行を準備した。比較は exact match
   を閾値にせず、実生成文と blocking failure を読む。
@@ -37,19 +38,31 @@ served-model manifest は tile 20 のような typed execution setting を表現
   `a98910dc5bf59dc768e5bcd20bcf58968699540eb1b33df33066dcb6f274fe49` だった。
 - current trace は direct paged-attention kernel 0 回、split partial/merge 512 launches、
   37.378910 ms / 411.411732 ms = 9.08552% を確認した。BH body の 5:1/128 条件とは
-  `AQ4_0` の 4:1/256 が異なるため、直接適用不可・実装なし・本番昇格なしの結論を維持する。
+  `AQ4_0` の 4:1/256 が異なるため、literal 直接適用不可という結論を維持する。
 - `AQ4_0` P3 は unchanged manifest で全 10 request を完走した。`SQ8_0` two-arm
   capture も全 request 成功かつ自動 blocking なしだったが、grouped 側の Python code
   response はコードを出さず、JavaScript 説明には誤り、Japanese multiturn は不完全だった。
   したがって exact-match 0% を閾値にせず、実文章を読んだ結果として quality approval は hold
   とした。`SQ8_0` はいずれにせよ active `AQ4_0` を置換するため昇格しない。
+- 隔離 source commit `c8074928` の `AQ4_0` full-model A/B（C=1339、warmup 6、各 32
+  decode step ×2）は direct 74.110977 tok/s、4:1×256 grouped 74.509830 tok/s、
+  **1.005382×**（+0.398854 tok/s）だった。token `4445` の 32-token 列は各 run で同一
+  だが、これは狭い診断であり文章品質 gate には使わない。
+- typed `aq4_gqa_grouped_split` / tile 128 manifest `69a5…ec2e` を
+  `tools/promote-served-model.py --yes` で昇格した。active/candidate の固定 10 prompt は
+  全件成功、blocking なし、生成文も全件同一だった。exact match 1.000 は記録値であり、
+  合否閾値ではない。service restart は 1 回で成功し、`NRestarts=0`。active は現在この
+  `AQ4_0` candidate であり、`SQ8_0` は昇格していない。
 
 ## 次の行動
 
-- `AQ4_0` の 4:1/256 full-attention shape 用の新 kernel が必要なら、BH redesign の
-  「適用」ではなく新規設計として別 task で扱い、full-model validation を先に要求する。
-  prefill-attention workstream が所有する kernel source は本件では変更しない。
+- active `AQ4_0` candidate の source commit `c8074928` は local branch
+  `bq-aq4-grouped-c807` に固定した。共有 runtime source の owner が未確定差分を commit
+  した後、同じ shape-gated patch を main に統合する。service を再起動して取り直す必要は
+  ない限り、新たな service window は使わない。
 - `SQ8_0` grouped tile-20 は service-candidate evidence として保持するが、今回の fixed
   suite の実文章品質は hold のままとする。将来再評価するなら、同じ model/control で
   code/multiturn completion を十分に観察できる prompt contract を別証跡で設計する。
-- active manifest は現行 `AQ4_0` P3 のまま維持する。`SQ8_0` promotion は実行しない。
+- active manifest は `AQ4_0` grouped candidate
+  `69a5e1eb2e7713a1d017332539a587b9a13cf925cbfb28d7c89719ba6709ec2e`。`SQ8_0`
+  promotion は実行しない。
