@@ -94,3 +94,39 @@ fragments; a clean native rebuild was required before the successful rerun.
 The two full multi-step cases continued to match their expected cached and
 full-reprefill sequences. Evidence:
 `benchmarks/results/2026-07-27/gemma4-activation-device-v0.1/raw/dj/gemma-proportional-rope-real-activation-validation-v4.json`.
+
+## Step 3: attention/residual resident region
+
+The region now spans both sides of every Gemma attention layer:
+
+```text
+host residual -> input RMSNorm -> Q/K/V projections -> Q/K head RMSNorm
+              -> default or proportional RoPE -> paged KV write -> direct paged attention
+              -> O projection -> post-attention RMSNorm -> residual add -> host residual
+```
+
+No split-attention kernel was added. Sliding layers retain their 8Q/1KV/256
+full-width/default RoPE geometry; full layers retain their 8Q/1KV/512 partial
+proportional RoPE geometry. K/V sharing continues to use the already-populated
+source cache. All activation-side work remains device-resident through O and
+the post-attention residual; only the completed residual is returned for the
+existing MLP/PLE region.
+
+The three R9700 repeats measured 28.811 tok/s decode and 35.608 tok/s
+prefill, or 20.53% of the 140.341 tok/s decode roofline. This is +33.97%
+decode / +45.40% prefill versus step 2, and +83.12% / +92.02% versus the
+original baseline. The direct multi-step differential against the unchanged
+host attention path on the six real capital-France activations measured max
+abs/max rel `0.00002288818359375` / `0.10881800949573517` over layer outputs,
+`0.000019073486328125` / `0.025056861340999603` after final norm, and
+`0.00001430511474609375` / `0.2142857164144516` for logits. Both known cached
+and full-reprefill continuations passed.
+
+The host profile records zero host-visible paged-attention or paged-KV-write
+calls. It records 288 host-visible matvec calls per four decode tokens, not
+zero: 280 are the two PLE projections for 35 layers, with the remaining eight
+from embedding/head work. This refutes the earlier claim that all 688 remaining
+matvecs were attention-side. The raw evidence is
+`benchmarks/results/2026-07-27/gemma4-activation-device-v0.1/raw/dj/attention-region-benchmark-v1.json`
+and
+`benchmarks/results/2026-07-27/gemma4-activation-device-v0.1/raw/dj/attention-region-validation-v2.json`.

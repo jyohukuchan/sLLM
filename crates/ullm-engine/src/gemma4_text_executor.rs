@@ -31,7 +31,8 @@ use std::time::Instant;
 use ullm_runtime_sys::{
     DeviceInfo, RuntimeBuffer, RuntimeContext, RuntimeStream, add_f32, bf16_row_f32,
     device_count, device_info, gemma_proportional_rope_f32, gelu_tanh_mul_f32,
-    matvec_bf16_f32, paged_decode_attn_f32, paged_kv_write_f32, rmsnorm_f32,
+    matvec_bf16_f32, paged_decode_attn_f32, paged_kv_write_f32, rmsnorm_f32, rope_f32,
+    segmented_rmsnorm_f32,
 };
 
 pub const GEMMA4_TEXT_MODEL_FILE: &str = "model.safetensors";
@@ -50,6 +51,9 @@ pub const GEMMA4_TEXT_REQUIRED_HIP_BF16_ROW_KERNEL_ENV: &str =
 pub const GEMMA4_TEXT_REQUIRED_HIP_RMSNORM_KERNEL_ENV: &str =
     "ULLM_REQUIRE_HIP_RMSNORM_KERNEL";
 pub const GEMMA4_TEXT_REQUIRED_HIP_ADD_KERNEL_ENV: &str = "ULLM_REQUIRE_HIP_ADD_KERNEL";
+pub const GEMMA4_TEXT_REQUIRED_HIP_ROPE_KERNEL_ENV: &str = "ULLM_REQUIRE_HIP_ROPE_KERNEL";
+pub const GEMMA4_TEXT_REQUIRED_HIP_PROPORTIONAL_ROPE_KERNEL_ENV: &str =
+    "ULLM_REQUIRE_HIP_GEMMA_PROPORTIONAL_ROPE_KERNEL";
 pub const GEMMA4_TEXT_REQUIRED_HIP_PAGED_DECODE_ENV: &str =
     "ULLM_REQUIRE_HIP_PAGED_DECODE_ATTN_KERNEL";
 pub const GEMMA4_TEXT_REQUIRED_HIP_PAGED_KV_WRITE_ENV: &str =
@@ -1116,7 +1120,18 @@ struct Bf16MatvecRuntime {
     mlp_post_normed: Option<RuntimeBuffer>,
     kv_key_input: Option<RuntimeBuffer>,
     kv_value_input: Option<RuntimeBuffer>,
+    attention_input_norm_weight: Option<RuntimeBuffer>,
+    attention_input_normed: Option<RuntimeBuffer>,
+    attention_q_norm_weight: Option<RuntimeBuffer>,
+    attention_k_norm_weight: Option<RuntimeBuffer>,
+    attention_value_norm_weight: Option<RuntimeBuffer>,
+    attention_post_norm_weight: Option<RuntimeBuffer>,
     attention_query: Option<RuntimeBuffer>,
+    attention_query_normed: Option<RuntimeBuffer>,
+    attention_key: Option<RuntimeBuffer>,
+    attention_key_normed: Option<RuntimeBuffer>,
+    attention_value: Option<RuntimeBuffer>,
+    attention_value_normed: Option<RuntimeBuffer>,
     attention_output: Option<RuntimeBuffer>,
     resident_logical_bytes: Gemma4ResidentLogicalBytes,
     resident_host_profile: Gemma4ResidentHostProfile,
@@ -1131,6 +1146,8 @@ impl Bf16MatvecRuntime {
             GEMMA4_TEXT_REQUIRED_HIP_BF16_ROW_KERNEL_ENV,
             GEMMA4_TEXT_REQUIRED_HIP_RMSNORM_KERNEL_ENV,
             GEMMA4_TEXT_REQUIRED_HIP_ADD_KERNEL_ENV,
+            GEMMA4_TEXT_REQUIRED_HIP_ROPE_KERNEL_ENV,
+            GEMMA4_TEXT_REQUIRED_HIP_PROPORTIONAL_ROPE_KERNEL_ENV,
         ] {
             if env::var(required).ok().as_deref() != Some("1") {
                 return Err(format!(
@@ -1188,7 +1205,18 @@ impl Bf16MatvecRuntime {
             mlp_post_normed: None,
             kv_key_input: None,
             kv_value_input: None,
+            attention_input_norm_weight: None,
+            attention_input_normed: None,
+            attention_q_norm_weight: None,
+            attention_k_norm_weight: None,
+            attention_value_norm_weight: None,
+            attention_post_norm_weight: None,
             attention_query: None,
+            attention_query_normed: None,
+            attention_key: None,
+            attention_key_normed: None,
+            attention_value: None,
+            attention_value_normed: None,
             attention_output: None,
             resident_logical_bytes: Gemma4ResidentLogicalBytes::default(),
             resident_host_profile: Gemma4ResidentHostProfile::default(),
@@ -1215,7 +1243,18 @@ impl Bf16MatvecRuntime {
             &self.mlp_post_normed,
             &self.kv_key_input,
             &self.kv_value_input,
+            &self.attention_input_norm_weight,
+            &self.attention_input_normed,
+            &self.attention_q_norm_weight,
+            &self.attention_k_norm_weight,
+            &self.attention_value_norm_weight,
+            &self.attention_post_norm_weight,
             &self.attention_query,
+            &self.attention_query_normed,
+            &self.attention_key,
+            &self.attention_key_normed,
+            &self.attention_value,
+            &self.attention_value_normed,
             &self.attention_output,
         ]
         .into_iter()
@@ -2398,6 +2437,139 @@ impl Gemma4DeviceKvCaches {
 }
 
 impl Bf16MatvecRuntime {
+    /// One complete Gemma attention/residual segment.  The only activation
+    /// transfers are the residual entering and leaving this method; all
+    /// normalization, projections, proportional RoPE, KV write, attention,
+    /// output projection, and post-attention residual remain on the device.
+    #[allow(clippy::too_many_arguments)]
+    fn attention_norm_residual_resident(
+        &mut self,
+        residual: &[f32],
+        input_weight: &RuntimeBuffer,
+        q_matrix: &RuntimeBuffer,
+        k_matrix: Option<&RuntimeBuffer>,
+        v_matrix: Option<&RuntimeBuffer>,
+        o_matrix: &RuntimeBuffer,
+        q_norm_weight: &RuntimeBuffer,
+        k_norm_weight: Option<&RuntimeBuffer>,
+        post_weight: &RuntimeBuffer,
+        hidden: usize,
+        q_heads: usize,
+        kv_heads: usize,
+        head_dim: usize,
+        rope: &ResidentRopeDescriptor,
+        position: usize,
+        epsilon: f32,
+        own_cache: Option<&mut Gemma4DeviceKvCache>,
+        shared_cache: Option<&Gemma4DeviceKvCache>,
+    ) -> Result<Vec<f32>, String> {
+        if residual.len() != hidden {
+            return Err(format!("Gemma4 resident attention residual width mismatch: expected {hidden}, got {}", residual.len()));
+        }
+        let owns_cache = own_cache.is_some();
+        let q_width = q_heads.checked_mul(head_dim).ok_or_else(|| "Gemma4 resident Q width overflows".to_string())?;
+        let kv_width = kv_heads.checked_mul(head_dim).ok_or_else(|| "Gemma4 resident KV width overflows".to_string())?;
+        let rotary_dim = match rope.kind {
+            ResidentRopeKind::Proportional => ((rope.partial_rotary_factor.unwrap_or(1.0) * head_dim as f32) / 2.0).floor() as usize * 2,
+            ResidentRopeKind::Default => rope.rotary_dim.unwrap_or(head_dim),
+            ResidentRopeKind::Mrope => return Err("Gemma resident attention does not support mRoPE".into()),
+        };
+        if rotary_dim == 0 { return Err("Gemma resident attention RoPE has zero rotary width".into()); }
+        if own_cache.is_some() != (k_matrix.is_some() && v_matrix.is_some() && k_norm_weight.is_some()) {
+            return Err("Gemma resident attention K/V projection/cache contract is inconsistent".into());
+        }
+        if own_cache.is_none() && shared_cache.is_none() {
+            return Err("Gemma resident attention needs an own or shared device KV cache".into());
+        }
+        let hidden_bytes = hidden.checked_mul(std::mem::size_of::<f32>()).ok_or_else(|| "Gemma resident attention hidden bytes overflow".to_string())?;
+        let q_bytes = q_width.checked_mul(std::mem::size_of::<f32>()).ok_or_else(|| "Gemma resident attention Q bytes overflow".to_string())?;
+        let kv_bytes = kv_width.checked_mul(std::mem::size_of::<f32>()).ok_or_else(|| "Gemma resident attention KV bytes overflow".to_string())?;
+        for (slot, bytes, label) in [
+            (&mut self.resident_input, hidden_bytes, "resident attention residual"),
+            (&mut self.attention_input_norm_weight, hidden_bytes, "resident attention input gamma"),
+            (&mut self.attention_input_normed, hidden_bytes, "resident attention input norm"),
+            (&mut self.attention_q_norm_weight, head_dim * 4, "resident attention Q gamma"),
+            (&mut self.attention_post_norm_weight, hidden_bytes, "resident attention post gamma"),
+            (&mut self.attention_query, q_bytes, "resident attention Q"),
+            (&mut self.attention_query_normed, q_bytes, "resident attention normalized Q"),
+            (&mut self.attention_output, q_bytes, "resident attention output"),
+            (&mut self.resident_output, hidden_bytes, "resident attention O projection"),
+            (&mut self.mlp_pre_normed, hidden_bytes, "resident attention residual output"),
+        ] {
+            Self::ensure_buffer(&mut self.context, slot, bytes, label, &mut self.resident_host_profile)?;
+        }
+        if owns_cache {
+            for (slot, bytes, label) in [
+                (&mut self.attention_k_norm_weight, head_dim * 4, "resident attention K gamma"),
+                (&mut self.attention_value_norm_weight, head_dim * 4, "resident attention V gamma"),
+                (&mut self.attention_key, kv_bytes, "resident attention K"),
+                (&mut self.attention_key_normed, kv_bytes, "resident attention normalized K"),
+                (&mut self.attention_value, kv_bytes, "resident attention V"),
+                (&mut self.attention_value_normed, kv_bytes, "resident attention normalized V"),
+            ] {
+                Self::ensure_buffer(&mut self.context, slot, bytes, label, &mut self.resident_host_profile)?;
+            }
+        }
+        self.resident_input.as_mut().expect("resident attention residual allocated")
+            .copy_from_host(0, &encode_f32_to_bytes(residual), Some(&mut self.stream))?;
+        bf16_row_f32(input_weight, 1, hidden, 0, self.attention_input_norm_weight.as_mut().unwrap(), Some(&mut self.stream))?;
+        rmsnorm_f32(self.resident_input.as_ref().unwrap(), self.attention_input_norm_weight.as_ref().unwrap(), hidden, epsilon, self.attention_input_normed.as_mut().unwrap(), Some(&mut self.stream))?;
+        matvec_bf16_f32(q_matrix, self.attention_input_normed.as_ref().unwrap(), q_width, hidden, self.attention_query.as_mut().unwrap(), Some(&mut self.stream))?;
+        bf16_row_f32(q_norm_weight, 1, head_dim, 0, self.attention_q_norm_weight.as_mut().unwrap(), Some(&mut self.stream))?;
+        segmented_rmsnorm_f32(self.attention_query.as_ref().unwrap(), self.attention_q_norm_weight.as_ref().unwrap(), q_heads, head_dim, epsilon, self.attention_query_normed.as_mut().unwrap(), Some(&mut self.stream))?;
+        match rope.kind {
+            ResidentRopeKind::Proportional => gemma_proportional_rope_f32(self.attention_query_normed.as_ref().unwrap(), 1, q_heads, head_dim, rotary_dim, position, rope.theta, self.attention_query.as_mut().unwrap(), Some(&mut self.stream))?,
+            ResidentRopeKind::Default => rope_f32(self.attention_query_normed.as_ref().unwrap(), 1, q_heads, head_dim, rotary_dim, position, rope.theta, self.attention_query.as_mut().unwrap(), Some(&mut self.stream))?,
+            ResidentRopeKind::Mrope => unreachable!(),
+        }
+
+        if let Some(cache) = own_cache {
+            matvec_bf16_f32(k_matrix.unwrap(), self.attention_input_normed.as_ref().unwrap(), kv_width, hidden, self.attention_key.as_mut().unwrap(), Some(&mut self.stream))?;
+            matvec_bf16_f32(v_matrix.unwrap(), self.attention_input_normed.as_ref().unwrap(), kv_width, hidden, self.attention_value.as_mut().unwrap(), Some(&mut self.stream))?;
+            bf16_row_f32(k_norm_weight.unwrap(), 1, head_dim, 0, self.attention_k_norm_weight.as_mut().unwrap(), Some(&mut self.stream))?;
+            self.attention_value_norm_weight.as_mut().unwrap().copy_from_host(0, &encode_f32_to_bytes(&vec![1.0_f32; head_dim]), Some(&mut self.stream))?;
+            segmented_rmsnorm_f32(self.attention_key.as_ref().unwrap(), self.attention_k_norm_weight.as_ref().unwrap(), kv_heads, head_dim, epsilon, self.attention_key_normed.as_mut().unwrap(), Some(&mut self.stream))?;
+            match rope.kind {
+                ResidentRopeKind::Proportional => gemma_proportional_rope_f32(self.attention_key_normed.as_ref().unwrap(), 1, kv_heads, head_dim, rotary_dim, position, rope.theta, self.attention_key.as_mut().unwrap(), Some(&mut self.stream))?,
+                ResidentRopeKind::Default => rope_f32(self.attention_key_normed.as_ref().unwrap(), 1, kv_heads, head_dim, rotary_dim, position, rope.theta, self.attention_key.as_mut().unwrap(), Some(&mut self.stream))?,
+                ResidentRopeKind::Mrope => unreachable!(),
+            }
+            segmented_rmsnorm_f32(self.attention_value.as_ref().unwrap(), self.attention_value_norm_weight.as_ref().unwrap(), kv_heads, head_dim, epsilon, self.attention_value_normed.as_mut().unwrap(), Some(&mut self.stream))?;
+            let write_position = cache.write_position()?;
+            let write_table = cache.write_table.as_ref().unwrap_or(&cache.read_table);
+            paged_kv_write_f32(self.attention_key.as_ref().unwrap(), self.attention_value_normed.as_ref().unwrap(), write_table, write_position, GEMMA4_DEVICE_KV_BLOCK_SIZE, cache.capacity_tokens, cache.kv_heads, cache.head_dim, cache.head_dim, &mut cache.key, &mut cache.value, Some(&mut self.stream))?;
+            cache.record_append(&mut self.stream)?;
+            self.account_device_kv(0, kv_bytes.checked_mul(2).ok_or_else(|| "Gemma resident KV write bytes overflow".to_string())?, false)?;
+            self.attention_device_resident(cache, q_heads, kv_heads, head_dim)?;
+        } else {
+            self.attention_device_resident(shared_cache.unwrap(), q_heads, kv_heads, head_dim)?;
+        }
+        matvec_bf16_f32(o_matrix, self.attention_output.as_ref().unwrap(), hidden, q_width, self.resident_output.as_mut().unwrap(), Some(&mut self.stream))?;
+        bf16_row_f32(post_weight, 1, hidden, 0, self.attention_post_norm_weight.as_mut().unwrap(), Some(&mut self.stream))?;
+        rmsnorm_f32(self.resident_output.as_ref().unwrap(), self.attention_post_norm_weight.as_ref().unwrap(), hidden, epsilon, self.attention_input_normed.as_mut().unwrap(), Some(&mut self.stream))?;
+        add_f32(self.resident_input.as_ref().unwrap(), self.attention_input_normed.as_ref().unwrap(), hidden, self.mlp_pre_normed.as_mut().unwrap(), Some(&mut self.stream))?;
+        let mut bytes = vec![0_u8; hidden_bytes];
+        self.mlp_pre_normed.as_mut().unwrap().copy_to_host(0, &mut bytes, Some(&mut self.stream))?;
+        self.stream.synchronize()?;
+        let output = decode_f32_le_values(&bytes);
+        if output.iter().any(|value| !value.is_finite()) { return Err("Gemma resident attention region produced non-finite output".into()); }
+        let matrix_bytes = |rows: usize, cols: usize| rows.checked_mul(cols).and_then(|n| n.checked_mul(2)).ok_or_else(|| "Gemma resident attention logical bytes overflow".to_string());
+        self.account_resident_weight_read(matrix_bytes(1, hidden)?, false)?;
+        self.account_resident_weight_read(matrix_bytes(q_width, hidden)?, true)?;
+        if owns_cache { self.account_resident_weight_read(matrix_bytes(kv_width, hidden)?, true)?; self.account_resident_weight_read(matrix_bytes(kv_width, hidden)?, true)?; self.account_resident_weight_read(matrix_bytes(1, head_dim)?, false)?; }
+        self.account_resident_weight_read(matrix_bytes(1, head_dim)?, false)?;
+        self.account_resident_weight_read(matrix_bytes(hidden, q_width)?, true)?;
+        self.account_resident_weight_read(matrix_bytes(1, hidden)?, false)?;
+        Ok(output)
+    }
+
+    fn attention_device_resident(&mut self, cache: &Gemma4DeviceKvCache, q_heads: usize, kv_heads: usize, head_dim: usize) -> Result<(), String> {
+        if cache.cache_len == 0 { return Err("Gemma resident attention cache is empty".into()); }
+        paged_decode_attn_f32(self.attention_query.as_ref().unwrap(), &cache.key, &cache.value, &cache.read_table, cache.cache_len, GEMMA4_DEVICE_KV_BLOCK_SIZE, cache.capacity_tokens, q_heads, kv_heads, head_dim, head_dim, 1.0, self.attention_output.as_mut().unwrap(), Some(&mut self.stream))?;
+        let read = cache.cache_len.checked_mul(cache.width()?).and_then(|n| n.checked_mul(8)).ok_or_else(|| "Gemma resident KV read bytes overflow".to_string())?;
+        self.account_device_kv(read, 0, true)
+    }
+
     fn append_device_kv(
         &mut self,
         cache: &mut Gemma4DeviceKvCache,
@@ -3212,29 +3384,38 @@ impl Gemma4TextExecutor {
                 per_layer_input.len()
             ));
         }
-        let residual_attention = hidden_states.to_vec();
-        let input_norm_weight =
-            self.read_weight_vector(&layer_tensor(layer_index, "input_layernorm.weight"), hidden)?;
-        let input_norm = rms_norm(
-            hidden_states,
-            Some(&input_norm_weight),
-            decoder.rms_norm_epsilon,
-        )?;
-        let attention = self.forward_attention(layer_index, &input_norm, position)?;
-        let post_attention_weight = self.read_weight_vector(
-            &layer_tensor(layer_index, "post_attention_layernorm.weight"),
-            hidden,
-        )?;
-        let post_attention = rms_norm(
-            &attention,
-            Some(&post_attention_weight),
-            decoder.rms_norm_epsilon,
-        )?;
-        let attention_residual = add_vectors(
-            &residual_attention,
-            &post_attention,
-            "Gemma4 attention residual",
-        )?;
+        let attention_residual = if env::var("ULLM_GEMMA4_DISABLE_ATTENTION_REGION").ok().as_deref() != Some("1")
+            && matches!(self.weights, Gemma4WeightStorage::Resident(_))
+            && matches!(self.caches, Gemma4KvStorage::Device(_))
+        {
+            self.forward_attention_norm_resident(layer_index, hidden_states, position)?
+        } else {
+            let residual_attention = hidden_states.to_vec();
+            let input_norm_weight = self.read_weight_vector(
+                &layer_tensor(layer_index, "input_layernorm.weight"),
+                hidden,
+            )?;
+            let input_norm = rms_norm(
+                hidden_states,
+                Some(&input_norm_weight),
+                decoder.rms_norm_epsilon,
+            )?;
+            let attention = self.forward_attention(layer_index, &input_norm, position)?;
+            let post_attention_weight = self.read_weight_vector(
+                &layer_tensor(layer_index, "post_attention_layernorm.weight"),
+                hidden,
+            )?;
+            let post_attention = rms_norm(
+                &attention,
+                Some(&post_attention_weight),
+                decoder.rms_norm_epsilon,
+            )?;
+            add_vectors(
+                &residual_attention,
+                &post_attention,
+                "Gemma4 attention residual",
+            )?
+        };
 
         let mlp_residual = if let Gemma4WeightStorage::Resident(weights) = &self.weights {
             let intermediate = match layer.mlp {
@@ -3330,6 +3511,43 @@ impl Gemma4TextExecutor {
             self.read_weight_vector(&layer_tensor(layer_index, "layer_scalar"), 1)?[0];
         scale_in_place(&mut output, layer_scalar, "Gemma4 layer scalar")?;
         Ok(output)
+    }
+
+    fn forward_attention_norm_resident(
+        &mut self,
+        layer_index: usize,
+        hidden_states: &[f32],
+        position: usize,
+    ) -> Result<Vec<f32>, String> {
+        let decoder = self.resident_descriptor.decoder.clone();
+        let layer = self.layer_descriptor(layer_index)?.clone();
+        let attention = layer.attention;
+        let rope = attention.rope.clone().ok_or_else(|| format!("Gemma4 descriptor layer {layer_index} is missing RoPE"))?;
+        let hidden = decoder.hidden_size;
+        let q_width = attention.q_heads.checked_mul(attention.head_dim).ok_or_else(|| "Gemma resident Q width overflows".to_string())?;
+        let kv_width = attention.kv_heads.checked_mul(attention.head_dim).ok_or_else(|| "Gemma resident KV width overflows".to_string())?;
+        let weights = match &self.weights { Gemma4WeightStorage::Resident(weights) => weights, Gemma4WeightStorage::Streamed(_) => return Err("Gemma resident attention region requires resident weights".into()) };
+        let input_weight = &weights.tensor(&layer_tensor(layer_index, "input_layernorm.weight"), &[hidden])?.buffer;
+        let q_matrix = &weights.tensor(&layer_tensor(layer_index, "self_attn.q_proj.weight"), &[q_width, hidden])?.buffer;
+        let o_matrix = &weights.tensor(&layer_tensor(layer_index, "self_attn.o_proj.weight"), &[hidden, q_width])?.buffer;
+        let q_norm_weight = &weights.tensor(&layer_tensor(layer_index, "self_attn.q_norm.weight"), &[attention.head_dim])?.buffer;
+        let post_weight = &weights.tensor(&layer_tensor(layer_index, "post_attention_layernorm.weight"), &[hidden])?.buffer;
+        let shared_source = match attention.kv_cache { ResidentKvCacheMode::Own => None, ResidentKvCacheMode::SharedFrom { source_layer_index } => Some(source_layer_index), ResidentKvCacheMode::LinearState => return Err("Gemma resident attention does not support linear state".into()) };
+        let (k_matrix, v_matrix, k_norm_weight) = if shared_source.is_none() {
+            (
+                Some(&weights.tensor(&layer_tensor(layer_index, "self_attn.k_proj.weight"), &[kv_width, hidden])?.buffer),
+                Some(&weights.tensor(&layer_tensor(layer_index, "self_attn.v_proj.weight"), &[kv_width, hidden])?.buffer),
+                Some(&weights.tensor(&layer_tensor(layer_index, "self_attn.k_norm.weight"), &[attention.head_dim])?.buffer),
+            )
+        } else { (None, None, None) };
+        let caches = match &mut self.caches { Gemma4KvStorage::Device(caches) => caches, Gemma4KvStorage::Host(_) => return Err("Gemma resident attention region requires device KV".into()) };
+        if let Some(source) = shared_source {
+            let cache = caches.cache(source)?;
+            self.matvec.attention_norm_residual_resident(hidden_states, input_weight, q_matrix, None, None, o_matrix, q_norm_weight, None, post_weight, hidden, attention.q_heads, attention.kv_heads, attention.head_dim, &rope, position, decoder.rms_norm_epsilon, None, Some(cache))
+        } else {
+            let cache = caches.cache_mut(layer_index)?;
+            self.matvec.attention_norm_residual_resident(hidden_states, input_weight, q_matrix, k_matrix, v_matrix, o_matrix, q_norm_weight, k_norm_weight, post_weight, hidden, attention.q_heads, attention.kv_heads, attention.head_dim, &rope, position, decoder.rms_norm_epsilon, Some(cache), None)
+        }
     }
 
     fn forward_attention(

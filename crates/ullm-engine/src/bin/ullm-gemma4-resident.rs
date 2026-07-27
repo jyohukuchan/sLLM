@@ -284,6 +284,7 @@ fn run(options: Options) -> Result<(), String> {
             "ULLM_REQUIRE_HIP_PAGED_KV_WRITE_KERNEL": env::var("ULLM_REQUIRE_HIP_PAGED_KV_WRITE_KERNEL").ok(),
             "ULLM_REQUIRE_HIP_RMSNORM_KERNEL": env::var("ULLM_REQUIRE_HIP_RMSNORM_KERNEL").ok(),
             "ULLM_REQUIRE_HIP_ADD_KERNEL": env::var("ULLM_REQUIRE_HIP_ADD_KERNEL").ok(),
+            "ULLM_REQUIRE_HIP_ROPE_KERNEL": env::var("ULLM_REQUIRE_HIP_ROPE_KERNEL").ok(),
             "ULLM_REQUIRE_HIP_GEMMA_PROPORTIONAL_ROPE_KERNEL": env::var("ULLM_REQUIRE_HIP_GEMMA_PROPORTIONAL_ROPE_KERNEL").ok(),
         },
         "preflight": preflight,
@@ -485,6 +486,7 @@ fn capture_command<const N: usize>(program: &str, args: [&str; N]) -> Value {
 }
 
 fn validation_workload(executor: &mut Gemma4TextExecutor) -> Result<Value, String> {
+    let attention_region_differential = attention_region_differential(executor)?;
     let mut cases = Vec::new();
     let mut capital_cached_ids = None;
     for case in [CAPITAL_FRANCE, ONCE_UPON_A_TIME] {
@@ -537,6 +539,7 @@ fn validation_workload(executor: &mut Gemma4TextExecutor) -> Result<Value, Strin
     let unshared_ids_equal_shared = unshared.generated_token_ids == capital_cached_ids;
     Ok(json!({
         "kind": "resident-greedy-and-cache-equivalence",
+        "attention_region_differential": attention_region_differential,
         "cases": cases,
         "shared_kv_source_check": {
             "result": "passed",
@@ -551,6 +554,57 @@ fn validation_workload(executor: &mut Gemma4TextExecutor) -> Result<Value, Strin
             "generated_ids_equal_to_normal_shared_path": unshared_ids_equal_shared,
         },
     }))
+}
+
+fn attention_region_differential(executor: &mut Gemma4TextExecutor) -> Result<Value, String> {
+    executor.reset();
+    unsafe { env::remove_var("ULLM_GEMMA4_DISABLE_ATTENTION_REGION") };
+    let resident = executor.prefill(CAPITAL_FRANCE.initial_token_ids)?;
+    executor.reset();
+    unsafe { env::set_var("ULLM_GEMMA4_DISABLE_ATTENTION_REGION", "1") };
+    let host = executor.prefill(CAPITAL_FRANCE.initial_token_ids)?;
+    unsafe { env::remove_var("ULLM_GEMMA4_DISABLE_ATTENTION_REGION") };
+    let (hidden_abs, hidden_rel) = max_error(
+        resident.layer_outputs.iter().flatten().copied(),
+        host.layer_outputs.iter().flatten().copied(),
+    )?;
+    let (final_abs, final_rel) = max_error(
+        resident.final_norm.iter().copied(),
+        host.final_norm.iter().copied(),
+    )?;
+    let (logit_abs, logit_rel) = max_error(
+        resident.logits_last.iter().copied(),
+        host.logits_last.iter().copied(),
+    )?;
+    Ok(json!({
+        "reference": "unchanged host attention path on the same six real captured prompt activations; multi-layer hidden/final/logit comparison",
+        "input_token_ids": CAPITAL_FRANCE.initial_token_ids,
+        "layer_output_max_abs": hidden_abs,
+        "layer_output_max_rel": hidden_rel,
+        "final_norm_max_abs": final_abs,
+        "final_norm_max_rel": final_rel,
+        "logits_max_abs": logit_abs,
+        "logits_max_rel": logit_rel,
+        "resident_top1": {"token_id": resident.top1.token_id, "logit": resident.top1.logit},
+        "host_top1": {"token_id": host.top1.token_id, "logit": host.top1.logit},
+    }))
+}
+
+fn max_error(
+    actual: impl Iterator<Item = f32>,
+    expected: impl Iterator<Item = f32>,
+) -> Result<(f32, f32), String> {
+    let mut max_abs = 0.0_f32;
+    let mut max_rel = 0.0_f32;
+    let mut count = 0_usize;
+    for (actual, expected) in actual.zip(expected) {
+        let abs = (actual - expected).abs();
+        max_abs = max_abs.max(abs);
+        max_rel = max_rel.max(abs / expected.abs().max(f32::MIN_POSITIVE));
+        count = count.saturating_add(1);
+    }
+    if count == 0 { return Err("attention region differential compared zero values".into()); }
+    Ok((max_abs, max_rel))
 }
 
 struct GenerationResult {
