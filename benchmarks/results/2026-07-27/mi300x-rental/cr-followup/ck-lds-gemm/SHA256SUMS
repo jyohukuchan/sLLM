@@ -1,0 +1,4 @@
+5cb07246a6e1ea20f745d9ffcd423050eaa0741d51476f29cd2c51df6b881dcd  benchmarks/results/2026-07-27/mi300x-rental/cr-followup/ck-lds-gemm/build.log
+360d27c3e07cc6a8c9df07d3d1e4aff370460b5445b13ff5bde431f10d8f3270  benchmarks/results/2026-07-27/mi300x-rental/cr-followup/ck-lds-gemm/ck_lds_gemm.cpp
+2676fe176f8cd523a31f8ae1669f4b7a9024ddf19f5842988f945f0e1a39b87e  benchmarks/results/2026-07-27/mi300x-rental/cr-followup/ck-lds-gemm/result.jsonl
+1c635ab2b58563c46583a7a894ffdfe889f4841ebbbca157423d462396b4e235  benchmarks/results/2026-07-27/mi300x-rental/cr-followup/ck-lds-gemm/telemetry.txt

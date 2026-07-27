@@ -1,0 +1,4 @@
+3a8c7e80c79fac98cdb6ea70195a1f145162cbabe38430321028530e50b3d8ca  benchmarks/results/2026-07-27/mi300x-rental/cr-followup/occupancy/build.log
+80bb5edb10f4798b06863f6dff6edd91bc5c55ce23152adcffb01884ee2e4652  benchmarks/results/2026-07-27/mi300x-rental/cr-followup/occupancy/hip-api-occupancy.stderr
+a08a4391932f64ff58c2e805d5b8fc932ec9ba3b924ba86f161f482f8ccbad7c  benchmarks/results/2026-07-27/mi300x-rental/cr-followup/occupancy/hip_launch_occupancy.cpp
+7ff1cd4480c24662d9408c09afe347b3e3e52f80596cdc6e9e5a5e206212a1f5  benchmarks/results/2026-07-27/mi300x-rental/cr-followup/occupancy/physical.stdout
