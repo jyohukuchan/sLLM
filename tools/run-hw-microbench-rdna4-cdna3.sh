@@ -21,7 +21,7 @@ binary="$results/hw-microbench-$arch"; "$rocm/bin/hipcc" -std=c++20 -O3 --offloa
 if (( build_only )); then exit 0; fi
 run_mode() {
   local mode=$1 start end
-  if command -v amd-smi >/dev/null; then amd-smi metric -j >"$results/telemetry-${mode}-before.json" 2>&1 || true; fi
+  if command -v amd-smi >/dev/null; then amd-smi metric --json >"$results/telemetry-${mode}-before.json" 2>&1 || true; fi
   start=$(date +%s)
   HIP_VISIBLE_DEVICES="${HIP_VISIBLE_DEVICES:-0}" "$binary" --mode "$mode" \
     --memory-peak-gbps "${HW_MB_MEMORY_PEAK_GBPS:?set from official/observed source}" \
@@ -29,7 +29,7 @@ run_mode() {
     --fp8-peak-tflops "${HW_MB_FP8_PEAK_TFLOPS:?set from official source}" \
     --output "$results/${mode}.jsonl"
   end=$(date +%s)
-  if command -v amd-smi >/dev/null; then amd-smi metric -j >"$results/telemetry-${mode}-after.json" 2>&1 || true; fi
+  if command -v amd-smi >/dev/null; then amd-smi metric --json >"$results/telemetry-${mode}-after.json" 2>&1 || true; fi
   printf '%s_seconds=%s\n' "$mode" "$((end-start))" >>"$results/runtime.txt"
 }
 : >"$results/runtime.txt"

@@ -1,0 +1,3 @@
+validate_seconds=0
+bandwidth_seconds=2
+gemm_seconds=5

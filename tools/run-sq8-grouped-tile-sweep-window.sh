@@ -170,7 +170,14 @@ PY
   event "moe-phase-finished status=$status"
   return "$status"
 }
-if run_moe_phase; then :; else printf '%s\n' "$?" >"$out/moe/phase-status.txt"; fi
+# CO's tile-quality and hardware-measurement window does not need to repeat
+# the independently completed MoE admission.  Keep the default historical
+# behavior for callers that do need it, but make the skip explicit in the
+# evidence rather than silently omitting the phase.
+if [[ ${ULLM_SKIP_MOE_PHASE:-0} == 1 ]]; then
+  printf '%s\n' 'skipped-by-ULLM_SKIP_MOE_PHASE' >"$out/moe/phase-status.txt"
+  event moe-phase-skipped
+elif run_moe_phase; then :; else printf '%s\n' "$?" >"$out/moe/phase-status.txt"; fi
 run_route() {
   local tile=$1; shift
   local -a e=(-u ULLM_EXPERIMENTAL_SQ8_PAGED_DECODE_SPLIT_TILE -u ULLM_EXPERIMENTAL_SQ8_PAGED_DECODE_SPLIT_ALLOW_MULTITILE -u ULLM_EXPERIMENTAL_PAGED_DECODE_GQA_GROUPED_SPLIT -u ULLM_DISABLE_SQ8_0_FLASH2_GQA_GROUPED HIP_VISIBLE_DEVICES=1 ULLM_HIP_VISIBLE_DEVICES=1 ULLM_REQUIRE_HIP_RMSNORM_KERNEL=1 ULLM_REQUIRE_HIP_ROPE_KERNEL=1 ULLM_REQUIRE_HIP_CAUSAL_ATTN_KERNEL=1 ULLM_REQUIRE_HIP_ADD_KERNEL=1 ULLM_REQUIRE_HIP_SILU_MUL_KERNEL=1 ULLM_REQUIRE_HIP_PAGED_KV_WRITE_KERNEL=1 ULLM_REQUIRE_HIP_PAGED_DECODE_ATTN_KERNEL=1 ULLM_REQUIRE_HIP_PAGED_DECODE_SPLIT_KERNEL=1 ULLM_REQUIRE_HIP_CACHED_PREFIX_ATTN_F32_FLASH2_KERNEL=1 ULLM_REQUIRE_HIP_BF16_MATVEC_KERNEL=1 ULLM_REQUIRE_HIP_BF16_ROW_KERNEL=1)
@@ -187,14 +194,15 @@ if [[ ${ULLM_SKIP_EXISTING_SPEED_BENCHMARKS:-0} != 1 ]]; then
 else
   event bench-skipped-existing-speed-evidence
 fi
-for route in direct 20 128; do
-  label=tile$route; [[ $route == direct ]] && label=direct
-  # The serving runner owns creation of the capture directory and rejects a
-  # pre-existing target.  Its target is the route directory itself (not an
-  # `oracle` child), so leave numeric/<route> absent until this invocation.
-  run_route "$route" "$serving" --artifact "$artifact" --package "$package" --prompt-lengths 512 --max-new-tokens 4 --prefill-mode m128-chunk128 --decode-oracle-capture-dir "$out/numeric/$label" --result-json "$out/numeric/$label-result.json" >"$out/numeric/$label.stdout" 2>"$out/numeric/$label.stderr"
-done
-python3 - "$out/numeric" "$out/numeric/summary.json" <<'PY'
+if [[ ${ULLM_SKIP_NUMERIC_CAPTURE:-0} != 1 ]]; then
+  for route in direct 20 128; do
+    label=tile$route; [[ $route == direct ]] && label=direct
+    # The serving runner owns creation of the capture directory and rejects a
+    # pre-existing target.  Its target is the route directory itself (not an
+    # `oracle` child), so leave numeric/<route> absent until this invocation.
+    run_route "$route" "$serving" --artifact "$artifact" --package "$package" --prompt-lengths 512 --max-new-tokens 4 --prefill-mode m128-chunk128 --decode-oracle-capture-dir "$out/numeric/$label" --result-json "$out/numeric/$label-result.json" >"$out/numeric/$label.stdout" 2>"$out/numeric/$label.stderr"
+  done
+  python3 - "$out/numeric" "$out/numeric/summary.json" <<'PY'
 import json,math,struct,sys
 from pathlib import Path
 root,out=map(Path,sys.argv[1:])
@@ -216,14 +224,21 @@ for route in ("tile20","tile128"):
  result["routes"][route]={"split_vs_direct_max_abs":maximum,"compared_f32_values":values,"nonfinite_values":bad}
 out.write_text(json.dumps(result,indent=2,sort_keys=True)+"\n")
 PY
-thermal quality-gateway
+else
+  # CO reuses the fresh CN numeric capture requested by the user; this window
+  # is reserved for the still-missing text-quality and hardware evidence.
+  cp -- "$root/benchmarks/results/2026-07-27/cn-moe-o-proj-tile128-window/numeric/summary.json" "$out/numeric/summary-reused-cn.json"
+  event numeric-capture-skipped-reused-cn
+fi
+quality_status=0
+if thermal quality-gateway; then
 release_lock; event isolated-gateway-start
 env HIP_VISIBLE_DEVICES=1 ULLM_HIP_VISIBLE_DEVICES=1 ULLM_SERVED_MODEL_MANIFEST="$out/quality/manifest-tile128.json" ULLM_GPU_LOCK_FILE="$lock" ULLM_BIND_HOST=127.0.0.1 ULLM_BIND_PORT="$port" "$gateway" >"$out/quality/gateway.stdout" 2>"$out/quality/gateway.stderr" & gateway_pid=$!
 # The gateway receives the candidate manifest in its process environment, but
 # the separate capture harness also reads that manifest to record request
 # provenance.  Pass it explicitly here; the old command only set it for the
 # background gateway and therefore failed before readiness with KeyError.
-ULLM_SERVED_MODEL_MANIFEST="$out/quality/manifest-tile128.json" \
+if ULLM_SERVED_MODEL_MANIFEST="$out/quality/manifest-tile128.json" \
 python3 - "$root/tools/lightweight_promotion.py" "$suite" "$out/quality/capture" "$port" >"$out/quality/capture-harness.stdout" 2>"$out/quality/capture-harness.stderr" <<'PY'
 import importlib.util,json,os,sys
 from pathlib import Path
@@ -233,9 +248,11 @@ ready=m.wait_for_live_gateway(base_url=f"http://127.0.0.1:{port}",token=token,mo
 rows=m.run_suite(suite=suite,model_id="ullm-qwen3-14b-sq8",manifest_document=manifest,base_url=f"http://127.0.0.1:{port}",token=token,request_timeout_seconds=120,output_dir=out/"cases",gateway_container=None)
 m.write_json_new(out/"capture.json",{"schema_version":"ullm.lightweight_served_suite_capture.v1","case_count":len(rows),"passed":not any(r["analysis"]["blocking"] for r in rows),"blocking_findings":[f"{r['case_id']}:{x}" for r in rows for x in r["analysis"]["blocking"]]},"capture")
 PY
+then :; else quality_status=$?; fi
 stop_gateway
 exec 9<>"$lock"; flock -n 9; held=1; event lock-reacquired-after-quality
-python3 - "$root/tools/lightweight_promotion.py" "$suite" "$out/quality/baseline" "$out/quality/capture/cases" "$out/quality/comparison.json" "$out/quality/comparison.md" >"$out/quality/compare-harness.stdout" 2>"$out/quality/compare-harness.stderr" <<'PY'
+if ((quality_status == 0)); then
+if python3 - "$root/tools/lightweight_promotion.py" "$suite" "$out/quality/baseline" "$out/quality/capture/cases" "$out/quality/comparison.json" "$out/quality/comparison.md" >"$out/quality/compare-harness.stdout" 2>"$out/quality/compare-harness.stderr" <<'PY'
 import importlib.util,json,sys
 from pathlib import Path
 s=importlib.util.spec_from_file_location("p",sys.argv[1]);m=importlib.util.module_from_spec(s);sys.modules["p"]=m;s.loader.exec_module(m)
@@ -243,4 +260,31 @@ suite=m.load_suite(Path(sys.argv[2]))
 def rows(d): return [json.loads((Path(d)/f"{case.case_id}.json").read_text()) for case in suite]
 base,candidate=rows(sys.argv[3]),rows(sys.argv[4]);c=m.compare_suites(suite,base,candidate);m.write_json_new(Path(sys.argv[5]),c,"comparison");m.write_comparison_markdown(Path(sys.argv[6]),suite,base,candidate,c)
 PY
+then :; else quality_status=$?; fi
+fi
+else
+  quality_status=$?
+fi
+printf '%s\n' "$quality_status" >"$out/quality/phase-status.txt"
+event "quality-phase-finished status=$quality_status"
+
+# Run the standalone R9700 hardware measurements while this same exclusive
+# window still owns the device.  A separate destination avoids overwriting
+# historical tile evidence; the wrapper rebuilds and ISA-audits its binary
+# immediately before timing.  If this phase fails, the completed tile evidence
+# remains intact and the EXIT trap still releases the lock before restoring AQ4.
+if [[ -n ${ULLM_HW_MICROBENCH_RESULTS_DIR:-} ]]; then
+  hw=$(realpath -m "$ULLM_HW_MICROBENCH_RESULTS_DIR")
+  [[ ! -e "$hw/hw-microbench-gfx1201" ]] || { echo "hardware benchmark binary already exists: $hw" >&2; exit 2; }
+  mkdir -p "$hw"
+  thermal hw-microbench
+  event hw-microbench-start
+  hw_started=$(date --iso-8601=seconds)
+  HIP_VISIBLE_DEVICES=1 ULLM_HIP_VISIBLE_DEVICES=1 \
+    HW_MB_MEMORY_PEAK_GBPS=640 HW_MB_BF16_PEAK_TFLOPS=191 HW_MB_FP8_PEAK_TFLOPS=383 \
+    "$root/tools/run-hw-microbench-rdna4-cdna3.sh" --arch gfx1201 --results-dir "$hw"
+  hw_finished=$(date --iso-8601=seconds)
+  printf 'started_at=%s\nfinished_at=%s\n' "$hw_started" "$hw_finished" >"$hw/window-wall-clock.txt"
+  event hw-microbench-finished
+fi
 metric >"$out/telemetry/before-restore.json"; event measurements-complete

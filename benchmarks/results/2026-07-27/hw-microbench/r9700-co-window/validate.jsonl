@@ -1,0 +1,1 @@
+{"schema":"ullm.hw-microbench.v1","kind":"environment","arch":"gfx1201","device":"AMD Radeon Graphics","wavefront":32,"timing":"HIP events around only repeated kernel launches; median","fp8_contract":"OCP E4M3FN values; gfx942 retains raw bytes as FNUZ and compensates both operands by x4"}

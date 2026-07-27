@@ -1,0 +1,34 @@
+{
+  "schema_version": "ullm.co_sq8_tile128_quality.v1",
+  "quality": {
+    "case_count": 8,
+    "policy": "lightweight-promotion-policy-v0.1 at ebf9a545",
+    "passed": true,
+    "blocking_findings": [],
+    "output_exact_match_rate_diagnostic": 0.0,
+    "javascript_debug_extended": "pass: original Boolean filter keeps truthy Infinity, isFinite result is 2"
+  },
+  "reused_numeric": {
+    "source": "../cn-moe-o-proj-tile128-window/numeric/summary.json",
+    "tile20_split_vs_direct_max_abs": 1.3091354370117188,
+    "tile128_split_vs_direct_max_abs": 2.3758392333984375,
+    "compared_f32_values_per_route": 471168,
+    "nonfinite_values_per_route": 0,
+    "used_as_quality_gate": false
+  },
+  "reused_speed": {
+    "direct_tokens_per_second": 15.356923,
+    "tile20_tokens_per_second": 27.561622,
+    "tile128_tokens_per_second": 26.311639,
+    "tile128_vs_direct": 1.714,
+    "tile128_vs_tile20_percent": 95.46
+  },
+  "production_restore": {
+    "active_manifest_sha256": "a654d92fe8142fcc0904fe187c96b84c95e0dd18acac61ef25d0cfa6429a08cd",
+    "active_state": "active",
+    "nrestarts": 0,
+    "manual_response": "HTTP 200: restored",
+    "runner_container_probe": "container_transport; superseded by manual bridge response"
+  },
+  "window_count": 1
+}

@@ -51,3 +51,24 @@ window は 1 回。停止前・復旧後とも active manifest SHA-256 は
 復旧後は `ActiveState=active`, `NRestarts=0` を確認し、manual gateway response probe が
 model `ullm-qwen3.5-9b-aq4` で `restored` を返した。`llama-qwen35-udq4.service` は
 inactive/disabled のままである。
+
+## CO: tile-128 文章品質（2026-07-27）
+
+この後の CO window で、CN の数値証跡を再利用して再測定せず、CF の direct 8 件を
+読み取り専用 baseline として tile-128 candidate を同一 prompt / token 上限で生成した。
+成果物は [`co-window/quality/comparison.md`](co-window/quality/comparison.md) と
+[`comparison.json`](co-window/quality/comparison.json) にある。8/8 が HTTP 200 で、空応答、
+反復、文字化け、コード要求放棄など policy の automated blocking は 0 件だった。
+完全一致率 0.000 は診断値であり、policy の合否しきい値ではない。
+
+`javascript_debug_extended` は candidate でも runnable JavaScript と expected output `2` を
+生成した。説明は `NaN` が falsy なので `filter(Boolean)` で除かれる一方、`Infinity` は
+truthy のまま残るため元コードは 3 となる、と正しく記す。従って tile-20 の「元の
+`filter(Boolean)` は NaN を含めない」という事実誤認は再現していない。実生成文に基づく
+lightweight-promotion-policy-v0.1 の判定は **pass** である。本タスクでは SQ8_0 の本番切替を
+行っていない。
+
+速度は既存の direct 15.356923、tile-20 27.561622、tile-128 26.311639 tok/s を使用した。
+したがって tile-128 は direct 比 1.714x、tile-20 比 95.46% である。CN の full-model
+numeric capture は tile-20 1.3091354370、tile-128 2.3758392334 maximum absolute difference
+（各 471,168 F32 values、non-finite 0）で、品質合否には使っていない。

@@ -189,7 +189,7 @@ void emit_metric(std::ostream& os, std::string_view kind, std::string_view name,
     os << ",\"arch\":"; json_string(os, arch); if (!extra.empty()) os << ',' << extra; os << "}\n";
 }
 
-void validate_gemm(const hipDeviceProp_t& p) {
+void validate_gemm(const hipDeviceProp_t& p, std::ostream& out) {
     constexpr unsigned m = 16, n = 16, k = 32;
     std::vector<uint16_t> a_bf(m * k), b_bf(n * k);
     std::vector<uint8_t> a_fp(m * k), b_fp(n * k);
@@ -211,7 +211,7 @@ void validate_gemm(const hipDeviceProp_t& p) {
     double fp_max = 0;
     for (unsigned r = 0; r < m; ++r) for (unsigned c = 0; c < n; ++c) { float ref = 0; for (unsigned q = 0; q < k; ++q) ref += ocp_e4m3_to_f32(a_fp[r*k+q]) * ocp_e4m3_to_f32(b_fp[c*k+q]); fp_max = std::max(fp_max, std::abs(static_cast<double>(ref - got[r*n+c]))); }
     if (fp_max > 2e-3) throw std::runtime_error("FP8 OCP/FNUZ CPU reference mismatch max_abs=" + std::to_string(fp_max));
-    std::cout << "{\"schema\":\"ullm.hw-microbench.v1\",\"kind\":\"validation\",\"bf16_cpu_max_abs\":" << bf_max << ",\"fp8_ocp_fnuz_cpu_max_abs\":" << fp_max << ",\"fp8_gfx942_two_operand_scale\":4,\"status\":\"pass\"}\n";
+    out << "{\"schema\":\"ullm.hw-microbench.v1\",\"kind\":\"validation\",\"bf16_cpu_max_abs\":" << bf_max << ",\"fp8_ocp_fnuz_cpu_max_abs\":" << fp_max << ",\"fp8_gfx942_two_operand_scale\":4,\"status\":\"pass\"}\n";
 }
 
 void run_bandwidth(const Options& o, const hipDeviceProp_t& p, std::ostream& out) {
@@ -267,6 +267,6 @@ int main(int argc, char** argv) try {
     Options o=parse(argc,argv); HIP_CHECK(hipSetDevice(o.device)); hipDeviceProp_t p{}; HIP_CHECK(hipGetDeviceProperties(&p,o.device)); require_supported_arch(p);
     std::ofstream file; std::ostream* out=&std::cout; if(!o.output.empty()){file.open(o.output);if(!file)throw std::runtime_error("cannot open output");out=&file;}
     *out << "{\"schema\":\"ullm.hw-microbench.v1\",\"kind\":\"environment\",\"arch\":"; json_string(*out,arch_name(p)); *out << ",\"device\":";json_string(*out,p.name);*out<<",\"wavefront\":"<<p.warpSize<<",\"timing\":\"HIP events around only repeated kernel launches; median\",\"fp8_contract\":\"OCP E4M3FN values; gfx942 retains raw bytes as FNUZ and compensates both operands by x4\"}\n";
-    if(o.mode=="all"||o.mode=="validate") validate_gemm(p); if(o.mode=="all"||o.mode=="bandwidth")run_bandwidth(o,p,*out); if(o.mode=="all"||o.mode=="gemm")run_gemm(o,p,*out);
+    if(o.mode=="all"||o.mode=="validate") validate_gemm(p,*out); if(o.mode=="all"||o.mode=="bandwidth")run_bandwidth(o,p,*out); if(o.mode=="all"||o.mode=="gemm")run_gemm(o,p,*out);
     if(o.mode!="all"&&o.mode!="validate"&&o.mode!="bandwidth"&&o.mode!="gemm")throw std::runtime_error("invalid mode"); return 0;
 } catch(const std::exception& e) { std::cerr<<"hw-microbench failed: "<<e.what()<<'\n'; return 1; }

@@ -1,0 +1,19 @@
+timestamp	event
+2026-07-27T11:54:31+09:00	production-stop
+2026-07-27T11:54:32+09:00	lock-acquired
+2026-07-27T11:54:32+09:00	moe-phase-skipped
+2026-07-27T11:54:32+09:00	bench-skipped-existing-speed-evidence
+2026-07-27T11:54:32+09:00	numeric-capture-skipped-reused-cn
+2026-07-27T11:54:32+09:00	thermal-pass quality-gateway edge=41
+2026-07-27T11:54:32+09:00	lock-released
+2026-07-27T11:54:32+09:00	isolated-gateway-start
+2026-07-27T11:56:36+09:00	isolated-gateway-stopped
+2026-07-27T11:56:36+09:00	lock-reacquired-after-quality
+2026-07-27T11:56:36+09:00	quality-phase-finished status=0
+2026-07-27T11:59:00+09:00	thermal-pass hw-microbench edge=45
+2026-07-27T11:59:00+09:00	hw-microbench-start
+2026-07-27T11:59:39+09:00	hw-microbench-finished
+2026-07-27T11:59:39+09:00	measurements-complete
+2026-07-27T11:59:39+09:00	lock-released
+2026-07-27T11:59:39+09:00	production-restore-start
+2026-07-27T11:59:40+09:00	window-finished status=1

@@ -37,11 +37,12 @@ run wrapper は peak 値を暗黙に埋めない。実行者は環境変数で�
 
 | GPU | memory | BF16 | FP8 | 出典 / 注記 |
 |---|---:|---:|---:|---|
-| R9700 | 640 GB/s | 未確認 | 383 TFLOPS | AMD product page は 640 GB/s、FP8 matrix 383、FP16 matrix 191 を掲載。BF16 単独 peak は同ページでは未掲載なので、BF16 比率に 191 を流用してはいけない。 |
+| R9700 | 640 GB/s | 191 TFLOPS | 383 TFLOPS | AMD product page は 640 GB/s、FP8 matrix 383、FP16 matrix 191 を掲載。BF16 単独 peak は同ページでは未掲載である。BF16 191 は 2026-07-27 のユーザー提供値で、RDNA4 の BF16=FP16 throughput 根拠と `383 ≈ 2×191` で整合するが、AMD の BF16 単独記載として扱わない。 |
 | MI300X | 5300 GB/s | 1307.4 TFLOPS | 2614.9 TFLOPS | AMD MI300X product page。レンタル host の `rocminfo` と `amd-smi` も成果物に保存して単一 MI300X であることを確認する。 |
 
-R9700 の BF16 peak を AMD が明示するまでは、`HW_MB_BF16_PEAK_TFLOPS=0`
-で走らせて `%` を未確認扱いにする。測定値そのものを推測で補わない。
+R9700 は上記ユーザー提供値を明示して `HW_MB_BF16_PEAK_TFLOPS=191` で走らせ、
+比率欄には同値に対する割合を記録する。AMD が BF16 単独 peak を明示するまでは、
+出典欄でその区別を維持する。測定値そのものを推測で補わない。
 
 ## rental 運用
 
