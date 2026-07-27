@@ -2321,6 +2321,51 @@
     }
 
     #[test]
+    fn proportional_rope_leaves_unrotated_channels_unchanged() {
+        let mut context = RuntimeContext::create(0).unwrap();
+        let mut stream = context.create_stream().unwrap();
+        let head_dim = 8_usize;
+        let rotary_dim = 4_usize;
+        let input_values = vec![
+            1.0_f32, 2.0, 3.0, 4.0, 13.0, 17.0, 19.0, 23.0,
+        ];
+        let expected = expected_gemma_proportional_rope(
+            &input_values, 1, 1, head_dim, rotary_dim, 7, 1_000_000.0,
+        );
+        let mut input = context
+            .alloc_buffer(input_values.len() * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut output = context
+            .alloc_buffer(input_values.len() * std::mem::size_of::<f32>())
+            .unwrap();
+        input
+            .copy_from_host(0, &f32s_to_le_bytes(&input_values), Some(&mut stream))
+            .unwrap();
+        stream.synchronize().unwrap();
+        gemma_proportional_rope_f32(
+            &input,
+            1,
+            1,
+            head_dim,
+            rotary_dim,
+            7,
+            1_000_000.0,
+            &mut output,
+            Some(&mut stream),
+        )
+        .unwrap();
+        let mut output_bytes = vec![0_u8; input_values.len() * std::mem::size_of::<f32>()];
+        output
+            .copy_to_host(0, &mut output_bytes, Some(&mut stream))
+            .unwrap();
+        stream.synchronize().unwrap();
+        let actual = le_bytes_to_f32s(&output_bytes);
+        assert_f32s_close(&actual, &expected, 1e-6);
+        assert_eq!(&actual[2..4], &input_values[2..4]);
+        assert_eq!(&actual[6..], &input_values[6..]);
+    }
+
+    #[test]
     fn cpu_rope_f32_rejects_invalid_rotary_dim_or_short_output() {
         let mut context = RuntimeContext::create(0).unwrap();
         let input = context

@@ -254,6 +254,7 @@ fn run(options: Options) -> Result<(), String> {
             "resident Gemma4 executor did not expose allocation accounting".to_string()
         })?;
     let mlp_validation = executor.resident_mlp_validation();
+    let rope_validation = executor.resident_rope_validation();
     let device = executor.device();
     let report = json!({
         "schema_version": "ullm.gemma4_e2b_resident.v0.1",
@@ -301,6 +302,14 @@ fn run(options: Options) -> Result<(), String> {
             "max_abs": mlp_validation.max_abs,
             "max_rel": mlp_validation.max_rel,
             "reference": "unchanged host pre-FF RMSNorm -> MLP -> post-FF RMSNorm -> residual-add sequence on the same captured attention residuals",
+        },
+        "gemma_proportional_rope_validation": {
+            "enabled": env::var("ULLM_GEMMA4_VALIDATE_PROPORTIONAL_ROPE").ok().as_deref() == Some("1"),
+            "calls": rope_validation.calls,
+            "elements": rope_validation.elements,
+            "max_abs": rope_validation.max_abs,
+            "max_rel": rope_validation.max_rel,
+            "reference": "unchanged host apply_gemma4_rope_in_place on the same real normalized Q/K activations; exponent denominator is head_dim and unrotated tail is copied unchanged",
         },
         "timing": {
             "resident_load_seconds": load_elapsed_seconds,

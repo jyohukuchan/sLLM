@@ -2185,6 +2185,42 @@ void rope_f32_host(
     }
 }
 
+void gemma_proportional_rope_f32_host(
+    const float *input,
+    size_t sequence_len,
+    size_t heads,
+    size_t head_dim,
+    size_t rotary_dim,
+    size_t position_offset,
+    float rope_base,
+    float *output) {
+    const size_t half = head_dim / 2;
+    const size_t active_pairs = rotary_dim / 2;
+    for (size_t timestep = 0; timestep < sequence_len; ++timestep) {
+        const float position = static_cast<float>(position_offset + timestep);
+        for (size_t head = 0; head < heads; ++head) {
+            const size_t base = (timestep * heads + head) * head_dim;
+            for (size_t pair_dim = 0; pair_dim < active_pairs; ++pair_dim) {
+                const float exponent =
+                    (2.0f * static_cast<float>(pair_dim)) / static_cast<float>(head_dim);
+                const float theta = position / std::pow(rope_base, exponent);
+                const float c = std::cos(theta);
+                const float s = std::sin(theta);
+                const float first = input[base + pair_dim];
+                const float second = input[base + half + pair_dim];
+                output[base + pair_dim] = first * c - second * s;
+                output[base + half + pair_dim] = second * c + first * s;
+            }
+            for (size_t dim = active_pairs; dim < half; ++dim) {
+                output[base + dim] = input[base + dim];
+            }
+            for (size_t dim = half + active_pairs; dim < head_dim; ++dim) {
+                output[base + dim] = input[base + dim];
+            }
+        }
+    }
+}
+
 void causal_attn_f32_host(
     const float *q,
     const float *k,

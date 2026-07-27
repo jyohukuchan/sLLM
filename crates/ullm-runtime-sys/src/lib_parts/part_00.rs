@@ -1082,6 +1082,17 @@ unsafe extern "C" {
         output_buffer: *mut RawRuntimeBuffer,
         stream: *mut RawRuntimeStream,
     ) -> c_int;
+    fn ullm_runtime_gemma_proportional_rope_f32(
+        input_buffer: *const RawRuntimeBuffer,
+        sequence_len: usize,
+        heads: usize,
+        head_dim: usize,
+        rotary_dim: usize,
+        position_offset: usize,
+        rope_base: f32,
+        output_buffer: *mut RawRuntimeBuffer,
+        stream: *mut RawRuntimeStream,
+    ) -> c_int;
     fn ullm_runtime_causal_attn_f32(
         q_buffer: *const RawRuntimeBuffer,
         k_buffer: *const RawRuntimeBuffer,
@@ -6963,6 +6974,36 @@ pub fn rope_f32(
             rope_base,
             output.raw.as_ptr(),
             stream,
+        )
+    })
+}
+
+pub fn gemma_proportional_rope_f32(
+    input: &RuntimeBuffer,
+    sequence_len: usize,
+    heads: usize,
+    head_dim: usize,
+    rotary_dim: usize,
+    position_offset: usize,
+    rope_base: f32,
+    output: &mut RuntimeBuffer,
+    stream: Option<&mut RuntimeStream>,
+) -> Result<(), String> {
+    if sequence_len == 0 || heads == 0 || head_dim == 0 || rotary_dim == 0 ||
+        rotary_dim > head_dim || !rotary_dim.is_multiple_of(2) || !rope_base.is_finite() || rope_base <= 1.0 {
+        return Err("Gemma proportional f32 RoPE geometry or base is invalid".to_string());
+    }
+    let elements = sequence_len.checked_mul(heads).and_then(|value| value.checked_mul(head_dim))
+        .ok_or_else(|| "Gemma proportional f32 RoPE element count overflows".to_string())?;
+    let required_bytes = elements.checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| "Gemma proportional f32 RoPE byte size overflows".to_string())?;
+    check_copy_range(0, required_bytes, input.size()?)?;
+    check_copy_range(0, required_bytes, output.size()?)?;
+    let stream = stream.map_or(std::ptr::null_mut(), |stream| stream.raw.as_ptr());
+    status_to_result(unsafe {
+        ullm_runtime_gemma_proportional_rope_f32(
+            input.raw.as_ptr(), sequence_len, heads, head_dim, rotary_dim, position_offset,
+            rope_base, output.raw.as_ptr(), stream,
         )
     })
 }

@@ -30,8 +30,8 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 use ullm_runtime_sys::{
     DeviceInfo, RuntimeBuffer, RuntimeContext, RuntimeStream, add_f32, bf16_row_f32,
-    device_count, device_info, gelu_tanh_mul_f32, matvec_bf16_f32, paged_decode_attn_f32,
-    paged_kv_write_f32, rmsnorm_f32,
+    device_count, device_info, gemma_proportional_rope_f32, gelu_tanh_mul_f32,
+    matvec_bf16_f32, paged_decode_attn_f32, paged_kv_write_f32, rmsnorm_f32,
 };
 
 pub const GEMMA4_TEXT_MODEL_FILE: &str = "model.safetensors";
@@ -62,6 +62,7 @@ const R9700_RUNTIME_NAME: &str = "AMD Radeon Graphics";
 const R9700_MEMORY_BYTES_MIN: u64 = 30 * 1024 * 1024 * 1024;
 const R9700_MEMORY_BYTES_MAX: u64 = 34 * 1024 * 1024 * 1024;
 const GEMMA4_VALIDATE_DEVICE_MLP_ENV: &str = "ULLM_GEMMA4_VALIDATE_DEVICE_MLP";
+const GEMMA4_VALIDATE_PROPORTIONAL_ROPE_ENV: &str = "ULLM_GEMMA4_VALIDATE_PROPORTIONAL_ROPE";
 
 fn record_elapsed_ns(slot: &mut u64, started: Instant) {
     *slot = slot.saturating_add(elapsed_ns(started));
@@ -143,6 +144,14 @@ pub struct Gemma4TextStepTrace {
 
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct Gemma4ResidentMlpValidation {
+    pub calls: u64,
+    pub elements: u64,
+    pub max_abs: f32,
+    pub max_rel: f32,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct Gemma4ResidentRopeValidation {
     pub calls: u64,
     pub elements: u64,
     pub max_abs: f32,
@@ -1104,6 +1113,7 @@ struct Bf16MatvecRuntime {
     resident_logical_bytes: Gemma4ResidentLogicalBytes,
     resident_host_profile: Gemma4ResidentHostProfile,
     mlp_validation: Gemma4ResidentMlpValidation,
+    rope_validation: Gemma4ResidentRopeValidation,
 }
 
 impl Bf16MatvecRuntime {
@@ -1175,6 +1185,7 @@ impl Bf16MatvecRuntime {
             resident_logical_bytes: Gemma4ResidentLogicalBytes::default(),
             resident_host_profile: Gemma4ResidentHostProfile::default(),
             mlp_validation: Gemma4ResidentMlpValidation::default(),
+            rope_validation: Gemma4ResidentRopeValidation::default(),
         })
     }
 
@@ -1230,6 +1241,10 @@ impl Bf16MatvecRuntime {
 
     fn mlp_validation(&self) -> Gemma4ResidentMlpValidation {
         self.mlp_validation
+    }
+
+    fn rope_validation(&self) -> Gemma4ResidentRopeValidation {
+        self.rope_validation
     }
 
     fn account_resident_weight_read(
@@ -1549,6 +1564,95 @@ impl Bf16MatvecRuntime {
             0,
         );
         Ok(output)
+    }
+
+    /// Executes the Gemma proportional/partial RoPE on a captured F32 head
+    /// activation, then compares it with the unchanged host implementation.
+    /// This is deliberately validation-only until the surrounding attention
+    /// chain can retain the activation on the device.
+    fn validate_gemma_proportional_rope(
+        &mut self,
+        values: &[f32],
+        heads: usize,
+        head_dim: usize,
+        rope: &ResidentRopeDescriptor,
+        position: usize,
+    ) -> Result<(), String> {
+        if env::var(GEMMA4_VALIDATE_PROPORTIONAL_ROPE_ENV).ok().as_deref() != Some("1") {
+            return Ok(());
+        }
+        let ResidentRopeKind::Proportional = rope.kind else {
+            return Ok(());
+        };
+        let partial = rope.partial_rotary_factor.unwrap_or(1.0);
+        let rotary_dim = ((partial * head_dim as f32) / 2.0).floor() as usize * 2;
+        if rotary_dim == 0 {
+            return Ok(());
+        }
+        let expected_elements = heads
+            .checked_mul(head_dim)
+            .ok_or_else(|| "Gemma proportional RoPE validation shape overflows".to_string())?;
+        if values.len() != expected_elements {
+            return Err("Gemma proportional RoPE validation input shape disagrees with heads".into());
+        }
+        let bytes = expected_elements
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| "Gemma proportional RoPE validation byte count overflows".to_string())?;
+        Self::ensure_buffer(
+            &mut self.context,
+            &mut self.attention_query,
+            bytes,
+            "Gemma proportional RoPE validation input",
+            &mut self.resident_host_profile,
+        )?;
+        Self::ensure_buffer(
+            &mut self.context,
+            &mut self.attention_output,
+            bytes,
+            "Gemma proportional RoPE validation output",
+            &mut self.resident_host_profile,
+        )?;
+        let input_bytes = encode_f32_to_bytes(values);
+        self.attention_query
+            .as_mut()
+            .expect("Gemma proportional RoPE validation input allocated")
+            .copy_from_host(0, &input_bytes, Some(&mut self.stream))?;
+        gemma_proportional_rope_f32(
+            self.attention_query
+                .as_ref()
+                .expect("Gemma proportional RoPE validation input allocated"),
+            1,
+            heads,
+            head_dim,
+            rotary_dim,
+            position,
+            rope.theta,
+            self.attention_output
+                .as_mut()
+                .expect("Gemma proportional RoPE validation output allocated"),
+            Some(&mut self.stream),
+        )?;
+        let mut output_bytes = vec![0_u8; bytes];
+        self.attention_output
+            .as_mut()
+            .expect("Gemma proportional RoPE validation output allocated")
+            .copy_to_host(0, &mut output_bytes, Some(&mut self.stream))?;
+        self.stream.synchronize()?;
+        let actual = decode_f32_le_values(&output_bytes);
+        let mut expected = values.to_vec();
+        apply_gemma4_rope_in_place(&mut expected, heads, head_dim, rope, position)?;
+        for (actual, expected) in actual.iter().zip(expected.iter()) {
+            let abs = (actual - expected).abs();
+            let rel = abs / expected.abs().max(f32::MIN_POSITIVE);
+            self.rope_validation.max_abs = self.rope_validation.max_abs.max(abs);
+            self.rope_validation.max_rel = self.rope_validation.max_rel.max(rel);
+        }
+        self.rope_validation.calls = self.rope_validation.calls.saturating_add(1);
+        self.rope_validation.elements = self.rope_validation.elements.saturating_add(
+            u64::try_from(expected_elements)
+                .map_err(|_| "Gemma proportional RoPE validation elements exceed u64".to_string())?,
+        );
+        Ok(())
     }
 
     /// Dense Gemma4 MLP region: host input -> gate/up projections -> GELUTanh
@@ -2701,6 +2805,10 @@ impl Gemma4TextExecutor {
         self.matvec.mlp_validation()
     }
 
+    pub fn resident_rope_validation(&self) -> Gemma4ResidentRopeValidation {
+        self.matvec.rope_validation()
+    }
+
     /// Actual bytes held by text weights, K/V storage, and the lazily
     /// allocated temporary buffers.  It intentionally excludes HIP runtime
     /// allocator/context overhead that is not exposed through RuntimeBuffer.
@@ -3250,6 +3358,9 @@ impl Gemma4TextExecutor {
             Some(&q_norm_weight),
             decoder.rms_norm_epsilon,
         )?;
+        self.matvec.validate_gemma_proportional_rope(
+            &query, q_heads, head_dim, &rope, position,
+        )?;
         apply_gemma4_rope_in_place(&mut query, q_heads, head_dim, &rope, position)?;
 
         let shared_source_layer = match (attention.kv_cache, self.kv_sharing_mode) {
@@ -3290,6 +3401,9 @@ impl Gemma4TextExecutor {
                 head_dim,
                 Some(&k_norm_weight),
                 decoder.rms_norm_epsilon,
+            )?;
+            self.matvec.validate_gemma_proportional_rope(
+                &key, kv_heads, head_dim, &rope, position,
             )?;
             apply_gemma4_rope_in_place(&mut key, kv_heads, head_dim, &rope, position)?;
             let value = rms_norm_heads(

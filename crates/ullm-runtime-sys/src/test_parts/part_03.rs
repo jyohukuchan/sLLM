@@ -158,6 +158,37 @@
         output
     }
 
+    fn expected_gemma_proportional_rope(
+        input: &[f32],
+        sequence_len: usize,
+        heads: usize,
+        head_dim: usize,
+        rotary_dim: usize,
+        position_offset: usize,
+        rope_base: f32,
+    ) -> Vec<f32> {
+        let mut output = input.to_vec();
+        let half = head_dim / 2;
+        let active_pairs = rotary_dim / 2;
+        for timestep in 0..sequence_len {
+            let position = (position_offset + timestep) as f32;
+            for head in 0..heads {
+                let base = (timestep * heads + head) * head_dim;
+                for pair_dim in 0..active_pairs {
+                    let exponent = (2.0 * pair_dim as f32) / head_dim as f32;
+                    let theta = position / rope_base.powf(exponent);
+                    let c = theta.cos();
+                    let s = theta.sin();
+                    let first = input[base + pair_dim];
+                    let second = input[base + half + pair_dim];
+                    output[base + pair_dim] = first * c - second * s;
+                    output[base + half + pair_dim] = second * c + first * s;
+                }
+            }
+        }
+        output
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn expected_causal_attn(
         q: &[f32],

@@ -39,6 +39,50 @@ extern "C" __global__ void ullm_rope_f32_kernel(
     output[base + pair_dim] = first * c - second * s;
     output[base + half + pair_dim] = second * c + first * s;
 }
+
+extern "C" __global__ void ullm_gemma_proportional_rope_f32_kernel(
+    const float *input,
+    unsigned long long sequence_len,
+    unsigned long long heads,
+    unsigned long long head_dim,
+    unsigned long long rotary_dim,
+    unsigned long long position_offset,
+    float rope_base,
+    float *output) {
+    const unsigned long long index =
+        static_cast<unsigned long long>(blockIdx.x) * blockDim.x + threadIdx.x;
+    const unsigned long long half = head_dim >> 1;
+    const unsigned long long active_pairs = rotary_dim >> 1;
+    const unsigned long long work_items = sequence_len * heads * head_dim;
+    if (index >= work_items) {
+        return;
+    }
+    const unsigned long long local_dim = index % head_dim;
+    const unsigned long long head_index = index / head_dim;
+    const unsigned long long base = head_index * head_dim;
+    const bool first_active = local_dim < active_pairs;
+    const bool second_active = local_dim >= half && local_dim < half + active_pairs;
+    if (!first_active && !second_active) {
+        output[base + local_dim] = input[base + local_dim];
+        return;
+    }
+    const unsigned long long pair_dim = first_active ? local_dim : local_dim - half;
+    const unsigned long long timestep = head_index / heads;
+    const float position = static_cast<float>(position_offset + timestep);
+    // Gemma's partial RoPE uses the complete head width for frequency, not
+    // the number of channels that happen to rotate in this layer.
+    const float exponent =
+        (2.0f * static_cast<float>(pair_dim)) / static_cast<float>(head_dim);
+    const float theta = position / powf(rope_base, exponent);
+    const float c = cosf(theta);
+    const float s = sinf(theta);
+    const float first = input[base + pair_dim];
+    const float second = input[base + half + pair_dim];
+    if (first_active) {
+        output[base + pair_dim] = first * c - second * s;
+    } else {
+        output[base + half + pair_dim] = second * c + first * s;
+    }
+}
 )";
     }
-

@@ -1217,6 +1217,20 @@ ullm_status ullm_runtime_rope_f32(
     ullm_runtime_buffer *output_buffer,
     ullm_runtime_stream *stream);
 
+// Gemma4's proportional RoPE rotates only `rotary_dim` channels, but derives
+// its frequency exponent from the complete head width.  Keep this distinct
+// from ullm_runtime_rope_f32: Qwen relies on the generic rotary-width rule.
+ullm_status ullm_runtime_gemma_proportional_rope_f32(
+    const ullm_runtime_buffer *input_buffer,
+    size_t sequence_len,
+    size_t heads,
+    size_t head_dim,
+    size_t rotary_dim,
+    size_t position_offset,
+    float rope_base,
+    ullm_runtime_buffer *output_buffer,
+    ullm_runtime_stream *stream);
+
 ullm_status ullm_runtime_causal_attn_f32(
     const ullm_runtime_buffer *q_buffer,
     const ullm_runtime_buffer *k_buffer,

@@ -2238,6 +2238,66 @@ ullm_status ullm_runtime_rope_f32(
         stream);
 }
 
+ullm_status ullm_runtime_gemma_proportional_rope_f32(
+    const ullm_runtime_buffer *input_buffer,
+    size_t sequence_len,
+    size_t heads,
+    size_t head_dim,
+    size_t rotary_dim,
+    size_t position_offset,
+    float rope_base,
+    ullm_runtime_buffer *output_buffer,
+    ullm_runtime_stream *stream) {
+    if (input_buffer == nullptr || output_buffer == nullptr) {
+        set_error("Gemma proportional f32 RoPE received a null pointer");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (sequence_len == 0 || heads == 0 || head_dim == 0 || rotary_dim == 0 ||
+        rotary_dim > head_dim || (rotary_dim % 2) != 0 || !std::isfinite(rope_base) ||
+        rope_base <= 1.0f) {
+        set_error("Gemma proportional f32 RoPE geometry or base is invalid");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (!buffers_share_backend(input_buffer, output_buffer) ||
+        !stream_matches_buffer(output_buffer, stream)) {
+        set_error("Gemma proportional f32 RoPE buffers or stream are incompatible");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t max_size = std::numeric_limits<size_t>::max();
+    if (heads > max_size / sequence_len ||
+        head_dim > max_size / (heads * sequence_len) ||
+        heads * sequence_len * head_dim > max_size / sizeof(float)) {
+        set_error("Gemma proportional f32 RoPE element count overflows");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t required_bytes = heads * sequence_len * head_dim * sizeof(float);
+    if (input_buffer->bytes < required_bytes || output_buffer->bytes < required_bytes) {
+        set_error("Gemma proportional f32 RoPE buffer is too small");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (input_buffer->backend == BackendKind::Cpu) {
+        gemma_proportional_rope_f32_host(
+            static_cast<const float *>(input_buffer->ptr), sequence_len, heads, head_dim, rotary_dim,
+            position_offset, rope_base, static_cast<float *>(output_buffer->ptr));
+        set_error("");
+        return ULLM_STATUS_OK;
+    }
+    std::string hip_kernel_error;
+    if (gemma_proportional_rope_f32_hip_kernel(
+            input_buffer, sequence_len, heads, head_dim, rotary_dim, position_offset, rope_base,
+            output_buffer, stream, &hip_kernel_error)) {
+        set_error("");
+        return ULLM_STATUS_OK;
+    }
+    if (std::getenv("ULLM_REQUIRE_HIP_GEMMA_PROPORTIONAL_ROPE_KERNEL") != nullptr) {
+        set_error(hip_kernel_error.empty() ? "Gemma proportional f32 RoPE HIP kernel is unavailable" : hip_kernel_error.c_str());
+        return ULLM_STATUS_RUNTIME_ERROR;
+    }
+    return gemma_proportional_rope_f32_hip_staging(
+        input_buffer, sequence_len, heads, head_dim, rotary_dim, position_offset, rope_base,
+        required_bytes, output_buffer, stream);
+}
+
 ullm_status ullm_runtime_depthwise_conv1d_f32(
     const ullm_runtime_buffer *input_buffer,
     const ullm_runtime_buffer *weight_buffer,
