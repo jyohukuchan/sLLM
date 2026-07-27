@@ -6669,23 +6669,7 @@ ULLM_DEFINE_TYPED_QWEN35_PAGED_KV_WRITE(ULLM_FUSED_TYPED_KV_FP8_E4M3FN, ULLM_FUS
 )";
     }
 
-    static const char *add_kernel_source() {
-        return R"(
-extern "C" __global__ void ullm_add_f32_kernel(
-    const float *lhs,
-    const float *rhs,
-    unsigned long long elements,
-    float *output) {
-    const unsigned long long index =
-        static_cast<unsigned long long>(blockIdx.x) * blockDim.x + threadIdx.x;
-    if (index >= elements) {
-        return;
-    }
-    output[index] = lhs[index] + rhs[index];
-}
-)";
-    }
-
+#include "kernels/primitives/primitives_sources_part_b.inc"
 #include "kernels/rope/rope_sources_part_b.inc"
 #include "kernels/attention/attention_sources.inc"
 #include "kernels/kv/kv_sources.inc"
