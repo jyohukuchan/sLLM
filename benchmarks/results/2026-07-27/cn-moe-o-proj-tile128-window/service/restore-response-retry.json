@@ -1,0 +1,5 @@
+{
+  "http_status": 200,
+  "content": "restored",
+  "note": "The runner's immediate container transport probe was transient. This retry completed after the service was active, without another service restart."
+}

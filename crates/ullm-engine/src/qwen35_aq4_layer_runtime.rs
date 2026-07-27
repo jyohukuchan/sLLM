@@ -263,6 +263,55 @@ impl PackageSelfAttnQProjectionLayout {
     }
 }
 
+/// Infer the Q projection representation from the complete attention
+/// contract, rather than from its relation to `hidden` alone.  Qwen3.5's
+/// gated Q projection has two rows per query channel, but its hidden size is
+/// not necessarily equal to the attention width: the 35B-A3B MoE has
+/// `hidden=2048`, 16 Q heads, and `head_dim=256`, hence Q is
+/// `[8192, 2048]` while O is `[2048, 4096]`.
+///
+/// The O projection distinguishes that unambiguously from a 32-head plain-Q
+/// interpretation.  Keeping this inference shared by manifest preflight and
+/// resident loading prevents their geometry from drifting apart.
+fn infer_self_attn_q_projection_layout(
+    q_rows: usize,
+    head_dim: usize,
+    value_dim: usize,
+    hidden: usize,
+    o_rows: usize,
+    o_cols: usize,
+) -> Result<(PackageSelfAttnQProjectionLayout, usize), String> {
+    if head_dim == 0 || value_dim == 0 || hidden == 0 {
+        return Err("self-attn Q-layout inference received a zero geometry dimension".into());
+    }
+    let matches_o = |q_heads: usize| {
+        q_heads
+            .checked_mul(value_dim)
+            .is_some_and(|attention_width| o_rows == hidden && o_cols == attention_width)
+    };
+    let plain = q_rows
+        .is_multiple_of(head_dim)
+        .then(|| q_rows / head_dim)
+        .filter(|&q_heads| q_heads != 0 && matches_o(q_heads));
+    let gated_head_rows = head_dim
+        .checked_mul(2)
+        .ok_or_else(|| "self-attn Q-layout gated head rows overflow".to_string())?;
+    let gated = q_rows
+        .is_multiple_of(gated_head_rows)
+        .then(|| q_rows / gated_head_rows)
+        .filter(|&q_heads| q_heads != 0 && matches_o(q_heads));
+    match (plain, gated) {
+        (Some(q_heads), None) => Ok((PackageSelfAttnQProjectionLayout::Plain, q_heads)),
+        (None, Some(q_heads)) => Ok((PackageSelfAttnQProjectionLayout::Qwen35Gated, q_heads)),
+        (None, None) => Err(format!(
+            "self-attn Q/O geometry is incompatible with plain or Qwen3.5 gated layout: q_rows={q_rows}, head_dim={head_dim}, value_dim={value_dim}, o=[{o_rows},{o_cols}], hidden={hidden}"
+        )),
+        (Some(plain_heads), Some(gated_heads)) => Err(format!(
+            "self-attn Q/O geometry ambiguously matches plain ({plain_heads} heads) and Qwen3.5 gated ({gated_heads} heads) layouts"
+        )),
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct MixedRequestStateBatchStepItem {
     pub request_id: RequestId,
@@ -1551,6 +1600,7 @@ impl PackageSelfAttnResidentStepLayer {
         let (q_rows, hidden) = package_aq4_matrix_shape(path, &q_tensor)?;
         let (k_rows, k_cols) = package_aq4_matrix_shape(path, &k_tensor)?;
         let (v_rows, v_cols) = package_aq4_matrix_shape(path, &v_tensor)?;
+        let (o_rows, o_cols) = package_aq4_matrix_shape(path, &o_tensor)?;
         let head_dim = q_norm.values.len();
         if head_dim == 0 || k_norm.values.len() != head_dim || k_cols != hidden || v_cols != hidden
         {
@@ -1564,23 +1614,10 @@ impl PackageSelfAttnResidentStepLayer {
             return Err("self-attn preflight V rows are not KV-head aligned".into());
         }
         let value_dim = v_rows / kv_heads;
-        let two_hidden = hidden
-            .checked_mul(2)
-            .ok_or_else(|| "self-attn preflight hidden overflows".to_string())?;
-        let two_head_dim = head_dim
-            .checked_mul(2)
-            .ok_or_else(|| "self-attn preflight head dimension overflows".to_string())?;
-        let (preflight_q_layout, q_heads) =
-            if q_rows == two_hidden && q_rows.is_multiple_of(two_head_dim) {
-                (
-                    PackageSelfAttnQProjectionLayout::Qwen35Gated,
-                    q_rows / two_head_dim,
-                )
-            } else if q_rows.is_multiple_of(head_dim) {
-                (PackageSelfAttnQProjectionLayout::Plain, q_rows / head_dim)
-            } else {
-                return Err("self-attn preflight Q rows do not match a supported layout".into());
-            };
+        let (preflight_q_layout, q_heads) = infer_self_attn_q_projection_layout(
+            q_rows, head_dim, value_dim, hidden, o_rows, o_cols,
+        )
+        .map_err(|error| format!("self-attn preflight {error}"))?;
         if q_heads == 0 || !q_heads.is_multiple_of(kv_heads) {
             return Err("self-attn preflight GQA head ratio is invalid".into());
         }
@@ -1822,29 +1859,15 @@ impl PackageSelfAttnResidentStepLayer {
             ));
         }
         let value_dim = v_matrix.rows / kv_heads;
-        let two_hidden = hidden
-            .checked_mul(2)
-            .ok_or_else(|| "self-attn resident hidden*2 overflows".to_string())?;
-        let two_head_dim = head_dim
-            .checked_mul(2)
-            .ok_or_else(|| "self-attn resident head_dim*2 overflows".to_string())?;
-        let (q_projection_layout, q_heads) =
-            if q_matrix.rows == two_hidden && q_matrix.rows.is_multiple_of(two_head_dim) {
-                (
-                    PackageSelfAttnQProjectionLayout::Qwen35Gated,
-                    q_matrix.rows / two_head_dim,
-                )
-            } else if q_matrix.rows.is_multiple_of(head_dim) {
-                (
-                    PackageSelfAttnQProjectionLayout::Plain,
-                    q_matrix.rows / head_dim,
-                )
-            } else {
-                return Err(format!(
-                    "self-attn resident q rows {} do not match plain or Qwen3.5 gated layout",
-                    q_matrix.rows
-                ));
-            };
+        let (q_projection_layout, q_heads) = infer_self_attn_q_projection_layout(
+            q_matrix.rows,
+            head_dim,
+            value_dim,
+            hidden,
+            o_matrix.rows,
+            o_matrix.cols,
+        )
+        .map_err(|error| format!("self-attn resident {error}"))?;
         if q_heads == 0 || !q_heads.is_multiple_of(kv_heads) {
             return Err(format!(
                 "self-attn resident q_heads {q_heads} must be nonzero and a multiple of kv_heads {kv_heads}"
@@ -8904,6 +8927,26 @@ mod linear_attn_step_state_tests {
                 79 * 1024 * 1024 / 2
             );
         }
+    }
+
+    #[test]
+    fn q_layout_inference_uses_o_projection_not_hidden_width() {
+        // Qwen3.5-35B-A3B: the gated Q projection is four times hidden,
+        // because 16 * 2 * 256 = 8192 whereas hidden is only 2048.
+        assert_eq!(
+            infer_self_attn_q_projection_layout(8192, 256, 256, 2048, 2048, 4096).unwrap(),
+            (PackageSelfAttnQProjectionLayout::Qwen35Gated, 16)
+        );
+        // The former 9B-sized contract remains the same gated layout even
+        // though there Q happens to be exactly two times hidden.
+        assert_eq!(
+            infer_self_attn_q_projection_layout(8192, 256, 256, 4096, 4096, 4096).unwrap(),
+            (PackageSelfAttnQProjectionLayout::Qwen35Gated, 16)
+        );
+        assert_eq!(
+            infer_self_attn_q_projection_layout(8192, 256, 256, 4096, 4096, 8192).unwrap(),
+            (PackageSelfAttnQProjectionLayout::Plain, 32)
+        );
     }
 
     #[test]

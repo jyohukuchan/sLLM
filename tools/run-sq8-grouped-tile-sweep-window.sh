@@ -14,7 +14,9 @@ steady="$root/target/release/examples/sq8_0_paged_decode_steady_bench"
 moe="$root/target/release/ullm-qwen35-moe-aq4-generate"
 moe_package=/home/homelab1/datapool/ullm/product/qwen35-35b-a3b-aq4_0-g8-moe-v0.2/package
 moe_tokenizer=/home/homelab1/datapool/ai_models/safetensors/Qwen3.5-35B-A3B-BF16
-moe_sha256=6ee827e43fa4e4a5e54fd66c1b20eb444e05632245f66349e10cfe409b9e39cd
+# Rebuilt after the Qwen3.5 gated-Q layout inference fix.  The window refuses
+# to run a stale binary so the recorded shape admission is auditable.
+moe_sha256=bad1b58c566b3464e1b840b1107be85cebee918dbfac148e919641f7087ac25b
 worker=/home/homelab1/coding-local/ultimateLLM/cf-sq8-build-release-20260727/ullm-sq8-worker
 gateway="$root/services/openai-gateway/.venv/bin/ullm-openai-gateway"
 suite="$cf/quality/prompt-suite-extended.json"
@@ -217,6 +219,11 @@ PY
 thermal quality-gateway
 release_lock; event isolated-gateway-start
 env HIP_VISIBLE_DEVICES=1 ULLM_HIP_VISIBLE_DEVICES=1 ULLM_SERVED_MODEL_MANIFEST="$out/quality/manifest-tile128.json" ULLM_GPU_LOCK_FILE="$lock" ULLM_BIND_HOST=127.0.0.1 ULLM_BIND_PORT="$port" "$gateway" >"$out/quality/gateway.stdout" 2>"$out/quality/gateway.stderr" & gateway_pid=$!
+# The gateway receives the candidate manifest in its process environment, but
+# the separate capture harness also reads that manifest to record request
+# provenance.  Pass it explicitly here; the old command only set it for the
+# background gateway and therefore failed before readiness with KeyError.
+ULLM_SERVED_MODEL_MANIFEST="$out/quality/manifest-tile128.json" \
 python3 - "$root/tools/lightweight_promotion.py" "$suite" "$out/quality/capture" "$port" >"$out/quality/capture-harness.stdout" 2>"$out/quality/capture-harness.stderr" <<'PY'
 import importlib.util,json,os,sys
 from pathlib import Path
