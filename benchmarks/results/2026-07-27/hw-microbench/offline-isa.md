@@ -11,3 +11,9 @@ architectures and its generated HSACO was disassembled with LLVM objdump.
 Also observed: gfx1201 `v_wmma_f32_16x16x16_bf16`; gfx942
 `v_mfma_f32_16x16x16_bf16`. This is a static resource check, not a substitute
 for target-GPU runtime occupancy; the runner records the limitation explicitly.
+
+After the CP STREAM repair, both fresh audits additionally extract the exact
+`stream_read_kernel` symbol. Each has two global/flat load instructions and
+zero global/flat atomic instructions. The gfx942 rerun retained one
+`v_mfma_f32_16x16x32_fp8_fp8`; this check is run before rental timing as well
+as in the target's result directory.

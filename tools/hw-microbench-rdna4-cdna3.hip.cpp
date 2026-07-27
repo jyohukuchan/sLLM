@@ -32,6 +32,7 @@ constexpr unsigned kDefaultWarmups = 5;
 constexpr unsigned kDefaultRepeats = 11;
 constexpr unsigned kDefaultInner = 10;
 constexpr size_t kDefaultWorksetMiB = 256; // Per STREAM vector: beyond both GPUs' cache hierarchies.
+constexpr unsigned kReadBlocks = 4096;
 
 struct Options {
     int device = 0;
@@ -39,6 +40,7 @@ struct Options {
     unsigned repeats = kDefaultRepeats;
     unsigned inner = kDefaultInner;
     size_t workset_mib = kDefaultWorksetMiB;
+    unsigned clock_warmup_seconds = 1;
     std::string mode = "all";
     std::string output;
     double memory_peak_gbps = 0.0;
@@ -85,13 +87,30 @@ template <typename F> double median_seconds(unsigned warmups, unsigned repeats, 
     return samples[samples.size() / 2];
 }
 
+// This is deliberately not a global reduction.  The former implementation
+// performed one contended atomicAdd per CTA (65,535 per launch), which made a
+// purported STREAM read benchmark measure atomic serialization instead of
+// DRAM reads.  Four independent accumulators retain the loaded values, and a
+// single non-contended write per CTA makes those loads observable to the ISA
+// and runtime without materially changing the 4*N byte accounting.
 __global__ void stream_read_kernel(const float* __restrict__ input, float* __restrict__ partial, size_t n) {
-    float sum = 0.0f;
-    for (size_t i = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x; i < n;
-         i += static_cast<size_t>(gridDim.x) * blockDim.x) sum += input[i];
+    float s0 = 0.0f, s1 = 0.0f, s2 = 0.0f, s3 = 0.0f;
+    const size_t lane = static_cast<size_t>(blockIdx.x) * blockDim.x * 4 + threadIdx.x * 4;
+    const size_t stride = static_cast<size_t>(gridDim.x) * blockDim.x * 4;
+    for (size_t i = lane; i < n; i += stride) {
+        // The benchmark workset is a multiple of this vector width.  Keeping
+        // the tail guard makes standalone smaller worksets safe as well.
+        if (i + 3 < n) {
+            const float4 x = *reinterpret_cast<const float4*>(input + i);
+            s0 += x.x; s1 += x.y; s2 += x.z; s3 += x.w;
+        } else {
+            for (size_t q = i; q < n; ++q) s0 += input[q];
+        }
+    }
+    float sum = (s0 + s1) + (s2 + s3);
     __shared__ float reduce[256]; reduce[threadIdx.x] = sum; __syncthreads();
     for (unsigned offset = 128; offset; offset >>= 1) { if (threadIdx.x < offset) reduce[threadIdx.x] += reduce[threadIdx.x + offset]; __syncthreads(); }
-    if (threadIdx.x == 0) atomicAdd(partial, reduce[0]);
+    if (threadIdx.x == 0) partial[blockIdx.x] = reduce[0];
 }
 __global__ void stream_copy_kernel(const float* __restrict__ input, float* __restrict__ output, size_t n) {
     for (size_t i = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x; i < n;
@@ -216,13 +235,13 @@ void validate_gemm(const hipDeviceProp_t& p, std::ostream& out) {
 
 void run_bandwidth(const Options& o, const hipDeviceProp_t& p, std::ostream& out) {
     const size_t n = o.workset_mib * 1024ull * 1024ull / sizeof(float); if (n < 1024) throw std::runtime_error("workset too small");
-    DeviceBuffer<float> a(n), b(n), c(n), partial(1); std::vector<float> host(n, 1.0f);
+    DeviceBuffer<float> a(n), b(n), c(n), partial(kReadBlocks); std::vector<float> host(n, 1.0f);
     HIP_CHECK(hipMemcpy(a.get(), host.data(), n*sizeof(float), hipMemcpyHostToDevice)); HIP_CHECK(hipMemcpy(b.get(), host.data(), n*sizeof(float), hipMemcpyHostToDevice));
-    dim3 block(256), grid(std::min<size_t>(65535, (n + 255) / 256)); EventTimer timer;
+    dim3 block(256), grid(std::min<size_t>(kReadBlocks, (n + block.x * 4 - 1) / (block.x * 4))); EventTimer timer;
     const std::string arch = arch_name(p);
     auto sample = [&](auto launch) { return median_seconds(o.warmups, o.repeats, [&] { return timer.measure([&] { for (unsigned j=0;j<o.inner;++j) launch(); }); }); };
-    double read_s = sample([&] { HIP_CHECK(hipMemset(partial.get(), 0, sizeof(float))); hipLaunchKernelGGL(stream_read_kernel, grid, block, 0, 0, a.get(), partial.get(), n); HIP_CHECK(hipGetLastError()); });
-    emit_metric(out, "bandwidth", "read", (double(n)*sizeof(float)*o.inner/read_s)/1e9, "GB/s", o.memory_peak_gbps, o.warmups,o.repeats,o.inner,arch, "\"bytes_per_iteration\":4");
+    double read_s = sample([&] { hipLaunchKernelGGL(stream_read_kernel, grid, block, 0, 0, a.get(), partial.get(), n); HIP_CHECK(hipGetLastError()); });
+    emit_metric(out, "bandwidth", "read", (double(n)*sizeof(float)*o.inner/read_s)/1e9, "GB/s", o.memory_peak_gbps, o.warmups,o.repeats,o.inner,arch, "\"bytes_per_iteration\":4,\"consumption\":\"four-accumulator reduction; one non-contended float store per CTA\",\"read_ctas\":"+std::to_string(grid.x));
     double copy_s = sample([&] { hipLaunchKernelGGL(stream_copy_kernel, grid, block, 0, 0, a.get(), c.get(), n); HIP_CHECK(hipGetLastError()); });
     emit_metric(out, "bandwidth", "copy", (double(n)*sizeof(float)*2*o.inner/copy_s)/1e9, "GB/s", o.memory_peak_gbps, o.warmups,o.repeats,o.inner,arch, "\"bytes_per_iteration\":8");
     double triad_s = sample([&] { hipLaunchKernelGGL(stream_triad_kernel, grid, block, 0, 0, a.get(), b.get(), c.get(), n); HIP_CHECK(hipGetLastError()); });
@@ -256,9 +275,32 @@ void run_gemm(const Options& o, const hipDeviceProp_t& p, std::ostream& out) {
     }
 }
 
+// Sustained, unreported load for the wrapper's DPM gate.  Timed throughput is
+// still measured separately with HIP events around only target launches.
+void run_clock_warmup(const Options& o, const hipDeviceProp_t& p, std::ostream& out) {
+    constexpr unsigned m = 1024, n = 1024, k = 1024;
+    const size_t ae = size_t(m) * k, be = size_t(n) * k, ce = size_t(m) * n;
+    std::vector<uint16_t> init(ae + be);
+    for (size_t i = 0; i < init.size(); ++i) init[i] = f32_to_bf16((int(i % 11) - 5) * 0.125f);
+    DeviceBuffer<uint16_t> a(ae), b(be); DeviceBuffer<float> c(ce);
+    HIP_CHECK(hipMemcpy(a.get(), init.data(), ae * sizeof(uint16_t), hipMemcpyHostToDevice));
+    HIP_CHECK(hipMemcpy(b.get(), init.data() + ae, be * sizeof(uint16_t), hipMemcpyHostToDevice));
+    dim3 block(p.warpSize), grid(n / 16, m / 16);
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(o.clock_warmup_seconds);
+    unsigned launches = 0;
+    do {
+        hipLaunchKernelGGL(bf16_gemm_kernel, grid, block, 0, 0, a.get(), b.get(), c.get(), m, n, k);
+        HIP_CHECK(hipGetLastError());
+        ++launches;
+    } while (std::chrono::steady_clock::now() < deadline);
+    HIP_CHECK(hipDeviceSynchronize());
+    out << "{\"schema\":\"ullm.hw-microbench.v1\",\"kind\":\"clock_warmup\",\"seconds_requested\":"
+        << o.clock_warmup_seconds << ",\"kernel\":\"naive_bf16_wmma_1024x1024x1024\",\"launches\":" << launches << "}\n";
+}
+
 Options parse(int argc, char** argv) {
     Options o; auto value=[&](int& i){if(++i>=argc)throw std::runtime_error("missing option value");return std::string(argv[i]);};
-    for(int i=1;i<argc;++i){std::string a=argv[i]; if(a=="--device")o.device=std::stoi(value(i)); else if(a=="--warmups")o.warmups=std::stoul(value(i)); else if(a=="--repeats")o.repeats=std::stoul(value(i)); else if(a=="--inner")o.inner=std::stoul(value(i)); else if(a=="--workset-mib")o.workset_mib=std::stoull(value(i)); else if(a=="--mode")o.mode=value(i); else if(a=="--output")o.output=value(i); else if(a=="--memory-peak-gbps")o.memory_peak_gbps=std::stod(value(i)); else if(a=="--bf16-peak-tflops")o.bf16_peak_tflops=std::stod(value(i)); else if(a=="--fp8-peak-tflops")o.fp8_peak_tflops=std::stod(value(i)); else if(a=="--help") { std::cout<<"usage: hw-microbench-rdna4-cdna3 [--mode all|validate|bandwidth|gemm] [--output FILE] [--memory-peak-gbps N] [--bf16-peak-tflops N] [--fp8-peak-tflops N]\n"; std::exit(0); } else throw std::runtime_error("unknown option: "+a); }
+    for(int i=1;i<argc;++i){std::string a=argv[i]; if(a=="--device")o.device=std::stoi(value(i)); else if(a=="--warmups")o.warmups=std::stoul(value(i)); else if(a=="--repeats")o.repeats=std::stoul(value(i)); else if(a=="--inner")o.inner=std::stoul(value(i)); else if(a=="--workset-mib")o.workset_mib=std::stoull(value(i)); else if(a=="--clock-warmup-seconds")o.clock_warmup_seconds=std::stoul(value(i)); else if(a=="--mode")o.mode=value(i); else if(a=="--output")o.output=value(i); else if(a=="--memory-peak-gbps")o.memory_peak_gbps=std::stod(value(i)); else if(a=="--bf16-peak-tflops")o.bf16_peak_tflops=std::stod(value(i)); else if(a=="--fp8-peak-tflops")o.fp8_peak_tflops=std::stod(value(i)); else if(a=="--help") { std::cout<<"usage: hw-microbench-rdna4-cdna3 [--mode all|validate|bandwidth|gemm|clock-warmup] [--clock-warmup-seconds N] [--output FILE] [--memory-peak-gbps N] [--bf16-peak-tflops N] [--fp8-peak-tflops N]\n"; std::exit(0); } else throw std::runtime_error("unknown option: "+a); }
     if(!o.warmups||!o.repeats||!o.inner)throw std::runtime_error("warmups, repeats and inner must be positive"); return o;
 }
 }
@@ -267,6 +309,6 @@ int main(int argc, char** argv) try {
     Options o=parse(argc,argv); HIP_CHECK(hipSetDevice(o.device)); hipDeviceProp_t p{}; HIP_CHECK(hipGetDeviceProperties(&p,o.device)); require_supported_arch(p);
     std::ofstream file; std::ostream* out=&std::cout; if(!o.output.empty()){file.open(o.output);if(!file)throw std::runtime_error("cannot open output");out=&file;}
     *out << "{\"schema\":\"ullm.hw-microbench.v1\",\"kind\":\"environment\",\"arch\":"; json_string(*out,arch_name(p)); *out << ",\"device\":";json_string(*out,p.name);*out<<",\"wavefront\":"<<p.warpSize<<",\"timing\":\"HIP events around only repeated kernel launches; median\",\"fp8_contract\":\"OCP E4M3FN values; gfx942 retains raw bytes as FNUZ and compensates both operands by x4\"}\n";
-    if(o.mode=="all"||o.mode=="validate") validate_gemm(p,*out); if(o.mode=="all"||o.mode=="bandwidth")run_bandwidth(o,p,*out); if(o.mode=="all"||o.mode=="gemm")run_gemm(o,p,*out);
-    if(o.mode!="all"&&o.mode!="validate"&&o.mode!="bandwidth"&&o.mode!="gemm")throw std::runtime_error("invalid mode"); return 0;
+    if(o.mode=="all"||o.mode=="validate") validate_gemm(p,*out); if(o.mode=="all"||o.mode=="bandwidth")run_bandwidth(o,p,*out); if(o.mode=="all"||o.mode=="gemm")run_gemm(o,p,*out); if(o.mode=="clock-warmup")run_clock_warmup(o,p,*out);
+    if(o.mode!="all"&&o.mode!="validate"&&o.mode!="bandwidth"&&o.mode!="gemm"&&o.mode!="clock-warmup")throw std::runtime_error("invalid mode"); return 0;
 } catch(const std::exception& e) { std::cerr<<"hw-microbench failed: "<<e.what()<<'\n'; return 1; }

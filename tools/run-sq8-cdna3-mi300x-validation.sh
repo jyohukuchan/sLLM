@@ -34,7 +34,9 @@ first item to cut when lease time is short (after the established profiler /
 occupancy, full-model, model/image, external-engine, timing-sweep, and
 hand-written-A priorities); never cut P0 for it. Set all three
 HW_MB_{MEMORY_PEAK_GBPS,BF16_PEAK_TFLOPS,FP8_PEAK_TFLOPS} values from the
-rental host's recorded official/amd-smi source before running this stage.
+rental host's recorded official/amd-smi source before running this stage. Also
+set HW_MB_AMD_SMI_GPU to the physical GPU index selected by the one-token
+HIP_VISIBLE_DEVICES mapping; it is recorded with continuous clock telemetry.
 EOF
 }
 
@@ -357,11 +359,14 @@ stage_hw_microbench() {
   : "${HW_MB_MEMORY_PEAK_GBPS:?set from recorded MI300X official/amd-smi source}"
   : "${HW_MB_BF16_PEAK_TFLOPS:?set from recorded MI300X official source}"
   : "${HW_MB_FP8_PEAK_TFLOPS:?set from recorded MI300X official source}"
+  : "${HW_MB_AMD_SMI_GPU:?set to the physical amd-smi GPU index for the selected MI300X}"
   HIP_VISIBLE_DEVICES="$hip_visible_devices" \
     HW_MB_MEMORY_PEAK_GBPS="$HW_MB_MEMORY_PEAK_GBPS" \
     HW_MB_BF16_PEAK_TFLOPS="$HW_MB_BF16_PEAK_TFLOPS" \
     HW_MB_FP8_PEAK_TFLOPS="$HW_MB_FP8_PEAK_TFLOPS" \
+    HW_MB_AMD_SMI_GPU="$HW_MB_AMD_SMI_GPU" \
     tools/run-hw-microbench-rdna4-cdna3.sh --arch gfx942 \
+      --amd-smi-gpu "$HW_MB_AMD_SMI_GPU" \
       --results-dir "$results_dir/hw-microbench"
 }
 

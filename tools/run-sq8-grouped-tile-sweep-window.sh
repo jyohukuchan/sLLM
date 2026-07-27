@@ -282,7 +282,7 @@ if [[ -n ${ULLM_HW_MICROBENCH_RESULTS_DIR:-} ]]; then
   hw_started=$(date --iso-8601=seconds)
   HIP_VISIBLE_DEVICES=1 ULLM_HIP_VISIBLE_DEVICES=1 \
     HW_MB_MEMORY_PEAK_GBPS=640 HW_MB_BF16_PEAK_TFLOPS=191 HW_MB_FP8_PEAK_TFLOPS=383 \
-    "$root/tools/run-hw-microbench-rdna4-cdna3.sh" --arch gfx1201 --results-dir "$hw"
+    "$root/tools/run-hw-microbench-rdna4-cdna3.sh" --arch gfx1201 --amd-smi-gpu 2 --results-dir "$hw"
   hw_finished=$(date --iso-8601=seconds)
   printf 'started_at=%s\nfinished_at=%s\n' "$hw_started" "$hw_finished" >"$hw/window-wall-clock.txt"
   event hw-microbench-finished

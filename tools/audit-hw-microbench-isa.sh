@@ -28,13 +28,23 @@ fi
 [[ -n $hsaco && -f $hsaco ]] || { echo "did not find saved $arch hsaco" >&2; exit 1; }
 "$objdump" --disassemble --mcpu="$arch" "$hsaco" >"$output_dir/$arch.disasm"
 "$readelf" --notes "$hsaco" >"$output_dir/$arch.notes.txt"
+stream_read_disasm="$output_dir/stream-read.disasm"
+awk '
+  /<.*stream_read_kernel.*>:/ { capture=1 }
+  capture && /^[[:xdigit:]]+ <.*>:/ && $0 !~ /stream_read_kernel/ { exit }
+  capture { print }
+' "$output_dir/$arch.disasm" >"$stream_read_disasm"
+stream_read_loads=$(grep -Ec '(^|[[:space:]])(global|flat)_load_' "$stream_read_disasm" || true)
+stream_read_atomics=$(grep -Ec '(^|[[:space:]])(global|flat)_atomic' "$stream_read_disasm" || true)
+[[ $stream_read_loads -gt 0 ]] || { echo "STREAM read ISA has no global/flat load: $stream_read_disasm" >&2; exit 1; }
+[[ $stream_read_atomics -eq 0 ]] || { echo "STREAM read ISA still contains atomic operations: $stream_read_disasm" >&2; exit 1; }
 if [[ $arch == gfx1201 ]]; then required='v_wmma_f32_16x16x16_fp8_fp8'; else required='v_mfma_f32_16x16x32_fp8_fp8'; fi
 count=$(grep -c "$required" "$output_dir/$arch.disasm" || true)
 [[ $count -gt 0 ]] || { echo "required instruction absent: $required" >&2; exit 1; }
 printf 'kernel\tvgpr\tsgpr\tagpr\tlds_bytes\tprivate_bytes\tvgpr_spills\tsgpr_spills\twavefront\n' >"$output_dir/resources.tsv"
 awk '
   function emit() { if (name ~ /bf16_gemm_kernel|fp8_gemm_kernel/) printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",name,vgpr,sgpr,agpr,lds,priv,vspill,sspill,wave }
-  /^  - \.args:/ { emit(); name=""; vgpr=sgpr=lds=priv=vspill=sspill=wave=""; agpr="N/A"; next }
+  /^  - \.args:|^  - \.agpr_count:/ { emit(); name=""; vgpr=sgpr=lds=priv=vspill=sspill=wave=""; agpr=($2 == ".agpr_count:" ? $3 : "N/A"); next }
   /^  - \.agpr_count:/ { agpr=$3; next }
   /^    \.name:/ { name=$2; next } /^    \.group_segment_fixed_size:/ {lds=$2;next}
   /^    \.private_segment_fixed_size:/ {priv=$2;next} /^    \.sgpr_count:/ {sgpr=$2;next}
@@ -49,6 +59,7 @@ if ! awk -F '\t' 'NR>1 { if ($6 != 0 || $7 != 0 || $8 != 0) bad=1 } END { exit b
 fi
 {
   echo "arch=$arch"; echo "hsaco=$hsaco"; echo "required_instruction=$required"; echo "required_instruction_count=$count"
+  echo "stream_read_disassembly=$stream_read_disasm"; echo "stream_read_global_or_flat_loads=$stream_read_loads"; echo "stream_read_global_or_flat_atomics=$stream_read_atomics"
   echo "gemm_resource_rows=$rows"; echo "static_occupancy=resource metadata recorded; runtime occupancy requires the target GPU"
 } >"$output_dir/summary.txt"
 echo "PASS $arch ISA audit: $required ($count); resources: $output_dir/resources.tsv"
