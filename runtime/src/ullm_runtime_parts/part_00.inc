@@ -1881,25 +1881,7 @@ constexpr int HIP_MEMCPY_DEVICE_TO_DEVICE = 3;
 
 } // namespace
 
-struct ullm_runtime_context {
-    uint32_t device_index = 0;
-    BackendKind backend = BackendKind::Cpu;
-    int hip_device_id = -1;
-};
-
-struct ullm_runtime_buffer {
-    BackendKind backend = BackendKind::Cpu;
-    int hip_device_id = -1;
-    void *ptr = nullptr;
-    size_t bytes = 0;
-};
-
-struct ullm_runtime_stream {
-    BackendKind backend = BackendKind::Cpu;
-    int hip_device_id = -1;
-    void *stream = nullptr;
-};
-
+#include "../parts/runtime_structs.inc"
 #include "../parts/probe_kernels.inc"
 #include "../parts/aq4_kernels.inc"
 #include "../parts/primitives_kernels_part_a.inc"
