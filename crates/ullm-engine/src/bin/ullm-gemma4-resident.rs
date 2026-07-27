@@ -36,6 +36,7 @@ enum Mode {
     Validation,
     SlidingBoundary,
     Benchmark,
+    AttentionProfile,
     Continuation,
 }
 
@@ -45,9 +46,10 @@ impl Mode {
             "validation" => Ok(Self::Validation),
             "sliding-boundary" => Ok(Self::SlidingBoundary),
             "benchmark" => Ok(Self::Benchmark),
+            "attention-profile" => Ok(Self::AttentionProfile),
             "continuation" => Ok(Self::Continuation),
             _ => Err(format!(
-                "--mode must be validation, sliding-boundary, benchmark, or continuation, got {raw:?}"
+                "--mode must be validation, sliding-boundary, benchmark, attention-profile, or continuation, got {raw:?}"
             )),
         }
     }
@@ -57,6 +59,7 @@ impl Mode {
             Self::Validation => "validation",
             Self::SlidingBoundary => "sliding-boundary",
             Self::Benchmark => "benchmark",
+            Self::AttentionProfile => "attention-profile",
             Self::Continuation => "continuation",
         }
     }
@@ -99,7 +102,7 @@ const ONCE_UPON_A_TIME: TraceCase = TraceCase {
 };
 
 fn usage() -> &'static str {
-    "usage: ullm-gemma4-resident --model-dir PATH --output PATH --mode validation|sliding-boundary|benchmark|continuation [--benchmark-repeats N] [--benchmark-prompt-tokens N] [--benchmark-decode-tokens N] [--benchmark-prompt-token-id ID] [--continuation-tokens N] [--cooldown-hotspot-c C] [--cooldown-timeout-seconds N]"
+    "usage: ullm-gemma4-resident --model-dir PATH --output PATH --mode validation|sliding-boundary|benchmark|attention-profile|continuation [--benchmark-repeats N] [--benchmark-prompt-tokens N] [--benchmark-decode-tokens N] [--benchmark-prompt-token-id ID] [--continuation-tokens N] [--cooldown-hotspot-c C] [--cooldown-timeout-seconds N]"
 }
 
 fn main() -> ExitCode {
@@ -282,6 +285,11 @@ fn run(options: Options) -> Result<(), String> {
             options.benchmark_repeats,
             options.benchmark_prompt_tokens,
             options.benchmark_decode_tokens,
+            options.benchmark_prompt_token_id,
+        )?,
+        Mode::AttentionProfile => attention_profile_workload(
+            &mut executor,
+            options.benchmark_prompt_tokens,
             options.benchmark_prompt_token_id,
         )?,
         Mode::Continuation => continuation_workload(&mut executor, options.continuation_tokens)?,
@@ -907,6 +915,52 @@ fn sliding_boundary_workload(executor: &mut Gemma4TextExecutor) -> Result<Value,
     }))
 }
 
+/// One cold-cache prefill with no warmup or decode.  This deliberately exists
+/// for profiler attribution: the trace contains exactly `35 * N` Gemma4
+/// paged-reader launches, rather than a warmup and a follow-on decode.
+fn attention_profile_workload(
+    executor: &mut Gemma4TextExecutor,
+    prompt_tokens: usize,
+    prompt_token_id: u32,
+) -> Result<Value, String> {
+    let prompt = vec![prompt_token_id; prompt_tokens];
+    executor.reset();
+    executor.reset_resident_logical_bytes();
+    executor.reset_resident_host_profile();
+    let started = Instant::now();
+    let trace = executor.prefill(&prompt)?;
+    let elapsed_seconds = started.elapsed().as_secs_f64();
+    let logical = executor
+        .resident_logical_bytes()
+        .ok_or_else(|| "attention profile has no logical accounting".to_string())?;
+    let host_profile = executor
+        .resident_host_profile()
+        .ok_or_else(|| "attention profile has no resident host profile".to_string())?;
+    let expected_attention_calls = prompt_tokens
+        .checked_mul(35)
+        .ok_or_else(|| "attention profile launch count overflows usize".to_string())?;
+    if usize::try_from(logical.attention_calls).ok() != Some(expected_attention_calls) {
+        return Err(format!(
+            "attention profile expected {expected_attention_calls} paged-reader calls, got {}",
+            logical.attention_calls
+        ));
+    }
+    Ok(json!({
+        "kind": "resident-attention-profile",
+        "method": "one cold-cache prefill only; no warmup or decode is included",
+        "prompt": {
+            "token_count": prompt_tokens,
+            "token_id": prompt_token_id,
+        },
+        "elapsed_seconds": elapsed_seconds,
+        "prefill_tokens_per_second": (prompt_tokens as f64) / elapsed_seconds,
+        "top1_token_id": trace.top1.token_id,
+        "logical_lower_bound": logical_bytes_json(logical)?,
+        "expected_paged_reader_calls": expected_attention_calls,
+        "host_profile": host_profile_json(host_profile),
+    }))
+}
+
 fn benchmark_workload(
     executor: &mut Gemma4TextExecutor,
     repeats: usize,
@@ -1105,6 +1159,21 @@ fn host_profile_json(profile: Gemma4ResidentHostProfile) -> Value {
             "bf16_row": primitive_host_profile_json(profile.bf16_row),
             "attention": primitive_host_profile_json(profile.attention),
             "kv_write": primitive_host_profile_json(profile.kv_write),
+        },
+        "attention_region": {
+            "units": "nanoseconds measured with std::time::Instant; complete resident attention region including its final synchronization",
+            "sliding": {
+                "primitive_ns": profile.attention_region.sliding_ns,
+                "calls": profile.attention_region.sliding_calls,
+                "layer_indices_per_token": 28,
+                "geometry": "8Q/1KV/256/256, local window 512",
+            },
+            "full": {
+                "primitive_ns": profile.attention_region.full_ns,
+                "calls": profile.attention_region.full_calls,
+                "layer_indices_per_token": 7,
+                "geometry": "8Q/1KV/512/512, full context",
+            },
         },
     })
 }

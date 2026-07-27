@@ -71,6 +71,14 @@ const GEMMA4_DISABLE_PLE_REGION_ENV: &str = "ULLM_GEMMA4_DISABLE_PLE_REGION";
 /// opt-in until it beats the already-promoted PLE-only path end-to-end.
 const GEMMA4_PREFILL_LAYER_MAJOR_ENV: &str = "ULLM_GEMMA4_PREFILL_LAYER_MAJOR";
 
+/// Gemma4 E2B's seven 512-wide full-context attention layers.  All remaining
+/// decoder attention layers are 256-wide sliding-window layers.
+const GEMMA4_FULL_ATTENTION_LAYER_INDICES: [usize; 7] = [4, 9, 14, 19, 24, 29, 34];
+
+fn gemma4_is_full_attention_layer(layer_index: usize) -> bool {
+    GEMMA4_FULL_ATTENTION_LAYER_INDICES.contains(&layer_index)
+}
+
 fn record_elapsed_ns(slot: &mut u64, started: Instant) {
     *slot = slot.saturating_add(elapsed_ns(started));
 }
@@ -273,6 +281,31 @@ pub struct Gemma4ResidentPrimitiveHostProfile {
     pub calls: u64,
 }
 
+/// Wall-clock accounting for complete resident attention regions, classified
+/// by the executing decoder layer.  Unlike `attention`, which describes the
+/// standalone paged-reader primitive on the legacy host route, this includes
+/// the device-resident input norm, Q/K/V/O projections, RoPE, K/V write,
+/// reader, post norm, residual boundary, and the final synchronization.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Gemma4ResidentAttentionRegionHostProfile {
+    pub sliding_ns: u64,
+    pub sliding_calls: u64,
+    pub full_ns: u64,
+    pub full_calls: u64,
+}
+
+impl Gemma4ResidentAttentionRegionHostProfile {
+    fn record(&mut self, layer_index: usize, elapsed_ns: u64) {
+        if gemma4_is_full_attention_layer(layer_index) {
+            self.full_ns = self.full_ns.saturating_add(elapsed_ns);
+            self.full_calls = self.full_calls.saturating_add(1);
+        } else {
+            self.sliding_ns = self.sliding_ns.saturating_add(elapsed_ns);
+            self.sliding_calls = self.sliding_calls.saturating_add(1);
+        }
+    }
+}
+
 impl Gemma4ResidentPrimitiveHostProfile {
     fn record(
         &mut self,
@@ -330,6 +363,10 @@ pub struct Gemma4ResidentHostProfile {
     pub matvec: Gemma4ResidentPrimitiveHostProfile,
     pub bf16_row: Gemma4ResidentPrimitiveHostProfile,
     pub attention: Gemma4ResidentPrimitiveHostProfile,
+    /// Complete device-resident attention-region timing, split by the Gemma4
+    /// local/full architecture.  It is diagnostic-only and does not change
+    /// the execution graph.
+    pub attention_region: Gemma4ResidentAttentionRegionHostProfile,
     pub kv_write: Gemma4ResidentPrimitiveHostProfile,
 }
 
@@ -4848,6 +4885,7 @@ impl Gemma4TextExecutor {
         hidden_states: &[f32],
         position: usize,
     ) -> Result<Vec<f32>, String> {
+        let region_started = Instant::now();
         let decoder = self.resident_descriptor.decoder.clone();
         let layer = self.layer_descriptor(layer_index)?.clone();
         let attention = layer.attention;
@@ -4943,7 +4981,7 @@ impl Gemma4TextExecutor {
                 return Err("Gemma resident attention region requires device KV".into());
             }
         };
-        if let Some(source) = shared_source {
+        let output = if let Some(source) = shared_source {
             let cache = caches.cache(source)?;
             self.matvec.attention_norm_residual_resident(
                 hidden_states,
@@ -4964,7 +5002,7 @@ impl Gemma4TextExecutor {
                 decoder.rms_norm_epsilon,
                 None,
                 Some(cache),
-            )
+            )?
         } else {
             let cache = caches.cache_mut(layer_index)?;
             self.matvec.attention_norm_residual_resident(
@@ -4986,8 +5024,13 @@ impl Gemma4TextExecutor {
                 decoder.rms_norm_epsilon,
                 Some(cache),
                 None,
-            )
-        }
+            )?
+        };
+        self.matvec
+            .resident_host_profile
+            .attention_region
+            .record(layer_index, elapsed_ns(region_started));
+        Ok(output)
     }
 
     fn forward_attention(
