@@ -27,6 +27,7 @@ use std::env;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 use ullm_runtime_sys::{
     DeviceInfo, RuntimeBuffer, RuntimeContext, RuntimeStream, bf16_row_f32, device_count,
     device_info, matvec_bf16_f32, paged_decode_attn_f32, paged_kv_write_f32,
@@ -54,6 +55,14 @@ const GEMMA4_DEVICE_KV_BLOCK_SIZE: usize = 1;
 const R9700_RUNTIME_NAME: &str = "AMD Radeon Graphics";
 const R9700_MEMORY_BYTES_MIN: u64 = 30 * 1024 * 1024 * 1024;
 const R9700_MEMORY_BYTES_MAX: u64 = 34 * 1024 * 1024 * 1024;
+
+fn record_elapsed_ns(slot: &mut u64, started: Instant) {
+    *slot = slot.saturating_add(elapsed_ns(started));
+}
+
+fn elapsed_ns(started: Instant) -> u64 {
+    u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX)
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Gemma4TextDeviceIdentity {
@@ -202,6 +211,34 @@ pub struct Gemma4ResidentLogicalBytes {
     pub matvec_calls: u64,
     pub bf16_row_reads: u64,
     pub attention_calls: u64,
+}
+
+/// Host-side timing of the resident Gemma4 executor's primitive boundaries.
+///
+/// All values are monotonically accumulated nanoseconds. `primitive_ns` is
+/// inclusive: it contains the categories below plus the small residual spent
+/// in primitive validation and bookkeeping. `executor_other_ns` is the time in
+/// a token forward pass not spent in one of those primitive calls. This is a
+/// diagnostic counter, not a throughput clock.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Gemma4ResidentHostProfile {
+    pub token_forward_ns: u64,
+    pub primitive_ns: u64,
+    pub executor_other_ns: u64,
+    pub input_encode_ns: u64,
+    pub output_allocation_ns: u64,
+    pub buffer_ensure_ns: u64,
+    pub buffer_allocate_ns: u64,
+    pub h2d_submit_ns: u64,
+    pub kernel_submit_ns: u64,
+    pub d2h_submit_ns: u64,
+    pub stream_synchronize_ns: u64,
+    pub output_decode_validate_ns: u64,
+    pub kv_table_host_ns: u64,
+    pub matvec_calls: u64,
+    pub row_calls: u64,
+    pub attention_calls: u64,
+    pub kv_write_calls: u64,
 }
 
 /// Diagnostic-only result from re-enabling the physical K/V projections of
@@ -990,6 +1027,7 @@ struct Bf16MatvecRuntime {
     attention_query: Option<RuntimeBuffer>,
     attention_output: Option<RuntimeBuffer>,
     resident_logical_bytes: Gemma4ResidentLogicalBytes,
+    resident_host_profile: Gemma4ResidentHostProfile,
 }
 
 impl Bf16MatvecRuntime {
@@ -1049,6 +1087,7 @@ impl Bf16MatvecRuntime {
             attention_query: None,
             attention_output: None,
             resident_logical_bytes: Gemma4ResidentLogicalBytes::default(),
+            resident_host_profile: Gemma4ResidentHostProfile::default(),
         })
     }
 
@@ -1085,6 +1124,14 @@ impl Bf16MatvecRuntime {
 
     fn reset_resident_logical_bytes(&mut self) {
         self.resident_logical_bytes = Gemma4ResidentLogicalBytes::default();
+    }
+
+    fn resident_host_profile(&self) -> Gemma4ResidentHostProfile {
+        self.resident_host_profile
+    }
+
+    fn reset_resident_host_profile(&mut self) {
+        self.resident_host_profile = Gemma4ResidentHostProfile::default();
     }
 
     fn account_resident_weight_read(
@@ -1154,7 +1201,9 @@ impl Bf16MatvecRuntime {
         slot: &mut Option<RuntimeBuffer>,
         required_bytes: usize,
         label: &str,
+        host_profile: &mut Gemma4ResidentHostProfile,
     ) -> Result<(), String> {
+        let started = Instant::now();
         if required_bytes == 0 {
             return Err(format!("Gemma4 {label} buffer requires nonzero bytes"));
         }
@@ -1163,11 +1212,14 @@ impl Bf16MatvecRuntime {
             None => true,
         };
         if needs_replacement {
+            let allocation_started = Instant::now();
             *slot =
                 Some(context.alloc_buffer(required_bytes).map_err(|error| {
                     format!("failed to allocate Gemma4 {label} buffer: {error}")
                 })?);
+            record_elapsed_ns(&mut host_profile.buffer_allocate_ns, allocation_started);
         }
+        record_elapsed_ns(&mut host_profile.buffer_ensure_ns, started);
         Ok(())
     }
 
@@ -1213,13 +1265,16 @@ impl Bf16MatvecRuntime {
         columns: usize,
         input: &[f32],
     ) -> Result<Vec<f32>, String> {
+        let operation_started = Instant::now();
         if input.len() != columns {
             return Err(format!(
                 "resident BF16 matvec input width mismatch: expected {columns}, got {}",
                 input.len()
             ));
         }
+        let encode_started = Instant::now();
         let input_bytes = encode_f32_to_bytes(input);
+        let input_encode_ns = elapsed_ns(encode_started);
         let output_bytes = rows
             .checked_mul(std::mem::size_of::<f32>())
             .ok_or_else(|| "resident BF16 matvec output byte count overflows".to_string())?;
@@ -1228,12 +1283,14 @@ impl Bf16MatvecRuntime {
             &mut self.resident_input,
             input_bytes.len(),
             "resident matvec input",
+            &mut self.resident_host_profile,
         )?;
         Self::ensure_buffer(
             &mut self.context,
             &mut self.resident_output,
             output_bytes,
             "resident matvec output",
+            &mut self.resident_host_profile,
         )?;
         let (input_slot, output_slot) = (&mut self.resident_input, &mut self.resident_output);
         let input_buffer = input_slot
@@ -1242,7 +1299,10 @@ impl Bf16MatvecRuntime {
         let output_buffer = output_slot
             .as_mut()
             .expect("resident output buffer was allocated");
+        let h2d_started = Instant::now();
         input_buffer.copy_from_host(0, &input_bytes, Some(&mut self.stream))?;
+        let h2d_submit_ns = elapsed_ns(h2d_started);
+        let kernel_started = Instant::now();
         matvec_bf16_f32(
             matrix,
             input_buffer,
@@ -1251,15 +1311,24 @@ impl Bf16MatvecRuntime {
             output_buffer,
             Some(&mut self.stream),
         )?;
+        let kernel_submit_ns = elapsed_ns(kernel_started);
+        let output_allocation_started = Instant::now();
         let mut host_output = vec![0_u8; output_bytes];
+        let output_allocation_ns = elapsed_ns(output_allocation_started);
+        let d2h_started = Instant::now();
         output_buffer.copy_to_host(0, &mut host_output, Some(&mut self.stream))?;
+        let d2h_submit_ns = elapsed_ns(d2h_started);
+        let synchronize_started = Instant::now();
         self.stream.synchronize()?;
+        let stream_synchronize_ns = elapsed_ns(synchronize_started);
+        let decode_started = Instant::now();
         let output = decode_f32_le_values(&host_output);
         if output.len() != rows || output.iter().any(|value| !value.is_finite()) {
             return Err(
                 "Gemma4 resident BF16 matvec returned non-finite or malformed F32 output".into(),
             );
         }
+        let output_decode_validate_ns = elapsed_ns(decode_started);
         let matrix_bytes = rows
             .checked_mul(columns)
             .and_then(|elements| elements.checked_mul(std::mem::size_of::<u16>()))
@@ -1267,6 +1336,24 @@ impl Bf16MatvecRuntime {
                 "Gemma4 resident BF16 matvec logical byte count overflows".to_string()
             })?;
         self.account_resident_weight_read(matrix_bytes, true)?;
+        let profile = &mut self.resident_host_profile;
+        profile.input_encode_ns = profile.input_encode_ns.saturating_add(input_encode_ns);
+        profile.output_allocation_ns = profile
+            .output_allocation_ns
+            .saturating_add(output_allocation_ns);
+        profile.h2d_submit_ns = profile.h2d_submit_ns.saturating_add(h2d_submit_ns);
+        profile.kernel_submit_ns = profile.kernel_submit_ns.saturating_add(kernel_submit_ns);
+        profile.d2h_submit_ns = profile.d2h_submit_ns.saturating_add(d2h_submit_ns);
+        profile.stream_synchronize_ns = profile
+            .stream_synchronize_ns
+            .saturating_add(stream_synchronize_ns);
+        profile.output_decode_validate_ns = profile
+            .output_decode_validate_ns
+            .saturating_add(output_decode_validate_ns);
+        profile.primitive_ns = profile
+            .primitive_ns
+            .saturating_add(elapsed_ns(operation_started));
+        profile.matvec_calls = profile.matvec_calls.saturating_add(1);
         Ok(output)
     }
 
@@ -1277,6 +1364,7 @@ impl Bf16MatvecRuntime {
         columns: usize,
         row_index: usize,
     ) -> Result<Vec<f32>, String> {
+        let operation_started = Instant::now();
         let output_bytes = columns
             .checked_mul(std::mem::size_of::<f32>())
             .ok_or_else(|| "resident BF16 row output byte count overflows".to_string())?;
@@ -1285,11 +1373,13 @@ impl Bf16MatvecRuntime {
             &mut self.resident_row_output,
             output_bytes,
             "resident BF16 row output",
+            &mut self.resident_host_profile,
         )?;
         let output_buffer = self
             .resident_row_output
             .as_mut()
             .expect("resident row output buffer was allocated");
+        let kernel_started = Instant::now();
         bf16_row_f32(
             matrix,
             rows,
@@ -1298,19 +1388,44 @@ impl Bf16MatvecRuntime {
             output_buffer,
             Some(&mut self.stream),
         )?;
+        let kernel_submit_ns = elapsed_ns(kernel_started);
+        let output_allocation_started = Instant::now();
         let mut host_output = vec![0_u8; output_bytes];
+        let output_allocation_ns = elapsed_ns(output_allocation_started);
+        let d2h_started = Instant::now();
         output_buffer.copy_to_host(0, &mut host_output, Some(&mut self.stream))?;
+        let d2h_submit_ns = elapsed_ns(d2h_started);
+        let synchronize_started = Instant::now();
         self.stream.synchronize()?;
+        let stream_synchronize_ns = elapsed_ns(synchronize_started);
+        let decode_started = Instant::now();
         let output = decode_f32_le_values(&host_output);
         if output.len() != columns || output.iter().any(|value| !value.is_finite()) {
             return Err(
                 "Gemma4 resident BF16 row returned non-finite or malformed F32 output".into(),
             );
         }
+        let output_decode_validate_ns = elapsed_ns(decode_started);
         let row_bytes = columns
             .checked_mul(std::mem::size_of::<u16>())
             .ok_or_else(|| "Gemma4 resident BF16 row logical byte count overflows".to_string())?;
         self.account_resident_weight_read(row_bytes, false)?;
+        let profile = &mut self.resident_host_profile;
+        profile.output_allocation_ns = profile
+            .output_allocation_ns
+            .saturating_add(output_allocation_ns);
+        profile.kernel_submit_ns = profile.kernel_submit_ns.saturating_add(kernel_submit_ns);
+        profile.d2h_submit_ns = profile.d2h_submit_ns.saturating_add(d2h_submit_ns);
+        profile.stream_synchronize_ns = profile
+            .stream_synchronize_ns
+            .saturating_add(stream_synchronize_ns);
+        profile.output_decode_validate_ns = profile
+            .output_decode_validate_ns
+            .saturating_add(output_decode_validate_ns);
+        profile.primitive_ns = profile
+            .primitive_ns
+            .saturating_add(elapsed_ns(operation_started));
+        profile.row_calls = profile.row_calls.saturating_add(1);
         Ok(output)
     }
 
@@ -1706,6 +1821,7 @@ impl Bf16MatvecRuntime {
         key: &[f32],
         value: &[f32],
     ) -> Result<(), String> {
+        let operation_started = Instant::now();
         let width = cache.width()?;
         if key.len() != width || value.len() != width {
             return Err(format!(
@@ -1725,19 +1841,23 @@ impl Bf16MatvecRuntime {
                 cache.layer_index
             ));
         }
+        let encode_started = Instant::now();
         let key_bytes = encode_f32_to_bytes(key);
         let value_bytes = encode_f32_to_bytes(value);
+        let input_encode_ns = elapsed_ns(encode_started);
         Self::ensure_buffer(
             &mut self.context,
             &mut self.kv_key_input,
             key_bytes.len(),
             "device KV key staging",
+            &mut self.resident_host_profile,
         )?;
         Self::ensure_buffer(
             &mut self.context,
             &mut self.kv_value_input,
             value_bytes.len(),
             "device KV value staging",
+            &mut self.resident_host_profile,
         )?;
         let position = cache.write_position()?;
         let (key_slot, value_slot) = (&mut self.kv_key_input, &mut self.kv_value_input);
@@ -1747,8 +1867,10 @@ impl Bf16MatvecRuntime {
         let value_staging = value_slot
             .as_mut()
             .expect("device KV value staging buffer was allocated");
+        let h2d_started = Instant::now();
         key_staging.copy_from_host(0, &key_bytes, Some(&mut self.stream))?;
         value_staging.copy_from_host(0, &value_bytes, Some(&mut self.stream))?;
+        let h2d_submit_ns = elapsed_ns(h2d_started);
         let (key_cache, value_cache, read_table, write_table) = (
             &mut cache.key,
             &mut cache.value,
@@ -1756,6 +1878,7 @@ impl Bf16MatvecRuntime {
             &cache.write_table,
         );
         let write_table = write_table.as_ref().unwrap_or(read_table);
+        let kernel_started = Instant::now();
         paged_kv_write_f32(
             key_staging,
             value_staging,
@@ -1770,12 +1893,25 @@ impl Bf16MatvecRuntime {
             value_cache,
             Some(&mut self.stream),
         )?;
+        let kernel_submit_ns = elapsed_ns(kernel_started);
+        let table_started = Instant::now();
         cache.record_append(&mut self.stream)?;
+        let kv_table_host_ns = elapsed_ns(table_started);
         let write_bytes = width
             .checked_mul(2)
             .and_then(|elements| elements.checked_mul(std::mem::size_of::<f32>()))
             .ok_or_else(|| "Gemma4 resident KV write logical byte count overflows".to_string())?;
-        self.account_device_kv(0, write_bytes, false)
+        self.account_device_kv(0, write_bytes, false)?;
+        let profile = &mut self.resident_host_profile;
+        profile.input_encode_ns = profile.input_encode_ns.saturating_add(input_encode_ns);
+        profile.h2d_submit_ns = profile.h2d_submit_ns.saturating_add(h2d_submit_ns);
+        profile.kernel_submit_ns = profile.kernel_submit_ns.saturating_add(kernel_submit_ns);
+        profile.kv_table_host_ns = profile.kv_table_host_ns.saturating_add(kv_table_host_ns);
+        profile.primitive_ns = profile
+            .primitive_ns
+            .saturating_add(elapsed_ns(operation_started));
+        profile.kv_write_calls = profile.kv_write_calls.saturating_add(1);
+        Ok(())
     }
 
     fn device_attention(
@@ -1786,6 +1922,7 @@ impl Bf16MatvecRuntime {
         kv_heads: usize,
         head_dim: usize,
     ) -> Result<Vec<f32>, String> {
+        let operation_started = Instant::now();
         if cache.cache_len == 0 {
             return Err(format!(
                 "Gemma4 device attention layer {} has no KV entries",
@@ -1807,7 +1944,9 @@ impl Bf16MatvecRuntime {
                 cache.layer_index
             ));
         }
+        let encode_started = Instant::now();
         let query_bytes = encode_f32_to_bytes(query);
+        let input_encode_ns = elapsed_ns(encode_started);
         let output_bytes = expected_query
             .checked_mul(std::mem::size_of::<f32>())
             .ok_or_else(|| {
@@ -1818,12 +1957,14 @@ impl Bf16MatvecRuntime {
             &mut self.attention_query,
             query_bytes.len(),
             "device attention query",
+            &mut self.resident_host_profile,
         )?;
         Self::ensure_buffer(
             &mut self.context,
             &mut self.attention_output,
             output_bytes,
             "device attention output",
+            &mut self.resident_host_profile,
         )?;
         let (query_slot, output_slot) = (&mut self.attention_query, &mut self.attention_output);
         let query_buffer = query_slot
@@ -1832,7 +1973,10 @@ impl Bf16MatvecRuntime {
         let output_buffer = output_slot
             .as_mut()
             .expect("device attention output buffer was allocated");
+        let h2d_started = Instant::now();
         query_buffer.copy_from_host(0, &query_bytes, Some(&mut self.stream))?;
+        let h2d_submit_ns = elapsed_ns(h2d_started);
+        let kernel_started = Instant::now();
         paged_decode_attn_f32(
             query_buffer,
             &cache.key,
@@ -1849,15 +1993,24 @@ impl Bf16MatvecRuntime {
             output_buffer,
             Some(&mut self.stream),
         )?;
+        let kernel_submit_ns = elapsed_ns(kernel_started);
+        let output_allocation_started = Instant::now();
         let mut host_output = vec![0_u8; output_bytes];
+        let output_allocation_ns = elapsed_ns(output_allocation_started);
+        let d2h_started = Instant::now();
         output_buffer.copy_to_host(0, &mut host_output, Some(&mut self.stream))?;
+        let d2h_submit_ns = elapsed_ns(d2h_started);
+        let synchronize_started = Instant::now();
         self.stream.synchronize()?;
+        let stream_synchronize_ns = elapsed_ns(synchronize_started);
+        let decode_started = Instant::now();
         let output = decode_f32_le_values(&host_output);
         if output.len() != expected_query || output.iter().any(|value| !value.is_finite()) {
             return Err(
                 "Gemma4 device attention returned non-finite or malformed F32 output".into(),
             );
         }
+        let output_decode_validate_ns = elapsed_ns(decode_started);
         let read_bytes = cache
             .cache_len
             .checked_mul(cache.width()?)
@@ -1865,6 +2018,24 @@ impl Bf16MatvecRuntime {
             .and_then(|elements| elements.checked_mul(std::mem::size_of::<f32>()))
             .ok_or_else(|| "Gemma4 resident KV read logical byte count overflows".to_string())?;
         self.account_device_kv(read_bytes, 0, true)?;
+        let profile = &mut self.resident_host_profile;
+        profile.input_encode_ns = profile.input_encode_ns.saturating_add(input_encode_ns);
+        profile.output_allocation_ns = profile
+            .output_allocation_ns
+            .saturating_add(output_allocation_ns);
+        profile.h2d_submit_ns = profile.h2d_submit_ns.saturating_add(h2d_submit_ns);
+        profile.kernel_submit_ns = profile.kernel_submit_ns.saturating_add(kernel_submit_ns);
+        profile.d2h_submit_ns = profile.d2h_submit_ns.saturating_add(d2h_submit_ns);
+        profile.stream_synchronize_ns = profile
+            .stream_synchronize_ns
+            .saturating_add(stream_synchronize_ns);
+        profile.output_decode_validate_ns = profile
+            .output_decode_validate_ns
+            .saturating_add(output_decode_validate_ns);
+        profile.primitive_ns = profile
+            .primitive_ns
+            .saturating_add(elapsed_ns(operation_started));
+        profile.attention_calls = profile.attention_calls.saturating_add(1);
         Ok(output)
     }
 }
@@ -2072,6 +2243,17 @@ impl Gemma4TextExecutor {
         self.matvec.reset_resident_logical_bytes();
     }
 
+    /// Host-side primitive accounting since the most recent reset. Available
+    /// only while the source BF16 checkpoint is resident on device.
+    pub fn resident_host_profile(&self) -> Option<Gemma4ResidentHostProfile> {
+        self.is_resident()
+            .then(|| self.matvec.resident_host_profile())
+    }
+
+    pub fn reset_resident_host_profile(&mut self) {
+        self.matvec.reset_resident_host_profile();
+    }
+
     /// Immutable device-cache state, including the explicit layer-to-source
     /// mapping used by Gemma4's shared K/V attention layers.
     pub fn resident_kv_cache_snapshot(
@@ -2201,6 +2383,8 @@ impl Gemma4TextExecutor {
     /// to preserve a simple explicit KV cache, but returned rows are laid out
     /// exactly as `[batch=1, tokens, width]` for the trace writer.
     pub fn execute_step(&mut self, input_token_ids: &[u32]) -> Result<Gemma4TextStepTrace, String> {
+        let token_started = Instant::now();
+        let primitive_before = self.matvec.resident_host_profile().primitive_ns;
         if input_token_ids.is_empty() {
             return Err("Gemma4TextExecutor input token list must be nonempty".into());
         }
@@ -2254,14 +2438,26 @@ impl Gemma4TextExecutor {
         let final_token_hidden = final_token_hidden.expect("checked nonempty input");
         let logits_last = self.project_tied_logits(&final_token_hidden)?;
         let top1 = top1_from_logits(&logits_last)?;
-        Ok(Gemma4TextStepTrace {
+        let trace = Gemma4TextStepTrace {
             input_token_ids: input_token_ids.to_vec(),
             embedding,
             layer_outputs,
             final_norm,
             logits_last,
             top1,
-        })
+        };
+        let token_forward_ns = elapsed_ns(token_started);
+        let primitive_ns = self
+            .matvec
+            .resident_host_profile()
+            .primitive_ns
+            .saturating_sub(primitive_before);
+        let profile = &mut self.matvec.resident_host_profile;
+        profile.token_forward_ns = profile.token_forward_ns.saturating_add(token_forward_ns);
+        profile.executor_other_ns = profile
+            .executor_other_ns
+            .saturating_add(token_forward_ns.saturating_sub(primitive_ns));
+        Ok(trace)
     }
 
     fn forward_token(&mut self, token_id: u32) -> Result<TokenForward, String> {

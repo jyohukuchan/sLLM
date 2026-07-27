@@ -17,7 +17,8 @@ use std::process::{Command, ExitCode};
 use std::thread;
 use std::time::{Duration, Instant};
 use ullm_engine::gemma4_text_executor::{
-    Gemma4ResidentKvCacheSnapshot, Gemma4ResidentLogicalBytes, Gemma4TextExecutor,
+    Gemma4ResidentHostProfile, Gemma4ResidentKvCacheSnapshot, Gemma4ResidentLogicalBytes,
+    Gemma4TextExecutor,
 };
 
 const R9700_AMD_SMI_INDEX: &str = "2";
@@ -686,12 +687,16 @@ fn benchmark_workload(executor: &mut Gemma4TextExecutor, repeats: usize) -> Resu
     for _ in 0..repeats {
         executor.reset();
         executor.reset_resident_logical_bytes();
+        executor.reset_resident_host_profile();
         let started = Instant::now();
         let trace = executor.prefill(prompt)?;
         let elapsed_seconds = started.elapsed().as_secs_f64();
         let logical = executor
             .resident_logical_bytes()
             .ok_or_else(|| "prefill run has no logical accounting".to_string())?;
+        let host_profile = executor
+            .resident_host_profile()
+            .ok_or_else(|| "prefill run has no resident host profile".to_string())?;
         prefill_tokens = prefill_tokens
             .checked_add(prompt.len())
             .ok_or_else(|| "prefill token count overflows usize".to_string())?;
@@ -701,6 +706,7 @@ fn benchmark_workload(executor: &mut Gemma4TextExecutor, repeats: usize) -> Resu
             "elapsed_seconds": elapsed_seconds,
             "top1_token_id": trace.top1.token_id,
             "logical_lower_bound": logical_bytes_json(logical)?,
+            "host_profile": host_profile_json(host_profile),
         }));
     }
 
@@ -712,6 +718,7 @@ fn benchmark_workload(executor: &mut Gemma4TextExecutor, repeats: usize) -> Resu
         let prefill_trace = executor.prefill(prompt)?;
         let mut input_token_id = prefill_trace.top1.token_id;
         executor.reset_resident_logical_bytes();
+        executor.reset_resident_host_profile();
         let started = Instant::now();
         let mut context_lengths_after_append = Vec::with_capacity(DECODE_TOKENS_PER_REPEAT);
         let mut generated = Vec::with_capacity(DECODE_TOKENS_PER_REPEAT);
@@ -725,6 +732,9 @@ fn benchmark_workload(executor: &mut Gemma4TextExecutor, repeats: usize) -> Resu
         let logical = executor
             .resident_logical_bytes()
             .ok_or_else(|| "decode run has no logical accounting".to_string())?;
+        let host_profile = executor
+            .resident_host_profile()
+            .ok_or_else(|| "decode run has no resident host profile".to_string())?;
         decode_tokens = decode_tokens
             .checked_add(DECODE_TOKENS_PER_REPEAT)
             .ok_or_else(|| "decode token count overflows usize".to_string())?;
@@ -734,6 +744,7 @@ fn benchmark_workload(executor: &mut Gemma4TextExecutor, repeats: usize) -> Resu
             "context_lengths_after_append": context_lengths_after_append,
             "elapsed_seconds": elapsed_seconds,
             "logical_lower_bound": logical_bytes_json(logical)?,
+            "host_profile": host_profile_json(host_profile),
         }));
     }
     let prefill_tok_s = (prefill_tokens as f64) / prefill_seconds;
@@ -823,6 +834,31 @@ fn logical_bytes_json(bytes: Gemma4ResidentLogicalBytes) -> Result<Value, String
         "bf16_row_reads": bytes.bf16_row_reads,
         "attention_calls": bytes.attention_calls,
     }))
+}
+
+fn host_profile_json(profile: Gemma4ResidentHostProfile) -> Value {
+    json!({
+        "units": "nanoseconds measured with std::time::Instant; primitive_ns is inclusive",
+        "token_forward_ns": profile.token_forward_ns,
+        "primitive_ns": profile.primitive_ns,
+        "executor_other_ns": profile.executor_other_ns,
+        "input_encode_ns": profile.input_encode_ns,
+        "output_allocation_ns": profile.output_allocation_ns,
+        "buffer_ensure_ns": profile.buffer_ensure_ns,
+        "buffer_allocate_ns": profile.buffer_allocate_ns,
+        "h2d_submit_ns": profile.h2d_submit_ns,
+        "kernel_submit_ns": profile.kernel_submit_ns,
+        "d2h_submit_ns": profile.d2h_submit_ns,
+        "stream_synchronize_ns": profile.stream_synchronize_ns,
+        "output_decode_validate_ns": profile.output_decode_validate_ns,
+        "kv_table_host_ns": profile.kv_table_host_ns,
+        "calls": {
+            "matvec": profile.matvec_calls,
+            "row": profile.row_calls,
+            "attention": profile.attention_calls,
+            "kv_write": profile.kv_write_calls,
+        },
+    })
 }
 
 fn snapshot_json(snapshot: Option<Gemma4ResidentKvCacheSnapshot>) -> Value {
