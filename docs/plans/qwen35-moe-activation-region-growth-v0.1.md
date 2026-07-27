@@ -68,3 +68,45 @@ failed the required multi-step gate: host generated
 ID vectors differed.  Evidence remains local under
 `raw/step1/{host,candidate}-131k-*`.  No code from this rejected attempt is
 landed.
+
+## Attempted step 2: dedicated-workspace shared-expert region (rejected)
+
+Before retrying, a fresh unchanged-host source run at context length 8,192
+used the 23-token text prompt from the original baseline and produced the
+non-repeating 16-token continuation
+`[90700, 8340, 25, 271, 16, 13, 220, 2972, 2014, 53983, 279, 5952, 64700,
+198, 262, 348]`. This is the healthy reference; it refutes the concern that
+the source MoE path is intrinsically degenerate at all reproducible context
+lengths. The original 262,144-token capability remains unreproducible from
+fresh source and is not used here.
+
+The retry allocated three distinct persistent F32 workspaces per layer for
+the shared gate, shared up, and SiLU product. They did not alias attention,
+dense-MLP, routed-expert, or combine buffers. The shared down result used the
+already-owned `shared_output` handoff buffer. The chain was therefore
+`post-norm -> device BF16 gate/up -> device SiLU product -> device BF16 down
+-> existing device shared combine`; routing, full attention, selected-expert
+GEMM, and AQ4 dequantization were not changed.
+
+The catastrophic prior failure was largely buffer-alias corruption: the same
+real-model comparison fell from final-hidden max abs `23.95994` to
+`0.12071514`. It still fails the required numerical gate. The only semantic
+difference remaining between the unchanged host chain and this non-aliasing
+candidate was host `std::exp` versus the existing device `expf` SiLU product
+(and its F32 multiplication order); after forty layers that difference was
+large enough to alter two of forty final route vectors. This candidate is
+therefore rejected, and all implementation code was rolled back byte-exact.
+
+| step | decode tok/s | prefill tok/s | final route-ID agreement | result |
+| --- | ---: | ---: | --- | --- |
+| baseline (committed 262k record) | 11.032 | 10.955 | n/a | reference only; 262k not reproducible from fresh source |
+| step 2 host, 8k / 16 decode | 11.039 | 10.455 | 40 / 40 | healthy source reference |
+| step 2 dedicated resident, 8k / 16 decode | 11.499 | 10.760 | 38 / 40 | rejected |
+
+Both runs generated the same 16 token IDs, but that is insufficient for a
+promotion. On the final generated token, post-final-norm hidden max abs/max
+rel were `0.12071514129638672` / `16.248566048614325`; full-vocabulary logits
+were `0.09089469909667969` / `316.64006791171477`. The real activation dumps
+and JSON records are retained locally in
+`benchmarks/results/2026-07-27/qwen35-moe-activation-device-v0.1/raw/dm-step2/`.
+The selected IDs are compared before accepting the identical text continuation.
