@@ -1,0 +1,48 @@
+{
+  "schema": "ullm.qwen35-moe-host-gap-ranking.v0.1",
+  "model": "Qwen3.5-35B-A3B AQ4_0 G8 MoE",
+  "hardware": {
+    "gpu": "R9700",
+    "runtime_hip_device": 1,
+    "physical_gpu_index": 2,
+    "architecture": "gfx1201"
+  },
+  "case": {
+    "prompt_tokens": 24,
+    "decode_tokens": 4,
+    "context_tokens": 262144,
+    "typed_kv": "F16"
+  },
+  "throughput_unprofiled_three_repeat": {
+    "decode_tok_s": 11.0319522351,
+    "prefill_tok_s": 10.9549531852,
+    "decode_repeat_tok_s": [11.0381383769, 11.023113413, 11.0346049155]
+  },
+  "rocprof_decode_attribution": {
+    "wall_ms": 479.111535,
+    "kernel_ms": 261.1489,
+    "outside_kernel_ms": 217.962635,
+    "outside_kernel_percent": 45.495,
+    "warning": "API durations overlap GPU execution; rank them, do not sum them to wall time."
+  },
+  "raw_api_ranking_decode": [
+    {"rank": 1, "api": "hipMemcpyDtoHAsync", "calls": 1912, "duration_ms": 282.755, "mean_us": 147.884, "max_us": 1659.0, "classification": "activation/routing results copied to host"},
+    {"rank": 2, "api": "hipStreamSynchronize", "calls": 1592, "duration_ms": 46.171, "classification": "waits induced by host-visible activation results"},
+    {"rank": 3, "api": "hipMemcpyDtoDAsync", "calls": 5247, "duration_ms": 34.025, "classification": "device staging, including selected-expert slabs"},
+    {"rank": 4, "api": "hipModuleLaunchKernel", "calls": 2834, "duration_ms": 18.948, "classification": "kernel submission"},
+    {"rank": 5, "api": "hipMemcpyHtoDAsync", "calls": 1192, "duration_ms": 9.349, "classification": "activation results returned after host work"},
+    {"rank": 6, "api": "hipLaunchKernel", "calls": 1113, "duration_ms": 7.684, "classification": "kernel submission"},
+    {"rank": 7, "api": "hipMalloc", "calls": 636, "duration_ms": 2.374, "classification": "allocation"},
+    {"rank": 8, "api": "hipFree", "calls": 636, "duration_ms": 2.221, "classification": "allocation"},
+    {"rank": 9, "api": "hipSetDevice", "calls": 15163, "duration_ms": 1.868, "classification": "runtime bookkeeping"}
+  ],
+  "source_attribution": {
+    "router_result_boundary_per_layer": "3 D2H copies plus synchronization; measured but excluded from optimization scope",
+    "first_in_scope_region": "resident post-attention norm -> shared gate/up -> SiLU product -> shared down -> resident combine",
+    "excluded_visible_path": "full-attention O projection passthrough matvec_add fallback"
+  },
+  "trace_database": {
+    "relative_path": "raw/baseline/moe-rocprof/homelab1-WRX80-Creator/3944401_results.db",
+    "sha256": "b10ed6a36641d98f869436e5112e2cb5f8bbaf61fe42b30c2496a8f00af09e69"
+  }
+}
