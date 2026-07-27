@@ -214,11 +214,11 @@ optional_tool_status() {
 }
 
 rental_cargo() {
-  local -a cargo_args=("$@")
+  local -a cargo_global_args=()
   if (( ! allow_network )); then
-    cargo_args+=(--offline)
+    cargo_global_args+=(--offline)
   fi
-  cargo_args+=(--locked)
+  cargo_global_args+=(--locked)
   # These environment keys override .cargo/config.toml only for the rental
   # command.  Local developers retain clang+mold; a rental host can use cc and
   # an empty Rust flag set when mold is unavailable.
@@ -230,7 +230,7 @@ rental_cargo() {
     CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER="$rental_linker" \
     CARGO_ENCODED_RUSTFLAGS="${ULLM_RENTAL_ENCODED_RUSTFLAGS:-}" \
     CARGO_TARGET_DIR="$target_dir" \
-    cargo "${cargo_args[@]}"
+    cargo "${cargo_global_args[@]}" "$@"
 }
 
 stage_preflight() {

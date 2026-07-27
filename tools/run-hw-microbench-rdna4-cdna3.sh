@@ -27,7 +27,10 @@ sample_metrics() {
   : >"$out"
   while :; do
     now=$(date --iso-8601=ns)
-    if raw=$(amd-smi metric --gpu "$amd_smi_gpu" --temperature --clock --power --violation --json 2>&1); then
+    # `--violation` was removed by amd-smi 26.x (ROCm 7.2.4).  Clock, power,
+    # and temperature are the telemetry required by this benchmark and remain
+    # available on both the older and newer CLI variants.
+    if raw=$(amd-smi metric --gpu "$amd_smi_gpu" --temperature --clock --power --json 2>&1); then
       jq -cn --arg timestamp "$now" --arg phase "$phase" --argjson metric "$raw" '{timestamp:$timestamp,phase:$phase,metric:$metric}' >>"$out"
     else
       jq -cn --arg timestamp "$now" --arg phase "$phase" --arg error "$raw" '{timestamp:$timestamp,phase:$phase,error:$error}' >>"$out"

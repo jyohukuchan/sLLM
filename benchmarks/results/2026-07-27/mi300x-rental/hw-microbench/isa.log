@@ -1,0 +1,1 @@
+PASS gfx942 ISA audit: v_mfma_f32_16x16x32_fp8_fp8 (1); resources: /home/hotaisle/ullm-mi300x/results/2026-07-27/sq8-cdna3-mi300x/hw-microbench/isa/resources.tsv

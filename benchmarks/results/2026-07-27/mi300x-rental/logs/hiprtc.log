@@ -1,0 +1,38 @@
+In file included from tools/../runtime/src/ullm_runtime.cpp:5,
+                 from tools/sq8-cdna3-hiprtc-audit.cpp:9:
+tools/../runtime/src/ullm_runtime_parts/part_00.inc:1884:8: warning: ‘ullm_runtime_context’ has a field ‘{anonymous}::BackendKind ullm_runtime_context::backend’ whose type uses the anonymous namespace [-Wsubobject-linkage]
+ 1884 | struct ullm_runtime_context {
+      |        ^~~~~~~~~~~~~~~~~~~~
+tools/../runtime/src/ullm_runtime_parts/part_00.inc:1890:8: warning: ‘ullm_runtime_buffer’ has a field ‘{anonymous}::BackendKind ullm_runtime_buffer::backend’ whose type uses the anonymous namespace [-Wsubobject-linkage]
+ 1890 | struct ullm_runtime_buffer {
+      |        ^~~~~~~~~~~~~~~~~~~
+tools/../runtime/src/ullm_runtime_parts/part_00.inc:1897:8: warning: ‘ullm_runtime_stream’ has a field ‘{anonymous}::BackendKind ullm_runtime_stream::backend’ whose type uses the anonymous namespace [-Wsubobject-linkage]
+ 1897 | struct ullm_runtime_stream {
+      |        ^~~~~~~~~~~~~~~~~~~
+PASS matvec_bf16_f32 code_bytes=6696
+PASS top1_f32 code_bytes=6048
+PASS rmsnorm_f32 code_bytes=6336
+PASS segmented_rmsnorm_f32 code_bytes=6752
+PASS segmented_rmsnorm_silu_mul_f32 code_bytes=7096
+PASS silu_mul_f32 code_bytes=5960
+PASS sigmoid_mul_f32 code_bytes=5992
+PASS add_f32 code_bytes=5720
+PASS rope_f32 code_bytes=10784
+PASS causal_attn_f32 code_bytes=10152
+PASS causal_attn_f32_flash2 code_bytes=9576
+PASS causal_attn_batch_f32 code_bytes=11168
+PASS causal_attn_batch_f32_flash2 code_bytes=10600
+PASS cached_prefix_attn_f32 code_bytes=10728
+PASS cached_prefix_attn_f32_flash2 code_bytes=9904
+PASS sq_fp8_matvec_f32 code_bytes=23440
+PASS sq_fp8_matvec_batch_f32 code_bytes=23440
+PASS sq_fp8_matvec_pair_f32 code_bytes=23440
+PASS sq_fp8_matvec_triple_f32 code_bytes=23440
+PASS paged_decode_attn_f32 code_bytes=189952
+PASS paged_kv_write_f32 code_bytes=63352
+PASS paged_chunk_f32 code_bytes=138296
+PASS qwen35_split_q_gate_f32 code_bytes=7032
+PASS qwen35_qk_norm_rope_f32 code_bytes=13944
+PASS qwen35_qk_norm_rope_batch_f32 code_bytes=14320
+PASS qwen35_qk_norm_rope_paged_kv_write_f32 code_bytes=202368
+PASS depthwise_conv1d_f32 code_bytes=7192

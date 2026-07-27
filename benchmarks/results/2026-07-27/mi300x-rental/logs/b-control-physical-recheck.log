@@ -1,0 +1,9 @@
+physical-only SQ8_0 gfx942 A′ smoke: device 1 (AMD Instinct MI300X VF, gfx942:sramecc+:xnack-)
+fragment probe passed: logical max_abs=0.007812 max_rel=0.000000; inferred 256 lane/register coordinates
+B control hardware layout sentinel: first=0.53125 expected=0.53125
+k_or_v_tail_id1 (DefaultTile16x128x128, M/N/K=1/1024/5120): B max_abs=0.000000 max_rel=0.000000; A′ max_abs=0.000000 max_rel=0.000000; A′-B max_abs=0.000000 max_rel=0.000000
+q_or_o_full_id1 (DefaultTile16x128x128, M/N/K=16/5120/5120): B max_abs=0.000000 max_rel=0.000000; A′ max_abs=0.000000 max_rel=0.000000; A′-B max_abs=0.000000 max_rel=0.000000
+gate_or_up_tail_id2 (KPaddingTile16x128x256, M/N/K=1/17408/5120): B max_abs=0.000000 max_rel=0.000000; A′ max_abs=0.000000 max_rel=0.000000; A′-B max_abs=0.000000 max_rel=0.000000
+gate_or_up_full_id3 (DefaultTile16x256x128, M/N/K=128/17408/5120): B max_abs=0.000000 max_rel=0.000000; A′ max_abs=0.000000 max_rel=0.000000; A′-B max_abs=0.000000 max_rel=0.000000
+down_tail_id4 (DefaultTile16x128x256, M/N/K=1/5120/17408): B max_abs=0.000000 max_rel=0.000000; A′ max_abs=0.000000 max_rel=0.000000; A′-B max_abs=0.000000 max_rel=0.000000
+SQ8_0 gfx942 A′ physical smoke passed

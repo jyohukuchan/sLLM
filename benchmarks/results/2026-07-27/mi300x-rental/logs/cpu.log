@@ -1,0 +1,179 @@
+   Compiling version_check v0.9.5
+   Compiling proc-macro2 v1.0.106
+   Compiling quote v1.0.46
+   Compiling unicode-ident v1.0.24
+   Compiling typenum v1.20.1
+   Compiling zerocopy v0.8.54
+   Compiling find-msvc-tools v0.1.9
+   Compiling shlex v2.0.1
+   Compiling serde_core v1.0.228
+   Compiling zmij v1.0.21
+   Compiling serde v1.0.228
+   Compiling serde_json v1.0.150
+   Compiling cpufeatures v0.2.17
+   Compiling itoa v1.0.18
+   Compiling cc v1.2.65
+   Compiling rand_core v0.6.4
+   Compiling cfg-if v1.0.4
+   Compiling memchr v2.8.2
+   Compiling generic-array v0.14.7
+   Compiling syn v2.0.118
+   Compiling ullm-runtime-sys v0.1.0 (/home/hotaisle/ullm-mi300x/uLLM-project/crates/ullm-runtime-sys)
+   Compiling block-buffer v0.10.4
+   Compiling crypto-common v0.1.7
+   Compiling digest v0.10.7
+   Compiling sha2 v0.10.9
+   Compiling serde_derive v1.0.228
+   Compiling ppv-lite86 v0.2.21
+   Compiling rand_chacha v0.3.1
+warning: ullm-runtime-sys@0.1.0: In file included from /home/hotaisle/ullm-mi300x/uLLM-project/runtime/src/ullm_runtime.cpp:5:
+warning: ullm-runtime-sys@0.1.0: /home/hotaisle/ullm-mi300x/uLLM-project/runtime/src/ullm_runtime_parts/part_00.inc:1884:8: warning: 'ullm_runtime_context' has a field '{anonymous}::BackendKind ullm_runtime_context::backend' whose type uses the anonymous namespace [-Wsubobject-linkage]
+warning: ullm-runtime-sys@0.1.0:  1884 | struct ullm_runtime_context {
+warning: ullm-runtime-sys@0.1.0:       |        ^~~~~~~~~~~~~~~~~~~~
+warning: ullm-runtime-sys@0.1.0: /home/hotaisle/ullm-mi300x/uLLM-project/runtime/src/ullm_runtime_parts/part_00.inc:1890:8: warning: 'ullm_runtime_buffer' has a field '{anonymous}::BackendKind ullm_runtime_buffer::backend' whose type uses the anonymous namespace [-Wsubobject-linkage]
+warning: ullm-runtime-sys@0.1.0:  1890 | struct ullm_runtime_buffer {
+warning: ullm-runtime-sys@0.1.0:       |        ^~~~~~~~~~~~~~~~~~~
+warning: ullm-runtime-sys@0.1.0: /home/hotaisle/ullm-mi300x/uLLM-project/runtime/src/ullm_runtime_parts/part_00.inc:1897:8: warning: 'ullm_runtime_stream' has a field '{anonymous}::BackendKind ullm_runtime_stream::backend' whose type uses the anonymous namespace [-Wsubobject-linkage]
+warning: ullm-runtime-sys@0.1.0:  1897 | struct ullm_runtime_stream {
+warning: ullm-runtime-sys@0.1.0:       |        ^~~~~~~~~~~~~~~~~~~
+   Compiling ullm-engine v0.1.0 (/home/hotaisle/ullm-mi300x/uLLM-project/crates/ullm-engine)
+warning: variant `Aq4GemmWmmaGroup8RaggedM` is never constructed
+  --> crates/ullm-engine/src/backend_operation_registry.rs:40:5
+   |
+17 | enum ProbeFaultStage {
+   |      --------------- variant in this enum
+...
+40 |     Aq4GemmWmmaGroup8RaggedM = 22,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `ProbeFaultStage` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: method `bundle` is never used
+   --> crates/ullm-engine/src/sq8_fp32_reference.rs:227:19
+    |
+190 | impl ArtifactFp32VerifiedInputs {
+    | ------------------------------- method in this implementation
+...
+227 |     pub(crate) fn bundle(&self, tensor_name: &str) -> Result<&PassthroughPayloadBundle, String> {
+    |                   ^^^^^^
+
+warning: `ullm-engine` (lib test) generated 2 warnings
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 53.43s
+     Running unittests src/lib.rs (/home/hotaisle/ullm-mi300x/results/2026-07-27/sq8-cdna3-mi300x/cargo-target/debug/deps/ullm_engine-aa0c79dea7e70f3f)
+error: Unrecognized option: 'offline'
+error: test failed, to rerun pass `-p ullm-engine --lib`
+warning: ullm-runtime-sys@0.1.0: In file included from /home/hotaisle/ullm-mi300x/uLLM-project/runtime/src/ullm_runtime.cpp:5:
+warning: ullm-runtime-sys@0.1.0: /home/hotaisle/ullm-mi300x/uLLM-project/runtime/src/ullm_runtime_parts/part_00.inc:1884:8: warning: 'ullm_runtime_context' has a field '{anonymous}::BackendKind ullm_runtime_context::backend' whose type uses the anonymous namespace [-Wsubobject-linkage]
+warning: ullm-runtime-sys@0.1.0:  1884 | struct ullm_runtime_context {
+warning: ullm-runtime-sys@0.1.0:       |        ^~~~~~~~~~~~~~~~~~~~
+warning: ullm-runtime-sys@0.1.0: /home/hotaisle/ullm-mi300x/uLLM-project/runtime/src/ullm_runtime_parts/part_00.inc:1890:8: warning: 'ullm_runtime_buffer' has a field '{anonymous}::BackendKind ullm_runtime_buffer::backend' whose type uses the anonymous namespace [-Wsubobject-linkage]
+warning: ullm-runtime-sys@0.1.0:  1890 | struct ullm_runtime_buffer {
+warning: ullm-runtime-sys@0.1.0:       |        ^~~~~~~~~~~~~~~~~~~
+warning: ullm-runtime-sys@0.1.0: /home/hotaisle/ullm-mi300x/uLLM-project/runtime/src/ullm_runtime_parts/part_00.inc:1897:8: warning: 'ullm_runtime_stream' has a field '{anonymous}::BackendKind ullm_runtime_stream::backend' whose type uses the anonymous namespace [-Wsubobject-linkage]
+warning: ullm-runtime-sys@0.1.0:  1897 | struct ullm_runtime_stream {
+warning: ullm-runtime-sys@0.1.0:       |        ^~~~~~~~~~~~~~~~~~~
+warning: variant `Aq4GemmWmmaGroup8RaggedM` is never constructed
+  --> crates/ullm-engine/src/backend_operation_registry.rs:40:5
+   |
+17 | enum ProbeFaultStage {
+   |      --------------- variant in this enum
+...
+40 |     Aq4GemmWmmaGroup8RaggedM = 22,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `ProbeFaultStage` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: method `bundle` is never used
+   --> crates/ullm-engine/src/sq8_fp32_reference.rs:227:19
+    |
+190 | impl ArtifactFp32VerifiedInputs {
+    | ------------------------------- method in this implementation
+...
+227 |     pub(crate) fn bundle(&self, tensor_name: &str) -> Result<&PassthroughPayloadBundle, String> {
+    |                   ^^^^^^
+
+warning: `ullm-engine` (lib test) generated 2 warnings
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.05s
+     Running unittests src/lib.rs (/home/hotaisle/ullm-mi300x/results/2026-07-27/sq8-cdna3-mi300x/cargo-target/debug/deps/ullm_engine-aa0c79dea7e70f3f)
+
+running 6 tests
+test sq8_gfx942_aprime::tests::fp16_and_bf16_rounding_handle_normal_and_subnormal_inputs ... ok
+test sq8_gfx942_aprime::tests::artifact_bf16_weight_prepack_uses_the_atomic_oracle_and_expands_losslessly ... ok
+test sq8_gfx942_aprime::tests::fragment_fixture_is_unique_and_can_infer_an_identity_dump_without_a_layout_assumption ... ok
+test sq8_gfx942_aprime::tests::aprime_cpu_oracle_applies_x2_to_each_operand_and_matches_ocp_reference ... ok
+test sq8_gfx942_aprime::tests::b_control_bf16_and_fp16_match_the_exact_reference_for_representable_fixture ... ok
+test sq8_gfx942_aprime::tests::b_control_hipblas_layout_oracle_reproduces_the_mi300x_tail_delta ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 828 filtered out; finished in 0.83s
+
+warning: ullm-runtime-sys@0.1.0: In file included from /home/hotaisle/ullm-mi300x/uLLM-project/runtime/src/ullm_runtime.cpp:5:
+warning: ullm-runtime-sys@0.1.0: /home/hotaisle/ullm-mi300x/uLLM-project/runtime/src/ullm_runtime_parts/part_00.inc:1884:8: warning: 'ullm_runtime_context' has a field '{anonymous}::BackendKind ullm_runtime_context::backend' whose type uses the anonymous namespace [-Wsubobject-linkage]
+warning: ullm-runtime-sys@0.1.0:  1884 | struct ullm_runtime_context {
+warning: ullm-runtime-sys@0.1.0:       |        ^~~~~~~~~~~~~~~~~~~~
+warning: ullm-runtime-sys@0.1.0: /home/hotaisle/ullm-mi300x/uLLM-project/runtime/src/ullm_runtime_parts/part_00.inc:1890:8: warning: 'ullm_runtime_buffer' has a field '{anonymous}::BackendKind ullm_runtime_buffer::backend' whose type uses the anonymous namespace [-Wsubobject-linkage]
+warning: ullm-runtime-sys@0.1.0:  1890 | struct ullm_runtime_buffer {
+warning: ullm-runtime-sys@0.1.0:       |        ^~~~~~~~~~~~~~~~~~~
+warning: ullm-runtime-sys@0.1.0: /home/hotaisle/ullm-mi300x/uLLM-project/runtime/src/ullm_runtime_parts/part_00.inc:1897:8: warning: 'ullm_runtime_stream' has a field '{anonymous}::BackendKind ullm_runtime_stream::backend' whose type uses the anonymous namespace [-Wsubobject-linkage]
+warning: ullm-runtime-sys@0.1.0:  1897 | struct ullm_runtime_stream {
+warning: ullm-runtime-sys@0.1.0:       |        ^~~~~~~~~~~~~~~~~~~
+   Compiling ullm-engine v0.1.0 (/home/hotaisle/ullm-mi300x/uLLM-project/crates/ullm-engine)
+warning: method `bundle` is never used
+   --> crates/ullm-engine/src/sq8_fp32_reference.rs:227:19
+    |
+190 | impl ArtifactFp32VerifiedInputs {
+    | ------------------------------- method in this implementation
+...
+227 |     pub(crate) fn bundle(&self, tensor_name: &str) -> Result<&PassthroughPayloadBundle, String> {
+    |                   ^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `ullm-engine` (lib) generated 1 warning
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 23.49s
+     Running tests/sq8_fnuz_prepack.rs (/home/hotaisle/ullm-mi300x/results/2026-07-27/sq8-cdna3-mi300x/cargo-target/debug/deps/sq8_fnuz_prepack-57c57394e64c160c)
+
+running 7 tests
+test combined_prepack_is_fail_closed_for_payload_and_scale_errors ... ok
+test exhaustive_256_byte_oracle_enumerates_every_exception ... ok
+test f32_activation_scale_companion_is_exact_and_fail_closed ... ok
+test payload_prepack_rejects_nan_and_normalizes_only_negative_zero ... ok
+test scale_compensation_is_x2_per_operand_and_x4_for_a_pair ... ok
+test hash_checked_artifact_scan_records_frequency_and_scale_gate ... ok
+test bf16_scale_range_gate_rejects_overflow_and_has_no_valid_x2_x4_underflow ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+warning: ullm-runtime-sys@0.1.0: In file included from /home/hotaisle/ullm-mi300x/uLLM-project/runtime/src/ullm_runtime.cpp:5:
+warning: ullm-runtime-sys@0.1.0: /home/hotaisle/ullm-mi300x/uLLM-project/runtime/src/ullm_runtime_parts/part_00.inc:1884:8: warning: 'ullm_runtime_context' has a field '{anonymous}::BackendKind ullm_runtime_context::backend' whose type uses the anonymous namespace [-Wsubobject-linkage]
+warning: ullm-runtime-sys@0.1.0:  1884 | struct ullm_runtime_context {
+warning: ullm-runtime-sys@0.1.0:       |        ^~~~~~~~~~~~~~~~~~~~
+warning: ullm-runtime-sys@0.1.0: /home/hotaisle/ullm-mi300x/uLLM-project/runtime/src/ullm_runtime_parts/part_00.inc:1890:8: warning: 'ullm_runtime_buffer' has a field '{anonymous}::BackendKind ullm_runtime_buffer::backend' whose type uses the anonymous namespace [-Wsubobject-linkage]
+warning: ullm-runtime-sys@0.1.0:  1890 | struct ullm_runtime_buffer {
+warning: ullm-runtime-sys@0.1.0:       |        ^~~~~~~~~~~~~~~~~~~
+warning: ullm-runtime-sys@0.1.0: /home/hotaisle/ullm-mi300x/uLLM-project/runtime/src/ullm_runtime_parts/part_00.inc:1897:8: warning: 'ullm_runtime_stream' has a field '{anonymous}::BackendKind ullm_runtime_stream::backend' whose type uses the anonymous namespace [-Wsubobject-linkage]
+warning: ullm-runtime-sys@0.1.0:  1897 | struct ullm_runtime_stream {
+warning: ullm-runtime-sys@0.1.0:       |        ^~~~~~~~~~~~~~~~~~~
+   Compiling ullm-runtime-sys v0.1.0 (/home/hotaisle/ullm-mi300x/uLLM-project/crates/ullm-runtime-sys)
+warning: function `first_hip_aq4_matvec_top1_f32_writes_partial_maximum_when_available` is never used
+    --> crates/ullm-runtime-sys/src/lib_parts/../test_parts/part_01.rs:2523:8
+     |
+2523 |     fn first_hip_aq4_matvec_top1_f32_writes_partial_maximum_when_available() {
+     |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `ullm-runtime-sys` (lib test) generated 1 warning
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 4.05s
+     Running unittests src/lib.rs (/home/hotaisle/ullm-mi300x/results/2026-07-27/sq8-cdna3-mi300x/cargo-target/debug/deps/ullm_runtime_sys-6e6f28b0fedaf215)
+
+running 5 tests
+test sq8_ck_gfx942_aprime_tests::buffer_size_helpers_keep_bf16_and_f32_contracts_separate ... ok
+test sq8_ck_gfx942_aprime_tests::feature_off_is_explicit_and_does_not_repurpose_gfx1201 ... ok
+test sq8_ck_gfx942_aprime_tests::isolated_shape_table_preserves_all_qwen3_14b_projection_cases ... ok
+test sq8_ck_gfx942_aprime_tests::exact_gfx942_selector_accepts_only_the_arch_token_and_modifiers ... ok
+test sq8_ck_gfx942_aprime_tests::gfx1201_public_abi_and_dispatch_source_remain_isolated_from_aprime ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 212 filtered out; finished in 0.00s
+

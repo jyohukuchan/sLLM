@@ -366,6 +366,12 @@ fn run_projection_case(
             B_CONTROL_RELATIVE_TOLERANCE,
         )?
     };
+    if case.name == "k_or_v_tail_id1" {
+        println!(
+            "B control hardware layout sentinel: first={:.5} expected={:.5}",
+            control[0], fixture.expected_f32[0]
+        );
+    }
     let aprime_stats = verify_close(
         &format!("{} A′ FNUZ/CK", case.name),
         &aprime,
