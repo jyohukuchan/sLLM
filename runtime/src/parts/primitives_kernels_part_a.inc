@@ -401,8 +401,10 @@ bool gemma_bf16_matmul_f32_hip_kernel(
     const int device_id = matrix_buffer->hip_device_id;
     void *function = hip_gemma_bf16_matmul_kernel_cache().function_for_device(device_id, error);
     if (function == nullptr) return false;
+    constexpr size_t kGemmaBf16MatmulBatchTile = 8u;
     if (rows > std::numeric_limits<unsigned int>::max() ||
-        batch_count > std::numeric_limits<unsigned int>::max()) {
+        batch_count > std::numeric_limits<unsigned int>::max() ||
+        batch_count > std::numeric_limits<size_t>::max() - (kGemmaBf16MatmulBatchTile - 1u)) {
         if (error != nullptr) *error = "Gemma BF16 matmul dimensions exceed HIP grid limit";
         return false;
     }
@@ -416,11 +418,13 @@ bool gemma_bf16_matmul_f32_hip_kernel(
         &matrix_ptr, &input_ptr, &kernel_rows, &kernel_cols, &kernel_batch, &output_ptr,
     };
     void *hip_stream = stream == nullptr ? nullptr : stream->stream;
+    const size_t grid_y = (batch_count + (kGemmaBf16MatmulBatchTile - 1u)) /
+        kGemmaBf16MatmulBatchTile;
     if (!hip_runtime().module_launch_kernel_2d(
             function,
             static_cast<unsigned int>(rows),
-            static_cast<unsigned int>(batch_count),
-            64,
+            static_cast<unsigned int>(grid_y),
+            256,
             kernel_params,
             hip_stream,
             device_id)) {

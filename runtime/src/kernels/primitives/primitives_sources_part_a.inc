@@ -82,7 +82,9 @@ extern "C" __global__ void ullm_bf16_row_f32_kernel(
     }
 
     // Isolated Gemma prefill projection.  It intentionally has a separate
-    // entry point from the production M=1 BF16 matvec kernel.
+    // entry point from the production M=1 BF16 matvec kernel.  One CTA owns
+    // one output row and eight M rows: all eight wave32s reuse each staged
+    // 256-element BF16 weight strip from LDS.
     static const char *gemma_bf16_matmul_kernel_source() {
         return R"(
 __device__ float ullm_bf16_pair_low_to_f32(unsigned int value) {
@@ -100,40 +102,37 @@ extern "C" __global__ void ullm_gemma_bf16_matmul_f32_kernel(
     unsigned long long cols,
     unsigned long long batch_count,
     float *output) {
+    constexpr unsigned int kBatchTile = 8u;
+    constexpr unsigned int kKTile = 256u;
     const unsigned int row = blockIdx.x;
-    const unsigned int batch = blockIdx.y;
     const unsigned int tid = threadIdx.x;
-    __shared__ float partial[64];
+    const unsigned int lane = tid & 31u;
+    const unsigned int batch = blockIdx.y * kBatchTile + (tid >> 5);
+    __shared__ unsigned short weight_tile[kKTile];
     float sum = 0.0f;
-    if (row < rows && batch < batch_count) {
-        const unsigned long long row_offset = static_cast<unsigned long long>(row) * cols;
-        const float *input_row = input + static_cast<unsigned long long>(batch) * cols;
-        if ((cols & 1ull) == 0ull) {
-            const unsigned int *matrix_pairs =
-                reinterpret_cast<const unsigned int *>(matrix + row_offset);
-            const unsigned long long pair_cols = cols >> 1;
-            for (unsigned long long pair_col = tid; pair_col < pair_cols;
-                 pair_col += blockDim.x) {
-                const unsigned int packed = matrix_pairs[pair_col];
-                const unsigned long long col = pair_col << 1;
-                sum += ullm_bf16_pair_low_to_f32(packed) * input_row[col];
-                sum += ullm_bf16_pair_high_to_f32(packed) * input_row[col + 1ull];
-            }
-        } else {
-            for (unsigned long long col = tid; col < cols; col += blockDim.x) {
-                sum += __uint_as_float(static_cast<unsigned int>(matrix[row_offset + col]) << 16) *
-                    input_row[col];
+    const bool valid_output = row < rows && batch < batch_count;
+    for (unsigned long long k_base = 0ull; k_base < cols; k_base += kKTile) {
+        const unsigned long long k = k_base + tid;
+        if (row < rows && k < cols) {
+            weight_tile[tid] = matrix[static_cast<unsigned long long>(row) * cols + k];
+        }
+        __syncthreads();
+        if (valid_output) {
+            const unsigned long long tile_cols =
+                (cols - k_base) < kKTile ? (cols - k_base) : kKTile;
+            const float *input_row = input + static_cast<unsigned long long>(batch) * cols;
+            for (unsigned long long k_in_tile = lane; k_in_tile < tile_cols; k_in_tile += 32ull) {
+                sum += __uint_as_float(static_cast<unsigned int>(weight_tile[k_in_tile]) << 16) *
+                    input_row[k_base + k_in_tile];
             }
         }
-    }
-    partial[tid] = sum;
-    __syncthreads();
-    for (unsigned int offset = blockDim.x >> 1; offset > 0; offset >>= 1) {
-        if (tid < offset) partial[tid] += partial[tid + offset];
         __syncthreads();
     }
-    if (tid == 0 && row < rows && batch < batch_count) {
-        output[static_cast<unsigned long long>(batch) * rows + row] = partial[0];
+    for (unsigned int offset = 16u; offset > 0u; offset >>= 1u) {
+        sum += __shfl_down(sum, offset, 32);
+    }
+    if (lane == 0u && valid_output) {
+        output[static_cast<unsigned long long>(batch) * rows + row] = sum;
     }
 }
 )";
