@@ -1,0 +1,15 @@
+timestamp	event
+2026-07-27T10:59:21+09:00	production-stop
+2026-07-27T10:59:22+09:00	lock-acquired
+2026-07-27T10:59:22+09:00	thermal-pass bench-direct edge=36
+2026-07-27T10:59:22+09:00	bench-start-direct
+2026-07-27T11:00:22+09:00	bench-finished-direct
+2026-07-27T11:01:19+09:00	thermal-pass bench-tile20 edge=45
+2026-07-27T11:01:19+09:00	bench-start-tile20
+2026-07-27T11:02:17+09:00	bench-finished-tile20
+2026-07-27T11:03:44+09:00	thermal-pass bench-tile128 edge=45
+2026-07-27T11:03:44+09:00	bench-start-tile128
+2026-07-27T11:04:43+09:00	bench-finished-tile128
+2026-07-27T11:04:46+09:00	lock-released
+2026-07-27T11:04:46+09:00	production-restore-start
+2026-07-27T11:04:47+09:00	window-finished status=1
