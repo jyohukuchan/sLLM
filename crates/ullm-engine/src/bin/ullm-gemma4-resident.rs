@@ -571,6 +571,7 @@ fn capture_command<const N: usize>(program: &str, args: [&str; N]) -> Value {
 
 fn validation_workload(executor: &mut Gemma4TextExecutor) -> Result<Value, String> {
     let attention_region_differential = attention_region_differential(executor)?;
+    let causal_mask_future_token_probe = causal_mask_future_token_probe(executor)?;
     let mut cases = Vec::new();
     let mut capital_cached_ids = None;
     for case in [CAPITAL_FRANCE, ONCE_UPON_A_TIME] {
@@ -624,6 +625,7 @@ fn validation_workload(executor: &mut Gemma4TextExecutor) -> Result<Value, Strin
     Ok(json!({
         "kind": "resident-greedy-and-cache-equivalence",
         "attention_region_differential": attention_region_differential,
+        "causal_mask_future_token_probe": causal_mask_future_token_probe,
         "cases": cases,
         "shared_kv_source_check": {
             "result": "passed",
@@ -640,10 +642,63 @@ fn validation_workload(executor: &mut Gemma4TextExecutor) -> Result<Value, Strin
     }))
 }
 
+/// Deliberately changes only token 2.  Rows 0 and 1 are therefore identical
+/// inputs at identical positions.  If a batched reader accidentally exposes
+/// the pre-written third K/V row, either prefix row can change and this probe
+/// fails before any plausible-looking continuation can hide the leak.
+fn causal_mask_future_token_probe(executor: &mut Gemma4TextExecutor) -> Result<Value, String> {
+    const PREFIX: [u32; 2] = [2, 818];
+    const FIRST_FUTURE: u32 = 5279;
+    const SECOND_FUTURE: u32 = 7001;
+    unsafe { env::set_var("ULLM_GEMMA4_PREFILL_LAYER_MAJOR", "1") };
+    executor.reset();
+    let first = executor.prefill(&[PREFIX[0], PREFIX[1], FIRST_FUTURE])?;
+    executor.reset();
+    let second = executor.prefill(&[PREFIX[0], PREFIX[1], SECOND_FUTURE])?;
+    let hidden = executor.config().decoder.hidden_size;
+    let prefix_elements = PREFIX
+        .len()
+        .checked_mul(hidden)
+        .ok_or_else(|| "causal-mask prefix width overflows".to_string())?;
+    let mut max_abs = 0.0_f32;
+    let mut max_rel = 0.0_f32;
+    for (layer, (first_layer, second_layer)) in first
+        .layer_outputs
+        .iter()
+        .zip(second.layer_outputs.iter())
+        .enumerate()
+    {
+        let (abs, rel) = max_error(
+            first_layer[..prefix_elements].iter().copied(),
+            second_layer[..prefix_elements].iter().copied(),
+        )?;
+        if abs != 0.0 {
+            return Err(format!(
+                "causal-mask future-token probe failed at layer {layer}: changing token 2 changed an earlier row (max_abs={abs}, max_rel={rel})"
+            ));
+        }
+        max_abs = max_abs.max(abs);
+        max_rel = max_rel.max(rel);
+    }
+    let output = json!({
+        "result": "passed",
+        "method": "Two three-token batched prefills differ only in the final token; every layer output for token rows 0 and 1 must be bit-identical.",
+        "first_input_token_ids": [PREFIX[0], PREFIX[1], FIRST_FUTURE],
+        "second_input_token_ids": [PREFIX[0], PREFIX[1], SECOND_FUTURE],
+        "checked_prefix_rows": PREFIX.len(),
+        "required_cache_lengths": [1, 2],
+        "layer_output_prefix_max_abs": max_abs,
+        "layer_output_prefix_max_rel": max_rel,
+    });
+    unsafe { env::remove_var("ULLM_GEMMA4_PREFILL_LAYER_MAJOR") };
+    Ok(output)
+}
+
 fn attention_region_differential(executor: &mut Gemma4TextExecutor) -> Result<Value, String> {
     executor.reset();
     unsafe { env::remove_var("ULLM_GEMMA4_DISABLE_ATTENTION_REGION") };
     unsafe { env::remove_var("ULLM_GEMMA4_DISABLE_PLE_REGION") };
+    unsafe { env::set_var("ULLM_GEMMA4_PREFILL_LAYER_MAJOR", "1") };
     let resident = executor.prefill(CAPITAL_FRANCE.initial_token_ids)?;
     executor.reset();
     unsafe { env::set_var("ULLM_GEMMA4_DISABLE_ATTENTION_REGION", "1") };
@@ -651,6 +706,7 @@ fn attention_region_differential(executor: &mut Gemma4TextExecutor) -> Result<Va
     let host = executor.prefill(CAPITAL_FRANCE.initial_token_ids)?;
     unsafe { env::remove_var("ULLM_GEMMA4_DISABLE_ATTENTION_REGION") };
     unsafe { env::remove_var("ULLM_GEMMA4_DISABLE_PLE_REGION") };
+    unsafe { env::remove_var("ULLM_GEMMA4_PREFILL_LAYER_MAJOR") };
     let (hidden_abs, hidden_rel) = max_error(
         resident.layer_outputs.iter().flatten().copied(),
         host.layer_outputs.iter().flatten().copied(),

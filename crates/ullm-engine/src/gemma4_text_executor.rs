@@ -67,6 +67,9 @@ const R9700_MEMORY_BYTES_MAX: u64 = 34 * 1024 * 1024 * 1024;
 const GEMMA4_VALIDATE_DEVICE_MLP_ENV: &str = "ULLM_GEMMA4_VALIDATE_DEVICE_MLP";
 const GEMMA4_VALIDATE_PROPORTIONAL_ROPE_ENV: &str = "ULLM_GEMMA4_VALIDATE_PROPORTIONAL_ROPE";
 const GEMMA4_DISABLE_PLE_REGION_ENV: &str = "ULLM_GEMMA4_DISABLE_PLE_REGION";
+/// The layer-major Q/K/V/MLP prototype is retained for measurement, but is
+/// opt-in until it beats the already-promoted PLE-only path end-to-end.
+const GEMMA4_PREFILL_LAYER_MAJOR_ENV: &str = "ULLM_GEMMA4_PREFILL_LAYER_MAJOR";
 
 fn record_elapsed_ns(slot: &mut u64, started: Instant) {
     *slot = slot.saturating_add(elapsed_ns(started));
@@ -2593,6 +2596,45 @@ impl Gemma4DeviceKvCache {
         Ok(())
     }
 
+    /// Restricts the logical reader view without changing the committed K/V
+    /// storage.  Batched prefill writes an owning layer's complete chunk
+    /// before its M=1 readers run; this makes row `i` see precisely the
+    /// original prefix plus rows through `i`, never a later pre-written row.
+    fn set_read_window(
+        &mut self,
+        visible_absolute_len: usize,
+        stream: &mut RuntimeStream,
+    ) -> Result<(), String> {
+        if visible_absolute_len > self.absolute_len {
+            return Err(format!(
+                "Gemma4 KV read window {visible_absolute_len} exceeds committed length {}",
+                self.absolute_len
+            ));
+        }
+        self.cache_len = if self.is_sliding() {
+            visible_absolute_len.min(self.capacity_tokens)
+        } else {
+            visible_absolute_len
+        };
+        if self.is_sliding() {
+            let start = visible_absolute_len
+                .checked_sub(self.cache_len)
+                .ok_or_else(|| "Gemma4 sliding KV read-window start underflows".to_string())?;
+            let mut table = Vec::with_capacity(self.cache_len);
+            for relative in 0..self.cache_len {
+                let logical = start
+                    .checked_add(relative)
+                    .ok_or_else(|| "Gemma4 sliding KV read-window position overflows".to_string())?;
+                table.push(u32::try_from(logical % self.capacity_tokens).map_err(|_| {
+                    "Gemma4 sliding KV read-window physical block exceeds u32".to_string()
+                })?);
+            }
+            self.read_table
+                .copy_from_host(0, &encode_u32_to_bytes(&table), Some(stream))?;
+        }
+        Ok(())
+    }
+
     fn reset(&mut self) {
         self.cache_len = 0;
         self.absolute_len = 0;
@@ -3807,7 +3849,13 @@ impl Gemma4TextExecutor {
         // This first prefill activation increment only batches the PLE model
         // projection.  It is deliberately unavailable to decode so the M=1
         // resident route remains exactly as it was before this change.
-        if input_token_ids.len() > 1 && matches!(self.weights, Gemma4WeightStorage::Resident(_)) {
+        if input_token_ids.len() > 1
+            && matches!(self.weights, Gemma4WeightStorage::Resident(_))
+            && matches!(self.caches, Gemma4KvStorage::Device(_))
+            && env::var(GEMMA4_PREFILL_LAYER_MAJOR_ENV).ok().as_deref() == Some("1")
+            && env::var("ULLM_GEMMA4_DISABLE_ATTENTION_REGION").ok().as_deref() != Some("1")
+            && env::var(GEMMA4_DISABLE_PLE_REGION_ENV).ok().as_deref() != Some("1")
+        {
             return self.execute_prefill_with_batched_ple(input_token_ids);
         }
         let token_started = Instant::now();
@@ -3918,31 +3966,17 @@ impl Gemma4TextExecutor {
         for token_chunk in input_token_ids.chunks(GEMMA4_PREFILL_ACTIVATION_CHUNK_TOKENS) {
             let (chunk_embeddings, per_layer_inputs) =
                 self.prefill_ple_inputs_batched(token_chunk)?;
-            let ple_width = self
-                .resident_descriptor
-                .layers
-                .len()
-                .checked_mul(self.ple_descriptor()?.input_size)
-                .ok_or_else(|| "Gemma4 batched PLE width overflows".to_string())?;
-            for (token_offset, token_id) in token_chunk.iter().enumerate() {
-                let embedding_start = token_offset
-                    .checked_mul(hidden)
-                    .ok_or_else(|| "Gemma4 batched embedding offset overflows".to_string())?;
-                let ple_start = token_offset
-                    .checked_mul(ple_width)
-                    .ok_or_else(|| "Gemma4 batched PLE offset overflows".to_string())?;
-                let token = self.forward_token_prefill_from_ple(
-                    *token_id,
-                    &chunk_embeddings[embedding_start..embedding_start + hidden],
-                    &per_layer_inputs[ple_start..ple_start + ple_width],
-                )?;
-                embedding.extend_from_slice(&token.embedding);
-                for (layer_index, output) in token.layer_outputs.iter().enumerate() {
-                    layer_outputs[layer_index].extend_from_slice(output);
-                }
-                final_norm.extend_from_slice(&token.final_norm);
-                final_token_hidden = Some(token.final_norm);
+            let chunk = self.forward_prefill_chunk_from_ple(
+                token_chunk,
+                &chunk_embeddings,
+                &per_layer_inputs,
+            )?;
+            embedding.extend_from_slice(&chunk.embedding);
+            for (layer_index, output) in chunk.layer_outputs.iter().enumerate() {
+                layer_outputs[layer_index].extend_from_slice(output);
             }
+            final_norm.extend_from_slice(&chunk.final_norm);
+            final_token_hidden = chunk.final_norm.chunks_exact(hidden).last().map(ToOwned::to_owned);
         }
         let final_token_hidden = final_token_hidden.expect("checked nonempty input");
         let logits_last = self.project_tied_logits(&final_token_hidden)?;
@@ -4067,6 +4101,377 @@ impl Gemma4TextExecutor {
         }
         finite_slice(&projected, "Gemma4 batched PLE")?;
         Ok((embeddings, projected))
+    }
+
+    /// Executes one resident prefill activation chunk layer-major.  All dense
+    /// projections use the Gemma-only `[M,K] -> [M,N]` path, while attention
+    /// intentionally remains the established M=1 paged reader.  K/V is first
+    /// materialized for every row of an owning source layer; the reader then
+    /// exposes only the causal prefix for each row.  That ordering is required
+    /// for shared source layers 13/14, and the temporary read window prevents
+    /// a pre-written future row from becoming visible to attention.
+    fn forward_prefill_chunk_from_ple(
+        &mut self,
+        token_ids: &[u32],
+        embeddings: &[f32],
+        per_layer_inputs: &[f32],
+    ) -> Result<TokenForward, String> {
+        let decoder = self.resident_descriptor.decoder.clone();
+        let ple = self.ple_descriptor()?.clone();
+        let rows = token_ids.len();
+        let hidden = decoder.hidden_size;
+        let layers = self.resident_descriptor.layers.len();
+        let packed_ple = layers
+            .checked_mul(ple.input_size)
+            .ok_or_else(|| "Gemma4 batched PLE width overflows".to_string())?;
+        if rows == 0
+            || embeddings.len() != rows * hidden
+            || per_layer_inputs.len() != rows * packed_ple
+        {
+            return Err("Gemma4 batched prefill chunk input shape is invalid".into());
+        }
+        if !matches!(self.weights, Gemma4WeightStorage::Resident(_))
+            || !matches!(self.caches, Gemma4KvStorage::Device(_))
+        {
+            return Err("Gemma4 batched prefill requires resident weights and device K/V".into());
+        }
+
+        let first_position = self.position;
+        let mut states = embeddings.to_vec();
+        let mut layer_outputs = (0..layers)
+            .map(|_| Vec::with_capacity(rows * hidden))
+            .collect::<Vec<_>>();
+        for layer_index in 0..layers {
+            let layer_ple = self
+                .layer_descriptor(layer_index)?
+                .per_layer_embedding
+                .as_ref()
+                .ok_or_else(|| format!("Gemma4 descriptor layer {layer_index} is missing PLE"))?
+                .clone();
+            let ple_inputs = per_layer_inputs_for_layer(
+                per_layer_inputs,
+                rows,
+                packed_ple,
+                layer_index,
+                layer_ple.input_size,
+            )?;
+            states = self.forward_prefill_layer_batched(
+                layer_index,
+                &states,
+                &ple_inputs,
+                first_position,
+            )?;
+            layer_outputs[layer_index].extend_from_slice(&states);
+        }
+        let final_weight = self.read_weight_vector(GEMMA4_TEXT_FINAL_NORM, hidden)?;
+        let mut final_norm = Vec::with_capacity(rows * hidden);
+        for state in states.chunks_exact(hidden) {
+            final_norm.extend_from_slice(&rms_norm(
+                state,
+                Some(&final_weight),
+                decoder.rms_norm_epsilon,
+            )?);
+        }
+        self.position = self
+            .position
+            .checked_add(rows)
+            .ok_or_else(|| "Gemma4 sequence position overflows usize".to_string())?;
+        Ok(TokenForward {
+            embedding: embeddings.to_vec(),
+            layer_outputs,
+            final_norm,
+        })
+    }
+
+    fn forward_prefill_layer_batched(
+        &mut self,
+        layer_index: usize,
+        states: &[f32],
+        per_layer_inputs: &[f32],
+        first_position: usize,
+    ) -> Result<Vec<f32>, String> {
+        let decoder = self.resident_descriptor.decoder.clone();
+        let layer = self.layer_descriptor(layer_index)?.clone();
+        let attention = layer.attention.clone();
+        let ple = layer
+            .per_layer_embedding
+            .as_ref()
+            .ok_or_else(|| format!("Gemma4 descriptor layer {layer_index} is missing PLE"))?
+            .clone();
+        let hidden = decoder.hidden_size;
+        if states.is_empty() || !states.len().is_multiple_of(hidden) {
+            return Err(format!("Gemma4 batched layer {layer_index} state shape is invalid"));
+        }
+        let rows = states.len() / hidden;
+        if per_layer_inputs.len() != rows * ple.input_size {
+            return Err(format!("Gemma4 batched layer {layer_index} PLE shape is invalid"));
+        }
+        let q_width = attention
+            .q_heads
+            .checked_mul(attention.head_dim)
+            .ok_or_else(|| "Gemma4 batched Q width overflows".to_string())?;
+        let kv_width = attention
+            .kv_heads
+            .checked_mul(attention.head_dim)
+            .ok_or_else(|| "Gemma4 batched KV width overflows".to_string())?;
+        let rope = attention
+            .rope
+            .clone()
+            .ok_or_else(|| format!("Gemma4 descriptor layer {layer_index} is missing RoPE"))?;
+
+        let input_weight = self.read_weight_vector(
+            &layer_tensor(layer_index, "input_layernorm.weight"),
+            hidden,
+        )?;
+        let mut input_norm = Vec::with_capacity(states.len());
+        for state in states.chunks_exact(hidden) {
+            input_norm.extend_from_slice(&rms_norm(
+                state,
+                Some(&input_weight),
+                decoder.rms_norm_epsilon,
+            )?);
+        }
+        let q_raw = self.matmul_named_batched(
+            &layer_tensor(layer_index, "self_attn.q_proj.weight"),
+            q_width,
+            hidden,
+            rows,
+            &input_norm,
+        )?;
+        let q_weight = self.read_weight_vector(
+            &layer_tensor(layer_index, "self_attn.q_norm.weight"),
+            attention.head_dim,
+        )?;
+        let mut queries = Vec::with_capacity(q_raw.len());
+        for (row, q) in q_raw.chunks_exact(q_width).enumerate() {
+            let mut q = rms_norm_heads(
+                q,
+                attention.q_heads,
+                attention.head_dim,
+                Some(&q_weight),
+                decoder.rms_norm_epsilon,
+            )?;
+            let position = first_position
+                .checked_add(row)
+                .ok_or_else(|| "Gemma4 batched Q position overflows".to_string())?;
+            self.matvec.validate_gemma_proportional_rope(
+                &q,
+                attention.q_heads,
+                attention.head_dim,
+                &rope,
+                position,
+            )?;
+            apply_gemma4_rope_in_place(
+                &mut q,
+                attention.q_heads,
+                attention.head_dim,
+                &rope,
+                position,
+            )?;
+            queries.extend_from_slice(&q);
+        }
+
+        let source_layer = match attention.kv_cache {
+            ResidentKvCacheMode::Own => None,
+            ResidentKvCacheMode::SharedFrom { source_layer_index } => Some(source_layer_index),
+            ResidentKvCacheMode::LinearState => {
+                return Err("Gemma4 batched prefill does not support linear attention".into())
+            }
+        };
+        let own_kv = if source_layer.is_none() {
+            let k_raw = self.matmul_named_batched(
+                &layer_tensor(layer_index, "self_attn.k_proj.weight"),
+                kv_width,
+                hidden,
+                rows,
+                &input_norm,
+            )?;
+            let v_raw = self.matmul_named_batched(
+                &layer_tensor(layer_index, "self_attn.v_proj.weight"),
+                kv_width,
+                hidden,
+                rows,
+                &input_norm,
+            )?;
+            let k_weight = self.read_weight_vector(
+                &layer_tensor(layer_index, "self_attn.k_norm.weight"),
+                attention.head_dim,
+            )?;
+            let mut keys = Vec::with_capacity(k_raw.len());
+            let mut values = Vec::with_capacity(v_raw.len());
+            for row in 0..rows {
+                let range = row * kv_width..(row + 1) * kv_width;
+                let mut key = rms_norm_heads(
+                    &k_raw[range.clone()],
+                    attention.kv_heads,
+                    attention.head_dim,
+                    Some(&k_weight),
+                    decoder.rms_norm_epsilon,
+                )?;
+                let position = first_position
+                    .checked_add(row)
+                    .ok_or_else(|| "Gemma4 batched K position overflows".to_string())?;
+                self.matvec.validate_gemma_proportional_rope(
+                    &key,
+                    attention.kv_heads,
+                    attention.head_dim,
+                    &rope,
+                    position,
+                )?;
+                apply_gemma4_rope_in_place(
+                    &mut key,
+                    attention.kv_heads,
+                    attention.head_dim,
+                    &rope,
+                    position,
+                )?;
+                keys.extend_from_slice(&key);
+                values.extend_from_slice(&rms_norm_heads(
+                    &v_raw[range],
+                    attention.kv_heads,
+                    attention.head_dim,
+                    None,
+                    decoder.rms_norm_epsilon,
+                )?);
+            }
+            Some((keys, values))
+        } else {
+            None
+        };
+        let attention_output = self.prefill_attention_m1_causal(
+            layer_index,
+            source_layer,
+            own_kv.as_ref(),
+            &queries,
+            attention.q_heads,
+            attention.kv_heads,
+            attention.head_dim,
+        )?;
+        let output_projection = self.matmul_named_batched(
+            &layer_tensor(layer_index, "self_attn.o_proj.weight"),
+            hidden,
+            q_width,
+            rows,
+            &attention_output,
+        )?;
+        let post_attention_weight = self.read_weight_vector(
+            &layer_tensor(layer_index, "post_attention_layernorm.weight"),
+            hidden,
+        )?;
+        let mut attention_residual = Vec::with_capacity(states.len());
+        for row in 0..rows {
+            let range = row * hidden..(row + 1) * hidden;
+            let post = rms_norm(
+                &output_projection[range.clone()],
+                Some(&post_attention_weight),
+                decoder.rms_norm_epsilon,
+            )?;
+            attention_residual.extend_from_slice(&add_vectors(
+                &states[range],
+                &post,
+                "Gemma4 batched attention residual",
+            )?);
+        }
+
+        let intermediate = match layer.mlp {
+            ResidentMlpDescriptor::Dense { intermediate_size, .. } => intermediate_size,
+            ResidentMlpDescriptor::MoE { .. } => {
+                return Err(format!("Gemma4 resident executor cannot execute MoE MLP at layer {layer_index}"))
+            }
+        };
+        let pre_mlp_weight = self.read_weight_vector(
+            &layer_tensor(layer_index, "pre_feedforward_layernorm.weight"),
+            hidden,
+        )?;
+        let mut mlp_input = Vec::with_capacity(states.len());
+        for residual in attention_residual.chunks_exact(hidden) {
+            mlp_input.extend_from_slice(&rms_norm(
+                residual,
+                Some(&pre_mlp_weight),
+                decoder.rms_norm_epsilon,
+            )?);
+        }
+        let gate = self.matmul_named_batched(
+            &layer_tensor(layer_index, "mlp.gate_proj.weight"),
+            intermediate,
+            hidden,
+            rows,
+            &mlp_input,
+        )?;
+        let up = self.matmul_named_batched(
+            &layer_tensor(layer_index, "mlp.up_proj.weight"),
+            intermediate,
+            hidden,
+            rows,
+            &mlp_input,
+        )?;
+        let mut activated = gelu_pytorch_tanh(&gate)?;
+        multiply_in_place(&mut activated, &up, "Gemma4 batched gated MLP product")?;
+        let mlp = self.matmul_named_batched(
+            &layer_tensor(layer_index, "mlp.down_proj.weight"),
+            hidden,
+            intermediate,
+            rows,
+            &activated,
+        )?;
+        let post_mlp_weight = self.read_weight_vector(
+            &layer_tensor(layer_index, "post_feedforward_layernorm.weight"),
+            hidden,
+        )?;
+        let mut mlp_residual = Vec::with_capacity(states.len());
+        for row in 0..rows {
+            let range = row * hidden..(row + 1) * hidden;
+            let post = rms_norm(
+                &mlp[range.clone()],
+                Some(&post_mlp_weight),
+                decoder.rms_norm_epsilon,
+            )?;
+            mlp_residual.extend_from_slice(&add_vectors(
+                &attention_residual[range],
+                &post,
+                "Gemma4 batched MLP residual",
+            )?);
+        }
+
+        let ple_gate = self.matmul_named_batched(
+            &layer_tensor(layer_index, "per_layer_input_gate.weight"),
+            ple.input_size,
+            hidden,
+            rows,
+            &mlp_residual,
+        )?;
+        let mut ple_product = gelu_pytorch_tanh(&ple_gate)?;
+        multiply_in_place(&mut ple_product, per_layer_inputs, "Gemma4 batched PLE gate product")?;
+        let ple_projection = self.matmul_named_batched(
+            &layer_tensor(layer_index, "per_layer_projection.weight"),
+            hidden,
+            ple.input_size,
+            rows,
+            &ple_product,
+        )?;
+        let post_ple_weight = self.read_weight_vector(
+            &layer_tensor(layer_index, "post_per_layer_input_norm.weight"),
+            hidden,
+        )?;
+        let layer_scalar = self.read_weight_vector(&layer_tensor(layer_index, "layer_scalar"), 1)?[0];
+        let mut output = Vec::with_capacity(states.len());
+        for row in 0..rows {
+            let range = row * hidden..(row + 1) * hidden;
+            let post = rms_norm(
+                &ple_projection[range.clone()],
+                Some(&post_ple_weight),
+                decoder.rms_norm_epsilon,
+            )?;
+            let mut combined = add_vectors(
+                &mlp_residual[range],
+                &post,
+                "Gemma4 batched PLE residual",
+            )?;
+            scale_in_place(&mut combined, layer_scalar, "Gemma4 layer scalar")?;
+            output.extend_from_slice(&combined);
+        }
+        finite_slice(&output, "Gemma4 batched layer output")?;
+        Ok(output)
     }
 
     fn forward_token_prefill_from_ple(
@@ -4880,6 +5285,132 @@ impl Gemma4TextExecutor {
             }
         }
     }
+
+    fn matmul_named_batched(
+        &mut self,
+        name: &str,
+        rows: usize,
+        columns: usize,
+        batch_count: usize,
+        input: &[f32],
+    ) -> Result<Vec<f32>, String> {
+        finite_slice(input, &format!("Gemma4 batched matmul input {name}"))?;
+        match &mut self.weights {
+            Gemma4WeightStorage::Resident(weights) => {
+                let tensor = weights.tensor(name, &[rows, columns])?;
+                self.matvec.gemma_matmul_resident(
+                    &tensor.buffer,
+                    rows,
+                    columns,
+                    batch_count,
+                    input,
+                )
+            }
+            Gemma4WeightStorage::Streamed(_) => {
+                Err("Gemma4 batched matmul requires resident weights".into())
+            }
+        }
+    }
+
+    fn prefill_attention_m1_causal(
+        &mut self,
+        layer_index: usize,
+        shared_source: Option<usize>,
+        own_kv: Option<&(Vec<f32>, Vec<f32>)>,
+        queries: &[f32],
+        q_heads: usize,
+        kv_heads: usize,
+        head_dim: usize,
+    ) -> Result<Vec<f32>, String> {
+        let query_width = q_heads
+            .checked_mul(head_dim)
+            .ok_or_else(|| "Gemma4 batched attention query width overflows".to_string())?;
+        if queries.is_empty() || !queries.len().is_multiple_of(query_width) {
+            return Err("Gemma4 batched attention query shape is invalid".into());
+        }
+        let rows = queries.len() / query_width;
+        let kv_width = kv_heads
+            .checked_mul(head_dim)
+            .ok_or_else(|| "Gemma4 batched attention KV width overflows".to_string())?;
+        if let Some((keys, values)) = own_kv
+            && (keys.len() != rows * kv_width || values.len() != rows * kv_width)
+        {
+            return Err("Gemma4 batched attention K/V shape is invalid".into());
+        }
+        let source_layer = shared_source.unwrap_or(layer_index);
+        let caches = match &mut self.caches {
+            Gemma4KvStorage::Device(caches) => caches,
+            Gemma4KvStorage::Host(_) => return Err("Gemma4 batched attention requires device K/V".into()),
+        };
+        let cache = caches.cache_mut(source_layer)?;
+        if let Some((keys, values)) = own_kv {
+            let initial_absolute_len = cache.absolute_len;
+            for row in 0..rows {
+                let range = row * kv_width..(row + 1) * kv_width;
+                self.matvec.append_device_kv(cache, &keys[range.clone()], &values[range])?;
+            }
+            let expected = initial_absolute_len
+                .checked_add(rows)
+                .ok_or_else(|| "Gemma4 batched K/V length overflows".to_string())?;
+            if cache.absolute_len != expected {
+                return Err(format!(
+                    "Gemma4 batched layer {layer_index} committed {} K/V rows, expected {expected}",
+                    cache.absolute_len
+                ));
+            }
+        } else if cache.absolute_len < rows {
+            return Err(format!(
+                "Gemma4 shared layer {layer_index} needs a full source-layer chunk from {source_layer} before attention"
+            ));
+        }
+        let first_visible_absolute_len = cache
+            .absolute_len
+            .checked_sub(rows)
+            .ok_or_else(|| "Gemma4 batched attention source cache is shorter than chunk".to_string())?;
+        let full_absolute_len = cache.absolute_len;
+        let mut output = Vec::with_capacity(queries.len());
+        for (row, query) in queries.chunks_exact(query_width).enumerate() {
+            let visible = first_visible_absolute_len
+                .checked_add(row)
+                .and_then(|position| position.checked_add(1))
+                .ok_or_else(|| "Gemma4 batched causal cache length overflows".to_string())?;
+            cache.set_read_window(visible, &mut self.matvec.stream)?;
+            if cache.cache_len != visible.min(cache.capacity_tokens) {
+                return Err(format!(
+                    "Gemma4 batched causal mask cache length mismatch at layer {layer_index}, row {row}: got {}, expected {}",
+                    cache.cache_len,
+                    visible.min(cache.capacity_tokens)
+                ));
+            }
+            output.extend_from_slice(&self.matvec.device_attention(
+                cache, query, q_heads, kv_heads, head_dim,
+            )?);
+        }
+        cache.set_read_window(full_absolute_len, &mut self.matvec.stream)?;
+        Ok(output)
+    }
+}
+
+fn per_layer_inputs_for_layer(
+    packed: &[f32],
+    rows: usize,
+    packed_width: usize,
+    layer_index: usize,
+    layer_width: usize,
+) -> Result<Vec<f32>, String> {
+    if packed.len() != rows * packed_width
+        || layer_width == 0
+        || (layer_index + 1).checked_mul(layer_width).is_none_or(|end| end > packed_width)
+    {
+        return Err("Gemma4 batched PLE packed input shape is invalid".into());
+    }
+    let start = layer_index * layer_width;
+    let end = start + layer_width;
+    let mut result = Vec::with_capacity(rows * layer_width);
+    for row in packed.chunks_exact(packed_width) {
+        result.extend_from_slice(&row[start..end]);
+    }
+    Ok(result)
 }
 
 #[derive(Debug)]
