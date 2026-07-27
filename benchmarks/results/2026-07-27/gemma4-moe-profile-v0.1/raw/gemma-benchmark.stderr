@@ -1,0 +1,12 @@
+W20260727 16:10:40.002372 133387380061632 simple_timer.cpp:55] [rocprofv3] tool initialization ::     0.011728 sec
+W20260727 16:10:40.002485 133387380061632 simple_timer.cpp:55] [rocprofv3] 'target/release/ullm-gemma4-resident --model-dir /home/homelab1/datapool/ai_models/safetensors/gemma-4-E2B --output benchmarks/results/2026-07-27/gemma4-moe-profile-v0.1/raw/gemma-benchmark.json --mode benchmark --benchmark-repeats 3' ::     0.000000 sec
+W20260727 16:10:40.650328 133387380061632 tool.cpp:2422] HIP (runtime) version 7.2.0 initialized (instance=0)
+W20260727 16:10:40.751662 133387380061632 tool.cpp:2422] HSA version 8.20.1 initialized (instance=0)
+W20260727 16:10:53.578822 133387380061632 simple_timer.cpp:55] [rocprofv3] 'target/release/ullm-gemma4-resident --model-dir /home/homelab1/datapool/ai_models/safetensors/gemma-4-E2B --output benchmarks/results/2026-07-27/gemma4-moe-profile-v0.1/raw/gemma-benchmark.json --mode benchmark --benchmark-repeats 3' ::    13.576337 sec
+E20260727 16:10:53.637001 133387380061632 output_stream.cpp:111] Opened result file: benchmarks/results/2026-07-27/gemma4-moe-profile-v0.1/raw/gemma-benchmark/gemma_kernel_trace.csv
+E20260727 16:10:53.986295 133387380061632 output_stream.cpp:111] Opened result file: benchmarks/results/2026-07-27/gemma4-moe-profile-v0.1/raw/gemma-benchmark/gemma_hip_api_trace.csv
+E20260727 16:10:54.542334 133387380061632 output_stream.cpp:111] Opened result file: benchmarks/results/2026-07-27/gemma4-moe-profile-v0.1/raw/gemma-benchmark/gemma_memory_copy_trace.csv
+E20260727 16:10:54.579028 133387380061632 output_stream.cpp:111] Opened result file: benchmarks/results/2026-07-27/gemma4-moe-profile-v0.1/raw/gemma-benchmark/gemma_memory_allocation_trace.csv
+E20260727 16:10:54.602091 133387380061632 output_stream.cpp:111] Opened result file: benchmarks/results/2026-07-27/gemma4-moe-profile-v0.1/raw/gemma-benchmark/gemma_agent_info.csv
+W20260727 16:10:54.613562 133387380061632 simple_timer.cpp:55] [rocprofv3] output generation ::     1.029849 sec
+W20260727 16:10:54.613652 133387380061632 simple_timer.cpp:55] [rocprofv3] tool finalization ::     1.030442 sec

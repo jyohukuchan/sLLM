@@ -1,0 +1,13 @@
+2026-07-27T16:10:19+09:00
+NRestarts=0
+ActiveState=inactive
+[
+    {
+        "gpu": 2,
+        "process_list": [
+            {
+                "process_info": "No running processes detected"
+            }
+        ]
+    }
+]

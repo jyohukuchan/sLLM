@@ -1,0 +1,13 @@
+W20260727 16:12:01.003958 128256512612096 simple_timer.cpp:55] [rocprofv3] tool initialization ::     0.010969 sec
+W20260727 16:12:01.004267 128256512612096 simple_timer.cpp:55] [rocprofv3] 'target/release/ullm-qwen35-moe-aq4-generate --package /home/homelab1/datapool/ullm/product/qwen35-35b-a3b-aq4_0-g8-moe-v0.2/package --prompt-token-ids 248045,846,198,20206,303,799,2716,6163,11316,25,1092,3520,264,58377,5902,30,248046,198,248045,74455,198,248068,198 --new-tokens 4 --device-index 1 --context-length 262144 --kv-block-size 16 --output benchmarks/results/2026-07-27/gemma4-moe-profile-v0.1/raw/moe-generate.json' ::     0.000000 sec
+W20260727 16:12:01.013146 128256512612096 tool.cpp:2422] HIP (runtime) version 7.2.0 initialized (instance=0)
+W20260727 16:12:01.115916 128256512612096 tool.cpp:2422] HSA version 8.20.1 initialized (instance=0)
+ullm-qwen35-moe-aq4-generate: failed to load Qwen3.5 MoE linear layer 0: required backend operation runtime feature/guard is unavailable
+W20260727 16:12:02.159157 128256512612096 simple_timer.cpp:55] [rocprofv3] 'target/release/ullm-qwen35-moe-aq4-generate --package /home/homelab1/datapool/ullm/product/qwen35-35b-a3b-aq4_0-g8-moe-v0.2/package --prompt-token-ids 248045,846,198,20206,303,799,2716,6163,11316,25,1092,3520,264,58377,5902,30,248046,198,248045,74455,198,248068,198 --new-tokens 4 --device-index 1 --context-length 262144 --kv-block-size 16 --output benchmarks/results/2026-07-27/gemma4-moe-profile-v0.1/raw/moe-generate.json' ::     1.154890 sec
+E20260727 16:12:02.191511 128256512612096 output_stream.cpp:111] Opened result file: benchmarks/results/2026-07-27/gemma4-moe-profile-v0.1/raw/moe-generate/moe_kernel_trace.csv
+E20260727 16:12:02.225539 128256512612096 output_stream.cpp:111] Opened result file: benchmarks/results/2026-07-27/gemma4-moe-profile-v0.1/raw/moe-generate/moe_hip_api_trace.csv
+E20260727 16:12:02.246804 128256512612096 output_stream.cpp:111] Opened result file: benchmarks/results/2026-07-27/gemma4-moe-profile-v0.1/raw/moe-generate/moe_memory_copy_trace.csv
+E20260727 16:12:02.262336 128256512612096 output_stream.cpp:111] Opened result file: benchmarks/results/2026-07-27/gemma4-moe-profile-v0.1/raw/moe-generate/moe_memory_allocation_trace.csv
+E20260727 16:12:02.272222 128256512612096 output_stream.cpp:111] Opened result file: benchmarks/results/2026-07-27/gemma4-moe-profile-v0.1/raw/moe-generate/moe_agent_info.csv
+W20260727 16:12:02.281616 128256512612096 simple_timer.cpp:55] [rocprofv3] output generation ::     0.116557 sec
+W20260727 16:12:02.281656 128256512612096 simple_timer.cpp:55] [rocprofv3] tool finalization ::     0.116934 sec

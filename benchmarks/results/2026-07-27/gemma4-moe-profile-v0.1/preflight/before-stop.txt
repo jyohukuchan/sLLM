@@ -1,0 +1,28 @@
+2026-07-27T16:10:19+09:00
+                     USER        PID ACCESS COMMAND
+/run/ullm/r9700.lock:
+                     homelab1  3341446 F.... ullm-openai-gat
+NRestarts=0
+ActiveState=active
+[
+    {
+        "gpu": 2,
+        "process_list": [
+            {
+                "process_info": {
+                    "name": "/opt/ullm/aq4-overnight-consolidation-v0.1/releases/aq4-consolidated-840a1c7a-5a274733/ullm-aq4-worker",
+                    "pid": 3341567,
+                    "mem_usage": {
+                        "value": 7352516608,
+                        "unit": "B"
+                    },
+                    "cu_occupancy": "N/A",
+                    "evicted_time": {
+                        "value": 141,
+                        "unit": "ms"
+                    }
+                }
+            }
+        ]
+    }
+]

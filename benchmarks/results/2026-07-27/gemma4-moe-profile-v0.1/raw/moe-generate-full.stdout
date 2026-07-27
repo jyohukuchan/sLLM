@@ -1,0 +1,2355 @@
+{
+  "device": {
+    "required_architecture": "gfx1201",
+    "ullm_runtime_index": 1
+  },
+  "format_id": "AQ4_0",
+  "generation": {
+    "decode_tokens_per_second": 8.813876900957414,
+    "decode_wall_ms": 453.829801,
+    "final_position": 26,
+    "final_routes": [
+      {
+        "boundary_tie_flags": [
+          0
+        ],
+        "layer_index": 0,
+        "routing_scores": [
+          0.232421875,
+          0.1982421875,
+          0.169921875,
+          0.15234375,
+          0.09228515625,
+          0.052734375,
+          0.052734375,
+          0.04931640625
+        ],
+        "selected_expert_ids": [
+          81,
+          132,
+          115,
+          158,
+          177,
+          192,
+          30,
+          187
+        ]
+      },
+      {
+        "boundary_tie_flags": [
+          0
+        ],
+        "layer_index": 1,
+        "routing_scores": [
+          0.27734375,
+          0.1904296875,
+          0.1171875,
+          0.10693359375,
+          0.08740234375,
+          0.07958984375,
+          0.07568359375,
+          0.06591796875
+        ],
+        "selected_expert_ids": [
+          217,
+          233,
+          155,
+          146,
+          11,
+          62,
+          182,
+          250
+        ]
+      },
+      {
+        "boundary_tie_flags": [
+          0
+        ],
+        "layer_index": 2,
+        "routing_scores": [
+          0.2080078125,
+          0.1787109375,
+          0.1455078125,
+          0.1328125,
+          0.1171875,
+          0.0869140625,
+          0.06640625,
+          0.064453125
+        ],
+        "selected_expert_ids": [
+          255,
+          121,
+          167,
+          43,
+          20,
+          109,
+          253,
+          123
+        ]
+      },
+      {
+        "boundary_tie_flags": [
+          0
+        ],
+        "layer_index": 3,
+        "routing_scores": [
+          0.271484375,
+          0.228515625,
+          0.138671875,
+          0.08935546875,
+          0.08251953125,
+          0.0751953125,
+          0.064453125,
+          0.050048828125
+        ],
+        "selected_expert_ids": [
+          117,
+          119,
+          236,
+          190,
+          214,
+          37,
+          225,
+          199
+        ]
+      },
+      {
+        "boundary_tie_flags": [
+          0
+        ],
+        "layer_index": 4,
+        "routing_scores": [
+          0.318359375,
+          0.12109375,
+          0.11181640625,
+          0.1103515625,
+          0.095703125,
+          0.0927734375,
+          0.08203125,
+          0.06689453125
+        ],
+        "selected_expert_ids": [
+          58,
+          222,
+          54,
+          154,
+          213,
+          95,
+          142,
+          102
+        ]
+      },
+      {
+        "boundary_tie_flags": [
+          0
+        ],
+        "layer_index": 5,
+        "routing_scores": [
+          0.2314453125,
+          0.1591796875,
+          0.1318359375,
+          0.111328125,
+          0.10791015625,
+          0.099609375,
+          0.08642578125,
+          0.07177734375
+        ],
+        "selected_expert_ids": [
+          43,
+          110,
+          218,
+          135,
+          158,
+          86,
+          65,
+          188
+        ]
+      },
+      {
+        "boundary_tie_flags": [
+          0
+        ],
+        "layer_index": 6,
+        "routing_scores": [
+          0.1982421875,
+          0.1953125,
+          0.1748046875,
+          0.1337890625,
+          0.09521484375,
+          0.0751953125,
+          0.0673828125,
+          0.0595703125
+        ],
+        "selected_expert_ids": [
+          138,
+          79,
+          133,
+          182,
+          65,
+          14,
+          206,
+          196
+        ]
+      },
+      {
+        "boundary_tie_flags": [
+          0
+        ],
+        "layer_index": 7,
+        "routing_scores": [
+          0.197265625,
+          0.173828125,
+          0.1640625,
+          0.158203125,
+          0.1005859375,
+          0.08349609375,
+          0.068359375,
+          0.053955078125
+        ],
+        "selected_expert_ids": [
+          117,
+          14,
+          78,
+          229,
+          35,
+          203,
+          23,
+          36
+        ]
+      },
+      {
+        "boundary_tie_flags": [
+          1
+        ],
+        "layer_index": 8,
+        "routing_scores": [
+          0.208984375,
+          0.1845703125,
+          0.1630859375,
+          0.125,
+          0.10693359375,
+          0.095703125,
+          0.05908203125,
+          0.055419921875
+        ],
+        "selected_expert_ids": [
+          224,
+          239,
+          4,
+          180,
+          99,
+          110,
+          77,
+          191
+        ]
+      },
+      {
+        "boundary_tie_flags": [
+          0
+        ],
+        "layer_index": 9,
+        "routing_scores": [
+          0.2470703125,
+          0.2333984375,
+          0.1669921875,
+          0.10791015625,
+          0.087890625,
+          0.07080078125,
+          0.044189453125,
+          0.04150390625
+        ],
+        "selected_expert_ids": [
+          239,
+          2,
+          59,
+          191,
+          243,
+          170,
+          161,
+          171
+        ]
+      },
+      {
+        "boundary_tie_flags": [
+          0
+        ],
+        "layer_index": 10,
+        "routing_scores": [
+          0.23046875,
+          0.1630859375,
+          0.15625,
+          0.1337890625,
+          0.09912109375,
+          0.0771484375,
+          0.0712890625,
+          0.0693359375
+        ],
+        "selected_expert_ids": [
+          247,
+          185,
+          196,
+          125,
+          65,
+          243,
+          88,
+          157
+        ]
+      },
+      {
+        "boundary_tie_flags": [
+          0
+        ],
+        "layer_index": 11,
+        "routing_scores": [
+          0.2041015625,
+          0.19921875,
+          0.18359375,
+          0.12890625,
+          0.12060546875,
+          0.060791015625,
+          0.054443359375,
+          0.048828125
+        ],
+        "selected_expert_ids": [
+          206,
+          128,
+          47,
+          160,
+          108,
+          150,
+          62,
+          107
+        ]
+      },
+      {
+        "boundary_tie_flags": [
+          0
+        ],
+        "layer_index": 12,
+        "routing_scores": [
+          0.1708984375,
+          0.1630859375,
+          0.1552734375,
+          0.1396484375,
+          0.119140625,
+          0.09912109375,
+          0.09423828125,
+          0.05810546875
+        ],
+        "selected_expert_ids": [
+          93,
+          60,
+          145,
+          199,
+          223,
+          220,
+          221,
+          193
+        ]
+      },
+      {
+        "boundary_tie_flags": [
+          0
+        ],
+        "layer_index": 13,
+        "routing_scores": [
+          0.294921875,
+          0.1728515625,
+          0.130859375,
+          0.11328125,
+          0.08544921875,
+          0.0732421875,
+          0.0654296875,
+          0.064453125
+        ],
+        "selected_expert_ids": [
+          182,
+          134,
+          89,
+          202,
+          44,
+          243,
+          154,
+          20
+        ]
+      },
+      {
+        "boundary_tie_flags": [
+          0
+        ],
+        "layer_index": 14,
+        "routing_scores": [
+          0.25,
+          0.177734375,
+          0.1318359375,
+          0.1298828125,
+          0.09814453125,
+          0.087890625,
+          0.07666015625,
+          0.047119140625
+        ],
+        "selected_expert_ids": [
+          189,
+          137,
+          125,
+          32,
+          103,
+          51,
+          64,
+          28
+        ]
+      },
+      {
+        "boundary_tie_flags": [
+          0
+        ],
+        "layer_index": 15,
+        "routing_scores": [
+          0.1826171875,
+          0.1630859375,
+          0.1630859375,
+          0.130859375,
+          0.12158203125,
+          0.1123046875,
+          0.06298828125,
+          0.06298828125
+        ],
+        "selected_expert_ids": [
+          165,
+          185,
+          58,
+          87,
+          242,
+          243,
+          238,
+          88
+        ]
+      },
+      {
+        "boundary_tie_flags": [
+          0
+        ],
+        "layer_index": 16,
+        "routing_scores": [
+          0.19140625,
+          0.1884765625,
+          0.14453125,
+          0.1376953125,
+          0.099609375,
+          0.09765625,
+          0.07177734375,
+          0.068359375
+        ],
+        "selected_expert_ids": [
+          60,
+          134,
+          28,
+          252,
+          43,
+          229,
+          9,
+          202
+        ]
+      },
+      {
+        "boundary_tie_flags": [
+          0
+        ],
+        "layer_index": 17,
+        "routing_scores": [
+          0.21484375,
+          0.17578125,
+          0.150390625,
+          0.1455078125,
+          0.1064453125,
+          0.09375,
+          0.0634765625,
+          0.049560546875
+        ],
+        "selected_expert_ids": [
+          16,
+          198,
+          0,
+          87,
+          250,
+          64,
+          5,
+          15
+        ]
+      },
+      {
+        "boundary_tie_flags": [
+          1
+        ],
+        "layer_index": 18,
+        "routing_scores": [
+          0.240234375,
+          0.2158203125,
+          0.2021484375,
+          0.08837890625,
+          0.07080078125,
+          0.06982421875,
+          0.057861328125,
+          0.054443359375
+        ],
+        "selected_expert_ids": [
+          134,
+          43,
+          197,
+          203,
+          195,
+          163,
+          155,
+          127
+        ]
+      },
+      {
+        "boundary_tie_flags": [
+          0
+        ],
+        "layer_index": 19,
+        "routing_scores": [
+          0.25390625,
+          0.2275390625,
+          0.1611328125,
+          0.09912109375,
+          0.08642578125,
+          0.06396484375,
+          0.056640625,
+          0.05224609375
+        ],
+        "selected_expert_ids": [
+          116,
+          20,
+          109,
+          167,
+          205,
+          19,
+          121,
+          215
+        ]
+      },
+      {
+        "boundary_tie_flags": [
+          0
+        ],
+        "layer_index": 20,
+        "routing_scores": [
+          0.28515625,
+          0.203125,
+          0.1396484375,
+          0.08837890625,
+          0.07958984375,
+          0.0703125,
+          0.06787109375,
+          0.06591796875
+        ],
+        "selected_expert_ids": [
+          116,
+          239,
+          99,
+          224,
+          3,
+          56,
+          77,
+          98
+        ]
+      },
+      {
+        "boundary_tie_flags": [
+          0
+        ],
+        "layer_index": 21,
+        "routing_scores": [
+          0.296875,
+          0.1953125,
+          0.154296875,
+          0.1357421875,
+          0.055908203125,
+          0.055908203125,
+          0.055908203125,
+          0.04931640625
+        ],
+        "selected_expert_ids": [
+          239,
+          2,
+          191,
+          197,
+          243,
+          117,
+          103,
+          189
+        ]
+      },
+      {
+        "boundary_tie_flags": [
+          0
+        ],
+        "layer_index": 22,
+        "routing_scores": [
+          0.306640625,
+          0.2109375,
+          0.1669921875,
+          0.07861328125,
+          0.07861328125,
+          0.07177734375,
+          0.04541015625,
+          0.0419921875
+        ],
+        "selected_expert_ids": [
+          176,
+          125,
+          243,
+          247,
+          185,
+          36,
+          196,
+          150
+        ]
+      },
+      {
+        "boundary_tie_flags": [
+          0
+        ],
+        "layer_index": 23,
+        "routing_scores": [
+          0.20703125,
+          0.1884765625,
+          0.1748046875,
+          0.154296875,
+          0.0849609375,
+          0.07275390625,
+          0.0634765625,
+          0.05419921875
+        ],
+        "selected_expert_ids": [
+          9,
+          206,
+          150,
+          128,
+          160,
+          86,
+          89,
+          254
+        ]
+      },
+      {
+        "boundary_tie_flags": [
+          0
+        ],
+        "layer_index": 24,
+        "routing_scores": [
+          0.3671875,
+          0.3046875,
+          0.1015625,
+          0.07080078125,
+          0.0478515625,
+          0.03662109375,
+          0.03564453125,
+          0.034423828125
+        ],
+        "selected_expert_ids": [
+          23,
+          60,
+          221,
+          93,
+          85,
+          199,
+          151,
+          18
+        ]
+      },
+      {
+        "boundary_tie_flags": [
+          1
+        ],
+        "layer_index": 25,
+        "routing_scores": [
+          0.2734375,
+          0.2236328125,
+          0.12890625,
+          0.091796875,
+          0.08203125,
+          0.072265625,
+          0.06787109375,
+          0.06005859375
+        ],
+        "selected_expert_ids": [
+          44,
+          182,
+          134,
+          171,
+          78,
+          202,
+          154,
+          185
+        ]
+      },
+      {
+        "boundary_tie_flags": [
+          0
+        ],
+        "layer_index": 26,
+        "routing_scores": [
+          0.212890625,
+          0.2099609375,
+          0.1796875,
+          0.10400390625,
+          0.0859375,
+          0.07861328125,
+          0.0703125,
+          0.05908203125
+        ],
+        "selected_expert_ids": [
+          88,
+          137,
+          103,
+          51,
+          189,
+          126,
+          32,
+          52
+        ]
+      },
+      {
+        "boundary_tie_flags": [
+          0
+        ],
+        "layer_index": 27,
+        "routing_scores": [
+          0.25390625,
+          0.19140625,
+          0.142578125,
+          0.11279296875,
+          0.09326171875,
+          0.09326171875,
+          0.0673828125,
+          0.04541015625
+        ],
+        "selected_expert_ids": [
+          165,
+          87,
+          242,
+          58,
+          185,
+          172,
+          181,
+          229
+        ]
+      },
+      {
+        "boundary_tie_flags": [
+          0
+        ],
+        "layer_index": 28,
+        "routing_scores": [
+          0.29296875,
+          0.162109375,
+          0.1220703125,
+          0.11279296875,
+          0.111328125,
+          0.076171875,
+          0.062255859375,
+          0.060546875
+        ],
+        "selected_expert_ids": [
+          150,
+          43,
+          229,
+          152,
+          252,
+          163,
+          182,
+          238
+        ]
+      },
+      {
+        "boundary_tie_flags": [
+          0
+        ],
+        "layer_index": 29,
+        "routing_scores": [
+          0.2060546875,
+          0.2001953125,
+          0.1357421875,
+          0.1103515625,
+          0.10693359375,
+          0.08349609375,
+          0.08203125,
+          0.07470703125
+        ],
+        "selected_expert_ids": [
+          0,
+          20,
+          16,
+          87,
+          15,
+          64,
+          248,
+          144
+        ]
+      },
+      {
+        "boundary_tie_flags": [
+          0
+        ],
+        "layer_index": 30,
+        "routing_scores": [
+          0.1943359375,
+          0.1884765625,
+          0.1689453125,
+          0.15625,
+          0.11083984375,
+          0.09326171875,
+          0.044677734375,
+          0.04345703125
+        ],
+        "selected_expert_ids": [
+          163,
+          226,
+          195,
+          134,
+          43,
+          197,
+          155,
+          161
+        ]
+      },
+      {
+        "boundary_tie_flags": [
+          0
+        ],
+        "layer_index": 31,
+        "routing_scores": [
+          0.2216796875,
+          0.18359375,
+          0.150390625,
+          0.1435546875,
+          0.10986328125,
+          0.0732421875,
+          0.0634765625,
+          0.054443359375
+        ],
+        "selected_expert_ids": [
+          20,
+          116,
+          167,
+          75,
+          109,
+          36,
+          26,
+          205
+        ]
+      },
+      {
+        "boundary_tie_flags": [
+          0
+        ],
+        "layer_index": 32,
+        "routing_scores": [
+          0.259765625,
+          0.2119140625,
+          0.1650390625,
+          0.150390625,
+          0.060791015625,
+          0.059814453125,
+          0.05517578125,
+          0.0380859375
+        ],
+        "selected_expert_ids": [
+          90,
+          119,
+          252,
+          112,
+          223,
+          181,
+          134,
+          2
+        ]
+      },
+      {
+        "boundary_tie_flags": [
+          0
+        ],
+        "layer_index": 33,
+        "routing_scores": [
+          0.1591796875,
+          0.154296875,
+          0.140625,
+          0.138671875,
+          0.1298828125,
+          0.1201171875,
+          0.083984375,
+          0.07421875
+        ],
+        "selected_expert_ids": [
+          16,
+          83,
+          93,
+          92,
+          231,
+          210,
+          43,
+          129
+        ]
+      },
+      {
+        "boundary_tie_flags": [
+          0
+        ],
+        "layer_index": 34,
+        "routing_scores": [
+          0.2236328125,
+          0.1943359375,
+          0.1826171875,
+          0.1279296875,
+          0.109375,
+          0.061279296875,
+          0.05224609375,
+          0.04833984375
+        ],
+        "selected_expert_ids": [
+          26,
+          133,
+          85,
+          1,
+          82,
+          92,
+          132,
+          86
+        ]
+      },
+      {
+        "boundary_tie_flags": [
+          0
+        ],
+        "layer_index": 35,
+        "routing_scores": [
+          0.234375,
+          0.216796875,
+          0.19140625,
+          0.14453125,
+          0.087890625,
+          0.051513671875,
+          0.0419921875,
+          0.0302734375
+        ],
+        "selected_expert_ids": [
+          84,
+          57,
+          42,
+          72,
+          174,
+          86,
+          135,
+          27
+        ]
+      },
+      {
+        "boundary_tie_flags": [
+          0
+        ],
+        "layer_index": 36,
+        "routing_scores": [
+          0.341796875,
+          0.2177734375,
+          0.10107421875,
+          0.0966796875,
+          0.087890625,
+          0.059326171875,
+          0.050048828125,
+          0.045654296875
+        ],
+        "selected_expert_ids": [
+          83,
+          20,
+          222,
+          221,
+          192,
+          75,
+          70,
+          120
+        ]
+      },
+      {
+        "boundary_tie_flags": [
+          0
+        ],
+        "layer_index": 37,
+        "routing_scores": [
+          0.326171875,
+          0.185546875,
+          0.1513671875,
+          0.1123046875,
+          0.068359375,
+          0.058349609375,
+          0.0546875,
+          0.0439453125
+        ],
+        "selected_expert_ids": [
+          182,
+          39,
+          72,
+          104,
+          190,
+          88,
+          138,
+          200
+        ]
+      },
+      {
+        "boundary_tie_flags": [
+          0
+        ],
+        "layer_index": 38,
+        "routing_scores": [
+          0.41796875,
+          0.1376953125,
+          0.09326171875,
+          0.0888671875,
+          0.08740234375,
+          0.068359375,
+          0.054931640625,
+          0.051513671875
+        ],
+        "selected_expert_ids": [
+          151,
+          27,
+          120,
+          209,
+          64,
+          249,
+          148,
+          103
+        ]
+      },
+      {
+        "boundary_tie_flags": [
+          0
+        ],
+        "layer_index": 39,
+        "routing_scores": [
+          0.314453125,
+          0.150390625,
+          0.09716796875,
+          0.09423828125,
+          0.08837890625,
+          0.08837890625,
+          0.0830078125,
+          0.0830078125
+        ],
+        "selected_expert_ids": [
+          162,
+          42,
+          154,
+          222,
+          167,
+          80,
+          221,
+          186
+        ]
+      }
+    ],
+    "final_step_wall_ms": 112.106024,
+    "final_top_logits": [
+      {
+        "logit": 29.847389221191406,
+        "token_id": 16
+      }
+    ],
+    "generated_token_ids": [
+      90700,
+      8340,
+      25,
+      271
+    ],
+    "prompt_token_ids": [
+      248045,
+      846,
+      198,
+      20206,
+      303,
+      799,
+      2716,
+      6163,
+      11316,
+      25,
+      1092,
+      3520,
+      264,
+      58377,
+      5902,
+      30,
+      248046,
+      198,
+      248045,
+      74455,
+      198,
+      248068,
+      198
+    ],
+    "prompt_wall_ms": 2800.98864,
+    "wall_ms": 3265.9943240000002
+  },
+  "kv_cache": {
+    "key_dtype": "f16",
+    "value_dtype": "f16"
+  },
+  "load_wall_ms": 54362.629206,
+  "model": "Qwen3.5-35B-A3B",
+  "package_dir": "/home/homelab1/datapool/ullm/product/qwen35-35b-a3b-aq4_0-g8-moe-v0.2/package",
+  "residency": {
+    "cache_blocks": 16384,
+    "context_length": 262144,
+    "declared_package_bytes": 25029380864,
+    "device_total_global_mem_bytes": 34208743424,
+    "kv_block_size": 16,
+    "resident_expert_payload_bytes": 20132659328,
+    "shared_moe_decode_workspace_bytes": 116605032
+  },
+  "residency_hold_seconds": 0,
+  "router_verification": [
+    {
+      "layer_index": 0,
+      "reference_boundary_tie_flags": [
+        0
+      ],
+      "reference_selected_expert_ids": [
+        81,
+        132,
+        115,
+        158,
+        177,
+        192,
+        30,
+        187
+      ],
+      "routing_score_sum": 1.0,
+      "runtime_boundary_tie_flags": [
+        0
+      ],
+      "runtime_selected_expert_ids": [
+        81,
+        132,
+        115,
+        158,
+        177,
+        192,
+        30,
+        187
+      ],
+      "strict_order_match": true
+    },
+    {
+      "layer_index": 1,
+      "reference_boundary_tie_flags": [
+        0
+      ],
+      "reference_selected_expert_ids": [
+        217,
+        233,
+        155,
+        146,
+        11,
+        62,
+        182,
+        250
+      ],
+      "routing_score_sum": 1.00048828125,
+      "runtime_boundary_tie_flags": [
+        0
+      ],
+      "runtime_selected_expert_ids": [
+        217,
+        233,
+        155,
+        146,
+        11,
+        62,
+        182,
+        250
+      ],
+      "strict_order_match": true
+    },
+    {
+      "layer_index": 2,
+      "reference_boundary_tie_flags": [
+        0
+      ],
+      "reference_selected_expert_ids": [
+        255,
+        121,
+        167,
+        43,
+        20,
+        109,
+        253,
+        123
+      ],
+      "routing_score_sum": 1.0,
+      "runtime_boundary_tie_flags": [
+        0
+      ],
+      "runtime_selected_expert_ids": [
+        255,
+        121,
+        167,
+        43,
+        20,
+        109,
+        253,
+        123
+      ],
+      "strict_order_match": true
+    },
+    {
+      "layer_index": 3,
+      "reference_boundary_tie_flags": [
+        0
+      ],
+      "reference_selected_expert_ids": [
+        117,
+        119,
+        236,
+        190,
+        214,
+        37,
+        225,
+        199
+      ],
+      "routing_score_sum": 1.000244140625,
+      "runtime_boundary_tie_flags": [
+        0
+      ],
+      "runtime_selected_expert_ids": [
+        117,
+        119,
+        236,
+        190,
+        214,
+        37,
+        225,
+        199
+      ],
+      "strict_order_match": true
+    },
+    {
+      "layer_index": 4,
+      "reference_boundary_tie_flags": [
+        0
+      ],
+      "reference_selected_expert_ids": [
+        58,
+        222,
+        54,
+        154,
+        213,
+        95,
+        142,
+        102
+      ],
+      "routing_score_sum": 0.9990234375,
+      "runtime_boundary_tie_flags": [
+        0
+      ],
+      "runtime_selected_expert_ids": [
+        58,
+        222,
+        54,
+        154,
+        213,
+        95,
+        142,
+        102
+      ],
+      "strict_order_match": true
+    },
+    {
+      "layer_index": 5,
+      "reference_boundary_tie_flags": [
+        0
+      ],
+      "reference_selected_expert_ids": [
+        43,
+        110,
+        218,
+        135,
+        158,
+        86,
+        65,
+        188
+      ],
+      "routing_score_sum": 0.99951171875,
+      "runtime_boundary_tie_flags": [
+        0
+      ],
+      "runtime_selected_expert_ids": [
+        43,
+        110,
+        218,
+        135,
+        158,
+        86,
+        65,
+        188
+      ],
+      "strict_order_match": true
+    },
+    {
+      "layer_index": 6,
+      "reference_boundary_tie_flags": [
+        0
+      ],
+      "reference_selected_expert_ids": [
+        138,
+        79,
+        133,
+        182,
+        65,
+        14,
+        206,
+        196
+      ],
+      "routing_score_sum": 0.99951171875,
+      "runtime_boundary_tie_flags": [
+        0
+      ],
+      "runtime_selected_expert_ids": [
+        138,
+        79,
+        133,
+        182,
+        65,
+        14,
+        206,
+        196
+      ],
+      "strict_order_match": true
+    },
+    {
+      "layer_index": 7,
+      "reference_boundary_tie_flags": [
+        0
+      ],
+      "reference_selected_expert_ids": [
+        117,
+        14,
+        78,
+        229,
+        35,
+        203,
+        23,
+        36
+      ],
+      "routing_score_sum": 0.999755859375,
+      "runtime_boundary_tie_flags": [
+        0
+      ],
+      "runtime_selected_expert_ids": [
+        117,
+        14,
+        78,
+        229,
+        35,
+        203,
+        23,
+        36
+      ],
+      "strict_order_match": true
+    },
+    {
+      "layer_index": 8,
+      "reference_boundary_tie_flags": [
+        1
+      ],
+      "reference_selected_expert_ids": [
+        224,
+        239,
+        4,
+        180,
+        99,
+        110,
+        77,
+        191
+      ],
+      "routing_score_sum": 0.998779296875,
+      "runtime_boundary_tie_flags": [
+        1
+      ],
+      "runtime_selected_expert_ids": [
+        224,
+        239,
+        4,
+        180,
+        99,
+        110,
+        77,
+        191
+      ],
+      "strict_order_match": null
+    },
+    {
+      "layer_index": 9,
+      "reference_boundary_tie_flags": [
+        0
+      ],
+      "reference_selected_expert_ids": [
+        239,
+        2,
+        59,
+        191,
+        243,
+        170,
+        161,
+        171
+      ],
+      "routing_score_sum": 0.999755859375,
+      "runtime_boundary_tie_flags": [
+        0
+      ],
+      "runtime_selected_expert_ids": [
+        239,
+        2,
+        59,
+        191,
+        243,
+        170,
+        161,
+        171
+      ],
+      "strict_order_match": true
+    },
+    {
+      "layer_index": 10,
+      "reference_boundary_tie_flags": [
+        0
+      ],
+      "reference_selected_expert_ids": [
+        247,
+        185,
+        196,
+        125,
+        65,
+        243,
+        88,
+        157
+      ],
+      "routing_score_sum": 1.00048828125,
+      "runtime_boundary_tie_flags": [
+        0
+      ],
+      "runtime_selected_expert_ids": [
+        247,
+        185,
+        196,
+        125,
+        65,
+        243,
+        88,
+        157
+      ],
+      "strict_order_match": true
+    },
+    {
+      "layer_index": 11,
+      "reference_boundary_tie_flags": [
+        0
+      ],
+      "reference_selected_expert_ids": [
+        206,
+        128,
+        47,
+        160,
+        108,
+        150,
+        62,
+        107
+      ],
+      "routing_score_sum": 1.00048828125,
+      "runtime_boundary_tie_flags": [
+        0
+      ],
+      "runtime_selected_expert_ids": [
+        206,
+        128,
+        47,
+        160,
+        108,
+        150,
+        62,
+        107
+      ],
+      "strict_order_match": true
+    },
+    {
+      "layer_index": 12,
+      "reference_boundary_tie_flags": [
+        0
+      ],
+      "reference_selected_expert_ids": [
+        93,
+        60,
+        145,
+        199,
+        223,
+        220,
+        221,
+        193
+      ],
+      "routing_score_sum": 0.99951171875,
+      "runtime_boundary_tie_flags": [
+        0
+      ],
+      "runtime_selected_expert_ids": [
+        93,
+        60,
+        145,
+        199,
+        223,
+        220,
+        221,
+        193
+      ],
+      "strict_order_match": true
+    },
+    {
+      "layer_index": 13,
+      "reference_boundary_tie_flags": [
+        0
+      ],
+      "reference_selected_expert_ids": [
+        182,
+        134,
+        89,
+        202,
+        44,
+        243,
+        154,
+        20
+      ],
+      "routing_score_sum": 1.00048828125,
+      "runtime_boundary_tie_flags": [
+        0
+      ],
+      "runtime_selected_expert_ids": [
+        182,
+        134,
+        89,
+        202,
+        44,
+        243,
+        154,
+        20
+      ],
+      "strict_order_match": true
+    },
+    {
+      "layer_index": 14,
+      "reference_boundary_tie_flags": [
+        0
+      ],
+      "reference_selected_expert_ids": [
+        189,
+        137,
+        125,
+        32,
+        103,
+        51,
+        64,
+        28
+      ],
+      "routing_score_sum": 0.999267578125,
+      "runtime_boundary_tie_flags": [
+        0
+      ],
+      "runtime_selected_expert_ids": [
+        189,
+        137,
+        125,
+        32,
+        103,
+        51,
+        64,
+        28
+      ],
+      "strict_order_match": true
+    },
+    {
+      "layer_index": 15,
+      "reference_boundary_tie_flags": [
+        0
+      ],
+      "reference_selected_expert_ids": [
+        165,
+        185,
+        58,
+        87,
+        242,
+        243,
+        238,
+        88
+      ],
+      "routing_score_sum": 0.99951171875,
+      "runtime_boundary_tie_flags": [
+        0
+      ],
+      "runtime_selected_expert_ids": [
+        165,
+        185,
+        58,
+        87,
+        242,
+        243,
+        238,
+        88
+      ],
+      "strict_order_match": true
+    },
+    {
+      "layer_index": 16,
+      "reference_boundary_tie_flags": [
+        0
+      ],
+      "reference_selected_expert_ids": [
+        60,
+        134,
+        28,
+        252,
+        43,
+        229,
+        9,
+        202
+      ],
+      "routing_score_sum": 0.99951171875,
+      "runtime_boundary_tie_flags": [
+        0
+      ],
+      "runtime_selected_expert_ids": [
+        60,
+        134,
+        28,
+        252,
+        43,
+        229,
+        9,
+        202
+      ],
+      "strict_order_match": true
+    },
+    {
+      "layer_index": 17,
+      "reference_boundary_tie_flags": [
+        0
+      ],
+      "reference_selected_expert_ids": [
+        16,
+        198,
+        0,
+        87,
+        250,
+        64,
+        5,
+        15
+      ],
+      "routing_score_sum": 0.999755859375,
+      "runtime_boundary_tie_flags": [
+        0
+      ],
+      "runtime_selected_expert_ids": [
+        16,
+        198,
+        0,
+        87,
+        250,
+        64,
+        5,
+        15
+      ],
+      "strict_order_match": true
+    },
+    {
+      "layer_index": 18,
+      "reference_boundary_tie_flags": [
+        1
+      ],
+      "reference_selected_expert_ids": [
+        134,
+        43,
+        197,
+        203,
+        195,
+        163,
+        155,
+        127
+      ],
+      "routing_score_sum": 0.99951171875,
+      "runtime_boundary_tie_flags": [
+        1
+      ],
+      "runtime_selected_expert_ids": [
+        134,
+        43,
+        197,
+        203,
+        195,
+        163,
+        155,
+        127
+      ],
+      "strict_order_match": null
+    },
+    {
+      "layer_index": 19,
+      "reference_boundary_tie_flags": [
+        0
+      ],
+      "reference_selected_expert_ids": [
+        116,
+        20,
+        109,
+        167,
+        205,
+        19,
+        121,
+        215
+      ],
+      "routing_score_sum": 1.0009765625,
+      "runtime_boundary_tie_flags": [
+        0
+      ],
+      "runtime_selected_expert_ids": [
+        116,
+        20,
+        109,
+        167,
+        205,
+        19,
+        121,
+        215
+      ],
+      "strict_order_match": true
+    },
+    {
+      "layer_index": 20,
+      "reference_boundary_tie_flags": [
+        0
+      ],
+      "reference_selected_expert_ids": [
+        116,
+        239,
+        99,
+        224,
+        3,
+        56,
+        77,
+        98
+      ],
+      "routing_score_sum": 1.0,
+      "runtime_boundary_tie_flags": [
+        0
+      ],
+      "runtime_selected_expert_ids": [
+        116,
+        239,
+        99,
+        224,
+        3,
+        56,
+        77,
+        98
+      ],
+      "strict_order_match": true
+    },
+    {
+      "layer_index": 21,
+      "reference_boundary_tie_flags": [
+        0
+      ],
+      "reference_selected_expert_ids": [
+        239,
+        2,
+        191,
+        197,
+        243,
+        117,
+        103,
+        189
+      ],
+      "routing_score_sum": 0.999267578125,
+      "runtime_boundary_tie_flags": [
+        0
+      ],
+      "runtime_selected_expert_ids": [
+        239,
+        2,
+        191,
+        197,
+        243,
+        117,
+        103,
+        189
+      ],
+      "strict_order_match": true
+    },
+    {
+      "layer_index": 22,
+      "reference_boundary_tie_flags": [
+        0
+      ],
+      "reference_selected_expert_ids": [
+        176,
+        125,
+        243,
+        247,
+        185,
+        36,
+        196,
+        150
+      ],
+      "routing_score_sum": 1.0009765625,
+      "runtime_boundary_tie_flags": [
+        0
+      ],
+      "runtime_selected_expert_ids": [
+        176,
+        125,
+        243,
+        247,
+        185,
+        36,
+        196,
+        150
+      ],
+      "strict_order_match": true
+    },
+    {
+      "layer_index": 23,
+      "reference_boundary_tie_flags": [
+        0
+      ],
+      "reference_selected_expert_ids": [
+        9,
+        206,
+        150,
+        128,
+        160,
+        86,
+        89,
+        254
+      ],
+      "routing_score_sum": 1.0,
+      "runtime_boundary_tie_flags": [
+        0
+      ],
+      "runtime_selected_expert_ids": [
+        9,
+        206,
+        150,
+        128,
+        160,
+        86,
+        89,
+        254
+      ],
+      "strict_order_match": true
+    },
+    {
+      "layer_index": 24,
+      "reference_boundary_tie_flags": [
+        0
+      ],
+      "reference_selected_expert_ids": [
+        23,
+        60,
+        221,
+        93,
+        85,
+        199,
+        151,
+        18
+      ],
+      "routing_score_sum": 0.998779296875,
+      "runtime_boundary_tie_flags": [
+        0
+      ],
+      "runtime_selected_expert_ids": [
+        23,
+        60,
+        221,
+        93,
+        85,
+        199,
+        151,
+        18
+      ],
+      "strict_order_match": true
+    },
+    {
+      "layer_index": 25,
+      "reference_boundary_tie_flags": [
+        1
+      ],
+      "reference_selected_expert_ids": [
+        44,
+        182,
+        134,
+        171,
+        78,
+        202,
+        154,
+        185
+      ],
+      "routing_score_sum": 1.0,
+      "runtime_boundary_tie_flags": [
+        1
+      ],
+      "runtime_selected_expert_ids": [
+        44,
+        182,
+        134,
+        171,
+        78,
+        202,
+        154,
+        185
+      ],
+      "strict_order_match": null
+    },
+    {
+      "layer_index": 26,
+      "reference_boundary_tie_flags": [
+        0
+      ],
+      "reference_selected_expert_ids": [
+        88,
+        137,
+        103,
+        51,
+        189,
+        126,
+        32,
+        52
+      ],
+      "routing_score_sum": 1.00048828125,
+      "runtime_boundary_tie_flags": [
+        0
+      ],
+      "runtime_selected_expert_ids": [
+        88,
+        137,
+        103,
+        51,
+        189,
+        126,
+        32,
+        52
+      ],
+      "strict_order_match": true
+    },
+    {
+      "layer_index": 27,
+      "reference_boundary_tie_flags": [
+        0
+      ],
+      "reference_selected_expert_ids": [
+        165,
+        87,
+        242,
+        58,
+        185,
+        172,
+        181,
+        229
+      ],
+      "routing_score_sum": 1.0,
+      "runtime_boundary_tie_flags": [
+        0
+      ],
+      "runtime_selected_expert_ids": [
+        165,
+        87,
+        242,
+        58,
+        185,
+        172,
+        181,
+        229
+      ],
+      "strict_order_match": true
+    },
+    {
+      "layer_index": 28,
+      "reference_boundary_tie_flags": [
+        0
+      ],
+      "reference_selected_expert_ids": [
+        150,
+        43,
+        229,
+        152,
+        252,
+        163,
+        182,
+        238
+      ],
+      "routing_score_sum": 1.000244140625,
+      "runtime_boundary_tie_flags": [
+        0
+      ],
+      "runtime_selected_expert_ids": [
+        150,
+        43,
+        229,
+        152,
+        252,
+        163,
+        182,
+        238
+      ],
+      "strict_order_match": true
+    },
+    {
+      "layer_index": 29,
+      "reference_boundary_tie_flags": [
+        0
+      ],
+      "reference_selected_expert_ids": [
+        0,
+        20,
+        16,
+        87,
+        15,
+        64,
+        248,
+        144
+      ],
+      "routing_score_sum": 0.99951171875,
+      "runtime_boundary_tie_flags": [
+        0
+      ],
+      "runtime_selected_expert_ids": [
+        0,
+        20,
+        16,
+        87,
+        15,
+        64,
+        248,
+        144
+      ],
+      "strict_order_match": true
+    },
+    {
+      "layer_index": 30,
+      "reference_boundary_tie_flags": [
+        0
+      ],
+      "reference_selected_expert_ids": [
+        163,
+        226,
+        195,
+        134,
+        43,
+        197,
+        155,
+        161
+      ],
+      "routing_score_sum": 1.000244140625,
+      "runtime_boundary_tie_flags": [
+        0
+      ],
+      "runtime_selected_expert_ids": [
+        163,
+        226,
+        195,
+        134,
+        43,
+        197,
+        155,
+        161
+      ],
+      "strict_order_match": true
+    },
+    {
+      "layer_index": 31,
+      "reference_boundary_tie_flags": [
+        0
+      ],
+      "reference_selected_expert_ids": [
+        20,
+        116,
+        167,
+        75,
+        109,
+        36,
+        26,
+        205
+      ],
+      "routing_score_sum": 1.000244140625,
+      "runtime_boundary_tie_flags": [
+        0
+      ],
+      "runtime_selected_expert_ids": [
+        20,
+        116,
+        167,
+        75,
+        109,
+        36,
+        26,
+        205
+      ],
+      "strict_order_match": true
+    },
+    {
+      "layer_index": 32,
+      "reference_boundary_tie_flags": [
+        0
+      ],
+      "reference_selected_expert_ids": [
+        90,
+        119,
+        252,
+        112,
+        223,
+        181,
+        134,
+        2
+      ],
+      "routing_score_sum": 1.0009765625,
+      "runtime_boundary_tie_flags": [
+        0
+      ],
+      "runtime_selected_expert_ids": [
+        90,
+        119,
+        252,
+        112,
+        223,
+        181,
+        134,
+        2
+      ],
+      "strict_order_match": true
+    },
+    {
+      "layer_index": 33,
+      "reference_boundary_tie_flags": [
+        0
+      ],
+      "reference_selected_expert_ids": [
+        16,
+        83,
+        93,
+        92,
+        231,
+        210,
+        43,
+        129
+      ],
+      "routing_score_sum": 1.0009765625,
+      "runtime_boundary_tie_flags": [
+        0
+      ],
+      "runtime_selected_expert_ids": [
+        16,
+        83,
+        93,
+        92,
+        231,
+        210,
+        43,
+        129
+      ],
+      "strict_order_match": true
+    },
+    {
+      "layer_index": 34,
+      "reference_boundary_tie_flags": [
+        0
+      ],
+      "reference_selected_expert_ids": [
+        26,
+        133,
+        85,
+        1,
+        82,
+        92,
+        132,
+        86
+      ],
+      "routing_score_sum": 0.999755859375,
+      "runtime_boundary_tie_flags": [
+        0
+      ],
+      "runtime_selected_expert_ids": [
+        26,
+        133,
+        85,
+        1,
+        82,
+        92,
+        132,
+        86
+      ],
+      "strict_order_match": true
+    },
+    {
+      "layer_index": 35,
+      "reference_boundary_tie_flags": [
+        0
+      ],
+      "reference_selected_expert_ids": [
+        84,
+        57,
+        42,
+        72,
+        174,
+        86,
+        135,
+        27
+      ],
+      "routing_score_sum": 0.998779296875,
+      "runtime_boundary_tie_flags": [
+        0
+      ],
+      "runtime_selected_expert_ids": [
+        84,
+        57,
+        42,
+        72,
+        174,
+        86,
+        135,
+        27
+      ],
+      "strict_order_match": true
+    },
+    {
+      "layer_index": 36,
+      "reference_boundary_tie_flags": [
+        0
+      ],
+      "reference_selected_expert_ids": [
+        83,
+        20,
+        222,
+        221,
+        192,
+        75,
+        70,
+        120
+      ],
+      "routing_score_sum": 1.000244140625,
+      "runtime_boundary_tie_flags": [
+        0
+      ],
+      "runtime_selected_expert_ids": [
+        83,
+        20,
+        222,
+        221,
+        192,
+        75,
+        70,
+        120
+      ],
+      "strict_order_match": true
+    },
+    {
+      "layer_index": 37,
+      "reference_boundary_tie_flags": [
+        0
+      ],
+      "reference_selected_expert_ids": [
+        182,
+        39,
+        72,
+        104,
+        190,
+        88,
+        138,
+        200
+      ],
+      "routing_score_sum": 1.000732421875,
+      "runtime_boundary_tie_flags": [
+        0
+      ],
+      "runtime_selected_expert_ids": [
+        182,
+        39,
+        72,
+        104,
+        190,
+        88,
+        138,
+        200
+      ],
+      "strict_order_match": true
+    },
+    {
+      "layer_index": 38,
+      "reference_boundary_tie_flags": [
+        0
+      ],
+      "reference_selected_expert_ids": [
+        151,
+        27,
+        120,
+        209,
+        64,
+        249,
+        148,
+        103
+      ],
+      "routing_score_sum": 1.0,
+      "runtime_boundary_tie_flags": [
+        0
+      ],
+      "runtime_selected_expert_ids": [
+        151,
+        27,
+        120,
+        209,
+        64,
+        249,
+        148,
+        103
+      ],
+      "strict_order_match": true
+    },
+    {
+      "layer_index": 39,
+      "reference_boundary_tie_flags": [
+        0
+      ],
+      "reference_selected_expert_ids": [
+        162,
+        42,
+        154,
+        222,
+        167,
+        80,
+        221,
+        186
+      ],
+      "routing_score_sum": 0.9990234375,
+      "runtime_boundary_tie_flags": [
+        0
+      ],
+      "runtime_selected_expert_ids": [
+        162,
+        42,
+        154,
+        222,
+        167,
+        80,
+        221,
+        186
+      ],
+      "strict_order_match": true
+    }
+  ],
+  "router_verification_tie_free_mismatches": [],
+  "schema": "ullm.qwen35_moe_aq4_generation.v0.1"
+}

@@ -1,0 +1,272 @@
+{
+  "marker": "ullm_moe_route_f32_kernel",
+  "markers_per_token": 40,
+  "reconstructed_tokens": 27,
+  "phase_boundary_method": "first marker of the next token",
+  "phases": {
+    "prefill": {
+      "token_range": [
+        0,
+        23
+      ],
+      "wall_ms_from_driver": 2800.98864,
+      "kernel_sum_ms": 1473.041692,
+      "wall_not_in_any_kernel_ms": 1327.946948,
+      "kernel_fraction_of_wall": 0.5259006305716398,
+      "positive_inter_kernel_gap_ms": 1303.998897,
+      "positive_inter_kernel_gaps": 71207,
+      "gap_after_next_launch_returned_ms": 93.737477,
+      "gaps_after_next_launch_returned": 20714,
+      "gap_time_fraction_after_next_launch_returned": 0.0718846290557867,
+      "gap_count_fraction_after_next_launch_returned": 0.29089836673360764,
+      "symbols": [
+        {
+          "symbol": "ullm_moe_route_f32_kernel",
+          "total_ms": 530.135114,
+          "launches": 920,
+          "share_of_kernel_time": 0.3598914524138262
+        },
+        {
+          "symbol": "ullm_moe_decode_gemm_f32_kernel",
+          "total_ms": 329.779444,
+          "launches": 1840,
+          "share_of_kernel_time": 0.2238765174068135
+        },
+        {
+          "symbol": "ullm_aq4_dequant_f32_kernel",
+          "total_ms": 226.126184,
+          "launches": 1840,
+          "share_of_kernel_time": 0.15350969713082635
+        },
+        {
+          "symbol": "ullm_matvec_bf16_f32_kernel",
+          "total_ms": 207.006864,
+          "launches": 8073,
+          "share_of_kernel_time": 0.1405302138590114
+        },
+        {
+          "symbol": "__amd_rocclr_copyBuffer",
+          "total_ms": 135.568176,
+          "launches": 48346,
+          "share_of_kernel_time": 0.09203281667875562
+        },
+        {
+          "symbol": "ullm_linear_attn_recurrent_f32_kernel",
+          "total_ms": 12.281635,
+          "launches": 690,
+          "share_of_kernel_time": 0.00833760175743892
+        },
+        {
+          "symbol": "ullm_rmsnorm_f32_kernel",
+          "total_ms": 10.733031,
+          "launches": 1863,
+          "share_of_kernel_time": 0.007286304969024597
+        },
+        {
+          "symbol": "ullm_moe_scatter_weighted_f32_kernel",
+          "total_ms": 3.478668,
+          "launches": 920,
+          "share_of_kernel_time": 0.002361554339495233
+        },
+        {
+          "symbol": "ullm_add_f32_kernel",
+          "total_ms": 3.270031,
+          "launches": 1840,
+          "share_of_kernel_time": 0.002219917479430039
+        },
+        {
+          "symbol": "ullm_paged_decode_attn_typed_kf16_vf16_kernel",
+          "total_ms": 2.93846,
+          "launches": 230,
+          "share_of_kernel_time": 0.0019948247330395315
+        },
+        {
+          "symbol": "ullm_linear_attn_qkv_prepare_f32_kernel",
+          "total_ms": 2.788465,
+          "launches": 690,
+          "share_of_kernel_time": 0.0018929980157004274
+        },
+        {
+          "symbol": "ullm_moe_gated_silu_f32_kernel",
+          "total_ms": 1.98129,
+          "launches": 920,
+          "share_of_kernel_time": 0.0013450332130857299
+        },
+        {
+          "symbol": "ullm_moe_gather_f32_kernel",
+          "total_ms": 1.914458,
+          "launches": 920,
+          "share_of_kernel_time": 0.0012996631462621222
+        },
+        {
+          "symbol": "ullm_moe_sigmoid_gate_f32_kernel",
+          "total_ms": 1.70157,
+          "launches": 920,
+          "share_of_kernel_time": 0.0011551404208320262
+        },
+        {
+          "symbol": "ullm_segmented_rmsnorm_silu_mul_f32_kernel",
+          "total_ms": 1.661892,
+          "launches": 690,
+          "share_of_kernel_time": 0.0011282043196914483
+        },
+        {
+          "symbol": "ullm_qwen35_qk_norm_rope_paged_kv_write_typed_kf16_vf16_kernel",
+          "total_ms": 0.969767,
+          "launches": 230,
+          "share_of_kernel_time": 0.0006583432127323657
+        },
+        {
+          "symbol": "ullm_sigmoid_mul_f32_kernel",
+          "total_ms": 0.457283,
+          "launches": 230,
+          "share_of_kernel_time": 0.00031043452638406384
+        },
+        {
+          "symbol": "ullm_top1_f32_kernel",
+          "total_ms": 0.14972,
+          "launches": 23,
+          "share_of_kernel_time": 0.00010164002880103138
+        },
+        {
+          "symbol": "ullm_bf16_row_f32_kernel",
+          "total_ms": 0.09964,
+          "launches": 23,
+          "share_of_kernel_time": 6.764234884941736e-05
+        }
+      ]
+    },
+    "decode": {
+      "token_range": [
+        23,
+        27
+      ],
+      "wall_ms_from_driver": 453.829801,
+      "kernel_sum_ms": 251.906577,
+      "wall_not_in_any_kernel_ms": 201.923224,
+      "kernel_fraction_of_wall": 0.5550683900548875,
+      "positive_inter_kernel_gap_ms": 201.067279,
+      "positive_inter_kernel_gaps": 12361,
+      "gap_after_next_launch_returned_ms": 16.142107,
+      "gaps_after_next_launch_returned": 3608,
+      "gap_time_fraction_after_next_launch_returned": 0.0802821179074095,
+      "gap_count_fraction_after_next_launch_returned": 0.2918857697597282,
+      "symbols": [
+        {
+          "symbol": "ullm_moe_route_f32_kernel",
+          "total_ms": 90.008124,
+          "launches": 160,
+          "share_of_kernel_time": 0.3573075585080893
+        },
+        {
+          "symbol": "ullm_moe_decode_gemm_f32_kernel",
+          "total_ms": 56.470787,
+          "launches": 320,
+          "share_of_kernel_time": 0.2241735316025512
+        },
+        {
+          "symbol": "ullm_aq4_dequant_f32_kernel",
+          "total_ms": 38.484527,
+          "launches": 320,
+          "share_of_kernel_time": 0.15277301394159312
+        },
+        {
+          "symbol": "ullm_matvec_bf16_f32_kernel",
+          "total_ms": 36.017928,
+          "launches": 1399,
+          "share_of_kernel_time": 0.14298129262420964
+        },
+        {
+          "symbol": "__amd_rocclr_copyBuffer",
+          "total_ms": 22.777429,
+          "launches": 8397,
+          "share_of_kernel_time": 0.09042014413144918
+        },
+        {
+          "symbol": "ullm_linear_attn_recurrent_f32_kernel",
+          "total_ms": 2.132698,
+          "launches": 119,
+          "share_of_kernel_time": 0.008466225953282672
+        },
+        {
+          "symbol": "ullm_rmsnorm_f32_kernel",
+          "total_ms": 1.799332,
+          "launches": 322,
+          "share_of_kernel_time": 0.007142854392404372
+        },
+        {
+          "symbol": "ullm_paged_decode_attn_typed_kf16_vf16_kernel",
+          "total_ms": 0.993284,
+          "launches": 40,
+          "share_of_kernel_time": 0.0039430649720590665
+        },
+        {
+          "symbol": "ullm_moe_scatter_weighted_f32_kernel",
+          "total_ms": 0.599842,
+          "launches": 160,
+          "share_of_kernel_time": 0.0023812081730601262
+        },
+        {
+          "symbol": "ullm_add_f32_kernel",
+          "total_ms": 0.555923,
+          "launches": 320,
+          "share_of_kernel_time": 0.0022068617922588025
+        },
+        {
+          "symbol": "ullm_linear_attn_qkv_prepare_f32_kernel",
+          "total_ms": 0.541806,
+          "launches": 119,
+          "share_of_kernel_time": 0.002150821175264511
+        },
+        {
+          "symbol": "ullm_moe_gated_silu_f32_kernel",
+          "total_ms": 0.342203,
+          "launches": 160,
+          "share_of_kernel_time": 0.0013584520264431207
+        },
+        {
+          "symbol": "ullm_moe_gather_f32_kernel",
+          "total_ms": 0.323083,
+          "launches": 160,
+          "share_of_kernel_time": 0.0012825508720242743
+        },
+        {
+          "symbol": "ullm_moe_sigmoid_gate_f32_kernel",
+          "total_ms": 0.290882,
+          "launches": 160,
+          "share_of_kernel_time": 0.0011547217363840406
+        },
+        {
+          "symbol": "ullm_segmented_rmsnorm_silu_mul_f32_kernel",
+          "total_ms": 0.284885,
+          "launches": 119,
+          "share_of_kernel_time": 0.0011309152916638616
+        },
+        {
+          "symbol": "ullm_qwen35_qk_norm_rope_paged_kv_write_typed_kf16_vf16_kernel",
+          "total_ms": 0.167443,
+          "launches": 40,
+          "share_of_kernel_time": 0.0006647027719327868
+        },
+        {
+          "symbol": "ullm_sigmoid_mul_f32_kernel",
+          "total_ms": 0.078281,
+          "launches": 40,
+          "share_of_kernel_time": 0.00031075409357017304
+        },
+        {
+          "symbol": "ullm_top1_f32_kernel",
+          "total_ms": 0.0256,
+          "launches": 4,
+          "share_of_kernel_time": 0.00010162497662774402
+        },
+        {
+          "symbol": "ullm_bf16_row_f32_kernel",
+          "total_ms": 0.01252,
+          "launches": 3,
+          "share_of_kernel_time": 4.970096513200606e-05
+        }
+      ]
+    }
+  }
+}
