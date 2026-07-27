@@ -13,6 +13,8 @@ fn main() {
     let source = root.join("runtime/src/ullm_runtime.cpp");
     let include_sources = [
         root.join("runtime/src/ullm_runtime_hiprtc_sources.inc"),
+        root.join("runtime/src/kernels/rope/rope_sources_part_a.inc"),
+        root.join("runtime/src/kernels/rope/rope_sources_part_b.inc"),
         root.join("runtime/src/kernels/sq8_0/sq8_0_matvec_hiprtc.inc"),
         root.join("runtime/src/kernels/sq8_0/sq8_0_matvec_runtime.inc"),
         root.join("runtime/src/kernels/sq8_1/sq8_1_matvec_hiprtc.inc"),

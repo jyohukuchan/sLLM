@@ -4948,3 +4948,67 @@ fn hip_aq4_wmma_group8_ragged_m_exact_buffers_match_cpu_when_enabled() {
         stream.synchronize().unwrap();
         assert_f32s_close(&le_bytes_to_f32s(&output_bytes), &expected, 5e-4);
     }
+    #[test]
+    fn hip_gemma_proportional_rope_f32_full_geometry_preserves_partial_boundaries() {
+        if device_count().unwrap() < 2 {
+            return;
+        }
+        let mut context = RuntimeContext::create(1).unwrap();
+        let mut stream = context.create_stream().unwrap();
+        let heads = 8_usize;
+        let head_dim = 512_usize;
+        let rotary_dim = 128_usize;
+        let input_values = (0..heads * head_dim)
+            .map(|index| index as f32 * 0.03125 - 51.0)
+            .collect::<Vec<_>>();
+        let expected = expected_gemma_proportional_rope(
+            &input_values,
+            1,
+            heads,
+            head_dim,
+            rotary_dim,
+            17,
+            1_000_000.0,
+        );
+        let mut input = context
+            .alloc_buffer(input_values.len() * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut output = context
+            .alloc_buffer(input_values.len() * std::mem::size_of::<f32>())
+            .unwrap();
+        input
+            .copy_from_host(0, &f32s_to_le_bytes(&input_values), Some(&mut stream))
+            .unwrap();
+        gemma_proportional_rope_f32(
+            &input,
+            1,
+            heads,
+            head_dim,
+            rotary_dim,
+            17,
+            1_000_000.0,
+            &mut output,
+            Some(&mut stream),
+        )
+        .unwrap();
+        let mut output_bytes = vec![0_u8; input_values.len() * std::mem::size_of::<f32>()];
+        output
+            .copy_to_host(0, &mut output_bytes, Some(&mut stream))
+            .unwrap();
+        stream.synchronize().unwrap();
+        let actual = le_bytes_to_f32s(&output_bytes);
+        // HIPRTC's powf/cosf differs slightly from the serial Rust reference;
+        // the exact pass-through boundary checks below remain bit-exact.
+        assert_f32s_close(&actual, &expected, 1e-4);
+        for head in 0..heads {
+            let base = head * head_dim;
+            assert_eq!(
+                &actual[base + rotary_dim / 2..base + head_dim / 2],
+                &input_values[base + rotary_dim / 2..base + head_dim / 2],
+            );
+            assert_eq!(
+                &actual[base + head_dim / 2 + rotary_dim / 2..base + head_dim],
+                &input_values[base + head_dim / 2 + rotary_dim / 2..base + head_dim],
+            );
+        }
+    }

@@ -70,3 +70,27 @@ RMSNorm -> residual-add` sequence covered 3,045 real captured residuals /
 multi-step cases both passed and retained `[9079, 236761, 108, 818]` and
 `[528, 496, 1902, 1298]`, respectively. The validation evidence is
 `benchmarks/results/2026-07-27/gemma4-activation-device-v0.1/raw/dh/mlp-norm-residual-validation-v3.json`.
+
+## Step 2.5: Gemma proportional RoPE validation gate
+
+`ullm_runtime_gemma_proportional_rope_f32` remains validation-only and is not
+wired into Gemma execution. The final R9700 (`gfx1201`) validation exercised
+906 real normalized Q/K activations (2,646,528 values) against the unchanged
+host `apply_gemma4_rope_in_place`, with
+`ULLM_REQUIRE_HIP_GEMMA_PROPORTIONAL_ROPE_KERNEL=1` set so HIPRTC staging
+cannot satisfy the run. It measured max abs `0.000003814697265625` and max
+rel `0.02024332620203495` (near-zero reference). The rotated channels have
+the same maxima; both unrotated spans, including their channels adjacent to
+the active partial pairs, are bit-exact pass-through (`0.0` abs / `0.0` rel).
+
+The frequency exponent is `2 * pair / head_dim`, never `rotary_dim`; the
+generic Qwen kernel was not changed. The direct full-geometry HIP regression
+also covers 8 heads × 512 channels with 128 rotary channels and asserts both
+unrotated spans bit-exact. The first attempted real run exposed that Cargo did
+not track the included RoPE source fragment, so it could link a stale native
+runtime object. `ullm-runtime-sys/build.rs` now tracks both RoPE source
+fragments; a clean native rebuild was required before the successful rerun.
+
+The two full multi-step cases continued to match their expected cached and
+full-reprefill sequences. Evidence:
+`benchmarks/results/2026-07-27/gemma4-activation-device-v0.1/raw/dj/gemma-proportional-rope-real-activation-validation-v4.json`.

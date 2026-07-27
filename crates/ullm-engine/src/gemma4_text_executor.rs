@@ -156,6 +156,14 @@ pub struct Gemma4ResidentRopeValidation {
     pub elements: u64,
     pub max_abs: f32,
     pub max_rel: f32,
+    /// Aggregate error within the channels that are actually rotated.
+    pub rotated_max_abs: f32,
+    pub rotated_max_rel: f32,
+    /// Aggregate error in the two unrotated channel spans.  This must be zero:
+    /// the proportional RoPE kernel copies these values, including the two
+    /// channels immediately adjacent to each active partial-pair span.
+    pub unrotated_max_abs: f32,
+    pub unrotated_max_rel: f32,
 }
 
 /// Byte-accounted resident-text execution plan for the inspected checkpoint.
@@ -1641,11 +1649,21 @@ impl Bf16MatvecRuntime {
         let actual = decode_f32_le_values(&output_bytes);
         let mut expected = values.to_vec();
         apply_gemma4_rope_in_place(&mut expected, heads, head_dim, rope, position)?;
-        for (actual, expected) in actual.iter().zip(expected.iter()) {
+        let active_pairs = rotary_dim / 2;
+        let half = head_dim / 2;
+        for (index, (actual, expected)) in actual.iter().zip(expected.iter()).enumerate() {
             let abs = (actual - expected).abs();
             let rel = abs / expected.abs().max(f32::MIN_POSITIVE);
             self.rope_validation.max_abs = self.rope_validation.max_abs.max(abs);
             self.rope_validation.max_rel = self.rope_validation.max_rel.max(rel);
+            let channel = index % head_dim;
+            if channel < active_pairs || (half..half + active_pairs).contains(&channel) {
+                self.rope_validation.rotated_max_abs = self.rope_validation.rotated_max_abs.max(abs);
+                self.rope_validation.rotated_max_rel = self.rope_validation.rotated_max_rel.max(rel);
+            } else {
+                self.rope_validation.unrotated_max_abs = self.rope_validation.unrotated_max_abs.max(abs);
+                self.rope_validation.unrotated_max_rel = self.rope_validation.unrotated_max_rel.max(rel);
+            }
         }
         self.rope_validation.calls = self.rope_validation.calls.saturating_add(1);
         self.rope_validation.elements = self.rope_validation.elements.saturating_add(

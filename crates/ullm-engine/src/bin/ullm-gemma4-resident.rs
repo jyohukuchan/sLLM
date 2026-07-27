@@ -284,6 +284,7 @@ fn run(options: Options) -> Result<(), String> {
             "ULLM_REQUIRE_HIP_PAGED_KV_WRITE_KERNEL": env::var("ULLM_REQUIRE_HIP_PAGED_KV_WRITE_KERNEL").ok(),
             "ULLM_REQUIRE_HIP_RMSNORM_KERNEL": env::var("ULLM_REQUIRE_HIP_RMSNORM_KERNEL").ok(),
             "ULLM_REQUIRE_HIP_ADD_KERNEL": env::var("ULLM_REQUIRE_HIP_ADD_KERNEL").ok(),
+            "ULLM_REQUIRE_HIP_GEMMA_PROPORTIONAL_ROPE_KERNEL": env::var("ULLM_REQUIRE_HIP_GEMMA_PROPORTIONAL_ROPE_KERNEL").ok(),
         },
         "preflight": preflight,
         "cooldown": cooldown,
@@ -309,6 +310,15 @@ fn run(options: Options) -> Result<(), String> {
             "elements": rope_validation.elements,
             "max_abs": rope_validation.max_abs,
             "max_rel": rope_validation.max_rel,
+            "rotated_channels": {
+                "max_abs": rope_validation.rotated_max_abs,
+                "max_rel": rope_validation.rotated_max_rel,
+            },
+            "unrotated_channels": {
+                "max_abs": rope_validation.unrotated_max_abs,
+                "max_rel": rope_validation.unrotated_max_rel,
+                "contract": "exact pass-through, including channels on both partial-pair boundaries",
+            },
             "reference": "unchanged host apply_gemma4_rope_in_place on the same real normalized Q/K activations; exponent denominator is head_dim and unrotated tail is copied unchanged",
         },
         "timing": {
