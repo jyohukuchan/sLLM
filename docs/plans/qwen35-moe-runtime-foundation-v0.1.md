@@ -537,3 +537,34 @@ AQ4_0 allocation failure や生成失敗を示す観測ではない。R9700 が�
 inactive、GPU process なし、edge <=45 C を同時に満たした時点で、隔離 release binary により
 9B baseline → 35B 262,144-token F16-KV resident load → 8-token generation → router read-back / VRAM
 telemetry を一つの flock window で実施する。
+
+### 許可済み physical window の結果（2026-07-27 10:22 JST）
+
+CE は明示許可に基づき `ullm-openai.service` を一度だけ停止した。停止前の active manifest は
+`a654d92fe8142fcc0904fe187c96b84c95e0dd18acac61ef25d0cfa6429a08cd`、R9700 edge は 36 C、
+停止後の AMD SMI process list は空であった。`HIP_VISIBLE_DEVICES=1`、uLLM runtime device 1、
+36 個の AQ4 HIP guard と F16 typed-KV の 3 guard を指定し、9B baseline は HIP backend で
+128 token を完走、既知 top-1 token **220**（logit `8.529029846191406`）と一致した。
+
+35B driver は 262,144-token / F16 KV configuration で load を開始したが、VRAM allocation の前に
+`Qwen3.5 MoE full layer 3 does not match the inspected mRoPE/Q-gate/KV contract` で fail-closed した。
+従って 30,858,010,436 B ledger の実 allocation は**未測定**、生成文・40 layer route read-back・
+MoE prefill/decode throughput も**未到達**である。telemetry JSONL の唯一の poll は VRAM fields が
+`null` であり、allocation byte を返していない。これは OOM や ledger 超過を示す測定値ではない。
+
+停止理由を source と照合すると、`resident_rope_from_qwen35()` は mRoPE descriptor に
+`rotary_dim: None` / `partial_rotary_factor: Some(0.25)` を保持する一方、MoE runtime は full layer に
+`rotary_dim == Some(64)` を要求している。この相互に満たせない contract が layer 3 で検出された。
+この window は一回とする運用制約に従い、service を再停止して修正版を試すことはしない。
+
+service は同じ active manifest のまま一度だけ start し、`/readyz`、`/v1/models`、実際の
+completion `service restored` を OpenWebUI bridge から確認した。復旧後は
+`ActiveState=active`、`NRestarts=0`、manifest SHA-256 は停止前後で同一である。gateway completion の
+短文 timings（prefill `70.942962 tok/s`、decode `122.082175 tok/s`）は recovery response の値であり、
+既知 baseline（prefill `975.421658`、decode `77.836412 tok/s`）と workload が異なるため性能回帰の
+判定には使わない。9B の functional baseline は top-1 一致で確認済みだが、同条件の throughput
+baseline はこの window では未取得であり、回帰は**未確認**である。
+
+完全な証跡は
+`benchmarks/results/2026-07-27/qwen35-moe-physical-run/` に保存した。MoE を本番 manifest へ昇格
+していない。

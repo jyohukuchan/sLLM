@@ -1,0 +1,34 @@
+{
+  "schema": "ullm.qwen35_moe_physical_run.v0.1",
+  "status": "blocked_before_moe_allocation",
+  "service_window_count": 1,
+  "moe": {
+    "format_id": "AQ4_0",
+    "model": "Qwen3.5-35B-A3B",
+    "context_length": 262144,
+    "kv_cache_dtype": "f16",
+    "ledger_bytes": 30858010436,
+    "vram_allocation": "not_reached",
+    "generation": "not_reached",
+    "router_verification": "not_reached",
+    "prefill_tokens_per_second": null,
+    "decode_tokens_per_second": null,
+    "failure": "Qwen3.5 MoE full layer 3 does not match the inspected mRoPE/Q-gate/KV contract"
+  },
+  "dense_aq4_0_baseline": {
+    "backend": "hip",
+    "top1_token_id": 220,
+    "expected_top1_token_id": 220,
+    "functional_result": "passed",
+    "throughput_regression": "not_measured"
+  },
+  "service_restore": {
+    "manifest_sha256": "a654d92fe8142fcc0904fe187c96b84c95e0dd18acac61ef25d0cfa6429a08cd",
+    "active_state": "active",
+    "nrestarts": 0,
+    "completion": "service restored",
+    "completion_prefill_tokens_per_second": 70.94296178777967,
+    "completion_decode_tokens_per_second": 122.08217497696307,
+    "throughput_comparison_to_reference": "not_comparable_workload"
+  }
+}
