@@ -1,0 +1,19 @@
+2026-07-27T05:36:50+00:00
+== sglang executables ==
+/usr/bin/python3
+== packages ==
+sglang: NOT_INSTALLED
+torch: NOT_INSTALLED
+transformers: NOT_INSTALLED
+llama_cpp: NOT_INSTALLED
+== disk ==
+Filesystem      Size  Used Avail Use% Mounted on
+/dev/vda2        12T   41G   12T   1% /
+== pip cache ==
+Package index page cache location (pip v23.3+): /home/hotaisle/.cache/pip/http-v2
+Package index page cache location (older pips): /home/hotaisle/.cache/pip/http
+Package index page cache size: 0 bytes
+Number of HTTP files: 0
+Locally built wheels location: /home/hotaisle/.cache/pip/wheels
+Locally built wheels size: 0 bytes
+Number of locally built wheels: 0

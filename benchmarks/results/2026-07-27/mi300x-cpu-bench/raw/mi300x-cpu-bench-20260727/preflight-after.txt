@@ -1,0 +1,14 @@
+2026-07-27T05:36:34+00:00
+ 05:36:34 up  5:22,  2 users,  load average: 1.59, 1.07, 0.64
+    PID    PPID %CPU %MEM COMMAND         COMMAND
+  25017    1480  2.1  0.0 sshd            sshd: hotaisle [priv]
+      1       0  0.1  0.0 systemd         /sbin/init
+   1127       2  0.1  0.0 kworker/0:3-eve [kworker/0:3-events]
+   1065       1  0.0  0.0 containerd      /usr/bin/containerd
+   6841       2  0.0  0.0 kworker/u26:1-e [kworker/u26:1-events_unbound]
+  16412       2  0.0  0.0 kworker/u26:2-e [kworker/u26:2-events_power_efficient]
+    512       1  0.0  0.0 systemd-journal /usr/lib/systemd/systemd-journald
+  22069       2  0.0  0.0 kworker/u26:4-e [kworker/u26:4-events_power_efficient]
+   1199       1  0.0  0.0 dockerd         /usr/bin/dockerd -H fd:// --containerd=/run/containerd/containerd.sock
+   5211       1  0.0  0.0 fwupd           /usr/libexec/fwupd/fwupd
+   1480       1  0.0  0.0 sshd            sshd: /usr/sbin/sshd -D [listener] 0 of 10-100 startups

@@ -1,0 +1,2 @@
+071f036318c5e151405e352e0e038c44ef8b9a4e243daac8884def278d5c2fbc  tools/cpu-microbench-sapphirerapids.cpp
+5127db927b11c920fd2cec63c1ad2a260da8a562c7fb7895d8ab784357e2d829  benchmarks/results/2026-07-27/mi300x-cpu-bench/bin/cpu-microbench-sapphirerapids
