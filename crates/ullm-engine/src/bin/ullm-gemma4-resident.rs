@@ -18,7 +18,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 use ullm_engine::gemma4_text_executor::{
     Gemma4ResidentHostProfile, Gemma4ResidentKvCacheSnapshot, Gemma4ResidentLogicalBytes,
-    Gemma4TextExecutor,
+    Gemma4ResidentPrimitiveHostProfile, Gemma4TextExecutor,
 };
 
 const R9700_AMD_SMI_INDEX: &str = "2";
@@ -858,6 +858,27 @@ fn host_profile_json(profile: Gemma4ResidentHostProfile) -> Value {
             "attention": profile.attention_calls,
             "kv_write": profile.kv_write_calls,
         },
+        "by_primitive": {
+            "matvec": primitive_host_profile_json(profile.matvec),
+            "bf16_row": primitive_host_profile_json(profile.bf16_row),
+            "attention": primitive_host_profile_json(profile.attention),
+            "kv_write": primitive_host_profile_json(profile.kv_write),
+        },
+    })
+}
+
+fn primitive_host_profile_json(profile: Gemma4ResidentPrimitiveHostProfile) -> Value {
+    json!({
+        "primitive_ns": profile.primitive_ns,
+        "input_encode_ns": profile.input_encode_ns,
+        "output_allocation_ns": profile.output_allocation_ns,
+        "h2d_submit_ns": profile.h2d_submit_ns,
+        "kernel_submit_ns": profile.kernel_submit_ns,
+        "d2h_submit_ns": profile.d2h_submit_ns,
+        "stream_synchronize_ns": profile.stream_synchronize_ns,
+        "output_decode_validate_ns": profile.output_decode_validate_ns,
+        "kv_table_host_ns": profile.kv_table_host_ns,
+        "calls": profile.calls,
     })
 }
 

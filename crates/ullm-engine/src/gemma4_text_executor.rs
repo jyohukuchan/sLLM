@@ -221,6 +221,52 @@ pub struct Gemma4ResidentLogicalBytes {
 /// a token forward pass not spent in one of those primitive calls. This is a
 /// diagnostic counter, not a throughput clock.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Gemma4ResidentPrimitiveHostProfile {
+    pub primitive_ns: u64,
+    pub input_encode_ns: u64,
+    pub output_allocation_ns: u64,
+    pub h2d_submit_ns: u64,
+    pub kernel_submit_ns: u64,
+    pub d2h_submit_ns: u64,
+    pub stream_synchronize_ns: u64,
+    pub output_decode_validate_ns: u64,
+    pub kv_table_host_ns: u64,
+    pub calls: u64,
+}
+
+impl Gemma4ResidentPrimitiveHostProfile {
+    fn record(
+        &mut self,
+        primitive_ns: u64,
+        input_encode_ns: u64,
+        output_allocation_ns: u64,
+        h2d_submit_ns: u64,
+        kernel_submit_ns: u64,
+        d2h_submit_ns: u64,
+        stream_synchronize_ns: u64,
+        output_decode_validate_ns: u64,
+        kv_table_host_ns: u64,
+    ) {
+        self.primitive_ns = self.primitive_ns.saturating_add(primitive_ns);
+        self.input_encode_ns = self.input_encode_ns.saturating_add(input_encode_ns);
+        self.output_allocation_ns = self
+            .output_allocation_ns
+            .saturating_add(output_allocation_ns);
+        self.h2d_submit_ns = self.h2d_submit_ns.saturating_add(h2d_submit_ns);
+        self.kernel_submit_ns = self.kernel_submit_ns.saturating_add(kernel_submit_ns);
+        self.d2h_submit_ns = self.d2h_submit_ns.saturating_add(d2h_submit_ns);
+        self.stream_synchronize_ns = self
+            .stream_synchronize_ns
+            .saturating_add(stream_synchronize_ns);
+        self.output_decode_validate_ns = self
+            .output_decode_validate_ns
+            .saturating_add(output_decode_validate_ns);
+        self.kv_table_host_ns = self.kv_table_host_ns.saturating_add(kv_table_host_ns);
+        self.calls = self.calls.saturating_add(1);
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Gemma4ResidentHostProfile {
     pub token_forward_ns: u64,
     pub primitive_ns: u64,
@@ -239,6 +285,13 @@ pub struct Gemma4ResidentHostProfile {
     pub row_calls: u64,
     pub attention_calls: u64,
     pub kv_write_calls: u64,
+    /// Per-operation decomposition of the aggregate fields above.  This is
+    /// deliberately separate so old consumers of the aggregate contract stay
+    /// valid while the port order is measured from actual D2H/sync costs.
+    pub matvec: Gemma4ResidentPrimitiveHostProfile,
+    pub bf16_row: Gemma4ResidentPrimitiveHostProfile,
+    pub attention: Gemma4ResidentPrimitiveHostProfile,
+    pub kv_write: Gemma4ResidentPrimitiveHostProfile,
 }
 
 /// Diagnostic-only result from re-enabling the physical K/V projections of
@@ -1336,6 +1389,7 @@ impl Bf16MatvecRuntime {
                 "Gemma4 resident BF16 matvec logical byte count overflows".to_string()
             })?;
         self.account_resident_weight_read(matrix_bytes, true)?;
+        let primitive_ns = elapsed_ns(operation_started);
         let profile = &mut self.resident_host_profile;
         profile.input_encode_ns = profile.input_encode_ns.saturating_add(input_encode_ns);
         profile.output_allocation_ns = profile
@@ -1352,8 +1406,19 @@ impl Bf16MatvecRuntime {
             .saturating_add(output_decode_validate_ns);
         profile.primitive_ns = profile
             .primitive_ns
-            .saturating_add(elapsed_ns(operation_started));
+            .saturating_add(primitive_ns);
         profile.matvec_calls = profile.matvec_calls.saturating_add(1);
+        profile.matvec.record(
+            primitive_ns,
+            input_encode_ns,
+            output_allocation_ns,
+            h2d_submit_ns,
+            kernel_submit_ns,
+            d2h_submit_ns,
+            stream_synchronize_ns,
+            output_decode_validate_ns,
+            0,
+        );
         Ok(output)
     }
 
@@ -1410,6 +1475,7 @@ impl Bf16MatvecRuntime {
             .checked_mul(std::mem::size_of::<u16>())
             .ok_or_else(|| "Gemma4 resident BF16 row logical byte count overflows".to_string())?;
         self.account_resident_weight_read(row_bytes, false)?;
+        let primitive_ns = elapsed_ns(operation_started);
         let profile = &mut self.resident_host_profile;
         profile.output_allocation_ns = profile
             .output_allocation_ns
@@ -1424,8 +1490,19 @@ impl Bf16MatvecRuntime {
             .saturating_add(output_decode_validate_ns);
         profile.primitive_ns = profile
             .primitive_ns
-            .saturating_add(elapsed_ns(operation_started));
+            .saturating_add(primitive_ns);
         profile.row_calls = profile.row_calls.saturating_add(1);
+        profile.bf16_row.record(
+            primitive_ns,
+            0,
+            output_allocation_ns,
+            0,
+            kernel_submit_ns,
+            d2h_submit_ns,
+            stream_synchronize_ns,
+            output_decode_validate_ns,
+            0,
+        );
         Ok(output)
     }
 
@@ -1902,6 +1979,7 @@ impl Bf16MatvecRuntime {
             .and_then(|elements| elements.checked_mul(std::mem::size_of::<f32>()))
             .ok_or_else(|| "Gemma4 resident KV write logical byte count overflows".to_string())?;
         self.account_device_kv(0, write_bytes, false)?;
+        let primitive_ns = elapsed_ns(operation_started);
         let profile = &mut self.resident_host_profile;
         profile.input_encode_ns = profile.input_encode_ns.saturating_add(input_encode_ns);
         profile.h2d_submit_ns = profile.h2d_submit_ns.saturating_add(h2d_submit_ns);
@@ -1909,8 +1987,19 @@ impl Bf16MatvecRuntime {
         profile.kv_table_host_ns = profile.kv_table_host_ns.saturating_add(kv_table_host_ns);
         profile.primitive_ns = profile
             .primitive_ns
-            .saturating_add(elapsed_ns(operation_started));
+            .saturating_add(primitive_ns);
         profile.kv_write_calls = profile.kv_write_calls.saturating_add(1);
+        profile.kv_write.record(
+            primitive_ns,
+            input_encode_ns,
+            0,
+            h2d_submit_ns,
+            kernel_submit_ns,
+            0,
+            0,
+            0,
+            kv_table_host_ns,
+        );
         Ok(())
     }
 
@@ -2018,6 +2107,7 @@ impl Bf16MatvecRuntime {
             .and_then(|elements| elements.checked_mul(std::mem::size_of::<f32>()))
             .ok_or_else(|| "Gemma4 resident KV read logical byte count overflows".to_string())?;
         self.account_device_kv(read_bytes, 0, true)?;
+        let primitive_ns = elapsed_ns(operation_started);
         let profile = &mut self.resident_host_profile;
         profile.input_encode_ns = profile.input_encode_ns.saturating_add(input_encode_ns);
         profile.output_allocation_ns = profile
@@ -2034,8 +2124,19 @@ impl Bf16MatvecRuntime {
             .saturating_add(output_decode_validate_ns);
         profile.primitive_ns = profile
             .primitive_ns
-            .saturating_add(elapsed_ns(operation_started));
+            .saturating_add(primitive_ns);
         profile.attention_calls = profile.attention_calls.saturating_add(1);
+        profile.attention.record(
+            primitive_ns,
+            input_encode_ns,
+            output_allocation_ns,
+            h2d_submit_ns,
+            kernel_submit_ns,
+            d2h_submit_ns,
+            stream_synchronize_ns,
+            output_decode_validate_ns,
+            0,
+        );
         Ok(output)
     }
 }
