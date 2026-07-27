@@ -38,3 +38,35 @@ host-visible.  Absorbing the next boundary requires device RMSNorm plus its
 BF16 gamma conversion and device residual/add workspaces; attention requires
 device Q/K/V normalization and RoPE before its device-resident attention
 output can feed the next projection.
+
+## Step 2: MLP-adjacent direct-gamma norms and residual
+
+The region now begins at the host attention residual and ends only after the
+MLP residual:
+
+```text
+host attention residual -> direct-BF16 pre-FF RMSNorm -> dense MLP
+                        -> direct-BF16 post-FF RMSNorm -> residual add
+                        -> host MLP residual
+```
+
+The two Gemma gamma vectors stay in their resident checkpoint BF16 buffers.
+Each is converted by the existing device BF16-row kernel into a persistent F32
+workspace for the existing device RMSNorm kernel; no `+1` transform is
+applied. The existing device add kernel writes the final residual. This removes
+280 host-visible BF16-row D2H/synchronize boundaries per four-token decode
+(1,056 -> 776) while preserving the 688 remaining host-visible matvec calls.
+No runtime translation unit changed in this step.
+
+Three R9700-only repeats measured 21.505 tok/s decode and 24.490 tok/s
+prefill, or 15.32% of the 140.341 tok/s decode roofline (+5.01% decode and
++3.73% prefill versus step 1). The raw evidence is
+`benchmarks/results/2026-07-27/gemma4-activation-device-v0.1/raw/dh/mlp-norm-residual-benchmark-v3.json`.
+
+Validation against the unchanged host `pre-FF RMSNorm -> MLP -> post-FF
+RMSNorm -> residual-add` sequence covered 3,045 real captured residuals /
+4,677,120 output elements: max abs `0.00042724609375`, max rel
+`0.1631205677986145` (near-zero maximum). The full cached-versus-reprefill
+multi-step cases both passed and retained `[9079, 236761, 108, 818]` and
+`[528, 496, 1902, 1298]`, respectively. The validation evidence is
+`benchmarks/results/2026-07-27/gemma4-activation-device-v0.1/raw/dh/mlp-norm-residual-validation-v3.json`.

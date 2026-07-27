@@ -9,8 +9,11 @@ decode-attention investigation on the R9700 (`gfx1201`).
 # HIP device ordinal 1 maps to the sole gfx1201 R9700; physical amd-smi index 2.
 HIP_VISIBLE_DEVICES=1 \
 ULLM_REQUIRE_HIP_BF16_MATVEC_KERNEL=1 \
+ULLM_REQUIRE_HIP_BF16_ROW_KERNEL=1 \
 ULLM_REQUIRE_HIP_PAGED_DECODE_ATTN_KERNEL=1 \
 ULLM_REQUIRE_HIP_PAGED_KV_WRITE_KERNEL=1 \
+ULLM_REQUIRE_HIP_RMSNORM_KERNEL=1 \
+ULLM_REQUIRE_HIP_ADD_KERNEL=1 \
 target/release/ullm-gemma4-resident \
   --model-dir /home/homelab1/datapool/ai_models/safetensors/gemma-4-E2B \
   --output benchmarks/results/2026-07-27/gemma4-decode-attention-dc/baseline-resident.json \

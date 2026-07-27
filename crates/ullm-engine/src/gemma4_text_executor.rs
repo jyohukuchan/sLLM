@@ -29,8 +29,9 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 use ullm_runtime_sys::{
-    DeviceInfo, RuntimeBuffer, RuntimeContext, RuntimeStream, bf16_row_f32, device_count,
-    device_info, gelu_tanh_mul_f32, matvec_bf16_f32, paged_decode_attn_f32, paged_kv_write_f32,
+    DeviceInfo, RuntimeBuffer, RuntimeContext, RuntimeStream, add_f32, bf16_row_f32,
+    device_count, device_info, gelu_tanh_mul_f32, matvec_bf16_f32, paged_decode_attn_f32,
+    paged_kv_write_f32, rmsnorm_f32,
 };
 
 pub const GEMMA4_TEXT_MODEL_FILE: &str = "model.safetensors";
@@ -44,6 +45,11 @@ pub const GEMMA4_TEXT_PER_LAYER_PROJECTION_NORM: &str =
     "model.language_model.per_layer_projection_norm.weight";
 pub const GEMMA4_TEXT_FINAL_NORM: &str = "model.language_model.norm.weight";
 pub const GEMMA4_TEXT_REQUIRED_HIP_KERNEL_ENV: &str = "ULLM_REQUIRE_HIP_BF16_MATVEC_KERNEL";
+pub const GEMMA4_TEXT_REQUIRED_HIP_BF16_ROW_KERNEL_ENV: &str =
+    "ULLM_REQUIRE_HIP_BF16_ROW_KERNEL";
+pub const GEMMA4_TEXT_REQUIRED_HIP_RMSNORM_KERNEL_ENV: &str =
+    "ULLM_REQUIRE_HIP_RMSNORM_KERNEL";
+pub const GEMMA4_TEXT_REQUIRED_HIP_ADD_KERNEL_ENV: &str = "ULLM_REQUIRE_HIP_ADD_KERNEL";
 pub const GEMMA4_TEXT_REQUIRED_HIP_PAGED_DECODE_ENV: &str =
     "ULLM_REQUIRE_HIP_PAGED_DECODE_ATTN_KERNEL";
 pub const GEMMA4_TEXT_REQUIRED_HIP_PAGED_KV_WRITE_ENV: &str =
@@ -1087,6 +1093,10 @@ struct Bf16MatvecRuntime {
     mlp_gate: Option<RuntimeBuffer>,
     mlp_up: Option<RuntimeBuffer>,
     mlp_activated: Option<RuntimeBuffer>,
+    mlp_pre_norm_weight: Option<RuntimeBuffer>,
+    mlp_pre_normed: Option<RuntimeBuffer>,
+    mlp_post_norm_weight: Option<RuntimeBuffer>,
+    mlp_post_normed: Option<RuntimeBuffer>,
     kv_key_input: Option<RuntimeBuffer>,
     kv_value_input: Option<RuntimeBuffer>,
     attention_query: Option<RuntimeBuffer>,
@@ -1098,14 +1108,17 @@ struct Bf16MatvecRuntime {
 
 impl Bf16MatvecRuntime {
     fn create() -> Result<Self, String> {
-        if env::var(GEMMA4_TEXT_REQUIRED_HIP_KERNEL_ENV)
-            .ok()
-            .as_deref()
-            != Some("1")
-        {
-            return Err(format!(
-                "Gemma4TextExecutor requires {GEMMA4_TEXT_REQUIRED_HIP_KERNEL_ENV}=1 to forbid host-staging fallback"
-            ));
+        for required in [
+            GEMMA4_TEXT_REQUIRED_HIP_KERNEL_ENV,
+            GEMMA4_TEXT_REQUIRED_HIP_BF16_ROW_KERNEL_ENV,
+            GEMMA4_TEXT_REQUIRED_HIP_RMSNORM_KERNEL_ENV,
+            GEMMA4_TEXT_REQUIRED_HIP_ADD_KERNEL_ENV,
+        ] {
+            if env::var(required).ok().as_deref() != Some("1") {
+                return Err(format!(
+                    "Gemma4TextExecutor requires {required}=1 to forbid host-staging fallback"
+                ));
+            }
         }
         let count = device_count()?;
         let mut candidates = Vec::new();
@@ -1151,6 +1164,10 @@ impl Bf16MatvecRuntime {
             mlp_gate: None,
             mlp_up: None,
             mlp_activated: None,
+            mlp_pre_norm_weight: None,
+            mlp_pre_normed: None,
+            mlp_post_norm_weight: None,
+            mlp_post_normed: None,
             kv_key_input: None,
             kv_value_input: None,
             attention_query: None,
@@ -1173,6 +1190,10 @@ impl Bf16MatvecRuntime {
             &self.mlp_gate,
             &self.mlp_up,
             &self.mlp_activated,
+            &self.mlp_pre_norm_weight,
+            &self.mlp_pre_normed,
+            &self.mlp_post_norm_weight,
+            &self.mlp_post_normed,
             &self.kv_key_input,
             &self.kv_value_input,
             &self.attention_query,
@@ -1607,6 +1628,265 @@ impl Bf16MatvecRuntime {
         self.account_resident_weight_read(matrix_bytes(intermediate, hidden)?, true)?;
         self.account_resident_weight_read(matrix_bytes(intermediate, hidden)?, true)?;
         self.account_resident_weight_read(matrix_bytes(hidden, intermediate)?, true)?;
+        Ok(output)
+    }
+
+    /// Extends the dense MLP region across both adjacent host boundaries:
+    ///
+    /// ```text
+    /// host attention residual -> direct-BF16 pre-FF RMSNorm -> dense MLP
+    ///     -> direct-BF16 post-FF RMSNorm -> residual add -> host MLP residual
+    /// ```
+    ///
+    /// The norm weights remain in their checkpoint BF16 buffers.  `bf16_row_f32`
+    /// converts each direct Gemma gamma into a device workspace; in particular,
+    /// this deliberately does not apply Qwen's `weight + 1` convention.
+    fn dense_mlp_norm_residual_resident(
+        &mut self,
+        gate_matrix: &RuntimeBuffer,
+        up_matrix: &RuntimeBuffer,
+        down_matrix: &RuntimeBuffer,
+        pre_feedforward_weight: &RuntimeBuffer,
+        post_feedforward_weight: &RuntimeBuffer,
+        hidden: usize,
+        intermediate: usize,
+        epsilon: f32,
+        attention_residual: &[f32],
+    ) -> Result<Vec<f32>, String> {
+        if attention_residual.len() != hidden {
+            return Err(format!(
+                "Gemma4 dense MLP residual width mismatch: expected {hidden}, got {}",
+                attention_residual.len()
+            ));
+        }
+        let input_bytes = encode_f32_to_bytes(attention_residual);
+        let hidden_bytes = hidden
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| "Gemma4 dense MLP hidden bytes overflow".to_string())?;
+        let intermediate_bytes = intermediate
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| "Gemma4 dense MLP intermediate bytes overflow".to_string())?;
+        Self::ensure_buffer(
+            &mut self.context,
+            &mut self.resident_input,
+            input_bytes.len(),
+            "dense MLP residual input",
+            &mut self.resident_host_profile,
+        )?;
+        Self::ensure_buffer(
+            &mut self.context,
+            &mut self.mlp_pre_norm_weight,
+            hidden_bytes,
+            "dense MLP pre-feedforward gamma",
+            &mut self.resident_host_profile,
+        )?;
+        Self::ensure_buffer(
+            &mut self.context,
+            &mut self.mlp_pre_normed,
+            hidden_bytes,
+            "dense MLP pre-feedforward output",
+            &mut self.resident_host_profile,
+        )?;
+        Self::ensure_buffer(
+            &mut self.context,
+            &mut self.mlp_gate,
+            intermediate_bytes,
+            "dense MLP gate",
+            &mut self.resident_host_profile,
+        )?;
+        Self::ensure_buffer(
+            &mut self.context,
+            &mut self.mlp_up,
+            intermediate_bytes,
+            "dense MLP up",
+            &mut self.resident_host_profile,
+        )?;
+        Self::ensure_buffer(
+            &mut self.context,
+            &mut self.mlp_activated,
+            intermediate_bytes,
+            "dense MLP activated",
+            &mut self.resident_host_profile,
+        )?;
+        Self::ensure_buffer(
+            &mut self.context,
+            &mut self.resident_output,
+            hidden_bytes,
+            "dense MLP output",
+            &mut self.resident_host_profile,
+        )?;
+        Self::ensure_buffer(
+            &mut self.context,
+            &mut self.mlp_post_norm_weight,
+            hidden_bytes,
+            "dense MLP post-feedforward gamma",
+            &mut self.resident_host_profile,
+        )?;
+        Self::ensure_buffer(
+            &mut self.context,
+            &mut self.mlp_post_normed,
+            hidden_bytes,
+            "dense MLP post-feedforward output",
+            &mut self.resident_host_profile,
+        )?;
+
+        self.resident_input
+            .as_mut()
+            .expect("dense MLP residual input allocated")
+            .copy_from_host(0, &input_bytes, Some(&mut self.stream))?;
+        bf16_row_f32(
+            pre_feedforward_weight,
+            1,
+            hidden,
+            0,
+            self.mlp_pre_norm_weight
+                .as_mut()
+                .expect("dense MLP pre-feedforward gamma allocated"),
+            Some(&mut self.stream),
+        )?;
+        rmsnorm_f32(
+            self.resident_input
+                .as_ref()
+                .expect("dense MLP residual input allocated"),
+            self.mlp_pre_norm_weight
+                .as_ref()
+                .expect("dense MLP pre-feedforward gamma allocated"),
+            hidden,
+            epsilon,
+            self.mlp_pre_normed
+                .as_mut()
+                .expect("dense MLP pre-feedforward output allocated"),
+            Some(&mut self.stream),
+        )?;
+        matvec_bf16_f32(
+            gate_matrix,
+            self.mlp_pre_normed
+                .as_ref()
+                .expect("dense MLP pre-feedforward output allocated"),
+            intermediate,
+            hidden,
+            self.mlp_gate.as_mut().expect("dense MLP gate allocated"),
+            Some(&mut self.stream),
+        )?;
+        matvec_bf16_f32(
+            up_matrix,
+            self.mlp_pre_normed
+                .as_ref()
+                .expect("dense MLP pre-feedforward output allocated"),
+            intermediate,
+            hidden,
+            self.mlp_up.as_mut().expect("dense MLP up allocated"),
+            Some(&mut self.stream),
+        )?;
+        gelu_tanh_mul_f32(
+            self.mlp_gate.as_ref().expect("dense MLP gate allocated"),
+            self.mlp_up.as_ref().expect("dense MLP up allocated"),
+            intermediate,
+            self.mlp_activated
+                .as_mut()
+                .expect("dense MLP activated allocated"),
+            Some(&mut self.stream),
+        )?;
+        matvec_bf16_f32(
+            down_matrix,
+            self.mlp_activated
+                .as_ref()
+                .expect("dense MLP activated allocated"),
+            hidden,
+            intermediate,
+            self.resident_output
+                .as_mut()
+                .expect("dense MLP output allocated"),
+            Some(&mut self.stream),
+        )?;
+        bf16_row_f32(
+            post_feedforward_weight,
+            1,
+            hidden,
+            0,
+            self.mlp_post_norm_weight
+                .as_mut()
+                .expect("dense MLP post-feedforward gamma allocated"),
+            Some(&mut self.stream),
+        )?;
+        rmsnorm_f32(
+            self.resident_output
+                .as_ref()
+                .expect("dense MLP output allocated"),
+            self.mlp_post_norm_weight
+                .as_ref()
+                .expect("dense MLP post-feedforward gamma allocated"),
+            hidden,
+            epsilon,
+            self.mlp_post_normed
+                .as_mut()
+                .expect("dense MLP post-feedforward output allocated"),
+            Some(&mut self.stream),
+        )?;
+        add_f32(
+            self.resident_input
+                .as_ref()
+                .expect("dense MLP residual input allocated"),
+            self.mlp_post_normed
+                .as_ref()
+                .expect("dense MLP post-feedforward output allocated"),
+            hidden,
+            self.mlp_pre_normed
+                .as_mut()
+                .expect("dense MLP pre-feedforward output allocated"),
+            Some(&mut self.stream),
+        )?;
+        let mut host_output = vec![0_u8; hidden_bytes];
+        self.mlp_pre_normed
+            .as_mut()
+            .expect("dense MLP residual output allocated")
+            .copy_to_host(0, &mut host_output, Some(&mut self.stream))?;
+        self.stream.synchronize()?;
+        let output = decode_f32_le_values(&host_output);
+        if output.len() != hidden || output.iter().any(|value| !value.is_finite()) {
+            return Err(
+                "Gemma4 dense MLP norm-residual region returned non-finite or malformed F32 output"
+                    .into(),
+            );
+        }
+
+        if env::var(GEMMA4_VALIDATE_DEVICE_MLP_ENV).ok().as_deref() == Some("1") {
+            let pre_weight = self.bf16_row_resident(pre_feedforward_weight, 1, hidden, 0)?;
+            let feedforward_input = rms_norm(attention_residual, Some(&pre_weight), epsilon)?;
+            let gate = self.matvec_resident(gate_matrix, intermediate, hidden, &feedforward_input)?;
+            let up = self.matvec_resident(up_matrix, intermediate, hidden, &feedforward_input)?;
+            let mut activated = gelu_pytorch_tanh(&gate)?;
+            multiply_in_place(&mut activated, &up, "Gemma4 MLP norm-residual validation product")?;
+            let mlp = self.matvec_resident(down_matrix, hidden, intermediate, &activated)?;
+            let post_weight = self.bf16_row_resident(post_feedforward_weight, 1, hidden, 0)?;
+            let post_feedforward = rms_norm(&mlp, Some(&post_weight), epsilon)?;
+            let reference = add_vectors(
+                attention_residual,
+                &post_feedforward,
+                "Gemma4 MLP norm-residual validation add",
+            )?;
+            for (actual, expected) in output.iter().zip(reference.iter()) {
+                let abs = (actual - expected).abs();
+                let rel = abs / expected.abs().max(f32::MIN_POSITIVE);
+                self.mlp_validation.max_abs = self.mlp_validation.max_abs.max(abs);
+                self.mlp_validation.max_rel = self.mlp_validation.max_rel.max(rel);
+            }
+            self.mlp_validation.calls = self.mlp_validation.calls.saturating_add(1);
+            self.mlp_validation.elements = self.mlp_validation.elements.saturating_add(
+                u64::try_from(output.len())
+                    .map_err(|_| "Gemma4 MLP validation elements exceed u64".to_string())?,
+            );
+        }
+        let matrix_bytes = |rows: usize, cols: usize| {
+            rows.checked_mul(cols)
+                .and_then(|elements| elements.checked_mul(std::mem::size_of::<u16>()))
+                .ok_or_else(|| "Gemma4 dense MLP logical byte count overflows".to_string())
+        };
+        self.account_resident_weight_read(matrix_bytes(1, hidden)?, false)?;
+        self.account_resident_weight_read(matrix_bytes(intermediate, hidden)?, true)?;
+        self.account_resident_weight_read(matrix_bytes(intermediate, hidden)?, true)?;
+        self.account_resident_weight_read(matrix_bytes(hidden, intermediate)?, true)?;
+        self.account_resident_weight_read(matrix_bytes(1, hidden)?, false)?;
         Ok(output)
     }
 
@@ -2830,27 +3110,71 @@ impl Gemma4TextExecutor {
             "Gemma4 attention residual",
         )?;
 
-        let residual_mlp = attention_residual.clone();
-        let pre_feedforward_weight = self.read_weight_vector(
-            &layer_tensor(layer_index, "pre_feedforward_layernorm.weight"),
-            hidden,
-        )?;
-        let feedforward_input = rms_norm(
-            &attention_residual,
-            Some(&pre_feedforward_weight),
-            decoder.rms_norm_epsilon,
-        )?;
-        let mlp = self.forward_mlp(layer_index, &feedforward_input)?;
-        let post_feedforward_weight = self.read_weight_vector(
-            &layer_tensor(layer_index, "post_feedforward_layernorm.weight"),
-            hidden,
-        )?;
-        let post_feedforward = rms_norm(
-            &mlp,
-            Some(&post_feedforward_weight),
-            decoder.rms_norm_epsilon,
-        )?;
-        let mlp_residual = add_vectors(&residual_mlp, &post_feedforward, "Gemma4 MLP residual")?;
+        let mlp_residual = if let Gemma4WeightStorage::Resident(weights) = &self.weights {
+            let intermediate = match layer.mlp {
+                ResidentMlpDescriptor::Dense {
+                    intermediate_size, ..
+                } => intermediate_size,
+                ResidentMlpDescriptor::MoE { .. } => {
+                    return Err(format!(
+                        "Gemma4 resident executor cannot execute MoE MLP at layer {layer_index}"
+                    ));
+                }
+            };
+            let gate = weights.tensor(
+                &layer_tensor(layer_index, "mlp.gate_proj.weight"),
+                &[intermediate, hidden],
+            )?;
+            let up = weights.tensor(
+                &layer_tensor(layer_index, "mlp.up_proj.weight"),
+                &[intermediate, hidden],
+            )?;
+            let down = weights.tensor(
+                &layer_tensor(layer_index, "mlp.down_proj.weight"),
+                &[hidden, intermediate],
+            )?;
+            let pre_feedforward_weight = weights.tensor(
+                &layer_tensor(layer_index, "pre_feedforward_layernorm.weight"),
+                &[hidden],
+            )?;
+            let post_feedforward_weight = weights.tensor(
+                &layer_tensor(layer_index, "post_feedforward_layernorm.weight"),
+                &[hidden],
+            )?;
+            self.matvec.dense_mlp_norm_residual_resident(
+                &gate.buffer,
+                &up.buffer,
+                &down.buffer,
+                &pre_feedforward_weight.buffer,
+                &post_feedforward_weight.buffer,
+                hidden,
+                intermediate,
+                decoder.rms_norm_epsilon,
+                &attention_residual,
+            )?
+        } else {
+            let residual_mlp = attention_residual.clone();
+            let pre_feedforward_weight = self.read_weight_vector(
+                &layer_tensor(layer_index, "pre_feedforward_layernorm.weight"),
+                hidden,
+            )?;
+            let feedforward_input = rms_norm(
+                &attention_residual,
+                Some(&pre_feedforward_weight),
+                decoder.rms_norm_epsilon,
+            )?;
+            let mlp = self.forward_mlp(layer_index, &feedforward_input)?;
+            let post_feedforward_weight = self.read_weight_vector(
+                &layer_tensor(layer_index, "post_feedforward_layernorm.weight"),
+                hidden,
+            )?;
+            let post_feedforward = rms_norm(
+                &mlp,
+                Some(&post_feedforward_weight),
+                decoder.rms_norm_epsilon,
+            )?;
+            add_vectors(&residual_mlp, &post_feedforward, "Gemma4 MLP residual")?
+        };
 
         let ple_gate = self.matmul_named(
             &layer_tensor(layer_index, "per_layer_input_gate.weight"),
