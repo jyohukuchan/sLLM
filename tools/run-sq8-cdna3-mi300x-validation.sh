@@ -17,7 +17,7 @@ Options:
   --results-dir /absolute/directory Persistent logs and resume stamps.
   --jobs N                          Cargo build jobs; default: 8.
   --hip-visible-devices TOKEN       One GPU token; default: $HIP_VISIBLE_DEVICES or 0.
-  --stage NAME                      all, preflight, cpu, hiprtc, build, isa, or physical.
+  --stage NAME                      all, preflight, cpu, hiprtc, build, isa, physical, or hw_microbench.
   --allow-network                   Permit Cargo to fetch missing dependencies; default is offline.
   --rehearsal-no-gfx942             Permit offline rehearsal without gfx942; physical remains an expected failure.
   --dry-run                         Validate arguments and print the ordered plan without writing/running.
@@ -27,6 +27,14 @@ Before renting, clone the checked revision and warm its Cargo cache.  The
 default offline mode fails early when that provisioning was skipped, instead of
 spending leased GPU time on downloads.  Re-run the same command after a failure:
 completed stages have a .done stamp and are not repeated.
+
+`hw_microbench` is deliberately a non-P0, opt-in stage. It requires every P0
+stamp including `physical`, so P0 cannot be skipped or weakened. It is the
+first item to cut when lease time is short (after the established profiler /
+occupancy, full-model, model/image, external-engine, timing-sweep, and
+hand-written-A priorities); never cut P0 for it. Set all three
+HW_MB_{MEMORY_PEAK_GBPS,BF16_PEAK_TFLOPS,FP8_PEAK_TFLOPS} values from the
+rental host's recorded official/amd-smi source before running this stage.
 EOF
 }
 
@@ -103,7 +111,7 @@ if [[ $results_dir != /* || ! $jobs =~ ^[1-9][0-9]*$ || $hip_visible_devices == 
   exit 2
 fi
 case "$requested_stage" in
-  all|preflight|cpu|hiprtc|build|isa|physical) ;;
+  all|preflight|cpu|hiprtc|build|isa|physical|hw_microbench) ;;
   *)
     usage
     exit 2
@@ -336,6 +344,27 @@ stage_physical() {
     env -u ULLM_SMOKE_SKIP_B_CONTROL "$smoke_binary"
 }
 
+stage_hw_microbench() {
+  cd -- "$repo_dir"
+  local prerequisite
+  for prerequisite in preflight cpu hiprtc build isa physical; do
+    if [[ ! -f $state_dir/$prerequisite.done ]]; then
+      printf 'hw_microbench requires completed P0 stage %s; it is intentionally non-P0 and cannot run after a P0 failure.\n' \
+        "$prerequisite" >&2
+      return 1
+    fi
+  done
+  : "${HW_MB_MEMORY_PEAK_GBPS:?set from recorded MI300X official/amd-smi source}"
+  : "${HW_MB_BF16_PEAK_TFLOPS:?set from recorded MI300X official source}"
+  : "${HW_MB_FP8_PEAK_TFLOPS:?set from recorded MI300X official source}"
+  HIP_VISIBLE_DEVICES="$hip_visible_devices" \
+    HW_MB_MEMORY_PEAK_GBPS="$HW_MB_MEMORY_PEAK_GBPS" \
+    HW_MB_BF16_PEAK_TFLOPS="$HW_MB_BF16_PEAK_TFLOPS" \
+    HW_MB_FP8_PEAK_TFLOPS="$HW_MB_FP8_PEAK_TFLOPS" \
+    tools/run-hw-microbench-rdna4-cdna3.sh --arch gfx942 \
+      --results-dir "$results_dir/hw-microbench"
+}
+
 run_named_stage() {
   local name=$1
   case "$name" in
@@ -345,6 +374,7 @@ run_named_stage() {
     build) run_step build stage_build ;;
     isa) run_step isa stage_isa ;;
     physical) run_step physical stage_physical ;;
+    hw_microbench) run_step hw_microbench stage_hw_microbench ;;
   esac
 }
 
@@ -356,5 +386,9 @@ if [[ $requested_stage == all ]]; then
   printf 'UNCONFIRMED by this runner: full-model gfx942 integration, runtime occupancy/residency, and hand-written A.\n'
 else
   run_named_stage "$requested_stage"
-  printf 'PASS requested P0 validation stage; logs and resume state: %s\n' "$results_dir"
+  if [[ $requested_stage == hw_microbench ]]; then
+    printf 'PASS optional non-P0 hardware microbenchmark; logs and resume state: %s\n' "$results_dir"
+  else
+    printf 'PASS requested P0 validation stage; logs and resume state: %s\n' "$results_dir"
+  fi
 fi
