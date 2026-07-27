@@ -103,15 +103,22 @@ run_route() {
   [[ "$tile" == direct ]] || e+=(ULLM_EXPERIMENTAL_SQ8_PAGED_DECODE_SPLIT_TILE="$tile" ULLM_EXPERIMENTAL_SQ8_PAGED_DECODE_SPLIT_ALLOW_MULTITILE=1 ULLM_EXPERIMENTAL_PAGED_DECODE_GQA_GROUPED_SPLIT=1)
   env "${e[@]}" "$@"
 }
+if [[ ${ULLM_SKIP_EXISTING_SPEED_BENCHMARKS:-0} != 1 ]]; then
+  for route in direct 20 128; do
+    label=tile$route; [[ $route == direct ]] && label=direct
+    thermal "bench-$label"; event "bench-start-$label"
+    run_route "$route" "$steady" --artifact "$artifact" --package "$package" --output "$out/bench/$label.json" --prompt-tokens 1024 --warmup-steps 4 --measured-steps 16 --repeats 5 >"$out/bench/$label.stdout" 2>"$out/bench/$label.stderr"
+    event "bench-finished-$label"
+  done
+else
+  event bench-skipped-existing-speed-evidence
+fi
 for route in direct 20 128; do
   label=tile$route; [[ $route == direct ]] && label=direct
-  thermal "bench-$label"; event "bench-start-$label"
-  run_route "$route" "$steady" --artifact "$artifact" --package "$package" --output "$out/bench/$label.json" --prompt-tokens 1024 --warmup-steps 4 --measured-steps 16 --repeats 5 >"$out/bench/$label.stdout" 2>"$out/bench/$label.stderr"
-  event "bench-finished-$label"
-done
-for route in direct 20 128; do
-  label=tile$route; [[ $route == direct ]] && label=direct; mkdir -p "$out/numeric/$label"
-  run_route "$route" "$serving" --artifact "$artifact" --package "$package" --prompt-lengths 512 --max-new-tokens 4 --prefill-mode m128-chunk128 --decode-oracle-capture-dir "$out/numeric/$label/oracle" --result-json "$out/numeric/$label/result.json" >"$out/numeric/$label.stdout" 2>"$out/numeric/$label.stderr"
+  # The serving runner owns creation of the capture directory and rejects a
+  # pre-existing target.  Its target is the route directory itself (not an
+  # `oracle` child), so leave numeric/<route> absent until this invocation.
+  run_route "$route" "$serving" --artifact "$artifact" --package "$package" --prompt-lengths 512 --max-new-tokens 4 --prefill-mode m128-chunk128 --decode-oracle-capture-dir "$out/numeric/$label" --result-json "$out/numeric/$label-result.json" >"$out/numeric/$label.stdout" 2>"$out/numeric/$label.stderr"
 done
 python3 - "$out/numeric" "$out/numeric/summary.json" <<'PY'
 import json,math,struct,sys
@@ -120,7 +127,7 @@ root,out=map(Path,sys.argv[1:])
 def items(p):
  with p.open("rb") as f:
   while b:=f.read(1048576): yield from struct.iter_unpack("<f",b)
-def captures(route): return json.loads((root/route/"result.json").read_text())["requests"][0]["decode_oracle_captures"]
+def captures(route): return json.loads((root/f"{route}-result.json").read_text())["requests"][0]["decode_oracle_captures"]
 base=captures("direct"); result={"schema_version":"ullm.sq8_grouped_tile_sweep_numeric.v1","reference_route":"direct","routes":{}}
 for route in ("tile20","tile128"):
  maximum=0.; values=bad=0
@@ -131,6 +138,7 @@ for route in ("tile20","tile128"):
  result["routes"][route]={"split_vs_direct_max_abs":maximum,"compared_f32_values":values,"nonfinite_values":bad}
 out.write_text(json.dumps(result,indent=2,sort_keys=True)+"\n")
 PY
+thermal quality-gateway
 release_lock; event isolated-gateway-start
 env HIP_VISIBLE_DEVICES=1 ULLM_HIP_VISIBLE_DEVICES=1 ULLM_SERVED_MODEL_MANIFEST="$out/quality/manifest-tile128.json" ULLM_GPU_LOCK_FILE="$lock" ULLM_BIND_HOST=127.0.0.1 ULLM_BIND_PORT="$port" "$gateway" >"$out/quality/gateway.stdout" 2>"$out/quality/gateway.stderr" & gateway_pid=$!
 python3 - "$root/tools/lightweight_promotion.py" "$suite" "$out/quality/capture" "$port" <<'PY'
