@@ -7719,6 +7719,4 @@ ullm_status linear_attn_recurrent_f32_hip_staging(
     return ULLM_STATUS_OK;
 }
 
-} // namespace
-
-#include "../ullm_runtime_api.inc"
+#include "../parts/runtime_epilogue.inc"
