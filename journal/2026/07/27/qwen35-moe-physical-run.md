@@ -39,3 +39,38 @@
 - 新しい service window が明示的に許可された時だけ、修正済み release binary で 262,144-token
   F16-KV load、短い generation、全 40 layer の route read-back、VRAM telemetry、同条件 9B
   prefill/decode baseline を同じ一回の window で再実行する。
+
+## 前回の要点
+
+- CE の停止は allocation 前で正しかった。CE は mRoPE/Q-gate/KV を一括した fail-closed
+  message で停止したが、その message だけではどの field が矛盾したかは確定していなかった。
+- 35B-A3B と 9B はいずれも `ForConditionalGeneration` wrapper と vision config を持つため、
+  text-only executor に入る position/mRoPE contract を HF 実装から分けて確認する必要があった。
+
+## 今回の変更点
+
+- Transformers 5.12.1 の `qwen3_5_moe/modeling_qwen3_5_moe.py` を行番号付きで再監査した。
+  text model は position を text/T/H/W の 4 行として作り、T/H/W の 3 行に interleaved mRoPE
+  (`[11,11,10]`) を適用する。text-only input は 3 行が同じ scalar position なので既存 scalar
+  bridge と同値であり、vision/audio/MTP は scope 外のまま fail-closed とする。
+- 直接の停止原因は、descriptor の正しい source semantic
+  `rotary_dim=None + partial_rotary_factor=0.25` を、MoE validator が実行時導出値
+  `Some(64)` と比較していたことだった。`217992c4` は両者を分離した。
+- validator は 35B full attention の `16Q/2KV/256`、Q/K norm、Q output sigmoid gate、own KV、
+  mRoPE section/theta/interleave を fail-closed で確認する。9B dense は mRoPE/Q-gate/linear
+  contract は同じだが `16Q/4KV/256` なので MoE bridge に流用しない。linear recurrent geometry
+  も 35B config に限定して検査した。
+- `cargo test -p ullm-engine qwen35_moe_aq4_runtime --lib` は 3 passed、R9700 feature の release
+  binary build も成功した。`AQ4_0`/`SQ8_0` の本番実装、shared kernel include、active manifest
+  は変更していない。
+- 実機を再試行する直前の read-only preflight では CF の gateway/worker が
+  `/run/ullm/r9700.lock` と R9700 7,120,428,000 B を保持し、CF の `codex exec` も実行中だった。
+  指示どおり停止・lock 取得を行わず、CF の解放後に再確認する。
+
+## 次の行動
+
+- CF/CG が R9700 を解放し、lock owner なし、service の状態、R9700 process、edge <=45 C を再確認
+  できた場合だけ、active manifest SHA-256 を記録して一回の service window を実行する。
+- 262,144-token F16 KV の実 allocation、短い generation の token-to-text decode、全40 layer
+  router raw-BF16 read-back、prefill/decode timing を同一 evidence set に記録し、同 manifest
+  で service を復旧して completion と `NRestarts` を確認する。

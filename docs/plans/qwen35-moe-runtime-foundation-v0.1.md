@@ -568,3 +568,35 @@ baseline はこの window では未取得であり、回帰は**未確認**で�
 完全な証跡は
 `benchmarks/results/2026-07-27/qwen35-moe-physical-run/` に保存した。MoE を本番 manifest へ昇格
 していない。
+
+### CH: HF 契約再監査と mRoPE descriptor 修正（2026-07-27）
+
+CH は Transformers **5.12.1** のローカル実装と、実 checkpoint の
+`config.json` を再読した。`Qwen3_5MoeForConditionalGeneration` という top-level
+architecture は vision を含む conditional wrapper であるが、対象 executor は
+`text_config.model_type=qwen3_5_moe_text` の text decoder に限定する。したがって
+vision/audio/MTP token はこの executor の対象外であり、multimodal 入力を scalar text
+position として黙って実行することはしない。
+
+| 項目 | HF 実装の根拠 | 35B-A3B text config | 9B dense との差分 |
+| --- | --- | --- | --- |
+| position/mRoPE | `modeling_qwen3_5_moe.py:1279-1290` は position を text/T/H/W の 4 行にし、text row を mask に、残る T/H/W の 3 行を RoPE に渡す。`:147-165` は 2-D ids を 3 行に expand し、`:167-182` は section を interleave する。 | `mrope_section=[11,11,10]`, `mrope_interleaved=true`, `partial_rotary_factor=0.25`, theta `10_000_000`; head 256 なので実行 rotary width は 64。text-only では 3 行とも同じ token position なので scalar bridge と同値。 | dense も同じ処理（`modeling_qwen3_5.py:1174-1199`, `:95-184`）と同じ rope config。mRoPE は MoE 固有ではない。 |
+| Q output gate | `modeling_qwen3_5_moe.py:655-690` は Q projection を Q/gate の二つに split し、`:692-717` は Q/K の両方へ RoPE、attention output に `sigmoid(gate)`、その後 O projection。 | q-norm/k-norm 有効、gated Q projection。 | dense も同じ順序・shape（`modeling_qwen3_5.py:657-716`）。 |
+| KV/GQA | `modeling_qwen3_5_moe.py:650-665` は Q=16 heads、KV=2 heads、head dim=256。`:606-640` は `repeat_kv` と attention を定義し、`:695-696` は K/V を cache update する。 | K/V projection rows は各 512、GQA ratio 8、full-attention layer 自身が K/V cache を所有。 | dense は Q=16、KV=4（config; `modeling_qwen3_5.py:652-665`）で ratio 4。これは MoE 固有 loader が密 bridge の KV shape を仮定してはならない理由である。 |
+| hybrid state | `modeling_qwen3_5_moe.py:837-846` と `:1305-1316` は layer type で linear attention と full attention を分ける。 | 40 層、full は 3,7,…,39。linear は key heads 16/value heads 32、各 128 dim、conv width 4、state FP32。 | dense も同じ hybrid 契約（`modeling_qwen3_5.py:756-765`, `:1200-1211`）だが 32 層、full は 3,…,31。 |
+
+停止した CE binary の不一致は multimodal mRoPE を無視したことでも Q-gate/KV 未実装でもなく、
+descriptor が正しく持つ `rotary_dim=None` と `partial_rotary_factor=0.25` に対し、MoE
+validator が導出済みの実行値 `rotary_dim=Some(64)` を descriptor そのものへ誤って要求した
+ことである。`resident_rope_from_qwen35()` が前者を作る根拠は
+`crates/ullm-engine/src/model_config.rs:1627-1641`、HF の width 導出は
+`modeling_qwen3_5_moe.py:132-143` である。
+
+コミット `217992c4` は source semantic contract（mRoPE: `None + 0.25`, interleaved
+`[11,11,10]`）と text-only fused-kernel execution width（64）を分離した。full attention
+は 35B 固有の `16Q/2KV/256` と Q/K norm、Q gate、own KV を、linear attention は実 config
+の recurrent-state geometry を fail-closed で照合する。fixed 64 descriptor、9B の 4 KV
+heads、section/partial-factor/gate/KV の不一致は引き続き拒否する。これは 9B dense path に
+触れない MoE runtime-only 変更であり、`cargo test -p ullm-engine qwen35_moe_aq4_runtime --lib`
+は 3 tests passed、`cargo build --release -p ullm-engine --features rocm-moe-gfx1201 --bin
+ullm-qwen35-moe-aq4-generate` は成功した。
