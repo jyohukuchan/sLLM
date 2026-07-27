@@ -30,8 +30,9 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 use ullm_runtime_sys::{
     DeviceInfo, RuntimeBuffer, RuntimeContext, RuntimeStream, add_f32, bf16_row_f32, device_count,
-    device_info, gelu_tanh_mul_f32, gemma_proportional_rope_f32, matvec_bf16_f32,
-    paged_decode_attn_f32, paged_kv_write_f32, rmsnorm_f32, rope_f32, segmented_rmsnorm_f32,
+    device_info, gelu_tanh_mul_f32, gemma_bf16_matmul_f32, gemma_proportional_rope_f32,
+    matvec_bf16_f32, paged_decode_attn_f32, paged_kv_write_f32, rmsnorm_f32, rope_f32,
+    segmented_rmsnorm_f32,
 };
 
 pub const GEMMA4_TEXT_MODEL_FILE: &str = "model.safetensors";
@@ -59,6 +60,7 @@ pub const GEMMA4_TEXT_REQUIRED_HIP_PAGED_KV_WRITE_ENV: &str =
 const SAFETENSORS_HEADER_LIMIT_BYTES: u64 = 128 * 1024 * 1024;
 const RESIDENT_UPLOAD_CHUNK_BYTES: usize = 16 * 1024 * 1024;
 const GEMMA4_DEVICE_KV_BLOCK_SIZE: usize = 1;
+const GEMMA4_PREFILL_ACTIVATION_CHUNK_TOKENS: usize = 128;
 const R9700_RUNTIME_NAME: &str = "AMD Radeon Graphics";
 const R9700_MEMORY_BYTES_MIN: u64 = 30 * 1024 * 1024 * 1024;
 const R9700_MEMORY_BYTES_MAX: u64 = 34 * 1024 * 1024 * 1024;
@@ -1525,6 +1527,88 @@ impl Bf16MatvecRuntime {
             output_decode_validate_ns,
             0,
         );
+        Ok(output)
+    }
+
+    /// Gemma-only row-major `[M, columns]` BF16-weight projection.  Decode
+    /// never calls this method: it retains its established M=1 matvec route.
+    fn gemma_matmul_resident(
+        &mut self,
+        matrix: &RuntimeBuffer,
+        rows: usize,
+        columns: usize,
+        batch_count: usize,
+        input: &[f32],
+    ) -> Result<Vec<f32>, String> {
+        let expected_input = batch_count
+            .checked_mul(columns)
+            .ok_or_else(|| "Gemma BF16 matmul input element count overflows".to_string())?;
+        if input.len() != expected_input {
+            return Err(format!(
+                "Gemma BF16 matmul input width mismatch: expected {expected_input}, got {}",
+                input.len()
+            ));
+        }
+        let output_elements = batch_count
+            .checked_mul(rows)
+            .ok_or_else(|| "Gemma BF16 matmul output element count overflows".to_string())?;
+        let input_bytes = encode_f32_to_bytes(input);
+        let output_bytes = output_elements
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| "Gemma BF16 matmul output byte count overflows".to_string())?;
+        Self::ensure_buffer(
+            &mut self.context,
+            &mut self.resident_input,
+            input_bytes.len(),
+            "Gemma batched matmul input",
+            &mut self.resident_host_profile,
+        )?;
+        Self::ensure_buffer(
+            &mut self.context,
+            &mut self.resident_output,
+            output_bytes,
+            "Gemma batched matmul output",
+            &mut self.resident_host_profile,
+        )?;
+        self.resident_input
+            .as_mut()
+            .expect("Gemma batched matmul input allocated")
+            .copy_from_host(0, &input_bytes, Some(&mut self.stream))?;
+        gemma_bf16_matmul_f32(
+            matrix,
+            self.resident_input
+                .as_ref()
+                .expect("Gemma batched matmul input allocated"),
+            rows,
+            columns,
+            batch_count,
+            self.resident_output
+                .as_mut()
+                .expect("Gemma batched matmul output allocated"),
+            Some(&mut self.stream),
+        )?;
+        let mut host_output = vec![0_u8; output_bytes];
+        self.resident_output
+            .as_mut()
+            .expect("Gemma batched matmul output allocated")
+            .copy_to_host(0, &mut host_output, Some(&mut self.stream))?;
+        self.stream.synchronize()?;
+        let output = decode_f32_le_values(&host_output);
+        if output.len() != output_elements || output.iter().any(|value| !value.is_finite()) {
+            return Err(
+                "Gemma BF16 batched matmul returned non-finite or malformed F32 output".into(),
+            );
+        }
+        let matrix_bytes = rows
+            .checked_mul(columns)
+            .and_then(|elements| elements.checked_mul(std::mem::size_of::<u16>()))
+            .ok_or_else(|| "Gemma BF16 matmul logical byte count overflows".to_string())?;
+        self.account_resident_weight_read(
+            matrix_bytes.checked_mul(batch_count).ok_or_else(|| {
+                "Gemma BF16 matmul aggregate logical byte count overflows".to_string()
+            })?,
+            true,
+        )?;
         Ok(output)
     }
 
@@ -3720,6 +3804,12 @@ impl Gemma4TextExecutor {
     /// to preserve a simple explicit KV cache, but returned rows are laid out
     /// exactly as `[batch=1, tokens, width]` for the trace writer.
     pub fn execute_step(&mut self, input_token_ids: &[u32]) -> Result<Gemma4TextStepTrace, String> {
+        // This first prefill activation increment only batches the PLE model
+        // projection.  It is deliberately unavailable to decode so the M=1
+        // resident route remains exactly as it was before this change.
+        if input_token_ids.len() > 1 && matches!(self.weights, Gemma4WeightStorage::Resident(_)) {
+            return self.execute_prefill_with_batched_ple(input_token_ids);
+        }
         let token_started = Instant::now();
         let primitive_before = self.matvec.resident_host_profile().primitive_ns;
         if input_token_ids.is_empty() {
@@ -3795,6 +3885,238 @@ impl Gemma4TextExecutor {
             .executor_other_ns
             .saturating_add(token_forward_ns.saturating_sub(primitive_ns));
         Ok(trace)
+    }
+
+    fn execute_prefill_with_batched_ple(
+        &mut self,
+        input_token_ids: &[u32],
+    ) -> Result<Gemma4TextStepTrace, String> {
+        let token_started = Instant::now();
+        let primitive_before = self.matvec.resident_host_profile().primitive_ns;
+        if input_token_ids.is_empty() {
+            return Err("Gemma4TextExecutor input token list must be nonempty".into());
+        }
+        let next_position = self
+            .position
+            .checked_add(input_token_ids.len())
+            .ok_or_else(|| "Gemma4 sequence position overflows usize".to_string())?;
+        if next_position > self.resident_descriptor.decoder.max_position_embeddings {
+            return Err(format!(
+                "Gemma4 input reaches position {next_position}, beyond max_position_embeddings={}",
+                self.resident_descriptor.decoder.max_position_embeddings
+            ));
+        }
+        let hidden = self.resident_descriptor.decoder.hidden_size;
+        let layers = self.resident_descriptor.layers.len();
+        let mut embedding = Vec::with_capacity(input_token_ids.len() * hidden);
+        let mut layer_outputs = (0..layers)
+            .map(|_| Vec::with_capacity(input_token_ids.len() * hidden))
+            .collect::<Vec<_>>();
+        let mut final_norm = Vec::with_capacity(input_token_ids.len() * hidden);
+        let mut final_token_hidden = None;
+
+        for token_chunk in input_token_ids.chunks(GEMMA4_PREFILL_ACTIVATION_CHUNK_TOKENS) {
+            let (chunk_embeddings, per_layer_inputs) =
+                self.prefill_ple_inputs_batched(token_chunk)?;
+            let ple_width = self
+                .resident_descriptor
+                .layers
+                .len()
+                .checked_mul(self.ple_descriptor()?.input_size)
+                .ok_or_else(|| "Gemma4 batched PLE width overflows".to_string())?;
+            for (token_offset, token_id) in token_chunk.iter().enumerate() {
+                let embedding_start = token_offset
+                    .checked_mul(hidden)
+                    .ok_or_else(|| "Gemma4 batched embedding offset overflows".to_string())?;
+                let ple_start = token_offset
+                    .checked_mul(ple_width)
+                    .ok_or_else(|| "Gemma4 batched PLE offset overflows".to_string())?;
+                let token = self.forward_token_prefill_from_ple(
+                    *token_id,
+                    &chunk_embeddings[embedding_start..embedding_start + hidden],
+                    &per_layer_inputs[ple_start..ple_start + ple_width],
+                )?;
+                embedding.extend_from_slice(&token.embedding);
+                for (layer_index, output) in token.layer_outputs.iter().enumerate() {
+                    layer_outputs[layer_index].extend_from_slice(output);
+                }
+                final_norm.extend_from_slice(&token.final_norm);
+                final_token_hidden = Some(token.final_norm);
+            }
+        }
+        let final_token_hidden = final_token_hidden.expect("checked nonempty input");
+        let logits_last = self.project_tied_logits(&final_token_hidden)?;
+        let top1 = top1_from_logits(&logits_last)?;
+        let trace = Gemma4TextStepTrace {
+            input_token_ids: input_token_ids.to_vec(),
+            embedding,
+            layer_outputs,
+            final_norm,
+            logits_last,
+            top1,
+        };
+        let token_forward_ns = elapsed_ns(token_started);
+        let primitive_ns = self
+            .matvec
+            .resident_host_profile()
+            .primitive_ns
+            .saturating_sub(primitive_before);
+        let profile = &mut self.matvec.resident_host_profile;
+        profile.token_forward_ns = profile.token_forward_ns.saturating_add(token_forward_ns);
+        profile.executor_other_ns = profile
+            .executor_other_ns
+            .saturating_add(token_forward_ns.saturating_sub(primitive_ns));
+        Ok(trace)
+    }
+
+    /// Computes all token-dependent PLE inputs for one prefill chunk before
+    /// layer execution.  PLE has no K/V dependency, so this cannot affect the
+    /// causal cache transition; each subsequent token still takes the existing
+    /// M=1 attention route with its own cache length.
+    fn prefill_ple_inputs_batched(
+        &mut self,
+        token_ids: &[u32],
+    ) -> Result<(Vec<f32>, Vec<f32>), String> {
+        let decoder = self.resident_descriptor.decoder.clone();
+        let ple = self.ple_descriptor()?.clone();
+        let layers = self.resident_descriptor.layers.len();
+        let hidden = decoder.hidden_size;
+        let packed_width = layers
+            .checked_mul(ple.input_size)
+            .ok_or_else(|| "Gemma4 batched PLE packed width overflows".to_string())?;
+        let embedding_scale = self.resident_descriptor.embedding.scale.ok_or_else(|| {
+            "Gemma4 resident descriptor is missing the token embedding scale".to_string()
+        })?;
+        let mut embeddings = Vec::with_capacity(token_ids.len() * hidden);
+        let mut token_identity = Vec::with_capacity(token_ids.len() * packed_width);
+        for token_id in token_ids {
+            let token_index = usize::try_from(*token_id)
+                .map_err(|_| "Gemma4 token ID does not fit usize".to_string())?;
+            if token_index >= decoder.vocab_size || token_index >= ple.vocabulary_size {
+                return Err(format!("Gemma4 token ID {token_id} is outside vocabulary"));
+            }
+            let mut token_embedding = self.read_weight_row(
+                GEMMA4_TEXT_EMBED_TOKENS,
+                decoder.vocab_size,
+                hidden,
+                token_index,
+            )?;
+            scale_in_place(
+                &mut token_embedding,
+                embedding_scale,
+                "Gemma4 embedding scale",
+            )?;
+            embeddings.extend_from_slice(&token_embedding);
+            let mut identity_row = self.read_weight_row(
+                GEMMA4_TEXT_EMBED_TOKENS_PER_LAYER,
+                ple.vocabulary_size,
+                packed_width,
+                token_index,
+            )?;
+            scale_in_place(
+                &mut identity_row,
+                ple.token_embedding_scale,
+                "Gemma4 PLE token embedding scale",
+            )?;
+            token_identity.extend_from_slice(&identity_row);
+        }
+        let matrix = match &self.weights {
+            Gemma4WeightStorage::Resident(weights) => weights.tensor(
+                GEMMA4_TEXT_PER_LAYER_MODEL_PROJECTION,
+                &[packed_width, hidden],
+            )?,
+            Gemma4WeightStorage::Streamed(_) => {
+                return Err("Gemma4 batched PLE requires resident weights".into());
+            }
+        };
+        let mut projected = self.matvec.gemma_matmul_resident(
+            &matrix.buffer,
+            packed_width,
+            hidden,
+            token_ids.len(),
+            &embeddings,
+        )?;
+        scale_in_place(
+            &mut projected,
+            ple.model_projection_scale,
+            "Gemma4 PLE model projection scale",
+        )?;
+        let norm_weight =
+            self.read_weight_vector(GEMMA4_TEXT_PER_LAYER_PROJECTION_NORM, ple.input_size)?;
+        for (token_index, identity) in token_identity.chunks_exact(packed_width).enumerate() {
+            let token_start = token_index
+                .checked_mul(packed_width)
+                .ok_or_else(|| "Gemma4 batched PLE token offset overflows".to_string())?;
+            for layer_index in 0..layers {
+                let start = token_start
+                    .checked_add(layer_index * ple.input_size)
+                    .ok_or_else(|| "Gemma4 batched PLE slice offset overflows".to_string())?;
+                let end = start
+                    .checked_add(ple.input_size)
+                    .ok_or_else(|| "Gemma4 batched PLE slice end overflows".to_string())?;
+                let normalized = rms_norm(
+                    &projected[start..end],
+                    Some(&norm_weight),
+                    decoder.rms_norm_epsilon,
+                )?;
+                for (index, value) in projected[start..end].iter_mut().enumerate() {
+                    *value = (normalized[index] + identity[layer_index * ple.input_size + index])
+                        * ple.residual_combine_scale;
+                }
+            }
+        }
+        finite_slice(&projected, "Gemma4 batched PLE")?;
+        Ok((embeddings, projected))
+    }
+
+    fn forward_token_prefill_from_ple(
+        &mut self,
+        token_id: u32,
+        embedding: &[f32],
+        per_layer_inputs: &[f32],
+    ) -> Result<TokenForward, String> {
+        let decoder = self.resident_descriptor.decoder.clone();
+        let ple = self.ple_descriptor()?.clone();
+        let hidden = decoder.hidden_size;
+        let layers = self.resident_descriptor.layers.len();
+        let ple_dim = ple.input_size;
+        if embedding.len() != hidden || per_layer_inputs.len() != layers * ple_dim {
+            return Err("Gemma4 batched prefill PLE input shape is invalid".into());
+        }
+        let mut hidden_states = embedding.to_vec();
+        let mut layer_outputs = Vec::with_capacity(layers);
+        let position = self.position;
+        for layer_index in 0..layers {
+            let ple_start = layer_index
+                .checked_mul(ple_dim)
+                .ok_or_else(|| "Gemma4 batched PLE layer offset overflows".to_string())?;
+            let ple_end = ple_start
+                .checked_add(ple_dim)
+                .ok_or_else(|| "Gemma4 batched PLE layer end overflows".to_string())?;
+            hidden_states = self.forward_layer(
+                layer_index,
+                &hidden_states,
+                &per_layer_inputs[ple_start..ple_end],
+                position,
+            )?;
+            layer_outputs.push(hidden_states.clone());
+        }
+        let final_weight = self.read_weight_vector(GEMMA4_TEXT_FINAL_NORM, hidden)?;
+        let final_norm = rms_norm(
+            &hidden_states,
+            Some(&final_weight),
+            decoder.rms_norm_epsilon,
+        )?;
+        self.position = self
+            .position
+            .checked_add(1)
+            .ok_or_else(|| "Gemma4 sequence position overflows usize".to_string())?;
+        let _ = token_id;
+        Ok(TokenForward {
+            embedding: embedding.to_vec(),
+            layer_outputs,
+            final_norm,
+        })
     }
 
     fn forward_token(&mut self, token_id: u32) -> Result<TokenForward, String> {

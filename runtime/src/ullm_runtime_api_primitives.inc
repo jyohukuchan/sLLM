@@ -213,6 +213,67 @@ ullm_status ullm_runtime_matvec_bf16_f32(
         stream);
 }
 
+ullm_status ullm_runtime_gemma_bf16_matmul_f32(
+    const ullm_runtime_buffer *matrix_buffer,
+    const ullm_runtime_buffer *input_buffer,
+    size_t rows,
+    size_t cols,
+    size_t batch_count,
+    ullm_runtime_buffer *output_buffer,
+    ullm_runtime_stream *stream) {
+    if (matrix_buffer == nullptr || input_buffer == nullptr || output_buffer == nullptr ||
+        rows == 0 || cols == 0 || batch_count == 0) {
+        set_error("Gemma BF16 matmul requires non-null buffers and nonzero rows, cols, and batch count");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (!buffers_share_backend(matrix_buffer, input_buffer) ||
+        !buffers_share_backend(matrix_buffer, output_buffer) ||
+        !stream_matches_buffer(output_buffer, stream)) {
+        set_error("Gemma BF16 matmul buffers or stream belong to different backends or devices");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t max_size = std::numeric_limits<size_t>::max();
+    if (cols > max_size / rows || batch_count > max_size / cols ||
+        batch_count > max_size / rows) {
+        set_error("Gemma BF16 matmul element count overflows");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t matrix_elements = rows * cols;
+    const size_t input_elements = batch_count * cols;
+    const size_t output_elements = batch_count * rows;
+    if (matrix_elements > max_size / sizeof(uint16_t) ||
+        input_elements > max_size / sizeof(float) || output_elements > max_size / sizeof(float)) {
+        set_error("Gemma BF16 matmul byte count overflows");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t matrix_bytes = matrix_elements * sizeof(uint16_t);
+    const size_t input_bytes = input_elements * sizeof(float);
+    const size_t output_bytes = output_elements * sizeof(float);
+    if (matrix_buffer->bytes < matrix_bytes || input_buffer->bytes < input_bytes ||
+        output_buffer->bytes < output_bytes) {
+        set_error("Gemma BF16 matmul buffer is too small");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (matrix_buffer->backend == BackendKind::Cpu) {
+        const auto *matrix = static_cast<const uint16_t *>(matrix_buffer->ptr);
+        const auto *input = static_cast<const float *>(input_buffer->ptr);
+        auto *output = static_cast<float *>(output_buffer->ptr);
+        for (size_t batch = 0; batch < batch_count; ++batch) {
+            matvec_bf16_f32_host(matrix, input + batch * cols, rows, cols, output + batch * rows);
+        }
+        set_error("");
+        return ULLM_STATUS_OK;
+    }
+    std::string hip_kernel_error;
+    if (gemma_bf16_matmul_f32_hip_kernel(
+            matrix_buffer, input_buffer, rows, cols, batch_count, output_buffer, stream, &hip_kernel_error)) {
+        set_error("");
+        return ULLM_STATUS_OK;
+    }
+    set_error(hip_kernel_error.empty() ? "Gemma BF16 matmul HIP kernel is unavailable" : hip_kernel_error.c_str());
+    return ULLM_STATUS_RUNTIME_ERROR;
+}
+
 ullm_status ullm_runtime_bf16_row_f32(
     const ullm_runtime_buffer *matrix_buffer,
     size_t rows,

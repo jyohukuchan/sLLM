@@ -878,6 +878,15 @@ unsafe extern "C" {
         output_buffer: *mut RawRuntimeBuffer,
         stream: *mut RawRuntimeStream,
     ) -> c_int;
+    fn ullm_runtime_gemma_bf16_matmul_f32(
+        matrix_buffer: *const RawRuntimeBuffer,
+        input_buffer: *const RawRuntimeBuffer,
+        rows: usize,
+        cols: usize,
+        batch_count: usize,
+        output_buffer: *mut RawRuntimeBuffer,
+        stream: *mut RawRuntimeStream,
+    ) -> c_int;
     fn ullm_runtime_bf16_row_f32(
         matrix_buffer: *const RawRuntimeBuffer,
         rows: usize,
@@ -5926,6 +5935,52 @@ pub fn matvec_bf16_f32(
     })
 }
 
+/// Gemma-only BF16 weight / F32 activation projection for a row-major
+/// `[batch_count, cols]` input and `[batch_count, rows]` output.  This is a
+/// separate ABI so existing M=1 decode dispatch remains byte-for-byte intact.
+pub fn gemma_bf16_matmul_f32(
+    matrix_buffer: &RuntimeBuffer,
+    input_buffer: &RuntimeBuffer,
+    rows: usize,
+    cols: usize,
+    batch_count: usize,
+    output_buffer: &mut RuntimeBuffer,
+    stream: Option<&mut RuntimeStream>,
+) -> Result<(), String> {
+    if rows == 0 || cols == 0 || batch_count == 0 {
+        return Err(
+            "Gemma BF16 matmul rows, cols, and batch count must be greater than zero".to_string(),
+        );
+    }
+    let matrix_bytes = rows
+        .checked_mul(cols)
+        .and_then(|elements| elements.checked_mul(std::mem::size_of::<u16>()))
+        .ok_or_else(|| "Gemma BF16 matmul matrix byte size overflows".to_string())?;
+    let input_bytes = batch_count
+        .checked_mul(cols)
+        .and_then(|elements| elements.checked_mul(std::mem::size_of::<f32>()))
+        .ok_or_else(|| "Gemma BF16 matmul input byte size overflows".to_string())?;
+    let output_bytes = batch_count
+        .checked_mul(rows)
+        .and_then(|elements| elements.checked_mul(std::mem::size_of::<f32>()))
+        .ok_or_else(|| "Gemma BF16 matmul output byte size overflows".to_string())?;
+    check_copy_range(0, matrix_bytes, matrix_buffer.size()?)?;
+    check_copy_range(0, input_bytes, input_buffer.size()?)?;
+    check_copy_range(0, output_bytes, output_buffer.size()?)?;
+    let stream = stream.map_or(std::ptr::null_mut(), |stream| stream.raw.as_ptr());
+    status_to_result(unsafe {
+        ullm_runtime_gemma_bf16_matmul_f32(
+            matrix_buffer.raw.as_ptr(),
+            input_buffer.raw.as_ptr(),
+            rows,
+            cols,
+            batch_count,
+            output_buffer.raw.as_ptr(),
+            stream,
+        )
+    })
+}
+
 pub fn bf16_row_f32(
     matrix_buffer: &RuntimeBuffer,
     rows: usize,
@@ -6989,21 +7044,38 @@ pub fn gemma_proportional_rope_f32(
     output: &mut RuntimeBuffer,
     stream: Option<&mut RuntimeStream>,
 ) -> Result<(), String> {
-    if sequence_len == 0 || heads == 0 || head_dim == 0 || rotary_dim == 0 ||
-        rotary_dim > head_dim || !rotary_dim.is_multiple_of(2) || !rope_base.is_finite() || rope_base <= 1.0 {
+    if sequence_len == 0
+        || heads == 0
+        || head_dim == 0
+        || rotary_dim == 0
+        || rotary_dim > head_dim
+        || !rotary_dim.is_multiple_of(2)
+        || !rope_base.is_finite()
+        || rope_base <= 1.0
+    {
         return Err("Gemma proportional f32 RoPE geometry or base is invalid".to_string());
     }
-    let elements = sequence_len.checked_mul(heads).and_then(|value| value.checked_mul(head_dim))
+    let elements = sequence_len
+        .checked_mul(heads)
+        .and_then(|value| value.checked_mul(head_dim))
         .ok_or_else(|| "Gemma proportional f32 RoPE element count overflows".to_string())?;
-    let required_bytes = elements.checked_mul(std::mem::size_of::<f32>())
+    let required_bytes = elements
+        .checked_mul(std::mem::size_of::<f32>())
         .ok_or_else(|| "Gemma proportional f32 RoPE byte size overflows".to_string())?;
     check_copy_range(0, required_bytes, input.size()?)?;
     check_copy_range(0, required_bytes, output.size()?)?;
     let stream = stream.map_or(std::ptr::null_mut(), |stream| stream.raw.as_ptr());
     status_to_result(unsafe {
         ullm_runtime_gemma_proportional_rope_f32(
-            input.raw.as_ptr(), sequence_len, heads, head_dim, rotary_dim, position_offset,
-            rope_base, output.raw.as_ptr(), stream,
+            input.raw.as_ptr(),
+            sequence_len,
+            heads,
+            head_dim,
+            rotary_dim,
+            position_offset,
+            rope_base,
+            output.raw.as_ptr(),
+            stream,
         )
     })
 }

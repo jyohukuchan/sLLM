@@ -891,6 +891,20 @@ ullm_status ullm_runtime_matvec_bf16_f32(
     ullm_runtime_buffer *output_buffer,
     ullm_runtime_stream *stream);
 
+/*
+ * Gemma-only BF16 weight / F32 activation projection for a row-major [M,cols]
+ * activation matrix.  The shared M=1 BF16 matvec ABI above remains unchanged
+ * for production decode users.
+ */
+ullm_status ullm_runtime_gemma_bf16_matmul_f32(
+    const ullm_runtime_buffer *matrix_buffer,
+    const ullm_runtime_buffer *input_buffer,
+    size_t rows,
+    size_t cols,
+    size_t batch_count,
+    ullm_runtime_buffer *output_buffer,
+    ullm_runtime_stream *stream);
+
 ullm_status ullm_runtime_bf16_row_f32(
     const ullm_runtime_buffer *matrix_buffer,
     size_t rows,

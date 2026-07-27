@@ -81,6 +81,64 @@ extern "C" __global__ void ullm_bf16_row_f32_kernel(
 )";
     }
 
+    // Isolated Gemma prefill projection.  It intentionally has a separate
+    // entry point from the production M=1 BF16 matvec kernel.
+    static const char *gemma_bf16_matmul_kernel_source() {
+        return R"(
+__device__ float ullm_bf16_pair_low_to_f32(unsigned int value) {
+    return __uint_as_float((value & 0xffffu) << 16);
+}
+
+__device__ float ullm_bf16_pair_high_to_f32(unsigned int value) {
+    return __uint_as_float((value & 0xffff0000u));
+}
+
+extern "C" __global__ void ullm_gemma_bf16_matmul_f32_kernel(
+    const unsigned short *matrix,
+    const float *input,
+    unsigned long long rows,
+    unsigned long long cols,
+    unsigned long long batch_count,
+    float *output) {
+    const unsigned int row = blockIdx.x;
+    const unsigned int batch = blockIdx.y;
+    const unsigned int tid = threadIdx.x;
+    __shared__ float partial[64];
+    float sum = 0.0f;
+    if (row < rows && batch < batch_count) {
+        const unsigned long long row_offset = static_cast<unsigned long long>(row) * cols;
+        const float *input_row = input + static_cast<unsigned long long>(batch) * cols;
+        if ((cols & 1ull) == 0ull) {
+            const unsigned int *matrix_pairs =
+                reinterpret_cast<const unsigned int *>(matrix + row_offset);
+            const unsigned long long pair_cols = cols >> 1;
+            for (unsigned long long pair_col = tid; pair_col < pair_cols;
+                 pair_col += blockDim.x) {
+                const unsigned int packed = matrix_pairs[pair_col];
+                const unsigned long long col = pair_col << 1;
+                sum += ullm_bf16_pair_low_to_f32(packed) * input_row[col];
+                sum += ullm_bf16_pair_high_to_f32(packed) * input_row[col + 1ull];
+            }
+        } else {
+            for (unsigned long long col = tid; col < cols; col += blockDim.x) {
+                sum += __uint_as_float(static_cast<unsigned int>(matrix[row_offset + col]) << 16) *
+                    input_row[col];
+            }
+        }
+    }
+    partial[tid] = sum;
+    __syncthreads();
+    for (unsigned int offset = blockDim.x >> 1; offset > 0; offset >>= 1) {
+        if (tid < offset) partial[tid] += partial[tid + offset];
+        __syncthreads();
+    }
+    if (tid == 0 && row < rows && batch < batch_count) {
+        output[static_cast<unsigned long long>(batch) * rows + row] = partial[0];
+    }
+}
+)";
+    }
+
     // Superseded scalar-reduction RMSNorm reference. It is deliberately not passed to HIPRTC
     // for gfx1201: production keeps the same entry-point ABI but uses the validated wave32
     // shuffle reduction below. Retain this source for controlled rollback comparisons and for

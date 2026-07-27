@@ -155,6 +155,64 @@ HipBf16MatvecKernelCache &hip_bf16_matvec_kernel_cache() {
     return cache;
 }
 
+class HipGemmaBf16MatmulKernelCache {
+public:
+    void *function_for_device(int device_id, std::string *error) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto found = modules_.find(device_id);
+        if (found != modules_.end()) return found->second->function;
+        const std::vector<std::string> candidates = hip_arch_candidates(device_id);
+        if (candidates.empty()) {
+            append_error(error, "unable to infer HIP offload architecture for Gemma BF16 matmul");
+            return nullptr;
+        }
+        std::string compile_errors;
+        for (const std::string &arch : candidates) {
+            std::vector<char> code;
+            std::string compile_error;
+            if (!hiprtc_runtime().compile_gemma_bf16_matmul_kernel(arch, &code, &compile_error)) {
+                append_error(&compile_errors, compile_error);
+                continue;
+            }
+            void *module = nullptr;
+            if (!hip_runtime().module_load_data(&module, code.data(), device_id)) {
+                append_error(&compile_errors, "hipModuleLoadData failed for " + arch);
+                continue;
+            }
+            void *function = nullptr;
+            if (!hip_runtime().module_get_function(
+                    &function, module, "ullm_gemma_bf16_matmul_f32_kernel", device_id)) {
+                hip_runtime().module_unload(module, device_id);
+                append_error(&compile_errors, "hipModuleGetFunction failed for " + arch);
+                continue;
+            }
+            auto loaded = std::make_unique<LoadedModule>();
+            loaded->module = module;
+            loaded->function = function;
+            void *result = loaded->function;
+            modules_.emplace(device_id, std::move(loaded));
+            return result;
+        }
+        append_error(error, compile_errors.empty() ? "failed to build Gemma BF16 matmul HIP kernel" : compile_errors);
+        return nullptr;
+    }
+
+private:
+    struct LoadedModule { void *module = nullptr; void *function = nullptr; };
+    static void append_error(std::string *error, const std::string &message) {
+        if (error == nullptr || message.empty()) return;
+        if (!error->empty()) error->append("\n");
+        error->append(message);
+    }
+    std::mutex mutex_;
+    std::unordered_map<int, std::unique_ptr<LoadedModule>> modules_;
+};
+
+HipGemmaBf16MatmulKernelCache &hip_gemma_bf16_matmul_kernel_cache() {
+    static HipGemmaBf16MatmulKernelCache cache;
+    return cache;
+}
+
 class HipBf16RowKernelCache {
 public:
     void *function_for_device(int device_id, std::string *error) {
@@ -326,6 +384,47 @@ bool matvec_bf16_f32_hip_kernel(
         if (error != nullptr) {
             *error = "hipModuleLaunchKernel failed for BF16 matvec";
         }
+        return false;
+    }
+    return true;
+}
+
+bool gemma_bf16_matmul_f32_hip_kernel(
+    const ullm_runtime_buffer *matrix_buffer,
+    const ullm_runtime_buffer *input_buffer,
+    size_t rows,
+    size_t cols,
+    size_t batch_count,
+    ullm_runtime_buffer *output_buffer,
+    ullm_runtime_stream *stream,
+    std::string *error) {
+    const int device_id = matrix_buffer->hip_device_id;
+    void *function = hip_gemma_bf16_matmul_kernel_cache().function_for_device(device_id, error);
+    if (function == nullptr) return false;
+    if (rows > std::numeric_limits<unsigned int>::max() ||
+        batch_count > std::numeric_limits<unsigned int>::max()) {
+        if (error != nullptr) *error = "Gemma BF16 matmul dimensions exceed HIP grid limit";
+        return false;
+    }
+    unsigned long long kernel_rows = static_cast<unsigned long long>(rows);
+    unsigned long long kernel_cols = static_cast<unsigned long long>(cols);
+    unsigned long long kernel_batch = static_cast<unsigned long long>(batch_count);
+    void *matrix_ptr = matrix_buffer->ptr;
+    void *input_ptr = input_buffer->ptr;
+    void *output_ptr = output_buffer->ptr;
+    void *kernel_params[] = {
+        &matrix_ptr, &input_ptr, &kernel_rows, &kernel_cols, &kernel_batch, &output_ptr,
+    };
+    void *hip_stream = stream == nullptr ? nullptr : stream->stream;
+    if (!hip_runtime().module_launch_kernel_2d(
+            function,
+            static_cast<unsigned int>(rows),
+            static_cast<unsigned int>(batch_count),
+            64,
+            kernel_params,
+            hip_stream,
+            device_id)) {
+        if (error != nullptr) *error = "hipModuleLaunchKernel failed for Gemma BF16 matmul";
         return false;
     }
     return true;

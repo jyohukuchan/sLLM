@@ -803,6 +803,14 @@ ullm_status ullm_runtime_matvec_bf16_f32(
     size_t cols,
     ullm_runtime_buffer *output_buffer,
     ullm_runtime_stream *stream);
+ullm_status ullm_runtime_gemma_bf16_matmul_f32(
+    const ullm_runtime_buffer *matrix_buffer,
+    const ullm_runtime_buffer *input_buffer,
+    size_t rows,
+    size_t cols,
+    size_t batch_count,
+    ullm_runtime_buffer *output_buffer,
+    ullm_runtime_stream *stream);
 ullm_status ullm_runtime_bf16_row_f32(
     const ullm_runtime_buffer *matrix_buffer,
     size_t rows,
@@ -63789,6 +63797,17 @@ public:
             code,
             error);
     }
+    bool compile_gemma_bf16_matmul_kernel(
+        const std::string &arch,
+        std::vector<char> *code,
+        std::string *error) {
+        return compile_kernel(
+            arch,
+            gemma_bf16_matmul_kernel_source(),
+            "ullm_gemma_bf16_matmul_f32.hip",
+            code,
+            error);
+    }
     bool compile_bf16_row_kernel(
         const std::string &arch,
         std::vector<char> *code,
@@ -70534,6 +70553,61 @@ extern "C" __global__ void ullm_bf16_row_f32_kernel(
     const unsigned long long row_offset = row_index * cols;
     for (unsigned long long col = tid; col < cols; col += blockDim.x) {
         output[col] = ullm_bf16_to_f32(matrix[row_offset + col]);
+    }
+}
+)";
+    }
+    static const char *gemma_bf16_matmul_kernel_source() {
+        return R"(
+__device__ float ullm_bf16_pair_low_to_f32(unsigned int value) {
+    return __uint_as_float((value & 0xffffu) << 16);
+}
+
+__device__ float ullm_bf16_pair_high_to_f32(unsigned int value) {
+    return __uint_as_float((value & 0xffff0000u));
+}
+
+extern "C" __global__ void ullm_gemma_bf16_matmul_f32_kernel(
+    const unsigned short *matrix,
+    const float *input,
+    unsigned long long rows,
+    unsigned long long cols,
+    unsigned long long batch_count,
+    float *output) {
+    const unsigned int row = blockIdx.x;
+    const unsigned int batch = blockIdx.y;
+    const unsigned int tid = threadIdx.x;
+    __shared__ float partial[64];
+    float sum = 0.0f;
+    if (row < rows && batch < batch_count) {
+        const unsigned long long row_offset = static_cast<unsigned long long>(row) * cols;
+        const float *input_row = input + static_cast<unsigned long long>(batch) * cols;
+        if ((cols & 1ull) == 0ull) {
+            const unsigned int *matrix_pairs =
+                reinterpret_cast<const unsigned int *>(matrix + row_offset);
+            const unsigned long long pair_cols = cols >> 1;
+            for (unsigned long long pair_col = tid; pair_col < pair_cols;
+                 pair_col += blockDim.x) {
+                const unsigned int packed = matrix_pairs[pair_col];
+                const unsigned long long col = pair_col << 1;
+                sum += ullm_bf16_pair_low_to_f32(packed) * input_row[col];
+                sum += ullm_bf16_pair_high_to_f32(packed) * input_row[col + 1ull];
+            }
+        } else {
+            for (unsigned long long col = tid; col < cols; col += blockDim.x) {
+                sum += __uint_as_float(static_cast<unsigned int>(matrix[row_offset + col]) << 16) *
+                    input_row[col];
+            }
+        }
+    }
+    partial[tid] = sum;
+    __syncthreads();
+    for (unsigned int offset = blockDim.x >> 1; offset > 0; offset >>= 1) {
+        if (tid < offset) partial[tid] += partial[tid + offset];
+        __syncthreads();
+    }
+    if (tid == 0 && row < rows && batch < batch_count) {
+        output[static_cast<unsigned long long>(batch) * rows + row] = partial[0];
     }
 }
 )";
@@ -84188,6 +84262,61 @@ HipBf16MatvecKernelCache &hip_bf16_matvec_kernel_cache() {
     static HipBf16MatvecKernelCache cache;
     return cache;
 }
+class HipGemmaBf16MatmulKernelCache {
+public:
+    void *function_for_device(int device_id, std::string *error) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto found = modules_.find(device_id);
+        if (found != modules_.end()) return found->second->function;
+        const std::vector<std::string> candidates = hip_arch_candidates(device_id);
+        if (candidates.empty()) {
+            append_error(error, "unable to infer HIP offload architecture for Gemma BF16 matmul");
+            return nullptr;
+        }
+        std::string compile_errors;
+        for (const std::string &arch : candidates) {
+            std::vector<char> code;
+            std::string compile_error;
+            if (!hiprtc_runtime().compile_gemma_bf16_matmul_kernel(arch, &code, &compile_error)) {
+                append_error(&compile_errors, compile_error);
+                continue;
+            }
+            void *module = nullptr;
+            if (!hip_runtime().module_load_data(&module, code.data(), device_id)) {
+                append_error(&compile_errors, "hipModuleLoadData failed for " + arch);
+                continue;
+            }
+            void *function = nullptr;
+            if (!hip_runtime().module_get_function(
+                    &function, module, "ullm_gemma_bf16_matmul_f32_kernel", device_id)) {
+                hip_runtime().module_unload(module, device_id);
+                append_error(&compile_errors, "hipModuleGetFunction failed for " + arch);
+                continue;
+            }
+            auto loaded = std::make_unique<LoadedModule>();
+            loaded->module = module;
+            loaded->function = function;
+            void *result = loaded->function;
+            modules_.emplace(device_id, std::move(loaded));
+            return result;
+        }
+        append_error(error, compile_errors.empty() ? "failed to build Gemma BF16 matmul HIP kernel" : compile_errors);
+        return nullptr;
+    }
+private:
+    struct LoadedModule { void *module = nullptr; void *function = nullptr; };
+    static void append_error(std::string *error, const std::string &message) {
+        if (error == nullptr || message.empty()) return;
+        if (!error->empty()) error->append("\n");
+        error->append(message);
+    }
+    std::mutex mutex_;
+    std::unordered_map<int, std::unique_ptr<LoadedModule>> modules_;
+};
+HipGemmaBf16MatmulKernelCache &hip_gemma_bf16_matmul_kernel_cache() {
+    static HipGemmaBf16MatmulKernelCache cache;
+    return cache;
+}
 class HipBf16RowKernelCache {
 public:
     void *function_for_device(int device_id, std::string *error) {
@@ -84347,6 +84476,46 @@ bool matvec_bf16_f32_hip_kernel(
         if (error != nullptr) {
             *error = "hipModuleLaunchKernel failed for BF16 matvec";
         }
+        return false;
+    }
+    return true;
+}
+bool gemma_bf16_matmul_f32_hip_kernel(
+    const ullm_runtime_buffer *matrix_buffer,
+    const ullm_runtime_buffer *input_buffer,
+    size_t rows,
+    size_t cols,
+    size_t batch_count,
+    ullm_runtime_buffer *output_buffer,
+    ullm_runtime_stream *stream,
+    std::string *error) {
+    const int device_id = matrix_buffer->hip_device_id;
+    void *function = hip_gemma_bf16_matmul_kernel_cache().function_for_device(device_id, error);
+    if (function == nullptr) return false;
+    if (rows > std::numeric_limits<unsigned int>::max() ||
+        batch_count > std::numeric_limits<unsigned int>::max()) {
+        if (error != nullptr) *error = "Gemma BF16 matmul dimensions exceed HIP grid limit";
+        return false;
+    }
+    unsigned long long kernel_rows = static_cast<unsigned long long>(rows);
+    unsigned long long kernel_cols = static_cast<unsigned long long>(cols);
+    unsigned long long kernel_batch = static_cast<unsigned long long>(batch_count);
+    void *matrix_ptr = matrix_buffer->ptr;
+    void *input_ptr = input_buffer->ptr;
+    void *output_ptr = output_buffer->ptr;
+    void *kernel_params[] = {
+        &matrix_ptr, &input_ptr, &kernel_rows, &kernel_cols, &kernel_batch, &output_ptr,
+    };
+    void *hip_stream = stream == nullptr ? nullptr : stream->stream;
+    if (!hip_runtime().module_launch_kernel_2d(
+            function,
+            static_cast<unsigned int>(rows),
+            static_cast<unsigned int>(batch_count),
+            64,
+            kernel_params,
+            hip_stream,
+            device_id)) {
+        if (error != nullptr) *error = "hipModuleLaunchKernel failed for Gemma BF16 matmul";
         return false;
     }
     return true;
@@ -100422,6 +100591,66 @@ ullm_status ullm_runtime_matvec_bf16_f32(
         required_output_bytes,
         output_buffer,
         stream);
+}
+ullm_status ullm_runtime_gemma_bf16_matmul_f32(
+    const ullm_runtime_buffer *matrix_buffer,
+    const ullm_runtime_buffer *input_buffer,
+    size_t rows,
+    size_t cols,
+    size_t batch_count,
+    ullm_runtime_buffer *output_buffer,
+    ullm_runtime_stream *stream) {
+    if (matrix_buffer == nullptr || input_buffer == nullptr || output_buffer == nullptr ||
+        rows == 0 || cols == 0 || batch_count == 0) {
+        set_error("Gemma BF16 matmul requires non-null buffers and nonzero rows, cols, and batch count");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (!buffers_share_backend(matrix_buffer, input_buffer) ||
+        !buffers_share_backend(matrix_buffer, output_buffer) ||
+        !stream_matches_buffer(output_buffer, stream)) {
+        set_error("Gemma BF16 matmul buffers or stream belong to different backends or devices");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t max_size = std::numeric_limits<size_t>::max();
+    if (cols > max_size / rows || batch_count > max_size / cols ||
+        batch_count > max_size / rows) {
+        set_error("Gemma BF16 matmul element count overflows");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t matrix_elements = rows * cols;
+    const size_t input_elements = batch_count * cols;
+    const size_t output_elements = batch_count * rows;
+    if (matrix_elements > max_size / sizeof(uint16_t) ||
+        input_elements > max_size / sizeof(float) || output_elements > max_size / sizeof(float)) {
+        set_error("Gemma BF16 matmul byte count overflows");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t matrix_bytes = matrix_elements * sizeof(uint16_t);
+    const size_t input_bytes = input_elements * sizeof(float);
+    const size_t output_bytes = output_elements * sizeof(float);
+    if (matrix_buffer->bytes < matrix_bytes || input_buffer->bytes < input_bytes ||
+        output_buffer->bytes < output_bytes) {
+        set_error("Gemma BF16 matmul buffer is too small");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (matrix_buffer->backend == BackendKind::Cpu) {
+        const auto *matrix = static_cast<const uint16_t *>(matrix_buffer->ptr);
+        const auto *input = static_cast<const float *>(input_buffer->ptr);
+        auto *output = static_cast<float *>(output_buffer->ptr);
+        for (size_t batch = 0; batch < batch_count; ++batch) {
+            matvec_bf16_f32_host(matrix, input + batch * cols, rows, cols, output + batch * rows);
+        }
+        set_error("");
+        return ULLM_STATUS_OK;
+    }
+    std::string hip_kernel_error;
+    if (gemma_bf16_matmul_f32_hip_kernel(
+            matrix_buffer, input_buffer, rows, cols, batch_count, output_buffer, stream, &hip_kernel_error)) {
+        set_error("");
+        return ULLM_STATUS_OK;
+    }
+    set_error(hip_kernel_error.empty() ? "Gemma BF16 matmul HIP kernel is unavailable" : hip_kernel_error.c_str());
+    return ULLM_STATUS_RUNTIME_ERROR;
 }
 ullm_status ullm_runtime_bf16_row_f32(
     const ullm_runtime_buffer *matrix_buffer,

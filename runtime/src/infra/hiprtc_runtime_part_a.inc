@@ -409,6 +409,18 @@ public:
             error);
     }
 
+    bool compile_gemma_bf16_matmul_kernel(
+        const std::string &arch,
+        std::vector<char> *code,
+        std::string *error) {
+        return compile_kernel(
+            arch,
+            gemma_bf16_matmul_kernel_source(),
+            "ullm_gemma_bf16_matmul_f32.hip",
+            code,
+            error);
+    }
+
     bool compile_bf16_row_kernel(
         const std::string &arch,
         std::vector<char> *code,
