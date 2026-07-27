@@ -5453,39 +5453,7 @@ extern "C" __global__ void ullm_aq4_matvec_gate_beta_f32_kernel(
 )";
     }
 
-    static const char *matvec_kernel_source() {
-        return R"(
-extern "C" __global__ void ullm_matvec_f32_kernel(
-    const float *matrix,
-    const float *input,
-    unsigned long long rows,
-    unsigned long long cols,
-    float *output) {
-    const unsigned int row = blockIdx.x;
-    const unsigned int tid = threadIdx.x;
-    __shared__ float partial[256];
-    float sum = 0.0f;
-    if (row < rows) {
-        const unsigned long long row_offset = static_cast<unsigned long long>(row) * cols;
-        for (unsigned long long col = tid; col < cols; col += blockDim.x) {
-            sum += matrix[row_offset + col] * input[col];
-        }
-    }
-    partial[tid] = sum;
-    __syncthreads();
-    for (unsigned int offset = blockDim.x >> 1; offset > 0; offset >>= 1) {
-        if (tid < offset) {
-            partial[tid] += partial[tid + offset];
-        }
-        __syncthreads();
-    }
-    if (tid == 0 && row < rows) {
-        output[row] = partial[0];
-    }
-}
-)";
-    }
-
+#include "kernels/primitives/primitives_sources_part_0.inc"
 #include "kernels/sq8_0/sq8_0_matvec_hiprtc.inc"
 #include "kernels/sq8_1/sq8_1_matvec_hiprtc.inc"
 
