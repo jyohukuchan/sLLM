@@ -29,10 +29,9 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 use ullm_runtime_sys::{
-    DeviceInfo, RuntimeBuffer, RuntimeContext, RuntimeStream, add_f32, bf16_row_f32,
-    device_count, device_info, gemma_proportional_rope_f32, gelu_tanh_mul_f32,
-    matvec_bf16_f32, paged_decode_attn_f32, paged_kv_write_f32, rmsnorm_f32, rope_f32,
-    segmented_rmsnorm_f32,
+    DeviceInfo, RuntimeBuffer, RuntimeContext, RuntimeStream, add_f32, bf16_row_f32, device_count,
+    device_info, gelu_tanh_mul_f32, gemma_proportional_rope_f32, matvec_bf16_f32,
+    paged_decode_attn_f32, paged_kv_write_f32, rmsnorm_f32, rope_f32, segmented_rmsnorm_f32,
 };
 
 pub const GEMMA4_TEXT_MODEL_FILE: &str = "model.safetensors";
@@ -46,10 +45,8 @@ pub const GEMMA4_TEXT_PER_LAYER_PROJECTION_NORM: &str =
     "model.language_model.per_layer_projection_norm.weight";
 pub const GEMMA4_TEXT_FINAL_NORM: &str = "model.language_model.norm.weight";
 pub const GEMMA4_TEXT_REQUIRED_HIP_KERNEL_ENV: &str = "ULLM_REQUIRE_HIP_BF16_MATVEC_KERNEL";
-pub const GEMMA4_TEXT_REQUIRED_HIP_BF16_ROW_KERNEL_ENV: &str =
-    "ULLM_REQUIRE_HIP_BF16_ROW_KERNEL";
-pub const GEMMA4_TEXT_REQUIRED_HIP_RMSNORM_KERNEL_ENV: &str =
-    "ULLM_REQUIRE_HIP_RMSNORM_KERNEL";
+pub const GEMMA4_TEXT_REQUIRED_HIP_BF16_ROW_KERNEL_ENV: &str = "ULLM_REQUIRE_HIP_BF16_ROW_KERNEL";
+pub const GEMMA4_TEXT_REQUIRED_HIP_RMSNORM_KERNEL_ENV: &str = "ULLM_REQUIRE_HIP_RMSNORM_KERNEL";
 pub const GEMMA4_TEXT_REQUIRED_HIP_ADD_KERNEL_ENV: &str = "ULLM_REQUIRE_HIP_ADD_KERNEL";
 pub const GEMMA4_TEXT_REQUIRED_HIP_ROPE_KERNEL_ENV: &str = "ULLM_REQUIRE_HIP_ROPE_KERNEL";
 pub const GEMMA4_TEXT_REQUIRED_HIP_PROPORTIONAL_ROPE_KERNEL_ENV: &str =
@@ -67,6 +64,7 @@ const R9700_MEMORY_BYTES_MIN: u64 = 30 * 1024 * 1024 * 1024;
 const R9700_MEMORY_BYTES_MAX: u64 = 34 * 1024 * 1024 * 1024;
 const GEMMA4_VALIDATE_DEVICE_MLP_ENV: &str = "ULLM_GEMMA4_VALIDATE_DEVICE_MLP";
 const GEMMA4_VALIDATE_PROPORTIONAL_ROPE_ENV: &str = "ULLM_GEMMA4_VALIDATE_PROPORTIONAL_ROPE";
+const GEMMA4_DISABLE_PLE_REGION_ENV: &str = "ULLM_GEMMA4_DISABLE_PLE_REGION";
 
 fn record_elapsed_ns(slot: &mut u64, started: Instant) {
     *slot = slot.saturating_add(elapsed_ns(started));
@@ -1118,6 +1116,7 @@ struct Bf16MatvecRuntime {
     mlp_pre_normed: Option<RuntimeBuffer>,
     mlp_post_norm_weight: Option<RuntimeBuffer>,
     mlp_post_normed: Option<RuntimeBuffer>,
+    ple_input: Option<RuntimeBuffer>,
     kv_key_input: Option<RuntimeBuffer>,
     kv_value_input: Option<RuntimeBuffer>,
     attention_input_norm_weight: Option<RuntimeBuffer>,
@@ -1203,6 +1202,7 @@ impl Bf16MatvecRuntime {
             mlp_pre_normed: None,
             mlp_post_norm_weight: None,
             mlp_post_normed: None,
+            ple_input: None,
             kv_key_input: None,
             kv_value_input: None,
             attention_input_norm_weight: None,
@@ -1241,6 +1241,7 @@ impl Bf16MatvecRuntime {
             &self.mlp_pre_normed,
             &self.mlp_post_norm_weight,
             &self.mlp_post_normed,
+            &self.ple_input,
             &self.kv_key_input,
             &self.kv_value_input,
             &self.attention_input_norm_weight,
@@ -1511,9 +1512,7 @@ impl Bf16MatvecRuntime {
         profile.output_decode_validate_ns = profile
             .output_decode_validate_ns
             .saturating_add(output_decode_validate_ns);
-        profile.primitive_ns = profile
-            .primitive_ns
-            .saturating_add(primitive_ns);
+        profile.primitive_ns = profile.primitive_ns.saturating_add(primitive_ns);
         profile.matvec_calls = profile.matvec_calls.saturating_add(1);
         profile.matvec.record(
             primitive_ns,
@@ -1595,9 +1594,7 @@ impl Bf16MatvecRuntime {
         profile.output_decode_validate_ns = profile
             .output_decode_validate_ns
             .saturating_add(output_decode_validate_ns);
-        profile.primitive_ns = profile
-            .primitive_ns
-            .saturating_add(primitive_ns);
+        profile.primitive_ns = profile.primitive_ns.saturating_add(primitive_ns);
         profile.row_calls = profile.row_calls.saturating_add(1);
         profile.bf16_row.record(
             primitive_ns,
@@ -1625,7 +1622,11 @@ impl Bf16MatvecRuntime {
         rope: &ResidentRopeDescriptor,
         position: usize,
     ) -> Result<(), String> {
-        if env::var(GEMMA4_VALIDATE_PROPORTIONAL_ROPE_ENV).ok().as_deref() != Some("1") {
+        if env::var(GEMMA4_VALIDATE_PROPORTIONAL_ROPE_ENV)
+            .ok()
+            .as_deref()
+            != Some("1")
+        {
             return Ok(());
         }
         let ResidentRopeKind::Proportional = rope.kind else {
@@ -1640,7 +1641,9 @@ impl Bf16MatvecRuntime {
             .checked_mul(head_dim)
             .ok_or_else(|| "Gemma proportional RoPE validation shape overflows".to_string())?;
         if values.len() != expected_elements {
-            return Err("Gemma proportional RoPE validation input shape disagrees with heads".into());
+            return Err(
+                "Gemma proportional RoPE validation input shape disagrees with heads".into(),
+            );
         }
         let bytes = expected_elements
             .checked_mul(std::mem::size_of::<f32>())
@@ -1697,17 +1700,22 @@ impl Bf16MatvecRuntime {
             self.rope_validation.max_rel = self.rope_validation.max_rel.max(rel);
             let channel = index % head_dim;
             if channel < active_pairs || (half..half + active_pairs).contains(&channel) {
-                self.rope_validation.rotated_max_abs = self.rope_validation.rotated_max_abs.max(abs);
-                self.rope_validation.rotated_max_rel = self.rope_validation.rotated_max_rel.max(rel);
+                self.rope_validation.rotated_max_abs =
+                    self.rope_validation.rotated_max_abs.max(abs);
+                self.rope_validation.rotated_max_rel =
+                    self.rope_validation.rotated_max_rel.max(rel);
             } else {
-                self.rope_validation.unrotated_max_abs = self.rope_validation.unrotated_max_abs.max(abs);
-                self.rope_validation.unrotated_max_rel = self.rope_validation.unrotated_max_rel.max(rel);
+                self.rope_validation.unrotated_max_abs =
+                    self.rope_validation.unrotated_max_abs.max(abs);
+                self.rope_validation.unrotated_max_rel =
+                    self.rope_validation.unrotated_max_rel.max(rel);
             }
         }
         self.rope_validation.calls = self.rope_validation.calls.saturating_add(1);
         self.rope_validation.elements = self.rope_validation.elements.saturating_add(
-            u64::try_from(expected_elements)
-                .map_err(|_| "Gemma proportional RoPE validation elements exceed u64".to_string())?,
+            u64::try_from(expected_elements).map_err(|_| {
+                "Gemma proportional RoPE validation elements exceed u64".to_string()
+            })?,
         );
         Ok(())
     }
@@ -1725,46 +1733,107 @@ impl Bf16MatvecRuntime {
         input: &[f32],
     ) -> Result<Vec<f32>, String> {
         if input.len() != hidden {
-            return Err(format!("Gemma4 dense MLP input width mismatch: expected {hidden}, got {}", input.len()));
+            return Err(format!(
+                "Gemma4 dense MLP input width mismatch: expected {hidden}, got {}",
+                input.len()
+            ));
         }
         let input_bytes = encode_f32_to_bytes(input);
-        let intermediate_bytes = intermediate.checked_mul(std::mem::size_of::<f32>())
+        let intermediate_bytes = intermediate
+            .checked_mul(std::mem::size_of::<f32>())
             .ok_or_else(|| "Gemma4 dense MLP intermediate bytes overflow".to_string())?;
-        let output_bytes = hidden.checked_mul(std::mem::size_of::<f32>())
+        let output_bytes = hidden
+            .checked_mul(std::mem::size_of::<f32>())
             .ok_or_else(|| "Gemma4 dense MLP output bytes overflow".to_string())?;
-        Self::ensure_buffer(&mut self.context, &mut self.resident_input, input_bytes.len(), "dense MLP input", &mut self.resident_host_profile)?;
-        Self::ensure_buffer(&mut self.context, &mut self.mlp_gate, intermediate_bytes, "dense MLP gate", &mut self.resident_host_profile)?;
-        Self::ensure_buffer(&mut self.context, &mut self.mlp_up, intermediate_bytes, "dense MLP up", &mut self.resident_host_profile)?;
-        Self::ensure_buffer(&mut self.context, &mut self.mlp_activated, intermediate_bytes, "dense MLP activated", &mut self.resident_host_profile)?;
-        Self::ensure_buffer(&mut self.context, &mut self.resident_output, output_bytes, "dense MLP output", &mut self.resident_host_profile)?;
-        let input_buffer = self.resident_input.as_mut().expect("dense MLP input allocated");
+        Self::ensure_buffer(
+            &mut self.context,
+            &mut self.resident_input,
+            input_bytes.len(),
+            "dense MLP input",
+            &mut self.resident_host_profile,
+        )?;
+        Self::ensure_buffer(
+            &mut self.context,
+            &mut self.mlp_gate,
+            intermediate_bytes,
+            "dense MLP gate",
+            &mut self.resident_host_profile,
+        )?;
+        Self::ensure_buffer(
+            &mut self.context,
+            &mut self.mlp_up,
+            intermediate_bytes,
+            "dense MLP up",
+            &mut self.resident_host_profile,
+        )?;
+        Self::ensure_buffer(
+            &mut self.context,
+            &mut self.mlp_activated,
+            intermediate_bytes,
+            "dense MLP activated",
+            &mut self.resident_host_profile,
+        )?;
+        Self::ensure_buffer(
+            &mut self.context,
+            &mut self.resident_output,
+            output_bytes,
+            "dense MLP output",
+            &mut self.resident_host_profile,
+        )?;
+        let input_buffer = self
+            .resident_input
+            .as_mut()
+            .expect("dense MLP input allocated");
         input_buffer.copy_from_host(0, &input_bytes, Some(&mut self.stream))?;
-        matvec_bf16_f32(gate_matrix, input_buffer, intermediate, hidden,
-            self.mlp_gate.as_mut().expect("dense MLP gate allocated"), Some(&mut self.stream))?;
-        matvec_bf16_f32(up_matrix, input_buffer, intermediate, hidden,
-            self.mlp_up.as_mut().expect("dense MLP up allocated"), Some(&mut self.stream))?;
+        matvec_bf16_f32(
+            gate_matrix,
+            input_buffer,
+            intermediate,
+            hidden,
+            self.mlp_gate.as_mut().expect("dense MLP gate allocated"),
+            Some(&mut self.stream),
+        )?;
+        matvec_bf16_f32(
+            up_matrix,
+            input_buffer,
+            intermediate,
+            hidden,
+            self.mlp_up.as_mut().expect("dense MLP up allocated"),
+            Some(&mut self.stream),
+        )?;
         gelu_tanh_mul_f32(
             self.mlp_gate.as_ref().expect("dense MLP gate allocated"),
             self.mlp_up.as_ref().expect("dense MLP up allocated"),
             intermediate,
-            self.mlp_activated.as_mut().expect("dense MLP activated allocated"),
+            self.mlp_activated
+                .as_mut()
+                .expect("dense MLP activated allocated"),
             Some(&mut self.stream),
         )?;
         matvec_bf16_f32(
             down_matrix,
-            self.mlp_activated.as_ref().expect("dense MLP activated allocated"),
+            self.mlp_activated
+                .as_ref()
+                .expect("dense MLP activated allocated"),
             hidden,
             intermediate,
-            self.resident_output.as_mut().expect("dense MLP output allocated"),
+            self.resident_output
+                .as_mut()
+                .expect("dense MLP output allocated"),
             Some(&mut self.stream),
         )?;
         let mut host_output = vec![0_u8; output_bytes];
-        self.resident_output.as_mut().expect("dense MLP output allocated")
+        self.resident_output
+            .as_mut()
+            .expect("dense MLP output allocated")
             .copy_to_host(0, &mut host_output, Some(&mut self.stream))?;
         self.stream.synchronize()?;
         let output = decode_f32_le_values(&host_output);
         if output.len() != hidden || output.iter().any(|value| !value.is_finite()) {
-            return Err("Gemma4 dense MLP resident region returned non-finite or malformed F32 output".into());
+            return Err(
+                "Gemma4 dense MLP resident region returned non-finite or malformed F32 output"
+                    .into(),
+            );
         }
         if env::var(GEMMA4_VALIDATE_DEVICE_MLP_ENV).ok().as_deref() == Some("1") {
             let gate = self.matvec_resident(gate_matrix, intermediate, hidden, input)?;
@@ -1780,12 +1849,15 @@ impl Bf16MatvecRuntime {
             }
             self.mlp_validation.calls = self.mlp_validation.calls.saturating_add(1);
             self.mlp_validation.elements = self.mlp_validation.elements.saturating_add(
-                u64::try_from(output.len()).map_err(|_| "Gemma4 MLP validation elements exceed u64".to_string())?,
+                u64::try_from(output.len())
+                    .map_err(|_| "Gemma4 MLP validation elements exceed u64".to_string())?,
             );
         }
-        let matrix_bytes = |rows: usize, cols: usize| rows.checked_mul(cols)
-            .and_then(|elements| elements.checked_mul(std::mem::size_of::<u16>()))
-            .ok_or_else(|| "Gemma4 dense MLP logical byte count overflows".to_string());
+        let matrix_bytes = |rows: usize, cols: usize| {
+            rows.checked_mul(cols)
+                .and_then(|elements| elements.checked_mul(std::mem::size_of::<u16>()))
+                .ok_or_else(|| "Gemma4 dense MLP logical byte count overflows".to_string())
+        };
         self.account_resident_weight_read(matrix_bytes(intermediate, hidden)?, true)?;
         self.account_resident_weight_read(matrix_bytes(intermediate, hidden)?, true)?;
         self.account_resident_weight_read(matrix_bytes(hidden, intermediate)?, true)?;
@@ -2014,10 +2086,15 @@ impl Bf16MatvecRuntime {
         if env::var(GEMMA4_VALIDATE_DEVICE_MLP_ENV).ok().as_deref() == Some("1") {
             let pre_weight = self.bf16_row_resident(pre_feedforward_weight, 1, hidden, 0)?;
             let feedforward_input = rms_norm(attention_residual, Some(&pre_weight), epsilon)?;
-            let gate = self.matvec_resident(gate_matrix, intermediate, hidden, &feedforward_input)?;
+            let gate =
+                self.matvec_resident(gate_matrix, intermediate, hidden, &feedforward_input)?;
             let up = self.matvec_resident(up_matrix, intermediate, hidden, &feedforward_input)?;
             let mut activated = gelu_pytorch_tanh(&gate)?;
-            multiply_in_place(&mut activated, &up, "Gemma4 MLP norm-residual validation product")?;
+            multiply_in_place(
+                &mut activated,
+                &up,
+                "Gemma4 MLP norm-residual validation product",
+            )?;
             let mlp = self.matvec_resident(down_matrix, hidden, intermediate, &activated)?;
             let post_weight = self.bf16_row_resident(post_feedforward_weight, 1, hidden, 0)?;
             let post_feedforward = rms_norm(&mlp, Some(&post_weight), epsilon)?;
@@ -2047,6 +2124,185 @@ impl Bf16MatvecRuntime {
         self.account_resident_weight_read(matrix_bytes(intermediate, hidden)?, true)?;
         self.account_resident_weight_read(matrix_bytes(intermediate, hidden)?, true)?;
         self.account_resident_weight_read(matrix_bytes(hidden, intermediate)?, true)?;
+        self.account_resident_weight_read(matrix_bytes(1, hidden)?, false)?;
+        Ok(output)
+    }
+
+    /// One complete per-layer-embedding update.  The PLE gate/projection and
+    /// every activation-side operation between them stay on the device.  The
+    /// only activation boundary is the completed layer output, retained for
+    /// the adjacent attention region until that region is joined in a later
+    /// growth step.
+    fn ple_norm_residual_resident(
+        &mut self,
+        gate_matrix: &RuntimeBuffer,
+        projection_matrix: &RuntimeBuffer,
+        post_weight: &RuntimeBuffer,
+        hidden: usize,
+        ple_dim: usize,
+        epsilon: f32,
+        mlp_residual: &[f32],
+        per_layer_input: &[f32],
+    ) -> Result<Vec<f32>, String> {
+        if mlp_residual.len() != hidden || per_layer_input.len() != ple_dim {
+            return Err(format!(
+                "Gemma4 resident PLE shape mismatch: residual={} expected={hidden}, input={} expected={ple_dim}",
+                mlp_residual.len(),
+                per_layer_input.len()
+            ));
+        }
+        let f32_bytes = std::mem::size_of::<f32>();
+        let hidden_bytes = hidden
+            .checked_mul(f32_bytes)
+            .ok_or_else(|| "Gemma4 resident PLE hidden bytes overflow".to_string())?;
+        let ple_bytes = ple_dim
+            .checked_mul(f32_bytes)
+            .ok_or_else(|| "Gemma4 resident PLE input bytes overflow".to_string())?;
+        for (slot, bytes, label) in [
+            (
+                &mut self.resident_input,
+                hidden_bytes,
+                "resident PLE residual",
+            ),
+            (&mut self.ple_input, ple_bytes, "resident PLE input"),
+            (&mut self.mlp_gate, ple_bytes, "resident PLE gate"),
+            (
+                &mut self.mlp_activated,
+                ple_bytes,
+                "resident PLE activated gate",
+            ),
+            (
+                &mut self.resident_output,
+                hidden_bytes,
+                "resident PLE projection",
+            ),
+            (
+                &mut self.mlp_post_norm_weight,
+                hidden_bytes,
+                "resident PLE post gamma",
+            ),
+            (
+                &mut self.mlp_post_normed,
+                hidden_bytes,
+                "resident PLE post norm",
+            ),
+            (
+                &mut self.mlp_pre_normed,
+                hidden_bytes,
+                "resident PLE residual output",
+            ),
+        ] {
+            Self::ensure_buffer(
+                &mut self.context,
+                slot,
+                bytes,
+                label,
+                &mut self.resident_host_profile,
+            )?;
+        }
+        self.resident_input
+            .as_mut()
+            .expect("resident PLE residual allocated")
+            .copy_from_host(
+                0,
+                &encode_f32_to_bytes(mlp_residual),
+                Some(&mut self.stream),
+            )?;
+        self.ple_input
+            .as_mut()
+            .expect("resident PLE input allocated")
+            .copy_from_host(
+                0,
+                &encode_f32_to_bytes(per_layer_input),
+                Some(&mut self.stream),
+            )?;
+        matvec_bf16_f32(
+            gate_matrix,
+            self.resident_input
+                .as_ref()
+                .expect("resident PLE residual allocated"),
+            ple_dim,
+            hidden,
+            self.mlp_gate.as_mut().expect("resident PLE gate allocated"),
+            Some(&mut self.stream),
+        )?;
+        gelu_tanh_mul_f32(
+            self.mlp_gate.as_ref().expect("resident PLE gate allocated"),
+            self.ple_input
+                .as_ref()
+                .expect("resident PLE input allocated"),
+            ple_dim,
+            self.mlp_activated
+                .as_mut()
+                .expect("resident PLE activated gate allocated"),
+            Some(&mut self.stream),
+        )?;
+        matvec_bf16_f32(
+            projection_matrix,
+            self.mlp_activated
+                .as_ref()
+                .expect("resident PLE activated gate allocated"),
+            hidden,
+            ple_dim,
+            self.resident_output
+                .as_mut()
+                .expect("resident PLE projection allocated"),
+            Some(&mut self.stream),
+        )?;
+        bf16_row_f32(
+            post_weight,
+            1,
+            hidden,
+            0,
+            self.mlp_post_norm_weight
+                .as_mut()
+                .expect("resident PLE post gamma allocated"),
+            Some(&mut self.stream),
+        )?;
+        rmsnorm_f32(
+            self.resident_output
+                .as_ref()
+                .expect("resident PLE projection allocated"),
+            self.mlp_post_norm_weight
+                .as_ref()
+                .expect("resident PLE post gamma allocated"),
+            hidden,
+            epsilon,
+            self.mlp_post_normed
+                .as_mut()
+                .expect("resident PLE post norm allocated"),
+            Some(&mut self.stream),
+        )?;
+        add_f32(
+            self.resident_input
+                .as_ref()
+                .expect("resident PLE residual allocated"),
+            self.mlp_post_normed
+                .as_ref()
+                .expect("resident PLE post norm allocated"),
+            hidden,
+            self.mlp_pre_normed
+                .as_mut()
+                .expect("resident PLE residual output allocated"),
+            Some(&mut self.stream),
+        )?;
+        let mut bytes = vec![0_u8; hidden_bytes];
+        self.mlp_pre_normed
+            .as_mut()
+            .expect("resident PLE residual output allocated")
+            .copy_to_host(0, &mut bytes, Some(&mut self.stream))?;
+        self.stream.synchronize()?;
+        let output = decode_f32_le_values(&bytes);
+        if output.len() != hidden || output.iter().any(|value| !value.is_finite()) {
+            return Err("Gemma4 resident PLE returned non-finite or malformed F32 output".into());
+        }
+        let matrix_bytes = |rows: usize, cols: usize| {
+            rows.checked_mul(cols)
+                .and_then(|elements| elements.checked_mul(std::mem::size_of::<u16>()))
+                .ok_or_else(|| "Gemma4 resident PLE logical bytes overflow".to_string())
+        };
+        self.account_resident_weight_read(matrix_bytes(ple_dim, hidden)?, true)?;
+        self.account_resident_weight_read(matrix_bytes(hidden, ple_dim)?, true)?;
         self.account_resident_weight_read(matrix_bytes(1, hidden)?, false)?;
         Ok(output)
     }
@@ -2464,109 +2720,407 @@ impl Bf16MatvecRuntime {
         shared_cache: Option<&Gemma4DeviceKvCache>,
     ) -> Result<Vec<f32>, String> {
         if residual.len() != hidden {
-            return Err(format!("Gemma4 resident attention residual width mismatch: expected {hidden}, got {}", residual.len()));
+            return Err(format!(
+                "Gemma4 resident attention residual width mismatch: expected {hidden}, got {}",
+                residual.len()
+            ));
         }
         let owns_cache = own_cache.is_some();
-        let q_width = q_heads.checked_mul(head_dim).ok_or_else(|| "Gemma4 resident Q width overflows".to_string())?;
-        let kv_width = kv_heads.checked_mul(head_dim).ok_or_else(|| "Gemma4 resident KV width overflows".to_string())?;
+        let q_width = q_heads
+            .checked_mul(head_dim)
+            .ok_or_else(|| "Gemma4 resident Q width overflows".to_string())?;
+        let kv_width = kv_heads
+            .checked_mul(head_dim)
+            .ok_or_else(|| "Gemma4 resident KV width overflows".to_string())?;
         let rotary_dim = match rope.kind {
-            ResidentRopeKind::Proportional => ((rope.partial_rotary_factor.unwrap_or(1.0) * head_dim as f32) / 2.0).floor() as usize * 2,
+            ResidentRopeKind::Proportional => {
+                ((rope.partial_rotary_factor.unwrap_or(1.0) * head_dim as f32) / 2.0).floor()
+                    as usize
+                    * 2
+            }
             ResidentRopeKind::Default => rope.rotary_dim.unwrap_or(head_dim),
-            ResidentRopeKind::Mrope => return Err("Gemma resident attention does not support mRoPE".into()),
+            ResidentRopeKind::Mrope => {
+                return Err("Gemma resident attention does not support mRoPE".into());
+            }
         };
-        if rotary_dim == 0 { return Err("Gemma resident attention RoPE has zero rotary width".into()); }
-        if own_cache.is_some() != (k_matrix.is_some() && v_matrix.is_some() && k_norm_weight.is_some()) {
-            return Err("Gemma resident attention K/V projection/cache contract is inconsistent".into());
+        if rotary_dim == 0 {
+            return Err("Gemma resident attention RoPE has zero rotary width".into());
+        }
+        if own_cache.is_some()
+            != (k_matrix.is_some() && v_matrix.is_some() && k_norm_weight.is_some())
+        {
+            return Err(
+                "Gemma resident attention K/V projection/cache contract is inconsistent".into(),
+            );
         }
         if own_cache.is_none() && shared_cache.is_none() {
             return Err("Gemma resident attention needs an own or shared device KV cache".into());
         }
-        let hidden_bytes = hidden.checked_mul(std::mem::size_of::<f32>()).ok_or_else(|| "Gemma resident attention hidden bytes overflow".to_string())?;
-        let q_bytes = q_width.checked_mul(std::mem::size_of::<f32>()).ok_or_else(|| "Gemma resident attention Q bytes overflow".to_string())?;
-        let kv_bytes = kv_width.checked_mul(std::mem::size_of::<f32>()).ok_or_else(|| "Gemma resident attention KV bytes overflow".to_string())?;
+        let hidden_bytes = hidden
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| "Gemma resident attention hidden bytes overflow".to_string())?;
+        let q_bytes = q_width
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| "Gemma resident attention Q bytes overflow".to_string())?;
+        let kv_bytes = kv_width
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| "Gemma resident attention KV bytes overflow".to_string())?;
         for (slot, bytes, label) in [
-            (&mut self.resident_input, hidden_bytes, "resident attention residual"),
-            (&mut self.attention_input_norm_weight, hidden_bytes, "resident attention input gamma"),
-            (&mut self.attention_input_normed, hidden_bytes, "resident attention input norm"),
-            (&mut self.attention_q_norm_weight, head_dim * 4, "resident attention Q gamma"),
-            (&mut self.attention_post_norm_weight, hidden_bytes, "resident attention post gamma"),
+            (
+                &mut self.resident_input,
+                hidden_bytes,
+                "resident attention residual",
+            ),
+            (
+                &mut self.attention_input_norm_weight,
+                hidden_bytes,
+                "resident attention input gamma",
+            ),
+            (
+                &mut self.attention_input_normed,
+                hidden_bytes,
+                "resident attention input norm",
+            ),
+            (
+                &mut self.attention_q_norm_weight,
+                head_dim * 4,
+                "resident attention Q gamma",
+            ),
+            (
+                &mut self.attention_post_norm_weight,
+                hidden_bytes,
+                "resident attention post gamma",
+            ),
             (&mut self.attention_query, q_bytes, "resident attention Q"),
-            (&mut self.attention_query_normed, q_bytes, "resident attention normalized Q"),
-            (&mut self.attention_output, q_bytes, "resident attention output"),
-            (&mut self.resident_output, hidden_bytes, "resident attention O projection"),
-            (&mut self.mlp_pre_normed, hidden_bytes, "resident attention residual output"),
+            (
+                &mut self.attention_query_normed,
+                q_bytes,
+                "resident attention normalized Q",
+            ),
+            (
+                &mut self.attention_output,
+                q_bytes,
+                "resident attention output",
+            ),
+            (
+                &mut self.resident_output,
+                hidden_bytes,
+                "resident attention O projection",
+            ),
+            (
+                &mut self.mlp_pre_normed,
+                hidden_bytes,
+                "resident attention residual output",
+            ),
         ] {
-            Self::ensure_buffer(&mut self.context, slot, bytes, label, &mut self.resident_host_profile)?;
+            Self::ensure_buffer(
+                &mut self.context,
+                slot,
+                bytes,
+                label,
+                &mut self.resident_host_profile,
+            )?;
         }
         if owns_cache {
             for (slot, bytes, label) in [
-                (&mut self.attention_k_norm_weight, head_dim * 4, "resident attention K gamma"),
-                (&mut self.attention_value_norm_weight, head_dim * 4, "resident attention V gamma"),
+                (
+                    &mut self.attention_k_norm_weight,
+                    head_dim * 4,
+                    "resident attention K gamma",
+                ),
+                (
+                    &mut self.attention_value_norm_weight,
+                    head_dim * 4,
+                    "resident attention V gamma",
+                ),
                 (&mut self.attention_key, kv_bytes, "resident attention K"),
-                (&mut self.attention_key_normed, kv_bytes, "resident attention normalized K"),
+                (
+                    &mut self.attention_key_normed,
+                    kv_bytes,
+                    "resident attention normalized K",
+                ),
                 (&mut self.attention_value, kv_bytes, "resident attention V"),
-                (&mut self.attention_value_normed, kv_bytes, "resident attention normalized V"),
+                (
+                    &mut self.attention_value_normed,
+                    kv_bytes,
+                    "resident attention normalized V",
+                ),
             ] {
-                Self::ensure_buffer(&mut self.context, slot, bytes, label, &mut self.resident_host_profile)?;
+                Self::ensure_buffer(
+                    &mut self.context,
+                    slot,
+                    bytes,
+                    label,
+                    &mut self.resident_host_profile,
+                )?;
             }
         }
-        self.resident_input.as_mut().expect("resident attention residual allocated")
+        self.resident_input
+            .as_mut()
+            .expect("resident attention residual allocated")
             .copy_from_host(0, &encode_f32_to_bytes(residual), Some(&mut self.stream))?;
-        bf16_row_f32(input_weight, 1, hidden, 0, self.attention_input_norm_weight.as_mut().unwrap(), Some(&mut self.stream))?;
-        rmsnorm_f32(self.resident_input.as_ref().unwrap(), self.attention_input_norm_weight.as_ref().unwrap(), hidden, epsilon, self.attention_input_normed.as_mut().unwrap(), Some(&mut self.stream))?;
-        matvec_bf16_f32(q_matrix, self.attention_input_normed.as_ref().unwrap(), q_width, hidden, self.attention_query.as_mut().unwrap(), Some(&mut self.stream))?;
-        bf16_row_f32(q_norm_weight, 1, head_dim, 0, self.attention_q_norm_weight.as_mut().unwrap(), Some(&mut self.stream))?;
-        segmented_rmsnorm_f32(self.attention_query.as_ref().unwrap(), self.attention_q_norm_weight.as_ref().unwrap(), q_heads, head_dim, epsilon, self.attention_query_normed.as_mut().unwrap(), Some(&mut self.stream))?;
+        bf16_row_f32(
+            input_weight,
+            1,
+            hidden,
+            0,
+            self.attention_input_norm_weight.as_mut().unwrap(),
+            Some(&mut self.stream),
+        )?;
+        rmsnorm_f32(
+            self.resident_input.as_ref().unwrap(),
+            self.attention_input_norm_weight.as_ref().unwrap(),
+            hidden,
+            epsilon,
+            self.attention_input_normed.as_mut().unwrap(),
+            Some(&mut self.stream),
+        )?;
+        matvec_bf16_f32(
+            q_matrix,
+            self.attention_input_normed.as_ref().unwrap(),
+            q_width,
+            hidden,
+            self.attention_query.as_mut().unwrap(),
+            Some(&mut self.stream),
+        )?;
+        bf16_row_f32(
+            q_norm_weight,
+            1,
+            head_dim,
+            0,
+            self.attention_q_norm_weight.as_mut().unwrap(),
+            Some(&mut self.stream),
+        )?;
+        segmented_rmsnorm_f32(
+            self.attention_query.as_ref().unwrap(),
+            self.attention_q_norm_weight.as_ref().unwrap(),
+            q_heads,
+            head_dim,
+            epsilon,
+            self.attention_query_normed.as_mut().unwrap(),
+            Some(&mut self.stream),
+        )?;
         match rope.kind {
-            ResidentRopeKind::Proportional => gemma_proportional_rope_f32(self.attention_query_normed.as_ref().unwrap(), 1, q_heads, head_dim, rotary_dim, position, rope.theta, self.attention_query.as_mut().unwrap(), Some(&mut self.stream))?,
-            ResidentRopeKind::Default => rope_f32(self.attention_query_normed.as_ref().unwrap(), 1, q_heads, head_dim, rotary_dim, position, rope.theta, self.attention_query.as_mut().unwrap(), Some(&mut self.stream))?,
+            ResidentRopeKind::Proportional => gemma_proportional_rope_f32(
+                self.attention_query_normed.as_ref().unwrap(),
+                1,
+                q_heads,
+                head_dim,
+                rotary_dim,
+                position,
+                rope.theta,
+                self.attention_query.as_mut().unwrap(),
+                Some(&mut self.stream),
+            )?,
+            ResidentRopeKind::Default => rope_f32(
+                self.attention_query_normed.as_ref().unwrap(),
+                1,
+                q_heads,
+                head_dim,
+                rotary_dim,
+                position,
+                rope.theta,
+                self.attention_query.as_mut().unwrap(),
+                Some(&mut self.stream),
+            )?,
             ResidentRopeKind::Mrope => unreachable!(),
         }
 
         if let Some(cache) = own_cache {
-            matvec_bf16_f32(k_matrix.unwrap(), self.attention_input_normed.as_ref().unwrap(), kv_width, hidden, self.attention_key.as_mut().unwrap(), Some(&mut self.stream))?;
-            matvec_bf16_f32(v_matrix.unwrap(), self.attention_input_normed.as_ref().unwrap(), kv_width, hidden, self.attention_value.as_mut().unwrap(), Some(&mut self.stream))?;
-            bf16_row_f32(k_norm_weight.unwrap(), 1, head_dim, 0, self.attention_k_norm_weight.as_mut().unwrap(), Some(&mut self.stream))?;
-            self.attention_value_norm_weight.as_mut().unwrap().copy_from_host(0, &encode_f32_to_bytes(&vec![1.0_f32; head_dim]), Some(&mut self.stream))?;
-            segmented_rmsnorm_f32(self.attention_key.as_ref().unwrap(), self.attention_k_norm_weight.as_ref().unwrap(), kv_heads, head_dim, epsilon, self.attention_key_normed.as_mut().unwrap(), Some(&mut self.stream))?;
+            matvec_bf16_f32(
+                k_matrix.unwrap(),
+                self.attention_input_normed.as_ref().unwrap(),
+                kv_width,
+                hidden,
+                self.attention_key.as_mut().unwrap(),
+                Some(&mut self.stream),
+            )?;
+            matvec_bf16_f32(
+                v_matrix.unwrap(),
+                self.attention_input_normed.as_ref().unwrap(),
+                kv_width,
+                hidden,
+                self.attention_value.as_mut().unwrap(),
+                Some(&mut self.stream),
+            )?;
+            bf16_row_f32(
+                k_norm_weight.unwrap(),
+                1,
+                head_dim,
+                0,
+                self.attention_k_norm_weight.as_mut().unwrap(),
+                Some(&mut self.stream),
+            )?;
+            self.attention_value_norm_weight
+                .as_mut()
+                .unwrap()
+                .copy_from_host(
+                    0,
+                    &encode_f32_to_bytes(&vec![1.0_f32; head_dim]),
+                    Some(&mut self.stream),
+                )?;
+            segmented_rmsnorm_f32(
+                self.attention_key.as_ref().unwrap(),
+                self.attention_k_norm_weight.as_ref().unwrap(),
+                kv_heads,
+                head_dim,
+                epsilon,
+                self.attention_key_normed.as_mut().unwrap(),
+                Some(&mut self.stream),
+            )?;
             match rope.kind {
-                ResidentRopeKind::Proportional => gemma_proportional_rope_f32(self.attention_key_normed.as_ref().unwrap(), 1, kv_heads, head_dim, rotary_dim, position, rope.theta, self.attention_key.as_mut().unwrap(), Some(&mut self.stream))?,
-                ResidentRopeKind::Default => rope_f32(self.attention_key_normed.as_ref().unwrap(), 1, kv_heads, head_dim, rotary_dim, position, rope.theta, self.attention_key.as_mut().unwrap(), Some(&mut self.stream))?,
+                ResidentRopeKind::Proportional => gemma_proportional_rope_f32(
+                    self.attention_key_normed.as_ref().unwrap(),
+                    1,
+                    kv_heads,
+                    head_dim,
+                    rotary_dim,
+                    position,
+                    rope.theta,
+                    self.attention_key.as_mut().unwrap(),
+                    Some(&mut self.stream),
+                )?,
+                ResidentRopeKind::Default => rope_f32(
+                    self.attention_key_normed.as_ref().unwrap(),
+                    1,
+                    kv_heads,
+                    head_dim,
+                    rotary_dim,
+                    position,
+                    rope.theta,
+                    self.attention_key.as_mut().unwrap(),
+                    Some(&mut self.stream),
+                )?,
                 ResidentRopeKind::Mrope => unreachable!(),
             }
-            segmented_rmsnorm_f32(self.attention_value.as_ref().unwrap(), self.attention_value_norm_weight.as_ref().unwrap(), kv_heads, head_dim, epsilon, self.attention_value_normed.as_mut().unwrap(), Some(&mut self.stream))?;
+            segmented_rmsnorm_f32(
+                self.attention_value.as_ref().unwrap(),
+                self.attention_value_norm_weight.as_ref().unwrap(),
+                kv_heads,
+                head_dim,
+                epsilon,
+                self.attention_value_normed.as_mut().unwrap(),
+                Some(&mut self.stream),
+            )?;
             let write_position = cache.write_position()?;
             let write_table = cache.write_table.as_ref().unwrap_or(&cache.read_table);
-            paged_kv_write_f32(self.attention_key.as_ref().unwrap(), self.attention_value_normed.as_ref().unwrap(), write_table, write_position, GEMMA4_DEVICE_KV_BLOCK_SIZE, cache.capacity_tokens, cache.kv_heads, cache.head_dim, cache.head_dim, &mut cache.key, &mut cache.value, Some(&mut self.stream))?;
+            paged_kv_write_f32(
+                self.attention_key.as_ref().unwrap(),
+                self.attention_value_normed.as_ref().unwrap(),
+                write_table,
+                write_position,
+                GEMMA4_DEVICE_KV_BLOCK_SIZE,
+                cache.capacity_tokens,
+                cache.kv_heads,
+                cache.head_dim,
+                cache.head_dim,
+                &mut cache.key,
+                &mut cache.value,
+                Some(&mut self.stream),
+            )?;
             cache.record_append(&mut self.stream)?;
-            self.account_device_kv(0, kv_bytes.checked_mul(2).ok_or_else(|| "Gemma resident KV write bytes overflow".to_string())?, false)?;
+            self.account_device_kv(
+                0,
+                kv_bytes
+                    .checked_mul(2)
+                    .ok_or_else(|| "Gemma resident KV write bytes overflow".to_string())?,
+                false,
+            )?;
             self.attention_device_resident(cache, q_heads, kv_heads, head_dim)?;
         } else {
             self.attention_device_resident(shared_cache.unwrap(), q_heads, kv_heads, head_dim)?;
         }
-        matvec_bf16_f32(o_matrix, self.attention_output.as_ref().unwrap(), hidden, q_width, self.resident_output.as_mut().unwrap(), Some(&mut self.stream))?;
-        bf16_row_f32(post_weight, 1, hidden, 0, self.attention_post_norm_weight.as_mut().unwrap(), Some(&mut self.stream))?;
-        rmsnorm_f32(self.resident_output.as_ref().unwrap(), self.attention_post_norm_weight.as_ref().unwrap(), hidden, epsilon, self.attention_input_normed.as_mut().unwrap(), Some(&mut self.stream))?;
-        add_f32(self.resident_input.as_ref().unwrap(), self.attention_input_normed.as_ref().unwrap(), hidden, self.mlp_pre_normed.as_mut().unwrap(), Some(&mut self.stream))?;
+        matvec_bf16_f32(
+            o_matrix,
+            self.attention_output.as_ref().unwrap(),
+            hidden,
+            q_width,
+            self.resident_output.as_mut().unwrap(),
+            Some(&mut self.stream),
+        )?;
+        bf16_row_f32(
+            post_weight,
+            1,
+            hidden,
+            0,
+            self.attention_post_norm_weight.as_mut().unwrap(),
+            Some(&mut self.stream),
+        )?;
+        rmsnorm_f32(
+            self.resident_output.as_ref().unwrap(),
+            self.attention_post_norm_weight.as_ref().unwrap(),
+            hidden,
+            epsilon,
+            self.attention_input_normed.as_mut().unwrap(),
+            Some(&mut self.stream),
+        )?;
+        add_f32(
+            self.resident_input.as_ref().unwrap(),
+            self.attention_input_normed.as_ref().unwrap(),
+            hidden,
+            self.mlp_pre_normed.as_mut().unwrap(),
+            Some(&mut self.stream),
+        )?;
         let mut bytes = vec![0_u8; hidden_bytes];
-        self.mlp_pre_normed.as_mut().unwrap().copy_to_host(0, &mut bytes, Some(&mut self.stream))?;
+        self.mlp_pre_normed.as_mut().unwrap().copy_to_host(
+            0,
+            &mut bytes,
+            Some(&mut self.stream),
+        )?;
         self.stream.synchronize()?;
         let output = decode_f32_le_values(&bytes);
-        if output.iter().any(|value| !value.is_finite()) { return Err("Gemma resident attention region produced non-finite output".into()); }
-        let matrix_bytes = |rows: usize, cols: usize| rows.checked_mul(cols).and_then(|n| n.checked_mul(2)).ok_or_else(|| "Gemma resident attention logical bytes overflow".to_string());
+        if output.iter().any(|value| !value.is_finite()) {
+            return Err("Gemma resident attention region produced non-finite output".into());
+        }
+        let matrix_bytes = |rows: usize, cols: usize| {
+            rows.checked_mul(cols)
+                .and_then(|n| n.checked_mul(2))
+                .ok_or_else(|| "Gemma resident attention logical bytes overflow".to_string())
+        };
         self.account_resident_weight_read(matrix_bytes(1, hidden)?, false)?;
         self.account_resident_weight_read(matrix_bytes(q_width, hidden)?, true)?;
-        if owns_cache { self.account_resident_weight_read(matrix_bytes(kv_width, hidden)?, true)?; self.account_resident_weight_read(matrix_bytes(kv_width, hidden)?, true)?; self.account_resident_weight_read(matrix_bytes(1, head_dim)?, false)?; }
+        if owns_cache {
+            self.account_resident_weight_read(matrix_bytes(kv_width, hidden)?, true)?;
+            self.account_resident_weight_read(matrix_bytes(kv_width, hidden)?, true)?;
+            self.account_resident_weight_read(matrix_bytes(1, head_dim)?, false)?;
+        }
         self.account_resident_weight_read(matrix_bytes(1, head_dim)?, false)?;
         self.account_resident_weight_read(matrix_bytes(hidden, q_width)?, true)?;
         self.account_resident_weight_read(matrix_bytes(1, hidden)?, false)?;
         Ok(output)
     }
 
-    fn attention_device_resident(&mut self, cache: &Gemma4DeviceKvCache, q_heads: usize, kv_heads: usize, head_dim: usize) -> Result<(), String> {
-        if cache.cache_len == 0 { return Err("Gemma resident attention cache is empty".into()); }
-        paged_decode_attn_f32(self.attention_query.as_ref().unwrap(), &cache.key, &cache.value, &cache.read_table, cache.cache_len, GEMMA4_DEVICE_KV_BLOCK_SIZE, cache.capacity_tokens, q_heads, kv_heads, head_dim, head_dim, 1.0, self.attention_output.as_mut().unwrap(), Some(&mut self.stream))?;
-        let read = cache.cache_len.checked_mul(cache.width()?).and_then(|n| n.checked_mul(8)).ok_or_else(|| "Gemma resident KV read bytes overflow".to_string())?;
+    fn attention_device_resident(
+        &mut self,
+        cache: &Gemma4DeviceKvCache,
+        q_heads: usize,
+        kv_heads: usize,
+        head_dim: usize,
+    ) -> Result<(), String> {
+        if cache.cache_len == 0 {
+            return Err("Gemma resident attention cache is empty".into());
+        }
+        paged_decode_attn_f32(
+            self.attention_query.as_ref().unwrap(),
+            &cache.key,
+            &cache.value,
+            &cache.read_table,
+            cache.cache_len,
+            GEMMA4_DEVICE_KV_BLOCK_SIZE,
+            cache.capacity_tokens,
+            q_heads,
+            kv_heads,
+            head_dim,
+            head_dim,
+            1.0,
+            self.attention_output.as_mut().unwrap(),
+            Some(&mut self.stream),
+        )?;
+        let read = cache
+            .cache_len
+            .checked_mul(cache.width()?)
+            .and_then(|n| n.checked_mul(8))
+            .ok_or_else(|| "Gemma resident KV read bytes overflow".to_string())?;
         self.account_device_kv(read, 0, true)
     }
 
@@ -2663,9 +3217,7 @@ impl Bf16MatvecRuntime {
         profile.h2d_submit_ns = profile.h2d_submit_ns.saturating_add(h2d_submit_ns);
         profile.kernel_submit_ns = profile.kernel_submit_ns.saturating_add(kernel_submit_ns);
         profile.kv_table_host_ns = profile.kv_table_host_ns.saturating_add(kv_table_host_ns);
-        profile.primitive_ns = profile
-            .primitive_ns
-            .saturating_add(primitive_ns);
+        profile.primitive_ns = profile.primitive_ns.saturating_add(primitive_ns);
         profile.kv_write_calls = profile.kv_write_calls.saturating_add(1);
         profile.kv_write.record(
             primitive_ns,
@@ -2800,9 +3352,7 @@ impl Bf16MatvecRuntime {
         profile.output_decode_validate_ns = profile
             .output_decode_validate_ns
             .saturating_add(output_decode_validate_ns);
-        profile.primitive_ns = profile
-            .primitive_ns
-            .saturating_add(primitive_ns);
+        profile.primitive_ns = profile.primitive_ns.saturating_add(primitive_ns);
         profile.attention_calls = profile.attention_calls.saturating_add(1);
         profile.attention.record(
             primitive_ns,
@@ -3384,17 +3934,18 @@ impl Gemma4TextExecutor {
                 per_layer_input.len()
             ));
         }
-        let attention_residual = if env::var("ULLM_GEMMA4_DISABLE_ATTENTION_REGION").ok().as_deref() != Some("1")
+        let attention_residual = if env::var("ULLM_GEMMA4_DISABLE_ATTENTION_REGION")
+            .ok()
+            .as_deref()
+            != Some("1")
             && matches!(self.weights, Gemma4WeightStorage::Resident(_))
             && matches!(self.caches, Gemma4KvStorage::Device(_))
         {
             self.forward_attention_norm_resident(layer_index, hidden_states, position)?
         } else {
             let residual_attention = hidden_states.to_vec();
-            let input_norm_weight = self.read_weight_vector(
-                &layer_tensor(layer_index, "input_layernorm.weight"),
-                hidden,
-            )?;
+            let input_norm_weight = self
+                .read_weight_vector(&layer_tensor(layer_index, "input_layernorm.weight"), hidden)?;
             let input_norm = rms_norm(
                 hidden_states,
                 Some(&input_norm_weight),
@@ -3483,34 +4034,85 @@ impl Gemma4TextExecutor {
             add_vectors(&residual_mlp, &post_feedforward, "Gemma4 MLP residual")?
         };
 
+        let mut output = if env::var(GEMMA4_DISABLE_PLE_REGION_ENV).ok().as_deref() != Some("1") {
+            if let Gemma4WeightStorage::Resident(weights) = &self.weights {
+                let gate = weights.tensor(
+                    &layer_tensor(layer_index, "per_layer_input_gate.weight"),
+                    &[ple.input_size, hidden],
+                )?;
+                let projection = weights.tensor(
+                    &layer_tensor(layer_index, "per_layer_projection.weight"),
+                    &[hidden, ple.input_size],
+                )?;
+                let post_weight = weights.tensor(
+                    &layer_tensor(layer_index, "post_per_layer_input_norm.weight"),
+                    &[hidden],
+                )?;
+                self.matvec.ple_norm_residual_resident(
+                    &gate.buffer,
+                    &projection.buffer,
+                    &post_weight.buffer,
+                    hidden,
+                    ple.input_size,
+                    decoder.rms_norm_epsilon,
+                    &mlp_residual,
+                    per_layer_input,
+                )?
+            } else {
+                self.forward_ple_host(
+                    layer_index,
+                    hidden,
+                    ple.input_size,
+                    decoder.rms_norm_epsilon,
+                    &mlp_residual,
+                    per_layer_input,
+                )?
+            }
+        } else {
+            self.forward_ple_host(
+                layer_index,
+                hidden,
+                ple.input_size,
+                decoder.rms_norm_epsilon,
+                &mlp_residual,
+                per_layer_input,
+            )?
+        };
+        let layer_scalar =
+            self.read_weight_vector(&layer_tensor(layer_index, "layer_scalar"), 1)?[0];
+        scale_in_place(&mut output, layer_scalar, "Gemma4 layer scalar")?;
+        Ok(output)
+    }
+
+    fn forward_ple_host(
+        &mut self,
+        layer_index: usize,
+        hidden: usize,
+        ple_dim: usize,
+        epsilon: f32,
+        mlp_residual: &[f32],
+        per_layer_input: &[f32],
+    ) -> Result<Vec<f32>, String> {
         let ple_gate = self.matmul_named(
             &layer_tensor(layer_index, "per_layer_input_gate.weight"),
-            ple.input_size,
+            ple_dim,
             hidden,
-            &mlp_residual,
+            mlp_residual,
         )?;
         let mut ple_product = gelu_pytorch_tanh(&ple_gate)?;
         multiply_in_place(&mut ple_product, per_layer_input, "Gemma4 PLE gate product")?;
         let ple_projection = self.matmul_named(
             &layer_tensor(layer_index, "per_layer_projection.weight"),
             hidden,
-            ple.input_size,
+            ple_dim,
             &ple_product,
         )?;
         let post_ple_weight = self.read_weight_vector(
             &layer_tensor(layer_index, "post_per_layer_input_norm.weight"),
             hidden,
         )?;
-        let post_ple = rms_norm(
-            &ple_projection,
-            Some(&post_ple_weight),
-            decoder.rms_norm_epsilon,
-        )?;
-        let mut output = add_vectors(&mlp_residual, &post_ple, "Gemma4 PLE residual")?;
-        let layer_scalar =
-            self.read_weight_vector(&layer_tensor(layer_index, "layer_scalar"), 1)?[0];
-        scale_in_place(&mut output, layer_scalar, "Gemma4 layer scalar")?;
-        Ok(output)
+        let post_ple = rms_norm(&ple_projection, Some(&post_ple_weight), epsilon)?;
+        add_vectors(mlp_residual, &post_ple, "Gemma4 PLE residual")
     }
 
     fn forward_attention_norm_resident(
@@ -3522,31 +4124,142 @@ impl Gemma4TextExecutor {
         let decoder = self.resident_descriptor.decoder.clone();
         let layer = self.layer_descriptor(layer_index)?.clone();
         let attention = layer.attention;
-        let rope = attention.rope.clone().ok_or_else(|| format!("Gemma4 descriptor layer {layer_index} is missing RoPE"))?;
+        let rope = attention
+            .rope
+            .clone()
+            .ok_or_else(|| format!("Gemma4 descriptor layer {layer_index} is missing RoPE"))?;
         let hidden = decoder.hidden_size;
-        let q_width = attention.q_heads.checked_mul(attention.head_dim).ok_or_else(|| "Gemma resident Q width overflows".to_string())?;
-        let kv_width = attention.kv_heads.checked_mul(attention.head_dim).ok_or_else(|| "Gemma resident KV width overflows".to_string())?;
-        let weights = match &self.weights { Gemma4WeightStorage::Resident(weights) => weights, Gemma4WeightStorage::Streamed(_) => return Err("Gemma resident attention region requires resident weights".into()) };
-        let input_weight = &weights.tensor(&layer_tensor(layer_index, "input_layernorm.weight"), &[hidden])?.buffer;
-        let q_matrix = &weights.tensor(&layer_tensor(layer_index, "self_attn.q_proj.weight"), &[q_width, hidden])?.buffer;
-        let o_matrix = &weights.tensor(&layer_tensor(layer_index, "self_attn.o_proj.weight"), &[hidden, q_width])?.buffer;
-        let q_norm_weight = &weights.tensor(&layer_tensor(layer_index, "self_attn.q_norm.weight"), &[attention.head_dim])?.buffer;
-        let post_weight = &weights.tensor(&layer_tensor(layer_index, "post_attention_layernorm.weight"), &[hidden])?.buffer;
-        let shared_source = match attention.kv_cache { ResidentKvCacheMode::Own => None, ResidentKvCacheMode::SharedFrom { source_layer_index } => Some(source_layer_index), ResidentKvCacheMode::LinearState => return Err("Gemma resident attention does not support linear state".into()) };
+        let q_width = attention
+            .q_heads
+            .checked_mul(attention.head_dim)
+            .ok_or_else(|| "Gemma resident Q width overflows".to_string())?;
+        let kv_width = attention
+            .kv_heads
+            .checked_mul(attention.head_dim)
+            .ok_or_else(|| "Gemma resident KV width overflows".to_string())?;
+        let weights = match &self.weights {
+            Gemma4WeightStorage::Resident(weights) => weights,
+            Gemma4WeightStorage::Streamed(_) => {
+                return Err("Gemma resident attention region requires resident weights".into());
+            }
+        };
+        let input_weight = &weights
+            .tensor(
+                &layer_tensor(layer_index, "input_layernorm.weight"),
+                &[hidden],
+            )?
+            .buffer;
+        let q_matrix = &weights
+            .tensor(
+                &layer_tensor(layer_index, "self_attn.q_proj.weight"),
+                &[q_width, hidden],
+            )?
+            .buffer;
+        let o_matrix = &weights
+            .tensor(
+                &layer_tensor(layer_index, "self_attn.o_proj.weight"),
+                &[hidden, q_width],
+            )?
+            .buffer;
+        let q_norm_weight = &weights
+            .tensor(
+                &layer_tensor(layer_index, "self_attn.q_norm.weight"),
+                &[attention.head_dim],
+            )?
+            .buffer;
+        let post_weight = &weights
+            .tensor(
+                &layer_tensor(layer_index, "post_attention_layernorm.weight"),
+                &[hidden],
+            )?
+            .buffer;
+        let shared_source = match attention.kv_cache {
+            ResidentKvCacheMode::Own => None,
+            ResidentKvCacheMode::SharedFrom { source_layer_index } => Some(source_layer_index),
+            ResidentKvCacheMode::LinearState => {
+                return Err("Gemma resident attention does not support linear state".into());
+            }
+        };
         let (k_matrix, v_matrix, k_norm_weight) = if shared_source.is_none() {
             (
-                Some(&weights.tensor(&layer_tensor(layer_index, "self_attn.k_proj.weight"), &[kv_width, hidden])?.buffer),
-                Some(&weights.tensor(&layer_tensor(layer_index, "self_attn.v_proj.weight"), &[kv_width, hidden])?.buffer),
-                Some(&weights.tensor(&layer_tensor(layer_index, "self_attn.k_norm.weight"), &[attention.head_dim])?.buffer),
+                Some(
+                    &weights
+                        .tensor(
+                            &layer_tensor(layer_index, "self_attn.k_proj.weight"),
+                            &[kv_width, hidden],
+                        )?
+                        .buffer,
+                ),
+                Some(
+                    &weights
+                        .tensor(
+                            &layer_tensor(layer_index, "self_attn.v_proj.weight"),
+                            &[kv_width, hidden],
+                        )?
+                        .buffer,
+                ),
+                Some(
+                    &weights
+                        .tensor(
+                            &layer_tensor(layer_index, "self_attn.k_norm.weight"),
+                            &[attention.head_dim],
+                        )?
+                        .buffer,
+                ),
             )
-        } else { (None, None, None) };
-        let caches = match &mut self.caches { Gemma4KvStorage::Device(caches) => caches, Gemma4KvStorage::Host(_) => return Err("Gemma resident attention region requires device KV".into()) };
+        } else {
+            (None, None, None)
+        };
+        let caches = match &mut self.caches {
+            Gemma4KvStorage::Device(caches) => caches,
+            Gemma4KvStorage::Host(_) => {
+                return Err("Gemma resident attention region requires device KV".into());
+            }
+        };
         if let Some(source) = shared_source {
             let cache = caches.cache(source)?;
-            self.matvec.attention_norm_residual_resident(hidden_states, input_weight, q_matrix, None, None, o_matrix, q_norm_weight, None, post_weight, hidden, attention.q_heads, attention.kv_heads, attention.head_dim, &rope, position, decoder.rms_norm_epsilon, None, Some(cache))
+            self.matvec.attention_norm_residual_resident(
+                hidden_states,
+                input_weight,
+                q_matrix,
+                None,
+                None,
+                o_matrix,
+                q_norm_weight,
+                None,
+                post_weight,
+                hidden,
+                attention.q_heads,
+                attention.kv_heads,
+                attention.head_dim,
+                &rope,
+                position,
+                decoder.rms_norm_epsilon,
+                None,
+                Some(cache),
+            )
         } else {
             let cache = caches.cache_mut(layer_index)?;
-            self.matvec.attention_norm_residual_resident(hidden_states, input_weight, q_matrix, k_matrix, v_matrix, o_matrix, q_norm_weight, k_norm_weight, post_weight, hidden, attention.q_heads, attention.kv_heads, attention.head_dim, &rope, position, decoder.rms_norm_epsilon, Some(cache), None)
+            self.matvec.attention_norm_residual_resident(
+                hidden_states,
+                input_weight,
+                q_matrix,
+                k_matrix,
+                v_matrix,
+                o_matrix,
+                q_norm_weight,
+                k_norm_weight,
+                post_weight,
+                hidden,
+                attention.q_heads,
+                attention.kv_heads,
+                attention.head_dim,
+                &rope,
+                position,
+                decoder.rms_norm_epsilon,
+                Some(cache),
+                None,
+            )
         }
     }
 
@@ -3594,9 +4307,8 @@ impl Gemma4TextExecutor {
             Some(&q_norm_weight),
             decoder.rms_norm_epsilon,
         )?;
-        self.matvec.validate_gemma_proportional_rope(
-            &query, q_heads, head_dim, &rope, position,
-        )?;
+        self.matvec
+            .validate_gemma_proportional_rope(&query, q_heads, head_dim, &rope, position)?;
         apply_gemma4_rope_in_place(&mut query, q_heads, head_dim, &rope, position)?;
 
         let shared_source_layer = match (attention.kv_cache, self.kv_sharing_mode) {
@@ -3638,9 +4350,8 @@ impl Gemma4TextExecutor {
                 Some(&k_norm_weight),
                 decoder.rms_norm_epsilon,
             )?;
-            self.matvec.validate_gemma_proportional_rope(
-                &key, kv_heads, head_dim, &rope, position,
-            )?;
+            self.matvec
+                .validate_gemma_proportional_rope(&key, kv_heads, head_dim, &rope, position)?;
             apply_gemma4_rope_in_place(&mut key, kv_heads, head_dim, &rope, position)?;
             let value = rms_norm_heads(
                 &value_raw,

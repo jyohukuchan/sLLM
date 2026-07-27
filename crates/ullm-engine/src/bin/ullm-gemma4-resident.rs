@@ -559,11 +559,14 @@ fn validation_workload(executor: &mut Gemma4TextExecutor) -> Result<Value, Strin
 fn attention_region_differential(executor: &mut Gemma4TextExecutor) -> Result<Value, String> {
     executor.reset();
     unsafe { env::remove_var("ULLM_GEMMA4_DISABLE_ATTENTION_REGION") };
+    unsafe { env::remove_var("ULLM_GEMMA4_DISABLE_PLE_REGION") };
     let resident = executor.prefill(CAPITAL_FRANCE.initial_token_ids)?;
     executor.reset();
     unsafe { env::set_var("ULLM_GEMMA4_DISABLE_ATTENTION_REGION", "1") };
+    unsafe { env::set_var("ULLM_GEMMA4_DISABLE_PLE_REGION", "1") };
     let host = executor.prefill(CAPITAL_FRANCE.initial_token_ids)?;
     unsafe { env::remove_var("ULLM_GEMMA4_DISABLE_ATTENTION_REGION") };
+    unsafe { env::remove_var("ULLM_GEMMA4_DISABLE_PLE_REGION") };
     let (hidden_abs, hidden_rel) = max_error(
         resident.layer_outputs.iter().flatten().copied(),
         host.layer_outputs.iter().flatten().copied(),
@@ -577,7 +580,7 @@ fn attention_region_differential(executor: &mut Gemma4TextExecutor) -> Result<Va
         host.logits_last.iter().copied(),
     )?;
     Ok(json!({
-        "reference": "unchanged host attention path on the same six real captured prompt activations; multi-layer hidden/final/logit comparison",
+        "reference": "unchanged host attention/PLE path on the same six real captured prompt activations; multi-layer hidden/final/logit comparison",
         "input_token_ids": CAPITAL_FRANCE.initial_token_ids,
         "layer_output_max_abs": hidden_abs,
         "layer_output_max_rel": hidden_rel,
@@ -603,7 +606,9 @@ fn max_error(
         max_rel = max_rel.max(abs / expected.abs().max(f32::MIN_POSITIVE));
         count = count.saturating_add(1);
     }
-    if count == 0 { return Err("attention region differential compared zero values".into()); }
+    if count == 0 {
+        return Err("attention region differential compared zero values".into());
+    }
     Ok((max_abs, max_rel))
 }
 

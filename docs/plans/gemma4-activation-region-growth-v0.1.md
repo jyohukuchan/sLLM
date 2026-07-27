@@ -130,3 +130,37 @@ matvecs were attention-side. The raw evidence is
 `benchmarks/results/2026-07-27/gemma4-activation-device-v0.1/raw/dj/attention-region-benchmark-v1.json`
 and
 `benchmarks/results/2026-07-27/gemma4-activation-device-v0.1/raw/dj/attention-region-validation-v2.json`.
+
+## Step 4: PLE projection/norm/residual resident region
+
+Each layer's complete PLE update now stays resident between its two projection
+weights:
+
+```text
+host MLP residual + host per-layer input -> input-gate projection -> GELUTanh
+    product -> per-layer projection -> direct-BF16 post-PLE RMSNorm -> residual
+    add -> host completed layer output
+```
+
+This moves both PLE projections and the intervening activation operations as
+one region; it deliberately does not create an isolated gate or norm port.
+The remaining outer boundaries are the current MLP-to-PLE handoff and the
+PLE-to-next-attention handoff. The BF16 post-PLE gamma remains resident and is
+converted into the persistent F32 gamma workspace; it is never transformed by
+`+1`.
+
+Three R9700-only repeats measured **32.983 tok/s** decode and **40.540 tok/s**
+prefill, or **23.50%** of the 140.341 tok/s decode roofline. The host profile
+now records **8 host-visible matvec calls per four decode tokens**, down from
+288: all 280 layer PLE projection calls are gone. Paged attention and paged KV
+write remain at zero host-visible calls. Raw evidence is
+`benchmarks/results/2026-07-27/gemma4-activation-device-v0.1/raw/dk/ple-region-benchmark-v1.json`.
+
+The multi-layer differential against the unchanged host attention/PLE sequence
+on six real captured activations measured layer-output max abs/max rel
+`0.00002288818359375` / `0.07097011804580688`, final-norm
+`0.000030517578125` / `0.022209612652659416`, and logits
+`0.000013113021850585938` / `0.1607142835855484`. The explicitly checked
+logits retained top-1 `9079`; both cached and full-reprefill continuations
+passed with `[9079, 236761, 108, 818]` and `[528, 496, 1902, 1298]`.
+Evidence: `benchmarks/results/2026-07-27/gemma4-activation-device-v0.1/raw/dk/ple-region-validation-v1.json`.
