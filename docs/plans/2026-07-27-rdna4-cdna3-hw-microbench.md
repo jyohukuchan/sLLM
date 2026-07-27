@@ -51,7 +51,8 @@ R9700 の BF16 peak を AMD が明示するまでは、`HW_MB_BF16_PEAK_TFLOPS=0
 `state/hw_microbench.done` を使う。lease が厳しい場合の切捨て対象であり、
 P0 を省略して得る時間に置き換えてはならない。
 
-各 run は `telemetry-before.json` / `telemetry-after.json`、`rocminfo`、
+各 measurement group は `telemetry-<group>-before.json` /
+`telemetry-<group>-after.json`（validation、bandwidth、gemm）、`rocminfo`、
 `amd-smi` の実クロック、power、temperature、throttle 表示を同じ results
 directory に残す。`THROTTLED` 一語ではなく実クロックを判定材料にする。
 開始は edge <=45 C を待つ（40 C 固定は禁止）。
