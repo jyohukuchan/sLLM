@@ -73471,6 +73471,87 @@ extern "C" __global__ void ullm_paged_decode_attn_f32_kernel(
     float softmax_scale,
     float *output) {
     __shared__ float partial[256];
+    // Gemma4 full-attention shape: 8Q/1KV/512/512.  The generic fallback
+    // below gives each output element a thread, which makes every one of the
+    // 512 output threads recompute the same 512-term Q dot K.  Keep a
+    // 256-thread CTA per Q head instead: each thread owns a pair of Q/K and V
+    // dimensions.  This deliberately does not alter the canonical <=256
+    // branch below (including Qwen3.5's production 256-wide path).
+    if (gridDim.x == q_heads && blockDim.x == 256u && head_dim == 512ull &&
+        value_dim == 512ull) {
+        const unsigned long long q_head = blockIdx.x;
+        const unsigned int tid = threadIdx.x;
+        const unsigned long long q_per_kv = q_heads / kv_heads;
+        const unsigned long long kv_head = q_head / q_per_kv;
+        const unsigned long long q_base = q_head * 512ull;
+        const unsigned long long paired_dim = static_cast<unsigned long long>(tid) + 256ull;
+
+        float max_score = -3.4028234663852886e38f;
+        float denominator = 0.0f;
+        float weighted_lo = 0.0f;
+        float weighted_hi = 0.0f;
+        unsigned long long block_index = 0ull;
+        unsigned long long block_end = block_size;
+        unsigned long long block_id = static_cast<unsigned long long>(block_table[0]);
+        if (block_id >= cache_blocks) {
+            output[q_head * 512ull + tid] = 0.0f;
+            output[q_head * 512ull + paired_dim] = 0.0f;
+            return;
+        }
+        unsigned long long physical_timestep = block_id * block_size;
+        for (unsigned long long source_timestep = 0; source_timestep < cache_len; ++source_timestep) {
+            if (source_timestep == block_end) {
+                ++block_index;
+                block_end += block_size;
+                block_id = static_cast<unsigned long long>(block_table[block_index]);
+                if (block_id >= cache_blocks) {
+                    output[q_head * 512ull + tid] = 0.0f;
+                    output[q_head * 512ull + paired_dim] = 0.0f;
+                    return;
+                }
+                physical_timestep = block_id * block_size;
+            }
+            const unsigned long long k_base =
+                (physical_timestep * kv_heads + kv_head) * 512ull;
+            const float local =
+                q[q_base + tid] * k_cache[k_base + tid] +
+                q[q_base + paired_dim] * k_cache[k_base + paired_dim];
+            const float score =
+                ullm_paged_decode_reduce_sum_256(local, partial) * softmax_scale;
+            const unsigned long long v_base =
+                (physical_timestep * kv_heads + kv_head) * 512ull;
+            const float value_lo = v_cache[v_base + tid];
+            const float value_hi = v_cache[v_base + paired_dim];
+            if (score > max_score) {
+                const float scale = expf(max_score - score);
+                weighted_lo = weighted_lo * scale + value_lo;
+                weighted_hi = weighted_hi * scale + value_hi;
+                denominator = denominator * scale + 1.0f;
+                max_score = score;
+            } else {
+                const float weight = expf(score - max_score);
+                weighted_lo += weight * value_lo;
+                weighted_hi += weight * value_hi;
+                denominator += weight;
+            }
+            ++physical_timestep;
+        }
+        const unsigned long long output_base = q_head * 512ull;
+        const float decoded_lo = weighted_lo / denominator;
+        const float decoded_hi = weighted_hi / denominator;
+        if (gate != nullptr) {
+            const float gate_lo = gate[output_base + tid];
+            const float gate_hi = gate[output_base + paired_dim];
+            output[output_base + tid] =
+                (1.0f / (1.0f + expf(-gate_lo))) * decoded_lo;
+            output[output_base + paired_dim] =
+                (1.0f / (1.0f + expf(-gate_hi))) * decoded_hi;
+        } else {
+            output[output_base + tid] = decoded_lo;
+            output[output_base + paired_dim] = decoded_hi;
+        }
+        return;
+    }
     if (gridDim.x == q_heads && blockDim.x == 256u && head_dim <= 256ull &&
         value_dim <= 256ull) {
         const unsigned long long q_head = blockIdx.x;
@@ -91602,7 +91683,8 @@ bool paged_decode_attn_f32_hip_kernel(
     constexpr unsigned int launch_block_size = 256;
     const size_t output_elements = q_heads * value_dim;
     const bool use_head_parallel_kernel =
-        head_dim <= launch_block_size && value_dim <= launch_block_size;
+        (head_dim <= launch_block_size && value_dim <= launch_block_size) ||
+        (head_dim == 512u && value_dim == 512u);
     const size_t grid_size = use_head_parallel_kernel
                                  ? q_heads
                                  : (output_elements + launch_block_size - 1) / launch_block_size;

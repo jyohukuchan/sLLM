@@ -268,8 +268,12 @@ bool paged_decode_attn_f32_hip_kernel(
 
     constexpr unsigned int launch_block_size = 256;
     const size_t output_elements = q_heads * value_dim;
+    // The exact 512-wide body below keeps the same one-CTA-per-Q-head
+    // decomposition as the canonical <=256 path: every lane owns two Q/K and
+    // V elements.  Do not send it to the scalar output-element fallback.
     const bool use_head_parallel_kernel =
-        head_dim <= launch_block_size && value_dim <= launch_block_size;
+        (head_dim <= launch_block_size && value_dim <= launch_block_size) ||
+        (head_dim == 512u && value_dim == 512u);
     const size_t grid_size = use_head_parallel_kernel
                                  ? q_heads
                                  : (output_elements + launch_block_size - 1) / launch_block_size;
@@ -835,4 +839,3 @@ ullm_status paged_decode_attn_f32_hip_staging(
     set_error("");
     return ULLM_STATUS_OK;
 }
-
