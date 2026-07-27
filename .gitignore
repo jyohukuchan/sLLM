@@ -4,3 +4,6 @@ reference-src/
 __pycache__/
 *.pyc
 benchmarks/results/**/logs/
+
+# Preprocessed TU baseline (regenerate with tools/check-runtime-tu-identical.sh --record)
+runtime/baseline/tu-baseline.i
