@@ -30,7 +30,7 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 use ullm_runtime_sys::{
     DeviceInfo, RuntimeBuffer, RuntimeContext, RuntimeStream, bf16_row_f32, device_count,
-    device_info, matvec_bf16_f32, paged_decode_attn_f32, paged_kv_write_f32,
+    device_info, gelu_tanh_mul_f32, matvec_bf16_f32, paged_decode_attn_f32, paged_kv_write_f32,
 };
 
 pub const GEMMA4_TEXT_MODEL_FILE: &str = "model.safetensors";
@@ -55,6 +55,7 @@ const GEMMA4_DEVICE_KV_BLOCK_SIZE: usize = 1;
 const R9700_RUNTIME_NAME: &str = "AMD Radeon Graphics";
 const R9700_MEMORY_BYTES_MIN: u64 = 30 * 1024 * 1024 * 1024;
 const R9700_MEMORY_BYTES_MAX: u64 = 34 * 1024 * 1024 * 1024;
+const GEMMA4_VALIDATE_DEVICE_MLP_ENV: &str = "ULLM_GEMMA4_VALIDATE_DEVICE_MLP";
 
 fn record_elapsed_ns(slot: &mut u64, started: Instant) {
     *slot = slot.saturating_add(elapsed_ns(started));
@@ -132,6 +133,14 @@ pub struct Gemma4TextStepTrace {
     /// F32 final-token logits after Gemma4's final soft-cap.
     pub logits_last: Vec<f32>,
     pub top1: Gemma4TextTop1,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct Gemma4ResidentMlpValidation {
+    pub calls: u64,
+    pub elements: u64,
+    pub max_abs: f32,
+    pub max_rel: f32,
 }
 
 /// Byte-accounted resident-text execution plan for the inspected checkpoint.
@@ -1075,12 +1084,16 @@ struct Bf16MatvecRuntime {
     resident_input: Option<RuntimeBuffer>,
     resident_output: Option<RuntimeBuffer>,
     resident_row_output: Option<RuntimeBuffer>,
+    mlp_gate: Option<RuntimeBuffer>,
+    mlp_up: Option<RuntimeBuffer>,
+    mlp_activated: Option<RuntimeBuffer>,
     kv_key_input: Option<RuntimeBuffer>,
     kv_value_input: Option<RuntimeBuffer>,
     attention_query: Option<RuntimeBuffer>,
     attention_output: Option<RuntimeBuffer>,
     resident_logical_bytes: Gemma4ResidentLogicalBytes,
     resident_host_profile: Gemma4ResidentHostProfile,
+    mlp_validation: Gemma4ResidentMlpValidation,
 }
 
 impl Bf16MatvecRuntime {
@@ -1135,12 +1148,16 @@ impl Bf16MatvecRuntime {
             resident_input: None,
             resident_output: None,
             resident_row_output: None,
+            mlp_gate: None,
+            mlp_up: None,
+            mlp_activated: None,
             kv_key_input: None,
             kv_value_input: None,
             attention_query: None,
             attention_output: None,
             resident_logical_bytes: Gemma4ResidentLogicalBytes::default(),
             resident_host_profile: Gemma4ResidentHostProfile::default(),
+            mlp_validation: Gemma4ResidentMlpValidation::default(),
         })
     }
 
@@ -1153,6 +1170,9 @@ impl Bf16MatvecRuntime {
             &self.resident_input,
             &self.resident_output,
             &self.resident_row_output,
+            &self.mlp_gate,
+            &self.mlp_up,
+            &self.mlp_activated,
             &self.kv_key_input,
             &self.kv_value_input,
             &self.attention_query,
@@ -1185,6 +1205,10 @@ impl Bf16MatvecRuntime {
 
     fn reset_resident_host_profile(&mut self) {
         self.resident_host_profile = Gemma4ResidentHostProfile::default();
+    }
+
+    fn mlp_validation(&self) -> Gemma4ResidentMlpValidation {
+        self.mlp_validation
     }
 
     fn account_resident_weight_read(
@@ -1503,6 +1527,86 @@ impl Bf16MatvecRuntime {
             output_decode_validate_ns,
             0,
         );
+        Ok(output)
+    }
+
+    /// Dense Gemma4 MLP region: host input -> gate/up projections -> GELUTanh
+    /// product -> down projection -> host output.  Every intermediate remains
+    /// in these persistent device workspaces.
+    fn dense_mlp_resident(
+        &mut self,
+        gate_matrix: &RuntimeBuffer,
+        up_matrix: &RuntimeBuffer,
+        down_matrix: &RuntimeBuffer,
+        hidden: usize,
+        intermediate: usize,
+        input: &[f32],
+    ) -> Result<Vec<f32>, String> {
+        if input.len() != hidden {
+            return Err(format!("Gemma4 dense MLP input width mismatch: expected {hidden}, got {}", input.len()));
+        }
+        let input_bytes = encode_f32_to_bytes(input);
+        let intermediate_bytes = intermediate.checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| "Gemma4 dense MLP intermediate bytes overflow".to_string())?;
+        let output_bytes = hidden.checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| "Gemma4 dense MLP output bytes overflow".to_string())?;
+        Self::ensure_buffer(&mut self.context, &mut self.resident_input, input_bytes.len(), "dense MLP input", &mut self.resident_host_profile)?;
+        Self::ensure_buffer(&mut self.context, &mut self.mlp_gate, intermediate_bytes, "dense MLP gate", &mut self.resident_host_profile)?;
+        Self::ensure_buffer(&mut self.context, &mut self.mlp_up, intermediate_bytes, "dense MLP up", &mut self.resident_host_profile)?;
+        Self::ensure_buffer(&mut self.context, &mut self.mlp_activated, intermediate_bytes, "dense MLP activated", &mut self.resident_host_profile)?;
+        Self::ensure_buffer(&mut self.context, &mut self.resident_output, output_bytes, "dense MLP output", &mut self.resident_host_profile)?;
+        let input_buffer = self.resident_input.as_mut().expect("dense MLP input allocated");
+        input_buffer.copy_from_host(0, &input_bytes, Some(&mut self.stream))?;
+        matvec_bf16_f32(gate_matrix, input_buffer, intermediate, hidden,
+            self.mlp_gate.as_mut().expect("dense MLP gate allocated"), Some(&mut self.stream))?;
+        matvec_bf16_f32(up_matrix, input_buffer, intermediate, hidden,
+            self.mlp_up.as_mut().expect("dense MLP up allocated"), Some(&mut self.stream))?;
+        gelu_tanh_mul_f32(
+            self.mlp_gate.as_ref().expect("dense MLP gate allocated"),
+            self.mlp_up.as_ref().expect("dense MLP up allocated"),
+            intermediate,
+            self.mlp_activated.as_mut().expect("dense MLP activated allocated"),
+            Some(&mut self.stream),
+        )?;
+        matvec_bf16_f32(
+            down_matrix,
+            self.mlp_activated.as_ref().expect("dense MLP activated allocated"),
+            hidden,
+            intermediate,
+            self.resident_output.as_mut().expect("dense MLP output allocated"),
+            Some(&mut self.stream),
+        )?;
+        let mut host_output = vec![0_u8; output_bytes];
+        self.resident_output.as_mut().expect("dense MLP output allocated")
+            .copy_to_host(0, &mut host_output, Some(&mut self.stream))?;
+        self.stream.synchronize()?;
+        let output = decode_f32_le_values(&host_output);
+        if output.len() != hidden || output.iter().any(|value| !value.is_finite()) {
+            return Err("Gemma4 dense MLP resident region returned non-finite or malformed F32 output".into());
+        }
+        if env::var(GEMMA4_VALIDATE_DEVICE_MLP_ENV).ok().as_deref() == Some("1") {
+            let gate = self.matvec_resident(gate_matrix, intermediate, hidden, input)?;
+            let up = self.matvec_resident(up_matrix, intermediate, hidden, input)?;
+            let mut activated = gelu_pytorch_tanh(&gate)?;
+            multiply_in_place(&mut activated, &up, "Gemma4 MLP validation product")?;
+            let reference = self.matvec_resident(down_matrix, hidden, intermediate, &activated)?;
+            for (actual, expected) in output.iter().zip(reference.iter()) {
+                let abs = (actual - expected).abs();
+                let rel = abs / expected.abs().max(f32::MIN_POSITIVE);
+                self.mlp_validation.max_abs = self.mlp_validation.max_abs.max(abs);
+                self.mlp_validation.max_rel = self.mlp_validation.max_rel.max(rel);
+            }
+            self.mlp_validation.calls = self.mlp_validation.calls.saturating_add(1);
+            self.mlp_validation.elements = self.mlp_validation.elements.saturating_add(
+                u64::try_from(output.len()).map_err(|_| "Gemma4 MLP validation elements exceed u64".to_string())?,
+            );
+        }
+        let matrix_bytes = |rows: usize, cols: usize| rows.checked_mul(cols)
+            .and_then(|elements| elements.checked_mul(std::mem::size_of::<u16>()))
+            .ok_or_else(|| "Gemma4 dense MLP logical byte count overflows".to_string());
+        self.account_resident_weight_read(matrix_bytes(intermediate, hidden)?, true)?;
+        self.account_resident_weight_read(matrix_bytes(intermediate, hidden)?, true)?;
+        self.account_resident_weight_read(matrix_bytes(hidden, intermediate)?, true)?;
         Ok(output)
     }
 
@@ -2313,6 +2417,10 @@ impl Gemma4TextExecutor {
         }
     }
 
+    pub fn resident_mlp_validation(&self) -> Gemma4ResidentMlpValidation {
+        self.matvec.mlp_validation()
+    }
+
     /// Actual bytes held by text weights, K/V storage, and the lazily
     /// allocated temporary buffers.  It intentionally excludes HIP runtime
     /// allocator/context overhead that is not exposed through RuntimeBuffer.
@@ -2950,6 +3058,28 @@ impl Gemma4TextExecutor {
             }
         };
         let hidden = self.resident_descriptor.decoder.hidden_size;
+        if let Gemma4WeightStorage::Resident(weights) = &self.weights {
+            let gate = weights.tensor(
+                &layer_tensor(layer_index, "mlp.gate_proj.weight"),
+                &[intermediate, hidden],
+            )?;
+            let up = weights.tensor(
+                &layer_tensor(layer_index, "mlp.up_proj.weight"),
+                &[intermediate, hidden],
+            )?;
+            let down = weights.tensor(
+                &layer_tensor(layer_index, "mlp.down_proj.weight"),
+                &[hidden, intermediate],
+            )?;
+            return self.matvec.dense_mlp_resident(
+                &gate.buffer,
+                &up.buffer,
+                &down.buffer,
+                hidden,
+                intermediate,
+                input,
+            );
+        }
         let gate = self.matmul_named(
             &layer_tensor(layer_index, "mlp.gate_proj.weight"),
             intermediate,

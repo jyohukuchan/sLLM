@@ -497,6 +497,10 @@ public:
         return compile_kernel(arch, silu_mul_kernel_source(), "ullm_silu_mul_f32.hip", code, error);
     }
 
+    bool compile_gelu_tanh_mul_kernel(const std::string &arch, std::vector<char> *code, std::string *error) {
+        return compile_kernel(arch, gelu_tanh_mul_kernel_source(), "ullm_gelu_tanh_mul_f32.hip", code, error);
+    }
+
     bool compile_sigmoid_mul_kernel(const std::string &arch, std::vector<char> *code, std::string *error) {
         return compile_kernel(arch, sigmoid_mul_kernel_source(), "ullm_sigmoid_mul_f32.hip", code, error);
     }
@@ -978,4 +982,3 @@ private:
         options.push_back("-I/opt/rocm-7.2.1/include");
         return options;
     }
-

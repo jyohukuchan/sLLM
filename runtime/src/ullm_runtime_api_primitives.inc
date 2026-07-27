@@ -1026,6 +1026,57 @@ ullm_status ullm_runtime_silu_mul_f32(
         stream);
 }
 
+ullm_status ullm_runtime_gelu_tanh_mul_f32(
+    const ullm_runtime_buffer *gate_buffer,
+    const ullm_runtime_buffer *up_buffer,
+    size_t elements,
+    ullm_runtime_buffer *output_buffer,
+    ullm_runtime_stream *stream) {
+    if (gate_buffer == nullptr || up_buffer == nullptr || output_buffer == nullptr) {
+        set_error("f32 GELUTanh-mul received a null pointer");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (elements == 0) {
+        set_error("f32 GELUTanh-mul elements must be greater than zero");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (!buffers_share_backend(gate_buffer, up_buffer) ||
+        !buffers_share_backend(gate_buffer, output_buffer) ||
+        !stream_matches_buffer(output_buffer, stream)) {
+        set_error("f32 GELUTanh-mul buffers or stream do not share a backend/device");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (elements > std::numeric_limits<size_t>::max() / sizeof(float)) {
+        set_error("f32 GELUTanh-mul byte size overflows");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t required_bytes = elements * sizeof(float);
+    if (gate_buffer->bytes < required_bytes || up_buffer->bytes < required_bytes ||
+        output_buffer->bytes < required_bytes) {
+        set_error("f32 GELUTanh-mul buffer is too small");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (gate_buffer->backend == BackendKind::Cpu) {
+        gelu_tanh_mul_f32_host(static_cast<const float *>(gate_buffer->ptr),
+                               static_cast<const float *>(up_buffer->ptr), elements,
+                               static_cast<float *>(output_buffer->ptr));
+        set_error("");
+        return ULLM_STATUS_OK;
+    }
+    std::string hip_error;
+    if (gelu_tanh_mul_f32_hip_kernel(
+            gate_buffer, up_buffer, elements, output_buffer, stream, &hip_error)) {
+        set_error("");
+        return ULLM_STATUS_OK;
+    }
+    if (std::getenv("ULLM_REQUIRE_HIP_GELU_TANH_MUL_KERNEL") != nullptr) {
+        set_error(hip_error.empty() ? "f32 GELUTanh-mul HIP kernel is unavailable" : hip_error.c_str());
+        return ULLM_STATUS_RUNTIME_ERROR;
+    }
+    return gelu_tanh_mul_f32_hip_staging(
+        gate_buffer, up_buffer, elements, required_bytes, output_buffer, stream);
+}
+
 ullm_status ullm_runtime_sigmoid_mul_f32(
     const ullm_runtime_buffer *gate_buffer,
     const ullm_runtime_buffer *input_buffer,

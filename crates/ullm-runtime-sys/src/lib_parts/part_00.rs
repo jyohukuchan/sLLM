@@ -955,6 +955,13 @@ unsafe extern "C" {
         output_buffer: *mut RawRuntimeBuffer,
         stream: *mut RawRuntimeStream,
     ) -> c_int;
+    fn ullm_runtime_gelu_tanh_mul_f32(
+        gate_buffer: *const RawRuntimeBuffer,
+        up_buffer: *const RawRuntimeBuffer,
+        elements: usize,
+        output_buffer: *mut RawRuntimeBuffer,
+        stream: *mut RawRuntimeStream,
+    ) -> c_int;
     fn ullm_runtime_sigmoid_mul_f32(
         gate_buffer: *const RawRuntimeBuffer,
         input_buffer: *const RawRuntimeBuffer,
@@ -6280,6 +6287,34 @@ pub fn silu_mul_f32(
     let stream = stream.map_or(std::ptr::null_mut(), |stream| stream.raw.as_ptr());
     status_to_result(unsafe {
         ullm_runtime_silu_mul_f32(
+            gate_buffer.raw.as_ptr(),
+            up_buffer.raw.as_ptr(),
+            elements,
+            output_buffer.raw.as_ptr(),
+            stream,
+        )
+    })
+}
+
+pub fn gelu_tanh_mul_f32(
+    gate_buffer: &RuntimeBuffer,
+    up_buffer: &RuntimeBuffer,
+    elements: usize,
+    output_buffer: &mut RuntimeBuffer,
+    stream: Option<&mut RuntimeStream>,
+) -> Result<(), String> {
+    if elements == 0 {
+        return Err("f32 GELUTanh-mul elements must be greater than zero".to_string());
+    }
+    let required_bytes = elements
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| "f32 GELUTanh-mul byte size overflows".to_string())?;
+    check_copy_range(0, required_bytes, gate_buffer.size()?)?;
+    check_copy_range(0, required_bytes, up_buffer.size()?)?;
+    check_copy_range(0, required_bytes, output_buffer.size()?)?;
+    let stream = stream.map_or(std::ptr::null_mut(), |stream| stream.raw.as_ptr());
+    status_to_result(unsafe {
+        ullm_runtime_gelu_tanh_mul_f32(
             gate_buffer.raw.as_ptr(),
             up_buffer.raw.as_ptr(),
             elements,

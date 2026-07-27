@@ -3364,6 +3364,120 @@ ullm_status silu_mul_f32_hip_staging(
     return ULLM_STATUS_OK;
 }
 
+void gelu_tanh_mul_f32_host(
+    const float *gate,
+    const float *up,
+    size_t elements,
+    float *output) {
+    constexpr float coefficient = 0.7978845608f;
+    for (size_t index = 0; index < elements; ++index) {
+        const float value = gate[index];
+        // Keep this exact operation order aligned with Transformers GELUTanh.
+        const float activated = 0.5f * value *
+            (1.0f + std::tanh(value * coefficient * (1.0f + 0.044715f * value * value)));
+        output[index] = activated * up[index];
+    }
+}
+
+class HipGeluTanhMulKernelCache {
+public:
+    void *function_for_device(int device_id, std::string *error) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto found = modules_.find(device_id);
+        if (found != modules_.end()) return found->second->function;
+        std::string failures;
+        for (const std::string &arch : hip_arch_candidates(device_id)) {
+            std::vector<char> code;
+            std::string compile_error;
+            if (!hiprtc_runtime().compile_gelu_tanh_mul_kernel(arch, &code, &compile_error)) {
+                failures += compile_error + "\n";
+                continue;
+            }
+            void *module = nullptr;
+            void *function = nullptr;
+            if (!hip_runtime().module_load_data(&module, code.data(), device_id) ||
+                !hip_runtime().module_get_function(
+                    &function, module, "ullm_gelu_tanh_mul_f32_kernel", device_id)) {
+                if (module != nullptr) hip_runtime().module_unload(module, device_id);
+                failures += "failed to load GELUTanh-mul HIP module for " + arch + "\n";
+                continue;
+            }
+            auto loaded = std::make_unique<LoadedModule>();
+            loaded->module = module;
+            loaded->function = function;
+            void *result = function;
+            modules_.emplace(device_id, std::move(loaded));
+            return result;
+        }
+        if (error != nullptr) *error = failures.empty() ? "failed to build GELUTanh-mul HIP kernel" : failures;
+        return nullptr;
+    }
+private:
+    struct LoadedModule { void *module = nullptr; void *function = nullptr; };
+    std::mutex mutex_;
+    std::unordered_map<int, std::unique_ptr<LoadedModule>> modules_;
+};
+
+HipGeluTanhMulKernelCache &hip_gelu_tanh_mul_kernel_cache() {
+    static HipGeluTanhMulKernelCache cache;
+    return cache;
+}
+
+bool gelu_tanh_mul_f32_hip_kernel(
+    const ullm_runtime_buffer *gate_buffer,
+    const ullm_runtime_buffer *up_buffer,
+    size_t elements,
+    ullm_runtime_buffer *output_buffer,
+    ullm_runtime_stream *stream,
+    std::string *error) {
+    void *function = hip_gelu_tanh_mul_kernel_cache().function_for_device(gate_buffer->hip_device_id, error);
+    if (function == nullptr) return false;
+    constexpr unsigned int block_size = 256;
+    const size_t grid_size = (elements + block_size - 1) / block_size;
+    if (grid_size > static_cast<size_t>(std::numeric_limits<unsigned int>::max())) {
+        if (error != nullptr) *error = "GELUTanh-mul element count exceeds HIP grid limit";
+        return false;
+    }
+    unsigned long long kernel_elements = static_cast<unsigned long long>(elements);
+    void *gate_ptr = gate_buffer->ptr;
+    void *up_ptr = up_buffer->ptr;
+    void *output_ptr = output_buffer->ptr;
+    void *params[] = {&gate_ptr, &up_ptr, &kernel_elements, &output_ptr};
+    if (!hip_runtime().module_launch_kernel(
+            function, static_cast<unsigned int>(grid_size), block_size, params,
+            stream == nullptr ? nullptr : stream->stream, gate_buffer->hip_device_id)) {
+        if (error != nullptr) *error = "hipModuleLaunchKernel failed for f32 GELUTanh-mul";
+        return false;
+    }
+    return true;
+}
+
+ullm_status gelu_tanh_mul_f32_hip_staging(
+    const ullm_runtime_buffer *gate_buffer,
+    const ullm_runtime_buffer *up_buffer,
+    size_t elements,
+    size_t required_bytes,
+    ullm_runtime_buffer *output_buffer,
+    ullm_runtime_stream *stream) {
+    std::vector<float> gate(elements), up(elements), output(elements);
+    void *hip_stream = stream == nullptr ? nullptr : stream->stream;
+    const int device_id = gate_buffer->hip_device_id;
+    if (!hip_runtime().copy_async(gate.data(), gate_buffer->ptr, required_bytes, HIP_MEMCPY_DEVICE_TO_HOST, hip_stream, device_id) ||
+        !hip_runtime().copy_async(up.data(), up_buffer->ptr, required_bytes, HIP_MEMCPY_DEVICE_TO_HOST, hip_stream, device_id) ||
+        !synchronize_hip_staging(stream, device_id)) {
+        set_error("failed to copy f32 GELUTanh-mul inputs to host staging buffers");
+        return ULLM_STATUS_RUNTIME_ERROR;
+    }
+    gelu_tanh_mul_f32_host(gate.data(), up.data(), elements, output.data());
+    if (!hip_runtime().copy_async(output_buffer->ptr, output.data(), required_bytes, HIP_MEMCPY_HOST_TO_DEVICE, hip_stream, device_id) ||
+        !synchronize_hip_staging(stream, device_id)) {
+        set_error("failed to copy f32 GELUTanh-mul output to HIP buffer");
+        return ULLM_STATUS_RUNTIME_ERROR;
+    }
+    set_error("");
+    return ULLM_STATUS_OK;
+}
+
 class HipSigmoidMulKernelCache {
 public:
     void *function_for_device(int device_id, std::string *error) {

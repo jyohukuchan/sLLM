@@ -253,6 +253,7 @@ fn run(options: Options) -> Result<(), String> {
         .ok_or_else(|| {
             "resident Gemma4 executor did not expose allocation accounting".to_string()
         })?;
+    let mlp_validation = executor.resident_mlp_validation();
     let device = executor.device();
     let report = json!({
         "schema_version": "ullm.gemma4_e2b_resident.v0.1",
@@ -290,6 +291,14 @@ fn run(options: Options) -> Result<(), String> {
         "resident_memory": memory_json(&plan, device.total_global_mem, actual_weight_bytes, actual_kv_bytes, actual_transient_bytes, actual_total_bytes)?,
         "final_kv_snapshot": snapshot_json(snapshot),
         "workload": workload,
+        "mlp_region_validation": {
+            "enabled": env::var("ULLM_GEMMA4_VALIDATE_DEVICE_MLP").ok().as_deref() == Some("1"),
+            "calls": mlp_validation.calls,
+            "elements": mlp_validation.elements,
+            "max_abs": mlp_validation.max_abs,
+            "max_rel": mlp_validation.max_rel,
+            "reference": "unchanged per-projection resident host path on the same captured MLP inputs",
+        },
         "timing": {
             "resident_load_seconds": load_elapsed_seconds,
             "wall_seconds_including_load_and_workload": launch_started.elapsed().as_secs_f64(),

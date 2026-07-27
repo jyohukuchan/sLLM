@@ -1076,6 +1076,15 @@ ullm_status ullm_runtime_silu_mul_f32(
     ullm_runtime_buffer *output_buffer,
     ullm_runtime_stream *stream);
 
+/* Gemma4 GELUTanh followed by the gated-MLP product.  The literal coefficient
+ * and operation order match Transformers' GELUTanh F32 path. */
+ullm_status ullm_runtime_gelu_tanh_mul_f32(
+    const ullm_runtime_buffer *gate_buffer,
+    const ullm_runtime_buffer *up_buffer,
+    size_t elements,
+    ullm_runtime_buffer *output_buffer,
+    ullm_runtime_stream *stream);
+
 ullm_status ullm_runtime_sigmoid_mul_f32(
     const ullm_runtime_buffer *gate_buffer,
     const ullm_runtime_buffer *input_buffer,

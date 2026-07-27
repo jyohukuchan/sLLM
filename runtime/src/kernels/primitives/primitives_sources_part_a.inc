@@ -487,3 +487,21 @@ extern "C" __global__ void ullm_sigmoid_mul_f32_kernel(
 )";
     }
 
+    static const char *gelu_tanh_mul_kernel_source() {
+        return R"(
+extern "C" __global__ void ullm_gelu_tanh_mul_f32_kernel(
+    const float *gate,
+    const float *up,
+    unsigned long long elements,
+    float *output) {
+    const unsigned long long index =
+        static_cast<unsigned long long>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (index >= elements) return;
+    const float value = gate[index];
+    // Match Transformers GELUTanh: literal and F32 operation order are part of the contract.
+    const float activated = 0.5f * value *
+        (1.0f + tanhf(value * 0.7978845608f * (1.0f + 0.044715f * value * value)));
+    output[index] = activated * up[index];
+}
+)";
+    }
