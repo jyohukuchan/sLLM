@@ -16,17 +16,16 @@ use std::time::Instant;
 use crate::aq4_package_runtime::PackageResidentSharedBufferRegistry;
 use crate::backend_operation_registry::require_device_architecture;
 use crate::loader::{
-    LoadOptions, WeightRegistry, effective_qwen35_rmsnorm_weight_values,
-    load_named_passthrough_bf16_resident, materialize_config, read_named_passthrough_f32,
+    effective_qwen35_rmsnorm_weight_values, load_named_passthrough_bf16_resident,
+    materialize_config, read_named_passthrough_f32, LoadOptions, WeightRegistry,
 };
 use crate::model_config::{
-    DecoderLayerKind, ModelArchitectureKind, ResidentKvCacheMode, ResidentMlpDescriptor,
-    ResidentModelDescriptor, ResidentRopeKind, RmsNormWeightConvention,
-    load_model_config_from_package,
+    load_model_config_from_package, DecoderLayerKind, ModelArchitectureKind, ResidentKvCacheMode,
+    ResidentMlpDescriptor, ResidentModelDescriptor, ResidentRopeKind, RmsNormWeightConvention,
 };
 use crate::package::{
-    TensorSelector, inspect_package, select_exact_passthrough_payload_bundle,
-    select_tensor_payload_bundle,
+    inspect_package, select_exact_passthrough_payload_bundle, select_tensor_payload_bundle,
+    TensorSelector,
 };
 use crate::qwen35_aq4_head_runtime::{
     PackageEmbeddingRuntime, PackageFinalNormRuntime, PackageLmHeadMode, PackageLmHeadRuntime,
@@ -38,8 +37,11 @@ use crate::qwen35_aq4_layer_runtime::{
     PackageSelfAttnResidentStepLayer,
 };
 
-/// The pure-text Qwen3.5 mRoPE position rows are all the scalar text position.
-/// The descriptor still validates the complete mRoPE contract before this
+/// The Qwen3.5 text model makes four position rows (text/T/H/W), then passes
+/// its three T/H/W rows to interleaved mRoPE.  For this executor's explicit
+/// text-only scope those three rows are the same scalar token position, so the
+/// interleaving is observationally equivalent to the scalar RoPE dispatch.
+/// The descriptor still validates the complete mRoPE contract before that
 /// scalar decode bridge is admitted.
 pub const QWEN35_MOE_TEXT_ROTARY_DIM: usize = 64;
 pub const QWEN35_MOE_TEXT_ROPE_BASE: f32 = 10_000_000.0;
@@ -1237,13 +1239,28 @@ fn validate_qwen35_moe_descriptor(descriptor: &ResidentModelDescriptor) -> Resul
                 let rope = layer.attention.rope.as_ref().ok_or_else(|| {
                     format!("Qwen3.5 MoE full layer {position} has no mRoPE descriptor")
                 })?;
+                // HF derives the execution rotary width as
+                // `head_dim * partial_rotary_factor` (256 * 0.25 = 64), but
+                // the descriptor intentionally retains that as the source
+                // semantic pair (`rotary_dim=None`, partial factor=0.25).
+                // Do not require a fabricated fixed `rotary_dim=64`: doing
+                // so makes a valid inspected descriptor fail before any
+                // allocation.  The scalar bridge below still passes the
+                // derived 64 channels to the fused kernel for its text-only
+                // execution contract.
                 if rope.kind != ResidentRopeKind::Mrope
-                    || rope.rotary_dim != Some(QWEN35_MOE_TEXT_ROTARY_DIM)
+                    || rope.rotary_dim.is_some()
+                    || rope.partial_rotary_factor.map(f32::to_bits) != Some(0.25_f32.to_bits())
                     || rope.theta.to_bits() != QWEN35_MOE_TEXT_ROPE_BASE.to_bits()
                     || !rope.mrope_interleaved
                     || rope.mrope_sections != [11, 11, 10]
+                    || layer.attention.q_heads != 16
+                    || layer.attention.kv_heads != 2
+                    || layer.attention.head_dim != 256
+                    || layer.attention.value_dim != 256
                     || !layer.attention.q_norm
                     || !layer.attention.k_norm
+                    || layer.attention.v_norm
                     || !layer.attention.output_gate
                     || layer.attention.kv_cache != ResidentKvCacheMode::Own
                 {
@@ -1254,7 +1271,16 @@ fn validate_qwen35_moe_descriptor(descriptor: &ResidentModelDescriptor) -> Resul
             }
             DecoderLayerKind::LinearAttention => {
                 if layer.attention.kv_cache != ResidentKvCacheMode::LinearState
-                    || layer.attention.linear_attention.is_none()
+                    || !matches!(
+                        layer.attention.linear_attention.as_ref(),
+                        Some(linear)
+                            if linear.conv_kernel_dim == 4
+                                && linear.key_head_dim == 128
+                                && linear.num_key_heads == 16
+                                && linear.num_value_heads == 32
+                                && linear.value_head_dim == 128
+                                && linear.state_dtype == "float32"
+                    )
                 {
                     return Err(format!(
                         "Qwen3.5 MoE linear layer {position} does not declare recurrent state"
@@ -1641,6 +1667,77 @@ impl Qwen35MoeAq4Runtime {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model_config::{
+        ResidentAttentionDescriptor, ResidentAttentionScale, ResidentDecoderDescriptor,
+        ResidentEmbeddingDescriptor, ResidentLayerDescriptor, ResidentLayerNormDescriptor,
+        ResidentOutputDescriptor, ResidentRopeDescriptor,
+    };
+
+    fn inspected_text_only_full_attention_descriptor() -> ResidentModelDescriptor {
+        ResidentModelDescriptor {
+            source_config_sha256: "0".repeat(64),
+            architecture: ModelArchitectureKind::Qwen35MoeText,
+            decoder: ResidentDecoderDescriptor {
+                hidden_size: 2048,
+                vocab_size: 248_320,
+                max_position_embeddings: 262_144,
+                rms_norm_epsilon: 1e-6,
+                norm_weight_convention: RmsNormWeightConvention::OnePlusWeight,
+            },
+            embedding: ResidentEmbeddingDescriptor {
+                tied_to_output: false,
+                scale: None,
+            },
+            output: ResidentOutputDescriptor {
+                tied_to_embedding: false,
+                logit_soft_cap: None,
+            },
+            layers: vec![ResidentLayerDescriptor {
+                layer_index: 0,
+                attention: ResidentAttentionDescriptor {
+                    kind: DecoderLayerKind::FullAttention,
+                    q_heads: 16,
+                    kv_heads: 2,
+                    head_dim: 256,
+                    value_dim: 256,
+                    scale: ResidentAttentionScale::InverseSqrtHeadDim,
+                    rope: Some(ResidentRopeDescriptor {
+                        kind: ResidentRopeKind::Mrope,
+                        theta: QWEN35_MOE_TEXT_ROPE_BASE,
+                        // The HF source config retains a partial factor.  Its
+                        // 64-channel execution width must not be written back
+                        // as a different descriptor contract.
+                        rotary_dim: None,
+                        partial_rotary_factor: Some(0.25),
+                        mrope_interleaved: true,
+                        mrope_sections: vec![11, 11, 10],
+                    }),
+                    sliding_window: None,
+                    kv_cache: ResidentKvCacheMode::Own,
+                    q_norm: true,
+                    k_norm: true,
+                    v_norm: false,
+                    output_gate: true,
+                    linear_attention: None,
+                },
+                norms: ResidentLayerNormDescriptor {
+                    residual_norms: vec![],
+                    q_norm: true,
+                    k_norm: true,
+                    v_norm: false,
+                    post_per_layer_input_norm: false,
+                },
+                mlp: ResidentMlpDescriptor::MoE {
+                    num_experts: 256,
+                    experts_per_token: 8,
+                    expert_intermediate_size: 512,
+                    shared_expert_intermediate_size: 512,
+                    activation: "silu".into(),
+                },
+                per_layer_embedding: None,
+            }],
+        }
+    }
 
     #[test]
     fn production_sized_config_keeps_the_declared_r9700_contract() {
@@ -1655,5 +1752,24 @@ mod tests {
         assert_eq!(block_table(513, 256)?, vec![0, 1, 2]);
         assert!(block_table(0, 256).is_err());
         Ok(())
+    }
+
+    #[test]
+    fn inspected_mrope_contract_accepts_partial_factor_and_rejects_fixed_or_wrong_kv_shape() {
+        let descriptor = inspected_text_only_full_attention_descriptor();
+        validate_qwen35_moe_descriptor(&descriptor).unwrap();
+
+        let mut fabricated_fixed_rotary = descriptor.clone();
+        fabricated_fixed_rotary.layers[0]
+            .attention
+            .rope
+            .as_mut()
+            .unwrap()
+            .rotary_dim = Some(QWEN35_MOE_TEXT_ROTARY_DIM);
+        assert!(validate_qwen35_moe_descriptor(&fabricated_fixed_rotary).is_err());
+
+        let mut dense_gqa_shape = descriptor;
+        dense_gqa_shape.layers[0].attention.kv_heads = 4;
+        assert!(validate_qwen35_moe_descriptor(&dense_gqa_shape).is_err());
     }
 }
