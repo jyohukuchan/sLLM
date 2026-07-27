@@ -42,3 +42,29 @@ passthrough fallback also appears in the trace.
 | --- | --- | ---: | ---: | ---: |
 | baseline | none newly added | not yet reduced | 11.032 | 10.955 |
 
+## Attempted step 1: shared-expert resident gate/up/product/down (rejected)
+
+The candidate used only dead-after-use resident buffers: the normal MLP
+activation buffer for gate, the layer input buffer for up, and an
+attention-projection temporary for the SiLU product.  Thus it added no VRAM
+allocation and left post-norm resident for the independent route verifier.
+The existing device `silu_mul_f32` kernel was sufficient; no GELUTanh or RoPE
+kernel applies to this SiLU shared-expert chain.
+
+It is rejected.  A current-source 262144-token load first exposed the
+prewarm's hard-coded RMS epsilon (`1e-5` versus the descriptor's `1e-6`); when
+temporarily corrected for diagnosis, allocation of the final full-attention V
+cache failed even with zero new region memory.  The pre-existing 262k baseline
+therefore cannot be reproduced from a fresh source build and must not be used
+as a promotion comparison.
+
+At a 131072-token diagnostic context, the candidate's own raw-BF16 router
+verification passed, but comparison with the unchanged host shared-expert path
+failed the required multi-step gate: host generated
+`[194659, 194659, 194659, 194659]`; candidate generated
+`[90700, 8340, 25, 271]`.  Final hidden max abs/max rel were
+`23.95993995666504` / `27510.341719335243`; logits were
+`35.50808143615723` / `235438.86013986013`; all 40 final-token selected-expert
+ID vectors differed.  Evidence remains local under
+`raw/step1/{host,candidate}-131k-*`.  No code from this rejected attempt is
+landed.
