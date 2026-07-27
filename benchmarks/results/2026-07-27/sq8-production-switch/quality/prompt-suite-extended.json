@@ -1,0 +1,67 @@
+{
+  "schema_version": "ullm.lightweight_promotion_prompt_suite.v1",
+  "title": "SQ8_0 extended direct versus grouped tile-20 quality recheck",
+  "cases": [
+    {
+      "id": "python_code_extended",
+      "category": "code_generation",
+      "max_completion_tokens": 512,
+      "expect": {"language": "en", "kind": "code"},
+      "messages": [{"role": "user", "content": "Write a complete Python function named retry_delays that returns exponential retry delays capped at a maximum. Include type hints, a docstring, input validation, and a small executable example call."}]
+    },
+    {
+      "id": "javascript_debug_extended",
+      "category": "code_generation",
+      "max_completion_tokens": 512,
+      "expect": {"language": "en", "kind": "code"},
+      "messages": [{"role": "user", "content": "Fix this JavaScript so it counts only finite numbers, then explain the bug accurately and briefly. Include a runnable corrected snippet and its expected output:\nconst values = [1, NaN, Infinity, 2];\nconst count = values.filter(Boolean).length;"}]
+    },
+    {
+      "id": "ja_multiturn_extended",
+      "category": "multi_turn",
+      "max_completion_tokens": 512,
+      "expect": {"language": "ja", "kind": "prose"},
+      "messages": [
+        {"role": "system", "content": "簡潔で具体的に答えてください。"},
+        {"role": "user", "content": "サービス起動直後に ready endpoint が失敗することがあります。"},
+        {"role": "assistant", "content": "固定時間だけ待つより、期限付きの再試行が有用です。"},
+        {"role": "user", "content": "その理由と、実装時の注意点を2項目で教えてください。各項目は理由、具体的な実装、失敗時の扱いを含めて完結させてください。"}
+      ]
+    },
+    {
+      "id": "ja_explanation_extended",
+      "category": "japanese",
+      "max_completion_tokens": 128,
+      "expect": {"language": "ja", "kind": "prose"},
+      "messages": [{"role": "user", "content": "量子化推論で、ロールバック可能な manifest 切替が安全性を上げる理由を日本語で3点説明してください。"}]
+    },
+    {
+      "id": "en_explanation_extended",
+      "category": "english",
+      "max_completion_tokens": 128,
+      "expect": {"language": "en", "kind": "prose"},
+      "messages": [{"role": "user", "content": "Explain in English why an atomic manifest swap is useful for a local inference service. Use a short paragraph."}]
+    },
+    {
+      "id": "ja_summary_extended",
+      "category": "summary",
+      "max_completion_tokens": 128,
+      "expect": {"language": "ja", "kind": "summary"},
+      "messages": [{"role": "user", "content": "次を日本語で4文以内に要約してください。候補workerは実リクエストを処理し、失敗時には既知のmanifest bytesへ戻す。完全一致は要求せず、空応答、反復、文字化け、コード要求の放棄を調べる。"}]
+    },
+    {
+      "id": "en_multiturn_extended",
+      "category": "multi_turn",
+      "max_completion_tokens": 128,
+      "expect": {"language": "en", "kind": "prose"},
+      "messages": [{"role": "system", "content": "Answer in concise English."}, {"role": "user", "content": "I need to compare a candidate model with the current model."}, {"role": "assistant", "content": "Use the same fixed prompts and save both outputs."}, {"role": "user", "content": "What should I preserve if activation fails?"}]
+    },
+    {
+      "id": "translation_extended",
+      "category": "translation",
+      "max_completion_tokens": 128,
+      "expect": {"language": "ja", "kind": "prose"},
+      "messages": [{"role": "user", "content": "Translate this into natural Japanese: A rollback path makes rapid experimentation safer because a failed live check can return to known-good manifest bytes."}]
+    }
+  ]
+}

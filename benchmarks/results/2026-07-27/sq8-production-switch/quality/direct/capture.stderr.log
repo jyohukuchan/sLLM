@@ -1,0 +1,12 @@
+Traceback (most recent call last):
+  File "/home/homelab1/coding-local/ultimateLLM/uLLM-sq8-production-switch-cf/tools/capture-lightweight-served-suite.py", line 122, in <module>
+    raise SystemExit(main())
+                     ^^^^^^
+  File "/home/homelab1/coding-local/ultimateLLM/uLLM-sq8-production-switch-cf/tools/capture-lightweight-served-suite.py", line 71, in main
+    suite = PROMOTION.load_suite(args.prompt_suite)
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/homelab1/coding-local/ultimateLLM/uLLM-sq8-production-switch-cf/tools/lightweight_promotion.py", line 456, in load_suite
+    fail("prompt suite must contain 8 through 16 cases")
+  File "/home/homelab1/coding-local/ultimateLLM/uLLM-sq8-production-switch-cf/tools/lightweight_promotion.py", line 86, in fail
+    raise PromotionError(message)
+capture_lightweight_promotion.PromotionError: prompt suite must contain 8 through 16 cases
