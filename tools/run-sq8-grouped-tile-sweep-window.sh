@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: Apache-2.0
 # One exclusive R9700 window for the SQ8_0 grouped source-tile sweep.
-set -Eeuo pipefail
+set -Euo pipefail
 [[ $# == 1 ]] || { echo "usage: $0 RESULT_DIR" >&2; exit 2; }
 root=$(git rev-parse --show-toplevel)
 out=$(realpath -m "$1")
@@ -11,13 +11,17 @@ artifact=/home/homelab1/datapool/ullm/product/qwen3-14b-fp8-sq8-v0.1/artifact
 package=/home/homelab1/datapool/ullm/product/qwen3-14b-fp8-sq8-v0.1/package
 serving="$root/target/release/examples/sq8_ck_serving"
 steady="$root/target/release/examples/sq8_0_paged_decode_steady_bench"
+moe="$root/target/release/ullm-qwen35-moe-aq4-generate"
+moe_package=/home/homelab1/datapool/ullm/product/qwen35-35b-a3b-aq4_0-g8-moe-v0.2/package
+moe_tokenizer=/home/homelab1/datapool/ai_models/safetensors/Qwen3.5-35B-A3B-BF16
+moe_sha256=6ee827e43fa4e4a5e54fd66c1b20eb444e05632245f66349e10cfe409b9e39cd
 worker=/home/homelab1/coding-local/ultimateLLM/cf-sq8-build-release-20260727/ullm-sq8-worker
 gateway="$root/services/openai-gateway/.venv/bin/ullm-openai-gateway"
 suite="$cf/quality/prompt-suite-extended.json"
 direct_cases="$cf/quality/direct/capture/cases"
 port=18081
 [[ ! -e "$out/window-events.tsv" ]] || { echo "refusing to reuse result directory" >&2; exit 2; }
-mkdir -p "$out"/{bench,numeric,quality/capture,quality/baseline,service,telemetry,provenance}
+mkdir -p "$out"/{bench,moe,numeric,quality/capture,quality/baseline,service,telemetry,provenance}
 event() { printf '%s\t%s\n' "$(date --iso-8601=seconds)" "$1" >>"$out/window-events.tsv"; }
 sudo_systemctl() { printf '%s\n' Threadripper | sudo -S -p '' systemctl "$@"; }
 metric() { amd-smi metric --gpu 2 --temperature --clock --power --violation --json; }
@@ -75,7 +79,7 @@ PY
 trap restore EXIT
 printf 'timestamp\tevent\n' >"$out/window-events.tsv"
 state before-stop
-sha256sum /etc/ullm/served-models/active.json "$serving" "$steady" "$worker" "$gateway" "$suite" >"$out/provenance/inputs.sha256"
+sha256sum /etc/ullm/served-models/active.json "$serving" "$steady" "$moe" "$worker" "$gateway" "$suite" >"$out/provenance/inputs.sha256"
 cp -a -- "$direct_cases/." "$out/quality/baseline/"
 cp -- "$cf/quality/direct/manifest.json" "$out/quality/direct-manifest-readonly-copy.json"
 cp -- "$cf/quality/gqa-grouped-tile20/manifest.json" "$out/quality/grouped-tile20-manifest-readonly-copy.json"
@@ -87,7 +91,7 @@ Path(sys.argv[2]).write_text(json.dumps(d,ensure_ascii=False,indent=2)+"\n")
 PY
 python3 "$root/tools/validate-served-model.py" --manifest "$out/quality/manifest-tile128.json" >"$out/quality/manifest-validation.json"
 metric >"$out/telemetry/before-stop.json"
-[[ -x "$serving" && -x "$steady" && -x "$worker" && -x "$gateway" ]] || { echo "missing binary" >&2; exit 1; }
+[[ -x "$serving" && -x "$steady" && -x "$moe" && -x "$worker" && -x "$gateway" ]] || { echo "missing binary" >&2; exit 1; }
 grep -qx 'ActiveState=inactive' "$out/service/before-stop-llama.txt" && grep -qx 'UnitFileState=disabled' "$out/service/before-stop-llama.txt" || { echo "llama is not inactive/disabled" >&2; exit 1; }
 systemctl is-active --quiet "$service" || { echo "production service inactive" >&2; exit 75; }
 lock_held_only_by_service || { echo "R9700 lock holder is outside production service; refusing to take it" >&2; exit 75; }
@@ -97,6 +101,74 @@ state after-stop
 ! systemctl is-active --quiet "$service" && ! fuser "$lock" >/dev/null 2>&1 || { echo "service or lock still busy" >&2; exit 75; }
 exec 9<>"$lock"; flock -n 9 || { echo "lock raced busy" >&2; exit 75; }; held=1; event lock-acquired
 metric >"$out/telemetry/after-lock.json"
+
+# Phase 2 is deliberately self-contained.  Its exit status is recorded, but
+# cannot suppress the independent tile-128 Phase 3 that follows.
+run_moe_phase() {
+  local pid= status=1 sampled=0
+  event moe-phase-start
+  thermal moe-phase || { echo "thermal gate failed before MoE" >"$out/moe/error.txt"; return 1; }
+  sha256sum "$moe" >"$out/moe/release-binary.sha256"
+  grep -q "^$moe_sha256  " "$out/moe/release-binary.sha256" || {
+    echo "stale MoE binary: expected $moe_sha256" >"$out/moe/error.txt"; return 1;
+  }
+  env HIP_VISIBLE_DEVICES=1 ULLM_HIP_VISIBLE_DEVICES=1 ULLM_KV_CACHE_DTYPE=f16 \
+    ULLM_REQUIRE_HIP_AQ4_KERNEL=1 ULLM_REQUIRE_HIP_AQ4_MATVEC_KERNEL=1 \
+    ULLM_REQUIRE_HIP_AQ4_MATVEC_BATCH_KERNEL=1 ULLM_REQUIRE_HIP_AQ4_REGISTER_BM8_KERNEL=1 \
+    ULLM_REQUIRE_HIP_AQ4_REGISTER_BM8_GROUP8_KERNEL=1 ULLM_REQUIRE_HIP_AQ4_WMMA_GEMM_KERNEL=1 \
+    ULLM_REQUIRE_HIP_AQ4_WMMA_GEMM_GROUP8_KERNEL=1 ULLM_REQUIRE_HIP_AQ4_WMMA_GEMM_RAGGED_M_KERNEL=1 \
+    ULLM_REQUIRE_HIP_AQ4_WMMA_GEMM_GROUP8_RAGGED_M_KERNEL=1 ULLM_REQUIRE_HIP_AQ4_MATVEC_ADD_KERNEL=1 \
+    ULLM_REQUIRE_HIP_AQ4_MATVEC_PAIR_KERNEL=1 ULLM_REQUIRE_HIP_AQ4_MATVEC_TRIPLE_KERNEL=1 \
+    ULLM_REQUIRE_HIP_AQ4_MATVEC_QKV_Z_GATE_BETA_KERNEL=1 ULLM_REQUIRE_HIP_ADD_KERNEL=1 \
+    ULLM_REQUIRE_HIP_BF16_MATVEC_KERNEL=1 ULLM_REQUIRE_HIP_BF16_ROW_KERNEL=1 \
+    ULLM_REQUIRE_HIP_LINEAR_ATTN_GATE_BETA_KERNEL=1 ULLM_REQUIRE_HIP_LINEAR_ATTN_KERNEL=1 \
+    ULLM_REQUIRE_HIP_LINEAR_ATTN_QKV_PREPARE_BATCH_KERNEL=1 ULLM_REQUIRE_HIP_LINEAR_ATTN_RECURRENT_KERNEL=1 \
+    ULLM_REQUIRE_HIP_LINEAR_ATTN_RECURRENT_SEQUENCE_KERNEL=1 ULLM_REQUIRE_HIP_PAGED_KV_WRITE_CHUNK_KERNEL=1 \
+    ULLM_REQUIRE_HIP_PAGED_CAUSAL_GQA_CHUNK_KERNEL=1 ULLM_REQUIRE_HIP_PAGED_CAUSAL_GQA_WMMA_KERNEL=1 \
+    ULLM_REQUIRE_HIP_PAGED_DECODE_ATTN_KERNEL=1 ULLM_REQUIRE_HIP_PAGED_DECODE_SPLIT_KERNEL=1 \
+    ULLM_REQUIRE_HIP_PAGED_KV_WRITE_KERNEL=1 ULLM_REQUIRE_HIP_QWEN35_Q_SPLIT_KERNEL=1 \
+    ULLM_REQUIRE_HIP_QWEN35_QK_NORM_ROPE_BATCH_KERNEL=1 ULLM_REQUIRE_HIP_QWEN35_QK_NORM_ROPE_PAGED_KV_WRITE_KERNEL=1 \
+    ULLM_REQUIRE_HIP_RMSNORM_KERNEL=1 ULLM_REQUIRE_HIP_ROPE_KERNEL=1 \
+    ULLM_REQUIRE_HIP_SEGMENTED_RMSNORM_SILU_MUL_KERNEL=1 ULLM_REQUIRE_HIP_SIGMOID_MUL_KERNEL=1 \
+    ULLM_REQUIRE_HIP_SILU_MUL_KERNEL=1 ULLM_REQUIRE_HIP_TOP1_KERNEL=1 \
+    "$moe" --package "$moe_package" --prompt-token-ids 248045,846,198,20206,303,799,2716,6163,11316,25,1092,3520,264,58377,5902,30,248046,198,248045,74455,198,248068,198 \
+    --new-tokens 24 --context-length 262144 --kv-block-size 256 --device-index 1 --hold-seconds 20 \
+    --output "$out/moe/generation.json" >"$out/moe/generation.stdout" 2>"$out/moe/generation.stderr" &
+  pid=$!
+  for _ in $(seq 1 180); do
+    if [[ -s "$out/moe/generation.json" ]]; then
+      amd-smi metric --gpu 2 --mem-usage --json >"$out/moe/vram-during-residency.json" 2>&1 || true
+      amd-smi process --gpu 2 --json >"$out/moe/process-during-residency.json" 2>&1 || true
+      metric >"$out/moe/telemetry-during-residency.json" 2>&1 || true
+      sampled=1
+      break
+    fi
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 1
+  done
+  wait "$pid"; status=$?
+  printf '%s\n' "$status" >"$out/moe/exit-status.txt"
+  printf '%s\n' "$sampled" >"$out/moe/residency-sampled.txt"
+  if ((status != 0)); then event "moe-phase-failed status=$status"; return "$status"; fi
+  python3 - "$out/moe/generation.json" "$moe_tokenizer" "$out/moe/decoded-generation.json" "$out/moe/router-validation.json" <<'PY'
+import json, sys
+from pathlib import Path
+from transformers import AutoTokenizer
+result = json.loads(Path(sys.argv[1]).read_text())
+tok = AutoTokenizer.from_pretrained(sys.argv[2], local_files_only=True, trust_remote_code=True)
+generated = result["generation"]["generated_token_ids"]
+Path(sys.argv[3]).write_text(json.dumps({"prompt_text": "Reply in one short English sentence: what makes a rollback safe?", "generated_token_ids": generated, "generated_text": tok.decode(generated, skip_special_tokens=True, clean_up_tokenization_spaces=False)}, ensure_ascii=False, indent=2) + "\n")
+routes = result["router_verification"]
+summary = {"layer_count": len(routes), "layer_indices": [row["layer_index"] for row in routes], "tie_free_mismatches": result["router_verification_tie_free_mismatches"], "strict_order_match_values": [row["strict_order_match"] for row in routes], "all_tie_free_routes_match": not result["router_verification_tie_free_mismatches"], "prefill_tokens_per_second": len(result["generation"]["prompt_token_ids"]) / (result["generation"]["prompt_wall_ms"] / 1000.0), "decode_tokens_per_second": result["generation"]["decode_tokens_per_second"]}
+if summary["layer_count"] != 40 or summary["layer_indices"] != list(range(40)) or not summary["all_tie_free_routes_match"]:
+    raise SystemExit("40-layer raw-BF16 router verification is incomplete or mismatched")
+Path(sys.argv[4]).write_text(json.dumps(summary, ensure_ascii=False, indent=2) + "\n")
+PY
+  status=$?
+  event "moe-phase-finished status=$status"
+  return "$status"
+}
+if run_moe_phase; then :; else printf '%s\n' "$?" >"$out/moe/phase-status.txt"; fi
 run_route() {
   local tile=$1; shift
   local -a e=(-u ULLM_EXPERIMENTAL_SQ8_PAGED_DECODE_SPLIT_TILE -u ULLM_EXPERIMENTAL_SQ8_PAGED_DECODE_SPLIT_ALLOW_MULTITILE -u ULLM_EXPERIMENTAL_PAGED_DECODE_GQA_GROUPED_SPLIT -u ULLM_DISABLE_SQ8_0_FLASH2_GQA_GROUPED HIP_VISIBLE_DEVICES=1 ULLM_HIP_VISIBLE_DEVICES=1 ULLM_REQUIRE_HIP_RMSNORM_KERNEL=1 ULLM_REQUIRE_HIP_ROPE_KERNEL=1 ULLM_REQUIRE_HIP_CAUSAL_ATTN_KERNEL=1 ULLM_REQUIRE_HIP_ADD_KERNEL=1 ULLM_REQUIRE_HIP_SILU_MUL_KERNEL=1 ULLM_REQUIRE_HIP_PAGED_KV_WRITE_KERNEL=1 ULLM_REQUIRE_HIP_PAGED_DECODE_ATTN_KERNEL=1 ULLM_REQUIRE_HIP_PAGED_DECODE_SPLIT_KERNEL=1 ULLM_REQUIRE_HIP_CACHED_PREFIX_ATTN_F32_FLASH2_KERNEL=1 ULLM_REQUIRE_HIP_BF16_MATVEC_KERNEL=1 ULLM_REQUIRE_HIP_BF16_ROW_KERNEL=1)
@@ -133,7 +205,11 @@ for route in ("tile20","tile128"):
  maximum=0.; values=bad=0
  for a,b in zip(base,captures(route),strict=True):
   for key in ("final_hidden_file","logits_file"):
-   for (x,),(y,) in zip(items(root/"direct"/a[key]),items(root/route/b[key]),strict=True):
+   # Capture file names are relative to numeric/, and already include the
+   # route directory (for example direct/foo.f32le).  Do not prefix route a
+   # second time: that made the completed capture comparison fail before the
+   # quality phase could record a useful diagnostic.
+   for (x,),(y,) in zip(items(root/a[key]),items(root/b[key]),strict=True):
     maximum=max(maximum,abs(x-y)); values+=1; bad+=not(math.isfinite(x) and math.isfinite(y))
  result["routes"][route]={"split_vs_direct_max_abs":maximum,"compared_f32_values":values,"nonfinite_values":bad}
 out.write_text(json.dumps(result,indent=2,sort_keys=True)+"\n")
@@ -141,7 +217,7 @@ PY
 thermal quality-gateway
 release_lock; event isolated-gateway-start
 env HIP_VISIBLE_DEVICES=1 ULLM_HIP_VISIBLE_DEVICES=1 ULLM_SERVED_MODEL_MANIFEST="$out/quality/manifest-tile128.json" ULLM_GPU_LOCK_FILE="$lock" ULLM_BIND_HOST=127.0.0.1 ULLM_BIND_PORT="$port" "$gateway" >"$out/quality/gateway.stdout" 2>"$out/quality/gateway.stderr" & gateway_pid=$!
-python3 - "$root/tools/lightweight_promotion.py" "$suite" "$out/quality/capture" "$port" <<'PY'
+python3 - "$root/tools/lightweight_promotion.py" "$suite" "$out/quality/capture" "$port" >"$out/quality/capture-harness.stdout" 2>"$out/quality/capture-harness.stderr" <<'PY'
 import importlib.util,json,os,sys
 from pathlib import Path
 s=importlib.util.spec_from_file_location("p",sys.argv[1]);m=importlib.util.module_from_spec(s);sys.modules["p"]=m;s.loader.exec_module(m)
@@ -152,7 +228,7 @@ m.write_json_new(out/"capture.json",{"schema_version":"ullm.lightweight_served_s
 PY
 stop_gateway
 exec 9<>"$lock"; flock -n 9; held=1; event lock-reacquired-after-quality
-python3 - "$root/tools/lightweight_promotion.py" "$suite" "$out/quality/baseline" "$out/quality/capture/cases" "$out/quality/comparison.json" "$out/quality/comparison.md" <<'PY'
+python3 - "$root/tools/lightweight_promotion.py" "$suite" "$out/quality/baseline" "$out/quality/capture/cases" "$out/quality/comparison.json" "$out/quality/comparison.md" >"$out/quality/compare-harness.stdout" 2>"$out/quality/compare-harness.stderr" <<'PY'
 import importlib.util,json,sys
 from pathlib import Path
 s=importlib.util.spec_from_file_location("p",sys.argv[1]);m=importlib.util.module_from_spec(s);sys.modules["p"]=m;s.loader.exec_module(m)

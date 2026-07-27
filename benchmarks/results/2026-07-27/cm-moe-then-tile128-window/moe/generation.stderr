@@ -1,0 +1,1 @@
+ullm-qwen35-moe-aq4-generate: failed to load Qwen3.5 MoE full-attention layer 3: self-attn resident o shape mismatch: got [2048,4096] expected [2048,8192]

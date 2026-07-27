@@ -1,0 +1,16 @@
+{
+  "reference_route": "direct",
+  "routes": {
+    "tile128": {
+      "compared_f32_values": 471168,
+      "nonfinite_values": 0,
+      "split_vs_direct_max_abs": 2.3758392333984375
+    },
+    "tile20": {
+      "compared_f32_values": 471168,
+      "nonfinite_values": 0,
+      "split_vs_direct_max_abs": 1.3091354370117188
+    }
+  },
+  "schema_version": "ullm.sq8_grouped_tile_sweep_numeric.v1"
+}
