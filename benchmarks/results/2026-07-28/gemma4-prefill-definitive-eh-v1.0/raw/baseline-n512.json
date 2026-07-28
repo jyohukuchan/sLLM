@@ -1,0 +1,3781 @@
+{
+  "cooldown": {
+    "decision": "temperature at or below threshold before measured work",
+    "elapsed_seconds": 0.150605763,
+    "samples": [
+      {
+        "args": [
+          "metric",
+          "--gpu",
+          "2",
+          "--temperature",
+          "--clock",
+          "--power",
+          "--violation",
+          "--mem-usage",
+          "--json"
+        ],
+        "exit_code": 0,
+        "parsed_stdout": {
+          "gpu_data": [
+            {
+              "clock": {
+                "dclk_0": {
+                  "clk": {
+                    "unit": "MHz",
+                    "value": 25
+                  },
+                  "clk_locked": "N/A",
+                  "deep_sleep": "N/A",
+                  "max_clk": "N/A",
+                  "min_clk": "N/A"
+                },
+                "dclk_1": {
+                  "clk": "N/A",
+                  "clk_locked": "N/A",
+                  "deep_sleep": "N/A",
+                  "max_clk": "N/A",
+                  "min_clk": "N/A"
+                },
+                "dclk_2": {
+                  "clk": "N/A",
+                  "clk_locked": "N/A",
+                  "deep_sleep": "N/A",
+                  "max_clk": "N/A",
+                  "min_clk": "N/A"
+                },
+                "dclk_3": {
+                  "clk": "N/A",
+                  "clk_locked": "N/A",
+                  "deep_sleep": "N/A",
+                  "max_clk": "N/A",
+                  "min_clk": "N/A"
+                },
+                "fclk_0": {
+                  "clk": {
+                    "unit": "MHz",
+                    "value": 1537
+                  },
+                  "clk_locked": "N/A",
+                  "deep_sleep": "DISABLED",
+                  "max_clk": {
+                    "unit": "MHz",
+                    "value": 2400
+                  },
+                  "min_clk": {
+                    "unit": "MHz",
+                    "value": 313
+                  }
+                },
+                "gfx_0": {
+                  "clk": {
+                    "unit": "MHz",
+                    "value": 81
+                  },
+                  "clk_locked": "N/A",
+                  "deep_sleep": "N/A",
+                  "max_clk": {
+                    "unit": "MHz",
+                    "value": 0
+                  },
+                  "min_clk": "N/A"
+                },
+                "gfx_1": {
+                  "clk": "N/A",
+                  "clk_locked": "N/A",
+                  "deep_sleep": "N/A",
+                  "max_clk": "N/A",
+                  "min_clk": "N/A"
+                },
+                "gfx_2": {
+                  "clk": "N/A",
+                  "clk_locked": "N/A",
+                  "deep_sleep": "N/A",
+                  "max_clk": "N/A",
+                  "min_clk": "N/A"
+                },
+                "gfx_3": {
+                  "clk": "N/A",
+                  "clk_locked": "N/A",
+                  "deep_sleep": "N/A",
+                  "max_clk": "N/A",
+                  "min_clk": "N/A"
+                },
+                "gfx_4": {
+                  "clk": "N/A",
+                  "clk_locked": "N/A",
+                  "deep_sleep": "N/A",
+                  "max_clk": "N/A",
+                  "min_clk": "N/A"
+                },
+                "gfx_5": {
+                  "clk": "N/A",
+                  "clk_locked": "N/A",
+                  "deep_sleep": "N/A",
+                  "max_clk": "N/A",
+                  "min_clk": "N/A"
+                },
+                "gfx_6": {
+                  "clk": "N/A",
+                  "clk_locked": "N/A",
+                  "deep_sleep": "N/A",
+                  "max_clk": "N/A",
+                  "min_clk": "N/A"
+                },
+                "gfx_7": {
+                  "clk": "N/A",
+                  "clk_locked": "N/A",
+                  "deep_sleep": "N/A",
+                  "max_clk": "N/A",
+                  "min_clk": "N/A"
+                },
+                "mem_0": {
+                  "clk": {
+                    "unit": "MHz",
+                    "value": 875
+                  },
+                  "clk_locked": "N/A",
+                  "deep_sleep": "DISABLED",
+                  "max_clk": {
+                    "unit": "MHz",
+                    "value": 1259
+                  },
+                  "min_clk": {
+                    "unit": "MHz",
+                    "value": 97
+                  }
+                },
+                "socclk_0": {
+                  "clk": {
+                    "unit": "MHz",
+                    "value": 872
+                  },
+                  "clk_locked": "N/A",
+                  "deep_sleep": "DISABLED",
+                  "max_clk": {
+                    "unit": "MHz",
+                    "value": 1476
+                  },
+                  "min_clk": {
+                    "unit": "MHz",
+                    "value": 417
+                  }
+                },
+                "vclk_0": {
+                  "clk": {
+                    "unit": "MHz",
+                    "value": 25
+                  },
+                  "clk_locked": "N/A",
+                  "deep_sleep": "N/A",
+                  "max_clk": "N/A",
+                  "min_clk": "N/A"
+                },
+                "vclk_1": {
+                  "clk": "N/A",
+                  "clk_locked": "N/A",
+                  "deep_sleep": "N/A",
+                  "max_clk": "N/A",
+                  "min_clk": "N/A"
+                },
+                "vclk_2": {
+                  "clk": "N/A",
+                  "clk_locked": "N/A",
+                  "deep_sleep": "N/A",
+                  "max_clk": "N/A",
+                  "min_clk": "N/A"
+                },
+                "vclk_3": {
+                  "clk": "N/A",
+                  "clk_locked": "N/A",
+                  "deep_sleep": "N/A",
+                  "max_clk": "N/A",
+                  "min_clk": "N/A"
+                }
+              },
+              "gpu": 2,
+              "mem_usage": {
+                "free_gtt": {
+                  "unit": "MB",
+                  "value": 56221
+                },
+                "free_visible_vram": {
+                  "unit": "MB",
+                  "value": 20872
+                },
+                "free_vram": {
+                  "unit": "MB",
+                  "value": 20872
+                },
+                "total_gtt": {
+                  "unit": "MB",
+                  "value": 56235
+                },
+                "total_visible_vram": {
+                  "unit": "MB",
+                  "value": 32624
+                },
+                "total_vram": {
+                  "unit": "MB",
+                  "value": 32624
+                },
+                "used_gtt": {
+                  "unit": "MB",
+                  "value": 14
+                },
+                "used_visible_vram": {
+                  "unit": "MB",
+                  "value": 11752
+                },
+                "used_vram": {
+                  "unit": "MB",
+                  "value": 11752
+                }
+              },
+              "power": {
+                "gfx_voltage": {
+                  "unit": "mV",
+                  "value": 865
+                },
+                "mem_voltage": {
+                  "unit": "mV",
+                  "value": 1250
+                },
+                "power_management": "ENABLED",
+                "soc_voltage": {
+                  "unit": "mV",
+                  "value": 802
+                },
+                "socket_power": {
+                  "unit": "W",
+                  "value": 39
+                },
+                "throttle_status": "THROTTLED"
+              },
+              "temperature": {
+                "edge": {
+                  "unit": "C",
+                  "value": 62
+                },
+                "hotspot": {
+                  "unit": "C",
+                  "value": 63
+                },
+                "mem": {
+                  "unit": "C",
+                  "value": 64
+                }
+              },
+              "throttle": {
+                "accumulation_counter": "N/A",
+                "gfx_clk_below_host_limit_accumulated": "N/A",
+                "gfx_clk_below_host_limit_power_accumulated": "N/A",
+                "gfx_clk_below_host_limit_power_violation_activity": "N/A",
+                "gfx_clk_below_host_limit_power_violation_status": "N/A",
+                "gfx_clk_below_host_limit_thermal_accumulated": "N/A",
+                "gfx_clk_below_host_limit_thermal_violation_activity": "N/A",
+                "gfx_clk_below_host_limit_thermal_violation_status": "N/A",
+                "gfx_clk_below_host_limit_violation_activity": "N/A",
+                "gfx_clk_below_host_limit_violation_status": "N/A",
+                "hbm_thermal_accumulated": "N/A",
+                "hbm_thermal_violation_activity": "N/A",
+                "hbm_thermal_violation_status": "N/A",
+                "low_utilization_accumulated": "N/A",
+                "low_utilization_violation_activity": "N/A",
+                "low_utilization_violation_status": "N/A",
+                "ppt_accumulated": "N/A",
+                "ppt_violation_activity": "N/A",
+                "ppt_violation_status": "N/A",
+                "prochot_accumulated": "N/A",
+                "prochot_violation_activity": "N/A",
+                "prochot_violation_status": "N/A",
+                "socket_thermal_accumulated": "N/A",
+                "socket_thermal_violation_activity": "N/A",
+                "socket_thermal_violation_status": "N/A",
+                "total_gfx_clk_below_host_limit_accumulated": "N/A",
+                "total_gfx_clk_below_host_limit_violation_activity": "N/A",
+                "total_gfx_clk_below_host_limit_violation_status": "N/A",
+                "vr_thermal_accumulated": "N/A",
+                "vr_thermal_violation_activity": "N/A",
+                "vr_thermal_violation_status": "N/A"
+              }
+            }
+          ]
+        },
+        "program": "/opt/rocm/bin/amd-smi",
+        "stderr": "",
+        "stdout": "{\n    \"gpu_data\": [\n        {\n            \"gpu\": 2,\n            \"power\": {\n                \"socket_power\": {\n                    \"value\": 39,\n                    \"unit\": \"W\"\n                },\n                \"gfx_voltage\": {\n                    \"value\": 865,\n                    \"unit\": \"mV\"\n                },\n                \"soc_voltage\": {\n                    \"value\": 802,\n                    \"unit\": \"mV\"\n                },\n                \"mem_voltage\": {\n                    \"value\": 1250,\n                    \"unit\": \"mV\"\n                },\n                \"throttle_status\": \"THROTTLED\",\n                \"power_management\": \"ENABLED\"\n            },\n            \"clock\": {\n                \"gfx_0\": {\n                    \"clk\": {\n                        \"value\": 81,\n                        \"unit\": \"MHz\"\n                    },\n                    \"min_clk\": \"N/A\",\n                    \"max_clk\": {\n                        \"value\": 0,\n                        \"unit\": \"MHz\"\n                    },\n                    \"clk_locked\": \"N/A\",\n                    \"deep_sleep\": \"N/A\"\n                },\n                \"gfx_1\": {\n                    \"clk\": \"N/A\",\n                    \"min_clk\": \"N/A\",\n                    \"max_clk\": \"N/A\",\n                    \"clk_locked\": \"N/A\",\n                    \"deep_sleep\": \"N/A\"\n                },\n                \"gfx_2\": {\n                    \"clk\": \"N/A\",\n                    \"min_clk\": \"N/A\",\n                    \"max_clk\": \"N/A\",\n                    \"clk_locked\": \"N/A\",\n                    \"deep_sleep\": \"N/A\"\n                },\n                \"gfx_3\": {\n                    \"clk\": \"N/A\",\n                    \"min_clk\": \"N/A\",\n                    \"max_clk\": \"N/A\",\n                    \"clk_locked\": \"N/A\",\n                    \"deep_sleep\": \"N/A\"\n                },\n                \"gfx_4\": {\n                    \"clk\": \"N/A\",\n                    \"min_clk\": \"N/A\",\n                    \"max_clk\": \"N/A\",\n                    \"clk_locked\": \"N/A\",\n                    \"deep_sleep\": \"N/A\"\n                },\n                \"gfx_5\": {\n                    \"clk\": \"N/A\",\n                    \"min_clk\": \"N/A\",\n                    \"max_clk\": \"N/A\",\n                    \"clk_locked\": \"N/A\",\n                    \"deep_sleep\": \"N/A\"\n                },\n                \"gfx_6\": {\n                    \"clk\": \"N/A\",\n                    \"min_clk\": \"N/A\",\n                    \"max_clk\": \"N/A\",\n                    \"clk_locked\": \"N/A\",\n                    \"deep_sleep\": \"N/A\"\n                },\n                \"gfx_7\": {\n                    \"clk\": \"N/A\",\n                    \"min_clk\": \"N/A\",\n                    \"max_clk\": \"N/A\",\n                    \"clk_locked\": \"N/A\",\n                    \"deep_sleep\": \"N/A\"\n                },\n                \"mem_0\": {\n                    \"clk\": {\n                        \"value\": 875,\n                        \"unit\": \"MHz\"\n                    },\n                    \"min_clk\": {\n                        \"value\": 97,\n                        \"unit\": \"MHz\"\n                    },\n                    \"max_clk\": {\n                        \"value\": 1259,\n                        \"unit\": \"MHz\"\n                    },\n                    \"clk_locked\": \"N/A\",\n                    \"deep_sleep\": \"DISABLED\"\n                },\n                \"vclk_0\": {\n                    \"clk\": {\n                        \"value\": 25,\n                        \"unit\": \"MHz\"\n                    },\n                    \"min_clk\": \"N/A\",\n                    \"max_clk\": \"N/A\",\n                    \"clk_locked\": \"N/A\",\n                    \"deep_sleep\": \"N/A\"\n                },\n                \"vclk_1\": {\n                    \"clk\": \"N/A\",\n                    \"min_clk\": \"N/A\",\n                    \"max_clk\": \"N/A\",\n                    \"clk_locked\": \"N/A\",\n                    \"deep_sleep\": \"N/A\"\n                },\n                \"vclk_2\": {\n                    \"clk\": \"N/A\",\n                    \"min_clk\": \"N/A\",\n                    \"max_clk\": \"N/A\",\n                    \"clk_locked\": \"N/A\",\n                    \"deep_sleep\": \"N/A\"\n                },\n                \"vclk_3\": {\n                    \"clk\": \"N/A\",\n                    \"min_clk\": \"N/A\",\n                    \"max_clk\": \"N/A\",\n                    \"clk_locked\": \"N/A\",\n                    \"deep_sleep\": \"N/A\"\n                },\n                \"dclk_0\": {\n                    \"clk\": {\n                        \"value\": 25,\n                        \"unit\": \"MHz\"\n                    },\n                    \"min_clk\": \"N/A\",\n                    \"max_clk\": \"N/A\",\n                    \"clk_locked\": \"N/A\",\n                    \"deep_sleep\": \"N/A\"\n                },\n                \"dclk_1\": {\n                    \"clk\": \"N/A\",\n                    \"min_clk\": \"N/A\",\n                    \"max_clk\": \"N/A\",\n                    \"clk_locked\": \"N/A\",\n                    \"deep_sleep\": \"N/A\"\n                },\n                \"dclk_2\": {\n                    \"clk\": \"N/A\",\n                    \"min_clk\": \"N/A\",\n                    \"max_clk\": \"N/A\",\n                    \"clk_locked\": \"N/A\",\n                    \"deep_sleep\": \"N/A\"\n                },\n                \"dclk_3\": {\n                    \"clk\": \"N/A\",\n                    \"min_clk\": \"N/A\",\n                    \"max_clk\": \"N/A\",\n                    \"clk_locked\": \"N/A\",\n                    \"deep_sleep\": \"N/A\"\n                },\n                \"fclk_0\": {\n                    \"clk\": {\n                        \"value\": 1537,\n                        \"unit\": \"MHz\"\n                    },\n                    \"min_clk\": {\n                        \"value\": 313,\n                        \"unit\": \"MHz\"\n                    },\n                    \"max_clk\": {\n                        \"value\": 2400,\n                        \"unit\": \"MHz\"\n                    },\n                    \"clk_locked\": \"N/A\",\n                    \"deep_sleep\": \"DISABLED\"\n                },\n                \"socclk_0\": {\n                    \"clk\": {\n                        \"value\": 872,\n                        \"unit\": \"MHz\"\n                    },\n                    \"min_clk\": {\n                        \"value\": 417,\n                        \"unit\": \"MHz\"\n                    },\n                    \"max_clk\": {\n                        \"value\": 1476,\n                        \"unit\": \"MHz\"\n                    },\n                    \"clk_locked\": \"N/A\",\n                    \"deep_sleep\": \"DISABLED\"\n                }\n            },\n            \"temperature\": {\n                \"edge\": {\n                    \"value\": 62,\n                    \"unit\": \"C\"\n                },\n                \"hotspot\": {\n                    \"value\": 63,\n                    \"unit\": \"C\"\n                },\n                \"mem\": {\n                    \"value\": 64,\n                    \"unit\": \"C\"\n                }\n            },\n            \"mem_usage\": {\n                \"total_vram\": {\n                    \"value\": 32624,\n                    \"unit\": \"MB\"\n                },\n                \"used_vram\": {\n                    \"value\": 11752,\n                    \"unit\": \"MB\"\n                },\n                \"free_vram\": {\n                    \"value\": 20872,\n                    \"unit\": \"MB\"\n                },\n                \"total_visible_vram\": {\n                    \"value\": 32624,\n                    \"unit\": \"MB\"\n                },\n                \"used_visible_vram\": {\n                    \"value\": 11752,\n                    \"unit\": \"MB\"\n                },\n                \"free_visible_vram\": {\n                    \"value\": 20872,\n                    \"unit\": \"MB\"\n                },\n                \"total_gtt\": {\n                    \"value\": 56235,\n                    \"unit\": \"MB\"\n                },\n                \"used_gtt\": {\n                    \"value\": 14,\n                    \"unit\": \"MB\"\n                },\n                \"free_gtt\": {\n                    \"value\": 56221,\n                    \"unit\": \"MB\"\n                }\n            },\n            \"throttle\": {\n                \"accumulation_counter\": \"N/A\",\n                \"prochot_accumulated\": \"N/A\",\n                \"ppt_accumulated\": \"N/A\",\n                \"socket_thermal_accumulated\": \"N/A\",\n                \"vr_thermal_accumulated\": \"N/A\",\n                \"hbm_thermal_accumulated\": \"N/A\",\n                \"gfx_clk_below_host_limit_accumulated\": \"N/A\",\n                \"gfx_clk_below_host_limit_power_accumulated\": \"N/A\",\n                \"gfx_clk_below_host_limit_thermal_accumulated\": \"N/A\",\n                \"total_gfx_clk_below_host_limit_accumulated\": \"N/A\",\n                \"low_utilization_accumulated\": \"N/A\",\n                \"prochot_violation_status\": \"N/A\",\n                \"ppt_violation_status\": \"N/A\",\n                \"socket_thermal_violation_status\": \"N/A\",\n                \"vr_thermal_violation_status\": \"N/A\",\n                \"hbm_thermal_violation_status\": \"N/A\",\n                \"gfx_clk_below_host_limit_violation_status\": \"N/A\",\n                \"gfx_clk_below_host_limit_power_violation_status\": \"N/A\",\n                \"gfx_clk_below_host_limit_thermal_violation_status\": \"N/A\",\n                \"total_gfx_clk_below_host_limit_violation_status\": \"N/A\",\n                \"low_utilization_violation_status\": \"N/A\",\n                \"prochot_violation_activity\": \"N/A\",\n                \"ppt_violation_activity\": \"N/A\",\n                \"socket_thermal_violation_activity\": \"N/A\",\n                \"vr_thermal_violation_activity\": \"N/A\",\n                \"hbm_thermal_violation_activity\": \"N/A\",\n                \"gfx_clk_below_host_limit_violation_activity\": \"N/A\",\n                \"gfx_clk_below_host_limit_power_violation_activity\": \"N/A\",\n                \"gfx_clk_below_host_limit_thermal_violation_activity\": \"N/A\",\n                \"total_gfx_clk_below_host_limit_violation_activity\": \"N/A\",\n                \"low_utilization_violation_activity\": \"N/A\"\n            }\n        }\n    ]\n}\n"
+      }
+    ],
+    "threshold_hotspot_c": 87.0
+  },
+  "device": {
+    "backend": "hip",
+    "compute": [
+      12,
+      0
+    ],
+    "device_id": 0,
+    "gcn_arch_name": "gfx1201",
+    "name": "AMD Radeon Graphics",
+    "runtime_index": 1,
+    "total_global_mem_bytes": 34208743424
+  },
+  "environment": {
+    "HIP_VISIBLE_DEVICES": "1",
+    "ULLM_HIP_VISIBLE_DEVICES": "1",
+    "ULLM_REQUIRE_HIP_BF16_MATVEC_KERNEL": "1",
+    "ULLM_REQUIRE_HIP_PAGED_DECODE_ATTN_KERNEL": "1",
+    "ULLM_REQUIRE_HIP_PAGED_KV_WRITE_KERNEL": "1"
+  },
+  "final_kv_snapshot": {
+    "shared_layer_sources": [
+      {
+        "layer_index": 15,
+        "layer_kind": "sliding_attention",
+        "source_layer_index": 13
+      },
+      {
+        "layer_index": 16,
+        "layer_kind": "sliding_attention",
+        "source_layer_index": 13
+      },
+      {
+        "layer_index": 17,
+        "layer_kind": "sliding_attention",
+        "source_layer_index": 13
+      },
+      {
+        "layer_index": 18,
+        "layer_kind": "sliding_attention",
+        "source_layer_index": 13
+      },
+      {
+        "layer_index": 19,
+        "layer_kind": "full_attention",
+        "source_layer_index": 14
+      },
+      {
+        "layer_index": 20,
+        "layer_kind": "sliding_attention",
+        "source_layer_index": 13
+      },
+      {
+        "layer_index": 21,
+        "layer_kind": "sliding_attention",
+        "source_layer_index": 13
+      },
+      {
+        "layer_index": 22,
+        "layer_kind": "sliding_attention",
+        "source_layer_index": 13
+      },
+      {
+        "layer_index": 23,
+        "layer_kind": "sliding_attention",
+        "source_layer_index": 13
+      },
+      {
+        "layer_index": 24,
+        "layer_kind": "full_attention",
+        "source_layer_index": 14
+      },
+      {
+        "layer_index": 25,
+        "layer_kind": "sliding_attention",
+        "source_layer_index": 13
+      },
+      {
+        "layer_index": 26,
+        "layer_kind": "sliding_attention",
+        "source_layer_index": 13
+      },
+      {
+        "layer_index": 27,
+        "layer_kind": "sliding_attention",
+        "source_layer_index": 13
+      },
+      {
+        "layer_index": 28,
+        "layer_kind": "sliding_attention",
+        "source_layer_index": 13
+      },
+      {
+        "layer_index": 29,
+        "layer_kind": "full_attention",
+        "source_layer_index": 14
+      },
+      {
+        "layer_index": 30,
+        "layer_kind": "sliding_attention",
+        "source_layer_index": 13
+      },
+      {
+        "layer_index": 31,
+        "layer_kind": "sliding_attention",
+        "source_layer_index": 13
+      },
+      {
+        "layer_index": 32,
+        "layer_kind": "sliding_attention",
+        "source_layer_index": 13
+      },
+      {
+        "layer_index": 33,
+        "layer_kind": "sliding_attention",
+        "source_layer_index": 13
+      },
+      {
+        "layer_index": 34,
+        "layer_kind": "full_attention",
+        "source_layer_index": 14
+      }
+    ],
+    "source_layers": [
+      {
+        "absolute_len": 640,
+        "allocated_bytes": 1052672,
+        "cache_len": 512,
+        "capacity_tokens": 512,
+        "layer_index": 0,
+        "layer_kind": "sliding_attention"
+      },
+      {
+        "absolute_len": 640,
+        "allocated_bytes": 1052672,
+        "cache_len": 512,
+        "capacity_tokens": 512,
+        "layer_index": 1,
+        "layer_kind": "sliding_attention"
+      },
+      {
+        "absolute_len": 640,
+        "allocated_bytes": 1052672,
+        "cache_len": 512,
+        "capacity_tokens": 512,
+        "layer_index": 2,
+        "layer_kind": "sliding_attention"
+      },
+      {
+        "absolute_len": 640,
+        "allocated_bytes": 1052672,
+        "cache_len": 512,
+        "capacity_tokens": 512,
+        "layer_index": 3,
+        "layer_kind": "sliding_attention"
+      },
+      {
+        "absolute_len": 640,
+        "allocated_bytes": 537395200,
+        "cache_len": 640,
+        "capacity_tokens": 131072,
+        "layer_index": 4,
+        "layer_kind": "full_attention"
+      },
+      {
+        "absolute_len": 640,
+        "allocated_bytes": 1052672,
+        "cache_len": 512,
+        "capacity_tokens": 512,
+        "layer_index": 5,
+        "layer_kind": "sliding_attention"
+      },
+      {
+        "absolute_len": 640,
+        "allocated_bytes": 1052672,
+        "cache_len": 512,
+        "capacity_tokens": 512,
+        "layer_index": 6,
+        "layer_kind": "sliding_attention"
+      },
+      {
+        "absolute_len": 640,
+        "allocated_bytes": 1052672,
+        "cache_len": 512,
+        "capacity_tokens": 512,
+        "layer_index": 7,
+        "layer_kind": "sliding_attention"
+      },
+      {
+        "absolute_len": 640,
+        "allocated_bytes": 1052672,
+        "cache_len": 512,
+        "capacity_tokens": 512,
+        "layer_index": 8,
+        "layer_kind": "sliding_attention"
+      },
+      {
+        "absolute_len": 640,
+        "allocated_bytes": 537395200,
+        "cache_len": 640,
+        "capacity_tokens": 131072,
+        "layer_index": 9,
+        "layer_kind": "full_attention"
+      },
+      {
+        "absolute_len": 640,
+        "allocated_bytes": 1052672,
+        "cache_len": 512,
+        "capacity_tokens": 512,
+        "layer_index": 10,
+        "layer_kind": "sliding_attention"
+      },
+      {
+        "absolute_len": 640,
+        "allocated_bytes": 1052672,
+        "cache_len": 512,
+        "capacity_tokens": 512,
+        "layer_index": 11,
+        "layer_kind": "sliding_attention"
+      },
+      {
+        "absolute_len": 640,
+        "allocated_bytes": 1052672,
+        "cache_len": 512,
+        "capacity_tokens": 512,
+        "layer_index": 12,
+        "layer_kind": "sliding_attention"
+      },
+      {
+        "absolute_len": 640,
+        "allocated_bytes": 1052672,
+        "cache_len": 512,
+        "capacity_tokens": 512,
+        "layer_index": 13,
+        "layer_kind": "sliding_attention"
+      },
+      {
+        "absolute_len": 640,
+        "allocated_bytes": 537395200,
+        "cache_len": 640,
+        "capacity_tokens": 131072,
+        "layer_index": 14,
+        "layer_kind": "full_attention"
+      }
+    ]
+  },
+  "mode": "benchmark",
+  "model": {
+    "activation_dtype": "F32",
+    "config_sha256": "e5faef0dd1a8f2437f6010721146b85433eaa90e679ef011e803c7ffefae73b8",
+    "model_dir": "/home/homelab1/datapool/ai_models/safetensors/gemma-4-E2B",
+    "weight_format": "source BF16 safetensors, resident text decoder"
+  },
+  "preflight": {
+    "decision": "accepted: service is not running (inactive or failed) and amd-smi reported no R9700 process",
+    "note": "The required pgrep command was executed. Its raw output is deliberately summarized because its broad pattern can match an orchestration prompt rather than an executable workload; amd-smi process state is the authoritative R9700 occupancy check.",
+    "r9700_process": {
+      "args": [
+        "process",
+        "--gpu",
+        "2",
+        "--general",
+        "--json"
+      ],
+      "exit_code": 0,
+      "parsed_stdout": [
+        {
+          "gpu": 2,
+          "process_list": [
+            {
+              "process_info": "No running processes detected"
+            }
+          ]
+        }
+      ],
+      "program": "/opt/rocm/bin/amd-smi",
+      "stderr": "",
+      "stdout": "[\n    {\n        \"gpu\": 2,\n        \"process_list\": [\n            {\n                \"process_info\": \"No running processes detected\"\n            }\n        ]\n    }\n]\n"
+    },
+    "required_pgrep": {
+      "args": [
+        "-af",
+        "ullm-sq8-r9700|run_measurements.py|llama-bench|llama-server|promote-served-model|ullm-aq4-worker"
+      ],
+      "exit_code": 0,
+      "non_orchestrator_match_lines": [],
+      "program": "pgrep",
+      "raw_match_line_count": 1
+    },
+    "ullm_openai_service": {
+      "args": [
+        "is-active",
+        "ullm-openai.service"
+      ],
+      "exit_code": 3,
+      "parsed_stdout": null,
+      "program": "systemctl",
+      "stderr": "",
+      "stdout": "inactive\n"
+    }
+  },
+  "producer": "ullm-gemma4-resident",
+  "resident_memory": {
+    "actual_runtimebuffer_accounting": {
+      "device_kv_bytes_at_config_max_capacity": 1624817664,
+      "headroom_to_reported_total_vram_bytes": 22336397370,
+      "reported_total_vram_bytes": 34208743424,
+      "resident_checkpoint_weight_bytes": 10246357958,
+      "scope_note": "RuntimeBuffer accounting excludes HIP context/allocator overhead. amd-smi telemetry is captured while the resident allocation is live.",
+      "temporary_buffer_bytes_after_workload": 1170432,
+      "total_runtimebuffer_bytes": 11872346054
+    },
+    "config_max_context_tokens": 131072,
+    "context_demand_table": [
+      {
+        "context_tokens": 1,
+        "demand_kv_bytes": 12644364,
+        "demand_total_device_bytes": 10260172754,
+        "fits": true,
+        "headroom_to_reported_total_vram_bytes": 23948570670
+      },
+      {
+        "context_tokens": 512,
+        "demand_kv_bytes": 18929664,
+        "demand_total_device_bytes": 10266458054,
+        "fits": true,
+        "headroom_to_reported_total_vram_bytes": 23942285370
+      },
+      {
+        "context_tokens": 4096,
+        "demand_kv_bytes": 63012864,
+        "demand_total_device_bytes": 10310541254,
+        "fits": true,
+        "headroom_to_reported_total_vram_bytes": 23898202170
+      },
+      {
+        "context_tokens": 32768,
+        "demand_kv_bytes": 415678464,
+        "demand_total_device_bytes": 10663206854,
+        "fits": true,
+        "headroom_to_reported_total_vram_bytes": 23545536570
+      },
+      {
+        "context_tokens": 131072,
+        "demand_kv_bytes": 1624817664,
+        "demand_total_device_bytes": 11872346054,
+        "fits": true,
+        "headroom_to_reported_total_vram_bytes": 22336397370
+      }
+    ],
+    "full_source_file_plus_max_context_fits_reported_vram": true,
+    "full_source_file_plus_max_context_kv_and_planned_transient_bytes": 11872610014,
+    "kv_geometry": {
+      "full_kv_bytes_per_token": 12288,
+      "full_kv_page_table_bytes_per_token": 12,
+      "full_kv_source_layers": 3,
+      "local_kv_capacity_tokens": 512,
+      "local_kv_fixed_bytes_including_tables": 12632064,
+      "local_kv_source_layers": 12
+    },
+    "ple_weight_bytes_included_in_text_resident_plan": 4780303872,
+    "resident_checkpoint_tensor_count_planned": 2011,
+    "resident_checkpoint_weight_bytes_planned": 10246357958,
+    "source_model_file_bytes": 10246621918,
+    "source_payload_bytes": 10246357958,
+    "text_decoder_tensor_count_executed": 600,
+    "text_decoder_weight_bytes_executed": 9294899782,
+    "transient_device_bytes_planned": 1170432,
+    "unexecuted_multimodal_payload_bytes": 951458176
+  },
+  "schema_version": "ullm.gemma4_e2b_resident.v0.1",
+  "telemetry": {
+    "after_resident_load": {
+      "args": [
+        "metric",
+        "--gpu",
+        "2",
+        "--temperature",
+        "--clock",
+        "--power",
+        "--violation",
+        "--mem-usage",
+        "--json"
+      ],
+      "exit_code": 0,
+      "parsed_stdout": {
+        "gpu_data": [
+          {
+            "clock": {
+              "dclk_0": {
+                "clk": {
+                  "unit": "MHz",
+                  "value": 25
+                },
+                "clk_locked": "N/A",
+                "deep_sleep": "N/A",
+                "max_clk": "N/A",
+                "min_clk": "N/A"
+              },
+              "dclk_1": {
+                "clk": "N/A",
+                "clk_locked": "N/A",
+                "deep_sleep": "N/A",
+                "max_clk": "N/A",
+                "min_clk": "N/A"
+              },
+              "dclk_2": {
+                "clk": "N/A",
+                "clk_locked": "N/A",
+                "deep_sleep": "N/A",
+                "max_clk": "N/A",
+                "min_clk": "N/A"
+              },
+              "dclk_3": {
+                "clk": "N/A",
+                "clk_locked": "N/A",
+                "deep_sleep": "N/A",
+                "max_clk": "N/A",
+                "min_clk": "N/A"
+              },
+              "fclk_0": {
+                "clk": {
+                  "unit": "MHz",
+                  "value": 1848
+                },
+                "clk_locked": "N/A",
+                "deep_sleep": "DISABLED",
+                "max_clk": {
+                  "unit": "MHz",
+                  "value": 2400
+                },
+                "min_clk": {
+                  "unit": "MHz",
+                  "value": 313
+                }
+              },
+              "gfx_0": {
+                "clk": {
+                  "unit": "MHz",
+                  "value": 2829
+                },
+                "clk_locked": "N/A",
+                "deep_sleep": "N/A",
+                "max_clk": {
+                  "unit": "MHz",
+                  "value": 0
+                },
+                "min_clk": "N/A"
+              },
+              "gfx_1": {
+                "clk": "N/A",
+                "clk_locked": "N/A",
+                "deep_sleep": "N/A",
+                "max_clk": "N/A",
+                "min_clk": "N/A"
+              },
+              "gfx_2": {
+                "clk": "N/A",
+                "clk_locked": "N/A",
+                "deep_sleep": "N/A",
+                "max_clk": "N/A",
+                "min_clk": "N/A"
+              },
+              "gfx_3": {
+                "clk": "N/A",
+                "clk_locked": "N/A",
+                "deep_sleep": "N/A",
+                "max_clk": "N/A",
+                "min_clk": "N/A"
+              },
+              "gfx_4": {
+                "clk": "N/A",
+                "clk_locked": "N/A",
+                "deep_sleep": "N/A",
+                "max_clk": "N/A",
+                "min_clk": "N/A"
+              },
+              "gfx_5": {
+                "clk": "N/A",
+                "clk_locked": "N/A",
+                "deep_sleep": "N/A",
+                "max_clk": "N/A",
+                "min_clk": "N/A"
+              },
+              "gfx_6": {
+                "clk": "N/A",
+                "clk_locked": "N/A",
+                "deep_sleep": "N/A",
+                "max_clk": "N/A",
+                "min_clk": "N/A"
+              },
+              "gfx_7": {
+                "clk": "N/A",
+                "clk_locked": "N/A",
+                "deep_sleep": "N/A",
+                "max_clk": "N/A",
+                "min_clk": "N/A"
+              },
+              "mem_0": {
+                "clk": {
+                  "unit": "MHz",
+                  "value": 1124
+                },
+                "clk_locked": "N/A",
+                "deep_sleep": "DISABLED",
+                "max_clk": {
+                  "unit": "MHz",
+                  "value": 1259
+                },
+                "min_clk": {
+                  "unit": "MHz",
+                  "value": 97
+                }
+              },
+              "socclk_0": {
+                "clk": {
+                  "unit": "MHz",
+                  "value": 1129
+                },
+                "clk_locked": "N/A",
+                "deep_sleep": "DISABLED",
+                "max_clk": {
+                  "unit": "MHz",
+                  "value": 1476
+                },
+                "min_clk": {
+                  "unit": "MHz",
+                  "value": 417
+                }
+              },
+              "vclk_0": {
+                "clk": {
+                  "unit": "MHz",
+                  "value": 25
+                },
+                "clk_locked": "N/A",
+                "deep_sleep": "N/A",
+                "max_clk": "N/A",
+                "min_clk": "N/A"
+              },
+              "vclk_1": {
+                "clk": "N/A",
+                "clk_locked": "N/A",
+                "deep_sleep": "N/A",
+                "max_clk": "N/A",
+                "min_clk": "N/A"
+              },
+              "vclk_2": {
+                "clk": "N/A",
+                "clk_locked": "N/A",
+                "deep_sleep": "N/A",
+                "max_clk": "N/A",
+                "min_clk": "N/A"
+              },
+              "vclk_3": {
+                "clk": "N/A",
+                "clk_locked": "N/A",
+                "deep_sleep": "N/A",
+                "max_clk": "N/A",
+                "min_clk": "N/A"
+              }
+            },
+            "gpu": 2,
+            "mem_usage": {
+              "free_gtt": {
+                "unit": "MB",
+                "value": 56221
+              },
+              "free_visible_vram": {
+                "unit": "MB",
+                "value": 20872
+              },
+              "free_vram": {
+                "unit": "MB",
+                "value": 20872
+              },
+              "total_gtt": {
+                "unit": "MB",
+                "value": 56235
+              },
+              "total_visible_vram": {
+                "unit": "MB",
+                "value": 32624
+              },
+              "total_vram": {
+                "unit": "MB",
+                "value": 32624
+              },
+              "used_gtt": {
+                "unit": "MB",
+                "value": 14
+              },
+              "used_visible_vram": {
+                "unit": "MB",
+                "value": 11752
+              },
+              "used_vram": {
+                "unit": "MB",
+                "value": 11752
+              }
+            },
+            "power": {
+              "gfx_voltage": {
+                "unit": "mV",
+                "value": 660
+              },
+              "mem_voltage": {
+                "unit": "mV",
+                "value": 1350
+              },
+              "power_management": "ENABLED",
+              "soc_voltage": {
+                "unit": "mV",
+                "value": 797
+              },
+              "socket_power": {
+                "unit": "W",
+                "value": 42
+              },
+              "throttle_status": "UNTHROTTLED"
+            },
+            "temperature": {
+              "edge": {
+                "unit": "C",
+                "value": 62
+              },
+              "hotspot": {
+                "unit": "C",
+                "value": 64
+              },
+              "mem": {
+                "unit": "C",
+                "value": 64
+              }
+            },
+            "throttle": {
+              "accumulation_counter": "N/A",
+              "gfx_clk_below_host_limit_accumulated": "N/A",
+              "gfx_clk_below_host_limit_power_accumulated": "N/A",
+              "gfx_clk_below_host_limit_power_violation_activity": "N/A",
+              "gfx_clk_below_host_limit_power_violation_status": "N/A",
+              "gfx_clk_below_host_limit_thermal_accumulated": "N/A",
+              "gfx_clk_below_host_limit_thermal_violation_activity": "N/A",
+              "gfx_clk_below_host_limit_thermal_violation_status": "N/A",
+              "gfx_clk_below_host_limit_violation_activity": "N/A",
+              "gfx_clk_below_host_limit_violation_status": "N/A",
+              "hbm_thermal_accumulated": "N/A",
+              "hbm_thermal_violation_activity": "N/A",
+              "hbm_thermal_violation_status": "N/A",
+              "low_utilization_accumulated": "N/A",
+              "low_utilization_violation_activity": "N/A",
+              "low_utilization_violation_status": "N/A",
+              "ppt_accumulated": "N/A",
+              "ppt_violation_activity": "N/A",
+              "ppt_violation_status": "N/A",
+              "prochot_accumulated": "N/A",
+              "prochot_violation_activity": "N/A",
+              "prochot_violation_status": "N/A",
+              "socket_thermal_accumulated": "N/A",
+              "socket_thermal_violation_activity": "N/A",
+              "socket_thermal_violation_status": "N/A",
+              "total_gfx_clk_below_host_limit_accumulated": "N/A",
+              "total_gfx_clk_below_host_limit_violation_activity": "N/A",
+              "total_gfx_clk_below_host_limit_violation_status": "N/A",
+              "vr_thermal_accumulated": "N/A",
+              "vr_thermal_violation_activity": "N/A",
+              "vr_thermal_violation_status": "N/A"
+            }
+          }
+        ]
+      },
+      "program": "/opt/rocm/bin/amd-smi",
+      "stderr": "",
+      "stdout": "{\n    \"gpu_data\": [\n        {\n            \"gpu\": 2,\n            \"power\": {\n                \"socket_power\": {\n                    \"value\": 42,\n                    \"unit\": \"W\"\n                },\n                \"gfx_voltage\": {\n                    \"value\": 660,\n                    \"unit\": \"mV\"\n                },\n                \"soc_voltage\": {\n                    \"value\": 797,\n                    \"unit\": \"mV\"\n                },\n                \"mem_voltage\": {\n                    \"value\": 1350,\n                    \"unit\": \"mV\"\n                },\n                \"throttle_status\": \"UNTHROTTLED\",\n                \"power_management\": \"ENABLED\"\n            },\n            \"clock\": {\n                \"gfx_0\": {\n                    \"clk\": {\n                        \"value\": 2829,\n                        \"unit\": \"MHz\"\n                    },\n                    \"min_clk\": \"N/A\",\n                    \"max_clk\": {\n                        \"value\": 0,\n                        \"unit\": \"MHz\"\n                    },\n                    \"clk_locked\": \"N/A\",\n                    \"deep_sleep\": \"N/A\"\n                },\n                \"gfx_1\": {\n                    \"clk\": \"N/A\",\n                    \"min_clk\": \"N/A\",\n                    \"max_clk\": \"N/A\",\n                    \"clk_locked\": \"N/A\",\n                    \"deep_sleep\": \"N/A\"\n                },\n                \"gfx_2\": {\n                    \"clk\": \"N/A\",\n                    \"min_clk\": \"N/A\",\n                    \"max_clk\": \"N/A\",\n                    \"clk_locked\": \"N/A\",\n                    \"deep_sleep\": \"N/A\"\n                },\n                \"gfx_3\": {\n                    \"clk\": \"N/A\",\n                    \"min_clk\": \"N/A\",\n                    \"max_clk\": \"N/A\",\n                    \"clk_locked\": \"N/A\",\n                    \"deep_sleep\": \"N/A\"\n                },\n                \"gfx_4\": {\n                    \"clk\": \"N/A\",\n                    \"min_clk\": \"N/A\",\n                    \"max_clk\": \"N/A\",\n                    \"clk_locked\": \"N/A\",\n                    \"deep_sleep\": \"N/A\"\n                },\n                \"gfx_5\": {\n                    \"clk\": \"N/A\",\n                    \"min_clk\": \"N/A\",\n                    \"max_clk\": \"N/A\",\n                    \"clk_locked\": \"N/A\",\n                    \"deep_sleep\": \"N/A\"\n                },\n                \"gfx_6\": {\n                    \"clk\": \"N/A\",\n                    \"min_clk\": \"N/A\",\n                    \"max_clk\": \"N/A\",\n                    \"clk_locked\": \"N/A\",\n                    \"deep_sleep\": \"N/A\"\n                },\n                \"gfx_7\": {\n                    \"clk\": \"N/A\",\n                    \"min_clk\": \"N/A\",\n                    \"max_clk\": \"N/A\",\n                    \"clk_locked\": \"N/A\",\n                    \"deep_sleep\": \"N/A\"\n                },\n                \"mem_0\": {\n                    \"clk\": {\n                        \"value\": 1124,\n                        \"unit\": \"MHz\"\n                    },\n                    \"min_clk\": {\n                        \"value\": 97,\n                        \"unit\": \"MHz\"\n                    },\n                    \"max_clk\": {\n                        \"value\": 1259,\n                        \"unit\": \"MHz\"\n                    },\n                    \"clk_locked\": \"N/A\",\n                    \"deep_sleep\": \"DISABLED\"\n                },\n                \"vclk_0\": {\n                    \"clk\": {\n                        \"value\": 25,\n                        \"unit\": \"MHz\"\n                    },\n                    \"min_clk\": \"N/A\",\n                    \"max_clk\": \"N/A\",\n                    \"clk_locked\": \"N/A\",\n                    \"deep_sleep\": \"N/A\"\n                },\n                \"vclk_1\": {\n                    \"clk\": \"N/A\",\n                    \"min_clk\": \"N/A\",\n                    \"max_clk\": \"N/A\",\n                    \"clk_locked\": \"N/A\",\n                    \"deep_sleep\": \"N/A\"\n                },\n                \"vclk_2\": {\n                    \"clk\": \"N/A\",\n                    \"min_clk\": \"N/A\",\n                    \"max_clk\": \"N/A\",\n                    \"clk_locked\": \"N/A\",\n                    \"deep_sleep\": \"N/A\"\n                },\n                \"vclk_3\": {\n                    \"clk\": \"N/A\",\n                    \"min_clk\": \"N/A\",\n                    \"max_clk\": \"N/A\",\n                    \"clk_locked\": \"N/A\",\n                    \"deep_sleep\": \"N/A\"\n                },\n                \"dclk_0\": {\n                    \"clk\": {\n                        \"value\": 25,\n                        \"unit\": \"MHz\"\n                    },\n                    \"min_clk\": \"N/A\",\n                    \"max_clk\": \"N/A\",\n                    \"clk_locked\": \"N/A\",\n                    \"deep_sleep\": \"N/A\"\n                },\n                \"dclk_1\": {\n                    \"clk\": \"N/A\",\n                    \"min_clk\": \"N/A\",\n                    \"max_clk\": \"N/A\",\n                    \"clk_locked\": \"N/A\",\n                    \"deep_sleep\": \"N/A\"\n                },\n                \"dclk_2\": {\n                    \"clk\": \"N/A\",\n                    \"min_clk\": \"N/A\",\n                    \"max_clk\": \"N/A\",\n                    \"clk_locked\": \"N/A\",\n                    \"deep_sleep\": \"N/A\"\n                },\n                \"dclk_3\": {\n                    \"clk\": \"N/A\",\n                    \"min_clk\": \"N/A\",\n                    \"max_clk\": \"N/A\",\n                    \"clk_locked\": \"N/A\",\n                    \"deep_sleep\": \"N/A\"\n                },\n                \"fclk_0\": {\n                    \"clk\": {\n                        \"value\": 1848,\n                        \"unit\": \"MHz\"\n                    },\n                    \"min_clk\": {\n                        \"value\": 313,\n                        \"unit\": \"MHz\"\n                    },\n                    \"max_clk\": {\n                        \"value\": 2400,\n                        \"unit\": \"MHz\"\n                    },\n                    \"clk_locked\": \"N/A\",\n                    \"deep_sleep\": \"DISABLED\"\n                },\n                \"socclk_0\": {\n                    \"clk\": {\n                        \"value\": 1129,\n                        \"unit\": \"MHz\"\n                    },\n                    \"min_clk\": {\n                        \"value\": 417,\n                        \"unit\": \"MHz\"\n                    },\n                    \"max_clk\": {\n                        \"value\": 1476,\n                        \"unit\": \"MHz\"\n                    },\n                    \"clk_locked\": \"N/A\",\n                    \"deep_sleep\": \"DISABLED\"\n                }\n            },\n            \"temperature\": {\n                \"edge\": {\n                    \"value\": 62,\n                    \"unit\": \"C\"\n                },\n                \"hotspot\": {\n                    \"value\": 64,\n                    \"unit\": \"C\"\n                },\n                \"mem\": {\n                    \"value\": 64,\n                    \"unit\": \"C\"\n                }\n            },\n            \"mem_usage\": {\n                \"total_vram\": {\n                    \"value\": 32624,\n                    \"unit\": \"MB\"\n                },\n                \"used_vram\": {\n                    \"value\": 11752,\n                    \"unit\": \"MB\"\n                },\n                \"free_vram\": {\n                    \"value\": 20872,\n                    \"unit\": \"MB\"\n                },\n                \"total_visible_vram\": {\n                    \"value\": 32624,\n                    \"unit\": \"MB\"\n                },\n                \"used_visible_vram\": {\n                    \"value\": 11752,\n                    \"unit\": \"MB\"\n                },\n                \"free_visible_vram\": {\n                    \"value\": 20872,\n                    \"unit\": \"MB\"\n                },\n                \"total_gtt\": {\n                    \"value\": 56235,\n                    \"unit\": \"MB\"\n                },\n                \"used_gtt\": {\n                    \"value\": 14,\n                    \"unit\": \"MB\"\n                },\n                \"free_gtt\": {\n                    \"value\": 56221,\n                    \"unit\": \"MB\"\n                }\n            },\n            \"throttle\": {\n                \"accumulation_counter\": \"N/A\",\n                \"prochot_accumulated\": \"N/A\",\n                \"ppt_accumulated\": \"N/A\",\n                \"socket_thermal_accumulated\": \"N/A\",\n                \"vr_thermal_accumulated\": \"N/A\",\n                \"hbm_thermal_accumulated\": \"N/A\",\n                \"gfx_clk_below_host_limit_accumulated\": \"N/A\",\n                \"gfx_clk_below_host_limit_power_accumulated\": \"N/A\",\n                \"gfx_clk_below_host_limit_thermal_accumulated\": \"N/A\",\n                \"total_gfx_clk_below_host_limit_accumulated\": \"N/A\",\n                \"low_utilization_accumulated\": \"N/A\",\n                \"prochot_violation_status\": \"N/A\",\n                \"ppt_violation_status\": \"N/A\",\n                \"socket_thermal_violation_status\": \"N/A\",\n                \"vr_thermal_violation_status\": \"N/A\",\n                \"hbm_thermal_violation_status\": \"N/A\",\n                \"gfx_clk_below_host_limit_violation_status\": \"N/A\",\n                \"gfx_clk_below_host_limit_power_violation_status\": \"N/A\",\n                \"gfx_clk_below_host_limit_thermal_violation_status\": \"N/A\",\n                \"total_gfx_clk_below_host_limit_violation_status\": \"N/A\",\n                \"low_utilization_violation_status\": \"N/A\",\n                \"prochot_violation_activity\": \"N/A\",\n                \"ppt_violation_activity\": \"N/A\",\n                \"socket_thermal_violation_activity\": \"N/A\",\n                \"vr_thermal_violation_activity\": \"N/A\",\n                \"hbm_thermal_violation_activity\": \"N/A\",\n                \"gfx_clk_below_host_limit_violation_activity\": \"N/A\",\n                \"gfx_clk_below_host_limit_power_violation_activity\": \"N/A\",\n                \"gfx_clk_below_host_limit_thermal_violation_activity\": \"N/A\",\n                \"total_gfx_clk_below_host_limit_violation_activity\": \"N/A\",\n                \"low_utilization_violation_activity\": \"N/A\"\n            }\n        }\n    ]\n}\n"
+    },
+    "after_workload": {
+      "args": [
+        "metric",
+        "--gpu",
+        "2",
+        "--temperature",
+        "--clock",
+        "--power",
+        "--violation",
+        "--mem-usage",
+        "--json"
+      ],
+      "exit_code": 0,
+      "parsed_stdout": {
+        "gpu_data": [
+          {
+            "clock": {
+              "dclk_0": {
+                "clk": {
+                  "unit": "MHz",
+                  "value": 25
+                },
+                "clk_locked": "N/A",
+                "deep_sleep": "N/A",
+                "max_clk": "N/A",
+                "min_clk": "N/A"
+              },
+              "dclk_1": {
+                "clk": "N/A",
+                "clk_locked": "N/A",
+                "deep_sleep": "N/A",
+                "max_clk": "N/A",
+                "min_clk": "N/A"
+              },
+              "dclk_2": {
+                "clk": "N/A",
+                "clk_locked": "N/A",
+                "deep_sleep": "N/A",
+                "max_clk": "N/A",
+                "min_clk": "N/A"
+              },
+              "dclk_3": {
+                "clk": "N/A",
+                "clk_locked": "N/A",
+                "deep_sleep": "N/A",
+                "max_clk": "N/A",
+                "min_clk": "N/A"
+              },
+              "fclk_0": {
+                "clk": {
+                  "unit": "MHz",
+                  "value": 1848
+                },
+                "clk_locked": "N/A",
+                "deep_sleep": "DISABLED",
+                "max_clk": {
+                  "unit": "MHz",
+                  "value": 2400
+                },
+                "min_clk": {
+                  "unit": "MHz",
+                  "value": 313
+                }
+              },
+              "gfx_0": {
+                "clk": {
+                  "unit": "MHz",
+                  "value": 1938
+                },
+                "clk_locked": "N/A",
+                "deep_sleep": "N/A",
+                "max_clk": {
+                  "unit": "MHz",
+                  "value": 0
+                },
+                "min_clk": "N/A"
+              },
+              "gfx_1": {
+                "clk": "N/A",
+                "clk_locked": "N/A",
+                "deep_sleep": "N/A",
+                "max_clk": "N/A",
+                "min_clk": "N/A"
+              },
+              "gfx_2": {
+                "clk": "N/A",
+                "clk_locked": "N/A",
+                "deep_sleep": "N/A",
+                "max_clk": "N/A",
+                "min_clk": "N/A"
+              },
+              "gfx_3": {
+                "clk": "N/A",
+                "clk_locked": "N/A",
+                "deep_sleep": "N/A",
+                "max_clk": "N/A",
+                "min_clk": "N/A"
+              },
+              "gfx_4": {
+                "clk": "N/A",
+                "clk_locked": "N/A",
+                "deep_sleep": "N/A",
+                "max_clk": "N/A",
+                "min_clk": "N/A"
+              },
+              "gfx_5": {
+                "clk": "N/A",
+                "clk_locked": "N/A",
+                "deep_sleep": "N/A",
+                "max_clk": "N/A",
+                "min_clk": "N/A"
+              },
+              "gfx_6": {
+                "clk": "N/A",
+                "clk_locked": "N/A",
+                "deep_sleep": "N/A",
+                "max_clk": "N/A",
+                "min_clk": "N/A"
+              },
+              "gfx_7": {
+                "clk": "N/A",
+                "clk_locked": "N/A",
+                "deep_sleep": "N/A",
+                "max_clk": "N/A",
+                "min_clk": "N/A"
+              },
+              "mem_0": {
+                "clk": {
+                  "unit": "MHz",
+                  "value": 1124
+                },
+                "clk_locked": "N/A",
+                "deep_sleep": "DISABLED",
+                "max_clk": {
+                  "unit": "MHz",
+                  "value": 1259
+                },
+                "min_clk": {
+                  "unit": "MHz",
+                  "value": 97
+                }
+              },
+              "socclk_0": {
+                "clk": {
+                  "unit": "MHz",
+                  "value": 1129
+                },
+                "clk_locked": "N/A",
+                "deep_sleep": "DISABLED",
+                "max_clk": {
+                  "unit": "MHz",
+                  "value": 1476
+                },
+                "min_clk": {
+                  "unit": "MHz",
+                  "value": 417
+                }
+              },
+              "vclk_0": {
+                "clk": {
+                  "unit": "MHz",
+                  "value": 25
+                },
+                "clk_locked": "N/A",
+                "deep_sleep": "N/A",
+                "max_clk": "N/A",
+                "min_clk": "N/A"
+              },
+              "vclk_1": {
+                "clk": "N/A",
+                "clk_locked": "N/A",
+                "deep_sleep": "N/A",
+                "max_clk": "N/A",
+                "min_clk": "N/A"
+              },
+              "vclk_2": {
+                "clk": "N/A",
+                "clk_locked": "N/A",
+                "deep_sleep": "N/A",
+                "max_clk": "N/A",
+                "min_clk": "N/A"
+              },
+              "vclk_3": {
+                "clk": "N/A",
+                "clk_locked": "N/A",
+                "deep_sleep": "N/A",
+                "max_clk": "N/A",
+                "min_clk": "N/A"
+              }
+            },
+            "gpu": 2,
+            "mem_usage": {
+              "free_gtt": {
+                "unit": "MB",
+                "value": 56221
+              },
+              "free_visible_vram": {
+                "unit": "MB",
+                "value": 20870
+              },
+              "free_vram": {
+                "unit": "MB",
+                "value": 20870
+              },
+              "total_gtt": {
+                "unit": "MB",
+                "value": 56235
+              },
+              "total_visible_vram": {
+                "unit": "MB",
+                "value": 32624
+              },
+              "total_vram": {
+                "unit": "MB",
+                "value": 32624
+              },
+              "used_gtt": {
+                "unit": "MB",
+                "value": 14
+              },
+              "used_visible_vram": {
+                "unit": "MB",
+                "value": 11754
+              },
+              "used_vram": {
+                "unit": "MB",
+                "value": 11754
+              }
+            },
+            "power": {
+              "gfx_voltage": {
+                "unit": "mV",
+                "value": 828
+              },
+              "mem_voltage": {
+                "unit": "mV",
+                "value": 1350
+              },
+              "power_management": "ENABLED",
+              "soc_voltage": {
+                "unit": "mV",
+                "value": 807
+              },
+              "socket_power": {
+                "unit": "W",
+                "value": 90
+              },
+              "throttle_status": "THROTTLED"
+            },
+            "temperature": {
+              "edge": {
+                "unit": "C",
+                "value": 76
+              },
+              "hotspot": {
+                "unit": "C",
+                "value": 81
+              },
+              "mem": {
+                "unit": "C",
+                "value": 80
+              }
+            },
+            "throttle": {
+              "accumulation_counter": "N/A",
+              "gfx_clk_below_host_limit_accumulated": "N/A",
+              "gfx_clk_below_host_limit_power_accumulated": "N/A",
+              "gfx_clk_below_host_limit_power_violation_activity": "N/A",
+              "gfx_clk_below_host_limit_power_violation_status": "N/A",
+              "gfx_clk_below_host_limit_thermal_accumulated": "N/A",
+              "gfx_clk_below_host_limit_thermal_violation_activity": "N/A",
+              "gfx_clk_below_host_limit_thermal_violation_status": "N/A",
+              "gfx_clk_below_host_limit_violation_activity": "N/A",
+              "gfx_clk_below_host_limit_violation_status": "N/A",
+              "hbm_thermal_accumulated": "N/A",
+              "hbm_thermal_violation_activity": "N/A",
+              "hbm_thermal_violation_status": "N/A",
+              "low_utilization_accumulated": "N/A",
+              "low_utilization_violation_activity": "N/A",
+              "low_utilization_violation_status": "N/A",
+              "ppt_accumulated": "N/A",
+              "ppt_violation_activity": "N/A",
+              "ppt_violation_status": "N/A",
+              "prochot_accumulated": "N/A",
+              "prochot_violation_activity": "N/A",
+              "prochot_violation_status": "N/A",
+              "socket_thermal_accumulated": "N/A",
+              "socket_thermal_violation_activity": "N/A",
+              "socket_thermal_violation_status": "N/A",
+              "total_gfx_clk_below_host_limit_accumulated": "N/A",
+              "total_gfx_clk_below_host_limit_violation_activity": "N/A",
+              "total_gfx_clk_below_host_limit_violation_status": "N/A",
+              "vr_thermal_accumulated": "N/A",
+              "vr_thermal_violation_activity": "N/A",
+              "vr_thermal_violation_status": "N/A"
+            }
+          }
+        ]
+      },
+      "program": "/opt/rocm/bin/amd-smi",
+      "stderr": "",
+      "stdout": "{\n    \"gpu_data\": [\n        {\n            \"gpu\": 2,\n            \"power\": {\n                \"socket_power\": {\n                    \"value\": 90,\n                    \"unit\": \"W\"\n                },\n                \"gfx_voltage\": {\n                    \"value\": 828,\n                    \"unit\": \"mV\"\n                },\n                \"soc_voltage\": {\n                    \"value\": 807,\n                    \"unit\": \"mV\"\n                },\n                \"mem_voltage\": {\n                    \"value\": 1350,\n                    \"unit\": \"mV\"\n                },\n                \"throttle_status\": \"THROTTLED\",\n                \"power_management\": \"ENABLED\"\n            },\n            \"clock\": {\n                \"gfx_0\": {\n                    \"clk\": {\n                        \"value\": 1938,\n                        \"unit\": \"MHz\"\n                    },\n                    \"min_clk\": \"N/A\",\n                    \"max_clk\": {\n                        \"value\": 0,\n                        \"unit\": \"MHz\"\n                    },\n                    \"clk_locked\": \"N/A\",\n                    \"deep_sleep\": \"N/A\"\n                },\n                \"gfx_1\": {\n                    \"clk\": \"N/A\",\n                    \"min_clk\": \"N/A\",\n                    \"max_clk\": \"N/A\",\n                    \"clk_locked\": \"N/A\",\n                    \"deep_sleep\": \"N/A\"\n                },\n                \"gfx_2\": {\n                    \"clk\": \"N/A\",\n                    \"min_clk\": \"N/A\",\n                    \"max_clk\": \"N/A\",\n                    \"clk_locked\": \"N/A\",\n                    \"deep_sleep\": \"N/A\"\n                },\n                \"gfx_3\": {\n                    \"clk\": \"N/A\",\n                    \"min_clk\": \"N/A\",\n                    \"max_clk\": \"N/A\",\n                    \"clk_locked\": \"N/A\",\n                    \"deep_sleep\": \"N/A\"\n                },\n                \"gfx_4\": {\n                    \"clk\": \"N/A\",\n                    \"min_clk\": \"N/A\",\n                    \"max_clk\": \"N/A\",\n                    \"clk_locked\": \"N/A\",\n                    \"deep_sleep\": \"N/A\"\n                },\n                \"gfx_5\": {\n                    \"clk\": \"N/A\",\n                    \"min_clk\": \"N/A\",\n                    \"max_clk\": \"N/A\",\n                    \"clk_locked\": \"N/A\",\n                    \"deep_sleep\": \"N/A\"\n                },\n                \"gfx_6\": {\n                    \"clk\": \"N/A\",\n                    \"min_clk\": \"N/A\",\n                    \"max_clk\": \"N/A\",\n                    \"clk_locked\": \"N/A\",\n                    \"deep_sleep\": \"N/A\"\n                },\n                \"gfx_7\": {\n                    \"clk\": \"N/A\",\n                    \"min_clk\": \"N/A\",\n                    \"max_clk\": \"N/A\",\n                    \"clk_locked\": \"N/A\",\n                    \"deep_sleep\": \"N/A\"\n                },\n                \"mem_0\": {\n                    \"clk\": {\n                        \"value\": 1124,\n                        \"unit\": \"MHz\"\n                    },\n                    \"min_clk\": {\n                        \"value\": 97,\n                        \"unit\": \"MHz\"\n                    },\n                    \"max_clk\": {\n                        \"value\": 1259,\n                        \"unit\": \"MHz\"\n                    },\n                    \"clk_locked\": \"N/A\",\n                    \"deep_sleep\": \"DISABLED\"\n                },\n                \"vclk_0\": {\n                    \"clk\": {\n                        \"value\": 25,\n                        \"unit\": \"MHz\"\n                    },\n                    \"min_clk\": \"N/A\",\n                    \"max_clk\": \"N/A\",\n                    \"clk_locked\": \"N/A\",\n                    \"deep_sleep\": \"N/A\"\n                },\n                \"vclk_1\": {\n                    \"clk\": \"N/A\",\n                    \"min_clk\": \"N/A\",\n                    \"max_clk\": \"N/A\",\n                    \"clk_locked\": \"N/A\",\n                    \"deep_sleep\": \"N/A\"\n                },\n                \"vclk_2\": {\n                    \"clk\": \"N/A\",\n                    \"min_clk\": \"N/A\",\n                    \"max_clk\": \"N/A\",\n                    \"clk_locked\": \"N/A\",\n                    \"deep_sleep\": \"N/A\"\n                },\n                \"vclk_3\": {\n                    \"clk\": \"N/A\",\n                    \"min_clk\": \"N/A\",\n                    \"max_clk\": \"N/A\",\n                    \"clk_locked\": \"N/A\",\n                    \"deep_sleep\": \"N/A\"\n                },\n                \"dclk_0\": {\n                    \"clk\": {\n                        \"value\": 25,\n                        \"unit\": \"MHz\"\n                    },\n                    \"min_clk\": \"N/A\",\n                    \"max_clk\": \"N/A\",\n                    \"clk_locked\": \"N/A\",\n                    \"deep_sleep\": \"N/A\"\n                },\n                \"dclk_1\": {\n                    \"clk\": \"N/A\",\n                    \"min_clk\": \"N/A\",\n                    \"max_clk\": \"N/A\",\n                    \"clk_locked\": \"N/A\",\n                    \"deep_sleep\": \"N/A\"\n                },\n                \"dclk_2\": {\n                    \"clk\": \"N/A\",\n                    \"min_clk\": \"N/A\",\n                    \"max_clk\": \"N/A\",\n                    \"clk_locked\": \"N/A\",\n                    \"deep_sleep\": \"N/A\"\n                },\n                \"dclk_3\": {\n                    \"clk\": \"N/A\",\n                    \"min_clk\": \"N/A\",\n                    \"max_clk\": \"N/A\",\n                    \"clk_locked\": \"N/A\",\n                    \"deep_sleep\": \"N/A\"\n                },\n                \"fclk_0\": {\n                    \"clk\": {\n                        \"value\": 1848,\n                        \"unit\": \"MHz\"\n                    },\n                    \"min_clk\": {\n                        \"value\": 313,\n                        \"unit\": \"MHz\"\n                    },\n                    \"max_clk\": {\n                        \"value\": 2400,\n                        \"unit\": \"MHz\"\n                    },\n                    \"clk_locked\": \"N/A\",\n                    \"deep_sleep\": \"DISABLED\"\n                },\n                \"socclk_0\": {\n                    \"clk\": {\n                        \"value\": 1129,\n                        \"unit\": \"MHz\"\n                    },\n                    \"min_clk\": {\n                        \"value\": 417,\n                        \"unit\": \"MHz\"\n                    },\n                    \"max_clk\": {\n                        \"value\": 1476,\n                        \"unit\": \"MHz\"\n                    },\n                    \"clk_locked\": \"N/A\",\n                    \"deep_sleep\": \"DISABLED\"\n                }\n            },\n            \"temperature\": {\n                \"edge\": {\n                    \"value\": 76,\n                    \"unit\": \"C\"\n                },\n                \"hotspot\": {\n                    \"value\": 81,\n                    \"unit\": \"C\"\n                },\n                \"mem\": {\n                    \"value\": 80,\n                    \"unit\": \"C\"\n                }\n            },\n            \"mem_usage\": {\n                \"total_vram\": {\n                    \"value\": 32624,\n                    \"unit\": \"MB\"\n                },\n                \"used_vram\": {\n                    \"value\": 11754,\n                    \"unit\": \"MB\"\n                },\n                \"free_vram\": {\n                    \"value\": 20870,\n                    \"unit\": \"MB\"\n                },\n                \"total_visible_vram\": {\n                    \"value\": 32624,\n                    \"unit\": \"MB\"\n                },\n                \"used_visible_vram\": {\n                    \"value\": 11754,\n                    \"unit\": \"MB\"\n                },\n                \"free_visible_vram\": {\n                    \"value\": 20870,\n                    \"unit\": \"MB\"\n                },\n                \"total_gtt\": {\n                    \"value\": 56235,\n                    \"unit\": \"MB\"\n                },\n                \"used_gtt\": {\n                    \"value\": 14,\n                    \"unit\": \"MB\"\n                },\n                \"free_gtt\": {\n                    \"value\": 56221,\n                    \"unit\": \"MB\"\n                }\n            },\n            \"throttle\": {\n                \"accumulation_counter\": \"N/A\",\n                \"prochot_accumulated\": \"N/A\",\n                \"ppt_accumulated\": \"N/A\",\n                \"socket_thermal_accumulated\": \"N/A\",\n                \"vr_thermal_accumulated\": \"N/A\",\n                \"hbm_thermal_accumulated\": \"N/A\",\n                \"gfx_clk_below_host_limit_accumulated\": \"N/A\",\n                \"gfx_clk_below_host_limit_power_accumulated\": \"N/A\",\n                \"gfx_clk_below_host_limit_thermal_accumulated\": \"N/A\",\n                \"total_gfx_clk_below_host_limit_accumulated\": \"N/A\",\n                \"low_utilization_accumulated\": \"N/A\",\n                \"prochot_violation_status\": \"N/A\",\n                \"ppt_violation_status\": \"N/A\",\n                \"socket_thermal_violation_status\": \"N/A\",\n                \"vr_thermal_violation_status\": \"N/A\",\n                \"hbm_thermal_violation_status\": \"N/A\",\n                \"gfx_clk_below_host_limit_violation_status\": \"N/A\",\n                \"gfx_clk_below_host_limit_power_violation_status\": \"N/A\",\n                \"gfx_clk_below_host_limit_thermal_violation_status\": \"N/A\",\n                \"total_gfx_clk_below_host_limit_violation_status\": \"N/A\",\n                \"low_utilization_violation_status\": \"N/A\",\n                \"prochot_violation_activity\": \"N/A\",\n                \"ppt_violation_activity\": \"N/A\",\n                \"socket_thermal_violation_activity\": \"N/A\",\n                \"vr_thermal_violation_activity\": \"N/A\",\n                \"hbm_thermal_violation_activity\": \"N/A\",\n                \"gfx_clk_below_host_limit_violation_activity\": \"N/A\",\n                \"gfx_clk_below_host_limit_power_violation_activity\": \"N/A\",\n                \"gfx_clk_below_host_limit_thermal_violation_activity\": \"N/A\",\n                \"total_gfx_clk_below_host_limit_violation_activity\": \"N/A\",\n                \"low_utilization_violation_activity\": \"N/A\"\n            }\n        }\n    ]\n}\n"
+    },
+    "before_workload": {
+      "args": [
+        "metric",
+        "--gpu",
+        "2",
+        "--temperature",
+        "--clock",
+        "--power",
+        "--violation",
+        "--mem-usage",
+        "--json"
+      ],
+      "exit_code": 0,
+      "parsed_stdout": {
+        "gpu_data": [
+          {
+            "clock": {
+              "dclk_0": {
+                "clk": {
+                  "unit": "MHz",
+                  "value": 25
+                },
+                "clk_locked": "N/A",
+                "deep_sleep": "N/A",
+                "max_clk": "N/A",
+                "min_clk": "N/A"
+              },
+              "dclk_1": {
+                "clk": "N/A",
+                "clk_locked": "N/A",
+                "deep_sleep": "N/A",
+                "max_clk": "N/A",
+                "min_clk": "N/A"
+              },
+              "dclk_2": {
+                "clk": "N/A",
+                "clk_locked": "N/A",
+                "deep_sleep": "N/A",
+                "max_clk": "N/A",
+                "min_clk": "N/A"
+              },
+              "dclk_3": {
+                "clk": "N/A",
+                "clk_locked": "N/A",
+                "deep_sleep": "N/A",
+                "max_clk": "N/A",
+                "min_clk": "N/A"
+              },
+              "fclk_0": {
+                "clk": {
+                  "unit": "MHz",
+                  "value": 582
+                },
+                "clk_locked": "N/A",
+                "deep_sleep": "DISABLED",
+                "max_clk": {
+                  "unit": "MHz",
+                  "value": 2400
+                },
+                "min_clk": {
+                  "unit": "MHz",
+                  "value": 313
+                }
+              },
+              "gfx_0": {
+                "clk": {
+                  "unit": "MHz",
+                  "value": 2829
+                },
+                "clk_locked": "N/A",
+                "deep_sleep": "N/A",
+                "max_clk": {
+                  "unit": "MHz",
+                  "value": 0
+                },
+                "min_clk": "N/A"
+              },
+              "gfx_1": {
+                "clk": "N/A",
+                "clk_locked": "N/A",
+                "deep_sleep": "N/A",
+                "max_clk": "N/A",
+                "min_clk": "N/A"
+              },
+              "gfx_2": {
+                "clk": "N/A",
+                "clk_locked": "N/A",
+                "deep_sleep": "N/A",
+                "max_clk": "N/A",
+                "min_clk": "N/A"
+              },
+              "gfx_3": {
+                "clk": "N/A",
+                "clk_locked": "N/A",
+                "deep_sleep": "N/A",
+                "max_clk": "N/A",
+                "min_clk": "N/A"
+              },
+              "gfx_4": {
+                "clk": "N/A",
+                "clk_locked": "N/A",
+                "deep_sleep": "N/A",
+                "max_clk": "N/A",
+                "min_clk": "N/A"
+              },
+              "gfx_5": {
+                "clk": "N/A",
+                "clk_locked": "N/A",
+                "deep_sleep": "N/A",
+                "max_clk": "N/A",
+                "min_clk": "N/A"
+              },
+              "gfx_6": {
+                "clk": "N/A",
+                "clk_locked": "N/A",
+                "deep_sleep": "N/A",
+                "max_clk": "N/A",
+                "min_clk": "N/A"
+              },
+              "gfx_7": {
+                "clk": "N/A",
+                "clk_locked": "N/A",
+                "deep_sleep": "N/A",
+                "max_clk": "N/A",
+                "min_clk": "N/A"
+              },
+              "mem_0": {
+                "clk": {
+                  "unit": "MHz",
+                  "value": 96
+                },
+                "clk_locked": "N/A",
+                "deep_sleep": "ENABLED",
+                "max_clk": {
+                  "unit": "MHz",
+                  "value": 1259
+                },
+                "min_clk": {
+                  "unit": "MHz",
+                  "value": 97
+                }
+              },
+              "socclk_0": {
+                "clk": {
+                  "unit": "MHz",
+                  "value": 417
+                },
+                "clk_locked": "N/A",
+                "deep_sleep": "DISABLED",
+                "max_clk": {
+                  "unit": "MHz",
+                  "value": 1476
+                },
+                "min_clk": {
+                  "unit": "MHz",
+                  "value": 417
+                }
+              },
+              "vclk_0": {
+                "clk": {
+                  "unit": "MHz",
+                  "value": 25
+                },
+                "clk_locked": "N/A",
+                "deep_sleep": "N/A",
+                "max_clk": "N/A",
+                "min_clk": "N/A"
+              },
+              "vclk_1": {
+                "clk": "N/A",
+                "clk_locked": "N/A",
+                "deep_sleep": "N/A",
+                "max_clk": "N/A",
+                "min_clk": "N/A"
+              },
+              "vclk_2": {
+                "clk": "N/A",
+                "clk_locked": "N/A",
+                "deep_sleep": "N/A",
+                "max_clk": "N/A",
+                "min_clk": "N/A"
+              },
+              "vclk_3": {
+                "clk": "N/A",
+                "clk_locked": "N/A",
+                "deep_sleep": "N/A",
+                "max_clk": "N/A",
+                "min_clk": "N/A"
+              }
+            },
+            "gpu": 2,
+            "mem_usage": {
+              "free_gtt": {
+                "unit": "MB",
+                "value": 56221
+              },
+              "free_visible_vram": {
+                "unit": "MB",
+                "value": 20872
+              },
+              "free_vram": {
+                "unit": "MB",
+                "value": 20872
+              },
+              "total_gtt": {
+                "unit": "MB",
+                "value": 56235
+              },
+              "total_visible_vram": {
+                "unit": "MB",
+                "value": 32624
+              },
+              "total_vram": {
+                "unit": "MB",
+                "value": 32624
+              },
+              "used_gtt": {
+                "unit": "MB",
+                "value": 14
+              },
+              "used_visible_vram": {
+                "unit": "MB",
+                "value": 11752
+              },
+              "used_vram": {
+                "unit": "MB",
+                "value": 11752
+              }
+            },
+            "power": {
+              "gfx_voltage": {
+                "unit": "mV",
+                "value": 621
+              },
+              "mem_voltage": {
+                "unit": "mV",
+                "value": 1250
+              },
+              "power_management": "ENABLED",
+              "soc_voltage": {
+                "unit": "mV",
+                "value": 829
+              },
+              "socket_power": {
+                "unit": "W",
+                "value": 19
+              },
+              "throttle_status": "UNTHROTTLED"
+            },
+            "temperature": {
+              "edge": {
+                "unit": "C",
+                "value": 62
+              },
+              "hotspot": {
+                "unit": "C",
+                "value": 63
+              },
+              "mem": {
+                "unit": "C",
+                "value": 64
+              }
+            },
+            "throttle": {
+              "accumulation_counter": "N/A",
+              "gfx_clk_below_host_limit_accumulated": "N/A",
+              "gfx_clk_below_host_limit_power_accumulated": "N/A",
+              "gfx_clk_below_host_limit_power_violation_activity": "N/A",
+              "gfx_clk_below_host_limit_power_violation_status": "N/A",
+              "gfx_clk_below_host_limit_thermal_accumulated": "N/A",
+              "gfx_clk_below_host_limit_thermal_violation_activity": "N/A",
+              "gfx_clk_below_host_limit_thermal_violation_status": "N/A",
+              "gfx_clk_below_host_limit_violation_activity": "N/A",
+              "gfx_clk_below_host_limit_violation_status": "N/A",
+              "hbm_thermal_accumulated": "N/A",
+              "hbm_thermal_violation_activity": "N/A",
+              "hbm_thermal_violation_status": "N/A",
+              "low_utilization_accumulated": "N/A",
+              "low_utilization_violation_activity": "N/A",
+              "low_utilization_violation_status": "N/A",
+              "ppt_accumulated": "N/A",
+              "ppt_violation_activity": "N/A",
+              "ppt_violation_status": "N/A",
+              "prochot_accumulated": "N/A",
+              "prochot_violation_activity": "N/A",
+              "prochot_violation_status": "N/A",
+              "socket_thermal_accumulated": "N/A",
+              "socket_thermal_violation_activity": "N/A",
+              "socket_thermal_violation_status": "N/A",
+              "total_gfx_clk_below_host_limit_accumulated": "N/A",
+              "total_gfx_clk_below_host_limit_violation_activity": "N/A",
+              "total_gfx_clk_below_host_limit_violation_status": "N/A",
+              "vr_thermal_accumulated": "N/A",
+              "vr_thermal_violation_activity": "N/A",
+              "vr_thermal_violation_status": "N/A"
+            }
+          }
+        ]
+      },
+      "program": "/opt/rocm/bin/amd-smi",
+      "stderr": "",
+      "stdout": "{\n    \"gpu_data\": [\n        {\n            \"gpu\": 2,\n            \"power\": {\n                \"socket_power\": {\n                    \"value\": 19,\n                    \"unit\": \"W\"\n                },\n                \"gfx_voltage\": {\n                    \"value\": 621,\n                    \"unit\": \"mV\"\n                },\n                \"soc_voltage\": {\n                    \"value\": 829,\n                    \"unit\": \"mV\"\n                },\n                \"mem_voltage\": {\n                    \"value\": 1250,\n                    \"unit\": \"mV\"\n                },\n                \"throttle_status\": \"UNTHROTTLED\",\n                \"power_management\": \"ENABLED\"\n            },\n            \"clock\": {\n                \"gfx_0\": {\n                    \"clk\": {\n                        \"value\": 2829,\n                        \"unit\": \"MHz\"\n                    },\n                    \"min_clk\": \"N/A\",\n                    \"max_clk\": {\n                        \"value\": 0,\n                        \"unit\": \"MHz\"\n                    },\n                    \"clk_locked\": \"N/A\",\n                    \"deep_sleep\": \"N/A\"\n                },\n                \"gfx_1\": {\n                    \"clk\": \"N/A\",\n                    \"min_clk\": \"N/A\",\n                    \"max_clk\": \"N/A\",\n                    \"clk_locked\": \"N/A\",\n                    \"deep_sleep\": \"N/A\"\n                },\n                \"gfx_2\": {\n                    \"clk\": \"N/A\",\n                    \"min_clk\": \"N/A\",\n                    \"max_clk\": \"N/A\",\n                    \"clk_locked\": \"N/A\",\n                    \"deep_sleep\": \"N/A\"\n                },\n                \"gfx_3\": {\n                    \"clk\": \"N/A\",\n                    \"min_clk\": \"N/A\",\n                    \"max_clk\": \"N/A\",\n                    \"clk_locked\": \"N/A\",\n                    \"deep_sleep\": \"N/A\"\n                },\n                \"gfx_4\": {\n                    \"clk\": \"N/A\",\n                    \"min_clk\": \"N/A\",\n                    \"max_clk\": \"N/A\",\n                    \"clk_locked\": \"N/A\",\n                    \"deep_sleep\": \"N/A\"\n                },\n                \"gfx_5\": {\n                    \"clk\": \"N/A\",\n                    \"min_clk\": \"N/A\",\n                    \"max_clk\": \"N/A\",\n                    \"clk_locked\": \"N/A\",\n                    \"deep_sleep\": \"N/A\"\n                },\n                \"gfx_6\": {\n                    \"clk\": \"N/A\",\n                    \"min_clk\": \"N/A\",\n                    \"max_clk\": \"N/A\",\n                    \"clk_locked\": \"N/A\",\n                    \"deep_sleep\": \"N/A\"\n                },\n                \"gfx_7\": {\n                    \"clk\": \"N/A\",\n                    \"min_clk\": \"N/A\",\n                    \"max_clk\": \"N/A\",\n                    \"clk_locked\": \"N/A\",\n                    \"deep_sleep\": \"N/A\"\n                },\n                \"mem_0\": {\n                    \"clk\": {\n                        \"value\": 96,\n                        \"unit\": \"MHz\"\n                    },\n                    \"min_clk\": {\n                        \"value\": 97,\n                        \"unit\": \"MHz\"\n                    },\n                    \"max_clk\": {\n                        \"value\": 1259,\n                        \"unit\": \"MHz\"\n                    },\n                    \"clk_locked\": \"N/A\",\n                    \"deep_sleep\": \"ENABLED\"\n                },\n                \"vclk_0\": {\n                    \"clk\": {\n                        \"value\": 25,\n                        \"unit\": \"MHz\"\n                    },\n                    \"min_clk\": \"N/A\",\n                    \"max_clk\": \"N/A\",\n                    \"clk_locked\": \"N/A\",\n                    \"deep_sleep\": \"N/A\"\n                },\n                \"vclk_1\": {\n                    \"clk\": \"N/A\",\n                    \"min_clk\": \"N/A\",\n                    \"max_clk\": \"N/A\",\n                    \"clk_locked\": \"N/A\",\n                    \"deep_sleep\": \"N/A\"\n                },\n                \"vclk_2\": {\n                    \"clk\": \"N/A\",\n                    \"min_clk\": \"N/A\",\n                    \"max_clk\": \"N/A\",\n                    \"clk_locked\": \"N/A\",\n                    \"deep_sleep\": \"N/A\"\n                },\n                \"vclk_3\": {\n                    \"clk\": \"N/A\",\n                    \"min_clk\": \"N/A\",\n                    \"max_clk\": \"N/A\",\n                    \"clk_locked\": \"N/A\",\n                    \"deep_sleep\": \"N/A\"\n                },\n                \"dclk_0\": {\n                    \"clk\": {\n                        \"value\": 25,\n                        \"unit\": \"MHz\"\n                    },\n                    \"min_clk\": \"N/A\",\n                    \"max_clk\": \"N/A\",\n                    \"clk_locked\": \"N/A\",\n                    \"deep_sleep\": \"N/A\"\n                },\n                \"dclk_1\": {\n                    \"clk\": \"N/A\",\n                    \"min_clk\": \"N/A\",\n                    \"max_clk\": \"N/A\",\n                    \"clk_locked\": \"N/A\",\n                    \"deep_sleep\": \"N/A\"\n                },\n                \"dclk_2\": {\n                    \"clk\": \"N/A\",\n                    \"min_clk\": \"N/A\",\n                    \"max_clk\": \"N/A\",\n                    \"clk_locked\": \"N/A\",\n                    \"deep_sleep\": \"N/A\"\n                },\n                \"dclk_3\": {\n                    \"clk\": \"N/A\",\n                    \"min_clk\": \"N/A\",\n                    \"max_clk\": \"N/A\",\n                    \"clk_locked\": \"N/A\",\n                    \"deep_sleep\": \"N/A\"\n                },\n                \"fclk_0\": {\n                    \"clk\": {\n                        \"value\": 582,\n                        \"unit\": \"MHz\"\n                    },\n                    \"min_clk\": {\n                        \"value\": 313,\n                        \"unit\": \"MHz\"\n                    },\n                    \"max_clk\": {\n                        \"value\": 2400,\n                        \"unit\": \"MHz\"\n                    },\n                    \"clk_locked\": \"N/A\",\n                    \"deep_sleep\": \"DISABLED\"\n                },\n                \"socclk_0\": {\n                    \"clk\": {\n                        \"value\": 417,\n                        \"unit\": \"MHz\"\n                    },\n                    \"min_clk\": {\n                        \"value\": 417,\n                        \"unit\": \"MHz\"\n                    },\n                    \"max_clk\": {\n                        \"value\": 1476,\n                        \"unit\": \"MHz\"\n                    },\n                    \"clk_locked\": \"N/A\",\n                    \"deep_sleep\": \"DISABLED\"\n                }\n            },\n            \"temperature\": {\n                \"edge\": {\n                    \"value\": 62,\n                    \"unit\": \"C\"\n                },\n                \"hotspot\": {\n                    \"value\": 63,\n                    \"unit\": \"C\"\n                },\n                \"mem\": {\n                    \"value\": 64,\n                    \"unit\": \"C\"\n                }\n            },\n            \"mem_usage\": {\n                \"total_vram\": {\n                    \"value\": 32624,\n                    \"unit\": \"MB\"\n                },\n                \"used_vram\": {\n                    \"value\": 11752,\n                    \"unit\": \"MB\"\n                },\n                \"free_vram\": {\n                    \"value\": 20872,\n                    \"unit\": \"MB\"\n                },\n                \"total_visible_vram\": {\n                    \"value\": 32624,\n                    \"unit\": \"MB\"\n                },\n                \"used_visible_vram\": {\n                    \"value\": 11752,\n                    \"unit\": \"MB\"\n                },\n                \"free_visible_vram\": {\n                    \"value\": 20872,\n                    \"unit\": \"MB\"\n                },\n                \"total_gtt\": {\n                    \"value\": 56235,\n                    \"unit\": \"MB\"\n                },\n                \"used_gtt\": {\n                    \"value\": 14,\n                    \"unit\": \"MB\"\n                },\n                \"free_gtt\": {\n                    \"value\": 56221,\n                    \"unit\": \"MB\"\n                }\n            },\n            \"throttle\": {\n                \"accumulation_counter\": \"N/A\",\n                \"prochot_accumulated\": \"N/A\",\n                \"ppt_accumulated\": \"N/A\",\n                \"socket_thermal_accumulated\": \"N/A\",\n                \"vr_thermal_accumulated\": \"N/A\",\n                \"hbm_thermal_accumulated\": \"N/A\",\n                \"gfx_clk_below_host_limit_accumulated\": \"N/A\",\n                \"gfx_clk_below_host_limit_power_accumulated\": \"N/A\",\n                \"gfx_clk_below_host_limit_thermal_accumulated\": \"N/A\",\n                \"total_gfx_clk_below_host_limit_accumulated\": \"N/A\",\n                \"low_utilization_accumulated\": \"N/A\",\n                \"prochot_violation_status\": \"N/A\",\n                \"ppt_violation_status\": \"N/A\",\n                \"socket_thermal_violation_status\": \"N/A\",\n                \"vr_thermal_violation_status\": \"N/A\",\n                \"hbm_thermal_violation_status\": \"N/A\",\n                \"gfx_clk_below_host_limit_violation_status\": \"N/A\",\n                \"gfx_clk_below_host_limit_power_violation_status\": \"N/A\",\n                \"gfx_clk_below_host_limit_thermal_violation_status\": \"N/A\",\n                \"total_gfx_clk_below_host_limit_violation_status\": \"N/A\",\n                \"low_utilization_violation_status\": \"N/A\",\n                \"prochot_violation_activity\": \"N/A\",\n                \"ppt_violation_activity\": \"N/A\",\n                \"socket_thermal_violation_activity\": \"N/A\",\n                \"vr_thermal_violation_activity\": \"N/A\",\n                \"hbm_thermal_violation_activity\": \"N/A\",\n                \"gfx_clk_below_host_limit_violation_activity\": \"N/A\",\n                \"gfx_clk_below_host_limit_power_violation_activity\": \"N/A\",\n                \"gfx_clk_below_host_limit_thermal_violation_activity\": \"N/A\",\n                \"total_gfx_clk_below_host_limit_violation_activity\": \"N/A\",\n                \"low_utilization_violation_activity\": \"N/A\"\n            }\n        }\n    ]\n}\n"
+    }
+  },
+  "timing": {
+    "clock": "std::time::Instant monotonic wall clock; no profiler range is used as throughput",
+    "resident_load_seconds": 8.073740375,
+    "wall_seconds_including_load_and_workload": 1244.50587907
+  },
+  "workload": {
+    "decode": {
+      "accounting": "Each timed operation is M=1 decode after an untimed prefill of the declared fixed-token prompt. Generated tokens per repeat are divided by total monotonic wall time; load, the setup prefill, cooldown, warmup, and profiler time are excluded.",
+      "milliseconds_per_token": 343.285955796875,
+      "runs": [
+        {
+          "context_lengths_after_append": [
+            513,
+            514,
+            515,
+            516,
+            517,
+            518,
+            519,
+            520,
+            521,
+            522,
+            523,
+            524,
+            525,
+            526,
+            527,
+            528,
+            529,
+            530,
+            531,
+            532,
+            533,
+            534,
+            535,
+            536,
+            537,
+            538,
+            539,
+            540,
+            541,
+            542,
+            543,
+            544,
+            545,
+            546,
+            547,
+            548,
+            549,
+            550,
+            551,
+            552,
+            553,
+            554,
+            555,
+            556,
+            557,
+            558,
+            559,
+            560,
+            561,
+            562,
+            563,
+            564,
+            565,
+            566,
+            567,
+            568,
+            569,
+            570,
+            571,
+            572,
+            573,
+            574,
+            575,
+            576,
+            577,
+            578,
+            579,
+            580,
+            581,
+            582,
+            583,
+            584,
+            585,
+            586,
+            587,
+            588,
+            589,
+            590,
+            591,
+            592,
+            593,
+            594,
+            595,
+            596,
+            597,
+            598,
+            599,
+            600,
+            601,
+            602,
+            603,
+            604,
+            605,
+            606,
+            607,
+            608,
+            609,
+            610,
+            611,
+            612,
+            613,
+            614,
+            615,
+            616,
+            617,
+            618,
+            619,
+            620,
+            621,
+            622,
+            623,
+            624,
+            625,
+            626,
+            627,
+            628,
+            629,
+            630,
+            631,
+            632,
+            633,
+            634,
+            635,
+            636,
+            637,
+            638,
+            639,
+            640
+          ],
+          "elapsed_seconds": 43.948747816,
+          "generated_tokens": [
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            818,
+            236743,
+            198,
+            198,
+            198,
+            818,
+            236743,
+            198,
+            198,
+            818,
+            236743,
+            198,
+            198,
+            818,
+            236743,
+            198,
+            818,
+            236743,
+            198,
+            818,
+            236743,
+            198,
+            818,
+            236743,
+            198,
+            818,
+            236743,
+            198,
+            818,
+            236743,
+            198,
+            818,
+            236743,
+            198,
+            818,
+            236743,
+            198,
+            818,
+            236743,
+            198,
+            818,
+            236743,
+            198,
+            818,
+            236743,
+            198,
+            818,
+            236743,
+            198,
+            818,
+            236743,
+            198,
+            818,
+            236743,
+            198,
+            818,
+            236743,
+            198,
+            818,
+            236743,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198
+          ],
+          "host_profile": {
+            "buffer_allocate_ns": 0,
+            "buffer_ensure_ns": 5003625,
+            "by_primitive": {
+              "attention": {
+                "calls": 4480,
+                "d2h_submit_ns": 36422434161,
+                "h2d_submit_ns": 16868701,
+                "input_encode_ns": 11087557,
+                "kernel_submit_ns": 12914914,
+                "kv_table_host_ns": 0,
+                "output_allocation_ns": 1391880,
+                "output_decode_validate_ns": 6904884,
+                "primitive_ns": 36595315914,
+                "stream_synchronize_ns": 121498088
+              },
+              "bf16_row": {
+                "calls": 33792,
+                "d2h_submit_ns": 1086407743,
+                "h2d_submit_ns": 0,
+                "input_encode_ns": 0,
+                "kernel_submit_ns": 73858836,
+                "kv_table_host_ns": 0,
+                "output_allocation_ns": 8602503,
+                "output_decode_validate_ns": 31069175,
+                "primitive_ns": 2015736006,
+                "stream_synchronize_ns": 805901330
+              },
+              "kv_write": {
+                "calls": 1920,
+                "d2h_submit_ns": 0,
+                "h2d_submit_ns": 11725192,
+                "input_encode_ns": 1302582,
+                "kernel_submit_ns": 7928941,
+                "kv_table_host_ns": 9444148,
+                "output_allocation_ns": 0,
+                "output_decode_validate_ns": 0,
+                "primitive_ns": 31718706,
+                "stream_synchronize_ns": 0
+              },
+              "matvec": {
+                "calls": 35456,
+                "d2h_submit_ns": 2392057886,
+                "h2d_submit_ns": 142452489,
+                "input_encode_ns": 92547389,
+                "kernel_submit_ns": 82572835,
+                "kv_table_host_ns": 0,
+                "output_allocation_ns": 23262943,
+                "output_decode_validate_ns": 127656237,
+                "primitive_ns": 3528843421,
+                "stream_synchronize_ns": 652164276
+              }
+            },
+            "calls": {
+              "attention": 4480,
+              "kv_write": 1920,
+              "matvec": 35456,
+              "row": 33792
+            },
+            "d2h_submit_ns": 39900899790,
+            "executor_other_ns": 1776646981,
+            "h2d_submit_ns": 171046382,
+            "input_encode_ns": 104937528,
+            "kernel_submit_ns": 177275526,
+            "kv_table_host_ns": 9444148,
+            "output_allocation_ns": 33257326,
+            "output_decode_validate_ns": 165630296,
+            "primitive_ns": 42171614047,
+            "stream_synchronize_ns": 1579563694,
+            "token_forward_ns": 43948261028,
+            "units": "nanoseconds measured with std::time::Instant; primitive_ns is inclusive"
+          },
+          "logical_lower_bound": {
+            "attention_calls": 4480,
+            "bf16_row_reads": 33792,
+            "bf16_weight_bytes": 583621026560,
+            "kv_read_bytes": 5873860608,
+            "kv_write_bytes": 4718592,
+            "matvec_calls": 35456,
+            "total_bytes": 589499605760
+          }
+        },
+        {
+          "context_lengths_after_append": [
+            513,
+            514,
+            515,
+            516,
+            517,
+            518,
+            519,
+            520,
+            521,
+            522,
+            523,
+            524,
+            525,
+            526,
+            527,
+            528,
+            529,
+            530,
+            531,
+            532,
+            533,
+            534,
+            535,
+            536,
+            537,
+            538,
+            539,
+            540,
+            541,
+            542,
+            543,
+            544,
+            545,
+            546,
+            547,
+            548,
+            549,
+            550,
+            551,
+            552,
+            553,
+            554,
+            555,
+            556,
+            557,
+            558,
+            559,
+            560,
+            561,
+            562,
+            563,
+            564,
+            565,
+            566,
+            567,
+            568,
+            569,
+            570,
+            571,
+            572,
+            573,
+            574,
+            575,
+            576,
+            577,
+            578,
+            579,
+            580,
+            581,
+            582,
+            583,
+            584,
+            585,
+            586,
+            587,
+            588,
+            589,
+            590,
+            591,
+            592,
+            593,
+            594,
+            595,
+            596,
+            597,
+            598,
+            599,
+            600,
+            601,
+            602,
+            603,
+            604,
+            605,
+            606,
+            607,
+            608,
+            609,
+            610,
+            611,
+            612,
+            613,
+            614,
+            615,
+            616,
+            617,
+            618,
+            619,
+            620,
+            621,
+            622,
+            623,
+            624,
+            625,
+            626,
+            627,
+            628,
+            629,
+            630,
+            631,
+            632,
+            633,
+            634,
+            635,
+            636,
+            637,
+            638,
+            639,
+            640
+          ],
+          "elapsed_seconds": 43.936533868,
+          "generated_tokens": [
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            818,
+            236743,
+            198,
+            198,
+            198,
+            818,
+            236743,
+            198,
+            198,
+            818,
+            236743,
+            198,
+            198,
+            818,
+            236743,
+            198,
+            818,
+            236743,
+            198,
+            818,
+            236743,
+            198,
+            818,
+            236743,
+            198,
+            818,
+            236743,
+            198,
+            818,
+            236743,
+            198,
+            818,
+            236743,
+            198,
+            818,
+            236743,
+            198,
+            818,
+            236743,
+            198,
+            818,
+            236743,
+            198,
+            818,
+            236743,
+            198,
+            818,
+            236743,
+            198,
+            818,
+            236743,
+            198,
+            818,
+            236743,
+            198,
+            818,
+            236743,
+            198,
+            818,
+            236743,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198
+          ],
+          "host_profile": {
+            "buffer_allocate_ns": 0,
+            "buffer_ensure_ns": 5011432,
+            "by_primitive": {
+              "attention": {
+                "calls": 4480,
+                "d2h_submit_ns": 36404772069,
+                "h2d_submit_ns": 16897155,
+                "input_encode_ns": 11147444,
+                "kernel_submit_ns": 13023221,
+                "kv_table_host_ns": 0,
+                "output_allocation_ns": 1419731,
+                "output_decode_validate_ns": 6602326,
+                "primitive_ns": 36578544612,
+                "stream_synchronize_ns": 122396701
+              },
+              "bf16_row": {
+                "calls": 33792,
+                "d2h_submit_ns": 1095004564,
+                "h2d_submit_ns": 0,
+                "input_encode_ns": 0,
+                "kernel_submit_ns": 74541276,
+                "kv_table_host_ns": 0,
+                "output_allocation_ns": 7745275,
+                "output_decode_validate_ns": 31062222,
+                "primitive_ns": 2026820011,
+                "stream_synchronize_ns": 808702083
+              },
+              "kv_write": {
+                "calls": 1920,
+                "d2h_submit_ns": 0,
+                "h2d_submit_ns": 11689596,
+                "input_encode_ns": 1267669,
+                "kernel_submit_ns": 8143003,
+                "kv_table_host_ns": 9709188,
+                "output_allocation_ns": 0,
+                "output_decode_validate_ns": 0,
+                "primitive_ns": 32169088,
+                "stream_synchronize_ns": 0
+              },
+              "matvec": {
+                "calls": 35456,
+                "d2h_submit_ns": 2398697692,
+                "h2d_submit_ns": 141994015,
+                "input_encode_ns": 94994140,
+                "kernel_submit_ns": 82222937,
+                "kv_table_host_ns": 0,
+                "output_allocation_ns": 24390704,
+                "output_decode_validate_ns": 126335679,
+                "primitive_ns": 3537766728,
+                "stream_synchronize_ns": 653206747
+              }
+            },
+            "calls": {
+              "attention": 4480,
+              "kv_write": 1920,
+              "matvec": 35456,
+              "row": 33792
+            },
+            "d2h_submit_ns": 39898474325,
+            "executor_other_ns": 1760801050,
+            "h2d_submit_ns": 170580766,
+            "input_encode_ns": 107409253,
+            "kernel_submit_ns": 177930437,
+            "kv_table_host_ns": 9709188,
+            "output_allocation_ns": 33555710,
+            "output_decode_validate_ns": 164000227,
+            "primitive_ns": 42175300439,
+            "stream_synchronize_ns": 1584305531,
+            "token_forward_ns": 43936101489,
+            "units": "nanoseconds measured with std::time::Instant; primitive_ns is inclusive"
+          },
+          "logical_lower_bound": {
+            "attention_calls": 4480,
+            "bf16_row_reads": 33792,
+            "bf16_weight_bytes": 583621026560,
+            "kv_read_bytes": 5873860608,
+            "kv_write_bytes": 4718592,
+            "matvec_calls": 35456,
+            "total_bytes": 589499605760
+          }
+        },
+        {
+          "context_lengths_after_append": [
+            513,
+            514,
+            515,
+            516,
+            517,
+            518,
+            519,
+            520,
+            521,
+            522,
+            523,
+            524,
+            525,
+            526,
+            527,
+            528,
+            529,
+            530,
+            531,
+            532,
+            533,
+            534,
+            535,
+            536,
+            537,
+            538,
+            539,
+            540,
+            541,
+            542,
+            543,
+            544,
+            545,
+            546,
+            547,
+            548,
+            549,
+            550,
+            551,
+            552,
+            553,
+            554,
+            555,
+            556,
+            557,
+            558,
+            559,
+            560,
+            561,
+            562,
+            563,
+            564,
+            565,
+            566,
+            567,
+            568,
+            569,
+            570,
+            571,
+            572,
+            573,
+            574,
+            575,
+            576,
+            577,
+            578,
+            579,
+            580,
+            581,
+            582,
+            583,
+            584,
+            585,
+            586,
+            587,
+            588,
+            589,
+            590,
+            591,
+            592,
+            593,
+            594,
+            595,
+            596,
+            597,
+            598,
+            599,
+            600,
+            601,
+            602,
+            603,
+            604,
+            605,
+            606,
+            607,
+            608,
+            609,
+            610,
+            611,
+            612,
+            613,
+            614,
+            615,
+            616,
+            617,
+            618,
+            619,
+            620,
+            621,
+            622,
+            623,
+            624,
+            625,
+            626,
+            627,
+            628,
+            629,
+            630,
+            631,
+            632,
+            633,
+            634,
+            635,
+            636,
+            637,
+            638,
+            639,
+            640
+          ],
+          "elapsed_seconds": 43.972660057,
+          "generated_tokens": [
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            818,
+            236743,
+            198,
+            198,
+            198,
+            818,
+            236743,
+            198,
+            198,
+            818,
+            236743,
+            198,
+            198,
+            818,
+            236743,
+            198,
+            818,
+            236743,
+            198,
+            818,
+            236743,
+            198,
+            818,
+            236743,
+            198,
+            818,
+            236743,
+            198,
+            818,
+            236743,
+            198,
+            818,
+            236743,
+            198,
+            818,
+            236743,
+            198,
+            818,
+            236743,
+            198,
+            818,
+            236743,
+            198,
+            818,
+            236743,
+            198,
+            818,
+            236743,
+            198,
+            818,
+            236743,
+            198,
+            818,
+            236743,
+            198,
+            818,
+            236743,
+            198,
+            818,
+            236743,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198
+          ],
+          "host_profile": {
+            "buffer_allocate_ns": 0,
+            "buffer_ensure_ns": 5020349,
+            "by_primitive": {
+              "attention": {
+                "calls": 4480,
+                "d2h_submit_ns": 36433417674,
+                "h2d_submit_ns": 16583576,
+                "input_encode_ns": 11160201,
+                "kernel_submit_ns": 12857028,
+                "kv_table_host_ns": 0,
+                "output_allocation_ns": 1411308,
+                "output_decode_validate_ns": 6639639,
+                "primitive_ns": 36606572557,
+                "stream_synchronize_ns": 122326483
+              },
+              "bf16_row": {
+                "calls": 33792,
+                "d2h_submit_ns": 1098159312,
+                "h2d_submit_ns": 0,
+                "input_encode_ns": 0,
+                "kernel_submit_ns": 73924650,
+                "kv_table_host_ns": 0,
+                "output_allocation_ns": 7875723,
+                "output_decode_validate_ns": 31264829,
+                "primitive_ns": 2030272412,
+                "stream_synchronize_ns": 809310778
+              },
+              "kv_write": {
+                "calls": 1920,
+                "d2h_submit_ns": 0,
+                "h2d_submit_ns": 11537167,
+                "input_encode_ns": 1249539,
+                "kernel_submit_ns": 8064719,
+                "kv_table_host_ns": 9488069,
+                "output_allocation_ns": 0,
+                "output_decode_validate_ns": 0,
+                "primitive_ns": 31651993,
+                "stream_synchronize_ns": 0
+              },
+              "matvec": {
+                "calls": 35456,
+                "d2h_submit_ns": 2397067048,
+                "h2d_submit_ns": 140942021,
+                "input_encode_ns": 93630138,
+                "kernel_submit_ns": 82641181,
+                "kv_table_host_ns": 0,
+                "output_allocation_ns": 23591677,
+                "output_decode_validate_ns": 127857803,
+                "primitive_ns": 3535947701,
+                "stream_synchronize_ns": 654049057
+              }
+            },
+            "calls": {
+              "attention": 4480,
+              "kv_write": 1920,
+              "matvec": 35456,
+              "row": 33792
+            },
+            "d2h_submit_ns": 39928644034,
+            "executor_other_ns": 1767739152,
+            "h2d_submit_ns": 169062764,
+            "input_encode_ns": 106039878,
+            "kernel_submit_ns": 177487578,
+            "kv_table_host_ns": 9488069,
+            "output_allocation_ns": 32878708,
+            "output_decode_validate_ns": 165762271,
+            "primitive_ns": 42204444663,
+            "stream_synchronize_ns": 1585686318,
+            "token_forward_ns": 43972183815,
+            "units": "nanoseconds measured with std::time::Instant; primitive_ns is inclusive"
+          },
+          "logical_lower_bound": {
+            "attention_calls": 4480,
+            "bf16_row_reads": 33792,
+            "bf16_weight_bytes": 583621026560,
+            "kv_read_bytes": 5873860608,
+            "kv_write_bytes": 4718592,
+            "matvec_calls": 35456,
+            "total_bytes": 589499605760
+          }
+        },
+        {
+          "context_lengths_after_append": [
+            513,
+            514,
+            515,
+            516,
+            517,
+            518,
+            519,
+            520,
+            521,
+            522,
+            523,
+            524,
+            525,
+            526,
+            527,
+            528,
+            529,
+            530,
+            531,
+            532,
+            533,
+            534,
+            535,
+            536,
+            537,
+            538,
+            539,
+            540,
+            541,
+            542,
+            543,
+            544,
+            545,
+            546,
+            547,
+            548,
+            549,
+            550,
+            551,
+            552,
+            553,
+            554,
+            555,
+            556,
+            557,
+            558,
+            559,
+            560,
+            561,
+            562,
+            563,
+            564,
+            565,
+            566,
+            567,
+            568,
+            569,
+            570,
+            571,
+            572,
+            573,
+            574,
+            575,
+            576,
+            577,
+            578,
+            579,
+            580,
+            581,
+            582,
+            583,
+            584,
+            585,
+            586,
+            587,
+            588,
+            589,
+            590,
+            591,
+            592,
+            593,
+            594,
+            595,
+            596,
+            597,
+            598,
+            599,
+            600,
+            601,
+            602,
+            603,
+            604,
+            605,
+            606,
+            607,
+            608,
+            609,
+            610,
+            611,
+            612,
+            613,
+            614,
+            615,
+            616,
+            617,
+            618,
+            619,
+            620,
+            621,
+            622,
+            623,
+            624,
+            625,
+            626,
+            627,
+            628,
+            629,
+            630,
+            631,
+            632,
+            633,
+            634,
+            635,
+            636,
+            637,
+            638,
+            639,
+            640
+          ],
+          "elapsed_seconds": 43.913661091,
+          "generated_tokens": [
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            818,
+            236743,
+            198,
+            198,
+            198,
+            818,
+            236743,
+            198,
+            198,
+            818,
+            236743,
+            198,
+            198,
+            818,
+            236743,
+            198,
+            818,
+            236743,
+            198,
+            818,
+            236743,
+            198,
+            818,
+            236743,
+            198,
+            818,
+            236743,
+            198,
+            818,
+            236743,
+            198,
+            818,
+            236743,
+            198,
+            818,
+            236743,
+            198,
+            818,
+            236743,
+            198,
+            818,
+            236743,
+            198,
+            818,
+            236743,
+            198,
+            818,
+            236743,
+            198,
+            818,
+            236743,
+            198,
+            818,
+            236743,
+            198,
+            818,
+            236743,
+            198,
+            818,
+            236743,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198
+          ],
+          "host_profile": {
+            "buffer_allocate_ns": 0,
+            "buffer_ensure_ns": 4883517,
+            "by_primitive": {
+              "attention": {
+                "calls": 4480,
+                "d2h_submit_ns": 36392767985,
+                "h2d_submit_ns": 16807290,
+                "input_encode_ns": 11011882,
+                "kernel_submit_ns": 12715668,
+                "kv_table_host_ns": 0,
+                "output_allocation_ns": 1319387,
+                "output_decode_validate_ns": 6510143,
+                "primitive_ns": 36565521374,
+                "stream_synchronize_ns": 122182437
+              },
+              "bf16_row": {
+                "calls": 33792,
+                "d2h_submit_ns": 1093937787,
+                "h2d_submit_ns": 0,
+                "input_encode_ns": 0,
+                "kernel_submit_ns": 73079997,
+                "kv_table_host_ns": 0,
+                "output_allocation_ns": 7838512,
+                "output_decode_validate_ns": 30677038,
+                "primitive_ns": 2023442295,
+                "stream_synchronize_ns": 808167193
+              },
+              "kv_write": {
+                "calls": 1920,
+                "d2h_submit_ns": 0,
+                "h2d_submit_ns": 11861771,
+                "input_encode_ns": 1234227,
+                "kernel_submit_ns": 8109981,
+                "kv_table_host_ns": 9832911,
+                "output_allocation_ns": 0,
+                "output_decode_validate_ns": 0,
+                "primitive_ns": 32308747,
+                "stream_synchronize_ns": 0
+              },
+              "matvec": {
+                "calls": 35456,
+                "d2h_submit_ns": 2394339010,
+                "h2d_submit_ns": 139001418,
+                "input_encode_ns": 93323755,
+                "kernel_submit_ns": 81601522,
+                "kv_table_host_ns": 0,
+                "output_allocation_ns": 22546427,
+                "output_decode_validate_ns": 124699840,
+                "primitive_ns": 3525737100,
+                "stream_synchronize_ns": 654259696
+              }
+            },
+            "calls": {
+              "attention": 4480,
+              "kv_write": 1920,
+              "matvec": 35456,
+              "row": 33792
+            },
+            "d2h_submit_ns": 39881044782,
+            "executor_other_ns": 1766231840,
+            "h2d_submit_ns": 167670479,
+            "input_encode_ns": 105569864,
+            "kernel_submit_ns": 175507168,
+            "kv_table_host_ns": 9832911,
+            "output_allocation_ns": 31704326,
+            "output_decode_validate_ns": 161887021,
+            "primitive_ns": 42147009516,
+            "stream_synchronize_ns": 1584609326,
+            "token_forward_ns": 43913241356,
+            "units": "nanoseconds measured with std::time::Instant; primitive_ns is inclusive"
+          },
+          "logical_lower_bound": {
+            "attention_calls": 4480,
+            "bf16_row_reads": 33792,
+            "bf16_weight_bytes": 583621026560,
+            "kv_read_bytes": 5873860608,
+            "kv_write_bytes": 4718592,
+            "matvec_calls": 35456,
+            "total_bytes": 589499605760
+          }
+        },
+        {
+          "context_lengths_after_append": [
+            513,
+            514,
+            515,
+            516,
+            517,
+            518,
+            519,
+            520,
+            521,
+            522,
+            523,
+            524,
+            525,
+            526,
+            527,
+            528,
+            529,
+            530,
+            531,
+            532,
+            533,
+            534,
+            535,
+            536,
+            537,
+            538,
+            539,
+            540,
+            541,
+            542,
+            543,
+            544,
+            545,
+            546,
+            547,
+            548,
+            549,
+            550,
+            551,
+            552,
+            553,
+            554,
+            555,
+            556,
+            557,
+            558,
+            559,
+            560,
+            561,
+            562,
+            563,
+            564,
+            565,
+            566,
+            567,
+            568,
+            569,
+            570,
+            571,
+            572,
+            573,
+            574,
+            575,
+            576,
+            577,
+            578,
+            579,
+            580,
+            581,
+            582,
+            583,
+            584,
+            585,
+            586,
+            587,
+            588,
+            589,
+            590,
+            591,
+            592,
+            593,
+            594,
+            595,
+            596,
+            597,
+            598,
+            599,
+            600,
+            601,
+            602,
+            603,
+            604,
+            605,
+            606,
+            607,
+            608,
+            609,
+            610,
+            611,
+            612,
+            613,
+            614,
+            615,
+            616,
+            617,
+            618,
+            619,
+            620,
+            621,
+            622,
+            623,
+            624,
+            625,
+            626,
+            627,
+            628,
+            629,
+            630,
+            631,
+            632,
+            633,
+            634,
+            635,
+            636,
+            637,
+            638,
+            639,
+            640
+          ],
+          "elapsed_seconds": 43.931408878,
+          "generated_tokens": [
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            818,
+            236743,
+            198,
+            198,
+            198,
+            818,
+            236743,
+            198,
+            198,
+            818,
+            236743,
+            198,
+            198,
+            818,
+            236743,
+            198,
+            818,
+            236743,
+            198,
+            818,
+            236743,
+            198,
+            818,
+            236743,
+            198,
+            818,
+            236743,
+            198,
+            818,
+            236743,
+            198,
+            818,
+            236743,
+            198,
+            818,
+            236743,
+            198,
+            818,
+            236743,
+            198,
+            818,
+            236743,
+            198,
+            818,
+            236743,
+            198,
+            818,
+            236743,
+            198,
+            818,
+            236743,
+            198,
+            818,
+            236743,
+            198,
+            818,
+            236743,
+            198,
+            818,
+            236743,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198,
+            198
+          ],
+          "host_profile": {
+            "buffer_allocate_ns": 0,
+            "buffer_ensure_ns": 4962062,
+            "by_primitive": {
+              "attention": {
+                "calls": 4480,
+                "d2h_submit_ns": 36427597995,
+                "h2d_submit_ns": 16895265,
+                "input_encode_ns": 11028266,
+                "kernel_submit_ns": 13069874,
+                "kv_table_host_ns": 0,
+                "output_allocation_ns": 1473268,
+                "output_decode_validate_ns": 6617378,
+                "primitive_ns": 36599375843,
+                "stream_synchronize_ns": 120502049
+              },
+              "bf16_row": {
+                "calls": 33792,
+                "d2h_submit_ns": 1087224242,
+                "h2d_submit_ns": 0,
+                "input_encode_ns": 0,
+                "kernel_submit_ns": 73411091,
+                "kv_table_host_ns": 0,
+                "output_allocation_ns": 8835896,
+                "output_decode_validate_ns": 31410001,
+                "primitive_ns": 2017368654,
+                "stream_synchronize_ns": 806589149
+              },
+              "kv_write": {
+                "calls": 1920,
+                "d2h_submit_ns": 0,
+                "h2d_submit_ns": 11550966,
+                "input_encode_ns": 1284378,
+                "kernel_submit_ns": 7876172,
+                "kv_table_host_ns": 9568328,
+                "output_allocation_ns": 0,
+                "output_decode_validate_ns": 0,
+                "primitive_ns": 31622367,
+                "stream_synchronize_ns": 0
+              },
+              "matvec": {
+                "calls": 35456,
+                "d2h_submit_ns": 2390668207,
+                "h2d_submit_ns": 141576489,
+                "input_encode_ns": 93767201,
+                "kernel_submit_ns": 82415173,
+                "kv_table_host_ns": 0,
+                "output_allocation_ns": 23297926,
+                "output_decode_validate_ns": 126232295,
+                "primitive_ns": 3523701303,
+                "stream_synchronize_ns": 649665614
+              }
+            },
+            "calls": {
+              "attention": 4480,
+              "kv_write": 1920,
+              "matvec": 35456,
+              "row": 33792
+            },
+            "d2h_submit_ns": 39905490444,
+            "executor_other_ns": 1758880163,
+            "h2d_submit_ns": 170022720,
+            "input_encode_ns": 106079845,
+            "kernel_submit_ns": 176772310,
+            "kv_table_host_ns": 9568328,
+            "output_allocation_ns": 33607090,
+            "output_decode_validate_ns": 164259674,
+            "primitive_ns": 42172068167,
+            "stream_synchronize_ns": 1576756812,
+            "token_forward_ns": 43930948330,
+            "units": "nanoseconds measured with std::time::Instant; primitive_ns is inclusive"
+          },
+          "logical_lower_bound": {
+            "attention_calls": 4480,
+            "bf16_row_reads": 33792,
+            "bf16_weight_bytes": 583621026560,
+            "kv_read_bytes": 5873860608,
+            "kv_write_bytes": 4718592,
+            "matvec_calls": 35456,
+            "total_bytes": 589499605760
+          }
+        }
+      ],
+      "tok_per_second": 2.913023335541603,
+      "tokens_per_repeat": 128,
+      "total_elapsed_seconds": 219.70301171,
+      "total_tokens": 640
+    },
+    "kind": "resident-throughput",
+    "logical_stream_definition": "For each timed run, BF16 source weights read by each resident matvec or BF16 row operation plus F32 K/V writes and unique K+V cache reads per attention invocation. It is a logical lower bound, not a physical-HBM counter; activation transfers, output writes, page tables, allocator traffic, L2 reuse, and kernel-launch overhead are excluded.",
+    "prefill": {
+      "accounting": "Each timed operation is an M=N prefill of the declared fixed-token prompt after resident load. Total input tokens divided by total monotonic wall time; load, cooldown, warmup, and profiler time are excluded.",
+      "milliseconds_per_token": 180.34776540585935,
+      "runs": [
+        {
+          "elapsed_seconds": 92.041654343,
+          "host_profile": {
+            "buffer_allocate_ns": 0,
+            "buffer_ensure_ns": 17919098,
+            "by_primitive": {
+              "attention": {
+                "calls": 17920,
+                "d2h_submit_ns": 65375940099,
+                "h2d_submit_ns": 62653923,
+                "input_encode_ns": 42973072,
+                "kernel_submit_ns": 47160947,
+                "kv_table_host_ns": 0,
+                "output_allocation_ns": 5100439,
+                "output_decode_validate_ns": 23838663,
+                "primitive_ns": 66029582280,
+                "stream_synchronize_ns": 463715688
+              },
+              "bf16_row": {
+                "calls": 135168,
+                "d2h_submit_ns": 4154279886,
+                "h2d_submit_ns": 0,
+                "input_encode_ns": 0,
+                "kernel_submit_ns": 276793314,
+                "kv_table_host_ns": 0,
+                "output_allocation_ns": 26041598,
+                "output_decode_validate_ns": 116596099,
+                "primitive_ns": 7817019384,
+                "stream_synchronize_ns": 3205470008
+              },
+              "kv_write": {
+                "calls": 7680,
+                "d2h_submit_ns": 0,
+                "h2d_submit_ns": 44957699,
+                "input_encode_ns": 4954997,
+                "kernel_submit_ns": 27608896,
+                "kv_table_host_ns": 28650929,
+                "output_allocation_ns": 0,
+                "output_decode_validate_ns": 0,
+                "primitive_ns": 111008671,
+                "stream_synchronize_ns": 0
+              },
+              "matvec": {
+                "calls": 141313,
+                "d2h_submit_ns": 8806205989,
+                "h2d_submit_ns": 511158680,
+                "input_encode_ns": 354048320,
+                "kernel_submit_ns": 301531874,
+                "kv_table_host_ns": 0,
+                "output_allocation_ns": 47694408,
+                "output_decode_validate_ns": 358785271,
+                "primitive_ns": 13018761058,
+                "stream_synchronize_ns": 2578812739
+              }
+            },
+            "calls": {
+              "attention": 17920,
+              "kv_write": 7680,
+              "matvec": 141313,
+              "row": 135168
+            },
+            "d2h_submit_ns": 78336425974,
+            "executor_other_ns": 5065282420,
+            "h2d_submit_ns": 618770302,
+            "input_encode_ns": 401976389,
+            "kernel_submit_ns": 653095031,
+            "kv_table_host_ns": 28650929,
+            "output_allocation_ns": 78836445,
+            "output_decode_validate_ns": 499220033,
+            "primitive_ns": 86976371393,
+            "stream_synchronize_ns": 6247998435,
+            "token_forward_ns": 92041653813,
+            "units": "nanoseconds measured with std::time::Instant; primitive_ns is inclusive"
+          },
+          "input_tokens": 512,
+          "logical_lower_bound": {
+            "attention_calls": 17920,
+            "bf16_row_reads": 135168,
+            "bf16_weight_bytes": 1922972552192,
+            "kv_read_bytes": 11296309248,
+            "kv_write_bytes": 18874368,
+            "matvec_calls": 141313,
+            "total_bytes": 1934287735808
+          },
+          "top1_token_id": 184
+        },
+        {
+          "elapsed_seconds": 92.43161711,
+          "host_profile": {
+            "buffer_allocate_ns": 0,
+            "buffer_ensure_ns": 19357376,
+            "by_primitive": {
+              "attention": {
+                "calls": 17920,
+                "d2h_submit_ns": 65403575627,
+                "h2d_submit_ns": 65866795,
+                "input_encode_ns": 43762261,
+                "kernel_submit_ns": 49210592,
+                "kv_table_host_ns": 0,
+                "output_allocation_ns": 5328747,
+                "output_decode_validate_ns": 24728088,
+                "primitive_ns": 66068954969,
+                "stream_synchronize_ns": 467648991
+              },
+              "bf16_row": {
+                "calls": 135168,
+                "d2h_submit_ns": 4160641179,
+                "h2d_submit_ns": 0,
+                "input_encode_ns": 0,
+                "kernel_submit_ns": 288925926,
+                "kv_table_host_ns": 0,
+                "output_allocation_ns": 26295481,
+                "output_decode_validate_ns": 121670807,
+                "primitive_ns": 7854579998,
+                "stream_synchronize_ns": 3217669036
+              },
+              "kv_write": {
+                "calls": 7680,
+                "d2h_submit_ns": 0,
+                "h2d_submit_ns": 46952983,
+                "input_encode_ns": 5060737,
+                "kernel_submit_ns": 29318847,
+                "kv_table_host_ns": 29305714,
+                "output_allocation_ns": 0,
+                "output_decode_validate_ns": 0,
+                "primitive_ns": 115852309,
+                "stream_synchronize_ns": 0
+              },
+              "matvec": {
+                "calls": 141313,
+                "d2h_submit_ns": 8786549807,
+                "h2d_submit_ns": 541797582,
+                "input_encode_ns": 361468771,
+                "kernel_submit_ns": 318483114,
+                "kv_table_host_ns": 0,
+                "output_allocation_ns": 50542807,
+                "output_decode_validate_ns": 374256929,
+                "primitive_ns": 13098476835,
+                "stream_synchronize_ns": 2601454995
+              }
+            },
+            "calls": {
+              "attention": 17920,
+              "kv_write": 7680,
+              "matvec": 141313,
+              "row": 135168
+            },
+            "d2h_submit_ns": 78350766613,
+            "executor_other_ns": 5293752179,
+            "h2d_submit_ns": 654617360,
+            "input_encode_ns": 410291769,
+            "kernel_submit_ns": 685938479,
+            "kv_table_host_ns": 29305714,
+            "output_allocation_ns": 82167035,
+            "output_decode_validate_ns": 520655824,
+            "primitive_ns": 87137864111,
+            "stream_synchronize_ns": 6286773022,
+            "token_forward_ns": 92431616290,
+            "units": "nanoseconds measured with std::time::Instant; primitive_ns is inclusive"
+          },
+          "input_tokens": 512,
+          "logical_lower_bound": {
+            "attention_calls": 17920,
+            "bf16_row_reads": 135168,
+            "bf16_weight_bytes": 1922972552192,
+            "kv_read_bytes": 11296309248,
+            "kv_write_bytes": 18874368,
+            "matvec_calls": 141313,
+            "total_bytes": 1934287735808
+          },
+          "top1_token_id": 184
+        },
+        {
+          "elapsed_seconds": 92.452208182,
+          "host_profile": {
+            "buffer_allocate_ns": 0,
+            "buffer_ensure_ns": 19025547,
+            "by_primitive": {
+              "attention": {
+                "calls": 17920,
+                "d2h_submit_ns": 65475665862,
+                "h2d_submit_ns": 65435464,
+                "input_encode_ns": 44199140,
+                "kernel_submit_ns": 49162441,
+                "kv_table_host_ns": 0,
+                "output_allocation_ns": 5393114,
+                "output_decode_validate_ns": 24886053,
+                "primitive_ns": 66140933292,
+                "stream_synchronize_ns": 467475696
+              },
+              "bf16_row": {
+                "calls": 135168,
+                "d2h_submit_ns": 4152663264,
+                "h2d_submit_ns": 0,
+                "input_encode_ns": 0,
+                "kernel_submit_ns": 288178102,
+                "kv_table_host_ns": 0,
+                "output_allocation_ns": 33017095,
+                "output_decode_validate_ns": 121477791,
+                "primitive_ns": 7852896358,
+                "stream_synchronize_ns": 3218540666
+              },
+              "kv_write": {
+                "calls": 7680,
+                "d2h_submit_ns": 0,
+                "h2d_submit_ns": 46542438,
+                "input_encode_ns": 5045911,
+                "kernel_submit_ns": 29067126,
+                "kv_table_host_ns": 28999896,
+                "output_allocation_ns": 0,
+                "output_decode_validate_ns": 0,
+                "primitive_ns": 114839862,
+                "stream_synchronize_ns": 0
+              },
+              "matvec": {
+                "calls": 141313,
+                "d2h_submit_ns": 8782194947,
+                "h2d_submit_ns": 540895514,
+                "input_encode_ns": 362488140,
+                "kernel_submit_ns": 318945079,
+                "kv_table_host_ns": 0,
+                "output_allocation_ns": 51265783,
+                "output_decode_validate_ns": 370752578,
+                "primitive_ns": 13089433992,
+                "stream_synchronize_ns": 2600209363
+              }
+            },
+            "calls": {
+              "attention": 17920,
+              "kv_write": 7680,
+              "matvec": 141313,
+              "row": 135168
+            },
+            "d2h_submit_ns": 78410524073,
+            "executor_other_ns": 5254104058,
+            "h2d_submit_ns": 652873416,
+            "input_encode_ns": 411733191,
+            "kernel_submit_ns": 685352748,
+            "kv_table_host_ns": 28999896,
+            "output_allocation_ns": 89675992,
+            "output_decode_validate_ns": 517116422,
+            "primitive_ns": 87198103504,
+            "stream_synchronize_ns": 6286225725,
+            "token_forward_ns": 92452207562,
+            "units": "nanoseconds measured with std::time::Instant; primitive_ns is inclusive"
+          },
+          "input_tokens": 512,
+          "logical_lower_bound": {
+            "attention_calls": 17920,
+            "bf16_row_reads": 135168,
+            "bf16_weight_bytes": 1922972552192,
+            "kv_read_bytes": 11296309248,
+            "kv_write_bytes": 18874368,
+            "matvec_calls": 141313,
+            "total_bytes": 1934287735808
+          },
+          "top1_token_id": 184
+        },
+        {
+          "elapsed_seconds": 92.339153068,
+          "host_profile": {
+            "buffer_allocate_ns": 0,
+            "buffer_ensure_ns": 18702309,
+            "by_primitive": {
+              "attention": {
+                "calls": 17920,
+                "d2h_submit_ns": 65475883366,
+                "h2d_submit_ns": 64324104,
+                "input_encode_ns": 43632184,
+                "kernel_submit_ns": 48330921,
+                "kv_table_host_ns": 0,
+                "output_allocation_ns": 5282508,
+                "output_decode_validate_ns": 24395883,
+                "primitive_ns": 66137129285,
+                "stream_synchronize_ns": 466800024
+              },
+              "bf16_row": {
+                "calls": 135168,
+                "d2h_submit_ns": 4158103230,
+                "h2d_submit_ns": 0,
+                "input_encode_ns": 0,
+                "kernel_submit_ns": 282416263,
+                "kv_table_host_ns": 0,
+                "output_allocation_ns": 32836967,
+                "output_decode_validate_ns": 120198449,
+                "primitive_ns": 7848274957,
+                "stream_synchronize_ns": 3216270218
+              },
+              "kv_write": {
+                "calls": 7680,
+                "d2h_submit_ns": 0,
+                "h2d_submit_ns": 45657385,
+                "input_encode_ns": 4966889,
+                "kernel_submit_ns": 28276946,
+                "kv_table_host_ns": 28717717,
+                "output_allocation_ns": 0,
+                "output_decode_validate_ns": 0,
+                "primitive_ns": 112700691,
+                "stream_synchronize_ns": 0
+              },
+              "matvec": {
+                "calls": 141313,
+                "d2h_submit_ns": 8789362832,
+                "h2d_submit_ns": 527076524,
+                "input_encode_ns": 364131199,
+                "kernel_submit_ns": 309175595,
+                "kv_table_host_ns": 0,
+                "output_allocation_ns": 50109532,
+                "output_decode_validate_ns": 365034026,
+                "primitive_ns": 13058969809,
+                "stream_synchronize_ns": 2591715707
+              }
+            },
+            "calls": {
+              "attention": 17920,
+              "kv_write": 7680,
+              "matvec": 141313,
+              "row": 135168
+            },
+            "d2h_submit_ns": 78423349428,
+            "executor_other_ns": 5182077526,
+            "h2d_submit_ns": 637058013,
+            "input_encode_ns": 412730272,
+            "kernel_submit_ns": 668199725,
+            "kv_table_host_ns": 28717717,
+            "output_allocation_ns": 88229007,
+            "output_decode_validate_ns": 509628358,
+            "primitive_ns": 87157074742,
+            "stream_synchronize_ns": 6274785949,
+            "token_forward_ns": 92339152268,
+            "units": "nanoseconds measured with std::time::Instant; primitive_ns is inclusive"
+          },
+          "input_tokens": 512,
+          "logical_lower_bound": {
+            "attention_calls": 17920,
+            "bf16_row_reads": 135168,
+            "bf16_weight_bytes": 1922972552192,
+            "kv_read_bytes": 11296309248,
+            "kv_write_bytes": 18874368,
+            "matvec_calls": 141313,
+            "total_bytes": 1934287735808
+          },
+          "top1_token_id": 184
+        },
+        {
+          "elapsed_seconds": 92.425646736,
+          "host_profile": {
+            "buffer_allocate_ns": 0,
+            "buffer_ensure_ns": 19197305,
+            "by_primitive": {
+              "attention": {
+                "calls": 17920,
+                "d2h_submit_ns": 65456574956,
+                "h2d_submit_ns": 66211369,
+                "input_encode_ns": 44153708,
+                "kernel_submit_ns": 49225471,
+                "kv_table_host_ns": 0,
+                "output_allocation_ns": 5457835,
+                "output_decode_validate_ns": 24749515,
+                "primitive_ns": 66121354730,
+                "stream_synchronize_ns": 466254194
+              },
+              "bf16_row": {
+                "calls": 135168,
+                "d2h_submit_ns": 4148570029,
+                "h2d_submit_ns": 0,
+                "input_encode_ns": 0,
+                "kernel_submit_ns": 289653469,
+                "kv_table_host_ns": 0,
+                "output_allocation_ns": 32127790,
+                "output_decode_validate_ns": 122723691,
+                "primitive_ns": 7849432626,
+                "stream_synchronize_ns": 3217123631
+              },
+              "kv_write": {
+                "calls": 7680,
+                "d2h_submit_ns": 0,
+                "h2d_submit_ns": 46903548,
+                "input_encode_ns": 5252754,
+                "kernel_submit_ns": 29789458,
+                "kv_table_host_ns": 29046102,
+                "output_allocation_ns": 0,
+                "output_decode_validate_ns": 0,
+                "primitive_ns": 116212568,
+                "stream_synchronize_ns": 0
+              },
+              "matvec": {
+                "calls": 141313,
+                "d2h_submit_ns": 8769706856,
+                "h2d_submit_ns": 543106124,
+                "input_encode_ns": 368633395,
+                "kernel_submit_ns": 319897033,
+                "kv_table_host_ns": 0,
+                "output_allocation_ns": 51196067,
+                "output_decode_validate_ns": 372005429,
+                "primitive_ns": 13084184048,
+                "stream_synchronize_ns": 2596132131
+              }
+            },
+            "calls": {
+              "attention": 17920,
+              "kv_write": 7680,
+              "matvec": 141313,
+              "row": 135168
+            },
+            "d2h_submit_ns": 78374851841,
+            "executor_other_ns": 5254461924,
+            "h2d_submit_ns": 656221041,
+            "input_encode_ns": 418039857,
+            "kernel_submit_ns": 688565431,
+            "kv_table_host_ns": 29046102,
+            "output_allocation_ns": 88781692,
+            "output_decode_validate_ns": 519478635,
+            "primitive_ns": 87171183972,
+            "stream_synchronize_ns": 6279509956,
+            "token_forward_ns": 92425645896,
+            "units": "nanoseconds measured with std::time::Instant; primitive_ns is inclusive"
+          },
+          "input_tokens": 512,
+          "logical_lower_bound": {
+            "attention_calls": 17920,
+            "bf16_row_reads": 135168,
+            "bf16_weight_bytes": 1922972552192,
+            "kv_read_bytes": 11296309248,
+            "kv_write_bytes": 18874368,
+            "matvec_calls": 141313,
+            "total_bytes": 1934287735808
+          },
+          "top1_token_id": 184
+        }
+      ],
+      "tok_per_second": 5.544842752831308,
+      "total_elapsed_seconds": 461.69027943899994,
+      "total_tokens": 2560
+    },
+    "prompt": {
+      "construction": "one fixed valid Gemma tokenizer token repeated to the requested context length; this makes every repeat and both before/after builds use the exact same token IDs",
+      "token_count": 512,
+      "token_id": 2
+    },
+    "warmup": {
+      "excluded_from_timing": true,
+      "prompt_token_count": 512,
+      "top1_token_id": 184
+    }
+  }
+}
