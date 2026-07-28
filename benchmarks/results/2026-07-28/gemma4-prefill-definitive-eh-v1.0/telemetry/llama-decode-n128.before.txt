@@ -1,0 +1,6 @@
+GPU: 2
+    TEMPERATURE:
+        EDGE: 68 °C
+        HOTSPOT: 70 °C
+        MEM: 70 °C
+
