@@ -61,6 +61,8 @@ const SAFETENSORS_HEADER_LIMIT_BYTES: u64 = 128 * 1024 * 1024;
 const RESIDENT_UPLOAD_CHUNK_BYTES: usize = 16 * 1024 * 1024;
 const GEMMA4_DEVICE_KV_BLOCK_SIZE: usize = 1;
 const GEMMA4_PREFILL_ACTIVATION_CHUNK_TOKENS: usize = 128;
+const GEMMA4_PREFILL_ACTIVATION_CHUNK_TOKENS_ENV: &str =
+    "ULLM_GEMMA4_PREFILL_ACTIVATION_CHUNK_TOKENS";
 const R9700_RUNTIME_NAME: &str = "AMD Radeon Graphics";
 const R9700_MEMORY_BYTES_MIN: u64 = 30 * 1024 * 1024 * 1024;
 const R9700_MEMORY_BYTES_MAX: u64 = 34 * 1024 * 1024 * 1024;
@@ -77,6 +79,26 @@ const GEMMA4_FULL_ATTENTION_LAYER_INDICES: [usize; 7] = [4, 9, 14, 19, 24, 29, 3
 
 fn gemma4_is_full_attention_layer(layer_index: usize) -> bool {
     GEMMA4_FULL_ATTENTION_LAYER_INDICES.contains(&layer_index)
+}
+
+fn gemma4_prefill_activation_chunk_tokens() -> Result<usize, String> {
+    match env::var(GEMMA4_PREFILL_ACTIVATION_CHUNK_TOKENS_ENV) {
+        Ok(value) => {
+            let rows = value.parse::<usize>().map_err(|_| format!(
+                "{GEMMA4_PREFILL_ACTIVATION_CHUNK_TOKENS_ENV} must be an integer in 1..={GEMMA4_PREFILL_ACTIVATION_CHUNK_TOKENS}"
+            ))?;
+            if !(1..=GEMMA4_PREFILL_ACTIVATION_CHUNK_TOKENS).contains(&rows) {
+                return Err(format!(
+                    "{GEMMA4_PREFILL_ACTIVATION_CHUNK_TOKENS_ENV} must be in 1..={GEMMA4_PREFILL_ACTIVATION_CHUNK_TOKENS}, got {rows}"
+                ));
+            }
+            Ok(rows)
+        }
+        Err(env::VarError::NotPresent) => Ok(GEMMA4_PREFILL_ACTIVATION_CHUNK_TOKENS),
+        Err(error) => Err(format!(
+            "failed to read {GEMMA4_PREFILL_ACTIVATION_CHUNK_TOKENS_ENV}: {error}"
+        )),
+    }
 }
 
 fn record_elapsed_ns(slot: &mut u64, started: Instant) {
@@ -4038,6 +4060,7 @@ impl Gemma4TextExecutor {
             ));
         }
         let hidden = self.resident_descriptor.decoder.hidden_size;
+        let activation_chunk_tokens = gemma4_prefill_activation_chunk_tokens()?;
         let layers = self.resident_descriptor.layers.len();
         let mut embedding = Vec::with_capacity(input_token_ids.len() * hidden);
         let mut layer_outputs = (0..layers)
@@ -4046,7 +4069,7 @@ impl Gemma4TextExecutor {
         let mut final_norm = Vec::with_capacity(input_token_ids.len() * hidden);
         let mut final_token_hidden = None;
 
-        for token_chunk in input_token_ids.chunks(GEMMA4_PREFILL_ACTIVATION_CHUNK_TOKENS) {
+        for token_chunk in input_token_ids.chunks(activation_chunk_tokens) {
             let (chunk_embeddings, per_layer_inputs) =
                 self.prefill_ple_inputs_batched(token_chunk)?;
             let chunk = self.forward_prefill_chunk_from_ple(
