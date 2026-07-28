@@ -30,6 +30,9 @@ const DEFAULT_BENCHMARK_PROMPT_TOKENS: usize = 6;
 const DEFAULT_BENCHMARK_DECODE_TOKENS: usize = 4;
 const DEFAULT_BENCHMARK_PROMPT_TOKEN_ID: u32 = 2;
 const DEFAULT_CONTINUATION_TOKENS: usize = 128;
+const GEMMA4_SLIDING_ATTENTION_LAYERS: usize = 28;
+const GEMMA4_FULL_ATTENTION_LAYERS: usize = 7;
+const GEMMA4_PREFILL_QUERY_TILE_TOKENS: usize = 128;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Mode {
@@ -936,9 +939,7 @@ fn attention_profile_workload(
     let host_profile = executor
         .resident_host_profile()
         .ok_or_else(|| "attention profile has no resident host profile".to_string())?;
-    let expected_attention_calls = prompt_tokens
-        .checked_mul(35)
-        .ok_or_else(|| "attention profile launch count overflows usize".to_string())?;
+    let expected_attention_calls = expected_prefill_reader_calls(prompt_tokens)?;
     if usize::try_from(logical.attention_calls).ok() != Some(expected_attention_calls) {
         return Err(format!(
             "attention profile expected {expected_attention_calls} paged-reader calls, got {}",
@@ -959,6 +960,45 @@ fn attention_profile_workload(
         "expected_paged_reader_calls": expected_attention_calls,
         "host_profile": host_profile_json(host_profile),
     }))
+}
+
+/// The profiling workload reports *physical reader launches*.  The 28 local
+/// layers remain M=1, while the promoted full-attention path emits one reader
+/// per query tile.  Keep the legacy count when the documented rollback is
+/// active so this diagnostic validates either execution route honestly.
+fn expected_prefill_reader_calls(prompt_tokens: usize) -> Result<usize, String> {
+    let sliding = prompt_tokens
+        .checked_mul(GEMMA4_SLIDING_ATTENTION_LAYERS)
+        .ok_or_else(|| "sliding reader launch count overflows usize".to_string())?;
+    let full = if env::var("ULLM_GEMMA4_PREFILL_LAYER_MAJOR").ok().as_deref() == Some("0") {
+        prompt_tokens
+            .checked_mul(GEMMA4_FULL_ATTENTION_LAYERS)
+            .ok_or_else(|| "full reader launch count overflows usize".to_string())?
+    } else {
+        let tile_tokens = match env::var("ULLM_GEMMA4_PREFILL_ACTIVATION_CHUNK_TOKENS") {
+            Ok(value) => value.parse::<usize>().map_err(|_| {
+                "ULLM_GEMMA4_PREFILL_ACTIVATION_CHUNK_TOKENS must be an integer".to_string()
+            })?,
+            Err(env::VarError::NotPresent) => GEMMA4_PREFILL_QUERY_TILE_TOKENS,
+            Err(error) => {
+                return Err(format!(
+                    "failed to read ULLM_GEMMA4_PREFILL_ACTIVATION_CHUNK_TOKENS: {error}"
+                ));
+            }
+        };
+        if !(1..=GEMMA4_PREFILL_QUERY_TILE_TOKENS).contains(&tile_tokens) {
+            return Err(format!(
+                "ULLM_GEMMA4_PREFILL_ACTIVATION_CHUNK_TOKENS must be in 1..={GEMMA4_PREFILL_QUERY_TILE_TOKENS}, got {tile_tokens}"
+            ));
+        }
+        prompt_tokens
+            .div_ceil(tile_tokens)
+            .checked_mul(GEMMA4_FULL_ATTENTION_LAYERS)
+            .ok_or_else(|| "batched full reader launch count overflows usize".to_string())?
+    };
+    sliding
+        .checked_add(full)
+        .ok_or_else(|| "total reader launch count overflows usize".to_string())
 }
 
 fn benchmark_workload(

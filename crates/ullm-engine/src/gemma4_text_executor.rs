@@ -4313,6 +4313,11 @@ impl Gemma4TextExecutor {
         if per_layer_inputs.len() != rows * ple.input_size {
             return Err(format!("Gemma4 batched layer {layer_index} PLE shape is invalid"));
         }
+        // Keep DT's complete attention-region split meaningful after the
+        // layer-major prefill path began bypassing `forward_resident_attention`.
+        // This spans the same attention-side work (input norm through the
+        // post-attention residual) but records once per batched layer chunk.
+        let attention_region_started = Instant::now();
         let q_width = attention
             .q_heads
             .checked_mul(attention.head_dim)
@@ -4491,6 +4496,10 @@ impl Gemma4TextExecutor {
                 "Gemma4 batched attention residual",
             )?);
         }
+        self.matvec
+            .resident_host_profile
+            .attention_region
+            .record(layer_index, elapsed_ns(attention_region_started));
 
         let intermediate = match layer.mlp {
             ResidentMlpDescriptor::Dense { intermediate_size, .. } => intermediate_size,
