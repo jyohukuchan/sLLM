@@ -1255,6 +1255,12 @@ ullm_status ullm_runtime_gemma_full_attn_batched_512_f32(
     float softmax_scale,
     ullm_runtime_buffer *output_buffer,
     ullm_runtime_stream *stream);
+ullm_status ullm_runtime_gemma_full_attn_batched_512_split_f32(
+    const ullm_runtime_buffer *q_buffer, const ullm_runtime_buffer *k_cache_buffer,
+    const ullm_runtime_buffer *v_cache_buffer, const ullm_runtime_buffer *block_table_buffer,
+    size_t prefix_len, size_t query_rows, size_t cache_len, size_t block_size, size_t cache_blocks,
+    float softmax_scale, size_t split_count, ullm_runtime_buffer *workspace_buffer,
+    ullm_runtime_buffer *output_buffer, ullm_runtime_stream *stream);
 ullm_status ullm_runtime_gemma_sliding_attn_ring_batched_256_f32(
     const ullm_runtime_buffer *q_buffer,
     const ullm_runtime_buffer *k_ring_buffer,
@@ -1268,6 +1274,13 @@ ullm_status ullm_runtime_gemma_sliding_attn_ring_batched_256_f32(
     size_t q_heads,
     float softmax_scale,
     ullm_runtime_buffer *output_buffer,
+    ullm_runtime_stream *stream);
+ullm_status ullm_runtime_gemma_sliding_attn_ring_batched_256_split_f32(
+    const ullm_runtime_buffer *q_buffer, const ullm_runtime_buffer *k_ring_buffer,
+    const ullm_runtime_buffer *v_ring_buffer, const ullm_runtime_buffer *fresh_k_buffer,
+    const ullm_runtime_buffer *fresh_v_buffer, size_t prefix_len, size_t history_rows,
+    size_t query_rows, size_t ring_capacity, size_t q_heads, float softmax_scale,
+    size_t split_count, ullm_runtime_buffer *workspace_buffer, ullm_runtime_buffer *output_buffer,
     ullm_runtime_stream *stream);
 ullm_status ullm_runtime_paged_decode_attn_sigmoid_gate_f32(
     const ullm_runtime_buffer *q_buffer,
@@ -74879,6 +74892,202 @@ extern "C" __global__ void ullm_gemma_sliding_attn_ring_batched_256_f32_kernel(
         output[(row * q_heads + q_head) * 256ull + tid] = weighted[row] / row_denom[row];
     }
 }
+
+// Gemma split-KV prefill readers.  These are intentionally separate from the
+// production paged-decode split ABI: Gemma retains every row of a prefill
+// chunk in a CTA, so each partial writes one online-softmax state per row.
+// Workspace layout is [row][q_head][split][max, denominator, numerator...].
+extern "C" __global__ void ullm_gemma_full_attn_batched_512_split_partial_f32_kernel(
+    const float *q, const float *k_cache, const float *v_cache,
+    const unsigned int *block_table, unsigned long long prefix_len,
+    unsigned long long query_rows, unsigned long long cache_len,
+    unsigned long long block_size, unsigned long long cache_blocks,
+    float softmax_scale, unsigned long long split_count, float *workspace) {
+    const unsigned int tid = threadIdx.x;
+    const unsigned long long partial_index = blockIdx.x;
+    const unsigned long long q_head = partial_index / split_count;
+    const unsigned long long split_id = partial_index - q_head * split_count;
+    if (q_head >= 8ull || blockDim.x != 256u || query_rows == 0ull || query_rows > 128ull ||
+        prefix_len + query_rows > cache_len || split_count == 0ull) return;
+    const unsigned long long visible = prefix_len + query_rows;
+    const unsigned long long tile = (visible + split_count - 1ull) / split_count;
+    const unsigned long long source_start = split_id * tile;
+    const unsigned long long source_end = source_start < visible
+        ? min(visible, source_start + tile) : source_start;
+    __shared__ float cached_k[512];
+    __shared__ float cached_v[512];
+    __shared__ float reduce[256];
+    __shared__ float row_max[128];
+    __shared__ float row_denom[128];
+    __shared__ float update_scale;
+    __shared__ float update_weight;
+    float weighted_lo[128];
+    float weighted_hi[128];
+    #pragma unroll
+    for (unsigned int row = 0; row < 128u; ++row) {
+        weighted_lo[row] = 0.0f;
+        weighted_hi[row] = 0.0f;
+        if (tid == 0u) { row_max[row] = -3.4028234663852886e38f; row_denom[row] = 0.0f; }
+    }
+    __syncthreads();
+    for (unsigned long long source = source_start; source < source_end; ++source) {
+        const unsigned long long logical_block = source / block_size;
+        const unsigned long long block_offset = source - logical_block * block_size;
+        const unsigned long long block_id = static_cast<unsigned long long>(block_table[logical_block]);
+        if (block_id >= cache_blocks) return;
+        const unsigned long long physical = block_id * block_size + block_offset;
+        for (unsigned int value = tid; value < 512u; value += 256u) {
+            cached_k[value] = k_cache[physical * 512ull + value];
+            cached_v[value] = v_cache[physical * 512ull + value];
+        }
+        __syncthreads();
+        for (unsigned long long row = 0; row < query_rows; ++row) {
+            if (source > prefix_len + row) continue;
+            const unsigned long long q_base = (row * 8ull + q_head) * 512ull;
+            reduce[tid] = q[q_base + tid] * cached_k[tid] +
+                q[q_base + tid + 256ull] * cached_k[tid + 256u];
+            __syncthreads();
+            for (unsigned int stride = 128u; stride > 0u; stride >>= 1u) {
+                if (tid < stride) reduce[tid] += reduce[tid + stride];
+                __syncthreads();
+            }
+            if (tid == 0u) {
+                const float score = reduce[0] * softmax_scale;
+                const float old_max = row_max[row];
+                const float new_max = score > old_max ? score : old_max;
+                update_scale = old_max <= -3.0e38f ? 0.0f : expf(old_max - new_max);
+                update_weight = expf(score - new_max);
+                row_max[row] = new_max;
+                row_denom[row] = row_denom[row] * update_scale + update_weight;
+            }
+            __syncthreads();
+            weighted_lo[row] = weighted_lo[row] * update_scale + update_weight * cached_v[tid];
+            weighted_hi[row] = weighted_hi[row] * update_scale + update_weight * cached_v[tid + 256u];
+            __syncthreads();
+        }
+    }
+    const unsigned long long stride = 514ull;
+    for (unsigned long long row = 0; row < query_rows; ++row) {
+        const unsigned long long base = ((row * 8ull + q_head) * split_count + split_id) * stride;
+        if (tid == 0u) { workspace[base] = row_max[row]; workspace[base + 1ull] = row_denom[row]; }
+        workspace[base + 2ull + tid] = weighted_lo[row];
+        workspace[base + 258ull + tid] = weighted_hi[row];
+    }
+}
+
+extern "C" __global__ void ullm_gemma_full_attn_batched_512_split_merge_f32_kernel(
+    unsigned long long query_rows, unsigned long long split_count,
+    const float *workspace, float *output) {
+    const unsigned int tid = threadIdx.x;
+    const unsigned long long q_head = blockIdx.x;
+    if (q_head >= 8ull || blockDim.x != 256u || query_rows == 0ull || query_rows > 128ull) return;
+    const unsigned long long stride = 514ull;
+    for (unsigned long long row = 0; row < query_rows; ++row) {
+        float merged_max = -3.4028234663852886e38f;
+        float merged_denom = 0.0f;
+        float merged_lo = 0.0f;
+        float merged_hi = 0.0f;
+        for (unsigned long long split = 0; split < split_count; ++split) {
+            const unsigned long long base = ((row * 8ull + q_head) * split_count + split) * stride;
+            const float denom = workspace[base + 1ull];
+            if (denom == 0.0f) continue;
+            const float partial_max = workspace[base];
+            const float new_max = partial_max > merged_max ? partial_max : merged_max;
+            const float alpha = merged_denom == 0.0f ? 0.0f : expf(merged_max - new_max);
+            const float beta = expf(partial_max - new_max);
+            merged_lo = merged_lo * alpha + workspace[base + 2ull + tid] * beta;
+            merged_hi = merged_hi * alpha + workspace[base + 258ull + tid] * beta;
+            merged_denom = merged_denom * alpha + denom * beta;
+            merged_max = new_max;
+        }
+        const unsigned long long out = (row * 8ull + q_head) * 512ull;
+        output[out + tid] = merged_lo / merged_denom;
+        output[out + tid + 256ull] = merged_hi / merged_denom;
+    }
+}
+
+extern "C" __global__ void ullm_gemma_sliding_attn_ring_batched_256_split_partial_f32_kernel(
+    const float *q, const float *k_ring, const float *v_ring,
+    const float *fresh_k, const float *fresh_v, unsigned long long prefix_len,
+    unsigned long long history_rows, unsigned long long query_rows,
+    unsigned long long ring_capacity, unsigned long long q_heads,
+    float softmax_scale, unsigned long long split_count, float *workspace) {
+    const unsigned int tid = threadIdx.x;
+    const unsigned long long partial_index = blockIdx.x;
+    const unsigned long long q_head = partial_index / split_count;
+    const unsigned long long split_id = partial_index - q_head * split_count;
+    if (q_head >= q_heads || blockDim.x != 256u || query_rows == 0ull || query_rows > 128ull ||
+        history_rows > 511ull || history_rows > prefix_len || ring_capacity == 0ull || split_count == 0ull) return;
+    const unsigned long long sources = history_rows + query_rows;
+    const unsigned long long tile = (sources + split_count - 1ull) / split_count;
+    const unsigned long long source_start = split_id * tile;
+    const unsigned long long source_end = source_start < sources ? min(sources, source_start + tile) : source_start;
+    __shared__ float cached_k[256]; __shared__ float cached_v[256]; __shared__ float reduce[256];
+    __shared__ float row_max[128]; __shared__ float row_denom[128];
+    __shared__ float update_scale; __shared__ float update_weight;
+    float weighted[128];
+    #pragma unroll
+    for (unsigned int row = 0; row < 128u; ++row) {
+        weighted[row] = 0.0f;
+        if (tid == 0u) { row_max[row] = -3.4028234663852886e38f; row_denom[row] = 0.0f; }
+    }
+    __syncthreads();
+    for (unsigned long long source = source_start; source < source_end; ++source) {
+        if (source < history_rows) {
+            const unsigned long long logical = prefix_len - history_rows + source;
+            const unsigned long long physical = logical % ring_capacity;
+            cached_k[tid] = k_ring[physical * 256ull + tid]; cached_v[tid] = v_ring[physical * 256ull + tid];
+        } else {
+            const unsigned long long fresh = source - history_rows;
+            cached_k[tid] = fresh_k[fresh * 256ull + tid]; cached_v[tid] = fresh_v[fresh * 256ull + tid];
+        }
+        __syncthreads();
+        for (unsigned long long row = 0; row < query_rows; ++row) {
+            if (source >= history_rows && source - history_rows > row) continue;
+            const unsigned long long q_base = (row * q_heads + q_head) * 256ull;
+            reduce[tid] = q[q_base + tid] * cached_k[tid];
+            __syncthreads();
+            for (unsigned int stride = 128u; stride > 0u; stride >>= 1u) {
+                if (tid < stride) reduce[tid] += reduce[tid + stride]; __syncthreads();
+            }
+            if (tid == 0u) {
+                const float score = reduce[0] * softmax_scale; const float old_max = row_max[row];
+                const float new_max = score > old_max ? score : old_max;
+                update_scale = old_max <= -3.0e38f ? 0.0f : expf(old_max - new_max);
+                update_weight = expf(score - new_max); row_max[row] = new_max;
+                row_denom[row] = row_denom[row] * update_scale + update_weight;
+            }
+            __syncthreads(); weighted[row] = weighted[row] * update_scale + update_weight * cached_v[tid]; __syncthreads();
+        }
+    }
+    const unsigned long long stride = 258ull;
+    for (unsigned long long row = 0; row < query_rows; ++row) {
+        const unsigned long long base = ((row * q_heads + q_head) * split_count + split_id) * stride;
+        if (tid == 0u) { workspace[base] = row_max[row]; workspace[base + 1ull] = row_denom[row]; }
+        workspace[base + 2ull + tid] = weighted[row];
+    }
+}
+
+extern "C" __global__ void ullm_gemma_sliding_attn_ring_batched_256_split_merge_f32_kernel(
+    unsigned long long query_rows, unsigned long long q_heads, unsigned long long split_count,
+    const float *workspace, float *output) {
+    const unsigned int tid = threadIdx.x; const unsigned long long q_head = blockIdx.x;
+    if (q_head >= q_heads || blockDim.x != 256u || query_rows == 0ull || query_rows > 128ull) return;
+    const unsigned long long stride = 258ull;
+    for (unsigned long long row = 0; row < query_rows; ++row) {
+        float merged_max = -3.4028234663852886e38f, merged_denom = 0.0f, numerator = 0.0f;
+        for (unsigned long long split = 0; split < split_count; ++split) {
+            const unsigned long long base = ((row * q_heads + q_head) * split_count + split) * stride;
+            const float denom = workspace[base + 1ull]; if (denom == 0.0f) continue;
+            const float partial_max = workspace[base]; const float new_max = partial_max > merged_max ? partial_max : merged_max;
+            const float alpha = merged_denom == 0.0f ? 0.0f : expf(merged_max - new_max);
+            const float beta = expf(partial_max - new_max);
+            numerator = numerator * alpha + workspace[base + 2ull + tid] * beta;
+            merged_denom = merged_denom * alpha + denom * beta; merged_max = new_max;
+        }
+        output[(row * q_heads + q_head) * 256ull + tid] = numerator / merged_denom;
+    }
+}
 )";
     }
     static const char *paged_kv_write_kernel_source() {
@@ -91636,6 +91845,10 @@ public:
         void *legacy = nullptr;
         void *gemma_full_batched_512 = nullptr;
         void *gemma_sliding_ring_batched_256 = nullptr;
+        void *gemma_full_batched_512_split_partial = nullptr;
+        void *gemma_full_batched_512_split_merge = nullptr;
+        void *gemma_sliding_ring_batched_256_split_partial = nullptr;
+        void *gemma_sliding_ring_batched_256_split_merge = nullptr;
         void *split_partial = nullptr;
         void *split_merge = nullptr;
     };
@@ -91657,6 +91870,9 @@ public:
         Functions functions;
         if (!functions_for_device(device_id, &functions, error)) return nullptr;
         return functions.gemma_sliding_ring_batched_256;
+    }
+    bool gemma_split_functions_for_device(int device_id, Functions *functions, std::string *error) {
+        return functions_for_device(device_id, functions, error);
     }
     void *typed_function_for_device(
         int device_id,
@@ -91762,6 +91978,22 @@ public:
                 append_error(&compile_errors, "hipModuleGetFunction Gemma sliding ring batched attention failed for " + arch);
                 continue;
             }
+            void *gemma_full_batched_512_split_partial_function = nullptr;
+            void *gemma_full_batched_512_split_merge_function = nullptr;
+            void *gemma_sliding_ring_batched_256_split_partial_function = nullptr;
+            void *gemma_sliding_ring_batched_256_split_merge_function = nullptr;
+            if (!hip_runtime().module_get_function(&gemma_full_batched_512_split_partial_function, module,
+                    "ullm_gemma_full_attn_batched_512_split_partial_f32_kernel", device_id) ||
+                !hip_runtime().module_get_function(&gemma_full_batched_512_split_merge_function, module,
+                    "ullm_gemma_full_attn_batched_512_split_merge_f32_kernel", device_id) ||
+                !hip_runtime().module_get_function(&gemma_sliding_ring_batched_256_split_partial_function, module,
+                    "ullm_gemma_sliding_attn_ring_batched_256_split_partial_f32_kernel", device_id) ||
+                !hip_runtime().module_get_function(&gemma_sliding_ring_batched_256_split_merge_function, module,
+                    "ullm_gemma_sliding_attn_ring_batched_256_split_merge_f32_kernel", device_id)) {
+                hip_runtime().module_unload(module, device_id);
+                append_error(&compile_errors, "hipModuleGetFunction Gemma split attention failed for " + arch);
+                continue;
+            }
             if (!hip_runtime().module_get_function(
                     &split_partial_function,
                     module,
@@ -91790,6 +92022,10 @@ public:
             loaded->legacy_function = legacy_function;
             loaded->gemma_full_batched_512_function = gemma_full_batched_512_function;
             loaded->gemma_sliding_ring_batched_256_function = gemma_sliding_ring_batched_256_function;
+            loaded->gemma_full_batched_512_split_partial_function = gemma_full_batched_512_split_partial_function;
+            loaded->gemma_full_batched_512_split_merge_function = gemma_full_batched_512_split_merge_function;
+            loaded->gemma_sliding_ring_batched_256_split_partial_function = gemma_sliding_ring_batched_256_split_partial_function;
+            loaded->gemma_sliding_ring_batched_256_split_merge_function = gemma_sliding_ring_batched_256_split_merge_function;
             loaded->split_partial_function = split_partial_function;
             loaded->split_merge_function = split_merge_function;
             bool typed_loaded = true;
@@ -91837,6 +92073,10 @@ private:
         void *legacy_function = nullptr;
         void *gemma_full_batched_512_function = nullptr;
         void *gemma_sliding_ring_batched_256_function = nullptr;
+        void *gemma_full_batched_512_split_partial_function = nullptr;
+        void *gemma_full_batched_512_split_merge_function = nullptr;
+        void *gemma_sliding_ring_batched_256_split_partial_function = nullptr;
+        void *gemma_sliding_ring_batched_256_split_merge_function = nullptr;
         void *split_partial_function = nullptr;
         void *split_merge_function = nullptr;
         void *typed[3][3] = {};
@@ -91878,6 +92118,10 @@ private:
         functions->legacy = loaded.legacy_function;
         functions->gemma_full_batched_512 = loaded.gemma_full_batched_512_function;
         functions->gemma_sliding_ring_batched_256 = loaded.gemma_sliding_ring_batched_256_function;
+        functions->gemma_full_batched_512_split_partial = loaded.gemma_full_batched_512_split_partial_function;
+        functions->gemma_full_batched_512_split_merge = loaded.gemma_full_batched_512_split_merge_function;
+        functions->gemma_sliding_ring_batched_256_split_partial = loaded.gemma_sliding_ring_batched_256_split_partial_function;
+        functions->gemma_sliding_ring_batched_256_split_merge = loaded.gemma_sliding_ring_batched_256_split_merge_function;
         functions->split_partial = loaded.split_partial_function;
         functions->split_merge = loaded.split_merge_function;
     }
@@ -92053,6 +92297,67 @@ bool gemma_sliding_attn_ring_batched_256_f32_hip_kernel(
     if (!hip_runtime().module_launch_kernel(function, static_cast<unsigned int>(q_heads), 256u,
                                              params, hip_stream, device_id)) {
         if (error != nullptr) *error = "hipModuleLaunchKernel failed for Gemma sliding ring batched attention";
+        return false;
+    }
+    return true;
+}
+bool gemma_full_attn_batched_512_split_f32_hip_kernel(
+    const ullm_runtime_buffer *q_buffer, const ullm_runtime_buffer *k_cache_buffer,
+    const ullm_runtime_buffer *v_cache_buffer, const ullm_runtime_buffer *block_table_buffer,
+    size_t prefix_len, size_t query_rows, size_t cache_len, size_t block_size, size_t cache_blocks,
+    float softmax_scale, size_t split_count, ullm_runtime_buffer *workspace_buffer,
+    ullm_runtime_buffer *output_buffer, ullm_runtime_stream *stream, std::string *error) {
+    HipPagedDecodeAttnKernelCache::Functions functions;
+    const int device_id = q_buffer->hip_device_id;
+    if (!hip_paged_decode_attn_kernel_cache().gemma_split_functions_for_device(device_id, &functions, error) ||
+        functions.gemma_full_batched_512_split_partial == nullptr || functions.gemma_full_batched_512_split_merge == nullptr) return false;
+    unsigned long long prefix = prefix_len, rows = query_rows, length = cache_len, block = block_size,
+        blocks = cache_blocks, splits = split_count;
+    void *q = q_buffer->ptr; void *k = k_cache_buffer->ptr; void *v = v_cache_buffer->ptr;
+    void *table = block_table_buffer->ptr; void *workspace = workspace_buffer->ptr; void *output = output_buffer->ptr;
+    void *partial_params[] = {&q, &k, &v, &table, &prefix, &rows, &length, &block, &blocks,
+        &softmax_scale, &splits, &workspace};
+    void *hip_stream = stream == nullptr ? nullptr : stream->stream;
+    if (!hip_runtime().module_launch_kernel(functions.gemma_full_batched_512_split_partial,
+            static_cast<unsigned int>(8u * split_count), 256u, partial_params, hip_stream, device_id)) {
+        if (error != nullptr) *error = "hipModuleLaunchKernel failed for Gemma full split partial attention";
+        return false;
+    }
+    void *merge_params[] = {&rows, &splits, &workspace, &output};
+    if (!hip_runtime().module_launch_kernel(functions.gemma_full_batched_512_split_merge, 8u, 256u,
+            merge_params, hip_stream, device_id)) {
+        if (error != nullptr) *error = "hipModuleLaunchKernel failed for Gemma full split merge attention";
+        return false;
+    }
+    return true;
+}
+bool gemma_sliding_attn_ring_batched_256_split_f32_hip_kernel(
+    const ullm_runtime_buffer *q_buffer, const ullm_runtime_buffer *k_ring_buffer,
+    const ullm_runtime_buffer *v_ring_buffer, const ullm_runtime_buffer *fresh_k_buffer,
+    const ullm_runtime_buffer *fresh_v_buffer, size_t prefix_len, size_t history_rows,
+    size_t query_rows, size_t ring_capacity, size_t q_heads, float softmax_scale,
+    size_t split_count, ullm_runtime_buffer *workspace_buffer, ullm_runtime_buffer *output_buffer,
+    ullm_runtime_stream *stream, std::string *error) {
+    HipPagedDecodeAttnKernelCache::Functions functions;
+    const int device_id = q_buffer->hip_device_id;
+    if (!hip_paged_decode_attn_kernel_cache().gemma_split_functions_for_device(device_id, &functions, error) ||
+        functions.gemma_sliding_ring_batched_256_split_partial == nullptr || functions.gemma_sliding_ring_batched_256_split_merge == nullptr) return false;
+    unsigned long long prefix = prefix_len, history = history_rows, rows = query_rows, ring = ring_capacity,
+        heads = q_heads, splits = split_count;
+    void *q = q_buffer->ptr; void *kr = k_ring_buffer->ptr; void *vr = v_ring_buffer->ptr;
+    void *fk = fresh_k_buffer->ptr; void *fv = fresh_v_buffer->ptr; void *workspace = workspace_buffer->ptr; void *output = output_buffer->ptr;
+    void *partial_params[] = {&q, &kr, &vr, &fk, &fv, &prefix, &history, &rows, &ring, &heads,
+        &softmax_scale, &splits, &workspace};
+    void *hip_stream = stream == nullptr ? nullptr : stream->stream;
+    if (!hip_runtime().module_launch_kernel(functions.gemma_sliding_ring_batched_256_split_partial,
+            static_cast<unsigned int>(q_heads * split_count), 256u, partial_params, hip_stream, device_id)) {
+        if (error != nullptr) *error = "hipModuleLaunchKernel failed for Gemma sliding split partial attention";
+        return false;
+    }
+    void *merge_params[] = {&rows, &heads, &splits, &workspace, &output};
+    if (!hip_runtime().module_launch_kernel(functions.gemma_sliding_ring_batched_256_split_merge,
+            static_cast<unsigned int>(q_heads), 256u, merge_params, hip_stream, device_id)) {
+        if (error != nullptr) *error = "hipModuleLaunchKernel failed for Gemma sliding split merge attention";
         return false;
     }
     return true;
@@ -107153,6 +107458,87 @@ ullm_status ullm_runtime_gemma_sliding_attn_ring_batched_256_f32(
         return ULLM_STATUS_OK;
     }
     set_error(hip_error.empty() ? "Gemma sliding ring batched attention HIP kernel is unavailable" : hip_error.c_str());
+    return ULLM_STATUS_RUNTIME_ERROR;
+}
+ullm_status ullm_runtime_gemma_full_attn_batched_512_split_f32(
+    const ullm_runtime_buffer *q_buffer, const ullm_runtime_buffer *k_cache_buffer,
+    const ullm_runtime_buffer *v_cache_buffer, const ullm_runtime_buffer *block_table_buffer,
+    size_t prefix_len, size_t query_rows, size_t cache_len, size_t block_size, size_t cache_blocks,
+    float softmax_scale, size_t split_count, ullm_runtime_buffer *workspace_buffer,
+    ullm_runtime_buffer *output_buffer, ullm_runtime_stream *stream) {
+    constexpr size_t q_heads = 8u, width = 512u, state = width + 2u;
+    if (q_buffer == nullptr || k_cache_buffer == nullptr || v_cache_buffer == nullptr ||
+        block_table_buffer == nullptr || workspace_buffer == nullptr || output_buffer == nullptr ||
+        query_rows == 0 || query_rows > 128 || cache_len == 0 || block_size == 0 || cache_blocks == 0 ||
+        split_count < 2 || prefix_len > cache_len || query_rows > cache_len - prefix_len ||
+        !std::isfinite(softmax_scale) || softmax_scale <= 0.0f ||
+        !buffers_share_backend(q_buffer, k_cache_buffer) || !buffers_share_backend(q_buffer, v_cache_buffer) ||
+        !buffers_share_backend(q_buffer, block_table_buffer) || !buffers_share_backend(q_buffer, workspace_buffer) ||
+        !buffers_share_backend(q_buffer, output_buffer) || !stream_matches_buffer(output_buffer, stream)) {
+        set_error("Gemma full split attention received invalid buffers or geometry");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t q_elements = query_rows * q_heads * width;
+    const size_t physical_tokens = cache_blocks * block_size;
+    const size_t table_entries = (cache_len - 1u) / block_size + 1u;
+    if (q_elements > std::numeric_limits<size_t>::max() / sizeof(float) ||
+        physical_tokens > std::numeric_limits<size_t>::max() / width ||
+        query_rows > std::numeric_limits<size_t>::max() / q_heads ||
+        query_rows * q_heads > std::numeric_limits<size_t>::max() / split_count ||
+        query_rows * q_heads * split_count > std::numeric_limits<size_t>::max() / state ||
+        query_rows * q_heads * split_count * state > std::numeric_limits<size_t>::max() / sizeof(float)) {
+        set_error("Gemma full split attention byte size overflows"); return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t q_bytes = q_elements * sizeof(float);
+    const size_t kv_bytes = physical_tokens * width * sizeof(float);
+    const size_t workspace_bytes = query_rows * q_heads * split_count * state * sizeof(float);
+    if (q_buffer->bytes < q_bytes || k_cache_buffer->bytes < kv_bytes || v_cache_buffer->bytes < kv_bytes ||
+        block_table_buffer->bytes < table_entries * sizeof(std::uint32_t) || workspace_buffer->bytes < workspace_bytes ||
+        output_buffer->bytes < q_bytes) { set_error("Gemma full split attention buffer is too small"); return ULLM_STATUS_INVALID_ARGUMENT; }
+    if (q_buffer->backend == BackendKind::Cpu) return ullm_runtime_gemma_full_attn_batched_512_f32(
+        q_buffer, k_cache_buffer, v_cache_buffer, block_table_buffer, prefix_len, query_rows, cache_len,
+        block_size, cache_blocks, softmax_scale, output_buffer, stream);
+    std::string hip_error;
+    if (gemma_full_attn_batched_512_split_f32_hip_kernel(q_buffer, k_cache_buffer, v_cache_buffer,
+            block_table_buffer, prefix_len, query_rows, cache_len, block_size, cache_blocks, softmax_scale,
+            split_count, workspace_buffer, output_buffer, stream, &hip_error)) { set_error(""); return ULLM_STATUS_OK; }
+    set_error(hip_error.empty() ? "Gemma full split attention HIP kernel is unavailable" : hip_error.c_str());
+    return ULLM_STATUS_RUNTIME_ERROR;
+}
+ullm_status ullm_runtime_gemma_sliding_attn_ring_batched_256_split_f32(
+    const ullm_runtime_buffer *q_buffer, const ullm_runtime_buffer *k_ring_buffer,
+    const ullm_runtime_buffer *v_ring_buffer, const ullm_runtime_buffer *fresh_k_buffer,
+    const ullm_runtime_buffer *fresh_v_buffer, size_t prefix_len, size_t history_rows,
+    size_t query_rows, size_t ring_capacity, size_t q_heads, float softmax_scale,
+    size_t split_count, ullm_runtime_buffer *workspace_buffer, ullm_runtime_buffer *output_buffer,
+    ullm_runtime_stream *stream) {
+    constexpr size_t width = 256u, state = width + 2u;
+    if (q_buffer == nullptr || k_ring_buffer == nullptr || v_ring_buffer == nullptr || fresh_k_buffer == nullptr ||
+        fresh_v_buffer == nullptr || workspace_buffer == nullptr || output_buffer == nullptr || query_rows == 0 ||
+        query_rows > 128 || history_rows > 511 || history_rows > prefix_len || ring_capacity == 0 || q_heads == 0 ||
+        split_count < 2 || !std::isfinite(softmax_scale) || softmax_scale <= 0.0f ||
+        !buffers_share_backend(q_buffer, k_ring_buffer) || !buffers_share_backend(q_buffer, v_ring_buffer) ||
+        !buffers_share_backend(q_buffer, fresh_k_buffer) || !buffers_share_backend(q_buffer, fresh_v_buffer) ||
+        !buffers_share_backend(q_buffer, workspace_buffer) || !buffers_share_backend(q_buffer, output_buffer) ||
+        !stream_matches_buffer(output_buffer, stream)) { set_error("Gemma sliding split attention received invalid buffers or geometry"); return ULLM_STATUS_INVALID_ARGUMENT; }
+    if (query_rows > std::numeric_limits<size_t>::max() / q_heads || query_rows * q_heads > std::numeric_limits<size_t>::max() / split_count ||
+        query_rows * q_heads * split_count > std::numeric_limits<size_t>::max() / state ||
+        query_rows * q_heads * split_count * state > std::numeric_limits<size_t>::max() / sizeof(float)) { set_error("Gemma sliding split attention workspace overflows"); return ULLM_STATUS_INVALID_ARGUMENT; }
+    const size_t q_bytes = query_rows * q_heads * width * sizeof(float);
+    const size_t ring_bytes = ring_capacity * width * sizeof(float);
+    const size_t fresh_bytes = query_rows * width * sizeof(float);
+    const size_t workspace_bytes = query_rows * q_heads * split_count * state * sizeof(float);
+    if (q_buffer->bytes < q_bytes || output_buffer->bytes < q_bytes || k_ring_buffer->bytes < ring_bytes ||
+        v_ring_buffer->bytes < ring_bytes || fresh_k_buffer->bytes < fresh_bytes || fresh_v_buffer->bytes < fresh_bytes ||
+        workspace_buffer->bytes < workspace_bytes) { set_error("Gemma sliding split attention buffer is too small"); return ULLM_STATUS_INVALID_ARGUMENT; }
+    if (q_buffer->backend == BackendKind::Cpu) return ullm_runtime_gemma_sliding_attn_ring_batched_256_f32(
+        q_buffer, k_ring_buffer, v_ring_buffer, fresh_k_buffer, fresh_v_buffer, prefix_len, history_rows,
+        query_rows, ring_capacity, q_heads, softmax_scale, output_buffer, stream);
+    std::string hip_error;
+    if (gemma_sliding_attn_ring_batched_256_split_f32_hip_kernel(q_buffer, k_ring_buffer, v_ring_buffer,
+            fresh_k_buffer, fresh_v_buffer, prefix_len, history_rows, query_rows, ring_capacity, q_heads,
+            softmax_scale, split_count, workspace_buffer, output_buffer, stream, &hip_error)) { set_error(""); return ULLM_STATUS_OK; }
+    set_error(hip_error.empty() ? "Gemma sliding split attention HIP kernel is unavailable" : hip_error.c_str());
     return ULLM_STATUS_RUNTIME_ERROR;
 }
 static ullm_status paged_decode_attn_typed_f32_hip_staging(

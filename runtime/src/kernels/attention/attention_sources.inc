@@ -3086,5 +3086,201 @@ extern "C" __global__ void ullm_gemma_sliding_attn_ring_batched_256_f32_kernel(
         output[(row * q_heads + q_head) * 256ull + tid] = weighted[row] / row_denom[row];
     }
 }
+
+// Gemma split-KV prefill readers.  These are intentionally separate from the
+// production paged-decode split ABI: Gemma retains every row of a prefill
+// chunk in a CTA, so each partial writes one online-softmax state per row.
+// Workspace layout is [row][q_head][split][max, denominator, numerator...].
+extern "C" __global__ void ullm_gemma_full_attn_batched_512_split_partial_f32_kernel(
+    const float *q, const float *k_cache, const float *v_cache,
+    const unsigned int *block_table, unsigned long long prefix_len,
+    unsigned long long query_rows, unsigned long long cache_len,
+    unsigned long long block_size, unsigned long long cache_blocks,
+    float softmax_scale, unsigned long long split_count, float *workspace) {
+    const unsigned int tid = threadIdx.x;
+    const unsigned long long partial_index = blockIdx.x;
+    const unsigned long long q_head = partial_index / split_count;
+    const unsigned long long split_id = partial_index - q_head * split_count;
+    if (q_head >= 8ull || blockDim.x != 256u || query_rows == 0ull || query_rows > 128ull ||
+        prefix_len + query_rows > cache_len || split_count == 0ull) return;
+    const unsigned long long visible = prefix_len + query_rows;
+    const unsigned long long tile = (visible + split_count - 1ull) / split_count;
+    const unsigned long long source_start = split_id * tile;
+    const unsigned long long source_end = source_start < visible
+        ? min(visible, source_start + tile) : source_start;
+    __shared__ float cached_k[512];
+    __shared__ float cached_v[512];
+    __shared__ float reduce[256];
+    __shared__ float row_max[128];
+    __shared__ float row_denom[128];
+    __shared__ float update_scale;
+    __shared__ float update_weight;
+    float weighted_lo[128];
+    float weighted_hi[128];
+    #pragma unroll
+    for (unsigned int row = 0; row < 128u; ++row) {
+        weighted_lo[row] = 0.0f;
+        weighted_hi[row] = 0.0f;
+        if (tid == 0u) { row_max[row] = -3.4028234663852886e38f; row_denom[row] = 0.0f; }
+    }
+    __syncthreads();
+    for (unsigned long long source = source_start; source < source_end; ++source) {
+        const unsigned long long logical_block = source / block_size;
+        const unsigned long long block_offset = source - logical_block * block_size;
+        const unsigned long long block_id = static_cast<unsigned long long>(block_table[logical_block]);
+        if (block_id >= cache_blocks) return;
+        const unsigned long long physical = block_id * block_size + block_offset;
+        for (unsigned int value = tid; value < 512u; value += 256u) {
+            cached_k[value] = k_cache[physical * 512ull + value];
+            cached_v[value] = v_cache[physical * 512ull + value];
+        }
+        __syncthreads();
+        for (unsigned long long row = 0; row < query_rows; ++row) {
+            if (source > prefix_len + row) continue;
+            const unsigned long long q_base = (row * 8ull + q_head) * 512ull;
+            reduce[tid] = q[q_base + tid] * cached_k[tid] +
+                q[q_base + tid + 256ull] * cached_k[tid + 256u];
+            __syncthreads();
+            for (unsigned int stride = 128u; stride > 0u; stride >>= 1u) {
+                if (tid < stride) reduce[tid] += reduce[tid + stride];
+                __syncthreads();
+            }
+            if (tid == 0u) {
+                const float score = reduce[0] * softmax_scale;
+                const float old_max = row_max[row];
+                const float new_max = score > old_max ? score : old_max;
+                update_scale = old_max <= -3.0e38f ? 0.0f : expf(old_max - new_max);
+                update_weight = expf(score - new_max);
+                row_max[row] = new_max;
+                row_denom[row] = row_denom[row] * update_scale + update_weight;
+            }
+            __syncthreads();
+            weighted_lo[row] = weighted_lo[row] * update_scale + update_weight * cached_v[tid];
+            weighted_hi[row] = weighted_hi[row] * update_scale + update_weight * cached_v[tid + 256u];
+            __syncthreads();
+        }
+    }
+    const unsigned long long stride = 514ull;
+    for (unsigned long long row = 0; row < query_rows; ++row) {
+        const unsigned long long base = ((row * 8ull + q_head) * split_count + split_id) * stride;
+        if (tid == 0u) { workspace[base] = row_max[row]; workspace[base + 1ull] = row_denom[row]; }
+        workspace[base + 2ull + tid] = weighted_lo[row];
+        workspace[base + 258ull + tid] = weighted_hi[row];
+    }
+}
+
+extern "C" __global__ void ullm_gemma_full_attn_batched_512_split_merge_f32_kernel(
+    unsigned long long query_rows, unsigned long long split_count,
+    const float *workspace, float *output) {
+    const unsigned int tid = threadIdx.x;
+    const unsigned long long q_head = blockIdx.x;
+    if (q_head >= 8ull || blockDim.x != 256u || query_rows == 0ull || query_rows > 128ull) return;
+    const unsigned long long stride = 514ull;
+    for (unsigned long long row = 0; row < query_rows; ++row) {
+        float merged_max = -3.4028234663852886e38f;
+        float merged_denom = 0.0f;
+        float merged_lo = 0.0f;
+        float merged_hi = 0.0f;
+        for (unsigned long long split = 0; split < split_count; ++split) {
+            const unsigned long long base = ((row * 8ull + q_head) * split_count + split) * stride;
+            const float denom = workspace[base + 1ull];
+            if (denom == 0.0f) continue;
+            const float partial_max = workspace[base];
+            const float new_max = partial_max > merged_max ? partial_max : merged_max;
+            const float alpha = merged_denom == 0.0f ? 0.0f : expf(merged_max - new_max);
+            const float beta = expf(partial_max - new_max);
+            merged_lo = merged_lo * alpha + workspace[base + 2ull + tid] * beta;
+            merged_hi = merged_hi * alpha + workspace[base + 258ull + tid] * beta;
+            merged_denom = merged_denom * alpha + denom * beta;
+            merged_max = new_max;
+        }
+        const unsigned long long out = (row * 8ull + q_head) * 512ull;
+        output[out + tid] = merged_lo / merged_denom;
+        output[out + tid + 256ull] = merged_hi / merged_denom;
+    }
+}
+
+extern "C" __global__ void ullm_gemma_sliding_attn_ring_batched_256_split_partial_f32_kernel(
+    const float *q, const float *k_ring, const float *v_ring,
+    const float *fresh_k, const float *fresh_v, unsigned long long prefix_len,
+    unsigned long long history_rows, unsigned long long query_rows,
+    unsigned long long ring_capacity, unsigned long long q_heads,
+    float softmax_scale, unsigned long long split_count, float *workspace) {
+    const unsigned int tid = threadIdx.x;
+    const unsigned long long partial_index = blockIdx.x;
+    const unsigned long long q_head = partial_index / split_count;
+    const unsigned long long split_id = partial_index - q_head * split_count;
+    if (q_head >= q_heads || blockDim.x != 256u || query_rows == 0ull || query_rows > 128ull ||
+        history_rows > 511ull || history_rows > prefix_len || ring_capacity == 0ull || split_count == 0ull) return;
+    const unsigned long long sources = history_rows + query_rows;
+    const unsigned long long tile = (sources + split_count - 1ull) / split_count;
+    const unsigned long long source_start = split_id * tile;
+    const unsigned long long source_end = source_start < sources ? min(sources, source_start + tile) : source_start;
+    __shared__ float cached_k[256]; __shared__ float cached_v[256]; __shared__ float reduce[256];
+    __shared__ float row_max[128]; __shared__ float row_denom[128];
+    __shared__ float update_scale; __shared__ float update_weight;
+    float weighted[128];
+    #pragma unroll
+    for (unsigned int row = 0; row < 128u; ++row) {
+        weighted[row] = 0.0f;
+        if (tid == 0u) { row_max[row] = -3.4028234663852886e38f; row_denom[row] = 0.0f; }
+    }
+    __syncthreads();
+    for (unsigned long long source = source_start; source < source_end; ++source) {
+        if (source < history_rows) {
+            const unsigned long long logical = prefix_len - history_rows + source;
+            const unsigned long long physical = logical % ring_capacity;
+            cached_k[tid] = k_ring[physical * 256ull + tid]; cached_v[tid] = v_ring[physical * 256ull + tid];
+        } else {
+            const unsigned long long fresh = source - history_rows;
+            cached_k[tid] = fresh_k[fresh * 256ull + tid]; cached_v[tid] = fresh_v[fresh * 256ull + tid];
+        }
+        __syncthreads();
+        for (unsigned long long row = 0; row < query_rows; ++row) {
+            if (source >= history_rows && source - history_rows > row) continue;
+            const unsigned long long q_base = (row * q_heads + q_head) * 256ull;
+            reduce[tid] = q[q_base + tid] * cached_k[tid];
+            __syncthreads();
+            for (unsigned int stride = 128u; stride > 0u; stride >>= 1u) {
+                if (tid < stride) reduce[tid] += reduce[tid + stride]; __syncthreads();
+            }
+            if (tid == 0u) {
+                const float score = reduce[0] * softmax_scale; const float old_max = row_max[row];
+                const float new_max = score > old_max ? score : old_max;
+                update_scale = old_max <= -3.0e38f ? 0.0f : expf(old_max - new_max);
+                update_weight = expf(score - new_max); row_max[row] = new_max;
+                row_denom[row] = row_denom[row] * update_scale + update_weight;
+            }
+            __syncthreads(); weighted[row] = weighted[row] * update_scale + update_weight * cached_v[tid]; __syncthreads();
+        }
+    }
+    const unsigned long long stride = 258ull;
+    for (unsigned long long row = 0; row < query_rows; ++row) {
+        const unsigned long long base = ((row * q_heads + q_head) * split_count + split_id) * stride;
+        if (tid == 0u) { workspace[base] = row_max[row]; workspace[base + 1ull] = row_denom[row]; }
+        workspace[base + 2ull + tid] = weighted[row];
+    }
+}
+
+extern "C" __global__ void ullm_gemma_sliding_attn_ring_batched_256_split_merge_f32_kernel(
+    unsigned long long query_rows, unsigned long long q_heads, unsigned long long split_count,
+    const float *workspace, float *output) {
+    const unsigned int tid = threadIdx.x; const unsigned long long q_head = blockIdx.x;
+    if (q_head >= q_heads || blockDim.x != 256u || query_rows == 0ull || query_rows > 128ull) return;
+    const unsigned long long stride = 258ull;
+    for (unsigned long long row = 0; row < query_rows; ++row) {
+        float merged_max = -3.4028234663852886e38f, merged_denom = 0.0f, numerator = 0.0f;
+        for (unsigned long long split = 0; split < split_count; ++split) {
+            const unsigned long long base = ((row * q_heads + q_head) * split_count + split) * stride;
+            const float denom = workspace[base + 1ull]; if (denom == 0.0f) continue;
+            const float partial_max = workspace[base]; const float new_max = partial_max > merged_max ? partial_max : merged_max;
+            const float alpha = merged_denom == 0.0f ? 0.0f : expf(merged_max - new_max);
+            const float beta = expf(partial_max - new_max);
+            numerator = numerator * alpha + workspace[base + 2ull + tid] * beta;
+            merged_denom = merged_denom * alpha + denom * beta; merged_max = new_max;
+        }
+        output[(row * q_heads + q_head) * 256ull + tid] = numerator / merged_denom;
+    }
+}
 )";
     }

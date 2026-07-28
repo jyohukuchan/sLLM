@@ -2206,6 +2206,89 @@ ullm_status ullm_runtime_gemma_sliding_attn_ring_batched_256_f32(
     return ULLM_STATUS_RUNTIME_ERROR;
 }
 
+ullm_status ullm_runtime_gemma_full_attn_batched_512_split_f32(
+    const ullm_runtime_buffer *q_buffer, const ullm_runtime_buffer *k_cache_buffer,
+    const ullm_runtime_buffer *v_cache_buffer, const ullm_runtime_buffer *block_table_buffer,
+    size_t prefix_len, size_t query_rows, size_t cache_len, size_t block_size, size_t cache_blocks,
+    float softmax_scale, size_t split_count, ullm_runtime_buffer *workspace_buffer,
+    ullm_runtime_buffer *output_buffer, ullm_runtime_stream *stream) {
+    constexpr size_t q_heads = 8u, width = 512u, state = width + 2u;
+    if (q_buffer == nullptr || k_cache_buffer == nullptr || v_cache_buffer == nullptr ||
+        block_table_buffer == nullptr || workspace_buffer == nullptr || output_buffer == nullptr ||
+        query_rows == 0 || query_rows > 128 || cache_len == 0 || block_size == 0 || cache_blocks == 0 ||
+        split_count < 2 || prefix_len > cache_len || query_rows > cache_len - prefix_len ||
+        !std::isfinite(softmax_scale) || softmax_scale <= 0.0f ||
+        !buffers_share_backend(q_buffer, k_cache_buffer) || !buffers_share_backend(q_buffer, v_cache_buffer) ||
+        !buffers_share_backend(q_buffer, block_table_buffer) || !buffers_share_backend(q_buffer, workspace_buffer) ||
+        !buffers_share_backend(q_buffer, output_buffer) || !stream_matches_buffer(output_buffer, stream)) {
+        set_error("Gemma full split attention received invalid buffers or geometry");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t q_elements = query_rows * q_heads * width;
+    const size_t physical_tokens = cache_blocks * block_size;
+    const size_t table_entries = (cache_len - 1u) / block_size + 1u;
+    if (q_elements > std::numeric_limits<size_t>::max() / sizeof(float) ||
+        physical_tokens > std::numeric_limits<size_t>::max() / width ||
+        query_rows > std::numeric_limits<size_t>::max() / q_heads ||
+        query_rows * q_heads > std::numeric_limits<size_t>::max() / split_count ||
+        query_rows * q_heads * split_count > std::numeric_limits<size_t>::max() / state ||
+        query_rows * q_heads * split_count * state > std::numeric_limits<size_t>::max() / sizeof(float)) {
+        set_error("Gemma full split attention byte size overflows"); return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t q_bytes = q_elements * sizeof(float);
+    const size_t kv_bytes = physical_tokens * width * sizeof(float);
+    const size_t workspace_bytes = query_rows * q_heads * split_count * state * sizeof(float);
+    if (q_buffer->bytes < q_bytes || k_cache_buffer->bytes < kv_bytes || v_cache_buffer->bytes < kv_bytes ||
+        block_table_buffer->bytes < table_entries * sizeof(std::uint32_t) || workspace_buffer->bytes < workspace_bytes ||
+        output_buffer->bytes < q_bytes) { set_error("Gemma full split attention buffer is too small"); return ULLM_STATUS_INVALID_ARGUMENT; }
+    if (q_buffer->backend == BackendKind::Cpu) return ullm_runtime_gemma_full_attn_batched_512_f32(
+        q_buffer, k_cache_buffer, v_cache_buffer, block_table_buffer, prefix_len, query_rows, cache_len,
+        block_size, cache_blocks, softmax_scale, output_buffer, stream);
+    std::string hip_error;
+    if (gemma_full_attn_batched_512_split_f32_hip_kernel(q_buffer, k_cache_buffer, v_cache_buffer,
+            block_table_buffer, prefix_len, query_rows, cache_len, block_size, cache_blocks, softmax_scale,
+            split_count, workspace_buffer, output_buffer, stream, &hip_error)) { set_error(""); return ULLM_STATUS_OK; }
+    set_error(hip_error.empty() ? "Gemma full split attention HIP kernel is unavailable" : hip_error.c_str());
+    return ULLM_STATUS_RUNTIME_ERROR;
+}
+
+ullm_status ullm_runtime_gemma_sliding_attn_ring_batched_256_split_f32(
+    const ullm_runtime_buffer *q_buffer, const ullm_runtime_buffer *k_ring_buffer,
+    const ullm_runtime_buffer *v_ring_buffer, const ullm_runtime_buffer *fresh_k_buffer,
+    const ullm_runtime_buffer *fresh_v_buffer, size_t prefix_len, size_t history_rows,
+    size_t query_rows, size_t ring_capacity, size_t q_heads, float softmax_scale,
+    size_t split_count, ullm_runtime_buffer *workspace_buffer, ullm_runtime_buffer *output_buffer,
+    ullm_runtime_stream *stream) {
+    constexpr size_t width = 256u, state = width + 2u;
+    if (q_buffer == nullptr || k_ring_buffer == nullptr || v_ring_buffer == nullptr || fresh_k_buffer == nullptr ||
+        fresh_v_buffer == nullptr || workspace_buffer == nullptr || output_buffer == nullptr || query_rows == 0 ||
+        query_rows > 128 || history_rows > 511 || history_rows > prefix_len || ring_capacity == 0 || q_heads == 0 ||
+        split_count < 2 || !std::isfinite(softmax_scale) || softmax_scale <= 0.0f ||
+        !buffers_share_backend(q_buffer, k_ring_buffer) || !buffers_share_backend(q_buffer, v_ring_buffer) ||
+        !buffers_share_backend(q_buffer, fresh_k_buffer) || !buffers_share_backend(q_buffer, fresh_v_buffer) ||
+        !buffers_share_backend(q_buffer, workspace_buffer) || !buffers_share_backend(q_buffer, output_buffer) ||
+        !stream_matches_buffer(output_buffer, stream)) { set_error("Gemma sliding split attention received invalid buffers or geometry"); return ULLM_STATUS_INVALID_ARGUMENT; }
+    if (query_rows > std::numeric_limits<size_t>::max() / q_heads || query_rows * q_heads > std::numeric_limits<size_t>::max() / split_count ||
+        query_rows * q_heads * split_count > std::numeric_limits<size_t>::max() / state ||
+        query_rows * q_heads * split_count * state > std::numeric_limits<size_t>::max() / sizeof(float)) { set_error("Gemma sliding split attention workspace overflows"); return ULLM_STATUS_INVALID_ARGUMENT; }
+    const size_t q_bytes = query_rows * q_heads * width * sizeof(float);
+    const size_t ring_bytes = ring_capacity * width * sizeof(float);
+    const size_t fresh_bytes = query_rows * width * sizeof(float);
+    const size_t workspace_bytes = query_rows * q_heads * split_count * state * sizeof(float);
+    if (q_buffer->bytes < q_bytes || output_buffer->bytes < q_bytes || k_ring_buffer->bytes < ring_bytes ||
+        v_ring_buffer->bytes < ring_bytes || fresh_k_buffer->bytes < fresh_bytes || fresh_v_buffer->bytes < fresh_bytes ||
+        workspace_buffer->bytes < workspace_bytes) { set_error("Gemma sliding split attention buffer is too small"); return ULLM_STATUS_INVALID_ARGUMENT; }
+    if (q_buffer->backend == BackendKind::Cpu) return ullm_runtime_gemma_sliding_attn_ring_batched_256_f32(
+        q_buffer, k_ring_buffer, v_ring_buffer, fresh_k_buffer, fresh_v_buffer, prefix_len, history_rows,
+        query_rows, ring_capacity, q_heads, softmax_scale, output_buffer, stream);
+    std::string hip_error;
+    if (gemma_sliding_attn_ring_batched_256_split_f32_hip_kernel(q_buffer, k_ring_buffer, v_ring_buffer,
+            fresh_k_buffer, fresh_v_buffer, prefix_len, history_rows, query_rows, ring_capacity, q_heads,
+            softmax_scale, split_count, workspace_buffer, output_buffer, stream, &hip_error)) { set_error(""); return ULLM_STATUS_OK; }
+    set_error(hip_error.empty() ? "Gemma sliding split attention HIP kernel is unavailable" : hip_error.c_str());
+    return ULLM_STATUS_RUNTIME_ERROR;
+}
+
 static ullm_status paged_decode_attn_typed_f32_hip_staging(
     const ullm_runtime_buffer *q_buffer,
     const ullm_runtime_buffer *k_cache_buffer,

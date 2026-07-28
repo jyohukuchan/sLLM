@@ -5,6 +5,10 @@ public:
         void *legacy = nullptr;
         void *gemma_full_batched_512 = nullptr;
         void *gemma_sliding_ring_batched_256 = nullptr;
+        void *gemma_full_batched_512_split_partial = nullptr;
+        void *gemma_full_batched_512_split_merge = nullptr;
+        void *gemma_sliding_ring_batched_256_split_partial = nullptr;
+        void *gemma_sliding_ring_batched_256_split_merge = nullptr;
         void *split_partial = nullptr;
         void *split_merge = nullptr;
     };
@@ -29,6 +33,10 @@ public:
         Functions functions;
         if (!functions_for_device(device_id, &functions, error)) return nullptr;
         return functions.gemma_sliding_ring_batched_256;
+    }
+
+    bool gemma_split_functions_for_device(int device_id, Functions *functions, std::string *error) {
+        return functions_for_device(device_id, functions, error);
     }
 
     void *typed_function_for_device(
@@ -141,6 +149,22 @@ public:
                 append_error(&compile_errors, "hipModuleGetFunction Gemma sliding ring batched attention failed for " + arch);
                 continue;
             }
+            void *gemma_full_batched_512_split_partial_function = nullptr;
+            void *gemma_full_batched_512_split_merge_function = nullptr;
+            void *gemma_sliding_ring_batched_256_split_partial_function = nullptr;
+            void *gemma_sliding_ring_batched_256_split_merge_function = nullptr;
+            if (!hip_runtime().module_get_function(&gemma_full_batched_512_split_partial_function, module,
+                    "ullm_gemma_full_attn_batched_512_split_partial_f32_kernel", device_id) ||
+                !hip_runtime().module_get_function(&gemma_full_batched_512_split_merge_function, module,
+                    "ullm_gemma_full_attn_batched_512_split_merge_f32_kernel", device_id) ||
+                !hip_runtime().module_get_function(&gemma_sliding_ring_batched_256_split_partial_function, module,
+                    "ullm_gemma_sliding_attn_ring_batched_256_split_partial_f32_kernel", device_id) ||
+                !hip_runtime().module_get_function(&gemma_sliding_ring_batched_256_split_merge_function, module,
+                    "ullm_gemma_sliding_attn_ring_batched_256_split_merge_f32_kernel", device_id)) {
+                hip_runtime().module_unload(module, device_id);
+                append_error(&compile_errors, "hipModuleGetFunction Gemma split attention failed for " + arch);
+                continue;
+            }
             if (!hip_runtime().module_get_function(
                     &split_partial_function,
                     module,
@@ -170,6 +194,10 @@ public:
             loaded->legacy_function = legacy_function;
             loaded->gemma_full_batched_512_function = gemma_full_batched_512_function;
             loaded->gemma_sliding_ring_batched_256_function = gemma_sliding_ring_batched_256_function;
+            loaded->gemma_full_batched_512_split_partial_function = gemma_full_batched_512_split_partial_function;
+            loaded->gemma_full_batched_512_split_merge_function = gemma_full_batched_512_split_merge_function;
+            loaded->gemma_sliding_ring_batched_256_split_partial_function = gemma_sliding_ring_batched_256_split_partial_function;
+            loaded->gemma_sliding_ring_batched_256_split_merge_function = gemma_sliding_ring_batched_256_split_merge_function;
             loaded->split_partial_function = split_partial_function;
             loaded->split_merge_function = split_merge_function;
             bool typed_loaded = true;
@@ -218,6 +246,10 @@ private:
         void *legacy_function = nullptr;
         void *gemma_full_batched_512_function = nullptr;
         void *gemma_sliding_ring_batched_256_function = nullptr;
+        void *gemma_full_batched_512_split_partial_function = nullptr;
+        void *gemma_full_batched_512_split_merge_function = nullptr;
+        void *gemma_sliding_ring_batched_256_split_partial_function = nullptr;
+        void *gemma_sliding_ring_batched_256_split_merge_function = nullptr;
         void *split_partial_function = nullptr;
         void *split_merge_function = nullptr;
         void *typed[3][3] = {};
@@ -262,6 +294,10 @@ private:
         functions->legacy = loaded.legacy_function;
         functions->gemma_full_batched_512 = loaded.gemma_full_batched_512_function;
         functions->gemma_sliding_ring_batched_256 = loaded.gemma_sliding_ring_batched_256_function;
+        functions->gemma_full_batched_512_split_partial = loaded.gemma_full_batched_512_split_partial_function;
+        functions->gemma_full_batched_512_split_merge = loaded.gemma_full_batched_512_split_merge_function;
+        functions->gemma_sliding_ring_batched_256_split_partial = loaded.gemma_sliding_ring_batched_256_split_partial_function;
+        functions->gemma_sliding_ring_batched_256_split_merge = loaded.gemma_sliding_ring_batched_256_split_merge_function;
         functions->split_partial = loaded.split_partial_function;
         functions->split_merge = loaded.split_merge_function;
     }
@@ -448,6 +484,69 @@ bool gemma_sliding_attn_ring_batched_256_f32_hip_kernel(
     if (!hip_runtime().module_launch_kernel(function, static_cast<unsigned int>(q_heads), 256u,
                                              params, hip_stream, device_id)) {
         if (error != nullptr) *error = "hipModuleLaunchKernel failed for Gemma sliding ring batched attention";
+        return false;
+    }
+    return true;
+}
+
+bool gemma_full_attn_batched_512_split_f32_hip_kernel(
+    const ullm_runtime_buffer *q_buffer, const ullm_runtime_buffer *k_cache_buffer,
+    const ullm_runtime_buffer *v_cache_buffer, const ullm_runtime_buffer *block_table_buffer,
+    size_t prefix_len, size_t query_rows, size_t cache_len, size_t block_size, size_t cache_blocks,
+    float softmax_scale, size_t split_count, ullm_runtime_buffer *workspace_buffer,
+    ullm_runtime_buffer *output_buffer, ullm_runtime_stream *stream, std::string *error) {
+    HipPagedDecodeAttnKernelCache::Functions functions;
+    const int device_id = q_buffer->hip_device_id;
+    if (!hip_paged_decode_attn_kernel_cache().gemma_split_functions_for_device(device_id, &functions, error) ||
+        functions.gemma_full_batched_512_split_partial == nullptr || functions.gemma_full_batched_512_split_merge == nullptr) return false;
+    unsigned long long prefix = prefix_len, rows = query_rows, length = cache_len, block = block_size,
+        blocks = cache_blocks, splits = split_count;
+    void *q = q_buffer->ptr; void *k = k_cache_buffer->ptr; void *v = v_cache_buffer->ptr;
+    void *table = block_table_buffer->ptr; void *workspace = workspace_buffer->ptr; void *output = output_buffer->ptr;
+    void *partial_params[] = {&q, &k, &v, &table, &prefix, &rows, &length, &block, &blocks,
+        &softmax_scale, &splits, &workspace};
+    void *hip_stream = stream == nullptr ? nullptr : stream->stream;
+    if (!hip_runtime().module_launch_kernel(functions.gemma_full_batched_512_split_partial,
+            static_cast<unsigned int>(8u * split_count), 256u, partial_params, hip_stream, device_id)) {
+        if (error != nullptr) *error = "hipModuleLaunchKernel failed for Gemma full split partial attention";
+        return false;
+    }
+    void *merge_params[] = {&rows, &splits, &workspace, &output};
+    if (!hip_runtime().module_launch_kernel(functions.gemma_full_batched_512_split_merge, 8u, 256u,
+            merge_params, hip_stream, device_id)) {
+        if (error != nullptr) *error = "hipModuleLaunchKernel failed for Gemma full split merge attention";
+        return false;
+    }
+    return true;
+}
+
+bool gemma_sliding_attn_ring_batched_256_split_f32_hip_kernel(
+    const ullm_runtime_buffer *q_buffer, const ullm_runtime_buffer *k_ring_buffer,
+    const ullm_runtime_buffer *v_ring_buffer, const ullm_runtime_buffer *fresh_k_buffer,
+    const ullm_runtime_buffer *fresh_v_buffer, size_t prefix_len, size_t history_rows,
+    size_t query_rows, size_t ring_capacity, size_t q_heads, float softmax_scale,
+    size_t split_count, ullm_runtime_buffer *workspace_buffer, ullm_runtime_buffer *output_buffer,
+    ullm_runtime_stream *stream, std::string *error) {
+    HipPagedDecodeAttnKernelCache::Functions functions;
+    const int device_id = q_buffer->hip_device_id;
+    if (!hip_paged_decode_attn_kernel_cache().gemma_split_functions_for_device(device_id, &functions, error) ||
+        functions.gemma_sliding_ring_batched_256_split_partial == nullptr || functions.gemma_sliding_ring_batched_256_split_merge == nullptr) return false;
+    unsigned long long prefix = prefix_len, history = history_rows, rows = query_rows, ring = ring_capacity,
+        heads = q_heads, splits = split_count;
+    void *q = q_buffer->ptr; void *kr = k_ring_buffer->ptr; void *vr = v_ring_buffer->ptr;
+    void *fk = fresh_k_buffer->ptr; void *fv = fresh_v_buffer->ptr; void *workspace = workspace_buffer->ptr; void *output = output_buffer->ptr;
+    void *partial_params[] = {&q, &kr, &vr, &fk, &fv, &prefix, &history, &rows, &ring, &heads,
+        &softmax_scale, &splits, &workspace};
+    void *hip_stream = stream == nullptr ? nullptr : stream->stream;
+    if (!hip_runtime().module_launch_kernel(functions.gemma_sliding_ring_batched_256_split_partial,
+            static_cast<unsigned int>(q_heads * split_count), 256u, partial_params, hip_stream, device_id)) {
+        if (error != nullptr) *error = "hipModuleLaunchKernel failed for Gemma sliding split partial attention";
+        return false;
+    }
+    void *merge_params[] = {&rows, &heads, &splits, &workspace, &output};
+    if (!hip_runtime().module_launch_kernel(functions.gemma_sliding_ring_batched_256_split_merge,
+            static_cast<unsigned int>(q_heads), 256u, merge_params, hip_stream, device_id)) {
+        if (error != nullptr) *error = "hipModuleLaunchKernel failed for Gemma sliding split merge attention";
         return false;
     }
     return true;

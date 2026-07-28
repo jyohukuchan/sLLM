@@ -1293,6 +1293,22 @@ unsafe extern "C" {
         output_buffer: *mut RawRuntimeBuffer,
         stream: *mut RawRuntimeStream,
     ) -> c_int;
+    fn ullm_runtime_gemma_full_attn_batched_512_split_f32(
+        q_buffer: *const RawRuntimeBuffer,
+        k_cache_buffer: *const RawRuntimeBuffer,
+        v_cache_buffer: *const RawRuntimeBuffer,
+        block_table_buffer: *const RawRuntimeBuffer,
+        prefix_len: usize,
+        query_rows: usize,
+        cache_len: usize,
+        block_size: usize,
+        cache_blocks: usize,
+        softmax_scale: f32,
+        split_count: usize,
+        workspace_buffer: *mut RawRuntimeBuffer,
+        output_buffer: *mut RawRuntimeBuffer,
+        stream: *mut RawRuntimeStream,
+    ) -> c_int;
     fn ullm_runtime_gemma_sliding_attn_ring_batched_256_f32(
         q_buffer: *const RawRuntimeBuffer,
         k_ring_buffer: *const RawRuntimeBuffer,
@@ -1305,6 +1321,23 @@ unsafe extern "C" {
         ring_capacity: usize,
         q_heads: usize,
         softmax_scale: f32,
+        output_buffer: *mut RawRuntimeBuffer,
+        stream: *mut RawRuntimeStream,
+    ) -> c_int;
+    fn ullm_runtime_gemma_sliding_attn_ring_batched_256_split_f32(
+        q_buffer: *const RawRuntimeBuffer,
+        k_ring_buffer: *const RawRuntimeBuffer,
+        v_ring_buffer: *const RawRuntimeBuffer,
+        fresh_k_buffer: *const RawRuntimeBuffer,
+        fresh_v_buffer: *const RawRuntimeBuffer,
+        prefix_len: usize,
+        history_rows: usize,
+        query_rows: usize,
+        ring_capacity: usize,
+        q_heads: usize,
+        softmax_scale: f32,
+        split_count: usize,
+        workspace_buffer: *mut RawRuntimeBuffer,
         output_buffer: *mut RawRuntimeBuffer,
         stream: *mut RawRuntimeStream,
     ) -> c_int;
@@ -8481,36 +8514,114 @@ pub fn gemma_full_attn_batched_512_f32(
 ) -> Result<(), String> {
     const Q_HEADS: usize = 8;
     const WIDTH: usize = 512;
-    if query_rows == 0 || query_rows > 128 || cache_len == 0 || block_size == 0 || cache_blocks == 0 {
-        return Err("Gemma full batched attention requires 1..=128 rows and a nonempty paged cache".into());
+    if query_rows == 0 || query_rows > 128 || cache_len == 0 || block_size == 0 || cache_blocks == 0
+    {
+        return Err(
+            "Gemma full batched attention requires 1..=128 rows and a nonempty paged cache".into(),
+        );
     }
-    let visible = prefix_len.checked_add(query_rows)
+    let visible = prefix_len
+        .checked_add(query_rows)
         .ok_or_else(|| "Gemma full batched attention visible length overflows".to_string())?;
     if visible > cache_len || !softmax_scale.is_finite() || softmax_scale <= 0.0 {
-        return Err("Gemma full batched attention received invalid causal geometry or scale".into());
+        return Err(
+            "Gemma full batched attention received invalid causal geometry or scale".into(),
+        );
     }
-    let q_elements = query_rows.checked_mul(Q_HEADS).and_then(|n| n.checked_mul(WIDTH))
+    let q_elements = query_rows
+        .checked_mul(Q_HEADS)
+        .and_then(|n| n.checked_mul(WIDTH))
         .ok_or_else(|| "Gemma full batched attention query size overflows".to_string())?;
-    let physical = cache_blocks.checked_mul(block_size)
+    let physical = cache_blocks
+        .checked_mul(block_size)
         .ok_or_else(|| "Gemma full batched attention physical cache size overflows".to_string())?;
-    let kv_elements = physical.checked_mul(WIDTH)
+    let kv_elements = physical
+        .checked_mul(WIDTH)
         .ok_or_else(|| "Gemma full batched attention KV size overflows".to_string())?;
-    let table_entries = cache_len.checked_sub(1).and_then(|n| n.checked_div(block_size)).and_then(|n| n.checked_add(1))
+    let table_entries = cache_len
+        .checked_sub(1)
+        .and_then(|n| n.checked_div(block_size))
+        .and_then(|n| n.checked_add(1))
         .ok_or_else(|| "Gemma full batched attention table size overflows".to_string())?;
-    let q_bytes = q_elements.checked_mul(std::mem::size_of::<f32>()).ok_or_else(|| "Gemma full batched attention query bytes overflow".to_string())?;
-    let kv_bytes = kv_elements.checked_mul(std::mem::size_of::<f32>()).ok_or_else(|| "Gemma full batched attention KV bytes overflow".to_string())?;
-    let table_bytes = table_entries.checked_mul(std::mem::size_of::<u32>()).ok_or_else(|| "Gemma full batched attention table bytes overflow".to_string())?;
+    let q_bytes = q_elements
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| "Gemma full batched attention query bytes overflow".to_string())?;
+    let kv_bytes = kv_elements
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| "Gemma full batched attention KV bytes overflow".to_string())?;
+    let table_bytes = table_entries
+        .checked_mul(std::mem::size_of::<u32>())
+        .ok_or_else(|| "Gemma full batched attention table bytes overflow".to_string())?;
     check_copy_range(0, q_bytes, q.size()?)?;
     check_copy_range(0, kv_bytes, k_cache.size()?)?;
     check_copy_range(0, kv_bytes, v_cache.size()?)?;
     check_copy_range(0, table_bytes, block_table.size()?)?;
     check_copy_range(0, q_bytes, output.size()?)?;
     let stream = stream.map_or(std::ptr::null_mut(), |stream| stream.raw.as_ptr());
-    status_to_result(unsafe { ullm_runtime_gemma_full_attn_batched_512_f32(
-        q.raw.as_ptr(), k_cache.raw.as_ptr(), v_cache.raw.as_ptr(), block_table.raw.as_ptr(),
-        prefix_len, query_rows, cache_len, block_size, cache_blocks, softmax_scale,
-        output.raw.as_ptr(), stream,
-    ) })
+    status_to_result(unsafe {
+        ullm_runtime_gemma_full_attn_batched_512_f32(
+            q.raw.as_ptr(),
+            k_cache.raw.as_ptr(),
+            v_cache.raw.as_ptr(),
+            block_table.raw.as_ptr(),
+            prefix_len,
+            query_rows,
+            cache_len,
+            block_size,
+            cache_blocks,
+            softmax_scale,
+            output.raw.as_ptr(),
+            stream,
+        )
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn gemma_full_attn_batched_512_split_f32(
+    q: &RuntimeBuffer,
+    k_cache: &RuntimeBuffer,
+    v_cache: &RuntimeBuffer,
+    block_table: &RuntimeBuffer,
+    prefix_len: usize,
+    query_rows: usize,
+    cache_len: usize,
+    block_size: usize,
+    cache_blocks: usize,
+    softmax_scale: f32,
+    split_count: usize,
+    workspace: &mut RuntimeBuffer,
+    output: &mut RuntimeBuffer,
+    stream: Option<&mut RuntimeStream>,
+) -> Result<(), String> {
+    if split_count < 2 {
+        return Err("Gemma full split attention requires at least two splits".into());
+    }
+    let workspace_bytes = query_rows
+        .checked_mul(8)
+        .and_then(|n| n.checked_mul(split_count))
+        .and_then(|n| n.checked_mul(514))
+        .and_then(|n| n.checked_mul(4))
+        .ok_or_else(|| "Gemma full split attention workspace size overflows".to_string())?;
+    check_copy_range(0, workspace_bytes, workspace.size()?)?;
+    let stream = stream.map_or(std::ptr::null_mut(), |stream| stream.raw.as_ptr());
+    status_to_result(unsafe {
+        ullm_runtime_gemma_full_attn_batched_512_split_f32(
+            q.raw.as_ptr(),
+            k_cache.raw.as_ptr(),
+            v_cache.raw.as_ptr(),
+            block_table.raw.as_ptr(),
+            prefix_len,
+            query_rows,
+            cache_len,
+            block_size,
+            cache_blocks,
+            softmax_scale,
+            split_count,
+            workspace.raw.as_ptr(),
+            output.raw.as_ptr(),
+            stream,
+        )
+    })
 }
 
 /// Exact Gemma4 local-prefill attention over a pre-write 256-wide ring and
@@ -8533,16 +8644,29 @@ pub fn gemma_sliding_attn_ring_batched_256_f32(
     stream: Option<&mut RuntimeStream>,
 ) -> Result<(), String> {
     const WIDTH: usize = 256;
-    if query_rows == 0 || query_rows > 128 || q_heads == 0 || history_rows > 511 ||
-        history_rows > prefix_len || ring_capacity == 0 || !softmax_scale.is_finite() || softmax_scale <= 0.0 {
+    if query_rows == 0
+        || query_rows > 128
+        || q_heads == 0
+        || history_rows > 511
+        || history_rows > prefix_len
+        || ring_capacity == 0
+        || !softmax_scale.is_finite()
+        || softmax_scale <= 0.0
+    {
         return Err("Gemma sliding ring batched attention received invalid geometry".into());
     }
-    let q_bytes = query_rows.checked_mul(q_heads).and_then(|n| n.checked_mul(WIDTH))
+    let q_bytes = query_rows
+        .checked_mul(q_heads)
+        .and_then(|n| n.checked_mul(WIDTH))
         .and_then(|n| n.checked_mul(std::mem::size_of::<f32>()))
         .ok_or_else(|| "Gemma sliding ring batched attention query size overflows".to_string())?;
-    let ring_bytes = ring_capacity.checked_mul(WIDTH).and_then(|n| n.checked_mul(std::mem::size_of::<f32>()))
+    let ring_bytes = ring_capacity
+        .checked_mul(WIDTH)
+        .and_then(|n| n.checked_mul(std::mem::size_of::<f32>()))
         .ok_or_else(|| "Gemma sliding ring batched attention ring size overflows".to_string())?;
-    let fresh_bytes = query_rows.checked_mul(WIDTH).and_then(|n| n.checked_mul(std::mem::size_of::<f32>()))
+    let fresh_bytes = query_rows
+        .checked_mul(WIDTH)
+        .and_then(|n| n.checked_mul(std::mem::size_of::<f32>()))
         .ok_or_else(|| "Gemma sliding ring batched attention fresh size overflows".to_string())?;
     check_copy_range(0, q_bytes, q.size()?)?;
     check_copy_range(0, q_bytes, output.size()?)?;
@@ -8553,9 +8677,69 @@ pub fn gemma_sliding_attn_ring_batched_256_f32(
     let stream = stream.map_or(std::ptr::null_mut(), |stream| stream.raw.as_ptr());
     status_to_result(unsafe {
         ullm_runtime_gemma_sliding_attn_ring_batched_256_f32(
-            q.raw.as_ptr(), k_ring.raw.as_ptr(), v_ring.raw.as_ptr(), fresh_k.raw.as_ptr(),
-            fresh_v.raw.as_ptr(), prefix_len, history_rows, query_rows, ring_capacity, q_heads,
-            softmax_scale, output.raw.as_ptr(), stream,
+            q.raw.as_ptr(),
+            k_ring.raw.as_ptr(),
+            v_ring.raw.as_ptr(),
+            fresh_k.raw.as_ptr(),
+            fresh_v.raw.as_ptr(),
+            prefix_len,
+            history_rows,
+            query_rows,
+            ring_capacity,
+            q_heads,
+            softmax_scale,
+            output.raw.as_ptr(),
+            stream,
+        )
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn gemma_sliding_attn_ring_batched_256_split_f32(
+    q: &RuntimeBuffer,
+    k_ring: &RuntimeBuffer,
+    v_ring: &RuntimeBuffer,
+    fresh_k: &RuntimeBuffer,
+    fresh_v: &RuntimeBuffer,
+    prefix_len: usize,
+    history_rows: usize,
+    query_rows: usize,
+    ring_capacity: usize,
+    q_heads: usize,
+    softmax_scale: f32,
+    split_count: usize,
+    workspace: &mut RuntimeBuffer,
+    output: &mut RuntimeBuffer,
+    stream: Option<&mut RuntimeStream>,
+) -> Result<(), String> {
+    if split_count < 2 {
+        return Err("Gemma sliding split attention requires at least two splits".into());
+    }
+    let workspace_bytes = query_rows
+        .checked_mul(q_heads)
+        .and_then(|n| n.checked_mul(split_count))
+        .and_then(|n| n.checked_mul(258))
+        .and_then(|n| n.checked_mul(4))
+        .ok_or_else(|| "Gemma sliding split attention workspace size overflows".to_string())?;
+    check_copy_range(0, workspace_bytes, workspace.size()?)?;
+    let stream = stream.map_or(std::ptr::null_mut(), |stream| stream.raw.as_ptr());
+    status_to_result(unsafe {
+        ullm_runtime_gemma_sliding_attn_ring_batched_256_split_f32(
+            q.raw.as_ptr(),
+            k_ring.raw.as_ptr(),
+            v_ring.raw.as_ptr(),
+            fresh_k.raw.as_ptr(),
+            fresh_v.raw.as_ptr(),
+            prefix_len,
+            history_rows,
+            query_rows,
+            ring_capacity,
+            q_heads,
+            softmax_scale,
+            split_count,
+            workspace.raw.as_ptr(),
+            output.raw.as_ptr(),
+            stream,
         )
     })
 }
