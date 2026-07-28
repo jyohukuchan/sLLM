@@ -17,8 +17,11 @@ The ordinary 256-wide paged-decode, chunk, and WMMA bodies are unchanged.
 - The K/V source snapshot confirms source layer 14 is complete before full
   consumers 19, 24, 29, and 34 execute.
 
-This is not a promotion result.  The layer-major path remains gated pending
-tile-width sensitivity and end-to-end timing.
+The layer-major path is promoted by default.  The append-only rollback is
+`ULLM_GEMMA4_PREFILL_LAYER_MAJOR=0`, which retains the former token-major
+route byte-for-byte.  The current promotion evidence is this real-activation
+validation plus the M=16/M=128 full-model continuation comparison and the
+three-context clean-release timing below.
 
 ## First throughput evidence
 

@@ -69,8 +69,9 @@ const R9700_MEMORY_BYTES_MAX: u64 = 34 * 1024 * 1024 * 1024;
 const GEMMA4_VALIDATE_DEVICE_MLP_ENV: &str = "ULLM_GEMMA4_VALIDATE_DEVICE_MLP";
 const GEMMA4_VALIDATE_PROPORTIONAL_ROPE_ENV: &str = "ULLM_GEMMA4_VALIDATE_PROPORTIONAL_ROPE";
 const GEMMA4_DISABLE_PLE_REGION_ENV: &str = "ULLM_GEMMA4_DISABLE_PLE_REGION";
-/// The layer-major Q/K/V/MLP prototype is retained for measurement, but is
-/// opt-in until it beats the already-promoted PLE-only path end-to-end.
+/// The full-attention reader needs layer-major `[M,H]` projections.  It is
+/// promoted by default after full-model validation; set this to `0` for the
+/// byte-identical token-major rollback route.
 const GEMMA4_PREFILL_LAYER_MAJOR_ENV: &str = "ULLM_GEMMA4_PREFILL_LAYER_MAJOR";
 
 /// Gemma4 E2B's seven 512-wide full-context attention layers.  All remaining
@@ -3957,7 +3958,7 @@ impl Gemma4TextExecutor {
         if input_token_ids.len() > 1
             && matches!(self.weights, Gemma4WeightStorage::Resident(_))
             && matches!(self.caches, Gemma4KvStorage::Device(_))
-            && env::var(GEMMA4_PREFILL_LAYER_MAJOR_ENV).ok().as_deref() == Some("1")
+            && env::var(GEMMA4_PREFILL_LAYER_MAJOR_ENV).ok().as_deref() != Some("0")
             && env::var("ULLM_GEMMA4_DISABLE_ATTENTION_REGION").ok().as_deref() != Some("1")
             && env::var(GEMMA4_DISABLE_PLE_REGION_ENV).ok().as_deref() != Some("1")
         {
