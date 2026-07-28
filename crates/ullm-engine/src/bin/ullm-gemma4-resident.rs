@@ -696,6 +696,8 @@ fn causal_mask_sliding_window_probe(executor: &mut Gemma4TextExecutor) -> Result
     const PROMPT_TOKENS: usize = 640;
     const FIRST_KEY: u32 = 818;
     const SECOND_KEY: u32 = 5279;
+    let prior_layer_major = env::var_os("ULLM_GEMMA4_PREFILL_LAYER_MAJOR");
+    let prior_ring_batched = env::var_os("ULLM_GEMMA4_PREFILL_SLIDING_RING_BATCHED");
     unsafe { env::set_var("ULLM_GEMMA4_PREFILL_LAYER_MAJOR", "1") };
     unsafe { env::set_var("ULLM_GEMMA4_PREFILL_SLIDING_RING_BATCHED", "1") };
     let mut first_tokens = vec![2_u32; PROMPT_TOKENS];
@@ -706,8 +708,11 @@ fn causal_mask_sliding_window_probe(executor: &mut Gemma4TextExecutor) -> Result
     second_tokens[0] = SECOND_KEY;
     executor.reset();
     let second = executor.prefill(&second_tokens)?;
-    unsafe { env::remove_var("ULLM_GEMMA4_PREFILL_SLIDING_RING_BATCHED") };
-    unsafe { env::remove_var("ULLM_GEMMA4_PREFILL_LAYER_MAJOR") };
+    restore_env_var(
+        "ULLM_GEMMA4_PREFILL_SLIDING_RING_BATCHED",
+        prior_ring_batched,
+    );
+    restore_env_var("ULLM_GEMMA4_PREFILL_LAYER_MAJOR", prior_layer_major);
 
     let hidden = executor.config().decoder.hidden_size;
     let range = QUERY_INDEX
@@ -746,6 +751,8 @@ fn causal_mask_future_token_probe(executor: &mut Gemma4TextExecutor) -> Result<V
     const FUTURE_INDEX: usize = QUERY_INDEX + 1;
     const FIRST_FUTURE: u32 = 5279;
     const SECOND_FUTURE: u32 = 7001;
+    let prior_layer_major = env::var_os("ULLM_GEMMA4_PREFILL_LAYER_MAJOR");
+    let prior_ring_batched = env::var_os("ULLM_GEMMA4_PREFILL_SLIDING_RING_BATCHED");
     unsafe { env::set_var("ULLM_GEMMA4_PREFILL_LAYER_MAJOR", "1") };
     unsafe { env::set_var("ULLM_GEMMA4_PREFILL_SLIDING_RING_BATCHED", "1") };
     let mut tokens = vec![2_u32; PROMPT_TOKENS];
@@ -791,9 +798,21 @@ fn causal_mask_future_token_probe(executor: &mut Gemma4TextExecutor) -> Result<V
         "layer_output_query_max_abs": max_abs,
         "layer_output_query_max_rel": max_rel,
     });
-    unsafe { env::remove_var("ULLM_GEMMA4_PREFILL_SLIDING_RING_BATCHED") };
-    unsafe { env::remove_var("ULLM_GEMMA4_PREFILL_LAYER_MAJOR") };
+    restore_env_var(
+        "ULLM_GEMMA4_PREFILL_SLIDING_RING_BATCHED",
+        prior_ring_batched,
+    );
+    restore_env_var("ULLM_GEMMA4_PREFILL_LAYER_MAJOR", prior_layer_major);
     Ok(output)
+}
+
+fn restore_env_var(name: &str, value: Option<std::ffi::OsString>) {
+    unsafe {
+        match value {
+            Some(value) => env::set_var(name, value),
+            None => env::remove_var(name),
+        }
+    }
 }
 
 fn attention_region_differential(executor: &mut Gemma4TextExecutor) -> Result<Value, String> {
@@ -1055,12 +1074,16 @@ fn attention_profile_workload(
     }))
 }
 
-/// The profiling workload reports *physical reader launches*.  The 28 local
-/// layers remain M=1, while the promoted full-attention path emits one reader
-/// per query tile.  Keep the legacy count when the documented rollback is
+/// The profiling workload reports *physical reader launches*. Both the 28
+/// local layers and seven full-attention layers emit one reader per query tile
+/// by default; keep the legacy local M=1 count when its documented rollback is
 /// active so this diagnostic validates either execution route honestly.
 fn expected_prefill_reader_calls(prompt_tokens: usize) -> Result<usize, String> {
-    let sliding = if env::var("ULLM_GEMMA4_PREFILL_SLIDING_RING_BATCHED").ok().as_deref() == Some("1") {
+    let sliding = if env::var("ULLM_GEMMA4_PREFILL_SLIDING_RING_BATCHED")
+        .ok()
+        .as_deref()
+        != Some("0")
+    {
         let tile_tokens = env::var("ULLM_GEMMA4_PREFILL_ACTIVATION_CHUNK_TOKENS")
             .ok().map(|value| value.parse::<usize>())
             .transpose().map_err(|_| "ULLM_GEMMA4_PREFILL_ACTIVATION_CHUNK_TOKENS must be an integer".to_string())?

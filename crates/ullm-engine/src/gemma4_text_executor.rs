@@ -104,6 +104,15 @@ fn gemma4_split_kv_enabled(split_count: usize, query_rows: usize) -> bool {
     split_count > 1 && query_rows >= GEMMA4_SPLIT_KV_MIN_QUERY_ROWS
 }
 
+/// The ring reader is the validated default. `=0` retains the established
+/// M=1 reader as an explicit rollback control.
+fn gemma4_prefill_sliding_ring_batched_enabled() -> bool {
+    env::var(GEMMA4_PREFILL_SLIDING_RING_BATCHED_ENV)
+        .ok()
+        .as_deref()
+        != Some("0")
+}
+
 /// Gemma4 E2B's seven 512-wide full-context attention layers.  All remaining
 /// decoder attention layers are 256-wide sliding-window layers.
 const GEMMA4_FULL_ATTENTION_LAYER_INDICES: [usize; 7] = [4, 9, 14, 19, 24, 29, 34];
@@ -2055,7 +2064,7 @@ impl Bf16MatvecRuntime {
         )?;
         // See the full reader above: M=1 decode and short prefill tails retain
         // the established reader; `=0` is an explicit unsplit rollback.
-        let split_count = gemma4_split_kv_factor(GEMMA4_SLIDING_ATTN_SPLIT_KV_ENV, 32)?;
+        let split_count = gemma4_split_kv_factor(GEMMA4_SLIDING_ATTN_SPLIT_KV_ENV, 16)?;
         let use_split = gemma4_split_kv_enabled(split_count, query_rows);
         let workspace_bytes = query_rows
             .checked_mul(q_heads)
@@ -4699,11 +4708,7 @@ impl Gemma4TextExecutor {
             )?;
             layer_outputs[layer_index].extend_from_slice(&states);
         }
-        if env::var(GEMMA4_PREFILL_SLIDING_RING_BATCHED_ENV)
-            .ok()
-            .as_deref()
-            == Some("1")
-        {
+        if gemma4_prefill_sliding_ring_batched_enabled() {
             self.commit_prefill_sliding_fresh()?;
         }
         let final_weight = self.read_weight_vector(GEMMA4_TEXT_FINAL_NORM, hidden)?;
@@ -4913,11 +4918,7 @@ impl Gemma4TextExecutor {
                 attention.kv_heads,
                 attention.head_dim,
             )?
-        } else if env::var(GEMMA4_PREFILL_SLIDING_RING_BATCHED_ENV)
-            .ok()
-            .as_deref()
-            == Some("1")
-        {
+        } else if gemma4_prefill_sliding_ring_batched_enabled() {
             self.prefill_sliding_attention_ring_batched_256_causal(
                 layer_index,
                 source_layer,

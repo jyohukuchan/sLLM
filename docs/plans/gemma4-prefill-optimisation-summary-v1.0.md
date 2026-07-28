@@ -2,12 +2,11 @@
 
 ## Verdict
 
-The Gemma4 E2B BF16 resident path is substantially better and no further
-prefill change is justified under the project's >=1.10x realistic-gain rule.
-The final current-build sweep found no landable candidate above that bar.
-The remaining large theoretical bounds require a new device-resident
-activation graph plus a new attention topology; they are future architecture,
-not a kernel-tuning backlog.
+The Gemma4 E2B BF16 resident path is substantially better. The previous
+statement that no further prefill change was justified was incomplete: the
+sliding direct-ring reader was left disabled, so its already-implemented
+split-KV path had never run. Session EG activated and measured that combination
+on the R9700, then promoted it with an explicit `=0` rollback.
 
 This document consolidates the completed effort. It distinguishes measured
 throughput and trace attribution from derived Amdahl bounds; those bounds are
@@ -38,6 +37,23 @@ The important shape result is that prefill and decode stopped collapsing with
 context. The original prefill scaling was approximately N^1.551 to N^1.810;
 the promoted path is nearly flat over these points. The gap to llama.cpp is
 still real, especially for prefill, and must not be described as closed.
+
+## Correction: sliding split-KV was not previously measured
+
+The earlier `0.916x` direct-ring result predates sliding split-KV. Its reader
+ran at 8 CTAs / 64 CUs (0.125 CTA/CU), the root cause later fixed for the full
+reader. The `ULLM_GEMMA4_PREFILL_SLIDING_RING_BATCHED` dispatch flag remained
+off, which made the sliding split default unreachable; it was therefore wrong
+to describe it as a tried-and-failed final candidate or to require a new
+sliding architecture before measuring it.
+
+With the ring route enabled, sliding split factor 16 is the current
+end-to-end N=2048 winner (56.069 tok/s in the one-cold-run factor sweep; 32
+minimizes reader-only round-trip time but loses to merge/other costs). A kernel
+trace of factor 16 reports 128 CTAs per sliding partial dispatch, **2.0
+CTA/CU**, and 103.504 derived source-accounted QK+AV GFLOPS, replacing the old
+0.125 CTA/CU / 10.977 GFLOPS state. These are dispatch timing and derived work,
+not PMC/HBM counters.
 
 ## What was actually wrong, in discovery order
 
@@ -92,6 +108,11 @@ establish launch geometry and duration.
   512-wide attention layers, with explicit shared-KV source ordering.
 - Full attention uses F32 split-KV partial/merge readers; the token-major
   path is still available as a rollback.
+- Sliding 256-wide attention now defaults to the direct-ring batched split-KV
+  reader (factor 16); `ULLM_GEMMA4_PREFILL_SLIDING_RING_BATCHED=0` restores
+  the former M=1 route. This activation was validated separately for future
+  keys, `j-512`, a 2,052-token cached continuation, logits, multi-step cache
+  equivalence, and source-13/source-14 shared-KV consumers.
 - Gemma-only BF16 batched matmul moved from M=8 to M=16 while retaining the
   F32 input, accumulation, and reduction order. Its clean five-median gains
   were 1.040x / 1.075x / 1.024x at N=128 / 512 / 2048. The representative
@@ -104,7 +125,7 @@ establish launch geometry and duration.
 | --- | --- | --- |
 | Isolated direct-weight RMSNorm port | 12.297 decode tok/s versus 15.733 primitive baseline; 13.078 versus 18.544 prefill tok/s | It returned the norm output to the host while its producer and consumer remained host-mediated. Extra H2D, launch, and D2H outweighed the saved row read. |
 | Sliding reader batching, snapshot gather | Numerically validated, but did not meet the promoted throughput baseline | Reducing logical reads did not supply enough useful work to the GPU or retain the whole activation graph. |
-| Sliding reader batching, direct-ring (the third batching attempt in the sequence) | About 100x fewer logical K/V reads, **0.916x** realised N=512/N=2048 throughput | The grid/topology, not logical K/V byte count, was limiting. The route is retained only behind a flag. |
+| Sliding reader batching, direct-ring before split-KV | About 100x fewer logical K/V reads, **0.916x** realised N=512/N=2048 throughput | This result is historical only: it used the 8-CTA reader before split-KV supplied enough CTAs. It must not be used to reject the activated split route. |
 | Reducing the 512-wide fallback's FMAs | About 256x less redundant FMA work, only about +20% | The reader was neither compute- nor bandwidth-roofed; 8 CTAs left 56 CUs idle. |
 | Split merge-grid tuning | Free-merge Amdahl ceiling was 1.013x in its measured configuration | Even though its 8-CTA merge grid was underfilled, it was too small a fraction of whole prefill. It was correctly rejected. |
 | More small BF16 matmul tiling | M=8 to M=16 realised only 1.075x at N=512 and 1.024x at N=2048 | The remaining obvious tile adjustment is below the project bar; matrix-instruction approaches round F32 operands and have no accepted numerical route. |
@@ -149,15 +170,15 @@ The final N=512/N=2048 current-build trace found these non-additive bounds:
 | future candidate | current measured share (512 / 2048) | free-component ceiling | conclusion |
 | --- | ---: | ---: | --- |
 | Further M=16 BF16 matmul redesign | 25.62% / 21.51% end-to-end | 1.344x / 1.274x | Actual adjacent M=8-to-M=16 result is <=1.075x / <=1.024x; no quick accepted variant remains. |
-| New sliding attention architecture | 32.66% / 39.13% reader envelope | 1.485x / 1.643x | Only as future device-graph/ring/attention architecture; the directly related batched reader was 0.916x. |
+| Further sliding attention architecture | 32.66% / 39.13% reader envelope (pre-activation trace) | 1.485x / 1.643x | Reassess only after the activated direct-ring split baseline; the cited 0.916x result was pre-split and is not a rejection of this path. |
 | Reader transport only | 9.33% / 7.16% | 1.103x / 1.077x | Below the bar across target contexts and inseparable from device-graph work. |
 | Full split partial | 1.16% / 3.09% GPU | 1.012x / 1.032x | Too small. |
 | Split merge | 0.063% / 0.047% GPU | 1.0006x / 1.0005x | Too small. |
 
 The following controls are intentionally retained:
 
-- `ULLM_GEMMA4_PREFILL_SLIDING_RING_BATCHED` is off by default; it preserves
-  the rejected experimental sliding batched route for future research.
+- `ULLM_GEMMA4_PREFILL_SLIDING_RING_BATCHED=0` rolls back the promoted sliding
+  batched route to the former M=1 reader. Omission is the promoted default.
 - `ULLM_GEMMA4_PREFILL_LAYER_MAJOR=0` rolls back to the former token-major
   route.
 - `ULLM_GEMMA4_FULL_ATTN_SPLIT_KV=0` and
