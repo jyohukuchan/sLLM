@@ -31,7 +31,7 @@ use std::time::Instant;
 use ullm_runtime_sys::{
     DeviceInfo, RuntimeBuffer, RuntimeContext, RuntimeStream, add_f32, bf16_row_f32, device_count,
     device_info, gelu_tanh_mul_f32, gemma_bf16_matmul_f32, gemma_proportional_rope_f32,
-    matvec_bf16_f32, paged_decode_attn_f32, paged_kv_write_f32, rmsnorm_f32, rope_f32,
+    gemma_full_attn_batched_512_f32, matvec_bf16_f32, paged_decode_attn_f32, paged_kv_write_f32, rmsnorm_f32, rope_f32,
     segmented_rmsnorm_f32,
 };
 
@@ -1649,6 +1649,52 @@ impl Bf16MatvecRuntime {
             })?,
             true,
         )?;
+        Ok(output)
+    }
+
+    fn gemma_full_attention_batched_512(
+        &mut self,
+        cache: &Gemma4DeviceKvCache,
+        queries: &[f32],
+        prefix_len: usize,
+        query_rows: usize,
+        softmax_scale: f32,
+    ) -> Result<Vec<f32>, String> {
+        const QUERY_WIDTH: usize = 8 * 512;
+        if queries.len() != query_rows * QUERY_WIDTH || cache.cache_len != cache.absolute_len {
+            return Err("Gemma4 full batched reader input/cache shape is invalid".into());
+        }
+        let input_bytes = encode_f32_to_bytes(queries);
+        Self::ensure_buffer(
+            &mut self.context, &mut self.resident_input, input_bytes.len(),
+            "Gemma full batched attention query", &mut self.resident_host_profile,
+        )?;
+        Self::ensure_buffer(
+            &mut self.context, &mut self.resident_output, input_bytes.len(),
+            "Gemma full batched attention output", &mut self.resident_host_profile,
+        )?;
+        self.resident_input.as_mut().expect("Gemma full query buffer allocated")
+            .copy_from_host(0, &input_bytes, Some(&mut self.stream))?;
+        gemma_full_attn_batched_512_f32(
+            self.resident_input.as_ref().expect("Gemma full query buffer allocated"),
+            &cache.key, &cache.value, &cache.read_table, prefix_len, query_rows,
+            cache.cache_len, GEMMA4_DEVICE_KV_BLOCK_SIZE, cache.capacity_tokens,
+            softmax_scale, self.resident_output.as_mut().expect("Gemma full output buffer allocated"),
+            Some(&mut self.stream),
+        )?;
+        let mut host_output = vec![0_u8; input_bytes.len()];
+        self.resident_output.as_mut().expect("Gemma full output buffer allocated")
+            .copy_to_host(0, &mut host_output, Some(&mut self.stream))?;
+        self.stream.synchronize()?;
+        let output = decode_f32_le_values(&host_output);
+        if output.len() != queries.len() || output.iter().any(|value| !value.is_finite()) {
+            return Err("Gemma full batched reader returned non-finite or malformed output".into());
+        }
+        let kv_read = cache.cache_len
+            .checked_mul(2).and_then(|n| n.checked_mul(512))
+            .and_then(|n| n.checked_mul(std::mem::size_of::<f32>()))
+            .ok_or_else(|| "Gemma full batched reader KV accounting overflows".to_string())?;
+        self.account_device_kv(kv_read, 0, true)?;
         Ok(output)
     }
 
@@ -4375,15 +4421,27 @@ impl Gemma4TextExecutor {
         } else {
             None
         };
-        let attention_output = self.prefill_attention_m1_causal(
-            layer_index,
-            source_layer,
-            own_kv.as_ref(),
-            &queries,
-            attention.q_heads,
-            attention.kv_heads,
-            attention.head_dim,
-        )?;
+        let attention_output = if gemma4_is_full_attention_layer(layer_index) {
+            self.prefill_full_attention_batched_512_causal(
+                layer_index,
+                source_layer,
+                own_kv.as_ref(),
+                &queries,
+                attention.q_heads,
+                attention.kv_heads,
+                attention.head_dim,
+            )?
+        } else {
+            self.prefill_attention_m1_causal(
+                layer_index,
+                source_layer,
+                own_kv.as_ref(),
+                &queries,
+                attention.q_heads,
+                attention.kv_heads,
+                attention.head_dim,
+            )?
+        };
         let output_projection = self.matmul_named_batched(
             &layer_tensor(layer_index, "self_attn.o_proj.weight"),
             hidden,
@@ -5431,6 +5489,64 @@ impl Gemma4TextExecutor {
         }
         cache.set_read_window(full_absolute_len, &mut self.matvec.stream)?;
         Ok(output)
+    }
+
+    /// Full-context-only batch reader.  The owning source writes the whole
+    /// chunk before this call; source caches are consequently complete before
+    /// any consumer layer runs.  The reader itself receives the prior prefix
+    /// and applies causality per query row on device.
+    fn prefill_full_attention_batched_512_causal(
+        &mut self,
+        layer_index: usize,
+        shared_source: Option<usize>,
+        own_kv: Option<&(Vec<f32>, Vec<f32>)>,
+        queries: &[f32],
+        q_heads: usize,
+        kv_heads: usize,
+        head_dim: usize,
+    ) -> Result<Vec<f32>, String> {
+        if q_heads != 8 || kv_heads != 1 || head_dim != 512 {
+            return Err(format!(
+                "Gemma4 full batched reader only accepts 8Q/1KV/512, got {q_heads}Q/{kv_heads}KV/{head_dim}"
+            ));
+        }
+        let query_width = q_heads * head_dim;
+        if queries.is_empty() || !queries.len().is_multiple_of(query_width) {
+            return Err("Gemma4 full batched attention query shape is invalid".into());
+        }
+        let rows = queries.len() / query_width;
+        let source_layer = shared_source.unwrap_or(layer_index);
+        let caches = match &mut self.caches {
+            Gemma4KvStorage::Device(caches) => caches,
+            Gemma4KvStorage::Host(_) => return Err("Gemma4 full batched attention requires device K/V".into()),
+        };
+        let cache = caches.cache_mut(source_layer)?;
+        let prefix_len = cache.absolute_len;
+        if let Some((keys, values)) = own_kv {
+            let kv_width = kv_heads * head_dim;
+            if keys.len() != rows * kv_width || values.len() != rows * kv_width {
+                return Err("Gemma4 full batched attention K/V shape is invalid".into());
+            }
+            for row in 0..rows {
+                let range = row * kv_width..(row + 1) * kv_width;
+                self.matvec.append_device_kv(cache, &keys[range.clone()], &values[range])?;
+            }
+        } else {
+            if cache.absolute_len < rows {
+                return Err(format!(
+                    "Gemma4 shared full layer {layer_index} needs a completed source chunk from {source_layer}"
+                ));
+            }
+        }
+        let reader_prefix = if own_kv.is_some() { prefix_len } else { cache.absolute_len - rows };
+        if cache.absolute_len != reader_prefix + rows || cache.is_sliding() {
+            return Err(format!(
+                "Gemma4 full reader received incomplete or sliding source cache at layer {source_layer}"
+            ));
+        }
+        self.matvec.gemma_full_attention_batched_512(
+            cache, queries, reader_prefix, rows, 1.0,
+        )
     }
 }
 
