@@ -1,0 +1,24 @@
+2026-07-28T21:49:24+09:00 GPU: 2
+    TEMPERATURE:
+        EDGE: 40 °C
+        HOTSPOT: 42 °C
+        MEM: 40 °C
+
+2026-07-28T21:49:29+09:00 GPU: 2
+    TEMPERATURE:
+        EDGE: 41 °C
+        HOTSPOT: 42 °C
+        MEM: 40 °C
+
+2026-07-28T21:49:34+09:00 GPU: 2
+    TEMPERATURE:
+        EDGE: 42 °C
+        HOTSPOT: 44 °C
+        MEM: 42 °C
+
+2026-07-28T21:49:39+09:00 GPU: 2
+    TEMPERATURE:
+        EDGE: 44 °C
+        HOTSPOT: 47 °C
+        MEM: 44 °C
+

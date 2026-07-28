@@ -1,0 +1,60 @@
+2026-07-28T21:49:45+09:00 GPU: 2
+    TEMPERATURE:
+        EDGE: 43 °C
+        HOTSPOT: 43 °C
+        MEM: 42 °C
+
+2026-07-28T21:49:50+09:00 GPU: 2
+    TEMPERATURE:
+        EDGE: 43 °C
+        HOTSPOT: 44 °C
+        MEM: 42 °C
+
+2026-07-28T21:49:55+09:00 GPU: 2
+    TEMPERATURE:
+        EDGE: 44 °C
+        HOTSPOT: 47 °C
+        MEM: 44 °C
+
+2026-07-28T21:50:00+09:00 GPU: 2
+    TEMPERATURE:
+        EDGE: 46 °C
+        HOTSPOT: 50 °C
+        MEM: 46 °C
+
+2026-07-28T21:50:05+09:00 GPU: 2
+    TEMPERATURE:
+        EDGE: 46 °C
+        HOTSPOT: 50 °C
+        MEM: 47 °C
+
+2026-07-28T21:50:10+09:00 GPU: 2
+    TEMPERATURE:
+        EDGE: 48 °C
+        HOTSPOT: 51 °C
+        MEM: 48 °C
+
+2026-07-28T21:50:16+09:00 GPU: 2
+    TEMPERATURE:
+        EDGE: 48 °C
+        HOTSPOT: 52 °C
+        MEM: 49 °C
+
+2026-07-28T21:50:21+09:00 GPU: 2
+    TEMPERATURE:
+        EDGE: 50 °C
+        HOTSPOT: 54 °C
+        MEM: 50 °C
+
+2026-07-28T21:50:26+09:00 GPU: 2
+    TEMPERATURE:
+        EDGE: 50 °C
+        HOTSPOT: 54 °C
+        MEM: 51 °C
+
+2026-07-28T21:50:31+09:00 GPU: 2
+    TEMPERATURE:
+        EDGE: 51 °C
+        HOTSPOT: 55 °C
+        MEM: 52 °C
+
