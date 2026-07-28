@@ -1438,6 +1438,23 @@ ullm_status ullm_runtime_gemma_full_attn_batched_512_f32(
     ullm_runtime_buffer *output_buffer,
     ullm_runtime_stream *stream);
 
+// Gemma4 local-prefill snapshot and exact two-sided 256-wide reader.  These
+// are isolated from the shared paged-decode body used by production models.
+ullm_status ullm_runtime_gemma_sliding_snapshot_gather_256_f32(
+    const ullm_runtime_buffer *k_cache_buffer,
+    const ullm_runtime_buffer *v_cache_buffer,
+    const ullm_runtime_buffer *block_table_buffer,
+    size_t absolute_len, size_t cache_len, size_t cache_blocks, size_t history_rows,
+    ullm_runtime_buffer *snapshot_k_buffer, ullm_runtime_buffer *snapshot_v_buffer,
+    ullm_runtime_stream *stream);
+
+ullm_status ullm_runtime_gemma_sliding_attn_batched_256_f32(
+    const ullm_runtime_buffer *q_buffer,
+    const ullm_runtime_buffer *snapshot_k_buffer,
+    const ullm_runtime_buffer *snapshot_v_buffer,
+    size_t prefix_len, size_t history_rows, size_t query_rows, size_t q_heads,
+    float softmax_scale, ullm_runtime_buffer *output_buffer, ullm_runtime_stream *stream);
+
 ullm_status ullm_runtime_paged_decode_attn_sigmoid_gate_f32(
     const ullm_runtime_buffer *q_buffer,
     const ullm_runtime_buffer *gate_buffer,

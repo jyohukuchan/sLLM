@@ -1255,6 +1255,19 @@ ullm_status ullm_runtime_gemma_full_attn_batched_512_f32(
     float softmax_scale,
     ullm_runtime_buffer *output_buffer,
     ullm_runtime_stream *stream);
+ullm_status ullm_runtime_gemma_sliding_snapshot_gather_256_f32(
+    const ullm_runtime_buffer *k_cache_buffer,
+    const ullm_runtime_buffer *v_cache_buffer,
+    const ullm_runtime_buffer *block_table_buffer,
+    size_t absolute_len, size_t cache_len, size_t cache_blocks, size_t history_rows,
+    ullm_runtime_buffer *snapshot_k_buffer, ullm_runtime_buffer *snapshot_v_buffer,
+    ullm_runtime_stream *stream);
+ullm_status ullm_runtime_gemma_sliding_attn_batched_256_f32(
+    const ullm_runtime_buffer *q_buffer,
+    const ullm_runtime_buffer *snapshot_k_buffer,
+    const ullm_runtime_buffer *snapshot_v_buffer,
+    size_t prefix_len, size_t history_rows, size_t query_rows, size_t q_heads,
+    float softmax_scale, ullm_runtime_buffer *output_buffer, ullm_runtime_stream *stream);
 ullm_status ullm_runtime_paged_decode_attn_sigmoid_gate_f32(
     const ullm_runtime_buffer *q_buffer,
     const ullm_runtime_buffer *gate_buffer,
@@ -74787,6 +74800,107 @@ extern "C" __global__ void ullm_gemma_full_attn_batched_512_f32_kernel(
         output[output_base + static_cast<unsigned long long>(tid) + 256ull] = weighted_hi[row];
     }
 }
+
+// Gemma4 local-attention prefill support.  The gather runs before the source
+// layer writes its chunk into the 512-entry ring, preserving the historical
+// rows which would otherwise alias the new writes after a rollover.  Newly
+// projected rows are appended to this compact snapshot by the host route.
+extern "C" __global__ void ullm_gemma_sliding_snapshot_gather_256_f32_kernel(
+    const float *k_cache, const float *v_cache, const unsigned int *block_table,
+    unsigned long long absolute_len, unsigned long long cache_len,
+    unsigned long long cache_blocks, unsigned long long history_rows,
+    float *snapshot_k, float *snapshot_v) {
+    const unsigned long long row = static_cast<unsigned long long>(blockIdx.x);
+    const unsigned int tid = threadIdx.x;
+    if (tid >= 256u || row >= history_rows || history_rows > cache_len ||
+        absolute_len < cache_len || cache_len == 0ull) {
+        return;
+    }
+    const unsigned long long logical = absolute_len - history_rows + row;
+    const unsigned long long table_start = absolute_len - cache_len;
+    const unsigned long long table_index = logical - table_start;
+    const unsigned long long physical = static_cast<unsigned long long>(block_table[table_index]);
+    if (physical >= cache_blocks) {
+        return;
+    }
+    snapshot_k[row * 256ull + tid] = k_cache[physical * 256ull + tid];
+    snapshot_v[row * 256ull + tid] = v_cache[physical * 256ull + tid];
+}
+
+// Exact Gemma4 E2B local-attention prefill reader.  Its source snapshot is
+// laid out as `[max(0,p-511), p+M)`: it is intentionally not a paged reader,
+// because the source ring has already been overwritten by the time this
+// batched reader executes.  Both bounds are explicit even though the compact
+// snapshot normally makes the lower one redundant; that keeps a future wider
+// snapshot from silently changing Gemma's local-attention contract.
+extern "C" __global__ void ullm_gemma_sliding_attn_batched_256_f32_kernel(
+    const float *q, const float *snapshot_k, const float *snapshot_v,
+    unsigned long long prefix_len, unsigned long long history_rows,
+    unsigned long long query_rows, unsigned long long q_heads,
+    float softmax_scale, float *output) {
+    const unsigned int tid = threadIdx.x;
+    const unsigned long long q_head = static_cast<unsigned long long>(blockIdx.x);
+    if (tid >= 256u || q_head >= q_heads || query_rows == 0ull || query_rows > 128ull ||
+        history_rows > 511ull || q_heads == 0ull || softmax_scale <= 0.0f) {
+        return;
+    }
+    __shared__ float cached_k[256];
+    __shared__ float cached_v[256];
+    __shared__ float reduce[256];
+    __shared__ float row_max[128];
+    __shared__ float row_denom[128];
+    __shared__ float update_scale;
+    __shared__ float update_weight;
+    float weighted[128];
+    #pragma unroll
+    for (unsigned int row = 0; row < 128u; ++row) {
+        weighted[row] = 0.0f;
+        if (tid == 0u) {
+            row_max[row] = -3.4028234663852886e38f;
+            row_denom[row] = 0.0f;
+        }
+    }
+    __syncthreads();
+    const unsigned long long snapshot_start = prefix_len - history_rows;
+    const unsigned long long snapshot_rows = history_rows + query_rows;
+    for (unsigned long long source = 0; source < snapshot_rows; ++source) {
+        const unsigned long long logical_key = snapshot_start + source;
+        cached_k[tid] = snapshot_k[source * 256ull + tid];
+        cached_v[tid] = snapshot_v[source * 256ull + tid];
+        __syncthreads();
+        for (unsigned long long row = 0; row < query_rows; ++row) {
+            const unsigned long long logical_query = prefix_len + row;
+            if (logical_key > logical_query || logical_key + 511ull < logical_query) {
+                continue;
+            }
+            const unsigned long long q_base = (row * q_heads + q_head) * 256ull;
+            reduce[tid] = q[q_base + tid] * cached_k[tid];
+            __syncthreads();
+            for (unsigned int stride = 128u; stride > 0u; stride >>= 1u) {
+                if (tid < stride) {
+                    reduce[tid] += reduce[tid + stride];
+                }
+                __syncthreads();
+            }
+            if (tid == 0u) {
+                const float score = reduce[0] * softmax_scale;
+                const float old_max = row_max[row];
+                const float new_max = score > old_max ? score : old_max;
+                update_scale = old_max <= -3.4028234663852886e38f ? 0.0f : expf(old_max - new_max);
+                update_weight = expf(score - new_max);
+                row_max[row] = new_max;
+                row_denom[row] = row_denom[row] * update_scale + update_weight;
+            }
+            __syncthreads();
+            weighted[row] = weighted[row] * update_scale + update_weight * cached_v[tid];
+            __syncthreads();
+        }
+    }
+    for (unsigned long long row = 0; row < query_rows; ++row) {
+        const unsigned long long output_base = (row * q_heads + q_head) * 256ull;
+        output[output_base + tid] = weighted[row] / row_denom[row];
+    }
+}
 )";
     }
     static const char *paged_kv_write_kernel_source() {
@@ -91543,6 +91657,8 @@ public:
     struct Functions {
         void *legacy = nullptr;
         void *gemma_full_batched_512 = nullptr;
+        void *gemma_sliding_snapshot_gather_256 = nullptr;
+        void *gemma_sliding_batched_256 = nullptr;
         void *split_partial = nullptr;
         void *split_merge = nullptr;
     };
@@ -91559,6 +91675,16 @@ public:
             return nullptr;
         }
         return functions.gemma_full_batched_512;
+    }
+    void *gemma_sliding_snapshot_gather_256_function_for_device(int device_id, std::string *error) {
+        Functions functions;
+        if (!functions_for_device(device_id, &functions, error)) return nullptr;
+        return functions.gemma_sliding_snapshot_gather_256;
+    }
+    void *gemma_sliding_batched_256_function_for_device(int device_id, std::string *error) {
+        Functions functions;
+        if (!functions_for_device(device_id, &functions, error)) return nullptr;
+        return functions.gemma_sliding_batched_256;
     }
     void *typed_function_for_device(
         int device_id,
@@ -91654,6 +91780,26 @@ public:
                 append_error(&compile_errors, "hipModuleGetFunction Gemma full batched attention failed for " + arch);
                 continue;
             }
+            void *gemma_sliding_snapshot_gather_256_function = nullptr;
+            if (!hip_runtime().module_get_function(
+                    &gemma_sliding_snapshot_gather_256_function,
+                    module,
+                    "ullm_gemma_sliding_snapshot_gather_256_f32_kernel",
+                    device_id)) {
+                hip_runtime().module_unload(module, device_id);
+                append_error(&compile_errors, "hipModuleGetFunction Gemma sliding snapshot gather failed for " + arch);
+                continue;
+            }
+            void *gemma_sliding_batched_256_function = nullptr;
+            if (!hip_runtime().module_get_function(
+                    &gemma_sliding_batched_256_function,
+                    module,
+                    "ullm_gemma_sliding_attn_batched_256_f32_kernel",
+                    device_id)) {
+                hip_runtime().module_unload(module, device_id);
+                append_error(&compile_errors, "hipModuleGetFunction Gemma sliding batched attention failed for " + arch);
+                continue;
+            }
             if (!hip_runtime().module_get_function(
                     &split_partial_function,
                     module,
@@ -91681,6 +91827,8 @@ public:
             loaded->module = module;
             loaded->legacy_function = legacy_function;
             loaded->gemma_full_batched_512_function = gemma_full_batched_512_function;
+            loaded->gemma_sliding_snapshot_gather_256_function = gemma_sliding_snapshot_gather_256_function;
+            loaded->gemma_sliding_batched_256_function = gemma_sliding_batched_256_function;
             loaded->split_partial_function = split_partial_function;
             loaded->split_merge_function = split_merge_function;
             bool typed_loaded = true;
@@ -91727,6 +91875,8 @@ private:
         void *module = nullptr;
         void *legacy_function = nullptr;
         void *gemma_full_batched_512_function = nullptr;
+        void *gemma_sliding_snapshot_gather_256_function = nullptr;
+        void *gemma_sliding_batched_256_function = nullptr;
         void *split_partial_function = nullptr;
         void *split_merge_function = nullptr;
         void *typed[3][3] = {};
@@ -91767,6 +91917,8 @@ private:
         }
         functions->legacy = loaded.legacy_function;
         functions->gemma_full_batched_512 = loaded.gemma_full_batched_512_function;
+        functions->gemma_sliding_snapshot_gather_256 = loaded.gemma_sliding_snapshot_gather_256_function;
+        functions->gemma_sliding_batched_256 = loaded.gemma_sliding_batched_256_function;
         functions->split_partial = loaded.split_partial_function;
         functions->split_merge = loaded.split_merge_function;
     }
@@ -91906,6 +92058,73 @@ bool gemma_full_attn_batched_512_f32_hip_kernel(
         if (error != nullptr) {
             *error = "hipModuleLaunchKernel failed for Gemma full batched attention";
         }
+        return false;
+    }
+    return true;
+}
+bool gemma_sliding_snapshot_gather_256_f32_hip_kernel(
+    const ullm_runtime_buffer *k_cache_buffer,
+    const ullm_runtime_buffer *v_cache_buffer,
+    const ullm_runtime_buffer *block_table_buffer,
+    size_t absolute_len,
+    size_t cache_len,
+    size_t cache_blocks,
+    size_t history_rows,
+    ullm_runtime_buffer *snapshot_k_buffer,
+    ullm_runtime_buffer *snapshot_v_buffer,
+    ullm_runtime_stream *stream,
+    std::string *error) {
+    void *function = hip_paged_decode_attn_kernel_cache()
+        .gemma_sliding_snapshot_gather_256_function_for_device(k_cache_buffer->hip_device_id, error);
+    if (function == nullptr) return false;
+    unsigned long long kernel_absolute_len = static_cast<unsigned long long>(absolute_len);
+    unsigned long long kernel_cache_len = static_cast<unsigned long long>(cache_len);
+    unsigned long long kernel_cache_blocks = static_cast<unsigned long long>(cache_blocks);
+    unsigned long long kernel_history_rows = static_cast<unsigned long long>(history_rows);
+    void *k_ptr = k_cache_buffer->ptr;
+    void *v_ptr = v_cache_buffer->ptr;
+    void *table_ptr = block_table_buffer->ptr;
+    void *snapshot_k_ptr = snapshot_k_buffer->ptr;
+    void *snapshot_v_ptr = snapshot_v_buffer->ptr;
+    void *params[] = {&k_ptr, &v_ptr, &table_ptr, &kernel_absolute_len, &kernel_cache_len,
+        &kernel_cache_blocks, &kernel_history_rows, &snapshot_k_ptr, &snapshot_v_ptr};
+    void *hip_stream = stream == nullptr ? nullptr : stream->stream;
+    if (!hip_runtime().module_launch_kernel(function, static_cast<unsigned int>(history_rows), 256u,
+            params, hip_stream, k_cache_buffer->hip_device_id)) {
+        if (error != nullptr) *error = "hipModuleLaunchKernel failed for Gemma sliding snapshot gather";
+        return false;
+    }
+    return true;
+}
+bool gemma_sliding_attn_batched_256_f32_hip_kernel(
+    const ullm_runtime_buffer *q_buffer,
+    const ullm_runtime_buffer *snapshot_k_buffer,
+    const ullm_runtime_buffer *snapshot_v_buffer,
+    size_t prefix_len,
+    size_t history_rows,
+    size_t query_rows,
+    size_t q_heads,
+    float softmax_scale,
+    ullm_runtime_buffer *output_buffer,
+    ullm_runtime_stream *stream,
+    std::string *error) {
+    void *function = hip_paged_decode_attn_kernel_cache()
+        .gemma_sliding_batched_256_function_for_device(q_buffer->hip_device_id, error);
+    if (function == nullptr) return false;
+    unsigned long long kernel_prefix_len = static_cast<unsigned long long>(prefix_len);
+    unsigned long long kernel_history_rows = static_cast<unsigned long long>(history_rows);
+    unsigned long long kernel_query_rows = static_cast<unsigned long long>(query_rows);
+    unsigned long long kernel_q_heads = static_cast<unsigned long long>(q_heads);
+    void *q_ptr = q_buffer->ptr;
+    void *snapshot_k_ptr = snapshot_k_buffer->ptr;
+    void *snapshot_v_ptr = snapshot_v_buffer->ptr;
+    void *output_ptr = output_buffer->ptr;
+    void *params[] = {&q_ptr, &snapshot_k_ptr, &snapshot_v_ptr, &kernel_prefix_len,
+        &kernel_history_rows, &kernel_query_rows, &kernel_q_heads, &softmax_scale, &output_ptr};
+    void *hip_stream = stream == nullptr ? nullptr : stream->stream;
+    if (!hip_runtime().module_launch_kernel(function, static_cast<unsigned int>(q_heads), 256u,
+            params, hip_stream, q_buffer->hip_device_id)) {
+        if (error != nullptr) *error = "hipModuleLaunchKernel failed for Gemma sliding batched attention";
         return false;
     }
     return true;
@@ -106923,6 +107142,131 @@ ullm_status ullm_runtime_gemma_full_attn_batched_512_f32(
         return ULLM_STATUS_OK;
     }
     set_error(hip_error.empty() ? "Gemma full batched attention HIP kernel is unavailable" : hip_error.c_str());
+    return ULLM_STATUS_RUNTIME_ERROR;
+}
+ullm_status ullm_runtime_gemma_sliding_snapshot_gather_256_f32(
+    const ullm_runtime_buffer *k_cache_buffer,
+    const ullm_runtime_buffer *v_cache_buffer,
+    const ullm_runtime_buffer *block_table_buffer,
+    size_t absolute_len, size_t cache_len, size_t cache_blocks, size_t history_rows,
+    ullm_runtime_buffer *snapshot_k_buffer, ullm_runtime_buffer *snapshot_v_buffer,
+    ullm_runtime_stream *stream) {
+    constexpr size_t width = 256u;
+    if (k_cache_buffer == nullptr || v_cache_buffer == nullptr || block_table_buffer == nullptr ||
+        snapshot_k_buffer == nullptr || snapshot_v_buffer == nullptr || cache_len == 0 ||
+        cache_blocks == 0 || history_rows > 511 || history_rows > cache_len || absolute_len < cache_len ||
+        !buffers_share_backend(k_cache_buffer, v_cache_buffer) ||
+        !buffers_share_backend(k_cache_buffer, block_table_buffer) ||
+        !buffers_share_backend(k_cache_buffer, snapshot_k_buffer) ||
+        !buffers_share_backend(k_cache_buffer, snapshot_v_buffer) ||
+        !stream_matches_buffer(snapshot_k_buffer, stream)) {
+        set_error("Gemma sliding snapshot gather received invalid buffers or geometry");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t cache_elements = cache_blocks * width;
+    const size_t table_bytes = cache_len * sizeof(std::uint32_t);
+    const size_t snapshot_bytes = history_rows * width * sizeof(float);
+    if (cache_elements > std::numeric_limits<size_t>::max() / sizeof(float) ||
+        k_cache_buffer->bytes < cache_elements * sizeof(float) ||
+        v_cache_buffer->bytes < cache_elements * sizeof(float) ||
+        block_table_buffer->bytes < table_bytes || snapshot_k_buffer->bytes < snapshot_bytes ||
+        snapshot_v_buffer->bytes < snapshot_bytes) {
+        set_error("Gemma sliding snapshot gather buffer is too small");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (history_rows == 0) {
+        set_error("");
+        return ULLM_STATUS_OK;
+    }
+    if (k_cache_buffer->backend == BackendKind::Cpu) {
+        const auto *k = static_cast<const float *>(k_cache_buffer->ptr);
+        const auto *v = static_cast<const float *>(v_cache_buffer->ptr);
+        const auto *table = static_cast<const std::uint32_t *>(block_table_buffer->ptr);
+        auto *snapshot_k = static_cast<float *>(snapshot_k_buffer->ptr);
+        auto *snapshot_v = static_cast<float *>(snapshot_v_buffer->ptr);
+        const size_t table_start = absolute_len - cache_len;
+        const size_t first = absolute_len - history_rows;
+        for (size_t row = 0; row < history_rows; ++row) {
+            const size_t physical = table[first + row - table_start];
+            if (physical >= cache_blocks) {
+                set_error("Gemma sliding snapshot gather table index is invalid");
+                return ULLM_STATUS_INVALID_ARGUMENT;
+            }
+            std::memcpy(snapshot_k + row * width, k + physical * width, width * sizeof(float));
+            std::memcpy(snapshot_v + row * width, v + physical * width, width * sizeof(float));
+        }
+        set_error("");
+        return ULLM_STATUS_OK;
+    }
+    std::string hip_error;
+    if (gemma_sliding_snapshot_gather_256_f32_hip_kernel(
+            k_cache_buffer, v_cache_buffer, block_table_buffer, absolute_len, cache_len, cache_blocks,
+            history_rows, snapshot_k_buffer, snapshot_v_buffer, stream, &hip_error)) {
+        set_error("");
+        return ULLM_STATUS_OK;
+    }
+    set_error(hip_error.empty() ? "Gemma sliding snapshot gather HIP kernel is unavailable" : hip_error.c_str());
+    return ULLM_STATUS_RUNTIME_ERROR;
+}
+ullm_status ullm_runtime_gemma_sliding_attn_batched_256_f32(
+    const ullm_runtime_buffer *q_buffer,
+    const ullm_runtime_buffer *snapshot_k_buffer,
+    const ullm_runtime_buffer *snapshot_v_buffer,
+    size_t prefix_len, size_t history_rows, size_t query_rows, size_t q_heads,
+    float softmax_scale, ullm_runtime_buffer *output_buffer, ullm_runtime_stream *stream) {
+    constexpr size_t width = 256u;
+    if (q_buffer == nullptr || snapshot_k_buffer == nullptr || snapshot_v_buffer == nullptr ||
+        output_buffer == nullptr || query_rows == 0 || query_rows > 128 || q_heads == 0 ||
+        history_rows > 511 || history_rows > prefix_len || !std::isfinite(softmax_scale) ||
+        softmax_scale <= 0.0f || !buffers_share_backend(q_buffer, snapshot_k_buffer) ||
+        !buffers_share_backend(q_buffer, snapshot_v_buffer) || !buffers_share_backend(q_buffer, output_buffer) ||
+        !stream_matches_buffer(output_buffer, stream)) {
+        set_error("Gemma sliding batched attention received invalid buffers or geometry");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t q_elements = query_rows * q_heads * width;
+    const size_t snapshot_elements = (history_rows + query_rows) * width;
+    if (q_elements > std::numeric_limits<size_t>::max() / sizeof(float) ||
+        snapshot_elements > std::numeric_limits<size_t>::max() / sizeof(float) ||
+        q_buffer->bytes < q_elements * sizeof(float) || output_buffer->bytes < q_elements * sizeof(float) ||
+        snapshot_k_buffer->bytes < snapshot_elements * sizeof(float) ||
+        snapshot_v_buffer->bytes < snapshot_elements * sizeof(float)) {
+        set_error("Gemma sliding batched attention buffer is too small");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (q_buffer->backend == BackendKind::Cpu) {
+        const auto *q = static_cast<const float *>(q_buffer->ptr);
+        const auto *k = static_cast<const float *>(snapshot_k_buffer->ptr);
+        const auto *v = static_cast<const float *>(snapshot_v_buffer->ptr);
+        auto *output = static_cast<float *>(output_buffer->ptr);
+        const size_t start = prefix_len - history_rows;
+        for (size_t row = 0; row < query_rows; ++row) for (size_t head = 0; head < q_heads; ++head) {
+            float maximum = -std::numeric_limits<float>::infinity(), denominator = 0.0f;
+            float weighted[width] = {};
+            for (size_t source = 0; source < history_rows + query_rows; ++source) {
+                const size_t key_pos = start + source, query_pos = prefix_len + row;
+                if (key_pos > query_pos || key_pos + 511 < query_pos) continue;
+                float dot = 0.0f;
+                for (size_t dim = 0; dim < width; ++dim) dot += q[(row * q_heads + head) * width + dim] * k[source * width + dim];
+                const float score = dot * softmax_scale, next = std::max(maximum, score);
+                const float scale = std::isfinite(maximum) ? std::exp(maximum - next) : 0.0f;
+                const float weight = std::exp(score - next);
+                for (size_t dim = 0; dim < width; ++dim) weighted[dim] = weighted[dim] * scale + weight * v[source * width + dim];
+                maximum = next; denominator = denominator * scale + weight;
+            }
+            for (size_t dim = 0; dim < width; ++dim) output[(row * q_heads + head) * width + dim] = weighted[dim] / denominator;
+        }
+        set_error("");
+        return ULLM_STATUS_OK;
+    }
+    std::string hip_error;
+    if (gemma_sliding_attn_batched_256_f32_hip_kernel(
+            q_buffer, snapshot_k_buffer, snapshot_v_buffer, prefix_len, history_rows, query_rows,
+            q_heads, softmax_scale, output_buffer, stream, &hip_error)) {
+        set_error("");
+        return ULLM_STATUS_OK;
+    }
+    set_error(hip_error.empty() ? "Gemma sliding batched attention HIP kernel is unavailable" : hip_error.c_str());
     return ULLM_STATUS_RUNTIME_ERROR;
 }
 static ullm_status paged_decode_attn_typed_f32_hip_staging(

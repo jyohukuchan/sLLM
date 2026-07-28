@@ -8,7 +8,7 @@
 //! measurement window, and records the exact cache/no-cache and sliding-window
 //! checks used for the resident execution path.
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::env;
 use std::fs::{self, File};
 use std::io::Write;
@@ -962,19 +962,16 @@ fn attention_profile_workload(
     }))
 }
 
-/// The profiling workload reports *physical reader launches*.  The 28 local
-/// layers remain M=1, while the promoted full-attention path emits one reader
-/// per query tile.  Keep the legacy count when the documented rollback is
-/// active so this diagnostic validates either execution route honestly.
+/// The profiling workload reports *physical reader launches*.  Both Gemma-only
+/// batched readers emit one launch per layer/chunk; the rollback deliberately
+/// restores the legacy M=1 count for an apples-to-apples escape hatch.
 fn expected_prefill_reader_calls(prompt_tokens: usize) -> Result<usize, String> {
-    let sliding = prompt_tokens
-        .checked_mul(GEMMA4_SLIDING_ATTENTION_LAYERS)
-        .ok_or_else(|| "sliding reader launch count overflows usize".to_string())?;
-    let full = if env::var("ULLM_GEMMA4_PREFILL_LAYER_MAJOR").ok().as_deref() == Some("0") {
-        prompt_tokens
-            .checked_mul(GEMMA4_FULL_ATTENTION_LAYERS)
-            .ok_or_else(|| "full reader launch count overflows usize".to_string())?
-    } else {
+    if env::var("ULLM_GEMMA4_PREFILL_LAYER_MAJOR").ok().as_deref() == Some("0") {
+        return prompt_tokens
+            .checked_mul(GEMMA4_SLIDING_ATTENTION_LAYERS + GEMMA4_FULL_ATTENTION_LAYERS)
+            .ok_or_else(|| "legacy reader launch count overflows usize".to_string());
+    }
+    let tiles = {
         let tile_tokens = match env::var("ULLM_GEMMA4_PREFILL_ACTIVATION_CHUNK_TOKENS") {
             Ok(value) => value.parse::<usize>().map_err(|_| {
                 "ULLM_GEMMA4_PREFILL_ACTIVATION_CHUNK_TOKENS must be an integer".to_string()
@@ -991,14 +988,11 @@ fn expected_prefill_reader_calls(prompt_tokens: usize) -> Result<usize, String> 
                 "ULLM_GEMMA4_PREFILL_ACTIVATION_CHUNK_TOKENS must be in 1..={GEMMA4_PREFILL_QUERY_TILE_TOKENS}, got {tile_tokens}"
             ));
         }
-        prompt_tokens
-            .div_ceil(tile_tokens)
-            .checked_mul(GEMMA4_FULL_ATTENTION_LAYERS)
-            .ok_or_else(|| "batched full reader launch count overflows usize".to_string())?
+        prompt_tokens.div_ceil(tile_tokens)
     };
-    sliding
-        .checked_add(full)
-        .ok_or_else(|| "total reader launch count overflows usize".to_string())
+    tiles
+        .checked_mul(GEMMA4_SLIDING_ATTENTION_LAYERS + GEMMA4_FULL_ATTENTION_LAYERS)
+        .ok_or_else(|| "batched reader launch count overflows usize".to_string())
 }
 
 fn benchmark_workload(
@@ -1165,6 +1159,7 @@ fn logical_bytes_json(bytes: Gemma4ResidentLogicalBytes) -> Result<Value, String
         "bf16_weight_bytes": bytes.bf16_weight_bytes,
         "kv_read_bytes": bytes.kv_read_bytes,
         "kv_write_bytes": bytes.kv_write_bytes,
+        "kv_snapshot_bytes": bytes.kv_snapshot_bytes,
         "total_bytes": bytes.total_bytes()?,
         "matvec_calls": bytes.matvec_calls,
         "bf16_row_reads": bytes.bf16_row_reads,
