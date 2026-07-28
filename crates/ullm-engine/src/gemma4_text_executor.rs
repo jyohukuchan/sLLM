@@ -74,6 +74,14 @@ const GEMMA4_DISABLE_PLE_REGION_ENV: &str = "ULLM_GEMMA4_DISABLE_PLE_REGION";
 /// promoted by default after full-model validation; set this to `0` for the
 /// byte-identical token-major rollback route.
 const GEMMA4_PREFILL_LAYER_MAJOR_ENV: &str = "ULLM_GEMMA4_PREFILL_LAYER_MAJOR";
+/// The experimental local-reader snapshot route is deliberately independent
+/// from the promoted layer-major/full-reader switch.  Keep it off until its
+/// rollover and end-to-end GPU contracts have been demonstrated.
+const GEMMA4_PREFILL_SLIDING_BATCHED_ENV: &str = "ULLM_GEMMA4_PREFILL_SLIDING_BATCHED";
+
+fn gemma4_prefill_sliding_batched_enabled() -> bool {
+    env::var(GEMMA4_PREFILL_SLIDING_BATCHED_ENV).ok().as_deref() == Some("1")
+}
 
 /// Gemma4 E2B's seven 512-wide full-context attention layers.  All remaining
 /// decoder attention layers are 256-wide sliding-window layers.
@@ -4749,8 +4757,18 @@ impl Gemma4TextExecutor {
                 attention.kv_heads,
                 attention.head_dim,
             )?
-        } else {
+        } else if gemma4_prefill_sliding_batched_enabled() {
             self.prefill_sliding_attention_batched_256_causal(
+                layer_index,
+                source_layer,
+                own_kv.as_ref(),
+                &queries,
+                attention.q_heads,
+                attention.kv_heads,
+                attention.head_dim,
+            )?
+        } else {
+            self.prefill_attention_m1_causal(
                 layer_index,
                 source_layer,
                 own_kv.as_ref(),

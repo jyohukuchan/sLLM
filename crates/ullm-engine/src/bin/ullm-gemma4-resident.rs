@@ -8,7 +8,7 @@
 //! measurement window, and records the exact cache/no-cache and sliding-window
 //! checks used for the resident execution path.
 
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use std::env;
 use std::fs::{self, File};
 use std::io::Write;
@@ -962,9 +962,9 @@ fn attention_profile_workload(
     }))
 }
 
-/// The profiling workload reports *physical reader launches*.  Both Gemma-only
-/// batched readers emit one launch per layer/chunk; the rollback deliberately
-/// restores the legacy M=1 count for an apples-to-apples escape hatch.
+/// The profiling workload reports *physical reader launches*.  The promoted
+/// full reader is tiled, while the sliding reader stays M=1 unless its
+/// separately gated experiment is explicitly enabled.
 fn expected_prefill_reader_calls(prompt_tokens: usize) -> Result<usize, String> {
     if env::var("ULLM_GEMMA4_PREFILL_LAYER_MAJOR").ok().as_deref() == Some("0") {
         return prompt_tokens
@@ -990,9 +990,25 @@ fn expected_prefill_reader_calls(prompt_tokens: usize) -> Result<usize, String> 
         }
         prompt_tokens.div_ceil(tile_tokens)
     };
-    tiles
-        .checked_mul(GEMMA4_SLIDING_ATTENTION_LAYERS + GEMMA4_FULL_ATTENTION_LAYERS)
-        .ok_or_else(|| "batched reader launch count overflows usize".to_string())
+    let sliding = if env::var("ULLM_GEMMA4_PREFILL_SLIDING_BATCHED")
+        .ok()
+        .as_deref()
+        == Some("1")
+    {
+        tiles
+            .checked_mul(GEMMA4_SLIDING_ATTENTION_LAYERS)
+            .ok_or_else(|| "batched sliding reader launch count overflows usize".to_string())?
+    } else {
+        prompt_tokens
+            .checked_mul(GEMMA4_SLIDING_ATTENTION_LAYERS)
+            .ok_or_else(|| "legacy sliding reader launch count overflows usize".to_string())?
+    };
+    let full = tiles
+        .checked_mul(GEMMA4_FULL_ATTENTION_LAYERS)
+        .ok_or_else(|| "batched full reader launch count overflows usize".to_string())?;
+    sliding
+        .checked_add(full)
+        .ok_or_else(|| "total reader launch count overflows usize".to_string())
 }
 
 fn benchmark_workload(
