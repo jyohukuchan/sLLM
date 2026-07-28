@@ -279,6 +279,10 @@ fn run(options: Options) -> Result<(), String> {
     let after_load_telemetry = capture_telemetry();
     let cooldown = wait_for_cooldown(options.cooldown_hotspot_c, options.cooldown_timeout_seconds)?;
     let before_workload_telemetry = capture_telemetry();
+    // Validation probes temporarily enable and then restore individual
+    // dispatch controls.  Preserve the caller's exact launch configuration
+    // before they run so the evidence cannot misleadingly report a rollback.
+    let environment = driver_environment_json();
 
     let workload = match options.mode {
         Mode::Validation => validation_workload(&mut executor)?,
@@ -335,18 +339,7 @@ fn run(options: Options) -> Result<(), String> {
             "compute": [device.compute_major, device.compute_minor],
             "total_global_mem_bytes": device.total_global_mem,
         },
-        "environment": {
-            "HIP_VISIBLE_DEVICES": env::var("HIP_VISIBLE_DEVICES").ok(),
-            "ULLM_HIP_VISIBLE_DEVICES": env::var("ULLM_HIP_VISIBLE_DEVICES").ok(),
-            "ULLM_REQUIRE_HIP_BF16_MATVEC_KERNEL": env::var("ULLM_REQUIRE_HIP_BF16_MATVEC_KERNEL").ok(),
-            "ULLM_REQUIRE_HIP_BF16_ROW_KERNEL": env::var("ULLM_REQUIRE_HIP_BF16_ROW_KERNEL").ok(),
-            "ULLM_REQUIRE_HIP_PAGED_DECODE_ATTN_KERNEL": env::var("ULLM_REQUIRE_HIP_PAGED_DECODE_ATTN_KERNEL").ok(),
-            "ULLM_REQUIRE_HIP_PAGED_KV_WRITE_KERNEL": env::var("ULLM_REQUIRE_HIP_PAGED_KV_WRITE_KERNEL").ok(),
-            "ULLM_REQUIRE_HIP_RMSNORM_KERNEL": env::var("ULLM_REQUIRE_HIP_RMSNORM_KERNEL").ok(),
-            "ULLM_REQUIRE_HIP_ADD_KERNEL": env::var("ULLM_REQUIRE_HIP_ADD_KERNEL").ok(),
-            "ULLM_REQUIRE_HIP_ROPE_KERNEL": env::var("ULLM_REQUIRE_HIP_ROPE_KERNEL").ok(),
-            "ULLM_REQUIRE_HIP_GEMMA_PROPORTIONAL_ROPE_KERNEL": env::var("ULLM_REQUIRE_HIP_GEMMA_PROPORTIONAL_ROPE_KERNEL").ok(),
-        },
+        "environment": environment,
         "preflight": preflight,
         "cooldown": cooldown,
         "telemetry": {
@@ -423,14 +416,52 @@ fn continuation_workload(
             &generated[..CAPITAL_FRANCE.expected_generated_token_ids.len()]
         ));
     }
+    let final_position = executor.position();
+    let ring_rollover = if continuation_tokens >= executor.config().sliding_window {
+        let snapshot = executor
+            .resident_kv_cache_snapshot()?
+            .ok_or_else(|| "continuation has no device K/V snapshot".to_string())?;
+        assert_sliding_boundary_state(&snapshot, executor.config().sliding_window, final_position)?;
+        json!({
+            "result": "passed",
+            "sliding_window": executor.config().sliding_window,
+            "final_position": final_position,
+            "method": "cached M=1 decode continued beyond the sliding-ring capacity and every sliding source retained capacity/window cache_len with the exact absolute position",
+        })
+    } else {
+        json!({
+            "result": "not-requested",
+            "minimum_continuation_tokens": executor.config().sliding_window,
+        })
+    };
     Ok(json!({
         "kind": "known-good-cached-continuation",
         "initial_token_ids": CAPITAL_FRANCE.initial_token_ids,
         "expected_first_four_generated_token_ids_from_bl_trace": CAPITAL_FRANCE.expected_generated_token_ids,
         "generated_token_ids": generated,
         "first_four_match_bl_trace": true,
+        "ring_rollover": ring_rollover,
         "cached_decode": generation.json,
     }))
+}
+
+fn driver_environment_json() -> Value {
+    json!({
+        "HIP_VISIBLE_DEVICES": env::var("HIP_VISIBLE_DEVICES").ok(),
+        "ULLM_HIP_VISIBLE_DEVICES": env::var("ULLM_HIP_VISIBLE_DEVICES").ok(),
+        "ULLM_REQUIRE_HIP_BF16_MATVEC_KERNEL": env::var("ULLM_REQUIRE_HIP_BF16_MATVEC_KERNEL").ok(),
+        "ULLM_REQUIRE_HIP_BF16_ROW_KERNEL": env::var("ULLM_REQUIRE_HIP_BF16_ROW_KERNEL").ok(),
+        "ULLM_REQUIRE_HIP_PAGED_DECODE_ATTN_KERNEL": env::var("ULLM_REQUIRE_HIP_PAGED_DECODE_ATTN_KERNEL").ok(),
+        "ULLM_REQUIRE_HIP_PAGED_KV_WRITE_KERNEL": env::var("ULLM_REQUIRE_HIP_PAGED_KV_WRITE_KERNEL").ok(),
+        "ULLM_REQUIRE_HIP_RMSNORM_KERNEL": env::var("ULLM_REQUIRE_HIP_RMSNORM_KERNEL").ok(),
+        "ULLM_REQUIRE_HIP_ADD_KERNEL": env::var("ULLM_REQUIRE_HIP_ADD_KERNEL").ok(),
+        "ULLM_REQUIRE_HIP_ROPE_KERNEL": env::var("ULLM_REQUIRE_HIP_ROPE_KERNEL").ok(),
+        "ULLM_REQUIRE_HIP_GEMMA_PROPORTIONAL_ROPE_KERNEL": env::var("ULLM_REQUIRE_HIP_GEMMA_PROPORTIONAL_ROPE_KERNEL").ok(),
+        "ULLM_GEMMA4_PREFILL_LAYER_MAJOR": env::var("ULLM_GEMMA4_PREFILL_LAYER_MAJOR").ok(),
+        "ULLM_GEMMA4_PREFILL_SLIDING_RING_BATCHED": env::var("ULLM_GEMMA4_PREFILL_SLIDING_RING_BATCHED").ok(),
+        "ULLM_GEMMA4_FULL_ATTN_SPLIT_KV": env::var("ULLM_GEMMA4_FULL_ATTN_SPLIT_KV").ok(),
+        "ULLM_GEMMA4_SLIDING_ATTN_SPLIT_KV": env::var("ULLM_GEMMA4_SLIDING_ATTN_SPLIT_KV").ok(),
+    })
 }
 
 fn preflight() -> Result<Value, String> {
@@ -704,24 +735,31 @@ fn causal_mask_sliding_window_probe(executor: &mut Gemma4TextExecutor) -> Result
     }))
 }
 
-/// Deliberately changes only token 2.  Rows 0 and 1 are therefore identical
-/// inputs at identical positions.  If a batched reader accidentally exposes
-/// the pre-written third K/V row, either prefix row can change and this probe
-/// fails before any plausible-looking continuation can hide the leak.
+/// Changes only key j+1 in a complete query tile.  Query j is identical in
+/// both inputs, so a batched reader that exposes a future K/V row fails before
+/// any plausible-looking continuation can hide the leak.
 fn causal_mask_future_token_probe(executor: &mut Gemma4TextExecutor) -> Result<Value, String> {
-    const PREFIX: [u32; 2] = [2, 818];
+    // M=3 used to exercise the M=1 fallback because split-KV intentionally
+    // starts at M=4.  A complete tile instead reaches the ring split reader.
+    const PROMPT_TOKENS: usize = GEMMA4_PREFILL_QUERY_TILE_TOKENS;
+    const QUERY_INDEX: usize = 64;
+    const FUTURE_INDEX: usize = QUERY_INDEX + 1;
     const FIRST_FUTURE: u32 = 5279;
     const SECOND_FUTURE: u32 = 7001;
     unsafe { env::set_var("ULLM_GEMMA4_PREFILL_LAYER_MAJOR", "1") };
+    unsafe { env::set_var("ULLM_GEMMA4_PREFILL_SLIDING_RING_BATCHED", "1") };
+    let mut tokens = vec![2_u32; PROMPT_TOKENS];
+    tokens[FUTURE_INDEX] = FIRST_FUTURE;
     executor.reset();
-    let first = executor.prefill(&[PREFIX[0], PREFIX[1], FIRST_FUTURE])?;
+    let first = executor.prefill(&tokens)?;
+    tokens[FUTURE_INDEX] = SECOND_FUTURE;
     executor.reset();
-    let second = executor.prefill(&[PREFIX[0], PREFIX[1], SECOND_FUTURE])?;
+    let second = executor.prefill(&tokens)?;
     let hidden = executor.config().decoder.hidden_size;
-    let prefix_elements = PREFIX
-        .len()
+    let query_range = QUERY_INDEX
         .checked_mul(hidden)
-        .ok_or_else(|| "causal-mask prefix width overflows".to_string())?;
+        .and_then(|start| start.checked_add(hidden).map(|end| start..end))
+        .ok_or_else(|| "causal-mask query width overflows".to_string())?;
     let mut max_abs = 0.0_f32;
     let mut max_rel = 0.0_f32;
     for (layer, (first_layer, second_layer)) in first
@@ -731,12 +769,12 @@ fn causal_mask_future_token_probe(executor: &mut Gemma4TextExecutor) -> Result<V
         .enumerate()
     {
         let (abs, rel) = max_error(
-            first_layer[..prefix_elements].iter().copied(),
-            second_layer[..prefix_elements].iter().copied(),
+            first_layer[query_range.clone()].iter().copied(),
+            second_layer[query_range.clone()].iter().copied(),
         )?;
         if abs != 0.0 {
             return Err(format!(
-                "causal-mask future-token probe failed at layer {layer}: changing token 2 changed an earlier row (max_abs={abs}, max_rel={rel})"
+                "causal-mask future-token probe failed at layer {layer}: changing key {FUTURE_INDEX} changed query {QUERY_INDEX} (max_abs={abs}, max_rel={rel})"
             ));
         }
         max_abs = max_abs.max(abs);
@@ -744,14 +782,16 @@ fn causal_mask_future_token_probe(executor: &mut Gemma4TextExecutor) -> Result<V
     }
     let output = json!({
         "result": "passed",
-        "method": "Two three-token batched prefills differ only in the final token; every layer output for token rows 0 and 1 must be bit-identical.",
-        "first_input_token_ids": [PREFIX[0], PREFIX[1], FIRST_FUTURE],
-        "second_input_token_ids": [PREFIX[0], PREFIX[1], SECOND_FUTURE],
-        "checked_prefix_rows": PREFIX.len(),
-        "required_cache_lengths": [1, 2],
-        "layer_output_prefix_max_abs": max_abs,
-        "layer_output_prefix_max_rel": max_rel,
+        "method": "Two 128-token M=128 prefills differ only at key j+1. Query j must be bit-identical in every layer; this reaches the ring-batched split reader rather than the M=1 fallback.",
+        "query_index": QUERY_INDEX,
+        "excluded_future_key_index": FUTURE_INDEX,
+        "first_future_token_id": FIRST_FUTURE,
+        "second_future_token_id": SECOND_FUTURE,
+        "prefill_chunk_rows": PROMPT_TOKENS,
+        "layer_output_query_max_abs": max_abs,
+        "layer_output_query_max_rel": max_rel,
     });
+    unsafe { env::remove_var("ULLM_GEMMA4_PREFILL_SLIDING_RING_BATCHED") };
     unsafe { env::remove_var("ULLM_GEMMA4_PREFILL_LAYER_MAJOR") };
     Ok(output)
 }
