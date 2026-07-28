@@ -1196,6 +1196,11 @@ fn host_profile_json(profile: Gemma4ResidentHostProfile) -> Value {
         "stream_synchronize_ns": profile.stream_synchronize_ns,
         "output_decode_validate_ns": profile.output_decode_validate_ns,
         "kv_table_host_ns": profile.kv_table_host_ns,
+        "gemma_batched_matmul": {
+            "primitive_ns": profile.gemma_batched_matmul_ns,
+            "calls": profile.gemma_batched_matmul_calls,
+            "units": "nanoseconds measured with std::time::Instant; end-to-end host round trip including H2D, kernel, D2H, and synchronization",
+        },
         "calls": {
             "matvec": profile.matvec_calls,
             "row": profile.row_calls,
@@ -1223,6 +1228,30 @@ fn host_profile_json(profile: Gemma4ResidentHostProfile) -> Value {
                 "geometry": "8Q/1KV/512/512, full context",
             },
         },
+        "attention_components": {
+            "units": "nanoseconds measured with std::time::Instant; reader_round_trip_ns includes reader staging, kernel, D2H, and its final stream synchronization; GPU-kernel-only reader time is measured separately with rocprof",
+            "sliding": attention_component_host_profile_json(profile.attention_components.sliding),
+            "full": attention_component_host_profile_json(profile.attention_components.full),
+        },
+    })
+}
+
+fn attention_component_host_profile_json(
+    profile: ullm_engine::gemma4_text_executor::Gemma4ResidentAttentionComponentHostProfile,
+) -> Value {
+    json!({
+        "input_rms_norm_ns": profile.input_rms_norm_ns,
+        "q_projection_ns": profile.q_projection_ns,
+        "k_projection_ns": profile.k_projection_ns,
+        "v_projection_ns": profile.v_projection_ns,
+        "rope_and_head_norm_ns": profile.rope_and_head_norm_ns,
+        "kv_write_ns": profile.kv_write_ns,
+        "reader_round_trip_ns": profile.reader_round_trip_ns,
+        "output_projection_ns": profile.output_projection_ns,
+        "post_attention_norm_ns": profile.post_attention_norm_ns,
+        "residual_ns": profile.residual_ns,
+        "residual_host_or_sync_ns": profile.residual_host_or_sync_ns,
+        "calls": profile.calls,
     })
 }
 

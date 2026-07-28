@@ -319,6 +319,76 @@ pub struct Gemma4ResidentAttentionRegionHostProfile {
     pub full_calls: u64,
 }
 
+/// Non-semantic wall-clock attribution inside the complete attention region.
+/// `reader_round_trip_ns` covers the reader invocation through the host copy
+/// and stream synchronization; its GPU-kernel-only duration is intentionally
+/// collected by rocprof rather than inferred from a host clock.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Gemma4ResidentAttentionComponentHostProfile {
+    pub input_rms_norm_ns: u64,
+    pub q_projection_ns: u64,
+    pub k_projection_ns: u64,
+    pub v_projection_ns: u64,
+    pub rope_and_head_norm_ns: u64,
+    pub kv_write_ns: u64,
+    pub reader_round_trip_ns: u64,
+    pub output_projection_ns: u64,
+    pub post_attention_norm_ns: u64,
+    pub residual_ns: u64,
+    pub residual_host_or_sync_ns: u64,
+    pub calls: u64,
+}
+
+impl Gemma4ResidentAttentionComponentHostProfile {
+    fn record(&mut self, components: Gemma4ResidentAttentionComponentHostProfile, region_ns: u64) {
+        self.input_rms_norm_ns = self.input_rms_norm_ns.saturating_add(components.input_rms_norm_ns);
+        self.q_projection_ns = self.q_projection_ns.saturating_add(components.q_projection_ns);
+        self.k_projection_ns = self.k_projection_ns.saturating_add(components.k_projection_ns);
+        self.v_projection_ns = self.v_projection_ns.saturating_add(components.v_projection_ns);
+        self.rope_and_head_norm_ns = self.rope_and_head_norm_ns.saturating_add(components.rope_and_head_norm_ns);
+        self.kv_write_ns = self.kv_write_ns.saturating_add(components.kv_write_ns);
+        self.reader_round_trip_ns = self.reader_round_trip_ns.saturating_add(components.reader_round_trip_ns);
+        self.output_projection_ns = self.output_projection_ns.saturating_add(components.output_projection_ns);
+        self.post_attention_norm_ns = self.post_attention_norm_ns.saturating_add(components.post_attention_norm_ns);
+        self.residual_ns = self.residual_ns.saturating_add(components.residual_ns);
+        let accounted = components.input_rms_norm_ns
+            .saturating_add(components.q_projection_ns)
+            .saturating_add(components.k_projection_ns)
+            .saturating_add(components.v_projection_ns)
+            .saturating_add(components.rope_and_head_norm_ns)
+            .saturating_add(components.kv_write_ns)
+            .saturating_add(components.reader_round_trip_ns)
+            .saturating_add(components.output_projection_ns)
+            .saturating_add(components.post_attention_norm_ns)
+            .saturating_add(components.residual_ns);
+        self.residual_host_or_sync_ns = self.residual_host_or_sync_ns
+            .saturating_add(region_ns.saturating_sub(accounted));
+        self.calls = self.calls.saturating_add(1);
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Gemma4ResidentAttentionComponentsHostProfile {
+    pub sliding: Gemma4ResidentAttentionComponentHostProfile,
+    pub full: Gemma4ResidentAttentionComponentHostProfile,
+}
+
+impl Gemma4ResidentAttentionComponentsHostProfile {
+    fn record(
+        &mut self,
+        layer_index: usize,
+        components: Gemma4ResidentAttentionComponentHostProfile,
+        region_ns: u64,
+    ) {
+        let profile = if gemma4_is_full_attention_layer(layer_index) {
+            &mut self.full
+        } else {
+            &mut self.sliding
+        };
+        profile.record(components, region_ns);
+    }
+}
+
 impl Gemma4ResidentAttentionRegionHostProfile {
     fn record(&mut self, layer_index: usize, elapsed_ns: u64) {
         if gemma4_is_full_attention_layer(layer_index) {
@@ -382,6 +452,11 @@ pub struct Gemma4ResidentHostProfile {
     pub row_calls: u64,
     pub attention_calls: u64,
     pub kv_write_calls: u64,
+    /// End-to-end host time of Gemma's batched BF16 `[M,K] x [N,K]`
+    /// primitive.  This is deliberately separate from the legacy M=1
+    /// `matvec` profile so the current M>1 candidate can be attributed.
+    pub gemma_batched_matmul_ns: u64,
+    pub gemma_batched_matmul_calls: u64,
     /// Per-operation decomposition of the aggregate fields above.  This is
     /// deliberately separate so old consumers of the aggregate contract stay
     /// valid while the port order is measured from actual D2H/sync costs.
@@ -392,6 +467,10 @@ pub struct Gemma4ResidentHostProfile {
     /// local/full architecture.  It is diagnostic-only and does not change
     /// the execution graph.
     pub attention_region: Gemma4ResidentAttentionRegionHostProfile,
+    /// Component timing for the layer-major prefill attention region.  This
+    /// only reads the monotonic host clock and leaves the execution graph
+    /// unchanged.
+    pub attention_components: Gemma4ResidentAttentionComponentsHostProfile,
     pub kv_write: Gemma4ResidentPrimitiveHostProfile,
 }
 
@@ -1628,6 +1707,7 @@ impl Bf16MatvecRuntime {
         batch_count: usize,
         input: &[f32],
     ) -> Result<Vec<f32>, String> {
+        let operation_started = Instant::now();
         let expected_input = batch_count
             .checked_mul(columns)
             .ok_or_else(|| "Gemma BF16 matmul input element count overflows".to_string())?;
@@ -1697,6 +1777,14 @@ impl Bf16MatvecRuntime {
             })?,
             true,
         )?;
+        self.resident_host_profile.gemma_batched_matmul_ns = self
+            .resident_host_profile
+            .gemma_batched_matmul_ns
+            .saturating_add(elapsed_ns(operation_started));
+        self.resident_host_profile.gemma_batched_matmul_calls = self
+            .resident_host_profile
+            .gemma_batched_matmul_calls
+            .saturating_add(1);
         Ok(output)
     }
 
@@ -4434,6 +4522,7 @@ impl Gemma4TextExecutor {
         // This spans the same attention-side work (input norm through the
         // post-attention residual) but records once per batched layer chunk.
         let attention_region_started = Instant::now();
+        let mut attention_components = Gemma4ResidentAttentionComponentHostProfile::default();
         let q_width = attention
             .q_heads
             .checked_mul(attention.head_dim)
@@ -4447,6 +4536,7 @@ impl Gemma4TextExecutor {
             .clone()
             .ok_or_else(|| format!("Gemma4 descriptor layer {layer_index} is missing RoPE"))?;
 
+        let input_norm_started = Instant::now();
         let input_weight = self.read_weight_vector(
             &layer_tensor(layer_index, "input_layernorm.weight"),
             hidden,
@@ -4459,6 +4549,8 @@ impl Gemma4TextExecutor {
                 decoder.rms_norm_epsilon,
             )?);
         }
+        attention_components.input_rms_norm_ns = elapsed_ns(input_norm_started);
+        let q_projection_started = Instant::now();
         let q_raw = self.matmul_named_batched(
             &layer_tensor(layer_index, "self_attn.q_proj.weight"),
             q_width,
@@ -4466,6 +4558,8 @@ impl Gemma4TextExecutor {
             rows,
             &input_norm,
         )?;
+        attention_components.q_projection_ns = elapsed_ns(q_projection_started);
+        let q_rope_started = Instant::now();
         let q_weight = self.read_weight_vector(
             &layer_tensor(layer_index, "self_attn.q_norm.weight"),
             attention.head_dim,
@@ -4498,6 +4592,7 @@ impl Gemma4TextExecutor {
             )?;
             queries.extend_from_slice(&q);
         }
+        attention_components.rope_and_head_norm_ns = elapsed_ns(q_rope_started);
 
         let source_layer = match attention.kv_cache {
             ResidentKvCacheMode::Own => None,
@@ -4507,6 +4602,7 @@ impl Gemma4TextExecutor {
             }
         };
         let own_kv = if source_layer.is_none() {
+            let k_projection_started = Instant::now();
             let k_raw = self.matmul_named_batched(
                 &layer_tensor(layer_index, "self_attn.k_proj.weight"),
                 kv_width,
@@ -4514,6 +4610,8 @@ impl Gemma4TextExecutor {
                 rows,
                 &input_norm,
             )?;
+            attention_components.k_projection_ns = elapsed_ns(k_projection_started);
+            let v_projection_started = Instant::now();
             let v_raw = self.matmul_named_batched(
                 &layer_tensor(layer_index, "self_attn.v_proj.weight"),
                 kv_width,
@@ -4521,6 +4619,8 @@ impl Gemma4TextExecutor {
                 rows,
                 &input_norm,
             )?;
+            attention_components.v_projection_ns = elapsed_ns(v_projection_started);
+            let kv_rope_started = Instant::now();
             let k_weight = self.read_weight_vector(
                 &layer_tensor(layer_index, "self_attn.k_norm.weight"),
                 attention.head_dim,
@@ -4562,11 +4662,14 @@ impl Gemma4TextExecutor {
                     decoder.rms_norm_epsilon,
                 )?);
             }
+            attention_components.rope_and_head_norm_ns = attention_components
+                .rope_and_head_norm_ns
+                .saturating_add(elapsed_ns(kv_rope_started));
             Some((keys, values))
         } else {
             None
         };
-        let attention_output = if gemma4_is_full_attention_layer(layer_index) {
+        let attention_reader = if gemma4_is_full_attention_layer(layer_index) {
             self.prefill_full_attention_batched_512_causal(
                 layer_index,
                 source_layer,
@@ -4597,13 +4700,18 @@ impl Gemma4TextExecutor {
                 attention.head_dim,
             )?
         };
+        attention_components.kv_write_ns = attention_reader.kv_write_ns;
+        attention_components.reader_round_trip_ns = attention_reader.reader_round_trip_ns;
+        let output_projection_started = Instant::now();
         let output_projection = self.matmul_named_batched(
             &layer_tensor(layer_index, "self_attn.o_proj.weight"),
             hidden,
             q_width,
             rows,
-            &attention_output,
+            &attention_reader.output,
         )?;
+        attention_components.output_projection_ns = elapsed_ns(output_projection_started);
+        let post_attention_norm_started = Instant::now();
         let post_attention_weight = self.read_weight_vector(
             &layer_tensor(layer_index, "post_attention_layernorm.weight"),
             hidden,
@@ -4616,16 +4724,29 @@ impl Gemma4TextExecutor {
                 Some(&post_attention_weight),
                 decoder.rms_norm_epsilon,
             )?;
+            let residual_started = Instant::now();
             attention_residual.extend_from_slice(&add_vectors(
                 &states[range],
                 &post,
                 "Gemma4 batched attention residual",
             )?);
+            attention_components.residual_ns = attention_components
+                .residual_ns
+                .saturating_add(elapsed_ns(residual_started));
         }
+        // `post_attention_norm_started` intentionally includes the weight
+        // fetch and all rows; residual time is disjoint from it.
+        attention_components.post_attention_norm_ns = elapsed_ns(post_attention_norm_started)
+            .saturating_sub(attention_components.residual_ns);
+        let attention_region_ns = elapsed_ns(attention_region_started);
         self.matvec
             .resident_host_profile
             .attention_region
-            .record(layer_index, elapsed_ns(attention_region_started));
+            .record(layer_index, attention_region_ns);
+        self.matvec
+            .resident_host_profile
+            .attention_components
+            .record(layer_index, attention_components, attention_region_ns);
 
         let intermediate = match layer.mlp {
             ResidentMlpDescriptor::Dense { intermediate_size, .. } => intermediate_size,
@@ -5584,7 +5705,7 @@ impl Gemma4TextExecutor {
         q_heads: usize,
         kv_heads: usize,
         head_dim: usize,
-    ) -> Result<Vec<f32>, String> {
+    ) -> Result<Gemma4PrefillReaderOutput, String> {
         const WIDTH: usize = 256;
         if kv_heads != 1 || head_dim != WIDTH || q_heads != 8 ||
             queries.is_empty() || !queries.len().is_multiple_of(q_heads * WIDTH) {
@@ -5596,14 +5717,24 @@ impl Gemma4TextExecutor {
             Gemma4KvStorage::Device(caches) => caches,
             Gemma4KvStorage::Host(_) => return Err("Gemma sliding ring reader requires device K/V".into()),
         };
+        let kv_write_started = Instant::now();
         if let Some((keys, values)) = own_kv {
             let cache = caches.cache(source_layer)?;
             self.matvec.prepare_gemma_sliding_fresh(cache, keys, values, rows)?;
         } else if !self.matvec.sliding_fresh.contains_key(&source_layer) {
             return Err(format!("Gemma shared sliding layer {layer_index} needs fresh source-{source_layer} K/V"));
         }
+        let kv_write_ns = elapsed_ns(kv_write_started);
         let cache = caches.cache(source_layer)?;
-        self.matvec.gemma_sliding_attention_ring_batched_256(cache, source_layer, queries, q_heads)
+        let reader_started = Instant::now();
+        let output = self
+            .matvec
+            .gemma_sliding_attention_ring_batched_256(cache, source_layer, queries, q_heads)?;
+        Ok(Gemma4PrefillReaderOutput {
+            output,
+            kv_write_ns,
+            reader_round_trip_ns: elapsed_ns(reader_started),
+        })
     }
 
     /// Commits fresh local K/V only after every layer of the chunk completed.
@@ -5641,7 +5772,7 @@ impl Gemma4TextExecutor {
         q_heads: usize,
         kv_heads: usize,
         head_dim: usize,
-    ) -> Result<Vec<f32>, String> {
+    ) -> Result<Gemma4PrefillReaderOutput, String> {
         let query_width = q_heads
             .checked_mul(head_dim)
             .ok_or_else(|| "Gemma4 batched attention query width overflows".to_string())?;
@@ -5663,6 +5794,7 @@ impl Gemma4TextExecutor {
             Gemma4KvStorage::Host(_) => return Err("Gemma4 batched attention requires device K/V".into()),
         };
         let cache = caches.cache_mut(source_layer)?;
+        let kv_write_started = Instant::now();
         if let Some((keys, values)) = own_kv {
             let initial_absolute_len = cache.absolute_len;
             for row in 0..rows {
@@ -5683,11 +5815,13 @@ impl Gemma4TextExecutor {
                 "Gemma4 shared layer {layer_index} needs a full source-layer chunk from {source_layer} before attention"
             ));
         }
+        let kv_write_ns = elapsed_ns(kv_write_started);
         let first_visible_absolute_len = cache
             .absolute_len
             .checked_sub(rows)
             .ok_or_else(|| "Gemma4 batched attention source cache is shorter than chunk".to_string())?;
         let full_absolute_len = cache.absolute_len;
+        let reader_started = Instant::now();
         let mut output = Vec::with_capacity(queries.len());
         for (row, query) in queries.chunks_exact(query_width).enumerate() {
             let visible = first_visible_absolute_len
@@ -5707,7 +5841,11 @@ impl Gemma4TextExecutor {
             )?);
         }
         cache.set_read_window(full_absolute_len, &mut self.matvec.stream)?;
-        Ok(output)
+        Ok(Gemma4PrefillReaderOutput {
+            output,
+            kv_write_ns,
+            reader_round_trip_ns: elapsed_ns(reader_started),
+        })
     }
 
     /// Full-context-only batch reader.  The owning source writes the whole
@@ -5723,7 +5861,7 @@ impl Gemma4TextExecutor {
         q_heads: usize,
         kv_heads: usize,
         head_dim: usize,
-    ) -> Result<Vec<f32>, String> {
+    ) -> Result<Gemma4PrefillReaderOutput, String> {
         if q_heads != 8 || kv_heads != 1 || head_dim != 512 {
             return Err(format!(
                 "Gemma4 full batched reader only accepts 8Q/1KV/512, got {q_heads}Q/{kv_heads}KV/{head_dim}"
@@ -5741,6 +5879,7 @@ impl Gemma4TextExecutor {
         };
         let cache = caches.cache_mut(source_layer)?;
         let prefix_len = cache.absolute_len;
+        let kv_write_started = Instant::now();
         if let Some((keys, values)) = own_kv {
             let kv_width = kv_heads * head_dim;
             if keys.len() != rows * kv_width || values.len() != rows * kv_width {
@@ -5757,16 +5896,29 @@ impl Gemma4TextExecutor {
                 ));
             }
         }
+        let kv_write_ns = elapsed_ns(kv_write_started);
         let reader_prefix = if own_kv.is_some() { prefix_len } else { cache.absolute_len - rows };
         if cache.absolute_len != reader_prefix + rows || cache.is_sliding() {
             return Err(format!(
                 "Gemma4 full reader received incomplete or sliding source cache at layer {source_layer}"
             ));
         }
-        self.matvec.gemma_full_attention_batched_512(
+        let reader_started = Instant::now();
+        let output = self.matvec.gemma_full_attention_batched_512(
             cache, queries, reader_prefix, rows, 1.0,
-        )
+        )?;
+        Ok(Gemma4PrefillReaderOutput {
+            output,
+            kv_write_ns,
+            reader_round_trip_ns: elapsed_ns(reader_started),
+        })
     }
+}
+
+struct Gemma4PrefillReaderOutput {
+    output: Vec<f32>,
+    kv_write_ns: u64,
+    reader_round_trip_ns: u64,
 }
 
 fn per_layer_inputs_for_layer(

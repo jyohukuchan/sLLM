@@ -1,0 +1,8 @@
+W20260728 12:16:19.572343 132518514777792 simple_timer.cpp:55] [rocprofv3] tool initialization ::     0.002214 sec
+W20260728 12:16:19.572824 132518514777792 simple_timer.cpp:55] [rocprofv3] 'target/release/ullm-gemma4-resident --model-dir /home/homelab1/datapool/ai_models/safetensors/gemma-4-E2B --output benchmarks/results/2026-07-28/gemma4-reader-attribution-v0.1/raw/rocprof-profile-n128.json --mode attention-profile --benchmark-prompt-tokens 128 --benchmark-prompt-token-id 2 --cooldown-hotspot-c 55 --cooldown-timeout-seconds 900' ::     0.000000 sec
+W20260728 12:16:20.278561 132518514777792 tool.cpp:2422] HSA version 8.20.1 initialized (instance=0)
+W20260728 12:16:31.764705 132518514777792 simple_timer.cpp:55] [rocprofv3] 'target/release/ullm-gemma4-resident --model-dir /home/homelab1/datapool/ai_models/safetensors/gemma-4-E2B --output benchmarks/results/2026-07-28/gemma4-reader-attribution-v0.1/raw/rocprof-profile-n128.json --mode attention-profile --benchmark-prompt-tokens 128 --benchmark-prompt-token-id 2 --cooldown-hotspot-c 55 --cooldown-timeout-seconds 900' ::    12.191881 sec
+E20260728 12:16:31.785162 132518514777792 output_stream.cpp:111] Opened result file: benchmarks/results/2026-07-28/gemma4-reader-attribution-v0.1/raw/rocprof-n128/homelab1-WRX80-Creator/4108606_kernel_trace.csv
+E20260728 12:16:31.884989 132518514777792 output_stream.cpp:111] Opened result file: benchmarks/results/2026-07-28/gemma4-reader-attribution-v0.1/raw/rocprof-n128/homelab1-WRX80-Creator/4108606_agent_info.csv
+W20260728 12:16:31.888239 132518514777792 simple_timer.cpp:55] [rocprofv3] output generation ::     0.122291 sec
+W20260728 12:16:31.888297 132518514777792 simple_timer.cpp:55] [rocprofv3] tool finalization ::     0.122418 sec
