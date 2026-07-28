@@ -2,41 +2,74 @@
 
 ## Verdict
 
-The Gemma4 E2B BF16 resident path is substantially better. The previous
-statement that no further prefill change was justified was incomplete: the
-sliding direct-ring reader was left disabled, so its already-implemented
-split-KV path had never run. Session EG activated and measured that combination
-on the R9700, then promoted it with an explicit `=0` rollback.
+The Gemma4 E2B BF16 resident path is substantially better. The prior headline
+mixed multiple harnesses; this is the single definitive before/after record.
+It distinguishes measured throughput and trace attribution from derived Amdahl
+bounds; those bounds are not additive and are never performance forecasts.
 
-This document consolidates the completed effort. It distinguishes measured
-throughput and trace attribution from derived Amdahl bounds; those bounds are
-not additive and are never performance forecasts.
+## Definitive single-methodology result
 
-## Measurement contract and result
+All rows below come from
+`benchmarks/results/2026-07-28/gemma4-prefill-definitive-eh-v1.0/`: R9700
+only (amd-smi GPU 2 / HIP ordinal 1 / `gfx1201`), exclusive
+`flock /run/ullm/r9700.lock`, fixed token-id-2 prompts, an excluded warmup,
+then five timed prefills and five timed 128-token greedy decodes. Both uLLM
+endpoints are separate clean release builds with native `ullm-runtime-sys`
+recompiled; the pre-residency endpoint was not rerun after it had completed.
+`ullm-openai` was stopped during the window and restored after the lock was
+released. The promoted endpoint used its eight-kernel HIP no-host-staging
+guard contract, including the Gemma proportional-RoPE guard; the baseline and
+AQ4 fixture retain their own applicable guard contracts. Junction telemetry
+is retained for every timed invocation.
 
-All uLLM before/after throughput rows below are matched clean release builds,
-median of five runs, serialised with `flock /run/ullm/r9700.lock` on the
-R9700 only (amd-smi GPU 2, HIP ordinal 1, `gfx1201`). `ullm-openai` was
-stopped for the GPU window and restored afterward. The pre-residency baseline
-was built separately, rather than inferred by toggling a live binary. The
-benchmark uses the same fixed workload at each listed context.
+Each table cell is **median tok/s [min--max]** over five samples. uLLM medians
+are calculated from each run's elapsed time, rather than from the JSON
+aggregate field. llama.cpp was rerun serially in the same window with
+`gemma-4-E2B-BF16.gguf`, all layers offloaded, F32 K/V, Flash Attention off,
+the same context/batch settings and five repetitions. Its cells are likewise
+five-sample medians.
 
-The llama.cpp comparison is the matched-settings record for the same
-`gemma-4-E2B-BF16.gguf` on the same GPU: F32 K/V and Flash Attention off.
-It is a comparison reference, not evidence that uLLM and llama.cpp share
-implementation or sampling noise. Ratios are llama.cpp tok/s divided by the
-final uLLM tok/s.
+| context | baseline prefill | promoted prefill | gain | llama.cpp prefill | llama/promoted |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 128 | 11.8605 [11.6730--11.9851] | 57.1927 [56.2093--59.7086] | 4.82x | 4,103.23 [2,289.29--4,136.93] | 71.74x |
+| 512 | 5.5396 [5.5380--5.5627] | 56.0942 [55.7158--58.4627] | 10.13x | 7,775.90 [6,047.54--7,876.10] | 138.62x |
+| 2048 | 1.8191 [1.8187--1.8202] | 53.8293 [52.7666--54.7036] | 29.59x | 6,350.10 [6,004.97--6,380.41] | 117.97x |
 
-| context | pre-residency prefill | final prefill | gain | llama.cpp prefill | llama/uLLM | pre-residency decode | final decode | gain | llama.cpp decode | llama/uLLM |
-| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 128 | 12.047 | 59.02 | 4.90x | 3,858.17 | 65.4x | 6.596 | 22.62 | 3.43x | 73.459 | 3.25x |
-| 512 | 5.613 | 58.99 | 10.51x | 7,532.68 | 127.7x | 2.948 | 18.32 | 6.21x | 73.278 | 4.00x |
-| 2048 | 1.827 | 54.04 | 29.58x | 6,305.79 | 116.7x | 0.933 | 15.53 | 16.64x | 73.369 | 4.72x |
+| context | baseline decode | promoted decode | gain | llama.cpp decode | llama/promoted |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 128 | 6.4870 [6.4650--6.4955] | 29.1612 [26.1586--29.2943] | 4.50x | 73.3361 [72.0749--73.3901] | 2.51x |
+| 512 | 2.9133 [2.9109--2.9148] | 22.8527 [22.0932--23.4734] | 7.84x | 73.2653 [71.8016--73.3797] | 3.21x |
+| 2048 | 0.9355 [0.9347--0.9359] | 18.9907 [18.5416--19.0907] | 20.30x | 73.2380 [69.4406--73.4576] | 3.86x |
 
-The important shape result is that prefill and decode stopped collapsing with
-context. The original prefill scaling was approximately N^1.551 to N^1.810;
-the promoted path is nearly flat over these points. The gap to llama.cpp is
-still real, especially for prefill, and must not be described as closed.
+The structural claim holds under realistic load: total prefill time scales as
+`N^1.549` then `N^1.803` for the baseline, versus `N^1.014` then `N^1.030`
+for the promoted endpoint over 128→512→2048. The promoted decode reaches
+20.779% / 16.284% / 13.532% of the 140.341 tok/s (640 GB/s) source-byte
+roofline at those contexts. The gap to llama.cpp remains real and must not be
+described as closed.
+
+### Do not mix these figures with other harnesses
+
+- The superseded 4-token-decode claim of **+109.65%** is not comparable with
+  this 128-token decode table; the realistic-load result collapsed to about
+  +24% in that earlier comparison.
+- Session EG's
+  `benchmarks/results/2026-07-28/gemma4-sliding-split-eg/raw/benchmark-decode32-*.json`
+  values are one-repeat, 32-token-decode measurements. They are useful
+  routing evidence, not values to compare with these five-median rows.
+- `benchmarks/results/2026-07-28/gemma4-full-batched-reader-v0.1/` explicitly
+  records one-repeat candidate timings. It is likewise not a substitute for
+  this table.
+- The inherited llama.cpp values 3,858.17 / 7,532.68 / 6,305.79 prefill and
+  73.459 / 73.278 / 73.369 decode did not exactly reproduce. Current
+  `llama-bench` aggregate fields are 3,747.41 / 7,440.09 / 6,288.81 prefill
+  and 73.099 / 73.009 / 72.541 decode tok/s; the headline uses the more
+  transparent current five-sample medians and spreads above.
+
+All other timing values later in this document are explicitly local
+component, trace, sweep, or candidate measurements unless they point to the
+definitive directory above; they must not be substituted into the headline
+before/after comparison.
 
 ## Correction: sliding split-KV was not previously measured
 
