@@ -29,11 +29,19 @@ One-repeat clean-release timing with the same fixed token-2 prompt found:
 | 128 | 16 | 47.371 | 17.253 | 56 | 3,640 |
 | 128 | 128 | 53.748 | 16.393 | 7 | 3,591 |
 | 512 | 128 | 41.686 | 14.190 | 28 | 14,364 |
+| 2048 | 128 | 30.048 | 12.439 | 112 | 57,456 |
 
 The M=16/M=128 comparison has the same final top-1 (`184`) for the 128-token
 fixed prompt.  M=128 is 13.5% faster and is the candidate width.  Its reader
 count is exactly `7 * ceil(N / 128)`; the remaining calls are the untouched
 28 sliding layers (`28 * N`).
 
-N=2048 is running detached under the R9700 lock at the time of this increment.
-The recovery monitor will restart `ullm-openai` only after that lock releases.
+The N=2048 one-repeat run took 68.157 s.  Its detached lock holder completed
+and the recovery monitor restarted `ullm-openai` successfully (`active`, zero
+restarts).
+
+The measured prefill scaling exponents are `N^0.183` over 128→512 and
+`N^0.236` over 512→2048.  Against the supplied llama.cpp numbers, the
+remaining prefill gaps are 71.8x (N=128), 180.7x (N=512), and 209.8x
+(N=2048).  These are first one-repeat throughput figures, not promotion
+evidence.
