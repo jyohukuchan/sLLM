@@ -401,7 +401,7 @@ bool gemma_bf16_matmul_f32_hip_kernel(
     const int device_id = matrix_buffer->hip_device_id;
     void *function = hip_gemma_bf16_matmul_kernel_cache().function_for_device(device_id, error);
     if (function == nullptr) return false;
-    constexpr size_t kGemmaBf16MatmulBatchTile = 8u;
+    constexpr size_t kGemmaBf16MatmulBatchTile = 16u;
     if (rows > std::numeric_limits<unsigned int>::max() ||
         batch_count > std::numeric_limits<unsigned int>::max() ||
         batch_count > std::numeric_limits<size_t>::max() - (kGemmaBf16MatmulBatchTile - 1u)) {

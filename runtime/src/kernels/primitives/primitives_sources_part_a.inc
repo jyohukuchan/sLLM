@@ -83,7 +83,7 @@ extern "C" __global__ void ullm_bf16_row_f32_kernel(
 
     // Isolated Gemma prefill projection.  It intentionally has a separate
     // entry point from the production M=1 BF16 matvec kernel.  One CTA owns
-    // one output row and eight M rows: all eight wave32s reuse each staged
+    // one output row and sixteen M rows: all eight wave32s reuse each staged
     // 256-element BF16 weight strip from LDS.
     static const char *gemma_bf16_matmul_kernel_source() {
         return R"(
@@ -102,37 +102,53 @@ extern "C" __global__ void ullm_gemma_bf16_matmul_f32_kernel(
     unsigned long long cols,
     unsigned long long batch_count,
     float *output) {
-    constexpr unsigned int kBatchTile = 8u;
+    constexpr unsigned int kBatchTile = 16u;
     constexpr unsigned int kKTile = 256u;
     const unsigned int row = blockIdx.x;
     const unsigned int tid = threadIdx.x;
     const unsigned int lane = tid & 31u;
-    const unsigned int batch = blockIdx.y * kBatchTile + (tid >> 5);
+    const unsigned int batch0 = blockIdx.y * kBatchTile + (tid >> 5);
+    const unsigned int batch1 = batch0 + 8u;
     __shared__ unsigned short weight_tile[kKTile];
-    float sum = 0.0f;
-    const bool valid_output = row < rows && batch < batch_count;
+    float sum0 = 0.0f;
+    float sum1 = 0.0f;
+    const bool valid_output0 = row < rows && batch0 < batch_count;
+    const bool valid_output1 = row < rows && batch1 < batch_count;
     for (unsigned long long k_base = 0ull; k_base < cols; k_base += kKTile) {
         const unsigned long long k = k_base + tid;
         if (row < rows && k < cols) {
             weight_tile[tid] = matrix[static_cast<unsigned long long>(row) * cols + k];
         }
         __syncthreads();
-        if (valid_output) {
+        if (valid_output0) {
             const unsigned long long tile_cols =
                 (cols - k_base) < kKTile ? (cols - k_base) : kKTile;
-            const float *input_row = input + static_cast<unsigned long long>(batch) * cols;
+            const float *input_row = input + static_cast<unsigned long long>(batch0) * cols;
             for (unsigned long long k_in_tile = lane; k_in_tile < tile_cols; k_in_tile += 32ull) {
-                sum += __uint_as_float(static_cast<unsigned int>(weight_tile[k_in_tile]) << 16) *
+                sum0 += __uint_as_float(static_cast<unsigned int>(weight_tile[k_in_tile]) << 16) *
+                    input_row[k_base + k_in_tile];
+            }
+        }
+        if (valid_output1) {
+            const unsigned long long tile_cols =
+                (cols - k_base) < kKTile ? (cols - k_base) : kKTile;
+            const float *input_row = input + static_cast<unsigned long long>(batch1) * cols;
+            for (unsigned long long k_in_tile = lane; k_in_tile < tile_cols; k_in_tile += 32ull) {
+                sum1 += __uint_as_float(static_cast<unsigned int>(weight_tile[k_in_tile]) << 16) *
                     input_row[k_base + k_in_tile];
             }
         }
         __syncthreads();
     }
     for (unsigned int offset = 16u; offset > 0u; offset >>= 1u) {
-        sum += __shfl_down(sum, offset, 32);
+        sum0 += __shfl_down(sum0, offset, 32);
+        sum1 += __shfl_down(sum1, offset, 32);
     }
-    if (lane == 0u && valid_output) {
-        output[static_cast<unsigned long long>(batch) * rows + row] = sum;
+    if (lane == 0u && valid_output0) {
+        output[static_cast<unsigned long long>(batch0) * rows + row] = sum0;
+    }
+    if (lane == 0u && valid_output1) {
+        output[static_cast<unsigned long long>(batch1) * rows + row] = sum1;
     }
 }
 )";
