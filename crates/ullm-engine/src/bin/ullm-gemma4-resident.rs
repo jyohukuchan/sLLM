@@ -583,6 +583,7 @@ fn capture_command<const N: usize>(program: &str, args: [&str; N]) -> Value {
 fn validation_workload(executor: &mut Gemma4TextExecutor) -> Result<Value, String> {
     let attention_region_differential = attention_region_differential(executor)?;
     let causal_mask_future_token_probe = causal_mask_future_token_probe(executor)?;
+    let causal_mask_sliding_window_probe = causal_mask_sliding_window_probe(executor)?;
     let mut cases = Vec::new();
     let mut capital_cached_ids = None;
     for case in [CAPITAL_FRANCE, ONCE_UPON_A_TIME] {
@@ -637,6 +638,7 @@ fn validation_workload(executor: &mut Gemma4TextExecutor) -> Result<Value, Strin
         "kind": "resident-greedy-and-cache-equivalence",
         "attention_region_differential": attention_region_differential,
         "causal_mask_future_token_probe": causal_mask_future_token_probe,
+        "causal_mask_sliding_window_probe": causal_mask_sliding_window_probe,
         "cases": cases,
         "shared_kv_source_check": {
             "result": "passed",
@@ -650,6 +652,55 @@ fn validation_workload(executor: &mut Gemma4TextExecutor) -> Result<Value, Strin
             "physical_kv_reprojected_top1_logits": unshared.top1_logits,
             "generated_ids_equal_to_normal_shared_path": unshared_ids_equal_shared,
         },
+    }))
+}
+
+/// Changes key 0 and observes layer 0's query 512 result.  At that point the
+/// local reader's 512-token window starts at key 1, so a reader that leaks the
+/// excluded j-512 key changes the output.  Query 512 deliberately starts a
+/// full M=128 prefill chunk and therefore exercises the split-reader dispatch,
+/// rather than a final M=1 tail.
+fn causal_mask_sliding_window_probe(executor: &mut Gemma4TextExecutor) -> Result<Value, String> {
+    const QUERY_INDEX: usize = 512;
+    const PROMPT_TOKENS: usize = 640;
+    const FIRST_KEY: u32 = 818;
+    const SECOND_KEY: u32 = 5279;
+    unsafe { env::set_var("ULLM_GEMMA4_PREFILL_LAYER_MAJOR", "1") };
+    unsafe { env::set_var("ULLM_GEMMA4_PREFILL_SLIDING_RING_BATCHED", "1") };
+    let mut first_tokens = vec![2_u32; PROMPT_TOKENS];
+    first_tokens[0] = FIRST_KEY;
+    executor.reset();
+    let first = executor.prefill(&first_tokens)?;
+    let mut second_tokens = first_tokens;
+    second_tokens[0] = SECOND_KEY;
+    executor.reset();
+    let second = executor.prefill(&second_tokens)?;
+    unsafe { env::remove_var("ULLM_GEMMA4_PREFILL_SLIDING_RING_BATCHED") };
+    unsafe { env::remove_var("ULLM_GEMMA4_PREFILL_LAYER_MAJOR") };
+
+    let hidden = executor.config().decoder.hidden_size;
+    let range = QUERY_INDEX
+        .checked_mul(hidden)
+        .and_then(|start| start.checked_add(hidden).map(|end| start..end))
+        .ok_or_else(|| "sliding-window causal probe row range overflows".to_string())?;
+    let (max_abs, max_rel) = max_error(
+        first.layer_outputs[0][range.clone()].iter().copied(),
+        second.layer_outputs[0][range].iter().copied(),
+    )?;
+    if max_abs != 0.0 {
+        return Err(format!(
+            "sliding-window causal probe failed: query {QUERY_INDEX} observed excluded key 0 (max_abs={max_abs}, max_rel={max_rel})"
+        ));
+    }
+    Ok(json!({
+        "result": "passed",
+        "method": "Two 640-token M=128-chunk prefills differ only at key 0; layer 0 query 512 must be bit-identical because the 512-token sliding window excludes key j-512.",
+        "query_index": QUERY_INDEX,
+        "excluded_key_index": 0,
+        "prefill_chunk_rows": 128,
+        "layer_checked": 0,
+        "layer_output_max_abs": max_abs,
+        "layer_output_max_rel": max_rel,
     }))
 }
 
@@ -855,8 +906,10 @@ fn full_reprefill_generation(
 
 fn sliding_boundary_workload(executor: &mut Gemma4TextExecutor) -> Result<Value, String> {
     let window = executor.config().sliding_window;
+    // Four complete ring rotations exercise both overwrite addressing and the
+    // promoted M=128 prefill path at the requested N=2048 acceptance length.
     let sequence_len = window
-        .checked_add(1)
+        .checked_mul(4)
         .ok_or_else(|| "sliding-window boundary sequence length overflows usize".to_string())?;
     let boundary_tokens = vec![2_u32; sequence_len];
 

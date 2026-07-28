@@ -76,6 +76,11 @@ const GEMMA4_DISABLE_PLE_REGION_ENV: &str = "ULLM_GEMMA4_DISABLE_PLE_REGION";
 /// byte-identical token-major rollback route.
 const GEMMA4_PREFILL_LAYER_MAJOR_ENV: &str = "ULLM_GEMMA4_PREFILL_LAYER_MAJOR";
 const GEMMA4_PREFILL_SLIDING_RING_BATCHED_ENV: &str = "ULLM_GEMMA4_PREFILL_SLIDING_RING_BATCHED";
+/// The split readers first pay for a partial-output merge.  Measurements on
+/// R9700 showed no meaningful win at M=1, a marginal one at M=2, and a clear
+/// one from M=4 onward.  Decode is always M=1, so keeping it on the established
+/// reader removes that otherwise pure split/merge overhead.
+const GEMMA4_SPLIT_KV_MIN_QUERY_ROWS: usize = 4;
 const GEMMA4_FULL_ATTN_SPLIT_KV_ENV: &str = "ULLM_GEMMA4_FULL_ATTN_SPLIT_KV";
 const GEMMA4_SLIDING_ATTN_SPLIT_KV_ENV: &str = "ULLM_GEMMA4_SLIDING_ATTN_SPLIT_KV";
 
@@ -84,15 +89,19 @@ fn gemma4_split_kv_factor(env_name: &str, default: usize) -> Result<usize, Strin
         Ok(raw) => {
             let split = raw
                 .parse::<usize>()
-                .map_err(|_| format!("{env_name} must be an integer in 1..=64"))?;
-            if !(1..=64).contains(&split) {
-                return Err(format!("{env_name} must be in 1..=64, got {split}"));
+                .map_err(|_| format!("{env_name} must be an integer in 0..=64"))?;
+            if split > 64 {
+                return Err(format!("{env_name} must be in 0..=64, got {split}"));
             }
             Ok(split)
         }
         Err(env::VarError::NotPresent) => Ok(default),
         Err(error) => Err(format!("failed to read {env_name}: {error}")),
     }
+}
+
+fn gemma4_split_kv_enabled(split_count: usize, query_rows: usize) -> bool {
+    split_count > 1 && query_rows >= GEMMA4_SPLIT_KV_MIN_QUERY_ROWS
 }
 
 /// Gemma4 E2B's seven 512-wide full-context attention layers.  All remaining
@@ -1860,14 +1869,17 @@ impl Bf16MatvecRuntime {
             "Gemma full batched attention output",
             &mut self.resident_host_profile,
         )?;
-        let split_count = gemma4_split_kv_factor(GEMMA4_FULL_ATTN_SPLIT_KV_ENV, 1)?;
+        // Promoted on R9700 for prefill-sized chunks.  `=0` is the explicit
+        // byte-identical rollback to the established unsplit reader.
+        let split_count = gemma4_split_kv_factor(GEMMA4_FULL_ATTN_SPLIT_KV_ENV, 8)?;
+        let use_split = gemma4_split_kv_enabled(split_count, query_rows);
         let workspace_bytes = query_rows
             .checked_mul(8)
             .and_then(|n| n.checked_mul(split_count))
             .and_then(|n| n.checked_mul(514))
             .and_then(|n| n.checked_mul(4))
             .ok_or_else(|| "Gemma full split workspace byte count overflows".to_string())?;
-        if split_count > 1 {
+        if use_split {
             Self::ensure_buffer(
                 &mut self.context,
                 &mut self.resident_attention_workspace,
@@ -1880,7 +1892,7 @@ impl Bf16MatvecRuntime {
             .as_mut()
             .expect("Gemma full query buffer allocated")
             .copy_from_host(0, &input_bytes, Some(&mut self.stream))?;
-        if split_count > 1 {
+        if use_split {
             gemma_full_attn_batched_512_split_f32(
                 self.resident_input
                     .as_ref()
@@ -2041,14 +2053,17 @@ impl Bf16MatvecRuntime {
             "Gemma sliding ring batched attention output",
             &mut self.resident_host_profile,
         )?;
-        let split_count = gemma4_split_kv_factor(GEMMA4_SLIDING_ATTN_SPLIT_KV_ENV, 1)?;
+        // See the full reader above: M=1 decode and short prefill tails retain
+        // the established reader; `=0` is an explicit unsplit rollback.
+        let split_count = gemma4_split_kv_factor(GEMMA4_SLIDING_ATTN_SPLIT_KV_ENV, 32)?;
+        let use_split = gemma4_split_kv_enabled(split_count, query_rows);
         let workspace_bytes = query_rows
             .checked_mul(q_heads)
             .and_then(|n| n.checked_mul(split_count))
             .and_then(|n| n.checked_mul(258))
             .and_then(|n| n.checked_mul(4))
             .ok_or_else(|| "Gemma sliding split workspace byte count overflows".to_string())?;
-        if split_count > 1 {
+        if use_split {
             Self::ensure_buffer(
                 &mut self.context,
                 &mut self.resident_attention_workspace,
@@ -2061,7 +2076,7 @@ impl Bf16MatvecRuntime {
             .as_mut()
             .expect("Gemma sliding query buffer allocated")
             .copy_from_host(0, &input_bytes, Some(&mut self.stream))?;
-        if split_count > 1 {
+        if use_split {
             gemma_sliding_attn_ring_batched_256_split_f32(
                 self.resident_input
                     .as_ref()
@@ -6674,6 +6689,15 @@ fn top1_from_logits(logits: &[f32]) -> Result<Gemma4TextTop1, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn split_kv_dispatch_keeps_decode_and_short_tails_unsplit() {
+        assert!(!gemma4_split_kv_enabled(8, 1));
+        assert!(!gemma4_split_kv_enabled(32, 3));
+        assert!(!gemma4_split_kv_enabled(1, 128));
+        assert!(gemma4_split_kv_enabled(8, 4));
+        assert!(gemma4_split_kv_enabled(32, 128));
+    }
 
     #[test]
     fn bf16_conversion_preserves_expected_values() {
