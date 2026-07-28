@@ -30,10 +30,9 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 use ullm_runtime_sys::{
     DeviceInfo, RuntimeBuffer, RuntimeContext, RuntimeStream, add_f32, bf16_row_f32, device_count,
-    device_info, gelu_tanh_mul_f32, gemma_bf16_matmul_f32, gemma_full_attn_batched_512_f32,
-    gemma_proportional_rope_f32, gemma_sliding_attn_batched_256_f32,
-    gemma_sliding_snapshot_gather_256_f32, matvec_bf16_f32, paged_decode_attn_f32,
-    paged_kv_write_f32, rmsnorm_f32, rope_f32, segmented_rmsnorm_f32,
+    device_info, gelu_tanh_mul_f32, gemma_bf16_matmul_f32, gemma_proportional_rope_f32,
+    gemma_full_attn_batched_512_f32, matvec_bf16_f32, paged_decode_attn_f32, paged_kv_write_f32, rmsnorm_f32, rope_f32,
+    segmented_rmsnorm_f32,
 };
 
 pub const GEMMA4_TEXT_MODEL_FILE: &str = "model.safetensors";
@@ -74,14 +73,6 @@ const GEMMA4_DISABLE_PLE_REGION_ENV: &str = "ULLM_GEMMA4_DISABLE_PLE_REGION";
 /// promoted by default after full-model validation; set this to `0` for the
 /// byte-identical token-major rollback route.
 const GEMMA4_PREFILL_LAYER_MAJOR_ENV: &str = "ULLM_GEMMA4_PREFILL_LAYER_MAJOR";
-/// The experimental local-reader snapshot route is deliberately independent
-/// from the promoted layer-major/full-reader switch.  Keep it off until its
-/// rollover and end-to-end GPU contracts have been demonstrated.
-const GEMMA4_PREFILL_SLIDING_BATCHED_ENV: &str = "ULLM_GEMMA4_PREFILL_SLIDING_BATCHED";
-
-fn gemma4_prefill_sliding_batched_enabled() -> bool {
-    env::var(GEMMA4_PREFILL_SLIDING_BATCHED_ENV).ok().as_deref() == Some("1")
-}
 
 /// Gemma4 E2B's seven 512-wide full-context attention layers.  All remaining
 /// decoder attention layers are 256-wide sliding-window layers.
@@ -287,8 +278,6 @@ pub struct Gemma4ResidentLogicalBytes {
     pub bf16_weight_bytes: u64,
     pub kv_read_bytes: u64,
     pub kv_write_bytes: u64,
-    /// K/V traffic added solely by the pre-overwrite local-reader snapshot.
-    pub kv_snapshot_bytes: u64,
     pub matvec_calls: u64,
     pub bf16_row_reads: u64,
     pub attention_calls: u64,
@@ -1178,16 +1167,6 @@ enum Gemma4WeightStorage {
     Resident(ResidentGemma4Weights),
 }
 
-#[derive(Debug)]
-struct Gemma4SlidingKvSnapshot {
-    key: RuntimeBuffer,
-    value: RuntimeBuffer,
-    prefix_len: usize,
-    history_rows: usize,
-    query_rows: usize,
-    written_rows: usize,
-}
-
 struct Bf16MatvecRuntime {
     context: RuntimeContext,
     stream: RuntimeStream,
@@ -1218,7 +1197,6 @@ struct Bf16MatvecRuntime {
     attention_value: Option<RuntimeBuffer>,
     attention_value_normed: Option<RuntimeBuffer>,
     attention_output: Option<RuntimeBuffer>,
-    sliding_snapshots: BTreeMap<usize, Gemma4SlidingKvSnapshot>,
     resident_logical_bytes: Gemma4ResidentLogicalBytes,
     resident_host_profile: Gemma4ResidentHostProfile,
     mlp_validation: Gemma4ResidentMlpValidation,
@@ -1305,7 +1283,6 @@ impl Bf16MatvecRuntime {
             attention_value: None,
             attention_value_normed: None,
             attention_output: None,
-            sliding_snapshots: BTreeMap::new(),
             resident_logical_bytes: Gemma4ResidentLogicalBytes::default(),
             resident_host_profile: Gemma4ResidentHostProfile::default(),
             mlp_validation: Gemma4ResidentMlpValidation::default(),
@@ -1356,25 +1333,7 @@ impl Bf16MatvecRuntime {
             total
                 .checked_add(bytes)
                 .ok_or_else(|| "Gemma4 transient allocation byte count overflows u64".to_string())
-        })?
-        .checked_add(
-            self.sliding_snapshots
-                .values()
-                .try_fold(0_u64, |total, snapshot| {
-                    let key = u64::try_from(snapshot.key.size()?)
-                        .map_err(|_| "Gemma4 sliding snapshot key size exceeds u64".to_string())?;
-                    let value = u64::try_from(snapshot.value.size()?).map_err(|_| {
-                        "Gemma4 sliding snapshot value size exceeds u64".to_string()
-                    })?;
-                    let bytes = key
-                        .checked_add(value)
-                        .ok_or_else(|| "Gemma4 sliding snapshot size overflows u64".to_string())?;
-                    total.checked_add(bytes).ok_or_else(|| {
-                        "Gemma4 transient snapshot allocation overflows u64".to_string()
-                    })
-                })?,
-        )
-        .ok_or_else(|| "Gemma4 transient allocation byte count overflows u64".to_string())
+        })
     }
 
     fn resident_logical_bytes(&self) -> Gemma4ResidentLogicalBytes {
@@ -1460,17 +1419,6 @@ impl Bf16MatvecRuntime {
                 .checked_add(1)
                 .ok_or_else(|| "Gemma4 resident attention call count overflows u64".to_string())?;
         }
-        Ok(())
-    }
-
-    fn account_gemma_sliding_snapshot(&mut self, bytes: usize) -> Result<(), String> {
-        let bytes = u64::try_from(bytes)
-            .map_err(|_| "Gemma sliding snapshot logical byte count exceeds u64".to_string())?;
-        self.resident_logical_bytes.kv_snapshot_bytes = self
-            .resident_logical_bytes
-            .kv_snapshot_bytes
-            .checked_add(bytes)
-            .ok_or_else(|| "Gemma sliding snapshot logical byte count overflows u64".to_string())?;
         Ok(())
     }
 
@@ -1741,258 +1689,36 @@ impl Bf16MatvecRuntime {
         }
         let input_bytes = encode_f32_to_bytes(queries);
         Self::ensure_buffer(
-            &mut self.context,
-            &mut self.resident_input,
-            input_bytes.len(),
-            "Gemma full batched attention query",
-            &mut self.resident_host_profile,
+            &mut self.context, &mut self.resident_input, input_bytes.len(),
+            "Gemma full batched attention query", &mut self.resident_host_profile,
         )?;
         Self::ensure_buffer(
-            &mut self.context,
-            &mut self.resident_output,
-            input_bytes.len(),
-            "Gemma full batched attention output",
-            &mut self.resident_host_profile,
+            &mut self.context, &mut self.resident_output, input_bytes.len(),
+            "Gemma full batched attention output", &mut self.resident_host_profile,
         )?;
-        self.resident_input
-            .as_mut()
-            .expect("Gemma full query buffer allocated")
+        self.resident_input.as_mut().expect("Gemma full query buffer allocated")
             .copy_from_host(0, &input_bytes, Some(&mut self.stream))?;
         gemma_full_attn_batched_512_f32(
-            self.resident_input
-                .as_ref()
-                .expect("Gemma full query buffer allocated"),
-            &cache.key,
-            &cache.value,
-            &cache.read_table,
-            prefix_len,
-            query_rows,
-            cache.cache_len,
-            GEMMA4_DEVICE_KV_BLOCK_SIZE,
-            cache.capacity_tokens,
-            softmax_scale,
-            self.resident_output
-                .as_mut()
-                .expect("Gemma full output buffer allocated"),
+            self.resident_input.as_ref().expect("Gemma full query buffer allocated"),
+            &cache.key, &cache.value, &cache.read_table, prefix_len, query_rows,
+            cache.cache_len, GEMMA4_DEVICE_KV_BLOCK_SIZE, cache.capacity_tokens,
+            softmax_scale, self.resident_output.as_mut().expect("Gemma full output buffer allocated"),
             Some(&mut self.stream),
         )?;
         let mut host_output = vec![0_u8; input_bytes.len()];
-        self.resident_output
-            .as_mut()
-            .expect("Gemma full output buffer allocated")
+        self.resident_output.as_mut().expect("Gemma full output buffer allocated")
             .copy_to_host(0, &mut host_output, Some(&mut self.stream))?;
         self.stream.synchronize()?;
         let output = decode_f32_le_values(&host_output);
         if output.len() != queries.len() || output.iter().any(|value| !value.is_finite()) {
             return Err("Gemma full batched reader returned non-finite or malformed output".into());
         }
-        let kv_read = cache
-            .cache_len
-            .checked_mul(2)
-            .and_then(|n| n.checked_mul(512))
+        let kv_read = cache.cache_len
+            .checked_mul(2).and_then(|n| n.checked_mul(512))
             .and_then(|n| n.checked_mul(std::mem::size_of::<f32>()))
             .ok_or_else(|| "Gemma full batched reader KV accounting overflows".to_string())?;
         self.account_device_kv(kv_read, 0, true)?;
         Ok(output)
-    }
-
-    fn prepare_gemma_sliding_snapshot(
-        &mut self,
-        cache: &Gemma4DeviceKvCache,
-        query_rows: usize,
-    ) -> Result<(), String> {
-        const WIDTH: usize = 256;
-        if !cache.is_sliding()
-            || cache.kv_heads != 1
-            || cache.head_dim != WIDTH
-            || query_rows == 0
-            || query_rows > 128
-        {
-            return Err("Gemma sliding snapshot received unsupported cache geometry".into());
-        }
-        let history_rows = cache.absolute_len.min(511);
-        let snapshot_rows = history_rows
-            .checked_add(query_rows)
-            .ok_or_else(|| "Gemma sliding snapshot row count overflows".to_string())?;
-        let bytes = snapshot_rows
-            .checked_mul(WIDTH)
-            .and_then(|n| n.checked_mul(std::mem::size_of::<f32>()))
-            .ok_or_else(|| "Gemma sliding snapshot byte count overflows".to_string())?;
-        let replace = match self.sliding_snapshots.get(&cache.layer_index) {
-            Some(snapshot) => snapshot.key.size()? < bytes || snapshot.value.size()? < bytes,
-            None => true,
-        };
-        if replace {
-            let key = self.context.alloc_buffer(bytes)?;
-            let value = self.context.alloc_buffer(bytes)?;
-            self.sliding_snapshots.insert(
-                cache.layer_index,
-                Gemma4SlidingKvSnapshot {
-                    key,
-                    value,
-                    prefix_len: cache.absolute_len,
-                    history_rows,
-                    query_rows,
-                    written_rows: 0,
-                },
-            );
-        }
-        let snapshot = self
-            .sliding_snapshots
-            .get_mut(&cache.layer_index)
-            .expect("Gemma sliding snapshot inserted or already present");
-        snapshot.prefix_len = cache.absolute_len;
-        snapshot.history_rows = history_rows;
-        snapshot.query_rows = query_rows;
-        snapshot.written_rows = 0;
-        if history_rows != 0 {
-            gemma_sliding_snapshot_gather_256_f32(
-                &cache.key,
-                &cache.value,
-                &cache.read_table,
-                cache.absolute_len,
-                cache.cache_len,
-                cache.capacity_tokens,
-                history_rows,
-                &mut snapshot.key,
-                &mut snapshot.value,
-                Some(&mut self.stream),
-            )?;
-            let snapshot_bytes = history_rows
-                .checked_mul(2)
-                .and_then(|n| n.checked_mul(WIDTH))
-                .and_then(|n| n.checked_mul(std::mem::size_of::<f32>()))
-                .ok_or_else(|| "Gemma sliding snapshot gather accounting overflows".to_string())?;
-            self.account_gemma_sliding_snapshot(snapshot_bytes)?;
-        }
-        Ok(())
-    }
-
-    fn append_gemma_sliding_snapshot_row(
-        &mut self,
-        layer_index: usize,
-        width: usize,
-    ) -> Result<(), String> {
-        let Some(snapshot) = self.sliding_snapshots.get_mut(&layer_index) else {
-            return Ok(());
-        };
-        if width != 256 || snapshot.written_rows >= snapshot.query_rows {
-            return Err("Gemma sliding snapshot append has invalid row geometry".into());
-        }
-        let offset = snapshot
-            .history_rows
-            .checked_add(snapshot.written_rows)
-            .and_then(|row| row.checked_mul(width))
-            .and_then(|n| n.checked_mul(std::mem::size_of::<f32>()))
-            .ok_or_else(|| "Gemma sliding snapshot append offset overflows".to_string())?;
-        let bytes = width
-            .checked_mul(std::mem::size_of::<f32>())
-            .ok_or_else(|| "Gemma sliding snapshot append size overflows".to_string())?;
-        let key_staging = self
-            .kv_key_input
-            .as_ref()
-            .expect("Gemma KV key staging exists before snapshot copy");
-        let value_staging = self
-            .kv_value_input
-            .as_ref()
-            .expect("Gemma KV value staging exists before snapshot copy");
-        snapshot
-            .key
-            .copy_from_buffer(offset, key_staging, 0, bytes, Some(&mut self.stream))?;
-        snapshot
-            .value
-            .copy_from_buffer(offset, value_staging, 0, bytes, Some(&mut self.stream))?;
-        snapshot.written_rows += 1;
-        self.account_gemma_sliding_snapshot(
-            bytes
-                .checked_mul(2)
-                .ok_or_else(|| "Gemma sliding snapshot append accounting overflows".to_string())?,
-        )?;
-        Ok(())
-    }
-
-    fn gemma_sliding_attention_batched_256(
-        &mut self,
-        source_layer: usize,
-        queries: &[f32],
-        q_heads: usize,
-    ) -> Result<Vec<f32>, String> {
-        const WIDTH: usize = 256;
-        if q_heads == 0 || queries.is_empty() || !queries.len().is_multiple_of(q_heads * WIDTH) {
-            return Err("Gemma sliding batched attention query shape is invalid".into());
-        }
-        let query_rows = queries.len() / (q_heads * WIDTH);
-        let snapshot = self.sliding_snapshots.get(&source_layer).ok_or_else(|| {
-            format!("Gemma sliding source layer {source_layer} has no retained snapshot")
-        })?;
-        if snapshot.query_rows != query_rows || snapshot.written_rows != query_rows {
-            return Err(format!(
-                "Gemma sliding source layer {source_layer} snapshot is incomplete"
-            ));
-        }
-        let input_bytes = encode_f32_to_bytes(queries);
-        Self::ensure_buffer(
-            &mut self.context,
-            &mut self.resident_input,
-            input_bytes.len(),
-            "Gemma sliding batched attention query",
-            &mut self.resident_host_profile,
-        )?;
-        Self::ensure_buffer(
-            &mut self.context,
-            &mut self.resident_output,
-            input_bytes.len(),
-            "Gemma sliding batched attention output",
-            &mut self.resident_host_profile,
-        )?;
-        self.resident_input
-            .as_mut()
-            .expect("Gemma sliding query buffer allocated")
-            .copy_from_host(0, &input_bytes, Some(&mut self.stream))?;
-        gemma_sliding_attn_batched_256_f32(
-            self.resident_input
-                .as_ref()
-                .expect("Gemma sliding query buffer allocated"),
-            &snapshot.key,
-            &snapshot.value,
-            snapshot.prefix_len,
-            snapshot.history_rows,
-            query_rows,
-            q_heads,
-            1.0,
-            self.resident_output
-                .as_mut()
-                .expect("Gemma sliding output buffer allocated"),
-            Some(&mut self.stream),
-        )?;
-        let mut host_output = vec![0_u8; input_bytes.len()];
-        self.resident_output
-            .as_ref()
-            .expect("Gemma sliding output buffer allocated")
-            .copy_to_host(0, &mut host_output, Some(&mut self.stream))?;
-        self.stream.synchronize()?;
-        let output = decode_f32_le_values(&host_output);
-        if output.len() != queries.len() || output.iter().any(|value| !value.is_finite()) {
-            return Err(
-                "Gemma sliding batched reader returned non-finite or malformed output".into(),
-            );
-        }
-        let read = (snapshot.history_rows + query_rows)
-            .checked_mul(2)
-            .and_then(|n| n.checked_mul(WIDTH))
-            .and_then(|n| n.checked_mul(std::mem::size_of::<f32>()))
-            .ok_or_else(|| "Gemma sliding batched reader accounting overflows".to_string())?;
-        self.account_device_kv(read, 0, true)?;
-        Ok(output)
-    }
-
-    fn reset_gemma_sliding_snapshots(&mut self) {
-        for snapshot in self.sliding_snapshots.values_mut() {
-            snapshot.prefix_len = 0;
-            snapshot.history_rows = 0;
-            snapshot.query_rows = 0;
-            snapshot.written_rows = 0;
-        }
     }
 
     fn bf16_row_resident(
@@ -3002,9 +2728,9 @@ impl Gemma4DeviceKvCache {
                 .ok_or_else(|| "Gemma4 sliding KV read-window start underflows".to_string())?;
             let mut table = Vec::with_capacity(self.cache_len);
             for relative in 0..self.cache_len {
-                let logical = start.checked_add(relative).ok_or_else(|| {
-                    "Gemma4 sliding KV read-window position overflows".to_string()
-                })?;
+                let logical = start
+                    .checked_add(relative)
+                    .ok_or_else(|| "Gemma4 sliding KV read-window position overflows".to_string())?;
                 table.push(u32::try_from(logical % self.capacity_tokens).map_err(|_| {
                     "Gemma4 sliding KV read-window physical block exceeds u32".to_string()
                 })?);
@@ -3675,22 +3401,17 @@ impl Bf16MatvecRuntime {
             &mut self.resident_host_profile,
         )?;
         let position = cache.write_position()?;
+        let (key_slot, value_slot) = (&mut self.kv_key_input, &mut self.kv_value_input);
+        let key_staging = key_slot
+            .as_mut()
+            .expect("device KV key staging buffer was allocated");
+        let value_staging = value_slot
+            .as_mut()
+            .expect("device KV value staging buffer was allocated");
         let h2d_started = Instant::now();
-        {
-            let (key_slot, value_slot) = (&mut self.kv_key_input, &mut self.kv_value_input);
-            key_slot
-                .as_mut()
-                .expect("device KV key staging buffer was allocated")
-                .copy_from_host(0, &key_bytes, Some(&mut self.stream))?;
-            value_slot
-                .as_mut()
-                .expect("device KV value staging buffer was allocated")
-                .copy_from_host(0, &value_bytes, Some(&mut self.stream))?;
-        }
+        key_staging.copy_from_host(0, &key_bytes, Some(&mut self.stream))?;
+        value_staging.copy_from_host(0, &value_bytes, Some(&mut self.stream))?;
         let h2d_submit_ns = elapsed_ns(h2d_started);
-        if cache.is_sliding() && self.sliding_snapshots.contains_key(&cache.layer_index) {
-            self.append_gemma_sliding_snapshot_row(cache.layer_index, width)?;
-        }
         let (key_cache, value_cache, read_table, write_table) = (
             &mut cache.key,
             &mut cache.value,
@@ -3698,14 +3419,6 @@ impl Bf16MatvecRuntime {
             &cache.write_table,
         );
         let write_table = write_table.as_ref().unwrap_or(read_table);
-        let key_staging = self
-            .kv_key_input
-            .as_ref()
-            .expect("device KV key staging buffer was allocated");
-        let value_staging = self
-            .kv_value_input
-            .as_ref()
-            .expect("device KV value staging buffer was allocated");
         let kernel_started = Instant::now();
         paged_kv_write_f32(
             key_staging,
@@ -4202,7 +3915,6 @@ impl Gemma4TextExecutor {
             }
             Gemma4KvStorage::Device(caches) => caches.reset(),
         }
-        self.matvec.reset_gemma_sliding_snapshots();
         self.position = 0;
     }
 
@@ -4247,10 +3959,7 @@ impl Gemma4TextExecutor {
             && matches!(self.weights, Gemma4WeightStorage::Resident(_))
             && matches!(self.caches, Gemma4KvStorage::Device(_))
             && env::var(GEMMA4_PREFILL_LAYER_MAJOR_ENV).ok().as_deref() != Some("0")
-            && env::var("ULLM_GEMMA4_DISABLE_ATTENTION_REGION")
-                .ok()
-                .as_deref()
-                != Some("1")
+            && env::var("ULLM_GEMMA4_DISABLE_ATTENTION_REGION").ok().as_deref() != Some("1")
             && env::var(GEMMA4_DISABLE_PLE_REGION_ENV).ok().as_deref() != Some("1")
         {
             return self.execute_prefill_with_batched_ple(input_token_ids);
@@ -4374,11 +4083,7 @@ impl Gemma4TextExecutor {
                 layer_outputs[layer_index].extend_from_slice(output);
             }
             final_norm.extend_from_slice(&chunk.final_norm);
-            final_token_hidden = chunk
-                .final_norm
-                .chunks_exact(hidden)
-                .last()
-                .map(ToOwned::to_owned);
+            final_token_hidden = chunk.final_norm.chunks_exact(hidden).last().map(ToOwned::to_owned);
         }
         let final_token_hidden = final_token_hidden.expect("checked nonempty input");
         let logits_last = self.project_tied_logits(&final_token_hidden)?;
@@ -4602,15 +4307,11 @@ impl Gemma4TextExecutor {
             .clone();
         let hidden = decoder.hidden_size;
         if states.is_empty() || !states.len().is_multiple_of(hidden) {
-            return Err(format!(
-                "Gemma4 batched layer {layer_index} state shape is invalid"
-            ));
+            return Err(format!("Gemma4 batched layer {layer_index} state shape is invalid"));
         }
         let rows = states.len() / hidden;
         if per_layer_inputs.len() != rows * ple.input_size {
-            return Err(format!(
-                "Gemma4 batched layer {layer_index} PLE shape is invalid"
-            ));
+            return Err(format!("Gemma4 batched layer {layer_index} PLE shape is invalid"));
         }
         // Keep DT's complete attention-region split meaningful after the
         // layer-major prefill path began bypassing `forward_resident_attention`.
@@ -4630,8 +4331,10 @@ impl Gemma4TextExecutor {
             .clone()
             .ok_or_else(|| format!("Gemma4 descriptor layer {layer_index} is missing RoPE"))?;
 
-        let input_weight =
-            self.read_weight_vector(&layer_tensor(layer_index, "input_layernorm.weight"), hidden)?;
+        let input_weight = self.read_weight_vector(
+            &layer_tensor(layer_index, "input_layernorm.weight"),
+            hidden,
+        )?;
         let mut input_norm = Vec::with_capacity(states.len());
         for state in states.chunks_exact(hidden) {
             input_norm.extend_from_slice(&rms_norm(
@@ -4684,7 +4387,7 @@ impl Gemma4TextExecutor {
             ResidentKvCacheMode::Own => None,
             ResidentKvCacheMode::SharedFrom { source_layer_index } => Some(source_layer_index),
             ResidentKvCacheMode::LinearState => {
-                return Err("Gemma4 batched prefill does not support linear attention".into());
+                return Err("Gemma4 batched prefill does not support linear attention".into())
             }
         };
         let own_kv = if source_layer.is_none() {
@@ -4757,16 +4460,6 @@ impl Gemma4TextExecutor {
                 attention.kv_heads,
                 attention.head_dim,
             )?
-        } else if gemma4_prefill_sliding_batched_enabled() {
-            self.prefill_sliding_attention_batched_256_causal(
-                layer_index,
-                source_layer,
-                own_kv.as_ref(),
-                &queries,
-                attention.q_heads,
-                attention.kv_heads,
-                attention.head_dim,
-            )?
         } else {
             self.prefill_attention_m1_causal(
                 layer_index,
@@ -4809,13 +4502,9 @@ impl Gemma4TextExecutor {
             .record(layer_index, elapsed_ns(attention_region_started));
 
         let intermediate = match layer.mlp {
-            ResidentMlpDescriptor::Dense {
-                intermediate_size, ..
-            } => intermediate_size,
+            ResidentMlpDescriptor::Dense { intermediate_size, .. } => intermediate_size,
             ResidentMlpDescriptor::MoE { .. } => {
-                return Err(format!(
-                    "Gemma4 resident executor cannot execute MoE MLP at layer {layer_index}"
-                ));
+                return Err(format!("Gemma4 resident executor cannot execute MoE MLP at layer {layer_index}"))
             }
         };
         let pre_mlp_weight = self.read_weight_vector(
@@ -4880,11 +4569,7 @@ impl Gemma4TextExecutor {
             &mlp_residual,
         )?;
         let mut ple_product = gelu_pytorch_tanh(&ple_gate)?;
-        multiply_in_place(
-            &mut ple_product,
-            per_layer_inputs,
-            "Gemma4 batched PLE gate product",
-        )?;
+        multiply_in_place(&mut ple_product, per_layer_inputs, "Gemma4 batched PLE gate product")?;
         let ple_projection = self.matmul_named_batched(
             &layer_tensor(layer_index, "per_layer_projection.weight"),
             hidden,
@@ -4896,8 +4581,7 @@ impl Gemma4TextExecutor {
             &layer_tensor(layer_index, "post_per_layer_input_norm.weight"),
             hidden,
         )?;
-        let layer_scalar =
-            self.read_weight_vector(&layer_tensor(layer_index, "layer_scalar"), 1)?[0];
+        let layer_scalar = self.read_weight_vector(&layer_tensor(layer_index, "layer_scalar"), 1)?[0];
         let mut output = Vec::with_capacity(states.len());
         for row in 0..rows {
             let range = row * hidden..(row + 1) * hidden;
@@ -4906,8 +4590,11 @@ impl Gemma4TextExecutor {
                 Some(&post_ple_weight),
                 decoder.rms_norm_epsilon,
             )?;
-            let mut combined =
-                add_vectors(&mlp_residual[range], &post, "Gemma4 batched PLE residual")?;
+            let mut combined = add_vectors(
+                &mlp_residual[range],
+                &post,
+                "Gemma4 batched PLE residual",
+            )?;
             scale_in_place(&mut combined, layer_scalar, "Gemma4 layer scalar")?;
             output.extend_from_slice(&combined);
         }
@@ -5745,8 +5432,13 @@ impl Gemma4TextExecutor {
         match &mut self.weights {
             Gemma4WeightStorage::Resident(weights) => {
                 let tensor = weights.tensor(name, &[rows, columns])?;
-                self.matvec
-                    .gemma_matmul_resident(&tensor.buffer, rows, columns, batch_count, input)
+                self.matvec.gemma_matmul_resident(
+                    &tensor.buffer,
+                    rows,
+                    columns,
+                    batch_count,
+                    input,
+                )
             }
             Gemma4WeightStorage::Streamed(_) => {
                 Err("Gemma4 batched matmul requires resident weights".into())
@@ -5782,17 +5474,14 @@ impl Gemma4TextExecutor {
         let source_layer = shared_source.unwrap_or(layer_index);
         let caches = match &mut self.caches {
             Gemma4KvStorage::Device(caches) => caches,
-            Gemma4KvStorage::Host(_) => {
-                return Err("Gemma4 batched attention requires device K/V".into());
-            }
+            Gemma4KvStorage::Host(_) => return Err("Gemma4 batched attention requires device K/V".into()),
         };
         let cache = caches.cache_mut(source_layer)?;
         if let Some((keys, values)) = own_kv {
             let initial_absolute_len = cache.absolute_len;
             for row in 0..rows {
                 let range = row * kv_width..(row + 1) * kv_width;
-                self.matvec
-                    .append_device_kv(cache, &keys[range.clone()], &values[range])?;
+                self.matvec.append_device_kv(cache, &keys[range.clone()], &values[range])?;
             }
             let expected = initial_absolute_len
                 .checked_add(rows)
@@ -5808,9 +5497,10 @@ impl Gemma4TextExecutor {
                 "Gemma4 shared layer {layer_index} needs a full source-layer chunk from {source_layer} before attention"
             ));
         }
-        let first_visible_absolute_len = cache.absolute_len.checked_sub(rows).ok_or_else(|| {
-            "Gemma4 batched attention source cache is shorter than chunk".to_string()
-        })?;
+        let first_visible_absolute_len = cache
+            .absolute_len
+            .checked_sub(rows)
+            .ok_or_else(|| "Gemma4 batched attention source cache is shorter than chunk".to_string())?;
         let full_absolute_len = cache.absolute_len;
         let mut output = Vec::with_capacity(queries.len());
         for (row, query) in queries.chunks_exact(query_width).enumerate() {
@@ -5826,74 +5516,12 @@ impl Gemma4TextExecutor {
                     visible.min(cache.capacity_tokens)
                 ));
             }
-            output.extend_from_slice(
-                &self
-                    .matvec
-                    .device_attention(cache, query, q_heads, kv_heads, head_dim)?,
-            );
+            output.extend_from_slice(&self.matvec.device_attention(
+                cache, query, q_heads, kv_heads, head_dim,
+            )?);
         }
         cache.set_read_window(full_absolute_len, &mut self.matvec.stream)?;
         Ok(output)
-    }
-
-    /// Gemma-only local reader.  The owning source gathers its prior 511
-    /// logical K/V rows before it writes the chunk into the 512-entry ring;
-    /// the same snapshot stays live for every shared-KV consumer of source 13.
-    fn prefill_sliding_attention_batched_256_causal(
-        &mut self,
-        layer_index: usize,
-        shared_source: Option<usize>,
-        own_kv: Option<&(Vec<f32>, Vec<f32>)>,
-        queries: &[f32],
-        q_heads: usize,
-        kv_heads: usize,
-        head_dim: usize,
-    ) -> Result<Vec<f32>, String> {
-        if kv_heads != 1 || head_dim != 256 {
-            return Err(format!(
-                "Gemma sliding batched reader only accepts Q/1KV/256, got {q_heads}Q/{kv_heads}KV/{head_dim}"
-            ));
-        }
-        let query_width = q_heads
-            .checked_mul(head_dim)
-            .ok_or_else(|| "Gemma sliding batched attention query width overflows".to_string())?;
-        if queries.is_empty() || !queries.len().is_multiple_of(query_width) {
-            return Err("Gemma sliding batched attention query shape is invalid".into());
-        }
-        let rows = queries.len() / query_width;
-        let source_layer = shared_source.unwrap_or(layer_index);
-        let caches = match &mut self.caches {
-            Gemma4KvStorage::Device(caches) => caches,
-            Gemma4KvStorage::Host(_) => {
-                return Err("Gemma sliding batched attention requires device K/V".into());
-            }
-        };
-        let cache = caches.cache_mut(source_layer)?;
-        if let Some((keys, values)) = own_kv {
-            let kv_width = kv_heads
-                .checked_mul(head_dim)
-                .ok_or_else(|| "Gemma sliding batched attention KV width overflows".to_string())?;
-            if keys.len() != rows * kv_width || values.len() != rows * kv_width {
-                return Err("Gemma sliding batched attention K/V shape is invalid".into());
-            }
-            self.matvec.prepare_gemma_sliding_snapshot(cache, rows)?;
-            for row in 0..rows {
-                let range = row * kv_width..(row + 1) * kv_width;
-                self.matvec
-                    .append_device_kv(cache, &keys[range.clone()], &values[range])?;
-            }
-        } else {
-            let snapshot = self.matvec.sliding_snapshots.get(&source_layer).ok_or_else(|| {
-                format!("Gemma shared sliding layer {layer_index} needs the retained snapshot from source {source_layer}")
-            })?;
-            if snapshot.query_rows != rows || snapshot.written_rows != rows {
-                return Err(format!(
-                    "Gemma shared sliding layer {layer_index} received an incomplete source-{source_layer} snapshot"
-                ));
-            }
-        }
-        self.matvec
-            .gemma_sliding_attention_batched_256(source_layer, queries, q_heads)
     }
 
     /// Full-context-only batch reader.  The owning source writes the whole
@@ -5923,9 +5551,7 @@ impl Gemma4TextExecutor {
         let source_layer = shared_source.unwrap_or(layer_index);
         let caches = match &mut self.caches {
             Gemma4KvStorage::Device(caches) => caches,
-            Gemma4KvStorage::Host(_) => {
-                return Err("Gemma4 full batched attention requires device K/V".into());
-            }
+            Gemma4KvStorage::Host(_) => return Err("Gemma4 full batched attention requires device K/V".into()),
         };
         let cache = caches.cache_mut(source_layer)?;
         let prefix_len = cache.absolute_len;
@@ -5936,8 +5562,7 @@ impl Gemma4TextExecutor {
             }
             for row in 0..rows {
                 let range = row * kv_width..(row + 1) * kv_width;
-                self.matvec
-                    .append_device_kv(cache, &keys[range.clone()], &values[range])?;
+                self.matvec.append_device_kv(cache, &keys[range.clone()], &values[range])?;
             }
         } else {
             if cache.absolute_len < rows {
@@ -5946,18 +5571,15 @@ impl Gemma4TextExecutor {
                 ));
             }
         }
-        let reader_prefix = if own_kv.is_some() {
-            prefix_len
-        } else {
-            cache.absolute_len - rows
-        };
+        let reader_prefix = if own_kv.is_some() { prefix_len } else { cache.absolute_len - rows };
         if cache.absolute_len != reader_prefix + rows || cache.is_sliding() {
             return Err(format!(
                 "Gemma4 full reader received incomplete or sliding source cache at layer {source_layer}"
             ));
         }
-        self.matvec
-            .gemma_full_attention_batched_512(cache, queries, reader_prefix, rows, 1.0)
+        self.matvec.gemma_full_attention_batched_512(
+            cache, queries, reader_prefix, rows, 1.0,
+        )
     }
 }
 
@@ -5970,9 +5592,7 @@ fn per_layer_inputs_for_layer(
 ) -> Result<Vec<f32>, String> {
     if packed.len() != rows * packed_width
         || layer_width == 0
-        || (layer_index + 1)
-            .checked_mul(layer_width)
-            .is_none_or(|end| end > packed_width)
+        || (layer_index + 1).checked_mul(layer_width).is_none_or(|end| end > packed_width)
     {
         return Err("Gemma4 batched PLE packed input shape is invalid".into());
     }

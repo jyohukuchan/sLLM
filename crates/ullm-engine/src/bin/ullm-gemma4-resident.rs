@@ -962,16 +962,19 @@ fn attention_profile_workload(
     }))
 }
 
-/// The profiling workload reports *physical reader launches*.  The promoted
-/// full reader is tiled, while the sliding reader stays M=1 unless its
-/// separately gated experiment is explicitly enabled.
+/// The profiling workload reports *physical reader launches*.  The 28 local
+/// layers remain M=1, while the promoted full-attention path emits one reader
+/// per query tile.  Keep the legacy count when the documented rollback is
+/// active so this diagnostic validates either execution route honestly.
 fn expected_prefill_reader_calls(prompt_tokens: usize) -> Result<usize, String> {
-    if env::var("ULLM_GEMMA4_PREFILL_LAYER_MAJOR").ok().as_deref() == Some("0") {
-        return prompt_tokens
-            .checked_mul(GEMMA4_SLIDING_ATTENTION_LAYERS + GEMMA4_FULL_ATTENTION_LAYERS)
-            .ok_or_else(|| "legacy reader launch count overflows usize".to_string());
-    }
-    let tiles = {
+    let sliding = prompt_tokens
+        .checked_mul(GEMMA4_SLIDING_ATTENTION_LAYERS)
+        .ok_or_else(|| "sliding reader launch count overflows usize".to_string())?;
+    let full = if env::var("ULLM_GEMMA4_PREFILL_LAYER_MAJOR").ok().as_deref() == Some("0") {
+        prompt_tokens
+            .checked_mul(GEMMA4_FULL_ATTENTION_LAYERS)
+            .ok_or_else(|| "full reader launch count overflows usize".to_string())?
+    } else {
         let tile_tokens = match env::var("ULLM_GEMMA4_PREFILL_ACTIVATION_CHUNK_TOKENS") {
             Ok(value) => value.parse::<usize>().map_err(|_| {
                 "ULLM_GEMMA4_PREFILL_ACTIVATION_CHUNK_TOKENS must be an integer".to_string()
@@ -988,24 +991,11 @@ fn expected_prefill_reader_calls(prompt_tokens: usize) -> Result<usize, String> 
                 "ULLM_GEMMA4_PREFILL_ACTIVATION_CHUNK_TOKENS must be in 1..={GEMMA4_PREFILL_QUERY_TILE_TOKENS}, got {tile_tokens}"
             ));
         }
-        prompt_tokens.div_ceil(tile_tokens)
-    };
-    let sliding = if env::var("ULLM_GEMMA4_PREFILL_SLIDING_BATCHED")
-        .ok()
-        .as_deref()
-        == Some("1")
-    {
-        tiles
-            .checked_mul(GEMMA4_SLIDING_ATTENTION_LAYERS)
-            .ok_or_else(|| "batched sliding reader launch count overflows usize".to_string())?
-    } else {
         prompt_tokens
-            .checked_mul(GEMMA4_SLIDING_ATTENTION_LAYERS)
-            .ok_or_else(|| "legacy sliding reader launch count overflows usize".to_string())?
+            .div_ceil(tile_tokens)
+            .checked_mul(GEMMA4_FULL_ATTENTION_LAYERS)
+            .ok_or_else(|| "batched full reader launch count overflows usize".to_string())?
     };
-    let full = tiles
-        .checked_mul(GEMMA4_FULL_ATTENTION_LAYERS)
-        .ok_or_else(|| "batched full reader launch count overflows usize".to_string())?;
     sliding
         .checked_add(full)
         .ok_or_else(|| "total reader launch count overflows usize".to_string())
@@ -1175,7 +1165,6 @@ fn logical_bytes_json(bytes: Gemma4ResidentLogicalBytes) -> Result<Value, String
         "bf16_weight_bytes": bytes.bf16_weight_bytes,
         "kv_read_bytes": bytes.kv_read_bytes,
         "kv_write_bytes": bytes.kv_write_bytes,
-        "kv_snapshot_bytes": bytes.kv_snapshot_bytes,
         "total_bytes": bytes.total_bytes()?,
         "matvec_calls": bytes.matvec_calls,
         "bf16_row_reads": bytes.bf16_row_reads,
