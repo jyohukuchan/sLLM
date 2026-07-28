@@ -1438,6 +1438,23 @@ ullm_status ullm_runtime_gemma_full_attn_batched_512_f32(
     ullm_runtime_buffer *output_buffer,
     ullm_runtime_stream *stream);
 
+// Gemma4 256-wide sliding prefill reader.  History is read directly from the
+// pre-write ring by logical modulo mapping; `fresh_*` holds this chunk only.
+ullm_status ullm_runtime_gemma_sliding_attn_ring_batched_256_f32(
+    const ullm_runtime_buffer *q_buffer,
+    const ullm_runtime_buffer *k_ring_buffer,
+    const ullm_runtime_buffer *v_ring_buffer,
+    const ullm_runtime_buffer *fresh_k_buffer,
+    const ullm_runtime_buffer *fresh_v_buffer,
+    size_t prefix_len,
+    size_t history_rows,
+    size_t query_rows,
+    size_t ring_capacity,
+    size_t q_heads,
+    float softmax_scale,
+    ullm_runtime_buffer *output_buffer,
+    ullm_runtime_stream *stream);
+
 ullm_status ullm_runtime_paged_decode_attn_sigmoid_gate_f32(
     const ullm_runtime_buffer *q_buffer,
     const ullm_runtime_buffer *gate_buffer,

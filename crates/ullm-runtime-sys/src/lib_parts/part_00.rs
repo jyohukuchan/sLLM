@@ -1293,6 +1293,21 @@ unsafe extern "C" {
         output_buffer: *mut RawRuntimeBuffer,
         stream: *mut RawRuntimeStream,
     ) -> c_int;
+    fn ullm_runtime_gemma_sliding_attn_ring_batched_256_f32(
+        q_buffer: *const RawRuntimeBuffer,
+        k_ring_buffer: *const RawRuntimeBuffer,
+        v_ring_buffer: *const RawRuntimeBuffer,
+        fresh_k_buffer: *const RawRuntimeBuffer,
+        fresh_v_buffer: *const RawRuntimeBuffer,
+        prefix_len: usize,
+        history_rows: usize,
+        query_rows: usize,
+        ring_capacity: usize,
+        q_heads: usize,
+        softmax_scale: f32,
+        output_buffer: *mut RawRuntimeBuffer,
+        stream: *mut RawRuntimeStream,
+    ) -> c_int;
     fn ullm_runtime_paged_decode_attn_typed_f32(
         q: *const RawRuntimeBuffer,
         k_cache: *const RawRuntimeBuffer,
@@ -8496,6 +8511,53 @@ pub fn gemma_full_attn_batched_512_f32(
         prefix_len, query_rows, cache_len, block_size, cache_blocks, softmax_scale,
         output.raw.as_ptr(), stream,
     ) })
+}
+
+/// Exact Gemma4 local-prefill attention over a pre-write 256-wide ring and
+/// the chunk's freshly projected K/V.  The ring is addressed as logical `%`
+/// physical capacity, so no ring snapshot is materialized.
+#[allow(clippy::too_many_arguments)]
+pub fn gemma_sliding_attn_ring_batched_256_f32(
+    q: &RuntimeBuffer,
+    k_ring: &RuntimeBuffer,
+    v_ring: &RuntimeBuffer,
+    fresh_k: &RuntimeBuffer,
+    fresh_v: &RuntimeBuffer,
+    prefix_len: usize,
+    history_rows: usize,
+    query_rows: usize,
+    ring_capacity: usize,
+    q_heads: usize,
+    softmax_scale: f32,
+    output: &mut RuntimeBuffer,
+    stream: Option<&mut RuntimeStream>,
+) -> Result<(), String> {
+    const WIDTH: usize = 256;
+    if query_rows == 0 || query_rows > 128 || q_heads == 0 || history_rows > 511 ||
+        history_rows > prefix_len || ring_capacity == 0 || !softmax_scale.is_finite() || softmax_scale <= 0.0 {
+        return Err("Gemma sliding ring batched attention received invalid geometry".into());
+    }
+    let q_bytes = query_rows.checked_mul(q_heads).and_then(|n| n.checked_mul(WIDTH))
+        .and_then(|n| n.checked_mul(std::mem::size_of::<f32>()))
+        .ok_or_else(|| "Gemma sliding ring batched attention query size overflows".to_string())?;
+    let ring_bytes = ring_capacity.checked_mul(WIDTH).and_then(|n| n.checked_mul(std::mem::size_of::<f32>()))
+        .ok_or_else(|| "Gemma sliding ring batched attention ring size overflows".to_string())?;
+    let fresh_bytes = query_rows.checked_mul(WIDTH).and_then(|n| n.checked_mul(std::mem::size_of::<f32>()))
+        .ok_or_else(|| "Gemma sliding ring batched attention fresh size overflows".to_string())?;
+    check_copy_range(0, q_bytes, q.size()?)?;
+    check_copy_range(0, q_bytes, output.size()?)?;
+    check_copy_range(0, ring_bytes, k_ring.size()?)?;
+    check_copy_range(0, ring_bytes, v_ring.size()?)?;
+    check_copy_range(0, fresh_bytes, fresh_k.size()?)?;
+    check_copy_range(0, fresh_bytes, fresh_v.size()?)?;
+    let stream = stream.map_or(std::ptr::null_mut(), |stream| stream.raw.as_ptr());
+    status_to_result(unsafe {
+        ullm_runtime_gemma_sliding_attn_ring_batched_256_f32(
+            q.raw.as_ptr(), k_ring.raw.as_ptr(), v_ring.raw.as_ptr(), fresh_k.raw.as_ptr(),
+            fresh_v.raw.as_ptr(), prefix_len, history_rows, query_rows, ring_capacity, q_heads,
+            softmax_scale, output.raw.as_ptr(), stream,
+        )
+    })
 }
 
 fn kv_cache_dtype_payload_bytes(dtype: u32) -> Result<usize, String> {

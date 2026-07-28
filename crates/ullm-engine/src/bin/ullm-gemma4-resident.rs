@@ -967,9 +967,17 @@ fn attention_profile_workload(
 /// per query tile.  Keep the legacy count when the documented rollback is
 /// active so this diagnostic validates either execution route honestly.
 fn expected_prefill_reader_calls(prompt_tokens: usize) -> Result<usize, String> {
-    let sliding = prompt_tokens
-        .checked_mul(GEMMA4_SLIDING_ATTENTION_LAYERS)
-        .ok_or_else(|| "sliding reader launch count overflows usize".to_string())?;
+    let sliding = if env::var("ULLM_GEMMA4_PREFILL_SLIDING_RING_BATCHED").ok().as_deref() == Some("1") {
+        let tile_tokens = env::var("ULLM_GEMMA4_PREFILL_ACTIVATION_CHUNK_TOKENS")
+            .ok().map(|value| value.parse::<usize>())
+            .transpose().map_err(|_| "ULLM_GEMMA4_PREFILL_ACTIVATION_CHUNK_TOKENS must be an integer".to_string())?
+            .unwrap_or(GEMMA4_PREFILL_QUERY_TILE_TOKENS);
+        prompt_tokens.div_ceil(tile_tokens).checked_mul(GEMMA4_SLIDING_ATTENTION_LAYERS)
+            .ok_or_else(|| "batched sliding reader launch count overflows usize".to_string())?
+    } else {
+        prompt_tokens.checked_mul(GEMMA4_SLIDING_ATTENTION_LAYERS)
+            .ok_or_else(|| "sliding reader launch count overflows usize".to_string())?
+    };
     let full = if env::var("ULLM_GEMMA4_PREFILL_LAYER_MAJOR").ok().as_deref() == Some("0") {
         prompt_tokens
             .checked_mul(GEMMA4_FULL_ATTENTION_LAYERS)

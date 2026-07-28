@@ -3008,5 +3008,83 @@ extern "C" __global__ void ullm_gemma_full_attn_batched_512_f32_kernel(
         output[output_base + static_cast<unsigned long long>(tid) + 256ull] = weighted_hi[row];
     }
 }
+
+// Gemma4's local-prefill reader deliberately separates the pre-write ring
+// history from this chunk's freshly projected K/V.  A full ring cannot be
+// overwritten before row 0 has consumed its oldest entry: direct logical to
+// physical mapping preserves that pre-write history without a snapshot copy.
+extern "C" __global__ void ullm_gemma_sliding_attn_ring_batched_256_f32_kernel(
+    const float *q, const float *k_ring, const float *v_ring,
+    const float *fresh_k, const float *fresh_v,
+    unsigned long long prefix_len, unsigned long long history_rows,
+    unsigned long long query_rows, unsigned long long ring_capacity,
+    unsigned long long q_heads, float softmax_scale, float *output) {
+    const unsigned int tid = threadIdx.x;
+    const unsigned long long q_head = static_cast<unsigned long long>(blockIdx.x);
+    if (q_head >= q_heads || blockDim.x != 256u || q_heads == 0ull ||
+        query_rows == 0ull || query_rows > 128ull || history_rows > 511ull ||
+        history_rows > prefix_len || ring_capacity == 0ull) {
+        return;
+    }
+    __shared__ float cached_k[256];
+    __shared__ float cached_v[256];
+    __shared__ float reduce[256];
+    __shared__ float row_max[128];
+    __shared__ float row_denom[128];
+    __shared__ float update_scale;
+    __shared__ float update_weight;
+    float weighted[128];
+    #pragma unroll
+    for (unsigned int row = 0; row < 128u; ++row) {
+        weighted[row] = 0.0f;
+        if (tid == 0u) {
+            row_max[row] = -3.4028234663852886e38f;
+            row_denom[row] = 0.0f;
+        }
+    }
+    __syncthreads();
+
+    const unsigned long long source_rows = history_rows + query_rows;
+    for (unsigned long long source = 0; source < source_rows; ++source) {
+        if (source < history_rows) {
+            const unsigned long long logical = prefix_len - history_rows + source;
+            const unsigned long long physical = logical % ring_capacity;
+            cached_k[tid] = k_ring[physical * 256ull + tid];
+            cached_v[tid] = v_ring[physical * 256ull + tid];
+        } else {
+            const unsigned long long fresh = source - history_rows;
+            cached_k[tid] = fresh_k[fresh * 256ull + tid];
+            cached_v[tid] = fresh_v[fresh * 256ull + tid];
+        }
+        __syncthreads();
+        for (unsigned long long row = 0; row < query_rows; ++row) {
+            // History is wholly visible. Fresh K/V is visible only through
+            // this query's row, enforcing the upper causal bound.
+            if (source >= history_rows && source - history_rows > row) continue;
+            const unsigned long long q_base = (row * q_heads + q_head) * 256ull;
+            reduce[tid] = q[q_base + tid] * cached_k[tid];
+            __syncthreads();
+            for (unsigned int stride = 128u; stride > 0u; stride >>= 1u) {
+                if (tid < stride) reduce[tid] += reduce[tid + stride];
+                __syncthreads();
+            }
+            if (tid == 0u) {
+                const float score = reduce[0] * softmax_scale;
+                const float old_max = row_max[row];
+                const float new_max = score > old_max ? score : old_max;
+                update_scale = old_max <= -3.4028234663852886e38f ? 0.0f : expf(old_max - new_max);
+                update_weight = expf(score - new_max);
+                row_max[row] = new_max;
+                row_denom[row] = row_denom[row] * update_scale + update_weight;
+            }
+            __syncthreads();
+            weighted[row] = weighted[row] * update_scale + update_weight * cached_v[tid];
+            __syncthreads();
+        }
+    }
+    for (unsigned long long row = 0; row < query_rows; ++row) {
+        output[(row * q_heads + q_head) * 256ull + tid] = weighted[row] / row_denom[row];
+    }
+}
 )";
     }

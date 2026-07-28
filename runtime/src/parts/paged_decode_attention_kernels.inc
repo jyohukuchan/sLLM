@@ -4,6 +4,7 @@ public:
     struct Functions {
         void *legacy = nullptr;
         void *gemma_full_batched_512 = nullptr;
+        void *gemma_sliding_ring_batched_256 = nullptr;
         void *split_partial = nullptr;
         void *split_merge = nullptr;
     };
@@ -22,6 +23,12 @@ public:
             return nullptr;
         }
         return functions.gemma_full_batched_512;
+    }
+
+    void *gemma_sliding_ring_batched_256_function_for_device(int device_id, std::string *error) {
+        Functions functions;
+        if (!functions_for_device(device_id, &functions, error)) return nullptr;
+        return functions.gemma_sliding_ring_batched_256;
     }
 
     void *typed_function_for_device(
@@ -124,6 +131,16 @@ public:
                 append_error(&compile_errors, "hipModuleGetFunction Gemma full batched attention failed for " + arch);
                 continue;
             }
+            void *gemma_sliding_ring_batched_256_function = nullptr;
+            if (!hip_runtime().module_get_function(
+                    &gemma_sliding_ring_batched_256_function,
+                    module,
+                    "ullm_gemma_sliding_attn_ring_batched_256_f32_kernel",
+                    device_id)) {
+                hip_runtime().module_unload(module, device_id);
+                append_error(&compile_errors, "hipModuleGetFunction Gemma sliding ring batched attention failed for " + arch);
+                continue;
+            }
             if (!hip_runtime().module_get_function(
                     &split_partial_function,
                     module,
@@ -152,6 +169,7 @@ public:
             loaded->module = module;
             loaded->legacy_function = legacy_function;
             loaded->gemma_full_batched_512_function = gemma_full_batched_512_function;
+            loaded->gemma_sliding_ring_batched_256_function = gemma_sliding_ring_batched_256_function;
             loaded->split_partial_function = split_partial_function;
             loaded->split_merge_function = split_merge_function;
             bool typed_loaded = true;
@@ -199,6 +217,7 @@ private:
         void *module = nullptr;
         void *legacy_function = nullptr;
         void *gemma_full_batched_512_function = nullptr;
+        void *gemma_sliding_ring_batched_256_function = nullptr;
         void *split_partial_function = nullptr;
         void *split_merge_function = nullptr;
         void *typed[3][3] = {};
@@ -242,6 +261,7 @@ private:
         }
         functions->legacy = loaded.legacy_function;
         functions->gemma_full_batched_512 = loaded.gemma_full_batched_512_function;
+        functions->gemma_sliding_ring_batched_256 = loaded.gemma_sliding_ring_batched_256_function;
         functions->split_partial = loaded.split_partial_function;
         functions->split_merge = loaded.split_merge_function;
     }
@@ -391,6 +411,43 @@ bool gemma_full_attn_batched_512_f32_hip_kernel(
         if (error != nullptr) {
             *error = "hipModuleLaunchKernel failed for Gemma full batched attention";
         }
+        return false;
+    }
+    return true;
+}
+
+bool gemma_sliding_attn_ring_batched_256_f32_hip_kernel(
+    const ullm_runtime_buffer *q_buffer,
+    const ullm_runtime_buffer *k_ring_buffer,
+    const ullm_runtime_buffer *v_ring_buffer,
+    const ullm_runtime_buffer *fresh_k_buffer,
+    const ullm_runtime_buffer *fresh_v_buffer,
+    size_t prefix_len, size_t history_rows, size_t query_rows,
+    size_t ring_capacity, size_t q_heads, float softmax_scale,
+    ullm_runtime_buffer *output_buffer, ullm_runtime_stream *stream,
+    std::string *error) {
+    const int device_id = q_buffer->hip_device_id;
+    void *function = hip_paged_decode_attn_kernel_cache()
+        .gemma_sliding_ring_batched_256_function_for_device(device_id, error);
+    if (function == nullptr) return false;
+    unsigned long long kernel_prefix_len = static_cast<unsigned long long>(prefix_len);
+    unsigned long long kernel_history_rows = static_cast<unsigned long long>(history_rows);
+    unsigned long long kernel_query_rows = static_cast<unsigned long long>(query_rows);
+    unsigned long long kernel_ring_capacity = static_cast<unsigned long long>(ring_capacity);
+    unsigned long long kernel_q_heads = static_cast<unsigned long long>(q_heads);
+    void *q_ptr = q_buffer->ptr;
+    void *k_ring_ptr = k_ring_buffer->ptr;
+    void *v_ring_ptr = v_ring_buffer->ptr;
+    void *fresh_k_ptr = fresh_k_buffer->ptr;
+    void *fresh_v_ptr = fresh_v_buffer->ptr;
+    void *output_ptr = output_buffer->ptr;
+    void *params[] = {&q_ptr, &k_ring_ptr, &v_ring_ptr, &fresh_k_ptr, &fresh_v_ptr,
+        &kernel_prefix_len, &kernel_history_rows, &kernel_query_rows, &kernel_ring_capacity,
+        &kernel_q_heads, &softmax_scale, &output_ptr};
+    void *hip_stream = stream == nullptr ? nullptr : stream->stream;
+    if (!hip_runtime().module_launch_kernel(function, static_cast<unsigned int>(q_heads), 256u,
+                                             params, hip_stream, device_id)) {
+        if (error != nullptr) *error = "hipModuleLaunchKernel failed for Gemma sliding ring batched attention";
         return false;
     }
     return true;

@@ -2122,6 +2122,90 @@ ullm_status ullm_runtime_gemma_full_attn_batched_512_f32(
     return ULLM_STATUS_RUNTIME_ERROR;
 }
 
+ullm_status ullm_runtime_gemma_sliding_attn_ring_batched_256_f32(
+    const ullm_runtime_buffer *q_buffer,
+    const ullm_runtime_buffer *k_ring_buffer,
+    const ullm_runtime_buffer *v_ring_buffer,
+    const ullm_runtime_buffer *fresh_k_buffer,
+    const ullm_runtime_buffer *fresh_v_buffer,
+    size_t prefix_len,
+    size_t history_rows,
+    size_t query_rows,
+    size_t ring_capacity,
+    size_t q_heads,
+    float softmax_scale,
+    ullm_runtime_buffer *output_buffer,
+    ullm_runtime_stream *stream) {
+    constexpr size_t width = 256u;
+    if (q_buffer == nullptr || k_ring_buffer == nullptr || v_ring_buffer == nullptr ||
+        fresh_k_buffer == nullptr || fresh_v_buffer == nullptr || output_buffer == nullptr ||
+        query_rows == 0 || query_rows > 128 || history_rows > 511 || history_rows > prefix_len ||
+        ring_capacity == 0 || q_heads == 0 || !std::isfinite(softmax_scale) || softmax_scale <= 0.0f ||
+        !buffers_share_backend(q_buffer, k_ring_buffer) || !buffers_share_backend(q_buffer, v_ring_buffer) ||
+        !buffers_share_backend(q_buffer, fresh_k_buffer) || !buffers_share_backend(q_buffer, fresh_v_buffer) ||
+        !buffers_share_backend(q_buffer, output_buffer) || !stream_matches_buffer(output_buffer, stream)) {
+        set_error("Gemma sliding ring batched attention received invalid buffers or geometry");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t q_elements = query_rows * q_heads * width;
+    const size_t ring_elements = ring_capacity * width;
+    const size_t fresh_elements = query_rows * width;
+    if (q_elements > std::numeric_limits<size_t>::max() / sizeof(float) ||
+        ring_elements > std::numeric_limits<size_t>::max() / sizeof(float) ||
+        fresh_elements > std::numeric_limits<size_t>::max() / sizeof(float) ||
+        q_buffer->bytes < q_elements * sizeof(float) || output_buffer->bytes < q_elements * sizeof(float) ||
+        k_ring_buffer->bytes < ring_elements * sizeof(float) || v_ring_buffer->bytes < ring_elements * sizeof(float) ||
+        fresh_k_buffer->bytes < fresh_elements * sizeof(float) || fresh_v_buffer->bytes < fresh_elements * sizeof(float)) {
+        set_error("Gemma sliding ring batched attention buffer is too small");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (q_buffer->backend == BackendKind::Cpu) {
+        const auto *q = static_cast<const float *>(q_buffer->ptr);
+        const auto *kr = static_cast<const float *>(k_ring_buffer->ptr);
+        const auto *vr = static_cast<const float *>(v_ring_buffer->ptr);
+        const auto *fk = static_cast<const float *>(fresh_k_buffer->ptr);
+        const auto *fv = static_cast<const float *>(fresh_v_buffer->ptr);
+        auto *out = static_cast<float *>(output_buffer->ptr);
+        for (size_t row = 0; row < query_rows; ++row) for (size_t head = 0; head < q_heads; ++head) {
+            std::vector<float> scores(history_rows + row + 1u);
+            float max_score = -std::numeric_limits<float>::infinity();
+            for (size_t source = 0; source < scores.size(); ++source) {
+                const float *key = source < history_rows
+                    ? kr + ((prefix_len - history_rows + source) % ring_capacity) * width
+                    : fk + (source - history_rows) * width;
+                float score = 0.0f;
+                for (size_t dim = 0; dim < width; ++dim) score += q[(row * q_heads + head) * width + dim] * key[dim];
+                scores[source] = score * softmax_scale;
+                max_score = std::max(max_score, scores[source]);
+            }
+            float denom = 0.0f;
+            for (float score : scores) denom += std::exp(score - max_score);
+            for (size_t dim = 0; dim < width; ++dim) {
+                float value = 0.0f;
+                for (size_t source = 0; source < scores.size(); ++source) {
+                    const float *v = source < history_rows
+                        ? vr + ((prefix_len - history_rows + source) % ring_capacity) * width
+                        : fv + (source - history_rows) * width;
+                    value += std::exp(scores[source] - max_score) * v[dim];
+                }
+                out[(row * q_heads + head) * width + dim] = value / denom;
+            }
+        }
+        set_error("");
+        return ULLM_STATUS_OK;
+    }
+    std::string hip_error;
+    if (gemma_sliding_attn_ring_batched_256_f32_hip_kernel(
+            q_buffer, k_ring_buffer, v_ring_buffer, fresh_k_buffer, fresh_v_buffer,
+            prefix_len, history_rows, query_rows, ring_capacity, q_heads, softmax_scale,
+            output_buffer, stream, &hip_error)) {
+        set_error("");
+        return ULLM_STATUS_OK;
+    }
+    set_error(hip_error.empty() ? "Gemma sliding ring batched attention HIP kernel is unavailable" : hip_error.c_str());
+    return ULLM_STATUS_RUNTIME_ERROR;
+}
+
 static ullm_status paged_decode_attn_typed_f32_hip_staging(
     const ullm_runtime_buffer *q_buffer,
     const ullm_runtime_buffer *k_cache_buffer,
