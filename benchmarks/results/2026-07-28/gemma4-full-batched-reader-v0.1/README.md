@@ -19,3 +19,21 @@ The ordinary 256-wide paged-decode, chunk, and WMMA bodies are unchanged.
 
 This is not a promotion result.  The layer-major path remains gated pending
 tile-width sensitivity and end-to-end timing.
+
+## First throughput evidence
+
+One-repeat clean-release timing with the same fixed token-2 prompt found:
+
+| context | query tile | prefill tok/s | decode tok/s | full reader launches | total reader launches |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 128 | 16 | 47.371 | 17.253 | 56 | 3,640 |
+| 128 | 128 | 53.748 | 16.393 | 7 | 3,591 |
+| 512 | 128 | 41.686 | 14.190 | 28 | 14,364 |
+
+The M=16/M=128 comparison has the same final top-1 (`184`) for the 128-token
+fixed prompt.  M=128 is 13.5% faster and is the candidate width.  Its reader
+count is exactly `7 * ceil(N / 128)`; the remaining calls are the untouched
+28 sliding layers (`28 * N`).
+
+N=2048 is running detached under the R9700 lock at the time of this increment.
+The recovery monitor will restart `ullm-openai` only after that lock releases.
