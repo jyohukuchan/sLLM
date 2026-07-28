@@ -2042,6 +2042,86 @@ ullm_status ullm_runtime_paged_decode_attn_f32(
         stream);
 }
 
+ullm_status ullm_runtime_gemma_full_attn_batched_512_f32(
+    const ullm_runtime_buffer *q_buffer,
+    const ullm_runtime_buffer *k_cache_buffer,
+    const ullm_runtime_buffer *v_cache_buffer,
+    const ullm_runtime_buffer *block_table_buffer,
+    size_t prefix_len,
+    size_t query_rows,
+    size_t cache_len,
+    size_t block_size,
+    size_t cache_blocks,
+    float softmax_scale,
+    ullm_runtime_buffer *output_buffer,
+    ullm_runtime_stream *stream) {
+    constexpr size_t q_heads = 8u;
+    constexpr size_t width = 512u;
+    if (q_buffer == nullptr || k_cache_buffer == nullptr || v_cache_buffer == nullptr ||
+        block_table_buffer == nullptr || output_buffer == nullptr) {
+        set_error("Gemma full batched attention received a null buffer");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (query_rows == 0 || query_rows > 128 || cache_len == 0 || block_size == 0 || cache_blocks == 0 ||
+        !std::isfinite(softmax_scale) || softmax_scale <= 0.0f) {
+        set_error("Gemma full batched attention received invalid geometry or softmax scale");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (prefix_len > cache_len || query_rows > cache_len - prefix_len ||
+        !buffers_share_backend(q_buffer, k_cache_buffer) ||
+        !buffers_share_backend(q_buffer, v_cache_buffer) ||
+        !buffers_share_backend(q_buffer, block_table_buffer) ||
+        !buffers_share_backend(q_buffer, output_buffer) ||
+        !stream_matches_buffer(output_buffer, stream)) {
+        set_error("Gemma full batched attention buffers, stream, or causal prefix are invalid");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t q_elements = query_rows * q_heads * width;
+    const size_t physical_tokens = cache_blocks * block_size;
+    const size_t kv_elements = physical_tokens * width;
+    const size_t table_entries = (cache_len - 1u) / block_size + 1u;
+    if (q_elements > std::numeric_limits<size_t>::max() / sizeof(float) ||
+        kv_elements > std::numeric_limits<size_t>::max() / sizeof(float) ||
+        table_entries > std::numeric_limits<size_t>::max() / sizeof(std::uint32_t)) {
+        set_error("Gemma full batched attention byte size overflows");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t q_bytes = q_elements * sizeof(float);
+    const size_t kv_bytes = kv_elements * sizeof(float);
+    const size_t table_bytes = table_entries * sizeof(std::uint32_t);
+    if (q_buffer->bytes < q_bytes || k_cache_buffer->bytes < kv_bytes ||
+        v_cache_buffer->bytes < kv_bytes || block_table_buffer->bytes < table_bytes ||
+        output_buffer->bytes < q_bytes) {
+        set_error("Gemma full batched attention buffer is too small");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (q_buffer->backend == BackendKind::Cpu) {
+        const auto *q = static_cast<const float *>(q_buffer->ptr);
+        const auto *k = static_cast<const float *>(k_cache_buffer->ptr);
+        const auto *v = static_cast<const float *>(v_cache_buffer->ptr);
+        const auto *table = static_cast<const std::uint32_t *>(block_table_buffer->ptr);
+        auto *output = static_cast<float *>(output_buffer->ptr);
+        for (size_t row = 0; row < query_rows; ++row) {
+            paged_decode_attn_f32_host(
+                q + row * q_heads * width, k, v, table, prefix_len + row + 1u,
+                block_size, q_heads, 1u, width, width, softmax_scale,
+                output + row * q_heads * width);
+        }
+        set_error("");
+        return ULLM_STATUS_OK;
+    }
+    std::string hip_error;
+    if (gemma_full_attn_batched_512_f32_hip_kernel(
+            q_buffer, k_cache_buffer, v_cache_buffer, block_table_buffer, prefix_len,
+            query_rows, cache_len, block_size, cache_blocks, softmax_scale, output_buffer,
+            stream, &hip_error)) {
+        set_error("");
+        return ULLM_STATUS_OK;
+    }
+    set_error(hip_error.empty() ? "Gemma full batched attention HIP kernel is unavailable" : hip_error.c_str());
+    return ULLM_STATUS_RUNTIME_ERROR;
+}
+
 static ullm_status paged_decode_attn_typed_f32_hip_staging(
     const ullm_runtime_buffer *q_buffer,
     const ullm_runtime_buffer *k_cache_buffer,

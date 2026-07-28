@@ -2914,5 +2914,99 @@ ULLM_DEFINE_TYPED_PAGED_DECODE_SPLIT(ULLM_TYPED_DECODE_FP8_E4M3FN, ULLM_TYPED_DE
 ULLM_DEFINE_TYPED_PAGED_DECODE_SPLIT(ULLM_TYPED_DECODE_FP8_E4M3FN, ULLM_TYPED_DECODE_F16, fp8, f16)
 ULLM_DEFINE_TYPED_PAGED_DECODE_SPLIT(ULLM_TYPED_DECODE_FP8_E4M3FN, ULLM_TYPED_DECODE_FP8_E4M3FN, fp8, fp8)
 #undef ULLM_DEFINE_TYPED_PAGED_DECODE_SPLIT
+
+// Exact Gemma4 E2B full-attention prefill reader.  One CTA owns one of the
+// eight Q heads and retains two V accumulators per query row in registers.
+// K/V for each source token is loaded once into LDS then reused for the whole
+// query chunk.  The `source <= prefix + row` check is deliberately inside the
+// row loop: moving it outside makes early queries see later chunk tokens.
+extern "C" __global__ void ullm_gemma_full_attn_batched_512_f32_kernel(
+    const float *q, const float *k_cache, const float *v_cache,
+    const unsigned int *block_table, unsigned long long prefix_len,
+    unsigned long long query_rows, unsigned long long cache_len,
+    unsigned long long block_size, unsigned long long cache_blocks,
+    float softmax_scale, float *output) {
+    const unsigned int tid = threadIdx.x;
+    const unsigned long long q_head = static_cast<unsigned long long>(blockIdx.x);
+    if (q_head >= 8ull || blockDim.x != 256u || query_rows == 0ull || query_rows > 128ull ||
+        prefix_len + query_rows > cache_len) {
+        return;
+    }
+    __shared__ float cached_k[512];
+    __shared__ float cached_v[512];
+    __shared__ float reduce[256];
+    __shared__ float row_max[128];
+    __shared__ float row_denom[128];
+    __shared__ float update_scale;
+    __shared__ float update_weight;
+
+    float weighted_lo[128];
+    float weighted_hi[128];
+    #pragma unroll
+    for (unsigned int row = 0; row < 128u; ++row) {
+        weighted_lo[row] = 0.0f;
+        weighted_hi[row] = 0.0f;
+        if (tid == 0u) {
+            row_max[row] = -3.4028234663852886e38f;
+            row_denom[row] = 0.0f;
+        }
+    }
+    __syncthreads();
+
+    for (unsigned long long source = 0; source < prefix_len + query_rows; ++source) {
+        const unsigned long long logical_block = source / block_size;
+        const unsigned long long block_offset = source - logical_block * block_size;
+        if (logical_block >= (cache_len - 1ull) / block_size + 1ull) {
+            return;
+        }
+        const unsigned long long block_id = static_cast<unsigned long long>(block_table[logical_block]);
+        if (block_id >= cache_blocks) {
+            return;
+        }
+        const unsigned long long physical = block_id * block_size + block_offset;
+        for (unsigned int value = tid; value < 512u; value += 256u) {
+            cached_k[value] = k_cache[physical * 512ull + value];
+            cached_v[value] = v_cache[physical * 512ull + value];
+        }
+        __syncthreads();
+        for (unsigned long long row = 0; row < query_rows; ++row) {
+            if (source > prefix_len + row) {
+                continue;
+            }
+            const unsigned long long q_base = (row * 8ull + q_head) * 512ull;
+            float dot = q[q_base + tid] * cached_k[tid] +
+                        q[q_base + static_cast<unsigned long long>(tid) + 256ull] *
+                            cached_k[tid + 256u];
+            reduce[tid] = dot;
+            __syncthreads();
+            for (unsigned int stride = 128u; stride > 0u; stride >>= 1u) {
+                if (tid < stride) {
+                    reduce[tid] += reduce[tid + stride];
+                }
+                __syncthreads();
+            }
+            if (tid == 0u) {
+                const float score = reduce[0] * softmax_scale;
+                const float old_max = row_max[row];
+                const float new_max = score > old_max ? score : old_max;
+                update_scale = old_max <= -3.4028234663852886e38f ? 0.0f : expf(old_max - new_max);
+                update_weight = expf(score - new_max);
+                row_max[row] = new_max;
+                row_denom[row] = row_denom[row] * update_scale + update_weight;
+            }
+            __syncthreads();
+            weighted_lo[row] = weighted_lo[row] * update_scale + update_weight * cached_v[tid];
+            weighted_hi[row] = weighted_hi[row] * update_scale + update_weight * cached_v[tid + 256u];
+            __syncthreads();
+        }
+    }
+    for (unsigned long long row = 0; row < query_rows; ++row) {
+        const unsigned long long output_base = (row * 8ull + q_head) * 512ull;
+        weighted_lo[row] /= row_denom[row];
+        weighted_hi[row] /= row_denom[row];
+        output[output_base + tid] = weighted_lo[row];
+        output[output_base + static_cast<unsigned long long>(tid) + 256ull] = weighted_hi[row];
+    }
+}
 )";
     }

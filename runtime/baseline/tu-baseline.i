@@ -1242,6 +1242,19 @@ ullm_status ullm_runtime_paged_decode_attn_f32(
     float softmax_scale,
     ullm_runtime_buffer *output_buffer,
     ullm_runtime_stream *stream);
+ullm_status ullm_runtime_gemma_full_attn_batched_512_f32(
+    const ullm_runtime_buffer *q_buffer,
+    const ullm_runtime_buffer *k_cache_buffer,
+    const ullm_runtime_buffer *v_cache_buffer,
+    const ullm_runtime_buffer *block_table_buffer,
+    size_t prefix_len,
+    size_t query_rows,
+    size_t cache_len,
+    size_t block_size,
+    size_t cache_blocks,
+    float softmax_scale,
+    ullm_runtime_buffer *output_buffer,
+    ullm_runtime_stream *stream);
 ullm_status ullm_runtime_paged_decode_attn_sigmoid_gate_f32(
     const ullm_runtime_buffer *q_buffer,
     const ullm_runtime_buffer *gate_buffer,
@@ -74680,6 +74693,100 @@ ULLM_DEFINE_TYPED_PAGED_DECODE_SPLIT(ULLM_TYPED_DECODE_FP8_E4M3FN, ULLM_TYPED_DE
 ULLM_DEFINE_TYPED_PAGED_DECODE_SPLIT(ULLM_TYPED_DECODE_FP8_E4M3FN, ULLM_TYPED_DECODE_F16, fp8, f16)
 ULLM_DEFINE_TYPED_PAGED_DECODE_SPLIT(ULLM_TYPED_DECODE_FP8_E4M3FN, ULLM_TYPED_DECODE_FP8_E4M3FN, fp8, fp8)
 #undef ULLM_DEFINE_TYPED_PAGED_DECODE_SPLIT
+
+// Exact Gemma4 E2B full-attention prefill reader.  One CTA owns one of the
+// eight Q heads and retains two V accumulators per query row in registers.
+// K/V for each source token is loaded once into LDS then reused for the whole
+// query chunk.  The `source <= prefix + row` check is deliberately inside the
+// row loop: moving it outside makes early queries see later chunk tokens.
+extern "C" __global__ void ullm_gemma_full_attn_batched_512_f32_kernel(
+    const float *q, const float *k_cache, const float *v_cache,
+    const unsigned int *block_table, unsigned long long prefix_len,
+    unsigned long long query_rows, unsigned long long cache_len,
+    unsigned long long block_size, unsigned long long cache_blocks,
+    float softmax_scale, float *output) {
+    const unsigned int tid = threadIdx.x;
+    const unsigned long long q_head = static_cast<unsigned long long>(blockIdx.x);
+    if (q_head >= 8ull || blockDim.x != 256u || query_rows == 0ull || query_rows > 128ull ||
+        prefix_len + query_rows > cache_len) {
+        return;
+    }
+    __shared__ float cached_k[512];
+    __shared__ float cached_v[512];
+    __shared__ float reduce[256];
+    __shared__ float row_max[128];
+    __shared__ float row_denom[128];
+    __shared__ float update_scale;
+    __shared__ float update_weight;
+
+    float weighted_lo[128];
+    float weighted_hi[128];
+    #pragma unroll
+    for (unsigned int row = 0; row < 128u; ++row) {
+        weighted_lo[row] = 0.0f;
+        weighted_hi[row] = 0.0f;
+        if (tid == 0u) {
+            row_max[row] = -3.4028234663852886e38f;
+            row_denom[row] = 0.0f;
+        }
+    }
+    __syncthreads();
+
+    for (unsigned long long source = 0; source < prefix_len + query_rows; ++source) {
+        const unsigned long long logical_block = source / block_size;
+        const unsigned long long block_offset = source - logical_block * block_size;
+        if (logical_block >= (cache_len - 1ull) / block_size + 1ull) {
+            return;
+        }
+        const unsigned long long block_id = static_cast<unsigned long long>(block_table[logical_block]);
+        if (block_id >= cache_blocks) {
+            return;
+        }
+        const unsigned long long physical = block_id * block_size + block_offset;
+        for (unsigned int value = tid; value < 512u; value += 256u) {
+            cached_k[value] = k_cache[physical * 512ull + value];
+            cached_v[value] = v_cache[physical * 512ull + value];
+        }
+        __syncthreads();
+        for (unsigned long long row = 0; row < query_rows; ++row) {
+            if (source > prefix_len + row) {
+                continue;
+            }
+            const unsigned long long q_base = (row * 8ull + q_head) * 512ull;
+            float dot = q[q_base + tid] * cached_k[tid] +
+                        q[q_base + static_cast<unsigned long long>(tid) + 256ull] *
+                            cached_k[tid + 256u];
+            reduce[tid] = dot;
+            __syncthreads();
+            for (unsigned int stride = 128u; stride > 0u; stride >>= 1u) {
+                if (tid < stride) {
+                    reduce[tid] += reduce[tid + stride];
+                }
+                __syncthreads();
+            }
+            if (tid == 0u) {
+                const float score = reduce[0] * softmax_scale;
+                const float old_max = row_max[row];
+                const float new_max = score > old_max ? score : old_max;
+                update_scale = old_max <= -3.4028234663852886e38f ? 0.0f : expf(old_max - new_max);
+                update_weight = expf(score - new_max);
+                row_max[row] = new_max;
+                row_denom[row] = row_denom[row] * update_scale + update_weight;
+            }
+            __syncthreads();
+            weighted_lo[row] = weighted_lo[row] * update_scale + update_weight * cached_v[tid];
+            weighted_hi[row] = weighted_hi[row] * update_scale + update_weight * cached_v[tid + 256u];
+            __syncthreads();
+        }
+    }
+    for (unsigned long long row = 0; row < query_rows; ++row) {
+        const unsigned long long output_base = (row * 8ull + q_head) * 512ull;
+        weighted_lo[row] /= row_denom[row];
+        weighted_hi[row] /= row_denom[row];
+        output[output_base + tid] = weighted_lo[row];
+        output[output_base + static_cast<unsigned long long>(tid) + 256ull] = weighted_hi[row];
+    }
+}
 )";
     }
     static const char *paged_kv_write_kernel_source() {
@@ -91435,6 +91542,7 @@ class HipPagedDecodeAttnKernelCache {
 public:
     struct Functions {
         void *legacy = nullptr;
+        void *gemma_full_batched_512 = nullptr;
         void *split_partial = nullptr;
         void *split_merge = nullptr;
     };
@@ -91444,6 +91552,13 @@ public:
             return nullptr;
         }
         return functions.legacy;
+    }
+    void *gemma_full_batched_512_function_for_device(int device_id, std::string *error) {
+        Functions functions;
+        if (!functions_for_device(device_id, &functions, error)) {
+            return nullptr;
+        }
+        return functions.gemma_full_batched_512;
     }
     void *typed_function_for_device(
         int device_id,
@@ -91529,6 +91644,16 @@ public:
                 continue;
             }
             void *split_partial_function = nullptr;
+            void *gemma_full_batched_512_function = nullptr;
+            if (!hip_runtime().module_get_function(
+                    &gemma_full_batched_512_function,
+                    module,
+                    "ullm_gemma_full_attn_batched_512_f32_kernel",
+                    device_id)) {
+                hip_runtime().module_unload(module, device_id);
+                append_error(&compile_errors, "hipModuleGetFunction Gemma full batched attention failed for " + arch);
+                continue;
+            }
             if (!hip_runtime().module_get_function(
                     &split_partial_function,
                     module,
@@ -91555,6 +91680,7 @@ public:
             auto loaded = std::make_unique<LoadedModule>();
             loaded->module = module;
             loaded->legacy_function = legacy_function;
+            loaded->gemma_full_batched_512_function = gemma_full_batched_512_function;
             loaded->split_partial_function = split_partial_function;
             loaded->split_merge_function = split_merge_function;
             bool typed_loaded = true;
@@ -91600,6 +91726,7 @@ private:
     struct LoadedModule {
         void *module = nullptr;
         void *legacy_function = nullptr;
+        void *gemma_full_batched_512_function = nullptr;
         void *split_partial_function = nullptr;
         void *split_merge_function = nullptr;
         void *typed[3][3] = {};
@@ -91639,6 +91766,7 @@ private:
             return;
         }
         functions->legacy = loaded.legacy_function;
+        functions->gemma_full_batched_512 = loaded.gemma_full_batched_512_function;
         functions->split_partial = loaded.split_partial_function;
         functions->split_merge = loaded.split_merge_function;
     }
@@ -91733,6 +91861,50 @@ bool paged_decode_attn_f32_hip_kernel(
             device_id)) {
         if (error != nullptr) {
             *error = "hipModuleLaunchKernel failed for f32 paged decode attention";
+        }
+        return false;
+    }
+    return true;
+}
+bool gemma_full_attn_batched_512_f32_hip_kernel(
+    const ullm_runtime_buffer *q_buffer,
+    const ullm_runtime_buffer *k_cache_buffer,
+    const ullm_runtime_buffer *v_cache_buffer,
+    const ullm_runtime_buffer *block_table_buffer,
+    size_t prefix_len,
+    size_t query_rows,
+    size_t cache_len,
+    size_t block_size,
+    size_t cache_blocks,
+    float softmax_scale,
+    ullm_runtime_buffer *output_buffer,
+    ullm_runtime_stream *stream,
+    std::string *error) {
+    const int device_id = q_buffer->hip_device_id;
+    void *function = hip_paged_decode_attn_kernel_cache()
+        .gemma_full_batched_512_function_for_device(device_id, error);
+    if (function == nullptr) {
+        return false;
+    }
+    unsigned long long kernel_prefix_len = static_cast<unsigned long long>(prefix_len);
+    unsigned long long kernel_query_rows = static_cast<unsigned long long>(query_rows);
+    unsigned long long kernel_cache_len = static_cast<unsigned long long>(cache_len);
+    unsigned long long kernel_block_size = static_cast<unsigned long long>(block_size);
+    unsigned long long kernel_cache_blocks = static_cast<unsigned long long>(cache_blocks);
+    void *q_ptr = q_buffer->ptr;
+    void *k_ptr = k_cache_buffer->ptr;
+    void *v_ptr = v_cache_buffer->ptr;
+    void *block_table_ptr = block_table_buffer->ptr;
+    void *output_ptr = output_buffer->ptr;
+    void *kernel_params[] = {
+        &q_ptr, &k_ptr, &v_ptr, &block_table_ptr, &kernel_prefix_len,
+        &kernel_query_rows, &kernel_cache_len, &kernel_block_size, &kernel_cache_blocks,
+        &softmax_scale, &output_ptr,
+    };
+    void *hip_stream = stream == nullptr ? nullptr : stream->stream;
+    if (!hip_runtime().module_launch_kernel(function, 8u, 256u, kernel_params, hip_stream, device_id)) {
+        if (error != nullptr) {
+            *error = "hipModuleLaunchKernel failed for Gemma full batched attention";
         }
         return false;
     }
@@ -106673,6 +106845,85 @@ ullm_status ullm_runtime_paged_decode_attn_f32(
         softmax_scale,
         output_buffer,
         stream);
+}
+ullm_status ullm_runtime_gemma_full_attn_batched_512_f32(
+    const ullm_runtime_buffer *q_buffer,
+    const ullm_runtime_buffer *k_cache_buffer,
+    const ullm_runtime_buffer *v_cache_buffer,
+    const ullm_runtime_buffer *block_table_buffer,
+    size_t prefix_len,
+    size_t query_rows,
+    size_t cache_len,
+    size_t block_size,
+    size_t cache_blocks,
+    float softmax_scale,
+    ullm_runtime_buffer *output_buffer,
+    ullm_runtime_stream *stream) {
+    constexpr size_t q_heads = 8u;
+    constexpr size_t width = 512u;
+    if (q_buffer == nullptr || k_cache_buffer == nullptr || v_cache_buffer == nullptr ||
+        block_table_buffer == nullptr || output_buffer == nullptr) {
+        set_error("Gemma full batched attention received a null buffer");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (query_rows == 0 || query_rows > 128 || cache_len == 0 || block_size == 0 || cache_blocks == 0 ||
+        !std::isfinite(softmax_scale) || softmax_scale <= 0.0f) {
+        set_error("Gemma full batched attention received invalid geometry or softmax scale");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (prefix_len > cache_len || query_rows > cache_len - prefix_len ||
+        !buffers_share_backend(q_buffer, k_cache_buffer) ||
+        !buffers_share_backend(q_buffer, v_cache_buffer) ||
+        !buffers_share_backend(q_buffer, block_table_buffer) ||
+        !buffers_share_backend(q_buffer, output_buffer) ||
+        !stream_matches_buffer(output_buffer, stream)) {
+        set_error("Gemma full batched attention buffers, stream, or causal prefix are invalid");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t q_elements = query_rows * q_heads * width;
+    const size_t physical_tokens = cache_blocks * block_size;
+    const size_t kv_elements = physical_tokens * width;
+    const size_t table_entries = (cache_len - 1u) / block_size + 1u;
+    if (q_elements > std::numeric_limits<size_t>::max() / sizeof(float) ||
+        kv_elements > std::numeric_limits<size_t>::max() / sizeof(float) ||
+        table_entries > std::numeric_limits<size_t>::max() / sizeof(std::uint32_t)) {
+        set_error("Gemma full batched attention byte size overflows");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t q_bytes = q_elements * sizeof(float);
+    const size_t kv_bytes = kv_elements * sizeof(float);
+    const size_t table_bytes = table_entries * sizeof(std::uint32_t);
+    if (q_buffer->bytes < q_bytes || k_cache_buffer->bytes < kv_bytes ||
+        v_cache_buffer->bytes < kv_bytes || block_table_buffer->bytes < table_bytes ||
+        output_buffer->bytes < q_bytes) {
+        set_error("Gemma full batched attention buffer is too small");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (q_buffer->backend == BackendKind::Cpu) {
+        const auto *q = static_cast<const float *>(q_buffer->ptr);
+        const auto *k = static_cast<const float *>(k_cache_buffer->ptr);
+        const auto *v = static_cast<const float *>(v_cache_buffer->ptr);
+        const auto *table = static_cast<const std::uint32_t *>(block_table_buffer->ptr);
+        auto *output = static_cast<float *>(output_buffer->ptr);
+        for (size_t row = 0; row < query_rows; ++row) {
+            paged_decode_attn_f32_host(
+                q + row * q_heads * width, k, v, table, prefix_len + row + 1u,
+                block_size, q_heads, 1u, width, width, softmax_scale,
+                output + row * q_heads * width);
+        }
+        set_error("");
+        return ULLM_STATUS_OK;
+    }
+    std::string hip_error;
+    if (gemma_full_attn_batched_512_f32_hip_kernel(
+            q_buffer, k_cache_buffer, v_cache_buffer, block_table_buffer, prefix_len,
+            query_rows, cache_len, block_size, cache_blocks, softmax_scale, output_buffer,
+            stream, &hip_error)) {
+        set_error("");
+        return ULLM_STATUS_OK;
+    }
+    set_error(hip_error.empty() ? "Gemma full batched attention HIP kernel is unavailable" : hip_error.c_str());
+    return ULLM_STATUS_RUNTIME_ERROR;
 }
 static ullm_status paged_decode_attn_typed_f32_hip_staging(
     const ullm_runtime_buffer *q_buffer,

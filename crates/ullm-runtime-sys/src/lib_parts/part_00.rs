@@ -1279,6 +1279,20 @@ unsafe extern "C" {
         output: *mut RawRuntimeBuffer,
         stream: *mut RawRuntimeStream,
     ) -> c_int;
+    fn ullm_runtime_gemma_full_attn_batched_512_f32(
+        q_buffer: *const RawRuntimeBuffer,
+        k_cache_buffer: *const RawRuntimeBuffer,
+        v_cache_buffer: *const RawRuntimeBuffer,
+        block_table_buffer: *const RawRuntimeBuffer,
+        prefix_len: usize,
+        query_rows: usize,
+        cache_len: usize,
+        block_size: usize,
+        cache_blocks: usize,
+        softmax_scale: f32,
+        output_buffer: *mut RawRuntimeBuffer,
+        stream: *mut RawRuntimeStream,
+    ) -> c_int;
     fn ullm_runtime_paged_decode_attn_typed_f32(
         q: *const RawRuntimeBuffer,
         k_cache: *const RawRuntimeBuffer,
@@ -8431,6 +8445,57 @@ pub fn paged_decode_attn_f32(
             stream,
         )
     })
+}
+
+/// Exact Gemma4 full-attention prefill reader for a row-major `[M, 8, 512]`
+/// query chunk and a paged F32 K/V cache.  `prefix_len` is the committed
+/// length before the chunk; row `j` may see keys through `prefix_len + j`.
+pub fn gemma_full_attn_batched_512_f32(
+    q: &RuntimeBuffer,
+    k_cache: &RuntimeBuffer,
+    v_cache: &RuntimeBuffer,
+    block_table: &RuntimeBuffer,
+    prefix_len: usize,
+    query_rows: usize,
+    cache_len: usize,
+    block_size: usize,
+    cache_blocks: usize,
+    softmax_scale: f32,
+    output: &mut RuntimeBuffer,
+    stream: Option<&mut RuntimeStream>,
+) -> Result<(), String> {
+    const Q_HEADS: usize = 8;
+    const WIDTH: usize = 512;
+    if query_rows == 0 || query_rows > 128 || cache_len == 0 || block_size == 0 || cache_blocks == 0 {
+        return Err("Gemma full batched attention requires 1..=128 rows and a nonempty paged cache".into());
+    }
+    let visible = prefix_len.checked_add(query_rows)
+        .ok_or_else(|| "Gemma full batched attention visible length overflows".to_string())?;
+    if visible > cache_len || !softmax_scale.is_finite() || softmax_scale <= 0.0 {
+        return Err("Gemma full batched attention received invalid causal geometry or scale".into());
+    }
+    let q_elements = query_rows.checked_mul(Q_HEADS).and_then(|n| n.checked_mul(WIDTH))
+        .ok_or_else(|| "Gemma full batched attention query size overflows".to_string())?;
+    let physical = cache_blocks.checked_mul(block_size)
+        .ok_or_else(|| "Gemma full batched attention physical cache size overflows".to_string())?;
+    let kv_elements = physical.checked_mul(WIDTH)
+        .ok_or_else(|| "Gemma full batched attention KV size overflows".to_string())?;
+    let table_entries = cache_len.checked_sub(1).and_then(|n| n.checked_div(block_size)).and_then(|n| n.checked_add(1))
+        .ok_or_else(|| "Gemma full batched attention table size overflows".to_string())?;
+    let q_bytes = q_elements.checked_mul(std::mem::size_of::<f32>()).ok_or_else(|| "Gemma full batched attention query bytes overflow".to_string())?;
+    let kv_bytes = kv_elements.checked_mul(std::mem::size_of::<f32>()).ok_or_else(|| "Gemma full batched attention KV bytes overflow".to_string())?;
+    let table_bytes = table_entries.checked_mul(std::mem::size_of::<u32>()).ok_or_else(|| "Gemma full batched attention table bytes overflow".to_string())?;
+    check_copy_range(0, q_bytes, q.size()?)?;
+    check_copy_range(0, kv_bytes, k_cache.size()?)?;
+    check_copy_range(0, kv_bytes, v_cache.size()?)?;
+    check_copy_range(0, table_bytes, block_table.size()?)?;
+    check_copy_range(0, q_bytes, output.size()?)?;
+    let stream = stream.map_or(std::ptr::null_mut(), |stream| stream.raw.as_ptr());
+    status_to_result(unsafe { ullm_runtime_gemma_full_attn_batched_512_f32(
+        q.raw.as_ptr(), k_cache.raw.as_ptr(), v_cache.raw.as_ptr(), block_table.raw.as_ptr(),
+        prefix_len, query_rows, cache_len, block_size, cache_blocks, softmax_scale,
+        output.raw.as_ptr(), stream,
+    ) })
 }
 
 fn kv_cache_dtype_payload_bytes(dtype: u32) -> Result<usize, String> {

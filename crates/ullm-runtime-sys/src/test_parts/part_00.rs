@@ -3440,6 +3440,67 @@ fn cpu_paged_decode_attn_f32_computes_expected_values() {
 }
 
 #[test]
+fn cpu_gemma_full_batched_512_reader_is_causal_per_query_row() {
+    let mut context = RuntimeContext::create(0).unwrap();
+    let mut stream = context.create_stream().unwrap();
+    let prefix_len = 2_usize;
+    let query_rows = 3_usize;
+    let cache_len = prefix_len + query_rows;
+    let block_size = 1_usize;
+    let cache_blocks = cache_len;
+    let q_heads = 8_usize;
+    let width = 512_usize;
+    let scale = 1.0_f32 / (width as f32).sqrt();
+    let q_values = (0..query_rows * q_heads * width)
+        .map(|index| ((index % 29) as f32 - 14.0) / 31.0)
+        .collect::<Vec<_>>();
+    let k_values = (0..cache_len * width)
+        .map(|index| ((index % 23) as f32 - 11.0) / 19.0)
+        .collect::<Vec<_>>();
+    let v_values = (0..cache_len * width)
+        .map(|index| ((index % 37) as f32 - 18.0) / 41.0)
+        .collect::<Vec<_>>();
+    let table = (0..cache_len as u32).collect::<Vec<_>>();
+    let mut expected = Vec::new();
+    for row in 0..query_rows {
+        expected.extend_from_slice(&expected_paged_decode_attn(
+            &q_values[row * q_heads * width..(row + 1) * q_heads * width],
+            &k_values,
+            &v_values,
+            &table,
+            prefix_len + row + 1,
+            block_size,
+            q_heads,
+            1,
+            width,
+            width,
+            scale,
+        ));
+    }
+    let mut q = context.alloc_buffer(q_values.len() * 4).unwrap();
+    let mut k = context.alloc_buffer(k_values.len() * 4).unwrap();
+    let mut v = context.alloc_buffer(v_values.len() * 4).unwrap();
+    let mut table_buffer = context.alloc_buffer(table.len() * 4).unwrap();
+    let mut output = context.alloc_buffer(expected.len() * 4).unwrap();
+    q.copy_from_host(0, &f32s_to_le_bytes(&q_values), Some(&mut stream)).unwrap();
+    k.copy_from_host(0, &f32s_to_le_bytes(&k_values), Some(&mut stream)).unwrap();
+    v.copy_from_host(0, &f32s_to_le_bytes(&v_values), Some(&mut stream)).unwrap();
+    table_buffer.copy_from_host(
+        0,
+        &table.iter().flat_map(|value| value.to_le_bytes()).collect::<Vec<_>>(),
+        Some(&mut stream),
+    ).unwrap();
+    gemma_full_attn_batched_512_f32(
+        &q, &k, &v, &table_buffer, prefix_len, query_rows, cache_len, block_size,
+        cache_blocks, scale, &mut output, Some(&mut stream),
+    ).unwrap();
+    let mut output_bytes = vec![0_u8; expected.len() * 4];
+    output.copy_to_host(0, &mut output_bytes, Some(&mut stream)).unwrap();
+    stream.synchronize().unwrap();
+    assert_f32s_close(&le_bytes_to_f32s(&output_bytes), &expected, 1e-5);
+}
+
+#[test]
 fn paged_decode_attn_split_workspace_bytes_checks_boundaries_and_overflow() {
     assert_eq!(
         paged_decode_attn_split_workspace_bytes(1, 1, 1, 1).unwrap(),

@@ -3,6 +3,7 @@ class HipPagedDecodeAttnKernelCache {
 public:
     struct Functions {
         void *legacy = nullptr;
+        void *gemma_full_batched_512 = nullptr;
         void *split_partial = nullptr;
         void *split_merge = nullptr;
     };
@@ -13,6 +14,14 @@ public:
             return nullptr;
         }
         return functions.legacy;
+    }
+
+    void *gemma_full_batched_512_function_for_device(int device_id, std::string *error) {
+        Functions functions;
+        if (!functions_for_device(device_id, &functions, error)) {
+            return nullptr;
+        }
+        return functions.gemma_full_batched_512;
     }
 
     void *typed_function_for_device(
@@ -105,6 +114,16 @@ public:
                 continue;
             }
             void *split_partial_function = nullptr;
+            void *gemma_full_batched_512_function = nullptr;
+            if (!hip_runtime().module_get_function(
+                    &gemma_full_batched_512_function,
+                    module,
+                    "ullm_gemma_full_attn_batched_512_f32_kernel",
+                    device_id)) {
+                hip_runtime().module_unload(module, device_id);
+                append_error(&compile_errors, "hipModuleGetFunction Gemma full batched attention failed for " + arch);
+                continue;
+            }
             if (!hip_runtime().module_get_function(
                     &split_partial_function,
                     module,
@@ -132,6 +151,7 @@ public:
             auto loaded = std::make_unique<LoadedModule>();
             loaded->module = module;
             loaded->legacy_function = legacy_function;
+            loaded->gemma_full_batched_512_function = gemma_full_batched_512_function;
             loaded->split_partial_function = split_partial_function;
             loaded->split_merge_function = split_merge_function;
             bool typed_loaded = true;
@@ -178,6 +198,7 @@ private:
     struct LoadedModule {
         void *module = nullptr;
         void *legacy_function = nullptr;
+        void *gemma_full_batched_512_function = nullptr;
         void *split_partial_function = nullptr;
         void *split_merge_function = nullptr;
         void *typed[3][3] = {};
@@ -220,6 +241,7 @@ private:
             return;
         }
         functions->legacy = loaded.legacy_function;
+        functions->gemma_full_batched_512 = loaded.gemma_full_batched_512_function;
         functions->split_partial = loaded.split_partial_function;
         functions->split_merge = loaded.split_merge_function;
     }
@@ -323,6 +345,51 @@ bool paged_decode_attn_f32_hip_kernel(
             device_id)) {
         if (error != nullptr) {
             *error = "hipModuleLaunchKernel failed for f32 paged decode attention";
+        }
+        return false;
+    }
+    return true;
+}
+
+bool gemma_full_attn_batched_512_f32_hip_kernel(
+    const ullm_runtime_buffer *q_buffer,
+    const ullm_runtime_buffer *k_cache_buffer,
+    const ullm_runtime_buffer *v_cache_buffer,
+    const ullm_runtime_buffer *block_table_buffer,
+    size_t prefix_len,
+    size_t query_rows,
+    size_t cache_len,
+    size_t block_size,
+    size_t cache_blocks,
+    float softmax_scale,
+    ullm_runtime_buffer *output_buffer,
+    ullm_runtime_stream *stream,
+    std::string *error) {
+    const int device_id = q_buffer->hip_device_id;
+    void *function = hip_paged_decode_attn_kernel_cache()
+        .gemma_full_batched_512_function_for_device(device_id, error);
+    if (function == nullptr) {
+        return false;
+    }
+    unsigned long long kernel_prefix_len = static_cast<unsigned long long>(prefix_len);
+    unsigned long long kernel_query_rows = static_cast<unsigned long long>(query_rows);
+    unsigned long long kernel_cache_len = static_cast<unsigned long long>(cache_len);
+    unsigned long long kernel_block_size = static_cast<unsigned long long>(block_size);
+    unsigned long long kernel_cache_blocks = static_cast<unsigned long long>(cache_blocks);
+    void *q_ptr = q_buffer->ptr;
+    void *k_ptr = k_cache_buffer->ptr;
+    void *v_ptr = v_cache_buffer->ptr;
+    void *block_table_ptr = block_table_buffer->ptr;
+    void *output_ptr = output_buffer->ptr;
+    void *kernel_params[] = {
+        &q_ptr, &k_ptr, &v_ptr, &block_table_ptr, &kernel_prefix_len,
+        &kernel_query_rows, &kernel_cache_len, &kernel_block_size, &kernel_cache_blocks,
+        &softmax_scale, &output_ptr,
+    };
+    void *hip_stream = stream == nullptr ? nullptr : stream->stream;
+    if (!hip_runtime().module_launch_kernel(function, 8u, 256u, kernel_params, hip_stream, device_id)) {
+        if (error != nullptr) {
+            *error = "hipModuleLaunchKernel failed for Gemma full batched attention";
         }
         return false;
     }
