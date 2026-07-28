@@ -34,7 +34,14 @@ aq4_guard_env=(
     ULLM_REQUIRE_HIP_SEGMENTED_RMSNORM_SILU_MUL_KERNEL=1 ULLM_REQUIRE_HIP_SIGMOID_MUL_KERNEL=1
     ULLM_REQUIRE_HIP_SILU_MUL_KERNEL=1 ULLM_REQUIRE_HIP_TOP1_KERNEL=1
 )
-gemma4_guard_env=(
+baseline_gemma4_guard_env=(
+    ULLM_REQUIRE_HIP_BF16_MATVEC_KERNEL=1
+    ULLM_REQUIRE_HIP_F32_ROW_KERNEL=1
+    ULLM_REQUIRE_HIP_PAGED_ATTENTION_KERNEL=1
+    ULLM_REQUIRE_HIP_PAGED_DECODE_ATTN_KERNEL=1
+    ULLM_REQUIRE_HIP_PAGED_KV_WRITE_KERNEL=1
+)
+promoted_gemma4_guard_env=(
     ULLM_REQUIRE_HIP_ADD_KERNEL=1
     ULLM_REQUIRE_HIP_BF16_MATVEC_KERNEL=1
     ULLM_REQUIRE_HIP_BF16_ROW_KERNEL=1
@@ -96,12 +103,18 @@ build_endpoint() {
 run_ullm_endpoint() {
     local name=$1
     local tree=$2
+    local -a guard_env
+    case "$name" in
+        baseline) guard_env=("${baseline_gemma4_guard_env[@]}") ;;
+        promoted) guard_env=("${promoted_gemma4_guard_env[@]}") ;;
+        *) echo "unknown Gemma4 endpoint: $name" >&2; return 2 ;;
+    esac
     build_endpoint "$name" "$tree"
     local binary="$tree/target/release/ullm-gemma4-resident"
     for n in 128 512 2048; do
         run_timed "${name}-n${n}" env \
             HIP_VISIBLE_DEVICES=1 ULLM_HIP_VISIBLE_DEVICES=1 \
-            "${gemma4_guard_env[@]}" \
+            "${guard_env[@]}" \
             "$binary" --model-dir "$model_dir" --output "$raw/${name}-n${n}.json" \
             --mode benchmark --benchmark-repeats 5 --benchmark-prompt-tokens "$n" \
             --benchmark-decode-tokens 128 --benchmark-prompt-token-id 2 \
@@ -131,7 +144,7 @@ sha256sum "$repo/runtime/src/ullm_runtime.cpp" "$repo/runtime/src/ullm_runtime_a
     "$repo/runtime/src/ullm_runtime_hiprtc_sources.inc" > "$out/preflight/runtime-source-sentinels-start.sha256"
 
 if [[ "${ULLM_EH_RESUME:-0}" == 1 ]]; then
-    printf '%s\n' "${gemma4_guard_env[@]}" > "$raw/gemma4-promoted-guard-contract.txt"
+    printf '%s\n' "${promoted_gemma4_guard_env[@]}" > "$raw/gemma4-promoted-guard-contract.txt"
 else
     (
         cd "$repo"
@@ -146,7 +159,7 @@ else
     mv "$raw/qwen35-aq4-start.stdout" "$raw/qwen35-aq4-start.json"
     run_ullm_endpoint baseline "$baseline"
 fi
-printf '%s\n' "${gemma4_guard_env[@]}" > "$raw/gemma4-promoted-guard-contract.txt"
+printf '%s\n' "${promoted_gemma4_guard_env[@]}" > "$raw/gemma4-promoted-guard-contract.txt"
 run_ullm_endpoint promoted "$repo"
 run_llama
 
