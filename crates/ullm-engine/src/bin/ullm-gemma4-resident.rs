@@ -8,7 +8,7 @@
 //! measurement window, and records the exact cache/no-cache and sliding-window
 //! checks used for the resident execution path.
 
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use std::env;
 use std::fs::{self, File};
 use std::io::Write;
@@ -26,7 +26,9 @@ const AMD_SMI: &str = "/opt/rocm/bin/amd-smi";
 const DEFAULT_COOLDOWN_HOTSPOT_C: f64 = 55.0;
 const DEFAULT_COOLDOWN_TIMEOUT_SECONDS: u64 = 900;
 const DEFAULT_BENCHMARK_REPEATS: usize = 3;
-const DECODE_TOKENS_PER_REPEAT: usize = 4;
+const DEFAULT_BENCHMARK_PROMPT_TOKENS: usize = 6;
+const DEFAULT_BENCHMARK_DECODE_TOKENS: usize = 4;
+const DEFAULT_BENCHMARK_PROMPT_TOKEN_ID: u32 = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Mode {
@@ -62,6 +64,9 @@ struct Options {
     output: PathBuf,
     mode: Mode,
     benchmark_repeats: usize,
+    benchmark_prompt_tokens: usize,
+    benchmark_decode_tokens: usize,
+    benchmark_prompt_token_id: u32,
     cooldown_hotspot_c: f64,
     cooldown_timeout_seconds: u64,
 }
@@ -89,7 +94,7 @@ const ONCE_UPON_A_TIME: TraceCase = TraceCase {
 };
 
 fn usage() -> &'static str {
-    "usage: ullm-gemma4-resident --model-dir PATH --output PATH --mode validation|sliding-boundary|benchmark [--benchmark-repeats N] [--cooldown-hotspot-c C] [--cooldown-timeout-seconds N]"
+    "usage: ullm-gemma4-resident --model-dir PATH --output PATH --mode validation|sliding-boundary|benchmark [--benchmark-repeats N] [--benchmark-prompt-tokens N] [--benchmark-decode-tokens N] [--benchmark-prompt-token-id ID] [--cooldown-hotspot-c C] [--cooldown-timeout-seconds N]"
 }
 
 fn main() -> ExitCode {
@@ -107,6 +112,9 @@ fn parse_options() -> Result<Options, String> {
     let mut output = None;
     let mut mode = None;
     let mut benchmark_repeats = DEFAULT_BENCHMARK_REPEATS;
+    let mut benchmark_prompt_tokens = DEFAULT_BENCHMARK_PROMPT_TOKENS;
+    let mut benchmark_decode_tokens = DEFAULT_BENCHMARK_DECODE_TOKENS;
+    let mut benchmark_prompt_token_id = DEFAULT_BENCHMARK_PROMPT_TOKEN_ID;
     let mut cooldown_hotspot_c = DEFAULT_COOLDOWN_HOTSPOT_C;
     let mut cooldown_timeout_seconds = DEFAULT_COOLDOWN_TIMEOUT_SECONDS;
     let mut arguments = env::args().skip(1);
@@ -143,6 +151,24 @@ fn parse_options() -> Result<Options, String> {
                     &next_argument("--benchmark-repeats", &mut arguments)?,
                 )?;
             }
+            "--benchmark-prompt-tokens" => {
+                benchmark_prompt_tokens = parse_positive_usize(
+                    "--benchmark-prompt-tokens",
+                    &next_argument("--benchmark-prompt-tokens", &mut arguments)?,
+                )?;
+            }
+            "--benchmark-decode-tokens" => {
+                benchmark_decode_tokens = parse_positive_usize(
+                    "--benchmark-decode-tokens",
+                    &next_argument("--benchmark-decode-tokens", &mut arguments)?,
+                )?;
+            }
+            "--benchmark-prompt-token-id" => {
+                let raw = next_argument("--benchmark-prompt-token-id", &mut arguments)?;
+                benchmark_prompt_token_id = raw.parse::<u32>().map_err(|_| {
+                    format!("--benchmark-prompt-token-id must be a u32, got {raw:?}")
+                })?;
+            }
             "--cooldown-hotspot-c" => {
                 let raw = next_argument("--cooldown-hotspot-c", &mut arguments)?;
                 cooldown_hotspot_c = raw.parse::<f64>().map_err(|_| {
@@ -169,6 +195,9 @@ fn parse_options() -> Result<Options, String> {
         output: output.ok_or_else(|| format!("--output is required; {}", usage()))?,
         mode: mode.ok_or_else(|| format!("--mode is required; {}", usage()))?,
         benchmark_repeats,
+        benchmark_prompt_tokens,
+        benchmark_decode_tokens,
+        benchmark_prompt_token_id,
         cooldown_hotspot_c,
         cooldown_timeout_seconds,
     })
@@ -235,7 +264,13 @@ fn run(options: Options) -> Result<(), String> {
     let workload = match options.mode {
         Mode::Validation => validation_workload(&mut executor)?,
         Mode::SlidingBoundary => sliding_boundary_workload(&mut executor)?,
-        Mode::Benchmark => benchmark_workload(&mut executor, options.benchmark_repeats)?,
+        Mode::Benchmark => benchmark_workload(
+            &mut executor,
+            options.benchmark_repeats,
+            options.benchmark_prompt_tokens,
+            options.benchmark_decode_tokens,
+            options.benchmark_prompt_token_id,
+        )?,
     };
     let after_workload_telemetry = capture_telemetry();
     let snapshot = executor.resident_kv_cache_snapshot()?;
@@ -677,10 +712,16 @@ fn sliding_boundary_workload(executor: &mut Gemma4TextExecutor) -> Result<Value,
     }))
 }
 
-fn benchmark_workload(executor: &mut Gemma4TextExecutor, repeats: usize) -> Result<Value, String> {
-    let prompt = CAPITAL_FRANCE.initial_token_ids;
+fn benchmark_workload(
+    executor: &mut Gemma4TextExecutor,
+    repeats: usize,
+    prompt_tokens: usize,
+    decode_tokens_per_repeat: usize,
+    prompt_token_id: u32,
+) -> Result<Value, String> {
+    let prompt = vec![prompt_token_id; prompt_tokens];
     executor.reset();
-    let warmup = executor.prefill(prompt)?;
+    let warmup = executor.prefill(&prompt)?;
     let mut prefill_runs = Vec::with_capacity(repeats);
     let mut prefill_tokens = 0_usize;
     let mut prefill_seconds = 0.0_f64;
@@ -689,7 +730,7 @@ fn benchmark_workload(executor: &mut Gemma4TextExecutor, repeats: usize) -> Resu
         executor.reset_resident_logical_bytes();
         executor.reset_resident_host_profile();
         let started = Instant::now();
-        let trace = executor.prefill(prompt)?;
+        let trace = executor.prefill(&prompt)?;
         let elapsed_seconds = started.elapsed().as_secs_f64();
         let logical = executor
             .resident_logical_bytes()
@@ -715,14 +756,14 @@ fn benchmark_workload(executor: &mut Gemma4TextExecutor, repeats: usize) -> Resu
     let mut decode_seconds = 0.0_f64;
     for _ in 0..repeats {
         executor.reset();
-        let prefill_trace = executor.prefill(prompt)?;
+        let prefill_trace = executor.prefill(&prompt)?;
         let mut input_token_id = prefill_trace.top1.token_id;
         executor.reset_resident_logical_bytes();
         executor.reset_resident_host_profile();
         let started = Instant::now();
-        let mut context_lengths_after_append = Vec::with_capacity(DECODE_TOKENS_PER_REPEAT);
-        let mut generated = Vec::with_capacity(DECODE_TOKENS_PER_REPEAT);
-        for _ in 0..DECODE_TOKENS_PER_REPEAT {
+        let mut context_lengths_after_append = Vec::with_capacity(decode_tokens_per_repeat);
+        let mut generated = Vec::with_capacity(decode_tokens_per_repeat);
+        for _ in 0..decode_tokens_per_repeat {
             let trace = executor.decode(input_token_id)?;
             context_lengths_after_append.push(executor.position());
             input_token_id = trace.top1.token_id;
@@ -736,7 +777,7 @@ fn benchmark_workload(executor: &mut Gemma4TextExecutor, repeats: usize) -> Resu
             .resident_host_profile()
             .ok_or_else(|| "decode run has no resident host profile".to_string())?;
         decode_tokens = decode_tokens
-            .checked_add(DECODE_TOKENS_PER_REPEAT)
+            .checked_add(decode_tokens_per_repeat)
             .ok_or_else(|| "decode token count overflows usize".to_string())?;
         decode_seconds += elapsed_seconds;
         decode_runs.push(json!({
@@ -751,6 +792,11 @@ fn benchmark_workload(executor: &mut Gemma4TextExecutor, repeats: usize) -> Resu
     let decode_tok_s = (decode_tokens as f64) / decode_seconds;
     Ok(json!({
         "kind": "resident-throughput",
+        "prompt": {
+            "token_count": prompt.len(),
+            "token_id": prompt_token_id,
+            "construction": "one fixed valid Gemma tokenizer token repeated to the requested context length; this makes every repeat and both before/after builds use the exact same token IDs",
+        },
         "warmup": {
             "prompt_token_count": prompt.len(),
             "top1_token_id": warmup.top1.token_id,
@@ -758,7 +804,7 @@ fn benchmark_workload(executor: &mut Gemma4TextExecutor, repeats: usize) -> Resu
         },
         "prefill": {
             "runs": prefill_runs,
-            "accounting": "Each timed operation is a M=N prefill of the six-token BL capital-France prompt after resident load. Total input tokens divided by total monotonic wall time; load, cooldown, warmup, and profiler time are excluded.",
+            "accounting": "Each timed operation is an M=N prefill of the declared fixed-token prompt after resident load. Total input tokens divided by total monotonic wall time; load, cooldown, warmup, and profiler time are excluded.",
             "total_tokens": prefill_tokens,
             "total_elapsed_seconds": prefill_seconds,
             "tok_per_second": prefill_tok_s,
@@ -766,7 +812,8 @@ fn benchmark_workload(executor: &mut Gemma4TextExecutor, repeats: usize) -> Resu
         },
         "decode": {
             "runs": decode_runs,
-            "accounting": "Each timed operation is M=1 decode after an untimed six-token resident prefill. Four generated tokens per repeat are divided by total monotonic wall time; load, the setup prefill, cooldown, warmup, and profiler time are excluded.",
+            "tokens_per_repeat": decode_tokens_per_repeat,
+            "accounting": "Each timed operation is M=1 decode after an untimed prefill of the declared fixed-token prompt. Generated tokens per repeat are divided by total monotonic wall time; load, the setup prefill, cooldown, warmup, and profiler time are excluded.",
             "total_tokens": decode_tokens,
             "total_elapsed_seconds": decode_seconds,
             "tok_per_second": decode_tok_s,
