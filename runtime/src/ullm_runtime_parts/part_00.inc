@@ -1253,6 +1253,30 @@ public:
             error);
     }
 
+    bool compile_cached_prefix_attn_f32_flash2_gqa_grouped_prototype_kernel(
+        const std::string &arch,
+        std::vector<char> *code,
+        std::string *error) {
+        return compile_kernel(
+            arch,
+            cached_prefix_flash2_f32_gqa_grouped_prototype_kernel_source(),
+            "ullm_sq8_0_cached_prefix_attn_f32_flash2_gqa_grouped_prototype.hip",
+            code,
+            error);
+    }
+
+    bool compile_cached_prefix_attn_f32_flash2_gqa_grouped_exact_tile64_prototype_kernel(
+        const std::string &arch,
+        std::vector<char> *code,
+        std::string *error) {
+        return compile_kernel(
+            arch,
+            cached_prefix_flash2_f32_gqa_grouped_exact_tile64_prototype_kernel_source(),
+            "ullm_sq8_0_cached_prefix_attn_f32_flash2_gqa_grouped_exact_tile64_prototype.hip",
+            code,
+            error);
+    }
+
     bool compile_cached_prefix_attn_fp8_e4m3_flash2_kernel(
         const std::string &arch,
         std::vector<char> *code,

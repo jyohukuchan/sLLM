@@ -7392,6 +7392,403 @@ extern "C" __global__ void ullm_cached_prefix_attn_f32_flash2_kernel(
 )";
     }
 
+    // One CTA handles the five Q heads that share a Qwen3-14B KV head.  It
+    // stages K or V in 20-token pieces, but preserves the generic Flash2
+    // kernel's 64-token online-softmax update boundary and reduction trees.
+    // This gives the GQA K/V reuse without intentionally changing the F32
+    // accumulation schedule.
+    static const char *cached_prefix_flash2_f32_gqa_grouped_exact_tile64_prototype_kernel_source() {
+        return R"(
+extern "C" __global__ void ullm_sq8_0_cached_prefix_attn_f32_flash2_gqa_grouped_exact_tile64_prototype_kernel(
+    const float *q,
+    const float *k_cache,
+    const float *v_cache,
+    unsigned long long cached_prefix_len,
+    unsigned long long new_tokens,
+    unsigned long long q_heads,
+    unsigned long long kv_heads,
+    unsigned long long head_dim,
+    unsigned long long value_dim,
+    float softmax_scale,
+    float *output) {
+    constexpr unsigned int kStageTokens = 20u;
+    constexpr unsigned int kFlashTileTokens = 64u;
+    constexpr unsigned int kQHeadsPerKv = 5u;
+    constexpr unsigned int kHeadDim = 128u;
+    constexpr unsigned int kWaveSize = 32u;
+
+    if (blockDim.x != 256u || kv_heads == 0u || head_dim != kHeadDim ||
+        value_dim != kHeadDim || q_heads != kv_heads * kQHeadsPerKv) {
+        return;
+    }
+    const unsigned long long grouped_index = static_cast<unsigned long long>(blockIdx.x);
+    const unsigned long long grouped_count = new_tokens * kv_heads;
+    if (grouped_index >= grouped_count) {
+        return;
+    }
+
+    const unsigned long long token_index = grouped_index / kv_heads;
+    const unsigned long long kv_head = grouped_index % kv_heads;
+    const unsigned long long cache_len = cached_prefix_len + token_index + 1u;
+    const unsigned int tid = threadIdx.x;
+    const unsigned int lane = tid & (kWaveSize - 1u);
+    const unsigned int wave = tid >> 5u;
+    const bool is_q_consumer = wave < kQHeadsPerKv;
+
+    __shared__ float staged_k[kStageTokens * kHeadDim];
+    __shared__ float staged_v[kStageTokens * kHeadDim];
+    __shared__ float scores[kQHeadsPerKv * kFlashTileTokens];
+    __shared__ float reduce[kQHeadsPerKv * kFlashTileTokens];
+    __shared__ float shared_alpha[kQHeadsPerKv];
+    __shared__ float shared_denominator[kQHeadsPerKv];
+    __shared__ float shared_max_score[kQHeadsPerKv];
+
+    float q0 = 0.0f;
+    float q1 = 0.0f;
+    float q2 = 0.0f;
+    float q3 = 0.0f;
+    float weighted0 = 0.0f;
+    float weighted1 = 0.0f;
+    float weighted2 = 0.0f;
+    float weighted3 = 0.0f;
+    float max_score = -3.4028234663852886e38f;
+    float denominator = 0.0f;
+    unsigned long long q_head = 0u;
+    if (is_q_consumer) {
+        q_head = kv_head * kQHeadsPerKv + static_cast<unsigned long long>(wave);
+        const unsigned long long q_base = (token_index * q_heads + q_head) * head_dim;
+        q0 = q[q_base + static_cast<unsigned long long>(lane)];
+        q1 = q[q_base + static_cast<unsigned long long>(lane + 32u)];
+        q2 = q[q_base + static_cast<unsigned long long>(lane + 64u)];
+        q3 = q[q_base + static_cast<unsigned long long>(lane + 96u)];
+    }
+
+    for (unsigned long long tile_start = 0u; tile_start < cache_len; tile_start += kFlashTileTokens) {
+        const unsigned long long remaining = cache_len - tile_start;
+        const unsigned int tile_count =
+            remaining < static_cast<unsigned long long>(kFlashTileTokens) ?
+                static_cast<unsigned int>(remaining) : kFlashTileTokens;
+
+        // K is loaded once per KV head in smaller pieces.  Scores still span
+        // the generic 64-token Flash2 tile before any online update occurs.
+        for (unsigned int stage_start = 0u; stage_start < tile_count; stage_start += kStageTokens) {
+            const unsigned int stage_count =
+                tile_count - stage_start < kStageTokens ? tile_count - stage_start : kStageTokens;
+            const unsigned int stage_elements = stage_count * kHeadDim;
+            for (unsigned int index = tid; index < stage_elements; index += blockDim.x) {
+                const unsigned int token_offset = index / kHeadDim;
+                const unsigned int dim = index % kHeadDim;
+                const unsigned long long source_timestep =
+                    tile_start + static_cast<unsigned long long>(stage_start + token_offset);
+                staged_k[index] = k_cache[(source_timestep * kv_heads + kv_head) * head_dim + dim];
+            }
+            __syncthreads();
+            if (is_q_consumer) {
+                const unsigned int score_base = wave * kFlashTileTokens;
+                for (unsigned int token_offset = 0u; token_offset < stage_count; ++token_offset) {
+                    const unsigned int k_base = token_offset * kHeadDim + lane;
+                    // Generic's 256-lane tree has zero in lanes 128..255;
+                    // this is its effective 128-value pair order.
+                    const float product0 = q0 * staged_k[k_base];
+                    const float product1 = q1 * staged_k[k_base + 32u];
+                    const float product2 = q2 * staged_k[k_base + 64u];
+                    const float product3 = q3 * staged_k[k_base + 96u];
+                    float partial = (product0 + product2) + (product1 + product3);
+                    for (int offset = 16; offset > 0; offset >>= 1) {
+                        partial += __shfl_down(partial, offset, kWaveSize);
+                    }
+                    if (lane == 0u) {
+                        scores[score_base + stage_start + token_offset] = partial * softmax_scale;
+                    }
+                }
+            }
+            __syncthreads();
+        }
+
+        // The generic max/sum reduction is a 256-entry tree.  For <=64
+        // scores its 128 and 64 strides only combine identities, leaving this
+        // exact 32..1 pairing.  Keep the raw weight array for V afterward.
+        if (is_q_consumer && lane == 0u) {
+            const unsigned int score_base = wave * kFlashTileTokens;
+            for (unsigned int index = 0u; index < kFlashTileTokens; ++index) {
+                reduce[score_base + index] =
+                    index < tile_count ? scores[score_base + index] : -3.4028234663852886e38f;
+            }
+            for (unsigned int stride = 32u; stride > 0u; stride >>= 1) {
+                for (unsigned int index = 0u; index < stride; ++index) {
+                    const float left = reduce[score_base + index];
+                    const float right = reduce[score_base + index + stride];
+                    reduce[score_base + index] = left > right ? left : right;
+                }
+            }
+            const float tile_max = reduce[score_base];
+            const float m_new = max_score > tile_max ? max_score : tile_max;
+            const float alpha = max_score <= -3.0e38f ? 0.0f : expf(max_score - m_new);
+            for (unsigned int index = 0u; index < kFlashTileTokens; ++index) {
+                const float weight = index < tile_count ? expf(scores[score_base + index] - m_new) : 0.0f;
+                if (index < tile_count) {
+                    scores[score_base + index] = weight;
+                }
+                reduce[score_base + index] = weight;
+            }
+            for (unsigned int stride = 32u; stride > 0u; stride >>= 1) {
+                for (unsigned int index = 0u; index < stride; ++index) {
+                    reduce[score_base + index] += reduce[score_base + index + stride];
+                }
+            }
+            denominator = denominator * alpha + reduce[score_base];
+            max_score = m_new;
+            shared_alpha[wave] = alpha;
+            shared_denominator[wave] = denominator;
+            shared_max_score[wave] = max_score;
+        }
+        __syncthreads();
+
+        float alpha = 0.0f;
+        float tile_weighted0 = 0.0f;
+        float tile_weighted1 = 0.0f;
+        float tile_weighted2 = 0.0f;
+        float tile_weighted3 = 0.0f;
+        if (is_q_consumer) {
+            alpha = shared_alpha[wave];
+            denominator = shared_denominator[wave];
+            max_score = shared_max_score[wave];
+        }
+
+        // V is likewise staged once per KV head.  Each output component
+        // visits token offsets 0..63 before the same one online update.
+        for (unsigned int stage_start = 0u; stage_start < tile_count; stage_start += kStageTokens) {
+            const unsigned int stage_count =
+                tile_count - stage_start < kStageTokens ? tile_count - stage_start : kStageTokens;
+            const unsigned int stage_elements = stage_count * kHeadDim;
+            for (unsigned int index = tid; index < stage_elements; index += blockDim.x) {
+                const unsigned int token_offset = index / kHeadDim;
+                const unsigned int dim = index % kHeadDim;
+                const unsigned long long source_timestep =
+                    tile_start + static_cast<unsigned long long>(stage_start + token_offset);
+                staged_v[index] = v_cache[(source_timestep * kv_heads + kv_head) * value_dim + dim];
+            }
+            __syncthreads();
+            if (is_q_consumer) {
+                const unsigned int score_base = wave * kFlashTileTokens + stage_start;
+                for (unsigned int token_offset = 0u; token_offset < stage_count; ++token_offset) {
+                    const float weight = scores[score_base + token_offset];
+                    const unsigned int v_base = token_offset * kHeadDim + lane;
+                    tile_weighted0 += weight * staged_v[v_base];
+                    tile_weighted1 += weight * staged_v[v_base + 32u];
+                    tile_weighted2 += weight * staged_v[v_base + 64u];
+                    tile_weighted3 += weight * staged_v[v_base + 96u];
+                }
+            }
+            __syncthreads();
+        }
+        if (is_q_consumer) {
+            weighted0 = weighted0 * alpha + tile_weighted0;
+            weighted1 = weighted1 * alpha + tile_weighted1;
+            weighted2 = weighted2 * alpha + tile_weighted2;
+            weighted3 = weighted3 * alpha + tile_weighted3;
+        }
+        __syncthreads();
+    }
+
+    if (is_q_consumer) {
+        const unsigned long long output_base =
+            (token_index * q_heads + q_head) * value_dim + static_cast<unsigned long long>(lane);
+        output[output_base] = weighted0 / denominator;
+        output[output_base + 32u] = weighted1 / denominator;
+        output[output_base + 64u] = weighted2 / denominator;
+        output[output_base + 96u] = weighted3 / denominator;
+    }
+}
+)";
+    }
+
+    // Qwen3-14B SQ8 uses five Q heads per KV head (40 / 8).  The ordinary
+    // Flash2 mapping above launches one workgroup per Q head, so those five
+    // workgroups independently fetch the same F32 K/V rows.  This separate,
+    // opt-in source maps one workgroup to (token, KV head): five wave32
+    // consumers retain their Q/output vectors while all eight waves stage a
+    // small K/V tile once in LDS.  It is intentionally shape-specialized;
+    // the generic Flash2 source remains the normal fallback.
+    static const char *cached_prefix_flash2_f32_gqa_grouped_prototype_kernel_source() {
+        return R"(
+extern "C" __global__ void ullm_sq8_0_cached_prefix_attn_f32_flash2_gqa_grouped_prototype_kernel(
+    const float *q,
+    const float *k_cache,
+    const float *v_cache,
+    unsigned long long cached_prefix_len,
+    unsigned long long new_tokens,
+    unsigned long long q_heads,
+    unsigned long long kv_heads,
+    unsigned long long head_dim,
+    unsigned long long value_dim,
+    float softmax_scale,
+    float *output) {
+    constexpr unsigned int kTileTokens = 20u;
+    constexpr unsigned int kQHeadsPerKv = 5u;
+    constexpr unsigned int kHeadDim = 128u;
+    constexpr unsigned int kWaveSize = 32u;
+
+    if (blockDim.x != 256u || kv_heads == 0u || head_dim != kHeadDim ||
+        value_dim != kHeadDim || q_heads != kv_heads * kQHeadsPerKv) {
+        return;
+    }
+
+    const unsigned long long grouped_index = static_cast<unsigned long long>(blockIdx.x);
+    const unsigned long long grouped_count = new_tokens * kv_heads;
+    if (grouped_index >= grouped_count) {
+        return;
+    }
+
+    const unsigned long long token_index = grouped_index / kv_heads;
+    const unsigned long long kv_head = grouped_index % kv_heads;
+    const unsigned long long cache_len = cached_prefix_len + token_index + 1u;
+    const unsigned int tid = threadIdx.x;
+    const unsigned int lane = tid & (kWaveSize - 1u);
+    const unsigned int wave = tid >> 5u;
+    const bool is_q_consumer = wave < kQHeadsPerKv;
+
+    // One 20-token F32 K tile and V tile consume 20,480 B.  Together with
+    // scores this stays below 21 KiB, allowing three 256-thread workgroups
+    // per 64-KiB LDS CU while avoiding the five semantic K/V rereads.
+    __shared__ float staged_k[kTileTokens * kHeadDim];
+    __shared__ float staged_v[kTileTokens * kHeadDim];
+    __shared__ float scores[kQHeadsPerKv * kTileTokens];
+
+    float q0 = 0.0f;
+    float q1 = 0.0f;
+    float q2 = 0.0f;
+    float q3 = 0.0f;
+    float weighted0 = 0.0f;
+    float weighted1 = 0.0f;
+    float weighted2 = 0.0f;
+    float weighted3 = 0.0f;
+    float max_score = -3.4028234663852886e38f;
+    float denominator = 0.0f;
+    unsigned long long q_head = 0u;
+    if (is_q_consumer) {
+        q_head = kv_head * kQHeadsPerKv + static_cast<unsigned long long>(wave);
+        const unsigned long long q_base = (token_index * q_heads + q_head) * head_dim;
+        q0 = q[q_base + static_cast<unsigned long long>(lane)];
+        q1 = q[q_base + static_cast<unsigned long long>(lane + 32u)];
+        q2 = q[q_base + static_cast<unsigned long long>(lane + 64u)];
+        q3 = q[q_base + static_cast<unsigned long long>(lane + 96u)];
+    }
+
+    for (unsigned long long tile_start = 0u; tile_start < cache_len; tile_start += kTileTokens) {
+        const unsigned long long remaining = cache_len - tile_start;
+        const unsigned int tile_count =
+            remaining < static_cast<unsigned long long>(kTileTokens) ?
+                static_cast<unsigned int>(remaining) :
+                kTileTokens;
+        const unsigned int staged_elements = tile_count * kHeadDim;
+
+        // All eight waves participate in exactly one K and one V global load
+        // per staged element.  The five consumers then reuse LDS.
+        for (unsigned int staged_index = tid; staged_index < staged_elements;
+             staged_index += blockDim.x) {
+            const unsigned int tile_offset = staged_index / kHeadDim;
+            const unsigned int dim = staged_index % kHeadDim;
+            const unsigned long long source_timestep =
+                tile_start + static_cast<unsigned long long>(tile_offset);
+            const unsigned long long k_index =
+                (source_timestep * kv_heads + kv_head) * head_dim + dim;
+            const unsigned long long v_index =
+                (source_timestep * kv_heads + kv_head) * value_dim + dim;
+            staged_k[staged_index] = k_cache[k_index];
+            staged_v[staged_index] = v_cache[v_index];
+        }
+        __syncthreads();
+
+        if (is_q_consumer) {
+            const unsigned int score_base = wave * kTileTokens;
+            for (unsigned int tile_offset = 0u; tile_offset < tile_count; ++tile_offset) {
+                const unsigned int k_base = tile_offset * kHeadDim + lane;
+                // Preserve the generic kernel's 128-lane reduction tree:
+                // stride 64 pairs dim d with d+64, stride 32 then pairs
+                // d with d+32, and the remaining tree combines lanes 16,
+                // 8, ... .  The wave implementation keeps that order while
+                // avoiding the generic CTA-wide LDS rendezvous per score.
+                const float product0 = q0 * staged_k[k_base];
+                const float product1 = q1 * staged_k[k_base + 32u];
+                const float product2 = q2 * staged_k[k_base + 64u];
+                const float product3 = q3 * staged_k[k_base + 96u];
+                float partial = (product0 + product2) + (product1 + product3);
+                for (int offset = 16; offset > 0; offset >>= 1) {
+                    partial += __shfl_down(partial, offset, kWaveSize);
+                }
+                if (lane == 0u) {
+                    scores[score_base + tile_offset] = partial * softmax_scale;
+                }
+            }
+        }
+        __syncthreads();
+
+        float alpha = 0.0f;
+        if (is_q_consumer) {
+            if (lane == 0u) {
+                const unsigned int score_base = wave * kTileTokens;
+                float tile_max = -3.4028234663852886e38f;
+                for (unsigned int tile_offset = 0u; tile_offset < tile_count; ++tile_offset) {
+                    const float score = scores[score_base + tile_offset];
+                    tile_max = tile_max > score ? tile_max : score;
+                }
+                const float m_new = max_score > tile_max ? max_score : tile_max;
+                alpha = max_score <= -3.0e38f ? 0.0f : expf(max_score - m_new);
+                float tile_sum = 0.0f;
+                for (unsigned int tile_offset = 0u; tile_offset < tile_count; ++tile_offset) {
+                    const float weight = expf(scores[score_base + tile_offset] - m_new);
+                    scores[score_base + tile_offset] = weight;
+                    tile_sum += weight;
+                }
+                denominator = denominator * alpha + tile_sum;
+                max_score = m_new;
+            }
+            alpha = __shfl(alpha, 0, kWaveSize);
+            denominator = __shfl(denominator, 0, kWaveSize);
+            max_score = __shfl(max_score, 0, kWaveSize);
+        }
+        // Scores are produced by lane zero of each consumer wave.  Every
+        // wave, including the three staging-only waves, must rendezvous before
+        // the consumer waves read those LDS weights.
+        __syncthreads();
+
+        if (is_q_consumer) {
+            const unsigned int score_base = wave * kTileTokens;
+            float tile_weighted0 = 0.0f;
+            float tile_weighted1 = 0.0f;
+            float tile_weighted2 = 0.0f;
+            float tile_weighted3 = 0.0f;
+            for (unsigned int tile_offset = 0u; tile_offset < tile_count; ++tile_offset) {
+                const float weight = scores[score_base + tile_offset];
+                const unsigned int v_base = tile_offset * kHeadDim + lane;
+                tile_weighted0 += weight * staged_v[v_base];
+                tile_weighted1 += weight * staged_v[v_base + 32u];
+                tile_weighted2 += weight * staged_v[v_base + 64u];
+                tile_weighted3 += weight * staged_v[v_base + 96u];
+            }
+            weighted0 = weighted0 * alpha + tile_weighted0;
+            weighted1 = weighted1 * alpha + tile_weighted1;
+            weighted2 = weighted2 * alpha + tile_weighted2;
+            weighted3 = weighted3 * alpha + tile_weighted3;
+        }
+        // Consumers must finish LDS reads before every wave can overwrite the
+        // tile on the next iteration.
+        __syncthreads();
+    }
+
+    if (is_q_consumer) {
+        const unsigned long long output_base =
+            (token_index * q_heads + q_head) * value_dim + static_cast<unsigned long long>(lane);
+        output[output_base] = weighted0 / denominator;
+        output[output_base + 32u] = weighted1 / denominator;
+        output[output_base + 64u] = weighted2 / denominator;
+        output[output_base + 96u] = weighted3 / denominator;
+    }
+}
+)";
+    }
+
     // This isolated R9700-only source is intentionally a separate symbol.  It
     // keeps the public Flash2 launch contract and F32 KV layout unchanged while
     // replacing the three 256-lane LDS trees with wave32 reductions plus the
