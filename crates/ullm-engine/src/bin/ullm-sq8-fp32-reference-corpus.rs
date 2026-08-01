@@ -13,9 +13,10 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use ullm_engine::sq8_fp32_reference::{
-    duration_seconds, process_peak_rss_kib, write_forward_capture, ArtifactFp32Forward,
-    ArtifactFp32ForwardSummary, ArtifactFp32ReferenceIdentity, ArtifactFp32ReferenceModel,
-    ARTIFACT_FP32_REFERENCE_SCHEMA_VERSION, QWEN3_14B_FP32_REFERENCE_MAX_CONTEXT,
+    ARTIFACT_FP32_REFERENCE_SCHEMA_VERSION, ArtifactFp32Forward, ArtifactFp32ForwardSummary,
+    ArtifactFp32ReferenceIdentity, ArtifactFp32ReferenceModel,
+    QWEN3_14B_FP32_REFERENCE_MAX_CONTEXT, duration_seconds, process_peak_rss_kib,
+    write_forward_capture,
 };
 
 const CORPUS_SCHEMA_VERSION: &str = "ullm.sq8.artifact_fp32_reference.corpus.v1";
@@ -261,8 +262,7 @@ fn run(options: Options) -> Result<(), String> {
         fixture_root: fixture_root.display().to_string(),
         fixture_manifest_sha256: gate.corpus.fixture_manifest_sha256,
         mode: options.mode.as_str().to_string(),
-        mode_reference_execution:
-            "cpu_strict_f32_scalar_causal_reference_with_m128_checkpoint_grouping",
+        mode_reference_execution: "cpu_strict_f32_scalar_causal_reference_with_m128_checkpoint_grouping",
         case: materialized.plan.clone(),
         reference_identity: serde_json::to_value(&identity)
             .map_err(|error| format!("failed to serialize reference identity: {error}"))?,

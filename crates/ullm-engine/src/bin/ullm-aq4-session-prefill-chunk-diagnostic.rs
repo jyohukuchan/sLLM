@@ -15,7 +15,7 @@ use serde_json::json;
 use std::any::Any;
 use std::env;
 use std::io::{self, Write};
-use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::process::ExitCode;
 use std::time::Instant;
 
@@ -23,7 +23,7 @@ use ullm_engine::aq4_worker_backend::QWEN35_AQ4_REQUIRED_HIP_KERNEL_ENV;
 use ullm_engine::inference_api::{CancellationToken, InferenceRequest, SamplingParams};
 use ullm_engine::qwen35_aq4_head_runtime::PackageLmHeadMode;
 use ullm_engine::qwen35_aq4_model_runtime::{
-    Qwen35Aq4ModelLoadConfig, QWEN35_AQ4_CONTEXT_LENGTH, QWEN35_AQ4_KV_BLOCK_SIZE,
+    QWEN35_AQ4_CONTEXT_LENGTH, QWEN35_AQ4_KV_BLOCK_SIZE, Qwen35Aq4ModelLoadConfig,
 };
 use ullm_engine::qwen35_aq4_session::{Qwen35Aq4InferenceSession, Qwen35Aq4SessionConfig};
 use ullm_engine::worker_driver::{InferenceSession, PublishedAdvance, SessionAdvance};

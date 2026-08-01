@@ -2088,6 +2088,130 @@ fn hip_aq4_wmma_group8_ragged_m_exact_buffers_match_cpu_when_enabled() {
     }
 
     #[test]
+    #[ignore = "requires an isolated gfx1201 HIP device and ULLM_RUN_AQ4_COMMON_SHAPE_TIMING=1"]
+    fn hip_aq4_common_n4096_k4096_m_sweep_timing_when_enabled() {
+        assert_eq!(
+            std::env::var("ULLM_RUN_AQ4_COMMON_SHAPE_TIMING").as_deref(),
+            Ok("1")
+        );
+        let device_index = (1..device_count().unwrap())
+            .find(|&candidate| {
+                device_info(candidate)
+                    .map(|info| info.gcn_arch_name == "gfx1201")
+                    .unwrap_or(false)
+            })
+            .expect("isolated gfx1201 HIP device");
+        let _lock = AQ4_EXPERIMENTAL_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        const ROWS: usize = 4096;
+        const COLS: usize = 4096;
+        const SCALE_COUNT: usize = 7;
+        const WARMUP: usize = 10;
+        const REPEATS: usize = 31;
+        const INNER: usize = 10;
+        const TENSOR_SCALE: f32 = 0.75;
+
+        let elements = ROWS * COLS;
+        let mut seed = 0x6a09_e667_u32;
+        let mut next_unit = || {
+            seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            (seed as f32) / (u32::MAX as f32)
+        };
+        let indices: Vec<u8> = (0..elements / 2)
+            .map(|_| {
+                let low = (next_unit() * 16.0) as u8 & 0x0f;
+                let high = (next_unit() * 16.0) as u8 & 0x0f;
+                low | (high << 4)
+            })
+            .collect();
+        let scale_indices: Vec<u8> = (0..elements / 16)
+            .map(|_| ((next_unit() * SCALE_COUNT as f32) as u8).min((SCALE_COUNT - 1) as u8))
+            .collect();
+        let codebook_values: Vec<f32> = (0..16).map(|_| next_unit() - 0.5).collect();
+        let scale_values: Vec<f32> = (0..SCALE_COUNT)
+            .map(|_| 0.5 + next_unit() * 0.5)
+            .collect();
+        let row_scales: Vec<f32> = (0..ROWS).map(|_| 0.75 + next_unit() * 0.5).collect();
+
+        for &m in &[1_usize, 4, 16, 64, 128] {
+            let input_values: Vec<f32> = (0..m * COLS).map(|_| next_unit() - 0.5).collect();
+            let mut context = RuntimeContext::create(device_index).unwrap();
+            let mut stream = context.create_stream().unwrap();
+            let mut index = context.alloc_buffer(elements / 2).unwrap();
+            let mut scale = context.alloc_buffer(elements / 16).unwrap();
+            let mut codebook = context.alloc_buffer(16 * std::mem::size_of::<f32>()).unwrap();
+            let mut scale_table = context
+                .alloc_buffer(SCALE_COUNT * std::mem::size_of::<f32>())
+                .unwrap();
+            let mut input = context
+                .alloc_buffer(input_values.len() * std::mem::size_of::<f32>())
+                .unwrap();
+            let mut row_scale = context.alloc_buffer(ROWS * std::mem::size_of::<f32>()).unwrap();
+            let mut output = context
+                .alloc_buffer(m * ROWS * std::mem::size_of::<f32>())
+                .unwrap();
+            index.copy_from_host(0, &indices, Some(&mut stream)).unwrap();
+            scale.copy_from_host(0, &scale_indices, Some(&mut stream)).unwrap();
+            codebook
+                .copy_from_host(0, &f32s_to_le_bytes(&codebook_values), Some(&mut stream))
+                .unwrap();
+            scale_table
+                .copy_from_host(0, &f32s_to_le_bytes(&scale_values), Some(&mut stream))
+                .unwrap();
+            input
+                .copy_from_host(0, &f32s_to_le_bytes(&input_values), Some(&mut stream))
+                .unwrap();
+            row_scale
+                .copy_from_host(0, &f32s_to_le_bytes(&row_scales), Some(&mut stream))
+                .unwrap();
+            stream.synchronize().unwrap();
+
+            macro_rules! launch {
+                () => {{
+                    if m == 128 {
+                        aq4_matvec_batch_wmma_prototype_f32(
+                            &index, &scale, &codebook, &scale_table, &input, Some(&row_scale),
+                            SCALE_COUNT, 16, TENSOR_SCALE, ROWS, ROWS, COLS, m,
+                            &mut output, Some(&mut stream),
+                        )
+                    } else {
+                        aq4_matvec_batch_wmma_ragged_m_prototype_f32(
+                            &index, &scale, &codebook, &scale_table, &input, Some(&row_scale),
+                            SCALE_COUNT, 16, TENSOR_SCALE, ROWS, ROWS, COLS, m,
+                            &mut output, Some(&mut stream),
+                        )
+                    }
+                    .unwrap();
+                }};
+            }
+
+            for _ in 0..WARMUP {
+                launch!();
+            }
+            stream.synchronize().unwrap();
+            let mut samples_ms = Vec::with_capacity(REPEATS);
+            for _ in 0..REPEATS {
+                let started = std::time::Instant::now();
+                for _ in 0..INNER {
+                    launch!();
+                }
+                stream.synchronize().unwrap();
+                samples_ms.push(started.elapsed().as_secs_f64() * 1_000.0 / INNER as f64);
+            }
+            samples_ms.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            let median_ms = samples_ms[REPEATS / 2];
+            let min_ms = samples_ms[0];
+            let tflops = 2.0 * m as f64 * ROWS as f64 * COLS as f64
+                / (median_ms * 1.0e9);
+            eprintln!(
+                "AQ4 common-shape format=aq4_g16_codebook M={m} N={ROWS} K={COLS} median_ms={median_ms:.6} min_ms={min_ms:.6} dense_equiv_tflops={tflops:.6} warmup={WARMUP} repeat={REPEATS} inner={INNER}"
+            );
+        }
+    }
+
+    #[test]
     #[ignore = "requires an isolated gfx1201 HIP device and ULLM_RUN_AQ4_WMMA_GROUP8_DIFFERENTIAL=1"]
     fn hip_aq4_wmma_group8_m128_target_shapes_match_cpu_when_enabled() {
         assert_eq!(

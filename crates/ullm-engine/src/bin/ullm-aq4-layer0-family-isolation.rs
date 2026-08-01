@@ -34,7 +34,7 @@ use ullm_engine::qwen35_aq4_layer_runtime::{
 };
 use ullm_engine::qwen35_aq4_session::{QWEN35_AQ4_ROPE_BASE, QWEN35_AQ4_ROTARY_DIM};
 use ullm_engine::qwen35_package_contract::{
-    package_layer_entries_for_indices, PackageDecoderLayerKind, PackageManifestLayerEntry,
+    PackageDecoderLayerKind, PackageManifestLayerEntry, package_layer_entries_for_indices,
 };
 
 const SCHEMA: &str = "ullm.aq4_layer0_family_isolation.aq4_cpu.v1";

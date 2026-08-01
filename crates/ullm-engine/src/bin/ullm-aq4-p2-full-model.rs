@@ -1123,7 +1123,11 @@ fn prefill_chunk_widths(prompt_len: usize, requested_m: usize) -> Result<Vec<usi
 }
 
 fn pure_prefill_audit_facts(
-    records: &[(usize, usize, [ullm_engine::backend_operation_registry::OperationExecutionRecord; 2])],
+    records: &[(
+        usize,
+        usize,
+        [ullm_engine::backend_operation_registry::OperationExecutionRecord; 2],
+    )],
     layers: usize,
     chunks: u64,
     outcome: &str,
@@ -2197,7 +2201,11 @@ fn load_fixture_case(path: &Path, case_id: Option<&str>) -> Result<FixtureCase, 
     let bytes = read_bounded_regular_file(path, "fixture", MAX_FIXTURE_BYTES)?;
     let fixture: FixtureFile = serde_json::from_value(parse_strict_json(&bytes, "fixture")?)
         .map_err(|error| format!("fixture JSON rejected: {error}"))?;
-    if fixture.schema_version.as_deref().is_some_and(|value| value != "ullm.aq4_p2_case_fixture.v1") {
+    if fixture
+        .schema_version
+        .as_deref()
+        .is_some_and(|value| value != "ullm.aq4_p2_case_fixture.v1")
+    {
         return Err("fixture schema_version is unsupported".to_string());
     }
     if fixture.cases.is_empty() || fixture.cases.len() > 128 {

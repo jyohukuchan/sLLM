@@ -21,15 +21,13 @@ use ullm_engine::sq_canonical::read_sq8_canonical_artifact;
 use ullm_engine::sq8_embedding_runtime::QWEN3_14B_SQ8_EMBEDDING_REQUIRED_HIP_KERNEL_ENV;
 use ullm_engine::sq8_layer_runtime::{
     QWEN3_14B_SQ8_PAGED_REQUIRED_HIP_KERNEL_ENV,
-    QWEN3_14B_SQ8_PREFILL_CHUNK_REQUIRED_HIP_KERNEL_ENV,
-    QWEN3_14B_SQ8_REQUIRED_HIP_KERNEL_ENV,
+    QWEN3_14B_SQ8_PREFILL_CHUNK_REQUIRED_HIP_KERNEL_ENV, QWEN3_14B_SQ8_REQUIRED_HIP_KERNEL_ENV,
 };
 use ullm_engine::sq8_model_head_runtime::{
     QWEN3_14B_SQ8_MODEL_HEAD_REQUIRED_HIP_KERNEL_ENV, validate_qwen3_14b_sq8_r9700_device_info,
 };
 use ullm_engine::sq8_serving_runtime::{
-    QWEN3_14B_SQ8_PAGED_DECODE_SPLIT_EXPERIMENT_TILE_ENV,
-    QWEN3_14B_SQ8_SERVING_CONTEXT_TOKENS,
+    QWEN3_14B_SQ8_PAGED_DECODE_SPLIT_EXPERIMENT_TILE_ENV, QWEN3_14B_SQ8_SERVING_CONTEXT_TOKENS,
     Qwen3Sq8ServingSession, Sq8ServingPrefillMode, Sq8ServingRuntimeStatus,
     load_qwen3_14b_sq8_serving_norms,
 };
@@ -166,10 +164,18 @@ fn main() -> Result<(), String> {
 
 fn run(options: Options) -> Result<(), String> {
     let capture_started = Instant::now();
-    let plan_bytes = fs::read(&options.plan)
-        .map_err(|err| format!("failed to read capture plan {}: {err}", options.plan.display()))?;
-    let plan: CapturePlan = serde_json::from_slice(&plan_bytes)
-        .map_err(|err| format!("failed to parse capture plan {}: {err}", options.plan.display()))?;
+    let plan_bytes = fs::read(&options.plan).map_err(|err| {
+        format!(
+            "failed to read capture plan {}: {err}",
+            options.plan.display()
+        )
+    })?;
+    let plan: CapturePlan = serde_json::from_slice(&plan_bytes).map_err(|err| {
+        format!(
+            "failed to parse capture plan {}: {err}",
+            options.plan.display()
+        )
+    })?;
     validate_plan(&plan)?;
     prepare_output_root(&options.output)?;
     let output = options.output.canonicalize().map_err(|err| {
@@ -418,7 +424,10 @@ fn validate_selector_binding(plan: &CapturePlan) -> Result<(), String> {
             "paged_decode_source_tile_split",
             [
                 ("ULLM_EXPERIMENTAL_SQ8_PAGED_DECODE_SPLIT_TILE", "128"),
-                ("ULLM_EXPERIMENTAL_SQ8_PAGED_DECODE_SPLIT_ALLOW_MULTITILE", "1"),
+                (
+                    "ULLM_EXPERIMENTAL_SQ8_PAGED_DECODE_SPLIT_ALLOW_MULTITILE",
+                    "1",
+                ),
             ]
             .as_slice(),
         ),
@@ -426,7 +435,10 @@ fn validate_selector_binding(plan: &CapturePlan) -> Result<(), String> {
             "paged_decode_source_tile_split",
             [
                 ("ULLM_EXPERIMENTAL_SQ8_PAGED_DECODE_SPLIT_TILE", "256"),
-                ("ULLM_EXPERIMENTAL_SQ8_PAGED_DECODE_SPLIT_ALLOW_MULTITILE", "1"),
+                (
+                    "ULLM_EXPERIMENTAL_SQ8_PAGED_DECODE_SPLIT_ALLOW_MULTITILE",
+                    "1",
+                ),
             ]
             .as_slice(),
         ),
@@ -465,7 +477,10 @@ fn capture_case(
     seen_position_ids: &mut HashSet<String>,
 ) -> Result<(), String> {
     if case.prompt_token_ids.is_empty() || case.teacher_forced_input_tokens.is_empty() {
-        return Err(format!("capture case {} has an empty prompt or teacher stream", case.case_id));
+        return Err(format!(
+            "capture case {} has an empty prompt or teacher stream",
+            case.case_id
+        ));
     }
     if case.teacher_forced_tokens_u32le_sha256.len() != 64
         || !case
@@ -494,7 +509,10 @@ fn capture_case(
         .map(|position| (position.ordinal, position))
         .collect::<BTreeMap<_, _>>();
     if plans_by_ordinal.len() != case.positions.len() {
-        return Err(format!("capture case {} repeats a capture ordinal", case.case_id));
+        return Err(format!(
+            "capture case {} repeats a capture ordinal",
+            case.case_id
+        ));
     }
     session
         .start_teacher_forced_capture_for_testing(
@@ -507,11 +525,7 @@ fn capture_case(
         .map_err(|err| err.to_string())?;
     let mut prompt_cursor = 0_usize;
     while prompt_cursor < case.prompt_token_ids.len() {
-        let width = prefill_logical_width(
-            &case.mode,
-            prompt_cursor,
-            case.prompt_token_ids.len(),
-        )?;
+        let width = prefill_logical_width(&case.mode, prompt_cursor, case.prompt_token_ids.len())?;
         let ordinal = prompt_cursor + width - 1;
         let planned = plans_by_ordinal.get(&ordinal).copied();
         let forced = if ordinal + 1 == case.prompt_token_ids.len() {
@@ -547,7 +561,10 @@ fn capture_case(
     for decode_index in 0..case.teacher_forced_input_tokens.len() {
         let ordinal = case.prompt_token_ids.len() + decode_index;
         let planned = plans_by_ordinal.get(&ordinal).copied();
-        let forced = case.teacher_forced_input_tokens.get(decode_index + 1).copied();
+        let forced = case
+            .teacher_forced_input_tokens
+            .get(decode_index + 1)
+            .copied();
         let capture = session
             .advance_teacher_forced_capture_for_testing(
                 forced,
@@ -573,7 +590,10 @@ fn capture_case(
         ));
     }
     for ordinal in plans_by_ordinal {
-        if !captured_positions.iter().any(|captured| captured.id == ordinal.1.id) {
+        if !captured_positions
+            .iter()
+            .any(|captured| captured.id == ordinal.1.id)
+        {
             return Err(format!(
                 "capture plan requested an ordinal that is not an execution-unit endpoint: {}",
                 ordinal.1.id
@@ -639,10 +659,12 @@ fn persist_if_planned(
     match (planned, capture) {
         (None, None) => Ok(()),
         (None, Some(_)) => Err(format!(
-            "capture case {} produced an unplanned tensor capture", case.case_id
+            "capture case {} produced an unplanned tensor capture",
+            case.case_id
         )),
         (Some(position), None) => Err(format!(
-            "capture case {} omitted required capture {}", case.case_id, position.id
+            "capture case {} omitted required capture {}",
+            case.case_id, position.id
         )),
         (Some(position), Some(capture)) => {
             if position.case_id != case.case_id
@@ -677,9 +699,13 @@ fn persist_if_planned(
                     position.ordinal, position.phase, position.phase_index
                 ));
             fs::create_dir_all(directory.join("layers")).map_err(|err| {
-                format!("failed to create capture directory {}: {err}", directory.display())
+                format!(
+                    "failed to create capture directory {}: {err}",
+                    directory.display()
+                )
             })?;
-            let logits = write_f32_tensor(&directory.join("logits.f32le"), &capture.logits, VOCAB_SIZE)?;
+            let logits =
+                write_f32_tensor(&directory.join("logits.f32le"), &capture.logits, VOCAB_SIZE)?;
             let final_hidden = write_f32_tensor(
                 &directory.join("final-hidden.f32le"),
                 &capture.final_hidden,
@@ -687,7 +713,10 @@ fn persist_if_planned(
             )?;
             let layers = if position.layer_required {
                 let values = capture.layers.ok_or_else(|| {
-                    format!("capture {} omitted its required all-layer trace", position.id)
+                    format!(
+                        "capture {} omitted its required all-layer trace",
+                        position.id
+                    )
                 })?;
                 if values.len() != LAYER_COUNT {
                     return Err(format!(
@@ -701,7 +730,9 @@ fn persist_if_planned(
                     .enumerate()
                     .map(|(index, values)| {
                         write_f32_tensor(
-                            &directory.join("layers").join(format!("layer-{index:02}-hidden.f32le")),
+                            &directory
+                                .join("layers")
+                                .join(format!("layer-{index:02}-hidden.f32le")),
                             values,
                             HIDDEN_SIZE,
                         )
@@ -709,7 +740,10 @@ fn persist_if_planned(
                     .collect::<Result<Vec<_>, _>>()?
             } else {
                 if capture.layers.is_some() {
-                    return Err(format!("capture {} unexpectedly has a layer trace", position.id));
+                    return Err(format!(
+                        "capture {} unexpectedly has a layer trace",
+                        position.id
+                    ));
                 }
                 Vec::new()
             };
@@ -733,7 +767,11 @@ fn persist_if_planned(
     }
 }
 
-fn write_f32_tensor(path: &Path, values: &[f32], expected_elements: usize) -> Result<TensorDescriptor, String> {
+fn write_f32_tensor(
+    path: &Path,
+    values: &[f32],
+    expected_elements: usize,
+) -> Result<TensorDescriptor, String> {
     if values.len() != expected_elements {
         return Err(format!(
             "tensor {} element count mismatch: expected={expected_elements} actual={}",
@@ -910,22 +948,35 @@ fn prepare_output_root(output: &Path) -> Result<(), String> {
     let parent = output
         .parent()
         .ok_or_else(|| format!("capture output has no parent: {}", output.display()))?;
-    fs::create_dir_all(parent)
-        .map_err(|err| format!("failed to create capture output parent {}: {err}", parent.display()))?;
-    fs::create_dir(output)
-        .map_err(|err| format!("failed to create capture output {}: {err}", output.display()))
+    fs::create_dir_all(parent).map_err(|err| {
+        format!(
+            "failed to create capture output parent {}: {err}",
+            parent.display()
+        )
+    })?;
+    fs::create_dir(output).map_err(|err| {
+        format!(
+            "failed to create capture output {}: {err}",
+            output.display()
+        )
+    })
 }
 
 fn write_json_new(path: &Path, value: &impl Serialize) -> Result<(), String> {
     if path.exists() {
-        return Err(format!("refusing to overwrite JSON receipt {}", path.display()));
+        return Err(format!(
+            "refusing to overwrite JSON receipt {}",
+            path.display()
+        ));
     }
     let mut bytes = serde_json::to_vec_pretty(value)
         .map_err(|err| format!("failed to serialize JSON receipt: {err}"))?;
     bytes.push(b'\n');
     let temporary = path.with_file_name(format!(
         ".{}.{}.tmp",
-        path.file_name().and_then(|value| value.to_str()).unwrap_or("receipt"),
+        path.file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or("receipt"),
         std::process::id()
     ));
     let mut file = OpenOptions::new()
@@ -947,7 +998,8 @@ fn write_json_new(path: &Path, value: &impl Serialize) -> Result<(), String> {
 }
 
 fn sha256_file(path: &Path) -> Result<String, String> {
-    let mut file = File::open(path).map_err(|err| format!("failed to open {}: {err}", path.display()))?;
+    let mut file =
+        File::open(path).map_err(|err| format!("failed to open {}: {err}", path.display()))?;
     let mut digest = Sha256::new();
     let mut buffer = [0_u8; 1024 * 1024];
     loop {
@@ -986,8 +1038,12 @@ fn parse_options() -> Result<Options, String> {
     })
 }
 
-fn next_value(args: &mut impl Iterator<Item = std::ffi::OsString>, name: &str) -> Result<std::ffi::OsString, String> {
-    args.next().ok_or_else(|| format!("{name} requires a value"))
+fn next_value(
+    args: &mut impl Iterator<Item = std::ffi::OsString>,
+    name: &str,
+) -> Result<std::ffi::OsString, String> {
+    args.next()
+        .ok_or_else(|| format!("{name} requires a value"))
 }
 
 fn usage() -> String {

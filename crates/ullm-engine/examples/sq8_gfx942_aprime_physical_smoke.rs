@@ -288,20 +288,32 @@ fn run_projection_case(
             // warmup
             for _ in 0..3 {
                 sq8_gfx942_aprime_projection_fnuz_prepacked_f32(
-                    &activation_fnuz_buffer, &activation_fnuz_scale_buffer,
-                    &weight_fnuz_buffer, &weight_fnuz_scale_buffer,
-                    case.m, case.n, case.k,
-                    &mut aprime_workspace, &mut aprime_output, Some(stream),
+                    &activation_fnuz_buffer,
+                    &activation_fnuz_scale_buffer,
+                    &weight_fnuz_buffer,
+                    &weight_fnuz_scale_buffer,
+                    case.m,
+                    case.n,
+                    case.k,
+                    &mut aprime_workspace,
+                    &mut aprime_output,
+                    Some(stream),
                 )?;
             }
             stream.synchronize()?;
             let t0 = std::time::Instant::now();
             for _ in 0..reps {
                 sq8_gfx942_aprime_projection_fnuz_prepacked_f32(
-                    &activation_fnuz_buffer, &activation_fnuz_scale_buffer,
-                    &weight_fnuz_buffer, &weight_fnuz_scale_buffer,
-                    case.m, case.n, case.k,
-                    &mut aprime_workspace, &mut aprime_output, Some(stream),
+                    &activation_fnuz_buffer,
+                    &activation_fnuz_scale_buffer,
+                    &weight_fnuz_buffer,
+                    &weight_fnuz_scale_buffer,
+                    case.m,
+                    case.n,
+                    case.k,
+                    &mut aprime_workspace,
+                    &mut aprime_output,
+                    Some(stream),
                 )?;
             }
             stream.synchronize()?;
@@ -311,8 +323,14 @@ fn run_projection_case(
             let bytes = (case.n as f64 * case.k as f64) + (case.m as f64 * case.k as f64);
             println!(
                 "TIMING {} M/N/K={}/{}/{} reps={} per_call_ms={:.6} TFLOPS={:.3} weight_GB/s={:.1}",
-                case.name, case.m, case.n, case.k, reps,
-                per * 1e3, flop / per / 1e12, bytes / per / 1e9
+                case.name,
+                case.m,
+                case.n,
+                case.k,
+                reps,
+                per * 1e3,
+                flop / per / 1e12,
+                bytes / per / 1e9
             );
         }
     }
@@ -349,7 +367,10 @@ fn run_projection_case(
     // comparison. A' is never skipped.
     let skip_b = std::env::var("ULLM_SMOKE_SKIP_B_CONTROL").is_ok();
     let control_stats = if skip_b {
-        eprintln!("{} B control SKIPPED by ULLM_SMOKE_SKIP_B_CONTROL", case.name);
+        eprintln!(
+            "{} B control SKIPPED by ULLM_SMOKE_SKIP_B_CONTROL",
+            case.name
+        );
         verify_close(
             &format!("{} B OCP-to-BF16 control (skipped)", case.name),
             &control,

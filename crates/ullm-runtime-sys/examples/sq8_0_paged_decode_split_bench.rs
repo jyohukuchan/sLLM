@@ -103,11 +103,17 @@ fn xorshift_values(count: usize, salt: u32) -> Vec<f32> {
 }
 
 fn f32_bytes(values: &[f32]) -> Vec<u8> {
-    values.iter().flat_map(|value| value.to_le_bytes()).collect()
+    values
+        .iter()
+        .flat_map(|value| value.to_le_bytes())
+        .collect()
 }
 
 fn u32_bytes(values: &[u32]) -> Vec<u8> {
-    values.iter().flat_map(|value| value.to_le_bytes()).collect()
+    values
+        .iter()
+        .flat_map(|value| value.to_le_bytes())
+        .collect()
 }
 
 fn bytes_f32(values: &[u8]) -> Vec<f32> {
@@ -425,7 +431,10 @@ fn run(options: Options) -> Result<(), String> {
     summary.push_str(
         "  \"timing_scope\": \"host API call plus stream synchronize per M=1 attention invocation; excludes model layers and profiler\",\n",
     );
-    summary.push_str(&format!("  \"direct_legacy\": {},\n", timing_json(&direct_timing)));
+    summary.push_str(&format!(
+        "  \"direct_legacy\": {},\n",
+        timing_json(&direct_timing)
+    ));
     summary.push_str("  \"tiles\": [\n");
     for (index, (tile, workspace_bytes, differential, tile_timing)) in rows.iter().enumerate() {
         summary.push_str(&format!(

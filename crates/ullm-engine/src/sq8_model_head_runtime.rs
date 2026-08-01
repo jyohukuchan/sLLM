@@ -378,9 +378,7 @@ impl Sq8ModelHeadM1ExecutionBinding {
             Sq8LayerExecutionProfile::Rdna4W8a8BlockCk
                 | Sq8LayerExecutionProfile::Rdna4W8a8BlockHandwrittenWmmaPrototype
         ) {
-            return Err(
-                "Qwen3-14B SQ8 M=1 model head requires an RDNA4 W8A8 profile".into(),
-            );
+            return Err("Qwen3-14B SQ8 M=1 model head requires an RDNA4 W8A8 profile".into());
         }
         self.device.validate_r9700()?;
         validate_sha256(&self.package_manifest_sha256).map_err(|err| {

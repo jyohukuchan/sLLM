@@ -927,7 +927,9 @@ fn validate_case(
                 .is_none_or(str::is_empty)
                 || case.path_oracle_result_sha256.is_some()))
     {
-        eprintln!("DEBUG_CASE_BINDING_MISMATCH: case={case:?} execution={execution:?} identity={identity:?} expected_mode={expected_mode:?} expected_resolved={expected_resolved:?}");
+        eprintln!(
+            "DEBUG_CASE_BINDING_MISMATCH: case={case:?} execution={execution:?} identity={identity:?} expected_mode={expected_mode:?} expected_resolved={expected_resolved:?}"
+        );
         return Err("case workload/control/device binding differs".into());
     }
     Ok(())

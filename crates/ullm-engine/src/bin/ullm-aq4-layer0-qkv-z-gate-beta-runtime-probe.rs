@@ -24,10 +24,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use ullm_engine::aq4_package_runtime::PackageAq4ResidentMatvec;
 use ullm_engine::host_bytes::encode_f32_to_bytes;
-use ullm_engine::loader::{read_named_passthrough_f32, WeightRegistry};
+use ullm_engine::loader::{WeightRegistry, read_named_passthrough_f32};
 use ullm_engine::package::{
-    select_passthrough_payload_bundle, select_tensor_payload_bundle, PassthroughPayloadBundle,
-    TensorPayloadBundle, TensorSelector,
+    PassthroughPayloadBundle, TensorPayloadBundle, TensorSelector,
+    select_passthrough_payload_bundle, select_tensor_payload_bundle,
 };
 
 const SCHEMA: &str = "ullm.aq4_layer0_qkv_z_gate_beta_runtime_probe.v2";
@@ -2026,10 +2026,12 @@ mod tests {
         fs::write(&path, header).unwrap();
         let reader = InputReader::open(&path, QKV_TENSOR).unwrap();
         fs::write(&path, b"replaced\n").unwrap();
-        assert!(reader
-            .finish_identity()
-            .expect_err("replacement must be rejected")
-            .contains("changed during probe"));
+        assert!(
+            reader
+                .finish_identity()
+                .expect_err("replacement must be rejected")
+                .contains("changed during probe")
+        );
         let _ = fs::remove_file(path);
     }
 
@@ -2055,69 +2057,83 @@ mod tests {
 
     #[test]
     fn hip_environment_contract_requires_exact_values() {
-        assert!(validate_hip_environment_values(
-            Some("1"),
-            Some("1"),
-            Some("1"),
-            Some("1"),
-            Some("4"),
-            None,
-        )
-        .is_ok());
-        assert!(validate_hip_environment_values(
-            Some("1"),
-            Some("1"),
-            Some("1"),
-            Some("1"),
-            None,
-            Some("4"),
-        )
-        .is_ok());
-        assert!(validate_hip_environment_values(
-            Some("0"),
-            Some("1"),
-            Some("1"),
-            Some("1"),
-            Some("4"),
-            None,
-        )
-        .is_err());
-        assert!(validate_hip_environment_values(
-            Some("1"),
-            Some("1"),
-            Some("1"),
-            Some("1"),
-            Some("32"),
-            None,
-        )
-        .is_err());
-        assert!(validate_hip_environment_values(
-            Some("1"),
-            Some("1"),
-            Some("1"),
-            Some("1"),
-            Some("2"),
-            Some("4"),
-        )
-        .is_err());
-        assert!(validate_hip_environment_values(
-            Some("1"),
-            Some("1"),
-            Some("1"),
-            Some("1"),
-            Some("4"),
-            Some("2"),
-        )
-        .is_ok());
-        assert!(validate_hip_environment_values(
-            Some("1"),
-            Some("1"),
-            Some("1"),
-            Some("1"),
-            Some("invalid"),
-            Some("4"),
-        )
-        .is_ok());
+        assert!(
+            validate_hip_environment_values(
+                Some("1"),
+                Some("1"),
+                Some("1"),
+                Some("1"),
+                Some("4"),
+                None,
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_hip_environment_values(
+                Some("1"),
+                Some("1"),
+                Some("1"),
+                Some("1"),
+                None,
+                Some("4"),
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_hip_environment_values(
+                Some("0"),
+                Some("1"),
+                Some("1"),
+                Some("1"),
+                Some("4"),
+                None,
+            )
+            .is_err()
+        );
+        assert!(
+            validate_hip_environment_values(
+                Some("1"),
+                Some("1"),
+                Some("1"),
+                Some("1"),
+                Some("32"),
+                None,
+            )
+            .is_err()
+        );
+        assert!(
+            validate_hip_environment_values(
+                Some("1"),
+                Some("1"),
+                Some("1"),
+                Some("1"),
+                Some("2"),
+                Some("4"),
+            )
+            .is_err()
+        );
+        assert!(
+            validate_hip_environment_values(
+                Some("1"),
+                Some("1"),
+                Some("1"),
+                Some("1"),
+                Some("4"),
+                Some("2"),
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_hip_environment_values(
+                Some("1"),
+                Some("1"),
+                Some("1"),
+                Some("1"),
+                Some("invalid"),
+                Some("4"),
+            )
+            .is_ok()
+        );
         assert!(resolve_fused_rpb_values(None, None).is_err());
     }
 
@@ -2261,9 +2277,11 @@ mod tests {
             let link = root.join("link");
             fs::create_dir_all(&target).unwrap();
             symlink(&target, &link).unwrap();
-            assert!(prepare_output_directory(&link)
-                .expect_err("output symlink must be rejected")
-                .contains("symlink"));
+            assert!(
+                prepare_output_directory(&link)
+                    .expect_err("output symlink must be rejected")
+                    .contains("symlink")
+            );
             fs::remove_dir_all(root).unwrap();
         }
     }

@@ -13,8 +13,8 @@ use crate::sq8_layer_oracle::{
 use ullm_runtime_sys::{
     RuntimeBuffer, RuntimeContext, RuntimeStream, Sq8CkImplementation, Sq8CkQuantizedActivation,
     SqFp8ExecutionPath, add_f32, causal_attn_f32, rope_f32, segmented_rmsnorm_f32, silu_mul_f32,
-    sq8_handwritten_gfx1201_m1_projection_f32, sq_fp8_matvec_block2d_batch_f32,
-    sq8_ck_projection_buffer_bytes, sq8_ck_projection_f32,
+    sq_fp8_matvec_block2d_batch_f32, sq8_ck_projection_buffer_bytes, sq8_ck_projection_f32,
+    sq8_handwritten_gfx1201_m1_projection_f32,
 };
 
 pub const QWEN3_14B_SQ8_LAYER_ACTIVATION_QUANTIZATIONS: usize = 4;
@@ -60,7 +60,6 @@ impl Sq8LayerExecutionProfile {
             Self::Rdna4W8a8BlockCk | Self::Rdna4W8a8BlockHandwrittenWmmaPrototype
         )
     }
-
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

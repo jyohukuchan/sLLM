@@ -1560,7 +1560,9 @@ impl Qwen3Sq8ServingSession {
                 .prompt_token_ids
                 .len()
                 .checked_add(request.max_new_tokens.saturating_sub(1))
-                .ok_or_else(|| Sq8ServingError::invalid_request("teacher-forced context overflows"))?;
+                .ok_or_else(|| {
+                    Sq8ServingError::invalid_request("teacher-forced context overflows")
+                })?;
             if highest_forward_count > QWEN3_14B_SQ8_SERVING_CONTEXT_TOKENS {
                 return Err(Sq8ServingError::invalid_request(format!(
                     "teacher-forced capture exceeds context: forwards={highest_forward_count} context={QWEN3_14B_SQ8_SERVING_CONTEXT_TOKENS}"
@@ -1867,7 +1869,9 @@ impl Qwen3Sq8ServingSession {
     ) -> Result<Option<Sq8ServingTeacherForcedCapture>, String> {
         if !capture_output {
             if capture_layers || !layer_traces.is_empty() {
-                return Err("teacher-forced layer trace was produced without an output capture".into());
+                return Err(
+                    "teacher-forced layer trace was produced without an output capture".into(),
+                );
             }
             return Ok(None);
         }
@@ -3547,7 +3551,10 @@ fn validate_active_sampling_progress(active: &ActiveServingRequest) -> Result<()
     if accounted_tokens != Some(active.generated_tokens) {
         return Err(format!(
             "serving generated-token accounting mismatch: generated={} sampled={} forced={} teacher_forced={}",
-            active.generated_tokens, active.sampled_tokens, forced_tokens, active.teacher_forced_tokens
+            active.generated_tokens,
+            active.sampled_tokens,
+            forced_tokens,
+            active.teacher_forced_tokens
         ));
     }
     if active.sampler.draws() != expected_draws {
@@ -4895,9 +4902,11 @@ mod tests {
 
             let units = plan_prefill_units(4095, mode).unwrap();
             assert_eq!(units.len(), expected_units, "M={chunk_tokens}");
-            assert!(units
-                .iter()
-                .all(|unit| unit.execution_width == chunk_tokens));
+            assert!(
+                units
+                    .iter()
+                    .all(|unit| unit.execution_width == chunk_tokens)
+            );
             assert_eq!(
                 units.len() * QWEN3_14B_SQ8_STACK_LAYERS,
                 expected_attention_calls,

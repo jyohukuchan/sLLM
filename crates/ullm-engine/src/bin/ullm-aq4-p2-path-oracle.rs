@@ -8,7 +8,7 @@
 //! prepared token; a vocabulary or sequence-by-vocabulary matrix is never retained.
 
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::env;
 use std::fs;
 use std::path::PathBuf;
@@ -17,12 +17,12 @@ use std::process::ExitCode;
 use ullm_engine::inference_api::{CancellationToken, InferenceRequest, SamplingParams};
 use ullm_engine::qwen35_aq4_head_runtime::PackageLmHeadMode;
 use ullm_engine::qwen35_aq4_model_runtime::{
-    Qwen35Aq4CalibrationObserver, Qwen35Aq4ModelLoadConfig, QWEN35_AQ4_CONTEXT_LENGTH,
-    QWEN35_AQ4_KV_BLOCK_SIZE,
+    QWEN35_AQ4_CONTEXT_LENGTH, QWEN35_AQ4_KV_BLOCK_SIZE, Qwen35Aq4CalibrationObserver,
+    Qwen35Aq4ModelLoadConfig,
 };
 use ullm_engine::qwen35_aq4_session::{
-    Qwen35Aq4CalibrationReplay, Qwen35Aq4InferenceSession, Qwen35Aq4SessionConfig,
-    Qwen35Aq4SessionStatus, QWEN35_AQ4_PREFILL_CHUNK_GRID,
+    QWEN35_AQ4_PREFILL_CHUNK_GRID, Qwen35Aq4CalibrationReplay, Qwen35Aq4InferenceSession,
+    Qwen35Aq4SessionConfig, Qwen35Aq4SessionStatus,
 };
 use ullm_engine::worker_driver::{InferenceSession, SessionAdvance};
 

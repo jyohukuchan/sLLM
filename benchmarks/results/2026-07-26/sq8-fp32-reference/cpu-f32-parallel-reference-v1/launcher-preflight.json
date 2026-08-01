@@ -1,7 +1,7 @@
 {
-  "checked_unix_seconds": 1785039667,
-  "mem_available_kib": 60398608,
-  "remaining_after_budget_kib": 37329936,
+  "checked_unix_seconds": 1785044611,
+  "mem_available_kib": 86255780,
+  "remaining_after_budget_kib": 63187108,
   "reserve_kib": 16777216,
   "schema_version": "ullm.sq8.artifact_fp32_reference.parallel_launcher.v1",
   "workers_rss_budget_kib": 6291456
