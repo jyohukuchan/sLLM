@@ -135,8 +135,7 @@ impl Sq8ServingChunkExecutionReport {
         if !is_qwen3_14b_sq8_prefill_chunk_tokens(self.chunk_len) {
             return Err("SQ8 serving cached-prefix chunk width is not measured".into());
         }
-        if !self.prefix_position.is_multiple_of(self.chunk_len)
-            || self.stack.sequence_len != self.chunk_len
+        if self.stack.sequence_len != self.chunk_len
             || self.stack.host_staging_used
             || self.stack.host_readback_count != 0
             || self.kv_write_calls != self.chunk_len * QWEN3_14B_SQ8_STACK_LAYERS
@@ -781,6 +780,39 @@ impl Qwen3Sq8StackRuntime {
         self.next_paged_decode_position = Some(0);
     }
 
+    /// Rewinds the synchronized serving cursor so the next fixed-width chunk can overwrite a
+    /// real-token suffix. The paired `PagedDecodeState` cursors must be rewound by the caller
+    /// before the next chunk; this method deliberately has no access to cache storage itself.
+    ///
+    /// The cached-prefix kernel receives an explicit prefix position. Alignment to the chunk
+    /// width was therefore a scheduler policy, not a resident-workspace requirement: this keeps
+    /// the resident stack at its fixed `config.sequence_len` while permitting an overlapping tail.
+    pub(crate) fn rewind_paged_serving_cursor(
+        &mut self,
+        old_position: usize,
+        new_position: usize,
+    ) -> Result<(), String> {
+        self.validate_runtime_contract()?;
+        if !self.paged_m1_sequence_active {
+            return Err("Qwen3-14B SQ8 serving cursor rewind requires an active sequence".into());
+        }
+        if self.next_paged_decode_position != Some(old_position) {
+            return Err(format!(
+                "Qwen3-14B SQ8 serving cursor rewind is stale: expected={old_position} actual={:?}",
+                self.next_paged_decode_position
+            ));
+        }
+        if new_position >= old_position {
+            return Err(format!(
+                "Qwen3-14B SQ8 serving cursor rewind must move backwards: old={old_position} new={new_position}"
+            ));
+        }
+        self.last_execution_report = None;
+        self.last_serving_chunk_report = None;
+        self.next_paged_decode_position = Some(new_position);
+        Ok(())
+    }
+
     pub(crate) fn enqueue_serving_reset(
         &mut self,
         decode: &mut Qwen3Sq8PagedDecodeRuntime,
@@ -1211,12 +1243,6 @@ impl Qwen3Sq8StackRuntime {
         if !is_qwen3_14b_sq8_prefill_chunk_tokens(chunk_tokens) {
             return Err(format!(
                 "Qwen3-14B SQ8 serving prefill chunk width is not measured: M={chunk_tokens}"
-            ));
-        }
-        if !prefix_position.is_multiple_of(chunk_tokens) {
-            return Err(format!(
-                "Qwen3-14B SQ8 serving prefill chunk position must be a multiple of {}, got {prefix_position}",
-                chunk_tokens
             ));
         }
         validate_paged_cache_layer_count(caches)?;

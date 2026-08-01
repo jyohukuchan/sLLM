@@ -2084,6 +2084,29 @@ impl PagedDecodeState {
         self.written_len = 0;
     }
 
+    /// Rewinds the logical append cursor for a synchronized serving prefill retry.
+    ///
+    /// This intentionally does not clear the device cache. The caller must overwrite every
+    /// position in `new_written_len..old_written_len` before issuing an attention operation that
+    /// observes the restored suffix. Cached-prefix attention receives `written_len` explicitly,
+    /// so entries after the rewound cursor are outside its logical prefix until that overwrite
+    /// completes. It is therefore suitable for a fixed-width overlapping tail chunk, but not
+    /// for arbitrary cache reuse.
+    pub(crate) fn rewind_serving_write_cursor(
+        &mut self,
+        new_written_len: usize,
+    ) -> Result<(), String> {
+        let old_written_len = self.written_len;
+        if new_written_len >= old_written_len {
+            return Err(format!(
+                "paged decoder serving rewind must move backwards: old={old_written_len} new={new_written_len}"
+            ));
+        }
+        self.validate_cache_position(new_written_len)?;
+        self.written_len = new_written_len;
+        Ok(())
+    }
+
     pub fn reset(&mut self, stream: &mut RuntimeStream) -> Result<(), String> {
         zero_buffer(&mut self.k_cache_buffer, Some(stream))?;
         zero_buffer(&mut self.v_cache_buffer, Some(stream))?;
