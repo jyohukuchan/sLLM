@@ -1,3 +1,0 @@
-                     USER        PID ACCESS COMMAND
-/run/ullm/r9700.lock:
-                     homelab1  1176474 F.... bash

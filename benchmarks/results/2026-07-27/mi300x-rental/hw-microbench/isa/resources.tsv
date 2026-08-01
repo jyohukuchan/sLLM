@@ -1,3 +1,0 @@
-kernel	vgpr	sgpr	agpr	lds_bytes	private_bytes	vgpr_spills	sgpr_spills	wavefront
-_ZN12_GLOBAL__N_116bf16_gemm_kernelEPKtS1_Pfjjj	16	20	0	0	0	0	0	64
-_ZN12_GLOBAL__N_115fp8_gemm_kernelEPKhS1_Pfjjj	16	20	0	0	0	0	0	64

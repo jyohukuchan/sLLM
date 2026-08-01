@@ -1,4 +1,0 @@
-{"timestamp":"2026-07-28T21:37:04+09:00","amd_smi_metric":"GPU: 2\n    TEMPERATURE:\n        EDGE: 71 °C\n        HOTSPOT: 72 °C\n        MEM: 72 °C\n\n"}
-{"timestamp":"2026-07-28T21:37:09+09:00","amd_smi_metric":"GPU: 2\n    TEMPERATURE:\n        EDGE: 74 °C\n        HOTSPOT: 90 °C\n        MEM: 80 °C\n\n"}
-{"timestamp":"2026-07-28T21:37:14+09:00","amd_smi_metric":"GPU: 2\n    TEMPERATURE:\n        EDGE: 78 °C\n        HOTSPOT: 95 °C\n        MEM: 86 °C\n\n"}
-{"timestamp":"2026-07-28T21:37:20+09:00","amd_smi_metric":"GPU: 2\n    TEMPERATURE:\n        EDGE: 75 °C\n        HOTSPOT: 77 °C\n        MEM: 78 °C\n\n"}

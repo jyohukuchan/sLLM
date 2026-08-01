@@ -1,7 +1,0 @@
-<|im_start|>user
-Write a Python function named retry_delays that returns exponential retry delays capped at a maximum. Include a small example call.<|im_end|>
-<|im_start|>assistant
-<think>
-
-</think>
-

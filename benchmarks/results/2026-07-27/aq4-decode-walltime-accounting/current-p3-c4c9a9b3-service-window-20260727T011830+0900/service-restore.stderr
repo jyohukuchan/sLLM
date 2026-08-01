@@ -1,2 +1,0 @@
-Job for ullm-openai.service failed.
-See "systemctl status ullm-openai.service" and "journalctl -xeu ullm-openai.service" for details.

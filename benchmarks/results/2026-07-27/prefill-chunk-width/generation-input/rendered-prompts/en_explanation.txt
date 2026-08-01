@@ -1,7 +1,0 @@
-<|im_start|>user
-Explain in English why an atomic manifest swap is useful for a local inference service. Use a short paragraph.<|im_end|>
-<|im_start|>assistant
-<think>
-
-</think>
-

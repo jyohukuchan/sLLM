@@ -1,9 +1,0 @@
-{
-  "candidate_over_reference": 1.0021569118136089,
-  "candidate_tokens_per_second": 977.0876006280538,
-  "condition": "cold AQ4_0 prefill; 2048 tokens; M=128",
-  "historical_aq4_f32_m128_p2048_tokens_per_second": 966.9146012373889,
-  "reference_tokens_per_second": 974.984644729749,
-  "schema_version": "ullm.aq4_matvec_add.prefill_ab.v1",
-  "throughput_definition": "one cold full-model prefill timing after one in-process warmup; not a profiler range duration"
-}

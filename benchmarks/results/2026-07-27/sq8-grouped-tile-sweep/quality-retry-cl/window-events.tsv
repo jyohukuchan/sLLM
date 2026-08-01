@@ -1,7 +1,0 @@
-timestamp	event
-2026-07-27T11:15:31+09:00	production-stop
-2026-07-27T11:15:31+09:00	lock-acquired
-2026-07-27T11:15:32+09:00	bench-skipped-existing-speed-evidence
-2026-07-27T11:15:34+09:00	lock-released
-2026-07-27T11:15:34+09:00	production-restore-start
-2026-07-27T11:15:35+09:00	window-finished status=1

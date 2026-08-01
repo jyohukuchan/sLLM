@@ -1,6 +1,0 @@
-# Keep captured commands, package metadata, and container output byte-for-byte.
-# Some upstream tools emit trailing spaces, which are evidence rather than source
-# formatting in this result directory.
-raw/** -whitespace
-attempts/** -whitespace
-environment/** -whitespace

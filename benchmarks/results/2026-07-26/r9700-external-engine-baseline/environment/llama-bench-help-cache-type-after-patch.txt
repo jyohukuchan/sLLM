@@ -1,1 +1,0 @@
-  -ctk, --cache-type-k <t>                    (default: f16)

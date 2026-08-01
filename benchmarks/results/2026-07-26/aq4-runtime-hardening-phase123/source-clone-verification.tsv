@@ -1,3 +1,0 @@
-clone	head	tree	detached	clean_status_lines	git_dir	git_common_dir	git_dot_is_directory	alternates_exists	git_alternate_report_lines	core_filemode	git_fsck_no_dangling	freeze_tool_present
-/opt/ullm/aq4-runtime-hardening-v0.1/sources/aq4-promotion-0cd760568e197	0cd760568e197e1adb4c4df3d6149591a912f709	bd372761d7e79b3d5db2b533cdd3fdfa77f125c2	yes	0	.git	.git	yes	no	0	false	PASS	-
-/opt/ullm/aq4-runtime-hardening-v0.1/control-source/manifest-freezer-f71bb2e534b	f71bb2e534b12bbf0ab37e716da1090c485ab733	3cd6e0ace792a070192c11af39e7f83c45de8d0a	yes	0	.git	.git	yes	no	0	false	PASS	yes

@@ -1,1 +1,0 @@
-lmsysorg/sglang-rocm:v0.5.15.post1-rocm720-mi30x-20260724 871b78040880 77.8GB

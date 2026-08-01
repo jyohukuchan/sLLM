@@ -1,9 +1,0 @@
-arch=gfx942
-hsaco=/home/hotaisle/ullm-mi300x/results/2026-07-27/sq8-cdna3-mi300x/hw-microbench/isa/build/hw-microbench-rdna4-cdna3.hip-hip-amdgcn-amd-amdhsa-gfx942.out
-required_instruction=v_mfma_f32_16x16x32_fp8_fp8
-required_instruction_count=1
-stream_read_disassembly=/home/hotaisle/ullm-mi300x/results/2026-07-27/sq8-cdna3-mi300x/hw-microbench/isa/stream-read.disasm
-stream_read_global_or_flat_loads=2
-stream_read_global_or_flat_atomics=0
-gemm_resource_rows=2
-static_occupancy=resource metadata recorded; runtime occupancy requires the target GPU

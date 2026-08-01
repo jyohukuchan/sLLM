@@ -1,9 +1,0 @@
-{
-  "torch": "2.10.0+git8514f05",
-  "hip_visible_devices": "0",
-  "rocr_visible_devices": null,
-  "cuda_available": true,
-  "device_count": 1,
-  "device_name_0": "",
-  "arch_0": "gfx1201"
-}

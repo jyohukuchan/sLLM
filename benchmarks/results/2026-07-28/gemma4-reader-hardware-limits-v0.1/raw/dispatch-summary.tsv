@@ -1,5 +1,0 @@
-n	kernel	launches	gpu_seconds	mean_us	lds_bytes	scratch_bytes_per_work_item	vgpr	agpr	sgpr	grid_threads	block_threads
-512	ullm_paged_decode_attn_f32_kernel	14336	2.780232672	193.934	1024	0	32	0	128	2048	256
-512	ullm_gemma_full_attn_batched_512_f32_kernel	28	0.942675302	33666.975	6152	1040	32	0	128	2048	256
-2048	ullm_paged_decode_attn_f32_kernel	57344	19.080124074	332.731	1024	0	32	0	128	2048	256
-2048	ullm_gemma_full_attn_batched_512_f32_kernel	112	14.147059635	126313.032	6152	1040	32	0	128	2048	256

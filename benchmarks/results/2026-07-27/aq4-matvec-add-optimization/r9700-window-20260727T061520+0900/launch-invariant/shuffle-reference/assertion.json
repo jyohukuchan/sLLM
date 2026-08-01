@@ -1,8 +1,0 @@
-{
-  "body": "shuffle-reference",
-  "matvec_add_launches_per_token": 64,
-  "measured_tokens": 2,
-  "module_launches_per_token": 292,
-  "status": "valid",
-  "throughput_note": "trace is cardinality-only; unprofiled profile outputs supply tok/s"
-}

@@ -1,2 +1,0 @@
-b096ad77575f44291b3a8184d955215550fa80ad99369508c14cd668fcfc1c31  /tmp/ullm-br-prefill-final-target/release/examples/sq8_ck_serving
-97793ef519ef52f26ef89fc7ba215178bdf4c5c928460d061fe8c0baa6058b7a  /tmp/ullm-br-prefill-final-target/release/ullm-sq8-r9700-phase0-profile

@@ -1,2 +1,0 @@
-74f998549c7510bdeb35e25374b06bd7ddf6da4f09004b8485e6fe7365a47d5f  /tmp/ullm-sq8_0-handwritten-projection-final/bench
-84d53c1ed6f67911af5d6be714b81b6f772112907fbcd5ad256d2374393bda02  /tmp/ullm-bj-handwritten-7cf4-target/release/examples/sq8_ck_serving

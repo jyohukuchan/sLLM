@@ -1,8 +1,0 @@
-1s 000
-3s 000
-6s 000
-NRestarts=0
-ActiveState=active
-                     USER        PID ACCESS COMMAND
-/run/ullm/r9700.lock:
-                     homelab1  3371817 F.... ullm-openai-gat

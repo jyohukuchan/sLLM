@@ -1,5 +1,0 @@
-MainPID=2363226
-Result=success
-NRestarts=0
-ActiveState=active
-SubState=running

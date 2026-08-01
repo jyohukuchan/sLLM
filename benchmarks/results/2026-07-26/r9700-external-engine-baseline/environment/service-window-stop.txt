@@ -1,2 +1,0 @@
-2026-07-26T13:47:10+09:00
-command: echo '<redacted>' | sudo -S -p "" systemctl stop ullm-openai.service

@@ -1,7 +1,0 @@
-<|im_start|>user
-量子化推論で「ロールバックを残して素早く試す」利点を、日本語で3点に分けて説明してください。<|im_end|>
-<|im_start|>assistant
-<think>
-
-</think>
-

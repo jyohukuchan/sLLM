@@ -1,4 +1,0 @@
-"Name","Calls","TotalDurationNs","AverageNs","Percentage","MinNs","MaxNs","StdDev"
-"ullm.sq8.phase0.prefill.m128.v1/repeat=0/prompt_tokens=1024",1,3700638210,3700638210.000000,100.00,3700638210,3700638210,0.00000000e+00
-"roctxProfilerResume",1,1390,1390.000000,3.756e-05,1390,1390,0.00000000e+00
-"roctxProfilerPause",1,550,550.000000,1.486e-05,550,550,0.00000000e+00

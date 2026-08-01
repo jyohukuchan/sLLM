@@ -1,9 +1,0 @@
-<|im_start|>user
-Summarize this note in four sentences or fewer:
-
-A candidate worker must start and answer real requests. Save both baseline and candidate text. Exact output equality is not required. Detect empty answers, repetition loops, garbled text, and response abandonment automatically. Preserve the exact old manifest before the swap. If readiness or a real response fails after the swap, restore the old bytes and verify the restored service.<|im_end|>
-<|im_start|>assistant
-<think>
-
-</think>
-

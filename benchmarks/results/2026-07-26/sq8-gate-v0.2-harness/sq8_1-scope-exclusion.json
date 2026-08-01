@@ -1,7 +1,0 @@
-{
-  "candidate_id": "sq8_1-w8a8",
-  "frozen_gate_sha256": "64a43c032570bed8086e3c441b0774cc470c5ab1e8c67f99e02af2b6307f72bf",
-  "reason": "v0.2 scope.format_id is SQ8_0; SQ8_1 W8A8 is a separate quality gate.",
-  "schema_version": "ullm.sq8.gate.v0.2.capture-plan-blocked.v1",
-  "status": "excluded_by_frozen_scope"
-}

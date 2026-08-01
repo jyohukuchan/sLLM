@@ -1,7 +1,0 @@
-docker run -d --rm --name r9700-external-sglang \
-  --device=/dev/kfd --device=/dev/dri/renderD129 --group-add video --ipc=host --shm-size=16g --security-opt seccomp=unconfined \
-  -e HIP_VISIBLE_DEVICES=0 \
-  -v /home/homelab1/datapool/ai_models/safetensors/Qwen/Qwen3-14B-FP8:/model:ro \
-  -p 127.0.0.1:19000:30000 \
-  --entrypoint /bin/bash lmsysorg/sglang-rocm:v0.5.15.post1-rocm720-mi30x-20260724 \
-  -lc 'unset ROCR_VISIBLE_DEVICES; exec python3 -m sglang.launch_server --model-path /model --served-model-name qwen3-14b-fp8 --tp-size 1 --context-length 1044 --dtype bfloat16 --quantization fp8 --kv-cache-dtype bfloat16 --mem-fraction-static 0.80 --max-running-requests 1 --max-total-tokens 1044 --disable-radix-cache --host 0.0.0.0 --port 30000'

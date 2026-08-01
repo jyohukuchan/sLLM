@@ -1,1 +1,0 @@
-python3 tools/benchmark-openai-steady-decode.py --url http://127.0.0.1:18000/v1/completions --model qwen3-14b-fp8 --tokenizer /home/homelab1/datapool/ai_models/safetensors/Qwen/Qwen3-14B-FP8 --output benchmarks/results/2026-07-26/r9700-external-engine-baseline/raw/vllm-openai-fp8-kv-auto/client --prompt-tokens 1028 --max-tokens 16 --repetitions 5 --warmup 1 --timeout 180

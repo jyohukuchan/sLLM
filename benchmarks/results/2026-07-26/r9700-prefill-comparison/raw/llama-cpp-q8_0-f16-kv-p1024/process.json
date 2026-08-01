@@ -1,9 +1,0 @@
-{
-  "monotonic_ended_ns": 69375640958900,
-  "monotonic_started_ns": 69364588732369,
-  "pid": 1584678,
-  "returncode": 0,
-  "utc_ended": "2026-07-26T19:28:08.771+09:00",
-  "utc_started": "2026-07-26T19:27:57.719+09:00",
-  "wall_seconds": 11.052226531
-}

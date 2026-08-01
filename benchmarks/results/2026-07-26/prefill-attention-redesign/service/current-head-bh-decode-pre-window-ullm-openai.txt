@@ -1,7 +1,0 @@
-MainPID=3958542
-NRestarts=0
-ActiveState=active
-SubState=running
-UnitFileState=enabled
-StartLimitIntervalUSec=15min
-StartLimitBurst=3

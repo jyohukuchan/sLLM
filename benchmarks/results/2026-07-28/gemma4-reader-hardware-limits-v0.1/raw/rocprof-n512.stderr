@@ -1,6 +1,0 @@
-W20260728 12:27:47.242754 123506455506624 simple_timer.cpp:55] [rocprofv3] tool initialization ::     0.183385 sec
-W20260728 12:27:47.242853 123506455506624 simple_timer.cpp:55] [rocprofv3] 'target/release/ullm-gemma4-resident --model-dir /home/homelab1/datapool/ai_models/safetensors/gemma-4-E2B --output benchmarks/results/2026-07-28/gemma4-reader-hardware-limits-v0.1/raw/profile-n512.json --mode attention-profile --continuation-tokens 512' ::     0.000000 sec
-ullm-gemma4-resident: refusing GPU work because amd-smi reports one or more R9700 processes
-W20260728 12:27:48.569687 123506455506624 simple_timer.cpp:55] [rocprofv3] 'target/release/ullm-gemma4-resident --model-dir /home/homelab1/datapool/ai_models/safetensors/gemma-4-E2B --output benchmarks/results/2026-07-28/gemma4-reader-hardware-limits-v0.1/raw/profile-n512.json --mode attention-profile --continuation-tokens 512' ::     1.326834 sec
-W20260728 12:27:48.572515 123506455506624 simple_timer.cpp:55] [rocprofv3] output generation ::     0.002578 sec
-W20260728 12:27:48.572553 123506455506624 simple_timer.cpp:55] [rocprofv3] tool finalization ::     0.002707 sec

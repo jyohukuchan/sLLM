@@ -1,4 +1,0 @@
-{"record":"thermal_sensor","hip_ordinal":2,"gcnArchName":"gfx1030","pci_bus_id":"0000:03:00.0","drm_card":"card0","hwmon":"hwmon5","temp2_input":"/sys/class/drm/card0/device/hwmon/hwmon5/temp2_input","temp2_label":"junction","junction_limit_c":85,"cooldown_target_c":45}
-{"record":"thermal","event":"cooldown_wait_begin","unix_epoch_ms":1785003752161,"phase":"startup","pci_bus_id":"0000:03:00.0","drm_card":"card0,"junction_limit_c":85,"cooldown_target_c":45}
-{"record":"thermal","event":"sample","unix_epoch_ms":1785003752162,"phase":"startup:poll","pci_bus_id":"0000:03:00.0","drm_card":"card0","temperature_c":41,"junction_limit_c":85,"cooldown_target_c":45,"enforce_limit":false}
-{"record":"thermal","event":"cooldown_complete","unix_epoch_ms":1785003752162,"phase":"startup","pci_bus_id":"0000:03:00.0","drm_card":"card0,"junction_limit_c":85,"cooldown_target_c":45,"temperature_c":41}

@@ -1,7 +1,0 @@
-2026-07-26T05:27:27+09:00
-attempt=initial-start
-MainPID=1420097
-Result=success
-NRestarts=0
-ActiveState=active
-SubState=running

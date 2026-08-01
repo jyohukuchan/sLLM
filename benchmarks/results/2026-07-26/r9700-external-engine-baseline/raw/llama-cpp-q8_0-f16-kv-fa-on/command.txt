@@ -1,1 +1,0 @@
-env -u ROCR_VISIBLE_DEVICES HIP_VISIBLE_DEVICES=1 /home/homelab1/llama.cpp-src/build-rdna4/bin/llama-bench -m /home/homelab1/datapool/ai_models/gguf/Qwen/Qwen3-14B-GGUF-530227a7/Qwen3-14B-Q8_0.gguf -o json -r 5 -p 0 -n 16 -d 1028 -b 128 -ub 128 -ctk f16 -ctv f16 -ngl 999 -sm none -mg 0 -dev ROCm0 -nkvo 0 -fa on -t 64 -mmp 1

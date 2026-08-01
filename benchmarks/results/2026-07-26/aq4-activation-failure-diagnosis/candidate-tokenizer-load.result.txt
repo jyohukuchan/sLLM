@@ -1,3 +1,0 @@
-command=FrozenQwen3Tokenizer.load_contract(candidate manifest tokenizer)
-exit_code=0
-signal=none

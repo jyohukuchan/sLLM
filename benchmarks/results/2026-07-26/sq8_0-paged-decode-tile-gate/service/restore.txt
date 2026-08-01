@@ -1,2 +1,0 @@
-2026-07-26T06:39:36+09:00
-attempt=initial-start

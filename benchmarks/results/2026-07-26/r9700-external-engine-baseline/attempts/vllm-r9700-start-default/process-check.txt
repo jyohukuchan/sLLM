@@ -1,7 +1,0 @@
-    PID    PPID %CPU %MEM     ELAPSED CMD
-      1       0 54.0  1.5       01:36 /usr/bin/python /usr/local/bin/vllm serve /model --served-model-name qwen3-14b-fp8 --tensor-parallel-size 1 --pipeline-parallel-size 1 --quantization fp8 --dtype bfloat16 --kv-cache-dtype auto --max-model-len 1044 --max-num-seqs 1 --max-num-batched-tokens 1044 --gpu-memory-utilization 0.80
-    642       1  0.2  0.0       00:11 /usr/bin/python -c from multiprocessing.resource_tracker import main;main(35)
-    643       1  291  0.8       00:11 /usr/bin/python -c from multiprocessing.spawn import spawn_main; spawn_main(tracker_fd=36, pipe_handle=38) --multiprocessing-fork
-    900       0  0.0  0.0       00:00 /bin/bash -lc ps -eo pid,ppid,%cpu,%mem,etime,cmd | head -n 30
-    908     900  0.0  0.0       00:00 ps -eo pid,ppid,%cpu,%mem,etime,cmd
-    909     900  0.0  0.0       00:00 head -n 30

@@ -1,3 +1,0 @@
-ActiveState=inactive
-SubState=dead
-UnitFileState=disabled

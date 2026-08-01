@@ -1,3 +1,0 @@
-2026-07-26T19:12:23+09:00
-window=1
-approved sudo credential intentionally not recorded

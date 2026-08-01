@@ -1,9 +1,0 @@
-{
-  "amdahl_speedup_upper_bound": 1.0412624939357202,
-  "assumed_attention_speedup_from_sq8_0": 1.79005,
-  "assumption": "The SQ8_0 full-model speedup applies perfectly to every measured AQ4_0 split-attention-core nanosecond and to no other work.",
-  "attention_fraction": 0.0897854228991553,
-  "fractional_throughput_gain_upper_bound": 0.041262493935720235,
-  "schema_version": "ullm.aq4_attention_redesign_amdahl_bound.v1",
-  "status": "conditional_not_a_prediction"
-}

@@ -1,7 +1,0 @@
-{
-  "command": "env -u ROCR_VISIBLE_DEVICES HIP_VISIBLE_DEVICES=1 /home/homelab1/llama.cpp-src/build-rdna4/bin/llama-bench --list-devices",
-  "expected_gfx": "gfx1201",
-  "forbidden_gfx": "gfx1030",
-  "returncode": 0,
-  "valid": true
-}

@@ -1,1 +1,0 @@
-path=/home/homelab1/datapool/ai_models/gguf/Qwen/Qwen3-14B-GGUF-530227a7/Qwen3-14B-Q8_0.gguf\nsize_bytes=15698533728\nmtime_utc=2026-07-26 13:20:28.176738240 +0900

@@ -1,1 +1,0 @@
-amdsmi_cli_exceptions.AmdSmiInvalidParameterException: Parameter '-j' is invalid. Run 'amd-smi metric -h' for more info. Error code: -2

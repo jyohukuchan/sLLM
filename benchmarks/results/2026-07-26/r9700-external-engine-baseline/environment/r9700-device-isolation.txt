@@ -1,4 +1,0 @@
-device_node=/dev/dri/renderD129
-pci_bdf=0000:47:00.0
-host_hip_visible_devices=1
-container_hip_visible_devices=0

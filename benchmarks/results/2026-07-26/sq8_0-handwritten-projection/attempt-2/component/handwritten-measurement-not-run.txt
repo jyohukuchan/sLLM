@@ -1,3 +1,0 @@
-not run: candidate event timing is forbidden until both frozen numerical gates pass
-component_gate_pass=1
-full_model_multistep_pass=0

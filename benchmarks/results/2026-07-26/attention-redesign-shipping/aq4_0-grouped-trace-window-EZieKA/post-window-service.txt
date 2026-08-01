@@ -1,4 +1,0 @@
-MainPID=4044231
-NRestarts=0
-ActiveState=active
-SubState=running

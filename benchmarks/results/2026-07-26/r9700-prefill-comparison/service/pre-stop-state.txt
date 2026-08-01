@@ -1,8 +1,0 @@
-2026-07-26T19:12:23+09:00
-command: systemctl show ullm-openai.service --property=ActiveState\,UnitFileState\,SubState\,MainPID\,NRestarts
-MainPID=4064784
-NRestarts=0
-ActiveState=active
-SubState=running
-UnitFileState=enabled
-returncode: 0

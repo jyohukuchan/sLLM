@@ -1,1 +1,0 @@
-{"schema":"ullm.ck-lds-gemm.v1","m":4096,"n":4096,"k":4096,"input":"zero FP8 payload/scales; zero-output correctness verified","instance":"16x128x128 RCR LDS-tiled CK","clock_warmup_repeats":30000,"warmups":5,"repeats":20,"median_or_average":"CK invoker average HIP-event ms","milliseconds":0.406041,"tflops":338.486}

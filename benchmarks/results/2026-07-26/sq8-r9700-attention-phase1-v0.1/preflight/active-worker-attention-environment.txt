@@ -1,7 +1,0 @@
---- active worker identity / selected attention environment ---
-gateway_pid=961738
-worker_pid=962187
-/home/homelab1/coding-local/ultimateLLM/uLLM-aq4-fidelity-promotion-release-f1a3cf4c/ullm-aq4-worker
-1f93f21543af777adb0f00cc35d6857d0af432657ed74e7723636ace9dfca69b  /proc/962187/exe
-ULLM_REQUIRE_HIP_PAGED_DECODE_ATTN_KERNEL=1
-ULLM_REQUIRE_HIP_PAGED_DECODE_SPLIT_KERNEL=1

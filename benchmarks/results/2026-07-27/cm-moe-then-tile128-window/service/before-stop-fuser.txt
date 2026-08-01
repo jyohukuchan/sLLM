@@ -1,3 +1,0 @@
-                     USER        PID ACCESS COMMAND
-/run/ullm/r9700.lock:
-                     homelab1  2180339 F.... ullm-openai-gat

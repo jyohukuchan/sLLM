@@ -1,1 +1,0 @@
-wrote=/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-26/sq8_0-projection-contract/attempt-2/diagnostic/report.json first_stage_divergence=down_projected

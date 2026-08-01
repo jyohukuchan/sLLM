@@ -1,1 +1,0 @@
-/usr/bin/hipcc -O3 -std=c++17 --offload-arch=gfx1030 --offload-device-only /home/homelab1/coding-local/ultimateLLM/uLLM-project/tools/sq9-q8-gfx1030-isa.hip.cpp -o /home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-26/sq9_0-vs-q8_0-offline/isa/sq9-q8-gfx1030.bundle

@@ -1,7 +1,0 @@
-2026-07-27T08:00:59+09:00	preflight-complete
-2026-07-27T08:00:59+09:00	service-stop-attempt
-2026-07-27T08:01:00+09:00	r9700-lock-acquired
-2026-07-27T08:01:00+09:00	thermal-pass edge_c=37 limit_c=45
-2026-07-27T08:01:31+09:00	profiles-complete
-2026-07-27T08:01:31+09:00	r9700-lock-released
-2026-07-27T08:01:31+09:00	service-restore-attempt
