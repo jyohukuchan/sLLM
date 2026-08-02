@@ -273,6 +273,15 @@
 16. 残りの初期バージョン機能を実装する。
 17. 人間がREADMEを整備し、発表する。
 
+## 当面のPhase 1概要
+
+- 目的は、推論機能を実装する前に、Rust主体のtop-level build、CMakeでbuildするC++/HIP backend、両者を結ぶversioned C ABI、テストとCIの拡張可能な雛形を確立すること。
+- repository skeletonとして、source、公開header、contract/reference/fixture/API test、CI schema・matrix・共通scriptの配置と責務を定め、最小構成をbuild・link・testできる状態にする。実モデルのload・推論、数値kernel、性能最適化は含めない。
+- CIの正本としてtest result schema、compatibility tuple schema、suite registry、host matrix、path-to-suite mappingを作り、未知test、未知marker、期待test 0件、result欠落を成功扱いしない。
+- H0静的検証、H1 host contract、H2 tiny NumPy oracleを独立して並列実行し、`host-required`へfail-closedで集約する。GPU処理をCPUで模倣するtestやfull modelのdownload・実行は追加しない。
+- Phase 1の完了条件は、clean checkoutからdocumented commandで雛形を再現buildでき、H0〜H2と集約checkが時間予算内で成功し、意図的なlint・test・schema・収集件数の異常を確実にfailureへできること。
+- ROCm 7.14.0によるH3 compile-only、専用local hostでのGPU evidenceとG0 preflightはPhase 1の完了後に行う。
+
 ## 現在の状態と次の作業
 
 - 現在: Phase 0のCI・テスト方針を確定し、repository skeletonと初期CI・test harnessの設計開始待ち。
