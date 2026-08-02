@@ -13,5 +13,6 @@
 - AGENTS.mdへ、独立した作業単位ごとのtest、本番または本番相当環境への適用、適用後確認、`push` skillによる公開手順を追加した。
 - push前reviewを受け、検証・適用・push対象のimmutable identity、受入evidence、適用先がないcode変更のpush禁止、適用後失敗時のrollback規則を追加した。
 - 最終reviewで検出したbuild/ROCm/target/codegen変更のGPU gate不一致を、G0/G1/G2/G4/P0必須へ統一した。
+- governance baseline本体をcommit `2764e73ebc45c8bbd209a426ca93ce341ed5d860`として`origin/main`へpushした。
 
 [対応する計画](../../../../plans/active/2026/08/1-10/restart-review-remediation.md)

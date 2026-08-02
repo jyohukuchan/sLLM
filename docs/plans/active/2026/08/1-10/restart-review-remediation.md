@@ -30,11 +30,11 @@
 - [x] `uLLM-project.md`のCI実装順序をmain planへ同期した。
 - [x] AGENTS.mdへ作業単位ごとのtest、適用、適用後確認、`push` skillによる公開手順を追加した。
 - [ ] `passwords.txt`内に有効なcredentialがある場合、所有者がrotationし、modeを最低`0600`へ変更。
-- [ ] governance baselineを機能codeより先にcommit・push。
+- [x] governance baselineを機能codeより先にcommit `2764e73ebc45c8bbd209a426ca93ce341ed5d860`として`origin/main`へpush。
 
 ## 確認結果
 
-- `main`と`origin/main`は`1805fe16d4a2f3f96bd25c0d807fb03b133c5c47`でahead/behind 0/0。
+- governance baseline本体のpush後、`main`と`origin/main`は`2764e73ebc45c8bbd209a426ca93ce341ed5d860`でahead/behind 0/0。
 - 現行mainは2,378 commitで、空tree reset commit `f0eefbdd`は旧commit `e146237d`を親に持つ。
 - pre-reset/post-reset bundleのhashと`git bundle verify`は成功し、現行repositoryの`git fsck --full`も成功した。
 - backup全fileの独立再検査は一部permission denialのため未完了だが、既存manifestにはrsync差分0とbundle検証が記録されている。

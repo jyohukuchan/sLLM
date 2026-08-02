@@ -292,16 +292,16 @@
   - 初期MVP、GPU分類、toolchain、Rust/C++境界、model lock、provenance、API profileの草案を作成。
   - CI・テストの失敗事例、参照推論engine、GitHub Actions、AMD GPU runner運用を調査し、方針策定計画を作成。
   - 再出発レビューを検証し、repository hygiene、credential、performance cliff、GPU merge gate、fail-closed集約の対策を作成。
+  - governance baselineをcommit `2764e73ebc45c8bbd209a426ca93ce341ed5d860`として`origin/main`へ公開。
 - 確認待ち:
   - CI・テスト方針草案の時間予算、GPU runner前提、未確定事項についてユーザー確認を受ける。
 - 次:
   1. CI・テスト方針草案をユーザー確認後に確定する。
   2. credentialを所有者側でrotationし、project内平文fileから移行する。
-  3. governance baselineをcommit・pushする。
-  4. test result schema、compatibility tuple manifest、marker、repository skeletonを設計する。
-  5. tracked tree H0、local hygiene command、H1〜H2のCPU CIをrepository skeletonと同時に実装する。
-  6. ROCm 7.14.0によるH3 compile-only CIを追加する。
-  7. 利用可能な実機に合わせてGPU runner基盤とG0 preflightを構築する。
+  3. test result schema、compatibility tuple manifest、marker、repository skeletonを設計する。
+  4. tracked tree H0、local hygiene command、H1〜H2のCPU CIをrepository skeletonと同時に実装する。
+  5. ROCm 7.14.0によるH3 compile-only CIを追加する。
+  6. 利用可能な実機に合わせてGPU runner基盤とG0 preflightを構築する。
 
 ## 未解決事項
 
