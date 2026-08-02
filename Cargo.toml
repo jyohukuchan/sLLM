@@ -1,0 +1,19 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/ullm-core",
+    "crates/ullm-hip-sys",
+    "crates/ullm-hip",
+    "crates/ullm-cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85.0"
+license = "MIT"
+
+[workspace.dependencies]
+ullm-core = { path = "crates/ullm-core" }
+ullm-hip = { path = "crates/ullm-hip" }
+ullm-hip-sys = { path = "crates/ullm-hip-sys" }

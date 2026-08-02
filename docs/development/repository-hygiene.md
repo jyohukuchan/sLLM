@@ -64,12 +64,14 @@ untracked、ignored data、worktree、remote同期はGitHub-hosted H0ではな�
 - 通常開発中の短期的な未commit・未push状態は許容するが、governance、license、test policy等の開発前baselineを長期間localだけに置かない。
 - force pushや共有済み履歴の書換えによって同期問題を解消しない。
 
-## 将来の実装
+## 実装済みの検査入口
 
-Phase 1で次を追加する。
+Phase 1で次を追加した。
 
-- Git treeを検査するH0 script。
-- filesystemをread-onlyで集計するlocal hygiene script。
-- machine-readableなallowlistとschema。
-- file size、file count、worktree、ahead/behindを含むsummary report。
-- push skillからlocal hygiene scriptを呼ぶ検証手順。
+- `ci/tools/tracked_tree.py`: Git index/treeとbase revisionの差分を検査するH0 script。
+- `ci/tools/local_hygiene.py`: filesystemをread-onlyで集計するlocal hygiene command。
+- `ci/policy/hygiene-allowlist-v1.json`と`ci/schema/hygiene-allowlist-v1.schema.json`: machine-readableなallowlistとschema。
+- 両commandはfile size、file count、worktree、branch activity、ahead/behindを含むJSON summaryを出力する。
+- 恒久的なcommandと出力先は[host build and test entry points](testing.md)を正とする。
+
+これらのcommandは上限超過を報告して非zero終了するが、dirty worktree、未追跡file、ignored artifactを削除しない。

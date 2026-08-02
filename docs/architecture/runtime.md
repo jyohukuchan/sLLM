@@ -110,6 +110,14 @@ Cargo を top-level build entry point とする。`ullm-hip-sys/build.rs` が CM
 
 C ABI から生成した Rust bindings は repository に check-in する。通常ビルドは bindgen の実行を必須にせず、明示的な再生成操作だけが bindings を更新する。生成元 header、ABI version、生成 tool/version、生成 option を固定し、header を変更した commit では対応する generated bindings も同時に更新する。安全性、所有権、`Send`/`Sync` の判断は generated code に持たせず `ullm-hip` の手書き wrapper に閉じ込める。
 
+### Phase 1 host stub
+
+Phase 1では、CargoからCMake static libraryをbuild・linkする経路とversioned C ABIを実際に成立させる一方、HIP compiler、ROCm library、GPU処理は導入しない。`native/hip`はC++17 host stubとしてbuildされ、ABI versionとlibrary versionを返し、HIP backend/context probeには`ULLM_STATUS_HIP_UNAVAILABLE`を返す。成功、CPU fallback、GPU対応として扱わない。
+
+公開headerは`include/ullm/hip.h`、check-inしたbindingsは`crates/ullm-hip-sys/src/bindings.rs`、Cargo/CMake統合は`crates/ullm-hip-sys/build.rs`を正とする。Phase 2のH3でHIP languageとtarget別codegenを追加するまで、stub artifactをHIP compile evidenceまたはGPU evidenceに使用しない。
+
+Phase 1のbackend-independent contractは、read/write access mode、opaque queue/buffer/event handle、completionまでresourceを強参照するownership tokenを含む。これは非実行のlifetime contractであり、非同期実行や完了を偽装しない。C/Rust ABIのsize、alignment、field offset、constantはbuild時のnative layout probeでcheck-in bindingsと機械的に照合し、C/C++両方で公開headerをcompileする。
+
 ## MVP の対象外
 
 次は初期 MVP に含めない。

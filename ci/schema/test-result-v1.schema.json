@@ -1,0 +1,350 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ullm-project.local/ci/schema/test-result-v1.schema.json",
+  "title": "uLLM test result v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "result_id", "suite_id", "tier", "state", "required",
+    "evidence_mode", "run_id", "run_attempt", "reviewed_sha", "tested_sha",
+    "workflow_sha", "git_tree_oid", "worktree_clean",
+    "matrix_manifest_sha256", "matrix_row_id", "tuple_digest", "command",
+    "command_sha256", "toolchain", "toolchain_sha256", "artifact",
+    "created_at", "started_at", "finished_at", "duration_seconds", "seed",
+    "counts", "resource", "cases", "steps", "diagnostic"
+  ],
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "counts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "collected", "selected", "passed", "failed", "skipped", "deselected"
+      ],
+      "properties": {
+        "collected": {"type": "integer", "minimum": 0},
+        "selected": {"type": "integer", "minimum": 0},
+        "passed": {"type": "integer", "minimum": 0},
+        "failed": {"type": "integer", "minimum": 0},
+        "skipped": {"type": "integer", "minimum": 0},
+        "deselected": {"type": "integer", "minimum": 0}
+      }
+    },
+    "step_resource": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "wall_time_limit_seconds", "timed_out", "max_rss_bytes",
+        "max_rss_limit_bytes", "rss_breach", "cpu_user_seconds",
+        "cpu_system_seconds", "stdout_bytes", "stderr_bytes", "output_bytes",
+        "stdout_captured_bytes", "stderr_captured_bytes", "captured_output_bytes",
+        "output_limit_bytes", "output_breach", "network_isolated",
+        "network_guard_strategy", "address_space_limit_bytes",
+        "address_space_limit_enforced"
+      ],
+      "properties": {
+        "wall_time_limit_seconds": {"type": "number", "exclusiveMinimum": 0},
+        "timed_out": {"type": "boolean"},
+        "max_rss_bytes": {"type": "integer", "minimum": 0},
+        "max_rss_limit_bytes": {"type": "integer", "minimum": 1},
+        "rss_breach": {"type": "boolean"},
+        "cpu_user_seconds": {"type": "number", "minimum": 0},
+        "cpu_system_seconds": {"type": "number", "minimum": 0},
+        "stdout_bytes": {"type": "integer", "minimum": 0},
+        "stderr_bytes": {"type": "integer", "minimum": 0},
+        "output_bytes": {"type": "integer", "minimum": 0},
+        "stdout_captured_bytes": {"type": "integer", "minimum": 0},
+        "stderr_captured_bytes": {"type": "integer", "minimum": 0},
+        "captured_output_bytes": {"type": "integer", "minimum": 0},
+        "output_limit_bytes": {"type": "integer", "minimum": 1},
+        "output_breach": {"type": "boolean"},
+        "network_isolated": {"type": "boolean"},
+        "network_guard_strategy": {"type": "string", "minLength": 1},
+        "address_space_limit_bytes": {"type": ["integer", "null"], "minimum": 1},
+        "address_space_limit_enforced": {"type": "boolean"}
+      }
+    },
+    "row_resource": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "wall_time_limit_seconds", "wall_time_breach", "max_rss_bytes",
+        "max_rss_limit_bytes", "rss_breach", "runner_max_rss_bytes",
+        "fixture_size_bytes", "fixture_size_limit_bytes", "fixture_size_breach",
+        "output_bytes", "captured_output_bytes", "row_output_limit_bytes", "output_breach",
+        "address_space_limit_bytes", "commands_expected", "commands_executed",
+        "commands_complete", "network_isolated", "network_guard_strategies"
+      ],
+      "properties": {
+        "wall_time_limit_seconds": {"type": "number", "exclusiveMinimum": 0},
+        "wall_time_breach": {"type": "boolean"},
+        "max_rss_bytes": {"type": "integer", "minimum": 0},
+        "max_rss_limit_bytes": {"type": "integer", "minimum": 1},
+        "rss_breach": {"type": "boolean"},
+        "runner_max_rss_bytes": {"type": "integer", "minimum": 0},
+        "fixture_size_bytes": {"type": "integer", "minimum": 0},
+        "fixture_size_limit_bytes": {"type": "integer", "minimum": 1},
+        "fixture_size_breach": {"type": "boolean"},
+        "output_bytes": {"type": "integer", "minimum": 0},
+        "captured_output_bytes": {"type": "integer", "minimum": 0},
+        "row_output_limit_bytes": {"type": "integer", "minimum": 1},
+        "output_breach": {"type": "boolean"},
+        "address_space_limit_bytes": {"type": ["integer", "null"], "minimum": 1},
+        "commands_expected": {"type": "integer", "minimum": 1},
+        "commands_executed": {"type": "integer", "minimum": 0},
+        "commands_complete": {"type": "boolean"},
+        "network_isolated": {"type": "boolean"},
+        "network_guard_strategies": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {"type": "string", "minLength": 1}
+        }
+      }
+    },
+    "execution_record": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "state", "started_at", "finished_at", "duration_seconds", "exit_code",
+        "stdout_sha256", "stderr_sha256", "diagnostic", "selection_required",
+        "count_source", "counts", "resource"
+      ],
+      "properties": {
+        "step_id": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9_.:-]{0,127}$"
+        },
+        "case_id": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9_.:-]{0,127}$"
+        },
+        "state": {"enum": ["PASS", "FAIL", "SKIP", "INFRA_ERROR"]},
+        "started_at": {"type": "string", "format": "date-time"},
+        "finished_at": {"type": "string", "format": "date-time"},
+        "duration_seconds": {"type": "number", "minimum": 0},
+        "exit_code": {"type": "integer"},
+        "stdout_sha256": {"$ref": "#/$defs/sha256"},
+        "stderr_sha256": {"$ref": "#/$defs/sha256"},
+        "diagnostic": {"type": "string"},
+        "selection_required": {"type": "boolean"},
+        "count_source": {
+          "enum": [
+            "validator-command", "pytest-machine", "cargo-harness",
+            "unittest-machine"
+          ]
+        },
+        "counts": {"$ref": "#/$defs/counts"},
+        "resource": {"$ref": "#/$defs/step_resource"}
+      }
+    }
+  },
+  "properties": {
+    "schema_version": {"const": "test-result-v1"},
+    "result_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$"
+    },
+    "suite_id": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9_.-]{0,127}$"
+    },
+    "tier": {
+      "enum": [
+        "tier_h0", "tier_h1", "tier_h2", "tier_h3", "tier_g0", "tier_g1",
+        "tier_g2", "tier_g3", "tier_g4", "tier_p0", "tier_p1"
+      ]
+    },
+    "state": {"enum": ["PASS", "FAIL", "SKIP", "INFRA_ERROR", "QUARANTINED"]},
+    "required": {"type": "boolean"},
+    "evidence_mode": {"enum": ["required-ci", "local-development"]},
+    "run_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$"
+    },
+    "run_attempt": {"type": "integer", "minimum": 1},
+    "reviewed_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "tested_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "workflow_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "git_tree_oid": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "worktree_clean": {"type": "boolean"},
+    "matrix_manifest_sha256": {"$ref": "#/$defs/sha256"},
+    "matrix_row_id": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9_.-]{0,63}$"
+    },
+    "tuple_digest": {"$ref": "#/$defs/sha256"},
+    "command": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "array",
+        "minItems": 1,
+        "items": {"type": "string", "minLength": 1}
+      }
+    },
+    "command_sha256": {"$ref": "#/$defs/sha256"},
+    "toolchain": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "python", "platform", "system", "machine", "git", "rustc_dev",
+        "cargo_dev", "rustc_msrv", "cargo_msrv", "clang_format", "cmake",
+        "host_packages"
+      ],
+      "properties": {
+        "python": {"type": "string", "minLength": 1},
+        "platform": {"type": "string", "minLength": 1},
+        "system": {"type": "string", "minLength": 1},
+        "machine": {"type": "string", "minLength": 1},
+        "git": {"type": "string", "minLength": 1},
+        "rustc_dev": {"type": "string", "minLength": 1},
+        "cargo_dev": {"type": "string", "minLength": 1},
+        "rustc_msrv": {"type": "string", "minLength": 1},
+        "cargo_msrv": {"type": "string", "minLength": 1},
+        "clang_format": {"type": "string", "minLength": 1},
+        "cmake": {"type": "string", "minLength": 1},
+        "host_packages": {
+          "type": "object",
+          "minProperties": 1,
+          "propertyNames": {"pattern": "^[a-z0-9][a-z0-9-]*$"},
+          "additionalProperties": {"type": "string", "minLength": 1}
+        }
+      }
+    },
+    "toolchain_sha256": {"$ref": "#/$defs/sha256"},
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["content_sha256", "manifest_sha256"],
+      "properties": {
+        "content_sha256": {"$ref": "#/$defs/sha256"},
+        "manifest_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "created_at": {"type": "string", "format": "date-time"},
+    "started_at": {"type": "string", "format": "date-time"},
+    "finished_at": {"type": "string", "format": "date-time"},
+    "duration_seconds": {"type": "number", "minimum": 0},
+    "seed": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 4294967295
+    },
+    "counts": {"$ref": "#/$defs/counts"},
+    "resource": {"$ref": "#/$defs/row_resource"},
+    "cases": {
+      "type": "array",
+      "items": {
+        "allOf": [
+          {"$ref": "#/$defs/execution_record"},
+          {"required": ["case_id"], "not": {"required": ["step_id"]}}
+        ]
+      }
+    },
+    "steps": {
+      "type": "array",
+      "items": {
+        "allOf": [
+          {"$ref": "#/$defs/execution_record"},
+          {"required": ["step_id"], "not": {"required": ["case_id"]}}
+        ]
+      }
+    },
+    "diagnostic": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "message", "errors", "warnings", "network_disabled",
+        "model_disabled", "gpu_fallback_disabled", "network_guard_self_test"
+      ],
+      "properties": {
+        "message": {"type": "string"},
+        "errors": {"type": "array", "items": {"type": "string"}},
+        "warnings": {"type": "array", "items": {"type": "string"}},
+        "output_dir": {"type": "string"},
+        "network_disabled": {"const": true},
+        "model_disabled": {"const": true},
+        "gpu_fallback_disabled": {"const": true},
+        "network_guard_self_test": {"type": "boolean"}
+      }
+    },
+    "gpu": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "uuid", "bdf", "exact_target", "selected_backend", "dispatch_count",
+        "fallback_allowed", "fallback_used", "code_object"
+      ],
+      "properties": {
+        "uuid": {"type": "string"},
+        "bdf": {"type": "string"},
+        "exact_target": {"type": "string"},
+        "selected_backend": {"type": "string"},
+        "dispatch_count": {"type": "integer", "minimum": 0},
+        "dispatch_ids": {"type": "array", "items": {"type": "string"}},
+        "fallback_allowed": {"type": "boolean"},
+        "fallback_used": {"type": "boolean"},
+        "code_object": {"type": "object"}
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"required": {"const": true}}},
+      "then": {
+        "properties": {
+          "state": {"not": {"enum": ["SKIP", "QUARANTINED"]}}
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "evidence_mode": {"const": "required-ci"},
+          "state": {"const": "PASS"}
+        }
+      },
+      "then": {"properties": {"worktree_clean": {"const": true}}}
+    },
+    {
+      "if": {"properties": {"matrix_row_id": {"const": "h2"}}},
+      "then": {
+        "properties": {
+          "resource": {
+            "properties": {
+              "address_space_limit_bytes": {"const": 4294967296}
+            }
+          },
+          "steps": {
+            "items": {
+              "properties": {
+                "resource": {
+                  "properties": {
+                    "address_space_limit_bytes": {"const": 4294967296}
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "tier": {
+            "enum": [
+              "tier_g0", "tier_g1", "tier_g2", "tier_g3", "tier_g4",
+              "tier_p0", "tier_p1"
+            ]
+          }
+        }
+      },
+      "then": {"required": ["gpu"]}
+    }
+  ]
+}

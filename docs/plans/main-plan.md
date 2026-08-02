@@ -149,6 +149,7 @@
   - C++17。
   - ROCm 7.14.0同梱の`amdclang++`とLLVMを使用する。
   - CMake 3.21以上。
+  - H0〜H2 host CI用Python 3.12.10。直接依存versionは`ci/requirements-host.txt`で固定する。
 - ROCm compiler/runtime/libraryは同一releaseへ揃える。
 - local開発環境の有効化とfail-closedな確認は`docs/development/environment.md`および`scripts/dev`を正本とする。
 - toolchainで実装上の問題が確認された場合は、互換性文書とこの計画を更新して変更する。
@@ -281,10 +282,11 @@
 - H0静的検証、H1 host contract、H2 tiny NumPy oracleを独立して並列実行し、`host-required`へfail-closedで集約する。GPU処理をCPUで模倣するtestやfull modelのdownload・実行は追加しない。
 - Phase 1の完了条件は、clean checkoutからdocumented commandで雛形を再現buildでき、H0〜H2と集約checkが時間予算内で成功し、意図的なlint・test・schema・収集件数の異常を確実にfailureへできること。
 - ROCm 7.14.0によるH3 compile-only、専用local hostでのGPU evidenceとG0 preflightはPhase 1の完了後に行う。
+- Phase 1は完了した。実装path、再現command、CPU-only境界は[host build and test entry points](../development/testing.md)を正とする。
 
 ## 現在の状態と次の作業
 
-- 現在: Phase 0のCI・テスト方針を確定し、repository skeletonと初期CI・test harnessの設計開始待ち。
+- 現在: Phase 1のrepository skeleton、versioned host C ABI stub、H0〜H2、fail-closed `host-required`、repository hygiene commandを実装・検証済み。次はPhase 2のH3 HIP compile-only設計・実装。
 - 完了:
   - プロジェクトライセンスをMITへ統一。
   - Qwen3.5のMTP表記とBF16階層の矛盾を修正。
@@ -298,10 +300,16 @@
   - llama.cpp、vLLM、SGLang、TensorRT-LLM、ROCm/ATOM、LMDeploy、KTransformersの2026-08-02時点の安定releaseを完全commit SHAで`reference/`へ固定し、7件の再現manifestを作成。
   - 固定した7件のexact revisionを一次sourceとしてCI・testを再調査し、採用・不採用項目を記録。
   - H0〜H2の時間予算とfail-closed集約、schema/markerの必須概念、H3昇格条件、初期GPU evidenceのtarget・台数・基本隔離方針を確定。
+  - Rust workspace、4 crate、CMake C++17 static host stub、versioned C ABI、checked-in bindingsを追加し、Cargoからbuild・link・testできるrepository skeletonを構築。
+  - `test-result-v1`、compatibility tuple、suite/host/path matrix、tracked/local hygiene、共通host runner、fail-closed aggregatorを実装。
+  - H0/H1/H2を独立rowとして実装し、実収集・選択件数、row/command resource、network namespace、clean SHA identityを記録・検証。意図的なformat/test/schema/0件/missing/duplicate/unknown/stale/hash/identity/resource異常をfailureへできることをself-testで確認。
+  - opaque queue/buffer/event、access mode、completion ownership、TensorView/NVFP4境界、semantic op arity、C/Rust ABI layout parity、error sink truncation contractをPhase 1の非実行contractとして追加。
+  - Python 3.12/Linux x86_64 host dependencyをtransitive dependencyとartifact SHA-256まで固定し、test中の外部networkをnamespaceで遮断。
+  - GitHub-hosted CPUだけを使う`host-required` workflowを追加し、official Actionsを完全commit SHAへ固定。H3/GPU/self-hosted runnerは含めていない。
 - 次:
-  1. test result schema、compatibility tuple manifest、suite registry、path mapping、repository skeletonを設計する。
-  2. tracked tree H0、local hygiene command、H1〜H2のCPU CIをrepository skeletonと同時に実装する。
-  3. ROCm 7.14.0によるH3 compile-only CIを追加する。
+  1. ROCm 7.14.0固定toolchain imageとartifact metadata contractを設計する。
+  2. exact `gfx1030`/`gfx1201`のH3 compile-only rowをnon-requiredで追加する。
+  3. H3を20回以上かつ7日以上観測し、昇格条件を評価する。
   4. 専用local hostのGPU evidence実行・集約とG0 preflightを構築する。
 
 ## 未解決事項

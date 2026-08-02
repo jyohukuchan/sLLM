@@ -282,6 +282,17 @@ GPUに影響する変更は、実GPU evidenceが得られるまで「compile済�
 - H0〜H2を並列PR required rowとし、`host-required`へfail-closed集約する。H3はまだrequiredにしない。
 - timeout、収集件数、seed、case timingをtest harnessから必ず出力する。
 
+実施状況: **完了**。
+
+- Rust workspace、CMake C++17 static host stub、versioned C ABI、checked-in bindingsを実装した。host stubはHIP未構築を明示し、CPU fallbackまたはGPU evidenceにしない。
+- 2つのschema、suite/host/path manifest、共通runner、fail-closed aggregator、tracked/local hygiene commandを正本pathへ実装した。
+- H0、H1、H2を独立rowとして実行し、全row `PASS`と`host-required`集約`PASS`を確認した。
+- fail-closed self-testで、意図的なformat/test/schema/0件、missing/duplicate/unknown/stale/hash/identity不一致、non-success needs、禁止tracked pathを拒否した。
+- 追加監査で判明したactual selected 0件、dirty/mismatched identity、network未隔離、resource/output/fixture超過、fixture mapping driftもfail-closed対象へ追加した。
+- Python 3.12/Linux x86_64 dependencyをtransitive dependencyとSHA-256まで固定し、Rust 1.97.1/MSRV 1.85.0を各commandで明示選択した。
+- required commandを外部routeのないnetwork namespaceで実行し、H2の4 GiB address-space limit、row-wide timeout、max RSS、fixture/output上限をmachine-readable resultへ記録・検証した。
+- 恒久的な実行入口、出力、CPU-only境界は[host build and test entry points](../../../../../development/testing.md)を正とする。
+
 ### Phase 2: HIP compile-only
 
 - ROCm 7.14.0固定toolchainでH3を追加する。

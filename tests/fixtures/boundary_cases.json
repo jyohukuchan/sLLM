@@ -1,0 +1,13 @@
+{
+  "seed": 20260803,
+  "cases": [
+    {"id": "empty", "values": [0]},
+    {"id": "one", "values": [1]},
+    {"id": "three", "values": [3]},
+    {"id": "seven", "values": [7]},
+    {"id": "sixteen_low_high", "values": [15, 16, 17]},
+    {"id": "prime_nonaligned", "values": [17, 37, 73]},
+    {"id": "two_fifty_six_low", "values": [255]},
+    {"id": "two_fifty_six_high", "values": [256, 257]}
+  ]
+}

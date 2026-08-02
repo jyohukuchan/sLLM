@@ -1,0 +1,49 @@
+{
+  "schema_version": "host-v1",
+  "matrix_id": "host-required",
+  "revision": 4,
+  "rows": [
+    {
+      "row_id": "h0",
+      "tier": "tier_h0",
+      "required": true,
+      "suite_ids": ["h0-rust-format", "h0-rust-clippy", "h0-cpp-format-static", "h0-python", "h0-markdown-links", "h0-json-schema-manifest-workflow", "h0-license-provenance", "h0-tracked-tree", "h0-suite-registration", "h0-self-test"],
+      "seed": 1729,
+      "timeout_seconds": 480,
+      "max_command_seconds": 120,
+      "max_rss_bytes": 2147483648,
+      "fixture_size_limit_bytes": 67108864,
+      "max_command_output_bytes": 4194304,
+      "max_row_output_bytes": 16777216,
+      "address_space_limit_bytes": null
+    },
+    {
+      "row_id": "h1",
+      "tier": "tier_h1",
+      "required": true,
+      "suite_ids": ["h1-host-contract"],
+      "seed": 2718,
+      "timeout_seconds": 600,
+      "max_command_seconds": 120,
+      "max_rss_bytes": 4294967296,
+      "fixture_size_limit_bytes": 67108864,
+      "max_command_output_bytes": 4194304,
+      "max_row_output_bytes": 16777216,
+      "address_space_limit_bytes": null
+    },
+    {
+      "row_id": "h2",
+      "tier": "tier_h2",
+      "required": true,
+      "suite_ids": ["h2-tiny-oracle"],
+      "seed": 314159,
+      "timeout_seconds": 480,
+      "max_command_seconds": 120,
+      "max_rss_bytes": 4294967296,
+      "fixture_size_limit_bytes": 67108864,
+      "max_command_output_bytes": 4194304,
+      "max_row_output_bytes": 16777216,
+      "address_space_limit_bytes": 4294967296
+    }
+  ]
+}

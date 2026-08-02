@@ -19,8 +19,11 @@
 | HIP compiler | ROCm 7.14.0 同梱 `amdclang++` | system LLVM ではなく、選択した ROCm tree の compiler を使う |
 | LLVM | 23 | ROCm 7.14.0 に含まれる LLVM 系列 |
 | CMake | 3.21 以上 | `cmake_minimum_required(VERSION 3.21)` とする |
+| Python host CI | 3.12.10 | H0〜H2のtest harnessとNumPy oracle専用。production runtimeの実装言語・互換性契約ではない |
 
 Rust 2024 は Rust 1.85.0 で安定化されたため、edition と MSRV を 1.85.0 に揃える。resolver 3 は Rust version を考慮する resolver であり、virtual workspace では edition から暗黙に決まらないため明示する。開発 pin は再現性のための固定値であって MSRV ではない。依存クレートを選ぶ際は、開発 pin でビルドできるだけでなく MSRV を超えないことを要求する。
+
+Python host CIのtransitive dependencyを含むexact versionとartifact SHA-256は`ci/requirements-host.txt`、実行入口とCPU-only境界は`docs/development/testing.md`を正とする。dependency取得とtest実行を分け、required host testはnetwork namespaceで外部接続を遮断し、model cache、GPU fallbackを使用しない。
 
 ## ROCm の発見と一貫性
 

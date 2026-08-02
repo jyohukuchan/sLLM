@@ -22,4 +22,20 @@
 - H3のPR compile rowを`gfx1030`/`gfx1201`とし、20回以上・7日以上に加えて全期待rowのPASS、他state/cancel/schema errorなし、artifact hash一致、時間・infra条件をrequired昇格条件にした。`gfx1200`はnightly/release compile-onlyに残した。
 - 初期GPU evidenceを専用local hostの`gfx1030` 1台と`gfx1201` 1台の直列実行とし、2台目の`gfx1030`をspare/nightly用とした。暫定local経路はtrusted project commitだけに限定し、public fork PRからはGPU runnerを直接使わない。
 
+## 2026-08-03
+
+- Phase 1のrepository skeletonとしてRust workspace、`ullm-core`、`ullm-hip-sys`、`ullm-hip`、`ullm-cli`を追加した。
+- Cargo `build.rs`からCMake C++17 static host stubを`OUT_DIR`配下へbuild・linkし、versioned C ABI、caller-owned error sink、reserved-field検証、checked-in bindingsを追加した。
+- host stubはHIP backend/contextを明示的なunavailableとして返し、GPU成功またはCPU fallbackとして扱わないcontractをRust H1で確認した。
+- `test-result-v1`、compatibility tuple、hygiene allowlist schema、suite registry、host matrix、path mapping、共通runnerとaggregatorを追加した。
+- H0へRust format/clippy/MSRV、C++ format/static host build、Python、Markdown/link、schema/workflow、license/provenance、tracked tree、registration、negative self-testを登録した。
+- H1へRust workspace test、Python contract/API test、CI contract test、H2へ固定seedのtiny NumPy boundary/KV/sampling oracleを登録した。
+- H2 subprocessへ4 GiB address-space上限、pytestへsocket禁止を適用し、model、GPU、network、CPU fallbackをrequired host evidenceから除外した。
+- missing/duplicate/unknown/stale report、schema/hash/identity不一致、non-success needs、0件収集、意図的format/test failure、禁止tracked pathがfail closedになることを確認した。
+- GitHub-hosted CPUだけでH0〜H2を並列実行し、`host-required`へ集約するworkflowを追加した。official Actionsは完全commit SHAへ固定し、H3とGPU runnerは含めていない。
+- Phase 1完了監査で不足していたopaque handle/access/completion ownership、C/Rust ABI parity、TensorView/NVFP4境界、semantic op arity、error-sink truncation、CLI error exitを実装し、Rust testを22件へ拡張した。
+- test harnessをactual collected/selected/outcome count、strict clean SHA identity、network namespace、row/command resource limit、bounded outputへ拡張し、異常をschema-validな非PASSとして扱うcontractを追加した。
+- Python host dependencyをtransitive dependencyとartifact SHA-256までlockし、checkout credentialを保持せず、Rust 1.97.1/MSRV 1.85.0をcommandごとに明示した。
+- fixture consumer mappingをH1/H2へ同期し、hash-locked isolated venvでH0/H1/H2とlocal-development aggregateがPASSすることを確認した。immutable evidenceはcommit後のclean checkoutとGitHub required workflowで別途固定する。
+
 [対応する計画](../../../../plans/active/2026/08/1-10/ci-test-strategy.md)

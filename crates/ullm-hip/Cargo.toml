@@ -1,0 +1,11 @@
+[package]
+name = "ullm-hip"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Safe Rust wrapper and Phase 1 host probe for the uLLM HIP ABI"
+
+[dependencies]
+ullm-core.workspace = true
+ullm-hip-sys.workspace = true

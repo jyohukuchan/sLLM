@@ -1,0 +1,26 @@
+{
+  "seed": 20260803,
+  "cases": [
+    {
+      "id": "single_logit",
+      "logits": [0.0],
+      "temperature": 1.0,
+      "top_p": 1.0,
+      "expected_token": 0
+    },
+    {
+      "id": "three_way",
+      "logits": [0.3, 0.2, 0.1],
+      "temperature": 1.0,
+      "top_p": 1.0,
+      "expected_token": 2
+    },
+    {
+      "id": "seven_way_nucleus",
+      "logits": [0.0, 1.0, -1.0, 0.5, 2.0, 0.25, -0.25],
+      "temperature": 0.7,
+      "top_p": 0.9,
+      "expected_token": 1
+    }
+  ]
+}

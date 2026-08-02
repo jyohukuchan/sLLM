@@ -1,0 +1,230 @@
+name: host-required
+
+on:
+  pull_request:
+  merge_group:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+env:
+  RUSTUP_AUTO_INSTALL: "0"
+
+jobs:
+  h0:
+    name: h0
+    runs-on: ubuntu-24.04
+    timeout-minutes: 8
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Set up Python 3.12
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        with:
+          python-version: "3.12.10"
+      - name: Install host requirements
+        run: >-
+          python3 -m pip install --disable-pip-version-check --no-input
+          --require-hashes --only-binary=:all: --no-deps
+          -r ci/requirements-host.txt
+      - name: Install Rust development and MSRV toolchains
+        run: |
+          rustup toolchain install 1.97.1 --profile minimal --component rustfmt --component clippy
+          rustup toolchain install 1.85.0 --profile minimal
+      - name: Verify clean checkout after setup
+        run: test -z "$(git status --porcelain=v1 --untracked-files=all)"
+      - name: Run h0 host suite
+        env:
+          ULLM_H0_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before || '' }}
+        run: >-
+          python3 ci/tools/run_host_suite.py
+          --row h0
+          --output-dir .local-artifacts/ci/h0
+          --strict-ci
+          --expected-reviewed-sha "${{ github.sha }}"
+          --expected-tested-sha "${{ github.sha }}"
+          --expected-workflow-sha "${{ github.sha }}"
+      - name: Upload h0 report and sidecar
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: host-h0
+          path: |
+            .local-artifacts/ci/h0/report.json
+            .local-artifacts/ci/h0/report.json.sha256
+          if-no-files-found: error
+          retention-days: 7
+
+  h1:
+    name: h1
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Set up Python 3.12
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        with:
+          python-version: "3.12.10"
+      - name: Install host requirements
+        run: >-
+          python3 -m pip install --disable-pip-version-check --no-input
+          --require-hashes --only-binary=:all: --no-deps
+          -r ci/requirements-host.txt
+      - name: Install Rust development toolchain
+        run: rustup toolchain install 1.97.1 --profile minimal
+      - name: Verify clean checkout after setup
+        run: test -z "$(git status --porcelain=v1 --untracked-files=all)"
+      - name: Run h1 host suite
+        run: >-
+          python3 ci/tools/run_host_suite.py
+          --row h1
+          --output-dir .local-artifacts/ci/h1
+          --strict-ci
+          --expected-reviewed-sha "${{ github.sha }}"
+          --expected-tested-sha "${{ github.sha }}"
+          --expected-workflow-sha "${{ github.sha }}"
+      - name: Upload h1 report and sidecar
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: host-h1
+          path: |
+            .local-artifacts/ci/h1/report.json
+            .local-artifacts/ci/h1/report.json.sha256
+          if-no-files-found: error
+          retention-days: 7
+
+  h2:
+    name: h2
+    runs-on: ubuntu-24.04
+    timeout-minutes: 8
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Set up Python 3.12
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        with:
+          python-version: "3.12.10"
+      - name: Install host requirements
+        run: >-
+          python3 -m pip install --disable-pip-version-check --no-input
+          --require-hashes --only-binary=:all: --no-deps
+          -r ci/requirements-host.txt
+      - name: Verify clean checkout after setup
+        run: test -z "$(git status --porcelain=v1 --untracked-files=all)"
+      - name: Run h2 host suite
+        run: >-
+          python3 ci/tools/run_host_suite.py
+          --row h2
+          --output-dir .local-artifacts/ci/h2
+          --strict-ci
+          --expected-reviewed-sha "${{ github.sha }}"
+          --expected-tested-sha "${{ github.sha }}"
+          --expected-workflow-sha "${{ github.sha }}"
+      - name: Upload h2 report and sidecar
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: host-h2
+          path: |
+            .local-artifacts/ci/h2/report.json
+            .local-artifacts/ci/h2/report.json.sha256
+          if-no-files-found: error
+          retention-days: 7
+
+  host-required:
+    name: host-required
+    if: ${{ always() }}
+    needs: [h0, h1, h2]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Set up Python 3.12
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        with:
+          python-version: "3.12.10"
+      - name: Install host requirements
+        run: >-
+          python3 -m pip install --disable-pip-version-check --no-input
+          --require-hashes --only-binary=:all: --no-deps
+          -r ci/requirements-host.txt
+      - name: Generate needs JSON
+        env:
+          NEEDS_JSON: ${{ toJSON(needs) }}
+        run: |
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+
+          output = Path(".local-artifacts/ci/needs.json")
+          output.parent.mkdir(parents=True, exist_ok=True)
+          output.write_text(os.environ["NEEDS_JSON"] + "\n", encoding="utf-8")
+          PY
+      - name: Download h0 artifacts
+        if: ${{ always() }}
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: host-h0
+          path: .local-artifacts/ci/h0
+      - name: Download h1 artifacts
+        if: ${{ always() }}
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: host-h1
+          path: .local-artifacts/ci/h1
+      - name: Download h2 artifacts
+        if: ${{ always() }}
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: host-h2
+          path: .local-artifacts/ci/h2
+      - name: Aggregate host results
+        if: ${{ always() }}
+        run: >-
+          python3 ci/tools/aggregate_host_results.py
+          --needs-json .local-artifacts/ci/needs.json
+          --artifact-dir .local-artifacts/ci
+          --output-dir .local-artifacts/ci/aggregate
+          --strict-ci
+          --run-id "${{ github.run_id }}"
+          --run-attempt "${{ github.run_attempt }}"
+          --expected-reviewed-sha "${{ github.sha }}"
+          --expected-tested-sha "${{ github.sha }}"
+          --expected-workflow-sha "${{ github.sha }}"
+      - name: Upload aggregate report and sidecar
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: host-required
+          path: |
+            .local-artifacts/ci/aggregate/report.json
+            .local-artifacts/ci/aggregate/report.json.sha256
+          if-no-files-found: error
+          retention-days: 7

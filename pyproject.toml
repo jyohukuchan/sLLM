@@ -1,0 +1,38 @@
+[project]
+name = "ullm-test-contracts"
+version = "0.0.0"
+description = "Small, deterministic host contract and NumPy oracle tests for uLLM"
+requires-python = ">=3.12,<3.13"
+dependencies = []
+
+[project.optional-dependencies]
+test = [
+    "jsonschema==4.25.1",
+    "numpy==2.3.2",
+    "PyYAML==6.0.2",
+    "pytest==9.0.3",
+]
+
+[tool.pytest.ini_options]
+minversion = "9.0.3"
+addopts = ["--strict-markers", "--strict-config", "-ra", "-p", "no:cacheprovider"]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+markers = [
+    "tier_h0: static host checks",
+    "tier_h1: host contract and API validation checks",
+    "tier_h2: tiny independent NumPy oracle checks",
+    "tier_h3: HIP compile-only checks",
+    "tier_g0: GPU runner preflight checks",
+    "tier_g1: GPU kernel and ABI checks",
+    "tier_g2: GPU model-slice checks",
+    "tier_g3: GPU end-to-end checks",
+    "tier_g4: GPU compatibility checks",
+    "tier_p0: performance smoke checks",
+    "tier_p1: performance regression checks",
+    "requires_gpu: test requires an explicitly assigned GPU",
+    "requires_model: test requires an explicitly provisioned model",
+    "slow: test exceeds the normal host-test budget",
+    "network: test requires explicitly permitted network access",
+    "quarantined: test is isolated from required evidence",
+]

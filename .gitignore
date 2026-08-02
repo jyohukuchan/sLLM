@@ -19,6 +19,13 @@
 /.local-artifacts/models/
 /.local-artifacts/binaries/
 /.local-artifacts/logs/
+/.local-artifacts/ci/
+/.local-artifacts/ci-phase1/
+
+# Python host-test caches
+__pycache__/
+*.py[cod]
+/.pytest_cache/
 
 # Generated test fixtures
 /tests/fixtures/generated/

@@ -1,0 +1,132 @@
+{
+  "served_model": "fixture-model",
+  "valid": [
+    {
+      "id": "minimum",
+      "request": {
+        "model": "fixture-model",
+        "messages": [{"role": "user", "content": "hello"}]
+      }
+    },
+    {
+      "id": "supported_generation_fields",
+      "request": {
+        "model": "fixture-model",
+        "messages": [
+          {"role": "system", "content": "be concise"},
+          {"role": "user", "content": "hello"},
+          {"role": "assistant", "content": "hi"}
+        ],
+        "temperature": 0.0,
+        "top_p": 0.9,
+        "max_completion_tokens": 7,
+        "stop": ["\n"],
+        "presence_penalty": -2.0,
+        "frequency_penalty": 2.0,
+        "stream": false,
+        "n": 1
+      }
+    }
+  ],
+  "invalid": [
+    {
+      "id": "missing_model",
+      "request": {"messages": [{"role": "user", "content": "hello"}]},
+      "status": 400,
+      "code": "invalid_value",
+      "param": "model"
+    },
+    {
+      "id": "empty_messages",
+      "request": {"model": "fixture-model", "messages": []},
+      "status": 400,
+      "code": "invalid_value",
+      "param": "messages"
+    },
+    {
+      "id": "unknown_model",
+      "request": {
+        "model": "not-served",
+        "messages": [{"role": "user", "content": "hello"}]
+      },
+      "status": 404,
+      "code": "model_not_found",
+      "param": "model"
+    },
+    {
+      "id": "unknown_field",
+      "request": {
+        "model": "fixture-model",
+        "messages": [{"role": "user", "content": "hello"}],
+        "future_field": true
+      },
+      "status": 400,
+      "code": "unsupported_parameter",
+      "param": "future_field"
+    },
+    {
+      "id": "tools_rejected",
+      "request": {
+        "model": "fixture-model",
+        "messages": [{"role": "user", "content": "hello"}],
+        "tools": []
+      },
+      "status": 400,
+      "code": "unsupported_parameter",
+      "param": "tools"
+    },
+    {
+      "id": "developer_role_rejected",
+      "request": {
+        "model": "fixture-model",
+        "messages": [{"role": "developer", "content": "hello"}]
+      },
+      "status": 400,
+      "code": "unsupported_parameter",
+      "param": "messages"
+    },
+    {
+      "id": "multipart_content_rejected",
+      "request": {
+        "model": "fixture-model",
+        "messages": [{"role": "user", "content": [{"type": "text", "text": "hello"}]}]
+      },
+      "status": 400,
+      "code": "unsupported_parameter",
+      "param": "messages"
+    },
+    {
+      "id": "n_must_be_one",
+      "request": {
+        "model": "fixture-model",
+        "messages": [{"role": "user", "content": "hello"}],
+        "n": 2
+      },
+      "status": 400,
+      "code": "invalid_value",
+      "param": "n"
+    },
+    {
+      "id": "response_format_rejected",
+      "request": {
+        "model": "fixture-model",
+        "messages": [{"role": "user", "content": "hello"}],
+        "response_format": {"type": "json_object"}
+      },
+      "status": 400,
+      "code": "unsupported_parameter",
+      "param": "response_format"
+    },
+    {
+      "id": "temperature_type_not_coerced",
+      "request": {
+        "model": "fixture-model",
+        "messages": [{"role": "user", "content": "hello"}],
+        "temperature": "0.5"
+      },
+      "status": 400,
+      "code": "invalid_value",
+      "param": "temperature"
+    }
+  ]
+}

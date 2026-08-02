@@ -1,0 +1,124 @@
+{
+  "schema_version": "suites-v1",
+  "registry_id": "uLLM-host-suites",
+  "revision": 3,
+  "allowed_tiers": ["tier_h0", "tier_h1", "tier_h2", "tier_h3", "tier_g0", "tier_g1", "tier_g2", "tier_g3", "tier_g4", "tier_p0", "tier_p1"],
+  "allowed_attributes": ["requires_gpu", "requires_model", "slow", "network", "quarantined"],
+  "suites": [
+    {
+      "suite_id": "h0-rust-format",
+      "tier": "tier_h0",
+      "marker": "tier_h0",
+      "attributes": {"requires_gpu": false, "requires_model": false, "slow": false, "network": false, "quarantined": false},
+      "test_ids": ["h0.rust.format"],
+      "commands": [{"command_id": "rust-format", "argv": ["{python}", "ci/tools/validate_rust.py", "--mode", "format"]}]
+    },
+    {
+      "suite_id": "h0-rust-clippy",
+      "tier": "tier_h0",
+      "marker": "tier_h0",
+      "attributes": {"requires_gpu": false, "requires_model": false, "slow": false, "network": false, "quarantined": false},
+      "test_ids": ["h0.rust.clippy", "h0.rust.msrv"],
+      "commands": [
+        {"command_id": "rust-clippy", "argv": ["{python}", "ci/tools/validate_rust.py", "--mode", "clippy"]},
+        {"command_id": "rust-msrv", "argv": ["{python}", "ci/tools/validate_rust.py", "--mode", "msrv"]}
+      ]
+    },
+    {
+      "suite_id": "h0-cpp-format-static",
+      "tier": "tier_h0",
+      "marker": "tier_h0",
+      "attributes": {"requires_gpu": false, "requires_model": false, "slow": false, "network": false, "quarantined": false},
+      "test_ids": ["h0.cpp.format", "h0.cpp.static-host-build"],
+      "commands": [
+        {"command_id": "cpp-format", "argv": ["{python}", "ci/tools/validate_cpp.py", "--mode", "format"]},
+        {"command_id": "cpp-static-host-build", "argv": ["{python}", "ci/tools/validate_cpp.py", "--mode", "static"]}
+      ]
+    },
+    {
+      "suite_id": "h0-python",
+      "tier": "tier_h0",
+      "marker": "tier_h0",
+      "attributes": {"requires_gpu": false, "requires_model": false, "slow": false, "network": false, "quarantined": false},
+      "test_ids": ["h0.python.compile", "h0.python.static"],
+      "commands": [
+        {"command_id": "python-compile", "argv": ["{python}", "ci/tools/validate_python.py", "--mode", "compile"]},
+        {"command_id": "python-static", "argv": ["{python}", "ci/tools/validate_python.py", "--mode", "static"]}
+      ]
+    },
+    {
+      "suite_id": "h0-markdown-links",
+      "tier": "tier_h0",
+      "marker": "tier_h0",
+      "attributes": {"requires_gpu": false, "requires_model": false, "slow": false, "network": false, "quarantined": false},
+      "test_ids": ["h0.markdown.local-links", "h0.markdown.structure"],
+      "commands": [{"command_id": "markdown-local-links", "argv": ["{python}", "ci/tools/validate_markdown_links.py"]}]
+    },
+    {
+      "suite_id": "h0-json-schema-manifest-workflow",
+      "tier": "tier_h0",
+      "marker": "tier_h0",
+      "attributes": {"requires_gpu": false, "requires_model": false, "slow": false, "network": false, "quarantined": false},
+      "test_ids": ["h0.json.schemas", "h0.json.manifests", "h0.workflow.structure"],
+      "commands": [{"command_id": "json-schema-manifest-workflow", "argv": ["{python}", "ci/tools/validate_json_manifests.py"]}]
+    },
+    {
+      "suite_id": "h0-license-provenance",
+      "tier": "tier_h0",
+      "marker": "tier_h0",
+      "attributes": {"requires_gpu": false, "requires_model": false, "slow": false, "network": false, "quarantined": false},
+      "test_ids": ["h0.license", "h0.provenance"],
+      "commands": [{"command_id": "license-provenance", "argv": ["{python}", "ci/tools/validate_license_provenance.py"]}]
+    },
+    {
+      "suite_id": "h0-tracked-tree",
+      "tier": "tier_h0",
+      "marker": "tier_h0",
+      "attributes": {"requires_gpu": false, "requires_model": false, "slow": false, "network": false, "quarantined": false},
+      "test_ids": ["h0.tracked-tree"],
+      "commands": [{"command_id": "tracked-tree", "argv": ["{python}", "ci/tools/tracked_tree.py"]}]
+    },
+    {
+      "suite_id": "h0-suite-registration",
+      "tier": "tier_h0",
+      "marker": "tier_h0",
+      "attributes": {"requires_gpu": false, "requires_model": false, "slow": false, "network": false, "quarantined": false},
+      "test_ids": ["h0.registration.unknown-test", "h0.registration.unknown-marker", "h0.registration.zero-collection"],
+      "commands": [{"command_id": "suite-registration", "argv": ["{python}", "ci/tools/validate_matrix.py"]}]
+    },
+    {
+      "suite_id": "h0-self-test",
+      "tier": "tier_h0",
+      "marker": "tier_h0",
+      "attributes": {"requires_gpu": false, "requires_model": false, "slow": false, "network": false, "quarantined": false},
+      "test_ids": ["h0.fail-closed.self-test", "h0.fail-closed.pytest-module"],
+      "commands": [
+        {"command_id": "fail-closed-self-test", "argv": ["{python}", "ci/tools/self_test.py"]},
+        {"command_id": "fail-closed-pytest-module", "argv": ["{python}", "ci/tests/test_fail_closed.py"]}
+      ]
+    },
+    {
+      "suite_id": "h1-host-contract",
+      "tier": "tier_h1",
+      "marker": "tier_h1",
+      "attributes": {"requires_gpu": false, "requires_model": false, "slow": false, "network": false, "quarantined": false},
+      "test_ids": ["h1.cargo.test.workspace", "h1.pytest.marker.tier_h1", "h1.ci.contracts"],
+      "commands": [
+        {"command_id": "cargo-test-workspace", "argv": ["cargo", "+1.97.1", "test", "--workspace", "--locked", "--offline"]},
+        {"command_id": "pytest-tier-h1", "argv": ["{python}", "-m", "pytest", "--durations=0", "-m", "tier_h1", "tests"]},
+        {"command_id": "ci-contract-tests", "argv": ["{python}", "ci/tests/test_h1_contracts.py"]}
+      ]
+    },
+    {
+      "suite_id": "h2-tiny-oracle",
+      "tier": "tier_h2",
+      "marker": "tier_h2",
+      "attributes": {"requires_gpu": false, "requires_model": false, "slow": false, "network": false, "quarantined": false},
+      "test_ids": ["h2.pytest.marker.tier_h2", "h2.ci.oracle"],
+      "commands": [
+        {"command_id": "pytest-tier-h2", "argv": ["{python}", "-m", "pytest", "--durations=0", "-m", "tier_h2", "tests"]},
+        {"command_id": "ci-oracle-tests", "argv": ["{python}", "ci/tests/test_h2_oracle.py"]}
+      ]
+    }
+  ]
+}

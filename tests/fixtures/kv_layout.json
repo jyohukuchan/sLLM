@@ -1,0 +1,21 @@
+{
+  "layout": {
+    "layers": 2,
+    "kv_planes": 2,
+    "batch_size": 3,
+    "max_tokens": 258,
+    "block_size": 16,
+    "kv_heads": 3,
+    "head_dim": 4,
+    "dtype_bytes": 2
+  },
+  "probes": [
+    {"layer": 0, "kv": 0, "batch": 0, "token": 0, "head": 0, "channel": 0},
+    {"layer": 0, "kv": 1, "batch": 1, "token": 15, "head": 2, "channel": 3},
+    {"layer": 1, "kv": 0, "batch": 2, "token": 16, "head": 1, "channel": 0},
+    {"layer": 1, "kv": 1, "batch": 0, "token": 17, "head": 0, "channel": 2},
+    {"layer": 0, "kv": 0, "batch": 2, "token": 255, "head": 2, "channel": 1},
+    {"layer": 1, "kv": 1, "batch": 1, "token": 256, "head": 1, "channel": 3},
+    {"layer": 1, "kv": 0, "batch": 2, "token": 257, "head": 0, "channel": 0}
+  ]
+}
