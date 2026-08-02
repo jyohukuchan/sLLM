@@ -7,6 +7,7 @@
 _ullm_activate_rocm_main() {
     local expected_rocm_version="7.14.0"
     local expected_llvm_major="23"
+    local default_rocm_root="/opt/rocm/core-7.14"
     local selected_root
     local canonical_root
     local version
@@ -27,14 +28,14 @@ _ullm_activate_rocm_main() {
             return 1
         fi
         selected_root="$ULLM_ROCM_PATH"
-    elif [[ -n "${ROCM_PATH:-}" ]]; then
-        selected_root="$ROCM_PATH"
-    else
-        if [[ -z "${HOME:-}" ]]; then
-            printf 'activate-rocm: HOME is not set and no ROCm root was provided\n' >&2
+    elif [[ -v ROCM_PATH ]]; then
+        if [[ -z "$ROCM_PATH" ]]; then
+            printf 'activate-rocm: ROCM_PATH is set but empty\n' >&2
             return 1
         fi
-        selected_root="$HOME/.local/amd-rocm/current"
+        selected_root="$ROCM_PATH"
+    else
+        selected_root="$default_rocm_root"
     fi
 
     if [[ ! -d "$selected_root" ]]; then
@@ -77,7 +78,7 @@ _ullm_activate_rocm_main() {
     for required_path in \
         "$canonical_root/include/hip" \
         "$canonical_root/lib/cmake/hip" \
-        "$canonical_root/amdgcn/bitcode" \
+        "$canonical_root/lib/llvm/amdgcn/bitcode" \
         "$canonical_root/lib/libamdhip64.so"; do
         if [[ ! -e "$required_path" ]]; then
             printf 'activate-rocm: required ROCm component is missing: %s\n' "$required_path" >&2

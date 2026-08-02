@@ -280,7 +280,7 @@
   - CI・テストの失敗事例、参照推論engine、GitHub Actions、AMD GPU runner運用を調査し、方針策定計画を作成。
   - 再出発レビューを検証し、repository hygiene、credential、performance cliff、GPU merge gate、fail-closed集約の対策を作成。
   - governance baselineをcommit `2764e73ebc45c8bbd209a426ca93ce341ed5d860`として`origin/main`へ公開。
-  - Rust 1.97.1/MSRV 1.85.0、C++17、ROCm 7.14.0/LLVM 23のlocal開発環境を構築し、exact `gfx1030,gfx1201`の最小HIP smokeを実GPU 3台で確認。
+  - Rust 1.97.1/MSRV 1.85.0、C++17、公式system package版ROCm 7.14.0/LLVM 23の開発環境を構築し、legacy ROCm user-spaceを除去したうえで、exact `gfx1030,gfx1201`の最小HIP smokeを実GPU 3台で確認。
   - 専用local hostで`homelab1`への`NOPASSWD: ALL`設定を完了し、無人進行を優先する明示的なrisk trade-offとして受容。
 - 確認待ち:
   - CI・テスト方針草案の時間予算、GPU runner前提、未確定事項についてユーザー確認を受ける。
@@ -294,7 +294,7 @@
 ## 未解決事項
 
 - AMD consumer RDNA2を含む各exact gfx targetの実機検証状態。
-- ROCm 7.14.0のlocal最小smokeを越える数値kernel、model、長時間安定性、性能と、HWE kernel 6.17上のmixed V620/R9700 tupleを正式な互換性対象にできるか。
+- ROCm 7.14.0 system package環境の最小smokeを越える数値kernel、model、長時間安定性、性能と、HWE kernel 6.17上のmixed V620/R9700 tupleを正式な互換性対象にできるか。
 - Qwen3.5-4Bで使用する完全commit SHAとlock manifest。
 - resource gateの1 TOPSに用いる精度・operation数、16 GBの単位とdevice-local memoryの定義、帯域の算出方法、対応例外を承認する基準。
 - Infinity Fabric、RDMA、KV永続化の詳細設計。

@@ -2,7 +2,7 @@
 
 ## 2026-08-02
 
-- hostを監査し、Ubuntu 24.04.4、kernel `6.17.0-35-generic`、amdgpu `6.16.13`、system ROCm 7.2.1、Rust 1.96.0を確認した。
+- hostを監査し、Ubuntu 24.04.4、kernel `6.17.0-35-generic`、amdgpu `6.16.13`、既存のsystem ROCm、Rust 1.96.0を確認した。
 - system G++ 13.3.0、CMake 3.28.3、Ninja 1.11.1、Python 3.12.3、uv、jq、git、ghはそのまま利用可能と判定した。
 - rustupへ開発pin 1.97.1とMSRV 1.85.0を導入し、1.97.1へrustfmtとclippyを追加した。
 - repository rootへ`rust-toolchain.toml`を追加し、1.97.1の自動選択を確認した。
@@ -14,7 +14,11 @@
 - exact `gfx1030,gfx1201` fat binaryをC++17/HIPでcompileし、Radeon Pro V620 2台とRadeon AI PRO R9700 1台の全visible deviceで入力41から出力42になる最小kernelを実行した。CPU fallbackは使用していない。
 - `scripts/dev/activate-rocm.sh`、`check-environment.sh`、`hip-smoke.cpp`を追加し、ROCm rootのfail-closed選択、toolchain検査、全visible GPU実行を再現可能にした。
 - Bash syntax、ShellCheck、clang-format、C++17 host probe、ROCm root選択の冪等性、HIP/HSA runtimeの同一root解決、3台のGPU smokeを検証した。
-- system ROCm 7.2.1の明示選択と`gfx1201` target欠落が成功扱いにならないnegative testを実行した。
+- 既存のsystem ROCmの明示選択と`gfx1201` target欠落が成功扱いにならないnegative testを実行した。
+- その後、legacy ROCm user-space packages、旧installation root、旧ROCm APT sourceを除去し、amdgpu driver packagesは変更せず保持した。
+- AMD公式APT source `https://repo.amd.com/rocm/packages-multi-arch/ubuntu2404` の `stable main` からsystem packageを導入した。
+- `amdrocm-core-sdk7.14-gfx1030`と`amdrocm-core-sdk7.14-gfx1201`をpackage version `7.14.0-3`で導入し、current ROCm rootを`/opt/rocm/core-7.14`とした。
+- system package rootのROCm version `7.14.0`、AMD clang LLVM 23、HIP runtime `71460850`を確認した。先行するtarball smokeの履歴は上記のまま保持する。
 - このsmokeを正式なG0/G1、full model、数値正しさ、性能、またはtarget全体の互換性evidenceとして扱わないとした。
 
 [対応する計画](../../../../plans/active/2026/08/1-10/development-environment.md)

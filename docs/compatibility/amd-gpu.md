@@ -8,7 +8,7 @@
 
 ## 正規識別子
 
-AMD GPUの正規キーは製品名や「RDNA 2」「CDNA 3」ではなく、HIPが実行時に返す`gcnArchName`と、それに一致するコードtargetである。[`hipDeviceProp_t::gcnArchName`](https://rocm.docs.amd.com/projects/HIP/en/docs-7.2.1/doxygen/html/structhip_device_prop__t.html)はAMD GCN architecture nameを返す。RDNA、CDNA、Radeon、Instinctなどは表示・説明用の分類に留める。
+AMD GPUの正規キーは製品名や「RDNA 2」「CDNA 3」ではなく、HIPが実行時に返す`gcnArchName`と、それに一致するコードtargetである。[`hipGetDeviceProperties`](https://rocm.docs.amd.com/projects/HIP/en/docs-7.14.0/reference/hip_runtime_api/modules/device_management.html#_CPPv422hipGetDevicePropertiesP15hipDeviceProp_ti)はdevice propertiesを取得し、その`gcnArchName`はAMD GCN architecture nameを返す。RDNA、CDNA、Radeon、Instinctなどは表示・説明用の分類に留める。
 
 AMD向け`binary_key`は少なくとも次の要素を持つ。
 

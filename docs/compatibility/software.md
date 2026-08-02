@@ -24,11 +24,15 @@ Rust 2024 は Rust 1.85.0 で安定化されたため、edition と MSRV を 1.8
 
 ## ROCm の発見と一貫性
 
-ROCm root は次の優先順位で一つだけ選ぶ。
+ビルド・configure 全体の契約では、CMake に明示された `ROCM_PATH`（例: `-DROCM_PATH=...`）を最優先とする。明示指定した root が存在しない場合、または検査に失敗した場合は明示的に失敗させ、環境変数や既定 rootへ fallback しない。
 
-1. ビルド時に明示された CMake の `ROCM_PATH`
-2. 環境変数 `ROCM_PATH`
-3. 標準配置 `/opt/rocm`
+開発環境の `scripts/dev/activate-rocm.sh` は、ROCm root を次の優先順位で一つだけ選ぶ。
+
+1. 環境変数 `ULLM_ROCM_PATH`
+2. スクリプト実行前から定義されている環境変数 `ROCM_PATH`
+3. 標準配置 `/opt/rocm/core-7.14`
+
+`ULLM_ROCM_PATH` またはスクリプト実行前から定義されている `ROCM_PATH` が定義されて空の場合は明示的に失敗させる。選択した root が存在しない場合、または検査に失敗した場合も明示的に失敗させ、既定 rootや別 releaseへfallbackしない。
 
 選択後は path を canonicalize し、compiler、HIP headers、CMake package、runtime、device libraries をすべてその root から解決する。HIP compiler は原則として安定した entry point `${ROCM_PATH}/bin/amdclang++` を使い、その symlink を解決した実体も同じ ROCm root 内にあることを検査する。package manager 配置と tarball 配置で LLVM の内部 directory が異なるため、`${ROCM_PATH}/llvm` または `${ROCM_PATH}/lib/llvm` を無条件に仮定しない。発見した root、ROCm release、`amdclang++ --version` の LLVM major を configure 時に検査し、ROCm 7.14.0、LLVM 23、または期待する配置と一致しない場合は明示的に失敗させる。暗黙に system `clang++`、別の `/opt/rocm-*`、別 release の library へフォールバックしてはならない。
 
@@ -98,8 +102,9 @@ software compatibility tuple の lifecycle は次の四つに統一する。
 | lifecycle / evidence | `experimental` / `project-verified`（最小 smoke の範囲だけ） |
 | OS / kernel | Ubuntu 24.04.4 LTS / `6.17.0-35-generic` |
 | amdgpu | `6.16.13` |
-| ROCm build/runtime | tarball 7.14.0、`$HOME/.local/amd-rocm/7.14.0`。`current` symlink から使用 |
+| ROCm build/runtime | system packages `amdrocm-core-sdk7.14-gfx1030`、`amdrocm-core-sdk7.14-gfx1201`（ともに `7.14.0-3`）、`https://repo.amd.com/rocm/packages-multi-arch/ubuntu2404` の `stable main`。root `/opt/rocm/core-7.14` |
 | compiler / runtime | AMD clang 23.0.0git / HIP runtime `71460850` |
+| package migration | legacy ROCm user-space packages、旧installation root、旧ROCm APT sourceを除去。amdgpu driver packagesは変更せず保持 |
 | GPU 0, 2 | Radeon Pro V620、`gfx1030`、PCI `0000:03:00.0` / `0000:43:00.0` |
 | GPU 1 | Radeon AI PRO R9700、`gfx1201`、PCI `0000:47:00.0` |
 | build target | exact `gfx1030` と `gfx1201` を含む fat binary。codegen feature は未固定 |
@@ -116,6 +121,7 @@ software compatibility tuple の lifecycle は次の四つに統一する。
 - [Announcing Rust 1.97.1](https://blog.rust-lang.org/2026/07/16/Rust-1.97.1/) — 開発 pin の release 情報
 - [ROCm Core SDK 7.14.0 release notes](https://rocm.docs.amd.com/en/docs-7.14.0/about/release-notes.html) — OS 対応、component versions、LLVM 23
 - [ROCm Core SDK components](https://rocm.docs.amd.com/en/docs-7.14.0/components/core.html) — ROCm 同梱 compiler と core components
+- [AMD ROCm multi-architecture APT repository](https://repo.amd.com/rocm/packages-multi-arch/ubuntu2404) — 現在の Ubuntu 24.04 system package source
 - [Install AMD ROCm 7.14.0](https://rocm.docs.amd.com/en/docs-7.14.0/install/rocm.html) — self-contained multi-architecture tarball と custom install directory の公式手順
 - [ROCm environment variables](https://rocm.docs.amd.com/en/docs-7.14.0/reference/environment-variables/index.html) — Linux における `ROCM_PATH` と compiler path
 - [CMake 3.21 release notes](https://cmake.org/cmake/help/v3.21/release/3.21.html) — 最小 CMake version の一次資料
