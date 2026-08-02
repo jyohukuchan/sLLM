@@ -15,5 +15,11 @@
 - 再出発レビューを受け、`255/256/257`を含むperformance-cliff sanity、同一reviewed SHAのGPU merge gate、`always()`を含むfail-closed集約条件を追加した。
 - repository hygieneとcredential方針をPhase 0/1のgovernance baselineへ追加した。
 - push前reviewを受け、H3 required昇格条件、P1 weekly/release予算、build・ROCm・target・codegen変更のH3/G4 gate表現を統一した。
+- source-lockの7件を固定完全SHAの一次sourceとして4 reader sessionで再調査し、全sessionが終了コード0で完了した。外部codeのcopy、adapt、portは行っていない。
+- 段階化、明示登録、決定的sharding、per-test timeout、GPU preflight、immutable artifact再利用、isolated test、warmup/metricを採用し、暗黙skip、0件成功、soft-fail、可変外部data、root/privileged runnerを不採用とした。
+- H0/H1/H2の並列required row、`host-required`集約、8/10/8分のhard timeout、workflow p95 10分・hard上限15分を確定した。
+- tier/属性marker、versioned suite registry、path-to-suite manifest、test-result/compatibility-tuple schemaの正本pathと必須概念を確定した。
+- H3のPR compile rowを`gfx1030`/`gfx1201`とし、20回以上・7日以上に加えて全期待rowのPASS、他state/cancel/schema errorなし、artifact hash一致、時間・infra条件をrequired昇格条件にした。`gfx1200`はnightly/release compile-onlyに残した。
+- 初期GPU evidenceを専用local hostの`gfx1030` 1台と`gfx1201` 1台の直列実行とし、2台目の`gfx1030`をspare/nightly用とした。暫定local経路はtrusted project commitだけに限定し、public fork PRからはGPU runnerを直接使わない。
 
 [対応する計画](../../../../plans/active/2026/08/1-10/ci-test-strategy.md)

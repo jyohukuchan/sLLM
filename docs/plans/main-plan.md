@@ -208,7 +208,7 @@
 - 性能計測ではInferenceXと比較可能な種類のデータを収集し、グラフを作成する。
 - 単一リクエストのllama.cpp比較では、model revision、llama.cpp commit、GPU target、数値型、入力長、出力長を記録する。
 
-## 正しさ確認方針とCI・テスト草案
+## 正しさ確認方針とCI・テスト
 
 ### 決定済み
 
@@ -217,7 +217,7 @@
 - CPUで数時間以上を要する確認は極力避ける。
 - 2の冪や特定サイズだけでなく、非整列値と境界前後を含める。
 
-### CI・テスト草案（確認待ち）
+### CI・テスト方針
 
 - GPU kernel、GPU-scale GEMM/attention、full model推論、GPU性能をCPU emulationで証明しない。
 - CPU CIはhost contract、極小NumPy oracle、HIP compile-onlyに限定し、full modelのdownload・load・forward・generationを行わない。
@@ -228,7 +228,9 @@
 - 数値toleranceはop、入力範囲、accumulation dtype、出力dtypeごとに根拠を持って定義し、全op共通の緩い既定値を置かない。
 - performanceに影響する境界`B`は実GPUで`B-1/B/B+1`を測定し、backend、dispatch、fallback、artifact hashとともに記録する。初期G3 smokeは`255/256/257`を含める。
 - HIP/runtime/backend/dispatch/native buildへ影響する変更は、同じreviewed immutable SHAに対するG0/G1/G2/P0とfail-closed集約をmerge条件とする。
-- 詳細な草案と実装順序は[CI・テスト方針策定計画](active/2026/08/1-10/ci-test-strategy.md)を参照する。
+- H0/H1/H2は並列required rowとし、`host-required`へ集約する。required workflowはp95 10分以内、hard上限15分とする。
+- 初期GPU evidenceは専用local hostのexact `gfx1030` 1台と`gfx1201` 1台で直列実行し、public fork PRからGPU runnerを直接使わない。
+- 詳細な方針と実装順序は[CI・テスト方針策定計画](active/2026/08/1-10/ci-test-strategy.md)を参照する。
 
 ## 開発運用上の決定
 
@@ -273,7 +275,7 @@
 
 ## 現在の状態と次の作業
 
-- 現在: プロジェクト開始準備を完了し、repository skeletonと初期CI・test harnessの設計開始待ち。
+- 現在: Phase 0のCI・テスト方針を確定し、repository skeletonと初期CI・test harnessの設計開始待ち。
 - 完了:
   - プロジェクトライセンスをMITへ統一。
   - Qwen3.5のMTP表記とBF16階層の矛盾を修正。
@@ -285,15 +287,13 @@
   - Rust 1.97.1/MSRV 1.85.0、C++17、公式system package版ROCm 7.14.0/LLVM 23の開発環境を構築し、legacy ROCm user-spaceを除去したうえで、exact `gfx1030,gfx1201`の最小HIP smokeを実GPU 3台で確認。
   - 専用local hostで`homelab1`への`NOPASSWD: ALL`設定を完了し、無人進行を優先する明示的なrisk trade-offとして受容。
   - llama.cpp、vLLM、SGLang、TensorRT-LLM、ROCm/ATOM、LMDeploy、KTransformersの2026-08-02時点の安定releaseを完全commit SHAで`reference/`へ固定し、7件の再現manifestを作成。
-- 確認待ち:
-  - CI・テスト方針草案の時間予算、GPU runner前提、未確定事項についてユーザー確認を受ける。
+  - 固定した7件のexact revisionを一次sourceとしてCI・testを再調査し、採用・不採用項目を記録。
+  - H0〜H2の時間予算とfail-closed集約、schema/markerの必須概念、H3昇格条件、初期GPU evidenceのtarget・台数・基本隔離方針を確定。
 - 次:
-  1. 固定した7件のexact revisionを一次sourceとしてCI・test構成を再調査し、CI・テスト方針草案へ反映する。
-  2. 更新したCI・テスト方針草案をユーザー確認後に確定する。
-  3. test result schema、compatibility tuple manifest、marker、repository skeletonを設計する。
-  4. tracked tree H0、local hygiene command、H1〜H2のCPU CIをrepository skeletonと同時に実装する。
-  5. ROCm 7.14.0によるH3 compile-only CIを追加する。
-  6. 利用可能な実機に合わせてGPU runner基盤とG0 preflightを構築する。
+  1. test result schema、compatibility tuple manifest、suite registry、path mapping、repository skeletonを設計する。
+  2. tracked tree H0、local hygiene command、H1〜H2のCPU CIをrepository skeletonと同時に実装する。
+  3. ROCm 7.14.0によるH3 compile-only CIを追加する。
+  4. 専用local hostのGPU evidence実行・集約とG0 preflightを構築する。
 
 ## 未解決事項
 
@@ -303,7 +303,5 @@
 - resource gateの1 TOPSに用いる精度・operation数、16 GBの単位とdevice-local memoryの定義、帯域の算出方法、対応例外を承認する基準。
 - Infinity Fabric、RDMA、KV永続化の詳細設計。
 - 量子化形式ごとのlayout、scale granularity、accumulator、fallback表。
-- 初期GPU runnerのSKU、exact target、台数、隔離・再image方式。
 - Qwen3.5-4B baselineで測定して決めるop別数値toleranceと性能回帰閾値。
-- public fork PRのreview済みcommitを実行できる使い捨てGPU runnerを用意できるか。
 - sudo以外の既存平文credentialの失効・rotationとsecret managerへの移行状況。

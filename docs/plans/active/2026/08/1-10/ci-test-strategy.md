@@ -4,7 +4,7 @@
 
 開発初期から細かな不具合を検出しつつ、GPUで行うべき処理をCPUで無理に再現して長時間を費やす運用を禁止する。CPUだけで確認できる契約と、実GPUでしか確認できない事実を分離し、各変更に必要な最小の検証を短時間で実行する。
 
-この計画はCI workflowそのものの実装前に、テスト階層、実行時間予算、GPU runnerの安全境界、正しさの証拠、実装順序を固定するための草案である。
+この計画はCI workflowそのものの実装前に、テスト階層、実行時間予算、GPU runnerの安全境界、正しさの証拠、実装順序を固定する正本である。
 
 ## 調査結果
 
@@ -12,10 +12,9 @@
 
 - `reference/llama.cpp`、`reference/vLLM`、`reference/SGLang`、`reference/AMD-ATOM`、`reference/TensorRT-LLM`、`reference/LMDeploy`、`reference/KTransformers`には、`docs/references/source-lock.md` に固定したofficial origin・version・完全SHAのsourceが配置済みである。7件ともshallow、detached、cleanであり、6件はrecursive submodule statusが空、KTransformersは4 gitlinkが全て未初期化で各submodule worktreeが空である。`reference/` は引き続きignore・未追跡である。
 - 取得sourceのlicense、path、特殊なLFS/vocabulary fixture、KTransformersの未初期化gitlinkの事実はsource-lock manifestに固定した。追加調査対象からはLMDeployとKTransformersだけを正式採用し、MLC LLM、Candle、CTranslate2、OpenVINO GenAI、ONNX Runtime GenAI、TGIは今回未採用で、cloneも今後の採用予定もない。
-- 固定exact revisionを一次sourceとしてCI/test実装の要点を再調査する作業は、source配置後の次のPhase 0としてまだpendingである。
-- vLLMは必須のbasic correctness、hardware別suite、slow/optional/distributed、model family別suiteを分離していた。
-- TensorRT-LLMはGPU名、GPU数、OS、backend、stage、capabilityを明示したtest listを使用し、性能回帰を通常の機能テストから分離していた。
-- これらは設計上の参考であり、uLLMの対応実績または正しさの証拠にはしない。sourceは配置済みだが、固定exact revisionを一次sourceとして行うCI/test再調査はpendingであり、完了まではuLLMの対応実績または正しさの証拠にしない。
+- 7件の固定exact revisionを一次sourceとしてCI/testを再調査した。段階化、明示登録、決定的sharding、per-test timeout、preflight、artifact再利用、isolated test、warmupとmetric記録を採用する。
+- 暗黙skip、0件収集の成功、required testの`continue-on-error`またはsoft-fail、可変外部artifact/model、root/privileged runner、外部live統計への実行時依存は採用しない。
+- source別の完全SHA、主要根拠、採否は[exact-revision調査](../../../../../references/ci-test-exact-revision-review.md)に記録する。これらは設計上の参考であり、uLLMの対応実績または正しさの証拠にはしない。
 
 ### CI運用
 
@@ -56,9 +55,9 @@ fake backendはscheduler、execution plan、resource lifetime、error propagatio
 
 | ID | 階層 | 実行環境 | 検証対象 | 初期予算 |
 | --- | --- | --- | --- | --- |
-| H0 | 静的検証 | GitHub-hosted CPU | format、lint、Markdown/link、schema、license、workflow構文、tracked tree hygiene | 5分/job |
-| H1 | host contract | GitHub-hosted CPU | Rustのparser、model lock、scheduler、sampling、descriptor、layout、fake backend、C ABIのerror mapping、API validation | 5分/job、通常1秒未満/test |
-| H2 | tiny oracle | GitHub-hosted CPU | Python+NumPyによる極小op、dtype変換、KV indexing、sampling helperの独立参照 | 5分/job、通常2秒未満/case |
+| H0 | 静的検証 | GitHub-hosted CPU | format、lint、Markdown/link、schema、license、workflow構文、tracked tree hygiene | hard timeout 8分/job |
+| H1 | host contract | GitHub-hosted CPU | Rustのparser、model lock、scheduler、sampling、descriptor、layout、fake backend、C ABIのerror mapping、API validation | hard timeout 10分/job、通常1秒未満/test |
+| H2 | tiny oracle | GitHub-hosted CPU | Python+NumPyによる極小op、dtype変換、KV indexing、sampling helperの独立参照 | hard timeout 8分/job、通常2秒未満/case |
 | H3 | HIP compile-only | GPUなし、固定ROCm toolchain | C++/HIP構文、target別codegen、CMake/Cargo integration、ABI static assertion、binding差分 | 5分/target、15分/job |
 | G0 | runner preflight | 対象AMD GPU | exact target、driver/runtime/library、device health、binary key、capability probe | 5分/tuple |
 | G1 | GPU kernel・ABI | 対象AMD GPU | allocator、queue/event、非同期lifetime、C ABI、capability拒否、個別kernel | 10分/suite、30秒/test |
@@ -68,7 +67,9 @@ fake backendはscheduler、execution plan、resource lifetime、error propagatio
 | P0 | performance smoke | 対象AMD GPU | kernel latency、TTFT、TPOT、token/s、peak VRAMの短い観測 | 15分/cell |
 | P1 | performance regression | 対象AMD GPU | 履歴baseline、llama.cpp同条件比較、stress | weekly/release内で最大90/180分 |
 
-予算はjobの上限であり、上限まで使うことを目標にしない。Phase 1のPR必須CPU workflowはH0〜H2とする。Phase 2でH3をnon-requiredとして追加し、container pullを含むwall timeが15分以内で安定した時点でrequiredへ昇格してH0〜H3を並列化する。予算を超えるtestは原因を分割・縮小し、根拠なくtimeoutだけを延長しない。
+予算はjobの上限であり、上限まで使うことを目標にしない。Phase 1ではH0、H1、H2を独立したPR required rowとして並列実行し、2分上限の集約を含むrequired workflow全体をp95 10分以内、hard上限15分とする。setup、cache restore、artifact upload、集約をwall timeに含める。予算超過時はtest分割、依存削減、cacheまたはbuild構成の改善を優先し、timeout延長だけで解決しない。
+
+Phase 2でH3をnon-requiredとして追加する。20回以上かつ7日以上の連続観測で、期待rowが全て`PASS`、`FAIL`/`SKIP`/`QUARANTINED`/cancel/schema errorが0、artifact hashが全て一致し、container pullを含むp95が12分以下、最大15分以下、unexpected `INFRA_ERROR`が0、missing resultが0の全条件を満たした後だけrequired昇格をreviewする。
 
 G3 smokeはmodelを事前配置したrunnerで、最大5 request、入力token長`1`、`7`、`255`、`256`、`257`、各出力8 tokenを初期caseとする。nightlyでは入力token長`1`、`7`、`255`、`256`、`257`、`513`、各出力32 tokenまでを初期caseとする。model cache miss時にjob内でdownloadして時間上限を回避せず、preflightの`INFRA_ERROR`とする。P1の90分はweeklyの1 tuple、180分はreleaseの1 tupleあたりのworkflow上限とし、case数、tuple数、setup時間をreportへ記録する。
 
@@ -79,7 +80,7 @@ G3 smokeはmodelを事前配置したrunnerで、最大5 request、入力token�
 - PRでは各opについて必須境界caseと、seed固定の追加caseを最大8件実行する。
 - nightly相当のhost property testでも追加caseは最大64件とし、seedと完全shapeを記録する。
 - 上限を超える必要があるtestは理由を記録し、`slow`へ分類して通常PRから外す。CPUでGPU規模へ拡大することを解決策にしない。
-- H2 job全体は最大RSS 4 GiB、fixture合計64 MiB、wall time 5分を上限とし、cgroupまたは同等の外部制限で強制する。
+- H2 test processは最大RSS 4 GiB、fixture合計64 MiB、wall time 5分を内側上限としてcgroupまたは同等の外部制限で強制する。jobのhard timeout 8分にはsetup、cache restore、report生成、artifact uploadを含める。
 - H1のfake backendはmetadataだけを扱い、16 MiBを超えるtensor payloadのmaterializeと数値kernelの実行を拒否する。
 - dependency取得とtest実行を分ける。test processではnetworkを無効化し、model cacheをmountせず、full model名・lock・weightへのアクセス要求を即時失敗させる。
 - JAXはNumPyで計算量または実装上の限界が確認された場合だけ使用する。`JAX_PLATFORMS=cpu`を設定し、実行時にもCPU backendだけであることをassertして、GPU oracleとして暗黙に使わない。
@@ -110,6 +111,14 @@ G3 smokeはmodelを事前配置したrunnerで、最大5 request、入力token�
 
 NumPy oracleは入力dtype、accumulation dtype、丸め位置、出力dtypeを明示し、最適化HIP実装と同じ制御構造を写さない。
 
+## suite登録とmarker
+
+- tier markerは`tier_h0`〜`tier_h3`、`tier_g0`〜`tier_g4`、`tier_p0`、`tier_p1`とする。
+- 直交属性は`requires_gpu`、`requires_model`、`slow`、`network`、`quarantined`とする。
+- markerやrunner labelだけをtest選択またはsecurity boundaryにせず、`ci/matrix/suites-v1.json`のversioned suite registryと`ci/matrix/path-to-suite-v1.json`へ明示登録する。
+- 未登録test、未知marker、期待収集件数0はH0でfailureとする。required rowはregistryとpath-to-suite manifestから解決した期待suiteを全て収集したことをassertする。
+- 推定時間によるshardingは、同じregistry revisionと入力から同じ分割を生成する決定的方式に限定する。live外部統計をrequired workflowの入力にしない。
+
 ## 結果状態
 
 | 状態 | 意味 |
@@ -139,6 +148,17 @@ result JSONとGitHub job conclusionは次のように対応させる。
 - `QUARANTINED`はissue、owner、期限を持つ非required専用workflowへ隔離し、required集約checkとpromotion evidenceへ入力しない。そのworkflowに限ってfailure継続を許可する。
 - required集約jobは全期待rowのresult JSON、終了コード、report artifactをfail-closedで照合する。
 
+Phase 1で`ci/schema/test-result-v1.schema.json`を作成し、各rowのresultを検証する。v1では少なくとも次を必須概念とする。
+
+- `schema_version`、result ID、suite ID、tier、state、required属性。
+- run ID/attempt、reviewed/tested/workflowの完全SHA、Git tree OID。
+- matrix manifest SHA-256、matrix row ID、tuple digest。
+- command、toolchain、artifact content/manifestのSHA-256。
+- 開始・終了時刻、duration、収集・選択・pass・fail・skip件数、seed、case list、diagnostic。
+- GPU rowではGPU UUID/BDF/exact target、selected backend、dispatch ID/count、fallbackの許可・使用、code object metadata。
+
+required rowでは`SKIP`と`QUARANTINED`を禁止する。field名と型の詳細はschema実装時に固定するが、上記の意味を削除または弱めない。
+
 GitHub Actions実装では、各required jobのreport生成とupload、および集約jobを`if: ${{ always() }}`で起動する。集約jobは`needs`全体を入力にし、次を検証する。
 
 - `needs.<job>.result`が`success`以外、未知、欠落の場合はfailure。
@@ -148,15 +168,15 @@ GitHub Actions実装では、各required jobのreport生成とupload、および
 - required rowが全て`PASS`であり、unknown state、`SKIP`、`QUARANTINED`、`INFRA_ERROR`、`FAIL`、cancelがないこと。
 - artifactが現在のrun/attemptから取得でき、content hashとreport hashが一致すること。
 
-集約jobを唯一の安定したrequired check名としてbranch protectionへ登録する。失敗時artifact uploadも`always()`で試みるが、required evidenceのupload失敗自体をfailureとする。
+集約job `host-required`を唯一の安定したrequired check名としてbranch protectionへ登録する。失敗時artifact uploadも`always()`で試みるが、required evidenceのupload失敗自体をfailureとする。
 
 ## CI eventとrunner
 
 | Event | CPU | AMD GPU | 用途 |
 | --- | --- | --- | --- |
-| `pull_request` / `merge_group` | Phase 1はH0〜H2を必須。Phase 2はH3をnon-requiredで追加し、15分以内で安定後にH0〜H3を必須 | 直接使用しない | forkを含む高速・安全な検証 |
-| maintainerによる信頼済みdispatch | 必要に応じ実行 | G0〜G3 | review済みcommitのmerge前確認。隔離・使い捨てrunner必須 |
-| protected `main` push | H0〜H3 | canonical tupleでG0〜G2、変更によりG3 | merge直後のGPU smoke |
+| `pull_request` / `merge_group` | Phase 1はH0〜H2を必須。Phase 2はH3をnon-requiredで追加し、昇格条件を満たした後だけH0〜H3を必須化 | 直接使用しない | forkを含む高速・安全な検証 |
+| maintainerによる信頼済み実行 | 必要に応じ実行 | G0〜G3 | review済み完全SHAのmerge前確認。初期は専用local host、将来は隔離・使い捨てrunner |
+| protected `main` push | H0〜H2 requiredとH3 non-required。昇格後はH0〜H3を`host-required`へ含める | canonical tupleでG0〜G2、変更によりG3 | merge直後のGPU smoke |
 | daily schedule | smoke | 代表1 tuple | health、flaky、短い性能観測 |
 | weekly schedule | full host | 利用可能な明示tuple一覧 | broad correctness、compatibility、性能履歴 |
 | protected release | full host | release対象の全明示tuple | release evidence。途中cancelしない |
@@ -170,6 +190,10 @@ GitHub Actions実装では、各required jobのreport生成とupload、および
 - GPU resetはjob内の任意コードへ許可せず、全process停止後にhost controllerだけが行う。
 - runner groupをrepositoryとGPU workflowへ限定し、GitHub environment approval、branch protection、最小`GITHUB_TOKEN`権限を併用する。
 - third-party Actionsは完全commit SHAで固定する。
+
+初期GPU evidenceは専用local host上の`gfx1030` 1台と`gfx1201` 1台をcanonical runtime rowとし、相互干渉を避けて直列実行する。2台目の`gfx1030`はspareまたはnightly再現確認用とし、同一changeの必須rowを増やさない。UUID/BDFはG0実装時にtuple manifestへ固定する。
+
+GitHub self-hosted GPU基盤が完成するまでは、maintainerがlocalで作成または完全にreviewしたtrusted project commitだけを、確認したcommandから40桁SHA指定で実行し、同一SHAのevidenceをfail-closed集約へ入力する。この暫定経路ではfork PR head、外部提供binary、未review scriptを実行せず、secretまたはcontroller credentialを注入しない。実行後はprocess残留、device health、artifact hashを確認し、異常時はhostをquarantineする。self-hosted化後はdefault-branch control workflow、ephemeral JIT registration、専用非特権runner user、secret・`sudo`・Docker socketなし、job後のprocess検査とreboot/reimage/quarantineを必須とする。public fork PRのGPU pre-merge実行はこの隔離基盤が完成するまで行わない。
 
 GPU control workflowはprotected default branchのimmutable revisionを信頼元とし、PR側のworkflow定義を使用しない。実行対象codeはmaintainerがreview済みとして記録した完全commit SHAだけを受け付け、branch名や可変tagを入力にしない。許可済みSHA、reviewer、元PR、workflow revisionをcontrol-plane artifactへ記録する。
 
@@ -194,6 +218,8 @@ GPU matrixを独立軸の直積で生成せず、検証する完全tupleを`incl
 
 各runはversioned JSON manifestとtest reportをartifactとして保存する。runner labelはrouting用であり、preflightで取得した値を事実の正本とする。
 
+Phase 1では`ci/schema/compatibility-tuple-v1.schema.json`、`ci/matrix/suites-v1.json`、`ci/matrix/host-v1.json`、`ci/matrix/path-to-suite-v1.json`を正本pathとして作成する。schemaとmanifestを可変外部dataから実行時生成しない。
+
 ## artifact・cache・保持期間
 
 - Qwen3.5-4B weightをGitHub Actions artifactへuploadしない。
@@ -211,7 +237,7 @@ GPU matrixを独立軸の直積で生成せず、検証する完全tupleを`incl
 - TTFT、TPOT、token/s、peak VRAMを保存する。
 - medianと分散またはrobustな分位点を保存し、単発値で回帰判定しない。
 - llama.cpp比較は固定commit、同じmodel revision、入力長、出力長、dtype、GPU targetで実GPU上だけで行う。
-- kernel/runtime pathに触れるPRでは短いP0を手動GPU検証へ含められるが、性能不安定だけでcorrectness結果を上書きしない。
+- kernel/runtime pathに触れる変更では短いP0をGPU sanity evidenceとして必須にするが、性能不安定だけでcorrectness結果を上書きしない。
 - hard thresholdは十分なbaseline履歴、runner noise、再現率を確認後、metricとtupleごとに設定する。
 
 ### `B-1/B/B+1` performance-cliff sanity
@@ -221,7 +247,7 @@ GPU matrixを独立軸の直積で生成せず、検証する完全tupleを`incl
 - 各点のselected backend、dispatch ID/count、fallback使用、artifact hash、median、robust spreadを記録する。
 - 合法な点の欠落、重複、stale/cancel、非GPU実行、測定値不正、CPU fallback、未許可dispatchはfailureとする。
 - 境界でdispatch IDが変わること自体はfailureにせず、versioned dispatch manifestで許可された選択か確認する。
-- baseline分布がない段階では全GPU共通の倍率thresholdを発明しない。tripletの完全な実測証拠と`performance_sanity_disposition`を必須にし、`review_required`または未設定ならreviewer、理由、日時を伴う承認なしにmergeしない。
+- baseline分布がない段階では全GPU共通の倍率thresholdを発明しない。tripletの完全な実測証拠と`performance_sanity_disposition`を必須にする。threshold未承認時は`review_required`とし、reviewer、理由、日時を伴う承認なしにPASS集約またはmergeしない。
 - 履歴が蓄積した後、metric、tuple、dispatch ID、case setごとにversioned thresholdを承認する。
 
 ## 変更影響による選択
@@ -242,31 +268,32 @@ GPUに影響する変更は、実GPU evidenceが得られるまで「compile済�
 
 ### Phase 0: 方針確定
 
-- この計画をreviewし、初期GPU runnerの所有形態と利用可能なexact targetを確認する。
-- test result schema、tuple manifest schema、marker名、時間予算を確定する。
-- 利用可能になったsource-lock manifestの完全SHAを対象に、llama.cpp、vLLM、SGLang、ATOM、TensorRT-LLM、LMDeploy、KTransformersのCI/testを一次sourceとして再調査する。このexact-revision再調査はまだpendingであり、完了後にtest result schema・matrix・実装順序へ反映する。
+- 初期GPU evidenceの所有形態、canonical `gfx1030`/`gfx1201` row、直列実行、将来のself-hosted隔離方針を確定した。
+- test result/tuple schemaの必須概念、marker、正本path、時間予算を確定した。
+- source-lock manifestの完全SHAを対象に、llama.cpp、vLLM、SGLang、ATOM、TensorRT-LLM、LMDeploy、KTransformersのCI/testを一次sourceとして再調査し、採否を方針へ反映した。
 - license、provenance、model lock、CI・test、repository hygiene、credential方針をgovernance baselineとして機能codeより先にcommit・pushする。
 
 ### Phase 1: repository skeletonとCPU CI
 
 - `tests/contracts`、`tests/reference`、`tests/fixtures`、`tests/api`を用意する。
-- `ci/matrix`、`ci/schema`、`ci/scripts`にmatrix、manifest schema、共通runnerを置く。
+- `ci/schema/test-result-v1.schema.json`、`ci/schema/compatibility-tuple-v1.schema.json`、`ci/matrix/suites-v1.json`、`ci/matrix/host-v1.json`、`ci/matrix/path-to-suite-v1.json`と共通runnerを置く。
 - Rust format/lint/test、C++ format/static check、Python test、Markdown/schema検証を追加する。
 - [repository hygiene方針](../../../../../development/repository-hygiene.md)に従うtracked tree H0検査とlocal hygiene commandを追加する。
-- H0〜H2をPR required checkとし、安定した集約check名を用意する。H3はまだrequiredにしない。
+- H0〜H2を並列PR required rowとし、`host-required`へfail-closed集約する。H3はまだrequiredにしない。
 - timeout、収集件数、seed、case timingをtest harnessから必ず出力する。
 
 ### Phase 2: HIP compile-only
 
 - ROCm 7.14.0固定toolchainでH3を追加する。
 - prebuilt imageをdigestで固定し、`ROCM_PATH`、`amdclang++`、LLVM、headers、device libraries、CMake packageが同じROCm 7.14.0 rootから解決されたことをjob冒頭で検証する。CI中にROCmを都度installしない。
-- PRでは代表rowの`gfx1030`と`gfx1200`をcompileし、nightly/releaseでは`gfx1030`〜`gfx1036`、`gfx1200`、`gfx1201`、将来の`gfx942`を各明示rowとしてcompileする。
+- PRではexact `gfx1030`と`gfx1201`を独立rowでcompileし、nightly/releaseでは`gfx1030`〜`gfx1036`、`gfx1200`、`gfx1201`、将来の`gfx942`を各明示rowとしてcompileする。`gfx1200` compileを実機互換性の証拠にしない。
 - exact/generic targetとcodegen featureを混ぜず、artifact metadataを検証する。
 - compile-only結果を実機互換性または性能の証拠にしない。
-- container pullを含む実測wall timeが15分以内で安定してからH3をrequiredへ昇格する。それまではnon-requiredで計測し、H0〜H2だけをrequiredとする。
+- 20回以上かつ7日以上の連続観測で全期待row `PASS`、他state/cancel/schema error 0、artifact hash一致、p95 12分以下、最大15分以下、unexpected `INFRA_ERROR` 0、missing result 0を満たした後だけH3のrequired昇格をreviewする。それまではnon-requiredで計測し、H0〜H2だけをrequiredとする。
 
 ### Phase 3: GPU runner基盤
 
+- 専用local hostでreview済み完全SHAに対する直列実行とevidence集約を先に実装する。
 - runner group、environment、default-branch workflow、ephemeral/JIT登録、host controllerを用意する。
 - G0 preflight、process監視、timeout、診断収集、quarantine、reboot/reimageを実装する。
 - modelを使わない最小HIP probeで運用を検証する。
@@ -307,14 +334,11 @@ GPUに影響する変更は、実GPU evidenceが得られるまで「compile済�
 
 ## 未確定事項
 
-- 最初に常時利用できるGPU runnerのSKU、exact `gfx` target、台数、隔離方式。
-- public repositoryで使い捨てGPU runnerを用意できるか。用意できない場合、fork PRのGPU pre-merge testは行わず、protected staging/main後の検証に限定する。
 - Qwen3.5-4Bの完全commit SHAとmodel lock。
 - opごとのaccumulation、丸め、NaN/Inf contractと数値tolerance。
 - deterministic RNG injectionを内部test APIへ許可するか。
 - performance hard gateを開始するために必要なbaseline回数と閾値。
 - test結果・release evidenceのGitHub外長期保存先。
-- 初期の代表tupleを`gfx1200`と`gfx1030`のどの実機で構成するか。
 
 ## 公式資料
 
