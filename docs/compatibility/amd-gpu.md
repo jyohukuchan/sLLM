@@ -2,7 +2,7 @@
 
 > 最終更新: 2026-08-02
 >
-> この文書はAMD向けの識別規則と初期候補を記録する。現時点の初期targetはすべて`lifecycle=experimental`で、`evidence`に`unverified`を含む。
+> この文書はAMD向けの識別規則と初期候補を記録する。現時点の初期targetはすべて`lifecycle=experimental`である。計画targetのevidenceは`unverified`、local実機smokeは検証した限定範囲だけ`project-verified`とする。
 
 共通の状態、resource gate候補、NVIDIAを含む将来例は[GPU互換性方針](gpu.md)を参照する。
 
@@ -103,17 +103,19 @@ uLLMがhipBLASLt 1.4.1のFP8 GEMM pathを使用する場合の初期contract候�
 
 ## 製品別evidence
 
-2026-08-02時点の事実を次のように記録する。すべて`lifecycle=experimental`であり、uLLM実機検証がないため`evidence`に`unverified`を含む。
+2026-08-02時点の事実を次のように記録する。すべて`lifecycle=experimental`であり、evidenceはupstream掲載、local実機smoke、未検証範囲を分けて記載する。
 
 | 対象構成 | upstreamの事実 | evidence |
 | --- | --- | --- |
 | `gfx942`のROCm 7.14.0掲載MI300製品・OS構成 | AMDの現行support資料に掲載 | `[vendor-supported, unverified]` |
 | `gfx1200`/`gfx1201`のROCm 7.14.0掲載RDNA 4製品・OS構成 | AMDの現行support資料に掲載 | `[vendor-supported, unverified]` |
 | `gfx1030`のROCm 7.14.0掲載Radeon PRO W6800/V620製品・OS構成 | AMDの現行support資料に掲載 | `[vendor-supported, unverified]` |
+| local Radeon AI PRO R9700 1台、exact `gfx1201` | Ubuntu 24.04.4、kernel `6.17.0-35-generic`、amdgpu `6.16.13`、ROCm 7.14.0の限定smokeを実行 | `[project-verified]` |
+| local Radeon Pro V620 2台、exact `gfx1030` | 同じlocal host tupleで各deviceの限定smokeを実行。初期候補のGA kernel 6.8とは異なる | `[project-verified]` |
 | consumer RDNA 2 / RX 6000系 | `gfx1030`の掲載だけでは同じtargetを持つ全consumer SKUの公式対応にならない。[Radeon Linux support matrix](https://rocm.docs.amd.com/projects/radeon-ryzen/en/latest/docs/compatibility/compatibilityrad/native_linux/native_linux_compatibility.html)に完全なSKU/OS構成が掲載された場合だけ`vendor-supported`を付ける | `[unverified]` |
 | `gfx1031`–`gfx1036` | LLVMのcode target定義は製品構成のvendor supportではない | `[unverified]` |
 
-`project-verified`は現在空である。将来evidenceを更新するときは、SKU名だけでなく`binary_key`、`capability_profile`、OS、ROCm/driver/component version、resource gate、対象機能の検証記録を一組として残す。
+local `project-verified` の範囲は、exact `gfx1030,gfx1201` fat binaryを用いたallocation、copy、単一kernel、synchronize、copy-backだけである。codegen feature、artifact metadata、capability profile、resource gate、数値kernel、model、性能は未検証であり、target全体や別SKUへ一般化しない。完全なsoftware tupleと実行結果は[software compatibility](software.md)に記録する。将来evidenceを更新するときは、SKU名だけでなく`binary_key`、`capability_profile`、OS、ROCm/driver/component version、resource gate、対象機能の検証記録を一組として残す。
 
 ## 将来AMD候補
 

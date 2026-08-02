@@ -30,7 +30,7 @@ ROCm root は次の優先順位で一つだけ選ぶ。
 2. 環境変数 `ROCM_PATH`
 3. 標準配置 `/opt/rocm`
 
-選択後は path を canonicalize し、compiler、HIP headers、CMake package、runtime、device libraries をすべてその root から解決する。HIP compiler は原則として `${ROCM_PATH}/llvm/bin/amdclang++` を使う。発見した root、ROCm release、`amdclang++ --version` の LLVM major を configure 時に検査し、ROCm 7.14.0、LLVM 23、または期待する配置と一致しない場合は明示的に失敗させる。暗黙に system `clang++`、別の `/opt/rocm-*`、別 release の library へフォールバックしてはならない。
+選択後は path を canonicalize し、compiler、HIP headers、CMake package、runtime、device libraries をすべてその root から解決する。HIP compiler は原則として安定した entry point `${ROCM_PATH}/bin/amdclang++` を使い、その symlink を解決した実体も同じ ROCm root 内にあることを検査する。package manager 配置と tarball 配置で LLVM の内部 directory が異なるため、`${ROCM_PATH}/llvm` または `${ROCM_PATH}/lib/llvm` を無条件に仮定しない。発見した root、ROCm release、`amdclang++ --version` の LLVM major を configure 時に検査し、ROCm 7.14.0、LLVM 23、または期待する配置と一致しない場合は明示的に失敗させる。暗黙に system `clang++`、別の `/opt/rocm-*`、別 release の library へフォールバックしてはならない。
 
 「ROCm components は同一 release」とは、各 component 固有の内部バージョン番号を `7.14.0` に揃えるという意味ではない。ROCm 7.14.0 の配布物・repository として組み合わせて公開された compiler、HIP runtime、ROCr、math libraries、headers、device libraries を混在させずに使う、という意味である。
 
@@ -89,6 +89,25 @@ software compatibility tuple の lifecycle は次の四つに統一する。
 - Ubuntu 26.04 LTS と ROCm 7.14.0 の組み合わせは将来検証する `planned` tuple とする。AMD が ROCm 7.14.0 で Ubuntu 26.04 を掲載していても、uLLM による実機検証なしに Ubuntu 24.04 の結果を移植しない。
 - 表にない Ubuntu、ROCm release、GPU の組み合わせは暗黙の `supported` としない。調査前は未分類であり、採用候補なら具体的な tuple を `planned` として追加する。
 
+### 2026-08-02 local development evidence
+
+次の実績は、この host で開発環境と最小 HIP 実行経路を確認した限定的な evidence である。初期候補の GA kernel 6.8 とは異なる HWE kernel 6.17 を使っており、formal G0/G1 report、capability profile、resource gate、codegen feature、artifact metadata は未実装であるため、lifecycle は `experimental` のままとする。
+
+| 項目 | 検証値 |
+| --- | --- |
+| lifecycle / evidence | `experimental` / `project-verified`（最小 smoke の範囲だけ） |
+| OS / kernel | Ubuntu 24.04.4 LTS / `6.17.0-35-generic` |
+| amdgpu | `6.16.13` |
+| ROCm build/runtime | tarball 7.14.0、`$HOME/.local/amd-rocm/7.14.0`。`current` symlink から使用 |
+| compiler / runtime | AMD clang 23.0.0git / HIP runtime `71460850` |
+| GPU 0, 2 | Radeon Pro V620、`gfx1030`、PCI `0000:03:00.0` / `0000:43:00.0` |
+| GPU 1 | Radeon AI PRO R9700、`gfx1201`、PCI `0000:47:00.0` |
+| build target | exact `gfx1030` と `gfx1201` を含む fat binary。codegen feature は未固定 |
+| runtime libraries | `libamdhip64.so.7` と `libhsa-runtime64.so.1` が上記 ROCm root から解決 |
+| smoke scope | 各 visible device で allocation、host-to-device copy、1 kernel dispatch、synchronize、device-to-host copy、free。入力 41、出力 42 |
+
+この結果は full model、数値 kernel、性能、generic code object、複数 GPU 実行、長時間安定性、または vendor-supported OS/GPU tuple を証明しない。正式な互換性昇格には、完全な tuple manifest と CI・テスト計画で定義する G0/G1 以降の report が必要である。
+
 ## 公式資料
 
 - [Ubuntu releases](https://releases.ubuntu.com/) — Ubuntu 24.04 LTS および 26.04 LTS の公式 release 情報
@@ -97,5 +116,6 @@ software compatibility tuple の lifecycle は次の四つに統一する。
 - [Announcing Rust 1.97.1](https://blog.rust-lang.org/2026/07/16/Rust-1.97.1/) — 開発 pin の release 情報
 - [ROCm Core SDK 7.14.0 release notes](https://rocm.docs.amd.com/en/docs-7.14.0/about/release-notes.html) — OS 対応、component versions、LLVM 23
 - [ROCm Core SDK components](https://rocm.docs.amd.com/en/docs-7.14.0/components/core.html) — ROCm 同梱 compiler と core components
+- [Install AMD ROCm 7.14.0](https://rocm.docs.amd.com/en/docs-7.14.0/install/rocm.html) — self-contained multi-architecture tarball と custom install directory の公式手順
 - [ROCm environment variables](https://rocm.docs.amd.com/en/docs-7.14.0/reference/environment-variables/index.html) — Linux における `ROCM_PATH` と compiler path
 - [CMake 3.21 release notes](https://cmake.org/cmake/help/v3.21/release/3.21.html) — 最小 CMake version の一次資料
