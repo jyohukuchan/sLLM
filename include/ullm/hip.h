@@ -63,6 +63,7 @@ typedef struct ullm_error_sink_t {
  * status unchanged. */
 
 /* The argument must be a character array, not a pointer. */
+// clang-format off
 #define ULLM_ERROR_SINK_INIT(buffer)                                           \
   {sizeof(ullm_error_sink_t),                                                  \
    ULLM_HIP_ABI_VERSION,                                                       \
@@ -70,6 +71,7 @@ typedef struct ullm_error_sink_t {
    sizeof(buffer),                                                             \
    0,                                                                          \
    {0, 0}}
+// clang-format on
 
 typedef struct ullm_version_info_t {
   uint32_t struct_size;
