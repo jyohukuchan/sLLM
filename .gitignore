@@ -6,3 +6,20 @@ reference/
 # Passwords
 passwords.txt
 password.txt
+
+# Local build outputs
+/build/
+/target/
+/cmake-build-*/
+
+# Raw local artifacts; keep summaries and manifests outside these paths
+/.local-artifacts/raw/
+/.local-artifacts/traces/
+/.local-artifacts/profiles/
+/.local-artifacts/model-slices/
+/.local-artifacts/models/
+/.local-artifacts/binaries/
+/.local-artifacts/logs/
+
+# Generated test fixtures
+/tests/fixtures/generated/

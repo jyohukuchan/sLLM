@@ -1,0 +1,123 @@
+# ランタイムアーキテクチャ
+
+## 設計原則
+
+uLLM のランタイムは Rust workspace が主導し、GPU の操作だけを C++/HIP に閉じ込める。Rust はユーザー入力から実行計画までの意味論、型、安全な所有権を管理し、C++ は HIP runtime に近い resource と kernel 実行を管理する。両者の境界は HIP 専用の versioned C ABI とし、C++ ABI や Rust ABI を公開境界にしない。
+
+初期 MVP は Qwen3.5-4B BF16 の単一 GPU 推論に限定する。ただし、後から backend や dtype、KV cache 表現を追加する際に上位層を作り直さないよう、op descriptor、capability query、KV layout abstraction は最初から設ける。
+
+## ディレクトリと責務
+
+```text
+Cargo workspace
+├── crates/ullm-core
+├── crates/ullm-hip-sys
+├── crates/ullm-hip
+├── crates/ullm-cli
+└── native/hip
+    └── CMake project
+```
+
+| 領域 | 責務 |
+| --- | --- |
+| `ullm-core` | frontend、model/config、tokenizer、scheduler、sampling、backend 非依存の execution plan と tensor/op descriptor |
+| `ullm-hip-sys` | versioned HIP C ABI の宣言、check-in した generated bindings、`build.rs` による native build と link 情報の伝達 |
+| `ullm-hip` | C ABI の安全な Rust wrapper、HIP backend 実装、resource ownership、非同期実行の lifetime と error 変換 |
+| `ullm-cli` | CLI、設定の読み込み、runtime の組み立てと起動。GPU resource の詳細を直接扱わない |
+| `native/hip` | HIP context、allocator、queues、events、operator dispatch、backend 内 kernel registry、HIP kernels |
+
+Rust 側は model graph を backend 非依存の op descriptor 列へ落とし、scheduler が request の実行順序と batch を決め、execution plan が tensor dependency と access mode を明示する。HIP 固有の queue 選択や kernel symbol は `ullm-core` に漏らさない。
+
+## Backend 境界
+
+`ullm-core` は上位の Rust `Backend` trait だけに依存する。trait は少なくとも次の概念を提供する。
+
+- device の列挙と capability query
+- buffer の確保と import/export 可能性の照会
+- op descriptor の support query と coarse な command list/prepared plan の準備
+- prepared plan の queue への非同期 submit と completion event
+- backend status を Rust error へ変換する診断情報
+
+`ullm-hip` がこの trait を実装し、`ullm-hip-sys` の C ABI を呼ぶ。上位 trait の version と HIP C ABI の version は別に管理する。将来 backend を追加しても、その backend に HIP C ABI を実装させる必要はない。
+
+### HIP 専用 versioned C ABI
+
+C ABI では context、buffer、queue、event、prepared op などを opaque handle として扱う。公開 struct には先頭付近に `struct_size` と `abi_version` を置き、追加 field は size を確認してから読む。予約 field はゼロを要求し、未知の必須 version は status error で拒否する。C++ class、STL container、reference、template、Rust layout に依存する型は ABI を越境させない。
+
+すべての ABI 関数は整数の status code を返す。詳細な診断は呼び出し側が渡す error sink に書き込み、文字列の所有権と有効期間を ABI で定義する。非同期処理が caller の一時 buffer や callback context を保持しない設計を基本とする。保持が必要な API では retain/release 契約を明示する。
+
+C++ exception と Rust panic は境界を越えてはならない。C++ entry point は内部例外を捕捉して status と error sink に変換する。Rust の `extern "C"` callback を設ける場合は panic を捕捉し、unwind させず failure status に変換する。destructor や release API は exception を送出しない。
+
+### Handle の所有権
+
+Rust の安全な wrapper では `ContextInner` を `Arc` で所有し、`Context`、`Buffer`、`Queue`、`Event`、`PreparedOp` の関係を次のように固定する。
+
+- `ContextInner` は native context handle と shutdown state を所有し、公開 `Context` は `Arc<ContextInner>` を保持する。
+- 公開 `Buffer`、`Queue`、`Event`、`PreparedOp` はそれぞれ対応する `Arc<BufferInner>`、`Arc<QueueInner>`、`Arc<EventInner>`、`Arc<PreparedOpInner>` を保持する。各 inner は自身の native handle と `Arc<ContextInner>` を所有し、公開 `Context` より長生きしても native context を早期破棄させない。
+- `ContextInner` は子 handle の強参照一覧を持たない。親から子への強参照を作らず、循環参照と暗黙の resource 延命を防ぐ。
+- `PreparedOpInner` は prepare 時に即時 copy された metadata と native prepared handle、および `Arc<ContextInner>` だけを保持する。個々の submission、caller の tensor descriptor、command buffer への pointer は保持しない。
+- handle の clone/drop は Rust wrapper で定義した retain/release 契約に従う。native release は対応する Rust 所有者の最後の drop から行い、別種類の handle の破棄順序に依存させない。
+
+`HipExecutor` は `Arc<ContextInner>` と実行中の `InFlightSubmission` を所有する。`ContextInner` から executor または submission への強参照は持たない。`InFlightSubmission` は completion までに必要な `Arc<BufferInner>`、`Arc<QueueInner>`、`Arc<PreparedOpInner>`、`Arc<EventInner>` を保持するため、利用者が公開 `Event` を先に drop しても resource は解放されない。`EventInner` は native event と terminal status/diagnostic を所有するが、実行中 resource の唯一の所有者にはならない。
+
+shutdown は新規 prepare/submit を拒否する closing 状態への遷移、executor が所有する全 submission の drain、terminal status の回収、in-flight 参照の解放、executor 所有 queue の停止という順に行う。shutdown 中に完了を待たず context を破棄しない。外部に残る子 handle は shutdown 後の新規操作を拒否するが、安全に drop できるよう、その `Arc<ContextInner>` がなくなるまで native context の最終 release は行わない。
+
+## Tensor、Buffer、非同期 lifetime
+
+`Buffer` は device allocation の所有権を表す。Rust の安全な wrapper は buffer state を `Arc` で保持し、native opaque handle の最終 release は最後の所有者が離れ、かつ in-flight work がなくなった後に行う。
+
+tensor と view は所有形態を曖昧にしない。owned tensor と、非同期 submit に使える owned view は `Arc<BufferInner>`、byte offset、shape、stride、物理 `DType`、device を保持する。同期的な descriptor 構築中だけ使う borrowed view は Rust lifetime で元 buffer に拘束し、submit 境界を越える API には渡せない。borrowed view を submit する場合は、検証後に明示的に owned view へ変換する。
+
+view の作成や op への binding では bounds、alignment、shape/stride の整合を検証する。execution plan は tensor ごとに `read`、`write`、必要なら `read_write` access を宣言する。submit は全 owned view の `Arc<BufferInner>` を clone して `InFlightSubmission` へ移し、completion まで解放しない。書き込み先の再利用、読み書き競合、別 queue 間 dependency は access 情報と event dependency から決める。
+
+同期 API を基礎にして非同期 API を装うのではなく、queue submission と event completion を基本契約とする。MVP が一つの compute queue しか使わない場合も lifetime 契約はこの形を維持する。
+
+### Prepare、submit、非同期 error
+
+C ABI の主要呼び出し単位は kernel 一個ごとの細粒度 call ではなく、複数 op を含められる coarse な command list または prepared plan とする。prepare は op/tensor layout など再利用可能な metadata を native 所有 storage へ即時 copy し、caller-owned array、文字列、一時 descriptor への pointer を返却後に保持しない。submit も resource binding、access mode、dependency event の metadata を call 中に即時 copy する。
+
+submit の同期的な validation/enqueue failure は submit 自体の status と error sink で返す。enqueue 後に生じた非同期 error は completion event に保存し、`event_query` と `event_wait` の status および caller-owned error sink から取得する。`event_query` は pending、success、failure を区別し、failure の詳細が別 thread の一時 buffer に依存しないよう completion state が診断情報を所有する。event を drop しても executor は submission の完了または shutdown drain まで監視を続ける。
+
+## Registry と dispatch
+
+registry は責務の異なる三層に分ける。
+
+| Registry | 所有者 | 役割 |
+| --- | --- | --- |
+| Backend registry | Rust runtime | 利用可能 backend の生成、device/capability による選択 |
+| Op registry | `ullm-core` と backend adapter | 論理 op descriptor、必要 capability、backend support query、fallback 方針の対応づけ |
+| Kernel registry | 各 backend。MVP では `native/hip` | op、物理 dtype、encoding、shape/layout、GPU target に応じた実装候補の選択 |
+
+op descriptor は kernel 名ではなく、演算の意味、shape、layout、数値要件を記述する。backend は capability query で descriptor を受理できるか返し、prepare 時に具体的な kernel を選ぶ。実行開始後に不足 capability が判明する構成を避ける。
+
+## DType と量子化 encoding
+
+`DType` は BF16、FP16、FP8 など、要素の物理 scalar format を表す。量子化の scale、grouping、packing、codebook、tensor ごとの付加 metadata は `DType` に詰め込まず、独立した quantization encoding descriptor として表す。これにより、同じ低精度 storage dtype に複数の量子化方式を対応づけたり、weight、activation、KV cache で異なる encoding 制約を表現できる。
+
+MVP の Qwen3.5-4B は BF16 の unquantized encoding だけを実装する。それでも descriptor は `DType` と encoding を別 field として運び、未対応 encoding は capability query または prepare で明示的に拒否する。未知の encoding を unquantized と解釈してはならない。
+
+## KV cache layout
+
+KV cache は通常の tensor descriptor に加え、layer、K/V の分離または interleave、token/block addressing、head grouping、stride、dtype、quantization encoding を表せる layout descriptor を持つ。MVP は連続 FP16 layout を実装する。model weight/activation の BF16 と KV cache の FP16 を同一 dtype として扱わない。scheduler は layout の内部 pointer arithmetic を行わず、backend が提示する alignment、block size、capacity capability に従って allocation と slot を計画する。
+
+この abstraction は将来の paged/block layout や量子化 layout を受け入れるためのものであり、MVP でそれらを実装することを意味しない。
+
+## Build integration
+
+Cargo を top-level build entry point とする。`ullm-hip-sys/build.rs` が CMake を使って `native/hip` を configure/build し、Cargo に native link search path、library、必要な rerun 条件を伝える。CMake の configure/build/install output は Cargo が割り当てた `OUT_DIR` 以下だけに生成し、source tree や共有 build directory へ生成物を書かない。
+
+`build.rs` は検出済みの `ROCM_PATH`、`CMAKE_HIP_ARCHITECTURES`、`ULLM_HIP_CODEGEN_FEATURES` を明示的に CMake へ渡す。CMake は別の ROCm や host GPU target を独自に再発見せず、同じ tree の `amdclang++` と渡された target/features を使う。release build で target/features が不足する場合は configure error とし、生成した native artifact の metadata に実際の入力を記録する。
+
+C ABI から生成した Rust bindings は repository に check-in する。通常ビルドは bindgen の実行を必須にせず、明示的な再生成操作だけが bindings を更新する。生成元 header、ABI version、生成 tool/version、生成 option を固定し、header を変更した commit では対応する generated bindings も同時に更新する。安全性、所有権、`Send`/`Sync` の判断は generated code に持たせず `ullm-hip` の手書き wrapper に閉じ込める。
+
+## MVP の対象外
+
+次は初期 MVP に含めない。
+
+- dynamic backend/plugin loading
+- runtime JIT compilation
+- 複数 compute stream を使う scheduling と overlap 最適化
+- multi-GPU、Infinity Fabric、その他 RDMA transport
+- backend 外へ公開する kernel plugin ABI
+
+これらのための実装や不完全な ABI は先行追加しない。一方で、opaque handle、capability query、非同期 event、op/KV descriptor により、将来の追加で上位の model/scheduler API を破壊しない境界を保つ。
