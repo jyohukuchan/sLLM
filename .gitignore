@@ -1,11 +1,10 @@
 # 内部資料・メモ
-README-AI-manuscript.md
-uLLM-project.md
+/README-AI-manuscript.md
+/uLLM-project.md
 # 参考資料
-reference/
+/reference/
 # Passwords
-passwords.txt
-password.txt
+/passwords.txt
 
 # Local build outputs
 /build/

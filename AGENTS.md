@@ -44,7 +44,9 @@
 - `docs/plans/active`には未完了のplan、`docs/plans/archive`には完了または放棄したplan、`docs/history`には詳細な変更履歴をMarkdownで置く。各directoryは`YYYY/MM/1-10`、`11-20`、`21-`の区分を使う。
 - `docs/plans/main-plan.md`以外のplanは対応するhistoryを、historyは対応するplanを、それぞれ末尾からlinkする。
 - `README.md`は編集せず、代わりに`README-AI-manuscript.md`を編集する。
-- `.gitignore`は追記だけを許可する。
+- `.gitignore`への新規行の追記は、事前許可なく行える。
+  - 既存行の変更・削除・移動は、変更内容についてユーザーから事前に許可を得る。
+  - ユーザーが手動で行った変更は、内容をreviewしたうえで、追加の許可なくcommit・pushできる。
 - `AGENTS.md`または`uLLM-project.md`を変更した場合はユーザーへ確認する。
 - AIは`passwords.txt`を編集しない。credential fileの取扱いは`docs/security/credentials.md`に従う。
 
