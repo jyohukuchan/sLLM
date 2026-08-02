@@ -3,7 +3,7 @@
 ## この文書の役割
 
 - Git管理外の `uLLM-project.md` にある要件定義・開発方針・重要な決定を、開発に必要な範囲で追跡可能な形へ同期する。
-- 実装順序、現在の判断、未解決事項、完了状況はこの文書を更新して管理する。
+- この文書には重要なproduct・architecture・compatibility上の決定、開発計画と順序、進捗、未解決事項だけを記録する。恒久的な実行手順は各正本文書へ置き、ここには重複させない。
 - `uLLM-project.md` とこの文書に方針上の差異が生じた場合は、推測で統合せずユーザーへ確認する。
 - 角括弧内の項目は、初期バージョンでは対応しない将来機能を表す。
 
@@ -228,25 +228,11 @@
 - HIP/runtime/backend/dispatch/native buildへ影響する変更は、同じreviewed immutable SHAに対するG0/G1/G2/P0とfail-closed集約をmerge条件とする。
 - 詳細な草案と実装順序は[CI・テスト方針策定計画](active/2026/08/1-10/ci-test-strategy.md)を参照する。
 
-## Repository hygieneとcredential
+## 開発運用上の決定
 
-- Gitにはsource、文書、小さなfixture、manifest、hash、summaryを保存し、model、binary、raw trace/profile、large model slice、生成物を保存しない。
-- tracked blob size、tracked path増加、禁止raw pathをH0で検査する。
-- untracked/ignored size、checkout size、worktree、stale worktree、ahead/behindはlocal hygiene commandとpush前検査で管理する。
-- 詳細は[repository hygiene方針](../development/repository-hygiene.md)に従う。
-- project内の`passwords.txt`/`password.txt`を資格情報保管場所として使用せず、AI、CI、build、testは内容を読まない。
-- credentialはsecret manager、workload identity、短命の実行時注入を使用し、untrusted GPU jobへ渡さない。
-- 詳細は[credential方針](../security/credentials.md)に従う。
-
-## 作業単位の完了フロー
-
-- 一つの作業単位は、独立してreview・rollbackできる機能、修正、文書変更とする。
-- 検証・適用・pushでは、commit SHA、Git tree OID、artifact digest等で固定した同一candidateを使用する。commit整理等でcandidateが変わった場合はidentityを更新し、testからやり直す。
-- 各作業単位では、影響範囲、受入条件、必要なevidenceを事前に定め、対応するtest、lint、buildを通した後に同一candidateを本番または本番相当の統合環境へ適用し、smoke test、health check、必要な実機確認のevidenceを記録する。
-- 本番環境が未整備の場合は本番未適用であることを記録する。文書・計画・repository scaffoldのように独立したdeployment対象がない変更は、追跡対象の正本への反映と検証を適用として扱う。
-- code、設定、deployment変更を適用できる本番環境または本番相当環境がない場合、その作業単位は未完了としてpushしない。
-- 検証と適用後確認が成功した作業単位は、`push` skillに従ってproject全体をreviewし、必要最小限のcommitへ整理してGitHubへpushする。
-- test、適用、適用後確認のいずれかに失敗した場合はpushせず、既に適用済みなら安全に可能な範囲で直前の検証済みrevisionへrollbackする。rollback不能または失敗時は追加変更を停止し、失敗内容、本番状態、未適用範囲を記録する。
+- Gitで追跡するのはsource、文書、小さなfixture、manifest、hash、summaryとし、model、binary、raw trace/profile、large model slice、生成物は追跡しない。詳細は[repository hygiene方針](../development/repository-hygiene.md)を正本とする。
+- 無人での進行を優先しつつsecret exposureを最小化する。専用local hostでは`homelab1`への`NOPASSWD: ALL`を意図的なtrade-offとして受容し、main agentがtask scope内で`sudo -n`を使う。恒久方針は[credential方針](../security/credentials.md)を正本とする。
+- 作業単位は独立してreview・rollbackできる範囲とする。immutable identityの固定から検証、適用、適用後確認、rollback/fail-stop、`push` skillによる公開までの実行手順は`AGENTS.md`を正本とする。
 
 ## 開発順序
 
@@ -295,15 +281,15 @@
   - 再出発レビューを検証し、repository hygiene、credential、performance cliff、GPU merge gate、fail-closed集約の対策を作成。
   - governance baselineをcommit `2764e73ebc45c8bbd209a426ca93ce341ed5d860`として`origin/main`へ公開。
   - Rust 1.97.1/MSRV 1.85.0、C++17、ROCm 7.14.0/LLVM 23のlocal開発環境を構築し、exact `gfx1030,gfx1201`の最小HIP smokeを実GPU 3台で確認。
+  - 専用local hostで`homelab1`への`NOPASSWD: ALL`設定を完了し、無人進行を優先する明示的なrisk trade-offとして受容。
 - 確認待ち:
   - CI・テスト方針草案の時間予算、GPU runner前提、未確定事項についてユーザー確認を受ける。
 - 次:
   1. CI・テスト方針草案をユーザー確認後に確定する。
-  2. credentialを所有者側でrotationし、project内平文fileから移行する。
-  3. test result schema、compatibility tuple manifest、marker、repository skeletonを設計する。
-  4. tracked tree H0、local hygiene command、H1〜H2のCPU CIをrepository skeletonと同時に実装する。
-  5. ROCm 7.14.0によるH3 compile-only CIを追加する。
-  6. 利用可能な実機に合わせてGPU runner基盤とG0 preflightを構築する。
+  2. test result schema、compatibility tuple manifest、marker、repository skeletonを設計する。
+  3. tracked tree H0、local hygiene command、H1〜H2のCPU CIをrepository skeletonと同時に実装する。
+  4. ROCm 7.14.0によるH3 compile-only CIを追加する。
+  5. 利用可能な実機に合わせてGPU runner基盤とG0 preflightを構築する。
 
 ## 未解決事項
 
@@ -316,4 +302,4 @@
 - 初期GPU runnerのSKU、exact target、台数、隔離・再image方式。
 - Qwen3.5-4B baselineで測定して決めるop別数値toleranceと性能回帰閾値。
 - public fork PRのreview済みcommitを実行できる使い捨てGPU runnerを用意できるか。
-- 既存平文credentialの失効・rotationとsecret managerへの移行状況。
+- sudo以外の既存平文credentialの失効・rotationとsecret managerへの移行状況。
