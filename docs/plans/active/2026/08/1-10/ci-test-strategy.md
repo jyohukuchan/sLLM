@@ -10,11 +10,12 @@
 
 ### ローカル参照実装
 
-- `reference/llama.cpp`、`reference/vLLM`、`reference/SGLang`、`reference/AMD-ATOM`、`reference/TensorRT-LLM`は現時点では空であり、この配置からCI・テスト実装を調査することはできなかった。
-- vLLMとTensorRT-LLMについては、workspace外に存在した読み取り専用mirrorを補助的に調査した。
-  - vLLMは必須のbasic correctness、hardware別suite、slow/optional/distributed、model family別suiteを分離していた。
-  - TensorRT-LLMはGPU名、GPU数、OS、backend、stage、capabilityを明示したtest listを使用し、性能回帰を通常の機能テストから分離していた。
-- これらは設計上の参考であり、uLLMの対応実績または正しさの証拠にはしない。`reference/`へ固定commitのsourceを配置した後、一次sourceとして再調査する。
+- `reference/llama.cpp`、`reference/vLLM`、`reference/SGLang`、`reference/AMD-ATOM`、`reference/TensorRT-LLM`には、`docs/references/source-lock.md` に固定したofficial origin・version・完全SHAのsourceが配置済みである。local treeはshallow、detached、clean、submoduleなしで、`reference/` は引き続きignore・未追跡である。
+- 取得sourceのlicense、path、特殊なLFS/vocabulary fixtureの事実はsource-lock manifestに固定した。candidate researchは未cloneであり、short SHAはdiscovery identifierに留める。
+- 固定exact revisionを一次sourceとしてCI/test実装の要点を再調査する作業は、source配置後の次のPhase 0としてまだpendingである。
+- vLLMは必須のbasic correctness、hardware別suite、slow/optional/distributed、model family別suiteを分離していた。
+- TensorRT-LLMはGPU名、GPU数、OS、backend、stage、capabilityを明示したtest listを使用し、性能回帰を通常の機能テストから分離していた。
+- これらは設計上の参考であり、uLLMの対応実績または正しさの証拠にはしない。sourceは配置済みだが、固定exact revisionを一次sourceとして行うCI/test再調査はpendingであり、完了まではuLLMの対応実績または正しさの証拠にしない。
 
 ### CI運用
 
@@ -243,7 +244,7 @@ GPUに影響する変更は、実GPU evidenceが得られるまで「compile済�
 
 - この計画をreviewし、初期GPU runnerの所有形態と利用可能なexact targetを確認する。
 - test result schema、tuple manifest schema、marker名、時間予算を確定する。
-- 参照sourceを固定commitで`reference/`へ配置後、llama.cpp、vLLM、SGLang、ATOM、TensorRT-LLMのCI/testを再調査する。
+- 利用可能になったsource-lock manifestの完全SHAを対象に、llama.cpp、vLLM、SGLang、ATOM、TensorRT-LLMのCI/testを一次sourceとして再調査する。このexact-revision再調査はまだpendingであり、完了後にtest result schema・matrix・実装順序へ反映する。
 - license、provenance、model lock、CI・test、repository hygiene、credential方針をgovernance baselineとして機能codeより先にcommit・pushする。
 
 ### Phase 1: repository skeletonとCPU CI

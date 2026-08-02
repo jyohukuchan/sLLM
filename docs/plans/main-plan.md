@@ -188,6 +188,7 @@
 ## 外部実装の参照とコード流用
 
 - llama.cppとvLLMから、実装前に技術上の要点を抽出する。
+- local `reference/` の公式origin、version、完全commit SHA、取得状態は[参照source固定マニフェスト](../references/source-lock.md)を正とし、追加候補の優先順位と参照範囲は[推論engine参照](../references/inference-engines.md)へ記録する。
 - vLLM等からコードを直接流用しない。reader subagentとimplementer subagentを分離し、要点だけを渡す。
 - llama.cppからの直接流用は許可するが、トップレベルLICENSEへの曖昧な追記だけで済ませない。
 - 直接流用する場合は、copyright/license noticeを保持し、upstream URL、完全commit SHA、upstream/local path、hash、exact/adapted/ported区分、変更内容、import commitを記録する。
@@ -282,14 +283,16 @@
   - governance baselineをcommit `2764e73ebc45c8bbd209a426ca93ce341ed5d860`として`origin/main`へ公開。
   - Rust 1.97.1/MSRV 1.85.0、C++17、公式system package版ROCm 7.14.0/LLVM 23の開発環境を構築し、legacy ROCm user-spaceを除去したうえで、exact `gfx1030,gfx1201`の最小HIP smokeを実GPU 3台で確認。
   - 専用local hostで`homelab1`への`NOPASSWD: ALL`設定を完了し、無人進行を優先する明示的なrisk trade-offとして受容。
+  - llama.cpp、vLLM、SGLang、TensorRT-LLM、ROCm/ATOMの2026-08-02時点の最新安定releaseを完全commit SHAで`reference/`へ固定し、再現manifestを作成。追加候補としてLMDeploy、MLC LLM、KTransformers、Candleをfirst tierに選定。
 - 確認待ち:
   - CI・テスト方針草案の時間予算、GPU runner前提、未確定事項についてユーザー確認を受ける。
 - 次:
-  1. CI・テスト方針草案をユーザー確認後に確定する。
-  2. test result schema、compatibility tuple manifest、marker、repository skeletonを設計する。
-  3. tracked tree H0、local hygiene command、H1〜H2のCPU CIをrepository skeletonと同時に実装する。
-  4. ROCm 7.14.0によるH3 compile-only CIを追加する。
-  5. 利用可能な実機に合わせてGPU runner基盤とG0 preflightを構築する。
+  1. 固定した5件のexact revisionを一次sourceとしてCI・test構成を再調査し、CI・テスト方針草案へ反映する。
+  2. 更新したCI・テスト方針草案をユーザー確認後に確定する。
+  3. test result schema、compatibility tuple manifest、marker、repository skeletonを設計する。
+  4. tracked tree H0、local hygiene command、H1〜H2のCPU CIをrepository skeletonと同時に実装する。
+  5. ROCm 7.14.0によるH3 compile-only CIを追加する。
+  6. 利用可能な実機に合わせてGPU runner基盤とG0 preflightを構築する。
 
 ## 未解決事項
 
