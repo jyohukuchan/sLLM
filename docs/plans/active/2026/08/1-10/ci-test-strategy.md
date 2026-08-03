@@ -199,7 +199,15 @@ GPU control workflowはprotected default branchのimmutable revisionを信頼元
 
 PR由来のproject scriptとbinaryは隔離runner内の非特権userで信頼できないcodeとして実行する。jobへsecret、host controller credential、cloud credential、Docker socket、`sudo`を渡さない。modelはhost controllerが事前検証したread-only mountから提供し、jobから外部model storageへ直接認証させない。runnerは成功・失敗にかかわらずjob後に破棄または再image化する。
 
-runtime descriptor、backend選択、capability query、C ABI、lifetime、operator dispatch、fallback、HIP kernel、native build integrationに影響する変更は、対象immutable tupleのG0、G1、G2、P0 sanityをmerge必須とする。build、ROCm、target、codegenに影響する変更は、これらに加えてH3とG4もmerge必須とする。`tested_sha`はreview済みの完全40桁`reviewed_sha`と一致しなければならず、branch、tag、別commit、merge後のSHA、古いartifactを代用しない。runner基盤が未整備の場合、その種の機能変更をprotected mainへmergeしない。
+GPU hard gateは変更が実際に触れるscopeへ適用し、未実装の後続tierをbootstrap変更へ循環的に要求しない。一方、適用対象となったtierは同じimmutable candidateで省略しない。
+
+- schema、matrix、runnerの非実行contractだけの変更はH0〜H2とnegative self-testを必須とする。GPU/runtime behaviorも変える場合は下記の該当gateを追加する。
+- H3 toolchain、compile-only、artifact metadataだけの変更はH0〜H3を必須とし、compile結果をGPU実行evidenceへ昇格させない。
+- trusted local runnerとG0 preflightの変更はH0〜H3、host側negative test、canonical deviceのG0、実行前後healthを必須とする。
+- model-free native HIP実行、C ABI、lifetime、allocator、queue/event、fallback、dispatchに影響する変更はH0〜H3とcanonical `gfx1030`/`gfx1201`のG0/G1を必須とする。
+- model pathへ影響する変更からG2、互換性の昇格・表記変更からG4、性能または実運用dispatchへ影響する変更からP0を必須とする。
+
+`tested_sha`はreview済みの完全40桁`reviewed_sha`と一致しなければならず、branch、tag、別commit、merge後のSHA、古いartifactを代用しない。該当scopeのrunnerまたはevidence経路が未整備なら、その機能変更をprotected mainへmergeしない。
 
 G1、G2、P0 reportには少なくとも、report ID、run ID/attempt、reviewed/tested/workflow SHA、matrix row ID、tuple digest、selected backend、GPU UUID/BDF/exact target、dispatch ID/count、CPU fallbackの許可・使用有無、artifact content/manifest SHA-256、target/codegen feature、state、開始・終了時刻を含める。GPU PASSでは`selected_backend=hip`、GPU dispatch数1以上、CPU fallback未使用、artifact hash一致を必須とする。
 
@@ -255,10 +263,12 @@ Phase 1では`ci/schema/compatibility-tuple-v1.schema.json`、`ci/matrix/suites-
 最初からpath-to-suite mappingを管理する。
 
 - Rust frontend/model lock/APIだけの変更: H0〜H2。GPU contractに影響する場合だけG2/G3を追加。
-- runtime descriptor、backend/capability/dispatch、C ABI、lifetime変更: H0〜H3、同一reviewed SHAのG0/G1/G2/P0をmerge必須。
-- HIP kernel、fallback、native build変更: H0〜H3、同一reviewed SHAと対象tupleのG0/G1/G2/P0をmerge必須。
+- H3 toolchain、compile-only、artifact metadataだけの変更: H0〜H3。GPU実行evidenceは要求せず、実行済みとも表記しない。
+- trusted local runner、G0 preflightだけの変更: H0〜H3、host negative test、同一reviewed SHAのcanonical G0、実行前後health。
+- runtime descriptor、backend/capability/dispatch、C ABI、lifetime、allocator、queue/event変更: H0〜H3、同一reviewed SHAのcanonical G0/G1。model pathへ影響するときだけG2、性能または実運用dispatchへ影響するときだけP0を追加。
+- HIP kernel、fallback、native build変更: H0〜H3、同一reviewed SHAと対象tupleのG0/G1。semantic numerical opは独立oracleと境界case、model pathはG2、性能pathはP0を追加。
 - tokenizer/chat template/model integration変更: H0〜H2、G2/G3。
-- build、ROCm、target、codegen変更: H0、H3、同一reviewed SHAと対象tupleのG0/G1/G2/G4/P0をmerge必須。
+- build、ROCm、target、codegen変更: compile-only scopeならH0〜H3。runtime artifactへ適用する場合は同一reviewed SHAのG0/G1、互換性昇格時はG4、model/performanceへ影響するときだけG2/P0を追加。
 - quantization/dtype変更: H1〜H3、対象GPUのG1/G2、数値評価、P0。
 - scheduler/batching変更: H1、fake backendのcontrol-plane test、実GPUのG2/G3。CPUでGPU workloadを再現しない。
 
@@ -301,10 +311,12 @@ GPUに影響する変更は、実GPU evidenceが得られるまで「compile済�
 - exact/generic targetとcodegen featureを混ぜず、artifact metadataを検証する。
 - compile-only結果を実機互換性または性能の証拠にしない。
 - 20回以上かつ7日以上の連続観測で全期待row `PASS`、他state/cancel/schema error 0、artifact hash一致、p95 12分以下、最大15分以下、unexpected `INFRA_ERROR` 0、missing result 0を満たした後だけH3のrequired昇格をreviewする。それまではnon-requiredで計測し、H0〜H2だけをrequiredとする。
+- required昇格観測はG0、GPU runner、model-free runtimeの開発と並行する。7日間を後続実装の開始条件または待機期間にしない。
 
 ### Phase 3: GPU runner基盤
 
 - 専用local hostでreview済み完全SHAに対する直列実行とevidence集約を先に実装する。
+- H3のrequired昇格観測と並行して、canonical `gfx1030`/`gfx1201`のG0とmodel-free probeを進める。
 - runner group、environment、default-branch workflow、ephemeral/JIT登録、host controllerを用意する。
 - G0 preflight、process監視、timeout、診断収集、quarantine、reboot/reimageを実装する。
 - modelを使わない最小HIP probeで運用を検証する。

@@ -1,8 +1,8 @@
 # GPU互換性方針
 
-> 最終更新: 2026-08-02
+> 最終更新: 2026-08-03
 >
-> この文書はGPU対応を判定・表記する共通規則である。現時点ではuLLMのGPU実機検証結果はない。互換表の将来候補は現在の対応宣言ではない。
+> この文書はGPU対応を判定・表記する共通規則である。専用local hostのexact `gfx1030`/`gfx1201`ではallocation、copy、単一kernel、synchronize、copy-backの限定smokeだけを確認済みである。formal G0/G1、artifact metadata、数値kernel、model、性能は未検証であり、互換表の将来候補は現在の対応宣言ではない。
 
 ## 二層の識別モデル
 
@@ -94,7 +94,7 @@ vendor mapping、library query、probeは代替関係ではない。例えばhar
 
 `lifecycle=supported`への昇格には原則として同じscopeの`project-verified`を要求する。`vendor-supported`だけで自動昇格せず、反対にvendor公式範囲外でも十分なproject evidenceがあれば`project-verified`を保持できる。
 
-現時点の初期AMD targetは`lifecycle=experimental`かつ`evidence`に`unverified`を含む。AMDの製品別状態は[AMD GPU互換性方針](amd-gpu.md)に記録する。
+現時点の初期AMD targetは`lifecycle=experimental`かつ、限定smoke以外の機能scopeでは`evidence`に`unverified`を含む。AMDの製品別状態と限定smokeの範囲は[AMD GPU互換性方針](amd-gpu.md)に記録する。
 
 ### software.mdとの関係
 

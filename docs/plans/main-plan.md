@@ -315,12 +315,12 @@
   - opaque queue/buffer/event、access mode、completion ownership、TensorView/NVFP4境界、semantic op arity、C/Rust ABI layout parity、error sink truncation contractをPhase 1の非実行contractとして追加。
   - Python 3.12/Linux x86_64 host dependencyをtransitive dependencyとartifact SHA-256まで固定し、test中の外部networkをnamespaceで遮断。
   - GitHub-hosted CPUだけを使う`host-required` workflowを追加し、official Actionsを完全commit SHAへ固定。H3/GPU/self-hosted runnerは含めていない。
+  - Phase 2 bootstrap gateを変更scope別へ整理し、H3 required昇格観測をG0/model-free pathと並行する正本へ同期。
 - 次:
-  1. 変更scope別のbootstrap gateをCI正本へ同期する。
-  2. ROCm 7.14.0固定toolchain imageとartifact metadata contractを設計する。
-  3. exact `gfx1030`/`gfx1201`のH3 compile-only rowをnon-requiredで追加し、required昇格観測を開始する。
-  4. H3観測と並行して、専用local hostのGPU evidence実行・集約とG0 preflightを構築する。
-  5. canonical `gfx1030`/`gfx1201`でmodel-free最小GPU実行経路を同一candidate SHAに対して検証する。
+  1. ROCm 7.14.0固定toolchain imageとartifact metadata contractを設計する。
+  2. exact `gfx1030`/`gfx1201`のH3 compile-only rowをnon-requiredで追加し、required昇格観測を開始する。
+  3. H3観測と並行して、専用local hostのGPU evidence実行・集約とG0 preflightを構築する。
+  4. canonical `gfx1030`/`gfx1201`でmodel-free最小GPU実行経路を同一candidate SHAに対して検証する。
 
 ## 未解決事項
 

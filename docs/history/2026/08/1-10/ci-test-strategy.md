@@ -37,5 +37,8 @@
 - test harnessをactual collected/selected/outcome count、strict clean SHA identity、network namespace、row/command resource limit、bounded outputへ拡張し、異常をschema-validな非PASSとして扱うcontractを追加した。
 - Python host dependencyをtransitive dependencyとartifact SHA-256までlockし、checkout credentialを保持せず、Rust 1.97.1/MSRV 1.85.0をcommandごとに明示した。
 - fixture consumer mappingをH1/H2へ同期し、hash-locked isolated venvでH0/H1/H2とlocal-development aggregateがPASSすることを確認した。immutable evidenceはcommit後のclean checkoutとGitHub required workflowで別途固定する。
+- Phase 2 bootstrapで未構築のG0/G1/G2/G4/P0をH3自身へ循環的に要求しないよう、GPU hard gateを変更scope別へ分割した。
+- H3 toolchain/artifactはH0〜H3、G0 runnerはH0〜H3とcanonical G0、model-free runtimeはH0〜H3とcanonical G0/G1を同一candidateへ要求する。G2/G4/P0はmodel、互換性昇格、性能または実運用dispatchへ実際に影響するときから追加する。
+- H3の20回以上・7日以上の観測はrequired昇格だけの条件とし、G0、GPU runner、model-free runtimeを並行して進めると明記した。
 
 [対応する計画](../../../../plans/active/2026/08/1-10/ci-test-strategy.md)
