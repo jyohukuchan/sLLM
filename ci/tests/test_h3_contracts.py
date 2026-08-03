@@ -83,10 +83,15 @@ def artifact_fixture(
         )},
         "resolved_paths": copy.deepcopy(toolchain["paths"]),
         "build": {
-            "source_directory": "/workspace/uLLM-project",
+            "source_directory": "/workspace",
+            "source_path": "/workspace/native/hip/src/hip_compile_probe.hip.cpp",
             "output_directory": str(output),
-            "generator": "Unix Makefiles",
+            "object_path": str(output / f"hip-compile-probe-{target}.o"),
+            "link_output_path": str(output / f"hip-compile-probe-{target}.elf"),
+            "generator": "direct-amdclang++",
+            "mode": "direct-compile-link",
             "build_type": "Release",
+            "language_standard": "gnu++17",
             "output_directory_scope": "row-private",
             "source_tree_output": False,
             "shared_build_directory": False,
@@ -100,10 +105,16 @@ def artifact_fixture(
         "host_bundle": {
             "format": "ELF64",
             "machine": "X86_64",
-            "bundles": [{
-                "target": target,
-                "id": f"hipv4-amdgcn-amd-amdhsa--{target}",
-            }],
+            "bundles": [
+                {
+                    "target": target,
+                    "id": f"hipv4-amdgcn-amd-amdhsa--{target}",
+                },
+                {
+                    "target": "host",
+                    "id": "host-x86_64-unknown-linux-gnu-",
+                },
+            ],
             "sections": {
                 ".hip_fatbin": {"present": True, "size_bytes": 256},
             },
@@ -138,6 +149,15 @@ def artifact_fixture(
             "network_used": False,
             "model_used": False,
             "cpu_fallback_used": False,
+        },
+        "execution_environment": {
+            "mode": "local-development",
+            "execution_scope": "local-system",
+            "container_image_reference": None,
+            "observed_image_config_digest": None,
+            "pinned_container": False,
+            "identity_verified": False,
+            "network_isolated": False,
         },
         "timestamps": {
             "created_at": "2026-08-03T05:00:00Z",
@@ -203,6 +223,11 @@ class H3ManifestNegativeTests(unittest.TestCase):
             (lambda doc: doc["rows"][0].update(required=True), "required true"),
             (lambda doc: doc["rows"][0]["codegen"].update(code_object_version="V5"), "CO mismatch"),
             (lambda doc: doc["rows"][0]["codegen"]["features"].update(xnack="off"), "feature mismatch"),
+            (lambda doc: doc["rows"][0].pop("direct_build"), "missing direct contract"),
+            (lambda doc: doc["rows"][0].update(cmake={"generator": "Unix Makefiles", "build_type": "Release", "timeout_seconds": 900}), "old CMake contract"),
+            (lambda doc: doc["rows"][0]["direct_build"]["commands"][0].remove("-mno-wavefrontsize64"), "missing direct compile flag"),
+            (lambda doc: doc["rows"][0]["direct_build"]["commands"][1].append("-Winvalid-pch"), "extra direct link flag"),
+            (lambda doc: doc["rows"][0]["direct_build"]["commands"][0].__setitem__(5, "--offload-arch=gfx1201"), "substituted direct target"),
         ]
         for mutation, label in cases:
             self.assert_manifest_rejected("ci/matrix/hip-compile-v1.json", mutation, label)
@@ -288,9 +313,8 @@ class H3ArtifactNegativeTests(unittest.TestCase):
             (lambda doc: doc["host_bundle"]["bundles"][0].update(
                 id="hipv4-amdgcn-amd-amdhsa--gfx1201"
             ), "bundle ID swap"),
-            (lambda doc: doc["host_bundle"]["bundles"].append(
-                copy.deepcopy(doc["host_bundle"]["bundles"][0])
-            ), "multiple bundle"),
+            (lambda doc: doc["host_bundle"]["bundles"].pop(), "missing host bundle"),
+            (lambda doc: doc["host_bundle"]["bundles"].reverse(), "bundle order"),
             (lambda doc: doc["host_bundle"]["sections"].pop(".hip_fatbin"), "missing .hip_fatbin"),
             (lambda doc: doc["host_bundle"].pop("format"), "missing host ELF format"),
             (lambda doc: doc["host_bundle"].update(format="ELF32"), "invalid host ELF format"),
@@ -302,9 +326,13 @@ class H3ArtifactNegativeTests(unittest.TestCase):
             (lambda doc: doc["artifact"].update(sha256="f" * 64), "artifact SHA mismatch"),
             (lambda doc: doc["artifact"].update(size_bytes=256), "artifact size mismatch"),
             (lambda doc: doc["build"].update(source_directory=doc["build"]["output_directory"]), "source tree output"),
+            (lambda doc: doc["build"].update(source_path="/workspace/native/hip/src/other.hip.cpp"), "direct source substitution"),
+            (lambda doc: doc["build"].update(object_path=doc["build"]["object_path"].replace("gfx1030", "gfx1201")), "direct object target substitution"),
+            (lambda doc: doc["build"].update(generator="Unix Makefiles"), "CMake metadata masquerade"),
             (lambda doc: doc["build"].update(output_directory_scope="shared"), "shared output scope"),
             (lambda doc: doc["scope"].update(gpu_execution=True), "GPU execution scope"),
             (lambda doc: doc["scope"].update(model_verified=True), "model scope"),
+            (lambda doc: doc["execution_environment"].update(network_isolated=True), "local network isolation claim"),
         ]
         for mutation, label in cases:
             repo = copy_contract_tree()

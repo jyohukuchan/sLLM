@@ -40,8 +40,6 @@ fn main() {
     let bindings = manifest_dir.join("src/bindings.rs");
     let cmake_file = source_dir.join("CMakeLists.txt");
     let out_dir = PathBuf::from(env::var_os("OUT_DIR").expect("Cargo must provide OUT_DIR"));
-    let build_dir = out_dir.join("native-hip-build");
-
     println!("cargo:rerun-if-changed={}", header.display());
     println!("cargo:rerun-if-changed={}", umbrella_header.display());
     println!("cargo:rerun-if-changed={}", source.display());
@@ -53,29 +51,61 @@ fn main() {
     println!("cargo:rerun-if-env-changed=ROCM_PATH");
     println!("cargo:rerun-if-env-changed=CMAKE_HIP_ARCHITECTURES");
     println!("cargo:rerun-if-env-changed=ULLM_HIP_CODEGEN_FEATURES");
+    println!("cargo:rerun-if-env-changed=ULLM_ENABLE_HIP_COMPILE_PROBE");
+    println!("cargo:rerun-if-env-changed=ULLM_HIP_COMPILER");
     println!("cargo:rerun-if-env-changed=CXX");
 
     let profile = env::var("PROFILE").expect("Cargo must provide PROFILE");
+    let hip_probe = match env::var("ULLM_ENABLE_HIP_COMPILE_PROBE") {
+        Ok(value) if value == "1" || value.eq_ignore_ascii_case("on") => true,
+        Ok(value) if value == "0" || value.eq_ignore_ascii_case("off") => false,
+        Ok(value) => {
+            panic!("ULLM_ENABLE_HIP_COMPILE_PROBE must be unset, 0/OFF, or 1/ON; got {value}")
+        }
+        Err(env::VarError::NotPresent) => false,
+        Err(error) => panic!("cannot read ULLM_ENABLE_HIP_COMPILE_PROBE: {error}"),
+    };
+    let hip_configuration = if hip_probe {
+        Some(validate_hip_environment(&profile))
+    } else {
+        None
+    };
+    let build_dir = match &hip_configuration {
+        Some(configuration) => out_dir.join(format!("native-hip-build-{}", configuration.target)),
+        None => out_dir.join("native-hip-build-stub"),
+    };
     let mut configure = Command::new("cmake");
     configure
         .arg("-S")
         .arg(&source_dir)
         .arg("-B")
         .arg(&build_dir)
+        .arg("-G")
+        .arg("Unix Makefiles")
         .arg(format!("-DCMAKE_BUILD_TYPE={profile}"))
         .arg(format!(
             "-DCMAKE_ARCHIVE_OUTPUT_DIRECTORY={}",
             build_dir.display()
         ));
 
-    for variable in [
-        "ROCM_PATH",
-        "CMAKE_HIP_ARCHITECTURES",
-        "ULLM_HIP_CODEGEN_FEATURES",
-    ] {
-        if let Some(value) = env::var_os(variable) {
-            configure.arg(format!("-D{variable}={}", value.to_string_lossy()));
-        }
+    if let Some(configuration) = &hip_configuration {
+        configure
+            .arg("-DULLM_ENABLE_HIP_COMPILE_PROBE=ON")
+            .arg(format!("-DROCM_PATH={}", configuration.rocm_path.display()))
+            .arg(format!(
+                "-DCMAKE_HIP_COMPILER={}",
+                configuration.compiler.display()
+            ))
+            .arg(format!(
+                "-DCMAKE_HIP_ARCHITECTURES={}",
+                configuration.target
+            ))
+            .arg(format!(
+                "-DULLM_HIP_CODEGEN_FEATURES={}",
+                configuration.codegen_features
+            ));
+    } else {
+        configure.arg("-DULLM_ENABLE_HIP_COMPILE_PROBE=OFF");
     }
     if let Some(cxx) = env::var_os("CXX") {
         configure.arg(format!("-DCMAKE_CXX_COMPILER={}", cxx.to_string_lossy()));
@@ -89,6 +119,15 @@ fn main() {
         .arg("--target")
         .arg("ullm_hip_stub");
     run(&mut build, "CMake build");
+    if hip_configuration.is_some() {
+        let mut probe_build = Command::new("cmake");
+        probe_build
+            .arg("--build")
+            .arg(&build_dir)
+            .arg("--target")
+            .arg("ullm_hip_compile_probe_link");
+        run(&mut probe_build, "HIP compile/link probe build");
+    }
 
     let archive = static_archive(&build_dir);
     assert!(
@@ -102,6 +141,91 @@ fn main() {
     if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("linux") {
         println!("cargo:rustc-link-lib=dylib=stdc++");
     }
+}
+
+struct HipConfiguration {
+    rocm_path: PathBuf,
+    compiler: PathBuf,
+    target: String,
+    codegen_features: String,
+}
+
+fn validate_hip_environment(profile: &str) -> HipConfiguration {
+    assert_eq!(
+        profile, "release",
+        "ULLM_ENABLE_HIP_COMPILE_PROBE requires Cargo --release"
+    );
+    let rocm_path = required_absolute_path("ROCM_PATH");
+    assert_eq!(
+        rocm_path,
+        Path::new("/opt/rocm"),
+        "H3 requires the logical ROCm root /opt/rocm"
+    );
+    let canonical_rocm = rocm_path.canonicalize().unwrap_or_else(|error| {
+        panic!(
+            "cannot canonicalize ROCM_PATH {}: {error}",
+            rocm_path.display()
+        )
+    });
+
+    let compiler = required_absolute_path("ULLM_HIP_COMPILER");
+    assert_eq!(
+        compiler,
+        rocm_path.join("bin/amdclang++"),
+        "H3 requires the logical ROCM_PATH/bin/amdclang++ entry point"
+    );
+    let compiler_real = compiler.canonicalize().unwrap_or_else(|error| {
+        panic!(
+            "cannot canonicalize HIP compiler {}: {error}",
+            compiler.display()
+        )
+    });
+    assert!(
+        path_within(&compiler_real, &canonical_rocm),
+        "HIP compiler must resolve inside ROCM_PATH: {}",
+        compiler_real.display()
+    );
+    assert_eq!(
+        compiler.file_name().and_then(|name| name.to_str()),
+        Some("amdclang++"),
+        "H3 requires the ROCm amdclang++ entry point"
+    );
+
+    let target = env::var("CMAKE_HIP_ARCHITECTURES")
+        .unwrap_or_else(|_| panic!("H3 requires CMAKE_HIP_ARCHITECTURES"));
+    assert!(
+        matches!(target.as_str(), "gfx1030" | "gfx1201"),
+        "H3 requires exactly one exact gfx1030 or gfx1201 target"
+    );
+    assert!(
+        !target.contains(';') && !target.contains(',') && !target.contains(' '),
+        "H3 target must not contain multiple or generic architectures"
+    );
+
+    let codegen_features = env::var("ULLM_HIP_CODEGEN_FEATURES")
+        .unwrap_or_else(|_| panic!("H3 requires ULLM_HIP_CODEGEN_FEATURES"));
+    assert_eq!(
+        codegen_features,
+        "co_v6,wave32,xnack=unsupported,sramecc=unsupported,generic_processor_version=0",
+        "H3 codegen features are not the pinned compile-only tuple"
+    );
+    HipConfiguration {
+        rocm_path: canonical_rocm,
+        compiler,
+        target,
+        codegen_features,
+    }
+}
+
+fn path_within(path: &Path, root: &Path) -> bool {
+    path == root || path.strip_prefix(root).is_ok()
+}
+
+fn required_absolute_path(name: &str) -> PathBuf {
+    let value = env::var_os(name).unwrap_or_else(|| panic!("H3 requires {name}"));
+    let path = PathBuf::from(value);
+    assert!(path.is_absolute(), "{name} must be an absolute path");
+    path
 }
 
 fn verify_checked_in_bindings(

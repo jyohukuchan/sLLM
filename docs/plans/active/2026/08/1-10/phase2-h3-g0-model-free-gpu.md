@@ -8,6 +8,12 @@
 - 上位計画: [main plan](../../../../main-plan.md)
 - CI正本: [CI・テスト方針](ci-test-strategy.md)
 
+実装進捗:
+
+- 作業単位0と1のstatic contractを完了した。
+- 作業単位2のCMake/build接続と、固定image内のpinned `amdclang++`を使うexact 2 target direct compile/link runner、artifact検査、fail-closed集約、non-required workflowを実装した。local systemのROCm 7.14.0では両targetのcompile-onlyがPASSしており、生成executableまたはGPUは実行していない。
+- 次のrollback境界は、同一immutable candidateをdigest固定imageでH0〜H3検証し、H3観測を開始するところまでとする。その後は7日を待たず作業単位4へ進む。
+
 ## 目的
 
 Phase 1のhost-only skeletonを維持したまま、ROCm 7.14.0で再現可能なHIP compile evidenceと、専用local hostで同一immutable candidateを検証するGPU evidence経路を追加する。到達点は、`Cargo -> ullm-hip -> versioned C ABI -> native HIP -> GPU`を通るmodel-freeの最小実行である。

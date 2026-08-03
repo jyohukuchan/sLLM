@@ -25,6 +25,10 @@
     "hip_headers": "/opt/rocm/include",
     "hip_cmake_package": "/opt/rocm/lib/cmake/hip",
     "device_libraries": "/opt/rocm/amdgcn/bitcode",
-    "hip_runtime": "/opt/rocm/lib/libamdhip64.so"
+    "hip_runtime": "/opt/rocm/lib/libamdhip64.so",
+    "clang_offload_bundler": "/opt/rocm/lib/llvm/bin/clang-offload-bundler",
+    "llvm_objcopy": "/opt/rocm/lib/llvm/bin/llvm-objcopy",
+    "llvm_readobj": "/opt/rocm/lib/llvm/bin/llvm-readobj",
+    "llvm_objdump": "/opt/rocm/lib/llvm/bin/llvm-objdump"
   }
 }

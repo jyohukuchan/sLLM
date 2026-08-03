@@ -11,6 +11,7 @@
       "tier": "tier_h3",
       "required": false,
       "target": "gfx1030",
+      "seed": 1030,
       "execution": {
         "mode": "compile-only",
         "requires_gpu": false,
@@ -18,7 +19,25 @@
         "network": false,
         "fallback_allowed": false
       },
-      "cmake": {"generator": "Unix Makefiles", "build_type": "Release", "timeout_seconds": 900},
+      "direct_build": {
+        "driver": "/opt/rocm/bin/amdclang++",
+        "mode": "direct-compile-link",
+        "build_type": "Release",
+        "timeout_seconds": 900,
+        "source_relative_path": "native/hip/src/hip_compile_probe.hip.cpp",
+        "object_pattern": "hip-compile-probe-{target}.o",
+        "link_output_pattern": "hip-compile-probe-{target}.elf",
+        "commands": [
+          ["/opt/rocm/bin/amdclang++", "-D__HIP_ROCclr__=1", "-O3", "-DNDEBUG", "-std=gnu++17", "--offload-arch={target}", "-mcode-object-version=6", "-mno-wavefrontsize64", "-o", "{build_dir}/hip-compile-probe-{target}.o", "-x", "hip", "-c", "{source_path}"],
+          ["/opt/rocm/bin/amdclang++", "-O3", "-DNDEBUG", "--offload-arch={target}", "-mcode-object-version=6", "-mno-wavefrontsize64", "--hip-link", "--rtlib=compiler-rt", "-unwindlib=libgcc", "{build_dir}/hip-compile-probe-{target}.o", "-o", "{build_dir}/hip-compile-probe-{target}.elf", "/opt/rocm/lib/libamdhip64.so"]
+        ]
+      },
+      "resource": {"max_rss_bytes": 4294967296, "max_output_bytes": 16777216},
+      "output": {
+        "root_prefix": "/tmp/ullm-h3-",
+        "directory_pattern": "h3-{target}",
+        "artifact_pattern": "device-code-object-{target}.elf"
+      },
       "codegen": {
         "target": "gfx1030",
         "target_kind": "exact",
@@ -33,6 +52,7 @@
       "tier": "tier_h3",
       "required": false,
       "target": "gfx1201",
+      "seed": 1201,
       "execution": {
         "mode": "compile-only",
         "requires_gpu": false,
@@ -40,7 +60,25 @@
         "network": false,
         "fallback_allowed": false
       },
-      "cmake": {"generator": "Unix Makefiles", "build_type": "Release", "timeout_seconds": 900},
+      "direct_build": {
+        "driver": "/opt/rocm/bin/amdclang++",
+        "mode": "direct-compile-link",
+        "build_type": "Release",
+        "timeout_seconds": 900,
+        "source_relative_path": "native/hip/src/hip_compile_probe.hip.cpp",
+        "object_pattern": "hip-compile-probe-{target}.o",
+        "link_output_pattern": "hip-compile-probe-{target}.elf",
+        "commands": [
+          ["/opt/rocm/bin/amdclang++", "-D__HIP_ROCclr__=1", "-O3", "-DNDEBUG", "-std=gnu++17", "--offload-arch={target}", "-mcode-object-version=6", "-mno-wavefrontsize64", "-o", "{build_dir}/hip-compile-probe-{target}.o", "-x", "hip", "-c", "{source_path}"],
+          ["/opt/rocm/bin/amdclang++", "-O3", "-DNDEBUG", "--offload-arch={target}", "-mcode-object-version=6", "-mno-wavefrontsize64", "--hip-link", "--rtlib=compiler-rt", "-unwindlib=libgcc", "{build_dir}/hip-compile-probe-{target}.o", "-o", "{build_dir}/hip-compile-probe-{target}.elf", "/opt/rocm/lib/libamdhip64.so"]
+        ]
+      },
+      "resource": {"max_rss_bytes": 4294967296, "max_output_bytes": 16777216},
+      "output": {
+        "root_prefix": "/tmp/ullm-h3-",
+        "directory_pattern": "h3-{target}",
+        "artifact_pattern": "device-code-object-{target}.elf"
+      },
       "codegen": {
         "target": "gfx1201",
         "target_kind": "exact",

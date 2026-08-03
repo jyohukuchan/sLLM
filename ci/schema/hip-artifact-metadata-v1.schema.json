@@ -18,6 +18,30 @@
       "format": "date-time",
       "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\\.[0-9]{1,9})?Z$"
     },
+    "execution_environment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "mode", "execution_scope", "container_image_reference",
+        "observed_image_config_digest", "pinned_container", "identity_verified",
+        "network_isolated"
+      ],
+      "properties": {
+        "mode": {"enum": ["required-ci", "local-development"]},
+        "execution_scope": {"enum": ["official-container", "local-system"]},
+        "container_image_reference": {
+          "type": ["string", "null"],
+          "pattern": "^[A-Za-z0-9./_-]+@sha256:[0-9a-f]{64}$"
+        },
+        "observed_image_config_digest": {
+          "type": ["string", "null"],
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "pinned_container": {"type": "boolean"},
+        "identity_verified": {"type": "boolean"},
+        "network_isolated": {"type": "boolean"}
+      }
+    },
     "absolute_source_path": {
       "type": "string",
       "pattern": "^/(?:[A-Za-z0-9._-]+/)*[A-Za-z0-9._-]+$"
@@ -47,14 +71,18 @@
     "resolved_paths": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["rocm_root", "compiler", "hip_headers", "hip_cmake_package", "device_libraries", "hip_runtime"],
+      "required": ["rocm_root", "compiler", "hip_headers", "hip_cmake_package", "device_libraries", "hip_runtime", "clang_offload_bundler", "llvm_objcopy", "llvm_readobj", "llvm_objdump"],
       "properties": {
         "rocm_root": {"const": "/opt/rocm"},
         "compiler": {"const": "/opt/rocm/bin/amdclang++"},
         "hip_headers": {"const": "/opt/rocm/include"},
         "hip_cmake_package": {"const": "/opt/rocm/lib/cmake/hip"},
         "device_libraries": {"const": "/opt/rocm/amdgcn/bitcode"},
-        "hip_runtime": {"const": "/opt/rocm/lib/libamdhip64.so"}
+        "hip_runtime": {"const": "/opt/rocm/lib/libamdhip64.so"},
+        "clang_offload_bundler": {"const": "/opt/rocm/lib/llvm/bin/clang-offload-bundler"},
+        "llvm_objcopy": {"const": "/opt/rocm/lib/llvm/bin/llvm-objcopy"},
+        "llvm_readobj": {"const": "/opt/rocm/lib/llvm/bin/llvm-readobj"},
+        "llvm_objdump": {"const": "/opt/rocm/lib/llvm/bin/llvm-objdump"}
       }
     },
     "codegen": {
@@ -84,8 +112,8 @@
       "additionalProperties": false,
       "required": ["id", "target"],
       "properties": {
-        "id": {"enum": ["hipv4-amdgcn-amd-amdhsa--gfx1030", "hipv4-amdgcn-amd-amdhsa--gfx1201"]},
-        "target": {"enum": ["gfx1030", "gfx1201"]}
+        "id": {"enum": ["hipv4-amdgcn-amd-amdhsa--gfx1030", "hipv4-amdgcn-amd-amdhsa--gfx1201", "host-x86_64-unknown-linux-gnu-"]},
+        "target": {"enum": ["gfx1030", "gfx1201", "host"]}
       }
     },
     "section": {
@@ -112,8 +140,8 @@
         "machine": {"const": "X86_64"},
         "bundles": {
           "type": "array",
-          "minItems": 1,
-          "maxItems": 1,
+          "minItems": 2,
+          "maxItems": 2,
           "items": {"$ref": "#/$defs/host_bundle"}
         },
         "sections": {
@@ -166,6 +194,7 @@
     "schema_version", "metadata_id", "matrix_row_id", "target", "candidate",
     "toolchain_id", "matrix_id", "toolchain_manifest_sha256", "matrix_manifest_sha256",
     "image", "resolved_paths", "build", "codegen", "artifact", "host_bundle", "device_code_object", "scope",
+    "execution_environment",
     "timestamps", "duration_seconds"
   ],
   "properties": {
@@ -195,14 +224,20 @@
       "type": "object",
       "additionalProperties": false,
       "required": [
-        "source_directory", "output_directory", "generator", "build_type",
+        "source_directory", "source_path", "output_directory", "object_path", "link_output_path",
+        "generator", "mode", "build_type", "language_standard",
         "output_directory_scope", "source_tree_output", "shared_build_directory"
       ],
       "properties": {
         "source_directory": {"$ref": "#/$defs/absolute_source_path"},
+        "source_path": {"pattern": "^/(?:workspace|[A-Za-z0-9._+-]+(?:/[A-Za-z0-9._+-]+)*)/native/hip/src/hip_compile_probe\\.hip\\.cpp$", "type": "string"},
         "output_directory": {"pattern": "^/tmp/ullm-h3-[A-Za-z0-9._-]+/h3-gfx(?:1030|1201)$", "type": "string"},
-        "generator": {"const": "Unix Makefiles"},
+        "object_path": {"pattern": "^/tmp/ullm-h3-[A-Za-z0-9._-]+/h3-gfx(?:1030|1201)/hip-compile-probe-gfx(?:1030|1201)\\.o$", "type": "string"},
+        "link_output_path": {"pattern": "^/tmp/ullm-h3-[A-Za-z0-9._-]+/h3-gfx(?:1030|1201)/hip-compile-probe-gfx(?:1030|1201)\\.elf$", "type": "string"},
+        "generator": {"const": "direct-amdclang++"},
+        "mode": {"const": "direct-compile-link"},
         "build_type": {"const": "Release"},
+        "language_standard": {"const": "gnu++17"},
         "output_directory_scope": {"const": "row-private"},
         "source_tree_output": {"const": false},
         "shared_build_directory": {"const": false}
@@ -243,6 +278,7 @@
         "cpu_fallback_used": {"const": false}
       }
     },
+    "execution_environment": {"$ref": "#/$defs/execution_environment"},
     "timestamps": {
       "type": "object",
       "additionalProperties": false,
@@ -254,5 +290,53 @@
       }
     },
     "duration_seconds": {"type": "number", "minimum": 0, "maximum": 900}
-  }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "execution_environment": {
+            "properties": {"mode": {"const": "required-ci"}}
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "execution_environment": {
+            "properties": {
+              "execution_scope": {"const": "official-container"},
+              "container_image_reference": {"const": "docker.io/rocm/dev-ubuntu-24.04@sha256:439edaa8f0c4be4a3728e528f87b8a2ea1f051f34cf10b27caa4bd94f562eda7"},
+              "observed_image_config_digest": {"const": "sha256:4c91c0d850e38a40fd669dd043ab42e9bad9a2b8a38e3f873c5a4eaced9f28cf"},
+              "pinned_container": {"const": true},
+              "identity_verified": {"const": true},
+              "network_isolated": {"const": true}
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "execution_environment": {
+            "properties": {"mode": {"const": "local-development"}}
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "execution_environment": {
+            "properties": {
+              "execution_scope": {"const": "local-system"},
+              "container_image_reference": {"const": null},
+              "observed_image_config_digest": {"const": null},
+              "pinned_container": {"const": false},
+              "identity_verified": {"const": false},
+              "network_isolated": {"const": false}
+            }
+          }
+        }
+      }
+    }
+  ]
 }

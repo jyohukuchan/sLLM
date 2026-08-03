@@ -24,6 +24,29 @@ from common import (  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[2]
 EXPECTED_HOST_ROWS = {"h0": "tier_h0", "h1": "tier_h1", "h2": "tier_h2"}
+H3_SUITE_ID = "h3-compile-only-contract"
+EXPECTED_H3_PATH_RULES = {
+    "ci/tools/aggregate_h3_results.py",
+    "ci/tools/run_h3_compile.py",
+    "ci/tools/validate_h3_contracts.py",
+    "ci/tools/validate_json_manifests.py",
+    "ci/tools/validate_matrix.py",
+    "ci/schema/h3-aggregate-v1.schema.json",
+    "ci/schema/hip-artifact-metadata-v1.schema.json",
+    "ci/schema/rocm-toolchain-v1.schema.json",
+    "ci/schema/test-result-v1.schema.json",
+    "ci/matrix/hip-compile-v1.json",
+    "ci/matrix/suites-v1.json",
+    "ci/matrix/path-to-suite-v1.json",
+    "ci/toolchains/rocm-7.14.0.json",
+    "ci/tests/test_h3_contracts.py",
+    "ci/tests/test_h3_runner.py",
+    "ci/tests/test_h3_aggregate.py",
+    ".github/workflows/h3-compile.yml",
+    "crates/ullm-hip-sys/build.rs",
+    "native/hip/CMakeLists.txt",
+    "native/hip/src/hip_compile_probe.hip.cpp",
+}
 EXPECTED_FIXTURE_SUITES = {
     "tests/fixtures/api_cases.json": {"h0-python", "h1-host-contract"},
     "tests/fixtures/boundary_cases.json": {"h0-python", "h2-tiny-oracle"},
@@ -216,6 +239,16 @@ def main() -> int:
             if suite["tier"] in {"tier_h0", "tier_h1", "tier_h2"} and any(suite["attributes"][key] for key in ("requires_gpu", "requires_model", "network", "quarantined")):
                 raise ContractError(f"required host suite has prohibited attribute: {sid}")
 
+        h3_suite = suite_by_id.get(H3_SUITE_ID)
+        if h3_suite is None:
+            raise ContractError(f"missing independent H3 suite: {H3_SUITE_ID}")
+        if h3_suite["tier"] != "tier_h3" or h3_suite["marker"] != "tier_h3":
+            raise ContractError("H3 compile suite has the wrong tier/marker")
+        if h3_suite["attributes"] != {key: False for key in ALLOWED_ATTRIBUTES}:
+            raise ContractError("H3 compile suite must be model-free, GPU-free, offline, and non-quarantined")
+        if h3_suite["commands"] != [{"command_id": "h3-compile-contract", "argv": ["{python}", "-m", "unittest", "ci.tests.test_h3_contracts", "ci.tests.test_h3_runner", "ci.tests.test_h3_aggregate"]}]:
+            raise ContractError("H3 compile suite command registration drifted")
+
         validate_cargo_toolchain_registration(suites)
 
         rows = {row["row_id"]: row for row in host["rows"]}
@@ -227,6 +260,8 @@ def main() -> int:
             for sid in row["suite_ids"]:
                 if sid not in suite_by_id or suite_by_id[sid]["tier"] != row["tier"]:
                     raise ContractError(f"row {row_id} references unknown/wrong-tier suite {sid}")
+                if sid == H3_SUITE_ID:
+                    raise ContractError("H3 suite must not be registered in host-required rows")
         h1 = suite_by_id["h1-host-contract"]
         h2 = suite_by_id["h2-tiny-oracle"]
         h0_self_test = suite_by_id["h0-self-test"]
@@ -254,6 +289,10 @@ def main() -> int:
                 raise ContractError(f"path rule has zero/duplicate suites: {rule['pattern']}")
             if any(sid not in suite_by_id for sid in rule["suite_ids"]):
                 raise ContractError(f"path rule references unknown suite: {rule['pattern']}")
+        rules_by_pattern = {rule["pattern"]: set(rule["suite_ids"]) for rule in paths["rules"]}
+        for h3_path in EXPECTED_H3_PATH_RULES:
+            if H3_SUITE_ID not in rules_by_pattern.get(h3_path, set()):
+                raise ContractError(f"H3 path is not explicitly registered to {H3_SUITE_ID}: {h3_path}")
 
         declared_markers, marked_files = pytest_markers()
         known_suite_markers = {suite["marker"] for suite in suites["suites"]}

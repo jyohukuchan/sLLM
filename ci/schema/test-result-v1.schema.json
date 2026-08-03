@@ -140,6 +140,89 @@
         "counts": {"$ref": "#/$defs/counts"},
         "resource": {"$ref": "#/$defs/step_resource"}
       }
+    },
+    "h3_toolchain": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["toolchain_id", "manifest_sha256", "rocm", "compiler", "paths", "observed"],
+      "properties": {
+        "toolchain_id": {"const": "rocm-7.14.0"},
+        "manifest_sha256": {"$ref": "#/$defs/sha256"},
+        "rocm": {
+          "type": "object", "additionalProperties": false,
+          "required": ["path", "version", "llvm_major"],
+          "properties": {"path": {"const": "/opt/rocm"}, "version": {"const": "7.14.0"}, "llvm_major": {"const": 23}}
+        },
+        "compiler": {
+          "type": "object", "additionalProperties": false,
+          "required": ["name", "path", "version", "llvm_major"],
+          "properties": {"name": {"const": "amdclang++"}, "path": {"const": "/opt/rocm/bin/amdclang++"}, "version": {"type": "string", "pattern": "^23\\."}, "llvm_major": {"const": 23}}
+        },
+        "paths": {
+          "type": "object", "additionalProperties": false,
+          "required": ["rocm_root", "compiler", "hip_headers", "hip_cmake_package", "device_libraries", "hip_runtime", "clang_offload_bundler", "llvm_objcopy", "llvm_readobj", "llvm_objdump"],
+          "properties": {
+            "rocm_root": {"const": "/opt/rocm"}, "compiler": {"const": "/opt/rocm/bin/amdclang++"}, "hip_headers": {"const": "/opt/rocm/include"},
+            "hip_cmake_package": {"const": "/opt/rocm/lib/cmake/hip"}, "device_libraries": {"const": "/opt/rocm/amdgcn/bitcode"},
+            "hip_runtime": {"const": "/opt/rocm/lib/libamdhip64.so"}, "clang_offload_bundler": {"const": "/opt/rocm/lib/llvm/bin/clang-offload-bundler"}, "llvm_objcopy": {"const": "/opt/rocm/lib/llvm/bin/llvm-objcopy"},
+            "llvm_readobj": {"const": "/opt/rocm/lib/llvm/bin/llvm-readobj"}, "llvm_objdump": {"const": "/opt/rocm/lib/llvm/bin/llvm-objdump"}
+          }
+        },
+        "observed": {
+          "type": "object", "additionalProperties": false,
+          "required": ["compiler_version", "llvm_major", "tools"],
+          "properties": {
+            "compiler_version": {"type": "string", "minLength": 1}, "llvm_major": {"const": 23},
+            "tools": {
+              "type": "object", "additionalProperties": false,
+              "required": ["clang_offload_bundler", "llvm_objcopy", "llvm_readobj", "llvm_objdump"],
+              "properties": {"clang_offload_bundler": {"type": "string", "minLength": 1}, "llvm_objcopy": {"type": "string", "minLength": 1}, "llvm_readobj": {"type": "string", "minLength": 1}, "llvm_objdump": {"type": "string", "minLength": 1}}
+            }
+          }
+        }
+      }
+    },
+    "h3_artifact": {
+      "type": "object", "additionalProperties": false,
+      "required": ["target", "size_bytes", "content_sha256", "metadata_sha256", "metadata_sidecar_sha256", "artifact_sidecar_sha256"],
+      "properties": {
+        "target": {"enum": ["gfx1030", "gfx1201"]}, "size_bytes": {"type": "integer", "minimum": 0},
+        "content_sha256": {"$ref": "#/$defs/sha256"}, "metadata_sha256": {"$ref": "#/$defs/sha256"},
+        "metadata_sidecar_sha256": {"$ref": "#/$defs/sha256"}, "artifact_sidecar_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "h3_scope": {
+      "type": "object", "additionalProperties": false,
+      "required": ["compile_only", "link_verified", "gpu_execution", "execution_attempted", "numerics_verified", "model_verified", "performance_verified", "support_claim", "network_used", "model_used", "cpu_fallback_used"],
+      "properties": {
+        "compile_only": {"const": true}, "link_verified": {"type": "boolean"}, "gpu_execution": {"const": false}, "execution_attempted": {"const": false},
+        "numerics_verified": {"const": false}, "model_verified": {"const": false}, "performance_verified": {"const": false}, "support_claim": {"const": false},
+        "network_used": {"const": false}, "model_used": {"const": false}, "cpu_fallback_used": {"const": false}
+      }
+    },
+    "execution_environment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "mode", "execution_scope", "container_image_reference",
+        "observed_image_config_digest", "pinned_container", "identity_verified",
+        "network_isolated"
+      ],
+      "properties": {
+        "mode": {"enum": ["required-ci", "local-development"]},
+        "execution_scope": {"enum": ["official-container", "local-system"]},
+        "container_image_reference": {
+          "type": ["string", "null"],
+          "pattern": "^[A-Za-z0-9./_-]+@sha256:[0-9a-f]{64}$"
+        },
+        "observed_image_config_digest": {
+          "type": ["string", "null"],
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "pinned_container": {"type": "boolean"},
+        "identity_verified": {"type": "boolean"},
+        "network_isolated": {"type": "boolean"}
+      }
     }
   },
   "properties": {
@@ -212,7 +295,8 @@
           "minProperties": 1,
           "propertyNames": {"pattern": "^[a-z0-9][a-z0-9-]*$"},
           "additionalProperties": {"type": "string", "minLength": 1}
-        }
+        },
+        "h3": {"$ref": "#/$defs/h3_toolchain"}
       }
     },
     "toolchain_sha256": {"$ref": "#/$defs/sha256"},
@@ -225,6 +309,9 @@
         "manifest_sha256": {"$ref": "#/$defs/sha256"}
       }
     },
+    "h3_artifact": {"$ref": "#/$defs/h3_artifact"},
+    "h3_scope": {"$ref": "#/$defs/h3_scope"},
+    "execution_environment": {"$ref": "#/$defs/execution_environment"},
     "created_at": {"type": "string", "format": "date-time"},
     "started_at": {"type": "string", "format": "date-time"},
     "finished_at": {"type": "string", "format": "date-time"},
@@ -266,7 +353,7 @@
         "errors": {"type": "array", "items": {"type": "string"}},
         "warnings": {"type": "array", "items": {"type": "string"}},
         "output_dir": {"type": "string"},
-        "network_disabled": {"const": true},
+        "network_disabled": {"type": "boolean"},
         "model_disabled": {"const": true},
         "gpu_fallback_disabled": {"const": true},
         "network_guard_self_test": {"type": "boolean"}
@@ -342,9 +429,88 @@
               "tier_p0", "tier_p1"
             ]
           }
-        }
+      }
       },
       "then": {"required": ["gpu"]}
+    },
+    {
+      "if": {"properties": {"tier": {"const": "tier_h3"}}},
+      "then": {
+        "required": ["h3_artifact", "h3_scope", "execution_environment"],
+        "properties": {
+          "required": {"const": false},
+          "toolchain": {"required": ["h3"]}
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "tier": {"const": "tier_h3"},
+          "state": {"const": "PASS"},
+          "evidence_mode": {"const": "required-ci"}
+        }
+      },
+      "then": {
+        "properties": {
+          "h3_scope": {"properties": {"link_verified": {"const": true}}},
+          "execution_environment": {
+            "properties": {
+              "mode": {"const": "required-ci"},
+              "execution_scope": {"const": "official-container"},
+              "pinned_container": {"const": true},
+              "identity_verified": {"const": true},
+              "network_isolated": {"const": true},
+              "container_image_reference": {"const": "docker.io/rocm/dev-ubuntu-24.04@sha256:439edaa8f0c4be4a3728e528f87b8a2ea1f051f34cf10b27caa4bd94f562eda7"},
+              "observed_image_config_digest": {"const": "sha256:4c91c0d850e38a40fd669dd043ab42e9bad9a2b8a38e3f873c5a4eaced9f28cf"}
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "tier": {"const": "tier_h3"},
+          "state": {"const": "PASS"},
+          "evidence_mode": {"const": "local-development"}
+        }
+      },
+      "then": {
+        "properties": {
+          "execution_environment": {
+            "properties": {
+              "execution_scope": {"const": "local-system"},
+              "container_image_reference": {"const": null},
+              "observed_image_config_digest": {"const": null},
+              "pinned_container": {"const": false},
+              "identity_verified": {"const": false},
+              "network_isolated": {"const": false}
+            }
+          },
+          "diagnostic": {
+            "properties": {
+              "network_disabled": {"const": false}
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "tier": {"enum": ["tier_h0", "tier_h1", "tier_h2"]}
+        }
+      },
+      "then": {
+        "properties": {
+          "diagnostic": {
+            "properties": {
+              "network_disabled": {"const": true}
+            }
+          }
+        }
+      }
     }
   ]
 }

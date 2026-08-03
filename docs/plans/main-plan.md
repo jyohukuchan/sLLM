@@ -295,7 +295,7 @@
 
 ## 現在の状態と次の作業
 
-- 現在: Phase 1を完了し、Phase 2のbootstrap gate同期とH3静的contractを実装済み。次は固定contractに従ってCMake/build接続、exact `gfx1030`/`gfx1201` H3 compile-only、artifact生成・集約を実装する。
+- 現在: Phase 1を完了し、Phase 2のbootstrap gate同期、H3静的contract、CMake/build接続、固定image内`amdclang++`によるexact `gfx1030`/`gfx1201` compile-only runner、artifact検査・fail-closed集約、non-required workflowを実装済み。次は同一immutable candidateをdigest固定ROCm imageで検証してH3観測を開始し、待機せずG0へ進む。
 - 完了:
   - プロジェクトライセンスをMITへ統一。
   - Qwen3.5のMTP表記とBF16階層の矛盾を修正。
@@ -317,11 +317,12 @@
   - GitHub-hosted CPUだけを使う`host-required` workflowを追加し、official Actionsを完全commit SHAへ固定。H3/GPU/self-hosted runnerは含めていない。
   - Phase 2 bootstrap gateを変更scope別へ整理し、H3 required昇格観測をG0/model-free pathと並行する正本へ同期。
   - 公式ROCm 7.14.0 imageをimmutable digestで固定し、exact `gfx1030`/`gfx1201`のnon-required H3 matrix、host bundleと抽出device code objectを分離したartifact metadata schema、fail-closed validatorとnegative testを追加。
+  - 明示HIP CMake pathと、固定image内のpinned `amdclang++`だけを使うH3 direct compile/link runnerを追加し、bundle保持host objectからdevice code objectを抽出してCode Object V6、target別ELF flags、wave32、symbol、artifact/sidecar identityを検査する経路を構築。
+  - H3 2 rowのreport・metadata・device artifact・sidecar・candidate identityをfail-closed集約する独立checkと、digest/configを検査したROCm containerを`--network none`で使うnon-required workflowを追加。GPUまたは生成executableは実行しない。
 - 次:
-  1. 固定toolchain contractへCMake/buildを接続し、exact `gfx1030`/`gfx1201`のH3 compile-onlyとartifact生成・集約を実装する。
-  2. H3をnon-requiredで継続実行し、required昇格観測を開始する。
-  3. H3観測と並行して、専用local hostのGPU evidence実行・集約とG0 preflightを構築する。
-  4. canonical `gfx1030`/`gfx1201`でmodel-free最小GPU実行経路を同一candidate SHAに対して検証する。
+  1. H3実装を同一immutable candidateとしてdigest固定ROCm imageのexact 2 rowで検証し、non-required観測を開始する。
+  2. H3観測と並行して、専用local hostのGPU evidence実行・集約とG0 preflightを構築する。
+  3. canonical `gfx1030`/`gfx1201`でmodel-free最小GPU実行経路を同一candidate SHAに対して検証する。
 
 ## 未解決事項
 

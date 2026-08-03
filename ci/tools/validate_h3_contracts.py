@@ -26,9 +26,25 @@ BUNDLE_IDS = {
     "gfx1030": "hipv4-amdgcn-amd-amdhsa--gfx1030",
     "gfx1201": "hipv4-amdgcn-amd-amdhsa--gfx1201",
 }
+HOST_BUNDLE_ID = "host-x86_64-unknown-linux-gnu-"
+PINNED_IMAGE_REFERENCE = "docker.io/rocm/dev-ubuntu-24.04@sha256:439edaa8f0c4be4a3728e528f87b8a2ea1f051f34cf10b27caa4bd94f562eda7"
 DEVICE_E_FLAGS = {
     "gfx1030": "0x00000036",
     "gfx1201": "0x0000004e",
+}
+H3_SEEDS = {"gfx1030": 1030, "gfx1201": 1201}
+DIRECT_BUILD = {
+    "driver": "/opt/rocm/bin/amdclang++",
+    "mode": "direct-compile-link",
+    "build_type": "Release",
+    "timeout_seconds": 900,
+    "source_relative_path": "native/hip/src/hip_compile_probe.hip.cpp",
+    "object_pattern": "hip-compile-probe-{target}.o",
+    "link_output_pattern": "hip-compile-probe-{target}.elf",
+    "commands": [
+        ["/opt/rocm/bin/amdclang++", "-D__HIP_ROCclr__=1", "-O3", "-DNDEBUG", "-std=gnu++17", "--offload-arch={target}", "-mcode-object-version=6", "-mno-wavefrontsize64", "-o", "{build_dir}/hip-compile-probe-{target}.o", "-x", "hip", "-c", "{source_path}"],
+        ["/opt/rocm/bin/amdclang++", "-O3", "-DNDEBUG", "--offload-arch={target}", "-mcode-object-version=6", "-mno-wavefrontsize64", "--hip-link", "--rtlib=compiler-rt", "-unwindlib=libgcc", "{build_dir}/hip-compile-probe-{target}.o", "-o", "{build_dir}/hip-compile-probe-{target}.elf", "/opt/rocm/lib/libamdhip64.so"],
+    ],
 }
 IMAGE_KEYS = (
     "repository", "tag", "manifest_digest", "config_digest",
@@ -36,7 +52,8 @@ IMAGE_KEYS = (
 )
 PATH_KEYS = (
     "rocm_root", "compiler", "hip_headers", "hip_cmake_package",
-    "device_libraries", "hip_runtime",
+    "device_libraries", "hip_runtime", "clang_offload_bundler", "llvm_objcopy",
+    "llvm_readobj", "llvm_objdump",
 )
 
 
@@ -121,6 +138,9 @@ def _validate_toolchain_invariants(toolchain: dict[str, Any]) -> None:
         value = PurePosixPath(toolchain["paths"][key])
         if value != root and root not in value.parents:
             raise ContractError(f"resolved path is outside the canonical ROCm root: {key}")
+    for key in ("clang_offload_bundler", "llvm_objcopy", "llvm_readobj", "llvm_objdump"):
+        if PurePosixPath(toolchain["paths"][key]).parent.name != "bin":
+            raise ContractError(f"LLVM inspector is not in the ROCm LLVM bin directory: {key}")
 
 
 def _validate_matrix_invariants(matrix: dict[str, Any], toolchain: dict[str, Any]) -> dict[str, dict[str, Any]]:
@@ -142,6 +162,8 @@ def _validate_matrix_invariants(matrix: dict[str, Any], toolchain: dict[str, Any
             raise ContractError(f"duplicate H3 target: {target}")
         if target not in EXPECTED_TARGETS or row_id != f"h3-{target}":
             raise ContractError(f"H3 row identity does not match its exact target: {row_id}/{target}")
+        if row["seed"] != H3_SEEDS[target]:
+            raise ContractError(f"H3 row seed is not bound to its exact target: {row_id}")
         if row["tier"] != "tier_h3" or row["required"] is not False:
             raise ContractError(f"H3 row is not explicitly non-required: {row_id}")
         execution = row["execution"]
@@ -153,8 +175,16 @@ def _validate_matrix_invariants(matrix: dict[str, Any], toolchain: dict[str, Any
             "fallback_allowed": False,
         }:
             raise ContractError(f"H3 row has an execution capability outside compile-only scope: {row_id}")
-        if row["cmake"] != {"generator": "Unix Makefiles", "build_type": "Release", "timeout_seconds": 900}:
-            raise ContractError(f"H3 row has non-canonical CMake contract: {row_id}")
+        if row["direct_build"] != DIRECT_BUILD:
+            raise ContractError(f"H3 row has a non-canonical direct amdclang++ contract: {row_id}")
+        if row["resource"] != {"max_rss_bytes": 4294967296, "max_output_bytes": 16777216}:
+            raise ContractError(f"H3 row has non-canonical resource limits: {row_id}")
+        if row["output"] != {
+            "root_prefix": "/tmp/ullm-h3-",
+            "directory_pattern": "h3-{target}",
+            "artifact_pattern": "device-code-object-{target}.elf",
+        }:
+            raise ContractError(f"H3 row has non-canonical private output contract: {row_id}")
         codegen = row["codegen"]
         if codegen["target"] != target or codegen["target_kind"] != "exact" or codegen["target_count"] != 1:
             raise ContractError(f"H3 row target is missing, generic, or multi-target: {row_id}")
@@ -220,13 +250,38 @@ def _validate_artifact_invariants(
     host_bundle = metadata["host_bundle"]
     if host_bundle["format"] != "ELF64" or host_bundle["machine"] != "X86_64":
         raise ContractError("host bundle ELF identity must be ELF64/X86_64")
-    if len(host_bundle["bundles"]) != 1:
-        raise ContractError("host bundle evidence must contain exactly one bundle")
-    bundle = host_bundle["bundles"][0]
-    if bundle["target"] != target or bundle["id"] != BUNDLE_IDS[target]:
-        raise ContractError("host bundle identity does not match the exact H3 target")
+    expected_bundles = [
+        {"id": BUNDLE_IDS[target], "target": target},
+        {"id": HOST_BUNDLE_ID, "target": "host"},
+    ]
+    if host_bundle["bundles"] != expected_bundles:
+        raise ContractError("host bundle list is not the exact device/host order")
     if not host_bundle["sections"][".hip_fatbin"]["present"]:
         raise ContractError("host bundle evidence does not prove .hip_fatbin")
+
+    environment = metadata["execution_environment"]
+    if environment["mode"] == "required-ci":
+        expected_environment = {
+            "mode": "required-ci",
+            "execution_scope": "official-container",
+            "container_image_reference": PINNED_IMAGE_REFERENCE,
+            "observed_image_config_digest": "sha256:4c91c0d850e38a40fd669dd043ab42e9bad9a2b8a38e3f873c5a4eaced9f28cf",
+            "pinned_container": True,
+            "identity_verified": True,
+            "network_isolated": True,
+        }
+    else:
+        expected_environment = {
+            "mode": "local-development",
+            "execution_scope": "local-system",
+            "container_image_reference": None,
+            "observed_image_config_digest": None,
+            "pinned_container": False,
+            "identity_verified": False,
+            "network_isolated": False,
+        }
+    if environment != expected_environment:
+        raise ContractError("H3 execution environment does not match its evidence mode")
 
     device = metadata["device_code_object"]
     if (
@@ -248,15 +303,27 @@ def _validate_artifact_invariants(
         raise ContractError("device code object features do not match the measured unsupported tuple")
     if not device["sections"][".text"]["present"]:
         raise ContractError("device code object does not prove .text")
-    if not device["symbols"]:
-        raise ContractError("device code object has no defined symbols")
+    if not device["symbols"] or not any(
+        symbol["name"] == "ullm_hip_compile_probe" and symbol["defined"]
+        for symbol in device["symbols"]
+    ):
+        raise ContractError("device code object has no defined compile-probe symbol")
     build = metadata["build"]
     source = PurePosixPath(build["source_directory"])
+    source_path = PurePosixPath(build["source_path"])
     output = PurePosixPath(build["output_directory"])
     if _path_is_within(output, source):
         raise ContractError("H3 output directory is inside the source tree")
+    if source_path != source / row["direct_build"]["source_relative_path"]:
+        raise ContractError("H3 direct compile source path does not match its row contract")
     if output.name != f"h3-{target}" or build["output_directory_scope"] != "row-private":
         raise ContractError("H3 output directory is not private to its exact row")
+    expected_object = output / row["direct_build"]["object_pattern"].replace("{target}", target)
+    expected_link = output / row["direct_build"]["link_output_pattern"].replace("{target}", target)
+    if PurePosixPath(build["object_path"]) != expected_object or PurePosixPath(build["link_output_path"]) != expected_link:
+        raise ContractError("H3 direct compile/link outputs do not match the exact target row")
+    if build["generator"] != "direct-amdclang++" or build["mode"] != "direct-compile-link" or build["build_type"] != "Release" or build["language_standard"] != "gnu++17":
+        raise ContractError("H3 metadata build record does not identify direct amdclang++ Release compilation")
     if build["source_tree_output"] is not False or build["shared_build_directory"] is not False:
         raise ContractError("H3 source-tree/shared-build output is forbidden")
     artifact_path = PurePosixPath(metadata["artifact"]["path"])

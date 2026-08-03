@@ -15,5 +15,10 @@
 - H3 matrixをexact `gfx1030`/`gfx1201`の2 row、Code Object V6、wave32、`xnack`/`sramecc=unsupported`、non-required、compile-onlyとして固定した。
 - HIP artifact metadataをhost側のx86-64 offload bundleと抽出後のAMDGPU device code objectへ分離し、bundle identity、target別ELF ABI/e_flags、candidate SHA/tree、manifest hash、artifact size/hash、row-private build path、非実行scopeをfail-closed検証するschemaとvalidatorを追加した。
 - tag-only/`latest`、digest/platform/root/version/LLVM不一致、missing/duplicate/unknown/generic/multiple/wrong target、required化、codegen不一致、target差し替え、stale identity/hash、source/shared build出力、誇張した実行scopeを拒否するnegative testを追加し、255/256/257 byte境界も確認した。この作業単位は静的contractだけであり、H3 compile、GPU実行、数値・model・性能evidenceはまだ生成していない。
+- 明示optionでだけ有効になるHIP CMake OBJECT/link pathとCargo build接続を追加し、host-only既定経路を維持した。
+- exact `gfx1030`/`gfx1201`を独立compileするH3 runnerを追加した。固定ROCm imageにはCMakeが含まれないため、H3 evidenceではhostのCMakeとlibraryを持ち込まず、image内のpinned `amdclang++`によるcanonical 2 commandのdirect compile/linkを使う。bundle保持host objectの`.hip_fatbin`からdevice ELFを抽出して、Code Object V6、target別e_flags、wave32、定義symbolを同一ROCm rootのLLVM toolsで検査する。明示HIP CMake/Cargo接続は別のbuild pathとして維持し、local systemで両targetがcompile-only PASSしており、生成executableとGPUは実行していない。
+- report、metadata、device artifactと全sidecar、candidate SHA/tree、run identity、toolchain/matrix hashをexact 2 rowで照合するfail-closed aggregate contractとnegative testを追加した。
+- H3を`host-required`から分離したnon-required workflowとして追加した。workflowはmanifest/config digestを検査したROCm imageをsource read-only、row-private output、`--network none`、GPU device/socketなしで起動し、runner自身もloopback以外のinterfaceと外部到達可能なdefault routeの不在を確認する。imageにGitが含まれないため、candidate identity検査専用にUbuntu 24.04 hostの`/usr/bin/git`だけをexact pathへread-only mountし、実測versionをreportへ記録するがROCm toolchain identityには含めない。
+- H3 contract/runner/aggregateの20 test、JSON/schema/workflow validator、matrix validator、Cargo workspace test、local exact 2 target compile-onlyがPASSした。正式なH3 evidenceは同一immutable candidateをdigest固定imageで再検証してから記録する。
 
 [対応する計画](../../../../plans/active/2026/08/1-10/phase2-h3-g0-model-free-gpu.md)
