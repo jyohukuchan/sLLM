@@ -56,7 +56,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--repo", type=Path, default=ROOT)
     parser.add_argument("--output", type=Path)
-    parser.add_argument("--base", default=os.environ.get("ULLM_H0_BASE_SHA"))
+    parser.add_argument("--base", default=os.environ.get("SLLM_H0_BASE_SHA"))
     args = parser.parse_args(argv)
     repo = args.repo.resolve()
     errors: list[str] = []

@@ -40,7 +40,7 @@ jobs:
           REVIEWED_SHA: ${{ github.sha }}
           TESTED_SHA: ${{ github.sha }}
           WORKFLOW_SHA: ${{ github.sha }}
-          ULLM_H3_NETWORK_DISABLED: "1"
+          SLLM_H3_NETWORK_DISABLED: "1"
           RUN_ID: ${{ github.run_id }}
           RUN_ATTEMPT: ${{ github.run_attempt }}
         run: |
@@ -57,7 +57,7 @@ jobs:
             --env HOME=/tmp/h3-home \
             --env REVIEWED_SHA --env TESTED_SHA --env WORKFLOW_SHA \
             --env RUN_ID --env RUN_ATTEMPT \
-            --env ULLM_H3_NETWORK_DISABLED --env H3_IMAGE_REFERENCE --env H3_IMAGE_CONFIG_DIGEST \
+            --env SLLM_H3_NETWORK_DISABLED --env H3_IMAGE_REFERENCE --env H3_IMAGE_CONFIG_DIGEST \
             --workdir /workspace \
             "$H3_IMAGE_REFERENCE" /bin/bash -eu -o pipefail -c '
               mkdir -p "$HOME"
@@ -107,7 +107,7 @@ jobs:
           REVIEWED_SHA: ${{ github.sha }}
           TESTED_SHA: ${{ github.sha }}
           WORKFLOW_SHA: ${{ github.sha }}
-          ULLM_H3_NETWORK_DISABLED: "1"
+          SLLM_H3_NETWORK_DISABLED: "1"
           RUN_ID: ${{ github.run_id }}
           RUN_ATTEMPT: ${{ github.run_attempt }}
         run: |
@@ -124,7 +124,7 @@ jobs:
             --env HOME=/tmp/h3-home \
             --env REVIEWED_SHA --env TESTED_SHA --env WORKFLOW_SHA \
             --env RUN_ID --env RUN_ATTEMPT \
-            --env ULLM_H3_NETWORK_DISABLED --env H3_IMAGE_REFERENCE --env H3_IMAGE_CONFIG_DIGEST \
+            --env SLLM_H3_NETWORK_DISABLED --env H3_IMAGE_REFERENCE --env H3_IMAGE_CONFIG_DIGEST \
             --workdir /workspace \
             "$H3_IMAGE_REFERENCE" /bin/bash -eu -o pipefail -c '
               mkdir -p "$HOME"

@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://ullm-project.local/ci/schema/g0-preflight-v1.schema.json",
-  "title": "uLLM trusted-local G0 preflight contracts v1",
+  "$id": "https://sllm-project.local/ci/schema/g0-preflight-v1.schema.json",
+  "title": "sLLM trusted-local G0 preflight contracts v1",
   "$defs": {
     "sha40": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
     "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
@@ -36,7 +36,7 @@
       "additionalProperties": false,
       "required": ["$schema", "schema_version", "matrix_id", "revision", "tier", "required", "toolchain_id", "artifact_matrix_id", "execution", "scope", "output", "rows"],
       "properties": {
-        "$schema": {"const": "https://ullm-project.local/ci/schema/g0-preflight-v1.schema.json#/$defs/gpu_runtime_matrix"},
+        "$schema": {"const": "https://sllm-project.local/ci/schema/g0-preflight-v1.schema.json#/$defs/gpu_runtime_matrix"},
         "schema_version": {"const": "gpu-runtime-v1"},
         "matrix_id": {"const": "gpu-runtime-v1"},
         "revision": {"type": "integer", "minimum": 1},
@@ -52,7 +52,7 @@
             "host_lock": {
               "type": "object", "additionalProperties": false,
               "required": ["path", "acquisition"],
-              "properties": {"path": {"const": "/tmp/ullm-g0.lock"}, "acquisition": {"const": "nonblocking"}}
+              "properties": {"path": {"const": "/tmp/sllm-g0.lock"}, "acquisition": {"const": "nonblocking"}}
             },
             "trusted_local_only": {"const": true},
             "visibility_is_security_boundary": {"const": false},
@@ -67,7 +67,7 @@
                 "provider_id": {"const": "g0-native-hip-observer-v1"},
                 "source": {"const": "ci/tools/g0_native_observer.cpp"},
                 "compiler": {"const": "/opt/rocm/core-7.14/bin/amdclang++"},
-                "output_prefix": {"const": "/tmp/ullm-g0-provider-"},
+                "output_prefix": {"const": "/tmp/sllm-g0-provider-"},
                 "timeout_seconds": {"const": 60},
                 "allowed_hip_apis": {
                   "const": ["hipRuntimeGetVersion", "hipGetDeviceCount", "hipGetDeviceProperties", "hipDeviceGetPCIBusId", "hipDeviceGetUuid"]
@@ -103,7 +103,7 @@
           "type": "object", "additionalProperties": false,
           "required": ["root_prefix", "directory_pattern", "source_tree_output", "sidecar_hashes"],
           "properties": {
-            "root_prefix": {"const": "/tmp/ullm-g0-"},
+            "root_prefix": {"const": "/tmp/sllm-g0-"},
             "directory_pattern": {"const": "g0-{target}"},
             "source_tree_output": {"const": false},
             "sidecar_hashes": {"const": true}

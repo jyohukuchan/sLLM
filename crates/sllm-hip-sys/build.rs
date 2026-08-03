@@ -31,8 +31,8 @@ fn capture(command: &mut Command, description: &str) -> String {
 fn main() {
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let source_dir = manifest_dir.join("../../native/hip");
-    let header = manifest_dir.join("../../include/ullm/hip.h");
-    let umbrella_header = manifest_dir.join("../../include/ullm/ullm.h");
+    let header = manifest_dir.join("../../include/sllm/hip.h");
+    let umbrella_header = manifest_dir.join("../../include/sllm/sllm.h");
     let source = source_dir.join("src/hip_stub.cpp");
     let evidence_header = source_dir.join("src/evidence_abi.h");
     let evidence_stub = source_dir.join("src/hip_evidence_stub.cpp");
@@ -58,33 +58,33 @@ fn main() {
     println!("cargo:rerun-if-changed={}", cmake_file.display());
     println!("cargo:rerun-if-env-changed=ROCM_PATH");
     println!("cargo:rerun-if-env-changed=CMAKE_HIP_ARCHITECTURES");
-    println!("cargo:rerun-if-env-changed=ULLM_HIP_CODEGEN_FEATURES");
-    println!("cargo:rerun-if-env-changed=ULLM_ENABLE_HIP_COMPILE_PROBE");
-    println!("cargo:rerun-if-env-changed=ULLM_ENABLE_HIP_RUNTIME");
-    println!("cargo:rerun-if-env-changed=ULLM_HIP_COMPILER");
+    println!("cargo:rerun-if-env-changed=SLLM_HIP_CODEGEN_FEATURES");
+    println!("cargo:rerun-if-env-changed=SLLM_ENABLE_HIP_COMPILE_PROBE");
+    println!("cargo:rerun-if-env-changed=SLLM_ENABLE_HIP_RUNTIME");
+    println!("cargo:rerun-if-env-changed=SLLM_HIP_COMPILER");
     println!("cargo:rerun-if-env-changed=CXX");
 
     let profile = env::var("PROFILE").expect("Cargo must provide PROFILE");
-    let hip_probe = match env::var("ULLM_ENABLE_HIP_COMPILE_PROBE") {
+    let hip_probe = match env::var("SLLM_ENABLE_HIP_COMPILE_PROBE") {
         Ok(value) if value == "1" || value.eq_ignore_ascii_case("on") => true,
         Ok(value) if value == "0" || value.eq_ignore_ascii_case("off") => false,
         Ok(value) => {
-            panic!("ULLM_ENABLE_HIP_COMPILE_PROBE must be unset, 0/OFF, or 1/ON; got {value}")
+            panic!("SLLM_ENABLE_HIP_COMPILE_PROBE must be unset, 0/OFF, or 1/ON; got {value}")
         }
         Err(env::VarError::NotPresent) => false,
-        Err(error) => panic!("cannot read ULLM_ENABLE_HIP_COMPILE_PROBE: {error}"),
+        Err(error) => panic!("cannot read SLLM_ENABLE_HIP_COMPILE_PROBE: {error}"),
     };
     let hip_configuration = if hip_probe {
         Some(validate_hip_environment(&profile, "H3 compile probe"))
     } else {
         None
     };
-    let hip_runtime = match env::var("ULLM_ENABLE_HIP_RUNTIME") {
+    let hip_runtime = match env::var("SLLM_ENABLE_HIP_RUNTIME") {
         Ok(value) if value == "1" => true,
         Ok(value) if value == "0" => false,
-        Ok(value) => panic!("ULLM_ENABLE_HIP_RUNTIME must be unset, 0, or exactly 1; got {value}"),
+        Ok(value) => panic!("SLLM_ENABLE_HIP_RUNTIME must be unset, 0, or exactly 1; got {value}"),
         Err(env::VarError::NotPresent) => false,
-        Err(error) => panic!("cannot read ULLM_ENABLE_HIP_RUNTIME: {error}"),
+        Err(error) => panic!("cannot read SLLM_ENABLE_HIP_RUNTIME: {error}"),
     };
     let hip_configuration = if hip_runtime {
         Some(hip_configuration.unwrap_or_else(|| validate_hip_environment(&profile, "HIP runtime")))
@@ -121,26 +121,26 @@ fn main() {
                 configuration.target
             ))
             .arg(format!(
-                "-DULLM_HIP_COMPILE_TARGET={}",
+                "-DSLLM_HIP_COMPILE_TARGET={}",
                 configuration.target
             ))
             .arg(format!(
-                "-DULLM_HIP_CODEGEN_FEATURES={}",
+                "-DSLLM_HIP_CODEGEN_FEATURES={}",
                 configuration.codegen_features
             ));
         configure.arg(if hip_probe {
-            "-DULLM_ENABLE_HIP_COMPILE_PROBE=ON"
+            "-DSLLM_ENABLE_HIP_COMPILE_PROBE=ON"
         } else {
-            "-DULLM_ENABLE_HIP_COMPILE_PROBE=OFF"
+            "-DSLLM_ENABLE_HIP_COMPILE_PROBE=OFF"
         });
         configure.arg(if hip_runtime {
-            "-DULLM_ENABLE_HIP_RUNTIME=ON"
+            "-DSLLM_ENABLE_HIP_RUNTIME=ON"
         } else {
-            "-DULLM_ENABLE_HIP_RUNTIME=OFF"
+            "-DSLLM_ENABLE_HIP_RUNTIME=OFF"
         });
     } else {
-        configure.arg("-DULLM_ENABLE_HIP_COMPILE_PROBE=OFF");
-        configure.arg("-DULLM_ENABLE_HIP_RUNTIME=OFF");
+        configure.arg("-DSLLM_ENABLE_HIP_COMPILE_PROBE=OFF");
+        configure.arg("-DSLLM_ENABLE_HIP_RUNTIME=OFF");
     }
     if let Some(cxx) = env::var_os("CXX") {
         configure.arg(format!("-DCMAKE_CXX_COMPILER={}", cxx.to_string_lossy()));
@@ -152,7 +152,7 @@ fn main() {
         .arg("--build")
         .arg(&build_dir)
         .arg("--target")
-        .arg("ullm_hip_stub");
+        .arg("sllm_hip_stub");
     run(&mut build, "CMake build");
     if hip_probe {
         let mut probe_build = Command::new("cmake");
@@ -160,7 +160,7 @@ fn main() {
             .arg("--build")
             .arg(&build_dir)
             .arg("--target")
-            .arg("ullm_hip_compile_probe_link");
+            .arg("sllm_hip_compile_probe_link");
         run(&mut probe_build, "HIP compile/link probe build");
     }
 
@@ -172,7 +172,7 @@ fn main() {
     );
     verify_checked_in_bindings(&manifest_dir, &layout_probe, &bindings, &out_dir);
     println!("cargo:rustc-link-search=native={}", build_dir.display());
-    println!("cargo:rustc-link-lib=static=ullm_hip_stub");
+    println!("cargo:rustc-link-lib=static=sllm_hip_stub");
     if hip_runtime {
         let runtime_rocm_lib = hip_configuration
             .as_ref()
@@ -212,7 +212,7 @@ fn validate_hip_environment(profile: &str, purpose: &str) -> HipConfiguration {
         )
     });
 
-    let compiler = required_absolute_path("ULLM_HIP_COMPILER");
+    let compiler = required_absolute_path("SLLM_HIP_COMPILER");
     assert_eq!(
         compiler,
         rocm_path.join("bin/amdclang++"),
@@ -256,8 +256,8 @@ fn validate_hip_environment(profile: &str, purpose: &str) -> HipConfiguration {
         "H3 target must not contain multiple or generic architectures"
     );
 
-    let codegen_features = env::var("ULLM_HIP_CODEGEN_FEATURES")
-        .unwrap_or_else(|_| panic!("H3 requires ULLM_HIP_CODEGEN_FEATURES"));
+    let codegen_features = env::var("SLLM_HIP_CODEGEN_FEATURES")
+        .unwrap_or_else(|_| panic!("H3 requires SLLM_HIP_CODEGEN_FEATURES"));
     assert_eq!(
         codegen_features,
         "co_v6,wave32,xnack=unsupported,sramecc=unsupported,generic_processor_version=0",
@@ -334,7 +334,7 @@ fn verify_checked_in_bindings(
     out_dir: &Path,
 ) {
     let cxx = env::var_os("CXX").unwrap_or_else(|| "c++".into());
-    let cxx_probe = out_dir.join("ullm-abi-layout-cxx");
+    let cxx_probe = out_dir.join("sllm-abi-layout-cxx");
     let cxx_output = capture(
         Command::new(&cxx)
             .arg("-std=c++17")
@@ -351,8 +351,8 @@ fn verify_checked_in_bindings(
     assert!(cxx_output.is_empty(), "C++ ABI probe compiler wrote stdout");
     let c_layout = capture(&mut Command::new(&cxx_probe), "C++ ABI layout probe");
 
-    let rust_probe_source = out_dir.join("ullm-abi-layout-rust.rs");
-    let rust_probe_binary = out_dir.join("ullm-abi-layout-rust");
+    let rust_probe_source = out_dir.join("sllm-abi-layout-rust.rs");
+    let rust_probe_binary = out_dir.join("sllm-abi-layout-rust");
     let bindings_path = bindings
         .canonicalize()
         .unwrap_or_else(|error| panic!("cannot resolve {}: {error}", bindings.display()));
@@ -360,26 +360,26 @@ fn verify_checked_in_bindings(
         "#[path = {:?}] mod bindings;\n\
          use std::mem::{{align_of, offset_of, size_of}};\n\
          fn main() {{\n\
-             println!(\"const ULLM_HIP_ABI_VERSION={{}}\", bindings::ULLM_HIP_ABI_VERSION);\n\
-             println!(\"const ULLM_HIP_LIBRARY_VERSION_MAJOR={{}}\", bindings::ULLM_HIP_LIBRARY_VERSION_MAJOR);\n\
-             println!(\"const ULLM_HIP_LIBRARY_VERSION_MINOR={{}}\", bindings::ULLM_HIP_LIBRARY_VERSION_MINOR);\n\
-             println!(\"const ULLM_HIP_LIBRARY_VERSION_PATCH={{}}\", bindings::ULLM_HIP_LIBRARY_VERSION_PATCH);\n\
-             println!(\"const ULLM_STATUS_OK={{}}\", bindings::ULLM_STATUS_OK);\n\
-             println!(\"const ULLM_STATUS_INVALID_ARGUMENT={{}}\", bindings::ULLM_STATUS_INVALID_ARGUMENT);\n\
-             println!(\"const ULLM_STATUS_BUFFER_TOO_SMALL={{}}\", bindings::ULLM_STATUS_BUFFER_TOO_SMALL);\n\
-             println!(\"const ULLM_STATUS_UNSUPPORTED={{}}\", bindings::ULLM_STATUS_UNSUPPORTED);\n\
-             println!(\"const ULLM_STATUS_HIP_UNAVAILABLE={{}}\", bindings::ULLM_STATUS_HIP_UNAVAILABLE);\n\
-             println!(\"const ULLM_STATUS_INVALID_ABI_VERSION={{}}\", bindings::ULLM_STATUS_INVALID_ABI_VERSION);\n\
-             println!(\"const ULLM_STATUS_RESERVED_NONZERO={{}}\", bindings::ULLM_STATUS_RESERVED_NONZERO);\n\
-             println!(\"const ULLM_STATUS_INTERNAL_ERROR={{}}\", bindings::ULLM_STATUS_INTERNAL_ERROR);\n\
-             println!(\"const ULLM_BACKEND_HIP={{}}\", bindings::ULLM_BACKEND_HIP);\n\
-             println!(\"const ULLM_ACCESS_READ={{}}\", bindings::ULLM_ACCESS_READ);\n\
-             println!(\"const ULLM_ACCESS_WRITE={{}}\", bindings::ULLM_ACCESS_WRITE);\n\
-             println!(\"const ULLM_ACCESS_READ_WRITE={{}}\", bindings::ULLM_ACCESS_READ_WRITE);\n\
-             println!(\"layout ullm_error_sink_t size={{}} align={{}} struct_size={{}} abi_version={{}} message={{}} message_capacity={{}} message_length={{}} reserved={{}}\", size_of::<bindings::ullm_error_sink_t>(), align_of::<bindings::ullm_error_sink_t>(), offset_of!(bindings::ullm_error_sink_t, struct_size), offset_of!(bindings::ullm_error_sink_t, abi_version), offset_of!(bindings::ullm_error_sink_t, message), offset_of!(bindings::ullm_error_sink_t, message_capacity), offset_of!(bindings::ullm_error_sink_t, message_length), offset_of!(bindings::ullm_error_sink_t, reserved));\n\
-             println!(\"layout ullm_version_info_t size={{}} align={{}} struct_size={{}} abi_version={{}} major={{}} minor={{}} patch={{}} reserved={{}}\", size_of::<bindings::ullm_version_info_t>(), align_of::<bindings::ullm_version_info_t>(), offset_of!(bindings::ullm_version_info_t, struct_size), offset_of!(bindings::ullm_version_info_t, abi_version), offset_of!(bindings::ullm_version_info_t, major), offset_of!(bindings::ullm_version_info_t, minor), offset_of!(bindings::ullm_version_info_t, patch), offset_of!(bindings::ullm_version_info_t, reserved));\n\
-             println!(\"layout ullm_backend_probe_result_t size={{}} align={{}} struct_size={{}} abi_version={{}} backend={{}} available={{}} hip_runtime_present={{}} reserved={{}}\", size_of::<bindings::ullm_backend_probe_result_t>(), align_of::<bindings::ullm_backend_probe_result_t>(), offset_of!(bindings::ullm_backend_probe_result_t, struct_size), offset_of!(bindings::ullm_backend_probe_result_t, abi_version), offset_of!(bindings::ullm_backend_probe_result_t, backend), offset_of!(bindings::ullm_backend_probe_result_t, available), offset_of!(bindings::ullm_backend_probe_result_t, hip_runtime_present), offset_of!(bindings::ullm_backend_probe_result_t, reserved));\n\
-             println!(\"layout ullm_context_probe_result_t size={{}} align={{}} struct_size={{}} abi_version={{}} context_present={{}} hip_available={{}} reserved={{}}\", size_of::<bindings::ullm_context_probe_result_t>(), align_of::<bindings::ullm_context_probe_result_t>(), offset_of!(bindings::ullm_context_probe_result_t, struct_size), offset_of!(bindings::ullm_context_probe_result_t, abi_version), offset_of!(bindings::ullm_context_probe_result_t, context_present), offset_of!(bindings::ullm_context_probe_result_t, hip_available), offset_of!(bindings::ullm_context_probe_result_t, reserved));\n\
+             println!(\"const SLLM_HIP_ABI_VERSION={{}}\", bindings::SLLM_HIP_ABI_VERSION);\n\
+             println!(\"const SLLM_HIP_LIBRARY_VERSION_MAJOR={{}}\", bindings::SLLM_HIP_LIBRARY_VERSION_MAJOR);\n\
+             println!(\"const SLLM_HIP_LIBRARY_VERSION_MINOR={{}}\", bindings::SLLM_HIP_LIBRARY_VERSION_MINOR);\n\
+             println!(\"const SLLM_HIP_LIBRARY_VERSION_PATCH={{}}\", bindings::SLLM_HIP_LIBRARY_VERSION_PATCH);\n\
+             println!(\"const SLLM_STATUS_OK={{}}\", bindings::SLLM_STATUS_OK);\n\
+             println!(\"const SLLM_STATUS_INVALID_ARGUMENT={{}}\", bindings::SLLM_STATUS_INVALID_ARGUMENT);\n\
+             println!(\"const SLLM_STATUS_BUFFER_TOO_SMALL={{}}\", bindings::SLLM_STATUS_BUFFER_TOO_SMALL);\n\
+             println!(\"const SLLM_STATUS_UNSUPPORTED={{}}\", bindings::SLLM_STATUS_UNSUPPORTED);\n\
+             println!(\"const SLLM_STATUS_HIP_UNAVAILABLE={{}}\", bindings::SLLM_STATUS_HIP_UNAVAILABLE);\n\
+             println!(\"const SLLM_STATUS_INVALID_ABI_VERSION={{}}\", bindings::SLLM_STATUS_INVALID_ABI_VERSION);\n\
+             println!(\"const SLLM_STATUS_RESERVED_NONZERO={{}}\", bindings::SLLM_STATUS_RESERVED_NONZERO);\n\
+             println!(\"const SLLM_STATUS_INTERNAL_ERROR={{}}\", bindings::SLLM_STATUS_INTERNAL_ERROR);\n\
+             println!(\"const SLLM_BACKEND_HIP={{}}\", bindings::SLLM_BACKEND_HIP);\n\
+             println!(\"const SLLM_ACCESS_READ={{}}\", bindings::SLLM_ACCESS_READ);\n\
+             println!(\"const SLLM_ACCESS_WRITE={{}}\", bindings::SLLM_ACCESS_WRITE);\n\
+             println!(\"const SLLM_ACCESS_READ_WRITE={{}}\", bindings::SLLM_ACCESS_READ_WRITE);\n\
+             println!(\"layout sllm_error_sink_t size={{}} align={{}} struct_size={{}} abi_version={{}} message={{}} message_capacity={{}} message_length={{}} reserved={{}}\", size_of::<bindings::sllm_error_sink_t>(), align_of::<bindings::sllm_error_sink_t>(), offset_of!(bindings::sllm_error_sink_t, struct_size), offset_of!(bindings::sllm_error_sink_t, abi_version), offset_of!(bindings::sllm_error_sink_t, message), offset_of!(bindings::sllm_error_sink_t, message_capacity), offset_of!(bindings::sllm_error_sink_t, message_length), offset_of!(bindings::sllm_error_sink_t, reserved));\n\
+             println!(\"layout sllm_version_info_t size={{}} align={{}} struct_size={{}} abi_version={{}} major={{}} minor={{}} patch={{}} reserved={{}}\", size_of::<bindings::sllm_version_info_t>(), align_of::<bindings::sllm_version_info_t>(), offset_of!(bindings::sllm_version_info_t, struct_size), offset_of!(bindings::sllm_version_info_t, abi_version), offset_of!(bindings::sllm_version_info_t, major), offset_of!(bindings::sllm_version_info_t, minor), offset_of!(bindings::sllm_version_info_t, patch), offset_of!(bindings::sllm_version_info_t, reserved));\n\
+             println!(\"layout sllm_backend_probe_result_t size={{}} align={{}} struct_size={{}} abi_version={{}} backend={{}} available={{}} hip_runtime_present={{}} reserved={{}}\", size_of::<bindings::sllm_backend_probe_result_t>(), align_of::<bindings::sllm_backend_probe_result_t>(), offset_of!(bindings::sllm_backend_probe_result_t, struct_size), offset_of!(bindings::sllm_backend_probe_result_t, abi_version), offset_of!(bindings::sllm_backend_probe_result_t, backend), offset_of!(bindings::sllm_backend_probe_result_t, available), offset_of!(bindings::sllm_backend_probe_result_t, hip_runtime_present), offset_of!(bindings::sllm_backend_probe_result_t, reserved));\n\
+             println!(\"layout sllm_context_probe_result_t size={{}} align={{}} struct_size={{}} abi_version={{}} context_present={{}} hip_available={{}} reserved={{}}\", size_of::<bindings::sllm_context_probe_result_t>(), align_of::<bindings::sllm_context_probe_result_t>(), offset_of!(bindings::sllm_context_probe_result_t, struct_size), offset_of!(bindings::sllm_context_probe_result_t, abi_version), offset_of!(bindings::sllm_context_probe_result_t, context_present), offset_of!(bindings::sllm_context_probe_result_t, hip_available), offset_of!(bindings::sllm_context_probe_result_t, reserved));\n\
          }}\n",
         bindings_path.display()
     );
@@ -401,7 +401,7 @@ fn verify_checked_in_bindings(
     assert_eq!(
         c_layout.trim(),
         rust_layout.trim(),
-        "checked-in Rust bindings do not match include/ullm/hip.h ABI layout/constants\nC++:\n{}\nRust:\n{}",
+        "checked-in Rust bindings do not match include/sllm/hip.h ABI layout/constants\nC++:\n{}\nRust:\n{}",
         c_layout,
         rust_layout
     );
@@ -409,8 +409,8 @@ fn verify_checked_in_bindings(
 
 fn static_archive(build_dir: &Path) -> PathBuf {
     if env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc") {
-        build_dir.join("ullm_hip_stub.lib")
+        build_dir.join("sllm_hip_stub.lib")
     } else {
-        build_dir.join("libullm_hip_stub.a")
+        build_dir.join("libsllm_hip_stub.a")
     }
 }

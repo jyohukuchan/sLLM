@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://ullm-project.local/ci/schema/g1-runtime-artifact-v1.schema.json",
-  "title": "uLLM dedicated G1 runtime artifact metadata v1",
+  "$id": "https://sllm-project.local/ci/schema/g1-runtime-artifact-v1.schema.json",
+  "title": "sLLM dedicated G1 runtime artifact metadata v1",
   "type": "object",
   "additionalProperties": false,
   "$defs": {
@@ -84,7 +84,7 @@
       "properties": {
         "model_used": {"const": false}, "cpu_fallback_allowed": {"const": false}, "cpu_fallback_used": {"const": false},
         "binary_command": {
-          "const": ["target/release/ullm-hip-evidence", "--timeout-ms", "1000"]
+          "const": ["target/release/sllm-hip-evidence", "--timeout-ms", "1000"]
         }
       }
     }

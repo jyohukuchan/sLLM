@@ -87,7 +87,7 @@ def _matrix_schema(toolchain_schema: dict[str, Any]) -> dict[str, Any]:
 
     return {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "$id": "https://ullm-project.local/ci/schema/hip-compile-v1.schema.json",
+        "$id": "https://sllm-project.local/ci/schema/hip-compile-v1.schema.json",
         "$defs": toolchain_schema["$defs"],
         "$ref": "#/$defs/hip_compile_matrix",
     }
@@ -180,7 +180,7 @@ def _validate_matrix_invariants(matrix: dict[str, Any], toolchain: dict[str, Any
         if row["resource"] != {"max_rss_bytes": 4294967296, "max_output_bytes": 16777216}:
             raise ContractError(f"H3 row has non-canonical resource limits: {row_id}")
         if row["output"] != {
-            "root_prefix": "/tmp/ullm-h3-",
+            "root_prefix": "/tmp/sllm-h3-",
             "directory_pattern": "h3-{target}",
             "artifact_pattern": "device-code-object-{target}.elf",
         }:
@@ -305,7 +305,7 @@ def _validate_artifact_invariants(
     if not device["sections"][".text"]["present"]:
         raise ContractError("device code object does not prove .text")
     if not device["symbols"] or not any(
-        symbol["name"] == "ullm_hip_compile_probe" and symbol["defined"]
+        symbol["name"] == "sllm_hip_compile_probe" and symbol["defined"]
         for symbol in device["symbols"]
     ):
         raise ContractError("device code object has no defined compile-probe symbol")

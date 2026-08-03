@@ -14,7 +14,7 @@
 - 取得sourceのlicense、path、特殊なLFS/vocabulary fixture、KTransformersの未初期化gitlinkの事実はsource-lock manifestに固定した。追加調査対象からはLMDeployとKTransformersだけを正式採用し、MLC LLM、Candle、CTranslate2、OpenVINO GenAI、ONNX Runtime GenAI、TGIは今回未採用で、cloneも今後の採用予定もない。
 - 7件の固定exact revisionを一次sourceとしてCI/testを再調査した。段階化、明示登録、決定的sharding、per-test timeout、preflight、artifact再利用、isolated test、warmupとmetric記録を採用する。
 - 暗黙skip、0件収集の成功、required testの`continue-on-error`またはsoft-fail、可変外部artifact/model、root/privileged runner、外部live統計への実行時依存は採用しない。
-- source別の完全SHA、主要根拠、採否は[exact-revision調査](../../../../../references/ci-test-exact-revision-review.md)に記録する。これらは設計上の参考であり、uLLMの対応実績または正しさの証拠にはしない。
+- source別の完全SHA、主要根拠、採否は[exact-revision調査](../../../../../references/ci-test-exact-revision-review.md)に記録する。これらは設計上の参考であり、sLLMの対応実績または正しさの証拠にはしない。
 
 ### CI運用
 

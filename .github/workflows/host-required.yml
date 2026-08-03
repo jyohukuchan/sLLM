@@ -44,7 +44,7 @@ jobs:
         run: test -z "$(git status --porcelain=v1 --untracked-files=all)"
       - name: Run h0 host suite
         env:
-          ULLM_H0_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before || '' }}
+          SLLM_H0_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before || '' }}
         run: >-
           python3 ci/tools/run_host_suite.py
           --row h0

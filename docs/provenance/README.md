@@ -1,7 +1,7 @@
 # Third-party provenance and code reuse
 
 This document defines the minimum provenance record for external source material
-used by uLLM. It is an engineering policy, not legal advice. License obligations
+used by sLLM. It is an engineering policy, not legal advice. License obligations
 must be checked for the exact upstream revision and files being used.
 
 ## Reuse policy
@@ -24,7 +24,7 @@ project `LICENSE`. For every exact copy, adaptation, or source-to-source port:
    header must identify the notice entry and must survive later refactoring.
 4. Record the upstream repository URL, full commit SHA, source path, upstream Git
    blob ID, local destination, imported SHA-256, copyright, license, reuse mode,
-   modifications, and the uLLM import commit.
+   modifications, and the sLLM import commit.
 5. Preserve all upstream license and notice material required for redistribution.
 
 `exact`, `adapted`, and `ported` are all direct reuse modes:
@@ -83,7 +83,7 @@ and reuse mode. Keep the record machine-readable inside the corresponding
 ```yaml
 schema_version: 1
 id: llama-cpp-<short-purpose-name>-001
-component: <uLLM component name>
+component: <sLLM component name>
 upstream:
   repository: https://github.com/ggml-org/llama.cpp
   commit: <40-character full commit SHA>
@@ -106,7 +106,7 @@ reuse:
     - <specific semantic or structural change>
     - <specific rename, API adaptation, or bug fix>
 import:
-  commit: <full uLLM commit SHA that first introduced the material>
+  commit: <full sLLM commit SHA that first introduced the material>
   reviewed_by: <reviewer or approval reference>
   reviewed_at: <YYYY-MM-DD>
 ```
@@ -124,7 +124,7 @@ value in a release.
 
 ## AI-assisted code
 
-AI output is not accepted into uLLM merely because it was generated rather than
+AI output is not accepted into sLLM merely because it was generated rather than
 copied manually. A human reviewer must review and affirmatively adopt the change,
 check it for suspicious similarity to identifiable third-party source
 expression, and apply this provenance policy whenever external expression was

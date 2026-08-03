@@ -1,22 +1,22 @@
 use core::ffi::c_char;
 
-pub const ULLM_HIP_EVIDENCE_ABI_VERSION: u32 = 1;
-pub const ULLM_HIP_EVIDENCE_TRANSFORM_XOR: u8 = 0x5a;
+pub const SLLM_HIP_EVIDENCE_ABI_VERSION: u32 = 1;
+pub const SLLM_HIP_EVIDENCE_TRANSFORM_XOR: u8 = 0x5a;
 
-pub const ULLM_STATUS_HIP_TIMEOUT: u32 = 8;
-pub const ULLM_STATUS_HIP_INVALID_HANDLE: u32 = 9;
-pub const ULLM_STATUS_HIP_ZERO_DISPATCH: u32 = 10;
-pub const ULLM_STATUS_HIP_RUNTIME_ERROR: u32 = 11;
-pub const ULLM_STATUS_HIP_DISPATCH_CONTRACT: u32 = 12;
+pub const SLLM_STATUS_HIP_TIMEOUT: u32 = 8;
+pub const SLLM_STATUS_HIP_INVALID_HANDLE: u32 = 9;
+pub const SLLM_STATUS_HIP_ZERO_DISPATCH: u32 = 10;
+pub const SLLM_STATUS_HIP_RUNTIME_ERROR: u32 = 11;
+pub const SLLM_STATUS_HIP_DISPATCH_CONTRACT: u32 = 12;
 
 #[repr(C)]
-pub struct ullm_hip_evidence_completion_t {
+pub struct sllm_hip_evidence_completion_t {
     _private: [u8; 0],
 }
 
 #[repr(C)]
 #[derive(Clone, Copy)]
-pub struct ullm_hip_evidence_request_t {
+pub struct sllm_hip_evidence_request_t {
     pub struct_size: u32,
     pub abi_version: u32,
     pub input: *const u8,
@@ -26,7 +26,7 @@ pub struct ullm_hip_evidence_request_t {
 
 #[repr(C)]
 #[derive(Clone, Copy)]
-pub struct ullm_hip_evidence_result_t {
+pub struct sllm_hip_evidence_result_t {
     pub struct_size: u32,
     pub abi_version: u32,
     pub output_size: u64,
@@ -43,7 +43,7 @@ pub struct ullm_hip_evidence_result_t {
 
 #[repr(C)]
 #[derive(Clone, Copy)]
-pub struct ullm_error_sink_t {
+pub struct sllm_error_sink_t {
     pub struct_size: u32,
     pub abi_version: u32,
     pub message: *mut c_char,
@@ -53,21 +53,21 @@ pub struct ullm_error_sink_t {
 }
 
 unsafe extern "C" {
-    pub fn ullm_hip_evidence_submit(
-        request: *const ullm_hip_evidence_request_t,
-        completion: *mut *mut ullm_hip_evidence_completion_t,
-        error_sink: *mut ullm_error_sink_t,
+    pub fn sllm_hip_evidence_submit(
+        request: *const sllm_hip_evidence_request_t,
+        completion: *mut *mut sllm_hip_evidence_completion_t,
+        error_sink: *mut sllm_error_sink_t,
     ) -> u32;
-    pub fn ullm_hip_evidence_wait(
-        completion: *mut ullm_hip_evidence_completion_t,
+    pub fn sllm_hip_evidence_wait(
+        completion: *mut sllm_hip_evidence_completion_t,
         timeout_ms: u32,
         output: *mut u8,
         output_capacity: u64,
-        result: *mut ullm_hip_evidence_result_t,
-        error_sink: *mut ullm_error_sink_t,
+        result: *mut sllm_hip_evidence_result_t,
+        error_sink: *mut sllm_error_sink_t,
     ) -> u32;
-    pub fn ullm_hip_evidence_destroy(
-        completion: *mut *mut ullm_hip_evidence_completion_t,
-        error_sink: *mut ullm_error_sink_t,
+    pub fn sllm_hip_evidence_destroy(
+        completion: *mut *mut sllm_hip_evidence_completion_t,
+        error_sink: *mut sllm_error_sink_t,
     ) -> u32;
 }

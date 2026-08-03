@@ -168,7 +168,7 @@ def validate_h3_workflow(path: Path, document: dict[str, object]) -> list[str]:
             output_mount, "ci/tools/run_h3_compile.py", f"--row {row_id}",
             "--repo /workspace", "--output-dir /output", "--strict-ci", "--pinned-container",
             "--observed-image-reference", "--observed-image-config-digest", H3_IMAGE_CONFIG_DIGEST,
-            "REVIEWED_SHA", "TESTED_SHA", "WORKFLOW_SHA", "ULLM_H3_NETWORK_DISABLED",
+            "REVIEWED_SHA", "TESTED_SHA", "WORKFLOW_SHA", "SLLM_H3_NETWORK_DISABLED",
             "git config --global --add safe.directory /workspace", "output ownership",
         )
         for fragment in required_fragments:

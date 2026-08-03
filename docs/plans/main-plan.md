@@ -1,10 +1,10 @@
-# uLLM メイン計画
+# sLLM メイン計画
 
 ## この文書の役割
 
-- Git管理外の `uLLM-project.md` にある要件定義・開発方針・重要な決定を、開発に必要な範囲で追跡可能な形へ同期する。
+- Git管理外の `sLLM.md` にある要件定義・開発方針・重要な決定を、開発に必要な範囲で追跡可能な形へ同期する。
 - この文書には重要なproduct・architecture・compatibility上の決定、開発計画と順序、進捗、未解決事項だけを記録する。恒久的な実行手順は各正本文書へ置き、ここには重複させない。
-- `uLLM-project.md` とこの文書に方針上の差異が生じた場合は、推測で統合せずユーザーへ確認する。
+- `sLLM.md` とこの文書に方針上の差異が生じた場合は、推測で統合せずユーザーへ確認する。
 - 角括弧内の項目は、初期バージョンでは対応しない将来機能を表す。
 
 ## プロジェクトの目的と方針
@@ -29,7 +29,7 @@
 - GPU操作、device memory、queue/event、operator dispatch、kernelはC++/HIPで実装する。
 - frontend、model/config/tokenizer、scheduler、sampling、execution planはRustで実装する。
 - OpenAI-compatible APIを提供する。
-  - 初期仕様は `uLLM OpenAI-compatible Chat Completions profile v1` とする。
+  - 初期仕様は `sLLM OpenAI-compatible Chat Completions profile v1` とする。
   - llama.cpp serverは実装参考・差分比較対象であり、仕様の正本にはしない。
   - [Responses APIに対応する。]
 - 最適化済みの単一リクエストでは、同一条件のllama.cppより高速であることを一つの基準とする。
@@ -290,13 +290,14 @@
 - 最初に、未構築のG0/G1/G2/G4/P0をH3自身へ要求するbootstrap循環を解消し、変更が実際に触れる範囲だけを同一immutable SHAで要求する段階的gateをCI正本へ同期する。
 - H3はnon-requiredで開始し、20回以上かつ7日以上の観測はrequired昇格だけの条件とする。観測中もG0とmodel-free GPU pathの実装を並行し、後続開発を停止しない。
 - 初期runtime evidenceは専用local hostのcanonical `gfx1030` 1台と`gfx1201` 1台を直列実行し、完全tuple、artifact identity、CPU fallback未使用、実行前後のdevice healthを記録する。
-- model-free最小経路は`Cargo -> ullm-hip -> versioned C ABI -> native HIP -> GPU`を通してallocation、copy、単一diagnostic kernel、completion、copy-back、解放を検証する。推論opまたはGPU対応済みの証拠にはしない。
+- model-free最小経路は`Cargo -> sllm-hip -> versioned C ABI -> native HIP -> GPU`を通してallocation、copy、単一diagnostic kernel、completion、copy-back、解放を検証する。推論opまたはGPU対応済みの証拠にはしない。
 - 詳細な作業単位、受入条件、evidence、rollback境界は[Phase 2 H3・G0・model-free GPU path計画](archive/2026/08/1-10/phase2-h3-g0-model-free-gpu.md)を正とする。
 
 ## 現在の状態と次の作業
 
 - 現在: Phase 2前半のH3、G0、model-free G1を完了した。commit `f393d688a051d2b73c8773d8a930a711592609bc`（tree `2ccda6e7c0614d585f26babc6b7c68ca51220bbe`）に対し、H0〜H3とcanonical `gfx1030`/`gfx1201`のG0/G1・fail-closed集約がPASSした。H3 required昇格の20回・7日観測は並行follow-upであり、Phase 3開始を待たせない。
 - 完了:
+  - プロジェクト名を`sLLM`へ変更し、CLI、Rust crate、C ABI、環境変数、CI、文書、source directoryを新名称へ統一。
   - プロジェクトライセンスをMITへ統一。
   - Qwen3.5のMTP表記とBF16階層の矛盾を修正。
   - reset前のGit履歴を現状維持すると決定。

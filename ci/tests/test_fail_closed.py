@@ -196,7 +196,7 @@ class NetworkNamespaceRestorationTests(unittest.TestCase):
     def test_parent_netns_change_during_probe_fails_closed(self) -> None:
         plan = self._plan()
         with (
-            patch.dict(os.environ, {"ULLM_NETWORK_GUARD_ACTIVE": "0"}),
+            patch.dict(os.environ, {"SLLM_NETWORK_GUARD_ACTIVE": "0"}),
             patch(
                 "network_guard.current_netns",
                 side_effect=[plan.parent_netns, "net:[4026531841]"],
@@ -279,12 +279,12 @@ class ChildIsolationVerificationTests(unittest.TestCase):
 def main() -> int:
     suite = unittest.defaultTestLoader.loadTestsFromModule(sys.modules[__name__])
     result = unittest.TextTestRunner(verbosity=2).run(suite)
-    if os.environ.get("ULLM_EMIT_TEST_COUNTS") == "1":
+    if os.environ.get("SLLM_EMIT_TEST_COUNTS") == "1":
         selected = result.testsRun
         failed = len(result.failures) + len(result.errors)
         skipped = len(result.skipped)
         print(
-            "ULLM_UNITTEST_COUNTS="
+            "SLLM_UNITTEST_COUNTS="
             + json.dumps(
                 {
                     "collected": selected,

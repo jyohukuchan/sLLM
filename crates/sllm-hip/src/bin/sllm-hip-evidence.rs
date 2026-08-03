@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use ullm_hip::{EVIDENCE_CASE_SIZES, Status, expected_evidence_output, run_evidence};
+use sllm_hip::{EVIDENCE_CASE_SIZES, Status, expected_evidence_output, run_evidence};
 
 fn main() {
     let mut timeout_ms = 1_000_u32;

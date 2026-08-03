@@ -277,9 +277,9 @@ def assert_zero_actual_selection() -> None:
     zero = {key: 0 for key in COUNT_KEYS}
     encoded = json.dumps(zero, sort_keys=True, separators=(",", ":"))
     cases = (
-        ([sys.executable, "-m", "pytest", "-m", "tier_h1", "tests"], f"ULLM_PYTEST_COUNTS={encoded}"),
+        ([sys.executable, "-m", "pytest", "-m", "tier_h1", "tests"], f"SLLM_PYTEST_COUNTS={encoded}"),
         (["cargo", f"+{DEV_RUST_VERSION}", "test", "--workspace"], "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out;"),
-        ([sys.executable, "ci/tests/test_h2_oracle.py"], f"ULLM_UNITTEST_COUNTS={encoded}"),
+        ([sys.executable, "ci/tests/test_h2_oracle.py"], f"SLLM_UNITTEST_COUNTS={encoded}"),
     )
     for command, output in cases:
         counts, warning, source = actual_counts(command, output, 0)
@@ -517,7 +517,7 @@ def run() -> None:
 
     assert_zero_actual_selection()
 
-    with tempfile.TemporaryDirectory(prefix="ullm-ci-self-test-") as raw_dir:
+    with tempfile.TemporaryDirectory(prefix="sllm-ci-self-test-") as raw_dir:
         root = Path(raw_dir)
         assert_identity_and_network_failures(root)
         assert_post_execution_mutation_failure(root)

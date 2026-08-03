@@ -24,7 +24,7 @@
 
 ## 2026-08-03
 
-- Phase 1のrepository skeletonとしてRust workspace、`ullm-core`、`ullm-hip-sys`、`ullm-hip`、`ullm-cli`を追加した。
+- Phase 1のrepository skeletonとしてRust workspace、`sllm-core`、`sllm-hip-sys`、`sllm-hip`、`sllm-cli`を追加した。
 - Cargo `build.rs`からCMake C++17 static host stubを`OUT_DIR`配下へbuild・linkし、versioned C ABI、caller-owned error sink、reserved-field検証、checked-in bindingsを追加した。
 - host stubはHIP backend/contextを明示的なunavailableとして返し、GPU成功またはCPU fallbackとして扱わないcontractをRust H1で確認した。
 - `test-result-v1`、compatibility tuple、hygiene allowlist schema、suite registry、host matrix、path mapping、共通runnerとaggregatorを追加した。

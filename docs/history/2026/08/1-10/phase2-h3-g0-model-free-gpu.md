@@ -5,7 +5,7 @@
 - Phase 1完了後の次作業を、ROCm 7.14.0固定toolchain、exact `gfx1030`/`gfx1201` H3、trusted local GPU evidence、G0、model-free最小GPU実行までに限定した。
 - H3の20回以上・7日以上の観測はrequired昇格だけの条件であり、G0とmodel-free pathの開発を停止しないと決定した。
 - 現行GPU hard gateが未構築のG0/G1/G2/G4/P0をH3自身へ要求するbootstrap循環を記録し、実装前にscope別gateへ修正する作業単位を計画の先頭に置いた。
-- model-free最小経路を`Cargo -> ullm-hip -> versioned C ABI -> native HIP -> GPU`とし、allocation、copy、diagnostic kernel、completion、copy-back、解放をcanonical `gfx1030`/`gfx1201`で検証する到達点を定めた。
+- model-free最小経路を`Cargo -> sllm-hip -> versioned C ABI -> native HIP -> GPU`とし、allocation、copy、diagnostic kernel、completion、copy-back、解放をcanonical `gfx1030`/`gfx1201`で検証する到達点を定めた。
 - 数値op、model load・推論、性能、generic target、互換性昇格を計画範囲外とした。
 - この時点では計画文書だけを作成しており、H3、G0、GPU runtimeの実装evidenceはまだない。
 - 作業単位0としてCI hard gateを変更scope別へ分割し、H3、G0 runner、model-free runtimeに適用する同一candidate evidenceを明確化した。
@@ -27,7 +27,7 @@
 - commit `e91ff35caac8247fc056eb14a1d6cee2a2319cc5`（tree `75b229791cd3cf7c6ed38c25264b0cd09a9cde33`）に対し、Python 3.12.10固定環境のH0/H1/H2、digest固定ROCm imageのexact 2 target H3とaggregateがimmutable PASSした。
 - 同じcandidateとH3 artifactでcanonical V620 `gfx1030`（BDF `0000:03:00.0`、UUID `GPU-76a08c022586fed6`）とR9700 `gfx1201`（BDF `0000:47:00.0`、UUID `GPU-a8e9ddefa2d60f55`）のG0を直列実行し、両rowとaggregateがPASSした。pre/post healthは不変、GPU processと残留childは0、allocation/copy/kernel/dispatch countは0であり、G0を実行・数値・性能evidenceへ昇格させない。
 - G0 aggregateはrun `local-e91ff35c` attempt 1、report SHA-256は`gfx1030=408e95b9b6ccc661a5bab661b0be9da2d9c096425492633d25d6337a3fa22341`、`gfx1201=cb94cffccba48ab908d1ef41a3573bfb3e645a40fb157d458171f36c3a90aa67`である。次はH3 required昇格の7日観測を待たず作業単位5のmodel-free G1へ進む。
-- public inference ABIから分離したprivate evidence C ABI、Rustのone-shot completion ownership、native HIP stream/event/device・pinned host buffer lifetime、専用`ullm-hip-evidence` binaryを実装した。各caseは2 device allocation、2 HIP transfer、1 diagnostic XOR dispatchを行い、Rust oracleへbyte exactに照合する。
+- public inference ABIから分離したprivate evidence C ABI、Rustのone-shot completion ownership、native HIP stream/event/device・pinned host buffer lifetime、専用`sllm-hip-evidence` binaryを実装した。各caseは2 device allocation、2 HIP transfer、1 diagnostic XOR dispatchを行い、Rust oracleへbyte exactに照合する。
 - G1 builder/runner/aggregateはexact target、Code Object V6、wave32、target別ELF flags、kernel symbol、candidate identity、実際にloadしたHIP/ROCr library path、timeout/output/process cleanup、artifact/sidecar hashをfail-closedに検査する。artifact検査中の`llvm-objcopy`が入力binaryをin-place更新する問題を実buildで検出し、private一時出力の明示と検査前後のsize/SHA-256 bindingへ修正した。
 - 最終immutable candidateをcommit `f393d688a051d2b73c8773d8a930a711592609bc`、tree `2ccda6e7c0614d585f26babc6b7c68ca51220bbe`に固定した。H0 106/106、H1 42/42、H2 9/9、digest固定containerのH3 2/2、canonical GPUのG0 2/2、G1 2/2と全aggregateがPASSした。
 - G1はV620 `gfx1030`（BDF `0000:03:00.0`、UUID `GPU-76a08c022586fed6`）とR9700 `gfx1201`（BDF `0000:47:00.0`、UUID `GPU-a8e9ddefa2d60f55`）で1、3、17、255、256、257 byteを直列実行した。全caseでbyte exact、fallback/model/semantic opなし、pre/post health正常、GPU process・残留child 0を確認した。

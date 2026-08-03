@@ -1,13 +1,13 @@
 ## プロジェクト概要
 
 - 多機能なLLM推論engine。GPU操作はC++/HIP、それ以外のbackendはRustで実装し、MIT licenseで公開する。
-- Git管理外の詳細資料は`uLLM-project.md`、追跡対象の計画正本は`docs/plans/main-plan.md`とする。
+- Git管理外の詳細資料は`sLLM.md`、追跡対象の計画正本は`docs/plans/main-plan.md`とする。
 
 ## 役割と正本
 
 - 初回の行動開始時に`docs/plans/main-plan.md`を必ず読む。
 - `docs/plans/main-plan.md`には重要なproduct・architecture・compatibility上の決定、開発計画と順序、進捗、未解決事項だけを記録し、恒久的な実行手順を重複させない。
-- `uLLM-project.md`の要件・方針・重要な決定は`docs/plans/main-plan.md`へ同期する。差異を見つけた場合は独断で統合せず、ユーザーへ確認する。
+- `sLLM.md`の要件・方針・重要な決定は`docs/plans/main-plan.md`へ同期する。差異を見つけた場合は独断で統合せず、ユーザーへ確認する。
 - 調査と実装はsubagentが担当する。main agentは計画の作成・編集、subagentの指示・監視、全体調整、Git操作、特権操作、その他の雑務を担当する。
 - 重いshell commandは原則`timeout --signal=TERM --kill-after=30s 15m <command>`で実行し、pipelineや複合commandではshell wrapper全体をtimeout対象にする。exit code 124または137はtimeoutとして報告する。
 
@@ -47,7 +47,7 @@
 - `.gitignore`への新規行の追記は、事前許可なく行える。
   - 既存行の変更・削除・移動は、変更内容についてユーザーから事前に許可を得る。
   - ユーザーが手動で行った変更は、内容をreviewしたうえで、追加の許可なくcommit・pushできる。
-- `AGENTS.md`または`uLLM-project.md`を変更した場合はユーザーへ確認する。
+- `AGENTS.md`または`sLLM.md`を変更した場合はユーザーへ確認する。
 - AIは`passwords.txt`を編集しない。credential fileの取扱いは`docs/security/credentials.md`に従う。
 
 ## 特権操作

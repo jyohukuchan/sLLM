@@ -1,10 +1,10 @@
 [workspace]
 resolver = "3"
 members = [
-    "crates/ullm-core",
-    "crates/ullm-hip-sys",
-    "crates/ullm-hip",
-    "crates/ullm-cli",
+    "crates/sllm-core",
+    "crates/sllm-hip-sys",
+    "crates/sllm-hip",
+    "crates/sllm-cli",
 ]
 
 [workspace.package]
@@ -14,6 +14,6 @@ rust-version = "1.85.0"
 license = "MIT"
 
 [workspace.dependencies]
-ullm-core = { path = "crates/ullm-core" }
-ullm-hip = { path = "crates/ullm-hip" }
-ullm-hip-sys = { path = "crates/ullm-hip-sys" }
+sllm-core = { path = "crates/sllm-core" }
+sllm-hip = { path = "crates/sllm-hip" }
+sllm-hip-sys = { path = "crates/sllm-hip-sys" }

@@ -40,10 +40,10 @@ EXPECTED_CODEGEN_FEATURES = (
     "co_v6,wave32,xnack=unsupported,sramecc=unsupported,"
     "generic_processor_version=0"
 )
-BINARY_NAME = "ullm-hip-evidence"
+BINARY_NAME = "sllm-hip-evidence"
 METADATA_NAME = "g1-runtime-artifact.json"
 SIDECAR_SUFFIX = ".sha256"
-OUTPUT_ROOT_PREFIX = "ullm-g1-"
+OUTPUT_ROOT_PREFIX = "sllm-g1-"
 PRIVATE_TMP = Path("/tmp")
 MAX_BUILD_TIMEOUT_SECONDS = 900.0
 DEFAULT_BUILD_TIMEOUT_SECONDS = 900.0
@@ -303,11 +303,11 @@ def _validate_toolchain_env(target: str, rocm_root: Path) -> None:
     expected_values = {
         "ROCM_PATH": expected_root,
         "HIP_PATH": expected_root,
-        "ULLM_HIP_COMPILER": expected_compiler,
+        "SLLM_HIP_COMPILER": expected_compiler,
         "CMAKE_HIP_ARCHITECTURES": target,
-        "ULLM_HIP_CODEGEN_FEATURES": EXPECTED_CODEGEN_FEATURES,
-        "ULLM_ENABLE_HIP_RUNTIME": "1",
-        "ULLM_ENABLE_HIP_COMPILE_PROBE": "0",
+        "SLLM_HIP_CODEGEN_FEATURES": EXPECTED_CODEGEN_FEATURES,
+        "SLLM_ENABLE_HIP_RUNTIME": "1",
+        "SLLM_ENABLE_HIP_COMPILE_PROBE": "0",
     }
     if rocm_root != EXPECTED_ROCM_ROOT:
         raise G1BuilderError(f"G1 requires the canonical ROCm root {EXPECTED_ROCM_ROOT}")
@@ -472,7 +472,7 @@ def _output_paths(
             raise G1BuilderError("G1 output must be an absolute exact row directory")
         root = row_dir.parent
         if root.parent != PRIVATE_TMP or not root.name.startswith(OUTPUT_ROOT_PREFIX):
-            raise G1BuilderError("G1 output must be below a private /tmp/ullm-g1-* root")
+            raise G1BuilderError("G1 output must be below a private /tmp/sllm-g1-* root")
         _reject_symlink_components(root, "G1 output root")
         if root.exists():
             _require_private_directory(root, "G1 output root")
@@ -498,11 +498,11 @@ def _build_environment(target: str, target_dir: Path) -> dict[str, str]:
         {
             "ROCM_PATH": str(EXPECTED_ROCM_ROOT),
             "HIP_PATH": str(EXPECTED_ROCM_ROOT),
-            "ULLM_HIP_COMPILER": str(EXPECTED_ROCM_ROOT / "bin/amdclang++"),
+            "SLLM_HIP_COMPILER": str(EXPECTED_ROCM_ROOT / "bin/amdclang++"),
             "CMAKE_HIP_ARCHITECTURES": target,
-            "ULLM_HIP_CODEGEN_FEATURES": EXPECTED_CODEGEN_FEATURES,
-            "ULLM_ENABLE_HIP_RUNTIME": "1",
-            "ULLM_ENABLE_HIP_COMPILE_PROBE": "0",
+            "SLLM_HIP_CODEGEN_FEATURES": EXPECTED_CODEGEN_FEATURES,
+            "SLLM_ENABLE_HIP_RUNTIME": "1",
+            "SLLM_ENABLE_HIP_COMPILE_PROBE": "0",
             "CARGO_TARGET_DIR": str(target_dir),
         }
     )
@@ -580,7 +580,7 @@ def _metadata(
             "model_used": False,
             "cpu_fallback_allowed": False,
             "cpu_fallback_used": False,
-            "binary_command": ["target/release/ullm-hip-evidence", "--timeout-ms", "1000"],
+            "binary_command": ["target/release/sllm-hip-evidence", "--timeout-ms", "1000"],
         },
     }
 
@@ -633,7 +633,7 @@ def build_runtime_artifact(
         _make_private_directory(target_dir, "Cargo target directory")
         build_binary = target_dir / "release" / BINARY_NAME
         if build_binary.parts[-3:] != ("target", "release", BINARY_NAME):
-            raise G1BuilderError("Cargo output is not target/release/ullm-hip-evidence")
+            raise G1BuilderError("Cargo output is not target/release/sllm-hip-evidence")
         environment = _build_environment(target, target_dir)
         command = (
             "cargo",
@@ -643,7 +643,7 @@ def build_runtime_artifact(
             "--offline",
             "--release",
             "--package",
-            "ullm-hip",
+            "sllm-hip",
             "--bin",
             BINARY_NAME,
         )

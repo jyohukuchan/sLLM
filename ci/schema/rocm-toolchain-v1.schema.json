@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://ullm-project.local/ci/schema/rocm-toolchain-v1.schema.json",
-  "title": "uLLM ROCm toolchain and HIP compile matrix contracts v1",
+  "$id": "https://sllm-project.local/ci/schema/rocm-toolchain-v1.schema.json",
+  "title": "sLLM ROCm toolchain and HIP compile matrix contracts v1",
   "type": "object",
   "additionalProperties": false,
   "$defs": {
@@ -86,7 +86,7 @@
       "additionalProperties": false,
       "required": ["root_prefix", "directory_pattern", "artifact_pattern"],
       "properties": {
-        "root_prefix": {"const": "/tmp/ullm-h3-"},
+        "root_prefix": {"const": "/tmp/sllm-h3-"},
         "directory_pattern": {"const": "h3-{target}"},
         "artifact_pattern": {"const": "device-code-object-{target}.elf"}
       }
@@ -149,7 +149,7 @@
       "additionalProperties": false,
       "required": ["$schema", "schema_version", "matrix_id", "revision", "toolchain_id", "targets", "rows"],
       "properties": {
-        "$schema": {"const": "https://ullm-project.local/ci/schema/rocm-toolchain-v1.schema.json#/$defs/hip_compile_matrix"},
+        "$schema": {"const": "https://sllm-project.local/ci/schema/rocm-toolchain-v1.schema.json#/$defs/hip_compile_matrix"},
         "schema_version": {"const": "hip-compile-v1"},
         "matrix_id": {"const": "hip-compile-v1"},
         "revision": {"type": "integer", "minimum": 1},

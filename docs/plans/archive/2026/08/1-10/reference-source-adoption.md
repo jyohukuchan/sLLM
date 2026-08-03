@@ -10,7 +10,7 @@
 
 - LMDeploy `v0.15.0` とKTransformers `v0.6.4` だけを正式採用し、40桁の完全commit SHAで固定する。
 - MLC LLM、Candle、CTranslate2、OpenVINO GenAI、ONNX Runtime GenAI、TGIは今回未採用とし、cloneせず、採用予定に置かない。
-- 参照sourceはuLLMの対応実績、正しさ、直接reuse許可を意味しない。llama.cpp以外はreader-onlyとする。
+- 参照sourceはsLLMの対応実績、正しさ、直接reuse許可を意味しない。llama.cpp以外はreader-onlyとする。
 
 ## 完了条件と結果
 

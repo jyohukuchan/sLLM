@@ -1,4 +1,4 @@
-//! Backend-independent runtime contracts for uLLM.
+//! Backend-independent runtime contracts for sLLM.
 //!
 //! Phase 1 deliberately contains descriptors and control-plane behavior only.
 //! It does not allocate model data, emulate a GPU, or execute numerical work.

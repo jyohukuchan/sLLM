@@ -172,8 +172,8 @@ def unlocked_host_lock(_path: Path):
 
 class G1RunnerFixture:
     def __init__(self, target: str = "gfx1030") -> None:
-        self.stage = Path(tempfile.mkdtemp(prefix="ullm-g1-stage-"))
-        self.output_root = Path(tempfile.mkdtemp(prefix="ullm-g1-output-"))
+        self.stage = Path(tempfile.mkdtemp(prefix="sllm-g1-stage-"))
+        self.output_root = Path(tempfile.mkdtemp(prefix="sllm-g1-output-"))
         self.matrix = validate_g1_matrix(ROOT)
         self.row = row_by_id(self.matrix, f"g1-{target}")
         self.row_id = self.row["row_id"]
@@ -470,7 +470,7 @@ class G1RunnerTests(unittest.TestCase):
                 result = runner.main(fixture.argv())
             self.assertEqual(result, 2)
             routing_mock.assert_not_called()
-            unsafe_root = Path(tempfile.mkdtemp(prefix="ullm-g1-unsafe-"))
+            unsafe_root = Path(tempfile.mkdtemp(prefix="sllm-g1-unsafe-"))
             try:
                 symlink_output = unsafe_root / fixture.row_id
                 symlink_output.symlink_to(fixture.output_root, target_is_directory=True)

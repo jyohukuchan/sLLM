@@ -45,7 +45,7 @@ EXPECTED_H3_PATH_RULES = {
     "ci/tests/test_h3_runner.py",
     "ci/tests/test_h3_aggregate.py",
     ".github/workflows/h3-compile.yml",
-    "crates/ullm-hip-sys/build.rs",
+    "crates/sllm-hip-sys/build.rs",
     "native/hip/CMakeLists.txt",
     "native/hip/src/hip_compile_probe.hip.cpp",
 }

@@ -1,4 +1,4 @@
-# uLLM OpenAI-compatible Chat Completions profile v1
+# sLLM OpenAI-compatible Chat Completions profile v1
 
 This document defines the initial public compatibility profile. “Compatible”
 means compatible with the explicitly listed subset; it does not claim complete
@@ -17,13 +17,13 @@ resulting request, response, and error differences.
 
 This document selects the supported subset and imposes explicit rejection rules.
 The pin does not make every endpoint or field in the OpenAI schema supported.
-This profile determines which pinned-schema operations and fields uLLM accepts;
+This profile determines which pinned-schema operations and fields sLLM accepts;
 for that subset, the pinned schema governs JSON names, types, ranges, and standard
 response shapes. Explicit rejection and status-code rules in this profile govern
-uLLM behavior for requests outside that subset. The
+sLLM behavior for requests outside that subset. The
 [llama.cpp server API](https://github.com/ggml-org/llama.cpp/blob/master/tools/server/README.md)
 is an implementation reference and a peer for differential comparison; it is not
-the uLLM API specification.
+the sLLM API specification.
 
 ## Initial endpoints
 
@@ -125,15 +125,15 @@ Authentication and deployment policy are outside this payload-compatibility
 profile. A deployment that requires authentication should use the standard
 `Authorization: Bearer ...` header rather than adding credentials to JSON bodies.
 
-## uLLM extensions
+## sLLM extensions
 
-uLLM-specific request or response fields must be isolated under a clearly named
-top-level `ullm` object, or exposed through a separately documented non-OpenAI
+sLLM-specific request or response fields must be isolated under a clearly named
+top-level `sllm` object, or exposed through a separately documented non-OpenAI
 endpoint. They must not reuse a standard OpenAI field with different semantics.
 Standard clients can therefore select this profile without accidentally enabling
 engine-specific behavior.
 
-An extension is opt-in. An unrecognized member inside `ullm` is also an error; it
+An extension is opt-in. An unrecognized member inside `sllm` is also an error; it
 is not silently ignored. Extension fields are not part of the compatibility claim
 and must be documented and versioned independently.
 

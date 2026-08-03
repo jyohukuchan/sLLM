@@ -89,17 +89,17 @@ class H3RunnerEvidenceModeTests(unittest.TestCase):
                     execution_environment(args, "required-ci")
 
     def test_required_ci_network_isolation_contract(self) -> None:
-        with patch.dict(os.environ, {"ULLM_H3_NETWORK_DISABLED": "0"}, clear=False):
+        with patch.dict(os.environ, {"SLLM_H3_NETWORK_DISABLED": "0"}, clear=False):
             with self.assertRaises(H3Error):
                 assert_required_network_isolation()
         for names in ([], [(1, "eth0")], [(1, "lo"), (2, "eth0")]):
-            with self.subTest(names=names), patch.dict(os.environ, {"ULLM_H3_NETWORK_DISABLED": "1"}, clear=False), patch(
+            with self.subTest(names=names), patch.dict(os.environ, {"SLLM_H3_NETWORK_DISABLED": "1"}, clear=False), patch(
                 "run_h3_compile.socket.if_nameindex", return_value=names
             ):
                 with self.assertRaises(H3Error):
                     assert_required_network_isolation()
 
-        with patch.dict(os.environ, {"ULLM_H3_NETWORK_DISABLED": "1"}, clear=False), patch(
+        with patch.dict(os.environ, {"SLLM_H3_NETWORK_DISABLED": "1"}, clear=False), patch(
             "run_h3_compile.socket.if_nameindex", return_value=[(1, "lo")]
         ), patch(
             "run_h3_compile.Path.read_text",
@@ -113,7 +113,7 @@ class H3RunnerEvidenceModeTests(unittest.TestCase):
         )
         for ipv4_routes, ipv6_routes in malformed_tables:
             with self.subTest(ipv4_routes=ipv4_routes, ipv6_routes=ipv6_routes), patch.dict(
-                os.environ, {"ULLM_H3_NETWORK_DISABLED": "1"}, clear=False
+                os.environ, {"SLLM_H3_NETWORK_DISABLED": "1"}, clear=False
             ), patch("run_h3_compile.socket.if_nameindex", return_value=[(1, "lo")]), patch(
                 "run_h3_compile.Path.read_text", side_effect=[ipv4_routes, ipv6_routes]
             ):
@@ -121,7 +121,7 @@ class H3RunnerEvidenceModeTests(unittest.TestCase):
                     assert_required_network_isolation()
 
         ipv4_routes = IPV4_ROUTE_HEADER + "eth0 00000000 00000000 0001 0 0 0 00000000 0 0 0\n"
-        with patch.dict(os.environ, {"ULLM_H3_NETWORK_DISABLED": "1"}, clear=False), patch(
+        with patch.dict(os.environ, {"SLLM_H3_NETWORK_DISABLED": "1"}, clear=False), patch(
             "run_h3_compile.socket.if_nameindex", return_value=[(1, "lo")]
         ), patch(
             "run_h3_compile.Path.read_text", side_effect=[ipv4_routes, MEASURED_IPV6_LOOPBACK_ROUTES]
@@ -130,7 +130,7 @@ class H3RunnerEvidenceModeTests(unittest.TestCase):
                 assert_required_network_isolation()
 
     def test_failure_report_is_schema_valid(self) -> None:
-        with tempfile.TemporaryDirectory(prefix="ullm-h3-runner-failure-") as temporary:
+        with tempfile.TemporaryDirectory(prefix="sllm-h3-runner-failure-") as temporary:
             output = Path(temporary) / "output"
             exit_code = runner_main([
                 "--row", "h3-gfx1030",

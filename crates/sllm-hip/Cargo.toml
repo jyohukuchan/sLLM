@@ -1,0 +1,11 @@
+[package]
+name = "sllm-hip"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Safe Rust wrapper and Phase 1 host probe for the sLLM HIP ABI"
+
+[dependencies]
+sllm-core.workspace = true
+sllm-hip-sys.workspace = true

@@ -12,7 +12,7 @@ source scripts/dev/activate-rocm.sh
 
 `activate-rocm.sh`は次の優先順位で候補を一つだけ選ぶ。
 
-1. 明示的な`ULLM_ROCM_PATH`
+1. 明示的な`SLLM_ROCM_PATH`
 2. 既存の`ROCM_PATH`
 3. `/opt/rocm/core-7.14`
 
@@ -21,7 +21,7 @@ source scripts/dev/activate-rocm.sh
 一時的に別の展開先を使う場合は、source前に明示する。
 
 ```bash
-export ULLM_ROCM_PATH=/absolute/path/to/rocm-root
+export SLLM_ROCM_PATH=/absolute/path/to/rocm-root
 source scripts/dev/activate-rocm.sh
 ```
 
@@ -44,7 +44,7 @@ scripts/dev/check-environment.sh gpu
 `gpu` modeはhost検査を先に行い、`hip-smoke.cpp`を`amdclang++`のHIP modeで明示targetを含むfat binaryへcompileする。既定targetは`gfx1030,gfx1201`である。別のexact target集合はcomma-separated valueで指定できる。
 
 ```bash
-ULLM_HIP_ARCHITECTURES=gfx1030,gfx1200,gfx1201 \
+SLLM_HIP_ARCHITECTURES=gfx1030,gfx1200,gfx1201 \
   scripts/dev/check-environment.sh gpu
 ```
 

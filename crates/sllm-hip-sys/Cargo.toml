@@ -1,10 +1,10 @@
 [package]
-name = "ullm-hip-sys"
+name = "sllm-hip-sys"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "Checked-in bindings and native build integration for the uLLM HIP C ABI"
+description = "Checked-in bindings and native build integration for the sLLM HIP C ABI"
 build = "build.rs"
 
 [lib]

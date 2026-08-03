@@ -9,11 +9,11 @@ use std::mem::size_of;
 use std::ptr::NonNull;
 use std::time::Duration;
 
-use ullm_core::{
+use sllm_core::{
     Backend, BackendCapabilities, BackendError, BackendSupport, ExecutionReceipt,
     MaterializedTensor, SemanticOp, TensorView,
 };
-use ullm_hip_sys as sys;
+use sllm_hip_sys as sys;
 
 const ERROR_CAPACITY: usize = 256;
 
@@ -38,38 +38,38 @@ pub enum Status {
 impl Status {
     pub const fn from_raw(raw: u32) -> Self {
         match raw {
-            sys::ULLM_STATUS_OK => Self::Ok,
-            sys::ULLM_STATUS_INVALID_ARGUMENT => Self::InvalidArgument,
-            sys::ULLM_STATUS_BUFFER_TOO_SMALL => Self::BufferTooSmall,
-            sys::ULLM_STATUS_UNSUPPORTED => Self::Unsupported,
-            sys::ULLM_STATUS_HIP_UNAVAILABLE => Self::HipUnavailable,
-            sys::ULLM_STATUS_INVALID_ABI_VERSION => Self::InvalidAbiVersion,
-            sys::ULLM_STATUS_RESERVED_NONZERO => Self::ReservedNonzero,
-            sys::ULLM_STATUS_INTERNAL_ERROR => Self::InternalError,
-            sys::evidence::ULLM_STATUS_HIP_TIMEOUT => Self::Timeout,
-            sys::evidence::ULLM_STATUS_HIP_INVALID_HANDLE => Self::InvalidHandle,
-            sys::evidence::ULLM_STATUS_HIP_ZERO_DISPATCH => Self::ZeroDispatch,
-            sys::evidence::ULLM_STATUS_HIP_RUNTIME_ERROR => Self::RuntimeError,
-            sys::evidence::ULLM_STATUS_HIP_DISPATCH_CONTRACT => Self::DispatchContract,
+            sys::SLLM_STATUS_OK => Self::Ok,
+            sys::SLLM_STATUS_INVALID_ARGUMENT => Self::InvalidArgument,
+            sys::SLLM_STATUS_BUFFER_TOO_SMALL => Self::BufferTooSmall,
+            sys::SLLM_STATUS_UNSUPPORTED => Self::Unsupported,
+            sys::SLLM_STATUS_HIP_UNAVAILABLE => Self::HipUnavailable,
+            sys::SLLM_STATUS_INVALID_ABI_VERSION => Self::InvalidAbiVersion,
+            sys::SLLM_STATUS_RESERVED_NONZERO => Self::ReservedNonzero,
+            sys::SLLM_STATUS_INTERNAL_ERROR => Self::InternalError,
+            sys::evidence::SLLM_STATUS_HIP_TIMEOUT => Self::Timeout,
+            sys::evidence::SLLM_STATUS_HIP_INVALID_HANDLE => Self::InvalidHandle,
+            sys::evidence::SLLM_STATUS_HIP_ZERO_DISPATCH => Self::ZeroDispatch,
+            sys::evidence::SLLM_STATUS_HIP_RUNTIME_ERROR => Self::RuntimeError,
+            sys::evidence::SLLM_STATUS_HIP_DISPATCH_CONTRACT => Self::DispatchContract,
             other => Self::Unknown(other),
         }
     }
 
     pub const fn raw(self) -> u32 {
         match self {
-            Self::Ok => sys::ULLM_STATUS_OK,
-            Self::InvalidArgument => sys::ULLM_STATUS_INVALID_ARGUMENT,
-            Self::BufferTooSmall => sys::ULLM_STATUS_BUFFER_TOO_SMALL,
-            Self::Unsupported => sys::ULLM_STATUS_UNSUPPORTED,
-            Self::HipUnavailable => sys::ULLM_STATUS_HIP_UNAVAILABLE,
-            Self::InvalidAbiVersion => sys::ULLM_STATUS_INVALID_ABI_VERSION,
-            Self::ReservedNonzero => sys::ULLM_STATUS_RESERVED_NONZERO,
-            Self::InternalError => sys::ULLM_STATUS_INTERNAL_ERROR,
-            Self::Timeout => sys::evidence::ULLM_STATUS_HIP_TIMEOUT,
-            Self::InvalidHandle => sys::evidence::ULLM_STATUS_HIP_INVALID_HANDLE,
-            Self::ZeroDispatch => sys::evidence::ULLM_STATUS_HIP_ZERO_DISPATCH,
-            Self::RuntimeError => sys::evidence::ULLM_STATUS_HIP_RUNTIME_ERROR,
-            Self::DispatchContract => sys::evidence::ULLM_STATUS_HIP_DISPATCH_CONTRACT,
+            Self::Ok => sys::SLLM_STATUS_OK,
+            Self::InvalidArgument => sys::SLLM_STATUS_INVALID_ARGUMENT,
+            Self::BufferTooSmall => sys::SLLM_STATUS_BUFFER_TOO_SMALL,
+            Self::Unsupported => sys::SLLM_STATUS_UNSUPPORTED,
+            Self::HipUnavailable => sys::SLLM_STATUS_HIP_UNAVAILABLE,
+            Self::InvalidAbiVersion => sys::SLLM_STATUS_INVALID_ABI_VERSION,
+            Self::ReservedNonzero => sys::SLLM_STATUS_RESERVED_NONZERO,
+            Self::InternalError => sys::SLLM_STATUS_INTERNAL_ERROR,
+            Self::Timeout => sys::evidence::SLLM_STATUS_HIP_TIMEOUT,
+            Self::InvalidHandle => sys::evidence::SLLM_STATUS_HIP_INVALID_HANDLE,
+            Self::ZeroDispatch => sys::evidence::SLLM_STATUS_HIP_ZERO_DISPATCH,
+            Self::RuntimeError => sys::evidence::SLLM_STATUS_HIP_RUNTIME_ERROR,
+            Self::DispatchContract => sys::evidence::SLLM_STATUS_HIP_DISPATCH_CONTRACT,
             Self::Unknown(raw) => raw,
         }
     }
@@ -151,10 +151,10 @@ fn status_name(status: Status) -> &'static str {
     }
 }
 
-fn sink(buffer: &mut [u8; ERROR_CAPACITY]) -> sys::ullm_error_sink_t {
-    sys::ullm_error_sink_t {
-        struct_size: size_of::<sys::ullm_error_sink_t>() as u32,
-        abi_version: sys::ULLM_HIP_ABI_VERSION,
+fn sink(buffer: &mut [u8; ERROR_CAPACITY]) -> sys::sllm_error_sink_t {
+    sys::sllm_error_sink_t {
+        struct_size: size_of::<sys::sllm_error_sink_t>() as u32,
+        abi_version: sys::SLLM_HIP_ABI_VERSION,
         message: buffer.as_mut_ptr().cast(),
         message_capacity: buffer.len() as u64,
         message_length: 0,
@@ -190,22 +190,22 @@ pub fn abi_version() -> Result<u32, HipError> {
     let mut buffer = [0u8; ERROR_CAPACITY];
     let mut error_sink = sink(&mut buffer);
     let mut version = 0;
-    let raw = unsafe { sys::ullm_get_abi_version(&mut version, &mut error_sink) };
+    let raw = unsafe { sys::sllm_get_abi_version(&mut version, &mut error_sink) };
     ensure_ok(raw, diagnostic(&buffer, error_sink.message_length)).map(|()| version)
 }
 
 pub fn version() -> Result<Version, HipError> {
     let mut buffer = [0u8; ERROR_CAPACITY];
     let mut error_sink = sink(&mut buffer);
-    let mut info = sys::ullm_version_info_t {
-        struct_size: size_of::<sys::ullm_version_info_t>() as u32,
-        abi_version: sys::ULLM_HIP_ABI_VERSION,
+    let mut info = sys::sllm_version_info_t {
+        struct_size: size_of::<sys::sllm_version_info_t>() as u32,
+        abi_version: sys::SLLM_HIP_ABI_VERSION,
         major: 0,
         minor: 0,
         patch: 0,
         reserved: [0; 3],
     };
-    let raw = unsafe { sys::ullm_query_version(&mut info, &mut error_sink) };
+    let raw = unsafe { sys::sllm_query_version(&mut info, &mut error_sink) };
     ensure_ok(raw, diagnostic(&buffer, error_sink.message_length)).map(|()| Version {
         abi_version: info.abi_version,
         major: info.major,
@@ -217,16 +217,16 @@ pub fn version() -> Result<Version, HipError> {
 pub fn backend_probe() -> Result<BackendProbe, HipError> {
     let mut buffer = [0u8; ERROR_CAPACITY];
     let mut error_sink = sink(&mut buffer);
-    let mut result = sys::ullm_backend_probe_result_t {
-        struct_size: size_of::<sys::ullm_backend_probe_result_t>() as u32,
-        abi_version: sys::ULLM_HIP_ABI_VERSION,
+    let mut result = sys::sllm_backend_probe_result_t {
+        struct_size: size_of::<sys::sllm_backend_probe_result_t>() as u32,
+        abi_version: sys::SLLM_HIP_ABI_VERSION,
         backend: 0,
         available: 0,
         hip_runtime_present: 0,
         reserved: [0; 3],
     };
     let raw =
-        unsafe { sys::ullm_backend_probe(sys::ULLM_BACKEND_HIP, &mut result, &mut error_sink) };
+        unsafe { sys::sllm_backend_probe(sys::SLLM_BACKEND_HIP, &mut result, &mut error_sink) };
     let status = Status::from_raw(raw);
     if status != Status::Ok && status != Status::HipUnavailable {
         return Err(error_from_raw(
@@ -245,14 +245,14 @@ pub fn backend_probe() -> Result<BackendProbe, HipError> {
 pub fn context_probe() -> Result<ContextProbe, HipError> {
     let mut buffer = [0u8; ERROR_CAPACITY];
     let mut error_sink = sink(&mut buffer);
-    let mut result = sys::ullm_context_probe_result_t {
-        struct_size: size_of::<sys::ullm_context_probe_result_t>() as u32,
-        abi_version: sys::ULLM_HIP_ABI_VERSION,
+    let mut result = sys::sllm_context_probe_result_t {
+        struct_size: size_of::<sys::sllm_context_probe_result_t>() as u32,
+        abi_version: sys::SLLM_HIP_ABI_VERSION,
         context_present: 0,
         hip_available: 0,
         reserved: [0; 4],
     };
-    let raw = unsafe { sys::ullm_context_probe(std::ptr::null(), &mut result, &mut error_sink) };
+    let raw = unsafe { sys::sllm_context_probe(std::ptr::null(), &mut result, &mut error_sink) };
     let status = Status::from_raw(raw);
     if status != Status::Ok && status != Status::HipUnavailable {
         return Err(error_from_raw(
@@ -291,7 +291,7 @@ pub struct EvidenceReport {
 }
 
 pub struct EvidenceCompletion {
-    handle: Option<NonNull<sys::evidence::ullm_hip_evidence_completion_t>>,
+    handle: Option<NonNull<sys::evidence::sllm_hip_evidence_completion_t>>,
 }
 
 impl fmt::Debug for EvidenceCompletion {
@@ -324,7 +324,7 @@ impl EvidenceCompletion {
         let mut error_sink = evidence_sink(&mut error_buffer);
         let mut result = evidence_result();
         let raw = unsafe {
-            sys::evidence::ullm_hip_evidence_wait(
+            sys::evidence::sllm_hip_evidence_wait(
                 handle.as_ptr(),
                 timeout_ms,
                 output.as_mut_ptr(),
@@ -359,7 +359,7 @@ impl Drop for EvidenceCompletion {
         let mut error_buffer = [0u8; ERROR_CAPACITY];
         let mut error_sink = evidence_sink(&mut error_buffer);
         let _ =
-            unsafe { sys::evidence::ullm_hip_evidence_destroy(&mut raw_handle, &mut error_sink) };
+            unsafe { sys::evidence::sllm_hip_evidence_destroy(&mut raw_handle, &mut error_sink) };
     }
 }
 
@@ -374,9 +374,9 @@ pub fn submit_evidence(input: &[u8]) -> Result<EvidenceCompletion, HipError> {
         status: Status::InvalidArgument,
         message: "evidence input is too large for the HIP ABI".to_owned(),
     })?;
-    let request = sys::evidence::ullm_hip_evidence_request_t {
-        struct_size: size_of::<sys::evidence::ullm_hip_evidence_request_t>() as u32,
-        abi_version: sys::evidence::ULLM_HIP_EVIDENCE_ABI_VERSION,
+    let request = sys::evidence::sllm_hip_evidence_request_t {
+        struct_size: size_of::<sys::evidence::sllm_hip_evidence_request_t>() as u32,
+        abi_version: sys::evidence::SLLM_HIP_EVIDENCE_ABI_VERSION,
         input: input.as_ptr(),
         input_size,
         reserved: [0; 4],
@@ -385,7 +385,7 @@ pub fn submit_evidence(input: &[u8]) -> Result<EvidenceCompletion, HipError> {
     let mut error_buffer = [0u8; ERROR_CAPACITY];
     let mut error_sink = evidence_sink(&mut error_buffer);
     let raw =
-        unsafe { sys::evidence::ullm_hip_evidence_submit(&request, &mut handle, &mut error_sink) };
+        unsafe { sys::evidence::sllm_hip_evidence_submit(&request, &mut handle, &mut error_sink) };
     ensure_ok(raw, diagnostic(&error_buffer, error_sink.message_length))?;
     NonNull::new(handle)
         .map(|handle| EvidenceCompletion {
@@ -412,7 +412,7 @@ fn validate_evidence_contract(
             message: "evidence result contains zero kernel dispatches".to_owned(),
         });
     }
-    if report.selected_backend != sys::ULLM_BACKEND_HIP
+    if report.selected_backend != sys::SLLM_BACKEND_HIP
         || report.fallback_used
         || !report.terminal
         || report.output_size != input.len()
@@ -440,10 +440,10 @@ pub fn run_evidence(
     Ok((output, report))
 }
 
-fn evidence_sink(buffer: &mut [u8; ERROR_CAPACITY]) -> sys::evidence::ullm_error_sink_t {
-    sys::evidence::ullm_error_sink_t {
-        struct_size: size_of::<sys::evidence::ullm_error_sink_t>() as u32,
-        abi_version: sys::ULLM_HIP_ABI_VERSION,
+fn evidence_sink(buffer: &mut [u8; ERROR_CAPACITY]) -> sys::evidence::sllm_error_sink_t {
+    sys::evidence::sllm_error_sink_t {
+        struct_size: size_of::<sys::evidence::sllm_error_sink_t>() as u32,
+        abi_version: sys::SLLM_HIP_ABI_VERSION,
         message: buffer.as_mut_ptr().cast(),
         message_capacity: buffer.len() as u64,
         message_length: 0,
@@ -451,10 +451,10 @@ fn evidence_sink(buffer: &mut [u8; ERROR_CAPACITY]) -> sys::evidence::ullm_error
     }
 }
 
-fn evidence_result() -> sys::evidence::ullm_hip_evidence_result_t {
-    sys::evidence::ullm_hip_evidence_result_t {
-        struct_size: size_of::<sys::evidence::ullm_hip_evidence_result_t>() as u32,
-        abi_version: sys::evidence::ULLM_HIP_EVIDENCE_ABI_VERSION,
+fn evidence_result() -> sys::evidence::sllm_hip_evidence_result_t {
+    sys::evidence::sllm_hip_evidence_result_t {
+        struct_size: size_of::<sys::evidence::sllm_hip_evidence_result_t>() as u32,
+        abi_version: sys::evidence::SLLM_HIP_EVIDENCE_ABI_VERSION,
         output_size: 0,
         allocation_count: 0,
         copy_count: 0,
@@ -516,10 +516,10 @@ impl Backend for HipBackend {
 mod tests {
     use super::*;
 
-    fn sink_for(buffer: &mut [u8]) -> sys::ullm_error_sink_t {
-        sys::ullm_error_sink_t {
-            struct_size: size_of::<sys::ullm_error_sink_t>() as u32,
-            abi_version: sys::ULLM_HIP_ABI_VERSION,
+    fn sink_for(buffer: &mut [u8]) -> sys::sllm_error_sink_t {
+        sys::sllm_error_sink_t {
+            struct_size: size_of::<sys::sllm_error_sink_t>() as u32,
+            abi_version: sys::SLLM_HIP_ABI_VERSION,
             message: buffer.as_mut_ptr().cast(),
             message_capacity: buffer.len() as u64,
             message_length: 0,
@@ -527,10 +527,10 @@ mod tests {
         }
     }
 
-    fn backend_result() -> sys::ullm_backend_probe_result_t {
-        sys::ullm_backend_probe_result_t {
-            struct_size: size_of::<sys::ullm_backend_probe_result_t>() as u32,
-            abi_version: sys::ULLM_HIP_ABI_VERSION,
+    fn backend_result() -> sys::sllm_backend_probe_result_t {
+        sys::sllm_backend_probe_result_t {
+            struct_size: size_of::<sys::sllm_backend_probe_result_t>() as u32,
+            abi_version: sys::SLLM_HIP_ABI_VERSION,
             backend: 0,
             available: 0,
             hip_runtime_present: 0,
@@ -538,10 +538,10 @@ mod tests {
         }
     }
 
-    fn version_info() -> sys::ullm_version_info_t {
-        sys::ullm_version_info_t {
-            struct_size: size_of::<sys::ullm_version_info_t>() as u32,
-            abi_version: sys::ULLM_HIP_ABI_VERSION,
+    fn version_info() -> sys::sllm_version_info_t {
+        sys::sllm_version_info_t {
+            struct_size: size_of::<sys::sllm_version_info_t>() as u32,
+            abi_version: sys::SLLM_HIP_ABI_VERSION,
             major: 0,
             minor: 0,
             patch: 0,
@@ -549,10 +549,10 @@ mod tests {
         }
     }
 
-    fn context_probe_result() -> sys::ullm_context_probe_result_t {
-        sys::ullm_context_probe_result_t {
-            struct_size: size_of::<sys::ullm_context_probe_result_t>() as u32,
-            abi_version: sys::ULLM_HIP_ABI_VERSION,
+    fn context_probe_result() -> sys::sllm_context_probe_result_t {
+        sys::sllm_context_probe_result_t {
+            struct_size: size_of::<sys::sllm_context_probe_result_t>() as u32,
+            abi_version: sys::SLLM_HIP_ABI_VERSION,
             context_present: 0,
             hip_available: 0,
             reserved: [0; 4],
@@ -562,16 +562,16 @@ mod tests {
     #[test]
     fn status_mapping_preserves_unknown_codes() {
         assert_eq!(
-            Status::from_raw(sys::ULLM_STATUS_HIP_UNAVAILABLE),
+            Status::from_raw(sys::SLLM_STATUS_HIP_UNAVAILABLE),
             Status::HipUnavailable
         );
         assert_eq!(
-            Status::from_raw(sys::evidence::ULLM_STATUS_HIP_ZERO_DISPATCH),
+            Status::from_raw(sys::evidence::SLLM_STATUS_HIP_ZERO_DISPATCH),
             Status::ZeroDispatch
         );
         assert_eq!(
             Status::ZeroDispatch.raw(),
-            sys::evidence::ULLM_STATUS_HIP_ZERO_DISPATCH
+            sys::evidence::SLLM_STATUS_HIP_ZERO_DISPATCH
         );
         assert_eq!(Status::from_raw(99), Status::Unknown(99));
     }
@@ -597,7 +597,7 @@ mod tests {
             allocation_count: 2,
             copy_count: 2,
             dispatch_count: 1,
-            selected_backend: sys::ULLM_BACKEND_HIP,
+            selected_backend: sys::SLLM_BACKEND_HIP,
             fallback_used: false,
             terminal: true,
         };
@@ -627,8 +627,8 @@ mod tests {
     fn private_evidence_abi_layout_and_constants_are_explicit() {
         use std::mem::{align_of, offset_of};
 
-        type Request = sys::evidence::ullm_hip_evidence_request_t;
-        type Result = sys::evidence::ullm_hip_evidence_result_t;
+        type Request = sys::evidence::sllm_hip_evidence_request_t;
+        type Result = sys::evidence::sllm_hip_evidence_result_t;
         assert_eq!(size_of::<Request>(), 40);
         assert_eq!(align_of::<Request>(), 8);
         assert_eq!(offset_of!(Request, struct_size), 0);
@@ -648,7 +648,7 @@ mod tests {
         assert_eq!(offset_of!(Result, fallback_used), 44);
         assert_eq!(offset_of!(Result, terminal), 48);
         assert_eq!(offset_of!(Result, reserved), 52);
-        type ErrorSink = sys::evidence::ullm_error_sink_t;
+        type ErrorSink = sys::evidence::sllm_error_sink_t;
         assert_eq!(size_of::<ErrorSink>(), 48);
         assert_eq!(align_of::<ErrorSink>(), 8);
         assert_eq!(offset_of!(ErrorSink, struct_size), 0);
@@ -657,12 +657,12 @@ mod tests {
         assert_eq!(offset_of!(ErrorSink, message_capacity), 16);
         assert_eq!(offset_of!(ErrorSink, message_length), 24);
         assert_eq!(offset_of!(ErrorSink, reserved), 32);
-        assert_eq!(sys::evidence::ULLM_HIP_EVIDENCE_ABI_VERSION, 1);
-        assert_eq!(sys::evidence::ULLM_HIP_EVIDENCE_TRANSFORM_XOR, 0x5a);
-        assert_eq!(sys::evidence::ULLM_STATUS_HIP_TIMEOUT, 8);
-        assert_eq!(sys::evidence::ULLM_STATUS_HIP_INVALID_HANDLE, 9);
-        assert_eq!(sys::evidence::ULLM_STATUS_HIP_ZERO_DISPATCH, 10);
-        assert_eq!(sys::evidence::ULLM_STATUS_HIP_DISPATCH_CONTRACT, 12);
+        assert_eq!(sys::evidence::SLLM_HIP_EVIDENCE_ABI_VERSION, 1);
+        assert_eq!(sys::evidence::SLLM_HIP_EVIDENCE_TRANSFORM_XOR, 0x5a);
+        assert_eq!(sys::evidence::SLLM_STATUS_HIP_TIMEOUT, 8);
+        assert_eq!(sys::evidence::SLLM_STATUS_HIP_INVALID_HANDLE, 9);
+        assert_eq!(sys::evidence::SLLM_STATUS_HIP_ZERO_DISPATCH, 10);
+        assert_eq!(sys::evidence::SLLM_STATUS_HIP_DISPATCH_CONTRACT, 12);
     }
 
     #[test]
@@ -680,41 +680,41 @@ mod tests {
         let mut error_sink = evidence_sink(&mut message);
         let mut handle = std::ptr::null_mut();
         let input = [1_u8, 2, 3];
-        let mut request = sys::evidence::ullm_hip_evidence_request_t {
-            struct_size: size_of::<sys::evidence::ullm_hip_evidence_request_t>() as u32,
-            abi_version: sys::evidence::ULLM_HIP_EVIDENCE_ABI_VERSION,
+        let mut request = sys::evidence::sllm_hip_evidence_request_t {
+            struct_size: size_of::<sys::evidence::sllm_hip_evidence_request_t>() as u32,
+            abi_version: sys::evidence::SLLM_HIP_EVIDENCE_ABI_VERSION,
             input: input.as_ptr(),
             input_size: input.len() as u64,
             reserved: [0; 4],
         };
 
         let raw = unsafe {
-            sys::evidence::ullm_hip_evidence_submit(std::ptr::null(), &mut handle, &mut error_sink)
+            sys::evidence::sllm_hip_evidence_submit(std::ptr::null(), &mut handle, &mut error_sink)
         };
         assert_eq!(Status::from_raw(raw), Status::InvalidArgument);
 
         request.struct_size -= 1;
         let raw = unsafe {
-            sys::evidence::ullm_hip_evidence_submit(&request, &mut handle, &mut error_sink)
+            sys::evidence::sllm_hip_evidence_submit(&request, &mut handle, &mut error_sink)
         };
         assert_eq!(Status::from_raw(raw), Status::InvalidArgument);
 
-        request.struct_size = size_of::<sys::evidence::ullm_hip_evidence_request_t>() as u32;
+        request.struct_size = size_of::<sys::evidence::sllm_hip_evidence_request_t>() as u32;
         request.abi_version += 1;
         let raw = unsafe {
-            sys::evidence::ullm_hip_evidence_submit(&request, &mut handle, &mut error_sink)
+            sys::evidence::sllm_hip_evidence_submit(&request, &mut handle, &mut error_sink)
         };
         assert_eq!(Status::from_raw(raw), Status::InvalidAbiVersion);
 
-        request.abi_version = sys::evidence::ULLM_HIP_EVIDENCE_ABI_VERSION;
+        request.abi_version = sys::evidence::SLLM_HIP_EVIDENCE_ABI_VERSION;
         request.reserved[0] = 1;
         let raw = unsafe {
-            sys::evidence::ullm_hip_evidence_submit(&request, &mut handle, &mut error_sink)
+            sys::evidence::sllm_hip_evidence_submit(&request, &mut handle, &mut error_sink)
         };
         assert_eq!(Status::from_raw(raw), Status::ReservedNonzero);
 
         let raw = unsafe {
-            sys::evidence::ullm_hip_evidence_wait(
+            sys::evidence::sllm_hip_evidence_wait(
                 std::ptr::null_mut(),
                 0,
                 std::ptr::null_mut(),
@@ -726,18 +726,18 @@ mod tests {
         assert_eq!(Status::from_raw(raw), Status::InvalidHandle);
 
         let raw = unsafe {
-            sys::evidence::ullm_hip_evidence_destroy(std::ptr::null_mut(), &mut error_sink)
+            sys::evidence::sllm_hip_evidence_destroy(std::ptr::null_mut(), &mut error_sink)
         };
         assert_eq!(Status::from_raw(raw), Status::InvalidArgument);
 
         let mut stale = std::ptr::null_mut();
-        let raw = unsafe { sys::evidence::ullm_hip_evidence_destroy(&mut stale, &mut error_sink) };
+        let raw = unsafe { sys::evidence::sllm_hip_evidence_destroy(&mut stale, &mut error_sink) };
         assert_eq!(Status::from_raw(raw), Status::InvalidHandle);
 
-        let mut fake = std::ptr::dangling_mut::<sys::evidence::ullm_hip_evidence_completion_t>();
-        let raw = unsafe { sys::evidence::ullm_hip_evidence_destroy(&mut fake, &mut error_sink) };
+        let mut fake = std::ptr::dangling_mut::<sys::evidence::sllm_hip_evidence_completion_t>();
+        let raw = unsafe { sys::evidence::sllm_hip_evidence_destroy(&mut fake, &mut error_sink) };
         assert_eq!(Status::from_raw(raw), Status::InvalidHandle);
-        let raw = unsafe { sys::evidence::ullm_hip_evidence_destroy(&mut fake, &mut error_sink) };
+        let raw = unsafe { sys::evidence::sllm_hip_evidence_destroy(&mut fake, &mut error_sink) };
         assert_eq!(Status::from_raw(raw), Status::InvalidHandle);
     }
 
@@ -776,25 +776,25 @@ mod tests {
         let mut message = [0_u8; ERROR_CAPACITY];
         let mut error_sink = sink(&mut message);
 
-        let raw = unsafe { sys::ullm_query_version(std::ptr::null_mut(), &mut error_sink) };
+        let raw = unsafe { sys::sllm_query_version(std::ptr::null_mut(), &mut error_sink) };
         assert_eq!(Status::from_raw(raw), Status::InvalidArgument);
         assert!(diagnostic(&message, error_sink.message_length).contains("version output"));
 
         let mut info = version_info();
         info.reserved[0] = 1;
-        let raw = unsafe { sys::ullm_query_version(&mut info, &mut error_sink) };
+        let raw = unsafe { sys::sllm_query_version(&mut info, &mut error_sink) };
         assert_eq!(Status::from_raw(raw), Status::ReservedNonzero);
         assert!(diagnostic(&message, error_sink.message_length).contains("reserved"));
 
         let mut info = version_info();
         info.abi_version += 1;
-        let raw = unsafe { sys::ullm_query_version(&mut info, &mut error_sink) };
+        let raw = unsafe { sys::sllm_query_version(&mut info, &mut error_sink) };
         assert_eq!(Status::from_raw(raw), Status::InvalidAbiVersion);
         assert!(diagnostic(&message, error_sink.message_length).contains("ABI"));
 
         let mut info = version_info();
         info.struct_size -= 1;
-        let raw = unsafe { sys::ullm_query_version(&mut info, &mut error_sink) };
+        let raw = unsafe { sys::sllm_query_version(&mut info, &mut error_sink) };
         assert_eq!(Status::from_raw(raw), Status::InvalidArgument);
         assert!(diagnostic(&message, error_sink.message_length).contains("struct_size"));
     }
@@ -808,12 +808,12 @@ mod tests {
         info.minor = u32::MAX;
         info.patch = u32::MAX;
 
-        let raw = unsafe { sys::ullm_query_version(&mut info, &mut error_sink) };
+        let raw = unsafe { sys::sllm_query_version(&mut info, &mut error_sink) };
         assert_eq!(Status::from_raw(raw), Status::Ok);
-        assert_eq!(info.abi_version, sys::ULLM_HIP_ABI_VERSION);
-        assert_eq!(info.major, sys::ULLM_HIP_LIBRARY_VERSION_MAJOR);
-        assert_eq!(info.minor, sys::ULLM_HIP_LIBRARY_VERSION_MINOR);
-        assert_eq!(info.patch, sys::ULLM_HIP_LIBRARY_VERSION_PATCH);
+        assert_eq!(info.abi_version, sys::SLLM_HIP_ABI_VERSION);
+        assert_eq!(info.major, sys::SLLM_HIP_LIBRARY_VERSION_MAJOR);
+        assert_eq!(info.minor, sys::SLLM_HIP_LIBRARY_VERSION_MINOR);
+        assert_eq!(info.patch, sys::SLLM_HIP_LIBRARY_VERSION_PATCH);
         assert_eq!(info.reserved, [0; 3]);
         assert_eq!(error_sink.message_length, 0);
     }
@@ -824,7 +824,7 @@ mod tests {
         let mut error_sink = sink(&mut message);
 
         let raw = unsafe {
-            sys::ullm_context_probe(std::ptr::null(), std::ptr::null_mut(), &mut error_sink)
+            sys::sllm_context_probe(std::ptr::null(), std::ptr::null_mut(), &mut error_sink)
         };
         assert_eq!(Status::from_raw(raw), Status::InvalidArgument);
         assert!(diagnostic(&message, error_sink.message_length).contains("context probe"));
@@ -832,21 +832,21 @@ mod tests {
         let mut result = context_probe_result();
         result.reserved[0] = 1;
         let raw =
-            unsafe { sys::ullm_context_probe(std::ptr::null(), &mut result, &mut error_sink) };
+            unsafe { sys::sllm_context_probe(std::ptr::null(), &mut result, &mut error_sink) };
         assert_eq!(Status::from_raw(raw), Status::ReservedNonzero);
         assert!(diagnostic(&message, error_sink.message_length).contains("reserved"));
 
         let mut result = context_probe_result();
         result.abi_version += 1;
         let raw =
-            unsafe { sys::ullm_context_probe(std::ptr::null(), &mut result, &mut error_sink) };
+            unsafe { sys::sllm_context_probe(std::ptr::null(), &mut result, &mut error_sink) };
         assert_eq!(Status::from_raw(raw), Status::InvalidAbiVersion);
         assert!(diagnostic(&message, error_sink.message_length).contains("ABI"));
 
         let mut result = context_probe_result();
         result.struct_size -= 1;
         let raw =
-            unsafe { sys::ullm_context_probe(std::ptr::null(), &mut result, &mut error_sink) };
+            unsafe { sys::sllm_context_probe(std::ptr::null(), &mut result, &mut error_sink) };
         assert_eq!(Status::from_raw(raw), Status::InvalidArgument);
         assert!(diagnostic(&message, error_sink.message_length).contains("struct_size"));
     }
@@ -860,7 +860,7 @@ mod tests {
         result.hip_available = u32::MAX;
 
         let raw =
-            unsafe { sys::ullm_context_probe(std::ptr::null(), &mut result, &mut error_sink) };
+            unsafe { sys::sllm_context_probe(std::ptr::null(), &mut result, &mut error_sink) };
         assert_eq!(Status::from_raw(raw), Status::HipUnavailable);
         assert_eq!(result.context_present, 0);
         assert_eq!(result.hip_available, 0);
@@ -872,9 +872,9 @@ mod tests {
     fn native_probe_rejects_nonzero_reserved_fields() {
         let mut buffer = [0u8; ERROR_CAPACITY];
         let mut error_sink = sink(&mut buffer);
-        let mut result = sys::ullm_backend_probe_result_t {
-            struct_size: size_of::<sys::ullm_backend_probe_result_t>() as u32,
-            abi_version: sys::ULLM_HIP_ABI_VERSION,
+        let mut result = sys::sllm_backend_probe_result_t {
+            struct_size: size_of::<sys::sllm_backend_probe_result_t>() as u32,
+            abi_version: sys::SLLM_HIP_ABI_VERSION,
             backend: 0,
             available: 0,
             hip_runtime_present: 0,
@@ -882,20 +882,20 @@ mod tests {
         };
 
         let raw =
-            unsafe { sys::ullm_backend_probe(sys::ULLM_BACKEND_HIP, &mut result, &mut error_sink) };
+            unsafe { sys::sllm_backend_probe(sys::SLLM_BACKEND_HIP, &mut result, &mut error_sink) };
         assert_eq!(Status::from_raw(raw), Status::ReservedNonzero);
         assert!(diagnostic(&buffer, error_sink.message_length).contains("reserved"));
     }
 
     #[test]
     fn native_abi_rejects_null_and_wrong_abi_inputs() {
-        let raw = unsafe { sys::ullm_get_abi_version(std::ptr::null_mut(), std::ptr::null_mut()) };
+        let raw = unsafe { sys::sllm_get_abi_version(std::ptr::null_mut(), std::ptr::null_mut()) };
         assert_eq!(Status::from_raw(raw), Status::InvalidArgument);
 
         let mut untouched = [0xA5_u8; ERROR_CAPACITY];
         let mut wrong_sink = sink(&mut untouched);
-        wrong_sink.abi_version = sys::ULLM_HIP_ABI_VERSION + 1;
-        let raw = unsafe { sys::ullm_get_abi_version(std::ptr::null_mut(), &mut wrong_sink) };
+        wrong_sink.abi_version = sys::SLLM_HIP_ABI_VERSION + 1;
+        let raw = unsafe { sys::sllm_get_abi_version(std::ptr::null_mut(), &mut wrong_sink) };
         assert_eq!(Status::from_raw(raw), Status::InvalidAbiVersion);
         assert!(untouched.iter().all(|byte| *byte == 0xA5));
 
@@ -904,14 +904,14 @@ mod tests {
         let mut result = backend_result();
         result.struct_size -= 1;
         let raw =
-            unsafe { sys::ullm_backend_probe(sys::ULLM_BACKEND_HIP, &mut result, &mut error_sink) };
+            unsafe { sys::sllm_backend_probe(sys::SLLM_BACKEND_HIP, &mut result, &mut error_sink) };
         assert_eq!(Status::from_raw(raw), Status::InvalidArgument);
         assert!(diagnostic(&message, error_sink.message_length).contains("struct_size"));
 
         let mut result = backend_result();
         result.abi_version += 1;
         let raw =
-            unsafe { sys::ullm_backend_probe(sys::ULLM_BACKEND_HIP, &mut result, &mut error_sink) };
+            unsafe { sys::sllm_backend_probe(sys::SLLM_BACKEND_HIP, &mut result, &mut error_sink) };
         assert_eq!(Status::from_raw(raw), Status::InvalidAbiVersion);
     }
 
@@ -922,21 +922,21 @@ mod tests {
         let mut short = [0xA5_u8; 1];
         let mut short_sink = sink_for(&mut short);
         let raw =
-            unsafe { sys::ullm_backend_probe(sys::ULLM_BACKEND_HIP, &mut result, &mut short_sink) };
+            unsafe { sys::sllm_backend_probe(sys::SLLM_BACKEND_HIP, &mut result, &mut short_sink) };
         assert_eq!(Status::from_raw(raw), Status::BufferTooSmall);
         assert_eq!(short_sink.message_length as usize, expected.len());
         assert_eq!(short, [0]);
 
         let mut no_storage = sink_for(&mut []);
         let raw =
-            unsafe { sys::ullm_backend_probe(sys::ULLM_BACKEND_HIP, &mut result, &mut no_storage) };
+            unsafe { sys::sllm_backend_probe(sys::SLLM_BACKEND_HIP, &mut result, &mut no_storage) };
         assert_eq!(Status::from_raw(raw), Status::BufferTooSmall);
         assert_eq!(no_storage.message_length as usize, expected.len());
 
         let mut full = vec![0_u8; expected.len() + 1];
         let mut full_sink = sink_for(&mut full);
         let raw =
-            unsafe { sys::ullm_backend_probe(sys::ULLM_BACKEND_HIP, &mut result, &mut full_sink) };
+            unsafe { sys::sllm_backend_probe(sys::SLLM_BACKEND_HIP, &mut result, &mut full_sink) };
         assert_eq!(Status::from_raw(raw), Status::HipUnavailable);
         assert_eq!(full_sink.message_length as usize, expected.len());
         assert_eq!(&full[..expected.len()], expected.as_bytes());
@@ -945,12 +945,12 @@ mod tests {
         let mut invalid_sink = sink_for(&mut full);
         invalid_sink.message = std::ptr::null_mut();
         let raw = unsafe {
-            sys::ullm_backend_probe(sys::ULLM_BACKEND_HIP, &mut result, &mut invalid_sink)
+            sys::sllm_backend_probe(sys::SLLM_BACKEND_HIP, &mut result, &mut invalid_sink)
         };
         assert_eq!(Status::from_raw(raw), Status::InvalidArgument);
 
         let raw = unsafe {
-            sys::ullm_backend_probe(sys::ULLM_BACKEND_HIP, &mut result, std::ptr::null_mut())
+            sys::sllm_backend_probe(sys::SLLM_BACKEND_HIP, &mut result, std::ptr::null_mut())
         };
         assert_eq!(Status::from_raw(raw), Status::HipUnavailable);
     }
@@ -960,7 +960,7 @@ mod tests {
         let mut message = [0_u8; ERROR_CAPACITY];
         let mut error_sink = sink(&mut message);
         let mut result = backend_result();
-        let raw = unsafe { sys::ullm_backend_probe(999, &mut result, &mut error_sink) };
+        let raw = unsafe { sys::sllm_backend_probe(999, &mut result, &mut error_sink) };
         assert_eq!(Status::from_raw(raw), Status::Unsupported);
         assert_eq!(result.backend, 0);
         assert!(diagnostic(&message, error_sink.message_length).contains("unknown backend"));

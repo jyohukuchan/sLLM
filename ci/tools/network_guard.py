@@ -464,7 +464,7 @@ def _probe(
 
 def prepare_isolation() -> IsolationPlan:
     """Select a tested isolation method and prove the parent netns is unchanged."""
-    if os.environ.get("ULLM_NETWORK_GUARD_ACTIVE") == "1":
+    if os.environ.get("SLLM_NETWORK_GUARD_ACTIVE") == "1":
         raise NetworkIsolationError("network guard cannot establish a nested required boundary")
     parent_netns = current_netns()
     failures: list[str] = []
@@ -522,10 +522,10 @@ def child_main(args: argparse.Namespace) -> int:
         print("network guard: missing command", file=sys.stderr)
         return 2
     env = os.environ.copy()
-    env["ULLM_NETWORK_GUARD_ACTIVE"] = "1"
-    env["ULLM_CI_NETWORK_DISABLED"] = "1"
-    env["ULLM_NETWORK_GUARD_STRATEGY"] = args.strategy or "unknown"
-    env["ULLM_EMIT_TEST_COUNTS"] = "1"
+    env["SLLM_NETWORK_GUARD_ACTIVE"] = "1"
+    env["SLLM_CI_NETWORK_DISABLED"] = "1"
+    env["SLLM_NETWORK_GUARD_STRATEGY"] = args.strategy or "unknown"
+    env["SLLM_EMIT_TEST_COUNTS"] = "1"
     try:
         os.execvpe(command[0], command, env)
     except OSError as exc:

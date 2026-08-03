@@ -2,7 +2,7 @@
 
 ## 設計原則
 
-uLLM のランタイムは Rust workspace が主導し、GPU の操作だけを C++/HIP に閉じ込める。Rust はユーザー入力から実行計画までの意味論、型、安全な所有権を管理し、C++ は HIP runtime に近い resource と kernel 実行を管理する。両者の境界は HIP 専用の versioned C ABI とし、C++ ABI や Rust ABI を公開境界にしない。
+sLLM のランタイムは Rust workspace が主導し、GPU の操作だけを C++/HIP に閉じ込める。Rust はユーザー入力から実行計画までの意味論、型、安全な所有権を管理し、C++ は HIP runtime に近い resource と kernel 実行を管理する。両者の境界は HIP 専用の versioned C ABI とし、C++ ABI や Rust ABI を公開境界にしない。
 
 初期 MVP は Qwen3.5-4B BF16 の単一 GPU 推論に限定する。ただし、後から backend や dtype、KV cache 表現を追加する際に上位層を作り直さないよう、op descriptor、capability query、KV layout abstraction は最初から設ける。
 
@@ -10,27 +10,27 @@ uLLM のランタイムは Rust workspace が主導し、GPU の操作だけを 
 
 ```text
 Cargo workspace
-├── crates/ullm-core
-├── crates/ullm-hip-sys
-├── crates/ullm-hip
-├── crates/ullm-cli
+├── crates/sllm-core
+├── crates/sllm-hip-sys
+├── crates/sllm-hip
+├── crates/sllm-cli
 └── native/hip
     └── CMake project
 ```
 
 | 領域 | 責務 |
 | --- | --- |
-| `ullm-core` | frontend、model/config、tokenizer、scheduler、sampling、backend 非依存の execution plan と tensor/op descriptor |
-| `ullm-hip-sys` | versioned HIP C ABI の宣言、check-in した generated bindings、`build.rs` による native build と link 情報の伝達 |
-| `ullm-hip` | C ABI の安全な Rust wrapper、HIP backend 実装、resource ownership、非同期実行の lifetime と error 変換 |
-| `ullm-cli` | CLI、設定の読み込み、runtime の組み立てと起動。GPU resource の詳細を直接扱わない |
+| `sllm-core` | frontend、model/config、tokenizer、scheduler、sampling、backend 非依存の execution plan と tensor/op descriptor |
+| `sllm-hip-sys` | versioned HIP C ABI の宣言、check-in した generated bindings、`build.rs` による native build と link 情報の伝達 |
+| `sllm-hip` | C ABI の安全な Rust wrapper、HIP backend 実装、resource ownership、非同期実行の lifetime と error 変換 |
+| `sllm-cli` | CLI、設定の読み込み、runtime の組み立てと起動。GPU resource の詳細を直接扱わない |
 | `native/hip` | HIP context、allocator、queues、events、operator dispatch、backend 内 kernel registry、HIP kernels |
 
-Rust 側は model graph を backend 非依存の op descriptor 列へ落とし、scheduler が request の実行順序と batch を決め、execution plan が tensor dependency と access mode を明示する。HIP 固有の queue 選択や kernel symbol は `ullm-core` に漏らさない。
+Rust 側は model graph を backend 非依存の op descriptor 列へ落とし、scheduler が request の実行順序と batch を決め、execution plan が tensor dependency と access mode を明示する。HIP 固有の queue 選択や kernel symbol は `sllm-core` に漏らさない。
 
 ## Backend 境界
 
-`ullm-core` は上位の Rust `Backend` trait だけに依存する。trait は少なくとも次の概念を提供する。
+`sllm-core` は上位の Rust `Backend` trait だけに依存する。trait は少なくとも次の概念を提供する。
 
 - device の列挙と capability query
 - buffer の確保と import/export 可能性の照会
@@ -38,7 +38,7 @@ Rust 側は model graph を backend 非依存の op descriptor 列へ落とし�
 - prepared plan の queue への非同期 submit と completion event
 - backend status を Rust error へ変換する診断情報
 
-`ullm-hip` がこの trait を実装し、`ullm-hip-sys` の C ABI を呼ぶ。上位 trait の version と HIP C ABI の version は別に管理する。将来 backend を追加しても、その backend に HIP C ABI を実装させる必要はない。
+`sllm-hip` がこの trait を実装し、`sllm-hip-sys` の C ABI を呼ぶ。上位 trait の version と HIP C ABI の version は別に管理する。将来 backend を追加しても、その backend に HIP C ABI を実装させる必要はない。
 
 ### HIP 専用 versioned C ABI
 
@@ -85,7 +85,7 @@ registry は責務の異なる三層に分ける。
 | Registry | 所有者 | 役割 |
 | --- | --- | --- |
 | Backend registry | Rust runtime | 利用可能 backend の生成、device/capability による選択 |
-| Op registry | `ullm-core` と backend adapter | 論理 op descriptor、必要 capability、backend support query、fallback 方針の対応づけ |
+| Op registry | `sllm-core` と backend adapter | 論理 op descriptor、必要 capability、backend support query、fallback 方針の対応づけ |
 | Kernel registry | 各 backend。MVP では `native/hip` | op、物理 dtype、encoding、shape/layout、GPU target に応じた実装候補の選択 |
 
 op descriptor は kernel 名ではなく、演算の意味、shape、layout、数値要件を記述する。backend は capability query で descriptor を受理できるか返し、prepare 時に具体的な kernel を選ぶ。実行開始後に不足 capability が判明する構成を避ける。
@@ -104,23 +104,23 @@ KV cache は通常の tensor descriptor に加え、layer、K/V の分離また�
 
 ## Build integration
 
-Cargo を top-level build entry point とする。`ullm-hip-sys/build.rs` が CMake を使って `native/hip` を configure/build し、Cargo に native link search path、library、必要な rerun 条件を伝える。CMake の configure/build/install output は Cargo が割り当てた `OUT_DIR` 以下だけに生成し、source tree や共有 build directory へ生成物を書かない。
+Cargo を top-level build entry point とする。`sllm-hip-sys/build.rs` が CMake を使って `native/hip` を configure/build し、Cargo に native link search path、library、必要な rerun 条件を伝える。CMake の configure/build/install output は Cargo が割り当てた `OUT_DIR` 以下だけに生成し、source tree や共有 build directory へ生成物を書かない。
 
-`build.rs` は検出済みの `ROCM_PATH`、`CMAKE_HIP_ARCHITECTURES`、`ULLM_HIP_CODEGEN_FEATURES` を明示的に CMake へ渡す。CMake は別の ROCm や host GPU target を独自に再発見せず、同じ tree の `amdclang++` と渡された target/features を使う。release build で target/features が不足する場合は configure error とし、生成した native artifact の metadata に実際の入力を記録する。
+`build.rs` は検出済みの `ROCM_PATH`、`CMAKE_HIP_ARCHITECTURES`、`SLLM_HIP_CODEGEN_FEATURES` を明示的に CMake へ渡す。CMake は別の ROCm や host GPU target を独自に再発見せず、同じ tree の `amdclang++` と渡された target/features を使う。release build で target/features が不足する場合は configure error とし、生成した native artifact の metadata に実際の入力を記録する。
 
-C ABI から生成した Rust bindings は repository に check-in する。通常ビルドは bindgen の実行を必須にせず、明示的な再生成操作だけが bindings を更新する。生成元 header、ABI version、生成 tool/version、生成 option を固定し、header を変更した commit では対応する generated bindings も同時に更新する。安全性、所有権、`Send`/`Sync` の判断は generated code に持たせず `ullm-hip` の手書き wrapper に閉じ込める。
+C ABI から生成した Rust bindings は repository に check-in する。通常ビルドは bindgen の実行を必須にせず、明示的な再生成操作だけが bindings を更新する。生成元 header、ABI version、生成 tool/version、生成 option を固定し、header を変更した commit では対応する generated bindings も同時に更新する。安全性、所有権、`Send`/`Sync` の判断は generated code に持たせず `sllm-hip` の手書き wrapper に閉じ込める。
 
 ### Phase 1 host stub
 
-Phase 1では、CargoからCMake static libraryをbuild・linkする経路とversioned C ABIを実際に成立させる一方、HIP compiler、ROCm library、GPU処理は導入しない。`native/hip`はC++17 host stubとしてbuildされ、ABI versionとlibrary versionを返し、HIP backend/context probeには`ULLM_STATUS_HIP_UNAVAILABLE`を返す。成功、CPU fallback、GPU対応として扱わない。
+Phase 1では、CargoからCMake static libraryをbuild・linkする経路とversioned C ABIを実際に成立させる一方、HIP compiler、ROCm library、GPU処理は導入しない。`native/hip`はC++17 host stubとしてbuildされ、ABI versionとlibrary versionを返し、HIP backend/context probeには`SLLM_STATUS_HIP_UNAVAILABLE`を返す。成功、CPU fallback、GPU対応として扱わない。
 
-公開headerは`include/ullm/hip.h`、check-inしたbindingsは`crates/ullm-hip-sys/src/bindings.rs`、Cargo/CMake統合は`crates/ullm-hip-sys/build.rs`を正とする。Phase 2のH3でHIP languageとtarget別codegenを追加するまで、stub artifactをHIP compile evidenceまたはGPU evidenceに使用しない。
+公開headerは`include/sllm/hip.h`、check-inしたbindingsは`crates/sllm-hip-sys/src/bindings.rs`、Cargo/CMake統合は`crates/sllm-hip-sys/build.rs`を正とする。Phase 2のH3でHIP languageとtarget別codegenを追加するまで、stub artifactをHIP compile evidenceまたはGPU evidenceに使用しない。
 
 Phase 1のbackend-independent contractは、read/write access mode、opaque queue/buffer/event handle、completionまでresourceを強参照するownership tokenを含む。これは非実行のlifetime contractであり、非同期実行や完了を偽装しない。C/Rust ABIのsize、alignment、field offset、constantはbuild時のnative layout probeでcheck-in bindingsと機械的に照合し、C/C++両方で公開headerをcompileする。
 
 ### Phase 2 model-free evidence path
 
-Phase 2の最小GPU経路はpublic inference ABIへ未成熟なopを追加せず、private evidence ABIと専用`ullm-hip-evidence` binaryへ分離する。Rustはinputをnative submit中にcopyさせ、opaque integer handleを一度だけwait/destroyできる所有型として保持する。native completionはHIP stream、event、device buffer、pinned host bufferをcompletionまで所有し、各caseで2 device allocation、2 HIP transfer、1 diagnostic kernel dispatchを行う。
+Phase 2の最小GPU経路はpublic inference ABIへ未成熟なopを追加せず、private evidence ABIと専用`sllm-hip-evidence` binaryへ分離する。Rustはinputをnative submit中にcopyさせ、opaque integer handleを一度だけwait/destroyできる所有型として保持する。native completionはHIP stream、event、device buffer、pinned host bufferをcompletionまで所有し、各caseで2 device allocation、2 HIP transfer、1 diagnostic kernel dispatchを行う。
 
 caseは1、3、17、255、256、257 byteとし、Rust側の独立XOR oracleへbyte exactで照合する。host stubは明示`HIP unavailable`を返し、CPU fallback、model、semantic numerical opはこの経路に存在しない。HIP buildはbare exact `gfx1030`または`gfx1201`を要求し、runtimeのraw `gcnArchName`、embedded Code Object V6/target/ELF flags/wave32/kernel symbol、実際にloadしたHIP/ROCr library pathが契約と一致しない場合は実行evidenceにしない。
 

@@ -34,7 +34,7 @@ cleanup() {
     if [[ -z "${TEMP_DIR:-}" || ! -d "$TEMP_DIR" ]]; then
         return
     fi
-    if [[ "$TEMP_DIR" != "$TEMP_PARENT"/ullm-environment.* ]]; then
+    if [[ "$TEMP_DIR" != "$TEMP_PARENT"/sllm-environment.* ]]; then
         printf 'check-environment: refusing to clean unexpected path: %s\n' "$TEMP_DIR" >&2
         return
     fi
@@ -147,10 +147,10 @@ parse_architectures() {
     local architecture
     local -A seen=()
 
-    [[ -n "$architecture_csv" ]] || fail 'ULLM_HIP_ARCHITECTURES must not be empty'
+    [[ -n "$architecture_csv" ]] || fail 'SLLM_HIP_ARCHITECTURES must not be empty'
     if [[ "$architecture_csv" == ,* || "$architecture_csv" == *, || \
         "$architecture_csv" == *,,* ]]; then
-        fail "invalid comma-separated ULLM_HIP_ARCHITECTURES: $architecture_csv"
+        fail "invalid comma-separated SLLM_HIP_ARCHITECTURES: $architecture_csv"
     fi
 
     IFS=',' read -r -a HIP_ARCHITECTURES <<<"$architecture_csv"
@@ -166,7 +166,7 @@ parse_architectures() {
 }
 
 check_gpu() {
-    local architecture_csv="${ULLM_HIP_ARCHITECTURES:-gfx1030,gfx1201}"
+    local architecture_csv="${SLLM_HIP_ARCHITECTURES:-gfx1030,gfx1201}"
     local architecture
     local compiler="$ROCM_PATH/bin/amdclang++"
     local smoke_binary="$TEMP_DIR/hip-smoke"
@@ -186,7 +186,7 @@ check_gpu() {
         compile_arguments+=("--offload-arch=$architecture")
     done
     compile_arguments+=(
-        "-DULLM_HIP_ARCHITECTURES=\"$architecture_csv\""
+        "-DSLLM_HIP_ARCHITECTURES=\"$architecture_csv\""
         "$SCRIPT_DIR/hip-smoke.cpp"
         "-L$ROCM_PATH/lib"
         "-Wl,-rpath,$ROCM_PATH/lib"
@@ -233,7 +233,7 @@ fi
 require_command realpath
 TEMP_PARENT="$(realpath -m -- "${TMPDIR:-/tmp}")"
 readonly TEMP_PARENT
-TEMP_DIR="$(mktemp -d "$TEMP_PARENT/ullm-environment.XXXXXXXX")"
+TEMP_DIR="$(mktemp -d "$TEMP_PARENT/sllm-environment.XXXXXXXX")"
 readonly TEMP_DIR
 trap cleanup EXIT
 trap 'exit 130' INT

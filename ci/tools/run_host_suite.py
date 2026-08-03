@@ -211,7 +211,7 @@ def actual_counts(
     if is_pytest(argv):
         return _machine_counts(
             output,
-            prefix="ULLM_PYTEST_COUNTS",
+            prefix="SLLM_PYTEST_COUNTS",
             source="pytest-machine",
         )
     if is_cargo_test(argv):
@@ -246,7 +246,7 @@ def actual_counts(
     if is_unittest_script(argv):
         return _machine_counts(
             output,
-            prefix="ULLM_UNITTEST_COUNTS",
+            prefix="SLLM_UNITTEST_COUNTS",
             source="unittest-machine",
         )
     return {
@@ -358,7 +358,7 @@ def run_unittest_count_wrapper(original_argv: list[str]) -> int:
         "deselected": 0,
     }
     print(
-        "ULLM_UNITTEST_COUNTS="
+        "SLLM_UNITTEST_COUNTS="
         + json.dumps(counts, sort_keys=True, separators=(",", ":")),
         flush=True,
     )
@@ -440,7 +440,7 @@ def run_bounded_process(
     started = time.monotonic()
 
     command_env = isolated_env()
-    command_env["ULLM_EMIT_TEST_COUNTS"] = "1"
+    command_env["SLLM_EMIT_TEST_COUNTS"] = "1"
     proc = subprocess.Popen(
         argv,
         cwd=repo,

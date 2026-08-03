@@ -107,8 +107,8 @@ def safe_output_directory(output: Path, repo: Path, row: dict[str, Any]) -> Path
         raise ContractError("G0 output directory must be absolute")
     resolved = output.resolve(strict=False)
     path_outside_repo(resolved, repo, "G0 output directory")
-    if resolved.name != f"g0-{row['target']}" or not resolved.parent.name.startswith("ullm-g0-") or resolved.parent.parent != Path("/tmp"):
-        raise ContractError("G0 output must be /tmp/ullm-g0-*/g0-<exact-target>")
+    if resolved.name != f"g0-{row['target']}" or not resolved.parent.name.startswith("sllm-g0-") or resolved.parent.parent != Path("/tmp"):
+        raise ContractError("G0 output must be /tmp/sllm-g0-*/g0-<exact-target>")
     if output.exists() and output.is_symlink():
         raise ContractError("G0 output directory must not be a symlink")
     output.mkdir(parents=True, exist_ok=True)
@@ -119,7 +119,7 @@ def safe_output_directory(output: Path, repo: Path, row: dict[str, Any]) -> Path
 
 @contextmanager
 def nonblocking_host_lock(path: Path) -> Iterator[None]:
-    if path != Path("/tmp/ullm-g0.lock"):
+    if path != Path("/tmp/sllm-g0.lock"):
         raise ContractError("G0 lock path is not canonical")
     descriptor = os.open(path, os.O_RDWR | os.O_CREAT | os.O_CLOEXEC, 0o600)
     try:
@@ -583,7 +583,7 @@ def run_native_provider(repo: Path, row: dict[str, Any], *, hip_visible_devices:
     hsa_library = root / "lib/libhsa-runtime64.so.1.21.0"
     if not compiler.is_file() or not hip_library.is_file() or not hsa_library.is_file():
         raise ContractError("ROCm native provider compiler/runtime library path is unavailable")
-    provider_dir = Path(tempfile.mkdtemp(prefix="ullm-g0-provider-", dir="/tmp"))
+    provider_dir = Path(tempfile.mkdtemp(prefix="sllm-g0-provider-", dir="/tmp"))
     binary = provider_dir / "g0_native_observer"
     compile_argv = [
         str(compiler),

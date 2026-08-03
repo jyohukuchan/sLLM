@@ -220,7 +220,7 @@ def validate_manifests(repo: Path) -> tuple[dict[str, Any], dict[str, Any]]:
             raise H3Error(f"H3 row direct amdclang++ contract is not canonical: {row_id}")
         if row.get("resource") != {"max_rss_bytes": 4294967296, "max_output_bytes": 16777216}:
             raise H3Error(f"H3 row resource contract is not canonical: {row_id}")
-        if row.get("output") != {"root_prefix": "/tmp/ullm-h3-", "directory_pattern": "h3-{target}", "artifact_pattern": "device-code-object-{target}.elf"}:
+        if row.get("output") != {"root_prefix": "/tmp/sllm-h3-", "directory_pattern": "h3-{target}", "artifact_pattern": "device-code-object-{target}.elf"}:
             raise H3Error(f"H3 row output contract is not canonical: {row_id}")
         if row.get("codegen") != {"target": target, "target_kind": "exact", "target_count": 1, "code_object_version": "V6", "wavefront_size": 32, "features": FEATURES}:
             raise H3Error(f"H3 row codegen tuple is not canonical: {row_id}")
@@ -517,8 +517,8 @@ def assert_required_network_isolation() -> None:
     proof.  The workflow supplies the actual boundary with ``--network none``.
     """
 
-    if os.environ.get("ULLM_H3_NETWORK_DISABLED") != "1":
-        raise H3Error("required CI requires ULLM_H3_NETWORK_DISABLED=1")
+    if os.environ.get("SLLM_H3_NETWORK_DISABLED") != "1":
+        raise H3Error("required CI requires SLLM_H3_NETWORK_DISABLED=1")
     try:
         interfaces = sorted(name for _index, name in socket.if_nameindex())
     except OSError as exc:
@@ -669,7 +669,7 @@ def main(argv: list[str] | None = None) -> int:
             raise H3Error("direct compile probe source is missing or is not a regular file")
         commands = render_direct_commands(row, target, build_dir, source_path)
         env = os.environ.copy()
-        env.update({"ROCM_PATH": str(root), "HIP_PATH": str(root), "ULLM_H3_NETWORK_DISABLED": env.get("ULLM_H3_NETWORK_DISABLED", "0")})
+        env.update({"ROCM_PATH": str(root), "HIP_PATH": str(root), "SLLM_H3_NETWORK_DISABLED": env.get("SLLM_H3_NETWORK_DISABLED", "0")})
         start_monotonic = time.monotonic()
         for step_index, command in enumerate(commands):
             remaining = 900 - (time.monotonic() - start_monotonic)

@@ -86,12 +86,12 @@ class HostContractTests(unittest.TestCase):
 def main() -> int:
     suite = unittest.defaultTestLoader.loadTestsFromModule(sys.modules[__name__])
     result = unittest.TextTestRunner(verbosity=2).run(suite)
-    if os.environ.get("ULLM_EMIT_TEST_COUNTS") == "1":
+    if os.environ.get("SLLM_EMIT_TEST_COUNTS") == "1":
         selected = result.testsRun
         failed = len(result.failures) + len(result.errors)
         skipped = len(result.skipped)
         print(
-            "ULLM_UNITTEST_COUNTS="
+            "SLLM_UNITTEST_COUNTS="
             + json.dumps(
                 {
                     "collected": selected,

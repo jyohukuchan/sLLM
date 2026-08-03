@@ -590,7 +590,7 @@ def _result_schema_validator(schema_path: Path, schema: dict[str, Any]) -> Any:
     def reject_external_reference(uri: str) -> Any:
         raise ContractError(f"result schema reference is not an allowlisted local schema: {uri}")
 
-    canonical_uri = "https://ullm-project.local/ci/schema/g0-preflight-v1.schema.json"
+    canonical_uri = "https://sllm-project.local/ci/schema/g0-preflight-v1.schema.json"
     store = {
         canonical_uri: preflight_schema,
         preflight_path.resolve().as_uri(): preflight_schema,
@@ -998,10 +998,10 @@ def isolated_env() -> dict[str, str]:
         "PYTHONHASHSEED": "0",
         "PYTHONDONTWRITEBYTECODE": "1",
         "NO_NETWORK": "1",
-        "ULLM_CI_NETWORK_DISABLED": "1",
-        "ULLM_CI_MODEL_DISABLED": "1",
-        "ULLM_CI_NO_MODEL": "1",
-        "ULLM_CI_NO_GPU_FALLBACK": "1",
+        "SLLM_CI_NETWORK_DISABLED": "1",
+        "SLLM_CI_MODEL_DISABLED": "1",
+        "SLLM_CI_NO_MODEL": "1",
+        "SLLM_CI_NO_GPU_FALLBACK": "1",
         "CUDA_VISIBLE_DEVICES": "",
         "HIP_VISIBLE_DEVICES": "",
         "ROCR_VISIBLE_DEVICES": "",

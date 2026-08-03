@@ -1,7 +1,7 @@
 # Model artifact lock format
 
 Model identifiers such as a Hugging Face repository name or branch are mutable.
-uLLM therefore resolves every model input to an immutable revision and verifies
+sLLM therefore resolves every model input to an immutable revision and verifies
 every downloaded byte before loading it. The lock file, not a cache directory or
 floating alias, is the record of what was used.
 
@@ -59,7 +59,7 @@ Never download locked bytes using the requested branch or tag after resolution.
 
 For an LFS file, `git_blob` identifies the repository's pointer blob and `lfs_oid`
 identifies the LFS content object. Neither replaces the SHA-256 computed over the
-actual bytes uLLM consumes.
+actual bytes sLLM consumes.
 
 ## Resolution procedure
 

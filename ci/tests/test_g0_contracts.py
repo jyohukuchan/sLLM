@@ -450,7 +450,7 @@ class G0PreflightNegativeTests(unittest.TestCase):
     def test_staged_h3_artifact_rebinding_is_explicit_and_hash_bound(self) -> None:
         metadata_path = Path(self.preflight["artifact_binding"]["metadata_path"])
         metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-        declared_root = Path(tempfile.mkdtemp(prefix="ullm-h3-declared-")) / "h3-gfx1030"
+        declared_root = Path(tempfile.mkdtemp(prefix="sllm-h3-declared-")) / "h3-gfx1030"
         declared_artifact = declared_root / "device-code-object-gfx1030.elf"
         metadata["build"].update(
             output_directory=str(declared_root),
@@ -564,13 +564,13 @@ class G0PreflightNegativeTests(unittest.TestCase):
 
 class G0RunnerAggregateTests(unittest.TestCase):
     def test_nonblocking_lock_rejects_competing_row(self) -> None:
-        with nonblocking_host_lock(Path("/tmp/ullm-g0.lock")):
+        with nonblocking_host_lock(Path("/tmp/sllm-g0.lock")):
             with self.assertRaises(ContractError):
-                with nonblocking_host_lock(Path("/tmp/ullm-g0.lock")):
+                with nonblocking_host_lock(Path("/tmp/sllm-g0.lock")):
                     pass
 
     def test_runner_rejects_rocr_before_canonical_routing(self) -> None:
-        output_root = Path(tempfile.mkdtemp(prefix="ullm-g0-rocr-"))
+        output_root = Path(tempfile.mkdtemp(prefix="sllm-g0-rocr-"))
         output = output_root / "g0-gfx1030"
         try:
             with patch.dict("run_g0_preflight.os.environ", {"ROCR_VISIBLE_DEVICES": "0"}, clear=True), patch(
@@ -656,7 +656,7 @@ class G0RunnerAggregateTests(unittest.TestCase):
             validate_result_payload(host_report)
 
     def test_runner_uses_canonical_routing_and_mocked_native_observer(self) -> None:
-        output_root = Path(tempfile.mkdtemp(prefix="ullm-g0-runner-"))
+        output_root = Path(tempfile.mkdtemp(prefix="sllm-g0-runner-"))
         output = output_root / "g0-gfx1030"
         matrix = validate_g0_matrix(ROOT)
         row = row_by_id(matrix, "g0-gfx1030")
@@ -673,7 +673,7 @@ class G0RunnerAggregateTests(unittest.TestCase):
             "metadata_sha256": "1" * 64,
             "metadata_sidecar_path": "/tmp/h3-gfx1030/hip-artifact-metadata.json.sha256",
             "metadata_sidecar_sha256": "2" * 64,
-            "metadata_declared_artifact_path": "/tmp/ullm-h3-build/h3-gfx1030/device-code-object-gfx1030.elf",
+            "metadata_declared_artifact_path": "/tmp/sllm-h3-build/h3-gfx1030/device-code-object-gfx1030.elf",
             "artifact_path": "/tmp/h3-gfx1030/device-code-object-gfx1030.elf",
             "artifact_sha256": "3" * 64,
             "artifact_sidecar_path": "/tmp/h3-gfx1030/device-code-object-gfx1030.elf.sha256",
@@ -771,7 +771,7 @@ class G0RunnerAggregateTests(unittest.TestCase):
             "metadata_sha256": "1" * 64,
             "metadata_sidecar_path": "/tmp/h3-gfx1030/hip-artifact-metadata.json.sha256",
             "metadata_sidecar_sha256": "2" * 64,
-            "metadata_declared_artifact_path": "/tmp/ullm-h3-build/h3-gfx1030/device-code-object-gfx1030.elf",
+            "metadata_declared_artifact_path": "/tmp/sllm-h3-build/h3-gfx1030/device-code-object-gfx1030.elf",
             "artifact_path": "/tmp/h3-gfx1030/device-code-object-gfx1030.elf",
             "artifact_sha256": "3" * 64,
             "artifact_sidecar_path": "/tmp/h3-gfx1030/device-code-object-gfx1030.elf.sha256",
@@ -788,7 +788,7 @@ class G0RunnerAggregateTests(unittest.TestCase):
             ("observe_processes", {**valid_process(row), "available": False, "reliable": False, "source": None}),
         ):
             with self.subTest(observer=observer_name):
-                output_root = Path(tempfile.mkdtemp(prefix="ullm-g0-runner-"))
+                output_root = Path(tempfile.mkdtemp(prefix="sllm-g0-runner-"))
                 output = output_root / "g0-gfx1030"
                 try:
                     health_result = observer_result if observer_name == "observe_health" else valid_health(row)
@@ -858,7 +858,7 @@ class G0RunnerAggregateTests(unittest.TestCase):
                     "--row",
                     "g0-gfx1030",
                     "--output-dir",
-                    "/tmp/ullm-g0-unit/g0-gfx1030",
+                    "/tmp/sllm-g0-unit/g0-gfx1030",
                     "--reviewed-sha",
                     "a" * 40,
                     "--tested-sha",
@@ -872,7 +872,7 @@ class G0RunnerAggregateTests(unittest.TestCase):
         self.assertEqual(rejected.exception.code, 2)
 
     def test_needs_zero_missing_duplicate_unknown_and_non_success_fail(self) -> None:
-        directory = Path(tempfile.mkdtemp(prefix="ullm-g0-needs-"))
+        directory = Path(tempfile.mkdtemp(prefix="sllm-g0-needs-"))
         path = directory / "needs.json"
         cases = (
             {},
@@ -896,7 +896,7 @@ class G0RunnerAggregateTests(unittest.TestCase):
 
     def test_aggregate_output_stays_in_private_tmp_and_run_id_is_strict(self) -> None:
         outside = Path(tempfile.mkdtemp(prefix="not-g0-output-"))
-        inside = Path(tempfile.mkdtemp(prefix="ullm-g0-summary-"))
+        inside = Path(tempfile.mkdtemp(prefix="sllm-g0-summary-"))
         try:
             with self.assertRaises(ContractError):
                 write_summary(outside, {})
@@ -912,7 +912,7 @@ class G0RunnerAggregateTests(unittest.TestCase):
     def test_row_aggregation_rejects_skip_zero_duplicate_stale_and_dispatch(self) -> None:
         repo = fixture_repo()
         run_root, preflight = preflight_fixture(repo)
-        collection = Path(tempfile.mkdtemp(prefix="ullm-g0-aggregate-"))
+        collection = Path(tempfile.mkdtemp(prefix="sllm-g0-aggregate-"))
         try:
             matrix = validate_g0_matrix(repo)
             row = row_by_id(matrix, "g0-gfx1030")
@@ -973,8 +973,8 @@ class G0RunnerAggregateTests(unittest.TestCase):
 
     def test_aggregate_requires_exact_two_current_rows_and_schema_hashes(self) -> None:
         repo = fixture_repo()
-        collection = Path(tempfile.mkdtemp(prefix="ullm-g0-aggregate-"))
-        needs_root = Path(tempfile.mkdtemp(prefix="ullm-g0-needs-"))
+        collection = Path(tempfile.mkdtemp(prefix="sllm-g0-aggregate-"))
+        needs_root = Path(tempfile.mkdtemp(prefix="sllm-g0-needs-"))
         run_roots: list[Path] = []
         needs = needs_root / "needs.json"
         needs.write_text(
@@ -1063,12 +1063,12 @@ class G0RunnerAggregateTests(unittest.TestCase):
 def main() -> int:
     suite = unittest.defaultTestLoader.loadTestsFromModule(sys.modules[__name__])
     result = unittest.TextTestRunner(verbosity=2).run(suite)
-    if os.environ.get("ULLM_EMIT_TEST_COUNTS") == "1":
+    if os.environ.get("SLLM_EMIT_TEST_COUNTS") == "1":
         selected = result.testsRun
         failed = len(result.failures) + len(result.errors)
         skipped = len(result.skipped)
         print(
-            "ULLM_UNITTEST_COUNTS="
+            "SLLM_UNITTEST_COUNTS="
             + json.dumps(
                 {"collected": selected, "selected": selected, "passed": selected - failed - skipped,
                  "failed": failed, "skipped": skipped, "deselected": 0},

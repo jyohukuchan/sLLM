@@ -6,7 +6,7 @@
 
 ## 二層の識別モデル
 
-GPU対応をSKU名やarchitectureの通称だけで決めない。uLLMは`binary_key`と`capability_profile`を分離する。
+GPU対応をSKU名やarchitectureの通称だけで決めない。sLLMは`binary_key`と`capability_profile`を分離する。
 
 ### `binary_key`
 
@@ -77,7 +77,7 @@ vendor mapping、library query、probeは代替関係ではない。例えばhar
 
 | 値 | 意味 |
 | --- | --- |
-| `supported` | uLLMが互換性契約として受け入れ、不具合修正対象とする |
+| `supported` | sLLMが互換性契約として受け入れ、不具合修正対象とする |
 | `experimental` | 初期対象として実装・bring-up中、または試験的に利用可能だが互換性契約には未昇格 |
 | `planned` | 将来対応の意図はあるが、現在の実装対象または利用可能pathではない |
 | `unsupported` | 対象外と明示決定した、resource/capability要件を確定的に満たさない、または既知の非互換 |
@@ -87,10 +87,10 @@ vendor mapping、library query、probeは代替関係ではない。例えばhar
 | 値 | 意味 |
 | --- | --- |
 | `vendor-supported` | vendorのsupport matrixが対象SKU、OS、driver/runtime/libraryの構成を掲載 |
-| `project-verified` | uLLMが同じ具体的構成と対象機能を実機検証済み |
-| `unverified` | uLLMによる該当構成・機能の実機検証結果がない |
+| `project-verified` | sLLMが同じ具体的構成と対象機能を実機検証済み |
+| `unverified` | sLLMによる該当構成・機能の実機検証結果がない |
 
-`evidence`は必要なら複数付ける。例えばvendor公式構成をuLLMがまだ検証していなければ`[vendor-supported, unverified]`となる。同じ構成・機能をuLLMが検証した時点で`unverified`を外し、`project-verified`を付ける。toolchainがtargetを生成できることだけでは`vendor-supported`でも`project-verified`でもない。
+`evidence`は必要なら複数付ける。例えばvendor公式構成をsLLMがまだ検証していなければ`[vendor-supported, unverified]`となる。同じ構成・機能をsLLMが検証した時点で`unverified`を外し、`project-verified`を付ける。toolchainがtargetを生成できることだけでは`vendor-supported`でも`project-verified`でもない。
 
 `lifecycle=supported`への昇格には原則として同じscopeの`project-verified`を要求する。`vendor-supported`だけで自動昇格せず、反対にvendor公式範囲外でも十分なproject evidenceがあれば`project-verified`を保持できる。
 
@@ -131,7 +131,7 @@ BlackwellのThor targetはCUDA 12.9以前の`sm_101`からCUDA 13.0以降の`sm_
 
 ## 互換表の記載規則
 
-- vendor資料に掲載されたtarget、uLLMの実装有無、実機検証結果という事実を分ける。
+- vendor資料に掲載されたtarget、sLLMの実装有無、実機検証結果という事実を分ける。
 - 初期候補と将来候補は計画として記し、現在の動作実績と混ぜない。
 - 未検証は`evidence=unverified`と明記し、`works`や`verified`と断定しない。
 - 変化するvendor support matrixには確認日と公式一次資料へのリンクを付ける。

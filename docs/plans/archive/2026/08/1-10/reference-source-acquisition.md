@@ -4,7 +4,7 @@
 
 **完了（2026-08-02）**
 
-この作業単位では、uLLMがCI、test、runtime、kernel、schedulerの設計を調査するための公式推論engine sourceを、再現可能なrevisionでlocal `reference/` に配置し、取得事実をmanifestへ固定する。sourceの実装利用、性能比較、CI/testのexact-revision再調査はこの計画の完了条件に含めない。
+この作業単位では、sLLMがCI、test、runtime、kernel、schedulerの設計を調査するための公式推論engine sourceを、再現可能なrevisionでlocal `reference/` に配置し、取得事実をmanifestへ固定する。sourceの実装利用、性能比較、CI/testのexact-revision再調査はこの計画の完了条件に含めない。
 
 ## 完了条件と結果
 

@@ -34,7 +34,7 @@ CONTRACT_FILES = (
 
 
 def copy_contract_tree() -> Path:
-    root = Path(tempfile.mkdtemp(prefix="ullm-h3-contract-repo-"))
+    root = Path(tempfile.mkdtemp(prefix="sllm-h3-contract-repo-"))
     for relative in CONTRACT_FILES:
         destination = root / relative
         destination.parent.mkdir(parents=True, exist_ok=True)
@@ -52,7 +52,7 @@ def mutate_json(root: Path, relative: str, mutation) -> None:
 def artifact_fixture(
     repo: Path, target: str = "gfx1030", size: int = 257
 ) -> tuple[Path, Path, dict[str, object]]:
-    run_root = Path(tempfile.mkdtemp(prefix="ullm-h3-artifact-"))
+    run_root = Path(tempfile.mkdtemp(prefix="sllm-h3-artifact-"))
     output = run_root / f"h3-{target}"
     output.mkdir(parents=True)
     artifact_path = output / f"device-code-object-{target}.elf"
@@ -135,7 +135,7 @@ def artifact_fixture(
             "sections": {
                 ".text": {"present": True, "size_bytes": 255},
             },
-            "symbols": [{"name": "ullm_hip_compile_probe", "defined": True}],
+            "symbols": [{"name": "sllm_hip_compile_probe", "defined": True}],
         },
         "scope": {
             "compile_only": True,
@@ -352,12 +352,12 @@ class H3ArtifactNegativeTests(unittest.TestCase):
 def main() -> int:
     suite = unittest.defaultTestLoader.loadTestsFromModule(sys.modules[__name__])
     result = unittest.TextTestRunner(verbosity=2).run(suite)
-    if os.environ.get("ULLM_EMIT_TEST_COUNTS") == "1":
+    if os.environ.get("SLLM_EMIT_TEST_COUNTS") == "1":
         selected = result.testsRun
         failed = len(result.failures) + len(result.errors)
         skipped = len(result.skipped)
         print(
-            "ULLM_UNITTEST_COUNTS="
+            "SLLM_UNITTEST_COUNTS="
             + json.dumps(
                 {
                     "collected": selected,

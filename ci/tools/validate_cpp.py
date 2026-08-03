@@ -68,10 +68,10 @@ def main() -> int:
         if not cmake.exists():
             print("static: C++ files exist but no CMakeLists.txt; no native host build target")
             return 0
-        with tempfile.TemporaryDirectory(prefix="ullm-cmake-") as directory:
+        with tempfile.TemporaryDirectory(prefix="sllm-cmake-") as directory:
             build = Path(directory) / "build"
             configure = subprocess.run(
-                ["cmake", "-S", str(source_dir), "-B", str(build), "-DULLM_ENABLE_HIP=OFF", "-DCMAKE_BUILD_TYPE=Debug"],
+                ["cmake", "-S", str(source_dir), "-B", str(build), "-DSLLM_ENABLE_HIP=OFF", "-DCMAKE_BUILD_TYPE=Debug"],
                 cwd=ROOT,
                 check=False,
                 timeout=300,

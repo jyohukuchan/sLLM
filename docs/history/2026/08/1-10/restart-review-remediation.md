@@ -9,7 +9,7 @@
 - repository hygiene、credential、performance cliff、GPU merge gate、fail-closed集約を採用した。
 - `.gitignore`、CI・テスト計画、main plan、AGENTS.mdを更新し、repository hygieneとcredential文書を追加した。
 - `passwords.txt`の内容・権限は変更していない。
-- ユーザー承認後、`uLLM-project.md`のCI実装順序をmain planへ同期した。
+- ユーザー承認後、`sLLM.md`のCI実装順序をmain planへ同期した。
 - AGENTS.mdへ、独立した作業単位ごとのtest、本番または本番相当環境への適用、適用後確認、`push` skillによる公開手順を追加した。
 - push前reviewを受け、検証・適用・push対象のimmutable identity、受入evidence、適用先がないcode変更のpush禁止、適用後失敗時のrollback規則を追加した。
 - 最終reviewで検出したbuild/ROCm/target/codegen変更のGPU gate不一致を、G0/G1/G2/G4/P0必須へ統一した。

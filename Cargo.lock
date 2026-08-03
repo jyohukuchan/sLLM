@@ -3,24 +3,24 @@
 version = 4
 
 [[package]]
-name = "ullm-cli"
+name = "sllm-cli"
 version = "0.1.0"
 dependencies = [
- "ullm-hip",
+ "sllm-hip",
 ]
 
 [[package]]
-name = "ullm-core"
+name = "sllm-core"
 version = "0.1.0"
 
 [[package]]
-name = "ullm-hip"
+name = "sllm-hip"
 version = "0.1.0"
 dependencies = [
- "ullm-core",
- "ullm-hip-sys",
+ "sllm-core",
+ "sllm-hip-sys",
 ]
 
 [[package]]
-name = "ullm-hip-sys"
+name = "sllm-hip-sys"
 version = "0.1.0"

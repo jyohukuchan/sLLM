@@ -41,7 +41,7 @@
     {"pattern": "ci/tests/test_h3_aggregate.py", "suite_ids": ["h3-compile-only-contract"]},
     {"pattern": ".github/**", "suite_ids": ["h0-json-schema-manifest-workflow", "h0-markdown-links"]},
     {"pattern": ".github/workflows/h3-compile.yml", "suite_ids": ["h0-json-schema-manifest-workflow", "h0-h3-static-contracts", "h3-compile-only-contract"]},
-    {"pattern": "crates/ullm-hip-sys/build.rs", "suite_ids": ["h3-compile-only-contract"]},
+    {"pattern": "crates/sllm-hip-sys/build.rs", "suite_ids": ["h3-compile-only-contract"]},
     {"pattern": "native/hip/CMakeLists.txt", "suite_ids": ["h3-compile-only-contract"]},
     {"pattern": "native/hip/src/hip_compile_probe.hip.cpp", "suite_ids": ["h3-compile-only-contract"]},
     {"pattern": "Cargo.toml", "suite_ids": ["h0-rust-format", "h0-rust-clippy", "h1-host-contract"]},
