@@ -9,15 +9,15 @@
 - `docs/plans/main-plan.md`には重要なproduct・architecture・compatibility上の決定、開発計画と順序、進捗、未解決事項だけを記録し、恒久的な実行手順を重複させない。
 - `sLLM.md`の要件・方針・重要な決定は`docs/plans/main-plan.md`へ同期する。差異を見つけた場合は独断で統合せず、ユーザーへ確認する。
 - 調査と実装はsubagentが担当する。main agentは計画の作成・編集、subagentの指示・監視、全体調整、Git操作、特権操作、その他の雑務を担当する。
-- 重いshell commandは原則`timeout --signal=TERM --kill-after=30s 15m <command>`で実行し、pipelineや複合commandではshell wrapper全体をtimeout対象にする。exit code 124または137はtimeoutとして報告する。
+- 重いshell commandは開始から15分を最初の状況確認時点とし、その後も少なくとも15分ごとにprocessの生存、出力の更新、resource使用、停止兆候を確認する。正常に進行していれば終了させず継続し、確認結果をユーザーへ報告する。15分での一律timeoutは禁止し、明示された時間制約またはtest contract固有のtimeoutだけを使用する。
 
 ## Subagent実行
 
 - Codex内蔵の`spawn_agent`、`wait_agent`、`interrupt_agent`等は使わず、shellから`codex exec`を実行する。
 - 調査は原則`--sandbox read-only`、実装は`codex exec --ephemeral --sandbox workspace-write -C <repo> -`を使う。`workspace-write`がbubblewrapまたはuser namespace制約で失敗した場合はerrorを記録し、現在のsessionがunrestrictedかつ対象taskの権限内である場合に限り`--sandbox danger-full-access`へ切り替えられる。`--dangerously-bypass-approvals-and-sandbox`は禁止する。
-- 各実行は`timeout --signal=TERM --kill-after=30s 15m`で包む。pipelineや複合commandはshell wrapper全体をtimeout対象にする。exit code 124または137はtimeoutとして報告する。
+- 各実行は15分を最初の状況確認時点として起動し、15分経過時点と以後少なくとも15分ごとにprocessの生存、stdout・stderr、成果物、停止兆候を確認する。正常に進行していれば終了させず継続する。進捗がない、停止が疑われる、または個別taskの明示的な時間制約を超えた場合だけ、根拠を記録して停止を判断する。
 - 長いpromptはquoted heredoc等でstdinへ渡し、shell引数へ直接埋め込まない。backtickやcommand substitutionが展開される渡し方を避ける。
-- 並列実行時はmain agentがPID、担当file、stdout・stderr等の出力先を記録し、同じfileを複数processへ割り当てない。各processの出力とexit codeを回収し、必要に応じて`--output-last-message`と`--json`を使う。監視・終了はshellのprocess管理と`timeout`で行う。
+- 並列実行時はmain agentがPID、担当file、stdout・stderr等の出力先を記録し、同じfileを複数processへ割り当てない。各processの出力とexit codeを回収し、必要に応じて`--output-last-message`と`--json`を使う。監視・終了はshellのprocess管理で行い、一律の15分timeoutは使わない。
 
 ## 実装と検証
 
