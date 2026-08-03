@@ -96,25 +96,25 @@ software compatibility tuple の lifecycle は次の四つに統一する。
 - Ubuntu 26.04 LTS と ROCm 7.14.0 の組み合わせは将来検証する `planned` tuple とする。AMD が ROCm 7.14.0 で Ubuntu 26.04 を掲載していても、uLLM による実機検証なしに Ubuntu 24.04 の結果を移植しない。
 - 表にない Ubuntu、ROCm release、GPU の組み合わせは暗黙の `supported` としない。調査前は未分類であり、採用候補なら具体的な tuple を `planned` として追加する。
 
-### 2026-08-02 local development evidence
+### 2026-08-03 local model-free evidence
 
-次の実績は、この host で開発環境と最小 HIP 実行経路を確認した限定的な evidence である。初期候補の GA kernel 6.8 とは異なる HWE kernel 6.17 を使っており、formal G0/G1 report、capability profile、resource gate、codegen feature、artifact metadata は未実装であるため、lifecycle は `experimental` のままとする。
+次の実績は、同一immutable candidateのformal G0/G1で確認した限定的なevidenceである。初期候補のGA kernel 6.8とは異なるHWE kernel 6.17を使い、capability profile、resource gate、semantic数値kernel、model、性能と長時間安定性は未検証であるため、lifecycleは`experimental`のままとする。
 
 | 項目 | 検証値 |
 | --- | --- |
-| lifecycle / evidence | `experimental` / `project-verified`（最小 smoke の範囲だけ） |
+| lifecycle / evidence | `experimental` / `project-verified`（formal model-free G0/G1の範囲だけ） |
+| candidate identity | commit `f393d688a051d2b73c8773d8a930a711592609bc` / tree `2ccda6e7c0614d585f26babc6b7c68ca51220bbe` |
 | OS / kernel | Ubuntu 24.04.4 LTS / `6.17.0-35-generic` |
 | amdgpu | `6.16.13` |
 | ROCm build/runtime | system packages `amdrocm-core-sdk7.14-gfx1030`、`amdrocm-core-sdk7.14-gfx1201`（ともに `7.14.0-3`）、`https://repo.amd.com/rocm/packages-multi-arch/ubuntu2404` の `stable main`。root `/opt/rocm/core-7.14` |
 | compiler / runtime | AMD clang 23.0.0git / HIP runtime `71460850` |
 | package migration | legacy ROCm user-space packages、旧installation root、旧ROCm APT sourceを除去。amdgpu driver packagesは変更せず保持 |
-| GPU 0, 2 | Radeon Pro V620、`gfx1030`、PCI `0000:03:00.0` / `0000:43:00.0` |
-| GPU 1 | Radeon AI PRO R9700、`gfx1201`、PCI `0000:47:00.0` |
-| build target | exact `gfx1030` と `gfx1201` を含む fat binary。codegen feature は未固定 |
-| runtime libraries | `libamdhip64.so.7` と `libhsa-runtime64.so.1` が上記 ROCm root から解決 |
-| smoke scope | 各 visible device で allocation、host-to-device copy、1 kernel dispatch、synchronize、device-to-host copy、free。入力 41、出力 42 |
+| canonical GPU | V620 exact `gfx1030`、BDF `0000:03:00.0`、UUID `GPU-76a08c022586fed6`; R9700 exact `gfx1201`、BDF `0000:47:00.0`、UUID `GPU-a8e9ddefa2d60f55` |
+| artifact | target別専用binary、Code Object V6、wave32、`xnack`/`sramecc=unsupported`; SHA-256 `gfx1030=40a55e8028355dd1b27b26886ccfef6d0b4085569d2656f90e7ebdc2be1a852c`、`gfx1201=69207b19c1146f73258db848fd5da74a25dd0a8e980b090ee09037da0dd2b1f5` |
+| runtime libraries | `/opt/rocm/core-7.14/lib/libamdhip64.so.7.14.60850-0000000`、`/opt/rocm/core-7.14/lib/libhsa-runtime64.so.1.21.0` |
+| G0/G1 scope | G0 identity/read-only health/process、G1の1、3、17、255、256、257 byte。各case 2 allocation、2 transfer、1 diagnostic dispatch、byte exact、CPU fallback/model/semantic opなし |
 
-この結果は full model、数値 kernel、性能、generic code object、複数 GPU 実行、長時間安定性、または vendor-supported OS/GPU tuple を証明しない。正式な互換性昇格には、完全な tuple manifest と CI・テスト計画で定義する G0/G1 以降の report が必要である。
+この結果はsemantic数値kernel、full model、性能、generic code object、複数GPU実行、長時間安定性、別GPU/SKU、またはvendor-supported OS/GPU tupleを証明しない。G0/G1 evidenceは検証したcandidate・artifact・canonical 2 GPUへだけ結び付ける。
 
 ## 公式資料
 

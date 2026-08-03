@@ -124,6 +124,8 @@ Phase 2の最小GPU経路はpublic inference ABIへ未成熟なopを追加せず
 
 caseは1、3、17、255、256、257 byteとし、Rust側の独立XOR oracleへbyte exactで照合する。host stubは明示`HIP unavailable`を返し、CPU fallback、model、semantic numerical opはこの経路に存在しない。HIP buildはbare exact `gfx1030`または`gfx1201`を要求し、runtimeのraw `gcnArchName`、embedded Code Object V6/target/ELF flags/wave32/kernel symbol、実際にloadしたHIP/ROCr library pathが契約と一致しない場合は実行evidenceにしない。
 
+この経路はcommit `f393d688a051d2b73c8773d8a930a711592609bc`でcanonical `gfx1030`/`gfx1201`のG1をPASSした。これはmodel-free診断経路のarchitecture evidenceに限り、public semantic op、数値正しさ、model推論、性能または一般GPU対応の証拠ではない。
+
 timeoutまたは早期drop後のresourceは完了を証明せずにfreeしない。background reaperへ所有権を移し、回収枠を固定上限へ制限する。同期・解放を証明できなければcircuit breakerを開いて新規submitを拒否し、専用processの終了とtrusted local runnerによる子process/GPU process残留確認を最終cleanup境界とする。このprivate pathは将来のsemantic command list ABIや一般的なGPU対応を確定しない。
 
 ## MVP の対象外

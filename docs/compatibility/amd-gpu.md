@@ -1,8 +1,8 @@
 # AMD GPU互換性方針
 
-> 最終更新: 2026-08-02
+> 最終更新: 2026-08-03
 >
-> この文書はAMD向けの識別規則と初期候補を記録する。現時点の初期targetはすべて`lifecycle=experimental`である。計画targetのevidenceは`unverified`、local実機smokeは検証した限定範囲だけ`project-verified`とする。
+> この文書はAMD向けの識別規則と初期候補を記録する。現時点の初期targetはすべて`lifecycle=experimental`である。計画targetのevidenceは`unverified`、canonical local実機のformal model-free G0/G1は検証した限定範囲だけ`project-verified`とする。
 
 共通の状態、resource gate候補、NVIDIAを含む将来例は[GPU互換性方針](gpu.md)を参照する。
 
@@ -103,19 +103,19 @@ uLLMがhipBLASLt 1.4.1のFP8 GEMM pathを使用する場合の初期contract候�
 
 ## 製品別evidence
 
-2026-08-02時点の事実を次のように記録する。すべて`lifecycle=experimental`であり、evidenceはupstream掲載、local実機smoke、未検証範囲を分けて記載する。
+2026-08-03時点の事実を次のように記録する。すべて`lifecycle=experimental`であり、evidenceはupstream掲載、local実機G0/G1、未検証範囲を分けて記載する。
 
 | 対象構成 | upstreamの事実 | evidence |
 | --- | --- | --- |
 | `gfx942`のROCm 7.14.0掲載MI300製品・OS構成 | AMDの現行support資料に掲載 | `[vendor-supported, unverified]` |
 | `gfx1200`/`gfx1201`のROCm 7.14.0掲載RDNA 4製品・OS構成 | AMDの現行support資料に掲載 | `[vendor-supported, unverified]` |
 | `gfx1030`のROCm 7.14.0掲載Radeon PRO W6800/V620製品・OS構成 | AMDの現行support資料に掲載 | `[vendor-supported, unverified]` |
-| local Radeon AI PRO R9700 1台、exact `gfx1201` | Ubuntu 24.04.4、kernel `6.17.0-35-generic`、amdgpu `6.16.13`、ROCm 7.14.0の限定smokeを実行 | `[project-verified]` |
-| local Radeon Pro V620 2台、exact `gfx1030` | 同じlocal host tupleで各deviceの限定smokeを実行。初期候補のGA kernel 6.8とは異なる | `[project-verified]` |
+| canonical Radeon AI PRO R9700 1台、exact `gfx1201` | Ubuntu 24.04.4、kernel `6.17.0-35-generic`、amdgpu `6.16.13`、ROCm 7.14.0でformal model-free G0/G1を実行 | `[project-verified]` |
+| canonical Radeon Pro V620 1台、exact `gfx1030` | 同じlocal host tupleでformal model-free G0/G1を実行。2台目V620はspareであり必須evidence外 | `[project-verified]` |
 | consumer RDNA 2 / RX 6000系 | `gfx1030`の掲載だけでは同じtargetを持つ全consumer SKUの公式対応にならない。[Radeon Linux support matrix](https://rocm.docs.amd.com/projects/radeon-ryzen/en/latest/docs/compatibility/compatibilityrad/native_linux/native_linux_compatibility.html)に完全なSKU/OS構成が掲載された場合だけ`vendor-supported`を付ける | `[unverified]` |
 | `gfx1031`–`gfx1036` | LLVMのcode target定義は製品構成のvendor supportではない | `[unverified]` |
 
-local `project-verified` の範囲は、exact `gfx1030,gfx1201` fat binaryを用いたallocation、copy、単一kernel、synchronize、copy-backだけである。codegen feature、artifact metadata、capability profile、resource gate、数値kernel、model、性能は未検証であり、target全体や別SKUへ一般化しない。完全なsoftware tupleと実行結果は[software compatibility](software.md)に記録する。将来evidenceを更新するときは、SKU名だけでなく`binary_key`、`capability_profile`、OS、ROCm/driver/component version、resource gate、対象機能の検証記録を一組として残す。
+local `project-verified` の範囲は、commit `f393d688a051d2b73c8773d8a930a711592609bc`のcanonical exact `gfx1030`/`gfx1201` artifactに対するG0 identity/healthと、1、3、17、255、256、257 byteのG1 allocation、copy、diagnostic dispatch、completion、byte-exact copy-backだけである。Code Object V6、wave32、target別ELF flags、artifact metadata、実loader pathを検証したが、capability profile、resource gate、semantic数値kernel、model、性能は未検証であり、target全体や別SKUへ一般化しない。完全なsoftware tupleと実行結果は[software compatibility](software.md)に記録する。
 
 ## 将来AMD候補
 

@@ -321,7 +321,7 @@ GPUに影響する変更は、実GPU evidenceが得られるまで「compile済�
 - G0 preflight、process監視、timeout、診断収集、quarantine、reboot/reimageを実装する。
 - modelを使わない最小HIP probeで運用を検証する。
 
-実施状況: canonical `gfx1030`/`gfx1201`のG0、read-only health/process observer、完全SHA/treeとexact H3 artifact binding、host lock、fail-closed 2 row aggregateを実装済み。G1も同じtrusted local境界で専用artifact、actual loader path、timeout/crash/output bound、実行前後healthとprocess残留を検証する。正式なG1完了は同一immutable candidateのH0〜H3/G0/G1 aggregateで判定する。
+実施状況: canonical `gfx1030`/`gfx1201`のG0、read-only health/process observer、完全SHA/treeとexact H3 artifact binding、host lock、G1専用artifact/actual loader検査、timeout/crash/output bound、実行前後health・process確認、fail-closed 2 row aggregateを実装した。commit `f393d688a051d2b73c8773d8a930a711592609bc`（tree `2ccda6e7c0614d585f26babc6b7c68ca51220bbe`）で同一candidateのH0〜H3/G0/G1 aggregateが全てPASSした。
 
 ### Phase 4: runtime・kernel test
 
@@ -329,7 +329,7 @@ GPUに影響する変更は、実GPU evidenceが得られるまで「compile済�
 - 各semantic opにNumPy oracleとboundary generatorを追加する。
 - baseline kernelを正しさの基準とし、optimized kernelを同じcontract suiteへ登録する。
 
-実施状況: semantic opより先に、private evidence ABIのmodel-free allocation/copy/queue-event lifetime/diagnostic kernelをG1へ実装した。H0のstatic/negative test PASSをGPU G1 PASSと扱わず、canonical 2 GPUの実reportだけをG1 aggregateへ入力する。semantic opとNumPy oracleは次作業であり、このdiagnostic XOR kernelを数値実装の基準へ昇格しない。
+実施状況: semantic opより先に、private evidence ABIのmodel-free allocation/copy/queue-event lifetime/diagnostic kernelをG1へ実装した。canonical 2 GPUで1、3、17、255、256、257 byteをbyte exactに実行し、各caseのallocation/copy/dispatch count、fallbackなし、実行後healthを同一candidateのG1 aggregateで検証済み。semantic opとNumPy oracleは次作業であり、このdiagnostic XOR kernelを数値実装の基準へ昇格しない。
 
 ### Phase 5: model slice・end-to-end
 

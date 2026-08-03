@@ -3,18 +3,20 @@
 ## 状態
 
 - 作成日: 2026-08-03
-- 状態: active
+- 完了日: 2026-08-03
+- 状態: complete
 - 対象期間: Phase 2前半
 - 上位計画: [main plan](../../../../main-plan.md)
-- CI正本: [CI・テスト方針](ci-test-strategy.md)
+- CI正本: [CI・テスト方針](../../../../active/2026/08/1-10/ci-test-strategy.md)
 
 実装進捗:
 
 - 作業単位0と1のstatic contractを完了した。
 - 作業単位2のCMake/build接続、exact 2 target direct compile/link、artifact検査、fail-closed集約、non-required workflowをcommit `03f90be1ad85145e3abee86e67615c1e17f552b4`として公開した。GitHubの2 compile rowはPASSし、aggregateはrun identityのcontainer伝播漏れをfail-closedに検出したため、その修正は次candidateへ含める。
 - 作業単位4のcanonical tuple、identity-only native HIP observer、read-only health/process observer、exact H3 artifact binding、2 row aggregateとnegative contractを完了した。commit `e91ff35caac8247fc056eb14a1d6cee2a2319cc5`（tree `75b229791cd3cf7c6ed38c25264b0cd09a9cde33`）でH0〜H3とcanonical `gfx1030`/`gfx1201`のG0・aggregateがPASSした。
-- 作業単位5のprivate evidence C ABI、安全なRust wrapper、native HIP allocation/copy/diagnostic dispatch/completion、専用binary、G1 artifact/loader検査、trusted local runnerと2 row aggregateを実装した。host testとpre-candidateのexact 2 target build・実機6 boundary caseはPASSしたが、正式な完了判定は同一immutable candidateのH0〜H3/G0/G1後に行う。
-- 次のrollback境界は作業単位5を固定するimmutable candidateとし、7日を待たず作業単位6の適用・文書同期へ進む。
+- 作業単位5のprivate evidence C ABI、安全なRust wrapper、native HIP allocation/copy/diagnostic dispatch/completion、専用binary、G1 artifact/loader検査、trusted local runnerと2 row aggregateを実装した。
+- 作業単位6をcommit `f393d688a051d2b73c8773d8a930a711592609bc`（tree `2ccda6e7c0614d585f26babc6b7c68ca51220bbe`）で完了した。同一identityのH0〜H3、canonical `gfx1030`/`gfx1201` G0/G1と全aggregateがPASSし、実行前後healthは正常、GPU process・残留childは0だった。
+- H3 required昇格の20回・7日観測だけを非blocking follow-upとして残し、この計画を完了する。
 
 ## 目的
 
@@ -231,7 +233,7 @@ G1 case:
 - exact targetごとに1、3、17要素と、設定したcopy/dispatch境界の前後を実GPUで実行する。
 - 入力は固定seedで生成し、期待する単純変換をbyte exactで比較する。
 - selected backend、dispatch ID/count、fallback、artifact hash、GPU UUID/BDF、開始/終了時刻をreportへ記録する。
-- public eventを早期dropするcase、途中失敗、timeout後のcleanup、複数buffer access modeを検査する。
+- public eventは追加せず、private completionの早期drop・timeout後cleanupをRust `Drop`とnative reaperへ閉じ込め、runnerのtimeout/crash/process cleanupをnegative testで検査する。複数buffer access modeは将来のsemantic op scopeとし、このprivate G1の完了条件へ含めない。
 
 受入条件:
 
@@ -249,11 +251,18 @@ G1 case:
 4. [runtime architecture](../../../../../architecture/runtime.md)、compatibility文書、CI正本、main planを実装事実へ同期する。
 5. H3観測が7日未満ならrequired昇格を未完了follow-upとして残すが、この計画のmodel-free実装完了を妨げない。
 
+完了結果:
+
+- immutable candidateはcommit `f393d688a051d2b73c8773d8a930a711592609bc`、tree `2ccda6e7c0614d585f26babc6b7c68ca51220bbe`。
+- H0 106/106、H1 42/42、H2 9/9、H3 2/2、G0 2/2、G1 2/2と各fail-closed aggregateがPASSした。
+- G1は両GPUで1、3、17、255、256、257 byteを実行し、各caseで2 allocation、2 transfer、1 dispatch、byte exact、fallback/model/semantic opなしを確認した。
+- `gfx1030` artifact SHA-256は`40a55e8028355dd1b27b26886ccfef6d0b4085569d2656f90e7ebdc2be1a852c`、`gfx1201`は`69207b19c1146f73258db848fd5da74a25dd0a8e980b090ee09037da0dd2b1f5`。
+
 ## 全体の完了条件
 
 - bootstrap gateがCI正本へ反映され、計画とhard gateに循環がない。
 - ROCm 7.14.0 image/toolchain/artifact contractがversioned fileとして固定されている。
-- exact `gfx1030`/`gfx1201` H3がnon-requiredでfail-closedに動き、昇格観測が自動継続している。
+- exact `gfx1030`/`gfx1201` H3がnon-requiredでfail-closedに動き、昇格観測を後続開発と並行できる。
 - trusted local経路が同一immutable SHA以外を拒否し、canonical 2 GPUのG0を直列実行できる。
 - model-free最小GPU pathが両GPUでG1 PASSし、CPU fallback、model、semantic numerical opを使っていない。
 - 実行前後health、process残留、artifact/report hashが確認され、異常を成功扱いしない。

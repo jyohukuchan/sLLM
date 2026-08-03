@@ -291,11 +291,11 @@
 - H3はnon-requiredで開始し、20回以上かつ7日以上の観測はrequired昇格だけの条件とする。観測中もG0とmodel-free GPU pathの実装を並行し、後続開発を停止しない。
 - 初期runtime evidenceは専用local hostのcanonical `gfx1030` 1台と`gfx1201` 1台を直列実行し、完全tuple、artifact identity、CPU fallback未使用、実行前後のdevice healthを記録する。
 - model-free最小経路は`Cargo -> ullm-hip -> versioned C ABI -> native HIP -> GPU`を通してallocation、copy、単一diagnostic kernel、completion、copy-back、解放を検証する。推論opまたはGPU対応済みの証拠にはしない。
-- 詳細な作業単位、受入条件、evidence、rollback境界は[Phase 2 H3・G0・model-free GPU path計画](active/2026/08/1-10/phase2-h3-g0-model-free-gpu.md)を正とする。
+- 詳細な作業単位、受入条件、evidence、rollback境界は[Phase 2 H3・G0・model-free GPU path計画](archive/2026/08/1-10/phase2-h3-g0-model-free-gpu.md)を正とする。
 
 ## 現在の状態と次の作業
 
-- 現在: Phase 1とPhase 2のH3/G0を完了済み。model-free G1のprivate C ABI、Rust ownership、native HIP allocation/copy/diagnostic dispatch/completion、専用evidence binary、exact artifact/loader検査、canonical 2 row runner・aggregateを実装した。host統合testとpre-candidateのexact 2 target build・実機6 boundary caseはPASSしており、次は同一immutable candidateへH0〜H3とcanonical G0/G1を固定する。H3 required昇格の7日観測は並行follow-upであり、この候補化を待たせない。
+- 現在: Phase 2前半のH3、G0、model-free G1を完了した。commit `f393d688a051d2b73c8773d8a930a711592609bc`（tree `2ccda6e7c0614d585f26babc6b7c68ca51220bbe`）に対し、H0〜H3とcanonical `gfx1030`/`gfx1201`のG0/G1・fail-closed集約がPASSした。H3 required昇格の20回・7日観測は並行follow-upであり、Phase 3開始を待たせない。
 - 完了:
   - プロジェクトライセンスをMITへ統一。
   - Qwen3.5のMTP表記とBF16階層の矛盾を修正。
@@ -323,10 +323,10 @@
   - canonical GPUをV620 `0000:03:00.0` / `GPU-76a08c022586fed6`とR9700 `0000:47:00.0` / `GPU-a8e9ddefa2d60f55`へ固定し、spare V620を必須rowから除外した。
   - model-free G1をpublic inference ABIから分離したprivate evidence ABIと専用Rust binaryとして実装。1、3、17、255、256、257 byteを各2 device allocation、2 HIP transfer、1 diagnostic dispatchでbyte exact検証し、host stub、CPU fallback、model、semantic opをPASS経路から除外した。
   - G1 artifactのexact target、Code Object V6、wave32、ELF flags、kernel symbol、runtime loader path、candidate identityを検査し、timeout/output/process cleanup、stale/symlink/target差し替えをfail-closedにするrunner・2 row aggregateを追加した。
+  - immutable candidate `f393d688a051d2b73c8773d8a930a711592609bc`でH0 106件、H1 42件、H2 9件、H3 exact 2 target、canonical 2 GPUのG0/G1を集約までPASSさせた。G1は各GPUで1、3、17、255、256、257 byteをbyte exactに検証し、CPU fallback、model、semantic opを使用していない。
 - 次:
-  1. G1実装をimmutable candidateとして固定し、H0〜H3とcanonical `gfx1030`/`gfx1201`のG0/G1を同一SHA/treeで直列実行・集約する。
-  2. 実行前後health、process残留、artifact/report digestを確認し、architecture・compatibility・historyと個別計画を最終evidenceへ同期する。
-  3. Phase 2前半を閉じた後、Qwen3.5-4Bの完全revision/model lockと最初のsemantic op/model sliceを次の独立計画として確定する。
+  1. Qwen3.5-4Bの完全revision/model lockと、最初のsemantic op・G2 model sliceをPhase 3の独立計画として確定する。
+  2. H3はnon-requiredのまま観測を継続し、20回以上・7日以上の条件を満たした時点でrequired昇格だけをreviewする。
 
 ## 未解決事項
 
