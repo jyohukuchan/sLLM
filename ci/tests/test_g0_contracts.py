@@ -39,6 +39,7 @@ from run_g0_preflight import (  # noqa: E402
     main as runner_main,
     make_report,
     nonblocking_host_lock,
+    parse_sysfs_ras_counters,
     parser as runner_parser,
     run_native_provider,
     unavailable_preflight,
@@ -320,6 +321,39 @@ def preflight_fixture(
         },
     }
     return run_root, preflight
+
+
+class G0RasParserTests(unittest.TestCase):
+    def test_zero_counters(self) -> None:
+        self.assertEqual(
+            parse_sysfs_ras_counters("ue: 0\nce: 0\nde: 0\n"),
+            {"ue": 0, "ce": 0, "de": 0},
+        )
+
+    def test_nonzero_ue_is_returned_without_summing_ce_or_de(self) -> None:
+        counters = parse_sysfs_ras_counters("ue: 7\nce: 11\nde: 13\n")
+        self.assertEqual(counters["ue"], 7)
+        self.assertEqual(counters["ce"], 11)
+        self.assertEqual(counters["de"], 13)
+
+    def test_rejects_noncanonical_counter_documents(self) -> None:
+        cases = {
+            "missing ue": "ce: 0\nde: 0\n",
+            "missing de": "ue: 0\nce: 0\n",
+            "duplicate ue": "ue: 0\nue: 1\nce: 0\nde: 0\n",
+            "unknown key": "ue: 0\nce: 0\nfoo: 0\nde: 0\n",
+            "malformed": "ue: zero\nce: 0\nde: 0\n",
+            "negative": "ue: -1\nce: 0\nde: 0\n",
+            "signed": "ue: +1\nce: 0\nde: 0\n",
+            "leading zero": "ue: 01\nce: 0\nde: 0\n",
+            "ambiguous whitespace": "ue:\t0\nce: 0\nde: 0\n",
+            "trailing whitespace": "ue: 0\nce: 0\nde: 0 \n",
+            "overflow": "ue: 18446744073709551616\nce: 0\nde: 0\n",
+        }
+        for label, text in cases.items():
+            with self.subTest(label=label):
+                with self.assertRaises(ContractError):
+                    parse_sysfs_ras_counters(text)
 
 
 class G0MatrixTests(unittest.TestCase):

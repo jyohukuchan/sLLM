@@ -57,6 +57,15 @@ RUN_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
 AMD_UUID = re.compile(r"^[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}$")
 HEX16 = re.compile(r"^[0-9a-f]{16}$")
 SYSFS_BDF = re.compile(r"^[0-9a-f]{4}:[0-9a-f]{2}:[0-9a-f]{2}\.[0-7]$")
+SYSFS_RAS_COUNTER_MAX = (1 << 64) - 1
+SYSFS_RAS_COUNTER_MAX_TEXT = str(SYSFS_RAS_COUNTER_MAX)
+SYSFS_RAS_COUNTERS = re.compile(
+    r"ue: (0|[1-9][0-9]*)\n"
+    r"ce: (0|[1-9][0-9]*)\n"
+    r"de: (0|[1-9][0-9]*)\n?\Z"
+)
+
+
 def now() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -421,6 +430,26 @@ def selected_gpu_record(document: Any, gpu: int, label: str) -> dict[str, Any]:
     return record
 
 
+def parse_sysfs_ras_counters(text: str) -> dict[str, int]:
+    """Parse the canonical three-line AMD UMC RAS counter format."""
+    match = SYSFS_RAS_COUNTERS.fullmatch(text)
+    if match is None:
+        raise ContractError("canonical PCI sysfs RAS counter is malformed")
+
+    counters: dict[str, int] = {}
+    for key, digits in zip(("ue", "ce", "de"), match.groups()):
+        if (
+            len(digits) > len(SYSFS_RAS_COUNTER_MAX_TEXT)
+            or (
+                len(digits) == len(SYSFS_RAS_COUNTER_MAX_TEXT)
+                and digits > SYSFS_RAS_COUNTER_MAX_TEXT
+            )
+        ):
+            raise ContractError("canonical PCI sysfs RAS counter overflows uint64")
+        counters[key] = int(digits, 10)
+    return counters
+
+
 def read_sysfs_health(row: dict[str, Any], sysfs_root: Path) -> tuple[str, bool, int]:
     device = sysfs_root / row["bdf"]
     if not device.is_dir():
@@ -436,10 +465,8 @@ def read_sysfs_health(row: dict[str, Any], sysfs_root: Path) -> tuple[str, bool,
     if ras_path.is_symlink() or not ras_path.is_file():
         raise ContractError("canonical PCI sysfs RAS counter is unavailable or unsafe")
     ras_text = ras_path.read_text(encoding="ascii")
-    match = re.fullmatch(r"\s*ue:\s*(\d+)ce:\s*(\d+)de:\s*(\d+)\s*", ras_text)
-    if match is None:
-        raise ContractError("canonical PCI sysfs RAS counter is malformed")
-    return runtime_status, True, int(match.group(1))
+    counters = parse_sysfs_ras_counters(ras_text)
+    return runtime_status, True, counters["ue"]
 
 
 def observe_health(row: dict[str, Any], binding: dict[str, Any], *, amd_smi: str, sysfs_root: Path) -> dict[str, Any]:
