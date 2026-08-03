@@ -1,7 +1,7 @@
 {
   "schema_version": "suites-v1",
   "registry_id": "uLLM-host-suites",
-  "revision": 3,
+  "revision": 4,
   "allowed_tiers": ["tier_h0", "tier_h1", "tier_h2", "tier_h3", "tier_g0", "tier_g1", "tier_g2", "tier_g3", "tier_g4", "tier_p0", "tier_p1"],
   "allowed_attributes": ["requires_gpu", "requires_model", "slow", "network", "quarantined"],
   "suites": [
@@ -61,6 +61,14 @@
       "attributes": {"requires_gpu": false, "requires_model": false, "slow": false, "network": false, "quarantined": false},
       "test_ids": ["h0.json.schemas", "h0.json.manifests", "h0.workflow.structure"],
       "commands": [{"command_id": "json-schema-manifest-workflow", "argv": ["{python}", "ci/tools/validate_json_manifests.py"]}]
+    },
+    {
+      "suite_id": "h0-h3-static-contracts",
+      "tier": "tier_h0",
+      "marker": "tier_h0",
+      "attributes": {"requires_gpu": false, "requires_model": false, "slow": false, "network": false, "quarantined": false},
+      "test_ids": ["h0.h3.contracts", "h0.h3.negative-contracts"],
+      "commands": [{"command_id": "h3-static-contracts", "argv": ["{python}", "ci/tests/test_h3_contracts.py"]}]
     },
     {
       "suite_id": "h0-license-provenance",

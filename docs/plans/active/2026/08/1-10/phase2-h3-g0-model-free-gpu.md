@@ -260,8 +260,6 @@ G1 case:
 
 ## 未確定事項
 
-- H3 prebuilt imageのregistryと最終digest。
-- exact targetごとの初期code object versionと`xnack`/`sramecc`/wavefront正規値。
 - canonical GPUのUUID/BDF。G0実装時にhost実測から固定する。
 - local runner lockとhost controllerの恒久配置。
 - diagnostic kernel用C ABIをadditive public ABI、private test ABI、専用test binaryのどれに置くか。実装前にarchitecture reviewで決める。

@@ -1,0 +1,173 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ullm-project.local/ci/schema/rocm-toolchain-v1.schema.json",
+  "title": "uLLM ROCm toolchain and HIP compile matrix contracts v1",
+  "type": "object",
+  "additionalProperties": false,
+  "$defs": {
+    "sha256_digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "absolute_rocm_path": {
+      "type": "string",
+      "pattern": "^/opt/rocm(?:/[A-Za-z0-9._+~-]+)+$"
+    },
+    "date_time_z": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\\.[0-9]{1,9})?Z$"
+    },
+    "platform": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["os", "architecture"],
+      "properties": {
+        "os": {"const": "linux"},
+        "architecture": {"const": "amd64"}
+      }
+    },
+    "image": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "repository", "tag", "manifest_digest", "config_digest",
+        "manifest_list_digest", "manifest_type", "platform",
+        "tag_api_url", "registry_observed_at"
+      ],
+      "properties": {
+        "repository": {"const": "docker.io/rocm/dev-ubuntu-24.04"},
+        "tag": {"const": "7.14.0-full"},
+        "manifest_digest": {"const": "sha256:439edaa8f0c4be4a3728e528f87b8a2ea1f051f34cf10b27caa4bd94f562eda7"},
+        "config_digest": {"const": "sha256:4c91c0d850e38a40fd669dd043ab42e9bad9a2b8a38e3f873c5a4eaced9f28cf"},
+        "manifest_list_digest": {"const": null},
+        "manifest_type": {"const": "application/vnd.docker.distribution.manifest.v2+json"},
+        "platform": {"$ref": "#/$defs/platform"},
+        "tag_api_url": {"const": "https://hub.docker.com/v2/repositories/rocm/dev-ubuntu-24.04/tags/7.14.0-full"},
+        "registry_observed_at": {"const": "2026-08-03T04:41:00Z"}
+      }
+    },
+    "codegen": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "target", "target_kind", "target_count", "code_object_version",
+        "wavefront_size", "features"
+      ],
+      "properties": {
+        "target": {"enum": ["gfx1030", "gfx1201"]},
+        "target_kind": {"const": "exact"},
+        "target_count": {"const": 1},
+        "code_object_version": {"const": "V6"},
+        "wavefront_size": {"const": 32},
+        "features": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["xnack", "sramecc", "generic_processor_version"],
+          "properties": {
+            "xnack": {"const": "unsupported"},
+            "sramecc": {"const": "unsupported"},
+            "generic_processor_version": {"const": 0}
+          }
+        }
+      }
+    },
+    "hip_compile_row": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "row_id", "tier", "required", "target", "execution", "cmake",
+        "codegen"
+      ],
+      "properties": {
+        "row_id": {"enum": ["h3-gfx1030", "h3-gfx1201"]},
+        "tier": {"const": "tier_h3"},
+        "required": {"const": false},
+        "target": {"enum": ["gfx1030", "gfx1201"]},
+        "execution": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["mode", "requires_gpu", "requires_model", "network", "fallback_allowed"],
+          "properties": {
+            "mode": {"const": "compile-only"},
+            "requires_gpu": {"const": false},
+            "requires_model": {"const": false},
+            "network": {"const": false},
+            "fallback_allowed": {"const": false}
+          }
+        },
+        "cmake": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["generator", "build_type", "timeout_seconds"],
+          "properties": {
+            "generator": {"const": "Unix Makefiles"},
+            "build_type": {"const": "Release"},
+            "timeout_seconds": {"const": 900}
+          }
+        },
+        "codegen": {"$ref": "#/$defs/codegen"}
+      }
+    },
+    "hip_compile_matrix": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["$schema", "schema_version", "matrix_id", "revision", "toolchain_id", "targets", "rows"],
+      "properties": {
+        "$schema": {"const": "https://ullm-project.local/ci/schema/rocm-toolchain-v1.schema.json#/$defs/hip_compile_matrix"},
+        "schema_version": {"const": "hip-compile-v1"},
+        "matrix_id": {"const": "hip-compile-v1"},
+        "revision": {"type": "integer", "minimum": 1},
+        "toolchain_id": {"const": "rocm-7.14.0"},
+        "targets": {"const": ["gfx1030", "gfx1201"]},
+        "rows": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 2,
+          "uniqueItems": true,
+          "items": {"$ref": "#/$defs/hip_compile_row"}
+        }
+      }
+    }
+  },
+  "required": ["schema_version", "toolchain_id", "image", "rocm", "compiler", "paths"],
+  "properties": {
+    "schema_version": {"const": "rocm-toolchain-v1"},
+    "toolchain_id": {"const": "rocm-7.14.0"},
+    "image": {"$ref": "#/$defs/image"},
+    "rocm": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "version", "llvm_major"],
+      "properties": {
+        "path": {"const": "/opt/rocm"},
+        "version": {"const": "7.14.0"},
+        "llvm_major": {"const": 23}
+      }
+    },
+    "compiler": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "path", "version", "llvm_major"],
+      "properties": {
+        "name": {"const": "amdclang++"},
+        "path": {"const": "/opt/rocm/bin/amdclang++"},
+        "version": {"pattern": "^23\\.[0-9]+\\.[0-9]+(?:git)?$", "type": "string"},
+        "llvm_major": {"const": 23}
+      }
+    },
+    "paths": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["rocm_root", "compiler", "hip_headers", "hip_cmake_package", "device_libraries", "hip_runtime"],
+      "properties": {
+        "rocm_root": {"const": "/opt/rocm"},
+        "compiler": {"const": "/opt/rocm/bin/amdclang++"},
+        "hip_headers": {"const": "/opt/rocm/include"},
+        "hip_cmake_package": {"const": "/opt/rocm/lib/cmake/hip"},
+        "device_libraries": {"const": "/opt/rocm/amdgcn/bitcode"},
+        "hip_runtime": {"const": "/opt/rocm/lib/libamdhip64.so"}
+      }
+    }
+  }
+}

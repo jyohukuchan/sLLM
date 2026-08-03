@@ -1,0 +1,54 @@
+{
+  "$schema": "https://ullm-project.local/ci/schema/rocm-toolchain-v1.schema.json#/$defs/hip_compile_matrix",
+  "schema_version": "hip-compile-v1",
+  "matrix_id": "hip-compile-v1",
+  "revision": 1,
+  "toolchain_id": "rocm-7.14.0",
+  "targets": ["gfx1030", "gfx1201"],
+  "rows": [
+    {
+      "row_id": "h3-gfx1030",
+      "tier": "tier_h3",
+      "required": false,
+      "target": "gfx1030",
+      "execution": {
+        "mode": "compile-only",
+        "requires_gpu": false,
+        "requires_model": false,
+        "network": false,
+        "fallback_allowed": false
+      },
+      "cmake": {"generator": "Unix Makefiles", "build_type": "Release", "timeout_seconds": 900},
+      "codegen": {
+        "target": "gfx1030",
+        "target_kind": "exact",
+        "target_count": 1,
+        "code_object_version": "V6",
+        "wavefront_size": 32,
+        "features": {"xnack": "unsupported", "sramecc": "unsupported", "generic_processor_version": 0}
+      }
+    },
+    {
+      "row_id": "h3-gfx1201",
+      "tier": "tier_h3",
+      "required": false,
+      "target": "gfx1201",
+      "execution": {
+        "mode": "compile-only",
+        "requires_gpu": false,
+        "requires_model": false,
+        "network": false,
+        "fallback_allowed": false
+      },
+      "cmake": {"generator": "Unix Makefiles", "build_type": "Release", "timeout_seconds": 900},
+      "codegen": {
+        "target": "gfx1201",
+        "target_kind": "exact",
+        "target_count": 1,
+        "code_object_version": "V6",
+        "wavefront_size": 32,
+        "features": {"xnack": "unsupported", "sramecc": "unsupported", "generic_processor_version": 0}
+      }
+    }
+  ]
+}
