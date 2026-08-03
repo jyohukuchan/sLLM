@@ -284,9 +284,18 @@
 - ROCm 7.14.0によるH3 compile-only、専用local hostでのGPU evidenceとG0 preflightはPhase 1の完了後に行う。
 - Phase 1は完了した。実装path、再現command、CPU-only境界は[host build and test entry points](../development/testing.md)を正とする。
 
+## 当面のPhase 2前半
+
+- 対象はROCm 7.14.0固定toolchain、exact `gfx1030`/`gfx1201`のH3 compile-only、専用local hostのGPU evidenceとG0、model-freeの最小GPU実行経路までとする。数値op、model load・推論、性能最適化、対応GPUの昇格は含めない。
+- 最初に、未構築のG0/G1/G2/G4/P0をH3自身へ要求するbootstrap循環を解消し、変更が実際に触れる範囲だけを同一immutable SHAで要求する段階的gateをCI正本へ同期する。
+- H3はnon-requiredで開始し、20回以上かつ7日以上の観測はrequired昇格だけの条件とする。観測中もG0とmodel-free GPU pathの実装を並行し、後続開発を停止しない。
+- 初期runtime evidenceは専用local hostのcanonical `gfx1030` 1台と`gfx1201` 1台を直列実行し、完全tuple、artifact identity、CPU fallback未使用、実行前後のdevice healthを記録する。
+- model-free最小経路は`Cargo -> ullm-hip -> versioned C ABI -> native HIP -> GPU`を通してallocation、copy、単一diagnostic kernel、completion、copy-back、解放を検証する。推論opまたはGPU対応済みの証拠にはしない。
+- 詳細な作業単位、受入条件、evidence、rollback境界は[Phase 2 H3・G0・model-free GPU path計画](active/2026/08/1-10/phase2-h3-g0-model-free-gpu.md)を正とする。
+
 ## 現在の状態と次の作業
 
-- 現在: Phase 1のrepository skeleton、versioned host C ABI stub、H0〜H2、fail-closed `host-required`、repository hygiene commandを実装・検証済み。次はPhase 2のH3 HIP compile-only設計・実装。
+- 現在: Phase 1のrepository skeleton、versioned host C ABI stub、H0〜H2、fail-closed `host-required`、repository hygiene commandを実装・検証済み。次はPhase 2前半計画に従い、bootstrap gateの同期とH3 HIP compile-only設計・実装を行う。
 - 完了:
   - プロジェクトライセンスをMITへ統一。
   - Qwen3.5のMTP表記とBF16階層の矛盾を修正。
@@ -307,10 +316,11 @@
   - Python 3.12/Linux x86_64 host dependencyをtransitive dependencyとartifact SHA-256まで固定し、test中の外部networkをnamespaceで遮断。
   - GitHub-hosted CPUだけを使う`host-required` workflowを追加し、official Actionsを完全commit SHAへ固定。H3/GPU/self-hosted runnerは含めていない。
 - 次:
-  1. ROCm 7.14.0固定toolchain imageとartifact metadata contractを設計する。
-  2. exact `gfx1030`/`gfx1201`のH3 compile-only rowをnon-requiredで追加する。
-  3. H3を20回以上かつ7日以上観測し、昇格条件を評価する。
-  4. 専用local hostのGPU evidence実行・集約とG0 preflightを構築する。
+  1. 変更scope別のbootstrap gateをCI正本へ同期する。
+  2. ROCm 7.14.0固定toolchain imageとartifact metadata contractを設計する。
+  3. exact `gfx1030`/`gfx1201`のH3 compile-only rowをnon-requiredで追加し、required昇格観測を開始する。
+  4. H3観測と並行して、専用local hostのGPU evidence実行・集約とG0 preflightを構築する。
+  5. canonical `gfx1030`/`gfx1201`でmodel-free最小GPU実行経路を同一candidate SHAに対して検証する。
 
 ## 未解決事項
 
