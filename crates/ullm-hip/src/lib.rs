@@ -6,6 +6,8 @@
 
 use std::fmt;
 use std::mem::size_of;
+use std::ptr::NonNull;
+use std::time::Duration;
 
 use ullm_core::{
     Backend, BackendCapabilities, BackendError, BackendSupport, ExecutionReceipt,
@@ -25,6 +27,11 @@ pub enum Status {
     InvalidAbiVersion,
     ReservedNonzero,
     InternalError,
+    Timeout,
+    InvalidHandle,
+    ZeroDispatch,
+    RuntimeError,
+    DispatchContract,
     Unknown(u32),
 }
 
@@ -39,6 +46,11 @@ impl Status {
             sys::ULLM_STATUS_INVALID_ABI_VERSION => Self::InvalidAbiVersion,
             sys::ULLM_STATUS_RESERVED_NONZERO => Self::ReservedNonzero,
             sys::ULLM_STATUS_INTERNAL_ERROR => Self::InternalError,
+            sys::evidence::ULLM_STATUS_HIP_TIMEOUT => Self::Timeout,
+            sys::evidence::ULLM_STATUS_HIP_INVALID_HANDLE => Self::InvalidHandle,
+            sys::evidence::ULLM_STATUS_HIP_ZERO_DISPATCH => Self::ZeroDispatch,
+            sys::evidence::ULLM_STATUS_HIP_RUNTIME_ERROR => Self::RuntimeError,
+            sys::evidence::ULLM_STATUS_HIP_DISPATCH_CONTRACT => Self::DispatchContract,
             other => Self::Unknown(other),
         }
     }
@@ -53,6 +65,11 @@ impl Status {
             Self::InvalidAbiVersion => sys::ULLM_STATUS_INVALID_ABI_VERSION,
             Self::ReservedNonzero => sys::ULLM_STATUS_RESERVED_NONZERO,
             Self::InternalError => sys::ULLM_STATUS_INTERNAL_ERROR,
+            Self::Timeout => sys::evidence::ULLM_STATUS_HIP_TIMEOUT,
+            Self::InvalidHandle => sys::evidence::ULLM_STATUS_HIP_INVALID_HANDLE,
+            Self::ZeroDispatch => sys::evidence::ULLM_STATUS_HIP_ZERO_DISPATCH,
+            Self::RuntimeError => sys::evidence::ULLM_STATUS_HIP_RUNTIME_ERROR,
+            Self::DispatchContract => sys::evidence::ULLM_STATUS_HIP_DISPATCH_CONTRACT,
             Self::Unknown(raw) => raw,
         }
     }
@@ -125,6 +142,11 @@ fn status_name(status: Status) -> &'static str {
         Status::InvalidAbiVersion => "invalid ABI version",
         Status::ReservedNonzero => "reserved field is non-zero",
         Status::InternalError => "internal error",
+        Status::Timeout => "HIP evidence timeout",
+        Status::InvalidHandle => "invalid HIP evidence handle",
+        Status::ZeroDispatch => "HIP evidence performed zero dispatches",
+        Status::RuntimeError => "HIP runtime error",
+        Status::DispatchContract => "HIP evidence dispatch contract violation",
         Status::Unknown(_) => "unknown native status",
     }
 }
@@ -245,6 +267,205 @@ pub fn context_probe() -> Result<ContextProbe, HipError> {
     })
 }
 
+/// Independent Rust oracle for the private model-free diagnostic transform.
+/// This is evidence plumbing, not a semantic operation or a CPU fallback.
+pub const EVIDENCE_EXPECTED_XOR: u8 = 0x5a;
+pub const EVIDENCE_CASE_SIZES: [usize; 6] = [1, 3, 17, 255, 256, 257];
+
+pub fn expected_evidence_output(input: &[u8]) -> Vec<u8> {
+    input
+        .iter()
+        .map(|value| *value ^ EVIDENCE_EXPECTED_XOR)
+        .collect()
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EvidenceReport {
+    pub output_size: usize,
+    pub allocation_count: u64,
+    pub copy_count: u64,
+    pub dispatch_count: u64,
+    pub selected_backend: u32,
+    pub fallback_used: bool,
+    pub terminal: bool,
+}
+
+pub struct EvidenceCompletion {
+    handle: Option<NonNull<sys::evidence::ullm_hip_evidence_completion_t>>,
+}
+
+impl fmt::Debug for EvidenceCompletion {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("EvidenceCompletion")
+            .finish_non_exhaustive()
+    }
+}
+
+impl EvidenceCompletion {
+    pub fn wait(
+        &mut self,
+        output: &mut [u8],
+        timeout: Duration,
+    ) -> Result<EvidenceReport, HipError> {
+        if self.handle.is_none() {
+            return Err(HipError::Status {
+                status: Status::InvalidHandle,
+                message: "evidence completion was already consumed".to_owned(),
+            });
+        }
+        let timeout_ms = timeout_millis(timeout);
+        let output_capacity = u64::try_from(output.len()).map_err(|_| HipError::Status {
+            status: Status::InvalidArgument,
+            message: "evidence output is too large for the HIP ABI".to_owned(),
+        })?;
+        let handle = self.handle.take().expect("evidence handle checked above");
+        let mut error_buffer = [0u8; ERROR_CAPACITY];
+        let mut error_sink = evidence_sink(&mut error_buffer);
+        let mut result = evidence_result();
+        let raw = unsafe {
+            sys::evidence::ullm_hip_evidence_wait(
+                handle.as_ptr(),
+                timeout_ms,
+                output.as_mut_ptr(),
+                output_capacity,
+                &mut result,
+                &mut error_sink,
+            )
+        };
+        ensure_ok(raw, diagnostic(&error_buffer, error_sink.message_length))?;
+        let output_size = usize::try_from(result.output_size).map_err(|_| HipError::Status {
+            status: Status::RuntimeError,
+            message: "HIP evidence result size does not fit in usize".to_owned(),
+        })?;
+        Ok(EvidenceReport {
+            output_size,
+            allocation_count: result.allocation_count,
+            copy_count: result.copy_count,
+            dispatch_count: result.dispatch_count,
+            selected_backend: result.selected_backend,
+            fallback_used: result.fallback_used != 0,
+            terminal: result.terminal != 0,
+        })
+    }
+}
+
+impl Drop for EvidenceCompletion {
+    fn drop(&mut self) {
+        let Some(handle) = self.handle.take() else {
+            return;
+        };
+        let mut raw_handle = handle.as_ptr();
+        let mut error_buffer = [0u8; ERROR_CAPACITY];
+        let mut error_sink = evidence_sink(&mut error_buffer);
+        let _ =
+            unsafe { sys::evidence::ullm_hip_evidence_destroy(&mut raw_handle, &mut error_sink) };
+    }
+}
+
+pub fn submit_evidence(input: &[u8]) -> Result<EvidenceCompletion, HipError> {
+    if input.is_empty() {
+        return Err(HipError::Status {
+            status: Status::InvalidArgument,
+            message: "evidence input must not be empty".to_owned(),
+        });
+    }
+    let input_size = u64::try_from(input.len()).map_err(|_| HipError::Status {
+        status: Status::InvalidArgument,
+        message: "evidence input is too large for the HIP ABI".to_owned(),
+    })?;
+    let request = sys::evidence::ullm_hip_evidence_request_t {
+        struct_size: size_of::<sys::evidence::ullm_hip_evidence_request_t>() as u32,
+        abi_version: sys::evidence::ULLM_HIP_EVIDENCE_ABI_VERSION,
+        input: input.as_ptr(),
+        input_size,
+        reserved: [0; 4],
+    };
+    let mut handle = std::ptr::null_mut();
+    let mut error_buffer = [0u8; ERROR_CAPACITY];
+    let mut error_sink = evidence_sink(&mut error_buffer);
+    let raw =
+        unsafe { sys::evidence::ullm_hip_evidence_submit(&request, &mut handle, &mut error_sink) };
+    ensure_ok(raw, diagnostic(&error_buffer, error_sink.message_length))?;
+    NonNull::new(handle)
+        .map(|handle| EvidenceCompletion {
+            handle: Some(handle),
+        })
+        .ok_or_else(|| HipError::Status {
+            status: Status::InternalError,
+            message: "native evidence submit returned a null completion".to_owned(),
+        })
+}
+
+fn timeout_millis(timeout: Duration) -> u32 {
+    timeout.as_millis().try_into().unwrap_or(u32::MAX)
+}
+
+fn validate_evidence_contract(
+    input: &[u8],
+    output: &[u8],
+    report: &EvidenceReport,
+) -> Result<(), HipError> {
+    if report.dispatch_count == 0 {
+        return Err(HipError::Status {
+            status: Status::ZeroDispatch,
+            message: "evidence result contains zero kernel dispatches".to_owned(),
+        });
+    }
+    if report.selected_backend != sys::ULLM_BACKEND_HIP
+        || report.fallback_used
+        || !report.terminal
+        || report.output_size != input.len()
+        || report.allocation_count != 2
+        || report.copy_count != 2
+        || report.dispatch_count != 1
+        || output != expected_evidence_output(input)
+    {
+        return Err(HipError::Status {
+            status: Status::DispatchContract,
+            message: "evidence result failed the exact no-fallback byte contract".to_owned(),
+        });
+    }
+    Ok(())
+}
+
+pub fn run_evidence(
+    input: &[u8],
+    timeout: Duration,
+) -> Result<(Vec<u8>, EvidenceReport), HipError> {
+    let mut completion = submit_evidence(input)?;
+    let mut output = vec![0u8; input.len()];
+    let report = completion.wait(&mut output, timeout)?;
+    validate_evidence_contract(input, &output, &report)?;
+    Ok((output, report))
+}
+
+fn evidence_sink(buffer: &mut [u8; ERROR_CAPACITY]) -> sys::evidence::ullm_error_sink_t {
+    sys::evidence::ullm_error_sink_t {
+        struct_size: size_of::<sys::evidence::ullm_error_sink_t>() as u32,
+        abi_version: sys::ULLM_HIP_ABI_VERSION,
+        message: buffer.as_mut_ptr().cast(),
+        message_capacity: buffer.len() as u64,
+        message_length: 0,
+        reserved: [0, 0],
+    }
+}
+
+fn evidence_result() -> sys::evidence::ullm_hip_evidence_result_t {
+    sys::evidence::ullm_hip_evidence_result_t {
+        struct_size: size_of::<sys::evidence::ullm_hip_evidence_result_t>() as u32,
+        abi_version: sys::evidence::ULLM_HIP_EVIDENCE_ABI_VERSION,
+        output_size: 0,
+        allocation_count: 0,
+        copy_count: 0,
+        dispatch_count: 0,
+        selected_backend: 0,
+        fallback_used: 0,
+        terminal: 0,
+        reserved: [0; 4],
+    }
+}
+
 /// A typed backend handle is only constructible after an available HIP probe.
 #[derive(Clone, Copy, Debug)]
 pub struct HipBackend {
@@ -344,7 +565,180 @@ mod tests {
             Status::from_raw(sys::ULLM_STATUS_HIP_UNAVAILABLE),
             Status::HipUnavailable
         );
+        assert_eq!(
+            Status::from_raw(sys::evidence::ULLM_STATUS_HIP_ZERO_DISPATCH),
+            Status::ZeroDispatch
+        );
+        assert_eq!(
+            Status::ZeroDispatch.raw(),
+            sys::evidence::ULLM_STATUS_HIP_ZERO_DISPATCH
+        );
         assert_eq!(Status::from_raw(99), Status::Unknown(99));
+    }
+
+    #[test]
+    fn evidence_oracle_covers_required_non_aligned_boundaries() {
+        assert_eq!(EVIDENCE_CASE_SIZES, [1, 3, 17, 255, 256, 257]);
+        for size in EVIDENCE_CASE_SIZES {
+            let input: Vec<u8> = (0..size).map(|index| index as u8).collect();
+            let expected = expected_evidence_output(&input);
+            assert_eq!(expected.len(), size);
+            assert_eq!(expected[0], input[0] ^ EVIDENCE_EXPECTED_XOR);
+            assert_eq!(expected[size - 1], input[size - 1] ^ EVIDENCE_EXPECTED_XOR);
+        }
+    }
+
+    #[test]
+    fn evidence_contract_rejects_zero_and_multiple_dispatches() {
+        let input = [1_u8, 3, 17];
+        let output = expected_evidence_output(&input);
+        let mut report = EvidenceReport {
+            output_size: input.len(),
+            allocation_count: 2,
+            copy_count: 2,
+            dispatch_count: 1,
+            selected_backend: sys::ULLM_BACKEND_HIP,
+            fallback_used: false,
+            terminal: true,
+        };
+        assert!(validate_evidence_contract(&input, &output, &report).is_ok());
+        report.dispatch_count = 0;
+        let error = validate_evidence_contract(&input, &output, &report)
+            .expect_err("zero dispatch must fail closed");
+        assert_eq!(error.status(), Status::ZeroDispatch);
+        report.dispatch_count = 2;
+        let error = validate_evidence_contract(&input, &output, &report)
+            .expect_err("non-exact dispatch count must fail");
+        assert_eq!(error.status(), Status::DispatchContract);
+    }
+
+    #[test]
+    fn timeout_conversion_is_bounded_and_zero_is_an_immediate_poll() {
+        assert_eq!(timeout_millis(Duration::ZERO), 0);
+        assert_eq!(timeout_millis(Duration::from_nanos(999_999)), 0);
+        assert_eq!(timeout_millis(Duration::from_millis(1)), 1);
+        assert_eq!(
+            timeout_millis(Duration::from_millis(u64::from(u32::MAX) + 1)),
+            u32::MAX
+        );
+    }
+
+    #[test]
+    fn private_evidence_abi_layout_and_constants_are_explicit() {
+        use std::mem::{align_of, offset_of};
+
+        type Request = sys::evidence::ullm_hip_evidence_request_t;
+        type Result = sys::evidence::ullm_hip_evidence_result_t;
+        assert_eq!(size_of::<Request>(), 40);
+        assert_eq!(align_of::<Request>(), 8);
+        assert_eq!(offset_of!(Request, struct_size), 0);
+        assert_eq!(offset_of!(Request, abi_version), 4);
+        assert_eq!(offset_of!(Request, input), 8);
+        assert_eq!(offset_of!(Request, input_size), 16);
+        assert_eq!(offset_of!(Request, reserved), 24);
+        assert_eq!(size_of::<Result>(), 72);
+        assert_eq!(align_of::<Result>(), 8);
+        assert_eq!(offset_of!(Result, struct_size), 0);
+        assert_eq!(offset_of!(Result, abi_version), 4);
+        assert_eq!(offset_of!(Result, output_size), 8);
+        assert_eq!(offset_of!(Result, allocation_count), 16);
+        assert_eq!(offset_of!(Result, copy_count), 24);
+        assert_eq!(offset_of!(Result, dispatch_count), 32);
+        assert_eq!(offset_of!(Result, selected_backend), 40);
+        assert_eq!(offset_of!(Result, fallback_used), 44);
+        assert_eq!(offset_of!(Result, terminal), 48);
+        assert_eq!(offset_of!(Result, reserved), 52);
+        type ErrorSink = sys::evidence::ullm_error_sink_t;
+        assert_eq!(size_of::<ErrorSink>(), 48);
+        assert_eq!(align_of::<ErrorSink>(), 8);
+        assert_eq!(offset_of!(ErrorSink, struct_size), 0);
+        assert_eq!(offset_of!(ErrorSink, abi_version), 4);
+        assert_eq!(offset_of!(ErrorSink, message), 8);
+        assert_eq!(offset_of!(ErrorSink, message_capacity), 16);
+        assert_eq!(offset_of!(ErrorSink, message_length), 24);
+        assert_eq!(offset_of!(ErrorSink, reserved), 32);
+        assert_eq!(sys::evidence::ULLM_HIP_EVIDENCE_ABI_VERSION, 1);
+        assert_eq!(sys::evidence::ULLM_HIP_EVIDENCE_TRANSFORM_XOR, 0x5a);
+        assert_eq!(sys::evidence::ULLM_STATUS_HIP_TIMEOUT, 8);
+        assert_eq!(sys::evidence::ULLM_STATUS_HIP_INVALID_HANDLE, 9);
+        assert_eq!(sys::evidence::ULLM_STATUS_HIP_ZERO_DISPATCH, 10);
+        assert_eq!(sys::evidence::ULLM_STATUS_HIP_DISPATCH_CONTRACT, 12);
+    }
+
+    #[test]
+    fn host_stub_evidence_is_unavailable_and_never_cpu_fallback() {
+        let input = [1_u8, 3, 17, 255, 0, 257_u16 as u8];
+        let error = run_evidence(&input, Duration::from_millis(100)).expect_err("stub must fail");
+        assert_eq!(error.status(), Status::HipUnavailable);
+        assert!(error.message().contains("CPU fallback"));
+        assert!(submit_evidence(&[]).is_err());
+    }
+
+    #[test]
+    fn private_evidence_abi_validates_request_and_handle_inputs_on_stub() {
+        let mut message = [0_u8; ERROR_CAPACITY];
+        let mut error_sink = evidence_sink(&mut message);
+        let mut handle = std::ptr::null_mut();
+        let input = [1_u8, 2, 3];
+        let mut request = sys::evidence::ullm_hip_evidence_request_t {
+            struct_size: size_of::<sys::evidence::ullm_hip_evidence_request_t>() as u32,
+            abi_version: sys::evidence::ULLM_HIP_EVIDENCE_ABI_VERSION,
+            input: input.as_ptr(),
+            input_size: input.len() as u64,
+            reserved: [0; 4],
+        };
+
+        let raw = unsafe {
+            sys::evidence::ullm_hip_evidence_submit(std::ptr::null(), &mut handle, &mut error_sink)
+        };
+        assert_eq!(Status::from_raw(raw), Status::InvalidArgument);
+
+        request.struct_size -= 1;
+        let raw = unsafe {
+            sys::evidence::ullm_hip_evidence_submit(&request, &mut handle, &mut error_sink)
+        };
+        assert_eq!(Status::from_raw(raw), Status::InvalidArgument);
+
+        request.struct_size = size_of::<sys::evidence::ullm_hip_evidence_request_t>() as u32;
+        request.abi_version += 1;
+        let raw = unsafe {
+            sys::evidence::ullm_hip_evidence_submit(&request, &mut handle, &mut error_sink)
+        };
+        assert_eq!(Status::from_raw(raw), Status::InvalidAbiVersion);
+
+        request.abi_version = sys::evidence::ULLM_HIP_EVIDENCE_ABI_VERSION;
+        request.reserved[0] = 1;
+        let raw = unsafe {
+            sys::evidence::ullm_hip_evidence_submit(&request, &mut handle, &mut error_sink)
+        };
+        assert_eq!(Status::from_raw(raw), Status::ReservedNonzero);
+
+        let raw = unsafe {
+            sys::evidence::ullm_hip_evidence_wait(
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null_mut(),
+                &mut error_sink,
+            )
+        };
+        assert_eq!(Status::from_raw(raw), Status::InvalidHandle);
+
+        let raw = unsafe {
+            sys::evidence::ullm_hip_evidence_destroy(std::ptr::null_mut(), &mut error_sink)
+        };
+        assert_eq!(Status::from_raw(raw), Status::InvalidArgument);
+
+        let mut stale = std::ptr::null_mut();
+        let raw = unsafe { sys::evidence::ullm_hip_evidence_destroy(&mut stale, &mut error_sink) };
+        assert_eq!(Status::from_raw(raw), Status::InvalidHandle);
+
+        let mut fake = std::ptr::dangling_mut::<sys::evidence::ullm_hip_evidence_completion_t>();
+        let raw = unsafe { sys::evidence::ullm_hip_evidence_destroy(&mut fake, &mut error_sink) };
+        assert_eq!(Status::from_raw(raw), Status::InvalidHandle);
+        let raw = unsafe { sys::evidence::ullm_hip_evidence_destroy(&mut fake, &mut error_sink) };
+        assert_eq!(Status::from_raw(raw), Status::InvalidHandle);
     }
 
     #[test]

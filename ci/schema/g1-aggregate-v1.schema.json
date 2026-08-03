@@ -1,0 +1,52 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ullm-project.local/ci/schema/g1-aggregate-v1.schema.json",
+  "title": "uLLM fail-closed G1 aggregate v1",
+  "type": "object",
+  "additionalProperties": false,
+  "$defs": {
+    "sha40": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "row": {
+      "type": "object", "additionalProperties": false,
+      "required": ["row_id", "target", "bdf", "uuid", "state", "run_id", "run_attempt", "reviewed_sha", "tested_sha", "workflow_sha", "git_tree_oid", "toolchain_id", "toolchain_manifest_sha256", "matrix_manifest_sha256", "artifact_schema_sha256", "artifact_path", "staged_artifact_path", "artifact_sha256", "artifact_sidecar_sha256", "metadata_sha256", "metadata_sidecar_sha256", "report_sha256", "report_sidecar_sha256"],
+      "properties": {
+        "row_id": {"enum": ["g1-gfx1030", "g1-gfx1201"]}, "target": {"enum": ["gfx1030", "gfx1201"]},
+        "bdf": {"type": "string", "pattern": "^[0-9a-f]{4}:[0-9a-f]{2}:[0-9a-f]{2}\\.[0-7]$"},
+        "uuid": {"type": "string", "pattern": "^GPU-[0-9a-f]{16}$"}, "state": {"const": "PASS"},
+        "run_id": {"type": "string", "minLength": 1}, "run_attempt": {"type": "integer", "minimum": 1},
+        "reviewed_sha": {"$ref": "#/$defs/sha40"}, "tested_sha": {"$ref": "#/$defs/sha40"},
+        "workflow_sha": {"$ref": "#/$defs/sha40"}, "git_tree_oid": {"$ref": "#/$defs/sha40"},
+        "toolchain_id": {"const": "rocm-7.14.0"}, "toolchain_manifest_sha256": {"$ref": "#/$defs/sha256"},
+        "matrix_manifest_sha256": {"$ref": "#/$defs/sha256"}, "artifact_schema_sha256": {"$ref": "#/$defs/sha256"},
+        "artifact_path": {"type": "string", "pattern": "^/[^\\u0000]*"},
+        "staged_artifact_path": {"type": "string", "pattern": "^/[^\\u0000]*"},
+        "artifact_sha256": {"$ref": "#/$defs/sha256"},
+        "artifact_sidecar_sha256": {"$ref": "#/$defs/sha256"}, "metadata_sha256": {"$ref": "#/$defs/sha256"},
+        "metadata_sidecar_sha256": {"$ref": "#/$defs/sha256"}, "report_sha256": {"$ref": "#/$defs/sha256"},
+        "report_sidecar_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    }
+  },
+  "required": ["schema_version", "aggregate_id", "state", "required", "run_id", "run_attempt", "reviewed_sha", "tested_sha", "workflow_sha", "git_tree_oid", "toolchain_id", "toolchain_manifest_sha256", "matrix_manifest_sha256", "report_schema_sha256", "artifact_schema_sha256", "aggregate_schema_sha256", "expected_rows", "rows", "errors"],
+  "properties": {
+    "schema_version": {"const": "g1-aggregate-v1"}, "aggregate_id": {"type": "string", "minLength": 1},
+    "state": {"const": "PASS"}, "required": {"const": true}, "run_id": {"type": "string", "minLength": 1},
+    "run_attempt": {"type": "integer", "minimum": 1}, "reviewed_sha": {"$ref": "#/$defs/sha40"},
+    "tested_sha": {"$ref": "#/$defs/sha40"}, "workflow_sha": {"$ref": "#/$defs/sha40"},
+    "git_tree_oid": {"$ref": "#/$defs/sha40"}, "toolchain_id": {"const": "rocm-7.14.0"},
+    "toolchain_manifest_sha256": {"$ref": "#/$defs/sha256"}, "matrix_manifest_sha256": {"$ref": "#/$defs/sha256"},
+    "report_schema_sha256": {"$ref": "#/$defs/sha256"}, "artifact_schema_sha256": {"$ref": "#/$defs/sha256"},
+    "aggregate_schema_sha256": {"$ref": "#/$defs/sha256"},
+    "expected_rows": {"const": ["g1-gfx1030", "g1-gfx1201"]},
+    "rows": {
+      "type": "array", "minItems": 2, "maxItems": 2,
+      "prefixItems": [
+        {"allOf": [{"$ref": "#/$defs/row"}, {"properties": {"row_id": {"const": "g1-gfx1030"}, "target": {"const": "gfx1030"}}}]},
+        {"allOf": [{"$ref": "#/$defs/row"}, {"properties": {"row_id": {"const": "g1-gfx1201"}, "target": {"const": "gfx1201"}}}]}
+      ],
+      "items": false
+    },
+    "errors": {"type": "array", "maxItems": 0, "items": {"type": "string"}}
+  }
+}

@@ -1,7 +1,7 @@
 {
   "schema_version": "suites-v1",
   "registry_id": "uLLM-host-suites",
-  "revision": 7,
+  "revision": 9,
   "allowed_tiers": ["tier_h0", "tier_h1", "tier_h2", "tier_h3", "tier_g0", "tier_g1", "tier_g2", "tier_g3", "tier_g4", "tier_p0", "tier_p1"],
   "allowed_attributes": ["requires_gpu", "requires_model", "slow", "network", "quarantined"],
   "suites": [
@@ -78,8 +78,13 @@
       "tier": "tier_h0",
       "marker": "tier_h0",
       "attributes": {"requires_gpu": false, "requires_model": false, "slow": false, "network": false, "quarantined": false},
-      "test_ids": ["h0.g0.contracts", "h0.g0.negative-contracts"],
-      "commands": [{"command_id": "g0-static-contracts", "argv": ["{python}", "ci/tests/test_g0_contracts.py"]}]
+      "test_ids": ["h0.g0.contracts", "h0.g0.negative-contracts", "h0.g1.contracts", "h0.g1.builder", "h0.g1.runner", "h0.g1.negative-contracts"],
+      "commands": [
+        {"command_id": "g0-static-contracts", "argv": ["{python}", "ci/tests/test_g0_contracts.py"]},
+        {"command_id": "g1-static-contracts", "argv": ["{python}", "ci/tests/test_g1_contracts.py"]},
+        {"command_id": "g1-builder", "argv": ["{python}", "ci/tests/test_g1_builder.py"]},
+        {"command_id": "g1-runner", "argv": ["{python}", "ci/tests/test_g1_runner.py"]}
+      ]
     },
     {
       "suite_id": "h3-compile-only-contract",

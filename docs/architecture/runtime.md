@@ -118,6 +118,14 @@ Phase 1では、CargoからCMake static libraryをbuild・linkする経路とver
 
 Phase 1のbackend-independent contractは、read/write access mode、opaque queue/buffer/event handle、completionまでresourceを強参照するownership tokenを含む。これは非実行のlifetime contractであり、非同期実行や完了を偽装しない。C/Rust ABIのsize、alignment、field offset、constantはbuild時のnative layout probeでcheck-in bindingsと機械的に照合し、C/C++両方で公開headerをcompileする。
 
+### Phase 2 model-free evidence path
+
+Phase 2の最小GPU経路はpublic inference ABIへ未成熟なopを追加せず、private evidence ABIと専用`ullm-hip-evidence` binaryへ分離する。Rustはinputをnative submit中にcopyさせ、opaque integer handleを一度だけwait/destroyできる所有型として保持する。native completionはHIP stream、event、device buffer、pinned host bufferをcompletionまで所有し、各caseで2 device allocation、2 HIP transfer、1 diagnostic kernel dispatchを行う。
+
+caseは1、3、17、255、256、257 byteとし、Rust側の独立XOR oracleへbyte exactで照合する。host stubは明示`HIP unavailable`を返し、CPU fallback、model、semantic numerical opはこの経路に存在しない。HIP buildはbare exact `gfx1030`または`gfx1201`を要求し、runtimeのraw `gcnArchName`、embedded Code Object V6/target/ELF flags/wave32/kernel symbol、実際にloadしたHIP/ROCr library pathが契約と一致しない場合は実行evidenceにしない。
+
+timeoutまたは早期drop後のresourceは完了を証明せずにfreeしない。background reaperへ所有権を移し、回収枠を固定上限へ制限する。同期・解放を証明できなければcircuit breakerを開いて新規submitを拒否し、専用processの終了とtrusted local runnerによる子process/GPU process残留確認を最終cleanup境界とする。このprivate pathは将来のsemantic command list ABIや一般的なGPU対応を確定しない。
+
 ## MVP の対象外
 
 次は初期 MVP に含めない。

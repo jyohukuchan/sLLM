@@ -20,6 +20,11 @@ H3_IMAGE_REFERENCE = "docker.io/rocm/dev-ubuntu-24.04@sha256:439edaa8f0c4be4a372
 H3_IMAGE_CONFIG_DIGEST = "sha256:4c91c0d850e38a40fd669dd043ab42e9bad9a2b8a38e3f873c5a4eaced9f28cf"
 H3_GIT_HELPER_MOUNT = "type=bind,src=/usr/bin/git,dst=/usr/local/bin/git,readonly"
 H3_AGGREGATE_SCHEMA = "ci/schema/h3-aggregate-v1.schema.json"
+G1_SCHEMA_FILES = {
+    "ci/schema/g1-aggregate-v1.schema.json",
+    "ci/schema/g1-report-v1.schema.json",
+    "ci/schema/g1-runtime-artifact-v1.schema.json",
+}
 
 
 def workflow_documents() -> list[tuple[Path, dict[str, object]]]:
@@ -211,6 +216,9 @@ def main() -> int:
             raise ContractError("no CI schemas found")
         if H3_AGGREGATE_SCHEMA not in {path.relative_to(ROOT).as_posix() for path in schema_paths}:
             raise ContractError("H3 aggregate schema is not registered for manifest validation")
+        schema_names = {path.relative_to(ROOT).as_posix() for path in schema_paths}
+        if not G1_SCHEMA_FILES.issubset(schema_names):
+            raise ContractError("G1 report, aggregate, and dedicated artifact schemas are not registered")
         from jsonschema import Draft202012Validator, FormatChecker
         for path in schema_paths:
             schema = read_json(path)

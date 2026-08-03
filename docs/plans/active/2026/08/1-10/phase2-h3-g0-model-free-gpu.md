@@ -13,7 +13,8 @@
 - 作業単位0と1のstatic contractを完了した。
 - 作業単位2のCMake/build接続、exact 2 target direct compile/link、artifact検査、fail-closed集約、non-required workflowをcommit `03f90be1ad85145e3abee86e67615c1e17f552b4`として公開した。GitHubの2 compile rowはPASSし、aggregateはrun identityのcontainer伝播漏れをfail-closedに検出したため、その修正は次candidateへ含める。
 - 作業単位4のcanonical tuple、identity-only native HIP observer、read-only health/process observer、exact H3 artifact binding、2 row aggregateとnegative contractを完了した。commit `e91ff35caac8247fc056eb14a1d6cee2a2319cc5`（tree `75b229791cd3cf7c6ed38c25264b0cd09a9cde33`）でH0〜H3とcanonical `gfx1030`/`gfx1201`のG0・aggregateがPASSした。
-- 次のrollback境界は作業単位5のmodel-free diagnostic pathとし、7日を待たずG1実装へ進む。
+- 作業単位5のprivate evidence C ABI、安全なRust wrapper、native HIP allocation/copy/diagnostic dispatch/completion、専用binary、G1 artifact/loader検査、trusted local runnerと2 row aggregateを実装した。host testとpre-candidateのexact 2 target build・実機6 boundary caseはPASSしたが、正式な完了判定は同一immutable candidateのH0〜H3/G0/G1後に行う。
+- 次のrollback境界は作業単位5を固定するimmutable candidateとし、7日を待たず作業単位6の適用・文書同期へ進む。
 
 ## 目的
 
@@ -74,7 +75,7 @@ G2はmodel path、G4は互換性昇格、P0は性能または実運用dispatch�
 - host stubは既定のCPU CI経路として残し、HIPを暗黙有効化しない。HIP buildは明示optionと検証済みROCm root/targetを要求する。
 - diagnostic kernelは小さな整数bufferをGPU上で決定的に更新するだけとし、入力・出力をbyte exactで比較する。caseには1要素だけでなく、3、17、境界前後など非2冪・非整列値を含める。
 - CPU実装、GPU kernel emulation、別backend fallbackを禁止し、`selected_backend=hip`、dispatch 1件以上、`fallback_used=false`をreportで検証する。
-- completionまでqueue、buffer、eventを所有し、完了後に全resourceを解放する。timeout、途中失敗、caller側の早期dropでもuse-after-freeまたはleakを許さない。
+- completionまでstream、device/pinned buffer、eventをnative completionが所有する。timeout、途中失敗、caller側の早期dropでは未完了resourceを解放せずreaperへ移し、回収不能時はcleanup circuit breakerで新規submitを拒否する。専用evidence processの終了とrunnerのprocess残留確認までをcleanup境界に含め、use-after-freeや無制限の未回収queueを許さない。
 
 ## 作業単位
 
@@ -268,6 +269,6 @@ G1 case:
 ## 未確定事項
 
 - local runner lockとhost controllerの恒久配置。
-- diagnostic kernel用C ABIをadditive public ABI、private test ABI、専用test binaryのどれに置くか。実装前にarchitecture reviewで決める。
+- H3 required昇格観測の20回・7日条件を満たした後のreview時期。G1/model-free pathの完了条件には含めない。
 
 [対応する履歴](../../../../../history/2026/08/1-10/phase2-h3-g0-model-free-gpu.md)

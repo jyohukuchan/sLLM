@@ -295,7 +295,7 @@
 
 ## 現在の状態と次の作業
 
-- 現在: Phase 1を完了し、Phase 2のH3を公開済み。canonical GPU/ROCm tuple、identity-only native observer、read-only health/process確認、exact H3 artifact binding、G0 2 row集約を実装し、同一immutable candidateでH0〜H3とcanonical `gfx1030`/`gfx1201`のG0をPASSした。H3 required昇格の7日観測を待たず、model-free G1へ進む。
+- 現在: Phase 1とPhase 2のH3/G0を完了済み。model-free G1のprivate C ABI、Rust ownership、native HIP allocation/copy/diagnostic dispatch/completion、専用evidence binary、exact artifact/loader検査、canonical 2 row runner・aggregateを実装した。host統合testとpre-candidateのexact 2 target build・実機6 boundary caseはPASSしており、次は同一immutable candidateへH0〜H3とcanonical G0/G1を固定する。H3 required昇格の7日観測は並行follow-upであり、この候補化を待たせない。
 - 完了:
   - プロジェクトライセンスをMITへ統一。
   - Qwen3.5のMTP表記とBF16階層の矛盾を修正。
@@ -321,10 +321,12 @@
   - H3 2 rowのreport・metadata・device artifact・sidecar・candidate identityをfail-closed集約する独立checkと、digest/configを検査したROCm containerを`--network none`で使うnon-required workflowを追加。GPUまたは生成executableは実行しない。
   - H3実装をcommit `03f90be1ad85145e3abee86e67615c1e17f552b4`として公開し、GitHub上のexact 2 compile rowがPASSすることを確認。初回aggregateでworkflow run identityのcontainer伝播漏れを検出し、fail-closedに失敗した。
   - canonical GPUをV620 `0000:03:00.0` / `GPU-76a08c022586fed6`とR9700 `0000:47:00.0` / `GPU-a8e9ddefa2d60f55`へ固定し、spare V620を必須rowから除外した。
+  - model-free G1をpublic inference ABIから分離したprivate evidence ABIと専用Rust binaryとして実装。1、3、17、255、256、257 byteを各2 device allocation、2 HIP transfer、1 diagnostic dispatchでbyte exact検証し、host stub、CPU fallback、model、semantic opをPASS経路から除外した。
+  - G1 artifactのexact target、Code Object V6、wave32、ELF flags、kernel symbol、runtime loader path、candidate identityを検査し、timeout/output/process cleanup、stale/symlink/target差し替えをfail-closedにするrunner・2 row aggregateを追加した。
 - 次:
-  1. model-free diagnostic pathのC ABI、ownership、allocation/copy/dispatch/completion/cleanupを実装する。
-  2. 同一immutable candidateとexact H3 artifactに対してcanonical `gfx1030`/`gfx1201`のG0/G1を直列実行・集約する。
-  3. 同じ証跡境界を再利用してmodel-free最小GPU実行経路を実装し、両GPUのG1を同一candidate SHAに対して検証する。
+  1. G1実装をimmutable candidateとして固定し、H0〜H3とcanonical `gfx1030`/`gfx1201`のG0/G1を同一SHA/treeで直列実行・集約する。
+  2. 実行前後health、process残留、artifact/report digestを確認し、architecture・compatibility・historyと個別計画を最終evidenceへ同期する。
+  3. Phase 2前半を閉じた後、Qwen3.5-4Bの完全revision/model lockと最初のsemantic op/model sliceを次の独立計画として確定する。
 
 ## 未解決事項
 

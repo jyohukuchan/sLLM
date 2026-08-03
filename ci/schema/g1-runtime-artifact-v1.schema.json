@@ -1,0 +1,92 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ullm-project.local/ci/schema/g1-runtime-artifact-v1.schema.json",
+  "title": "uLLM dedicated G1 runtime artifact metadata v1",
+  "type": "object",
+  "additionalProperties": false,
+  "$defs": {
+    "sha40": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "absolute": {"type": "string", "pattern": "^/[^\\u0000]*$"}
+  },
+  "required": ["schema_version", "metadata_id", "row_id", "target", "candidate", "toolchain_id", "toolchain_manifest_sha256", "matrix_manifest_sha256", "artifact_schema_sha256", "gpu", "artifact", "observed", "device_code_sha256", "scope"],
+  "properties": {
+    "schema_version": {"const": "g1-runtime-artifact-v1"},
+    "metadata_id": {"type": "string", "pattern": "^g1-runtime-artifact-(?:gfx1030|gfx1201)$"},
+    "row_id": {"enum": ["g1-gfx1030", "g1-gfx1201"]},
+    "target": {"enum": ["gfx1030", "gfx1201"]},
+    "candidate": {
+      "type": "object", "additionalProperties": false,
+      "required": ["reviewed_sha", "tested_sha", "workflow_sha", "git_tree_oid", "worktree_clean", "revision_input"],
+      "properties": {
+        "reviewed_sha": {"$ref": "#/$defs/sha40"}, "tested_sha": {"$ref": "#/$defs/sha40"},
+        "workflow_sha": {"$ref": "#/$defs/sha40"}, "git_tree_oid": {"$ref": "#/$defs/sha40"},
+        "worktree_clean": {"const": true}, "revision_input": {"const": "full-sha"}
+      }
+    },
+    "toolchain_id": {"const": "rocm-7.14.0"},
+    "toolchain_manifest_sha256": {"$ref": "#/$defs/sha256"},
+    "matrix_manifest_sha256": {"$ref": "#/$defs/sha256"},
+    "artifact_schema_sha256": {"$ref": "#/$defs/sha256"},
+    "gpu": {
+      "type": "object", "additionalProperties": false,
+      "required": ["bdf", "uuid", "target"],
+      "properties": {
+        "bdf": {"type": "string", "pattern": "^[0-9a-f]{4}:[0-9a-f]{2}:[0-9a-f]{2}\\.[0-7]$"},
+        "uuid": {"type": "string", "pattern": "^GPU-[0-9a-f]{16}$"}, "target": {"enum": ["gfx1030", "gfx1201"]}
+      }
+    },
+    "artifact": {
+      "type": "object", "additionalProperties": false,
+      "required": ["path", "size_bytes", "sha256", "sidecar_sha256", "kind"],
+      "properties": {
+        "path": {"$ref": "#/$defs/absolute"}, "size_bytes": {"type": "integer", "minimum": 1},
+        "sha256": {"$ref": "#/$defs/sha256"}, "sidecar_sha256": {"$ref": "#/$defs/sha256"},
+        "kind": {"const": "dedicated-rust-evidence-binary"}
+      }
+    },
+    "observed": {
+      "type": "object", "additionalProperties": false,
+      "required": ["target", "code_object_version", "ei_abiversion", "e_flags", "wavefront_size", "features", "diagnostic_kernel_symbol", "bundles"],
+      "properties": {
+        "target": {"enum": ["gfx1030", "gfx1201"]},
+        "code_object_version": {"const": "V6"},
+        "ei_abiversion": {"const": 4},
+        "e_flags": {"enum": ["0x00000036", "0x0000004e"]},
+        "wavefront_size": {"const": 32},
+        "features": {
+          "type": "object", "additionalProperties": false,
+          "required": ["xnack", "sramecc", "generic_processor_version"],
+          "properties": {
+            "xnack": {"const": "unsupported"},
+            "sramecc": {"const": "unsupported"},
+            "generic_processor_version": {"const": 0}
+          }
+        },
+        "diagnostic_kernel_symbol": {"type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]*evidence_transform[A-Za-z0-9_]*$"},
+        "bundles": {
+          "type": "array", "minItems": 2, "maxItems": 2,
+          "items": {
+            "type": "object", "additionalProperties": false,
+            "required": ["id", "target"],
+            "properties": {
+              "id": {"type": "string", "pattern": "^(?:hipv4-amdgcn-amd-amdhsa--(?:gfx1030|gfx1201)|host-x86_64-unknown-linux-gnu-)$"},
+              "target": {"enum": ["gfx1030", "gfx1201", "host"]}
+            }
+          }
+        }
+      }
+    },
+    "device_code_sha256": {"$ref": "#/$defs/sha256"},
+    "scope": {
+      "type": "object", "additionalProperties": false,
+      "required": ["model_used", "cpu_fallback_allowed", "cpu_fallback_used", "binary_command"],
+      "properties": {
+        "model_used": {"const": false}, "cpu_fallback_allowed": {"const": false}, "cpu_fallback_used": {"const": false},
+        "binary_command": {
+          "const": ["target/release/ullm-hip-evidence", "--timeout-ms", "1000"]
+        }
+      }
+    }
+  }
+}

@@ -26,6 +26,7 @@ ROOT = Path(__file__).resolve().parents[2]
 EXPECTED_HOST_ROWS = {"h0": "tier_h0", "h1": "tier_h1", "h2": "tier_h2"}
 H3_SUITE_ID = "h3-compile-only-contract"
 H3_STATIC_SUITE_ID = "h0-h3-static-contracts"
+G1_STATIC_SUITE_ID = "h0-g0-static-contracts"
 EXPECTED_H3_PATH_RULES = {
     "ci/tools/aggregate_h3_results.py",
     "ci/tools/run_h3_compile.py",
@@ -57,6 +58,23 @@ EXPECTED_FIXTURE_SUITES = {
 EXPECTED_H3_STATIC_PATH_RULES = {
     "ci/tests/test_h3_workflow_identity.py",
     ".github/workflows/h3-compile.yml",
+}
+EXPECTED_G1_STATIC_PATH_RULES = {
+    "ci/tools/aggregate_g1_results.py",
+    "ci/tools/build_g1_runtime.py",
+    "ci/tools/run_g1_evidence.py",
+    "ci/tools/validate_g1_contracts.py",
+    "ci/tools/validate_json_manifests.py",
+    "ci/tools/validate_matrix.py",
+    "ci/schema/g1-aggregate-v1.schema.json",
+    "ci/schema/g1-report-v1.schema.json",
+    "ci/schema/g1-runtime-artifact-v1.schema.json",
+    "ci/matrix/g1-runtime-v1.json",
+    "ci/matrix/suites-v1.json",
+    "ci/matrix/path-to-suite-v1.json",
+    "ci/tests/test_g1_builder.py",
+    "ci/tests/test_g1_contracts.py",
+    "ci/tests/test_g1_runner.py",
 }
 
 
@@ -208,6 +226,9 @@ def validate_cargo_toolchain_registration(suites: dict[str, object]) -> None:
 
 def main() -> int:
     try:
+        from validate_g1_contracts import validate_g1_matrix
+
+        validate_g1_matrix(ROOT)
         suites, host, paths = load_manifests(ROOT)
         suite_by_id = {suite["suite_id"]: suite for suite in suites["suites"]}
         if set(suites) != {"schema_version", "registry_id", "revision", "allowed_tiers", "allowed_attributes", "suites"}:
@@ -264,6 +285,17 @@ def main() -> int:
         ]:
             raise ContractError("H3 workflow identity test is not registered in the required H0 suite")
 
+        g1_static_suite = suite_by_id.get(G1_STATIC_SUITE_ID)
+        if g1_static_suite is None or g1_static_suite["tier"] != "tier_h0" or g1_static_suite["marker"] != "tier_h0":
+            raise ContractError("G1 static contract test must be registered in H0")
+        expected_g1_commands = [
+            {"command_id": "g1-static-contracts", "argv": ["{python}", "ci/tests/test_g1_contracts.py"]},
+            {"command_id": "g1-builder", "argv": ["{python}", "ci/tests/test_g1_builder.py"]},
+            {"command_id": "g1-runner", "argv": ["{python}", "ci/tests/test_g1_runner.py"]},
+        ]
+        if not all(command in g1_static_suite["commands"] for command in expected_g1_commands):
+            raise ContractError("G1 static suite must collect contracts, builder, and runner tests")
+
         validate_cargo_toolchain_registration(suites)
 
         rows = {row["row_id"]: row for row in host["rows"]}
@@ -313,6 +345,9 @@ def main() -> int:
                 raise ContractError(
                     f"H3 workflow identity path is not explicitly registered to {H3_STATIC_SUITE_ID}: {h3_static_path}"
                 )
+        for g1_path in EXPECTED_G1_STATIC_PATH_RULES:
+            if G1_STATIC_SUITE_ID not in rules_by_pattern.get(g1_path, set()):
+                raise ContractError(f"G1 path is not explicitly registered to the H0 static suite: {g1_path}")
 
         declared_markers, marked_files = pytest_markers()
         known_suite_markers = {suite["marker"] for suite in suites["suites"]}
