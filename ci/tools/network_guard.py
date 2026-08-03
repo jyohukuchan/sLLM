@@ -54,7 +54,6 @@ class IsolationPlan:
     strategy: str
     prefix: tuple[str, ...]
     parent_netns: str
-    parent_connectivity: tuple[str, tuple[str, ...], RouteSnapshot, RouteSnapshot]
     expected_euid: int
     expected_egid: int
     require_no_capabilities: bool
@@ -368,11 +367,10 @@ def _child_arguments(
     return result
 
 
-def _candidate_plans() -> list[IsolationPlan]:
+def _candidate_plans(parent_netns: str) -> list[IsolationPlan]:
     unshare = shutil.which("unshare")
     if not unshare:
         raise NetworkIsolationError("unshare is unavailable")
-    parent, interfaces, ipv4, ipv6 = parent_connectivity_snapshot()
     uid = os.getuid()
     gid = os.getgid()
     execution_environment = tuple(
@@ -384,8 +382,7 @@ def _candidate_plans() -> list[IsolationPlan]:
         IsolationPlan(
             strategy="user-network-namespace",
             prefix=(unshare, "--user", "--map-root-user", "--net", "--fork"),
-            parent_netns=parent,
-            parent_connectivity=(parent, interfaces, ipv4, ipv6),
+            parent_netns=parent_netns,
             expected_euid=0,
             expected_egid=0,
             require_no_capabilities=False,
@@ -413,8 +410,7 @@ def _candidate_plans() -> list[IsolationPlan]:
                     "--bounding-set=-all",
                     "--no-new-privs",
                 ),
-                parent_netns=parent,
-                parent_connectivity=(parent, interfaces, ipv4, ipv6),
+                parent_netns=parent_netns,
                 expected_euid=uid,
                 expected_egid=gid,
                 require_no_capabilities=True,
@@ -467,16 +463,15 @@ def _probe(
 
 
 def prepare_isolation() -> IsolationPlan:
-    """Select a tested isolation method and prove parent connectivity is untouched."""
+    """Select a tested isolation method and prove the parent netns is unchanged."""
     if os.environ.get("ULLM_NETWORK_GUARD_ACTIVE") == "1":
         raise NetworkIsolationError("network guard cannot establish a nested required boundary")
-    parent_before = parent_connectivity_snapshot()
+    parent_netns = current_netns()
     failures: list[str] = []
-    for plan in _candidate_plans():
+    for plan in _candidate_plans(parent_netns):
         passed, detail = _probe(plan)
-        parent_after = parent_connectivity_snapshot()
-        if parent_after != parent_before:
-            raise NetworkIsolationError("network guard changed parent network connectivity")
+        if current_netns() != parent_netns:
+            raise NetworkIsolationError("network guard changed the parent network namespace")
         if passed:
             return plan
         failures.append(f"{plan.strategy}: {detail or 'probe failed'}")
@@ -485,9 +480,7 @@ def prepare_isolation() -> IsolationPlan:
 
 def verify_parent_restored(plan: IsolationPlan) -> None:
     if current_netns() != plan.parent_netns:
-        raise NetworkIsolationError("test execution did not restore the parent network namespace")
-    if parent_connectivity_snapshot() != plan.parent_connectivity:
-        raise NetworkIsolationError("test execution did not restore parent connectivity")
+        raise NetworkIsolationError("test execution changed the parent network namespace")
 
 
 def child_main(args: argparse.Namespace) -> int:

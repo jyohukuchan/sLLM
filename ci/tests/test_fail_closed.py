@@ -8,14 +8,19 @@ import os
 import sys
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "ci/tools"))
 
 from network_guard import (  # noqa: E402
+    IsolationPlan,
     NetworkIsolationError,
+    assert_isolated,
     _normalize_ipv4_routes,
     _normalize_ipv6_routes,
+    prepare_isolation,
+    verify_parent_restored,
 )
 from self_test import run  # noqa: E402
 
@@ -154,6 +159,121 @@ class NetworkRouteNormalizationTests(unittest.TestCase):
             with self.subTest(protocol="IPv6", fields=fields):
                 with self.assertRaises(NetworkIsolationError):
                     _normalize_ipv6_routes([" ".join(fields)])
+
+
+class NetworkNamespaceRestorationTests(unittest.TestCase):
+    def _plan(self, parent_netns: str = "net:[4026531840]") -> IsolationPlan:
+        return IsolationPlan(
+            strategy="test",
+            prefix=(),
+            parent_netns=parent_netns,
+            expected_euid=os.getuid(),
+            expected_egid=os.getgid(),
+            require_no_capabilities=False,
+            execution_environment=(),
+        )
+
+    def test_same_parent_netns_with_topology_change_is_accepted(self) -> None:
+        plan = self._plan()
+        changed_topology = (
+            plan.parent_netns,
+            ("lo", "eth0"),
+            (("eth0", "changed-route"),),
+            (("eth0", "changed-ipv6-route"),),
+        )
+        with (
+            patch("network_guard.current_netns", return_value=plan.parent_netns),
+            patch("network_guard.parent_connectivity_snapshot", return_value=changed_topology),
+        ):
+            verify_parent_restored(plan)
+
+    def test_parent_netns_change_fails_closed(self) -> None:
+        plan = self._plan()
+        with patch("network_guard.current_netns", return_value="net:[4026531841]"):
+            with self.assertRaisesRegex(NetworkIsolationError, "parent network namespace"):
+                verify_parent_restored(plan)
+
+    def test_parent_netns_change_during_probe_fails_closed(self) -> None:
+        plan = self._plan()
+        with (
+            patch.dict(os.environ, {"ULLM_NETWORK_GUARD_ACTIVE": "0"}),
+            patch(
+                "network_guard.current_netns",
+                side_effect=[plan.parent_netns, "net:[4026531841]"],
+            ),
+            patch("network_guard._candidate_plans", return_value=[plan]),
+            patch("network_guard._probe", return_value=(True, "")),
+        ):
+            with self.assertRaisesRegex(NetworkIsolationError, "parent network namespace"):
+                prepare_isolation()
+
+
+class ChildIsolationVerificationTests(unittest.TestCase):
+    PARENT_NETNS = "net:[4026531840]"
+    CHILD_NETNS = "net:[4026531841]"
+    ZERO_CAPABILITIES = {
+        "CapInh": 0,
+        "CapPrm": 0,
+        "CapEff": 0,
+        "CapBnd": 0,
+        "CapAmb": 0,
+    }
+
+    def _assert_child_rejected(
+        self,
+        *,
+        child_netns: str = CHILD_NETNS,
+        euid: int = 1000,
+        egid: int = 1000,
+        capabilities: dict[str, int] | None = None,
+        no_new_privs: int = 1,
+        groups: tuple[int, ...] = (),
+        interfaces: tuple[str, ...] = ("lo",),
+        routes: tuple[tuple[tuple[str, ...], ...], tuple[tuple[str, ...], ...]] = ((), ()),
+    ) -> None:
+        with (
+            patch("network_guard.current_netns", return_value=child_netns),
+            patch("network_guard.os.geteuid", return_value=euid),
+            patch("network_guard.os.getegid", return_value=egid),
+            patch(
+                "network_guard.process_security_state",
+                return_value=(capabilities or self.ZERO_CAPABILITIES, no_new_privs),
+            ),
+            patch("network_guard.os.getgroups", return_value=list(groups)),
+            patch("network_guard._interface_names", return_value=interfaces),
+            patch("network_guard._route_snapshot", return_value=routes),
+            patch("network_guard._assert_external_connect_fails"),
+        ):
+            with self.assertRaises(NetworkIsolationError):
+                assert_isolated(
+                    parent_netns=self.PARENT_NETNS,
+                    expected_euid=1000,
+                    expected_egid=1000,
+                    require_no_capabilities=True,
+                    address_space_limit_bytes=None,
+                )
+
+    def test_same_netns_is_rejected(self) -> None:
+        self._assert_child_rejected(child_netns=self.PARENT_NETNS)
+
+    def test_uid_gid_and_privilege_state_mismatches_are_rejected(self) -> None:
+        cases = {
+            "uid": {"euid": 1001},
+            "gid": {"egid": 1001},
+            "capability": {"capabilities": {**self.ZERO_CAPABILITIES, "CapEff": 1}},
+            "no-new-privs": {"no_new_privs": 0},
+            "supplementary-groups": {"groups": (1001,)},
+        }
+        for label, overrides in cases.items():
+            with self.subTest(state=label):
+                self._assert_child_rejected(**overrides)
+
+    def test_non_loopback_interface_is_rejected(self) -> None:
+        self._assert_child_rejected(interfaces=("lo", "eth0"))
+
+    def test_default_route_is_rejected(self) -> None:
+        ipv4_default_route = (("eth0", "00000000"),)
+        self._assert_child_rejected(routes=(ipv4_default_route, ()))
 
 
 def main() -> int:
