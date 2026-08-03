@@ -221,6 +221,7 @@ def _validate_artifact_invariants(
     *,
     expected_candidate_sha: str | None = None,
     expected_tree_oid: str | None = None,
+    artifact_path_override: Path | None = None,
 ) -> None:
     rows = {row["row_id"]: row for row in matrix["rows"]}
     row_id = metadata["matrix_row_id"]
@@ -326,12 +327,19 @@ def _validate_artifact_invariants(
         raise ContractError("H3 metadata build record does not identify direct amdclang++ Release compilation")
     if build["source_tree_output"] is not False or build["shared_build_directory"] is not False:
         raise ContractError("H3 source-tree/shared-build output is forbidden")
-    artifact_path = PurePosixPath(metadata["artifact"]["path"])
-    if artifact_path.parent != output or not artifact_path.name.endswith(f"-{target}.elf"):
+    metadata_artifact_path = PurePosixPath(metadata["artifact"]["path"])
+    if metadata_artifact_path.parent != output or not metadata_artifact_path.name.endswith(f"-{target}.elf"):
         raise ContractError("artifact path is outside the row output directory or is not the exact device ELF target")
-    if any(f"-gfx{other[3:]}" in artifact_path.name for other in EXPECTED_TARGETS if other != target):
+    if any(f"-gfx{other[3:]}" in metadata_artifact_path.name for other in EXPECTED_TARGETS if other != target):
         raise ContractError("artifact path contains another H3 target identity")
-    actual_path = Path(str(artifact_path))
+    actual_path = artifact_path_override or Path(str(metadata_artifact_path))
+    if not actual_path.is_absolute():
+        raise ContractError("bound H3 artifact path is not absolute")
+    if artifact_path_override is not None and (
+        actual_path.name != metadata_artifact_path.name
+        or actual_path.parent.name != f"h3-{target}"
+    ):
+        raise ContractError("rebound H3 artifact is not the exact staged target artifact")
     if not actual_path.exists() or not actual_path.is_file() or actual_path.is_symlink():
         raise ContractError(f"artifact file is missing or not a regular non-symlink file: {actual_path}")
     actual_size = actual_path.stat().st_size
@@ -356,8 +364,13 @@ def validate_artifact_metadata(
     *,
     expected_candidate_sha: str | None = None,
     expected_tree_oid: str | None = None,
+    artifact_path_override: Path | None = None,
 ) -> dict[str, Any]:
-    """Validate one artifact metadata JSON and its referenced artifact file."""
+    """Validate metadata against its declared artifact or an exact staged copy.
+
+    A detached artifact may be supplied only when the immutable metadata remains
+    unchanged and the staged filename/row identity still match the declaration.
+    """
 
     toolchain_schema, artifact_schema, toolchain, matrix = _load_contract_files(repo)
     _validate_schema(toolchain, toolchain_schema, "ROCm toolchain")
@@ -374,6 +387,7 @@ def validate_artifact_metadata(
         matrix,
         expected_candidate_sha=expected_candidate_sha,
         expected_tree_oid=expected_tree_oid,
+        artifact_path_override=artifact_path_override,
     )
     return metadata
 

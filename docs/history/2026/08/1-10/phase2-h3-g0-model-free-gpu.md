@@ -20,5 +20,8 @@
 - report、metadata、device artifactと全sidecar、candidate SHA/tree、run identity、toolchain/matrix hashをexact 2 rowで照合するfail-closed aggregate contractとnegative testを追加した。
 - H3を`host-required`から分離したnon-required workflowとして追加した。workflowはmanifest/config digestを検査したROCm imageをsource read-only、row-private output、`--network none`、GPU device/socketなしで起動し、runner自身もloopback以外のinterfaceと外部到達可能なdefault routeの不在を確認する。imageにGitが含まれないため、candidate identity検査専用にUbuntu 24.04 hostの`/usr/bin/git`だけをexact pathへread-only mountし、実測versionをreportへ記録するがROCm toolchain identityには含めない。
 - H3 contract/runner/aggregateの20 test、JSON/schema/workflow validator、matrix validator、Cargo workspace test、local exact 2 target compile-onlyがPASSした。正式なH3 evidenceは同一immutable candidateをdigest固定imageで再検証してから記録する。
+- H3実装をcommit `03f90be1ad85145e3abee86e67615c1e17f552b4`（tree `87d034951191f1702817d27a4b16c8dd055f2259`）として公開した。GitHub run `30793742848`ではexact 2 compile rowがPASSし、aggregateがrowの既定run identityとGitHub run identityの不一致を拒否した。workflowからcontainerへrun ID/attemptを明示伝播する修正を次candidateへ追加した。
+- canonical G0 rowをV620 `gfx1030`（BDF `0000:03:00.0`、UUID `GPU-76a08c022586fed6`）とR9700 `gfx1201`（BDF `0000:47:00.0`、UUID `GPU-a8e9ddefa2d60f55`）へ固定し、BDF `0000:43:00.0`の2台目V620をspareとして必須evidenceから除外した。
+- pinned ROCm 7.14.0のidentity APIだけを呼ぶprivate native observer、exact BDFからのHIP visibility routingと実観測による再検証、read-only AMD-SMI/sysfs health・process前後確認、外部observation injection拒否、temporary binary cleanup、exact H3 artifact rebinding、G0 2 row fail-closed aggregateを実装した。静的contractとhost negative testはPASSしたが、同一immutable candidateのcanonical G0実機evidenceは未取得である。
 
 [対応する計画](../../../../plans/active/2026/08/1-10/phase2-h3-g0-model-free-gpu.md)

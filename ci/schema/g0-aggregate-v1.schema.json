@@ -1,0 +1,52 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ullm-project.local/ci/schema/g0-aggregate-v1.schema.json",
+  "title": "uLLM trusted-local G0 aggregate v1",
+  "type": "object",
+  "additionalProperties": false,
+  "$defs": {
+    "sha40": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "row": {
+      "type": "object", "additionalProperties": false,
+      "required": ["row_id", "target", "bdf", "uuid", "state", "report_sha256", "report_sidecar_sha256", "kernel_dispatch_count"],
+      "properties": {
+        "row_id": {"enum": ["g0-gfx1030", "g0-gfx1201"]}, "target": {"enum": ["gfx1030", "gfx1201"]},
+        "bdf": {"type": "string"}, "uuid": {"type": "string"}, "state": {"const": "PASS"},
+        "report_sha256": {"$ref": "#/$defs/sha256"}, "report_sidecar_sha256": {"$ref": "#/$defs/sha256"},
+        "kernel_dispatch_count": {"const": 0}
+      }
+    }
+  },
+  "required": ["schema_version", "aggregate_id", "state", "required", "run_id", "run_attempt", "reviewed_sha", "tested_sha", "workflow_sha", "git_tree_oid", "matrix_manifest_sha256", "preflight_schema_sha256", "aggregate_schema_sha256", "expected_rows", "rows", "errors"],
+  "properties": {
+    "schema_version": {"const": "g0-aggregate-v1"}, "aggregate_id": {"type": "string", "pattern": "^g0-aggregate\\.[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}\\.[1-9][0-9]*$"},
+    "state": {"const": "PASS"}, "required": {"const": true}, "run_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$"},
+    "run_attempt": {"type": "integer", "minimum": 1}, "reviewed_sha": {"$ref": "#/$defs/sha40"},
+    "tested_sha": {"$ref": "#/$defs/sha40"}, "workflow_sha": {"$ref": "#/$defs/sha40"},
+    "git_tree_oid": {"$ref": "#/$defs/sha40"}, "matrix_manifest_sha256": {"$ref": "#/$defs/sha256"},
+    "preflight_schema_sha256": {"$ref": "#/$defs/sha256"}, "aggregate_schema_sha256": {"$ref": "#/$defs/sha256"},
+    "expected_rows": {"const": ["g0-gfx1030", "g0-gfx1201"]},
+    "rows": {
+      "type": "array", "minItems": 2, "maxItems": 2, "uniqueItems": true,
+      "items": {"$ref": "#/$defs/row"},
+      "allOf": [
+        {
+          "contains": {
+            "type": "object", "required": ["row_id", "target"],
+            "properties": {"row_id": {"const": "g0-gfx1030"}, "target": {"const": "gfx1030"}}
+          },
+          "minContains": 1, "maxContains": 1
+        },
+        {
+          "contains": {
+            "type": "object", "required": ["row_id", "target"],
+            "properties": {"row_id": {"const": "g0-gfx1201"}, "target": {"const": "gfx1201"}}
+          },
+          "minContains": 1, "maxContains": 1
+        }
+      ]
+    },
+    "errors": {"type": "array", "maxItems": 0, "items": {"type": "string"}}
+  }
+}

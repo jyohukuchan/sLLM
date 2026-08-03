@@ -1,0 +1,96 @@
+{
+  "$schema": "https://ullm-project.local/ci/schema/g0-preflight-v1.schema.json#/$defs/gpu_runtime_matrix",
+  "schema_version": "gpu-runtime-v1",
+  "matrix_id": "gpu-runtime-v1",
+  "revision": 2,
+  "tier": "tier_g0",
+  "required": true,
+  "toolchain_id": "rocm-7.14.0",
+  "artifact_matrix_id": "hip-compile-v1",
+  "execution": {
+    "serial": true,
+    "host_lock": {"path": "/tmp/ullm-g0.lock", "acquisition": "nonblocking"},
+    "trusted_local_only": true,
+    "visibility_is_security_boundary": false,
+    "sudo_allowed": false,
+    "reset_allowed": false,
+    "credentials_allowed": false,
+    "docker_socket_allowed": false,
+    "native_observation_provider": {
+      "provider_id": "g0-native-hip-observer-v1",
+      "source": "ci/tools/g0_native_observer.cpp",
+      "compiler": "/opt/rocm/core-7.14/bin/amdclang++",
+      "output_prefix": "/tmp/ullm-g0-provider-",
+      "timeout_seconds": 60,
+      "allowed_hip_apis": [
+        "hipRuntimeGetVersion",
+        "hipGetDeviceCount",
+        "hipGetDeviceProperties",
+        "hipDeviceGetPCIBusId",
+        "hipDeviceGetUuid"
+      ]
+    },
+    "health_process_observer": {
+      "provider_id": "amd-smi-sysfs-read-only-v1",
+      "amd_smi": "/opt/rocm/core-7.14/bin/amd-smi",
+      "sysfs_pci_root": "/sys/bus/pci/devices",
+      "command_timeout_seconds": 30,
+      "no_process_sentinel": "No running processes detected"
+    }
+  },
+  "scope": {
+    "identity_probe_only": true,
+    "model_used": false,
+    "allocation_attempted": false,
+    "copy_attempted": false,
+    "kernel_attempted": false,
+    "dispatch_attempted": false,
+    "native_hip_observation_provider": "native-hip-observer-v1",
+    "execution_verified": false,
+    "numerics_verified": false,
+    "performance_verified": false,
+    "support_claim": false
+  },
+  "output": {
+    "root_prefix": "/tmp/ullm-g0-",
+    "directory_pattern": "g0-{target}",
+    "source_tree_output": false,
+    "sidecar_hashes": true
+  },
+  "rows": [
+    {
+      "row_id": "g0-gfx1030",
+      "target": "gfx1030",
+      "bdf": "0000:03:00.0",
+      "uuid": "GPU-76a08c022586fed6",
+      "product": "AMD Radeon Pro V620",
+      "h3_artifact_row_id": "h3-gfx1030",
+      "rocm": {
+        "root": "/opt/rocm/core-7.14",
+        "release": "7.14.0",
+        "hip_runtime_api_version": 71460850,
+        "hip_runtime_library": "/opt/rocm/core-7.14/lib/libamdhip64.so.7.14.60850-0000000",
+        "hsa_runtime_library": "/opt/rocm/core-7.14/lib/libhsa-runtime64.so.1.21.0"
+      },
+      "timeout_seconds": 300,
+      "seed": 1031
+    },
+    {
+      "row_id": "g0-gfx1201",
+      "target": "gfx1201",
+      "bdf": "0000:47:00.0",
+      "uuid": "GPU-a8e9ddefa2d60f55",
+      "product": "AMD Radeon AI PRO R9700",
+      "h3_artifact_row_id": "h3-gfx1201",
+      "rocm": {
+        "root": "/opt/rocm/core-7.14",
+        "release": "7.14.0",
+        "hip_runtime_api_version": 71460850,
+        "hip_runtime_library": "/opt/rocm/core-7.14/lib/libamdhip64.so.7.14.60850-0000000",
+        "hsa_runtime_library": "/opt/rocm/core-7.14/lib/libhsa-runtime64.so.1.21.0"
+      },
+      "timeout_seconds": 300,
+      "seed": 1202
+    }
+  ]
+}

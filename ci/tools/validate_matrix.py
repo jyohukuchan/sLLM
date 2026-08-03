@@ -25,6 +25,7 @@ from common import (  # noqa: E402
 ROOT = Path(__file__).resolve().parents[2]
 EXPECTED_HOST_ROWS = {"h0": "tier_h0", "h1": "tier_h1", "h2": "tier_h2"}
 H3_SUITE_ID = "h3-compile-only-contract"
+H3_STATIC_SUITE_ID = "h0-h3-static-contracts"
 EXPECTED_H3_PATH_RULES = {
     "ci/tools/aggregate_h3_results.py",
     "ci/tools/run_h3_compile.py",
@@ -52,6 +53,10 @@ EXPECTED_FIXTURE_SUITES = {
     "tests/fixtures/boundary_cases.json": {"h0-python", "h2-tiny-oracle"},
     "tests/fixtures/kv_layout.json": {"h0-python", "h2-tiny-oracle"},
     "tests/fixtures/sampling_cases.json": {"h0-python", "h2-tiny-oracle"},
+}
+EXPECTED_H3_STATIC_PATH_RULES = {
+    "ci/tests/test_h3_workflow_identity.py",
+    ".github/workflows/h3-compile.yml",
 }
 
 
@@ -248,6 +253,16 @@ def main() -> int:
             raise ContractError("H3 compile suite must be model-free, GPU-free, offline, and non-quarantined")
         if h3_suite["commands"] != [{"command_id": "h3-compile-contract", "argv": ["{python}", "-m", "unittest", "ci.tests.test_h3_contracts", "ci.tests.test_h3_runner", "ci.tests.test_h3_aggregate"]}]:
             raise ContractError("H3 compile suite command registration drifted")
+        h3_static_suite = suite_by_id.get(H3_STATIC_SUITE_ID)
+        if h3_static_suite is None:
+            raise ContractError(f"missing required H3 static suite: {H3_STATIC_SUITE_ID}")
+        if h3_static_suite["tier"] != "tier_h0" or h3_static_suite["marker"] != "tier_h0":
+            raise ContractError("H3 static suite has the wrong tier/marker")
+        if h3_static_suite["commands"] != [
+            {"command_id": "h3-static-contracts", "argv": ["{python}", "ci/tests/test_h3_contracts.py"]},
+            {"command_id": "h3-workflow-identity", "argv": ["{python}", "ci/tests/test_h3_workflow_identity.py"]},
+        ]:
+            raise ContractError("H3 workflow identity test is not registered in the required H0 suite")
 
         validate_cargo_toolchain_registration(suites)
 
@@ -293,6 +308,11 @@ def main() -> int:
         for h3_path in EXPECTED_H3_PATH_RULES:
             if H3_SUITE_ID not in rules_by_pattern.get(h3_path, set()):
                 raise ContractError(f"H3 path is not explicitly registered to {H3_SUITE_ID}: {h3_path}")
+        for h3_static_path in EXPECTED_H3_STATIC_PATH_RULES:
+            if H3_STATIC_SUITE_ID not in rules_by_pattern.get(h3_static_path, set()):
+                raise ContractError(
+                    f"H3 workflow identity path is not explicitly registered to {H3_STATIC_SUITE_ID}: {h3_static_path}"
+                )
 
         declared_markers, marked_files = pytest_markers()
         known_suite_markers = {suite["marker"] for suite in suites["suites"]}

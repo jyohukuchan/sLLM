@@ -312,6 +312,17 @@
     "h3_artifact": {"$ref": "#/$defs/h3_artifact"},
     "h3_scope": {"$ref": "#/$defs/h3_scope"},
     "execution_environment": {"$ref": "#/$defs/execution_environment"},
+    "g0": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["preflight", "preflight_sha256", "preflight_schema_sha256", "kernel_dispatch_count"],
+      "properties": {
+        "preflight": {"$ref": "g0-preflight-v1.schema.json#/$defs/preflight"},
+        "preflight_sha256": {"$ref": "#/$defs/sha256"},
+        "preflight_schema_sha256": {"$ref": "#/$defs/sha256"},
+        "kernel_dispatch_count": {"const": 0}
+      }
+    },
     "created_at": {"type": "string", "format": "date-time"},
     "started_at": {"type": "string", "format": "date-time"},
     "finished_at": {"type": "string", "format": "date-time"},
@@ -375,7 +386,8 @@
         "dispatch_ids": {"type": "array", "items": {"type": "string"}},
         "fallback_allowed": {"type": "boolean"},
         "fallback_used": {"type": "boolean"},
-        "code_object": {"type": "object"}
+        "code_object": {"type": "object"},
+        "kernel_dispatch_count": {"type": "integer", "minimum": 0}
       }
     }
   },
@@ -442,6 +454,33 @@
           "toolchain": {"required": ["h3"]}
         }
       }
+    },
+    {
+      "if": {"required": ["tier"], "properties": {"tier": {"const": "tier_g0"}}},
+      "then": {
+        "required": ["g0", "gpu"],
+        "properties": {
+          "required": {"const": true},
+          "evidence_mode": {"const": "required-ci"},
+          "counts": {
+            "properties": {
+              "selected": {"minimum": 1},
+              "skipped": {"const": 0}
+            }
+          },
+          "gpu": {
+            "required": ["kernel_dispatch_count"],
+            "properties": {
+              "selected_backend": {"const": "hip-preflight"},
+              "dispatch_count": {"const": 0},
+              "kernel_dispatch_count": {"const": 0},
+              "fallback_allowed": {"const": false},
+              "fallback_used": {"const": false}
+            }
+          }
+        }
+      },
+      "else": {"not": {"required": ["g0"]}}
     },
     {
       "if": {

@@ -11,8 +11,9 @@
 実装進捗:
 
 - 作業単位0と1のstatic contractを完了した。
-- 作業単位2のCMake/build接続と、固定image内のpinned `amdclang++`を使うexact 2 target direct compile/link runner、artifact検査、fail-closed集約、non-required workflowを実装した。local systemのROCm 7.14.0では両targetのcompile-onlyがPASSしており、生成executableまたはGPUは実行していない。
-- 次のrollback境界は、同一immutable candidateをdigest固定imageでH0〜H3検証し、H3観測を開始するところまでとする。その後は7日を待たず作業単位4へ進む。
+- 作業単位2のCMake/build接続、exact 2 target direct compile/link、artifact検査、fail-closed集約、non-required workflowをcommit `03f90be1ad85145e3abee86e67615c1e17f552b4`として公開した。GitHubの2 compile rowはPASSし、aggregateはrun identityのcontainer伝播漏れをfail-closedに検出したため、その修正は次candidateへ含める。
+- 作業単位4のcanonical tuple、identity-only native HIP observer、read-only health/process observer、exact H3 artifact binding、2 row aggregateとnegative contractを実装中である。canonical device identityはversioned matrixへ固定済みだが、同一immutable candidateの正式G0 evidenceはまだない。
+- 次のrollback境界は、H3 identity修正とG0 runnerを同一immutable candidateとしてH0〜H3・canonical 2 row G0で検証するところまでとする。その後は7日を待たず作業単位5へ進む。
 
 ## 目的
 
@@ -266,7 +267,6 @@ G1 case:
 
 ## 未確定事項
 
-- canonical GPUのUUID/BDF。G0実装時にhost実測から固定する。
 - local runner lockとhost controllerの恒久配置。
 - diagnostic kernel用C ABIをadditive public ABI、private test ABI、専用test binaryのどれに置くか。実装前にarchitecture reviewで決める。
 

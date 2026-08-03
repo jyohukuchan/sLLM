@@ -1,0 +1,263 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ullm-project.local/ci/schema/g0-preflight-v1.schema.json",
+  "title": "uLLM trusted-local G0 preflight contracts v1",
+  "$defs": {
+    "sha40": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "row": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["row_id", "target", "bdf", "uuid", "product", "h3_artifact_row_id", "rocm", "timeout_seconds", "seed"],
+      "properties": {
+        "row_id": {"enum": ["g0-gfx1030", "g0-gfx1201"]},
+        "target": {"enum": ["gfx1030", "gfx1201"]},
+        "bdf": {"pattern": "^[0-9a-f]{4}:[0-9a-f]{2}:[0-9a-f]{2}\\.[0-7]$"},
+        "uuid": {"pattern": "^GPU-[0-9a-f]{16}$"},
+        "product": {"enum": ["AMD Radeon Pro V620", "AMD Radeon AI PRO R9700"]},
+        "h3_artifact_row_id": {"enum": ["h3-gfx1030", "h3-gfx1201"]},
+        "rocm": {
+          "type": "object", "additionalProperties": false,
+          "required": ["root", "release", "hip_runtime_api_version", "hip_runtime_library", "hsa_runtime_library"],
+          "properties": {
+            "root": {"const": "/opt/rocm/core-7.14"},
+            "release": {"const": "7.14.0"},
+            "hip_runtime_api_version": {"const": 71460850},
+            "hip_runtime_library": {"const": "/opt/rocm/core-7.14/lib/libamdhip64.so.7.14.60850-0000000"},
+            "hsa_runtime_library": {"const": "/opt/rocm/core-7.14/lib/libhsa-runtime64.so.1.21.0"}
+          }
+        },
+        "timeout_seconds": {"const": 300},
+        "seed": {"type": "integer", "minimum": 0, "maximum": 4294967295}
+      }
+    },
+    "gpu_runtime_matrix": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["$schema", "schema_version", "matrix_id", "revision", "tier", "required", "toolchain_id", "artifact_matrix_id", "execution", "scope", "output", "rows"],
+      "properties": {
+        "$schema": {"const": "https://ullm-project.local/ci/schema/g0-preflight-v1.schema.json#/$defs/gpu_runtime_matrix"},
+        "schema_version": {"const": "gpu-runtime-v1"},
+        "matrix_id": {"const": "gpu-runtime-v1"},
+        "revision": {"type": "integer", "minimum": 1},
+        "tier": {"const": "tier_g0"},
+        "required": {"const": true},
+        "toolchain_id": {"const": "rocm-7.14.0"},
+        "artifact_matrix_id": {"const": "hip-compile-v1"},
+        "execution": {
+          "type": "object", "additionalProperties": false,
+          "required": ["serial", "host_lock", "trusted_local_only", "visibility_is_security_boundary", "sudo_allowed", "reset_allowed", "credentials_allowed", "docker_socket_allowed", "native_observation_provider", "health_process_observer"],
+          "properties": {
+            "serial": {"const": true},
+            "host_lock": {
+              "type": "object", "additionalProperties": false,
+              "required": ["path", "acquisition"],
+              "properties": {"path": {"const": "/tmp/ullm-g0.lock"}, "acquisition": {"const": "nonblocking"}}
+            },
+            "trusted_local_only": {"const": true},
+            "visibility_is_security_boundary": {"const": false},
+            "sudo_allowed": {"const": false},
+            "reset_allowed": {"const": false},
+            "credentials_allowed": {"const": false},
+            "docker_socket_allowed": {"const": false},
+            "native_observation_provider": {
+              "type": "object", "additionalProperties": false,
+              "required": ["provider_id", "source", "compiler", "output_prefix", "timeout_seconds", "allowed_hip_apis"],
+              "properties": {
+                "provider_id": {"const": "g0-native-hip-observer-v1"},
+                "source": {"const": "ci/tools/g0_native_observer.cpp"},
+                "compiler": {"const": "/opt/rocm/core-7.14/bin/amdclang++"},
+                "output_prefix": {"const": "/tmp/ullm-g0-provider-"},
+                "timeout_seconds": {"const": 60},
+                "allowed_hip_apis": {
+                  "const": ["hipRuntimeGetVersion", "hipGetDeviceCount", "hipGetDeviceProperties", "hipDeviceGetPCIBusId", "hipDeviceGetUuid"]
+                }
+              }
+            },
+            "health_process_observer": {
+              "type": "object", "additionalProperties": false,
+              "required": ["provider_id", "amd_smi", "sysfs_pci_root", "command_timeout_seconds", "no_process_sentinel"],
+              "properties": {
+                "provider_id": {"const": "amd-smi-sysfs-read-only-v1"},
+                "amd_smi": {"const": "/opt/rocm/core-7.14/bin/amd-smi"},
+                "sysfs_pci_root": {"const": "/sys/bus/pci/devices"},
+                "command_timeout_seconds": {"const": 30},
+                "no_process_sentinel": {"const": "No running processes detected"}
+              }
+            }
+          }
+        },
+        "scope": {
+          "type": "object", "additionalProperties": false,
+          "required": ["identity_probe_only", "model_used", "allocation_attempted", "copy_attempted", "kernel_attempted", "dispatch_attempted", "native_hip_observation_provider", "execution_verified", "numerics_verified", "performance_verified", "support_claim"],
+          "properties": {
+            "identity_probe_only": {"const": true}, "model_used": {"const": false},
+            "allocation_attempted": {"const": false}, "copy_attempted": {"const": false},
+            "kernel_attempted": {"const": false}, "dispatch_attempted": {"const": false},
+            "native_hip_observation_provider": {"const": "native-hip-observer-v1"},
+            "execution_verified": {"const": false}, "numerics_verified": {"const": false},
+            "performance_verified": {"const": false}, "support_claim": {"const": false}
+          }
+        },
+        "output": {
+          "type": "object", "additionalProperties": false,
+          "required": ["root_prefix", "directory_pattern", "source_tree_output", "sidecar_hashes"],
+          "properties": {
+            "root_prefix": {"const": "/tmp/ullm-g0-"},
+            "directory_pattern": {"const": "g0-{target}"},
+            "source_tree_output": {"const": false},
+            "sidecar_hashes": {"const": true}
+          }
+        },
+        "rows": {"type": "array", "minItems": 2, "maxItems": 2, "items": {"$ref": "#/$defs/row"}}
+      }
+    },
+    "health": {
+      "type": "object", "additionalProperties": false,
+      "required": ["available", "reliable", "observed_at", "bdf", "uuid", "gcnArchName", "source", "facts"],
+      "properties": {
+        "available": {"type": "boolean"}, "reliable": {"type": "boolean"},
+        "observed_at": {"type": ["string", "null"], "format": "date-time"},
+        "bdf": {"type": ["string", "null"]}, "uuid": {"type": ["string", "null"]},
+        "gcnArchName": {"type": ["string", "null"]},
+        "source": {"type": ["string", "null"]},
+        "facts": {
+          "type": "object", "additionalProperties": false,
+          "required": ["device_state", "amdgpu_driver_bound", "runtime_status", "ras_uncorrectable_count", "sysfs_ras_uncorrectable_count", "temperature_c"],
+          "properties": {
+            "device_state": {"type": ["string", "null"]},
+            "amdgpu_driver_bound": {"type": ["boolean", "null"]},
+            "runtime_status": {"type": ["string", "null"]},
+            "ras_uncorrectable_count": {"type": ["integer", "null"], "minimum": 0},
+            "sysfs_ras_uncorrectable_count": {"type": ["integer", "null"], "minimum": 0},
+            "temperature_c": {"type": ["number", "null"]}
+          }
+        }
+      }
+    },
+    "processes": {
+      "type": "object", "additionalProperties": false,
+      "required": ["available", "reliable", "observed_at", "bdf", "uuid", "gcnArchName", "source", "gpu_processes", "residual_runner_children"],
+      "properties": {
+        "available": {"type": "boolean"}, "reliable": {"type": "boolean"},
+        "observed_at": {"type": ["string", "null"], "format": "date-time"},
+        "bdf": {"type": ["string", "null"]}, "uuid": {"type": ["string", "null"]},
+        "gcnArchName": {"type": ["string", "null"]},
+        "source": {"type": ["string", "null"]},
+        "gpu_processes": {"type": "array", "items": {"type": "object"}},
+        "residual_runner_children": {"type": "array", "items": {"type": "integer", "minimum": 1}}
+      }
+    },
+    "preflight": {
+      "type": "object", "additionalProperties": false,
+      "required": ["schema_version", "candidate", "visibility", "routing", "artifact_binding", "provider", "device", "runtime", "health_pre", "health_post", "process_pre", "process_post", "scope"],
+      "properties": {
+        "schema_version": {"const": "g0-preflight-v1"},
+        "candidate": {
+          "type": "object", "additionalProperties": false,
+          "required": ["reviewed_sha", "tested_sha", "workflow_sha", "git_tree_oid", "worktree_clean", "revision_input"],
+          "properties": {
+            "reviewed_sha": {"$ref": "#/$defs/sha40"}, "tested_sha": {"$ref": "#/$defs/sha40"},
+            "workflow_sha": {"$ref": "#/$defs/sha40"}, "git_tree_oid": {"$ref": "#/$defs/sha40"},
+            "worktree_clean": {"type": "boolean"}, "revision_input": {"const": "full-sha"}
+          }
+        },
+        "visibility": {
+          "type": "object", "additionalProperties": false,
+          "required": ["HIP_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES", "GPU_DEVICE_ORDINAL", "security_boundary"],
+          "properties": {
+            "HIP_VISIBLE_DEVICES": {"type": ["string", "null"]},
+            "CUDA_VISIBLE_DEVICES": {"type": ["string", "null"]},
+            "GPU_DEVICE_ORDINAL": {"type": ["string", "null"]},
+            "security_boundary": {"const": false}
+          }
+        },
+        "routing": {
+          "type": "object", "additionalProperties": false,
+          "required": ["source", "amd_smi", "argv", "bdf", "uuid", "gpu", "hip_id"],
+          "properties": {
+            "source": {"type": ["string", "null"]},
+            "amd_smi": {"type": ["string", "null"]},
+            "argv": {"type": "array", "items": {"type": "string"}},
+            "bdf": {"type": ["string", "null"]},
+            "uuid": {"type": ["string", "null"]},
+            "gpu": {"type": ["integer", "null"], "minimum": 0},
+            "hip_id": {"type": ["integer", "null"], "minimum": 0}
+          }
+        },
+        "artifact_binding": {
+          "type": "object", "additionalProperties": false,
+          "required": ["metadata_path", "metadata_sha256", "metadata_sidecar_path", "metadata_sidecar_sha256", "metadata_declared_artifact_path", "artifact_path", "artifact_sha256", "artifact_sidecar_path", "artifact_sidecar_sha256", "h3_matrix_row_id", "target", "toolchain_id", "toolchain_manifest_sha256"],
+          "properties": {
+            "metadata_path": {"type": "string"}, "metadata_sha256": {"$ref": "#/$defs/sha256"},
+            "metadata_sidecar_path": {"type": "string"}, "metadata_sidecar_sha256": {"$ref": "#/$defs/sha256"},
+            "metadata_declared_artifact_path": {"type": "string"},
+            "artifact_path": {"type": "string"}, "artifact_sha256": {"$ref": "#/$defs/sha256"},
+            "artifact_sidecar_path": {"type": "string"}, "artifact_sidecar_sha256": {"$ref": "#/$defs/sha256"},
+            "h3_matrix_row_id": {"enum": ["h3-gfx1030", "h3-gfx1201"]},
+            "target": {"enum": ["gfx1030", "gfx1201"]}, "toolchain_id": {"const": "rocm-7.14.0"},
+            "toolchain_manifest_sha256": {"$ref": "#/$defs/sha256"}
+          }
+        },
+        "provider": {
+          "type": "object", "additionalProperties": false,
+          "required": ["provider_id", "available", "source_path", "source_sha256", "binary_path", "binary_removed", "binary_sha256", "compiler_path", "compiler_version", "compile_command_sha256", "runtime_command_sha256"],
+          "properties": {
+            "provider_id": {"const": "g0-native-hip-observer-v1"},
+            "available": {"type": "boolean"},
+            "source_path": {"type": ["string", "null"]},
+            "source_sha256": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"},
+            "binary_path": {"type": ["string", "null"]},
+            "binary_removed": {"type": "boolean"},
+            "binary_sha256": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"},
+            "compiler_path": {"type": ["string", "null"]},
+            "compiler_version": {"type": ["string", "null"]},
+            "compile_command_sha256": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"},
+            "runtime_command_sha256": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"}
+          }
+        },
+        "device": {
+          "type": "object", "additionalProperties": false,
+          "required": ["probe_kind", "observed", "visible_device_count", "ordinal", "bdf", "uuid", "hip_uuid_hex", "gcnArchName", "exact_target", "product", "wave_size", "total_global_memory_bytes", "rocm_root", "allocation_count", "copy_count", "kernel_dispatch_count", "dispatch_count"],
+          "properties": {
+            "probe_kind": {"const": "hip-identity-only-v1"}, "observed": {"type": "boolean"},
+            "visible_device_count": {"type": ["integer", "null"], "minimum": 0},
+            "ordinal": {"type": ["integer", "null"], "minimum": 0},
+            "bdf": {"type": ["string", "null"]}, "uuid": {"type": ["string", "null"]},
+            "hip_uuid_hex": {"type": ["string", "null"], "pattern": "^[0-9a-f]{16}$"},
+            "gcnArchName": {"type": ["string", "null"]}, "exact_target": {"type": ["string", "null"]},
+            "product": {"type": ["string", "null"]}, "wave_size": {"type": ["integer", "null"], "minimum": 1},
+            "total_global_memory_bytes": {"type": ["integer", "null"], "minimum": 1},
+            "rocm_root": {"type": ["string", "null"]}, "allocation_count": {"const": 0},
+            "copy_count": {"const": 0}, "kernel_dispatch_count": {"const": 0}, "dispatch_count": {"const": 0}
+          }
+        },
+        "runtime": {
+          "type": "object", "additionalProperties": false,
+          "required": ["rocm_root", "release", "hip_runtime_api_version", "hip_runtime_library_path", "hsa_runtime_library_path", "bdf", "uuid", "gcnArchName"],
+          "properties": {
+            "rocm_root": {"type": ["string", "null"]}, "release": {"type": ["string", "null"]},
+            "hip_runtime_api_version": {"type": ["integer", "null"], "minimum": 0},
+            "hip_runtime_library_path": {"type": ["string", "null"]},
+            "hsa_runtime_library_path": {"type": ["string", "null"]},
+            "bdf": {"type": ["string", "null"]}, "uuid": {"type": ["string", "null"]},
+            "gcnArchName": {"type": ["string", "null"]}
+          }
+        },
+        "health_pre": {"$ref": "#/$defs/health"}, "health_post": {"$ref": "#/$defs/health"},
+        "process_pre": {"$ref": "#/$defs/processes"}, "process_post": {"$ref": "#/$defs/processes"},
+        "scope": {
+          "type": "object", "additionalProperties": false,
+          "required": ["selected_backend", "fallback_allowed", "fallback_used", "identity_probe_only", "native_hip_observation_provider", "execution_verified", "numerics_verified", "performance_verified", "support_claim"],
+          "properties": {
+            "selected_backend": {"const": "hip-preflight"}, "fallback_allowed": {"const": false},
+            "fallback_used": {"const": false}, "identity_probe_only": {"const": true},
+            "native_hip_observation_provider": {"const": "native-hip-observer-v1"},
+            "execution_verified": {"const": false}, "numerics_verified": {"const": false},
+            "performance_verified": {"const": false}, "support_claim": {"const": false}
+          }
+        }
+      }
+    }
+  }
+}

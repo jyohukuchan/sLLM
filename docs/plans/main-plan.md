@@ -295,7 +295,7 @@
 
 ## 現在の状態と次の作業
 
-- 現在: Phase 1を完了し、Phase 2のbootstrap gate同期、H3静的contract、CMake/build接続、固定image内`amdclang++`によるexact `gfx1030`/`gfx1201` compile-only runner、artifact検査・fail-closed集約、non-required workflowを実装済み。次は同一immutable candidateをdigest固定ROCm imageで検証してH3観測を開始し、待機せずG0へ進む。
+- 現在: Phase 1を完了し、Phase 2のH3を公開済み。canonical GPU/ROCm tuple、identity-only native observer、read-only health/process確認、exact H3 artifact binding、G0 2 row集約を実装中である。次はレビュー済み同一immutable candidateでH0〜H3とcanonical 2 GPUのG0を通し、待機せずmodel-free G1へ進む。
 - 完了:
   - プロジェクトライセンスをMITへ統一。
   - Qwen3.5のMTP表記とBF16階層の矛盾を修正。
@@ -319,10 +319,12 @@
   - 公式ROCm 7.14.0 imageをimmutable digestで固定し、exact `gfx1030`/`gfx1201`のnon-required H3 matrix、host bundleと抽出device code objectを分離したartifact metadata schema、fail-closed validatorとnegative testを追加。
   - 明示HIP CMake pathと、固定image内のpinned `amdclang++`だけを使うH3 direct compile/link runnerを追加し、bundle保持host objectからdevice code objectを抽出してCode Object V6、target別ELF flags、wave32、symbol、artifact/sidecar identityを検査する経路を構築。
   - H3 2 rowのreport・metadata・device artifact・sidecar・candidate identityをfail-closed集約する独立checkと、digest/configを検査したROCm containerを`--network none`で使うnon-required workflowを追加。GPUまたは生成executableは実行しない。
+  - H3実装をcommit `03f90be1ad85145e3abee86e67615c1e17f552b4`として公開し、GitHub上のexact 2 compile rowがPASSすることを確認。初回aggregateでworkflow run identityのcontainer伝播漏れを検出し、fail-closedに失敗した。
+  - canonical GPUをV620 `0000:03:00.0` / `GPU-76a08c022586fed6`とR9700 `0000:47:00.0` / `GPU-a8e9ddefa2d60f55`へ固定し、spare V620を必須rowから除外した。
 - 次:
-  1. H3実装を同一immutable candidateとしてdigest固定ROCm imageのexact 2 rowで検証し、non-required観測を開始する。
-  2. H3観測と並行して、専用local hostのGPU evidence実行・集約とG0 preflightを構築する。
-  3. canonical `gfx1030`/`gfx1201`でmodel-free最小GPU実行経路を同一candidate SHAに対して検証する。
+  1. H3 workflowへrun ID/attemptを正しく伝播し、G0 runner・schema・negative testとともに同一immutable candidateのH0〜H3を検証する。
+  2. exact H3 artifactに対してcanonical `gfx1030`/`gfx1201`のG0を直列実行・集約する。
+  3. 同じ証跡境界を再利用してmodel-free最小GPU実行経路を実装し、両GPUのG1を同一candidate SHAに対して検証する。
 
 ## 未解決事項
 

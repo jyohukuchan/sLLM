@@ -1,7 +1,7 @@
 {
   "schema_version": "suites-v1",
   "registry_id": "uLLM-host-suites",
-  "revision": 5,
+  "revision": 7,
   "allowed_tiers": ["tier_h0", "tier_h1", "tier_h2", "tier_h3", "tier_g0", "tier_g1", "tier_g2", "tier_g3", "tier_g4", "tier_p0", "tier_p1"],
   "allowed_attributes": ["requires_gpu", "requires_model", "slow", "network", "quarantined"],
   "suites": [
@@ -67,8 +67,19 @@
       "tier": "tier_h0",
       "marker": "tier_h0",
       "attributes": {"requires_gpu": false, "requires_model": false, "slow": false, "network": false, "quarantined": false},
-      "test_ids": ["h0.h3.contracts", "h0.h3.negative-contracts"],
-      "commands": [{"command_id": "h3-static-contracts", "argv": ["{python}", "ci/tests/test_h3_contracts.py"]}]
+      "test_ids": ["h0.h3.contracts", "h0.h3.negative-contracts", "h0.h3.workflow-identity"],
+      "commands": [
+        {"command_id": "h3-static-contracts", "argv": ["{python}", "ci/tests/test_h3_contracts.py"]},
+        {"command_id": "h3-workflow-identity", "argv": ["{python}", "ci/tests/test_h3_workflow_identity.py"]}
+      ]
+    },
+    {
+      "suite_id": "h0-g0-static-contracts",
+      "tier": "tier_h0",
+      "marker": "tier_h0",
+      "attributes": {"requires_gpu": false, "requires_model": false, "slow": false, "network": false, "quarantined": false},
+      "test_ids": ["h0.g0.contracts", "h0.g0.negative-contracts"],
+      "commands": [{"command_id": "g0-static-contracts", "argv": ["{python}", "ci/tests/test_g0_contracts.py"]}]
     },
     {
       "suite_id": "h3-compile-only-contract",

@@ -12,6 +12,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 EXCLUDED = {".git", ".local-artifacts", "reference", "target", "build", "ci"}
+EXPLICIT_CPP_SOURCES = {"ci/tools/g0_native_observer.cpp"}
 
 
 def cpp_files() -> list[Path]:
@@ -30,7 +31,11 @@ def cpp_files() -> list[Path]:
     files: list[Path] = []
     for name in names:
         path = (ROOT / name).resolve()
-        if path.is_file() and not any(part in EXCLUDED for part in path.relative_to(ROOT).parts):
+        relative = path.relative_to(ROOT)
+        if path.is_file() and (
+            relative.as_posix() in EXPLICIT_CPP_SOURCES
+            or not any(part in EXCLUDED for part in relative.parts)
+        ):
             files.append(path)
     return sorted(files)
 

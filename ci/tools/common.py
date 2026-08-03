@@ -90,9 +90,17 @@ def sha256_file(path: Path) -> str:
 
 
 def read_json(path: Path) -> Any:
+    def reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        document: dict[str, Any] = {}
+        for key, value in pairs:
+            if key in document:
+                raise ContractError(f"duplicate JSON key in {path}: {key}")
+            document[key] = value
+        return document
+
     try:
         with path.open("r", encoding="utf-8") as stream:
-            return json.load(stream)
+            return json.load(stream, object_pairs_hook=reject_duplicate_keys)
     except (OSError, ValueError) as exc:
         raise ContractError(f"cannot read JSON {path}: {exc}") from exc
 
@@ -129,6 +137,8 @@ def iso_z(value: datetime) -> str:
 
 
 def parse_time(value: str) -> datetime:
+    if not isinstance(value, str):
+        raise ContractError(f"timestamp must be a string: {value!r}")
     try:
         parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
     except ValueError as exc:
@@ -561,14 +571,66 @@ def tuple_digest(row: dict[str, Any]) -> str:
     return sha256_json(row)
 
 
+G0_OBSERVATION_FIELDS = ("health_pre", "health_post", "process_pre", "process_post")
+
+
+def _result_schema_validator(schema_path: Path, schema: dict[str, Any]) -> Any:
+    """Build a result validator with only the checked-in G0 schema resolvable."""
+
+    try:
+        from jsonschema import Draft202012Validator, FormatChecker, RefResolver
+    except ImportError as exc:
+        raise ContractError("jsonschema is required for result validation") from exc
+
+    preflight_path = schema_path.with_name("g0-preflight-v1.schema.json")
+    preflight_schema = read_json(preflight_path)
+    if not isinstance(preflight_schema, dict):
+        raise ContractError("G0 preflight schema must be an object")
+
+    def reject_external_reference(uri: str) -> Any:
+        raise ContractError(f"result schema reference is not an allowlisted local schema: {uri}")
+
+    canonical_uri = "https://ullm-project.local/ci/schema/g0-preflight-v1.schema.json"
+    store = {
+        canonical_uri: preflight_schema,
+        preflight_path.resolve().as_uri(): preflight_schema,
+    }
+    base_uri = schema.get("$id") if isinstance(schema.get("$id"), str) else schema_path.resolve().as_uri()
+    resolver = RefResolver(
+        base_uri,
+        schema,
+        store=store,
+        handlers={"http": reject_external_reference, "https": reject_external_reference, "file": reject_external_reference},
+    )
+    return Draft202012Validator(schema, resolver=resolver, format_checker=FormatChecker())
+
+
+def _validate_g0_observation_window(payload: dict[str, Any]) -> None:
+    if payload.get("state") != "PASS":
+        return
+    started = parse_time(payload["started_at"])
+    finished = parse_time(payload["finished_at"])
+    if started > finished:
+        raise ContractError("G0 report execution window is reversed")
+    if finished > utc_now():
+        raise ContractError("G0 report execution window is in the future")
+    preflight = payload["g0"]["preflight"]
+    for field in G0_OBSERVATION_FIELDS:
+        observed = parse_time(preflight[field]["observed_at"])
+        if not started <= observed <= finished:
+            raise ContractError(f"G0 {field}.observed_at is outside the report execution window")
+
+
 def validate_result_payload(payload: dict[str, Any], schema_path: Path | None = None) -> None:
     schema_path = schema_path or SCHEMA_DIR / "test-result-v1.schema.json"
     try:
-        from jsonschema import Draft202012Validator, FormatChecker
-    except ImportError as exc:
-        raise ContractError("jsonschema is required for result validation") from exc
+        schema_path = schema_path.resolve()
+    except OSError as exc:
+        raise ContractError(f"result schema path is unavailable: {schema_path}") from exc
     schema = read_json(schema_path)
-    validator = Draft202012Validator(schema, format_checker=FormatChecker())
+    if not isinstance(schema, dict):
+        raise ContractError("result schema must be an object")
+    validator = _result_schema_validator(schema_path, schema)
     errors = sorted(validator.iter_errors(payload), key=lambda error: list(error.path))
     if errors:
         detail = "; ".join(f"{'.'.join(map(str, error.path)) or '<root>'}: {error.message}" for error in errors[:8])
@@ -581,7 +643,20 @@ def validate_result_payload(payload: dict[str, Any], schema_path: Path | None = 
         raise ContractError("command hash does not match the command manifest")
     if payload["toolchain_sha256"] != sha256_json(payload["toolchain"]):
         raise ContractError("toolchain hash does not match the toolchain snapshot")
-    if payload["artifact"]["content_sha256"] != command_content_hash(steps):
+    is_g0_preflight = payload.get("tier") == "tier_g0"
+    if is_g0_preflight:
+        g0 = payload.get("g0", {})
+        preflight = g0.get("preflight", {})
+        if g0.get("preflight_sha256") != sha256_json(preflight):
+            raise ContractError("G0 preflight content hash does not match its report")
+        if g0.get("preflight_schema_sha256") != sha256_file(
+            SCHEMA_DIR / "g0-preflight-v1.schema.json"
+        ):
+            raise ContractError("G0 preflight schema hash is stale")
+        if payload["artifact"]["content_sha256"] != preflight.get("artifact_binding", {}).get("artifact_sha256"):
+            raise ContractError("G0 artifact content hash does not match its H3 binding")
+        _validate_g0_observation_window(payload)
+    elif payload["artifact"]["content_sha256"] != command_content_hash(steps):
         raise ContractError("artifact content hash does not match the step records")
 
     def validate_counts(value: dict[str, int], label: str) -> None:
@@ -631,7 +706,7 @@ def validate_result_payload(payload: dict[str, Any], schema_path: Path | None = 
             or duration > value["wall_time_limit_seconds"]
         ):
             raise ContractError(f"{label}: PASS command breached a resource limit")
-        if state == "PASS" and value["network_isolated"] is not True:
+        if state == "PASS" and value["network_isolated"] is not True and not is_g0_preflight:
             raise ContractError(f"{label}: test command was not network-isolated")
 
     validate_counts(counts, "result")
@@ -808,12 +883,18 @@ def validate_result_payload(payload: dict[str, Any], schema_path: Path | None = 
             or resource_summary["wall_time_breach"]
         ):
             raise ContractError("PASS result breached a row resource limit")
-        if resource_summary["network_isolated"] is not True:
+        if resource_summary["network_isolated"] is not True and not is_g0_preflight:
             raise ContractError("PASS row was not network-isolated")
-        if payload["diagnostic"]["network_guard_self_test"] is not True:
+        if payload["diagnostic"]["network_guard_self_test"] is not True and not is_g0_preflight:
             raise ContractError(
                 "PASS result did not complete the network guard self-test"
             )
+        if is_g0_preflight and (
+            resource_summary["network_isolated"] is not False
+            or payload["diagnostic"]["network_guard_self_test"] is not False
+            or set(resource_summary["network_guard_strategies"]) != {"trusted-local-no-network-use"}
+        ):
+            raise ContractError("G0 must report trusted-local no-network-use without claiming network isolation")
     if payload["state"] == "FAIL" and not any(
         case["state"] == "FAIL" for case in cases
     ):

@@ -60,6 +60,38 @@ Exit codes are:
 
 Required rows prohibit `SKIP` and `QUARANTINED`. Zero selected tests, unknown tests or markers, dirty or mismatched strict identity, missing reports, network-isolation failure, resource/output breach, and CPU fallback are failures. The row-wide limits are versioned in `ci/matrix/host-v1.json`.
 
+## G0 trusted-local preflight
+
+G0 is not part of CPU host CI and never allocates, copies, dispatches, or runs a kernel. Its private native observer links against the pinned HIP runtime and calls identity APIs only. The runner resolves the canonical device from AMD-SMI's exact BDF, uses that HIP id only as a visibility routing hint, and then requires the observer to see exactly one device with the versioned BDF, UUID, target, product, runtime version, and resolved HIP/ROCr libraries. It also records read-only AMD-SMI/sysfs health and process facts before and after observation. The contract validates `/opt/rocm` 7.14.0, the staged H3 artifact and sidecar hashes, the immutable metadata's declared artifact path versus the staged artifact path, reliable ordered pre/post health/process facts, and zero allocation/copy/kernel/dispatch counts. The temporary observer binary is removed before the report is finalized; only its source/build provenance and hash remain in evidence.
+
+For a trusted local run, use one clean checkout and the same 40-character SHA for all rows. The two rows share a nonblocking host lock and must be run serially; visibility variables are routing hints only. Each row writes `report.json` and `report.json.sha256` below `/tmp/ullm-g0-*`, outside the source tree:
+
+```bash
+candidate_sha=$(git rev-parse HEAD)
+python3 ci/tools/run_g0_preflight.py \
+  --row g0-gfx1030 --trusted-local \
+  --output-dir /tmp/ullm-g0-run/g0-gfx1030 \
+  --artifact-metadata /tmp/ullm-h3-run/h3-gfx1030/hip-artifact-metadata.json \
+  --run-id trusted-g0 --run-attempt 1 \
+  --reviewed-sha "$candidate_sha" --tested-sha "$candidate_sha" --workflow-sha "$candidate_sha"
+```
+
+Repeat the command for `g0-gfx1201` with that row's exact staged H3 metadata. Run the rows serially and aggregate only the two schema-valid `PASS` reports from the same clean immutable candidate:
+
+```bash
+python3 ci/tools/aggregate_g0_results.py \
+  --needs-json /tmp/ullm-g0-run/needs.json \
+  --artifact-dir /tmp/ullm-g0-run \
+  --output-dir /tmp/ullm-g0-aggregate \
+  --run-id trusted-g0 --run-attempt 1 \
+  --expected-reviewed-sha "$candidate_sha" \
+  --expected-tested-sha "$candidate_sha" \
+  --expected-workflow-sha "$candidate_sha" \
+  --expected-tree-oid "$(git rev-parse HEAD^{tree})"
+```
+
+The scripts and host-negative tests do not provide canonical G0 evidence by themselves; that requires successful runs on both canonical GPUs and a successful aggregate bound to the same immutable candidate. G0 must not be described as kernel, allocation, copy, dispatch, numerical, model, compatibility, or performance evidence. Those execution claims begin only at G1.
+
 ## Local aggregation
 
 Create `.local-artifacts/ci/needs.json` with the current job conclusions:
