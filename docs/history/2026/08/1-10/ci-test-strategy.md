@@ -40,5 +40,6 @@
 - Phase 2 bootstrapで未構築のG0/G1/G2/G4/P0をH3自身へ循環的に要求しないよう、GPU hard gateを変更scope別へ分割した。
 - H3 toolchain/artifactはH0〜H3、G0 runnerはH0〜H3とcanonical G0、model-free runtimeはH0〜H3とcanonical G0/G1を同一candidateへ要求する。G2/G4/P0はmodel、互換性昇格、性能または実運用dispatchへ実際に影響するときから追加する。
 - H3の20回以上・7日以上の観測はrequired昇格だけの条件とし、G0、GPU runner、model-free runtimeを並行して進めると明記した。
+- H0 network guardが`/proc/net/route`と`/proc/net/ipv6_route`の動的counterまで完全一致比較してparent network破壊を誤検出していたため、routeの意味属性だけを厳格に正規化するよう修正し、counter変化、意味属性変化、不正形式、fresh namespaceの空IPv4 routeを回帰testへ追加した。
 
 [対応する計画](../../../../plans/active/2026/08/1-10/ci-test-strategy.md)

@@ -30,13 +30,31 @@ class NetworkIsolationError(RuntimeError):
 
 SCRIPT = Path(__file__).resolve()
 
+Route = tuple[str, ...]
+RouteSnapshot = tuple[Route, ...]
+
+_IPV4_ROUTE_HEADER = (
+    "Iface",
+    "Destination",
+    "Gateway",
+    "Flags",
+    "RefCnt",
+    "Use",
+    "Metric",
+    "Mask",
+    "MTU",
+    "Window",
+    "IRTT",
+)
+_HEX_DIGITS = frozenset("0123456789abcdefABCDEF")
+
 
 @dataclass(frozen=True)
 class IsolationPlan:
     strategy: str
     prefix: tuple[str, ...]
     parent_netns: str
-    parent_connectivity: tuple[str, tuple[str, ...], tuple[str, ...], tuple[str, ...]]
+    parent_connectivity: tuple[str, tuple[str, ...], RouteSnapshot, RouteSnapshot]
     expected_euid: int
     expected_egid: int
     require_no_capabilities: bool
@@ -79,13 +97,137 @@ def process_security_state() -> tuple[dict[str, int], int]:
     return capabilities, no_new_privs
 
 
-def _route_snapshot() -> tuple[tuple[str, ...], tuple[str, ...]]:
+def _normalize_hex(field: str, *, width: int, label: str) -> str:
+    if len(field) != width or any(character not in _HEX_DIGITS for character in field):
+        raise NetworkIsolationError(
+            f"malformed {label}: expected {width} hexadecimal characters"
+        )
+    return field.lower()
+
+
+def _normalize_decimal(field: str, *, label: str) -> str:
+    if not field or any(character not in "0123456789" for character in field):
+        raise NetworkIsolationError(f"malformed {label}: expected an unsigned decimal integer")
+    value = int(field, 10)
+    if value > 0xFFFFFFFF:
+        raise NetworkIsolationError(f"malformed {label}: value exceeds a 32-bit unsigned integer")
+    return str(value)
+
+
+def _normalize_interface(field: str, *, label: str) -> str:
+    if not field or any(character.isspace() or character == "\x00" for character in field):
+        raise NetworkIsolationError(f"malformed {label}: invalid interface name")
+    return field
+
+
+def _normalize_ipv4_routes(lines: Sequence[str]) -> RouteSnapshot:
+    """Normalize IPv4 proc routes while excluding only RefCnt and Use."""
+    # A fresh network namespace exposes an empty /proc/net/route rather than
+    # the header, which is a valid no-route snapshot.  Any non-empty file
+    # still requires the exact proc header and strict row validation.
+    if not lines:
+        return ()
+    if tuple(lines[0].split()) != _IPV4_ROUTE_HEADER:
+        raise NetworkIsolationError("malformed IPv4 route header")
+    routes: list[Route] = []
+    for line_number, line in enumerate(lines[1:], start=2):
+        fields = line.split()
+        if len(fields) != 11:
+            raise NetworkIsolationError(
+                f"malformed IPv4 route line {line_number}: expected 11 columns"
+            )
+        interface = _normalize_interface(
+            fields[0], label=f"IPv4 route line {line_number} interface"
+        )
+        destination = _normalize_hex(
+            fields[1], width=8, label=f"IPv4 route line {line_number} destination"
+        )
+        gateway = _normalize_hex(
+            fields[2], width=8, label=f"IPv4 route line {line_number} gateway"
+        )
+        flags = _normalize_hex(
+            fields[3], width=4, label=f"IPv4 route line {line_number} flags"
+        )
+        # RefCnt and Use are validated but intentionally omitted from the
+        # normalized route because Linux updates them while the topology is
+        # unchanged.
+        _normalize_decimal(fields[4], label=f"IPv4 route line {line_number} RefCnt")
+        _normalize_decimal(fields[5], label=f"IPv4 route line {line_number} Use")
+        metric = _normalize_decimal(fields[6], label=f"IPv4 route line {line_number} Metric")
+        mask = _normalize_hex(
+            fields[7], width=8, label=f"IPv4 route line {line_number} mask"
+        )
+        mtu = _normalize_decimal(fields[8], label=f"IPv4 route line {line_number} MTU")
+        window = _normalize_decimal(fields[9], label=f"IPv4 route line {line_number} Window")
+        irtt = _normalize_decimal(fields[10], label=f"IPv4 route line {line_number} IRTT")
+        routes.append((interface, destination, gateway, flags, metric, mask, mtu, window, irtt))
+    return tuple(routes)
+
+
+def _normalize_ipv6_prefix(field: str, *, label: str) -> str:
+    normalized = _normalize_hex(field, width=2, label=label)
+    if int(normalized, 16) > 128:
+        raise NetworkIsolationError(f"malformed {label}: prefix length exceeds 128")
+    return normalized
+
+
+def _normalize_ipv6_routes(lines: Sequence[str]) -> RouteSnapshot:
+    """Normalize IPv6 proc routes while excluding only ref and use counters."""
+    routes: list[Route] = []
+    for line_number, line in enumerate(lines, start=1):
+        fields = line.split()
+        if len(fields) != 10:
+            raise NetworkIsolationError(
+                f"malformed IPv6 route line {line_number}: expected 10 columns"
+            )
+        destination = _normalize_hex(
+            fields[0], width=32, label=f"IPv6 route line {line_number} destination"
+        )
+        destination_prefix = _normalize_ipv6_prefix(
+            fields[1], label=f"IPv6 route line {line_number} destination prefix"
+        )
+        source = _normalize_hex(
+            fields[2], width=32, label=f"IPv6 route line {line_number} source"
+        )
+        source_prefix = _normalize_ipv6_prefix(
+            fields[3], label=f"IPv6 route line {line_number} source prefix"
+        )
+        gateway = _normalize_hex(
+            fields[4], width=32, label=f"IPv6 route line {line_number} gateway"
+        )
+        metric = _normalize_hex(
+            fields[5], width=8, label=f"IPv6 route line {line_number} metric"
+        )
+        _normalize_hex(fields[6], width=8, label=f"IPv6 route line {line_number} ref")
+        _normalize_hex(fields[7], width=8, label=f"IPv6 route line {line_number} use")
+        flags = _normalize_hex(
+            fields[8], width=8, label=f"IPv6 route line {line_number} flags"
+        )
+        interface = _normalize_interface(
+            fields[9], label=f"IPv6 route line {line_number} interface"
+        )
+        routes.append(
+            (
+                destination,
+                destination_prefix,
+                source,
+                source_prefix,
+                gateway,
+                metric,
+                flags,
+                interface,
+            )
+        )
+    return tuple(routes)
+
+
+def _route_snapshot() -> tuple[RouteSnapshot, RouteSnapshot]:
     try:
-        ipv4 = tuple(Path("/proc/net/route").read_text(encoding="ascii").splitlines())
-        ipv6 = tuple(Path("/proc/net/ipv6_route").read_text(encoding="ascii").splitlines())
-    except OSError as exc:
+        ipv4_lines = Path("/proc/net/route").read_text(encoding="ascii").splitlines()
+        ipv6_lines = Path("/proc/net/ipv6_route").read_text(encoding="ascii").splitlines()
+    except (OSError, UnicodeError) as exc:
         raise NetworkIsolationError(f"cannot inspect network routes: {exc}") from exc
-    return ipv4, ipv6
+    return _normalize_ipv4_routes(ipv4_lines), _normalize_ipv6_routes(ipv6_lines)
 
 
 def _interface_names() -> tuple[str, ...]:
@@ -102,30 +244,25 @@ def _interface_names() -> tuple[str, ...]:
     return names
 
 
-def parent_connectivity_snapshot() -> tuple[str, tuple[str, ...], tuple[str, ...], tuple[str, ...]]:
+def parent_connectivity_snapshot() -> tuple[str, tuple[str, ...], RouteSnapshot, RouteSnapshot]:
     """Capture route/interface topology without relying on external connectivity."""
     ipv4, ipv6 = _route_snapshot()
     return current_netns(), _interface_names(), ipv4, ipv6
 
 
 def _assert_no_default_route() -> None:
-    ipv4_raw, ipv6_raw = _route_snapshot()
-    ipv4 = ipv4_raw[1:]
-    ipv6 = ipv6_raw
-    for line in ipv4:
-        fields = line.split()
-        if len(fields) >= 2 and fields[1] == "00000000":
+    ipv4, ipv6 = _route_snapshot()
+    for route in ipv4:
+        if route[1] == "00000000":
             raise NetworkIsolationError("isolated namespace still has an IPv4 default route")
-    for line in ipv6:
-        fields = line.split()
+    for route in ipv6:
         # A fresh namespace can retain Linux's unreachable loopback default
         # entries.  They are harmless; any default through another device is
         # an externally usable route and must fail closed.
         if (
-            len(fields) >= 10
-            and fields[0] == "0" * 32
-            and fields[1] == "00"
-            and fields[-1] != "lo"
+            route[0] == "0" * 32
+            and route[1] == "00"
+            and route[-1] != "lo"
         ):
             raise NetworkIsolationError("isolated namespace still has an IPv6 default route")
 
