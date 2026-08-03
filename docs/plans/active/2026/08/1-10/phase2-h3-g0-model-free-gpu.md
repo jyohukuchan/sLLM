@@ -12,8 +12,8 @@
 
 - 作業単位0と1のstatic contractを完了した。
 - 作業単位2のCMake/build接続、exact 2 target direct compile/link、artifact検査、fail-closed集約、non-required workflowをcommit `03f90be1ad85145e3abee86e67615c1e17f552b4`として公開した。GitHubの2 compile rowはPASSし、aggregateはrun identityのcontainer伝播漏れをfail-closedに検出したため、その修正は次candidateへ含める。
-- 作業単位4のcanonical tuple、identity-only native HIP observer、read-only health/process observer、exact H3 artifact binding、2 row aggregateとnegative contractを実装中である。canonical device identityはversioned matrixへ固定済みだが、同一immutable candidateの正式G0 evidenceはまだない。
-- 次のrollback境界は、H3 identity修正とG0 runnerを同一immutable candidateとしてH0〜H3・canonical 2 row G0で検証するところまでとする。その後は7日を待たず作業単位5へ進む。
+- 作業単位4のcanonical tuple、identity-only native HIP observer、read-only health/process observer、exact H3 artifact binding、2 row aggregateとnegative contractを完了した。commit `e91ff35caac8247fc056eb14a1d6cee2a2319cc5`（tree `75b229791cd3cf7c6ed38c25264b0cd09a9cde33`）でH0〜H3とcanonical `gfx1030`/`gfx1201`のG0・aggregateがPASSした。
+- 次のrollback境界は作業単位5のmodel-free diagnostic pathとし、7日を待たずG1実装へ進む。
 
 ## 目的
 

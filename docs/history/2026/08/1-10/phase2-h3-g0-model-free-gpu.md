@@ -23,5 +23,9 @@
 - H3実装をcommit `03f90be1ad85145e3abee86e67615c1e17f552b4`（tree `87d034951191f1702817d27a4b16c8dd055f2259`）として公開した。GitHub run `30793742848`ではexact 2 compile rowがPASSし、aggregateがrowの既定run identityとGitHub run identityの不一致を拒否した。workflowからcontainerへrun ID/attemptを明示伝播する修正を次candidateへ追加した。
 - canonical G0 rowをV620 `gfx1030`（BDF `0000:03:00.0`、UUID `GPU-76a08c022586fed6`）とR9700 `gfx1201`（BDF `0000:47:00.0`、UUID `GPU-a8e9ddefa2d60f55`）へ固定し、BDF `0000:43:00.0`の2台目V620をspareとして必須evidenceから除外した。
 - pinned ROCm 7.14.0のidentity APIだけを呼ぶprivate native observer、exact BDFからのHIP visibility routingと実観測による再検証、read-only AMD-SMI/sysfs health・process前後確認、外部observation injection拒否、temporary binary cleanup、exact H3 artifact rebinding、G0 2 row fail-closed aggregateを実装した。静的contractとhost negative testはPASSしたが、同一immutable candidateのcanonical G0実機evidenceは未取得である。
+- 実機の`ras/umc_err_count`が`ue`/`ce`/`de`の3行形式であることを受け、uint64範囲のcanonical keyed parserへ修正し、uncorrectable countには`ue`だけを使用した。missing、duplicate、unknown、signed、whitespace、leading-zero、overflowをhost negative testで拒否する。
+- commit `e91ff35caac8247fc056eb14a1d6cee2a2319cc5`（tree `75b229791cd3cf7c6ed38c25264b0cd09a9cde33`）に対し、Python 3.12.10固定環境のH0/H1/H2、digest固定ROCm imageのexact 2 target H3とaggregateがimmutable PASSした。
+- 同じcandidateとH3 artifactでcanonical V620 `gfx1030`（BDF `0000:03:00.0`、UUID `GPU-76a08c022586fed6`）とR9700 `gfx1201`（BDF `0000:47:00.0`、UUID `GPU-a8e9ddefa2d60f55`）のG0を直列実行し、両rowとaggregateがPASSした。pre/post healthは不変、GPU processと残留childは0、allocation/copy/kernel/dispatch countは0であり、G0を実行・数値・性能evidenceへ昇格させない。
+- G0 aggregateはrun `local-e91ff35c` attempt 1、report SHA-256は`gfx1030=408e95b9b6ccc661a5bab661b0be9da2d9c096425492633d25d6337a3fa22341`、`gfx1201=cb94cffccba48ab908d1ef41a3573bfb3e645a40fb157d458171f36c3a90aa67`である。次はH3 required昇格の7日観測を待たず作業単位5のmodel-free G1へ進む。
 
 [対応する計画](../../../../plans/active/2026/08/1-10/phase2-h3-g0-model-free-gpu.md)

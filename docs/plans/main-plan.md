@@ -295,7 +295,7 @@
 
 ## 現在の状態と次の作業
 
-- 現在: Phase 1を完了し、Phase 2のH3を公開済み。canonical GPU/ROCm tuple、identity-only native observer、read-only health/process確認、exact H3 artifact binding、G0 2 row集約を実装中である。次はレビュー済み同一immutable candidateでH0〜H3とcanonical 2 GPUのG0を通し、待機せずmodel-free G1へ進む。
+- 現在: Phase 1を完了し、Phase 2のH3を公開済み。canonical GPU/ROCm tuple、identity-only native observer、read-only health/process確認、exact H3 artifact binding、G0 2 row集約を実装し、同一immutable candidateでH0〜H3とcanonical `gfx1030`/`gfx1201`のG0をPASSした。H3 required昇格の7日観測を待たず、model-free G1へ進む。
 - 完了:
   - プロジェクトライセンスをMITへ統一。
   - Qwen3.5のMTP表記とBF16階層の矛盾を修正。
@@ -322,8 +322,8 @@
   - H3実装をcommit `03f90be1ad85145e3abee86e67615c1e17f552b4`として公開し、GitHub上のexact 2 compile rowがPASSすることを確認。初回aggregateでworkflow run identityのcontainer伝播漏れを検出し、fail-closedに失敗した。
   - canonical GPUをV620 `0000:03:00.0` / `GPU-76a08c022586fed6`とR9700 `0000:47:00.0` / `GPU-a8e9ddefa2d60f55`へ固定し、spare V620を必須rowから除外した。
 - 次:
-  1. H3 workflowへrun ID/attemptを正しく伝播し、G0 runner・schema・negative testとともに同一immutable candidateのH0〜H3を検証する。
-  2. exact H3 artifactに対してcanonical `gfx1030`/`gfx1201`のG0を直列実行・集約する。
+  1. model-free diagnostic pathのC ABI、ownership、allocation/copy/dispatch/completion/cleanupを実装する。
+  2. 同一immutable candidateとexact H3 artifactに対してcanonical `gfx1030`/`gfx1201`のG0/G1を直列実行・集約する。
   3. 同じ証跡境界を再利用してmodel-free最小GPU実行経路を実装し、両GPUのG1を同一candidate SHAに対して検証する。
 
 ## 未解決事項
