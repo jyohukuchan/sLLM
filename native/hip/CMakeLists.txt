@@ -10,7 +10,23 @@ option(SLLM_ENABLE_HIP_RUNTIME
     OFF
 )
 
-if(SLLM_ENABLE_HIP_COMPILE_PROBE OR SLLM_ENABLE_HIP_RUNTIME)
+option(SLLM_ENABLE_PUBLIC_HIP_RUNTIME
+    "Build the public HIP context/resource runtime"
+    OFF
+)
+
+option(SLLM_ENABLE_PUBLIC_RUNTIME_HOST_TEST
+    "Build the production public runtime against the test-only fake HIP API"
+    OFF
+)
+
+option(SLLM_SEMANTIC_G1_AUTHORITY
+    "Require controller-held sealed compiler authority for semantic G1 only"
+    OFF
+)
+
+if(SLLM_ENABLE_HIP_COMPILE_PROBE OR SLLM_ENABLE_HIP_RUNTIME OR
+   SLLM_ENABLE_PUBLIC_HIP_RUNTIME)
     if(NOT DEFINED ROCM_PATH OR ROCM_PATH STREQUAL "")
         message(FATAL_ERROR "HIP build requires an explicit ROCM_PATH")
     endif()
@@ -62,34 +78,76 @@ if(SLLM_ENABLE_HIP_COMPILE_PROBE OR SLLM_ENABLE_HIP_RUNTIME)
     if(NOT DEFINED CMAKE_HIP_COMPILER OR CMAKE_HIP_COMPILER STREQUAL "")
         message(FATAL_ERROR "HIP build requires an explicit CMAKE_HIP_COMPILER")
     endif()
-    if(NOT IS_ABSOLUTE "${CMAKE_HIP_COMPILER}")
-        message(FATAL_ERROR "CMAKE_HIP_COMPILER must be an absolute path")
-    endif()
-    get_filename_component(SLLM_HIP_COMPILER_REAL "${CMAKE_HIP_COMPILER}" REALPATH)
-    string(FIND "${SLLM_HIP_COMPILER_REAL}" "${SLLM_ROCM_REAL}/" SLLM_HIP_COMPILER_ROOT_OFFSET)
-    if(SLLM_HIP_COMPILER_REAL STREQUAL "" OR
-       (NOT SLLM_HIP_COMPILER_REAL STREQUAL SLLM_ROCM_REAL AND
-        NOT SLLM_HIP_COMPILER_ROOT_OFFSET EQUAL 0))
-        message(FATAL_ERROR "HIP compiler must resolve inside ROCM_PATH")
-    endif()
-    get_filename_component(SLLM_HIP_COMPILER_NAME "${CMAKE_HIP_COMPILER}" NAME)
-    if(NOT SLLM_HIP_COMPILER_NAME STREQUAL "amdclang++")
-        message(FATAL_ERROR "HIP build requires the ROCm amdclang++ entry point")
-    endif()
-    if(NOT CMAKE_HIP_COMPILER STREQUAL "${ROCM_PATH}/bin/amdclang++")
-        message(FATAL_ERROR "HIP compiler must use the logical ROCM_PATH/bin/amdclang++ entry point")
-    endif()
-    execute_process(
-        COMMAND "${CMAKE_HIP_COMPILER}" --version
-        RESULT_VARIABLE SLLM_HIP_COMPILER_STATUS
-        OUTPUT_VARIABLE SLLM_HIP_COMPILER_VERSION
-        ERROR_VARIABLE SLLM_HIP_COMPILER_ERROR
-        OUTPUT_STRIP_TRAILING_WHITESPACE
-    )
-    if(NOT SLLM_HIP_COMPILER_STATUS EQUAL 0 OR
-       NOT SLLM_HIP_COMPILER_VERSION MATCHES "(^|\\n)AMD clang version 23\\.")
+    if(NOT DEFINED SLLM_HIP_COMPILER_LOGICAL OR
+       NOT SLLM_HIP_COMPILER_LOGICAL STREQUAL "${ROCM_PATH}/bin/amdclang++")
         message(FATAL_ERROR
-            "HIP build requires LLVM major 23 from ROCm amdclang++; compiler output=${SLLM_HIP_COMPILER_VERSION}; error=${SLLM_HIP_COMPILER_ERROR}")
+            "HIP build requires the logical ROCM_PATH/bin/amdclang++ compiler identity")
+    endif()
+    if(SLLM_SEMANTIC_G1_AUTHORITY)
+        # CMake and Cargo receive only the reviewed client pathname and an
+        # authenticated broker session.  The pathname is a retained sealed
+        # descriptor, so replacement of the original client path cannot alter
+        # the compiler client that CMake executes.
+        if(NOT DEFINED ENV{SLLM_HIP_COMPILER_BROKER_CLIENT} OR
+           NOT "$ENV{SLLM_HIP_COMPILER_BROKER_CLIENT}" STREQUAL "${CMAKE_HIP_COMPILER}" OR
+           NOT CMAKE_HIP_COMPILER MATCHES "^/proc/self/fd/(3|[4-9]|[1-9][0-9]+)$" OR
+           NOT DEFINED ENV{SLLM_HIP_COMPILER_BROKER_CLIENT_FD} OR
+           NOT "$ENV{SLLM_HIP_COMPILER_BROKER_CLIENT_FD}" MATCHES "^(3|[4-9]|[1-9][0-9]+)$" OR
+           NOT CMAKE_HIP_COMPILER STREQUAL "/proc/self/fd/$ENV{SLLM_HIP_COMPILER_BROKER_CLIENT_FD}")
+            message(FATAL_ERROR "semantic G1 requires the exact authenticated compiler broker client")
+        endif()
+        if(NOT DEFINED ENV{SLLM_HIP_COMPILER_BROKER_SOCKET} OR
+           NOT "$ENV{SLLM_HIP_COMPILER_BROKER_SOCKET}" MATCHES "^/[^\n\r ]+$" OR
+           NOT DEFINED ENV{SLLM_HIP_COMPILER_BROKER_SESSION} OR
+           NOT DEFINED ENV{SLLM_HIP_COMPILER_BROKER_TOKEN})
+            message(FATAL_ERROR "semantic G1 compiler broker session is missing or malformed")
+        endif()
+        foreach(SLLM_SEMANTIC_G1_HEX_ENV
+                SLLM_HIP_COMPILER_BROKER_SESSION
+                SLLM_HIP_COMPILER_BROKER_TOKEN
+                SLLM_HIP_COMPILER_BROKER_CLIENT_SHA256)
+            if(NOT DEFINED ENV{${SLLM_SEMANTIC_G1_HEX_ENV}})
+                message(FATAL_ERROR "semantic G1 compiler broker identity is missing")
+            endif()
+            string(LENGTH "$ENV{${SLLM_SEMANTIC_G1_HEX_ENV}}" SLLM_SEMANTIC_G1_HEX_LENGTH)
+            if(NOT SLLM_SEMANTIC_G1_HEX_LENGTH EQUAL 64 OR
+               NOT "$ENV{${SLLM_SEMANTIC_G1_HEX_ENV}}" MATCHES "^[0-9a-f]+$")
+                message(FATAL_ERROR "semantic G1 compiler broker identity is malformed")
+            endif()
+        endforeach()
+        if(NOT DEFINED ENV{SLLM_HIP_COMPILER_BROKER_CLIENT_SHA256})
+            message(FATAL_ERROR "semantic G1 compiler broker client byte identity is missing or malformed")
+        endif()
+    else()
+        if(NOT IS_ABSOLUTE "${CMAKE_HIP_COMPILER}")
+            message(FATAL_ERROR "CMAKE_HIP_COMPILER must be an absolute path")
+        endif()
+        get_filename_component(SLLM_HIP_COMPILER_REAL "${CMAKE_HIP_COMPILER}" REALPATH)
+        string(FIND "${SLLM_HIP_COMPILER_REAL}" "${SLLM_ROCM_REAL}/" SLLM_HIP_COMPILER_ROOT_OFFSET)
+        if(SLLM_HIP_COMPILER_REAL STREQUAL "" OR
+           (NOT SLLM_HIP_COMPILER_REAL STREQUAL SLLM_ROCM_REAL AND
+            NOT SLLM_HIP_COMPILER_ROOT_OFFSET EQUAL 0))
+            message(FATAL_ERROR "HIP compiler must resolve inside ROCM_PATH")
+        endif()
+        get_filename_component(SLLM_HIP_COMPILER_NAME "${CMAKE_HIP_COMPILER}" NAME)
+        if(NOT SLLM_HIP_COMPILER_NAME STREQUAL "amdclang++" OR
+           NOT CMAKE_HIP_COMPILER STREQUAL "${ROCM_PATH}/bin/amdclang++")
+            message(FATAL_ERROR "HIP compiler must use the logical ROCM_PATH/bin/amdclang++ entry point")
+        endif()
+    endif()
+    if(NOT SLLM_SEMANTIC_G1_AUTHORITY)
+        execute_process(
+            COMMAND "${CMAKE_HIP_COMPILER}" --version
+            RESULT_VARIABLE SLLM_HIP_COMPILER_STATUS
+            OUTPUT_VARIABLE SLLM_HIP_COMPILER_VERSION
+            ERROR_VARIABLE SLLM_HIP_COMPILER_ERROR
+            OUTPUT_STRIP_TRAILING_WHITESPACE
+        )
+        if(NOT SLLM_HIP_COMPILER_STATUS EQUAL 0 OR
+           NOT SLLM_HIP_COMPILER_VERSION MATCHES "(^|\\n)AMD clang version 23\\.")
+            message(FATAL_ERROR
+                "HIP build requires LLVM major 23 from ROCm amdclang++; compiler output=${SLLM_HIP_COMPILER_VERSION}; error=${SLLM_HIP_COMPILER_ERROR}")
+        endif()
     endif()
     if(NOT DEFINED CMAKE_HIP_ARCHITECTURES OR
        CMAKE_HIP_ARCHITECTURES STREQUAL "" OR
@@ -107,6 +165,35 @@ if(SLLM_ENABLE_HIP_COMPILE_PROBE OR SLLM_ENABLE_HIP_RUNTIME)
           "co_v6,wave32,xnack=unsupported,sramecc=unsupported,generic_processor_version=0")
         message(FATAL_ERROR "HIP codegen features are not the pinned tuple")
     endif()
+    # ROCm 7.14 / AMD clang 23 accepts the two code-object/wave32 driver
+    # options below.  Its --help exposes neither -mno-xnack nor -mno-sramecc,
+    # and target
+    # IDs with :xnack- or :sramecc- are rejected for exact gfx1030/gfx1201
+    # because those processors report both features as unsupported.  Therefore
+    # the exact target (without a feature suffix) is the source-level encoding
+    # of xnack=unsupported,sramecc=unsupported; adding guessed disable flags
+    # would make the pinned tuple less reproducible.  Exact targets also carry
+    # generic_processor_version=0; no generic processor target is accepted by
+    # this CMake path.
+    if(NOT SLLM_SEMANTIC_G1_AUTHORITY)
+        execute_process(
+            COMMAND "${CMAKE_HIP_COMPILER}" --help
+            RESULT_VARIABLE SLLM_HIP_HELP_STATUS
+            OUTPUT_VARIABLE SLLM_HIP_HELP
+            ERROR_VARIABLE SLLM_HIP_HELP_ERROR
+        )
+        if(NOT SLLM_HIP_HELP_STATUS EQUAL 0 OR
+           NOT SLLM_HIP_HELP MATCHES "-mcode-object-version=<value>" OR
+           NOT SLLM_HIP_HELP MATCHES "-mno-wavefrontsize64")
+            message(FATAL_ERROR
+                "ROCm AMD clang does not expose the pinned HIP flags: ${SLLM_HIP_HELP_ERROR}")
+        endif()
+    endif()
+    if(CMAKE_HIP_ARCHITECTURES MATCHES ":" OR
+       SLLM_HIP_CODEGEN_FEATURES MATCHES "generic_processor_version=[1-9]")
+        message(FATAL_ERROR
+            "public HIP build requires an exact target with generic_processor_version=0")
+    endif()
     sllm_require_rocm_path("${ROCM_PATH}/include/hip/hip_runtime.h" "hip_headers")
     sllm_require_rocm_path("${ROCM_PATH}/lib/cmake/hip" "hip_cmake_package")
     sllm_require_rocm_path("${ROCM_PATH}/amdgcn/bitcode" "device_libraries")
@@ -115,18 +202,28 @@ if(SLLM_ENABLE_HIP_COMPILE_PROBE OR SLLM_ENABLE_HIP_RUNTIME)
     sllm_require_rocm_path("${ROCM_PATH}/lib/llvm/bin/llvm-objcopy" "llvm_objcopy")
     sllm_require_rocm_path("${ROCM_PATH}/lib/llvm/bin/llvm-readobj" "llvm_readobj")
     sllm_require_rocm_path("${ROCM_PATH}/lib/llvm/bin/llvm-objdump" "llvm_objdump")
-    project(sllm_hip_stub VERSION 0.1.0 LANGUAGES C CXX HIP)
+    if(SLLM_SEMANTIC_G1_AUTHORITY)
+        # Configure is intentionally compiler-less.  Semantic G1 uses only
+        # the two fixed custom HIP actions below; no CMake compiler-id or
+        # try-compile request can gain compiler authority during discovery.
+        project(sllm_hip_stub VERSION 0.1.0 LANGUAGES C CXX)
+    else()
+        project(sllm_hip_stub VERSION 0.1.0 LANGUAGES C CXX HIP)
+    endif()
 else()
     project(sllm_hip_stub VERSION 0.1.0 LANGUAGES C CXX)
 endif()
 
-if(SLLM_ENABLE_HIP_COMPILE_PROBE OR SLLM_ENABLE_HIP_RUNTIME)
+if((SLLM_ENABLE_HIP_COMPILE_PROBE OR SLLM_ENABLE_HIP_RUNTIME OR
+   SLLM_ENABLE_PUBLIC_HIP_RUNTIME) AND NOT SLLM_SEMANTIC_G1_AUTHORITY)
     set(CMAKE_HIP_STANDARD 17)
     set(CMAKE_HIP_STANDARD_REQUIRED ON)
 endif()
 
 set(SLLM_HIP_NATIVE_SOURCES
     src/hip_stub.cpp
+    src/public_runtime_stub.cpp
+    src/rmsnorm_api.cpp
     src/hip_evidence_stub.cpp
     src/header_c_compile.c
     src/header_cpp_compile.cpp
@@ -136,6 +233,62 @@ if(SLLM_ENABLE_HIP_RUNTIME)
     set_source_files_properties(src/hip_evidence_runtime.hip.cpp PROPERTIES LANGUAGE HIP)
     list(REMOVE_ITEM SLLM_HIP_NATIVE_SOURCES src/hip_evidence_stub.cpp)
     list(APPEND SLLM_HIP_NATIVE_SOURCES src/hip_evidence_runtime.hip.cpp)
+endif()
+
+if(SLLM_ENABLE_PUBLIC_HIP_RUNTIME)
+    list(REMOVE_ITEM SLLM_HIP_NATIVE_SOURCES src/public_runtime_stub.cpp)
+    if(SLLM_SEMANTIC_G1_AUTHORITY)
+        set(SLLM_SEMANTIC_G1_HIP_FLAGS
+            -D__HIP_ROCclr__=1
+            -DSLLM_ENABLE_PUBLIC_HIP_RUNTIME=1
+            -O3
+            -DNDEBUG
+            -std=gnu++17
+            -fPIC
+            -I "${PROJECT_SOURCE_DIR}/../../include"
+            -I "${PROJECT_SOURCE_DIR}/src"
+            "--offload-arch=${CMAKE_HIP_ARCHITECTURES}"
+            -mcode-object-version=6
+            -mno-wavefrontsize64
+            -pthread
+            -x hip
+            -c
+        )
+        set(SLLM_SEMANTIC_G1_PUBLIC_OBJECT "${CMAKE_BINARY_DIR}/public_runtime.hip.o")
+        set(SLLM_SEMANTIC_G1_KERNEL_OBJECT "${CMAKE_BINARY_DIR}/rmsnorm_kernel.hip.o")
+        add_custom_command(
+            OUTPUT "${SLLM_SEMANTIC_G1_PUBLIC_OBJECT}"
+            COMMAND "${CMAKE_HIP_COMPILER}" ${SLLM_SEMANTIC_G1_HIP_FLAGS}
+                "${PROJECT_SOURCE_DIR}/src/public_runtime.hip.cpp"
+                -o "${SLLM_SEMANTIC_G1_PUBLIC_OBJECT}"
+            DEPENDS src/public_runtime.hip.cpp src/public_runtime_internal.hpp src/rmsnorm_api.hpp
+                "${PROJECT_SOURCE_DIR}/../../include/sllm/hip.h"
+            WORKING_DIRECTORY "${CMAKE_BINARY_DIR}"
+            VERBATIM
+        )
+        add_custom_command(
+            OUTPUT "${SLLM_SEMANTIC_G1_KERNEL_OBJECT}"
+            COMMAND "${CMAKE_HIP_COMPILER}" ${SLLM_SEMANTIC_G1_HIP_FLAGS}
+                "${PROJECT_SOURCE_DIR}/src/rmsnorm_kernel.hip.cpp"
+                -o "${SLLM_SEMANTIC_G1_KERNEL_OBJECT}"
+            DEPENDS src/rmsnorm_kernel.hip.cpp src/rmsnorm_kernel_internal.hpp
+                "${PROJECT_SOURCE_DIR}/../../include/sllm/hip.h"
+            WORKING_DIRECTORY "${CMAKE_BINARY_DIR}"
+            VERBATIM
+        )
+        set_source_files_properties(
+            "${SLLM_SEMANTIC_G1_PUBLIC_OBJECT}" "${SLLM_SEMANTIC_G1_KERNEL_OBJECT}"
+            PROPERTIES GENERATED TRUE EXTERNAL_OBJECT TRUE
+        )
+        list(APPEND SLLM_HIP_NATIVE_SOURCES
+            "${SLLM_SEMANTIC_G1_PUBLIC_OBJECT}" "${SLLM_SEMANTIC_G1_KERNEL_OBJECT}"
+        )
+    else()
+        set_source_files_properties(src/public_runtime.hip.cpp PROPERTIES LANGUAGE HIP)
+        set_source_files_properties(src/rmsnorm_kernel.hip.cpp PROPERTIES LANGUAGE HIP)
+        list(APPEND SLLM_HIP_NATIVE_SOURCES src/public_runtime.hip.cpp)
+        list(APPEND SLLM_HIP_NATIVE_SOURCES src/rmsnorm_kernel.hip.cpp)
+    endif()
 endif()
 
 add_library(sllm_hip_stub STATIC ${SLLM_HIP_NATIVE_SOURCES})
@@ -165,7 +318,23 @@ else()
     )
 endif()
 
-if(SLLM_ENABLE_HIP_RUNTIME)
+if(SLLM_ENABLE_HIP_RUNTIME OR SLLM_ENABLE_PUBLIC_HIP_RUNTIME)
+    target_include_directories(sllm_hip_stub PRIVATE
+        "${ROCM_PATH}/include"
+    )
+    target_link_directories(sllm_hip_stub PRIVATE
+        "${ROCM_PATH}/lib"
+    )
+    target_link_libraries(sllm_hip_stub PRIVATE amdhip64)
+endif()
+
+if(SLLM_ENABLE_PUBLIC_HIP_RUNTIME)
+    target_compile_definitions(sllm_hip_stub PRIVATE
+        SLLM_ENABLE_PUBLIC_HIP_RUNTIME=1
+    )
+endif()
+
+if(SLLM_ENABLE_HIP_RUNTIME OR SLLM_ENABLE_PUBLIC_HIP_RUNTIME)
     target_compile_definitions(sllm_hip_stub PRIVATE
         SLLM_HIP_COMPILE_TARGET="${SLLM_HIP_COMPILE_TARGET}"
     )
@@ -220,4 +389,40 @@ if(SLLM_ENABLE_HIP_COMPILE_PROBE)
         DEPENDS "${SLLM_HIP_PROBE_OBJECT_OUTPUT}"
     )
     add_dependencies(sllm_hip_compile_probe_link sllm_hip_compile_probe_bundle_object)
+endif()
+
+if(SLLM_ENABLE_PUBLIC_RUNTIME_HOST_TEST)
+    enable_testing()
+    find_package(Threads REQUIRED)
+    add_executable(sllm_public_runtime_host_test
+        src/public_runtime.hip.cpp
+        src/rmsnorm_api.cpp
+        tests/fake_hip_runtime.cpp
+        tests/public_runtime_host_test.cpp
+    )
+    set_source_files_properties(src/public_runtime.hip.cpp PROPERTIES
+        LANGUAGE CXX
+    )
+    target_compile_features(sllm_public_runtime_host_test PRIVATE cxx_std_17)
+    target_compile_definitions(sllm_public_runtime_host_test PRIVATE
+        SLLM_PUBLIC_RUNTIME_HOST_TEST=1
+    )
+    target_include_directories(sllm_public_runtime_host_test PRIVATE
+        "${PROJECT_SOURCE_DIR}/../../include"
+        "${PROJECT_SOURCE_DIR}/src"
+        "${PROJECT_SOURCE_DIR}/tests/fake_hip/include"
+    )
+    target_compile_options(sllm_public_runtime_host_test PRIVATE
+        -Wall
+        -Wextra
+        -Wpedantic
+        -Wconversion
+        -Wsign-conversion
+        -Wshadow
+        -Werror
+    )
+    target_link_libraries(sllm_public_runtime_host_test PRIVATE Threads::Threads)
+    add_test(NAME sllm_public_runtime_host_test
+        COMMAND sllm_public_runtime_host_test
+    )
 endif()

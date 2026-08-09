@@ -44,3 +44,5 @@ llama.cppのlocal `models/` にある19 vocabulary GGUF（合計 `77556152` byte
 ## 関連文書
 
 - 今回の採用作業は [採用計画](../plans/archive/2026/08/1-10/reference-source-adoption.md) と [採用履歴](../history/2026/08/1-10/reference-source-adoption.md) を参照する。
+- Qwen3.5 Phase 3の固定llama.cpp/vLLM reader結果は[Qwen3.5 Phase 3 reader記録](qwen3.5-phase3-reader.md)を参照する。
+- Qwen3.5 full-model text path、state/cache、tensor分類、CLI/G3のreader結果は[Qwen3.5 Phase 3 full-model reader記録](qwen3.5-phase3-full-model-reader.md)を参照する。

@@ -6,6 +6,13 @@ rust-version.workspace = true
 license.workspace = true
 description = "Safe Rust wrapper and Phase 1 host probe for the sLLM HIP ABI"
 
+[[bin]]
+name = "sllm-rmsnorm-g2-evidence"
+path = "src/bin/sllm-rmsnorm-g2-evidence.rs"
+
 [dependencies]
 sllm-core.workspace = true
 sllm-hip-sys.workspace = true
+
+[dev-dependencies]
+static_assertions = "1.1.0"

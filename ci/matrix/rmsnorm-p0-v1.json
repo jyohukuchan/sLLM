@@ -1,0 +1,79 @@
+{
+  "schema_version": "rmsnorm-p0-matrix-v1",
+  "matrix_id": "rmsnorm-p0-v1",
+  "revision": 1,
+  "suite_id": "p0-rmsnorm-runtime-smoke",
+  "tier": "tier_p0",
+  "required": true,
+  "serial": true,
+  "dispatch_block_size": 256,
+  "timing": {
+    "timing_contract": "rmsnorm-p0-timing-v1",
+    "unit": "ns",
+    "kernel_source": "hip-event-elapsed-time",
+    "wall_source": "steady-clock-monotonic",
+    "warmup_iterations": 5,
+    "measurement_iterations": 21,
+    "location": "median",
+    "robust_spread": "median-absolute-deviation"
+  },
+  "dtype": {
+    "activation": "BF16",
+    "weight": "BF16",
+    "output": "BF16",
+    "accumulation": "F32",
+    "scale_mode": "offset-one",
+    "epsilon": "1e-6"
+  },
+  "scope": {
+    "selected_backend": "hip",
+    "public_rmsnorm_path": true,
+    "semantic_op_used": true,
+    "model_used": false,
+    "gpu_execution": true,
+    "fallback_allowed": false,
+    "fallback_used": false,
+    "cpu_fallback_used": false,
+    "optimized_claim": false,
+    "other_engine_comparison": false,
+    "performance_hard_gate": false
+  },
+  "cases": [
+    {"order": 0, "id": "p0-r3-n37", "rows": 3, "n": 37, "input_seed": 9301, "classification": "synthetic-nonaligned"},
+    {"order": 1, "id": "p0-r1-n2560", "rows": 1, "n": 2560, "input_seed": 9302, "classification": "locked-model-hidden-size"},
+    {"order": 2, "id": "p0-r1-n255", "rows": 1, "n": 255, "input_seed": 9303, "classification": "dispatch-b-minus-1"},
+    {"order": 3, "id": "p0-r1-n256", "rows": 1, "n": 256, "input_seed": 9304, "classification": "dispatch-b"},
+    {"order": 4, "id": "p0-r1-n257", "rows": 1, "n": 257, "input_seed": 9305, "classification": "dispatch-b-plus-1"}
+  ],
+  "targets": [
+    {
+      "order": 0,
+      "row_id": "rmsnorm-p0-gfx1030",
+      "target": "gfx1030",
+      "device": {"bdf": "0000:03:00.0", "uuid": "GPU-76a08c022586fed6", "product": "AMD Radeon Pro V620", "physical_hip_index": 0, "logical_device_index": 0},
+      "backend": "hip",
+      "cases": ["p0-r3-n37", "p0-r1-n2560", "p0-r1-n255", "p0-r1-n256", "p0-r1-n257"]
+    },
+    {
+      "order": 1,
+      "row_id": "rmsnorm-p0-gfx1201",
+      "target": "gfx1201",
+      "device": {"bdf": "0000:47:00.0", "uuid": "GPU-a8e9ddefa2d60f55", "product": "AMD Radeon AI PRO R9700", "physical_hip_index": 2, "logical_device_index": 0},
+      "backend": "hip",
+      "cases": ["p0-r3-n37", "p0-r1-n2560", "p0-r1-n255", "p0-r1-n256", "p0-r1-n257"]
+    }
+  ],
+  "model_lock": {
+    "path": "docs/models/locks/qwen3.5-4b-bf16.json",
+    "fingerprint": "sha256:32265444b7cdd2a00e4e4e3e6aa8375a05acf6cddfcb9ffc348f54f67a7cd935",
+    "resolved_revision": "851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a"
+  },
+  "review_policy": "ci/matrix/rmsnorm-p0-review-policy-v1.json",
+  "runtime_producer": {
+    "binary_name": "sllm-rmsnorm-p0-evidence",
+    "role": "dedicated-p0-public-rmsnorm-producer",
+    "result_schema": "rmsnorm-p0-runtime-result-v1",
+    "implementation_status": "host-scaffold-a5-required"
+  },
+  "prerequisites": ["g0", "private_g1", "semantic_g1", "g2", "h3"]
+}

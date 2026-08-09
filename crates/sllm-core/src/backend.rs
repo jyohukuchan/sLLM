@@ -1,6 +1,10 @@
 use std::fmt;
+use std::sync::Arc;
 
-use crate::{OpError, SemanticOp, TensorError, TensorView};
+use crate::{
+    ExecutionError, ExecutionSession, ExecutionSessionRequest, OpError, SemanticOp, TensorError,
+    TensorView,
+};
 
 pub trait Backend: Send + Sync {
     fn name(&self) -> &'static str;
@@ -8,6 +12,19 @@ pub trait Backend: Send + Sync {
     fn supports(&self, operation: &SemanticOp) -> BackendSupport;
     fn materialize(&self, view: &TensorView) -> Result<MaterializedTensor, BackendError>;
     fn execute(&self, operation: &SemanticOp) -> Result<ExecutionReceipt, BackendError>;
+
+    /// Opens the additive owned execution path.  The legacy control-plane
+    /// methods above intentionally keep their Phase 1 contracts and must not
+    /// be reinterpreted as numerical execution.
+    fn open_execution_session(
+        &self,
+        _request: ExecutionSessionRequest,
+    ) -> Result<Arc<ExecutionSession>, ExecutionError> {
+        Err(ExecutionError::ExecutionUnavailable {
+            backend: self.name(),
+            reason: "this backend does not implement owned execution sessions".to_owned(),
+        })
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

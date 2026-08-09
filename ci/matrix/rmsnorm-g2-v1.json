@@ -1,0 +1,41 @@
+{
+  "schema_version": "rmsnorm-g2-matrix-v1",
+  "matrix_id": "rmsnorm-g2-v1",
+  "suite_id": "g2-rmsnorm-real-weight-runtime",
+  "tier": "tier_g2",
+  "required": true,
+  "targets": [
+    {
+      "order": 0,
+      "row_id": "rmsnorm-g2-gfx1030",
+      "target": "gfx1030",
+      "device": {"bdf": "0000:03:00.0", "uuid": "GPU-76a08c022586fed6", "product": "AMD Radeon Pro V620", "physical_hip_index": 0, "logical_device_index": 0},
+      "backend": "hip",
+      "cases": ["g2-r1-n2560", "g2-r2-n2560", "g2-r17-n2560", "g2-r255-n2560", "g2-r256-n2560", "g2-r257-n2560"]
+    },
+    {
+      "order": 1,
+      "row_id": "rmsnorm-g2-gfx1201",
+      "target": "gfx1201",
+      "device": {"bdf": "0000:47:00.0", "uuid": "GPU-a8e9ddefa2d60f55", "product": "AMD Radeon AI PRO R9700", "physical_hip_index": 2, "logical_device_index": 0},
+      "backend": "hip",
+      "cases": ["g2-r1-n2560", "g2-r2-n2560", "g2-r17-n2560", "g2-r255-n2560", "g2-r256-n2560", "g2-r257-n2560"]
+    }
+  ],
+  "cases": [
+    {"order": 0, "id": "g2-r1-n2560", "rows": 1, "n": 2560, "input_seed": 9201, "classification": "finite"},
+    {"order": 1, "id": "g2-r2-n2560", "rows": 2, "n": 2560, "input_seed": 9202, "classification": "finite"},
+    {"order": 2, "id": "g2-r17-n2560", "rows": 17, "n": 2560, "input_seed": 9217, "classification": "finite"},
+    {"order": 3, "id": "g2-r255-n2560", "rows": 255, "n": 2560, "input_seed": 9255, "classification": "finite"},
+    {"order": 4, "id": "g2-r256-n2560", "rows": 256, "n": 2560, "input_seed": 9256, "classification": "finite"},
+    {"order": 5, "id": "g2-r257-n2560", "rows": 257, "n": 2560, "input_seed": 9257, "classification": "finite"}
+  ],
+  "tolerance": "ci/matrix/rmsnorm-g2-tolerance-v1.json",
+  "slice_contract": "ci/schema/rmsnorm-g2-model-slice-v1.schema.json",
+  "prerequisites": {
+    "g0": "bound-only:g0-gfx1030-or-gfx1201",
+    "private_g1": "bound-only:g1-gfx1030-or-gfx1201",
+    "semantic_g1": "bound-only:rmsnorm-semantic-g1-gfx1030-or-gfx1201",
+    "h3": "bound-only:h3-rmsnorm-gfx1030-or-gfx1201"
+  }
+}

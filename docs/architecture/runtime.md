@@ -128,6 +128,16 @@ caseは1、3、17、255、256、257 byteとし、Rust側の独立XOR oracleへby
 
 timeoutまたは早期drop後のresourceは完了を証明せずにfreeしない。background reaperへ所有権を移し、回収枠を固定上限へ制限する。同期・解放を証明できなければcircuit breakerを開いて新規submitを拒否し、専用processの終了とtrusted local runnerによる子process/GPU process残留確認を最終cleanup境界とする。このprivate pathは将来のsemantic command list ABIや一般的なGPU対応を確定しない。
 
+### Phase 3最初のpublic semantic op
+
+最初のpublic semantic opはRMSNormとする。private diagnostic G1を昇格または流用せず、`SemanticOpDescriptor -> Backend -> sllm-hip -> versioned public C ABI -> native op registry -> HIP kernel registry`を通す。private diagnostic G1はallocation、transfer、lifetime、loaderの回帰evidenceとして並行して残し、semantic RMSNorm G1は独立したschema、runner、aggregateで数値正しさを記録する。
+
+baseline RMSNormはBF16 activation、BF16 raw scale weight、BF16 output、FP32 accumulation、row-majorで連続した最終次元に限定する。Qwen3.5 HF checkpointでは実効scaleをFP32で`1 + raw_weight`として適用し、raw weightを通常scaleとして直接乗算しない。disk上のweightを事前変換せず、descriptorのversioned scale modeでoffset-one semanticsを明示する。epsilonはlocked model configまたは明示的なsynthetic caseから取得し、暗黙の既定値へfallbackしない。初期実装はin-placeを許可せず、input/output alias、unsupported dtype/encoding/scale mode/stride/alignment/shape、zero-lengthをcapability queryまたはprepareで明示的に拒否する。
+
+Rustはsemantic descriptor、owned tensor view、buffer access、completionまでの強参照を所有し、native側はopaque resource、metadataの即時copy、dispatch、kernel選択、非同期completionを所有する。exact target、layoutまたはkernelが適合しない場合は別backend、generic kernel、CPUへfallbackしない。公開ABIを拡張するときは既存v1を壊さず、additiveに表せない変更だけversionを上げる。
+
+synthetic caseによるsemantic G1の後、固定model lockから抽出した実RMSNorm weightと独立生成activationをG2で検証する。短いP0は同じpublic RMSNorm pathのkernel latencyとdispatch境界だけを観測し、full model性能または最適化済みであることを意味しない。
+
 ## MVP の対象外
 
 次は初期 MVP に含めない。

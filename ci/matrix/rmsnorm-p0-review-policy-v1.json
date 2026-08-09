@@ -1,0 +1,29 @@
+{
+  "schema_version": "rmsnorm-p0-review-policy-v1",
+  "policy_id": "rmsnorm-p0-review-policy-v1",
+  "revision": 1,
+  "performance_sanity_disposition": "review_required",
+  "threshold": {
+    "approved": false,
+    "threshold_id": null,
+    "metric_thresholds": []
+  },
+  "required_measurement": {
+    "targets": ["gfx1030", "gfx1201"],
+    "case_ids": ["p0-r3-n37", "p0-r1-n2560", "p0-r1-n255", "p0-r1-n256", "p0-r1-n257"],
+    "boundary_triplet": ["p0-r1-n255", "p0-r1-n256", "p0-r1-n257"],
+    "warmup_iterations": 5,
+    "measurement_iterations": 21,
+    "metrics": ["kernel_latency_ns", "wall_latency_ns"],
+    "summaries": ["median_ns", "median_absolute_deviation_ns"]
+  },
+  "required_review": {
+    "decision": "accept_observation_without_threshold",
+    "fields": ["reviewer", "reason", "reviewed_at", "canonical_rows"]
+  },
+  "claims": {
+    "optimized": false,
+    "faster_than_other_engine": false,
+    "performance_hard_gate_established": false
+  }
+}

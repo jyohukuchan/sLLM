@@ -12,6 +12,14 @@ pub mod evidence {
     include!("evidence_bindings.rs");
 }
 
+/// Build-time identity embedded in the dedicated G2 executable dependency.
+/// The host builder and validator independently recompute this identity from
+/// the reviewed Cargo/build.rs/CMake source set before accepting an artifact.
+#[doc(hidden)]
+pub mod g2_build_identity {
+    include!(concat!(env!("OUT_DIR"), "/rmsnorm_g2_build_identity.rs"));
+}
+
 /// Metadata for the checked-in ABI mirror. Regeneration is intentionally explicit.
 pub mod binding_metadata {
     pub const SOURCE: &str = "include/sllm/hip.h";

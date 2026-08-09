@@ -1,0 +1,34 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sllm-project.local/ci/schema/rmsnorm-p0-review-disposition-v1.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "disposition_id", "performance_sanity_disposition", "threshold", "candidate", "tree_oid", "matrix", "review_policy", "case_set_sha256", "model_lock", "source_set_sha256", "review", "canonical_rows", "claims"],
+  "properties": {
+    "schema_version": {"const": "rmsnorm-p0-review-disposition-v1"},
+    "disposition_id": {"type": "string", "minLength": 1},
+    "performance_sanity_disposition": {"const": "review_required"},
+    "threshold": {"type": "object", "additionalProperties": false, "required": ["approved", "threshold_id", "metric_thresholds"], "properties": {"approved": {"const": false}, "threshold_id": {"const": null}, "metric_thresholds": {"type": "array", "maxItems": 0, "items": false}}},
+    "candidate": {"$ref": "#/$defs/candidate"},
+    "tree_oid": {"$ref": "#/$defs/sha40"},
+    "matrix": {"$ref": "#/$defs/identity"},
+    "review_policy": {"$ref": "#/$defs/identity"},
+    "case_set_sha256": {"$ref": "#/$defs/sha256"},
+    "model_lock": {"$ref": "#/$defs/model_lock"},
+    "source_set_sha256": {"$ref": "#/$defs/sha256"},
+    "review": {"$ref": "#/$defs/review"},
+    "canonical_rows": {"type": "array", "minItems": 2, "maxItems": 2, "items": {"$ref": "#/$defs/row"}},
+    "claims": {"$ref": "#/$defs/claims"}
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "sha40": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "candidate": {"type": "object", "additionalProperties": false, "required": ["reviewed_sha", "tested_sha", "workflow_sha", "git_tree_oid", "worktree_clean", "revision_input"], "properties": {"reviewed_sha": {"$ref": "#/$defs/sha40"}, "tested_sha": {"$ref": "#/$defs/sha40"}, "workflow_sha": {"$ref": "#/$defs/sha40"}, "git_tree_oid": {"$ref": "#/$defs/sha40"}, "worktree_clean": {"const": true}, "revision_input": {"const": "full-sha"}}},
+    "identity": {"type": "object", "additionalProperties": false, "required": ["path", "sha256"], "properties": {"path": {"type": "string", "minLength": 1}, "sha256": {"$ref": "#/$defs/sha256"}}},
+    "model_lock": {"type": "object", "additionalProperties": false, "required": ["path", "sha256", "fingerprint", "resolved_revision"], "properties": {"path": {"const": "docs/models/locks/qwen3.5-4b-bf16.json"}, "sha256": {"$ref": "#/$defs/sha256"}, "fingerprint": {"const": "sha256:32265444b7cdd2a00e4e4e3e6aa8375a05acf6cddfcb9ffc348f54f67a7cd935"}, "resolved_revision": {"const": "851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a"}}},
+    "review": {"type": "object", "additionalProperties": false, "required": ["decision", "reviewer", "reason", "reviewed_at"], "properties": {"decision": {"const": "accept_observation_without_threshold"}, "reviewer": {"type": "string", "minLength": 3}, "reason": {"type": "string", "minLength": 24}, "reviewed_at": {"type": "string", "format": "date-time"}}},
+    "case_summary": {"type": "object", "additionalProperties": false, "required": ["order", "id", "kernel_median_ns", "kernel_mad_ns", "wall_median_ns", "wall_mad_ns", "sample_set_sha256"], "properties": {"order": {"type": "integer", "minimum": 0, "maximum": 4}, "id": {"type": "string", "minLength": 1}, "kernel_median_ns": {"type": "integer", "minimum": 1}, "kernel_mad_ns": {"type": "integer", "minimum": 0}, "wall_median_ns": {"type": "integer", "minimum": 1}, "wall_mad_ns": {"type": "integer", "minimum": 0}, "sample_set_sha256": {"$ref": "#/$defs/sha256"}}},
+    "row": {"type": "object", "additionalProperties": false, "required": ["order", "row_id", "target", "report_sha256", "artifact_sha256", "measurement_sha256", "complete_measurements", "cases"], "properties": {"order": {"type": "integer", "minimum": 0, "maximum": 1}, "row_id": {"enum": ["rmsnorm-p0-gfx1030", "rmsnorm-p0-gfx1201"]}, "target": {"enum": ["gfx1030", "gfx1201"]}, "report_sha256": {"$ref": "#/$defs/sha256"}, "artifact_sha256": {"$ref": "#/$defs/sha256"}, "measurement_sha256": {"$ref": "#/$defs/sha256"}, "complete_measurements": {"const": true}, "cases": {"type": "array", "minItems": 5, "maxItems": 5, "items": {"$ref": "#/$defs/case_summary"}}}},
+    "claims": {"type": "object", "additionalProperties": false, "required": ["optimized", "faster_than_other_engine", "performance_hard_gate_established"], "properties": {"optimized": {"const": false}, "faster_than_other_engine": {"const": false}, "performance_hard_gate_established": {"const": false}}}
+  }
+}

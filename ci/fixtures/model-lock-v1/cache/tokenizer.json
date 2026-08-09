@@ -1,0 +1,9 @@
+{
+  "added_tokens": [
+    {
+      "id": 0,
+      "content": "<|endoftext|>",
+      "special": true
+    }
+  ]
+}

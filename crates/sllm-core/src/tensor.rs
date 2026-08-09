@@ -10,6 +10,7 @@ pub struct TensorView {
     shape: Vec<usize>,
     strides: Vec<usize>,
     byte_offset: u64,
+    payload_bytes: u64,
     span_bytes: u64,
 }
 
@@ -100,6 +101,7 @@ impl TensorView {
             shape: shape.to_vec(),
             strides: strides.to_vec(),
             byte_offset,
+            payload_bytes,
             span_bytes,
         })
     }
@@ -139,6 +141,18 @@ impl TensorView {
         self.span_bytes
     }
 
+    /// Bytes addressed by this view, excluding its byte offset in the backing
+    /// buffer.  This is distinct from [`Self::span_bytes`] so layout checks do
+    /// not accidentally require a zero-offset subview.
+    pub const fn payload_bytes(&self) -> u64 {
+        self.payload_bytes
+    }
+
+    /// Exclusive byte end in the backing buffer.
+    pub const fn end_offset(&self) -> u64 {
+        self.span_bytes
+    }
+
     pub fn is_contiguous(&self) -> bool {
         let mut expected = 1usize;
         for (&dimension, &stride) in self.shape.iter().zip(&self.strides).rev() {
@@ -150,7 +164,7 @@ impl TensorView {
                 None => return false,
             };
         }
-        self.byte_offset == 0
+        true
     }
 }
 

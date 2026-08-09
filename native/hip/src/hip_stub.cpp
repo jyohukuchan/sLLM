@@ -4,6 +4,8 @@
 #include <cstring>
 #include <limits>
 
+#ifndef SLLM_ENABLE_PUBLIC_HIP_RUNTIME
+
 namespace {
 
 void clear_error(sllm_error_sink_t *const sink) noexcept {
@@ -44,6 +46,10 @@ sllm_status_t validate_error_sink(sllm_error_sink_t *const sink) noexcept {
   if (sink == nullptr) {
     return SLLM_STATUS_OK;
   }
+  if (sink->struct_size <
+      offsetof(sllm_error_sink_t, abi_version) + sizeof(sink->abi_version)) {
+    return SLLM_STATUS_INVALID_ARGUMENT;
+  }
   if (sink->struct_size < sizeof(sllm_error_sink_t)) {
     return SLLM_STATUS_INVALID_ARGUMENT;
   }
@@ -71,6 +77,11 @@ sllm_status_t validate_struct(const Struct *const value,
                               const char *const name) noexcept {
   if (value == nullptr) {
     return write_error(sink, SLLM_STATUS_INVALID_ARGUMENT, name);
+  }
+  if (value->struct_size <
+      offsetof(Struct, abi_version) + sizeof(value->abi_version)) {
+    return write_error(sink, SLLM_STATUS_INVALID_ARGUMENT,
+                       "struct_size does not include abi_version");
   }
   if (value->struct_size < sizeof(Struct)) {
     return write_error(sink, SLLM_STATUS_INVALID_ARGUMENT,
@@ -119,7 +130,7 @@ validate_context_probe_result(const sllm_context_probe_result_t *const result,
 
 extern "C" sllm_status_t
 sllm_get_abi_version(uint32_t *const abi_version,
-                     sllm_error_sink_t *const error_sink) {
+                     sllm_error_sink_t *const error_sink) noexcept {
   try {
     const sllm_status_t sink_status = validate_error_sink(error_sink);
     if (sink_status != SLLM_STATUS_OK) {
@@ -139,7 +150,7 @@ sllm_get_abi_version(uint32_t *const abi_version,
 
 extern "C" sllm_status_t
 sllm_query_version(sllm_version_info_t *const version,
-                   sllm_error_sink_t *const error_sink) {
+                   sllm_error_sink_t *const error_sink) noexcept {
   try {
     const sllm_status_t sink_status = validate_error_sink(error_sink);
     if (sink_status != SLLM_STATUS_OK) {
@@ -168,7 +179,7 @@ sllm_query_version(sllm_version_info_t *const version,
 extern "C" sllm_status_t
 sllm_backend_probe(const uint32_t backend,
                    sllm_backend_probe_result_t *const result,
-                   sllm_error_sink_t *const error_sink) {
+                   sllm_error_sink_t *const error_sink) noexcept {
   try {
     const sllm_status_t sink_status = validate_error_sink(error_sink);
     if (sink_status != SLLM_STATUS_OK) {
@@ -197,7 +208,7 @@ sllm_backend_probe(const uint32_t backend,
 extern "C" sllm_status_t
 sllm_context_probe(const sllm_context_t *const context,
                    sllm_context_probe_result_t *const result,
-                   sllm_error_sink_t *const error_sink) {
+                   sllm_error_sink_t *const error_sink) noexcept {
   try {
     const sllm_status_t sink_status = validate_error_sink(error_sink);
     if (sink_status != SLLM_STATUS_OK) {
@@ -217,3 +228,5 @@ sllm_context_probe(const sllm_context_t *const context,
                        "unexpected exception in context probe");
   }
 }
+
+#endif // SLLM_ENABLE_PUBLIC_HIP_RUNTIME

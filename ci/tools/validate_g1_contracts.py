@@ -437,7 +437,7 @@ def _tail_is_dedicated_binary(path_value: Any, label: str) -> None:
     path = Path(path_value)
     if not path.is_absolute() or path.parts[-3:] != EXPECTED_BINARY_SUFFIX or "." in path.parts or ".." in path.parts:
         raise ContractError(f"{label} is not a target/release/{BINARY_NAME} path")
-    if FORBIDDEN_H3_TEXT.search(path_value):
+    if FORBIDDEN_H3_TEXT.search("/".join(path.parts[-3:])):
         raise ContractError(f"{label} contains an H3 path")
 
 

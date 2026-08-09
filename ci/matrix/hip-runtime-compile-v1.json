@@ -1,0 +1,123 @@
+{
+  "$schema": "https://sllm-project.local/ci/schema/hip-runtime-compile-v1.schema.json",
+  "schema_version": "hip-runtime-compile-v1",
+  "matrix_id": "hip-runtime-compile-v1",
+  "revision": 2,
+  "toolchain_id": "rocm-7.14.0",
+  "container": {
+    "image_reference": "docker.io/rocm/dev-ubuntu-24.04@sha256:439edaa8f0c4be4a3728e528f87b8a2ea1f051f34cf10b27caa4bd94f562eda7",
+    "image_config_digest": "sha256:4c91c0d850e38a40fd669dd043ab42e9bad9a2b8a38e3f873c5a4eaced9f28cf",
+    "platform": {"os": "linux", "architecture": "amd64"},
+    "rocm_root": "/opt/rocm",
+    "compiler": "/opt/rocm/bin/amdclang++",
+    "llvm_major": 23
+  },
+  "sources": {
+    "canonical_order": [
+      "include/sllm/hip.h",
+      "native/hip/src/hip_compile_probe.hip.cpp",
+      "native/hip/src/public_runtime.hip.cpp",
+      "native/hip/src/public_runtime_internal.hpp"
+    ],
+    "files": [
+      {"path": "include/sllm/hip.h", "sha256": "b7dc51e05d8cdff31ff416bca5c5a896864ed5dbc869da81960592e425dc890a"},
+      {"path": "native/hip/src/hip_compile_probe.hip.cpp", "sha256": "c8d726552cfdc3196f1e42dbc8b4107b63562f219dc8d437a89172cbf0beb65b"},
+      {"path": "native/hip/src/public_runtime.hip.cpp", "sha256": "d945d5c8db257903e102736a169487e6eb29eaa9c1637215ce752e34118ea8cd"},
+      {"path": "native/hip/src/public_runtime_internal.hpp", "sha256": "128bccd42da62255927bce704bbdfb3423669677b7368045301c34f0eedaff45"}
+    ],
+    "source_set_sha256": "9fe7a73635f1021ebcf0b28a1379864d94b7eff0f0906bf017479999964b1ceb"
+  },
+  "direct_compile_sources": {
+    "canonical_order": [
+      "include/sllm/hip.h",
+      "native/hip/src/hip_compile_probe.hip.cpp",
+      "native/hip/src/public_runtime.hip.cpp",
+      "native/hip/src/public_runtime_internal.hpp",
+      "native/hip/src/rmsnorm_api.cpp",
+      "native/hip/src/rmsnorm_api.hpp",
+      "native/hip/src/rmsnorm_kernel.hip.cpp",
+      "native/hip/src/rmsnorm_kernel_internal.hpp"
+    ],
+    "files": [
+      {"path": "include/sllm/hip.h", "sha256": "b7dc51e05d8cdff31ff416bca5c5a896864ed5dbc869da81960592e425dc890a"},
+      {"path": "native/hip/src/hip_compile_probe.hip.cpp", "sha256": "c8d726552cfdc3196f1e42dbc8b4107b63562f219dc8d437a89172cbf0beb65b"},
+      {"path": "native/hip/src/public_runtime.hip.cpp", "sha256": "d945d5c8db257903e102736a169487e6eb29eaa9c1637215ce752e34118ea8cd"},
+      {"path": "native/hip/src/public_runtime_internal.hpp", "sha256": "128bccd42da62255927bce704bbdfb3423669677b7368045301c34f0eedaff45"},
+      {"path": "native/hip/src/rmsnorm_api.cpp", "sha256": "08f899273e1e7b064f717571b271ae2b4609f394bd1e32644919c42187c75d7f"},
+      {"path": "native/hip/src/rmsnorm_api.hpp", "sha256": "64aabff65bb99435e783e7af6b72e3c31d2f03da7dc7d3480cda59e883f9d43e"},
+      {"path": "native/hip/src/rmsnorm_kernel.hip.cpp", "sha256": "90cf982f2d5865a571c5573da5efbce802c61ccf0d2e2e747a624331b1af526d"},
+      {"path": "native/hip/src/rmsnorm_kernel_internal.hpp", "sha256": "d4aaae93cd08e18f6725f2a82e7c7f69bd17e5b3446dd2fb2dab81f5e8a932eb"}
+    ],
+    "source_set_sha256": "61a13965f9daf308a97b3322d6aed83f046065ca51e2a3bd1ab9db109c9cdf3d"
+  },
+  "public_abi_symbols": [
+    "sllm_backend_probe", "sllm_buffer_copy_d2h", "sllm_buffer_copy_h2d", "sllm_buffer_create", "sllm_buffer_release", "sllm_buffer_size", "sllm_completion_query", "sllm_completion_read", "sllm_completion_release", "sllm_completion_wait", "sllm_context_create", "sllm_context_probe", "sllm_context_release", "sllm_device_count", "sllm_device_query", "sllm_event_create", "sllm_event_release", "sllm_get_abi_version", "sllm_query_version", "sllm_queue_create", "sllm_queue_release", "sllm_rmsnorm_execute", "sllm_rmsnorm_plan_release", "sllm_rmsnorm_prepare"
+  ],
+  "targets": ["gfx1030", "gfx1201"],
+  "rows": [
+    {
+      "row_id": "h3-public-gfx1030",
+      "target": "gfx1030",
+      "tier": "tier_h3_public_runtime",
+      "required": false,
+      "seed": 1030,
+      "execution": {"mode": "compile-only", "compile_only": true, "requires_gpu": false, "requires_model": false, "network": false, "fallback_allowed": false, "execution_attempted": false, "gpu_execution": false},
+      "build": {
+        "generator": "direct-amdclang++",
+        "mode": "compile-link",
+        "build_type": "Release",
+        "language_standard": "gnu++17",
+        "probe_source": "native/hip/src/hip_compile_probe.hip.cpp",
+        "public_runtime_source": "native/hip/src/public_runtime.hip.cpp",
+        "public_runtime_header": "native/hip/src/public_runtime_internal.hpp",
+        "rmsnorm_kernel_source": "native/hip/src/rmsnorm_kernel.hip.cpp",
+        "rmsnorm_kernel_header": "native/hip/src/rmsnorm_kernel_internal.hpp",
+        "rmsnorm_api_source": "native/hip/src/rmsnorm_api.cpp",
+        "rmsnorm_api_header": "native/hip/src/rmsnorm_api.hpp",
+        "link_library": "/opt/rocm/lib/libamdhip64.so",
+        "commands": [
+          ["/opt/rocm/bin/amdclang++", "-D__HIP_ROCclr__=1", "-O3", "-DNDEBUG", "-std=gnu++17", "-I", "{repo}/include", "-I", "{repo}/native/hip/src", "--offload-arch={target}", "-mcode-object-version=6", "-mno-wavefrontsize64", "-o", "{build_dir}/hip-compile-probe-{target}.o", "-x", "hip", "-c", "{repo}/native/hip/src/hip_compile_probe.hip.cpp"],
+          ["/opt/rocm/bin/amdclang++", "-D__HIP_ROCclr__=1", "-O3", "-DNDEBUG", "-std=gnu++17", "-I", "{repo}/include", "-I", "{repo}/native/hip/src", "--offload-arch={target}", "-mcode-object-version=6", "-mno-wavefrontsize64", "-o", "{build_dir}/public-runtime-{target}.o", "-x", "hip", "-c", "{repo}/native/hip/src/public_runtime.hip.cpp"],
+          ["/opt/rocm/bin/amdclang++", "-D__HIP_ROCclr__=1", "-O3", "-DNDEBUG", "-std=gnu++17", "-I", "{repo}/include", "-I", "{repo}/native/hip/src", "--offload-arch={target}", "-mcode-object-version=6", "-mno-wavefrontsize64", "-pthread", "-o", "{build_dir}/rmsnorm-kernel-{target}.o", "-x", "hip", "-c", "{repo}/native/hip/src/rmsnorm_kernel.hip.cpp"],
+          ["/opt/rocm/bin/amdclang++", "-O3", "-DNDEBUG", "-std=gnu++17", "-I", "{repo}/include", "-I", "{repo}/native/hip/src", "--offload-arch={target}", "-mcode-object-version=6", "-mno-wavefrontsize64", "-pthread", "-o", "{build_dir}/rmsnorm-api-{target}.o", "-c", "{repo}/native/hip/src/rmsnorm_api.cpp"],
+          ["/opt/rocm/bin/amdclang++", "-O3", "-DNDEBUG", "--offload-arch={target}", "-mcode-object-version=6", "-mno-wavefrontsize64", "--hip-link", "--rtlib=compiler-rt", "-unwindlib=libgcc", "-pthread", "-nostartfiles", "{build_dir}/hip-compile-probe-{target}.o", "{build_dir}/public-runtime-{target}.o", "{build_dir}/rmsnorm-kernel-{target}.o", "{build_dir}/rmsnorm-api-{target}.o", "-o", "{build_dir}/public-runtime-{target}.elf", "/opt/rocm/lib/libamdhip64.so"]
+        ]
+      },
+      "resource": {"max_rss_bytes": 4294967296, "max_output_bytes": 16777216, "timeout_seconds": 900, "max_output_file_bytes": 268435456},
+      "output": {"root_prefix": "sllm-h3-public-runtime-", "directory_pattern": "h3-public-gfx{target}", "build_directory_pattern": "build", "probe_object_pattern": "hip-compile-probe-{target}.o", "public_runtime_object_pattern": "public-runtime-{target}.o", "rmsnorm_kernel_object_pattern": "rmsnorm-kernel-{target}.o", "rmsnorm_api_object_pattern": "rmsnorm-api-{target}.o", "host_elf_pattern": "public-runtime-{target}.elf", "probe_fatbin_pattern": "probe-{target}.fatbin", "device_object_pattern": "device-code-object-{target}.elf"},
+      "codegen": {"target": "gfx1030", "target_kind": "exact", "target_count": 1, "code_object_version": "V6", "wavefront_size": 32, "features": {"xnack": "unsupported", "sramecc": "unsupported", "generic_processor_version": 0}, "e_flags": "0x00000036"}
+    },
+    {
+      "row_id": "h3-public-gfx1201",
+      "target": "gfx1201",
+      "tier": "tier_h3_public_runtime",
+      "required": false,
+      "seed": 1201,
+      "execution": {"mode": "compile-only", "compile_only": true, "requires_gpu": false, "requires_model": false, "network": false, "fallback_allowed": false, "execution_attempted": false, "gpu_execution": false},
+      "build": {
+        "generator": "direct-amdclang++",
+        "mode": "compile-link",
+        "build_type": "Release",
+        "language_standard": "gnu++17",
+        "probe_source": "native/hip/src/hip_compile_probe.hip.cpp",
+        "public_runtime_source": "native/hip/src/public_runtime.hip.cpp",
+        "public_runtime_header": "native/hip/src/public_runtime_internal.hpp",
+        "rmsnorm_kernel_source": "native/hip/src/rmsnorm_kernel.hip.cpp",
+        "rmsnorm_kernel_header": "native/hip/src/rmsnorm_kernel_internal.hpp",
+        "rmsnorm_api_source": "native/hip/src/rmsnorm_api.cpp",
+        "rmsnorm_api_header": "native/hip/src/rmsnorm_api.hpp",
+        "link_library": "/opt/rocm/lib/libamdhip64.so",
+        "commands": [
+          ["/opt/rocm/bin/amdclang++", "-D__HIP_ROCclr__=1", "-O3", "-DNDEBUG", "-std=gnu++17", "-I", "{repo}/include", "-I", "{repo}/native/hip/src", "--offload-arch={target}", "-mcode-object-version=6", "-mno-wavefrontsize64", "-o", "{build_dir}/hip-compile-probe-{target}.o", "-x", "hip", "-c", "{repo}/native/hip/src/hip_compile_probe.hip.cpp"],
+          ["/opt/rocm/bin/amdclang++", "-D__HIP_ROCclr__=1", "-O3", "-DNDEBUG", "-std=gnu++17", "-I", "{repo}/include", "-I", "{repo}/native/hip/src", "--offload-arch={target}", "-mcode-object-version=6", "-mno-wavefrontsize64", "-o", "{build_dir}/public-runtime-{target}.o", "-x", "hip", "-c", "{repo}/native/hip/src/public_runtime.hip.cpp"],
+          ["/opt/rocm/bin/amdclang++", "-D__HIP_ROCclr__=1", "-O3", "-DNDEBUG", "-std=gnu++17", "-I", "{repo}/include", "-I", "{repo}/native/hip/src", "--offload-arch={target}", "-mcode-object-version=6", "-mno-wavefrontsize64", "-pthread", "-o", "{build_dir}/rmsnorm-kernel-{target}.o", "-x", "hip", "-c", "{repo}/native/hip/src/rmsnorm_kernel.hip.cpp"],
+          ["/opt/rocm/bin/amdclang++", "-O3", "-DNDEBUG", "-std=gnu++17", "-I", "{repo}/include", "-I", "{repo}/native/hip/src", "--offload-arch={target}", "-mcode-object-version=6", "-mno-wavefrontsize64", "-pthread", "-o", "{build_dir}/rmsnorm-api-{target}.o", "-c", "{repo}/native/hip/src/rmsnorm_api.cpp"],
+          ["/opt/rocm/bin/amdclang++", "-O3", "-DNDEBUG", "--offload-arch={target}", "-mcode-object-version=6", "-mno-wavefrontsize64", "--hip-link", "--rtlib=compiler-rt", "-unwindlib=libgcc", "-pthread", "-nostartfiles", "{build_dir}/hip-compile-probe-{target}.o", "{build_dir}/public-runtime-{target}.o", "{build_dir}/rmsnorm-kernel-{target}.o", "{build_dir}/rmsnorm-api-{target}.o", "-o", "{build_dir}/public-runtime-{target}.elf", "/opt/rocm/lib/libamdhip64.so"]
+        ]
+      },
+      "resource": {"max_rss_bytes": 4294967296, "max_output_bytes": 16777216, "timeout_seconds": 900, "max_output_file_bytes": 268435456},
+      "output": {"root_prefix": "sllm-h3-public-runtime-", "directory_pattern": "h3-public-gfx{target}", "build_directory_pattern": "build", "probe_object_pattern": "hip-compile-probe-{target}.o", "public_runtime_object_pattern": "public-runtime-{target}.o", "rmsnorm_kernel_object_pattern": "rmsnorm-kernel-{target}.o", "rmsnorm_api_object_pattern": "rmsnorm-api-{target}.o", "host_elf_pattern": "public-runtime-{target}.elf", "probe_fatbin_pattern": "probe-{target}.fatbin", "device_object_pattern": "device-code-object-{target}.elf"},
+      "codegen": {"target": "gfx1201", "target_kind": "exact", "target_count": 1, "code_object_version": "V6", "wavefront_size": 32, "features": {"xnack": "unsupported", "sramecc": "unsupported", "generic_processor_version": 0}, "e_flags": "0x0000004e"}
+    }
+  ]
+}

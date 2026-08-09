@@ -1,0 +1,37 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sllm-project.local/ci/schema/rmsnorm-g2-tolerance-v1.schema.json",
+  "type": "object", "additionalProperties": false,
+  "required": ["schema_version", "tolerance_id", "operator", "input_dtype", "weight_dtype", "accumulation_dtype", "output_dtype", "scale_mode", "atol", "rtol", "comparison", "approval"],
+  "properties": {
+    "schema_version": {"const": "rmsnorm-g2-tolerance-v1"},
+    "tolerance_id": {"const": "rmsnorm-bf16-f32-output-v1"},
+    "operator": {"const": "RMSNorm"}, "input_dtype": {"const": "BF16"}, "weight_dtype": {"const": "BF16"},
+    "accumulation_dtype": {"const": "FP32"}, "output_dtype": {"const": "BF16"}, "scale_mode": {"const": "offset-one"},
+    "atol": {"const": 0.0078125}, "rtol": {"const": 0.015625},
+    "comparison": {
+      "type": "object", "additionalProperties": false, "required": ["finite_rule", "nonfinite_rule", "oracle", "model_hidden_size", "epsilon"],
+      "properties": {
+        "finite_rule": {"const": "abs(actual-reference) <= atol + rtol*abs(reference)"},
+        "nonfinite_rule": {"const": "classification-exact"},
+        "oracle": {"const": "tests/reference/semantic_rmsnorm.py"},
+        "model_hidden_size": {"const": 2560}, "epsilon": {"const": "1e-6"}
+      }
+    },
+    "approval": {
+      "type": "object", "additionalProperties": false, "required": ["status", "calibration_candidate_sha256", "reviewer", "approved_at", "reason"],
+      "properties": {
+        "status": {"const": "pre-registered"},
+        "calibration_candidate_sha256": {
+          "oneOf": [
+            {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+            {"const": null}
+          ]
+        },
+        "reviewer": {"const": "phase3-stage-a-contract"},
+        "approved_at": {"const": "2026-08-04T00:00:00Z"},
+        "reason": {"const": "locked before canonical GPU calibration; same-candidate tolerance expansion is forbidden"}
+      }
+    }
+  }
+}

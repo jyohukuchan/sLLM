@@ -20,7 +20,7 @@ SCHEMA_DIR = ROOT / "ci" / "schema"
 MATRIX_DIR = ROOT / "ci" / "matrix"
 
 ALLOWED_TIERS = (
-    "tier_h0", "tier_h1", "tier_h2", "tier_h3", "tier_g0", "tier_g1",
+    "tier_h0", "tier_h1", "tier_h2", "tier_h3", "tier_h3_rmsnorm", "tier_g0", "tier_g1",
     "tier_g2", "tier_g3", "tier_g4", "tier_p0", "tier_p1",
 )
 ALLOWED_ATTRIBUTES = (

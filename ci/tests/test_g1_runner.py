@@ -27,6 +27,7 @@ from validate_g1_contracts import (  # noqa: E402
     EXPECTED_SIZES,
     METADATA_NAME,
     _manifest_hashes,
+    _tail_is_dedicated_binary,
     inspect_g1_runtime_artifact,
     validate_g1_matrix,
     validate_artifact_metadata,
@@ -440,6 +441,17 @@ class G1RunnerTests(unittest.TestCase):
             self.assertFalse((fixture.output() / "report.json").exists())
         finally:
             fixture.close()
+
+    def test_h3_ancestor_text_does_not_reject_dedicated_binary_tail(self) -> None:
+        positive = "/tmp/sllm-g1-private-h3-regression/target/release/sllm-hip-evidence"
+        _tail_is_dedicated_binary(positive, "G1 regression artifact path")
+
+        for negative in (
+            "/tmp/sllm-g1-private-h3-regression/target/release/device-code-object-gfx1030.elf",
+            "/tmp/sllm-g1-private-h3-regression/target/release/sllm-hip-evidence-compile-only",
+        ):
+            with self.subTest(negative=negative), self.assertRaises(ContractError):
+                _tail_is_dedicated_binary(negative, "G1 regression artifact path")
 
     def test_wrong_row_gpu_target_toolchain_and_artifact_scope_fail_closed(self) -> None:
         mutations = (

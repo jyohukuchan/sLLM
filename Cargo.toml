@@ -5,6 +5,7 @@ members = [
     "crates/sllm-hip-sys",
     "crates/sllm-hip",
     "crates/sllm-cli",
+    "crates/sllm-frontend",
 ]
 
 [workspace.package]
@@ -14,6 +15,10 @@ rust-version = "1.85.0"
 license = "MIT"
 
 [workspace.dependencies]
+serde = { version = "=1.0.228", features = ["derive"] }
+serde_json = { version = "=1.0.150" }
+sha2 = { version = "=0.10.9" }
+tokenizers = { version = "=0.21.4", default-features = false, features = ["onig"] }
 sllm-core = { path = "crates/sllm-core" }
 sllm-hip = { path = "crates/sllm-hip" }
 sllm-hip-sys = { path = "crates/sllm-hip-sys" }

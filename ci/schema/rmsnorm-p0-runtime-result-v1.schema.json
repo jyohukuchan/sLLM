@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sllm-project.local/ci/schema/rmsnorm-p0-runtime-result-v1.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "state", "row_id", "target", "candidate", "artifact", "matrix", "case_set_sha256", "model_lock", "source_set_sha256", "dtype", "scope", "device", "timing", "dispatch", "cases", "measurement_sha256"],
+  "properties": {
+    "schema_version": {"const": "rmsnorm-p0-runtime-result-v1"},
+    "state": {"const": "PASS"},
+    "row_id": {"enum": ["rmsnorm-p0-gfx1030", "rmsnorm-p0-gfx1201"]},
+    "target": {"enum": ["gfx1030", "gfx1201"]},
+    "candidate": {"$ref": "#/$defs/candidate"},
+    "artifact": {"$ref": "#/$defs/artifact"},
+    "matrix": {"$ref": "#/$defs/identity"},
+    "case_set_sha256": {"$ref": "#/$defs/sha256"},
+    "model_lock": {"$ref": "#/$defs/model_lock"},
+    "source_set_sha256": {"$ref": "#/$defs/sha256"},
+    "dtype": {"$ref": "#/$defs/dtype"},
+    "scope": {"$ref": "#/$defs/scope"},
+    "device": {"$ref": "#/$defs/device"},
+    "timing": {"$ref": "#/$defs/timing"},
+    "dispatch": {"$ref": "#/$defs/dispatch_summary"},
+    "cases": {"type": "array", "minItems": 5, "maxItems": 5, "items": {"$ref": "#/$defs/case"}},
+    "measurement_sha256": {"$ref": "#/$defs/sha256"}
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "sha40": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "candidate": {"type": "object", "additionalProperties": false, "required": ["reviewed_sha", "tested_sha", "workflow_sha", "git_tree_oid", "worktree_clean", "revision_input"], "properties": {"reviewed_sha": {"$ref": "#/$defs/sha40"}, "tested_sha": {"$ref": "#/$defs/sha40"}, "workflow_sha": {"$ref": "#/$defs/sha40"}, "git_tree_oid": {"$ref": "#/$defs/sha40"}, "worktree_clean": {"const": true}, "revision_input": {"const": "full-sha"}}},
+    "artifact": {"type": "object", "additionalProperties": false, "required": ["artifact_id", "artifact_sha256", "binary_sha256", "binary_sidecar_sha256", "source_set_sha256", "binary_role"], "properties": {"artifact_id": {"type": "string", "minLength": 1}, "artifact_sha256": {"$ref": "#/$defs/sha256"}, "binary_sha256": {"$ref": "#/$defs/sha256"}, "binary_sidecar_sha256": {"$ref": "#/$defs/sha256"}, "source_set_sha256": {"$ref": "#/$defs/sha256"}, "binary_role": {"const": "dedicated-p0-public-rmsnorm-producer"}}},
+    "identity": {"type": "object", "additionalProperties": false, "required": ["path", "sha256"], "properties": {"path": {"const": "ci/matrix/rmsnorm-p0-v1.json"}, "sha256": {"$ref": "#/$defs/sha256"}}},
+    "model_lock": {"type": "object", "additionalProperties": false, "required": ["path", "sha256", "fingerprint", "resolved_revision", "used"], "properties": {"path": {"const": "docs/models/locks/qwen3.5-4b-bf16.json"}, "sha256": {"$ref": "#/$defs/sha256"}, "fingerprint": {"const": "sha256:32265444b7cdd2a00e4e4e3e6aa8375a05acf6cddfcb9ffc348f54f67a7cd935"}, "resolved_revision": {"const": "851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a"}, "used": {"const": false}}},
+    "dtype": {"type": "object", "additionalProperties": false, "required": ["activation", "weight", "output", "accumulation", "scale_mode", "epsilon"], "properties": {"activation": {"const": "BF16"}, "weight": {"const": "BF16"}, "output": {"const": "BF16"}, "accumulation": {"const": "F32"}, "scale_mode": {"const": "offset-one"}, "epsilon": {"const": "1e-6"}}},
+    "scope": {"type": "object", "additionalProperties": false, "required": ["selected_backend", "gpu_execution", "public_rmsnorm_path", "semantic_op_used", "model_used", "fallback_allowed", "fallback_used", "cpu_fallback_used"], "properties": {"selected_backend": {"const": "hip"}, "gpu_execution": {"const": true}, "public_rmsnorm_path": {"const": true}, "semantic_op_used": {"const": true}, "model_used": {"const": false}, "fallback_allowed": {"const": false}, "fallback_used": {"const": false}, "cpu_fallback_used": {"const": false}}},
+    "device": {"type": "object", "additionalProperties": false, "required": ["bdf", "uuid", "product", "target", "physical_hip_index", "logical_device_index"], "properties": {"bdf": {"type": "string", "minLength": 1}, "uuid": {"type": "string", "minLength": 1}, "product": {"type": "string", "minLength": 1}, "target": {"enum": ["gfx1030", "gfx1201"]}, "physical_hip_index": {"type": "integer", "minimum": 0}, "logical_device_index": {"const": 0}}},
+    "timing": {"type": "object", "additionalProperties": false, "required": ["timing_contract", "unit", "kernel_source", "wall_source", "warmup_iterations", "measurement_iterations", "location", "robust_spread"], "properties": {"timing_contract": {"const": "rmsnorm-p0-timing-v1"}, "unit": {"const": "ns"}, "kernel_source": {"const": "hip-event-elapsed-time"}, "wall_source": {"const": "steady-clock-monotonic"}, "warmup_iterations": {"const": 5}, "measurement_iterations": {"const": 21}, "location": {"const": "median"}, "robust_spread": {"const": "median-absolute-deviation"}}},
+    "dispatch_summary": {"type": "object", "additionalProperties": false, "required": ["backend", "kernel_id", "kernel_symbol", "device_symbol", "workgroup_size_x", "dispatch_count", "fallback_allowed", "fallback_used"], "properties": {"backend": {"const": "hip"}, "kernel_id": {"const": 1}, "kernel_symbol": {"const": "rmsnorm.baseline.wave32.v1"}, "device_symbol": {"const": "sllm_rmsnorm_baseline_wave32_v1"}, "workgroup_size_x": {"const": 256}, "dispatch_count": {"const": 130}, "fallback_allowed": {"const": false}, "fallback_used": {"const": false}}},
+    "dispatch": {"type": "object", "additionalProperties": false, "required": ["iteration", "dispatch_id", "dispatch_count", "kernel_id", "kernel_symbol", "device_symbol", "fallback_used"], "properties": {"iteration": {"type": "integer", "minimum": 0}, "dispatch_id": {"type": "integer", "minimum": 1}, "dispatch_count": {"const": 1}, "kernel_id": {"const": 1}, "kernel_symbol": {"const": "rmsnorm.baseline.wave32.v1"}, "device_symbol": {"const": "sllm_rmsnorm_baseline_wave32_v1"}, "fallback_used": {"const": false}}},
+    "sample": {"type": "object", "additionalProperties": false, "required": ["iteration", "dispatch_id", "dispatch_count", "kernel_id", "kernel_symbol", "device_symbol", "fallback_used", "kernel_latency_ns", "wall_latency_ns"], "properties": {"iteration": {"type": "integer", "minimum": 0}, "dispatch_id": {"type": "integer", "minimum": 1}, "dispatch_count": {"const": 1}, "kernel_id": {"const": 1}, "kernel_symbol": {"const": "rmsnorm.baseline.wave32.v1"}, "device_symbol": {"const": "sllm_rmsnorm_baseline_wave32_v1"}, "fallback_used": {"const": false}, "kernel_latency_ns": {"type": "integer", "minimum": 1}, "wall_latency_ns": {"type": "integer", "minimum": 1}}},
+    "summary": {"type": "object", "additionalProperties": false, "required": ["kernel_median_ns", "kernel_mad_ns", "wall_median_ns", "wall_mad_ns", "sample_set_sha256"], "properties": {"kernel_median_ns": {"type": "integer", "minimum": 1}, "kernel_mad_ns": {"type": "integer", "minimum": 0}, "wall_median_ns": {"type": "integer", "minimum": 1}, "wall_mad_ns": {"type": "integer", "minimum": 0}, "sample_set_sha256": {"$ref": "#/$defs/sha256"}}},
+    "case": {"type": "object", "additionalProperties": false, "required": ["order", "id", "rows", "n", "input_seed", "classification", "state", "warmup_dispatches", "samples", "summary"], "properties": {"order": {"type": "integer", "minimum": 0, "maximum": 4}, "id": {"type": "string", "minLength": 1}, "rows": {"type": "integer", "minimum": 1}, "n": {"type": "integer", "minimum": 1, "maximum": 4096}, "input_seed": {"type": "integer", "minimum": 0}, "classification": {"type": "string", "minLength": 1}, "state": {"const": "PASS"}, "warmup_dispatches": {"type": "array", "minItems": 5, "maxItems": 5, "items": {"$ref": "#/$defs/dispatch"}}, "samples": {"type": "array", "minItems": 21, "maxItems": 21, "items": {"$ref": "#/$defs/sample"}}, "summary": {"$ref": "#/$defs/summary"}}}
+  }
+}

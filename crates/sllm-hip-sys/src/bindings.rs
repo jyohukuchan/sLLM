@@ -20,6 +20,35 @@ pub const SLLM_STATUS_HIP_UNAVAILABLE: sllm_status_t = 4;
 pub const SLLM_STATUS_INVALID_ABI_VERSION: sllm_status_t = 5;
 pub const SLLM_STATUS_RESERVED_NONZERO: sllm_status_t = 6;
 pub const SLLM_STATUS_INTERNAL_ERROR: sllm_status_t = 7;
+pub const SLLM_STATUS_PUBLIC_PENDING: sllm_status_t = 0x100;
+pub const SLLM_STATUS_PUBLIC_TIMEOUT: sllm_status_t = 0x101;
+pub const SLLM_STATUS_PUBLIC_INVALID_HANDLE: sllm_status_t = 0x102;
+pub const SLLM_STATUS_PUBLIC_DEVICE_MISMATCH: sllm_status_t = 0x103;
+pub const SLLM_STATUS_PUBLIC_HIP_RUNTIME_ERROR: sllm_status_t = 0x104;
+pub const SLLM_STATUS_PUBLIC_BUSY: sllm_status_t = 0x105;
+pub const SLLM_STATUS_PUBLIC_NOT_READY: sllm_status_t = 0x106;
+pub const SLLM_STATUS_INVALID_RMSNORM_DESCRIPTOR: sllm_status_t = 0x107;
+pub const SLLM_STATUS_INVALID_TENSOR_BINDING: sllm_status_t = 0x108;
+pub const SLLM_STATUS_ZERO_EXTENT: sllm_status_t = 0x109;
+pub const SLLM_STATUS_SHAPE_MISMATCH: sllm_status_t = 0x10a;
+pub const SLLM_STATUS_STRIDE_MISMATCH: sllm_status_t = 0x10b;
+pub const SLLM_STATUS_METADATA_OVERFLOW: sllm_status_t = 0x10c;
+pub const SLLM_STATUS_BUFFER_OUT_OF_BOUNDS: sllm_status_t = 0x10d;
+pub const SLLM_STATUS_MISALIGNED_OFFSET: sllm_status_t = 0x10e;
+pub const SLLM_STATUS_UNSUPPORTED_DTYPE: sllm_status_t = 0x10f;
+pub const SLLM_STATUS_UNSUPPORTED_ENCODING: sllm_status_t = 0x110;
+pub const SLLM_STATUS_INVALID_EPSILON: sllm_status_t = 0x111;
+pub const SLLM_STATUS_UNSUPPORTED_SCALE_MODE: sllm_status_t = 0x112;
+pub const SLLM_STATUS_ALIAS_OVERLAP: sllm_status_t = 0x113;
+pub const SLLM_STATUS_CONTEXT_OR_DEVICE_MISMATCH: sllm_status_t = 0x114;
+
+pub const SLLM_HIP_RMSNORM_DISPATCH_INFO_VERSION: u32 = 1;
+pub const SLLM_HIP_RMSNORM_KERNEL_ID_BASELINE_WAVE32_V1: u32 = 1;
+pub const SLLM_HIP_RMSNORM_KERNEL_SYMBOL_MAX: u32 = 64;
+pub const SLLM_HIP_RMSNORM_DEVICE_SYMBOL_MAX: u32 = 64;
+pub const SLLM_HIP_RMSNORM_MAX_N: u64 = 4096;
+pub const SLLM_HIP_RMSNORM_WORKGROUP_SIZE: u32 = 256;
+pub const SLLM_HIP_RMSNORM_MAX_ROWS: u64 = 4_294_967_295;
 
 pub const SLLM_BACKEND_HIP: u32 = 1;
 
@@ -28,6 +57,28 @@ pub type sllm_access_mode_t = u32;
 pub const SLLM_ACCESS_READ: sllm_access_mode_t = 1;
 pub const SLLM_ACCESS_WRITE: sllm_access_mode_t = 2;
 pub const SLLM_ACCESS_READ_WRITE: sllm_access_mode_t = 3;
+
+pub const SLLM_HIP_MAX_DEVICE_NAME: u32 = 128;
+pub const SLLM_HIP_MAX_GCN_ARCH_NAME: u32 = 64;
+pub const SLLM_HIP_MAX_TRANSFER_BYTES: u64 = 1_073_741_824;
+pub const SLLM_HIP_RMSNORM_VERSION: u32 = 1;
+pub const SLLM_HIP_TENSOR_MAX_RANK: u32 = 8;
+
+pub type sllm_tensor_dtype_t = u32;
+pub const SLLM_TENSOR_DTYPE_BF16: sllm_tensor_dtype_t = 0;
+pub const SLLM_TENSOR_DTYPE_F32: sllm_tensor_dtype_t = 2;
+pub type sllm_tensor_encoding_t = u32;
+pub const SLLM_TENSOR_ENCODING_UNQUANTIZED: sllm_tensor_encoding_t = 0;
+pub type sllm_rmsnorm_accumulation_dtype_t = u32;
+pub const SLLM_RMSNORM_ACCUMULATION_F32: sllm_rmsnorm_accumulation_dtype_t = 2;
+pub type sllm_rmsnorm_scale_mode_t = u32;
+pub const SLLM_RMSNORM_SCALE_MODE_OFFSET_ONE: sllm_rmsnorm_scale_mode_t = 1;
+pub type sllm_rmsnorm_alias_policy_t = u32;
+pub const SLLM_RMSNORM_ALIAS_POLICY_REJECT_OVERLAP: sllm_rmsnorm_alias_policy_t = 1;
+
+pub const SLLM_COMPLETION_STATE_PENDING: u32 = 0;
+pub const SLLM_COMPLETION_STATE_SUCCESS: u32 = 1;
+pub const SLLM_COMPLETION_STATE_FAILURE: u32 = 2;
 
 #[repr(C)]
 pub struct sllm_context_t {
@@ -51,6 +102,11 @@ pub struct sllm_event_t {
 
 #[repr(C)]
 pub struct sllm_completion_t {
+    _private: [u8; 0],
+}
+
+#[repr(C)]
+pub struct sllm_rmsnorm_plan_t {
     _private: [u8; 0],
 }
 
@@ -97,6 +153,129 @@ pub struct sllm_context_probe_result_t {
     pub reserved: [u32; 4],
 }
 
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct sllm_device_info_t {
+    pub struct_size: u32,
+    pub abi_version: u32,
+    pub device_index: u32,
+    pub visible_device_count: u32,
+    pub total_memory_bytes: u64,
+    pub wavefront_size: u32,
+    pub reserved0: u32,
+    pub name: [c_char; 128],
+    pub gcn_arch_name: [c_char; 64],
+    pub reserved: [u32; 4],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct sllm_context_create_info_t {
+    pub struct_size: u32,
+    pub abi_version: u32,
+    pub device_index: u32,
+    pub flags: u32,
+    pub expected_gcn_arch_name: [c_char; 64],
+    pub reserved: [u32; 4],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct sllm_queue_create_info_t {
+    pub struct_size: u32,
+    pub abi_version: u32,
+    pub flags: u32,
+    pub reserved: [u32; 5],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct sllm_buffer_create_info_t {
+    pub struct_size: u32,
+    pub abi_version: u32,
+    pub size_bytes: u64,
+    pub alignment_bytes: u64,
+    pub flags: u32,
+    pub reserved: [u32; 5],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct sllm_transfer_desc_t {
+    pub struct_size: u32,
+    pub abi_version: u32,
+    pub host_pointer: *mut core::ffi::c_void,
+    pub buffer_offset_bytes: u64,
+    pub size_bytes: u64,
+    pub reserved: [u32; 4],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct sllm_completion_result_t {
+    pub struct_size: u32,
+    pub abi_version: u32,
+    pub state: u32,
+    pub reserved0: u32,
+    pub transfer_size_bytes: u64,
+    pub available_bytes: u64,
+    pub reserved: [u32; 4],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct sllm_tensor_binding_t {
+    pub struct_size: u32,
+    pub abi_version: u32,
+    pub buffer: *const sllm_buffer_t,
+    pub byte_offset: u64,
+    pub dtype: sllm_tensor_dtype_t,
+    pub encoding: sllm_tensor_encoding_t,
+    pub rank: u32,
+    pub reserved0: u32,
+    pub shape: [u64; 8],
+    pub stride_elements: [u64; 8],
+    pub reserved: [u64; 2],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct sllm_rmsnorm_desc_t {
+    pub struct_size: u32,
+    pub abi_version: u32,
+    pub op_version: u32,
+    pub accumulation_dtype: sllm_rmsnorm_accumulation_dtype_t,
+    pub scale_mode: sllm_rmsnorm_scale_mode_t,
+    pub alias_policy: sllm_rmsnorm_alias_policy_t,
+    pub epsilon_bits: u32,
+    pub reserved: [u32; 3],
+    pub activation: sllm_tensor_binding_t,
+    pub raw_scale: sllm_tensor_binding_t,
+    pub output: sllm_tensor_binding_t,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct sllm_rmsnorm_dispatch_info_t {
+    pub struct_size: u32,
+    pub abi_version: u32,
+    pub info_version: u32,
+    pub backend: u32,
+    pub dispatch_id: u64,
+    pub dispatch_count: u32,
+    pub kernel_id: u32,
+    pub workgroup_size_x: u32,
+    pub grid_size_x: u32,
+    pub row_count: u64,
+    pub normalized_size: u64,
+    pub fallback_allowed: u32,
+    pub fallback_used: u32,
+    pub kernel_symbol: [c_char; 64],
+    pub device_symbol: [c_char; 64],
+    pub gcn_arch_name: [c_char; 64],
+    pub reserved: [u32; 8],
+}
+
 unsafe extern "C" {
     pub fn sllm_get_abi_version(
         abi_version: *mut u32,
@@ -114,6 +293,108 @@ unsafe extern "C" {
     pub fn sllm_context_probe(
         context: *const sllm_context_t,
         result: *mut sllm_context_probe_result_t,
+        error_sink: *mut sllm_error_sink_t,
+    ) -> sllm_status_t;
+    pub fn sllm_device_count(count: *mut u32, error_sink: *mut sllm_error_sink_t) -> sllm_status_t;
+    pub fn sllm_device_query(
+        device_index: u32,
+        info: *mut sllm_device_info_t,
+        error_sink: *mut sllm_error_sink_t,
+    ) -> sllm_status_t;
+    pub fn sllm_context_create(
+        info: *const sllm_context_create_info_t,
+        context: *mut *mut sllm_context_t,
+        error_sink: *mut sllm_error_sink_t,
+    ) -> sllm_status_t;
+    pub fn sllm_context_release(
+        context: *mut *mut sllm_context_t,
+        error_sink: *mut sllm_error_sink_t,
+    ) -> sllm_status_t;
+    pub fn sllm_queue_create(
+        context: *const sllm_context_t,
+        info: *const sllm_queue_create_info_t,
+        queue: *mut *mut sllm_queue_t,
+        error_sink: *mut sllm_error_sink_t,
+    ) -> sllm_status_t;
+    pub fn sllm_queue_release(
+        queue: *mut *mut sllm_queue_t,
+        error_sink: *mut sllm_error_sink_t,
+    ) -> sllm_status_t;
+    pub fn sllm_buffer_create(
+        context: *const sllm_context_t,
+        info: *const sllm_buffer_create_info_t,
+        buffer: *mut *mut sllm_buffer_t,
+        error_sink: *mut sllm_error_sink_t,
+    ) -> sllm_status_t;
+    pub fn sllm_buffer_release(
+        buffer: *mut *mut sllm_buffer_t,
+        error_sink: *mut sllm_error_sink_t,
+    ) -> sllm_status_t;
+    pub fn sllm_buffer_size(
+        buffer: *const sllm_buffer_t,
+        size_bytes: *mut u64,
+        error_sink: *mut sllm_error_sink_t,
+    ) -> sllm_status_t;
+    pub fn sllm_event_create(
+        context: *const sllm_context_t,
+        event: *mut *mut sllm_event_t,
+        error_sink: *mut sllm_error_sink_t,
+    ) -> sllm_status_t;
+    pub fn sllm_event_release(
+        event: *mut *mut sllm_event_t,
+        error_sink: *mut sllm_error_sink_t,
+    ) -> sllm_status_t;
+    pub fn sllm_buffer_copy_h2d(
+        queue: *const sllm_queue_t,
+        buffer: *const sllm_buffer_t,
+        transfer: *const sllm_transfer_desc_t,
+        completion: *mut *mut sllm_completion_t,
+        error_sink: *mut sllm_error_sink_t,
+    ) -> sllm_status_t;
+    pub fn sllm_buffer_copy_d2h(
+        queue: *const sllm_queue_t,
+        buffer: *const sllm_buffer_t,
+        transfer: *const sllm_transfer_desc_t,
+        completion: *mut *mut sllm_completion_t,
+        error_sink: *mut sllm_error_sink_t,
+    ) -> sllm_status_t;
+    pub fn sllm_completion_query(
+        completion: *mut sllm_completion_t,
+        result: *mut sllm_completion_result_t,
+        error_sink: *mut sllm_error_sink_t,
+    ) -> sllm_status_t;
+    pub fn sllm_completion_wait(
+        completion: *mut sllm_completion_t,
+        timeout_ms: u32,
+        result: *mut sllm_completion_result_t,
+        error_sink: *mut sllm_error_sink_t,
+    ) -> sllm_status_t;
+    pub fn sllm_completion_read(
+        completion: *mut sllm_completion_t,
+        destination: *mut core::ffi::c_void,
+        destination_capacity: u64,
+        bytes_written: *mut u64,
+        error_sink: *mut sllm_error_sink_t,
+    ) -> sllm_status_t;
+    pub fn sllm_completion_release(
+        completion: *mut *mut sllm_completion_t,
+        error_sink: *mut sllm_error_sink_t,
+    ) -> sllm_status_t;
+    pub fn sllm_rmsnorm_prepare(
+        context: *const sllm_context_t,
+        descriptor: *const sllm_rmsnorm_desc_t,
+        plan: *mut *mut sllm_rmsnorm_plan_t,
+        error_sink: *mut sllm_error_sink_t,
+    ) -> sllm_status_t;
+    pub fn sllm_rmsnorm_plan_release(
+        plan: *mut *mut sllm_rmsnorm_plan_t,
+        error_sink: *mut sllm_error_sink_t,
+    ) -> sllm_status_t;
+    pub fn sllm_rmsnorm_execute(
+        plan: *const sllm_rmsnorm_plan_t,
+        queue: *const sllm_queue_t,
+        completion: *mut *mut sllm_completion_t,
+        dispatch_info: *mut sllm_rmsnorm_dispatch_info_t,
         error_sink: *mut sllm_error_sink_t,
     ) -> sllm_status_t;
 }

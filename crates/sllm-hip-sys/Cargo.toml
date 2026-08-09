@@ -9,3 +9,7 @@ build = "build.rs"
 
 [lib]
 path = "src/lib.rs"
+
+[build-dependencies]
+serde_json.workspace = true
+sha2.workspace = true

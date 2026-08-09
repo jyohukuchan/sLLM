@@ -5,8 +5,10 @@
 
 mod backend;
 mod dtype;
+mod execution;
 mod fake;
 mod handles;
+mod model;
 mod op;
 mod registry;
 mod tensor;
@@ -16,12 +18,33 @@ pub use backend::{
     MaterializedTensor,
 };
 pub use dtype::{DType, Encoding, EncodingError};
+pub use execution::{
+    AdapterResource, BoundSemanticOp, BufferRange, DispatchEvidence, ExecutionAdapterAccess,
+    ExecutionBuffer, ExecutionBufferId, ExecutionError, ExecutionQueue, ExecutionQueueId,
+    ExecutionReadbackAdapter, ExecutionSession, ExecutionSessionAdapter, ExecutionSessionId,
+    ExecutionSessionRequest, ExecutionState, ExecutionSubmissionAdapter, ExecutionTransferAdapter,
+    OwnedTensorBinding, PrepareSupport, PreparedOperation, PreparedOperationId, Readback,
+    ShutdownReport, Submission, Transfer,
+};
 pub use fake::{FakeBackend, MAX_FAKE_MATERIALIZATION_BYTES};
 pub use handles::{
     AccessMode, BufferHandle, BufferUse, CompletionLease, EventHandle, InFlightSubmission,
     QueueHandle,
 };
-pub use op::{OpError, SemanticOp, SemanticOpDescriptor, SemanticOpKind};
+pub use model::{
+    AccumulationDType, BaseModel, BudgetBoundary, ClassificationStatus, ComponentMetadata,
+    ComponentStatus, ConfigEos, ExcludedFile, GenerationConfig, GenerationStopPolicyV1,
+    LayerSchedule, LayerType, LicenseInfo, LockedFile, LockedModel, MaxNewTokensZero,
+    ModelArchitecture, ModelError, ModelLock, NormalizationContract, NormalizationKind,
+    PromptEvaluation, ScaleMode, SliceContract, StopEvaluation, StopIdentity, StopTokenHandling,
+    TensorClassification, TensorContract, TensorDType, TensorDescriptor, TextConfig,
+    TokenizerContract, TokenizerEos, VerifiedCache, VerifiedFile, fingerprint_for_json,
+    parse_model_lock, read_model_lock, validate_model_config, verify_model_cache,
+};
+pub use op::{
+    OpError, RmsNormAliasPolicy, RmsNormContract, RmsNormEpsilon, RmsNormScaleMode, RmsNormTensor,
+    SemanticOp, SemanticOpDescriptor, SemanticOpKind,
+};
 pub use registry::{BACKEND_REGISTRY, BackendRegistration, backend_registry};
 pub use tensor::{TensorError, TensorView};
 
@@ -38,6 +61,8 @@ mod tests {
         assert_eq!(view.dtype(), DType::Bf16);
         assert_eq!(view.encoding(), Encoding::Unquantized);
         assert_eq!(view.element_count(), 105);
+        assert_eq!(view.payload_bytes(), 210);
+        assert_eq!(view.end_offset(), 210);
         assert_eq!(view.span_bytes(), 210);
     }
 
@@ -249,6 +274,15 @@ mod tests {
             backend.execute(&operation),
             Err(BackendError::NumericalExecutionUnsupported)
         ));
+        assert!(matches!(
+            backend.open_execution_session(
+                ExecutionSessionRequest::new(0, "fake").expect("valid session request")
+            ),
+            Err(ExecutionError::ExecutionUnavailable {
+                backend: "fake",
+                ..
+            })
+        ));
     }
 
     #[test]
@@ -295,6 +329,219 @@ mod tests {
         assert_eq!(SemanticOpKind::Copy.arity(), (1, 1));
         assert_eq!(SemanticOpKind::Add.arity(), (2, 1));
         assert_eq!(SemanticOpKind::Matmul.arity(), (2, 1));
+        assert_eq!(SemanticOpKind::RmsNorm.arity(), (2, 1));
+    }
+
+    #[test]
+    fn rms_norm_requires_explicit_contract_and_exposes_fixed_baseline() {
+        let activation = TensorView::contiguous(DType::Bf16, &[2, 3]).expect("valid activation");
+        let scale = TensorView::contiguous(DType::Bf16, &[3]).expect("valid scale");
+        let output = TensorView::contiguous(DType::Bf16, &[2, 3]).expect("valid output");
+
+        assert!(matches!(
+            SemanticOpDescriptor::new(
+                SemanticOpKind::RmsNorm,
+                vec![activation.clone(), scale.clone()],
+                vec![output.clone()],
+            ),
+            Err(OpError::RmsNormContractRequired)
+        ));
+
+        let operation = SemanticOpDescriptor::new_rms_norm(
+            vec![activation, scale],
+            vec![output],
+            1.0e-6,
+            RmsNormScaleMode::OffsetOne,
+        )
+        .expect("valid RMSNorm descriptor");
+        let contract = operation.rms_norm_contract().expect("RMSNorm contract");
+        assert_eq!(contract.scale_mode(), RmsNormScaleMode::OffsetOne);
+        assert_eq!(contract.epsilon().value().to_bits(), 1.0e-6_f32.to_bits());
+        assert_eq!(contract.accumulation_dtype(), DType::F32);
+        assert_eq!(contract.output_dtype(), DType::Bf16);
+        assert_eq!(contract.alias_policy(), RmsNormAliasPolicy::Unsupported);
+        assert_eq!(contract.effective_scale(0.25), 1.25);
+        assert_eq!(
+            RmsNormContract::new(1.0e-6, RmsNormScaleMode::OffsetOne),
+            Ok(contract)
+        );
+    }
+
+    #[test]
+    fn rms_norm_rejects_rank_zero_zero_stride_dtype_encoding_and_shape_errors() {
+        let scale = TensorView::contiguous(DType::Bf16, &[3]).expect("valid scale");
+        let output = TensorView::contiguous(DType::Bf16, &[2, 3]).expect("valid output");
+        let make = |activation: TensorView, scale: TensorView, output: TensorView| {
+            SemanticOpDescriptor::new_rms_norm(
+                vec![activation, scale],
+                vec![output],
+                1.0e-6,
+                RmsNormScaleMode::OffsetOne,
+            )
+        };
+
+        let scalar = TensorView::contiguous(DType::Bf16, &[]).expect("valid scalar");
+        assert!(matches!(
+            make(
+                scalar,
+                scale.clone(),
+                TensorView::contiguous(DType::Bf16, &[]).unwrap()
+            ),
+            Err(OpError::RmsNormRankZero {
+                tensor: RmsNormTensor::Activation
+            })
+        ));
+
+        let zero = TensorView::contiguous(DType::Bf16, &[2, 0]).expect("zero extent view");
+        assert!(matches!(
+            make(zero, scale.clone(), output.clone()),
+            Err(OpError::RmsNormZeroExtent {
+                tensor: RmsNormTensor::Activation
+            })
+        ));
+
+        let strided = TensorView::new(DType::Bf16, Encoding::Unquantized, &[2, 3], &[4, 1], 0)
+            .expect("valid strided view");
+        assert!(matches!(
+            make(
+                strided,
+                scale.clone(),
+                TensorView::contiguous(DType::Bf16, &[2, 3]).unwrap()
+            ),
+            Err(OpError::RmsNormNonContiguous {
+                tensor: RmsNormTensor::Activation
+            })
+        ));
+
+        let wrong_dtype = TensorView::contiguous(DType::F32, &[2, 3]).expect("valid tensor");
+        assert!(matches!(
+            make(wrong_dtype, scale.clone(), output.clone()),
+            Err(OpError::RmsNormUnsupportedDType {
+                tensor: RmsNormTensor::Activation,
+                actual: DType::F32
+            })
+        ));
+
+        let packed_scale = TensorView::with_encoding(
+            DType::U8,
+            Encoding::Nvfp4 {
+                block_size: 16,
+                scale_dtype: DType::F32,
+            },
+            &[3],
+        )
+        .expect("valid packed descriptor");
+        assert!(matches!(
+            make(
+                TensorView::contiguous(DType::Bf16, &[2, 3]).unwrap(),
+                packed_scale,
+                output.clone()
+            ),
+            Err(OpError::RmsNormUnsupportedEncoding {
+                tensor: RmsNormTensor::RawScale,
+                actual: Encoding::Nvfp4 {
+                    block_size: 16,
+                    scale_dtype: DType::F32,
+                }
+            })
+        ));
+
+        let wrong_output = TensorView::contiguous(DType::Bf16, &[2, 4]).unwrap();
+        assert!(matches!(
+            make(
+                TensorView::contiguous(DType::Bf16, &[2, 3]).unwrap(),
+                scale.clone(),
+                wrong_output
+            ),
+            Err(OpError::RmsNormOutputShapeMismatch)
+        ));
+
+        let rank_two_scale = TensorView::contiguous(DType::Bf16, &[1, 3]).unwrap();
+        assert!(matches!(
+            make(
+                TensorView::contiguous(DType::Bf16, &[2, 3]).unwrap(),
+                rank_two_scale,
+                output.clone()
+            ),
+            Err(OpError::RmsNormScaleRankMismatch)
+        ));
+
+        let wrong_scale = TensorView::contiguous(DType::Bf16, &[4]).unwrap();
+        assert!(matches!(
+            make(
+                TensorView::contiguous(DType::Bf16, &[2, 3]).unwrap(),
+                wrong_scale,
+                output
+            ),
+            Err(OpError::RmsNormScaleShapeMismatch)
+        ));
+    }
+
+    #[test]
+    fn rms_norm_accepts_aligned_nonzero_offset_without_inferring_alias() {
+        let offset = TensorView::new(DType::Bf16, Encoding::Unquantized, &[2, 3], &[3, 1], 2)
+            .expect("aligned offset");
+        let scale = TensorView::contiguous(DType::Bf16, &[3]).expect("valid scale");
+        let output = TensorView::contiguous(DType::Bf16, &[2, 3]).expect("valid output");
+        assert_eq!(offset.payload_bytes(), 12);
+        assert_eq!(offset.end_offset(), 14);
+        assert!(offset.is_contiguous());
+        assert!(
+            SemanticOpDescriptor::new_rms_norm(
+                vec![offset, scale],
+                vec![output],
+                1.0e-6,
+                RmsNormScaleMode::OffsetOne,
+            )
+            .is_ok()
+        );
+
+        // Both zero-offset views are valid descriptors even though TensorView
+        // cannot identify whether they came from the same backing buffer.
+        let valid = SemanticOpDescriptor::new_rms_norm(
+            vec![
+                TensorView::contiguous(DType::Bf16, &[2, 3]).unwrap(),
+                TensorView::contiguous(DType::Bf16, &[3]).unwrap(),
+            ],
+            vec![TensorView::contiguous(DType::Bf16, &[2, 3]).unwrap()],
+            1.0e-6,
+            RmsNormScaleMode::OffsetOne,
+        )
+        .expect("buffer identity is outside TensorView");
+        assert_eq!(
+            valid.rms_norm_contract().expect("contract").alias_policy(),
+            RmsNormAliasPolicy::Unsupported
+        );
+    }
+
+    #[test]
+    fn rms_norm_rejects_invalid_epsilon_and_fake_backend_stays_numerically_unsupported() {
+        for epsilon in [0.0_f32, -1.0, f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            assert!(matches!(
+                RmsNormContract::new(epsilon, RmsNormScaleMode::OffsetOne),
+                Err(OpError::RmsNormInvalidEpsilon { .. })
+            ));
+        }
+
+        let operation = SemanticOpDescriptor::new_rms_norm(
+            vec![
+                TensorView::contiguous(DType::Bf16, &[1, 3]).unwrap(),
+                TensorView::contiguous(DType::Bf16, &[3]).unwrap(),
+            ],
+            vec![TensorView::contiguous(DType::Bf16, &[1, 3]).unwrap()],
+            1.0e-6,
+            RmsNormScaleMode::OffsetOne,
+        )
+        .expect("valid RMSNorm");
+        let backend = FakeBackend::new();
+        assert!(matches!(
+            backend.execute(&operation),
+            Err(BackendError::NumericalExecutionUnsupported)
+        ));
+        assert!(matches!(
+            backend.supports(&operation),
+            BackendSupport::Unsupported { .. }
+        ));
     }
 
     #[test]

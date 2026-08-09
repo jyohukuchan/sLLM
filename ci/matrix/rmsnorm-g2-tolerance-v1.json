@@ -1,0 +1,26 @@
+{
+  "schema_version": "rmsnorm-g2-tolerance-v1",
+  "tolerance_id": "rmsnorm-bf16-f32-output-v1",
+  "operator": "RMSNorm",
+  "input_dtype": "BF16",
+  "weight_dtype": "BF16",
+  "accumulation_dtype": "FP32",
+  "output_dtype": "BF16",
+  "scale_mode": "offset-one",
+  "atol": 0.0078125,
+  "rtol": 0.015625,
+  "comparison": {
+    "finite_rule": "abs(actual-reference) <= atol + rtol*abs(reference)",
+    "nonfinite_rule": "classification-exact",
+    "oracle": "tests/reference/semantic_rmsnorm.py",
+    "model_hidden_size": 2560,
+    "epsilon": "1e-6"
+  },
+  "approval": {
+    "status": "pre-registered",
+    "calibration_candidate_sha256": null,
+    "reviewer": "phase3-stage-a-contract",
+    "approved_at": "2026-08-04T00:00:00Z",
+    "reason": "locked before canonical GPU calibration; same-candidate tolerance expansion is forbidden"
+  }
+}

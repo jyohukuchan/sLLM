@@ -1,0 +1,80 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sllm-project.local/ci/schema/rmsnorm-g2-model-slice-v1.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "slice_id", "source", "tensor", "recipe", "output", "storage"],
+  "properties": {
+    "schema_version": {"const": "rmsnorm-g2-model-slice-v1"},
+    "slice_id": {"const": "qwen3.5-4b-layer0-input-layernorm-v1"},
+    "source": {"$ref": "#/$defs/source"},
+    "tensor": {"$ref": "#/$defs/tensor"},
+    "recipe": {"$ref": "#/$defs/recipe"},
+    "output": {"$ref": "#/$defs/output"},
+    "storage": {"$ref": "#/$defs/storage"}
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "sha40": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "safe_path": {"type": "string", "minLength": 1, "pattern": "^[^/\\u0000][^\\u0000]*$"},
+    "source": {
+      "type": "object", "additionalProperties": false,
+      "required": ["model_lock_path", "model_lock_sha256", "model_lock_fingerprint", "resolved_revision"],
+      "properties": {
+        "model_lock_path": {"const": "docs/models/locks/qwen3.5-4b-bf16.json"},
+        "model_lock_sha256": {"$ref": "#/$defs/sha256"},
+        "model_lock_fingerprint": {"const": "sha256:32265444b7cdd2a00e4e4e3e6aa8375a05acf6cddfcb9ffc348f54f67a7cd935"},
+        "resolved_revision": {"const": "851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a"}
+      }
+    },
+    "tensor": {
+      "type": "object", "additionalProperties": false,
+      "required": ["name", "source_shard", "dtype", "shape", "header_length_field_bytes", "header_length_bytes", "data_buffer_start", "data_offset_basis", "data_offsets", "absolute_byte_range", "byte_size", "epsilon", "scale_mode"],
+      "properties": {
+        "name": {"const": "model.language_model.layers.0.input_layernorm.weight"},
+        "source_shard": {"const": "model.safetensors-00002-of-00002.safetensors"},
+        "dtype": {"const": "BF16"},
+        "shape": {"const": [2560]},
+        "header_length_field_bytes": {"const": 8},
+        "header_length_bytes": {"const": 79064},
+        "data_buffer_start": {"const": 79072},
+        "data_offset_basis": {"const": "data-buffer-relative"},
+        "data_offsets": {"const": [15360, 20480]},
+        "absolute_byte_range": {"const": [94432, 99552]},
+        "byte_size": {"const": 5120},
+        "epsilon": {"const": "1e-6"},
+        "scale_mode": {"const": "offset-one"}
+      }
+    },
+    "recipe": {
+      "type": "object", "additionalProperties": false,
+      "required": ["version", "extractor", "repository", "commit", "script_path", "script_sha256", "arguments", "synthetic_fixture_only"],
+      "properties": {
+        "version": {"const": "rmsnorm-g2-slice-recipe-v1"},
+        "extractor": {"const": "sllm-g2-synthetic-safetensors-extractor"},
+        "repository": {"const": "sLLM"},
+        "commit": {"$ref": "#/$defs/sha40"},
+        "script_path": {"const": "ci/tools/extract_rmsnorm_g2_slice.py"},
+        "script_sha256": {"$ref": "#/$defs/sha256"},
+        "arguments": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+        "synthetic_fixture_only": {"const": true}
+      }
+    },
+    "output": {
+      "type": "object", "additionalProperties": false,
+      "required": ["size_bytes", "sha256"],
+      "properties": {"size_bytes": {"const": 5120}, "sha256": {"$ref": "#/$defs/sha256"}}
+    },
+    "storage": {
+      "type": "object", "additionalProperties": false,
+      "required": ["raw_slice_stored", "raw_slice_uploaded", "raw_model_stored", "raw_model_uploaded", "path_recorded"],
+      "properties": {
+        "raw_slice_stored": {"const": false},
+        "raw_slice_uploaded": {"const": false},
+        "raw_model_stored": {"const": false},
+        "raw_model_uploaded": {"const": false},
+        "path_recorded": {"const": false}
+      }
+    }
+  }
+}

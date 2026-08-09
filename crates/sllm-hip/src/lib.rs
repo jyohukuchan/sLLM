@@ -1,21 +1,37 @@
 //! Safe Rust access to the versioned HIP ABI.
 //!
-//! The Phase 1 native library is a host stub. Probing it is useful for callers
-//! that need an explicit capability result, but it must not be mistaken for a
-//! working HIP backend.
+//! The legacy [`sllm_core::Backend`] methods remain a Phase 1 control-plane
+//! boundary and retain their unavailable/non-executing contract.  The
+//! additive owned execution session is the typed
+//! `Context`/`Buffer`/`RmsNormDescriptor`/`PreparedRmsNorm` path below; it does
+//! not change the meaning of those legacy methods.
 
 use std::fmt;
 use std::mem::size_of;
 use std::ptr::NonNull;
+use std::sync::Arc;
 use std::time::Duration;
 
 use sllm_core::{
-    Backend, BackendCapabilities, BackendError, BackendSupport, ExecutionReceipt,
-    MaterializedTensor, SemanticOp, TensorView,
+    Backend, BackendCapabilities, BackendError, BackendSupport, ExecutionError, ExecutionReceipt,
+    ExecutionSession, ExecutionSessionRequest, MaterializedTensor, SemanticOp, TensorView,
 };
 use sllm_hip_sys as sys;
 
+mod bridge;
+mod rmsnorm;
+mod runtime;
+
+pub use rmsnorm::{
+    PreparedRmsNorm, RmsNormDescriptor, RmsNormDispatchInfo, RmsNormSubmission, TensorBinding,
+};
+pub use runtime::{
+    Buffer, Completion, CompletionState, Context, DeviceInfo, Event, Queue, RuntimeError,
+    RuntimeStatus,
+};
+
 const ERROR_CAPACITY: usize = 256;
+const MAX_FINITE_TIMEOUT_MS: u32 = u32::MAX - 1;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Status {
@@ -319,7 +335,15 @@ impl EvidenceCompletion {
             status: Status::InvalidArgument,
             message: "evidence output is too large for the HIP ABI".to_owned(),
         })?;
-        let handle = self.handle.take().expect("evidence handle checked above");
+        let handle = match self.handle.take() {
+            Some(handle) => handle,
+            None => {
+                return Err(HipError::Status {
+                    status: Status::InvalidHandle,
+                    message: "evidence completion was already consumed".to_owned(),
+                });
+            }
+        };
         let mut error_buffer = [0u8; ERROR_CAPACITY];
         let mut error_sink = evidence_sink(&mut error_buffer);
         let mut result = evidence_result();
@@ -398,7 +422,12 @@ pub fn submit_evidence(input: &[u8]) -> Result<EvidenceCompletion, HipError> {
 }
 
 fn timeout_millis(timeout: Duration) -> u32 {
-    timeout.as_millis().try_into().unwrap_or(u32::MAX)
+    let millis = timeout.as_millis();
+    if millis >= u128::from(MAX_FINITE_TIMEOUT_MS) {
+        MAX_FINITE_TIMEOUT_MS
+    } else {
+        u32::try_from(millis).unwrap_or(MAX_FINITE_TIMEOUT_MS)
+    }
 }
 
 fn validate_evidence_contract(
@@ -467,6 +496,8 @@ fn evidence_result() -> sys::evidence::sllm_hip_evidence_result_t {
 }
 
 /// A typed backend handle is only constructible after an available HIP probe.
+/// Its legacy [`Backend`] methods remain the Phase 1 unavailable contract;
+/// owned numerical work is opened separately through `open_execution_session`.
 #[derive(Clone, Copy, Debug)]
 pub struct HipBackend {
     _private: (),
@@ -509,6 +540,13 @@ impl Backend for HipBackend {
 
     fn execute(&self, _operation: &SemanticOp) -> Result<ExecutionReceipt, BackendError> {
         Err(BackendError::BackendUnavailable { name: self.name() })
+    }
+
+    fn open_execution_session(
+        &self,
+        request: ExecutionSessionRequest,
+    ) -> Result<Arc<ExecutionSession>, ExecutionError> {
+        bridge::open_execution_session(*self, request)
     }
 }
 
@@ -619,7 +657,11 @@ mod tests {
         assert_eq!(timeout_millis(Duration::from_millis(1)), 1);
         assert_eq!(
             timeout_millis(Duration::from_millis(u64::from(u32::MAX) + 1)),
-            u32::MAX
+            u32::MAX - 1
+        );
+        assert_eq!(
+            timeout_millis(Duration::from_millis(u64::from(u32::MAX))),
+            u32::MAX - 1
         );
     }
 
@@ -751,6 +793,38 @@ mod tests {
             HipBackend::connect(),
             Err(HipError::HipUnavailable { .. })
         ));
+    }
+
+    #[test]
+    fn generic_backend_preserves_legacy_contract_while_owned_session_is_additive() {
+        let backend = HipBackend { _private: () };
+        let activation =
+            TensorView::contiguous(sllm_core::DType::Bf16, &[2, 3]).expect("valid activation");
+        let scale = TensorView::contiguous(sllm_core::DType::Bf16, &[3]).expect("valid scale");
+        let output = TensorView::contiguous(sllm_core::DType::Bf16, &[2, 3]).expect("valid output");
+        let operation = sllm_core::SemanticOp::new_rms_norm(
+            vec![activation.clone(), scale],
+            vec![output],
+            1.0e-6,
+            sllm_core::RmsNormScaleMode::OffsetOne,
+        )
+        .expect("valid RMSNorm operation");
+
+        assert!(!backend.capabilities().numerical_execution);
+        assert_eq!(
+            backend.supports(&operation),
+            BackendSupport::Unsupported {
+                reason: "HIP backend is unavailable in Phase 1",
+            }
+        );
+        assert_eq!(
+            backend.materialize(&activation),
+            Err(BackendError::BackendUnavailable { name: "hip" })
+        );
+        assert_eq!(
+            backend.execute(&operation),
+            Err(BackendError::BackendUnavailable { name: "hip" })
+        );
     }
 
     #[test]

@@ -1,0 +1,205 @@
+name: semantic-rmsnorm-g1
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: semantic-rmsnorm-g1-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  semantic-rmsnorm-g1:
+    runs-on: [self-hosted, sllm-semantic-g1, rocm-7.14]
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout immutable candidate
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Prepare private controller directories
+        run: |
+          set -eu
+          RUN_ROOT="$RUNNER_TEMP/sllm-semantic-rmsnorm-g1-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          test ! -e "$RUN_ROOT"
+          mkdir -m 700 "$RUN_ROOT"
+          printf 'RUN_ROOT=%s\n' "$RUN_ROOT" >> "$GITHUB_ENV"
+
+      - name: Verify exact immutable candidate
+        env:
+          REVIEWED_SHA: ${{ github.sha }}
+          TESTED_SHA: ${{ github.sha }}
+          WORKFLOW_SHA: ${{ github.sha }}
+        run: |
+          set -eu
+          test "$(command -v git)" = /usr/bin/git
+          /usr/bin/git --version
+          for key in remote.origin.url remote.origin.fetch branch.main.remote branch.main.merge; do
+            env PATH=/usr/bin:/bin LC_ALL=C GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_COUNT=0 GIT_NO_REPLACE_OBJECTS=1 \
+              /usr/bin/git --no-replace-objects config --local --unset-all "$key" || true
+          done
+          test "$(/usr/bin/git --no-replace-objects rev-parse HEAD)" = "$REVIEWED_SHA"
+          test "$(/usr/bin/git --no-replace-objects rev-parse HEAD)" = "$TESTED_SHA"
+          test "$(/usr/bin/git --no-replace-objects rev-parse HEAD)" = "$WORKFLOW_SHA"
+          test -n "$(/usr/bin/git --no-replace-objects rev-parse --show-object-format=storage)"
+          test -z "$(/usr/bin/git --no-replace-objects for-each-ref --format='%(refname)' refs/replace)"
+          test -z "$(/usr/bin/git --no-replace-objects status --porcelain=v1 --untracked-files=all)"
+
+      - name: Run controller-owned serial gfx1030 and gfx1201 evidence
+        env:
+          REVIEWED_SHA: ${{ github.sha }}
+          TESTED_SHA: ${{ github.sha }}
+          WORKFLOW_SHA: ${{ github.sha }}
+        run: |
+          set -eu
+          test -n "${RUN_ROOT:-}"
+          test -d "$RUN_ROOT"
+          exec /usr/bin/env -i \
+            PATH=/usr/bin:/bin \
+            LC_CTYPE=C.UTF-8 \
+            HOME="$HOME" \
+            CI=true \
+            GITHUB_ACTIONS=true \
+            GITHUB_SHA="$GITHUB_SHA" \
+            GITHUB_WORKSPACE="$GITHUB_WORKSPACE" \
+            RUNNER_TEMP="$RUNNER_TEMP" \
+            RUN_ROOT="$RUN_ROOT" \
+            REVIEWED_SHA="$REVIEWED_SHA" \
+            TESTED_SHA="$TESTED_SHA" \
+            WORKFLOW_SHA="$WORKFLOW_SHA" \
+            GITHUB_RUN_ID="$GITHUB_RUN_ID" \
+            GITHUB_RUN_ATTEMPT="$GITHUB_RUN_ATTEMPT" \
+            GITHUB_WORKFLOW=semantic-rmsnorm-g1 \
+            /usr/bin/python3 -I -S -c '
+          import fcntl
+          import os
+          import subprocess
+          import sys
+          workspace = os.environ["GITHUB_WORKSPACE"]
+          reviewed = os.environ["REVIEWED_SHA"]
+          result = subprocess.run(
+              ["/usr/bin/git", "--no-replace-objects", "-C", workspace, "show", f"{reviewed}:ci/tools/orchestrate_rmsnorm_g1_evidence.py"],
+              stdin=subprocess.DEVNULL,
+              stdout=subprocess.PIPE,
+              stderr=subprocess.PIPE,
+              env={"PATH": "/usr/bin:/bin", "LC_ALL": "C", "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_SYSTEM": "/dev/null", "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_COUNT": "0", "GIT_NO_REPLACE_OBJECTS": "1"},
+              check=False,
+          )
+          if result.returncode != 0 or not result.stdout or len(result.stdout) > 4 * 1024 * 1024:
+              raise SystemExit("cannot create the reviewed sealed semantic G1 controller source")
+          fd = os.memfd_create("sllm-semantic-g1-controller", os.MFD_CLOEXEC | os.MFD_ALLOW_SEALING)
+          offset = 0
+          while offset < len(result.stdout):
+              offset += os.write(fd, result.stdout[offset:])
+          fcntl.fcntl(fd, fcntl.F_ADD_SEALS, fcntl.F_SEAL_SHRINK | fcntl.F_SEAL_GROW | fcntl.F_SEAL_WRITE | fcntl.F_SEAL_SEAL)
+          os.set_inheritable(fd, True)
+          os.execve(
+              "/usr/bin/python3",
+              ["/usr/bin/python3", "-I", "-S", f"/proc/self/fd/{fd}", *sys.argv[2:]],
+              {**os.environ, "SLLM_G1_CONTROLLER_FD": str(fd)},
+          )
+          ' -- \
+            --artifact-root "$RUN_ROOT/artifacts" \
+            --output-dir "$RUN_ROOT/rmsnorm-semantic-g1-aggregate-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
+            --run-id "$GITHUB_RUN_ID" \
+            --run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --reviewed-sha "$REVIEWED_SHA" \
+            --tested-sha "$TESTED_SHA" \
+            --workflow-sha "$WORKFLOW_SHA"
+
+      - name: Upload controller-validated evidence
+        if: ${{ success() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: semantic-rmsnorm-g1-evidence
+          path: |
+            ${{ env.RUN_ROOT }}/rmsnorm-semantic-g1-aggregate-${{ github.run_id }}-${{ github.run_attempt }}/rmsnorm-semantic-g1-aggregate.json
+            ${{ env.RUN_ROOT }}/rmsnorm-semantic-g1-aggregate-${{ github.run_id }}-${{ github.run_attempt }}/rmsnorm-semantic-g1-aggregate.json.sha256
+            ${{ env.RUN_ROOT }}/rmsnorm-semantic-g1-aggregate-${{ github.run_id }}-${{ github.run_attempt }}/rows/rmsnorm-semantic-g1-gfx1030/rmsnorm-semantic-g1-report.json
+            ${{ env.RUN_ROOT }}/rmsnorm-semantic-g1-aggregate-${{ github.run_id }}-${{ github.run_attempt }}/rows/rmsnorm-semantic-g1-gfx1030/rmsnorm-semantic-g1-report.json.sha256
+            ${{ env.RUN_ROOT }}/rmsnorm-semantic-g1-aggregate-${{ github.run_id }}-${{ github.run_attempt }}/rows/rmsnorm-semantic-g1-gfx1201/rmsnorm-semantic-g1-report.json
+            ${{ env.RUN_ROOT }}/rmsnorm-semantic-g1-aggregate-${{ github.run_id }}-${{ github.run_attempt }}/rows/rmsnorm-semantic-g1-gfx1201/rmsnorm-semantic-g1-report.json.sha256
+            ${{ env.RUN_ROOT }}/artifacts/rmsnorm-semantic-g1-gfx1030/rmsnorm-semantic-g1-artifact.json
+            ${{ env.RUN_ROOT }}/artifacts/rmsnorm-semantic-g1-gfx1030/rmsnorm-semantic-g1-artifact.json.sha256
+            ${{ env.RUN_ROOT }}/artifacts/rmsnorm-semantic-g1-gfx1201/rmsnorm-semantic-g1-artifact.json
+            ${{ env.RUN_ROOT }}/artifacts/rmsnorm-semantic-g1-gfx1201/rmsnorm-semantic-g1-artifact.json.sha256
+            ${{ env.RUN_ROOT }}/rmsnorm-semantic-g1-aggregate-${{ github.run_id }}-${{ github.run_attempt }}/rows/rmsnorm-semantic-g1-gfx1030/raw/case-0.bin
+            ${{ env.RUN_ROOT }}/rmsnorm-semantic-g1-aggregate-${{ github.run_id }}-${{ github.run_attempt }}/rows/rmsnorm-semantic-g1-gfx1030/raw/case-0.bin.sha256
+            ${{ env.RUN_ROOT }}/rmsnorm-semantic-g1-aggregate-${{ github.run_id }}-${{ github.run_attempt }}/rows/rmsnorm-semantic-g1-gfx1030/raw/case-1.bin
+            ${{ env.RUN_ROOT }}/rmsnorm-semantic-g1-aggregate-${{ github.run_id }}-${{ github.run_attempt }}/rows/rmsnorm-semantic-g1-gfx1030/raw/case-1.bin.sha256
+            ${{ env.RUN_ROOT }}/rmsnorm-semantic-g1-aggregate-${{ github.run_id }}-${{ github.run_attempt }}/rows/rmsnorm-semantic-g1-gfx1030/raw/case-2.bin
+            ${{ env.RUN_ROOT }}/rmsnorm-semantic-g1-aggregate-${{ github.run_id }}-${{ github.run_attempt }}/rows/rmsnorm-semantic-g1-gfx1030/raw/case-2.bin.sha256
+            ${{ env.RUN_ROOT }}/rmsnorm-semantic-g1-aggregate-${{ github.run_id }}-${{ github.run_attempt }}/rows/rmsnorm-semantic-g1-gfx1030/raw/case-3.bin
+            ${{ env.RUN_ROOT }}/rmsnorm-semantic-g1-aggregate-${{ github.run_id }}-${{ github.run_attempt }}/rows/rmsnorm-semantic-g1-gfx1030/raw/case-3.bin.sha256
+            ${{ env.RUN_ROOT }}/rmsnorm-semantic-g1-aggregate-${{ github.run_id }}-${{ github.run_attempt }}/rows/rmsnorm-semantic-g1-gfx1030/raw/case-4.bin
+            ${{ env.RUN_ROOT }}/rmsnorm-semantic-g1-aggregate-${{ github.run_id }}-${{ github.run_attempt }}/rows/rmsnorm-semantic-g1-gfx1030/raw/case-4.bin.sha256
+            ${{ env.RUN_ROOT }}/rmsnorm-semantic-g1-aggregate-${{ github.run_id }}-${{ github.run_attempt }}/rows/rmsnorm-semantic-g1-gfx1030/raw/case-5.bin
+            ${{ env.RUN_ROOT }}/rmsnorm-semantic-g1-aggregate-${{ github.run_id }}-${{ github.run_attempt }}/rows/rmsnorm-semantic-g1-gfx1030/raw/case-5.bin.sha256
+            ${{ env.RUN_ROOT }}/rmsnorm-semantic-g1-aggregate-${{ github.run_id }}-${{ github.run_attempt }}/rows/rmsnorm-semantic-g1-gfx1030/raw/case-6.bin
+            ${{ env.RUN_ROOT }}/rmsnorm-semantic-g1-aggregate-${{ github.run_id }}-${{ github.run_attempt }}/rows/rmsnorm-semantic-g1-gfx1030/raw/case-6.bin.sha256
+            ${{ env.RUN_ROOT }}/rmsnorm-semantic-g1-aggregate-${{ github.run_id }}-${{ github.run_attempt }}/rows/rmsnorm-semantic-g1-gfx1030/raw/case-7.bin
+            ${{ env.RUN_ROOT }}/rmsnorm-semantic-g1-aggregate-${{ github.run_id }}-${{ github.run_attempt }}/rows/rmsnorm-semantic-g1-gfx1030/raw/case-7.bin.sha256
+            ${{ env.RUN_ROOT }}/rmsnorm-semantic-g1-aggregate-${{ github.run_id }}-${{ github.run_attempt }}/rows/rmsnorm-semantic-g1-gfx1030/raw/case-8.bin
+            ${{ env.RUN_ROOT }}/rmsnorm-semantic-g1-aggregate-${{ github.run_id }}-${{ github.run_attempt }}/rows/rmsnorm-semantic-g1-gfx1030/raw/case-8.bin.sha256
+            ${{ env.RUN_ROOT }}/rmsnorm-semantic-g1-aggregate-${{ github.run_id }}-${{ github.run_attempt }}/rows/rmsnorm-semantic-g1-gfx1030/raw/case-9.bin
+            ${{ env.RUN_ROOT }}/rmsnorm-semantic-g1-aggregate-${{ github.run_id }}-${{ github.run_attempt }}/rows/rmsnorm-semantic-g1-gfx1030/raw/case-9.bin.sha256
+            ${{ env.RUN_ROOT }}/rmsnorm-semantic-g1-aggregate-${{ github.run_id }}-${{ github.run_attempt }}/rows/rmsnorm-semantic-g1-gfx1030/raw/case-10.bin
+            ${{ env.RUN_ROOT }}/rmsnorm-semantic-g1-aggregate-${{ github.run_id }}-${{ github.run_attempt }}/rows/rmsnorm-semantic-g1-gfx1030/raw/case-10.bin.sha256
+            ${{ env.RUN_ROOT }}/rmsnorm-semantic-g1-aggregate-${{ github.run_id }}-${{ github.run_attempt }}/rows/rmsnorm-semantic-g1-gfx1030/raw/case-11.bin
+            ${{ env.RUN_ROOT }}/rmsnorm-semantic-g1-aggregate-${{ github.run_id }}-${{ github.run_attempt }}/rows/rmsnorm-semantic-g1-gfx1030/raw/case-11.bin.sha256
+            ${{ env.RUN_ROOT }}/rmsnorm-semantic-g1-aggregate-${{ github.run_id }}-${{ github.run_attempt }}/rows/rmsnorm-semantic-g1-gfx1030/raw/case-12.bin
+            ${{ env.RUN_ROOT }}/rmsnorm-semantic-g1-aggregate-${{ github.run_id }}-${{ github.run_attempt }}/rows/rmsnorm-semantic-g1-gfx1030/raw/case-12.bin.sha256
+            ${{ env.RUN_ROOT }}/rmsnorm-semantic-g1-aggregate-${{ github.run_id }}-${{ github.run_attempt }}/rows/rmsnorm-semantic-g1-gfx1030/raw/case-13.bin
+            ${{ env.RUN_ROOT }}/rmsnorm-semantic-g1-aggregate-${{ github.run_id }}-${{ github.run_attempt }}/rows/rmsnorm-semantic-g1-gfx1030/raw/case-13.bin.sha256
+            ${{ env.RUN_ROOT }}/rmsnorm-semantic-g1-aggregate-${{ github.run_id }}-${{ github.run_attempt }}/rows/rmsnorm-semantic-g1-gfx1030/raw/case-14.bin
+            ${{ env.RUN_ROOT }}/rmsnorm-semantic-g1-aggregate-${{ github.run_id }}-${{ github.run_attempt }}/rows/rmsnorm-semantic-g1-gfx1030/raw/case-14.bin.sha256
+            ${{ env.RUN_ROOT }}/rmsnorm-semantic-g1-aggregate-${{ github.run_id }}-${{ github.run_attempt }}/rows/rmsnorm-semantic-g1-gfx1201/raw/case-0.bin
+            ${{ env.RUN_ROOT }}/rmsnorm-semantic-g1-aggregate-${{ github.run_id }}-${{ github.run_attempt }}/rows/rmsnorm-semantic-g1-gfx1201/raw/case-0.bin.sha256
+            ${{ env.RUN_ROOT }}/rmsnorm-semantic-g1-aggregate-${{ github.run_id }}-${{ github.run_attempt }}/rows/rmsnorm-semantic-g1-gfx1201/raw/case-1.bin
+            ${{ env.RUN_ROOT }}/rmsnorm-semantic-g1-aggregate-${{ github.run_id }}-${{ github.run_attempt }}/rows/rmsnorm-semantic-g1-gfx1201/raw/case-1.bin.sha256
+            ${{ env.RUN_ROOT }}/rmsnorm-semantic-g1-aggregate-${{ github.run_id }}-${{ github.run_attempt }}/rows/rmsnorm-semantic-g1-gfx1201/raw/case-2.bin
+            ${{ env.RUN_ROOT }}/rmsnorm-semantic-g1-aggregate-${{ github.run_id }}-${{ github.run_attempt }}/rows/rmsnorm-semantic-g1-gfx1201/raw/case-2.bin.sha256
+            ${{ env.RUN_ROOT }}/rmsnorm-semantic-g1-aggregate-${{ github.run_id }}-${{ github.run_attempt }}/rows/rmsnorm-semantic-g1-gfx1201/raw/case-3.bin
+            ${{ env.RUN_ROOT }}/rmsnorm-semantic-g1-aggregate-${{ github.run_id }}-${{ github.run_attempt }}/rows/rmsnorm-semantic-g1-gfx1201/raw/case-3.bin.sha256
+            ${{ env.RUN_ROOT }}/rmsnorm-semantic-g1-aggregate-${{ github.run_id }}-${{ github.run_attempt }}/rows/rmsnorm-semantic-g1-gfx1201/raw/case-4.bin
+            ${{ env.RUN_ROOT }}/rmsnorm-semantic-g1-aggregate-${{ github.run_id }}-${{ github.run_attempt }}/rows/rmsnorm-semantic-g1-gfx1201/raw/case-4.bin.sha256
+            ${{ env.RUN_ROOT }}/rmsnorm-semantic-g1-aggregate-${{ github.run_id }}-${{ github.run_attempt }}/rows/rmsnorm-semantic-g1-gfx1201/raw/case-5.bin
+            ${{ env.RUN_ROOT }}/rmsnorm-semantic-g1-aggregate-${{ github.run_id }}-${{ github.run_attempt }}/rows/rmsnorm-semantic-g1-gfx1201/raw/case-5.bin.sha256
+            ${{ env.RUN_ROOT }}/rmsnorm-semantic-g1-aggregate-${{ github.run_id }}-${{ github.run_attempt }}/rows/rmsnorm-semantic-g1-gfx1201/raw/case-6.bin
+            ${{ env.RUN_ROOT }}/rmsnorm-semantic-g1-aggregate-${{ github.run_id }}-${{ github.run_attempt }}/rows/rmsnorm-semantic-g1-gfx1201/raw/case-6.bin.sha256
+            ${{ env.RUN_ROOT }}/rmsnorm-semantic-g1-aggregate-${{ github.run_id }}-${{ github.run_attempt }}/rows/rmsnorm-semantic-g1-gfx1201/raw/case-7.bin
+            ${{ env.RUN_ROOT }}/rmsnorm-semantic-g1-aggregate-${{ github.run_id }}-${{ github.run_attempt }}/rows/rmsnorm-semantic-g1-gfx1201/raw/case-7.bin.sha256
+            ${{ env.RUN_ROOT }}/rmsnorm-semantic-g1-aggregate-${{ github.run_id }}-${{ github.run_attempt }}/rows/rmsnorm-semantic-g1-gfx1201/raw/case-8.bin
+            ${{ env.RUN_ROOT }}/rmsnorm-semantic-g1-aggregate-${{ github.run_id }}-${{ github.run_attempt }}/rows/rmsnorm-semantic-g1-gfx1201/raw/case-8.bin.sha256
+            ${{ env.RUN_ROOT }}/rmsnorm-semantic-g1-aggregate-${{ github.run_id }}-${{ github.run_attempt }}/rows/rmsnorm-semantic-g1-gfx1201/raw/case-9.bin
+            ${{ env.RUN_ROOT }}/rmsnorm-semantic-g1-aggregate-${{ github.run_id }}-${{ github.run_attempt }}/rows/rmsnorm-semantic-g1-gfx1201/raw/case-9.bin.sha256
+            ${{ env.RUN_ROOT }}/rmsnorm-semantic-g1-aggregate-${{ github.run_id }}-${{ github.run_attempt }}/rows/rmsnorm-semantic-g1-gfx1201/raw/case-10.bin
+            ${{ env.RUN_ROOT }}/rmsnorm-semantic-g1-aggregate-${{ github.run_id }}-${{ github.run_attempt }}/rows/rmsnorm-semantic-g1-gfx1201/raw/case-10.bin.sha256
+            ${{ env.RUN_ROOT }}/rmsnorm-semantic-g1-aggregate-${{ github.run_id }}-${{ github.run_attempt }}/rows/rmsnorm-semantic-g1-gfx1201/raw/case-11.bin
+            ${{ env.RUN_ROOT }}/rmsnorm-semantic-g1-aggregate-${{ github.run_id }}-${{ github.run_attempt }}/rows/rmsnorm-semantic-g1-gfx1201/raw/case-11.bin.sha256
+            ${{ env.RUN_ROOT }}/rmsnorm-semantic-g1-aggregate-${{ github.run_id }}-${{ github.run_attempt }}/rows/rmsnorm-semantic-g1-gfx1201/raw/case-12.bin
+            ${{ env.RUN_ROOT }}/rmsnorm-semantic-g1-aggregate-${{ github.run_id }}-${{ github.run_attempt }}/rows/rmsnorm-semantic-g1-gfx1201/raw/case-12.bin.sha256
+            ${{ env.RUN_ROOT }}/rmsnorm-semantic-g1-aggregate-${{ github.run_id }}-${{ github.run_attempt }}/rows/rmsnorm-semantic-g1-gfx1201/raw/case-13.bin
+            ${{ env.RUN_ROOT }}/rmsnorm-semantic-g1-aggregate-${{ github.run_id }}-${{ github.run_attempt }}/rows/rmsnorm-semantic-g1-gfx1201/raw/case-13.bin.sha256
+            ${{ env.RUN_ROOT }}/rmsnorm-semantic-g1-aggregate-${{ github.run_id }}-${{ github.run_attempt }}/rows/rmsnorm-semantic-g1-gfx1201/raw/case-14.bin
+            ${{ env.RUN_ROOT }}/rmsnorm-semantic-g1-aggregate-${{ github.run_id }}-${{ github.run_attempt }}/rows/rmsnorm-semantic-g1-gfx1201/raw/case-14.bin.sha256
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Remove private controller directories
+        if: ${{ always() }}
+        run: |
+          set -eu
+          if [ -n "${RUN_ROOT:-}" ] && [ -d "$RUN_ROOT" ]; then
+            rm -rf -- "$RUN_ROOT"
+          fi

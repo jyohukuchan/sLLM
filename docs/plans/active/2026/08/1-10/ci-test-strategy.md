@@ -207,6 +207,24 @@ GPU hard gateは変更が実際に触れるscopeへ適用し、未実装の後�
 - model-free native HIP実行、C ABI、lifetime、allocator、queue/event、fallback、dispatchに影響する変更はH0〜H3とcanonical `gfx1030`/`gfx1201`のG0/G1を必須とする。
 - model pathへ影響する変更からG2、互換性の昇格・表記変更からG4、性能または実運用dispatchへ影響する変更からP0を必須とする。
 
+### main plan Phase 3 Stage Aのbootstrap gate
+
+ここでいうmain planのPhase 3 Stage Aは、この文書の実装段階`Phase 3: GPU runner基盤`とは別の作業区分である。main plan Phase 3 Stage Aは、既存GPU runner基盤を使って最初のpublic semantic opとmodel-bound G2へ進む。Phase 3全体はその後のfull model CLI生成とG3までを含み、Stage Aだけで完了しない。
+
+- 計画、model lock schema/validator、reader記録、host parserだけのcandidateはH0〜H2を必須とし、GPU実行済みとは表記しない。
+- G2/P0のschema、matrix、runner、aggregateについて非実行contractだけを初めて構築するbootstrap candidateは、H0〜H2とhost側negative self-testを必須とする。GPU/runtime behaviorも変更する場合だけ、影響範囲に応じてH3/G0/private diagnostic G1を追加し、未完成のG2/P0自身は循環的に要求しない。
+- 初回G2/P0 enablement candidateはH0〜H2、同一candidateのH3 PASS evidence、canonical G0/private diagnostic G1/semantic RMSNorm G1/G2/P0、aggregate、実行前後healthを必須とする。これがG2/P0 baseline identityを確立する。
+- public runtime ABI、allocator、queue/event、lifetime、dispatch、native buildに触れるcandidateはH0〜H3とcanonical G0/private diagnostic G1を必須とする。
+- RMSNorm semantic contractとbaseline kernelには、private diagnostic G1とは別のversioned semantic-op G1 report、matrix、runner、aggregateを設ける。synthetic BF16 input/weight、FP32 oracle、非整列shape、dispatch境界、selected backend/kernel/dispatch、fallbackなしを同一candidateのcanonical 2 GPUで検証する。private G1 schemaへ数値結果を継ぎ足さない。
+- G2 aggregate確立後のmodel path、G2/P0 schema・runner・tolerance変更は、H0〜H3、canonical G0、private diagnostic G1、semantic RMSNorm G1、real-weight G2を同じimmutable candidateへ結び付ける。
+- public HIP runtime/kernelと実運用dispatchに触れる最終candidateはP0も必須とする。Phase 3 Stage AのP0はRMSNorm kernel latencyと合法な`B-1/B/B+1`の短い観測に限定し、承認済みthresholdがない間はversioned `review_required` dispositionを要求する。性能最適化済みまたは性能回帰gate確立済みとは表記しない。
+- G3、G4、P1はPhase 3 Stage Aの完了条件に含めない。full model executionへ接続したPhase 3後続StageからG3、互換性昇格からG4、performance hard thresholdからP1を要求する。
+- tokenizer、chat template、image/video processorをlockして構造検証するだけの変更はG3を要求しない。runtimeでtokenization/template適用またはfull model生成へ接続した時点からG3を要求する。
+
+Phase 3 Stage Aの最終集約は、同一review済み40桁SHA/treeに対するH0〜H3、canonical `gfx1030`/`gfx1201`のG0、private diagnostic G1、semantic RMSNorm G1、G2、P0、実行前後health、process cleanupを必須とする。Phase 3全体の最終candidateはこれらにfull model G3を追加する。H3はrequired workflow昇格前でも最終candidateの必須PASS evidenceであり、branch protection上のrequired checkへの昇格は20回以上・7日以上の観測条件に従って別に判断する。
+
+model lock fingerprintはmodel入力のidentity、reviewed SHA/treeはcode candidateのidentity、H3/G1/G2/P0 artifact・report digestはそのcandidateから得た実装と結果のidentity、tuple digestは実行環境のidentityである。aggregateはこれらを別fieldで保持して同一run graphへ結び付け、相互の代用、別candidateの混在、floating aliasによる置換を拒否する。
+
 `tested_sha`はreview済みの完全40桁`reviewed_sha`と一致しなければならず、branch、tag、別commit、merge後のSHA、古いartifactを代用しない。該当scopeのrunnerまたはevidence経路が未整備なら、その機能変更をprotected mainへmergeしない。
 
 G1、G2、P0 reportには少なくとも、report ID、run ID/attempt、reviewed/tested/workflow SHA、matrix row ID、tuple digest、selected backend、GPU UUID/BDF/exact target、dispatch ID/count、CPU fallbackの許可・使用有無、artifact content/manifest SHA-256、target/codegen feature、state、開始・終了時刻を含める。GPU PASSでは`selected_backend=hip`、GPU dispatch数1以上、CPU fallback未使用、artifact hash一致を必須とする。
