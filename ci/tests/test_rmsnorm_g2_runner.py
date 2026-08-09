@@ -180,9 +180,23 @@ class G2RunnerTests(unittest.TestCase):
             execution = runner.subprocess.CompletedProcess([], 1, b"", b"HIP unavailable")
             healthy = {"available": True, "reliable": True, "state": "OK", "target": "gfx1030", "ras_uncorrectable_count": 0}
             clean = {"state": "CLEAN", "residual_runner_children": [], "gpu_processes": []}
-            with patch.dict(os.environ, {"SLLM_G2_GPU_EXECUTION": "1"}), patch.object(runner.subprocess, "run", return_value=query) as mocked_query, patch.object(runner, "_load_observation", side_effect=[healthy, healthy, clean, clean]), patch.object(runner, "_run_bounded_binary", return_value=execution):
+            routing = {"hip_id": 1}
+            events: list[str] = []
+
+            def observe(*_args: object) -> tuple[dict[str, object], dict[str, object], dict[str, object]]:
+                events.append("observe")
+                return healthy, clean, routing
+
+            def execute(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[bytes]:
+                events.append("execute")
+                return execution
+
+            with patch.dict(os.environ, {"SLLM_G2_GPU_EXECUTION": "1"}), patch.object(runner.subprocess, "run", return_value=query) as mocked_query, patch.object(runner, "_observe_live", side_effect=observe) as live_observation, patch.object(runner, "_run_bounded_binary", side_effect=execute) as bounded_binary:
                 report = runner.run_row(args)
             mocked_query.assert_called_once()
+            self.assertEqual(live_observation.call_count, 2)
+            self.assertEqual(events, ["observe", "execute", "observe"])
+            self.assertEqual(bounded_binary.call_args.kwargs["env"]["HIP_VISIBLE_DEVICES"], "1")
             self.assertEqual(report["state"], "FAIL")
             self.assertEqual(report["scope"]["dispatch_count"], 0)
             self.assertIn("CPU/stub", report["execution"]["failure_reason"])

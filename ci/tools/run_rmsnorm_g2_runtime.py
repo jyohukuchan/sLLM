@@ -31,6 +31,14 @@ from validate_rmsnorm_g2_contracts import (  # noqa: E402
     validate_candidate, validate_matrix, validate_slice_record, validate_tolerance, _schema_validate,
     extract_verified_slice_payload,
 )
+from run_g0_preflight import (  # noqa: E402
+    amd_smi_list_json, nonblocking_host_lock, observe_health, observe_processes,
+    require_available_observation,
+)
+from validate_g0_contracts import (  # noqa: E402
+    AMD_SMI_EXECUTABLE, row_by_id, validate_g0_matrix, validate_health,
+    validate_processes, validate_routing, validate_visibility_environment,
+)
 
 TIMEOUT_SECONDS = 600
 PROTOCOL_SCHEMA = "rmsnorm-g2-runtime-result-v1"
@@ -75,6 +83,36 @@ def _load_observation(path: Path | None, target: str, *, kind: str) -> dict[str,
     return value
 
 
+def _observe_live(repo: Path, target: str) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    row = row_by_id(validate_g0_matrix(repo), f"g0-{target}")
+    routing = amd_smi_list_json(row, executable=AMD_SMI_EXECUTABLE)
+    visibility = validate_visibility_environment(
+        {"HIP_VISIBLE_DEVICES": str(routing["hip_id"]), "CUDA_VISIBLE_DEVICES": None, "GPU_DEVICE_ORDINAL": None}
+    )
+    validate_routing(routing, visibility, row)
+    observed_health = observe_health(
+        row, routing, amd_smi=AMD_SMI_EXECUTABLE, sysfs_root=Path("/sys/bus/pci/devices")
+    )
+    require_available_observation(observed_health, "G2 live health")
+    validate_health(observed_health, "G2 live", row)
+    observed_processes = observe_processes(row, routing, amd_smi=AMD_SMI_EXECUTABLE)
+    require_available_observation(observed_processes, "G2 live process")
+    validate_processes(observed_processes, "G2 live", row)
+    facts = observed_health["facts"]
+    if facts["ras_uncorrectable_count"] != 0 or facts["sysfs_ras_uncorrectable_count"] != 0:
+        raise ContractError("G2 live health reports an uncorrectable error")
+    if observed_processes["gpu_processes"] or observed_processes["residual_runner_children"]:
+        raise ContractError("G2 live process observation is not clean")
+    health = {
+        "available": True,
+        "reliable": True,
+        "state": "OK",
+        "target": target,
+        "ras_uncorrectable_count": 0,
+    }
+    return health, _clean_process(), routing
+
+
 def _kill_process_group(process: subprocess.Popen[bytes]) -> None:
     try:
         os.killpg(process.pid, signal.SIGTERM)
@@ -94,7 +132,13 @@ def _kill_process_group(process: subprocess.Popen[bytes]) -> None:
         process.wait(timeout=2)
 
 
-def _run_bounded_binary(argv: list[str], *, cwd: Path, pass_fds: tuple[int, ...]) -> subprocess.CompletedProcess[bytes]:
+def _run_bounded_binary(
+    argv: list[str],
+    *,
+    cwd: Path,
+    pass_fds: tuple[int, ...],
+    env: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess[bytes]:
     """Run one G2 child with a hard protocol/output bound and group cleanup."""
 
     process = subprocess.Popen(
@@ -104,6 +148,7 @@ def _run_bounded_binary(argv: list[str], *, cwd: Path, pass_fds: tuple[int, ...]
         stderr=subprocess.PIPE,
         start_new_session=True,
         pass_fds=pass_fds,
+        env=env,
     )
     assert process.stdout is not None and process.stderr is not None
     selector = selectors.DefaultSelector()
@@ -347,37 +392,55 @@ def run_row(args: argparse.Namespace, repo: Path = ROOT, *, strict_git: bool = F
         raise ContractError("G2 runner artifact ID is stale")
     if Path(args.binary).name != G2_BINARY or artifact["binary"]["g2_binary_name"] != G2_BINARY:
         raise ContractError("G2 runner refuses G1/H3 binary substitution")
-    health_pre = _load_observation(getattr(args, "health_pre", None), args.target, kind="health")
-    health_post = _load_observation(getattr(args, "health_post", None), args.target, kind="health")
-    process_pre = _load_observation(getattr(args, "process_pre", None), args.target, kind="process")
-    process_post = _load_observation(getattr(args, "process_post", None), args.target, kind="process")
+    health_pre = _unavailable_health(args.target)
+    health_post = _unavailable_health(args.target)
+    process_pre = _clean_process()
+    process_post = _clean_process()
     if os.environ.get("SLLM_G2_GPU_EXECUTION") != "1":
         report = make_failure_report(args, candidate, slice_record, artifact, "GPU-only G2 execution was not explicitly enabled", health_pre=health_pre, health_post=health_post, process_pre=process_pre, process_post=process_post)
         _write_report(Path(args.output_dir), report)
         return report
-    if health_pre != _unavailable_health(args.target) and (health_pre["state"] != "OK" or not health_pre["available"] or not health_pre["reliable"]):
-        raise ContractError("G2 canonical execution requires reliable healthy pre-execution evidence")
-    if health_post != _unavailable_health(args.target) and (health_post["state"] != "OK" or not health_post["available"] or not health_post["reliable"]):
-        raise ContractError("G2 canonical execution requires reliable healthy post-execution evidence")
-    if health_pre == _unavailable_health(args.target) or health_post == _unavailable_health(args.target):
-        raise ContractError("G2 canonical execution requires explicit pre/post health observations")
-    if process_pre != _clean_process() or process_post != _clean_process():
-        raise ContractError("G2 canonical execution requires clean pre/post process observations")
+    if any(getattr(args, name, None) is not None for name in ("health_pre", "health_post", "process_pre", "process_post")):
+        raise ContractError("G2 canonical execution rejects precomputed pre/post observations")
+    completed: subprocess.CompletedProcess[bytes] | None = None
+    execution_error: Exception | None = None
     started_ns = time.monotonic_ns()
-    raw_fd = -1
+    with nonblocking_host_lock(Path("/tmp/sllm-g0.lock")):
+        health_pre, process_pre, routing_pre = _observe_live(repo, args.target)
+        raw_fd = -1
+        try:
+            if not hasattr(os, "memfd_create"):
+                raise ContractError("G2 runner requires Linux memfd support to avoid persisting raw slices")
+            raw_fd = os.memfd_create("sllm-g2-verified-slice", os.MFD_CLOEXEC)
+            offset = 0
+            while offset < len(payload):
+                written = os.write(raw_fd, payload[offset:])
+                if written <= 0:
+                    raise ContractError("G2 runner could not materialize the complete extractor payload in memory")
+                offset += written
+            os.lseek(raw_fd, 0, os.SEEK_SET)
+            execution_environment = os.environ.copy()
+            for selector in ("HIP_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES", "GPU_DEVICE_ORDINAL", "ROCR_VISIBLE_DEVICES"):
+                execution_environment.pop(selector, None)
+            execution_environment["HIP_VISIBLE_DEVICES"] = str(routing_pre["hip_id"])
+            completed = _run_bounded_binary(
+                [str(args.binary), "--target", args.target, "--slice-fd", str(raw_fd)],
+                cwd=repo,
+                pass_fds=(raw_fd,),
+                env=execution_environment,
+            )
+        except (ContractError, OSError, subprocess.SubprocessError) as exc:
+            execution_error = exc
+        finally:
+            if raw_fd >= 0:
+                os.close(raw_fd)
+        health_post, process_post, routing_post = _observe_live(repo, args.target)
+        if routing_post != routing_pre:
+            raise ContractError("G2 canonical device routing changed across execution")
     report: dict[str, Any]
-    try:
-        if not hasattr(os, "memfd_create"):
-            raise ContractError("G2 runner requires Linux memfd support to avoid persisting raw slices")
-        raw_fd = os.memfd_create("sllm-g2-verified-slice", os.MFD_CLOEXEC)
-        offset = 0
-        while offset < len(payload):
-            written = os.write(raw_fd, payload[offset:])
-            if written <= 0:
-                raise ContractError("G2 runner could not materialize the complete extractor payload in memory")
-            offset += written
-        os.lseek(raw_fd, 0, os.SEEK_SET)
-        completed = _run_bounded_binary([str(args.binary), "--target", args.target, "--slice-fd", str(raw_fd)], cwd=repo, pass_fds=(raw_fd,))
+    if execution_error is not None or completed is None:
+        report = make_failure_report(args, candidate, slice_record, artifact, f"G2 binary execution failed closed: {execution_error}", health_pre=health_pre, health_post=health_post, process_pre=process_pre, process_post=process_post)
+    else:
         protocol: dict[str, Any] | None = None
         oracle_cases: list[dict[str, Any]] | None = None
         protocol_sha = "0" * 64
@@ -402,12 +465,7 @@ def run_row(args: argparse.Namespace, repo: Path = ROOT, *, strict_git: bool = F
             report["dispatch"]["dispatch_count"] = protocol["dispatch_count"]
             report["collection"] = {"expected_cases": 6, "collected_cases": 6, "passed_cases": sum(case["state"] == "PASS" for case in oracle_cases), "failed_cases": sum(case["state"] == "FAIL" for case in oracle_cases), "expected_rows": 1, "collected_rows": 1}
             report["state"] = "PASS" if not reason else "FAIL"
-        report["execution"]["duration_ns"] = time.monotonic_ns() - started_ns
-    except (ContractError, OSError, subprocess.SubprocessError) as exc:
-        report = make_failure_report(args, candidate, slice_record, artifact, f"G2 binary execution failed closed: {exc}", health_pre=health_pre, health_post=health_post, process_pre=process_pre, process_post=process_post)
-    finally:
-        if raw_fd >= 0:
-            os.close(raw_fd)
+    report["execution"]["duration_ns"] = time.monotonic_ns() - started_ns
     from validate_rmsnorm_g2_contracts import validate_report
     validate_report(report, repo)
     _write_report(Path(args.output_dir), report)
