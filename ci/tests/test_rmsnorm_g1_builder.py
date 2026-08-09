@@ -343,8 +343,8 @@ class SemanticG1BuilderTests(unittest.TestCase):
             root = Path(temporary)
             project = root / "reviewed-project"
             native_build = root / "native-build"
-            project.mkdir()
-            native_build.mkdir()
+            project.mkdir(mode=0o700)
+            native_build.mkdir(mode=0o700)
             source = project / "route.hip.cpp"
             source.write_text("// reviewed input\n", encoding="utf-8")
             output = native_build / "route.o"

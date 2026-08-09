@@ -2053,6 +2053,11 @@ def _materialize_reviewed_snapshot(repo: Path, candidate: Mapping[str, Any], par
                 finally:
                     os.close(descriptor)
                 destination.chmod((member.mode & 0o555) or 0o400)
+        # Do not inherit a CI launcher or caller umask for any directory in
+        # the reviewed snapshot.  The private root already prevents traversal,
+        # and each nested directory remains independently private as well.
+        for directory in (snapshot, *(path for path in snapshot.rglob("*") if path.is_dir())):
+            directory.chmod(0o700)
         return snapshot
     except BaseException:
         raise
