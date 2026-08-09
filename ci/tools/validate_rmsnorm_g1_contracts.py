@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import array
 import base64
+import ctypes
 import fcntl
 import hashlib
 import json
@@ -345,11 +346,15 @@ MODEL_HIDDEN_SIZE = 2560
 MODEL_EPSILON = 1e-6
 MODEL_EPSILON_TEXT = "1e-6"
 MODEL_LOCK_SHA256 = "e0ab289154c0b59c8dc5863fd14024a3228f6ea20571c12a805662a090e61abb"
+F_ADD_SEALS = getattr(fcntl, "F_ADD_SEALS", 1033)
+F_GET_SEALS = getattr(fcntl, "F_GET_SEALS", 1034)
+MFD_CLOEXEC = getattr(os, "MFD_CLOEXEC", 0x0001)
+MFD_ALLOW_SEALING = getattr(os, "MFD_ALLOW_SEALING", 0x0002)
 REQUIRED_SEALS = (
-    getattr(fcntl, "F_SEAL_SHRINK", 0)
-    | getattr(fcntl, "F_SEAL_GROW", 0)
-    | getattr(fcntl, "F_SEAL_WRITE", 0)
-    | getattr(fcntl, "F_SEAL_SEAL", 0)
+    getattr(fcntl, "F_SEAL_SHRINK", 0x0002)
+    | getattr(fcntl, "F_SEAL_GROW", 0x0004)
+    | getattr(fcntl, "F_SEAL_WRITE", 0x0008)
+    | getattr(fcntl, "F_SEAL_SEAL", 0x0001)
 )
 
 
@@ -554,16 +559,22 @@ def validate_open_file_identity(descriptor: int, expected: Mapping[str, Any], la
 def _sealed_memfd(data: bytes, label: str) -> int:
     if not data:
         raise EvidenceError(f"{label} cannot be empty")
-    if not hasattr(os, "memfd_create") or not hasattr(fcntl, "F_ADD_SEALS"):
-        raise EvidenceError("Linux sealed memfd support is required for semantic G1")
-    flags = getattr(os, "MFD_CLOEXEC", 0) | getattr(os, "MFD_ALLOW_SEALING", 0)
+    flags = MFD_CLOEXEC | MFD_ALLOW_SEALING
     descriptor = -1
     try:
-        descriptor = os.memfd_create(f"sllm-semantic-g1-{label}", flags)
+        name = f"sllm-semantic-g1-{label}"
+        if hasattr(os, "memfd_create"):
+            descriptor = os.memfd_create(name, flags)
+        else:
+            libc = ctypes.CDLL(None, use_errno=True)
+            descriptor = libc.memfd_create(name.encode(), flags)
+            if descriptor < 0:
+                error = ctypes.get_errno()
+                raise OSError(error, os.strerror(error))
         offset = 0
         while offset < len(data):
             offset += os.write(descriptor, data[offset:])
-        fcntl.fcntl(descriptor, fcntl.F_ADD_SEALS, REQUIRED_SEALS)
+        fcntl.fcntl(descriptor, F_ADD_SEALS, REQUIRED_SEALS)
         os.lseek(descriptor, 0, os.SEEK_SET)
         return descriptor
     except OSError as exc:
@@ -574,7 +585,7 @@ def _sealed_memfd(data: bytes, label: str) -> int:
 
 def descriptor_is_sealed(descriptor: int) -> bool:
     try:
-        return (fcntl.fcntl(descriptor, fcntl.F_GET_SEALS) & REQUIRED_SEALS) == REQUIRED_SEALS
+        return (fcntl.fcntl(descriptor, F_GET_SEALS) & REQUIRED_SEALS) == REQUIRED_SEALS
     except OSError:
         return False
 
@@ -2608,9 +2619,10 @@ def validate_compiler_execution_contract(repo: Path = ROOT) -> None:
         "action_digest",
         "build_tree_reaped",
         "os.posix_spawn(",
-        "os.pidfd_open",
-        "signal.pidfd_send_signal",
+        "runner._pidfd_open",
+        "runner._pidfd_send_signal",
         "COMPILER_EXEC_HELPER_SOURCE",
+        "setsid()",
         "exec_ready",
         "parent-issued-exact-action-v1",
         "COMPILER_BROKER_CLIENT_FD_ENV",

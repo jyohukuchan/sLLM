@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import ctypes
 import hashlib
 import json
 import os
@@ -43,6 +44,20 @@ from validate_g0_contracts import (  # noqa: E402
 TIMEOUT_SECONDS = 600
 PROTOCOL_SCHEMA = "rmsnorm-g2-runtime-result-v1"
 MAX_PROTOCOL_BYTES = 16 * 1024 * 1024
+MFD_CLOEXEC = getattr(os, "MFD_CLOEXEC", 0x0001)
+
+
+def _memfd_create(name: str) -> int:
+    if hasattr(os, "memfd_create"):
+        return os.memfd_create(name, MFD_CLOEXEC)
+    libc = ctypes.CDLL(None, use_errno=True)
+    descriptor = libc.memfd_create(name.encode(), MFD_CLOEXEC)
+    if descriptor < 0:
+        error = ctypes.get_errno()
+        raise OSError(error, os.strerror(error))
+    return descriptor
+
+
 MAX_PROTOCOL_FIELD_BYTES = 2 * 1024 * 1024
 
 
@@ -410,9 +425,7 @@ def run_row(args: argparse.Namespace, repo: Path = ROOT, *, strict_git: bool = F
         health_pre, process_pre, routing_pre = _observe_live(repo, args.target)
         raw_fd = -1
         try:
-            if not hasattr(os, "memfd_create"):
-                raise ContractError("G2 runner requires Linux memfd support to avoid persisting raw slices")
-            raw_fd = os.memfd_create("sllm-g2-verified-slice", os.MFD_CLOEXEC)
+            raw_fd = _memfd_create("sllm-g2-verified-slice")
             offset = 0
             while offset < len(payload):
                 written = os.write(raw_fd, payload[offset:])

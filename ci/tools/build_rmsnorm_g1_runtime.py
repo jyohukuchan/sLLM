@@ -208,6 +208,12 @@ int main(int argc, char **argv, char **envp) {
     if (end == argv[1] + 14 || *end != '\0' || descriptor < 3 || descriptor > 1048575) {
         return fail("malformed compiler descriptor");
     }
+    // Some pinned portable CPython builds do not expose the non-standard
+    // POSIX_SPAWN_SETSID extension.  Establish the session in this reviewed
+    // native pre-exec boundary instead of falling back to Python fork hooks.
+    if (setsid() < 0) {
+        return fail("cannot establish compiler session");
+    }
     if (chdir(argv[2] + 6) != 0) {
         return fail("cannot enter the reviewed compiler cwd");
     }
@@ -458,10 +464,8 @@ class _SpawnedCompiler:
         self.pidfd = -1
 
     def pin_identity(self) -> None:
-        if not hasattr(os, "pidfd_open"):
-            raise BuilderError("compiler exec identity requires Linux pidfd_open")
         try:
-            self.pidfd = os.pidfd_open(self.pid, 0)
+            self.pidfd = runner._pidfd_open(self.pid, 0)
         except OSError as exc:
             raise BuilderError("compiler exec identity pidfd could not be opened") from exc
 
@@ -622,7 +626,7 @@ class CompilerBroker:
             **self.source,
             "device": int(compiler_details.st_dev),
             "inode": int(compiler_details.st_ino),
-            "seals": int(fcntl.fcntl(self.compiler.fd, fcntl.F_GET_SEALS)),
+            "seals": int(fcntl.fcntl(self.compiler.fd, contracts.F_GET_SEALS)),
         }
         self._actions = exact_actions.OneShotBroker()
         self.session = secrets.token_hex(32)
@@ -1018,7 +1022,7 @@ class CompilerBroker:
         try:
             pid = os.posix_spawn(
                 f"/proc/self/fd/{limiter_fd}", command, dict(environment),
-                file_actions=actions, setsid=True,
+                file_actions=actions,
             )
         except BaseException:
             for descriptor in (stdout_read, stdout_write, stderr_read, stderr_write):
@@ -1072,7 +1076,7 @@ class CompilerBroker:
                 if process.pidfd < 0 or facts[1] != os.getpid() or decoded_command != expected_command or observed_cwd != cwd or facts[2] != process.pid:
                     raise BuilderError("compiler sealed exec identity/cwd/pgrp/argv mismatch")
                 try:
-                    signal.pidfd_send_signal(process.pidfd, 0, None, 0)
+                    runner._pidfd_send_signal(process.pidfd, 0)
                 except OSError as exc:
                     raise BuilderError("compiler exec identity pidfd no longer names the observed process") from exc
                 confirmed_facts = _process_facts(process.pid)
@@ -1110,7 +1114,7 @@ class CompilerBroker:
             input_view = exact_actions.seal_input_view(manifest)
         except exact_actions.ExactActionError as exc:
             raise BuilderError(f"exact action immutable input view could not be bound: {exc}") from exc
-        if manifest["executable"] != self._compiler_manifest_identity or manifest["argv0"] != self._compiler_argv0() or int(fcntl.fcntl(self.compiler.fd, fcntl.F_GET_SEALS)) != manifest["executable"]["seals"]:
+        if manifest["executable"] != self._compiler_manifest_identity or manifest["argv0"] != self._compiler_argv0() or int(fcntl.fcntl(self.compiler.fd, contracts.F_GET_SEALS)) != manifest["executable"]["seals"]:
             input_view.close()
             raise BuilderError("exact action executable identity or argv0 is not the broker-sealed compiler")
         argv = list(input_view.argv)

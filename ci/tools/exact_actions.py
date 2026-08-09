@@ -7,8 +7,9 @@ complete action manifest, and atomically consume that manifest before launch.
 
 from __future__ import annotations
 
-import hashlib
+import ctypes
 import fcntl
+import hashlib
 import json
 import os
 import secrets
@@ -26,7 +27,17 @@ class ExactActionError(ValueError):
 
 
 INPUT_VIEW_ALGORITHM = "sealed-input-view-v1"
-INPUT_VIEW_SEALS = fcntl.F_SEAL_SHRINK | fcntl.F_SEAL_GROW | fcntl.F_SEAL_WRITE | fcntl.F_SEAL_SEAL
+# Linux keeps these command/flag values ABI-stable, but portable CPython
+# builds can omit their symbolic names when built against older headers.
+F_ADD_SEALS = getattr(fcntl, "F_ADD_SEALS", 1033)
+MFD_CLOEXEC = getattr(os, "MFD_CLOEXEC", 0x0001)
+MFD_ALLOW_SEALING = getattr(os, "MFD_ALLOW_SEALING", 0x0002)
+INPUT_VIEW_SEALS = (
+    getattr(fcntl, "F_SEAL_SHRINK", 0x0002)
+    | getattr(fcntl, "F_SEAL_GROW", 0x0004)
+    | getattr(fcntl, "F_SEAL_WRITE", 0x0008)
+    | getattr(fcntl, "F_SEAL_SEAL", 0x0001)
+)
 
 
 def canonical_bytes(value: Any) -> bytes:
@@ -128,18 +139,26 @@ def _read_verified_descriptor(descriptor: int, record: Mapping[str, Any], label:
 
 
 def _sealed_bytes(data: bytes, label: str) -> int:
+    descriptor = -1
     try:
-        descriptor = os.memfd_create(label, os.MFD_CLOEXEC | os.MFD_ALLOW_SEALING)
+        if hasattr(os, "memfd_create"):
+            descriptor = os.memfd_create(label, MFD_CLOEXEC | MFD_ALLOW_SEALING)
+        else:
+            libc = ctypes.CDLL(None, use_errno=True)
+            descriptor = libc.memfd_create(label.encode(), MFD_CLOEXEC | MFD_ALLOW_SEALING)
+            if descriptor < 0:
+                error = ctypes.get_errno()
+                raise OSError(error, os.strerror(error))
         offset = 0
         while offset < len(data):
             offset += os.write(descriptor, data[offset:])
-        fcntl.fcntl(descriptor, fcntl.F_ADD_SEALS, INPUT_VIEW_SEALS)
+        fcntl.fcntl(descriptor, F_ADD_SEALS, INPUT_VIEW_SEALS)
         os.set_inheritable(descriptor, False)
         return descriptor
     except OSError as exc:
         try:
             os.close(descriptor)
-        except (OSError, UnboundLocalError):
+        except OSError:
             pass
         raise ExactActionError(f"{label} could not be sealed into an immutable descriptor") from exc
 

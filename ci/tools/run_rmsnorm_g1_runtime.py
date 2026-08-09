@@ -55,17 +55,40 @@ EXPECTED_CASE_COUNT = 15
 SANITIZED_RUNTIME_PATH = "/opt/rocm/bin:/opt/rocm/lib/llvm/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 SANITIZED_RUNTIME_LD_LIBRARY_PATH = "/opt/rocm/lib:/opt/rocm/lib64:/lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu:/lib:/usr/lib"
 _REQUIRED_SEALS = (
-    getattr(fcntl, "F_SEAL_SHRINK", 0)
-    | getattr(fcntl, "F_SEAL_GROW", 0)
-    | getattr(fcntl, "F_SEAL_WRITE", 0)
-    | getattr(fcntl, "F_SEAL_SEAL", 0)
+    getattr(fcntl, "F_SEAL_SHRINK", 0x0002)
+    | getattr(fcntl, "F_SEAL_GROW", 0x0004)
+    | getattr(fcntl, "F_SEAL_WRITE", 0x0008)
+    | getattr(fcntl, "F_SEAL_SEAL", 0x0001)
 )
+_F_GET_SEALS = getattr(fcntl, "F_GET_SEALS", 1034)
 _PR_SET_CHILD_SUBREAPER = 36
 _PR_GET_CHILD_SUBREAPER = 37
 
 
 class RunnerError(ValueError):
     """A malformed raw frame or a failed Linux containment boundary."""
+
+
+def _pidfd_open(pid: int, flags: int = 0) -> int:
+    if hasattr(os, "pidfd_open"):
+        return os.pidfd_open(pid, flags)
+    libc = ctypes.CDLL(None, use_errno=True)
+    descriptor = libc.pidfd_open(pid, flags)
+    if descriptor < 0:
+        error = ctypes.get_errno()
+        raise OSError(error, os.strerror(error))
+    return descriptor
+
+
+def _pidfd_send_signal(descriptor: int, signal_value: int) -> None:
+    if hasattr(signal, "pidfd_send_signal"):
+        signal.pidfd_send_signal(descriptor, signal_value, None, 0)
+        return
+    libc = ctypes.CDLL(None, use_errno=True)
+    result = libc.pidfd_send_signal(descriptor, signal_value, None, 0)
+    if result != 0:
+        error = ctypes.get_errno()
+        raise OSError(error, os.strerror(error))
 
 
 @dataclass(frozen=True)
@@ -118,7 +141,7 @@ def _proc_snapshot() -> dict[int, _ProcFacts]:
 def _child_subreaper_state() -> bool:
     """Read the process-local subreaper state through the Linux primitive."""
 
-    if sys.platform != "linux" or not hasattr(os, "pidfd_open") or not hasattr(signal, "pidfd_send_signal"):
+    if sys.platform != "linux":
         raise RunnerError("semantic G1 requires Linux pidfd and child-subreaper containment")
     value = ctypes.c_int()
     try:
@@ -134,7 +157,7 @@ def _child_subreaper_state() -> bool:
 def _set_child_subreaper(enabled: bool) -> None:
     """Set the process-local reaper flag, rejecting a missing Linux primitive."""
 
-    if sys.platform != "linux" or not hasattr(os, "pidfd_open") or not hasattr(signal, "pidfd_send_signal"):
+    if sys.platform != "linux":
         raise RunnerError("semantic G1 requires Linux pidfd and child-subreaper containment")
     try:
         libc = ctypes.CDLL(None, use_errno=True)
@@ -244,7 +267,7 @@ class LinuxContainment:
         if observed.starttime != expected.starttime:
             return False
         try:
-            descriptor = os.pidfd_open(pid, 0)
+            descriptor = _pidfd_open(pid, 0)
         except ProcessLookupError:
             return True
         except OSError:
@@ -257,7 +280,7 @@ class LinuxContainment:
                 return True
             if observed.starttime != expected.starttime:
                 return False
-            signal.pidfd_send_signal(descriptor, signal_value, None, 0)
+            _pidfd_send_signal(descriptor, signal_value)
             return True
         except ProcessLookupError:
             return True
@@ -718,7 +741,7 @@ def audit_child_fd_inheritance(
 
 def descriptor_is_sealed(descriptor: int) -> bool:
     try:
-        return (fcntl.fcntl(descriptor, fcntl.F_GET_SEALS) & _REQUIRED_SEALS) == _REQUIRED_SEALS
+        return (fcntl.fcntl(descriptor, _F_GET_SEALS) & _REQUIRED_SEALS) == _REQUIRED_SEALS
     except OSError:
         return False
 
