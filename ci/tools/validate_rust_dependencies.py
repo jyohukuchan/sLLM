@@ -618,6 +618,7 @@ def _cargo_environment() -> dict[str, str]:
     environment = os.environ.copy()
     environment.pop("CARGO_BUILD_TARGET", None)
     environment["CARGO_NET_OFFLINE"] = "true"
+    environment["RUSTUP_AUTO_INSTALL"] = "0"
     return environment
 
 

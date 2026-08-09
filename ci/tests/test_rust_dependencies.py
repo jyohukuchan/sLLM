@@ -148,7 +148,11 @@ class RustDependencyPolicyTests(unittest.TestCase):
             observed["kwargs"] = kwargs
             return subprocess.CompletedProcess(command, 0, stdout="{}", stderr="")
 
-        with patch.dict(os.environ, {"CARGO_BUILD_TARGET": "wasm32-unknown-unknown"}, clear=False):
+        with patch.dict(
+            os.environ,
+            {"CARGO_BUILD_TARGET": "wasm32-unknown-unknown", "RUSTUP_AUTO_INSTALL": "1"},
+            clear=False,
+        ):
             self.assertEqual(_cargo_metadata(ROOT, runner=successful_runner), {})
 
         self.assertEqual(
@@ -156,6 +160,7 @@ class RustDependencyPolicyTests(unittest.TestCase):
             ["cargo", f"+{MSRV_AUTHORITY}", "metadata", "--locked", "--offline", "--format-version", "1"],
         )
         self.assertEqual(observed["kwargs"]["env"]["CARGO_NET_OFFLINE"], "true")
+        self.assertEqual(observed["kwargs"]["env"]["RUSTUP_AUTO_INSTALL"], "0")
         self.assertNotIn("CARGO_BUILD_TARGET", observed["kwargs"]["env"])
 
     def test_cargo_check_command_pins_recorded_target_and_sanitizes_environment(self) -> None:
@@ -166,7 +171,11 @@ class RustDependencyPolicyTests(unittest.TestCase):
             observed["kwargs"] = kwargs
             return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
 
-        with patch.dict(os.environ, {"CARGO_BUILD_TARGET": "wasm32-unknown-unknown"}, clear=False):
+        with patch.dict(
+            os.environ,
+            {"CARGO_BUILD_TARGET": "wasm32-unknown-unknown", "RUSTUP_AUTO_INSTALL": "hostile"},
+            clear=False,
+        ):
             run_cargo_check(ROOT, runner=successful_runner)
 
         self.assertEqual(
@@ -177,6 +186,7 @@ class RustDependencyPolicyTests(unittest.TestCase):
             ],
         )
         self.assertEqual(observed["kwargs"]["env"]["CARGO_NET_OFFLINE"], "true")
+        self.assertEqual(observed["kwargs"]["env"]["RUSTUP_AUTO_INSTALL"], "0")
         self.assertNotIn("CARGO_BUILD_TARGET", observed["kwargs"]["env"])
 
     def test_cargo_check_command_failure_is_not_a_pass(self) -> None:
