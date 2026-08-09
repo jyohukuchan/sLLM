@@ -256,6 +256,7 @@ class SemanticG1BuilderTests(unittest.TestCase):
             transcript = broker.close(build_reaped=True, validate=False)
             self.assertEqual(transcript["request_count"], 1)
             event = transcript["events"][0]
+            self.assertEqual(event["action_manifest"]["argv0"], broker.source["path"])
             self.assertEqual(event["compiler"]["exit_code"], 0)
             self.assertEqual(event["compiler"]["stdout_sha256"], hashlib.sha256(stdout).hexdigest())
             self.assertTrue(os.fstat(compiler.fd).st_size > 0)

@@ -839,7 +839,7 @@ class CompilerBroker:
         return COMPILER_EXEC_CHILD_FD
 
     def _compiler_argv0(self) -> str:
-        return f"/proc/self/fd/{self._compiler_exec_fd()}"
+        return str(self.source["path"])
 
     @staticmethod
     def _proc_environ(pid: int) -> dict[str, str]:
