@@ -302,9 +302,15 @@ chat templateとtokenizerは同じ固定revisionから検証し、EOSの片方�
 
 | candidate | readerで固定する責務 | handoff |
 | --- | --- | --- |
-| B0 | lock/config/index/header parser、typed text config、738-tensor catalog、verified range | `TextConfig`、`TensorCatalog`、immutable byte-range descriptors |
-| B1 | tokenizer/decoder/chat-template frontend、generated-only stop policy | input/output token IDs、rendered text、stop metadata |
-| B2 | bounded shard range、weight registry、required/known-unconsumed/rejected分類 | immutable weight descriptors |
+| B0 | Rust workspace dependency closure、license/feature/MSRV/offline解決 | fixed frontend dependency graph |
+| B1 | 738 tensorのconfig-derived exact shape/dtype/class、header照合 | private expected-shape catalogとverified `TensorDescriptor` |
+| B2 | verified FDからのbounded frontend asset read | typed config/tokenizer/template asset bytes |
+| B3 | tokenizer/decoder、special-token identity | input/output token IDs |
+| B4 | typed text-only chat renderer、generated-only stop policy | rendered text、stop metadata |
+| B5 | required/config-conditional/known-unconsumed/rejected分類、weight load plan | immutable consumer/range/chunk descriptors |
+| B6 | offline verify/tokenize/render/decode CLI | model実行前frontend report |
+| B7a | backend-neutral bounded buffer readback | verified transfer/readback primitive |
+| B7b | B5 exact rangeから既存upload/readbackへのbridge | GPU weight buffer handoff |
 | C0 | BF16 host oracle、shape/order、accumulation contract | deterministic oracle vectors/descriptors |
 | C1 | copy/gather/RMSNorm/residual | normalized hidden/residual buffers |
 | C2 | matmul/GEMV/GEMM、SiLU gated MLP | MLP output buffers |

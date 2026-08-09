@@ -1322,9 +1322,68 @@ fn qwen_tensor_catalog(inputs: &QwenShapeInputs) -> Result<QwenTensorCatalog, Mo
     Ok(catalog)
 }
 
+fn validate_qwen_header_catalog(
+    actual: &BTreeMap<String, TensorDescriptor>,
+    classifications: &[TensorClassification],
+    expected: &QwenTensorCatalog,
+) -> Result<(), ModelError> {
+    if expected.len() != 738 {
+        return Err(invalid(
+            "Qwen tensor catalog cardinality differs from the reviewed 738 tensors",
+        ));
+    }
+    let missing: Vec<&str> = expected
+        .keys()
+        .filter(|name| !actual.contains_key(*name))
+        .map(String::as_str)
+        .collect();
+    let extra: Vec<&str> = actual
+        .keys()
+        .filter(|name| !expected.contains_key(*name))
+        .map(String::as_str)
+        .collect();
+    if !missing.is_empty() || !extra.is_empty() {
+        let missing_count = missing.len();
+        let extra_count = extra.len();
+        let missing_preview = &missing[..missing.len().min(4)];
+        let extra_preview = &extra[..extra.len().min(4)];
+        return Err(invalid(format!(
+            "Qwen tensor names do not match the reviewed exact catalog; missing_count={missing_count} missing_preview={missing_preview:?} extra_count={extra_count} extra_preview={extra_preview:?}"
+        )));
+    }
+    for (name, descriptor) in actual {
+        let (expected_class, expected_dtype, expected_shape) = expected
+            .get(name)
+            .expect("exact Qwen tensor name-set equality was verified before metadata lookup");
+        let classified = classifications
+            .iter()
+            .find(|classification| name.starts_with(&classification.prefix))
+            .map(|classification| classification.id.as_str());
+        if classified != Some(*expected_class) {
+            return Err(invalid(format!(
+                "Qwen tensor class differs from the reviewed catalog: {name}"
+            )));
+        }
+        if descriptor.dtype != *expected_dtype {
+            return Err(invalid(format!(
+                "Qwen tensor dtype differs from the reviewed catalog: {name}"
+            )));
+        }
+        if descriptor.shape != *expected_shape {
+            return Err(invalid(format!(
+                "Qwen tensor shape differs from the reviewed catalog: {name}"
+            )));
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod qwen_shape_tests {
     use super::*;
+
+    type QwenActualHeaderCatalog = BTreeMap<String, TensorDescriptor>;
+    type QwenHeaderCatalogMutation = fn(&mut QwenActualHeaderCatalog);
 
     fn inputs() -> QwenShapeInputs {
         QwenShapeInputs {
@@ -1359,6 +1418,32 @@ mod qwen_shape_tests {
             mtp_use_dedicated_embeddings: false,
             tie_word_embeddings: true,
         }
+    }
+
+    fn qwen_actual_header_catalog_from_expected(
+        expected: &QwenTensorCatalog,
+    ) -> QwenActualHeaderCatalog {
+        expected
+            .iter()
+            .map(|(name, (_, dtype, shape))| {
+                (
+                    name.clone(),
+                    TensorDescriptor {
+                        tensor_name: name.clone(),
+                        source_file: "synthetic.safetensors".to_owned(),
+                        dtype: *dtype,
+                        shape: shape.clone(),
+                        header_length_field_bytes: 8,
+                        header_length_bytes: 0,
+                        data_buffer_start: 0,
+                        data_offset_basis: "data-buffer-relative".to_owned(),
+                        data_offsets: [0, 1],
+                        absolute_byte_range: [0, 1],
+                        byte_size: 1,
+                    },
+                )
+            })
+            .collect()
     }
 
     #[test]
@@ -1421,6 +1506,81 @@ mod qwen_shape_tests {
         assert!(require_positive_u64(&object, "field", "test").is_err());
         object.insert("field".to_owned(), Value::from(true));
         assert!(require_positive_u64(&object, "field", "test").is_err());
+    }
+
+    #[test]
+    fn exact_header_catalog_rejects_qwen_name_shape_rank_dimension_and_dtype_mutations() {
+        let expected = qwen_tensor_catalog(&inputs()).expect("reviewed shape inputs build");
+        let classifications = [
+            TensorClassification {
+                id: "text".to_owned(),
+                prefix: "model.language_model.".to_owned(),
+                tensor_count: 426,
+                phase3_status: ClassificationStatus::PartiallyConsumed,
+            },
+            TensorClassification {
+                id: "vision".to_owned(),
+                prefix: "model.visual.".to_owned(),
+                tensor_count: 297,
+                phase3_status: ClassificationStatus::KnownUnconsumed,
+            },
+            TensorClassification {
+                id: "mtp".to_owned(),
+                prefix: "mtp.".to_owned(),
+                tensor_count: 15,
+                phase3_status: ClassificationStatus::KnownUnconsumed,
+            },
+        ];
+        let valid = qwen_actual_header_catalog_from_expected(&expected);
+        assert_eq!(valid.len(), 738);
+        validate_qwen_header_catalog(&valid, &classifications, &expected)
+            .expect("generated actual catalog is valid");
+
+        let expected_elements = 8192_u64 * 2560;
+        let rank_mutation_elements = [8192_u64, 2560, 1].into_iter().product::<u64>();
+        assert_eq!(expected_elements, rank_mutation_elements);
+        assert_eq!(8192_u64 * 2560, 10240 * 2048);
+        assert_eq!(
+            TensorDType::Bf16.byte_width(),
+            TensorDType::F16.byte_width()
+        );
+        let mutations: [(&str, QwenHeaderCatalogMutation); 4] = [
+            ("missing name", |actual| {
+                actual.remove("model.language_model.layers.0.linear_attn.A_log");
+            }),
+            ("wrong rank", |actual| {
+                actual
+                    .get_mut("model.language_model.layers.0.linear_attn.in_proj_qkv.weight")
+                    .unwrap()
+                    .shape = vec![8192, 2560, 1];
+            }),
+            ("wrong dimension", |actual| {
+                actual
+                    .get_mut("model.language_model.layers.0.linear_attn.in_proj_qkv.weight")
+                    .unwrap()
+                    .shape = vec![10240, 2048];
+            }),
+            ("same-width wrong dtype", |actual| {
+                actual
+                    .get_mut("model.language_model.layers.0.linear_attn.in_proj_qkv.weight")
+                    .unwrap()
+                    .dtype = TensorDType::F16;
+            }),
+        ];
+        for (label, mutate) in mutations {
+            let mut actual = valid.clone();
+            mutate(&mut actual);
+            let error = validate_qwen_header_catalog(&actual, &classifications, &expected)
+                .expect_err("Qwen exact catalog accepted mutation");
+            if label == "missing name" {
+                assert!(error.to_string().contains("missing_count=1"));
+                assert!(error.to_string().contains(
+                    "missing_preview=[\"model.language_model.layers.0.linear_attn.A_log\"]"
+                ));
+                assert!(error.to_string().contains("extra_count=0"));
+                assert!(error.to_string().contains("extra_preview=[]"));
+            }
+        }
     }
 }
 
@@ -3260,43 +3420,7 @@ fn validate_safetensors(
         let shape_inputs = qwen_shape_inputs
             .ok_or_else(|| invalid("Qwen safetensors validation lacks parsed config shapes"))?;
         let catalog = qwen_tensor_catalog(shape_inputs)?;
-        if catalog.len() != 738 || tensors.len() != catalog.len() {
-            return Err(invalid(
-                "Qwen tensor catalog cardinality differs from the reviewed 738 tensors",
-            ));
-        }
-        for (name, descriptor) in &tensors {
-            let Some((expected_class, expected_dtype, expected_shape)) = catalog.get(name) else {
-                return Err(invalid(format!(
-                    "unknown Qwen tensor outside the reviewed catalog: {name}"
-                )));
-            };
-            if descriptor.dtype != *expected_dtype {
-                return Err(invalid(format!(
-                    "Qwen tensor dtype differs from the reviewed catalog: {name}"
-                )));
-            }
-            if descriptor.shape != *expected_shape {
-                return Err(invalid(format!(
-                    "Qwen tensor shape differs from the reviewed catalog: {name}"
-                )));
-            }
-            let classified = contract
-                .classifications
-                .iter()
-                .find(|classification| name.starts_with(&classification.prefix))
-                .map(|classification| classification.id.as_str());
-            if classified != Some(*expected_class) {
-                return Err(invalid(format!(
-                    "Qwen tensor class differs from the reviewed catalog: {name}"
-                )));
-            }
-        }
-        if catalog.keys().any(|name| !tensors.contains_key(name)) {
-            return Err(invalid(
-                "Qwen tensor catalog contains a missing reviewed tensor",
-            ));
-        }
+        validate_qwen_header_catalog(&tensors, &contract.classifications, &catalog)?;
     }
     let slice = &lock.model.slice_contract;
     let descriptor = tensors

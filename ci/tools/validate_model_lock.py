@@ -524,6 +524,50 @@ def _qwen_tensor_catalog(inputs: _QwenShapeInputs) -> dict[str, tuple[str, str, 
     return catalog
 
 
+def _qwen_actual_header_catalog_from_expected(
+    expected: dict[str, tuple[str, str, tuple[int, ...]]],
+) -> dict[str, dict[str, object]]:
+    return {
+        name: {"dtype": dtype, "shape": list(shape)}
+        for name, (_, dtype, shape) in expected.items()
+    }
+
+
+def _validate_qwen_header_catalog(
+    actual: dict[str, dict[str, object]],
+    classifications: list[dict[str, Any]],
+    expected: dict[str, tuple[str, str, tuple[int, ...]]],
+) -> None:
+    if len(expected) != 738:
+        raise ContractError(
+            "Qwen tensor catalog cardinality differs from the reviewed 738 tensors"
+        )
+    missing = sorted(set(expected) - set(actual))
+    extra = sorted(set(actual) - set(expected))
+    if missing or extra:
+        raise ContractError(
+            "Qwen tensor names do not match the reviewed exact catalog; "
+            f"missing_count={len(missing)} missing_preview={missing[:4]} "
+            f"extra_count={len(extra)} extra_preview={extra[:4]}"
+        )
+    for name, header in actual.items():
+        expected_class, expected_dtype, expected_shape = expected[name]
+        actual_class = next(
+            (
+                item["id"]
+                for item in classifications
+                if name.startswith(item["prefix"])
+            ),
+            None,
+        )
+        if actual_class != expected_class:
+            raise ContractError(f"Qwen tensor class differs from the reviewed catalog: {name}")
+        if header["dtype"] != expected_dtype:
+            raise ContractError(f"Qwen tensor dtype differs from the reviewed catalog: {name}")
+        if tuple(header["shape"]) != expected_shape:
+            raise ContractError(f"Qwen tensor shape differs from the reviewed catalog: {name}")
+
+
 def _reject_constant(value: str) -> None:
     raise ContractError(f"non-standard JSON number is forbidden: {value}")
 
@@ -1413,29 +1457,7 @@ def _validate_safetensors_headers(
         if qwen_shape_inputs is None:
             raise ContractError("Qwen safetensors validation lacks parsed config shapes")
         catalog = _qwen_tensor_catalog(qwen_shape_inputs)
-        if set(all_headers) != set(catalog):
-            missing = sorted(set(catalog) - set(all_headers))
-            extra = sorted(set(all_headers) - set(catalog))
-            raise ContractError(
-                "Qwen safetensors names do not match the reviewed exact catalog; "
-                f"missing={missing[:4]} extra={extra[:4]}"
-            )
-        for name, header in all_headers.items():
-            expected_class, expected_dtype, expected_shape = catalog[name]
-            actual_class = next(
-                (
-                    item["id"]
-                    for item in classifications
-                    if name.startswith(item["prefix"])
-                ),
-                None,
-            )
-            if actual_class != expected_class:
-                raise ContractError(f"Qwen tensor class differs from the reviewed catalog: {name}")
-            if header["dtype"] != expected_dtype:
-                raise ContractError(f"Qwen tensor dtype differs from the reviewed catalog: {name}")
-            if tuple(header["shape"]) != expected_shape:
-                raise ContractError(f"Qwen tensor shape differs from the reviewed catalog: {name}")
+        _validate_qwen_header_catalog(all_headers, classifications, catalog)
     slice_contract = model["slice_contract"]
     slice_header = all_headers.get(slice_contract["tensor_name"])
     if slice_header is None:

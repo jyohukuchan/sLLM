@@ -386,6 +386,58 @@ class ModelLockContractTests(unittest.TestCase):
         )
         self.assertNotIn("model.language_model.layers.3.linear_attn.A_log", catalog)
 
+    def test_qwen_exact_header_catalog_rejects_name_shape_rank_dimension_and_dtype_mutations(self) -> None:
+        module = __import__("validate_model_lock")
+        expected = module._qwen_tensor_catalog(
+            module._qwen_shape_inputs(self._reviewed_qwen_config(), self.lock["model"])
+        )
+        actual = module._qwen_actual_header_catalog_from_expected(expected)
+        classifications = self.lock["model"]["tensor_contract"]["classifications"]
+        self.assertEqual(len(actual), 738)
+        module._validate_qwen_header_catalog(actual, classifications, expected)
+
+        mutations = (
+            (
+                "missing name",
+                lambda headers: headers.pop("model.language_model.layers.0.linear_attn.A_log"),
+            ),
+            (
+                "wrong rank",
+                lambda headers: headers["model.language_model.layers.0.linear_attn.in_proj_qkv.weight"].update(
+                    shape=[8192, 2560, 1]
+                ),
+            ),
+            (
+                "wrong dimension",
+                lambda headers: headers["model.language_model.layers.0.linear_attn.in_proj_qkv.weight"].update(
+                    shape=[10240, 2048]
+                ),
+            ),
+            (
+                "same-width wrong dtype",
+                lambda headers: headers["model.language_model.layers.0.linear_attn.in_proj_qkv.weight"].update(
+                    dtype="F16"
+                ),
+            ),
+        )
+        self.assertEqual(8192 * 2560, math.prod((8192, 2560, 1)))
+        self.assertEqual(8192 * 2560, 10240 * 2048)
+        for label, mutate in mutations:
+            with self.subTest(label=label):
+                changed = copy.deepcopy(actual)
+                mutate(changed)
+                with self.assertRaises(ContractError) as context:
+                    module._validate_qwen_header_catalog(changed, classifications, expected)
+                if label == "missing name":
+                    diagnostic = str(context.exception)
+                    self.assertIn("missing_count=1", diagnostic)
+                    self.assertIn(
+                        "missing_preview=['model.language_model.layers.0.linear_attn.A_log']",
+                        diagnostic,
+                    )
+                    self.assertIn("extra_count=0", diagnostic)
+                    self.assertIn("extra_preview=[]", diagnostic)
+
     def test_qwen_shape_inputs_reject_non_positive_and_checked_overflow(self) -> None:
         module = __import__("validate_model_lock")
         baseline = self._reviewed_qwen_config()
