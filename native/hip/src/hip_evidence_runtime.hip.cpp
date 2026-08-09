@@ -34,6 +34,7 @@ static_assert(sizeof(std::size_t) <= sizeof(uint64_t),
 constexpr uint32_t kBackendHip = SLLM_BACKEND_HIP;
 constexpr char kCompileTarget[] = SLLM_HIP_COMPILE_TARGET;
 constexpr std::size_t kMaxCleanupSlots = 2U;
+constexpr auto kCleanupSlotWait = std::chrono::seconds(1);
 
 constexpr bool exact_architecture_matches(std::string_view reported,
                                           std::string_view target) noexcept {
@@ -171,9 +172,17 @@ public:
   // Completion as well as its eventual cleanup, so a hung reaper cannot be
   // hidden behind an unbounded sequence of new submissions.
   bool try_reserve_cleanup_slot() noexcept {
-    std::lock_guard<std::mutex> lock(mutex_);
-    if (!worker_.joinable() || cleanup_blocked_ ||
-        cleanup_slots_ >= kMaxCleanupSlots) {
+    std::unique_lock<std::mutex> lock(mutex_);
+    if (!worker_.joinable() || cleanup_blocked_) {
+      return false;
+    }
+    if (cleanup_slots_ >= kMaxCleanupSlots &&
+        !condition_.wait_for(lock, kCleanupSlotWait, [this] {
+          return cleanup_blocked_ || cleanup_slots_ < kMaxCleanupSlots;
+        })) {
+      return false;
+    }
+    if (cleanup_blocked_) {
       return false;
     }
     ++cleanup_slots_;
@@ -186,11 +195,13 @@ public:
       std::terminate();
     }
     --cleanup_slots_;
+    condition_.notify_all();
   }
 
   void mark_cleanup_unproven() noexcept {
     std::lock_guard<std::mutex> lock(mutex_);
     cleanup_blocked_ = true;
+    condition_.notify_all();
   }
 
   // Ownership of completion is transferred to this method. The queue is an
