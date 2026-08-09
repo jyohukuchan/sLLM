@@ -1729,12 +1729,13 @@ def _semantic_exact_action_recipes(build_repo: Path, native_build_dir: Path, tar
     """
 
     include = build_repo / "include"
+    include_argument = build_repo / "native/hip/../../include"
     source_root = build_repo / "native/hip/src"
     cmake = build_repo / "native/hip/CMakeLists.txt"
     build_rs = build_repo / "crates/sllm-hip-sys/build.rs"
     common = [
         "-D__HIP_ROCclr__=1", "-DSLLM_ENABLE_PUBLIC_HIP_RUNTIME=1", "-O3", "-DNDEBUG",
-        "-std=gnu++17", "-fPIC", "-I", str(include), "-I", str(source_root),
+        "-std=gnu++17", "-fPIC", "-I", str(include_argument), "-I", str(source_root),
         f"--offload-arch={target}", "-mcode-object-version=6", "-mno-wavefrontsize64",
         "-pthread", "-x", "hip", "-c",
     ]

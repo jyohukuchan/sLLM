@@ -326,6 +326,17 @@ class SemanticG1BuilderTests(unittest.TestCase):
         with self.assertRaisesRegex(builder.BuilderError, "already carries GNU Make"):
             builder.compiler_client_environment({**base, "MAKELEVEL": "1"})
 
+    def test_exact_action_recipe_preserves_cmake_include_spelling(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="sllm-g1-action-recipe-") as temporary:
+            recipes = builder._semantic_exact_action_recipes(
+                ROOT, Path(temporary), "gfx1030",
+            )
+        cmake_include = str(ROOT / "native/hip/../../include")
+        normalized_include = str(ROOT / "include")
+        for recipe in recipes.values():
+            self.assertIn(cmake_include, recipe["argv"])
+            self.assertNotIn(normalized_include, recipe["argv"])
+
     def test_native_build_cwd_and_output_root_execute_the_reviewed_semantic_route(self) -> None:
         with tempfile.TemporaryDirectory(prefix="sllm-g1-native-route-") as temporary:
             root = Path(temporary)
