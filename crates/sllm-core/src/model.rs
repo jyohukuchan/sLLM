@@ -768,117 +768,652 @@ fn qwen_layer_schedule() -> Vec<LayerType> {
 /// machine-readable tensor-name/class/dtype catalog.  This is intentionally a
 /// catalog rather than a prefix/count test: a swapped layer, omitted tensor,
 /// or unknown tensor must not become an accepted member of a broad prefix.
-fn qwen_tensor_catalog() -> BTreeMap<String, (&'static str, TensorDType)> {
-    let mut catalog = BTreeMap::new();
-    let mut add = |name: String, class: &'static str, dtype: TensorDType| {
-        catalog.insert(name, (class, dtype));
-    };
+#[derive(Clone, Debug)]
+struct QwenTextShapeInputs {
+    hidden_size: u64,
+    num_hidden_layers: u64,
+    num_attention_heads: u64,
+    num_key_value_heads: u64,
+    head_dim: u64,
+    intermediate_size: u64,
+    vocab_size: u64,
+    full_attention_interval: u64,
+    layer_types: Vec<LayerType>,
+    linear_conv_kernel_dim: u64,
+    linear_key_head_dim: u64,
+    linear_num_key_heads: u64,
+    linear_num_value_heads: u64,
+    linear_value_head_dim: u64,
+}
 
-    for suffix in ["embed_tokens.weight", "norm.weight"] {
+#[derive(Clone, Debug)]
+struct QwenVisionShapeInputs {
+    depth: u64,
+    hidden_size: u64,
+    in_channels: u64,
+    temporal_patch_size: u64,
+    patch_size: u64,
+    spatial_merge_size: u64,
+    intermediate_size: u64,
+    out_hidden_size: u64,
+    num_position_embeddings: u64,
+}
+
+#[derive(Clone, Debug)]
+struct QwenShapeInputs {
+    text: QwenTextShapeInputs,
+    vision: QwenVisionShapeInputs,
+    mtp_num_hidden_layers: u64,
+    mtp_use_dedicated_embeddings: bool,
+    tie_word_embeddings: bool,
+}
+
+type QwenTensorCatalog = BTreeMap<String, (&'static str, TensorDType, Vec<u64>)>;
+
+fn require_positive_u64(
+    object: &Map<String, Value>,
+    field: &str,
+    scope: &str,
+) -> Result<u64, ModelError> {
+    let value = object
+        .get(field)
+        .and_then(Value::as_u64)
+        .ok_or_else(|| invalid(format!("{scope} field {field} must be an integer")))?;
+    if value == 0 {
+        return Err(invalid(format!("{scope} field {field} must be positive")));
+    }
+    Ok(value)
+}
+
+fn checked_shape_mul(left: u64, right: u64, field: &str) -> Result<u64, ModelError> {
+    left.checked_mul(right)
+        .ok_or_else(|| invalid(format!("Qwen shape arithmetic overflow: {field}")))
+}
+
+fn checked_shape_add(left: u64, right: u64, field: &str) -> Result<u64, ModelError> {
+    left.checked_add(right)
+        .ok_or_else(|| invalid(format!("Qwen shape arithmetic overflow: {field}")))
+}
+
+fn validate_qwen_shape_inputs(
+    root: &Map<String, Value>,
+    architecture: &ModelArchitecture,
+) -> Result<QwenShapeInputs, ModelError> {
+    let text = root
+        .get("text_config")
+        .and_then(Value::as_object)
+        .ok_or_else(|| invalid("Qwen text_config is not an object"))?;
+    let vision = root
+        .get("vision_config")
+        .and_then(Value::as_object)
+        .ok_or_else(|| invalid("Qwen vision_config is not an object"))?;
+
+    let text_fields = [
+        "hidden_size",
+        "num_hidden_layers",
+        "num_attention_heads",
+        "num_key_value_heads",
+        "head_dim",
+        "intermediate_size",
+        "vocab_size",
+        "full_attention_interval",
+        "linear_conv_kernel_dim",
+        "linear_key_head_dim",
+        "linear_num_key_heads",
+        "linear_num_value_heads",
+        "linear_value_head_dim",
+        "mtp_num_hidden_layers",
+    ];
+    for field in text_fields {
+        require_positive_u64(text, field, "Qwen text_config")?;
+    }
+    let text_inputs = QwenTextShapeInputs {
+        hidden_size: require_positive_u64(text, "hidden_size", "Qwen text_config")?,
+        num_hidden_layers: require_positive_u64(text, "num_hidden_layers", "Qwen text_config")?,
+        num_attention_heads: require_positive_u64(text, "num_attention_heads", "Qwen text_config")?,
+        num_key_value_heads: require_positive_u64(text, "num_key_value_heads", "Qwen text_config")?,
+        head_dim: require_positive_u64(text, "head_dim", "Qwen text_config")?,
+        intermediate_size: require_positive_u64(text, "intermediate_size", "Qwen text_config")?,
+        vocab_size: require_positive_u64(text, "vocab_size", "Qwen text_config")?,
+        full_attention_interval: require_positive_u64(
+            text,
+            "full_attention_interval",
+            "Qwen text_config",
+        )?,
+        layer_types: architecture.text_config.layer_types.clone(),
+        linear_conv_kernel_dim: require_positive_u64(
+            text,
+            "linear_conv_kernel_dim",
+            "Qwen text_config",
+        )?,
+        linear_key_head_dim: require_positive_u64(text, "linear_key_head_dim", "Qwen text_config")?,
+        linear_num_key_heads: require_positive_u64(
+            text,
+            "linear_num_key_heads",
+            "Qwen text_config",
+        )?,
+        linear_num_value_heads: require_positive_u64(
+            text,
+            "linear_num_value_heads",
+            "Qwen text_config",
+        )?,
+        linear_value_head_dim: require_positive_u64(
+            text,
+            "linear_value_head_dim",
+            "Qwen text_config",
+        )?,
+    };
+    if text_inputs.num_hidden_layers != text_inputs.layer_types.len() as u64
+        || text_inputs.num_hidden_layers != architecture.text_config.num_hidden_layers
+        || text_inputs.full_attention_interval != 4
+        || text_inputs.layer_types != qwen_layer_schedule()
+        || text_inputs.num_key_value_heads > text_inputs.num_attention_heads
+    {
+        return Err(invalid(
+            "Qwen text shape inputs do not match the explicit reviewed schedule",
+        ));
+    }
+
+    let vision_fields = [
+        "depth",
+        "hidden_size",
+        "in_channels",
+        "temporal_patch_size",
+        "patch_size",
+        "spatial_merge_size",
+        "intermediate_size",
+        "num_heads",
+        "num_position_embeddings",
+        "out_hidden_size",
+    ];
+    for field in vision_fields {
+        require_positive_u64(vision, field, "Qwen vision_config")?;
+    }
+    let deepstack_visual_indexes = vision
+        .get("deepstack_visual_indexes")
+        .and_then(Value::as_array)
+        .ok_or_else(|| invalid("Qwen vision deepstack_visual_indexes must be an array"))?;
+    if !deepstack_visual_indexes.is_empty() {
+        return Err(invalid(
+            "Qwen vision deepstack_visual_indexes must be explicitly empty",
+        ));
+    }
+    let vision_inputs = QwenVisionShapeInputs {
+        depth: require_positive_u64(vision, "depth", "Qwen vision_config")?,
+        hidden_size: require_positive_u64(vision, "hidden_size", "Qwen vision_config")?,
+        in_channels: require_positive_u64(vision, "in_channels", "Qwen vision_config")?,
+        temporal_patch_size: require_positive_u64(
+            vision,
+            "temporal_patch_size",
+            "Qwen vision_config",
+        )?,
+        patch_size: require_positive_u64(vision, "patch_size", "Qwen vision_config")?,
+        spatial_merge_size: require_positive_u64(
+            vision,
+            "spatial_merge_size",
+            "Qwen vision_config",
+        )?,
+        intermediate_size: require_positive_u64(vision, "intermediate_size", "Qwen vision_config")?,
+        out_hidden_size: require_positive_u64(vision, "out_hidden_size", "Qwen vision_config")?,
+        num_position_embeddings: require_positive_u64(
+            vision,
+            "num_position_embeddings",
+            "Qwen vision_config",
+        )?,
+    };
+    if vision_inputs.depth != 24 {
+        return Err(invalid(
+            "Qwen vision depth must produce the reviewed 297 tensors",
+        ));
+    }
+
+    let mtp_num_hidden_layers =
+        require_positive_u64(text, "mtp_num_hidden_layers", "Qwen text_config")?;
+    let mtp_use_dedicated_embeddings = text
+        .get("mtp_use_dedicated_embeddings")
+        .and_then(Value::as_bool)
+        .ok_or_else(|| invalid("Qwen text_config MTP embedding condition is missing"))?;
+    let tie_word_embeddings = root
+        .get("tie_word_embeddings")
+        .and_then(Value::as_bool)
+        .ok_or_else(|| invalid("Qwen tie_word_embeddings condition is missing"))?;
+    if mtp_num_hidden_layers != 1 || mtp_use_dedicated_embeddings || !tie_word_embeddings {
+        return Err(invalid(
+            "Qwen MTP requires one layer, tied embeddings, and no dedicated embeddings",
+        ));
+    }
+    Ok(QwenShapeInputs {
+        text: text_inputs,
+        vision: vision_inputs,
+        mtp_num_hidden_layers,
+        mtp_use_dedicated_embeddings,
+        tie_word_embeddings,
+    })
+}
+
+fn qwen_tensor_catalog(inputs: &QwenShapeInputs) -> Result<QwenTensorCatalog, ModelError> {
+    let mut catalog = BTreeMap::new();
+    let mut add = |name: String,
+                   class: &'static str,
+                   dtype: TensorDType,
+                   shape: Vec<u64>|
+     -> Result<(), ModelError> {
+        if catalog
+            .insert(name.clone(), (class, dtype, shape))
+            .is_some()
+        {
+            return Err(invalid(format!(
+                "duplicate Qwen tensor catalog entry: {name}"
+            )));
+        }
+        Ok(())
+    };
+    let text = &inputs.text;
+    let vision = &inputs.vision;
+    let linear_projection_width = checked_shape_mul(
+        text.linear_num_value_heads,
+        text.linear_value_head_dim,
+        "linear projection width",
+    )?;
+    let linear_qkv_width = checked_shape_add(
+        checked_shape_mul(
+            2,
+            checked_shape_mul(
+                text.linear_num_key_heads,
+                text.linear_key_head_dim,
+                "linear qkv query/key width",
+            )?,
+            "linear qkv query/key width",
+        )?,
+        checked_shape_mul(
+            text.linear_num_value_heads,
+            text.linear_value_head_dim,
+            "linear qkv value width",
+        )?,
+        "linear qkv width",
+    )?;
+    let full_q_width = checked_shape_mul(
+        2,
+        checked_shape_mul(text.num_attention_heads, text.head_dim, "full query width")?,
+        "full query/gate width",
+    )?;
+    let full_kv_width =
+        checked_shape_mul(text.num_key_value_heads, text.head_dim, "full KV width")?;
+    let full_output_width =
+        checked_shape_mul(text.num_attention_heads, text.head_dim, "full output width")?;
+
+    add(
+        "model.language_model.embed_tokens.weight".to_owned(),
+        "text",
+        TensorDType::Bf16,
+        vec![text.vocab_size, text.hidden_size],
+    )?;
+    add(
+        "model.language_model.norm.weight".to_owned(),
+        "text",
+        TensorDType::Bf16,
+        vec![text.hidden_size],
+    )?;
+    for (layer, layer_type) in text.layer_types.iter().copied().enumerate() {
+        let prefix = format!("model.language_model.layers.{layer}");
         add(
-            format!("model.language_model.{suffix}"),
+            format!("{prefix}.input_layernorm.weight"),
             "text",
             TensorDType::Bf16,
-        );
-    }
-    for (layer, layer_type) in qwen_layer_schedule().into_iter().enumerate() {
-        let prefix = format!("model.language_model.layers.{layer}");
-        for suffix in [
-            "input_layernorm.weight",
-            "mlp.down_proj.weight",
-            "mlp.gate_proj.weight",
-            "mlp.up_proj.weight",
-            "post_attention_layernorm.weight",
-        ] {
-            add(format!("{prefix}.{suffix}"), "text", TensorDType::Bf16);
-        }
+            vec![text.hidden_size],
+        )?;
+        add(
+            format!("{prefix}.post_attention_layernorm.weight"),
+            "text",
+            TensorDType::Bf16,
+            vec![text.hidden_size],
+        )?;
+        add(
+            format!("{prefix}.mlp.gate_proj.weight"),
+            "text",
+            TensorDType::Bf16,
+            vec![text.intermediate_size, text.hidden_size],
+        )?;
+        add(
+            format!("{prefix}.mlp.up_proj.weight"),
+            "text",
+            TensorDType::Bf16,
+            vec![text.intermediate_size, text.hidden_size],
+        )?;
+        add(
+            format!("{prefix}.mlp.down_proj.weight"),
+            "text",
+            TensorDType::Bf16,
+            vec![text.hidden_size, text.intermediate_size],
+        )?;
         match layer_type {
             LayerType::LinearAttention => {
-                for suffix in [
-                    "linear_attn.conv1d.weight",
-                    "linear_attn.dt_bias",
-                    "linear_attn.in_proj_a.weight",
-                    "linear_attn.in_proj_b.weight",
-                    "linear_attn.in_proj_qkv.weight",
-                    "linear_attn.in_proj_z.weight",
-                    "linear_attn.out_proj.weight",
-                ] {
-                    add(format!("{prefix}.{suffix}"), "text", TensorDType::Bf16);
+                add(
+                    format!("{prefix}.linear_attn.in_proj_qkv.weight"),
+                    "text",
+                    TensorDType::Bf16,
+                    vec![linear_qkv_width, text.hidden_size],
+                )?;
+                add(
+                    format!("{prefix}.linear_attn.in_proj_z.weight"),
+                    "text",
+                    TensorDType::Bf16,
+                    vec![linear_projection_width, text.hidden_size],
+                )?;
+                for suffix in ["in_proj_b.weight", "in_proj_a.weight"] {
+                    add(
+                        format!("{prefix}.linear_attn.{suffix}"),
+                        "text",
+                        TensorDType::Bf16,
+                        vec![text.linear_num_value_heads, text.hidden_size],
+                    )?;
                 }
-                for suffix in ["linear_attn.A_log", "linear_attn.norm.weight"] {
-                    add(format!("{prefix}.{suffix}"), "text", TensorDType::F32);
-                }
+                add(
+                    format!("{prefix}.linear_attn.conv1d.weight"),
+                    "text",
+                    TensorDType::Bf16,
+                    vec![linear_qkv_width, text.linear_conv_kernel_dim],
+                )?;
+                add(
+                    format!("{prefix}.linear_attn.A_log"),
+                    "text",
+                    TensorDType::F32,
+                    vec![text.linear_num_value_heads],
+                )?;
+                add(
+                    format!("{prefix}.linear_attn.dt_bias"),
+                    "text",
+                    TensorDType::F32,
+                    vec![text.linear_num_value_heads],
+                )?;
+                add(
+                    format!("{prefix}.linear_attn.norm.weight"),
+                    "text",
+                    TensorDType::Bf16,
+                    vec![text.linear_value_head_dim],
+                )?;
+                add(
+                    format!("{prefix}.linear_attn.out_proj.weight"),
+                    "text",
+                    TensorDType::Bf16,
+                    vec![text.hidden_size, linear_projection_width],
+                )?;
             }
             LayerType::FullAttention => {
-                for suffix in [
-                    "self_attn.k_norm.weight",
-                    "self_attn.k_proj.weight",
-                    "self_attn.o_proj.weight",
-                    "self_attn.q_norm.weight",
-                    "self_attn.q_proj.weight",
-                    "self_attn.v_proj.weight",
-                ] {
-                    add(format!("{prefix}.{suffix}"), "text", TensorDType::Bf16);
+                add(
+                    format!("{prefix}.self_attn.q_proj.weight"),
+                    "text",
+                    TensorDType::Bf16,
+                    vec![full_q_width, text.hidden_size],
+                )?;
+                for suffix in ["k_proj.weight", "v_proj.weight"] {
+                    add(
+                        format!("{prefix}.self_attn.{suffix}"),
+                        "text",
+                        TensorDType::Bf16,
+                        vec![full_kv_width, text.hidden_size],
+                    )?;
+                }
+                add(
+                    format!("{prefix}.self_attn.o_proj.weight"),
+                    "text",
+                    TensorDType::Bf16,
+                    vec![text.hidden_size, full_output_width],
+                )?;
+                for suffix in ["q_norm.weight", "k_norm.weight"] {
+                    add(
+                        format!("{prefix}.self_attn.{suffix}"),
+                        "text",
+                        TensorDType::Bf16,
+                        vec![text.head_dim],
+                    )?;
                 }
             }
         }
     }
-    for block in 0..24 {
+
+    let spatial_merge_area = checked_shape_mul(
+        vision.spatial_merge_size,
+        vision.spatial_merge_size,
+        "vision spatial merge area",
+    )?;
+    let merged_width = checked_shape_mul(
+        vision.hidden_size,
+        spatial_merge_area,
+        "vision merged width",
+    )?;
+    let qkv_width = checked_shape_mul(3, vision.hidden_size, "vision qkv width")?;
+    for block in 0..vision.depth {
         let prefix = format!("model.visual.blocks.{block}");
-        for suffix in [
-            "attn.proj.bias",
-            "attn.proj.weight",
-            "attn.qkv.bias",
-            "attn.qkv.weight",
-            "mlp.linear_fc1.bias",
-            "mlp.linear_fc1.weight",
-            "mlp.linear_fc2.bias",
-            "mlp.linear_fc2.weight",
-            "norm1.bias",
-            "norm1.weight",
-            "norm2.bias",
-            "norm2.weight",
+        for (suffix, shape) in [
+            (
+                "attn.proj.weight",
+                vec![vision.hidden_size, vision.hidden_size],
+            ),
+            ("attn.proj.bias", vec![vision.hidden_size]),
+            ("attn.qkv.weight", vec![qkv_width, vision.hidden_size]),
+            ("attn.qkv.bias", vec![qkv_width]),
+            (
+                "mlp.linear_fc1.weight",
+                vec![vision.intermediate_size, vision.hidden_size],
+            ),
+            ("mlp.linear_fc1.bias", vec![vision.intermediate_size]),
+            (
+                "mlp.linear_fc2.weight",
+                vec![vision.hidden_size, vision.intermediate_size],
+            ),
+            ("mlp.linear_fc2.bias", vec![vision.hidden_size]),
+            ("norm1.weight", vec![vision.hidden_size]),
+            ("norm1.bias", vec![vision.hidden_size]),
+            ("norm2.weight", vec![vision.hidden_size]),
+            ("norm2.bias", vec![vision.hidden_size]),
         ] {
-            add(format!("{prefix}.{suffix}"), "vision", TensorDType::Bf16);
+            add(
+                format!("{prefix}.{suffix}"),
+                "vision",
+                TensorDType::Bf16,
+                shape,
+            )?;
         }
     }
-    for suffix in [
-        "merger.linear_fc1.bias",
-        "merger.linear_fc1.weight",
-        "merger.linear_fc2.bias",
-        "merger.linear_fc2.weight",
-        "merger.norm.bias",
-        "merger.norm.weight",
-        "patch_embed.proj.bias",
-        "patch_embed.proj.weight",
-        "pos_embed.weight",
+    for (suffix, shape) in [
+        ("merger.linear_fc1.weight", vec![merged_width, merged_width]),
+        ("merger.linear_fc1.bias", vec![merged_width]),
+        (
+            "merger.linear_fc2.weight",
+            vec![vision.out_hidden_size, merged_width],
+        ),
+        ("merger.linear_fc2.bias", vec![vision.out_hidden_size]),
+        ("merger.norm.weight", vec![vision.hidden_size]),
+        ("merger.norm.bias", vec![vision.hidden_size]),
+        (
+            "patch_embed.proj.weight",
+            vec![
+                vision.hidden_size,
+                vision.in_channels,
+                vision.temporal_patch_size,
+                vision.patch_size,
+                vision.patch_size,
+            ],
+        ),
+        ("patch_embed.proj.bias", vec![vision.hidden_size]),
+        (
+            "pos_embed.weight",
+            vec![vision.num_position_embeddings, vision.hidden_size],
+        ),
     ] {
         add(
             format!("model.visual.{suffix}"),
             "vision",
             TensorDType::Bf16,
+            shape,
+        )?;
+    }
+
+    if inputs.mtp_num_hidden_layers != 1
+        || inputs.mtp_use_dedicated_embeddings
+        || !inputs.tie_word_embeddings
+    {
+        return Err(invalid("Qwen MTP shape conditions are not satisfied"));
+    }
+    let mtp_q_width = checked_shape_mul(
+        2,
+        checked_shape_mul(text.num_attention_heads, text.head_dim, "MTP query width")?,
+        "MTP query/gate width",
+    )?;
+    let mtp_kv_width = checked_shape_mul(text.num_key_value_heads, text.head_dim, "MTP KV width")?;
+    let mtp_output_width =
+        checked_shape_mul(text.num_attention_heads, text.head_dim, "MTP output width")?;
+    for (suffix, shape) in [
+        (
+            "fc.weight",
+            vec![
+                text.hidden_size,
+                checked_shape_mul(2, text.hidden_size, "MTP fc width")?,
+            ],
+        ),
+        ("layers.0.input_layernorm.weight", vec![text.hidden_size]),
+        (
+            "layers.0.post_attention_layernorm.weight",
+            vec![text.hidden_size],
+        ),
+        (
+            "layers.0.mlp.gate_proj.weight",
+            vec![text.intermediate_size, text.hidden_size],
+        ),
+        (
+            "layers.0.mlp.up_proj.weight",
+            vec![text.intermediate_size, text.hidden_size],
+        ),
+        (
+            "layers.0.mlp.down_proj.weight",
+            vec![text.hidden_size, text.intermediate_size],
+        ),
+        (
+            "layers.0.self_attn.q_proj.weight",
+            vec![mtp_q_width, text.hidden_size],
+        ),
+        (
+            "layers.0.self_attn.k_proj.weight",
+            vec![mtp_kv_width, text.hidden_size],
+        ),
+        (
+            "layers.0.self_attn.v_proj.weight",
+            vec![mtp_kv_width, text.hidden_size],
+        ),
+        (
+            "layers.0.self_attn.o_proj.weight",
+            vec![text.hidden_size, mtp_output_width],
+        ),
+        ("layers.0.self_attn.q_norm.weight", vec![text.head_dim]),
+        ("layers.0.self_attn.k_norm.weight", vec![text.head_dim]),
+        ("norm.weight", vec![text.hidden_size]),
+        ("pre_fc_norm_embedding.weight", vec![text.hidden_size]),
+        ("pre_fc_norm_hidden.weight", vec![text.hidden_size]),
+    ] {
+        add(format!("mtp.{suffix}"), "mtp", TensorDType::Bf16, shape)?;
+    }
+    if catalog.len() != 738 {
+        return Err(invalid(format!(
+            "Qwen tensor catalog cardinality differs from 738: {}",
+            catalog.len()
+        )));
+    }
+    Ok(catalog)
+}
+
+#[cfg(test)]
+mod qwen_shape_tests {
+    use super::*;
+
+    fn inputs() -> QwenShapeInputs {
+        QwenShapeInputs {
+            text: QwenTextShapeInputs {
+                hidden_size: 2560,
+                num_hidden_layers: 32,
+                num_attention_heads: 16,
+                num_key_value_heads: 4,
+                head_dim: 256,
+                intermediate_size: 9216,
+                vocab_size: 248320,
+                full_attention_interval: 4,
+                layer_types: qwen_layer_schedule(),
+                linear_conv_kernel_dim: 4,
+                linear_key_head_dim: 128,
+                linear_num_key_heads: 16,
+                linear_num_value_heads: 32,
+                linear_value_head_dim: 128,
+            },
+            vision: QwenVisionShapeInputs {
+                depth: 24,
+                hidden_size: 1024,
+                in_channels: 3,
+                temporal_patch_size: 2,
+                patch_size: 16,
+                spatial_merge_size: 2,
+                intermediate_size: 4096,
+                out_hidden_size: 2560,
+                num_position_embeddings: 2304,
+            },
+            mtp_num_hidden_layers: 1,
+            mtp_use_dedicated_embeddings: false,
+            tie_word_embeddings: true,
+        }
+    }
+
+    #[test]
+    fn representative_shapes_cover_rank_width_dtype_and_counts() {
+        let catalog = qwen_tensor_catalog(&inputs()).expect("reviewed shape inputs build");
+        assert_eq!(catalog.len(), 738);
+        assert_eq!(
+            catalog["model.language_model.layers.0.linear_attn.in_proj_qkv.weight"].2,
+            [8192, 2560]
+        );
+        assert_eq!(
+            catalog["model.language_model.layers.3.self_attn.q_proj.weight"].2,
+            [8192, 2560]
+        );
+        assert_eq!(
+            catalog["model.visual.patch_embed.proj.weight"].2,
+            [1024, 3, 2, 16, 16]
+        );
+        assert_eq!(
+            catalog["model.visual.merger.linear_fc1.weight"].2,
+            [4096, 4096]
+        );
+        assert_eq!(
+            catalog["mtp.layers.0.self_attn.o_proj.weight"].2,
+            [2560, 4096]
+        );
+        assert_eq!(
+            catalog["model.language_model.layers.0.linear_attn.dt_bias"].1,
+            TensorDType::F32
+        );
+        assert_eq!(
+            catalog["model.language_model.layers.0.linear_attn.norm.weight"].1,
+            TensorDType::Bf16
         );
     }
-    for suffix in [
-        "fc.weight",
-        "layers.0.input_layernorm.weight",
-        "layers.0.mlp.down_proj.weight",
-        "layers.0.mlp.gate_proj.weight",
-        "layers.0.mlp.up_proj.weight",
-        "layers.0.post_attention_layernorm.weight",
-        "layers.0.self_attn.k_norm.weight",
-        "layers.0.self_attn.k_proj.weight",
-        "layers.0.self_attn.o_proj.weight",
-        "layers.0.self_attn.q_norm.weight",
-        "layers.0.self_attn.q_proj.weight",
-        "layers.0.self_attn.v_proj.weight",
-        "norm.weight",
-        "pre_fc_norm_embedding.weight",
-        "pre_fc_norm_hidden.weight",
-    ] {
-        add(format!("mtp.{suffix}"), "mtp", TensorDType::Bf16);
+
+    #[test]
+    fn shape_arithmetic_rejects_overflow_and_accepts_non_aligned_boundaries() {
+        for value in [1, 3, 17, u64::MAX] {
+            assert_eq!(checked_shape_mul(value, 1, "test"), Ok(value));
+            assert_eq!(checked_shape_add(value, 0, "test"), Ok(value));
+        }
+        assert!(checked_shape_mul(u64::MAX, 2, "overflow").is_err());
+        assert!(checked_shape_add(u64::MAX, 1, "overflow").is_err());
+
+        let mut object = Map::new();
+        for value in [1, 3, 17, u64::MAX] {
+            object.insert("field".to_owned(), Value::from(value));
+            assert_eq!(require_positive_u64(&object, "field", "test"), Ok(value));
+        }
+        object.insert("field".to_owned(), Value::from(0u64));
+        assert!(require_positive_u64(&object, "field", "test").is_err());
+        object.insert("field".to_owned(), Value::from(true));
+        assert!(require_positive_u64(&object, "field", "test").is_err());
     }
-    catalog
 }
 
 fn validate_model(model: &LockedModel) -> Result<(), ModelError> {
@@ -1910,14 +2445,16 @@ pub fn verify_model_cache(
         true,
         "safetensors index",
     )?;
-    let tensors = validate_safetensors(lock, &owned_files, &index_value)?;
     let config = read_verified_bytes(
         &owned_files,
         "config.json",
         MAX_CONFIG_JSON_BYTES,
         "model config",
     )?;
-    validate_model_config(lock, &config)?;
+    let config_value = parse_json(&config, false, MAX_CONFIG_JSON_BYTES, "model config")?;
+    let qwen_shape_inputs = validate_parsed_model_config(lock, &config_value)?;
+    let tensors =
+        validate_safetensors(lock, &owned_files, &index_value, qwen_shape_inputs.as_ref())?;
     validate_stop_identity(lock, &owned_files)?;
     assert_cache_root_stable(cache_root, &root_before, "semantic validation")?;
     assert_cache_path_bindings(cache_root, &owned_files, "semantic validation")?;
@@ -1947,6 +2484,13 @@ pub fn verify_model_cache(
 /// locked decimal string; all lock identity JSON remains integer-only.
 pub fn validate_model_config(lock: &ModelLock, bytes: &[u8]) -> Result<(), ModelError> {
     let value = parse_json(bytes, false, MAX_CONFIG_JSON_BYTES, "model config")?;
+    validate_parsed_model_config(lock, &value).map(|_| ())
+}
+
+fn validate_parsed_model_config(
+    lock: &ModelLock,
+    value: &Value,
+) -> Result<Option<QwenShapeInputs>, ModelError> {
     let root = value
         .as_object()
         .ok_or_else(|| invalid("config root must be an object"))?;
@@ -2058,7 +2602,11 @@ pub fn validate_model_config(lock: &ModelLock, bytes: &[u8]) -> Result<(), Model
     if require_full_text_config {
         validate_qwen_config_constants(root)?;
     }
-    Ok(())
+    if require_full_text_config {
+        Ok(Some(validate_qwen_shape_inputs(root, architecture)?))
+    } else {
+        Ok(None)
+    }
 }
 
 /// Validate every reviewed config field that is specific to the immutable
@@ -2502,6 +3050,7 @@ fn validate_safetensors(
     lock: &ModelLock,
     files: &BTreeMap<String, OwnedVerifiedFile>,
     index_value: &Value,
+    qwen_shape_inputs: Option<&QwenShapeInputs>,
 ) -> Result<BTreeMap<String, TensorDescriptor>, ModelError> {
     let index: SafetensorsIndex = from_value(index_value.clone())?;
     let contract = &lock.model.tensor_contract;
@@ -2700,14 +3249,16 @@ fn validate_safetensors(
         }
     }
     if lock.model.repo_id == QWEN_REPO_ID {
-        let catalog = qwen_tensor_catalog();
+        let shape_inputs = qwen_shape_inputs
+            .ok_or_else(|| invalid("Qwen safetensors validation lacks parsed config shapes"))?;
+        let catalog = qwen_tensor_catalog(shape_inputs)?;
         if catalog.len() != 738 || tensors.len() != catalog.len() {
             return Err(invalid(
                 "Qwen tensor catalog cardinality differs from the reviewed 738 tensors",
             ));
         }
         for (name, descriptor) in &tensors {
-            let Some((expected_class, expected_dtype)) = catalog.get(name) else {
+            let Some((expected_class, expected_dtype, expected_shape)) = catalog.get(name) else {
                 return Err(invalid(format!(
                     "unknown Qwen tensor outside the reviewed catalog: {name}"
                 )));
@@ -2715,6 +3266,11 @@ fn validate_safetensors(
             if descriptor.dtype != *expected_dtype {
                 return Err(invalid(format!(
                     "Qwen tensor dtype differs from the reviewed catalog: {name}"
+                )));
+            }
+            if descriptor.shape != *expected_shape {
+                return Err(invalid(format!(
+                    "Qwen tensor shape differs from the reviewed catalog: {name}"
                 )));
             }
             let classified = contract

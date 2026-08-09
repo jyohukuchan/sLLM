@@ -106,6 +106,99 @@ QWEN_TEXT_ROPE_PARAMETERS = {
 }
 
 
+@dataclass(frozen=True)
+class _QwenShapeInputs:
+    text: dict[str, int]
+    vision: dict[str, int]
+    layer_types: tuple[str, ...]
+    mtp_num_hidden_layers: int
+    mtp_use_dedicated_embeddings: bool
+    tie_word_embeddings: bool
+
+
+def _shape_positive(value: Any, *, field: str) -> int:
+    if type(value) is not int or not 0 < value <= UINT64_MAX:
+        raise ContractError(f"Qwen shape field {field} must be a positive u64 integer")
+    return value
+
+
+def _checked_shape_mul(left: int, right: int, *, field: str) -> int:
+    if type(left) is not int or type(right) is not int or left < 0 or right < 0:
+        raise ContractError(f"Qwen shape multiplication inputs are invalid: {field}")
+    if right and left > UINT64_MAX // right:
+        raise ContractError(f"Qwen shape arithmetic overflows u64: {field}")
+    return left * right
+
+
+def _checked_shape_add(left: int, right: int, *, field: str) -> int:
+    if type(left) is not int or type(right) is not int or left < 0 or right < 0:
+        raise ContractError(f"Qwen shape addition inputs are invalid: {field}")
+    if left > UINT64_MAX - right:
+        raise ContractError(f"Qwen shape arithmetic overflows u64: {field}")
+    return left + right
+
+
+def _qwen_shape_inputs(config: dict[str, Any], model: dict[str, Any]) -> _QwenShapeInputs:
+    text_config = config.get("text_config")
+    vision_config = config.get("vision_config")
+    if type(text_config) is not dict or type(vision_config) is not dict:
+        raise ContractError("Qwen shape inputs require text_config and vision_config objects")
+    text_fields = (
+        "hidden_size", "num_hidden_layers", "num_attention_heads",
+        "num_key_value_heads", "head_dim", "intermediate_size", "vocab_size",
+        "full_attention_interval", "linear_conv_kernel_dim", "linear_key_head_dim",
+        "linear_num_key_heads", "linear_num_value_heads", "linear_value_head_dim",
+        "mtp_num_hidden_layers",
+    )
+    text = {field: _shape_positive(text_config.get(field), field=f"text_config.{field}") for field in text_fields}
+    expected_layers = model["architecture"]["layer_schedule"]["layer_types"]
+    actual_layers = text_config.get("layer_types")
+    if (
+        type(actual_layers) is not list
+        or tuple(actual_layers) != tuple(expected_layers)
+        or tuple(actual_layers) != tuple(["linear_attention", "linear_attention", "linear_attention", "full_attention"] * 8)
+        or text["num_hidden_layers"] != len(actual_layers)
+        or text["full_attention_interval"] != 4
+        or text["num_key_value_heads"] > text["num_attention_heads"]
+    ):
+        raise ContractError("Qwen shape inputs do not match the explicit reviewed layer schedule")
+
+    vision_fields = (
+        "depth", "hidden_size", "in_channels", "temporal_patch_size", "patch_size",
+        "spatial_merge_size", "intermediate_size", "num_heads",
+        "num_position_embeddings", "out_hidden_size",
+    )
+    vision = {
+        field: _shape_positive(vision_config.get(field), field=f"vision_config.{field}")
+        for field in vision_fields
+    }
+    if vision["depth"] != 24:
+        raise ContractError("Qwen vision depth must produce the reviewed 297 tensors")
+    if vision_config.get("deepstack_visual_indexes") != []:
+        raise ContractError("Qwen vision deepstack_visual_indexes must be explicitly empty")
+
+    mtp_dedicated = text_config.get("mtp_use_dedicated_embeddings")
+    tied = config.get("tie_word_embeddings")
+    if (
+        text["mtp_num_hidden_layers"] != 1
+        or type(mtp_dedicated) is not bool
+        or mtp_dedicated
+        or type(tied) is not bool
+        or not tied
+    ):
+        raise ContractError(
+            "Qwen MTP requires one layer, tied embeddings, and no dedicated embeddings"
+        )
+    return _QwenShapeInputs(
+        text=text,
+        vision=vision,
+        layer_types=tuple(actual_layers),
+        mtp_num_hidden_layers=text["mtp_num_hidden_layers"],
+        mtp_use_dedicated_embeddings=mtp_dedicated,
+        tie_word_embeddings=tied,
+    )
+
+
 def _fixed_json_value_matches(actual: Any, expected: Any) -> bool:
     """Compare reviewed JSON constants without Python numeric coercion.
 
@@ -244,8 +337,8 @@ QWEN_FILES: dict[str, dict[str, Any]] = {
 }
 
 
-def _qwen_tensor_catalog() -> dict[str, tuple[str, str]]:
-    """Return the reviewed 738-tensor Qwen namespace with class and dtype.
+def _qwen_tensor_catalog(inputs: _QwenShapeInputs) -> dict[str, tuple[str, str, tuple[int, ...]]]:
+    """Return the reviewed 738-tensor Qwen namespace with class, dtype, shape.
 
     The catalog is generated from the locked explicit layer schedule, not from
     a prefix count.  It therefore rejects a wrong layer family, an added name,
@@ -253,61 +346,179 @@ def _qwen_tensor_catalog() -> dict[str, tuple[str, str]]:
     consumer edge that a later runtime may introduce.
     """
 
-    catalog: dict[str, tuple[str, str]] = {}
+    catalog: dict[str, tuple[str, str, tuple[int, ...]]] = {}
 
-    def add(name: str, classification: str, dtype: str) -> None:
+    def add(name: str, classification: str, dtype: str, shape: tuple[int, ...]) -> None:
         if name in catalog:
             raise ContractError(f"internal duplicate Qwen tensor catalog entry: {name}")
-        catalog[name] = (classification, dtype)
+        catalog[name] = (classification, dtype, shape)
 
-    for suffix in ("embed_tokens.weight", "norm.weight"):
-        add(f"model.language_model.{suffix}", "text", "BF16")
-    for layer in range(32):
+    text = inputs.text
+    vision = inputs.vision
+    linear_projection_width = _checked_shape_mul(
+        text["linear_num_value_heads"], text["linear_value_head_dim"],
+        field="linear projection width",
+    )
+    linear_qkv_width = _checked_shape_add(
+        _checked_shape_mul(
+            2,
+            _checked_shape_mul(
+                text["linear_num_key_heads"], text["linear_key_head_dim"],
+                field="linear qkv query/key width",
+            ),
+            field="linear qkv query/key width",
+        ),
+        _checked_shape_mul(
+            text["linear_num_value_heads"], text["linear_value_head_dim"],
+            field="linear qkv value width",
+        ),
+        field="linear qkv width",
+    )
+    full_q_width = _checked_shape_mul(
+        2,
+        _checked_shape_mul(
+            text["num_attention_heads"], text["head_dim"], field="full query width"
+        ),
+        field="full query/gate width",
+    )
+    full_kv_width = _checked_shape_mul(
+        text["num_key_value_heads"], text["head_dim"], field="full KV width"
+    )
+    full_output_width = _checked_shape_mul(
+        text["num_attention_heads"], text["head_dim"], field="full output width"
+    )
+
+    add(
+        "model.language_model.embed_tokens.weight", "text", "BF16",
+        (text["vocab_size"], text["hidden_size"]),
+    )
+    add("model.language_model.norm.weight", "text", "BF16", (text["hidden_size"],))
+    for layer, layer_type in enumerate(inputs.layer_types):
         prefix = f"model.language_model.layers.{layer}"
-        for suffix in (
-            "input_layernorm.weight", "mlp.down_proj.weight", "mlp.gate_proj.weight",
-            "mlp.up_proj.weight", "post_attention_layernorm.weight",
-        ):
-            add(f"{prefix}.{suffix}", "text", "BF16")
-        if layer % 4 == 3:
-            for suffix in (
-                "self_attn.k_norm.weight", "self_attn.k_proj.weight", "self_attn.o_proj.weight",
-                "self_attn.q_norm.weight", "self_attn.q_proj.weight", "self_attn.v_proj.weight",
-            ):
-                add(f"{prefix}.{suffix}", "text", "BF16")
+        add(f"{prefix}.input_layernorm.weight", "text", "BF16", (text["hidden_size"],))
+        add(f"{prefix}.post_attention_layernorm.weight", "text", "BF16", (text["hidden_size"],))
+        add(
+            f"{prefix}.mlp.gate_proj.weight", "text", "BF16",
+            (text["intermediate_size"], text["hidden_size"]),
+        )
+        add(
+            f"{prefix}.mlp.up_proj.weight", "text", "BF16",
+            (text["intermediate_size"], text["hidden_size"]),
+        )
+        add(
+            f"{prefix}.mlp.down_proj.weight", "text", "BF16",
+            (text["hidden_size"], text["intermediate_size"]),
+        )
+        if layer_type == "full_attention":
+            add(f"{prefix}.self_attn.q_proj.weight", "text", "BF16", (full_q_width, text["hidden_size"]))
+            add(f"{prefix}.self_attn.k_proj.weight", "text", "BF16", (full_kv_width, text["hidden_size"]))
+            add(f"{prefix}.self_attn.v_proj.weight", "text", "BF16", (full_kv_width, text["hidden_size"]))
+            add(f"{prefix}.self_attn.o_proj.weight", "text", "BF16", (text["hidden_size"], full_output_width))
+            add(f"{prefix}.self_attn.q_norm.weight", "text", "BF16", (text["head_dim"],))
+            add(f"{prefix}.self_attn.k_norm.weight", "text", "BF16", (text["head_dim"],))
         else:
-            for suffix in (
-                "linear_attn.conv1d.weight", "linear_attn.dt_bias", "linear_attn.in_proj_a.weight",
-                "linear_attn.in_proj_b.weight", "linear_attn.in_proj_qkv.weight",
-                "linear_attn.in_proj_z.weight", "linear_attn.out_proj.weight",
-            ):
-                add(f"{prefix}.{suffix}", "text", "BF16")
-            for suffix in ("linear_attn.A_log", "linear_attn.norm.weight"):
-                add(f"{prefix}.{suffix}", "text", "F32")
-    for block in range(24):
+            add(
+                f"{prefix}.linear_attn.in_proj_qkv.weight", "text", "BF16",
+                (linear_qkv_width, text["hidden_size"]),
+            )
+            add(
+                f"{prefix}.linear_attn.in_proj_z.weight", "text", "BF16",
+                (linear_projection_width, text["hidden_size"]),
+            )
+            for suffix in ("in_proj_a.weight", "in_proj_b.weight"):
+                add(
+                    f"{prefix}.linear_attn.{suffix}", "text", "BF16",
+                    (text["linear_num_value_heads"], text["hidden_size"]),
+                )
+            add(
+                f"{prefix}.linear_attn.conv1d.weight", "text", "BF16",
+                (linear_qkv_width, text["linear_conv_kernel_dim"]),
+            )
+            add(f"{prefix}.linear_attn.A_log", "text", "F32", (text["linear_num_value_heads"],))
+            add(f"{prefix}.linear_attn.dt_bias", "text", "F32", (text["linear_num_value_heads"],))
+            add(
+                f"{prefix}.linear_attn.norm.weight", "text", "BF16",
+                (text["linear_value_head_dim"],),
+            )
+            add(
+                f"{prefix}.linear_attn.out_proj.weight", "text", "BF16",
+                (text["hidden_size"], linear_projection_width),
+            )
+    for block in range(vision["depth"]):
         prefix = f"model.visual.blocks.{block}"
-        for suffix in (
-            "attn.proj.bias", "attn.proj.weight", "attn.qkv.bias", "attn.qkv.weight",
-            "mlp.linear_fc1.bias", "mlp.linear_fc1.weight", "mlp.linear_fc2.bias",
-            "mlp.linear_fc2.weight", "norm1.bias", "norm1.weight", "norm2.bias", "norm2.weight",
+        qkv_width = _checked_shape_mul(3, vision["hidden_size"], field="vision qkv width")
+        for suffix, shape in (
+            ("attn.proj.weight", (vision["hidden_size"], vision["hidden_size"])),
+            ("attn.proj.bias", (vision["hidden_size"],)),
+            ("attn.qkv.weight", (qkv_width, vision["hidden_size"])),
+            ("attn.qkv.bias", (qkv_width,)),
+            ("mlp.linear_fc1.weight", (vision["intermediate_size"], vision["hidden_size"])),
+            ("mlp.linear_fc1.bias", (vision["intermediate_size"],)),
+            ("mlp.linear_fc2.weight", (vision["hidden_size"], vision["intermediate_size"])),
+            ("mlp.linear_fc2.bias", (vision["hidden_size"],)),
+            ("norm1.weight", (vision["hidden_size"],)),
+            ("norm1.bias", (vision["hidden_size"],)),
+            ("norm2.weight", (vision["hidden_size"],)),
+            ("norm2.bias", (vision["hidden_size"],)),
         ):
-            add(f"{prefix}.{suffix}", "vision", "BF16")
-    for suffix in (
-        "merger.linear_fc1.bias", "merger.linear_fc1.weight", "merger.linear_fc2.bias",
-        "merger.linear_fc2.weight", "merger.norm.bias", "merger.norm.weight",
-        "patch_embed.proj.bias", "patch_embed.proj.weight", "pos_embed.weight",
+            add(f"{prefix}.{suffix}", "vision", "BF16", shape)
+    spatial_merge_area = _checked_shape_mul(
+        vision["spatial_merge_size"], vision["spatial_merge_size"],
+        field="vision spatial merge area",
+    )
+    merged_width = _checked_shape_mul(
+        vision["hidden_size"], spatial_merge_area, field="vision merged width"
+    )
+    for suffix, shape in (
+        ("merger.linear_fc1.weight", (merged_width, merged_width)),
+        ("merger.linear_fc1.bias", (merged_width,)),
+        ("merger.linear_fc2.weight", (vision["out_hidden_size"], merged_width)),
+        ("merger.linear_fc2.bias", (vision["out_hidden_size"],)),
+        ("merger.norm.weight", (vision["hidden_size"],)),
+        ("merger.norm.bias", (vision["hidden_size"],)),
+        (
+            "patch_embed.proj.weight",
+            (
+                vision["hidden_size"], vision["in_channels"], vision["temporal_patch_size"],
+                vision["patch_size"], vision["patch_size"],
+            ),
+        ),
+        ("patch_embed.proj.bias", (vision["hidden_size"],)),
+        ("pos_embed.weight", (vision["num_position_embeddings"], vision["hidden_size"])),
     ):
-        add(f"model.visual.{suffix}", "vision", "BF16")
-    for suffix in (
-        "fc.weight", "layers.0.input_layernorm.weight", "layers.0.mlp.down_proj.weight",
-        "layers.0.mlp.gate_proj.weight", "layers.0.mlp.up_proj.weight",
-        "layers.0.post_attention_layernorm.weight", "layers.0.self_attn.k_norm.weight",
-        "layers.0.self_attn.k_proj.weight", "layers.0.self_attn.o_proj.weight",
-        "layers.0.self_attn.q_norm.weight", "layers.0.self_attn.q_proj.weight",
-        "layers.0.self_attn.v_proj.weight", "norm.weight", "pre_fc_norm_embedding.weight",
-        "pre_fc_norm_hidden.weight",
+        add(f"model.visual.{suffix}", "vision", "BF16", shape)
+
+    if inputs.mtp_num_hidden_layers != 1 or inputs.mtp_use_dedicated_embeddings or not inputs.tie_word_embeddings:
+        raise ContractError("Qwen MTP shape conditions are not satisfied")
+    mtp_q_width = _checked_shape_mul(
+        2,
+        _checked_shape_mul(text["num_attention_heads"], text["head_dim"], field="MTP query width"),
+        field="MTP query/gate width",
+    )
+    mtp_kv_width = _checked_shape_mul(
+        text["num_key_value_heads"], text["head_dim"], field="MTP KV width"
+    )
+    mtp_output_width = _checked_shape_mul(
+        text["num_attention_heads"], text["head_dim"], field="MTP output width"
+    )
+    for suffix, shape in (
+        ("fc.weight", (text["hidden_size"], _checked_shape_mul(2, text["hidden_size"], field="MTP fc width"))),
+        ("layers.0.input_layernorm.weight", (text["hidden_size"],)),
+        ("layers.0.post_attention_layernorm.weight", (text["hidden_size"],)),
+        ("layers.0.mlp.gate_proj.weight", (text["intermediate_size"], text["hidden_size"])),
+        ("layers.0.mlp.up_proj.weight", (text["intermediate_size"], text["hidden_size"])),
+        ("layers.0.mlp.down_proj.weight", (text["hidden_size"], text["intermediate_size"])),
+        ("layers.0.self_attn.q_proj.weight", (mtp_q_width, text["hidden_size"])),
+        ("layers.0.self_attn.k_proj.weight", (mtp_kv_width, text["hidden_size"])),
+        ("layers.0.self_attn.v_proj.weight", (mtp_kv_width, text["hidden_size"])),
+        ("layers.0.self_attn.o_proj.weight", (text["hidden_size"], mtp_output_width)),
+        ("layers.0.self_attn.q_norm.weight", (text["head_dim"],)),
+        ("layers.0.self_attn.k_norm.weight", (text["head_dim"],)),
+        ("norm.weight", (text["hidden_size"],)),
+        ("pre_fc_norm_embedding.weight", (text["hidden_size"],)),
+        ("pre_fc_norm_hidden.weight", (text["hidden_size"],)),
     ):
-        add(f"mtp.{suffix}", "mtp", "BF16")
+        add(f"mtp.{suffix}", "mtp", "BF16", shape)
     if len(catalog) != 738:
         raise ContractError(f"internal Qwen tensor catalog cardinality drifted: {len(catalog)}")
     return catalog
@@ -1084,7 +1295,11 @@ def _read_safetensors_header(files: dict[str, _VerifiedCacheFile], shard_name: s
     return header_length, raw_header, after.st_size
 
 
-def _validate_safetensors_headers(files: dict[str, _VerifiedCacheFile], model: dict[str, Any]) -> None:
+def _validate_safetensors_headers(
+    files: dict[str, _VerifiedCacheFile],
+    model: dict[str, Any],
+    qwen_shape_inputs: _QwenShapeInputs | None = None,
+) -> None:
     """Validate index/header metadata without loading tensor data into memory."""
 
     index = _read_cache_json(files, model["tensor_contract"]["index_path"])
@@ -1195,7 +1410,9 @@ def _validate_safetensors_headers(files: dict[str, _VerifiedCacheFile], model: d
     if sum(counts.values()) != len(all_headers) or counts != expected:
         raise ContractError(f"safetensors tensor classification mismatch: {counts} != {expected}")
     if model["repo_id"] == REPO_ID:
-        catalog = _qwen_tensor_catalog()
+        if qwen_shape_inputs is None:
+            raise ContractError("Qwen safetensors validation lacks parsed config shapes")
+        catalog = _qwen_tensor_catalog(qwen_shape_inputs)
         if set(all_headers) != set(catalog):
             missing = sorted(set(catalog) - set(all_headers))
             extra = sorted(set(all_headers) - set(catalog))
@@ -1204,7 +1421,7 @@ def _validate_safetensors_headers(files: dict[str, _VerifiedCacheFile], model: d
                 f"missing={missing[:4]} extra={extra[:4]}"
             )
         for name, header in all_headers.items():
-            expected_class, expected_dtype = catalog[name]
+            expected_class, expected_dtype, expected_shape = catalog[name]
             actual_class = next(
                 (
                     item["id"]
@@ -1217,6 +1434,8 @@ def _validate_safetensors_headers(files: dict[str, _VerifiedCacheFile], model: d
                 raise ContractError(f"Qwen tensor class differs from the reviewed catalog: {name}")
             if header["dtype"] != expected_dtype:
                 raise ContractError(f"Qwen tensor dtype differs from the reviewed catalog: {name}")
+            if tuple(header["shape"]) != expected_shape:
+                raise ContractError(f"Qwen tensor shape differs from the reviewed catalog: {name}")
     slice_contract = model["slice_contract"]
     slice_header = all_headers.get(slice_contract["tensor_name"])
     if slice_header is None:
@@ -1231,7 +1450,10 @@ def _validate_safetensors_headers(files: dict[str, _VerifiedCacheFile], model: d
         raise ContractError("locked slice source shard does not match safetensors header")
 
 
-def _validate_qwen_config(files: dict[str, _VerifiedCacheFile], model: dict[str, Any]) -> None:
+def _validate_qwen_config(
+    files: dict[str, _VerifiedCacheFile],
+    model: dict[str, Any],
+) -> _QwenShapeInputs:
     config = _read_cache_json(files, "config.json")
     if not isinstance(config, dict):
         raise ContractError("Qwen config must be a JSON object")
@@ -1291,6 +1513,7 @@ def _validate_qwen_config(files: dict[str, _VerifiedCacheFile], model: dict[str,
         raise ContractError("Qwen text config dtype is not bfloat16")
     if not _fixed_json_value_matches(text.get("rms_norm_eps"), 0.000001):
         raise ContractError("Qwen text config rms_norm_eps differs from 1e-6")
+    return _qwen_shape_inputs(config, model)
 
 
 def _validate_stop_identity(files: dict[str, _VerifiedCacheFile], model: dict[str, Any]) -> None:
@@ -1401,9 +1624,10 @@ def validate_cache(
         # contents have already been hashed.  The descriptors stay open until
         # the final path/root identity checks have completed.
         _validate_stop_identity(verified_files, model)
+        qwen_shape_inputs = None
         if model["repo_id"] == REPO_ID:
-            _validate_qwen_config(verified_files, model)
-        _validate_safetensors_headers(verified_files, model)
+            qwen_shape_inputs = _validate_qwen_config(verified_files, model)
+        _validate_safetensors_headers(verified_files, model, qwen_shape_inputs)
 
         root_after_semantic = _cache_root_stat(cache_dir, require_trusted_read_only=require_trusted_read_only)
         if _stat_identity(root_before) != _stat_identity(root_after_semantic):

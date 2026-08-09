@@ -348,14 +348,59 @@ class ModelLockContractTests(unittest.TestCase):
             self.assert_rejected(mutated)
 
     def test_qwen_machine_readable_tensor_catalog_is_exactly_classified(self) -> None:
-        catalog = __import__("validate_model_lock")._qwen_tensor_catalog()
+        module = __import__("validate_model_lock")
+        catalog = module._qwen_tensor_catalog(
+            module._qwen_shape_inputs(self._reviewed_qwen_config(), self.lock["model"])
+        )
         self.assertEqual(len(catalog), 738)
-        self.assertEqual(sum(classification == "text" for classification, _ in catalog.values()), 426)
-        self.assertEqual(sum(classification == "vision" for classification, _ in catalog.values()), 297)
-        self.assertEqual(sum(classification == "mtp" for classification, _ in catalog.values()), 15)
-        self.assertEqual(catalog["model.language_model.layers.0.linear_attn.A_log"], ("text", "F32"))
-        self.assertEqual(catalog["model.language_model.layers.3.self_attn.q_proj.weight"], ("text", "BF16"))
+        self.assertEqual(sum(classification == "text" for classification, _, _ in catalog.values()), 426)
+        self.assertEqual(sum(classification == "vision" for classification, _, _ in catalog.values()), 297)
+        self.assertEqual(sum(classification == "mtp" for classification, _, _ in catalog.values()), 15)
+        self.assertEqual(
+            catalog["model.language_model.layers.0.linear_attn.A_log"],
+            ("text", "F32", (32,)),
+        )
+        self.assertEqual(
+            catalog["model.language_model.layers.0.linear_attn.dt_bias"],
+            ("text", "F32", (32,)),
+        )
+        self.assertEqual(
+            catalog["model.language_model.layers.0.linear_attn.norm.weight"],
+            ("text", "BF16", (128,)),
+        )
+        self.assertEqual(
+            catalog["model.language_model.layers.3.self_attn.q_proj.weight"],
+            ("text", "BF16", (8192, 2560)),
+        )
+        self.assertEqual(
+            catalog["model.visual.merger.linear_fc1.weight"],
+            ("vision", "BF16", (4096, 4096)),
+        )
+        self.assertEqual(
+            catalog["mtp.layers.0.self_attn.o_proj.weight"],
+            ("mtp", "BF16", (2560, 4096)),
+        )
         self.assertNotIn("model.language_model.layers.3.linear_attn.A_log", catalog)
+
+    def test_qwen_shape_inputs_reject_non_positive_and_checked_overflow(self) -> None:
+        module = __import__("validate_model_lock")
+        baseline = self._reviewed_qwen_config()
+        for value in (0, -1, 1.0, True, "1"):
+            changed = copy.deepcopy(baseline)
+            changed["text_config"]["hidden_size"] = value
+            with self.subTest(value=value), self.assertRaises(ContractError):
+                module._qwen_shape_inputs(changed, self.lock["model"])
+        for value in (0, -1, 1.0, True, "1"):
+            changed = copy.deepcopy(baseline)
+            changed["vision_config"]["patch_size"] = value
+            with self.subTest(value=value), self.assertRaises(ContractError):
+                module._qwen_shape_inputs(changed, self.lock["model"])
+        for value in (1, 3, 17, 2**64 - 1):
+            self.assertEqual(module._checked_shape_mul(value, 1, field="boundary"), value)
+        with self.assertRaises(ContractError):
+            module._checked_shape_mul(2**64 - 1, 2, field="overflow")
+        with self.assertRaises(ContractError):
+            module._checked_shape_add(2**64 - 1, 1, field="overflow")
 
     def test_fingerprint_excludes_only_root_bookkeeping(self) -> None:
         changed = copy.deepcopy(self.lock)
@@ -571,6 +616,14 @@ class ModelLockContractTests(unittest.TestCase):
         def wrong_dtype(header: dict[str, object]) -> None:
             header["fixture.tensor"]["dtype"] = "F32"
         mutations.append(wrong_dtype)
+
+        def same_width_dtype(header: dict[str, object]) -> None:
+            header["fixture.tensor"]["dtype"] = "F16"
+        mutations.append(same_width_dtype)
+
+        def wrong_rank(header: dict[str, object]) -> None:
+            header["fixture.tensor"]["shape"] = [1, 1]
+        mutations.append(wrong_rank)
 
         def wrong_shape(header: dict[str, object]) -> None:
             header["fixture.tensor"]["shape"] = [3]
