@@ -26,5 +26,7 @@
 - 分割計画3文書の最終dirty-local H0は316/316、Markdown local link、diff checkが`PASS`した。これは`immutable=false`の早期回帰確認であり、最終candidate evidenceには使わない。
 - unrestricted fallbackの広域監査Lunaは45分、fresh差分review Lunaは45分、同scopeのescalation review Terraも45分にわたりstdoutと`--output-last-message` artifactを一度も生成せず、process生存・CPU/memory低位のremote待機から進捗しなかった。各15分監視点で生存、出力、resource、worktreeを確認し、45分時点で無進捗processとして停止した。3 processともworktreeを変更せず、review判定は得ていない。
 - このためB0〜B7分割をreview済みまたは完了とは扱わず、B0も開始しなかった。plan candidateをlocal commit/treeへ固定し、同一identityのstrict H0を得た後、次回はそのidentityだけをfresh独立reviewする。
+- commit `4849036ccc9c58bdb0b575a6ef6b58e290da3bbf`の専用fresh reviewは、B0のpolicyが`tokenizers`閉包だけをinventoryし、`static_assertions`等の他workspace依存を網羅しないMedium 1件を検出した。B0を通常・build・devを含む全workspace targetのdependency graph、exact version/checksum/license/feature/MSRV、`--all-targets` offline checkへ拡張した。
+- 同じ監査で既存backend-neutral `ExecutionSession::upload()`とHIP `ExecutionSessionAdapter`がすでに公開upload経路を提供することを確認した。B7は新しいHIP wrapperや`Queue::copy_to_device()`直結を作らず、B5 load planをこの既存経路へ接続するsemantic evidenceに限定した。
 
 [対応する計画](../../../../plans/active/2026/08/1-10/phase3-qwen35-4b-bf16.md)
