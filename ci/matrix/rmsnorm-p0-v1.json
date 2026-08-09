@@ -50,7 +50,7 @@
       "order": 0,
       "row_id": "rmsnorm-p0-gfx1030",
       "target": "gfx1030",
-      "device": {"bdf": "0000:03:00.0", "uuid": "GPU-76a08c022586fed6", "product": "AMD Radeon Pro V620", "physical_hip_index": 0, "logical_device_index": 0},
+      "device": {"bdf": "0000:03:00.0", "uuid": "GPU-76a08c022586fed6", "product": "AMD Radeon Pro V620", "physical_hip_index": 1, "logical_device_index": 0},
       "backend": "hip",
       "cases": ["p0-r3-n37", "p0-r1-n2560", "p0-r1-n255", "p0-r1-n256", "p0-r1-n257"]
     },
@@ -58,7 +58,7 @@
       "order": 1,
       "row_id": "rmsnorm-p0-gfx1201",
       "target": "gfx1201",
-      "device": {"bdf": "0000:07:00.0", "uuid": "GPU-a8e9ddefa2d60f55", "product": "AMD Radeon AI PRO R9700", "physical_hip_index": 1, "logical_device_index": 0},
+      "device": {"bdf": "0000:07:00.0", "uuid": "GPU-a8e9ddefa2d60f55", "product": "AMD Radeon AI PRO R9700", "physical_hip_index": 2, "logical_device_index": 0},
       "backend": "hip",
       "cases": ["p0-r3-n37", "p0-r1-n2560", "p0-r1-n255", "p0-r1-n256", "p0-r1-n257"]
     }

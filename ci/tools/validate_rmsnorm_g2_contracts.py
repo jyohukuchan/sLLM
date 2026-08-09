@@ -155,9 +155,9 @@ def validate_candidate(
 
 def _expected_target(target: str) -> dict[str, Any]:
     if target == "gfx1030":
-        return {"bdf": "0000:03:00.0", "uuid": "GPU-76a08c022586fed6", "product": "AMD Radeon Pro V620", "physical_hip_index": 0, "logical_device_index": 0}
+        return {"bdf": "0000:03:00.0", "uuid": "GPU-76a08c022586fed6", "product": "AMD Radeon Pro V620", "physical_hip_index": 1, "logical_device_index": 0}
     if target == "gfx1201":
-        return {"bdf": "0000:07:00.0", "uuid": "GPU-a8e9ddefa2d60f55", "product": "AMD Radeon AI PRO R9700", "physical_hip_index": 1, "logical_device_index": 0}
+        return {"bdf": "0000:07:00.0", "uuid": "GPU-a8e9ddefa2d60f55", "product": "AMD Radeon AI PRO R9700", "physical_hip_index": 2, "logical_device_index": 0}
     raise ContractError(f"unsupported G2 target: {target}")
 
 
