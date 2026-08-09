@@ -30,6 +30,62 @@ H3_RMSNORM_SUITE_ID = "h3-rmsnorm-compile-only"
 SEMANTIC_G1_SUITE_ID = "h0-rmsnorm-semantic-g1-contract"
 G2_SUITE_ID = "h0-rmsnorm-g2-contract"
 P0_SUITE_ID = "h0-rmsnorm-p0-contract"
+PHASE3_STAGE_A_SUITE_ID = "h0-phase3-stage-a-evidence-plan"
+EXPECTED_PHASE3_STAGE_A_TEST_IDS = [
+    "phase3.stage_a.evidence_plan.contract",
+    "phase3.stage_a.evidence_plan.negative",
+    "phase3.stage_a.evidence_plan.no_execution",
+]
+EXPECTED_PHASE3_STAGE_A_PATH_RULES = {
+    "ci/tools/plan_phase3_stage_a_evidence.py",
+    "ci/tests/test_phase3_stage_a_evidence_plan.py",
+    "ci/schema/phase3-stage-a-evidence-plan-v1.schema.json",
+    "ci/tools/common.py",
+    "ci/tools/build_rmsnorm_g1_runtime.py",
+    "ci/tools/validate_json_manifests.py",
+    "ci/tools/validate_matrix.py",
+    "ci/tools/validate_rmsnorm_g1_contracts.py",
+    "ci/tools/validate_rmsnorm_g2_contracts.py",
+    "ci/tools/validate_rmsnorm_p0_contracts.py",
+    "ci/tools/orchestrate_rmsnorm_g1_evidence.py",
+    "ci/tools/build_rmsnorm_g2_runtime.py",
+    "ci/tools/build_rmsnorm_p0_runtime.py",
+    ".github/workflows/semantic-rmsnorm-g1.yml",
+    ".github/workflows/rmsnorm-h3-compile.yml",
+    "ci/matrix/rmsnorm-semantic-g1-v1.json",
+    "ci/matrix/rmsnorm-g2-v1.json",
+    "ci/matrix/rmsnorm-g2-build-inputs-v1.json",
+    "ci/matrix/rmsnorm-g2-tolerance-v1.json",
+    "ci/matrix/rmsnorm-p0-v1.json",
+    "ci/matrix/rmsnorm-p0-review-policy-v1.json",
+    "ci/matrix/rmsnorm-p0-public-path-inputs-v1.json",
+    "ci/schema/rmsnorm-semantic-g1-matrix-v1.schema.json",
+    "ci/schema/rmsnorm-semantic-g1-artifact-v1.schema.json",
+    "ci/schema/rmsnorm-semantic-g1-report-v1.schema.json",
+    "ci/schema/rmsnorm-semantic-g1-aggregate-v1.schema.json",
+    "ci/schema/rmsnorm-g2-matrix-v1.schema.json",
+    "ci/schema/rmsnorm-g2-model-slice-v1.schema.json",
+    "ci/schema/rmsnorm-g2-tolerance-v1.schema.json",
+    "ci/schema/rmsnorm-g2-runtime-result-v1.schema.json",
+    "ci/schema/rmsnorm-g2-artifact-v1.schema.json",
+    "ci/schema/rmsnorm-g2-report-v1.schema.json",
+    "ci/schema/rmsnorm-g2-aggregate-v1.schema.json",
+    "ci/schema/rmsnorm-p0-matrix-v1.schema.json",
+    "ci/schema/rmsnorm-p0-review-policy-v1.schema.json",
+    "ci/schema/rmsnorm-p0-artifact-v1.schema.json",
+    "ci/schema/rmsnorm-p0-runtime-result-v1.schema.json",
+    "ci/schema/rmsnorm-p0-report-v1.schema.json",
+    "ci/schema/rmsnorm-p0-review-disposition-v1.schema.json",
+    "ci/schema/rmsnorm-p0-aggregate-v1.schema.json",
+    "ci/matrix/rmsnorm-h3-compile-v1.json",
+    "ci/schema/rmsnorm-h3-compile-v1.schema.json",
+    "ci/schema/rmsnorm-h3-artifact-v1.schema.json",
+    "ci/schema/rmsnorm-h3-report-v1.schema.json",
+    "ci/schema/rmsnorm-h3-aggregate-v1.schema.json",
+    "ci/matrix/suites-v1.json",
+    "ci/matrix/host-v1.json",
+    "ci/matrix/path-to-suite-v1.json",
+}
 EXPECTED_H3_RMSNORM_TEST_IDS = [
     "h3.rmsnorm.contract",
     "h3.rmsnorm.runner",
@@ -500,6 +556,34 @@ def validate_p0_path_ownership(paths: dict[str, object]) -> None:
             raise ContractError(f"P0 path is not explicitly owned: {path}")
 
 
+def validate_phase3_stage_a_registration(
+    suites: dict[str, object], host: dict[str, object], paths: dict[str, object]
+) -> None:
+    """Validate the focused host-only Phase 3 Stage A planner registration."""
+
+    suite = next((item for item in suites["suites"] if item["suite_id"] == PHASE3_STAGE_A_SUITE_ID), None)
+    if suite is None:
+        raise ContractError(f"missing Phase 3 Stage A evidence-plan suite: {PHASE3_STAGE_A_SUITE_ID}")
+    if suite["tier"] != "tier_h0" or suite["marker"] != "tier_h0" or suite["attributes"] != {key: False for key in ALLOWED_ATTRIBUTES}:
+        raise ContractError("Phase 3 Stage A evidence-plan suite must be offline and GPU/model-free")
+    if suite["test_ids"] != EXPECTED_PHASE3_STAGE_A_TEST_IDS:
+        raise ContractError("Phase 3 Stage A evidence-plan test registration drifted")
+    expected_command = [{
+        "command_id": "phase3-stage-a-evidence-plan",
+        "argv": ["{python}", "-m", "unittest", "ci.tests.test_phase3_stage_a_evidence_plan"],
+    }]
+    if suite["commands"] != expected_command:
+        raise ContractError("Phase 3 Stage A evidence-plan command registration drifted")
+
+    host_rows = {row["row_id"]: row for row in host["rows"]}
+    if PHASE3_STAGE_A_SUITE_ID not in host_rows["h0"]["suite_ids"]:
+        raise ContractError("Phase 3 Stage A evidence-plan suite is not owned by host h0")
+    rules_by_pattern = {rule["pattern"]: set(rule["suite_ids"]) for rule in paths["rules"]}
+    for path in EXPECTED_PHASE3_STAGE_A_PATH_RULES:
+        if PHASE3_STAGE_A_SUITE_ID not in rules_by_pattern.get(path, set()):
+            raise ContractError(f"Phase 3 Stage A path is not explicitly owned: {path}")
+
+
 def validate_cargo_toolchain_registration(suites: dict[str, object]) -> None:
     """Allow the development pin everywhere, with one exact MSRV exception."""
 
@@ -537,12 +621,12 @@ def main() -> int:
             raise ContractError("host-v1 has unknown or missing top-level key")
         if set(paths) != {"schema_version", "revision", "default_suite_ids", "rules"}:
             raise ContractError("path-to-suite-v1 has unknown or missing top-level key")
-        if suites.get("schema_version") != "suites-v1" or suites.get("revision") != 16:
-            raise ContractError("suites-v1 identity is not revision 16")
-        if host.get("schema_version") != "host-v1" or host.get("revision") != 9:
-            raise ContractError("host-v1 identity is not revision 9")
-        if paths.get("schema_version") != "path-to-suite-v1" or paths.get("revision") != 22:
-            raise ContractError("path-to-suite-v1 identity is not revision 22")
+        if suites.get("schema_version") != "suites-v1" or suites.get("revision") != 17:
+            raise ContractError("suites-v1 identity is not revision 17")
+        if host.get("schema_version") != "host-v1" or host.get("revision") != 10:
+            raise ContractError("host-v1 identity is not revision 10")
+        if paths.get("schema_version") != "path-to-suite-v1" or paths.get("revision") != 23:
+            raise ContractError("path-to-suite-v1 identity is not revision 23")
         for suite in suites["suites"]:
             sid = suite["suite_id"]
             if set(suite) != {"suite_id", "tier", "marker", "attributes", "test_ids", "commands"}:
@@ -681,6 +765,7 @@ def main() -> int:
         validate_public_runtime_path_ownership(paths)
         validate_rmsnorm_path_ownership(paths)
         validate_semantic_g1_path_ownership(paths)
+        validate_phase3_stage_a_registration(suites, host, paths)
         for g1_path in EXPECTED_G1_STATIC_PATH_RULES:
             if G1_STATIC_SUITE_ID not in rules_by_pattern.get(g1_path, set()):
                 raise ContractError(f"G1 path is not explicitly registered to the H0 static suite: {g1_path}")

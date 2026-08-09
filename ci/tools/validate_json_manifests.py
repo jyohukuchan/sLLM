@@ -82,6 +82,7 @@ P0_SCHEMA_FILES = {
 P0_MATRIX = "ci/matrix/rmsnorm-p0-v1.json"
 P0_REVIEW_POLICY = "ci/matrix/rmsnorm-p0-review-policy-v1.json"
 P0_PUBLIC_PATH_INPUTS = "ci/matrix/rmsnorm-p0-public-path-inputs-v1.json"
+PHASE3_STAGE_A_EVIDENCE_PLAN_SCHEMA = "ci/schema/phase3-stage-a-evidence-plan-v1.schema.json"
 H3_PUBLIC_RUNTIME_STEP_NAMES = [
     "Checkout immutable candidate",
     "Prepare private public-H3 directories",
@@ -141,6 +142,33 @@ MODEL_LOCK_SCHEMA = "ci/schema/model-lock-v1.schema.json"
 MODEL_LOCK_PATH = "docs/models/locks/qwen3.5-4b-bf16.json"
 
 
+def h3_workspace_expectations() -> dict[str, object]:
+    """Return the shared read-only checkout mount/workdir contract."""
+
+    return {
+        "mount_destination": "/workspace",
+        "mount_read_only": True,
+        "workdir": "/workspace",
+    }
+
+
+def h3_rmsnorm_row_expectation(target: str, run_id: str, run_attempt: str) -> dict[str, str]:
+    """Derive one RMSNorm H3 row's container output path without shell text."""
+
+    if target not in {"gfx1030", "gfx1201"}:
+        raise ContractError(f"unsupported RMSNorm H3 target: {target}")
+    if not run_id or not run_attempt:
+        raise ContractError("RMSNorm H3 row path requires run identity")
+    row_id = f"h3-rmsnorm-{target}"
+    container_root = f"/tmp/sllm-rmsnorm-h3-{target}-{run_id}-{run_attempt}"
+    return {
+        "target": target,
+        "row_id": row_id,
+        "container_output_root": container_root,
+        "container_output_dir": f"{container_root}/{row_id}",
+    }
+
+
 def _expected_rmsnorm_verify_run() -> str:
     return """set -eu
 test "$(command -v git)" = /usr/bin/git
@@ -159,26 +187,29 @@ docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$RMS
 
 
 def _expected_rmsnorm_row_run(target: str) -> str:
-    output_root = f"/tmp/sllm-rmsnorm-h3-{target}-${{GITHUB_RUN_ID}}-${{GITHUB_RUN_ATTEMPT}}"
-    row_id = f"h3-rmsnorm-{target}"
+    expectation = h3_rmsnorm_row_expectation(target, "${GITHUB_RUN_ID}", "${GITHUB_RUN_ATTEMPT}")
+    workspace = h3_workspace_expectations()
+    output_root = expectation["container_output_root"]
+    row_id = expectation["row_id"]
+    workspace_mount = f'type=bind,src=$GITHUB_WORKSPACE,dst={workspace["mount_destination"]},readonly'
     return f'''set -eu
 test -n "$RUN_ROOT"
 TREE_OID="$(git rev-parse HEAD^{{tree}})"
 export TREE_OID
 docker run --rm --network none --user "$(id -u):$(id -g)" \\
   --mount "type=bind,src=$RUN_ROOT,dst=/tmp" \\
-  --mount "type=bind,src=$GITHUB_WORKSPACE,dst=/workspace,readonly" \\
+  --mount "{workspace_mount}" \\
   --mount "type=bind,src=/usr/bin/git,dst=/usr/local/bin/git,readonly" \\
   --env HOME=/tmp/sllm-rmsnorm-h3-home-${{GITHUB_RUN_ID}}-${{GITHUB_RUN_ATTEMPT}} \\
   --env REVIEWED_SHA --env TESTED_SHA --env WORKFLOW_SHA --env TREE_OID \\
   --env GITHUB_RUN_ID --env GITHUB_RUN_ATTEMPT --env SLLM_H3_NETWORK_DISABLED \\
   --env RMSNORM_H3_IMAGE_REFERENCE --env RMSNORM_H3_IMAGE_CONFIG_DIGEST \\
-  --workdir /workspace \\
+  --workdir {workspace["workdir"]} \\
   "$RMSNORM_H3_IMAGE_REFERENCE" /bin/bash -eu -o pipefail -c '
     mkdir -p "$HOME"
     git config --global --add safe.directory /workspace
     python3 ci/tools/run_rmsnorm_h3_compile.py \\
-      --repo /workspace --row {row_id} \\
+      --repo {workspace["workdir"]} --row {row_id} \\
       --output-dir "{output_root}" \\
       --strict-ci --pinned-container \\
       --observed-image-reference "$RMSNORM_H3_IMAGE_REFERENCE" \\
@@ -320,6 +351,8 @@ def _workflow_trigger(document: dict[str, object]) -> object:
 def _expected_public_runtime_row_run(row_id: str) -> str:
     """Return the exact serial container boundary for one public row."""
 
+    workspace = h3_workspace_expectations()
+    workspace_mount = f'type=bind,src=$GITHUB_WORKSPACE,dst={workspace["mount_destination"]},readonly'
     template = """set -eu
 TREE_OID="$(git rev-parse HEAD^{tree})"
 export TREE_OID
@@ -329,19 +362,19 @@ test "$(git rev-parse HEAD)" = "$WORKFLOW_SHA"
 test "$(git rev-parse HEAD^{tree})" = "$TREE_OID"
 test -z "$(git status --porcelain=v1 --untracked-files=all)"
 docker run --rm --network none --user "$(id -u):$(id -g)" \\
-  --mount "type=bind,src=$GITHUB_WORKSPACE,dst=/workspace,readonly" \\
+  --mount "{workspace_mount}" \\
   --mount "type=bind,src=$GITHUB_WORKSPACE/.local-artifacts/h3-public-runtime/ROW_ID,dst=/output" \\
   --mount "type=bind,src=/usr/bin/git,dst=/usr/local/bin/git,readonly" \\
   --env HOME=/tmp/h3-public-runtime-home \\
   --env REVIEWED_SHA --env TESTED_SHA --env WORKFLOW_SHA --env TREE_OID \\
   --env RUN_ID --env RUN_ATTEMPT --env SLLM_H3_NETWORK_DISABLED \\
   --env H3_PUBLIC_RUNTIME_IMAGE_REFERENCE --env H3_PUBLIC_RUNTIME_IMAGE_CONFIG_DIGEST \\
-  --workdir /workspace \\
+  --workdir {workdir} \\
   "$H3_PUBLIC_RUNTIME_IMAGE_REFERENCE" /bin/bash -eu -o pipefail -c '
     mkdir -p "$HOME"
     git config --global --add safe.directory /workspace
     exec python3 ci/tools/run_h3_public_runtime_compile.py \\
-      --row ROW_ID --repo /workspace --output-dir /output \\
+      --row ROW_ID --repo {workdir} --output-dir /output \\
       --strict-ci --pinned-container \\
       --observed-image-reference "$H3_PUBLIC_RUNTIME_IMAGE_REFERENCE" \\
       --observed-image-config-digest "$H3_PUBLIC_RUNTIME_IMAGE_CONFIG_DIGEST" \\
@@ -358,7 +391,7 @@ if find "$GITHUB_WORKSPACE/.local-artifacts/h3-public-runtime/ROW_ID" -xdev \\( 
   exit 1
 fi
 """
-    return template.replace("ROW_ID", row_id)
+    return template.replace("{workspace_mount}", workspace_mount).replace("{workdir}", workspace["workdir"]).replace("ROW_ID", row_id)
 
 
 def _expected_public_runtime_checkout_step() -> dict[str, object]:
@@ -1278,6 +1311,8 @@ def main() -> int:
             raise ContractError("real-weight G2 schemas are not registered")
         if not P0_SCHEMA_FILES.issubset(schema_names):
             raise ContractError("RMSNorm P0 host contract schemas are not registered")
+        if PHASE3_STAGE_A_EVIDENCE_PLAN_SCHEMA not in schema_names:
+            raise ContractError("Phase 3 Stage A evidence-plan schema is not registered for manifest validation")
         if not (ROOT / H3_RMSNORM_MATRIX).is_file():
             raise ContractError("RMSNorm H3 matrix is not registered for manifest validation")
         if not (ROOT / SEMANTIC_G1_WORKFLOW_PATH).is_file():

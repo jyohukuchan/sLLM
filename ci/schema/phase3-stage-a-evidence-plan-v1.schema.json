@@ -1,0 +1,171 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sllm-project.local/ci/schema/phase3-stage-a-evidence-plan-v1.schema.json",
+  "title": "sLLM Phase 3 Stage A host-only evidence plan v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["$schema", "schema_version", "plan_id", "evidence_state", "evidence_claim", "repository", "candidate", "run", "authority_files", "authority_files_sha256", "target_order", "h3", "controller", "g1", "g2", "p0"],
+  "properties": {
+    "$schema": {"const": "https://sllm-project.local/ci/schema/phase3-stage-a-evidence-plan-v1.schema.json"},
+    "schema_version": {"const": "phase3-stage-a-evidence-plan-v1"},
+    "plan_id": {"const": "phase3-stage-a-evidence-plan-v1"},
+    "evidence_state": {"const": "NOT_EXECUTED"},
+    "evidence_claim": {"$ref": "#/$defs/evidence_claim"},
+    "repository": {"$ref": "#/$defs/repository"},
+    "candidate": {"$ref": "#/$defs/candidate"},
+    "run": {"$ref": "#/$defs/run"},
+    "authority_files": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/authority_file"}},
+    "authority_files_sha256": {"$ref": "#/$defs/sha256"},
+    "target_order": {"const": ["gfx1030", "gfx1201"]},
+    "h3": {"$ref": "#/$defs/h3"},
+    "controller": {"$ref": "#/$defs/controller"},
+    "g1": {"$ref": "#/$defs/g1"},
+    "g2": {"$ref": "#/$defs/g2"},
+    "p0": {"$ref": "#/$defs/p0"}
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "sha40": {"type": "string", "pattern": "^[0-9a-f]{40}$", "not": {"const": "0000000000000000000000000000000000000000"}},
+    "absolute_path": {"type": "string", "pattern": "^/[^\\u0000]*$", "minLength": 2},
+    "nonempty_string": {"type": "string", "minLength": 1, "pattern": "^[^\\u0000\\r\\n]+$"},
+    "command": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1, "pattern": "^[^\\u0000\\r\\n*?]+$"}},
+    "evidence_claim": {
+      "type": "object", "additionalProperties": false,
+      "required": ["execution_performed", "gpu_evidence", "model_evidence", "claim"],
+      "properties": {
+        "execution_performed": {"const": false},
+        "gpu_evidence": {"const": false},
+        "model_evidence": {"const": false},
+        "claim": {"const": "host-only plan; no GPU, model, cache, container, build, or network work was executed"}
+      }
+    },
+    "repository": {
+      "type": "object", "additionalProperties": false, "required": ["path", "resolved"],
+      "properties": {"path": {"$ref": "#/$defs/absolute_path"}, "resolved": {"const": true}}
+    },
+    "candidate": {
+      "type": "object", "additionalProperties": false,
+      "required": ["reviewed_sha", "tested_sha", "workflow_sha", "git_tree_oid", "worktree_clean", "revision_input"],
+      "properties": {
+        "reviewed_sha": {"$ref": "#/$defs/sha40"},
+        "tested_sha": {"$ref": "#/$defs/sha40"},
+        "workflow_sha": {"$ref": "#/$defs/sha40"},
+        "git_tree_oid": {"$ref": "#/$defs/sha40"},
+        "worktree_clean": {"const": true},
+        "revision_input": {"const": "full-sha"}
+      }
+    },
+    "run": {
+      "type": "object", "additionalProperties": false,
+      "required": ["run_id", "run_attempt", "run_root", "run_root_exists"],
+      "properties": {
+        "run_id": {"type": "string", "pattern": "^[1-9][0-9]*$"},
+        "run_attempt": {"type": "integer", "minimum": 1},
+        "run_root": {"type": "string", "pattern": "^/[^\\u0000]*$", "maxLength": 35},
+        "run_root_exists": {"const": false}
+      }
+    },
+    "authority_file": {
+      "type": "object", "additionalProperties": false, "required": ["path", "sha256"],
+      "properties": {
+        "path": {"type": "string", "minLength": 1, "pattern": "^[^/][^\\u0000\\r\\n]*$"},
+        "sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "workspace": {
+      "type": "object", "additionalProperties": false, "required": ["mount_destination", "mount_read_only", "workdir"],
+      "properties": {
+        "mount_destination": {"const": "/workspace"},
+        "mount_read_only": {"const": true},
+        "workdir": {"const": "/workspace"}
+      }
+    },
+    "h3_row": {
+      "type": "object", "additionalProperties": false, "required": ["order", "row_id", "target", "container_output_dir", "host_output_dir"],
+      "properties": {
+        "order": {"type": "integer", "minimum": 0, "maximum": 1},
+        "row_id": {"type": "string", "pattern": "^h3-rmsnorm-gfx(?:1030|1201)$"},
+        "target": {"enum": ["gfx1030", "gfx1201"]},
+        "container_output_dir": {"type": "string", "pattern": "^/tmp/[^\\u0000\\r\\n]+$"},
+        "host_output_dir": {"$ref": "#/$defs/absolute_path"}
+      }
+    },
+    "h3": {
+      "type": "object", "additionalProperties": false, "required": ["workspace", "rows"],
+      "properties": {
+        "workspace": {"$ref": "#/$defs/workspace"},
+        "rows": {"type": "array", "minItems": 2, "maxItems": 2, "prefixItems": [
+          {"allOf": [{"$ref": "#/$defs/h3_row"}, {"properties": {"order": {"const": 0}, "row_id": {"const": "h3-rmsnorm-gfx1030"}, "target": {"const": "gfx1030"}}}]},
+          {"allOf": [{"$ref": "#/$defs/h3_row"}, {"properties": {"order": {"const": 1}, "row_id": {"const": "h3-rmsnorm-gfx1201"}, "target": {"const": "gfx1201"}}}]}
+        ], "items": false}
+      }
+    },
+    "controller": {
+      "type": "object", "additionalProperties": false, "required": ["execution_order", "artifact_root", "aggregate_output_dir", "artifact_row_dirs", "aggregate_row_dirs"],
+      "properties": {
+        "execution_order": {"const": ["gfx1030", "gfx1201"]},
+        "artifact_root": {"$ref": "#/$defs/absolute_path"},
+        "aggregate_output_dir": {"$ref": "#/$defs/absolute_path"},
+        "artifact_row_dirs": {"type": "array", "minItems": 2, "maxItems": 2, "items": {"$ref": "#/$defs/absolute_path"}},
+        "aggregate_row_dirs": {"type": "array", "minItems": 2, "maxItems": 2, "items": {"$ref": "#/$defs/absolute_path"}}
+      }
+    },
+    "g1_environment": {
+      "type": "object", "additionalProperties": false,
+      "required": ["PATH", "HOME", "LC_ALL", "LANG", "RUSTUP_HOME", "CARGO_HOME", "RUSTUP_TOOLCHAIN", "RUSTC", "CXX", "ROCM_PATH", "HIP_PATH", "SLLM_HIP_COMPILER", "CMAKE_HIP_ARCHITECTURES", "SLLM_HIP_CODEGEN_FEATURES", "SLLM_ENABLE_HIP_RUNTIME", "SLLM_ENABLE_PUBLIC_HIP_RUNTIME", "SLLM_ENABLE_HIP_COMPILE_PROBE", "SLLM_SEMANTIC_G1_AUTHORITY", "CARGO_TARGET_DIR", "SLLM_SEMANTIC_G1_NATIVE_HIP_BUILD_DIR"],
+      "properties": {
+        "PATH": {"type": "string"}, "HOME": {"type": "string"}, "LC_ALL": {"type": "string"}, "LANG": {"type": "string"},
+        "RUSTUP_HOME": {"type": "string"}, "CARGO_HOME": {"type": "string"}, "RUSTUP_TOOLCHAIN": {"type": "string"}, "RUSTC": {"type": "string"}, "CXX": {"type": "string"},
+        "ROCM_PATH": {"type": "string"}, "HIP_PATH": {"type": "string"}, "SLLM_HIP_COMPILER": {"type": "string"}, "CMAKE_HIP_ARCHITECTURES": {"type": "string"}, "SLLM_HIP_CODEGEN_FEATURES": {"type": "string"},
+        "SLLM_ENABLE_HIP_RUNTIME": {"type": "string"}, "SLLM_ENABLE_PUBLIC_HIP_RUNTIME": {"type": "string"}, "SLLM_ENABLE_HIP_COMPILE_PROBE": {"type": "string"}, "SLLM_SEMANTIC_G1_AUTHORITY": {"type": "string"},
+        "CARGO_TARGET_DIR": {"type": "string"}, "SLLM_SEMANTIC_G1_NATIVE_HIP_BUILD_DIR": {"type": "string"}
+      }
+    },
+    "g1_row": {
+      "type": "object", "additionalProperties": false, "required": ["order", "row_id", "target", "cargo_target_dir", "native_hip_build_dir", "row_output_dir", "socket_root", "socket_path_projection", "build_environment"],
+      "properties": {
+        "order": {"type": "integer", "minimum": 0, "maximum": 1}, "row_id": {"type": "string", "pattern": "^rmsnorm-semantic-g1-gfx(?:1030|1201)$"}, "target": {"enum": ["gfx1030", "gfx1201"]},
+        "cargo_target_dir": {"$ref": "#/$defs/absolute_path"}, "native_hip_build_dir": {"$ref": "#/$defs/absolute_path"}, "row_output_dir": {"$ref": "#/$defs/absolute_path"}, "socket_root": {"$ref": "#/$defs/absolute_path"}, "socket_path_projection": {"$ref": "#/$defs/absolute_path"},
+        "build_environment": {"$ref": "#/$defs/g1_environment"}
+      }
+    },
+    "g1": {
+      "type": "object", "additionalProperties": false, "required": ["matrix_id", "command", "rows"],
+      "properties": {"matrix_id": {"const": "rmsnorm-semantic-g1-v1"}, "command": {"$ref": "#/$defs/command"}, "rows": {"type": "array", "minItems": 2, "maxItems": 2, "prefixItems": [
+        {"allOf": [{"$ref": "#/$defs/g1_row"}, {"properties": {"order": {"const": 0}, "row_id": {"const": "rmsnorm-semantic-g1-gfx1030"}, "target": {"const": "gfx1030"}}}]},
+        {"allOf": [{"$ref": "#/$defs/g1_row"}, {"properties": {"order": {"const": 1}, "row_id": {"const": "rmsnorm-semantic-g1-gfx1201"}, "target": {"const": "gfx1201"}}}]}
+      ], "items": false}}
+    },
+    "g2_environment": {
+      "type": "object", "additionalProperties": false, "required": ["ROCM_PATH", "HIP_PATH", "SLLM_HIP_COMPILER", "CMAKE_HIP_ARCHITECTURES", "SLLM_HIP_CODEGEN_FEATURES", "SLLM_ENABLE_HIP_RUNTIME", "SLLM_ENABLE_PUBLIC_HIP_RUNTIME", "SLLM_ENABLE_HIP_COMPILE_PROBE"],
+      "properties": {"ROCM_PATH": {"type": "string"}, "HIP_PATH": {"type": "string"}, "SLLM_HIP_COMPILER": {"type": "string"}, "CMAKE_HIP_ARCHITECTURES": {"type": "string"}, "SLLM_HIP_CODEGEN_FEATURES": {"type": "string"}, "SLLM_ENABLE_HIP_RUNTIME": {"type": "string"}, "SLLM_ENABLE_PUBLIC_HIP_RUNTIME": {"type": "string"}, "SLLM_ENABLE_HIP_COMPILE_PROBE": {"type": "string"}}
+    },
+    "g2_row": {
+      "type": "object", "additionalProperties": false, "required": ["order", "row_id", "target", "builder_output_path", "builder_output_relative", "build_environment"],
+      "properties": {"order": {"type": "integer", "minimum": 0, "maximum": 1}, "row_id": {"type": "string", "pattern": "^rmsnorm-g2-gfx(?:1030|1201)$"}, "target": {"enum": ["gfx1030", "gfx1201"]}, "builder_output_path": {"$ref": "#/$defs/absolute_path"}, "builder_output_relative": {"const": "target/release/sllm-rmsnorm-g2-evidence"}, "build_environment": {"$ref": "#/$defs/g2_environment"}}
+    },
+    "g2": {
+      "type": "object", "additionalProperties": false, "required": ["matrix_id", "command", "builder_root", "rows"],
+      "properties": {"matrix_id": {"const": "rmsnorm-g2-v1"}, "command": {"$ref": "#/$defs/command"}, "builder_root": {"$ref": "#/$defs/absolute_path"}, "rows": {"type": "array", "minItems": 2, "maxItems": 2, "prefixItems": [
+        {"allOf": [{"$ref": "#/$defs/g2_row"}, {"properties": {"order": {"const": 0}, "row_id": {"const": "rmsnorm-g2-gfx1030"}, "target": {"const": "gfx1030"}}}]},
+        {"allOf": [{"$ref": "#/$defs/g2_row"}, {"properties": {"order": {"const": 1}, "row_id": {"const": "rmsnorm-g2-gfx1201"}, "target": {"const": "gfx1201"}}}]}
+      ], "items": false}}
+    },
+    "p0_environment": {"$ref": "#/$defs/g2_environment"},
+    "p0_builder_output": {
+      "type": "object", "additionalProperties": false, "required": ["binary_name", "relative_path", "copied_output_name"],
+      "properties": {"binary_name": {"const": "sllm-rmsnorm-p0-evidence"}, "relative_path": {"const": "release/sllm-rmsnorm-p0-evidence"}, "copied_output_name": {"const": "sllm-rmsnorm-p0-evidence"}}
+    },
+    "p0_row": {
+      "type": "object", "additionalProperties": false, "required": ["order", "row_id", "target", "artifact_output_dir", "builder", "builder_owned_output", "build_environment"],
+      "properties": {"order": {"type": "integer", "minimum": 0, "maximum": 1}, "row_id": {"type": "string", "pattern": "^rmsnorm-p0-gfx(?:1030|1201)$"}, "target": {"enum": ["gfx1030", "gfx1201"]}, "artifact_output_dir": {"$ref": "#/$defs/absolute_path"}, "builder": {"const": "ci/tools/build_rmsnorm_p0_runtime.py"}, "builder_owned_output": {"$ref": "#/$defs/p0_builder_output"}, "build_environment": {"$ref": "#/$defs/p0_environment"}}
+    },
+    "p0": {
+      "type": "object", "additionalProperties": false, "required": ["matrix_id", "command", "rows"],
+      "properties": {"matrix_id": {"const": "rmsnorm-p0-v1"}, "command": {"$ref": "#/$defs/command"}, "rows": {"type": "array", "minItems": 2, "maxItems": 2, "prefixItems": [
+        {"allOf": [{"$ref": "#/$defs/p0_row"}, {"properties": {"order": {"const": 0}, "row_id": {"const": "rmsnorm-p0-gfx1030"}, "target": {"const": "gfx1030"}}}]},
+        {"allOf": [{"$ref": "#/$defs/p0_row"}, {"properties": {"order": {"const": 1}, "row_id": {"const": "rmsnorm-p0-gfx1201"}, "target": {"const": "gfx1201"}}}]}
+      ], "items": false}}
+    }
+  }
+}

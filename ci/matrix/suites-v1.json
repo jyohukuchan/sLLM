@@ -1,7 +1,7 @@
 {
   "schema_version": "suites-v1",
   "registry_id": "sLLM-host-suites",
-  "revision": 16,
+  "revision": 17,
   "allowed_tiers": ["tier_h0", "tier_h1", "tier_h2", "tier_h3", "tier_h3_rmsnorm", "tier_g0", "tier_g1", "tier_g2", "tier_g3", "tier_g4", "tier_p0", "tier_p1"],
   "allowed_attributes": ["requires_gpu", "requires_model", "slow", "network", "quarantined"],
   "suites": [
@@ -135,6 +135,14 @@
       "attributes": {"requires_gpu": false, "requires_model": false, "slow": false, "network": false, "quarantined": false},
       "test_ids": ["p0.rmsnorm.schema", "p0.rmsnorm.builder", "p0.rmsnorm.runner", "p0.rmsnorm.aggregate"],
       "commands": [{"command_id": "p0-rmsnorm-host-contracts", "argv": ["{python}", "-m", "unittest", "ci.tests.test_rmsnorm_p0_schema", "ci.tests.test_rmsnorm_p0_builder", "ci.tests.test_rmsnorm_p0_runner", "ci.tests.test_rmsnorm_p0_aggregate"]}]
+    },
+    {
+      "suite_id": "h0-phase3-stage-a-evidence-plan",
+      "tier": "tier_h0",
+      "marker": "tier_h0",
+      "attributes": {"requires_gpu": false, "requires_model": false, "slow": false, "network": false, "quarantined": false},
+      "test_ids": ["phase3.stage_a.evidence_plan.contract", "phase3.stage_a.evidence_plan.negative", "phase3.stage_a.evidence_plan.no_execution"],
+      "commands": [{"command_id": "phase3-stage-a-evidence-plan", "argv": ["{python}", "-m", "unittest", "ci.tests.test_phase3_stage_a_evidence_plan"]}]
     },
     {
       "suite_id": "h0-license-provenance",

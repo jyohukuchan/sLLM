@@ -257,6 +257,42 @@ class BuildResult:
 
 
 @dataclass(frozen=True)
+class SemanticG1BuildLayout:
+    """Pure target-qualified paths shared by the builder and the planner."""
+
+    row_output: Path
+    cargo_target_dir: Path
+    native_hip_build_dir: Path
+    socket_root: Path
+    socket_path_projection: Path
+
+
+def semantic_g1_build_layout(output_root: Path, row: Mapping[str, Any]) -> SemanticG1BuildLayout:
+    """Derive the complete G1 build layout without touching the filesystem."""
+
+    root = Path(output_root)
+    row_id = row.get("row_id")
+    target = row.get("target")
+    if not root.is_absolute() or not isinstance(row_id, str) or not row_id:
+        raise BuilderError("semantic G1 layout requires an absolute output root and row id")
+    if not isinstance(target, str) or target not in contracts.TARGETS:
+        raise BuilderError("semantic G1 layout target is not canonical")
+    if row_id != f"rmsnorm-semantic-g1-{target}":
+        raise BuilderError("semantic G1 layout row id is not bound to its target")
+    native = root / f"native-hip-build-{target}"
+    socket_projection = native / ("broker-" + "0" * 24 + ".sock")
+    if len(os.fsencode(str(socket_projection))) >= 108:
+        raise BuilderError("semantic G1 projected AF_UNIX socket path exceeds the Linux limit")
+    return SemanticG1BuildLayout(
+        row_output=root / row_id,
+        cargo_target_dir=root / f"cargo-target-{target}",
+        native_hip_build_dir=native,
+        socket_root=native,
+        socket_path_projection=socket_projection,
+    )
+
+
+@dataclass(frozen=True)
 class _IssuedClientObservation:
     """Authenticated client facts retained between issuance and execution."""
 
@@ -2191,14 +2227,13 @@ def build_runtime_artifact(*, repo: Path = ROOT, row_id: str, identity: Mapping[
     _validate_inherited_environment(row["target"])
     _validate_toolchain()
     output_dir = Path(output_dir)
-    if not output_dir.is_absolute() or output_dir.name != row_id:
+    layout = semantic_g1_build_layout(output_dir.parent, row)
+    if output_dir != layout.row_output:
         raise BuilderError("builder output must be an absolute target-qualified row directory")
     _private_directory(output_dir.parent, "builder output root")
-    _new_directory(output_dir, "builder row output")
-    cargo_target_dir = output_dir.parent / f"cargo-target-{row['target']}"
-    _new_directory(cargo_target_dir, "builder target directory")
-    native_build_dir = output_dir.parent / f"native-hip-build-{row['target']}"
-    _new_directory(native_build_dir, "parent-derived native HIP build directory")
+    _new_directory(layout.row_output, "builder row output")
+    _new_directory(layout.cargo_target_dir, "builder target directory")
+    _new_directory(layout.native_hip_build_dir, "parent-derived native HIP build directory")
     build_repo = _materialize_reviewed_snapshot(repo, candidate, output_dir.parent)
     command = list(contracts.EXPECTED_COMMAND)
     compiler_snapshot = contracts.snapshot_file(
@@ -2216,9 +2251,9 @@ def build_runtime_artifact(*, repo: Path = ROOT, row_id: str, identity: Mapping[
         for name in directories:
             (Path(directory) / name).chmod(0o555)
     client_path.chmod(0o555)
-    environment = build_environment(row["target"], cargo_target_dir, native_build_dir)
+    environment = build_environment(row["target"], layout.cargo_target_dir, layout.native_hip_build_dir)
     exact_compiler_environment = compiler_spawn_environment(environment, str(compiler_source["path"]))
-    action_recipes = _semantic_exact_action_recipes(build_repo, native_build_dir, row["target"])
+    action_recipes = _semantic_exact_action_recipes(build_repo, layout.native_hip_build_dir, row["target"])
     for recipe_key, closure_inputs in _compiler_input_closures(
         compiler_snapshot, exec_helper, exact_compiler_environment, action_recipes
     ).items():
@@ -2235,9 +2270,9 @@ def build_runtime_artifact(*, repo: Path = ROOT, row_id: str, identity: Mapping[
         compiler=compiler_snapshot,
         client_path=client_path,
         exec_helper=exec_helper,
-        socket_root=native_build_dir,
-        allowed_roots=(build_repo, cargo_target_dir, native_build_dir),
-        output_roots=(cargo_target_dir, native_build_dir),
+        socket_root=layout.socket_root,
+        allowed_roots=(build_repo, layout.cargo_target_dir, layout.native_hip_build_dir),
+        output_roots=(layout.cargo_target_dir, layout.native_hip_build_dir),
         reviewed_sources={str(item["path"]): item for item in authority["sources"]},
         reviewed_tools=authority["toolchain"],
         target=row["target"],
@@ -2257,7 +2292,7 @@ def build_runtime_artifact(*, repo: Path = ROOT, row_id: str, identity: Mapping[
         if not broker._closing:
             broker.abort()
         compiler_snapshot.close()
-    source = cargo_target_dir / "release" / contracts.BINARY_NAME
+    source = layout.cargo_target_dir / "release" / contracts.BINARY_NAME
     _binary(source, "exact row Cargo output")
     staged = output_dir / contracts.BINARY_NAME
     shutil.copyfile(source, staged, follow_symlinks=False)
@@ -2306,7 +2341,7 @@ def build_runtime_artifact(*, repo: Path = ROOT, row_id: str, identity: Mapping[
     }
     if {path.name for path in output_dir.iterdir()} != expected_names:
         raise BuilderError("builder row output has stale or unknown files")
-    return BuildResult(row["row_id"], row["target"], output_dir, cargo_target_dir, staged, companion, metadata_path, contracts.sha256_file(staged), contracts.sha256_file(companion), contracts.sha256_file(metadata_path), tuple(command), compiler_execution, True)
+    return BuildResult(row["row_id"], row["target"], output_dir, layout.cargo_target_dir, staged, companion, metadata_path, contracts.sha256_file(staged), contracts.sha256_file(companion), contracts.sha256_file(metadata_path), tuple(command), compiler_execution, True)
 
 
 def parser() -> argparse.ArgumentParser:
