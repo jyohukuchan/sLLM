@@ -299,6 +299,7 @@ class SemanticG1BuilderTests(unittest.TestCase):
         self.assertEqual(environment, {
             "PATH": "/usr/bin:/bin", "LC_ALL": "C",
             "SLLM_HIP_COMPILER_LOGICAL": "/opt/rocm/bin/amdclang++",
+            "LD_LIBRARY_PATH": builder.COMPILER_RUNTIME_LD_LIBRARY_PATH,
         })
         with self.assertRaisesRegex(builder.BuilderError, "mutable input configuration: CLANG_CONFIG_FILE"):
             builder.compiler_spawn_environment(

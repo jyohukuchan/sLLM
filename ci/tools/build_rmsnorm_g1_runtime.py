@@ -45,7 +45,7 @@ EXPECTED_CODEGEN_FEATURES = "co_v6,wave32,xnack=unsupported,sramecc=unsupported,
 MAX_BUILD_TIMEOUT_SECONDS = 900.0
 MAX_BUILD_RSS_BYTES = 6 * 1024 * 1024 * 1024
 BUILD_ADDRESS_LIMIT_BYTES = 8 * 1024 * 1024 * 1024
-BUILD_PROCESS_COUNT_LIMIT = 512
+BUILD_PROCESS_COUNT_LIMIT = 4096
 PRIVATE_PREFIX = "sllm-rmsnorm-semantic-g1-"
 COMPILER_BROKER_AVAILABLE = True
 COMPILER_EXECUTION_PROTOCOL = "parent-owned-exact-action-broker-v1"
@@ -59,6 +59,12 @@ COMPILER_BROKER_MAX_TRANSCRIPT = 64 * 1024 * 1024
 COMPILER_BROKER_TIMEOUT_SECONDS = 120.0
 COMPILER_BROKER_BIND_TIMEOUT_SECONDS = 5.0
 COMPILER_EXEC_READY_TIMEOUT_SECONDS = 5.0
+COMPILER_RUNTIME_LD_LIBRARY_PATH = ":".join((
+    "/opt/rocm/core-7.14/lib/llvm/lib",
+    "/opt/rocm/core-7.14/lib/rocm_sysdeps/lib",
+    "/lib/x86_64-linux-gnu",
+    "/usr/lib/x86_64-linux-gnu",
+))
 COMPILER_EXEC_HELPER_NAME = "compiler-exec-helper"
 COMPILER_BROKER_TOKEN_ENV = "SLLM_HIP_COMPILER_BROKER_TOKEN"
 COMPILER_BROKER_SOCKET_ENV = "SLLM_HIP_COMPILER_BROKER_SOCKET"
@@ -960,7 +966,7 @@ class CompilerBroker:
                 actions.append((os.POSIX_SPAWN_CLOSE, source_fd))
         helper_argv = [
             f"/proc/self/fd/{helper_fd}", f"--compiler-fd={exec_fd}", f"--cwd={cwd}", "--",
-            f"/proc/self/fd/{exec_fd}", *argv,
+            self._compiler_argv0(), *argv,
         ]
         command = [
             f"/proc/self/fd/{limiter_fd}", f"--as={BUILD_ADDRESS_LIMIT_BYTES}",
@@ -1003,7 +1009,7 @@ class CompilerBroker:
         """Return facts only after /proc proves the actual sealed object exec'd."""
 
         sealed = os.fstat(self.compiler.fd)
-        expected_command = [f"/proc/self/fd/{exec_fd}", *argv]
+        expected_command = [self._compiler_argv0(), *argv]
         deadline = time.monotonic() + COMPILER_EXEC_READY_TIMEOUT_SECONDS
         while time.monotonic() < deadline:
             facts = _process_facts(process.pid)
@@ -1688,6 +1694,7 @@ def compiler_spawn_environment(build_environment: Mapping[str, str], compiler_lo
     # has no HOME/XDG configuration input at all.
     result.pop("HOME", None)
     result["SLLM_HIP_COMPILER_LOGICAL"] = compiler_logical_path
+    result["LD_LIBRARY_PATH"] = COMPILER_RUNTIME_LD_LIBRARY_PATH
     if not result or any(not isinstance(key, str) or not isinstance(value, str) or not key or "\0" in key or "\0" in value for key, value in result.items()):
         raise BuilderError("semantic G1 compiler spawn environment is malformed")
     return result
@@ -1794,8 +1801,44 @@ def _compiler_resource_directory(output: bytes) -> Path:
     return resolved
 
 
+def _sealed_compiler_probe(
+    compiler: contracts.SealedDescriptor,
+    exec_helper: Path,
+    compiler_environment: Mapping[str, str],
+    cwd: Path,
+    argv: list[str],
+) -> subprocess.CompletedProcess[bytes]:
+    """Run a bounded discovery action with the same sealed driver semantics."""
+
+    if exec_helper.is_symlink() or not exec_helper.is_file() or not os.access(exec_helper, os.X_OK):
+        raise BuilderError("compiler probe exec helper is unavailable")
+    return subprocess.run(
+        [
+            str(runner.PROCESS_LIMITER),
+            f"--as={BUILD_ADDRESS_LIMIT_BYTES}",
+            f"--nproc={BUILD_PROCESS_COUNT_LIMIT}",
+            "--",
+            str(exec_helper),
+            f"--compiler-fd={compiler.fd}",
+            f"--cwd={cwd}",
+            "--",
+            str(compiler.record["path"]),
+            *argv,
+        ],
+        cwd=cwd,
+        env=dict(compiler_environment),
+        pass_fds=(compiler.fd,),
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+        timeout=COMPILER_BROKER_TIMEOUT_SECONDS,
+    )
+
+
 def _compiler_input_closures(
     compiler: contracts.SealedDescriptor,
+    exec_helper: Path,
     compiler_environment: Mapping[str, str],
     recipes: Mapping[str, Mapping[str, Any]],
 ) -> dict[str, list[dict[str, str]]]:
@@ -1814,7 +1857,6 @@ def _compiler_input_closures(
     member fails closed instead of being called an exact input.
     """
 
-    compiler_path = contracts.fd_path(compiler.fd)
     runtime = contracts.runtime_dependency_closure(Path(str(compiler.record["path"])))
     runtime_objects = runtime.get("objects")
     if not isinstance(runtime_objects, list) or not runtime_objects:
@@ -1826,11 +1868,12 @@ def _compiler_input_closures(
             raise BuilderError("compiler input closure runtime record is malformed")
         static_paths.append(("compiler-runtime", Path(str(record["path"]))))
     try:
-        resource_probe = subprocess.run(
-            [str(runner.PROCESS_LIMITER), f"--as={BUILD_ADDRESS_LIMIT_BYTES}", f"--nproc={BUILD_PROCESS_COUNT_LIMIT}", "--", str(compiler_path), "--print-resource-dir"],
-            env=dict(compiler_environment), pass_fds=(compiler.fd,), stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
-            timeout=COMPILER_BROKER_TIMEOUT_SECONDS,
+        resource_probe = _sealed_compiler_probe(
+            compiler,
+            exec_helper,
+            compiler_environment,
+            Path(str(next(iter(recipes.values()))["cwd"])),
+            ["--print-resource-dir"],
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise BuilderError("compiler resource directory discovery could not complete") from exc
@@ -1871,10 +1914,12 @@ def _compiler_input_closures(
             scan_argv.append(value)
             index += 1
         try:
-            scanned = subprocess.run(
-                [str(runner.PROCESS_LIMITER), f"--as={BUILD_ADDRESS_LIMIT_BYTES}", f"--nproc={BUILD_PROCESS_COUNT_LIMIT}", "--", str(compiler_path), *scan_argv, "-M"],
-                cwd=cwd, env=dict(compiler_environment), pass_fds=(compiler.fd,), stdin=subprocess.DEVNULL,
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False, timeout=COMPILER_BROKER_TIMEOUT_SECONDS,
+            scanned = _sealed_compiler_probe(
+                compiler,
+                exec_helper,
+                compiler_environment,
+                cwd,
+                [*scan_argv, "-M"],
             )
         except (OSError, subprocess.TimeoutExpired) as exc:
             raise BuilderError("compiler input dependency discovery could not complete") from exc
@@ -2100,7 +2145,9 @@ def build_runtime_artifact(*, repo: Path = ROOT, row_id: str, identity: Mapping[
     environment = build_environment(row["target"], cargo_target_dir, native_build_dir)
     exact_compiler_environment = compiler_spawn_environment(environment, str(compiler_source["path"]))
     action_recipes = _semantic_exact_action_recipes(build_repo, native_build_dir, row["target"])
-    for recipe_key, closure_inputs in _compiler_input_closures(compiler_snapshot, exact_compiler_environment, action_recipes).items():
+    for recipe_key, closure_inputs in _compiler_input_closures(
+        compiler_snapshot, exec_helper, exact_compiler_environment, action_recipes
+    ).items():
         action_recipes[recipe_key]["inputs"].extend(closure_inputs)
         action_recipes[recipe_key]["implicit"].append({
             "role": "compiler-input-closure-policy",

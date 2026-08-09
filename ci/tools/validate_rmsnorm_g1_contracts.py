@@ -1895,7 +1895,7 @@ def _validate_serialized_compiler_execution(compiler: Mapping[str, Any]) -> dict
         limits = result.get("kernel_limits")
         if limits != {
             "address_space_bytes": 8 * 1024 * 1024 * 1024,
-            "process_count": 512,
+            "process_count": 4096,
             "rss_bytes": 6 * 1024 * 1024 * 1024,
             "enforced_by": "/usr/bin/prlimit",
             "address_space_enforcement": "kernel-prlimit-v1",
