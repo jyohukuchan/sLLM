@@ -54,6 +54,8 @@ hipError_t hipEventCreateWithFlags(hipEvent_t *event,
                                    unsigned int flags) noexcept;
 hipError_t hipEventDestroy(hipEvent_t event) noexcept;
 hipError_t hipEventRecord(hipEvent_t event, hipStream_t stream) noexcept;
+hipError_t hipEventElapsedTime(float *milliseconds, hipEvent_t start,
+                               hipEvent_t end) noexcept;
 hipError_t hipEventQuery(hipEvent_t event) noexcept;
 hipError_t hipMemcpyAsync(void *destination, const void *source,
                           std::size_t size, hipMemcpyKind kind,

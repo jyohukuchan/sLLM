@@ -308,6 +308,18 @@ hipError_t hipEventRecord(const hipEvent_t event,
   return hipSuccess;
 }
 
+hipError_t hipEventElapsedTime(float *const milliseconds,
+                               const hipEvent_t start,
+                               const hipEvent_t end) noexcept {
+  std::lock_guard<std::mutex> lock(state.mutex);
+  if (milliseconds == nullptr || state.events.count(start) == 0U ||
+      state.events.count(end) == 0U || !start->recorded || !end->recorded) {
+    return hipErrorInvalidValue;
+  }
+  *milliseconds = 0.001F;
+  return hipSuccess;
+}
+
 hipError_t hipEventQuery(const hipEvent_t event) noexcept {
   std::unique_lock<std::mutex> lock(state.mutex);
   if (state.events.count(event) == 0U) {

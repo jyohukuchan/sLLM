@@ -121,7 +121,34 @@ def complete_inputs(
 
 
 class P0AggregateTests(unittest.TestCase):
-    def test_complete_two_row_review_is_retained_but_aggregate_stays_fail(self) -> None:
+    def test_review_disposition_generation_requires_explicit_human_fields(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="sllm-p0-review-generation-") as directory:
+            root = Path(directory)
+            report_paths, artifact_paths, reports, _, _ = complete_inputs(root)
+            disposition = aggregator.generate_review_disposition(
+                report_paths,
+                artifact_paths,
+                reports,
+                candidate=candidate(),
+                reviewer="named-reviewer",
+                reason="Reviewed both complete rows without a performance threshold.",
+                reviewed_at=datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z"),
+                repo=ROOT,
+            )
+            self.assertEqual(disposition["performance_sanity_disposition"], "review_required")
+            with self.assertRaises(ContractError):
+                aggregator.generate_review_disposition(
+                    report_paths,
+                    artifact_paths,
+                    reports,
+                    candidate=candidate(),
+                    reviewer="named-reviewer",
+                    reason="none",
+                    reviewed_at=disposition["review"]["reviewed_at"],
+                    repo=ROOT,
+                )
+
+    def test_complete_two_row_review_produces_pass_with_review_required_disposition(self) -> None:
         with tempfile.TemporaryDirectory(prefix="sllm-p0-aggregate-") as directory:
             root = Path(directory)
             report_paths, artifact_paths, _, disposition_path, _ = complete_inputs(root)
@@ -129,10 +156,10 @@ class P0AggregateTests(unittest.TestCase):
                 report_paths, artifact_paths, disposition_path,
                 candidate=candidate(), repo=ROOT,
             )
-            self.assertEqual(aggregate["state"], "FAIL")
+            self.assertEqual(aggregate["state"], "PASS")
             self.assertEqual(aggregate["counts"]["collected_rows"], 2)
             self.assertEqual(aggregate["counts"]["collected_cases"], 10)
-            self.assertEqual(aggregate["counts"]["passed_rows"], 0)
+            self.assertEqual(aggregate["counts"]["passed_rows"], 2)
             contracts.validate_aggregate(aggregate)
 
     def test_aggregate_rejects_missing_duplicate_reordered_and_stale_rows(self) -> None:
@@ -236,7 +263,7 @@ class P0AggregateTests(unittest.TestCase):
                 with self.subTest(mutation=mutation), self.assertRaises(ContractError):
                     contracts.validate_report(changed)
 
-    def test_handwritten_report_or_aggregate_pass_is_rejected_until_a5(self) -> None:
+    def test_handwritten_aggregate_pass_with_incomplete_row_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory(prefix="sllm-p0-pass-") as directory:
             root = Path(directory)
             report_paths, artifact_paths, _, disposition_path, _ = complete_inputs(root)
@@ -246,9 +273,7 @@ class P0AggregateTests(unittest.TestCase):
             )
             forged = copy.deepcopy(aggregate)
             forged["state"] = "PASS"
-            for row in forged["rows"]:
-                row["state"] = "PASS"
-            forged["counts"]["passed_rows"] = 2
+            forged["rows"][0]["dispatch_count"] = 0
             forged["counts"]["failed_rows"] = 0
             with self.assertRaises(ContractError):
                 contracts.validate_aggregate(forged)

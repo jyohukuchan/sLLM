@@ -49,7 +49,7 @@ EXPECTED_G2_TEST_IDS = [
     "g2.rmsnorm.slice", "g2.rmsnorm.schema", "g2.rmsnorm.runner", "g2.rmsnorm.aggregate",
 ]
 EXPECTED_P0_TEST_IDS = [
-    "p0.rmsnorm.schema", "p0.rmsnorm.runner", "p0.rmsnorm.aggregate",
+    "p0.rmsnorm.schema", "p0.rmsnorm.builder", "p0.rmsnorm.runner", "p0.rmsnorm.aggregate",
 ]
 EXPECTED_G2_PATH_RULES = {
     "ci/tools/validate_rmsnorm_g2_contracts.py", "ci/tools/extract_rmsnorm_g2_slice.py",
@@ -67,6 +67,7 @@ EXPECTED_P0_PATH_RULES = {
     "ci/tools/validate_rmsnorm_p0_contracts.py",
     "ci/tools/run_rmsnorm_p0_runtime.py",
     "ci/tools/aggregate_rmsnorm_p0_results.py",
+    "ci/tools/build_rmsnorm_p0_runtime.py",
     "ci/tools/validate_json_manifests.py",
     "ci/tools/validate_matrix.py",
     "ci/schema/rmsnorm-p0-matrix-v1.schema.json",
@@ -82,8 +83,11 @@ EXPECTED_P0_PATH_RULES = {
     "ci/matrix/host-v1.json",
     "ci/matrix/path-to-suite-v1.json",
     "ci/tests/test_rmsnorm_p0_schema.py",
+    "ci/tests/test_rmsnorm_p0_builder.py",
     "ci/tests/test_rmsnorm_p0_runner.py",
     "ci/tests/test_rmsnorm_p0_aggregate.py",
+    "crates/sllm-hip/src/bin/sllm-rmsnorm-p0-evidence.rs",
+    "crates/sllm-hip/Cargo.toml",
     "docs/models/locks/qwen3.5-4b-bf16.json",
 }
 H3_STATIC_SUITE_ID = "h0-h3-static-contracts"
@@ -471,7 +475,8 @@ def validate_p0_suite_registration(suites: dict[str, object]) -> None:
         "command_id": "p0-rmsnorm-host-contracts",
         "argv": [
             "{python}", "-m", "unittest", "ci.tests.test_rmsnorm_p0_schema",
-            "ci.tests.test_rmsnorm_p0_runner", "ci.tests.test_rmsnorm_p0_aggregate",
+            "ci.tests.test_rmsnorm_p0_builder", "ci.tests.test_rmsnorm_p0_runner",
+            "ci.tests.test_rmsnorm_p0_aggregate",
         ],
     }]
     if suite["commands"] != expected:

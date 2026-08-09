@@ -10,9 +10,14 @@ description = "Safe Rust wrapper and Phase 1 host probe for the sLLM HIP ABI"
 name = "sllm-rmsnorm-g2-evidence"
 path = "src/bin/sllm-rmsnorm-g2-evidence.rs"
 
+[[bin]]
+name = "sllm-rmsnorm-p0-evidence"
+path = "src/bin/sllm-rmsnorm-p0-evidence.rs"
+
 [dependencies]
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 sllm-core.workspace = true
 sllm-hip-sys.workspace = true
 

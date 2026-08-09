@@ -6,6 +6,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <exception>
 #include <memory>
@@ -103,6 +104,9 @@ struct Completion final : QuarantineNode {
   Queue *queue;
   Buffer *buffer;
   hipEvent_t event;
+  hipEvent_t timing_start_event;
+  uint64_t timing_elapsed_ns;
+  bool timing_valid;
   uint64_t transfer_size_bytes;
   bool d2h;
   bool terminal;
@@ -137,6 +141,7 @@ struct Completion final : QuarantineNode {
              Buffer *const rmsnorm_output_value = nullptr)
       : QuarantineNode(HandleKind::Completion), context(context_value),
         queue(queue_value), buffer(buffer_value), event(nullptr),
+        timing_start_event(nullptr), timing_elapsed_ns(0U), timing_valid(false),
         transfer_size_bytes(transfer_size), d2h(d2h_value), terminal(false),
         success(false), safe_to_release(false), references_released(false),
         context_child_released(false), event_destroyed(false),
@@ -528,6 +533,36 @@ validate_rmsnorm_dispatch_info(const sllm_rmsnorm_dispatch_info_t *const info,
   return SLLM_STATUS_OK;
 }
 
+sllm_status_t validate_completion_timing(
+    const sllm_completion_timing_t *const timing,
+    sllm_error_sink_t *const sink) noexcept {
+  if (timing == nullptr) {
+    return sllm_public_runtime::write_error(
+        sink, SLLM_STATUS_INVALID_ARGUMENT,
+        "completion timing output is null");
+  }
+  uint32_t prefix[2] = {};
+  std::memcpy(prefix, timing, sizeof(prefix));
+  if (prefix[0] != sizeof(sllm_completion_timing_t)) {
+    return sllm_public_runtime::write_error(
+        sink, SLLM_STATUS_INVALID_ARGUMENT,
+        "completion timing has an unsupported struct size");
+  }
+  if (prefix[1] != SLLM_HIP_ABI_VERSION) {
+    return sllm_public_runtime::write_error(
+        sink, SLLM_STATUS_INVALID_ABI_VERSION,
+        "completion timing ABI version is unsupported");
+  }
+  if (timing->reserved0 != 0U || timing->reserved[0] != 0U ||
+      timing->reserved[1] != 0U || timing->reserved[2] != 0U ||
+      timing->reserved[3] != 0U) {
+    return sllm_public_runtime::write_error(
+        sink, SLLM_STATUS_RESERVED_NONZERO,
+        "completion timing reserved fields must be zero");
+  }
+  return SLLM_STATUS_OK;
+}
+
 void initialize_rmsnorm_dispatch_info(sllm_rmsnorm_dispatch_info_t *const info,
                                       const uint64_t dispatch_id,
                                       const uint64_t row_count,
@@ -857,6 +892,57 @@ sllm_status_t poll_completion(Completion *const completion,
     status = hipEventQuery(completion->event);
   }
   if (status == hipSuccess) {
+    if (completion->rmsnorm) {
+      if (completion->timing_start_event == nullptr) {
+        completion->terminal = true;
+        completion->success = false;
+        completion->failure_status = hipErrorInvalidValue;
+        completion->safety.quarantine();
+        completion->safe_to_release = false;
+        return sllm_public_runtime::write_error(
+            sink, SLLM_STATUS_PUBLIC_HIP_RUNTIME_ERROR,
+            "RMSNorm completion has no timing start event");
+      }
+      float elapsed_ms = 0.0F;
+      const hipError_t elapsed_status = hipEventElapsedTime(
+          &elapsed_ms, completion->timing_start_event, completion->event);
+      if (elapsed_status != hipSuccess || !std::isfinite(elapsed_ms) ||
+          elapsed_ms <= 0.0F) {
+        completion->terminal = true;
+        completion->success = false;
+        completion->failure_status = elapsed_status == hipSuccess
+                                         ? hipErrorInvalidValue
+                                         : elapsed_status;
+        completion->safety.quarantine();
+        completion->safe_to_release = false;
+        return hip_failure(sink, completion->failure_status,
+                           "hipEventElapsedTime");
+      }
+      const double elapsed_ns = static_cast<double>(elapsed_ms) * 1000000.0;
+      if (!std::isfinite(elapsed_ns) || elapsed_ns < 1.0 ||
+          elapsed_ns > static_cast<double>(std::numeric_limits<uint64_t>::max())) {
+        completion->terminal = true;
+        completion->success = false;
+        completion->failure_status = hipErrorInvalidValue;
+        completion->safety.quarantine();
+        completion->safe_to_release = false;
+        return sllm_public_runtime::write_error(
+            sink, SLLM_STATUS_PUBLIC_HIP_RUNTIME_ERROR,
+            "hipEventElapsedTime returned a non-positive or non-finite value");
+      }
+      completion->timing_elapsed_ns = static_cast<uint64_t>(std::ceil(elapsed_ns));
+      completion->timing_valid = completion->timing_elapsed_ns != 0U;
+      if (!completion->timing_valid) {
+        completion->terminal = true;
+        completion->success = false;
+        completion->failure_status = hipErrorInvalidValue;
+        completion->safety.quarantine();
+        completion->safe_to_release = false;
+        return sllm_public_runtime::write_error(
+            sink, SLLM_STATUS_PUBLIC_HIP_RUNTIME_ERROR,
+            "hipEventElapsedTime rounded to zero nanoseconds");
+      }
+    }
     if (!release_submission_references(completion)) {
       completion->terminal = true;
       completion->success = false;
@@ -955,6 +1041,17 @@ sllm_status_t cleanup_failed_submission(
                        "hipEventDestroy cleanup after async failure");
   }
   candidate->event = nullptr;
+  if (candidate->timing_start_event != nullptr) {
+    const hipError_t timing_destroy_status =
+        destroy_event_with_fault_injection(candidate->timing_start_event);
+    if (timing_destroy_status != hipSuccess) {
+      candidate->orphaned = true;
+      retain_poisoned(candidate, candidate->context);
+      return hip_failure(sink, timing_destroy_status,
+                         "hipEventDestroy timing cleanup after async failure");
+    }
+    candidate->timing_start_event = nullptr;
+  }
   if (!rollback_submission_references(candidate.get())) {
     candidate->orphaned = true;
     retain_poisoned(candidate, candidate->context);
@@ -1147,6 +1244,20 @@ sllm_status_t rollback_unpublished_submission(
    * back. */
   const hipError_t destroy_status = event_guard.cleanup();
   candidate->event = nullptr;
+  hipError_t timing_destroy_status = hipSuccess;
+  if (candidate->timing_start_event != nullptr) {
+    timing_destroy_status =
+        destroy_event_with_fault_injection(candidate->timing_start_event);
+    if (timing_destroy_status == hipSuccess) {
+      candidate->timing_start_event = nullptr;
+    }
+  }
+  if (timing_destroy_status != hipSuccess) {
+    candidate->orphaned = true;
+    retain_poisoned(candidate, candidate->context);
+    return hip_failure(sink, timing_destroy_status,
+                       "hipEventDestroy timing registry rollback");
+  }
   if (!rollback_submission_references(candidate.get())) {
     candidate->orphaned = true;
     retain_poisoned(candidate, candidate->context);
@@ -2712,6 +2823,68 @@ extern "C" sllm_status_t sllm_completion_read(
 }
 
 extern "C" sllm_status_t
+sllm_completion_timing(sllm_completion_t *const raw_completion,
+                       sllm_completion_timing_t *const timing,
+                       sllm_error_sink_t *const error_sink) noexcept {
+  try {
+    const sllm_status_t sink_status =
+        sllm_public_runtime::validate_error_sink(error_sink);
+    if (sink_status != SLLM_STATUS_OK) {
+      return sink_status;
+    }
+    const sllm_status_t timing_status =
+        validate_completion_timing(timing, error_sink);
+    if (timing_status != SLLM_STATUS_OK) {
+      return timing_status;
+    }
+    const uint32_t struct_size = timing->struct_size;
+    const uint32_t abi_version = timing->abi_version;
+    std::memset(timing, 0, sizeof(*timing));
+    timing->struct_size = struct_size;
+    timing->abi_version = abi_version;
+    if (raw_completion == nullptr) {
+      return sllm_public_runtime::write_error(
+          error_sink, SLLM_STATUS_INVALID_ARGUMENT,
+          "completion handle is null");
+    }
+    Completion *completion = nullptr;
+    const sllm_status_t pin_status =
+        pin_completion(raw_completion, &completion, error_sink);
+    if (pin_status != SLLM_STATUS_OK) {
+      return pin_status;
+    }
+    CompletionPin pin(completion);
+    std::unique_lock<std::mutex> state_lock(completion->state_mutex);
+    const sllm_status_t completion_status = poll_completion(completion, error_sink);
+    if (completion->terminal && !completion->safe_to_release) {
+      state_lock.unlock();
+      quarantine_completion(raw_completion, completion);
+      return completion_status;
+    }
+    if (completion_status != SLLM_STATUS_OK) {
+      return completion_status;
+    }
+    if (!completion->rmsnorm) {
+      return sllm_public_runtime::write_error(
+          error_sink, SLLM_STATUS_UNSUPPORTED,
+          "completion timing is only available for RMSNorm");
+    }
+    if (!completion->timing_valid || completion->timing_elapsed_ns == 0U) {
+      return sllm_public_runtime::write_error(
+          error_sink, SLLM_STATUS_PUBLIC_HIP_RUNTIME_ERROR,
+          "RMSNorm completion has no valid HIP event timing");
+    }
+    timing->valid = 1U;
+    timing->elapsed_ns = completion->timing_elapsed_ns;
+    return SLLM_STATUS_OK;
+  } catch (...) {
+    return sllm_public_runtime::write_error(
+        error_sink, SLLM_STATUS_INTERNAL_ERROR,
+        "unexpected exception in public completion timing");
+  }
+}
+
+extern "C" sllm_status_t
 sllm_completion_release(sllm_completion_t **const raw_completion,
                         sllm_error_sink_t *const error_sink) noexcept {
   try {
@@ -2727,7 +2900,9 @@ sllm_completion_release(sllm_completion_t **const raw_completion,
     }
     Completion *completion = nullptr;
     hipEvent_t event_to_destroy = nullptr;
+    hipEvent_t timing_event_to_destroy = nullptr;
     bool event_already_destroyed = false;
+    bool timing_event_destroyed = false;
     bool guard_reservation_failed = false;
     {
       std::lock_guard<std::mutex> registry_lock(registry_mutex);
@@ -2769,6 +2944,7 @@ sllm_completion_release(sllm_completion_t **const raw_completion,
       completion->release_active = true;
       event_already_destroyed = completion->event_destroyed;
       event_to_destroy = completion->event;
+      timing_event_to_destroy = completion->timing_start_event;
     }
 
     if (guard_reservation_failed) {
@@ -2786,7 +2962,7 @@ sllm_completion_release(sllm_completion_t **const raw_completion,
           "quarantined");
     }
 
-    if (!event_already_destroyed) {
+    if (!event_already_destroyed || timing_event_to_destroy != nullptr) {
       const sllm_status_t device_status =
           select_context_device(completion->context, error_sink);
       if (device_status != SLLM_STATUS_OK) {
@@ -2795,27 +2971,51 @@ sllm_completion_release(sllm_completion_t **const raw_completion,
         completion->release_active = false;
         return device_status;
       }
-      const hipError_t destroy_status =
-          destroy_event_with_fault_injection(event_to_destroy);
-      if (destroy_status != hipSuccess) {
-        {
-          std::lock_guard<std::mutex> registry_lock(registry_mutex);
-          unregister_handle(*raw_completion);
-          *raw_completion = nullptr;
+      if (!event_already_destroyed) {
+        const hipError_t destroy_status =
+            destroy_event_with_fault_injection(event_to_destroy);
+        if (destroy_status != hipSuccess) {
+          {
+            std::lock_guard<std::mutex> registry_lock(registry_mutex);
+            unregister_handle(*raw_completion);
+            *raw_completion = nullptr;
+          }
+          {
+            std::lock_guard<std::mutex> state_lock(completion->state_mutex);
+            completion->safe_to_release = false;
+            completion->release_active = false;
+            completion->orphaned = true;
+            completion->safety.quarantine();
+          }
+          retain_poisoned(completion, completion->context);
+          /* ROCm 7.14 documents deferred destruction of incomplete events, but
+           * does not document hipErrorNotReady as a non-consuming retry result.
+           * Every destroy error is therefore ambiguous and is quarantined once.
+           */
+          return hip_failure(error_sink, destroy_status, "hipEventDestroy");
         }
-        {
-          std::lock_guard<std::mutex> state_lock(completion->state_mutex);
-          completion->safe_to_release = false;
-          completion->release_active = false;
-          completion->orphaned = true;
-          completion->safety.quarantine();
+      }
+      if (timing_event_to_destroy != nullptr) {
+        const hipError_t timing_destroy_status =
+            destroy_event_with_fault_injection(timing_event_to_destroy);
+        if (timing_destroy_status != hipSuccess) {
+          {
+            std::lock_guard<std::mutex> registry_lock(registry_mutex);
+            unregister_handle(*raw_completion);
+            *raw_completion = nullptr;
+          }
+          {
+            std::lock_guard<std::mutex> state_lock(completion->state_mutex);
+            completion->safe_to_release = false;
+            completion->release_active = false;
+            completion->orphaned = true;
+            completion->safety.quarantine();
+          }
+          retain_poisoned(completion, completion->context);
+          return hip_failure(error_sink, timing_destroy_status,
+                             "hipEventDestroy timing event");
         }
-        retain_poisoned(completion, completion->context);
-        /* ROCm 7.14 documents deferred destruction of incomplete events, but
-         * does not document hipErrorNotReady as a non-consuming retry result.
-         * Every destroy error is therefore ambiguous and is quarantined once.
-         */
-        return hip_failure(error_sink, destroy_status, "hipEventDestroy");
+        timing_event_destroyed = true;
       }
     }
 
@@ -2832,6 +3032,9 @@ sllm_completion_release(sllm_completion_t **const raw_completion,
         completion->event_destroyed = true;
         event_destroy_observation_failed =
             !completion->safety.observe_event_destroy_success();
+      }
+      if (timing_event_destroyed) {
+        completion->timing_start_event = nullptr;
       }
       unregister_handle(*raw_completion);
       *raw_completion = nullptr;
@@ -3289,7 +3492,7 @@ sllm_rmsnorm_execute(const sllm_rmsnorm_plan_t *const raw_plan,
 
     hipEvent_t native_event = nullptr;
     const hipError_t event_status =
-        hipEventCreateWithFlags(&native_event, hipEventDisableTiming);
+        hipEventCreateWithFlags(&native_event, 0U);
     if (event_status != hipSuccess) {
       if (!rollback_reserved_rmsnorm_submission(plan, queue, error_sink)) {
         execute_guard.disarm();
@@ -3300,6 +3503,17 @@ sllm_rmsnorm_execute(const sllm_rmsnorm_plan_t *const raw_plan,
     }
     event_guard.adopt(plan->context, native_event);
     candidate->event = native_event;
+
+    hipEvent_t timing_start_event = nullptr;
+    const hipError_t timing_event_status =
+        hipEventCreateWithFlags(&timing_start_event, 0U);
+    if (timing_event_status != hipSuccess) {
+      execute_guard.disarm();
+      return rollback_unpublished_submission(
+          candidate, event_guard,
+          "RMSNorm timing event creation failed before enqueue", error_sink);
+    }
+    candidate->timing_start_event = timing_start_event;
 
     uintptr_t token = 0U;
     try {
@@ -3321,6 +3535,15 @@ sllm_rmsnorm_execute(const sllm_rmsnorm_plan_t *const raw_plan,
     event_guard.release();
     execute_guard.completion_registered(token);
     throw_after_rmsnorm_registration_if_requested();
+
+    const hipError_t timing_record_status =
+        hipEventRecord(candidate->timing_start_event, queue->stream);
+    if (timing_record_status != hipSuccess) {
+      execute_guard.disarm();
+      return cleanup_failed_submission(candidate, token, timing_record_status,
+                                       "hipEventRecord timing start", queue,
+                                       error_sink);
+    }
 
     const auto byte_pointer = [](Buffer *const buffer,
                                  const uint64_t offset) -> void * {

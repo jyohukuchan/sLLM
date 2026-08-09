@@ -48,6 +48,7 @@ def write_artifact(root: Path, target: str, value: dict[str, object] | None = No
         "artifact_id": f"rmsnorm-p0-{target}-{binary_sha}",
         "row_id": f"rmsnorm-p0-{target}", "target": target, "candidate": value,
         "binary": {"role": contracts.P0_BINARY_ROLE, "path": contracts.P0_BINARY, "sidecar_path": contracts.P0_SIDECAR, "size_bytes": binary.stat().st_size, "sha256": binary_sha, "sidecar_sha256": sha256_file(sidecar)},
+        "build": {"builder": "ci/tools/build_rmsnorm_p0_runtime.py", "command": list(contracts.P0_BUILD_COMMAND), "profile": "release", "binary_name": contracts.P0_BINARY, "output_path": contracts.P0_BINARY, "fresh_output": True, "substitution_rejected": True},
         "source_set": contracts.source_set(ROOT),
         "execution_contract": {"public_path": contracts.PUBLIC_PATH, "kernel_id": 1, "kernel_symbol": "rmsnorm.baseline.wave32.v1", "device_symbol": "sllm_rmsnorm_baseline_wave32_v1", "workgroup_size_x": 256, "timing_contract": "rmsnorm-p0-timing-v1", "dtype": dict(contracts.DTYPE_CONTRACT), "producer_status": contracts.PRODUCER_STATUS},
         "scope": {"selected_backend": "hip", "public_rmsnorm_path": True, "semantic_op_used": True, "model_used": False, "hip_only": True, "fallback_allowed": False, "fallback_used": False, "cpu_fallback_used": False},
@@ -137,7 +138,7 @@ class P0RunnerTests(unittest.TestCase):
             self.assertEqual(report["collection"]["collected_cases"], 0)
             contracts.validate_report(report)
 
-    def test_complete_runtime_values_are_retained_but_pass_remains_locked(self) -> None:
+    def test_complete_runtime_values_are_passed_only_with_clean_external_evidence(self) -> None:
         with tempfile.TemporaryDirectory(prefix="sllm-p0-runner-") as directory:
             root = Path(directory)
             args, artifact_document = self._args(root)
@@ -146,10 +147,10 @@ class P0RunnerTests(unittest.TestCase):
             with patch.dict(os.environ, {"SLLM_P0_GPU_EXECUTION": "1"}), patch.object(runner.subprocess, "run", return_value=completed) as invoked:
                 report = runner.run_row(args)
             self.assertEqual(invoked.call_count, 1)
-            self.assertEqual(report["state"], "FAIL")
+            self.assertEqual(report["state"], "PASS")
             self.assertEqual(report["collection"]["collected_cases"], 5)
             self.assertEqual(report["dispatch"]["dispatch_count"], 130)
-            self.assertIn("locked until A5", report["execution"]["failure_reason"])
+            self.assertIn("complete dedicated producer", report["execution"]["failure_reason"])
             contracts.validate_report(report)
 
     def test_runtime_rejects_non_gpu_zero_dispatch_fallback_and_identity_drift(self) -> None:
@@ -233,7 +234,7 @@ class P0RunnerTests(unittest.TestCase):
             with self.assertRaises(ContractError):
                 contracts.validate_artifact(artifact_document, binary_path=args.binary)
 
-    def test_handwritten_pass_report_is_rejected_until_a5(self) -> None:
+    def test_handwritten_pass_report_without_clean_execution_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory(prefix="sllm-p0-pass-") as directory:
             root = Path(directory)
             args, artifact_document = self._args(root)
@@ -242,7 +243,7 @@ class P0RunnerTests(unittest.TestCase):
             with patch.dict(os.environ, {"SLLM_P0_GPU_EXECUTION": "1"}), patch.object(runner.subprocess, "run", return_value=completed):
                 report = runner.run_row(args)
             report["state"] = "PASS"
-            report["execution"]["failure_reason"] = ""
+            report["execution"]["stderr_sha256"] = "f" * 64
             with self.assertRaises(ContractError):
                 contracts.validate_report(report)
 

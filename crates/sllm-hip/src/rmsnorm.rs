@@ -314,6 +314,10 @@ impl RmsNormSubmission {
     pub fn wait(&mut self, timeout: std::time::Duration) -> Result<CompletionState, RuntimeError> {
         self.completion.wait(timeout)
     }
+
+    pub fn kernel_elapsed_ns(&mut self) -> Result<u64, RuntimeError> {
+        self.completion.kernel_elapsed_ns()
+    }
 }
 
 impl HipBackend {

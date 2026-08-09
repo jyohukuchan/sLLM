@@ -442,6 +442,35 @@ extern "C" sllm_status_t sllm_completion_read(
 }
 
 extern "C" sllm_status_t
+sllm_completion_timing(sllm_completion_t *const /*completion*/,
+                       sllm_completion_timing_t *const timing,
+                       sllm_error_sink_t *const error_sink) noexcept {
+  try {
+    const sllm_status_t sink_status = validate_error_sink(error_sink);
+    if (sink_status != SLLM_STATUS_OK) {
+      return sink_status;
+    }
+    const sllm_status_t timing_status =
+        validate_struct(timing, error_sink, "completion timing output is null");
+    if (timing_status != SLLM_STATUS_OK) {
+      return timing_status;
+    }
+    if (timing->reserved0 != 0U || timing->reserved[0] != 0U ||
+        timing->reserved[1] != 0U || timing->reserved[2] != 0U ||
+        timing->reserved[3] != 0U) {
+      return write_error(error_sink, SLLM_STATUS_RESERVED_NONZERO,
+                         "completion timing reserved fields must be zero");
+    }
+    timing->valid = 0U;
+    timing->elapsed_ns = 0U;
+    return unavailable(error_sink);
+  } catch (...) {
+    return write_error(error_sink, SLLM_STATUS_INTERNAL_ERROR,
+                       "unexpected exception in public completion timing");
+  }
+}
+
+extern "C" sllm_status_t
 sllm_completion_release(sllm_completion_t **const completion,
                         sllm_error_sink_t *const error_sink) noexcept {
   try {

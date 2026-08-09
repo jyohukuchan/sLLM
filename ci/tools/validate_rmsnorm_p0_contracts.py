@@ -2,9 +2,8 @@
 """Host-only, fail-closed contracts for the RMSNorm P0 smoke.
 
 This module validates identities and retained measurement documents.  It does
-not query a GPU, execute HIP, or fabricate a numeric P0 PASS.  The checked-in
-producer status deliberately keeps report and aggregate PASS unavailable until
-the canonical A5 producer/parser is implemented and reviewed.
+not query a GPU or execute HIP; only the dedicated producer can emit actual
+GPU measurements, and all report/aggregate PASS paths remain fail-closed.
 """
 
 from __future__ import annotations
@@ -39,7 +38,11 @@ REVIEW_POLICY_PATH = "ci/matrix/rmsnorm-p0-review-policy-v1.json"
 P0_BINARY = "sllm-rmsnorm-p0-evidence"
 P0_SIDECAR = P0_BINARY + ".sha256"
 P0_BINARY_ROLE = "dedicated-p0-public-rmsnorm-producer"
-PRODUCER_STATUS = "host-scaffold-a5-required"
+P0_BUILD_COMMAND = (
+    "cargo", "+1.97.1", "build", "--locked", "--offline", "--release",
+    "--package", "sllm-hip", "--bin", P0_BINARY,
+)
+PRODUCER_STATUS = "a5-enabled"
 DTYPE_CONTRACT = {
     "activation": "BF16", "weight": "BF16", "output": "BF16",
     "accumulation": "F32", "scale_mode": "offset-one", "epsilon": "1e-6",
@@ -55,17 +58,14 @@ CASE_IDS = tuple(item[0] for item in CASE_SPECS)
 PREREQUISITE_KINDS = ("g0", "private_g1", "semantic_g1", "g2", "h3")
 PUBLIC_PATH = "SemanticOpDescriptor->Backend->sllm-hip->public-C-ABI->native-HIP-registry->rmsnorm.baseline.wave32.v1"
 P0_PUBLIC_PATH_INPUTS_PATH = "ci/matrix/rmsnorm-p0-public-path-inputs-v1.json"
-P0_SOURCE_SET_IDENTITY = "rmsnorm-p0-host-contract-existing-public-path-source-set-v1"
-A5_ENABLEMENT_REQUIREMENTS = (
-    "dedicated-p0-public-rmsnorm-producer-source",
-    "dedicated-p0-producer-build-identity",
-    "reviewed-p0-runtime-result-parser",
-)
+P0_SOURCE_SET_IDENTITY = "rmsnorm-p0-enabled-public-path-source-set-v1"
+A5_ENABLEMENT_REQUIREMENTS: tuple[str, ...] = ()
 EXPECTED_SOURCE_PATHS = (
     P0_PUBLIC_PATH_INPUTS_PATH,
     "ci/tools/validate_rmsnorm_p0_contracts.py",
     "ci/tools/run_rmsnorm_p0_runtime.py",
     "ci/tools/aggregate_rmsnorm_p0_results.py",
+    "ci/tools/build_rmsnorm_p0_runtime.py",
     "Cargo.lock",
     "Cargo.toml",
     "crates/sllm-core/Cargo.toml",
@@ -89,6 +89,7 @@ EXPECTED_SOURCE_PATHS = (
     "crates/sllm-hip/src/lib.rs",
     "crates/sllm-hip/src/rmsnorm.rs",
     "crates/sllm-hip/src/runtime.rs",
+    "crates/sllm-hip/src/bin/sllm-rmsnorm-p0-evidence.rs",
     "include/sllm/hip.h",
     "include/sllm/sllm.h",
     "native/hip/CMakeLists.txt",
@@ -289,17 +290,17 @@ def public_path_source_paths(
         raise ContractError("P0 public-path input manifest has unknown or missing fields")
     if (
         document["schema_version"] != "rmsnorm-p0-public-path-inputs-v1"
-        or document["identity"] != "rmsnorm-p0-host-contract-existing-public-path-v1"
+        or document["identity"] != "rmsnorm-p0-enabled-public-path-v1"
         or document["public_path"] != PUBLIC_PATH
     ):
         raise ContractError("P0 public-path input manifest identity drifted")
     if (
         document["producer_status"] != PRODUCER_STATUS
-        or document["dedicated_producer_included"] is not False
+        or document["dedicated_producer_included"] is not True
         or document["a5_enablement_requires"] != list(A5_ENABLEMENT_REQUIREMENTS)
     ):
         raise ContractError(
-            "P0 public-path input manifest implemented or obscured the deferred A5 producer/parser boundary"
+            "P0 public-path input manifest does not bind the enabled dedicated producer"
         )
     order_digest = document["source_order_sha256"]
     if (
@@ -450,6 +451,17 @@ def validate_artifact(
         raise ContractError("P0 producer sidecar is noncanonical or stale")
     if binary != {"role": P0_BINARY_ROLE, "path": P0_BINARY, "sidecar_path": P0_SIDECAR, "size_bytes": metadata.st_size, "sha256": actual_sha, "sidecar_sha256": hashlib.sha256(sidecar_bytes).hexdigest()}:
         raise ContractError("P0 artifact binary identity does not match actual files")
+    expected_build = {
+        "builder": "ci/tools/build_rmsnorm_p0_runtime.py",
+        "command": list(P0_BUILD_COMMAND),
+        "profile": "release",
+        "binary_name": P0_BINARY,
+        "output_path": P0_BINARY,
+        "fresh_output": True,
+        "substitution_rejected": True,
+    }
+    if document["build"] != expected_build:
+        raise ContractError("P0 artifact build identity is missing or substituted")
     expected_contract = {"public_path": PUBLIC_PATH, "kernel_id": 1, "kernel_symbol": "rmsnorm.baseline.wave32.v1", "device_symbol": "sllm_rmsnorm_baseline_wave32_v1", "workgroup_size_x": DISPATCH_BLOCK_SIZE, "timing_contract": "rmsnorm-p0-timing-v1", "dtype": DTYPE_CONTRACT, "producer_status": PRODUCER_STATUS}
     if document["execution_contract"] != expected_contract:
         raise ContractError("P0 artifact execution/timing contract drifted")
@@ -637,6 +649,7 @@ def validate_report(document: Mapping[str, Any], repo: Path = ROOT) -> dict[str,
         or document["execution"]["exit_code"] != 0
         or document["execution"]["timed_out"]
         or document["execution"]["crashed"]
+        or document["execution"]["stderr_sha256"] != hashlib.sha256(b"").hexdigest()
         or any(document[name]["state"] != "OK" or not document[name]["available"] or not document[name]["reliable"] for name in ("health_pre", "health_post"))
         or document["health_post"]["ras_uncorrectable_count"] > document["health_pre"]["ras_uncorrectable_count"]
         or any(document[name]["state"] != "CLEAN" or document[name]["residual_runner_children"] or document[name]["gpu_processes"] for name in ("process_pre", "process_post"))
@@ -651,12 +664,12 @@ def validate_report(document: Mapping[str, Any], repo: Path = ROOT) -> dict[str,
             or document["execution"]["exit_code"] != 0
             or document["execution"]["timed_out"]
             or document["execution"]["crashed"]
+            or document["execution"]["stderr_sha256"] != hashlib.sha256(b"").hexdigest()
             or any(document[name]["state"] != "OK" or not document[name]["available"] or not document[name]["reliable"] for name in ("health_pre", "health_post"))
             or document["health_post"]["ras_uncorrectable_count"] > document["health_pre"]["ras_uncorrectable_count"]
             or any(document[name]["state"] != "CLEAN" or document[name]["residual_runner_children"] or document[name]["gpu_processes"] for name in ("process_pre", "process_post"))
         ):
             raise ContractError("P0 PASS report has incomplete GPU/timing/health/process evidence")
-        raise ContractError("P0 numeric PASS is unavailable until the A5 producer/parser is reviewed")
     return dict(document)
 
 
@@ -746,7 +759,6 @@ def validate_aggregate(document: Mapping[str, Any], repo: Path = ROOT) -> dict[s
     if document["state"] == "PASS":
         if any(row["state"] != "PASS" or row["collected_cases"] != 5 or row["dispatch_count"] != TOTAL_DISPATCHES or row["fallback_used"] or not row["health_ok"] or not row["process_clean"] for row in rows):
             raise ContractError("P0 aggregate PASS row evidence is incomplete")
-        raise ContractError("P0 aggregate PASS is unavailable until canonical A5 evidence exists")
     return dict(document)
 
 
@@ -767,7 +779,7 @@ def main() -> int:
     except (ContractError, OSError, ValueError) as exc:
         print(f"P0 contracts: FAIL: {exc}", file=sys.stderr)
         return 1
-    print("P0 host contracts: PASS (numeric PASS locked until A5)")
+    print("P0 contracts: PASS (host validation only; no GPU execution)")
     return 0
 
 

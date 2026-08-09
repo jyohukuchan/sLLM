@@ -133,8 +133,8 @@
       "tier": "tier_h0",
       "marker": "tier_h0",
       "attributes": {"requires_gpu": false, "requires_model": false, "slow": false, "network": false, "quarantined": false},
-      "test_ids": ["p0.rmsnorm.schema", "p0.rmsnorm.runner", "p0.rmsnorm.aggregate"],
-      "commands": [{"command_id": "p0-rmsnorm-host-contracts", "argv": ["{python}", "-m", "unittest", "ci.tests.test_rmsnorm_p0_schema", "ci.tests.test_rmsnorm_p0_runner", "ci.tests.test_rmsnorm_p0_aggregate"]}]
+      "test_ids": ["p0.rmsnorm.schema", "p0.rmsnorm.builder", "p0.rmsnorm.runner", "p0.rmsnorm.aggregate"],
+      "commands": [{"command_id": "p0-rmsnorm-host-contracts", "argv": ["{python}", "-m", "unittest", "ci.tests.test_rmsnorm_p0_schema", "ci.tests.test_rmsnorm_p0_builder", "ci.tests.test_rmsnorm_p0_runner", "ci.tests.test_rmsnorm_p0_aggregate"]}]
     },
     {
       "suite_id": "h0-license-provenance",

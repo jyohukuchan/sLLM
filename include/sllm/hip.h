@@ -112,6 +112,15 @@ typedef struct sllm_event_t sllm_event_t;
 typedef struct sllm_completion_t sllm_completion_t;
 typedef struct sllm_rmsnorm_plan_t sllm_rmsnorm_plan_t;
 
+typedef struct sllm_completion_timing_t {
+  uint32_t struct_size;
+  uint32_t abi_version;
+  uint32_t valid;
+  uint32_t reserved0;
+  uint64_t elapsed_ns;
+  uint32_t reserved[4];
+} sllm_completion_timing_t;
+
 typedef struct sllm_error_sink_t {
   uint32_t struct_size;
   uint32_t abi_version;
@@ -360,6 +369,15 @@ SLLM_HIP_API sllm_status_t
 sllm_completion_read(sllm_completion_t *completion, void *destination,
                      uint64_t destination_capacity, uint64_t *bytes_written,
                      sllm_error_sink_t *error_sink) SLLM_HIP_NOEXCEPT;
+
+/* RMSNorm completions retain a pair of timing-enabled HIP events.  The
+ * elapsed value is available only after successful completion and is never a
+ * host-clock or CPU-fallback estimate.  Other completion kinds return
+ * SLLM_STATUS_UNSUPPORTED. */
+SLLM_HIP_API sllm_status_t
+sllm_completion_timing(sllm_completion_t *completion,
+                       sllm_completion_timing_t *timing,
+                       sllm_error_sink_t *error_sink) SLLM_HIP_NOEXCEPT;
 
 SLLM_HIP_API sllm_status_t
 sllm_completion_release(sllm_completion_t **completion,

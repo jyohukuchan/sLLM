@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
-"""Fail-closed canonical RMSNorm P0 row runner scaffold.
+"""Fail-closed canonical RMSNorm P0 row runner.
 
 Host use validates the complete contract and emits FAIL without starting the
 producer.  Canonical execution additionally requires an explicit environment
-gate and externally retained pre/post health/process observations.  Even a
-well-formed producer response remains FAIL until A5 reviews the real producer.
+gate and externally retained pre/post health/process observations.
 """
 
 from __future__ import annotations
@@ -117,12 +116,27 @@ def make_report(
     measurements = [] if runtime_result is None else runtime_result["cases"]
     measurement_sha = "0" * 64 if runtime_result is None else runtime_result["measurement_sha256"]
     runtime_sha = "0" * 64 if runtime_result is None else _sha(canonical_bytes(runtime_result))
+    healthy = all(
+        evidence is not None
+        and evidence.get("state") == "OK"
+        and evidence.get("available") is True
+        and evidence.get("reliable") is True
+        for evidence in (health_pre, health_post)
+    )
+    clean = all(
+        evidence is not None
+        and evidence.get("state") == "CLEAN"
+        and not evidence.get("residual_runner_children")
+        and not evidence.get("gpu_processes")
+        for evidence in (process_pre, process_post)
+    )
+    state = "PASS" if runtime_result is not None and exit_code == 0 and not timed_out and not crashed and not stderr and healthy and clean else "FAIL"
     dispatch_count = TOTAL_DISPATCHES if runtime_result is not None else 0
     device = next(item["device"] for item in validate_matrix(repo)["targets"] if item["target"] == target)
     report = {
         "schema_version": "rmsnorm-p0-report-v1",
         "report_id": f"rmsnorm-p0-{target}-{_sha((started + reason).encode())}",
-        "row_id": f"rmsnorm-p0-{target}", "target": target, "state": "FAIL", "required": True,
+        "row_id": f"rmsnorm-p0-{target}", "target": target, "state": state, "required": True,
         "run": {"run_id": args.run_id, "run_attempt": args.run_attempt},
         "candidate": candidate, "tree_oid": candidate["git_tree_oid"],
         "matrix": {"path": MATRIX_PATH, "sha256": sha256_file(repo / MATRIX_PATH)},
@@ -187,6 +201,17 @@ def run_row(
         "--warmup", str(WARMUP_ITERATIONS),
         "--iterations", str(MEASUREMENT_ITERATIONS),
         "--timing-contract", "rmsnorm-p0-timing-v1",
+        "--reviewed-sha", candidate["reviewed_sha"],
+        "--tested-sha", candidate["tested_sha"],
+        "--workflow-sha", candidate["workflow_sha"],
+        "--tree-oid", candidate["git_tree_oid"],
+        "--artifact-id", artifact["artifact_id"],
+        "--artifact-sha256", artifact_sha,
+        "--binary-sha256", artifact["binary"]["sha256"],
+        "--binary-sidecar-sha256", artifact["binary"]["sidecar_sha256"],
+        "--source-set-sha256", artifact["source_set"]["sha256"],
+        "--matrix-sha256", sha256_file(repo / MATRIX_PATH),
+        "--model-lock-sha256", sha256_file(repo / MODEL_LOCK_PATH),
     ]
     started_ns = time.monotonic_ns()
     try:
@@ -225,7 +250,7 @@ def run_row(
     validate_runtime_result(runtime_result, artifact, artifact_sha, repo)
     report = make_report(
         args, candidate, artifact, artifact_sha,
-        "complete producer measurements retained, but numeric PASS is locked until A5 review",
+        "complete dedicated producer measurements and public HIP event timing retained",
         runtime_result=runtime_result, exit_code=0, stdout=stdout, stderr=stderr,
         duration_ns=duration_ns, health_pre=health_pre, health_post=health_post,
         process_pre=process_pre, process_post=process_post,

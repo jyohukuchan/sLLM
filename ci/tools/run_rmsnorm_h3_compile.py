@@ -90,7 +90,7 @@ _EXPECTED_SOURCE_SETS = {
 PUBLIC_ABI_SYMBOLS = (
     "sllm_backend_probe", "sllm_buffer_copy_d2h", "sllm_buffer_copy_h2d", "sllm_buffer_create",
     "sllm_buffer_release", "sllm_buffer_size", "sllm_completion_query", "sllm_completion_read",
-    "sllm_completion_release", "sllm_completion_wait", "sllm_context_create", "sllm_context_probe",
+    "sllm_completion_release", "sllm_completion_timing", "sllm_completion_wait", "sllm_context_create", "sllm_context_probe",
     "sllm_context_release", "sllm_device_count", "sllm_device_query", "sllm_event_create",
     "sllm_event_release", "sllm_get_abi_version", "sllm_query_version", "sllm_queue_create",
     "sllm_queue_release", "sllm_rmsnorm_execute", "sllm_rmsnorm_plan_release", "sllm_rmsnorm_prepare",

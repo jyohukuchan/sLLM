@@ -194,14 +194,15 @@ class P0SchemaTests(unittest.TestCase):
             "native/hip/src/rmsnorm_kernel.hip.cpp",
         }
         self.assertEqual(paths, contracts.EXPECTED_SOURCE_PATHS)
-        self.assertEqual(len(paths), 45)
+        self.assertEqual(len(paths), 47)
         self.assertTrue(required.issubset(paths))
-        self.assertFalse(manifest["dedicated_producer_included"])
+        self.assertTrue(manifest["dedicated_producer_included"])
         self.assertEqual(
             manifest["a5_enablement_requires"],
             list(contracts.A5_ENABLEMENT_REQUIREMENTS),
         )
-        self.assertFalse(any("src/bin/" in path for path in paths))
+        self.assertIn("ci/tools/build_rmsnorm_p0_runtime.py", paths)
+        self.assertIn("crates/sllm-hip/src/bin/sllm-rmsnorm-p0-evidence.rs", paths)
         source_set = contracts.source_set(ROOT)
         self.assertEqual(source_set["identity"], contracts.P0_SOURCE_SET_IDENTITY)
         self.assertEqual(
@@ -243,10 +244,10 @@ class P0SchemaTests(unittest.TestCase):
         digest_mutated["source_order_sha256"] = "f" * 64
         mutations.append(digest_mutated)
         producer_forged = copy.deepcopy(manifest)
-        producer_forged["dedicated_producer_included"] = True
+        producer_forged["dedicated_producer_included"] = False
         mutations.append(producer_forged)
         a5_weakened = copy.deepcopy(manifest)
-        a5_weakened["a5_enablement_requires"].pop()
+        a5_weakened["a5_enablement_requires"] = ["unreviewed-boundary"]
         mutations.append(a5_weakened)
         for changed in mutations:
             with self.subTest(changed=changed), self.assertRaises(ContractError):

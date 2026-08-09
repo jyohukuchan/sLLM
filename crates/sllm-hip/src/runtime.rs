@@ -2540,6 +2540,37 @@ impl Completion {
         };
         ensure_ok(raw, &error_buffer, error_sink.message_length).map(|()| bytes_written)
     }
+
+    pub fn kernel_elapsed_ns(&mut self) -> Result<u64, RuntimeError> {
+        reap_pending_cleanup();
+        let raw_completion = self.raw.ok_or_else(|| {
+            RuntimeError::local(
+                RuntimeStatus::InvalidHandle,
+                "completion was already released",
+            )
+        })?;
+        let mut error_buffer = [0_u8; ERROR_CAPACITY];
+        let mut error_sink = sink(&mut error_buffer);
+        let mut timing = sys::sllm_completion_timing_t {
+            struct_size: size_of::<sys::sllm_completion_timing_t>() as u32,
+            abi_version: sys::SLLM_HIP_ABI_VERSION,
+            valid: 0,
+            reserved0: 0,
+            elapsed_ns: 0,
+            reserved: [0; 4],
+        };
+        let raw = unsafe {
+            sys::sllm_completion_timing(raw_completion.as_ptr(), &mut timing, &mut error_sink)
+        };
+        ensure_ok(raw, &error_buffer, error_sink.message_length)?;
+        if timing.valid != 1 || timing.elapsed_ns == 0 {
+            return Err(RuntimeError::local(
+                RuntimeStatus::HipRuntimeError,
+                "public completion timing did not return a positive elapsed time",
+            ));
+        }
+        Ok(timing.elapsed_ns)
+    }
 }
 
 impl Drop for Completion {

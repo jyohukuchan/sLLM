@@ -73,7 +73,7 @@
     "binary_name": "sllm-rmsnorm-p0-evidence",
     "role": "dedicated-p0-public-rmsnorm-producer",
     "result_schema": "rmsnorm-p0-runtime-result-v1",
-    "implementation_status": "host-scaffold-a5-required"
+    "implementation_status": "a5-enabled"
   },
   "prerequisites": ["g0", "private_g1", "semantic_g1", "g2", "h3"]
 }

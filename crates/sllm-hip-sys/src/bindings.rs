@@ -224,6 +224,17 @@ pub struct sllm_completion_result_t {
 
 #[repr(C)]
 #[derive(Clone, Copy)]
+pub struct sllm_completion_timing_t {
+    pub struct_size: u32,
+    pub abi_version: u32,
+    pub valid: u32,
+    pub reserved0: u32,
+    pub elapsed_ns: u64,
+    pub reserved: [u32; 4],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
 pub struct sllm_tensor_binding_t {
     pub struct_size: u32,
     pub abi_version: u32,
@@ -374,6 +385,11 @@ unsafe extern "C" {
         destination: *mut core::ffi::c_void,
         destination_capacity: u64,
         bytes_written: *mut u64,
+        error_sink: *mut sllm_error_sink_t,
+    ) -> sllm_status_t;
+    pub fn sllm_completion_timing(
+        completion: *mut sllm_completion_t,
+        timing: *mut sllm_completion_timing_t,
         error_sink: *mut sllm_error_sink_t,
     ) -> sllm_status_t;
     pub fn sllm_completion_release(

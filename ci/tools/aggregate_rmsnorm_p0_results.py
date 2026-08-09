@@ -20,6 +20,66 @@ from validate_rmsnorm_p0_contracts import (  # noqa: E402
 MAX_REPORT_AGE = timedelta(hours=24)
 
 
+def generate_review_disposition(
+    report_paths: Iterable[Path],
+    artifact_paths: Iterable[Path],
+    reports: Iterable[dict[str, Any]],
+    *,
+    candidate: dict[str, Any],
+    reviewer: str,
+    reason: str,
+    reviewed_at: str,
+    repo: Path = ROOT,
+) -> dict[str, Any]:
+    """Generate only from explicit human review fields, then validate it."""
+
+    report_paths = tuple(report_paths)
+    artifact_paths = tuple(artifact_paths)
+    reports = tuple(reports)
+    if len(report_paths) != 2 or len(artifact_paths) != 2 or len(reports) != 2:
+        raise ContractError("P0 review disposition generation requires exactly two rows")
+    rows = []
+    for order, (report_path, artifact_path, report) in enumerate(
+        zip(report_paths, artifact_paths, reports, strict=True)
+    ):
+        rows.append({
+            "order": order,
+            "row_id": ROWS[order],
+            "target": TARGETS[order],
+            "report_sha256": sha256_file(report_path),
+            "artifact_sha256": sha256_file(artifact_path),
+            "measurement_sha256": report["measurement_sha256"],
+            "complete_measurements": len(report["measurements"]) == 5,
+            "cases": [
+                {"order": case["order"], "id": case["id"], **case["summary"]}
+                for case in report["measurements"]
+            ],
+        })
+    document = {
+        "schema_version": "rmsnorm-p0-review-disposition-v1",
+        "disposition_id": f"rmsnorm-p0-review-{candidate['reviewed_sha']}",
+        "performance_sanity_disposition": "review_required",
+        "threshold": {"approved": False, "threshold_id": None, "metric_thresholds": []},
+        "candidate": candidate,
+        "tree_oid": candidate["git_tree_oid"],
+        "matrix": {"path": MATRIX_PATH, "sha256": sha256_file(repo / MATRIX_PATH)},
+        "review_policy": {"path": REVIEW_POLICY_PATH, "sha256": sha256_file(repo / REVIEW_POLICY_PATH)},
+        "case_set_sha256": case_set_sha256(repo),
+        "model_lock": {"path": MODEL_LOCK_PATH, "sha256": sha256_file(repo / MODEL_LOCK_PATH), "fingerprint": MODEL_LOCK_FINGERPRINT, "resolved_revision": RESOLVED_REVISION},
+        "source_set_sha256": source_set(repo)["sha256"],
+        "review": {"decision": "accept_observation_without_threshold", "reviewer": reviewer, "reason": reason, "reviewed_at": reviewed_at},
+        "canonical_rows": rows,
+        "claims": {"optimized": False, "faster_than_other_engine": False, "performance_hard_gate_established": False},
+    }
+    return validate_disposition(
+        document,
+        repo,
+        reports=reports,
+        report_sha256s=[sha256_file(path) for path in report_paths],
+        artifact_sha256s=[sha256_file(path) for path in artifact_paths],
+    )
+
+
 def _parse_time(value: str) -> datetime:
     if not isinstance(value, str) or not value.endswith("Z"):
         raise ContractError("P0 aggregate received a non-UTC report timestamp")
@@ -133,7 +193,10 @@ def main() -> int:
     parser.add_argument("--repo", type=Path, default=ROOT)
     parser.add_argument("--reports", nargs=2, type=Path, required=True)
     parser.add_argument("--artifacts", nargs=2, type=Path, required=True)
-    parser.add_argument("--review-disposition", type=Path, required=True)
+    parser.add_argument("--review-disposition", type=Path)
+    parser.add_argument("--reviewer")
+    parser.add_argument("--reason")
+    parser.add_argument("--reviewed-at")
     parser.add_argument("--reviewed-sha", required=True)
     parser.add_argument("--tested-sha", required=True)
     parser.add_argument("--workflow-sha", required=True)
@@ -142,8 +205,26 @@ def main() -> int:
     args = parser.parse_args()
     candidate = {"reviewed_sha": args.reviewed_sha, "tested_sha": args.tested_sha, "workflow_sha": args.workflow_sha, "git_tree_oid": args.tree_oid, "worktree_clean": True, "revision_input": "full-sha"}
     try:
+        disposition_path = args.review_disposition
+        if disposition_path is None:
+            if args.reviewer is None or args.reason is None or args.reviewed_at is None:
+                raise ContractError("P0 disposition generation requires explicit reviewer, reason, and reviewed_at")
+            reports = [validate_report(read_json(path), args.repo.resolve()) for path in args.reports]
+            disposition = generate_review_disposition(
+                args.reports,
+                args.artifacts,
+                reports,
+                candidate=candidate,
+                reviewer=args.reviewer,
+                reason=args.reason,
+                reviewed_at=args.reviewed_at,
+                repo=args.repo.resolve(),
+            )
+            args.output_dir.mkdir(parents=True, exist_ok=True)
+            disposition_path = args.output_dir / "rmsnorm-p0-review-disposition.json"
+            disposition_path.write_bytes(canonical_bytes(disposition))
         aggregate = aggregate_reports(
-            args.reports, args.artifacts, args.review_disposition,
+            args.reports, args.artifacts, disposition_path,
             candidate=candidate, repo=args.repo.resolve(), strict_git=True,
         )
         args.output_dir.mkdir(parents=True, exist_ok=True)

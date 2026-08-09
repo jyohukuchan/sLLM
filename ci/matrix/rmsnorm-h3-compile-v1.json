@@ -26,11 +26,11 @@
         "native/hip/src/rmsnorm_kernel_internal.hpp"
       ],
       "files": [
-        {"path": "include/sllm/hip.h", "sha256": "b7dc51e05d8cdff31ff416bca5c5a896864ed5dbc869da81960592e425dc890a"},
+        {"path": "include/sllm/hip.h", "sha256": "2e492a38cc09b04c981cf3b3c3a9c261060af4d9c769ce48463ca30eae840210"},
         {"path": "native/hip/src/rmsnorm_kernel.hip.cpp", "sha256": "90cf982f2d5865a571c5573da5efbce802c61ccf0d2e2e747a624331b1af526d"},
         {"path": "native/hip/src/rmsnorm_kernel_internal.hpp", "sha256": "d4aaae93cd08e18f6725f2a82e7c7f69bd17e5b3446dd2fb2dab81f5e8a932eb"}
       ],
-      "source_set_sha256": "e4fade69e9f300a328730cc9d94aecedf4c0c3937cc7d95dc7911a6741e9c8dc"
+      "source_set_sha256": "7e1ceaa80759696dad882dcd1cd2a12a10364d3d52fad5738494dcbbfe64fb8d"
     },
     "host_abi": {
       "canonical_order": [
@@ -40,12 +40,12 @@
         "native/hip/src/rmsnorm_api.hpp"
       ],
       "files": [
-        {"path": "native/hip/src/public_runtime.hip.cpp", "sha256": "d945d5c8db257903e102736a169487e6eb29eaa9c1637215ce752e34118ea8cd"},
+        {"path": "native/hip/src/public_runtime.hip.cpp", "sha256": "cbb4c72d5e6c1f2cd9e93877a38c2f9a3f4bfeeb01317dc8496ac401b44ea91e"},
         {"path": "native/hip/src/public_runtime_internal.hpp", "sha256": "128bccd42da62255927bce704bbdfb3423669677b7368045301c34f0eedaff45"},
         {"path": "native/hip/src/rmsnorm_api.cpp", "sha256": "08f899273e1e7b064f717571b271ae2b4609f394bd1e32644919c42187c75d7f"},
         {"path": "native/hip/src/rmsnorm_api.hpp", "sha256": "64aabff65bb99435e783e7af6b72e3c31d2f03da7dc7d3480cda59e883f9d43e"}
       ],
-      "source_set_sha256": "44ab6414d5cbaee021dccf5f2b363441614e3e1a25af5deab4abe72853bd9f48"
+      "source_set_sha256": "6e66f5b39b560eb63bc79e0e38ec08d448dfd980895dffd1afff274df19d1f95"
     },
     "binding_build": {
       "canonical_order": [
@@ -57,12 +57,12 @@
       ],
       "files": [
         {"path": "crates/sllm-hip-sys/build.rs", "sha256": "9d3cefa1eeea8c2cd22d030567b699485d21282d53c1997ccb24bc2eaa6163a9"},
-        {"path": "crates/sllm-hip-sys/src/bindings.rs", "sha256": "a6a3e36b2295b436ed55ddc4f78e4930fc7919dba43426c4d432f4e2a74e7948"},
-        {"path": "crates/sllm-hip/src/rmsnorm.rs", "sha256": "dc6001d6a38fb778ef3d48a8ca918feb4252a2e06f03355bc5e9ed286fc33935"},
+        {"path": "crates/sllm-hip-sys/src/bindings.rs", "sha256": "7d381adbf0326a37a4fbff841cc2767aa6262c8858bf42a13e5de659704e57a8"},
+        {"path": "crates/sllm-hip/src/rmsnorm.rs", "sha256": "2ea141ed24b32c9c2dc0d2a7649627ac426082a1dafe9c10a99df0bb898116bf"},
         {"path": "crates/sllm-core/src/op.rs", "sha256": "2beffed00f51e4238d433687810cacd6783f788b5ee5f435f8eda9695d51773e"},
         {"path": "native/hip/CMakeLists.txt", "sha256": "8d905835b946e8b4eca7307535f20401fd7dc6ddf33bbd3ea1f7ef3dde3079a7"}
       ],
-      "source_set_sha256": "b51700b467186a2f795c384e98f3ff4e5384d537cdef635cabd5655e39285893"
+      "source_set_sha256": "60a814ec2efeaec459e78e8d44ef10dfcc426d9101a9b33a661b7c1d95d41530"
     },
     "ci_contract": {
       "canonical_order": [
@@ -84,14 +84,14 @@
         {"path": "ci/schema/rmsnorm-h3-report-v1.schema.json", "sha256": "5e6baf65f9a3ddcbd6f7ec43dd9e6fa8e61f6104eef886ad30a2551eee37cd8f"},
         {"path": "ci/schema/rmsnorm-h3-aggregate-v1.schema.json", "sha256": "c8f99605018ed3f24bcf7106efeff2bd13b7703e7bedef8217799c9eea142606"},
         {"path": "ci/tools/validate_rmsnorm_h3_contracts.py", "sha256": "df0dcaeaa6ab8b2ade42611bda72ae91340171707cd2dcb8010188ec118320b7"},
-        {"path": "ci/tools/run_rmsnorm_h3_compile.py", "sha256": "64e83575cc1c17d66e5852414ec3e563e298ecf72a90beb400f2fd0f0e32fb5f"},
+        {"path": "ci/tools/run_rmsnorm_h3_compile.py", "sha256": "3ad9dabf056bd9ef07033f51ac227367bafc781403e3afd1b4821d82b07081fb"},
         {"path": "ci/tools/aggregate_rmsnorm_h3_results.py", "sha256": "3c7a5843895de51b2c3ae04be40158542d3085bb81cda6bf909fb79db1dab203"},
         {"path": "ci/tests/test_rmsnorm_h3_contracts.py", "sha256": "da7a9ea0b5d96dbd4ccbec36be1d9dae2a341827e3063732e2218ec69d45ad6d"},
         {"path": "ci/tests/test_rmsnorm_h3_runner.py", "sha256": "c4a857db7ade100653865906a792562514280b9ec58ead337c8c4db4b6b2d934"},
         {"path": "ci/tests/test_rmsnorm_h3_aggregate.py", "sha256": "e6e8891b6224aecc2995585cf385fe8d341579d4b4ebefa20d78efb03e1a399e"},
         {"path": ".github/workflows/rmsnorm-h3-compile.yml", "sha256": "d5609c64879e1a4a67ee250a0e7f6f8d15d060d1e6d66051cc7b07990600e2f0"}
       ],
-      "source_set_sha256": "fa8bd817f6d3614735ec8b08fb88654bb0d532cd49eadbaa25c426ef5af2074d"
+      "source_set_sha256": "0410a7c7db160b4c6be4f23e76c669e676ace01e94b36ff85a8e85d6443073e8"
     }
   },
   "source_symbol_map": [
@@ -104,7 +104,7 @@
   "public_abi_symbols": [
     "sllm_backend_probe", "sllm_buffer_copy_d2h", "sllm_buffer_copy_h2d", "sllm_buffer_create",
     "sllm_buffer_release", "sllm_buffer_size", "sllm_completion_query", "sllm_completion_read",
-    "sllm_completion_release", "sllm_completion_wait", "sllm_context_create", "sllm_context_probe",
+    "sllm_completion_release", "sllm_completion_timing", "sllm_completion_wait", "sllm_context_create", "sllm_context_probe",
     "sllm_context_release", "sllm_device_count", "sllm_device_query", "sllm_event_create",
     "sllm_event_release", "sllm_get_abi_version", "sllm_query_version", "sllm_queue_create",
     "sllm_queue_release", "sllm_rmsnorm_execute", "sllm_rmsnorm_plan_release", "sllm_rmsnorm_prepare"
