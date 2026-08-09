@@ -28,6 +28,7 @@ def candidate() -> dict[str, object]:
 
 
 _FRESH_G2_BINARY: Path | None = None
+_FRESH_G1_BINARY: Path | None = None
 
 
 def fresh_g2_binary() -> Path:
@@ -35,6 +36,37 @@ def fresh_g2_binary() -> Path:
     if _FRESH_G2_BINARY is None:
         _FRESH_G2_BINARY = builder.build_g2_binary(ROOT)
     return _FRESH_G2_BINARY
+
+
+def fresh_g1_binary() -> Path:
+    """Build the real G1 control binary instead of depending on test order."""
+
+    global _FRESH_G1_BINARY
+    if _FRESH_G1_BINARY is None:
+        environment = os.environ.copy()
+        environment["CARGO_TARGET_DIR"] = str((ROOT / "target").resolve())
+        completed = subprocess.run(
+            [
+                "cargo", "build", "--locked", "--offline", "-p", "sllm-hip",
+                "--bin", "sllm-rmsnorm-g1-evidence",
+            ],
+            cwd=ROOT,
+            capture_output=True,
+            check=False,
+            env=environment,
+            timeout=900,
+            start_new_session=True,
+        )
+        if completed.returncode != 0:
+            raise AssertionError(
+                "the actual G1 evidence binary could not be built for the substitution regression: "
+                + completed.stderr.decode("utf-8", "replace")
+            )
+        binary = ROOT / "target/debug/sllm-rmsnorm-g1-evidence"
+        if not binary.is_file():
+            raise AssertionError("the fixed G1 Cargo build did not produce its expected binary")
+        _FRESH_G1_BINARY = binary
+    return _FRESH_G1_BINARY
 
 
 def forged_identity_script() -> bytes:
@@ -332,9 +364,7 @@ class G2RunnerTests(unittest.TestCase):
                 contracts.validate_artifact(manifest, binary_path=binary)
 
     def test_actual_renamed_g1_binary_is_rejected_even_with_canonical_sidecar(self) -> None:
-        g1_candidates = (ROOT / "target/debug/sllm-rmsnorm-g1-evidence", ROOT / "target/release/sllm-rmsnorm-g1-evidence")
-        g1 = next((path for path in g1_candidates if path.is_file()), None)
-        self.assertIsNotNone(g1, "the host workspace must build the actual G1 evidence binary for this regression")
+        g1 = fresh_g1_binary()
         with tempfile.TemporaryDirectory(prefix="sllm-g2-g1-substitution-") as directory:
             root = Path(directory)
             binary = root / "sllm-rmsnorm-g2-evidence"
