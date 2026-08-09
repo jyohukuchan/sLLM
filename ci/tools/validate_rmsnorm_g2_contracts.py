@@ -516,7 +516,16 @@ def _duplicate_rejecting_pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     return result
 
 
-def _read_verified_fd_slice(fd: int, *, file_size: int, absolute_start: int, absolute_end: int, expected_sha256: str, label: str) -> bytes:
+def _read_verified_fd_slice(
+    fd: int,
+    *,
+    file_size: int,
+    absolute_start: int,
+    absolute_end: int,
+    expected_sha256: str,
+    label: str,
+    capture_payload: bool = True,
+) -> bytes:
     if absolute_start < 0 or absolute_end <= absolute_start or absolute_end > file_size:
         raise ContractError(f"{label} bounded range is outside the verified file")
     before = os.fstat(fd)
@@ -533,11 +542,11 @@ def _read_verified_fd_slice(fd: int, *, file_size: int, absolute_start: int, abs
         remaining -= len(chunk)
     if digest.hexdigest() != expected_sha256:
         raise ContractError(f"{label} SHA-256 does not match the fixed model lock")
-    payload = os.pread(fd, absolute_end - absolute_start, absolute_start)
+    payload = os.pread(fd, absolute_end - absolute_start, absolute_start) if capture_payload else b""
     after = os.fstat(fd)
     before_tuple = (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns)
     after_tuple = (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns)
-    if before_tuple != after_tuple or len(payload) != absolute_end - absolute_start:
+    if before_tuple != after_tuple or (capture_payload and len(payload) != absolute_end - absolute_start):
         raise ContractError(f"{label} changed while the bounded same-FD slice was read")
     return payload
 
@@ -680,6 +689,7 @@ def extract_verified_slice_payload(cache_root: Path, record: Mapping[str, Any], 
                 absolute_end=opened.st_size,
                 expected_sha256=entry["sha256"],
                 label=f"G2 verified cache file {relative}",
+                capture_payload=False,
             )
             return local_fd
         except BaseException:

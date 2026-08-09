@@ -44,6 +44,27 @@ def fixture(path: Path, *, marker: str = contracts.SYNTHETIC_MARKER, trailing: i
 
 
 class G2SliceTests(unittest.TestCase):
+    def test_full_file_verification_does_not_materialize_the_model_file(self) -> None:
+        contents = bytes(range(256)) * 32
+        with tempfile.TemporaryDirectory(prefix="sllm-g2-full-file-") as directory:
+            path = Path(directory) / "shard.safetensors"
+            path.write_bytes(contents)
+            descriptor = contracts.os.open(path, contracts.os.O_RDONLY)
+            try:
+                with patch.object(contracts.os, "pread", side_effect=AssertionError("full model pread")):
+                    payload = contracts._read_verified_fd_slice(
+                        descriptor,
+                        file_size=len(contents),
+                        absolute_start=0,
+                        absolute_end=len(contents),
+                        expected_sha256=hashlib.sha256(contents).hexdigest(),
+                        label="test full-file verification",
+                        capture_payload=False,
+                    )
+            finally:
+                contracts.os.close(descriptor)
+            self.assertEqual(payload, b"")
+
     def test_locked_recipe_and_synthetic_extraction_only_hashes_payload(self) -> None:
         record = slice_record()
         with tempfile.TemporaryDirectory(prefix="sllm-g2-synthetic-") as directory:
