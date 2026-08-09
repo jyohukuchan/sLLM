@@ -644,7 +644,7 @@ def _run_row(*, repo: Path, artifact_root: Path, row: Mapping[str, Any], run_id:
         ready = _receive_worker_frame(parent_socket, worker_binding, row_deadline, phase="ready", process=process, containment=containment)
         if set(ready) != {"kind", "binding"} or ready.get("kind") != "ready" or ready.get("binding") != worker_binding:
             raise ControllerError("worker ready frame does not bind its observed process identity")
-        challenge = base64.b64encode(secrets.token_bytes(32)).decode("ascii")
+        challenge = secrets.token_hex(32)
         contracts.ipc_send(parent_socket, {"kind": "start", "row_id": row["row_id"], "target": row["target"], "challenge": challenge})
         for order, case in enumerate(contracts.EXPECTED_CASES):
             request, activation, raw_scale, epsilon = _case_request(row, case)
