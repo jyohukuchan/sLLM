@@ -1918,7 +1918,6 @@ def _materialize_reviewed_snapshot(repo: Path, candidate: Mapping[str, Any], par
         raise BuilderError("private reviewed build snapshot must remain outside the checkout")
     archive = contracts._git_output_bytes(repo, ("archive", "--format=tar", str(candidate["reviewed_sha"])))
     snapshot = Path(tempfile.mkdtemp(prefix="sllm-rmsnorm-g1-reviewed-", dir=str(parent)))
-    directories: list[Path] = []
     try:
         with tarfile.open(fileobj=io.BytesIO(archive), mode="r:") as stream:
             for member in stream:
@@ -1929,7 +1928,6 @@ def _materialize_reviewed_snapshot(repo: Path, candidate: Mapping[str, Any], par
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 if member.isdir():
                     destination.mkdir(exist_ok=True)
-                    directories.append(destination)
                     continue
                 source = stream.extractfile(member)
                 if source is None:
@@ -1941,8 +1939,6 @@ def _materialize_reviewed_snapshot(repo: Path, candidate: Mapping[str, Any], par
                 finally:
                     os.close(descriptor)
                 destination.chmod((member.mode & 0o555) or 0o400)
-        for directory in sorted(directories, key=lambda path: len(path.parts), reverse=True):
-            directory.chmod(0o555)
         return snapshot
     except BaseException:
         raise

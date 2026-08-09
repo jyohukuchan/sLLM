@@ -218,7 +218,7 @@ class SemanticG1BuilderTests(unittest.TestCase):
                 hashlib.sha256(b"reviewed interpreter bytes").hexdigest(),
             )
 
-    def test_reviewed_snapshot_seals_nested_directories_after_extraction(self) -> None:
+    def test_reviewed_snapshot_keeps_nested_directories_private_until_final_seal(self) -> None:
         archive = io.BytesIO()
         with tarfile.open(fileobj=archive, mode="w:") as stream:
             for name in (".agents", ".agents/skills", ".agents/skills/push"):
@@ -242,7 +242,7 @@ class SemanticG1BuilderTests(unittest.TestCase):
                 (snapshot / ".agents/skills/push/SKILL.md").read_bytes(), payload
             )
             for relative in (".agents", ".agents/skills", ".agents/skills/push"):
-                self.assertEqual((snapshot / relative).stat().st_mode & 0o777, 0o555)
+                self.assertEqual((snapshot / relative).stat().st_mode & 0o777, 0o700)
 
     def test_brokered_true_round_trip_preserves_compiler_output_and_status(self) -> None:
         with tempfile.TemporaryDirectory(prefix="sllm-g1-broker-roundtrip-") as temporary:
