@@ -432,12 +432,12 @@ def _qwen_tensor_catalog(inputs: _QwenShapeInputs) -> dict[str, tuple[str, str, 
                 )
             add(
                 f"{prefix}.linear_attn.conv1d.weight", "text", "BF16",
-                (linear_qkv_width, text["linear_conv_kernel_dim"]),
+                (linear_qkv_width, 1, text["linear_conv_kernel_dim"]),
             )
             add(f"{prefix}.linear_attn.A_log", "text", "F32", (text["linear_num_value_heads"],))
-            add(f"{prefix}.linear_attn.dt_bias", "text", "F32", (text["linear_num_value_heads"],))
+            add(f"{prefix}.linear_attn.dt_bias", "text", "BF16", (text["linear_num_value_heads"],))
             add(
-                f"{prefix}.linear_attn.norm.weight", "text", "BF16",
+                f"{prefix}.linear_attn.norm.weight", "text", "F32",
                 (text["linear_value_head_dim"],),
             )
             add(

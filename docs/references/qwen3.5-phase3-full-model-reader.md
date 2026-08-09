@@ -98,10 +98,10 @@ index/headerのtext catalogは426 tensorで、bias tensorはない。以下のsh
 | GDN `linear_attn.in_proj_z.weight` | 24 | `[4096,2560]` | BF16 |
 | GDN `linear_attn.in_proj_b.weight` | 24 | `[32,2560]` | BF16 |
 | GDN `linear_attn.in_proj_a.weight` | 24 | `[32,2560]` | BF16 |
-| GDN `linear_attn.conv1d.weight` | 24 | `[8192,4]` | BF16 |
+| GDN `linear_attn.conv1d.weight` | 24 | `[8192,1,4]` | BF16 |
 | GDN `linear_attn.A_log` | 24 | `[32]` | F32 |
-| GDN `linear_attn.dt_bias` | 24 | `[32]` | F32 |
-| GDN `linear_attn.norm.weight` | 24 | `[128]` | BF16 |
+| GDN `linear_attn.dt_bias` | 24 | `[32]` | BF16 |
+| GDN `linear_attn.norm.weight` | 24 | `[128]` | F32 |
 | GDN `linear_attn.out_proj.weight` | 24 | `[2560,4096]` | BF16 |
 | `model.language_model.norm.weight` | 1 | `[2560]` | BF16 |
 
@@ -138,7 +138,7 @@ MTPはmain text configの`H=hidden_size`、`I=intermediate_size`、`A=num_attent
 | `mtp.layers.0.self_attn.q_norm.weight` / `k_norm.weight` | 1 / 1 | `[D]` / `[D]` | BF16 |
 | `mtp.norm.weight` / `pre_fc_norm_embedding.weight` / `pre_fc_norm_hidden.weight` | 1 / 1 / 1 | `[H]` / `[H]` / `[H]` | BF16 |
 
-固定text値では`mtp.fc.weight=[2560,5120]`、Q/K/V/Oはそれぞれ`[8192,2560]`、`[1024,2560]`、`[1024,2560]`、`[2560,4096]`となる。なお、既存catalogのGDN dtypeは固定header contractに対して2件が逆であり、`linear_attn.dt_bias`はF32 `[32]`、`linear_attn.norm.weight`はBF16 `[128]`へ修正する。
+固定text値では`mtp.fc.weight=[2560,5120]`、Q/K/V/Oはそれぞれ`[8192,2560]`、`[1024,2560]`、`[1024,2560]`、`[2560,4096]`となる。GDN storage dtypeは外部runtime実装から推定せず、固定safetensors headerを正とする。`linear_attn.dt_bias`はBF16 `[32]`、`linear_attn.norm.weight`はF32 `[128]`であり、B1開始時readerが両者を逆に記録した判断は固定cache照合で撤回した。
 
 ## full attention: Q/gate、GQA、RoPE
 
@@ -206,7 +206,7 @@ in_proj_a:   a:32
 
 ### convolution
 
-`conv1d.weight`はBF16 `[8192,4]`、biasなし、depthwise channel 8192、causal kernel length 4である。request-local `conv_state`はBF16 row-major `[3,8192]`（stride `[8192,1]`）で、過去3 tokenを `[x[t-3],x[t-2],x[t-1]]` のoldest-to-newest順に保持する。current inputを加えた4 tapをoldest-to-current順に畳み込み、SiLUを適用する。prefill scanとdecode stepは同じstate transitionで、request間共有やposition resetをしない。
+`conv1d.weight`の固定storage shapeはBF16 `[8192,1,4]`であり、middleのsingleton input-channel次元もheader契約に含める。biasなし、depthwise channel 8192、causal kernel length 4である。request-local `conv_state`はBF16 row-major `[3,8192]`（stride `[8192,1]`）で、過去3 tokenを `[x[t-3],x[t-2],x[t-1]]` のoldest-to-newest順に保持する。current inputを加えた4 tapをoldest-to-current順に畳み込み、SiLUを適用する。prefill scanとdecode stepは同じstate transitionで、request間共有やposition resetをしない。
 
 ### L2、GDN repeat、gate/decay
 
@@ -226,7 +226,7 @@ beta_t = sigmoid(float(b_t))
 g_t    = -exp(float(A_log)) * softplus(float(a_t) + float(dt_bias))
 ```
 
-`A_log`と`dt_bias`はF32 `[32]`、`a`と`b`のprojection出力は32 channelsである。`g`はlog-space decayであり、低精度のままexp/softplusを評価しない。
+`A_log`のstorageはF32 `[32]`、`dt_bias`のstorageはBF16 `[32]`で、式の評価時に`dt_bias`をFP32へcastする。`a`と`b`のprojection出力は32 channelsである。`g`はlog-space decayであり、低精度のままexp/softplusを評価しない。
 
 ### recurrent update
 

@@ -1112,7 +1112,7 @@ fn qwen_tensor_catalog(inputs: &QwenShapeInputs) -> Result<QwenTensorCatalog, Mo
                     format!("{prefix}.linear_attn.conv1d.weight"),
                     "text",
                     TensorDType::Bf16,
-                    vec![linear_qkv_width, text.linear_conv_kernel_dim],
+                    vec![linear_qkv_width, 1, text.linear_conv_kernel_dim],
                 )?;
                 add(
                     format!("{prefix}.linear_attn.A_log"),
@@ -1123,13 +1123,13 @@ fn qwen_tensor_catalog(inputs: &QwenShapeInputs) -> Result<QwenTensorCatalog, Mo
                 add(
                     format!("{prefix}.linear_attn.dt_bias"),
                     "text",
-                    TensorDType::F32,
+                    TensorDType::Bf16,
                     vec![text.linear_num_value_heads],
                 )?;
                 add(
                     format!("{prefix}.linear_attn.norm.weight"),
                     "text",
-                    TensorDType::Bf16,
+                    TensorDType::F32,
                     vec![text.linear_value_head_dim],
                 )?;
                 add(
@@ -1370,6 +1370,10 @@ mod qwen_shape_tests {
             [8192, 2560]
         );
         assert_eq!(
+            catalog["model.language_model.layers.0.linear_attn.conv1d.weight"].2,
+            [8192, 1, 4]
+        );
+        assert_eq!(
             catalog["model.language_model.layers.3.self_attn.q_proj.weight"].2,
             [8192, 2560]
         );
@@ -1386,12 +1390,16 @@ mod qwen_shape_tests {
             [2560, 4096]
         );
         assert_eq!(
-            catalog["model.language_model.layers.0.linear_attn.dt_bias"].1,
+            catalog["model.language_model.layers.0.linear_attn.A_log"].1,
             TensorDType::F32
         );
         assert_eq!(
-            catalog["model.language_model.layers.0.linear_attn.norm.weight"].1,
+            catalog["model.language_model.layers.0.linear_attn.dt_bias"].1,
             TensorDType::Bf16
+        );
+        assert_eq!(
+            catalog["model.language_model.layers.0.linear_attn.norm.weight"].1,
+            TensorDType::F32
         );
     }
 

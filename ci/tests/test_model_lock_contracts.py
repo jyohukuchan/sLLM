@@ -361,12 +361,16 @@ class ModelLockContractTests(unittest.TestCase):
             ("text", "F32", (32,)),
         )
         self.assertEqual(
+            catalog["model.language_model.layers.0.linear_attn.conv1d.weight"],
+            ("text", "BF16", (8192, 1, 4)),
+        )
+        self.assertEqual(
             catalog["model.language_model.layers.0.linear_attn.dt_bias"],
-            ("text", "F32", (32,)),
+            ("text", "BF16", (32,)),
         )
         self.assertEqual(
             catalog["model.language_model.layers.0.linear_attn.norm.weight"],
-            ("text", "BF16", (128,)),
+            ("text", "F32", (128,)),
         )
         self.assertEqual(
             catalog["model.language_model.layers.3.self_attn.q_proj.weight"],
