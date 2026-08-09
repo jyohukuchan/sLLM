@@ -77,7 +77,7 @@ Stage Aはpublic runtimeとmodel provenanceを固定するrollback境界であ�
 
 Stage Aはcommit `ac2baa3a0734d0894353ba180259d979da5a831e`、tree `4e43a9c42c9aa2dfa6a6d438610fa54c4e482d10`に対するH0〜H3、canonical 2 GPUのG0/private G1/semantic G1/G2/P0、前後health/process、独立review 9の`PASS`により2026-08-09に完了した。次のGPU evidence refresh前に、workflow/controllerからlocal commandを導出するtracked orchestrationまたはdry-run preflightを2〜4時間で整備してからStage Bへ進む。
 
-この運用負債解消を2026-08-09 23:51:09 JSTに開始し、hard中断時刻を2026-08-10 03:38:27 JSTとする。受入境界は、defaultでGPU、model cache、container、buildへ触れないhost-only dry-run、既存正本から導出したcanonical 2 targetの実行plan、run identity・短いsocket root・target別build/output ownership・canonical JSONのfail-closed検証、focused host回帰、独立reviewの`PASS`とする。
+この運用負債解消を2026-08-09 23:51:09 JSTに開始し、当初のhard中断時刻を2026-08-10 03:38:27 JSTとした。同作業完了後のStage B plan reviewを継続するため、ユーザー指示により2026-08-10 03:38:27 JSTから6時間延長し、現在の全体hard中断時刻を同日09:38:27 JSTとする。受入境界は、defaultでGPU、model cache、container、buildへ触れないhost-only dry-run、既存正本から導出したcanonical 2 targetの実行plan、run identity・短いsocket root・target別build/output ownership・canonical JSONのfail-closed検証、focused host回帰、独立reviewの`PASS`とする。
 
 同作業は2026-08-10 01:26 JSTに受入境界を満たして完了した。tracked plannerは既存workflow、matrix、G1/G2/P0総合validator、builderのpure layout helperからexact `gfx1030`→`gfx1201`の実行planを導出し、clean immutable Git identity、authority file hash、symlink component、短い未作成run root、target別path/output、schema順序をfail-closedに検証する。GPU、model cache、container、build、networkは実行せず、focused 11件、fail-closed 46件、matrix/JSON/G1/G2/P0 validator、dirty-local H0 316/316、独立reviewのHigh/Medium 0件・`PASS`を得た。既存P0 builderのsame-UID/trusted-solo output symlink安全負債は当面のtrusted development境界に従い延期したままとし、次のGPU evidence refreshではこのplannerを先行させる。
 
