@@ -25,7 +25,7 @@ from typing import Any
 from common import ContractError, ROOT, read_json, sha256_file  # noqa: E402
 from validate_rmsnorm_g2_contracts import (  # noqa: E402
     ABSOLUTE_RANGE, ATOL, BYTE_SIZE, CASE_IDS, CASE_ROWS, CASE_SEEDS, G2_BINARY,
-    MODEL_LOCK_FINGERPRINT, MODEL_LOCK_PATH, RESOLVED_REVISION, ROWS, SCHEMAS, TOLERANCE_PATH,
+    G2_RUNTIME_LD_LIBRARY_PATH, MODEL_LOCK_FINGERPRINT, MODEL_LOCK_PATH, RESOLVED_REVISION, ROWS, SCHEMAS, TOLERANCE_PATH,
     TOLERANCE_ID, candidate_sha256, extract_synthetic_slice_payload, validate_artifact,
     query_build_identity as _query_build_identity,
     validate_candidate, validate_matrix, validate_slice_record, validate_tolerance, _schema_validate,
@@ -424,6 +424,7 @@ def run_row(args: argparse.Namespace, repo: Path = ROOT, *, strict_git: bool = F
             for selector in ("HIP_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES", "GPU_DEVICE_ORDINAL", "ROCR_VISIBLE_DEVICES"):
                 execution_environment.pop(selector, None)
             execution_environment["HIP_VISIBLE_DEVICES"] = str(routing_pre["hip_id"])
+            execution_environment["LD_LIBRARY_PATH"] = G2_RUNTIME_LD_LIBRARY_PATH
             completed = _run_bounded_binary(
                 [str(args.binary), "--target", args.target, "--slice-fd", str(raw_fd)],
                 cwd=repo,

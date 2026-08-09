@@ -27,19 +27,26 @@ from validate_rmsnorm_g2_contracts import (  # noqa: E402
     builder_output_path,
     candidate_sha256,
     expected_build_identity,
+    g2_build_environment,
     query_build_identity,
     validate_artifact,
     validate_candidate,
 )
 
 
-def build_g2_binary(repo: Path = ROOT) -> Path:
+def build_g2_binary(target: str, repo: Path = ROOT) -> Path:
     """Run the sole supported G2 build and return its discovered output."""
 
+    build_environment = g2_build_environment(target)
     # Cargo's ambient target directory is not part of the G2 contract.  Force
     # the invocation and the subsequent discovery to share the repo-local
-    # target root, otherwise a successful build can leave target/debug stale.
+    # target root, otherwise a successful build can leave the expected profile
+    # output stale.
     environment = os.environ.copy()
+    for name in list(environment):
+        if name.startswith("CARGO_FEATURE_"):
+            environment.pop(name, None)
+    environment.update(build_environment)
     environment["CARGO_TARGET_DIR"] = str((repo / "target").resolve())
     try:
         completed = subprocess.run(
@@ -85,11 +92,11 @@ def build_artifact(
     boundary.
     """
 
-    owned_binary = build_g2_binary(repo)
-    if binary.resolve() != owned_binary.resolve():
-        raise ContractError("G2 artifact binary override is not the fresh owned Cargo output")
     if target not in ("gfx1030", "gfx1201"):
         raise ContractError("G2 artifact target is not canonical")
+    owned_binary = build_g2_binary(target, repo)
+    if binary.resolve() != owned_binary.resolve():
+        raise ContractError("G2 artifact binary override is not the fresh owned Cargo output")
     validate_candidate(candidate, repo, strict_git=strict_git)
     if owned_binary.name != G2_BINARY:
         raise ContractError("G2 artifact builder accepts only the dedicated G2 binary")
@@ -110,7 +117,7 @@ def build_artifact(
     sidecar = owned_binary.with_name(G2_SIDECAR)
     if _stable_file_bytes(sidecar, "G2 dedicated binary sidecar") != _canonical_sidecar(binary_sha, G2_BINARY):
         raise ContractError("G2 artifact builder requires the existing canonical binary sidecar")
-    document = {"schema_version": "rmsnorm-g2-artifact-v1", "artifact_id": f"rmsnorm-g2-{target}-{binary_sha}", "row_id": f"rmsnorm-g2-{target}", "target": target, "artifact_kind": "rmsnorm-g2-dedicated-public-rmsnorm", "candidate": candidate, "binary": {"role": "dedicated-g2-runtime", "path": G2_BINARY, "sidecar_path": G2_SIDECAR, "size_bytes": owned_binary.stat().st_size, "sha256": binary_sha, "sidecar_sha256": sha256_file(sidecar), "source_path": G2_SOURCE_PATH, "source_sha256": source_sha, "build_source_set": source_set, "build_identity": {**expected_identity["identity"], "identity_sha256": expected_identity["identity_sha256"]}, "build_command": list(G2_BUILD_COMMAND), "build_profile": G2_BUILD_PROFILE, "builder_output_path": G2_BUILDER_OUTPUT_PATH, "g2_binary_name": G2_BINARY, "g1_substitution_rejected": True, "h3_substitution_rejected": True}, "scope": {"model_used": True, "full_model_used": False, "tokenizer_used": False, "generation_used": False, "hip_only": True, "fallback_allowed": False, "fallback_used": False, "cpu_fallback_used": False}, "backend": "hip", "dispatch_contract": {"backend": "hip", "kernel_id": 1, "kernel_symbol": "rmsnorm.baseline.wave32.v1", "device_symbol": "sllm_rmsnorm_baseline_wave32_v1", "dispatch_count": 1, "workgroup_size_x": 256, "fallback_allowed": False, "fallback_used": False}, "prerequisites": prereqs}
+    document = {"schema_version": "rmsnorm-g2-artifact-v1", "artifact_id": f"rmsnorm-g2-{target}-{binary_sha}", "row_id": f"rmsnorm-g2-{target}", "target": target, "artifact_kind": "rmsnorm-g2-dedicated-public-rmsnorm", "candidate": candidate, "binary": {"role": "dedicated-g2-runtime", "path": G2_BINARY, "sidecar_path": G2_SIDECAR, "size_bytes": owned_binary.stat().st_size, "sha256": binary_sha, "sidecar_sha256": sha256_file(sidecar), "source_path": G2_SOURCE_PATH, "source_sha256": source_sha, "build_source_set": source_set, "build_identity": {**expected_identity["identity"], "identity_sha256": expected_identity["identity_sha256"]}, "build_command": list(G2_BUILD_COMMAND), "build_profile": G2_BUILD_PROFILE, "build_environment": g2_build_environment(target), "builder_output_path": G2_BUILDER_OUTPUT_PATH, "g2_binary_name": G2_BINARY, "g1_substitution_rejected": True, "h3_substitution_rejected": True}, "scope": {"model_used": True, "full_model_used": False, "tokenizer_used": False, "generation_used": False, "hip_only": True, "fallback_allowed": False, "fallback_used": False, "cpu_fallback_used": False}, "backend": "hip", "dispatch_contract": {"backend": "hip", "kernel_id": 1, "kernel_symbol": "rmsnorm.baseline.wave32.v1", "device_symbol": "sllm_rmsnorm_baseline_wave32_v1", "dispatch_count": 1, "workgroup_size_x": 256, "fallback_allowed": False, "fallback_used": False}, "prerequisites": prereqs}
     return validate_artifact(document, repo, binary_path=owned_binary)
 
 

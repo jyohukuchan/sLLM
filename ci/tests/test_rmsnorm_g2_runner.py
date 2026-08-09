@@ -34,7 +34,7 @@ _FRESH_G1_BINARY: Path | None = None
 def fresh_g2_binary() -> Path:
     global _FRESH_G2_BINARY
     if _FRESH_G2_BINARY is None:
-        _FRESH_G2_BINARY = builder.build_g2_binary(ROOT)
+        _FRESH_G2_BINARY = builder.build_g2_binary("gfx1030", ROOT)
     return _FRESH_G2_BINARY
 
 
@@ -105,7 +105,7 @@ def artifact(target: str, value: dict[str, object]) -> dict[str, object]:
         {"kind": "semantic_g1", "row_id": f"rmsnorm-semantic-g1-{target}", "state": "bound-not-executed-by-g2", "candidate_sha256": contracts.candidate_sha256(value), "artifact_sha256": "5" * 64, "report_sha256": "6" * 64},
         {"kind": "h3", "row_id": f"h3-rmsnorm-{target}", "state": "bound-not-executed-by-g2", "candidate_sha256": contracts.candidate_sha256(value), "artifact_sha256": "7" * 64, "report_sha256": "8" * 64},
     ]
-    return {"schema_version": "rmsnorm-g2-artifact-v1", "artifact_id": f"rmsnorm-g2-{target}-{binary_sha}", "row_id": f"rmsnorm-g2-{target}", "target": target, "artifact_kind": "rmsnorm-g2-dedicated-public-rmsnorm", "candidate": value, "binary": {"role": "dedicated-g2-runtime", "path": "sllm-rmsnorm-g2-evidence", "sidecar_path": "sllm-rmsnorm-g2-evidence.sha256", "size_bytes": len(binary_bytes), "sha256": binary_sha, "sidecar_sha256": hashlib.sha256(f"{binary_sha}  sllm-rmsnorm-g2-evidence\n".encode()).hexdigest(), "source_path": contracts.G2_SOURCE_PATH, "source_sha256": source_set["files"][0]["sha256"], "build_source_set": source_set, "build_identity": {**build_identity["identity"], "identity_sha256": build_identity["identity_sha256"]}, "build_command": list(contracts.G2_BUILD_COMMAND), "build_profile": contracts.G2_BUILD_PROFILE, "builder_output_path": contracts.G2_BUILDER_OUTPUT_PATH, "g2_binary_name": "sllm-rmsnorm-g2-evidence", "g1_substitution_rejected": True, "h3_substitution_rejected": True}, "scope": {"model_used": True, "full_model_used": False, "tokenizer_used": False, "generation_used": False, "hip_only": True, "fallback_allowed": False, "fallback_used": False, "cpu_fallback_used": False}, "backend": "hip", "dispatch_contract": {"backend": "hip", "kernel_id": 1, "kernel_symbol": "rmsnorm.baseline.wave32.v1", "device_symbol": "sllm_rmsnorm_baseline_wave32_v1", "dispatch_count": 1, "workgroup_size_x": 256, "fallback_allowed": False, "fallback_used": False}, "prerequisites": prerequisites}
+    return {"schema_version": "rmsnorm-g2-artifact-v1", "artifact_id": f"rmsnorm-g2-{target}-{binary_sha}", "row_id": f"rmsnorm-g2-{target}", "target": target, "artifact_kind": "rmsnorm-g2-dedicated-public-rmsnorm", "candidate": value, "binary": {"role": "dedicated-g2-runtime", "path": "sllm-rmsnorm-g2-evidence", "sidecar_path": "sllm-rmsnorm-g2-evidence.sha256", "size_bytes": len(binary_bytes), "sha256": binary_sha, "sidecar_sha256": hashlib.sha256(f"{binary_sha}  sllm-rmsnorm-g2-evidence\n".encode()).hexdigest(), "source_path": contracts.G2_SOURCE_PATH, "source_sha256": source_set["files"][0]["sha256"], "build_source_set": source_set, "build_identity": {**build_identity["identity"], "identity_sha256": build_identity["identity_sha256"]}, "build_command": list(contracts.G2_BUILD_COMMAND), "build_profile": contracts.G2_BUILD_PROFILE, "build_environment": contracts.g2_build_environment(target), "builder_output_path": contracts.G2_BUILDER_OUTPUT_PATH, "g2_binary_name": "sllm-rmsnorm-g2-evidence", "g1_substitution_rejected": True, "h3_substitution_rejected": True}, "scope": {"model_used": True, "full_model_used": False, "tokenizer_used": False, "generation_used": False, "hip_only": True, "fallback_allowed": False, "fallback_used": False, "cpu_fallback_used": False}, "backend": "hip", "dispatch_contract": {"backend": "hip", "kernel_id": 1, "kernel_symbol": "rmsnorm.baseline.wave32.v1", "device_symbol": "sllm_rmsnorm_baseline_wave32_v1", "dispatch_count": 1, "workgroup_size_x": 256, "fallback_allowed": False, "fallback_used": False}, "prerequisites": prerequisites}
 
 
 class G2RunnerTests(unittest.TestCase):
@@ -246,7 +246,7 @@ class G2RunnerTests(unittest.TestCase):
                         root / "artifact.json",
                         prerequisites=prerequisites,
                     )
-            build.assert_called_once_with(ROOT)
+            build.assert_called_once_with("gfx1030", ROOT)
 
         with patch.object(builder, "build_g2_binary", return_value=owned) as build:
             manifest = builder.build_artifact(
@@ -256,7 +256,7 @@ class G2RunnerTests(unittest.TestCase):
                 owned.parent / "artifact.json",
                 prerequisites=prerequisites,
             )
-        build.assert_called_once_with(ROOT)
+        build.assert_called_once_with("gfx1030", ROOT)
         self.assertEqual(manifest["binary"]["path"], contracts.G2_BINARY)
 
     def test_g2_build_neutralizes_ambient_cargo_target_dir(self) -> None:
@@ -277,10 +277,12 @@ class G2RunnerTests(unittest.TestCase):
                 "run",
                 return_value=builder.subprocess.CompletedProcess([], 0, b"", b""),
             ) as run:
-                result = builder.build_g2_binary(repo)
+                result = builder.build_g2_binary("gfx1030", repo)
 
         self.assertEqual(result, binary)
         self.assertEqual(run.call_args.kwargs["env"]["CARGO_TARGET_DIR"], str((repo / "target").resolve()))
+        for name, value in contracts.g2_build_environment("gfx1030").items():
+            self.assertEqual(run.call_args.kwargs["env"][name], value)
         self.assertEqual(run.call_args.args[0], list(contracts.G2_BUILD_COMMAND))
 
     def test_cli_builds_once_and_rejects_nonowned_binary_override(self) -> None:
@@ -308,7 +310,7 @@ class G2RunnerTests(unittest.TestCase):
                 builder, "read_json", return_value=prerequisites
             ), patch.object(builder, "validate_candidate"), patch.object(builder, "build_artifact", wraps=builder.build_artifact) as public_build:
                 self.assertEqual(builder.main(), 0)
-            build.assert_called_once_with(ROOT)
+            build.assert_called_once_with("gfx1030", ROOT)
             public_build.assert_called_once()
 
             copied = root / contracts.G2_BINARY
@@ -318,7 +320,7 @@ class G2RunnerTests(unittest.TestCase):
                 builder, "read_json", return_value=prerequisites
             ), patch.object(builder, "validate_candidate"), patch.object(builder, "build_artifact", wraps=builder.build_artifact) as rejected_public:
                 self.assertEqual(builder.main(), 1)
-            rejected_build.assert_called_once_with(ROOT)
+            rejected_build.assert_called_once_with("gfx1030", ROOT)
             rejected_public.assert_called_once()
 
     def test_runner_binds_declared_slice_to_extractor_and_rejects_symlink(self) -> None:
@@ -351,7 +353,7 @@ class G2RunnerTests(unittest.TestCase):
                 builder.build_artifact("gfx1030", binary, candidate(), root / "artifact.json", prerequisites=prerequisites)
             with patch.object(builder, "build_g2_binary", return_value=fresh_g2_binary()) as build:
                 manifest = builder.build_artifact("gfx1030", fresh_g2_binary(), candidate(), fresh_g2_binary().parent / "artifact.json", prerequisites=prerequisites)
-            build.assert_called_once_with(ROOT)
+            build.assert_called_once_with("gfx1030", ROOT)
             self.assertEqual(manifest["binary"]["g2_binary_name"], "sllm-rmsnorm-g2-evidence")
             bad = root / "sllm-rmsnorm-g1-evidence"
             bad.write_bytes(b"wrong")

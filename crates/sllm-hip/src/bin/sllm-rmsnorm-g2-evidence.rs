@@ -253,7 +253,10 @@ fn read_slice_fd(raw_fd: i32) -> Vec<u8> {
 }
 
 fn embedded_build_identity() -> &'static str {
-    let payload = sllm_hip_sys::g2_build_identity::IDENTITY_PAYLOAD;
+    // Keep the complete marker-prefixed record in optimized binaries.  Without
+    // this optimization barrier LLVM can prove that only the JSON suffix is
+    // observable and discard the marker bytes that the artifact verifier scans.
+    let payload = std::hint::black_box(sllm_hip_sys::g2_build_identity::IDENTITY_PAYLOAD);
     let identity = sllm_hip_sys::g2_build_identity::IDENTITY_JSON.as_bytes();
     if payload.len() <= identity.len() || !payload.ends_with(identity) {
         fail("G2 build identity payload is malformed");

@@ -56,10 +56,12 @@ G2_IDENTITY_SCHEMA = "rmsnorm-g2-build-identity-v1"
 G2_IDENTITY_MARKER = b"SLLM_G2_BUILD_IDENTITY_V1:"
 G2_ROLE = "dedicated-g2-runtime"
 G2_BUILD_COMMAND = (
-    "cargo", "+1.97.1", "build", "--locked", "--offline", "--bin", G2_BINARY,
+    "cargo", "+1.97.1", "build", "--locked", "--offline", "--release", "--bin", G2_BINARY,
 )
-G2_BUILD_PROFILE = "debug"
+G2_BUILD_PROFILE = "release"
 G2_BUILDER_OUTPUT_PATH = f"target/{G2_BUILD_PROFILE}/{G2_BINARY}"
+G2_RUNTIME_LD_LIBRARY_PATH = "/opt/rocm/lib:/opt/rocm/lib64:/lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu:/lib:/usr/lib"
+G2_CODEGEN_FEATURES = "co_v6,wave32,xnack=unsupported,sramecc=unsupported,generic_processor_version=0"
 PREREQUISITE_KINDS = ("g0", "private_g1", "semantic_g1", "h3")
 SYNTHETIC_MARKER = "rmsnorm-g2-synthetic-safetensors-v1"
 SCHEMAS = {
@@ -298,10 +300,13 @@ def query_build_identity(binary: Path, repo: Path = ROOT) -> dict[str, Any]:
     _require_executable(binary, "G2 identity-query executable")
     binary_bytes = _stable_file_bytes(binary, "G2 identity-query executable")
     _validate_builder_owned_output(binary_bytes, repo)
+    query_environment = os.environ.copy()
+    query_environment["LD_LIBRARY_PATH"] = G2_RUNTIME_LD_LIBRARY_PATH
     try:
         completed = subprocess.run(
             [str(binary), "--query-build-identity"],
             cwd=repo,
+            env=query_environment,
             capture_output=True,
             check=False,
             timeout=5,
@@ -384,6 +389,21 @@ def _require_executable(path: Path, label: str) -> None:
 
 def builder_output_path(repo: Path = ROOT) -> Path:
     return repo / G2_BUILDER_OUTPUT_PATH
+
+
+def g2_build_environment(target: str) -> dict[str, str]:
+    if target not in TARGETS:
+        raise ContractError("G2 build environment target is not canonical")
+    return {
+        "ROCM_PATH": "/opt/rocm",
+        "HIP_PATH": "/opt/rocm",
+        "SLLM_HIP_COMPILER": "/opt/rocm/bin/amdclang++",
+        "CMAKE_HIP_ARCHITECTURES": target,
+        "SLLM_HIP_CODEGEN_FEATURES": G2_CODEGEN_FEATURES,
+        "SLLM_ENABLE_HIP_RUNTIME": "1",
+        "SLLM_ENABLE_PUBLIC_HIP_RUNTIME": "0",
+        "SLLM_ENABLE_HIP_COMPILE_PROBE": "0",
+    }
 
 
 def _validate_builder_owned_output(binary_bytes: bytes, repo: Path) -> None:
@@ -823,6 +843,7 @@ def validate_artifact(
         binary["build_command"] != list(G2_BUILD_COMMAND)
         or binary["build_profile"] != G2_BUILD_PROFILE
         or binary["builder_output_path"] != G2_BUILDER_OUTPUT_PATH
+        or binary["build_environment"] != g2_build_environment(document["target"])
     ):
         raise ContractError("G2 artifact builder provenance is not the fixed offline Cargo invocation")
     if binary["source_path"] != G2_SOURCE_PATH or binary["source_sha256"] == "0" * 64:
