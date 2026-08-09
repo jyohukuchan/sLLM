@@ -232,8 +232,9 @@ class SemanticG1RunnerTests(unittest.TestCase):
         self.assertTrue(containment.restore_after_launch_failure())
         self.assertTrue(containment.subreaper_restored)
         self.assertEqual(runner.PROCESS_LIMITER, "/usr/bin/prlimit")
+        self.assertEqual(runner.PROCESS_ADDRESS_LIMIT_BYTES, 64 * 1024 * 1024 * 1024)
         self.assertGreater(runner.PROCESS_ADDRESS_LIMIT_BYTES, runner.MAX_RUNTIME_RSS_BYTES)
-        self.assertGreaterEqual(runner.PROCESS_COUNT_LIMIT, 1)
+        self.assertEqual(runner.PROCESS_COUNT_LIMIT, 4096)
 
     def test_actual_child_fd_audit_allows_internal_fds_and_rejects_unrelated_parent_fd(self) -> None:
         sealed = contracts.snapshot_bytes(b"expected inherited bytes", logical_path="/controller/expected", label="expected")
