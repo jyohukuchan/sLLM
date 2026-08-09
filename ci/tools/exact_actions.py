@@ -260,7 +260,10 @@ def seal_input_view(manifest: Mapping[str, Any]) -> ImmutableInputView:
                 descriptors.append(sealed)
             sealed, _data = by_path[key]
             records.append(dict(source))
-        target_base = max(INPUT_VIEW_FD_BASE, max(descriptors, default=0) + len(descriptors) + 8)
+        # Targets only need to be above every source descriptor.  Reserving an
+        # additional descriptor-count-sized hole needlessly exhausts the
+        # process RLIMIT_NOFILE for a complete compiler input closure.
+        target_base = max(INPUT_VIEW_FD_BASE, max(descriptors, default=0) + 1)
         fd_targets = [target_base + index for index in range(len(descriptors))]
         fd_by_path = {path: target for path, target in zip(by_path, fd_targets, strict=True)}
         rewritten = list(checked["argv"])
