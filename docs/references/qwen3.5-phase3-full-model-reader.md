@@ -8,8 +8,9 @@
 | --- | --- | --- | --- |
 | llama.cpp | `reference/llama.cpp` | `f5919bf458ef190468b5c329bb293f8a54a1e69c` | semantic/reference reader only |
 | vLLM | `reference/vLLM` | `568afb3a13806beb53bb2e6bd518269357b237c0` | semantic reader only |
+| SGLang | `reference/SGLang` | `fdebc938f7f4d16fe6b9f55dcd9a767cf0899ea1`（tag object `d21f3c3a10606ba3c7bf43f981496da0a7d620cd`） | independent semantic cross-check only |
 
-今回の確認対象pathは、vLLMの `vllm/model_executor/models/qwen3_next.py`、`qwen3_5.py`、`layers/mamba/gdn/qwen_gdn_linear_attn.py`、`layers/mamba/mamba_utils.py`、`layers/layernorm.py`、およびllama.cppの `src/models/qwen3next.cpp` である。固定sourceのidentityとlicense境界は[source-lock manifest](source-lock.md)と[provenance方針](../provenance/README.md)を正とする。
+今回の確認対象pathは、vLLMの `vllm/model_executor/models/qwen3_next.py`、`qwen3_5.py`、`qwen3_5_mtp.py`、`qwen3_vl.py`、`layers/mamba/gdn/qwen_gdn_linear_attn.py`、`layers/mamba/mamba_utils.py`、`layers/layernorm.py`、SGLangの対応する `python/sglang/srt/models/qwen3_5.py`、`qwen3_5_mtp.py`、`qwen3_vl.py`、config/layernorm、およびllama.cppの `src/models/qwen3next.cpp` である。vision/MTPのHF safetensors orientationはvLLMをreader、SGLangを独立cross-checkとして概念だけを抽出し、codeはcopy、adapt、portしていない。固定sourceのidentityとlicense境界は[source-lock manifest](source-lock.md)と[provenance方針](../provenance/README.md)を正とする。
 
 ## fixed cache、model identity、read boundary
 
@@ -105,6 +106,39 @@ index/headerのtext catalogは426 tensorで、bias tensorはない。以下のsh
 | `model.language_model.norm.weight` | 1 | `[2560]` | BF16 |
 
 required text、config-conditional、known-unconsumed、rejectedの分類を分ける。missing/duplicate/overlap/out-of-range、wrong dtype/shape、unexpected bias、wrong layer-class tensor、unknown main prefix、tie矛盾、quantized/converted checkpointはrejectする。`generation_config.json`は固定revisionに存在しないためplaceholderを作らない。
+
+## visionとMTPのexpected shape導出
+
+vision/MTPはPhase 3で実行しないが、known-unconsumedという分類はshapeやdtypeの検証省略を意味しない。固定sourceのdefault値は使わず、lock済み`config.json`から明示fieldを型付きで抽出して次の式へ代入する。visionは`N=depth`、`V=hidden_size`、`I=intermediate_size`、`C=in_channels`、`T=temporal_patch_size`、`P=patch_size`、`M=spatial_merge_size`、`S=M*M`、`O=out_hidden_size`、`E=num_position_embeddings`とする。`deepstack_visual_indexes`は空でなければ、現行297-name namespaceにない追加mergerを要求するためrejectする。
+
+| vision family | count | expected shape | dtype |
+| --- | ---: | --- | --- |
+| `model.visual.blocks.*.attn.proj.weight` / `.bias` | `N` / `N` | `[V,V]` / `[V]` | BF16 |
+| `model.visual.blocks.*.attn.qkv.weight` / `.bias` | `N` / `N` | `[3V,V]` / `[3V]` | BF16 |
+| `model.visual.blocks.*.mlp.linear_fc1.weight` / `.bias` | `N` / `N` | `[I,V]` / `[I]` | BF16 |
+| `model.visual.blocks.*.mlp.linear_fc2.weight` / `.bias` | `N` / `N` | `[V,I]` / `[V]` | BF16 |
+| `model.visual.blocks.*.norm1.weight` / `.bias` | `N` / `N` | `[V]` / `[V]` | BF16 |
+| `model.visual.blocks.*.norm2.weight` / `.bias` | `N` / `N` | `[V]` / `[V]` | BF16 |
+| `model.visual.merger.linear_fc1.weight` / `.bias` | 1 / 1 | `[V*S,V*S]` / `[V*S]` | BF16 |
+| `model.visual.merger.linear_fc2.weight` / `.bias` | 1 / 1 | `[O,V*S]` / `[O]` | BF16 |
+| `model.visual.merger.norm.weight` / `.bias` | 1 / 1 | `[V]` / `[V]` | BF16 |
+| `model.visual.patch_embed.proj.weight` / `.bias` | 1 / 1 | `[V,C,T,P,P]` / `[V]` | BF16 |
+| `model.visual.pos_embed.weight` | 1 | `[E,V]` | BF16 |
+
+現行namespaceのcountは`12N+9=297`なので`N=24`を必須とする。fused `attn.qkv.*`だけを受理し、外部engineがloaderで扱えるsplit `attn.q/k/v.*`を暗黙にaliasしない。mergerの第1linearはspatial shuffle後の`V*M^2`から同じ幅へ、第2linearは`O`へ写す。patch projectionはConv3dの`[out,in,kT,kH,kW]`である。全積・和はchecked arithmeticとし、zero、overflow、rank/dimension不一致をrejectする。
+
+MTPはmain text configの`H=hidden_size`、`I=intermediate_size`、`A=num_attention_heads`、`K=num_key_value_heads`、`D=head_dim`を使う。`mtp_num_hidden_layers=1`、`mtp_use_dedicated_embeddings=false`、`tie_word_embeddings=true`を必須とし、独立embedding/lm-headを受理しない。
+
+| MTP family | count | expected shape | dtype |
+| --- | ---: | --- | --- |
+| `mtp.fc.weight` | 1 | `[H,2H]` | BF16 |
+| `mtp.layers.0.input_layernorm.weight` / `post_attention_layernorm.weight` | 1 / 1 | `[H]` / `[H]` | BF16 |
+| `mtp.layers.0.mlp.gate_proj.weight` / `up_proj.weight` / `down_proj.weight` | 1 / 1 / 1 | `[I,H]` / `[I,H]` / `[H,I]` | BF16 |
+| `mtp.layers.0.self_attn.q_proj.weight` / `k_proj.weight` / `v_proj.weight` / `o_proj.weight` | 1 / 1 / 1 / 1 | `[2A*D,H]` / `[K*D,H]` / `[K*D,H]` / `[H,A*D]` | BF16 |
+| `mtp.layers.0.self_attn.q_norm.weight` / `k_norm.weight` | 1 / 1 | `[D]` / `[D]` | BF16 |
+| `mtp.norm.weight` / `pre_fc_norm_embedding.weight` / `pre_fc_norm_hidden.weight` | 1 / 1 / 1 | `[H]` / `[H]` / `[H]` | BF16 |
+
+固定text値では`mtp.fc.weight=[2560,5120]`、Q/K/V/Oはそれぞれ`[8192,2560]`、`[1024,2560]`、`[1024,2560]`、`[2560,4096]`となる。なお、既存catalogのGDN dtypeは固定header contractに対して2件が逆であり、`linear_attn.dt_bias`はF32 `[32]`、`linear_attn.norm.weight`はBF16 `[128]`へ修正する。
 
 ## full attention: Q/gate、GQA、RoPE
 
