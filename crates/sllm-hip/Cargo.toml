@@ -11,6 +11,8 @@ name = "sllm-rmsnorm-g2-evidence"
 path = "src/bin/sllm-rmsnorm-g2-evidence.rs"
 
 [dependencies]
+serde.workspace = true
+serde_json.workspace = true
 sllm-core.workspace = true
 sllm-hip-sys.workspace = true
 

@@ -80,8 +80,8 @@ def aggregate_reports(
             "candidate_sha256": candidate_sha256(candidate), "tuple_sha256": tuple_digest,
             "collected_cases": report["collection"]["collected_cases"],
             "dispatch_count": report["scope"]["dispatch_count"], "fallback_used": report["scope"]["fallback_used"],
-            "health_ok": report["health_post"]["state"] == "OK" and report["health_post"]["available"],
-            "process_clean": report["process_post"]["state"] == "CLEAN" and not report["process_post"]["gpu_processes"],
+            "health_ok": all(report[name]["state"] == "OK" and report[name]["available"] and report[name]["reliable"] and report[name]["ras_uncorrectable_count"] == 0 for name in ("health_pre", "health_post")),
+            "process_clean": all(report[name]["state"] == "CLEAN" and not report[name]["residual_runner_children"] and not report[name]["gpu_processes"] for name in ("process_pre", "process_post")),
         })
     passed = sum(row["state"] == "PASS" for row in rows)
     collected = sum(row["collected_cases"] == len(CASE_IDS) for row in rows)

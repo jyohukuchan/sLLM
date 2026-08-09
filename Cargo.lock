@@ -616,6 +616,8 @@ dependencies = [
 name = "sllm-hip"
 version = "0.1.0"
 dependencies = [
+ "serde",
+ "serde_json",
  "sllm-core",
  "sllm-hip-sys",
  "static_assertions",

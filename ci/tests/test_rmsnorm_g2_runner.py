@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import base64
 import hashlib
 import json
 import os
@@ -50,6 +51,15 @@ def forged_identity_script() -> bytes:
         "    sys.stderr.write('HIP unavailable\\n')\n"
         "    raise SystemExit(1)\n"
     ).encode("utf-8")
+
+
+def protocol_document(target: str = "gfx1030") -> dict[str, object]:
+    cases = []
+    dispatch = {"backend": "hip", "kernel_id": 1, "kernel_symbol": "rmsnorm.baseline.wave32.v1", "device_symbol": "sllm_rmsnorm_baseline_wave32_v1", "dispatch_count": 1, "workgroup_size_x": 256, "fallback_allowed": False, "fallback_used": False}
+    for order, (case_id, rows, seed) in enumerate(zip(contracts.CASE_IDS, contracts.CASE_ROWS, contracts.CASE_SEEDS)):
+        payload = base64.b64encode(bytes(rows * 2560 * 2)).decode("ascii")
+        cases.append({"order": order, "id": case_id, "rows": rows, "n": 2560, "input_seed": seed, "request_b64": payload, "output_b64": payload, "dispatch": dict(dispatch)})
+    return {"schema_version": "rmsnorm-g2-runtime-result-v1", "state": "PASS", "target": target, "model_used": True, "full_model_used": False, "tokenizer_used": False, "generation_used": False, "selected_backend": "hip", "dispatch_count": 6, "fallback_used": False, "cases": cases}
 
 
 def artifact(target: str, value: dict[str, object]) -> dict[str, object]:
@@ -136,12 +146,31 @@ class G2RunnerTests(unittest.TestCase):
             args = self._args(root)
             query = runner.subprocess.CompletedProcess([], 0, canonical_bytes(contracts.expected_build_identity(ROOT)["identity"]), b"")
             execution = runner.subprocess.CompletedProcess([], 1, b"", b"HIP unavailable")
-            with patch.dict(os.environ, {"SLLM_G2_GPU_EXECUTION": "1"}), patch.object(runner.subprocess, "run", side_effect=[query, execution]) as mocked:
+            healthy = {"available": True, "reliable": True, "state": "OK", "target": "gfx1030", "ras_uncorrectable_count": 0}
+            clean = {"state": "CLEAN", "residual_runner_children": [], "gpu_processes": []}
+            with patch.dict(os.environ, {"SLLM_G2_GPU_EXECUTION": "1"}), patch.object(runner.subprocess, "run", return_value=query) as mocked_query, patch.object(runner, "_load_observation", side_effect=[healthy, healthy, clean, clean]), patch.object(runner, "_run_bounded_binary", return_value=execution):
                 report = runner.run_row(args)
-            self.assertEqual(mocked.call_count, 2)
+            mocked_query.assert_called_once()
             self.assertEqual(report["state"], "FAIL")
             self.assertEqual(report["scope"]["dispatch_count"], 0)
             self.assertIn("CPU/stub", report["execution"]["failure_reason"])
+
+    def test_bounded_protocol_parser_and_independent_oracle_reject_trailing_duplicate_and_unknown(self) -> None:
+        document = protocol_document()
+        parsed = runner._parse_protocol(runner.canonical_protocol_bytes(document), "gfx1030")
+        cases, passed, protocol_sha = runner._oracle_cases(parsed, bytes(contracts.BYTE_SIZE))
+        self.assertTrue(passed)
+        self.assertEqual(len(cases), 6)
+        self.assertNotEqual(protocol_sha, "0" * 64)
+        with self.assertRaises(ContractError):
+            runner._parse_protocol(runner.canonical_protocol_bytes(document) + b"\n", "gfx1030")
+        duplicate = runner.canonical_protocol_bytes(document).replace(b'"state":"PASS"', b'"state":"PASS","state":"PASS"', 1)
+        with self.assertRaises(ContractError):
+            runner._parse_protocol(duplicate, "gfx1030")
+        unknown = copy.deepcopy(document)
+        unknown["unexpected"] = True
+        with self.assertRaises(ContractError):
+            runner._parse_protocol(runner.canonical_protocol_bytes(unknown), "gfx1030")
 
     def test_public_build_artifact_owns_build_and_copied_output_is_not_authority(self) -> None:
         self.assertNotIn("_build_artifact_from_owned_binary", vars(builder))

@@ -56,6 +56,7 @@ EXPECTED_G2_PATH_RULES = {
     "ci/tools/run_rmsnorm_g2_runtime.py", "ci/tools/aggregate_rmsnorm_g2_results.py", "ci/tools/build_rmsnorm_g2_runtime.py",
     "ci/schema/rmsnorm-g2-matrix-v1.schema.json", "ci/schema/rmsnorm-g2-model-slice-v1.schema.json",
     "ci/schema/rmsnorm-g2-tolerance-v1.schema.json", "ci/schema/rmsnorm-g2-artifact-v1.schema.json",
+    "ci/schema/rmsnorm-g2-runtime-result-v1.schema.json",
     "ci/schema/rmsnorm-g2-report-v1.schema.json", "ci/schema/rmsnorm-g2-aggregate-v1.schema.json",
     "ci/matrix/rmsnorm-g2-v1.json", "ci/matrix/rmsnorm-g2-tolerance-v1.json",
     "ci/tests/test_rmsnorm_g2_slice.py", "ci/tests/test_rmsnorm_g2_schema.py",

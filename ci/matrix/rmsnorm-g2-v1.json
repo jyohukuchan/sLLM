@@ -32,6 +32,7 @@
   ],
   "tolerance": "ci/matrix/rmsnorm-g2-tolerance-v1.json",
   "slice_contract": "ci/schema/rmsnorm-g2-model-slice-v1.schema.json",
+  "result_schema": "ci/schema/rmsnorm-g2-runtime-result-v1.schema.json",
   "prerequisites": {
     "g0": "bound-only:g0-gfx1030-or-gfx1201",
     "private_g1": "bound-only:g1-gfx1030-or-gfx1201",

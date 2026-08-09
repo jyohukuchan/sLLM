@@ -63,6 +63,7 @@ G2_SCHEMA_FILES = {
     "ci/schema/rmsnorm-g2-matrix-v1.schema.json",
     "ci/schema/rmsnorm-g2-model-slice-v1.schema.json",
     "ci/schema/rmsnorm-g2-tolerance-v1.schema.json",
+    "ci/schema/rmsnorm-g2-runtime-result-v1.schema.json",
     "ci/schema/rmsnorm-g2-artifact-v1.schema.json",
     "ci/schema/rmsnorm-g2-report-v1.schema.json",
     "ci/schema/rmsnorm-g2-aggregate-v1.schema.json",

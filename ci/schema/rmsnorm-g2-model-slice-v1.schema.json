@@ -51,13 +51,13 @@
       "required": ["version", "extractor", "repository", "commit", "script_path", "script_sha256", "arguments", "synthetic_fixture_only"],
       "properties": {
         "version": {"const": "rmsnorm-g2-slice-recipe-v1"},
-        "extractor": {"const": "sllm-g2-synthetic-safetensors-extractor"},
+        "extractor": {"enum": ["sllm-g2-synthetic-safetensors-extractor", "sllm-g2-verified-read-only-safetensors-extractor"]},
         "repository": {"const": "sLLM"},
         "commit": {"$ref": "#/$defs/sha40"},
         "script_path": {"const": "ci/tools/extract_rmsnorm_g2_slice.py"},
         "script_sha256": {"$ref": "#/$defs/sha256"},
         "arguments": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
-        "synthetic_fixture_only": {"const": true}
+        "synthetic_fixture_only": {"type": "boolean"}
       }
     },
     "output": {

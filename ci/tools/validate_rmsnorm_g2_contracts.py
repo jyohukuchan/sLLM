@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
-"""Host-only, fail-closed contracts for real-weight RMSNorm G2.
+"""Fail-closed contracts for real-weight RMSNorm G2.
 
-This module never opens a model cache.  Its slice reader accepts only a marked
-synthetic safetensors fixture, while GPU execution is delegated to the
-dedicated G2 binary and is not emulated by this module.
+The checked-in tests use only temporary synthetic safetensors fixtures.  The
+runtime path additionally verifies a complete read-only model cache and keeps
+the verified shard descriptor open while taking the bounded slice, so a path
+replacement cannot turn into a different tensor between verification and use.
+GPU execution remains delegated to the dedicated G2 binary.
 """
 
 from __future__ import annotations
@@ -64,6 +66,7 @@ SCHEMAS = {
     "matrix": "ci/schema/rmsnorm-g2-matrix-v1.schema.json",
     "slice": "ci/schema/rmsnorm-g2-model-slice-v1.schema.json",
     "tolerance": "ci/schema/rmsnorm-g2-tolerance-v1.schema.json",
+    "runtime_result": "ci/schema/rmsnorm-g2-runtime-result-v1.schema.json",
     "artifact": "ci/schema/rmsnorm-g2-artifact-v1.schema.json",
     "report": "ci/schema/rmsnorm-g2-report-v1.schema.json",
     "aggregate": "ci/schema/rmsnorm-g2-aggregate-v1.schema.json",
@@ -170,7 +173,7 @@ def expected_matrix() -> dict[str, Any]:
             {"order": order, "id": case_id, "rows": rows, "n": 2560, "input_seed": seed, "classification": "finite"}
             for order, (case_id, rows, seed) in enumerate(zip(CASE_IDS, CASE_ROWS, CASE_SEEDS))
         ],
-        "tolerance": TOLERANCE_PATH, "slice_contract": SCHEMAS["slice"],
+        "tolerance": TOLERANCE_PATH, "slice_contract": SCHEMAS["slice"], "result_schema": SCHEMAS["runtime_result"],
         "prerequisites": {
             "g0": "bound-only:g0-gfx1030-or-gfx1201",
             "private_g1": "bound-only:g1-gfx1030-or-gfx1201",
@@ -440,8 +443,17 @@ def validate_slice_record(record: Mapping[str, Any], repo: Path = ROOT) -> dict[
         raise ContractError("G2 slice shape/dtype/size is not locked BF16[2560]")
     if record["source"]["model_lock_sha256"] != sha256_file(repo / MODEL_LOCK_PATH) or record["source"]["model_lock_fingerprint"] != MODEL_LOCK_FINGERPRINT or record["source"]["resolved_revision"] != RESOLVED_REVISION:
         raise ContractError("G2 slice model-lock identity drifted")
-    if record["recipe"]["synthetic_fixture_only"] is not True:
-        raise ContractError("G2 host slice extractor must remain synthetic-fixture-only")
+    recipe = record["recipe"]
+    if recipe["synthetic_fixture_only"] is True:
+        if recipe["extractor"] != "sllm-g2-synthetic-safetensors-extractor":
+            raise ContractError("G2 synthetic slice recipe has an unknown extractor")
+    elif recipe["synthetic_fixture_only"] is False:
+        if recipe["extractor"] != "sllm-g2-verified-read-only-safetensors-extractor":
+            raise ContractError("G2 verified cache slice recipe has an unknown extractor")
+        if recipe["arguments"] != ["--cache-root", "<verified-read-only-cache-root>", "--tensor", TENSOR_NAME]:
+            raise ContractError("G2 verified cache slice recipe must not record a concrete cache path")
+    else:
+        raise ContractError("G2 slice recipe synthetic/verified mode is not boolean")
     if record["recipe"]["script_sha256"] != sha256_file(repo / "ci/tools/extract_rmsnorm_g2_slice.py"):
         raise ContractError("G2 slice extractor script hash is stale")
     if record["storage"] != {"raw_slice_stored": False, "raw_slice_uploaded": False, "raw_model_stored": False, "raw_model_uploaded": False, "path_recorded": False}:
@@ -493,6 +505,222 @@ def _read_fixture(path: Path) -> tuple[dict[str, Any], bytes]:
     if set(header) != {"__metadata__", TENSOR_NAME}:
         raise ContractError("synthetic G2 fixture has an unknown or missing tensor")
     return header, payload
+
+
+def _duplicate_rejecting_pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ContractError(f"safetensors header contains duplicate key: {key}")
+        result[key] = value
+    return result
+
+
+def _read_verified_fd_slice(fd: int, *, file_size: int, absolute_start: int, absolute_end: int, expected_sha256: str, label: str) -> bytes:
+    if absolute_start < 0 or absolute_end <= absolute_start or absolute_end > file_size:
+        raise ContractError(f"{label} bounded range is outside the verified file")
+    before = os.fstat(fd)
+    if before.st_size != file_size or not stat.S_ISREG(before.st_mode):
+        raise ContractError(f"{label} changed before same-FD verification")
+    os.lseek(fd, 0, os.SEEK_SET)
+    digest = hashlib.sha256()
+    remaining = file_size
+    while remaining:
+        chunk = os.read(fd, min(1024 * 1024, remaining))
+        if not chunk:
+            raise ContractError(f"{label} was truncated during same-FD verification")
+        digest.update(chunk)
+        remaining -= len(chunk)
+    if digest.hexdigest() != expected_sha256:
+        raise ContractError(f"{label} SHA-256 does not match the fixed model lock")
+    payload = os.pread(fd, absolute_end - absolute_start, absolute_start)
+    after = os.fstat(fd)
+    before_tuple = (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns)
+    after_tuple = (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns)
+    if before_tuple != after_tuple or len(payload) != absolute_end - absolute_start:
+        raise ContractError(f"{label} changed while the bounded same-FD slice was read")
+    return payload
+
+
+def _validate_verified_safetensors_header(header_bytes: bytes, *, file_size: int) -> dict[str, Any]:
+    if len(header_bytes) < 8:
+        raise ContractError("verified safetensors shard header is truncated")
+    header_length = struct.unpack("<Q", header_bytes[:8])[0]
+    if header_length != HEADER_LENGTH:
+        raise ContractError("verified safetensors shard header length is not locked")
+    if len(header_bytes) != 8 + header_length:
+        raise ContractError("verified safetensors shard header read is incomplete")
+    try:
+        header = json.loads(header_bytes[8:].decode("utf-8"), object_pairs_hook=_duplicate_rejecting_pairs)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ContractError(f"verified safetensors shard header is not JSON: {exc}") from exc
+    if not isinstance(header, dict) or "__metadata__" not in header:
+        raise ContractError("verified safetensors shard header is missing metadata")
+    data_start = 8 + header_length
+    ranges: list[tuple[int, int, str]] = []
+    for name, tensor in header.items():
+        if name == "__metadata__":
+            continue
+        if not isinstance(tensor, dict) or set(tensor) != {"dtype", "shape", "data_offsets"}:
+            raise ContractError(f"verified safetensors tensor metadata is not closed: {name}")
+        offsets = tensor["data_offsets"]
+        if not isinstance(offsets, list) or len(offsets) != 2 or any(not isinstance(value, int) or isinstance(value, bool) for value in offsets):
+            raise ContractError(f"verified safetensors tensor offsets are malformed: {name}")
+        start, end = offsets
+        if not 0 <= start < end or data_start + end > file_size:
+            raise ContractError(f"verified safetensors tensor range is outside the shard: {name}")
+        ranges.append((start, end, name))
+    ranges.sort()
+    previous_end = 0
+    for start, end, name in ranges:
+        if start != previous_end:
+            raise ContractError(f"verified safetensors tensor ranges overlap or leave an unowned gap: {name}")
+        previous_end = end
+    if ranges and data_start + previous_end != file_size:
+        raise ContractError("verified safetensors shard has trailing or unowned tensor bytes")
+    if TENSOR_NAME not in header:
+        raise ContractError("verified safetensors shard is missing the locked RMSNorm tensor")
+    return header
+
+
+def extract_verified_slice_payload(cache_root: Path, record: Mapping[str, Any], repo: Path = ROOT) -> tuple[dict[str, Any], bytes]:
+    """Verify the complete locked cache, then extract the locked range from one FD.
+
+    This is deliberately not used by the host unit tests with the real model
+    cache.  It is the production entry point for a pre-verified, read-only
+    cache and never creates a slice file.
+    """
+
+    validate_slice_record(record, repo)
+    if record["recipe"]["synthetic_fixture_only"] is not False:
+        raise ContractError("verified cache extraction requires a non-synthetic slice recipe")
+    _reject_symlink_components(cache_root, "G2 verified cache root")
+    root_metadata = cache_root.lstat()
+    if not stat.S_ISDIR(root_metadata.st_mode) or cache_root.is_symlink() or root_metadata.st_mode & 0o222:
+        raise ContractError("G2 verified cache root must be a read-only regular directory")
+    lock = read_json(repo / MODEL_LOCK_PATH)
+    if not isinstance(lock, dict) or lock.get("schema_version") != "model-lock-v1" or not isinstance(lock.get("model"), dict):
+        raise ContractError("G2 model lock is not the fixed model-lock-v1 object")
+    lock_files = lock["model"].get("files")
+    if not isinstance(lock_files, list) or not lock_files:
+        raise ContractError("G2 model lock has no complete file set")
+    expected: dict[str, dict[str, Any]] = {}
+    for entry in lock_files:
+        if not isinstance(entry, dict) or not isinstance(entry.get("path"), str) or entry["path"] in expected:
+            raise ContractError("G2 model lock contains duplicate or malformed file entries")
+        if Path(entry["path"]).is_absolute() or ".." in Path(entry["path"]).parts:
+            raise ContractError("G2 model lock contains an unsafe cache-relative path")
+        digest = entry.get("sha256")
+        if not isinstance(digest, str) or len(digest) != 64 or digest.lower() != digest or any(char not in "0123456789abcdef" for char in digest):
+            raise ContractError("G2 model lock contains a malformed file SHA-256")
+        lfs_oid = entry.get("lfs_oid")
+        if lfs_oid is not None and lfs_oid != f"sha256:{digest}":
+            raise ContractError("G2 model lock LFS identity does not match the file SHA-256")
+        expected[entry["path"]] = entry
+    discovered: set[str] = set()
+    for path in cache_root.rglob("*"):
+        relative = path.relative_to(cache_root).as_posix()
+        if path.is_symlink():
+            raise ContractError(f"G2 verified cache contains a symlink: {relative}")
+        if path.is_file():
+            discovered.add(relative)
+        elif path.is_dir():
+            if path.stat().st_mode & 0o222:
+                raise ContractError(f"G2 verified cache directory is writable: {relative}")
+        else:
+            raise ContractError(f"G2 verified cache contains a non-regular entry: {relative}")
+    if discovered != set(expected):
+        raise ContractError("G2 verified cache file set differs from the complete model lock")
+    shard_entry = expected.get(SOURCE_SHARD)
+    if shard_entry is None:
+        raise ContractError("G2 model lock does not contain the locked source shard")
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    directory_flags = flags | getattr(os, "O_DIRECTORY", 0)
+
+    def open_locked_path(relative: str) -> int:
+        parts = Path(relative).parts
+        if not parts or any(part in {"", ".", ".."} for part in parts):
+            raise ContractError(f"G2 verified cache path is unsafe: {relative}")
+        try:
+            parent_fd = os.open(cache_root, directory_flags)
+        except OSError as exc:
+            raise ContractError(f"G2 verified cache root cannot be opened without following symlinks: {exc}") from exc
+        try:
+            root_opened = os.fstat(parent_fd)
+            if (root_opened.st_dev, root_opened.st_ino, root_opened.st_size, root_opened.st_mtime_ns, root_opened.st_ctime_ns) != (root_metadata.st_dev, root_metadata.st_ino, root_metadata.st_size, root_metadata.st_mtime_ns, root_metadata.st_ctime_ns):
+                raise ContractError("G2 verified cache root changed before file verification")
+            for component in parts[:-1]:
+                next_fd = os.open(component, directory_flags, dir_fd=parent_fd)
+                os.close(parent_fd)
+                parent_fd = next_fd
+            return os.open(parts[-1], flags, dir_fd=parent_fd)
+        except OSError as exc:
+            raise ContractError(f"G2 verified cache path cannot be opened without following symlinks: {relative}: {exc}") from exc
+        finally:
+            os.close(parent_fd)
+
+    def verify_locked_file(relative: str, entry: Mapping[str, Any]) -> int:
+        path = cache_root / relative
+        _reject_symlink_components(path, f"G2 verified cache file {relative}")
+        metadata = path.lstat()
+        if not stat.S_ISREG(metadata.st_mode) or path.is_symlink() or metadata.st_mode & 0o222:
+            raise ContractError(f"G2 verified cache file is not a read-only regular file: {relative}")
+        try:
+            local_fd = open_locked_path(relative)
+        except ContractError:
+            raise
+        try:
+            opened = os.fstat(local_fd)
+            if (opened.st_dev, opened.st_ino, opened.st_size, opened.st_mtime_ns, opened.st_ctime_ns) != (metadata.st_dev, metadata.st_ino, metadata.st_size, metadata.st_mtime_ns, metadata.st_ctime_ns) or opened.st_size != entry.get("size_bytes"):
+                raise ContractError(f"G2 verified cache file changed before hashing: {relative}")
+            _read_verified_fd_slice(
+                local_fd,
+                file_size=opened.st_size,
+                absolute_start=0,
+                absolute_end=opened.st_size,
+                expected_sha256=entry["sha256"],
+                label=f"G2 verified cache file {relative}",
+            )
+            return local_fd
+        except BaseException:
+            os.close(local_fd)
+            raise
+
+    for relative, entry in expected.items():
+        if relative != SOURCE_SHARD:
+            fd = verify_locked_file(relative, entry)
+            os.close(fd)
+
+    try:
+        fd = verify_locked_file(SOURCE_SHARD, shard_entry)
+    except OSError as exc:
+        raise ContractError(f"G2 verified source shard cannot be opened without following symlinks: {exc}") from exc
+    try:
+        metadata = os.fstat(fd)
+        if metadata.st_size != shard_entry.get("size_bytes"):
+            raise ContractError("G2 source shard size differs from the fixed model lock")
+        payload = _read_verified_fd_slice(
+            fd,
+            file_size=metadata.st_size,
+            absolute_start=ABSOLUTE_RANGE[0],
+            absolute_end=ABSOLUTE_RANGE[1],
+            expected_sha256=shard_entry.get("sha256", ""),
+            label="G2 verified source shard",
+        )
+        os.lseek(fd, 0, os.SEEK_SET)
+        header_bytes = os.read(fd, 8 + HEADER_LENGTH)
+        header_after = os.fstat(fd)
+        if (header_after.st_dev, header_after.st_ino, header_after.st_size, header_after.st_mtime_ns, header_after.st_ctime_ns) != (metadata.st_dev, metadata.st_ino, metadata.st_size, metadata.st_mtime_ns, metadata.st_ctime_ns):
+            raise ContractError("G2 source shard changed while its same-FD header was read")
+        header = _validate_verified_safetensors_header(header_bytes, file_size=metadata.st_size)
+        tensor = header[TENSOR_NAME]
+        if tensor != {"dtype": "BF16", "shape": [2560], "data_offsets": list(DATA_OFFSETS)}:
+            raise ContractError("verified safetensors tensor metadata differs from the fixed lock")
+    finally:
+        os.close(fd)
+    result = dict(record)
+    result["output"] = {"size_bytes": BYTE_SIZE, "sha256": _sha256(payload)}
+    return validate_slice_record(result, repo), payload
 
 
 def extract_synthetic_slice(path: Path, record: Mapping[str, Any], repo: Path = ROOT) -> dict[str, Any]:
@@ -656,12 +884,18 @@ def validate_report(document: Mapping[str, Any], repo: Path = ROOT) -> dict[str,
             document["execution"]["exit_code"] != 0
             or document["execution"]["timed_out"]
             or document["execution"]["crashed"]
+            or document["execution"]["failure_reason"] != ""
+            or document["execution"]["protocol_sha256"] == "0" * 64
             or any(document[name]["state"] != "OK" or not document[name]["available"] or not document[name]["reliable"] for name in ("health_pre", "health_post"))
+            or any(document[name]["ras_uncorrectable_count"] != 0 for name in ("health_pre", "health_post"))
             or any(document[name]["state"] != "CLEAN" or document[name]["residual_runner_children"] or document[name]["gpu_processes"] for name in ("process_pre", "process_post"))
-            or any(case["dispatch_count"] != 1 for case in cases)
+            or document["scope"]["dispatch_count"] != 6
+            or document["dispatch"]["dispatch_count"] != 6
+            or document["collection"]["passed_cases"] != 6
+            or document["collection"]["failed_cases"] != 0
+            or any(case["state"] != "PASS" or case["dispatch_count"] != 1 or case["fallback_used"] or case["nan_count"] != 0 or case["inf_count"] != 0 or case["timeout"] or case["crashed"] for case in cases)
         ):
             raise ContractError("G2 PASS report has invalid execution, health, process, or dispatch evidence")
-        raise ContractError("G2 numeric PASS is unavailable until the A5 parser/oracle exists")
     return dict(document)
 
 
@@ -698,9 +932,8 @@ def validate_aggregate(document: Mapping[str, Any], repo: Path = ROOT) -> dict[s
     if document["counts"] != expected_counts:
         raise ContractError("G2 aggregate collection/count evidence is inconsistent")
     if document["state"] == "PASS":
-        if any(row["state"] != "PASS" or row["collected_cases"] != len(CASE_IDS) or row["dispatch_count"] < len(CASE_IDS) or not row["health_ok"] or not row["process_clean"] for row in rows):
+        if any(row["state"] != "PASS" or row["collected_cases"] != len(CASE_IDS) or row["dispatch_count"] != len(CASE_IDS) or not row["health_ok"] or not row["process_clean"] or row["fallback_used"] for row in rows):
             raise ContractError("G2 aggregate PASS row evidence is incomplete")
-        raise ContractError("G2 numeric aggregate PASS is unavailable until the A5 parser/oracle exists")
     for row in rows:
         for label in ("report_sha256", "artifact_sha256", "candidate_sha256", "tuple_sha256"):
             _nonzero_sha(row[label], f"G2 aggregate {row['row_id']} {label}")

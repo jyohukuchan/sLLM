@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://sllm-project.local/ci/schema/rmsnorm-g2-matrix-v1.schema.json",
   "type": "object", "additionalProperties": false,
-  "required": ["schema_version", "matrix_id", "suite_id", "tier", "required", "targets", "cases", "tolerance", "slice_contract", "prerequisites"],
+  "required": ["schema_version", "matrix_id", "suite_id", "tier", "required", "targets", "cases", "tolerance", "slice_contract", "result_schema", "prerequisites"],
   "properties": {
     "schema_version": {"const": "rmsnorm-g2-matrix-v1"}, "matrix_id": {"const": "rmsnorm-g2-v1"},
     "suite_id": {"const": "g2-rmsnorm-real-weight-runtime"}, "tier": {"const": "tier_g2"}, "required": {"const": true},
@@ -20,6 +20,7 @@
     ]},
     "tolerance": {"const": "ci/matrix/rmsnorm-g2-tolerance-v1.json"},
     "slice_contract": {"const": "ci/schema/rmsnorm-g2-model-slice-v1.schema.json"},
+    "result_schema": {"const": "ci/schema/rmsnorm-g2-runtime-result-v1.schema.json"},
     "prerequisites": {
       "type": "object", "additionalProperties": false, "required": ["g0", "private_g1", "semantic_g1", "h3"],
       "properties": {
