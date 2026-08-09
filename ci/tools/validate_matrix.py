@@ -31,6 +31,29 @@ SEMANTIC_G1_SUITE_ID = "h0-rmsnorm-semantic-g1-contract"
 G2_SUITE_ID = "h0-rmsnorm-g2-contract"
 P0_SUITE_ID = "h0-rmsnorm-p0-contract"
 PHASE3_STAGE_A_SUITE_ID = "h0-phase3-stage-a-evidence-plan"
+RUST_DEPENDENCY_SUITE_ID = "h0-rust-dependency-closure"
+EXPECTED_RUST_DEPENDENCY_TEST_IDS = [
+    "h0.rust.dependency.manifest",
+    "h0.rust.dependency.negative",
+]
+EXPECTED_RUST_DEPENDENCY_PATH_RULES = {
+    "Cargo.toml",
+    "Cargo.lock",
+    "crates/sllm-core/Cargo.toml",
+    "crates/sllm-hip-sys/Cargo.toml",
+    "crates/sllm-hip/Cargo.toml",
+    "crates/sllm-cli/Cargo.toml",
+    "crates/sllm-frontend/Cargo.toml",
+    "ci/dependencies/rust-workspace-v1.json",
+    "ci/schema/rust-dependency-policy-v1.schema.json",
+    "ci/tools/validate_rust_dependencies.py",
+    "ci/tests/test_rust_dependencies.py",
+    "ci/matrix/suites-v1.json",
+    "ci/matrix/host-v1.json",
+    "ci/matrix/path-to-suite-v1.json",
+    "ci/tools/validate_matrix.py",
+    "ci/tools/validate_json_manifests.py",
+}
 EXPECTED_PHASE3_STAGE_A_TEST_IDS = [
     "phase3.stage_a.evidence_plan.contract",
     "phase3.stage_a.evidence_plan.negative",
@@ -584,6 +607,35 @@ def validate_phase3_stage_a_registration(
             raise ContractError(f"Phase 3 Stage A path is not explicitly owned: {path}")
 
 
+def validate_rust_dependency_registration(
+    suites: dict[str, object], host: dict[str, object], paths: dict[str, object]
+) -> None:
+    """Require the B0 dependency closure to be a dedicated host-only suite."""
+
+    suite = next((item for item in suites["suites"] if item["suite_id"] == RUST_DEPENDENCY_SUITE_ID), None)
+    if suite is None:
+        raise ContractError(f"missing Rust dependency closure suite: {RUST_DEPENDENCY_SUITE_ID}")
+    if suite["tier"] != "tier_h0" or suite["marker"] != "tier_h0":
+        raise ContractError("Rust dependency closure suite has the wrong tier/marker")
+    if suite["attributes"] != {key: False for key in ALLOWED_ATTRIBUTES}:
+        raise ContractError("Rust dependency closure suite must be host-only and offline")
+    if suite["test_ids"] != EXPECTED_RUST_DEPENDENCY_TEST_IDS:
+        raise ContractError("Rust dependency closure test registration drifted")
+    expected_commands = [
+        {"command_id": "rust-dependency-validator", "argv": ["{python}", "ci/tools/validate_rust_dependencies.py"]},
+        {"command_id": "rust-dependency-tests", "argv": ["{python}", "ci/tests/test_rust_dependencies.py"]},
+    ]
+    if suite["commands"] != expected_commands:
+        raise ContractError("Rust dependency closure command registration drifted")
+    rows = {row["row_id"]: row for row in host["rows"]}
+    if RUST_DEPENDENCY_SUITE_ID not in rows["h0"]["suite_ids"]:
+        raise ContractError("Rust dependency closure suite is not owned by host h0")
+    rules_by_pattern = {rule["pattern"]: set(rule["suite_ids"]) for rule in paths["rules"]}
+    for path in EXPECTED_RUST_DEPENDENCY_PATH_RULES:
+        if RUST_DEPENDENCY_SUITE_ID not in rules_by_pattern.get(path, set()):
+            raise ContractError(f"Rust dependency closure path is not explicitly owned: {path}")
+
+
 def validate_cargo_toolchain_registration(suites: dict[str, object]) -> None:
     """Allow the development pin everywhere, with one exact MSRV exception."""
 
@@ -621,12 +673,12 @@ def main() -> int:
             raise ContractError("host-v1 has unknown or missing top-level key")
         if set(paths) != {"schema_version", "revision", "default_suite_ids", "rules"}:
             raise ContractError("path-to-suite-v1 has unknown or missing top-level key")
-        if suites.get("schema_version") != "suites-v1" or suites.get("revision") != 17:
-            raise ContractError("suites-v1 identity is not revision 17")
-        if host.get("schema_version") != "host-v1" or host.get("revision") != 10:
-            raise ContractError("host-v1 identity is not revision 10")
-        if paths.get("schema_version") != "path-to-suite-v1" or paths.get("revision") != 23:
-            raise ContractError("path-to-suite-v1 identity is not revision 23")
+        if suites.get("schema_version") != "suites-v1" or suites.get("revision") != 18:
+            raise ContractError("suites-v1 identity is not revision 18")
+        if host.get("schema_version") != "host-v1" or host.get("revision") != 11:
+            raise ContractError("host-v1 identity is not revision 11")
+        if paths.get("schema_version") != "path-to-suite-v1" or paths.get("revision") != 24:
+            raise ContractError("path-to-suite-v1 identity is not revision 24")
         for suite in suites["suites"]:
             sid = suite["suite_id"]
             if set(suite) != {"suite_id", "tier", "marker", "attributes", "test_ids", "commands"}:
@@ -766,6 +818,7 @@ def main() -> int:
         validate_rmsnorm_path_ownership(paths)
         validate_semantic_g1_path_ownership(paths)
         validate_phase3_stage_a_registration(suites, host, paths)
+        validate_rust_dependency_registration(suites, host, paths)
         for g1_path in EXPECTED_G1_STATIC_PATH_RULES:
             if G1_STATIC_SUITE_ID not in rules_by_pattern.get(g1_path, set()):
                 raise ContractError(f"G1 path is not explicitly registered to the H0 static suite: {g1_path}")

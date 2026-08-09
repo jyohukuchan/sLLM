@@ -140,6 +140,8 @@ G1_SCHEMA_FILES = {
 }
 MODEL_LOCK_SCHEMA = "ci/schema/model-lock-v1.schema.json"
 MODEL_LOCK_PATH = "docs/models/locks/qwen3.5-4b-bf16.json"
+RUST_DEPENDENCY_SCHEMA = "ci/schema/rust-dependency-policy-v1.schema.json"
+RUST_DEPENDENCY_MANIFEST = "ci/dependencies/rust-workspace-v1.json"
 
 
 def h3_workspace_expectations() -> dict[str, object]:
@@ -1329,6 +1331,8 @@ def main() -> int:
             )
         if MODEL_LOCK_SCHEMA not in schema_names:
             raise ContractError("model-lock-v1 schema is not registered for manifest validation")
+        if RUST_DEPENDENCY_SCHEMA not in schema_names:
+            raise ContractError("Rust dependency policy schema is not registered for manifest validation")
         from jsonschema import Draft202012Validator, FormatChecker
         for path in schema_paths:
             schema = read_json(path)
@@ -1336,6 +1340,12 @@ def main() -> int:
             if path.name == "hygiene-allowlist-v1.schema.json":
                 allowlist = read_json(ROOT / "ci/policy/hygiene-allowlist-v1.json")
                 errors.extend(f"{path.relative_to(ROOT)}: {error.message}" for error in Draft202012Validator(schema, format_checker=FormatChecker()).iter_errors(allowlist))
+            if path.relative_to(ROOT).as_posix() == RUST_DEPENDENCY_SCHEMA:
+                dependency_manifest = read_json(ROOT / RUST_DEPENDENCY_MANIFEST)
+                errors.extend(
+                    f"{path.relative_to(ROOT)}: {error.message}"
+                    for error in Draft202012Validator(schema, format_checker=FormatChecker()).iter_errors(dependency_manifest)
+                )
         load_manifests(ROOT)
         from validate_rmsnorm_h3_contracts import validate_static as validate_rmsnorm_h3_static
 

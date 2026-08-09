@@ -1,7 +1,7 @@
 {
   "schema_version": "suites-v1",
   "registry_id": "sLLM-host-suites",
-  "revision": 17,
+  "revision": 18,
   "allowed_tiers": ["tier_h0", "tier_h1", "tier_h2", "tier_h3", "tier_h3_rmsnorm", "tier_g0", "tier_g1", "tier_g2", "tier_g3", "tier_g4", "tier_p0", "tier_p1"],
   "allowed_attributes": ["requires_gpu", "requires_model", "slow", "network", "quarantined"],
   "suites": [
@@ -201,6 +201,17 @@
       "commands": [
         {"command_id": "pytest-tier-h2", "argv": ["{python}", "-m", "pytest", "--durations=0", "-m", "tier_h2", "tests"]},
         {"command_id": "ci-oracle-tests", "argv": ["{python}", "ci/tests/test_h2_oracle.py"]}
+      ]
+    },
+    {
+      "suite_id": "h0-rust-dependency-closure",
+      "tier": "tier_h0",
+      "marker": "tier_h0",
+      "attributes": {"requires_gpu": false, "requires_model": false, "slow": false, "network": false, "quarantined": false},
+      "test_ids": ["h0.rust.dependency.manifest", "h0.rust.dependency.negative"],
+      "commands": [
+        {"command_id": "rust-dependency-validator", "argv": ["{python}", "ci/tools/validate_rust_dependencies.py"]},
+        {"command_id": "rust-dependency-tests", "argv": ["{python}", "ci/tests/test_rust_dependencies.py"]}
       ]
     }
   ]

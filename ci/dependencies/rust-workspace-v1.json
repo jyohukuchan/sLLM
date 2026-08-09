@@ -1,0 +1,3568 @@
+{
+  "$schema": "https://sllm.dev/schema/rust-dependency-policy-v1.schema.json",
+  "schema_version": "rust-dependency-policy-v1",
+  "policy_id": "rust-workspace-v1",
+  "workspace": {
+    "root": ".",
+    "resolver": 3,
+    "members": [
+      "crates/sllm-cli/Cargo.toml",
+      "crates/sllm-core/Cargo.toml",
+      "crates/sllm-frontend/Cargo.toml",
+      "crates/sllm-hip-sys/Cargo.toml",
+      "crates/sllm-hip/Cargo.toml"
+    ],
+    "default_members": [
+      "crates/sllm-cli/Cargo.toml",
+      "crates/sllm-core/Cargo.toml",
+      "crates/sllm-frontend/Cargo.toml",
+      "crates/sllm-hip-sys/Cargo.toml",
+      "crates/sllm-hip/Cargo.toml"
+    ]
+  },
+  "workspace_members": [
+    {
+      "identity": {
+        "name": "sllm-cli",
+        "version": "0.1.0",
+        "source": "workspace"
+      },
+      "manifest": "crates/sllm-cli/Cargo.toml",
+      "targets": [
+        {
+          "name": "sllm",
+          "kind": [
+            "bin"
+          ],
+          "crate_types": [
+            "bin"
+          ],
+          "edition": "2024",
+          "required_features": [],
+          "test": true,
+          "doc": true,
+          "doctest": false
+        }
+      ]
+    },
+    {
+      "identity": {
+        "name": "sllm-core",
+        "version": "0.1.0",
+        "source": "workspace"
+      },
+      "manifest": "crates/sllm-core/Cargo.toml",
+      "targets": [
+        {
+          "name": "model_contract",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ],
+          "edition": "2024",
+          "required_features": [],
+          "test": true,
+          "doc": false,
+          "doctest": false
+        },
+        {
+          "name": "sllm_core",
+          "kind": [
+            "lib"
+          ],
+          "crate_types": [
+            "lib"
+          ],
+          "edition": "2024",
+          "required_features": [],
+          "test": true,
+          "doc": true,
+          "doctest": true
+        }
+      ]
+    },
+    {
+      "identity": {
+        "name": "sllm-frontend",
+        "version": "0.1.0",
+        "source": "workspace"
+      },
+      "manifest": "crates/sllm-frontend/Cargo.toml",
+      "targets": [
+        {
+          "name": "sllm_frontend",
+          "kind": [
+            "lib"
+          ],
+          "crate_types": [
+            "lib"
+          ],
+          "edition": "2024",
+          "required_features": [],
+          "test": true,
+          "doc": true,
+          "doctest": true
+        }
+      ]
+    },
+    {
+      "identity": {
+        "name": "sllm-hip-sys",
+        "version": "0.1.0",
+        "source": "workspace"
+      },
+      "manifest": "crates/sllm-hip-sys/Cargo.toml",
+      "targets": [
+        {
+          "name": "build-script-build",
+          "kind": [
+            "custom-build"
+          ],
+          "crate_types": [
+            "bin"
+          ],
+          "edition": "2024",
+          "required_features": [],
+          "test": false,
+          "doc": false,
+          "doctest": false
+        },
+        {
+          "name": "sllm_hip_sys",
+          "kind": [
+            "lib"
+          ],
+          "crate_types": [
+            "lib"
+          ],
+          "edition": "2024",
+          "required_features": [],
+          "test": true,
+          "doc": true,
+          "doctest": true
+        }
+      ]
+    },
+    {
+      "identity": {
+        "name": "sllm-hip",
+        "version": "0.1.0",
+        "source": "workspace"
+      },
+      "manifest": "crates/sllm-hip/Cargo.toml",
+      "targets": [
+        {
+          "name": "sllm-hip-evidence",
+          "kind": [
+            "bin"
+          ],
+          "crate_types": [
+            "bin"
+          ],
+          "edition": "2024",
+          "required_features": [],
+          "test": true,
+          "doc": true,
+          "doctest": false
+        },
+        {
+          "name": "sllm-rmsnorm-g1-evidence",
+          "kind": [
+            "bin"
+          ],
+          "crate_types": [
+            "bin"
+          ],
+          "edition": "2024",
+          "required_features": [],
+          "test": true,
+          "doc": true,
+          "doctest": false
+        },
+        {
+          "name": "sllm-rmsnorm-g2-evidence",
+          "kind": [
+            "bin"
+          ],
+          "crate_types": [
+            "bin"
+          ],
+          "edition": "2024",
+          "required_features": [],
+          "test": true,
+          "doc": true,
+          "doctest": false
+        },
+        {
+          "name": "sllm-rmsnorm-p0-evidence",
+          "kind": [
+            "bin"
+          ],
+          "crate_types": [
+            "bin"
+          ],
+          "edition": "2024",
+          "required_features": [],
+          "test": true,
+          "doc": true,
+          "doctest": false
+        },
+        {
+          "name": "sllm_hip",
+          "kind": [
+            "lib"
+          ],
+          "crate_types": [
+            "lib"
+          ],
+          "edition": "2024",
+          "required_features": [],
+          "test": true,
+          "doc": true,
+          "doctest": true
+        }
+      ]
+    }
+  ],
+  "packages": [
+    {
+      "identity": {
+        "name": "ahash",
+        "version": "0.8.12",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "MIT OR Apache-2.0",
+      "rust_version": "1.60.0",
+      "features": [
+        "default",
+        "getrandom",
+        "runtime-rng",
+        "serde",
+        "std"
+      ],
+      "checksum": "5a15f179cd60c4584b8a8c596927aadc462e27f2ca70c04e0071964a73ba7a75"
+    },
+    {
+      "identity": {
+        "name": "aho-corasick",
+        "version": "1.1.4",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "Unlicense OR MIT",
+      "rust_version": "1.60.0",
+      "features": [
+        "default",
+        "perf-literal",
+        "std"
+      ],
+      "checksum": "ddd31a130427c27518df266943a5308ed92d4b226cc639f5a8f1002816174301"
+    },
+    {
+      "identity": {
+        "name": "base64",
+        "version": "0.13.1",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "MIT/Apache-2.0",
+      "rust_version": null,
+      "features": [
+        "default",
+        "std"
+      ],
+      "checksum": "9e1b586273c5702936fe7b7d6896644d8be71e6314cfe09d3167c95f712589e8"
+    },
+    {
+      "identity": {
+        "name": "bitflags",
+        "version": "2.13.0",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "MIT OR Apache-2.0",
+      "rust_version": "1.56.0",
+      "features": [],
+      "checksum": "b4388bee8683e3d04af747c73422af53102d2bd24d9eadb6cbc100baef4b43f8"
+    },
+    {
+      "identity": {
+        "name": "block-buffer",
+        "version": "0.10.4",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "MIT OR Apache-2.0",
+      "rust_version": null,
+      "features": [],
+      "checksum": "3078c7629b62d3f0439517fa394996acacc5cbc91c5a20d8c658e77abd503a71"
+    },
+    {
+      "identity": {
+        "name": "castaway",
+        "version": "0.2.4",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "MIT",
+      "rust_version": null,
+      "features": [
+        "alloc"
+      ],
+      "checksum": "dec551ab6e7578819132c713a93c022a05d60159dc86e7a7050223577484c55a"
+    },
+    {
+      "identity": {
+        "name": "cc",
+        "version": "1.4.0",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "MIT OR Apache-2.0",
+      "rust_version": "1.63",
+      "features": [],
+      "checksum": "5add81bb678e6cb321aff7fa0dc7689ad82b112dbc032cea19f91d6b8e3582b9"
+    },
+    {
+      "identity": {
+        "name": "cfg-if",
+        "version": "1.0.4",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "MIT OR Apache-2.0",
+      "rust_version": "1.32",
+      "features": [],
+      "checksum": "9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801"
+    },
+    {
+      "identity": {
+        "name": "compact_str",
+        "version": "0.9.1",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "MIT",
+      "rust_version": null,
+      "features": [
+        "default",
+        "serde",
+        "std"
+      ],
+      "checksum": "9dfdd1c2274d9aa354115b09dc9a901d6c5576818cdf70d14cae2bdb47df00ab"
+    },
+    {
+      "identity": {
+        "name": "cpufeatures",
+        "version": "0.2.17",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "MIT OR Apache-2.0",
+      "rust_version": null,
+      "features": [],
+      "checksum": "59ed5838eebb26a2bb2e58f6d5b5316989ae9d08bab10e0e6d103e656d1b0280"
+    },
+    {
+      "identity": {
+        "name": "crossbeam-deque",
+        "version": "0.8.6",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "MIT OR Apache-2.0",
+      "rust_version": "1.61",
+      "features": [
+        "default",
+        "std"
+      ],
+      "checksum": "9dd111b7b7f7d55b72c0a6ae361660ee5853c9af73f70c3c2ef6858b950e2e51"
+    },
+    {
+      "identity": {
+        "name": "crossbeam-epoch",
+        "version": "0.9.18",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "MIT OR Apache-2.0",
+      "rust_version": "1.61",
+      "features": [
+        "alloc",
+        "std"
+      ],
+      "checksum": "5b82ac4a3c2ca9c3460964f020e1402edd5753411d7737aa39c3714ad1b5420e"
+    },
+    {
+      "identity": {
+        "name": "crossbeam-utils",
+        "version": "0.8.21",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "MIT OR Apache-2.0",
+      "rust_version": "1.60",
+      "features": [
+        "default",
+        "std"
+      ],
+      "checksum": "d0a5c400df2834b80a4c3327b3aad3a4c4cd4de0629063962b03235697506a28"
+    },
+    {
+      "identity": {
+        "name": "crypto-common",
+        "version": "0.1.7",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "MIT OR Apache-2.0",
+      "rust_version": null,
+      "features": [
+        "std"
+      ],
+      "checksum": "78c8292055d1c1df0cce5d180393dc8cce0abec0a7102adb6c7b1eef6016d60a"
+    },
+    {
+      "identity": {
+        "name": "darling",
+        "version": "0.20.11",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "MIT",
+      "rust_version": "1.56",
+      "features": [
+        "default",
+        "suggestions"
+      ],
+      "checksum": "fc7f46116c46ff9ab3eb1597a45688b6715c6e628b5c133e288e709a29bcb4ee"
+    },
+    {
+      "identity": {
+        "name": "darling_core",
+        "version": "0.20.11",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "MIT",
+      "rust_version": "1.56",
+      "features": [
+        "strsim",
+        "suggestions"
+      ],
+      "checksum": "0d00b9596d185e565c2207a0b01f8bd1a135483d02d9b7b0a54b11da8d53412e"
+    },
+    {
+      "identity": {
+        "name": "darling_macro",
+        "version": "0.20.11",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "MIT",
+      "rust_version": "1.56",
+      "features": [],
+      "checksum": "fc34b93ccb385b40dc71c6fceac4b2ad23662c7eeb248cf10d529b7e055b6ead"
+    },
+    {
+      "identity": {
+        "name": "dary_heap",
+        "version": "0.3.9",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "MIT OR Apache-2.0",
+      "rust_version": null,
+      "features": [
+        "serde"
+      ],
+      "checksum": "8b1e3a325bc115f096c8b77bbf027a7c2592230e70be2d985be950d3d5e60ebe"
+    },
+    {
+      "identity": {
+        "name": "derive_builder",
+        "version": "0.20.2",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "MIT OR Apache-2.0",
+      "rust_version": null,
+      "features": [
+        "default",
+        "std"
+      ],
+      "checksum": "507dfb09ea8b7fa618fcf76e953f4f5e192547945816d5358edffe39f6f94947"
+    },
+    {
+      "identity": {
+        "name": "derive_builder_core",
+        "version": "0.20.2",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "MIT OR Apache-2.0",
+      "rust_version": null,
+      "features": [
+        "lib_has_std"
+      ],
+      "checksum": "2d5bcf7b024d6835cfb3d473887cd966994907effbe9227e8c8219824d06c4e8"
+    },
+    {
+      "identity": {
+        "name": "derive_builder_macro",
+        "version": "0.20.2",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "MIT OR Apache-2.0",
+      "rust_version": null,
+      "features": [
+        "lib_has_std"
+      ],
+      "checksum": "ab63b0e2bf4d5928aff72e83a7dace85d7bba5fe12dcc3c5a572d78caffd3f3c"
+    },
+    {
+      "identity": {
+        "name": "digest",
+        "version": "0.10.7",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "MIT OR Apache-2.0",
+      "rust_version": null,
+      "features": [
+        "alloc",
+        "block-buffer",
+        "core-api",
+        "default",
+        "std"
+      ],
+      "checksum": "9ed9a281f7bc9b7576e61468ba615a66a5c8cfdff42420a70aa82701a3b1e292"
+    },
+    {
+      "identity": {
+        "name": "either",
+        "version": "1.16.0",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "MIT OR Apache-2.0",
+      "rust_version": "1.63.0",
+      "features": [
+        "default",
+        "std",
+        "use_std"
+      ],
+      "checksum": "91622ff5e7162018101f2fea40d6ebf4a78bbe5a49736a2020649edf9693679e"
+    },
+    {
+      "identity": {
+        "name": "esaxx-rs",
+        "version": "0.1.10",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "Apache-2.0",
+      "rust_version": null,
+      "features": [],
+      "checksum": "d817e038c30374a4bcb22f94d0a8a0e216958d4c3dcde369b1439fec4bdda6e6"
+    },
+    {
+      "identity": {
+        "name": "find-msvc-tools",
+        "version": "0.1.9",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "MIT OR Apache-2.0",
+      "rust_version": "1.63",
+      "features": [],
+      "checksum": "5baebc0774151f905a1a2cc41989300b1e6fbb29aff0ceffa1064fdd3088d582"
+    },
+    {
+      "identity": {
+        "name": "fnv",
+        "version": "1.0.7",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "Apache-2.0 / MIT",
+      "rust_version": null,
+      "features": [
+        "default",
+        "std"
+      ],
+      "checksum": "3f9eec918d3f24069decb9af1554cad7c880e2da24a9afd88aca000531ab82c1"
+    },
+    {
+      "identity": {
+        "name": "generic-array",
+        "version": "0.14.7",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "MIT",
+      "rust_version": null,
+      "features": [
+        "more_lengths"
+      ],
+      "checksum": "85649ca51fd72272d7821adaf274ad91c288277713d9c18820d8499a7ff69e9a"
+    },
+    {
+      "identity": {
+        "name": "getrandom",
+        "version": "0.3.4",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "MIT OR Apache-2.0",
+      "rust_version": "1.63",
+      "features": [
+        "std"
+      ],
+      "checksum": "899def5c37c4fd7b2664648c28120ecec138e4d395b459e5ca34f9cce2dd77fd"
+    },
+    {
+      "identity": {
+        "name": "ident_case",
+        "version": "1.0.1",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "MIT/Apache-2.0",
+      "rust_version": null,
+      "features": [],
+      "checksum": "b9e0384b61958566e926dc50660321d12159025e767c18e043daf26b70104c39"
+    },
+    {
+      "identity": {
+        "name": "itertools",
+        "version": "0.14.0",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "MIT OR Apache-2.0",
+      "rust_version": "1.63.0",
+      "features": [
+        "default",
+        "use_alloc",
+        "use_std"
+      ],
+      "checksum": "2b192c782037fadd9cfa75548310488aabdbf3d2da73885b31bd0abd03351285"
+    },
+    {
+      "identity": {
+        "name": "itoa",
+        "version": "1.0.18",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "MIT OR Apache-2.0",
+      "rust_version": "1.68",
+      "features": [],
+      "checksum": "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
+    },
+    {
+      "identity": {
+        "name": "libc",
+        "version": "0.2.186",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "MIT OR Apache-2.0",
+      "rust_version": "1.65",
+      "features": [
+        "default",
+        "std"
+      ],
+      "checksum": "68ab91017fe16c622486840e4c83c9a37afeff978bd239b5293d61ece587de66"
+    },
+    {
+      "identity": {
+        "name": "log",
+        "version": "0.4.33",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "MIT OR Apache-2.0",
+      "rust_version": "1.71.0",
+      "features": [],
+      "checksum": "0ceec5bc11778974d1bcb055b18002eba7f4b3518b6a0081b3af5f21666da9ad"
+    },
+    {
+      "identity": {
+        "name": "macro_rules_attribute-proc_macro",
+        "version": "0.2.2",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "Apache-2.0 OR MIT OR Zlib",
+      "rust_version": null,
+      "features": [],
+      "checksum": "670fdfda89751bc4a84ac13eaa63e205cf0fd22b4c9a5fbfa085b63c1f1d3a30"
+    },
+    {
+      "identity": {
+        "name": "macro_rules_attribute",
+        "version": "0.2.2",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "Apache-2.0 OR MIT OR Zlib",
+      "rust_version": null,
+      "features": [
+        "default"
+      ],
+      "checksum": "65049d7923698040cd0b1ddcced9b0eb14dd22c5f86ae59c3740eab64a676520"
+    },
+    {
+      "identity": {
+        "name": "memchr",
+        "version": "2.8.3",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "Unlicense OR MIT",
+      "rust_version": "1.61",
+      "features": [
+        "alloc",
+        "std"
+      ],
+      "checksum": "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
+    },
+    {
+      "identity": {
+        "name": "minimal-lexical",
+        "version": "0.2.1",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "MIT/Apache-2.0",
+      "rust_version": null,
+      "features": [
+        "std"
+      ],
+      "checksum": "68354c5c6bd36d73ff3feceb05efa59b6acb7626617f4962be322a825e61f79a"
+    },
+    {
+      "identity": {
+        "name": "monostate-impl",
+        "version": "0.1.18",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "MIT OR Apache-2.0",
+      "rust_version": "1.79",
+      "features": [],
+      "checksum": "e4db6d5580af57bf992f59068d4ea26fd518574ff48d7639b255a36f9de6e7e9"
+    },
+    {
+      "identity": {
+        "name": "monostate",
+        "version": "0.1.18",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "MIT OR Apache-2.0",
+      "rust_version": "1.79",
+      "features": [],
+      "checksum": "3341a273f6c9d5bef1908f17b7267bbab0e95c9bf69a0d4dcf8e9e1b2c76ef67"
+    },
+    {
+      "identity": {
+        "name": "nom",
+        "version": "7.1.3",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "MIT",
+      "rust_version": "1.48",
+      "features": [
+        "alloc",
+        "default",
+        "std"
+      ],
+      "checksum": "d273983c5a657a70a3e8f2a01329822f3b8c8172b73826411a55751e404a0a4a"
+    },
+    {
+      "identity": {
+        "name": "once_cell",
+        "version": "1.21.4",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "MIT OR Apache-2.0",
+      "rust_version": "1.65",
+      "features": [
+        "alloc",
+        "default",
+        "race",
+        "std"
+      ],
+      "checksum": "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
+    },
+    {
+      "identity": {
+        "name": "onig",
+        "version": "6.5.3",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "MIT",
+      "rust_version": "1.70.0",
+      "features": [],
+      "checksum": "0cc3cbf698f9438986c11a880c90a6d04b9de27575afd28bbf45b154b6c709e2"
+    },
+    {
+      "identity": {
+        "name": "onig_sys",
+        "version": "69.9.3",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "MIT",
+      "rust_version": "1.70.0",
+      "features": [],
+      "checksum": "1e68317604e77e53b85896388e1a803c1d21b74c899ec9e5e1112db90735edd7"
+    },
+    {
+      "identity": {
+        "name": "paste",
+        "version": "1.0.15",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "MIT OR Apache-2.0",
+      "rust_version": "1.31",
+      "features": [],
+      "checksum": "57c0d7b74b563b49d38dae00a0c37d4d6de9b432382b2892f0574ddcae73fd0a"
+    },
+    {
+      "identity": {
+        "name": "pkg-config",
+        "version": "0.3.33",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "MIT OR Apache-2.0",
+      "rust_version": "1.31",
+      "features": [],
+      "checksum": "19f132c84eca552bf34cab8ec81f1c1dcc229b811638f9d283dceabe58c5569e"
+    },
+    {
+      "identity": {
+        "name": "ppv-lite86",
+        "version": "0.2.21",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "MIT OR Apache-2.0",
+      "rust_version": "1.61",
+      "features": [
+        "simd",
+        "std"
+      ],
+      "checksum": "85eae3c4ed2f50dcfe72643da4befc30deadb458a9b590d720cde2f2b1e97da9"
+    },
+    {
+      "identity": {
+        "name": "proc-macro2",
+        "version": "1.0.107",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "MIT OR Apache-2.0",
+      "rust_version": "1.71",
+      "features": [
+        "default",
+        "proc-macro"
+      ],
+      "checksum": "985e7ec9bb745e6ce6535b544d84d6cd6f7ad8bd711c398938ae983b91a766d9"
+    },
+    {
+      "identity": {
+        "name": "quote",
+        "version": "1.0.47",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "MIT OR Apache-2.0",
+      "rust_version": "1.71",
+      "features": [
+        "default",
+        "proc-macro"
+      ],
+      "checksum": "1fbf4db142a473a8d80c26bbf18454ed458bf8d26c8219c331daecfdbd079001"
+    },
+    {
+      "identity": {
+        "name": "r-efi",
+        "version": "5.3.0",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "MIT OR Apache-2.0 OR LGPL-2.1-or-later",
+      "rust_version": "1.68",
+      "features": [],
+      "checksum": "69cdb34c158ceb288df11e18b4bd39de994f6657d83847bdffdbd7f346754b0f"
+    },
+    {
+      "identity": {
+        "name": "rand",
+        "version": "0.9.4",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "MIT OR Apache-2.0",
+      "rust_version": "1.63",
+      "features": [
+        "alloc",
+        "default",
+        "os_rng",
+        "small_rng",
+        "std",
+        "std_rng",
+        "thread_rng"
+      ],
+      "checksum": "44c5af06bb1b7d3216d91932aed5265164bf384dc89cd6ba05cf59a35f5f76ea"
+    },
+    {
+      "identity": {
+        "name": "rand_chacha",
+        "version": "0.9.0",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "MIT OR Apache-2.0",
+      "rust_version": "1.63",
+      "features": [
+        "std"
+      ],
+      "checksum": "d3022b5f1df60f26e1ffddd6c66e8aa15de382ae63b3a0c1bfc0e4d3e3f325cb"
+    },
+    {
+      "identity": {
+        "name": "rand_core",
+        "version": "0.9.5",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "MIT OR Apache-2.0",
+      "rust_version": "1.63",
+      "features": [
+        "os_rng",
+        "std"
+      ],
+      "checksum": "76afc826de14238e6e8c374ddcc1fa19e374fd8dd986b0d2af0d02377261d83c"
+    },
+    {
+      "identity": {
+        "name": "rayon-cond",
+        "version": "0.4.0",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "Apache-2.0/MIT",
+      "rust_version": "1.63.0",
+      "features": [],
+      "checksum": "2964d0cf57a3e7a06e8183d14a8b527195c706b7983549cd5462d5aa3747438f"
+    },
+    {
+      "identity": {
+        "name": "rayon-core",
+        "version": "1.13.0",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "MIT OR Apache-2.0",
+      "rust_version": "1.80",
+      "features": [],
+      "checksum": "22e18b0f0062d30d4230b2e85ff77fdfe4326feb054b9783a3460d8435c8ab91"
+    },
+    {
+      "identity": {
+        "name": "rayon",
+        "version": "1.12.0",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "MIT OR Apache-2.0",
+      "rust_version": "1.80",
+      "features": [],
+      "checksum": "fb39b166781f92d482534ef4b4b1b2568f42613b53e5b6c160e24cfbfa30926d"
+    },
+    {
+      "identity": {
+        "name": "regex-automata",
+        "version": "0.4.14",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "MIT OR Apache-2.0",
+      "rust_version": "1.65",
+      "features": [
+        "alloc",
+        "dfa-onepass",
+        "hybrid",
+        "meta",
+        "nfa-backtrack",
+        "nfa-pikevm",
+        "nfa-thompson",
+        "perf-inline",
+        "perf-literal",
+        "perf-literal-multisubstring",
+        "perf-literal-substring",
+        "std",
+        "syntax",
+        "unicode",
+        "unicode-age",
+        "unicode-bool",
+        "unicode-case",
+        "unicode-gencat",
+        "unicode-perl",
+        "unicode-script",
+        "unicode-segment",
+        "unicode-word-boundary"
+      ],
+      "checksum": "6e1dd4122fc1595e8162618945476892eefca7b88c52820e74af6262213cae8f"
+    },
+    {
+      "identity": {
+        "name": "regex-syntax",
+        "version": "0.8.11",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "MIT OR Apache-2.0",
+      "rust_version": "1.65",
+      "features": [
+        "default",
+        "std",
+        "unicode",
+        "unicode-age",
+        "unicode-bool",
+        "unicode-case",
+        "unicode-gencat",
+        "unicode-perl",
+        "unicode-script",
+        "unicode-segment"
+      ],
+      "checksum": "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
+    },
+    {
+      "identity": {
+        "name": "regex",
+        "version": "1.12.4",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "MIT OR Apache-2.0",
+      "rust_version": "1.65",
+      "features": [
+        "default",
+        "perf",
+        "perf-backtrack",
+        "perf-cache",
+        "perf-dfa",
+        "perf-inline",
+        "perf-literal",
+        "perf-onepass",
+        "std",
+        "unicode",
+        "unicode-age",
+        "unicode-bool",
+        "unicode-case",
+        "unicode-gencat",
+        "unicode-perl",
+        "unicode-script",
+        "unicode-segment"
+      ],
+      "checksum": "f1292b7759ae1cb9ec195452d1390a074f0cd8541ab7a5a8c31cd6db45d4a6ba"
+    },
+    {
+      "identity": {
+        "name": "rustversion",
+        "version": "1.0.22",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "MIT OR Apache-2.0",
+      "rust_version": "1.31",
+      "features": [],
+      "checksum": "b39cdef0fa800fc44525c84ccb54a029961a8215f9619753635a9c0d2538d46d"
+    },
+    {
+      "identity": {
+        "name": "ryu",
+        "version": "1.0.23",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "Apache-2.0 OR BSL-1.0",
+      "rust_version": "1.71",
+      "features": [],
+      "checksum": "9774ba4a74de5f7b1c1451ed6cd5285a32eddb5cccb8cc655a4e50009e06477f"
+    },
+    {
+      "identity": {
+        "name": "serde",
+        "version": "1.0.228",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "MIT OR Apache-2.0",
+      "rust_version": "1.56",
+      "features": [
+        "alloc",
+        "default",
+        "derive",
+        "serde_derive",
+        "std"
+      ],
+      "checksum": "9a8e94ea7f378bd32cbbd37198a4a91436180c5bb472411e48b5ec2e2124ae9e"
+    },
+    {
+      "identity": {
+        "name": "serde_core",
+        "version": "1.0.228",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "MIT OR Apache-2.0",
+      "rust_version": "1.56",
+      "features": [
+        "alloc",
+        "result",
+        "std"
+      ],
+      "checksum": "41d385c7d4ca58e59fc732af25c3983b67ac852c1a25000afe1175de458b67ad"
+    },
+    {
+      "identity": {
+        "name": "serde_derive",
+        "version": "1.0.228",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "MIT OR Apache-2.0",
+      "rust_version": "1.61",
+      "features": [
+        "default"
+      ],
+      "checksum": "d540f220d3187173da220f885ab66608367b6574e925011a9353e4badda91d79"
+    },
+    {
+      "identity": {
+        "name": "serde_json",
+        "version": "1.0.150",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "MIT OR Apache-2.0",
+      "rust_version": "1.71",
+      "features": [
+        "default",
+        "std"
+      ],
+      "checksum": "e8014e44b4736ed0538adeecded0fce2a272f22dc9578a7eb6b2d9993c74cfb9"
+    },
+    {
+      "identity": {
+        "name": "sha2",
+        "version": "0.10.9",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "MIT OR Apache-2.0",
+      "rust_version": null,
+      "features": [
+        "default",
+        "std"
+      ],
+      "checksum": "a7507d819769d01a365ab707794a4084392c824f54a7a6a7862f8c3d0892b283"
+    },
+    {
+      "identity": {
+        "name": "shlex",
+        "version": "2.0.1",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "MIT OR Apache-2.0",
+      "rust_version": "1.46.0",
+      "features": [
+        "default",
+        "std"
+      ],
+      "checksum": "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
+    },
+    {
+      "identity": {
+        "name": "smallvec",
+        "version": "1.15.2",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "MIT OR Apache-2.0",
+      "rust_version": null,
+      "features": [],
+      "checksum": "8ed6a63f02c8539c91a8685a86f4099661ba3da017932f6ebbea6de3f0fa7c90"
+    },
+    {
+      "identity": {
+        "name": "spm_precompiled",
+        "version": "0.1.4",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "Apache-2.0",
+      "rust_version": null,
+      "features": [],
+      "checksum": "5851699c4033c63636f7ea4cf7b7c1f1bf06d0cc03cfb42e711de5a5c46cf326"
+    },
+    {
+      "identity": {
+        "name": "static_assertions",
+        "version": "1.1.0",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "MIT OR Apache-2.0",
+      "rust_version": null,
+      "features": [],
+      "checksum": "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
+    },
+    {
+      "identity": {
+        "name": "strsim",
+        "version": "0.11.1",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "MIT",
+      "rust_version": "1.56",
+      "features": [],
+      "checksum": "7da8b5736845d9f2fcb837ea5d9e2628564b3b043a70948a3f0b778838c5fb4f"
+    },
+    {
+      "identity": {
+        "name": "syn",
+        "version": "2.0.118",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "MIT OR Apache-2.0",
+      "rust_version": "1.71",
+      "features": [
+        "clone-impls",
+        "default",
+        "derive",
+        "extra-traits",
+        "full",
+        "parsing",
+        "printing",
+        "proc-macro"
+      ],
+      "checksum": "1b9ae57f904213ebb649ce6895b8a66c66f0203b9319718f69a5612a065b1422"
+    },
+    {
+      "identity": {
+        "name": "thiserror-impl",
+        "version": "2.0.18",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "MIT OR Apache-2.0",
+      "rust_version": "1.68",
+      "features": [],
+      "checksum": "ebc4ee7f67670e9b64d05fa4253e753e016c6c95ff35b89b7941d6b856dec1d5"
+    },
+    {
+      "identity": {
+        "name": "thiserror",
+        "version": "2.0.18",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "MIT OR Apache-2.0",
+      "rust_version": "1.68",
+      "features": [
+        "default",
+        "std"
+      ],
+      "checksum": "4288b5bcbc7920c07a1149a35cf9590a2aa808e0bc1eafaade0b80947865fbc4"
+    },
+    {
+      "identity": {
+        "name": "tokenizers",
+        "version": "0.21.4",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "Apache-2.0",
+      "rust_version": null,
+      "features": [
+        "onig"
+      ],
+      "checksum": "a620b996116a59e184c2fa2dfd8251ea34a36d0a514758c6f966386bd2e03476"
+    },
+    {
+      "identity": {
+        "name": "typenum",
+        "version": "1.20.1",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "MIT OR Apache-2.0",
+      "rust_version": "1.41.0",
+      "features": [],
+      "checksum": "b6f5e870be6c3b371b77fe0ee0bafb859fa4964b4404c27de1d380043c4dda20"
+    },
+    {
+      "identity": {
+        "name": "unicode-ident",
+        "version": "1.0.24",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "(MIT OR Apache-2.0) AND Unicode-3.0",
+      "rust_version": "1.71",
+      "features": [],
+      "checksum": "e6e4313cd5fcd3dad5cafa179702e2b244f760991f45397d14d4ebf38247da75"
+    },
+    {
+      "identity": {
+        "name": "unicode-normalization-alignments",
+        "version": "0.1.12",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "MIT/Apache-2.0",
+      "rust_version": null,
+      "features": [],
+      "checksum": "43f613e4fa046e69818dd287fdc4bc78175ff20331479dab6e1b0f98d57062de"
+    },
+    {
+      "identity": {
+        "name": "unicode-segmentation",
+        "version": "1.13.3",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "MIT OR Apache-2.0",
+      "rust_version": "1.85.0",
+      "features": [],
+      "checksum": "c6f5d3c3b1bf09027a88a6bc961fc00497d651009560b5463668dc81b0fa87a8"
+    },
+    {
+      "identity": {
+        "name": "unicode_categories",
+        "version": "0.1.1",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "MIT OR Apache-2.0",
+      "rust_version": null,
+      "features": [],
+      "checksum": "39ec24b3121d976906ece63c9daad25b85969647682eee313cb5779fdd69e14e"
+    },
+    {
+      "identity": {
+        "name": "version_check",
+        "version": "0.9.5",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "MIT/Apache-2.0",
+      "rust_version": null,
+      "features": [],
+      "checksum": "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
+    },
+    {
+      "identity": {
+        "name": "wasip2",
+        "version": "1.0.4+wasi-0.2.12",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT",
+      "rust_version": "1.87.0",
+      "features": [],
+      "checksum": "b67efb37e106e55ce722a510d6b5f9c17f083e5fc79afc2badeb12cc313d9487"
+    },
+    {
+      "identity": {
+        "name": "wit-bindgen",
+        "version": "0.57.1",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT",
+      "rust_version": "1.85.0",
+      "features": [],
+      "checksum": "1ebf944e87a7c253233ad6766e082e3cd714b5d03812acc24c318f549614536e"
+    },
+    {
+      "identity": {
+        "name": "zerocopy-derive",
+        "version": "0.8.54",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "BSD-2-Clause OR Apache-2.0 OR MIT",
+      "rust_version": null,
+      "features": [],
+      "checksum": "e2e817b7b52d0c7358d3246da9d69935ebb18116b2b102b4230dac079b4862f5"
+    },
+    {
+      "identity": {
+        "name": "zerocopy",
+        "version": "0.8.54",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "BSD-2-Clause OR Apache-2.0 OR MIT",
+      "rust_version": "1.56.0",
+      "features": [
+        "simd"
+      ],
+      "checksum": "b7cbbc0a705a0fd05cc3676525980d2bf5a9bc4adac6d6475209a7887cf59d19"
+    },
+    {
+      "identity": {
+        "name": "zmij",
+        "version": "1.0.23",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "MIT",
+      "rust_version": "1.71",
+      "features": [],
+      "checksum": "29666d0abbfad1e3dc4dcf6144730dd3a3ab225bbbdac83319345b1b44ccfc1b"
+    },
+    {
+      "identity": {
+        "name": "sllm-cli",
+        "version": "0.1.0",
+        "source": "workspace"
+      },
+      "license": "MIT",
+      "rust_version": "1.85.0",
+      "features": [],
+      "checksum": null
+    },
+    {
+      "identity": {
+        "name": "sllm-core",
+        "version": "0.1.0",
+        "source": "workspace"
+      },
+      "license": "MIT",
+      "rust_version": "1.85.0",
+      "features": [],
+      "checksum": null
+    },
+    {
+      "identity": {
+        "name": "sllm-frontend",
+        "version": "0.1.0",
+        "source": "workspace"
+      },
+      "license": "MIT",
+      "rust_version": "1.85.0",
+      "features": [],
+      "checksum": null
+    },
+    {
+      "identity": {
+        "name": "sllm-hip-sys",
+        "version": "0.1.0",
+        "source": "workspace"
+      },
+      "license": "MIT",
+      "rust_version": "1.85.0",
+      "features": [],
+      "checksum": null
+    },
+    {
+      "identity": {
+        "name": "sllm-hip",
+        "version": "0.1.0",
+        "source": "workspace"
+      },
+      "license": "MIT",
+      "rust_version": "1.85.0",
+      "features": [],
+      "checksum": null
+    }
+  ],
+  "edges": [
+    {
+      "from": "registry:ahash@0.8.12",
+      "to": "registry:cfg-if@1.0.4",
+      "name": "cfg-if",
+      "kind": "normal",
+      "target": null,
+      "req": "^1.0",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:ahash@0.8.12",
+      "to": "registry:getrandom@0.3.4",
+      "name": "getrandom",
+      "kind": "normal",
+      "target": null,
+      "req": "^0.3.1",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": true,
+      "rename": null
+    },
+    {
+      "from": "registry:ahash@0.8.12",
+      "to": "registry:once_cell@1.21.4",
+      "name": "once_cell",
+      "kind": "normal",
+      "target": "cfg(not(all(target_arch = \"arm\", target_os = \"none\")))",
+      "req": "^1.18.0",
+      "requested_features": [
+        "alloc"
+      ],
+      "uses_default_features": false,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:ahash@0.8.12",
+      "to": "registry:serde@1.0.228",
+      "name": "serde",
+      "kind": "normal",
+      "target": null,
+      "req": "^1.0.117",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": true,
+      "rename": null
+    },
+    {
+      "from": "registry:ahash@0.8.12",
+      "to": "registry:version_check@0.9.5",
+      "name": "version_check",
+      "kind": "build",
+      "target": null,
+      "req": "^0.9.4",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:ahash@0.8.12",
+      "to": "registry:zerocopy@0.8.54",
+      "name": "zerocopy",
+      "kind": "normal",
+      "target": null,
+      "req": "^0.8.24",
+      "requested_features": [
+        "simd"
+      ],
+      "uses_default_features": false,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:aho-corasick@1.1.4",
+      "to": "registry:memchr@2.8.3",
+      "name": "memchr",
+      "kind": "normal",
+      "target": null,
+      "req": "^2.4.0",
+      "requested_features": [],
+      "uses_default_features": false,
+      "optional": true,
+      "rename": null
+    },
+    {
+      "from": "registry:block-buffer@0.10.4",
+      "to": "registry:generic-array@0.14.7",
+      "name": "generic-array",
+      "kind": "normal",
+      "target": null,
+      "req": "^0.14",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:castaway@0.2.4",
+      "to": "registry:rustversion@1.0.22",
+      "name": "rustversion",
+      "kind": "normal",
+      "target": null,
+      "req": "^1",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:cc@1.4.0",
+      "to": "registry:find-msvc-tools@0.1.9",
+      "name": "find-msvc-tools",
+      "kind": "normal",
+      "target": null,
+      "req": "^0.1.9",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:cc@1.4.0",
+      "to": "registry:shlex@2.0.1",
+      "name": "shlex",
+      "kind": "normal",
+      "target": null,
+      "req": "^2.0.1",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:compact_str@0.9.1",
+      "to": "registry:castaway@0.2.4",
+      "name": "castaway",
+      "kind": "normal",
+      "target": null,
+      "req": "^0.2.3",
+      "requested_features": [
+        "alloc"
+      ],
+      "uses_default_features": false,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:compact_str@0.9.1",
+      "to": "registry:cfg-if@1.0.4",
+      "name": "cfg-if",
+      "kind": "normal",
+      "target": null,
+      "req": "^1",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:compact_str@0.9.1",
+      "to": "registry:itoa@1.0.18",
+      "name": "itoa",
+      "kind": "normal",
+      "target": null,
+      "req": "^1",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:compact_str@0.9.1",
+      "to": "registry:rustversion@1.0.22",
+      "name": "rustversion",
+      "kind": "normal",
+      "target": null,
+      "req": "^1",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:compact_str@0.9.1",
+      "to": "registry:ryu@1.0.23",
+      "name": "ryu",
+      "kind": "normal",
+      "target": null,
+      "req": "^1",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:compact_str@0.9.1",
+      "to": "registry:serde@1.0.228",
+      "name": "serde",
+      "kind": "normal",
+      "target": null,
+      "req": "^1",
+      "requested_features": [
+        "alloc",
+        "derive"
+      ],
+      "uses_default_features": false,
+      "optional": true,
+      "rename": null
+    },
+    {
+      "from": "registry:compact_str@0.9.1",
+      "to": "registry:static_assertions@1.1.0",
+      "name": "static_assertions",
+      "kind": "normal",
+      "target": null,
+      "req": "^1",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:cpufeatures@0.2.17",
+      "to": "registry:libc@0.2.186",
+      "name": "libc",
+      "kind": "normal",
+      "target": "aarch64-linux-android",
+      "req": "^0.2.155",
+      "requested_features": [],
+      "uses_default_features": false,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:cpufeatures@0.2.17",
+      "to": "registry:libc@0.2.186",
+      "name": "libc",
+      "kind": "normal",
+      "target": "cfg(all(target_arch = \"aarch64\", target_os = \"linux\"))",
+      "req": "^0.2.155",
+      "requested_features": [],
+      "uses_default_features": false,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:cpufeatures@0.2.17",
+      "to": "registry:libc@0.2.186",
+      "name": "libc",
+      "kind": "normal",
+      "target": "cfg(all(target_arch = \"aarch64\", target_vendor = \"apple\"))",
+      "req": "^0.2.155",
+      "requested_features": [],
+      "uses_default_features": false,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:cpufeatures@0.2.17",
+      "to": "registry:libc@0.2.186",
+      "name": "libc",
+      "kind": "normal",
+      "target": "cfg(all(target_arch = \"loongarch64\", target_os = \"linux\"))",
+      "req": "^0.2.155",
+      "requested_features": [],
+      "uses_default_features": false,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:crossbeam-deque@0.8.6",
+      "to": "registry:crossbeam-epoch@0.9.18",
+      "name": "crossbeam-epoch",
+      "kind": "normal",
+      "target": null,
+      "req": "^0.9.17",
+      "requested_features": [],
+      "uses_default_features": false,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:crossbeam-deque@0.8.6",
+      "to": "registry:crossbeam-utils@0.8.21",
+      "name": "crossbeam-utils",
+      "kind": "normal",
+      "target": null,
+      "req": "^0.8.18",
+      "requested_features": [],
+      "uses_default_features": false,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:crossbeam-epoch@0.9.18",
+      "to": "registry:crossbeam-utils@0.8.21",
+      "name": "crossbeam-utils",
+      "kind": "normal",
+      "target": null,
+      "req": "^0.8.18",
+      "requested_features": [],
+      "uses_default_features": false,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:crypto-common@0.1.7",
+      "to": "registry:generic-array@0.14.7",
+      "name": "generic-array",
+      "kind": "normal",
+      "target": null,
+      "req": "=0.14.7",
+      "requested_features": [
+        "more_lengths"
+      ],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:crypto-common@0.1.7",
+      "to": "registry:typenum@1.20.1",
+      "name": "typenum",
+      "kind": "normal",
+      "target": null,
+      "req": "^1.14",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:darling@0.20.11",
+      "to": "registry:darling_core@0.20.11",
+      "name": "darling_core",
+      "kind": "normal",
+      "target": null,
+      "req": "=0.20.11",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:darling@0.20.11",
+      "to": "registry:darling_macro@0.20.11",
+      "name": "darling_macro",
+      "kind": "normal",
+      "target": null,
+      "req": "=0.20.11",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:darling_core@0.20.11",
+      "to": "registry:fnv@1.0.7",
+      "name": "fnv",
+      "kind": "normal",
+      "target": null,
+      "req": "^1.0.7",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:darling_core@0.20.11",
+      "to": "registry:ident_case@1.0.1",
+      "name": "ident_case",
+      "kind": "normal",
+      "target": null,
+      "req": "^1.0.1",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:darling_core@0.20.11",
+      "to": "registry:proc-macro2@1.0.107",
+      "name": "proc-macro2",
+      "kind": "normal",
+      "target": null,
+      "req": "^1.0.86",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:darling_core@0.20.11",
+      "to": "registry:quote@1.0.47",
+      "name": "quote",
+      "kind": "normal",
+      "target": null,
+      "req": "^1.0.18",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:darling_core@0.20.11",
+      "to": "registry:strsim@0.11.1",
+      "name": "strsim",
+      "kind": "normal",
+      "target": null,
+      "req": "^0.11.1",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": true,
+      "rename": null
+    },
+    {
+      "from": "registry:darling_core@0.20.11",
+      "to": "registry:syn@2.0.118",
+      "name": "syn",
+      "kind": "normal",
+      "target": null,
+      "req": "^2.0.15",
+      "requested_features": [
+        "extra-traits",
+        "full"
+      ],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:darling_macro@0.20.11",
+      "to": "registry:darling_core@0.20.11",
+      "name": "darling_core",
+      "kind": "normal",
+      "target": null,
+      "req": "=0.20.11",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:darling_macro@0.20.11",
+      "to": "registry:quote@1.0.47",
+      "name": "quote",
+      "kind": "normal",
+      "target": null,
+      "req": "^1.0.18",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:darling_macro@0.20.11",
+      "to": "registry:syn@2.0.118",
+      "name": "syn",
+      "kind": "normal",
+      "target": null,
+      "req": "^2.0.15",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:dary_heap@0.3.9",
+      "to": "registry:serde@1.0.228",
+      "name": "serde",
+      "kind": "normal",
+      "target": null,
+      "req": "^1",
+      "requested_features": [
+        "alloc"
+      ],
+      "uses_default_features": false,
+      "optional": true,
+      "rename": null
+    },
+    {
+      "from": "registry:derive_builder@0.20.2",
+      "to": "registry:derive_builder_macro@0.20.2",
+      "name": "derive_builder_macro",
+      "kind": "normal",
+      "target": null,
+      "req": "=0.20.2",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:derive_builder_core@0.20.2",
+      "to": "registry:darling@0.20.11",
+      "name": "darling",
+      "kind": "normal",
+      "target": null,
+      "req": "^0.20.10",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:derive_builder_core@0.20.2",
+      "to": "registry:proc-macro2@1.0.107",
+      "name": "proc-macro2",
+      "kind": "normal",
+      "target": null,
+      "req": "^1.0.37",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:derive_builder_core@0.20.2",
+      "to": "registry:quote@1.0.47",
+      "name": "quote",
+      "kind": "normal",
+      "target": null,
+      "req": "^1.0.35",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:derive_builder_core@0.20.2",
+      "to": "registry:syn@2.0.118",
+      "name": "syn",
+      "kind": "normal",
+      "target": null,
+      "req": "^2.0.15",
+      "requested_features": [
+        "extra-traits",
+        "full"
+      ],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:derive_builder_macro@0.20.2",
+      "to": "registry:derive_builder_core@0.20.2",
+      "name": "derive_builder_core",
+      "kind": "normal",
+      "target": null,
+      "req": "=0.20.2",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:derive_builder_macro@0.20.2",
+      "to": "registry:syn@2.0.118",
+      "name": "syn",
+      "kind": "normal",
+      "target": null,
+      "req": "^2.0.15",
+      "requested_features": [
+        "extra-traits",
+        "full"
+      ],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:digest@0.10.7",
+      "to": "registry:block-buffer@0.10.4",
+      "name": "block-buffer",
+      "kind": "normal",
+      "target": null,
+      "req": "^0.10",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": true,
+      "rename": null
+    },
+    {
+      "from": "registry:digest@0.10.7",
+      "to": "registry:crypto-common@0.1.7",
+      "name": "crypto-common",
+      "kind": "normal",
+      "target": null,
+      "req": "^0.1.3",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:generic-array@0.14.7",
+      "to": "registry:typenum@1.20.1",
+      "name": "typenum",
+      "kind": "normal",
+      "target": null,
+      "req": "^1.12",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:generic-array@0.14.7",
+      "to": "registry:version_check@0.9.5",
+      "name": "version_check",
+      "kind": "build",
+      "target": null,
+      "req": "^0.9",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:getrandom@0.3.4",
+      "to": "registry:cfg-if@1.0.4",
+      "name": "cfg-if",
+      "kind": "normal",
+      "target": null,
+      "req": "^1",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:getrandom@0.3.4",
+      "to": "registry:libc@0.2.186",
+      "name": "libc",
+      "kind": "normal",
+      "target": "cfg(all(any(target_os = \"linux\", target_os = \"android\"), not(any(all(target_os = \"linux\", target_env = \"\"), getrandom_backend = \"custom\", getrandom_backend = \"linux_raw\", getrandom_backend = \"rdrand\", getrandom_backend = \"rndr\"))))",
+      "req": "^0.2.154",
+      "requested_features": [],
+      "uses_default_features": false,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:getrandom@0.3.4",
+      "to": "registry:libc@0.2.186",
+      "name": "libc",
+      "kind": "normal",
+      "target": "cfg(any(target_os = \"dragonfly\", target_os = \"freebsd\", target_os = \"hurd\", target_os = \"illumos\", target_os = \"cygwin\", all(target_os = \"horizon\", target_arch = \"arm\")))",
+      "req": "^0.2.154",
+      "requested_features": [],
+      "uses_default_features": false,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:getrandom@0.3.4",
+      "to": "registry:libc@0.2.186",
+      "name": "libc",
+      "kind": "normal",
+      "target": "cfg(any(target_os = \"haiku\", target_os = \"redox\", target_os = \"nto\", target_os = \"aix\"))",
+      "req": "^0.2.154",
+      "requested_features": [],
+      "uses_default_features": false,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:getrandom@0.3.4",
+      "to": "registry:libc@0.2.186",
+      "name": "libc",
+      "kind": "normal",
+      "target": "cfg(any(target_os = \"ios\", target_os = \"visionos\", target_os = \"watchos\", target_os = \"tvos\"))",
+      "req": "^0.2.154",
+      "requested_features": [],
+      "uses_default_features": false,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:getrandom@0.3.4",
+      "to": "registry:libc@0.2.186",
+      "name": "libc",
+      "kind": "normal",
+      "target": "cfg(any(target_os = \"macos\", target_os = \"openbsd\", target_os = \"vita\", target_os = \"emscripten\"))",
+      "req": "^0.2.154",
+      "requested_features": [],
+      "uses_default_features": false,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:getrandom@0.3.4",
+      "to": "registry:libc@0.2.186",
+      "name": "libc",
+      "kind": "normal",
+      "target": "cfg(target_os = \"netbsd\")",
+      "req": "^0.2.154",
+      "requested_features": [],
+      "uses_default_features": false,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:getrandom@0.3.4",
+      "to": "registry:libc@0.2.186",
+      "name": "libc",
+      "kind": "normal",
+      "target": "cfg(target_os = \"solaris\")",
+      "req": "^0.2.154",
+      "requested_features": [],
+      "uses_default_features": false,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:getrandom@0.3.4",
+      "to": "registry:libc@0.2.186",
+      "name": "libc",
+      "kind": "normal",
+      "target": "cfg(target_os = \"vxworks\")",
+      "req": "^0.2.154",
+      "requested_features": [],
+      "uses_default_features": false,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:getrandom@0.3.4",
+      "to": "registry:r-efi@5.3.0",
+      "name": "r-efi",
+      "kind": "normal",
+      "target": "cfg(all(target_os = \"uefi\", getrandom_backend = \"efi_rng\"))",
+      "req": "^5.1",
+      "requested_features": [],
+      "uses_default_features": false,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:getrandom@0.3.4",
+      "to": "registry:wasip2@1.0.4+wasi-0.2.12",
+      "name": "wasip2",
+      "kind": "normal",
+      "target": "cfg(all(target_arch = \"wasm32\", target_os = \"wasi\", target_env = \"p2\"))",
+      "req": "^1",
+      "requested_features": [],
+      "uses_default_features": false,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:itertools@0.14.0",
+      "to": "registry:either@1.16.0",
+      "name": "either",
+      "kind": "normal",
+      "target": null,
+      "req": "^1.0",
+      "requested_features": [],
+      "uses_default_features": false,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:macro_rules_attribute@0.2.2",
+      "to": "registry:macro_rules_attribute-proc_macro@0.2.2",
+      "name": "macro_rules_attribute-proc_macro",
+      "kind": "normal",
+      "target": null,
+      "req": "=0.2.2",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:macro_rules_attribute@0.2.2",
+      "to": "registry:paste@1.0.15",
+      "name": "paste",
+      "kind": "normal",
+      "target": null,
+      "req": "^1.0.7",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:monostate-impl@0.1.18",
+      "to": "registry:proc-macro2@1.0.107",
+      "name": "proc-macro2",
+      "kind": "normal",
+      "target": null,
+      "req": "^1.0.80",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:monostate-impl@0.1.18",
+      "to": "registry:quote@1.0.47",
+      "name": "quote",
+      "kind": "normal",
+      "target": null,
+      "req": "^1.0.35",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:monostate-impl@0.1.18",
+      "to": "registry:syn@2.0.118",
+      "name": "syn",
+      "kind": "normal",
+      "target": null,
+      "req": "^2.0.59",
+      "requested_features": [
+        "parsing",
+        "proc-macro"
+      ],
+      "uses_default_features": false,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:monostate@0.1.18",
+      "to": "registry:monostate-impl@0.1.18",
+      "name": "monostate-impl",
+      "kind": "normal",
+      "target": null,
+      "req": "=0.1.18",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:monostate@0.1.18",
+      "to": "registry:serde@1.0.228",
+      "name": "serde",
+      "kind": "normal",
+      "target": "cfg(any())",
+      "req": "^1.0.220",
+      "requested_features": [],
+      "uses_default_features": false,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:monostate@0.1.18",
+      "to": "registry:serde_core@1.0.228",
+      "name": "serde_core",
+      "kind": "normal",
+      "target": null,
+      "req": "^1.0.220",
+      "requested_features": [],
+      "uses_default_features": false,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:nom@7.1.3",
+      "to": "registry:memchr@2.8.3",
+      "name": "memchr",
+      "kind": "normal",
+      "target": null,
+      "req": "^2.3",
+      "requested_features": [],
+      "uses_default_features": false,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:nom@7.1.3",
+      "to": "registry:minimal-lexical@0.2.1",
+      "name": "minimal-lexical",
+      "kind": "normal",
+      "target": null,
+      "req": "^0.2.0",
+      "requested_features": [],
+      "uses_default_features": false,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:onig@6.5.3",
+      "to": "registry:bitflags@2.13.0",
+      "name": "bitflags",
+      "kind": "normal",
+      "target": null,
+      "req": "^2.4.0",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:onig@6.5.3",
+      "to": "registry:libc@0.2.186",
+      "name": "libc",
+      "kind": "normal",
+      "target": "cfg(windows)",
+      "req": "^0.2",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:onig@6.5.3",
+      "to": "registry:once_cell@1.21.4",
+      "name": "once_cell",
+      "kind": "normal",
+      "target": null,
+      "req": "^1.12",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:onig@6.5.3",
+      "to": "registry:onig_sys@69.9.3",
+      "name": "onig_sys",
+      "kind": "normal",
+      "target": null,
+      "req": "^69.9.3",
+      "requested_features": [],
+      "uses_default_features": false,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:onig_sys@69.9.3",
+      "to": "registry:cc@1.4.0",
+      "name": "cc",
+      "kind": "build",
+      "target": null,
+      "req": "^1.0",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:onig_sys@69.9.3",
+      "to": "registry:pkg-config@0.3.33",
+      "name": "pkg-config",
+      "kind": "build",
+      "target": null,
+      "req": "^0.3.16",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:ppv-lite86@0.2.21",
+      "to": "registry:zerocopy@0.8.54",
+      "name": "zerocopy",
+      "kind": "normal",
+      "target": null,
+      "req": "^0.8.23",
+      "requested_features": [
+        "simd"
+      ],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:proc-macro2@1.0.107",
+      "to": "registry:unicode-ident@1.0.24",
+      "name": "unicode-ident",
+      "kind": "normal",
+      "target": null,
+      "req": "^1.0",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:quote@1.0.47",
+      "to": "registry:proc-macro2@1.0.107",
+      "name": "proc-macro2",
+      "kind": "normal",
+      "target": null,
+      "req": "^1.0.80",
+      "requested_features": [],
+      "uses_default_features": false,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:rand@0.9.4",
+      "to": "registry:rand_chacha@0.9.0",
+      "name": "rand_chacha",
+      "kind": "normal",
+      "target": null,
+      "req": "^0.9.0",
+      "requested_features": [],
+      "uses_default_features": false,
+      "optional": true,
+      "rename": null
+    },
+    {
+      "from": "registry:rand@0.9.4",
+      "to": "registry:rand_core@0.9.5",
+      "name": "rand_core",
+      "kind": "normal",
+      "target": null,
+      "req": "^0.9.0",
+      "requested_features": [],
+      "uses_default_features": false,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:rand_chacha@0.9.0",
+      "to": "registry:ppv-lite86@0.2.21",
+      "name": "ppv-lite86",
+      "kind": "normal",
+      "target": null,
+      "req": "^0.2.14",
+      "requested_features": [
+        "simd"
+      ],
+      "uses_default_features": false,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:rand_chacha@0.9.0",
+      "to": "registry:rand_core@0.9.5",
+      "name": "rand_core",
+      "kind": "normal",
+      "target": null,
+      "req": "^0.9.0",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:rand_core@0.9.5",
+      "to": "registry:getrandom@0.3.4",
+      "name": "getrandom",
+      "kind": "normal",
+      "target": null,
+      "req": "^0.3.0",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": true,
+      "rename": null
+    },
+    {
+      "from": "registry:rayon-cond@0.4.0",
+      "to": "registry:either@1.16.0",
+      "name": "either",
+      "kind": "normal",
+      "target": null,
+      "req": "^1.6",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:rayon-cond@0.4.0",
+      "to": "registry:itertools@0.14.0",
+      "name": "itertools",
+      "kind": "normal",
+      "target": null,
+      "req": "^0.14",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:rayon-cond@0.4.0",
+      "to": "registry:rayon@1.12.0",
+      "name": "rayon",
+      "kind": "normal",
+      "target": null,
+      "req": "^1.7",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:rayon-core@1.13.0",
+      "to": "registry:crossbeam-deque@0.8.6",
+      "name": "crossbeam-deque",
+      "kind": "normal",
+      "target": null,
+      "req": "^0.8.1",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:rayon-core@1.13.0",
+      "to": "registry:crossbeam-utils@0.8.21",
+      "name": "crossbeam-utils",
+      "kind": "normal",
+      "target": null,
+      "req": "^0.8.0",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:rayon@1.12.0",
+      "to": "registry:either@1.16.0",
+      "name": "either",
+      "kind": "normal",
+      "target": null,
+      "req": "^1",
+      "requested_features": [],
+      "uses_default_features": false,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:rayon@1.12.0",
+      "to": "registry:rayon-core@1.13.0",
+      "name": "rayon-core",
+      "kind": "normal",
+      "target": null,
+      "req": "^1.13.0",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:regex-automata@0.4.14",
+      "to": "registry:aho-corasick@1.1.4",
+      "name": "aho-corasick",
+      "kind": "normal",
+      "target": null,
+      "req": "^1.0.0",
+      "requested_features": [],
+      "uses_default_features": false,
+      "optional": true,
+      "rename": null
+    },
+    {
+      "from": "registry:regex-automata@0.4.14",
+      "to": "registry:memchr@2.8.3",
+      "name": "memchr",
+      "kind": "normal",
+      "target": null,
+      "req": "^2.6.0",
+      "requested_features": [],
+      "uses_default_features": false,
+      "optional": true,
+      "rename": null
+    },
+    {
+      "from": "registry:regex-automata@0.4.14",
+      "to": "registry:regex-syntax@0.8.11",
+      "name": "regex-syntax",
+      "kind": "normal",
+      "target": null,
+      "req": "^0.8.5",
+      "requested_features": [],
+      "uses_default_features": false,
+      "optional": true,
+      "rename": null
+    },
+    {
+      "from": "registry:regex@1.12.4",
+      "to": "registry:aho-corasick@1.1.4",
+      "name": "aho-corasick",
+      "kind": "normal",
+      "target": null,
+      "req": "^1.0.0",
+      "requested_features": [],
+      "uses_default_features": false,
+      "optional": true,
+      "rename": null
+    },
+    {
+      "from": "registry:regex@1.12.4",
+      "to": "registry:memchr@2.8.3",
+      "name": "memchr",
+      "kind": "normal",
+      "target": null,
+      "req": "^2.6.0",
+      "requested_features": [],
+      "uses_default_features": false,
+      "optional": true,
+      "rename": null
+    },
+    {
+      "from": "registry:regex@1.12.4",
+      "to": "registry:regex-automata@0.4.14",
+      "name": "regex-automata",
+      "kind": "normal",
+      "target": null,
+      "req": "^0.4.12",
+      "requested_features": [
+        "alloc",
+        "meta",
+        "nfa-pikevm",
+        "syntax"
+      ],
+      "uses_default_features": false,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:regex@1.12.4",
+      "to": "registry:regex-syntax@0.8.11",
+      "name": "regex-syntax",
+      "kind": "normal",
+      "target": null,
+      "req": "^0.8.11",
+      "requested_features": [],
+      "uses_default_features": false,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:serde@1.0.228",
+      "to": "registry:serde_core@1.0.228",
+      "name": "serde_core",
+      "kind": "normal",
+      "target": null,
+      "req": "=1.0.228",
+      "requested_features": [
+        "result"
+      ],
+      "uses_default_features": false,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:serde@1.0.228",
+      "to": "registry:serde_derive@1.0.228",
+      "name": "serde_derive",
+      "kind": "normal",
+      "target": null,
+      "req": "^1",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": true,
+      "rename": null
+    },
+    {
+      "from": "registry:serde_core@1.0.228",
+      "to": "registry:serde_derive@1.0.228",
+      "name": "serde_derive",
+      "kind": "normal",
+      "target": "cfg(any())",
+      "req": "=1.0.228",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:serde_derive@1.0.228",
+      "to": "registry:proc-macro2@1.0.107",
+      "name": "proc-macro2",
+      "kind": "normal",
+      "target": null,
+      "req": "^1.0.74",
+      "requested_features": [
+        "proc-macro"
+      ],
+      "uses_default_features": false,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:serde_derive@1.0.228",
+      "to": "registry:quote@1.0.47",
+      "name": "quote",
+      "kind": "normal",
+      "target": null,
+      "req": "^1.0.35",
+      "requested_features": [
+        "proc-macro"
+      ],
+      "uses_default_features": false,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:serde_derive@1.0.228",
+      "to": "registry:syn@2.0.118",
+      "name": "syn",
+      "kind": "normal",
+      "target": null,
+      "req": "^2.0.81",
+      "requested_features": [
+        "clone-impls",
+        "derive",
+        "parsing",
+        "printing",
+        "proc-macro"
+      ],
+      "uses_default_features": false,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:serde_json@1.0.150",
+      "to": "registry:itoa@1.0.18",
+      "name": "itoa",
+      "kind": "normal",
+      "target": null,
+      "req": "^1.0",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:serde_json@1.0.150",
+      "to": "registry:memchr@2.8.3",
+      "name": "memchr",
+      "kind": "normal",
+      "target": null,
+      "req": "^2",
+      "requested_features": [],
+      "uses_default_features": false,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:serde_json@1.0.150",
+      "to": "registry:serde@1.0.228",
+      "name": "serde",
+      "kind": "normal",
+      "target": "cfg(any())",
+      "req": "^1.0.220",
+      "requested_features": [],
+      "uses_default_features": false,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:serde_json@1.0.150",
+      "to": "registry:serde_core@1.0.228",
+      "name": "serde_core",
+      "kind": "normal",
+      "target": null,
+      "req": "^1.0.220",
+      "requested_features": [],
+      "uses_default_features": false,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:serde_json@1.0.150",
+      "to": "registry:zmij@1.0.23",
+      "name": "zmij",
+      "kind": "normal",
+      "target": null,
+      "req": "^1.0",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:sha2@0.10.9",
+      "to": "registry:cfg-if@1.0.4",
+      "name": "cfg-if",
+      "kind": "normal",
+      "target": null,
+      "req": "^1.0",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:sha2@0.10.9",
+      "to": "registry:cpufeatures@0.2.17",
+      "name": "cpufeatures",
+      "kind": "normal",
+      "target": "cfg(any(target_arch = \"aarch64\", target_arch = \"x86_64\", target_arch = \"x86\"))",
+      "req": "^0.2",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:sha2@0.10.9",
+      "to": "registry:digest@0.10.7",
+      "name": "digest",
+      "kind": "normal",
+      "target": null,
+      "req": "^0.10.7",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:spm_precompiled@0.1.4",
+      "to": "registry:base64@0.13.1",
+      "name": "base64",
+      "kind": "normal",
+      "target": null,
+      "req": "^0.13",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:spm_precompiled@0.1.4",
+      "to": "registry:nom@7.1.3",
+      "name": "nom",
+      "kind": "normal",
+      "target": null,
+      "req": "^7.1.1",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:spm_precompiled@0.1.4",
+      "to": "registry:serde@1.0.228",
+      "name": "serde",
+      "kind": "normal",
+      "target": null,
+      "req": "^1.0",
+      "requested_features": [
+        "derive"
+      ],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:spm_precompiled@0.1.4",
+      "to": "registry:unicode-segmentation@1.13.3",
+      "name": "unicode-segmentation",
+      "kind": "normal",
+      "target": null,
+      "req": "^1.9",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:syn@2.0.118",
+      "to": "registry:proc-macro2@1.0.107",
+      "name": "proc-macro2",
+      "kind": "normal",
+      "target": null,
+      "req": "^1.0.91",
+      "requested_features": [],
+      "uses_default_features": false,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:syn@2.0.118",
+      "to": "registry:quote@1.0.47",
+      "name": "quote",
+      "kind": "normal",
+      "target": null,
+      "req": "^1.0.35",
+      "requested_features": [],
+      "uses_default_features": false,
+      "optional": true,
+      "rename": null
+    },
+    {
+      "from": "registry:syn@2.0.118",
+      "to": "registry:unicode-ident@1.0.24",
+      "name": "unicode-ident",
+      "kind": "normal",
+      "target": null,
+      "req": "^1",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:thiserror-impl@2.0.18",
+      "to": "registry:proc-macro2@1.0.107",
+      "name": "proc-macro2",
+      "kind": "normal",
+      "target": null,
+      "req": "^1.0.74",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:thiserror-impl@2.0.18",
+      "to": "registry:quote@1.0.47",
+      "name": "quote",
+      "kind": "normal",
+      "target": null,
+      "req": "^1.0.35",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:thiserror-impl@2.0.18",
+      "to": "registry:syn@2.0.118",
+      "name": "syn",
+      "kind": "normal",
+      "target": null,
+      "req": "^2.0.87",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:thiserror@2.0.18",
+      "to": "registry:thiserror-impl@2.0.18",
+      "name": "thiserror-impl",
+      "kind": "normal",
+      "target": null,
+      "req": "=2.0.18",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:tokenizers@0.21.4",
+      "to": "registry:ahash@0.8.12",
+      "name": "ahash",
+      "kind": "normal",
+      "target": null,
+      "req": "^0.8.11",
+      "requested_features": [
+        "serde"
+      ],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:tokenizers@0.21.4",
+      "to": "registry:aho-corasick@1.1.4",
+      "name": "aho-corasick",
+      "kind": "normal",
+      "target": null,
+      "req": "^1.1",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:tokenizers@0.21.4",
+      "to": "registry:compact_str@0.9.1",
+      "name": "compact_str",
+      "kind": "normal",
+      "target": null,
+      "req": "^0.9",
+      "requested_features": [
+        "serde"
+      ],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:tokenizers@0.21.4",
+      "to": "registry:dary_heap@0.3.9",
+      "name": "dary_heap",
+      "kind": "normal",
+      "target": null,
+      "req": "^0.3.6",
+      "requested_features": [
+        "serde"
+      ],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:tokenizers@0.21.4",
+      "to": "registry:derive_builder@0.20.2",
+      "name": "derive_builder",
+      "kind": "normal",
+      "target": null,
+      "req": "^0.20",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:tokenizers@0.21.4",
+      "to": "registry:esaxx-rs@0.1.10",
+      "name": "esaxx-rs",
+      "kind": "normal",
+      "target": null,
+      "req": "^0.1.10",
+      "requested_features": [],
+      "uses_default_features": false,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:tokenizers@0.21.4",
+      "to": "registry:getrandom@0.3.4",
+      "name": "getrandom",
+      "kind": "normal",
+      "target": null,
+      "req": "^0.3",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:tokenizers@0.21.4",
+      "to": "registry:itertools@0.14.0",
+      "name": "itertools",
+      "kind": "normal",
+      "target": null,
+      "req": "^0.14",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:tokenizers@0.21.4",
+      "to": "registry:log@0.4.33",
+      "name": "log",
+      "kind": "normal",
+      "target": null,
+      "req": "^0.4",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:tokenizers@0.21.4",
+      "to": "registry:macro_rules_attribute@0.2.2",
+      "name": "macro_rules_attribute",
+      "kind": "normal",
+      "target": null,
+      "req": "^0.2.0",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:tokenizers@0.21.4",
+      "to": "registry:monostate@0.1.18",
+      "name": "monostate",
+      "kind": "normal",
+      "target": null,
+      "req": "^0.1.12",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:tokenizers@0.21.4",
+      "to": "registry:onig@6.5.3",
+      "name": "onig",
+      "kind": "normal",
+      "target": null,
+      "req": "^6.5.1",
+      "requested_features": [],
+      "uses_default_features": false,
+      "optional": true,
+      "rename": null
+    },
+    {
+      "from": "registry:tokenizers@0.21.4",
+      "to": "registry:paste@1.0.15",
+      "name": "paste",
+      "kind": "normal",
+      "target": null,
+      "req": "^1.0.14",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:tokenizers@0.21.4",
+      "to": "registry:rand@0.9.4",
+      "name": "rand",
+      "kind": "normal",
+      "target": null,
+      "req": "^0.9",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:tokenizers@0.21.4",
+      "to": "registry:rayon-cond@0.4.0",
+      "name": "rayon-cond",
+      "kind": "normal",
+      "target": null,
+      "req": "^0.4",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:tokenizers@0.21.4",
+      "to": "registry:rayon@1.12.0",
+      "name": "rayon",
+      "kind": "normal",
+      "target": null,
+      "req": "^1.10",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:tokenizers@0.21.4",
+      "to": "registry:regex-syntax@0.8.11",
+      "name": "regex-syntax",
+      "kind": "normal",
+      "target": null,
+      "req": "^0.8",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:tokenizers@0.21.4",
+      "to": "registry:regex@1.12.4",
+      "name": "regex",
+      "kind": "normal",
+      "target": null,
+      "req": "^1.10",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:tokenizers@0.21.4",
+      "to": "registry:serde@1.0.228",
+      "name": "serde",
+      "kind": "normal",
+      "target": null,
+      "req": "^1.0",
+      "requested_features": [
+        "derive"
+      ],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:tokenizers@0.21.4",
+      "to": "registry:serde_json@1.0.150",
+      "name": "serde_json",
+      "kind": "normal",
+      "target": null,
+      "req": "^1.0",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:tokenizers@0.21.4",
+      "to": "registry:spm_precompiled@0.1.4",
+      "name": "spm_precompiled",
+      "kind": "normal",
+      "target": null,
+      "req": "^0.1.3",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:tokenizers@0.21.4",
+      "to": "registry:thiserror@2.0.18",
+      "name": "thiserror",
+      "kind": "normal",
+      "target": null,
+      "req": "^2",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:tokenizers@0.21.4",
+      "to": "registry:unicode-normalization-alignments@0.1.12",
+      "name": "unicode-normalization-alignments",
+      "kind": "normal",
+      "target": null,
+      "req": "^0.1",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:tokenizers@0.21.4",
+      "to": "registry:unicode-segmentation@1.13.3",
+      "name": "unicode-segmentation",
+      "kind": "normal",
+      "target": null,
+      "req": "^1.11",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:tokenizers@0.21.4",
+      "to": "registry:unicode_categories@0.1.1",
+      "name": "unicode_categories",
+      "kind": "normal",
+      "target": null,
+      "req": "^0.1",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:unicode-normalization-alignments@0.1.12",
+      "to": "registry:smallvec@1.15.2",
+      "name": "smallvec",
+      "kind": "normal",
+      "target": null,
+      "req": "^1.0",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:wasip2@1.0.4+wasi-0.2.12",
+      "to": "registry:wit-bindgen@0.57.1",
+      "name": "wit-bindgen",
+      "kind": "normal",
+      "target": null,
+      "req": "^0.57.1",
+      "requested_features": [],
+      "uses_default_features": false,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:zerocopy-derive@0.8.54",
+      "to": "registry:proc-macro2@1.0.107",
+      "name": "proc-macro2",
+      "kind": "normal",
+      "target": null,
+      "req": "^1.0.1",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:zerocopy-derive@0.8.54",
+      "to": "registry:quote@1.0.47",
+      "name": "quote",
+      "kind": "normal",
+      "target": null,
+      "req": "^1.0.40",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:zerocopy-derive@0.8.54",
+      "to": "registry:syn@2.0.118",
+      "name": "syn",
+      "kind": "normal",
+      "target": null,
+      "req": "^2.0.46",
+      "requested_features": [
+        "full"
+      ],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:zerocopy@0.8.54",
+      "to": "registry:zerocopy-derive@0.8.54",
+      "name": "zerocopy-derive",
+      "kind": "normal",
+      "target": "cfg(any())",
+      "req": "=0.8.54",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "workspace:sllm-cli@0.1.0",
+      "to": "workspace:sllm-hip@0.1.0",
+      "name": "sllm-hip",
+      "kind": "normal",
+      "target": null,
+      "req": "*",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "workspace:sllm-core@0.1.0",
+      "to": "registry:serde@1.0.228",
+      "name": "serde",
+      "kind": "normal",
+      "target": null,
+      "req": "=1.0.228",
+      "requested_features": [
+        "derive"
+      ],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "workspace:sllm-core@0.1.0",
+      "to": "registry:serde_json@1.0.150",
+      "name": "serde_json",
+      "kind": "normal",
+      "target": null,
+      "req": "=1.0.150",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "workspace:sllm-core@0.1.0",
+      "to": "registry:sha2@0.10.9",
+      "name": "sha2",
+      "kind": "normal",
+      "target": null,
+      "req": "=0.10.9",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "workspace:sllm-frontend@0.1.0",
+      "to": "registry:tokenizers@0.21.4",
+      "name": "tokenizers",
+      "kind": "normal",
+      "target": null,
+      "req": "=0.21.4",
+      "requested_features": [
+        "onig"
+      ],
+      "uses_default_features": false,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "workspace:sllm-frontend@0.1.0",
+      "to": "workspace:sllm-core@0.1.0",
+      "name": "sllm-core",
+      "kind": "normal",
+      "target": null,
+      "req": "*",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "workspace:sllm-hip-sys@0.1.0",
+      "to": "registry:serde_json@1.0.150",
+      "name": "serde_json",
+      "kind": "build",
+      "target": null,
+      "req": "=1.0.150",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "workspace:sllm-hip-sys@0.1.0",
+      "to": "registry:sha2@0.10.9",
+      "name": "sha2",
+      "kind": "build",
+      "target": null,
+      "req": "=0.10.9",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "workspace:sllm-hip@0.1.0",
+      "to": "registry:serde@1.0.228",
+      "name": "serde",
+      "kind": "normal",
+      "target": null,
+      "req": "=1.0.228",
+      "requested_features": [
+        "derive"
+      ],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "workspace:sllm-hip@0.1.0",
+      "to": "registry:serde_json@1.0.150",
+      "name": "serde_json",
+      "kind": "normal",
+      "target": null,
+      "req": "=1.0.150",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "workspace:sllm-hip@0.1.0",
+      "to": "registry:sha2@0.10.9",
+      "name": "sha2",
+      "kind": "normal",
+      "target": null,
+      "req": "=0.10.9",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "workspace:sllm-hip@0.1.0",
+      "to": "registry:static_assertions@1.1.0",
+      "name": "static_assertions",
+      "kind": "dev",
+      "target": null,
+      "req": "^1.1.0",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "workspace:sllm-hip@0.1.0",
+      "to": "workspace:sllm-core@0.1.0",
+      "name": "sllm-core",
+      "kind": "normal",
+      "target": null,
+      "req": "*",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "workspace:sllm-hip@0.1.0",
+      "to": "workspace:sllm-hip-sys@0.1.0",
+      "name": "sllm-hip-sys",
+      "kind": "normal",
+      "target": null,
+      "req": "*",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    }
+  ],
+  "counts": {
+    "packages": 90,
+    "registry_packages": 85,
+    "workspace_packages": 5,
+    "edges": 170,
+    "edge_kinds": {
+      "build": 6,
+      "dev": 1,
+      "normal": 163
+    },
+    "target_specific_edges": 21,
+    "target_expressions": 18
+  },
+  "feature_assertions": {
+    "tokenizers": {
+      "package": "registry:tokenizers@0.21.4",
+      "allowed": [
+        "onig"
+      ],
+      "resolved": [
+        "onig"
+      ],
+      "forbidden": [
+        "default",
+        "http",
+        "progressbar",
+        "esaxx_fast"
+      ],
+      "required_packages": [
+        "registry:esaxx-rs@0.1.10"
+      ]
+    }
+  },
+  "msrv_policy": {
+    "authority_version": "1.85.0",
+    "authority_target": "x86_64-unknown-linux-gnu",
+    "mode": "current-linux-cargo-check",
+    "exceptions": [
+      {
+        "package": "registry:wasip2@1.0.4+wasi-0.2.12",
+        "declared_rust_version": "1.87.0",
+        "allowed_target": "cfg(all(target_arch = \"wasm32\", target_os = \"wasi\", target_env = \"p2\"))"
+      }
+    ]
+  }
+}

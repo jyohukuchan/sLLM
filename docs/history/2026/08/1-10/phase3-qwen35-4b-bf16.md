@@ -31,5 +31,9 @@
 - 修正commitのfresh reviewは、`ExecutionSession::upload()`の完了型に任意buffer rangeのD2H/read APIがなく、RMSNorm `Submission` output専用readbackしか存在しないため、B7のexact round-trip gateを満たせないHigh 1件を検出した。B7を、既存C ABIへlowerするbackend-neutral buffer readback契約B7aと、B5 load planをreview済みtransfer pathへ接続するB7bへ分割し、各4〜6時間・hard 7時間の独立rollback単位とした。
 - ユーザー指示により全体hard中断時刻を2026-08-10 03:38:27 JSTから6時間延長して同日09:38:27 JSTとした。修正planの同一identity reviewを閉じた後、B0を予測2〜4時間・開始から5時間hard stopで進める。
 - B7a/B7b分割後のfresh reviewは、B7aが最大16 GiBのbufferに対して「任意range」を約束する一方、既存transfer ABIが1 transfer最大1 GiBであるMedium 1件を検出した。B7aをbackend広告上限以下へ限定し、HIPは既存1 GiBを広告、超過はfake adapter host contractでsubmit前に拒否、B7bは既存16 MiB chunkを使う契約へ修正した。
+- 最終Stage B plan candidate `9d3f7d5feb27294644252c60f24984fc579e3bfe`、tree `f00f0e689256c94f32226cd0d86c68f69f7b5404`は、pinned Python 3.12.10のstrict H0 316/316と、commit `4849036ccc9c58bdb0b575a6ef6b58e290da3bbf`以後を対象としたfresh累積独立review High/Medium 0件を2026-08-10 03:40 JSTに`PASS`した。
+- 同candidateをrollback baseとしてB0を03:40:18 JSTに開始し、予測2〜4時間、個別hard中断時刻08:40:18 JSTを固定した。read-only sandboxとworkspace-write sandboxはそれぞれbubblewrap `RTM_NEWADDR`初期化に連続失敗して変更前に停止し、失敗を記録した上で対象scopeを変えないunrestricted transport fallbackへ切り替えた。
+- 分離したdependency auditorはCargo offline metadata/lockからworkspace 5、registry 85、全package 90、normal 163/build 6/dev 1の全edge 170を確認した。`tokenizers 0.21.4`のresolved featureは`onig`だけで、default/http/progressbar/`esaxx_fast`は無効だが、`esaxx-rs` packageはfeatureなしの通常依存として残る。Rust 1.87を宣言する`wasip2`はwasm32-wasip2限定edgeであり、Linux x86_64のRust 1.85 checkをauthorityとする境界を記録した。
+- validator implementerは絶対pathを含まないnormalized dependency policy/schema、Cargo.lock checksum/license/MSRV/feature/target edgeのoffline照合、Rust 1.85全target check、12件のfocused negative test、H0 suite/path/generic schema登録を実装した。局所validator、matrix、JSON/schema、Python compile、diff checkはPASSしたが、candidate SHA固定後のH0〜H2とfresh review前なのでB0は未完了である。
 
 [対応する計画](../../../../plans/active/2026/08/1-10/phase3-qwen35-4b-bf16.md)

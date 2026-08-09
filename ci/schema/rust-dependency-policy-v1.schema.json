@@ -1,0 +1,159 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sllm.dev/schema/rust-dependency-policy-v1.schema.json",
+  "title": "sLLM normalized Rust workspace dependency policy v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "$schema", "schema_version", "policy_id", "workspace", "workspace_members",
+    "packages", "edges", "counts", "feature_assertions", "msrv_policy"
+  ],
+  "properties": {
+    "$schema": {"const": "https://sllm.dev/schema/rust-dependency-policy-v1.schema.json"},
+    "schema_version": {"const": "rust-dependency-policy-v1"},
+    "policy_id": {"const": "rust-workspace-v1"},
+    "workspace": {"$ref": "#/$defs/workspace"},
+    "workspace_members": {
+      "type": "array", "minItems": 5, "maxItems": 5,
+      "items": {"$ref": "#/$defs/workspace_member"}
+    },
+    "packages": {
+      "type": "array", "minItems": 90, "maxItems": 90,
+      "items": {"$ref": "#/$defs/package"}
+    },
+    "edges": {
+      "type": "array", "minItems": 170, "maxItems": 170,
+      "items": {"$ref": "#/$defs/edge"}
+    },
+    "counts": {"$ref": "#/$defs/counts"},
+    "feature_assertions": {"$ref": "#/$defs/feature_assertions"},
+    "msrv_policy": {"$ref": "#/$defs/msrv_policy"}
+  },
+  "$defs": {
+    "relative_path": {
+      "type": "string", "minLength": 1, "maxLength": 512,
+      "pattern": "^(?!/)(?!.*\\\\)(?!.*(^|/)\\.\\.?(/|$))[^\\u0000]+$"
+    },
+    "package_name": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]*$"},
+    "package_version": {"type": "string", "minLength": 1, "pattern": "^[^\\x00]+$"},
+    "identity": {
+      "type": "object", "additionalProperties": false,
+      "required": ["name", "version", "source"],
+      "properties": {
+        "name": {"$ref": "#/$defs/package_name"},
+        "version": {"$ref": "#/$defs/package_version"},
+        "source": {"enum": ["workspace", "registry+https://github.com/rust-lang/crates.io-index"]}
+      }
+    },
+    "package_key": {
+      "type": "string", "pattern": "^(?:registry|workspace):[A-Za-z0-9][A-Za-z0-9_.-]*@[^\\x00]+$"
+    },
+    "target": {
+      "type": "object", "additionalProperties": false,
+      "required": ["name", "kind", "crate_types", "edition", "required_features", "test", "doc", "doctest"],
+      "properties": {
+        "name": {"type": "string", "minLength": 1},
+        "kind": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+        "crate_types": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+        "edition": {"type": "string", "enum": ["2015", "2018", "2021", "2024"]},
+        "required_features": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+        "test": {"type": "boolean"},
+        "doc": {"type": "boolean"},
+        "doctest": {"type": "boolean"}
+      }
+    },
+    "workspace": {
+      "type": "object", "additionalProperties": false,
+      "required": ["root", "resolver", "members", "default_members"],
+      "properties": {
+        "root": {"const": "."},
+        "resolver": {"const": 3},
+        "members": {"type": "array", "minItems": 5, "maxItems": 5, "uniqueItems": true, "items": {"$ref": "#/$defs/relative_path"}},
+        "default_members": {"type": "array", "minItems": 5, "maxItems": 5, "uniqueItems": true, "items": {"$ref": "#/$defs/relative_path"}}
+      }
+    },
+    "workspace_member": {
+      "type": "object", "additionalProperties": false,
+      "required": ["identity", "manifest", "targets"],
+      "properties": {
+        "identity": {"$ref": "#/$defs/identity"},
+        "manifest": {"$ref": "#/$defs/relative_path"},
+        "targets": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/target"}}
+      }
+    },
+    "package": {
+      "type": "object", "additionalProperties": false,
+      "required": ["identity", "checksum", "license", "rust_version", "features"],
+      "properties": {
+        "identity": {"$ref": "#/$defs/identity"},
+        "checksum": {"anyOf": [{"type": "null"}, {"type": "string", "pattern": "^[0-9a-f]{64}$"}]},
+        "license": {"type": ["string", "null"], "minLength": 1},
+        "rust_version": {"type": ["string", "null"], "pattern": "^[0-9]+(?:\\.[0-9]+){1,2}(?:[-+][^\\x00]+)?$"},
+        "features": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}}
+      }
+    },
+    "edge": {
+      "type": "object", "additionalProperties": false,
+      "required": ["from", "to", "name", "kind", "target", "req", "requested_features", "uses_default_features", "optional", "rename"],
+      "properties": {
+        "from": {"$ref": "#/$defs/package_key"},
+        "to": {"$ref": "#/$defs/package_key"},
+        "name": {"$ref": "#/$defs/package_name"},
+        "kind": {"enum": ["normal", "build", "dev"]},
+        "target": {"type": ["string", "null"], "minLength": 1},
+        "req": {"type": "string", "minLength": 1},
+        "requested_features": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+        "uses_default_features": {"type": "boolean"},
+        "optional": {"type": "boolean"},
+        "rename": {"type": ["string", "null"], "minLength": 1}
+      }
+    },
+    "counts": {
+      "type": "object", "additionalProperties": false,
+      "required": ["packages", "registry_packages", "workspace_packages", "edges", "edge_kinds", "target_specific_edges", "target_expressions"],
+      "properties": {
+        "packages": {"const": 90}, "registry_packages": {"const": 85}, "workspace_packages": {"const": 5}, "edges": {"const": 170},
+        "edge_kinds": {
+          "type": "object", "additionalProperties": false, "required": ["build", "dev", "normal"],
+          "properties": {"build": {"const": 6}, "dev": {"const": 1}, "normal": {"const": 163}}
+        },
+        "target_specific_edges": {"const": 21}, "target_expressions": {"const": 18}
+      }
+    },
+    "feature_assertions": {
+      "type": "object", "additionalProperties": false, "required": ["tokenizers"],
+      "properties": {
+        "tokenizers": {
+          "type": "object", "additionalProperties": false,
+          "required": ["package", "allowed", "resolved", "forbidden", "required_packages"],
+          "properties": {
+            "package": {"const": "registry:tokenizers@0.21.4"},
+            "allowed": {"const": ["onig"]},
+            "resolved": {"const": ["onig"]},
+            "forbidden": {"const": ["default", "http", "progressbar", "esaxx_fast"]},
+            "required_packages": {"const": ["registry:esaxx-rs@0.1.10"]}
+          }
+        }
+      }
+    },
+    "msrv_exception": {
+      "type": "object", "additionalProperties": false,
+      "required": ["package", "declared_rust_version", "allowed_target"],
+      "properties": {
+        "package": {"const": "registry:wasip2@1.0.4+wasi-0.2.12"},
+        "declared_rust_version": {"const": "1.87.0"},
+        "allowed_target": {"const": "cfg(all(target_arch = \"wasm32\", target_os = \"wasi\", target_env = \"p2\"))"}
+      }
+    },
+    "msrv_policy": {
+      "type": "object", "additionalProperties": false,
+      "required": ["authority_version", "authority_target", "mode", "exceptions"],
+      "properties": {
+        "authority_version": {"const": "1.85.0"},
+        "authority_target": {"const": "x86_64-unknown-linux-gnu"},
+        "mode": {"const": "current-linux-cargo-check"},
+        "exceptions": {"type": "array", "minItems": 1, "maxItems": 1, "items": {"$ref": "#/$defs/msrv_exception"}}
+      }
+    }
+  }
+}
