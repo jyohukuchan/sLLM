@@ -40,6 +40,55 @@ TOKENIZERS_PACKAGE = "registry:tokenizers@0.21.4"
 ESAXX_PACKAGE = "registry:esaxx-rs@0.1.10"
 WASIP2_PACKAGE = "registry:wasip2@1.0.4+wasi-0.2.12"
 WASIP2_TARGET = 'cfg(all(target_arch = "wasm32", target_os = "wasi", target_env = "p2"))'
+B0_DISABLED_HIP_FLAGS = frozenset({
+    "SLLM_ENABLE_HIP_COMPILE_PROBE",
+    "SLLM_ENABLE_HIP_RUNTIME",
+    "SLLM_ENABLE_PUBLIC_HIP_RUNTIME",
+})
+B0_ABSENT_ENVIRONMENT_VARIABLES = frozenset({
+    "CARGO_BUILD_TARGET",
+    "ROCM_PATH",
+    "HIP_PATH",
+    "CMAKE_HIP_ARCHITECTURES",
+    "SLLM_HIP_CODEGEN_FEATURES",
+    "SLLM_SEMANTIC_G1_AUTHORITY",
+    "SLLM_HIP_COMPILER",
+    "SLLM_HIP_COMPILER_LOGICAL",
+    "SLLM_HIP_COMPILER_BROKER_SOCKET",
+    "SLLM_HIP_COMPILER_BROKER_SESSION",
+    "SLLM_HIP_COMPILER_BROKER_CLIENT",
+    "SLLM_HIP_COMPILER_BROKER_CLIENT_SHA256",
+    "SLLM_HIP_COMPILER_BROKER_CLIENT_FD",
+    "SLLM_HIP_COMPILER_BROKER_TOKEN",
+    "SLLM_SEMANTIC_G1_NATIVE_HIP_BUILD_DIR",
+    "CXX",
+    "CMAKE_HIP_COMPILER",
+    "CMAKE_C_COMPILER",
+    "CMAKE_CXX_COMPILER",
+    "CMAKE_TOOLCHAIN_FILE",
+    "CMAKE_PREFIX_PATH",
+    "CMAKE_GENERATOR",
+    "CMAKE_GENERATOR_PLATFORM",
+    "CMAKE_GENERATOR_TOOLSET",
+    "CMAKE_MAKE_PROGRAM",
+    "CC",
+    "HIPCC",
+    "HIPCXX",
+    "CFLAGS",
+    "CXXFLAGS",
+    "CPPFLAGS",
+    "LDFLAGS",
+    "CPATH",
+    "C_INCLUDE_PATH",
+    "CPLUS_INCLUDE_PATH",
+    "OBJC_INCLUDE_PATH",
+    "GCC_EXEC_PREFIX",
+    "COMPILER_PATH",
+    "LIBRARY_PATH",
+    "LD_PRELOAD",
+    "LD_LIBRARY_PATH",
+})
+B0_SANITIZED_ENVIRONMENT_VARIABLES = B0_DISABLED_HIP_FLAGS | B0_ABSENT_ENVIRONMENT_VARIABLES
 SECTION_NAMES = ("workspace", "workspace_members", "packages", "edges", "counts")
 VERSION_RE = re.compile(r"^(\d+)(?:\.(\d+))?(?:\.(\d+))?(?:[-+].*)?$")
 IDENTITY_RE = re.compile(r"^(registry|workspace):[^:@\x00]+@[^\x00]+$")
@@ -588,6 +637,12 @@ def _validate_policy_semantics(manifest: dict[str, Any]) -> None:
         "allowed_target": WASIP2_TARGET,
     }:
         raise ContractError("wasip2 MSRV exception is not the recorded wasm-only exception")
+    wasip2 = package_map.get(WASIP2_PACKAGE)
+    if wasip2 is None:
+        raise ContractError("wasip2 MSRV exception package is missing")
+    wasip2_rust_version = wasip2["rust_version"]
+    if not isinstance(wasip2_rust_version, str) or wasip2_rust_version != exception["declared_rust_version"]:
+        raise ContractError("wasip2 rust_version does not match its MSRV exception")
     for key, package in package_map.items():
         declared = package["rust_version"]
         if declared is None or _rust_version_tuple(declared) <= _rust_version_tuple(MSRV_AUTHORITY):
@@ -613,10 +668,13 @@ def validate_manifest_against_observed(
 
 
 def _cargo_environment() -> dict[str, str]:
-    """Return Cargo's offline environment without an ambient target override."""
+    """Return Cargo's offline, host-only B0 environment."""
 
     environment = os.environ.copy()
-    environment.pop("CARGO_BUILD_TARGET", None)
+    for name in B0_ABSENT_ENVIRONMENT_VARIABLES:
+        environment.pop(name, None)
+    for name in B0_DISABLED_HIP_FLAGS:
+        environment[name] = "0"
     environment["CARGO_NET_OFFLINE"] = "true"
     environment["RUSTUP_AUTO_INSTALL"] = "0"
     return environment

@@ -17,6 +17,9 @@ sys.path.insert(0, str(ROOT / "ci/tools"))
 
 from common import ContractError, read_json  # noqa: E402
 from validate_rust_dependencies import (  # noqa: E402
+    B0_ABSENT_ENVIRONMENT_VARIABLES,
+    B0_DISABLED_HIP_FLAGS,
+    B0_SANITIZED_ENVIRONMENT_VARIABLES,
     POLICY_PATH,
     SCHEMA_PATH,
     SECTION_NAMES,
@@ -27,6 +30,14 @@ from validate_rust_dependencies import (  # noqa: E402
     run_cargo_check,
     validate_manifest_against_observed,
 )
+
+HOSTILE_CARGO_ENVIRONMENT = {
+    name: "hostile" for name in B0_SANITIZED_ENVIRONMENT_VARIABLES
+}
+HOSTILE_CARGO_ENVIRONMENT.update({
+    "CARGO_BUILD_TARGET": "wasm32-unknown-unknown",
+    "RUSTUP_AUTO_INSTALL": "hostile",
+})
 
 
 class RustDependencyPolicyTests(unittest.TestCase):
@@ -100,6 +111,20 @@ class RustDependencyPolicyTests(unittest.TestCase):
 
         self.assert_policy_rejected(mutate)
 
+    def test_wasip2_missing_rust_version_is_rejected(self) -> None:
+        def mutate(document):
+            package = next(item for item in document["packages"] if item["identity"]["name"] == "wasip2")
+            package["rust_version"] = None
+
+        self.assert_policy_rejected(mutate)
+
+    def test_wasip2_different_rust_version_is_rejected(self) -> None:
+        def mutate(document):
+            package = next(item for item in document["packages"] if item["identity"]["name"] == "wasip2")
+            package["rust_version"] = "1.88.0"
+
+        self.assert_policy_rejected(mutate)
+
     def test_absolute_path_is_rejected(self) -> None:
         self.assert_policy_rejected(
             lambda document: document["workspace_members"][0].update(manifest="/tmp/Cargo.toml")
@@ -150,7 +175,7 @@ class RustDependencyPolicyTests(unittest.TestCase):
 
         with patch.dict(
             os.environ,
-            {"CARGO_BUILD_TARGET": "wasm32-unknown-unknown", "RUSTUP_AUTO_INSTALL": "1"},
+            HOSTILE_CARGO_ENVIRONMENT,
             clear=False,
         ):
             self.assertEqual(_cargo_metadata(ROOT, runner=successful_runner), {})
@@ -161,6 +186,10 @@ class RustDependencyPolicyTests(unittest.TestCase):
         )
         self.assertEqual(observed["kwargs"]["env"]["CARGO_NET_OFFLINE"], "true")
         self.assertEqual(observed["kwargs"]["env"]["RUSTUP_AUTO_INSTALL"], "0")
+        for name in B0_DISABLED_HIP_FLAGS:
+            self.assertEqual(observed["kwargs"]["env"][name], "0")
+        for name in B0_ABSENT_ENVIRONMENT_VARIABLES:
+            self.assertNotIn(name, observed["kwargs"]["env"])
         self.assertNotIn("CARGO_BUILD_TARGET", observed["kwargs"]["env"])
 
     def test_cargo_check_command_pins_recorded_target_and_sanitizes_environment(self) -> None:
@@ -173,7 +202,7 @@ class RustDependencyPolicyTests(unittest.TestCase):
 
         with patch.dict(
             os.environ,
-            {"CARGO_BUILD_TARGET": "wasm32-unknown-unknown", "RUSTUP_AUTO_INSTALL": "hostile"},
+            HOSTILE_CARGO_ENVIRONMENT,
             clear=False,
         ):
             run_cargo_check(ROOT, runner=successful_runner)
@@ -187,6 +216,10 @@ class RustDependencyPolicyTests(unittest.TestCase):
         )
         self.assertEqual(observed["kwargs"]["env"]["CARGO_NET_OFFLINE"], "true")
         self.assertEqual(observed["kwargs"]["env"]["RUSTUP_AUTO_INSTALL"], "0")
+        for name in B0_DISABLED_HIP_FLAGS:
+            self.assertEqual(observed["kwargs"]["env"][name], "0")
+        for name in B0_ABSENT_ENVIRONMENT_VARIABLES:
+            self.assertNotIn(name, observed["kwargs"]["env"])
         self.assertNotIn("CARGO_BUILD_TARGET", observed["kwargs"]["env"])
 
     def test_cargo_check_command_failure_is_not_a_pass(self) -> None:
