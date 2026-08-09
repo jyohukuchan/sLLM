@@ -44,6 +44,32 @@ def fixture(path: Path, *, marker: str = contracts.SYNTHETIC_MARKER, trailing: i
 
 
 class G2SliceTests(unittest.TestCase):
+    def test_verified_header_allows_absent_optional_metadata(self) -> None:
+        header_object = {
+            contracts.TENSOR_NAME: {
+                "dtype": "BF16",
+                "shape": [2560],
+                "data_offsets": [0, contracts.BYTE_SIZE],
+            }
+        }
+        encoded = json.dumps(header_object, separators=(",", ":")).encode()
+        padded = encoded + b" " * (contracts.HEADER_LENGTH - len(encoded))
+        header = struct.pack("<Q", contracts.HEADER_LENGTH) + padded
+        parsed = contracts._validate_verified_safetensors_header(
+            header,
+            file_size=contracts.DATA_BUFFER_START + contracts.BYTE_SIZE,
+        )
+        self.assertNotIn("__metadata__", parsed)
+
+        malformed = {"__metadata__": {"format": 1}, **header_object}
+        encoded = json.dumps(malformed, separators=(",", ":")).encode()
+        padded = encoded + b" " * (contracts.HEADER_LENGTH - len(encoded))
+        with self.assertRaises(ContractError):
+            contracts._validate_verified_safetensors_header(
+                struct.pack("<Q", contracts.HEADER_LENGTH) + padded,
+                file_size=contracts.DATA_BUFFER_START + contracts.BYTE_SIZE,
+            )
+
     def test_full_file_verification_does_not_materialize_the_model_file(self) -> None:
         contents = bytes(range(256)) * 32
         with tempfile.TemporaryDirectory(prefix="sllm-g2-full-file-") as directory:

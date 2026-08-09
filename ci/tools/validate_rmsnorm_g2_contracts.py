@@ -563,8 +563,10 @@ def _validate_verified_safetensors_header(header_bytes: bytes, *, file_size: int
         header = json.loads(header_bytes[8:].decode("utf-8"), object_pairs_hook=_duplicate_rejecting_pairs)
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise ContractError(f"verified safetensors shard header is not JSON: {exc}") from exc
-    if not isinstance(header, dict) or "__metadata__" not in header:
-        raise ContractError("verified safetensors shard header is missing metadata")
+    if not isinstance(header, dict) or ("__metadata__" in header and not isinstance(header["__metadata__"], dict)):
+        raise ContractError("verified safetensors shard metadata is malformed")
+    if any(not isinstance(value, str) for value in header.get("__metadata__", {}).values()):
+        raise ContractError("verified safetensors shard metadata values must be strings")
     data_start = 8 + header_length
     ranges: list[tuple[int, int, str]] = []
     for name, tensor in header.items():
