@@ -312,6 +312,20 @@ class SemanticG1BuilderTests(unittest.TestCase):
         self.assertIn('"compiler-resource"', source)
         self.assertIn("live_pre_exec_validation", source)
 
+    def test_compiler_client_environment_binds_fixed_make_recursion(self) -> None:
+        base = {"PATH": "/usr/bin:/bin", "RUSTUP_TOOLCHAIN": "1.97.1"}
+        self.assertEqual(
+            builder.compiler_client_environment(base),
+            {
+                **base,
+                "MAKEFLAGS": "s -j1",
+                "MAKELEVEL": "4",
+                "MFLAGS": "-s -j1",
+            },
+        )
+        with self.assertRaisesRegex(builder.BuilderError, "already carries GNU Make"):
+            builder.compiler_client_environment({**base, "MAKELEVEL": "1"})
+
     def test_native_build_cwd_and_output_root_execute_the_reviewed_semantic_route(self) -> None:
         with tempfile.TemporaryDirectory(prefix="sllm-g1-native-route-") as temporary:
             root = Path(temporary)

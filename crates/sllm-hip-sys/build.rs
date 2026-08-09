@@ -572,9 +572,13 @@ impl PinnedCompiler {
             ];
             command.env_clear();
             for name in SEMANTIC_G1_COMMAND_ENVIRONMENT {
-                let value = env::var_os(name).unwrap_or_else(|| {
-                    panic!("semantic G1 closed command environment requires {name}")
-                });
+                let value = match *name {
+                    "PATH" => "/usr/bin:/bin".into(),
+                    "RUSTUP_TOOLCHAIN" => "1.97.1".into(),
+                    _ => env::var_os(name).unwrap_or_else(|| {
+                        panic!("semantic G1 closed command environment requires {name}")
+                    }),
+                };
                 command.env(name, value);
             }
             return;

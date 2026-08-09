@@ -65,6 +65,11 @@ COMPILER_RUNTIME_LD_LIBRARY_PATH = ":".join((
     "/lib/x86_64-linux-gnu",
     "/usr/lib/x86_64-linux-gnu",
 ))
+COMPILER_CLIENT_MAKE_ENVIRONMENT = (
+    ("MAKEFLAGS", "s -j1"),
+    ("MAKELEVEL", "4"),
+    ("MFLAGS", "-s -j1"),
+)
 COMPILER_EXEC_HELPER_NAME = "compiler-exec-helper"
 COMPILER_BROKER_TOKEN_ENV = "SLLM_HIP_COMPILER_BROKER_TOKEN"
 COMPILER_BROKER_SOCKET_ENV = "SLLM_HIP_COMPILER_BROKER_SOCKET"
@@ -1703,6 +1708,17 @@ def compiler_spawn_environment(build_environment: Mapping[str, str], compiler_lo
     return result
 
 
+def compiler_client_environment(build_environment: Mapping[str, str]) -> dict[str, str]:
+    """Bind the fixed GNU Make recursion facts seen by HIP compiler actions."""
+
+    result = dict(build_environment)
+    make_names = {name for name, _value in COMPILER_CLIENT_MAKE_ENVIRONMENT}
+    if make_names.intersection(result):
+        raise BuilderError("semantic G1 build environment already carries GNU Make recursion state")
+    result.update(COMPILER_CLIENT_MAKE_ENVIRONMENT)
+    return result
+
+
 def _semantic_exact_action_recipes(build_repo: Path, native_build_dir: Path, target: str) -> dict[str, dict[str, Any]]:
     """Declare the only two HIP actions semantic G1 can ever issue.
 
@@ -2170,7 +2186,7 @@ def build_runtime_artifact(*, repo: Path = ROOT, row_id: str, identity: Mapping[
         reviewed_sources={str(item["path"]): item for item in authority["sources"]},
         reviewed_tools=authority["toolchain"],
         target=row["target"],
-        expected_environment=environment,
+        expected_environment=compiler_client_environment(environment),
         compiler_environment=exact_compiler_environment,
         action_recipes=action_recipes,
         require_complete_recipe_set=True,
