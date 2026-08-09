@@ -131,14 +131,14 @@ class RunnerIdentityTests(unittest.TestCase):
     def test_every_registered_host_command_has_exact_direct_or_wrapper_classification(self) -> None:
         commands = host_runner._registered_host_commands(ROOT)
         unittest_commands = host_runner._registered_unittest_commands(ROOT)
-        self.assertEqual(len(commands), 30)
-        self.assertEqual(len(unittest_commands), 14)
-        self.assertEqual(len(commands) - len(unittest_commands), 16)
+        self.assertEqual(len(commands), 32)
+        self.assertEqual(len(unittest_commands), 15)
+        self.assertEqual(len(commands) - len(unittest_commands), 17)
         validator_commands = [
             command for command in commands
             if len(command) > 1 and command[1].startswith("ci/tools/")
         ]
-        self.assertEqual(len(validator_commands), 13)
+        self.assertEqual(len(validator_commands), 14)
         self.assertTrue(all(host_runner.execution_argv(command, repo=ROOT) == command for command in validator_commands))
         for command in commands:
             with self.subTest(command=command):
