@@ -134,7 +134,7 @@ EXPECTED_ROWS_DATA = (
     {
         "row_id": "g1-gfx1201",
         "target": "gfx1201",
-        "bdf": "0000:47:00.0",
+        "bdf": "0000:07:00.0",
         "uuid": "GPU-a8e9ddefa2d60f55",
         "product": "AMD Radeon AI PRO R9700",
         "timeout_seconds": 300,

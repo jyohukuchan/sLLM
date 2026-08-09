@@ -45,10 +45,10 @@ EXPECTED_BINDINGS = {
         "seed": 1031,
     },
     "gfx1201": {
-        "bdf": "0000:47:00.0",
+        "bdf": "0000:07:00.0",
         "uuid": "GPU-a8e9ddefa2d60f55",
         "product": "AMD Radeon AI PRO R9700",
-        "physical_hip_index": 2,
+        "physical_hip_index": 1,
         "logical_device_index": 0,
         "seed": 1202,
     },
@@ -1073,8 +1073,8 @@ def ipc_recv(sock: socket.socket) -> tuple[dict[str, Any], tuple[int, int, int]]
 
 
 def semantic_runtime_environment(physical_hip_index: int) -> dict[str, str]:
-    if physical_hip_index not in {0, 2}:
-        raise EvidenceError("semantic G1 physical HIP index is not canonical")
+    if type(physical_hip_index) is not int or physical_hip_index < 0:
+        raise EvidenceError("semantic G1 physical HIP index is invalid")
     return {
         "PATH": SANITIZED_RUNTIME_PATH,
         "LD_LIBRARY_PATH": SANITIZED_RUNTIME_LD_LIBRARY_PATH,

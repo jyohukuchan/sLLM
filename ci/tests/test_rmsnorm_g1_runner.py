@@ -67,6 +67,18 @@ class SemanticG1RunnerTests(unittest.TestCase):
         self.assertTrue(runner.cleanup_process_group(process, pgid))
         runner.close_process_streams(process)
 
+    def test_physical_hip_index_is_matrix_bound_not_topology_hard_coded(self) -> None:
+        for index in (0, 1, 17):
+            expected = str(index)
+            self.assertEqual(runner.semantic_runtime_environment(index)["HIP_VISIBLE_DEVICES"], expected)
+            self.assertEqual(contracts.semantic_runtime_environment(index)["HIP_VISIBLE_DEVICES"], expected)
+        for invalid in (-1, True, "1"):
+            with self.subTest(invalid=invalid):
+                with self.assertRaises(runner.RunnerError):
+                    runner.semantic_runtime_environment(invalid)  # type: ignore[arg-type]
+                with self.assertRaises(contracts.EvidenceError):
+                    contracts.semantic_runtime_environment(invalid)  # type: ignore[arg-type]
+
     def test_v2_raw_protocol_requires_exact_semantic_resource_counts(self) -> None:
         data = raw_response((2, 17))
         parsed = runner.parse_response(

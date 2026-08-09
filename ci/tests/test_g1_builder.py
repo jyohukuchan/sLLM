@@ -260,7 +260,7 @@ class G1BuilderTests(unittest.TestCase):
         self.assertEqual(metadata["row_id"], "g1-gfx1201")
         self.assertEqual(metadata["target"], "gfx1201")
         self.assertEqual(metadata["gpu"], {
-            "bdf": "0000:47:00.0",
+            "bdf": "0000:07:00.0",
             "uuid": "GPU-a8e9ddefa2d60f55",
             "target": "gfx1201",
         })

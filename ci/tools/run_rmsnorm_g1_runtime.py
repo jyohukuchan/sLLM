@@ -737,8 +737,8 @@ def gpu_child_pass_fds(loader_fd: int, executable_fd: int, runtime_fds: Sequence
 
 
 def semantic_runtime_environment(physical_hip_index: int) -> dict[str, str]:
-    if physical_hip_index not in {0, 2}:
-        raise RunnerError("semantic G1 physical HIP index is not canonical")
+    if type(physical_hip_index) is not int or physical_hip_index < 0:
+        raise RunnerError("semantic G1 physical HIP index is invalid")
     return {
         "PATH": SANITIZED_RUNTIME_PATH,
         "LD_LIBRARY_PATH": SANITIZED_RUNTIME_LD_LIBRARY_PATH,
@@ -955,7 +955,7 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--controller-pid", type=int)
     result.add_argument("--row", choices=ROWS)
     result.add_argument("--target", choices=TARGETS)
-    result.add_argument("--physical-hip-index", choices=(0, 2), type=int)
+    result.add_argument("--physical-hip-index", type=int)
     result.add_argument("--timeout-seconds", type=float)
     result.add_argument("--loader-fd", type=int)
     result.add_argument("--executable-fd", type=int)
