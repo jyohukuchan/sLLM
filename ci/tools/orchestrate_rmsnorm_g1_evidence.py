@@ -564,8 +564,14 @@ def _receive_worker_frame(
                         if worker_status is not None:
                             break
                         time.sleep(0.002)
+                    diagnostic = ""
+                    try:
+                        diagnostic = os.read(process.stderr.fileno(), 65536).decode("utf-8", "replace")[:1024].strip()
+                    except (BlockingIOError, OSError):
+                        pass
                     raise ControllerError(
-                        f"cannot receive authenticated worker {phase} frame: {exc}; worker_status={worker_status}"
+                        f"cannot receive authenticated worker {phase} frame: {exc}; "
+                        f"worker_status={worker_status}; diagnostic={diagnostic}"
                     ) from exc
                 if credentials != (binding["pid"], binding["uid"], binding["gid"]):
                     raise ControllerError("worker frame kernel credentials do not match its PID/starttime/UID/GID binding")
