@@ -1799,7 +1799,7 @@ def _validate_serialized_compiler_execution(compiler: Mapping[str, Any]) -> dict
             or isinstance(executable.get("inode"), bool)
             or not isinstance(executable.get("inode"), int)
             or executable.get("seals") != REQUIRED_SEALS
-            or not manifest["argv0"].startswith("/proc/self/fd/")
+            or manifest["argv0"] != compiler["source"]["path"]
         ):
             raise EvidenceError("exact-action issuance is not bound to the sealed compiler/argv0 identity")
         if item["state"] not in {"issued", "consumed"} or not isinstance(item["issued_at_ns"], int) or item["issued_at_ns"] < 1 or (item["consumed_at_ns"] is not None and (not isinstance(item["consumed_at_ns"], int) or item["consumed_at_ns"] < item["issued_at_ns"])):
