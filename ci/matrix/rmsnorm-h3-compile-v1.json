@@ -56,13 +56,13 @@
         "native/hip/CMakeLists.txt"
       ],
       "files": [
-        {"path": "crates/sllm-hip-sys/build.rs", "sha256": "4e3ad99573a661ffbc9246d4dd2d59c5f68f08bce2b6a7f20b1661496a289cdb"},
+        {"path": "crates/sllm-hip-sys/build.rs", "sha256": "ff5fafa127d75adb126e1748c5d7b1343c1de6ace25aedeccf1d3a672a5811ba"},
         {"path": "crates/sllm-hip-sys/src/bindings.rs", "sha256": "7d381adbf0326a37a4fbff841cc2767aa6262c8858bf42a13e5de659704e57a8"},
         {"path": "crates/sllm-hip/src/rmsnorm.rs", "sha256": "2ea141ed24b32c9c2dc0d2a7649627ac426082a1dafe9c10a99df0bb898116bf"},
         {"path": "crates/sllm-core/src/op.rs", "sha256": "2beffed00f51e4238d433687810cacd6783f788b5ee5f435f8eda9695d51773e"},
         {"path": "native/hip/CMakeLists.txt", "sha256": "8d905835b946e8b4eca7307535f20401fd7dc6ddf33bbd3ea1f7ef3dde3079a7"}
       ],
-      "source_set_sha256": "fe84d9545dbc6a7c7be63a531b8f5930b62e5016d965def0a1f783b95554b0bd"
+      "source_set_sha256": "f9af5a9efaacb039c19e48abeb0fb65444422d81a3f6ba786f33adc93bb8a8fb"
     },
     "ci_contract": {
       "canonical_order": [
