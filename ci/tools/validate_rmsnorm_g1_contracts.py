@@ -475,9 +475,16 @@ def _record_from_descriptor(descriptor: int, *, path: Path) -> dict[str, Any]:
 
 
 def file_identity(path: Path, label: str) -> dict[str, Any]:
-    descriptor = _open_regular(path, label)
     try:
-        return _record_from_descriptor(descriptor, path=path)
+        resolved = path.resolve(strict=True)
+    except OSError as exc:
+        raise EvidenceError(f"{label} source path cannot be resolved") from exc
+    descriptor = _open_regular(resolved, label)
+    try:
+        record = _record_from_descriptor(descriptor, path=path)
+        if record["resolved_path"] != str(resolved):
+            raise EvidenceError(f"{label} source path changed while recording identity")
+        return record
     finally:
         os.close(descriptor)
 

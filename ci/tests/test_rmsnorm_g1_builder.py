@@ -198,6 +198,24 @@ class SemanticG1BuilderTests(unittest.TestCase):
             self.assertEqual(contracts.fd_read_all(sealed.fd), b"original bytes")
             self.assertTrue(contracts.descriptor_is_sealed(sealed.fd))
 
+    def test_file_identity_records_reviewed_symlink_target(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="sllm-g1-identity-") as temporary:
+            root = Path(temporary)
+            target = root / "python3.12"
+            target.write_bytes(b"reviewed interpreter bytes")
+            logical = root / "python3"
+            logical.symlink_to(target.name)
+
+            record = contracts.file_identity(logical, "reviewed interpreter")
+
+            self.assertEqual(record["path"], str(logical))
+            self.assertEqual(record["resolved_path"], str(target))
+            self.assertEqual(record["size_bytes"], len(b"reviewed interpreter bytes"))
+            self.assertEqual(
+                record["sha256"],
+                hashlib.sha256(b"reviewed interpreter bytes").hexdigest(),
+            )
+
     def test_brokered_true_round_trip_preserves_compiler_output_and_status(self) -> None:
         with tempfile.TemporaryDirectory(prefix="sllm-g1-broker-roundtrip-") as temporary:
             root = Path(temporary)
