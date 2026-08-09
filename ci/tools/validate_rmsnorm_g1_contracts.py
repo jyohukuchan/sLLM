@@ -1052,7 +1052,7 @@ def ipc_recv(sock: socket.socket) -> tuple[dict[str, Any], tuple[int, int, int]]
     try:
         payload, control, flags, _address = sock.recvmsg(MAX_IPC_FRAME + 1, ancillary)
     except OSError as exc:
-        raise EvidenceError("cannot receive controller frame") from exc
+        raise EvidenceError(f"cannot receive controller frame: {exc}") from exc
     credentials: tuple[int, int, int] | None = None
     bad_ancillary = False
     for level, kind, data in control:
