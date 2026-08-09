@@ -10,6 +10,7 @@ import subprocess
 import sys
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "ci/tools"))
@@ -19,6 +20,10 @@ from validate_rust_dependencies import (  # noqa: E402
     POLICY_PATH,
     SCHEMA_PATH,
     SECTION_NAMES,
+    MSRV_AUTHORITY,
+    MSRV_TARGET,
+    _cargo_metadata,
+    _find_declared_dependency,
     run_cargo_check,
     validate_manifest_against_observed,
 )
@@ -102,6 +107,77 @@ class RustDependencyPolicyTests(unittest.TestCase):
 
     def test_schema_required_field_mutation_is_rejected(self) -> None:
         self.assert_policy_rejected(lambda document: document.pop("counts"))
+
+    def test_renamed_active_dependency_matches_alias_and_preserves_manifest_name(self) -> None:
+        package_dependencies = [
+            {
+                "name": "serde",
+                "rename": "serde_lib",
+                "kind": None,
+                "target": None,
+            }
+        ]
+        resolve_dependency = {"name": "serde_lib", "pkg": "registry+serde@1.0.0"}
+
+        declared = _find_declared_dependency(
+            package_dependencies,
+            resolve_dependency["name"],
+            kind="normal",
+            target=None,
+        )
+
+        self.assertIsNotNone(declared)
+        self.assertEqual(declared["name"], "serde")
+        self.assertEqual(declared["rename"], "serde_lib")
+
+    def test_unrenamed_dependency_does_not_match_a_resolve_alias(self) -> None:
+        declared = _find_declared_dependency(
+            [{"name": "serde", "rename": None, "kind": None, "target": None}],
+            "serde_lib",
+            kind="normal",
+            target=None,
+        )
+
+        self.assertIsNone(declared)
+
+    def test_cargo_metadata_command_is_offline_and_target_independent(self) -> None:
+        observed = {}
+
+        def successful_runner(command, **kwargs):
+            observed["command"] = command
+            observed["kwargs"] = kwargs
+            return subprocess.CompletedProcess(command, 0, stdout="{}", stderr="")
+
+        with patch.dict(os.environ, {"CARGO_BUILD_TARGET": "wasm32-unknown-unknown"}, clear=False):
+            self.assertEqual(_cargo_metadata(ROOT, runner=successful_runner), {})
+
+        self.assertEqual(
+            observed["command"],
+            ["cargo", f"+{MSRV_AUTHORITY}", "metadata", "--locked", "--offline", "--format-version", "1"],
+        )
+        self.assertEqual(observed["kwargs"]["env"]["CARGO_NET_OFFLINE"], "true")
+        self.assertNotIn("CARGO_BUILD_TARGET", observed["kwargs"]["env"])
+
+    def test_cargo_check_command_pins_recorded_target_and_sanitizes_environment(self) -> None:
+        observed = {}
+
+        def successful_runner(command, **kwargs):
+            observed["command"] = command
+            observed["kwargs"] = kwargs
+            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+        with patch.dict(os.environ, {"CARGO_BUILD_TARGET": "wasm32-unknown-unknown"}, clear=False):
+            run_cargo_check(ROOT, runner=successful_runner)
+
+        self.assertEqual(
+            observed["command"],
+            [
+                "cargo", f"+{MSRV_AUTHORITY}", "check", "--workspace", "--all-targets", "--locked", "--offline",
+                "--target", MSRV_TARGET,
+            ],
+        )
+        self.assertEqual(observed["kwargs"]["env"]["CARGO_NET_OFFLINE"], "true")
+        self.assertNotIn("CARGO_BUILD_TARGET", observed["kwargs"]["env"])
 
     def test_cargo_check_command_failure_is_not_a_pass(self) -> None:
         def failed_runner(*args, **kwargs):

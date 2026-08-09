@@ -131,6 +131,35 @@ def _cargo_dependency_name(name: str) -> str:
     return name.replace("-", "_")
 
 
+def _dependency_lookup_name(dependency: dict[str, Any]) -> str | None:
+    """Return the name Cargo uses in a resolve node for one manifest edge."""
+
+    declared_name = dependency.get("rename")
+    if declared_name is None:
+        declared_name = dependency.get("name")
+    if not isinstance(declared_name, str):
+        return None
+    return _cargo_dependency_name(declared_name)
+
+
+def _find_declared_dependency(
+    dependencies: list[dict[str, Any]],
+    resolved_name: Any,
+    *,
+    kind: str,
+    target: str | None,
+) -> dict[str, Any] | None:
+    """Map a resolve-node alias to exactly one manifest dependency."""
+
+    candidates = [
+        item for item in dependencies
+        if _dependency_lookup_name(item) == resolved_name
+        and (item.get("kind") or "normal") == kind
+        and item.get("target") == target
+    ]
+    return candidates[0] if len(candidates) == 1 else None
+
+
 def _package_sort_key(package: dict[str, Any]) -> str:
     return package_identity_key(package["identity"])
 
@@ -300,17 +329,13 @@ def normalize_metadata(metadata: dict[str, Any], repo: Path = ROOT) -> dict[str,
                 target = dep_kind.get("target")
                 if kind not in ALLOWED_EDGE_KINDS or (target is not None and not isinstance(target, str)):
                     raise ContractError(f"invalid resolved edge kind/target: {dep_kind!r}")
-                candidates = [
-                    item for item in metadata_deps[from_id]
-                    if _cargo_dependency_name(item.get("name", "")) == dependency.get("name")
-                    and (item.get("kind") or "normal") == kind
-                    and item.get("target") == target
-                ]
-                if len(candidates) != 1:
+                declared = _find_declared_dependency(
+                    metadata_deps[from_id], dependency.get("name"), kind=kind, target=target
+                )
+                if declared is None:
                     raise ContractError(
                         f"resolved edge does not map to exactly one declared dependency: {from_id!r} -> {dependency!r}"
                     )
-                declared = candidates[0]
                 declared_source = declared.get("source")
                 expected_destination_source = normalized_source_by_id[to_id]
                 if declared_source is None and expected_destination_source != "workspace":
@@ -587,11 +612,21 @@ def validate_manifest_against_observed(
             raise ContractError(f"Rust dependency {section} graph/field drift detected")
 
 
-def _cargo_metadata(repo: Path) -> dict[str, Any]:
-    command = ["cargo", f"+{MSRV_AUTHORITY}", "metadata", "--locked", "--offline", "--format-version", "1"]
+def _cargo_environment() -> dict[str, str]:
+    """Return Cargo's offline environment without an ambient target override."""
+
     environment = os.environ.copy()
+    environment.pop("CARGO_BUILD_TARGET", None)
     environment["CARGO_NET_OFFLINE"] = "true"
-    process = subprocess.run(command, cwd=repo, text=True, capture_output=True, check=False, env=environment)
+    return environment
+
+
+def _cargo_metadata(
+    repo: Path,
+    runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+) -> dict[str, Any]:
+    command = ["cargo", f"+{MSRV_AUTHORITY}", "metadata", "--locked", "--offline", "--format-version", "1"]
+    process = runner(command, cwd=repo, text=True, capture_output=True, check=False, env=_cargo_environment())
     if process.returncode != 0:
         raise ContractError(f"cargo metadata failed ({process.returncode}): {process.stderr.strip()}")
     try:
@@ -607,10 +642,9 @@ def run_cargo_check(repo: Path = ROOT, runner: Callable[..., subprocess.Complete
 
     command = [
         "cargo", f"+{MSRV_AUTHORITY}", "check", "--workspace", "--all-targets", "--locked", "--offline",
+        "--target", MSRV_TARGET,
     ]
-    environment = os.environ.copy()
-    environment["CARGO_NET_OFFLINE"] = "true"
-    process = runner(command, cwd=repo, text=True, capture_output=True, check=False, env=environment)
+    process = runner(command, cwd=repo, text=True, capture_output=True, check=False, env=_cargo_environment())
     if process.returncode != 0:
         detail = (process.stderr or process.stdout or "").strip()
         raise ContractError(f"cargo check failed ({process.returncode}): {detail[-4000:]}")

@@ -1,6 +1,6 @@
 {
   "schema_version": "path-to-suite-v1",
-  "revision": 24,
+  "revision": 25,
   "default_suite_ids": ["h0-tracked-tree", "h0-suite-registration"],
   "rules": [
     {"pattern": "ci/tools/plan_phase3_stage_a_evidence.py", "suite_ids": ["h0-phase3-stage-a-evidence-plan"]},
@@ -57,7 +57,7 @@
     {"pattern": "ci/tests/test_rmsnorm_p0_builder.py", "suite_ids": ["h0-rmsnorm-p0-contract"]},
     {"pattern": "ci/tests/test_rmsnorm_p0_runner.py", "suite_ids": ["h0-rmsnorm-p0-contract"]},
     {"pattern": "ci/tests/test_rmsnorm_p0_aggregate.py", "suite_ids": ["h0-rmsnorm-p0-contract"]},
-    {"pattern": "ci/tools/common.py", "suite_ids": ["h3-rmsnorm-compile-only", "h0-phase3-stage-a-evidence-plan"]},
+    {"pattern": "ci/tools/common.py", "suite_ids": ["h3-rmsnorm-compile-only", "h0-phase3-stage-a-evidence-plan", "h0-rust-dependency-closure"]},
     {"pattern": "ci/tools/validate_model_lock.py", "suite_ids": ["h1-host-contract"]},
     {"pattern": "ci/tools/aggregate_h3_public_runtime_results.py", "suite_ids": ["h3-public-runtime-compile-only"]},
     {"pattern": "ci/tools/run_h3_public_runtime_compile.py", "suite_ids": ["h3-public-runtime-compile-only"]},

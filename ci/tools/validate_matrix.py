@@ -48,6 +48,7 @@ EXPECTED_RUST_DEPENDENCY_PATH_RULES = {
     "ci/schema/rust-dependency-policy-v1.schema.json",
     "ci/tools/validate_rust_dependencies.py",
     "ci/tests/test_rust_dependencies.py",
+    "ci/tools/common.py",
     "ci/matrix/suites-v1.json",
     "ci/matrix/host-v1.json",
     "ci/matrix/path-to-suite-v1.json",
@@ -677,8 +678,8 @@ def main() -> int:
             raise ContractError("suites-v1 identity is not revision 18")
         if host.get("schema_version") != "host-v1" or host.get("revision") != 11:
             raise ContractError("host-v1 identity is not revision 11")
-        if paths.get("schema_version") != "path-to-suite-v1" or paths.get("revision") != 24:
-            raise ContractError("path-to-suite-v1 identity is not revision 24")
+        if paths.get("schema_version") != "path-to-suite-v1" or paths.get("revision") != 25:
+            raise ContractError("path-to-suite-v1 identity is not revision 25")
         for suite in suites["suites"]:
             sid = suite["suite_id"]
             if set(suite) != {"suite_id", "tier", "marker", "attributes", "test_ids", "commands"}:
