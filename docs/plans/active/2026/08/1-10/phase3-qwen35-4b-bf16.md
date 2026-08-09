@@ -123,6 +123,8 @@ B1 tensor shape closureは、B0のdocs-inclusive完了candidate `d610b4801052f11
 
 開始後の独立監査で、main text 426件のshape式は確定した一方、vision 297件とMTP 15件のorientationが追跡済みreader記録に不足し、現行catalogの`linear_attn.dt_bias`と`linear_attn.norm.weight`のdtypeが固定header contractに対して逆であることを検出した。固定vLLMと固定SGLangをreader/independent cross-checkに分離して全family式を確定し、visionの数値を外部source defaultへ固定せずlock済み`config.json`から厳密抽出する。Rust validatorだけでなく既存Python mirror validatorも同時に更新し、schema、fixture、public API、suite登録は変更しない。
 
+B1のhost-verified functional checkpointはcommit `be098f41c903c19b3f3e62883b0af8c8201e990b`、tree `0831c0bbf9fb98edcb0a6a30991b2c2476d54e48`である。既存config parserからprivate shape inputsを1回だけ構築し、Rust/Pythonの738-name catalogをshapeまで一致させ、header rank/dimensionをdtype/byte rangeと独立に照合する。focused Rustは25 unit + 8 integration、Pythonは22件をPASSし、pinned Python 3.12.10のstrict H0 335/335、H1 154/154（collected 186、deselected 32）、H2 35/35（collected 42、deselected 7）を各attempt 1のimmutable evidenceとして得た。fresh独立reviewはHigh/Medium/Low 0件の`PASS/no findings`である。今回の実行境界ではmodel cacheを使用していないため、同一candidateの固定cache metadata照合は未実施であり、B1全体は未完了のまま次工程を開始しない。
+
 受入条件:
 
 - CPU CIはtiny synthetic safetensors/tokenizer fixtureだけを使い、full modelをdownload/loadしない。
