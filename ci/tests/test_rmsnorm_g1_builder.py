@@ -64,7 +64,8 @@ class SemanticG1BuilderTests(unittest.TestCase):
         }
         client_environment = {"PATH": "/usr/bin:/bin", "HOME": "/tmp"}
         broker = builder.CompilerBroker(
-            compiler=compiler, client_path=client, exec_helper=helper, allowed_roots=(root,),
+            compiler=compiler, client_path=client, exec_helper=helper, socket_root=root,
+            allowed_roots=(root,),
             compiler_environment=compiler_environment or client_environment,
             action_recipes=recipes, require_complete_recipe_set=require_complete_recipe_set,
         )
@@ -354,6 +355,7 @@ class SemanticG1BuilderTests(unittest.TestCase):
             }
             broker = builder.CompilerBroker(
                 compiler=compiler, client_path=client, exec_helper=helper,
+                socket_root=native_build,
                 allowed_roots=(project, native_build), output_roots=(native_build,),
                 compiler_environment={"PATH": "/usr/bin:/bin"},
                 action_recipes={"native-route": recipe}, require_complete_recipe_set=True,
@@ -740,7 +742,7 @@ if done.returncode != 0:
     raise SystemExit(91)
 helper.chmod(0o555)
 compiler = contracts.snapshot_file(pathlib.Path("/bin/sleep"), None, "real broker death compiler")
-broker = builder.CompilerBroker(compiler=compiler, client_path=root / "compiler-client.py", exec_helper=helper, allowed_roots=(root,), action_recipes={{"death": {{"argv": ["2"], "cwd": str(root), "inputs": [], "implicit": [], "response_files": [], "outputs": []}}}})
+broker = builder.CompilerBroker(compiler=compiler, client_path=root / "compiler-client.py", exec_helper=helper, socket_root=root, allowed_roots=(root,), action_recipes={{"death": {{"argv": ["2"], "cwd": str(root), "inputs": [], "implicit": [], "response_files": [], "outputs": []}}}})
 broker.start()
 environment = {{"PATH": "/usr/bin:/bin", "HOME": "/tmp", **broker.environment()}}
 client_process = subprocess.Popen(
@@ -954,7 +956,7 @@ time.sleep(60.0)
             )
             self.assertEqual(completed.returncode, 0, completed.stderr.decode("utf-8", "replace"))
             helper.chmod(0o555)
-            broker = builder.CompilerBroker(compiler=compiler, client_path=client, exec_helper=helper, allowed_roots=(root,), action_recipes={"nonce": {"argv": ["1"], "cwd": str(root), "inputs": [], "implicit": [], "response_files": [], "outputs": []}})
+            broker = builder.CompilerBroker(compiler=compiler, client_path=client, exec_helper=helper, socket_root=root, allowed_roots=(root,), action_recipes={"nonce": {"argv": ["1"], "cwd": str(root), "inputs": [], "implicit": [], "response_files": [], "outputs": []}})
             broker.start()
             self.addCleanup(broker.abort)
             self.addCleanup(compiler.close)

@@ -512,6 +512,7 @@ class CompilerBroker:
         compiler: contracts.SealedDescriptor,
         client_path: Path,
         exec_helper: Path,
+        socket_root: Path,
         allowed_roots: tuple[Path, ...],
         output_roots: tuple[Path, ...] | None = None,
         reviewed_sources: Mapping[str, Mapping[str, Any]] | None = None,
@@ -534,6 +535,8 @@ class CompilerBroker:
         self.client_record = dict(self.client_snapshot.record)
         self.exec_helper = exec_helper.resolve(strict=True)
         self.exec_helper_snapshot = contracts.snapshot_file(self.exec_helper, None, "compiler exec helper")
+        self.socket_root = socket_root.resolve(strict=True)
+        _private_directory(self.socket_root, "compiler broker socket root")
         limiter_expected = (reviewed_tools or {}).get("process_limiter") if isinstance(reviewed_tools, Mapping) else None
         self.process_limiter_snapshot = contracts.snapshot_file(Path(runner.PROCESS_LIMITER), limiter_expected, "compiler process limiter")
         self.exec_helper_record = dict(self.exec_helper_snapshot.record)
@@ -614,7 +617,7 @@ class CompilerBroker:
         self._actions = exact_actions.OneShotBroker()
         self.session = secrets.token_hex(32)
         self.token = secrets.token_hex(32)
-        self.socket_path = self.client_path.parent / f"broker-{secrets.token_hex(12)}.sock"
+        self.socket_path = self.socket_root / f"broker-{secrets.token_hex(12)}.sock"
         self.listener = socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET)
         self.listener.setsockopt(socket.SOL_SOCKET, socket.SO_PASSCRED, 1)
         self.listener.bind(str(self.socket_path))
@@ -2161,6 +2164,7 @@ def build_runtime_artifact(*, repo: Path = ROOT, row_id: str, identity: Mapping[
         compiler=compiler_snapshot,
         client_path=client_path,
         exec_helper=exec_helper,
+        socket_root=native_build_dir,
         allowed_roots=(build_repo, cargo_target_dir, native_build_dir),
         output_roots=(cargo_target_dir, native_build_dir),
         reviewed_sources={str(item["path"]): item for item in authority["sources"]},
