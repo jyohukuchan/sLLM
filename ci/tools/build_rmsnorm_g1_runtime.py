@@ -146,20 +146,20 @@ def main():
     observation = {"protocol": PROTOCOL, "message_type": "observe", "session": session, "request_nonce": secrets.token_hex(32), "argv": argv, "cwd": os.getcwd(), "environment": environment}
     try:
         issued, _issued_frame_sha256 = exchange(socket_path, token, observation)
-        required_issued = {"protocol", "message_type", "session", "request_nonce", "action_manifest"}
+        required_issued = {"protocol", "message_type", "session", "request_nonce", "action_ticket"}
         if set(issued) != required_issued or issued["protocol"] != PROTOCOL or issued["message_type"] != "issued" or issued["session"] != session or issued["request_nonce"] != observation["request_nonce"]: raise RuntimeError("exact action issuance response is invalid")
-        manifest = issued["action_manifest"]
-        if not isinstance(manifest, dict) or manifest.get("argv") != argv or manifest.get("cwd", {}).get("path") != os.getcwd(): raise RuntimeError("exact action issuance does not bind this invocation")
-        request = {"protocol": PROTOCOL, "message_type": "execute", "session": session, "request_nonce": secrets.token_hex(32), "observation_nonce": observation["request_nonce"], "action_manifest": manifest}
+        ticket = issued["action_ticket"]
+        if not isinstance(ticket, dict) or set(ticket) != {"action_id", "manifest_digest", "argv", "cwd"} or ticket.get("argv") != argv or ticket.get("cwd") != os.getcwd(): raise RuntimeError("exact action issuance does not bind this invocation")
+        request = {"protocol": PROTOCOL, "message_type": "execute", "session": session, "request_nonce": secrets.token_hex(32), "observation_nonce": observation["request_nonce"], "action_ticket": ticket}
         response, response_frame_sha256 = exchange(socket_path, token, request)
         required = {"protocol", "message_type", "status", "session", "request_nonce", "source", "client", "action_id", "action_digest", "request_seq", "pid", "starttime", "ppid", "pgrp", "exit_code", "stdout_b64", "stderr_b64", "stdout_sha256", "stderr_sha256", "duration_ns", "timed_out", "crashed", "invocation", "kernel_limits", "exec_identity"}
-        if set(response) != required or response["protocol"] != PROTOCOL or response["message_type"] != "result" or response["status"] not in {"ok", "failed"} or response["session"] != session or response["request_nonce"] != request["request_nonce"] or response["action_id"] != manifest.get("action_id") or response["action_digest"] != manifest.get("manifest_digest"): raise RuntimeError("exact action execution response is invalid")
+        if set(response) != required or response["protocol"] != PROTOCOL or response["message_type"] != "result" or response["status"] not in {"ok", "failed"} or response["session"] != session or response["request_nonce"] != request["request_nonce"] or response["action_id"] != ticket.get("action_id") or response["action_digest"] != ticket.get("manifest_digest"): raise RuntimeError("exact action execution response is invalid")
         stdout = base64.b64decode(response["stdout_b64"], validate=True); stderr = base64.b64decode(response["stderr_b64"], validate=True)
         if len(stdout) > 256 * 1024 or len(stderr) > 256 * 1024 or response["stdout_sha256"] != hashlib.sha256(stdout).hexdigest() or response["stderr_sha256"] != hashlib.sha256(stderr).hexdigest(): raise RuntimeError("exact action response output is invalid")
-        acknowledgement = {"protocol": PROTOCOL, "message_type": "ack", "session": session, "request_nonce": secrets.token_hex(32), "observation_nonce": observation["request_nonce"], "action_id": manifest["action_id"], "action_digest": manifest["manifest_digest"], "response_frame_sha256": response_frame_sha256}
+        acknowledgement = {"protocol": PROTOCOL, "message_type": "ack", "session": session, "request_nonce": secrets.token_hex(32), "observation_nonce": observation["request_nonce"], "action_id": ticket["action_id"], "action_digest": ticket["manifest_digest"], "response_frame_sha256": response_frame_sha256}
         acknowledged, _acknowledged_frame_sha256 = exchange(socket_path, token, acknowledgement)
         required_ack = {"protocol", "message_type", "session", "request_nonce", "observation_nonce", "action_id", "action_digest", "response_frame_sha256", "ack_frame_sha256", "acknowledged"}
-        if set(acknowledged) != required_ack or acknowledged["protocol"] != PROTOCOL or acknowledged["message_type"] != "acknowledged" or acknowledged["session"] != session or acknowledged["request_nonce"] != acknowledgement["request_nonce"] or acknowledged["observation_nonce"] != observation["request_nonce"] or acknowledged["action_id"] != manifest["action_id"] or acknowledged["action_digest"] != manifest["manifest_digest"] or acknowledged["response_frame_sha256"] != response_frame_sha256 or acknowledged["acknowledged"] is not True: raise RuntimeError("exact action acknowledgement is invalid")
+        if set(acknowledged) != required_ack or acknowledged["protocol"] != PROTOCOL or acknowledged["message_type"] != "acknowledged" or acknowledged["session"] != session or acknowledged["request_nonce"] != acknowledgement["request_nonce"] or acknowledged["observation_nonce"] != observation["request_nonce"] or acknowledged["action_id"] != ticket["action_id"] or acknowledged["action_digest"] != ticket["manifest_digest"] or acknowledged["response_frame_sha256"] != response_frame_sha256 or acknowledged["acknowledged"] is not True: raise RuntimeError("exact action acknowledgement is invalid")
         sys.stdout.buffer.write(stdout); sys.stdout.buffer.flush(); sys.stderr.buffer.write(stderr); sys.stderr.buffer.flush()
         exit_code = int(response["exit_code"])
         if exit_code < 0: os.kill(os.getpid(), -exit_code)
@@ -635,6 +635,7 @@ class CompilerBroker:
         self._expected_environment: dict[str, str] | None = None if expected_environment is None else dict(expected_environment)
         self.events: list[dict[str, Any]] = []
         self._issued_observations: dict[str, _IssuedClientObservation] = {}
+        self._issued_manifests: dict[str, dict[str, Any]] = {}
         self._recipe_by_action: dict[str, str] = {}
         self._pending_deliveries: dict[str, dict[str, Any]] = {}
         self._seen_nonces: set[str] = set()
@@ -781,6 +782,27 @@ class CompilerBroker:
     @staticmethod
     def _inside(path: Path, roots: tuple[Path, ...]) -> bool:
         return any(path == root or root in path.parents for root in roots)
+
+    @staticmethod
+    def _action_ticket(manifest: Mapping[str, Any]) -> dict[str, Any]:
+        return {
+            "action_id": manifest["action_id"],
+            "manifest_digest": manifest["manifest_digest"],
+            "argv": list(manifest["argv"]),
+            "cwd": manifest["cwd"]["path"],
+        }
+
+    @staticmethod
+    def _validate_action_ticket(value: Any) -> dict[str, Any]:
+        if not isinstance(value, dict) or set(value) != {"action_id", "manifest_digest", "argv", "cwd"}:
+            raise BuilderError("exact action ticket is malformed")
+        if any(not isinstance(value.get(name), str) or contracts.SHA256_RE.fullmatch(value[name]) is None for name in ("action_id", "manifest_digest")):
+            raise BuilderError("exact action ticket identity is malformed")
+        if not isinstance(value["argv"], list) or any(not isinstance(item, str) or not item for item in value["argv"]):
+            raise BuilderError("exact action ticket argv is malformed")
+        if not isinstance(value["cwd"], str) or not Path(value["cwd"]).is_absolute():
+            raise BuilderError("exact action ticket cwd is malformed")
+        return dict(value)
 
     def _recipe_for_observation(self, argv: list[str], cwd: Path) -> tuple[str, dict[str, Any]]:
         """Derive an exact manifest only from a reviewed fixed action recipe.
@@ -1226,19 +1248,22 @@ class CompilerBroker:
                     client_binding=dict(client_binding),
                     manifest_digest=str(issued["manifest_digest"]),
                 )
+                self._issued_manifests[action_id] = dict(issued)
                 self._recipe_by_action[action_id] = recipe_key
                 self._send(conn, {
                     "protocol": COMPILER_BROKER_PROTOCOL, "message_type": "issued", "session": self.session,
-                    "request_nonce": observation["request_nonce"], "action_manifest": issued,
+                    "request_nonce": observation["request_nonce"], "action_ticket": self._action_ticket(issued),
                 })
                 return
             if request.get("message_type") == "execute":
-                required_execute = {"protocol", "message_type", "session", "request_nonce", "observation_nonce", "action_manifest"}
+                required_execute = {"protocol", "message_type", "session", "request_nonce", "observation_nonce", "action_ticket"}
                 if set(request) != required_execute or request.get("protocol") != COMPILER_BROKER_PROTOCOL or request.get("session") != self.session:
                     raise BuilderError("exact action execution request protocol/state is invalid")
-                manifest = contracts._validate_exact_action(request["action_manifest"])
-                issuance = self._issued_observations.get(str(manifest["action_id"]))
-                if issuance is None or issuance.manifest_digest != manifest["manifest_digest"] or request.get("observation_nonce") != issuance.observation_nonce:
+                ticket = self._validate_action_ticket(request["action_ticket"])
+                action_id = str(ticket["action_id"])
+                issuance = self._issued_observations.get(action_id)
+                manifest = self._issued_manifests.get(action_id)
+                if issuance is None or manifest is None or ticket != self._action_ticket(manifest) or issuance.manifest_digest != ticket["manifest_digest"] or request.get("observation_nonce") != issuance.observation_nonce:
                     raise BuilderError("exact action execution is not bound to its stored client observation")
                 action_request = {
                     "protocol": COMPILER_BROKER_PROTOCOL, "message_type": "observe", "session": self.session,
@@ -1254,12 +1279,18 @@ class CompilerBroker:
                 ):
                     raise BuilderError("exact action execution client no longer equals the stored issuance observation")
                 consumed = self._actions.consume(manifest)
+                del self._issued_manifests[action_id]
                 result = self._run_compiler(consumed)
+                wire_result = dict(result)
+                wire_result["invocation"] = {
+                    "action_id": consumed["action_id"],
+                    "manifest_digest": consumed["manifest_digest"],
+                }
                 response_body = {
                     "protocol": COMPILER_BROKER_PROTOCOL, "message_type": "result", "status": result["status"],
                     "session": self.session, "request_nonce": request["request_nonce"],
                     "source": self.source, "client": self.client_record, "request_seq": len(self.events),
-                    **result,
+                    **wire_result,
                 }
                 response_frame_sha = self._send(conn, response_body)
                 action_id = str(consumed["action_id"])
