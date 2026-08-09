@@ -923,7 +923,9 @@ def worker_main(args: argparse.Namespace) -> int:
                 request=request, timeout_seconds=float(args.timeout_seconds), forbidden_descriptors=(args.controller_fd,),
             )
             if execution.exit_code != 0 or execution.timed_out or execution.crashed or not execution.cleanup_proven or execution.error is not None:
-                _failure(sock, challenge, expected_order, execution.error or "runtime process failed")
+                error = execution.error or "runtime process failed"
+                print(f"semantic G1 worker runtime failure: {error}", file=sys.stderr, flush=True)
+                _failure(sock, challenge, expected_order, error)
                 return 2
             _ipc_send(sock, {
                 "kind": "raw-case", "challenge": challenge, "order": expected_order,

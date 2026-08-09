@@ -552,7 +552,8 @@ def _receive_worker_frame(
                     except BlockingIOError:
                         continue
                     if chunk:
-                        raise ControllerError("fixed worker emitted unexpected diagnostic output")
+                        diagnostic = chunk.decode("utf-8", "replace")[:1024].strip()
+                        raise ControllerError(f"fixed worker emitted unexpected diagnostic output: {diagnostic}")
                     selector.unregister(key.fileobj)
             if any(key.data == "controller" for key, _mask in events):
                 try:
