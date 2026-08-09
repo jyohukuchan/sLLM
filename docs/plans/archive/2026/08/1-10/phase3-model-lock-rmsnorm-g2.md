@@ -3,15 +3,15 @@
 ## 状態
 
 - 作成日: 2026-08-04
-- 状態: active
+- 状態: complete
 - 対象期間: Phase 3 Stage A
-- 上位計画: [Phase 3 Qwen3.5-4B BF16 text生成計画](phase3-qwen35-4b-bf16.md)
-- CI正本: [CI・テスト方針](ci-test-strategy.md)
+- 上位計画: [Phase 3 Qwen3.5-4B BF16 text生成計画](../../../../active/2026/08/1-10/phase3-qwen35-4b-bf16.md)
+- CI正本: [CI・テスト方針](../../../../active/2026/08/1-10/ci-test-strategy.md)
 - model固定正本: [model lock](../../../../../models/model-lock.md)
 
 ## 目的
 
-Phase 2で完成したmodel-free G1を土台に、Qwen/Qwen3.5-4Bの固定revisionへ結び付いた最初のBF16数値経路を実装する。到達点は、完全なmodel lockから実weight sliceを抽出し、Rustのsemantic opからpublic HIP backendを通してRMSNormを実行し、独立したNumPy oracle、canonical `gfx1030`/`gfx1201`のsemantic G1とG2、短いP0 smokeで正しさと実行経路を証明することである。これは[Phase 3全体計画](phase3-qwen35-4b-bf16.md)のStage Aであり、Phase 3自体の完了点ではない。
+Phase 2で完成したmodel-free G1を土台に、Qwen/Qwen3.5-4Bの固定revisionへ結び付いた最初のBF16数値経路を実装する。到達点は、完全なmodel lockから実weight sliceを抽出し、Rustのsemantic opからpublic HIP backendを通してRMSNormを実行し、独立したNumPy oracle、canonical `gfx1030`/`gfx1201`のsemantic G1とG2、短いP0 smokeで正しさと実行経路を証明することである。これは[Phase 3全体計画](../../../../active/2026/08/1-10/phase3-qwen35-4b-bf16.md)のStage Aであり、Phase 3自体の完了点ではない。
 
 この計画は、モデル全体の文章生成を完成させる計画ではない。attention、MLP、KV/state、prefill/decode、tokenizer実行、CLI生成、G3は、最初のmodel-bound数値経路が安定した後に別計画で追加する。
 
@@ -144,21 +144,25 @@ host capsuleの独立review指摘を修復中に中断した`ci/tools/execution_
 - ユーザー指示によりA5 canonical 2 GPU evidenceを2026-08-09 13:43:40 JSTに開始した。予測3〜6時間、hard中断時刻は同日20:43:40 JSTで、再試行してもリセットしない。工程内をA5.0 candidate scope監査・local checkpoint固定（30〜60分、hard 15:43:40）、A5.1同一SHAのhost/H3/preflight（30〜60分、開始から2時間で中断）、A5.2 `gfx1030` evidence（45〜90分、開始から2時間30分で中断）、A5.3 `gfx1201` evidence（45〜90分、開始から2時間30分で中断）、A5.4 aggregate・前後health・独立review（30〜60分、開始から2時間で中断）へ分割する。各子工程のhard時刻とA5全体hard時刻の早い方で停止する。中断A0の未追跡`execution_capsule.py`と`process_containment.py`はcandidateへ含めず、読取・実行もしない。
 - A5.0 candidate-scope reviewの`read-only` transportはbubblewrap loopback初期化に連続失敗し、2026-08-09 13:46 JSTに文書・diff未読、変更なしで停止した。同じ非変更scopeを`danger-full-access` transport fallbackで再実行し、A5.0 hard中断時刻15:43:40 JSTはリセットしない。
 - A5.0 candidate-scope review fallbackは2026-08-09 13:53:56 JSTに、現行差分から`.gitignore`と中断A0の保護2 fileを除く155 pathをcheckpoint候補として`PASS`判定した。candidateはmodified 38、新規117、最大blob 173852 bytes、新規content 2699460 bytes、全candidate content 3523675 bytesでhygiene上限内、diff check、plan/history相互link、禁止path・artifact・credential scanがPASSした。`.gitignore`には`/passwords.txt` ignore削除、Phase 3外の`/.agents/skills/update/`追加、既存`.local-artifacts`規則再編が混在し、既存行変更の許可を確認できないためcandidateから除外する。元worktreeの`.gitignore`と保護2 fileを変更・削除せず保持し、155 pathだけをlocal checkpoint commitへ固定した後、そのSHAからclean linked worktreeを作成してstrict evidenceを取得する。A5.0 hard中断時刻15:43:40 JSTは維持する。
+- A5の最終runtime candidateはcommit `ac2baa3a0734d0894353ba180259d979da5a831e`、tree `4e43a9c42c9aa2dfa6a6d438610fa54c4e482d10`として固定した。P0 Cargo buildへ900秒timeout、combined 4 MiB output上限、private session/process group、TERM・2秒grace・KILL、bounded leader reap、同一session/process-group消滅確認、resource単位の独立closeを追加した。required CPython 3.12.10を含むfocused 31件と、SIGKILL失敗時に主timeoutを保持しつつ残留memberを診断する回帰をPASSし、focused独立再reviewはaccepted scopeのhigh/medium 0件で`PASS`した。
+- 同candidateのfresh host evidenceはH0 305/305、H1 151/151、H2 35/35で`PASS`した。固定ROCm containerのbase H3とRMSNorm H3はいずれもcanonical `gfx1030`/`gfx1201`の2 rowを`PASS`し、pre-GPU G0、private G1、controller-owned semantic G1、real-weight G2、P0、post-GPU G0も同じSHA/tree・canonical順で`PASS`した。G2はread-only 13-file cacheを再hashしてlocked 5120-byte slice SHA-256 `8104f6b0c777fd9bc60925f81a7179cfb7bf9621b4abf26a4d0f98b6e9a9bfe9`を使用し、各target 6 case・6 HIP dispatch・fallbackなし・health OK・process cleanを記録した。P0は各target 5 case・130 HIP dispatch・fallbackなし・health OK・process cleanで、threshold、最適化、他engine比較を主張しない`review_required` dispositionを`PASS`した。
+- A5 review 9の最初のread-only transportはbubblewrap `RTM_NEWADDR`で全command実行前に停止したため判定へ使わず、同一非変更scopeのfresh `danger-full-access` transport fallbackを実行した。fallback reviewerはfull `986c8b86..ac2baa3a` 5-file差分、H0〜H3と全GPU aggregate、57 sidecar、G2/P0 validator、P0 cleanup、focused 15 test、`git diff --check`を独立確認し、2026-08-09 23:16 JSTにhigh/medium/low 0件の`PASS`を確定した。linked worktreeのremote/branch local Git configではsemantic G1 live authority再計算を意図どおり拒否したが、正式semantic G1 evidenceは当該configを除いたclean独立cloneでsealed controllerから生成され、embedded candidate、row、digestは一致した。
+- 以上によりPhase 3 Stage Aを完了とする。適用・rollback境界は上記`ac2baa3a` runtime candidateとし、Phase 3全体は完了扱いにしない。手作業で再構成したlocal A5 commandはcontainer mount path、target別build root、numeric workflow run ID、short UNIX socket root、canonical JSON newline、builder-owned outputの現行contractとずれて複数回fail-closedになった。次のGPU evidence refresh前に、workflow/controllerを正本としてcommandを導出するtracked orchestrationまたはdry-run preflightを2〜4時間の独立作業単位で整備し、その後にStage BのRust model I/O・text frontendへ進む。`/tmp`の手書きrunbookは再利用しない。
 
 | 作業単位 | 現在の状態 | 残る受入証拠 |
 | --- | --- | --- |
-| 0. 正本・schema・完了境界 | 実装済み | 最終candidateのidentityと結果をhistoryへ同期 |
-| 1. 完全model lock | lock、fingerprint、host validator、実cache content-only再検証、独立監査まで完了 | GPU hostでのverified read-only cache成立と最終candidateへのbinding |
+| 0. 正本・schema・完了境界 | 完了 | 最終candidateのidentityと結果をhistoryへ同期済み |
+| 1. 完全model lock | 完了 | verified read-only 13-file cache、locked slice、最終candidate bindingがPASS |
 | 2. reader記録・model contract | 固定llama.cpp/vLLMのreader記録と採否を作成済み | 後続op追加時の差分追記 |
-| 3. config・safetensors host基盤 | hash済みFDへsemantic parseを結び付け、tiny fixtureとnegative testを実装済み | G2実行時の同一FD/cache/slice binding |
-| 4. RMSNorm contract・oracle | BF16/FP32、offset-one、境界case、事前固定toleranceを実装済み | canonical GPU結果との照合 |
-| 5. public HIP実行基盤 | public ABI、Rust wrapper、completion/lifetime、host negative testを実装済み | fresh独立reviewと同一immutable candidateのH3/G0/private G1回帰 |
-| 6. baseline RMSNorm kernel・semantic G1 | kernel、専用H3、controller-owned raw-evidence workflow/schema/runner/aggregateを実装し、main-side authority監査とsemantic 38件をPASS | fresh独立review、exact 2 targetのH3とcanonical GPU semantic G1 2 row/aggregate |
-| 7. real-weight G2 | 計画とlocked tensor byte rangeのみ確定 | schema、runner、専用binary、slice抽出、2 GPU row、aggregateの実装とPASS |
-| 8. RMSNorm P0 | 計画のみ確定 | case-set、runner、review disposition、2 GPU row、aggregateの実装とPASS |
-| 9. 適用・終了判定 | 未着手 | 同一immutable candidateの全gate、適用、smoke/health、history/正本同期 |
+| 3. config・safetensors host基盤 | 完了 | hash済みFD、tiny negative、実cache/slice bindingがPASS |
+| 4. RMSNorm contract・oracle | 完了 | BF16/FP32 offset-oneとcanonical GPU照合がPASS |
+| 5. public HIP実行基盤 | 完了 | 同一candidateのH3/G0/private G1回帰がPASS |
+| 6. baseline RMSNorm kernel・semantic G1 | 完了 | exact 2 targetのH3、sealed-controller G1、aggregateがPASS |
+| 7. real-weight G2 | 完了 | dedicated binary、実slice、2 GPU 12 case、aggregateがPASS |
+| 8. RMSNorm P0 | 完了 | 2 GPU 10 case・260 dispatch、review disposition、aggregateがPASS |
+| 9. 適用・終了判定 | 完了 | post-GPU health/process、独立review 9、正本同期がPASS |
 
-直近の順序は、(1) semantic G1のfresh独立review、(2) direct testと標準containerによるhost再検証、(3) G2/P0 host contractと実行経路の実装、(4) immutable host evidence取得前に最小のtrusted-development baselineを新規作成・review、(5) identityを固定した同一candidateのH0〜H3およびcanonical GPU G0/private G1/semantic G1/G2/P0、(6) 適用後確認とStage A終了判定とする。reviewまたは整理でcandidate byteが変わった場合は、影響gateを新identityに対して最初からやり直す。
+本計画はhistoryとともにarchiveした。次の順序は、(1) GPU evidence commandのtracked orchestration/dry-run preflightを独立作業単位で整備、(2) Phase 3全体計画のStage B Rust model I/O・text frontendへ進む、とする。Stage A runtime byteを変更する場合は`ac2baa3a`のevidenceを流用せず、新identityに対して影響gateを最初からやり直す。
 
 ## 範囲
 
@@ -566,10 +570,9 @@ candidateを整理・squashしてidentityが変わった場合は、影響範囲
 
 ## 未確定事項
 
-- 実装済みlock schema/validatorから計算する最終lock fingerprintと、tracked manifestのreview。
-- lock済み738 tensorをmain text required、vision/MTP known-unconsumed、config-conditional、rejectedへ分けるexactなmachine-readable分類。
-- public C ABIをv1 additiveで拡張できるか、version更新が必要か。
-- baseline kernelのdispatch境界`B`、実測から固定するshape別tolerance、P0 review disposition。
-- G2 raw sliceの保存期間・削除手順。model cacheはcheckout外の固定SHA directoryをread-only検証して使う。
+- Stage Bでlock済み738 tensorをmain text required、vision/MTP known-unconsumed、config-conditional、rejectedへ分けるexactなmachine-readable分類。
+- Stage B以降のpublic C ABI追加をv1 additiveにできるか、version更新が必要か。
+- 次回GPU evidence refresh前のtracked orchestration/dry-run preflight。既存workflow/controllerのcontractを複製せず導出する。
+- 外部code実行を再開する前のephemeral VM/JIT runnerまたはjob後reimageによるsecurity boundary。
 
 [対応する履歴](../../../../../history/2026/08/1-10/phase3-model-lock-rmsnorm-g2.md)

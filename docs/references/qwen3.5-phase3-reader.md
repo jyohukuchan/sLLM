@@ -53,4 +53,4 @@ full model、generation、vision、MTP、CPU fallback、GPU emulationはこのG2
 - 不採用: 広いtensor ignore、converter後のGGUF表現をHF raw weightと同一視すること、固定sourceの既定値fallback、他engine出力を数値oracleにすること。
 - 固定sourceに存在しないためsLLMで独自に実装する: model lock/JCS、direct safetensors byte validation、public C ABI、stride/alignment/alias contract、semantic G1/G2/P0 evidence。
 
-[対応するPhase 3計画](../plans/active/2026/08/1-10/phase3-model-lock-rmsnorm-g2.md)
+[対応するPhase 3 Stage A計画](../plans/archive/2026/08/1-10/phase3-model-lock-rmsnorm-g2.md)

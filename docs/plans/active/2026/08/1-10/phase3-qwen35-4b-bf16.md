@@ -5,7 +5,7 @@
 - 作成日: 2026-08-04
 - 状態: active
 - 上位計画: [main plan](../../../../main-plan.md)
-- Stage A子計画: [model lock・RMSNorm・G2](phase3-model-lock-rmsnorm-g2.md)
+- Stage A子計画: [model lock・RMSNorm・G2（完了・archive）](../../../../archive/2026/08/1-10/phase3-model-lock-rmsnorm-g2.md)
 - CI正本: [CI・テスト方針](ci-test-strategy.md)
 
 ## 目的と完了境界
@@ -35,7 +35,7 @@ Phase 3はStage AのRMSNorm G2/P0だけでは完了しない。次をすべて�
 
 2026-08-08の再開以降、各作業単位は開始前に予測時間の範囲と中断上限を宣言する。中断上限は予測上端に1時間を加えたwall-clockとし、上限到達時は新しい変更を開始せず、安全なrollback可能点で一旦停止して、経過時間、完了範囲、未完了理由、次の分割案を報告する。ユーザーが明示的に中断した時間はwall-clockから除外する。正常に進む重いcommandは15分ごとの監視を続けるが、この中断上限を超えて自動継続しない。
 
-Stage Aの工程別時間は[Stage A計画](phase3-model-lock-rmsnorm-g2.md)を正とする。Stage B以降は開始前に8時間以下の独立review・rollback可能な単位へ分割し、それぞれ同じ`予測上端 + 1時間`契約を記録する。工程の見積りを変更する場合は、旧上限へ到達する前に根拠を示して本計画を更新し、経過後に後付けで上限を延長しない。
+Stage Aの工程別実績は[archive済みStage A計画](../../../../archive/2026/08/1-10/phase3-model-lock-rmsnorm-g2.md)を正とする。Stage B以降は開始前に8時間以下の独立review・rollback可能な単位へ分割し、それぞれ同じ`予測上端 + 1時間`契約を記録する。工程の見積りを変更する場合は、旧上限へ到達する前に根拠を示して本計画を更新し、経過後に後付けで上限を延長しない。
 
 ## 対象
 
@@ -71,9 +71,11 @@ Stage Aの工程別時間は[Stage A計画](phase3-model-lock-rmsnorm-g2.md)を�
 
 ### Stage A: model-bound最小数値経路
 
-[Stage A子計画](phase3-model-lock-rmsnorm-g2.md)に従い、完全model lock、host validator、RMSNorm semantic contract、独立NumPy oracle、public HIP runtime、baseline kernel、semantic G1、real-weight G2、短いP0を完成させる。
+[archive済みStage A子計画](../../../../archive/2026/08/1-10/phase3-model-lock-rmsnorm-g2.md)に従い、完全model lock、host validator、RMSNorm semantic contract、独立NumPy oracle、public HIP runtime、baseline kernel、semantic G1、real-weight G2、短いP0を完成させた。
 
 Stage Aはpublic runtimeとmodel provenanceを固定するrollback境界であり、Phase 3全体の完了ではない。
+
+Stage Aはcommit `ac2baa3a0734d0894353ba180259d979da5a831e`、tree `4e43a9c42c9aa2dfa6a6d438610fa54c4e482d10`に対するH0〜H3、canonical 2 GPUのG0/private G1/semantic G1/G2/P0、前後health/process、独立review 9の`PASS`により2026-08-09に完了した。次のGPU evidence refresh前に、workflow/controllerからlocal commandを導出するtracked orchestrationまたはdry-run preflightを2〜4時間で整備してからStage Bへ進む。
 
 ### Stage B: Rust model I/Oとtext frontend
 

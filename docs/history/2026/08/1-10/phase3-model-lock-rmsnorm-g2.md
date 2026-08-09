@@ -31,4 +31,16 @@
 - 現行dirty worktreeでsemantic G1 38件、H0 131件、H1 151件、H2 35件とlocal fail-closed aggregateをPASSさせた。この結果は`local-development`であり、immutable/GPU evidenceまたは独立review PASSを意味しない。
 - Stage Aの作業単位ごとの進捗表を計画へ追加し、fresh独立review後もG2/P0のschema、runner、専用binary、canonical 2 GPU evidence、aggregateが未実装であることを明示した。
 
-[対応する計画](../../../../plans/active/2026/08/1-10/phase3-model-lock-rmsnorm-g2.md)
+## 2026-08-09
+
+- trusted solo-development期間に限定して中断A0のcustom capsuleをStage Aの前提から外し、既存direct runner、固定container、timeout/resource上限、process cleanup、candidate/artifact identity、前後GPU healthを維持する最小baselineを完成させた。元worktreeの変更済み`.gitignore`と未追跡`execution_capsule.py`、`process_containment.py`はcandidateへ含めず、読取・実行・削除も行わなかった。
+- A5 runtime candidateをcommit `ac2baa3a0734d0894353ba180259d979da5a831e`、tree `4e43a9c42c9aa2dfa6a6d438610fa54c4e482d10`へ固定した。`986c8b86`以降の5-file差分はP0 builderへ900秒timeout、combined 4 MiB output上限、private session/process group、TERM・2秒grace・KILL、bounded reap、同一group消滅確認、独立resource closeを追加し、artifact schema/validatorへlimitsを結合した。
+- P0 cleanupのfocused matrixはsystem Pythonとrequired CPython 3.12.10で各31件をPASSした。timeout、exact output bound、EOF後残留member、TERM/KILL/close各失敗、SIGKILL失敗時の主error保持と残留member診断、KILL成功後のgroup消滅、pidfd非依存を回帰化し、focused独立再reviewはaccepted scopeのhigh/medium 0件で`PASS`した。
+- fresh host evidenceはH0 305/305、H1 151/151、H2 35/35で`PASS`した。固定ROCm containerのbase H3とRMSNorm H3はcanonical `gfx1030`/`gfx1201`をcompile-onlyで`PASS`し、同じidentityのpre-GPU G0、private G1、sealed-controller semantic G1、G2、P0、post-GPU G0も全てcanonical順で`PASS`した。
+- G2はread-only固定cache全13 fileを再hashし、`model.language_model.layers.0.input_layernorm.weight`の5120-byte BF16 slice SHA-256 `8104f6b0c777fd9bc60925f81a7179cfb7bf9621b4abf26a4d0f98b6e9a9bfe9`を使用した。両targetで各6 case・6 HIP dispatch、fallbackなし、health OK、process cleanを記録し、raw model/sliceは保存・uploadせずpathもreportへ記録しなかった。
+- P0は両targetで各5 case・130 HIP dispatch、fallbackなし、health OK、process cleanを記録した。wall medianは約1.06 msで255/256/257境界に病的な不連続を認めず、`review_required` dispositionとして受理した。threshold承認、最適化済み、他engineより高速、performance hard gate確立の主張は行わなかった。
+- review 9の最初のread-only transportはbubblewrap `RTM_NEWADDR`で全command実行前に停止したため判定へ使用せず、同一非変更scopeのfresh unrestricted transport fallbackを実行した。fallback reviewerはfull 5-file差分、固定SHA/tree、host件数、全aggregateのrow/order/state、57 sidecar、G2/P0 validator、P0 cleanup、focused 15 test、`git diff --check`を独立確認し、23:16 JSTにhigh/medium/low 0件の`PASS`を確定した。
+- 手書きで再構成したlocal A5 commandは、container内`/workspace`、target別build root、numeric workflow run ID、短いUNIX socket root、canonical JSON末尾改行、builder-owned outputという現行contractとの差異を各gateでfail-closedに拒否された。最終evidenceは全て現行contractへ合わせてfresh取得したが、同じ試行錯誤を機能追加ごとに繰り返さないため、次のGPU evidence refresh前にworkflow/controllerからcommandを導出するtracked orchestrationまたはdry-run preflightを2〜4時間の独立作業単位で整備する。
+- 以上によりPhase 3 Stage Aを完了し、`ac2baa3a`をpublic RMSNorm/model provenanceのrollback境界とした。Phase 3全体は未完了であり、次はA5運用負債を解消し、その後にStage BのRust model I/O・text frontendへ進む。full model生成、attention/MLP/KV/state、CLI、G3、performance最適化はStage Aの完了主張に含めない。
+
+[対応する計画](../../../../plans/archive/2026/08/1-10/phase3-model-lock-rmsnorm-g2.md)
