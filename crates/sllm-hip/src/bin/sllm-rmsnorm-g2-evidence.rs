@@ -298,7 +298,8 @@ fn main() {
         fail("target must be gfx1030 or gfx1201");
     }
     let raw_scale = read_slice_fd(slice_fd);
-    let device_index = if target == "gfx1201" { 2 } else { 0 };
+    // The runner exposes exactly one routed physical GPU to this process.
+    let device_index = 0;
     let backend =
         HipBackend::connect().unwrap_or_else(|error| fail(format!("HIP unavailable: {error}")));
     let context = Context::create(device_index, &target)
