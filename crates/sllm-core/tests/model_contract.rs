@@ -1,4 +1,6 @@
+use std::collections::HashSet;
 use std::fs;
+use std::os::unix::fs::MetadataExt;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -214,10 +216,58 @@ fn fixture_copy(label: &str) -> TestDirectory {
     TestDirectory(path)
 }
 
-fn descriptor_count() -> usize {
-    fs::read_dir("/proc/self/fd")
-        .expect("Linux exposes process descriptors")
-        .count()
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+struct RegularFileIdentity {
+    device: u64,
+    inode: u64,
+}
+
+fn regular_file_identity(path: &std::path::Path) -> RegularFileIdentity {
+    let metadata = fs::metadata(path).expect("fixture path metadata is available");
+    assert!(metadata.is_file(), "fixture path must be a regular file");
+    RegularFileIdentity {
+        device: metadata.dev(),
+        inode: metadata.ino(),
+    }
+}
+
+fn fixture_file_identities(directory: &std::path::Path) -> HashSet<RegularFileIdentity> {
+    fs::read_dir(directory)
+        .expect("read fixture directory")
+        .map(|entry| {
+            let entry = entry.expect("read fixture entry");
+            regular_file_identity(&entry.path())
+        })
+        .collect()
+}
+
+fn open_regular_file_identities() -> HashSet<RegularFileIdentity> {
+    let mut identities = HashSet::new();
+    for entry in fs::read_dir("/proc/self/fd").expect("Linux exposes process descriptors") {
+        let entry = entry.unwrap_or_else(|error| panic!("read /proc/self/fd entry: {error}"));
+        let path = entry.path();
+        let metadata = match fs::metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => panic!("metadata for /proc/self/fd entry {path:?}: {error}"),
+        };
+        if metadata.is_file() {
+            identities.insert(RegularFileIdentity {
+                device: metadata.dev(),
+                inode: metadata.ino(),
+            });
+        }
+    }
+    identities
+}
+
+fn assert_no_open_target_identities(targets: &HashSet<RegularFileIdentity>, context: &str) {
+    let open = open_regular_file_identities();
+    let remaining: Vec<_> = targets.intersection(&open).copied().collect();
+    assert!(
+        remaining.is_empty(),
+        "{context}: target regular-file descriptors remain open: {remaining:?}"
+    );
 }
 
 fn same_size_replacement(bytes: &[u8]) -> Vec<u8> {
@@ -232,18 +282,14 @@ fn same_size_replacement(bytes: &[u8]) -> Vec<u8> {
 
 #[test]
 fn lock_reader_binds_one_regular_descriptor_and_rejects_links_and_oversize_inputs() {
-    let baseline = descriptor_count();
     let source = repository_path("ci/fixtures/model-lock-v1/lock.json");
     let temporary = fixture_copy("lock-reader");
     let lock_path = temporary.0.join("lock.json");
     fs::copy(&source, &lock_path).expect("copy fixture lock");
+    let lock_identity = regular_file_identity(&lock_path);
     for _ in 0..32 {
         read_model_lock(&lock_path).expect("regular copied lock parses through its bound FD");
     }
-    assert!(
-        descriptor_count() <= baseline,
-        "repeated bound lock reads must close their descriptors"
-    );
 
     let link = temporary.0.join("lock-link.json");
     std::os::unix::fs::symlink(&lock_path, &link).expect("create lock symlink");
@@ -260,39 +306,48 @@ fn lock_reader_binds_one_regular_descriptor_and_rejects_links_and_oversize_input
         .expect("open oversized fixture lock")
         .set_len(1024 * 1024 + 1)
         .expect("extend sparse oversized fixture lock");
+    let oversized_identity = regular_file_identity(&oversized);
     assert!(
         read_model_lock(&oversized).is_err(),
         "lock size must be bounded before allocation"
     );
+    assert_no_open_target_identities(
+        &HashSet::from([lock_identity, oversized_identity]),
+        "repeated bound lock reads must close their descriptors",
+    );
+    drop(temporary);
 }
 
 #[test]
 fn hashed_fd_binding_rejects_path_and_same_inode_races_and_recovers_files() {
     let lock = read_model_lock(repository_path("ci/fixtures/model-lock-v1/lock.json"))
         .expect("tiny lock parses");
-    let baseline = descriptor_count();
 
     {
         let temporary = fixture_copy("thread-recovery");
-        let cache = verify_model_cache(&lock, &temporary.0).expect("cache validates");
-        std::thread::scope(|scope| {
-            scope
-                .spawn(|| {
-                    assert_eq!(
-                        cache
-                            .read_tensor_range("fixture.tensor", 0, 4)
-                            .expect("positional range read"),
-                        vec![0, 1, 2, 3]
-                    );
-                })
-                .join()
-                .expect("range-read thread succeeds");
-        });
+        let target_identities = fixture_file_identities(&temporary.0);
+        {
+            let cache = verify_model_cache(&lock, &temporary.0).expect("cache validates");
+            std::thread::scope(|scope| {
+                scope
+                    .spawn(|| {
+                        assert_eq!(
+                            cache
+                                .read_tensor_range("fixture.tensor", 0, 4)
+                                .expect("positional range read"),
+                            vec![0, 1, 2, 3]
+                        );
+                    })
+                    .join()
+                    .expect("range-read thread succeeds");
+            });
+        }
+        assert_no_open_target_identities(
+            &target_identities,
+            "verified files are closed on drop without descriptor growth",
+        );
+        drop(temporary);
     }
-    assert!(
-        descriptor_count() <= baseline,
-        "verified files are closed on drop without descriptor growth"
-    );
 
     let temporary = fixture_copy("path-replacement");
     let cache = verify_model_cache(&lock, &temporary.0).expect("cache validates");
