@@ -519,6 +519,7 @@ def _receive_worker_frame(
     binding: Mapping[str, Any],
     deadline: float,
     *,
+    phase: str,
     process: subprocess.Popen[bytes],
     containment: Any,
 ) -> dict[str, Any]:
@@ -557,7 +558,7 @@ def _receive_worker_frame(
                 try:
                     document, credentials = contracts.ipc_recv(sock)
                 except (OSError, ContractError) as exc:
-                    raise ControllerError(f"cannot receive authenticated worker raw frame: {exc}") from exc
+                    raise ControllerError(f"cannot receive authenticated worker {phase} frame: {exc}") from exc
                 if credentials != (binding["pid"], binding["uid"], binding["gid"]):
                     raise ControllerError("worker frame kernel credentials do not match its PID/starttime/UID/GID binding")
                 return document
@@ -626,7 +627,7 @@ def _run_row(*, repo: Path, artifact_root: Path, row: Mapping[str, Any], run_id:
         child_socket.close()
         child_socket = None  # type: ignore[assignment]
         row_deadline = time.monotonic() + float(row["timeout_seconds"])
-        ready = _receive_worker_frame(parent_socket, worker_binding, row_deadline, process=process, containment=containment)
+        ready = _receive_worker_frame(parent_socket, worker_binding, row_deadline, phase="ready", process=process, containment=containment)
         if set(ready) != {"kind", "binding"} or ready.get("kind") != "ready" or ready.get("binding") != worker_binding:
             raise ControllerError("worker ready frame does not bind its observed process identity")
         challenge = base64.b64encode(secrets.token_bytes(32)).decode("ascii")
@@ -635,7 +636,7 @@ def _run_row(*, repo: Path, artifact_root: Path, row: Mapping[str, Any], run_id:
             request, activation, raw_scale, epsilon = _case_request(row, case)
             case_started_wall, case_started_monotonic_ns = _iso(), time.monotonic_ns()
             contracts.ipc_send(parent_socket, {"kind": "case", "challenge": challenge, "order": order, "request_b64": base64.b64encode(request).decode("ascii")})
-            frame = _receive_worker_frame(parent_socket, worker_binding, row_deadline, process=process, containment=containment)
+            frame = _receive_worker_frame(parent_socket, worker_binding, row_deadline, phase=f"case-{order}", process=process, containment=containment)
             if frame.get("kind") == "failure":
                 raise ControllerError(f"fixed worker rejected raw runtime execution: {frame.get('error', 'unknown failure')}")
             if set(frame) != {"kind", "challenge", "order", "response_b64", "stderr_b64"} or frame.get("kind") != "raw-case" or frame.get("challenge") != challenge or frame.get("order") != order:
@@ -687,7 +688,7 @@ def _run_row(*, repo: Path, artifact_root: Path, row: Mapping[str, Any], run_id:
                 "controller_duration_ns": finished_monotonic_ns - case_started_monotonic_ns,
             })
         contracts.ipc_send(parent_socket, {"kind": "finish", "challenge": challenge})
-        done = _receive_worker_frame(parent_socket, worker_binding, row_deadline, process=process, containment=containment)
+        done = _receive_worker_frame(parent_socket, worker_binding, row_deadline, phase="done", process=process, containment=containment)
         if done != {"kind": "done", "challenge": challenge, "case_count": len(contracts.EXPECTED_CASES)}:
             raise ControllerError("worker completion frame is malformed")
     except BaseException:
