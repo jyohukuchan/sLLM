@@ -59,6 +59,9 @@ COMPILER_BROKER_MAX_TRANSCRIPT = 64 * 1024 * 1024
 COMPILER_BROKER_TIMEOUT_SECONDS = 120.0
 COMPILER_BROKER_BIND_TIMEOUT_SECONDS = 5.0
 COMPILER_EXEC_READY_TIMEOUT_SECONDS = 5.0
+COMPILER_LIMITER_CHILD_FD = 1000
+COMPILER_HELPER_CHILD_FD = 1001
+COMPILER_EXEC_CHILD_FD = 1002
 COMPILER_RUNTIME_LD_LIBRARY_PATH = ":".join((
     "/opt/rocm/core-7.14/lib/llvm/lib",
     "/opt/rocm/core-7.14/lib/rocm_sysdeps/lib",
@@ -404,6 +407,8 @@ def _parent_fd_identities() -> dict[tuple[int, int], int]:
     for entry in entries:
         try:
             descriptor = int(entry.name)
+            if descriptor in {0, 1, 2}:
+                continue
             details = os.fstat(descriptor)
             identities[(details.st_dev, details.st_ino)] = descriptor
         except (OSError, ValueError):
@@ -831,7 +836,7 @@ class CompilerBroker:
         raise BuilderError("compiler observation does not equal a parent-derived exact action recipe")
 
     def _compiler_exec_fd(self) -> int:
-        return 198 if self.compiler.fd not in {196, 197, 198} else 199
+        return COMPILER_EXEC_CHILD_FD
 
     def _compiler_argv0(self) -> str:
         return f"/proc/self/fd/{self._compiler_exec_fd()}"
@@ -959,6 +964,17 @@ class CompilerBroker:
             return self._spawn_compiler_inner(argv, environment, cwd, input_view)
 
     def _spawn_compiler_inner(self, argv: list[str], environment: Mapping[str, str], cwd: Path, input_view: exact_actions.ImmutableInputView) -> tuple[_SpawnedCompiler, runner.LinuxContainment, dict[str, Any]]:
+        exec_fd = self._compiler_exec_fd()
+        helper_fd = COMPILER_HELPER_CHILD_FD
+        limiter_fd = COMPILER_LIMITER_CHILD_FD
+        input_actions = input_view.spawn_file_actions()
+        reserved = {limiter_fd, helper_fd, exec_fd}
+        source_descriptors = {
+            self.compiler.fd, self.exec_helper_snapshot.fd, self.process_limiter_snapshot.fd,
+            *(action[1] for action in input_actions),
+        }
+        if reserved.intersection(source_descriptors):
+            raise BuilderError("compiler child reserved descriptors collide with sealed parent inputs")
         containment = runner.LinuxContainment.begin()
         stdout_read = stdout_write = stderr_read = stderr_write = -1
         try:
@@ -974,9 +990,6 @@ class CompilerBroker:
             if not containment.restore_after_launch_failure():
                 raise BuilderError("compiler broker could not restore containment after pipe allocation failure")
             raise
-        exec_fd = self._compiler_exec_fd()
-        helper_fd = 197 if self.exec_helper_snapshot.fd not in {exec_fd, 196, 197} else 195
-        limiter_fd = 196 if self.process_limiter_snapshot.fd not in {exec_fd, helper_fd, 196} else 194
         actions = [
             (os.POSIX_SPAWN_DUP2, stdout_write, 1),
             (os.POSIX_SPAWN_DUP2, stderr_write, 2),
@@ -988,7 +1001,7 @@ class CompilerBroker:
             (os.POSIX_SPAWN_CLOSE, stderr_read),
             (os.POSIX_SPAWN_CLOSE, stderr_write),
         ]
-        actions.extend(input_view.spawn_file_actions())
+        actions.extend(input_actions)
         if exec_fd != self.compiler.fd:
             actions.append((os.POSIX_SPAWN_CLOSE, self.compiler.fd))
         for source_fd in (self.exec_helper_snapshot.fd, self.process_limiter_snapshot.fd):

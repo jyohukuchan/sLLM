@@ -25,7 +25,6 @@ class ExactActionError(ValueError):
     """An exact-action manifest or state-machine invariant was violated."""
 
 
-INPUT_VIEW_FD_BASE = 300
 INPUT_VIEW_ALGORITHM = "sealed-input-view-v1"
 INPUT_VIEW_SEALS = fcntl.F_SEAL_SHRINK | fcntl.F_SEAL_GROW | fcntl.F_SEAL_WRITE | fcntl.F_SEAL_SEAL
 
@@ -260,11 +259,10 @@ def seal_input_view(manifest: Mapping[str, Any]) -> ImmutableInputView:
                 descriptors.append(sealed)
             sealed, _data = by_path[key]
             records.append(dict(source))
-        # Targets only need to be above every source descriptor.  Reserving an
-        # additional descriptor-count-sized hole needlessly exhausts the
-        # process RLIMIT_NOFILE for a complete compiler input closure.
-        target_base = max(INPUT_VIEW_FD_BASE, max(descriptors, default=0) + 1)
-        fd_targets = [target_base + index for index in range(len(descriptors))]
+        # POSIX_SPAWN_DUP2 with identical source/target descriptors clears
+        # FD_CLOEXEC.  Reusing each sealed source descriptor avoids requiring
+        # a second complete FD range for large compiler input closures.
+        fd_targets = list(descriptors)
         fd_by_path = {path: target for path, target in zip(by_path, fd_targets, strict=True)}
         rewritten = list(checked["argv"])
         for index, value in enumerate(rewritten):
