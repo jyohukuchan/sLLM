@@ -24,6 +24,8 @@ class P0BuilderTests(unittest.TestCase):
                 self.assertEqual(command, list(contracts.P0_BUILD_COMMAND))
                 environment = kwargs["env"]
                 self.assertIsInstance(environment, dict)
+                for name, value in contracts.p0_build_environment("gfx1030").items():
+                    self.assertEqual(environment[name], value)
                 target = Path(environment["CARGO_TARGET_DIR"])
                 binary = target / "release" / contracts.P0_BINARY
                 binary.parent.mkdir(parents=True)

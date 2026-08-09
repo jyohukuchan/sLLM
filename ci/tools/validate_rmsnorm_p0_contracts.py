@@ -42,6 +42,8 @@ P0_BUILD_COMMAND = (
     "cargo", "+1.97.1", "build", "--locked", "--offline", "--release",
     "--package", "sllm-hip", "--bin", P0_BINARY,
 )
+P0_CODEGEN_FEATURES = "co_v6,wave32,xnack=unsupported,sramecc=unsupported,generic_processor_version=0"
+P0_RUNTIME_LD_LIBRARY_PATH = "/opt/rocm/lib:/opt/rocm/lib64:/lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu:/lib:/usr/lib"
 PRODUCER_STATUS = "a5-enabled"
 DTYPE_CONTRACT = {
     "activation": "BF16", "weight": "BF16", "output": "BF16",
@@ -57,6 +59,21 @@ CASE_SPECS = (
 CASE_IDS = tuple(item[0] for item in CASE_SPECS)
 PREREQUISITE_KINDS = ("g0", "private_g1", "semantic_g1", "g2", "h3")
 PUBLIC_PATH = "SemanticOpDescriptor->Backend->sllm-hip->public-C-ABI->native-HIP-registry->rmsnorm.baseline.wave32.v1"
+
+
+def p0_build_environment(target: str) -> dict[str, str]:
+    if target not in TARGETS:
+        raise ContractError("P0 build environment target is not canonical")
+    return {
+        "ROCM_PATH": "/opt/rocm",
+        "HIP_PATH": "/opt/rocm",
+        "SLLM_HIP_COMPILER": "/opt/rocm/bin/amdclang++",
+        "CMAKE_HIP_ARCHITECTURES": target,
+        "SLLM_HIP_CODEGEN_FEATURES": P0_CODEGEN_FEATURES,
+        "SLLM_ENABLE_HIP_RUNTIME": "0",
+        "SLLM_ENABLE_PUBLIC_HIP_RUNTIME": "1",
+        "SLLM_ENABLE_HIP_COMPILE_PROBE": "0",
+    }
 P0_PUBLIC_PATH_INPUTS_PATH = "ci/matrix/rmsnorm-p0-public-path-inputs-v1.json"
 P0_SOURCE_SET_IDENTITY = "rmsnorm-p0-enabled-public-path-source-set-v1"
 A5_ENABLEMENT_REQUIREMENTS: tuple[str, ...] = ()
@@ -459,6 +476,7 @@ def validate_artifact(
         "output_path": P0_BINARY,
         "fresh_output": True,
         "substitution_rejected": True,
+        "environment": p0_build_environment(target),
     }
     if document["build"] != expected_build:
         raise ContractError("P0 artifact build identity is missing or substituted")

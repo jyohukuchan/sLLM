@@ -29,6 +29,7 @@ from validate_rmsnorm_p0_contracts import (  # noqa: E402
     PRODUCER_STATUS,
     PUBLIC_PATH,
     DTYPE_CONTRACT,
+    p0_build_environment,
     validate_artifact,
     validate_candidate,
     source_set,
@@ -83,6 +84,10 @@ def build_artifact(
     try:
         if run_build:
             environment = os.environ.copy()
+            for name in list(environment):
+                if name.startswith("CARGO_FEATURE_"):
+                    environment.pop(name, None)
+            environment.update(p0_build_environment(target))
             environment["CARGO_TARGET_DIR"] = str(build_root)
             completed = subprocess.run(
                 list(P0_BUILD_COMMAND),
@@ -125,6 +130,7 @@ def build_artifact(
                 "output_path": P0_BINARY,
                 "fresh_output": True,
                 "substitution_rejected": True,
+                "environment": p0_build_environment(target),
             },
             "source_set": source_set(repo),
             "execution_contract": {

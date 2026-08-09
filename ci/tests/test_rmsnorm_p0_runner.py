@@ -48,7 +48,7 @@ def write_artifact(root: Path, target: str, value: dict[str, object] | None = No
         "artifact_id": f"rmsnorm-p0-{target}-{binary_sha}",
         "row_id": f"rmsnorm-p0-{target}", "target": target, "candidate": value,
         "binary": {"role": contracts.P0_BINARY_ROLE, "path": contracts.P0_BINARY, "sidecar_path": contracts.P0_SIDECAR, "size_bytes": binary.stat().st_size, "sha256": binary_sha, "sidecar_sha256": sha256_file(sidecar)},
-        "build": {"builder": "ci/tools/build_rmsnorm_p0_runtime.py", "command": list(contracts.P0_BUILD_COMMAND), "profile": "release", "binary_name": contracts.P0_BINARY, "output_path": contracts.P0_BINARY, "fresh_output": True, "substitution_rejected": True},
+        "build": {"builder": "ci/tools/build_rmsnorm_p0_runtime.py", "command": list(contracts.P0_BUILD_COMMAND), "profile": "release", "binary_name": contracts.P0_BINARY, "output_path": contracts.P0_BINARY, "fresh_output": True, "substitution_rejected": True, "environment": contracts.p0_build_environment(target)},
         "source_set": contracts.source_set(ROOT),
         "execution_contract": {"public_path": contracts.PUBLIC_PATH, "kernel_id": 1, "kernel_symbol": "rmsnorm.baseline.wave32.v1", "device_symbol": "sllm_rmsnorm_baseline_wave32_v1", "workgroup_size_x": 256, "timing_contract": "rmsnorm-p0-timing-v1", "dtype": dict(contracts.DTYPE_CONTRACT), "producer_status": contracts.PRODUCER_STATUS},
         "scope": {"selected_backend": "hip", "public_rmsnorm_path": True, "semantic_op_used": True, "model_used": False, "hip_only": True, "fallback_allowed": False, "fallback_used": False, "cpu_fallback_used": False},
@@ -110,20 +110,12 @@ def runtime_result(target: str, artifact_document: dict[str, object], artifact_p
 class P0RunnerTests(unittest.TestCase):
     def _args(self, root: Path, target: str = "gfx1030") -> tuple[Namespace, dict[str, object]]:
         artifact_path, binary, artifact_document = write_artifact(root, target)
-        observations = {
-            "health_pre": ok_health(target), "health_post": ok_health(target),
-            "process_pre": clean_process(), "process_post": clean_process(),
-        }
-        paths: dict[str, Path] = {}
-        for name, document in observations.items():
-            path = root / f"{name}.json"
-            path.write_bytes(canonical_bytes(document))
-            paths[name] = path
         args = Namespace(
             repo=ROOT, target=target, artifact=artifact_path, binary=binary,
             output_dir=root / "out", run_id="p0-test-run", run_attempt=1,
             reviewed_sha="a" * 40, tested_sha="a" * 40, workflow_sha="a" * 40,
-            tree_oid="b" * 40, **paths,
+            tree_oid="b" * 40, health_pre=None, health_post=None,
+            process_pre=None, process_post=None,
         )
         return args, artifact_document
 
@@ -144,14 +136,42 @@ class P0RunnerTests(unittest.TestCase):
             args, artifact_document = self._args(root)
             result = runtime_result(args.target, artifact_document, args.artifact)
             completed = runner.subprocess.CompletedProcess([], 0, canonical_bytes(result), b"")
-            with patch.dict(os.environ, {"SLLM_P0_GPU_EXECUTION": "1"}), patch.object(runner.subprocess, "run", return_value=completed) as invoked:
+            observed = (ok_health(args.target), clean_process(), {"hip_id": 1})
+            events: list[str] = []
+
+            def observe(*_args: object) -> tuple[dict[str, object], dict[str, object], dict[str, object]]:
+                events.append("observe")
+                return observed
+
+            def execute(*_args: object, **_kwargs: object) -> object:
+                events.append("execute")
+                return completed
+
+            with patch.dict(os.environ, {"SLLM_P0_GPU_EXECUTION": "1"}), patch.object(runner, "_observe_live", side_effect=observe), patch.object(runner.subprocess, "run", side_effect=execute) as invoked:
                 report = runner.run_row(args)
             self.assertEqual(invoked.call_count, 1)
+            self.assertEqual(events, ["observe", "execute", "observe"])
+            self.assertEqual(invoked.call_args.kwargs["env"]["HIP_VISIBLE_DEVICES"], "1")
+            self.assertEqual(
+                invoked.call_args.kwargs["env"]["LD_LIBRARY_PATH"],
+                contracts.P0_RUNTIME_LD_LIBRARY_PATH,
+            )
             self.assertEqual(report["state"], "PASS")
             self.assertEqual(report["collection"]["collected_cases"], 5)
             self.assertEqual(report["dispatch"]["dispatch_count"], 130)
             self.assertIn("complete dedicated producer", report["execution"]["failure_reason"])
             contracts.validate_report(report)
+
+    def test_canonical_runner_rejects_precomputed_observation_inputs(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="sllm-p0-observation-") as directory:
+            args, _ = self._args(Path(directory))
+            args.health_pre = Path(directory) / "health-pre.json"
+            with patch.dict(os.environ, {"SLLM_P0_GPU_EXECUTION": "1"}), patch.object(
+                runner, "_observe_live"
+            ) as observe:
+                with self.assertRaises(ContractError):
+                    runner.run_row(args)
+            observe.assert_not_called()
 
     def test_runtime_rejects_non_gpu_zero_dispatch_fallback_and_identity_drift(self) -> None:
         with tempfile.TemporaryDirectory(prefix="sllm-p0-runtime-") as directory:
@@ -240,7 +260,8 @@ class P0RunnerTests(unittest.TestCase):
             args, artifact_document = self._args(root)
             result = runtime_result(args.target, artifact_document, args.artifact)
             completed = runner.subprocess.CompletedProcess([], 0, canonical_bytes(result), b"")
-            with patch.dict(os.environ, {"SLLM_P0_GPU_EXECUTION": "1"}), patch.object(runner.subprocess, "run", return_value=completed):
+            observed = (ok_health(args.target), clean_process(), {"hip_id": 1})
+            with patch.dict(os.environ, {"SLLM_P0_GPU_EXECUTION": "1"}), patch.object(runner, "_observe_live", side_effect=[observed, observed]), patch.object(runner.subprocess, "run", return_value=completed):
                 report = runner.run_row(args)
             report["state"] = "PASS"
             report["execution"]["stderr_sha256"] = "f" * 64

@@ -3,7 +3,8 @@
 
 Host use validates the complete contract and emits FAIL without starting the
 producer.  Canonical execution additionally requires an explicit environment
-gate and externally retained pre/post health/process observations.
+gate and collects live pre/post health/process observations under the shared
+host lock around the exact routed GPU execution.
 """
 
 from __future__ import annotations
@@ -23,10 +24,19 @@ from common import ContractError, ROOT, canonical_bytes, read_json, sha256_file 
 from validate_rmsnorm_p0_contracts import (  # noqa: E402
     DTYPE_CONTRACT, MATRIX_PATH, MEASUREMENT_ITERATIONS, MODEL_LOCK_FINGERPRINT,
     MODEL_LOCK_PATH, PRODUCER_STATUS, REVIEW_POLICY_PATH,
+    P0_RUNTIME_LD_LIBRARY_PATH,
     RESOLVED_REVISION, TARGETS, TOTAL_DISPATCHES, WARMUP_ITERATIONS,
     artifact_summary, case_set_sha256, source_set, validate_artifact,
     validate_candidate, validate_matrix, validate_report,
     validate_review_policy, validate_runtime_result,
+)
+from run_g0_preflight import (  # noqa: E402
+    amd_smi_list_json, nonblocking_host_lock, observe_health, observe_processes,
+    require_available_observation,
+)
+from validate_g0_contracts import (  # noqa: E402
+    AMD_SMI_EXECUTABLE, row_by_id, validate_g0_matrix, validate_health,
+    validate_processes, validate_routing, validate_visibility_environment,
 )
 
 TIMEOUT_SECONDS = 900
@@ -60,13 +70,31 @@ def _clean_process() -> dict[str, Any]:
     return {"state": "CLEAN", "residual_runner_children": [], "gpu_processes": []}
 
 
-def _load_observation(path: Path | None, fallback: dict[str, Any]) -> dict[str, Any]:
-    if path is None:
-        return dict(fallback)
-    value = read_json(path)
-    if not isinstance(value, dict):
-        raise ContractError(f"P0 observation is not an object: {path}")
-    return value
+def _observe_live(repo: Path, target: str) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    row = row_by_id(validate_g0_matrix(repo), f"g0-{target}")
+    routing = amd_smi_list_json(row, executable=AMD_SMI_EXECUTABLE)
+    visibility = validate_visibility_environment(
+        {"HIP_VISIBLE_DEVICES": str(routing["hip_id"]), "CUDA_VISIBLE_DEVICES": None, "GPU_DEVICE_ORDINAL": None}
+    )
+    validate_routing(routing, visibility, row)
+    observed_health = observe_health(
+        row, routing, amd_smi=AMD_SMI_EXECUTABLE, sysfs_root=Path("/sys/bus/pci/devices")
+    )
+    require_available_observation(observed_health, "P0 live health")
+    validate_health(observed_health, "P0 live", row)
+    observed_processes = observe_processes(row, routing, amd_smi=AMD_SMI_EXECUTABLE)
+    require_available_observation(observed_processes, "P0 live process")
+    validate_processes(observed_processes, "P0 live", row)
+    facts = observed_health["facts"]
+    if facts["ras_uncorrectable_count"] != 0 or facts["sysfs_ras_uncorrectable_count"] != 0:
+        raise ContractError("P0 live health reports an uncorrectable error")
+    if observed_processes["gpu_processes"] or observed_processes["residual_runner_children"]:
+        raise ContractError("P0 live process observation is not clean")
+    health = {
+        "available": True, "reliable": True, "state": "OK", "target": target,
+        "ras_uncorrectable_count": 0,
+    }
+    return health, _clean_process(), routing
 
 
 def _parse_runtime_stdout(stdout: bytes) -> dict[str, Any]:
@@ -188,13 +216,8 @@ def run_row(
         )
         _write_report(Path(args.output_dir), report)
         return report
-    observation_paths = (args.health_pre, args.health_post, args.process_pre, args.process_post)
-    if any(path is None for path in observation_paths):
-        raise ContractError("canonical P0 execution requires all pre/post health and process observations")
-    health_pre = _load_observation(args.health_pre, _unavailable_health(args.target))
-    health_post = _load_observation(args.health_post, _unavailable_health(args.target))
-    process_pre = _load_observation(args.process_pre, _clean_process())
-    process_post = _load_observation(args.process_post, _clean_process())
+    if any(getattr(args, name, None) is not None for name in ("health_pre", "health_post", "process_pre", "process_post")):
+        raise ContractError("P0 canonical execution rejects precomputed pre/post observations")
     command = [
         str(args.binary), "--target", args.target,
         "--case-set-sha256", case_set_sha256(repo),
@@ -213,12 +236,33 @@ def run_row(
         "--matrix-sha256", sha256_file(repo / MATRIX_PATH),
         "--model-lock-sha256", sha256_file(repo / MODEL_LOCK_PATH),
     ]
+    health_pre = _unavailable_health(args.target)
+    health_post = _unavailable_health(args.target)
+    process_pre = _clean_process()
+    process_post = _clean_process()
     started_ns = time.monotonic_ns()
     try:
-        completed = subprocess.run(
-            command, cwd=repo, capture_output=True, check=False,
-            timeout=TIMEOUT_SECONDS, start_new_session=True,
-        )
+        with nonblocking_host_lock(Path("/tmp/sllm-g0.lock")):
+            health_pre, process_pre, routing_pre = _observe_live(repo, args.target)
+            execution_environment = os.environ.copy()
+            for selector in ("HIP_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES", "GPU_DEVICE_ORDINAL", "ROCR_VISIBLE_DEVICES"):
+                execution_environment.pop(selector, None)
+            execution_environment["HIP_VISIBLE_DEVICES"] = str(routing_pre["hip_id"])
+            execution_environment["LD_LIBRARY_PATH"] = P0_RUNTIME_LD_LIBRARY_PATH
+            execution_error: Exception | None = None
+            try:
+                completed = subprocess.run(
+                    command, cwd=repo, env=execution_environment, capture_output=True, check=False,
+                    timeout=TIMEOUT_SECONDS, start_new_session=True,
+                )
+            except Exception as exc:
+                execution_error = exc
+            finally:
+                health_post, process_post, routing_post = _observe_live(repo, args.target)
+            if routing_post != routing_pre:
+                raise ContractError("P0 canonical device routing changed across execution")
+            if execution_error is not None:
+                raise execution_error
     except subprocess.TimeoutExpired as exc:
         report = make_report(
             args, candidate, artifact, artifact_sha, "P0 producer timed out",
