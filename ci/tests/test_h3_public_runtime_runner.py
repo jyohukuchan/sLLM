@@ -2319,6 +2319,7 @@ class H3PublicRuntimeRunnerTests(unittest.TestCase):
                         runner.inspect_device(path, Path("/fake/llvm-readobj"), row)
 
     def test_host_inspection_requires_public_symbols_and_rejects_stub_names(self) -> None:
+        self.assertIn("hipEventElapsedTime", runner.EXPECTED_HOST_HIP_UNDEFINED_SYMBOLS)
         row = {"target": "gfx1030", "resource": {"max_rss_bytes": 256 * 1024 * 1024, "max_output_bytes": 1024}}
         symbol_text = "\n".join(
             f"  Symbol {{\n    Name: {name}\n    Binding: Global (0x1)\n    Type: Function (0x2)\n    Other: 0\n    Section: .text\n  }}" for name in sorted(runner.PUBLIC_SYMBOLS)

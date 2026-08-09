@@ -88,6 +88,7 @@ EXPECTED_HOST_HIP_UNDEFINED_SYMBOLS = (
     "__hipUnregisterFatBinary",
     "hipEventCreateWithFlags",
     "hipEventDestroy",
+    "hipEventElapsedTime",
     "hipEventQuery",
     "hipEventRecord",
     "hipFree",
