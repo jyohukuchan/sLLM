@@ -30,5 +30,6 @@
 - 同じ監査で既存backend-neutral `ExecutionSession::upload()`とHIP `ExecutionSessionAdapter`がすでに公開upload経路を提供することを確認した。B7は新しいHIP wrapperや`Queue::copy_to_device()`直結を作らず、B5 load planをこの既存経路へ接続するsemantic evidenceに限定した。
 - 修正commitのfresh reviewは、`ExecutionSession::upload()`の完了型に任意buffer rangeのD2H/read APIがなく、RMSNorm `Submission` output専用readbackしか存在しないため、B7のexact round-trip gateを満たせないHigh 1件を検出した。B7を、既存C ABIへlowerするbackend-neutral buffer readback契約B7aと、B5 load planをreview済みtransfer pathへ接続するB7bへ分割し、各4〜6時間・hard 7時間の独立rollback単位とした。
 - ユーザー指示により全体hard中断時刻を2026-08-10 03:38:27 JSTから6時間延長して同日09:38:27 JSTとした。修正planの同一identity reviewを閉じた後、B0を予測2〜4時間・開始から5時間hard stopで進める。
+- B7a/B7b分割後のfresh reviewは、B7aが最大16 GiBのbufferに対して「任意range」を約束する一方、既存transfer ABIが1 transfer最大1 GiBであるMedium 1件を検出した。B7aをbackend広告上限以下へ限定し、HIPは既存1 GiBを広告、超過はfake adapter host contractでsubmit前に拒否、B7bは既存16 MiB chunkを使う契約へ修正した。
 
 [対応する計画](../../../../plans/active/2026/08/1-10/phase3-qwen35-4b-bf16.md)
