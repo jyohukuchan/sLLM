@@ -36,6 +36,9 @@ HOSTILE_CARGO_ENVIRONMENT = {
 }
 HOSTILE_CARGO_ENVIRONMENT.update({
     "CARGO_BUILD_TARGET": "wasm32-unknown-unknown",
+    "PATH": "/hostile/path",
+    "CARGO_HOME": "/hostile/cargo-home",
+    "RUSTUP_HOME": "/hostile/rustup-home",
     "RUSTUP_AUTO_INSTALL": "hostile",
 })
 
@@ -186,6 +189,8 @@ class RustDependencyPolicyTests(unittest.TestCase):
         )
         self.assertEqual(observed["kwargs"]["env"]["CARGO_NET_OFFLINE"], "true")
         self.assertEqual(observed["kwargs"]["env"]["RUSTUP_AUTO_INSTALL"], "0")
+        for name in ("PATH", "CARGO_HOME", "RUSTUP_HOME"):
+            self.assertEqual(observed["kwargs"]["env"][name], HOSTILE_CARGO_ENVIRONMENT[name])
         for name in B0_DISABLED_HIP_FLAGS:
             self.assertEqual(observed["kwargs"]["env"][name], "0")
         for name in B0_ABSENT_ENVIRONMENT_VARIABLES:
@@ -216,6 +221,8 @@ class RustDependencyPolicyTests(unittest.TestCase):
         )
         self.assertEqual(observed["kwargs"]["env"]["CARGO_NET_OFFLINE"], "true")
         self.assertEqual(observed["kwargs"]["env"]["RUSTUP_AUTO_INSTALL"], "0")
+        for name in ("PATH", "CARGO_HOME", "RUSTUP_HOME"):
+            self.assertEqual(observed["kwargs"]["env"][name], HOSTILE_CARGO_ENVIRONMENT[name])
         for name in B0_DISABLED_HIP_FLAGS:
             self.assertEqual(observed["kwargs"]["env"][name], "0")
         for name in B0_ABSENT_ENVIRONMENT_VARIABLES:
