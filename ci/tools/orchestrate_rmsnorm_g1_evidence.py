@@ -558,7 +558,14 @@ def _receive_worker_frame(
                 try:
                     document, credentials = contracts.ipc_recv(sock)
                 except (OSError, ContractError) as exc:
-                    raise ControllerError(f"cannot receive authenticated worker {phase} frame: {exc}") from exc
+                    for _attempt in range(10):
+                        worker_status = process.poll()
+                        if worker_status is not None:
+                            break
+                        time.sleep(0.002)
+                    raise ControllerError(
+                        f"cannot receive authenticated worker {phase} frame: {exc}; worker_status={worker_status}"
+                    ) from exc
                 if credentials != (binding["pid"], binding["uid"], binding["gid"]):
                     raise ControllerError("worker frame kernel credentials do not match its PID/starttime/UID/GID binding")
                 return document
