@@ -770,7 +770,8 @@ helper.chmod(0o555)
 compiler = contracts.snapshot_file(pathlib.Path("/bin/sleep"), None, "real broker death compiler")
 broker = builder.CompilerBroker(compiler=compiler, client_path=root / "compiler-client.py", exec_helper=helper, socket_root=root, allowed_roots=(root,), action_recipes={{"death": {{"argv": ["2"], "cwd": str(root), "inputs": [], "implicit": [], "response_files": [], "outputs": []}}}})
 broker.start()
-environment = {{"PATH": "/usr/bin:/bin", "HOME": "/tmp", **broker.environment()}}
+build_environment = {{"PATH": "/usr/bin:/bin", "HOME": "/tmp"}}
+environment = {{**builder.compiler_client_environment(build_environment), **broker.environment()}}
 client_process = subprocess.Popen(
     [broker.client_exec_path, "2"], cwd=root, env=environment, stdin=subprocess.DEVNULL,
     stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True, close_fds=True,
@@ -778,7 +779,7 @@ client_process = subprocess.Popen(
 )
 containment = builder.runner.LinuxContainment.begin()
 containment.bind_root(client_process.pid, client_process.pid)
-broker.bind_build(client_process.pid, os.getpgid(client_process.pid), environment, process=client_process, containment=containment)
+broker.bind_build(client_process.pid, os.getpgid(client_process.pid), build_environment, process=client_process, containment=containment)
 deadline = time.monotonic() + 5.0
 while broker._active_compiler_pid is None and time.monotonic() < deadline:
     time.sleep(0.01)
