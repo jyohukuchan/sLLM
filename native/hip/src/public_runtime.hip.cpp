@@ -533,13 +533,12 @@ validate_rmsnorm_dispatch_info(const sllm_rmsnorm_dispatch_info_t *const info,
   return SLLM_STATUS_OK;
 }
 
-sllm_status_t validate_completion_timing(
-    const sllm_completion_timing_t *const timing,
-    sllm_error_sink_t *const sink) noexcept {
+sllm_status_t
+validate_completion_timing(const sllm_completion_timing_t *const timing,
+                           sllm_error_sink_t *const sink) noexcept {
   if (timing == nullptr) {
-    return sllm_public_runtime::write_error(
-        sink, SLLM_STATUS_INVALID_ARGUMENT,
-        "completion timing output is null");
+    return sllm_public_runtime::write_error(sink, SLLM_STATUS_INVALID_ARGUMENT,
+                                            "completion timing output is null");
   }
   uint32_t prefix[2] = {};
   std::memcpy(prefix, timing, sizeof(prefix));
@@ -920,7 +919,8 @@ sllm_status_t poll_completion(Completion *const completion,
       }
       const double elapsed_ns = static_cast<double>(elapsed_ms) * 1000000.0;
       if (!std::isfinite(elapsed_ns) || elapsed_ns < 1.0 ||
-          elapsed_ns > static_cast<double>(std::numeric_limits<uint64_t>::max())) {
+          elapsed_ns >
+              static_cast<double>(std::numeric_limits<uint64_t>::max())) {
         completion->terminal = true;
         completion->success = false;
         completion->failure_status = hipErrorInvalidValue;
@@ -930,7 +930,8 @@ sllm_status_t poll_completion(Completion *const completion,
             sink, SLLM_STATUS_PUBLIC_HIP_RUNTIME_ERROR,
             "hipEventElapsedTime returned a non-positive or non-finite value");
       }
-      completion->timing_elapsed_ns = static_cast<uint64_t>(std::ceil(elapsed_ns));
+      completion->timing_elapsed_ns =
+          static_cast<uint64_t>(std::ceil(elapsed_ns));
       completion->timing_valid = completion->timing_elapsed_ns != 0U;
       if (!completion->timing_valid) {
         completion->terminal = true;
@@ -2843,9 +2844,9 @@ sllm_completion_timing(sllm_completion_t *const raw_completion,
     timing->struct_size = struct_size;
     timing->abi_version = abi_version;
     if (raw_completion == nullptr) {
-      return sllm_public_runtime::write_error(
-          error_sink, SLLM_STATUS_INVALID_ARGUMENT,
-          "completion handle is null");
+      return sllm_public_runtime::write_error(error_sink,
+                                              SLLM_STATUS_INVALID_ARGUMENT,
+                                              "completion handle is null");
     }
     Completion *completion = nullptr;
     const sllm_status_t pin_status =
@@ -2855,7 +2856,8 @@ sllm_completion_timing(sllm_completion_t *const raw_completion,
     }
     CompletionPin pin(completion);
     std::unique_lock<std::mutex> state_lock(completion->state_mutex);
-    const sllm_status_t completion_status = poll_completion(completion, error_sink);
+    const sllm_status_t completion_status =
+        poll_completion(completion, error_sink);
     if (completion->terminal && !completion->safe_to_release) {
       state_lock.unlock();
       quarantine_completion(raw_completion, completion);
@@ -3491,8 +3493,7 @@ sllm_rmsnorm_execute(const sllm_rmsnorm_plan_t *const raw_plan,
     }
 
     hipEvent_t native_event = nullptr;
-    const hipError_t event_status =
-        hipEventCreateWithFlags(&native_event, 0U);
+    const hipError_t event_status = hipEventCreateWithFlags(&native_event, 0U);
     if (event_status != hipSuccess) {
       if (!rollback_reserved_rmsnorm_submission(plan, queue, error_sink)) {
         execute_guard.disarm();

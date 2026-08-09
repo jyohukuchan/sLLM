@@ -20,12 +20,12 @@
       "native/hip/src/public_runtime_internal.hpp"
     ],
     "files": [
-      {"path": "include/sllm/hip.h", "sha256": "2e492a38cc09b04c981cf3b3c3a9c261060af4d9c769ce48463ca30eae840210"},
+      {"path": "include/sllm/hip.h", "sha256": "e91334f4631bd5a69ca6def2da421310d31cfaa07f8064e218c950eb8f1c1a56"},
       {"path": "native/hip/src/hip_compile_probe.hip.cpp", "sha256": "c8d726552cfdc3196f1e42dbc8b4107b63562f219dc8d437a89172cbf0beb65b"},
-      {"path": "native/hip/src/public_runtime.hip.cpp", "sha256": "cbb4c72d5e6c1f2cd9e93877a38c2f9a3f4bfeeb01317dc8496ac401b44ea91e"},
+      {"path": "native/hip/src/public_runtime.hip.cpp", "sha256": "bcc96927c25ac32b9f26dfff502d2ae94947f9b47590325895b585cfc8a4ed1a"},
       {"path": "native/hip/src/public_runtime_internal.hpp", "sha256": "128bccd42da62255927bce704bbdfb3423669677b7368045301c34f0eedaff45"}
     ],
-    "source_set_sha256": "69d3694011f26f7802954bdb3ad5082c5c03c2c289b06dc32fa97a78e1695253"
+    "source_set_sha256": "78bd0e837083738d2f777f2d1139a7e8b8ec639c7122f90adc5f6d6ed6852e85"
   },
   "direct_compile_sources": {
     "canonical_order": [
@@ -39,16 +39,16 @@
       "native/hip/src/rmsnorm_kernel_internal.hpp"
     ],
     "files": [
-      {"path": "include/sllm/hip.h", "sha256": "2e492a38cc09b04c981cf3b3c3a9c261060af4d9c769ce48463ca30eae840210"},
+      {"path": "include/sllm/hip.h", "sha256": "e91334f4631bd5a69ca6def2da421310d31cfaa07f8064e218c950eb8f1c1a56"},
       {"path": "native/hip/src/hip_compile_probe.hip.cpp", "sha256": "c8d726552cfdc3196f1e42dbc8b4107b63562f219dc8d437a89172cbf0beb65b"},
-      {"path": "native/hip/src/public_runtime.hip.cpp", "sha256": "cbb4c72d5e6c1f2cd9e93877a38c2f9a3f4bfeeb01317dc8496ac401b44ea91e"},
+      {"path": "native/hip/src/public_runtime.hip.cpp", "sha256": "bcc96927c25ac32b9f26dfff502d2ae94947f9b47590325895b585cfc8a4ed1a"},
       {"path": "native/hip/src/public_runtime_internal.hpp", "sha256": "128bccd42da62255927bce704bbdfb3423669677b7368045301c34f0eedaff45"},
       {"path": "native/hip/src/rmsnorm_api.cpp", "sha256": "08f899273e1e7b064f717571b271ae2b4609f394bd1e32644919c42187c75d7f"},
       {"path": "native/hip/src/rmsnorm_api.hpp", "sha256": "64aabff65bb99435e783e7af6b72e3c31d2f03da7dc7d3480cda59e883f9d43e"},
       {"path": "native/hip/src/rmsnorm_kernel.hip.cpp", "sha256": "90cf982f2d5865a571c5573da5efbce802c61ccf0d2e2e747a624331b1af526d"},
       {"path": "native/hip/src/rmsnorm_kernel_internal.hpp", "sha256": "d4aaae93cd08e18f6725f2a82e7c7f69bd17e5b3446dd2fb2dab81f5e8a932eb"}
     ],
-    "source_set_sha256": "63fbb621c7f1ddf78d33a65ead7717003be88f852674316b2a1117a11a104da0"
+    "source_set_sha256": "7e6615370a37fb1387dff54b3b3850cafbb6514b37cf4800ffb907cfe99ac0df"
   },
   "public_abi_symbols": [
     "sllm_backend_probe", "sllm_buffer_copy_d2h", "sllm_buffer_copy_h2d", "sllm_buffer_create", "sllm_buffer_release", "sllm_buffer_size", "sllm_completion_query", "sllm_completion_read", "sllm_completion_release", "sllm_completion_timing", "sllm_completion_wait", "sllm_context_create", "sllm_context_probe", "sllm_context_release", "sllm_device_count", "sllm_device_query", "sllm_event_create", "sllm_event_release", "sllm_get_abi_version", "sllm_query_version", "sllm_queue_create", "sllm_queue_release", "sllm_rmsnorm_execute", "sllm_rmsnorm_plan_release", "sllm_rmsnorm_prepare"

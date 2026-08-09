@@ -658,7 +658,7 @@ fn validate_hip_environment(
         client_sha256,
         client_fd,
     };
-    if semantic_g1_authority == false {
+    if !semantic_g1_authority {
         let mut compiler_probe = compiler.version_probe();
         let compiler_version = capture(&mut compiler_probe, "sealed ROCm amdclang++ version probe");
         let version_line = compiler_version.lines().next().unwrap_or_default();

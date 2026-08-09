@@ -374,10 +374,9 @@ sllm_completion_read(sllm_completion_t *completion, void *destination,
  * elapsed value is available only after successful completion and is never a
  * host-clock or CPU-fallback estimate.  Other completion kinds return
  * SLLM_STATUS_UNSUPPORTED. */
-SLLM_HIP_API sllm_status_t
-sllm_completion_timing(sllm_completion_t *completion,
-                       sllm_completion_timing_t *timing,
-                       sllm_error_sink_t *error_sink) SLLM_HIP_NOEXCEPT;
+SLLM_HIP_API sllm_status_t sllm_completion_timing(
+    sllm_completion_t *completion, sllm_completion_timing_t *timing,
+    sllm_error_sink_t *error_sink) SLLM_HIP_NOEXCEPT;
 
 SLLM_HIP_API sllm_status_t
 sllm_completion_release(sllm_completion_t **completion,
