@@ -44,6 +44,16 @@ P0_BUILD_COMMAND = (
 )
 P0_CODEGEN_FEATURES = "co_v6,wave32,xnack=unsupported,sramecc=unsupported,generic_processor_version=0"
 P0_RUNTIME_LD_LIBRARY_PATH = "/opt/rocm/lib:/opt/rocm/lib64:/lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu:/lib:/usr/lib"
+P0_BUILD_TIMEOUT_SECONDS = 900.0
+P0_BUILD_OUTPUT_LIMIT_BYTES = 4 * 1024 * 1024
+P0_BUILD_KILL_GRACE_SECONDS = 2.0
+P0_BUILD_LIMITS = {
+    "timeout_seconds": 900,
+    "combined_output_bytes": P0_BUILD_OUTPUT_LIMIT_BYTES,
+    "start_new_session": True,
+    "process_group_cleanup": "term-kill-group-disappearance-v1",
+    "termination_grace_seconds": 2,
+}
 PRODUCER_STATUS = "a5-enabled"
 DTYPE_CONTRACT = {
     "activation": "BF16", "weight": "BF16", "output": "BF16",
@@ -477,6 +487,7 @@ def validate_artifact(
         "fresh_output": True,
         "substitution_rejected": True,
         "environment": p0_build_environment(target),
+        "limits": P0_BUILD_LIMITS,
     }
     if document["build"] != expected_build:
         raise ContractError("P0 artifact build identity is missing or substituted")

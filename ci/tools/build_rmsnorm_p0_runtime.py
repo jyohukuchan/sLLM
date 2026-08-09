@@ -12,11 +12,14 @@ from __future__ import annotations
 import argparse
 import hashlib
 import os
+import selectors
 import shutil
+import signal
 import stat
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -25,6 +28,10 @@ from validate_rmsnorm_p0_contracts import (  # noqa: E402
     P0_BINARY,
     P0_BINARY_ROLE,
     P0_BUILD_COMMAND,
+    P0_BUILD_KILL_GRACE_SECONDS,
+    P0_BUILD_LIMITS,
+    P0_BUILD_OUTPUT_LIMIT_BYTES,
+    P0_BUILD_TIMEOUT_SECONDS,
     P0_SIDECAR,
     PRODUCER_STATUS,
     PUBLIC_PATH,
@@ -58,6 +65,106 @@ def _candidate(args: argparse.Namespace) -> dict[str, Any]:
     }
 
 
+def _process_group_exists(group_id: int) -> bool:
+    try:
+        os.killpg(group_id, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError as exc:
+        raise ContractError(f"P0 Cargo build process group cannot be inspected: {exc}") from exc
+    return True
+
+
+def _kill_process_group(process: subprocess.Popen[bytes]) -> None:
+    """Terminate and reap the complete isolated Cargo build process group."""
+
+    for signal_value in (signal.SIGTERM, signal.SIGKILL):
+        try:
+            os.killpg(process.pid, signal_value)
+        except ProcessLookupError:
+            pass
+        except OSError as exc:
+            raise ContractError(f"P0 Cargo build process-group cleanup failed: {exc}") from exc
+        deadline = time.monotonic() + P0_BUILD_KILL_GRACE_SECONDS
+        while time.monotonic() < deadline:
+            process.poll()
+            if not _process_group_exists(process.pid):
+                if process.poll() is None:
+                    process.wait(timeout=max(0.0, deadline - time.monotonic()))
+                return
+            time.sleep(0.01)
+    raise ContractError("P0 Cargo build process group could not be reaped")
+
+
+def _run_bounded_build(
+    command: list[str], *, cwd: Path, env: Mapping[str, str]
+) -> subprocess.CompletedProcess[bytes]:
+    """Run the fixed Cargo build with deadline, output bound, and group cleanup."""
+
+    try:
+        process = subprocess.Popen(
+            command,
+            cwd=cwd,
+            env=dict(env),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            start_new_session=True,
+        )
+    except OSError as exc:
+        raise ContractError(f"dedicated P0 Cargo build failed to start: {exc}") from exc
+    if process.stdout is None or process.stderr is None:
+        _kill_process_group(process)
+        raise ContractError("dedicated P0 Cargo build pipes are unavailable")
+
+    streams = {process.stdout.fileno(): "stdout", process.stderr.fileno(): "stderr"}
+    buffers = {"stdout": bytearray(), "stderr": bytearray()}
+    selector = selectors.DefaultSelector()
+    deadline = time.monotonic() + P0_BUILD_TIMEOUT_SECONDS
+    try:
+        for descriptor in streams:
+            os.set_blocking(descriptor, False)
+            selector.register(descriptor, selectors.EVENT_READ)
+        while selector.get_map():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                _kill_process_group(process)
+                raise ContractError("dedicated P0 Cargo build timed out")
+            events = selector.select(min(remaining, 0.25))
+            if not events and process.poll() is not None:
+                events = [(key, selectors.EVENT_READ) for key in selector.get_map().values()]
+            for key, _mask in events:
+                descriptor = int(key.fd)
+                try:
+                    chunk = os.read(descriptor, 65536)
+                except BlockingIOError:
+                    continue
+                if not chunk:
+                    selector.unregister(descriptor)
+                    continue
+                buffers[streams[descriptor]].extend(chunk)
+                if sum(len(value) for value in buffers.values()) > P0_BUILD_OUTPUT_LIMIT_BYTES:
+                    _kill_process_group(process)
+                    raise ContractError("dedicated P0 Cargo build output exceeded its bound")
+        if process.poll() is None:
+            try:
+                process.wait(timeout=max(0.0, deadline - time.monotonic()))
+            except subprocess.TimeoutExpired as exc:
+                _kill_process_group(process)
+                raise ContractError("dedicated P0 Cargo build timed out") from exc
+    except BaseException:
+        if process.poll() is None or _process_group_exists(process.pid):
+            _kill_process_group(process)
+        raise
+    finally:
+        selector.close()
+        process.stdout.close()
+        process.stderr.close()
+    return subprocess.CompletedProcess(
+        command, process.returncode, bytes(buffers["stdout"]), bytes(buffers["stderr"])
+    )
+
+
 def build_artifact(
     *,
     repo: Path = ROOT,
@@ -89,12 +196,8 @@ def build_artifact(
                     environment.pop(name, None)
             environment.update(p0_build_environment(target))
             environment["CARGO_TARGET_DIR"] = str(build_root)
-            completed = subprocess.run(
-                list(P0_BUILD_COMMAND),
-                cwd=repo,
-                env=environment,
-                capture_output=True,
-                check=False,
+            completed = _run_bounded_build(
+                list(P0_BUILD_COMMAND), cwd=repo, env=environment
             )
             if completed.returncode != 0:
                 detail = (completed.stderr or completed.stdout).decode("utf-8", "replace")[-4096:]
@@ -131,6 +234,7 @@ def build_artifact(
                 "fresh_output": True,
                 "substitution_rejected": True,
                 "environment": p0_build_environment(target),
+                "limits": P0_BUILD_LIMITS,
             },
             "source_set": source_set(repo),
             "execution_contract": {

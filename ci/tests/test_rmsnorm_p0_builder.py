@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import os
 import stat
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -33,7 +35,7 @@ class P0BuilderTests(unittest.TestCase):
                 binary.chmod(stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR)
                 return builder.subprocess.CompletedProcess(command, 0, b"", b"")
 
-            with patch.object(builder.subprocess, "run", side_effect=build) as invoked:
+            with patch.object(builder, "_run_bounded_build", side_effect=build) as invoked:
                 artifact = builder.build_artifact(
                     repo=ROOT,
                     output_dir=output,
@@ -46,11 +48,59 @@ class P0BuilderTests(unittest.TestCase):
             self.assertEqual(artifact["build"]["builder"], "ci/tools/build_rmsnorm_p0_runtime.py")
             self.assertTrue(artifact["build"]["fresh_output"])
             self.assertTrue(artifact["build"]["substitution_rejected"])
+            self.assertEqual(artifact["build"]["limits"], contracts.P0_BUILD_LIMITS)
             contracts.validate_artifact(
                 artifact,
                 ROOT,
                 binary_path=output / contracts.P0_BINARY,
             )
+
+    def test_bounded_build_enforces_deadline_output_and_process_group(self) -> None:
+        environment = dict(os.environ)
+        success = builder._run_bounded_build(
+            [sys.executable, "-c", "import sys; sys.stdout.write('ok')"],
+            cwd=ROOT,
+            env=environment,
+        )
+        self.assertEqual((success.returncode, success.stdout, success.stderr), (0, b"ok", b""))
+
+        with patch.object(builder, "P0_BUILD_TIMEOUT_SECONDS", 0.05):
+            started = time.monotonic()
+            with self.assertRaisesRegex(contracts.ContractError, "timed out"):
+                builder._run_bounded_build(
+                    [sys.executable, "-c", "import time; time.sleep(60)"],
+                    cwd=ROOT,
+                    env=environment,
+                )
+            self.assertLess(time.monotonic() - started, 5.0)
+
+        with tempfile.TemporaryDirectory(prefix="sllm-p0-build-child-") as directory:
+            child_pid = Path(directory) / "child.pid"
+            script = (
+                "import pathlib,signal,subprocess,sys,time;"
+                "child=subprocess.Popen([sys.executable,'-c',"
+                "'import signal,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(60)']);"
+                "pathlib.Path(sys.argv[1]).write_text(str(child.pid));"
+                "time.sleep(60)"
+            )
+            with patch.object(builder, "P0_BUILD_TIMEOUT_SECONDS", 0.1):
+                with self.assertRaisesRegex(contracts.ContractError, "timed out"):
+                    builder._run_bounded_build(
+                        [sys.executable, "-c", script, str(child_pid)],
+                        cwd=ROOT,
+                        env=environment,
+                    )
+            descendant = int(child_pid.read_text(encoding="ascii"))
+            with self.assertRaises(ProcessLookupError):
+                os.kill(descendant, 0)
+
+        with patch.object(builder, "P0_BUILD_OUTPUT_LIMIT_BYTES", 1024):
+            with self.assertRaisesRegex(contracts.ContractError, "output exceeded"):
+                builder._run_bounded_build(
+                    [sys.executable, "-c", "import sys; sys.stdout.write('x' * 4096)"],
+                    cwd=ROOT,
+                    env=environment,
+                )
 
     def test_builder_refuses_overwrite_and_noncanonical_targets(self) -> None:
         with tempfile.TemporaryDirectory(prefix="sllm-p0-builder-") as directory:
