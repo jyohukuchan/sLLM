@@ -428,6 +428,7 @@ def _validate_binary_files(
     *,
     repo: Path = ROOT,
     sidecar_path: Path | None = None,
+    require_builder_owned_output: bool = True,
 ) -> dict[str, Any]:
     binary = document["binary"]
     if binary_path.name != G2_BINARY:
@@ -440,7 +441,8 @@ def _validate_binary_files(
     binary_digest = _sha256(binary_bytes)
     if len(binary_bytes) != binary["size_bytes"] or binary_digest != binary["sha256"]:
         raise ContractError("G2 artifact binary size or SHA-256 does not match the actual file")
-    _validate_builder_owned_output(binary_bytes, repo)
+    if require_builder_owned_output:
+        _validate_builder_owned_output(binary_bytes, repo)
     identity = _validate_embedded_build_identity(binary_bytes, repo)
     sidecar_bytes = _stable_file_bytes(sidecar, "G2 dedicated binary sidecar")
     if sidecar_bytes != _canonical_sidecar(binary_digest, G2_BINARY) or _sha256(sidecar_bytes) != binary["sidecar_sha256"]:
@@ -831,6 +833,7 @@ def validate_artifact(
     repo: Path = ROOT,
     *,
     binary_path: Path | None = None,
+    require_builder_owned_output: bool = True,
 ) -> dict[str, Any]:
     _schema_validate(repo, "artifact", document)
     validate_candidate(document["candidate"], repo)
@@ -863,7 +866,12 @@ def validate_artifact(
         raise ContractError("G2 artifact scope is not the dedicated HIP/no-fallback contract")
     _validate_prerequisites(document["prerequisites"], candidate=document["candidate"], target=document["target"])
     actual_binary = repo / binary["path"] if binary_path is None else binary_path
-    embedded_identity = _validate_binary_files(actual_binary, document, repo=repo)
+    embedded_identity = _validate_binary_files(
+        actual_binary,
+        document,
+        repo=repo,
+        require_builder_owned_output=require_builder_owned_output,
+    )
     if embedded_identity["identity"] != expected_identity["identity"] or embedded_identity["identity_sha256"] != expected_identity["identity_sha256"]:
         raise ContractError("G2 executable identity is not bound to the artifact identity")
     return dict(document)

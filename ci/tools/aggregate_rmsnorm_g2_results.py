@@ -41,7 +41,20 @@ def aggregate_reports(
     report_documents = [read_json(path) for path in report_paths]
     artifact_documents = [read_json(path) for path in artifact_paths]
     reports = [validate_report(document, repo) for document in report_documents]
-    artifacts = [validate_artifact(document, repo, binary_path=path.parent / document["binary"]["path"]) for document, path in zip(artifact_documents, artifact_paths, strict=True)]
+    artifacts = [
+        validate_artifact(
+            document,
+            repo,
+            binary_path=path.parent / document["binary"]["path"],
+            # A two-target aggregate necessarily contains two distinct Cargo
+            # outputs, while the repository has only one canonical output
+            # path.  The builder and runner enforce live output ownership;
+            # aggregation revalidates each preserved binary, sidecar,
+            # embedded identity, source set, and manifest digest instead.
+            require_builder_owned_output=False,
+        )
+        for document, path in zip(artifact_documents, artifact_paths, strict=True)
+    ]
     if [report["target"] for report in reports] != list(TARGETS) or [report["row_id"] for report in reports] != list(ROWS):
         raise ContractError("G2 reports are not exactly ordered gfx1030/gfx1201 rows")
     if [artifact["target"] for artifact in artifacts] != list(TARGETS) or [artifact["row_id"] for artifact in artifacts] != list(ROWS):

@@ -7,6 +7,7 @@ import tempfile
 import unittest
 from argparse import Namespace
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "ci/tools"))
@@ -109,6 +110,20 @@ class G2AggregateTests(unittest.TestCase):
             changed["counts"]["collected_cases"] = 0
             with self.assertRaises(ContractError):
                 contracts.validate_aggregate(changed)
+
+    def test_aggregate_validates_preserved_artifacts_without_single_live_builder_output(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="sllm-g2-aggregate-") as directory:
+            reports, artifacts = self._files(Path(directory))
+            original = aggregator.validate_artifact
+            ownership_modes: list[bool] = []
+
+            def observe(*args: object, **kwargs: object) -> dict[str, object]:
+                ownership_modes.append(bool(kwargs.get("require_builder_owned_output", True)))
+                return original(*args, **kwargs)
+
+            with patch.object(aggregator, "validate_artifact", side_effect=observe):
+                aggregator.aggregate_reports(reports, artifacts, candidate=candidate())
+            self.assertEqual(ownership_modes, [False, False])
 
 
 if __name__ == "__main__":
