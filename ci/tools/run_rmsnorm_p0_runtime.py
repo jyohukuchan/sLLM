@@ -94,7 +94,7 @@ def _observe_live(repo: Path, target: str) -> tuple[dict[str, Any], dict[str, An
         "available": True, "reliable": True, "state": "OK", "target": target,
         "ras_uncorrectable_count": 0,
     }
-    return health, _clean_process(), routing
+    return health, _clean_process(), {**routing, "product": row["product"]}
 
 
 def _parse_runtime_stdout(stdout: bytes) -> dict[str, Any]:
