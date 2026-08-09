@@ -1002,10 +1002,15 @@ time.sleep(60.0)
     def test_static_contract_requires_parent_owned_broker(self) -> None:
         contracts.validate_compiler_execution_contract(ROOT)
         builder_source = (ROOT / "ci/tools/build_rmsnorm_g1_runtime.py").read_text(encoding="utf-8")
+        build_rs_source = (ROOT / "crates/sllm-hip-sys/build.rs").read_text(encoding="utf-8")
         self.assertIn("COMPILER_BROKER_AVAILABLE = True", builder_source)
         self.assertIn("execveat", builder_source)
         self.assertNotIn("sealed-memfd-wrapper-events-v3", builder_source)
         self.assertNotIn("EXPECTED_COMPILER_EVENT_PLAN", builder_source)
+        self.assertIn("command.env_clear();", build_rs_source)
+        self.assertIn("SEMANTIC_G1_COMMAND_ENVIRONMENT", build_rs_source)
+        self.assertIn('"SLLM_HIP_COMPILER_BROKER_SOCKET"', build_rs_source)
+        self.assertIn('"SLLM_HIP_COMPILER_BROKER_CLIENT_FD"', build_rs_source)
 
 
 if __name__ == "__main__":

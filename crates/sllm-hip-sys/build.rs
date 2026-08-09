@@ -538,6 +538,47 @@ impl PinnedCompiler {
     }
 
     fn apply_environment(&self, command: &mut Command) {
+        if self.client_path.is_some() {
+            // Cargo adds build-script-only variables such as LD_LIBRARY_PATH.
+            // A semantic G1 compiler observation must instead inherit exactly
+            // the controller-owned build environment and broker credentials.
+            const SEMANTIC_G1_COMMAND_ENVIRONMENT: &[&str] = &[
+                "PATH",
+                "HOME",
+                "LC_ALL",
+                "LANG",
+                "RUSTUP_HOME",
+                "CARGO_HOME",
+                "RUSTUP_TOOLCHAIN",
+                "RUSTC",
+                "CXX",
+                "ROCM_PATH",
+                "HIP_PATH",
+                "SLLM_HIP_COMPILER",
+                "CMAKE_HIP_ARCHITECTURES",
+                "SLLM_HIP_CODEGEN_FEATURES",
+                "SLLM_ENABLE_HIP_RUNTIME",
+                "SLLM_ENABLE_PUBLIC_HIP_RUNTIME",
+                "SLLM_ENABLE_HIP_COMPILE_PROBE",
+                "SLLM_SEMANTIC_G1_AUTHORITY",
+                "CARGO_TARGET_DIR",
+                "SLLM_SEMANTIC_G1_NATIVE_HIP_BUILD_DIR",
+                "SLLM_HIP_COMPILER_BROKER_SOCKET",
+                "SLLM_HIP_COMPILER_BROKER_TOKEN",
+                "SLLM_HIP_COMPILER_BROKER_SESSION",
+                "SLLM_HIP_COMPILER_BROKER_CLIENT",
+                "SLLM_HIP_COMPILER_BROKER_CLIENT_SHA256",
+                "SLLM_HIP_COMPILER_BROKER_CLIENT_FD",
+            ];
+            command.env_clear();
+            for name in SEMANTIC_G1_COMMAND_ENVIRONMENT {
+                let value = env::var_os(name).unwrap_or_else(|| {
+                    panic!("semantic G1 closed command environment requires {name}")
+                });
+                command.env(name, value);
+            }
+            return;
+        }
         command.env("SLLM_HIP_COMPILER_LOGICAL", self.logical_path.as_os_str());
         if let Some(client_path) = &self.client_path {
             command.env("SLLM_HIP_COMPILER_BROKER_CLIENT", client_path);
