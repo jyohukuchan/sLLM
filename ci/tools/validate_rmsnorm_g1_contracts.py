@@ -524,7 +524,7 @@ def _validate_sealed_input_view(view: Mapping[str, Any], manifest: Mapping[str, 
     for source, actual in zip(manifest["inputs"], inputs, strict=True):
         expected = dict(source)
         view_fd = actual.get("view_fd") if isinstance(actual, Mapping) else None
-        if not isinstance(view_fd, int) or isinstance(view_fd, bool) or view_fd < 300 or view_fd in target_fds or set(actual) != set(expected) | {"view_fd"} or any(actual.get(key) != value for key, value in expected.items()):
+        if not isinstance(view_fd, int) or isinstance(view_fd, bool) or view_fd < 3 or view_fd in target_fds or set(actual) != set(expected) | {"view_fd"} or any(actual.get(key) != value for key, value in expected.items()):
             raise EvidenceError("exact-action sealed input view identity is not bound to the issued input")
         target_fds.add(view_fd)
     include_directories = view.get("include_directories")

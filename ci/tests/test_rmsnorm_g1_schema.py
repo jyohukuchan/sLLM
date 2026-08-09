@@ -335,6 +335,11 @@ class SemanticG1SchemaTests(unittest.TestCase):
             forged = copy.deepcopy(transcript)
             forged["events"][0]["client_observation"]["environment_sha256"] = "too-short"
             self.assertFalse(_fragment_valid(forged, fragment, schema), f"{path.name}:nested-observation-digest")
+            forged = copy.deepcopy(transcript)
+            forged["events"][0]["compiler"]["invocation"]["sealed_input_view"]["inputs"] = [
+                {**record, "role": "source", "device": 1, "inode": 1, "view_fd": 2}
+            ]
+            self.assertFalse(_fragment_valid(forged, fragment, schema), f"{path.name}:standard-view-fd")
 
         artifact_schema = json.loads((ROOT / "ci/schema/rmsnorm-semantic-g1-artifact-v1.schema.json").read_text(encoding="utf-8"))
         aggregate_schema = json.loads((ROOT / "ci/schema/rmsnorm-semantic-g1-aggregate-v1.schema.json").read_text(encoding="utf-8"))
