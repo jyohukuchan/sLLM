@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import errno
 import hashlib
+import io
 import json
 import os
 import socket
@@ -13,6 +14,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+import tarfile
 import time
 import unittest
 from contextlib import contextmanager
@@ -215,6 +217,32 @@ class SemanticG1BuilderTests(unittest.TestCase):
                 record["sha256"],
                 hashlib.sha256(b"reviewed interpreter bytes").hexdigest(),
             )
+
+    def test_reviewed_snapshot_seals_nested_directories_after_extraction(self) -> None:
+        archive = io.BytesIO()
+        with tarfile.open(fileobj=archive, mode="w:") as stream:
+            for name in (".agents", ".agents/skills", ".agents/skills/push"):
+                member = tarfile.TarInfo(name)
+                member.type = tarfile.DIRTYPE
+                member.mode = 0o700
+                stream.addfile(member)
+            payload = b"reviewed skill bytes"
+            member = tarfile.TarInfo(".agents/skills/push/SKILL.md")
+            member.size = len(payload)
+            member.mode = 0o600
+            stream.addfile(member, io.BytesIO(payload))
+
+        with tempfile.TemporaryDirectory(prefix="sllm-g1-reviewed-parent-") as temporary:
+            parent = Path(temporary)
+            candidate = {"reviewed_sha": "a" * 40}
+            with mock.patch.object(contracts, "_git_output_bytes", return_value=archive.getvalue()):
+                snapshot = builder._materialize_reviewed_snapshot(ROOT, candidate, parent)
+
+            self.assertEqual(
+                (snapshot / ".agents/skills/push/SKILL.md").read_bytes(), payload
+            )
+            for relative in (".agents", ".agents/skills", ".agents/skills/push"):
+                self.assertEqual((snapshot / relative).stat().st_mode & 0o777, 0o555)
 
     def test_brokered_true_round_trip_preserves_compiler_output_and_status(self) -> None:
         with tempfile.TemporaryDirectory(prefix="sllm-g1-broker-roundtrip-") as temporary:
