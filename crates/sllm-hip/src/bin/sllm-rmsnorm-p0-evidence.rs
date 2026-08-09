@@ -64,6 +64,10 @@ fn parse_arguments() -> BTreeMap<String, String> {
         "--source-set-sha256",
         "--matrix-sha256",
         "--model-lock-sha256",
+        "--physical-hip-index",
+        "--device-bdf",
+        "--device-uuid",
+        "--device-product",
     ];
     let mut result = BTreeMap::new();
     for pair in values.chunks_exact(2) {
@@ -297,11 +301,23 @@ fn run_case(
 fn main() {
     let arguments = parse_arguments();
     let target = required(&arguments, "--target");
-    let target_index = match target.as_str() {
-        "gfx1030" => 0_u32,
-        "gfx1201" => 2_u32,
+    match target.as_str() {
+        "gfx1030" | "gfx1201" => {}
         _ => fail("target must be gfx1030 or gfx1201"),
-    };
+    }
+    // The runner exposes exactly one physical GPU, so the runtime-visible
+    // device is always logical index zero. Retain the independently observed
+    // physical routing tuple separately in the result.
+    let target_index = 0_u32;
+    let physical_hip_index = required(&arguments, "--physical-hip-index")
+        .parse::<u32>()
+        .unwrap_or_else(|_| fail("physical HIP index must be an unsigned integer"));
+    let device_bdf = required(&arguments, "--device-bdf");
+    let device_uuid = required(&arguments, "--device-uuid");
+    let device_product = required(&arguments, "--device-product");
+    if device_bdf.is_empty() || device_uuid.is_empty() || device_product.is_empty() {
+        fail("physical device routing tuple must be nonempty");
+    }
     if required(&arguments, "--warmup").parse::<usize>().ok() != Some(WARMUPS)
         || required(&arguments, "--iterations").parse::<usize>().ok() != Some(MEASUREMENTS)
         || required(&arguments, "--timing-contract") != "rmsnorm-p0-timing-v1"
@@ -366,7 +382,7 @@ fn main() {
     if device.device_index != target_index
         || device.gcn_arch_name != target
         || device.wavefront_size != 32
-        || device.name.is_empty()
+        || device.name != device_product
     {
         fail("actual HIP device identity does not match the canonical target");
     }
@@ -412,11 +428,14 @@ fn main() {
         "worktree_clean": true,
         "revision_input": "full-sha",
     });
-    let device_identity = if target == "gfx1030" {
-        json!({"bdf": "0000:03:00.0", "uuid": "GPU-76a08c022586fed6", "product": "AMD Radeon Pro V620", "target": target, "physical_hip_index": 0, "logical_device_index": 0})
-    } else {
-        json!({"bdf": "0000:47:00.0", "uuid": "GPU-a8e9ddefa2d60f55", "product": "AMD Radeon AI PRO R9700", "target": target, "physical_hip_index": 2, "logical_device_index": 0})
-    };
+    let device_identity = json!({
+        "bdf": device_bdf,
+        "uuid": device_uuid,
+        "product": device_product,
+        "target": target,
+        "physical_hip_index": physical_hip_index,
+        "logical_device_index": target_index,
+    });
     let result = json!({
         "schema_version": "rmsnorm-p0-runtime-result-v1",
         "state": "PASS",

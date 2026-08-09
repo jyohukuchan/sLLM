@@ -136,7 +136,19 @@ class P0RunnerTests(unittest.TestCase):
             args, artifact_document = self._args(root)
             result = runtime_result(args.target, artifact_document, args.artifact)
             completed = runner.subprocess.CompletedProcess([], 0, canonical_bytes(result), b"")
-            observed = (ok_health(args.target), clean_process(), {"hip_id": 1})
+            expected_device = next(
+                item["device"] for item in contracts.expected_matrix()["targets"]
+                if item["target"] == args.target
+            )
+            observed = (
+                ok_health(args.target), clean_process(),
+                {
+                    "hip_id": expected_device["physical_hip_index"],
+                    "bdf": expected_device["bdf"],
+                    "uuid": expected_device["uuid"],
+                    "product": expected_device["product"],
+                },
+            )
             events: list[str] = []
 
             def observe(*_args: object) -> tuple[dict[str, object], dict[str, object], dict[str, object]]:
@@ -156,6 +168,7 @@ class P0RunnerTests(unittest.TestCase):
                 invoked.call_args.kwargs["env"]["LD_LIBRARY_PATH"],
                 contracts.P0_RUNTIME_LD_LIBRARY_PATH,
             )
+            self.assertIn("--physical-hip-index", invoked.call_args.args[0])
             self.assertEqual(report["state"], "PASS")
             self.assertEqual(report["collection"]["collected_cases"], 5)
             self.assertEqual(report["dispatch"]["dispatch_count"], 130)
@@ -260,7 +273,19 @@ class P0RunnerTests(unittest.TestCase):
             args, artifact_document = self._args(root)
             result = runtime_result(args.target, artifact_document, args.artifact)
             completed = runner.subprocess.CompletedProcess([], 0, canonical_bytes(result), b"")
-            observed = (ok_health(args.target), clean_process(), {"hip_id": 1})
+            expected_device = next(
+                item["device"] for item in contracts.expected_matrix()["targets"]
+                if item["target"] == args.target
+            )
+            observed = (
+                ok_health(args.target), clean_process(),
+                {
+                    "hip_id": expected_device["physical_hip_index"],
+                    "bdf": expected_device["bdf"],
+                    "uuid": expected_device["uuid"],
+                    "product": expected_device["product"],
+                },
+            )
             with patch.dict(os.environ, {"SLLM_P0_GPU_EXECUTION": "1"}), patch.object(runner, "_observe_live", side_effect=[observed, observed]), patch.object(runner.subprocess, "run", return_value=completed):
                 report = runner.run_row(args)
             report["state"] = "PASS"

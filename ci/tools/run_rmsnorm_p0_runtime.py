@@ -249,6 +249,12 @@ def run_row(
                 execution_environment.pop(selector, None)
             execution_environment["HIP_VISIBLE_DEVICES"] = str(routing_pre["hip_id"])
             execution_environment["LD_LIBRARY_PATH"] = P0_RUNTIME_LD_LIBRARY_PATH
+            command.extend([
+                "--physical-hip-index", str(routing_pre["hip_id"]),
+                "--device-bdf", str(routing_pre["bdf"]),
+                "--device-uuid", str(routing_pre["uuid"]),
+                "--device-product", str(routing_pre["product"]),
+            ])
             execution_error: Exception | None = None
             try:
                 completed = subprocess.run(
