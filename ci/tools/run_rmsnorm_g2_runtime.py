@@ -167,8 +167,9 @@ def _run_bounded_binary(
             events = selector.select(min(remaining, 0.25))
             if not events and process.poll() is not None:
                 continue
-            for stream, _mask in events:
-                name = selector.get_key(stream).data
+            for key, _mask in events:
+                stream = key.fileobj
+                name = key.data
                 data = os.read(stream.fileno(), 65536)
                 if not data:
                     selector.unregister(stream)

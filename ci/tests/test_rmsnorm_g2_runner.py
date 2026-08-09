@@ -109,6 +109,16 @@ def artifact(target: str, value: dict[str, object]) -> dict[str, object]:
 
 
 class G2RunnerTests(unittest.TestCase):
+    def test_bounded_collector_reads_real_stdout_and_stderr_pipes(self) -> None:
+        completed = runner._run_bounded_binary(
+            ["/usr/bin/python3", "-c", "import sys;sys.stdout.write('out');sys.stderr.write('err')"],
+            cwd=ROOT,
+            pass_fds=(),
+        )
+        self.assertEqual(completed.returncode, 0)
+        self.assertEqual(completed.stdout, b"out")
+        self.assertEqual(completed.stderr, b"err")
+
     def _args(self, root: Path, *, binary: str = "sllm-rmsnorm-g2-evidence") -> Namespace:
         target = "gfx1030"
         (root / "artifact.json").write_text(json.dumps(artifact(target, candidate())), encoding="utf-8")
