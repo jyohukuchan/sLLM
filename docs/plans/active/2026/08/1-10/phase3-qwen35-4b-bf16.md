@@ -119,6 +119,8 @@ B0開始前にllama.cpp/vLLMの追加readerは不要である。ただしB0内�
 
 B0の最終機能candidateはcommit `a5519d89820f42a8349cf3485ee8dc37154d8507`、tree `4f6896eee85399ddc10831b752355d332960a0dd`で完了した。dependency closure本体はcommit `54fdcb76a5671a075ec0ff6e346cb78f5d3cf8a0`で固定したnormalized policy/schema、offline metadata/lock validator、Rust 1.85のLinux x86_64 targetを明示するworkspace/all-target check、renamed dependency、MSRV例外、hostile target/HIP/native/Rust compiler・flag overrideの回帰、H0 suite/path登録を維持する。Cargo実行環境はoffline・rustup自動取得禁止を強制し、B0 host-only契約外のHIP/native/Rust compiler injectionを除去する。旧candidateのH1 assertion失敗をretryで昇格せず、既存testのprocess-wide FD総数比較が並列harnessで7/200失敗することを再現し、固有fixtureのdevice/inodeだけをfail-closedに検査するparallel-safe testへ修正した。fresh独立reviewの全指摘を閉じた同一identityで、pinned Python 3.12.10 strict H0 335/335、H1 151/151、H2 35/35を各1回目にimmutable `PASS`した。model、GPU、model cache、container、networkは使用していない。本完了記録を含むdocs-only identityにもH0〜H2とfresh reviewを結合してから次のB1を開始する。
 
+B1 tensor shape closureは、B0のdocs-inclusive完了candidate `d610b4801052f11125a9002e0b59d0d0973a86d7`、tree `04d7214f86c7069ab73bc098459972f59fb3115b`をrollback baseとして2026-08-10 06:55:54 JSTに開始した。予測5〜8時間、作業単位固有hard上限9時間は維持するが、ユーザー指定の全体停止上限を延長しないため、今回の実行では2026-08-10 09:38:27 JSTを先に到達するeffective hard stopとする。固定reader記録、現行738 tensor catalog、schema/fixture/testの監査から開始し、未完了で停止する場合もB1完了やshape検証済みとは扱わない。B1はhost-onlyとし、GPU、full model payload、model cache、network、containerを使用しない。
+
 受入条件:
 
 - CPU CIはtiny synthetic safetensors/tokenizer fixtureだけを使い、full modelをdownload/loadしない。
