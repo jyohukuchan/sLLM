@@ -401,7 +401,7 @@ def g2_build_environment(target: str) -> dict[str, str]:
         "CMAKE_HIP_ARCHITECTURES": target,
         "SLLM_HIP_CODEGEN_FEATURES": G2_CODEGEN_FEATURES,
         "SLLM_ENABLE_HIP_RUNTIME": "1",
-        "SLLM_ENABLE_PUBLIC_HIP_RUNTIME": "0",
+        "SLLM_ENABLE_PUBLIC_HIP_RUNTIME": "1",
         "SLLM_ENABLE_HIP_COMPILE_PROBE": "0",
     }
 
