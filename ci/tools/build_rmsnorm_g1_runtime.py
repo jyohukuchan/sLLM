@@ -1573,7 +1573,8 @@ def _run(
         containment.bind_root(process.pid, pgid)
         if broker is not None:
             broker.bind_build(process.pid, pgid, stage_env, process=process, containment=containment)
-        _audit_child_fds(process.pid, retained_pipe_fds=pass_fds, parent_fds=parent_fds)
+        if broker is not None:
+            _audit_child_fds(process.pid, retained_pipe_fds=pass_fds, parent_fds=parent_fds)
         if process.stdout is None or process.stderr is None:
             raise BuilderError("builder diagnostic pipes are missing")
         selector = selectors.DefaultSelector()
