@@ -885,7 +885,7 @@ class CompilerBroker:
             raise BuilderError("exact action observation carries a forbidden execution override")
         expected_environment = self._expected_environment
         if expected_environment is not None:
-            expected_with_auth = dict(expected_environment)
+            expected_with_auth = compiler_client_environment(expected_environment)
             expected_with_auth.update(self.environment())
             if environment != expected_with_auth:
                 unexpected = sorted(set(environment) ^ set(expected_with_auth))
@@ -2186,7 +2186,7 @@ def build_runtime_artifact(*, repo: Path = ROOT, row_id: str, identity: Mapping[
         reviewed_sources={str(item["path"]): item for item in authority["sources"]},
         reviewed_tools=authority["toolchain"],
         target=row["target"],
-        expected_environment=compiler_client_environment(environment),
+        expected_environment=environment,
         compiler_environment=exact_compiler_environment,
         action_recipes=action_recipes,
         require_complete_recipe_set=True,
