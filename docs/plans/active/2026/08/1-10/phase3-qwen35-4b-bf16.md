@@ -151,6 +151,8 @@ B4 final implementation candidate `b43f2132c1afc604f2ae22ab12d55101aac7921b`、t
 
 B4 docs-only closeout candidate `28136d4e6a50fb6349b7cf81d063397aa136a50f`、tree `da0c7e6b4647561be9bcd9804c1b56075d718083`はstrict H0 335/335、attempt 1、failed/skipped 0、clean exact identity、report SHA-256 `73620fbe1c402dc1b78432bc5c2d4c1cf4e5b6b072c74724aeb6b136c90762ca`のsidecar一致を`PASS`した。fresh reviewが指摘したresource記録のweight payload不使用欠落は本記録で修正する。一方、candidate自身のcontentへ自身のSHA/tree/report/review結果を埋め込む要求はcontent-derived identityの自己参照になるため、B1〜B3と同じく、固定後の外部H0/reviewを同一identityへ結合し、そのPASS結果を次単位開始記録へ同期する。修復candidateのstrict H0とfresh reviewを取り直すまでB4全体は未完了、B5は未開始とする。
 
+closeout修復candidate `555bfef127077a74bb94bc3762cdf2984c48dbdf`、tree `55df85d4c728e807fb0035454bc35b6d4fd5084d`はstrict H0 335/335、attempt 1、failed/skipped 0、clean exact identity、report SHA-256 `1ea590f1683a555d02bdd3571b83c199a892950f5a85cf54845e07ad86fa66c9`のsidecar一致を`PASS`した。fresh reviewは自己参照境界を認め、残る指摘はmain planのimplementation resource行だけにweight payload不使用が未同期であるMedium 1件だった。本修復で3正本を一致させ、新candidateのH0とfresh reviewを取り直すまでB4全体は未完了、B5は未開始とする。
+
 受入条件:
 
 - CPU CIはtiny synthetic safetensors/tokenizer fixtureだけを使い、full modelをdownload/loadしない。
