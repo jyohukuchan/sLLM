@@ -319,6 +319,28 @@ impl Qwen35ChatTemplateV1 {
         lock: &ModelLock,
         cache: &VerifiedCache,
     ) -> Result<Self, ChatRenderError> {
+        Self::from_verified_cache_impl(lock, cache, QWEN35_CHAT_TEMPLATE_SHA256)
+    }
+
+    /// Test-only construction still performs the production metadata, bounded
+    /// read, UTF-8, and success-path checks.  It supplies an explicit digest
+    /// for a synthetic same-size asset because the real locked template is
+    /// intentionally not a CI fixture.  This seam is not present in normal
+    /// builds and cannot construct a renderer without a verified cache read.
+    #[cfg(test)]
+    fn from_verified_cache_with_test_digest(
+        lock: &ModelLock,
+        cache: &VerifiedCache,
+        expected_sha256: &str,
+    ) -> Result<Self, ChatRenderError> {
+        Self::from_verified_cache_impl(lock, cache, expected_sha256)
+    }
+
+    fn from_verified_cache_impl(
+        lock: &ModelLock,
+        cache: &VerifiedCache,
+        expected_sha256: &str,
+    ) -> Result<Self, ChatRenderError> {
         if lock.model.tokenizer_contract.chat_template_path != QWEN35_CHAT_TEMPLATE_FILENAME {
             return Err(ChatRenderError::UnsupportedTemplateIdentity);
         }
@@ -360,7 +382,7 @@ impl Qwen35ChatTemplateV1 {
         if bytes.len() != QWEN35_CHAT_TEMPLATE_SIZE_BYTES as usize {
             return Err(ChatRenderError::UnsupportedTemplateIdentity);
         }
-        validate_template_bytes(&bytes, QWEN35_CHAT_TEMPLATE_SHA256)?;
+        validate_template_bytes(&bytes, expected_sha256)?;
 
         Ok(Self {
             consistency_label: lock.fingerprint().to_owned(),
@@ -406,13 +428,6 @@ impl Qwen35ChatTemplateV1 {
     ) -> Result<String, ChatRenderError> {
         let (messages, options) = validate_untrusted_request(request)?;
         self.render(&messages, options)
-    }
-
-    #[cfg(test)]
-    fn test_only() -> Self {
-        Self {
-            consistency_label: "test-only renderer; unavailable in normal builds".to_owned(),
-        }
     }
 }
 
@@ -688,11 +703,125 @@ fn write_output(
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
     use super::*;
+    use sllm_core::{
+        ModelLock, VerifiedCache, fingerprint_for_json, parse_model_lock, verify_model_cache,
+    };
     use tokenizers::Tokenizer;
 
+    static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+    struct TestDirectory(PathBuf);
+
+    impl Drop for TestDirectory {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    struct Fixture {
+        cache: VerifiedCache,
+        lock: ModelLock,
+        directory: TestDirectory,
+    }
+
+    fn repository_path(relative: &str) -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join(relative)
+    }
+
+    fn test_directory() -> TestDirectory {
+        let sequence = TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!(
+            "sllm-chat-unit-positive-{}-{sequence}",
+            std::process::id()
+        ));
+        fs::create_dir(&path).expect("create chat unit test directory");
+        TestDirectory(path)
+    }
+
+    fn replace_once(source: String, old: &str, new: &str) -> String {
+        assert_eq!(source.matches(old).count(), 1, "replacement must be unique");
+        source.replacen(old, new, 1)
+    }
+
+    fn synthetic_verified_fixture() -> Fixture {
+        let template_bytes = vec![b' '; QWEN35_CHAT_TEMPLATE_SIZE_BYTES as usize];
+        let directory = test_directory();
+        let base_cache = repository_path("ci/fixtures/model-lock-v1/cache");
+        for entry in fs::read_dir(base_cache).expect("read base cache") {
+            let entry = entry.expect("read base cache entry");
+            fs::copy(entry.path(), directory.0.join(entry.file_name())).expect("copy cache file");
+        }
+        fs::write(
+            directory.0.join(QWEN35_CHAT_TEMPLATE_FILENAME),
+            &template_bytes,
+        )
+        .expect("write synthetic bounded template carrier");
+
+        let source = String::from_utf8(
+            fs::read(repository_path("ci/fixtures/model-lock-v1/lock.json"))
+                .expect("base lock exists"),
+        )
+        .expect("base lock is UTF-8");
+        let source = replace_once(
+            source,
+            r#"        "path": "chat_template.jinja",
+        "size_bytes": 44,
+        "sha256": "00458c8b559de6bbd4c15a4d6ca59b56015d25f95ca5ff29e7f5eae1d8dee31f","#,
+            &format!(
+                "        \"path\": \"chat_template.jinja\",\n        \"size_bytes\": {},\n        \"sha256\": \"{}\",",
+                template_bytes.len(),
+                sha256_hex(&template_bytes)
+            ),
+        );
+        let fingerprint =
+            fingerprint_for_json(source.as_bytes()).expect("recompute fixture fingerprint");
+        let source = replace_once(
+            source,
+            "  \"fingerprint\": \"sha256:7201b4dddf49fb09e4d871778c5dd75eaec29d3d0ab3911ae7eb7ea62548a490\",",
+            &format!("  \"fingerprint\": \"{fingerprint}\","),
+        );
+        let mut lock = parse_model_lock(source.as_bytes()).expect("synthetic lock parses");
+        let mut cache = verify_model_cache(&lock, &directory.0).expect("synthetic cache verifies");
+
+        // Keep production metadata fixed while allowing the private test seam
+        // to prove the same bounded-read success path with synthetic bytes.
+        lock.model
+            .files
+            .iter_mut()
+            .find(|file| file.path == QWEN35_CHAT_TEMPLATE_FILENAME)
+            .expect("chat lock entry")
+            .sha256 = QWEN35_CHAT_TEMPLATE_SHA256.to_owned();
+        cache
+            .files
+            .iter_mut()
+            .find(|file| file.path == QWEN35_CHAT_TEMPLATE_FILENAME)
+            .expect("chat cache entry")
+            .sha256 = QWEN35_CHAT_TEMPLATE_SHA256.to_owned();
+
+        Fixture {
+            cache,
+            lock,
+            directory,
+        }
+    }
+
     fn renderer() -> Qwen35ChatTemplateV1 {
-        Qwen35ChatTemplateV1::test_only()
+        let fixture = synthetic_verified_fixture();
+        let template = fs::read(fixture.directory.0.join(QWEN35_CHAT_TEMPLATE_FILENAME))
+            .expect("read synthetic template");
+        Qwen35ChatTemplateV1::from_verified_cache_with_test_digest(
+            &fixture.lock,
+            &fixture.cache,
+            &sha256_hex(&template),
+        )
+        .expect("synthetic fixture constructs through production path")
     }
 
     fn sha256_hex(bytes: &[u8]) -> String {
@@ -1242,6 +1371,51 @@ mod tests {
                 QWEN35_CHAT_MAX_OUTPUT_BYTES + 1,
             ),
             Err(ChatRenderError::OutputLimitExceedsHostCap)
+        );
+    }
+
+    #[test]
+    fn output_cap_boundaries_use_actual_rendered_lengths() {
+        let renderer = renderer();
+        let options = Qwen35RenderOptionsV1::default();
+        let framing_bytes = renderer
+            .render(&[Qwen35ChatMessageV1::user("")], options)
+            .expect("empty user framing renders")
+            .len();
+        assert!(framing_bytes < QWEN35_CHAT_MAX_OUTPUT_BYTES);
+        let exact_content_bytes = QWEN35_CHAT_MAX_OUTPUT_BYTES - framing_bytes;
+
+        let below = {
+            let messages = [Qwen35ChatMessageV1::user(
+                "x".repeat(exact_content_bytes - 1),
+            )];
+            renderer
+                .render_with_output_limit(&messages, options, QWEN35_CHAT_MAX_OUTPUT_BYTES)
+                .expect("max-minus-one rendered bytes fit")
+        };
+        assert_eq!(below.len(), QWEN35_CHAT_MAX_OUTPUT_BYTES - 1);
+        drop(below);
+
+        let exact = {
+            let messages = [Qwen35ChatMessageV1::user("x".repeat(exact_content_bytes))];
+            renderer
+                .render_with_output_limit(&messages, options, QWEN35_CHAT_MAX_OUTPUT_BYTES)
+                .expect("exact maximum rendered bytes fit")
+        };
+        assert_eq!(exact.len(), QWEN35_CHAT_MAX_OUTPUT_BYTES);
+        drop(exact);
+
+        let too_large = {
+            let messages = [Qwen35ChatMessageV1::user(
+                "x".repeat(exact_content_bytes + 1),
+            )];
+            renderer.render_with_output_limit(&messages, options, QWEN35_CHAT_MAX_OUTPUT_BYTES)
+        };
+        assert_eq!(
+            too_large,
+            Err(ChatRenderError::OutputTooLarge {
+                limit_bytes: QWEN35_CHAT_MAX_OUTPUT_BYTES,
+            })
         );
     }
 }
