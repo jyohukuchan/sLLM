@@ -285,6 +285,9 @@ impl AdapterResource {
 /// obtain its opaque resources through the checked downcast accessors on the
 /// session passed to each method.
 pub trait ExecutionSessionAdapter: Send + Sync {
+    /// Maximum byte count accepted by one H2D or D2H transfer.
+    fn max_transfer_bytes(&self) -> u64;
+
     fn supports(&self, descriptor: &SemanticOpDescriptor) -> PrepareSupport;
 
     fn create_queue(
@@ -318,6 +321,13 @@ pub trait ExecutionSessionAdapter: Send + Sync {
         destination: &BufferRange,
         bytes: Arc<[u8]>,
     ) -> Result<Box<dyn ExecutionTransferAdapter>, ExecutionError>;
+
+    fn readback(
+        &self,
+        access: &ExecutionAdapterAccess<'_>,
+        queue: &ExecutionQueue,
+        source: &BufferRange,
+    ) -> Result<Box<dyn ExecutionReadbackAdapter>, ExecutionError>;
 
     fn shutdown(
         &self,
@@ -402,6 +412,17 @@ impl ExecutionSession {
 
     pub fn backend_name(&self) -> &'static str {
         self.state.backend
+    }
+
+    pub fn max_transfer_bytes(&self) -> Result<u64, ExecutionError> {
+        self.ensure_open()?;
+        let limit = self.state.adapter.max_transfer_bytes();
+        if limit == 0 {
+            return Err(ExecutionError::InvalidRange {
+                reason: "backend transfer limit must be non-zero".to_owned(),
+            });
+        }
+        Ok(limit)
     }
 
     pub fn supports(&self, descriptor: &SemanticOpDescriptor) -> PrepareSupport {
@@ -516,6 +537,11 @@ impl ExecutionSession {
                     .to_owned(),
             });
         }
+        if destination.size_bytes() > self.max_transfer_bytes()? {
+            return Err(ExecutionError::InvalidRange {
+                reason: "upload range exceeds the backend transfer limit".to_owned(),
+            });
+        }
         let inner = self.state.adapter.upload(
             &ExecutionAdapterAccess { session: self },
             queue,
@@ -527,6 +553,33 @@ impl ExecutionSession {
             queue: queue.clone(),
             destination,
             bytes,
+            completion_state: ExecutionState::Pending,
+            inner,
+        })
+    }
+
+    pub fn readback(
+        &self,
+        queue: &ExecutionQueue,
+        source: BufferRange,
+    ) -> Result<BufferReadback, ExecutionError> {
+        self.ensure_open()?;
+        self.ensure_queue(queue)?;
+        self.ensure_buffer(source.buffer())?;
+        if source.size_bytes() > self.max_transfer_bytes()? {
+            return Err(ExecutionError::InvalidRange {
+                reason: "readback range exceeds the backend transfer limit".to_owned(),
+            });
+        }
+        let inner = self.state.adapter.readback(
+            &ExecutionAdapterAccess { session: self },
+            queue,
+            &source,
+        )?;
+        Ok(BufferReadback {
+            state: Arc::clone(&self.state),
+            queue: queue.clone(),
+            source,
             completion_state: ExecutionState::Pending,
             inner,
         })
@@ -1196,6 +1249,70 @@ pub struct Readback {
     inner: Box<dyn ExecutionReadbackAdapter>,
 }
 
+/// An asynchronous D2H transfer for an arbitrary checked buffer range.
+///
+/// This is deliberately separate from semantic-output [`Readback`]. The
+/// source range, queue, and session remain owned until terminal observation.
+pub struct BufferReadback {
+    state: Arc<ExecutionSessionState>,
+    queue: ExecutionQueue,
+    source: BufferRange,
+    completion_state: ExecutionState,
+    inner: Box<dyn ExecutionReadbackAdapter>,
+}
+
+impl fmt::Debug for BufferReadback {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("BufferReadback")
+            .field("session_id", &self.state.id)
+            .field("queue", &self.queue.id())
+            .field("source", &self.source)
+            .field("completion_state", &self.completion_state)
+            .finish_non_exhaustive()
+    }
+}
+
+impl BufferReadback {
+    pub const fn state(&self) -> ExecutionState {
+        self.completion_state
+    }
+
+    pub fn query(&mut self) -> Result<ExecutionState, ExecutionError> {
+        let state = self.inner.query()?;
+        self.completion_state = state;
+        Ok(state)
+    }
+
+    pub fn wait(&mut self, timeout: Duration) -> Result<ExecutionState, ExecutionError> {
+        let state = self.inner.wait(timeout)?;
+        self.completion_state = state;
+        Ok(state)
+    }
+
+    pub fn read_into(&mut self, destination: &mut [u8]) -> Result<u64, ExecutionError> {
+        if self.completion_state != ExecutionState::Success {
+            return Err(ExecutionError::NotReady);
+        }
+        let capacity =
+            u64::try_from(destination.len()).map_err(|_| ExecutionError::InvalidRange {
+                reason: "readback destination length does not fit u64".to_owned(),
+            })?;
+        if capacity != self.source.size_bytes() {
+            return Err(ExecutionError::InvalidRange {
+                reason: "readback destination must exactly match the source range".to_owned(),
+            });
+        }
+        let copied = self.inner.read_into(destination)?;
+        if copied != self.source.size_bytes() {
+            return Err(ExecutionError::InvalidRange {
+                reason: "backend readback byte count differs from the source range".to_owned(),
+            });
+        }
+        Ok(copied)
+    }
+}
+
 impl fmt::Debug for Readback {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
@@ -1246,6 +1363,8 @@ mod tests {
         support_in_progress: AtomicBool,
         support_shutdown_overlap: AtomicBool,
         shutdown_calls: AtomicUsize,
+        upload_calls: AtomicUsize,
+        readback_calls: AtomicUsize,
         support_gate: Mutex<Option<SupportGate>>,
     }
 
@@ -1263,9 +1382,15 @@ mod tests {
 
     struct TestSubmission;
     struct TestTransfer;
-    struct TestReadback;
+    struct TestReadback {
+        bytes: Vec<u8>,
+    }
 
     impl ExecutionSessionAdapter for TestAdapter {
+        fn max_transfer_bytes(&self) -> u64 {
+            256
+        }
+
         fn supports(&self, descriptor: &SemanticOpDescriptor) -> PrepareSupport {
             self.support_calls.fetch_add(1, Ordering::Relaxed);
             self.support_in_progress.store(true, Ordering::SeqCst);
@@ -1293,9 +1418,13 @@ mod tests {
         fn allocate(
             &self,
             _access: &ExecutionAdapterAccess<'_>,
-            _size_bytes: u64,
+            size_bytes: u64,
         ) -> Result<AdapterResource, ExecutionError> {
-            Ok(AdapterResource::new(()))
+            let size_bytes =
+                usize::try_from(size_bytes).map_err(|_| ExecutionError::InvalidRange {
+                    reason: "test buffer size does not fit usize".to_owned(),
+                })?;
+            Ok(AdapterResource::new(Mutex::new(vec![0_u8; size_bytes])))
         }
 
         fn prepare(
@@ -1337,12 +1466,49 @@ mod tests {
 
         fn upload(
             &self,
-            _access: &ExecutionAdapterAccess<'_>,
+            access: &ExecutionAdapterAccess<'_>,
             _queue: &ExecutionQueue,
-            _destination: &BufferRange,
-            _bytes: Arc<[u8]>,
+            destination: &BufferRange,
+            bytes: Arc<[u8]>,
         ) -> Result<Box<dyn ExecutionTransferAdapter>, ExecutionError> {
+            self.upload_calls.fetch_add(1, Ordering::Relaxed);
+            let start = usize::try_from(destination.offset_bytes()).map_err(|_| {
+                ExecutionError::InvalidRange {
+                    reason: "test upload offset does not fit usize".to_owned(),
+                }
+            })?;
+            let end = start + bytes.len();
+            let mut storage = access
+                .downcast_buffer_payload::<Mutex<Vec<u8>>>(destination.buffer())?
+                .lock()
+                .map_err(|_| ExecutionError::Busy)?;
+            storage[start..end].copy_from_slice(&bytes);
             Ok(Box::new(TestTransfer))
+        }
+
+        fn readback(
+            &self,
+            access: &ExecutionAdapterAccess<'_>,
+            _queue: &ExecutionQueue,
+            source: &BufferRange,
+        ) -> Result<Box<dyn ExecutionReadbackAdapter>, ExecutionError> {
+            self.readback_calls.fetch_add(1, Ordering::Relaxed);
+            let storage = access
+                .downcast_buffer_payload::<Mutex<Vec<u8>>>(source.buffer())?
+                .lock()
+                .map_err(|_| ExecutionError::Busy)?;
+            let start = usize::try_from(source.offset_bytes()).map_err(|_| {
+                ExecutionError::InvalidRange {
+                    reason: "test readback offset does not fit usize".to_owned(),
+                }
+            })?;
+            let size =
+                usize::try_from(source.size_bytes()).map_err(|_| ExecutionError::InvalidRange {
+                    reason: "test readback size does not fit usize".to_owned(),
+                })?;
+            Ok(Box::new(TestReadback {
+                bytes: storage[start..start + size].to_vec(),
+            }))
         }
 
         fn shutdown(
@@ -1373,9 +1539,16 @@ mod tests {
         fn start_output_readback(
             &mut self,
             _access: &ExecutionAdapterAccess<'_>,
-            _output: &OwnedTensorBinding,
+            output: &OwnedTensorBinding,
         ) -> Result<Box<dyn ExecutionReadbackAdapter>, ExecutionError> {
-            Ok(Box::new(TestReadback))
+            let size = usize::try_from(output.view().payload_bytes()).map_err(|_| {
+                ExecutionError::InvalidRange {
+                    reason: "test output size does not fit usize".to_owned(),
+                }
+            })?;
+            Ok(Box::new(TestReadback {
+                bytes: vec![0x5a; size],
+            }))
         }
     }
 
@@ -1399,7 +1572,12 @@ mod tests {
         }
 
         fn read_into(&mut self, destination: &mut [u8]) -> Result<u64, ExecutionError> {
-            destination.fill(0x5a);
+            if destination.len() != self.bytes.len() {
+                return Err(ExecutionError::InvalidRange {
+                    reason: "test readback destination length mismatch".to_owned(),
+                });
+            }
+            destination.copy_from_slice(&self.bytes);
             Ok(destination.len() as u64)
         }
     }
@@ -1450,6 +1628,94 @@ mod tests {
             )
             .expect("valid RMSNorm descriptor"),
         )
+    }
+
+    #[test]
+    fn bounded_buffer_readback_round_trips_and_rejects_before_adapter_submission() {
+        let adapter = Arc::new(TestAdapter::default());
+        let test_session = ExecutionSession::new("test", adapter.clone());
+        let queue = test_session.create_queue().unwrap();
+        let buffer = test_session.allocate(520).unwrap();
+        assert_eq!(test_session.max_transfer_bytes().unwrap(), 256);
+
+        for size in [1_usize, 3, 17, 255, 256] {
+            let bytes: Vec<u8> = (0..size).map(|index| (index % 251) as u8).collect();
+            let range = buffer.range(7, size as u64).unwrap();
+            let mut upload = test_session
+                .upload(&queue, range.clone(), Arc::<[u8]>::from(bytes.clone()))
+                .unwrap();
+            assert_eq!(
+                upload.wait(Duration::ZERO).unwrap(),
+                ExecutionState::Success
+            );
+
+            let mut readback = test_session.readback(&queue, range).unwrap();
+            let mut exact = vec![0_u8; size];
+            assert!(matches!(
+                readback.read_into(&mut exact),
+                Err(ExecutionError::NotReady)
+            ));
+            assert_eq!(
+                readback.wait(Duration::ZERO).unwrap(),
+                ExecutionState::Success
+            );
+            let mut short = vec![0_u8; size - 1];
+            let mut long = vec![0_u8; size + 1];
+            assert!(matches!(
+                readback.read_into(&mut short),
+                Err(ExecutionError::InvalidRange { .. })
+            ));
+            assert!(matches!(
+                readback.read_into(&mut long),
+                Err(ExecutionError::InvalidRange { .. })
+            ));
+            assert_eq!(readback.read_into(&mut exact).unwrap(), size as u64);
+            assert_eq!(exact, bytes);
+        }
+        assert_eq!(adapter.upload_calls.load(Ordering::Relaxed), 5);
+        assert_eq!(adapter.readback_calls.load(Ordering::Relaxed), 5);
+
+        let too_large = buffer.range(0, 257).unwrap();
+        assert!(matches!(
+            test_session.readback(&queue, too_large.clone()),
+            Err(ExecutionError::InvalidRange { .. })
+        ));
+        assert!(matches!(
+            test_session.upload(&queue, too_large, Arc::<[u8]>::from(vec![0_u8; 257])),
+            Err(ExecutionError::InvalidRange { .. })
+        ));
+        assert_eq!(adapter.upload_calls.load(Ordering::Relaxed), 5);
+        assert_eq!(adapter.readback_calls.load(Ordering::Relaxed), 5);
+
+        let other = session("test");
+        let other_queue = other.create_queue().unwrap();
+        let other_buffer = other.allocate(17).unwrap();
+        assert!(matches!(
+            test_session.readback(&other_queue, buffer.range(0, 1).unwrap()),
+            Err(ExecutionError::WrongQueue { .. })
+        ));
+        assert!(matches!(
+            test_session.readback(&queue, other_buffer.range(0, 1).unwrap()),
+            Err(ExecutionError::WrongSession { .. })
+        ));
+        assert!(matches!(
+            buffer.range(0, 0),
+            Err(ExecutionError::InvalidRange { .. })
+        ));
+        assert!(matches!(
+            buffer.range(u64::MAX, 2),
+            Err(ExecutionError::InvalidRange { .. })
+        ));
+
+        let pending = test_session
+            .readback(&queue, buffer.range(0, 1).unwrap())
+            .unwrap();
+        drop(pending);
+        test_session.shutdown(Duration::ZERO).unwrap();
+        assert!(matches!(
+            test_session.readback(&queue, buffer.range(0, 1).unwrap()),
+            Err(ExecutionError::Closing)
+        ));
     }
 
     #[test]

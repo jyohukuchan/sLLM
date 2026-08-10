@@ -12,6 +12,7 @@ mod model;
 mod op;
 mod registry;
 mod tensor;
+mod weights;
 
 pub use backend::{
     Backend, BackendCapabilities, BackendError, BackendSupport, ExecutionReceipt,
@@ -19,12 +20,12 @@ pub use backend::{
 };
 pub use dtype::{DType, Encoding, EncodingError};
 pub use execution::{
-    AdapterResource, BoundSemanticOp, BufferRange, DispatchEvidence, ExecutionAdapterAccess,
-    ExecutionBuffer, ExecutionBufferId, ExecutionError, ExecutionQueue, ExecutionQueueId,
-    ExecutionReadbackAdapter, ExecutionSession, ExecutionSessionAdapter, ExecutionSessionId,
-    ExecutionSessionRequest, ExecutionState, ExecutionSubmissionAdapter, ExecutionTransferAdapter,
-    OwnedTensorBinding, PrepareSupport, PreparedOperation, PreparedOperationId, Readback,
-    ShutdownReport, Submission, Transfer,
+    AdapterResource, BoundSemanticOp, BufferRange, BufferReadback, DispatchEvidence,
+    ExecutionAdapterAccess, ExecutionBuffer, ExecutionBufferId, ExecutionError, ExecutionQueue,
+    ExecutionQueueId, ExecutionReadbackAdapter, ExecutionSession, ExecutionSessionAdapter,
+    ExecutionSessionId, ExecutionSessionRequest, ExecutionState, ExecutionSubmissionAdapter,
+    ExecutionTransferAdapter, OwnedTensorBinding, PrepareSupport, PreparedOperation,
+    PreparedOperationId, Readback, ShutdownReport, Submission, Transfer,
 };
 pub use fake::{FakeBackend, MAX_FAKE_MATERIALIZATION_BYTES};
 pub use handles::{
@@ -47,6 +48,12 @@ pub use op::{
 };
 pub use registry::{BACKEND_REGISTRY, BackendRegistration, backend_registry};
 pub use tensor::{TensorError, TensorView};
+pub use weights::{
+    WEIGHT_LOAD_CHUNK_BYTES, WeightClassification, WeightConsumer, WeightConsumerKey,
+    WeightLoadChunk, WeightLoadEntry, WeightLoadPlan, WeightPlanError, WeightUploadError,
+    WeightUploadReceipt, WeightUploadRequest, build_verified_weight_load_plan,
+    build_weight_load_plan, upload_verified_weight,
+};
 
 #[cfg(test)]
 mod tests {

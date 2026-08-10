@@ -72,6 +72,10 @@ view の作成や op への binding では bounds、alignment、shape/stride の
 
 同期 API を基礎にして非同期 API を装うのではなく、queue submission と event completion を基本契約とする。MVP が一つの compute queue しか使わない場合も lifetime 契約はこの形を維持する。
 
+Phase 3のbackend-neutral transferでは、adapterが1回のH2D/D2Hに許す非zero `max_transfer_bytes`を広告する。上位層はsession、queue、buffer identityとchecked half-open `BufferRange`を検証し、上限を超えるrangeをbackendへsubmitしない。任意rangeのD2Hはsemantic opのoutput専用readbackと別のsingle-observer completion型にし、terminal success後かつsource rangeと同じcapacityのcaller-owned destinationにだけcopyする。HIP adapterは既存のversioned transfer ABIと`SLLM_HIP_MAX_TRANSFER_BYTES`へlowerし、新しいnative ABIや直接queue経路を作らない。
+
+weight uploadは、model lockと全file hashを検証して保持した`VerifiedCache`、B5のcontent-bound load-plan digest、期待tensor名/dtype、tensorと同じ長さのdestination rangeを結合する。planの最大16 MiB chunkごとにverified FDからpositional readし、同時に保持するhost stagingを1 chunkへ限定して、backend-neutral `ExecutionSession::upload()`へ順次submitする。plan-global destination offsetはcallerが渡すtensor rangeへ相対変換し、packed allocationとtensor別allocationのどちらでもsource planを変えない。失敗時は部分upload済みbufferを有効なweightとして公開せず破棄する。常時D2H検証は行わず、evidence経路だけがgeneric buffer readbackでchunkごとのbyte exactを確認する。HIP専用weight wrapper、直接queue、shard/tensor全体のhost複製は作らない。
+
 ### Prepare、submit、非同期 error
 
 C ABI の主要呼び出し単位は kernel 一個ごとの細粒度 call ではなく、複数 op を含められる coarse な command list または prepared plan とする。prepare は op/tensor layout など再利用可能な metadata を native 所有 storage へ即時 copy し、caller-owned array、文字列、一時 descriptor への pointer を返却後に保持しない。submit も resource binding、access mode、dependency event の metadata を call 中に即時 copy する。

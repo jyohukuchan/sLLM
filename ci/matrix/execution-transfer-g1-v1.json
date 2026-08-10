@@ -1,0 +1,15 @@
+{
+  "$schema": "https://sllm.dev/schema/execution-transfer-g1-matrix-v1.schema.json",
+  "schema_version": "execution-transfer-g1-matrix-v1",
+  "matrix_id": "execution-transfer-g1-v1",
+  "revision": 1,
+  "suite_id": "g1-execution-transfer-runtime",
+  "tier": "tier_g1",
+  "required": false,
+  "command": ["/usr/bin/cargo", "+1.97.1", "build", "--locked", "--offline", "--release", "--package", "sllm-hip", "--bin", "sllm-execution-transfer-g1-evidence"],
+  "case_sizes": [1, 3, 17, 255, 256, 257],
+  "rows": [
+    {"row_id": "execution-transfer-g1-gfx1030", "target": "gfx1030", "bdf": "0000:03:00.0", "product": "AMD Radeon Pro V620", "physical_hip_index": 1, "logical_device_index": 0, "timeout_seconds": 180, "network": false, "model_used": false, "fallback_allowed": false},
+    {"row_id": "execution-transfer-g1-gfx1201", "target": "gfx1201", "bdf": "0000:07:00.0", "product": "AMD Radeon AI PRO R9700", "physical_hip_index": 2, "logical_device_index": 0, "timeout_seconds": 180, "network": false, "model_used": false, "fallback_allowed": false}
+  ]
+}

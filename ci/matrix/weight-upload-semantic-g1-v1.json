@@ -1,0 +1,23 @@
+{
+  "$schema": "https://sllm.dev/schema/weight-upload-g1-matrix-v1.schema.json",
+  "schema_version": "weight-upload-g1-matrix-v1",
+  "matrix_id": "weight-upload-semantic-g1-v1",
+  "revision": 1,
+  "suite_id": "g1-weight-upload-runtime",
+  "tier": "tier_g1",
+  "required": false,
+  "command": ["/usr/bin/cargo", "+1.97.1", "build", "--locked", "--offline", "--release", "--package", "sllm-hip", "--bin", "sllm-weight-upload-g1-evidence"],
+  "lock_fingerprint": "sha256:32265444b7cdd2a00e4e4e3e6aa8375a05acf6cddfcb9ffc348f54f67a7cd935",
+  "plan_digest": "sha256:0820227fdc4129e5ff100e0aa87db7663d75703c9ba723bc4adc950a3af6ab66",
+  "tensor_name": "model.language_model.layers.0.linear_attn.in_proj_z.weight",
+  "tensor_dtype": "BF16",
+  "tensor_size_bytes": 20971520,
+  "source_file": "model.safetensors-00002-of-00002.safetensors",
+  "source_file_sha256": "cb544bd9bfae93dc59b0f22b292f5933573854a7f9b97835c67060d7d910e188",
+  "source_range": [42435872, 63407392],
+  "chunk_sizes": [16777216, 4194304],
+  "rows": [
+    {"row_id": "weight-upload-g1-gfx1030", "target": "gfx1030", "bdf": "0000:03:00.0", "product": "AMD Radeon Pro V620", "physical_hip_index": 1, "logical_device_index": 0, "timeout_seconds": 600, "network": false, "model_cache_used": true, "fallback_allowed": false},
+    {"row_id": "weight-upload-g1-gfx1201", "target": "gfx1201", "bdf": "0000:07:00.0", "product": "AMD Radeon AI PRO R9700", "physical_hip_index": 2, "logical_device_index": 0, "timeout_seconds": 600, "network": false, "model_cache_used": true, "fallback_allowed": false}
+  ]
+}

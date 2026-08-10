@@ -1,0 +1,82 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sllm.dev/schema/model-frontend-cli-report-v1.schema.json",
+  "title": "sLLM offline model frontend CLI success report v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "command", "state", "model", "scope", "result"],
+  "properties": {
+    "schema_version": {"const": "model-frontend-cli-report-v1"},
+    "command": {"enum": ["verify-model", "tokenize", "render", "decode"]},
+    "state": {"const": "PASS"},
+    "model": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repo_id", "resolved_revision", "lock_fingerprint"],
+      "properties": {
+        "repo_id": {"type": "string", "minLength": 1},
+        "resolved_revision": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+        "lock_fingerprint": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
+      }
+    },
+    "scope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["offline", "gpu_execution", "model_execution", "generation"],
+      "properties": {
+        "offline": {"const": true},
+        "gpu_execution": {"const": false},
+        "model_execution": {"const": false},
+        "generation": {"const": false}
+      }
+    },
+    "result": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "locked_files", "verified_files", "tensor_count", "weight_entries", "loadable_entries", "known_unconsumed_entries", "total_destination_bytes", "plan_digest"],
+          "properties": {
+            "kind": {"const": "verify-model"},
+            "locked_files": {"type": "integer", "minimum": 1},
+            "verified_files": {"type": "integer", "minimum": 1},
+            "tensor_count": {"type": "integer", "minimum": 1},
+            "weight_entries": {"type": "integer", "minimum": 1},
+            "loadable_entries": {"type": "integer", "minimum": 1},
+            "known_unconsumed_entries": {"type": "integer", "minimum": 0},
+            "total_destination_bytes": {"type": "integer", "minimum": 1},
+            "plan_digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "count", "token_ids"],
+          "properties": {
+            "kind": {"const": "tokenize"},
+            "count": {"type": "integer", "minimum": 0},
+            "token_ids": {"type": "array", "maxItems": 1048576, "items": {"type": "integer", "minimum": 0, "maximum": 4294967295}}
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "text"],
+          "properties": {"kind": {"const": "render"}, "text": {"type": "string", "maxLength": 16777216}}
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "text"],
+          "properties": {"kind": {"const": "decode"}, "text": {"type": "string"}}
+        }
+      ]
+    }
+  },
+  "allOf": [
+    {"if": {"properties": {"command": {"const": "verify-model"}}}, "then": {"properties": {"result": {"properties": {"kind": {"const": "verify-model"}}}}}},
+    {"if": {"properties": {"command": {"const": "tokenize"}}}, "then": {"properties": {"result": {"properties": {"kind": {"const": "tokenize"}}}}}},
+    {"if": {"properties": {"command": {"const": "render"}}}, "then": {"properties": {"result": {"properties": {"kind": {"const": "render"}}}}}},
+    {"if": {"properties": {"command": {"const": "decode"}}}, "then": {"properties": {"result": {"properties": {"kind": {"const": "decode"}}}}}}
+  ]
+}

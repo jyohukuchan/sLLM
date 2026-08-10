@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sllm.dev/schema/execution-transfer-g1-matrix-v1.schema.json",
+  "type": "object", "additionalProperties": false,
+  "required": ["$schema", "schema_version", "matrix_id", "revision", "suite_id", "tier", "required", "command", "case_sizes", "rows"],
+  "properties": {
+    "$schema": {"const": "https://sllm.dev/schema/execution-transfer-g1-matrix-v1.schema.json"},
+    "schema_version": {"const": "execution-transfer-g1-matrix-v1"},
+    "matrix_id": {"const": "execution-transfer-g1-v1"}, "revision": {"const": 1},
+    "suite_id": {"const": "g1-execution-transfer-runtime"}, "tier": {"const": "tier_g1"},
+    "required": {"const": false},
+    "command": {"const": ["/usr/bin/cargo", "+1.97.1", "build", "--locked", "--offline", "--release", "--package", "sllm-hip", "--bin", "sllm-execution-transfer-g1-evidence"]},
+    "case_sizes": {"const": [1, 3, 17, 255, 256, 257]},
+    "rows": {
+      "type": "array", "minItems": 2, "maxItems": 2,
+      "prefixItems": [
+        {"$ref": "#/$defs/gfx1030"}, {"$ref": "#/$defs/gfx1201"}
+      ], "items": false
+    }
+  },
+  "$defs": {
+    "row": {
+      "type": "object", "additionalProperties": false,
+      "required": ["row_id", "target", "bdf", "product", "physical_hip_index", "logical_device_index", "timeout_seconds", "network", "model_used", "fallback_allowed"],
+      "properties": {
+        "row_id": {"type": "string"}, "target": {"enum": ["gfx1030", "gfx1201"]},
+        "bdf": {"type": "string"}, "product": {"type": "string"},
+        "physical_hip_index": {"type": "integer", "minimum": 0}, "logical_device_index": {"const": 0},
+        "timeout_seconds": {"const": 180}, "network": {"const": false}, "model_used": {"const": false},
+        "fallback_allowed": {"const": false}
+      }
+    },
+    "gfx1030": {"allOf": [{"$ref": "#/$defs/row"}, {"properties": {"row_id": {"const": "execution-transfer-g1-gfx1030"}, "target": {"const": "gfx1030"}, "bdf": {"const": "0000:03:00.0"}, "product": {"const": "AMD Radeon Pro V620"}, "physical_hip_index": {"const": 1}}}]},
+    "gfx1201": {"allOf": [{"$ref": "#/$defs/row"}, {"properties": {"row_id": {"const": "execution-transfer-g1-gfx1201"}, "target": {"const": "gfx1201"}, "bdf": {"const": "0000:07:00.0"}, "product": {"const": "AMD Radeon AI PRO R9700"}, "physical_hip_index": {"const": 2}}}]}
+  }
+}

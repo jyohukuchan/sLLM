@@ -233,6 +233,10 @@ struct HipExecutionSession {
 }
 
 impl ExecutionSessionAdapter for HipExecutionSession {
+    fn max_transfer_bytes(&self) -> u64 {
+        crate::sys::SLLM_HIP_MAX_TRANSFER_BYTES
+    }
+
     fn supports(&self, descriptor: &sllm_core::SemanticOpDescriptor) -> PrepareSupport {
         if let Err(error) = self.state.ensure_open() {
             return PrepareSupport::Unsupported {
@@ -347,6 +351,27 @@ impl ExecutionSessionAdapter for HipExecutionSession {
             .copy_to_device(&buffer, bytes.as_ref(), destination.offset_bytes())
             .map_err(map_backend_error)?;
         Ok(Box::new(HipTransfer {
+            completion,
+            _ticket: ticket,
+        }))
+    }
+
+    fn readback(
+        &self,
+        access: &ExecutionAdapterAccess<'_>,
+        queue: &sllm_core::ExecutionQueue,
+        source: &BufferRange,
+    ) -> Result<Box<dyn ExecutionReadbackAdapter>, ExecutionError> {
+        self.state.ensure_open()?;
+        let queue = access.downcast_queue_payload::<Queue>(queue)?.clone();
+        let buffer = access
+            .downcast_buffer_payload::<Buffer>(source.buffer())?
+            .clone();
+        let ticket = self.state.acquire_active()?;
+        let completion = queue
+            .copy_to_host(&buffer, source.size_bytes(), source.offset_bytes())
+            .map_err(map_backend_error)?;
+        Ok(Box::new(HipReadback {
             completion,
             _ticket: ticket,
         }))
@@ -539,6 +564,20 @@ mod tests {
             Err(ExecutionError::ExecutionUnavailable { .. })
         ));
         assert!(!backend.capabilities().numerical_execution);
+    }
+
+    #[test]
+    fn owned_bridge_advertises_the_existing_public_transfer_limit_without_gpu() {
+        let adapter = HipExecutionSession {
+            state: Arc::new(HipSessionState::new()),
+            backend: HipBackend { _private: () },
+            context: Context::test_without_native(),
+        };
+        assert_eq!(
+            adapter.max_transfer_bytes(),
+            crate::sys::SLLM_HIP_MAX_TRANSFER_BYTES
+        );
+        assert_eq!(adapter.max_transfer_bytes(), 1_073_741_824);
     }
 
     #[test]

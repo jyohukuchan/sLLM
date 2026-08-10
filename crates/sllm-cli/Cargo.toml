@@ -7,6 +7,9 @@ license.workspace = true
 description = "sLLM command-line entry point"
 
 [dependencies]
+serde_json.workspace = true
+sllm-core.workspace = true
+sllm-frontend.workspace = true
 sllm-hip.workspace = true
 
 [[bin]]

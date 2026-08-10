@@ -1,0 +1,79 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sllm.dev/schema/weight-upload-g1-report-v1.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "state", "target", "device_index", "lock_fingerprint", "plan_digest", "tensor_name", "tensor_dtype", "tensor_size_bytes", "source_file", "source_file_sha256", "source_range", "destination_offset", "peak_host_staging_bytes", "scope", "counts", "chunks", "cleanup"],
+  "properties": {
+    "schema_version": {"const": "weight-upload-g1-report-v1"},
+    "state": {"const": "PASS"},
+    "target": {"enum": ["gfx1030", "gfx1201"]},
+    "device_index": {"type": "integer", "minimum": 0, "maximum": 63},
+    "lock_fingerprint": {"const": "sha256:32265444b7cdd2a00e4e4e3e6aa8375a05acf6cddfcb9ffc348f54f67a7cd935"},
+    "plan_digest": {"const": "sha256:0820227fdc4129e5ff100e0aa87db7663d75703c9ba723bc4adc950a3af6ab66"},
+    "tensor_name": {"const": "model.language_model.layers.0.linear_attn.in_proj_z.weight"},
+    "tensor_dtype": {"const": "BF16"},
+    "tensor_size_bytes": {"const": 20971520},
+    "source_file": {"const": "model.safetensors-00002-of-00002.safetensors"},
+    "source_file_sha256": {"const": "cb544bd9bfae93dc59b0f22b292f5933573854a7f9b97835c67060d7d910e188"},
+    "source_range": {"const": [42435872, 63407392]},
+    "destination_offset": {"const": 7},
+    "peak_host_staging_bytes": {"const": 16777216},
+    "scope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["selected_backend", "fallback_allowed", "fallback_used", "cpu_fallback_used", "gpu_execution", "model_cache_used", "weight_payload_used", "model_execution", "semantic_op_used", "kernel_dispatch_count", "network_used"],
+      "properties": {
+        "selected_backend": {"const": "hip"},
+        "fallback_allowed": {"const": false},
+        "fallback_used": {"const": false},
+        "cpu_fallback_used": {"const": false},
+        "gpu_execution": {"const": true},
+        "model_cache_used": {"const": true},
+        "weight_payload_used": {"const": true},
+        "model_execution": {"const": false},
+        "semantic_op_used": {"const": false},
+        "kernel_dispatch_count": {"const": 0},
+        "network_used": {"const": false}
+      }
+    },
+    "counts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["allocations", "chunks", "h2d_transfers", "d2h_transfers"],
+      "properties": {"allocations": {"const": 1}, "chunks": {"const": 2}, "h2d_transfers": {"const": 2}, "d2h_transfers": {"const": 2}}
+    },
+    "chunks": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 2,
+      "prefixItems": [{"$ref": "#/$defs/chunk0"}, {"$ref": "#/$defs/chunk1"}],
+      "items": false
+    },
+    "cleanup": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["retryable_cleanup", "durable_quarantine"],
+      "properties": {"retryable_cleanup": {"const": 0}, "durable_quarantine": {"const": 0}}
+    }
+  },
+  "$defs": {
+    "chunk": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["order", "tensor_offset", "source_offset", "destination_offset", "size_bytes", "h2d_state", "d2h_state", "exact_match"],
+      "properties": {
+        "order": {"type": "integer"},
+        "tensor_offset": {"type": "integer", "minimum": 0},
+        "source_offset": {"type": "integer", "minimum": 1},
+        "destination_offset": {"type": "integer", "minimum": 7},
+        "size_bytes": {"type": "integer", "minimum": 1},
+        "h2d_state": {"const": "success"},
+        "d2h_state": {"const": "success"},
+        "exact_match": {"const": true}
+      }
+    },
+    "chunk0": {"allOf": [{"$ref": "#/$defs/chunk"}, {"properties": {"order": {"const": 0}, "tensor_offset": {"const": 0}, "destination_offset": {"const": 7}, "size_bytes": {"const": 16777216}}}]},
+    "chunk1": {"allOf": [{"$ref": "#/$defs/chunk"}, {"properties": {"order": {"const": 1}, "tensor_offset": {"const": 16777216}, "destination_offset": {"const": 16777223}, "size_bytes": {"const": 4194304}}}]}
+  }
+}

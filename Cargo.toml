@@ -20,5 +20,6 @@ serde_json = { version = "=1.0.150" }
 sha2 = { version = "=0.10.9" }
 tokenizers = { version = "=0.21.4", default-features = false, features = ["onig"] }
 sllm-core = { path = "crates/sllm-core" }
+sllm-frontend = { path = "crates/sllm-frontend" }
 sllm-hip = { path = "crates/sllm-hip" }
 sllm-hip-sys = { path = "crates/sllm-hip-sys" }

@@ -14,6 +14,14 @@ path = "src/bin/sllm-rmsnorm-g2-evidence.rs"
 name = "sllm-rmsnorm-p0-evidence"
 path = "src/bin/sllm-rmsnorm-p0-evidence.rs"
 
+[[bin]]
+name = "sllm-execution-transfer-g1-evidence"
+path = "src/bin/sllm-execution-transfer-g1-evidence.rs"
+
+[[bin]]
+name = "sllm-weight-upload-g1-evidence"
+path = "src/bin/sllm-weight-upload-g1-evidence.rs"
+
 [dependencies]
 serde.workspace = true
 serde_json.workspace = true

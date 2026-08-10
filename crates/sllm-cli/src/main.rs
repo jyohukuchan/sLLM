@@ -1,6 +1,8 @@
 use std::env;
 use std::process::ExitCode;
 
+mod model;
+
 fn main() -> ExitCode {
     match run(env::args().skip(1)) {
         Ok(()) => ExitCode::SUCCESS,
@@ -19,18 +21,27 @@ fn run(mut arguments: impl Iterator<Item = String>) -> Result<(), String> {
         }
         Some("version") | Some("--version") | Some("-V") => print_version(),
         Some("doctor") => print_doctor(),
+        Some(command @ ("verify-model" | "tokenize" | "render" | "decode")) => {
+            let output = model::run(command, arguments)?;
+            println!("{output}");
+            Ok(())
+        }
         Some(command) => Err(format!("unknown command `{command}`; try `sllm help`")),
     }
 }
 
 fn print_help() {
-    println!("sLLM Phase 1");
+    println!("sLLM");
     println!();
     println!("Usage: sllm <command>");
     println!();
     println!("Commands:");
     println!("  version  Print the package and ABI version");
     println!("  doctor   Probe the Phase 1 host backend boundary");
+    println!("  verify-model  Verify a locked local model cache");
+    println!("  tokenize      Encode text with the verified tokenizer");
+    println!("  render        Render Qwen3.5 chat messages");
+    println!("  decode        Decode token IDs with the verified tokenizer");
 }
 
 fn print_version() -> Result<(), String> {

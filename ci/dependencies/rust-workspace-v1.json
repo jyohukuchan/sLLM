@@ -30,6 +30,20 @@
       "manifest": "crates/sllm-cli/Cargo.toml",
       "targets": [
         {
+          "name": "model_frontend_cli",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ],
+          "edition": "2024",
+          "required_features": [],
+          "test": true,
+          "doc": false,
+          "doctest": false
+        },
+        {
           "name": "sllm",
           "kind": [
             "bin"
@@ -80,6 +94,20 @@
           "test": true,
           "doc": true,
           "doctest": true
+        },
+        {
+          "name": "weight_contract",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ],
+          "edition": "2024",
+          "required_features": [],
+          "test": true,
+          "doc": false,
+          "doctest": false
         }
       ]
     },
@@ -182,6 +210,20 @@
       "manifest": "crates/sllm-hip/Cargo.toml",
       "targets": [
         {
+          "name": "sllm-execution-transfer-g1-evidence",
+          "kind": [
+            "bin"
+          ],
+          "crate_types": [
+            "bin"
+          ],
+          "edition": "2024",
+          "required_features": [],
+          "test": true,
+          "doc": true,
+          "doctest": false
+        },
+        {
           "name": "sllm-hip-evidence",
           "kind": [
             "bin"
@@ -225,6 +267,20 @@
         },
         {
           "name": "sllm-rmsnorm-p0-evidence",
+          "kind": [
+            "bin"
+          ],
+          "crate_types": [
+            "bin"
+          ],
+          "edition": "2024",
+          "required_features": [],
+          "test": true,
+          "doc": true,
+          "doctest": false
+        },
+        {
+          "name": "sllm-weight-upload-g1-evidence",
           "kind": [
             "bin"
           ],
@@ -3375,6 +3431,42 @@
     },
     {
       "from": "workspace:sllm-cli@0.1.0",
+      "to": "registry:serde_json@1.0.150",
+      "name": "serde_json",
+      "kind": "normal",
+      "target": null,
+      "req": "=1.0.150",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "workspace:sllm-cli@0.1.0",
+      "to": "workspace:sllm-core@0.1.0",
+      "name": "sllm-core",
+      "kind": "normal",
+      "target": null,
+      "req": "*",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "workspace:sllm-cli@0.1.0",
+      "to": "workspace:sllm-frontend@0.1.0",
+      "name": "sllm-frontend",
+      "kind": "normal",
+      "target": null,
+      "req": "*",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "workspace:sllm-cli@0.1.0",
       "to": "workspace:sllm-hip@0.1.0",
       "name": "sllm-hip",
       "kind": "normal",
@@ -3564,11 +3656,11 @@
     "packages": 90,
     "registry_packages": 85,
     "workspace_packages": 5,
-    "edges": 171,
+    "edges": 174,
     "edge_kinds": {
       "build": 6,
       "dev": 1,
-      "normal": 164
+      "normal": 167
     },
     "target_specific_edges": 21,
     "target_expressions": 18

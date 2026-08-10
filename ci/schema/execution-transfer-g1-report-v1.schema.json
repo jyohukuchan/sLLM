@@ -1,0 +1,58 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sllm.dev/schema/execution-transfer-g1-report-v1.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "state", "target", "device_index", "max_transfer_bytes", "scope", "counts", "cases", "cleanup"],
+  "properties": {
+    "schema_version": {"const": "execution-transfer-g1-report-v1"},
+    "state": {"const": "PASS"},
+    "target": {"enum": ["gfx1030", "gfx1201"]},
+    "device_index": {"type": "integer", "minimum": 0, "maximum": 63},
+    "max_transfer_bytes": {"const": 1073741824},
+    "scope": {
+      "type": "object", "additionalProperties": false,
+      "required": ["selected_backend", "fallback_allowed", "fallback_used", "cpu_fallback_used", "gpu_execution", "model_used", "semantic_op_used", "kernel_dispatch_count"],
+      "properties": {
+        "selected_backend": {"const": "hip"}, "fallback_allowed": {"const": false},
+        "fallback_used": {"const": false}, "cpu_fallback_used": {"const": false},
+        "gpu_execution": {"const": true}, "model_used": {"const": false},
+        "semantic_op_used": {"const": false}, "kernel_dispatch_count": {"const": 0}
+      }
+    },
+    "counts": {
+      "type": "object", "additionalProperties": false,
+      "required": ["cases", "allocations", "h2d_transfers", "d2h_transfers"],
+      "properties": {"cases": {"const": 6}, "allocations": {"const": 6}, "h2d_transfers": {"const": 6}, "d2h_transfers": {"const": 6}}
+    },
+    "cases": {
+      "type": "array", "minItems": 6, "maxItems": 6,
+      "prefixItems": [
+        {"$ref": "#/$defs/case1"}, {"$ref": "#/$defs/case3"}, {"$ref": "#/$defs/case17"},
+        {"$ref": "#/$defs/case255"}, {"$ref": "#/$defs/case256"}, {"$ref": "#/$defs/case257"}
+      ], "items": false
+    },
+    "cleanup": {
+      "type": "object", "additionalProperties": false,
+      "required": ["retryable_cleanup", "durable_quarantine"],
+      "properties": {"retryable_cleanup": {"const": 0}, "durable_quarantine": {"const": 0}}
+    }
+  },
+  "$defs": {
+    "case": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "order", "offset_bytes", "size_bytes", "h2d_state", "d2h_state", "exact_match"],
+      "properties": {
+        "id": {"type": "string"}, "order": {"type": "integer"}, "offset_bytes": {"type": "integer", "minimum": 1},
+        "size_bytes": {"type": "integer", "minimum": 1}, "h2d_state": {"const": "success"},
+        "d2h_state": {"const": "success"}, "exact_match": {"const": true}
+      }
+    },
+    "case1": {"allOf": [{"$ref": "#/$defs/case"}, {"properties": {"id": {"const": "bytes-1"}, "order": {"const": 0}, "offset_bytes": {"const": 1}, "size_bytes": {"const": 1}}}]},
+    "case3": {"allOf": [{"$ref": "#/$defs/case"}, {"properties": {"id": {"const": "bytes-3"}, "order": {"const": 1}, "offset_bytes": {"const": 4}, "size_bytes": {"const": 3}}}]},
+    "case17": {"allOf": [{"$ref": "#/$defs/case"}, {"properties": {"id": {"const": "bytes-17"}, "order": {"const": 2}, "offset_bytes": {"const": 7}, "size_bytes": {"const": 17}}}]},
+    "case255": {"allOf": [{"$ref": "#/$defs/case"}, {"properties": {"id": {"const": "bytes-255"}, "order": {"const": 3}, "offset_bytes": {"const": 10}, "size_bytes": {"const": 255}}}]},
+    "case256": {"allOf": [{"$ref": "#/$defs/case"}, {"properties": {"id": {"const": "bytes-256"}, "order": {"const": 4}, "offset_bytes": {"const": 13}, "size_bytes": {"const": 256}}}]},
+    "case257": {"allOf": [{"$ref": "#/$defs/case"}, {"properties": {"id": {"const": "bytes-257"}, "order": {"const": 5}, "offset_bytes": {"const": 16}, "size_bytes": {"const": 257}}}]}
+  }
+}
