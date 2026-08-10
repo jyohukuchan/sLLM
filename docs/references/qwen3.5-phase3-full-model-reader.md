@@ -278,6 +278,79 @@ GPU toleranceはreader段階では未校正・未PASSである。実装後、同
 
 text-only frontendはQwen2Tokenizer系BPE、vocab 248320、model max length 262144、BOS自動追加なしを前提とする。system/user/assistantとgeneration promptのtemplate branchだけを対象にし、image/video/tool branchは明示unsupportedとする。
 
+### B4 typed text-only chat renderer reader
+
+B4の出力権威は、固定revision `851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a` のlock済みfrontend assetだけである。
+
+| 項目 | 固定値 |
+| --- | --- |
+| filename | `chat_template.jinja` |
+| size | `7756` bytes |
+| SHA-256 | `a4aee8afcf2e0711942cf848899be66016f8d14a889ff9ede07bca099c28f715` |
+
+分離済みreaderは、このidentityを検証した7,756-byte frontend assetだけをbounded-readした。weight、full modelのload、GPU、network、containerは使用していない。固定assetを意味の正本とし、固定llama.cpp `f5919bf458ef190468b5c329bb293f8a54a1e69c`、vLLM `568afb3a13806beb53bb2e6bd518269357b237c0`、SGLang `fdebc938f7f4d16fe6b9f55dcd9a767cf0899ea1` は引数dispatchとdefault-enabled thinkingの独立provenance cross-checkにだけ用いた。cross-check元のcodeはcopy、adapt、portしていない。source identityとlicense境界は既存の[source-lock manifest](source-lock.md)と[provenance方針](../provenance/README.md)を維持する。
+
+入力は非空のtyped message列で、少なくとも1件のordinary `user` queryを要求する。`system`は任意だがindex 0にだけ置け、default systemは合成しない。対応roleはtext-onlyの`system`、`user`、`assistant`であり、user/assistantの交互性は要求しない。各complete messageは `<|im_end|>\n` で終わり、BOSと`<|endoftext|>`はtemplateから追加しない。
+
+各contentは両端をtrimする。対象はU+0009–000D、U+001C–001F、U+0020、U+0085、U+00A0、U+1680、U+2000–U+200A、U+2028、U+2029、U+202F、U+205F、U+3000である。内部whitespaceは保持し、HTML、JSON、XML、quote、backslash、special tokenをescapeしない。従ってliteralの`<|im_end|>`、`<think>`、`<>&"'`、Unicode、改行はrawのまま出力する。contentはvalid UTF-8 stringだけを受理する。
+
+`add_generation_prompt=true`のgeneration suffixは次のexact bytesとする。
+
+- `enable_thinking`未指定/defaultまたはboolean `true`: `"<|im_start|>assistant\n<think>\n"`
+- boolean `false`: `"<|im_start|>assistant\n<think>\n\n</think>\n\n"`
+
+`add_generation_prompt=false`ならsuffixはない。suffixは末尾messageのroleにかかわらず付加し、`enable_thinking=false`は保存済みassistant historyのreasoningを変更しない。
+
+assistantのhistorical/terminal区分は最後のordinary user indexで決める。それより前のassistantはhistoricalとして抽出reasoningを省き、最後のordinary userより後のassistantは次の形へnormalizeする。
+
+```text
+<|im_start|>assistant
+<think>
+{trimmed reasoning}
+</think>
+
+{answer}<|im_end|>
+```
+
+`reasoning_content`がstringならtrimしてreasoningとし、content内のthink tagは解析しない。それ以外でcontentに`</think>`があれば、最初のclosing tagより前にある最後の`<think>`以後をreasoning、最後のclosing tagより後をanswerとする。split周辺で個別除去する改行はU+000Aで、reasoningにはその後一般trimも適用する。closing tagのないopening tagは認識せずraw contentに残す。複数のclosing blockがある場合、最初と最後のclosing tagの間は破棄する。
+
+代表outputのexact escaped表現は次のとおりである。
+
+```text
+hello/default:
+"<|im_start|>user\nhello<|im_end|>\n<|im_start|>assistant\n<think>\n"
+
+hello/disabled:
+"<|im_start|>user\nhello<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+
+user = 雪 <>&"'\n第二行:
+"<|im_start|>user\n雪 <>&\"'\n第二行<|im_end|>\n<|im_start|>assistant\n<think>\n"
+
+system = "  You are concise.\n", user = "\n hello \t":
+"<|im_start|>system\nYou are concise.<|im_end|>\n<|im_start|>user\nhello<|im_end|>\n<|im_start|>assistant\n<think>\n"
+
+historical messages = [user "Q1", assistant "<think>\nold reasoning\n</think>\n\nOld answer", user "Q2"]:
+"<|im_start|>user\nQ1<|im_end|>\n<|im_start|>assistant\nOld answer<|im_end|>\n<|im_start|>user\nQ2<|im_end|>\n<|im_start|>assistant\n<think>\n"
+
+terminal messages = [user "Q1", assistant "<think>\nold reasoning\n</think>\n\nOld answer"], add_generation_prompt = false:
+"<|im_start|>user\nQ1<|im_end|>\n<|im_start|>assistant\n<think>\nold reasoning\n</think>\n\nOld answer<|im_end|>\n"
+```
+
+B4は次をunsupportedとして明示的にfail closedする。
+
+- 空を含むtools/tool-choice/tool-call field、`tool` role、`<tool_response>…</tool_response>`形へtrimされるuser content。
+- image、image URL、video、multimodal/content-part array。
+- null、mapping、numeric、boolean、arrayを含む非string content、invalid UTF-8。
+- `developer`等のunknown role、index 0以外のsystem、空message列、ordinary user queryなし。
+- 非string `reasoning_content`、assistant以外の`reasoning_content`、closed input schema外のfield。
+- asset kind、filename、size、SHA-256、対応renderer versionの不一致。
+
+validation順は、(1) raw bytesに対するasset kind/filename/size/SHA-256、(2) UTF-8とexact renderer version、(3) request-level unsupported field、(4) 空message列、(5) 全messageのrole/content type/role-specific field、(6) system位置とordinary user query、(7) checked/bounded bufferへのrender、とする。途中失敗ではpartial outputを返さない。
+
+最小APIは、`System { content: String }`、`User { content: String }`、`Assistant { content: String, reasoning_content: Option<String> }`のclosed enum、`TemplateDefault | Enabled | Disabled`のthinking enum、`add_generation_prompt: bool`を持つoptions、および`VerifiedFrontendAsset`を受けて`Result<String, ChatRenderError>`を返すversioned rendererを要求する。`TemplateDefault`と`Enabled`は同じ出力でもtyped inputとして分ける。固定semanticを直接実装する範囲であり、arbitrary Jinja interpreterは導入しない。
+
+最小fixtureは`hello-default-thinking`、`hello-disabled-thinking`、`unicode-specials-raw`、`explicit-system-trim`、`historical-inline-think-stripped`、`terminal-inline-think-normalized`、`assistant-reasoning-content`、`consecutive-users-supported`と、上記unsupported/identity mismatchごとのnegative caseを含める。各fixtureはrenderer version、完全なtemplate identity、typed messages/options、exact UTF-8 output bytes、そのSHA-256、B3由来token IDsを固定する。
+
 固定metadataには次の差異がある。
 
 ```text
