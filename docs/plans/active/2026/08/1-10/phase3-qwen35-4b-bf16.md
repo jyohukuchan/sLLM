@@ -153,6 +153,8 @@ B4 docs-only closeout candidate `28136d4e6a50fb6349b7cf81d063397aa136a50f`、tre
 
 closeout修復candidate `555bfef127077a74bb94bc3762cdf2984c48dbdf`、tree `55df85d4c728e807fb0035454bc35b6d4fd5084d`はstrict H0 335/335、attempt 1、failed/skipped 0、clean exact identity、report SHA-256 `1ea590f1683a555d02bdd3571b83c199a892950f5a85cf54845e07ad86fa66c9`のsidecar一致を`PASS`した。fresh reviewは自己参照境界を認め、残る指摘はmain planのimplementation resource行だけにweight payload不使用が未同期であるMedium 1件だった。本修復で3正本を一致させ、新candidateのH0とfresh reviewを取り直すまでB4全体は未完了、B5は未開始とする。
 
+B4 final docs-only closeout `b8a71243f7f93390630c7423d6ca082f9ec51703`、tree `caa9e69da0be67a9207c0455d628e5fecb2611d8`はpinned Python 3.12.10 strict H0 335/335、attempt 1、failed/skipped 0、clean exact SHA/tree、report SHA-256 `8c7db0493b46cac2d08d96ae27190940786a04847c379a4a0bb5db1e9dc17fe3`のsidecar一致とfresh独立review High/Medium/Low 0件の`PASS/no findings`を結合し、B4全体を完了した。これをrollback baseとして2026-08-10 14:56:38 JSTにB5 weight registry/load planを開始する。予測3〜5時間、作業単位hard中断時刻20:56:38 JSTだが、先に到達する全体停止上限15:38:27 JSTをeffective hard stopとする。所有範囲は新規`crates/sllm-core/src/weights.rs`、`crates/sllm-core/src/lib.rs`、新規`crates/sllm-core/tests/weight_contract.rs`と、追加test targetに必要なdependency inventory同期だけに限定する。B1のverified descriptorからrequired/config-conditional/known-unconsumed/rejected分類、一意consumer、exact source range、最大16 MiBの決定的chunkとoverflow-safe destination offsetを構築する。事前監査では固定reader記録と既存core APIだけを読み、weight payload read/materialize、model cache、GPU、network、containerは使用しない。
+
 受入条件:
 
 - CPU CIはtiny synthetic safetensors/tokenizer fixtureだけを使い、full modelをdownload/loadしない。
