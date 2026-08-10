@@ -127,6 +127,8 @@ B1のhost-verified functional checkpointはcommit `be098f41c903c19b3f3e62883b0af
 
 B1最終機能candidateはcommit `b5cc617287ec2efb97c5b06bd838621f51d547c8`、tree `e901d2fa1b33ae75a7d087c1d4323d38f9f02a00`である。固定cache 13 file・9,342,905,899 bytesのcontent-only hash、index、全738 header metadataはfingerprint `sha256:32265444b7cdd2a00e4e4e3e6aa8375a05acf6cddfcb9ffc348f54f67a7cd935`で`PASS`した。pinned Python 3.12.10 strict H0 335/335、H1 156/188（32 deselected）、H2 35/42（7 deselected）は各attempt 1のimmutable `PASS`で、precommit reviewとrollback base `d610b480...`からの累積reviewはいずれもHigh/Medium/Low 0件だった。GDN storage dtypeと`conv1d.weight=[8192,1,4]`、Rust/Python exact-catalog mutation、件数付きbounded diagnostic、production descriptor map非複製を確認し、GPU、payload materialize/range read、network、containerは使っていない。この完了記録を含むdocs-inclusive identityへ同じ固定cache/H0〜H2/fresh reviewを結合してからB1を完了扱いとし、B2を開始する。
 
+完了記録を追加したdocs-only candidate `01dbedfa9de5e435703ef26b66fb610f194cfdd2`のstrict H0 attempt 1は、335 selected中334 PASS、semantic G1 broker client-death test 1件FAILであり、retryで昇格させない。test/helperは`b5cc6172`からbyte-identicalで、単独100/100と同じ95-test command 3/3はPASSした一方、compiler PID clear後のfailure publicationを500 ms遅延させるin-memory probeで同じ失敗を決定的に再現した。productionのfail-closed動作は変えず、testの待機条件からPIDを外して既存5秒deadlineまでfailure publicationを待ち、failure non-Noneとcompiler PID Noneの両assertionを維持する。修正後のfocused 20/20、semantic G1 95/95はPASSしたが、修復を含む新identityへ固定cache/H0〜H2/fresh reviewを再結合するまでB1は未完了とする。
+
 受入条件:
 
 - CPU CIはtiny synthetic safetensors/tokenizer fixtureだけを使い、full modelをdownload/loadしない。

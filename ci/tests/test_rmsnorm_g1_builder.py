@@ -720,7 +720,7 @@ class SemanticG1BuilderTests(unittest.TestCase):
             process.kill()
             process.communicate(timeout=5.0)
             deadline = time.monotonic() + 5.0
-            while broker.failure is None and broker._active_compiler_pid is not None and time.monotonic() < deadline:
+            while broker.failure is None and time.monotonic() < deadline:
                 time.sleep(0.01)
             self.assertIsNotNone(broker.failure)
             self.assertIsNone(broker._active_compiler_pid)
