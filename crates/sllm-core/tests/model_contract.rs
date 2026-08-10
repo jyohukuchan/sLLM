@@ -80,6 +80,24 @@ fn generation_stop_policy_accessor_is_typed_and_preserves_order() {
 }
 
 #[test]
+fn qwen_text_config_retains_typed_full_attention_contract() {
+    let qwen = read_model_lock(repository_path("docs/models/locks/qwen3.5-4b-bf16.json"))
+        .expect("Qwen lock parses");
+    let text = &qwen.model().architecture.text_config;
+    assert!(!text.attention_bias);
+    assert_eq!(text.attention_dropout, "0");
+    assert!(text.attn_output_gate);
+    assert_eq!(text.max_position_embeddings, 262144);
+    assert!(text.use_cache);
+
+    assert_eq!(text.rope_parameters.rope_type, sllm_core::RopeType::Default);
+    assert_eq!(text.rope_parameters.rope_theta, 10_000_000);
+    assert_eq!(text.rope_parameters.partial_rotary_factor, "0.25");
+    assert!(text.rope_parameters.mrope_interleaved);
+    assert_eq!(text.rope_parameters.mrope_section, [11, 11, 10]);
+}
+
+#[test]
 fn generation_stop_policy_shape_mutations_fail_closed() {
     let baseline = fs::read_to_string(repository_path("ci/fixtures/model-lock-v1/lock.json"))
         .expect("tiny lock exists");

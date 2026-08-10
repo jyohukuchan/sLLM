@@ -898,8 +898,15 @@ def _validate_qwen_contract(document: dict[str, Any]) -> None:
         "model_type": "qwen3_5_text", "hidden_size": 2560, "num_hidden_layers": 32,
         "num_attention_heads": 16, "num_key_value_heads": 4, "head_dim": 256,
         "intermediate_size": 9216, "dtype": "BF16", "rms_norm_eps": "1e-6",
+        "attention_bias": False, "attention_dropout": "0", "attn_output_gate": True,
         "full_attention_interval": 4, "tie_word_embeddings": True, "vocab_size": 248320,
-        "mtp_num_hidden_layers": 1,
+        "max_position_embeddings": 262144,
+        "rope_parameters": {
+            "rope_type": "default", "rope_theta": 10000000,
+            "partial_rotary_factor": "0.25", "mrope_interleaved": True,
+            "mrope_section": [11, 11, 10],
+        },
+        "use_cache": True, "mtp_num_hidden_layers": 1,
     }
     if text != {**expected_text, "layer_types": expected_layer_types}:
         raise ContractError("Qwen text config contract does not match the resolved config")
@@ -1021,6 +1028,16 @@ def _validate_generation_stop_policy(policy: Any) -> None:
 def _validate_generic_contract(document: dict[str, Any]) -> None:
     model = document["model"]
     _validate_generation_stop_policy(model["tokenizer_contract"]["generation_stop_policy"])
+    text_config = model["architecture"]["text_config"]
+    _validate_decimal_unit_interval(text_config["rms_norm_eps"], field="rms_norm_eps", allow_zero=False)
+    _validate_decimal_unit_interval(
+        text_config["attention_dropout"], field="attention_dropout", allow_zero=True
+    )
+    _validate_decimal_unit_interval(
+        text_config["rope_parameters"]["partial_rotary_factor"],
+        field="partial_rotary_factor",
+        allow_zero=False,
+    )
     paths = {entry["path"] for entry in model["files"]}
     if len(paths) != len(model["files"]):
         raise ContractError("duplicate file path in model lock")
@@ -1048,6 +1065,22 @@ def _validate_generic_contract(document: dict[str, Any]) -> None:
         raise ContractError("tokenizer EOS source is not present in files")
     if any(entry["path"] in paths for entry in model["excluded_files"]):
         raise ContractError("excluded repository metadata is also locked as a runtime file")
+
+
+def _validate_decimal_unit_interval(value: Any, *, field: str, allow_zero: bool) -> None:
+    if type(value) is not str:
+        raise ContractError(f"{field} must remain an explicit decimal string")
+    try:
+        parsed = Decimal(value)
+    except Exception as exc:
+        raise ContractError(f"{field} is not a valid decimal string") from exc
+    if (
+        not parsed.is_finite()
+        or (allow_zero and parsed < 0)
+        or (not allow_zero and parsed <= 0)
+        or parsed > 1
+    ):
+        raise ContractError(f"{field} is outside the allowed unit interval")
 
 
 def validate_document(document: dict[str, Any], *, schema_path: Path = SCHEMA_PATH) -> None:

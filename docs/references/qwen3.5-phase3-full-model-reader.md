@@ -24,14 +24,15 @@
 | --- | --- |
 | repo / revision | `Qwen/Qwen3.5-4B` / `851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a` |
 | reader実施時lock fingerprint（停止policy導入前） | `sha256:89ba8a6b2e1b7c0324090ddf15ce0e673ff4c3dc242c4127690d490056d8efd1` |
-| 現行lock fingerprint | `sha256:32265444b7cdd2a00e4e4e3e6aa8375a05acf6cddfcb9ffc348f54f67a7cd935` |
+| 停止policy追加後・C3a0以前のlock fingerprint | `sha256:32265444b7cdd2a00e4e4e3e6aa8375a05acf6cddfcb9ffc348f54f67a7cd935` |
+| C3a0 typed attention/RoPE contract追加後の現行lock fingerprint | `sha256:f143d7b504170d071c77818105f7a07dc0297c6bea0c61a5404b071fed0c1fae` |
 | cache files | 13（lock対象。`.gitattributes`はruntime/evidence対象外） |
 | tensor index | 738 = text 426 + vision 297 + MTP 15 |
 | index metadata total | `9319737856` bytes |
 
 13 filesは `LICENSE`、`README.md`、`chat_template.jinja`、`config.json`、`merges.txt`、2つのsafetensors shard、`model.safetensors.index.json`、`preprocessor_config.json`、`tokenizer.json`、`tokenizer_config.json`、`video_preprocessor_config.json`、`vocab.json` である。
 
-このreader記録は、固定lock、config、index、safetensors header、bounded byte-range evidenceを根拠にする。現行lockは同じresolved revision、file identity、architecture、tensor catalogへversioned generated-token停止policyを追加したためfingerprintが更新されており、runtimeと後続evidenceは現行fingerprintを使用する。weight shard payloadをこのreaderが全read、全tensor decode、mmap、保存することはしていない。従って「13 files / 738 tensors」のcatalog、shape、dtype、offset、分類を記録するが、payload全体の意味的正しさやfull-model数値正しさをこの文書だけで証明しない。raw weight、slice、binary、traceをGitやreportへ保存しない。
+このreader記録は、固定lock、config、index、safetensors header、bounded byte-range evidenceを根拠にする。現行lockは同じresolved revision、file identity、architecture、tensor catalogにC3a0のtyped attention/RoPE contractを追加したためfingerprintが更新されている。旧fingerprintに結合したimmutable evidenceはhistorical identityとして保持し、runtimeと新規evidenceは現行fingerprintを使用する。weight shard payloadをこのreaderが全read、全tensor decode、mmap、保存することはしていない。従って「13 files / 738 tensors」のcatalog、shape、dtype、offset、分類を記録するが、payload全体の意味的正しさやfull-model数値正しさをこの文書だけで証明しない。raw weight、slice、binary、traceをGitやreportへ保存しない。
 
 ## text configとexplicit schedule
 

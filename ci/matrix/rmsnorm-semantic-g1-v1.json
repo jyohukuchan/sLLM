@@ -51,7 +51,7 @@
     "model_hidden_size": 2560,
     "epsilon": "1e-6",
     "model_lock_path": "docs/models/locks/qwen3.5-4b-bf16.json",
-    "model_lock_sha256": "e0ab289154c0b59c8dc5863fd14024a3228f6ea20571c12a805662a090e61abb"
+    "model_lock_sha256": "4071e1b36901e523a3c5c65559f2cecda7c9cc258185770f049886f52d1fe678"
   },
   "case_manifest": {
     "id": "rmsnorm-semantic-g1-cases-v1",

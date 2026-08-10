@@ -1,9 +1,10 @@
 //! Additive `sllm-core` owned-execution adapter for the typed public HIP
-//! RMSNorm path.  It does not alter the legacy `Backend` control-plane methods.
+//! BF16 copy/add, matmul, and RMSNorm paths. It does not alter the legacy `Backend`
+//! control-plane methods.
 //!
 //! The adapter contains no alternate ABI or kernel path.  It only lowers core
 //! owned bindings into the existing `Context`/`Queue`/`Buffer`/
-//! `PreparedRmsNorm`/`RmsNormSubmission` wrappers.
+//! typed prepared-operation/submission wrappers.
 
 use std::sync::Arc;
 #[cfg(test)]
@@ -11,16 +12,28 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
+use sllm_hip_sys as sys;
+
 use sllm_core::{
-    AdapterResource, BoundSemanticOp, BufferRange, DispatchEvidence, ExecutionAdapterAccess,
-    ExecutionError, ExecutionReadbackAdapter, ExecutionSession, ExecutionSessionAdapter,
-    ExecutionSessionRequest, ExecutionState, ExecutionSubmissionAdapter, ExecutionTransferAdapter,
-    OwnedTensorBinding, PrepareSupport, PreparedOperation, ShutdownReport,
+    AdapterResource, BoundSemanticOp, BufferRange, CausalAttentionDescriptor, DispatchEvidence,
+    ExecutionAdapterAccess, ExecutionCausalAttentionSubmissionAdapter, ExecutionError,
+    ExecutionKvStateSubmissionAdapter, ExecutionReadbackAdapter, ExecutionSession,
+    ExecutionSessionAdapter, ExecutionSessionRequest, ExecutionState, ExecutionSubmissionAdapter,
+    ExecutionTransferAdapter, OwnedTensorBinding, PrepareSupport, PreparedOperation,
+    ShutdownReport,
 };
 
+use crate::kv_state::{
+    CausalAttentionCompletion, CausalAttentionEvidence, KvAppendCompletion, KvStateResource,
+};
 use crate::{
-    Buffer, Completion, CompletionState, Context, HipBackend, PreparedRmsNorm, Queue,
-    RmsNormDescriptor, RmsNormDispatchInfo, RmsNormSubmission, RuntimeError, RuntimeStatus,
+    AttentionPreprocessDescriptor, AttentionPreprocessDispatchInfo, AttentionPreprocessSubmission,
+    Buffer, Completion, CompletionState, Context, ElementwiseDescriptor, ElementwiseDispatchInfo,
+    ElementwiseSubmission, EmbeddingDescriptor, EmbeddingDispatchInfo, EmbeddingSubmission,
+    HipBackend, MatmulDescriptor, MatmulDispatchInfo, MatmulSubmission,
+    PreparedAttentionPreprocess, PreparedElementwise, PreparedEmbedding, PreparedMatmul,
+    PreparedRmsNorm, Queue, RmsNormDescriptor, RmsNormDispatchInfo, RmsNormSubmission,
+    RuntimeError, RuntimeStatus,
 };
 
 const HIP_BACKEND_NAME: &str = "hip";
@@ -248,9 +261,20 @@ impl ExecutionSessionAdapter for HipExecutionSession {
                 reason: format!("invalid semantic descriptor: {error}"),
             };
         }
-        if descriptor.kind() != sllm_core::SemanticOpKind::RmsNorm {
+        if !matches!(
+            descriptor.kind(),
+            sllm_core::SemanticOpKind::Copy
+                | sllm_core::SemanticOpKind::Add
+                | sllm_core::SemanticOpKind::SiluMul
+                | sllm_core::SemanticOpKind::SigmoidMul
+                | sllm_core::SemanticOpKind::Embedding
+                | sllm_core::SemanticOpKind::Matmul
+                | sllm_core::SemanticOpKind::RmsNorm
+                | sllm_core::SemanticOpKind::AttentionPreprocess
+        ) {
             return PrepareSupport::Unsupported {
-                reason: "the HIP owned execution bridge currently prepares RMSNorm only".to_owned(),
+                reason: "the HIP owned execution bridge currently prepares copy, add, silu_mul, sigmoid_mul, embedding, matmul, RMSNorm, and attention_preprocess"
+                    .to_owned(),
             };
         }
         PrepareSupport::Supported
@@ -277,38 +301,275 @@ impl ExecutionSessionAdapter for HipExecutionSession {
             .map_err(map_backend_error)
     }
 
+    fn create_kv_state(
+        &self,
+        access: &ExecutionAdapterAccess<'_>,
+        state_id: sllm_core::KvStateId,
+        descriptor: sllm_core::KvStateDescriptor,
+    ) -> Result<AdapterResource, ExecutionError> {
+        self.state.ensure_open()?;
+        KvStateResource::create(&self.context, access.session_id(), state_id, descriptor)
+            .map(AdapterResource::new)
+            .map_err(map_backend_error)
+    }
+
+    fn kv_state_snapshot(
+        &self,
+        access: &ExecutionAdapterAccess<'_>,
+        state: &sllm_core::KvState,
+    ) -> Result<sllm_core::KvStateSnapshot, ExecutionError> {
+        self.state.ensure_open()?;
+        access
+            .downcast_kv_state_payload::<KvStateResource>(state)?
+            .snapshot()
+            .map_err(map_backend_error)
+    }
+
+    fn append_kv_state(
+        &self,
+        access: &ExecutionAdapterAccess<'_>,
+        state: &sllm_core::KvState,
+        queue: &sllm_core::ExecutionQueue,
+        key: &OwnedTensorBinding,
+        value: &OwnedTensorBinding,
+        request: &sllm_core::KvStateAppendRequest,
+    ) -> Result<Box<dyn ExecutionKvStateSubmissionAdapter>, ExecutionError> {
+        self.state.ensure_open()?;
+        let state_resource = access
+            .downcast_kv_state_payload::<KvStateResource>(state)?
+            .clone();
+        let queue = access.downcast_queue_payload::<Queue>(queue)?.clone();
+        let key_buffer = access
+            .downcast_buffer_payload::<Buffer>(key.buffer())?
+            .clone();
+        let value_buffer = access
+            .downcast_buffer_payload::<Buffer>(value.buffer())?
+            .clone();
+        let key = key_buffer.binding(key.view().clone());
+        let value = value_buffer.binding(value.view().clone());
+        let ticket = self.state.acquire_active()?;
+        let completion = match state_resource.append(&queue, &key, &value, *request) {
+            Ok(completion) => completion,
+            Err(error) => {
+                drop(ticket);
+                return Err(map_backend_error(error));
+            }
+        };
+        Ok(Box::new(HipKvSubmission {
+            completion,
+            _ticket: ticket,
+        }))
+    }
+
+    fn execute_causal_attention(
+        &self,
+        access: &ExecutionAdapterAccess<'_>,
+        state: &sllm_core::KvState,
+        queue: &sllm_core::ExecutionQueue,
+        query: &OwnedTensorBinding,
+        output: &OwnedTensorBinding,
+        descriptor: CausalAttentionDescriptor,
+    ) -> Result<
+        (
+            Box<dyn ExecutionCausalAttentionSubmissionAdapter>,
+            DispatchEvidence,
+        ),
+        ExecutionError,
+    > {
+        self.state.ensure_open()?;
+        let state_resource = access
+            .downcast_kv_state_payload::<KvStateResource>(state)?
+            .clone();
+        let queue = access.downcast_queue_payload::<Queue>(queue)?.clone();
+        let query_buffer = access
+            .downcast_buffer_payload::<Buffer>(query.buffer())?
+            .clone();
+        let output_buffer = access
+            .downcast_buffer_payload::<Buffer>(output.buffer())?
+            .clone();
+        let query = query_buffer.binding(query.view().clone());
+        let output = output_buffer.binding(output.view().clone());
+        let ticket = self.state.acquire_active()?;
+        let (completion, evidence) = match state_resource.causal_attention(
+            &queue,
+            &query,
+            &output,
+            descriptor.start_position(),
+            descriptor.expected_kv_length(),
+        ) {
+            Ok(value) => value,
+            Err(error) => {
+                drop(ticket);
+                return Err(map_backend_error(error));
+            }
+        };
+        Ok((
+            Box::new(HipCausalAttentionSubmission {
+                completion,
+                _evidence: evidence.clone(),
+                _ticket: ticket,
+            }),
+            dispatch_from_causal_attention(evidence),
+        ))
+    }
+
     fn prepare(
         &self,
         access: &ExecutionAdapterAccess<'_>,
         operation: &BoundSemanticOp,
     ) -> Result<AdapterResource, ExecutionError> {
         self.state.ensure_open()?;
-        if operation.descriptor().kind() != sllm_core::SemanticOpKind::RmsNorm {
-            return Err(ExecutionError::Unsupported {
-                reason: "the HIP owned execution bridge currently prepares RMSNorm only".to_owned(),
-            });
-        }
-        let activation = access
-            .downcast_buffer_payload::<Buffer>(operation.inputs()[0].buffer())?
-            .clone();
-        let raw_scale = access
-            .downcast_buffer_payload::<Buffer>(operation.inputs()[1].buffer())?
-            .clone();
-        let output = access
-            .downcast_buffer_payload::<Buffer>(operation.outputs()[0].buffer())?
-            .clone();
-        let descriptor = RmsNormDescriptor::from_validated_semantic(
-            Arc::clone(operation.descriptor()),
-            activation.binding(operation.inputs()[0].view().clone()),
-            raw_scale.binding(operation.inputs()[1].view().clone()),
-            output.binding(operation.outputs()[0].view().clone()),
-        )
-        .map_err(map_backend_error)?;
-        self.state.ensure_open()?;
-        self.backend
-            .prepare_rms_norm(&self.context, descriptor)
-            .map(AdapterResource::new)
-            .map_err(map_backend_error)
+        let prepared = match operation.descriptor().kind() {
+            sllm_core::SemanticOpKind::RmsNorm => {
+                let activation = access
+                    .downcast_buffer_payload::<Buffer>(operation.inputs()[0].buffer())?
+                    .clone();
+                let raw_scale = access
+                    .downcast_buffer_payload::<Buffer>(operation.inputs()[1].buffer())?
+                    .clone();
+                let output = access
+                    .downcast_buffer_payload::<Buffer>(operation.outputs()[0].buffer())?
+                    .clone();
+                let descriptor = RmsNormDescriptor::from_validated_semantic(
+                    Arc::clone(operation.descriptor()),
+                    activation.binding(operation.inputs()[0].view().clone()),
+                    raw_scale.binding(operation.inputs()[1].view().clone()),
+                    output.binding(operation.outputs()[0].view().clone()),
+                )
+                .map_err(map_backend_error)?;
+                self.state.ensure_open()?;
+                HipPreparedPlan::RmsNorm(
+                    self.backend
+                        .prepare_rms_norm(&self.context, descriptor)
+                        .map_err(map_backend_error)?,
+                )
+            }
+            sllm_core::SemanticOpKind::Copy
+            | sllm_core::SemanticOpKind::Add
+            | sllm_core::SemanticOpKind::SiluMul
+            | sllm_core::SemanticOpKind::SigmoidMul => {
+                let mut inputs = Vec::with_capacity(operation.inputs().len());
+                for input in operation.inputs() {
+                    let buffer = access
+                        .downcast_buffer_payload::<Buffer>(input.buffer())?
+                        .clone();
+                    inputs.push(buffer.binding(input.view().clone()));
+                }
+                let output_binding = &operation.outputs()[0];
+                let output = access
+                    .downcast_buffer_payload::<Buffer>(output_binding.buffer())?
+                    .clone();
+                let descriptor = ElementwiseDescriptor::from_validated_semantic(
+                    Arc::clone(operation.descriptor()),
+                    inputs,
+                    output.binding(output_binding.view().clone()),
+                )
+                .map_err(map_backend_error)?;
+                self.state.ensure_open()?;
+                HipPreparedPlan::Elementwise(
+                    self.backend
+                        .prepare_elementwise(&self.context, descriptor)
+                        .map_err(map_backend_error)?,
+                )
+            }
+            sllm_core::SemanticOpKind::Embedding => {
+                let weight = access
+                    .downcast_buffer_payload::<Buffer>(operation.inputs()[0].buffer())?
+                    .clone();
+                let token_ids = access
+                    .downcast_buffer_payload::<Buffer>(operation.inputs()[1].buffer())?
+                    .clone();
+                let output = access
+                    .downcast_buffer_payload::<Buffer>(operation.outputs()[0].buffer())?
+                    .clone();
+                let descriptor = EmbeddingDescriptor::from_validated_semantic(
+                    Arc::clone(operation.descriptor()),
+                    weight.binding(operation.inputs()[0].view().clone()),
+                    token_ids.binding(operation.inputs()[1].view().clone()),
+                    output.binding(operation.outputs()[0].view().clone()),
+                )
+                .map_err(map_backend_error)?;
+                self.state.ensure_open()?;
+                HipPreparedPlan::Embedding(
+                    self.backend
+                        .prepare_embedding(&self.context, descriptor)
+                        .map_err(map_backend_error)?,
+                )
+            }
+            sllm_core::SemanticOpKind::Matmul => {
+                let activation = access
+                    .downcast_buffer_payload::<Buffer>(operation.inputs()[0].buffer())?
+                    .clone();
+                let weight = access
+                    .downcast_buffer_payload::<Buffer>(operation.inputs()[1].buffer())?
+                    .clone();
+                let output = access
+                    .downcast_buffer_payload::<Buffer>(operation.outputs()[0].buffer())?
+                    .clone();
+                let descriptor = MatmulDescriptor::from_validated_semantic(
+                    Arc::clone(operation.descriptor()),
+                    activation.binding(operation.inputs()[0].view().clone()),
+                    weight.binding(operation.inputs()[1].view().clone()),
+                    output.binding(operation.outputs()[0].view().clone()),
+                )
+                .map_err(map_backend_error)?;
+                self.state.ensure_open()?;
+                HipPreparedPlan::Matmul(
+                    self.backend
+                        .prepare_matmul(&self.context, descriptor)
+                        .map_err(map_backend_error)?,
+                )
+            }
+            sllm_core::SemanticOpKind::AttentionPreprocess => {
+                let packed_q_gate = access
+                    .downcast_buffer_payload::<Buffer>(operation.inputs()[0].buffer())?
+                    .clone();
+                let k = access
+                    .downcast_buffer_payload::<Buffer>(operation.inputs()[1].buffer())?
+                    .clone();
+                let q_raw_scale = access
+                    .downcast_buffer_payload::<Buffer>(operation.inputs()[2].buffer())?
+                    .clone();
+                let k_raw_scale = access
+                    .downcast_buffer_payload::<Buffer>(operation.inputs()[3].buffer())?
+                    .clone();
+                let positions_binding = &operation.inputs()[4];
+                let positions = access
+                    .downcast_buffer_payload::<Buffer>(positions_binding.buffer())?
+                    .clone();
+                let q_output_binding = &operation.outputs()[0];
+                let gate_output_binding = &operation.outputs()[1];
+                let k_output_binding = &operation.outputs()[2];
+                let q_output = access
+                    .downcast_buffer_payload::<Buffer>(q_output_binding.buffer())?
+                    .clone();
+                let gate_output = access
+                    .downcast_buffer_payload::<Buffer>(gate_output_binding.buffer())?
+                    .clone();
+                let k_output = access
+                    .downcast_buffer_payload::<Buffer>(k_output_binding.buffer())?
+                    .clone();
+                let descriptor = AttentionPreprocessDescriptor::from_validated_semantic(
+                    Arc::clone(operation.descriptor()),
+                    packed_q_gate.binding(operation.inputs()[0].view().clone()),
+                    k.binding(operation.inputs()[1].view().clone()),
+                    q_raw_scale.binding(operation.inputs()[2].view().clone()),
+                    k_raw_scale.binding(operation.inputs()[3].view().clone()),
+                    positions.binding(positions_binding.view().clone()),
+                    q_output.binding(q_output_binding.view().clone()),
+                    gate_output.binding(gate_output_binding.view().clone()),
+                    k_output.binding(k_output_binding.view().clone()),
+                )
+                .map_err(map_backend_error)?;
+                self.state.ensure_open()?;
+                HipPreparedPlan::AttentionPreprocess(
+                    self.backend
+                        .prepare_attention_preprocess(&self.context, descriptor)
+                        .map_err(map_backend_error)?,
+                )
+            }
+        };
+        Ok(AdapterResource::new(prepared))
     }
 
     fn submit(
@@ -319,18 +580,54 @@ impl ExecutionSessionAdapter for HipExecutionSession {
     ) -> Result<(Box<dyn ExecutionSubmissionAdapter>, DispatchEvidence), ExecutionError> {
         self.state.ensure_open()?;
         let plan = access
-            .downcast_prepared_payload::<PreparedRmsNorm>(prepared)?
+            .downcast_prepared_payload::<HipPreparedPlan>(prepared)?
             .clone();
         let queue = access.downcast_queue_payload::<Queue>(queue)?.clone();
         let ticket = self.state.acquire_active()?;
-        let (submission, dispatch) = plan.execute(&queue).map_err(map_backend_error)?;
+        let (submission, dispatch) = match plan {
+            HipPreparedPlan::RmsNorm(plan) => {
+                let (submission, dispatch) = plan.execute(&queue).map_err(map_backend_error)?;
+                (
+                    HipSemanticSubmission::RmsNorm(submission),
+                    dispatch_from_rmsnorm(dispatch),
+                )
+            }
+            HipPreparedPlan::Elementwise(plan) => {
+                let (submission, dispatch) = plan.execute(&queue).map_err(map_backend_error)?;
+                (
+                    HipSemanticSubmission::Elementwise(submission),
+                    dispatch_from_elementwise(dispatch),
+                )
+            }
+            HipPreparedPlan::Embedding(plan) => {
+                let (submission, dispatch) = plan.execute(&queue).map_err(map_backend_error)?;
+                (
+                    HipSemanticSubmission::Embedding(submission),
+                    dispatch_from_embedding(dispatch),
+                )
+            }
+            HipPreparedPlan::Matmul(plan) => {
+                let (submission, dispatch) = plan.execute(&queue).map_err(map_backend_error)?;
+                (
+                    HipSemanticSubmission::Matmul(submission),
+                    dispatch_from_matmul(dispatch),
+                )
+            }
+            HipPreparedPlan::AttentionPreprocess(plan) => {
+                let (submission, dispatch) = plan.execute(&queue).map_err(map_backend_error)?;
+                (
+                    HipSemanticSubmission::AttentionPreprocess(submission),
+                    dispatch_from_attention_preprocess(dispatch),
+                )
+            }
+        };
         Ok((
             Box::new(HipSubmission {
                 submission,
                 queue,
                 _ticket: ticket,
             }),
-            dispatch_from_hip(dispatch),
+            dispatch,
         ))
     }
 
@@ -401,8 +698,47 @@ impl ExecutionSessionAdapter for HipExecutionSession {
     }
 }
 
+#[derive(Clone)]
+enum HipPreparedPlan {
+    RmsNorm(PreparedRmsNorm),
+    Elementwise(PreparedElementwise),
+    Embedding(PreparedEmbedding),
+    Matmul(PreparedMatmul),
+    AttentionPreprocess(PreparedAttentionPreprocess),
+}
+
+enum HipSemanticSubmission {
+    RmsNorm(RmsNormSubmission),
+    Elementwise(ElementwiseSubmission),
+    Embedding(EmbeddingSubmission),
+    Matmul(MatmulSubmission),
+    AttentionPreprocess(AttentionPreprocessSubmission),
+}
+
+impl HipSemanticSubmission {
+    fn query(&mut self) -> Result<CompletionState, RuntimeError> {
+        match self {
+            Self::RmsNorm(submission) => submission.query(),
+            Self::Elementwise(submission) => submission.query(),
+            Self::Embedding(submission) => submission.query(),
+            Self::Matmul(submission) => submission.query(),
+            Self::AttentionPreprocess(submission) => submission.query(),
+        }
+    }
+
+    fn wait(&mut self, timeout: Duration) -> Result<CompletionState, RuntimeError> {
+        match self {
+            Self::RmsNorm(submission) => submission.wait(timeout),
+            Self::Elementwise(submission) => submission.wait(timeout),
+            Self::Embedding(submission) => submission.wait(timeout),
+            Self::Matmul(submission) => submission.wait(timeout),
+            Self::AttentionPreprocess(submission) => submission.wait(timeout),
+        }
+    }
+}
+
 struct HipSubmission {
-    submission: RmsNormSubmission,
+    submission: HipSemanticSubmission,
     queue: Queue,
     _ticket: ActiveOperation,
 }
@@ -449,6 +785,49 @@ impl ExecutionSubmissionAdapter for HipSubmission {
 struct HipTransfer {
     completion: Completion,
     _ticket: ActiveOperation,
+}
+
+struct HipKvSubmission {
+    completion: KvAppendCompletion,
+    _ticket: ActiveOperation,
+}
+
+struct HipCausalAttentionSubmission {
+    completion: CausalAttentionCompletion,
+    _evidence: CausalAttentionEvidence,
+    _ticket: ActiveOperation,
+}
+
+impl ExecutionCausalAttentionSubmissionAdapter for HipCausalAttentionSubmission {
+    fn query(&mut self) -> Result<ExecutionState, ExecutionError> {
+        self.completion
+            .query()
+            .map(map_completion_state)
+            .map_err(map_async_error)
+    }
+
+    fn wait(&mut self, timeout: Duration) -> Result<ExecutionState, ExecutionError> {
+        self.completion
+            .wait(timeout)
+            .map(map_completion_state)
+            .map_err(map_async_error)
+    }
+}
+
+impl ExecutionKvStateSubmissionAdapter for HipKvSubmission {
+    fn query(&mut self) -> Result<ExecutionState, ExecutionError> {
+        self.completion
+            .query()
+            .map(map_completion_state)
+            .map_err(map_async_error)
+    }
+
+    fn wait(&mut self, timeout: Duration) -> Result<ExecutionState, ExecutionError> {
+        self.completion
+            .wait(timeout)
+            .map(map_completion_state)
+            .map_err(map_async_error)
+    }
 }
 
 impl ExecutionTransferAdapter for HipTransfer {
@@ -508,7 +887,7 @@ fn map_backend_error(error: RuntimeError) -> ExecutionError {
             backend: HIP_BACKEND_NAME,
             reason: error.message().to_owned(),
         },
-        RuntimeStatus::Busy => ExecutionError::Busy,
+        RuntimeStatus::Busy | RuntimeStatus::CausalAttentionStateBusy => ExecutionError::Busy,
         RuntimeStatus::NotReady => ExecutionError::NotReady,
         _ => ExecutionError::BackendStatus {
             status: error.status().raw(),
@@ -528,7 +907,7 @@ fn map_async_error(error: RuntimeError) -> ExecutionError {
     }
 }
 
-fn dispatch_from_hip(dispatch: RmsNormDispatchInfo) -> DispatchEvidence {
+fn dispatch_from_rmsnorm(dispatch: RmsNormDispatchInfo) -> DispatchEvidence {
     DispatchEvidence {
         abi_version: dispatch.abi_version,
         info_version: dispatch.info_version,
@@ -548,10 +927,115 @@ fn dispatch_from_hip(dispatch: RmsNormDispatchInfo) -> DispatchEvidence {
     }
 }
 
+fn dispatch_from_elementwise(dispatch: ElementwiseDispatchInfo) -> DispatchEvidence {
+    DispatchEvidence {
+        abi_version: dispatch.abi_version,
+        info_version: dispatch.info_version,
+        dispatch_id: dispatch.dispatch_id,
+        dispatch_count: dispatch.dispatch_count,
+        kernel_id: dispatch.kernel_id,
+        workgroup_size_x: dispatch.workgroup_size_x,
+        grid_size_x: dispatch.grid_size_x,
+        row_count: 1,
+        normalized_size: dispatch.element_count,
+        backend: dispatch.backend,
+        fallback_allowed: dispatch.fallback_allowed,
+        fallback_used: dispatch.fallback_used,
+        kernel_symbol: dispatch.kernel_symbol,
+        device_symbol: dispatch.device_symbol,
+        target: dispatch.gcn_arch_name,
+    }
+}
+
+fn dispatch_from_embedding(dispatch: EmbeddingDispatchInfo) -> DispatchEvidence {
+    DispatchEvidence {
+        abi_version: dispatch.abi_version,
+        info_version: dispatch.info_version,
+        dispatch_id: dispatch.dispatch_id,
+        dispatch_count: dispatch.dispatch_count,
+        kernel_id: dispatch.kernel_id,
+        workgroup_size_x: dispatch.workgroup_size_x,
+        grid_size_x: dispatch.grid_size_x,
+        row_count: dispatch.token_count,
+        normalized_size: dispatch.hidden_size,
+        backend: dispatch.backend,
+        fallback_allowed: dispatch.fallback_allowed,
+        fallback_used: dispatch.fallback_used,
+        kernel_symbol: dispatch.kernel_symbol,
+        device_symbol: dispatch.device_symbol,
+        target: dispatch.gcn_arch_name,
+    }
+}
+
+fn dispatch_from_matmul(dispatch: MatmulDispatchInfo) -> DispatchEvidence {
+    DispatchEvidence {
+        abi_version: dispatch.abi_version,
+        info_version: dispatch.info_version,
+        dispatch_id: dispatch.dispatch_id,
+        dispatch_count: dispatch.dispatch_count,
+        kernel_id: dispatch.kernel_id,
+        workgroup_size_x: dispatch.workgroup_size_x,
+        grid_size_x: dispatch.grid_size_x,
+        row_count: dispatch.m,
+        normalized_size: dispatch.output_elements,
+        backend: dispatch.backend,
+        fallback_allowed: dispatch.fallback_allowed,
+        fallback_used: dispatch.fallback_used,
+        kernel_symbol: dispatch.kernel_symbol,
+        device_symbol: dispatch.device_symbol,
+        target: dispatch.gcn_arch_name,
+    }
+}
+
+fn dispatch_from_attention_preprocess(
+    dispatch: AttentionPreprocessDispatchInfo,
+) -> DispatchEvidence {
+    DispatchEvidence {
+        abi_version: dispatch.abi_version,
+        info_version: dispatch.info_version,
+        dispatch_id: dispatch.dispatch_id,
+        dispatch_count: dispatch.dispatch_count,
+        kernel_id: dispatch.kernel_id,
+        workgroup_size_x: dispatch.workgroup_size_x,
+        grid_size_x: dispatch.grid_size_x,
+        row_count: dispatch.m,
+        normalized_size: 256,
+        backend: dispatch.backend,
+        fallback_allowed: dispatch.fallback_allowed,
+        fallback_used: dispatch.fallback_used,
+        kernel_symbol: dispatch.kernel_symbol,
+        device_symbol: dispatch.device_symbol,
+        target: dispatch.gcn_arch_name,
+    }
+}
+
+fn dispatch_from_causal_attention(dispatch: CausalAttentionEvidence) -> DispatchEvidence {
+    DispatchEvidence {
+        abi_version: sys::SLLM_HIP_ABI_VERSION,
+        info_version: sys::SLLM_HIP_CAUSAL_ATTENTION_DISPATCH_INFO_VERSION,
+        dispatch_id: dispatch.dispatch_id,
+        dispatch_count: dispatch.dispatch_count,
+        kernel_id: dispatch.kernel_id,
+        workgroup_size_x: dispatch.workgroup_size_x,
+        grid_size_x: dispatch.grid_size_x,
+        row_count: dispatch.query_count,
+        normalized_size: dispatch.head_dim as u64,
+        backend: sys::SLLM_BACKEND_HIP,
+        fallback_allowed: dispatch.fallback_allowed,
+        fallback_used: dispatch.fallback_used,
+        kernel_symbol: dispatch.kernel_symbol,
+        device_symbol: dispatch.device_symbol,
+        target: dispatch.target,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sllm_core::{Backend, ExecutionSessionRequest};
+    use sllm_core::{
+        AttentionPreprocessContract, AttentionPreprocessPositionMode, Backend, DType,
+        ExecutionSessionRequest, SemanticOpDescriptor, TensorView,
+    };
     use std::sync::Barrier;
     use std::thread;
 
@@ -638,5 +1122,78 @@ mod tests {
         drop(ticket);
         assert_eq!(state.active_count(), 0);
         assert_eq!(state.begin_shutdown(), Ok(()));
+    }
+
+    fn attention_descriptor() -> SemanticOpDescriptor {
+        let contract = AttentionPreprocessContract::new_qwen3_5(
+            AttentionPreprocessPositionMode::DecodeContinuation,
+            3,
+            17,
+        )
+        .expect("valid attention preprocess contract");
+        SemanticOpDescriptor::new_attention_preprocess(
+            vec![
+                TensorView::contiguous(DType::Bf16, &[17, 16, 512]).unwrap(),
+                TensorView::contiguous(DType::Bf16, &[17, 4, 256]).unwrap(),
+                TensorView::contiguous(DType::Bf16, &[16, 256]).unwrap(),
+                TensorView::contiguous(DType::Bf16, &[4, 256]).unwrap(),
+                TensorView::contiguous(DType::I32, &[17]).unwrap(),
+            ],
+            vec![
+                TensorView::contiguous(DType::Bf16, &[17, 16, 256]).unwrap(),
+                TensorView::contiguous(DType::Bf16, &[17, 16, 256]).unwrap(),
+                TensorView::contiguous(DType::Bf16, &[17, 4, 256]).unwrap(),
+            ],
+            contract,
+        )
+        .expect("valid attention preprocess descriptor")
+    }
+
+    #[test]
+    fn supports_attention_preprocess_after_owned_path_is_registered() {
+        let adapter = HipExecutionSession {
+            state: Arc::new(HipSessionState::new()),
+            backend: HipBackend { _private: () },
+            context: Context::test_without_native(),
+        };
+        assert_eq!(
+            adapter.supports(&attention_descriptor()),
+            PrepareSupport::Supported
+        );
+    }
+
+    #[test]
+    fn attention_dispatch_mapping_uses_m_rows_and_fixed_256_normalized_size() {
+        let dispatch = dispatch_from_attention_preprocess(AttentionPreprocessDispatchInfo {
+            abi_version: 1,
+            info_version: 1,
+            dispatch_id: 11,
+            dispatch_count: 1,
+            kernel_id: 1,
+            workgroup_size_x: 1,
+            grid_size_x: 340,
+            m: 17,
+            q_heads: 16,
+            k_heads: 4,
+            q_head_dim: 256,
+            k_head_dim: 256,
+            rotary_dim: 64,
+            start_position: 255,
+            backend: crate::sys::SLLM_BACKEND_HIP,
+            fallback_allowed: false,
+            fallback_used: false,
+            kernel_symbol: "attention_preprocess.headwise_norm_rope.v1".to_owned(),
+            device_symbol: "sllm_attention_preprocess_headwise_norm_rope_v1".to_owned(),
+            gcn_arch_name: "gfx1201".to_owned(),
+        });
+        assert_eq!(dispatch.row_count, 17);
+        assert_eq!(dispatch.normalized_size, 256);
+        assert_eq!(dispatch.target, "gfx1201");
+        assert!(!dispatch.fallback_allowed);
+        assert!(!dispatch.fallback_used);
+        assert_eq!(
+            dispatch.kernel_symbol,
+            "attention_preprocess.headwise_norm_rope.v1"
+        );
     }
 }

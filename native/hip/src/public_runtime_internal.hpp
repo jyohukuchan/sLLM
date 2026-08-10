@@ -367,6 +367,361 @@ struct AccountingState final {
     output.child_count -= output_count;
     return true;
   }
+
+  static bool reserve_kv_state(AccountingState &context,
+                               AccountingState &key_buffer,
+                               AccountingState &value_buffer) noexcept {
+    if (!can_increment(context.child_count) ||
+        !can_increment(context.lifetime_guards) ||
+        !can_increment(key_buffer.child_count) ||
+        !can_increment(value_buffer.child_count)) {
+      return false;
+    }
+    ++context.child_count;
+    ++context.lifetime_guards;
+    ++key_buffer.child_count;
+    ++value_buffer.child_count;
+    return true;
+  }
+
+  static bool release_kv_state(AccountingState &context,
+                               AccountingState &key_buffer,
+                               AccountingState &value_buffer) noexcept {
+    if (context.child_count == 0U || context.lifetime_guards == 0U ||
+        key_buffer.child_count == 0U || value_buffer.child_count == 0U) {
+      return false;
+    }
+    --context.child_count;
+    --context.lifetime_guards;
+    --key_buffer.child_count;
+    --value_buffer.child_count;
+    return true;
+  }
+
+  static bool reserve_kv_view(AccountingState &context,
+                              AccountingState &state) noexcept {
+    if (!can_increment(context.child_count) ||
+        !can_increment(context.lifetime_guards) ||
+        !can_increment(state.child_count)) {
+      return false;
+    }
+    ++context.child_count;
+    ++context.lifetime_guards;
+    ++state.child_count;
+    return true;
+  }
+
+  static bool release_kv_view(AccountingState &context,
+                              AccountingState &state) noexcept {
+    if (context.child_count == 0U || context.lifetime_guards == 0U ||
+        state.child_count == 0U) {
+      return false;
+    }
+    --context.child_count;
+    --context.lifetime_guards;
+    --state.child_count;
+    return true;
+  }
+
+  static constexpr std::size_t kv_append_resource_count = 5U;
+
+  static void
+  kv_append_resource_multiplicities(AccountingState *const *const resources,
+                                    uint64_t *const multiplicities) noexcept {
+    for (std::size_t index = 0U; index != kv_append_resource_count; ++index) {
+      multiplicities[index] = 0U;
+    }
+    for (std::size_t index = 0U; index != kv_append_resource_count; ++index) {
+      std::size_t first = index;
+      for (std::size_t prior = 0U; prior != index; ++prior) {
+        if (resources[prior] == resources[index]) {
+          first = prior;
+          break;
+        }
+      }
+      ++multiplicities[first];
+    }
+  }
+
+  static bool reserve_kv_append(AccountingState &context,
+                                AccountingState &queue, AccountingState &state,
+                                AccountingState &key_input,
+                                AccountingState &value_input,
+                                AccountingState &key_buffer,
+                                AccountingState &value_buffer) noexcept {
+    AccountingState *const resources[] = {&state, &key_input, &value_input,
+                                          &key_buffer, &value_buffer};
+    uint64_t multiplicities[kv_append_resource_count] = {};
+    kv_append_resource_multiplicities(resources, multiplicities);
+    const auto can_add = [](const uint64_t value, const uint64_t amount) {
+      return amount <= std::numeric_limits<uint64_t>::max() - value;
+    };
+    for (std::size_t index = 0U; index != kv_append_resource_count; ++index) {
+      if (multiplicities[index] != 0U &&
+          (!can_add(resources[index]->active_submissions,
+                    multiplicities[index]) ||
+           !can_add(resources[index]->completion_references,
+                    multiplicities[index]))) {
+        return false;
+      }
+    }
+    if (!can_increment(queue.active_submissions) ||
+        !can_increment(queue.completion_references) ||
+        !can_increment(context.child_count) ||
+        !can_increment(context.lifetime_guards)) {
+      return false;
+    }
+    ++queue.active_submissions;
+    ++queue.completion_references;
+    ++context.child_count;
+    ++context.lifetime_guards;
+    for (std::size_t index = 0U; index != kv_append_resource_count; ++index) {
+      if (multiplicities[index] != 0U) {
+        resources[index]->active_submissions += multiplicities[index];
+        resources[index]->completion_references += multiplicities[index];
+      }
+    }
+    return true;
+  }
+
+  static bool release_kv_active(AccountingState &queue, AccountingState &state,
+                                AccountingState &key_input,
+                                AccountingState &value_input,
+                                AccountingState &key_buffer,
+                                AccountingState &value_buffer) noexcept {
+    AccountingState *const resources[] = {&state, &key_input, &value_input,
+                                          &key_buffer, &value_buffer};
+    uint64_t multiplicities[kv_append_resource_count] = {};
+    kv_append_resource_multiplicities(resources, multiplicities);
+    if (queue.active_submissions == 0U) {
+      return false;
+    }
+    for (std::size_t index = 0U; index != kv_append_resource_count; ++index) {
+      if (multiplicities[index] != 0U &&
+          resources[index]->active_submissions < multiplicities[index]) {
+        return false;
+      }
+    }
+    --queue.active_submissions;
+    for (std::size_t index = 0U; index != kv_append_resource_count; ++index) {
+      if (multiplicities[index] != 0U) {
+        resources[index]->active_submissions -= multiplicities[index];
+      }
+    }
+    return true;
+  }
+
+  static bool rollback_kv_append(AccountingState &context,
+                                 AccountingState &queue, AccountingState &state,
+                                 AccountingState &key_input,
+                                 AccountingState &value_input,
+                                 AccountingState &key_buffer,
+                                 AccountingState &value_buffer) noexcept {
+    AccountingState *const resources[] = {&state, &key_input, &value_input,
+                                          &key_buffer, &value_buffer};
+    uint64_t multiplicities[kv_append_resource_count] = {};
+    kv_append_resource_multiplicities(resources, multiplicities);
+    if (queue.active_submissions == 0U || queue.completion_references == 0U ||
+        context.child_count == 0U || context.lifetime_guards == 0U) {
+      return false;
+    }
+    for (std::size_t index = 0U; index != kv_append_resource_count; ++index) {
+      if (multiplicities[index] != 0U &&
+          (resources[index]->active_submissions < multiplicities[index] ||
+           resources[index]->completion_references < multiplicities[index])) {
+        return false;
+      }
+    }
+    --queue.active_submissions;
+    --queue.completion_references;
+    --context.child_count;
+    --context.lifetime_guards;
+    for (std::size_t index = 0U; index != kv_append_resource_count; ++index) {
+      if (multiplicities[index] != 0U) {
+        resources[index]->active_submissions -= multiplicities[index];
+        resources[index]->completion_references -= multiplicities[index];
+      }
+    }
+    return true;
+  }
+
+  static bool release_kv_completion(
+      AccountingState &context, AccountingState &queue, AccountingState &state,
+      AccountingState &key_input, AccountingState &value_input,
+      AccountingState &key_buffer, AccountingState &value_buffer) noexcept {
+    AccountingState *const resources[] = {&state, &key_input, &value_input,
+                                          &key_buffer, &value_buffer};
+    uint64_t multiplicities[kv_append_resource_count] = {};
+    kv_append_resource_multiplicities(resources, multiplicities);
+    if (queue.completion_references == 0U || context.child_count == 0U ||
+        context.lifetime_guards == 0U) {
+      return false;
+    }
+    for (std::size_t index = 0U; index != kv_append_resource_count; ++index) {
+      if (multiplicities[index] != 0U &&
+          resources[index]->completion_references < multiplicities[index]) {
+        return false;
+      }
+    }
+    --queue.completion_references;
+    --context.child_count;
+    --context.lifetime_guards;
+    for (std::size_t index = 0U; index != kv_append_resource_count; ++index) {
+      if (multiplicities[index] != 0U) {
+        resources[index]->completion_references -= multiplicities[index];
+      }
+    }
+    return true;
+  }
+
+  static bool reserve_causal_attention(AccountingState &context,
+                                       AccountingState &queue,
+                                       AccountingState &state,
+                                       AccountingState &query,
+                                       AccountingState &output) noexcept {
+    AccountingState *const resources[] = {&state, &query, &output};
+    uint64_t multiplicities[] = {1U, 1U, 1U};
+    for (std::size_t index = 0U; index != 3U; ++index) {
+      for (std::size_t prior = 0U; prior != index; ++prior) {
+        if (resources[prior] == resources[index]) {
+          multiplicities[prior] += multiplicities[index];
+          multiplicities[index] = 0U;
+          break;
+        }
+      }
+    }
+    const auto can_add = [](const uint64_t value, const uint64_t amount) {
+      return amount <= std::numeric_limits<uint64_t>::max() - value;
+    };
+    if (!can_increment(queue.active_submissions) ||
+        !can_increment(queue.completion_references) ||
+        !can_increment(context.child_count) ||
+        !can_increment(context.lifetime_guards)) {
+      return false;
+    }
+    for (std::size_t index = 0U; index != 3U; ++index) {
+      if (multiplicities[index] != 0U &&
+          (!can_add(resources[index]->active_submissions,
+                    multiplicities[index]) ||
+           !can_add(resources[index]->completion_references,
+                    multiplicities[index]))) {
+        return false;
+      }
+    }
+    ++queue.active_submissions;
+    ++queue.completion_references;
+    ++context.child_count;
+    ++context.lifetime_guards;
+    for (std::size_t index = 0U; index != 3U; ++index) {
+      resources[index]->active_submissions += multiplicities[index];
+      resources[index]->completion_references += multiplicities[index];
+    }
+    return true;
+  }
+
+  static bool release_causal_active(AccountingState &queue,
+                                    AccountingState &state,
+                                    AccountingState &query,
+                                    AccountingState &output) noexcept {
+    AccountingState *const resources[] = {&state, &query, &output};
+    uint64_t multiplicities[] = {1U, 1U, 1U};
+    for (std::size_t index = 0U; index != 3U; ++index) {
+      for (std::size_t prior = 0U; prior != index; ++prior) {
+        if (resources[prior] == resources[index]) {
+          multiplicities[prior] += multiplicities[index];
+          multiplicities[index] = 0U;
+          break;
+        }
+      }
+    }
+    if (queue.active_submissions == 0U) {
+      return false;
+    }
+    for (std::size_t index = 0U; index != 3U; ++index) {
+      if (multiplicities[index] != 0U &&
+          resources[index]->active_submissions < multiplicities[index]) {
+        return false;
+      }
+    }
+    --queue.active_submissions;
+    for (std::size_t index = 0U; index != 3U; ++index) {
+      resources[index]->active_submissions -= multiplicities[index];
+    }
+    return true;
+  }
+
+  static bool rollback_causal_attention(AccountingState &context,
+                                        AccountingState &queue,
+                                        AccountingState &state,
+                                        AccountingState &query,
+                                        AccountingState &output) noexcept {
+    AccountingState *const resources[] = {&state, &query, &output};
+    uint64_t multiplicities[] = {1U, 1U, 1U};
+    for (std::size_t index = 0U; index != 3U; ++index) {
+      for (std::size_t prior = 0U; prior != index; ++prior) {
+        if (resources[prior] == resources[index]) {
+          multiplicities[prior] += multiplicities[index];
+          multiplicities[index] = 0U;
+          break;
+        }
+      }
+    }
+    if (queue.active_submissions == 0U || queue.completion_references == 0U ||
+        context.child_count == 0U || context.lifetime_guards == 0U) {
+      return false;
+    }
+    for (std::size_t index = 0U; index != 3U; ++index) {
+      if (multiplicities[index] != 0U &&
+          (resources[index]->active_submissions < multiplicities[index] ||
+           resources[index]->completion_references < multiplicities[index])) {
+        return false;
+      }
+    }
+    --queue.active_submissions;
+    --queue.completion_references;
+    --context.child_count;
+    --context.lifetime_guards;
+    for (std::size_t index = 0U; index != 3U; ++index) {
+      resources[index]->active_submissions -= multiplicities[index];
+      resources[index]->completion_references -= multiplicities[index];
+    }
+    return true;
+  }
+
+  static bool release_causal_completion(AccountingState &context,
+                                        AccountingState &queue,
+                                        AccountingState &state,
+                                        AccountingState &query,
+                                        AccountingState &output) noexcept {
+    AccountingState *const resources[] = {&state, &query, &output};
+    uint64_t multiplicities[] = {1U, 1U, 1U};
+    for (std::size_t index = 0U; index != 3U; ++index) {
+      for (std::size_t prior = 0U; prior != index; ++prior) {
+        if (resources[prior] == resources[index]) {
+          multiplicities[prior] += multiplicities[index];
+          multiplicities[index] = 0U;
+          break;
+        }
+      }
+    }
+    if (queue.completion_references == 0U || context.child_count == 0U ||
+        context.lifetime_guards == 0U) {
+      return false;
+    }
+    for (std::size_t index = 0U; index != 3U; ++index) {
+      if (multiplicities[index] != 0U &&
+          resources[index]->completion_references < multiplicities[index]) {
+        return false;
+      }
+    }
+    --queue.completion_references;
+    --context.child_count;
+    --context.lifetime_guards;
+    for (std::size_t index = 0U; index != 3U; ++index) {
+      resources[index]->completion_references -= multiplicities[index];
+    }
+    return true;
+  }
 };
 
 /* Completion ownership gate used by the native Completion state machine.  A

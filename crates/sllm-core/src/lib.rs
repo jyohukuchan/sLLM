@@ -8,6 +8,7 @@ mod dtype;
 mod execution;
 mod fake;
 mod handles;
+mod kv_state;
 mod model;
 mod op;
 mod registry;
@@ -20,31 +21,40 @@ pub use backend::{
 };
 pub use dtype::{DType, Encoding, EncodingError};
 pub use execution::{
-    AdapterResource, BoundSemanticOp, BufferRange, BufferReadback, DispatchEvidence,
-    ExecutionAdapterAccess, ExecutionBuffer, ExecutionBufferId, ExecutionError, ExecutionQueue,
-    ExecutionQueueId, ExecutionReadbackAdapter, ExecutionSession, ExecutionSessionAdapter,
-    ExecutionSessionId, ExecutionSessionRequest, ExecutionState, ExecutionSubmissionAdapter,
-    ExecutionTransferAdapter, OwnedTensorBinding, PrepareSupport, PreparedOperation,
-    PreparedOperationId, Readback, ShutdownReport, Submission, Transfer,
+    AdapterResource, BoundSemanticOp, BufferRange, BufferReadback, CausalAttentionSubmission,
+    DispatchEvidence, ExecutionAdapterAccess, ExecutionBuffer, ExecutionBufferId,
+    ExecutionCausalAttentionSubmissionAdapter, ExecutionError, ExecutionKvStateSubmissionAdapter,
+    ExecutionQueue, ExecutionQueueId, ExecutionReadbackAdapter, ExecutionSession,
+    ExecutionSessionAdapter, ExecutionSessionId, ExecutionSessionRequest, ExecutionState,
+    ExecutionSubmissionAdapter, ExecutionTransferAdapter, KvState, KvStateAppendSubmission,
+    KvStateId, OwnedTensorBinding, PrepareSupport, PreparedOperation, PreparedOperationId,
+    Readback, ShutdownReport, Submission, Transfer,
 };
 pub use fake::{FakeBackend, MAX_FAKE_MATERIALIZATION_BYTES};
 pub use handles::{
     AccessMode, BufferHandle, BufferUse, CompletionLease, EventHandle, InFlightSubmission,
     QueueHandle,
 };
+pub use kv_state::{
+    CausalAttentionDescriptor, KvStateAppendRequest, KvStateDescriptor, KvStateError,
+    KvStateLayout, KvStateSnapshot,
+};
 pub use model::{
     AccumulationDType, BaseModel, BudgetBoundary, ClassificationStatus, ComponentMetadata,
     ComponentStatus, ConfigEos, ExcludedFile, FrontendAssetKind, GenerationConfig,
     GenerationStopPolicyV1, LayerSchedule, LayerType, LicenseInfo, LockedFile, LockedModel,
     MaxNewTokensZero, ModelArchitecture, ModelError, ModelLock, NormalizationContract,
-    NormalizationKind, PromptEvaluation, ScaleMode, SliceContract, StopEvaluation, StopIdentity,
-    StopTokenHandling, TensorClassification, TensorContract, TensorDType, TensorDescriptor,
-    TextConfig, TokenizerContract, TokenizerEos, VerifiedCache, VerifiedFile, fingerprint_for_json,
-    parse_model_lock, read_model_lock, validate_model_config, verify_model_cache,
+    NormalizationKind, PromptEvaluation, RopeParameters, RopeType, ScaleMode, SliceContract,
+    StopEvaluation, StopIdentity, StopTokenHandling, TensorClassification, TensorContract,
+    TensorDType, TensorDescriptor, TextConfig, TokenizerContract, TokenizerEos, VerifiedCache,
+    VerifiedFile, fingerprint_for_json, parse_model_lock, read_model_lock, validate_model_config,
+    verify_model_cache,
 };
 pub use op::{
-    OpError, RmsNormAliasPolicy, RmsNormContract, RmsNormEpsilon, RmsNormScaleMode, RmsNormTensor,
-    SemanticOp, SemanticOpDescriptor, SemanticOpKind,
+    AttentionPreprocessContract, AttentionPreprocessPacking, AttentionPreprocessPositionMode,
+    AttentionPreprocessTensor, ElementwiseTensor, OpError, RmsNormAliasPolicy, RmsNormContract,
+    RmsNormEpsilon, RmsNormScaleMode, RmsNormTensor, SemanticOp, SemanticOpDescriptor,
+    SemanticOpKind,
 };
 pub use registry::{BACKEND_REGISTRY, BackendRegistration, backend_registry};
 pub use tensor::{TensorError, TensorView};
@@ -267,8 +277,8 @@ mod tests {
 
     #[test]
     fn fake_backend_never_executes_numerical_operations() {
-        let input = TensorView::contiguous(DType::F32, &[3, 5]).expect("valid input");
-        let output = TensorView::contiguous(DType::F32, &[3, 5]).expect("valid output");
+        let input = TensorView::contiguous(DType::Bf16, &[3, 5]).expect("valid input");
+        let output = TensorView::contiguous(DType::Bf16, &[3, 5]).expect("valid output");
         let operation = SemanticOp::new(
             SemanticOpKind::Add,
             vec![input.clone(), input],
@@ -326,17 +336,256 @@ mod tests {
             ),
             Err(OpError::MatmulShapeMismatch)
         ));
+        assert!(matches!(
+            SemanticOpDescriptor::new(
+                SemanticOpKind::Copy,
+                vec![TensorView::contiguous(DType::F32, &[2, 2]).expect("valid tensor")],
+                vec![TensorView::contiguous(DType::F32, &[2, 2]).expect("valid tensor")],
+            ),
+            Err(OpError::ElementwiseUnsupportedDType { .. })
+        ));
         let valid_copy = SemanticOpDescriptor::new(
             SemanticOpKind::Copy,
-            vec![TensorView::contiguous(DType::F32, &[2, 2]).expect("valid tensor")],
-            vec![TensorView::contiguous(DType::F32, &[2, 2]).expect("valid tensor")],
+            vec![TensorView::contiguous(DType::Bf16, &[2, 2]).expect("valid tensor")],
+            vec![TensorView::contiguous(DType::Bf16, &[2, 2]).expect("valid tensor")],
         )
         .expect("valid copy descriptor");
         assert_eq!(valid_copy.arity(), (1, 1));
         assert_eq!(SemanticOpKind::Copy.arity(), (1, 1));
         assert_eq!(SemanticOpKind::Add.arity(), (2, 1));
+        assert_eq!(SemanticOpKind::Embedding.arity(), (2, 1));
         assert_eq!(SemanticOpKind::Matmul.arity(), (2, 1));
+        assert_eq!(SemanticOpKind::SiluMul.arity(), (2, 1));
+        assert_eq!(SemanticOpKind::SigmoidMul.arity(), (2, 1));
         assert_eq!(SemanticOpKind::RmsNorm.arity(), (2, 1));
+    }
+
+    #[test]
+    fn kv_state_is_not_accidentally_added_to_semantic_op_kind() {
+        let semantic_kinds = [
+            SemanticOpKind::Copy,
+            SemanticOpKind::Add,
+            SemanticOpKind::Embedding,
+            SemanticOpKind::Matmul,
+            SemanticOpKind::SiluMul,
+            SemanticOpKind::SigmoidMul,
+            SemanticOpKind::RmsNorm,
+            SemanticOpKind::AttentionPreprocess,
+        ];
+        assert_eq!(semantic_kinds.len(), 8);
+        assert!(
+            semantic_kinds
+                .iter()
+                .all(|kind| !kind.name().contains("kv") && !kind.name().contains("state"))
+        );
+        assert_eq!(KvStateLayout::HEADS, 4);
+    }
+
+    #[test]
+    fn baseline_elementwise_rejects_scalar_zero_strided_dtype_and_encoding() {
+        let expect_copy_error = |view: TensorView, expected: OpError| {
+            assert_eq!(
+                SemanticOpDescriptor::new(SemanticOpKind::Copy, vec![view.clone()], vec![view],),
+                Err(expected)
+            );
+        };
+
+        expect_copy_error(
+            TensorView::contiguous(DType::Bf16, &[]).expect("representable scalar"),
+            OpError::ElementwiseRankZero {
+                kind: SemanticOpKind::Copy,
+                tensor: ElementwiseTensor::Input0,
+            },
+        );
+        expect_copy_error(
+            TensorView::contiguous(DType::Bf16, &[3, 0, 5]).expect("representable zero extent"),
+            OpError::ElementwiseZeroExtent {
+                kind: SemanticOpKind::Copy,
+                tensor: ElementwiseTensor::Input0,
+            },
+        );
+        expect_copy_error(
+            TensorView::new(DType::Bf16, Encoding::Unquantized, &[2, 3], &[4, 1], 0)
+                .expect("representable strided view"),
+            OpError::ElementwiseNonContiguous {
+                kind: SemanticOpKind::Copy,
+                tensor: ElementwiseTensor::Input0,
+            },
+        );
+        expect_copy_error(
+            TensorView::contiguous(DType::F16, &[7]).expect("representable f16 view"),
+            OpError::ElementwiseUnsupportedDType {
+                kind: SemanticOpKind::Copy,
+                tensor: ElementwiseTensor::Input0,
+                actual: DType::F16,
+            },
+        );
+        expect_copy_error(
+            TensorView::with_encoding(
+                DType::U8,
+                Encoding::Nvfp4 {
+                    block_size: 32,
+                    scale_dtype: DType::Bf16,
+                },
+                &[33],
+            )
+            .expect("representable encoded view"),
+            OpError::ElementwiseUnsupportedEncoding {
+                kind: SemanticOpKind::Copy,
+                tensor: ElementwiseTensor::Input0,
+                actual: Encoding::Nvfp4 {
+                    block_size: 32,
+                    scale_dtype: DType::Bf16,
+                },
+            },
+        );
+    }
+
+    #[test]
+    fn embedding_requires_bf16_weight_i32_ids_and_exact_output() {
+        let weight = TensorView::contiguous(DType::Bf16, &[7, 3]).unwrap();
+        let ids = TensorView::contiguous(DType::I32, &[2]).unwrap();
+        let output = TensorView::contiguous(DType::Bf16, &[2, 3]).unwrap();
+        let descriptor = SemanticOpDescriptor::new(
+            SemanticOpKind::Embedding,
+            vec![weight.clone(), ids.clone()],
+            vec![output],
+        )
+        .unwrap();
+        assert_eq!(descriptor.kind(), SemanticOpKind::Embedding);
+        assert!(!DType::I32.is_float());
+        assert_eq!(DType::I32.size_bytes(), 4);
+
+        assert_eq!(
+            SemanticOpDescriptor::new(
+                SemanticOpKind::Embedding,
+                vec![
+                    weight.clone(),
+                    TensorView::contiguous(DType::F32, &[2]).unwrap()
+                ],
+                vec![TensorView::contiguous(DType::Bf16, &[2, 3]).unwrap()],
+            ),
+            Err(OpError::EmbeddingTensorContractMismatch)
+        );
+        assert_eq!(
+            SemanticOpDescriptor::new(
+                SemanticOpKind::Embedding,
+                vec![weight.clone(), ids.clone()],
+                vec![TensorView::contiguous(DType::Bf16, &[2, 4]).unwrap()],
+            ),
+            Err(OpError::EmbeddingOutputShapeMismatch)
+        );
+        assert_eq!(
+            SemanticOpDescriptor::new(
+                SemanticOpKind::Embedding,
+                vec![weight, TensorView::contiguous(DType::I32, &[0]).unwrap()],
+                vec![TensorView::contiguous(DType::Bf16, &[0, 3]).unwrap()],
+            ),
+            Err(OpError::EmbeddingZeroExtent)
+        );
+    }
+
+    #[test]
+    fn matmul_and_silu_mul_fix_bf16_layout_shape_and_accumulation_boundary() {
+        let activation = TensorView::contiguous(DType::Bf16, &[3, 5]).unwrap();
+        let weight = TensorView::contiguous(DType::Bf16, &[7, 5]).unwrap();
+        let output = TensorView::contiguous(DType::Bf16, &[3, 7]).unwrap();
+        let descriptor = SemanticOpDescriptor::new(
+            SemanticOpKind::Matmul,
+            vec![activation.clone(), weight.clone()],
+            vec![output],
+        )
+        .unwrap();
+        assert_eq!(descriptor.kind(), SemanticOpKind::Matmul);
+
+        assert_eq!(
+            SemanticOpDescriptor::new(
+                SemanticOpKind::Matmul,
+                vec![activation.clone(), weight],
+                vec![TensorView::contiguous(DType::Bf16, &[3, 5]).unwrap()],
+            ),
+            Err(OpError::MatmulShapeMismatch)
+        );
+        assert_eq!(
+            SemanticOpDescriptor::new(
+                SemanticOpKind::Matmul,
+                vec![
+                    TensorView::contiguous(DType::F16, &[3, 5]).unwrap(),
+                    TensorView::contiguous(DType::Bf16, &[7, 5]).unwrap(),
+                ],
+                vec![TensorView::contiguous(DType::Bf16, &[3, 7]).unwrap()],
+            ),
+            Err(OpError::MatmulUnsupportedDType { actual: DType::F16 })
+        );
+
+        let gate = TensorView::contiguous(DType::Bf16, &[3, 17]).unwrap();
+        let silu_mul = SemanticOpDescriptor::new(
+            SemanticOpKind::SiluMul,
+            vec![gate.clone(), gate.clone()],
+            vec![gate],
+        )
+        .unwrap();
+        assert_eq!(silu_mul.kind(), SemanticOpKind::SiluMul);
+    }
+
+    #[test]
+    fn sigmoid_mul_is_distinct_and_freezes_output_gate_shape_and_o_proj_handoff() {
+        for m in [1_usize, 3, 17, 255, 256, 257] {
+            let gate = TensorView::contiguous(DType::Bf16, &[m, 16, 256]).unwrap();
+            let value = TensorView::contiguous(DType::Bf16, &[m, 16, 256]).unwrap();
+            let output = TensorView::new(
+                DType::Bf16,
+                Encoding::Unquantized,
+                &[m, 16, 256],
+                &[4096, 256, 1],
+                2,
+            )
+            .unwrap();
+            let descriptor = SemanticOpDescriptor::new(
+                SemanticOpKind::SigmoidMul,
+                vec![gate, value],
+                vec![output.clone()],
+            )
+            .unwrap();
+            assert_ne!(descriptor.kind(), SemanticOpKind::SiluMul);
+            let handoff = descriptor
+                .sigmoid_mul_o_proj_input_view()
+                .expect("sigmoid output has an o_proj handoff");
+            assert_eq!(handoff.shape(), &[m, 4096]);
+            assert_eq!(handoff.strides(), &[4096, 1]);
+            assert_eq!(handoff.byte_offset(), output.byte_offset());
+            assert_eq!(handoff.payload_bytes(), output.payload_bytes());
+            assert!(handoff.is_contiguous());
+        }
+
+        let valid = TensorView::contiguous(DType::Bf16, &[3, 16, 256]).unwrap();
+        for wrong_shape in [
+            vec![3, 4096],
+            vec![3, 4, 256],
+            vec![3, 16, 255],
+            vec![3, 16, 256, 1],
+        ] {
+            let wrong = TensorView::contiguous(DType::Bf16, &wrong_shape).unwrap();
+            assert_eq!(
+                SemanticOpDescriptor::new(
+                    SemanticOpKind::SigmoidMul,
+                    vec![wrong.clone(), wrong.clone()],
+                    vec![wrong],
+                ),
+                Err(OpError::SigmoidMulShapeMismatch)
+            );
+        }
+        assert_eq!(
+            SemanticOpDescriptor::new(
+                SemanticOpKind::SigmoidMul,
+                vec![
+                    valid.clone(),
+                    TensorView::contiguous(DType::Bf16, &[3, 16, 255]).unwrap(),
+                ],
+                vec![valid],
+            ),
+            Err(OpError::ElementwiseMetadataMismatch)
+        );
     }
 
     #[test]
@@ -549,6 +798,389 @@ mod tests {
             backend.supports(&operation),
             BackendSupport::Unsupported { .. }
         ));
+    }
+
+    fn attention_preprocess_views(m: usize) -> (Vec<TensorView>, Vec<TensorView>) {
+        (
+            vec![
+                TensorView::contiguous(DType::Bf16, &[m, 16, 512]).unwrap(),
+                TensorView::contiguous(DType::Bf16, &[m, 4, 256]).unwrap(),
+                TensorView::contiguous(DType::Bf16, &[16, 256]).unwrap(),
+                TensorView::contiguous(DType::Bf16, &[4, 256]).unwrap(),
+                TensorView::contiguous(DType::I32, &[m]).unwrap(),
+            ],
+            vec![
+                TensorView::contiguous(DType::Bf16, &[m, 16, 256]).unwrap(),
+                TensorView::contiguous(DType::Bf16, &[m, 16, 256]).unwrap(),
+                TensorView::contiguous(DType::Bf16, &[m, 4, 256]).unwrap(),
+            ],
+        )
+    }
+
+    fn attention_preprocess_descriptor(
+        m: usize,
+        mode: AttentionPreprocessPositionMode,
+        start_position: i64,
+    ) -> Result<SemanticOpDescriptor, OpError> {
+        let (inputs, outputs) = attention_preprocess_views(m);
+        let contract = AttentionPreprocessContract::new_qwen3_5(mode, start_position, m as u64)?;
+        SemanticOpDescriptor::new_attention_preprocess(inputs, outputs, contract)
+    }
+
+    fn attention_preprocess_non_contiguous(dtype: DType, shape: &[usize]) -> TensorView {
+        let mut strides = vec![0; shape.len()];
+        let mut stride = 1;
+        for (dimension, current_stride) in shape.iter().zip(strides.iter_mut()).rev() {
+            *current_stride = stride;
+            stride *= *dimension;
+        }
+        strides[0] += 1;
+        TensorView::new(dtype, Encoding::Unquantized, shape, &strides, 0).unwrap()
+    }
+
+    #[test]
+    fn attention_preprocess_freezes_layout_numeric_and_position_contract() {
+        for m in [1_usize, 3, 17] {
+            for start_position in [0_i64, 1, 3, 255, 256, 257] {
+                let mode = if start_position == 0 {
+                    AttentionPreprocessPositionMode::Prefill
+                } else {
+                    AttentionPreprocessPositionMode::DecodeContinuation
+                };
+                let descriptor = attention_preprocess_descriptor(m, mode, start_position)
+                    .expect("valid C3a1 descriptor");
+                assert_eq!(descriptor.kind(), SemanticOpKind::AttentionPreprocess);
+                assert_eq!(descriptor.arity(), (5, 3));
+                let contract = descriptor
+                    .attention_preprocess_contract()
+                    .expect("C3a1 contract");
+                assert_eq!(
+                    contract.packing(),
+                    AttentionPreprocessPacking::HeadInterleavedQGate
+                );
+                assert_eq!(contract.position_mode(), mode);
+                assert_eq!(contract.start_position(), start_position as u32);
+                assert_eq!(contract.token_count(), m as u32);
+                assert_eq!(contract.epsilon().bits(), 1.0e-6_f32.to_bits());
+                assert_eq!(contract.scale_mode(), RmsNormScaleMode::OffsetOne);
+                assert_eq!(contract.accumulation_dtype(), DType::F32);
+                assert_eq!(contract.output_dtype(), DType::Bf16);
+                assert_eq!(contract.rotary_dim(), 64);
+                assert_eq!(contract.rope_theta(), 10_000_000.0);
+                assert!(contract.mrope_interleaved());
+                assert_eq!(contract.mrope_sections(), [11, 11, 10]);
+                assert_eq!(contract.max_position_embeddings(), 262_144);
+            }
+        }
+    }
+
+    #[test]
+    fn attention_preprocess_rejects_wrong_tensor_contracts_and_flat_split() {
+        let replace = |index: usize, replacement: TensorView| {
+            let (mut inputs, mut outputs) = attention_preprocess_views(3);
+            if index < inputs.len() {
+                inputs[index] = replacement;
+            } else {
+                outputs[index - inputs.len()] = replacement;
+            }
+            let contract = AttentionPreprocessContract::new_qwen3_5(
+                AttentionPreprocessPositionMode::Prefill,
+                0,
+                3,
+            )
+            .unwrap();
+            assert!(
+                SemanticOpDescriptor::new_attention_preprocess(inputs, outputs, contract).is_err()
+            );
+        };
+
+        // Every C3a1 tensor has an independent fixed head/width/rank shape.
+        for (index, shape) in [
+            (0, vec![3, 15, 512]),
+            (0, vec![3, 16, 511]),
+            (0, vec![3, 16]),
+            (1, vec![3, 3, 256]),
+            (1, vec![3, 4, 255]),
+            (1, vec![3, 4]),
+            (2, vec![15, 256]),
+            (2, vec![16, 255]),
+            (2, vec![16]),
+            (3, vec![3, 256]),
+            (3, vec![4, 255]),
+            (3, vec![4]),
+            (4, vec![3, 1]),
+            (4, vec![4]),
+            (5, vec![3, 15, 256]),
+            (5, vec![3, 16, 255]),
+            (5, vec![3, 16]),
+            (6, vec![3, 15, 256]),
+            (6, vec![3, 16, 255]),
+            (6, vec![3, 16]),
+            (7, vec![3, 3, 256]),
+            (7, vec![3, 4, 255]),
+            (7, vec![3, 4]),
+        ] {
+            let dtype = if index == 4 { DType::I32 } else { DType::Bf16 };
+            replace(index, TensorView::contiguous(dtype, &shape).unwrap());
+        }
+
+        // The forbidden flat-half representation cannot satisfy rank three
+        // head-interleaved storage, even though it carries the same element count.
+        replace(0, TensorView::contiguous(DType::Bf16, &[3, 8192]).unwrap());
+
+        for index in 0..8 {
+            let shape = match index {
+                0 => vec![3, 16, 512],
+                1 => vec![3, 4, 256],
+                2 => vec![16, 256],
+                3 => vec![4, 256],
+                4 => vec![3],
+                5 | 6 => vec![3, 16, 256],
+                7 => vec![3, 4, 256],
+                _ => unreachable!(),
+            };
+            replace(index, TensorView::contiguous(DType::F32, &shape).unwrap());
+            replace(
+                index,
+                TensorView::with_encoding(
+                    DType::U8,
+                    Encoding::Nvfp4 {
+                        block_size: 16,
+                        scale_dtype: DType::F32,
+                    },
+                    &shape,
+                )
+                .unwrap(),
+            );
+            replace(
+                index,
+                attention_preprocess_non_contiguous(
+                    if index == 4 { DType::I32 } else { DType::Bf16 },
+                    &shape,
+                ),
+            );
+        }
+
+        for index in 0..8 {
+            let mut shape = match index {
+                0 => vec![3, 16, 512],
+                1 => vec![3, 4, 256],
+                2 => vec![16, 256],
+                3 => vec![4, 256],
+                4 => vec![3],
+                5 | 6 => vec![3, 16, 256],
+                7 => vec![3, 4, 256],
+                _ => unreachable!(),
+            };
+            shape[0] = 0;
+            replace(
+                index,
+                TensorView::contiguous(if index == 4 { DType::I32 } else { DType::Bf16 }, &shape)
+                    .unwrap(),
+            );
+        }
+    }
+
+    #[test]
+    fn attention_preprocess_rejects_missing_or_changed_config_and_position_boundaries() {
+        let (inputs, outputs) = attention_preprocess_views(1);
+        assert!(matches!(
+            SemanticOpDescriptor::new(SemanticOpKind::AttentionPreprocess, inputs, outputs,),
+            Err(OpError::AttentionPreprocessContractRequired)
+        ));
+        assert!(matches!(
+            AttentionPreprocessContract::new_qwen3_5(
+                AttentionPreprocessPositionMode::Prefill,
+                1,
+                1,
+            ),
+            Err(OpError::AttentionPreprocessPositionReset { .. })
+        ));
+        assert!(matches!(
+            AttentionPreprocessContract::new_qwen3_5(
+                AttentionPreprocessPositionMode::DecodeContinuation,
+                0,
+                1,
+            ),
+            Err(OpError::AttentionPreprocessPositionReset { .. })
+        ));
+        assert!(matches!(
+            AttentionPreprocessContract::new_qwen3_5(
+                AttentionPreprocessPositionMode::Prefill,
+                -1,
+                1,
+            ),
+            Err(OpError::AttentionPreprocessNegativePosition { .. })
+        ));
+        assert!(matches!(
+            AttentionPreprocessContract::new_qwen3_5(
+                AttentionPreprocessPositionMode::Prefill,
+                0,
+                0,
+            ),
+            Err(OpError::AttentionPreprocessZeroTokenCount)
+        ));
+        assert!(matches!(
+            AttentionPreprocessContract::new_qwen3_5(
+                AttentionPreprocessPositionMode::DecodeContinuation,
+                1,
+                u64::MAX,
+            ),
+            Err(OpError::AttentionPreprocessPositionOverflow)
+        ));
+        assert!(
+            AttentionPreprocessContract::new_qwen3_5(
+                AttentionPreprocessPositionMode::DecodeContinuation,
+                262_143,
+                1,
+            )
+            .is_ok()
+        );
+        assert!(matches!(
+            AttentionPreprocessContract::new_qwen3_5(
+                AttentionPreprocessPositionMode::DecodeContinuation,
+                262_143,
+                2,
+            ),
+            Err(OpError::AttentionPreprocessPositionOutOfRange { .. })
+        ));
+        assert!(matches!(
+            AttentionPreprocessContract::new_qwen3_5(
+                AttentionPreprocessPositionMode::DecodeContinuation,
+                262_144,
+                1,
+            ),
+            Err(OpError::AttentionPreprocessPositionOutOfRange { .. })
+        ));
+
+        let make = |epsilon,
+                    accumulation_dtype,
+                    output_dtype,
+                    rotary_dim,
+                    rope_theta,
+                    mrope_interleaved,
+                    mrope_sections,
+                    max_position_embeddings| {
+            AttentionPreprocessContract::new(
+                AttentionPreprocessPacking::HeadInterleavedQGate,
+                AttentionPreprocessPositionMode::Prefill,
+                0,
+                1,
+                epsilon,
+                RmsNormScaleMode::OffsetOne,
+                accumulation_dtype,
+                output_dtype,
+                rotary_dim,
+                rope_theta,
+                mrope_interleaved,
+                mrope_sections,
+                max_position_embeddings,
+            )
+        };
+        assert!(
+            make(
+                2.0e-6,
+                DType::F32,
+                DType::Bf16,
+                64,
+                10_000_000.0,
+                true,
+                [11, 11, 10],
+                262_144
+            )
+            .is_err()
+        );
+        assert!(
+            make(
+                1.0e-6,
+                DType::F16,
+                DType::Bf16,
+                64,
+                10_000_000.0,
+                true,
+                [11, 11, 10],
+                262_144
+            )
+            .is_err()
+        );
+        assert!(
+            make(
+                1.0e-6,
+                DType::F32,
+                DType::F32,
+                64,
+                10_000_000.0,
+                true,
+                [11, 11, 10],
+                262_144
+            )
+            .is_err()
+        );
+        assert!(
+            make(
+                1.0e-6,
+                DType::F32,
+                DType::Bf16,
+                32,
+                10_000_000.0,
+                true,
+                [11, 11, 10],
+                262_144
+            )
+            .is_err()
+        );
+        assert!(
+            make(
+                1.0e-6,
+                DType::F32,
+                DType::Bf16,
+                64,
+                1_000_000.0,
+                true,
+                [11, 11, 10],
+                262_144
+            )
+            .is_err()
+        );
+        assert!(
+            make(
+                1.0e-6,
+                DType::F32,
+                DType::Bf16,
+                64,
+                10_000_000.0,
+                false,
+                [11, 11, 10],
+                262_144
+            )
+            .is_err()
+        );
+        assert!(
+            make(
+                1.0e-6,
+                DType::F32,
+                DType::Bf16,
+                64,
+                10_000_000.0,
+                true,
+                [11, 10, 11],
+                262_144
+            )
+            .is_err()
+        );
+        assert!(
+            make(
+                1.0e-6,
+                DType::F32,
+                DType::Bf16,
+                64,
+                10_000_000.0,
+                true,
+                [11, 11, 10],
+                262_143
+            )
+            .is_err()
+        );
     }
 
     #[test]

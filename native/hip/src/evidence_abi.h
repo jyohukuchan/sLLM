@@ -10,11 +10,25 @@
 #define SLLM_HIP_EVIDENCE_ABI_VERSION UINT32_C(1)
 #define SLLM_HIP_EVIDENCE_TRANSFORM_XOR UINT8_C(0x5a)
 
+/* Versioned, bounded, copy-only readback for the private C3a2 evidence
+ * runner. This header is deliberately not installed and contains no device
+ * pointer or state-mutating operation. */
+#define SLLM_HIP_KV_EVIDENCE_ABI_VERSION UINT32_C(1)
+#define SLLM_HIP_KV_EVIDENCE_PLANE_K UINT32_C(0)
+#define SLLM_HIP_KV_EVIDENCE_PLANE_V UINT32_C(1)
+#define SLLM_HIP_KV_EVIDENCE_MAX_READBACK_BYTES UINT64_C(536870912)
+
 #define SLLM_STATUS_HIP_TIMEOUT UINT32_C(8)
 #define SLLM_STATUS_HIP_INVALID_HANDLE UINT32_C(9)
 #define SLLM_STATUS_HIP_ZERO_DISPATCH UINT32_C(10)
 #define SLLM_STATUS_HIP_RUNTIME_ERROR UINT32_C(11)
 #define SLLM_STATUS_HIP_DISPATCH_CONTRACT UINT32_C(12)
+
+#ifdef __cplusplus
+#define SLLM_HIP_EVIDENCE_NOEXCEPT noexcept
+#else
+#define SLLM_HIP_EVIDENCE_NOEXCEPT
+#endif
 
 typedef struct sllm_hip_evidence_request_t {
   uint32_t struct_size;
@@ -39,6 +53,19 @@ typedef struct sllm_hip_evidence_result_t {
   uint32_t reserved[4];
 } sllm_hip_evidence_result_t;
 
+typedef struct sllm_hip_kv_readback_request_t {
+  uint32_t struct_size;
+  uint32_t abi_version;
+  const sllm_kv_view_t *view;
+  uint32_t plane;
+  uint32_t reserved0;
+  uint64_t byte_offset;
+  uint64_t byte_length;
+  uint64_t host_capacity;
+  uint8_t *host_output;
+  uint32_t reserved[4];
+} sllm_hip_kv_readback_request_t;
+
 typedef struct sllm_hip_evidence_completion_t sllm_hip_evidence_completion_t;
 
 #ifdef __cplusplus
@@ -57,6 +84,14 @@ uint32_t sllm_hip_evidence_wait(sllm_hip_evidence_completion_t *completion,
 
 uint32_t sllm_hip_evidence_destroy(sllm_hip_evidence_completion_t **completion,
                                    struct sllm_error_sink_t *error_sink);
+
+/* Synchronously copies one bounded range from a live, opaque KV snapshot.
+ * The destination is caller-owned host memory; the source remains private. */
+uint32_t sllm_hip_kv_view_readback(
+    const sllm_hip_kv_readback_request_t *request,
+    struct sllm_error_sink_t *error_sink) SLLM_HIP_EVIDENCE_NOEXCEPT;
+
+#undef SLLM_HIP_EVIDENCE_NOEXCEPT
 
 #ifdef __cplusplus
 } /* extern "C" */
@@ -101,6 +136,28 @@ static_assert(offsetof(sllm_hip_evidence_result_t, terminal) == 48U,
               "private evidence result terminal offset changed");
 static_assert(offsetof(sllm_hip_evidence_result_t, reserved) == 52U,
               "private evidence result reserved offset changed");
+static_assert(sizeof(sllm_hip_kv_readback_request_t) == 72U,
+              "private KV readback request ABI layout changed");
+static_assert(alignof(sllm_hip_kv_readback_request_t) == 8U,
+              "private KV readback request ABI alignment changed");
+static_assert(offsetof(sllm_hip_kv_readback_request_t, struct_size) == 0U,
+              "private KV readback struct_size offset changed");
+static_assert(offsetof(sllm_hip_kv_readback_request_t, abi_version) == 4U,
+              "private KV readback abi_version offset changed");
+static_assert(offsetof(sllm_hip_kv_readback_request_t, view) == 8U,
+              "private KV readback view offset changed");
+static_assert(offsetof(sllm_hip_kv_readback_request_t, plane) == 16U,
+              "private KV readback plane offset changed");
+static_assert(offsetof(sllm_hip_kv_readback_request_t, byte_offset) == 24U,
+              "private KV readback byte_offset offset changed");
+static_assert(offsetof(sllm_hip_kv_readback_request_t, byte_length) == 32U,
+              "private KV readback byte_length offset changed");
+static_assert(offsetof(sllm_hip_kv_readback_request_t, host_capacity) == 40U,
+              "private KV readback host_capacity offset changed");
+static_assert(offsetof(sllm_hip_kv_readback_request_t, host_output) == 48U,
+              "private KV readback host_output offset changed");
+static_assert(offsetof(sllm_hip_kv_readback_request_t, reserved) == 56U,
+              "private KV readback reserved offset changed");
 static_assert(sizeof(sllm_error_sink_t) == 48U,
               "evidence error sink ABI layout changed");
 static_assert(alignof(sllm_error_sink_t) == 8U,

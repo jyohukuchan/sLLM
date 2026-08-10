@@ -107,6 +107,93 @@ class ModelLockContractTests(unittest.TestCase):
         )
         self.assertEqual(model["generation_config"], {"present": False, "path": None})
 
+    def test_qwen_typed_full_attention_config_is_explicit_and_fail_closed(self) -> None:
+        text = self.lock["model"]["architecture"]["text_config"]
+        self.assertEqual(
+            {
+                key: text[key]
+                for key in (
+                    "attention_bias", "attention_dropout", "attn_output_gate",
+                    "max_position_embeddings", "rope_parameters", "use_cache",
+                )
+            },
+            {
+                "attention_bias": False,
+                "attention_dropout": "0",
+                "attn_output_gate": True,
+                "max_position_embeddings": 262144,
+                "rope_parameters": {
+                    "rope_type": "default",
+                    "rope_theta": 10000000,
+                    "partial_rotary_factor": "0.25",
+                    "mrope_interleaved": True,
+                    "mrope_section": [11, 11, 10],
+                },
+                "use_cache": True,
+            },
+        )
+
+        mutations = (
+            ("missing field", lambda value: value.pop("attention_bias")),
+            ("unknown field", lambda value: value.__setitem__("unknown", 0)),
+            ("wrong type", lambda value: value.__setitem__("attention_bias", 0)),
+            ("wrong bias value", lambda value: value.__setitem__("attention_bias", True)),
+            ("wrong dropout value", lambda value: value.__setitem__("attention_dropout", "0.1")),
+            ("wrong gate value", lambda value: value.__setitem__("attn_output_gate", False)),
+            ("zero", lambda value: value.__setitem__("max_position_embeddings", 0)),
+            ("overflow", lambda value: value.__setitem__("max_position_embeddings", 2**53)),
+            ("wrong boolean", lambda value: value.__setitem__("use_cache", False)),
+            ("missing rope", lambda value: value.pop("rope_parameters")),
+            ("wrong rope type", lambda value: value.__setitem__("rope_parameters", [])),
+            (
+                "wrong rope kind",
+                lambda value: value["rope_parameters"].__setitem__("rope_type", "linear"),
+            ),
+            (
+                "wrong rope theta",
+                lambda value: value["rope_parameters"].__setitem__("rope_theta", 9999999),
+            ),
+            (
+                "zero rope theta",
+                lambda value: value["rope_parameters"].__setitem__("rope_theta", 0),
+            ),
+            (
+                "wrong partial rotary factor",
+                lambda value: value["rope_parameters"].__setitem__(
+                    "partial_rotary_factor", "0.5"
+                ),
+            ),
+            (
+                "wrong interleaved flag",
+                lambda value: value["rope_parameters"].__setitem__("mrope_interleaved", False),
+            ),
+            (
+                "section order",
+                lambda value: value["rope_parameters"].__setitem__("mrope_section", [11, 10, 11]),
+            ),
+            (
+                "section length",
+                lambda value: value["rope_parameters"].__setitem__("mrope_section", [11, 11]),
+            ),
+            (
+                "section zero",
+                lambda value: value["rope_parameters"].__setitem__("mrope_section", [11, 0, 10]),
+            ),
+            (
+                "rope unknown field",
+                lambda value: value["rope_parameters"].__setitem__("unknown", 0),
+            ),
+        )
+        for label, mutate in mutations:
+            with self.subTest(label=label):
+                changed = copy.deepcopy(self.lock)
+                mutate(changed["model"]["architecture"]["text_config"])
+                try:
+                    changed["fingerprint"] = fingerprint_for_document(changed)
+                except JCSValidationError:
+                    pass
+                self.assert_rejected(changed)
+
     def test_generation_stop_policy_is_strict_and_fails_closed(self) -> None:
         policy = self.lock["model"]["tokenizer_contract"]["generation_stop_policy"]
         self.assertEqual(policy["stop_token_ids"], [248046, 248044])

@@ -11,7 +11,11 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use crate::{AccessMode, SemanticOpDescriptor, SemanticOpKind, TensorView};
+use crate::kv_state::{
+    CausalAttentionDescriptor, KvStateAppendRequest, KvStateDescriptor, KvStateLayout,
+    KvStateSnapshot,
+};
+use crate::{AccessMode, DType, Encoding, SemanticOpDescriptor, SemanticOpKind, TensorView};
 
 static NEXT_EXECUTION_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -31,7 +35,7 @@ macro_rules! execution_id {
         pub struct $name(u64);
 
         impl $name {
-            const fn new(raw: u64) -> Self {
+            pub(crate) const fn new(raw: u64) -> Self {
                 Self(raw)
             }
 
@@ -46,6 +50,7 @@ execution_id!(ExecutionSessionId);
 execution_id!(ExecutionBufferId);
 execution_id!(ExecutionQueueId);
 execution_id!(PreparedOperationId);
+execution_id!(KvStateId);
 
 /// Exact device selection supplied when opening an owned backend session.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -152,6 +157,14 @@ pub enum ExecutionError {
         expected: ExecutionSessionId,
         actual: ExecutionSessionId,
     },
+    WrongKvState {
+        expected: KvStateId,
+        actual: KvStateId,
+    },
+    StaleKvLength {
+        expected: u64,
+        actual: u64,
+    },
     DescriptorBindingMismatch {
         role: &'static str,
     },
@@ -216,6 +229,16 @@ impl fmt::Display for ExecutionError {
                 actual.raw(),
                 expected.raw()
             ),
+            Self::WrongKvState { expected, actual } => write!(
+                formatter,
+                "KV state {} does not match state {}",
+                actual.raw(),
+                expected.raw()
+            ),
+            Self::StaleKvLength { expected, actual } => write!(
+                formatter,
+                "stale KV length: expected {expected}, backend reports {actual}"
+            ),
             Self::DescriptorBindingMismatch { role } => {
                 write!(
                     formatter,
@@ -240,7 +263,7 @@ impl fmt::Display for ExecutionError {
                 "{role} requires {required:?} access, binding has {actual:?}"
             ),
             Self::AliasOverlap { left, right } => {
-                write!(formatter, "RMSNorm {left} and {right} bindings overlap")
+                write!(formatter, "semantic {left} and {right} bindings overlap")
             }
             Self::Busy => formatter.write_str("execution resource is busy"),
             Self::NotReady => formatter.write_str("execution completion is not ready"),
@@ -334,6 +357,72 @@ pub trait ExecutionSessionAdapter: Send + Sync {
         access: &ExecutionAdapterAccess<'_>,
         deadline: Duration,
     ) -> Result<ShutdownReport, ExecutionError>;
+
+    /// Creates one request-local full-attention KV state resource.  Adapters
+    /// that do not implement C3a2 remain source-compatible and reject it by
+    /// default; core never allocates a CPU substitute.
+    fn create_kv_state(
+        &self,
+        _access: &ExecutionAdapterAccess<'_>,
+        _state_id: KvStateId,
+        _descriptor: KvStateDescriptor,
+    ) -> Result<AdapterResource, ExecutionError> {
+        Err(ExecutionError::Unsupported {
+            reason: "backend does not support request-local KV state".to_owned(),
+        })
+    }
+
+    /// Reads the backend-owned authoritative length and identity metadata.
+    fn kv_state_snapshot(
+        &self,
+        _access: &ExecutionAdapterAccess<'_>,
+        _state: &KvState,
+    ) -> Result<KvStateSnapshot, ExecutionError> {
+        Err(ExecutionError::Unsupported {
+            reason: "backend does not support request-local KV state snapshots".to_owned(),
+        })
+    }
+
+    /// Enqueues a transactional append.  The backend owns the authoritative
+    /// length transition; core supplies already-admitted bindings and request
+    /// metadata, but never performs numerical or state updates itself.
+    fn append_kv_state(
+        &self,
+        _access: &ExecutionAdapterAccess<'_>,
+        _state: &KvState,
+        _queue: &ExecutionQueue,
+        _key: &OwnedTensorBinding,
+        _value: &OwnedTensorBinding,
+        _request: &KvStateAppendRequest,
+    ) -> Result<Box<dyn ExecutionKvStateSubmissionAdapter>, ExecutionError> {
+        Err(ExecutionError::Unsupported {
+            reason: "backend does not support request-local KV state append".to_owned(),
+        })
+    }
+
+    /// Enqueues causal GQA attention against an immutable committed KV
+    /// snapshot. The adapter owns the native state lifetime until terminal
+    /// completion cleanup.
+    #[allow(clippy::too_many_arguments)]
+    fn execute_causal_attention(
+        &self,
+        _access: &ExecutionAdapterAccess<'_>,
+        _state: &KvState,
+        _queue: &ExecutionQueue,
+        _query: &OwnedTensorBinding,
+        _output: &OwnedTensorBinding,
+        _descriptor: CausalAttentionDescriptor,
+    ) -> Result<
+        (
+            Box<dyn ExecutionCausalAttentionSubmissionAdapter>,
+            DispatchEvidence,
+        ),
+        ExecutionError,
+    > {
+        Err(ExecutionError::Unsupported {
+            reason: "backend does not support causal GQA attention".to_owned(),
+        })
+    }
 }
 
 /// Adapter-owned mutable submission state.  It is intentionally `Send` but
@@ -359,6 +448,21 @@ pub trait ExecutionReadbackAdapter: Send {
     fn query(&mut self) -> Result<ExecutionState, ExecutionError>;
     fn wait(&mut self, timeout: Duration) -> Result<ExecutionState, ExecutionError>;
     fn read_into(&mut self, destination: &mut [u8]) -> Result<u64, ExecutionError>;
+}
+
+/// Adapter-owned mutable state append completion.  It is separate from a
+/// prepared semantic-op submission because a KV append has no stateless output
+/// descriptor or output readback operation.
+pub trait ExecutionKvStateSubmissionAdapter: Send {
+    fn query(&mut self) -> Result<ExecutionState, ExecutionError>;
+    fn wait(&mut self, timeout: Duration) -> Result<ExecutionState, ExecutionError>;
+}
+
+/// Adapter-owned mutable causal-attention completion. It is separate from a
+/// stateless semantic submission because it retains a request-local KV state.
+pub trait ExecutionCausalAttentionSubmissionAdapter: Send {
+    fn query(&mut self) -> Result<ExecutionState, ExecutionError>;
+    fn wait(&mut self, timeout: Duration) -> Result<ExecutionState, ExecutionError>;
 }
 
 struct ExecutionSessionState {
@@ -467,6 +571,217 @@ impl ExecutionSession {
             id: ExecutionBufferId::new(next_execution_id()),
             size_bytes,
             payload: resource.payload,
+        })
+    }
+
+    /// Creates a backend-owned request-local full-attention KV state.
+    ///
+    /// This is a state-resource operation, not a `SemanticOpDescriptor` and
+    /// not a prepared stateless operation.  An adapter that has not adopted
+    /// C3a2 returns the default unsupported error.
+    pub fn create_kv_state(
+        &self,
+        descriptor: KvStateDescriptor,
+    ) -> Result<KvState, ExecutionError> {
+        self.ensure_open()?;
+        let id = KvStateId::new(next_execution_id());
+        let resource = self.state.adapter.create_kv_state(
+            &ExecutionAdapterAccess { session: self },
+            id,
+            descriptor,
+        )?;
+        Ok(KvState {
+            state: Arc::clone(&self.state),
+            id,
+            descriptor,
+            payload: resource.payload,
+            append_in_flight: Arc::new(AtomicBool::new(false)),
+            attention_in_flight: Arc::new(AtomicBool::new(false)),
+            operation_admission: Arc::new(Mutex::new(())),
+        })
+    }
+
+    /// Returns the backend-owned authoritative length and typed identity.
+    pub fn kv_state_snapshot(&self, state: &KvState) -> Result<KvStateSnapshot, ExecutionError> {
+        self.ensure_open()?;
+        self.ensure_kv_state(state)?;
+        let snapshot = self
+            .state
+            .adapter
+            .kv_state_snapshot(&ExecutionAdapterAccess { session: self }, state)?;
+        validate_kv_state_snapshot(self, state, snapshot)
+    }
+
+    /// Admits and submits one transactional K/V append.  All core checks,
+    /// including the authoritative length comparison, occur before the
+    /// adapter append callback.  The returned type retains the state and both
+    /// input bindings until completion is observed or it is dropped.
+    #[allow(clippy::too_many_arguments)]
+    pub fn append_kv_state(
+        &self,
+        state: &KvState,
+        queue: &ExecutionQueue,
+        key: OwnedTensorBinding,
+        value: OwnedTensorBinding,
+        expected_length: u64,
+        start_position: u64,
+    ) -> Result<KvStateAppendSubmission, ExecutionError> {
+        self.ensure_open()?;
+        self.ensure_kv_state(state)?;
+        self.ensure_queue(queue)?;
+
+        let token_count = validate_kv_append_bindings(self, &key, &value)?;
+        if start_position != expected_length {
+            return Err(ExecutionError::InvalidRange {
+                reason: "KV append start position must equal expected length".to_owned(),
+            });
+        }
+        let end_position = start_position.checked_add(token_count).ok_or_else(|| {
+            ExecutionError::InvalidRange {
+                reason: "KV append end position overflowed u64".to_owned(),
+            }
+        })?;
+        if end_position > state.descriptor.capacity() {
+            return Err(ExecutionError::InvalidRange {
+                reason: "KV append exceeds state capacity".to_owned(),
+            });
+        }
+
+        {
+            let _admission = state
+                .operation_admission
+                .lock()
+                .map_err(|_| ExecutionError::Busy)?;
+            if state.attention_in_flight.load(Ordering::Acquire)
+                || state
+                    .append_in_flight
+                    .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+                    .is_err()
+            {
+                return Err(ExecutionError::Busy);
+            }
+        }
+
+        let snapshot = match self.kv_state_snapshot(state) {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                state.append_in_flight.store(false, Ordering::Release);
+                return Err(error);
+            }
+        };
+        if snapshot.length() != expected_length {
+            state.append_in_flight.store(false, Ordering::Release);
+            return Err(ExecutionError::StaleKvLength {
+                expected: expected_length,
+                actual: snapshot.length(),
+            });
+        }
+
+        let request = KvStateAppendRequest::new(
+            state.id,
+            state.descriptor,
+            token_count,
+            expected_length,
+            start_position,
+        );
+        let inner = match self.state.adapter.append_kv_state(
+            &ExecutionAdapterAccess { session: self },
+            state,
+            queue,
+            &key,
+            &value,
+            &request,
+        ) {
+            Ok(inner) => inner,
+            Err(error) => {
+                state.append_in_flight.store(false, Ordering::Release);
+                return Err(error);
+            }
+        };
+
+        Ok(KvStateAppendSubmission {
+            state: state.clone(),
+            queue: queue.clone(),
+            key,
+            value,
+            request,
+            completion_state: ExecutionState::Pending,
+            inner: Some(inner),
+        })
+    }
+
+    /// Validates and submits causal GQA attention against the exact session,
+    /// queue, Q/output bindings, and committed state identity.
+    #[allow(clippy::too_many_arguments)]
+    pub fn causal_attention(
+        &self,
+        state: &KvState,
+        queue: &ExecutionQueue,
+        query: OwnedTensorBinding,
+        output: OwnedTensorBinding,
+        descriptor: CausalAttentionDescriptor,
+    ) -> Result<CausalAttentionSubmission, ExecutionError> {
+        self.ensure_open()?;
+        self.ensure_kv_state(state)?;
+        self.ensure_queue(queue)?;
+        validate_causal_attention_bindings(self, &query, &output, descriptor)?;
+        if descriptor.expected_kv_length() > state.capacity() {
+            return Err(ExecutionError::InvalidRange {
+                reason: "causal attention snapshot length exceeds KV capacity".to_owned(),
+            });
+        }
+        {
+            let _admission = state
+                .operation_admission
+                .lock()
+                .map_err(|_| ExecutionError::Busy)?;
+            if state.append_in_flight.load(Ordering::Acquire)
+                || state
+                    .attention_in_flight
+                    .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+                    .is_err()
+            {
+                return Err(ExecutionError::Busy);
+            }
+        }
+        let snapshot = match self.kv_state_snapshot(state) {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                state.attention_in_flight.store(false, Ordering::Release);
+                return Err(error);
+            }
+        };
+        if snapshot.length() != descriptor.expected_kv_length() {
+            state.attention_in_flight.store(false, Ordering::Release);
+            return Err(ExecutionError::StaleKvLength {
+                expected: descriptor.expected_kv_length(),
+                actual: snapshot.length(),
+            });
+        }
+        let (inner, dispatch) = match self.state.adapter.execute_causal_attention(
+            &ExecutionAdapterAccess { session: self },
+            state,
+            queue,
+            &query,
+            &output,
+            descriptor,
+        ) {
+            Ok(result) => result,
+            Err(error) => {
+                state.attention_in_flight.store(false, Ordering::Release);
+                return Err(error);
+            }
+        };
+        Ok(CausalAttentionSubmission {
+            state: state.clone(),
+            queue: queue.clone(),
+            query,
+            output,
+            descriptor,
+            dispatch,
+            attention_in_flight: Arc::clone(&state.attention_in_flight),
+            completion_state: ExecutionState::Pending,
+            inner: Some(inner),
         })
     }
 
@@ -640,6 +955,20 @@ impl ExecutionSession {
             })
     }
 
+    fn downcast_kv_state_payload<'a, T: Any + Send + Sync>(
+        &self,
+        state: &'a KvState,
+    ) -> Result<&'a T, ExecutionError> {
+        self.ensure_kv_state(state)?;
+        state
+            .payload
+            .downcast_ref::<T>()
+            .ok_or(ExecutionError::WrongBackend {
+                expected: self.backend_name(),
+                actual: state.backend_name(),
+            })
+    }
+
     fn ensure_open(&self) -> Result<(), ExecutionError> {
         if self.state.closing.load(Ordering::Acquire) {
             Err(ExecutionError::Closing)
@@ -688,6 +1017,15 @@ impl ExecutionSession {
             prepared.session_id(),
         )
     }
+
+    fn ensure_kv_state(&self, state: &KvState) -> Result<(), ExecutionError> {
+        ensure_identity(
+            self.backend_name(),
+            self.id(),
+            state.backend_name(),
+            state.session_id(),
+        )
+    }
 }
 
 /// Core-issued access to adapter payloads.  It is created only while a
@@ -725,6 +1063,13 @@ impl ExecutionAdapterAccess<'_> {
         prepared: &'a PreparedOperation,
     ) -> Result<&'a T, ExecutionError> {
         self.session.downcast_prepared_payload(prepared)
+    }
+
+    pub fn downcast_kv_state_payload<'a, T: Any + Send + Sync>(
+        &self,
+        state: &'a KvState,
+    ) -> Result<&'a T, ExecutionError> {
+        self.session.downcast_kv_state_payload(state)
     }
 }
 
@@ -820,6 +1165,225 @@ impl ExecutionQueue {
 
     pub fn backend_name(&self) -> &'static str {
         self.state.backend
+    }
+}
+
+/// Opaque, backend-owned request-local full-attention KV state.
+#[derive(Clone)]
+pub struct KvState {
+    state: Arc<ExecutionSessionState>,
+    id: KvStateId,
+    descriptor: KvStateDescriptor,
+    payload: Arc<dyn Any + Send + Sync>,
+    append_in_flight: Arc<AtomicBool>,
+    attention_in_flight: Arc<AtomicBool>,
+    operation_admission: Arc<Mutex<()>>,
+}
+
+impl fmt::Debug for KvState {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("KvState")
+            .field("id", &self.id)
+            .field("session_id", &self.session_id())
+            .field("layer_id", &self.descriptor.layer_id())
+            .field("capacity", &self.descriptor.capacity())
+            .finish_non_exhaustive()
+    }
+}
+
+impl KvState {
+    pub const fn id(&self) -> KvStateId {
+        self.id
+    }
+
+    pub fn session_id(&self) -> ExecutionSessionId {
+        self.state.id
+    }
+
+    pub fn backend_name(&self) -> &'static str {
+        self.state.backend
+    }
+
+    pub const fn descriptor(&self) -> KvStateDescriptor {
+        self.descriptor
+    }
+
+    pub const fn layer_id(&self) -> u32 {
+        self.descriptor.layer_id()
+    }
+
+    pub const fn capacity(&self) -> u64 {
+        self.descriptor.capacity()
+    }
+
+    pub fn snapshot(&self, session: &ExecutionSession) -> Result<KvStateSnapshot, ExecutionError> {
+        session.kv_state_snapshot(self)
+    }
+}
+
+/// Distinct asynchronous completion for a transactional KV append.
+///
+/// The state, queue, and both input bindings are intentionally retained in
+/// this owner even though the adapter receives only borrowed views while the
+/// append callback runs.
+pub struct KvStateAppendSubmission {
+    state: KvState,
+    queue: ExecutionQueue,
+    key: OwnedTensorBinding,
+    value: OwnedTensorBinding,
+    request: KvStateAppendRequest,
+    completion_state: ExecutionState,
+    inner: Option<Box<dyn ExecutionKvStateSubmissionAdapter>>,
+}
+
+impl fmt::Debug for KvStateAppendSubmission {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("KvStateAppendSubmission")
+            .field("state", &self.state.id())
+            .field("queue", &self.queue.id())
+            .field("token_count", &self.request.token_count())
+            .field("completion_state", &self.completion_state)
+            .finish_non_exhaustive()
+    }
+}
+
+impl KvStateAppendSubmission {
+    pub fn state(&self) -> &KvState {
+        &self.state
+    }
+
+    pub fn key_binding(&self) -> &OwnedTensorBinding {
+        &self.key
+    }
+
+    pub fn value_binding(&self) -> &OwnedTensorBinding {
+        &self.value
+    }
+
+    pub const fn request(&self) -> KvStateAppendRequest {
+        self.request
+    }
+
+    pub const fn completion_state(&self) -> ExecutionState {
+        self.completion_state
+    }
+
+    pub fn query(&mut self) -> Result<ExecutionState, ExecutionError> {
+        let state = self
+            .inner
+            .as_mut()
+            .expect("KV submission adapter remains owned until drop")
+            .query()?;
+        self.record_completion(state);
+        Ok(state)
+    }
+
+    pub fn wait(&mut self, timeout: Duration) -> Result<ExecutionState, ExecutionError> {
+        let state = self
+            .inner
+            .as_mut()
+            .expect("KV submission adapter remains owned until drop")
+            .wait(timeout)?;
+        self.record_completion(state);
+        Ok(state)
+    }
+
+    fn record_completion(&mut self, state: ExecutionState) {
+        self.completion_state = state;
+        if state != ExecutionState::Pending {
+            self.state.append_in_flight.store(false, Ordering::Release);
+        }
+    }
+}
+
+impl Drop for KvStateAppendSubmission {
+    fn drop(&mut self) {
+        // Revoke or transfer backend commit/cleanup ownership before allowing a
+        // concurrent core append to be admitted for the same state.
+        drop(self.inner.take());
+        self.state.append_in_flight.store(false, Ordering::Release);
+    }
+}
+
+/// Distinct asynchronous completion for one causal GQA attention dispatch.
+/// The retained state clone prevents native K/V release while the completion
+/// owner (or its cleanup reaper) still exists.
+pub struct CausalAttentionSubmission {
+    state: KvState,
+    queue: ExecutionQueue,
+    query: OwnedTensorBinding,
+    output: OwnedTensorBinding,
+    descriptor: CausalAttentionDescriptor,
+    dispatch: DispatchEvidence,
+    attention_in_flight: Arc<AtomicBool>,
+    completion_state: ExecutionState,
+    inner: Option<Box<dyn ExecutionCausalAttentionSubmissionAdapter>>,
+}
+
+impl Drop for CausalAttentionSubmission {
+    fn drop(&mut self) {
+        drop(self.inner.take());
+        self.attention_in_flight.store(false, Ordering::Release);
+    }
+}
+
+impl fmt::Debug for CausalAttentionSubmission {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CausalAttentionSubmission")
+            .field("state", &self.state.id())
+            .field("queue", &self.queue.id())
+            .field("query_count", &self.descriptor.query_count())
+            .field("completion_state", &self.completion_state)
+            .finish_non_exhaustive()
+    }
+}
+
+impl CausalAttentionSubmission {
+    pub fn state(&self) -> &KvState {
+        &self.state
+    }
+
+    pub fn query_binding(&self) -> &OwnedTensorBinding {
+        &self.query
+    }
+
+    pub fn output_binding(&self) -> &OwnedTensorBinding {
+        &self.output
+    }
+
+    pub const fn descriptor(&self) -> CausalAttentionDescriptor {
+        self.descriptor
+    }
+
+    pub const fn completion_state(&self) -> ExecutionState {
+        self.completion_state
+    }
+
+    pub fn dispatch(&self) -> &DispatchEvidence {
+        &self.dispatch
+    }
+
+    pub fn query(&mut self) -> Result<ExecutionState, ExecutionError> {
+        let state = self
+            .inner
+            .as_mut()
+            .expect("attention submission adapter remains owned until drop")
+            .query()?;
+        self.completion_state = state;
+        Ok(state)
+    }
+
+    pub fn wait(&mut self, timeout: Duration) -> Result<ExecutionState, ExecutionError> {
+        let state = self
+            .inner
+            .as_mut()
+            .expect("attention submission adapter remains owned until drop")
+            .wait(timeout)?;
+        self.completion_state = state;
+        Ok(state)
     }
 }
 
@@ -928,7 +1492,7 @@ impl BoundSemanticOp {
         if inputs.len() != descriptor.inputs().len() || outputs.len() != descriptor.outputs().len()
         {
             return Err(ExecutionError::DescriptorBindingMismatch {
-                role: "RMSNorm binding arity",
+                role: "semantic operation binding arity",
             });
         }
         let first = inputs.first().or_else(|| outputs.first()).ok_or(
@@ -972,8 +1536,39 @@ impl BoundSemanticOp {
             }
         }
 
-        if descriptor.kind() == SemanticOpKind::RmsNorm {
+        if matches!(
+            descriptor.kind(),
+            SemanticOpKind::Copy
+                | SemanticOpKind::Add
+                | SemanticOpKind::SiluMul
+                | SemanticOpKind::SigmoidMul
+        ) {
+            validate_elementwise_nonoverlap(descriptor.kind(), &inputs, &outputs)?;
+        } else if descriptor.kind() == SemanticOpKind::Embedding {
+            validate_nonoverlap(&[
+                ("embedding weight", &inputs[0]),
+                ("embedding token IDs", &inputs[1]),
+                ("embedding output", &outputs[0]),
+            ])?;
+        } else if descriptor.kind() == SemanticOpKind::Matmul {
+            validate_nonoverlap(&[
+                ("matmul activation", &inputs[0]),
+                ("matmul weight", &inputs[1]),
+                ("matmul output", &outputs[0]),
+            ])?;
+        } else if descriptor.kind() == SemanticOpKind::RmsNorm {
             validate_rmsnorm_nonoverlap(&inputs, &outputs)?;
+        } else if descriptor.kind() == SemanticOpKind::AttentionPreprocess {
+            validate_nonoverlap(&[
+                ("attention_preprocess packed Q/gate", &inputs[0]),
+                ("attention_preprocess K", &inputs[1]),
+                ("attention_preprocess Q raw scale", &inputs[2]),
+                ("attention_preprocess K raw scale", &inputs[3]),
+                ("attention_preprocess positions", &inputs[4]),
+                ("attention_preprocess Q output", &outputs[0]),
+                ("attention_preprocess gate output", &outputs[1]),
+                ("attention_preprocess K output", &outputs[2]),
+            ])?;
         }
 
         Ok(Self {
@@ -1008,15 +1603,37 @@ impl BoundSemanticOp {
 
 fn input_role(kind: SemanticOpKind, index: usize) -> &'static str {
     match (kind, index) {
+        (SemanticOpKind::Copy, 0) => "copy input",
+        (SemanticOpKind::Add, 0) => "add input 0",
+        (SemanticOpKind::Add, 1) => "add input 1",
+        (SemanticOpKind::Embedding, 0) => "embedding weight",
+        (SemanticOpKind::Embedding, 1) => "embedding token IDs",
+        (SemanticOpKind::Matmul, 0) => "matmul activation",
+        (SemanticOpKind::Matmul, 1) => "matmul weight",
+        (SemanticOpKind::SiluMul, 0) => "silu_mul gate",
+        (SemanticOpKind::SiluMul, 1) => "silu_mul up",
         (SemanticOpKind::RmsNorm, 0) => "RMSNorm activation",
         (SemanticOpKind::RmsNorm, 1) => "RMSNorm raw scale",
+        (SemanticOpKind::AttentionPreprocess, 0) => "attention_preprocess packed Q/gate",
+        (SemanticOpKind::AttentionPreprocess, 1) => "attention_preprocess K",
+        (SemanticOpKind::AttentionPreprocess, 2) => "attention_preprocess Q raw scale",
+        (SemanticOpKind::AttentionPreprocess, 3) => "attention_preprocess K raw scale",
+        (SemanticOpKind::AttentionPreprocess, 4) => "attention_preprocess positions",
         _ => "input",
     }
 }
 
 fn output_role(kind: SemanticOpKind, index: usize) -> &'static str {
     match (kind, index) {
+        (SemanticOpKind::Copy, 0) => "copy output",
+        (SemanticOpKind::Add, 0) => "add output",
+        (SemanticOpKind::Embedding, 0) => "embedding output",
+        (SemanticOpKind::Matmul, 0) => "matmul output",
+        (SemanticOpKind::SiluMul, 0) => "silu_mul output",
         (SemanticOpKind::RmsNorm, 0) => "RMSNorm output",
+        (SemanticOpKind::AttentionPreprocess, 0) => "attention_preprocess Q output",
+        (SemanticOpKind::AttentionPreprocess, 1) => "attention_preprocess gate output",
+        (SemanticOpKind::AttentionPreprocess, 2) => "attention_preprocess K output",
         _ => "output",
     }
 }
@@ -1079,8 +1696,230 @@ fn validate_rmsnorm_nonoverlap(
     Ok(())
 }
 
+fn validate_elementwise_nonoverlap(
+    kind: SemanticOpKind,
+    inputs: &[OwnedTensorBinding],
+    outputs: &[OwnedTensorBinding],
+) -> Result<(), ExecutionError> {
+    let entries: Vec<(&str, &OwnedTensorBinding)> = match kind {
+        SemanticOpKind::Copy => vec![("copy input", &inputs[0]), ("copy output", &outputs[0])],
+        SemanticOpKind::Add => vec![
+            ("add input 0", &inputs[0]),
+            ("add input 1", &inputs[1]),
+            ("add output", &outputs[0]),
+        ],
+        SemanticOpKind::SiluMul => vec![
+            ("silu_mul gate", &inputs[0]),
+            ("silu_mul up", &inputs[1]),
+            ("silu_mul output", &outputs[0]),
+        ],
+        SemanticOpKind::SigmoidMul => vec![
+            ("sigmoid_mul gate", &inputs[0]),
+            ("sigmoid_mul attention value", &inputs[1]),
+            ("sigmoid_mul output", &outputs[0]),
+        ],
+        _ => unreachable!("elementwise overlap is only used by copy/add"),
+    };
+    validate_nonoverlap(&entries)
+}
+
+fn validate_nonoverlap(
+    entries: &[(&'static str, &OwnedTensorBinding)],
+) -> Result<(), ExecutionError> {
+    for left_index in 0..entries.len() {
+        for right_index in left_index + 1..entries.len() {
+            let (left_name, left) = entries[left_index];
+            let (right_name, right) = entries[right_index];
+            if left.buffer.id() == right.buffer.id()
+                && intervals_overlap(
+                    left.view.byte_offset(),
+                    left.view.end_offset(),
+                    right.view.byte_offset(),
+                    right.view.end_offset(),
+                )
+            {
+                return Err(ExecutionError::AliasOverlap {
+                    left: left_name,
+                    right: right_name,
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
 fn intervals_overlap(left_start: u64, left_end: u64, right_start: u64, right_end: u64) -> bool {
     left_start < right_end && right_start < left_end
+}
+
+fn validate_kv_state_snapshot(
+    session: &ExecutionSession,
+    state: &KvState,
+    snapshot: KvStateSnapshot,
+) -> Result<KvStateSnapshot, ExecutionError> {
+    if snapshot.session_id() != session.id() {
+        return Err(ExecutionError::WrongSession {
+            expected: session.id(),
+            actual: snapshot.session_id(),
+        });
+    }
+    if snapshot.state_id() != state.id() {
+        return Err(ExecutionError::WrongKvState {
+            expected: state.id(),
+            actual: snapshot.state_id(),
+        });
+    }
+    if snapshot.descriptor() != state.descriptor() {
+        return Err(ExecutionError::InvalidRequest {
+            reason: "backend KV snapshot descriptor does not match the state".to_owned(),
+        });
+    }
+    if snapshot.length() > state.capacity() {
+        return Err(ExecutionError::InvalidRequest {
+            reason: "backend KV snapshot length exceeds state capacity".to_owned(),
+        });
+    }
+    Ok(snapshot)
+}
+
+fn validate_kv_append_bindings(
+    session: &ExecutionSession,
+    key: &OwnedTensorBinding,
+    value: &OwnedTensorBinding,
+) -> Result<u64, ExecutionError> {
+    validate_kv_append_binding(session, key, "KV key")?;
+    validate_kv_append_binding(session, value, "KV value")?;
+
+    let key_shape = key.view().shape();
+    let value_shape = value.view().shape();
+    if key_shape[0] != value_shape[0] {
+        return Err(ExecutionError::InvalidRequest {
+            reason: "KV key and value token counts must match".to_owned(),
+        });
+    }
+    if key.buffer().id() == value.buffer().id()
+        && intervals_overlap(
+            key.view().byte_offset(),
+            key.view().end_offset(),
+            value.view().byte_offset(),
+            value.view().end_offset(),
+        )
+    {
+        return Err(ExecutionError::AliasOverlap {
+            left: "KV key",
+            right: "KV value",
+        });
+    }
+    u64::try_from(key_shape[0]).map_err(|_| ExecutionError::InvalidRequest {
+        reason: "KV token count does not fit u64".to_owned(),
+    })
+}
+
+fn validate_causal_attention_bindings(
+    session: &ExecutionSession,
+    query: &OwnedTensorBinding,
+    output: &OwnedTensorBinding,
+    descriptor: CausalAttentionDescriptor,
+) -> Result<(), ExecutionError> {
+    for (role, binding, required) in [
+        ("causal attention query", query, AccessMode::Read),
+        ("causal attention output", output, AccessMode::Write),
+    ] {
+        validate_binding_identity(session.backend_name(), session.id(), binding)?;
+        ensure_view_in_bounds(binding.buffer(), binding.view())?;
+        let permitted = match required {
+            AccessMode::Read => binding.access().permits_read(),
+            AccessMode::Write => binding.access().permits_write(),
+            AccessMode::ReadWrite => {
+                binding.access().permits_read() && binding.access().permits_write()
+            }
+        };
+        if !permitted {
+            return Err(ExecutionError::AccessViolation {
+                role,
+                required,
+                actual: binding.access(),
+            });
+        }
+        let view = binding.view();
+        if view.dtype() != DType::Bf16 || view.encoding() != Encoding::Unquantized {
+            return Err(ExecutionError::InvalidRequest {
+                reason: format!("{role} must be contiguous unquantized BF16"),
+            });
+        }
+        let query_count = usize::try_from(descriptor.query_count()).map_err(|_| {
+            ExecutionError::InvalidRequest {
+                reason: "causal attention query count does not fit the host index type".to_owned(),
+            }
+        })?;
+        let shape = view.shape();
+        let strides = view.strides();
+        if shape != [query_count, 16, 256] || strides != [16 * 256, 256, 1] || !view.is_contiguous()
+        {
+            return Err(ExecutionError::InvalidRequest {
+                reason: format!(
+                    "{role} must have the fixed contiguous [M, 16, 256] shape and strides"
+                ),
+            });
+        }
+    }
+    if query.buffer().id() == output.buffer().id()
+        && intervals_overlap(
+            query.view().byte_offset(),
+            query.view().end_offset(),
+            output.view().byte_offset(),
+            output.view().end_offset(),
+        )
+    {
+        return Err(ExecutionError::AliasOverlap {
+            left: "causal attention query",
+            right: "causal attention output",
+        });
+    }
+    Ok(())
+}
+
+fn validate_kv_append_binding(
+    session: &ExecutionSession,
+    binding: &OwnedTensorBinding,
+    role: &'static str,
+) -> Result<(), ExecutionError> {
+    validate_binding_identity(session.backend_name(), session.id(), binding)?;
+    ensure_view_in_bounds(binding.buffer(), binding.view())?;
+    if !binding.access().permits_read() {
+        return Err(ExecutionError::AccessViolation {
+            role,
+            required: AccessMode::Read,
+            actual: binding.access(),
+        });
+    }
+    let shape = binding.view().shape();
+    if shape.len() != 3 || shape[1] != KvStateLayout::HEADS || shape[2] != KvStateLayout::HEAD_DIM {
+        return Err(ExecutionError::InvalidRequest {
+            reason: format!("{role} must have contiguous shape [M, 4, 256]"),
+        });
+    }
+    if shape[0] == 0 {
+        return Err(ExecutionError::InvalidRequest {
+            reason: format!("{role} token count must be non-zero"),
+        });
+    }
+    if binding.view().dtype() != crate::DType::Bf16 {
+        return Err(ExecutionError::InvalidRequest {
+            reason: format!("{role} must use BF16 storage"),
+        });
+    }
+    if binding.view().encoding() != crate::Encoding::Unquantized {
+        return Err(ExecutionError::InvalidRequest {
+            reason: format!("{role} must use unquantized encoding"),
+        });
+    }
+    if !binding.view().is_contiguous() {
+        return Err(ExecutionError::InvalidRequest {
+            reason: format!("{role} must be row-major contiguous"),
+        });
+    }
+    Ok(())
 }
 
 /// An opaque prepared operation.  It retains the complete bound semantic
@@ -1582,8 +2421,833 @@ mod tests {
         }
     }
 
+    struct DropPayload(Arc<AtomicUsize>);
+
+    impl Drop for DropPayload {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    struct FakeStateEntry {
+        id: KvStateId,
+        descriptor: crate::KvStateDescriptor,
+        length: u64,
+    }
+
+    struct FakeStateStore {
+        entries: Mutex<Vec<FakeStateEntry>>,
+        append_drops: Arc<AtomicUsize>,
+        append_calls: AtomicUsize,
+        append_drop_saw_core_admission: AtomicBool,
+        wrong_snapshot_identity: AtomicBool,
+    }
+
+    struct KvStateAdapter {
+        base: TestAdapter,
+        store: Arc<FakeStateStore>,
+        state_resource_drops: Arc<AtomicUsize>,
+        buffer_drops: Arc<AtomicUsize>,
+        causal_attention_calls: AtomicUsize,
+        causal_attention_drops: Arc<AtomicUsize>,
+    }
+
+    impl KvStateAdapter {
+        fn new() -> Self {
+            Self {
+                base: TestAdapter::default(),
+                store: Arc::new(FakeStateStore {
+                    entries: Mutex::new(Vec::new()),
+                    append_drops: Arc::new(AtomicUsize::new(0)),
+                    append_calls: AtomicUsize::new(0),
+                    append_drop_saw_core_admission: AtomicBool::new(false),
+                    wrong_snapshot_identity: AtomicBool::new(false),
+                }),
+                state_resource_drops: Arc::new(AtomicUsize::new(0)),
+                buffer_drops: Arc::new(AtomicUsize::new(0)),
+                causal_attention_calls: AtomicUsize::new(0),
+                causal_attention_drops: Arc::new(AtomicUsize::new(0)),
+            }
+        }
+    }
+
+    struct FakeKvSubmission {
+        store: Arc<FakeStateStore>,
+        request: crate::KvStateAppendRequest,
+        core_append_in_flight: Arc<AtomicBool>,
+        complete: bool,
+    }
+
+    impl FakeKvSubmission {
+        fn finish(&mut self) -> Result<ExecutionState, ExecutionError> {
+            if !self.complete {
+                let mut entries = self
+                    .store
+                    .entries
+                    .lock()
+                    .map_err(|_| ExecutionError::Busy)?;
+                let entry = entries
+                    .iter_mut()
+                    .find(|entry| entry.id == self.request.state_id())
+                    .ok_or(ExecutionError::WrongKvState {
+                        expected: self.request.state_id(),
+                        actual: KvStateId::new(1),
+                    })?;
+                if entry.length != self.request.expected_length() {
+                    return Err(ExecutionError::StaleKvLength {
+                        expected: self.request.expected_length(),
+                        actual: entry.length,
+                    });
+                }
+                entry.length = self.request.end_position();
+                self.complete = true;
+            }
+            Ok(ExecutionState::Success)
+        }
+    }
+
+    impl Drop for FakeKvSubmission {
+        fn drop(&mut self) {
+            self.store.append_drop_saw_core_admission.store(
+                self.core_append_in_flight.load(Ordering::Acquire),
+                Ordering::Release,
+            );
+            self.store.append_drops.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    impl ExecutionKvStateSubmissionAdapter for FakeKvSubmission {
+        fn query(&mut self) -> Result<ExecutionState, ExecutionError> {
+            self.finish()
+        }
+
+        fn wait(&mut self, _timeout: Duration) -> Result<ExecutionState, ExecutionError> {
+            self.finish()
+        }
+    }
+
+    struct FakeCausalAttentionSubmission {
+        drops: Arc<AtomicUsize>,
+    }
+
+    impl Drop for FakeCausalAttentionSubmission {
+        fn drop(&mut self) {
+            self.drops.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    impl ExecutionCausalAttentionSubmissionAdapter for FakeCausalAttentionSubmission {
+        fn query(&mut self) -> Result<ExecutionState, ExecutionError> {
+            Ok(ExecutionState::Success)
+        }
+
+        fn wait(&mut self, _timeout: Duration) -> Result<ExecutionState, ExecutionError> {
+            Ok(ExecutionState::Success)
+        }
+    }
+
+    impl ExecutionSessionAdapter for KvStateAdapter {
+        fn max_transfer_bytes(&self) -> u64 {
+            self.base.max_transfer_bytes()
+        }
+
+        fn supports(&self, descriptor: &SemanticOpDescriptor) -> PrepareSupport {
+            self.base.supports(descriptor)
+        }
+
+        fn create_queue(
+            &self,
+            access: &ExecutionAdapterAccess<'_>,
+        ) -> Result<AdapterResource, ExecutionError> {
+            self.base.create_queue(access)
+        }
+
+        fn allocate(
+            &self,
+            _access: &ExecutionAdapterAccess<'_>,
+            _size_bytes: u64,
+        ) -> Result<AdapterResource, ExecutionError> {
+            Ok(AdapterResource::new(DropPayload(Arc::clone(
+                &self.buffer_drops,
+            ))))
+        }
+
+        fn prepare(
+            &self,
+            access: &ExecutionAdapterAccess<'_>,
+            operation: &BoundSemanticOp,
+        ) -> Result<AdapterResource, ExecutionError> {
+            self.base.prepare(access, operation)
+        }
+
+        fn submit(
+            &self,
+            access: &ExecutionAdapterAccess<'_>,
+            prepared: &PreparedOperation,
+            queue: &ExecutionQueue,
+        ) -> Result<(Box<dyn ExecutionSubmissionAdapter>, DispatchEvidence), ExecutionError>
+        {
+            self.base.submit(access, prepared, queue)
+        }
+
+        fn upload(
+            &self,
+            access: &ExecutionAdapterAccess<'_>,
+            queue: &ExecutionQueue,
+            destination: &BufferRange,
+            bytes: Arc<[u8]>,
+        ) -> Result<Box<dyn ExecutionTransferAdapter>, ExecutionError> {
+            self.base.upload(access, queue, destination, bytes)
+        }
+
+        fn readback(
+            &self,
+            access: &ExecutionAdapterAccess<'_>,
+            queue: &ExecutionQueue,
+            source: &BufferRange,
+        ) -> Result<Box<dyn ExecutionReadbackAdapter>, ExecutionError> {
+            self.base.readback(access, queue, source)
+        }
+
+        fn shutdown(
+            &self,
+            access: &ExecutionAdapterAccess<'_>,
+            deadline: Duration,
+        ) -> Result<ShutdownReport, ExecutionError> {
+            self.base.shutdown(access, deadline)
+        }
+
+        fn create_kv_state(
+            &self,
+            _access: &ExecutionAdapterAccess<'_>,
+            state_id: KvStateId,
+            descriptor: crate::KvStateDescriptor,
+        ) -> Result<AdapterResource, ExecutionError> {
+            self.store
+                .entries
+                .lock()
+                .map_err(|_| ExecutionError::Busy)?
+                .push(FakeStateEntry {
+                    id: state_id,
+                    descriptor,
+                    length: 0,
+                });
+            Ok(AdapterResource::new(DropPayload(Arc::clone(
+                &self.state_resource_drops,
+            ))))
+        }
+
+        fn kv_state_snapshot(
+            &self,
+            access: &ExecutionAdapterAccess<'_>,
+            state: &KvState,
+        ) -> Result<crate::KvStateSnapshot, ExecutionError> {
+            let entries = self
+                .store
+                .entries
+                .lock()
+                .map_err(|_| ExecutionError::Busy)?;
+            let entry = entries.iter().find(|entry| entry.id == state.id()).ok_or(
+                ExecutionError::WrongKvState {
+                    expected: state.id(),
+                    actual: KvStateId::new(1),
+                },
+            )?;
+            let state_id = if self.store.wrong_snapshot_identity.load(Ordering::Relaxed) {
+                KvStateId::new(state.id().raw().checked_add(1).unwrap_or(1))
+            } else {
+                state.id()
+            };
+            crate::KvStateSnapshot::new(
+                access.session_id(),
+                state_id,
+                entry.descriptor,
+                entry.length,
+            )
+            .map_err(|error| ExecutionError::InvalidRequest {
+                reason: error.to_string(),
+            })
+        }
+
+        fn append_kv_state(
+            &self,
+            _access: &ExecutionAdapterAccess<'_>,
+            state: &KvState,
+            _queue: &ExecutionQueue,
+            _key: &OwnedTensorBinding,
+            _value: &OwnedTensorBinding,
+            request: &crate::KvStateAppendRequest,
+        ) -> Result<Box<dyn ExecutionKvStateSubmissionAdapter>, ExecutionError> {
+            let entries = self
+                .store
+                .entries
+                .lock()
+                .map_err(|_| ExecutionError::Busy)?;
+            let entry = entries.iter().find(|entry| entry.id == state.id()).ok_or(
+                ExecutionError::WrongKvState {
+                    expected: state.id(),
+                    actual: request.state_id(),
+                },
+            )?;
+            if entry.length != request.expected_length() {
+                return Err(ExecutionError::StaleKvLength {
+                    expected: request.expected_length(),
+                    actual: entry.length,
+                });
+            }
+            self.store.append_calls.fetch_add(1, Ordering::Relaxed);
+            Ok(Box::new(FakeKvSubmission {
+                store: Arc::clone(&self.store),
+                request: *request,
+                core_append_in_flight: Arc::clone(&state.append_in_flight),
+                complete: false,
+            }))
+        }
+
+        fn execute_causal_attention(
+            &self,
+            access: &ExecutionAdapterAccess<'_>,
+            state: &KvState,
+            _queue: &ExecutionQueue,
+            _query: &OwnedTensorBinding,
+            _output: &OwnedTensorBinding,
+            descriptor: CausalAttentionDescriptor,
+        ) -> Result<
+            (
+                Box<dyn ExecutionCausalAttentionSubmissionAdapter>,
+                DispatchEvidence,
+            ),
+            ExecutionError,
+        > {
+            let snapshot = self.kv_state_snapshot(access, state)?;
+            if snapshot.length() != descriptor.expected_kv_length() {
+                return Err(ExecutionError::StaleKvLength {
+                    expected: descriptor.expected_kv_length(),
+                    actual: snapshot.length(),
+                });
+            }
+            self.causal_attention_calls.fetch_add(1, Ordering::Relaxed);
+            Ok((
+                Box::new(FakeCausalAttentionSubmission {
+                    drops: Arc::clone(&self.causal_attention_drops),
+                }),
+                DispatchEvidence {
+                    abi_version: 1,
+                    info_version: 1,
+                    dispatch_id: 2,
+                    dispatch_count: 1,
+                    kernel_id: 2,
+                    workgroup_size_x: 256,
+                    grid_size_x: (descriptor.query_count() * 16) as u32,
+                    row_count: descriptor.query_count(),
+                    normalized_size: 256,
+                    backend: 1,
+                    fallback_allowed: false,
+                    fallback_used: false,
+                    kernel_symbol: "causal_attention.stable_softmax_gqa.v1".to_owned(),
+                    device_symbol: "fake_causal_attention".to_owned(),
+                    target: "fake".to_owned(),
+                },
+            ))
+        }
+    }
+
     fn session(name: &'static str) -> ExecutionSession {
         ExecutionSession::new(name, Arc::new(TestAdapter::default()))
+    }
+
+    #[test]
+    fn adapters_without_c3a2_methods_remain_source_compatible_and_unsupported() {
+        let test_session = session("test");
+        let descriptor = crate::KvStateDescriptor::new(0, 1).unwrap();
+
+        assert!(matches!(
+            test_session.create_kv_state(descriptor),
+            Err(ExecutionError::Unsupported { reason })
+                if reason.contains("request-local KV state")
+        ));
+    }
+
+    fn kv_session() -> (ExecutionSession, Arc<KvStateAdapter>) {
+        let adapter = Arc::new(KvStateAdapter::new());
+        let session_adapter: Arc<dyn ExecutionSessionAdapter> = adapter.clone();
+        (ExecutionSession::new("kv-test", session_adapter), adapter)
+    }
+
+    fn kv_binding(
+        session: &ExecutionSession,
+        dtype: crate::DType,
+        encoding: crate::Encoding,
+        shape: &[usize],
+        strides: &[usize],
+        access: AccessMode,
+    ) -> OwnedTensorBinding {
+        let view = TensorView::new(dtype, encoding, shape, strides, 0).unwrap();
+        let buffer = session.allocate(view.end_offset().max(1)).unwrap();
+        session.bind(&buffer, view, access).unwrap()
+    }
+
+    fn valid_kv_bindings(
+        session: &ExecutionSession,
+        token_count: usize,
+    ) -> (OwnedTensorBinding, OwnedTensorBinding) {
+        let shape = [token_count, KvStateLayout::HEADS, KvStateLayout::HEAD_DIM];
+        let strides = [
+            KvStateLayout::HEADS * KvStateLayout::HEAD_DIM,
+            KvStateLayout::HEAD_DIM,
+            1,
+        ];
+        (
+            kv_binding(
+                session,
+                crate::DType::Bf16,
+                crate::Encoding::Unquantized,
+                &shape,
+                &strides,
+                AccessMode::Read,
+            ),
+            kv_binding(
+                session,
+                crate::DType::Bf16,
+                crate::Encoding::Unquantized,
+                &shape,
+                &strides,
+                AccessMode::Read,
+            ),
+        )
+    }
+
+    #[test]
+    fn kv_append_covers_non_aligned_capacity_and_exact_end_boundaries() {
+        for token_count in [1_usize, 3, 17, 255, 256, 257] {
+            let (session, adapter) = kv_session();
+            let queue = session.create_queue().unwrap();
+            let descriptor = crate::KvStateDescriptor::new(3, token_count as u64).unwrap();
+            let state = session.create_kv_state(descriptor).unwrap();
+            let (key, value) = valid_kv_bindings(&session, token_count);
+            let mut append = session
+                .append_kv_state(&state, &queue, key, value, 0, 0)
+                .unwrap();
+            assert_eq!(append.request().token_count(), token_count as u64);
+            assert_eq!(append.request().end_position(), token_count as u64);
+            assert_eq!(append.query().unwrap(), ExecutionState::Success);
+            assert_eq!(
+                session.kv_state_snapshot(&state).unwrap().length(),
+                token_count as u64
+            );
+            assert_eq!(adapter.store.append_calls.load(Ordering::Relaxed), 1);
+        }
+    }
+
+    #[test]
+    fn kv_append_covers_start_and_end_position_boundaries() {
+        let (session, _adapter) = kv_session();
+        let queue = session.create_queue().unwrap();
+        let state = session
+            .create_kv_state(crate::KvStateDescriptor::new(0, 257).unwrap())
+            .unwrap();
+        for (start, token_count, end) in [
+            (0_u64, 1_usize, 1_u64),
+            (1, 2, 3),
+            (3, 14, 17),
+            (17, 238, 255),
+            (255, 1, 256),
+            (256, 1, 257),
+        ] {
+            let (key, value) = valid_kv_bindings(&session, token_count);
+            let mut append = session
+                .append_kv_state(&state, &queue, key, value, start, start)
+                .unwrap();
+            assert_eq!(append.request().end_position(), end);
+            assert_eq!(
+                append.wait(Duration::ZERO).unwrap(),
+                ExecutionState::Success
+            );
+        }
+        assert_eq!(state.snapshot(&session).unwrap().length(), 257);
+    }
+
+    #[test]
+    fn kv_append_rejects_capacity_overflow_and_position_overflow_before_backend_append() {
+        let (session, adapter) = kv_session();
+        let queue = session.create_queue().unwrap();
+        let state = session
+            .create_kv_state(crate::KvStateDescriptor::new(0, 1).unwrap())
+            .unwrap();
+        let (key, value) = valid_kv_bindings(&session, 1);
+        assert!(matches!(
+            session.append_kv_state(&state, &queue, key, value, 1, 1),
+            Err(ExecutionError::InvalidRange { .. })
+        ));
+        assert_eq!(adapter.store.append_calls.load(Ordering::Relaxed), 0);
+
+        let state = session
+            .create_kv_state(crate::KvStateDescriptor::new(1, u64::MAX).unwrap())
+            .unwrap();
+        let (key, value) = valid_kv_bindings(&session, 1);
+        assert!(matches!(
+            session.append_kv_state(&state, &queue, key, value, u64::MAX, u64::MAX),
+            Err(ExecutionError::InvalidRange { reason })
+                if reason.contains("overflow")
+        ));
+        assert_eq!(adapter.store.append_calls.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn kv_append_uses_snapshot_for_stale_admission_and_rejects_concurrent_append() {
+        let (session, adapter) = kv_session();
+        let queue = session.create_queue().unwrap();
+        let state = session
+            .create_kv_state(crate::KvStateDescriptor::new(0, 3).unwrap())
+            .unwrap();
+        let (key, value) = valid_kv_bindings(&session, 1);
+        let mut first = session
+            .append_kv_state(&state, &queue, key, value, 0, 0)
+            .unwrap();
+
+        let (key, value) = valid_kv_bindings(&session, 1);
+        assert!(matches!(
+            session.append_kv_state(&state, &queue, key, value, 0, 0),
+            Err(ExecutionError::Busy)
+        ));
+        assert_eq!(adapter.store.append_calls.load(Ordering::Relaxed), 1);
+
+        assert_eq!(first.wait(Duration::ZERO).unwrap(), ExecutionState::Success);
+        assert_eq!(session.kv_state_snapshot(&state).unwrap().length(), 1);
+        let (key, value) = valid_kv_bindings(&session, 1);
+        assert!(matches!(
+            session.append_kv_state(&state, &queue, key, value, 0, 0),
+            Err(ExecutionError::StaleKvLength {
+                expected: 0,
+                actual: 1
+            })
+        ));
+        assert_eq!(adapter.store.append_calls.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn kv_append_rejects_wrong_session_state_identity_and_contract_without_append() {
+        let (session, adapter) = kv_session();
+        let queue = session.create_queue().unwrap();
+        let state = session
+            .create_kv_state(crate::KvStateDescriptor::new(2, 4).unwrap())
+            .unwrap();
+
+        adapter
+            .store
+            .wrong_snapshot_identity
+            .store(true, Ordering::Relaxed);
+        assert!(matches!(
+            session.kv_state_snapshot(&state),
+            Err(ExecutionError::WrongKvState { .. })
+        ));
+        adapter
+            .store
+            .wrong_snapshot_identity
+            .store(false, Ordering::Relaxed);
+
+        let (foreign_session, _) = kv_session();
+        let foreign_state = foreign_session
+            .create_kv_state(crate::KvStateDescriptor::new(2, 4).unwrap())
+            .unwrap();
+        assert!(matches!(
+            session.kv_state_snapshot(&foreign_state),
+            Err(ExecutionError::WrongSession { .. })
+        ));
+
+        let invalid = [
+            kv_binding(
+                &session,
+                crate::DType::Bf16,
+                crate::Encoding::Unquantized,
+                &[1, 16, 256],
+                &[4096, 256, 1],
+                AccessMode::Read,
+            ),
+            kv_binding(
+                &session,
+                crate::DType::F16,
+                crate::Encoding::Unquantized,
+                &[1, 4, 256],
+                &[1024, 256, 1],
+                AccessMode::Read,
+            ),
+            kv_binding(
+                &session,
+                crate::DType::U8,
+                crate::Encoding::Nvfp4 {
+                    block_size: 32,
+                    scale_dtype: crate::DType::Bf16,
+                },
+                &[1, 4, 256],
+                &[1024, 256, 1],
+                AccessMode::Read,
+            ),
+            kv_binding(
+                &session,
+                crate::DType::Bf16,
+                crate::Encoding::Unquantized,
+                &[1, 4, 256],
+                &[1024, 257, 1],
+                AccessMode::Read,
+            ),
+            kv_binding(
+                &session,
+                crate::DType::Bf16,
+                crate::Encoding::Unquantized,
+                &[0, 4, 256],
+                &[1024, 256, 1],
+                AccessMode::Read,
+            ),
+        ];
+        let (mismatch_key, _) = valid_kv_bindings(&session, 1);
+        let (_, mismatch_value) = valid_kv_bindings(&session, 3);
+        assert!(
+            session
+                .append_kv_state(&state, &queue, mismatch_key, mismatch_value, 0, 0)
+                .is_err()
+        );
+        for invalid_key in invalid {
+            let (_, value) = valid_kv_bindings(&session, 1);
+            assert!(
+                session
+                    .append_kv_state(&state, &queue, invalid_key, value, 0, 0)
+                    .is_err()
+            );
+        }
+        let (key, value) = valid_kv_bindings(&session, 1);
+        let wrong_access = kv_binding(
+            &session,
+            crate::DType::Bf16,
+            crate::Encoding::Unquantized,
+            &[1, 4, 256],
+            &[1024, 256, 1],
+            AccessMode::Write,
+        );
+        assert!(matches!(
+            session.append_kv_state(&state, &queue, wrong_access, value, 0, 0),
+            Err(ExecutionError::AccessViolation { .. })
+        ));
+        let (foreign_key, foreign_value) = valid_kv_bindings(&foreign_session, 1);
+        assert!(matches!(
+            session.append_kv_state(&state, &queue, foreign_key, foreign_value, 0, 0),
+            Err(ExecutionError::WrongSession { .. })
+        ));
+        drop(key);
+        assert_eq!(adapter.store.append_calls.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn kv_append_submission_owns_inputs_and_state_until_drop() {
+        let (session, adapter) = kv_session();
+        let queue = session.create_queue().unwrap();
+        let state = session
+            .create_kv_state(crate::KvStateDescriptor::new(0, 1).unwrap())
+            .unwrap();
+        let (key, value) = valid_kv_bindings(&session, 1);
+        let submission = session
+            .append_kv_state(&state, &queue, key, value, 0, 0)
+            .unwrap();
+        assert_eq!(adapter.buffer_drops.load(Ordering::Relaxed), 0);
+        assert_eq!(adapter.store.append_drops.load(Ordering::Relaxed), 0);
+        drop(submission);
+        assert_eq!(adapter.buffer_drops.load(Ordering::Relaxed), 2);
+        assert_eq!(adapter.store.append_drops.load(Ordering::Relaxed), 1);
+        assert!(
+            adapter
+                .store
+                .append_drop_saw_core_admission
+                .load(Ordering::Acquire)
+        );
+        assert_eq!(adapter.state_resource_drops.load(Ordering::Relaxed), 0);
+        drop(state);
+        assert_eq!(adapter.state_resource_drops.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn causal_attention_has_exact_shape_and_exclusive_state_admission() {
+        let (session, adapter) = kv_session();
+        let queue = session.create_queue().unwrap();
+        let state = session
+            .create_kv_state(crate::KvStateDescriptor::new(0, 3).unwrap())
+            .unwrap();
+        let (key, value) = valid_kv_bindings(&session, 1);
+        let mut append = session
+            .append_kv_state(&state, &queue, key, value, 0, 0)
+            .unwrap();
+        assert_eq!(
+            append.wait(Duration::ZERO).unwrap(),
+            ExecutionState::Success
+        );
+
+        let query = kv_binding(
+            &session,
+            crate::DType::Bf16,
+            crate::Encoding::Unquantized,
+            &[1, 16, 256],
+            &[4096, 256, 1],
+            AccessMode::Read,
+        );
+        let output = kv_binding(
+            &session,
+            crate::DType::Bf16,
+            crate::Encoding::Unquantized,
+            &[1, 16, 256],
+            &[4096, 256, 1],
+            AccessMode::Write,
+        );
+        let descriptor = CausalAttentionDescriptor::new(0, 1, 1).unwrap();
+        let attention = session
+            .causal_attention(&state, &queue, query, output, descriptor)
+            .unwrap();
+        assert_eq!(adapter.causal_attention_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(attention.dispatch().grid_size_x, 16);
+
+        let (blocked_key, blocked_value) = valid_kv_bindings(&session, 1);
+        assert!(matches!(
+            session.append_kv_state(&state, &queue, blocked_key, blocked_value, 1, 1),
+            Err(ExecutionError::Busy)
+        ));
+        let second_query = kv_binding(
+            &session,
+            crate::DType::Bf16,
+            crate::Encoding::Unquantized,
+            &[1, 16, 256],
+            &[4096, 256, 1],
+            AccessMode::Read,
+        );
+        let second_output = kv_binding(
+            &session,
+            crate::DType::Bf16,
+            crate::Encoding::Unquantized,
+            &[1, 16, 256],
+            &[4096, 256, 1],
+            AccessMode::Write,
+        );
+        assert!(matches!(
+            session.causal_attention(&state, &queue, second_query, second_output, descriptor,),
+            Err(ExecutionError::Busy)
+        ));
+        assert_eq!(adapter.causal_attention_drops.load(Ordering::Relaxed), 0);
+        drop(attention);
+        assert_eq!(adapter.causal_attention_drops.load(Ordering::Relaxed), 1);
+
+        let (key, value) = valid_kv_bindings(&session, 1);
+        let mut append = session
+            .append_kv_state(&state, &queue, key, value, 1, 1)
+            .unwrap();
+        assert_eq!(
+            append.wait(Duration::ZERO).unwrap(),
+            ExecutionState::Success
+        );
+        assert_eq!(session.kv_state_snapshot(&state).unwrap().length(), 2);
+    }
+
+    #[test]
+    fn causal_attention_rejects_invalid_descriptor_and_bindings() {
+        assert!(matches!(
+            CausalAttentionDescriptor::new(0, 0, 0),
+            Err(crate::KvStateError::ZeroQueryCount)
+        ));
+        assert!(matches!(
+            CausalAttentionDescriptor::new(u64::MAX, 1, 0),
+            Err(crate::KvStateError::LengthOverflow)
+        ));
+        assert!(matches!(
+            CausalAttentionDescriptor::new(2, 3, 4),
+            Err(crate::KvStateError::LengthMismatch { .. })
+        ));
+
+        let (session, _adapter) = kv_session();
+        let queue = session.create_queue().unwrap();
+        let state = session
+            .create_kv_state(crate::KvStateDescriptor::new(0, 3).unwrap())
+            .unwrap();
+        let query = kv_binding(
+            &session,
+            crate::DType::Bf16,
+            crate::Encoding::Unquantized,
+            &[1, 16, 256],
+            &[4096, 256, 1],
+            AccessMode::Read,
+        );
+        let wrong_output = kv_binding(
+            &session,
+            crate::DType::F16,
+            crate::Encoding::Unquantized,
+            &[1, 16, 256],
+            &[4096, 256, 1],
+            AccessMode::Write,
+        );
+        assert!(matches!(
+            session.causal_attention(
+                &state,
+                &queue,
+                query,
+                wrong_output,
+                CausalAttentionDescriptor::new(0, 1, 1).unwrap(),
+            ),
+            Err(ExecutionError::InvalidRequest { reason })
+                if reason.contains("BF16")
+        ));
+
+        let query = kv_binding(
+            &session,
+            crate::DType::Bf16,
+            crate::Encoding::Unquantized,
+            &[1, 16, 256],
+            &[4096, 256, 1],
+            AccessMode::Read,
+        );
+        let wrong_stride = kv_binding(
+            &session,
+            crate::DType::Bf16,
+            crate::Encoding::Unquantized,
+            &[1, 16, 256],
+            &[4096, 257, 1],
+            AccessMode::Write,
+        );
+        assert!(matches!(
+            session.causal_attention(
+                &state,
+                &queue,
+                query,
+                wrong_stride,
+                CausalAttentionDescriptor::new(0, 1, 1).unwrap(),
+            ),
+            Err(ExecutionError::InvalidRequest { reason })
+                if reason.contains("strides")
+        ));
+
+        let capacity_state = session
+            .create_kv_state(crate::KvStateDescriptor::new(0, 1).unwrap())
+            .unwrap();
+        let query = kv_binding(
+            &session,
+            crate::DType::Bf16,
+            crate::Encoding::Unquantized,
+            &[1, 16, 256],
+            &[4096, 256, 1],
+            AccessMode::Read,
+        );
+        let output = kv_binding(
+            &session,
+            crate::DType::Bf16,
+            crate::Encoding::Unquantized,
+            &[1, 16, 256],
+            &[4096, 256, 1],
+            AccessMode::Write,
+        );
+        assert!(matches!(
+            session.causal_attention(
+                &capacity_state,
+                &queue,
+                query,
+                output,
+                CausalAttentionDescriptor::new(1, 1, 2).unwrap(),
+            ),
+            Err(ExecutionError::InvalidRange { .. })
+        ));
     }
 
     fn rmsnorm_views(offsets: [u64; 3]) -> (TensorView, TensorView, TensorView) {
@@ -1967,6 +3631,250 @@ mod tests {
                     if left == expected_left && right == expected_right
             ));
         }
+    }
+
+    fn attention_preprocess_views_with_offsets(
+        offsets: [u64; 8],
+    ) -> (Vec<TensorView>, Vec<TensorView>) {
+        let make = |dtype, shape: &[usize], strides: &[usize], offset| {
+            TensorView::new(dtype, crate::Encoding::Unquantized, shape, strides, offset)
+                .expect("valid C3a1 view")
+        };
+        (
+            vec![
+                make(
+                    crate::DType::Bf16,
+                    &[1, 16, 512],
+                    &[8192, 512, 1],
+                    offsets[0],
+                ),
+                make(
+                    crate::DType::Bf16,
+                    &[1, 4, 256],
+                    &[1024, 256, 1],
+                    offsets[1],
+                ),
+                make(crate::DType::Bf16, &[16, 256], &[256, 1], offsets[2]),
+                make(crate::DType::Bf16, &[4, 256], &[256, 1], offsets[3]),
+                make(crate::DType::I32, &[1], &[1], offsets[4]),
+            ],
+            vec![
+                make(
+                    crate::DType::Bf16,
+                    &[1, 16, 256],
+                    &[4096, 256, 1],
+                    offsets[5],
+                ),
+                make(
+                    crate::DType::Bf16,
+                    &[1, 16, 256],
+                    &[4096, 256, 1],
+                    offsets[6],
+                ),
+                make(
+                    crate::DType::Bf16,
+                    &[1, 4, 256],
+                    &[1024, 256, 1],
+                    offsets[7],
+                ),
+            ],
+        )
+    }
+
+    fn bind_attention_preprocess(offsets: [u64; 8]) -> Result<BoundSemanticOp, ExecutionError> {
+        let session = session("test");
+        let buffer = session.allocate(100_000).expect("test buffer");
+        let (inputs, outputs) = attention_preprocess_views_with_offsets(offsets);
+        let descriptor = Arc::new(
+            SemanticOpDescriptor::new_attention_preprocess(
+                inputs.clone(),
+                outputs.clone(),
+                crate::AttentionPreprocessContract::new_qwen3_5(
+                    crate::AttentionPreprocessPositionMode::Prefill,
+                    0,
+                    1,
+                )
+                .expect("C3a1 contract"),
+            )
+            .expect("C3a1 descriptor"),
+        );
+        let input_bindings = inputs
+            .into_iter()
+            .map(|view| session.bind(&buffer, view, crate::AccessMode::Read))
+            .collect::<Result<Vec<_>, _>>()?;
+        let output_bindings = outputs
+            .into_iter()
+            .map(|view| session.bind(&buffer, view, crate::AccessMode::Write))
+            .collect::<Result<Vec<_>, _>>()?;
+        BoundSemanticOp::new(descriptor, input_bindings, output_bindings)
+    }
+
+    #[test]
+    fn attention_preprocess_binding_rejects_every_overlap_but_accepts_touching_ranges() {
+        let lengths = [16_384_u64, 2_048, 8_192, 2_048, 4, 8_192, 8_192, 2_048];
+        let mut touching = [0_u64; 8];
+        for index in 1..touching.len() {
+            touching[index] = touching[index - 1] + lengths[index - 1];
+        }
+        assert!(bind_attention_preprocess(touching).is_ok());
+
+        for left in 0..8 {
+            for right in left + 1..8 {
+                let mut overlapping = touching;
+                overlapping[right] = overlapping[left];
+                assert!(
+                    bind_attention_preprocess(overlapping).is_err(),
+                    "overlap pair {left}/{right} must be rejected"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn elementwise_overlap_rejects_aliases_but_allows_touching_ranges() {
+        let session = session("test");
+        let buffer = session.allocate(64).unwrap();
+        let view = |offset| {
+            TensorView::new(
+                crate::DType::Bf16,
+                crate::Encoding::Unquantized,
+                &[3],
+                &[1],
+                offset,
+            )
+            .expect("valid elementwise view")
+        };
+
+        let copy_input = view(0);
+        let copy_output = view(6);
+        let copy = Arc::new(
+            SemanticOpDescriptor::new(
+                SemanticOpKind::Copy,
+                vec![copy_input.clone()],
+                vec![copy_output.clone()],
+            )
+            .unwrap(),
+        );
+        assert!(
+            BoundSemanticOp::new(
+                copy,
+                vec![session.bind(&buffer, copy_input, AccessMode::Read).unwrap()],
+                vec![
+                    session
+                        .bind(&buffer, copy_output, AccessMode::Write)
+                        .unwrap()
+                ],
+            )
+            .is_ok(),
+            "half-open touching copy ranges must stay disjoint"
+        );
+
+        let add_views = [view(0), view(4), view(12)];
+        let add = Arc::new(
+            SemanticOpDescriptor::new(
+                SemanticOpKind::Add,
+                vec![add_views[0].clone(), add_views[1].clone()],
+                vec![add_views[2].clone()],
+            )
+            .unwrap(),
+        );
+        assert!(matches!(
+            BoundSemanticOp::new(
+                add,
+                vec![
+                    session
+                        .bind(&buffer, add_views[0].clone(), AccessMode::Read)
+                        .unwrap(),
+                    session
+                        .bind(&buffer, add_views[1].clone(), AccessMode::Read)
+                        .unwrap(),
+                ],
+                vec![
+                    session
+                        .bind(&buffer, add_views[2].clone(), AccessMode::Write)
+                        .unwrap()
+                ],
+            ),
+            Err(ExecutionError::AliasOverlap {
+                left: "add input 0",
+                right: "add input 1"
+            })
+        ));
+
+        let gate = TensorView::new(
+            crate::DType::Bf16,
+            crate::Encoding::Unquantized,
+            &[1, 16, 256],
+            &[4096, 256, 1],
+            0,
+        )
+        .unwrap();
+        let attention_value = TensorView::new(
+            crate::DType::Bf16,
+            crate::Encoding::Unquantized,
+            &[1, 16, 256],
+            &[4096, 256, 1],
+            8192,
+        )
+        .unwrap();
+        let sigmoid_output = gate.clone();
+        let sigmoid_mul = Arc::new(
+            SemanticOpDescriptor::new(
+                SemanticOpKind::SigmoidMul,
+                vec![gate.clone(), attention_value.clone()],
+                vec![sigmoid_output.clone()],
+            )
+            .unwrap(),
+        );
+        let sigmoid_buffer = session.allocate(16_384).unwrap();
+        assert!(matches!(
+            BoundSemanticOp::new(
+                sigmoid_mul,
+                vec![
+                    session
+                        .bind(&sigmoid_buffer, gate, AccessMode::Read)
+                        .unwrap(),
+                    session
+                        .bind(&sigmoid_buffer, attention_value, AccessMode::Read)
+                        .unwrap(),
+                ],
+                vec![
+                    session
+                        .bind(&sigmoid_buffer, sigmoid_output, AccessMode::Write)
+                        .unwrap(),
+                ],
+            ),
+            Err(ExecutionError::AliasOverlap {
+                left: "sigmoid_mul gate",
+                right: "sigmoid_mul output"
+            })
+        ));
+
+        let copy_input = view(0);
+        let copy_output = view(4);
+        let copy = Arc::new(
+            SemanticOpDescriptor::new(
+                SemanticOpKind::Copy,
+                vec![copy_input.clone()],
+                vec![copy_output.clone()],
+            )
+            .unwrap(),
+        );
+        assert!(matches!(
+            BoundSemanticOp::new(
+                copy,
+                vec![session.bind(&buffer, copy_input, AccessMode::Read).unwrap()],
+                vec![
+                    session
+                        .bind(&buffer, copy_output, AccessMode::Write)
+                        .unwrap()
+                ],
+            ),
+            Err(ExecutionError::AliasOverlap {
+                left: "copy input",
+                right: "copy output"
+            })
+        ));
     }
 
     #[test]

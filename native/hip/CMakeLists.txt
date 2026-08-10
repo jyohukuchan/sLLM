@@ -223,7 +223,13 @@ endif()
 set(SLLM_HIP_NATIVE_SOURCES
     src/hip_stub.cpp
     src/public_runtime_stub.cpp
+    src/embedding_api.cpp
+    src/elementwise_api.cpp
+    src/matmul_api.cpp
     src/rmsnorm_api.cpp
+    src/attention_preprocess_api.cpp
+    src/causal_attention_api.cpp
+    src/kv_state_api.cpp
     src/hip_evidence_stub.cpp
     src/header_c_compile.c
     src/header_cpp_compile.cpp
@@ -243,6 +249,7 @@ if(SLLM_ENABLE_PUBLIC_HIP_RUNTIME)
             -DSLLM_ENABLE_PUBLIC_HIP_RUNTIME=1
             -O3
             -DNDEBUG
+            -ffp-contract=off
             -std=gnu++17
             -fPIC
             -I "${PROJECT_SOURCE_DIR}/../../include"
@@ -256,12 +263,33 @@ if(SLLM_ENABLE_PUBLIC_HIP_RUNTIME)
         )
         set(SLLM_SEMANTIC_G1_PUBLIC_OBJECT "${CMAKE_BINARY_DIR}/public_runtime.hip.o")
         set(SLLM_SEMANTIC_G1_KERNEL_OBJECT "${CMAKE_BINARY_DIR}/rmsnorm_kernel.hip.o")
+        set(SLLM_ELEMENTWISE_G1_KERNEL_OBJECT "${CMAKE_BINARY_DIR}/elementwise_kernel.hip.o")
+        set(SLLM_EMBEDDING_G1_KERNEL_OBJECT "${CMAKE_BINARY_DIR}/embedding_kernel.hip.o")
+        set(SLLM_MATMUL_G1_KERNEL_OBJECT "${CMAKE_BINARY_DIR}/matmul_kernel.hip.o")
+        set(SLLM_ATTENTION_PREPROCESS_G1_KERNEL_OBJECT
+            "${CMAKE_BINARY_DIR}/attention_preprocess_kernel.hip.o")
+        set(SLLM_KV_STATE_G1_KERNEL_OBJECT
+            "${CMAKE_BINARY_DIR}/kv_state_kernel.hip.o")
+        set(SLLM_CAUSAL_ATTENTION_G1_KERNEL_OBJECT
+            "${CMAKE_BINARY_DIR}/causal_attention_kernel.hip.o")
         add_custom_command(
             OUTPUT "${SLLM_SEMANTIC_G1_PUBLIC_OBJECT}"
             COMMAND "${CMAKE_HIP_COMPILER}" ${SLLM_SEMANTIC_G1_HIP_FLAGS}
                 "${PROJECT_SOURCE_DIR}/src/public_runtime.hip.cpp"
                 -o "${SLLM_SEMANTIC_G1_PUBLIC_OBJECT}"
-            DEPENDS src/public_runtime.hip.cpp src/public_runtime_internal.hpp src/rmsnorm_api.hpp
+            DEPENDS src/public_runtime.hip.cpp src/matmul_runtime.inc
+                src/attention_preprocess_runtime.inc
+                src/causal_attention_runtime.inc
+                src/public_runtime_internal.hpp src/embedding_api.hpp
+                src/embedding_kernel_internal.hpp src/elementwise_api.hpp
+                src/elementwise_kernel_internal.hpp src/matmul_api.hpp
+                src/matmul_kernel_internal.hpp src/rmsnorm_api.hpp
+                src/attention_preprocess_api.hpp
+                src/attention_preprocess_kernel_internal.hpp
+                src/causal_attention_api.hpp
+                src/causal_attention_kernel_internal.hpp
+                src/kv_state_api.hpp src/kv_state_kernel_internal.hpp
+                src/evidence_abi.h
                 "${PROJECT_SOURCE_DIR}/../../include/sllm/hip.h"
             WORKING_DIRECTORY "${CMAKE_BINARY_DIR}"
             VERBATIM
@@ -276,18 +304,110 @@ if(SLLM_ENABLE_PUBLIC_HIP_RUNTIME)
             WORKING_DIRECTORY "${CMAKE_BINARY_DIR}"
             VERBATIM
         )
+        add_custom_command(
+            OUTPUT "${SLLM_ELEMENTWISE_G1_KERNEL_OBJECT}"
+            COMMAND "${CMAKE_HIP_COMPILER}" ${SLLM_SEMANTIC_G1_HIP_FLAGS}
+                "${PROJECT_SOURCE_DIR}/src/elementwise_kernel.hip.cpp"
+                -o "${SLLM_ELEMENTWISE_G1_KERNEL_OBJECT}"
+            DEPENDS src/elementwise_kernel.hip.cpp src/elementwise_kernel_internal.hpp
+                "${PROJECT_SOURCE_DIR}/../../include/sllm/hip.h"
+            WORKING_DIRECTORY "${CMAKE_BINARY_DIR}"
+            VERBATIM
+        )
+        add_custom_command(
+            OUTPUT "${SLLM_EMBEDDING_G1_KERNEL_OBJECT}"
+            COMMAND "${CMAKE_HIP_COMPILER}" ${SLLM_SEMANTIC_G1_HIP_FLAGS}
+                "${PROJECT_SOURCE_DIR}/src/embedding_kernel.hip.cpp"
+                -o "${SLLM_EMBEDDING_G1_KERNEL_OBJECT}"
+            DEPENDS src/embedding_kernel.hip.cpp src/embedding_kernel_internal.hpp
+                "${PROJECT_SOURCE_DIR}/../../include/sllm/hip.h"
+            WORKING_DIRECTORY "${CMAKE_BINARY_DIR}"
+            VERBATIM
+        )
+        add_custom_command(
+            OUTPUT "${SLLM_MATMUL_G1_KERNEL_OBJECT}"
+            COMMAND "${CMAKE_HIP_COMPILER}" ${SLLM_SEMANTIC_G1_HIP_FLAGS}
+                "${PROJECT_SOURCE_DIR}/src/matmul_kernel.hip.cpp"
+                -o "${SLLM_MATMUL_G1_KERNEL_OBJECT}"
+            DEPENDS src/matmul_kernel.hip.cpp src/matmul_kernel_internal.hpp
+                "${PROJECT_SOURCE_DIR}/../../include/sllm/hip.h"
+            WORKING_DIRECTORY "${CMAKE_BINARY_DIR}"
+            VERBATIM
+        )
+        add_custom_command(
+            OUTPUT "${SLLM_ATTENTION_PREPROCESS_G1_KERNEL_OBJECT}"
+            COMMAND "${CMAKE_HIP_COMPILER}" ${SLLM_SEMANTIC_G1_HIP_FLAGS}
+                "${PROJECT_SOURCE_DIR}/src/attention_preprocess_kernel.hip.cpp"
+                -o "${SLLM_ATTENTION_PREPROCESS_G1_KERNEL_OBJECT}"
+            DEPENDS src/attention_preprocess_kernel.hip.cpp
+                src/attention_preprocess_kernel_internal.hpp
+                src/rmsnorm_kernel_internal.hpp
+                "${PROJECT_SOURCE_DIR}/../../include/sllm/hip.h"
+            WORKING_DIRECTORY "${CMAKE_BINARY_DIR}"
+            VERBATIM
+        )
+        add_custom_command(
+            OUTPUT "${SLLM_KV_STATE_G1_KERNEL_OBJECT}"
+            COMMAND "${CMAKE_HIP_COMPILER}" ${SLLM_SEMANTIC_G1_HIP_FLAGS}
+                "${PROJECT_SOURCE_DIR}/src/kv_state_kernel.hip.cpp"
+                -o "${SLLM_KV_STATE_G1_KERNEL_OBJECT}"
+            DEPENDS src/kv_state_kernel.hip.cpp
+                src/kv_state_kernel_internal.hpp
+                "${PROJECT_SOURCE_DIR}/../../include/sllm/hip.h"
+            WORKING_DIRECTORY "${CMAKE_BINARY_DIR}"
+            VERBATIM
+        )
+        add_custom_command(
+            OUTPUT "${SLLM_CAUSAL_ATTENTION_G1_KERNEL_OBJECT}"
+            COMMAND "${CMAKE_HIP_COMPILER}" ${SLLM_SEMANTIC_G1_HIP_FLAGS}
+                "${PROJECT_SOURCE_DIR}/src/causal_attention_kernel.hip.cpp"
+                -o "${SLLM_CAUSAL_ATTENTION_G1_KERNEL_OBJECT}"
+            DEPENDS src/causal_attention_kernel.hip.cpp
+                src/causal_attention_kernel_internal.hpp
+                "${PROJECT_SOURCE_DIR}/../../include/sllm/hip.h"
+            WORKING_DIRECTORY "${CMAKE_BINARY_DIR}"
+            VERBATIM
+        )
         set_source_files_properties(
             "${SLLM_SEMANTIC_G1_PUBLIC_OBJECT}" "${SLLM_SEMANTIC_G1_KERNEL_OBJECT}"
+            "${SLLM_ELEMENTWISE_G1_KERNEL_OBJECT}"
+            "${SLLM_EMBEDDING_G1_KERNEL_OBJECT}"
+            "${SLLM_MATMUL_G1_KERNEL_OBJECT}"
+            "${SLLM_ATTENTION_PREPROCESS_G1_KERNEL_OBJECT}"
+            "${SLLM_KV_STATE_G1_KERNEL_OBJECT}"
+            "${SLLM_CAUSAL_ATTENTION_G1_KERNEL_OBJECT}"
             PROPERTIES GENERATED TRUE EXTERNAL_OBJECT TRUE
         )
         list(APPEND SLLM_HIP_NATIVE_SOURCES
             "${SLLM_SEMANTIC_G1_PUBLIC_OBJECT}" "${SLLM_SEMANTIC_G1_KERNEL_OBJECT}"
+            "${SLLM_ELEMENTWISE_G1_KERNEL_OBJECT}"
+            "${SLLM_EMBEDDING_G1_KERNEL_OBJECT}"
+            "${SLLM_MATMUL_G1_KERNEL_OBJECT}"
+            "${SLLM_ATTENTION_PREPROCESS_G1_KERNEL_OBJECT}"
+            "${SLLM_KV_STATE_G1_KERNEL_OBJECT}"
+            "${SLLM_CAUSAL_ATTENTION_G1_KERNEL_OBJECT}"
         )
     else()
         set_source_files_properties(src/public_runtime.hip.cpp PROPERTIES LANGUAGE HIP)
         set_source_files_properties(src/rmsnorm_kernel.hip.cpp PROPERTIES LANGUAGE HIP)
+        set_source_files_properties(src/elementwise_kernel.hip.cpp PROPERTIES LANGUAGE HIP)
+        set_source_files_properties(src/embedding_kernel.hip.cpp PROPERTIES LANGUAGE HIP)
+        set_source_files_properties(src/matmul_kernel.hip.cpp PROPERTIES LANGUAGE HIP)
+        set_source_files_properties(src/attention_preprocess_kernel.hip.cpp
+                                    PROPERTIES LANGUAGE HIP)
+        set_source_files_properties(src/kv_state_kernel.hip.cpp PROPERTIES
+                                    LANGUAGE HIP)
+        set_source_files_properties(src/causal_attention_kernel.hip.cpp PROPERTIES
+                                    LANGUAGE HIP)
         list(APPEND SLLM_HIP_NATIVE_SOURCES src/public_runtime.hip.cpp)
         list(APPEND SLLM_HIP_NATIVE_SOURCES src/rmsnorm_kernel.hip.cpp)
+        list(APPEND SLLM_HIP_NATIVE_SOURCES src/elementwise_kernel.hip.cpp)
+        list(APPEND SLLM_HIP_NATIVE_SOURCES src/embedding_kernel.hip.cpp)
+        list(APPEND SLLM_HIP_NATIVE_SOURCES src/matmul_kernel.hip.cpp)
+        list(APPEND SLLM_HIP_NATIVE_SOURCES
+            src/attention_preprocess_kernel.hip.cpp)
+        list(APPEND SLLM_HIP_NATIVE_SOURCES src/kv_state_kernel.hip.cpp)
+        list(APPEND SLLM_HIP_NATIVE_SOURCES src/causal_attention_kernel.hip.cpp)
     endif()
 endif()
 
@@ -341,6 +461,7 @@ if(SLLM_ENABLE_HIP_RUNTIME OR SLLM_ENABLE_PUBLIC_HIP_RUNTIME)
     target_compile_options(sllm_hip_stub PRIVATE
         $<$<COMPILE_LANGUAGE:HIP>:-mcode-object-version=6>
         $<$<COMPILE_LANGUAGE:HIP>:-mno-wavefrontsize64>
+        $<$<COMPILE_LANGUAGE:HIP>:-ffp-contract=off>
     )
 endif()
 
@@ -396,7 +517,13 @@ if(SLLM_ENABLE_PUBLIC_RUNTIME_HOST_TEST)
     find_package(Threads REQUIRED)
     add_executable(sllm_public_runtime_host_test
         src/public_runtime.hip.cpp
+        src/embedding_api.cpp
+        src/elementwise_api.cpp
+        src/matmul_api.cpp
         src/rmsnorm_api.cpp
+        src/attention_preprocess_api.cpp
+        src/causal_attention_api.cpp
+        src/kv_state_api.cpp
         tests/fake_hip_runtime.cpp
         tests/public_runtime_host_test.cpp
     )
@@ -424,5 +551,29 @@ if(SLLM_ENABLE_PUBLIC_RUNTIME_HOST_TEST)
     target_link_libraries(sllm_public_runtime_host_test PRIVATE Threads::Threads)
     add_test(NAME sllm_public_runtime_host_test
         COMMAND sllm_public_runtime_host_test
+    )
+
+    add_executable(sllm_private_evidence_stub_test
+        tests/private_evidence_stub_test.cpp
+    )
+    target_compile_features(sllm_private_evidence_stub_test PRIVATE cxx_std_17)
+    target_include_directories(sllm_private_evidence_stub_test PRIVATE
+        "${PROJECT_SOURCE_DIR}/../../include"
+        "${PROJECT_SOURCE_DIR}/src"
+    )
+    target_compile_options(sllm_private_evidence_stub_test PRIVATE
+        -Wall
+        -Wextra
+        -Wpedantic
+        -Wconversion
+        -Wsign-conversion
+        -Wshadow
+        -Werror
+    )
+    target_link_libraries(sllm_private_evidence_stub_test PRIVATE
+        sllm_hip_stub Threads::Threads
+    )
+    add_test(NAME sllm_private_evidence_stub_test
+        COMMAND sllm_private_evidence_stub_test
     )
 endif()

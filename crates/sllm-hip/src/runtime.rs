@@ -27,6 +27,11 @@ const DROP_WAIT_TIMEOUT_MS: u32 = 0;
 #[cfg(test)]
 static FORCED_RMSNORM_PLAN_RELEASE: Mutex<Option<(RuntimeStatus, bool)>> = Mutex::new(None);
 #[cfg(test)]
+static FORCED_MATMUL_PLAN_RELEASE: Mutex<Option<(RuntimeStatus, bool)>> = Mutex::new(None);
+#[cfg(test)]
+static FORCED_ATTENTION_PREPROCESS_PLAN_RELEASE: Mutex<Option<(RuntimeStatus, bool)>> =
+    Mutex::new(None);
+#[cfg(test)]
 pub(crate) static CLEANUP_TEST_SERIAL: Mutex<()> = Mutex::new(());
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -60,6 +65,19 @@ pub enum RuntimeStatus {
     UnsupportedScaleMode,
     AliasOverlap,
     ContextOrDeviceMismatch,
+    InvalidElementwiseDescriptor,
+    InvalidEmbeddingDescriptor,
+    TokenIdOutOfRange,
+    InvalidMatmulDescriptor,
+    InvalidAttentionPreprocessDescriptor,
+    PositionPayloadMismatch,
+    InvalidKvStateDescriptor,
+    InvalidKvAppendDescriptor,
+    KvLengthMismatch,
+    KvCapacityExceeded,
+    InvalidCausalAttentionDescriptor,
+    CausalAttentionLengthMismatch,
+    CausalAttentionStateBusy,
     Unknown(u32),
 }
 
@@ -95,6 +113,25 @@ impl RuntimeStatus {
             sys::SLLM_STATUS_UNSUPPORTED_SCALE_MODE => Self::UnsupportedScaleMode,
             sys::SLLM_STATUS_ALIAS_OVERLAP => Self::AliasOverlap,
             sys::SLLM_STATUS_CONTEXT_OR_DEVICE_MISMATCH => Self::ContextOrDeviceMismatch,
+            sys::SLLM_STATUS_INVALID_ELEMENTWISE_DESCRIPTOR => Self::InvalidElementwiseDescriptor,
+            sys::SLLM_STATUS_INVALID_EMBEDDING_DESCRIPTOR => Self::InvalidEmbeddingDescriptor,
+            sys::SLLM_STATUS_TOKEN_ID_OUT_OF_RANGE => Self::TokenIdOutOfRange,
+            sys::SLLM_STATUS_INVALID_MATMUL_DESCRIPTOR => Self::InvalidMatmulDescriptor,
+            sys::SLLM_STATUS_INVALID_ATTENTION_PREPROCESS_DESCRIPTOR => {
+                Self::InvalidAttentionPreprocessDescriptor
+            }
+            sys::SLLM_STATUS_POSITION_PAYLOAD_MISMATCH => Self::PositionPayloadMismatch,
+            sys::SLLM_STATUS_INVALID_KV_STATE_DESCRIPTOR => Self::InvalidKvStateDescriptor,
+            sys::SLLM_STATUS_INVALID_KV_APPEND_DESCRIPTOR => Self::InvalidKvAppendDescriptor,
+            sys::SLLM_STATUS_KV_LENGTH_MISMATCH => Self::KvLengthMismatch,
+            sys::SLLM_STATUS_KV_CAPACITY_EXCEEDED => Self::KvCapacityExceeded,
+            sys::SLLM_STATUS_INVALID_CAUSAL_ATTENTION_DESCRIPTOR => {
+                Self::InvalidCausalAttentionDescriptor
+            }
+            sys::SLLM_STATUS_CAUSAL_ATTENTION_LENGTH_MISMATCH => {
+                Self::CausalAttentionLengthMismatch
+            }
+            sys::SLLM_STATUS_CAUSAL_ATTENTION_STATE_BUSY => Self::CausalAttentionStateBusy,
             other => Self::Unknown(other),
         }
     }
@@ -130,6 +167,25 @@ impl RuntimeStatus {
             Self::UnsupportedScaleMode => sys::SLLM_STATUS_UNSUPPORTED_SCALE_MODE,
             Self::AliasOverlap => sys::SLLM_STATUS_ALIAS_OVERLAP,
             Self::ContextOrDeviceMismatch => sys::SLLM_STATUS_CONTEXT_OR_DEVICE_MISMATCH,
+            Self::InvalidElementwiseDescriptor => sys::SLLM_STATUS_INVALID_ELEMENTWISE_DESCRIPTOR,
+            Self::InvalidEmbeddingDescriptor => sys::SLLM_STATUS_INVALID_EMBEDDING_DESCRIPTOR,
+            Self::TokenIdOutOfRange => sys::SLLM_STATUS_TOKEN_ID_OUT_OF_RANGE,
+            Self::InvalidMatmulDescriptor => sys::SLLM_STATUS_INVALID_MATMUL_DESCRIPTOR,
+            Self::InvalidAttentionPreprocessDescriptor => {
+                sys::SLLM_STATUS_INVALID_ATTENTION_PREPROCESS_DESCRIPTOR
+            }
+            Self::PositionPayloadMismatch => sys::SLLM_STATUS_POSITION_PAYLOAD_MISMATCH,
+            Self::InvalidKvStateDescriptor => sys::SLLM_STATUS_INVALID_KV_STATE_DESCRIPTOR,
+            Self::InvalidKvAppendDescriptor => sys::SLLM_STATUS_INVALID_KV_APPEND_DESCRIPTOR,
+            Self::KvLengthMismatch => sys::SLLM_STATUS_KV_LENGTH_MISMATCH,
+            Self::KvCapacityExceeded => sys::SLLM_STATUS_KV_CAPACITY_EXCEEDED,
+            Self::InvalidCausalAttentionDescriptor => {
+                sys::SLLM_STATUS_INVALID_CAUSAL_ATTENTION_DESCRIPTOR
+            }
+            Self::CausalAttentionLengthMismatch => {
+                sys::SLLM_STATUS_CAUSAL_ATTENTION_LENGTH_MISMATCH
+            }
+            Self::CausalAttentionStateBusy => sys::SLLM_STATUS_CAUSAL_ATTENTION_STATE_BUSY,
             Self::Unknown(raw) => raw,
         }
     }
@@ -196,8 +252,23 @@ fn status_name(status: RuntimeStatus) -> &'static str {
         RuntimeStatus::UnsupportedEncoding => "unsupported tensor encoding",
         RuntimeStatus::InvalidEpsilon => "invalid RMSNorm epsilon",
         RuntimeStatus::UnsupportedScaleMode => "unsupported RMSNorm scale mode",
-        RuntimeStatus::AliasOverlap => "overlapping RMSNorm tensor intervals",
-        RuntimeStatus::ContextOrDeviceMismatch => "RMSNorm context or device mismatch",
+        RuntimeStatus::AliasOverlap => "overlapping semantic tensor intervals",
+        RuntimeStatus::ContextOrDeviceMismatch => "semantic context or device mismatch",
+        RuntimeStatus::InvalidElementwiseDescriptor => "invalid elementwise descriptor",
+        RuntimeStatus::InvalidEmbeddingDescriptor => "invalid embedding descriptor",
+        RuntimeStatus::TokenIdOutOfRange => "embedding token ID is out of range",
+        RuntimeStatus::InvalidMatmulDescriptor => "invalid matmul descriptor",
+        RuntimeStatus::InvalidAttentionPreprocessDescriptor => {
+            "invalid attention preprocess descriptor"
+        }
+        RuntimeStatus::PositionPayloadMismatch => "attention preprocess position payload mismatch",
+        RuntimeStatus::InvalidKvStateDescriptor => "invalid KV state descriptor",
+        RuntimeStatus::InvalidKvAppendDescriptor => "invalid KV append descriptor",
+        RuntimeStatus::KvLengthMismatch => "KV state length mismatch",
+        RuntimeStatus::KvCapacityExceeded => "KV state capacity exceeded",
+        RuntimeStatus::InvalidCausalAttentionDescriptor => "invalid causal attention descriptor",
+        RuntimeStatus::CausalAttentionLengthMismatch => "causal attention length mismatch",
+        RuntimeStatus::CausalAttentionStateBusy => "causal attention state is busy",
         RuntimeStatus::Unknown(_) => "unknown public runtime status",
     }
 }
@@ -350,10 +421,62 @@ enum PendingCleanup {
         buffer: Arc<BufferInner>,
         disposition: CleanupDisposition,
     },
+    KvState {
+        raw: Option<NonNull<sys::sllm_kv_state_t>>,
+        context: Context,
+        disposition: CleanupDisposition,
+    },
+    KvView {
+        raw: Option<NonNull<sys::sllm_kv_view_t>>,
+        context: Context,
+        disposition: CleanupDisposition,
+    },
+    KvCompletion {
+        raw: Option<NonNull<sys::sllm_completion_t>>,
+        context: Context,
+        queue: Queue,
+        key: Buffer,
+        value: Buffer,
+        state: crate::kv_state::KvStateResource,
+        disposition: CleanupDisposition,
+    },
+    CausalCompletion {
+        raw: Option<NonNull<sys::sllm_completion_t>>,
+        context: Context,
+        queue: Queue,
+        query: Buffer,
+        output: Buffer,
+        state: crate::kv_state::KvStateResource,
+        disposition: CleanupDisposition,
+    },
     RmsNormPlan {
         raw: Option<NonNull<sys::sllm_rmsnorm_plan_t>>,
         context: Arc<ContextInner>,
         descriptor: Box<crate::rmsnorm::RmsNormDescriptor>,
+        disposition: CleanupDisposition,
+    },
+    ElementwisePlan {
+        raw: Option<NonNull<sys::sllm_elementwise_plan_t>>,
+        context: Arc<ContextInner>,
+        descriptor: Box<crate::elementwise::ElementwiseDescriptor>,
+        disposition: CleanupDisposition,
+    },
+    EmbeddingPlan {
+        raw: Option<NonNull<sys::sllm_embedding_plan_t>>,
+        context: Arc<ContextInner>,
+        descriptor: Box<crate::embedding::EmbeddingDescriptor>,
+        disposition: CleanupDisposition,
+    },
+    MatmulPlan {
+        raw: Option<NonNull<sys::sllm_matmul_plan_t>>,
+        context: Arc<ContextInner>,
+        descriptor: Box<crate::matmul::MatmulDescriptor>,
+        disposition: CleanupDisposition,
+    },
+    AttentionPreprocessPlan {
+        raw: Option<NonNull<sys::sllm_attention_preprocess_plan_t>>,
+        context: Arc<ContextInner>,
+        descriptor: Box<crate::attention_preprocess::AttentionPreprocessDescriptor>,
         disposition: CleanupDisposition,
     },
 }
@@ -1198,6 +1321,7 @@ fn clear_cleanup_test_hooks() {
         .take();
     clear_cleanup_cas_failures();
     clear_forced_rmsnorm_plan_release_for_test();
+    clear_forced_matmul_plan_release_for_test();
 }
 
 struct DurableCleanupOwner {
@@ -1347,7 +1471,17 @@ impl PendingCleanup {
             | Self::Buffer { disposition, .. }
             | Self::Event { disposition, .. }
             | Self::Completion { disposition, .. }
-            | Self::RmsNormPlan { disposition, .. } => *disposition == CleanupDisposition::Poisoned,
+            | Self::KvState { disposition, .. }
+            | Self::KvView { disposition, .. }
+            | Self::KvCompletion { disposition, .. }
+            | Self::CausalCompletion { disposition, .. }
+            | Self::RmsNormPlan { disposition, .. }
+            | Self::ElementwisePlan { disposition, .. }
+            | Self::EmbeddingPlan { disposition, .. }
+            | Self::MatmulPlan { disposition, .. }
+            | Self::AttentionPreprocessPlan { disposition, .. } => {
+                *disposition == CleanupDisposition::Poisoned
+            }
         }
     }
 }
@@ -1431,6 +1565,106 @@ fn release_completion_once(
     (RuntimeStatus::from_raw(status), NonNull::new(native))
 }
 
+pub(crate) fn release_kv_state_once(
+    raw: NonNull<sys::sllm_kv_state_t>,
+) -> (RuntimeStatus, Option<NonNull<sys::sllm_kv_state_t>>) {
+    let mut error_buffer = [0_u8; ERROR_CAPACITY];
+    let mut error_sink = sink(&mut error_buffer);
+    let mut native = raw.as_ptr();
+    let status = unsafe { sys::sllm_kv_state_release(&mut native, &mut error_sink) };
+    (RuntimeStatus::from_raw(status), NonNull::new(native))
+}
+
+pub(crate) fn release_kv_view_once(
+    raw: NonNull<sys::sllm_kv_view_t>,
+) -> (RuntimeStatus, Option<NonNull<sys::sllm_kv_view_t>>) {
+    let mut error_buffer = [0_u8; ERROR_CAPACITY];
+    let mut error_sink = sink(&mut error_buffer);
+    let mut native = raw.as_ptr();
+    let status = unsafe { sys::sllm_kv_view_release(&mut native, &mut error_sink) };
+    (RuntimeStatus::from_raw(status), NonNull::new(native))
+}
+
+pub(crate) fn release_kv_completion_once(
+    raw: NonNull<sys::sllm_completion_t>,
+) -> (RuntimeStatus, Option<NonNull<sys::sllm_completion_t>>) {
+    release_completion_once(raw)
+}
+
+pub(crate) fn enqueue_kv_state_cleanup(
+    raw: NonNull<sys::sllm_kv_state_t>,
+    context: Context,
+    status: RuntimeStatus,
+) {
+    let (_, disposition, _) = classify_release(status, Some(raw));
+    enqueue_cleanup(PendingCleanup::KvState {
+        raw: Some(raw),
+        context,
+        disposition,
+    });
+}
+
+pub(crate) fn enqueue_kv_view_cleanup(
+    raw: NonNull<sys::sllm_kv_view_t>,
+    context: Context,
+    status: RuntimeStatus,
+) {
+    let (_, disposition, _) = classify_release(status, Some(raw));
+    enqueue_cleanup(PendingCleanup::KvView {
+        raw: Some(raw),
+        context,
+        disposition,
+    });
+}
+
+pub(crate) fn enqueue_kv_completion_cleanup(
+    raw: NonNull<sys::sllm_completion_t>,
+    context: Context,
+    queue: Queue,
+    key: Buffer,
+    value: Buffer,
+    state: crate::kv_state::KvStateResource,
+    status: RuntimeStatus,
+) {
+    let (_, disposition, _) = classify_release(status, Some(raw));
+    enqueue_cleanup(PendingCleanup::KvCompletion {
+        raw: Some(raw),
+        context,
+        queue,
+        key,
+        value,
+        state,
+        disposition,
+    });
+}
+
+pub(crate) fn release_causal_completion_once(
+    raw: NonNull<sys::sllm_completion_t>,
+) -> (RuntimeStatus, Option<NonNull<sys::sllm_completion_t>>) {
+    release_completion_once(raw)
+}
+
+pub(crate) fn enqueue_causal_completion_cleanup(
+    raw: NonNull<sys::sllm_completion_t>,
+    context: Context,
+    queue: Queue,
+    query: Buffer,
+    output: Buffer,
+    state: crate::kv_state::KvStateResource,
+    status: RuntimeStatus,
+) {
+    let (_, disposition, _) = classify_release(status, Some(raw));
+    enqueue_cleanup(PendingCleanup::CausalCompletion {
+        raw: Some(raw),
+        context,
+        queue,
+        query,
+        output,
+        state,
+        disposition,
+    });
+}
+
 pub(crate) fn release_rmsnorm_plan_once(
     raw: NonNull<sys::sllm_rmsnorm_plan_t>,
 ) -> (RuntimeStatus, Option<NonNull<sys::sllm_rmsnorm_plan_t>>) {
@@ -1465,6 +1699,128 @@ pub(crate) fn enqueue_rmsnorm_cleanup(
     });
 }
 
+pub(crate) fn release_elementwise_plan_once(
+    raw: NonNull<sys::sllm_elementwise_plan_t>,
+) -> (RuntimeStatus, Option<NonNull<sys::sllm_elementwise_plan_t>>) {
+    let mut error_buffer = [0_u8; ERROR_CAPACITY];
+    let mut error_sink = sink(&mut error_buffer);
+    let mut native = raw.as_ptr();
+    let status = unsafe { sys::sllm_elementwise_plan_release(&mut native, &mut error_sink) };
+    (RuntimeStatus::from_raw(status), NonNull::new(native))
+}
+
+pub(crate) fn enqueue_elementwise_cleanup(
+    raw: NonNull<sys::sllm_elementwise_plan_t>,
+    context: Context,
+    descriptor: crate::elementwise::ElementwiseDescriptor,
+    status: RuntimeStatus,
+) {
+    let (_, disposition, _) = classify_release(status, Some(raw));
+    enqueue_cleanup(PendingCleanup::ElementwisePlan {
+        raw: Some(raw),
+        context: Arc::clone(&context.inner),
+        descriptor: Box::new(descriptor),
+        disposition,
+    });
+}
+
+pub(crate) fn release_embedding_plan_once(
+    raw: NonNull<sys::sllm_embedding_plan_t>,
+) -> (RuntimeStatus, Option<NonNull<sys::sllm_embedding_plan_t>>) {
+    let mut error_buffer = [0_u8; ERROR_CAPACITY];
+    let mut error_sink = sink(&mut error_buffer);
+    let mut native = raw.as_ptr();
+    let status = unsafe { sys::sllm_embedding_plan_release(&mut native, &mut error_sink) };
+    (RuntimeStatus::from_raw(status), NonNull::new(native))
+}
+
+pub(crate) fn enqueue_embedding_cleanup(
+    raw: NonNull<sys::sllm_embedding_plan_t>,
+    context: Context,
+    descriptor: crate::embedding::EmbeddingDescriptor,
+    status: RuntimeStatus,
+) {
+    let (_, disposition, _) = classify_release(status, Some(raw));
+    enqueue_cleanup(PendingCleanup::EmbeddingPlan {
+        raw: Some(raw),
+        context: Arc::clone(&context.inner),
+        descriptor: Box::new(descriptor),
+        disposition,
+    });
+}
+
+pub(crate) fn release_matmul_plan_once(
+    raw: NonNull<sys::sllm_matmul_plan_t>,
+) -> (RuntimeStatus, Option<NonNull<sys::sllm_matmul_plan_t>>) {
+    #[cfg(test)]
+    if let Some((status, consumed)) = FORCED_MATMUL_PLAN_RELEASE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take()
+    {
+        return (status, if consumed { None } else { Some(raw) });
+    }
+
+    let mut error_buffer = [0_u8; ERROR_CAPACITY];
+    let mut error_sink = sink(&mut error_buffer);
+    let mut native = raw.as_ptr();
+    let status = unsafe { sys::sllm_matmul_plan_release(&mut native, &mut error_sink) };
+    (RuntimeStatus::from_raw(status), NonNull::new(native))
+}
+
+pub(crate) fn enqueue_matmul_cleanup(
+    raw: NonNull<sys::sllm_matmul_plan_t>,
+    context: Context,
+    descriptor: crate::matmul::MatmulDescriptor,
+    status: RuntimeStatus,
+) {
+    let (_, disposition, _) = classify_release(status, Some(raw));
+    enqueue_cleanup(PendingCleanup::MatmulPlan {
+        raw: Some(raw),
+        context: Arc::clone(&context.inner),
+        descriptor: Box::new(descriptor),
+        disposition,
+    });
+}
+
+pub(crate) fn release_attention_preprocess_plan_once(
+    raw: NonNull<sys::sllm_attention_preprocess_plan_t>,
+) -> (
+    RuntimeStatus,
+    Option<NonNull<sys::sllm_attention_preprocess_plan_t>>,
+) {
+    #[cfg(test)]
+    if let Some((status, consumed)) = FORCED_ATTENTION_PREPROCESS_PLAN_RELEASE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take()
+    {
+        return (status, if consumed { None } else { Some(raw) });
+    }
+
+    let mut error_buffer = [0_u8; ERROR_CAPACITY];
+    let mut error_sink = sink(&mut error_buffer);
+    let mut native = raw.as_ptr();
+    let status =
+        unsafe { sys::sllm_attention_preprocess_plan_release(&mut native, &mut error_sink) };
+    (RuntimeStatus::from_raw(status), NonNull::new(native))
+}
+
+pub(crate) fn enqueue_attention_preprocess_cleanup(
+    raw: NonNull<sys::sllm_attention_preprocess_plan_t>,
+    context: Context,
+    descriptor: crate::attention_preprocess::AttentionPreprocessDescriptor,
+    status: RuntimeStatus,
+) {
+    let (_, disposition, _) = classify_release(status, Some(raw));
+    enqueue_cleanup(PendingCleanup::AttentionPreprocessPlan {
+        raw: Some(raw),
+        context: Arc::clone(&context.inner),
+        descriptor: Box::new(descriptor),
+        disposition,
+    });
+}
+
 #[cfg(test)]
 pub(crate) fn force_rmsnorm_plan_release_for_test(status: RuntimeStatus, consumed: bool) {
     *FORCED_RMSNORM_PLAN_RELEASE
@@ -1475,6 +1831,39 @@ pub(crate) fn force_rmsnorm_plan_release_for_test(status: RuntimeStatus, consume
 #[cfg(test)]
 pub(crate) fn clear_forced_rmsnorm_plan_release_for_test() {
     FORCED_RMSNORM_PLAN_RELEASE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take();
+}
+
+#[cfg(test)]
+pub(crate) fn force_matmul_plan_release_for_test(status: RuntimeStatus, consumed: bool) {
+    *FORCED_MATMUL_PLAN_RELEASE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some((status, consumed));
+}
+
+#[cfg(test)]
+pub(crate) fn clear_forced_matmul_plan_release_for_test() {
+    FORCED_MATMUL_PLAN_RELEASE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take();
+}
+
+#[cfg(test)]
+pub(crate) fn force_attention_preprocess_plan_release_for_test(
+    status: RuntimeStatus,
+    consumed: bool,
+) {
+    *FORCED_ATTENTION_PREPROCESS_PLAN_RELEASE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some((status, consumed));
+}
+
+#[cfg(test)]
+pub(crate) fn clear_forced_attention_preprocess_plan_release_for_test() {
+    FORCED_ATTENTION_PREPROCESS_PLAN_RELEASE
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .take();
@@ -1701,6 +2090,266 @@ impl PendingCleanup {
                     })
                 }
             }
+            Self::KvState {
+                raw,
+                context,
+                disposition,
+            } => {
+                let Some(raw_handle) = raw else {
+                    return if disposition == CleanupDisposition::Poisoned {
+                        Some(Self::KvState {
+                            raw,
+                            context,
+                            disposition,
+                        })
+                    } else {
+                        None
+                    };
+                };
+                if disposition == CleanupDisposition::Poisoned {
+                    return Some(Self::KvState {
+                        raw: Some(raw_handle),
+                        context,
+                        disposition,
+                    });
+                }
+                let (status, remaining) = release_kv_state_once(raw_handle);
+                let (remaining, disposition, done) = classify_release(status, remaining);
+                if done {
+                    None
+                } else {
+                    Some(Self::KvState {
+                        raw: remaining,
+                        context,
+                        disposition,
+                    })
+                }
+            }
+            Self::KvView {
+                raw,
+                context,
+                disposition,
+            } => {
+                let Some(raw_handle) = raw else {
+                    return if disposition == CleanupDisposition::Poisoned {
+                        Some(Self::KvView {
+                            raw,
+                            context,
+                            disposition,
+                        })
+                    } else {
+                        None
+                    };
+                };
+                if disposition == CleanupDisposition::Poisoned {
+                    return Some(Self::KvView {
+                        raw: Some(raw_handle),
+                        context,
+                        disposition,
+                    });
+                }
+                let (status, remaining) = release_kv_view_once(raw_handle);
+                let (remaining, disposition, done) = classify_release(status, remaining);
+                if done {
+                    None
+                } else {
+                    Some(Self::KvView {
+                        raw: remaining,
+                        context,
+                        disposition,
+                    })
+                }
+            }
+            Self::KvCompletion {
+                raw,
+                context,
+                queue,
+                key,
+                value,
+                state,
+                disposition,
+            } => {
+                let Some(raw_handle) = raw else {
+                    return if disposition == CleanupDisposition::Poisoned {
+                        Some(Self::KvCompletion {
+                            raw,
+                            context,
+                            queue,
+                            key,
+                            value,
+                            state,
+                            disposition,
+                        })
+                    } else {
+                        None
+                    };
+                };
+                if disposition == CleanupDisposition::Poisoned {
+                    return Some(Self::KvCompletion {
+                        raw: Some(raw_handle),
+                        context,
+                        queue,
+                        key,
+                        value,
+                        state,
+                        disposition,
+                    });
+                }
+                let mut error_buffer = [0_u8; ERROR_CAPACITY];
+                let mut error_sink = sink(&mut error_buffer);
+                let mut result = Completion::result();
+                let wait_status = unsafe {
+                    sys::sllm_completion_wait(
+                        raw_handle.as_ptr(),
+                        DROP_WAIT_TIMEOUT_MS,
+                        &mut result,
+                        &mut error_sink,
+                    )
+                };
+                let status = RuntimeStatus::from_raw(wait_status);
+                let state_result = CompletionState::from_raw(result.state);
+                if !matches!(state_result, Ok(CompletionState::Success)) {
+                    let pending = matches!(state_result, Ok(CompletionState::Pending))
+                        && matches!(
+                            status,
+                            RuntimeStatus::Pending | RuntimeStatus::Timeout | RuntimeStatus::Busy
+                        );
+                    return Some(Self::KvCompletion {
+                        raw: Some(raw_handle),
+                        context,
+                        queue,
+                        key,
+                        value,
+                        state,
+                        disposition: if pending {
+                            CleanupDisposition::Recoverable
+                        } else {
+                            CleanupDisposition::Poisoned
+                        },
+                    });
+                }
+                if status != RuntimeStatus::Ok {
+                    return Some(Self::KvCompletion {
+                        raw: Some(raw_handle),
+                        context,
+                        queue,
+                        key,
+                        value,
+                        state,
+                        disposition: CleanupDisposition::Poisoned,
+                    });
+                }
+                let (release_status, remaining) = release_kv_completion_once(raw_handle);
+                let (remaining, disposition, done) = classify_release(release_status, remaining);
+                if done {
+                    None
+                } else {
+                    Some(Self::KvCompletion {
+                        raw: remaining,
+                        context,
+                        queue,
+                        key,
+                        value,
+                        state,
+                        disposition,
+                    })
+                }
+            }
+            Self::CausalCompletion {
+                raw,
+                context,
+                queue,
+                query,
+                output,
+                state,
+                disposition,
+            } => {
+                let Some(raw_handle) = raw else {
+                    return if disposition == CleanupDisposition::Poisoned {
+                        Some(Self::CausalCompletion {
+                            raw,
+                            context,
+                            queue,
+                            query,
+                            output,
+                            state,
+                            disposition,
+                        })
+                    } else {
+                        None
+                    };
+                };
+                if disposition == CleanupDisposition::Poisoned {
+                    return Some(Self::CausalCompletion {
+                        raw: Some(raw_handle),
+                        context,
+                        queue,
+                        query,
+                        output,
+                        state,
+                        disposition,
+                    });
+                }
+                let mut error_buffer = [0_u8; ERROR_CAPACITY];
+                let mut error_sink = sink(&mut error_buffer);
+                let mut result = Completion::result();
+                let wait_status = unsafe {
+                    sys::sllm_completion_wait(
+                        raw_handle.as_ptr(),
+                        DROP_WAIT_TIMEOUT_MS,
+                        &mut result,
+                        &mut error_sink,
+                    )
+                };
+                let status = RuntimeStatus::from_raw(wait_status);
+                let state_result = CompletionState::from_raw(result.state);
+                if !matches!(state_result, Ok(CompletionState::Success)) {
+                    let pending = matches!(state_result, Ok(CompletionState::Pending))
+                        && matches!(
+                            status,
+                            RuntimeStatus::Pending | RuntimeStatus::Timeout | RuntimeStatus::Busy
+                        );
+                    return Some(Self::CausalCompletion {
+                        raw: Some(raw_handle),
+                        context,
+                        queue,
+                        query,
+                        output,
+                        state,
+                        disposition: if pending {
+                            CleanupDisposition::Recoverable
+                        } else {
+                            CleanupDisposition::Poisoned
+                        },
+                    });
+                }
+                if status != RuntimeStatus::Ok {
+                    return Some(Self::CausalCompletion {
+                        raw: Some(raw_handle),
+                        context,
+                        queue,
+                        query,
+                        output,
+                        state,
+                        disposition: CleanupDisposition::Poisoned,
+                    });
+                }
+                let (release_status, remaining) = release_causal_completion_once(raw_handle);
+                let (remaining, disposition, done) = classify_release(release_status, remaining);
+                if done {
+                    None
+                } else {
+                    Some(Self::CausalCompletion {
+                        raw: remaining,
+                        context,
+                        queue,
+                        query,
+                        output,
+                        state,
+                        disposition,
+                    })
+                }
+            }
             Self::RmsNormPlan {
                 raw,
                 context,
@@ -1737,6 +2386,166 @@ impl PendingCleanup {
                     None
                 } else {
                     Some(Self::RmsNormPlan {
+                        raw: remaining,
+                        context,
+                        descriptor,
+                        disposition,
+                    })
+                }
+            }
+            Self::ElementwisePlan {
+                raw,
+                context,
+                descriptor,
+                disposition,
+            } => {
+                let Some(raw_handle) = raw else {
+                    return if disposition == CleanupDisposition::Poisoned {
+                        Some(Self::ElementwisePlan {
+                            raw,
+                            context,
+                            descriptor,
+                            disposition,
+                        })
+                    } else {
+                        None
+                    };
+                };
+                if disposition == CleanupDisposition::Poisoned {
+                    return Some(Self::ElementwisePlan {
+                        raw: Some(raw_handle),
+                        context,
+                        descriptor,
+                        disposition,
+                    });
+                }
+                let (status, remaining) = release_elementwise_plan_once(raw_handle);
+                let remaining = remaining?;
+                let (remaining, disposition, done) = classify_release(status, Some(remaining));
+                if done {
+                    None
+                } else {
+                    Some(Self::ElementwisePlan {
+                        raw: remaining,
+                        context,
+                        descriptor,
+                        disposition,
+                    })
+                }
+            }
+            Self::EmbeddingPlan {
+                raw,
+                context,
+                descriptor,
+                disposition,
+            } => {
+                let Some(raw_handle) = raw else {
+                    return if disposition == CleanupDisposition::Poisoned {
+                        Some(Self::EmbeddingPlan {
+                            raw,
+                            context,
+                            descriptor,
+                            disposition,
+                        })
+                    } else {
+                        None
+                    };
+                };
+                if disposition == CleanupDisposition::Poisoned {
+                    return Some(Self::EmbeddingPlan {
+                        raw: Some(raw_handle),
+                        context,
+                        descriptor,
+                        disposition,
+                    });
+                }
+                let (status, remaining) = release_embedding_plan_once(raw_handle);
+                let remaining = remaining?;
+                let (remaining, disposition, done) = classify_release(status, Some(remaining));
+                if done {
+                    None
+                } else {
+                    Some(Self::EmbeddingPlan {
+                        raw: remaining,
+                        context,
+                        descriptor,
+                        disposition,
+                    })
+                }
+            }
+            Self::MatmulPlan {
+                raw,
+                context,
+                descriptor,
+                disposition,
+            } => {
+                let Some(raw_handle) = raw else {
+                    return if disposition == CleanupDisposition::Poisoned {
+                        Some(Self::MatmulPlan {
+                            raw,
+                            context,
+                            descriptor,
+                            disposition,
+                        })
+                    } else {
+                        None
+                    };
+                };
+                if disposition == CleanupDisposition::Poisoned {
+                    return Some(Self::MatmulPlan {
+                        raw: Some(raw_handle),
+                        context,
+                        descriptor,
+                        disposition,
+                    });
+                }
+                let (status, remaining) = release_matmul_plan_once(raw_handle);
+                let remaining = remaining?;
+                let (remaining, disposition, done) = classify_release(status, Some(remaining));
+                if done {
+                    None
+                } else {
+                    Some(Self::MatmulPlan {
+                        raw: remaining,
+                        context,
+                        descriptor,
+                        disposition,
+                    })
+                }
+            }
+            Self::AttentionPreprocessPlan {
+                raw,
+                context,
+                descriptor,
+                disposition,
+            } => {
+                let Some(raw_handle) = raw else {
+                    return if disposition == CleanupDisposition::Poisoned {
+                        Some(Self::AttentionPreprocessPlan {
+                            raw,
+                            context,
+                            descriptor,
+                            disposition,
+                        })
+                    } else {
+                        None
+                    };
+                };
+                if disposition == CleanupDisposition::Poisoned {
+                    return Some(Self::AttentionPreprocessPlan {
+                        raw: Some(raw_handle),
+                        context,
+                        descriptor,
+                        disposition,
+                    });
+                }
+                let (status, remaining) = release_attention_preprocess_plan_once(raw_handle);
+                let remaining = remaining?;
+                let (remaining, disposition, done) = classify_release(status, Some(remaining));
+                if done {
+                    None
+                } else {
+                    Some(Self::AttentionPreprocessPlan {
                         raw: remaining,
                         context,
                         descriptor,
@@ -1786,6 +2595,7 @@ fn reap_pending_cleanup() {
 
 struct ContextInner {
     raw: Option<NonNull<sys::sllm_context_t>>,
+    expected_target: Option<Arc<str>>,
     #[cfg(test)]
     drop_probe: Option<Arc<AtomicUsize>>,
 }
@@ -1799,9 +2609,20 @@ unsafe impl Send for ContextInner {}
 unsafe impl Sync for ContextInner {}
 
 impl ContextInner {
+    #[cfg(test)]
     fn new(raw: Option<NonNull<sys::sllm_context_t>>) -> Self {
         Self {
             raw,
+            expected_target: None,
+            #[cfg(test)]
+            drop_probe: None,
+        }
+    }
+
+    fn new_with_target(raw: NonNull<sys::sllm_context_t>, target: &str) -> Self {
+        Self {
+            raw: Some(raw),
+            expected_target: Some(Arc::from(target)),
             #[cfg(test)]
             drop_probe: None,
         }
@@ -1814,6 +2635,7 @@ impl ContextInner {
     ) -> Self {
         Self {
             raw,
+            expected_target: None,
             drop_probe: Some(drop_probe),
         }
     }
@@ -1855,6 +2677,10 @@ impl Context {
         self.inner.raw.ok_or_else(|| {
             RuntimeError::local(RuntimeStatus::InvalidHandle, "context was already released")
         })
+    }
+
+    pub(crate) fn expected_target(&self) -> Option<&str> {
+        self.inner.expected_target.as_deref()
     }
 
     #[cfg(test)]
@@ -1916,7 +2742,7 @@ impl Context {
             )
         })?;
         Ok(Self {
-            inner: Arc::new(ContextInner::new(Some(raw))),
+            inner: Arc::new(ContextInner::new_with_target(raw, expected_gcn_arch_name)),
         })
     }
 
@@ -4587,6 +5413,35 @@ mod tests {
             CLEANUP_ACCOUNTING_ERRORS.load(Ordering::Acquire),
             before_errors
         );
+    }
+
+    #[test]
+    fn kv_state_and_snapshot_cleanup_have_no_host_fallback_path() {
+        let _serial = CLEANUP_TEST_SERIAL
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _state = CleanupTestStateGuard::new();
+        let context = Context::test_without_native();
+        let state_record = match CleanupRecord::accepted(PendingCleanup::KvState {
+            raw: None,
+            context: context.clone(),
+            disposition: CleanupDisposition::Recoverable,
+        }) {
+            Ok(record) => record,
+            Err(_) => panic!("KV state cleanup ticket must be accepted"),
+        };
+        assert!(matches!(state_record.try_once(), CleanupAttempt::Complete));
+        finish_pending_cleanup();
+        let view_record = match CleanupRecord::accepted(PendingCleanup::KvView {
+            raw: None,
+            context,
+            disposition: CleanupDisposition::Recoverable,
+        }) {
+            Ok(record) => record,
+            Err(_) => panic!("KV snapshot cleanup ticket must be accepted"),
+        };
+        assert!(matches!(view_record.try_once(), CleanupAttempt::Complete));
+        finish_pending_cleanup();
     }
 
     #[test]

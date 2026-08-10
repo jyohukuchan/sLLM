@@ -90,9 +90,21 @@
         "intermediate_size": 1,
         "dtype": "BF16",
         "rms_norm_eps": "1e-6",
+        "attention_bias": false,
+        "attention_dropout": "0",
+        "attn_output_gate": true,
         "full_attention_interval": 1,
         "layer_types": ["full_attention"],
+        "max_position_embeddings": 262144,
+        "rope_parameters": {
+          "rope_type": "default",
+          "rope_theta": 10000000,
+          "partial_rotary_factor": "0.25",
+          "mrope_interleaved": true,
+          "mrope_section": [11, 11, 10]
+        },
         "tie_word_embeddings": false,
+        "use_cache": true,
         "vocab_size": 1,
         "mtp_num_hidden_layers": 0
       },
@@ -160,7 +172,7 @@
     "generation_config": {"present": false, "path": null},
     "derivation": null
   },
-  "fingerprint": "sha256:7201b4dddf49fb09e4d871778c5dd75eaec29d3d0ab3911ae7eb7ea62548a490",
+  "fingerprint": "sha256:1065d7427922cf9f2e37c18e18b7434b7c3e63cda0dc75236273050170292415",
   "aliases": ["fixture-tiny"],
   "generated_at": "2026-08-04T00:00:00Z"
 }

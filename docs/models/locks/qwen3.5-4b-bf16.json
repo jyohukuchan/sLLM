@@ -183,6 +183,9 @@
         "intermediate_size": 9216,
         "dtype": "BF16",
         "rms_norm_eps": "1e-6",
+        "attention_bias": false,
+        "attention_dropout": "0",
+        "attn_output_gate": true,
         "full_attention_interval": 4,
         "layer_types": [
           "linear_attention",
@@ -218,7 +221,16 @@
           "linear_attention",
           "full_attention"
         ],
+        "max_position_embeddings": 262144,
+        "rope_parameters": {
+          "rope_type": "default",
+          "rope_theta": 10000000,
+          "partial_rotary_factor": "0.25",
+          "mrope_interleaved": true,
+          "mrope_section": [11, 11, 10]
+        },
         "tie_word_embeddings": true,
+        "use_cache": true,
         "vocab_size": 248320,
         "mtp_num_hidden_layers": 1
       },
@@ -381,7 +393,7 @@
     },
     "derivation": null
   },
-  "fingerprint": "sha256:32265444b7cdd2a00e4e4e3e6aa8375a05acf6cddfcb9ffc348f54f67a7cd935",
+  "fingerprint": "sha256:f143d7b504170d071c77818105f7a07dc0297c6bea0c61a5404b071fed0c1fae",
   "aliases": [
     "qwen3.5-4b-bf16"
   ],

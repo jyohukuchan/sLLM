@@ -3,7 +3,7 @@
 //! The legacy [`sllm_core::Backend`] methods remain a Phase 1 control-plane
 //! boundary and retain their unavailable/non-executing contract.  The
 //! additive owned execution session is the typed
-//! `Context`/`Buffer`/`RmsNormDescriptor`/`PreparedRmsNorm` path below; it does
+//! typed `Context`/`Buffer`/prepared semantic-operation paths below; it does
 //! not change the meaning of those legacy methods.
 
 use std::fmt;
@@ -18,10 +18,30 @@ use sllm_core::{
 };
 use sllm_hip_sys as sys;
 
+mod attention_preprocess;
 mod bridge;
+mod elementwise;
+mod embedding;
+mod kv_state;
+mod matmul;
 mod rmsnorm;
 mod runtime;
 
+pub use attention_preprocess::{
+    AttentionPreprocessDescriptor, AttentionPreprocessDispatchInfo, AttentionPreprocessSubmission,
+    PreparedAttentionPreprocess,
+};
+pub use elementwise::{
+    ElementwiseDescriptor, ElementwiseDispatchInfo, ElementwiseOperation, ElementwiseSubmission,
+    PreparedElementwise,
+};
+pub use embedding::{
+    EmbeddingDescriptor, EmbeddingDispatchInfo, EmbeddingSubmission, PreparedEmbedding,
+};
+pub use kv_state::{
+    CausalAttentionEvidence, KvAppendEvidence, bf16_to_f16_bits, expected_storage_offset,
+};
+pub use matmul::{MatmulDescriptor, MatmulDispatchInfo, MatmulSubmission, PreparedMatmul};
 pub use rmsnorm::{
     PreparedRmsNorm, RmsNormDescriptor, RmsNormDispatchInfo, RmsNormSubmission, TensorBinding,
 };
@@ -515,6 +535,57 @@ impl HipBackend {
     }
 }
 
+/// Evidence-binary-only bridge to the private native KV readback ABI.
+///
+/// This is not a public runtime capability: it accepts only a core-issued
+/// session/state pair and copies into caller-owned host storage. The native
+/// implementation retains all opaque-handle, snapshot, and lifetime checks.
+#[doc(hidden)]
+pub fn read_kv_storage_for_evidence(
+    session: &ExecutionSession,
+    state: &sllm_core::KvState,
+    plane: u32,
+    byte_offset: u64,
+    destination: &mut [u8],
+) -> Result<(), ExecutionError> {
+    if session.backend_name() != "hip" || state.backend_name() != "hip" {
+        return Err(ExecutionError::WrongBackend {
+            expected: "hip",
+            actual: state.backend_name(),
+        });
+    }
+    if state.session_id() != session.id() {
+        return Err(ExecutionError::WrongSession {
+            expected: session.id(),
+            actual: state.session_id(),
+        });
+    }
+    session.max_transfer_bytes()?;
+    let resource = kv_state::resource_for_evidence(session.id().raw(), state.id().raw())
+        .ok_or_else(|| ExecutionError::BackendStatus {
+            status: sys::SLLM_STATUS_PUBLIC_INVALID_HANDLE,
+            diagnostic: "HIP KV evidence state is stale or unavailable".to_owned(),
+        })?;
+    resource
+        .readback(plane, byte_offset, destination)
+        .map_err(map_evidence_runtime_error)
+}
+
+fn map_evidence_runtime_error(error: RuntimeError) -> ExecutionError {
+    match error.status() {
+        RuntimeStatus::HipUnavailable => ExecutionError::ExecutionUnavailable {
+            backend: "hip",
+            reason: error.message().to_owned(),
+        },
+        RuntimeStatus::Busy => ExecutionError::Busy,
+        RuntimeStatus::NotReady => ExecutionError::NotReady,
+        _ => ExecutionError::BackendStatus {
+            status: error.status().raw(),
+            diagnostic: error.message().to_owned(),
+        },
+    }
+}
+
 impl Backend for HipBackend {
     fn name(&self) -> &'static str {
         "hip"
@@ -671,6 +742,7 @@ mod tests {
 
         type Request = sys::evidence::sllm_hip_evidence_request_t;
         type Result = sys::evidence::sllm_hip_evidence_result_t;
+        type KvReadback = sys::evidence::sllm_hip_kv_readback_request_t;
         assert_eq!(size_of::<Request>(), 40);
         assert_eq!(align_of::<Request>(), 8);
         assert_eq!(offset_of!(Request, struct_size), 0);
@@ -690,6 +762,17 @@ mod tests {
         assert_eq!(offset_of!(Result, fallback_used), 44);
         assert_eq!(offset_of!(Result, terminal), 48);
         assert_eq!(offset_of!(Result, reserved), 52);
+        assert_eq!(size_of::<KvReadback>(), 72);
+        assert_eq!(align_of::<KvReadback>(), 8);
+        assert_eq!(offset_of!(KvReadback, struct_size), 0);
+        assert_eq!(offset_of!(KvReadback, abi_version), 4);
+        assert_eq!(offset_of!(KvReadback, view), 8);
+        assert_eq!(offset_of!(KvReadback, plane), 16);
+        assert_eq!(offset_of!(KvReadback, byte_offset), 24);
+        assert_eq!(offset_of!(KvReadback, byte_length), 32);
+        assert_eq!(offset_of!(KvReadback, host_capacity), 40);
+        assert_eq!(offset_of!(KvReadback, host_output), 48);
+        assert_eq!(offset_of!(KvReadback, reserved), 56);
         type ErrorSink = sys::evidence::sllm_error_sink_t;
         assert_eq!(size_of::<ErrorSink>(), 48);
         assert_eq!(align_of::<ErrorSink>(), 8);
@@ -705,6 +788,13 @@ mod tests {
         assert_eq!(sys::evidence::SLLM_STATUS_HIP_INVALID_HANDLE, 9);
         assert_eq!(sys::evidence::SLLM_STATUS_HIP_ZERO_DISPATCH, 10);
         assert_eq!(sys::evidence::SLLM_STATUS_HIP_DISPATCH_CONTRACT, 12);
+        assert_eq!(sys::evidence::SLLM_HIP_KV_EVIDENCE_ABI_VERSION, 1);
+        assert_eq!(sys::evidence::SLLM_HIP_KV_EVIDENCE_PLANE_K, 0);
+        assert_eq!(sys::evidence::SLLM_HIP_KV_EVIDENCE_PLANE_V, 1);
+        assert_eq!(
+            sys::evidence::SLLM_HIP_KV_EVIDENCE_MAX_READBACK_BYTES,
+            536_870_912
+        );
     }
 
     #[test]

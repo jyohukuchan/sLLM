@@ -21,7 +21,7 @@ const QWEN_SCHEMA_VERSION: &str = "model-lock-v1";
 const QWEN_REPO_ID: &str = "Qwen/Qwen3.5-4B";
 const QWEN_REVISION: &str = "851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a";
 const QWEN_FINGERPRINT: &str =
-    "sha256:32265444b7cdd2a00e4e4e3e6aa8375a05acf6cddfcb9ffc348f54f67a7cd935";
+    "sha256:f143d7b504170d071c77818105f7a07dc0297c6bea0c61a5404b071fed0c1fae";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WeightPlanError(String);
@@ -1152,7 +1152,7 @@ mod tests {
         let digest = Sha256::digest(encoded);
         assert_eq!(
             format!("{digest:x}"),
-            "9a57a67384038c9e437236511c50f1b03b88a4f733cb06464d4ad3e408616bb2"
+            "a8ee5d60d9dffeac3020d1b3833677eb66e50958a53412f1ccb1e9c09c174fef"
         );
         let expected_digest: [u8; 32] = digest.into();
         assert_eq!(

@@ -248,6 +248,23 @@ int main() {
   SLLM_PRINT_CONSTANT(SLLM_STATUS_UNSUPPORTED_SCALE_MODE);
   SLLM_PRINT_CONSTANT(SLLM_STATUS_ALIAS_OVERLAP);
   SLLM_PRINT_CONSTANT(SLLM_STATUS_CONTEXT_OR_DEVICE_MISMATCH);
+  SLLM_PRINT_CONSTANT(SLLM_STATUS_INVALID_ELEMENTWISE_DESCRIPTOR);
+  SLLM_PRINT_CONSTANT(SLLM_STATUS_INVALID_EMBEDDING_DESCRIPTOR);
+  SLLM_PRINT_CONSTANT(SLLM_STATUS_TOKEN_ID_OUT_OF_RANGE);
+  SLLM_PRINT_CONSTANT(SLLM_STATUS_INVALID_MATMUL_DESCRIPTOR);
+  SLLM_PRINT_CONSTANT(SLLM_STATUS_INVALID_ATTENTION_PREPROCESS_DESCRIPTOR);
+  SLLM_PRINT_CONSTANT(SLLM_STATUS_POSITION_PAYLOAD_MISMATCH);
+  SLLM_PRINT_CONSTANT(SLLM_STATUS_INVALID_KV_STATE_DESCRIPTOR);
+  SLLM_PRINT_CONSTANT(SLLM_STATUS_INVALID_KV_APPEND_DESCRIPTOR);
+  SLLM_PRINT_CONSTANT(SLLM_STATUS_KV_LENGTH_MISMATCH);
+  SLLM_PRINT_CONSTANT(SLLM_STATUS_KV_CAPACITY_EXCEEDED);
+  SLLM_PRINT_CONSTANT(SLLM_TENSOR_DTYPE_BF16);
+  SLLM_PRINT_CONSTANT(SLLM_TENSOR_DTYPE_F16);
+  SLLM_PRINT_CONSTANT(SLLM_TENSOR_DTYPE_F32);
+  SLLM_PRINT_CONSTANT(SLLM_HIP_KV_HEAD_COUNT);
+  SLLM_PRINT_CONSTANT(SLLM_HIP_KV_HEAD_DIM);
+  SLLM_PRINT_CONSTANT(SLLM_HIP_KV_MAX_CAPACITY);
+  SLLM_PRINT_CONSTANT(SLLM_HIP_KV_STATE_VERSION);
   SLLM_PRINT_CONSTANT(SLLM_BACKEND_HIP);
   SLLM_PRINT_CONSTANT(SLLM_ACCESS_READ);
   SLLM_PRINT_CONSTANT(SLLM_ACCESS_WRITE);
@@ -256,13 +273,61 @@ int main() {
   SLLM_PRINT_CONSTANT(SLLM_HIP_MAX_GCN_ARCH_NAME);
   SLLM_PRINT_CONSTANT(SLLM_HIP_MAX_TRANSFER_BYTES);
   SLLM_PRINT_CONSTANT(SLLM_HIP_RMSNORM_VERSION);
+  SLLM_PRINT_CONSTANT(SLLM_HIP_ELEMENTWISE_VERSION);
+  SLLM_PRINT_CONSTANT(SLLM_HIP_ELEMENTWISE_DISPATCH_INFO_VERSION);
+  SLLM_PRINT_CONSTANT(SLLM_HIP_ELEMENTWISE_KERNEL_ID_COPY_V1);
+  SLLM_PRINT_CONSTANT(SLLM_HIP_ELEMENTWISE_KERNEL_ID_ADD_V1);
+  SLLM_PRINT_CONSTANT(SLLM_HIP_ELEMENTWISE_KERNEL_ID_SILU_MUL_V1);
+  SLLM_PRINT_CONSTANT(SLLM_HIP_ELEMENTWISE_KERNEL_ID_SIGMOID_MUL_V1);
+  SLLM_PRINT_CONSTANT(SLLM_HIP_ELEMENTWISE_KERNEL_SYMBOL_MAX);
+  SLLM_PRINT_CONSTANT(SLLM_HIP_ELEMENTWISE_DEVICE_SYMBOL_MAX);
+  SLLM_PRINT_CONSTANT(SLLM_HIP_ELEMENTWISE_WORKGROUP_SIZE);
+  SLLM_PRINT_CONSTANT(SLLM_HIP_ELEMENTWISE_MAX_ELEMENTS);
+  SLLM_PRINT_CONSTANT(SLLM_HIP_EMBEDDING_VERSION);
+  SLLM_PRINT_CONSTANT(SLLM_HIP_EMBEDDING_DISPATCH_INFO_VERSION);
+  SLLM_PRINT_CONSTANT(SLLM_HIP_EMBEDDING_KERNEL_ID_GATHER_V1);
+  SLLM_PRINT_CONSTANT(SLLM_HIP_EMBEDDING_KERNEL_SYMBOL_MAX);
+  SLLM_PRINT_CONSTANT(SLLM_HIP_EMBEDDING_DEVICE_SYMBOL_MAX);
+  SLLM_PRINT_CONSTANT(SLLM_HIP_EMBEDDING_WORKGROUP_SIZE);
+  SLLM_PRINT_CONSTANT(SLLM_HIP_EMBEDDING_MAX_VOCAB);
+  SLLM_PRINT_CONSTANT(SLLM_HIP_EMBEDDING_MAX_HIDDEN);
+  SLLM_PRINT_CONSTANT(SLLM_HIP_EMBEDDING_MAX_TOKENS);
+  SLLM_PRINT_CONSTANT(SLLM_HIP_MATMUL_VERSION);
+  SLLM_PRINT_CONSTANT(SLLM_HIP_MATMUL_DISPATCH_INFO_VERSION);
+  SLLM_PRINT_CONSTANT(SLLM_HIP_MATMUL_KERNEL_ID_BASELINE_BF16_FP32_V1);
+  SLLM_PRINT_CONSTANT(SLLM_HIP_MATMUL_KERNEL_SYMBOL_MAX);
+  SLLM_PRINT_CONSTANT(SLLM_HIP_MATMUL_DEVICE_SYMBOL_MAX);
+  SLLM_PRINT_CONSTANT(SLLM_HIP_MATMUL_WORKGROUP_SIZE);
+  SLLM_PRINT_CONSTANT(SLLM_HIP_MATMUL_MAX_M);
+  SLLM_PRINT_CONSTANT(SLLM_HIP_MATMUL_MAX_K);
+  SLLM_PRINT_CONSTANT(SLLM_HIP_MATMUL_MAX_N);
+  SLLM_PRINT_CONSTANT(SLLM_HIP_MATMUL_MAX_OUTPUT_ELEMENTS);
+  SLLM_PRINT_CONSTANT(SLLM_HIP_ATTENTION_PREPROCESS_VERSION);
+  SLLM_PRINT_CONSTANT(SLLM_HIP_ATTENTION_PREPROCESS_DISPATCH_INFO_VERSION);
+  SLLM_PRINT_CONSTANT(SLLM_HIP_ATTENTION_PREPROCESS_KERNEL_ID_BASELINE_BF16_V1);
+  SLLM_PRINT_CONSTANT(SLLM_HIP_ATTENTION_PREPROCESS_KERNEL_SYMBOL_MAX);
+  SLLM_PRINT_CONSTANT(SLLM_HIP_ATTENTION_PREPROCESS_DEVICE_SYMBOL_MAX);
+  SLLM_PRINT_CONSTANT(SLLM_HIP_ATTENTION_PREPROCESS_WORKGROUP_SIZE);
+  SLLM_PRINT_CONSTANT(SLLM_HIP_ATTENTION_PREPROCESS_Q_HEADS);
+  SLLM_PRINT_CONSTANT(SLLM_HIP_ATTENTION_PREPROCESS_K_HEADS);
+  SLLM_PRINT_CONSTANT(SLLM_HIP_ATTENTION_PREPROCESS_Q_HEAD_DIM);
+  SLLM_PRINT_CONSTANT(SLLM_HIP_ATTENTION_PREPROCESS_K_HEAD_DIM);
+  SLLM_PRINT_CONSTANT(SLLM_HIP_ATTENTION_PREPROCESS_QGATE_HEAD_DIM);
+  SLLM_PRINT_CONSTANT(SLLM_HIP_ATTENTION_PREPROCESS_ROTARY_DIM);
+  SLLM_PRINT_CONSTANT(SLLM_HIP_ATTENTION_PREPROCESS_MAX_POSITION);
+  SLLM_PRINT_CONSTANT(SLLM_HIP_ATTENTION_PREPROCESS_MAX_M);
   SLLM_PRINT_CONSTANT(SLLM_HIP_TENSOR_MAX_RANK);
   SLLM_PRINT_CONSTANT(SLLM_TENSOR_DTYPE_BF16);
   SLLM_PRINT_CONSTANT(SLLM_TENSOR_DTYPE_F32);
+  SLLM_PRINT_CONSTANT(SLLM_TENSOR_DTYPE_I32);
   SLLM_PRINT_CONSTANT(SLLM_TENSOR_ENCODING_UNQUANTIZED);
   SLLM_PRINT_CONSTANT(SLLM_RMSNORM_ACCUMULATION_F32);
   SLLM_PRINT_CONSTANT(SLLM_RMSNORM_SCALE_MODE_OFFSET_ONE);
   SLLM_PRINT_CONSTANT(SLLM_RMSNORM_ALIAS_POLICY_REJECT_OVERLAP);
+  SLLM_PRINT_CONSTANT(SLLM_ELEMENTWISE_OPERATION_COPY);
+  SLLM_PRINT_CONSTANT(SLLM_ELEMENTWISE_OPERATION_ADD);
+  SLLM_PRINT_CONSTANT(SLLM_ELEMENTWISE_OPERATION_SILU_MUL);
+  SLLM_PRINT_CONSTANT(SLLM_ELEMENTWISE_OPERATION_SIGMOID_MUL);
   SLLM_PRINT_CONSTANT(SLLM_COMPLETION_STATE_PENDING);
   SLLM_PRINT_CONSTANT(SLLM_COMPLETION_STATE_SUCCESS);
   SLLM_PRINT_CONSTANT(SLLM_COMPLETION_STATE_FAILURE);
@@ -444,5 +509,337 @@ int main() {
       << offsetof(sllm_rmsnorm_dispatch_info_t, gcn_arch_name)
       << " reserved=" << offsetof(sllm_rmsnorm_dispatch_info_t, reserved)
       << '\n';
+  std::cout << "layout sllm_elementwise_desc_t size="
+            << sizeof(sllm_elementwise_desc_t)
+            << " align=" << alignof(sllm_elementwise_desc_t)
+            << " struct_size=" << offsetof(sllm_elementwise_desc_t, struct_size)
+            << " abi_version=" << offsetof(sllm_elementwise_desc_t, abi_version)
+            << " op_version=" << offsetof(sllm_elementwise_desc_t, op_version)
+            << " operation=" << offsetof(sllm_elementwise_desc_t, operation)
+            << " reserved=" << offsetof(sllm_elementwise_desc_t, reserved)
+            << " input0=" << offsetof(sllm_elementwise_desc_t, input0)
+            << " input1=" << offsetof(sllm_elementwise_desc_t, input1)
+            << " output=" << offsetof(sllm_elementwise_desc_t, output) << '\n';
+  std::cout
+      << "layout sllm_elementwise_dispatch_info_t size="
+      << sizeof(sllm_elementwise_dispatch_info_t)
+      << " align=" << alignof(sllm_elementwise_dispatch_info_t)
+      << " struct_size="
+      << offsetof(sllm_elementwise_dispatch_info_t, struct_size)
+      << " abi_version="
+      << offsetof(sllm_elementwise_dispatch_info_t, abi_version)
+      << " info_version="
+      << offsetof(sllm_elementwise_dispatch_info_t, info_version)
+      << " backend=" << offsetof(sllm_elementwise_dispatch_info_t, backend)
+      << " dispatch_id="
+      << offsetof(sllm_elementwise_dispatch_info_t, dispatch_id)
+      << " operation=" << offsetof(sllm_elementwise_dispatch_info_t, operation)
+      << " dispatch_count="
+      << offsetof(sllm_elementwise_dispatch_info_t, dispatch_count)
+      << " kernel_id=" << offsetof(sllm_elementwise_dispatch_info_t, kernel_id)
+      << " workgroup_size_x="
+      << offsetof(sllm_elementwise_dispatch_info_t, workgroup_size_x)
+      << " grid_size_x="
+      << offsetof(sllm_elementwise_dispatch_info_t, grid_size_x)
+      << " fallback_allowed="
+      << offsetof(sllm_elementwise_dispatch_info_t, fallback_allowed)
+      << " fallback_used="
+      << offsetof(sllm_elementwise_dispatch_info_t, fallback_used)
+      << " element_count="
+      << offsetof(sllm_elementwise_dispatch_info_t, element_count)
+      << " kernel_symbol="
+      << offsetof(sllm_elementwise_dispatch_info_t, kernel_symbol)
+      << " device_symbol="
+      << offsetof(sllm_elementwise_dispatch_info_t, device_symbol)
+      << " gcn_arch_name="
+      << offsetof(sllm_elementwise_dispatch_info_t, gcn_arch_name)
+      << " reserved=" << offsetof(sllm_elementwise_dispatch_info_t, reserved)
+      << '\n';
+  std::cout << "layout sllm_embedding_desc_t size="
+            << sizeof(sllm_embedding_desc_t)
+            << " align=" << alignof(sllm_embedding_desc_t)
+            << " struct_size=" << offsetof(sllm_embedding_desc_t, struct_size)
+            << " abi_version=" << offsetof(sllm_embedding_desc_t, abi_version)
+            << " op_version=" << offsetof(sllm_embedding_desc_t, op_version)
+            << " reserved=" << offsetof(sllm_embedding_desc_t, reserved)
+            << " weight=" << offsetof(sllm_embedding_desc_t, weight)
+            << " token_ids=" << offsetof(sllm_embedding_desc_t, token_ids)
+            << " output=" << offsetof(sllm_embedding_desc_t, output) << '\n';
+  std::cout << "layout sllm_embedding_dispatch_info_t size="
+            << sizeof(sllm_embedding_dispatch_info_t)
+            << " align=" << alignof(sllm_embedding_dispatch_info_t)
+            << " struct_size="
+            << offsetof(sllm_embedding_dispatch_info_t, struct_size)
+            << " abi_version="
+            << offsetof(sllm_embedding_dispatch_info_t, abi_version)
+            << " info_version="
+            << offsetof(sllm_embedding_dispatch_info_t, info_version)
+            << " backend=" << offsetof(sllm_embedding_dispatch_info_t, backend)
+            << " dispatch_id="
+            << offsetof(sllm_embedding_dispatch_info_t, dispatch_id)
+            << " dispatch_count="
+            << offsetof(sllm_embedding_dispatch_info_t, dispatch_count)
+            << " kernel_id="
+            << offsetof(sllm_embedding_dispatch_info_t, kernel_id)
+            << " workgroup_size_x="
+            << offsetof(sllm_embedding_dispatch_info_t, workgroup_size_x)
+            << " grid_size_x="
+            << offsetof(sllm_embedding_dispatch_info_t, grid_size_x)
+            << " fallback_allowed="
+            << offsetof(sllm_embedding_dispatch_info_t, fallback_allowed)
+            << " fallback_used="
+            << offsetof(sllm_embedding_dispatch_info_t, fallback_used)
+            << " token_count="
+            << offsetof(sllm_embedding_dispatch_info_t, token_count)
+            << " hidden_size="
+            << offsetof(sllm_embedding_dispatch_info_t, hidden_size)
+            << " vocab_size="
+            << offsetof(sllm_embedding_dispatch_info_t, vocab_size)
+            << " kernel_symbol="
+            << offsetof(sllm_embedding_dispatch_info_t, kernel_symbol)
+            << " device_symbol="
+            << offsetof(sllm_embedding_dispatch_info_t, device_symbol)
+            << " gcn_arch_name="
+            << offsetof(sllm_embedding_dispatch_info_t, gcn_arch_name)
+            << " reserved="
+            << offsetof(sllm_embedding_dispatch_info_t, reserved) << '\n';
+  std::cout << "layout sllm_matmul_desc_t size=" << sizeof(sllm_matmul_desc_t)
+            << " align=" << alignof(sllm_matmul_desc_t)
+            << " struct_size=" << offsetof(sllm_matmul_desc_t, struct_size)
+            << " abi_version=" << offsetof(sllm_matmul_desc_t, abi_version)
+            << " op_version=" << offsetof(sllm_matmul_desc_t, op_version)
+            << " reserved=" << offsetof(sllm_matmul_desc_t, reserved)
+            << " activation=" << offsetof(sllm_matmul_desc_t, activation)
+            << " weight=" << offsetof(sllm_matmul_desc_t, weight)
+            << " output=" << offsetof(sllm_matmul_desc_t, output) << '\n';
+  std::cout
+      << "layout sllm_matmul_dispatch_info_t size="
+      << sizeof(sllm_matmul_dispatch_info_t)
+      << " align=" << alignof(sllm_matmul_dispatch_info_t)
+      << " struct_size=" << offsetof(sllm_matmul_dispatch_info_t, struct_size)
+      << " abi_version=" << offsetof(sllm_matmul_dispatch_info_t, abi_version)
+      << " info_version=" << offsetof(sllm_matmul_dispatch_info_t, info_version)
+      << " backend=" << offsetof(sllm_matmul_dispatch_info_t, backend)
+      << " dispatch_id=" << offsetof(sllm_matmul_dispatch_info_t, dispatch_id)
+      << " dispatch_count="
+      << offsetof(sllm_matmul_dispatch_info_t, dispatch_count)
+      << " kernel_id=" << offsetof(sllm_matmul_dispatch_info_t, kernel_id)
+      << " workgroup_size_x="
+      << offsetof(sllm_matmul_dispatch_info_t, workgroup_size_x)
+      << " grid_size_x=" << offsetof(sllm_matmul_dispatch_info_t, grid_size_x)
+      << " fallback_allowed="
+      << offsetof(sllm_matmul_dispatch_info_t, fallback_allowed)
+      << " fallback_used="
+      << offsetof(sllm_matmul_dispatch_info_t, fallback_used)
+      << " m=" << offsetof(sllm_matmul_dispatch_info_t, m)
+      << " k=" << offsetof(sllm_matmul_dispatch_info_t, k)
+      << " n=" << offsetof(sllm_matmul_dispatch_info_t, n)
+      << " output_elements="
+      << offsetof(sllm_matmul_dispatch_info_t, output_elements)
+      << " kernel_symbol="
+      << offsetof(sllm_matmul_dispatch_info_t, kernel_symbol)
+      << " device_symbol="
+      << offsetof(sllm_matmul_dispatch_info_t, device_symbol)
+      << " gcn_arch_name="
+      << offsetof(sllm_matmul_dispatch_info_t, gcn_arch_name)
+      << " reserved=" << offsetof(sllm_matmul_dispatch_info_t, reserved)
+      << '\n';
+  std::cout
+      << "layout sllm_attention_preprocess_desc_t size="
+      << sizeof(sllm_attention_preprocess_desc_t)
+      << " align=" << alignof(sllm_attention_preprocess_desc_t)
+      << " struct_size="
+      << offsetof(sllm_attention_preprocess_desc_t, struct_size)
+      << " abi_version="
+      << offsetof(sllm_attention_preprocess_desc_t, abi_version)
+      << " op_version="
+      << offsetof(sllm_attention_preprocess_desc_t, op_version)
+      << " start_position="
+      << offsetof(sllm_attention_preprocess_desc_t, start_position)
+      << " reserved=" << offsetof(sllm_attention_preprocess_desc_t, reserved)
+      << " packed_q_gate="
+      << offsetof(sllm_attention_preprocess_desc_t, packed_q_gate)
+      << " k=" << offsetof(sllm_attention_preprocess_desc_t, k)
+      << " q_raw_scale="
+      << offsetof(sllm_attention_preprocess_desc_t, q_raw_scale)
+      << " k_raw_scale="
+      << offsetof(sllm_attention_preprocess_desc_t, k_raw_scale)
+      << " positions=" << offsetof(sllm_attention_preprocess_desc_t, positions)
+      << " q_output=" << offsetof(sllm_attention_preprocess_desc_t, q_output)
+      << " gate_output="
+      << offsetof(sllm_attention_preprocess_desc_t, gate_output)
+      << " k_output=" << offsetof(sllm_attention_preprocess_desc_t, k_output)
+      << '\n';
+  std::cout
+      << "layout sllm_attention_preprocess_dispatch_info_t size="
+      << sizeof(sllm_attention_preprocess_dispatch_info_t)
+      << " align=" << alignof(sllm_attention_preprocess_dispatch_info_t)
+      << " struct_size="
+      << offsetof(sllm_attention_preprocess_dispatch_info_t, struct_size)
+      << " abi_version="
+      << offsetof(sllm_attention_preprocess_dispatch_info_t, abi_version)
+      << " info_version="
+      << offsetof(sllm_attention_preprocess_dispatch_info_t, info_version)
+      << " backend="
+      << offsetof(sllm_attention_preprocess_dispatch_info_t, backend)
+      << " dispatch_id="
+      << offsetof(sllm_attention_preprocess_dispatch_info_t, dispatch_id)
+      << " dispatch_count="
+      << offsetof(sllm_attention_preprocess_dispatch_info_t, dispatch_count)
+      << " kernel_id="
+      << offsetof(sllm_attention_preprocess_dispatch_info_t, kernel_id)
+      << " workgroup_size_x="
+      << offsetof(sllm_attention_preprocess_dispatch_info_t, workgroup_size_x)
+      << " grid_size_x="
+      << offsetof(sllm_attention_preprocess_dispatch_info_t, grid_size_x)
+      << " m=" << offsetof(sllm_attention_preprocess_dispatch_info_t, m)
+      << " q_heads="
+      << offsetof(sllm_attention_preprocess_dispatch_info_t, q_heads)
+      << " k_heads="
+      << offsetof(sllm_attention_preprocess_dispatch_info_t, k_heads)
+      << " q_head_dim="
+      << offsetof(sllm_attention_preprocess_dispatch_info_t, q_head_dim)
+      << " k_head_dim="
+      << offsetof(sllm_attention_preprocess_dispatch_info_t, k_head_dim)
+      << " rotary_dim="
+      << offsetof(sllm_attention_preprocess_dispatch_info_t, rotary_dim)
+      << " start_position="
+      << offsetof(sllm_attention_preprocess_dispatch_info_t, start_position)
+      << " fallback_allowed="
+      << offsetof(sllm_attention_preprocess_dispatch_info_t, fallback_allowed)
+      << " fallback_used="
+      << offsetof(sllm_attention_preprocess_dispatch_info_t, fallback_used)
+      << " kernel_symbol="
+      << offsetof(sllm_attention_preprocess_dispatch_info_t, kernel_symbol)
+      << " device_symbol="
+      << offsetof(sllm_attention_preprocess_dispatch_info_t, device_symbol)
+      << " gcn_arch_name="
+      << offsetof(sllm_attention_preprocess_dispatch_info_t, gcn_arch_name)
+      << " reserved="
+      << offsetof(sllm_attention_preprocess_dispatch_info_t, reserved) << '\n';
+  std::cout << "layout sllm_kv_state_create_info_t size="
+            << sizeof(sllm_kv_state_create_info_t)
+            << " align=" << alignof(sllm_kv_state_create_info_t)
+            << " struct_size="
+            << offsetof(sllm_kv_state_create_info_t, struct_size)
+            << " abi_version="
+            << offsetof(sllm_kv_state_create_info_t, abi_version)
+            << " session_id="
+            << offsetof(sllm_kv_state_create_info_t, session_id)
+            << " layer_id=" << offsetof(sllm_kv_state_create_info_t, layer_id)
+            << " flags=" << offsetof(sllm_kv_state_create_info_t, flags)
+            << " capacity_tokens="
+            << offsetof(sllm_kv_state_create_info_t, capacity_tokens)
+            << " reserved=" << offsetof(sllm_kv_state_create_info_t, reserved)
+            << '\n';
+  std::cout
+      << "layout sllm_kv_view_info_t size=" << sizeof(sllm_kv_view_info_t)
+      << " align=" << alignof(sllm_kv_view_info_t)
+      << " struct_size=" << offsetof(sllm_kv_view_info_t, struct_size)
+      << " abi_version=" << offsetof(sllm_kv_view_info_t, abi_version)
+      << " info_version=" << offsetof(sllm_kv_view_info_t, info_version)
+      << " session_id=" << offsetof(sllm_kv_view_info_t, session_id)
+      << " layer_id=" << offsetof(sllm_kv_view_info_t, layer_id)
+      << " dtype=" << offsetof(sllm_kv_view_info_t, dtype)
+      << " capacity_tokens=" << offsetof(sllm_kv_view_info_t, capacity_tokens)
+      << " observed_length=" << offsetof(sllm_kv_view_info_t, observed_length)
+      << " generation=" << offsetof(sllm_kv_view_info_t, generation)
+      << " context_identity=" << offsetof(sllm_kv_view_info_t, context_identity)
+      << " state_identity=" << offsetof(sllm_kv_view_info_t, state_identity)
+      << " k_stride_elements="
+      << offsetof(sllm_kv_view_info_t, k_stride_elements)
+      << " v_stride_elements="
+      << offsetof(sllm_kv_view_info_t, v_stride_elements)
+      << " reserved=" << offsetof(sllm_kv_view_info_t, reserved) << '\n';
+  std::cout
+      << "layout sllm_kv_append_desc_t size=" << sizeof(sllm_kv_append_desc_t)
+      << " align=" << alignof(sllm_kv_append_desc_t)
+      << " struct_size=" << offsetof(sllm_kv_append_desc_t, struct_size)
+      << " abi_version=" << offsetof(sllm_kv_append_desc_t, abi_version)
+      << " append_version=" << offsetof(sllm_kv_append_desc_t, append_version)
+      << " expected_length=" << offsetof(sllm_kv_append_desc_t, expected_length)
+      << " start_position=" << offsetof(sllm_kv_append_desc_t, start_position)
+      << " key_input=" << offsetof(sllm_kv_append_desc_t, key_input)
+      << " value_input=" << offsetof(sllm_kv_append_desc_t, value_input)
+      << " reserved=" << offsetof(sllm_kv_append_desc_t, reserved) << '\n';
+  std::cout
+      << "layout sllm_kv_append_info_t size=" << sizeof(sllm_kv_append_info_t)
+      << " align=" << alignof(sllm_kv_append_info_t)
+      << " struct_size=" << offsetof(sllm_kv_append_info_t, struct_size)
+      << " abi_version=" << offsetof(sllm_kv_append_info_t, abi_version)
+      << " info_version=" << offsetof(sllm_kv_append_info_t, info_version)
+      << " dispatch_id=" << offsetof(sllm_kv_append_info_t, dispatch_id)
+      << " start_position=" << offsetof(sllm_kv_append_info_t, start_position)
+      << " token_count=" << offsetof(sllm_kv_append_info_t, token_count)
+      << " end_position=" << offsetof(sllm_kv_append_info_t, end_position)
+      << " commit_allowed=" << offsetof(sllm_kv_append_info_t, commit_allowed)
+      << " fallback_used=" << offsetof(sllm_kv_append_info_t, fallback_used)
+      << " kernel_symbol=" << offsetof(sllm_kv_append_info_t, kernel_symbol)
+      << " device_symbol=" << offsetof(sllm_kv_append_info_t, device_symbol)
+      << " gcn_arch_name=" << offsetof(sllm_kv_append_info_t, gcn_arch_name)
+      << " reserved=" << offsetof(sllm_kv_append_info_t, reserved) << '\n';
+  std::cout
+      << "layout sllm_causal_attention_desc_t size="
+      << sizeof(sllm_causal_attention_desc_t)
+      << " align=" << alignof(sllm_causal_attention_desc_t)
+      << " struct_size=" << offsetof(sllm_causal_attention_desc_t, struct_size)
+      << " abi_version=" << offsetof(sllm_causal_attention_desc_t, abi_version)
+      << " op_version=" << offsetof(sllm_causal_attention_desc_t, op_version)
+      << " reserved0=" << offsetof(sllm_causal_attention_desc_t, reserved0)
+      << " start_position="
+      << offsetof(sllm_causal_attention_desc_t, start_position)
+      << " expected_kv_length="
+      << offsetof(sllm_causal_attention_desc_t, expected_kv_length)
+      << " kv_state=" << offsetof(sllm_causal_attention_desc_t, kv_state)
+      << " query=" << offsetof(sllm_causal_attention_desc_t, query)
+      << " output=" << offsetof(sllm_causal_attention_desc_t, output)
+      << " reserved=" << offsetof(sllm_causal_attention_desc_t, reserved)
+      << '\n';
+  std::cout
+      << "layout sllm_causal_attention_dispatch_info_t size="
+      << sizeof(sllm_causal_attention_dispatch_info_t)
+      << " align=" << alignof(sllm_causal_attention_dispatch_info_t)
+      << " struct_size="
+      << offsetof(sllm_causal_attention_dispatch_info_t, struct_size)
+      << " abi_version="
+      << offsetof(sllm_causal_attention_dispatch_info_t, abi_version)
+      << " info_version="
+      << offsetof(sllm_causal_attention_dispatch_info_t, info_version)
+      << " backend=" << offsetof(sllm_causal_attention_dispatch_info_t, backend)
+      << " dispatch_id="
+      << offsetof(sllm_causal_attention_dispatch_info_t, dispatch_id)
+      << " dispatch_count="
+      << offsetof(sllm_causal_attention_dispatch_info_t, dispatch_count)
+      << " kernel_id="
+      << offsetof(sllm_causal_attention_dispatch_info_t, kernel_id)
+      << " workgroup_size_x="
+      << offsetof(sllm_causal_attention_dispatch_info_t, workgroup_size_x)
+      << " grid_size_x="
+      << offsetof(sllm_causal_attention_dispatch_info_t, grid_size_x)
+      << " query_count="
+      << offsetof(sllm_causal_attention_dispatch_info_t, query_count)
+      << " start_position="
+      << offsetof(sllm_causal_attention_dispatch_info_t, start_position)
+      << " committed_kv_length="
+      << offsetof(sllm_causal_attention_dispatch_info_t, committed_kv_length)
+      << " q_heads=" << offsetof(sllm_causal_attention_dispatch_info_t, q_heads)
+      << " kv_heads="
+      << offsetof(sllm_causal_attention_dispatch_info_t, kv_heads)
+      << " head_dim="
+      << offsetof(sllm_causal_attention_dispatch_info_t, head_dim)
+      << " scale_denominator="
+      << offsetof(sllm_causal_attention_dispatch_info_t, scale_denominator)
+      << " fallback_allowed="
+      << offsetof(sllm_causal_attention_dispatch_info_t, fallback_allowed)
+      << " fallback_used="
+      << offsetof(sllm_causal_attention_dispatch_info_t, fallback_used)
+      << " kernel_symbol="
+      << offsetof(sllm_causal_attention_dispatch_info_t, kernel_symbol)
+      << " device_symbol="
+      << offsetof(sllm_causal_attention_dispatch_info_t, device_symbol)
+      << " gcn_arch_name="
+      << offsetof(sllm_causal_attention_dispatch_info_t, gcn_arch_name)
+      << " reserved="
+      << offsetof(sllm_causal_attention_dispatch_info_t, reserved) << '\n';
   return 0;
 }

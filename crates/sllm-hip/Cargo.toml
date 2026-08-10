@@ -22,6 +22,34 @@ path = "src/bin/sllm-execution-transfer-g1-evidence.rs"
 name = "sllm-weight-upload-g1-evidence"
 path = "src/bin/sllm-weight-upload-g1-evidence.rs"
 
+[[bin]]
+name = "sllm-elementwise-g1-evidence"
+path = "src/bin/sllm-elementwise-g1-evidence.rs"
+
+[[bin]]
+name = "sllm-embedding-g1-evidence"
+path = "src/bin/sllm-embedding-g1-evidence.rs"
+
+[[bin]]
+name = "sllm-matmul-g1-evidence"
+path = "src/bin/sllm-matmul-g1-evidence.rs"
+
+[[bin]]
+name = "sllm-attention-preprocess-g1-evidence"
+path = "src/bin/sllm-attention-preprocess-g1-evidence.rs"
+
+[[bin]]
+name = "sllm-kv-state-g1-evidence"
+path = "src/bin/sllm-kv-state-g1-evidence.rs"
+
+[[bin]]
+name = "sllm-full-attention-g1-evidence"
+path = "src/bin/sllm-full-attention-g1-evidence.rs"
+
+[[bin]]
+name = "sllm-output-gate-g1-evidence"
+path = "src/bin/sllm-output-gate-g1-evidence.rs"
+
 [dependencies]
 serde.workspace = true
 serde_json.workspace = true

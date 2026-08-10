@@ -59,6 +59,19 @@ typedef uint32_t sllm_status_t;
 #define SLLM_STATUS_UNSUPPORTED_SCALE_MODE UINT32_C(0x112)
 #define SLLM_STATUS_ALIAS_OVERLAP UINT32_C(0x113)
 #define SLLM_STATUS_CONTEXT_OR_DEVICE_MISMATCH UINT32_C(0x114)
+#define SLLM_STATUS_INVALID_ELEMENTWISE_DESCRIPTOR UINT32_C(0x115)
+#define SLLM_STATUS_INVALID_EMBEDDING_DESCRIPTOR UINT32_C(0x116)
+#define SLLM_STATUS_TOKEN_ID_OUT_OF_RANGE UINT32_C(0x117)
+#define SLLM_STATUS_INVALID_MATMUL_DESCRIPTOR UINT32_C(0x118)
+#define SLLM_STATUS_INVALID_ATTENTION_PREPROCESS_DESCRIPTOR UINT32_C(0x119)
+#define SLLM_STATUS_POSITION_PAYLOAD_MISMATCH UINT32_C(0x11a)
+#define SLLM_STATUS_INVALID_KV_STATE_DESCRIPTOR UINT32_C(0x11b)
+#define SLLM_STATUS_INVALID_KV_APPEND_DESCRIPTOR UINT32_C(0x11c)
+#define SLLM_STATUS_KV_LENGTH_MISMATCH UINT32_C(0x11d)
+#define SLLM_STATUS_KV_CAPACITY_EXCEEDED UINT32_C(0x11e)
+#define SLLM_STATUS_INVALID_CAUSAL_ATTENTION_DESCRIPTOR UINT32_C(0x11f)
+#define SLLM_STATUS_CAUSAL_ATTENTION_LENGTH_MISMATCH UINT32_C(0x120)
+#define SLLM_STATUS_CAUSAL_ATTENTION_STATE_BUSY UINT32_C(0x121)
 
 #define SLLM_HIP_RMSNORM_DISPATCH_INFO_VERSION UINT32_C(1)
 #define SLLM_HIP_RMSNORM_KERNEL_ID_BASELINE_WAVE32_V1 UINT32_C(1)
@@ -67,6 +80,77 @@ typedef uint32_t sllm_status_t;
 #define SLLM_HIP_RMSNORM_MAX_N UINT64_C(4096)
 #define SLLM_HIP_RMSNORM_WORKGROUP_SIZE UINT32_C(256)
 #define SLLM_HIP_RMSNORM_MAX_ROWS UINT64_C(4294967295)
+
+#define SLLM_HIP_ELEMENTWISE_VERSION UINT32_C(1)
+#define SLLM_HIP_ELEMENTWISE_DISPATCH_INFO_VERSION UINT32_C(1)
+#define SLLM_HIP_ELEMENTWISE_KERNEL_ID_COPY_V1 UINT32_C(1)
+#define SLLM_HIP_ELEMENTWISE_KERNEL_ID_ADD_V1 UINT32_C(2)
+#define SLLM_HIP_ELEMENTWISE_KERNEL_ID_SILU_MUL_V1 UINT32_C(3)
+#define SLLM_HIP_ELEMENTWISE_KERNEL_ID_SIGMOID_MUL_V1 UINT32_C(4)
+#define SLLM_HIP_ELEMENTWISE_KERNEL_SYMBOL_MAX UINT32_C(64)
+#define SLLM_HIP_ELEMENTWISE_DEVICE_SYMBOL_MAX UINT32_C(64)
+#define SLLM_HIP_ELEMENTWISE_WORKGROUP_SIZE UINT32_C(256)
+#define SLLM_HIP_ELEMENTWISE_MAX_ELEMENTS UINT64_C(4294967295)
+
+#define SLLM_HIP_EMBEDDING_VERSION UINT32_C(1)
+#define SLLM_HIP_EMBEDDING_DISPATCH_INFO_VERSION UINT32_C(1)
+#define SLLM_HIP_EMBEDDING_KERNEL_ID_GATHER_V1 UINT32_C(1)
+#define SLLM_HIP_EMBEDDING_KERNEL_SYMBOL_MAX UINT32_C(64)
+#define SLLM_HIP_EMBEDDING_DEVICE_SYMBOL_MAX UINT32_C(64)
+#define SLLM_HIP_EMBEDDING_WORKGROUP_SIZE UINT32_C(256)
+#define SLLM_HIP_EMBEDDING_MAX_VOCAB UINT64_C(1048576)
+#define SLLM_HIP_EMBEDDING_MAX_HIDDEN UINT64_C(4096)
+#define SLLM_HIP_EMBEDDING_MAX_TOKENS UINT64_C(65536)
+
+#define SLLM_HIP_MATMUL_VERSION UINT32_C(1)
+#define SLLM_HIP_MATMUL_DISPATCH_INFO_VERSION UINT32_C(1)
+#define SLLM_HIP_MATMUL_KERNEL_ID_BASELINE_BF16_FP32_V1 UINT32_C(1)
+#define SLLM_HIP_MATMUL_KERNEL_SYMBOL_MAX UINT32_C(64)
+#define SLLM_HIP_MATMUL_DEVICE_SYMBOL_MAX UINT32_C(64)
+#define SLLM_HIP_MATMUL_WORKGROUP_SIZE UINT32_C(256)
+#define SLLM_HIP_MATMUL_MAX_M UINT64_C(65536)
+#define SLLM_HIP_MATMUL_MAX_K UINT64_C(16384)
+#define SLLM_HIP_MATMUL_MAX_N UINT64_C(262144)
+#define SLLM_HIP_MATMUL_MAX_OUTPUT_ELEMENTS UINT64_C(4294967295)
+
+#define SLLM_HIP_ATTENTION_PREPROCESS_VERSION UINT32_C(1)
+#define SLLM_HIP_ATTENTION_PREPROCESS_DISPATCH_INFO_VERSION UINT32_C(1)
+#define SLLM_HIP_ATTENTION_PREPROCESS_KERNEL_ID_BASELINE_BF16_V1 UINT32_C(1)
+#define SLLM_HIP_ATTENTION_PREPROCESS_KERNEL_SYMBOL_MAX UINT32_C(64)
+#define SLLM_HIP_ATTENTION_PREPROCESS_DEVICE_SYMBOL_MAX UINT32_C(64)
+#define SLLM_HIP_ATTENTION_PREPROCESS_WORKGROUP_SIZE UINT32_C(1)
+#define SLLM_HIP_ATTENTION_PREPROCESS_Q_HEADS UINT32_C(16)
+#define SLLM_HIP_ATTENTION_PREPROCESS_K_HEADS UINT32_C(4)
+#define SLLM_HIP_ATTENTION_PREPROCESS_Q_HEAD_DIM UINT32_C(256)
+#define SLLM_HIP_ATTENTION_PREPROCESS_K_HEAD_DIM UINT32_C(256)
+#define SLLM_HIP_ATTENTION_PREPROCESS_QGATE_HEAD_DIM UINT32_C(512)
+#define SLLM_HIP_ATTENTION_PREPROCESS_ROTARY_DIM UINT32_C(64)
+#define SLLM_HIP_ATTENTION_PREPROCESS_MAX_POSITION UINT32_C(262144)
+#define SLLM_HIP_ATTENTION_PREPROCESS_MAX_M UINT64_C(262144)
+
+#define SLLM_HIP_KV_STATE_VERSION UINT32_C(1)
+#define SLLM_HIP_KV_VIEW_INFO_VERSION UINT32_C(1)
+#define SLLM_HIP_KV_APPEND_INFO_VERSION UINT32_C(1)
+#define SLLM_HIP_KV_HEAD_COUNT UINT32_C(4)
+#define SLLM_HIP_KV_HEAD_DIM UINT32_C(256)
+#define SLLM_HIP_KV_MAX_CAPACITY UINT64_C(262144)
+#define SLLM_HIP_KV_MAX_M UINT64_C(262144)
+#define SLLM_HIP_KV_KERNEL_ID_BF16_TO_F16_TRANSPOSE_V1 UINT32_C(1)
+#define SLLM_HIP_KV_WORKGROUP_SIZE UINT32_C(256)
+#define SLLM_HIP_KV_KERNEL_SYMBOL_MAX UINT32_C(64)
+#define SLLM_HIP_KV_DEVICE_SYMBOL_MAX UINT32_C(64)
+
+#define SLLM_HIP_CAUSAL_ATTENTION_VERSION UINT32_C(1)
+#define SLLM_HIP_CAUSAL_ATTENTION_DISPATCH_INFO_VERSION UINT32_C(1)
+#define SLLM_HIP_CAUSAL_ATTENTION_KERNEL_ID_STABLE_SOFTMAX_V1 UINT32_C(1)
+#define SLLM_HIP_CAUSAL_ATTENTION_KERNEL_SYMBOL_MAX UINT32_C(64)
+#define SLLM_HIP_CAUSAL_ATTENTION_DEVICE_SYMBOL_MAX UINT32_C(64)
+#define SLLM_HIP_CAUSAL_ATTENTION_WORKGROUP_SIZE UINT32_C(256)
+#define SLLM_HIP_CAUSAL_ATTENTION_Q_HEADS UINT32_C(16)
+#define SLLM_HIP_CAUSAL_ATTENTION_KV_HEADS UINT32_C(4)
+#define SLLM_HIP_CAUSAL_ATTENTION_HEAD_DIM UINT32_C(256)
+#define SLLM_HIP_CAUSAL_ATTENTION_SCALE_DENOMINATOR UINT32_C(16)
+#define SLLM_HIP_CAUSAL_ATTENTION_MAX_M UINT64_C(262144)
 
 #define SLLM_BACKEND_HIP UINT32_C(1)
 
@@ -85,7 +169,9 @@ typedef uint32_t sllm_access_mode_t;
 
 typedef uint32_t sllm_tensor_dtype_t;
 #define SLLM_TENSOR_DTYPE_BF16 UINT32_C(0)
+#define SLLM_TENSOR_DTYPE_F16 UINT32_C(1)
 #define SLLM_TENSOR_DTYPE_F32 UINT32_C(2)
+#define SLLM_TENSOR_DTYPE_I32 UINT32_C(8)
 
 typedef uint32_t sllm_tensor_encoding_t;
 #define SLLM_TENSOR_ENCODING_UNQUANTIZED UINT32_C(0)
@@ -99,6 +185,12 @@ typedef uint32_t sllm_rmsnorm_scale_mode_t;
 typedef uint32_t sllm_rmsnorm_alias_policy_t;
 #define SLLM_RMSNORM_ALIAS_POLICY_REJECT_OVERLAP UINT32_C(1)
 
+typedef uint32_t sllm_elementwise_operation_t;
+#define SLLM_ELEMENTWISE_OPERATION_COPY UINT32_C(1)
+#define SLLM_ELEMENTWISE_OPERATION_ADD UINT32_C(2)
+#define SLLM_ELEMENTWISE_OPERATION_SILU_MUL UINT32_C(3)
+#define SLLM_ELEMENTWISE_OPERATION_SIGMOID_MUL UINT32_C(4)
+
 #define SLLM_COMPLETION_STATE_PENDING UINT32_C(0)
 #define SLLM_COMPLETION_STATE_SUCCESS UINT32_C(1)
 #define SLLM_COMPLETION_STATE_FAILURE UINT32_C(2)
@@ -111,6 +203,13 @@ typedef struct sllm_buffer_t sllm_buffer_t;
 typedef struct sllm_event_t sllm_event_t;
 typedef struct sllm_completion_t sllm_completion_t;
 typedef struct sllm_rmsnorm_plan_t sllm_rmsnorm_plan_t;
+typedef struct sllm_elementwise_plan_t sllm_elementwise_plan_t;
+typedef struct sllm_embedding_plan_t sllm_embedding_plan_t;
+typedef struct sllm_matmul_plan_t sllm_matmul_plan_t;
+typedef struct sllm_attention_preprocess_plan_t
+    sllm_attention_preprocess_plan_t;
+typedef struct sllm_kv_state_t sllm_kv_state_t;
+typedef struct sllm_kv_view_t sllm_kv_view_t;
 
 typedef struct sllm_completion_timing_t {
   uint32_t struct_size;
@@ -284,6 +383,269 @@ typedef struct sllm_rmsnorm_dispatch_info_t {
   uint32_t reserved[8];
 } sllm_rmsnorm_dispatch_info_t;
 
+/* Copy leaves input1 zero-initialized. Add and SiLU-multiply supply all three
+ * bindings. Every accepted binding is contiguous, unquantized BF16, non-empty,
+ * and pairwise non-overlapping within a backing-buffer identity. */
+typedef struct sllm_elementwise_desc_t {
+  uint32_t struct_size;
+  uint32_t abi_version;
+  uint32_t op_version;
+  sllm_elementwise_operation_t operation;
+  uint32_t reserved[4];
+  sllm_tensor_binding_t input0;
+  sllm_tensor_binding_t input1;
+  sllm_tensor_binding_t output;
+} sllm_elementwise_desc_t;
+
+typedef struct sllm_elementwise_dispatch_info_t {
+  uint32_t struct_size;
+  uint32_t abi_version;
+  uint32_t info_version;
+  uint32_t backend;
+  uint64_t dispatch_id;
+  sllm_elementwise_operation_t operation;
+  uint32_t dispatch_count;
+  uint32_t kernel_id;
+  uint32_t workgroup_size_x;
+  uint32_t grid_size_x;
+  uint32_t fallback_allowed;
+  uint32_t fallback_used;
+  uint64_t element_count;
+  char kernel_symbol[SLLM_HIP_ELEMENTWISE_KERNEL_SYMBOL_MAX];
+  char device_symbol[SLLM_HIP_ELEMENTWISE_DEVICE_SYMBOL_MAX];
+  char gcn_arch_name[SLLM_HIP_MAX_GCN_ARCH_NAME];
+  uint32_t reserved[8];
+} sllm_elementwise_dispatch_info_t;
+
+/* Baseline single-GPU embedding gather. The weight is BF16 [vocab, hidden],
+ * token_ids is I32 [tokens], and output is BF16 [tokens, hidden]. */
+typedef struct sllm_embedding_desc_t {
+  uint32_t struct_size;
+  uint32_t abi_version;
+  uint32_t op_version;
+  uint32_t reserved[5];
+  sllm_tensor_binding_t weight;
+  sllm_tensor_binding_t token_ids;
+  sllm_tensor_binding_t output;
+} sllm_embedding_desc_t;
+
+typedef struct sllm_embedding_dispatch_info_t {
+  uint32_t struct_size;
+  uint32_t abi_version;
+  uint32_t info_version;
+  uint32_t backend;
+  uint64_t dispatch_id;
+  uint32_t dispatch_count;
+  uint32_t kernel_id;
+  uint32_t workgroup_size_x;
+  uint32_t grid_size_x;
+  uint32_t fallback_allowed;
+  uint32_t fallback_used;
+  uint64_t token_count;
+  uint64_t hidden_size;
+  uint64_t vocab_size;
+  char kernel_symbol[SLLM_HIP_EMBEDDING_KERNEL_SYMBOL_MAX];
+  char device_symbol[SLLM_HIP_EMBEDDING_DEVICE_SYMBOL_MAX];
+  char gcn_arch_name[SLLM_HIP_MAX_GCN_ARCH_NAME];
+  uint32_t reserved[8];
+} sllm_embedding_dispatch_info_t;
+
+/* Baseline bias-free linear operation. activation is BF16 [M,K], checkpoint
+ * weight storage is BF16 [N,K], and output is BF16 [M,N]. */
+typedef struct sllm_matmul_desc_t {
+  uint32_t struct_size;
+  uint32_t abi_version;
+  uint32_t op_version;
+  uint32_t reserved[5];
+  sllm_tensor_binding_t activation;
+  sllm_tensor_binding_t weight;
+  sllm_tensor_binding_t output;
+} sllm_matmul_desc_t;
+
+typedef struct sllm_matmul_dispatch_info_t {
+  uint32_t struct_size;
+  uint32_t abi_version;
+  uint32_t info_version;
+  uint32_t backend;
+  uint64_t dispatch_id;
+  uint32_t dispatch_count;
+  uint32_t kernel_id;
+  uint32_t workgroup_size_x;
+  uint32_t grid_size_x;
+  uint32_t fallback_allowed;
+  uint32_t fallback_used;
+  uint64_t m;
+  uint64_t k;
+  uint64_t n;
+  uint64_t output_elements;
+  char kernel_symbol[SLLM_HIP_MATMUL_KERNEL_SYMBOL_MAX];
+  char device_symbol[SLLM_HIP_MATMUL_DEVICE_SYMBOL_MAX];
+  char gcn_arch_name[SLLM_HIP_MAX_GCN_ARCH_NAME];
+  uint32_t reserved[8];
+} sllm_matmul_dispatch_info_t;
+
+/* C3a1 text-only attention preprocessing. The packed Q/gate input is exactly
+ * [M, 16, 512], with each head's final axis [Q 256, gate 256]. K is [M, 4,
+ * 256]. All eight tensor bindings are required to be contiguous and their
+ * byte ranges must not overlap; the runtime retains every unique backing
+ * buffer through the asynchronous completion. */
+typedef struct sllm_attention_preprocess_desc_t {
+  uint32_t struct_size;
+  uint32_t abi_version;
+  uint32_t op_version;
+  uint32_t start_position;
+  uint32_t reserved[4];
+  sllm_tensor_binding_t packed_q_gate;
+  sllm_tensor_binding_t k;
+  sllm_tensor_binding_t q_raw_scale;
+  sllm_tensor_binding_t k_raw_scale;
+  sllm_tensor_binding_t positions;
+  sllm_tensor_binding_t q_output;
+  sllm_tensor_binding_t gate_output;
+  sllm_tensor_binding_t k_output;
+} sllm_attention_preprocess_desc_t;
+
+typedef struct sllm_attention_preprocess_dispatch_info_t {
+  uint32_t struct_size;
+  uint32_t abi_version;
+  uint32_t info_version;
+  uint32_t backend;
+  uint64_t dispatch_id;
+  uint32_t dispatch_count;
+  uint32_t kernel_id;
+  uint32_t workgroup_size_x;
+  uint32_t grid_size_x;
+  uint64_t m;
+  uint32_t q_heads;
+  uint32_t k_heads;
+  uint32_t q_head_dim;
+  uint32_t k_head_dim;
+  uint32_t rotary_dim;
+  uint32_t start_position;
+  uint32_t fallback_allowed;
+  uint32_t fallback_used;
+  char kernel_symbol[SLLM_HIP_ATTENTION_PREPROCESS_KERNEL_SYMBOL_MAX];
+  char device_symbol[SLLM_HIP_ATTENTION_PREPROCESS_DEVICE_SYMBOL_MAX];
+  char gcn_arch_name[SLLM_HIP_MAX_GCN_ARCH_NAME];
+  uint32_t reserved[8];
+} sllm_attention_preprocess_dispatch_info_t;
+
+/* A request-local full-attention KV state owns separate K and V device
+ * allocations.  The allocations are logically FP16 [4, capacity, 256]; no
+ * query-head repetition is materialized.  session_id is an application
+ * identity checked together with the context and is never dereferenced by
+ * the runtime. */
+typedef struct sllm_kv_state_create_info_t {
+  uint32_t struct_size;
+  uint32_t abi_version;
+  uint64_t session_id;
+  uint32_t layer_id;
+  uint32_t flags;
+  uint64_t capacity_tokens;
+  uint32_t reserved[4];
+} sllm_kv_state_create_info_t;
+
+typedef struct sllm_kv_view_info_t {
+  uint32_t struct_size;
+  uint32_t abi_version;
+  uint32_t info_version;
+  uint32_t reserved0;
+  uint64_t session_id;
+  uint32_t layer_id;
+  uint32_t dtype;
+  uint32_t encoding;
+  uint32_t head_count;
+  uint32_t head_dim;
+  uint32_t reserved1;
+  uint64_t capacity_tokens;
+  uint64_t observed_length;
+  uint64_t generation;
+  uint64_t context_identity;
+  uint64_t state_identity;
+  uint64_t k_stride_elements[3];
+  uint64_t v_stride_elements[3];
+  uint32_t reserved[4];
+} sllm_kv_view_info_t;
+
+/* Append inputs are independent, read-only BF16 [M, 4, 256] bindings.  The
+ * expected length and start position must both equal the state's published
+ * length at submission. */
+typedef struct sllm_kv_append_desc_t {
+  uint32_t struct_size;
+  uint32_t abi_version;
+  uint32_t append_version;
+  uint32_t reserved0;
+  uint64_t expected_length;
+  uint64_t start_position;
+  sllm_tensor_binding_t key_input;
+  sllm_tensor_binding_t value_input;
+  uint32_t reserved[4];
+} sllm_kv_append_desc_t;
+
+typedef struct sllm_kv_append_info_t {
+  uint32_t struct_size;
+  uint32_t abi_version;
+  uint32_t info_version;
+  uint32_t backend;
+  uint64_t dispatch_id;
+  uint32_t dispatch_count;
+  uint32_t kernel_id;
+  uint32_t workgroup_size_x;
+  uint32_t grid_size_x;
+  uint64_t start_position;
+  uint64_t token_count;
+  uint64_t end_position;
+  uint32_t commit_allowed;
+  uint32_t fallback_allowed;
+  uint32_t fallback_used;
+  uint32_t reserved0;
+  char kernel_symbol[SLLM_HIP_KV_KERNEL_SYMBOL_MAX];
+  char device_symbol[SLLM_HIP_KV_DEVICE_SYMBOL_MAX];
+  char gcn_arch_name[SLLM_HIP_MAX_GCN_ARCH_NAME];
+  uint32_t reserved[8];
+} sllm_kv_append_info_t;
+
+/* C3b causal full attention. Q and output are contiguous unquantized BF16
+ * [M, 16, 256]. The referenced state is one committed FP16 [4, capacity,
+ * 256] snapshot; no repeated K/V payload is part of this descriptor. */
+typedef struct sllm_causal_attention_desc_t {
+  uint32_t struct_size;
+  uint32_t abi_version;
+  uint32_t op_version;
+  uint32_t reserved0;
+  uint64_t start_position;
+  uint64_t expected_kv_length;
+  const sllm_kv_state_t *kv_state;
+  sllm_tensor_binding_t query;
+  sllm_tensor_binding_t output;
+  uint32_t reserved[4];
+} sllm_causal_attention_desc_t;
+
+typedef struct sllm_causal_attention_dispatch_info_t {
+  uint32_t struct_size;
+  uint32_t abi_version;
+  uint32_t info_version;
+  uint32_t backend;
+  uint64_t dispatch_id;
+  uint32_t dispatch_count;
+  uint32_t kernel_id;
+  uint32_t workgroup_size_x;
+  uint32_t grid_size_x;
+  uint64_t query_count;
+  uint64_t start_position;
+  uint64_t committed_kv_length;
+  uint32_t q_heads;
+  uint32_t kv_heads;
+  uint32_t head_dim;
+  uint32_t scale_denominator;
+  uint32_t fallback_allowed;
+  uint32_t fallback_used;
+  char kernel_symbol[SLLM_HIP_CAUSAL_ATTENTION_KERNEL_SYMBOL_MAX];
+  char device_symbol[SLLM_HIP_CAUSAL_ATTENTION_DEVICE_SYMBOL_MAX];
+  char gcn_arch_name[SLLM_HIP_MAX_GCN_ARCH_NAME];
+  uint32_t reserved[8];
+} sllm_causal_attention_dispatch_info_t;
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -370,7 +732,7 @@ sllm_completion_read(sllm_completion_t *completion, void *destination,
                      uint64_t destination_capacity, uint64_t *bytes_written,
                      sllm_error_sink_t *error_sink) SLLM_HIP_NOEXCEPT;
 
-/* RMSNorm completions retain a pair of timing-enabled HIP events.  The
+/* Numeric-operation completions retain a pair of timing-enabled HIP events. The
  * elapsed value is available only after successful completion and is never a
  * host-clock or CPU-fallback estimate.  Other completion kinds return
  * SLLM_STATUS_UNSUPPORTED. */
@@ -396,6 +758,106 @@ sllm_rmsnorm_plan_release(sllm_rmsnorm_plan_t **plan,
 SLLM_HIP_API sllm_status_t sllm_rmsnorm_execute(
     const sllm_rmsnorm_plan_t *plan, const sllm_queue_t *queue,
     sllm_completion_t **completion, sllm_rmsnorm_dispatch_info_t *dispatch_info,
+    sllm_error_sink_t *error_sink) SLLM_HIP_NOEXCEPT;
+
+SLLM_HIP_API sllm_status_t sllm_elementwise_prepare(
+    const sllm_context_t *context, const sllm_elementwise_desc_t *descriptor,
+    sllm_elementwise_plan_t **plan,
+    sllm_error_sink_t *error_sink) SLLM_HIP_NOEXCEPT;
+
+SLLM_HIP_API sllm_status_t
+sllm_elementwise_plan_release(sllm_elementwise_plan_t **plan,
+                              sllm_error_sink_t *error_sink) SLLM_HIP_NOEXCEPT;
+
+SLLM_HIP_API sllm_status_t sllm_elementwise_execute(
+    const sllm_elementwise_plan_t *plan, const sllm_queue_t *queue,
+    sllm_completion_t **completion,
+    sllm_elementwise_dispatch_info_t *dispatch_info,
+    sllm_error_sink_t *error_sink) SLLM_HIP_NOEXCEPT;
+
+SLLM_HIP_API sllm_status_t sllm_embedding_prepare(
+    const sllm_context_t *context, const sllm_embedding_desc_t *descriptor,
+    sllm_embedding_plan_t **plan,
+    sllm_error_sink_t *error_sink) SLLM_HIP_NOEXCEPT;
+
+SLLM_HIP_API sllm_status_t
+sllm_embedding_plan_release(sllm_embedding_plan_t **plan,
+                            sllm_error_sink_t *error_sink) SLLM_HIP_NOEXCEPT;
+
+SLLM_HIP_API sllm_status_t sllm_embedding_execute(
+    const sllm_embedding_plan_t *plan, const sllm_queue_t *queue,
+    sllm_completion_t **completion,
+    sllm_embedding_dispatch_info_t *dispatch_info,
+    sllm_error_sink_t *error_sink) SLLM_HIP_NOEXCEPT;
+
+SLLM_HIP_API sllm_status_t sllm_matmul_prepare(
+    const sllm_context_t *context, const sllm_matmul_desc_t *descriptor,
+    sllm_matmul_plan_t **plan, sllm_error_sink_t *error_sink) SLLM_HIP_NOEXCEPT;
+
+SLLM_HIP_API sllm_status_t sllm_matmul_plan_release(
+    sllm_matmul_plan_t **plan, sllm_error_sink_t *error_sink) SLLM_HIP_NOEXCEPT;
+
+SLLM_HIP_API sllm_status_t sllm_matmul_execute(
+    const sllm_matmul_plan_t *plan, const sllm_queue_t *queue,
+    sllm_completion_t **completion, sllm_matmul_dispatch_info_t *dispatch_info,
+    sllm_error_sink_t *error_sink) SLLM_HIP_NOEXCEPT;
+
+SLLM_HIP_API sllm_status_t sllm_attention_preprocess_prepare(
+    const sllm_context_t *context,
+    const sllm_attention_preprocess_desc_t *descriptor,
+    sllm_attention_preprocess_plan_t **plan,
+    sllm_error_sink_t *error_sink) SLLM_HIP_NOEXCEPT;
+
+SLLM_HIP_API sllm_status_t sllm_attention_preprocess_plan_release(
+    sllm_attention_preprocess_plan_t **plan,
+    sllm_error_sink_t *error_sink) SLLM_HIP_NOEXCEPT;
+
+SLLM_HIP_API sllm_status_t sllm_attention_preprocess_execute(
+    const sllm_attention_preprocess_plan_t *plan, const sllm_queue_t *queue,
+    sllm_completion_t **completion,
+    sllm_attention_preprocess_dispatch_info_t *dispatch_info,
+    sllm_error_sink_t *error_sink) SLLM_HIP_NOEXCEPT;
+
+SLLM_HIP_API sllm_status_t sllm_kv_state_create(
+    const sllm_context_t *context, const sllm_kv_state_create_info_t *info,
+    sllm_kv_state_t **state, sllm_error_sink_t *error_sink) SLLM_HIP_NOEXCEPT;
+
+SLLM_HIP_API sllm_status_t sllm_kv_state_release(
+    sllm_kv_state_t **state, sllm_error_sink_t *error_sink) SLLM_HIP_NOEXCEPT;
+
+SLLM_HIP_API sllm_status_t
+sllm_kv_state_query(const sllm_kv_state_t *state, sllm_kv_view_info_t *info,
+                    sllm_error_sink_t *error_sink) SLLM_HIP_NOEXCEPT;
+
+SLLM_HIP_API sllm_status_t
+sllm_kv_state_snapshot(const sllm_kv_state_t *state, sllm_kv_view_t **view,
+                       sllm_error_sink_t *error_sink) SLLM_HIP_NOEXCEPT;
+
+SLLM_HIP_API sllm_status_t
+sllm_kv_view_query(const sllm_kv_view_t *view, sllm_kv_view_info_t *info,
+                   sllm_error_sink_t *error_sink) SLLM_HIP_NOEXCEPT;
+
+SLLM_HIP_API sllm_status_t sllm_kv_view_release(
+    sllm_kv_view_t **view, sllm_error_sink_t *error_sink) SLLM_HIP_NOEXCEPT;
+
+SLLM_HIP_API sllm_status_t sllm_kv_state_append(
+    const sllm_kv_state_t *state, const sllm_queue_t *queue,
+    const sllm_kv_append_desc_t *descriptor, sllm_completion_t **completion,
+    sllm_kv_append_info_t *append_info,
+    sllm_error_sink_t *error_sink) SLLM_HIP_NOEXCEPT;
+
+/* Revokes publication for a pending append.  The completion remains owned by
+ * the caller and must still be queried/released after the GPU reaches a safe
+ * terminal state. */
+SLLM_HIP_API sllm_status_t sllm_kv_state_append_cancel(
+    const sllm_kv_state_t *state, sllm_completion_t *completion,
+    sllm_error_sink_t *error_sink) SLLM_HIP_NOEXCEPT;
+
+SLLM_HIP_API sllm_status_t sllm_causal_attention_execute(
+    const sllm_context_t *context, const sllm_queue_t *queue,
+    const sllm_causal_attention_desc_t *descriptor,
+    sllm_completion_t **completion,
+    sllm_causal_attention_dispatch_info_t *dispatch_info,
     sllm_error_sink_t *error_sink) SLLM_HIP_NOEXCEPT;
 
 #ifdef __cplusplus

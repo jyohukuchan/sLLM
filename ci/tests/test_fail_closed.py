@@ -131,8 +131,8 @@ class RunnerIdentityTests(unittest.TestCase):
     def test_every_registered_host_command_has_exact_direct_or_wrapper_classification(self) -> None:
         commands = host_runner._registered_host_commands(ROOT)
         unittest_commands = host_runner._registered_unittest_commands(ROOT)
-        self.assertEqual(len(commands), 32)
-        self.assertEqual(len(unittest_commands), 15)
+        self.assertEqual(len(commands), 34)
+        self.assertEqual(len(unittest_commands), 17)
         self.assertEqual(len(commands) - len(unittest_commands), 17)
         validator_commands = [
             command for command in commands

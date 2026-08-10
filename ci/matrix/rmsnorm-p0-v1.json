@@ -65,7 +65,7 @@
   ],
   "model_lock": {
     "path": "docs/models/locks/qwen3.5-4b-bf16.json",
-    "fingerprint": "sha256:32265444b7cdd2a00e4e4e3e6aa8375a05acf6cddfcb9ffc348f54f67a7cd935",
+    "fingerprint": "sha256:f143d7b504170d071c77818105f7a07dc0297c6bea0c61a5404b071fed0c1fae",
     "resolved_revision": "851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a"
   },
   "review_policy": "ci/matrix/rmsnorm-p0-review-policy-v1.json",

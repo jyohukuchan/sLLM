@@ -11,6 +11,7 @@ pub enum DType {
     F8E4M3FnuZ,
     F8E5M2,
     F8E5M2FnuZ,
+    I32,
     I8,
     U8,
 }
@@ -19,7 +20,7 @@ impl DType {
     pub const fn size_bytes(self) -> u64 {
         match self {
             Self::Bf16 | Self::F16 => 2,
-            Self::F32 => 4,
+            Self::F32 | Self::I32 => 4,
             Self::F8E4M3Fn
             | Self::F8E4M3FnuZ
             | Self::F8E5M2
@@ -30,7 +31,7 @@ impl DType {
     }
 
     pub const fn is_float(self) -> bool {
-        !matches!(self, Self::I8 | Self::U8)
+        !matches!(self, Self::I32 | Self::I8 | Self::U8)
     }
 }
 
@@ -44,6 +45,7 @@ impl fmt::Display for DType {
             Self::F8E4M3FnuZ => "f8e4m3fnuz",
             Self::F8E5M2 => "f8e5m2",
             Self::F8E5M2FnuZ => "f8e5m2fnuz",
+            Self::I32 => "i32",
             Self::I8 => "i8",
             Self::U8 => "u8",
         };

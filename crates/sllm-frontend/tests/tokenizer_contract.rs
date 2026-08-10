@@ -162,7 +162,7 @@ fn lock_bytes(
     let fingerprint = fingerprint_for_json(source.as_bytes()).expect("recompute lock fingerprint");
     let source = replace_once(
         source,
-        "  \"fingerprint\": \"sha256:7201b4dddf49fb09e4d871778c5dd75eaec29d3d0ab3911ae7eb7ea62548a490\",",
+        "  \"fingerprint\": \"sha256:1065d7427922cf9f2e37c18e18b7434b7c3e63cda0dc75236273050170292415\",",
         &format!("  \"fingerprint\": \"{fingerprint}\","),
     );
     source.into_bytes()

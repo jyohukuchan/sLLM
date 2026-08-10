@@ -445,7 +445,7 @@ fn main() {
         "artifact": {"artifact_id": artifact_id, "artifact_sha256": artifact_sha256, "binary_sha256": binary_sha256, "binary_sidecar_sha256": binary_sidecar_sha256, "source_set_sha256": source_set_sha256, "binary_role": "dedicated-p0-public-rmsnorm-producer"},
         "matrix": {"path": "ci/matrix/rmsnorm-p0-v1.json", "sha256": matrix_sha256},
         "case_set_sha256": case_set_sha256,
-        "model_lock": {"path": "docs/models/locks/qwen3.5-4b-bf16.json", "sha256": model_lock_sha256, "fingerprint": "sha256:32265444b7cdd2a00e4e4e3e6aa8375a05acf6cddfcb9ffc348f54f67a7cd935", "resolved_revision": "851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a", "used": false},
+        "model_lock": {"path": "docs/models/locks/qwen3.5-4b-bf16.json", "sha256": model_lock_sha256, "fingerprint": "sha256:f143d7b504170d071c77818105f7a07dc0297c6bea0c61a5404b071fed0c1fae", "resolved_revision": "851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a", "used": false},
         "source_set_sha256": source_set_sha256,
         "dtype": {"activation": "BF16", "weight": "BF16", "output": "BF16", "accumulation": "F32", "scale_mode": "offset-one", "epsilon": "1e-6"},
         "scope": {"selected_backend": "hip", "gpu_execution": true, "public_rmsnorm_path": true, "semantic_op_used": true, "model_used": false, "fallback_allowed": false, "fallback_used": false, "cpu_fallback_used": false},

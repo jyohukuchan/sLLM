@@ -15,7 +15,7 @@ use sllm_hip::HipBackend;
 const TENSOR_NAME: &str = "model.language_model.layers.0.linear_attn.in_proj_z.weight";
 const TENSOR_BYTES: u64 = 20 * 1024 * 1024;
 const LOCK_FINGERPRINT: &str =
-    "sha256:32265444b7cdd2a00e4e4e3e6aa8375a05acf6cddfcb9ffc348f54f67a7cd935";
+    "sha256:f143d7b504170d071c77818105f7a07dc0297c6bea0c61a5404b071fed0c1fae";
 const PLAN_DIGEST: &str = "sha256:0820227fdc4129e5ff100e0aa87db7663d75703c9ba723bc4adc950a3af6ab66";
 const SOURCE_FILE: &str = "model.safetensors-00002-of-00002.safetensors";
 const SOURCE_FILE_SHA256: &str = "cb544bd9bfae93dc59b0f22b292f5933573854a7f9b97835c67060d7d910e188";

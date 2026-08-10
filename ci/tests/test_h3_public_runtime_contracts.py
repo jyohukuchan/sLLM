@@ -284,6 +284,8 @@ def _macro_invocation_end(source: str, index: int) -> int | None:
         cursor = _rust_identifier_end(source, cursor)
         final_name = source[name_start:cursor]
         cursor = _skip_rust_whitespace(source, cursor)
+    if final_name in {"if", "while"}:
+        return None
     if cursor >= len(source) or source[cursor] != "!":
         return None
     cursor = _skip_rust_whitespace(source, cursor + 1)

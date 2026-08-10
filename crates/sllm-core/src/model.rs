@@ -4,9 +4,9 @@
 //! or unsafe execution path.  `parse_model_lock` accepts only the restricted
 //! model-lock JSON domain: JSON strings, booleans, null, and integers in the
 //! RFC 8785/I-JSON safe range.  In particular, floating-point JSON numbers are
-//! rejected while computing a lock identity.  A source model config may use a
-//! JSON number for `rms_norm_eps`; `validate_model_config` accepts that one
-//! finite positive value and compares it with the lock's decimal text.  This
+//! rejected while computing a lock identity.  A source model config may use
+//! JSON numbers for its reviewed decimal fields; `validate_model_config`
+//! accepts only finite values matching the lock's explicit decimal text.  This
 //! exception is intentionally outside the fingerprint domain.
 
 use serde::de::{self, DeserializeOwned, DeserializeSeed, MapAccess, SeqAccess, Visitor};
@@ -37,7 +37,7 @@ const MAX_RANGE_READ_BYTES: usize = 16 * 1024 * 1024;
 const QWEN_REPO_ID: &str = "Qwen/Qwen3.5-4B";
 const QWEN_REVISION: &str = "851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a";
 const QWEN_FINGERPRINT: &str =
-    "sha256:32265444b7cdd2a00e4e4e3e6aa8375a05acf6cddfcb9ffc348f54f67a7cd935";
+    "sha256:f143d7b504170d071c77818105f7a07dc0297c6bea0c61a5404b071fed0c1fae";
 
 // Linux is the supported host platform.  These are kept local instead of
 // adding a new direct libc dependency solely for model-lock file opening.
@@ -132,6 +132,22 @@ pub enum LayerType {
     FullAttention,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
+pub enum RopeType {
+    #[serde(rename = "default")]
+    Default,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct RopeParameters {
+    pub rope_type: RopeType,
+    pub rope_theta: u64,
+    pub partial_rotary_factor: String,
+    pub mrope_interleaved: bool,
+    pub mrope_section: Vec<u64>,
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq)]
 pub enum ComponentStatus {
     #[serde(rename = "consumed")]
@@ -176,9 +192,15 @@ pub struct TextConfig {
     pub intermediate_size: u64,
     pub dtype: TensorDType,
     pub rms_norm_eps: String,
+    pub attention_bias: bool,
+    pub attention_dropout: String,
+    pub attn_output_gate: bool,
     pub full_attention_interval: u64,
     pub layer_types: Vec<LayerType>,
+    pub max_position_embeddings: u64,
+    pub rope_parameters: RopeParameters,
     pub tie_word_embeddings: bool,
+    pub use_cache: bool,
     pub vocab_size: u64,
     pub mtp_num_hidden_layers: u64,
 }
@@ -638,9 +660,21 @@ fn validate_qwen_lock_contract(document: &ModelLock) -> Result<(), ModelError> {
                 intermediate_size: 9216,
                 dtype: TensorDType::Bf16,
                 rms_norm_eps: "1e-6".to_owned(),
+                attention_bias: false,
+                attention_dropout: "0".to_owned(),
+                attn_output_gate: true,
                 full_attention_interval: 4,
                 layer_types: expected_layers.clone(),
+                max_position_embeddings: 262_144,
+                rope_parameters: RopeParameters {
+                    rope_type: RopeType::Default,
+                    rope_theta: 10_000_000,
+                    partial_rotary_factor: "0.25".to_owned(),
+                    mrope_interleaved: true,
+                    mrope_section: vec![11, 11, 10],
+                },
                 tie_word_embeddings: true,
+                use_cache: true,
                 vocab_size: 248320,
                 mtp_num_hidden_layers: 1,
             })
@@ -755,15 +789,40 @@ fn validate_qwen_lock_contract(document: &ModelLock) -> Result<(), ModelError> {
 }
 
 fn qwen_layer_schedule() -> Vec<LayerType> {
-    (0..32)
-        .map(|layer| {
-            if layer % 4 == 3 {
-                LayerType::FullAttention
-            } else {
-                LayerType::LinearAttention
-            }
-        })
-        .collect()
+    vec![
+        LayerType::LinearAttention,
+        LayerType::LinearAttention,
+        LayerType::LinearAttention,
+        LayerType::FullAttention,
+        LayerType::LinearAttention,
+        LayerType::LinearAttention,
+        LayerType::LinearAttention,
+        LayerType::FullAttention,
+        LayerType::LinearAttention,
+        LayerType::LinearAttention,
+        LayerType::LinearAttention,
+        LayerType::FullAttention,
+        LayerType::LinearAttention,
+        LayerType::LinearAttention,
+        LayerType::LinearAttention,
+        LayerType::FullAttention,
+        LayerType::LinearAttention,
+        LayerType::LinearAttention,
+        LayerType::LinearAttention,
+        LayerType::FullAttention,
+        LayerType::LinearAttention,
+        LayerType::LinearAttention,
+        LayerType::LinearAttention,
+        LayerType::FullAttention,
+        LayerType::LinearAttention,
+        LayerType::LinearAttention,
+        LayerType::LinearAttention,
+        LayerType::FullAttention,
+        LayerType::LinearAttention,
+        LayerType::LinearAttention,
+        LayerType::LinearAttention,
+        LayerType::FullAttention,
+    ]
 }
 
 /// Returns the reviewed Qwen3.5-4B checkpoint namespace as a one-to-one,
@@ -1778,6 +1837,10 @@ fn validate_text_config(config: &TextConfig) -> Result<(), ModelError> {
         || config.intermediate_size == 0
         || config.vocab_size == 0
         || config.full_attention_interval == 0
+        || config.max_position_embeddings == 0
+        || config.rope_parameters.rope_theta == 0
+        || config.rope_parameters.mrope_section.is_empty()
+        || config.rope_parameters.mrope_section.contains(&0)
         || config.layer_types.len() as u64 != config.num_hidden_layers
     {
         return Err(invalid(
@@ -1785,6 +1848,12 @@ fn validate_text_config(config: &TextConfig) -> Result<(), ModelError> {
         ));
     }
     validate_decimal_epsilon(&config.rms_norm_eps)?;
+    validate_decimal_unit_interval(&config.attention_dropout, "attention_dropout", true)?;
+    validate_decimal_unit_interval(
+        &config.rope_parameters.partial_rotary_factor,
+        "partial_rotary_factor",
+        false,
+    )?;
     Ok(())
 }
 
@@ -1964,8 +2033,30 @@ fn validate_generation_stop_policy(policy: &GenerationStopPolicyV1) -> Result<()
 }
 
 fn validate_decimal_epsilon(value: &str) -> Result<(), ModelError> {
+    let parsed = parse_decimal(value, "rms_norm_eps")?;
+    if parsed <= 0.0 || parsed > 1.0 {
+        return Err(invalid(format!("epsilon is outside (0, 1]: {value}")));
+    }
+    Ok(())
+}
+
+fn validate_decimal_unit_interval(
+    value: &str,
+    field: &str,
+    allow_zero: bool,
+) -> Result<(), ModelError> {
+    let parsed = parse_decimal(value, field)?;
+    if (allow_zero && parsed < 0.0) || (!allow_zero && parsed <= 0.0) || parsed > 1.0 {
+        return Err(invalid(format!(
+            "{field} is outside the allowed unit interval: {value}"
+        )));
+    }
+    Ok(())
+}
+
+fn parse_decimal(value: &str, field: &str) -> Result<f64, ModelError> {
     if value.is_empty() {
-        return Err(invalid("rms_norm_eps must be explicit"));
+        return Err(invalid(format!("{field} must be explicit")));
     }
     let bytes = value.as_bytes();
     let mut cursor = 0;
@@ -1973,7 +2064,7 @@ fn validate_decimal_epsilon(value: &str) -> Result<(), ModelError> {
         cursor += 1;
     }
     if cursor == 0 {
-        return Err(invalid(format!("invalid decimal epsilon: {value}")));
+        return Err(invalid(format!("invalid decimal {field}: {value}")));
     }
     if cursor < bytes.len() && bytes[cursor] == b'.' {
         cursor += 1;
@@ -1982,7 +2073,7 @@ fn validate_decimal_epsilon(value: &str) -> Result<(), ModelError> {
             cursor += 1;
         }
         if cursor == start {
-            return Err(invalid(format!("invalid decimal epsilon: {value}")));
+            return Err(invalid(format!("invalid decimal {field}: {value}")));
         }
     }
     if cursor < bytes.len() && matches!(bytes[cursor], b'e' | b'E') {
@@ -1995,19 +2086,19 @@ fn validate_decimal_epsilon(value: &str) -> Result<(), ModelError> {
             cursor += 1;
         }
         if cursor == start {
-            return Err(invalid(format!("invalid decimal epsilon: {value}")));
+            return Err(invalid(format!("invalid decimal {field}: {value}")));
         }
     }
     if cursor != bytes.len() {
-        return Err(invalid(format!("invalid decimal epsilon: {value}")));
+        return Err(invalid(format!("invalid decimal {field}: {value}")));
     }
     let parsed = value
         .parse::<f64>()
-        .map_err(|_| invalid("epsilon is not finite"))?;
-    if !parsed.is_finite() || parsed <= 0.0 || parsed > 1.0 {
-        return Err(invalid(format!("epsilon is outside (0, 1]: {value}")));
+        .map_err(|_| invalid(format!("{field} is not finite")))?;
+    if !parsed.is_finite() {
+        return Err(invalid(format!("{field} is not finite")));
     }
-    Ok(())
+    Ok(parsed)
 }
 
 fn validate_repo_id(value: &str, field: &str) -> Result<(), ModelError> {
@@ -2695,8 +2786,8 @@ pub fn verify_model_cache(
 /// Validate the selected typed fields in a source `config.json`.
 ///
 /// The source config is not part of the lock fingerprint.  Its ordinary
-/// numeric `rms_norm_eps` is permitted only as a finite value matching the
-/// locked decimal string; all lock identity JSON remains integer-only.
+/// Numeric decimal fields are permitted only as finite values matching their
+/// locked decimal strings; all lock identity JSON remains integer-only.
 pub fn validate_model_config(lock: &ModelLock, bytes: &[u8]) -> Result<(), ModelError> {
     let value = parse_json(bytes, false, MAX_CONFIG_JSON_BYTES, "model config")?;
     validate_parsed_model_config(lock, &value).map(|_| ())
@@ -2816,6 +2907,7 @@ fn validate_parsed_model_config(
     }
     if require_full_text_config {
         validate_qwen_config_constants(root)?;
+        validate_qwen_typed_config_values(text, locked)?;
     }
     if require_full_text_config {
         Ok(Some(validate_qwen_shape_inputs(root, architecture)?))
@@ -3004,6 +3096,54 @@ fn validate_qwen_config_constants(root: &Map<String, Value>) -> Result<(), Model
     Ok(())
 }
 
+fn validate_qwen_typed_config_values(
+    text: &Map<String, Value>,
+    locked: &TextConfig,
+) -> Result<(), ModelError> {
+    expect_bool(text, "attention_bias", locked.attention_bias)?;
+    expect_f64(
+        text,
+        "attention_dropout",
+        locked
+            .attention_dropout
+            .parse::<f64>()
+            .map_err(|_| invalid("locked attention_dropout is not finite"))?,
+    )?;
+    expect_bool(text, "attn_output_gate", locked.attn_output_gate)?;
+    expect_u64(
+        text,
+        "max_position_embeddings",
+        locked.max_position_embeddings,
+    )?;
+    expect_bool(text, "use_cache", locked.use_cache)?;
+
+    let rope = text
+        .get("rope_parameters")
+        .and_then(Value::as_object)
+        .ok_or_else(|| invalid("Qwen text rope_parameters is not an object"))?;
+    let rope_type = match locked.rope_parameters.rope_type {
+        RopeType::Default => "default",
+    };
+    expect_string(rope, "rope_type", rope_type)?;
+    expect_u64(rope, "rope_theta", locked.rope_parameters.rope_theta)?;
+    expect_f64(
+        rope,
+        "partial_rotary_factor",
+        locked
+            .rope_parameters
+            .partial_rotary_factor
+            .parse::<f64>()
+            .map_err(|_| invalid("locked partial_rotary_factor is not finite"))?,
+    )?;
+    expect_bool(
+        rope,
+        "mrope_interleaved",
+        locked.rope_parameters.mrope_interleaved,
+    )?;
+    expect_u64_array(rope, "mrope_section", &locked.rope_parameters.mrope_section)?;
+    Ok(())
+}
+
 fn expect_exact_keys(
     object: &Map<String, Value>,
     expected: &[&str],
@@ -3066,6 +3206,26 @@ fn expect_string_array(
             .iter()
             .zip(expected)
             .any(|(value, expected)| value.as_str() != Some(*expected))
+    {
+        return Err(invalid(format!("Qwen config field {field} differs")));
+    }
+    Ok(())
+}
+
+fn expect_u64_array(
+    object: &Map<String, Value>,
+    field: &str,
+    expected: &[u64],
+) -> Result<(), ModelError> {
+    let values = object
+        .get(field)
+        .and_then(Value::as_array)
+        .ok_or_else(|| invalid(format!("Qwen config field {field} is not an array")))?;
+    if values.len() != expected.len()
+        || values
+            .iter()
+            .zip(expected)
+            .any(|(value, expected)| value.as_u64() != Some(*expected))
     {
         return Err(invalid(format!("Qwen config field {field} differs")));
     }

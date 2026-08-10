@@ -1,0 +1,189 @@
+#include "matmul_api.hpp"
+
+#include <cstring>
+#include <limits>
+
+namespace sllm_matmul {
+namespace {
+
+bool all_zero(const void *const bytes, const std::size_t size) noexcept {
+  const auto *const values = static_cast<const unsigned char *>(bytes);
+  for (std::size_t index = 0U; index != size; ++index) {
+    if (values[index] != 0U) {
+      return false;
+    }
+  }
+  return true;
+}
+
+bool multiply_overflows(const uint64_t left, const uint64_t right,
+                        uint64_t *const result) noexcept {
+  if (left != 0U && right > std::numeric_limits<uint64_t>::max() / left) {
+    return true;
+  }
+  *result = left * right;
+  return false;
+}
+
+sllm_status_t validate_tensor(const sllm_tensor_binding_t &binding,
+                              TensorMetadata *const copied,
+                              sllm_error_sink_t *const sink) noexcept {
+  if (binding.struct_size != sizeof(binding)) {
+    return sllm_public_runtime::write_error(
+        sink, SLLM_STATUS_INVALID_ARGUMENT,
+        "matmul tensor binding has an unsupported struct size");
+  }
+  if (binding.abi_version != SLLM_HIP_ABI_VERSION) {
+    return sllm_public_runtime::write_error(
+        sink, SLLM_STATUS_INVALID_ABI_VERSION,
+        "matmul tensor binding ABI version is unsupported");
+  }
+  if (binding.reserved0 != 0U ||
+      !all_zero(binding.reserved, sizeof(binding.reserved))) {
+    return sllm_public_runtime::write_error(
+        sink, SLLM_STATUS_RESERVED_NONZERO,
+        "matmul tensor binding reserved fields must be zero");
+  }
+  if (binding.buffer == nullptr || binding.rank != 2U) {
+    return sllm_public_runtime::write_error(
+        sink, SLLM_STATUS_INVALID_TENSOR_BINDING,
+        "matmul tensor binding requires a buffer and rank two");
+  }
+  if (binding.dtype != SLLM_TENSOR_DTYPE_BF16) {
+    return sllm_public_runtime::write_error(
+        sink, SLLM_STATUS_UNSUPPORTED_DTYPE,
+        "matmul tensors must use BF16 storage");
+  }
+  if (binding.encoding != SLLM_TENSOR_ENCODING_UNQUANTIZED) {
+    return sllm_public_runtime::write_error(
+        sink, SLLM_STATUS_UNSUPPORTED_ENCODING,
+        "matmul tensors must be unquantized");
+  }
+  if ((binding.byte_offset & UINT64_C(1)) != 0U) {
+    return sllm_public_runtime::write_error(
+        sink, SLLM_STATUS_MISALIGNED_OFFSET,
+        "matmul BF16 tensor offset must be two-byte aligned");
+  }
+  if (binding.shape[0] == 0U || binding.shape[1] == 0U) {
+    return sllm_public_runtime::write_error(
+        sink, SLLM_STATUS_ZERO_EXTENT,
+        "matmul tensor extents must be non-zero");
+  }
+  if (binding.stride_elements[1] != 1U ||
+      binding.stride_elements[0] != binding.shape[1]) {
+    return sllm_public_runtime::write_error(
+        sink, SLLM_STATUS_STRIDE_MISMATCH,
+        "matmul tensors must be row-major contiguous");
+  }
+  for (uint32_t index = 2U; index != SLLM_HIP_TENSOR_MAX_RANK; ++index) {
+    if (binding.shape[index] != 0U || binding.stride_elements[index] != 0U) {
+      return sllm_public_runtime::write_error(
+          sink, SLLM_STATUS_INVALID_TENSOR_BINDING,
+          "matmul unused tensor metadata must be zero");
+    }
+  }
+  uint64_t elements = 0U;
+  uint64_t payload_bytes = 0U;
+  if (multiply_overflows(binding.shape[0], binding.shape[1], &elements) ||
+      multiply_overflows(elements, UINT64_C(2), &payload_bytes) ||
+      sllm_public_runtime::add_overflows(binding.byte_offset, payload_bytes)) {
+    return sllm_public_runtime::write_error(
+        sink, SLLM_STATUS_METADATA_OVERFLOW,
+        "matmul tensor byte interval overflowed u64");
+  }
+  copied->byte_offset = binding.byte_offset;
+  copied->payload_bytes = payload_bytes;
+  copied->end_offset = binding.byte_offset + payload_bytes;
+  copied->shape[0] = binding.shape[0];
+  copied->shape[1] = binding.shape[1];
+  return SLLM_STATUS_OK;
+}
+
+} // namespace
+
+sllm_status_t
+validate_descriptor_prefix(const sllm_matmul_desc_t *const descriptor,
+                           sllm_error_sink_t *const sink) noexcept {
+  if (descriptor == nullptr) {
+    return sllm_public_runtime::write_error(
+        sink, SLLM_STATUS_INVALID_MATMUL_DESCRIPTOR,
+        "matmul descriptor is null");
+  }
+  uint32_t prefix[2] = {};
+  std::memcpy(prefix, descriptor, sizeof(prefix));
+  if (prefix[0] != sizeof(sllm_matmul_desc_t)) {
+    return sllm_public_runtime::write_error(
+        sink, SLLM_STATUS_INVALID_ARGUMENT,
+        "matmul descriptor prefix has an unsupported struct size");
+  }
+  if (prefix[1] != SLLM_HIP_ABI_VERSION) {
+    return sllm_public_runtime::write_error(
+        sink, SLLM_STATUS_INVALID_ABI_VERSION,
+        "matmul public ABI version is unsupported");
+  }
+  return SLLM_STATUS_OK;
+}
+
+sllm_status_t
+validate_and_copy_descriptor(const sllm_matmul_desc_t *const descriptor,
+                             DescriptorMetadata *const metadata,
+                             sllm_error_sink_t *const sink) noexcept {
+  if (descriptor == nullptr || metadata == nullptr) {
+    return sllm_public_runtime::write_error(
+        sink, SLLM_STATUS_INVALID_MATMUL_DESCRIPTOR,
+        "matmul descriptor or metadata output is null");
+  }
+  const sllm_status_t prefix_status =
+      validate_descriptor_prefix(descriptor, sink);
+  if (prefix_status != SLLM_STATUS_OK) {
+    return prefix_status;
+  }
+  if (descriptor->op_version != SLLM_HIP_MATMUL_VERSION) {
+    return sllm_public_runtime::write_error(
+        sink, SLLM_STATUS_INVALID_MATMUL_DESCRIPTOR,
+        "matmul descriptor version is unsupported");
+  }
+  if (!all_zero(descriptor->reserved, sizeof(descriptor->reserved))) {
+    return sllm_public_runtime::write_error(
+        sink, SLLM_STATUS_RESERVED_NONZERO,
+        "matmul descriptor reserved fields must be zero");
+  }
+  sllm_status_t status =
+      validate_tensor(descriptor->activation, &metadata->activation, sink);
+  if (status != SLLM_STATUS_OK) {
+    return status;
+  }
+  status = validate_tensor(descriptor->weight, &metadata->weight, sink);
+  if (status != SLLM_STATUS_OK) {
+    return status;
+  }
+  status = validate_tensor(descriptor->output, &metadata->output, sink);
+  if (status != SLLM_STATUS_OK) {
+    return status;
+  }
+  metadata->m = metadata->activation.shape[0];
+  metadata->k = metadata->activation.shape[1];
+  metadata->n = metadata->weight.shape[0];
+  if (metadata->weight.shape[1] != metadata->k ||
+      metadata->output.shape[0] != metadata->m ||
+      metadata->output.shape[1] != metadata->n) {
+    return sllm_public_runtime::write_error(
+        sink, SLLM_STATUS_SHAPE_MISMATCH,
+        "matmul requires activation [M,K], weight [N,K], and output [M,N]");
+  }
+  if (multiply_overflows(metadata->m, metadata->n,
+                         &metadata->output_elements)) {
+    return sllm_public_runtime::write_error(
+        sink, SLLM_STATUS_METADATA_OVERFLOW,
+        "matmul output element count overflowed u64");
+  }
+  return SLLM_STATUS_OK;
+}
+
+bool intervals_overlap(const TensorMetadata &left,
+                       const TensorMetadata &right) noexcept {
+  return left.byte_offset < right.end_offset &&
+         right.byte_offset < left.end_offset;
+}
+
+} // namespace sllm_matmul

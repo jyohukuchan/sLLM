@@ -1,7 +1,9 @@
-use core::ffi::c_char;
-
 pub const SLLM_HIP_EVIDENCE_ABI_VERSION: u32 = 1;
 pub const SLLM_HIP_EVIDENCE_TRANSFORM_XOR: u8 = 0x5a;
+pub const SLLM_HIP_KV_EVIDENCE_ABI_VERSION: u32 = 1;
+pub const SLLM_HIP_KV_EVIDENCE_PLANE_K: u32 = 0;
+pub const SLLM_HIP_KV_EVIDENCE_PLANE_V: u32 = 1;
+pub const SLLM_HIP_KV_EVIDENCE_MAX_READBACK_BYTES: u64 = 536_870_912;
 
 pub const SLLM_STATUS_HIP_TIMEOUT: u32 = 8;
 pub const SLLM_STATUS_HIP_INVALID_HANDLE: u32 = 9;
@@ -43,14 +45,20 @@ pub struct sllm_hip_evidence_result_t {
 
 #[repr(C)]
 #[derive(Clone, Copy)]
-pub struct sllm_error_sink_t {
+pub struct sllm_hip_kv_readback_request_t {
     pub struct_size: u32,
     pub abi_version: u32,
-    pub message: *mut c_char,
-    pub message_capacity: u64,
-    pub message_length: u64,
-    pub reserved: [u64; 2],
+    pub view: *const super::sllm_kv_view_t,
+    pub plane: u32,
+    pub reserved0: u32,
+    pub byte_offset: u64,
+    pub byte_length: u64,
+    pub host_capacity: u64,
+    pub host_output: *mut u8,
+    pub reserved: [u32; 4],
 }
+
+pub type sllm_error_sink_t = super::sllm_error_sink_t;
 
 unsafe extern "C" {
     pub fn sllm_hip_evidence_submit(
@@ -68,6 +76,10 @@ unsafe extern "C" {
     ) -> u32;
     pub fn sllm_hip_evidence_destroy(
         completion: *mut *mut sllm_hip_evidence_completion_t,
+        error_sink: *mut sllm_error_sink_t,
+    ) -> u32;
+    pub fn sllm_hip_kv_view_readback(
+        request: *const sllm_hip_kv_readback_request_t,
         error_sink: *mut sllm_error_sink_t,
     ) -> u32;
 }

@@ -7,7 +7,7 @@
   "tier": "tier_g1",
   "required": false,
   "command": ["/usr/bin/cargo", "+1.97.1", "build", "--locked", "--offline", "--release", "--package", "sllm-hip", "--bin", "sllm-weight-upload-g1-evidence"],
-  "lock_fingerprint": "sha256:32265444b7cdd2a00e4e4e3e6aa8375a05acf6cddfcb9ffc348f54f67a7cd935",
+  "lock_fingerprint": "sha256:f143d7b504170d071c77818105f7a07dc0297c6bea0c61a5404b071fed0c1fae",
   "plan_digest": "sha256:0820227fdc4129e5ff100e0aa87db7663d75703c9ba723bc4adc950a3af6ab66",
   "tensor_name": "model.language_model.layers.0.linear_attn.in_proj_z.weight",
   "tensor_dtype": "BF16",

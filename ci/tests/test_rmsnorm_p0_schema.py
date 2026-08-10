@@ -194,7 +194,7 @@ class P0SchemaTests(unittest.TestCase):
             "native/hip/src/rmsnorm_kernel.hip.cpp",
         }
         self.assertEqual(paths, contracts.EXPECTED_SOURCE_PATHS)
-        self.assertEqual(len(paths), 47)
+        self.assertEqual(len(paths), 82)
         self.assertTrue(required.issubset(paths))
         self.assertTrue(manifest["dedicated_producer_included"])
         self.assertEqual(

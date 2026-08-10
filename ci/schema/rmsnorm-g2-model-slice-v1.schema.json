@@ -23,7 +23,7 @@
       "properties": {
         "model_lock_path": {"const": "docs/models/locks/qwen3.5-4b-bf16.json"},
         "model_lock_sha256": {"$ref": "#/$defs/sha256"},
-        "model_lock_fingerprint": {"const": "sha256:32265444b7cdd2a00e4e4e3e6aa8375a05acf6cddfcb9ffc348f54f67a7cd935"},
+        "model_lock_fingerprint": {"const": "sha256:f143d7b504170d071c77818105f7a07dc0297c6bea0c61a5404b071fed0c1fae"},
         "resolved_revision": {"const": "851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a"}
       }
     },

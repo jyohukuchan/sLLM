@@ -28,7 +28,7 @@ impl TensorBinding {
         &self.view
     }
 
-    fn raw(&self) -> Result<sys::sllm_tensor_binding_t, RuntimeError> {
+    pub(crate) fn raw(&self) -> Result<sys::sllm_tensor_binding_t, RuntimeError> {
         let rank = u32::try_from(self.view.shape().len()).map_err(|_| {
             RuntimeError::local(
                 RuntimeStatus::InvalidTensorBinding,
@@ -71,6 +71,7 @@ impl TensorBinding {
             dtype: match self.view.dtype() {
                 DType::Bf16 => sys::SLLM_TENSOR_DTYPE_BF16,
                 DType::F32 => sys::SLLM_TENSOR_DTYPE_F32,
+                DType::I32 => sys::SLLM_TENSOR_DTYPE_I32,
                 _ => u32::MAX,
             },
             encoding: match self.view.encoding() {
@@ -83,6 +84,10 @@ impl TensorBinding {
             stride_elements: strides,
             reserved: [0; 2],
         })
+    }
+
+    pub(crate) fn buffer(&self) -> &Buffer {
+        &self.buffer
     }
 }
 
