@@ -139,6 +139,8 @@ B2 docs-only closeout commit `c437aab32f7fa7cd0681dd8b7db3807ac55c5984`、tree `
 
 初回B3 candidate `6073d2257f3811da43aa8e380a90427630c2742a`はstrict H1 182/214とH2 35/42をPASSしたが、strict H0 335/335のうちdependency inventory validator 1件だけが`workspace_members` driftでFAILした。report SHA-256 `4841e9265a3a680eb76fd6a7aaf2dd1e26bbdea86e12d8978ac5d13441d91e4b`はsidecarと一致する。このcandidateは受け入れず、H1/H2も再利用しない。原因は新規`tokenizer_contract` integration-test targetだけがB0のall-target inventoryへ未反映だったことで、package 90、edge 170、Cargo manifest/lock、version、checksum、license、feature、MSRVは不変である。inventoryへ当該target 1件だけを同期し、新candidateでH0〜H2とfresh reviewを取り直す。
 
+B3 implementation candidate `766bfec524b8410317e41cafa69b67f1179f3a95`、tree `3b0084c073c2fa1cab3a6a46e2ce5b0bcd866d1c`をclean worktreeで固定した。同一identityのpinned Python 3.12.10 strict H0 335/335、H1 182/214（32 deselected）、H2 35/42（7 deselected）は各attempt 1、failed/skipped 0で`PASS`し、reviewed/tested/workflow SHAとtreeがcandidateへ一致した。report SHA-256は順に`0ec565591f76963ffe756fc756016b8b74659de1d5831286b3d05e142c940db8`、`723410687e38b867724c6c90852dbb2e799d45785c5e799b2028de314b9c07c0`、`5853b9f26614bf4f80fa622486784e49e8813d6c631e84946b9f732c20ee90b4`で、各sidecarと一致する。rollback base `c437aab32f7fa7cd0681dd8b7db3807ac55c5984`からのfresh累積独立reviewもHigh/Medium/Low 0件の`PASS/no findings`だった。typed encode/decode、immutable tokenizer/special/EOS snapshot、exact fixture、negative/boundary test、H1 fixture ownershipとtarget inventory同期を受け入れる。GPU、full model、model cache、network、containerは使用していない。本記録のdocs-only identityへstrict H0とfresh reviewを結合するまでB3全体は未完了とする。
+
 受入条件:
 
 - CPU CIはtiny synthetic safetensors/tokenizer fixtureだけを使い、full modelをdownload/loadしない。
