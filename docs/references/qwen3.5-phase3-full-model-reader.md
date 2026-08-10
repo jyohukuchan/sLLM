@@ -383,9 +383,35 @@ load対象entryはtensor nameのRust `Ord`順にdestinationへpackedする。sou
 
 plan digestは既存`sha2`だけを使う。domainを`sLLM-weight-load-plan-v1\0`とする。builderは固定Qwenの`schema_version`、`repo_id`、`resolved_revision`、lock fingerprint、tie条件をexact値へ検査し、各descriptorのrelative `source_file`がlock内の1 fileだけに一致してrangeがそのsize内であることを要求する。digestにはこれらのlock identity、chunk size、entry数、total destination bytesに加え、各entryのname/classification/consumer/dtype/shape、relative source file、locked file size/SHA-256、source range、destination、全chunkを含める。従って同じoffsetを持つ別shardは同じplan identityにならない。現行の公開mutable fingerprint debtは解消済みと主張せず、固定identityと全source file identityをdigestへ直接bindする。
 
-binary encodingは、domain直後から上記field順とする。全count/length/offset/size/dimension/layer indexは`u64` little-endian、stringは`u64` byte lengthの後にUTF-8、booleanは1 byteの`0/1`、optional layerは1 byteの`0/1`後にpresent時だけ`u64`、vectorは`u64` element count後に要素列とする。classification tagはrequired/config-conditional/known-unconsumedを`1/2/3`、consumer tagはnone/embedding+tied-output/final-norm/input-norm/post-norm/MLP gate/up/down/GDN 9 role/full-attention 6 roleの順に`0..22`、dtype tagはBF16/F16/F32/I32/I64/U8を`1..6`とする。chunk vectorはcount後に各`source_offset,destination_offset,byte_length`の3つの`u64`を置く。unknown tag、reserved tag、zero chunkを作らない。filesystem絶対path、payload bytes、HashMap順、JSON key順を含めない。digestは内部`[u8; 32]`、表示時だけ`sha256:<lower-hex>`とする。
+canonical digestのwire encodingは、次のordered field listを唯一の定義とする。表記の`string`は`u64LE byte_length`に続くUTF-8 bytes、`u8`は1 byte、`u64LE`はunsigned 64-bit little-endianである。domainはlength prefixを持たないraw bytesである。
 
-codec回帰vectorは、schema/repo/revision/fingerprintを現行固定値、chunk size 16 MiB、tie true、entry/totalを1/3、name `x`、required、embedding+tied-output、layerなし、BF16 shape `[3]`、source `model-00001-of-00002.safetensors` size 20・SHA-256を64桁zero、range `[17,20)`、destination 0、chunk `(17,0,3)`とする。上記encodingは426 bytesでSHA-256 `6e293a33ffc4c2b95019ef4a82a2e580dc6a7d86ee8a48d46fbeb47157814dd6`になる。実装testは独立mirror encoderまたはchecked-in exact byte fixtureでこの値を固定する。
+1. `domain`: raw bytes `sLLM-weight-load-plan-v1\0`。
+2. `schema_version`: string。
+3. `repo_id`: string。
+4. `resolved_revision`: string。
+5. `fingerprint`: string（lock fingerprint）。
+6. `tie`: bool as `u8` (`0` or `1`)。
+7. `chunk_size`: `u64LE`。
+8. `entry_count`: `u64LE`。この1個の値がper-entry vectorのframingも兼ね、entry vector用のsecond countは一切書かない。
+9. `total_destination_bytes`: `u64LE`。
+10. 各entryをtensor nameのRust `Ord`順に、次の順で直列化する。
+    1. `name`: string。
+    2. `classification`: `u8`（required/config-conditional/known-unconsumedは`1/2/3`）。
+    3. `optional_layer`: marker `u8` (`0` absent, `1` present); presentなら直後にlayer index `u64LE`を1個だけ書く。
+    4. `consumer`: `u8`（none/embedding+tied-output/final-norm/input-norm/post-norm/MLP gate/up/down/GDN 9 role/full-attention 6 roleの順に`0..22`）。
+    5. `dtype`: `u8`（BF16/F16/F32/I32/I64/U8を`1..6`）。
+    6. `shape_count`: `u64LE`、続いてdimensionsを各`u64LE`で書く。
+    7. `source_file`: string（relative path）。
+    8. `locked_file_size`: `u64LE`。
+    9. `locked_file_sha256`: string。valueはlength `64`のlowercase ASCII hexであり、hex digestのraw 32 bytesや別のlength prefixを追加しない。
+    10. `source_start`: `u64LE`。
+    11. `source_end`: `u64LE`。
+    12. `destination_start`: `u64LE`。
+    13. `chunk_count`: `u64LE`、続いて各chunkを`source_offset`、`destination_offset`、`byte_length`の順に各`u64LE`で書く。
+
+この順序では、entry_count以外にentry vectorのcountを置かず、optional layer marker/indexはclassificationの直後に固定する。unknown tag、reserved tag、zero chunkを作らない。filesystem絶対path、payload bytes、HashMap順、JSON key順を含めない。digestは内部`[u8; 32]`、表示時だけ`sha256:<lower-hex>`とする。
+
+codec回帰vectorは、schema/repo/revision/fingerprintを現行固定値、chunk size 16 MiB、tie true、entry/totalを1/3、name `x`、required、embedding+tied-output、layerなし、BF16 shape `[3]`、source `model-00001-of-00002.safetensors` size 20・SHA-256を64桁zero、range `[17,20)`、destination 0、chunk `(17,0,3)`とする。上記encodingは426 bytesでSHA-256 `9a57a67384038c9e437236511c50f1b03b88a4f733cb06464d4ad3e408616bb2`になる。実装testは独立mirror encoderまたはchecked-in exact byte fixtureでこの値を固定する。
 
 metadata-only testは1、3、17 byte、`B-1/B/B+1`、非整列source start、input順反転、missing/unknown/duplicate、wrong layer class、zero/reversed/mismatched/overflow range、destination overflow、known-unconsumedの空destination/chunkを含める。新規integration-test targetだけをdependency inventoryへ同期し、既存`sha2` edge、Cargo manifest/lock、path-to-suiteは変更しない。
 

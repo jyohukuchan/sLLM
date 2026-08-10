@@ -159,6 +159,8 @@ B5 separated preimplementation readerは、既存`TensorDescriptor`、`VerifiedC
 
 初回B5 reader checkpoint `939a1be3f48983ad9deb041b9c5f9930f7c74e64`、tree `7777f1cb5eada0393e150c7d945b052a1508293a`はstrict H0 335/335、attempt 1、failed/skipped 0、clean exact identity、report SHA-256 `7e0ae8b7c394206e5b63f5709d330c44973c6af731f56b58d62da5b788409638`のsidecar一致を`PASS`した。fresh reviewはconsumer grammarとdigestのsource shard binding不足をHigh 2件、family算術表現、vision bias境界、binary encoding/test vector不足をMedium 3件として検出したためcheckpointを受け入れない。exact suffix grammar、relative source fileとlocked size/SHA、固定tag/width/vector framing、426-byte canonical digest vectorをreaderへ追加し、新checkpointでH0とfresh reviewを取り直す。B5は未実装・未完了である。
 
+修復reader candidate `f73c9646f221eb92fb0fe5371e0ce8519dbedb2d`、tree `775c81ed4b78d6787c271d59f783fbb20a6eb2c4`はstrict H0 335/335、attempt 1、failed/skipped 0、clean exact identity、report SHA-256 `df219c10bf813c1dde998cbdca906c77bf45b1d9d916c337095e42ef413d40ff`のsidecar一致を`PASS`した。fresh reviewはcanonical digestが記載規則から再現不能であるHigh 1件を検出したためcandidateを受け入れない。唯一のordered wire fields、u8 tag幅、単一entry framing、optional layer位置、locked SHAの64-byte lowercase ASCII hex stringをreaderへ固定し、独立再計算で426 bytes・SHA-256 `9a57a67384038c9e437236511c50f1b03b88a4f733cb06464d4ad3e408616bb2`を確認した。新checkpointのH0とfresh reviewは未実施で、B5は未実装・未完了である。
+
 受入条件:
 
 - CPU CIはtiny synthetic safetensors/tokenizer fixtureだけを使い、full modelをdownload/loadしない。
