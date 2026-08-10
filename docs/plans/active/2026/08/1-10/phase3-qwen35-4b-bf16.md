@@ -157,6 +157,8 @@ B4 final docs-only closeout `b8a71243f7f93390630c7423d6ca082f9ec51703`、tree `c
 
 B5 separated preimplementation readerは、既存`TensorDescriptor`、`VerifiedCache::tensors()`、lock/config/fingerprintだけでplan入力が足り、B1のprivate catalog、parser、hash、descriptor map、payload range readerを複製・追加公開しないと確定した。main text 426件のfamily/count/consumerを固定vLLMと固定llama.cppでconcept cross-checkし、vision 297件/MTP 15件はknown-unconsumedとした。現行lockの`tie_word_embeddings=true`ではembeddingをtied lm-head aliasとし、独立lm-headを拒否する。untied branchは現行B1契約外のためconditional型だけに留める。tensor name順、checked `[start,end)`、16 MiB以下chunk、固定binary domainのSHA-256 plan digest、payloadなしの1/3/17 byteと`B-1/B/B+1` testをreader記録へ固定した。追加CI差分は新integration-test targetのdependency inventory同期だけを予定し、Cargo manifest/lock/edgeとpath-to-suiteは変えない。B5は未実装・未完了である。
 
+初回B5 reader checkpoint `939a1be3f48983ad9deb041b9c5f9930f7c74e64`、tree `7777f1cb5eada0393e150c7d945b052a1508293a`はstrict H0 335/335、attempt 1、failed/skipped 0、clean exact identity、report SHA-256 `7e0ae8b7c394206e5b63f5709d330c44973c6af731f56b58d62da5b788409638`のsidecar一致を`PASS`した。fresh reviewはconsumer grammarとdigestのsource shard binding不足をHigh 2件、family算術表現、vision bias境界、binary encoding/test vector不足をMedium 3件として検出したためcheckpointを受け入れない。exact suffix grammar、relative source fileとlocked size/SHA、固定tag/width/vector framing、426-byte canonical digest vectorをreaderへ追加し、新checkpointでH0とfresh reviewを取り直す。B5は未実装・未完了である。
+
 受入条件:
 
 - CPU CIはtiny synthetic safetensors/tokenizer fixtureだけを使い、full modelをdownload/loadしない。
