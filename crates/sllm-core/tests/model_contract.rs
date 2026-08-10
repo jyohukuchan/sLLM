@@ -1,12 +1,14 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::os::unix::fs::MetadataExt;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use serde_json::Value;
+use sha2::{Digest, Sha256};
 use sllm_core::{
-    ModelError, TensorDType, fingerprint_for_json, parse_model_lock, read_model_lock,
-    verify_model_cache,
+    FrontendAssetKind, ModelError, TensorDType, fingerprint_for_json, parse_model_lock,
+    read_model_lock, verify_model_cache,
 };
 
 fn repository_path(relative: &str) -> PathBuf {
@@ -200,20 +202,54 @@ impl Drop for TestDirectory {
     }
 }
 
-fn fixture_copy(label: &str) -> TestDirectory {
+fn test_directory(label: &str) -> TestDirectory {
     let sequence = TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
     let path = std::env::temp_dir().join(format!(
         "sllm-model-contract-{label}-{}-{sequence}",
         std::process::id()
     ));
     fs::create_dir(&path).expect("create test directory");
+    TestDirectory(path)
+}
+
+fn fixture_copy(label: &str) -> TestDirectory {
+    let temporary = test_directory(label);
     for entry in fs::read_dir(repository_path("ci/fixtures/model-lock-v1/cache"))
         .expect("read fixture cache")
     {
         let entry = entry.expect("read fixture entry");
-        fs::copy(entry.path(), path.join(entry.file_name())).expect("copy fixture file");
+        fs::copy(entry.path(), temporary.0.join(entry.file_name())).expect("copy fixture file");
     }
-    TestDirectory(path)
+    temporary
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    Sha256::digest(bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+fn lock_with_asset(relative: &str, bytes: &[u8]) -> sllm_core::ModelLock {
+    let source = fs::read(repository_path("ci/fixtures/model-lock-v1/lock.json"))
+        .expect("fixture lock exists");
+    let mut document: Value = serde_json::from_slice(&source).expect("fixture lock is JSON");
+    let files = document["model"]["files"]
+        .as_array_mut()
+        .expect("fixture lock has files");
+    let entry = files
+        .iter_mut()
+        .find(|file| file["path"].as_str() == Some(relative))
+        .expect("asset is present in the fixture lock");
+    entry["size_bytes"] = Value::from(u64::try_from(bytes.len()).expect("test asset fits u64"));
+    entry["sha256"] = Value::String(sha256_hex(bytes));
+
+    let fingerprint_input = serde_json::to_vec_pretty(&document).expect("serialize lock input");
+    document["fingerprint"] = Value::String(
+        fingerprint_for_json(&fingerprint_input).expect("recompute fixture fingerprint"),
+    );
+    let updated = serde_json::to_vec_pretty(&document).expect("serialize updated lock");
+    parse_model_lock(&updated).expect("updated fixture lock parses")
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -259,6 +295,38 @@ fn open_regular_file_identities() -> HashSet<RegularFileIdentity> {
         }
     }
     identities
+}
+
+fn open_regular_file_identity_counts() -> HashMap<RegularFileIdentity, usize> {
+    let mut counts = HashMap::new();
+    for entry in fs::read_dir("/proc/self/fd").expect("Linux exposes process descriptors") {
+        let entry = entry.unwrap_or_else(|error| panic!("read /proc/self/fd entry: {error}"));
+        let path = entry.path();
+        let metadata = match fs::metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => panic!("metadata for /proc/self/fd entry {path:?}: {error}"),
+        };
+        if metadata.is_file() {
+            let identity = RegularFileIdentity {
+                device: metadata.dev(),
+                inode: metadata.ino(),
+            };
+            *counts.entry(identity).or_insert(0) += 1;
+        }
+    }
+    counts
+}
+
+fn assert_target_fd_count(targets: &HashSet<RegularFileIdentity>, expected: usize, context: &str) {
+    let counts = open_regular_file_identity_counts();
+    for target in targets {
+        assert_eq!(
+            counts.get(target).copied().unwrap_or(0),
+            expected,
+            "{context}: unexpected descriptor count for {target:?}",
+        );
+    }
 }
 
 fn assert_no_open_target_identities(targets: &HashSet<RegularFileIdentity>, context: &str) {
@@ -394,7 +462,8 @@ fn hashed_fd_binding_rejects_path_and_same_inode_races_and_recovers_files() {
     }
 
     let temporary = fixture_copy("hardlink");
-    let external = temporary.0.join("external-config");
+    let source_directory = test_directory("hardlink-source");
+    let external = source_directory.0.join("external-config");
     fs::copy(temporary.0.join("config.json"), &external).expect("copy external config");
     fs::remove_file(temporary.0.join("config.json")).expect("remove fixture config");
     fs::hard_link(&external, temporary.0.join("config.json")).expect("create hardlink");
@@ -408,4 +477,251 @@ fn hashed_fd_binding_rejects_path_and_same_inode_races_and_recovers_files() {
     )
     .expect("create symlink");
     assert!(verify_model_cache(&lock, &temporary.0).is_err());
+}
+
+fn assert_error_contains(result: Result<Vec<u8>, ModelError>, needle: &str) {
+    let error = result.expect_err("operation must fail");
+    assert!(
+        error.to_string().contains(needle),
+        "error {error:?} does not contain stable semantic substring {needle:?}"
+    );
+}
+
+#[test]
+fn fixed_frontend_assets_read_exact_bytes_from_temporary_cache() {
+    let lock = read_model_lock(repository_path("ci/fixtures/model-lock-v1/lock.json"))
+        .expect("tiny lock parses");
+    let temporary = fixture_copy("frontend-exact");
+    let cache = verify_model_cache(&lock, &temporary.0).expect("tiny cache validates");
+    let assets = [
+        (FrontendAssetKind::ConfigJson, "config.json"),
+        (FrontendAssetKind::TokenizerJson, "tokenizer.json"),
+        (
+            FrontendAssetKind::TokenizerConfigJson,
+            "tokenizer_config.json",
+        ),
+        (FrontendAssetKind::ChatTemplateJinja, "chat_template.jinja"),
+    ];
+    for (kind, relative) in assets {
+        assert_eq!(
+            cache
+                .read_frontend_asset(kind)
+                .expect("fixed frontend asset read succeeds"),
+            fs::read(temporary.0.join(relative)).expect("temporary asset exists"),
+            "asset bytes must be exact for {relative}",
+        );
+    }
+}
+
+#[test]
+fn chat_template_cap_is_inclusive_and_checked_before_read_allocation() {
+    const CAP: usize = 64 * 1024;
+    for (label, length, succeeds) in [
+        ("template-cap-minus-one", CAP - 1, true),
+        ("template-cap", CAP, true),
+        ("template-cap-plus-one", CAP + 1, false),
+    ] {
+        let temporary = fixture_copy(label);
+        let bytes = vec![b'x'; length];
+        fs::write(temporary.0.join("chat_template.jinja"), &bytes)
+            .expect("write generated template");
+        let lock = lock_with_asset("chat_template.jinja", &bytes);
+        let cache = verify_model_cache(&lock, &temporary.0).expect("generated cache validates");
+        let result = cache.read_frontend_asset(FrontendAssetKind::ChatTemplateJinja);
+        if succeeds {
+            assert_eq!(result.expect("cap-bound template read succeeds"), bytes);
+        } else {
+            assert_error_contains(result, "frontend asset chat_template.jinja");
+            assert_error_contains(
+                cache.read_frontend_asset(FrontendAssetKind::ChatTemplateJinja),
+                "bounded read limit",
+            );
+        }
+    }
+}
+
+#[test]
+fn frontend_asset_read_rechecks_root_and_path_bindings() {
+    let lock = read_model_lock(repository_path("ci/fixtures/model-lock-v1/lock.json"))
+        .expect("tiny lock parses");
+
+    let temporary = fixture_copy("frontend-path-replacement");
+    let cache = verify_model_cache(&lock, &temporary.0).expect("tiny cache validates");
+    let replacement = temporary.0.join("replacement");
+    let original = fs::read(temporary.0.join("config.json")).expect("read config");
+    fs::write(&replacement, same_size_replacement(&original)).expect("write replacement");
+    fs::rename(&replacement, temporary.0.join("config.json")).expect("replace config path");
+    assert_error_contains(
+        cache.read_frontend_asset(FrontendAssetKind::ConfigJson),
+        "changed during frontend asset read",
+    );
+    drop(cache);
+
+    let temporary = fixture_copy("frontend-symlink-replacement");
+    let cache = verify_model_cache(&lock, &temporary.0).expect("tiny cache validates");
+    let config = temporary.0.join("config.json");
+    let external = temporary.0.join("external-config");
+    fs::copy(&config, &external).expect("copy external config");
+    fs::remove_file(&config).expect("remove config");
+    std::os::unix::fs::symlink(&external, &config).expect("replace config with symlink");
+    assert_error_contains(
+        cache.read_frontend_asset(FrontendAssetKind::ConfigJson),
+        "changed during frontend asset read",
+    );
+    drop(cache);
+
+    let temporary = fixture_copy("frontend-hardlink-replacement");
+    let cache = verify_model_cache(&lock, &temporary.0).expect("tiny cache validates");
+    let config = temporary.0.join("config.json");
+    let external = temporary.0.join("external-config");
+    fs::copy(&config, &external).expect("copy hardlink source");
+    fs::remove_file(&config).expect("remove config");
+    fs::hard_link(&external, &config).expect("replace config with hardlink");
+    assert_error_contains(
+        cache.read_frontend_asset(FrontendAssetKind::ConfigJson),
+        "changed during frontend asset read",
+    );
+    drop(cache);
+
+    let temporary = fixture_copy("frontend-root-replacement");
+    let cache = verify_model_cache(&lock, &temporary.0).expect("tiny cache validates");
+    let moved = temporary.0.with_extension("moved");
+    fs::rename(&temporary.0, &moved).expect("move cache root");
+    std::os::unix::fs::symlink(&moved, &temporary.0).expect("replace cache root with symlink");
+    assert_error_contains(
+        cache.read_frontend_asset(FrontendAssetKind::ConfigJson),
+        "cache root changed during frontend asset read",
+    );
+    fs::remove_file(&temporary.0).expect("remove root symlink");
+    fs::rename(&moved, &temporary.0).expect("restore cache root");
+    drop(cache);
+}
+
+#[test]
+fn frontend_asset_read_rejects_same_inode_mutation_truncation_and_extension() {
+    let lock = read_model_lock(repository_path("ci/fixtures/model-lock-v1/lock.json"))
+        .expect("tiny lock parses");
+
+    let temporary = fixture_copy("frontend-same-inode");
+    let cache = verify_model_cache(&lock, &temporary.0).expect("tiny cache validates");
+    let config = temporary.0.join("config.json");
+    let original = fs::read(&config).expect("read config");
+    fs::write(&config, same_size_replacement(&original)).expect("mutate config in place");
+    assert_error_contains(
+        cache.read_frontend_asset(FrontendAssetKind::ConfigJson),
+        "verified file changed during frontend asset read",
+    );
+    drop(cache);
+
+    for (label, truncate) in [("frontend-truncate", true), ("frontend-extend", false)] {
+        let temporary = fixture_copy(label);
+        let cache = verify_model_cache(&lock, &temporary.0).expect("tiny cache validates");
+        let config = temporary.0.join("config.json");
+        if truncate {
+            fs::File::options()
+                .write(true)
+                .open(&config)
+                .expect("open config")
+                .set_len(1)
+                .expect("truncate config");
+        } else {
+            let mut bytes = fs::read(&config).expect("read config");
+            bytes.push(b' ');
+            fs::write(&config, bytes).expect("extend config");
+        }
+        assert_error_contains(
+            cache.read_frontend_asset(FrontendAssetKind::ConfigJson),
+            "verified file changed during frontend asset read",
+        );
+    }
+}
+
+#[test]
+fn concurrent_positional_whole_file_reads_are_repeatable() {
+    let lock = read_model_lock(repository_path("ci/fixtures/model-lock-v1/lock.json"))
+        .expect("tiny lock parses");
+    let temporary = fixture_copy("frontend-concurrent");
+    let cache = verify_model_cache(&lock, &temporary.0).expect("tiny cache validates");
+    let assets = [
+        (
+            FrontendAssetKind::ConfigJson,
+            fs::read(temporary.0.join("config.json")).expect("read config"),
+        ),
+        (
+            FrontendAssetKind::TokenizerJson,
+            fs::read(temporary.0.join("tokenizer.json")).expect("read tokenizer"),
+        ),
+        (
+            FrontendAssetKind::TokenizerConfigJson,
+            fs::read(temporary.0.join("tokenizer_config.json")).expect("read tokenizer config"),
+        ),
+        (
+            FrontendAssetKind::ChatTemplateJinja,
+            fs::read(temporary.0.join("chat_template.jinja")).expect("read template"),
+        ),
+    ];
+    std::thread::scope(|scope| {
+        for _ in 0..8 {
+            scope.spawn(|| {
+                for _ in 0..32 {
+                    for (kind, expected) in &assets {
+                        assert_eq!(
+                            cache
+                                .read_frontend_asset(*kind)
+                                .expect("concurrent positional read succeeds"),
+                            *expected,
+                        );
+                    }
+                }
+            });
+        }
+    });
+}
+
+#[test]
+fn repeated_frontend_reads_and_errors_do_not_grow_file_descriptors() {
+    const TEMPLATE_CAP: usize = 64 * 1024;
+    let lock = read_model_lock(repository_path("ci/fixtures/model-lock-v1/lock.json"))
+        .expect("tiny lock parses");
+
+    let temporary = fixture_copy("frontend-fd-success");
+    let targets = fixture_file_identities(&temporary.0);
+    assert_target_fd_count(&targets, 0, "before successful frontend reads");
+    {
+        let cache = verify_model_cache(&lock, &temporary.0).expect("tiny cache validates");
+        assert_target_fd_count(&targets, 1, "after cache verification");
+        for _ in 0..32 {
+            for kind in [
+                FrontendAssetKind::ConfigJson,
+                FrontendAssetKind::TokenizerJson,
+                FrontendAssetKind::TokenizerConfigJson,
+                FrontendAssetKind::ChatTemplateJinja,
+            ] {
+                cache
+                    .read_frontend_asset(kind)
+                    .expect("repeated frontend read succeeds");
+            }
+        }
+        assert_target_fd_count(&targets, 1, "after repeated successful reads");
+    }
+    assert_target_fd_count(&targets, 0, "after successful cache drop");
+    drop(temporary);
+
+    let bytes = vec![b'x'; TEMPLATE_CAP + 1];
+    let temporary = fixture_copy("frontend-fd-error");
+    fs::write(temporary.0.join("chat_template.jinja"), &bytes)
+        .expect("write generated oversized template");
+    let lock = lock_with_asset("chat_template.jinja", &bytes);
+    let targets = fixture_file_identities(&temporary.0);
+    let cache = verify_model_cache(&lock, &temporary.0).expect("oversized cache validates");
+    assert_target_fd_count(&targets, 1, "after error cache verification");
+    for _ in 0..64 {
+        assert_error_contains(
+            cache.read_frontend_asset(FrontendAssetKind::ChatTemplateJinja),
+            "bounded read limit",
+        );
+    }
+    assert_target_fd_count(&targets, 1, "after repeated frontend errors");
+    drop(cache);
+    assert_target_fd_count(&targets, 0, "after error cache drop");
 }

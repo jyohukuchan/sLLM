@@ -27,6 +27,8 @@ const MAX_LOCK_JSON_BYTES: usize = 1024 * 1024;
 const MAX_CONFIG_JSON_BYTES: usize = 1024 * 1024;
 const MAX_INDEX_JSON_BYTES: usize = 1024 * 1024;
 const MAX_TOKENIZER_JSON_BYTES: usize = 16 * 1024 * 1024;
+const MAX_TOKENIZER_CONFIG_JSON_BYTES: usize = 256 * 1024;
+const MAX_CHAT_TEMPLATE_JINJA_BYTES: usize = 64 * 1024;
 const MAX_SAFE_TENSOR_HEADER: u64 = 4 * 1024 * 1024;
 const MAX_JSON_DEPTH: usize = 64;
 const MAX_JSON_COLLECTION_ITEMS: usize = 1_000_000;
@@ -2498,6 +2500,26 @@ pub struct VerifiedCache {
     root_identity: FileIdentity,
 }
 
+/// The fixed set of frontend assets that may be read from a verified cache.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FrontendAssetKind {
+    ConfigJson,
+    TokenizerJson,
+    TokenizerConfigJson,
+    ChatTemplateJinja,
+}
+
+impl FrontendAssetKind {
+    fn specification(self) -> (&'static str, usize) {
+        match self {
+            Self::ConfigJson => ("config.json", MAX_CONFIG_JSON_BYTES),
+            Self::TokenizerJson => ("tokenizer.json", MAX_TOKENIZER_JSON_BYTES),
+            Self::TokenizerConfigJson => ("tokenizer_config.json", MAX_TOKENIZER_CONFIG_JSON_BYTES),
+            Self::ChatTemplateJinja => ("chat_template.jinja", MAX_CHAT_TEMPLATE_JINJA_BYTES),
+        }
+    }
+}
+
 #[derive(Debug)]
 struct OwnedVerifiedFile {
     path: PathBuf,
@@ -2561,6 +2583,31 @@ impl VerifiedCache {
         let bytes = read_owned_range(file, absolute, length, MAX_RANGE_READ_BYTES, "tensor range")?;
         assert_cache_root_stable(&self.cache_root, &self.root_identity, "tensor range")?;
         assert_cache_path_bindings(&self.cache_root, &self.owned_files, "tensor range")?;
+        Ok(bytes)
+    }
+
+    /// Read one fixed, hash-verified frontend asset through its held file
+    /// descriptor.  The whole asset is bounded before any buffer is allocated.
+    pub fn read_frontend_asset(&self, kind: FrontendAssetKind) -> Result<Vec<u8>, ModelError> {
+        let (relative, max_bytes) = kind.specification();
+        let file = self
+            .owned_files
+            .get(relative)
+            .ok_or_else(|| invalid(format!("frontend asset is not locked: {relative}")))?;
+        let max_bytes_u64 = u64::try_from(max_bytes)
+            .map_err(|_| invalid("frontend asset read limit does not fit u64"))?;
+        if file.size_bytes > max_bytes_u64 {
+            return Err(invalid(format!(
+                "frontend asset {relative} exceeds the bounded read limit"
+            )));
+        }
+        let length = usize::try_from(file.size_bytes)
+            .map_err(|_| invalid("frontend asset size does not fit usize"))?;
+        assert_cache_root_stable(&self.cache_root, &self.root_identity, "frontend asset read")?;
+        assert_cache_path_bindings(&self.cache_root, &self.owned_files, "frontend asset read")?;
+        let bytes = read_owned_range(file, 0, length, max_bytes, "frontend asset")?;
+        assert_cache_root_stable(&self.cache_root, &self.root_identity, "frontend asset read")?;
+        assert_cache_path_bindings(&self.cache_root, &self.owned_files, "frontend asset read")?;
         Ok(bytes)
     }
 }
@@ -3831,5 +3878,31 @@ mod tests {
         let mut overflow = base;
         overflow["stop_token_ids"] = serde_json::json!([4294967296u64]);
         assert!(serde_json::from_value::<GenerationStopPolicyV1>(overflow).is_err());
+    }
+
+    #[test]
+    fn frontend_asset_specifications_match_locked_names_and_caps() {
+        let specifications = [
+            (FrontendAssetKind::ConfigJson, "config.json", 1024 * 1024),
+            (
+                FrontendAssetKind::TokenizerJson,
+                "tokenizer.json",
+                16 * 1024 * 1024,
+            ),
+            (
+                FrontendAssetKind::TokenizerConfigJson,
+                "tokenizer_config.json",
+                256 * 1024,
+            ),
+            (
+                FrontendAssetKind::ChatTemplateJinja,
+                "chat_template.jinja",
+                64 * 1024,
+            ),
+        ];
+
+        for (kind, expected_name, expected_cap) in specifications {
+            assert_eq!(kind.specification(), (expected_name, expected_cap));
+        }
     }
 }

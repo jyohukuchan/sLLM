@@ -33,12 +33,12 @@ pub use handles::{
 };
 pub use model::{
     AccumulationDType, BaseModel, BudgetBoundary, ClassificationStatus, ComponentMetadata,
-    ComponentStatus, ConfigEos, ExcludedFile, GenerationConfig, GenerationStopPolicyV1,
-    LayerSchedule, LayerType, LicenseInfo, LockedFile, LockedModel, MaxNewTokensZero,
-    ModelArchitecture, ModelError, ModelLock, NormalizationContract, NormalizationKind,
-    PromptEvaluation, ScaleMode, SliceContract, StopEvaluation, StopIdentity, StopTokenHandling,
-    TensorClassification, TensorContract, TensorDType, TensorDescriptor, TextConfig,
-    TokenizerContract, TokenizerEos, VerifiedCache, VerifiedFile, fingerprint_for_json,
+    ComponentStatus, ConfigEos, ExcludedFile, FrontendAssetKind, GenerationConfig,
+    GenerationStopPolicyV1, LayerSchedule, LayerType, LicenseInfo, LockedFile, LockedModel,
+    MaxNewTokensZero, ModelArchitecture, ModelError, ModelLock, NormalizationContract,
+    NormalizationKind, PromptEvaluation, ScaleMode, SliceContract, StopEvaluation, StopIdentity,
+    StopTokenHandling, TensorClassification, TensorContract, TensorDType, TensorDescriptor,
+    TextConfig, TokenizerContract, TokenizerEos, VerifiedCache, VerifiedFile, fingerprint_for_json,
     parse_model_lock, read_model_lock, validate_model_config, verify_model_cache,
 };
 pub use op::{
