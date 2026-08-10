@@ -104,6 +104,20 @@
           "test": true,
           "doc": true,
           "doctest": true
+        },
+        {
+          "name": "tokenizer_contract",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ],
+          "edition": "2024",
+          "required_features": [],
+          "test": true,
+          "doc": false,
+          "doctest": false
         }
       ]
     },
