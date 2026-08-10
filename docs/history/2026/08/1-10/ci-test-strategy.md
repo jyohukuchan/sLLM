@@ -43,4 +43,10 @@
 - H0 network guardが`/proc/net/route`と`/proc/net/ipv6_route`の動的counterまで完全一致比較してparent network破壊を誤検出していたため、routeの意味属性だけを厳格に正規化するよう修正し、counter変化、意味属性変化、不正形式、fresh namespaceの空IPv4 routeを回帰testへ追加した。
 - H0 network guardが親namespace identityに加えてroute/interface topologyの同値性まで復元判定へ使い、hosted runnerの背景変化をchildの破壊と誤帰属していたため、復元判定を親netns identityのfail-closed比較へ限定し、child側のloopback-only、default-routeなし、権限drop検証を回帰testへ追加した。
 
+## 2026-08-10
+
+- ユーザー確認を受けて開発policyをresetした。H/G/P各tierとGPU resultのfail-closed判定は維持しつつ、全draft checkpointへのimmutable SHA、全host/GPU matrix、fresh独立review、docs-only closeoutの強制を廃止した。
+- 以後はdraft development、integration candidate、release/push candidate、docs-onlyのlaneへ分ける。draftはfocused test、integrationは影響testと1回のreview、releaseはclean immutable identityと最終matrix、docs-onlyはMarkdown/link/正本整合だけを要求する。
+- 過去の同一SHA gateとcloseout実績は当時の事実として保持するが、現在の完了条件にはしない。意味上のsource/build identityが変わらないdocs-only変更では、対応関係を確認して既存GPU evidenceを再利用できる。
+
 [対応する計画](../../../../plans/active/2026/08/1-10/ci-test-strategy.md)

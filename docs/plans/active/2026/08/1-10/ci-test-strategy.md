@@ -6,6 +6,26 @@
 
 この計画はCI workflowそのものの実装前に、テスト階層、実行時間予算、GPU runnerの安全境界、正しさの証拠、実装順序を固定する正本である。
 
+## 現行方針（2026-08-10以降）
+
+2026-08-10付で、全作業単位へ一律に適用していた旧universal gate、closeout、checkpointごとのfresh review規則はsupersededとする。既存のevidence段落にあるcommit、tree、artifact、test結果は履歴として保持するが、そのcloseout/fresh-review機構は継続しない。
+
+- defaultは`trusted-solo-development`とする。`external-contribution`と`release`は別laneであり、明示的に有効化するまでinactive・nonblockingとする。
+- verification laneは次の4つとする。
+
+| lane | 現行条件 |
+| --- | --- |
+| draft | 影響範囲のfocused testだけを実行し、dirty local worktreeを許可する。immutable identityとindependent reviewは要求せず、release evidenceへ昇格しない。 |
+| integration | 影響するH/G checkを実行し、reviewは1回とする。B5以降の個別draftはfocused test後にbatch integrationする。 |
+| release/push | clean worktreeのimmutable identity、final relevant matrix、累積1回のreviewを要求する。 |
+| docs-only | Markdown、link、consistencyだけを確認し、closeoutは行わない。semantic/build identityが不変でmappingが明示される場合は、既存GPU evidenceを再利用できる。 |
+
+- semantic/build identity（source/build inputs、toolchain、model lock、artifact/report）はGit commit/treeと別に記録し、相互に代用しない。docs-onlyのGit差分だけでは、変更されていないidentityへ結び付いたGPU evidenceを無効化しない。
+- unit開始時に受入条件をfreezeする。実際のcorrectness/security defectはblockerとし、新しいprocess requirementは、ユーザー承認がない限りnonblocking follow-upとする。
+- high-risk ABI/kernelのdesign reviewはoptional、integration reviewは1回、指摘へのfocused re-reviewは必要時のみ、release reviewは累積1回とする。checkpointごとのfresh reviewは行わない。
+- 同一unitを2回reject、review時間がimplementation時間を超過、function progressが1時間以上ない、verification/docsが作業の30%を超過、経過時間がestimateの1.5倍を超過、またはgate/acceptanceが変更された場合は、新規review/verificationを止めてreplanする。
+- GPU resultのfail-closed意味は変更しない。GPU不在、timeout、crash、zero selection、CPU fallback、staleまたは不一致のtarget/artifact/model lockはPASSにしない。exact target、artifact、model lock、numerical oracleを引き続き必須のevidenceとする。
+
 ## 調査結果
 
 ### ローカル参照実装
@@ -29,7 +49,7 @@
 2. CPU CIはhost側の意味論、境界検証、error処理、build、極小oracleだけを担当する。
 3. compile成功、GPU上での実行成功、数値一致、full model動作、性能を別々の証拠として記録する。
 4. GPUがない場合にCPU fallbackへ切り替えてGPU testを成功扱いしない。
-5. 新しいopまたはkernelには、同じ変更でhost contract、独立oracle、対象GPU testを追加する。
+5. 新しいopまたはkernelは、integration/releaseまでにhost contract、独立oracle、対象GPU testを揃える。draftではこれらを段階的に実装し、focused testで進めてよい。
 6. 全組み合わせの直積を回さず、変更影響と代表tupleに基づく明示的なmatrixを使う。
 7. 2の冪だけでなく、空、最小、奇数、素数、非整列、tile・vector・chunk境界の前後を必ず含める。
 8. timeout、crash、hang、数値不一致、割り当て済みGPUの不在、test未収集を成功または通常skipに変換しない。
@@ -67,7 +87,7 @@ fake backendはscheduler、execution plan、resource lifetime、error propagatio
 | P0 | performance smoke | 対象AMD GPU | kernel latency、TTFT、TPOT、token/s、peak VRAMの短い観測 | 15分/cell |
 | P1 | performance regression | 対象AMD GPU | 履歴baseline、llama.cpp同条件比較、stress | weekly/release内で最大90/180分 |
 
-予算はjobの上限であり、上限まで使うことを目標にしない。Phase 1ではH0、H1、H2を独立したPR required rowとして並列実行し、2分上限の集約を含むrequired workflow全体をp95 10分以内、hard上限15分とする。setup、cache restore、artifact upload、集約をwall timeに含める。予算超過時はtest分割、依存削減、cacheまたはbuild構成の改善を優先し、timeout延長だけで解決しない。
+予算はjobの上限であり、上限まで使うことを目標にしない。Phase 1ではH0、H1、H2を影響範囲に応じたdraft/integration rowとして並列実行し、2分上限の集約を含むworkflow全体をp95 10分以内、hard上限15分とする。external-contribution laneのrequired化は現時点で行わない。setup、cache restore、artifact upload、集約をwall timeに含める。予算超過時はtest分割、依存削減、cacheまたはbuild構成の改善を優先し、timeout延長だけで解決しない。
 
 Phase 2でH3をnon-requiredとして追加する。20回以上かつ7日以上の連続観測で、期待rowが全て`PASS`、`FAIL`/`SKIP`/`QUARANTINED`/cancel/schema errorが0、artifact hashが全て一致し、container pullを含むp95が12分以下、最大15分以下、unexpected `INFRA_ERROR`が0、missing resultが0の全条件を満たした後だけrequired昇格をreviewする。
 
@@ -151,7 +171,7 @@ result JSONとGitHub job conclusionは次のように対応させる。
 Phase 1で`ci/schema/test-result-v1.schema.json`を作成し、各rowのresultを検証する。v1では少なくとも次を必須概念とする。
 
 - `schema_version`、result ID、suite ID、tier、state、required属性。
-- run ID/attempt、reviewed/tested/workflowの完全SHA、Git tree OID。
+- run ID/attempt、利用可能なGit SHA/tree、semantic/build identity（source/build inputs、toolchain、model lock、artifact）。Git identityは後者の代用にしない。
 - matrix manifest SHA-256、matrix row ID、tuple digest。
 - command、toolchain、artifact content/manifestのSHA-256。
 - 開始・終了時刻、duration、収集・選択・pass・fail・skip件数、seed、case list、diagnostic。
@@ -162,7 +182,7 @@ required rowでは`SKIP`と`QUARANTINED`を禁止する。field名と型の詳�
 GitHub Actions実装では、各required jobのreport生成とupload、および集約jobを`if: ${{ always() }}`で起動する。集約jobは`needs`全体を入力にし、次を検証する。
 
 - `needs.<job>.result`が`success`以外、未知、欠落の場合はfailure。
-- `run_id`、`run_attempt`、`reviewed_sha`、`tested_sha`、`workflow_sha`、`matrix_manifest_sha256`が現在のrunと一致すること。
+- `run_id`、`run_attempt`、利用するworkflow/matrix identityが現在のrunと一致すること。`reviewed_sha`/`tested_sha`はreviewを行うlaneでの整合性metadataであり、全laneのcloseout条件ではない。
 - `created_at`と`finished_at`が現在のrun期間内であり、将来時刻または前回runのstale reportでないこと。
 - 期待matrix rowごとにreportがちょうど1件あり、missing、duplicate、unknown rowがないこと。
 - required rowが全て`PASS`であり、unknown state、`SKIP`、`QUARANTINED`、`INFRA_ERROR`、`FAIL`、cancelがないこと。
@@ -174,12 +194,12 @@ GitHub Actions実装では、各required jobのreport生成とupload、および
 
 | Event | CPU | AMD GPU | 用途 |
 | --- | --- | --- | --- |
-| `pull_request` / `merge_group` | Phase 1はH0〜H2を必須。Phase 2はH3をnon-requiredで追加し、昇格条件を満たした後だけH0〜H3を必須化 | 直接使用しない | forkを含む高速・安全な検証 |
-| maintainerによる信頼済み実行 | 必要に応じ実行 | G0〜G3 | review済み完全SHAのmerge前確認。初期は専用local host、将来は隔離・使い捨てrunner |
-| protected `main` push | H0〜H2 requiredとH3 non-required。昇格後はH0〜H3を`host-required`へ含める | canonical tupleでG0〜G2、変更によりG3 | merge直後のGPU smoke |
+| `pull_request` / `merge_group` | external-contribution lane。現在はinactive・nonblocking | 直接使用しない | 将来の外部貢献向け。trusted-soloの完了条件ではない |
+| maintainerによる信頼済み実行 | draft/integrationの影響範囲に応じて実行 | laneに応じたG0〜G3 | default trusted-solo-development。初期は専用local host、将来は隔離・使い捨てrunner |
+| protected `main` push | integration/releaseの影響範囲に応じて実行 | final relevant matrix | release/push laneの適用確認 |
 | daily schedule | smoke | 代表1 tuple | health、flaky、短い性能観測 |
 | weekly schedule | full host | 利用可能な明示tuple一覧 | broad correctness、compatibility、性能履歴 |
-| protected release | full host | release対象の全明示tuple | release evidence。途中cancelしない |
+| protected release | full host | release対象の全明示tuple | release lane。明示的に有効化した場合だけblocking |
 
 - public forkのPR codeを永続self-hosted runnerで実行しない。
 - `pull_request_target`はmetadata/label等に限定し、PR headをcheckoutして実行しない。
@@ -193,39 +213,38 @@ GitHub Actions実装では、各required jobのreport生成とupload、および
 
 初期GPU evidenceは専用local host上の`gfx1030` 1台と`gfx1201` 1台をcanonical runtime rowとし、相互干渉を避けて直列実行する。2台目の`gfx1030`はspareまたはnightly再現確認用とし、同一changeの必須rowを増やさない。UUID/BDFはG0実装時にtuple manifestへ固定する。
 
-GitHub self-hosted GPU基盤が完成するまでは、maintainerがlocalで作成または完全にreviewしたtrusted project commitだけを、確認したcommandから40桁SHA指定で実行し、同一SHAのevidenceをfail-closed集約へ入力する。この暫定経路ではfork PR head、外部提供binary、未review scriptを実行せず、secretまたはcontroller credentialを注入しない。実行後はprocess残留、device health、artifact hashを確認し、異常時はhostをquarantineする。self-hosted化後はdefault-branch control workflow、ephemeral JIT registration、専用非特権runner user、secret・`sudo`・Docker socketなし、job後のprocess検査とreboot/reimage/quarantineを必須とする。public fork PRのGPU pre-merge実行はこの隔離基盤が完成するまで行わない。
+GitHub self-hosted GPU基盤が完成するまでは、trusted-soloのdraftはmaintainerが確認したlocal sourceとcommandでfocused testを実行でき、dirty worktreeを許容する。integration/release evidenceはsource/build inputs、toolchain、artifact、model lockをsemantic/build identityへ結び付け、Git SHA/treeはsource snapshotとして別fieldに記録する。fork PR head、外部提供binary、未review scriptはinactiveなexternal-contribution laneを有効化するまで専用GPU hostで実行せず、secretまたはcontroller credentialを注入しない。実行後はprocess残留、device health、artifact hashを確認し、異常時はhostをquarantineする。
+
+以下2段落は将来のexternal-contribution laneを有効化した場合の条件であり、現在のtrusted-solo draft/integrationをblockしない。
 
 GPU control workflowはprotected default branchのimmutable revisionを信頼元とし、PR側のworkflow定義を使用しない。実行対象codeはmaintainerがreview済みとして記録した完全commit SHAだけを受け付け、branch名や可変tagを入力にしない。許可済みSHA、reviewer、元PR、workflow revisionをcontrol-plane artifactへ記録する。
 
 PR由来のproject scriptとbinaryは隔離runner内の非特権userで信頼できないcodeとして実行する。jobへsecret、host controller credential、cloud credential、Docker socket、`sudo`を渡さない。modelはhost controllerが事前検証したread-only mountから提供し、jobから外部model storageへ直接認証させない。runnerは成功・失敗にかかわらずjob後に破棄または再image化する。
 
-GPU hard gateは変更が実際に触れるscopeへ適用し、未実装の後続tierをbootstrap変更へ循環的に要求しない。一方、適用対象となったtierは同じimmutable candidateで省略しない。
+verification laneは変更が実際に触れるscopeへ適用し、未実装の後続tierをdraftへ循環的に要求しない。一方、integration/releaseで適用対象となったtierは省略しない。
 
-- schema、matrix、runnerの非実行contractだけの変更はH0〜H2とnegative self-testを必須とする。GPU/runtime behaviorも変える場合は下記の該当gateを追加する。
-- H3 toolchain、compile-only、artifact metadataだけの変更はH0〜H3を必須とし、compile結果をGPU実行evidenceへ昇格させない。
-- trusted local runnerとG0 preflightの変更はH0〜H3、host側negative test、canonical deviceのG0、実行前後healthを必須とする。
-- model-free native HIP実行、C ABI、lifetime、allocator、queue/event、fallback、dispatchに影響する変更はH0〜H3とcanonical `gfx1030`/`gfx1201`のG0/G1を必須とする。
-- model pathへ影響する変更からG2、互換性の昇格・表記変更からG4、性能または実運用dispatchへ影響する変更からP0を必須とする。
+- 旧scope別bootstrap gateの一覧は影響範囲を決める参考mappingとして残すが、2026-08-10以降はdraftへ一律適用しない。draftはfocused affected test、integration/releaseは上記laneに従って該当H/G/Pを選択する。
+- compile-only結果をGPU実行evidenceへ昇格させない。GPU correctnessではexact target、artifact、model lock、numerical oracle、fail-closed resultの意味を維持する。
 
 ### main plan Phase 3 Stage Aのbootstrap gate
 
 ここでいうmain planのPhase 3 Stage Aは、この文書の実装段階`Phase 3: GPU runner基盤`とは別の作業区分である。main plan Phase 3 Stage Aは、既存GPU runner基盤を使って最初のpublic semantic opとmodel-bound G2へ進む。Phase 3全体はその後のfull model CLI生成とG3までを含み、Stage Aだけで完了しない。
 
-- 計画、model lock schema/validator、reader記録、host parserだけのcandidateはH0〜H2を必須とし、GPU実行済みとは表記しない。
+- 計画、model lock schema/validator、reader記録、host parserだけのintegration/release candidateは影響するH0〜H2を実行し、GPU実行済みとは表記しない。draftはfocused affected testだけでよい。
 - G2/P0のschema、matrix、runner、aggregateについて非実行contractだけを初めて構築するbootstrap candidateは、H0〜H2とhost側negative self-testを必須とする。GPU/runtime behaviorも変更する場合だけ、影響範囲に応じてH3/G0/private diagnostic G1を追加し、未完成のG2/P0自身は循環的に要求しない。
-- 初回G2/P0 enablement candidateはH0〜H2、同一candidateのH3 PASS evidence、canonical G0/private diagnostic G1/semantic RMSNorm G1/G2/P0、aggregate、実行前後healthを必須とする。これがG2/P0 baseline identityを確立する。
-- public runtime ABI、allocator、queue/event、lifetime、dispatch、native buildに触れるcandidateはH0〜H3とcanonical G0/private diagnostic G1を必須とする。
-- RMSNorm semantic contractとbaseline kernelには、private diagnostic G1とは別のversioned semantic-op G1 report、matrix、runner、aggregateを設ける。synthetic BF16 input/weight、FP32 oracle、非整列shape、dispatch境界、selected backend/kernel/dispatch、fallbackなしを同一candidateのcanonical 2 GPUで検証する。private G1 schemaへ数値結果を継ぎ足さない。
+- 初回G2/P0 enablementは、影響するH/G/P checkを同一semantic/build identityへ結び付け、Git SHA/treeは別fieldに記録する。これがG2/P0 baseline identityを確立する。
+- public runtime ABI、allocator、queue/event、lifetime、dispatch、native buildに触れるdraftはfocused affected test、integration/releaseは該当H/G checkを実行する。
+- RMSNorm semantic contractとbaseline kernelには、private diagnostic G1とは別のversioned semantic-op G1 report、matrix、runner、aggregateを設ける。synthetic BF16 input/weight、FP32 oracle、非整列shape、dispatch境界、selected backend/kernel/dispatch、fallbackなしをcanonical 2 GPUで検証する。private G1 schemaへ数値結果を継ぎ足さない。
 - G2 aggregate確立後のmodel path、G2/P0 schema・runner・tolerance変更は、H0〜H3、canonical G0、private diagnostic G1、semantic RMSNorm G1、real-weight G2を同じimmutable candidateへ結び付ける。
-- public HIP runtime/kernelと実運用dispatchに触れる最終candidateはP0も必須とする。Phase 3 Stage AのP0はRMSNorm kernel latencyと合法な`B-1/B/B+1`の短い観測に限定し、承認済みthresholdがない間はversioned `review_required` dispositionを要求する。性能最適化済みまたは性能回帰gate確立済みとは表記しない。
+- public HIP runtime/kernelと実運用dispatchに触れる最終candidateはP0も対象に含める。Phase 3 Stage AのP0はRMSNorm kernel latencyと合法な`B-1/B/B+1`の短い観測に限定し、承認済みthresholdがない間はversioned `review_required` dispositionをnonblockingな観測として記録する。性能最適化済みまたは性能回帰gate確立済みとは表記しない。
 - G3、G4、P1はPhase 3 Stage Aの完了条件に含めない。full model executionへ接続したPhase 3後続StageからG3、互換性昇格からG4、performance hard thresholdからP1を要求する。
 - tokenizer、chat template、image/video processorをlockして構造検証するだけの変更はG3を要求しない。runtimeでtokenization/template適用またはfull model生成へ接続した時点からG3を要求する。
 
-Phase 3 Stage Aの最終集約は、同一review済み40桁SHA/treeに対するH0〜H3、canonical `gfx1030`/`gfx1201`のG0、private diagnostic G1、semantic RMSNorm G1、G2、P0、実行前後health、process cleanupを必須とする。Phase 3全体の最終candidateはこれらにfull model G3を追加する。H3はrequired workflow昇格前でも最終candidateの必須PASS evidenceであり、branch protection上のrequired checkへの昇格は20回以上・7日以上の観測条件に従って別に判断する。
+Phase 3のfinal integration/releaseは、影響範囲に応じたH0〜H3、canonical `gfx1030`/`gfx1201`のG0〜G3、P0、実行前後health、process cleanupを同一semantic/build identityへ結び付ける。Git SHA/treeは別fieldで記録し、full modelを含むfinal relevant matrix以外をGPU correctnessの代用にしない。
 
-model lock fingerprintはmodel入力のidentity、reviewed SHA/treeはcode candidateのidentity、H3/G1/G2/P0 artifact・report digestはそのcandidateから得た実装と結果のidentity、tuple digestは実行環境のidentityである。aggregateはこれらを別fieldで保持して同一run graphへ結び付け、相互の代用、別candidateの混在、floating aliasによる置換を拒否する。
+model lock fingerprint、source/build inputs、toolchain、artifact/reportはsemantic/build identity、Git SHA/treeはsource snapshot、tuple digestは実行環境のidentityである。aggregateはこれらを別fieldで保持して同一run graphへ結び付け、相互の代用、別identityの混在、floating aliasによる置換を拒否する。
 
-`tested_sha`はreview済みの完全40桁`reviewed_sha`と一致しなければならず、branch、tag、別commit、merge後のSHA、古いartifactを代用しない。該当scopeのrunnerまたはevidence経路が未整備なら、その機能変更をprotected mainへmergeしない。
+reviewを行うlaneでは`tested_sha`と`reviewed_sha`を一致させ、branch、tag、別commit、merge後のSHA、古いartifactを代用しない。Git SHA/treeはsource snapshotとして記録するが、source/build inputs、toolchain、model lock、artifactのsemantic/build identityを代用しない。該当scopeのrunnerまたはevidence経路が未整備なら、integration/releaseでの適用を行わない。
 
 G1、G2、P0 reportには少なくとも、report ID、run ID/attempt、reviewed/tested/workflow SHA、matrix row ID、tuple digest、selected backend、GPU UUID/BDF/exact target、dispatch ID/count、CPU fallbackの許可・使用有無、artifact content/manifest SHA-256、target/codegen feature、state、開始・終了時刻を含める。GPU PASSでは`selected_backend=hip`、GPU dispatch数1以上、CPU fallback未使用、artifact hash一致を必須とする。
 
@@ -273,22 +292,18 @@ Phase 1では`ci/schema/compatibility-tuple-v1.schema.json`、`ci/matrix/suites-
 - 各点のselected backend、dispatch ID/count、fallback使用、artifact hash、median、robust spreadを記録する。
 - 合法な点の欠落、重複、stale/cancel、非GPU実行、測定値不正、CPU fallback、未許可dispatchはfailureとする。
 - 境界でdispatch IDが変わること自体はfailureにせず、versioned dispatch manifestで許可された選択か確認する。
-- baseline分布がない段階では全GPU共通の倍率thresholdを発明しない。tripletの完全な実測証拠と`performance_sanity_disposition`を必須にする。threshold未承認時は`review_required`とし、reviewer、理由、日時を伴う承認なしにPASS集約またはmergeしない。
+- baseline分布がない段階では全GPU共通の倍率thresholdを発明しない。tripletの実測証拠と`performance_sanity_disposition`を記録する。threshold未承認時の`review_required`はnonblockingな観測であり、性能PASS/FAILや性能回帰gate確立済みとは主張しない。性能をrelease acceptanceへ入れる場合だけ、ユーザー承認済みthresholdを先に固定する。
 - 履歴が蓄積した後、metric、tuple、dispatch ID、case setごとにversioned thresholdを承認する。
 
-## 変更影響による選択
+## Verification lanesによる選択
 
 最初からpath-to-suite mappingを管理する。
 
-- Rust frontend/model lock/APIだけの変更: H0〜H2。GPU contractに影響する場合だけG2/G3を追加。
-- H3 toolchain、compile-only、artifact metadataだけの変更: H0〜H3。GPU実行evidenceは要求せず、実行済みとも表記しない。
-- trusted local runner、G0 preflightだけの変更: H0〜H3、host negative test、同一reviewed SHAのcanonical G0、実行前後health。
-- runtime descriptor、backend/capability/dispatch、C ABI、lifetime、allocator、queue/event変更: H0〜H3、同一reviewed SHAのcanonical G0/G1。model pathへ影響するときだけG2、性能または実運用dispatchへ影響するときだけP0を追加。
-- HIP kernel、fallback、native build変更: H0〜H3、同一reviewed SHAと対象tupleのG0/G1。semantic numerical opは独立oracleと境界case、model pathはG2、性能pathはP0を追加。
-- tokenizer/chat template/model integration変更: H0〜H2、G2/G3。
-- build、ROCm、target、codegen変更: compile-only scopeならH0〜H3。runtime artifactへ適用する場合は同一reviewed SHAのG0/G1、互換性昇格時はG4、model/performanceへ影響するときだけG2/P0を追加。
-- quantization/dtype変更: H1〜H3、対象GPUのG1/G2、数値評価、P0。
-- scheduler/batching変更: H1、fake backendのcontrol-plane test、実GPUのG2/G3。CPUでGPU workloadを再現しない。
+- draftは、影響するhost contract、compile、oracle、またはGPU focused testだけを選ぶ。dirty local worktreeを許可し、immutable identity、独立review、full matrixを要求しない。
+- integrationは、変更影響に応じたH0〜H3/G0〜G3/P0を選び、exact target・artifact・model lock・numerical oracleを同一semantic/build identityへ結び付け、reviewを1回行う。B7のfull H/G matrixはこのlane以降だけで実行する。
+- release/pushはclean immutable identityでfinal relevant matrixを実行し、release累積reviewを1回行う。Phase 3 final integration/releaseは関連するH0〜H3、G0〜G3、P0を要求する。
+- docs-onlyはMarkdown、link、consistencyの確認だけとし、closeoutを作らない。semantic/build identityが変わらずpath-to-suite mappingも変わらない場合は、対応するGPU evidenceを再利用できる。
+- 旧来の個別scope別gate一覧は、上記laneへ移行したため2026-08-10付でnonblockingな履歴扱いとする。最終GPU correctness、fail-closed結果、exact target/artifact/model lock、独立numerical oracleの条件は維持する。
 
 GPUに影響する変更は、実GPU evidenceが得られるまで「compile済み」または「host contract確認済み」とだけ表記し、「GPU verified」へ昇格させない。
 
@@ -307,7 +322,7 @@ GPUに影響する変更は、実GPU evidenceが得られるまで「compile済�
 - `ci/schema/test-result-v1.schema.json`、`ci/schema/compatibility-tuple-v1.schema.json`、`ci/matrix/suites-v1.json`、`ci/matrix/host-v1.json`、`ci/matrix/path-to-suite-v1.json`と共通runnerを置く。
 - Rust format/lint/test、C++ format/static check、Python test、Markdown/schema検証を追加する。
 - [repository hygiene方針](../../../../../development/repository-hygiene.md)に従うtracked tree H0検査とlocal hygiene commandを追加する。
-- H0〜H2を並列PR required rowとし、`host-required`へfail-closed集約する。H3はまだrequiredにしない。
+- H0〜H2を影響範囲に応じたhost verification rowとして並列実行し、`host-required`を使う場合もlane内の集約としてfail-closedに扱う。external-contribution laneのrequired化は行わない。
 - timeout、収集件数、seed、case timingをtest harnessから必ず出力する。
 
 実施状況: **完了**。
@@ -328,8 +343,8 @@ GPUに影響する変更は、実GPU evidenceが得られるまで「compile済�
 - PRではexact `gfx1030`と`gfx1201`を独立rowでcompileし、nightly/releaseでは`gfx1030`〜`gfx1036`、`gfx1200`、`gfx1201`、将来の`gfx942`を各明示rowとしてcompileする。`gfx1200` compileを実機互換性の証拠にしない。
 - exact/generic targetとcodegen featureを混ぜず、artifact metadataを検証する。
 - compile-only結果を実機互換性または性能の証拠にしない。
-- 20回以上かつ7日以上の連続観測で全期待row `PASS`、他state/cancel/schema error 0、artifact hash一致、p95 12分以下、最大15分以下、unexpected `INFRA_ERROR` 0、missing result 0を満たした後だけH3のrequired昇格をreviewする。それまではnon-requiredで計測し、H0〜H2だけをrequiredとする。
-- required昇格観測はG0、GPU runner、model-free runtimeの開発と並行する。7日間を後続実装の開始条件または待機期間にしない。
+- 20回かつ7日以上の観測によるH3 required昇格は旧運用条件として履歴に残すが、2026-08-10以降のlane適用や作業開始・完了をblockしない。
+- required昇格の観測はG0、GPU runner、model-free runtimeの開発と並行できる。追加のprocess条件はユーザー承認なしに新しいblocking条件へ昇格しない。
 
 ### Phase 3: GPU runner基盤
 

@@ -9,14 +9,17 @@ must be checked for the exact upstream revision and files being used.
 ### llama.cpp
 
 [llama.cpp](https://github.com/ggml-org/llama.cpp) may be used as an
-implementation reference. Direct reuse is allowed only after the exact source is
-reviewed and the import record described below is complete.
+implementation reference. Direct reuse is allowed and should be considered
+before writing a clean implementation. Draft development has no precondition of
+an independent human review or a complete import record; the record below is
+required for release or distribution.
 
 Direct reuse must not be represented only by a few general sentences in the
-project `LICENSE`. For every exact copy, adaptation, or source-to-source port:
+project `LICENSE`. For every exact copy, adaptation, or source-to-source port
+intended for release or distribution:
 
 1. Verify the license and copyright notices in the exact upstream revision and
-   source path.
+   source path before release or distribution.
 2. Add an entry to the repository-root `THIRD_PARTY_NOTICES.md`. Create that file
    when the first actual third-party import is made; an empty placeholder is not
    required.
@@ -38,7 +41,7 @@ A clean implementation based only on separately documented technical facts is
 not a direct import and does not use one of these reuse modes; its design notes
 must still identify the references consulted. It must not contain copied source
 text or a close translation. When uncertain, treat the work as direct reuse and
-request review.
+record it as direct reuse.
 
 Suggested source-file header:
 
@@ -56,10 +59,9 @@ not replace required copyright or notice text.
 
 Do not directly copy, adapt, or port source from vLLM or other inference engines.
 Use them only to identify technical facts, algorithms, constraints, and evaluation
-ideas. Inspection and implementation must be separated as required by the project
-development policy: the inspection output documents technical points without
-source expression, and implementation is based on that document rather than the
-upstream code.
+ideas. Keep inspection notes separate from implementation: the inspection output
+documents technical points without source expression, and implementation is based
+on that document rather than the upstream code. Separate agents are optional.
 
 Public papers, standards, and original project documentation should be preferred
 as the implementation basis when available. The same separation rule applies to
@@ -107,8 +109,8 @@ reuse:
     - <specific rename, API adaptation, or bug fix>
 import:
   commit: <full sLLM commit SHA that first introduced the material>
-  reviewed_by: <reviewer or approval reference>
-  reviewed_at: <YYYY-MM-DD>
+  reviewed_by: <optional reviewer or approval reference>
+  reviewed_at: <optional YYYY-MM-DD>
 ```
 
 `imported_sha256` is fixed to the bytes introduced by `import.commit`; it is not
@@ -119,17 +121,18 @@ overwriting the original import hash.
 
 For an import commit that is not known until the commit is created, use a clearly
 marked pending value in the working tree and replace it with the full commit SHA
-in the immediately following provenance-only commit. Do not leave the pending
-value in a release.
+before release. A provenance-only follow-up commit is not required at each
+development checkpoint. Do not leave the pending value in a release.
 
 ## AI-assisted code
 
 AI output is not accepted into sLLM merely because it was generated rather than
-copied manually. A human reviewer must review and affirmatively adopt the change,
-check it for suspicious similarity to identifiable third-party source
-expression, and apply this provenance policy whenever external expression was
-reproduced, closely adapted, or ported. Prompts, model output, or an agent's claim
-of originality are not sufficient provenance evidence.
+copied manually. AI origin alone does not add an independent review requirement,
+hard gate, or broader verification. At integration, a similarity or provenance
+check may be used; if identifiable third-party expression was reproduced,
+closely adapted, or ported, apply this policy for release or distribution.
+Prompts, model output, or an agent's claim of originality are not provenance
+evidence. Any human review is the ordinary review for the active work lane.
 
 `Co-Authored-By` and similar commit trailers record development participation.
 They are not evidence of copyright ownership, license compatibility, assignment,
@@ -137,7 +140,7 @@ or authority to grant legal rights.
 
 ## Updating or removing imported material
 
-An upstream update is a new provenance event: review the new revision and add its
+An upstream update is a new provenance event: inspect the new revision and add its
 imported hashes, modifications, notices, and import commit without rewriting the
 earlier event. Ordinary downstream maintenance is represented by Git history.
 When imported code is removed, retain enough history in the notice entry to

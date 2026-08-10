@@ -6,6 +6,7 @@
 - この文書には重要なproduct・architecture・compatibility上の決定、開発計画と順序、進捗、未解決事項だけを記録する。恒久的な実行手順は各正本文書へ置き、ここには重複させない。
 - `sLLM.md` とこの文書に方針上の差異が生じた場合は、推測で統合せずユーザーへ確認する。
 - 角括弧内の項目は、初期バージョンでは対応しない将来機能を表す。
+- project内の権限順は、現在の明示的なユーザー指示、`sLLM.md`、`AGENTS.md`、この文書の承認済み決定、active planの作業固有条件、historyに残す過去の事実、とする。下位文書とhistoryは上位方針を上書きせず、新しい完了条件やblockerを作らない。
 
 ## プロジェクトの目的と方針
 
@@ -191,7 +192,7 @@
 - llama.cppとvLLMから、実装前に技術上の要点を抽出する。
 - local `reference/` の公式origin、version、完全commit SHA、取得状態は[参照source固定マニフェスト](../references/source-lock.md)を正とし、固定sourceの参照範囲と採用判断は[推論engine参照](../references/inference-engines.md)へ記録する。
 - 2026-08-02の追加調査対象からはLMDeployとKTransformersだけを正式なlocal参照sourceとして採用する。MLC LLM、Candle、CTranslate2、OpenVINO GenAI、ONNX Runtime GenAI、TGIは今回未採用とし、採用予定に置かない。
-- vLLM等からコードを直接流用しない。reader subagentとimplementer subagentを分離し、要点だけを渡す。
+- vLLM等からコードを直接流用しない。参照sourceの表現を実装へ持ち込まないようreader記録とimplementation phaseを分離するが、別subagentの使用は必須にしない。
 - llama.cppからの直接流用は許可するが、トップレベルLICENSEへの曖昧な追記だけで済ませない。
 - 直接流用する場合は、copyright/license noticeを保持し、upstream URL、完全commit SHA、upstream/local path、hash、exact/adapted/ported区分、変更内容、import commitを記録する。
 - 実際にimportした時点で`THIRD_PARTY_NOTICES.md`を作成・更新し、コピー先から参照できるようにする。
@@ -228,8 +229,8 @@
 - PR必須CPU workflowは15分以内を初期目標とし、実GPUtestは変更影響と明示tupleに基づいて選択する。
 - 数値toleranceはop、入力範囲、accumulation dtype、出力dtypeごとに根拠を持って定義し、全op共通の緩い既定値を置かない。
 - performanceに影響する境界`B`は実GPUで`B-1/B/B+1`を測定し、backend、dispatch、fallback、artifact hashとともに記録する。初期G3 smokeは`255/256/257`を含める。
-- HIP/runtime/backend/dispatch/native buildへ影響する変更は、同じreviewed immutable SHAに対するG0/G1/G2/P0とfail-closed集約をmerge条件とする。
-- H0/H1/H2は並列required rowとし、`host-required`へ集約する。required workflowはp95 10分以内、hard上限15分とする。
+- HIP/runtime/backend/dispatch/native buildのdraft developmentでは、影響箇所のfocused host/GPU testを行う。integrationまたはreleaseでGPUの正しさを主張するときだけ、意味上のbuild identityが一致するG0/G1/G2/P0等の該当evidenceをfail-closedに集約する。
+- H0/H1/H2はintegration/releaseで選択された場合の並列rowとし、`host-required`へ集約する。draftへ全rowを一律要求しない。required workflowはp95 10分以内、hard上限15分とする。
 - 初期GPU evidenceは専用local hostのexact `gfx1030` 1台と`gfx1201` 1台で直列実行し、public fork PRからGPU runnerを直接使わない。
 - 詳細な方針と実装順序は[CI・テスト方針策定計画](active/2026/08/1-10/ci-test-strategy.md)を参照する。
 
@@ -237,7 +238,14 @@
 
 - Gitで追跡するのはsource、文書、小さなfixture、manifest、hash、summaryとし、model、binary、raw trace/profile、large model slice、生成物は追跡しない。詳細は[repository hygiene方針](../development/repository-hygiene.md)を正本とする。
 - 無人での進行を優先しつつsecret exposureを最小化する。専用local hostでは`homelab1`への`NOPASSWD: ALL`を意図的なtrade-offとして受容し、main agentがtask scope内で`sudo -n`を使う。恒久方針は[credential方針](../security/credentials.md)を正本とする。
-- 作業単位は独立してreview・rollbackできる範囲とする。immutable identityの固定から検証、適用、適用後確認、rollback/fail-stop、`push` skillによる公開までの実行手順は`AGENTS.md`を正本とする。
+- 現在の既定profileは`trusted-solo-development`とし、外部contribution実行時とrelease時の要件を分離する。使っていないprofileの要件は現在の開発をblockしない。
+- main agentは調査・実装を直接行える。subagentは並列化、分離、専門的contextに効果がある場合だけ任意に使い、subagent利用や特定の`codex exec`実行方式を完了条件にしない。
+- 作業単位は独立してreview・rollbackしやすい範囲とするが、細分化、immutable identity、独立review、全matrix実行を各draft checkpointの完了条件にしない。draft、integration、release/push、docs-onlyのlaneと実行手順は`AGENTS.md`を正本とする。
+- AIがhard gate、独立review必須化、広範/GPU再実行、security boundary、reuse制限、blocking stage、作業単位の追加分割、immutable evidence拡張を提案する場合、明示的なユーザー承認まではorigin・scope・cost・expiryを持つnonblocking proposalとして扱う。
+- 受入条件は作業単位の開始時に固定する。実際のcorrectness/security defectはblockerにできるが、review中に新しく作られたprocess要件は承認なしに遡及適用しない。
+- source/build input、toolchain、model lock、artifact digestから成る意味上のidentityをGit commit identityと区別する。docs-only変更で意味上のidentityが変わらないことを確認できればcode/GPU evidenceを再利用し、docs-only closeoutやfresh独立reviewを行わない。
+- deploy可能なservice/runtimeが対象にある場合だけ適用後smoke/healthを要求する。独立した適用先がないlibrary、tool、文書はpush可能である。
+- 同じ単位の2回reject、review時間が実装時間超過、1時間以上の機能進捗停止、検証・文書が30%超、見積り1.5倍超、gate/受入条件変更のいずれかで、新規review・検証を停止し、ユーザーへ報告して計画を見直す。
 
 ## 開発順序
 
@@ -305,17 +313,22 @@
 - CLIの生成停止集合は固定metadataとchat templateから`[248046, 248044]`（`<|im_end|>`を先、`<|endoftext|>`を後）とする。prompt tokenは停止判定せず、新規生成tokenをargmax直後に判定し、stop token自身をvisible outputへ含めない。停止token IDと理由はreportへ保持する。
 - text frontendは`tokenizers =0.21.4`をdefault featureなし・`onig` featureだけで固定し、HTTP、progressbar、`esaxx_fast`を無効にする。chat templateは任意Jinjaを実行せず、locked template hashを検証したtyped Qwen3.5 text-only rendererとする。停止policyをversioned lock/schema/APIへ反映し、全依存version/checksumはroot `Cargo.lock`、license/feature/MSRVはtracked dependency policyとoffline validatorへ固定してからfrontendを実装する。
 - G2は固定model lockから実行時に抽出するRMSNorm weightと、独立生成したactivationを使う。raw model、weight slice、traceはGit管理せず、source fingerprint、tensor名、offset・shape、抽出recipe、artifact SHA-256を記録する。
-- 同一immutable candidateに対してH0〜H3、canonical `gfx1030`/`gfx1201`のG0、private diagnostic G1、semantic RMSNorm G1、G2、P0、数値oracle、fallbackなし、実行後healthをfail-closedに集約する。G2/P0完了だけでfull model推論、一般GPU対応または性能最適化済みとは主張しない。
+- Phase 3のintegration/release candidateでは、意味上の同一build identityに対してH0〜H3、canonical `gfx1030`/`gfx1201`のG0、private diagnostic G1、semantic G1、G2、必要なP0、数値oracle、fallbackなし、実行後healthをfail-closedに集約する。個別draft checkpointでは影響範囲のfocused testだけを行う。G2/P0完了だけでfull model推論、一般GPU対応または性能最適化済みとは主張しない。
 - Stage Aではattention、RoPE、MLP、KV/state、tokenizer/chat template実行、prefill/decode、CLI生成、G3をまだ含めないが、これらはPhase 3全体の後続Stageで実装する。性能最適化とP1はPhase 3に含めない。
 - H3 required昇格の20回・7日観測は引き続き並行follow-upであり、Phase 3の開始条件・完了条件にはしない。
 - Phase 3全体の作業単位、受入条件、evidence、rollback境界は[Phase 3 Qwen3.5-4B BF16 text生成計画](active/2026/08/1-10/phase3-qwen35-4b-bf16.md)を正とし、完了した最初のmodel-bound数値経路は[Stage A model lock・RMSNorm・G2計画](archive/2026/08/1-10/phase3-model-lock-rmsnorm-g2.md)に記録する。
 
 ## 現在の状態と次の作業
 
+- 2026-08-10に開発policyをresetした。この節で以下に残す各checkpointのstrict H0〜H3、fresh独立review、docs-only closeout、同一Git SHAへの再実行、予測上端+1時間hard stopは当時の実績・運用記録であり、現在の完了条件ではない。以後のB5以降はdraftでfocused testを行い、まとまったintegration candidateで影響するhost/GPU evidenceと1回のreviewを取得し、最終releaseでclean immutable identityと累積reviewを固定する。
 - 現在: Phase 3 Stage Aをcommit `ac2baa3a0734d0894353ba180259d979da5a831e`（tree `4e43a9c42c9aa2dfa6a6d438610fa54c4e482d10`）で完了した。同一immutable identityに対しH0 305/305、H1 151/151、H2 35/35、base/RMSNorm H3、canonical `gfx1030`/`gfx1201`のpre/post G0、private G1、sealed-controller semantic RMSNorm G1、real-weight G2、P0、全aggregate、health/process cleanupが`PASS`した。G2は固定Qwen3.5-4B cacheのlocked 5120-byte sliceを使用して各target 6 HIP dispatch、P0は各target 130 HIP dispatchをfallbackなしで記録し、P0はperformance threshold・最適化・他engine比較を主張しない`review_required` dispositionとした。独立review 9はfull 5-file差分と最終evidenceをhigh/medium/low 0件で`PASS`した。A5運用負債もhost-only evidence planner、H0 316/316、独立review `PASS`により解消した。Phase 3全体とfull text生成/G3は未完了である。Stage BはB0〜B7bの独立作業単位へ分割済みで、B0 dependency closure、B1 tensor shape closure、B2 verified frontend asset closure、B3 tokenizer frontend、B4 typed chat rendererを完了した。現在はB5 weight registry/load planのhost-only事前監査中である。H3 required昇格の20回・7日観測は引き続きnonblocking follow-upとする。
 - 2026-08-08時点では今後数週間を単独のtrusted development期間とし、外部PR、未review code、第三者binaryを専用local/GPU hostで実行しない。期間中は悪意ある同一UID process、fork PRによるrunner侵害、永続runner上の敵対codeを防ぐrepository内custom capsuleの完成をPhase 3の前提から外し、将来のrunner隔離作業へ延期する。local/GPU実行はmaintainerが十分に確認したcodeと明示commandに限定し、secret・Docker socketを渡さず、可能な範囲のcontainer隔離、network遮断、timeout・resource上限、process cleanup、実行前後GPU health、candidate/artifact identityは維持する。外部contributorのcodeを実行する前、または複数の信頼境界を持つ運用へ移る前に、ephemeral VM/JIT runnerまたはjob後reimageをsecurity boundaryとする設計を必須で再開する。
 - host capsule独立reviewの修復中に中断された`ci/tools/execution_capsule.py`の部分変更（現行file SHA-256 `44801a0832756f0e6966cb7b23bd25653d6cfba91d6816ededf7f9fe63239ac9`）は未検証であり、host/GPU evidenceに使用しない。2026-08-08のユーザー判断により、直前版SHA-256 `a1464bcf5ae1407aaa91b984a6782af0a06d574447afcd052864440f7faedbba`へのbyte-for-byte復元は打ち切り、A0 security hardeningの部分変更を放棄する。Phase 3のsemantic実装はdirect testと標準containerによる`local-development`確認で再開し、immutable host evidenceが必要になる前に、現行部分変更を継承しない最小のtrusted-development baselineを新規作成・reviewして新identityを固定する。
-- 2026-08-08にPhase 3 Stage Aを再開し、2026-08-09に完了した。各工程は開始前に予測時間を固定し、予測上端を1時間超えた時点を中断上限とする運用を後続Stageでも維持する。Stage Aの実績は[archive済みStage A計画](archive/2026/08/1-10/phase3-model-lock-rmsnorm-g2.md)を正とし、後続Stageも開始前に8時間以下の作業単位へ分割する。
+- 2026-08-08にPhase 3 Stage Aを再開し、2026-08-09に完了した。当時は各工程へ予測上端+1時間の中断上限と8時間以下の分割を適用したが、この一律運用は2026-08-10のpolicy resetで廃止した。Stage Aの実績は[archive済みStage A計画](archive/2026/08/1-10/phase3-model-lock-rmsnorm-g2.md)を正とする。
+
+### 2026-08-10以前の詳細経緯（履歴）
+
+以下は当時の判断とevidenceを保存する履歴であり、記載されたfresh review、closeout、hard-stop clock、同一Git SHA gateを現行作業へ再適用しない。
 - 再開後A1 fresh reviewは2026-08-08 15:50:49 JSTに完了し、direct host回帰はPASSしたが、semantic G1のnonfinite raw-scale case欠落と、保存証拠から数値比較を独立再計算できないraw-response非保持の2件で`FAIL`とした。A2はこの2件だけを2〜4時間（中断上限5時間）で修復し、延期済みcustom capsule hardeningは継承しない。
 - A2実装は2026-08-08 16:18:23 JSTに完了し、raw-scale非有限値3件とbounded raw-response/sidecarの保存・identity結合・offline再計算を追加した。implementerのdirect host回帰はPASSした。A2の20:51:54 JST中断上限を維持したままfresh独立reviewを実行し、そのPASSまではA2完了またはG1修復完了とは扱わない。
 - A2 fresh独立reviewは2026-08-08 16:34 JSTに`FAIL`とした。元の2 blockerは閉じたが、semantic G1のreport/artifact/aggregate schemaにschema単体で未知keyを受理するopen objectが計23箇所あり、focused回帰もCMake compiler-broker client認証で1件失敗した。A2の20:51:54 JST中断上限を延長せず、この2件の修復と再reviewを続ける。
@@ -439,6 +452,9 @@
 - 初回B5 reader checkpoint `939a1be3f48983ad9deb041b9c5f9930f7c74e64`、tree `7777f1cb5eada0393e150c7d945b052a1508293a`はstrict H0 335/335、attempt 1、failed/skipped 0、report SHA-256 `7e0ae8b7c394206e5b63f5709d330c44973c6af731f56b58d62da5b788409638`のsidecar一致を`PASS`したが、fresh reviewがconsumer grammarとdigest shard bindingのHigh 2件、family算術、vision bias境界、binary encoding/test vector不足のMedium 3件を検出したため受け入れない。exact name grammar、relative source fileとlocked size/SHA、固定tag/width/framing、canonical digest vectorをreaderへ追加した新checkpointで取り直す。B5は未実装・未完了である。
 - 修復reader candidate `f73c9646f221eb92fb0fe5371e0ce8519dbedb2d`、tree `775c81ed4b78d6787c271d59f783fbb20a6eb2c4`はstrict H0 335/335、attempt 1、failed/skipped 0、report SHA-256 `df219c10bf813c1dde998cbdca906c77bf45b1d9d916c337095e42ef413d40ff`のsidecar一致を`PASS`したが、fresh reviewは426-byte canonical digestが記載規則から再現不能であるHigh 1件を検出したため受け入れない。domainからentry/chunkまでの唯一のwire順、tag幅、entry countの単一framing、optional layer位置、locked SHAのASCII hex string表現を固定し、独立再計算で426 bytes・SHA-256 `9a57a67384038c9e437236511c50f1b03b88a4f733cb06464d4ad3e408616bb2`を確認した。新checkpointのstrict H0とfresh reviewは未実施で、B5は未実装・未完了である。
 - 後続A3は8時間の一括工程にせず、G2 host contract・実行経路をA3a（2〜4時間、中断上限5時間）、P0 host contract・実行経路をA3b（2〜4時間、中断上限5時間）へ分割する。各工程は開始時刻とhard中断時刻を別々に固定し、未完了時間を次工程へ移し替えない。
+
+### 現行status summary
+
 - 完了:
   - プロジェクト名を`sLLM`へ変更し、CLI、Rust crate、C ABI、環境変数、CI、文書、source directoryを新名称へ統一。
   - プロジェクトライセンスをMITへ統一。
@@ -471,7 +487,7 @@
   - generated-token停止policy導入前のPhase 3 model-lock candidate `sha256:89ba8a6b2e1b7c0324090ddf15ce0e673ff4c3dc242c4127690d490056d8efd1`を独立監査までPASSさせた。111-byteの有効なsafetensors fixture、同size path差し替え・同一inode改変・gap/overlap/trailing/overflow・FD cleanupを含む15件のhost contractを固定し、実Qwen cache全13 fileのcontent-only hashと738 tensorのindex/header/slice照合を再検証した。このfingerprintは過去candidateのidentityであり、現行runtime入力には使用しない。
   - versioned generated-token停止policyをmodel lockへ固定した現行Qwen lock fingerprintは`sha256:32265444b7cdd2a00e4e4e3e6aa8375a05acf6cddfcb9ffc348f54f67a7cd935`とする。fingerprint domainは`schema_version`と完全な`model`のまま変更せず、stop-policy追加によるmodel identity更新として扱う。
 - 次:
-  1. B5 weight registry/load planの事前監査をeffective hard中断時刻2026-08-10 15:38:27 JSTまで進め、再開後は同一immutable candidateのH0〜H2とfresh独立reviewがPASSした後にだけB6 offline CLIを開始する。
+  1. B5 weight registry/load planをdraft laneで実装し、影響箇所のfocused test後にB6以降のdraftとbatch integrationする。B6開始のためのdocs-only closeout、同一Git SHAのH0〜H2、fresh独立reviewは要求しない。
   2. 次のGPU evidence refreshでは、完了したtracked host-only plannerを実行前preflightとして使う。
   3. H3はnon-requiredのまま観測を継続し、20回以上・7日以上の条件を満たした時点でrequired昇格だけをreviewする。
 
