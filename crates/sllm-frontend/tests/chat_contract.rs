@@ -94,6 +94,9 @@ fn fixture_with_spoofed_metadata(template_bytes: &[u8]) -> Fixture {
     let mut lock = parse_model_lock(source.as_bytes()).expect("synthetic lock parses");
     let mut cache = verify_model_cache(&lock, &directory.0).expect("synthetic cache verifies");
 
+    lock.model.repo_id = "Qwen/Qwen3.5-4B".to_owned();
+    lock.model.resolved_revision = "851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a".to_owned();
+
     // Deliberately mutate the public labels after core has verified different
     // bytes. The frontend constructor must bind itself to the bytes it reads,
     // so these labels can never turn this fixture into the fixed template.
@@ -124,6 +127,26 @@ fn same_size_utf8_spoof() -> Fixture {
 #[test]
 fn fixed_constructor_rejects_same_size_utf8_bytes_with_spoofed_metadata() {
     let fixture = same_size_utf8_spoof();
+    assert_eq!(
+        Qwen35ChatTemplateV1::from_verified_cache(&fixture.lock, &fixture.cache),
+        Err(ChatRenderError::UnsupportedTemplateIdentity)
+    );
+}
+
+#[test]
+fn fixed_constructor_rejects_wrong_repo_id() {
+    let mut fixture = same_size_utf8_spoof();
+    fixture.lock.model.repo_id = "Qwen/Qwen3.5-4B-Base".to_owned();
+    assert_eq!(
+        Qwen35ChatTemplateV1::from_verified_cache(&fixture.lock, &fixture.cache),
+        Err(ChatRenderError::UnsupportedTemplateIdentity)
+    );
+}
+
+#[test]
+fn fixed_constructor_rejects_wrong_resolved_revision() {
+    let mut fixture = same_size_utf8_spoof();
+    fixture.lock.model.resolved_revision = "0123456789abcdef0123456789abcdef01234567".to_owned();
     assert_eq!(
         Qwen35ChatTemplateV1::from_verified_cache(&fixture.lock, &fixture.cache),
         Err(ChatRenderError::UnsupportedTemplateIdentity)

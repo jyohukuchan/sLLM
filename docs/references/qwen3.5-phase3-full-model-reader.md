@@ -399,9 +399,8 @@ API handoffの境界は、Rustのtyped execution plan/runtimeから、versioned 
 
 このStage B-D reader記録で、fixed cacheの存在・identity・payload全readなし境界、text config/schedule/tensor family、full/GDNのhead・state/cache、text-only MRoPE、EOS/template/stop/reportは解決済みとする。
 
-残りは次の5点に限定する。
+残りは次の4点に限定する。tokenizer libraryとtext-only template normalization boundaryはB3/B4で解決済みである。
 
-- tokenizer libraryの選定とtext-only template normalization boundary。
 - candidate public API（ABI version、descriptor、ownership/error contract）の確定。
 - 実装後のcanonical GPU tolerance校正。
 - 独立したfull-model G3 golden token sequenceの確定。

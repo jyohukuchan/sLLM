@@ -9,6 +9,9 @@ pub const QWEN35_CHAT_TEMPLATE_SIZE_BYTES: u64 = 7_756;
 pub const QWEN35_CHAT_TEMPLATE_SHA256: &str =
     "a4aee8afcf2e0711942cf848899be66016f8d14a889ff9ede07bca099c28f715";
 
+const QWEN35_REPO_ID: &str = "Qwen/Qwen3.5-4B";
+const QWEN35_RESOLVED_REVISION: &str = "851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a";
+
 /// Hard host-side output cap for one rendered prompt (16 MiB).
 ///
 /// This is deliberately independent of tokenizer/model context limits: the
@@ -341,6 +344,11 @@ impl Qwen35ChatTemplateV1 {
         cache: &VerifiedCache,
         expected_sha256: &str,
     ) -> Result<Self, ChatRenderError> {
+        if lock.model.repo_id != QWEN35_REPO_ID
+            || lock.model.resolved_revision != QWEN35_RESOLVED_REVISION
+        {
+            return Err(ChatRenderError::UnsupportedTemplateIdentity);
+        }
         if lock.model.tokenizer_contract.chat_template_path != QWEN35_CHAT_TEMPLATE_FILENAME {
             return Err(ChatRenderError::UnsupportedTemplateIdentity);
         }
@@ -790,8 +798,11 @@ mod tests {
         let mut lock = parse_model_lock(source.as_bytes()).expect("synthetic lock parses");
         let mut cache = verify_model_cache(&lock, &directory.0).expect("synthetic cache verifies");
 
-        // Keep production metadata fixed while allowing the private test seam
-        // to prove the same bounded-read success path with synthetic bytes.
+        // Keep production identity and metadata fixed while allowing the
+        // private test seam to prove the same bounded-read success path with
+        // synthetic bytes.
+        lock.model.repo_id = QWEN35_REPO_ID.to_owned();
+        lock.model.resolved_revision = QWEN35_RESOLVED_REVISION.to_owned();
         lock.model
             .files
             .iter_mut()

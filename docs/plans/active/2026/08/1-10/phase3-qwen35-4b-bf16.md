@@ -145,6 +145,8 @@ B3 docs-only closeout commit `7904a2c196628adcc138eb6499a6a04bd5ebdb56`、tree `
 
 B4 candidate `b1984e47809ed8cc428b9b817409b74470beadf6`、tree `a8b01c84eef5836bc45d2535843ec3c29e180fe2`はstrict H0 335/335、H1 195/227（32 deselected）、H2 35/42（7 deselected）を各attempt 1、failed/skipped 0、clean exact identityで`PASS`したが、fresh累積独立reviewがStage B表の古い「dependency edge/Cargo.lock不変」と実際の受入済み`sha2` edge追加との矛盾をLow 1件として検出したため受け入れない。実装指摘は0件である。表を開始記録と実装範囲へ一致させ、旧evidenceを再利用せず新candidateのH0〜H2とfresh reviewを取り直す。
 
+表を修正したcandidate `5c8bbd5c5516891fa5708245ed2a8b522f533247`、tree `a753d87ef76575ce66350070a88b1c57121fcd86`はstrict H0 335/335、H1 195/227（32 deselected）、H2 35/42（7 deselected）を各attempt 1、failed/skipped 0、clean exact identityで`PASS`した。fresh累積独立reviewは、固定template bytesだけで別repo/revisionのlockを除外しないconstructor identity不足をMedium 1件、main planの現在状態とreader残件の陳腐化をLow 1件として検出したため受け入れない。fixed `repo_id`/`resolved_revision`検査とdirect mutation negative testを追加し、正本文書を同期した新candidateで全evidenceを取り直す。
+
 受入条件:
 
 - CPU CIはtiny synthetic safetensors/tokenizer fixtureだけを使い、full modelをdownload/loadしない。
