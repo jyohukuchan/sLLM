@@ -147,6 +147,8 @@ B4 candidate `b1984e47809ed8cc428b9b817409b74470beadf6`、tree `a8b01c84eef5836b
 
 表を修正したcandidate `5c8bbd5c5516891fa5708245ed2a8b522f533247`、tree `a753d87ef76575ce66350070a88b1c57121fcd86`はstrict H0 335/335、H1 195/227（32 deselected）、H2 35/42（7 deselected）を各attempt 1、failed/skipped 0、clean exact identityで`PASS`した。fresh累積独立reviewは、固定template bytesだけで別repo/revisionのlockを除外しないconstructor identity不足をMedium 1件、main planの現在状態とreader残件の陳腐化をLow 1件として検出したため受け入れない。fixed `repo_id`/`resolved_revision`検査とdirect mutation negative testを追加し、正本文書を同期した新candidateで全evidenceを取り直す。
 
+B4 final implementation candidate `b43f2132c1afc604f2ae22ab12d55101aac7921b`、tree `559c426b1184f25da131fa10e07a3926938d299e`をclean worktreeで固定した。constructorはfixed `repo_id`、`resolved_revision`、template path/size/SHAをread前に検査し、bounded verified-cache read後の実bytesへsize、SHA-256、UTF-8を検証する。private `cfg(test)` seamは同じproduction identity/metadata/read/UTF-8経路だけを使い、public direct negative testはwrong repo/revisionとsame-size spoofを拒否する。同一identityのstrict H0 335/335、H1 197/229（32 deselected）、H2 35/42（7 deselected）は各attempt 1、failed/skipped 0で`PASS`した。report SHA-256は順に`e139ea624639a609921ebe63f8398a1948b45b8d8b1c1a49a8efad9b828b745f`、`3197aa221dbc7d72c5c292662cb4c71900b46536ded041c81fa03970df0ebf62`、`27ab4aa34fc13e5fa068d855b3b8e2cbaf7e04d517cd676a3874c6c2eb8f9e94`でsidecarと一致する。B3 rollback base `7904a2c196628adcc138eb6499a6a04bd5ebdb56`からのfresh累積独立reviewはHigh/Medium/Low 0件の`PASS/no findings`だった。GPU、full model、model cache、network、containerは使用していない。B4 implementationを受け入れ、本記録のdocs-only identityへstrict H0とfresh reviewを結合するまでB4全体は未完了、B5は未開始とする。
+
 受入条件:
 
 - CPU CIはtiny synthetic safetensors/tokenizer fixtureだけを使い、full modelをdownload/loadしない。
