@@ -3,6 +3,13 @@
 use core::fmt;
 use std::borrow::Borrow;
 
+mod tokenizer;
+
+pub use tokenizer::{
+    DecodeModeV1, EosIdentitySnapshotV1, EosIdentityV1, SpecialTokenSnapshotV1, TokenIdContextV1,
+    TokenIdsV1, TokenizerError, TokenizerFrontendV1, TokenizerSnapshotV1,
+};
+
 pub use sllm_core::{
     BudgetBoundary, GenerationStopPolicyV1, MaxNewTokensZero, PromptEvaluation, StopEvaluation,
     StopTokenHandling,
@@ -11,9 +18,9 @@ pub use sllm_core::{
 pub const GENERATION_STOP_POLICY_VERSION: u8 = 1;
 pub const GENERATION_STOP_REASON_VERSION: u8 = 1;
 
-// This marker deliberately references the pinned dependency without exposing
-// tokenizer behavior. Text decoding and chat-template evaluation are outside
-// this generated-token-only boundary.
+// Tokenizer encode/decode is now part of this frontend boundary. Future
+// chat-template rendering and evaluation remain outside it. Keep an explicit
+// type reference to the pinned tokenizer dependency.
 #[allow(dead_code)]
 const TOKENIZERS_DEPENDENCY_MARKER: core::marker::PhantomData<tokenizers::Tokenizer> =
     core::marker::PhantomData;
