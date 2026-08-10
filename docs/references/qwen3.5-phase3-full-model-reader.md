@@ -369,6 +369,20 @@ Phase 3 text-only stop policyは解決済みで、停止集合と判定順は `[
 
 chat templateとtokenizerは同じ固定revisionから検証し、EOSの片方だけを暗黙採用しない。例えばtext-only `hello` のgeneration promptは、`<|im_start|>user`、本文、`<|im_end|>`、`<|im_start|>assistant`、thinking branchを含む固定templateの結果として扱う。
 
+### B5 weight registry/load-plan reader
+
+B5はB1が検証済みの`TensorDescriptor`だけを入力とするhost-only metadata planである。既存`VerifiedCache::tensors()`のname順iterator、descriptorのsource file・dtype・shape・absolute half-open range・byte size、lock/config/fingerprintを再利用する。safetensors parser、cache hash、descriptor map、`qwen_tensor_catalog`、payload range readerを複製せず、`read_tensor_range()`を呼ばない。純粋なdescriptor入力builderと、それへ`VerifiedCache::tensors()`を渡す薄いwrapperだけを追加する。
+
+固定catalogはmain text 426件、vision 297件、MTP 15件である。main textはembedding 1、final norm 1、全32 layerのinput/post normとMLP 5 familyで160、24 linear layerのGDN 9 familyで216、8 full-attention layerの6 familyで48となる。固定vLLM `568afb3a13806beb53bb2e6bd518269357b237c0`のQwen3.5 model/GDN constructionと、固定llama.cpp `f5919bf458ef190468b5c329bb293f8a54a1e69c`のQwen3Next consumer semantics/tied output aliasをconcept cross-checkに用いた。両sourceからcodeをcopy、adapt、portしていない。
+
+現行lockは`tie_word_embeddings=true`で、`model.language_model.embed_tokens.weight`をembeddingとtied lm-head aliasの一意sourceにする。独立`lm_head.weight`は拒否する。`tie_word_embeddings=false`は現行B1 lock/catalogが受理しないため、B5ではconfig-conditional分類を型で表現するだけに留め、untied source名やB1 catalogを独断で追加しない。vision `model.visual.*`と`mtp.*`はknown-unconsumedで、destinationとchunkを持たせない。unknown name、missing required、duplicate name/consumer、layer class不一致、unexpected bias、tied状態の独立lm-headはfail closedとする。
+
+load対象entryはtensor nameのRust `Ord`順にdestinationへpackedする。sourceはdescriptorの`[start,end)`をそのまま用い、`end-start == byte_size`、非zero、全source/destination offsetとtotal sizeをchecked arithmeticで検査する。chunk上限`B=16,777,216` bytesとし、tensor相対rangeを`B`以下へ決定的に分割する。`B+1`は`B`と1の2 chunkで、zero trailing chunkを作らない。
+
+plan digestは既存`sha2`だけを使う。domainを`sLLM-weight-load-plan-v1\0`とし、lock fingerprint、chunk size、tie条件、entry数、total destination bytes、各entryのname/classification/consumer/dtype/shape/source range/destination/chunkを固定tag、fixed little-endian integer、length-prefixed UTF-8でhashする。filesystem絶対path、payload bytes、HashMap順、JSON key順を含めない。digestは内部`[u8; 32]`、表示時だけ`sha256:<lower-hex>`とする。
+
+metadata-only testは1、3、17 byte、`B-1/B/B+1`、非整列source start、input順反転、missing/unknown/duplicate、wrong layer class、zero/reversed/mismatched/overflow range、destination overflow、known-unconsumedの空destination/chunkを含める。新規integration-test targetだけをdependency inventoryへ同期し、既存`sha2` edge、Cargo manifest/lock、path-to-suiteは変更しない。
+
 ## Stage B-D sequenceとhandoff
 
 これはcandidate境界とreader上の依存順を記録するもので、恒久的な実行手順ではない。
