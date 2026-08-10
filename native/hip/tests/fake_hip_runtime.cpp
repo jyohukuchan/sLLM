@@ -23,6 +23,7 @@ struct State final {
   hipError_t rmsnorm_launch_status = hipSuccess;
   hipError_t elementwise_launch_status = hipSuccess;
   hipError_t matmul_launch_status = hipSuccess;
+  hipError_t argmax_launch_status = hipSuccess;
   hipError_t kv_state_append_launch_status = hipSuccess;
   hipError_t causal_attention_launch_status = hipSuccess;
   hipError_t event_record_status = hipSuccess;
@@ -33,12 +34,15 @@ struct State final {
   std::size_t elementwise_sigmoid_mul_launch_calls = 0U;
   std::size_t embedding_gather_launch_calls = 0U;
   std::size_t matmul_launch_calls = 0U;
+  std::size_t argmax_launch_calls = 0U;
   std::size_t attention_preprocess_launch_calls = 0U;
   uint64_t elementwise_last_element_count = 0U;
   uint64_t matmul_last_m = 0U;
   uint64_t matmul_last_k = 0U;
   uint64_t matmul_last_n = 0U;
   uint64_t matmul_last_output_elements = 0U;
+  uint64_t argmax_last_m = 0U;
+  uint64_t argmax_last_v = 0U;
   uint32_t attention_preprocess_last_m = 0U;
   std::size_t kv_state_append_launch_calls = 0U;
   std::size_t causal_attention_launch_calls = 0U;
@@ -169,6 +173,7 @@ void reset() noexcept {
   state.rmsnorm_launch_status = hipSuccess;
   state.elementwise_launch_status = hipSuccess;
   state.matmul_launch_status = hipSuccess;
+  state.argmax_launch_status = hipSuccess;
   state.kv_state_append_launch_status = hipSuccess;
   state.causal_attention_launch_status = hipSuccess;
   state.event_record_status = hipSuccess;
@@ -179,6 +184,7 @@ void reset() noexcept {
   state.elementwise_sigmoid_mul_launch_calls = 0U;
   state.embedding_gather_launch_calls = 0U;
   state.matmul_launch_calls = 0U;
+  state.argmax_launch_calls = 0U;
   state.attention_preprocess_launch_calls = 0U;
   state.kv_state_append_launch_calls = 0U;
   state.causal_attention_launch_calls = 0U;
@@ -187,6 +193,8 @@ void reset() noexcept {
   state.matmul_last_k = 0U;
   state.matmul_last_n = 0U;
   state.matmul_last_output_elements = 0U;
+  state.argmax_last_m = 0U;
+  state.argmax_last_v = 0U;
   state.attention_preprocess_last_m = 0U;
   state.kv_state_last_token_count = 0U;
   state.kv_state_last_capacity_tokens = 0U;
@@ -295,6 +303,37 @@ hipError_t matmul_launch(const uint16_t *const /*activation*/,
   state.matmul_last_n = n;
   state.matmul_last_output_elements = m * n;
   return state.matmul_launch_status;
+}
+
+hipError_t argmax_launch(const uint16_t *const logits, int32_t *const output,
+                         const uint64_t m, const uint64_t v,
+                         const hipStream_t /*stream*/) noexcept {
+  std::lock_guard<std::mutex> lock(state.mutex);
+  ++state.argmax_launch_calls;
+  state.argmax_last_m = m;
+  state.argmax_last_v = v;
+  if (state.argmax_launch_status != hipSuccess) {
+    return state.argmax_launch_status;
+  }
+  for (uint64_t row = 0U; row != m; ++row) {
+    float maximum = 0.0F;
+    uint64_t index = 0U;
+    bool valid = false;
+    bool has_nan = false;
+    for (uint64_t column = 0U; column != v; ++column) {
+      const float value = bf16_to_f32(logits[row * v + column]);
+      if (std::isnan(value)) {
+        has_nan = true;
+      } else if (!valid || value > maximum ||
+                 (value == maximum && column < index)) {
+        maximum = value;
+        index = column;
+        valid = true;
+      }
+    }
+    output[row] = has_nan ? -1 : static_cast<int32_t>(index);
+  }
+  return hipSuccess;
 }
 
 hipError_t attention_preprocess_launch(
@@ -560,6 +599,26 @@ uint32_t rmsnorm_last_row_count() noexcept {
 void set_matmul_launch_status(const hipError_t status) noexcept {
   std::lock_guard<std::mutex> lock(state.mutex);
   state.matmul_launch_status = status;
+}
+
+std::size_t argmax_launch_calls() noexcept {
+  std::lock_guard<std::mutex> lock(state.mutex);
+  return state.argmax_launch_calls;
+}
+
+uint64_t argmax_last_m() noexcept {
+  std::lock_guard<std::mutex> lock(state.mutex);
+  return state.argmax_last_m;
+}
+
+uint64_t argmax_last_v() noexcept {
+  std::lock_guard<std::mutex> lock(state.mutex);
+  return state.argmax_last_v;
+}
+
+void set_argmax_launch_status(const hipError_t status) noexcept {
+  std::lock_guard<std::mutex> lock(state.mutex);
+  state.argmax_launch_status = status;
 }
 
 void set_event_record_status(const hipError_t status) noexcept {

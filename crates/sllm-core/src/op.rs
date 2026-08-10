@@ -12,6 +12,7 @@ pub enum SemanticOpKind {
     SigmoidMul,
     RmsNorm,
     AttentionPreprocess,
+    Argmax,
 }
 
 /// The only accepted C3a1 Q/gate storage layout. The packed tensor is
@@ -63,6 +64,21 @@ pub enum ElementwiseTensor {
     Output,
 }
 
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum ArgmaxTensor {
+    Logits,
+    Output,
+}
+
+impl fmt::Display for ArgmaxTensor {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::Logits => "logits",
+            Self::Output => "output",
+        })
+    }
+}
+
 impl fmt::Display for ElementwiseTensor {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(match self {
@@ -84,6 +100,7 @@ impl SemanticOpKind {
             Self::SigmoidMul => "sigmoid_mul",
             Self::RmsNorm => "rms_norm",
             Self::AttentionPreprocess => "attention_preprocess",
+            Self::Argmax => "argmax",
         }
     }
 
@@ -97,6 +114,7 @@ impl SemanticOpKind {
             Self::SigmoidMul => (2, 1),
             Self::RmsNorm => (2, 1),
             Self::AttentionPreprocess => (5, 3),
+            Self::Argmax => (1, 1),
         }
     }
 }
@@ -604,9 +622,67 @@ impl SemanticOpDescriptor {
                     .ok_or(OpError::AttentionPreprocessContractRequired)?;
                 validate_attention_preprocess(&self.inputs, &self.outputs, contract)?;
             }
+            SemanticOpKind::Argmax => {
+                validate_argmax(&self.inputs, &self.outputs)?;
+            }
         }
         Ok(())
     }
+}
+
+fn validate_argmax(inputs: &[TensorView], outputs: &[TensorView]) -> Result<(), OpError> {
+    let logits = &inputs[0];
+    let output = &outputs[0];
+    if logits.shape().len() != 2 {
+        return Err(OpError::ArgmaxRankMismatch {
+            tensor: ArgmaxTensor::Logits,
+        });
+    }
+    if output.shape().len() != 1 {
+        return Err(OpError::ArgmaxRankMismatch {
+            tensor: ArgmaxTensor::Output,
+        });
+    }
+    for (tensor, role) in [
+        (logits, ArgmaxTensor::Logits),
+        (output, ArgmaxTensor::Output),
+    ] {
+        if tensor.shape().contains(&0) {
+            return Err(OpError::ArgmaxZeroExtent { tensor: role });
+        }
+        if !tensor.is_contiguous() {
+            return Err(OpError::ArgmaxNonContiguous { tensor: role });
+        }
+        if tensor.encoding() != Encoding::Unquantized {
+            return Err(OpError::ArgmaxUnsupportedEncoding {
+                tensor: role,
+                actual: tensor.encoding(),
+            });
+        }
+    }
+    if logits.dtype() != DType::Bf16 {
+        return Err(OpError::ArgmaxUnsupportedDType {
+            tensor: ArgmaxTensor::Logits,
+            expected: DType::Bf16,
+            actual: logits.dtype(),
+        });
+    }
+    if output.dtype() != DType::I32 {
+        return Err(OpError::ArgmaxUnsupportedDType {
+            tensor: ArgmaxTensor::Output,
+            expected: DType::I32,
+            actual: output.dtype(),
+        });
+    }
+    if output.shape()[0] != logits.shape()[0] {
+        return Err(OpError::ArgmaxShapeMismatch);
+    }
+    if logits.shape()[1] > 1_048_576 {
+        return Err(OpError::ArgmaxVocabTooLarge {
+            vocab: logits.shape()[1],
+        });
+    }
+    Ok(())
 }
 
 fn validate_embedding(inputs: &[TensorView], outputs: &[TensorView]) -> Result<(), OpError> {
@@ -1003,6 +1079,28 @@ pub enum OpError {
     AttentionPreprocessShapeMismatch {
         tensor: AttentionPreprocessTensor,
     },
+    ArgmaxRankMismatch {
+        tensor: ArgmaxTensor,
+    },
+    ArgmaxZeroExtent {
+        tensor: ArgmaxTensor,
+    },
+    ArgmaxNonContiguous {
+        tensor: ArgmaxTensor,
+    },
+    ArgmaxUnsupportedDType {
+        tensor: ArgmaxTensor,
+        expected: DType,
+        actual: DType,
+    },
+    ArgmaxUnsupportedEncoding {
+        tensor: ArgmaxTensor,
+        actual: Encoding,
+    },
+    ArgmaxShapeMismatch,
+    ArgmaxVocabTooLarge {
+        vocab: usize,
+    },
 }
 
 impl fmt::Display for OpError {
@@ -1198,6 +1296,30 @@ impl fmt::Display for OpError {
                     formatter,
                     "attention_preprocess {tensor} has the wrong rank or shape"
                 )
+            }
+            Self::ArgmaxRankMismatch { tensor } => {
+                write!(formatter, "argmax {tensor} has the wrong rank")
+            }
+            Self::ArgmaxZeroExtent { tensor } => {
+                write!(formatter, "argmax {tensor} must have non-zero extents")
+            }
+            Self::ArgmaxNonContiguous { tensor } => {
+                write!(formatter, "argmax {tensor} must be row-major contiguous")
+            }
+            Self::ArgmaxUnsupportedDType {
+                tensor,
+                expected,
+                actual,
+            } => write!(formatter, "argmax {tensor} must use {expected}, got {actual}"),
+            Self::ArgmaxUnsupportedEncoding { tensor, actual } => write!(
+                formatter,
+                "argmax {tensor} must use unquantized encoding, got {actual:?}"
+            ),
+            Self::ArgmaxShapeMismatch => {
+                formatter.write_str("argmax output shape must be [M] for logits shape [M,V]")
+            }
+            Self::ArgmaxVocabTooLarge { vocab } => {
+                write!(formatter, "argmax vocabulary size {vocab} exceeds 1048576")
             }
         }
     }

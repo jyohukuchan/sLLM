@@ -368,6 +368,135 @@ struct AccountingState final {
     return true;
   }
 
+  static bool reserve_two_buffer_prepared_plan(AccountingState &context,
+                                               AccountingState &first,
+                                               AccountingState &second) noexcept {
+    const uint64_t first_count = 1U;
+    const uint64_t second_count = (&first == &second) ? 0U : 1U;
+    const auto can_add = [](const uint64_t value, const uint64_t amount) {
+      return amount <= std::numeric_limits<uint64_t>::max() - value;
+    };
+    if (!can_add(context.child_count, 1U) ||
+        !can_add(context.lifetime_guards, 1U) ||
+        !can_add(first.child_count, first_count) ||
+        !can_add(second.child_count, second_count)) {
+      return false;
+    }
+    ++context.child_count;
+    ++context.lifetime_guards;
+    first.child_count += first_count;
+    second.child_count += second_count;
+    return true;
+  }
+
+  static bool release_two_buffer_prepared_plan(AccountingState &context,
+                                               AccountingState &first,
+                                               AccountingState &second) noexcept {
+    const uint64_t first_count = 1U;
+    const uint64_t second_count = (&first == &second) ? 0U : 1U;
+    if (context.child_count == 0U || context.lifetime_guards == 0U ||
+        first.child_count < first_count || second.child_count < second_count) {
+      return false;
+    }
+    --context.child_count;
+    --context.lifetime_guards;
+    first.child_count -= first_count;
+    second.child_count -= second_count;
+    return true;
+  }
+
+  static bool reserve_two_buffer_submission(AccountingState &context,
+                                            AccountingState &queue,
+                                            AccountingState &first,
+                                            AccountingState &second) noexcept {
+    const uint64_t first_count = 1U;
+    const uint64_t second_count = (&first == &second) ? 0U : 1U;
+    const auto can_add = [](const uint64_t value, const uint64_t amount) {
+      return amount <= std::numeric_limits<uint64_t>::max() - value;
+    };
+    if (!can_increment(queue.active_submissions) ||
+        !can_increment(queue.completion_references) ||
+        !can_increment(context.child_count) ||
+        !can_increment(context.lifetime_guards) ||
+        !can_add(first.active_submissions, first_count) ||
+        !can_add(second.active_submissions, second_count) ||
+        !can_add(first.completion_references, first_count) ||
+        !can_add(second.completion_references, second_count)) {
+      return false;
+    }
+    ++queue.active_submissions;
+    ++queue.completion_references;
+    ++context.child_count;
+    ++context.lifetime_guards;
+    first.active_submissions += first_count;
+    second.active_submissions += second_count;
+    first.completion_references += first_count;
+    second.completion_references += second_count;
+    return true;
+  }
+
+  static bool release_two_buffer_active(AccountingState &queue,
+                                        AccountingState &first,
+                                        AccountingState &second) noexcept {
+    const uint64_t second_count = (&first == &second) ? 0U : 1U;
+    if (queue.active_submissions == 0U || first.active_submissions == 0U ||
+        second.active_submissions < second_count) {
+      return false;
+    }
+    --queue.active_submissions;
+    --first.active_submissions;
+    if (second_count != 0U) {
+      --second.active_submissions;
+    }
+    return true;
+  }
+
+  static bool rollback_two_buffer_submission(AccountingState &context,
+                                             AccountingState &queue,
+                                             AccountingState &first,
+                                             AccountingState &second) noexcept {
+    const uint64_t second_count = (&first == &second) ? 0U : 1U;
+    if (queue.active_submissions == 0U ||
+        queue.completion_references == 0U || context.child_count == 0U ||
+        context.lifetime_guards == 0U || first.active_submissions == 0U ||
+        first.completion_references == 0U ||
+        second.active_submissions < second_count ||
+        second.completion_references < second_count) {
+      return false;
+    }
+    --queue.active_submissions;
+    --queue.completion_references;
+    --context.child_count;
+    --context.lifetime_guards;
+    --first.active_submissions;
+    --first.completion_references;
+    if (second_count != 0U) {
+      --second.active_submissions;
+      --second.completion_references;
+    }
+    return true;
+  }
+
+  static bool release_two_buffer_completion(AccountingState &context,
+                                            AccountingState &queue,
+                                            AccountingState &first,
+                                            AccountingState &second) noexcept {
+    const uint64_t second_count = (&first == &second) ? 0U : 1U;
+    if (queue.completion_references == 0U || context.child_count == 0U ||
+        context.lifetime_guards == 0U || first.completion_references == 0U ||
+        second.completion_references < second_count) {
+      return false;
+    }
+    --queue.completion_references;
+    --context.child_count;
+    --context.lifetime_guards;
+    --first.completion_references;
+    if (second_count != 0U) {
+      --second.completion_references;
+    }
+    return true;
+  }
+
   static bool reserve_kv_state(AccountingState &context,
                                AccountingState &key_buffer,
                                AccountingState &value_buffer) noexcept {

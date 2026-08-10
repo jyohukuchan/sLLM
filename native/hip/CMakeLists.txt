@@ -20,6 +20,16 @@ option(SLLM_ENABLE_PUBLIC_RUNTIME_HOST_TEST
     OFF
 )
 
+option(SLLM_ENABLE_LINEAR_ATTENTION_GPU_TEST
+    "Build the focused real-GPU C4 linear-attention numerical runner"
+    OFF
+)
+
+option(SLLM_ENABLE_ARGMAX_GPU_TEST
+    "Build the focused real-GPU C5 argmax numerical runner"
+    OFF
+)
+
 option(SLLM_SEMANTIC_G1_AUTHORITY
     "Require controller-held sealed compiler authority for semantic G1 only"
     OFF
@@ -226,10 +236,12 @@ set(SLLM_HIP_NATIVE_SOURCES
     src/embedding_api.cpp
     src/elementwise_api.cpp
     src/matmul_api.cpp
+    src/argmax_api.cpp
     src/rmsnorm_api.cpp
     src/attention_preprocess_api.cpp
     src/causal_attention_api.cpp
     src/kv_state_api.cpp
+    src/linear_attention_api.cpp
     src/hip_evidence_stub.cpp
     src/header_c_compile.c
     src/header_cpp_compile.cpp
@@ -266,29 +278,37 @@ if(SLLM_ENABLE_PUBLIC_HIP_RUNTIME)
         set(SLLM_ELEMENTWISE_G1_KERNEL_OBJECT "${CMAKE_BINARY_DIR}/elementwise_kernel.hip.o")
         set(SLLM_EMBEDDING_G1_KERNEL_OBJECT "${CMAKE_BINARY_DIR}/embedding_kernel.hip.o")
         set(SLLM_MATMUL_G1_KERNEL_OBJECT "${CMAKE_BINARY_DIR}/matmul_kernel.hip.o")
+        set(SLLM_ARGMAX_G1_KERNEL_OBJECT "${CMAKE_BINARY_DIR}/argmax_kernel.hip.o")
         set(SLLM_ATTENTION_PREPROCESS_G1_KERNEL_OBJECT
             "${CMAKE_BINARY_DIR}/attention_preprocess_kernel.hip.o")
         set(SLLM_KV_STATE_G1_KERNEL_OBJECT
             "${CMAKE_BINARY_DIR}/kv_state_kernel.hip.o")
         set(SLLM_CAUSAL_ATTENTION_G1_KERNEL_OBJECT
             "${CMAKE_BINARY_DIR}/causal_attention_kernel.hip.o")
+        set(SLLM_LINEAR_ATTENTION_G1_KERNEL_OBJECT
+            "${CMAKE_BINARY_DIR}/linear_attention_kernel.hip.o")
         add_custom_command(
             OUTPUT "${SLLM_SEMANTIC_G1_PUBLIC_OBJECT}"
             COMMAND "${CMAKE_HIP_COMPILER}" ${SLLM_SEMANTIC_G1_HIP_FLAGS}
                 "${PROJECT_SOURCE_DIR}/src/public_runtime.hip.cpp"
                 -o "${SLLM_SEMANTIC_G1_PUBLIC_OBJECT}"
             DEPENDS src/public_runtime.hip.cpp src/matmul_runtime.inc
+                src/argmax_runtime.inc
                 src/attention_preprocess_runtime.inc
                 src/causal_attention_runtime.inc
+                src/linear_attention_runtime.inc
                 src/public_runtime_internal.hpp src/embedding_api.hpp
                 src/embedding_kernel_internal.hpp src/elementwise_api.hpp
                 src/elementwise_kernel_internal.hpp src/matmul_api.hpp
-                src/matmul_kernel_internal.hpp src/rmsnorm_api.hpp
+                src/matmul_kernel_internal.hpp src/argmax_api.hpp
+                src/argmax_kernel_internal.hpp src/rmsnorm_api.hpp
                 src/attention_preprocess_api.hpp
                 src/attention_preprocess_kernel_internal.hpp
                 src/causal_attention_api.hpp
                 src/causal_attention_kernel_internal.hpp
                 src/kv_state_api.hpp src/kv_state_kernel_internal.hpp
+                src/linear_attention_api.hpp
+                src/linear_attention_kernel_internal.hpp
                 src/evidence_abi.h
                 "${PROJECT_SOURCE_DIR}/../../include/sllm/hip.h"
             WORKING_DIRECTORY "${CMAKE_BINARY_DIR}"
@@ -335,6 +355,16 @@ if(SLLM_ENABLE_PUBLIC_HIP_RUNTIME)
             VERBATIM
         )
         add_custom_command(
+            OUTPUT "${SLLM_ARGMAX_G1_KERNEL_OBJECT}"
+            COMMAND "${CMAKE_HIP_COMPILER}" ${SLLM_SEMANTIC_G1_HIP_FLAGS}
+                "${PROJECT_SOURCE_DIR}/src/argmax_kernel.hip.cpp"
+                -o "${SLLM_ARGMAX_G1_KERNEL_OBJECT}"
+            DEPENDS src/argmax_kernel.hip.cpp src/argmax_kernel_internal.hpp
+                "${PROJECT_SOURCE_DIR}/../../include/sllm/hip.h"
+            WORKING_DIRECTORY "${CMAKE_BINARY_DIR}"
+            VERBATIM
+        )
+        add_custom_command(
             OUTPUT "${SLLM_ATTENTION_PREPROCESS_G1_KERNEL_OBJECT}"
             COMMAND "${CMAKE_HIP_COMPILER}" ${SLLM_SEMANTIC_G1_HIP_FLAGS}
                 "${PROJECT_SOURCE_DIR}/src/attention_preprocess_kernel.hip.cpp"
@@ -368,14 +398,26 @@ if(SLLM_ENABLE_PUBLIC_HIP_RUNTIME)
             WORKING_DIRECTORY "${CMAKE_BINARY_DIR}"
             VERBATIM
         )
+        add_custom_command(
+            OUTPUT "${SLLM_LINEAR_ATTENTION_G1_KERNEL_OBJECT}"
+            COMMAND "${CMAKE_HIP_COMPILER}" ${SLLM_SEMANTIC_G1_HIP_FLAGS}
+                "${PROJECT_SOURCE_DIR}/src/linear_attention_kernel.hip.cpp"
+                -o "${SLLM_LINEAR_ATTENTION_G1_KERNEL_OBJECT}"
+            DEPENDS src/linear_attention_kernel.hip.cpp
+                src/linear_attention_kernel_internal.hpp
+            WORKING_DIRECTORY "${CMAKE_BINARY_DIR}"
+            VERBATIM
+        )
         set_source_files_properties(
             "${SLLM_SEMANTIC_G1_PUBLIC_OBJECT}" "${SLLM_SEMANTIC_G1_KERNEL_OBJECT}"
             "${SLLM_ELEMENTWISE_G1_KERNEL_OBJECT}"
             "${SLLM_EMBEDDING_G1_KERNEL_OBJECT}"
             "${SLLM_MATMUL_G1_KERNEL_OBJECT}"
+            "${SLLM_ARGMAX_G1_KERNEL_OBJECT}"
             "${SLLM_ATTENTION_PREPROCESS_G1_KERNEL_OBJECT}"
             "${SLLM_KV_STATE_G1_KERNEL_OBJECT}"
             "${SLLM_CAUSAL_ATTENTION_G1_KERNEL_OBJECT}"
+            "${SLLM_LINEAR_ATTENTION_G1_KERNEL_OBJECT}"
             PROPERTIES GENERATED TRUE EXTERNAL_OBJECT TRUE
         )
         list(APPEND SLLM_HIP_NATIVE_SOURCES
@@ -383,9 +425,11 @@ if(SLLM_ENABLE_PUBLIC_HIP_RUNTIME)
             "${SLLM_ELEMENTWISE_G1_KERNEL_OBJECT}"
             "${SLLM_EMBEDDING_G1_KERNEL_OBJECT}"
             "${SLLM_MATMUL_G1_KERNEL_OBJECT}"
+            "${SLLM_ARGMAX_G1_KERNEL_OBJECT}"
             "${SLLM_ATTENTION_PREPROCESS_G1_KERNEL_OBJECT}"
             "${SLLM_KV_STATE_G1_KERNEL_OBJECT}"
             "${SLLM_CAUSAL_ATTENTION_G1_KERNEL_OBJECT}"
+            "${SLLM_LINEAR_ATTENTION_G1_KERNEL_OBJECT}"
         )
     else()
         set_source_files_properties(src/public_runtime.hip.cpp PROPERTIES LANGUAGE HIP)
@@ -393,21 +437,26 @@ if(SLLM_ENABLE_PUBLIC_HIP_RUNTIME)
         set_source_files_properties(src/elementwise_kernel.hip.cpp PROPERTIES LANGUAGE HIP)
         set_source_files_properties(src/embedding_kernel.hip.cpp PROPERTIES LANGUAGE HIP)
         set_source_files_properties(src/matmul_kernel.hip.cpp PROPERTIES LANGUAGE HIP)
+        set_source_files_properties(src/argmax_kernel.hip.cpp PROPERTIES LANGUAGE HIP)
         set_source_files_properties(src/attention_preprocess_kernel.hip.cpp
                                     PROPERTIES LANGUAGE HIP)
         set_source_files_properties(src/kv_state_kernel.hip.cpp PROPERTIES
                                     LANGUAGE HIP)
         set_source_files_properties(src/causal_attention_kernel.hip.cpp PROPERTIES
                                     LANGUAGE HIP)
+        set_source_files_properties(src/linear_attention_kernel.hip.cpp PROPERTIES
+                                    LANGUAGE HIP)
         list(APPEND SLLM_HIP_NATIVE_SOURCES src/public_runtime.hip.cpp)
         list(APPEND SLLM_HIP_NATIVE_SOURCES src/rmsnorm_kernel.hip.cpp)
         list(APPEND SLLM_HIP_NATIVE_SOURCES src/elementwise_kernel.hip.cpp)
         list(APPEND SLLM_HIP_NATIVE_SOURCES src/embedding_kernel.hip.cpp)
         list(APPEND SLLM_HIP_NATIVE_SOURCES src/matmul_kernel.hip.cpp)
+        list(APPEND SLLM_HIP_NATIVE_SOURCES src/argmax_kernel.hip.cpp)
         list(APPEND SLLM_HIP_NATIVE_SOURCES
             src/attention_preprocess_kernel.hip.cpp)
         list(APPEND SLLM_HIP_NATIVE_SOURCES src/kv_state_kernel.hip.cpp)
         list(APPEND SLLM_HIP_NATIVE_SOURCES src/causal_attention_kernel.hip.cpp)
+        list(APPEND SLLM_HIP_NATIVE_SOURCES src/linear_attention_kernel.hip.cpp)
     endif()
 endif()
 
@@ -442,10 +491,9 @@ if(SLLM_ENABLE_HIP_RUNTIME OR SLLM_ENABLE_PUBLIC_HIP_RUNTIME)
     target_include_directories(sllm_hip_stub PRIVATE
         "${ROCM_PATH}/include"
     )
-    target_link_directories(sllm_hip_stub PRIVATE
-        "${ROCM_PATH}/lib"
+    target_link_libraries(sllm_hip_stub PRIVATE
+        "${ROCM_PATH}/lib/libamdhip64.so"
     )
-    target_link_libraries(sllm_hip_stub PRIVATE amdhip64)
 endif()
 
 if(SLLM_ENABLE_PUBLIC_HIP_RUNTIME)
@@ -520,10 +568,12 @@ if(SLLM_ENABLE_PUBLIC_RUNTIME_HOST_TEST)
         src/embedding_api.cpp
         src/elementwise_api.cpp
         src/matmul_api.cpp
+        src/argmax_api.cpp
         src/rmsnorm_api.cpp
         src/attention_preprocess_api.cpp
         src/causal_attention_api.cpp
         src/kv_state_api.cpp
+        src/linear_attention_api.cpp
         tests/fake_hip_runtime.cpp
         tests/public_runtime_host_test.cpp
     )
@@ -553,6 +603,40 @@ if(SLLM_ENABLE_PUBLIC_RUNTIME_HOST_TEST)
         COMMAND sllm_public_runtime_host_test
     )
 
+    add_executable(sllm_argmax_public_c_abi_host_test
+        src/public_runtime.hip.cpp
+        src/embedding_api.cpp
+        src/elementwise_api.cpp
+        src/matmul_api.cpp
+        src/argmax_api.cpp
+        src/rmsnorm_api.cpp
+        src/attention_preprocess_api.cpp
+        src/causal_attention_api.cpp
+        src/kv_state_api.cpp
+        src/linear_attention_api.cpp
+        tests/fake_hip_runtime.cpp
+        tests/argmax_public_c_abi_test.cpp
+    )
+    set_source_files_properties(src/public_runtime.hip.cpp PROPERTIES
+        LANGUAGE CXX
+    )
+    target_compile_features(sllm_argmax_public_c_abi_host_test PRIVATE cxx_std_17)
+    target_compile_definitions(sllm_argmax_public_c_abi_host_test PRIVATE
+        SLLM_PUBLIC_RUNTIME_HOST_TEST=1
+    )
+    target_include_directories(sllm_argmax_public_c_abi_host_test PRIVATE
+        "${PROJECT_SOURCE_DIR}/../../include"
+        "${PROJECT_SOURCE_DIR}/src"
+        "${PROJECT_SOURCE_DIR}/tests/fake_hip/include"
+    )
+    target_compile_options(sllm_argmax_public_c_abi_host_test PRIVATE
+        -Wall -Wextra -Wpedantic -Wconversion -Wsign-conversion -Wshadow -Werror
+    )
+    target_link_libraries(sllm_argmax_public_c_abi_host_test PRIVATE Threads::Threads)
+    add_test(NAME sllm_argmax_public_c_abi_host_test
+        COMMAND sllm_argmax_public_c_abi_host_test
+    )
+
     add_executable(sllm_private_evidence_stub_test
         tests/private_evidence_stub_test.cpp
     )
@@ -576,4 +660,42 @@ if(SLLM_ENABLE_PUBLIC_RUNTIME_HOST_TEST)
     add_test(NAME sllm_private_evidence_stub_test
         COMMAND sllm_private_evidence_stub_test
     )
+endif()
+
+if(SLLM_ENABLE_LINEAR_ATTENTION_GPU_TEST)
+    if(NOT SLLM_ENABLE_PUBLIC_HIP_RUNTIME OR SLLM_SEMANTIC_G1_AUTHORITY)
+        message(FATAL_ERROR
+            "linear-attention GPU test requires the normal public HIP runtime build")
+    endif()
+    add_executable(sllm_linear_attention_gpu_test
+        tests/linear_attention_gpu_test.cpp
+    )
+    target_compile_features(sllm_linear_attention_gpu_test PRIVATE cxx_std_17)
+    target_compile_definitions(sllm_linear_attention_gpu_test PRIVATE
+        SLLM_TEST_EXPECTED_TARGET="${CMAKE_HIP_ARCHITECTURES}"
+    )
+    target_compile_options(sllm_linear_attention_gpu_test PRIVATE
+        -Wall -Wextra -Wpedantic -Wconversion -Wsign-conversion -Wshadow -Werror
+    )
+    target_link_libraries(sllm_linear_attention_gpu_test PRIVATE
+        sllm_hip_stub
+    )
+endif()
+
+if(SLLM_ENABLE_ARGMAX_GPU_TEST)
+    if(NOT SLLM_ENABLE_PUBLIC_HIP_RUNTIME OR SLLM_SEMANTIC_G1_AUTHORITY)
+        message(FATAL_ERROR
+            "argmax GPU test requires the normal public HIP runtime build")
+    endif()
+    add_executable(sllm_argmax_gpu_test
+        tests/argmax_gpu_test.cpp
+    )
+    target_compile_features(sllm_argmax_gpu_test PRIVATE cxx_std_17)
+    target_compile_definitions(sllm_argmax_gpu_test PRIVATE
+        SLLM_TEST_EXPECTED_TARGET="${CMAKE_HIP_ARCHITECTURES}"
+    )
+    target_compile_options(sllm_argmax_gpu_test PRIVATE
+        -Wall -Wextra -Wpedantic -Wconversion -Wsign-conversion -Wshadow -Werror
+    )
+    target_link_libraries(sllm_argmax_gpu_test PRIVATE sllm_hip_stub)
 endif()

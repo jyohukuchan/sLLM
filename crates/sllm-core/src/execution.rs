@@ -15,6 +15,10 @@ use crate::kv_state::{
     CausalAttentionDescriptor, KvStateAppendRequest, KvStateDescriptor, KvStateLayout,
     KvStateSnapshot,
 };
+use crate::linear_attention::{
+    LinearAttentionDescriptor, LinearAttentionLayout, LinearAttentionRequest,
+    LinearAttentionStateDescriptor, LinearAttentionStateSnapshot,
+};
 use crate::{AccessMode, DType, Encoding, SemanticOpDescriptor, SemanticOpKind, TensorView};
 
 static NEXT_EXECUTION_ID: AtomicU64 = AtomicU64::new(1);
@@ -51,6 +55,7 @@ execution_id!(ExecutionBufferId);
 execution_id!(ExecutionQueueId);
 execution_id!(PreparedOperationId);
 execution_id!(KvStateId);
+execution_id!(LinearAttentionStateId);
 
 /// Exact device selection supplied when opening an owned backend session.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -161,7 +166,15 @@ pub enum ExecutionError {
         expected: KvStateId,
         actual: KvStateId,
     },
+    WrongLinearAttentionState {
+        expected: LinearAttentionStateId,
+        actual: LinearAttentionStateId,
+    },
     StaleKvLength {
+        expected: u64,
+        actual: u64,
+    },
+    StaleLinearAttentionLength {
         expected: u64,
         actual: u64,
     },
@@ -235,9 +248,19 @@ impl fmt::Display for ExecutionError {
                 actual.raw(),
                 expected.raw()
             ),
+            Self::WrongLinearAttentionState { expected, actual } => write!(
+                formatter,
+                "linear-attention state {} does not match state {}",
+                actual.raw(),
+                expected.raw()
+            ),
             Self::StaleKvLength { expected, actual } => write!(
                 formatter,
                 "stale KV length: expected {expected}, backend reports {actual}"
+            ),
+            Self::StaleLinearAttentionLength { expected, actual } => write!(
+                formatter,
+                "stale linear-attention length: expected {expected}, backend reports {actual}"
             ),
             Self::DescriptorBindingMismatch { role } => {
                 write!(
@@ -423,6 +446,49 @@ pub trait ExecutionSessionAdapter: Send + Sync {
             reason: "backend does not support causal GQA attention".to_owned(),
         })
     }
+
+    /// Creates one request-local C4 convolution/recurrent state. Adapters
+    /// without native linear attention reject it rather than substituting CPU
+    /// storage or execution.
+    fn create_linear_attention_state(
+        &self,
+        _access: &ExecutionAdapterAccess<'_>,
+        _state_id: LinearAttentionStateId,
+        _descriptor: LinearAttentionStateDescriptor,
+    ) -> Result<AdapterResource, ExecutionError> {
+        Err(ExecutionError::Unsupported {
+            reason: "backend does not support request-local linear-attention state".to_owned(),
+        })
+    }
+
+    fn linear_attention_state_snapshot(
+        &self,
+        _access: &ExecutionAdapterAccess<'_>,
+        _state: &LinearAttentionState,
+    ) -> Result<LinearAttentionStateSnapshot, ExecutionError> {
+        Err(ExecutionError::Unsupported {
+            reason: "backend does not support linear-attention state snapshots".to_owned(),
+        })
+    }
+
+    fn execute_linear_attention(
+        &self,
+        _access: &ExecutionAdapterAccess<'_>,
+        _state: &LinearAttentionState,
+        _queue: &ExecutionQueue,
+        _bindings: &LinearAttentionBindings,
+        _request: LinearAttentionRequest,
+    ) -> Result<
+        (
+            Box<dyn ExecutionLinearAttentionSubmissionAdapter>,
+            DispatchEvidence,
+        ),
+        ExecutionError,
+    > {
+        Err(ExecutionError::Unsupported {
+            reason: "backend does not support linear-attention execution".to_owned(),
+        })
+    }
 }
 
 /// Adapter-owned mutable submission state.  It is intentionally `Send` but
@@ -461,6 +527,13 @@ pub trait ExecutionKvStateSubmissionAdapter: Send {
 /// Adapter-owned mutable causal-attention completion. It is separate from a
 /// stateless semantic submission because it retains a request-local KV state.
 pub trait ExecutionCausalAttentionSubmissionAdapter: Send {
+    fn query(&mut self) -> Result<ExecutionState, ExecutionError>;
+    fn wait(&mut self, timeout: Duration) -> Result<ExecutionState, ExecutionError>;
+}
+
+/// Adapter-owned completion for one transactional linear-attention state
+/// transition.
+pub trait ExecutionLinearAttentionSubmissionAdapter: Send {
     fn query(&mut self) -> Result<ExecutionState, ExecutionError>;
     fn wait(&mut self, timeout: Duration) -> Result<ExecutionState, ExecutionError>;
 }
@@ -610,6 +683,105 @@ impl ExecutionSession {
             .adapter
             .kv_state_snapshot(&ExecutionAdapterAccess { session: self }, state)?;
         validate_kv_state_snapshot(self, state, snapshot)
+    }
+
+    /// Creates a backend-owned request-local linear-attention state.
+    pub fn create_linear_attention_state(
+        &self,
+        descriptor: LinearAttentionStateDescriptor,
+    ) -> Result<LinearAttentionState, ExecutionError> {
+        self.ensure_open()?;
+        let id = LinearAttentionStateId::new(next_execution_id());
+        let resource = self.state.adapter.create_linear_attention_state(
+            &ExecutionAdapterAccess { session: self },
+            id,
+            descriptor,
+        )?;
+        Ok(LinearAttentionState {
+            state: Arc::clone(&self.state),
+            id,
+            descriptor,
+            payload: resource.payload,
+            execution_in_flight: Arc::new(AtomicBool::new(false)),
+        })
+    }
+
+    pub fn linear_attention_state_snapshot(
+        &self,
+        state: &LinearAttentionState,
+    ) -> Result<LinearAttentionStateSnapshot, ExecutionError> {
+        self.ensure_open()?;
+        self.ensure_linear_attention_state(state)?;
+        let snapshot = self
+            .state
+            .adapter
+            .linear_attention_state_snapshot(&ExecutionAdapterAccess { session: self }, state)?;
+        validate_linear_attention_state_snapshot(self, state, snapshot)
+    }
+
+    /// Admits one ordered convolution/recurrent state transition. The output
+    /// and inactive state slot may be written asynchronously, but publication
+    /// of the new state is a backend completion responsibility.
+    pub fn linear_attention(
+        &self,
+        state: &LinearAttentionState,
+        queue: &ExecutionQueue,
+        bindings: LinearAttentionBindings,
+        descriptor: LinearAttentionDescriptor,
+    ) -> Result<LinearAttentionSubmission, ExecutionError> {
+        self.ensure_open()?;
+        self.ensure_linear_attention_state(state)?;
+        self.ensure_queue(queue)?;
+        validate_linear_attention_bindings(self, &bindings, descriptor)?;
+        if descriptor.expected_length() > state.capacity() {
+            return Err(ExecutionError::InvalidRange {
+                reason: "linear-attention transition exceeds state capacity".to_owned(),
+            });
+        }
+        if state
+            .execution_in_flight
+            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_err()
+        {
+            return Err(ExecutionError::Busy);
+        }
+        let snapshot = match self.linear_attention_state_snapshot(state) {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                state.execution_in_flight.store(false, Ordering::Release);
+                return Err(error);
+            }
+        };
+        if snapshot.length() != descriptor.start_position() {
+            state.execution_in_flight.store(false, Ordering::Release);
+            return Err(ExecutionError::StaleLinearAttentionLength {
+                expected: descriptor.start_position(),
+                actual: snapshot.length(),
+            });
+        }
+        let request = LinearAttentionRequest::new(state.id, state.descriptor, descriptor);
+        let (inner, dispatch) = match self.state.adapter.execute_linear_attention(
+            &ExecutionAdapterAccess { session: self },
+            state,
+            queue,
+            &bindings,
+            request,
+        ) {
+            Ok(result) => result,
+            Err(error) => {
+                state.execution_in_flight.store(false, Ordering::Release);
+                return Err(error);
+            }
+        };
+        Ok(LinearAttentionSubmission {
+            state: state.clone(),
+            queue: queue.clone(),
+            bindings,
+            request,
+            dispatch,
+            completion_state: ExecutionState::Pending,
+            inner: Some(inner),
+        })
     }
 
     /// Admits and submits one transactional K/V append.  All core checks,
@@ -969,6 +1141,20 @@ impl ExecutionSession {
             })
     }
 
+    fn downcast_linear_attention_state_payload<'a, T: Any + Send + Sync>(
+        &self,
+        state: &'a LinearAttentionState,
+    ) -> Result<&'a T, ExecutionError> {
+        self.ensure_linear_attention_state(state)?;
+        state
+            .payload
+            .downcast_ref::<T>()
+            .ok_or(ExecutionError::WrongBackend {
+                expected: self.backend_name(),
+                actual: state.backend_name(),
+            })
+    }
+
     fn ensure_open(&self) -> Result<(), ExecutionError> {
         if self.state.closing.load(Ordering::Acquire) {
             Err(ExecutionError::Closing)
@@ -1026,6 +1212,18 @@ impl ExecutionSession {
             state.session_id(),
         )
     }
+
+    fn ensure_linear_attention_state(
+        &self,
+        state: &LinearAttentionState,
+    ) -> Result<(), ExecutionError> {
+        ensure_identity(
+            self.backend_name(),
+            self.id(),
+            state.backend_name(),
+            state.session_id(),
+        )
+    }
 }
 
 /// Core-issued access to adapter payloads.  It is created only while a
@@ -1070,6 +1268,13 @@ impl ExecutionAdapterAccess<'_> {
         state: &'a KvState,
     ) -> Result<&'a T, ExecutionError> {
         self.session.downcast_kv_state_payload(state)
+    }
+
+    pub fn downcast_linear_attention_state_payload<'a, T: Any + Send + Sync>(
+        &self,
+        state: &'a LinearAttentionState,
+    ) -> Result<&'a T, ExecutionError> {
+        self.session.downcast_linear_attention_state_payload(state)
     }
 }
 
@@ -1219,6 +1424,224 @@ impl KvState {
 
     pub fn snapshot(&self, session: &ExecutionSession) -> Result<KvStateSnapshot, ExecutionError> {
         session.kv_state_snapshot(self)
+    }
+}
+
+/// Opaque, backend-owned request-local short-convolution and recurrent state.
+#[derive(Clone)]
+pub struct LinearAttentionState {
+    state: Arc<ExecutionSessionState>,
+    id: LinearAttentionStateId,
+    descriptor: LinearAttentionStateDescriptor,
+    payload: Arc<dyn Any + Send + Sync>,
+    execution_in_flight: Arc<AtomicBool>,
+}
+
+impl fmt::Debug for LinearAttentionState {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("LinearAttentionState")
+            .field("id", &self.id)
+            .field("session_id", &self.session_id())
+            .field("layer_id", &self.descriptor.layer_id())
+            .field("capacity", &self.descriptor.capacity())
+            .finish_non_exhaustive()
+    }
+}
+
+impl LinearAttentionState {
+    pub const fn id(&self) -> LinearAttentionStateId {
+        self.id
+    }
+
+    pub fn session_id(&self) -> ExecutionSessionId {
+        self.state.id
+    }
+
+    pub fn backend_name(&self) -> &'static str {
+        self.state.backend
+    }
+
+    pub const fn descriptor(&self) -> LinearAttentionStateDescriptor {
+        self.descriptor
+    }
+
+    pub const fn layer_id(&self) -> u32 {
+        self.descriptor.layer_id()
+    }
+
+    pub const fn capacity(&self) -> u64 {
+        self.descriptor.capacity()
+    }
+
+    pub fn snapshot(
+        &self,
+        session: &ExecutionSession,
+    ) -> Result<LinearAttentionStateSnapshot, ExecutionError> {
+        session.linear_attention_state_snapshot(self)
+    }
+}
+
+/// Owned projected inputs, weights, and output for one C4 state transition.
+/// Construction is cheap; exact shape/access/alias validation occurs when it
+/// is submitted through an execution session.
+pub struct LinearAttentionBindings {
+    qkv: OwnedTensorBinding,
+    z: OwnedTensorBinding,
+    b_input: OwnedTensorBinding,
+    a_input: OwnedTensorBinding,
+    conv_weight: OwnedTensorBinding,
+    a_log: OwnedTensorBinding,
+    dt_bias: OwnedTensorBinding,
+    norm_weight: OwnedTensorBinding,
+    output: OwnedTensorBinding,
+}
+
+impl LinearAttentionBindings {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        qkv: OwnedTensorBinding,
+        z: OwnedTensorBinding,
+        b_input: OwnedTensorBinding,
+        a_input: OwnedTensorBinding,
+        conv_weight: OwnedTensorBinding,
+        a_log: OwnedTensorBinding,
+        dt_bias: OwnedTensorBinding,
+        norm_weight: OwnedTensorBinding,
+        output: OwnedTensorBinding,
+    ) -> Self {
+        Self {
+            qkv,
+            z,
+            b_input,
+            a_input,
+            conv_weight,
+            a_log,
+            dt_bias,
+            norm_weight,
+            output,
+        }
+    }
+
+    pub fn qkv(&self) -> &OwnedTensorBinding {
+        &self.qkv
+    }
+    pub fn z(&self) -> &OwnedTensorBinding {
+        &self.z
+    }
+    pub fn b_input(&self) -> &OwnedTensorBinding {
+        &self.b_input
+    }
+    pub fn a_input(&self) -> &OwnedTensorBinding {
+        &self.a_input
+    }
+    pub fn conv_weight(&self) -> &OwnedTensorBinding {
+        &self.conv_weight
+    }
+    pub fn a_log(&self) -> &OwnedTensorBinding {
+        &self.a_log
+    }
+    pub fn dt_bias(&self) -> &OwnedTensorBinding {
+        &self.dt_bias
+    }
+    pub fn norm_weight(&self) -> &OwnedTensorBinding {
+        &self.norm_weight
+    }
+    pub fn output(&self) -> &OwnedTensorBinding {
+        &self.output
+    }
+}
+
+impl fmt::Debug for LinearAttentionBindings {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("LinearAttentionBindings")
+            .field("qkv", &self.qkv.buffer().id())
+            .field("output", &self.output.buffer().id())
+            .finish_non_exhaustive()
+    }
+}
+
+/// Completion owner for one transactional C4 state transition.
+pub struct LinearAttentionSubmission {
+    state: LinearAttentionState,
+    queue: ExecutionQueue,
+    bindings: LinearAttentionBindings,
+    request: LinearAttentionRequest,
+    dispatch: DispatchEvidence,
+    completion_state: ExecutionState,
+    inner: Option<Box<dyn ExecutionLinearAttentionSubmissionAdapter>>,
+}
+
+impl fmt::Debug for LinearAttentionSubmission {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("LinearAttentionSubmission")
+            .field("state", &self.state.id())
+            .field("queue", &self.queue.id())
+            .field("token_count", &self.request.descriptor().token_count())
+            .field("completion_state", &self.completion_state)
+            .finish_non_exhaustive()
+    }
+}
+
+impl LinearAttentionSubmission {
+    pub fn state(&self) -> &LinearAttentionState {
+        &self.state
+    }
+    pub fn bindings(&self) -> &LinearAttentionBindings {
+        &self.bindings
+    }
+    pub const fn request(&self) -> LinearAttentionRequest {
+        self.request
+    }
+    pub fn dispatch(&self) -> &DispatchEvidence {
+        &self.dispatch
+    }
+    pub const fn completion_state(&self) -> ExecutionState {
+        self.completion_state
+    }
+
+    pub fn query(&mut self) -> Result<ExecutionState, ExecutionError> {
+        let Some(inner) = self.inner.as_mut() else {
+            return Ok(self.completion_state);
+        };
+        let completion = inner.query()?;
+        self.record_completion(completion);
+        Ok(completion)
+    }
+
+    pub fn wait(&mut self, timeout: Duration) -> Result<ExecutionState, ExecutionError> {
+        let Some(inner) = self.inner.as_mut() else {
+            return Ok(self.completion_state);
+        };
+        let completion = inner.wait(timeout)?;
+        self.record_completion(completion);
+        Ok(completion)
+    }
+
+    fn record_completion(&mut self, completion: ExecutionState) {
+        self.completion_state = completion;
+        if completion != ExecutionState::Pending {
+            // Keep core admission closed while adapter drop releases the native
+            // completion or transfers its cleanup ownership. Native admission
+            // remains the final safety boundary if that cleanup is quarantined.
+            drop(self.inner.take());
+            self.state
+                .execution_in_flight
+                .store(false, Ordering::Release);
+        }
+    }
+}
+
+impl Drop for LinearAttentionSubmission {
+    fn drop(&mut self) {
+        // Backend cancellation/cleanup runs before a new transition may be
+        // admitted for this state.
+        drop(self.inner.take());
+        self.state
+            .execution_in_flight
+            .store(false, Ordering::Release);
     }
 }
 
@@ -1569,6 +1992,11 @@ impl BoundSemanticOp {
                 ("attention_preprocess gate output", &outputs[1]),
                 ("attention_preprocess K output", &outputs[2]),
             ])?;
+        } else if descriptor.kind() == SemanticOpKind::Argmax {
+            validate_nonoverlap(&[
+                ("argmax logits", &inputs[0]),
+                ("argmax output", &outputs[0]),
+            ])?;
         }
 
         Ok(Self {
@@ -1614,6 +2042,7 @@ fn input_role(kind: SemanticOpKind, index: usize) -> &'static str {
         (SemanticOpKind::SiluMul, 1) => "silu_mul up",
         (SemanticOpKind::RmsNorm, 0) => "RMSNorm activation",
         (SemanticOpKind::RmsNorm, 1) => "RMSNorm raw scale",
+        (SemanticOpKind::Argmax, 0) => "argmax logits",
         (SemanticOpKind::AttentionPreprocess, 0) => "attention_preprocess packed Q/gate",
         (SemanticOpKind::AttentionPreprocess, 1) => "attention_preprocess K",
         (SemanticOpKind::AttentionPreprocess, 2) => "attention_preprocess Q raw scale",
@@ -1631,6 +2060,7 @@ fn output_role(kind: SemanticOpKind, index: usize) -> &'static str {
         (SemanticOpKind::Matmul, 0) => "matmul output",
         (SemanticOpKind::SiluMul, 0) => "silu_mul output",
         (SemanticOpKind::RmsNorm, 0) => "RMSNorm output",
+        (SemanticOpKind::Argmax, 0) => "argmax output",
         (SemanticOpKind::AttentionPreprocess, 0) => "attention_preprocess Q output",
         (SemanticOpKind::AttentionPreprocess, 1) => "attention_preprocess gate output",
         (SemanticOpKind::AttentionPreprocess, 2) => "attention_preprocess K output",
@@ -1874,6 +2304,179 @@ fn validate_causal_attention_bindings(
         return Err(ExecutionError::AliasOverlap {
             left: "causal attention query",
             right: "causal attention output",
+        });
+    }
+    Ok(())
+}
+
+fn validate_linear_attention_state_snapshot(
+    session: &ExecutionSession,
+    state: &LinearAttentionState,
+    snapshot: LinearAttentionStateSnapshot,
+) -> Result<LinearAttentionStateSnapshot, ExecutionError> {
+    if snapshot.session_id() != session.id() {
+        return Err(ExecutionError::WrongSession {
+            expected: session.id(),
+            actual: snapshot.session_id(),
+        });
+    }
+    if snapshot.state_id() != state.id() {
+        return Err(ExecutionError::WrongLinearAttentionState {
+            expected: state.id(),
+            actual: snapshot.state_id(),
+        });
+    }
+    if snapshot.descriptor() != state.descriptor() {
+        return Err(ExecutionError::InvalidRequest {
+            reason: "backend linear-attention snapshot descriptor does not match the state"
+                .to_owned(),
+        });
+    }
+    if snapshot.length() > state.capacity() {
+        return Err(ExecutionError::InvalidRequest {
+            reason: "backend linear-attention snapshot length exceeds state capacity".to_owned(),
+        });
+    }
+    Ok(snapshot)
+}
+
+fn validate_linear_attention_bindings(
+    session: &ExecutionSession,
+    bindings: &LinearAttentionBindings,
+    descriptor: LinearAttentionDescriptor,
+) -> Result<(), ExecutionError> {
+    let token_count =
+        usize::try_from(descriptor.token_count()).map_err(|_| ExecutionError::InvalidRequest {
+            reason: "linear-attention token count does not fit the host index type".to_owned(),
+        })?;
+    let qkv_shape = [token_count, LinearAttentionLayout::QKV_WIDTH];
+    let output_shape = [token_count, LinearAttentionLayout::OUTPUT_WIDTH];
+    let scalar_shape = [token_count, LinearAttentionLayout::VALUE_HEADS];
+    validate_linear_attention_binding(
+        session,
+        bindings.qkv(),
+        "linear attention qkv",
+        AccessMode::Read,
+        DType::Bf16,
+        &qkv_shape,
+    )?;
+    validate_linear_attention_binding(
+        session,
+        bindings.z(),
+        "linear attention z",
+        AccessMode::Read,
+        DType::Bf16,
+        &output_shape,
+    )?;
+    validate_linear_attention_binding(
+        session,
+        bindings.b_input(),
+        "linear attention b input",
+        AccessMode::Read,
+        DType::Bf16,
+        &scalar_shape,
+    )?;
+    validate_linear_attention_binding(
+        session,
+        bindings.a_input(),
+        "linear attention a input",
+        AccessMode::Read,
+        DType::Bf16,
+        &scalar_shape,
+    )?;
+    validate_linear_attention_binding(
+        session,
+        bindings.conv_weight(),
+        "linear attention convolution weight",
+        AccessMode::Read,
+        DType::Bf16,
+        &[
+            LinearAttentionLayout::QKV_WIDTH,
+            1,
+            LinearAttentionLayout::CONV_KERNEL_SIZE,
+        ],
+    )?;
+    validate_linear_attention_binding(
+        session,
+        bindings.a_log(),
+        "linear attention A_log",
+        AccessMode::Read,
+        DType::F32,
+        &[LinearAttentionLayout::VALUE_HEADS],
+    )?;
+    validate_linear_attention_binding(
+        session,
+        bindings.dt_bias(),
+        "linear attention dt_bias",
+        AccessMode::Read,
+        DType::Bf16,
+        &[LinearAttentionLayout::VALUE_HEADS],
+    )?;
+    validate_linear_attention_binding(
+        session,
+        bindings.norm_weight(),
+        "linear attention norm weight",
+        AccessMode::Read,
+        DType::F32,
+        &[LinearAttentionLayout::HEAD_DIM],
+    )?;
+    validate_linear_attention_binding(
+        session,
+        bindings.output(),
+        "linear attention output",
+        AccessMode::Write,
+        DType::Bf16,
+        &output_shape,
+    )?;
+
+    validate_nonoverlap(&[
+        ("linear attention qkv", bindings.qkv()),
+        ("linear attention z", bindings.z()),
+        ("linear attention b input", bindings.b_input()),
+        ("linear attention a input", bindings.a_input()),
+        (
+            "linear attention convolution weight",
+            bindings.conv_weight(),
+        ),
+        ("linear attention A_log", bindings.a_log()),
+        ("linear attention dt_bias", bindings.dt_bias()),
+        ("linear attention norm weight", bindings.norm_weight()),
+        ("linear attention output", bindings.output()),
+    ])
+}
+
+fn validate_linear_attention_binding(
+    session: &ExecutionSession,
+    binding: &OwnedTensorBinding,
+    role: &'static str,
+    required_access: AccessMode,
+    dtype: DType,
+    shape: &[usize],
+) -> Result<(), ExecutionError> {
+    validate_binding_identity(session.backend_name(), session.id(), binding)?;
+    ensure_view_in_bounds(binding.buffer(), binding.view())?;
+    let permitted = match required_access {
+        AccessMode::Read => binding.access().permits_read(),
+        AccessMode::Write => binding.access().permits_write(),
+        AccessMode::ReadWrite => {
+            binding.access().permits_read() && binding.access().permits_write()
+        }
+    };
+    if !permitted {
+        return Err(ExecutionError::AccessViolation {
+            role,
+            required: required_access,
+            actual: binding.access(),
+        });
+    }
+    let view = binding.view();
+    if view.dtype() != dtype
+        || view.encoding() != Encoding::Unquantized
+        || view.shape() != shape
+        || !view.is_contiguous()
+    {
+        return Err(ExecutionError::InvalidRequest {
+            reason: format!("{role} must be contiguous unquantized {dtype:?} with shape {shape:?}"),
         });
     }
     Ok(())
@@ -2437,10 +3040,20 @@ mod tests {
 
     struct FakeStateStore {
         entries: Mutex<Vec<FakeStateEntry>>,
+        linear_entries: Mutex<Vec<FakeLinearStateEntry>>,
         append_drops: Arc<AtomicUsize>,
         append_calls: AtomicUsize,
+        linear_drops: Arc<AtomicUsize>,
+        linear_calls: AtomicUsize,
+        linear_drop_saw_core_admission: AtomicBool,
         append_drop_saw_core_admission: AtomicBool,
         wrong_snapshot_identity: AtomicBool,
+    }
+
+    struct FakeLinearStateEntry {
+        id: LinearAttentionStateId,
+        descriptor: LinearAttentionStateDescriptor,
+        length: u64,
     }
 
     struct KvStateAdapter {
@@ -2458,8 +3071,12 @@ mod tests {
                 base: TestAdapter::default(),
                 store: Arc::new(FakeStateStore {
                     entries: Mutex::new(Vec::new()),
+                    linear_entries: Mutex::new(Vec::new()),
                     append_drops: Arc::new(AtomicUsize::new(0)),
                     append_calls: AtomicUsize::new(0),
+                    linear_drops: Arc::new(AtomicUsize::new(0)),
+                    linear_calls: AtomicUsize::new(0),
+                    linear_drop_saw_core_admission: AtomicBool::new(false),
                     append_drop_saw_core_admission: AtomicBool::new(false),
                     wrong_snapshot_identity: AtomicBool::new(false),
                 }),
@@ -2543,6 +3160,62 @@ mod tests {
 
         fn wait(&mut self, _timeout: Duration) -> Result<ExecutionState, ExecutionError> {
             Ok(ExecutionState::Success)
+        }
+    }
+
+    struct FakeLinearAttentionSubmission {
+        store: Arc<FakeStateStore>,
+        request: LinearAttentionRequest,
+        core_execution_in_flight: Arc<AtomicBool>,
+        complete: bool,
+    }
+
+    impl FakeLinearAttentionSubmission {
+        fn finish(&mut self) -> Result<ExecutionState, ExecutionError> {
+            if !self.complete {
+                let mut entries = self
+                    .store
+                    .linear_entries
+                    .lock()
+                    .map_err(|_| ExecutionError::Busy)?;
+                let entry = entries
+                    .iter_mut()
+                    .find(|entry| entry.id == self.request.state_id())
+                    .ok_or(ExecutionError::WrongLinearAttentionState {
+                        expected: self.request.state_id(),
+                        actual: LinearAttentionStateId::new(1),
+                    })?;
+                let descriptor = self.request.descriptor();
+                if entry.length != descriptor.start_position() {
+                    return Err(ExecutionError::StaleLinearAttentionLength {
+                        expected: descriptor.start_position(),
+                        actual: entry.length,
+                    });
+                }
+                entry.length = descriptor.expected_length();
+                self.complete = true;
+            }
+            Ok(ExecutionState::Success)
+        }
+    }
+
+    impl Drop for FakeLinearAttentionSubmission {
+        fn drop(&mut self) {
+            self.store.linear_drop_saw_core_admission.store(
+                self.core_execution_in_flight.load(Ordering::Acquire),
+                Ordering::Release,
+            );
+            self.store.linear_drops.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    impl ExecutionLinearAttentionSubmissionAdapter for FakeLinearAttentionSubmission {
+        fn query(&mut self) -> Result<ExecutionState, ExecutionError> {
+            self.finish()
+        }
+
+        fn wait(&mut self, _timeout: Duration) -> Result<ExecutionState, ExecutionError> {
+            self.finish()
         }
     }
 
@@ -2750,6 +3423,95 @@ mod tests {
                 },
             ))
         }
+
+        fn create_linear_attention_state(
+            &self,
+            _access: &ExecutionAdapterAccess<'_>,
+            state_id: LinearAttentionStateId,
+            descriptor: LinearAttentionStateDescriptor,
+        ) -> Result<AdapterResource, ExecutionError> {
+            self.store
+                .linear_entries
+                .lock()
+                .map_err(|_| ExecutionError::Busy)?
+                .push(FakeLinearStateEntry {
+                    id: state_id,
+                    descriptor,
+                    length: 0,
+                });
+            Ok(AdapterResource::new(DropPayload(Arc::clone(
+                &self.state_resource_drops,
+            ))))
+        }
+
+        fn linear_attention_state_snapshot(
+            &self,
+            access: &ExecutionAdapterAccess<'_>,
+            state: &LinearAttentionState,
+        ) -> Result<LinearAttentionStateSnapshot, ExecutionError> {
+            let entries = self
+                .store
+                .linear_entries
+                .lock()
+                .map_err(|_| ExecutionError::Busy)?;
+            let entry = entries.iter().find(|entry| entry.id == state.id()).ok_or(
+                ExecutionError::WrongLinearAttentionState {
+                    expected: state.id(),
+                    actual: LinearAttentionStateId::new(1),
+                },
+            )?;
+            LinearAttentionStateSnapshot::new(
+                access.session_id(),
+                state.id(),
+                entry.descriptor,
+                entry.length,
+            )
+            .map_err(|error| ExecutionError::InvalidRequest {
+                reason: error.to_string(),
+            })
+        }
+
+        fn execute_linear_attention(
+            &self,
+            _access: &ExecutionAdapterAccess<'_>,
+            state: &LinearAttentionState,
+            _queue: &ExecutionQueue,
+            _bindings: &LinearAttentionBindings,
+            request: LinearAttentionRequest,
+        ) -> Result<
+            (
+                Box<dyn ExecutionLinearAttentionSubmissionAdapter>,
+                DispatchEvidence,
+            ),
+            ExecutionError,
+        > {
+            self.store.linear_calls.fetch_add(1, Ordering::Relaxed);
+            Ok((
+                Box::new(FakeLinearAttentionSubmission {
+                    store: Arc::clone(&self.store),
+                    request,
+                    core_execution_in_flight: Arc::clone(&state.execution_in_flight),
+                    complete: false,
+                }),
+                DispatchEvidence {
+                    abi_version: 1,
+                    info_version: 1,
+                    dispatch_id: 3,
+                    dispatch_count: 2,
+                    kernel_id: 3,
+                    workgroup_size_x: 128,
+                    grid_size_x: LinearAttentionLayout::VALUE_HEADS as u32,
+                    row_count: request.descriptor().token_count(),
+                    normalized_size: LinearAttentionLayout::HEAD_DIM as u64,
+                    backend: 1,
+                    fallback_allowed: false,
+                    fallback_used: false,
+                    kernel_symbol: "linear_attention.gdn.v1".to_owned(),
+                    device_symbol: "fake_linear_attention".to_owned(),
+                    target: "fake".to_owned(),
+                },
+            ))
+        }
     }
 
     fn session(name: &'static str) -> ExecutionSession {
@@ -2757,7 +3519,7 @@ mod tests {
     }
 
     #[test]
-    fn adapters_without_c3a2_methods_remain_source_compatible_and_unsupported() {
+    fn adapters_without_stateful_methods_remain_source_compatible_and_unsupported() {
         let test_session = session("test");
         let descriptor = crate::KvStateDescriptor::new(0, 1).unwrap();
 
@@ -2765,6 +3527,13 @@ mod tests {
             test_session.create_kv_state(descriptor),
             Err(ExecutionError::Unsupported { reason })
                 if reason.contains("request-local KV state")
+        ));
+        assert!(matches!(
+            test_session.create_linear_attention_state(
+                LinearAttentionStateDescriptor::new(0, 1).unwrap()
+            ),
+            Err(ExecutionError::Unsupported { reason })
+                if reason.contains("linear-attention state")
         ));
     }
 
@@ -2815,6 +3584,643 @@ mod tests {
                 AccessMode::Read,
             ),
         )
+    }
+
+    fn linear_binding(
+        session: &ExecutionSession,
+        dtype: DType,
+        shape: &[usize],
+        access: AccessMode,
+    ) -> OwnedTensorBinding {
+        let view = TensorView::with_encoding(dtype, Encoding::Unquantized, shape).unwrap();
+        let buffer = session.allocate(view.end_offset().max(1)).unwrap();
+        session.bind(&buffer, view, access).unwrap()
+    }
+
+    fn valid_linear_bindings(
+        session: &ExecutionSession,
+        token_count: usize,
+    ) -> LinearAttentionBindings {
+        LinearAttentionBindings::new(
+            linear_binding(
+                session,
+                DType::Bf16,
+                &[token_count, LinearAttentionLayout::QKV_WIDTH],
+                AccessMode::Read,
+            ),
+            linear_binding(
+                session,
+                DType::Bf16,
+                &[token_count, LinearAttentionLayout::OUTPUT_WIDTH],
+                AccessMode::Read,
+            ),
+            linear_binding(
+                session,
+                DType::Bf16,
+                &[token_count, LinearAttentionLayout::VALUE_HEADS],
+                AccessMode::Read,
+            ),
+            linear_binding(
+                session,
+                DType::Bf16,
+                &[token_count, LinearAttentionLayout::VALUE_HEADS],
+                AccessMode::Read,
+            ),
+            linear_binding(
+                session,
+                DType::Bf16,
+                &[
+                    LinearAttentionLayout::QKV_WIDTH,
+                    1,
+                    LinearAttentionLayout::CONV_KERNEL_SIZE,
+                ],
+                AccessMode::Read,
+            ),
+            linear_binding(
+                session,
+                DType::F32,
+                &[LinearAttentionLayout::VALUE_HEADS],
+                AccessMode::Read,
+            ),
+            linear_binding(
+                session,
+                DType::Bf16,
+                &[LinearAttentionLayout::VALUE_HEADS],
+                AccessMode::Read,
+            ),
+            linear_binding(
+                session,
+                DType::F32,
+                &[LinearAttentionLayout::HEAD_DIM],
+                AccessMode::Read,
+            ),
+            linear_binding(
+                session,
+                DType::Bf16,
+                &[token_count, LinearAttentionLayout::OUTPUT_WIDTH],
+                AccessMode::Write,
+            ),
+        )
+    }
+
+    fn qwen_tied_weight_entry() -> crate::WeightLoadEntry {
+        crate::WeightLoadEntry {
+            tensor_name: crate::QWEN35_EMBEDDING_TENSOR.to_owned(),
+            classification: crate::WeightClassification::Required,
+            consumer: Some(crate::WeightConsumerKey {
+                layer: None,
+                role: crate::WeightConsumer::EmbeddingAndTiedOutput,
+            }),
+            dtype: crate::TensorDType::Bf16,
+            shape: vec![
+                crate::QWEN35_VOCAB_SIZE as u64,
+                crate::QWEN35_HIDDEN_SIZE as u64,
+            ],
+            source_file: "model-00001-of-00002.safetensors".to_owned(),
+            locked_file_size: 1,
+            locked_file_sha256: "0".repeat(64),
+            source_range: [0, 1],
+            destination_start: Some(0),
+            chunks: Vec::new(),
+        }
+    }
+
+    fn qwen_bound_op(
+        descriptor: SemanticOpDescriptor,
+        inputs: Vec<OwnedTensorBinding>,
+        outputs: Vec<OwnedTensorBinding>,
+    ) -> Arc<BoundSemanticOp> {
+        Arc::new(
+            BoundSemanticOp::new(Arc::new(descriptor), inputs, outputs)
+                .expect("valid Qwen host binding"),
+        )
+    }
+
+    fn qwen_final_output_fixture() -> (
+        ExecutionSession,
+        crate::WeightLoadEntry,
+        Arc<BoundSemanticOp>,
+        Arc<BoundSemanticOp>,
+        Arc<BoundSemanticOp>,
+        Arc<BoundSemanticOp>,
+    ) {
+        let (session, _) = kv_session();
+        let m = 17;
+        let embedding_tokens = 3;
+        let weight_view = TensorView::contiguous(
+            DType::Bf16,
+            &[crate::QWEN35_VOCAB_SIZE, crate::QWEN35_HIDDEN_SIZE],
+        )
+        .unwrap();
+        let weight_buffer = session.allocate(weight_view.end_offset()).unwrap();
+        let token_view = TensorView::contiguous(DType::I32, &[embedding_tokens]).unwrap();
+        let token_buffer = session.allocate(token_view.end_offset()).unwrap();
+        let embedding_output_view =
+            TensorView::contiguous(DType::Bf16, &[embedding_tokens, crate::QWEN35_HIDDEN_SIZE])
+                .unwrap();
+        let embedding_output_buffer = session
+            .allocate(embedding_output_view.end_offset())
+            .unwrap();
+        let embedding = qwen_bound_op(
+            SemanticOpDescriptor::new(
+                SemanticOpKind::Embedding,
+                vec![weight_view.clone(), token_view.clone()],
+                vec![embedding_output_view.clone()],
+            )
+            .unwrap(),
+            vec![
+                session
+                    .bind(&weight_buffer, weight_view.clone(), AccessMode::Read)
+                    .unwrap(),
+                session
+                    .bind(&token_buffer, token_view, AccessMode::Read)
+                    .unwrap(),
+            ],
+            vec![
+                session
+                    .bind(
+                        &embedding_output_buffer,
+                        embedding_output_view,
+                        AccessMode::Write,
+                    )
+                    .unwrap(),
+            ],
+        );
+
+        let final_activation =
+            TensorView::contiguous(DType::Bf16, &[m, crate::QWEN35_HIDDEN_SIZE]).unwrap();
+        let final_activation_buffer = session.allocate(final_activation.end_offset()).unwrap();
+        let final_scale =
+            TensorView::contiguous(DType::Bf16, &[crate::QWEN35_HIDDEN_SIZE]).unwrap();
+        let final_scale_buffer = session.allocate(final_scale.end_offset()).unwrap();
+        let norm_output = final_activation.clone();
+        let norm_output_buffer = session.allocate(norm_output.end_offset()).unwrap();
+        let final_rmsnorm = qwen_bound_op(
+            SemanticOpDescriptor::new_rms_norm(
+                vec![final_activation.clone(), final_scale.clone()],
+                vec![norm_output.clone()],
+                1.0e-6,
+                crate::RmsNormScaleMode::OffsetOne,
+            )
+            .unwrap(),
+            vec![
+                session
+                    .bind(&final_activation_buffer, final_activation, AccessMode::Read)
+                    .unwrap(),
+                session
+                    .bind(&final_scale_buffer, final_scale, AccessMode::Read)
+                    .unwrap(),
+            ],
+            vec![
+                session
+                    .bind(&norm_output_buffer, norm_output.clone(), AccessMode::Write)
+                    .unwrap(),
+            ],
+        );
+
+        let logits = TensorView::contiguous(DType::Bf16, &[m, crate::QWEN35_VOCAB_SIZE]).unwrap();
+        let logits_buffer = session.allocate(logits.end_offset()).unwrap();
+        let tied_projection = qwen_bound_op(
+            SemanticOpDescriptor::new(
+                SemanticOpKind::Matmul,
+                vec![norm_output.clone(), weight_view.clone()],
+                vec![logits.clone()],
+            )
+            .unwrap(),
+            vec![
+                session
+                    .bind(&norm_output_buffer, norm_output, AccessMode::Read)
+                    .unwrap(),
+                session
+                    .bind(&weight_buffer, weight_view, AccessMode::Read)
+                    .unwrap(),
+            ],
+            vec![
+                session
+                    .bind(&logits_buffer, logits.clone(), AccessMode::Write)
+                    .unwrap(),
+            ],
+        );
+        let token_ids = TensorView::contiguous(DType::I32, &[m]).unwrap();
+        let token_ids_buffer = session.allocate(token_ids.end_offset()).unwrap();
+        let argmax = qwen_bound_op(
+            SemanticOpDescriptor::new(
+                SemanticOpKind::Argmax,
+                vec![logits.clone()],
+                vec![token_ids.clone()],
+            )
+            .unwrap(),
+            vec![
+                session
+                    .bind(&logits_buffer, logits, AccessMode::Read)
+                    .unwrap(),
+            ],
+            vec![
+                session
+                    .bind(&token_ids_buffer, token_ids, AccessMode::Write)
+                    .unwrap(),
+            ],
+        );
+        (
+            session,
+            qwen_tied_weight_entry(),
+            embedding,
+            final_rmsnorm,
+            tied_projection,
+            argmax,
+        )
+    }
+
+    #[test]
+    fn qwen_final_output_contract_accepts_exact_tied_buffer_and_model_descriptors() {
+        let (_, entry, embedding, final_rmsnorm, tied_projection, argmax) =
+            qwen_final_output_fixture();
+        let composition = crate::QwenFinalOutputBindings::new(
+            &entry,
+            Arc::clone(&embedding),
+            Arc::clone(&final_rmsnorm),
+            Arc::clone(&tied_projection),
+            Arc::clone(&argmax),
+        )
+        .expect("exact Qwen final output composition");
+
+        assert_eq!(
+            composition.tied_weight().buffer().id(),
+            tied_projection.inputs()[1].buffer().id()
+        );
+        assert_eq!(
+            composition.tied_weight().view(),
+            tied_projection.inputs()[1].view()
+        );
+        assert_eq!(
+            final_rmsnorm.descriptor().inputs()[0].shape(),
+            &[17, crate::QWEN35_HIDDEN_SIZE]
+        );
+        assert_eq!(
+            tied_projection.descriptor().outputs()[0].shape(),
+            &[17, crate::QWEN35_VOCAB_SIZE]
+        );
+        assert_eq!(argmax.descriptor().outputs()[0].dtype(), DType::I32);
+    }
+
+    #[test]
+    fn qwen_final_output_contract_rejects_different_weight_buffer_range_and_access() {
+        let (session, entry, embedding, final_rmsnorm, tied_projection, argmax) =
+            qwen_final_output_fixture();
+        let weight_view = tied_projection.inputs()[1].view().clone();
+        let other_weight_buffer = session.allocate(weight_view.end_offset()).unwrap();
+        let different_buffer_projection = qwen_bound_op(
+            tied_projection.descriptor().as_ref().clone(),
+            vec![
+                tied_projection.inputs()[0].clone(),
+                session
+                    .bind(&other_weight_buffer, weight_view.clone(), AccessMode::Read)
+                    .unwrap(),
+            ],
+            tied_projection.outputs().to_vec(),
+        );
+        assert!(matches!(
+            crate::QwenFinalOutputBindings::new(
+                &entry,
+                Arc::clone(&embedding),
+                Arc::clone(&final_rmsnorm),
+                different_buffer_projection,
+                Arc::clone(&argmax),
+            ),
+            Err(ExecutionError::DescriptorBindingMismatch { .. })
+        ));
+
+        let shifted_weight = TensorView::new(
+            DType::Bf16,
+            Encoding::Unquantized,
+            &[crate::QWEN35_VOCAB_SIZE, crate::QWEN35_HIDDEN_SIZE],
+            &[crate::QWEN35_HIDDEN_SIZE, 1],
+            2,
+        )
+        .unwrap();
+        let shifted_weight_buffer = session.allocate(shifted_weight.end_offset()).unwrap();
+        let shifted_projection = qwen_bound_op(
+            SemanticOpDescriptor::new(
+                SemanticOpKind::Matmul,
+                vec![
+                    tied_projection.inputs()[0].view().clone(),
+                    shifted_weight.clone(),
+                ],
+                vec![tied_projection.outputs()[0].view().clone()],
+            )
+            .unwrap(),
+            vec![
+                tied_projection.inputs()[0].clone(),
+                session
+                    .bind(&shifted_weight_buffer, shifted_weight, AccessMode::Read)
+                    .unwrap(),
+            ],
+            tied_projection.outputs().to_vec(),
+        );
+        assert!(matches!(
+            crate::QwenFinalOutputBindings::new(
+                &entry,
+                Arc::clone(&embedding),
+                Arc::clone(&final_rmsnorm),
+                shifted_projection,
+                Arc::clone(&argmax),
+            ),
+            Err(ExecutionError::DescriptorBindingMismatch { .. })
+        ));
+
+        let read_write_projection = qwen_bound_op(
+            tied_projection.descriptor().as_ref().clone(),
+            vec![
+                tied_projection.inputs()[0].clone(),
+                session
+                    .bind(
+                        embedding.inputs()[0].buffer(),
+                        weight_view,
+                        AccessMode::ReadWrite,
+                    )
+                    .unwrap(),
+            ],
+            tied_projection.outputs().to_vec(),
+        );
+        assert!(matches!(
+            crate::QwenFinalOutputBindings::new(
+                &entry,
+                embedding,
+                final_rmsnorm,
+                read_write_projection,
+                argmax,
+            ),
+            Err(ExecutionError::AccessViolation { .. })
+        ));
+    }
+
+    #[test]
+    fn qwen_final_output_contract_rejects_wrong_model_shape_layout_dtype_and_weight_role() {
+        let (session, mut entry, embedding, final_rmsnorm, tied_projection, argmax) =
+            qwen_final_output_fixture();
+        entry.consumer = Some(crate::WeightConsumerKey {
+            layer: None,
+            role: crate::WeightConsumer::FinalNorm,
+        });
+        assert!(matches!(
+            crate::QwenFinalOutputBindings::new(
+                &entry,
+                Arc::clone(&embedding),
+                Arc::clone(&final_rmsnorm),
+                Arc::clone(&tied_projection),
+                Arc::clone(&argmax),
+            ),
+            Err(ExecutionError::InvalidRequest { .. })
+        ));
+
+        let wrong_weight = TensorView::contiguous(
+            DType::Bf16,
+            &[crate::QWEN35_VOCAB_SIZE - 1, crate::QWEN35_HIDDEN_SIZE],
+        )
+        .unwrap();
+        let wrong_logits =
+            TensorView::contiguous(DType::Bf16, &[17, crate::QWEN35_VOCAB_SIZE - 1]).unwrap();
+        let wrong_weight_buffer = session.allocate(wrong_weight.end_offset()).unwrap();
+        let wrong_logits_buffer = session.allocate(wrong_logits.end_offset()).unwrap();
+        let wrong_shape_projection = qwen_bound_op(
+            SemanticOpDescriptor::new(
+                SemanticOpKind::Matmul,
+                vec![
+                    tied_projection.inputs()[0].view().clone(),
+                    wrong_weight.clone(),
+                ],
+                vec![wrong_logits.clone()],
+            )
+            .unwrap(),
+            vec![
+                tied_projection.inputs()[0].clone(),
+                session
+                    .bind(&wrong_weight_buffer, wrong_weight, AccessMode::Read)
+                    .unwrap(),
+            ],
+            vec![
+                session
+                    .bind(&wrong_logits_buffer, wrong_logits, AccessMode::Write)
+                    .unwrap(),
+            ],
+        );
+        let entry = qwen_tied_weight_entry();
+        assert!(matches!(
+            crate::QwenFinalOutputBindings::new(
+                &entry,
+                embedding,
+                final_rmsnorm,
+                wrong_shape_projection,
+                argmax,
+            ),
+            Err(ExecutionError::DescriptorBindingMismatch { .. })
+        ));
+
+        assert!(SemanticOpDescriptor::new(
+            SemanticOpKind::Matmul,
+            vec![
+                TensorView::contiguous(DType::Bf16, &[17, crate::QWEN35_HIDDEN_SIZE]).unwrap(),
+                TensorView::contiguous(
+                    DType::F16,
+                    &[crate::QWEN35_VOCAB_SIZE, crate::QWEN35_HIDDEN_SIZE],
+                )
+                .unwrap(),
+            ],
+            vec![
+                TensorView::contiguous(DType::Bf16, &[17, crate::QWEN35_VOCAB_SIZE]).unwrap(),
+            ],
+        )
+        .is_err());
+        assert!(
+            SemanticOpDescriptor::new(
+                SemanticOpKind::Argmax,
+                vec![
+                    TensorView::new(
+                        DType::Bf16,
+                        Encoding::Unquantized,
+                        &[17, crate::QWEN35_VOCAB_SIZE],
+                        &[crate::QWEN35_VOCAB_SIZE + 1, 1],
+                        0,
+                    )
+                    .unwrap(),
+                ],
+                vec![TensorView::contiguous(DType::I32, &[17]).unwrap()],
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn linear_attention_covers_boundaries_and_transactional_publication() {
+        for token_count in [1_usize, 3, 17, 255, 256, 257] {
+            let (session, adapter) = kv_session();
+            let queue = session.create_queue().unwrap();
+            let state = session
+                .create_linear_attention_state(
+                    LinearAttentionStateDescriptor::new(5, token_count as u64).unwrap(),
+                )
+                .unwrap();
+            let descriptor =
+                LinearAttentionDescriptor::new(0, token_count as u64, token_count as u64).unwrap();
+            let mut submission = session
+                .linear_attention(
+                    &state,
+                    &queue,
+                    valid_linear_bindings(&session, token_count),
+                    descriptor,
+                )
+                .unwrap();
+            assert_eq!(state.snapshot(&session).unwrap().length(), 0);
+            assert_eq!(submission.request().descriptor(), descriptor);
+            assert_eq!(submission.dispatch().dispatch_count, 2);
+            assert_eq!(
+                submission.wait(Duration::ZERO).unwrap(),
+                ExecutionState::Success
+            );
+            assert_eq!(
+                submission.wait(Duration::ZERO).unwrap(),
+                ExecutionState::Success
+            );
+            assert!(
+                adapter
+                    .store
+                    .linear_drop_saw_core_admission
+                    .load(Ordering::Acquire)
+            );
+            assert_eq!(adapter.store.linear_drops.load(Ordering::Relaxed), 1);
+            assert_eq!(
+                state.snapshot(&session).unwrap().length(),
+                token_count as u64
+            );
+            assert_eq!(adapter.store.linear_calls.load(Ordering::Relaxed), 1);
+        }
+    }
+
+    #[test]
+    fn linear_attention_rejects_concurrency_and_drop_does_not_publish() {
+        let (session, adapter) = kv_session();
+        let queue = session.create_queue().unwrap();
+        let state = session
+            .create_linear_attention_state(LinearAttentionStateDescriptor::new(0, 3).unwrap())
+            .unwrap();
+        let descriptor = LinearAttentionDescriptor::new(0, 1, 1).unwrap();
+        let first = session
+            .linear_attention(
+                &state,
+                &queue,
+                valid_linear_bindings(&session, 1),
+                descriptor,
+            )
+            .unwrap();
+        assert!(matches!(
+            session.linear_attention(
+                &state,
+                &queue,
+                valid_linear_bindings(&session, 1),
+                descriptor,
+            ),
+            Err(ExecutionError::Busy)
+        ));
+        drop(first);
+        assert!(
+            adapter
+                .store
+                .linear_drop_saw_core_admission
+                .load(Ordering::Acquire)
+        );
+        assert_eq!(state.snapshot(&session).unwrap().length(), 0);
+        assert_eq!(adapter.store.linear_drops.load(Ordering::Relaxed), 1);
+
+        let mut second = session
+            .linear_attention(
+                &state,
+                &queue,
+                valid_linear_bindings(&session, 1),
+                descriptor,
+            )
+            .unwrap();
+        assert_eq!(second.query().unwrap(), ExecutionState::Success);
+        assert_eq!(second.query().unwrap(), ExecutionState::Success);
+        assert!(
+            adapter
+                .store
+                .linear_drop_saw_core_admission
+                .load(Ordering::Acquire)
+        );
+        assert_eq!(state.snapshot(&session).unwrap().length(), 1);
+        let next_descriptor = LinearAttentionDescriptor::new(1, 1, 2).unwrap();
+        let next = session
+            .linear_attention(
+                &state,
+                &queue,
+                valid_linear_bindings(&session, 1),
+                next_descriptor,
+            )
+            .expect("terminal query cleaned the backend owner before reopening admission");
+        drop(next);
+    }
+
+    #[test]
+    fn linear_attention_rejects_wrong_contract_alias_and_capacity_before_dispatch() {
+        let (session, adapter) = kv_session();
+        let queue = session.create_queue().unwrap();
+        let state = session
+            .create_linear_attention_state(LinearAttentionStateDescriptor::new(0, 3).unwrap())
+            .unwrap();
+        let descriptor = LinearAttentionDescriptor::new(0, 1, 1).unwrap();
+
+        let mut wrong_dtype = valid_linear_bindings(&session, 1);
+        wrong_dtype.qkv = linear_binding(
+            &session,
+            DType::F16,
+            &[1, LinearAttentionLayout::QKV_WIDTH],
+            AccessMode::Read,
+        );
+        assert!(matches!(
+            session.linear_attention(&state, &queue, wrong_dtype, descriptor),
+            Err(ExecutionError::InvalidRequest { reason }) if reason.contains("Bf16")
+        ));
+
+        let mut wrong_access = valid_linear_bindings(&session, 1);
+        wrong_access.output = linear_binding(
+            &session,
+            DType::Bf16,
+            &[1, LinearAttentionLayout::OUTPUT_WIDTH],
+            AccessMode::Read,
+        );
+        assert!(matches!(
+            session.linear_attention(&state, &queue, wrong_access, descriptor),
+            Err(ExecutionError::AccessViolation { .. })
+        ));
+
+        let mut alias = valid_linear_bindings(&session, 1);
+        let z_view = TensorView::with_encoding(
+            DType::Bf16,
+            Encoding::Unquantized,
+            &[1, LinearAttentionLayout::OUTPUT_WIDTH],
+        )
+        .unwrap();
+        alias.z = session
+            .bind(alias.qkv.buffer(), z_view, AccessMode::Read)
+            .unwrap();
+        assert!(matches!(
+            session.linear_attention(&state, &queue, alias, descriptor),
+            Err(ExecutionError::AliasOverlap { .. })
+        ));
+
+        let capacity_state = session
+            .create_linear_attention_state(LinearAttentionStateDescriptor::new(1, 1).unwrap())
+            .unwrap();
+        assert!(matches!(
+            session.linear_attention(
+                &capacity_state,
+                &queue,
+                valid_linear_bindings(&session, 3),
+                LinearAttentionDescriptor::new(0, 3, 3).unwrap(),
+            ),
+            Err(ExecutionError::InvalidRange { .. })
+        ));
+        assert_eq!(adapter.store.linear_calls.load(Ordering::Relaxed), 0);
     }
 
     #[test]

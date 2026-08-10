@@ -91,6 +91,8 @@ hipError_t embedding_gather_launch(const uint16_t *weight,
 hipError_t matmul_launch(const uint16_t *activation, const uint16_t *weight,
                          uint16_t *output, uint64_t m, uint64_t k, uint64_t n,
                          hipStream_t stream) noexcept;
+hipError_t argmax_launch(const uint16_t *logits, int32_t *output, uint64_t m,
+                         uint64_t v, hipStream_t stream) noexcept;
 hipError_t attention_preprocess_launch(
     const uint16_t *packed_q_gate, const uint16_t *k,
     const uint16_t *q_raw_scale, const uint16_t *k_raw_scale,
@@ -137,6 +139,10 @@ std::size_t rmsnorm_launch_calls() noexcept;
 uint32_t rmsnorm_last_normalized_size() noexcept;
 uint32_t rmsnorm_last_row_count() noexcept;
 void set_matmul_launch_status(hipError_t status) noexcept;
+std::size_t argmax_launch_calls() noexcept;
+uint64_t argmax_last_m() noexcept;
+uint64_t argmax_last_v() noexcept;
+void set_argmax_launch_status(hipError_t status) noexcept;
 void set_event_record_status(hipError_t status) noexcept;
 void set_event_create_gate(bool enabled) noexcept;
 void wait_event_create_entered();

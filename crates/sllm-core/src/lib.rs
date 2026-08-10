@@ -7,8 +7,10 @@ mod backend;
 mod dtype;
 mod execution;
 mod fake;
+mod final_output;
 mod handles;
 mod kv_state;
+mod linear_attention;
 mod model;
 mod op;
 mod registry;
@@ -24,13 +26,17 @@ pub use execution::{
     AdapterResource, BoundSemanticOp, BufferRange, BufferReadback, CausalAttentionSubmission,
     DispatchEvidence, ExecutionAdapterAccess, ExecutionBuffer, ExecutionBufferId,
     ExecutionCausalAttentionSubmissionAdapter, ExecutionError, ExecutionKvStateSubmissionAdapter,
-    ExecutionQueue, ExecutionQueueId, ExecutionReadbackAdapter, ExecutionSession,
-    ExecutionSessionAdapter, ExecutionSessionId, ExecutionSessionRequest, ExecutionState,
-    ExecutionSubmissionAdapter, ExecutionTransferAdapter, KvState, KvStateAppendSubmission,
-    KvStateId, OwnedTensorBinding, PrepareSupport, PreparedOperation, PreparedOperationId,
-    Readback, ShutdownReport, Submission, Transfer,
+    ExecutionLinearAttentionSubmissionAdapter, ExecutionQueue, ExecutionQueueId,
+    ExecutionReadbackAdapter, ExecutionSession, ExecutionSessionAdapter, ExecutionSessionId,
+    ExecutionSessionRequest, ExecutionState, ExecutionSubmissionAdapter, ExecutionTransferAdapter,
+    KvState, KvStateAppendSubmission, KvStateId, LinearAttentionBindings, LinearAttentionState,
+    LinearAttentionStateId, LinearAttentionSubmission, OwnedTensorBinding, PrepareSupport,
+    PreparedOperation, PreparedOperationId, Readback, ShutdownReport, Submission, Transfer,
 };
 pub use fake::{FakeBackend, MAX_FAKE_MATERIALIZATION_BYTES};
+pub use final_output::{
+    QWEN35_EMBEDDING_TENSOR, QWEN35_HIDDEN_SIZE, QWEN35_VOCAB_SIZE, QwenFinalOutputBindings,
+};
 pub use handles::{
     AccessMode, BufferHandle, BufferUse, CompletionLease, EventHandle, InFlightSubmission,
     QueueHandle,
@@ -38,6 +44,10 @@ pub use handles::{
 pub use kv_state::{
     CausalAttentionDescriptor, KvStateAppendRequest, KvStateDescriptor, KvStateError,
     KvStateLayout, KvStateSnapshot,
+};
+pub use linear_attention::{
+    LinearAttentionDescriptor, LinearAttentionError, LinearAttentionLayout, LinearAttentionRequest,
+    LinearAttentionStateDescriptor, LinearAttentionStateSnapshot,
 };
 pub use model::{
     AccumulationDType, BaseModel, BudgetBoundary, ClassificationStatus, ComponentMetadata,
@@ -51,10 +61,10 @@ pub use model::{
     verify_model_cache,
 };
 pub use op::{
-    AttentionPreprocessContract, AttentionPreprocessPacking, AttentionPreprocessPositionMode,
-    AttentionPreprocessTensor, ElementwiseTensor, OpError, RmsNormAliasPolicy, RmsNormContract,
-    RmsNormEpsilon, RmsNormScaleMode, RmsNormTensor, SemanticOp, SemanticOpDescriptor,
-    SemanticOpKind,
+    ArgmaxTensor, AttentionPreprocessContract, AttentionPreprocessPacking,
+    AttentionPreprocessPositionMode, AttentionPreprocessTensor, ElementwiseTensor, OpError,
+    RmsNormAliasPolicy, RmsNormContract, RmsNormEpsilon, RmsNormScaleMode, RmsNormTensor,
+    SemanticOp, SemanticOpDescriptor, SemanticOpKind,
 };
 pub use registry::{BACKEND_REGISTRY, BackendRegistration, backend_registry};
 pub use tensor::{TensorError, TensorView};
@@ -358,6 +368,130 @@ mod tests {
         assert_eq!(SemanticOpKind::SiluMul.arity(), (2, 1));
         assert_eq!(SemanticOpKind::SigmoidMul.arity(), (2, 1));
         assert_eq!(SemanticOpKind::RmsNorm.arity(), (2, 1));
+        assert_eq!(SemanticOpKind::Argmax.arity(), (1, 1));
+    }
+
+    #[test]
+    fn argmax_freezes_rank_dtype_layout_shape_and_vocab_boundaries() {
+        for (m, v) in [
+            (1_usize, 1_usize),
+            (3, 3),
+            (17, 17),
+            (1, 255),
+            (3, 256),
+            (17, 257),
+            (1, 248_320),
+            (1, 1_048_576),
+        ] {
+            let descriptor = SemanticOpDescriptor::new(
+                SemanticOpKind::Argmax,
+                vec![TensorView::contiguous(DType::Bf16, &[m, v]).unwrap()],
+                vec![TensorView::contiguous(DType::I32, &[m]).unwrap()],
+            )
+            .expect("valid greedy argmax descriptor");
+            assert_eq!(descriptor.kind(), SemanticOpKind::Argmax);
+            assert_eq!(descriptor.arity(), (1, 1));
+        }
+
+        let valid_logits = TensorView::contiguous(DType::Bf16, &[3, 17]).unwrap();
+        let valid_output = TensorView::contiguous(DType::I32, &[3]).unwrap();
+        let error = |logits, output| {
+            SemanticOpDescriptor::new(SemanticOpKind::Argmax, vec![logits], vec![output])
+                .expect_err("invalid argmax descriptor")
+        };
+
+        assert_eq!(
+            error(
+                TensorView::contiguous(DType::Bf16, &[17]).unwrap(),
+                valid_output.clone(),
+            ),
+            OpError::ArgmaxRankMismatch {
+                tensor: ArgmaxTensor::Logits,
+            }
+        );
+        assert_eq!(
+            error(
+                valid_logits.clone(),
+                TensorView::contiguous(DType::I32, &[3, 1]).unwrap(),
+            ),
+            OpError::ArgmaxRankMismatch {
+                tensor: ArgmaxTensor::Output,
+            }
+        );
+        assert_eq!(
+            error(
+                TensorView::contiguous(DType::Bf16, &[0, 17]).unwrap(),
+                TensorView::contiguous(DType::I32, &[0]).unwrap(),
+            ),
+            OpError::ArgmaxZeroExtent {
+                tensor: ArgmaxTensor::Logits,
+            }
+        );
+        assert_eq!(
+            error(
+                TensorView::new(DType::Bf16, Encoding::Unquantized, &[3, 17], &[18, 1], 0,)
+                    .unwrap(),
+                valid_output.clone(),
+            ),
+            OpError::ArgmaxNonContiguous {
+                tensor: ArgmaxTensor::Logits,
+            }
+        );
+        assert_eq!(
+            error(
+                TensorView::contiguous(DType::F16, &[3, 17]).unwrap(),
+                valid_output.clone(),
+            ),
+            OpError::ArgmaxUnsupportedDType {
+                tensor: ArgmaxTensor::Logits,
+                expected: DType::Bf16,
+                actual: DType::F16,
+            }
+        );
+        assert_eq!(
+            error(
+                valid_logits.clone(),
+                TensorView::contiguous(DType::F32, &[3]).unwrap(),
+            ),
+            OpError::ArgmaxUnsupportedDType {
+                tensor: ArgmaxTensor::Output,
+                expected: DType::I32,
+                actual: DType::F32,
+            }
+        );
+        let encoded = TensorView::with_encoding(
+            DType::U8,
+            Encoding::Nvfp4 {
+                block_size: 32,
+                scale_dtype: DType::Bf16,
+            },
+            &[3, 17],
+        )
+        .unwrap();
+        assert_eq!(
+            error(encoded, valid_output.clone()),
+            OpError::ArgmaxUnsupportedEncoding {
+                tensor: ArgmaxTensor::Logits,
+                actual: Encoding::Nvfp4 {
+                    block_size: 32,
+                    scale_dtype: DType::Bf16,
+                },
+            }
+        );
+        assert_eq!(
+            error(
+                valid_logits,
+                TensorView::contiguous(DType::I32, &[2]).unwrap(),
+            ),
+            OpError::ArgmaxShapeMismatch
+        );
+        assert_eq!(
+            error(
+                TensorView::contiguous(DType::Bf16, &[1, 1_048_577]).unwrap(),
+                TensorView::contiguous(DType::I32, &[1]).unwrap(),
+            ),
+            OpError::ArgmaxVocabTooLarge { vocab: 1_048_577 }
+        );
     }
 
     #[test]

@@ -3824,6 +3824,181 @@ bool kv_append_lifetime_alias_and_quarantine_contract() {
   return valid && other_queue_released && other_context_released;
 }
 
+bool linear_attention_transaction_and_lifetime_contract() {
+  fake_hip::reset();
+  constexpr uint64_t token_count = 3U;
+  constexpr uint64_t capacity = 7U;
+  const std::array<uint64_t, 9> sizes = {token_count * 8192U * 2U,
+                                         token_count * 4096U * 2U,
+                                         token_count * 32U * 2U,
+                                         token_count * 32U * 2U,
+                                         8192U * 4U * 2U,
+                                         32U * 4U,
+                                         32U * 2U,
+                                         128U * 4U,
+                                         token_count * 4096U * 2U};
+  sllm_context_t *context = nullptr;
+  sllm_queue_t *queue = nullptr;
+  std::array<sllm_buffer_t *, 9> buffers{};
+  sllm_linear_attention_state_t *state = nullptr;
+  const auto release_buffers = [&buffers]() {
+    bool success = true;
+    for (auto &buffer : buffers) {
+      if (buffer != nullptr) {
+        success = release_buffer(&buffer) && success;
+      }
+    }
+    return success;
+  };
+  if (!create_context(&context) || !create_queue(context, &queue)) {
+    return false;
+  }
+  for (std::size_t index = 0U; index != buffers.size(); ++index) {
+    if (!create_buffer_sized(context, sizes[index], &buffers[index])) {
+      release_buffers();
+      release_queue(&queue);
+      release_context(&context);
+      return false;
+    }
+  }
+  sllm_linear_attention_state_create_info_t create{};
+  create.struct_size = sizeof(create);
+  create.abi_version = SLLM_HIP_ABI_VERSION;
+  create.session_id = 0x5a17U;
+  create.layer_id = 9U;
+  create.capacity_tokens = capacity;
+  Error error;
+  if (!expect_status(sllm_linear_attention_state_create(context, &create,
+                                                        &state, &error.sink),
+                     SLLM_STATUS_OK, "linear attention state create", error) ||
+      state == nullptr) {
+    return false;
+  }
+  const auto query_state = [&](const uint64_t length, const uint64_t generation,
+                               const uint32_t active_slot) {
+    sllm_linear_attention_view_info_t view{};
+    view.struct_size = sizeof(view);
+    view.abi_version = SLLM_HIP_ABI_VERSION;
+    view.info_version = SLLM_HIP_LINEAR_ATTENTION_VIEW_INFO_VERSION;
+    Error query_error;
+    return expect_status(sllm_linear_attention_state_query(state, &view,
+                                                           &query_error.sink),
+                         SLLM_STATUS_OK, "linear attention state query",
+                         query_error) &&
+           view.session_id == create.session_id &&
+           view.layer_id == create.layer_id &&
+           view.conv_state_dtype == SLLM_TENSOR_DTYPE_BF16 &&
+           view.recurrent_state_dtype == SLLM_TENSOR_DTYPE_F32 &&
+           view.encoding == SLLM_TENSOR_ENCODING_UNQUANTIZED &&
+           view.active_slot == active_slot &&
+           view.capacity_tokens == capacity && view.observed_length == length &&
+           view.generation == generation && view.context_identity != 0U &&
+           view.state_identity != 0U && view.conv_state_shape[0] == 3U &&
+           view.conv_state_shape[1] == 8192U &&
+           view.recurrent_state_shape[0] == 32U &&
+           view.recurrent_state_shape[1] == 128U &&
+           view.recurrent_state_shape[2] == 128U;
+  };
+  const auto descriptor_for = [&](const uint64_t count, const uint64_t start) {
+    const uint64_t qkv_shape[] = {count, 8192U};
+    const uint64_t output_shape[] = {count, 4096U};
+    const uint64_t scalar_shape[] = {count, 32U};
+    constexpr uint64_t conv_shape[] = {8192U, 1U, 4U};
+    constexpr uint64_t head_shape[] = {32U};
+    constexpr uint64_t norm_shape[] = {128U};
+    sllm_linear_attention_desc_t descriptor{};
+    descriptor.struct_size = sizeof(descriptor);
+    descriptor.abi_version = SLLM_HIP_ABI_VERSION;
+    descriptor.op_version = SLLM_HIP_LINEAR_ATTENTION_VERSION;
+    descriptor.start_position = start;
+    descriptor.expected_length = start + count;
+    descriptor.state = state;
+    descriptor.qkv =
+        attention_binding(buffers[0], SLLM_TENSOR_DTYPE_BF16, 2U, qkv_shape);
+    descriptor.z =
+        attention_binding(buffers[1], SLLM_TENSOR_DTYPE_BF16, 2U, output_shape);
+    descriptor.b_input =
+        attention_binding(buffers[2], SLLM_TENSOR_DTYPE_BF16, 2U, scalar_shape);
+    descriptor.a_input =
+        attention_binding(buffers[3], SLLM_TENSOR_DTYPE_BF16, 2U, scalar_shape);
+    descriptor.conv_weight =
+        attention_binding(buffers[4], SLLM_TENSOR_DTYPE_BF16, 3U, conv_shape);
+    descriptor.a_log =
+        attention_binding(buffers[5], SLLM_TENSOR_DTYPE_F32, 1U, head_shape);
+    descriptor.dt_bias =
+        attention_binding(buffers[6], SLLM_TENSOR_DTYPE_BF16, 1U, head_shape);
+    descriptor.norm_weight =
+        attention_binding(buffers[7], SLLM_TENSOR_DTYPE_F32, 1U, norm_shape);
+    descriptor.output =
+        attention_binding(buffers[8], SLLM_TENSOR_DTYPE_BF16, 2U, output_shape);
+    return descriptor;
+  };
+  const auto dispatch_info = []() {
+    sllm_linear_attention_dispatch_info_t info{};
+    info.struct_size = sizeof(info);
+    info.abi_version = SLLM_HIP_ABI_VERSION;
+    info.info_version = SLLM_HIP_LINEAR_ATTENTION_DISPATCH_INFO_VERSION;
+    return info;
+  };
+  auto descriptor = descriptor_for(token_count, 0U);
+  auto stale = descriptor;
+  stale.start_position = 1U;
+  stale.expected_length = 4U;
+  auto info = dispatch_info();
+  sllm_completion_t *completion = nullptr;
+  if (!query_state(0U, 0U, 0U) ||
+      !expect_status(sllm_linear_attention_execute(context, queue, &stale,
+                                                   &completion, &info,
+                                                   &error.sink),
+                     SLLM_STATUS_LINEAR_ATTENTION_LENGTH_MISMATCH,
+                     "linear attention stale length", error) ||
+      completion != nullptr) {
+    return false;
+  }
+  info = dispatch_info();
+  if (!expect_status(sllm_linear_attention_execute(context, queue, &descriptor,
+                                                   &completion, &info,
+                                                   &error.sink),
+                     SLLM_STATUS_OK, "linear attention execute", error) ||
+      completion == nullptr || info.dispatch_id == 0U ||
+      info.dispatch_count != 2U ||
+      info.conv_kernel_id !=
+          SLLM_HIP_LINEAR_ATTENTION_KERNEL_ID_CAUSAL_CONV_SILU_V1 ||
+      info.recurrent_kernel_id !=
+          SLLM_HIP_LINEAR_ATTENTION_KERNEL_ID_RECURRENT_GATED_NORM_V1 ||
+      info.workgroup_size_x != SLLM_HIP_LINEAR_ATTENTION_WORKGROUP_SIZE ||
+      info.recurrent_grid_size_x != 32U || info.token_count != token_count ||
+      info.start_position != 0U || info.expected_length != token_count ||
+      info.fallback_allowed != 0U || info.fallback_used != 0U ||
+      !query_state(0U, 0U, 0U) ||
+      !release_buffer(&buffers[0], SLLM_STATUS_PUBLIC_BUSY) ||
+      !release_queue(&queue, SLLM_STATUS_PUBLIC_BUSY) ||
+      !query_completion(completion, SLLM_STATUS_OK) ||
+      !query_state(token_count, 1U, 1U) || !release_completion(&completion)) {
+    return false;
+  }
+
+  descriptor = descriptor_for(1U, token_count);
+  info = dispatch_info();
+  if (!expect_status(
+          sllm_linear_attention_execute(context, queue, &descriptor,
+                                        &completion, &info, &error.sink),
+          SLLM_STATUS_OK, "linear attention cancel execute", error) ||
+      !expect_status(
+          sllm_linear_attention_cancel(state, completion, &error.sink),
+          SLLM_STATUS_OK, "linear attention cancel", error) ||
+      !query_completion(completion, SLLM_STATUS_OK) ||
+      !release_completion(&completion) || !query_state(token_count, 1U, 1U)) {
+    return false;
+  }
+
+  const bool state_released =
+      expect_status(sllm_linear_attention_state_release(&state, &error.sink),
+                    SLLM_STATUS_OK, "linear attention state release", error);
+  return state_released && release_buffers() && release_queue(&queue) &&
+         release_context(&context);
+}
+
 } // namespace
 
 int main() {
@@ -3893,6 +4068,7 @@ int main() {
   }
   if (!kv_append_accounting_multiplicity_contract() ||
       !causal_attention_numerical_gqa_and_lifetime_contract() ||
+      !linear_attention_transaction_and_lifetime_contract() ||
       !kv_append_same_buffer_disjoint_lifecycle_contract() ||
       !kv_state_create_snapshot_contract() ||
       !kv_evidence_readback_contract() ||

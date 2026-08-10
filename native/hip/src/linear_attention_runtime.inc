@@ -1,0 +1,883 @@
+namespace {
+
+class LinearAttentionExecuteScopeGuard final {
+public:
+  LinearAttentionExecuteScopeGuard(LinearAttentionState *const state,
+                                   Queue *const queue,
+                                   const LinearAttentionBuffers buffers,
+                                   std::unique_ptr<Completion> *const candidate,
+                                   NativeEventGuard *const event_guard,
+                                   sllm_error_sink_t *const sink) noexcept
+      : state_(state), queue_(queue), buffers_(buffers), candidate_(candidate),
+        event_guard_(event_guard), sink_(sink), token_(0U),
+        phase_(Phase::Reserved) {}
+
+  LinearAttentionExecuteScopeGuard(const LinearAttentionExecuteScopeGuard &) =
+      delete;
+  LinearAttentionExecuteScopeGuard &
+  operator=(const LinearAttentionExecuteScopeGuard &) = delete;
+
+  ~LinearAttentionExecuteScopeGuard() { cleanup(); }
+
+  void candidate_allocated() noexcept { phase_ = Phase::Candidate; }
+  void completion_registered(const uintptr_t token) noexcept {
+    token_ = token;
+    phase_ = Phase::Registered;
+  }
+  void disarm() noexcept { phase_ = Phase::Disarmed; }
+
+private:
+  enum class Phase : uint8_t { Reserved, Candidate, Registered, Disarmed };
+
+  void cleanup() noexcept {
+    switch (phase_) {
+    case Phase::Reserved:
+      (void)rollback_reserved_linear_attention(state_, queue_, buffers_, sink_);
+      break;
+    case Phase::Candidate:
+      if (candidate_ != nullptr && candidate_->get() != nullptr) {
+        (void)rollback_unpublished_submission(
+            *candidate_, *event_guard_,
+            "linear attention unwound before completion registration", sink_);
+      } else {
+        state_->context->poisoned.store(true);
+      }
+      break;
+    case Phase::Registered:
+      if (candidate_ != nullptr && candidate_->get() != nullptr) {
+        (void)cleanup_failed_submission(
+            *candidate_, token_, hipErrorUnknown,
+            "linear attention unwound after completion registration", queue_,
+            sink_);
+      } else {
+        state_->context->poisoned.store(true);
+      }
+      break;
+    case Phase::Disarmed:
+      break;
+    }
+    phase_ = Phase::Disarmed;
+  }
+
+  LinearAttentionState *const state_;
+  Queue *const queue_;
+  LinearAttentionBuffers buffers_;
+  std::unique_ptr<Completion> *const candidate_;
+  NativeEventGuard *const event_guard_;
+  sllm_error_sink_t *const sink_;
+  uintptr_t token_;
+  Phase phase_;
+};
+
+sllm_status_t validate_linear_attention_view_info_input(
+    const sllm_linear_attention_view_info_t *const info,
+    sllm_error_sink_t *const sink) noexcept {
+  if (info == nullptr || info->struct_size != sizeof(*info)) {
+    return sllm_public_runtime::write_error(
+        sink, SLLM_STATUS_INVALID_ARGUMENT,
+        "linear attention view info has an unsupported struct size");
+  }
+  if (info->abi_version != SLLM_HIP_ABI_VERSION) {
+    return sllm_public_runtime::write_error(
+        sink, SLLM_STATUS_INVALID_ABI_VERSION,
+        "linear attention view info ABI version is unsupported");
+  }
+  if (info->info_version != SLLM_HIP_LINEAR_ATTENTION_VIEW_INFO_VERSION ||
+      info->reserved0 != 0U ||
+      !std::all_of(std::begin(info->reserved), std::end(info->reserved),
+                   [](const uint32_t value) { return value == 0U; })) {
+    return sllm_public_runtime::write_error(
+        sink, SLLM_STATUS_RESERVED_NONZERO,
+        "linear attention view info version or reserved fields are invalid");
+  }
+  return SLLM_STATUS_OK;
+}
+
+sllm_status_t validate_linear_attention_dispatch_info(
+    const sllm_linear_attention_dispatch_info_t *const info,
+    sllm_error_sink_t *const sink) noexcept {
+  if (info == nullptr || info->struct_size != sizeof(*info)) {
+    return sllm_public_runtime::write_error(
+        sink, SLLM_STATUS_INVALID_ARGUMENT,
+        "linear attention dispatch info has an unsupported struct size");
+  }
+  if (info->abi_version != SLLM_HIP_ABI_VERSION) {
+    return sllm_public_runtime::write_error(
+        sink, SLLM_STATUS_INVALID_ABI_VERSION,
+        "linear attention dispatch info ABI version is unsupported");
+  }
+  if (info->info_version != SLLM_HIP_LINEAR_ATTENTION_DISPATCH_INFO_VERSION ||
+      !std::all_of(std::begin(info->reserved), std::end(info->reserved),
+                   [](const uint32_t value) { return value == 0U; })) {
+    return sllm_public_runtime::write_error(
+        sink, SLLM_STATUS_RESERVED_NONZERO,
+        "linear attention dispatch info version or reserved fields are "
+        "invalid");
+  }
+  return SLLM_STATUS_OK;
+}
+
+void fill_linear_attention_view_info(
+    const LinearAttentionState *const state,
+    sllm_linear_attention_view_info_t *const info) noexcept {
+  sllm_linear_attention::initialize_view_info(info);
+  info->session_id = state->session_id;
+  info->layer_id = state->layer_id;
+  info->conv_state_dtype = SLLM_TENSOR_DTYPE_BF16;
+  info->recurrent_state_dtype = SLLM_TENSOR_DTYPE_F32;
+  info->encoding = SLLM_TENSOR_ENCODING_UNQUANTIZED;
+  info->active_slot = state->active_slot;
+  info->capacity_tokens = state->capacity_tokens;
+  info->observed_length = state->published_length;
+  info->generation = state->generation;
+  info->context_identity = state->context_identity;
+  info->state_identity = state->state_identity;
+  info->conv_state_shape[0] = SLLM_HIP_LINEAR_ATTENTION_CONV_HISTORY;
+  info->conv_state_shape[1] = SLLM_HIP_LINEAR_ATTENTION_QKV_WIDTH;
+  info->recurrent_state_shape[0] = SLLM_HIP_LINEAR_ATTENTION_VALUE_HEADS;
+  info->recurrent_state_shape[1] = SLLM_HIP_LINEAR_ATTENTION_HEAD_DIM;
+  info->recurrent_state_shape[2] = SLLM_HIP_LINEAR_ATTENTION_HEAD_DIM;
+}
+
+void fill_linear_attention_dispatch_info(
+    sllm_linear_attention_dispatch_info_t *const info,
+    const uint64_t dispatch_id,
+    const sllm_linear_attention::DescriptorMetadata &metadata,
+    const char *const arch_name) noexcept {
+  const uint32_t struct_size = info->struct_size;
+  const uint32_t abi_version = info->abi_version;
+  std::memset(info, 0, sizeof(*info));
+  info->struct_size = struct_size;
+  info->abi_version = abi_version;
+  info->info_version = SLLM_HIP_LINEAR_ATTENTION_DISPATCH_INFO_VERSION;
+  info->backend = SLLM_BACKEND_HIP;
+  info->dispatch_id = dispatch_id;
+  info->dispatch_count = 2U;
+  info->conv_kernel_id =
+      SLLM_HIP_LINEAR_ATTENTION_KERNEL_ID_CAUSAL_CONV_SILU_V1;
+  info->recurrent_kernel_id =
+      SLLM_HIP_LINEAR_ATTENTION_KERNEL_ID_RECURRENT_GATED_NORM_V1;
+  info->workgroup_size_x = SLLM_HIP_LINEAR_ATTENTION_WORKGROUP_SIZE;
+  const uint64_t conv_elements =
+      (metadata.token_count + SLLM_HIP_LINEAR_ATTENTION_CONV_HISTORY) *
+      SLLM_HIP_LINEAR_ATTENTION_QKV_WIDTH;
+  info->conv_grid_size_x = static_cast<uint32_t>(
+      (conv_elements + SLLM_HIP_LINEAR_ATTENTION_WORKGROUP_SIZE - 1U) /
+      SLLM_HIP_LINEAR_ATTENTION_WORKGROUP_SIZE);
+  info->recurrent_grid_size_x = SLLM_HIP_LINEAR_ATTENTION_VALUE_HEADS;
+  info->token_count = metadata.token_count;
+  info->start_position = metadata.start_position;
+  info->expected_length = metadata.expected_length;
+  info->qk_heads = SLLM_HIP_LINEAR_ATTENTION_QK_HEADS;
+  info->value_heads = SLLM_HIP_LINEAR_ATTENTION_VALUE_HEADS;
+  info->head_dim = SLLM_HIP_LINEAR_ATTENTION_HEAD_DIM;
+  info->fallback_allowed = 0U;
+  info->fallback_used = 0U;
+  sllm_public_runtime::copy_fixed_string(
+      info->kernel_symbol, SLLM_HIP_LINEAR_ATTENTION_KERNEL_SYMBOL_MAX,
+      ::sllm_linear_attention_kernel::kLogicalKernelId);
+  sllm_public_runtime::copy_fixed_string(
+      info->conv_device_symbol, SLLM_HIP_LINEAR_ATTENTION_DEVICE_SYMBOL_MAX,
+      ::sllm_linear_attention_kernel::kConvDeviceSymbol);
+  sllm_public_runtime::copy_fixed_string(
+      info->recurrent_device_symbol,
+      SLLM_HIP_LINEAR_ATTENTION_DEVICE_SYMBOL_MAX,
+      ::sllm_linear_attention_kernel::kRecurrentDeviceSymbol);
+  sllm_public_runtime::copy_fixed_string(info->gcn_arch_name,
+                                         SLLM_HIP_MAX_GCN_ARCH_NAME, arch_name);
+}
+
+hipError_t cleanup_linear_allocations(Context *const context,
+                                      void **const allocations,
+                                      const std::size_t count) noexcept {
+  hipError_t first_error = hipSuccess;
+  for (std::size_t index = 0U; index != count; ++index) {
+    if (allocations[index] == nullptr) {
+      continue;
+    }
+    const hipError_t status = hipFree(allocations[index]);
+    if (status != hipSuccess) {
+      if (first_error == hipSuccess) {
+        first_error = status;
+      }
+      orphan_owner.retain_allocation(context, allocations[index]);
+    }
+    allocations[index] = nullptr;
+  }
+  return first_error;
+}
+
+void *linear_binding_pointer(Buffer *const buffer,
+                             const uint64_t offset) noexcept {
+  return static_cast<char *>(buffer->device_pointer) +
+         static_cast<std::size_t>(offset);
+}
+
+} // namespace
+
+extern "C" sllm_status_t sllm_linear_attention_state_create(
+    const sllm_context_t *const raw_context,
+    const sllm_linear_attention_state_create_info_t *const info,
+    sllm_linear_attention_state_t **const raw_state,
+    sllm_error_sink_t *const error_sink) noexcept {
+  try {
+    if (raw_state != nullptr) {
+      *raw_state = nullptr;
+    }
+    const sllm_status_t sink_status =
+        sllm_public_runtime::validate_error_sink(error_sink);
+    if (sink_status != SLLM_STATUS_OK) {
+      return sink_status;
+    }
+    const sllm_status_t info_status =
+        sllm_linear_attention::validate_state_create_info(info, error_sink);
+    if (info_status != SLLM_STATUS_OK) {
+      return info_status;
+    }
+    if (raw_context == nullptr || raw_state == nullptr) {
+      return sllm_public_runtime::write_error(
+          error_sink, SLLM_STATUS_INVALID_ARGUMENT,
+          "linear attention state context or output is null");
+    }
+
+    Context *context = nullptr;
+    const uintptr_t context_token = handle_key(raw_context);
+    {
+      std::lock_guard<std::mutex> registry_lock(registry_mutex);
+      context = lookup<Context>(raw_context, HandleKind::Context);
+      if (context == nullptr) {
+        return sllm_public_runtime::write_error(
+            error_sink, SLLM_STATUS_PUBLIC_INVALID_HANDLE,
+            "linear attention context handle is stale or has the wrong kind");
+      }
+      std::lock_guard<std::mutex> accounting_lock(context->accounting_mutex);
+      if (context->poisoned.load() || context->release_active ||
+          !sllm_public_runtime::AccountingState::can_increment(
+              context->accounting.child_count)) {
+        return sllm_public_runtime::write_error(
+            error_sink,
+            context->release_active ? SLLM_STATUS_PUBLIC_BUSY
+                                    : SLLM_STATUS_INTERNAL_ERROR,
+            "linear attention context is unavailable for state creation");
+      }
+      ++context->accounting.child_count;
+    }
+    const sllm_status_t device_status =
+        select_context_device(context, error_sink);
+    if (device_status != SLLM_STATUS_OK) {
+      (void)rollback_child(
+          context, error_sink,
+          "linear attention provisional accounting rollback failed");
+      return device_status;
+    }
+
+    constexpr std::size_t conv_bytes =
+        static_cast<std::size_t>(SLLM_HIP_LINEAR_ATTENTION_CONV_HISTORY) *
+        SLLM_HIP_LINEAR_ATTENTION_QKV_WIDTH * sizeof(uint16_t);
+    constexpr std::size_t recurrent_bytes =
+        static_cast<std::size_t>(SLLM_HIP_LINEAR_ATTENTION_VALUE_HEADS) *
+        SLLM_HIP_LINEAR_ATTENTION_HEAD_DIM *
+        SLLM_HIP_LINEAR_ATTENTION_HEAD_DIM * sizeof(float);
+    void *allocations[4] = {};
+    for (std::size_t index = 0U; index != 4U; ++index) {
+      const std::size_t bytes = index < 2U ? conv_bytes : recurrent_bytes;
+      const hipError_t allocation_status =
+          sllm_public_runtime::FaultInjector::consume(
+              sllm_public_runtime::FaultPoint::NativeCreationFailure)
+              ? hipErrorUnknown
+              : hipMalloc(&allocations[index], bytes);
+      if (allocation_status != hipSuccess) {
+        const hipError_t cleanup_status =
+            cleanup_linear_allocations(context, allocations, index);
+        (void)rollback_child(
+            context, error_sink,
+            "linear attention provisional accounting rollback failed");
+        return hip_failure(error_sink,
+                           cleanup_status == hipSuccess ? allocation_status
+                                                        : cleanup_status,
+                           "hipMalloc linear attention state");
+      }
+#if defined(SLLM_PUBLIC_RUNTIME_HOST_TEST)
+      std::memset(allocations[index], 0, bytes);
+      const hipError_t zero_status = hipSuccess;
+#else
+      const hipError_t zero_status = hipMemset(allocations[index], 0, bytes);
+#endif
+      if (zero_status != hipSuccess) {
+        const hipError_t cleanup_status =
+            cleanup_linear_allocations(context, allocations, index + 1U);
+        (void)rollback_child(
+            context, error_sink,
+            "linear attention provisional accounting rollback failed");
+        return hip_failure(error_sink,
+                           cleanup_status == hipSuccess ? zero_status
+                                                        : cleanup_status,
+                           "hipMemset linear attention state");
+      }
+    }
+
+    std::unique_ptr<LinearAttentionState> candidate;
+    try {
+      candidate = std::make_unique<LinearAttentionState>(
+          context, info->session_id, info->layer_id, info->capacity_tokens,
+          std::array<void *, 2>{allocations[0], allocations[1]},
+          std::array<void *, 2>{allocations[2], allocations[3]}, context_token);
+    } catch (...) {
+      (void)cleanup_linear_allocations(context, allocations, 4U);
+      (void)rollback_child(
+          context, error_sink,
+          "linear attention provisional accounting rollback failed");
+      return sllm_public_runtime::write_error(
+          error_sink, SLLM_STATUS_INTERNAL_ERROR,
+          "linear attention state host allocation failed");
+    }
+    {
+      std::lock_guard<std::mutex> lock(context->accounting_mutex);
+      if (!reserve_linear_attention_state(context->accounting)) {
+        poison_context_locked(context);
+        poison_owner.retain(std::move(candidate));
+        return sllm_public_runtime::write_error(
+            error_sink, SLLM_STATUS_INTERNAL_ERROR,
+            "linear attention state accounting is exhausted; state "
+            "quarantined");
+      }
+      --context->accounting.child_count;
+    }
+    uintptr_t token = 0U;
+    try {
+      std::lock_guard<std::mutex> registry_lock(registry_mutex);
+      token =
+          register_handle(candidate.get(), HandleKind::LinearAttentionState);
+    } catch (...) {
+      bool accounting_released = false;
+      {
+        std::lock_guard<std::mutex> lock(context->accounting_mutex);
+        accounting_released =
+            release_linear_attention_state(context->accounting);
+        if (!accounting_released) {
+          poison_context_locked(context);
+          poison_owner.retain(std::move(candidate));
+        }
+      }
+      if (!accounting_released) {
+        return sllm_public_runtime::write_error(
+            error_sink, SLLM_STATUS_INTERNAL_ERROR,
+            "linear attention state accounting rollback failed");
+      }
+      (void)cleanup_linear_allocations(context, allocations, 4U);
+      return sllm_public_runtime::write_error(
+          error_sink, SLLM_STATUS_INTERNAL_ERROR,
+          "linear attention state registry allocation failed");
+    }
+    if (token == 0U) {
+      {
+        std::lock_guard<std::mutex> lock(context->accounting_mutex);
+        (void)release_linear_attention_state(context->accounting);
+      }
+      (void)cleanup_linear_allocations(context, allocations, 4U);
+      return sllm_public_runtime::write_error(
+          error_sink, SLLM_STATUS_INTERNAL_ERROR,
+          "linear attention state token allocation failed");
+    }
+    candidate->state_identity = token;
+    *raw_state = reinterpret_cast<sllm_linear_attention_state_t *>(token);
+    (void)candidate.release();
+    return SLLM_STATUS_OK;
+  } catch (...) {
+    return sllm_public_runtime::write_error(
+        error_sink, SLLM_STATUS_INTERNAL_ERROR,
+        "unexpected exception in linear attention state create");
+  }
+}
+
+extern "C" sllm_status_t sllm_linear_attention_state_release(
+    sllm_linear_attention_state_t **const raw_state,
+    sllm_error_sink_t *const error_sink) noexcept {
+  try {
+    const sllm_status_t sink_status =
+        sllm_public_runtime::validate_error_sink(error_sink);
+    if (sink_status != SLLM_STATUS_OK) {
+      return sink_status;
+    }
+    if (raw_state == nullptr || *raw_state == nullptr) {
+      return sllm_public_runtime::write_error(
+          error_sink, SLLM_STATUS_INVALID_ARGUMENT,
+          "linear attention state handle is null");
+    }
+    LinearAttentionState *state = nullptr;
+    {
+      std::lock_guard<std::mutex> registry_lock(registry_mutex);
+      state = lookup<LinearAttentionState>(*raw_state,
+                                           HandleKind::LinearAttentionState);
+      if (state == nullptr) {
+        return sllm_public_runtime::write_error(
+            error_sink, SLLM_STATUS_PUBLIC_INVALID_HANDLE,
+            "linear attention state handle is stale or has the wrong kind");
+      }
+      std::lock_guard<std::mutex> lock(state->context->accounting_mutex);
+      if (state->release_active || state->transition_token != 0U ||
+          state->accounting.active_submissions != 0U ||
+          state->accounting.completion_references != 0U) {
+        return sllm_public_runtime::write_error(
+            error_sink, SLLM_STATUS_PUBLIC_BUSY,
+            "linear attention state has an in-flight transition");
+      }
+      if (state->context->poisoned.load()) {
+        return sllm_public_runtime::write_error(
+            error_sink, SLLM_STATUS_INTERNAL_ERROR,
+            "linear attention state context is poisoned");
+      }
+      state->release_active = true;
+    }
+    const sllm_status_t device_status =
+        select_context_device(state->context, error_sink);
+    if (device_status != SLLM_STATUS_OK) {
+      std::lock_guard<std::mutex> registry_lock(registry_mutex);
+      state->release_active = false;
+      return device_status;
+    }
+    void *allocations[] = {state->conv_state[0], state->conv_state[1],
+                           state->recurrent_state[0], state->recurrent_state[1],
+                           state->scratch};
+    const hipError_t cleanup_status =
+        cleanup_linear_allocations(state->context, allocations, 5U);
+    state->conv_state = {nullptr, nullptr};
+    state->recurrent_state = {nullptr, nullptr};
+    state->scratch = nullptr;
+    state->scratch_bytes = 0U;
+    if (cleanup_status != hipSuccess) {
+      {
+        std::lock_guard<std::mutex> registry_lock(registry_mutex);
+        unregister_handle(*raw_state);
+        *raw_state = nullptr;
+      }
+      retain_poisoned(state, state->context);
+      return hip_failure(error_sink, cleanup_status,
+                         "hipFree linear attention state");
+    }
+    bool released = false;
+    {
+      std::lock_guard<std::mutex> lock(state->context->accounting_mutex);
+      released = !sllm_public_runtime::FaultInjector::consume(
+                     sllm_public_runtime::FaultPoint::AccountingFailure) &&
+                 release_linear_attention_state(state->context->accounting);
+    }
+    if (!released) {
+      {
+        std::lock_guard<std::mutex> registry_lock(registry_mutex);
+        unregister_handle(*raw_state);
+        *raw_state = nullptr;
+      }
+      retain_poisoned(state, state->context);
+      return sllm_public_runtime::write_error(
+          error_sink, SLLM_STATUS_INTERNAL_ERROR,
+          "linear attention state accounting release failed");
+    }
+    {
+      std::lock_guard<std::mutex> registry_lock(registry_mutex);
+      unregister_handle(*raw_state);
+      *raw_state = nullptr;
+    }
+    delete state;
+    return SLLM_STATUS_OK;
+  } catch (...) {
+    return sllm_public_runtime::write_error(
+        error_sink, SLLM_STATUS_INTERNAL_ERROR,
+        "unexpected exception in linear attention state release");
+  }
+}
+
+extern "C" sllm_status_t sllm_linear_attention_state_query(
+    const sllm_linear_attention_state_t *const raw_state,
+    sllm_linear_attention_view_info_t *const info,
+    sllm_error_sink_t *const error_sink) noexcept {
+  try {
+    const sllm_status_t sink_status =
+        sllm_public_runtime::validate_error_sink(error_sink);
+    if (sink_status != SLLM_STATUS_OK) {
+      return sink_status;
+    }
+    const sllm_status_t info_status =
+        validate_linear_attention_view_info_input(info, error_sink);
+    if (info_status != SLLM_STATUS_OK) {
+      return info_status;
+    }
+    std::lock_guard<std::mutex> registry_lock(registry_mutex);
+    LinearAttentionState *const state = lookup<LinearAttentionState>(
+        raw_state, HandleKind::LinearAttentionState);
+    if (state == nullptr) {
+      return sllm_public_runtime::write_error(
+          error_sink, SLLM_STATUS_PUBLIC_INVALID_HANDLE,
+          "linear attention state handle is stale or has the wrong kind");
+    }
+    std::lock_guard<std::mutex> lock(state->context->accounting_mutex);
+    if (state->context->poisoned.load() || state->release_active) {
+      return sllm_public_runtime::write_error(
+          error_sink, SLLM_STATUS_PUBLIC_BUSY,
+          "linear attention state is releasing or context is poisoned");
+    }
+    fill_linear_attention_view_info(state, info);
+    return SLLM_STATUS_OK;
+  } catch (...) {
+    return sllm_public_runtime::write_error(
+        error_sink, SLLM_STATUS_INTERNAL_ERROR,
+        "unexpected exception in linear attention state query");
+  }
+}
+
+extern "C" sllm_status_t sllm_linear_attention_execute(
+    const sllm_context_t *const raw_context,
+    const sllm_queue_t *const raw_queue,
+    const sllm_linear_attention_desc_t *const descriptor,
+    sllm_completion_t **const completion_output,
+    sllm_linear_attention_dispatch_info_t *const dispatch_info,
+    sllm_error_sink_t *const error_sink) noexcept {
+  try {
+    if (completion_output != nullptr) {
+      *completion_output = nullptr;
+    }
+    const sllm_status_t sink_status =
+        sllm_public_runtime::validate_error_sink(error_sink);
+    if (sink_status != SLLM_STATUS_OK) {
+      return sink_status;
+    }
+    const sllm_status_t info_status =
+        validate_linear_attention_dispatch_info(dispatch_info, error_sink);
+    if (info_status != SLLM_STATUS_OK) {
+      return info_status;
+    }
+    if (raw_context == nullptr || raw_queue == nullptr ||
+        descriptor == nullptr || completion_output == nullptr) {
+      return sllm_public_runtime::write_error(
+          error_sink, SLLM_STATUS_INVALID_ARGUMENT,
+          "linear attention context, queue, descriptor, or completion output "
+          "is null");
+    }
+    sllm_linear_attention::DescriptorMetadata metadata{};
+    const sllm_status_t descriptor_status =
+        sllm_linear_attention::validate_and_copy_descriptor(
+            descriptor, &metadata, error_sink);
+    if (descriptor_status != SLLM_STATUS_OK) {
+      return descriptor_status;
+    }
+
+    Context *context = nullptr;
+    Queue *queue = nullptr;
+    LinearAttentionState *state = nullptr;
+    LinearAttentionBuffers buffers{};
+    uint64_t dispatch_id = 0U;
+    {
+      std::lock_guard<std::mutex> registry_lock(registry_mutex);
+      context = lookup<Context>(raw_context, HandleKind::Context);
+      queue = lookup<Queue>(raw_queue, HandleKind::Queue);
+      state = lookup<LinearAttentionState>(descriptor->state,
+                                           HandleKind::LinearAttentionState);
+      const std::array<const sllm_buffer_t *, 9> raw_buffers = {
+          descriptor->qkv.buffer,         descriptor->z.buffer,
+          descriptor->b_input.buffer,     descriptor->a_input.buffer,
+          descriptor->conv_weight.buffer, descriptor->a_log.buffer,
+          descriptor->dt_bias.buffer,     descriptor->norm_weight.buffer,
+          descriptor->output.buffer};
+      for (std::size_t index = 0U; index != buffers.size(); ++index) {
+        buffers[index] = lookup<Buffer>(raw_buffers[index], HandleKind::Buffer);
+      }
+      if (context == nullptr || queue == nullptr || state == nullptr ||
+          std::any_of(
+              buffers.begin(), buffers.end(),
+              [](const Buffer *const buffer) { return buffer == nullptr; })) {
+        return sllm_public_runtime::write_error(
+            error_sink, SLLM_STATUS_PUBLIC_INVALID_HANDLE,
+            "linear attention handle is stale or has the wrong kind");
+      }
+      if (context != queue->context || context != state->context ||
+          std::any_of(buffers.begin(), buffers.end(),
+                      [context](const Buffer *const buffer) {
+                        return buffer->context != context;
+                      })) {
+        return sllm_public_runtime::write_error(
+            error_sink, SLLM_STATUS_PUBLIC_DEVICE_MISMATCH,
+            "linear attention resources must share one context");
+      }
+      const std::array<const sllm_linear_attention::TensorMetadata *, 9>
+          tensor_metadata = {
+              &metadata.qkv,     &metadata.z,           &metadata.b_input,
+              &metadata.a_input, &metadata.conv_weight, &metadata.a_log,
+              &metadata.dt_bias, &metadata.norm_weight, &metadata.output};
+      for (std::size_t index = 0U; index != buffers.size(); ++index) {
+        if (tensor_metadata[index]->end_offset > buffers[index]->size_bytes) {
+          return sllm_public_runtime::write_error(
+              error_sink, SLLM_STATUS_BUFFER_OUT_OF_BOUNDS,
+              "linear attention tensor interval exceeds its backing buffer");
+        }
+      }
+      std::lock_guard<std::mutex> lock(context->accounting_mutex);
+      if (context->poisoned.load() || context->release_active ||
+          queue->release_active || state->release_active ||
+          state->transition_token != 0U ||
+          state->accounting.active_submissions != 0U ||
+          state->accounting.completion_references != 0U ||
+          std::any_of(buffers.begin(), buffers.end(),
+                      [](const Buffer *const buffer) {
+                        return buffer->release_active;
+                      })) {
+        return sllm_public_runtime::write_error(
+            error_sink, SLLM_STATUS_LINEAR_ATTENTION_STATE_BUSY,
+            "linear attention state or dependency is busy");
+      }
+      if (metadata.start_position != state->published_length ||
+          metadata.expected_length > state->capacity_tokens) {
+        return sllm_public_runtime::write_error(
+            error_sink, SLLM_STATUS_LINEAR_ATTENTION_LENGTH_MISMATCH,
+            "linear attention range does not start at the committed state "
+            "length");
+      }
+      if (context->next_dispatch_id == 0U) {
+        return sllm_public_runtime::write_error(
+            error_sink, SLLM_STATUS_INTERNAL_ERROR,
+            "linear attention context dispatch id is exhausted");
+      }
+      dispatch_id = context->next_dispatch_id;
+      context->next_dispatch_id =
+          dispatch_id == std::numeric_limits<uint64_t>::max()
+              ? 0U
+              : dispatch_id + 1U;
+      if (!reserve_linear_attention_submission(context, queue, state,
+                                               buffers)) {
+        return sllm_public_runtime::write_error(
+            error_sink, SLLM_STATUS_INTERNAL_ERROR,
+            "linear attention submission accounting is exhausted");
+      }
+      state->transition_token = dispatch_id;
+      state->transition_start = metadata.start_position;
+      state->transition_count = metadata.token_count;
+      state->transition_end = metadata.expected_length;
+      state->commit_allowed = true;
+      dispatch_info->dispatch_id = dispatch_id;
+    }
+
+    std::unique_ptr<Completion> candidate;
+    NativeEventGuard event_guard;
+    LinearAttentionExecuteScopeGuard execute_guard(
+        state, queue, buffers, &candidate, &event_guard, error_sink);
+    const sllm_status_t device_status =
+        select_context_device(context, error_sink);
+    if (device_status != SLLM_STATUS_OK) {
+      return device_status;
+    }
+    const uint64_t required_scratch = metadata.token_count *
+                                      SLLM_HIP_LINEAR_ATTENTION_QKV_WIDTH *
+                                      sizeof(uint16_t);
+    if (required_scratch > state->scratch_bytes) {
+      void *new_scratch = nullptr;
+      const hipError_t allocation_status =
+          hipMalloc(&new_scratch, static_cast<std::size_t>(required_scratch));
+      if (allocation_status != hipSuccess) {
+        return hip_failure(error_sink, allocation_status,
+                           "hipMalloc linear attention scratch");
+      }
+      if (state->scratch != nullptr) {
+        const hipError_t free_status = hipFree(state->scratch);
+        if (free_status != hipSuccess) {
+          orphan_owner.retain_allocation(context, state->scratch);
+          context->poisoned.store(true);
+          void *cleanup[] = {new_scratch};
+          (void)cleanup_linear_allocations(context, cleanup, 1U);
+          return hip_failure(error_sink, free_status,
+                             "hipFree prior linear attention scratch");
+        }
+      }
+      state->scratch = new_scratch;
+      state->scratch_bytes = required_scratch;
+    }
+    hipDeviceProp_t properties = {};
+    const sllm_status_t property_status =
+        get_device_properties(context->device_index, &properties, error_sink);
+    if (property_status != SLLM_STATUS_OK) {
+      return property_status;
+    }
+    char arch_name[SLLM_HIP_MAX_GCN_ARCH_NAME] = {};
+    if (!copy_property(arch_name, sizeof(arch_name), properties.gcnArchName,
+                       sizeof(properties.gcnArchName))) {
+      return sllm_public_runtime::write_error(
+          error_sink, SLLM_STATUS_PUBLIC_HIP_RUNTIME_ERROR,
+          "linear attention gcnArchName is not NUL terminated or is too long");
+    }
+#if defined(SLLM_HIP_COMPILE_TARGET)
+    if (std::strcmp(arch_name, SLLM_HIP_COMPILE_TARGET) != 0) {
+      return sllm_public_runtime::write_error(
+          error_sink, SLLM_STATUS_PUBLIC_DEVICE_MISMATCH,
+          "linear attention device target does not match the compiled exact "
+          "target");
+    }
+#endif
+    try {
+      candidate = std::make_unique<Completion>(context, queue, nullptr, 0U,
+                                               false, std::vector<uint8_t>{});
+      candidate->linear_attention = true;
+      candidate->linear_attention_state = state;
+      candidate->linear_attention_buffers = buffers;
+      candidate->linear_attention_token = dispatch_id;
+      candidate->linear_attention_start = metadata.start_position;
+      candidate->linear_attention_count = metadata.token_count;
+      candidate->linear_attention_end = metadata.expected_length;
+      execute_guard.candidate_allocated();
+    } catch (...) {
+      return sllm_public_runtime::write_error(
+          error_sink, SLLM_STATUS_INTERNAL_ERROR,
+          "linear attention completion allocation failed");
+    }
+    hipEvent_t native_event = nullptr;
+    const hipError_t event_status = hipEventCreateWithFlags(&native_event, 0U);
+    if (event_status != hipSuccess) {
+      return hip_failure(error_sink, event_status, "hipEventCreateWithFlags");
+    }
+    event_guard.adopt(context, native_event);
+    candidate->event = native_event;
+    hipEvent_t timing_start_event = nullptr;
+    const hipError_t timing_status =
+        hipEventCreateWithFlags(&timing_start_event, 0U);
+    if (timing_status != hipSuccess) {
+      return rollback_unpublished_submission(
+          candidate, event_guard,
+          "linear attention timing event creation failed", error_sink);
+    }
+    candidate->timing_start_event = timing_start_event;
+    uintptr_t token = 0U;
+    try {
+      std::lock_guard<std::mutex> registry_lock(registry_mutex);
+      token = register_handle(candidate.get(), HandleKind::Completion);
+    } catch (...) {
+      return rollback_unpublished_submission(
+          candidate, event_guard,
+          "linear attention completion registry allocation failed", error_sink);
+    }
+    if (token == 0U) {
+      return rollback_unpublished_submission(
+          candidate, event_guard,
+          "linear attention completion token allocation failed", error_sink);
+    }
+    event_guard.release();
+    execute_guard.completion_registered(token);
+    const hipError_t timing_record_status =
+        hipEventRecord(candidate->timing_start_event, queue->stream);
+    if (timing_record_status != hipSuccess) {
+      return cleanup_failed_submission(
+          candidate, token, timing_record_status,
+          "hipEventRecord linear attention timing start", queue, error_sink);
+    }
+    const uint32_t active_slot = state->active_slot;
+    const uint32_t inactive_slot = 1U - active_slot;
+    const auto *const qkv = static_cast<const uint16_t *>(
+        linear_binding_pointer(buffers[0], metadata.qkv.byte_offset));
+    const auto *const z = static_cast<const uint16_t *>(
+        linear_binding_pointer(buffers[1], metadata.z.byte_offset));
+    const auto *const b_input = static_cast<const uint16_t *>(
+        linear_binding_pointer(buffers[2], metadata.b_input.byte_offset));
+    const auto *const a_input = static_cast<const uint16_t *>(
+        linear_binding_pointer(buffers[3], metadata.a_input.byte_offset));
+    const auto *const conv_weight = static_cast<const uint16_t *>(
+        linear_binding_pointer(buffers[4], metadata.conv_weight.byte_offset));
+    const auto *const a_log = static_cast<const float *>(
+        linear_binding_pointer(buffers[5], metadata.a_log.byte_offset));
+    const auto *const dt_bias = static_cast<const uint16_t *>(
+        linear_binding_pointer(buffers[6], metadata.dt_bias.byte_offset));
+    const auto *const norm_weight = static_cast<const float *>(
+        linear_binding_pointer(buffers[7], metadata.norm_weight.byte_offset));
+    auto *const output = static_cast<uint16_t *>(
+        linear_binding_pointer(buffers[8], metadata.output.byte_offset));
+    const hipError_t conv_status =
+        ::sllm_linear_attention_kernel::launch_convolution(
+            qkv, conv_weight,
+            static_cast<const uint16_t *>(state->conv_state[active_slot]),
+            static_cast<uint16_t *>(state->scratch),
+            static_cast<uint16_t *>(state->conv_state[inactive_slot]),
+            static_cast<uint32_t>(metadata.token_count), queue->stream);
+    if (conv_status != hipSuccess) {
+      return cleanup_failed_submission(candidate, token, conv_status,
+                                       "linear attention convolution launch",
+                                       queue, error_sink);
+    }
+    const hipError_t recurrent_status =
+        ::sllm_linear_attention_kernel::launch_recurrent(
+            static_cast<const uint16_t *>(state->scratch), z, b_input, a_input,
+            a_log, dt_bias, norm_weight,
+            static_cast<const float *>(state->recurrent_state[active_slot]),
+            static_cast<float *>(state->recurrent_state[inactive_slot]), output,
+            static_cast<uint32_t>(metadata.token_count), queue->stream);
+    if (recurrent_status != hipSuccess) {
+      return cleanup_failed_submission(candidate, token, recurrent_status,
+                                       "linear attention recurrent launch",
+                                       queue, error_sink);
+    }
+    const hipError_t record_status =
+        hipEventRecord(candidate->event, queue->stream);
+    if (record_status != hipSuccess) {
+      return cleanup_failed_submission(candidate, token, record_status,
+                                       "hipEventRecord linear attention", queue,
+                                       error_sink);
+    }
+    fill_linear_attention_dispatch_info(dispatch_info, dispatch_id, metadata,
+                                        arch_name);
+    *completion_output = reinterpret_cast<sllm_completion_t *>(token);
+    (void)candidate.release();
+    execute_guard.disarm();
+    return SLLM_STATUS_OK;
+  } catch (...) {
+    return sllm_public_runtime::write_error(
+        error_sink, SLLM_STATUS_INTERNAL_ERROR,
+        "unexpected exception in linear attention execute");
+  }
+}
+
+extern "C" sllm_status_t sllm_linear_attention_cancel(
+    const sllm_linear_attention_state_t *const raw_state,
+    sllm_completion_t *const raw_completion,
+    sllm_error_sink_t *const error_sink) noexcept {
+  try {
+    const sllm_status_t sink_status =
+        sllm_public_runtime::validate_error_sink(error_sink);
+    if (sink_status != SLLM_STATUS_OK) {
+      return sink_status;
+    }
+    if (raw_state == nullptr || raw_completion == nullptr) {
+      return sllm_public_runtime::write_error(
+          error_sink, SLLM_STATUS_INVALID_ARGUMENT,
+          "linear attention cancel input is null");
+    }
+    LinearAttentionState *state = nullptr;
+    Completion *completion = nullptr;
+    {
+      std::lock_guard<std::mutex> registry_lock(registry_mutex);
+      state = lookup<LinearAttentionState>(raw_state,
+                                           HandleKind::LinearAttentionState);
+      completion = lookup<Completion>(raw_completion, HandleKind::Completion);
+      if (state == nullptr || completion == nullptr) {
+        return sllm_public_runtime::write_error(
+            error_sink, SLLM_STATUS_PUBLIC_INVALID_HANDLE,
+            "linear attention state or completion handle is stale");
+      }
+    }
+    std::lock_guard<std::mutex> state_lock(completion->state_mutex);
+    if (!completion->linear_attention ||
+        completion->linear_attention_state != state) {
+      return sllm_public_runtime::write_error(
+          error_sink, SLLM_STATUS_INVALID_ARGUMENT,
+          "completion does not belong to the supplied linear attention state");
+    }
+    if (completion->terminal) {
+      return sllm_public_runtime::write_error(
+          error_sink, SLLM_STATUS_PUBLIC_BUSY,
+          "linear attention completion is already terminal");
+    }
+    if (!revoke_linear_attention_commit(completion)) {
+      return sllm_public_runtime::write_error(
+          error_sink, SLLM_STATUS_INTERNAL_ERROR,
+          "linear attention cancellation failed; context poisoned");
+    }
+    return SLLM_STATUS_OK;
+  } catch (...) {
+    return sllm_public_runtime::write_error(
+        error_sink, SLLM_STATUS_INTERNAL_ERROR,
+        "unexpected exception in linear attention cancel");
+  }
+}

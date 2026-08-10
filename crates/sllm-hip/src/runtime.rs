@@ -78,6 +78,11 @@ pub enum RuntimeStatus {
     InvalidCausalAttentionDescriptor,
     CausalAttentionLengthMismatch,
     CausalAttentionStateBusy,
+    InvalidLinearAttentionStateDescriptor,
+    InvalidLinearAttentionDescriptor,
+    LinearAttentionLengthMismatch,
+    LinearAttentionStateBusy,
+    InvalidArgmaxDescriptor,
     Unknown(u32),
 }
 
@@ -132,6 +137,17 @@ impl RuntimeStatus {
                 Self::CausalAttentionLengthMismatch
             }
             sys::SLLM_STATUS_CAUSAL_ATTENTION_STATE_BUSY => Self::CausalAttentionStateBusy,
+            sys::SLLM_STATUS_INVALID_LINEAR_ATTENTION_STATE_DESCRIPTOR => {
+                Self::InvalidLinearAttentionStateDescriptor
+            }
+            sys::SLLM_STATUS_INVALID_LINEAR_ATTENTION_DESCRIPTOR => {
+                Self::InvalidLinearAttentionDescriptor
+            }
+            sys::SLLM_STATUS_LINEAR_ATTENTION_LENGTH_MISMATCH => {
+                Self::LinearAttentionLengthMismatch
+            }
+            sys::SLLM_STATUS_LINEAR_ATTENTION_STATE_BUSY => Self::LinearAttentionStateBusy,
+            sys::SLLM_STATUS_INVALID_ARGMAX_DESCRIPTOR => Self::InvalidArgmaxDescriptor,
             other => Self::Unknown(other),
         }
     }
@@ -186,6 +202,17 @@ impl RuntimeStatus {
                 sys::SLLM_STATUS_CAUSAL_ATTENTION_LENGTH_MISMATCH
             }
             Self::CausalAttentionStateBusy => sys::SLLM_STATUS_CAUSAL_ATTENTION_STATE_BUSY,
+            Self::InvalidLinearAttentionStateDescriptor => {
+                sys::SLLM_STATUS_INVALID_LINEAR_ATTENTION_STATE_DESCRIPTOR
+            }
+            Self::InvalidLinearAttentionDescriptor => {
+                sys::SLLM_STATUS_INVALID_LINEAR_ATTENTION_DESCRIPTOR
+            }
+            Self::LinearAttentionLengthMismatch => {
+                sys::SLLM_STATUS_LINEAR_ATTENTION_LENGTH_MISMATCH
+            }
+            Self::LinearAttentionStateBusy => sys::SLLM_STATUS_LINEAR_ATTENTION_STATE_BUSY,
+            Self::InvalidArgmaxDescriptor => sys::SLLM_STATUS_INVALID_ARGMAX_DESCRIPTOR,
             Self::Unknown(raw) => raw,
         }
     }
@@ -269,6 +296,13 @@ fn status_name(status: RuntimeStatus) -> &'static str {
         RuntimeStatus::InvalidCausalAttentionDescriptor => "invalid causal attention descriptor",
         RuntimeStatus::CausalAttentionLengthMismatch => "causal attention length mismatch",
         RuntimeStatus::CausalAttentionStateBusy => "causal attention state is busy",
+        RuntimeStatus::InvalidLinearAttentionStateDescriptor => {
+            "invalid linear-attention state descriptor"
+        }
+        RuntimeStatus::InvalidLinearAttentionDescriptor => "invalid linear-attention descriptor",
+        RuntimeStatus::LinearAttentionLengthMismatch => "linear-attention length mismatch",
+        RuntimeStatus::LinearAttentionStateBusy => "linear-attention state is busy",
+        RuntimeStatus::InvalidArgmaxDescriptor => "invalid argmax descriptor",
         RuntimeStatus::Unknown(_) => "unknown public runtime status",
     }
 }
@@ -449,6 +483,19 @@ enum PendingCleanup {
         state: crate::kv_state::KvStateResource,
         disposition: CleanupDisposition,
     },
+    LinearAttentionState {
+        raw: Option<NonNull<sys::sllm_linear_attention_state_t>>,
+        context: Context,
+        disposition: CleanupDisposition,
+    },
+    LinearAttentionCompletion {
+        raw: Option<NonNull<sys::sllm_completion_t>>,
+        context: Context,
+        queue: Queue,
+        buffers: Vec<Buffer>,
+        state: crate::linear_attention::LinearAttentionStateResource,
+        disposition: CleanupDisposition,
+    },
     RmsNormPlan {
         raw: Option<NonNull<sys::sllm_rmsnorm_plan_t>>,
         context: Arc<ContextInner>,
@@ -471,6 +518,12 @@ enum PendingCleanup {
         raw: Option<NonNull<sys::sllm_matmul_plan_t>>,
         context: Arc<ContextInner>,
         descriptor: Box<crate::matmul::MatmulDescriptor>,
+        disposition: CleanupDisposition,
+    },
+    ArgmaxPlan {
+        raw: Option<NonNull<sys::sllm_argmax_plan_t>>,
+        context: Arc<ContextInner>,
+        descriptor: Box<crate::argmax::ArgmaxDescriptor>,
         disposition: CleanupDisposition,
     },
     AttentionPreprocessPlan {
@@ -1475,10 +1528,13 @@ impl PendingCleanup {
             | Self::KvView { disposition, .. }
             | Self::KvCompletion { disposition, .. }
             | Self::CausalCompletion { disposition, .. }
+            | Self::LinearAttentionState { disposition, .. }
+            | Self::LinearAttentionCompletion { disposition, .. }
             | Self::RmsNormPlan { disposition, .. }
             | Self::ElementwisePlan { disposition, .. }
             | Self::EmbeddingPlan { disposition, .. }
             | Self::MatmulPlan { disposition, .. }
+            | Self::ArgmaxPlan { disposition, .. }
             | Self::AttentionPreprocessPlan { disposition, .. } => {
                 *disposition == CleanupDisposition::Poisoned
             }
@@ -1665,6 +1721,57 @@ pub(crate) fn enqueue_causal_completion_cleanup(
     });
 }
 
+pub(crate) fn release_linear_attention_state_once(
+    raw: NonNull<sys::sllm_linear_attention_state_t>,
+) -> (
+    RuntimeStatus,
+    Option<NonNull<sys::sllm_linear_attention_state_t>>,
+) {
+    let mut error_buffer = [0_u8; ERROR_CAPACITY];
+    let mut error_sink = sink(&mut error_buffer);
+    let mut native = raw.as_ptr();
+    let status = unsafe { sys::sllm_linear_attention_state_release(&mut native, &mut error_sink) };
+    (RuntimeStatus::from_raw(status), NonNull::new(native))
+}
+
+pub(crate) fn enqueue_linear_attention_state_cleanup(
+    raw: NonNull<sys::sllm_linear_attention_state_t>,
+    context: Context,
+    status: RuntimeStatus,
+) {
+    let (_, disposition, _) = classify_release(status, Some(raw));
+    enqueue_cleanup(PendingCleanup::LinearAttentionState {
+        raw: Some(raw),
+        context,
+        disposition,
+    });
+}
+
+pub(crate) fn release_linear_attention_completion_once(
+    raw: NonNull<sys::sllm_completion_t>,
+) -> (RuntimeStatus, Option<NonNull<sys::sllm_completion_t>>) {
+    release_completion_once(raw)
+}
+
+pub(crate) fn enqueue_linear_attention_completion_cleanup(
+    raw: NonNull<sys::sllm_completion_t>,
+    context: Context,
+    queue: Queue,
+    buffers: Vec<Buffer>,
+    state: crate::linear_attention::LinearAttentionStateResource,
+    status: RuntimeStatus,
+) {
+    let (_, disposition, _) = classify_release(status, Some(raw));
+    enqueue_cleanup(PendingCleanup::LinearAttentionCompletion {
+        raw: Some(raw),
+        context,
+        queue,
+        buffers,
+        state,
+        disposition,
+    });
+}
+
 pub(crate) fn release_rmsnorm_plan_once(
     raw: NonNull<sys::sllm_rmsnorm_plan_t>,
 ) -> (RuntimeStatus, Option<NonNull<sys::sllm_rmsnorm_plan_t>>) {
@@ -1776,6 +1883,31 @@ pub(crate) fn enqueue_matmul_cleanup(
 ) {
     let (_, disposition, _) = classify_release(status, Some(raw));
     enqueue_cleanup(PendingCleanup::MatmulPlan {
+        raw: Some(raw),
+        context: Arc::clone(&context.inner),
+        descriptor: Box::new(descriptor),
+        disposition,
+    });
+}
+
+pub(crate) fn release_argmax_plan_once(
+    raw: NonNull<sys::sllm_argmax_plan_t>,
+) -> (RuntimeStatus, Option<NonNull<sys::sllm_argmax_plan_t>>) {
+    let mut error_buffer = [0_u8; ERROR_CAPACITY];
+    let mut error_sink = sink(&mut error_buffer);
+    let mut native = raw.as_ptr();
+    let status = unsafe { sys::sllm_argmax_plan_release(&mut native, &mut error_sink) };
+    (RuntimeStatus::from_raw(status), NonNull::new(native))
+}
+
+pub(crate) fn enqueue_argmax_cleanup(
+    raw: NonNull<sys::sllm_argmax_plan_t>,
+    context: Context,
+    descriptor: crate::argmax::ArgmaxDescriptor,
+    status: RuntimeStatus,
+) {
+    let (_, disposition, _) = classify_release(status, Some(raw));
+    enqueue_cleanup(PendingCleanup::ArgmaxPlan {
         raw: Some(raw),
         context: Arc::clone(&context.inner),
         descriptor: Box::new(descriptor),
@@ -2350,6 +2482,131 @@ impl PendingCleanup {
                     })
                 }
             }
+            Self::LinearAttentionState {
+                raw,
+                context,
+                disposition,
+            } => {
+                let Some(raw_handle) = raw else {
+                    return if disposition == CleanupDisposition::Poisoned {
+                        Some(Self::LinearAttentionState {
+                            raw,
+                            context,
+                            disposition,
+                        })
+                    } else {
+                        None
+                    };
+                };
+                if disposition == CleanupDisposition::Poisoned {
+                    return Some(Self::LinearAttentionState {
+                        raw: Some(raw_handle),
+                        context,
+                        disposition,
+                    });
+                }
+                let (status, remaining) = release_linear_attention_state_once(raw_handle);
+                let (remaining, disposition, done) = classify_release(status, remaining);
+                if done {
+                    None
+                } else {
+                    Some(Self::LinearAttentionState {
+                        raw: remaining,
+                        context,
+                        disposition,
+                    })
+                }
+            }
+            Self::LinearAttentionCompletion {
+                raw,
+                context,
+                queue,
+                buffers,
+                state,
+                disposition,
+            } => {
+                let Some(raw_handle) = raw else {
+                    return if disposition == CleanupDisposition::Poisoned {
+                        Some(Self::LinearAttentionCompletion {
+                            raw,
+                            context,
+                            queue,
+                            buffers,
+                            state,
+                            disposition,
+                        })
+                    } else {
+                        None
+                    };
+                };
+                if disposition == CleanupDisposition::Poisoned {
+                    return Some(Self::LinearAttentionCompletion {
+                        raw: Some(raw_handle),
+                        context,
+                        queue,
+                        buffers,
+                        state,
+                        disposition,
+                    });
+                }
+                let mut error_buffer = [0_u8; ERROR_CAPACITY];
+                let mut error_sink = sink(&mut error_buffer);
+                let mut result = Completion::result();
+                let wait_status = unsafe {
+                    sys::sllm_completion_wait(
+                        raw_handle.as_ptr(),
+                        DROP_WAIT_TIMEOUT_MS,
+                        &mut result,
+                        &mut error_sink,
+                    )
+                };
+                let status = RuntimeStatus::from_raw(wait_status);
+                let state_result = CompletionState::from_raw(result.state);
+                if !matches!(state_result, Ok(CompletionState::Success)) {
+                    let pending = matches!(state_result, Ok(CompletionState::Pending))
+                        && matches!(
+                            status,
+                            RuntimeStatus::Pending | RuntimeStatus::Timeout | RuntimeStatus::Busy
+                        );
+                    return Some(Self::LinearAttentionCompletion {
+                        raw: Some(raw_handle),
+                        context,
+                        queue,
+                        buffers,
+                        state,
+                        disposition: if pending {
+                            CleanupDisposition::Recoverable
+                        } else {
+                            CleanupDisposition::Poisoned
+                        },
+                    });
+                }
+                if status != RuntimeStatus::Ok {
+                    return Some(Self::LinearAttentionCompletion {
+                        raw: Some(raw_handle),
+                        context,
+                        queue,
+                        buffers,
+                        state,
+                        disposition: CleanupDisposition::Poisoned,
+                    });
+                }
+                let (release_status, remaining) =
+                    release_linear_attention_completion_once(raw_handle);
+                let (remaining, disposition, done) = classify_release(release_status, remaining);
+                if done {
+                    None
+                } else {
+                    Some(Self::LinearAttentionCompletion {
+                        raw: remaining,
+                        context,
+                        queue,
+                        buffers,
+                        state,
+                        disposition,
+                    })
+                }
+            }
             Self::RmsNormPlan {
                 raw,
                 context,
@@ -2506,6 +2763,46 @@ impl PendingCleanup {
                     None
                 } else {
                     Some(Self::MatmulPlan {
+                        raw: remaining,
+                        context,
+                        descriptor,
+                        disposition,
+                    })
+                }
+            }
+            Self::ArgmaxPlan {
+                raw,
+                context,
+                descriptor,
+                disposition,
+            } => {
+                let Some(raw_handle) = raw else {
+                    return if disposition == CleanupDisposition::Poisoned {
+                        Some(Self::ArgmaxPlan {
+                            raw,
+                            context,
+                            descriptor,
+                            disposition,
+                        })
+                    } else {
+                        None
+                    };
+                };
+                if disposition == CleanupDisposition::Poisoned {
+                    return Some(Self::ArgmaxPlan {
+                        raw: Some(raw_handle),
+                        context,
+                        descriptor,
+                        disposition,
+                    });
+                }
+                let (status, remaining) = release_argmax_plan_once(raw_handle);
+                let remaining = remaining?;
+                let (remaining, disposition, done) = classify_release(status, Some(remaining));
+                if done {
+                    None
+                } else {
+                    Some(Self::ArgmaxPlan {
                         raw: remaining,
                         context,
                         descriptor,

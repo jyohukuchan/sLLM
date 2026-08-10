@@ -18,15 +18,18 @@ use sllm_core::{
 };
 use sllm_hip_sys as sys;
 
+mod argmax;
 mod attention_preprocess;
 mod bridge;
 mod elementwise;
 mod embedding;
 mod kv_state;
+mod linear_attention;
 mod matmul;
 mod rmsnorm;
 mod runtime;
 
+pub use argmax::{ArgmaxDescriptor, ArgmaxDispatchInfo, ArgmaxSubmission, PreparedArgmax};
 pub use attention_preprocess::{
     AttentionPreprocessDescriptor, AttentionPreprocessDispatchInfo, AttentionPreprocessSubmission,
     PreparedAttentionPreprocess,

@@ -1,9 +1,11 @@
 #include "attention_preprocess_api.hpp"
+#include "argmax_api.hpp"
 #include "causal_attention_api.hpp"
 #include "elementwise_api.hpp"
 #include "embedding_api.hpp"
 #include "evidence_abi.h"
 #include "kv_state_api.hpp"
+#include "linear_attention_api.hpp"
 #include "matmul_api.hpp"
 #include "public_runtime_internal.hpp"
 #include "rmsnorm_api.hpp"
@@ -993,6 +995,91 @@ sllm_matmul_execute(const sllm_matmul_plan_t *const plan,
   }
 }
 
+extern "C" sllm_status_t sllm_argmax_prepare(
+    const sllm_context_t *const context,
+    const sllm_argmax_desc_t *const descriptor,
+    sllm_argmax_plan_t **const plan,
+    sllm_error_sink_t *const error_sink) noexcept {
+  try {
+    if (plan != nullptr) {
+      *plan = nullptr;
+    }
+    const sllm_status_t sink_status = validate_error_sink(error_sink);
+    if (sink_status != SLLM_STATUS_OK) {
+      return sink_status;
+    }
+    if (context == nullptr || plan == nullptr) {
+      return write_error(error_sink, SLLM_STATUS_INVALID_ARGUMENT,
+                         "argmax context or plan output is null");
+    }
+    sllm_argmax::DescriptorMetadata metadata{};
+    const sllm_status_t descriptor_status =
+        sllm_argmax::validate_and_copy_descriptor(descriptor, &metadata,
+                                                  error_sink);
+    if (descriptor_status != SLLM_STATUS_OK) {
+      return descriptor_status;
+    }
+    return unavailable(error_sink);
+  } catch (...) {
+    return write_error(error_sink, SLLM_STATUS_INTERNAL_ERROR,
+                       "unexpected exception in argmax prepare stub");
+  }
+}
+
+extern "C" sllm_status_t
+sllm_argmax_plan_release(sllm_argmax_plan_t **const plan,
+                         sllm_error_sink_t *const error_sink) noexcept {
+  try {
+    const sllm_status_t sink_status = validate_error_sink(error_sink);
+    if (sink_status != SLLM_STATUS_OK) {
+      return sink_status;
+    }
+    if (plan == nullptr || *plan == nullptr) {
+      return write_error(error_sink, SLLM_STATUS_INVALID_ARGUMENT,
+                         "argmax plan handle is null");
+    }
+    return unavailable(error_sink);
+  } catch (...) {
+    return write_error(error_sink, SLLM_STATUS_INTERNAL_ERROR,
+                       "unexpected exception in argmax release stub");
+  }
+}
+
+extern "C" sllm_status_t sllm_argmax_execute(
+    const sllm_argmax_plan_t *const plan, const sllm_queue_t *const queue,
+    sllm_completion_t **const completion,
+    sllm_argmax_dispatch_info_t *const dispatch_info,
+    sllm_error_sink_t *const error_sink) noexcept {
+  try {
+    if (completion != nullptr) {
+      *completion = nullptr;
+    }
+    const sllm_status_t sink_status = validate_error_sink(error_sink);
+    if (sink_status != SLLM_STATUS_OK) {
+      return sink_status;
+    }
+    if (plan == nullptr || queue == nullptr || completion == nullptr ||
+        dispatch_info == nullptr) {
+      return write_error(error_sink, SLLM_STATUS_INVALID_ARGUMENT,
+                         "argmax execute input or output is null");
+    }
+    if (dispatch_info->struct_size != sizeof(*dispatch_info) ||
+        dispatch_info->abi_version != SLLM_HIP_ABI_VERSION ||
+        dispatch_info->info_version !=
+            SLLM_HIP_ARGMAX_DISPATCH_INFO_VERSION ||
+        !std::all_of(std::begin(dispatch_info->reserved),
+                     std::end(dispatch_info->reserved),
+                     [](const uint32_t value) { return value == 0U; })) {
+      return write_error(error_sink, SLLM_STATUS_INVALID_ARGUMENT,
+                         "argmax dispatch info is unsupported");
+    }
+    return unavailable(error_sink);
+  } catch (...) {
+    return write_error(error_sink, SLLM_STATUS_INTERNAL_ERROR,
+                       "unexpected exception in argmax execute stub");
+  }
+}
+
 extern "C" sllm_status_t sllm_attention_preprocess_prepare(
     const sllm_context_t *const context,
     const sllm_attention_preprocess_desc_t *const descriptor,
@@ -1322,6 +1409,164 @@ extern "C" sllm_status_t sllm_causal_attention_execute(
   } catch (...) {
     return write_error(error_sink, SLLM_STATUS_INTERNAL_ERROR,
                        "unexpected exception in causal attention stub");
+  }
+}
+
+extern "C" sllm_status_t sllm_linear_attention_state_create(
+    const sllm_context_t *const context,
+    const sllm_linear_attention_state_create_info_t *const info,
+    sllm_linear_attention_state_t **const state,
+    sllm_error_sink_t *const error_sink) noexcept {
+  try {
+    if (state != nullptr) {
+      *state = nullptr;
+    }
+    const sllm_status_t sink_status = validate_error_sink(error_sink);
+    if (sink_status != SLLM_STATUS_OK) {
+      return sink_status;
+    }
+    const sllm_status_t info_status =
+        sllm_linear_attention::validate_state_create_info(info, error_sink);
+    if (info_status != SLLM_STATUS_OK) {
+      return info_status;
+    }
+    if (context == nullptr || state == nullptr) {
+      return write_error(error_sink, SLLM_STATUS_INVALID_ARGUMENT,
+                         "linear attention state context or output is null");
+    }
+    return unavailable(error_sink);
+  } catch (...) {
+    return write_error(
+        error_sink, SLLM_STATUS_INTERNAL_ERROR,
+        "unexpected exception in linear attention state create stub");
+  }
+}
+
+extern "C" sllm_status_t sllm_linear_attention_state_release(
+    sllm_linear_attention_state_t **const state,
+    sllm_error_sink_t *const error_sink) noexcept {
+  try {
+    const sllm_status_t sink_status = validate_error_sink(error_sink);
+    if (sink_status != SLLM_STATUS_OK) {
+      return sink_status;
+    }
+    if (state == nullptr || *state == nullptr) {
+      return write_error(error_sink, SLLM_STATUS_INVALID_ARGUMENT,
+                         "linear attention state handle is null");
+    }
+    return write_error(
+        error_sink, SLLM_STATUS_PUBLIC_INVALID_HANDLE,
+        "linear attention state is not owned by the unavailable stub");
+  } catch (...) {
+    return write_error(
+        error_sink, SLLM_STATUS_INTERNAL_ERROR,
+        "unexpected exception in linear attention state release stub");
+  }
+}
+
+extern "C" sllm_status_t sllm_linear_attention_state_query(
+    const sllm_linear_attention_state_t *const state,
+    sllm_linear_attention_view_info_t *const info,
+    sllm_error_sink_t *const error_sink) noexcept {
+  try {
+    const sllm_status_t sink_status = validate_error_sink(error_sink);
+    if (sink_status != SLLM_STATUS_OK) {
+      return sink_status;
+    }
+    if (info == nullptr || info->struct_size != sizeof(*info)) {
+      return write_error(error_sink, SLLM_STATUS_INVALID_ARGUMENT,
+                         "linear attention view info is invalid");
+    }
+    if (info->abi_version != SLLM_HIP_ABI_VERSION) {
+      return write_error(error_sink, SLLM_STATUS_INVALID_ABI_VERSION,
+                         "linear attention view info ABI is unsupported");
+    }
+    if (info->info_version != SLLM_HIP_LINEAR_ATTENTION_VIEW_INFO_VERSION ||
+        info->reserved0 != 0U ||
+        !std::all_of(std::begin(info->reserved), std::end(info->reserved),
+                     [](const uint32_t value) { return value == 0U; })) {
+      return write_error(error_sink, SLLM_STATUS_RESERVED_NONZERO,
+                         "linear attention view info is unsupported");
+    }
+    sllm_linear_attention::initialize_view_info(info);
+    if (state == nullptr) {
+      return write_error(error_sink, SLLM_STATUS_INVALID_ARGUMENT,
+                         "linear attention state handle is null");
+    }
+    return unavailable(error_sink);
+  } catch (...) {
+    return write_error(error_sink, SLLM_STATUS_INTERNAL_ERROR,
+                       "unexpected exception in linear attention query stub");
+  }
+}
+
+extern "C" sllm_status_t sllm_linear_attention_execute(
+    const sllm_context_t *const context, const sllm_queue_t *const queue,
+    const sllm_linear_attention_desc_t *const descriptor,
+    sllm_completion_t **const completion,
+    sllm_linear_attention_dispatch_info_t *const dispatch_info,
+    sllm_error_sink_t *const error_sink) noexcept {
+  try {
+    if (completion != nullptr) {
+      *completion = nullptr;
+    }
+    const sllm_status_t sink_status = validate_error_sink(error_sink);
+    if (sink_status != SLLM_STATUS_OK) {
+      return sink_status;
+    }
+    if (dispatch_info == nullptr ||
+        dispatch_info->struct_size != sizeof(*dispatch_info)) {
+      return write_error(error_sink, SLLM_STATUS_INVALID_ARGUMENT,
+                         "linear attention dispatch info is invalid");
+    }
+    if (dispatch_info->abi_version != SLLM_HIP_ABI_VERSION) {
+      return write_error(error_sink, SLLM_STATUS_INVALID_ABI_VERSION,
+                         "linear attention dispatch info ABI is unsupported");
+    }
+    if (dispatch_info->info_version !=
+            SLLM_HIP_LINEAR_ATTENTION_DISPATCH_INFO_VERSION ||
+        !std::all_of(std::begin(dispatch_info->reserved),
+                     std::end(dispatch_info->reserved),
+                     [](const uint32_t value) { return value == 0U; })) {
+      return write_error(error_sink, SLLM_STATUS_RESERVED_NONZERO,
+                         "linear attention dispatch info is unsupported");
+    }
+    sllm_linear_attention::DescriptorMetadata metadata{};
+    const sllm_status_t descriptor_status =
+        sllm_linear_attention::validate_and_copy_descriptor(
+            descriptor, &metadata, error_sink);
+    if (descriptor_status != SLLM_STATUS_OK) {
+      return descriptor_status;
+    }
+    if (context == nullptr || queue == nullptr || completion == nullptr) {
+      return write_error(error_sink, SLLM_STATUS_INVALID_ARGUMENT,
+                         "linear attention input or completion output is null");
+    }
+    sllm_linear_attention::initialize_dispatch_info(dispatch_info);
+    return unavailable(error_sink);
+  } catch (...) {
+    return write_error(error_sink, SLLM_STATUS_INTERNAL_ERROR,
+                       "unexpected exception in linear attention execute stub");
+  }
+}
+
+extern "C" sllm_status_t
+sllm_linear_attention_cancel(const sllm_linear_attention_state_t *const state,
+                             sllm_completion_t *const completion,
+                             sllm_error_sink_t *const error_sink) noexcept {
+  try {
+    const sllm_status_t sink_status = validate_error_sink(error_sink);
+    if (sink_status != SLLM_STATUS_OK) {
+      return sink_status;
+    }
+    if (state == nullptr || completion == nullptr) {
+      return write_error(error_sink, SLLM_STATUS_INVALID_ARGUMENT,
+                         "linear attention cancel input is null");
+    }
+    return unavailable(error_sink);
+  } catch (...) {
+    return write_error(error_sink, SLLM_STATUS_INTERNAL_ERROR,
+                       "unexpected exception in linear attention cancel stub");
   }
 }
 

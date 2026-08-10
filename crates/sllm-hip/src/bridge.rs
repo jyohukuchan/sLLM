@@ -17,23 +17,27 @@ use sllm_hip_sys as sys;
 use sllm_core::{
     AdapterResource, BoundSemanticOp, BufferRange, CausalAttentionDescriptor, DispatchEvidence,
     ExecutionAdapterAccess, ExecutionCausalAttentionSubmissionAdapter, ExecutionError,
-    ExecutionKvStateSubmissionAdapter, ExecutionReadbackAdapter, ExecutionSession,
-    ExecutionSessionAdapter, ExecutionSessionRequest, ExecutionState, ExecutionSubmissionAdapter,
-    ExecutionTransferAdapter, OwnedTensorBinding, PrepareSupport, PreparedOperation,
-    ShutdownReport,
+    ExecutionKvStateSubmissionAdapter, ExecutionLinearAttentionSubmissionAdapter,
+    ExecutionReadbackAdapter, ExecutionSession, ExecutionSessionAdapter, ExecutionSessionRequest,
+    ExecutionState, ExecutionSubmissionAdapter, ExecutionTransferAdapter, OwnedTensorBinding,
+    PrepareSupport, PreparedOperation, ShutdownReport,
 };
 
+use crate::argmax::{ArgmaxDispatchInfo, ArgmaxSubmission, PreparedArgmax};
 use crate::kv_state::{
     CausalAttentionCompletion, CausalAttentionEvidence, KvAppendCompletion, KvStateResource,
 };
+use crate::linear_attention::{
+    LinearAttentionCompletion, LinearAttentionEvidence, LinearAttentionStateResource,
+};
 use crate::{
-    AttentionPreprocessDescriptor, AttentionPreprocessDispatchInfo, AttentionPreprocessSubmission,
-    Buffer, Completion, CompletionState, Context, ElementwiseDescriptor, ElementwiseDispatchInfo,
-    ElementwiseSubmission, EmbeddingDescriptor, EmbeddingDispatchInfo, EmbeddingSubmission,
-    HipBackend, MatmulDescriptor, MatmulDispatchInfo, MatmulSubmission,
-    PreparedAttentionPreprocess, PreparedElementwise, PreparedEmbedding, PreparedMatmul,
-    PreparedRmsNorm, Queue, RmsNormDescriptor, RmsNormDispatchInfo, RmsNormSubmission,
-    RuntimeError, RuntimeStatus,
+    ArgmaxDescriptor, AttentionPreprocessDescriptor, AttentionPreprocessDispatchInfo,
+    AttentionPreprocessSubmission, Buffer, Completion, CompletionState, Context,
+    ElementwiseDescriptor, ElementwiseDispatchInfo, ElementwiseSubmission, EmbeddingDescriptor,
+    EmbeddingDispatchInfo, EmbeddingSubmission, HipBackend, MatmulDescriptor, MatmulDispatchInfo,
+    MatmulSubmission, PreparedAttentionPreprocess, PreparedElementwise, PreparedEmbedding,
+    PreparedMatmul, PreparedRmsNorm, Queue, RmsNormDescriptor, RmsNormDispatchInfo,
+    RmsNormSubmission, RuntimeError, RuntimeStatus,
 };
 
 const HIP_BACKEND_NAME: &str = "hip";
@@ -270,10 +274,11 @@ impl ExecutionSessionAdapter for HipExecutionSession {
                 | sllm_core::SemanticOpKind::Embedding
                 | sllm_core::SemanticOpKind::Matmul
                 | sllm_core::SemanticOpKind::RmsNorm
+                | sllm_core::SemanticOpKind::Argmax
                 | sllm_core::SemanticOpKind::AttentionPreprocess
         ) {
             return PrepareSupport::Unsupported {
-                reason: "the HIP owned execution bridge currently prepares copy, add, silu_mul, sigmoid_mul, embedding, matmul, RMSNorm, and attention_preprocess"
+                reason: "the HIP owned execution bridge currently prepares copy, add, silu_mul, sigmoid_mul, embedding, matmul, RMSNorm, argmax, and attention_preprocess"
                     .to_owned(),
             };
         }
@@ -413,6 +418,94 @@ impl ExecutionSessionAdapter for HipExecutionSession {
         ))
     }
 
+    fn create_linear_attention_state(
+        &self,
+        access: &ExecutionAdapterAccess<'_>,
+        state_id: sllm_core::LinearAttentionStateId,
+        descriptor: sllm_core::LinearAttentionStateDescriptor,
+    ) -> Result<AdapterResource, ExecutionError> {
+        self.state.ensure_open()?;
+        LinearAttentionStateResource::create(
+            &self.context,
+            access.session_id(),
+            state_id,
+            descriptor,
+        )
+        .map(AdapterResource::new)
+        .map_err(map_backend_error)
+    }
+
+    fn linear_attention_state_snapshot(
+        &self,
+        access: &ExecutionAdapterAccess<'_>,
+        state: &sllm_core::LinearAttentionState,
+    ) -> Result<sllm_core::LinearAttentionStateSnapshot, ExecutionError> {
+        self.state.ensure_open()?;
+        access
+            .downcast_linear_attention_state_payload::<LinearAttentionStateResource>(state)?
+            .snapshot()
+            .map_err(map_backend_error)
+    }
+
+    fn execute_linear_attention(
+        &self,
+        access: &ExecutionAdapterAccess<'_>,
+        state: &sllm_core::LinearAttentionState,
+        queue: &sllm_core::ExecutionQueue,
+        bindings: &sllm_core::LinearAttentionBindings,
+        request: sllm_core::LinearAttentionRequest,
+    ) -> Result<
+        (
+            Box<dyn ExecutionLinearAttentionSubmissionAdapter>,
+            DispatchEvidence,
+        ),
+        ExecutionError,
+    > {
+        self.state.ensure_open()?;
+        let state_resource = access
+            .downcast_linear_attention_state_payload::<LinearAttentionStateResource>(state)?
+            .clone();
+        let queue = access.downcast_queue_payload::<Queue>(queue)?.clone();
+        let owned = [
+            bindings.qkv(),
+            bindings.z(),
+            bindings.b_input(),
+            bindings.a_input(),
+            bindings.conv_weight(),
+            bindings.a_log(),
+            bindings.dt_bias(),
+            bindings.norm_weight(),
+            bindings.output(),
+        ];
+        let buffers = owned
+            .map(|binding| {
+                access
+                    .downcast_buffer_payload::<Buffer>(binding.buffer())
+                    .cloned()
+            })
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()?;
+        let native: [crate::TensorBinding; 9] =
+            std::array::from_fn(|index| buffers[index].binding(owned[index].view().clone()));
+        let references: [&crate::TensorBinding; 9] = std::array::from_fn(|index| &native[index]);
+        let ticket = self.state.acquire_active()?;
+        let (completion, evidence) = match state_resource.execute(&queue, references, request) {
+            Ok(result) => result,
+            Err(error) => {
+                drop(ticket);
+                return Err(map_backend_error(error));
+            }
+        };
+        Ok((
+            Box::new(HipLinearAttentionSubmission {
+                completion,
+                _evidence: evidence.clone(),
+                _ticket: ticket,
+            }),
+            dispatch_from_linear_attention(evidence),
+        ))
+    }
+
     fn prepare(
         &self,
         access: &ExecutionAdapterAccess<'_>,
@@ -520,6 +613,26 @@ impl ExecutionSessionAdapter for HipExecutionSession {
                         .map_err(map_backend_error)?,
                 )
             }
+            sllm_core::SemanticOpKind::Argmax => {
+                let logits = access
+                    .downcast_buffer_payload::<Buffer>(operation.inputs()[0].buffer())?
+                    .clone();
+                let output = access
+                    .downcast_buffer_payload::<Buffer>(operation.outputs()[0].buffer())?
+                    .clone();
+                let descriptor = ArgmaxDescriptor::from_validated_semantic(
+                    Arc::clone(operation.descriptor()),
+                    logits.binding(operation.inputs()[0].view().clone()),
+                    output.binding(operation.outputs()[0].view().clone()),
+                )
+                .map_err(map_backend_error)?;
+                self.state.ensure_open()?;
+                HipPreparedPlan::Argmax(
+                    self.backend
+                        .prepare_argmax(&self.context, descriptor)
+                        .map_err(map_backend_error)?,
+                )
+            }
             sllm_core::SemanticOpKind::AttentionPreprocess => {
                 let packed_q_gate = access
                     .downcast_buffer_payload::<Buffer>(operation.inputs()[0].buffer())?
@@ -613,6 +726,13 @@ impl ExecutionSessionAdapter for HipExecutionSession {
                     dispatch_from_matmul(dispatch),
                 )
             }
+            HipPreparedPlan::Argmax(plan) => {
+                let (submission, dispatch) = plan.execute(&queue).map_err(map_backend_error)?;
+                (
+                    HipSemanticSubmission::Argmax(submission),
+                    dispatch_from_argmax(dispatch),
+                )
+            }
             HipPreparedPlan::AttentionPreprocess(plan) => {
                 let (submission, dispatch) = plan.execute(&queue).map_err(map_backend_error)?;
                 (
@@ -704,6 +824,7 @@ enum HipPreparedPlan {
     Elementwise(PreparedElementwise),
     Embedding(PreparedEmbedding),
     Matmul(PreparedMatmul),
+    Argmax(PreparedArgmax),
     AttentionPreprocess(PreparedAttentionPreprocess),
 }
 
@@ -712,6 +833,7 @@ enum HipSemanticSubmission {
     Elementwise(ElementwiseSubmission),
     Embedding(EmbeddingSubmission),
     Matmul(MatmulSubmission),
+    Argmax(ArgmaxSubmission),
     AttentionPreprocess(AttentionPreprocessSubmission),
 }
 
@@ -722,6 +844,7 @@ impl HipSemanticSubmission {
             Self::Elementwise(submission) => submission.query(),
             Self::Embedding(submission) => submission.query(),
             Self::Matmul(submission) => submission.query(),
+            Self::Argmax(submission) => submission.query(),
             Self::AttentionPreprocess(submission) => submission.query(),
         }
     }
@@ -732,6 +855,7 @@ impl HipSemanticSubmission {
             Self::Elementwise(submission) => submission.wait(timeout),
             Self::Embedding(submission) => submission.wait(timeout),
             Self::Matmul(submission) => submission.wait(timeout),
+            Self::Argmax(submission) => submission.wait(timeout),
             Self::AttentionPreprocess(submission) => submission.wait(timeout),
         }
     }
@@ -796,6 +920,28 @@ struct HipCausalAttentionSubmission {
     completion: CausalAttentionCompletion,
     _evidence: CausalAttentionEvidence,
     _ticket: ActiveOperation,
+}
+
+struct HipLinearAttentionSubmission {
+    completion: LinearAttentionCompletion,
+    _evidence: LinearAttentionEvidence,
+    _ticket: ActiveOperation,
+}
+
+impl ExecutionLinearAttentionSubmissionAdapter for HipLinearAttentionSubmission {
+    fn query(&mut self) -> Result<ExecutionState, ExecutionError> {
+        self.completion
+            .query()
+            .map(map_completion_state)
+            .map_err(map_async_error)
+    }
+
+    fn wait(&mut self, timeout: Duration) -> Result<ExecutionState, ExecutionError> {
+        self.completion
+            .wait(timeout)
+            .map(map_completion_state)
+            .map_err(map_async_error)
+    }
 }
 
 impl ExecutionCausalAttentionSubmissionAdapter for HipCausalAttentionSubmission {
@@ -887,7 +1033,9 @@ fn map_backend_error(error: RuntimeError) -> ExecutionError {
             backend: HIP_BACKEND_NAME,
             reason: error.message().to_owned(),
         },
-        RuntimeStatus::Busy | RuntimeStatus::CausalAttentionStateBusy => ExecutionError::Busy,
+        RuntimeStatus::Busy
+        | RuntimeStatus::CausalAttentionStateBusy
+        | RuntimeStatus::LinearAttentionStateBusy => ExecutionError::Busy,
         RuntimeStatus::NotReady => ExecutionError::NotReady,
         _ => ExecutionError::BackendStatus {
             status: error.status().raw(),
@@ -987,6 +1135,26 @@ fn dispatch_from_matmul(dispatch: MatmulDispatchInfo) -> DispatchEvidence {
     }
 }
 
+fn dispatch_from_argmax(dispatch: ArgmaxDispatchInfo) -> DispatchEvidence {
+    DispatchEvidence {
+        abi_version: dispatch.abi_version,
+        info_version: dispatch.info_version,
+        dispatch_id: dispatch.dispatch_id,
+        dispatch_count: dispatch.dispatch_count,
+        kernel_id: dispatch.kernel_id,
+        workgroup_size_x: dispatch.workgroup_size_x,
+        grid_size_x: dispatch.grid_size_x,
+        row_count: dispatch.row_count,
+        normalized_size: dispatch.vocab_size,
+        backend: dispatch.backend,
+        fallback_allowed: dispatch.fallback_allowed,
+        fallback_used: dispatch.fallback_used,
+        kernel_symbol: dispatch.kernel_symbol,
+        device_symbol: dispatch.device_symbol,
+        target: dispatch.gcn_arch_name,
+    }
+}
+
 fn dispatch_from_attention_preprocess(
     dispatch: AttentionPreprocessDispatchInfo,
 ) -> DispatchEvidence {
@@ -1025,6 +1193,26 @@ fn dispatch_from_causal_attention(dispatch: CausalAttentionEvidence) -> Dispatch
         fallback_used: dispatch.fallback_used,
         kernel_symbol: dispatch.kernel_symbol,
         device_symbol: dispatch.device_symbol,
+        target: dispatch.target,
+    }
+}
+
+fn dispatch_from_linear_attention(dispatch: LinearAttentionEvidence) -> DispatchEvidence {
+    DispatchEvidence {
+        abi_version: sys::SLLM_HIP_ABI_VERSION,
+        info_version: sys::SLLM_HIP_LINEAR_ATTENTION_DISPATCH_INFO_VERSION,
+        dispatch_id: dispatch.dispatch_id,
+        dispatch_count: dispatch.dispatch_count,
+        kernel_id: dispatch.recurrent_kernel_id,
+        workgroup_size_x: dispatch.workgroup_size_x,
+        grid_size_x: dispatch.recurrent_grid_size_x,
+        row_count: dispatch.token_count,
+        normalized_size: sys::SLLM_HIP_LINEAR_ATTENTION_HEAD_DIM as u64,
+        backend: sys::SLLM_BACKEND_HIP,
+        fallback_allowed: false,
+        fallback_used: false,
+        kernel_symbol: dispatch.kernel_symbol,
+        device_symbol: dispatch.recurrent_device_symbol,
         target: dispatch.target,
     }
 }

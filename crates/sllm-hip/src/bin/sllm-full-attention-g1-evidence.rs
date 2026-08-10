@@ -103,6 +103,7 @@ struct CaseEvidence {
     committed_kv_length: u64,
     numerical_match: bool,
     nonuniform_softmax_checked: bool,
+    subnormal_score_contribution_checked: bool,
     causal_visibility_match: bool,
     gqa_mapping_match: bool,
     metadata_match: bool,
@@ -112,6 +113,7 @@ struct CaseEvidence {
 #[derive(Debug, Serialize)]
 struct OracleEvidence {
     scalar_ordered_dot_softmax_v: bool,
+    fp16_subnormal_affects_score: bool,
     final_bf16_rne_checked: bool,
     gqa_heads_checked: bool,
 }
@@ -234,6 +236,10 @@ fn input_q_words(m: usize) -> Vec<u16> {
             let offset = (row * Q_HEADS + head) * HEAD_DIM;
             words[offset] = float_to_bf16_rne(16.0);
             words[offset + 1] = float_to_bf16_rne(1.0 + (head % 4) as f32);
+            // Keep the FP16-subnormal K lane numerically live. 2^20 times
+            // the smallest FP16 subnormal survives the ordered F32 dot and
+            // therefore tests more than merely executing the decoder path.
+            words[offset + 2] = float_to_bf16_rne(1_048_576.0);
         }
     }
     words
@@ -354,7 +360,7 @@ fn scalar_oracle(
     value_words: &[u16],
     m: usize,
     start_position: u64,
-) -> Result<(Vec<u16>, bool), String> {
+) -> Result<(Vec<u16>, bool, bool), String> {
     let expected_length = start_position
         .checked_add(m as u64)
         .ok_or_else(|| "oracle position overflow".to_owned())?;
@@ -366,6 +372,7 @@ fn scalar_oracle(
     }
     let mut output = vec![0_u16; query_words.len()];
     let mut nonuniform_softmax_checked = false;
+    let mut subnormal_score_contribution_checked = false;
     for row in 0..m {
         let position = start_position + row as u64;
         for head in 0..Q_HEADS {
@@ -375,13 +382,22 @@ fn scalar_oracle(
             for key_position in 0..=position {
                 let key_offset = (key_position as usize * KV_HEADS + kv_head) * HEAD_DIM;
                 let mut dot = 0.0_f32;
+                let mut dot_without_subnormal_lane = 0.0_f32;
                 for dimension in 0..HEAD_DIM {
-                    dot += bf16_to_f32(query_words[query_offset + dimension])
+                    let product = bf16_to_f32(query_words[query_offset + dimension])
                         * f16_to_f32(sllm_hip::bf16_to_f16_bits(
                             key_words[key_offset + dimension],
                         ));
+                    dot += product;
+                    if dimension != 2 {
+                        dot_without_subnormal_lane += product;
+                    }
                 }
-                scores.push(dot * (1.0 / 16.0));
+                let score = dot * (1.0 / 16.0);
+                let score_without_subnormal_lane = dot_without_subnormal_lane * (1.0 / 16.0);
+                subnormal_score_contribution_checked |=
+                    score.to_bits() != score_without_subnormal_lane.to_bits();
+                scores.push(score);
             }
             let maximum = scores.iter().copied().fold(f32::NEG_INFINITY, f32::max);
             nonuniform_softmax_checked |= scores
@@ -403,7 +419,11 @@ fn scalar_oracle(
             }
         }
     }
-    Ok((output, nonuniform_softmax_checked))
+    Ok((
+        output,
+        nonuniform_softmax_checked,
+        subnormal_score_contribution_checked,
+    ))
 }
 
 fn metadata_matches(
@@ -496,13 +516,14 @@ fn run_case(
     }
     drop(attention);
 
-    let (expected, nonuniform_softmax_checked) = scalar_oracle(
-        &query_words,
-        &[prefix_key.as_slice(), key_words.as_slice()].concat(),
-        &[prefix_value.as_slice(), value_words.as_slice()].concat(),
-        case.m,
-        case.start_position,
-    )?;
+    let (expected, nonuniform_softmax_checked, subnormal_score_contribution_checked) =
+        scalar_oracle(
+            &query_words,
+            &[prefix_key.as_slice(), key_words.as_slice()].concat(),
+            &[prefix_value.as_slice(), value_words.as_slice()].concat(),
+            case.m,
+            case.start_position,
+        )?;
     let mut readback = session
         .readback(
             queue,
@@ -544,6 +565,7 @@ fn run_case(
         committed_kv_length: committed_length,
         numerical_match,
         nonuniform_softmax_checked,
+        subnormal_score_contribution_checked,
         causal_visibility_match,
         gqa_mapping_match,
         metadata_match,
@@ -566,6 +588,7 @@ fn unavailable_report(config: &Config, error: String) -> Report {
         cases: Vec::new(),
         oracle: OracleEvidence {
             scalar_ordered_dot_softmax_v: false,
+            fp16_subnormal_affects_score: false,
             final_bf16_rne_checked: false,
             gqa_heads_checked: false,
         },
@@ -615,6 +638,9 @@ fn run(config: &Config) -> Report {
                 scalar_ordered_dot_softmax_v: cases
                     .iter()
                     .any(|case| case.nonuniform_softmax_checked && case.numerical_match),
+                fp16_subnormal_affects_score: cases
+                    .iter()
+                    .all(|case| case.subnormal_score_contribution_checked),
                 final_bf16_rne_checked: cases.iter().all(|case| case.numerical_match),
                 gqa_heads_checked: cases.iter().all(|case| case.gqa_mapping_match),
             };
@@ -627,6 +653,7 @@ fn run(config: &Config) -> Report {
             });
             let pass = all_cases
                 && oracle.scalar_ordered_dot_softmax_v
+                && oracle.fp16_subnormal_affects_score
                 && oracle.final_bf16_rne_checked
                 && oracle.gqa_heads_checked
                 && cleanup.retryable_cleanup == 0
@@ -708,13 +735,15 @@ mod tests {
         let query = input_q_words(2);
         let keys = input_k_words(3, 0);
         let values = input_v_words(3, 0);
-        let (output, nonuniform) = scalar_oracle(&query, &keys, &values, 2, 1).unwrap();
+        let (output, nonuniform, subnormal_score_contribution) =
+            scalar_oracle(&query, &keys, &values, 2, 1).unwrap();
         // For row zero only absolute key 0/1 are visible; head four maps to
         // KV head one, so both causal visibility and GQA affect the result.
         assert_ne!(output[0], output[4 * HEAD_DIM]);
         assert_ne!(output[0], output[Q_HEADS * HEAD_DIM]);
         assert_eq!(output.len(), query.len());
         assert!(nonuniform);
+        assert!(subnormal_score_contribution);
     }
 
     #[test]

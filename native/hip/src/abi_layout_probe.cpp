@@ -252,6 +252,7 @@ int main() {
   SLLM_PRINT_CONSTANT(SLLM_STATUS_INVALID_EMBEDDING_DESCRIPTOR);
   SLLM_PRINT_CONSTANT(SLLM_STATUS_TOKEN_ID_OUT_OF_RANGE);
   SLLM_PRINT_CONSTANT(SLLM_STATUS_INVALID_MATMUL_DESCRIPTOR);
+  SLLM_PRINT_CONSTANT(SLLM_STATUS_INVALID_ARGMAX_DESCRIPTOR);
   SLLM_PRINT_CONSTANT(SLLM_STATUS_INVALID_ATTENTION_PREPROCESS_DESCRIPTOR);
   SLLM_PRINT_CONSTANT(SLLM_STATUS_POSITION_PAYLOAD_MISMATCH);
   SLLM_PRINT_CONSTANT(SLLM_STATUS_INVALID_KV_STATE_DESCRIPTOR);
@@ -302,6 +303,14 @@ int main() {
   SLLM_PRINT_CONSTANT(SLLM_HIP_MATMUL_MAX_K);
   SLLM_PRINT_CONSTANT(SLLM_HIP_MATMUL_MAX_N);
   SLLM_PRINT_CONSTANT(SLLM_HIP_MATMUL_MAX_OUTPUT_ELEMENTS);
+  SLLM_PRINT_CONSTANT(SLLM_HIP_ARGMAX_VERSION);
+  SLLM_PRINT_CONSTANT(SLLM_HIP_ARGMAX_DISPATCH_INFO_VERSION);
+  SLLM_PRINT_CONSTANT(SLLM_HIP_ARGMAX_KERNEL_ID_BASELINE_BF16_V1);
+  SLLM_PRINT_CONSTANT(SLLM_HIP_ARGMAX_KERNEL_SYMBOL_MAX);
+  SLLM_PRINT_CONSTANT(SLLM_HIP_ARGMAX_DEVICE_SYMBOL_MAX);
+  SLLM_PRINT_CONSTANT(SLLM_HIP_ARGMAX_WORKGROUP_SIZE);
+  SLLM_PRINT_CONSTANT(SLLM_HIP_ARGMAX_MAX_V);
+  SLLM_PRINT_CONSTANT(SLLM_HIP_ARGMAX_MAX_M);
   SLLM_PRINT_CONSTANT(SLLM_HIP_ATTENTION_PREPROCESS_VERSION);
   SLLM_PRINT_CONSTANT(SLLM_HIP_ATTENTION_PREPROCESS_DISPATCH_INFO_VERSION);
   SLLM_PRINT_CONSTANT(SLLM_HIP_ATTENTION_PREPROCESS_KERNEL_ID_BASELINE_BF16_V1);
@@ -644,6 +653,41 @@ int main() {
       << offsetof(sllm_matmul_dispatch_info_t, gcn_arch_name)
       << " reserved=" << offsetof(sllm_matmul_dispatch_info_t, reserved)
       << '\n';
+  std::cout << "layout sllm_argmax_desc_t size=" << sizeof(sllm_argmax_desc_t)
+            << " align=" << alignof(sllm_argmax_desc_t)
+            << " struct_size=" << offsetof(sllm_argmax_desc_t, struct_size)
+            << " abi_version=" << offsetof(sllm_argmax_desc_t, abi_version)
+            << " op_version=" << offsetof(sllm_argmax_desc_t, op_version)
+            << " reserved=" << offsetof(sllm_argmax_desc_t, reserved)
+            << " logits=" << offsetof(sllm_argmax_desc_t, logits)
+            << " output=" << offsetof(sllm_argmax_desc_t, output) << '\n';
+  std::cout
+      << "layout sllm_argmax_dispatch_info_t size="
+      << sizeof(sllm_argmax_dispatch_info_t)
+      << " align=" << alignof(sllm_argmax_dispatch_info_t)
+      << " struct_size=" << offsetof(sllm_argmax_dispatch_info_t, struct_size)
+      << " abi_version=" << offsetof(sllm_argmax_dispatch_info_t, abi_version)
+      << " info_version=" << offsetof(sllm_argmax_dispatch_info_t, info_version)
+      << " backend=" << offsetof(sllm_argmax_dispatch_info_t, backend)
+      << " dispatch_id=" << offsetof(sllm_argmax_dispatch_info_t, dispatch_id)
+      << " dispatch_count=" << offsetof(sllm_argmax_dispatch_info_t, dispatch_count)
+      << " kernel_id=" << offsetof(sllm_argmax_dispatch_info_t, kernel_id)
+      << " workgroup_size_x="
+      << offsetof(sllm_argmax_dispatch_info_t, workgroup_size_x)
+      << " grid_size_x=" << offsetof(sllm_argmax_dispatch_info_t, grid_size_x)
+      << " row_count=" << offsetof(sllm_argmax_dispatch_info_t, row_count)
+      << " vocab_size=" << offsetof(sllm_argmax_dispatch_info_t, vocab_size)
+      << " fallback_allowed="
+      << offsetof(sllm_argmax_dispatch_info_t, fallback_allowed)
+      << " fallback_used=" << offsetof(sllm_argmax_dispatch_info_t, fallback_used)
+      << " kernel_symbol="
+      << offsetof(sllm_argmax_dispatch_info_t, kernel_symbol)
+      << " device_symbol="
+      << offsetof(sllm_argmax_dispatch_info_t, device_symbol)
+      << " gcn_arch_name="
+      << offsetof(sllm_argmax_dispatch_info_t, gcn_arch_name)
+      << " reserved=" << offsetof(sllm_argmax_dispatch_info_t, reserved)
+      << '\n';
   std::cout
       << "layout sllm_attention_preprocess_desc_t size="
       << sizeof(sllm_attention_preprocess_desc_t)
@@ -841,5 +885,137 @@ int main() {
       << offsetof(sllm_causal_attention_dispatch_info_t, gcn_arch_name)
       << " reserved="
       << offsetof(sllm_causal_attention_dispatch_info_t, reserved) << '\n';
+  std::cout << "layout sllm_linear_attention_state_create_info_t size="
+            << sizeof(sllm_linear_attention_state_create_info_t)
+            << " align=" << alignof(sllm_linear_attention_state_create_info_t)
+            << " struct_size="
+            << offsetof(sllm_linear_attention_state_create_info_t, struct_size)
+            << " abi_version="
+            << offsetof(sllm_linear_attention_state_create_info_t, abi_version)
+            << " session_id="
+            << offsetof(sllm_linear_attention_state_create_info_t, session_id)
+            << " layer_id="
+            << offsetof(sllm_linear_attention_state_create_info_t, layer_id)
+            << " flags="
+            << offsetof(sllm_linear_attention_state_create_info_t, flags)
+            << " capacity_tokens="
+            << offsetof(sllm_linear_attention_state_create_info_t,
+                        capacity_tokens)
+            << " reserved="
+            << offsetof(sllm_linear_attention_state_create_info_t, reserved)
+            << '\n';
+  std::cout
+      << "layout sllm_linear_attention_view_info_t size="
+      << sizeof(sllm_linear_attention_view_info_t)
+      << " align=" << alignof(sllm_linear_attention_view_info_t)
+      << " struct_size="
+      << offsetof(sllm_linear_attention_view_info_t, struct_size)
+      << " abi_version="
+      << offsetof(sllm_linear_attention_view_info_t, abi_version)
+      << " info_version="
+      << offsetof(sllm_linear_attention_view_info_t, info_version)
+      << " reserved0=" << offsetof(sllm_linear_attention_view_info_t, reserved0)
+      << " session_id="
+      << offsetof(sllm_linear_attention_view_info_t, session_id)
+      << " layer_id=" << offsetof(sllm_linear_attention_view_info_t, layer_id)
+      << " conv_state_dtype="
+      << offsetof(sllm_linear_attention_view_info_t, conv_state_dtype)
+      << " recurrent_state_dtype="
+      << offsetof(sllm_linear_attention_view_info_t, recurrent_state_dtype)
+      << " encoding=" << offsetof(sllm_linear_attention_view_info_t, encoding)
+      << " active_slot="
+      << offsetof(sllm_linear_attention_view_info_t, active_slot)
+      << " capacity_tokens="
+      << offsetof(sllm_linear_attention_view_info_t, capacity_tokens)
+      << " observed_length="
+      << offsetof(sllm_linear_attention_view_info_t, observed_length)
+      << " generation="
+      << offsetof(sllm_linear_attention_view_info_t, generation)
+      << " context_identity="
+      << offsetof(sllm_linear_attention_view_info_t, context_identity)
+      << " state_identity="
+      << offsetof(sllm_linear_attention_view_info_t, state_identity)
+      << " conv_state_shape="
+      << offsetof(sllm_linear_attention_view_info_t, conv_state_shape)
+      << " recurrent_state_shape="
+      << offsetof(sllm_linear_attention_view_info_t, recurrent_state_shape)
+      << " reserved=" << offsetof(sllm_linear_attention_view_info_t, reserved)
+      << '\n';
+  std::cout
+      << "layout sllm_linear_attention_desc_t size="
+      << sizeof(sllm_linear_attention_desc_t)
+      << " align=" << alignof(sllm_linear_attention_desc_t)
+      << " struct_size=" << offsetof(sllm_linear_attention_desc_t, struct_size)
+      << " abi_version=" << offsetof(sllm_linear_attention_desc_t, abi_version)
+      << " op_version=" << offsetof(sllm_linear_attention_desc_t, op_version)
+      << " reserved0=" << offsetof(sllm_linear_attention_desc_t, reserved0)
+      << " start_position="
+      << offsetof(sllm_linear_attention_desc_t, start_position)
+      << " expected_length="
+      << offsetof(sllm_linear_attention_desc_t, expected_length)
+      << " state=" << offsetof(sllm_linear_attention_desc_t, state)
+      << " qkv=" << offsetof(sllm_linear_attention_desc_t, qkv)
+      << " z=" << offsetof(sllm_linear_attention_desc_t, z)
+      << " b_input=" << offsetof(sllm_linear_attention_desc_t, b_input)
+      << " a_input=" << offsetof(sllm_linear_attention_desc_t, a_input)
+      << " conv_weight=" << offsetof(sllm_linear_attention_desc_t, conv_weight)
+      << " a_log=" << offsetof(sllm_linear_attention_desc_t, a_log)
+      << " dt_bias=" << offsetof(sllm_linear_attention_desc_t, dt_bias)
+      << " norm_weight=" << offsetof(sllm_linear_attention_desc_t, norm_weight)
+      << " output=" << offsetof(sllm_linear_attention_desc_t, output)
+      << " reserved=" << offsetof(sllm_linear_attention_desc_t, reserved)
+      << '\n';
+  std::cout
+      << "layout sllm_linear_attention_dispatch_info_t size="
+      << sizeof(sllm_linear_attention_dispatch_info_t)
+      << " align=" << alignof(sllm_linear_attention_dispatch_info_t)
+      << " struct_size="
+      << offsetof(sllm_linear_attention_dispatch_info_t, struct_size)
+      << " abi_version="
+      << offsetof(sllm_linear_attention_dispatch_info_t, abi_version)
+      << " info_version="
+      << offsetof(sllm_linear_attention_dispatch_info_t, info_version)
+      << " backend=" << offsetof(sllm_linear_attention_dispatch_info_t, backend)
+      << " dispatch_id="
+      << offsetof(sllm_linear_attention_dispatch_info_t, dispatch_id)
+      << " dispatch_count="
+      << offsetof(sllm_linear_attention_dispatch_info_t, dispatch_count)
+      << " conv_kernel_id="
+      << offsetof(sllm_linear_attention_dispatch_info_t, conv_kernel_id)
+      << " recurrent_kernel_id="
+      << offsetof(sllm_linear_attention_dispatch_info_t, recurrent_kernel_id)
+      << " workgroup_size_x="
+      << offsetof(sllm_linear_attention_dispatch_info_t, workgroup_size_x)
+      << " conv_grid_size_x="
+      << offsetof(sllm_linear_attention_dispatch_info_t, conv_grid_size_x)
+      << " recurrent_grid_size_x="
+      << offsetof(sllm_linear_attention_dispatch_info_t, recurrent_grid_size_x)
+      << " token_count="
+      << offsetof(sllm_linear_attention_dispatch_info_t, token_count)
+      << " start_position="
+      << offsetof(sllm_linear_attention_dispatch_info_t, start_position)
+      << " expected_length="
+      << offsetof(sllm_linear_attention_dispatch_info_t, expected_length)
+      << " qk_heads="
+      << offsetof(sllm_linear_attention_dispatch_info_t, qk_heads)
+      << " value_heads="
+      << offsetof(sllm_linear_attention_dispatch_info_t, value_heads)
+      << " head_dim="
+      << offsetof(sllm_linear_attention_dispatch_info_t, head_dim)
+      << " fallback_allowed="
+      << offsetof(sllm_linear_attention_dispatch_info_t, fallback_allowed)
+      << " fallback_used="
+      << offsetof(sllm_linear_attention_dispatch_info_t, fallback_used)
+      << " kernel_symbol="
+      << offsetof(sllm_linear_attention_dispatch_info_t, kernel_symbol)
+      << " conv_device_symbol="
+      << offsetof(sllm_linear_attention_dispatch_info_t, conv_device_symbol)
+      << " recurrent_device_symbol="
+      << offsetof(sllm_linear_attention_dispatch_info_t,
+                  recurrent_device_symbol)
+      << " gcn_arch_name="
+      << offsetof(sllm_linear_attention_dispatch_info_t, gcn_arch_name)
+      << " reserved="
+      << offsetof(sllm_linear_attention_dispatch_info_t, reserved) << '\n';
   return 0;
 }

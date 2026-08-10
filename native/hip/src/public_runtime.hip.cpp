@@ -1,5 +1,7 @@
 #include "attention_preprocess_api.hpp"
 #include "attention_preprocess_kernel_internal.hpp"
+#include "argmax_api.hpp"
+#include "argmax_kernel_internal.hpp"
 #include "causal_attention_api.hpp"
 #include "causal_attention_kernel_internal.hpp"
 #include "elementwise_api.hpp"
@@ -9,6 +11,8 @@
 #include "evidence_abi.h"
 #include "kv_state_api.hpp"
 #include "kv_state_kernel_internal.hpp"
+#include "linear_attention_api.hpp"
+#include "linear_attention_kernel_internal.hpp"
 #include "matmul_api.hpp"
 #include "matmul_kernel_internal.hpp"
 #include "public_runtime_internal.hpp"
@@ -94,6 +98,14 @@ hipError_t launch(const uint16_t *const activation,
 }
 } // namespace sllm_matmul_kernel
 
+namespace sllm_argmax_kernel {
+hipError_t launch(const uint16_t *const logits, int32_t *const output,
+                  const uint64_t m, const uint64_t v,
+                  const hipStream_t stream) noexcept {
+  return fake_hip::argmax_launch(logits, output, m, v, stream);
+}
+} // namespace sllm_argmax_kernel
+
 namespace sllm_attention_preprocess_kernel {
 hipError_t launch(const uint16_t *const packed_q_gate, const uint16_t *const k,
                   const uint16_t *const q_raw_scale,
@@ -131,6 +143,24 @@ hipError_t launch(const uint16_t *const query, const uint16_t *const key,
       committed_kv_length, stream);
 }
 } // namespace sllm_causal_attention_kernel
+
+namespace sllm_linear_attention_kernel {
+hipError_t launch_convolution(const uint16_t *const, const uint16_t *const,
+                              const uint16_t *const, uint16_t *const,
+                              uint16_t *const, const uint32_t,
+                              const hipStream_t) noexcept {
+  return hipSuccess;
+}
+
+hipError_t launch_recurrent(const uint16_t *const, const uint16_t *const,
+                            const uint16_t *const, const uint16_t *const,
+                            const float *const, const uint16_t *const,
+                            const float *const, const float *const,
+                            float *const, uint16_t *const, const uint32_t,
+                            const hipStream_t) noexcept {
+  return hipSuccess;
+}
+} // namespace sllm_linear_attention_kernel
 #endif
 
 namespace {
@@ -145,9 +175,11 @@ enum class HandleKind : uint32_t {
   ElementwisePlan,
   EmbeddingPlan,
   MatmulPlan,
+  ArgmaxPlan,
   AttentionPreprocessPlan,
   KvState,
   KvView,
+  LinearAttentionState,
 };
 
 struct QuarantineNode {
@@ -257,6 +289,44 @@ struct KvView final : QuarantineNode {
         release_active(false) {}
 };
 
+struct LinearAttentionState final : QuarantineNode {
+  Context *context;
+  uint64_t context_identity;
+  uint64_t state_identity;
+  uint64_t session_id;
+  uint32_t layer_id;
+  uint64_t capacity_tokens;
+  std::array<void *, 2> conv_state;
+  std::array<void *, 2> recurrent_state;
+  void *scratch;
+  uint64_t scratch_bytes;
+  sllm_public_runtime::AccountingState accounting;
+  uint64_t published_length;
+  uint64_t generation;
+  uint32_t active_slot;
+  uint64_t transition_token;
+  uint64_t transition_start;
+  uint64_t transition_count;
+  uint64_t transition_end;
+  bool commit_allowed;
+  bool release_active;
+
+  LinearAttentionState(Context *const context_value,
+                       const uint64_t session_value, const uint32_t layer_value,
+                       const uint64_t capacity_value,
+                       const std::array<void *, 2> conv_value,
+                       const std::array<void *, 2> recurrent_value,
+                       const uint64_t context_token)
+      : QuarantineNode(HandleKind::LinearAttentionState),
+        context(context_value), context_identity(context_token),
+        state_identity(0U), session_id(session_value), layer_id(layer_value),
+        capacity_tokens(capacity_value), conv_state(conv_value),
+        recurrent_state(recurrent_value), scratch(nullptr), scratch_bytes(0U),
+        accounting(), published_length(0U), generation(0U), active_slot(0U),
+        transition_token(0U), transition_start(0U), transition_count(0U),
+        transition_end(0U), commit_allowed(false), release_active(false) {}
+};
+
 struct Event final : QuarantineNode {
   Context *context;
   hipEvent_t event;
@@ -272,6 +342,8 @@ struct ElementwisePlan;
 struct AttentionPreprocessPlan;
 using AttentionBuffers = std::array<struct Buffer *, 8>;
 using CausalAttentionBuffers = std::array<struct Buffer *, 2>;
+using LinearAttentionBuffers = std::array<struct Buffer *, 9>;
+struct ArgmaxCompletionTag final {};
 
 struct Completion final : QuarantineNode {
   Context *context;
@@ -315,6 +387,10 @@ struct Completion final : QuarantineNode {
   Buffer *matmul_activation;
   Buffer *matmul_weight;
   Buffer *matmul_output;
+  bool argmax;
+  ElementwisePlan *argmax_plan;
+  Buffer *argmax_logits;
+  Buffer *argmax_output;
   bool attention_preprocess;
   AttentionPreprocessPlan *attention_preprocess_plan;
   AttentionBuffers attention_buffers;
@@ -331,6 +407,13 @@ struct Completion final : QuarantineNode {
   bool causal_attention;
   KvState *causal_attention_state;
   CausalAttentionBuffers causal_attention_buffers;
+  bool linear_attention;
+  LinearAttentionState *linear_attention_state;
+  LinearAttentionBuffers linear_attention_buffers;
+  uint64_t linear_attention_token;
+  uint64_t linear_attention_start;
+  uint64_t linear_attention_count;
+  uint64_t linear_attention_end;
 
   Completion(Context *const context_value, Queue *const queue_value,
              Buffer *const buffer_value, const uint64_t transfer_size,
@@ -359,7 +442,10 @@ struct Completion final : QuarantineNode {
              const uint64_t kv_append_count_value = 0U,
              const uint64_t kv_append_end_value = 0U,
              KvState *const causal_attention_state_value = nullptr,
-             const CausalAttentionBuffers causal_attention_buffers_value = {})
+             const CausalAttentionBuffers causal_attention_buffers_value = {},
+             ElementwisePlan *const argmax_plan_value = nullptr,
+             Buffer *const argmax_logits_value = nullptr,
+             Buffer *const argmax_output_value = nullptr)
       : QuarantineNode(HandleKind::Completion), context(context_value),
         queue(queue_value), buffer(buffer_value), event(nullptr),
         timing_start_event(nullptr), timing_elapsed_ns(0U), timing_valid(false),
@@ -383,6 +469,8 @@ struct Completion final : QuarantineNode {
         matmul(matmul_plan_value != nullptr), matmul_plan(matmul_plan_value),
         matmul_activation(matmul_activation_value),
         matmul_weight(matmul_weight_value), matmul_output(matmul_output_value),
+        argmax(argmax_plan_value != nullptr), argmax_plan(argmax_plan_value),
+        argmax_logits(argmax_logits_value), argmax_output(argmax_output_value),
         attention_preprocess(attention_plan_value != nullptr),
         attention_preprocess_plan(attention_plan_value),
         attention_buffers(attention_buffers_value),
@@ -395,8 +483,23 @@ struct Completion final : QuarantineNode {
         kv_append_count(kv_append_count_value),
         kv_append_end(kv_append_end_value),
         causal_attention(causal_attention_state_value != nullptr),
-        causal_attention_state(causal_attention_state_value),
-        causal_attention_buffers(causal_attention_buffers_value) {}
+      causal_attention_state(causal_attention_state_value),
+      causal_attention_buffers(causal_attention_buffers_value),
+        linear_attention(false), linear_attention_state(nullptr),
+        linear_attention_buffers(), linear_attention_token(0U),
+        linear_attention_start(0U), linear_attention_count(0U),
+        linear_attention_end(0U) {}
+
+  Completion(Context *const context_value, Queue *const queue_value,
+             Buffer *const buffer_value, ElementwisePlan *const plan_value,
+             Buffer *const logits_value, Buffer *const output_value,
+             ArgmaxCompletionTag)
+      : Completion(context_value, queue_value, buffer_value, 0U, false,
+                   std::vector<uint8_t>{}, nullptr, nullptr, nullptr, nullptr,
+                   nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
+                   nullptr, nullptr, nullptr, {}, nullptr, nullptr, nullptr,
+                   nullptr, nullptr, 0U, 0U, 0U, 0U, nullptr, {}, plan_value,
+                   logits_value, output_value) {}
 };
 
 /* The plan stores copied descriptor metadata and its three retained buffer
@@ -427,8 +530,10 @@ struct ElementwisePlan final : QuarantineNode {
   sllm_elementwise::DescriptorMetadata metadata;
   sllm_embedding::DescriptorMetadata embedding_metadata;
   sllm_matmul::DescriptorMetadata matmul_metadata;
+  sllm_argmax::DescriptorMetadata argmax_metadata;
   bool embedding;
   bool matmul;
+  bool argmax;
   bool release_active;
   bool in_flight;
 
@@ -438,7 +543,8 @@ struct ElementwisePlan final : QuarantineNode {
       : QuarantineNode(HandleKind::ElementwisePlan), context(context_value),
         input0(input0_value), input1(input1_value), output(output_value),
         metadata(metadata_value), embedding_metadata(), matmul_metadata(),
-        embedding(false), matmul(false), release_active(false),
+        argmax_metadata(), embedding(false), matmul(false), argmax(false),
+        release_active(false),
         in_flight(false) {}
 
   ElementwisePlan(Context *const context_value, Buffer *const weight_value,
@@ -447,7 +553,8 @@ struct ElementwisePlan final : QuarantineNode {
       : QuarantineNode(HandleKind::EmbeddingPlan), context(context_value),
         input0(weight_value), input1(token_ids_value), output(output_value),
         metadata(), embedding_metadata(metadata_value), matmul_metadata(),
-        embedding(true), matmul(false), release_active(false),
+        argmax_metadata(), embedding(true), matmul(false), argmax(false),
+        release_active(false),
         in_flight(false) {}
 
   ElementwisePlan(Context *const context_value, Buffer *const activation_value,
@@ -456,8 +563,18 @@ struct ElementwisePlan final : QuarantineNode {
       : QuarantineNode(HandleKind::MatmulPlan), context(context_value),
         input0(activation_value), input1(weight_value), output(output_value),
         metadata(), embedding_metadata(), matmul_metadata(metadata_value),
-        embedding(false), matmul(true), release_active(false),
+        argmax_metadata(), embedding(false), matmul(true), argmax(false),
+        release_active(false),
         in_flight(false) {}
+
+  ElementwisePlan(Context *const context_value, Buffer *const logits_value,
+                  Buffer *const output_value,
+                  const sllm_argmax::DescriptorMetadata &metadata_value)
+      : QuarantineNode(HandleKind::ArgmaxPlan), context(context_value),
+        input0(logits_value), input1(nullptr), output(output_value),
+        metadata(), embedding_metadata(), matmul_metadata(),
+        argmax_metadata(metadata_value), embedding(false), matmul(false),
+        argmax(true), release_active(false), in_flight(false) {}
 };
 
 struct AttentionPreprocessPlan final : QuarantineNode {
@@ -589,7 +706,8 @@ private:
 
 OrphanOwner orphan_owner;
 
-bool is_first_attention_buffer(const AttentionBuffers &buffers,
+template <std::size_t Size>
+bool is_first_attention_buffer(const std::array<Buffer *, Size> &buffers,
                                const std::size_t index) noexcept {
   for (std::size_t prior = 0U; prior != index; ++prior) {
     if (buffers[prior] == buffers[index]) {
@@ -599,9 +717,10 @@ bool is_first_attention_buffer(const AttentionBuffers &buffers,
   return true;
 }
 
+template <std::size_t Size>
 bool reserve_attention_prepared_plan(
     sllm_public_runtime::AccountingState &context,
-    const AttentionBuffers &buffers) noexcept {
+    const std::array<Buffer *, Size> &buffers) noexcept {
   if (!sllm_public_runtime::AccountingState::can_increment(
           context.child_count) ||
       !sllm_public_runtime::AccountingState::can_increment(
@@ -629,9 +748,10 @@ bool reserve_attention_prepared_plan(
   return true;
 }
 
+template <std::size_t Size>
 bool release_attention_prepared_plan(
     sllm_public_runtime::AccountingState &context,
-    const AttentionBuffers &buffers) noexcept {
+    const std::array<Buffer *, Size> &buffers) noexcept {
   if (context.child_count == 0U || context.lifetime_guards == 0U) {
     return false;
   }
@@ -654,9 +774,11 @@ bool release_attention_prepared_plan(
   return true;
 }
 
-bool reserve_attention_submission(sllm_public_runtime::AccountingState &context,
-                                  sllm_public_runtime::AccountingState &queue,
-                                  const AttentionBuffers &buffers) noexcept {
+template <std::size_t Size>
+bool reserve_attention_submission(
+    sllm_public_runtime::AccountingState &context,
+    sllm_public_runtime::AccountingState &queue,
+    const std::array<Buffer *, Size> &buffers) noexcept {
   if (!sllm_public_runtime::AccountingState::can_increment(
           queue.active_submissions) ||
       !sllm_public_runtime::AccountingState::can_increment(
@@ -693,8 +815,10 @@ bool reserve_attention_submission(sllm_public_runtime::AccountingState &context,
   return true;
 }
 
-bool release_attention_active(sllm_public_runtime::AccountingState &queue,
-                              const AttentionBuffers &buffers) noexcept {
+template <std::size_t Size>
+bool release_attention_active(
+    sllm_public_runtime::AccountingState &queue,
+    const std::array<Buffer *, Size> &buffers) noexcept {
   if (queue.active_submissions == 0U) {
     return false;
   }
@@ -716,10 +840,11 @@ bool release_attention_active(sllm_public_runtime::AccountingState &queue,
   return true;
 }
 
+template <std::size_t Size>
 bool rollback_attention_submission(
     sllm_public_runtime::AccountingState &context,
     sllm_public_runtime::AccountingState &queue,
-    const AttentionBuffers &buffers) noexcept {
+    const std::array<Buffer *, Size> &buffers) noexcept {
   if (queue.active_submissions == 0U || queue.completion_references == 0U ||
       context.child_count == 0U || context.lifetime_guards == 0U) {
     return false;
@@ -747,9 +872,11 @@ bool rollback_attention_submission(
   return true;
 }
 
-bool release_attention_completion(sllm_public_runtime::AccountingState &context,
-                                  sllm_public_runtime::AccountingState &queue,
-                                  const AttentionBuffers &buffers) noexcept {
+template <std::size_t Size>
+bool release_attention_completion(
+    sllm_public_runtime::AccountingState &context,
+    sllm_public_runtime::AccountingState &queue,
+    const std::array<Buffer *, Size> &buffers) noexcept {
   if (queue.completion_references == 0U || context.child_count == 0U ||
       context.lifetime_guards == 0U) {
     return false;
@@ -771,6 +898,85 @@ bool release_attention_completion(sllm_public_runtime::AccountingState &context,
       --buffers[index]->accounting.completion_references;
     }
   }
+  return true;
+}
+
+bool reserve_linear_attention_state(
+    sllm_public_runtime::AccountingState &context) noexcept {
+  if (!sllm_public_runtime::AccountingState::can_increment(
+          context.child_count) ||
+      !sllm_public_runtime::AccountingState::can_increment(
+          context.lifetime_guards)) {
+    return false;
+  }
+  ++context.child_count;
+  ++context.lifetime_guards;
+  return true;
+}
+
+bool release_linear_attention_state(
+    sllm_public_runtime::AccountingState &context) noexcept {
+  if (context.child_count == 0U || context.lifetime_guards == 0U) {
+    return false;
+  }
+  --context.child_count;
+  --context.lifetime_guards;
+  return true;
+}
+
+bool reserve_linear_attention_submission(
+    Context *const context, Queue *const queue,
+    LinearAttentionState *const state,
+    const LinearAttentionBuffers &buffers) noexcept {
+  if (!sllm_public_runtime::AccountingState::can_increment(
+          state->accounting.active_submissions) ||
+      !sllm_public_runtime::AccountingState::can_increment(
+          state->accounting.completion_references) ||
+      !reserve_attention_submission(context->accounting, queue->accounting,
+                                    buffers)) {
+    return false;
+  }
+  ++state->accounting.active_submissions;
+  ++state->accounting.completion_references;
+  return true;
+}
+
+bool release_linear_attention_active(
+    Queue *const queue, LinearAttentionState *const state,
+    const LinearAttentionBuffers &buffers) noexcept {
+  if (state->accounting.active_submissions == 0U ||
+      !release_attention_active(queue->accounting, buffers)) {
+    return false;
+  }
+  --state->accounting.active_submissions;
+  return true;
+}
+
+bool rollback_linear_attention_submission(
+    Context *const context, Queue *const queue,
+    LinearAttentionState *const state,
+    const LinearAttentionBuffers &buffers) noexcept {
+  if (state->accounting.active_submissions == 0U ||
+      state->accounting.completion_references == 0U ||
+      !rollback_attention_submission(context->accounting, queue->accounting,
+                                     buffers)) {
+    return false;
+  }
+  --state->accounting.active_submissions;
+  --state->accounting.completion_references;
+  return true;
+}
+
+bool release_linear_attention_completion(
+    Context *const context, Queue *const queue,
+    LinearAttentionState *const state,
+    const LinearAttentionBuffers &buffers) noexcept {
+  if (state->accounting.completion_references == 0U ||
+      !release_attention_completion(context->accounting, queue->accounting,
+                                    buffers)) {
+    return false;
+  }
+  --state->accounting.completion_references;
   return true;
 }
 
@@ -1180,6 +1386,41 @@ validate_matmul_dispatch_info(const sllm_matmul_dispatch_info_t *const info,
   return SLLM_STATUS_OK;
 }
 
+sllm_status_t
+validate_argmax_dispatch_info(const sllm_argmax_dispatch_info_t *const info,
+                              sllm_error_sink_t *const sink) noexcept {
+  if (info == nullptr) {
+    return sllm_public_runtime::write_error(
+        sink, SLLM_STATUS_INVALID_ARGUMENT,
+        "argmax dispatch info output is null");
+  }
+  uint32_t prefix[2] = {};
+  std::memcpy(prefix, info, sizeof(prefix));
+  if (prefix[0] != sizeof(sllm_argmax_dispatch_info_t)) {
+    return sllm_public_runtime::write_error(
+        sink, SLLM_STATUS_INVALID_ARGUMENT,
+        "argmax dispatch info has an unsupported struct size");
+  }
+  if (prefix[1] != SLLM_HIP_ABI_VERSION) {
+    return sllm_public_runtime::write_error(
+        sink, SLLM_STATUS_INVALID_ABI_VERSION,
+        "argmax dispatch info ABI version is unsupported");
+  }
+  if (info->info_version != SLLM_HIP_ARGMAX_DISPATCH_INFO_VERSION) {
+    return sllm_public_runtime::write_error(
+        sink, SLLM_STATUS_INVALID_ARGUMENT,
+        "argmax dispatch info version is unsupported");
+  }
+  for (const uint32_t value : info->reserved) {
+    if (value != 0U) {
+      return sllm_public_runtime::write_error(
+          sink, SLLM_STATUS_RESERVED_NONZERO,
+          "argmax dispatch info reserved fields must be zero");
+    }
+  }
+  return SLLM_STATUS_OK;
+}
+
 sllm_status_t validate_attention_preprocess_dispatch_info(
     const sllm_attention_preprocess_dispatch_info_t *const info,
     sllm_error_sink_t *const sink) noexcept {
@@ -1386,6 +1627,36 @@ void initialize_matmul_dispatch_info(
   sllm_public_runtime::copy_fixed_string(info->device_symbol,
                                          SLLM_HIP_MATMUL_DEVICE_SYMBOL_MAX,
                                          ::sllm_matmul_kernel::kDeviceSymbol);
+  sllm_public_runtime::copy_fixed_string(info->gcn_arch_name,
+                                         SLLM_HIP_MAX_GCN_ARCH_NAME, arch_name);
+}
+
+void initialize_argmax_dispatch_info(
+    sllm_argmax_dispatch_info_t *const info, const uint64_t dispatch_id,
+    const sllm_argmax::DescriptorMetadata &metadata,
+    const char *const arch_name) noexcept {
+  const uint32_t struct_size = info->struct_size;
+  const uint32_t abi_version = info->abi_version;
+  std::memset(info, 0, sizeof(*info));
+  info->struct_size = struct_size;
+  info->abi_version = abi_version;
+  info->info_version = SLLM_HIP_ARGMAX_DISPATCH_INFO_VERSION;
+  info->backend = SLLM_BACKEND_HIP;
+  info->dispatch_id = dispatch_id;
+  info->dispatch_count = 1U;
+  info->kernel_id = SLLM_HIP_ARGMAX_KERNEL_ID_BASELINE_BF16_V1;
+  info->workgroup_size_x = SLLM_HIP_ARGMAX_WORKGROUP_SIZE;
+  info->grid_size_x = static_cast<uint32_t>(metadata.m);
+  info->row_count = metadata.m;
+  info->vocab_size = metadata.v;
+  info->fallback_allowed = 0U;
+  info->fallback_used = 0U;
+  sllm_public_runtime::copy_fixed_string(
+      info->kernel_symbol, SLLM_HIP_ARGMAX_KERNEL_SYMBOL_MAX,
+      ::sllm_argmax_kernel::kLogicalKernelId);
+  sllm_public_runtime::copy_fixed_string(
+      info->device_symbol, SLLM_HIP_ARGMAX_DEVICE_SYMBOL_MAX,
+      ::sllm_argmax_kernel::kDeviceSymbol);
   sllm_public_runtime::copy_fixed_string(info->gcn_arch_name,
                                          SLLM_HIP_MAX_GCN_ARCH_NAME, arch_name);
 }
@@ -1615,6 +1886,24 @@ bool rollback_reserved_elementwise_submission(
   return false;
 }
 
+bool rollback_reserved_argmax_submission(
+    ElementwisePlan *const plan, Queue *const queue,
+    sllm_error_sink_t *const sink) noexcept {
+  Context *const context = plan->context;
+  std::lock_guard<std::mutex> lock(context->accounting_mutex);
+  if (sllm_public_runtime::AccountingState::rollback_two_buffer_submission(
+          context->accounting, queue->accounting, plan->input0->accounting,
+          plan->output->accounting)) {
+    plan->in_flight = false;
+    return true;
+  }
+  poison_context_locked(context);
+  (void)sllm_public_runtime::write_error(
+      sink, SLLM_STATUS_INTERNAL_ERROR,
+      "argmax submission accounting rollback failed; context poisoned");
+  return false;
+}
+
 bool rollback_reserved_attention_submission(
     AttentionPreprocessPlan *const plan, Queue *const queue,
     sllm_error_sink_t *const sink) noexcept {
@@ -1716,6 +2005,90 @@ bool revoke_kv_append_commit(Completion *const completion) noexcept {
   return true;
 }
 
+bool clear_linear_attention_transition_locked(LinearAttentionState *const state,
+                                              const uint64_t token,
+                                              const bool publish) noexcept {
+  if (state == nullptr || token == 0U || state->transition_token != token) {
+    return false;
+  }
+  if (publish) {
+    if (!state->commit_allowed ||
+        state->published_length != state->transition_start ||
+        state->transition_end < state->transition_start ||
+        state->transition_end > state->capacity_tokens ||
+        state->generation == std::numeric_limits<uint64_t>::max()) {
+      return false;
+    }
+    state->active_slot = 1U - state->active_slot;
+    state->published_length = state->transition_end;
+    ++state->generation;
+  }
+  state->transition_token = 0U;
+  state->transition_start = 0U;
+  state->transition_count = 0U;
+  state->transition_end = 0U;
+  state->commit_allowed = false;
+  return true;
+}
+
+bool rollback_reserved_linear_attention(
+    LinearAttentionState *const state, Queue *const queue,
+    const LinearAttentionBuffers &buffers,
+    sllm_error_sink_t *const sink) noexcept {
+  Context *const context = state->context;
+  std::lock_guard<std::mutex> lock(context->accounting_mutex);
+  const uint64_t token = state->transition_token;
+  if (rollback_linear_attention_submission(context, queue, state, buffers) &&
+      clear_linear_attention_transition_locked(state, token, false)) {
+    return true;
+  }
+  poison_context_locked(context);
+  (void)sllm_public_runtime::write_error(
+      sink, SLLM_STATUS_INTERNAL_ERROR,
+      "linear attention accounting or transition rollback failed; context "
+      "poisoned");
+  return false;
+}
+
+bool finalize_linear_attention(Completion *const completion) noexcept {
+  if (!completion->linear_attention) {
+    return true;
+  }
+  std::lock_guard<std::mutex> lock(completion->context->accounting_mutex);
+  LinearAttentionState *const state = completion->linear_attention_state;
+  if (state == nullptr ||
+      state->transition_token != completion->linear_attention_token ||
+      state->transition_start != completion->linear_attention_start ||
+      state->transition_count != completion->linear_attention_count ||
+      state->transition_end != completion->linear_attention_end) {
+    poison_context_locked(completion->context);
+    return false;
+  }
+  const bool publish = state->commit_allowed;
+  if (!clear_linear_attention_transition_locked(
+          state, completion->linear_attention_token, publish)) {
+    poison_context_locked(completion->context);
+    return false;
+  }
+  return true;
+}
+
+bool revoke_linear_attention_commit(Completion *const completion) noexcept {
+  if (!completion->linear_attention) {
+    return false;
+  }
+  std::lock_guard<std::mutex> lock(completion->context->accounting_mutex);
+  LinearAttentionState *const state = completion->linear_attention_state;
+  if (state == nullptr ||
+      state->transition_token != completion->linear_attention_token ||
+      completion->linear_attention_token == 0U) {
+    poison_context_locked(completion->context);
+    return false;
+  }
+  state->commit_allowed = false;
+  return true;
+}
+
 bool reserve_submission_references(Queue *const queue,
                                    Buffer *const buffer) noexcept {
   std::lock_guard<std::mutex> lock(queue->context->accounting_mutex);
@@ -1750,6 +2123,10 @@ bool release_submission_references(Completion *const completion) noexcept {
           completion->matmul_activation->accounting,
           completion->matmul_weight->accounting,
           completion->matmul_output->accounting);
+    } else if (completion->argmax) {
+      released = sllm_public_runtime::AccountingState::release_two_buffer_active(
+          completion->queue->accounting, completion->argmax_logits->accounting,
+          completion->argmax_output->accounting);
     } else if (completion->attention_preprocess) {
       released = release_attention_active(completion->queue->accounting,
                                           completion->attention_buffers);
@@ -1764,6 +2141,10 @@ bool release_submission_references(Completion *const completion) noexcept {
       released = release_causal_active(completion->queue,
                                        completion->causal_attention_state,
                                        completion->causal_attention_buffers);
+    } else if (completion->linear_attention) {
+      released = release_linear_attention_active(
+          completion->queue, completion->linear_attention_state,
+          completion->linear_attention_buffers);
     } else {
       released = sllm_public_runtime::AccountingState::release_active(
           completion->queue->accounting, completion->buffer->accounting);
@@ -1783,6 +2164,9 @@ bool release_submission_references(Completion *const completion) noexcept {
   }
   if (completion->matmul && completion->matmul_plan != nullptr) {
     completion->matmul_plan->in_flight = false;
+  }
+  if (completion->argmax && completion->argmax_plan != nullptr) {
+    completion->argmax_plan->in_flight = false;
   }
   if (completion->attention_preprocess &&
       completion->attention_preprocess_plan != nullptr) {
@@ -1821,6 +2205,11 @@ bool rollback_submission_references(Completion *const completion) noexcept {
               completion->matmul_activation->accounting,
               completion->matmul_weight->accounting,
               completion->matmul_output->accounting);
+    } else if (completion->argmax) {
+      released = sllm_public_runtime::AccountingState::rollback_two_buffer_submission(
+          completion->context->accounting, completion->queue->accounting,
+          completion->argmax_logits->accounting,
+          completion->argmax_output->accounting);
     } else if (completion->attention_preprocess) {
       released = rollback_attention_submission(completion->context->accounting,
                                                completion->queue->accounting,
@@ -1835,6 +2224,11 @@ bool rollback_submission_references(Completion *const completion) noexcept {
           completion->kv_value_buffer->accounting);
     } else if (completion->causal_attention) {
       released = rollback_causal_attention(completion);
+    } else if (completion->linear_attention) {
+      released = rollback_linear_attention_submission(
+          completion->context, completion->queue,
+          completion->linear_attention_state,
+          completion->linear_attention_buffers);
     } else {
       released = sllm_public_runtime::AccountingState::rollback_submission(
           completion->context->accounting, completion->queue->accounting,
@@ -1844,6 +2238,11 @@ bool rollback_submission_references(Completion *const completion) noexcept {
   if (released && completion->kv_state_append) {
     released = clear_kv_transition_locked(completion->kv_state,
                                           completion->kv_append_token, false);
+  }
+  if (released && completion->linear_attention) {
+    released = clear_linear_attention_transition_locked(
+        completion->linear_attention_state, completion->linear_attention_token,
+        false);
   }
   if (released) {
     completion->active_release_attempted = true;
@@ -1857,6 +2256,9 @@ bool rollback_submission_references(Completion *const completion) noexcept {
     }
     if (completion->matmul && completion->matmul_plan != nullptr) {
       completion->matmul_plan->in_flight = false;
+    }
+    if (completion->argmax && completion->argmax_plan != nullptr) {
+      completion->argmax_plan->in_flight = false;
     }
     if (completion->attention_preprocess &&
         completion->attention_preprocess_plan != nullptr) {
@@ -1897,6 +2299,11 @@ bool release_completion_child_reference(Completion *const completion) noexcept {
               completion->matmul_activation->accounting,
               completion->matmul_weight->accounting,
               completion->matmul_output->accounting);
+    } else if (completion->argmax) {
+      released = sllm_public_runtime::AccountingState::release_two_buffer_completion(
+          completion->context->accounting, completion->queue->accounting,
+          completion->argmax_logits->accounting,
+          completion->argmax_output->accounting);
     } else if (completion->attention_preprocess) {
       released = release_attention_completion(completion->context->accounting,
                                               completion->queue->accounting,
@@ -1911,6 +2318,11 @@ bool release_completion_child_reference(Completion *const completion) noexcept {
           completion->kv_value_buffer->accounting);
     } else if (completion->causal_attention) {
       released = release_causal_completion(completion);
+    } else if (completion->linear_attention) {
+      released = release_linear_attention_completion(
+          completion->context, completion->queue,
+          completion->linear_attention_state,
+          completion->linear_attention_buffers);
     } else {
       released = sllm_public_runtime::AccountingState::
           release_completion_and_lifetime_guard(completion->context->accounting,
@@ -1952,8 +2364,9 @@ sllm_status_t poll_completion(Completion *const completion,
   }
   if (status == hipSuccess) {
     if (completion->rmsnorm || completion->elementwise || completion->matmul ||
+        completion->argmax ||
         completion->attention_preprocess || completion->kv_state_append ||
-        completion->causal_attention) {
+        completion->causal_attention || completion->linear_attention) {
       if (completion->timing_start_event == nullptr) {
         completion->terminal = true;
         completion->success = false;
@@ -2025,6 +2438,16 @@ sllm_status_t poll_completion(Completion *const completion,
       return sllm_public_runtime::write_error(
           sink, SLLM_STATUS_INTERNAL_ERROR,
           "KV append transition finalization failed; context poisoned");
+    }
+    if (!finalize_linear_attention(completion)) {
+      completion->terminal = true;
+      completion->success = false;
+      completion->safe_to_release = false;
+      completion->failure_status = hipErrorInvalidValue;
+      completion->safety.quarantine();
+      return sllm_public_runtime::write_error(
+          sink, SLLM_STATUS_INTERNAL_ERROR,
+          "linear attention transition finalization failed; context poisoned");
     }
     completion->terminal = true;
     completion->success = true;
@@ -2425,9 +2848,10 @@ public:
   ElementwiseExecuteScopeGuard(ElementwisePlan *const plan, Queue *const queue,
                                std::unique_ptr<Completion> *const candidate,
                                NativeEventGuard *const event_guard,
-                               sllm_error_sink_t *const sink) noexcept
+                               sllm_error_sink_t *const sink,
+                               const bool argmax = false) noexcept
       : plan_(plan), queue_(queue), candidate_(candidate),
-        event_guard_(event_guard), sink_(sink), token_(0U),
+        event_guard_(event_guard), sink_(sink), argmax_(argmax), token_(0U),
         phase_(Phase::Reserved) {}
 
   ElementwiseExecuteScopeGuard(const ElementwiseExecuteScopeGuard &) = delete;
@@ -2451,7 +2875,11 @@ private:
   void cleanup() noexcept {
     switch (phase_) {
     case Phase::Reserved:
-      (void)rollback_reserved_elementwise_submission(plan_, queue_, sink_);
+      if (argmax_) {
+        (void)rollback_reserved_argmax_submission(plan_, queue_, sink_);
+      } else {
+        (void)rollback_reserved_elementwise_submission(plan_, queue_, sink_);
+      }
       break;
     case Phase::Candidate:
       if (candidate_ != nullptr && candidate_->get() != nullptr) {
@@ -2460,7 +2888,11 @@ private:
             "elementwise execute unwound before completion registration",
             sink_);
       } else {
-        (void)rollback_reserved_elementwise_submission(plan_, queue_, sink_);
+        if (argmax_) {
+          (void)rollback_reserved_argmax_submission(plan_, queue_, sink_);
+        } else {
+          (void)rollback_reserved_elementwise_submission(plan_, queue_, sink_);
+        }
       }
       break;
     case Phase::Registered:
@@ -2484,6 +2916,7 @@ private:
   std::unique_ptr<Completion> *const candidate_;
   NativeEventGuard *const event_guard_;
   sllm_error_sink_t *const sink_;
+  bool argmax_;
   uintptr_t token_;
   Phase phase_;
 };
@@ -4151,8 +4584,10 @@ sllm_completion_timing(sllm_completion_t *const raw_completion,
       return completion_status;
     }
     if (!completion->rmsnorm && !completion->elementwise &&
-        !completion->matmul && !completion->attention_preprocess &&
-        !completion->kv_state_append && !completion->causal_attention) {
+        !completion->matmul && !completion->argmax &&
+        !completion->attention_preprocess &&
+        !completion->kv_state_append && !completion->causal_attention &&
+        !completion->linear_attention) {
       return sllm_public_runtime::write_error(
           error_sink, SLLM_STATUS_UNSUPPORTED,
           "completion timing is only available for numeric operations");
@@ -4221,6 +4656,13 @@ sllm_completion_release(sllm_completion_t **const raw_completion,
         return sllm_public_runtime::write_error(
             error_sink, SLLM_STATUS_INTERNAL_ERROR,
             "KV append revocation failed; context poisoned");
+      }
+      if (!completion->terminal && completion->linear_attention &&
+          !revoke_linear_attention_commit(completion)) {
+        completion->safe_to_release = false;
+        return sllm_public_runtime::write_error(
+            error_sink, SLLM_STATUS_INTERNAL_ERROR,
+            "linear attention revocation failed; context poisoned");
       }
       if (!completion->terminal || !completion->safe_to_release ||
           !completion->safety.can_release_graph()) {
@@ -5369,6 +5811,7 @@ sllm_elementwise_execute(const sllm_elementwise_plan_t *const raw_plan,
 #include "causal_attention_runtime.inc"
 #include "embedding_runtime.inc"
 #include "matmul_runtime.inc"
+#include "argmax_runtime.inc"
 
 namespace {
 
@@ -6618,6 +7061,8 @@ sllm_kv_state_append_cancel(const sllm_kv_state_t *const raw_state,
         "unexpected exception in KV append cancel");
   }
 }
+
+#include "linear_attention_runtime.inc"
 
 #if defined(SLLM_PUBLIC_RUNTIME_HOST_TEST)
 extern "C" std::size_t sllm_test_orphan_count() noexcept {
