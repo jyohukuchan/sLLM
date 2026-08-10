@@ -129,6 +129,8 @@ B1最終機能candidateはcommit `b5cc617287ec2efb97c5b06bd838621f51d547c8`、tr
 
 完了記録を追加したdocs-only candidate `01dbedfa9de5e435703ef26b66fb610f194cfdd2`のstrict H0 attempt 1は、335 selected中334 PASS、semantic G1 broker client-death test 1件FAILであり、retryで昇格させない。test/helperは`b5cc6172`からbyte-identicalで、単独100/100と同じ95-test command 3/3はPASSした一方、compiler PID clear後のfailure publicationを500 ms遅延させるin-memory probeで同じ失敗を決定的に再現した。productionのfail-closed動作は変えず、testの待機条件からPIDを外して既存5秒deadlineまでfailure publicationを待ち、failure non-Noneとcompiler PID Noneの両assertionを維持する。修正後のfocused 20/20、semantic G1 95/95はPASSしたが、修復を含む新identityへ固定cache/H0〜H2/fresh reviewを再結合するまでB1は未完了とする。
 
+B1の受入済みimmutable implementation candidateはcommit `6543098f70d8c06b5a6758becd4590ab44fb9811`、tree `b4f46f5a42c09df4e2d64aa5c1f8191620d60ce8`である。固定cache再検証はcandidate SHA/tree、前後clean、validator/lock/schema/output digest、attempt 1をsidecar付きreportへ結合し、13 file・9,342,905,899 bytes、fingerprint `sha256:32265444b7cdd2a00e4e4e3e6aa8375a05acf6cddfcb9ffc348f54f67a7cd935`、全738 header metadataを`PASS`した。同一identityのpinned Python 3.12.10 strict H0 335/335、H1 156/188（32 deselected）、H2 35/42（7 deselected）は各attempt 1、required case全PASS、skipped 0、report/sidecar一致だった。正しいrollback base `d610b4801052f11125a9002e0b59d0d0973a86d7`からのfresh累積独立reviewはHigh/Medium/Low 0件の`PASS/no findings`で、全738 tensorのRust/Python exact catalog、negative mutation、checked overflow、bounded diagnostic、descriptor map非複製、header-only semantic inspection、provenanceを確認した。broker client-death修正はtest 1行だけでproduction brokerは不変、`01dbedfa...`の334/335 FAILは非受入のまま再利用していない。B1 implementationは完了し、本結果を記録するdocs-only closeoutを検証してからB2を開始する。
+
 受入条件:
 
 - CPU CIはtiny synthetic safetensors/tokenizer fixtureだけを使い、full modelをdownload/loadしない。
