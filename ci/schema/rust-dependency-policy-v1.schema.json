@@ -22,7 +22,7 @@
       "items": {"$ref": "#/$defs/package"}
     },
     "edges": {
-      "type": "array", "minItems": 170, "maxItems": 170,
+      "type": "array", "minItems": 171, "maxItems": 171,
       "items": {"$ref": "#/$defs/edge"}
     },
     "counts": {"$ref": "#/$defs/counts"},
@@ -112,10 +112,10 @@
       "type": "object", "additionalProperties": false,
       "required": ["packages", "registry_packages", "workspace_packages", "edges", "edge_kinds", "target_specific_edges", "target_expressions"],
       "properties": {
-        "packages": {"const": 90}, "registry_packages": {"const": 85}, "workspace_packages": {"const": 5}, "edges": {"const": 170},
+        "packages": {"const": 90}, "registry_packages": {"const": 85}, "workspace_packages": {"const": 5}, "edges": {"const": 171},
         "edge_kinds": {
           "type": "object", "additionalProperties": false, "required": ["build", "dev", "normal"],
-          "properties": {"build": {"const": 6}, "dev": {"const": 1}, "normal": {"const": 163}}
+          "properties": {"build": {"const": 6}, "dev": {"const": 1}, "normal": {"const": 164}}
         },
         "target_specific_edges": {"const": 21}, "target_expressions": {"const": 18}
       }

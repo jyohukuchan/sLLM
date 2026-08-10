@@ -678,8 +678,8 @@ def main() -> int:
             raise ContractError("suites-v1 identity is not revision 18")
         if host.get("schema_version") != "host-v1" or host.get("revision") != 11:
             raise ContractError("host-v1 identity is not revision 11")
-        if paths.get("schema_version") != "path-to-suite-v1" or paths.get("revision") != 26:
-            raise ContractError("path-to-suite-v1 identity is not revision 26")
+        if paths.get("schema_version") != "path-to-suite-v1" or paths.get("revision") != 27:
+            raise ContractError("path-to-suite-v1 identity is not revision 27")
         for suite in suites["suites"]:
             sid = suite["suite_id"]
             if set(suite) != {"suite_id", "tier", "marker", "attributes", "test_ids", "commands"}:

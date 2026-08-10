@@ -92,6 +92,20 @@
       "manifest": "crates/sllm-frontend/Cargo.toml",
       "targets": [
         {
+          "name": "chat_contract",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ],
+          "edition": "2024",
+          "required_features": [],
+          "test": true,
+          "doc": false,
+          "doctest": false
+        },
+        {
           "name": "sllm_frontend",
           "kind": [
             "lib"
@@ -3411,6 +3425,18 @@
     },
     {
       "from": "workspace:sllm-frontend@0.1.0",
+      "to": "registry:sha2@0.10.9",
+      "name": "sha2",
+      "kind": "normal",
+      "target": null,
+      "req": "=0.10.9",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "workspace:sllm-frontend@0.1.0",
       "to": "registry:tokenizers@0.21.4",
       "name": "tokenizers",
       "kind": "normal",
@@ -3538,11 +3564,11 @@
     "packages": 90,
     "registry_packages": 85,
     "workspace_packages": 5,
-    "edges": 170,
+    "edges": 171,
     "edge_kinds": {
       "build": 6,
       "dev": 1,
-      "normal": 163
+      "normal": 164
     },
     "target_specific_edges": 21,
     "target_expressions": 18

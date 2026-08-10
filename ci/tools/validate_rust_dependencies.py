@@ -421,7 +421,7 @@ def normalize_metadata(metadata: dict[str, Any], repo: Path = ROOT) -> dict[str,
                         "rename": declared.get("rename"),
                     }
                 )
-    if len(edges_out) != 170:
+    if len(edges_out) != 171:
         raise ContractError(f"resolved edge count drifted: {len(edges_out)}")
     edge_keys = {
         (
@@ -576,7 +576,7 @@ def _validate_policy_semantics(manifest: dict[str, Any]) -> None:
         raise ContractError("workspace member/package identity sets differ")
 
     edges = manifest.get("edges")
-    if not isinstance(edges, list) or len(edges) != 170:
+    if not isinstance(edges, list) or len(edges) != 171:
         raise ContractError("policy edge count drifted")
     edge_keys: set[tuple[Any, ...]] = set()
     for edge in edges:

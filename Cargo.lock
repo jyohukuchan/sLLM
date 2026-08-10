@@ -608,6 +608,7 @@ dependencies = [
 name = "sllm-frontend"
 version = "0.1.0"
 dependencies = [
+ "sha2",
  "sllm-core",
  "tokenizers",
 ]

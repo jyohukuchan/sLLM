@@ -3,8 +3,15 @@
 use core::fmt;
 use std::borrow::Borrow;
 
+mod chat;
 mod tokenizer;
 
+pub use chat::{
+    ChatFieldV1, ChatRenderError, QWEN35_CHAT_MAX_OUTPUT_BYTES, QWEN35_CHAT_RENDERER_VERSION,
+    QWEN35_CHAT_TEMPLATE_FILENAME, QWEN35_CHAT_TEMPLATE_SHA256, QWEN35_CHAT_TEMPLATE_SIZE_BYTES,
+    Qwen35ChatMessageV1, Qwen35ChatTemplateV1, Qwen35RenderOptionsV1, ThinkingModeV1,
+    UntrustedChatMessageV1, UntrustedChatRequestV1, UntrustedChatValueV1,
+};
 pub use tokenizer::{
     DecodeModeV1, EosIdentitySnapshotV1, EosIdentityV1, SpecialTokenSnapshotV1, TokenIdContextV1,
     TokenIdsV1, TokenizerError, TokenizerFrontendV1, TokenizerSnapshotV1,
@@ -18,9 +25,9 @@ pub use sllm_core::{
 pub const GENERATION_STOP_POLICY_VERSION: u8 = 1;
 pub const GENERATION_STOP_REASON_VERSION: u8 = 1;
 
-// Tokenizer encode/decode is now part of this frontend boundary. Future
-// chat-template rendering and evaluation remain outside it. Keep an explicit
-// type reference to the pinned tokenizer dependency.
+// Tokenizer encode/decode and the fixed Qwen3.5 renderer are part of this
+// frontend boundary. Keep an explicit type reference to the pinned tokenizer
+// dependency.
 #[allow(dead_code)]
 const TOKENIZERS_DEPENDENCY_MARKER: core::marker::PhantomData<tokenizers::Tokenizer> =
     core::marker::PhantomData;
