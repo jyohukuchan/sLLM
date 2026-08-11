@@ -6,8 +6,8 @@
   "required": true,
   "timeout_seconds": 180,
   "candidate": {
-    "commit": "64a9f9752712fc7cff4f482ea7888b0aba03b719",
-    "tree": "cea24196f45881d4d8a5e0d23aa686b7594a440e"
+    "commit": "2c859a579007c388d956e46905ef71fb5a9d5881",
+    "tree": "1fb63550fe2d4405a97a00ba28e2bcb1dfc75f14"
   },
   "plan_digest": "sha256:0474ed893fbc043c3ace0197515f8d99e27fe3d28a4844fbdd9781bb9d30c7fa",
   "model": {
@@ -28,7 +28,7 @@
       "backend": "hip",
       "gpu_uuid": "GPU-76a08c022586fed6",
       "gpu_bdf": "0000:03:00.0",
-      "binary_sha256": "62c02a93960cbd462ee8bc16aa9031db98d6d16bb25cea95fd9bc8a64267d867",
+      "binary_sha256": "360154b9f43c7be7db26676cd6635b3a33da450275752076779f3cba7adf11a1",
       "cases": [
         "g3-prompt-1",
         "g3-prompt-7",
@@ -45,7 +45,7 @@
       "backend": "hip",
       "gpu_uuid": "GPU-a8e9ddefa2d60f55",
       "gpu_bdf": "0000:07:00.0",
-      "binary_sha256": "20235ac7761721be62586313ed4976a503cd210899e976de49948148bdf0988c",
+      "binary_sha256": "faafe84bc320b413661214393abea41a107a8893ddb1cf6dcdcd34247410868a",
       "cases": [
         "g3-prompt-1",
         "g3-prompt-7",
