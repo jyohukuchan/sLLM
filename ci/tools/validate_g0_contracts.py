@@ -48,7 +48,7 @@ EXPECTED_ROWS = (
     {
         "row_id": "g0-gfx1201",
         "target": "gfx1201",
-        "bdf": "0000:47:00.0",
+        "bdf": "0000:07:00.0",
         "uuid": "GPU-a8e9ddefa2d60f55",
         "product": "AMD Radeon AI PRO R9700",
         "h3_artifact_row_id": "h3-gfx1201",
@@ -65,7 +65,7 @@ EXPECTED_ROWS = (
 )
 EXPECTED_EXECUTION = {
     "serial": True,
-    "host_lock": {"path": "/tmp/ullm-g0.lock", "acquisition": "nonblocking"},
+    "host_lock": {"path": "/tmp/sllm-g0.lock", "acquisition": "nonblocking"},
     "trusted_local_only": True,
     "visibility_is_security_boundary": False,
     "sudo_allowed": False,
@@ -76,7 +76,7 @@ EXPECTED_EXECUTION = {
         "provider_id": "g0-native-hip-observer-v1",
         "source": "ci/tools/g0_native_observer.cpp",
         "compiler": "/opt/rocm/core-7.14/bin/amdclang++",
-        "output_prefix": "/tmp/ullm-g0-provider-",
+        "output_prefix": "/tmp/sllm-g0-provider-",
         "timeout_seconds": 60,
         "allowed_hip_apis": [
             "hipRuntimeGetVersion",
@@ -108,7 +108,7 @@ EXPECTED_SCOPE = {
     "support_claim": False,
 }
 EXPECTED_OUTPUT = {
-    "root_prefix": "/tmp/ullm-g0-",
+    "root_prefix": "/tmp/sllm-g0-",
     "directory_pattern": "g0-{target}",
     "source_tree_output": False,
     "sidecar_hashes": True,

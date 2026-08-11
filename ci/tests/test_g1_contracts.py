@@ -15,6 +15,7 @@ import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "ci/tools"))
@@ -169,7 +170,7 @@ class AggregateFixtureToolRunner:
 
 class G1Fixture:
     def __init__(self, target: str, run_id: str = "unit-run", attempt: int = 1) -> None:
-        self.root = Path(tempfile.mkdtemp(prefix="ullm-g1-fixture-"))
+        self.root = Path(tempfile.mkdtemp(prefix="sllm-g1-fixture-"))
         self.row_id = f"g1-{target}"
         self.target = target
         self.row_dir = self.root / self.row_id
@@ -247,13 +248,13 @@ class G1Fixture:
                 "model_used": False,
                 "cpu_fallback_allowed": False,
                 "cpu_fallback_used": False,
-                "binary_command": ["target/release/ullm-hip-evidence", "--timeout-ms", "1000"],
+                "binary_command": ["target/release/sllm-hip-evidence", "--timeout-ms", "1000"],
             },
         }
         self.metadata_path = self.row_dir / METADATA_NAME
         self.metadata_path.write_bytes(canonical_bytes(self.metadata))
         metadata_sidecar_sha = write_sidecar(self.metadata_path)
-        command = ["target/release/ullm-hip-evidence", "--timeout-ms", "1000"]
+        command = ["target/release/sllm-hip-evidence", "--timeout-ms", "1000"]
         self.report = {
             "schema_version": "g1-report-v1",
             "report_id": f"{self.row_id}.{run_id}.{attempt}",
@@ -383,7 +384,7 @@ class G1ContractTests(unittest.TestCase):
             self.assertEqual(Path(command[-2]).resolve(), fixture.artifact.resolve())
             self.assertNotEqual(Path(command[-1]).resolve(), fixture.artifact.resolve())
             self.assertNotEqual(Path(command[-1]).resolve(), Path(dump_output).resolve())
-            self.assertIn("ullm-g1-inspect-", command[-1])
+            self.assertIn("sllm-g1-inspect-", command[-1])
         finally:
             fixture.close()
 
@@ -406,6 +407,22 @@ class G1ContractTests(unittest.TestCase):
                     tool_runner=MutatingToolRunner(fixture.target),
                 )
             self.assertNotEqual(fixture.artifact.read_bytes(), before)
+        finally:
+            fixture.close()
+
+    def test_production_inspection_requires_real_pinned_tools(self) -> None:
+        fixture = G1Fixture("gfx1030")
+        try:
+            missing = "/opt/rocm/definitely-missing/llvm-readobj"
+            with mock.patch.dict(
+                g1_contracts.EXPECTED_INSPECTOR_TOOLS,
+                {"llvm_readobj": missing},
+            ):
+                with self.assertRaisesRegex(
+                    ContractError,
+                    "pinned G1 inspector is missing or outside /opt/rocm",
+                ):
+                    inspect_g1_runtime_artifact(fixture.artifact, fixture.target)
         finally:
             fixture.close()
 
@@ -553,8 +570,8 @@ class G1ContractTests(unittest.TestCase):
             ("residual process", lambda report: report["process_post"].update({"residual_runner_children": [{"pid": 1}]})),
             ("allocation total", lambda report: report["scope"].update({"allocation_count": 11})),
             ("case copy total", lambda report: report["cases"][2].update({"copy_count": 1})),
-            ("source path mismatch", lambda report: report["artifact"].update({"artifact_path": "/tmp/target/release/ullm-hip-evidence"})),
-            ("staged path mismatch", lambda report: report["artifact"].update({"staged_artifact_path": "/tmp/other/ullm-hip-evidence"})),
+            ("source path mismatch", lambda report: report["artifact"].update({"artifact_path": "/tmp/target/release/sllm-hip-evidence"})),
+            ("staged path mismatch", lambda report: report["artifact"].update({"staged_artifact_path": "/tmp/other/sllm-hip-evidence"})),
         )
         for label, mutation in mutations:
             fixture = G1Fixture("gfx1030")
@@ -568,10 +585,10 @@ class G1ContractTests(unittest.TestCase):
 
     def test_symlink_and_non_private_aggregate_output_fail(self) -> None:
         fixture = G1Fixture("gfx1030")
-        outside_root = Path(tempfile.mkdtemp(prefix="ullm-g1-outside-root-"))
+        outside_root = Path(tempfile.mkdtemp(prefix="sllm-g1-outside-root-"))
         outside = outside_root / "output"
-        private = Path(tempfile.mkdtemp(prefix="ullm-g1-private-"))
-        link = Path(tempfile.mkdtemp(prefix="ullm-g1-link-parent-")) / "link"
+        private = Path(tempfile.mkdtemp(prefix="sllm-g1-private-"))
+        link = Path(tempfile.mkdtemp(prefix="sllm-g1-link-parent-")) / "link"
         try:
             with self.assertRaises(ContractError):
                 write_summary(outside, {"not": "an aggregate"})
@@ -600,8 +617,8 @@ class G1ContractTests(unittest.TestCase):
         ), self.assertRaises(ContractError):
             aggregate_results(
                 needs_path=Path("/tmp/missing-g1-needs.json"),
-                artifact_dir=Path("/tmp/ullm-g1-missing"), repo=ROOT,
-                output_dir=Path("/tmp/ullm-g1-summary"), run_id=identity["run_id"],
+                artifact_dir=Path("/tmp/sllm-g1-missing"), repo=ROOT,
+                output_dir=Path("/tmp/sllm-g1-summary"), run_id=identity["run_id"],
                 run_attempt=identity["run_attempt"], reviewed_sha=identity["reviewed_sha"],
                 tested_sha=identity["tested_sha"], workflow_sha=identity["workflow_sha"],
                 tree_oid=identity["git_tree_oid"],
@@ -610,7 +627,7 @@ class G1ContractTests(unittest.TestCase):
     def test_missing_duplicate_and_cross_row_mismatch_fail(self) -> None:
         first = G1Fixture("gfx1030")
         second = G1Fixture("gfx1201")
-        collection = Path(tempfile.mkdtemp(prefix="ullm-g1-collection-"))
+        collection = Path(tempfile.mkdtemp(prefix="sllm-g1-collection-"))
         needs = collection.parent / "g1-needs.json"
         try:
             shutil.copytree(first.row_dir, collection / first.row_id)
@@ -630,20 +647,20 @@ class G1ContractTests(unittest.TestCase):
                     tool_runner=aggregate_runner,
                 )
             self.assertEqual(result["state"], "PASS")
-            output = Path(tempfile.mkdtemp(prefix="ullm-g1-summary-"))
+            output = Path(tempfile.mkdtemp(prefix="sllm-g1-summary-"))
             write_summary(output, result, ROOT)
             with self.assertRaises(ContractError):
                 write_summary(output, result, ROOT)
             shutil.rmtree(output, ignore_errors=True)
             victim = collection / "victim"
             victim.write_bytes(b"must-not-change")
-            symlink_output = Path(tempfile.mkdtemp(prefix="ullm-g1-symlink-output-"))
+            symlink_output = Path(tempfile.mkdtemp(prefix="sllm-g1-symlink-output-"))
             (symlink_output / "aggregate.json").symlink_to(victim)
             with self.assertRaises(ContractError):
                 write_summary(symlink_output, result, ROOT)
             self.assertEqual(victim.read_bytes(), b"must-not-change")
             shutil.rmtree(symlink_output, ignore_errors=True)
-            stale_sidecar_output = Path(tempfile.mkdtemp(prefix="ullm-g1-stale-sidecar-"))
+            stale_sidecar_output = Path(tempfile.mkdtemp(prefix="sllm-g1-stale-sidecar-"))
             stale_sidecar = stale_sidecar_output / "aggregate.json.sha256"
             stale_sidecar.write_bytes(b"stale-sidecar")
             with self.assertRaises(ContractError):
@@ -692,7 +709,7 @@ class G1ContractTests(unittest.TestCase):
             needs.unlink(missing_ok=True)
 
     def test_needs_order_and_cross_row_identity_fail(self) -> None:
-        path = Path(tempfile.mkdtemp(prefix="ullm-g1-needs-")) / "needs.json"
+        path = Path(tempfile.mkdtemp(prefix="sllm-g1-needs-")) / "needs.json"
         try:
             path.write_text(json.dumps({"g1-gfx1201": {"result": "success"}, "g1-gfx1030": {"result": "success"}}), encoding="utf-8")
             with self.assertRaises(ContractError):

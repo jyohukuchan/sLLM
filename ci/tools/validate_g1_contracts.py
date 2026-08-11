@@ -46,7 +46,7 @@ REPORT_SCHEMA = "ci/schema/g1-report-v1.schema.json"
 ARTIFACT_SCHEMA = "ci/schema/g1-runtime-artifact-v1.schema.json"
 REPORT_NAME = "report.json"
 METADATA_NAME = "g1-runtime-artifact.json"
-BINARY_NAME = "ullm-hip-evidence"
+BINARY_NAME = "sllm-hip-evidence"
 EXPECTED_BINARY_SUFFIX = ("target", "release", BINARY_NAME)
 SHA256_TOKEN = re.compile(r"^[0-9a-f]{64}$")
 RUN_ID_TOKEN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
@@ -57,7 +57,7 @@ FORBIDDEN_H3_TEXT = re.compile(
 
 EXPECTED_EXECUTION = {
     "serial": True,
-    "host_lock": {"path": "/tmp/ullm-g0.lock", "acquisition": "nonblocking"},
+    "host_lock": {"path": "/tmp/sllm-g0.lock", "acquisition": "nonblocking"},
     "trusted_local_only": True,
     "visibility_is_security_boundary": False,
     "sudo_allowed": False,
@@ -75,7 +75,7 @@ EXPECTED_SCOPE = {
     "required_sizes": list(EXPECTED_SIZES),
 }
 EXPECTED_COMMAND = {
-    "binary": "target/release/ullm-hip-evidence",
+    "binary": "target/release/sllm-hip-evidence",
     "arguments": ["--timeout-ms", "1000"],
     "documentation": "Dedicated Rust evidence binary; compile artifacts are not executable.",
 }
@@ -134,7 +134,7 @@ EXPECTED_ROWS_DATA = (
     {
         "row_id": "g1-gfx1201",
         "target": "gfx1201",
-        "bdf": "0000:47:00.0",
+        "bdf": "0000:07:00.0",
         "uuid": "GPU-a8e9ddefa2d60f55",
         "product": "AMD Radeon AI PRO R9700",
         "timeout_seconds": 300,
@@ -386,7 +386,7 @@ def validate_g1_matrix(repo: Path = ROOT) -> dict[str, Any]:
     }
     if set(matrix) != expected_top:
         raise ContractError("G1 matrix has unknown or missing top-level keys")
-    if matrix["$schema"] != "https://ullm-project.local/ci/schema/g1-report-v1.schema.json#/$defs/g1_runtime_matrix":
+    if matrix["$schema"] != "https://sllm-project.local/ci/schema/g1-report-v1.schema.json#/$defs/g1_runtime_matrix":
         raise ContractError("G1 matrix schema binding drifted")
     if matrix["schema_version"] != "g1-runtime-v1" or matrix["matrix_id"] != "g1-runtime-v1" or matrix["revision"] != 1:
         raise ContractError("G1 matrix identity/revision drifted")
@@ -437,7 +437,7 @@ def _tail_is_dedicated_binary(path_value: Any, label: str) -> None:
     path = Path(path_value)
     if not path.is_absolute() or path.parts[-3:] != EXPECTED_BINARY_SUFFIX or "." in path.parts or ".." in path.parts:
         raise ContractError(f"{label} is not a target/release/{BINARY_NAME} path")
-    if FORBIDDEN_H3_TEXT.search(path_value):
+    if FORBIDDEN_H3_TEXT.search("/".join(path.parts[-3:])):
         raise ContractError(f"{label} contains an H3 path")
 
 
@@ -460,8 +460,8 @@ def _validate_source_artifact_path(path_value: Any, repo: Path, label: str) -> N
         relative = path.resolve(strict=False).relative_to(Path("/tmp"))
     except ValueError as exc:
         raise ContractError(f"{label} must be below /tmp") from exc
-    if not relative.parts or not relative.parts[0].startswith("ullm-g1-"):
-        raise ContractError(f"{label} must be below a private ullm-g1-* staging root")
+    if not relative.parts or not relative.parts[0].startswith("sllm-g1-"):
+        raise ContractError(f"{label} must be below a private sllm-g1-* staging root")
     root = Path("/tmp") / relative.parts[0]
     if root.is_symlink() or not root.is_dir():
         raise ContractError(f"{label} private staging root is missing or unsafe")
@@ -769,14 +769,15 @@ def inspect_g1_runtime_artifact(
     artifact_snapshot = _artifact_snapshot(artifact_path, "G1 final staged executable")
     try:
         tools = {name: Path(path) for name, path in EXPECTED_INSPECTOR_TOOLS.items()}
-        for name, path in tools.items():
-            try:
-                resolved_path = path.resolve(strict=True)
-                resolved_path.relative_to(Path("/opt/rocm"))
-            except (OSError, ValueError):
-                raise ContractError(f"pinned G1 inspector is missing or outside /opt/rocm: {name}")
-            if not path.is_file() or not os.access(path, os.X_OK):
-                raise ContractError(f"pinned G1 inspector is missing or not executable: {name}")
+        if tool_runner is None:
+            for name, path in tools.items():
+                try:
+                    resolved_path = path.resolve(strict=True)
+                    resolved_path.relative_to(Path("/opt/rocm"))
+                except (OSError, ValueError):
+                    raise ContractError(f"pinned G1 inspector is missing or outside /opt/rocm: {name}")
+                if not path.is_file() or not os.access(path, os.X_OK):
+                    raise ContractError(f"pinned G1 inspector is missing or not executable: {name}")
 
         host_code, host_stdout, host_err = _inspection_tool_result(
             [str(tools["llvm_readobj"]), "--file-headers", "--sections", str(artifact_path)],
@@ -787,7 +788,7 @@ def inspect_g1_runtime_artifact(
         host_output = _inspection_text(host_stdout, "llvm-readobj host output")
         host = parse_g1_host_readobj(host_output)
 
-        with tempfile.TemporaryDirectory(prefix="ullm-g1-inspect-", dir="/tmp") as temporary:
+        with tempfile.TemporaryDirectory(prefix="sllm-g1-inspect-", dir="/tmp") as temporary:
             temporary_path = Path(temporary)
             fatbin = temporary_path / "embedded.hip_fatbin"
             objcopy_output = temporary_path / "objcopy-output"
@@ -938,7 +939,7 @@ def validate_artifact_metadata(
         "model_used": False,
         "cpu_fallback_allowed": False,
         "cpu_fallback_used": False,
-        "binary_command": ["target/release/ullm-hip-evidence", "--timeout-ms", "1000"],
+        "binary_command": ["target/release/sllm-hip-evidence", "--timeout-ms", "1000"],
     }:
         raise ContractError("G1 artifact metadata scope is not dedicated runtime scope")
     artifact = metadata["artifact"]
@@ -1095,7 +1096,7 @@ def validate_report(
         raise ContractError("G1 health evidence device binding is stale")
     if report["process_pre"]["device"] != report["device"] or report["process_post"]["device"] != report["device"]:
         raise ContractError("G1 process evidence device binding is stale")
-    command = ["target/release/ullm-hip-evidence", "--timeout-ms", "1000"]
+    command = ["target/release/sllm-hip-evidence", "--timeout-ms", "1000"]
     execution = report["execution"]
     if execution["command"] != command or execution["command_sha256"] != sha256_json(command):
         raise ContractError("G1 report command is not the dedicated release binary")

@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://ullm-project.local/ci/schema/hip-artifact-metadata-v1.schema.json",
-  "title": "uLLM HIP compile-only artifact metadata v1",
+  "$id": "https://sllm-project.local/ci/schema/hip-artifact-metadata-v1.schema.json",
+  "title": "sLLM HIP compile-only artifact metadata v1",
   "type": "object",
   "additionalProperties": false,
   "$defs": {
@@ -231,9 +231,9 @@
       "properties": {
         "source_directory": {"$ref": "#/$defs/absolute_source_path"},
         "source_path": {"pattern": "^/(?:workspace|[A-Za-z0-9._+-]+(?:/[A-Za-z0-9._+-]+)*)/native/hip/src/hip_compile_probe\\.hip\\.cpp$", "type": "string"},
-        "output_directory": {"pattern": "^/tmp/ullm-h3-[A-Za-z0-9._-]+/h3-gfx(?:1030|1201)$", "type": "string"},
-        "object_path": {"pattern": "^/tmp/ullm-h3-[A-Za-z0-9._-]+/h3-gfx(?:1030|1201)/hip-compile-probe-gfx(?:1030|1201)\\.o$", "type": "string"},
-        "link_output_path": {"pattern": "^/tmp/ullm-h3-[A-Za-z0-9._-]+/h3-gfx(?:1030|1201)/hip-compile-probe-gfx(?:1030|1201)\\.elf$", "type": "string"},
+        "output_directory": {"pattern": "^/tmp/sllm-h3-[A-Za-z0-9._-]+/h3-gfx(?:1030|1201)$", "type": "string"},
+        "object_path": {"pattern": "^/tmp/sllm-h3-[A-Za-z0-9._-]+/h3-gfx(?:1030|1201)/hip-compile-probe-gfx(?:1030|1201)\\.o$", "type": "string"},
+        "link_output_path": {"pattern": "^/tmp/sllm-h3-[A-Za-z0-9._-]+/h3-gfx(?:1030|1201)/hip-compile-probe-gfx(?:1030|1201)\\.elf$", "type": "string"},
         "generator": {"const": "direct-amdclang++"},
         "mode": {"const": "direct-compile-link"},
         "build_type": {"const": "Release"},
@@ -249,7 +249,7 @@
       "additionalProperties": false,
       "required": ["path", "size_bytes", "sha256"],
       "properties": {
-        "path": {"pattern": "^/tmp/ullm-h3-[A-Za-z0-9._-]+/h3-gfx(?:1030|1201)/[A-Za-z0-9_.+-]+-gfx(?:1030|1201)\\.elf$", "type": "string"},
+        "path": {"pattern": "^/tmp/sllm-h3-[A-Za-z0-9._-]+/h3-gfx(?:1030|1201)/[A-Za-z0-9_.+-]+-gfx(?:1030|1201)\\.elf$", "type": "string"},
         "size_bytes": {"type": "integer", "minimum": 1, "maximum": 9223372036854775807},
         "sha256": {"$ref": "#/$defs/sha256"}
       }

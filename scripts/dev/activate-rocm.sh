@@ -4,7 +4,7 @@
 # This file is intended to be sourced so the selected ROCm tree is also used by
 # later build and test commands in the caller's shell.
 
-_ullm_activate_rocm_main() {
+_sllm_activate_rocm_main() {
     local expected_rocm_version="7.14.0"
     local expected_llvm_major="23"
     local default_rocm_root="/opt/rocm/core-7.14"
@@ -22,12 +22,12 @@ _ullm_activate_rocm_main() {
         return 1
     fi
 
-    if [[ -v ULLM_ROCM_PATH ]]; then
-        if [[ -z "$ULLM_ROCM_PATH" ]]; then
-            printf 'activate-rocm: ULLM_ROCM_PATH is set but empty\n' >&2
+    if [[ -v SLLM_ROCM_PATH ]]; then
+        if [[ -z "$SLLM_ROCM_PATH" ]]; then
+            printf 'activate-rocm: SLLM_ROCM_PATH is set but empty\n' >&2
             return 1
         fi
-        selected_root="$ULLM_ROCM_PATH"
+        selected_root="$SLLM_ROCM_PATH"
     elif [[ -v ROCM_PATH ]]; then
         if [[ -z "$ROCM_PATH" ]]; then
             printf 'activate-rocm: ROCM_PATH is set but empty\n' >&2
@@ -91,9 +91,9 @@ _ullm_activate_rocm_main() {
         fi
     done
 
-    _ullm_rocm_deduplicate_path configured_path "$canonical_root/bin" \
+    _sllm_rocm_deduplicate_path configured_path "$canonical_root/bin" \
         "$canonical_root/llvm/bin" -- "${PATH:-}"
-    _ullm_rocm_deduplicate_path configured_ld_library_path "$canonical_root/lib" -- \
+    _sllm_rocm_deduplicate_path configured_ld_library_path "$canonical_root/lib" -- \
         "${LD_LIBRARY_PATH:-}"
 
     export ROCM_PATH="$canonical_root"
@@ -115,7 +115,7 @@ _ullm_activate_rocm_main() {
         "$expected_rocm_version" "$canonical_root" "$expected_llvm_major"
 }
 
-_ullm_rocm_deduplicate_path() {
+_sllm_rocm_deduplicate_path() {
     local output_name="$1"
     shift
     local -a entries=()
@@ -137,9 +137,9 @@ _ullm_rocm_deduplicate_path() {
             entries+=("$1")
         else
             existing="$1"
-            IFS=':' read -r -a _ullm_existing_entries <<<"$existing"
-            entries+=("${_ullm_existing_entries[@]}")
-            unset _ullm_existing_entries
+            IFS=':' read -r -a _sllm_existing_entries <<<"$existing"
+            entries+=("${_sllm_existing_entries[@]}")
+            unset _sllm_existing_entries
         fi
         shift
     done
@@ -163,16 +163,16 @@ _ullm_rocm_deduplicate_path() {
     printf -v "$output_name" '%s' "$result"
 }
 
-_ullm_activate_rocm_main
-_ullm_rocm_status=$?
-unset -f _ullm_activate_rocm_main _ullm_rocm_deduplicate_path
+_sllm_activate_rocm_main
+_sllm_rocm_status=$?
+unset -f _sllm_activate_rocm_main _sllm_rocm_deduplicate_path
 
 if [[ "${BASH_SOURCE[0]}" != "$0" ]]; then
-    if ((_ullm_rocm_status == 0)); then
-        unset _ullm_rocm_status
+    if ((_sllm_rocm_status == 0)); then
+        unset _sllm_rocm_status
         return 0
     fi
-    unset _ullm_rocm_status
+    unset _sllm_rocm_status
     return 1
 fi
-exit "$_ullm_rocm_status"
+exit "$_sllm_rocm_status"

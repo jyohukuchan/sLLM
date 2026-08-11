@@ -1,0 +1,9 @@
+{
+  "eos_token": "<|endoftext|>",
+  "added_tokens_decoder": {
+    "0": {
+      "content": "<|endoftext|>",
+      "special": true
+    }
+  }
+}

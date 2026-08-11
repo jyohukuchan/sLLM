@@ -1,0 +1,8 @@
+{
+  "metadata": {
+    "total_size": 4
+  },
+  "weight_map": {
+    "fixture.tensor": "model.safetensors"
+  }
+}

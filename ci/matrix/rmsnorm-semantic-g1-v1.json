@@ -1,0 +1,142 @@
+{
+  "$schema": "https://sllm-project.local/ci/schema/rmsnorm-semantic-g1-matrix-v1.schema.json",
+  "schema_version": "rmsnorm-semantic-g1-matrix-v1",
+  "matrix_id": "rmsnorm-semantic-g1-v1",
+  "revision": 1,
+  "suite_id": "g1-rmsnorm-semantic-runtime",
+  "tier": "tier_g1",
+  "required": true,
+  "toolchain_id": "rocm-7.14.0",
+  "execution": {
+    "mode": "trusted-local-semantic-runtime",
+    "serial": true,
+    "trusted_local_only": true,
+    "host_lock": {"path": "/tmp/sllm-g0.lock", "acquisition": "nonblocking"},
+    "requires_gpu": true,
+    "requires_model": false,
+    "network": false,
+    "sudo_allowed": false,
+    "reset_allowed": false,
+    "credentials_allowed": false,
+    "docker_socket_allowed": false
+  },
+  "scope": {
+    "selected_backend": "hip",
+    "fallback_allowed": false,
+    "fallback_used": false,
+    "model_used": false,
+    "semantic_op_used": true,
+    "cpu_fallback_used": false,
+    "gpu_execution": true,
+    "private_g1_used": false,
+    "h3_artifact_used": false
+  },
+  "command": ["/usr/bin/cargo", "+1.97.1", "build", "--locked", "--offline", "--release", "--package", "sllm-hip", "--bin", "sllm-rmsnorm-g1-evidence"],
+  "codegen": {
+    "code_object_version": "V6",
+    "wavefront_size": 32,
+    "features": {"xnack": "unsupported", "sramecc": "unsupported", "generic_processor_version": 0}
+  },
+  "oracle": {
+    "id": "rmsnorm-bf16-independent-oracle-v1",
+    "input_dtype": "BF16",
+    "weight_dtype": "BF16",
+    "output_dtype": "BF16",
+    "accumulation_dtype": "F32",
+    "scale_mode": "offset-one",
+    "independent": true,
+    "tolerance_id": "rmsnorm-bf16-f32-output-v1",
+    "atol": 0.0078125,
+    "rtol": 0.015625,
+    "model_hidden_size": 2560,
+    "epsilon": "1e-6",
+    "model_lock_path": "docs/models/locks/qwen3.5-4b-bf16.json",
+    "model_lock_sha256": "4071e1b36901e523a3c5c65559f2cecda7c9cc258185770f049886f52d1fe678"
+  },
+  "case_manifest": {
+    "id": "rmsnorm-semantic-g1-cases-v1",
+    "selected_count": 15,
+    "collected_count": 15,
+    "cases": [
+      {"id": "r1-n1", "rows": 1, "n": 1, "classification": "finite", "nonfinite_input": "none"},
+      {"id": "r1-n3", "rows": 1, "n": 3, "classification": "finite", "nonfinite_input": "none"},
+      {"id": "r2-n17", "rows": 2, "n": 17, "classification": "finite", "nonfinite_input": "none"},
+      {"id": "r1-n255", "rows": 1, "n": 255, "classification": "finite", "nonfinite_input": "none"},
+      {"id": "r1-n256", "rows": 1, "n": 256, "classification": "finite", "nonfinite_input": "none"},
+      {"id": "r1-n257", "rows": 1, "n": 257, "classification": "finite", "nonfinite_input": "none"},
+      {"id": "r1-n4095", "rows": 1, "n": 4095, "classification": "finite", "nonfinite_input": "none"},
+      {"id": "r1-n4096", "rows": 1, "n": 4096, "classification": "finite", "nonfinite_input": "none"},
+      {"id": "r1-n2560", "rows": 1, "n": 2560, "classification": "finite", "nonfinite_input": "none"},
+      {"id": "r1-n2560-nan", "rows": 1, "n": 2560, "classification": "nan", "nonfinite_input": "activation"},
+      {"id": "r1-n2560-posinf", "rows": 1, "n": 2560, "classification": "posinf", "nonfinite_input": "activation"},
+      {"id": "r1-n2560-neginf", "rows": 1, "n": 2560, "classification": "neginf", "nonfinite_input": "activation"},
+      {"id": "r1-n2560-raw-scale-nan", "rows": 1, "n": 2560, "classification": "nan", "nonfinite_input": "raw_scale"},
+      {"id": "r1-n2560-raw-scale-posinf", "rows": 1, "n": 2560, "classification": "posinf", "nonfinite_input": "raw_scale"},
+      {"id": "r1-n2560-raw-scale-neginf", "rows": 1, "n": 2560, "classification": "neginf", "nonfinite_input": "raw_scale"}
+    ]
+  },
+  "rows": [
+    {
+      "row_id": "rmsnorm-semantic-g1-gfx1030",
+      "target": "gfx1030",
+      "bdf": "0000:03:00.0",
+      "uuid": "GPU-76a08c022586fed6",
+      "product": "AMD Radeon Pro V620",
+      "physical_hip_index": 1,
+      "logical_device_index": 0,
+      "timeout_seconds": 300,
+      "seed": 1031,
+      "codegen": {
+        "target": "gfx1030",
+        "target_kind": "exact",
+        "target_count": 1,
+        "code_object_version": "V6",
+        "wavefront_size": 32,
+        "features": {"xnack": "unsupported", "sramecc": "unsupported", "generic_processor_version": 0},
+        "e_flags": "0x00000036"
+      },
+      "scope": {
+        "selected_backend": "hip",
+        "fallback_allowed": false,
+        "fallback_used": false,
+        "model_used": false,
+        "semantic_op_used": true,
+        "cpu_fallback_used": false,
+        "gpu_execution": true,
+        "private_g1_used": false,
+        "h3_artifact_used": false
+      }
+    },
+    {
+      "row_id": "rmsnorm-semantic-g1-gfx1201",
+      "target": "gfx1201",
+      "bdf": "0000:07:00.0",
+      "uuid": "GPU-a8e9ddefa2d60f55",
+      "product": "AMD Radeon AI PRO R9700",
+      "physical_hip_index": 2,
+      "logical_device_index": 0,
+      "timeout_seconds": 300,
+      "seed": 1202,
+      "codegen": {
+        "target": "gfx1201",
+        "target_kind": "exact",
+        "target_count": 1,
+        "code_object_version": "V6",
+        "wavefront_size": 32,
+        "features": {"xnack": "unsupported", "sramecc": "unsupported", "generic_processor_version": 0},
+        "e_flags": "0x0000004e"
+      },
+      "scope": {
+        "selected_backend": "hip",
+        "fallback_allowed": false,
+        "fallback_used": false,
+        "model_used": false,
+        "semantic_op_used": true,
+        "cpu_fallback_used": false,
+        "gpu_execution": true,
+        "private_g1_used": false,
+        "h3_artifact_used": false
+      }
+    }
+  ]
+}

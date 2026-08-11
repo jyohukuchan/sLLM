@@ -20,7 +20,7 @@
 
 ## 目的
 
-Phase 1のhost-only skeletonを維持したまま、ROCm 7.14.0で再現可能なHIP compile evidenceと、専用local hostで同一immutable candidateを検証するGPU evidence経路を追加する。到達点は、`Cargo -> ullm-hip -> versioned C ABI -> native HIP -> GPU`を通るmodel-freeの最小実行である。
+Phase 1のhost-only skeletonを維持したまま、ROCm 7.14.0で再現可能なHIP compile evidenceと、専用local hostで同一immutable candidateを検証するGPU evidence経路を追加する。到達点は、`Cargo -> sllm-hip -> versioned C ABI -> native HIP -> GPU`を通るmodel-freeの最小実行である。
 
 この計画が完了しても、数値op、model load・推論、性能、一般的なGPU互換性は完成扱いにしない。
 
@@ -73,7 +73,7 @@ G2はmodel path、G4は互換性昇格、P0は性能または実運用dispatch�
 
 ### model-free最小経路
 
-- public inference opを追加するためのprobeにしない。diagnostic kernelとその呼び出しはtest/evidence用途として明示し、`ullm-core::Backend::execute`の数値対応を主張しない。
+- public inference opを追加するためのprobeにしない。diagnostic kernelとその呼び出しはtest/evidence用途として明示し、`sllm-core::Backend::execute`の数値対応を主張しない。
 - host stubは既定のCPU CI経路として残し、HIPを暗黙有効化しない。HIP buildは明示optionと検証済みROCm root/targetを要求する。
 - diagnostic kernelは小さな整数bufferをGPU上で決定的に更新するだけとし、入力・出力をbyte exactで比較する。caseには1要素だけでなく、3、17、境界前後など非2冪・非整列値を含める。
 - CPU実装、GPU kernel emulation、別backend fallbackを禁止し、`selected_backend=hip`、dispatch 1件以上、`fallback_used=false`をreportで検証する。
@@ -111,7 +111,7 @@ G2はmodel path、G4は互換性昇格、P0は性能または実運用dispatch�
 - `ci/schema/hip-artifact-metadata-v1.schema.json`
 - `ci/matrix/hip-compile-v1.json`
 - toolchain検査・artifact metadata生成/検証script
-- CMakeと`ullm-hip-sys/build.rs`の明示HIP configure path
+- CMakeと`sllm-hip-sys/build.rs`の明示HIP configure path
 
 contractに固定する項目:
 
@@ -219,7 +219,7 @@ G0はresource gateの未確定閾値からsupport可否を決めず、raw fact�
 2. queue、device buffer、event/completionのnative ownershipを実装し、安全なRust wrapperへ閉じ込める。
 3. host-to-device copy、test/evidence専用diagnostic kernel dispatch、completion待機、device-to-host copyを接続する。
 4. Rust側がcompletionまでqueue/buffer/eventを強参照し、完了後に決定的に解放する。
-5. `ullm-cli`または専用test binaryから全経路を一回のdocumented commandで実行する。
+5. `sllm-cli`または専用test binaryから全経路を一回のdocumented commandで実行する。
 
 C ABI方針:
 

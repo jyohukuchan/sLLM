@@ -1,0 +1,184 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sllm-project.local/ci/schema/hip-runtime-compile-v1.schema.json",
+  "title": "sLLM H3 public HIP runtime compile-only matrix v1",
+  "type": "object",
+  "additionalProperties": false,
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "target": {"enum": ["gfx1030", "gfx1201"]},
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "sha256"],
+      "properties": {
+        "path": {"type": "string", "pattern": "^[A-Za-z0-9_./-]+$"},
+        "sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "command": {
+      "type": "array",
+      "minItems": 2,
+      "items": {"type": "string", "minLength": 1}
+    },
+    "codegen": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["target", "target_kind", "target_count", "code_object_version", "wavefront_size", "features", "e_flags"],
+      "properties": {
+        "target": {"$ref": "#/$defs/target"},
+        "target_kind": {"const": "exact"},
+        "target_count": {"const": 1},
+        "code_object_version": {"const": "V6"},
+        "wavefront_size": {"const": 32},
+        "features": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["xnack", "sramecc", "generic_processor_version"],
+          "properties": {
+            "xnack": {"const": "unsupported"},
+            "sramecc": {"const": "unsupported"},
+            "generic_processor_version": {"const": 0}
+          }
+        },
+        "e_flags": {"enum": ["0x00000036", "0x0000004e"]}
+      }
+    },
+    "row": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["row_id", "target", "tier", "required", "seed", "execution", "build", "resource", "output", "codegen"],
+      "properties": {
+        "row_id": {"type": "string", "pattern": "^h3-public-gfx(?:1030|1201)$"},
+        "target": {"$ref": "#/$defs/target"},
+        "tier": {"const": "tier_h3_public_runtime"},
+        "required": {"const": false},
+        "seed": {"type": "integer", "minimum": 1},
+        "execution": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["mode", "compile_only", "requires_gpu", "requires_model", "network", "fallback_allowed", "execution_attempted", "gpu_execution"],
+          "properties": {
+            "mode": {"const": "compile-only"},
+            "compile_only": {"const": true},
+            "requires_gpu": {"const": false},
+            "requires_model": {"const": false},
+            "network": {"const": false},
+            "fallback_allowed": {"const": false},
+            "execution_attempted": {"const": false},
+            "gpu_execution": {"const": false}
+          }
+        },
+        "build": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["generator", "mode", "build_type", "language_standard", "probe_source", "public_runtime_source", "public_runtime_header", "rmsnorm_kernel_source", "rmsnorm_kernel_header", "rmsnorm_api_source", "rmsnorm_api_header", "link_library", "commands"],
+          "properties": {
+            "generator": {"const": "direct-amdclang++"},
+            "mode": {"const": "compile-link"},
+            "build_type": {"const": "Release"},
+            "language_standard": {"const": "gnu++17"},
+            "probe_source": {"const": "native/hip/src/hip_compile_probe.hip.cpp"},
+            "public_runtime_source": {"const": "native/hip/src/public_runtime.hip.cpp"},
+            "public_runtime_header": {"const": "native/hip/src/public_runtime_internal.hpp"},
+            "rmsnorm_kernel_source": {"const": "native/hip/src/rmsnorm_kernel.hip.cpp"},
+            "rmsnorm_kernel_header": {"const": "native/hip/src/rmsnorm_kernel_internal.hpp"},
+            "rmsnorm_api_source": {"const": "native/hip/src/rmsnorm_api.cpp"},
+            "rmsnorm_api_header": {"const": "native/hip/src/rmsnorm_api.hpp"},
+            "link_library": {"const": "/opt/rocm/lib/libamdhip64.so"},
+            "commands": {"type": "array", "minItems": 5, "maxItems": 5, "items": {"$ref": "#/$defs/command"}}
+          }
+        },
+        "resource": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["max_rss_bytes", "max_output_bytes", "timeout_seconds", "max_output_file_bytes"],
+          "properties": {
+            "max_rss_bytes": {"const": 4294967296},
+            "max_output_bytes": {"const": 16777216},
+            "timeout_seconds": {"const": 900},
+            "max_output_file_bytes": {"const": 268435456}
+          }
+        },
+        "output": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["root_prefix", "directory_pattern", "build_directory_pattern", "probe_object_pattern", "public_runtime_object_pattern", "rmsnorm_kernel_object_pattern", "rmsnorm_api_object_pattern", "host_elf_pattern", "probe_fatbin_pattern", "device_object_pattern"],
+          "properties": {
+            "root_prefix": {"const": "sllm-h3-public-runtime-"},
+            "directory_pattern": {"const": "h3-public-gfx{target}"},
+            "build_directory_pattern": {"const": "build"},
+            "probe_object_pattern": {"const": "hip-compile-probe-{target}.o"},
+            "public_runtime_object_pattern": {"const": "public-runtime-{target}.o"},
+            "rmsnorm_kernel_object_pattern": {"const": "rmsnorm-kernel-{target}.o"},
+            "rmsnorm_api_object_pattern": {"const": "rmsnorm-api-{target}.o"},
+            "host_elf_pattern": {"const": "public-runtime-{target}.elf"},
+            "probe_fatbin_pattern": {"const": "probe-{target}.fatbin"},
+            "device_object_pattern": {"const": "device-code-object-{target}.elf"}
+          }
+        },
+        "codegen": {"$ref": "#/$defs/codegen"}
+      }
+    }
+  },
+  "required": ["$schema", "schema_version", "matrix_id", "revision", "toolchain_id", "container", "sources", "direct_compile_sources", "public_abi_symbols", "targets", "rows"],
+  "properties": {
+    "$schema": {"const": "https://sllm-project.local/ci/schema/hip-runtime-compile-v1.schema.json"},
+    "schema_version": {"const": "hip-runtime-compile-v1"},
+    "matrix_id": {"const": "hip-runtime-compile-v1"},
+    "revision": {"const": 2},
+    "toolchain_id": {"const": "rocm-7.14.0"},
+    "container": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["image_reference", "image_config_digest", "platform", "rocm_root", "compiler", "llvm_major"],
+      "properties": {
+        "image_reference": {"const": "docker.io/rocm/dev-ubuntu-24.04@sha256:439edaa8f0c4be4a3728e528f87b8a2ea1f051f34cf10b27caa4bd94f562eda7"},
+        "image_config_digest": {"const": "sha256:4c91c0d850e38a40fd669dd043ab42e9bad9a2b8a38e3f873c5a4eaced9f28cf"},
+        "platform": {"const": {"os": "linux", "architecture": "amd64"}},
+        "rocm_root": {"const": "/opt/rocm"},
+        "compiler": {"const": "/opt/rocm/bin/amdclang++"},
+        "llvm_major": {"const": 23}
+      }
+    },
+    "sources": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["canonical_order", "files", "source_set_sha256"],
+      "properties": {
+        "canonical_order": {"type": "array", "minItems": 4, "maxItems": 4, "items": {"type": "string"}},
+        "files": {"type": "array", "minItems": 4, "maxItems": 4, "uniqueItems": true, "items": {"$ref": "#/$defs/source"}},
+        "source_set_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "direct_compile_sources": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["canonical_order", "files", "source_set_sha256"],
+      "properties": {
+        "canonical_order": {"type": "array", "minItems": 47, "maxItems": 47, "items": {"type": "string"}},
+        "files": {"type": "array", "minItems": 47, "maxItems": 47, "uniqueItems": true, "items": {"$ref": "#/$defs/source"}},
+        "source_set_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "public_abi_symbols": {"const": [
+      "sllm_argmax_execute", "sllm_argmax_plan_release", "sllm_argmax_prepare",
+      "sllm_attention_preprocess_execute", "sllm_attention_preprocess_plan_release", "sllm_attention_preprocess_prepare",
+      "sllm_backend_probe", "sllm_buffer_copy_d2h", "sllm_buffer_copy_h2d", "sllm_buffer_create",
+      "sllm_buffer_release", "sllm_buffer_size", "sllm_causal_attention_execute", "sllm_completion_query",
+      "sllm_completion_read", "sllm_completion_release", "sllm_completion_timing", "sllm_completion_wait",
+      "sllm_context_create", "sllm_context_probe", "sllm_context_release", "sllm_device_count", "sllm_device_query",
+      "sllm_elementwise_execute", "sllm_elementwise_plan_release", "sllm_elementwise_prepare",
+      "sllm_embedding_execute", "sllm_embedding_plan_release", "sllm_embedding_prepare",
+      "sllm_event_create", "sllm_event_release", "sllm_get_abi_version", "sllm_kv_state_append",
+      "sllm_kv_state_append_cancel", "sllm_kv_state_create", "sllm_kv_state_query", "sllm_kv_state_release",
+      "sllm_kv_state_snapshot", "sllm_kv_view_query", "sllm_kv_view_release", "sllm_linear_attention_cancel",
+      "sllm_linear_attention_execute", "sllm_linear_attention_state_create", "sllm_linear_attention_state_query",
+      "sllm_linear_attention_state_release", "sllm_matmul_execute", "sllm_matmul_plan_release", "sllm_matmul_prepare",
+      "sllm_query_version", "sllm_queue_create", "sllm_queue_release", "sllm_rmsnorm_execute",
+      "sllm_rmsnorm_plan_release", "sllm_rmsnorm_prepare"
+    ]},
+    "targets": {"const": ["gfx1030", "gfx1201"]},
+    "rows": {"type": "array", "minItems": 2, "maxItems": 2, "items": {"$ref": "#/$defs/row"}}
+  }
+}

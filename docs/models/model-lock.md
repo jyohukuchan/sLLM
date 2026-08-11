@@ -1,7 +1,7 @@
 # Model artifact lock format
 
 Model identifiers such as a Hugging Face repository name or branch are mutable.
-uLLM therefore resolves every model input to an immutable revision and verifies
+sLLM therefore resolves every model input to an immutable revision and verifies
 every downloaded byte before loading it. The lock file, not a cache directory or
 floating alias, is the record of what was used.
 
@@ -59,7 +59,7 @@ Never download locked bytes using the requested branch or tag after resolution.
 
 For an LFS file, `git_blob` identifies the repository's pointer blob and `lfs_oid`
 identifies the LFS content object. Neither replaces the SHA-256 computed over the
-actual bytes uLLM consumes.
+actual bytes sLLM consumes.
 
 ## Resolution procedure
 
@@ -81,6 +81,25 @@ actual bytes uLLM consumes.
    startup, reject a duplicate alias, fingerprint mismatch, missing file, or
    content mismatch.
 
+## Verified cache and model slices
+
+The lock is integrity metadata, not a storage container. Full model bytes belong
+in a cache outside the repository checkout. Before any model-bound execution,
+verify the cache path, complete resolved revision, every byte size and SHA-256,
+and every LFS identity against the lock. Treat a cache miss, extra or missing
+runtime input, writable trusted-cache mount, or content mismatch as a non-PASS
+infrastructure or validation result; never download a replacement during an
+offline test run.
+
+A model slice is a temporary local artifact extracted at execution time from a
+verified read-only cache. Do not commit or upload raw slices. A reproducible
+slice record must contain the source lock fingerprint, exact tensor name, shard,
+safetensors byte range and logical shape/dtype, extractor repository and
+40-character commit SHA, script path and SHA-256, ordered arguments, relevant
+execution environment, and output size/SHA-256. The expected numerical result is
+computed from the verified extracted bytes and an independent input fixture; a
+slice hash or cache path never substitutes for the source model lock.
+
 ## Derived artifacts
 
 For each converted, quantized, merged, or otherwise generated artifact, record:
@@ -93,11 +112,13 @@ For each converted, quantized, merged, or otherwise generated artifact, record:
   output; and
 - every output path, byte size, and SHA-256.
 
-Original upstream snapshots use `derivation: null`. A derived output must also
-appear in `files`; the output hash in `derivation.outputs` must match its file
-record. Derived local outputs use `source_page_url`, `download_url`, `git_blob`,
-and `lfs_oid` as `null` unless they are subsequently published in a repository
-that supplies those identities.
+`model-lock-v1` only represents original upstream snapshots and therefore
+requires `derivation: null`. The requirements below define the information that
+a future derived-artifact schema must preserve; they are not accepted fields in
+`model-lock-v1`. A later schema must explicitly define nullable repository
+identities for unpublished local outputs and bind every derivation output to its
+corresponding file record. Do not encode a derived artifact by weakening or
+overloading `model-lock-v1`.
 
 ```yaml
 derivation:
@@ -141,14 +162,15 @@ Changing any member of the fingerprint input changes the fingerprint. An alias
 may move to a new fingerprint only through an explicit lock-file change; aliases
 must never resolve a floating Hub branch at runtime.
 
-## YAML example
+## YAML authoring excerpt
 
-YAML is shown only as an authoring format. The fingerprint is computed from the
-JCS canonical JSON representation of `{ "schema_version": ..., "model": ... }`
-defined above.
+YAML is shown only as a non-validating authoring excerpt. The normative v1 shape
+is `ci/schema/model-lock-v1.schema.json`, and the checked-in Qwen lock is the
+complete example. The fingerprint is computed from the JCS canonical JSON
+representation of `{ "schema_version": ..., "model": ... }` defined above.
 
 ```yaml
-schema_version: 1
+schema_version: model-lock-v1
 model:
   repo_id: Qwen/Qwen3.5-4B
   repo_type: model
@@ -165,13 +187,9 @@ model:
       revision: <full commit SHA when declared and resolved, otherwise null>
       evidence_path: README.md
   evidence_files:
-    - path: README.md
-      size_bytes: <integer>
-      sha256: <64 lowercase hexadecimal characters>
-      git_blob: <repository Git blob object ID>
-      source_page_url: https://huggingface.co/Qwen/Qwen3.5-4B/blob/<full-commit>/README.md
-      download_url: https://huggingface.co/Qwen/Qwen3.5-4B/resolve/<full-commit>/README.md
-      lfs_oid: null
+    - LICENSE
+    - README.md
+  files:
     - path: LICENSE
       size_bytes: <integer>
       sha256: <64 lowercase hexadecimal characters>
@@ -179,7 +197,13 @@ model:
       source_page_url: https://huggingface.co/Qwen/Qwen3.5-4B/blob/<full-commit>/LICENSE
       download_url: https://huggingface.co/Qwen/Qwen3.5-4B/resolve/<full-commit>/LICENSE
       lfs_oid: null
-  files:
+    - path: README.md
+      size_bytes: <integer>
+      sha256: <64 lowercase hexadecimal characters>
+      git_blob: <repository Git blob object ID>
+      source_page_url: https://huggingface.co/Qwen/Qwen3.5-4B/blob/<full-commit>/README.md
+      download_url: https://huggingface.co/Qwen/Qwen3.5-4B/resolve/<full-commit>/README.md
+      lfs_oid: null
     - path: config.json
       size_bytes: <integer>
       sha256: <64 lowercase hexadecimal characters>
@@ -194,12 +218,12 @@ model:
       source_page_url: https://huggingface.co/Qwen/Qwen3.5-4B/blob/<full-commit>/model.safetensors.index.json
       download_url: https://huggingface.co/Qwen/Qwen3.5-4B/resolve/<full-commit>/model.safetensors.index.json
       lfs_oid: null
-    - path: model-00001-of-00002.safetensors
+    - path: model.safetensors-00001-of-00002.safetensors
       size_bytes: <integer>
       sha256: <64 lowercase hexadecimal characters>
       git_blob: <repository Git blob object ID for the LFS pointer>
-      source_page_url: https://huggingface.co/Qwen/Qwen3.5-4B/blob/<full-commit>/model-00001-of-00002.safetensors
-      download_url: https://huggingface.co/Qwen/Qwen3.5-4B/resolve/<full-commit>/model-00001-of-00002.safetensors
+      source_page_url: https://huggingface.co/Qwen/Qwen3.5-4B/blob/<full-commit>/model.safetensors-00001-of-00002.safetensors
+      download_url: https://huggingface.co/Qwen/Qwen3.5-4B/resolve/<full-commit>/model.safetensors-00001-of-00002.safetensors
       lfs_oid: sha256:<64 lowercase hexadecimal characters>
     - path: tokenizer.json
       size_bytes: <integer>
@@ -222,7 +246,8 @@ aliases:
 generated_at: <RFC-3339 timestamp; excluded from fingerprint>
 ```
 
-The example file list is illustrative, not complete. The actual lock must enumerate
+The excerpt omits required architecture, tensor, slice, tokenizer, excluded-file,
+and other v1 fields. The actual lock must validate against the schema and enumerate
 all files used by the selected revision, including every shard named by its index.
-Replace `derivation: null` with the complete derivation record described above for
-generated artifacts.
+Derived artifacts require a future schema version; do not replace `derivation:
+null` inside `model-lock-v1`.

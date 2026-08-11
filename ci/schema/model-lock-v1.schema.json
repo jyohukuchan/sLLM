@@ -1,0 +1,359 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sllm.dev/schema/model-lock-v1.schema.json",
+  "title": "sLLM immutable model lock v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "model", "fingerprint", "aliases", "generated_at"],
+  "properties": {
+    "schema_version": {"const": "model-lock-v1"},
+    "model": {"$ref": "#/$defs/model"},
+    "fingerprint": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "aliases": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {"type": "string", "pattern": "^[a-z0-9][a-z0-9.-]{0,127}$"}
+    },
+    "generated_at": {"type": "string", "format": "date-time"}
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "sha40": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "safe_path": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512,
+      "pattern": "^(?!/)(?!.*\\\\)(?!.*(^|/)\\.\\.?(/|$))[^\\u0000]+$"
+    },
+    "file": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "size_bytes", "sha256", "git_blob", "source_page_url", "download_url", "lfs_oid"],
+      "properties": {
+        "path": {"$ref": "#/$defs/safe_path"},
+        "size_bytes": {"type": "integer", "minimum": 0},
+        "sha256": {"$ref": "#/$defs/sha256"},
+        "git_blob": {"$ref": "#/$defs/sha40"},
+        "source_page_url": {"type": "string", "format": "uri"},
+        "download_url": {"type": "string", "format": "uri"},
+        "lfs_oid": {
+          "anyOf": [
+            {"type": "null"},
+            {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
+          ]
+        }
+      }
+    },
+    "license": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "statement", "evidence_paths"],
+      "properties": {
+        "id": {"type": ["string", "null"], "pattern": "^[A-Za-z0-9][A-Za-z0-9.+-]{0,63}$"},
+        "statement": {"type": "string", "minLength": 1},
+        "evidence_paths": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {"$ref": "#/$defs/safe_path"}
+        }
+      }
+    },
+    "base_model": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repo_id", "revision", "evidence_path"],
+      "properties": {
+        "repo_id": {"type": "string", "pattern": "^[^/\\u0000]+/[^/\\u0000]+$"},
+        "revision": {
+          "anyOf": [
+            {"type": "null"},
+            {"$ref": "#/$defs/sha40"}
+          ]
+        },
+        "evidence_path": {"$ref": "#/$defs/safe_path"}
+      }
+    },
+    "text_config": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "model_type", "hidden_size", "num_hidden_layers", "num_attention_heads",
+        "num_key_value_heads", "head_dim", "intermediate_size", "dtype",
+        "rms_norm_eps", "attention_bias", "attention_dropout", "attn_output_gate",
+        "full_attention_interval", "layer_types", "max_position_embeddings", "rope_parameters",
+        "tie_word_embeddings", "use_cache", "vocab_size", "mtp_num_hidden_layers"
+      ],
+      "properties": {
+        "model_type": {"type": "string"},
+        "hidden_size": {"type": "integer", "minimum": 1},
+        "num_hidden_layers": {"type": "integer", "minimum": 1},
+        "num_attention_heads": {"type": "integer", "minimum": 1},
+        "num_key_value_heads": {"type": "integer", "minimum": 1},
+        "head_dim": {"type": "integer", "minimum": 1},
+        "intermediate_size": {"type": "integer", "minimum": 1},
+        "dtype": {"const": "BF16"},
+        "rms_norm_eps": {"type": "string", "pattern": "^[0-9]+(?:\\.[0-9]+)?(?:[eE][+-]?[0-9]+)?$"},
+        "attention_bias": {"type": "boolean"},
+        "attention_dropout": {"type": "string", "pattern": "^[0-9]+(?:\\.[0-9]+)?(?:[eE][+-]?[0-9]+)?$"},
+        "attn_output_gate": {"type": "boolean"},
+        "full_attention_interval": {"type": "integer", "minimum": 1},
+        "layer_types": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"enum": ["linear_attention", "full_attention"]}
+        },
+        "max_position_embeddings": {"type": "integer", "minimum": 1, "maximum": 9007199254740991},
+        "rope_parameters": {"$ref": "#/$defs/rope_parameters"},
+        "tie_word_embeddings": {"type": "boolean"},
+        "use_cache": {"type": "boolean"},
+        "vocab_size": {"type": "integer", "minimum": 1},
+        "mtp_num_hidden_layers": {"type": "integer", "minimum": 0}
+      }
+    },
+    "rope_parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["rope_type", "rope_theta", "partial_rotary_factor", "mrope_interleaved", "mrope_section"],
+      "properties": {
+        "rope_type": {"const": "default"},
+        "rope_theta": {"type": "integer", "minimum": 1, "maximum": 9007199254740991},
+        "partial_rotary_factor": {"type": "string", "pattern": "^[0-9]+(?:\\.[0-9]+)?(?:[eE][+-]?[0-9]+)?$"},
+        "mrope_interleaved": {"type": "boolean"},
+        "mrope_section": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"type": "integer", "minimum": 1, "maximum": 9007199254740991}
+        }
+      }
+    },
+    "architecture": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "architectures", "top_level_architecture", "model_type", "text_model_type",
+        "phase_scope", "custom_code", "converted", "moe", "vision", "mtp",
+        "text_config", "layer_schedule"
+      ],
+      "properties": {
+        "architectures": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string"}},
+        "top_level_architecture": {"type": "string"},
+        "model_type": {"type": "string"},
+        "text_model_type": {"type": "string"},
+        "phase_scope": {"const": "text-only"},
+        "custom_code": {"type": "boolean"},
+        "converted": {"type": "boolean"},
+        "moe": {"type": "boolean"},
+        "vision": {"$ref": "#/$defs/component"},
+        "mtp": {"$ref": "#/$defs/component"},
+        "text_config": {"$ref": "#/$defs/text_config"},
+        "layer_schedule": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "num_hidden_layers", "full_attention_interval", "layer_types", "allowed_types"],
+          "properties": {
+            "kind": {"const": "explicit"},
+            "num_hidden_layers": {"type": "integer", "minimum": 1},
+            "full_attention_interval": {"type": "integer", "minimum": 1},
+            "layer_types": {"type": "array", "minItems": 1, "items": {"enum": ["linear_attention", "full_attention"]}},
+            "allowed_types": {
+              "type": "array",
+              "minItems": 1,
+              "uniqueItems": true,
+              "items": {"enum": ["linear_attention", "full_attention"]}
+            }
+          }
+        }
+      }
+    },
+    "component": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["present", "tensor_prefix", "tensor_count", "phase3_status"],
+      "properties": {
+        "present": {"type": "boolean"},
+        "tensor_prefix": {"type": "string", "minLength": 1},
+        "tensor_count": {"type": "integer", "minimum": 0},
+        "phase3_status": {"enum": ["consumed", "known-unconsumed", "absent"]}
+      }
+    },
+    "tensor_classification": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "prefix", "tensor_count", "phase3_status"],
+      "properties": {
+        "id": {"type": "string", "pattern": "^[a-z][a-z0-9-]{0,63}$"},
+        "prefix": {"type": "string", "minLength": 1},
+        "tensor_count": {"type": "integer", "minimum": 0},
+        "phase3_status": {"enum": ["consumed", "known-unconsumed", "partially-consumed"]}
+      }
+    },
+    "tensor_contract": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["index_path", "indexed_tensor_count", "shards", "classifications", "unknown_policy", "duplicate_policy", "index_policy"],
+      "properties": {
+        "index_path": {"$ref": "#/$defs/safe_path"},
+        "indexed_tensor_count": {"type": "integer", "minimum": 1},
+        "shards": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"$ref": "#/$defs/safe_path"}},
+        "classifications": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/tensor_classification"}},
+        "unknown_policy": {"const": "reject"},
+        "duplicate_policy": {"const": "reject"},
+        "index_policy": {"const": "exact-weight-map-and-shard-metadata"}
+      }
+    },
+    "slice_contract": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["tensor_name", "source_file", "dtype", "shape", "header_length_field_bytes", "header_length_bytes", "data_buffer_start", "data_offset_basis", "data_offsets", "absolute_byte_range", "byte_size", "normalization"],
+      "properties": {
+        "tensor_name": {"type": "string", "minLength": 1},
+        "source_file": {"$ref": "#/$defs/safe_path"},
+        "dtype": {"const": "BF16"},
+        "shape": {"type": "array", "minItems": 1, "items": {"type": "integer", "minimum": 1}},
+        "header_length_field_bytes": {"const": 8},
+        "header_length_bytes": {"type": "integer", "minimum": 8, "maximum": 100000000},
+        "data_buffer_start": {"type": "integer", "minimum": 8},
+        "data_offset_basis": {"const": "data-buffer-relative"},
+        "data_offsets": {"type": "array", "minItems": 2, "maxItems": 2, "items": {"type": "integer", "minimum": 0}},
+        "absolute_byte_range": {"type": "array", "minItems": 2, "maxItems": 2, "items": {"type": "integer", "minimum": 0}},
+        "byte_size": {"type": "integer", "minimum": 1},
+        "normalization": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "scale_mode", "effective_scale", "epsilon", "activation_dtype", "weight_dtype", "accumulation_dtype", "output_dtype"],
+          "properties": {
+            "kind": {"const": "rmsnorm"},
+            "scale_mode": {"const": "offset-one"},
+            "effective_scale": {"const": "1 + raw_weight"},
+            "epsilon": {"type": "string", "pattern": "^[0-9]+(?:\\.[0-9]+)?(?:[eE][+-]?[0-9]+)?$"},
+            "activation_dtype": {"const": "BF16"},
+            "weight_dtype": {"const": "BF16"},
+            "accumulation_dtype": {"const": "FP32"},
+            "output_dtype": {"const": "BF16"}
+          }
+        }
+      }
+    },
+    "stop_identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["config_eos", "tokenizer_eos"],
+      "properties": {
+        "config_eos": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["token", "token_id", "source_file"],
+          "properties": {
+            "token": {"type": "string", "minLength": 1},
+            "token_id": {"type": "integer", "minimum": 0},
+            "source_file": {"$ref": "#/$defs/safe_path"}
+          }
+        },
+        "tokenizer_eos": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["token", "token_id", "source_files"],
+          "properties": {
+            "token": {"type": "string", "minLength": 1},
+            "token_id": {"type": "integer", "minimum": 0},
+            "source_files": {"type": "array", "minItems": 2, "uniqueItems": true, "items": {"$ref": "#/$defs/safe_path"}}
+          }
+        }
+      }
+    },
+    "generation_stop_policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "version", "stop_token_ids", "evaluation", "prompt_evaluation", "stop_token",
+        "budget_boundary", "max_new_tokens_zero", "reason_version"
+      ],
+      "properties": {
+        "version": {"const": 1},
+        "stop_token_ids": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {"type": "integer", "minimum": 0, "maximum": 4294967295}
+        },
+        "evaluation": {"const": "newly_generated_after_argmax"},
+        "prompt_evaluation": {"const": "never_stop"},
+        "stop_token": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["visible_output", "subsequent_decode_input"],
+          "properties": {
+            "visible_output": {"const": false},
+            "subsequent_decode_input": {"const": false}
+          }
+        },
+        "budget_boundary": {"const": "stop_token_wins"},
+        "max_new_tokens_zero": {"const": "max_new_tokens_before_decode"},
+        "reason_version": {"const": 1}
+      }
+    },
+    "tokenizer_contract": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["files", "chat_template_path", "vocab_size", "eos_token_id", "special_token_ids", "stop_identity", "generation_stop_policy"],
+      "properties": {
+        "files": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"$ref": "#/$defs/safe_path"}},
+        "chat_template_path": {"$ref": "#/$defs/safe_path"},
+        "vocab_size": {"type": "integer", "minimum": 1},
+        "eos_token_id": {"type": "integer", "minimum": 0},
+        "special_token_ids": {"type": "object", "minProperties": 1, "additionalProperties": {"type": "integer", "minimum": 0}},
+        "stop_identity": {"$ref": "#/$defs/stop_identity"},
+        "generation_stop_policy": {"$ref": "#/$defs/generation_stop_policy"}
+      }
+    },
+    "generation_config": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["present", "path"],
+      "properties": {
+        "present": {"const": false},
+        "path": {"type": "null"}
+      }
+    },
+    "model": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "repo_id", "repo_type", "requested_revision", "resolved_revision", "license", "base_models",
+        "evidence_files", "files", "excluded_files", "architecture", "tensor_contract", "slice_contract",
+        "tokenizer_contract", "generation_config", "derivation"
+      ],
+      "properties": {
+        "repo_id": {"type": "string", "pattern": "^[^/\\u0000]+/[^/\\u0000]+$"},
+        "repo_type": {"const": "model"},
+        "requested_revision": {"type": "string", "minLength": 1, "pattern": "^[^\\u0000]+$"},
+        "resolved_revision": {"$ref": "#/$defs/sha40"},
+        "license": {"$ref": "#/$defs/license"},
+        "base_models": {"type": "array", "items": {"$ref": "#/$defs/base_model"}},
+        "evidence_files": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"$ref": "#/$defs/safe_path"}},
+        "files": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/file"}},
+        "excluded_files": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["path", "git_blob", "reason"],
+            "properties": {
+              "path": {"$ref": "#/$defs/safe_path"},
+              "git_blob": {"$ref": "#/$defs/sha40"},
+              "reason": {"type": "string", "minLength": 1}
+            }
+          }
+        },
+        "architecture": {"$ref": "#/$defs/architecture"},
+        "tensor_contract": {"$ref": "#/$defs/tensor_contract"},
+        "slice_contract": {"$ref": "#/$defs/slice_contract"},
+        "tokenizer_contract": {"$ref": "#/$defs/tokenizer_contract"},
+        "generation_config": {"$ref": "#/$defs/generation_config"},
+        "derivation": {"type": "null"}
+      }
+    }
+  }
+}

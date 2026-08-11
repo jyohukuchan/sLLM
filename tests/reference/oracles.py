@@ -16,6 +16,130 @@ import numpy as np
 DEFAULT_SEED = 20260803
 MAX_CASES = 8
 MAX_ORACLE_ELEMENTS = 4096
+RMSNORM_OFFSET_ONE = "offset_one"
+
+
+def bf16_encode_rne(values: Any) -> np.ndarray:
+    """Encode float32 values to BF16 bit patterns using round-to-nearest-even.
+
+    NumPy has no portable BF16 scalar dtype, so the oracle represents BF16
+    values as uint16 storage bits. NaN payloads are kept nonzero rather than
+    being allowed to round into infinity.
+    """
+
+    float_values = np.asarray(values, dtype=np.float32)
+    bits = float_values.view(np.uint32)
+    round_bits = np.uint32(0x7FFF) + ((bits >> np.uint32(16)) & np.uint32(1))
+    rounded = ((bits + round_bits) >> np.uint32(16)).astype(np.uint16)
+
+    exponent = bits & np.uint32(0x7F800000)
+    mantissa = bits & np.uint32(0x007FFFFF)
+    nan_mask = (exponent == np.uint32(0x7F800000)) & (mantissa != 0)
+    preserved_nan = (bits >> np.uint32(16)).astype(np.uint16) | np.uint16(1)
+    return np.where(nan_mask, preserved_nan, rounded).astype(np.uint16, copy=False)
+
+
+def bf16_decode(codes: Any) -> np.ndarray:
+    """Decode uint16 BF16 storage bits to float32 without changing bit shape."""
+
+    raw_codes = np.asarray(codes)
+    if raw_codes.dtype != np.uint16:
+        if not np.issubdtype(raw_codes.dtype, np.integer):
+            raise ValueError("BF16 codes must be an unsigned 16-bit integer array")
+        if np.any(raw_codes < 0) or np.any(raw_codes > np.iinfo(np.uint16).max):
+            raise ValueError("BF16 codes must fit in uint16")
+        raw_codes = raw_codes.astype(np.uint16)
+    bits = raw_codes.astype(np.uint32, copy=False) << np.uint32(16)
+    return bits.view(np.float32)
+
+
+# Short aliases make the representation boundary explicit at call sites.
+encode_bf16_rne = bf16_encode_rne
+decode_bf16 = bf16_decode
+
+
+def _bf16_input_codes(value: Any, name: str) -> np.ndarray:
+    raw = np.asarray(value)
+    if raw.dtype == np.uint16:
+        codes = raw
+    elif np.issubdtype(raw.dtype, np.floating):
+        values = np.asarray(raw, dtype=np.float32)
+        codes = bf16_encode_rne(values)
+    else:
+        raise ValueError(f"{name} must be BF16 uint16 bits or floating-point values")
+    return codes
+
+
+def rmsnorm_bf16(
+    activation: Any,
+    raw_scale: Any,
+    epsilon: Real,
+    scale_mode: str,
+) -> np.ndarray:
+    """Return BF16-bit RMSNorm output for a bounded tiny case.
+
+    Inputs supplied as floating-point arrays are first rounded to BF16; uint16
+    inputs are treated as already-encoded BF16 storage. Reduction, epsilon,
+    inverse RMS, and the explicit offset-one scale are all evaluated in
+    float32. Activation and raw-scale nonfinite values are valid evidence and
+    propagate through the IEEE float32 calculation. There is intentionally no
+    default for ``epsilon`` or ``scale_mode``.
+    """
+
+    if scale_mode != RMSNORM_OFFSET_ONE:
+        raise ValueError("RMSNorm scale_mode must be the explicit offset_one mode")
+    if isinstance(epsilon, (bool, np.bool_)) or not isinstance(epsilon, Real):
+        raise ValueError("RMSNorm epsilon must be finite and positive")
+    try:
+        epsilon_value = np.float32(epsilon)
+    except (OverflowError, TypeError, ValueError) as exc:
+        raise ValueError("RMSNorm epsilon must be finite and positive") from exc
+    if not np.isfinite(epsilon_value) or epsilon_value <= np.float32(0.0):
+        raise ValueError("RMSNorm epsilon must be finite and positive")
+
+    activation_codes = _bf16_input_codes(activation, "activation")
+    scale_codes = _bf16_input_codes(raw_scale, "raw scale")
+    if activation_codes.ndim == 0:
+        raise ValueError("RMSNorm activation must have rank at least one")
+    if activation_codes.size == 0 or scale_codes.size == 0:
+        raise ValueError("RMSNorm activation and raw scale must be non-empty")
+    if activation_codes.size > MAX_ORACLE_ELEMENTS or scale_codes.size > MAX_ORACLE_ELEMENTS:
+        raise ValueError("RMSNorm evidence exceeds the tiny oracle element bound")
+    if scale_codes.ndim != 1:
+        raise ValueError("RMSNorm raw scale must have rank one")
+    if activation_codes.shape[-1] != scale_codes.shape[0]:
+        raise ValueError("RMSNorm raw scale length must match the activation last dimension")
+
+    x = bf16_decode(activation_codes).astype(np.float32, copy=False)
+    raw = bf16_decode(scale_codes).astype(np.float32, copy=False)
+    with np.errstate(over="ignore", invalid="ignore", divide="ignore", under="ignore"):
+        squared = np.multiply(x, x, dtype=np.float32)
+        sum_squares = np.sum(squared, axis=-1, keepdims=True, dtype=np.float32)
+        mean_square = np.divide(
+            sum_squares,
+            np.float32(activation_codes.shape[-1]),
+            dtype=np.float32,
+        )
+        denominator = np.add(mean_square, epsilon_value, dtype=np.float32)
+        inverse_rms = np.reciprocal(np.sqrt(denominator, dtype=np.float32), dtype=np.float32)
+        effective_scale = np.add(np.float32(1.0), raw, dtype=np.float32)
+        normalized = np.multiply(
+            np.multiply(x, inverse_rms, dtype=np.float32),
+            effective_scale,
+            dtype=np.float32,
+        )
+    return bf16_encode_rne(normalized)
+
+
+def rmsnorm_bf16_values(
+    activation: Any,
+    raw_scale: Any,
+    epsilon: Real,
+    scale_mode: str,
+) -> np.ndarray:
+    """Return the same oracle output decoded to float32 for numeric checks."""
+
+    return bf16_decode(rmsnorm_bf16(activation, raw_scale, epsilon, scale_mode))
 
 
 @dataclass(frozen=True)

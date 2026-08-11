@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sllm-project.local/ci/schema/hip-runtime-aggregate-v1.schema.json",
+  "title": "sLLM H3 public HIP runtime compile-only aggregate v1",
+  "type": "object",
+  "additionalProperties": false,
+  "$defs": {
+    "sha40": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "row": {
+      "type": "object", "additionalProperties": false,
+      "required": ["row_id", "target", "state", "report_sha256", "report_sidecar_sha256", "metadata_sha256", "metadata_sidecar_sha256", "device_object_sha256"],
+      "properties": {
+        "row_id": {"type": "string", "pattern": "^h3-public-gfx(?:1030|1201)$"}, "target": {"enum": ["gfx1030", "gfx1201"]}, "state": {"const": "PASS"},
+        "report_sha256": {"$ref": "#/$defs/sha256"}, "report_sidecar_sha256": {"$ref": "#/$defs/sha256"}, "metadata_sha256": {"$ref": "#/$defs/sha256"}, "metadata_sidecar_sha256": {"$ref": "#/$defs/sha256"}, "device_object_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    }
+  },
+  "required": ["schema_version", "aggregate_id", "state", "required", "evidence_mode", "run_id", "run_attempt", "reviewed_sha", "tested_sha", "workflow_sha", "git_tree_oid", "toolchain_id", "toolchain_manifest_sha256", "matrix_id", "matrix_manifest_sha256", "expected_rows", "scope", "rows", "errors"],
+  "properties": {
+    "schema_version": {"const": "hip-runtime-aggregate-v1"}, "aggregate_id": {"type": "string", "pattern": "^h3-public-runtime-aggregate\\.[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}\\.[1-9][0-9]*$"}, "state": {"const": "PASS"}, "required": {"const": false}, "evidence_mode": {"const": "required-ci"}, "run_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$"}, "run_attempt": {"type": "integer", "minimum": 1}, "reviewed_sha": {"$ref": "#/$defs/sha40"}, "tested_sha": {"$ref": "#/$defs/sha40"}, "workflow_sha": {"$ref": "#/$defs/sha40"}, "git_tree_oid": {"$ref": "#/$defs/sha40"}, "toolchain_id": {"const": "rocm-7.14.0"}, "toolchain_manifest_sha256": {"$ref": "#/$defs/sha256"}, "matrix_id": {"const": "hip-runtime-compile-v1"}, "matrix_manifest_sha256": {"$ref": "#/$defs/sha256"}, "expected_rows": {"const": ["h3-public-gfx1030", "h3-public-gfx1201"]}, "scope": {"type": "object", "additionalProperties": false, "required": ["public_runtime_stub_linked", "compile_only", "execution_attempted", "gpu_execution", "model_used", "network_used", "fallback_allowed", "fallback_used", "cpu_fallback_used", "support_claim"], "properties": {"public_runtime_stub_linked": {"const": false}, "compile_only": {"const": true}, "execution_attempted": {"const": false}, "gpu_execution": {"const": false}, "model_used": {"const": false}, "network_used": {"const": false}, "fallback_allowed": {"const": false}, "fallback_used": {"const": false}, "cpu_fallback_used": {"const": false}, "support_claim": {"const": false}}}, "rows": {"type": "array", "minItems": 2, "maxItems": 2, "items": {"$ref": "#/$defs/row"}}, "errors": {"const": []}
+  }
+}

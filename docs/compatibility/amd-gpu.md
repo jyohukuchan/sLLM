@@ -56,12 +56,12 @@ HIP runtimeから直接取得できる値だけではprofileは完成しない�
 
 [LLVM AMDGPU backendのprocessor表](https://llvm.org/docs/AMDGPUUsage.html#processors)は、generic processorが実行できるexact processorの集合と、generic化に伴う制限を定義している。[AMDのcode portability資料](https://rocm.docs.amd.com/projects/llvm-project/en/docs-6.4.2/conceptual/code-portability.html)も、`gfx10-3-generic`が`gfx1030`–`gfx1036`向けbinaryを一つにまとめられる一方、lowest-common-denominatorによる性能影響があり得ると説明している。
 
-uLLMは次の二経路を分ける。
+sLLMは次の二経路を分ける。
 
 - generic path: 配布binary数を抑えるbaseline。対象processor集合、`generic_processor_version`、feature stateを照合する。
 - exact fast path: `gcnArchName`とfeature stateが一致するexact target向け。固有命令とtarget別resource tuningを利用する候補とする。
 
-generic processor versionをELF `e_flags`へ保持する仕組みは[Code Object V6以降](https://llvm.org/docs/AMDGPUUsage.html#amdgpu-elf-header-e-flags-table-v6-onwards)に定義されるため、uLLMのgeneric pathはCode Object V6以降に限定する。基準toolchainのROCm 7.14.0同梱compilerが意図したgeneric version/feature stateを生成し、同releaseのROCr loaderが初期対象実機で受理することは今後検証する。検証完了まではgeneric pathも`evidence=unverified`である。
+generic processor versionをELF `e_flags`へ保持する仕組みは[Code Object V6以降](https://llvm.org/docs/AMDGPUUsage.html#amdgpu-elf-header-e-flags-table-v6-onwards)に定義されるため、sLLMのgeneric pathはCode Object V6以降に限定する。基準toolchainのROCm 7.14.0同梱compilerが意図したgeneric version/feature stateを生成し、同releaseのROCr loaderが初期対象実機で受理することは今後検証する。検証完了まではgeneric pathも`evidence=unverified`である。
 
 generic binaryへ黙ってfallbackしてよいとは限らない。特に`gfx9-4-generic`は`gfx942`と`gfx950`を覆う一方、LLVM表ではFP8/BF8命令と変換命令が利用不可であるため、初期CDNA 3 FP8 pathには採用しない。
 
@@ -79,7 +79,7 @@ generic binaryへ黙ってfallbackしてよいとは限らない。特に`gfx9-4
 
 ## FP8の根拠とinterop contract
 
-FP8はhardware ISA evidenceとlibrary/uLLM contractを分ける。
+FP8はhardware ISA evidenceとlibrary/sLLM contractを分ける。
 
 ### Hardware ISA evidence
 
@@ -89,15 +89,15 @@ AMDのROCm 7.14.0[data types and precision support](https://rocm.docs.amd.com/en
 - `gfx1200`/`gfx1201`（RDNA 4）: OCP系FP8（E4M3/E5M2）。
 - `gfx1030`–`gfx1036`（RDNA 2）: native FP8 matrix pathなし。将来FP8 modelを扱う場合は変換またはemulationを別pathとして明示する。
 
-### uLLMとhipBLASLtの初期interop contract
+### sLLMとhipBLASLtの初期interop contract
 
 [ROCm 7.14.0 release notes](https://rocm.docs.amd.com/en/docs-7.14.0/about/release-notes.html)は同releaseのhipBLASLtを1.4.1とする。そのversionの[hipBLASLt precision support](https://rocm.docs.amd.com/projects/hipBLASLt/en/docs-7.14.0/reference/data-type-support.html)は、同表がlibrary自身のdatatype supportでありhardware supportを示さないと明記している。
 
-uLLMがhipBLASLt 1.4.1のFP8 GEMM pathを使用する場合の初期contract候補は次とする。
+sLLMがhipBLASLt 1.4.1のFP8 GEMM pathを使用する場合の初期contract候補は次とする。
 
 - exact `gfx942`: `hipblaslt_f8_fnuz`/`hipblaslt_bf8_fnuz`を使う。
 - exact `gfx1200`/`gfx1201`: `hipblaslt_f8`/`hipblaslt_bf8`を使う。
-- model storage encoding、uLLM kernel input、hipBLASLt datatypeが異なる場合は明示的に変換し、FNUZとOCP payloadを再解釈しない。
+- model storage encoding、sLLM kernel input、hipBLASLt datatypeが異なる場合は明示的に変換し、FNUZとOCP payloadを再解釈しない。
 
 このcontractは初期FP8実装の計画であって、現在の実機検証結果ではない。hipBLASLt表だけをhardware全体の対応根拠にせず、hardware mappingとlibrary queryの両方を満たしたproblemだけdispatchする。
 

@@ -1,74 +1,115 @@
-## プロジェクト概要
+# AGENTS.md
 
-- 多機能なLLM推論engine。GPU操作はC++/HIP、それ以外のbackendはRustで実装し、MIT licenseで公開する。
-- Git管理外の詳細資料は`uLLM-project.md`、追跡対象の計画正本は`docs/plans/main-plan.md`とする。
+## Project
 
-## 役割と正本
+- sLLM is an MIT-licensed LLM inference engine. GPU operations use C++/HIP;
+  other backends and the upper layers use Rust.
+- `sLLM.md` is the detailed, Git-excluded requirements document.
+  `docs/plans/main-plan.md` is the tracked plan for product, architecture,
+  compatibility decisions, progress, and unresolved questions.
+- Read `docs/plans/main-plan.md` before beginning work. If `sLLM.md` and the
+  main plan disagree, ask the user; do not silently merge the difference.
 
-- 初回の行動開始時に`docs/plans/main-plan.md`を必ず読む。
-- `docs/plans/main-plan.md`には重要なproduct・architecture・compatibility上の決定、開発計画と順序、進捗、未解決事項だけを記録し、恒久的な実行手順を重複させない。
-- `uLLM-project.md`の要件・方針・重要な決定は`docs/plans/main-plan.md`へ同期する。差異を見つけた場合は独断で統合せず、ユーザーへ確認する。
-- 調査と実装はsubagentが担当する。main agentは計画の作成・編集、subagentの指示・監視、全体調整、Git操作、特権操作、その他の雑務を担当する。
-- 重いshell commandは原則`timeout --signal=TERM --kill-after=30s 15m <command>`で実行し、pipelineや複合commandではshell wrapper全体をtimeout対象にする。exit code 124または137はtimeoutとして報告する。
+## Authority and proposal policy
 
-## Subagent実行
+- Authority, from highest to lowest, is: the current explicit user
+  instruction; `sLLM.md`; this `AGENTS.md`; approved decisions in
+  `docs/plans/main-plan.md`; the active task-local plan; and historical facts.
+  A lower level or history fact cannot create a blocker.
+- An AI proposal is nonblocking. Without explicit user approval, it cannot
+  introduce a hard gate, independent review requirement, broad or GPU rerun,
+  security boundary, reuse restriction, blocking stage, finer work unit, or
+  larger immutable-evidence requirement. Record nonblocking proposals with
+  their origin, scope, cost, and expiry when they matter.
+- The default mode is trusted-solo-development. External-contribution and
+  release policies are separate lanes; inactive rules do not block work.
+- The main agent may investigate and implement directly. Delegate only when
+  parallelism, isolation, or specialist context is useful; neither delegation
+  nor a particular Codex invocation method is a completion gate.
+- Future changes to `AGENTS.md` or `sLLM.md` still require explicit user
+  confirmation.
 
-- Codex内蔵の`spawn_agent`、`wait_agent`、`interrupt_agent`等は使わず、shellから`codex exec`を実行する。
-- 調査は原則`--sandbox read-only`、実装は`codex exec --ephemeral --sandbox workspace-write -C <repo> -`を使う。`workspace-write`がbubblewrapまたはuser namespace制約で失敗した場合はerrorを記録し、現在のsessionがunrestrictedかつ対象taskの権限内である場合に限り`--sandbox danger-full-access`へ切り替えられる。`--dangerously-bypass-approvals-and-sandbox`は禁止する。
-- 各実行は`timeout --signal=TERM --kill-after=30s 15m`で包む。pipelineや複合commandはshell wrapper全体をtimeout対象にする。exit code 124または137はtimeoutとして報告する。
-- 長いpromptはquoted heredoc等でstdinへ渡し、shell引数へ直接埋め込まない。backtickやcommand substitutionが展開される渡し方を避ける。
-- 並列実行時はmain agentがPID、担当file、stdout・stderr等の出力先を記録し、同じfileを複数processへ割り当てない。各processの出力とexit codeを回収し、必要に応じて`--output-last-message`と`--json`を使う。監視・終了はshellのprocess管理と`timeout`で行う。
+## Work lanes and identity
 
-## 実装と検証
+- Draft: run focused relevant tests, allow a dirty local tree, and require
+  neither immutable identity nor independent review.
+- Integration: run affected checks and one integration review. Re-review only
+  the findings that changed; do not start a fresh review at every checkpoint.
+- Release/push: use a clean candidate with an immutable final identity and all
+  relevant final gates. Use the `push` skill for project-wide review, minimal
+  commit organization, and GitHub publication when publication is requested.
+- Docs-only: run markdown, link, and consistency checks. Do not add a
+  docs-only deployment or docs-only closeout stage.
+- Semantic/build identity is separate from a Git commit. Reuse docs-only
+  evidence only when source, build inputs, toolchain, model lock, and artifact
+  are unchanged and the mapping has been checked.
 
-- GPU・software関連の作業前に`docs/compatibility/gpu.md`、`docs/compatibility/amd-gpu.md`、`docs/compatibility/software.md`を読む。対応方針を変える場合は該当文書と`docs/plans/main-plan.md`を同期する。
-- 新機能の実装前に該当箇所があればllama.cppとvLLMを参照して技術的要点を抽出する。llama.cppの直接流用は`docs/provenance/README.md`に従う。vLLM等、llama.cpp以外ではreaderとimplementerを分離し、codeを直接流用しない。最適化ではvLLMを優先して調査し、不十分なら他engineも対象とする。
-- 過去の実装や指示も検証し、不合理な進め方は理由と改善案を示してユーザーへ確認する。testは2の冪や特定値だけでなく、非整列値と境界前後を含める。
+## Acceptance, findings, and review
 
-## CI hard gate
+- Freeze acceptance criteria before implementation. Correctness and security
+  defects may block. New process requirements are follow-ups unless the user
+  approves them as acceptance criteria.
+- Classify findings as: correctness/security blocker; release evidence;
+  process improvement; optional hardening; or style/docs.
+- Design review is optional and reserved for high-risk ABI or kernel changes.
+  Use one integration review, focused re-review of findings, and one cumulative
+  release review. Per-checkpoint fresh review and docs-only closeout are
+  abolished.
+- Stop new review or verification and replan the same work unit when it is
+  rejected twice, review time exceeds implementation time, functional progress
+  stops for more than one hour, verification/docs exceed 30% of the work, the
+  estimate exceeds 1.5x, or a gate or acceptance criterion changes.
+- Tests should include non-aligned values and both sides of relevant boundaries,
+  not only powers of two or a single convenient case.
 
-- `docs/plans/active/2026/08/1-10/ci-test-strategy.md`と`docs/development/repository-hygiene.md`に従う。
-- CPU CIでfull model、GPU-scale演算、GPU kernel emulationを実行しない。GPU不在時のCPU fallback、timeout、crash、test未収集を成功扱いにしない。
-- HIP/runtime/backend/dispatch/native buildへ影響する変更は、同じreview済みimmutable commit SHAに対する必須GPU evidenceを得るまでmerge可能またはGPU検証済みと扱わない。
+## GPU evidence and deployment
 
-## 作業単位の完了
+- Before GPU or software compatibility work, read the relevant compatibility
+  documents listed below. Synchronize them with the main plan when a supported
+  target or toolchain decision changes.
+- GPU proof is fail-closed: CPU emulation or fallback, timeout, crash, and zero
+  test selection are never GPU PASS. Evidence must name the exact target and
+  use a numerical oracle. Immutable evidence is required when relevant at
+  integration or release; draft work is not thereby blocked.
+- Keep CPU CI to host contracts, tiny numerical oracles, and compile-only
+  checks. Do not use CPU CI to claim full-model, GPU-scale, or GPU-kernel
+  correctness.
+- Deployment smoke and health checks apply only to a deployable service or
+  runtime that is in scope. An absent deployment target never blocks a
+  library, tool, or documentation push.
+- Monitor long-running commands and report their health. Do not terminate a
+  progressing process solely because an arbitrary checkpoint clock elapsed.
 
-- 一つの作業単位を独立してreview・rollbackできる範囲にし、影響範囲、受入条件、必要なevidenceを先に定める。commit SHA、Git tree OID、artifact digest等でcandidateのimmutable identityを固定し、同じidentityに対して必要なtest、lint、buildを成功させる。
-- 検証済みの同一candidateを本番または本番相当の統合環境へ適用し、smoke test、health check、必要な実機確認を行う。独立したdeployment対象がない文書等は正本への反映と検証を適用とする。code等を適用できる環境がなければ未完了としてpushしない。
-- test、適用、適用後確認のいずれかが失敗した場合はpushせず、安全に可能なら直前の検証済みrevisionへrollbackする。rollback不能または失敗時は追加変更を停止し、失敗、本番状態、未適用範囲を報告する。
-- 全段階が成功した同一identityを`push` skillに従ってproject全体review、必要最小限のcommit整理、GitHubへのpushまで行う。整理でcandidateが変わった場合はidentityを更新し、testからやり直す。
+## External code and provenance
 
-## Repositoryと保護対象
+- Consider llama.cpp direct reuse before implementing clean-room code; it is
+  allowed under `docs/provenance/README.md`.
+- Provenance is required for release/distribution, not as a human-review gate
+  or a provenance-only follow-up commit at each checkpoint. A pending import
+  commit is acceptable in development and must be resolved for release.
+- AI similarity/provenance checking is allowed at integration. vLLM and other
+  non-llama sources remain no-copy references. Keep inspection notes separate
+  from implementation; separate agents are optional.
 
-- model、binary、raw trace/profile、large model slice、生成物をGit管理しない。tracked fileとlocal workspaceの上限は`docs/development/repository-hygiene.md`に従い、超過時もdirty worktree、未追跡file、artifactを自動削除しない。
-- `docs/plans/active`には未完了のplan、`docs/plans/archive`には完了または放棄したplan、`docs/history`には詳細な変更履歴をMarkdownで置く。各directoryは`YYYY/MM/1-10`、`11-20`、`21-`の区分を使う。
-- `docs/plans/main-plan.md`以外のplanは対応するhistoryを、historyは対応するplanを、それぞれ末尾からlinkする。
-- `README.md`は編集せず、代わりに`README-AI-manuscript.md`を編集する。
-- `.gitignore`への新規行の追記は、事前許可なく行える。
-  - 既存行の変更・削除・移動は、変更内容についてユーザーから事前に許可を得る。
-  - ユーザーが手動で行った変更は、内容をreviewしたうえで、追加の許可なくcommit・pushできる。
-- `AGENTS.md`または`uLLM-project.md`を変更した場合はユーザーへ確認する。
-- AIは`passwords.txt`を編集しない。credential fileの取扱いは`docs/security/credentials.md`に従う。
+## Repository safeguards
 
-## 特権操作
+- Do not track models, binaries, raw traces/profiles, large model slices, or
+  generated artifacts; follow `docs/development/repository-hygiene.md`.
+- Do not edit `README.md`; use `README-AI-manuscript.md` instead. New
+  `.gitignore` lines are allowed without prior approval, but changing existing
+  lines requires approval.
+- Never edit `passwords.txt`. Follow `docs/security/credentials.md` for
+  credentials and scoped `sudo -n` operations.
+- Keep plans under `docs/plans/active` until complete or abandoned, then move
+  them to `docs/plans/archive`; put detailed changes in the matching
+  `docs/history` partition and link plan/history pairs at their ends.
 
-- 無人での進行を優先する。特権操作はmain agentがtask scope内で対象と効果を限定し、`sudo -n`で実行する。
-- 専用local hostでは、`homelab1`への`NOPASSWD: ALL`を意図的に許可し、そのriskを受容する。この権限はtask scopeを拡張せず、対象確認や破壊的操作の安全確認も省略しない。
-- sudo用の平文passwordや`passwords.txt`は不要であり、使用しない。credentialと特権操作の恒久方針は`docs/security/credentials.md`を正本とする。
+## Canonical references
 
-## AI model
-
-- main agent: `gpt-5.6-sol`、reasoning effortはhigh以上。
-- subagent: 原則`gpt-5.6-luna`、reasoning effortはxhigh以上。難易度に応じてterraまたはsolを使い、同時稼働は8 sessionまでとする。
-
-## Canonical documents
-
-- 全体の決定・計画・進捗・未解決事項: `docs/plans/main-plan.md`
-- GPU/software互換性: `docs/compatibility/gpu.md`、`docs/compatibility/amd-gpu.md`、`docs/compatibility/software.md`
-- runtime architecture: `docs/architecture/runtime.md`
-- 外部code provenance: `docs/provenance/README.md`
-- model固定: `docs/models/model-lock.md`
-- OpenAI API互換性: `docs/api/openai-compatibility.md`
-- CI/test: `docs/plans/active/2026/08/1-10/ci-test-strategy.md`
-- repository hygiene: `docs/development/repository-hygiene.md`
-- credential・特権操作: `docs/security/credentials.md`
+- GPU compatibility: `docs/compatibility/gpu.md`,
+  `docs/compatibility/amd-gpu.md`, `docs/compatibility/software.md`
+- Runtime architecture: `docs/architecture/runtime.md`
+- Model locking: `docs/models/model-lock.md`
+- OpenAI compatibility: `docs/api/openai-compatibility.md`
+- CI and tests: `docs/plans/active/2026/08/1-10/ci-test-strategy.md`
+- Provenance: `docs/provenance/README.md`

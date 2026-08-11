@@ -75,7 +75,7 @@ from validate_g1_contracts import (  # noqa: E402
 ZERO_SHA = "0" * 64
 ZERO_SHA40 = "0" * 40
 REPORT_NAME = "report.json"
-COMMAND = ["target/release/ullm-hip-evidence", "--timeout-ms", "1000"]
+COMMAND = ["target/release/sllm-hip-evidence", "--timeout-ms", "1000"]
 MAX_CAPTURED_OUTPUT = 1024 * 1024
 CAPTURE_CHUNK_BYTES = 64 * 1024
 TERM_GRACE_SECONDS = 2.0
@@ -83,7 +83,7 @@ KILL_GRACE_SECONDS = 2.0
 REAP_GRACE_SECONDS = 2.0
 METADATA_READ_LIMIT = 16 * 1024 * 1024
 SYSFS_PCI_ROOT = Path("/sys/bus/pci/devices")
-PRIVATE_TMP_PREFIX = "ullm-g1-"
+PRIVATE_TMP_PREFIX = "sllm-g1-"
 ROCM_ROOT = "/opt/rocm"
 ROCM_RELEASE = "7.14.0"
 PINNED_PATH = "/opt/rocm/bin:/opt/rocm/lib/llvm/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
@@ -441,7 +441,7 @@ def safe_output_directory(output: Path, repo: Path, row: Mapping[str, Any]) -> P
     resolved = output.resolve(strict=False)
     path_outside_repo(resolved, repo, "G1 output directory")
     if resolved.name != row["row_id"] or resolved.parent != root:
-        raise ContractError("G1 output must be /tmp/ullm-g1-*/g1-<exact-row>")
+        raise ContractError("G1 output must be /tmp/sllm-g1-*/g1-<exact-row>")
     if output.exists():
         if output.is_symlink() or not output.is_dir():
             raise ContractError("G1 output directory is unsafe")
@@ -487,7 +487,7 @@ def _safe_staged_artifact(
     except ValueError as exc:
         raise ContractError("G1 runtime artifact is outside the private metadata staging root") from exc
     if resolved.name != BINARY_NAME or resolved.parts[-3:] != ("target", "release", BINARY_NAME):
-        raise ContractError("G1 runtime artifact is not target/release/ullm-hip-evidence")
+        raise ContractError("G1 runtime artifact is not target/release/sllm-hip-evidence")
     if not resolved.is_file() or resolved.is_symlink():
         raise ContractError("G1 runtime artifact is not a regular non-symlink file")
     if not os.access(resolved, os.X_OK):
@@ -1481,7 +1481,7 @@ def main(argv: list[str] | None = None) -> int:
             artifact_snapshot=source_artifact_snapshot,
         )
 
-        with nonblocking_host_lock(Path("/tmp/ullm-g0.lock")):
+        with nonblocking_host_lock(Path("/tmp/sllm-g0.lock")):
             routing = amd_smi_list_json(row, executable=AMD_SMI_EXECUTABLE)
             visibility = validate_visibility_environment(
                 {

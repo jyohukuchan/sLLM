@@ -1,0 +1,487 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sllm-project.local/ci/schema/rmsnorm-semantic-g1-report-v1.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "report_id",
+    "row_id",
+    "target",
+    "state",
+    "required",
+    "run_id",
+    "run_attempt",
+    "candidate",
+    "authority",
+    "contracts",
+    "artifact_kind",
+    "scope",
+    "device",
+    "artifact",
+    "compiler_execution",
+    "worker",
+    "raw_frame_sha256",
+    "resource_counts",
+    "cases",
+    "health_pre",
+    "health_post",
+    "process_pre",
+    "process_post",
+    "controller_started_at",
+    "controller_finished_at",
+    "controller_duration_ns"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "rmsnorm-semantic-g1-report-v1"
+    },
+    "report_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "row_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "target": {
+      "type": "string",
+      "minLength": 1
+    },
+    "state": {
+      "enum": [
+        "PASS",
+        "FAIL"
+      ]
+    },
+    "required": {
+      "type": "boolean"
+    },
+    "run_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "run_attempt": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "candidate": {
+      "$ref": "#/$defs/candidate"
+    },
+    "authority": {
+      "$ref": "#/$defs/authority"
+    },
+    "contracts": {
+      "$ref": "#/$defs/contracts"
+    },
+    "artifact_kind": {
+      "type": "string"
+    },
+    "scope": {
+      "$ref": "#/$defs/scope"
+    },
+    "device": {
+      "$ref": "#/$defs/device"
+    },
+    "artifact": {
+      "$ref": "#/$defs/artifact_facts"
+    },
+    "compiler_execution": {
+      "$ref": "#/$defs/exact_action_transcript"
+    },
+    "worker": {
+      "$ref": "#/$defs/worker"
+    },
+    "raw_frame_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "resource_counts": {
+      "$ref": "#/$defs/resource_counts"
+    },
+    "cases": {
+      "type": "array",
+      "minItems": 15,
+      "maxItems": 15,
+      "items": {"$ref": "#/$defs/case"}
+    },
+    "health_pre": {
+      "$ref": "#/$defs/health"
+    },
+    "health_post": {
+      "$ref": "#/$defs/health"
+    },
+    "process_pre": {
+      "$ref": "#/$defs/process"
+    },
+    "process_post": {
+      "$ref": "#/$defs/process"
+    },
+    "controller_started_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "controller_finished_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "controller_duration_ns": {
+      "type": "integer",
+      "minimum": 0
+    }
+  },
+  "$defs": {
+    "exact_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "scope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["selected_backend", "fallback_allowed", "fallback_used", "model_used", "semantic_op_used", "cpu_fallback_used", "gpu_execution", "private_g1_used", "h3_artifact_used"],
+      "properties": {
+        "selected_backend": {"const": "hip"},
+        "fallback_allowed": {"const": false},
+        "fallback_used": {"const": false},
+        "model_used": {"const": false},
+        "semantic_op_used": {"const": true},
+        "cpu_fallback_used": {"const": false},
+        "gpu_execution": {"const": true},
+        "private_g1_used": {"const": false},
+        "h3_artifact_used": {"const": false}
+      }
+    },
+    "contracts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["matrix_manifest_sha256", "matrix_schema_sha256", "artifact_schema_sha256", "report_schema_sha256", "aggregate_schema_sha256", "model_lock_sha256"],
+      "properties": {
+        "matrix_manifest_sha256": {"$ref": "#/$defs/exact_digest"},
+        "matrix_schema_sha256": {"$ref": "#/$defs/exact_digest"},
+        "artifact_schema_sha256": {"$ref": "#/$defs/exact_digest"},
+        "report_schema_sha256": {"$ref": "#/$defs/exact_digest"},
+        "aggregate_schema_sha256": {"$ref": "#/$defs/exact_digest"},
+        "model_lock_sha256": {"$ref": "#/$defs/exact_digest"}
+      }
+    },
+    "authority_source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "git_blob_oid", "size_bytes", "sha256"],
+      "properties": {
+        "path": {"type": "string", "minLength": 1, "pattern": "^[^/\\u0000][^\\u0000]*$"},
+        "git_blob_oid": {"type": "string", "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"},
+        "size_bytes": {"type": "integer", "minimum": 1},
+        "sha256": {"$ref": "#/$defs/exact_digest"}
+      }
+    },
+    "authority": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["authority_version", "candidate", "controller", "workflow", "sources", "executables", "toolchain"],
+      "properties": {
+        "authority_version": {"const": "rmsnorm-semantic-g1-reviewed-authority-v1"},
+        "candidate": {"$ref": "#/$defs/candidate"},
+        "controller": {"$ref": "#/$defs/authority_source"},
+        "workflow": {"$ref": "#/$defs/authority_source"},
+        "sources": {"type": "array", "minItems": 59, "maxItems": 59, "items": {"$ref": "#/$defs/authority_source"}},
+        "executables": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["python", "compiler", "client_interpreter"],
+          "properties": {
+            "python": {"$ref": "#/$defs/record"},
+            "compiler": {"$ref": "#/$defs/record"},
+            "client_interpreter": {"$ref": "#/$defs/record"}
+          }
+        },
+        "toolchain": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["cargo", "rustc", "cmake", "cxx", "objcopy", "bundler", "amd_smi", "process_limiter", "loader", "hip_runtime", "hsa_runtime"],
+          "properties": {
+            "cargo": {"$ref": "#/$defs/record"},
+            "rustc": {"$ref": "#/$defs/record"},
+            "cmake": {"$ref": "#/$defs/record"},
+            "cxx": {"$ref": "#/$defs/record"},
+            "objcopy": {"$ref": "#/$defs/record"},
+            "bundler": {"$ref": "#/$defs/record"},
+            "amd_smi": {"$ref": "#/$defs/record"},
+            "process_limiter": {"$ref": "#/$defs/record"},
+            "loader": {"$ref": "#/$defs/record"},
+            "hip_runtime": {"$ref": "#/$defs/record"},
+            "hsa_runtime": {"$ref": "#/$defs/record"}
+          }
+        }
+      }
+    },
+    "device": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["bdf", "uuid", "target", "physical_hip_index", "logical_device_index"],
+      "properties": {
+        "bdf": {"type": "string", "minLength": 1},
+        "uuid": {"type": "string", "minLength": 1},
+        "target": {"enum": ["gfx1030", "gfx1201"]},
+        "physical_hip_index": {"type": "integer", "minimum": 0},
+        "logical_device_index": {"const": 0}
+      }
+    },
+    "artifact_facts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["metadata_sha256", "binary_sha256", "companion_sha256", "loader_sha256", "runtime_library_sha256", "runtime_dependency_closure_sha256", "compiler_execution_sha256"],
+      "properties": {
+        "metadata_sha256": {"$ref": "#/$defs/exact_digest"},
+        "binary_sha256": {"$ref": "#/$defs/exact_digest"},
+        "companion_sha256": {"$ref": "#/$defs/exact_digest"},
+        "loader_sha256": {"$ref": "#/$defs/exact_digest"},
+        "runtime_library_sha256": {"$ref": "#/$defs/exact_digest"},
+        "runtime_dependency_closure_sha256": {"$ref": "#/$defs/exact_digest"},
+        "compiler_execution_sha256": {"$ref": "#/$defs/exact_digest"}
+      }
+    },
+    "worker": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["pid", "starttime", "uid", "gid", "script_sha256", "interpreter_sha256"],
+      "properties": {
+        "pid": {"type": "integer", "minimum": 1},
+        "starttime": {"type": "integer", "minimum": 1},
+        "uid": {"type": "integer", "minimum": 0},
+        "gid": {"type": "integer", "minimum": 0},
+        "script_sha256": {"$ref": "#/$defs/exact_digest"},
+        "interpreter_sha256": {"$ref": "#/$defs/exact_digest"}
+      }
+    },
+    "resource_counts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["allocation_count", "copy_count", "dispatch_count", "kernel_count"],
+      "properties": {
+        "allocation_count": {"type": "integer", "minimum": 0},
+        "copy_count": {"type": "integer", "minimum": 0},
+        "dispatch_count": {"type": "integer", "minimum": 0},
+        "kernel_count": {"type": "integer", "minimum": 0}
+      }
+    },
+    "health": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["available", "reliable", "state", "device", "temperature_c", "ras_uncorrectable_count"],
+      "properties": {
+        "available": {"const": true},
+        "reliable": {"const": true},
+        "state": {"const": "OK"},
+        "device": {"$ref": "#/$defs/device"},
+        "temperature_c": {"type": "number"},
+        "ras_uncorrectable_count": {"type": "integer", "minimum": 0}
+      }
+    },
+    "process": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["available", "reliable", "state", "device", "gpu_processes", "residual_runner_children"],
+      "properties": {
+        "available": {"const": true},
+        "reliable": {"const": true},
+        "state": {"const": "CLEAN"},
+        "device": {"$ref": "#/$defs/device"},
+        "gpu_processes": {"type": "array", "maxItems": 0, "items": false},
+        "residual_runner_children": {"type": "array", "maxItems": 0, "items": false}
+      }
+    },
+    "numerics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["tolerance_id", "atol", "rtol", "max_abs_error", "max_rel_error", "nan_count", "inf_count"],
+      "properties": {
+        "tolerance_id": {"const": "rmsnorm-bf16-f32-output-v1"},
+        "atol": {"type": "number", "minimum": 0},
+        "rtol": {"type": "number", "minimum": 0},
+        "max_abs_error": {"type": "number", "minimum": 0},
+        "max_rel_error": {"type": "number", "minimum": 0},
+        "nan_count": {"type": "integer", "minimum": 0},
+        "inf_count": {"type": "integer", "minimum": 0}
+      }
+    },
+    "response_evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "sidecar_path", "size_bytes", "sha256", "sidecar_sha256", "candidate_sha256", "row_id", "case_id", "order"],
+      "properties": {
+        "path": {"type": "string", "pattern": "^rows/rmsnorm-semantic-g1-(?:gfx1030|gfx1201)/raw/case-[0-9]+\\.bin$"},
+        "sidecar_path": {"type": "string", "pattern": "^rows/rmsnorm-semantic-g1-(?:gfx1030|gfx1201)/raw/case-[0-9]+\\.bin\\.sha256$"},
+        "size_bytes": {"type": "integer", "minimum": 1, "maximum": 1048576},
+        "sha256": {"$ref": "#/$defs/exact_digest"},
+        "sidecar_sha256": {"$ref": "#/$defs/exact_digest"},
+        "candidate_sha256": {"$ref": "#/$defs/exact_digest"},
+        "row_id": {"type": "string", "enum": ["rmsnorm-semantic-g1-gfx1030", "rmsnorm-semantic-g1-gfx1201"]},
+        "case_id": {"type": "string", "minLength": 1},
+        "order": {"type": "integer", "minimum": 0, "maximum": 14}
+      }
+    },
+    "case": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["order", "id", "rows", "n", "classification", "nonfinite_input", "request_sha256", "response_sha256", "response_evidence", "resource_counts", "dispatch_id", "dispatch_count", "kernel_symbol", "device_symbol", "numerics", "controller_started_at", "controller_finished_at", "controller_duration_ns"],
+      "properties": {
+        "order": {"type": "integer", "minimum": 0, "maximum": 14},
+        "id": {"type": "string", "minLength": 1},
+        "rows": {"type": "integer", "minimum": 1},
+        "n": {"type": "integer", "minimum": 1, "maximum": 4096},
+        "classification": {"enum": ["finite", "nan", "posinf", "neginf"]},
+        "nonfinite_input": {"enum": ["none", "activation", "raw_scale"]},
+        "request_sha256": {"$ref": "#/$defs/exact_digest"},
+        "response_sha256": {"$ref": "#/$defs/exact_digest"},
+        "response_evidence": {"$ref": "#/$defs/response_evidence"},
+        "resource_counts": {"$ref": "#/$defs/resource_counts"},
+        "dispatch_id": {"type": "integer", "minimum": 1},
+        "dispatch_count": {"const": 1},
+        "kernel_symbol": {"type": "string", "minLength": 1},
+        "device_symbol": {"type": "string", "minLength": 1},
+        "numerics": {"$ref": "#/$defs/numerics"},
+        "controller_started_at": {"type": "string", "format": "date-time"},
+        "controller_finished_at": {"type": "string", "format": "date-time"},
+        "controller_duration_ns": {"type": "integer", "minimum": 0}
+      }
+    },
+    "candidate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "reviewed_sha",
+        "tested_sha",
+        "workflow_sha",
+        "git_tree_oid",
+        "git_object_format",
+        "git_oid_width",
+        "worktree_clean",
+        "revision_input"
+      ],
+      "properties": {
+        "reviewed_sha": {
+          "type": "string",
+          "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"
+        },
+        "tested_sha": {
+          "type": "string",
+          "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"
+        },
+        "workflow_sha": {
+          "type": "string",
+          "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"
+        },
+        "git_tree_oid": {
+          "type": "string",
+          "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"
+        },
+        "git_object_format": {
+          "enum": [
+            "sha1",
+            "sha256"
+          ]
+        },
+        "git_oid_width": {
+          "enum": [
+            40,
+            64
+          ]
+        },
+        "worktree_clean": {
+          "const": true
+        },
+        "revision_input": {
+          "const": "full-sha"
+        }
+      },
+      "allOf": [
+        {
+          "oneOf": [
+            {
+              "properties": {
+                "git_object_format": {
+                  "const": "sha1"
+                },
+                "git_oid_width": {
+                  "const": 40
+                }
+              }
+            },
+            {
+              "properties": {
+                "git_object_format": {
+                  "const": "sha256"
+                },
+                "git_oid_width": {
+                  "const": 64
+                }
+              }
+            }
+          ]
+        }
+      ]
+    },
+    "record": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "resolved_path",
+        "size_bytes",
+        "sha256"
+      ],
+      "properties": {
+        "path": {
+          "type": "string",
+          "pattern": "^/"
+        },
+        "resolved_path": {
+          "type": "string",
+          "pattern": "^/"
+        },
+        "size_bytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9223372036854775807
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      }
+    },
+    "sealed_input_view": {"type": "object", "additionalProperties": false, "required": ["algorithm", "argv", "argv_sha256", "inputs", "include_directories", "sealed"], "properties": {"algorithm": {"const": "sealed-input-view-v1"}, "argv": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}}, "argv_sha256": {"$ref": "#/$defs/exact_digest"}, "inputs": {"type": "array", "items": {"type": "object", "additionalProperties": false, "required": ["role", "path", "resolved_path", "size_bytes", "sha256", "device", "inode", "view_fd"], "properties": {"role": {"type": "string", "minLength": 1}, "path": {"type": "string", "pattern": "^/"}, "resolved_path": {"type": "string", "pattern": "^/"}, "size_bytes": {"type": "integer", "minimum": 0}, "sha256": {"$ref": "#/$defs/exact_digest"}, "device": {"type": "integer", "minimum": 1}, "inode": {"type": "integer", "minimum": 1}, "view_fd": {"type": "integer", "minimum": 3}}}}, "include_directories": {"type": "array", "items": {"type": "object", "additionalProperties": false, "required": ["original", "view"], "properties": {"original": {"type": "string"}, "view": {"type": "string", "pattern": "^/tmp/sllm-exact-input-view-"}}}}, "sealed": {"const": true}}},
+    "exact_directory": {"type": "object", "additionalProperties": false, "required": ["path", "resolved_path", "device", "inode"], "properties": {"path": {"type": "string", "pattern": "^/"}, "resolved_path": {"type": "string", "pattern": "^/"}, "device": {"type": "integer", "minimum": 1}, "inode": {"type": "integer", "minimum": 1}}},
+    "exact_executable": {"type": "object", "additionalProperties": false, "required": ["path", "resolved_path", "size_bytes", "sha256", "device", "inode", "seals"], "properties": {"path": {"type": "string", "pattern": "^/"}, "resolved_path": {"type": "string", "pattern": "^/"}, "size_bytes": {"type": "integer", "minimum": 0}, "sha256": {"$ref": "#/$defs/exact_digest"}, "device": {"type": "integer", "minimum": 1}, "inode": {"type": "integer", "minimum": 1}, "seals": {"type": "integer", "minimum": 1}}},
+    "exact_input": {"type": "object", "additionalProperties": false, "required": ["role", "path", "resolved_path", "size_bytes", "sha256", "device", "inode"], "properties": {"role": {"type": "string", "minLength": 1}, "path": {"type": "string", "pattern": "^/"}, "resolved_path": {"type": "string", "pattern": "^/"}, "size_bytes": {"type": "integer", "minimum": 0}, "sha256": {"$ref": "#/$defs/exact_digest"}, "device": {"type": "integer", "minimum": 1}, "inode": {"type": "integer", "minimum": 1}}},
+    "exact_implicit": {"type": "object", "additionalProperties": false, "required": ["role", "size_bytes", "sha256", "bytes_hex"], "properties": {"role": {"type": "string", "minLength": 1}, "size_bytes": {"type": "integer", "minimum": 0}, "sha256": {"$ref": "#/$defs/exact_digest"}, "bytes_hex": {"type": "string", "pattern": "^[0-9a-f]*$"}}},
+    "exact_output": {"type": "object", "additionalProperties": false, "required": ["path", "parent"], "properties": {"path": {"type": "string", "pattern": "^/"}, "parent": {"$ref": "#/$defs/exact_directory"}}},
+    "exact_binding": {"type": "object", "additionalProperties": false, "required": ["pid", "starttime", "uid", "gid"], "properties": {"pid": {"type": "integer", "minimum": 1}, "starttime": {"type": "integer", "minimum": 1}, "uid": {"type": "integer", "minimum": 0}, "gid": {"type": "integer", "minimum": 0}}},
+    "exact_action_manifest": {"type": "object", "additionalProperties": false, "required": ["schema_version", "action_id", "manifest_digest", "executable", "argv0", "argv", "cwd", "environment", "inputs", "implicit", "response_files", "outputs", "target", "occurrence_index", "occurrence_limit"], "properties": {"schema_version": {"const": "exact-parent-action-manifest-v1"}, "action_id": {"$ref": "#/$defs/exact_digest"}, "manifest_digest": {"$ref": "#/$defs/exact_digest"}, "executable": {"$ref": "#/$defs/exact_executable"}, "argv0": {"type": "string", "minLength": 1}, "argv": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}}, "cwd": {"$ref": "#/$defs/exact_directory"}, "environment": {"type": "array", "items": {"type": "array", "minItems": 2, "maxItems": 2, "prefixItems": [{"type": "string", "minLength": 1}, {"type": "string"}], "items": false}}, "inputs": {"type": "array", "items": {"$ref": "#/$defs/exact_input"}}, "implicit": {"type": "array", "items": {"$ref": "#/$defs/exact_implicit"}}, "response_files": {"type": "array", "items": {"$ref": "#/$defs/exact_implicit"}}, "outputs": {"type": "array", "items": {"$ref": "#/$defs/exact_output"}}, "target": {"type": "string", "minLength": 1}, "occurrence_index": {"const": 0}, "occurrence_limit": {"const": 1}}},
+    "exact_exec_identity": {"type": "object", "additionalProperties": false, "required": ["pid", "starttime", "ppid", "pgrp", "exe_dev", "exe_ino", "sealed_dev", "sealed_ino", "exe_path", "argv_sha256", "cwd", "exec_ready"], "properties": {"pid": {"type": "integer", "minimum": 1}, "starttime": {"type": "integer", "minimum": 1}, "ppid": {"type": "integer", "minimum": 1}, "pgrp": {"type": "integer", "minimum": 1}, "exe_dev": {"type": "integer", "minimum": 1}, "exe_ino": {"type": "integer", "minimum": 1}, "sealed_dev": {"type": "integer", "minimum": 1}, "sealed_ino": {"type": "integer", "minimum": 1}, "exe_path": {"type": "string", "pattern": "^/proc/[0-9]+/exe$"}, "argv_sha256": {"$ref": "#/$defs/exact_digest"}, "cwd": {"type": "string", "pattern": "^/"}, "exec_ready": {"const": true}}},
+    "exact_compiler": {"type": "object", "additionalProperties": false, "required": ["pid", "starttime", "ppid", "pgrp", "exit_code", "stdout_b64", "stderr_b64", "stdout_sha256", "stderr_sha256", "duration_ns", "status", "timed_out", "crashed", "invocation", "kernel_limits", "action_id", "action_digest", "exec_identity"], "properties": {"pid": {"type": "integer", "minimum": 1}, "starttime": {"type": "integer", "minimum": 1}, "ppid": {"type": "integer", "minimum": 1}, "pgrp": {"type": "integer", "minimum": 1}, "exit_code": {"type": "integer"}, "stdout_b64": {"type": "string"}, "stderr_b64": {"type": "string"}, "stdout_sha256": {"$ref": "#/$defs/exact_digest"}, "stderr_sha256": {"$ref": "#/$defs/exact_digest"}, "duration_ns": {"type": "integer", "minimum": 1}, "status": {"enum": ["ok", "failed"]}, "timed_out": {"type": "boolean"}, "crashed": {"type": "boolean"}, "invocation": {"type": "object", "additionalProperties": false, "required": ["action_manifest", "materialized_outputs", "sealed_input_view"], "properties": {"action_manifest": {"$ref": "#/$defs/exact_action_manifest"}, "materialized_outputs": {"type": "array", "items": {"$ref": "#/$defs/record"}}, "sealed_input_view": {"$ref": "#/$defs/sealed_input_view"}}}, "kernel_limits": {"type": "object", "additionalProperties": false, "required": ["address_space_bytes", "process_count", "rss_bytes", "enforced_by", "address_space_enforcement", "process_count_enforcement", "rss_enforcement"], "properties": {"address_space_bytes": {"type": "integer", "minimum": 1}, "process_count": {"type": "integer", "minimum": 1}, "rss_bytes": {"type": "integer", "minimum": 1}, "enforced_by": {"type": "string", "pattern": "^/"}, "address_space_enforcement": {"type": "string", "minLength": 1}, "process_count_enforcement": {"type": "string", "minLength": 1}, "rss_enforcement": {"type": "string", "minLength": 1}}}, "action_id": {"$ref": "#/$defs/exact_digest"}, "action_digest": {"$ref": "#/$defs/exact_digest"}, "exec_identity": {"$ref": "#/$defs/exact_exec_identity"}}},
+    "exact_action_issuance": {"type": "object", "additionalProperties": false, "required": ["recipe_key", "action_id", "action_digest", "state", "issued_at_ns", "consumed_at_ns", "manifest"], "properties": {"recipe_key": {"type": "string", "minLength": 1}, "action_id": {"$ref": "#/$defs/exact_digest"}, "action_digest": {"$ref": "#/$defs/exact_digest"}, "state": {"const": "consumed"}, "issued_at_ns": {"type": "integer", "minimum": 1}, "consumed_at_ns": {"type": "integer", "minimum": 1}, "manifest": {"$ref": "#/$defs/exact_action_manifest"}}},
+    "exact_action_event": {"type": "object", "additionalProperties": false, "required": ["sequence", "request_nonce", "observation_nonce", "client_observation", "client_binding", "action_id", "action_digest", "action_manifest", "request_frame_sha256", "response_frame_sha256", "ack_frame_sha256", "compiler_source_sha256", "compiler", "started_at_ns", "finished_at_ns", "consumed", "acknowledged"], "properties": {"sequence": {"type": "integer", "minimum": 0}, "request_nonce": {"$ref": "#/$defs/exact_digest"}, "observation_nonce": {"$ref": "#/$defs/exact_digest"}, "client_observation": {"type": "object", "additionalProperties": false, "required": ["observation_nonce", "argv", "cwd", "environment_sha256", "client_binding"], "properties": {"observation_nonce": {"$ref": "#/$defs/exact_digest"}, "argv": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}}, "cwd": {"type": "string", "pattern": "^/"}, "environment_sha256": {"$ref": "#/$defs/exact_digest"}, "client_binding": {"$ref": "#/$defs/exact_binding"}}}, "client_binding": {"$ref": "#/$defs/exact_binding"}, "action_id": {"$ref": "#/$defs/exact_digest"}, "action_digest": {"$ref": "#/$defs/exact_digest"}, "action_manifest": {"$ref": "#/$defs/exact_action_manifest"}, "request_frame_sha256": {"$ref": "#/$defs/exact_digest"}, "response_frame_sha256": {"$ref": "#/$defs/exact_digest"}, "ack_frame_sha256": {"$ref": "#/$defs/exact_digest"}, "compiler_source_sha256": {"$ref": "#/$defs/exact_digest"}, "compiler": {"$ref": "#/$defs/exact_compiler"}, "started_at_ns": {"type": "integer", "minimum": 1}, "finished_at_ns": {"type": "integer", "minimum": 1}, "consumed": {"const": true}, "acknowledged": {"const": true}}},
+    "exact_action_transcript": {"type": "object", "additionalProperties": false, "required": ["protocol", "event_protocol", "source", "client", "exec_helper", "session", "request_count", "events_sha256", "expected_recipe_keys", "closure", "actions", "events"], "properties": {"protocol": {"const": "parent-owned-exact-action-broker-v1"}, "event_protocol": {"const": "parent-issued-exact-action-v1"}, "source": {"$ref": "#/$defs/record"}, "client": {"$ref": "#/$defs/record"}, "exec_helper": {"$ref": "#/$defs/record"}, "session": {"$ref": "#/$defs/exact_digest"}, "request_count": {"type": "integer", "minimum": 1}, "events_sha256": {"$ref": "#/$defs/exact_digest"}, "expected_recipe_keys": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string", "minLength": 1}}, "closure": {"type": "object", "additionalProperties": false, "required": ["state", "build_root_pid", "build_root_starttime", "build_root_pgrp", "build_tree_reaped", "listener_closed", "active_requests", "quiescence_rounds", "state_machine", "request_count", "last_sequence", "events_sha256"], "properties": {"state": {"const": "closed"}, "build_root_pid": {"type": "integer", "minimum": 1}, "build_root_starttime": {"type": "integer", "minimum": 1}, "build_root_pgrp": {"type": "integer", "minimum": 1}, "build_tree_reaped": {"const": true}, "listener_closed": {"const": true}, "active_requests": {"const": 0}, "quiescence_rounds": {"const": 3}, "state_machine": {"const": "new-running-closing-closed-v1"}, "request_count": {"type": "integer", "minimum": 1}, "last_sequence": {"type": "integer", "minimum": 0}, "events_sha256": {"$ref": "#/$defs/exact_digest"}}}, "actions": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/exact_action_issuance"}}, "events": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/exact_action_event"}}}},
+    "keyword_coverage": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 2,
+      "prefixItems": [
+        {
+          "const": 1,
+          "maxLength": 1
+        }
+      ],
+      "items": false,
+      "allOf": [
+        {
+          "type": "array"
+        }
+      ],
+      "oneOf": [
+        {
+          "type": "array"
+        }
+      ]
+    }
+  }
+}

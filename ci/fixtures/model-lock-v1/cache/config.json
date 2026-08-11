@@ -1,0 +1,9 @@
+{
+  "architectures": ["FixtureModel"],
+  "model_type": "fixture",
+  "eos_token_id": 0,
+  "text_config": {
+    "model_type": "fixture_text",
+    "eos_token_id": 0
+  }
+}

@@ -1,7 +1,7 @@
 [project]
-name = "ullm-test-contracts"
+name = "sllm-test-contracts"
 version = "0.0.0"
-description = "Small, deterministic host contract and NumPy oracle tests for uLLM"
+description = "Small, deterministic host contract and NumPy oracle tests for sLLM"
 requires-python = ">=3.12,<3.13"
 dependencies = []
 

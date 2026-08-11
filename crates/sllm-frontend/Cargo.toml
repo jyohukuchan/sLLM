@@ -1,0 +1,12 @@
+[package]
+name = "sllm-frontend"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Dependency-locked frontend boundary for the sLLM text stack"
+
+[dependencies]
+sha2.workspace = true
+sllm-core.workspace = true
+tokenizers.workspace = true

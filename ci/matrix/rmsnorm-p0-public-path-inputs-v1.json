@@ -1,0 +1,339 @@
+{
+  "schema_version": "rmsnorm-p0-public-path-inputs-v1",
+  "identity": "rmsnorm-p0-enabled-public-path-v1",
+  "public_path": "SemanticOpDescriptor->Backend->sllm-hip->public-C-ABI->native-HIP-registry->rmsnorm.baseline.wave32.v1",
+  "producer_status": "a5-enabled",
+  "dedicated_producer_included": true,
+  "a5_enablement_requires": [],
+  "source_order_sha256": "3d2feb78595b15ab5b9473c463c47669aa5c862514d42f050e9b82747f72709e",
+  "source_paths": [
+    {
+      "order": 0,
+      "path": "ci/matrix/rmsnorm-p0-public-path-inputs-v1.json"
+    },
+    {
+      "order": 1,
+      "path": "ci/tools/validate_rmsnorm_p0_contracts.py"
+    },
+    {
+      "order": 2,
+      "path": "ci/tools/run_rmsnorm_p0_runtime.py"
+    },
+    {
+      "order": 3,
+      "path": "ci/tools/aggregate_rmsnorm_p0_results.py"
+    },
+    {
+      "order": 4,
+      "path": "ci/tools/build_rmsnorm_p0_runtime.py"
+    },
+    {
+      "order": 5,
+      "path": "Cargo.lock"
+    },
+    {
+      "order": 6,
+      "path": "Cargo.toml"
+    },
+    {
+      "order": 7,
+      "path": "crates/sllm-core/Cargo.toml"
+    },
+    {
+      "order": 8,
+      "path": "crates/sllm-core/src/backend.rs"
+    },
+    {
+      "order": 9,
+      "path": "crates/sllm-core/src/dtype.rs"
+    },
+    {
+      "order": 10,
+      "path": "crates/sllm-core/src/execution.rs"
+    },
+    {
+      "order": 11,
+      "path": "crates/sllm-core/src/fake.rs"
+    },
+    {
+      "order": 12,
+      "path": "crates/sllm-core/src/handles.rs"
+    },
+    {
+      "order": 13,
+      "path": "crates/sllm-core/src/kv_state.rs"
+    },
+    {
+      "order": 14,
+      "path": "crates/sllm-core/src/lib.rs"
+    },
+    {
+      "order": 15,
+      "path": "crates/sllm-core/src/model.rs"
+    },
+    {
+      "order": 16,
+      "path": "crates/sllm-core/src/op.rs"
+    },
+    {
+      "order": 17,
+      "path": "crates/sllm-core/src/registry.rs"
+    },
+    {
+      "order": 18,
+      "path": "crates/sllm-core/src/tensor.rs"
+    },
+    {
+      "order": 19,
+      "path": "crates/sllm-core/src/weights.rs"
+    },
+    {
+      "order": 20,
+      "path": "crates/sllm-hip-sys/Cargo.toml"
+    },
+    {
+      "order": 21,
+      "path": "crates/sllm-hip-sys/build.rs"
+    },
+    {
+      "order": 22,
+      "path": "crates/sllm-hip-sys/src/bindings.rs"
+    },
+    {
+      "order": 23,
+      "path": "crates/sllm-hip-sys/src/evidence_bindings.rs"
+    },
+    {
+      "order": 24,
+      "path": "crates/sllm-hip-sys/src/lib.rs"
+    },
+    {
+      "order": 25,
+      "path": "crates/sllm-hip/Cargo.toml"
+    },
+    {
+      "order": 26,
+      "path": "crates/sllm-hip/src/attention_preprocess.rs"
+    },
+    {
+      "order": 27,
+      "path": "crates/sllm-hip/src/bridge.rs"
+    },
+    {
+      "order": 28,
+      "path": "crates/sllm-hip/src/embedding.rs"
+    },
+    {
+      "order": 29,
+      "path": "crates/sllm-hip/src/elementwise.rs"
+    },
+    {
+      "order": 30,
+      "path": "crates/sllm-hip/src/lib.rs"
+    },
+    {
+      "order": 31,
+      "path": "crates/sllm-hip/src/kv_state.rs"
+    },
+    {
+      "order": 32,
+      "path": "crates/sllm-hip/src/matmul.rs"
+    },
+    {
+      "order": 33,
+      "path": "crates/sllm-hip/src/rmsnorm.rs"
+    },
+    {
+      "order": 34,
+      "path": "crates/sllm-hip/src/runtime.rs"
+    },
+    {
+      "order": 35,
+      "path": "crates/sllm-hip/src/bin/sllm-rmsnorm-p0-evidence.rs"
+    },
+    {
+      "order": 36,
+      "path": "include/sllm/hip.h"
+    },
+    {
+      "order": 37,
+      "path": "include/sllm/sllm.h"
+    },
+    {
+      "order": 38,
+      "path": "native/hip/CMakeLists.txt"
+    },
+    {
+      "order": 39,
+      "path": "native/hip/src/abi_layout_probe.cpp"
+    },
+    {
+      "order": 40,
+      "path": "native/hip/src/attention_preprocess_api.cpp"
+    },
+    {
+      "order": 41,
+      "path": "native/hip/src/attention_preprocess_api.hpp"
+    },
+    {
+      "order": 42,
+      "path": "native/hip/src/attention_preprocess_kernel.hip.cpp"
+    },
+    {
+      "order": 43,
+      "path": "native/hip/src/attention_preprocess_kernel_internal.hpp"
+    },
+    {
+      "order": 44,
+      "path": "native/hip/src/attention_preprocess_runtime.inc"
+    },
+    {
+      "order": 45,
+      "path": "native/hip/src/causal_attention_api.cpp"
+    },
+    {
+      "order": 46,
+      "path": "native/hip/src/causal_attention_api.hpp"
+    },
+    {
+      "order": 47,
+      "path": "native/hip/src/causal_attention_kernel.hip.cpp"
+    },
+    {
+      "order": 48,
+      "path": "native/hip/src/causal_attention_kernel_internal.hpp"
+    },
+    {
+      "order": 49,
+      "path": "native/hip/src/causal_attention_runtime.inc"
+    },
+    {
+      "order": 50,
+      "path": "native/hip/src/embedding_api.cpp"
+    },
+    {
+      "order": 51,
+      "path": "native/hip/src/embedding_api.hpp"
+    },
+    {
+      "order": 52,
+      "path": "native/hip/src/embedding_kernel.hip.cpp"
+    },
+    {
+      "order": 53,
+      "path": "native/hip/src/embedding_kernel_internal.hpp"
+    },
+    {
+      "order": 54,
+      "path": "native/hip/src/embedding_runtime.inc"
+    },
+    {
+      "order": 55,
+      "path": "native/hip/src/elementwise_api.cpp"
+    },
+    {
+      "order": 56,
+      "path": "native/hip/src/elementwise_api.hpp"
+    },
+    {
+      "order": 57,
+      "path": "native/hip/src/elementwise_kernel.hip.cpp"
+    },
+    {
+      "order": 58,
+      "path": "native/hip/src/elementwise_kernel_internal.hpp"
+    },
+    {
+      "order": 59,
+      "path": "native/hip/src/evidence_abi.h"
+    },
+    {
+      "order": 60,
+      "path": "native/hip/src/header_c_compile.c"
+    },
+    {
+      "order": 61,
+      "path": "native/hip/src/header_cpp_compile.cpp"
+    },
+    {
+      "order": 62,
+      "path": "native/hip/src/hip_compile_probe.hip.cpp"
+    },
+    {
+      "order": 63,
+      "path": "native/hip/src/hip_evidence_runtime.hip.cpp"
+    },
+    {
+      "order": 64,
+      "path": "native/hip/src/hip_evidence_stub.cpp"
+    },
+    {
+      "order": 65,
+      "path": "native/hip/src/hip_stub.cpp"
+    },
+    {
+      "order": 66,
+      "path": "native/hip/src/kv_state_api.cpp"
+    },
+    {
+      "order": 67,
+      "path": "native/hip/src/kv_state_api.hpp"
+    },
+    {
+      "order": 68,
+      "path": "native/hip/src/kv_state_kernel.hip.cpp"
+    },
+    {
+      "order": 69,
+      "path": "native/hip/src/kv_state_kernel_internal.hpp"
+    },
+    {
+      "order": 70,
+      "path": "native/hip/src/matmul_api.cpp"
+    },
+    {
+      "order": 71,
+      "path": "native/hip/src/matmul_api.hpp"
+    },
+    {
+      "order": 72,
+      "path": "native/hip/src/matmul_kernel.hip.cpp"
+    },
+    {
+      "order": 73,
+      "path": "native/hip/src/matmul_kernel_internal.hpp"
+    },
+    {
+      "order": 74,
+      "path": "native/hip/src/matmul_runtime.inc"
+    },
+    {
+      "order": 75,
+      "path": "native/hip/src/public_runtime.hip.cpp"
+    },
+    {
+      "order": 76,
+      "path": "native/hip/src/public_runtime_internal.hpp"
+    },
+    {
+      "order": 77,
+      "path": "native/hip/src/public_runtime_stub.cpp"
+    },
+    {
+      "order": 78,
+      "path": "native/hip/src/rmsnorm_api.cpp"
+    },
+    {
+      "order": 79,
+      "path": "native/hip/src/rmsnorm_api.hpp"
+    },
+    {
+      "order": 80,
+      "path": "native/hip/src/rmsnorm_kernel.hip.cpp"
+    },
+    {
+      "order": 81,
+      "path": "native/hip/src/rmsnorm_kernel_internal.hpp"
+    }
+  ]
+}

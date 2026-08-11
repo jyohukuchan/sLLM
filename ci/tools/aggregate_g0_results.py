@@ -161,8 +161,8 @@ def aggregate(
         raise ContractError("G0 artifact collection is missing or unsafe")
     path_outside_repo(artifact_dir, repo, "G0 artifact collection")
     resolved_artifact_dir = artifact_dir.resolve()
-    if resolved_artifact_dir.parent != Path("/tmp") or not resolved_artifact_dir.name.startswith("ullm-g0-"):
-        raise ContractError("G0 artifact collection must be a private /tmp/ullm-g0-* directory")
+    if resolved_artifact_dir.parent != Path("/tmp") or not resolved_artifact_dir.name.startswith("sllm-g0-"):
+        raise ContractError("G0 artifact collection must be a private /tmp/sllm-g0-* directory")
     if [path.name for path in sorted(artifact_dir.iterdir())] != list(ROW_IDS):
         raise ContractError("G0 artifact collection has missing, duplicate, or unknown rows")
     expected_identity = {
@@ -201,8 +201,8 @@ def write_summary(output: Path, document: dict[str, Any]) -> None:
     if not output.is_absolute() or output.is_symlink():
         raise ContractError("G0 aggregate output must be an absolute non-symlink path")
     resolved = output.resolve(strict=False)
-    if resolved.parent != Path("/tmp") or not resolved.name.startswith("ullm-g0-"):
-        raise ContractError("G0 aggregate output must be a private /tmp/ullm-g0-* directory")
+    if resolved.parent != Path("/tmp") or not resolved.name.startswith("sllm-g0-"):
+        raise ContractError("G0 aggregate output must be a private /tmp/sllm-g0-* directory")
     output.mkdir(parents=True, exist_ok=True)
     if output.is_symlink() or not output.is_dir() or output.resolve() != resolved:
         raise ContractError("G0 aggregate output is not a regular directory")

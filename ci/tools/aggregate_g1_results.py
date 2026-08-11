@@ -139,8 +139,8 @@ def aggregate_results(
     if not artifact_dir.is_absolute() or artifact_dir.is_symlink() or not artifact_dir.is_dir():
         raise ContractError("G1 artifact collection is missing or unsafe")
     resolved_artifact_dir = artifact_dir.resolve(strict=False)
-    if resolved_artifact_dir != artifact_dir or resolved_artifact_dir.parent != Path("/tmp") or not resolved_artifact_dir.name.startswith("ullm-g1-"):
-        raise ContractError("G1 artifact collection must be a private /tmp/ullm-g1-* directory")
+    if resolved_artifact_dir != artifact_dir or resolved_artifact_dir.parent != Path("/tmp") or not resolved_artifact_dir.name.startswith("sllm-g1-"):
+        raise ContractError("G1 artifact collection must be a private /tmp/sllm-g1-* directory")
     if artifact_dir.stat().st_uid != os.getuid() or artifact_dir.stat().st_mode & 0o077:
         raise ContractError("G1 artifact collection must be owned by the current user with mode 0700")
     if [path.name for path in sorted(artifact_dir.iterdir())] != list(EXPECTED_ROWS):
@@ -196,8 +196,8 @@ def aggregate_results(
 
 
 def write_summary(output_dir: Path, summary: dict[str, Any], repo: Path = ROOT) -> None:
-    if not output_dir.is_absolute() or output_dir.is_symlink() or output_dir.parent != Path("/tmp") or not output_dir.name.startswith("ullm-g1-"):
-        raise ContractError("G1 aggregate output must be a private /tmp/ullm-g1-* directory")
+    if not output_dir.is_absolute() or output_dir.is_symlink() or output_dir.parent != Path("/tmp") or not output_dir.name.startswith("sllm-g1-"):
+        raise ContractError("G1 aggregate output must be a private /tmp/sllm-g1-* directory")
     validate_aggregate_schema(summary, repo)
     data = canonical_bytes(summary)
     report_digest = hashlib.sha256(data).hexdigest()

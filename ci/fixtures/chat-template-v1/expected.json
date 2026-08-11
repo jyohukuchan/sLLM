@@ -1,0 +1,78 @@
+{
+  "fixture_version": "chat-template-v1",
+  "tokenizer_fixture": "B3 tokenizer-v1 byte-identical copy",
+  "positive_cases": [
+    {
+      "case_id": "hello-default-thinking",
+      "renderer_version": 1,
+      "template": {"kind": "ChatTemplateJinja", "filename": "chat_template.jinja", "size_bytes": 7756, "sha256": "a4aee8afcf2e0711942cf848899be66016f8d14a889ff9ede07bca099c28f715"},
+      "input": {"messages":[{"role":"user","content":"hello"}],"add_generation_prompt":true,"thinking":"TemplateDefault"},
+      "output": "<|im_start|>user\nhello<|im_end|>\n<|im_start|>assistant\n<think>\n",
+      "output_sha256": "a1db2559117b444f1be293a858eb4ffe5afc570189ccf052d66a99a53cea1775",
+      "token_ids": [0, 0, 0, 0, 1, 9, 0, 0, 0, 0, 0, 0, 0]
+    },
+    {
+      "case_id": "hello-disabled-thinking",
+      "renderer_version": 1,
+      "template": {"kind": "ChatTemplateJinja", "filename": "chat_template.jinja", "size_bytes": 7756, "sha256": "a4aee8afcf2e0711942cf848899be66016f8d14a889ff9ede07bca099c28f715"},
+      "input": {"messages":[{"role":"user","content":"hello"}],"add_generation_prompt":true,"thinking":"Disabled"},
+      "output": "<|im_start|>user\nhello<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n",
+      "output_sha256": "dba0806a50bde638ddb2b984c95a8ac9d1a82bb3a44863359df05d33f4300e36",
+      "token_ids": [0, 0, 0, 0, 1, 9, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+    },
+    {
+      "case_id": "unicode-specials-raw",
+      "renderer_version": 1,
+      "template": {"kind": "ChatTemplateJinja", "filename": "chat_template.jinja", "size_bytes": 7756, "sha256": "a4aee8afcf2e0711942cf848899be66016f8d14a889ff9ede07bca099c28f715"},
+      "input": {"messages":[{"role":"user","content":"雪 <>&\"'\n第二行"}],"add_generation_prompt":true,"thinking":"Enabled"},
+      "output": "<|im_start|>user\n雪 <>&\"'\n第二行<|im_end|>\n<|im_start|>assistant\n<think>\n",
+      "output_sha256": "f2b4084846d1893f38a1b08e1e4022f6b604d70d9e9ea5a2f16dd92f4657f455",
+      "token_ids": [0, 0, 0, 0, 0, 0, 0, 9, 0, 0, 0, 0, 0, 0, 0]
+    },
+    {
+      "case_id": "explicit-system-trim",
+      "renderer_version": 1,
+      "template": {"kind": "ChatTemplateJinja", "filename": "chat_template.jinja", "size_bytes": 7756, "sha256": "a4aee8afcf2e0711942cf848899be66016f8d14a889ff9ede07bca099c28f715"},
+      "input": {"messages":[{"role":"system","content":"  You are concise.\n"},{"role":"user","content":"\n hello \t"}],"add_generation_prompt":true,"thinking":"TemplateDefault"},
+      "output": "<|im_start|>system\nYou are concise.<|im_end|>\n<|im_start|>user\nhello<|im_end|>\n<|im_start|>assistant\n<think>\n",
+      "output_sha256": "c2ce2e69d458a8fb07ae612c235b6687cc082dd0245d572541edfbd5dd6dcd14",
+      "token_ids": [0, 0, 0, 0, 0, 0, 0, 0, 9, 0, 0, 0, 0, 1, 9, 0, 0, 0, 0, 0, 0, 0]
+    },
+    {
+      "case_id": "historical-inline-think-stripped",
+      "renderer_version": 1,
+      "template": {"kind": "ChatTemplateJinja", "filename": "chat_template.jinja", "size_bytes": 7756, "sha256": "a4aee8afcf2e0711942cf848899be66016f8d14a889ff9ede07bca099c28f715"},
+      "input": {"messages":[{"role":"user","content":"Q1"},{"role":"assistant","content":"<think>\nold reasoning\n</think>\n\nOld answer"},{"role":"user","content":"Q2"}],"add_generation_prompt":true,"thinking":"TemplateDefault"},
+      "output": "<|im_start|>user\nQ1<|im_end|>\n<|im_start|>assistant\nOld answer<|im_end|>\n<|im_start|>user\nQ2<|im_end|>\n<|im_start|>assistant\n<think>\n",
+      "output_sha256": "ee4c46aa28cd68bed5d8d7f80228a57242a7193fac3db8a5c42a77610bcd88e8",
+      "token_ids": [0, 0, 0, 0, 0, 9, 0, 0, 0, 0, 0, 0, 9, 0, 0, 0, 0, 0, 9, 0, 0, 0, 0, 0, 0, 0]
+    },
+    {
+      "case_id": "terminal-inline-think-normalized",
+      "renderer_version": 1,
+      "template": {"kind": "ChatTemplateJinja", "filename": "chat_template.jinja", "size_bytes": 7756, "sha256": "a4aee8afcf2e0711942cf848899be66016f8d14a889ff9ede07bca099c28f715"},
+      "input": {"messages":[{"role":"user","content":"Q1"},{"role":"assistant","content":"<think>\nold reasoning\n</think>\n\nOld answer"}],"add_generation_prompt":false,"thinking":"Disabled"},
+      "output": "<|im_start|>user\nQ1<|im_end|>\n<|im_start|>assistant\n<think>\nold reasoning\n</think>\n\nOld answer<|im_end|>\n",
+      "output_sha256": "f20d94d4afc2cdee4d9afb3c875e2d72705a4ff1e3a6bc1dff628954a0a766af",
+      "token_ids": [0, 0, 0, 0, 0, 9, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 9]
+    },
+    {
+      "case_id": "assistant-reasoning-content",
+      "renderer_version": 1,
+      "template": {"kind": "ChatTemplateJinja", "filename": "chat_template.jinja", "size_bytes": 7756, "sha256": "a4aee8afcf2e0711942cf848899be66016f8d14a889ff9ede07bca099c28f715"},
+      "input": {"messages":[{"role":"user","content":"Q"},{"role":"assistant","content":"Answer <think>raw</think>","reasoning_content":"  explicit reason\n"}],"add_generation_prompt":false,"thinking":"TemplateDefault"},
+      "output": "<|im_start|>user\nQ<|im_end|>\n<|im_start|>assistant\n<think>\nexplicit reason\n</think>\n\nAnswer <think>raw</think><|im_end|>\n",
+      "output_sha256": "edcbc3d215a4ce0676e0146dc15a0d2f0de167877944d74f7745feac2c9a4653",
+      "token_ids": [0, 0, 0, 0, 0, 9, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 9]
+    },
+    {
+      "case_id": "consecutive-users-supported",
+      "renderer_version": 1,
+      "template": {"kind": "ChatTemplateJinja", "filename": "chat_template.jinja", "size_bytes": 7756, "sha256": "a4aee8afcf2e0711942cf848899be66016f8d14a889ff9ede07bca099c28f715"},
+      "input": {"messages":[{"role":"user","content":"A"},{"role":"user","content":"B"}],"add_generation_prompt":true,"thinking":"TemplateDefault"},
+      "output": "<|im_start|>user\nA<|im_end|>\n<|im_start|>user\nB<|im_end|>\n<|im_start|>assistant\n<think>\n",
+      "output_sha256": "41fdc83ed8e669c34f7e5c3b8a54ddf53369aefc3ca9bf401f8ba16cf35270a7",
+      "token_ids": [0, 0, 0, 0, 0, 9, 0, 0, 0, 0, 0, 9, 0, 0, 0, 0, 0, 0, 0]
+    }
+  ]
+}

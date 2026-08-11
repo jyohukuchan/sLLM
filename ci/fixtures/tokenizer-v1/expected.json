@@ -1,0 +1,22 @@
+{
+  "fixture_version": "tokenizer-v1",
+  "consistency_label": "sha256:823468084d25ca4971aa86fdf5170540330d0805d2ba534a7db732b1dd1290fc",
+  "vocab_size": 12,
+  "special_roles": [
+    {"role": "bos", "token_id": 10, "content": "<|bos|>"},
+    {"role": "eos", "token_id": 8, "content": "<|endoftext|>"}
+  ],
+  "config_eos": {"token": "<|endoftext|>", "token_id": 8, "observed_content": "<|endoftext|>"},
+  "tokenizer_eos": {"token": "<|im_end|>", "token_id": 9, "observed_content": "<|im_end|>"},
+  "stop_token_ids": [9, 8],
+  "encode": {
+    "hello world": [1, 2],
+    "é 世界,": [3, 4, 7],
+    "": []
+  },
+  "decode": {
+    "ids": [1, 8, 2],
+    "skip_special_tokens": "hello world",
+    "preserve_special_tokens": "hello <|endoftext|> world"
+  }
+}

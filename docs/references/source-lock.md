@@ -2,7 +2,7 @@
 
 ## 目的とスナップショット
 
-- この文書は、uLLMが実装の比較・調査だけに使う外部推論engine sourceの取得元、固定revision、local checkout状態を記録する。参照sourceはuLLMの実装、配布物、正しさの証拠ではない。
+- この文書は、sLLMが実装の比較・調査だけに使う外部推論engine sourceの取得元、固定revision、local checkout状態を記録する。参照sourceはsLLMの実装、配布物、正しさの証拠ではない。
 - 観測日は **2026-08-02**。表の7件は、その日に公式GitHub releaseで `draft=false` かつ `prerelease=false` として観測できた対象のrevisionである。将来の「latest」を約束する記録ではない。
 - version/tagは表示用の識別子であり、lock値は40桁の完全commit SHAである。SGLangだけは、commitを指すannotated tag objectも併記する。
 - source treeはGit管理対象にしない。追跡するのはこのmanifestと調査記録だけであり、local `reference/` は既存の `.gitignore` の `/reference/` により引き続き無視・未追跡とする。

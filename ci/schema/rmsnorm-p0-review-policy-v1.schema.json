@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sllm-project.local/ci/schema/rmsnorm-p0-review-policy-v1.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "policy_id", "revision", "performance_sanity_disposition", "threshold", "required_measurement", "required_review", "claims"],
+  "properties": {
+    "schema_version": {"const": "rmsnorm-p0-review-policy-v1"},
+    "policy_id": {"const": "rmsnorm-p0-review-policy-v1"},
+    "revision": {"const": 1},
+    "performance_sanity_disposition": {"const": "review_required"},
+    "threshold": {"type": "object", "additionalProperties": false, "required": ["approved", "threshold_id", "metric_thresholds"], "properties": {"approved": {"const": false}, "threshold_id": {"const": null}, "metric_thresholds": {"type": "array", "maxItems": 0, "items": false}}},
+    "required_measurement": {"type": "object", "additionalProperties": false, "required": ["targets", "case_ids", "boundary_triplet", "warmup_iterations", "measurement_iterations", "metrics", "summaries"], "properties": {"targets": {"const": ["gfx1030", "gfx1201"]}, "case_ids": {"const": ["p0-r3-n37", "p0-r1-n2560", "p0-r1-n255", "p0-r1-n256", "p0-r1-n257"]}, "boundary_triplet": {"const": ["p0-r1-n255", "p0-r1-n256", "p0-r1-n257"]}, "warmup_iterations": {"const": 5}, "measurement_iterations": {"const": 21}, "metrics": {"const": ["kernel_latency_ns", "wall_latency_ns"]}, "summaries": {"const": ["median_ns", "median_absolute_deviation_ns"]}}},
+    "required_review": {"type": "object", "additionalProperties": false, "required": ["decision", "fields"], "properties": {"decision": {"const": "accept_observation_without_threshold"}, "fields": {"const": ["reviewer", "reason", "reviewed_at", "canonical_rows"]}}},
+    "claims": {"type": "object", "additionalProperties": false, "required": ["optimized", "faster_than_other_engine", "performance_hard_gate_established"], "properties": {"optimized": {"const": false}, "faster_than_other_engine": {"const": false}, "performance_hard_gate_established": {"const": false}}}
+  }
+}

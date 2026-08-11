@@ -118,7 +118,7 @@ class FakeRunner:
         self.device_output = device_output or device_readobj_fixture(target)
         self.binary = binary or (
             b"not-an-ELF-but-the-pinned-tool-fixture-is-authoritative\n"
-            b"libamdhip64.so\0ullm_hip_evidence_submit\0"
+            b"libamdhip64.so\0sllm_hip_evidence_submit\0"
         )
 
     def __call__(self, argv, *, cwd=None, env=None, timeout=None):
@@ -163,7 +163,7 @@ class G1BuilderTests(unittest.TestCase):
         for path in self.roots:
             shutil.rmtree(path, ignore_errors=True)
 
-    def private_root(self, name: str = "ullm-g1-test") -> Path:
+    def private_root(self, name: str = "sllm-g1-test") -> Path:
         root = Path(tempfile.mkdtemp(prefix=name + "-", dir="/tmp"))
         root.chmod(0o700)
         self.roots.append(root)
@@ -241,16 +241,16 @@ class G1BuilderTests(unittest.TestCase):
         command = tuple(cargo["argv"])
         self.assertEqual(command, (
             "cargo", "+1.97.1", "build", "--locked", "--offline", "--release",
-            "--package", "ullm-hip", "--bin", "ullm-hip-evidence",
+            "--package", "sllm-hip", "--bin", "sllm-hip-evidence",
         ))
         self.assertNotIn("--all-features", command)
         self.assertNotIn("--features", command)
         environment = cargo["env"]
-        self.assertEqual(environment["ULLM_ENABLE_HIP_RUNTIME"], "1")
-        self.assertEqual(environment["ULLM_ENABLE_HIP_COMPILE_PROBE"], "0")
+        self.assertEqual(environment["SLLM_ENABLE_HIP_RUNTIME"], "1")
+        self.assertEqual(environment["SLLM_ENABLE_HIP_COMPILE_PROBE"], "0")
         self.assertEqual(environment["CMAKE_HIP_ARCHITECTURES"], "gfx1030")
         self.assertEqual(environment["ROCM_PATH"], "/opt/rocm")
-        self.assertEqual(environment["ULLM_HIP_COMPILER"], "/opt/rocm/bin/amdclang++")
+        self.assertEqual(environment["SLLM_HIP_COMPILER"], "/opt/rocm/bin/amdclang++")
         self.assertTrue(Path(environment["CARGO_TARGET_DIR"]).is_relative_to(result.output_dir.parent))
         self.assertTrue(all(call["timeout"] is not None for call in fake.calls))
 
@@ -260,7 +260,7 @@ class G1BuilderTests(unittest.TestCase):
         self.assertEqual(metadata["row_id"], "g1-gfx1201")
         self.assertEqual(metadata["target"], "gfx1201")
         self.assertEqual(metadata["gpu"], {
-            "bdf": "0000:47:00.0",
+            "bdf": "0000:07:00.0",
             "uuid": "GPU-a8e9ddefa2d60f55",
             "target": "gfx1201",
         })
@@ -341,7 +341,7 @@ class G1BuilderTests(unittest.TestCase):
 
     def test_symlinked_or_stale_output_is_rejected(self) -> None:
         root = self.private_root()
-        outside = self.private_root("ullm-g1-outside")
+        outside = self.private_root("sllm-g1-outside")
         symlink = root / "g1-gfx1030"
         symlink.symlink_to(outside, target_is_directory=True)
         with patch.object(builder, "verify_candidate"), patch.object(builder, "validate_toolchain"):
@@ -366,7 +366,7 @@ class G1BuilderTests(unittest.TestCase):
         bad_values = (
             {"CMAKE_HIP_ARCHITECTURES": "gfx1201"},
             {"ROCM_PATH": "/opt/rocm-7.13"},
-            {"ULLM_HIP_COMPILER": "/usr/bin/clang++"},
+            {"SLLM_HIP_COMPILER": "/usr/bin/clang++"},
             {"RUSTFLAGS": "-C target-cpu=native"},
             {"RUSTC_WRAPPER": "/tmp/wrapper"},
         )
@@ -383,7 +383,7 @@ class G1BuilderTests(unittest.TestCase):
 
     def test_host_stub_is_not_silently_staged(self) -> None:
         fake = FakeRunner(
-            binary=b"\x7fELFhost-stub\0ullm_hip_evidence_submit\0",
+            binary=b"\x7fELFhost-stub\0sllm_hip_evidence_submit\0",
             host_output=host_readobj_fixture().replace(".hip_fatbin", ".not_fatbin"),
         )
         root = self.private_root()

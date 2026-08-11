@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sllm-project.local/ci/schema/rmsnorm-g2-runtime-result-v1.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "state", "target", "model_used", "full_model_used", "tokenizer_used", "generation_used", "selected_backend", "dispatch_count", "fallback_used", "cases"],
+  "properties": {
+    "schema_version": {"const": "rmsnorm-g2-runtime-result-v1"},
+    "state": {"const": "PASS"},
+    "target": {"enum": ["gfx1030", "gfx1201"]},
+    "model_used": {"const": true},
+    "full_model_used": {"const": false},
+    "tokenizer_used": {"const": false},
+    "generation_used": {"const": false},
+    "selected_backend": {"const": "hip"},
+    "dispatch_count": {"const": 6},
+    "fallback_used": {"const": false},
+    "cases": {"type": "array", "minItems": 6, "maxItems": 6, "items": {"$ref": "#/$defs/case"}}
+  },
+  "$defs": {
+    "base64": {"type": "string", "minLength": 4, "pattern": "^[A-Za-z0-9+/]+={0,2}$"},
+    "dispatch": {
+      "type": "object", "additionalProperties": false,
+      "required": ["backend", "kernel_id", "kernel_symbol", "device_symbol", "dispatch_count", "workgroup_size_x", "fallback_allowed", "fallback_used"],
+      "properties": {
+        "backend": {"const": "hip"}, "kernel_id": {"const": 1},
+        "kernel_symbol": {"const": "rmsnorm.baseline.wave32.v1"},
+        "device_symbol": {"const": "sllm_rmsnorm_baseline_wave32_v1"},
+        "dispatch_count": {"const": 1}, "workgroup_size_x": {"const": 256},
+        "fallback_allowed": {"const": false}, "fallback_used": {"const": false}
+      }
+    },
+    "case": {
+      "type": "object", "additionalProperties": false,
+      "required": ["order", "id", "rows", "n", "input_seed", "request_b64", "output_b64", "dispatch"],
+      "properties": {
+        "order": {"type": "integer", "minimum": 0, "maximum": 5},
+        "id": {"enum": ["g2-r1-n2560", "g2-r2-n2560", "g2-r17-n2560", "g2-r255-n2560", "g2-r256-n2560", "g2-r257-n2560"]},
+        "rows": {"type": "integer", "enum": [1, 2, 17, 255, 256, 257]},
+        "n": {"const": 2560}, "input_seed": {"type": "integer", "minimum": 0},
+        "request_b64": {"$ref": "#/$defs/base64"}, "output_b64": {"$ref": "#/$defs/base64"},
+        "dispatch": {"$ref": "#/$defs/dispatch"}
+      }
+    }
+  }
+}

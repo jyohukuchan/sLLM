@@ -46,7 +46,7 @@ def write_sidecar(path: Path) -> str:
 
 class H3Fixture:
     def __init__(self, target: str, size: int = 257) -> None:
-        self.root = Path(tempfile.mkdtemp(prefix="ullm-h3-aggregate-test-"))
+        self.root = Path(tempfile.mkdtemp(prefix="sllm-h3-aggregate-test-"))
         self.row_id = f"h3-{target}"
         self.target = target
         self.row_dir = self.root / self.row_id
@@ -63,7 +63,7 @@ class H3Fixture:
         }
         self.artifact = self.row_dir / f"device-code-object-{target}.elf"
         self.artifact.write_bytes(bytes((index % 251 for index in range(size))))
-        output_directory = f"/tmp/ullm-h3-unit/h3-{target}"
+        output_directory = f"/tmp/sllm-h3-unit/h3-{target}"
         artifact_path = f"{output_directory}/device-code-object-{target}.elf"
         now = datetime.now(timezone.utc).replace(microsecond=0)
         started = now - timedelta(seconds=1)
@@ -136,7 +136,7 @@ class H3Fixture:
                     "generic_processor_version": 0,
                 },
                 "sections": {".text": {"present": True, "size_bytes": 255}},
-                "symbols": [{"name": "ullm_hip_compile_probe", "defined": True}],
+                "symbols": [{"name": "sllm_hip_compile_probe", "defined": True}],
             },
             "scope": EXPECTED_SCOPE.copy(),
             "execution_environment": EXPECTED_ENVIRONMENT.copy(),
@@ -229,7 +229,7 @@ class H3Fixture:
 class H3AggregateContractTests(unittest.TestCase):
     def _collection(self) -> tuple[Path, Path, dict[str, str], list[H3Fixture]]:
         fixtures = [H3Fixture(target) for target in ("gfx1030", "gfx1201")]
-        collection = Path(tempfile.mkdtemp(prefix="ullm-h3-collection-"))
+        collection = Path(tempfile.mkdtemp(prefix="sllm-h3-collection-"))
         for fixture in fixtures:
             shutil.copytree(fixture.row_dir, collection / fixture.row_id)
         needs = collection.parent / f"{collection.name}-needs.json"
@@ -332,7 +332,7 @@ class H3AggregateContractTests(unittest.TestCase):
             (lambda commands: commands[0].remove("-mno-wavefrontsize64"), "missing direct flag"),
             (lambda commands: commands[1].append("-Winvalid-pch"), "extra direct flag"),
             (lambda commands: commands[1].__setitem__(3, "--offload-arch=gfx1201"), "link target substitution"),
-            (lambda commands: commands[1].__setitem__(9, "/tmp/ullm-h3-unit/h3-gfx1201/hip-compile-probe-gfx1201.o"), "object linkage substitution"),
+            (lambda commands: commands[1].__setitem__(9, "/tmp/sllm-h3-unit/h3-gfx1201/hip-compile-probe-gfx1201.o"), "object linkage substitution"),
         )
         for mutation, label in mutations:
             with self.subTest(label=label):
@@ -393,7 +393,7 @@ class H3AggregateContractTests(unittest.TestCase):
             fixture.close()
 
     def test_fail_state_and_needs_missing_unknown_non_success(self) -> None:
-        needs = Path(tempfile.mkdtemp(prefix="ullm-h3-needs-")) / "needs.json"
+        needs = Path(tempfile.mkdtemp(prefix="sllm-h3-needs-")) / "needs.json"
         try:
             needs.write_text(json.dumps({"h3-gfx1030": {"result": "success"}}) + "\n", encoding="utf-8")
             with self.assertRaises(ContractError):

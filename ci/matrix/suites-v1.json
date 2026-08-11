@@ -1,8 +1,8 @@
 {
   "schema_version": "suites-v1",
-  "registry_id": "uLLM-host-suites",
-  "revision": 9,
-  "allowed_tiers": ["tier_h0", "tier_h1", "tier_h2", "tier_h3", "tier_g0", "tier_g1", "tier_g2", "tier_g3", "tier_g4", "tier_p0", "tier_p1"],
+  "registry_id": "sLLM-host-suites",
+  "revision": 20,
+  "allowed_tiers": ["tier_h0", "tier_h1", "tier_h2", "tier_h3", "tier_h3_rmsnorm", "tier_g0", "tier_g1", "tier_g2", "tier_g3", "tier_g4", "tier_p0", "tier_p1"],
   "allowed_attributes": ["requires_gpu", "requires_model", "slow", "network", "quarantined"],
   "suites": [
     {
@@ -95,6 +95,72 @@
       "commands": [{"command_id": "h3-compile-contract", "argv": ["{python}", "-m", "unittest", "ci.tests.test_h3_contracts", "ci.tests.test_h3_runner", "ci.tests.test_h3_aggregate"]}]
     },
     {
+      "suite_id": "h3-public-runtime-compile-only",
+      "tier": "tier_h3",
+      "marker": "tier_h3",
+      "attributes": {"requires_gpu": false, "requires_model": false, "slow": false, "network": false, "quarantined": false},
+      "test_ids": ["h3.public-runtime.contract", "h3.public-runtime.runner", "h3.public-runtime.aggregate", "h3.public-runtime.workflow"],
+      "commands": [{"command_id": "h3-public-runtime-contracts", "argv": ["{python}", "-m", "unittest", "ci.tests.test_h3_public_runtime_contracts", "ci.tests.test_h3_public_runtime_runner", "ci.tests.test_h3_public_runtime_aggregate"]}]
+    },
+    {
+      "suite_id": "h3-rmsnorm-compile-only",
+      "tier": "tier_h3_rmsnorm",
+      "marker": "tier_h3_rmsnorm",
+      "attributes": {"requires_gpu": false, "requires_model": false, "slow": false, "network": false, "quarantined": false},
+      "test_ids": ["h3.rmsnorm.contract", "h3.rmsnorm.runner", "h3.rmsnorm.aggregate", "h3.rmsnorm.workflow"],
+      "commands": [{"command_id": "h3-rmsnorm-contracts", "argv": ["{python}", "-m", "unittest", "ci.tests.test_rmsnorm_h3_contracts", "ci.tests.test_rmsnorm_h3_runner", "ci.tests.test_rmsnorm_h3_aggregate"]}]
+    },
+    {
+      "suite_id": "h0-rmsnorm-semantic-g1-contract",
+      "tier": "tier_h0",
+      "marker": "tier_h0",
+      "attributes": {"requires_gpu": false, "requires_model": false, "slow": false, "network": false, "quarantined": false},
+      "test_ids": ["g1.rmsnorm.semantic.exact-actions", "g1.rmsnorm.semantic.builder", "g1.rmsnorm.semantic.runner", "g1.rmsnorm.semantic.aggregate", "g1.rmsnorm.semantic.controller", "g1.rmsnorm.semantic.manifest", "g1.rmsnorm.semantic.schema"],
+      "commands": [
+        {"command_id": "g1-rmsnorm-semantic-contracts", "argv": ["{python}", "-m", "unittest", "ci.tests.test_rmsnorm_g1_exact_actions", "ci.tests.test_rmsnorm_g1_builder", "ci.tests.test_rmsnorm_g1_runner", "ci.tests.test_rmsnorm_g1_aggregate", "ci.tests.test_rmsnorm_g1_controller", "ci.tests.test_rmsnorm_g1_manifest_validator", "ci.tests.test_rmsnorm_g1_schema"]}
+      ]
+    },
+    {
+      "suite_id": "h0-execution-transfer-g1-contract",
+      "tier": "tier_h0",
+      "marker": "tier_h0",
+      "attributes": {"requires_gpu": false, "requires_model": false, "slow": false, "network": false, "quarantined": false},
+      "test_ids": ["g1.execution-transfer.contract", "g1.execution-transfer.schema"],
+      "commands": [{"command_id": "g1-execution-transfer-contracts", "argv": ["{python}", "-m", "unittest", "ci.tests.test_execution_transfer_g1_contracts"]}]
+    },
+    {
+      "suite_id": "h0-weight-upload-g1-contract",
+      "tier": "tier_h0",
+      "marker": "tier_h0",
+      "attributes": {"requires_gpu": false, "requires_model": false, "slow": false, "network": false, "quarantined": false},
+      "test_ids": ["g1.weight-upload.contract", "g1.weight-upload.schema", "g1.weight-upload.range"],
+      "commands": [{"command_id": "g1-weight-upload-contracts", "argv": ["{python}", "-m", "unittest", "ci.tests.test_weight_upload_g1_contracts"]}]
+    },
+    {
+      "suite_id": "h0-rmsnorm-g2-contract",
+      "tier": "tier_h0",
+      "marker": "tier_h0",
+      "attributes": {"requires_gpu": false, "requires_model": false, "slow": false, "network": false, "quarantined": false},
+      "test_ids": ["g2.rmsnorm.slice", "g2.rmsnorm.schema", "g2.rmsnorm.runner", "g2.rmsnorm.aggregate"],
+      "commands": [{"command_id": "g2-rmsnorm-host-contracts", "argv": ["{python}", "-m", "unittest", "ci.tests.test_rmsnorm_g2_slice", "ci.tests.test_rmsnorm_g2_schema", "ci.tests.test_rmsnorm_g2_runner", "ci.tests.test_rmsnorm_g2_aggregate"]}]
+    },
+    {
+      "suite_id": "h0-rmsnorm-p0-contract",
+      "tier": "tier_h0",
+      "marker": "tier_h0",
+      "attributes": {"requires_gpu": false, "requires_model": false, "slow": false, "network": false, "quarantined": false},
+      "test_ids": ["p0.rmsnorm.schema", "p0.rmsnorm.builder", "p0.rmsnorm.runner", "p0.rmsnorm.aggregate"],
+      "commands": [{"command_id": "p0-rmsnorm-host-contracts", "argv": ["{python}", "-m", "unittest", "ci.tests.test_rmsnorm_p0_schema", "ci.tests.test_rmsnorm_p0_builder", "ci.tests.test_rmsnorm_p0_runner", "ci.tests.test_rmsnorm_p0_aggregate"]}]
+    },
+    {
+      "suite_id": "h0-phase3-stage-a-evidence-plan",
+      "tier": "tier_h0",
+      "marker": "tier_h0",
+      "attributes": {"requires_gpu": false, "requires_model": false, "slow": false, "network": false, "quarantined": false},
+      "test_ids": ["phase3.stage_a.evidence_plan.contract", "phase3.stage_a.evidence_plan.negative", "phase3.stage_a.evidence_plan.no_execution"],
+      "commands": [{"command_id": "phase3-stage-a-evidence-plan", "argv": ["{python}", "-m", "unittest", "ci.tests.test_phase3_stage_a_evidence_plan"]}]
+    },
+    {
       "suite_id": "h0-license-provenance",
       "tier": "tier_h0",
       "marker": "tier_h0",
@@ -134,11 +200,12 @@
       "tier": "tier_h1",
       "marker": "tier_h1",
       "attributes": {"requires_gpu": false, "requires_model": false, "slow": false, "network": false, "quarantined": false},
-      "test_ids": ["h1.cargo.test.workspace", "h1.pytest.marker.tier_h1", "h1.ci.contracts"],
+      "test_ids": ["h1.cargo.test.workspace", "h1.pytest.marker.tier_h1", "h1.ci.contracts", "h1.model-lock.contracts"],
       "commands": [
         {"command_id": "cargo-test-workspace", "argv": ["cargo", "+1.97.1", "test", "--workspace", "--locked", "--offline"]},
         {"command_id": "pytest-tier-h1", "argv": ["{python}", "-m", "pytest", "--durations=0", "-m", "tier_h1", "tests"]},
-        {"command_id": "ci-contract-tests", "argv": ["{python}", "ci/tests/test_h1_contracts.py"]}
+        {"command_id": "ci-contract-tests", "argv": ["{python}", "ci/tests/test_h1_contracts.py"]},
+        {"command_id": "model-lock-contracts", "argv": ["{python}", "ci/tests/test_model_lock_contracts.py"]}
       ]
     },
     {
@@ -150,6 +217,17 @@
       "commands": [
         {"command_id": "pytest-tier-h2", "argv": ["{python}", "-m", "pytest", "--durations=0", "-m", "tier_h2", "tests"]},
         {"command_id": "ci-oracle-tests", "argv": ["{python}", "ci/tests/test_h2_oracle.py"]}
+      ]
+    },
+    {
+      "suite_id": "h0-rust-dependency-closure",
+      "tier": "tier_h0",
+      "marker": "tier_h0",
+      "attributes": {"requires_gpu": false, "requires_model": false, "slow": false, "network": false, "quarantined": false},
+      "test_ids": ["h0.rust.dependency.manifest", "h0.rust.dependency.negative"],
+      "commands": [
+        {"command_id": "rust-dependency-validator", "argv": ["{python}", "ci/tools/validate_rust_dependencies.py"]},
+        {"command_id": "rust-dependency-tests", "argv": ["{python}", "ci/tests/test_rust_dependencies.py"]}
       ]
     }
   ]

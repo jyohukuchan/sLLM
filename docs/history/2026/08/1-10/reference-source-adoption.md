@@ -31,7 +31,7 @@
 - 未採用6件は過去に想定した調査範囲だけを残し、順位と将来優先区分を削除した。
 - [CI・テスト方針策定計画](../../../../plans/active/2026/08/1-10/ci-test-strategy.md) のlocal source factとexact-revision再調査対象を7件へ同期した。
 - [main plan](../../../../plans/main-plan.md) に採用判断を重要決定として記録し、完了状態と次のCI・test再調査対象を7件へ同期した。
-- 参照はuLLMの対応実績、性能、正しさの証拠ではなく、直接reuse許可でもない。llama.cpp以外をreader-onlyとする既存のprovenance境界を維持した。
+- 参照はsLLMの対応実績、性能、正しさの証拠ではなく、直接reuse許可でもない。llama.cpp以外をreader-onlyとする既存のprovenance境界を維持した。
 
 ## 検証
 

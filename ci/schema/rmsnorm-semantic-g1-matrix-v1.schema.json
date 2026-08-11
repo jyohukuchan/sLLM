@@ -1,0 +1,62 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sllm-project.local/ci/schema/rmsnorm-semantic-g1-matrix-v1.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["$schema", "schema_version", "matrix_id", "revision", "suite_id", "tier", "required", "toolchain_id", "execution", "scope", "command", "codegen", "oracle", "case_manifest", "rows"],
+  "properties": {
+    "$schema": {"const": "https://sllm-project.local/ci/schema/rmsnorm-semantic-g1-matrix-v1.schema.json"},
+    "schema_version": {"const": "rmsnorm-semantic-g1-matrix-v1"},
+    "matrix_id": {"const": "rmsnorm-semantic-g1-v1"},
+    "revision": {"const": 1},
+    "suite_id": {"const": "g1-rmsnorm-semantic-runtime"},
+    "tier": {"const": "tier_g1"},
+    "required": {"const": true},
+    "toolchain_id": {"const": "rocm-7.14.0"},
+    "execution": {"$ref": "#/$defs/execution"},
+    "scope": {"$ref": "#/$defs/scope"},
+    "command": {"const": ["/usr/bin/cargo", "+1.97.1", "build", "--locked", "--offline", "--release", "--package", "sllm-hip", "--bin", "sllm-rmsnorm-g1-evidence"]},
+    "codegen": {"$ref": "#/$defs/common_codegen"},
+    "oracle": {"$ref": "#/$defs/oracle"},
+    "case_manifest": {"$ref": "#/$defs/case_manifest"},
+    "rows": {"type": "array", "minItems": 2, "maxItems": 2, "prefixItems": [{"$ref": "#/$defs/gfx1030_row"}, {"$ref": "#/$defs/gfx1201_row"}], "items": false}
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "scope": {
+      "type": "object", "additionalProperties": false,
+      "required": ["selected_backend", "fallback_allowed", "fallback_used", "model_used", "semantic_op_used", "cpu_fallback_used", "gpu_execution", "private_g1_used", "h3_artifact_used"],
+      "properties": {"selected_backend": {"const": "hip"}, "fallback_allowed": {"const": false}, "fallback_used": {"const": false}, "model_used": {"const": false}, "semantic_op_used": {"const": true}, "cpu_fallback_used": {"const": false}, "gpu_execution": {"const": true}, "private_g1_used": {"const": false}, "h3_artifact_used": {"const": false}}
+    },
+    "execution": {
+      "type": "object", "additionalProperties": false,
+      "required": ["mode", "serial", "trusted_local_only", "host_lock", "requires_gpu", "requires_model", "network", "sudo_allowed", "reset_allowed", "credentials_allowed", "docker_socket_allowed"],
+      "properties": {"mode": {"const": "trusted-local-semantic-runtime"}, "serial": {"const": true}, "trusted_local_only": {"const": true}, "host_lock": {"type": "object", "additionalProperties": false, "required": ["path", "acquisition"], "properties": {"path": {"const": "/tmp/sllm-g0.lock"}, "acquisition": {"const": "nonblocking"}}}, "requires_gpu": {"const": true}, "requires_model": {"const": false}, "network": {"const": false}, "sudo_allowed": {"const": false}, "reset_allowed": {"const": false}, "credentials_allowed": {"const": false}, "docker_socket_allowed": {"const": false}}
+    },
+    "features": {"type": "object", "additionalProperties": false, "required": ["xnack", "sramecc", "generic_processor_version"], "properties": {"xnack": {"const": "unsupported"}, "sramecc": {"const": "unsupported"}, "generic_processor_version": {"const": 0}}},
+    "common_codegen": {"type": "object", "additionalProperties": false, "required": ["code_object_version", "wavefront_size", "features"], "properties": {"code_object_version": {"const": "V6"}, "wavefront_size": {"const": 32}, "features": {"$ref": "#/$defs/features"}}},
+    "row_codegen": {"type": "object", "additionalProperties": false, "required": ["target", "target_kind", "target_count", "code_object_version", "wavefront_size", "features", "e_flags"], "properties": {"target": {"enum": ["gfx1030", "gfx1201"]}, "target_kind": {"const": "exact"}, "target_count": {"const": 1}, "code_object_version": {"const": "V6"}, "wavefront_size": {"const": 32}, "features": {"$ref": "#/$defs/features"}, "e_flags": {"enum": ["0x00000036", "0x0000004e"]}}},
+    "oracle": {"type": "object", "additionalProperties": false, "required": ["id", "input_dtype", "weight_dtype", "output_dtype", "accumulation_dtype", "scale_mode", "independent", "tolerance_id", "atol", "rtol", "model_hidden_size", "epsilon", "model_lock_path", "model_lock_sha256"], "properties": {"id": {"const": "rmsnorm-bf16-independent-oracle-v1"}, "input_dtype": {"const": "BF16"}, "weight_dtype": {"const": "BF16"}, "output_dtype": {"const": "BF16"}, "accumulation_dtype": {"const": "F32"}, "scale_mode": {"const": "offset-one"}, "independent": {"const": true}, "tolerance_id": {"const": "rmsnorm-bf16-f32-output-v1"}, "atol": {"const": 0.0078125}, "rtol": {"const": 0.015625}, "model_hidden_size": {"const": 2560}, "epsilon": {"const": "1e-6"}, "model_lock_path": {"const": "docs/models/locks/qwen3.5-4b-bf16.json"}, "model_lock_sha256": {"$ref": "#/$defs/sha256"}}},
+    "case": {"type": "object", "additionalProperties": false, "required": ["id", "rows", "n", "classification", "nonfinite_input"], "properties": {"id": {"type": "string"}, "rows": {"type": "integer"}, "n": {"type": "integer"}, "classification": {"enum": ["finite", "nan", "posinf", "neginf"]}, "nonfinite_input": {"enum": ["none", "activation", "raw_scale"]}}},
+    "case_manifest": {"type": "object", "additionalProperties": false, "required": ["id", "selected_count", "collected_count", "cases"], "properties": {"id": {"const": "rmsnorm-semantic-g1-cases-v1"}, "selected_count": {"const": 15}, "collected_count": {"const": 15}, "cases": {"type": "array", "minItems": 15, "maxItems": 15, "prefixItems": [
+      {"allOf": [{"$ref": "#/$defs/case"}, {"properties": {"id": {"const": "r1-n1"}, "rows": {"const": 1}, "n": {"const": 1}, "classification": {"const": "finite"}, "nonfinite_input": {"const": "none"}}}]},
+      {"allOf": [{"$ref": "#/$defs/case"}, {"properties": {"id": {"const": "r1-n3"}, "rows": {"const": 1}, "n": {"const": 3}, "classification": {"const": "finite"}, "nonfinite_input": {"const": "none"}}}]},
+      {"allOf": [{"$ref": "#/$defs/case"}, {"properties": {"id": {"const": "r2-n17"}, "rows": {"const": 2}, "n": {"const": 17}, "classification": {"const": "finite"}, "nonfinite_input": {"const": "none"}}}]},
+      {"allOf": [{"$ref": "#/$defs/case"}, {"properties": {"id": {"const": "r1-n255"}, "rows": {"const": 1}, "n": {"const": 255}, "classification": {"const": "finite"}, "nonfinite_input": {"const": "none"}}}]},
+      {"allOf": [{"$ref": "#/$defs/case"}, {"properties": {"id": {"const": "r1-n256"}, "rows": {"const": 1}, "n": {"const": 256}, "classification": {"const": "finite"}, "nonfinite_input": {"const": "none"}}}]},
+      {"allOf": [{"$ref": "#/$defs/case"}, {"properties": {"id": {"const": "r1-n257"}, "rows": {"const": 1}, "n": {"const": 257}, "classification": {"const": "finite"}, "nonfinite_input": {"const": "none"}}}]},
+      {"allOf": [{"$ref": "#/$defs/case"}, {"properties": {"id": {"const": "r1-n4095"}, "rows": {"const": 1}, "n": {"const": 4095}, "classification": {"const": "finite"}, "nonfinite_input": {"const": "none"}}}]},
+      {"allOf": [{"$ref": "#/$defs/case"}, {"properties": {"id": {"const": "r1-n4096"}, "rows": {"const": 1}, "n": {"const": 4096}, "classification": {"const": "finite"}, "nonfinite_input": {"const": "none"}}}]},
+      {"allOf": [{"$ref": "#/$defs/case"}, {"properties": {"id": {"const": "r1-n2560"}, "rows": {"const": 1}, "n": {"const": 2560}, "classification": {"const": "finite"}, "nonfinite_input": {"const": "none"}}}]},
+      {"allOf": [{"$ref": "#/$defs/case"}, {"properties": {"id": {"const": "r1-n2560-nan"}, "rows": {"const": 1}, "n": {"const": 2560}, "classification": {"const": "nan"}, "nonfinite_input": {"const": "activation"}}}]},
+      {"allOf": [{"$ref": "#/$defs/case"}, {"properties": {"id": {"const": "r1-n2560-posinf"}, "rows": {"const": 1}, "n": {"const": 2560}, "classification": {"const": "posinf"}, "nonfinite_input": {"const": "activation"}}}]},
+      {"allOf": [{"$ref": "#/$defs/case"}, {"properties": {"id": {"const": "r1-n2560-neginf"}, "rows": {"const": 1}, "n": {"const": 2560}, "classification": {"const": "neginf"}, "nonfinite_input": {"const": "activation"}}}]},
+      {"allOf": [{"$ref": "#/$defs/case"}, {"properties": {"id": {"const": "r1-n2560-raw-scale-nan"}, "rows": {"const": 1}, "n": {"const": 2560}, "classification": {"const": "nan"}, "nonfinite_input": {"const": "raw_scale"}}}]},
+      {"allOf": [{"$ref": "#/$defs/case"}, {"properties": {"id": {"const": "r1-n2560-raw-scale-posinf"}, "rows": {"const": 1}, "n": {"const": 2560}, "classification": {"const": "posinf"}, "nonfinite_input": {"const": "raw_scale"}}}]},
+      {"allOf": [{"$ref": "#/$defs/case"}, {"properties": {"id": {"const": "r1-n2560-raw-scale-neginf"}, "rows": {"const": 1}, "n": {"const": 2560}, "classification": {"const": "neginf"}, "nonfinite_input": {"const": "raw_scale"}}}]}
+    ], "items": false}}},
+    "row": {"type": "object", "additionalProperties": false, "required": ["row_id", "target", "bdf", "uuid", "product", "physical_hip_index", "logical_device_index", "timeout_seconds", "seed", "codegen", "scope"], "properties": {"row_id": {"type": "string"}, "target": {"enum": ["gfx1030", "gfx1201"]}, "bdf": {"type": "string"}, "uuid": {"type": "string"}, "product": {"type": "string"}, "physical_hip_index": {"type": "integer"}, "logical_device_index": {"const": 0}, "timeout_seconds": {"const": 300}, "seed": {"type": "integer"}, "codegen": {"$ref": "#/$defs/row_codegen"}, "scope": {"$ref": "#/$defs/scope"}}},
+    "gfx1030_row": {"allOf": [{"$ref": "#/$defs/row"}, {"properties": {"row_id": {"const": "rmsnorm-semantic-g1-gfx1030"}, "target": {"const": "gfx1030"}, "bdf": {"const": "0000:03:00.0"}, "uuid": {"const": "GPU-76a08c022586fed6"}, "product": {"const": "AMD Radeon Pro V620"}, "physical_hip_index": {"const": 1}, "seed": {"const": 1031}, "codegen": {"allOf": [{"$ref": "#/$defs/row_codegen"}, {"properties": {"target": {"const": "gfx1030"}, "e_flags": {"const": "0x00000036"}}}]}}}]},
+    "gfx1201_row": {"allOf": [{"$ref": "#/$defs/row"}, {"properties": {"row_id": {"const": "rmsnorm-semantic-g1-gfx1201"}, "target": {"const": "gfx1201"}, "bdf": {"const": "0000:07:00.0"}, "uuid": {"const": "GPU-a8e9ddefa2d60f55"}, "product": {"const": "AMD Radeon AI PRO R9700"}, "physical_hip_index": {"const": 2}, "seed": {"const": 1202}, "codegen": {"allOf": [{"$ref": "#/$defs/row_codegen"}, {"properties": {"target": {"const": "gfx1201"}, "e_flags": {"const": "0x0000004e"}}}]}}}]}
+  }
+}

@@ -1,6 +1,6 @@
 # 内部資料・メモ
 /README-AI-manuscript.md
-/uLLM-project.md
+/sLLM.md
 # 参考資料
 /reference/
 # Passwords
@@ -21,6 +21,12 @@
 /.local-artifacts/logs/
 /.local-artifacts/ci/
 /.local-artifacts/ci-phase1/
+/.local-artifacts/h3/
+/.local-artifacts/h3-aggregate/
+/.local-artifacts/h3-needs.json
+/.local-artifacts/h3-public-runtime/
+/.local-artifacts/h3-public-runtime-aggregate/
+/.local-artifacts/h3-public-runtime-needs.json
 
 # Python host-test caches
 __pycache__/

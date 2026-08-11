@@ -1,0 +1,54 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sllm.dev/schema/weight-upload-g1-matrix-v1.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["$schema", "schema_version", "matrix_id", "revision", "suite_id", "tier", "required", "command", "lock_fingerprint", "plan_digest", "tensor_name", "tensor_dtype", "tensor_size_bytes", "source_file", "source_file_sha256", "source_range", "chunk_sizes", "rows"],
+  "properties": {
+    "$schema": {"const": "https://sllm.dev/schema/weight-upload-g1-matrix-v1.schema.json"},
+    "schema_version": {"const": "weight-upload-g1-matrix-v1"},
+    "matrix_id": {"const": "weight-upload-semantic-g1-v1"},
+    "revision": {"const": 1},
+    "suite_id": {"const": "g1-weight-upload-runtime"},
+    "tier": {"const": "tier_g1"},
+    "required": {"const": false},
+    "command": {"const": ["/usr/bin/cargo", "+1.97.1", "build", "--locked", "--offline", "--release", "--package", "sllm-hip", "--bin", "sllm-weight-upload-g1-evidence"]},
+    "lock_fingerprint": {"const": "sha256:f143d7b504170d071c77818105f7a07dc0297c6bea0c61a5404b071fed0c1fae"},
+    "plan_digest": {"const": "sha256:0820227fdc4129e5ff100e0aa87db7663d75703c9ba723bc4adc950a3af6ab66"},
+    "tensor_name": {"const": "model.language_model.layers.0.linear_attn.in_proj_z.weight"},
+    "tensor_dtype": {"const": "BF16"},
+    "tensor_size_bytes": {"const": 20971520},
+    "source_file": {"const": "model.safetensors-00002-of-00002.safetensors"},
+    "source_file_sha256": {"const": "cb544bd9bfae93dc59b0f22b292f5933573854a7f9b97835c67060d7d910e188"},
+    "source_range": {"const": [42435872, 63407392]},
+    "chunk_sizes": {"const": [16777216, 4194304]},
+    "rows": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 2,
+      "prefixItems": [{"$ref": "#/$defs/gfx1030"}, {"$ref": "#/$defs/gfx1201"}],
+      "items": false
+    }
+  },
+  "$defs": {
+    "row": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["row_id", "target", "bdf", "product", "physical_hip_index", "logical_device_index", "timeout_seconds", "network", "model_cache_used", "fallback_allowed"],
+      "properties": {
+        "row_id": {"type": "string"},
+        "target": {"enum": ["gfx1030", "gfx1201"]},
+        "bdf": {"type": "string"},
+        "product": {"type": "string"},
+        "physical_hip_index": {"type": "integer", "minimum": 0},
+        "logical_device_index": {"const": 0},
+        "timeout_seconds": {"const": 600},
+        "network": {"const": false},
+        "model_cache_used": {"const": true},
+        "fallback_allowed": {"const": false}
+      }
+    },
+    "gfx1030": {"allOf": [{"$ref": "#/$defs/row"}, {"properties": {"row_id": {"const": "weight-upload-g1-gfx1030"}, "target": {"const": "gfx1030"}, "bdf": {"const": "0000:03:00.0"}, "product": {"const": "AMD Radeon Pro V620"}, "physical_hip_index": {"const": 1}}}]},
+    "gfx1201": {"allOf": [{"$ref": "#/$defs/row"}, {"properties": {"row_id": {"const": "weight-upload-g1-gfx1201"}, "target": {"const": "gfx1201"}, "bdf": {"const": "0000:07:00.0"}, "product": {"const": "AMD Radeon AI PRO R9700"}, "physical_hip_index": {"const": 2}}}]}
+  }
+}

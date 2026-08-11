@@ -14,7 +14,7 @@
 | GPU変更をGPU未検証でmerge可能 | 採用 | reviewed immutable SHAに結び付くG0/G1/G2/P0をGPU影響変更のmerge条件にする |
 | fail-closed集約の実装条件不足 | 採用 | `always()`、`needs`、report identity/freshness、missing/duplicate/unknown/cancelを規定する |
 | governance baselineが未公開 | 部分採用 | remoteとlocal commitは同期済みだが、新規governance文書は未commit。機能code前に承認・commit・pushする |
-| `uLLM-project.md`とmain planのCI順序差 | 対応済み | ユーザー承認後、git管理外文書の実装順序をmain planへ同期した |
+| `sLLM.md`とmain planのCI順序差 | 対応済み | ユーザー承認後、git管理外文書の実装順序をmain planへ同期した |
 | 平文credential運用 | 採用 | `passwords.txt`を使用禁止とし、secret manager・短命注入・sudo規則を定義する。file自体の変更とcredential rotationは所有者が行う |
 
 ## 実施内容
@@ -27,7 +27,7 @@
 - [x] CI・テスト計画へperformance cliff、GPU merge gate、集約条件を追加。
 - [x] main planへ再発防止方針と実装順序を同期。
 - [x] AGENTS.mdのcredential、repository hygiene、CI規則についてユーザー承認を得た。
-- [x] `uLLM-project.md`のCI実装順序をmain planへ同期した。
+- [x] `sLLM.md`のCI実装順序をmain planへ同期した。
 - [x] AGENTS.mdへ作業単位ごとのtest、適用、適用後確認、`push` skillによる公開手順を追加した。
 - [ ] `passwords.txt`内に有効なcredentialがある場合、所有者がrotationし、modeを最低`0600`へ変更。
 - [x] governance baselineを機能codeより先にcommit `2764e73ebc45c8bbd209a426ca93ce341ed5d860`として`origin/main`へpush。
@@ -45,7 +45,7 @@
 ## 完了条件
 
 1. AGENTS.md変更がユーザー承認済み。
-2. `uLLM-project.md`とのCI順序差が解消または明示的に現状維持と決定済み。
+2. `sLLM.md`とのCI順序差が解消または明示的に現状維持と決定済み。
 3. credentialの失効・rotationとlocal file移行が所有者により完了。
 4. governance baselineがremoteへpush済み。
 5. H0実装時にtracked tree guardとlocal hygiene commandが同時に追加される。

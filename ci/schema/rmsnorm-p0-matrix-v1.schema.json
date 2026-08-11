@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sllm-project.local/ci/schema/rmsnorm-p0-matrix-v1.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "matrix_id", "revision", "suite_id", "tier", "required", "serial", "dispatch_block_size", "timing", "dtype", "scope", "cases", "targets", "model_lock", "review_policy", "runtime_producer", "prerequisites"],
+  "properties": {
+    "schema_version": {"const": "rmsnorm-p0-matrix-v1"},
+    "matrix_id": {"const": "rmsnorm-p0-v1"},
+    "revision": {"const": 1},
+    "suite_id": {"const": "p0-rmsnorm-runtime-smoke"},
+    "tier": {"const": "tier_p0"},
+    "required": {"const": true},
+    "serial": {"const": true},
+    "dispatch_block_size": {"const": 256},
+    "timing": {"$ref": "#/$defs/timing"},
+    "dtype": {"$ref": "#/$defs/dtype"},
+    "scope": {"$ref": "#/$defs/scope"},
+    "cases": {"type": "array", "minItems": 5, "maxItems": 5, "items": {"$ref": "#/$defs/case"}},
+    "targets": {"type": "array", "minItems": 2, "maxItems": 2, "items": {"$ref": "#/$defs/target"}},
+    "model_lock": {"$ref": "#/$defs/model_lock"},
+    "review_policy": {"const": "ci/matrix/rmsnorm-p0-review-policy-v1.json"},
+    "runtime_producer": {"$ref": "#/$defs/producer"},
+    "prerequisites": {"const": ["g0", "private_g1", "semantic_g1", "g2", "h3"]}
+  },
+  "$defs": {
+    "timing": {"type": "object", "additionalProperties": false, "required": ["timing_contract", "unit", "kernel_source", "wall_source", "warmup_iterations", "measurement_iterations", "location", "robust_spread"], "properties": {"timing_contract": {"const": "rmsnorm-p0-timing-v1"}, "unit": {"const": "ns"}, "kernel_source": {"const": "hip-event-elapsed-time"}, "wall_source": {"const": "steady-clock-monotonic"}, "warmup_iterations": {"const": 5}, "measurement_iterations": {"const": 21}, "location": {"const": "median"}, "robust_spread": {"const": "median-absolute-deviation"}}},
+    "dtype": {"type": "object", "additionalProperties": false, "required": ["activation", "weight", "output", "accumulation", "scale_mode", "epsilon"], "properties": {"activation": {"const": "BF16"}, "weight": {"const": "BF16"}, "output": {"const": "BF16"}, "accumulation": {"const": "F32"}, "scale_mode": {"const": "offset-one"}, "epsilon": {"const": "1e-6"}}},
+    "scope": {"type": "object", "additionalProperties": false, "required": ["selected_backend", "public_rmsnorm_path", "semantic_op_used", "model_used", "gpu_execution", "fallback_allowed", "fallback_used", "cpu_fallback_used", "optimized_claim", "other_engine_comparison", "performance_hard_gate"], "properties": {"selected_backend": {"const": "hip"}, "public_rmsnorm_path": {"const": true}, "semantic_op_used": {"const": true}, "model_used": {"const": false}, "gpu_execution": {"const": true}, "fallback_allowed": {"const": false}, "fallback_used": {"const": false}, "cpu_fallback_used": {"const": false}, "optimized_claim": {"const": false}, "other_engine_comparison": {"const": false}, "performance_hard_gate": {"const": false}}},
+    "case": {"type": "object", "additionalProperties": false, "required": ["order", "id", "rows", "n", "input_seed", "classification"], "properties": {"order": {"type": "integer", "minimum": 0, "maximum": 4}, "id": {"type": "string", "minLength": 1}, "rows": {"type": "integer", "minimum": 1}, "n": {"type": "integer", "minimum": 1, "maximum": 4096}, "input_seed": {"type": "integer", "minimum": 0}, "classification": {"enum": ["synthetic-nonaligned", "locked-model-hidden-size", "dispatch-b-minus-1", "dispatch-b", "dispatch-b-plus-1"]}}},
+    "device": {"type": "object", "additionalProperties": false, "required": ["bdf", "uuid", "product", "physical_hip_index", "logical_device_index"], "properties": {"bdf": {"type": "string", "minLength": 1}, "uuid": {"type": "string", "minLength": 1}, "product": {"type": "string", "minLength": 1}, "physical_hip_index": {"type": "integer", "minimum": 0}, "logical_device_index": {"const": 0}}},
+    "target": {"type": "object", "additionalProperties": false, "required": ["order", "row_id", "target", "device", "backend", "cases"], "properties": {"order": {"type": "integer", "minimum": 0, "maximum": 1}, "row_id": {"enum": ["rmsnorm-p0-gfx1030", "rmsnorm-p0-gfx1201"]}, "target": {"enum": ["gfx1030", "gfx1201"]}, "device": {"$ref": "#/$defs/device"}, "backend": {"const": "hip"}, "cases": {"type": "array", "minItems": 5, "maxItems": 5, "items": {"type": "string", "minLength": 1}}}},
+    "model_lock": {"type": "object", "additionalProperties": false, "required": ["path", "fingerprint", "resolved_revision"], "properties": {"path": {"const": "docs/models/locks/qwen3.5-4b-bf16.json"}, "fingerprint": {"const": "sha256:f143d7b504170d071c77818105f7a07dc0297c6bea0c61a5404b071fed0c1fae"}, "resolved_revision": {"const": "851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a"}}},
+    "producer": {"type": "object", "additionalProperties": false, "required": ["binary_name", "role", "result_schema", "implementation_status"], "properties": {"binary_name": {"const": "sllm-rmsnorm-p0-evidence"}, "role": {"const": "dedicated-p0-public-rmsnorm-producer"}, "result_schema": {"const": "rmsnorm-p0-runtime-result-v1"}, "implementation_status": {"const": "a5-enabled"}}}
+  }
+}

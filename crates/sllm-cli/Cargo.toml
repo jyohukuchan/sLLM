@@ -1,0 +1,17 @@
+[package]
+name = "sllm-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "sLLM command-line entry point"
+
+[dependencies]
+serde_json.workspace = true
+sllm-core.workspace = true
+sllm-frontend.workspace = true
+sllm-hip.workspace = true
+
+[[bin]]
+name = "sllm"
+path = "src/main.rs"

@@ -6,8 +6,8 @@
 #include <unordered_set>
 #include <vector>
 
-#ifndef ULLM_HIP_ARCHITECTURES
-#error "ULLM_HIP_ARCHITECTURES must describe the explicitly compiled targets"
+#ifndef SLLM_HIP_ARCHITECTURES
+#error "SLLM_HIP_ARCHITECTURES must describe the explicitly compiled targets"
 #endif
 
 namespace {
@@ -29,7 +29,7 @@ bool check_hip(hipError_t status, const char *expression, const char *file,
   return false;
 }
 
-#define ULLM_HIP_CHECK(expression)                                             \
+#define SLLM_HIP_CHECK(expression)                                             \
   check_hip((expression), #expression, __FILE__, __LINE__)
 
 std::string base_architecture(const std::string &architecture) {
@@ -39,7 +39,7 @@ std::string base_architecture(const std::string &architecture) {
 
 std::unordered_set<std::string> compiled_architectures() {
   std::unordered_set<std::string> architectures;
-  std::string encoded = ULLM_HIP_ARCHITECTURES;
+  std::string encoded = SLLM_HIP_ARCHITECTURES;
   std::size_t start = 0;
   while (start <= encoded.size()) {
     const auto comma = encoded.find(',', start);
@@ -64,14 +64,14 @@ struct DeviceRecord {
 
 int main() {
   int runtime_version = 0;
-  if (!ULLM_HIP_CHECK(hipRuntimeGetVersion(&runtime_version))) {
+  if (!SLLM_HIP_CHECK(hipRuntimeGetVersion(&runtime_version))) {
     return 1;
   }
   std::cout << "hip_runtime_version=" << runtime_version << '\n';
-  std::cout << "compiled_targets=" << ULLM_HIP_ARCHITECTURES << '\n';
+  std::cout << "compiled_targets=" << SLLM_HIP_ARCHITECTURES << '\n';
 
   int device_count = 0;
-  if (!ULLM_HIP_CHECK(hipGetDeviceCount(&device_count))) {
+  if (!SLLM_HIP_CHECK(hipGetDeviceCount(&device_count))) {
     return 1;
   }
   if (device_count <= 0) {
@@ -85,7 +85,7 @@ int main() {
   devices.reserve(static_cast<std::size_t>(device_count));
   for (int device = 0; device < device_count; ++device) {
     hipDeviceProp_t properties{};
-    if (!ULLM_HIP_CHECK(hipGetDeviceProperties(&properties, device))) {
+    if (!SLLM_HIP_CHECK(hipGetDeviceProperties(&properties, device))) {
       return 1;
     }
     const std::string exact_arch = properties.gcnArchName;
@@ -104,36 +104,36 @@ int main() {
   }
 
   for (const auto &device : devices) {
-    if (!ULLM_HIP_CHECK(hipSetDevice(device.index))) {
+    if (!SLLM_HIP_CHECK(hipSetDevice(device.index))) {
       return 1;
     }
 
     int input = 41;
     int result = 0;
     int *device_value = nullptr;
-    if (!ULLM_HIP_CHECK(
+    if (!SLLM_HIP_CHECK(
             hipMalloc(reinterpret_cast<void **>(&device_value), sizeof(int)))) {
       return 1;
     }
-    if (!ULLM_HIP_CHECK(hipMemcpy(device_value, &input, sizeof(int),
+    if (!SLLM_HIP_CHECK(hipMemcpy(device_value, &input, sizeof(int),
                                   hipMemcpyHostToDevice))) {
-      if (!ULLM_HIP_CHECK(hipFree(device_value))) {
+      if (!SLLM_HIP_CHECK(hipFree(device_value))) {
         return 1;
       }
       return 1;
     }
 
     add_one<<<1, 1>>>(device_value);
-    if (!ULLM_HIP_CHECK(hipGetLastError()) ||
-        !ULLM_HIP_CHECK(hipDeviceSynchronize()) ||
-        !ULLM_HIP_CHECK(hipMemcpy(&result, device_value, sizeof(int),
+    if (!SLLM_HIP_CHECK(hipGetLastError()) ||
+        !SLLM_HIP_CHECK(hipDeviceSynchronize()) ||
+        !SLLM_HIP_CHECK(hipMemcpy(&result, device_value, sizeof(int),
                                   hipMemcpyDeviceToHost))) {
-      if (!ULLM_HIP_CHECK(hipFree(device_value))) {
+      if (!SLLM_HIP_CHECK(hipFree(device_value))) {
         return 1;
       }
       return 1;
     }
-    if (!ULLM_HIP_CHECK(hipFree(device_value))) {
+    if (!SLLM_HIP_CHECK(hipFree(device_value))) {
       return 1;
     }
 

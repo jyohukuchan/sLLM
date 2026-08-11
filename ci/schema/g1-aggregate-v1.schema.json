@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://ullm-project.local/ci/schema/g1-aggregate-v1.schema.json",
-  "title": "uLLM fail-closed G1 aggregate v1",
+  "$id": "https://sllm-project.local/ci/schema/g1-aggregate-v1.schema.json",
+  "title": "sLLM fail-closed G1 aggregate v1",
   "type": "object",
   "additionalProperties": false,
   "$defs": {

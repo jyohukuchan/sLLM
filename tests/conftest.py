@@ -51,7 +51,7 @@ def pytest_runtest_logreport(report) -> None:
 def pytest_sessionfinish(session, exitstatus) -> None:
     """Emit a single machine-readable count record for the outer CI runner."""
 
-    if os.environ.get("ULLM_EMIT_TEST_COUNTS") != "1":
+    if os.environ.get("SLLM_EMIT_TEST_COUNTS") != "1":
         return
     selected_ids = [item.nodeid for item in session.items]
     outcomes = {"passed": 0, "failed": 0, "skipped": 0}
@@ -65,7 +65,7 @@ def pytest_sessionfinish(session, exitstatus) -> None:
         "deselected": _DESELECTED,
     }
     print(
-        "\nULLM_PYTEST_COUNTS="
+        "\nSLLM_PYTEST_COUNTS="
         + json.dumps(counts, sort_keys=True, separators=(",", ":")),
         flush=True,
     )

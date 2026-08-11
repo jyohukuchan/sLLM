@@ -1,12 +1,12 @@
 ---
 
 name: push
-description: uLLM-project全体の変更を確認し、未コミット変更と未公開のローカルコミットを必要最小限のコミットに整理して、現在のブランチをGitHubへpushする。ユーザーが明示的にcommit、push、変更の公開、またはpush前のコミット整理を依頼した場合に使用する。共有済み履歴の書き換えやforce pushには使用しない。
+description: sLLM全体の変更を確認し、未コミット変更と未公開のローカルコミットを必要最小限のコミットに整理して、現在のブランチをGitHubへpushする。ユーザーが明示的にcommit、push、変更の公開、またはpush前のコミット整理を依頼した場合に使用する。共有済み履歴の書き換えやforce pushには使用しない。
 ---
 
 # 目的
 
-このSkillを含むuLLM-projectのGitリポジトリ全体を対象として、変更内容を安全にコミットし、現在のブランチをGitHubへpushする。
+このSkillを含むsLLMのGitリポジトリ全体を対象として、変更内容を安全にコミットし、現在のブランチをGitHubへpushする。
 
 原則として、同じ目的の変更は1つのコミットにまとめる。独立した変更としてレビュー、取り消し、またはcherry-pickする必要がある場合のみ、複数のコミットに分ける。
 
@@ -36,7 +36,7 @@ description: uLLM-project全体の変更を確認し、未コミット変更と�
 * upstreamに対するahead／behind
 * merge、rebase、cherry-pickの進行状態
 
-リポジトリのルートが、このSkillを含むuLLM-projectであることを確認する。
+リポジトリのルートが、このSkillを含むsLLMであることを確認する。
 
 remoteの最新状態を確認するため、適切なremoteに対して`git fetch --prune`を実行する。
 

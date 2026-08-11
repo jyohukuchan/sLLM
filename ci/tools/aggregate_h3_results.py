@@ -397,7 +397,7 @@ def validate_artifact_fields(metadata: dict[str, Any], target: str, artifact: Pa
     if set(device["sections"]) != {".text"} or not isinstance(device["sections"][".text"], dict) or set(device["sections"][".text"]) != {"present", "size_bytes"} or device["sections"][".text"]["present"] is not True or not isinstance(device["sections"][".text"]["size_bytes"], int) or device["sections"][".text"]["size_bytes"] < 0:
         raise ContractError(f"{target}: device ELF does not prove .text")
     symbols = device.get("symbols")
-    if not isinstance(symbols, list) or not symbols or any(not isinstance(symbol, dict) or set(symbol) != {"name", "defined"} or not isinstance(symbol["name"], str) or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", symbol["name"]) or symbol["defined"] is not True for symbol in symbols) or not any(symbol["name"] == "ullm_hip_compile_probe" for symbol in symbols):
+    if not isinstance(symbols, list) or not symbols or any(not isinstance(symbol, dict) or set(symbol) != {"name", "defined"} or not isinstance(symbol["name"], str) or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", symbol["name"]) or symbol["defined"] is not True for symbol in symbols) or not any(symbol["name"] == "sllm_hip_compile_probe" for symbol in symbols):
         raise ContractError(f"{target}: device ELF has no defined compile-probe symbol")
     for name in ("created_at", "started_at", "finished_at"):
         parse_time(metadata.get("timestamps", {}).get(name), f"{target} metadata {name}")

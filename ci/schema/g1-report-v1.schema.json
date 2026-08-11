@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://ullm-project.local/ci/schema/g1-report-v1.schema.json",
-  "title": "uLLM model-free G1 evidence report v1",
+  "$id": "https://sllm-project.local/ci/schema/g1-report-v1.schema.json",
+  "title": "sLLM model-free G1 evidence report v1",
   "type": "object",
   "additionalProperties": false,
   "$defs": {
@@ -122,14 +122,14 @@
       "type": "object", "additionalProperties": false,
       "required": ["$schema", "schema_version", "matrix_id", "revision", "tier", "required", "toolchain_id", "execution", "scope", "command", "rows"],
       "properties": {
-        "$schema": {"const": "https://ullm-project.local/ci/schema/g1-report-v1.schema.json#/$defs/g1_runtime_matrix"},
+        "$schema": {"const": "https://sllm-project.local/ci/schema/g1-report-v1.schema.json#/$defs/g1_runtime_matrix"},
         "schema_version": {"const": "g1-runtime-v1"}, "matrix_id": {"const": "g1-runtime-v1"}, "revision": {"const": 1},
         "tier": {"const": "tier_g1"}, "required": {"const": true}, "toolchain_id": {"const": "rocm-7.14.0"},
         "execution": {
           "type": "object", "additionalProperties": false,
           "required": ["serial", "host_lock", "trusted_local_only", "visibility_is_security_boundary", "sudo_allowed", "reset_allowed", "credentials_allowed", "docker_socket_allowed", "binary_is_h3_artifact"],
           "properties": {
-            "serial": {"const": true}, "host_lock": {"const": {"path": "/tmp/ullm-g0.lock", "acquisition": "nonblocking"}},
+            "serial": {"const": true}, "host_lock": {"const": {"path": "/tmp/sllm-g0.lock", "acquisition": "nonblocking"}},
             "trusted_local_only": {"const": true}, "visibility_is_security_boundary": {"const": false}, "sudo_allowed": {"const": false},
             "reset_allowed": {"const": false}, "credentials_allowed": {"const": false}, "docker_socket_allowed": {"const": false},
             "binary_is_h3_artifact": {"const": false}
@@ -148,7 +148,7 @@
           "type": "object", "additionalProperties": false,
           "required": ["binary", "arguments", "documentation"],
           "properties": {
-            "binary": {"const": "target/release/ullm-hip-evidence"}, "arguments": {"const": ["--timeout-ms", "1000"]},
+            "binary": {"const": "target/release/sllm-hip-evidence"}, "arguments": {"const": ["--timeout-ms", "1000"]},
             "documentation": {"const": "Dedicated Rust evidence binary; compile artifacts are not executable."}
           }
         },

@@ -1,0 +1,181 @@
+name: h3-rmsnorm-compile-only (non-required)
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  RMSNORM_H3_IMAGE_REFERENCE: docker.io/rocm/dev-ubuntu-24.04@sha256:439edaa8f0c4be4a3728e528f87b8a2ea1f051f34cf10b27caa4bd94f562eda7
+  RMSNORM_H3_IMAGE_MANIFEST_DIGEST: sha256:439edaa8f0c4be4a3728e528f87b8a2ea1f051f34cf10b27caa4bd94f562eda7
+  RMSNORM_H3_IMAGE_CONFIG_DIGEST: sha256:4c91c0d850e38a40fd669dd043ab42e9bad9a2b8a38e3f873c5a4eaced9f28cf
+  SLLM_H3_NETWORK_DISABLED: "1"
+
+jobs:
+  h3-rmsnorm:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout immutable candidate
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Prepare private per-run directory
+        run: |
+          set -eu
+          RUN_ROOT="$RUNNER_TEMP/sllm-rmsnorm-h3-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          test ! -e "$RUN_ROOT"
+          mkdir -m 700 "$RUN_ROOT"
+          printf 'RUN_ROOT=%s\n' "$RUN_ROOT" >> "$GITHUB_ENV"
+
+      - name: Verify immutable identity and pinned image
+        env:
+          REVIEWED_SHA: ${{ github.sha }}
+          TESTED_SHA: ${{ github.sha }}
+          WORKFLOW_SHA: ${{ github.sha }}
+        run: |
+          set -eu
+          test "$(command -v git)" = /usr/bin/git
+          git --version
+          TREE_OID="$(git rev-parse HEAD^{tree})"
+          export TREE_OID
+          test "$(git rev-parse HEAD)" = "$REVIEWED_SHA"
+          test "$(git rev-parse HEAD)" = "$TESTED_SHA"
+          test "$(git rev-parse HEAD)" = "$WORKFLOW_SHA"
+          test "$(git rev-parse HEAD^{tree})" = "$TREE_OID"
+          test -z "$(git status --porcelain=v1 --untracked-files=all)"
+          docker pull "$RMSNORM_H3_IMAGE_REFERENCE"
+          test "$(docker image inspect --format '{{.Id}}' "$RMSNORM_H3_IMAGE_REFERENCE")" = "$RMSNORM_H3_IMAGE_CONFIG_DIGEST"
+          docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$RMSNORM_H3_IMAGE_REFERENCE" | grep -F -- "$RMSNORM_H3_IMAGE_MANIFEST_DIGEST" >/dev/null
+
+      - name: Compile, link, extract, and inspect gfx1030
+        env:
+          REVIEWED_SHA: ${{ github.sha }}
+          TESTED_SHA: ${{ github.sha }}
+          WORKFLOW_SHA: ${{ github.sha }}
+        run: |
+          set -eu
+          test -n "$RUN_ROOT"
+          TREE_OID="$(git rev-parse HEAD^{tree})"
+          export TREE_OID
+          docker run --rm --network none --user "$(id -u):$(id -g)" \
+            --mount "type=bind,src=$RUN_ROOT,dst=/tmp" \
+            --mount "type=bind,src=$GITHUB_WORKSPACE,dst=/workspace,readonly" \
+            --mount "type=bind,src=/usr/bin/git,dst=/usr/local/bin/git,readonly" \
+            --env HOME=/tmp/sllm-rmsnorm-h3-home-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT} \
+            --env REVIEWED_SHA --env TESTED_SHA --env WORKFLOW_SHA --env TREE_OID \
+            --env GITHUB_RUN_ID --env GITHUB_RUN_ATTEMPT --env SLLM_H3_NETWORK_DISABLED \
+            --env RMSNORM_H3_IMAGE_REFERENCE --env RMSNORM_H3_IMAGE_CONFIG_DIGEST \
+            --workdir /workspace \
+            "$RMSNORM_H3_IMAGE_REFERENCE" /bin/bash -eu -o pipefail -c '
+              mkdir -p "$HOME"
+              git config --global --add safe.directory /workspace
+              python3 ci/tools/run_rmsnorm_h3_compile.py \
+                --repo /workspace --row h3-rmsnorm-gfx1030 \
+                --output-dir "/tmp/sllm-rmsnorm-h3-gfx1030-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
+                --strict-ci --pinned-container \
+                --observed-image-reference "$RMSNORM_H3_IMAGE_REFERENCE" \
+                --observed-image-config-digest "$RMSNORM_H3_IMAGE_CONFIG_DIGEST" \
+                --reviewed-sha "$REVIEWED_SHA" --tested-sha "$TESTED_SHA" \
+                --workflow-sha "$WORKFLOW_SHA" --tree-oid "$TREE_OID" \
+                --run-id "${GITHUB_RUN_ID}" --run-attempt "${GITHUB_RUN_ATTEMPT}"
+            '
+
+      - name: Compile, link, extract, and inspect gfx1201
+        env:
+          REVIEWED_SHA: ${{ github.sha }}
+          TESTED_SHA: ${{ github.sha }}
+          WORKFLOW_SHA: ${{ github.sha }}
+        run: |
+          set -eu
+          test -n "$RUN_ROOT"
+          TREE_OID="$(git rev-parse HEAD^{tree})"
+          export TREE_OID
+          docker run --rm --network none --user "$(id -u):$(id -g)" \
+            --mount "type=bind,src=$RUN_ROOT,dst=/tmp" \
+            --mount "type=bind,src=$GITHUB_WORKSPACE,dst=/workspace,readonly" \
+            --mount "type=bind,src=/usr/bin/git,dst=/usr/local/bin/git,readonly" \
+            --env HOME=/tmp/sllm-rmsnorm-h3-home-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT} \
+            --env REVIEWED_SHA --env TESTED_SHA --env WORKFLOW_SHA --env TREE_OID \
+            --env GITHUB_RUN_ID --env GITHUB_RUN_ATTEMPT --env SLLM_H3_NETWORK_DISABLED \
+            --env RMSNORM_H3_IMAGE_REFERENCE --env RMSNORM_H3_IMAGE_CONFIG_DIGEST \
+            --workdir /workspace \
+            "$RMSNORM_H3_IMAGE_REFERENCE" /bin/bash -eu -o pipefail -c '
+              mkdir -p "$HOME"
+              git config --global --add safe.directory /workspace
+              python3 ci/tools/run_rmsnorm_h3_compile.py \
+                --repo /workspace --row h3-rmsnorm-gfx1201 \
+                --output-dir "/tmp/sllm-rmsnorm-h3-gfx1201-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
+                --strict-ci --pinned-container \
+                --observed-image-reference "$RMSNORM_H3_IMAGE_REFERENCE" \
+                --observed-image-config-digest "$RMSNORM_H3_IMAGE_CONFIG_DIGEST" \
+                --reviewed-sha "$REVIEWED_SHA" --tested-sha "$TESTED_SHA" \
+                --workflow-sha "$WORKFLOW_SHA" --tree-oid "$TREE_OID" \
+                --run-id "${GITHUB_RUN_ID}" --run-attempt "${GITHUB_RUN_ATTEMPT}"
+            '
+
+      - name: Aggregate exact RMSNorm rows without binary upload
+        env:
+          REVIEWED_SHA: ${{ github.sha }}
+          TESTED_SHA: ${{ github.sha }}
+          WORKFLOW_SHA: ${{ github.sha }}
+        run: |
+          set -eu
+          test -n "$RUN_ROOT"
+          test -d "$RUN_ROOT/sllm-rmsnorm-h3-gfx1030-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}/h3-rmsnorm-gfx1030"
+          test -d "$RUN_ROOT/sllm-rmsnorm-h3-gfx1201-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}/h3-rmsnorm-gfx1201"
+          mkdir -m 700 "$RUN_ROOT/sllm-rmsnorm-h3-collection-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          cp -a "$RUN_ROOT/sllm-rmsnorm-h3-gfx1030-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}/h3-rmsnorm-gfx1030" "$RUN_ROOT/sllm-rmsnorm-h3-collection-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}/"
+          cp -a "$RUN_ROOT/sllm-rmsnorm-h3-gfx1201-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}/h3-rmsnorm-gfx1201" "$RUN_ROOT/sllm-rmsnorm-h3-collection-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}/"
+          mkdir -p -m 700 "$GITHUB_WORKSPACE/.local-artifacts/rmsnorm-h3-aggregate"
+          TREE_OID="$(git rev-parse HEAD^{tree})"
+          export TREE_OID
+          docker run --rm --network none --user "$(id -u):$(id -g)" \
+            --mount "type=bind,src=$RUN_ROOT,dst=/tmp" \
+            --mount "type=bind,src=$GITHUB_WORKSPACE,dst=/workspace,readonly" \
+            --mount "type=bind,src=/usr/bin/git,dst=/usr/local/bin/git,readonly" \
+            --env HOME=/tmp/sllm-rmsnorm-h3-home-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT} \
+            --env REVIEWED_SHA --env TESTED_SHA --env WORKFLOW_SHA --env TREE_OID \
+            --env GITHUB_RUN_ID --env GITHUB_RUN_ATTEMPT --env SLLM_H3_NETWORK_DISABLED \
+            --env RMSNORM_H3_IMAGE_REFERENCE --env RMSNORM_H3_IMAGE_CONFIG_DIGEST \
+            --workdir /workspace \
+            "$RMSNORM_H3_IMAGE_REFERENCE" /bin/bash -eu -o pipefail -c '
+              mkdir -p "$HOME"
+              git config --global --add safe.directory /workspace
+              python3 ci/tools/aggregate_rmsnorm_h3_results.py \
+                --repo /workspace --artifact-root "/tmp/sllm-rmsnorm-h3-collection-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
+                --output-dir "/tmp/sllm-rmsnorm-h3-aggregate-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
+                --strict-ci --expected-reviewed-sha "$REVIEWED_SHA" \
+                --expected-tested-sha "$TESTED_SHA" --expected-workflow-sha "$WORKFLOW_SHA" \
+                --tree-oid "$(git rev-parse HEAD^{tree})" --run-id "${GITHUB_RUN_ID}" \
+                --run-attempt "${GITHUB_RUN_ATTEMPT}"
+            '
+          cp "$RUN_ROOT/sllm-rmsnorm-h3-aggregate-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}/rmsnorm-h3-aggregate.json" "$GITHUB_WORKSPACE/.local-artifacts/rmsnorm-h3-aggregate/"
+          cp "$RUN_ROOT/sllm-rmsnorm-h3-aggregate-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}/rmsnorm-h3-aggregate.json.sha256" "$GITHUB_WORKSPACE/.local-artifacts/rmsnorm-h3-aggregate/"
+
+      - name: Upload JSON aggregate only
+        if: ${{ success() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: rmsnorm-h3-aggregate
+          path: |
+            .local-artifacts/rmsnorm-h3-aggregate/rmsnorm-h3-aggregate.json
+            .local-artifacts/rmsnorm-h3-aggregate/rmsnorm-h3-aggregate.json.sha256
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Cleanup private per-run directory
+        if: ${{ always() }}
+        run: |
+          set -eu
+          if [ -n "${RUN_ROOT:-}" ] && [ -d "$RUN_ROOT" ]; then
+            rm -rf -- "$RUN_ROOT"
+          fi

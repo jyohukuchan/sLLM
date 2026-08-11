@@ -50,6 +50,7 @@ untracked、ignored data、worktree、remote同期はGitHub-hosted H0ではな�
 | registered worktree | 3 | 4超 |
 
 - model weightはcheckout外の検証済みcacheへ置く。
+- G2等のmodel sliceは検証済みread-only cacheから実行時に抽出し、`.local-artifacts/model-slices/`等のlocal-only領域へ一時保存する。raw sliceをGit、GitHub Actions artifact、JSON reportへ埋め込まず、lock fingerprint、tensor、byte range、recipe、size、SHA-256、短いsummaryだけを追跡する。
 - `reference/`のsource mirrorは登録したrepositoryと固定commitをmanifestへ記録し、生成物やmodelを混在させない。
 - 上限超過時はsize、file count、上位directoryをread-onlyで報告し、自動削除しない。
 - `git worktree prune --dry-run --verbose`でstale registrationを検出する。

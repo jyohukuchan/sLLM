@@ -1,0 +1,15 @@
+[package]
+name = "sllm-hip-sys"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Checked-in bindings and native build integration for the sLLM HIP C ABI"
+build = "build.rs"
+
+[lib]
+path = "src/lib.rs"
+
+[build-dependencies]
+serde_json.workspace = true
+sha2.workspace = true

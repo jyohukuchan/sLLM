@@ -1,0 +1,12 @@
+[package]
+name = "sllm-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Backend-independent sLLM runtime descriptors and contracts"
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
