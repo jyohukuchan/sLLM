@@ -330,62 +330,58 @@ bool run_negative_contract(const sllm_context_t *const context) {
                           "argmax wrong ABI version");
   mutation = valid;
   mutation.op_version = SLLM_HIP_ARGMAX_VERSION + 1U;
-  success = success &&
-            prepare_fails(context, mutation,
-                          SLLM_STATUS_INVALID_ARGMAX_DESCRIPTOR,
-                          "argmax wrong operation version");
+  success = success && prepare_fails(context, mutation,
+                                     SLLM_STATUS_INVALID_ARGMAX_DESCRIPTOR,
+                                     "argmax wrong operation version");
   mutation = valid;
   mutation.reserved[0] = 1U;
-  success = success &&
-            prepare_fails(context, mutation, SLLM_STATUS_RESERVED_NONZERO,
-                          "argmax nonzero reserved field");
+  success =
+      success && prepare_fails(context, mutation, SLLM_STATUS_RESERVED_NONZERO,
+                               "argmax nonzero reserved field");
   mutation = valid;
   mutation.logits.dtype = SLLM_TENSOR_DTYPE_F16;
-  success = success &&
-            prepare_fails(context, mutation, SLLM_STATUS_UNSUPPORTED_DTYPE,
-                          "argmax wrong logits dtype");
+  success =
+      success && prepare_fails(context, mutation, SLLM_STATUS_UNSUPPORTED_DTYPE,
+                               "argmax wrong logits dtype");
   mutation = valid;
   mutation.output.rank = 2U;
   mutation.output.shape[1] = 1U;
   mutation.output.stride_elements[0] = 1U;
   mutation.output.stride_elements[1] = 1U;
   success = success &&
-            prepare_fails(context, mutation,
-                          SLLM_STATUS_INVALID_TENSOR_BINDING,
+            prepare_fails(context, mutation, SLLM_STATUS_INVALID_TENSOR_BINDING,
                           "argmax wrong output rank");
   mutation = valid;
   mutation.logits.stride_elements[0] = 18U;
-  success = success &&
-            prepare_fails(context, mutation, SLLM_STATUS_STRIDE_MISMATCH,
-                          "argmax noncontiguous logits");
+  success =
+      success && prepare_fails(context, mutation, SLLM_STATUS_STRIDE_MISMATCH,
+                               "argmax noncontiguous logits");
   mutation = valid;
   mutation.logits.shape[0] = 0U;
-  success = success &&
-            prepare_fails(context, mutation, SLLM_STATUS_ZERO_EXTENT,
-                          "argmax zero row count");
+  success = success && prepare_fails(context, mutation, SLLM_STATUS_ZERO_EXTENT,
+                                     "argmax zero row count");
   mutation = valid;
   mutation.output.shape[0] = 2U;
-  success = success &&
-            prepare_fails(context, mutation, SLLM_STATUS_SHAPE_MISMATCH,
-                          "argmax output shape mismatch");
+  success =
+      success && prepare_fails(context, mutation, SLLM_STATUS_SHAPE_MISMATCH,
+                               "argmax output shape mismatch");
   mutation = valid;
   mutation.logits.shape[1] = SLLM_HIP_ARGMAX_MAX_V + 1U;
   mutation.logits.stride_elements[0] = SLLM_HIP_ARGMAX_MAX_V + 1U;
-  success = success &&
-            prepare_fails(context, mutation, SLLM_STATUS_UNSUPPORTED,
-                          "argmax vocabulary limit");
+  success = success && prepare_fails(context, mutation, SLLM_STATUS_UNSUPPORTED,
+                                     "argmax vocabulary limit");
   mutation = valid;
   mutation.output = binding(logits, SLLM_TENSOR_DTYPE_I32, 1U, 3U);
-  success = success &&
-            prepare_fails(context, mutation, SLLM_STATUS_ALIAS_OVERLAP,
-                          "argmax overlapping bindings");
+  success =
+      success && prepare_fails(context, mutation, SLLM_STATUS_ALIAS_OVERLAP,
+                               "argmax overlapping bindings");
 
-  const bool output_released = expect(
-      sllm_buffer_release(&output, &error.sink), SLLM_STATUS_OK,
-      "negative output buffer release", error);
-  const bool logits_released = expect(
-      sllm_buffer_release(&logits, &error.sink), SLLM_STATUS_OK,
-      "negative logits buffer release", error);
+  const bool output_released =
+      expect(sllm_buffer_release(&output, &error.sink), SLLM_STATUS_OK,
+             "negative output buffer release", error);
+  const bool logits_released =
+      expect(sllm_buffer_release(&logits, &error.sink), SLLM_STATUS_OK,
+             "negative logits buffer release", error);
   return success && output_released && logits_released;
 }
 

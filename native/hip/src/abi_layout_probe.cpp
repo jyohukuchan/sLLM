@@ -670,7 +670,8 @@ int main() {
       << " info_version=" << offsetof(sllm_argmax_dispatch_info_t, info_version)
       << " backend=" << offsetof(sllm_argmax_dispatch_info_t, backend)
       << " dispatch_id=" << offsetof(sllm_argmax_dispatch_info_t, dispatch_id)
-      << " dispatch_count=" << offsetof(sllm_argmax_dispatch_info_t, dispatch_count)
+      << " dispatch_count="
+      << offsetof(sllm_argmax_dispatch_info_t, dispatch_count)
       << " kernel_id=" << offsetof(sllm_argmax_dispatch_info_t, kernel_id)
       << " workgroup_size_x="
       << offsetof(sllm_argmax_dispatch_info_t, workgroup_size_x)
@@ -679,7 +680,8 @@ int main() {
       << " vocab_size=" << offsetof(sllm_argmax_dispatch_info_t, vocab_size)
       << " fallback_allowed="
       << offsetof(sllm_argmax_dispatch_info_t, fallback_allowed)
-      << " fallback_used=" << offsetof(sllm_argmax_dispatch_info_t, fallback_used)
+      << " fallback_used="
+      << offsetof(sllm_argmax_dispatch_info_t, fallback_used)
       << " kernel_symbol="
       << offsetof(sllm_argmax_dispatch_info_t, kernel_symbol)
       << " device_symbol="

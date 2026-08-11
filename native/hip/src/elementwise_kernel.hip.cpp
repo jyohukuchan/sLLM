@@ -97,8 +97,9 @@ bool grid_for(const uint64_t element_count, dim3 *const grid) noexcept {
     return false;
   }
   const uint64_t workgroup = static_cast<uint64_t>(kWorkgroupSize);
-  const uint64_t blocks = element_count / workgroup +
-                          static_cast<uint64_t>(element_count % workgroup != 0U);
+  const uint64_t blocks =
+      element_count / workgroup +
+      static_cast<uint64_t>(element_count % workgroup != 0U);
   if (blocks > std::numeric_limits<uint32_t>::max()) {
     return false;
   }
@@ -115,9 +116,8 @@ hipError_t launch_copy(const uint16_t *const input, uint16_t *const output,
   if (!grid_for(element_count, &grid)) {
     return hipErrorInvalidValue;
   }
-  hipLaunchKernelGGL(sllm_elementwise_copy_bf16_v1, grid,
-                     dim3(kWorkgroupSize), 0U, stream, input, output,
-                     element_count);
+  hipLaunchKernelGGL(sllm_elementwise_copy_bf16_v1, grid, dim3(kWorkgroupSize),
+                     0U, stream, input, output, element_count);
   return hipGetLastError();
 }
 
@@ -142,8 +142,8 @@ hipError_t launch_silu_mul(const uint16_t *const gate, const uint16_t *const up,
   if (!grid_for(element_count, &grid)) {
     return hipErrorInvalidValue;
   }
-  hipLaunchKernelGGL(sllm_elementwise_silu_mul_bf16_fp32_v1,
-                     grid, dim3(kWorkgroupSize), 0U, stream, gate, up, output,
+  hipLaunchKernelGGL(sllm_elementwise_silu_mul_bf16_fp32_v1, grid,
+                     dim3(kWorkgroupSize), 0U, stream, gate, up, output,
                      element_count);
   return hipGetLastError();
 }
@@ -157,9 +157,9 @@ hipError_t launch_sigmoid_mul(const uint16_t *const gate,
   if (!grid_for(element_count, &grid)) {
     return hipErrorInvalidValue;
   }
-  hipLaunchKernelGGL(sllm_elementwise_sigmoid_mul_bf16_fp32_v1,
-                     grid, dim3(kWorkgroupSize), 0U, stream, gate,
-                     attention_value, output, element_count);
+  hipLaunchKernelGGL(sllm_elementwise_sigmoid_mul_bf16_fp32_v1, grid,
+                     dim3(kWorkgroupSize), 0U, stream, gate, attention_value,
+                     output, element_count);
   return hipGetLastError();
 }
 

@@ -1,5 +1,5 @@
-#include "attention_preprocess_api.hpp"
 #include "argmax_api.hpp"
+#include "attention_preprocess_api.hpp"
 #include "causal_attention_api.hpp"
 #include "elementwise_api.hpp"
 #include "embedding_api.hpp"
@@ -995,11 +995,11 @@ sllm_matmul_execute(const sllm_matmul_plan_t *const plan,
   }
 }
 
-extern "C" sllm_status_t sllm_argmax_prepare(
-    const sllm_context_t *const context,
-    const sllm_argmax_desc_t *const descriptor,
-    sllm_argmax_plan_t **const plan,
-    sllm_error_sink_t *const error_sink) noexcept {
+extern "C" sllm_status_t
+sllm_argmax_prepare(const sllm_context_t *const context,
+                    const sllm_argmax_desc_t *const descriptor,
+                    sllm_argmax_plan_t **const plan,
+                    sllm_error_sink_t *const error_sink) noexcept {
   try {
     if (plan != nullptr) {
       *plan = nullptr;
@@ -1045,11 +1045,12 @@ sllm_argmax_plan_release(sllm_argmax_plan_t **const plan,
   }
 }
 
-extern "C" sllm_status_t sllm_argmax_execute(
-    const sllm_argmax_plan_t *const plan, const sllm_queue_t *const queue,
-    sllm_completion_t **const completion,
-    sllm_argmax_dispatch_info_t *const dispatch_info,
-    sllm_error_sink_t *const error_sink) noexcept {
+extern "C" sllm_status_t
+sllm_argmax_execute(const sllm_argmax_plan_t *const plan,
+                    const sllm_queue_t *const queue,
+                    sllm_completion_t **const completion,
+                    sllm_argmax_dispatch_info_t *const dispatch_info,
+                    sllm_error_sink_t *const error_sink) noexcept {
   try {
     if (completion != nullptr) {
       *completion = nullptr;
@@ -1065,8 +1066,7 @@ extern "C" sllm_status_t sllm_argmax_execute(
     }
     if (dispatch_info->struct_size != sizeof(*dispatch_info) ||
         dispatch_info->abi_version != SLLM_HIP_ABI_VERSION ||
-        dispatch_info->info_version !=
-            SLLM_HIP_ARGMAX_DISPATCH_INFO_VERSION ||
+        dispatch_info->info_version != SLLM_HIP_ARGMAX_DISPATCH_INFO_VERSION ||
         !std::all_of(std::begin(dispatch_info->reserved),
                      std::end(dispatch_info->reserved),
                      [](const uint32_t value) { return value == 0U; })) {

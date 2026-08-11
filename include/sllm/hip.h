@@ -962,8 +962,7 @@ SLLM_HIP_API sllm_status_t sllm_argmax_plan_release(
 
 SLLM_HIP_API sllm_status_t sllm_argmax_execute(
     const sllm_argmax_plan_t *plan, const sllm_queue_t *queue,
-    sllm_completion_t **completion,
-    sllm_argmax_dispatch_info_t *dispatch_info,
+    sllm_completion_t **completion, sllm_argmax_dispatch_info_t *dispatch_info,
     sllm_error_sink_t *error_sink) SLLM_HIP_NOEXCEPT;
 
 SLLM_HIP_API sllm_status_t sllm_attention_preprocess_prepare(

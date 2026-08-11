@@ -32,10 +32,11 @@ __device__ void merge_candidate(Candidate *const left,
   left->has_nan = has_nan;
 }
 
-extern "C" __global__ __launch_bounds__(SLLM_HIP_ARGMAX_WORKGROUP_SIZE, 1)
-void sllm_argmax_bf16_f32_v1(const uint16_t *const logits,
-                             int32_t *const output,
-                             const uint64_t vocab_size) {
+extern "C" __global__
+__launch_bounds__(SLLM_HIP_ARGMAX_WORKGROUP_SIZE,
+                  1) void sllm_argmax_bf16_f32_v1(const uint16_t *const logits,
+                                                  int32_t *const output,
+                                                  const uint64_t vocab_size) {
   __shared__ Candidate candidates[SLLM_HIP_ARGMAX_WORKGROUP_SIZE];
   const uint32_t lane = static_cast<uint32_t>(threadIdx.x);
   const uint32_t row = static_cast<uint32_t>(blockIdx.x);

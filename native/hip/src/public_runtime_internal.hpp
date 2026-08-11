@@ -368,9 +368,10 @@ struct AccountingState final {
     return true;
   }
 
-  static bool reserve_two_buffer_prepared_plan(AccountingState &context,
-                                               AccountingState &first,
-                                               AccountingState &second) noexcept {
+  static bool
+  reserve_two_buffer_prepared_plan(AccountingState &context,
+                                   AccountingState &first,
+                                   AccountingState &second) noexcept {
     const uint64_t first_count = 1U;
     const uint64_t second_count = (&first == &second) ? 0U : 1U;
     const auto can_add = [](const uint64_t value, const uint64_t amount) {
@@ -389,9 +390,10 @@ struct AccountingState final {
     return true;
   }
 
-  static bool release_two_buffer_prepared_plan(AccountingState &context,
-                                               AccountingState &first,
-                                               AccountingState &second) noexcept {
+  static bool
+  release_two_buffer_prepared_plan(AccountingState &context,
+                                   AccountingState &first,
+                                   AccountingState &second) noexcept {
     const uint64_t first_count = 1U;
     const uint64_t second_count = (&first == &second) ? 0U : 1U;
     if (context.child_count == 0U || context.lifetime_guards == 0U ||
@@ -456,10 +458,9 @@ struct AccountingState final {
                                              AccountingState &first,
                                              AccountingState &second) noexcept {
     const uint64_t second_count = (&first == &second) ? 0U : 1U;
-    if (queue.active_submissions == 0U ||
-        queue.completion_references == 0U || context.child_count == 0U ||
-        context.lifetime_guards == 0U || first.active_submissions == 0U ||
-        first.completion_references == 0U ||
+    if (queue.active_submissions == 0U || queue.completion_references == 0U ||
+        context.child_count == 0U || context.lifetime_guards == 0U ||
+        first.active_submissions == 0U || first.completion_references == 0U ||
         second.active_submissions < second_count ||
         second.completion_references < second_count) {
       return false;

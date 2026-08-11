@@ -1,7 +1,7 @@
-#include "attention_preprocess_api.hpp"
-#include "attention_preprocess_kernel_internal.hpp"
 #include "argmax_api.hpp"
 #include "argmax_kernel_internal.hpp"
+#include "attention_preprocess_api.hpp"
+#include "attention_preprocess_kernel_internal.hpp"
 #include "causal_attention_api.hpp"
 #include "causal_attention_kernel_internal.hpp"
 #include "elementwise_api.hpp"
@@ -483,8 +483,8 @@ struct Completion final : QuarantineNode {
         kv_append_count(kv_append_count_value),
         kv_append_end(kv_append_end_value),
         causal_attention(causal_attention_state_value != nullptr),
-      causal_attention_state(causal_attention_state_value),
-      causal_attention_buffers(causal_attention_buffers_value),
+        causal_attention_state(causal_attention_state_value),
+        causal_attention_buffers(causal_attention_buffers_value),
         linear_attention(false), linear_attention_state(nullptr),
         linear_attention_buffers(), linear_attention_token(0U),
         linear_attention_start(0U), linear_attention_count(0U),
@@ -544,8 +544,7 @@ struct ElementwisePlan final : QuarantineNode {
         input0(input0_value), input1(input1_value), output(output_value),
         metadata(metadata_value), embedding_metadata(), matmul_metadata(),
         argmax_metadata(), embedding(false), matmul(false), argmax(false),
-        release_active(false),
-        in_flight(false) {}
+        release_active(false), in_flight(false) {}
 
   ElementwisePlan(Context *const context_value, Buffer *const weight_value,
                   Buffer *const token_ids_value, Buffer *const output_value,
@@ -554,8 +553,7 @@ struct ElementwisePlan final : QuarantineNode {
         input0(weight_value), input1(token_ids_value), output(output_value),
         metadata(), embedding_metadata(metadata_value), matmul_metadata(),
         argmax_metadata(), embedding(true), matmul(false), argmax(false),
-        release_active(false),
-        in_flight(false) {}
+        release_active(false), in_flight(false) {}
 
   ElementwisePlan(Context *const context_value, Buffer *const activation_value,
                   Buffer *const weight_value, Buffer *const output_value,
@@ -564,15 +562,14 @@ struct ElementwisePlan final : QuarantineNode {
         input0(activation_value), input1(weight_value), output(output_value),
         metadata(), embedding_metadata(), matmul_metadata(metadata_value),
         argmax_metadata(), embedding(false), matmul(true), argmax(false),
-        release_active(false),
-        in_flight(false) {}
+        release_active(false), in_flight(false) {}
 
   ElementwisePlan(Context *const context_value, Buffer *const logits_value,
                   Buffer *const output_value,
                   const sllm_argmax::DescriptorMetadata &metadata_value)
       : QuarantineNode(HandleKind::ArgmaxPlan), context(context_value),
-        input0(logits_value), input1(nullptr), output(output_value),
-        metadata(), embedding_metadata(), matmul_metadata(),
+        input0(logits_value), input1(nullptr), output(output_value), metadata(),
+        embedding_metadata(), matmul_metadata(),
         argmax_metadata(metadata_value), embedding(false), matmul(false),
         argmax(true), release_active(false), in_flight(false) {}
 };
@@ -1654,9 +1651,9 @@ void initialize_argmax_dispatch_info(
   sllm_public_runtime::copy_fixed_string(
       info->kernel_symbol, SLLM_HIP_ARGMAX_KERNEL_SYMBOL_MAX,
       ::sllm_argmax_kernel::kLogicalKernelId);
-  sllm_public_runtime::copy_fixed_string(
-      info->device_symbol, SLLM_HIP_ARGMAX_DEVICE_SYMBOL_MAX,
-      ::sllm_argmax_kernel::kDeviceSymbol);
+  sllm_public_runtime::copy_fixed_string(info->device_symbol,
+                                         SLLM_HIP_ARGMAX_DEVICE_SYMBOL_MAX,
+                                         ::sllm_argmax_kernel::kDeviceSymbol);
   sllm_public_runtime::copy_fixed_string(info->gcn_arch_name,
                                          SLLM_HIP_MAX_GCN_ARCH_NAME, arch_name);
 }
@@ -2124,9 +2121,11 @@ bool release_submission_references(Completion *const completion) noexcept {
           completion->matmul_weight->accounting,
           completion->matmul_output->accounting);
     } else if (completion->argmax) {
-      released = sllm_public_runtime::AccountingState::release_two_buffer_active(
-          completion->queue->accounting, completion->argmax_logits->accounting,
-          completion->argmax_output->accounting);
+      released =
+          sllm_public_runtime::AccountingState::release_two_buffer_active(
+              completion->queue->accounting,
+              completion->argmax_logits->accounting,
+              completion->argmax_output->accounting);
     } else if (completion->attention_preprocess) {
       released = release_attention_active(completion->queue->accounting,
                                           completion->attention_buffers);
@@ -2206,10 +2205,11 @@ bool rollback_submission_references(Completion *const completion) noexcept {
               completion->matmul_weight->accounting,
               completion->matmul_output->accounting);
     } else if (completion->argmax) {
-      released = sllm_public_runtime::AccountingState::rollback_two_buffer_submission(
-          completion->context->accounting, completion->queue->accounting,
-          completion->argmax_logits->accounting,
-          completion->argmax_output->accounting);
+      released =
+          sllm_public_runtime::AccountingState::rollback_two_buffer_submission(
+              completion->context->accounting, completion->queue->accounting,
+              completion->argmax_logits->accounting,
+              completion->argmax_output->accounting);
     } else if (completion->attention_preprocess) {
       released = rollback_attention_submission(completion->context->accounting,
                                                completion->queue->accounting,
@@ -2300,10 +2300,11 @@ bool release_completion_child_reference(Completion *const completion) noexcept {
               completion->matmul_weight->accounting,
               completion->matmul_output->accounting);
     } else if (completion->argmax) {
-      released = sllm_public_runtime::AccountingState::release_two_buffer_completion(
-          completion->context->accounting, completion->queue->accounting,
-          completion->argmax_logits->accounting,
-          completion->argmax_output->accounting);
+      released =
+          sllm_public_runtime::AccountingState::release_two_buffer_completion(
+              completion->context->accounting, completion->queue->accounting,
+              completion->argmax_logits->accounting,
+              completion->argmax_output->accounting);
     } else if (completion->attention_preprocess) {
       released = release_attention_completion(completion->context->accounting,
                                               completion->queue->accounting,
@@ -2364,9 +2365,9 @@ sllm_status_t poll_completion(Completion *const completion,
   }
   if (status == hipSuccess) {
     if (completion->rmsnorm || completion->elementwise || completion->matmul ||
-        completion->argmax ||
-        completion->attention_preprocess || completion->kv_state_append ||
-        completion->causal_attention || completion->linear_attention) {
+        completion->argmax || completion->attention_preprocess ||
+        completion->kv_state_append || completion->causal_attention ||
+        completion->linear_attention) {
       if (completion->timing_start_event == nullptr) {
         completion->terminal = true;
         completion->success = false;
@@ -4585,9 +4586,8 @@ sllm_completion_timing(sllm_completion_t *const raw_completion,
     }
     if (!completion->rmsnorm && !completion->elementwise &&
         !completion->matmul && !completion->argmax &&
-        !completion->attention_preprocess &&
-        !completion->kv_state_append && !completion->causal_attention &&
-        !completion->linear_attention) {
+        !completion->attention_preprocess && !completion->kv_state_append &&
+        !completion->causal_attention && !completion->linear_attention) {
       return sllm_public_runtime::write_error(
           error_sink, SLLM_STATUS_UNSUPPORTED,
           "completion timing is only available for numeric operations");
@@ -5807,11 +5807,11 @@ sllm_elementwise_execute(const sllm_elementwise_plan_t *const raw_plan,
   }
 }
 
+#include "argmax_runtime.inc"
 #include "attention_preprocess_runtime.inc"
 #include "causal_attention_runtime.inc"
 #include "embedding_runtime.inc"
 #include "matmul_runtime.inc"
-#include "argmax_runtime.inc"
 
 namespace {
 

@@ -221,8 +221,8 @@ hipError_t launch_convolution(const uint16_t *const qkv,
   const uint64_t elements =
       static_cast<uint64_t>(token_count) * kQkvWidth + kConvHistory * kQkvWidth;
   const uint64_t workgroup = static_cast<uint64_t>(kWorkgroupSize);
-  const uint64_t blocks = elements / workgroup +
-                          static_cast<uint64_t>(elements % workgroup != 0U);
+  const uint64_t blocks =
+      elements / workgroup + static_cast<uint64_t>(elements % workgroup != 0U);
   if (blocks > std::numeric_limits<uint32_t>::max()) {
     return hipErrorInvalidValue;
   }

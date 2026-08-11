@@ -25,7 +25,7 @@
     "files": [
       {
         "path": "include/sllm/hip.h",
-        "sha256": "d6ffda94cabda494cdb28aeab9de79e2ee665a704cee485439a8209811430b23"
+        "sha256": "4475645f841a7599002d7e82caafa3a8c0ab00b3c02d669f38f8889e95952e51"
       },
       {
         "path": "native/hip/src/hip_compile_probe.hip.cpp",
@@ -33,14 +33,14 @@
       },
       {
         "path": "native/hip/src/public_runtime.hip.cpp",
-        "sha256": "1d2e896f687306057707e43b460a2347ba5bc46828f90b0f4591b51c09ef3619"
+        "sha256": "3c2252d782370a9030d62c0e747069c0b5ceae94f1ee662d115a714377cde86f"
       },
       {
         "path": "native/hip/src/public_runtime_internal.hpp",
-        "sha256": "971903c70f4e28291162804fc5350b1816d7d6ea68431afc13f687c884eff17c"
+        "sha256": "db65482614c7a856e0096466d9b86dcb9df3d5a4b6dd55cd585f5a599faa7a93"
       }
     ],
-    "source_set_sha256": "25e3a66027962f4e354979a02f1557b30fca3905f487ea8b6624ea2b05e96d58"
+    "source_set_sha256": "f200d9dba2a2704f5b9e0de9773c543acb3f014d6a79b59e7dd2c87394b7492e"
   },
   "direct_compile_sources": {
     "canonical_order": [
@@ -56,7 +56,7 @@
     "files": [
       {
         "path": "include/sllm/hip.h",
-        "sha256": "d6ffda94cabda494cdb28aeab9de79e2ee665a704cee485439a8209811430b23"
+        "sha256": "4475645f841a7599002d7e82caafa3a8c0ab00b3c02d669f38f8889e95952e51"
       },
       {
         "path": "native/hip/src/hip_compile_probe.hip.cpp",
@@ -64,11 +64,11 @@
       },
       {
         "path": "native/hip/src/public_runtime.hip.cpp",
-        "sha256": "1d2e896f687306057707e43b460a2347ba5bc46828f90b0f4591b51c09ef3619"
+        "sha256": "3c2252d782370a9030d62c0e747069c0b5ceae94f1ee662d115a714377cde86f"
       },
       {
         "path": "native/hip/src/public_runtime_internal.hpp",
-        "sha256": "971903c70f4e28291162804fc5350b1816d7d6ea68431afc13f687c884eff17c"
+        "sha256": "db65482614c7a856e0096466d9b86dcb9df3d5a4b6dd55cd585f5a599faa7a93"
       },
       {
         "path": "native/hip/src/rmsnorm_api.cpp",
@@ -87,7 +87,7 @@
         "sha256": "d4aaae93cd08e18f6725f2a82e7c7f69bd17e5b3446dd2fb2dab81f5e8a932eb"
       }
     ],
-    "source_set_sha256": "27a8bfe4ab9af70d75ba25297c9f31c86d6028dc12defc88ab4c0ef264410fd7"
+    "source_set_sha256": "3bcb2a485858664db7b6629bc2587a29e8611f3dda903e2f4f4cd3eeb948e7c3"
   },
   "public_abi_symbols": [
     "sllm_backend_probe",
