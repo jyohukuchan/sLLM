@@ -1,6 +1,7 @@
 name: h3-rmsnorm-compile-only (non-required)
 
 on:
+  pull_request:
   push:
     branches: [main]
   workflow_dispatch:

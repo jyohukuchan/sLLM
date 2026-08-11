@@ -44,7 +44,11 @@ H3_RMSNORM_SCHEMA_FILES = {
 H3_RMSNORM_MATRIX = "ci/matrix/rmsnorm-h3-compile-v1.json"
 H3_RMSNORM_WORKFLOW_PATH = ".github/workflows/rmsnorm-h3-compile.yml"
 H3_RMSNORM_WORKFLOW_NAME = "h3-rmsnorm-compile-only (non-required)"
-H3_RMSNORM_WORKFLOW_TRIGGER = {"push": {"branches": ["main"]}, "workflow_dispatch": None}
+H3_RMSNORM_WORKFLOW_TRIGGER = {
+    "pull_request": None,
+    "push": {"branches": ["main"]},
+    "workflow_dispatch": None,
+}
 SEMANTIC_G1_WORKFLOW_PATH = ".github/workflows/semantic-rmsnorm-g1.yml"
 SEMANTIC_G1_WORKFLOW_NAME = "semantic-rmsnorm-g1"
 SEMANTIC_G1_WORKFLOW_SHA256 = "a1c0cc85334445c14c15b5be43e979f587a4f2bd8cb8b53690603b65939770fc"
