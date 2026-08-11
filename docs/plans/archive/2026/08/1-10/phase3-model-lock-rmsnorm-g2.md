@@ -5,13 +5,13 @@
 - 作成日: 2026-08-04
 - 状態: complete
 - 対象期間: Phase 3 Stage A
-- 上位計画: [Phase 3 Qwen3.5-4B BF16 text生成計画](../../../../active/2026/08/1-10/phase3-qwen35-4b-bf16.md)
+- 上位計画: [Phase 3 Qwen3.5-4B BF16 text生成計画](../../../../archive/2026/08/1-10/phase3-qwen35-4b-bf16.md)
 - CI正本: [CI・テスト方針](../../../../active/2026/08/1-10/ci-test-strategy.md)
 - model固定正本: [model lock](../../../../../models/model-lock.md)
 
 ## 目的
 
-Phase 2で完成したmodel-free G1を土台に、Qwen/Qwen3.5-4Bの固定revisionへ結び付いた最初のBF16数値経路を実装する。到達点は、完全なmodel lockから実weight sliceを抽出し、Rustのsemantic opからpublic HIP backendを通してRMSNormを実行し、独立したNumPy oracle、canonical `gfx1030`/`gfx1201`のsemantic G1とG2、短いP0 smokeで正しさと実行経路を証明することである。これは[Phase 3全体計画](../../../../active/2026/08/1-10/phase3-qwen35-4b-bf16.md)のStage Aであり、Phase 3自体の完了点ではない。
+Phase 2で完成したmodel-free G1を土台に、Qwen/Qwen3.5-4Bの固定revisionへ結び付いた最初のBF16数値経路を実装する。到達点は、完全なmodel lockから実weight sliceを抽出し、Rustのsemantic opからpublic HIP backendを通してRMSNormを実行し、独立したNumPy oracle、canonical `gfx1030`/`gfx1201`のsemantic G1とG2、短いP0 smokeで正しさと実行経路を証明することである。これは[Phase 3全体計画](../../../../archive/2026/08/1-10/phase3-qwen35-4b-bf16.md)のStage Aであり、Phase 3自体の完了点ではない。
 
 この計画は、モデル全体の文章生成を完成させる計画ではない。attention、MLP、KV/state、prefill/decode、tokenizer実行、CLI生成、G3は、最初のmodel-bound数値経路が安定した後に別計画で追加する。
 

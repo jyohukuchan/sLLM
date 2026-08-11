@@ -3,10 +3,10 @@
 ## 状態
 
 - 作成日: 2026-08-04
-- 状態: active
+- 状態: completed（archive済み）
 - 上位計画: [main plan](../../../../main-plan.md)
 - Stage A子計画: [model lock・RMSNorm・G2（完了・archive）](../../../../archive/2026/08/1-10/phase3-model-lock-rmsnorm-g2.md)
-- CI正本: [CI・テスト方針](ci-test-strategy.md)
+- CI正本: [CI・テスト方針](../../../../active/2026/08/1-10/ci-test-strategy.md)
 
 ## 現行方針（2026-08-10以降）
 
@@ -331,7 +331,16 @@ release整形で変更されたHIP/C++ sourceとsource-closure matrixをsemantic
 
 final G3はruntime loader path `/opt/rocm/lib`を明示し、canonical両GPUを直列に各6 case実行した。attempt 1はloader path未指定のためGPU dispatch前にexit 127となり、空rawとFAIL manifestを保持して採用しない。attempt 2の12 manifestは全てHIP、exact target、fallbackなし、golden token/stop一致、timeoutなし、実行前後health/process cleanup PASSで、aggregateは12/12 row、6 reviewed case、48 audit比較、0 mismatchをPASSした。matrix SHA-256は`b0e3bc7d31cf8084bb8e3e5c66767353eb5e75992b72a4edd977e97656184f39`、aggregate SHA-256は`00321368b363f75f9140cf6eb2c7c9e94f6fe47a14688ad86097f229d93e5a2f`である。
 
-累積release reviewはgeneration/dispatchのcorrectness/security blocker 0件、attempt 2およびsemantic/buildとtooling identity分離に指摘なしだった。一方、local host reportがPython 3.12.3で正本の3.12.10 tupleと異なる点をrelease-evidence High 1件とした。offline cacheからhash固定13 packageを同期したPython 3.12.10 venvとdetached clean `2c859a57`でstrict H0を2回実行したが、両方とも同じ3 commandが2 GiB RSS上限を超え、337/340 FAILした。attempt 2のpeakはclippy 3.67 GiB、MSRV 2.31 GiB、dependency validator 3.30 GiBで、残り337件はPASSした。2回rejectのreplan ruleに従い追加verification/reviewを停止する。Phase 3の機能実装、format、host local-development、exact build、G3 integrationは完了したが、release/pushと計画archiveはH0 resource contractのreplanまで保留する。
+累積release reviewはgeneration/dispatchのcorrectness/security blocker 0件、attempt 2およびsemantic/buildとtooling identity分離に指摘なしだった。一方、local host reportがPython 3.12.3で正本の3.12.10 tupleと異なる点をrelease-evidence High 1件とした。offline cacheからhash固定13 packageを同期したPython 3.12.10 venvとdetached clean `2c859a57`でstrict H0を2回実行したが、両方とも同じ3 commandが2 GiB RSS上限を超え、337/340 FAILした。attempt 2のpeakはclippy 3.67 GiB、MSRV 2.31 GiB、dependency validator 3.30 GiBで、残り337件はPASSした。これは旧attemptの失敗とreplanを記録する履歴であり、後続のstrict tupleとfocused reviewによりrelease-evidence findingは解決済みで、Phase 3をblockしない。
+
+## Phase 3完了記録（2026-08-11）
+
+Phase 3は、host evidence/tooling identityとsemantic/build identityを分離した次のmappingで完了した。
+
+- host evidence/tooling candidateはcommit `e3def2dffd018c0b8df41e5e1d8940270060182a`、tree `f284b329e9252167182769311d1a64c2c7254625`。先行release candidateとの差分は、H0 clippy、MSRV check、dependency cargo checkの各Cargo commandへの明示`--jobs 1`とexact contract testsだけであり、推論source/build inputs、model lock、GPU artifact、G3 controller/matrix意味論、2 GiB gateは不変である。focused independent reviewは`PASS/no findings`で、Python static、focused tests 7/7と18/18、diff check、Cargo option placement、H0 limitを確認した。
+- clean detached pinned Python 3.12.10 strict evidenceは、同じreviewed/tested/workflow SHA `e3def2dffd018c0b8df41e5e1d8940270060182a`、run-id `phase3-release-e3def2df`、attempt 1である。H0は`PASS` 340/340、failed/skipped 0、343.417s、row peak 507,998,208 bytes（変更なしの2,147,483,648-byte gate未満）で、clippy 437,243,904、MSRV 401,158,144、dependency validator cargo check 439,119,872 bytes、report SHA-256 `8902d167cceb17eb38c5b5c59d39276b459678f6b0bf5584f4e26a6ab3f7efad`。H1は`PASS` collected 344/selected 312/pass 312/deselected 32、failed/skipped 0、report SHA-256 `327d7e03c141671a4c209ba478ceb6da3612a2baffcddedfeefb034cea54aa96`。H2は`PASS` collected 42/selected 35/pass 35/deselected 7、failed/skipped 0、report SHA-256 `2150963dd5a53a4948cabf316ebd9994729f524ede2fbb4b03becbb533a51ef9`。
+- strict aggregateは`PASS`、errors/warnings 0、matrix manifest SHA-256 `c528256c36a02d31a0770756d54d2d3b4c84dac36100e47f6c2200ad4a498ee4`、aggregate SHA-256 `609800e9cf432ece8ce8096c5fa6409013fbfc5c5aa0ba2ea38cc7110fa111b4`。既存release evidenceは、semantic/build commit `2c859a579007c388d956e46905ef71fb5a9d5881`、tree `1fb63550fe2d4405a97a00ba28e2bcb1dfc75f14`、exact CLI binary SHA-256 `gfx1030=360154b9f43c7be7db26676cd6635b3a33da450275752076779f3cba7adf11a1`・`gfx1201=faafe84bc320b413661214393abea41a107a8893ddb1cf6dcdcd34247410868a`、G3 tooling commit `b74bf2d10330d9c0c5ceae46b84a9716b40df5ad`、G3 matrix SHA-256 `b0e3bc7d31cf8084bb8e3e5c66767353eb5e75992b72a4edd977e97656184f39`、aggregate SHA-256 `00321368b363f75f9140cf6eb2c7c9e94f6fe47a14688ad86097f229d93e5a2f`である。canonical V620/R9700のattempt 2は12/12 PASS、six reviewed cases、48 comparisons、zero mismatches、exact HIP/no fallback/health/cleanup PASSであり、e3def2dfではGPU rerunを実施しておらず、主張もしない。
+- 累積release reviewのcorrectness/security implementation blockerは0件で、残ったhost Python/resource evidence findingはこのstrict tupleとfocused reviewで解決した。別の累積reviewは要求せず、H3 required promotionはnonblocking follow-upとしてPhase 3完了を阻害しない。Phase 3固有のdependency/MSRV、G3 golden、D2 full-provisioning/VRAMの未解決記載はこのevidenceで解消し、`ModelLock`/`VerifiedCache`のopaque API移行と追加op/shape coverageは将来課題として残す。
 
 ## Verification lanes
 
@@ -351,11 +360,8 @@ final G3はruntime loader path `/opt/rocm/lib`を明示し、canonical両GPUを�
 
 ## 未解決事項
 
-- `tokenizers =0.21.4`のsemver解決結果をroot lockへ固定したときの全transitive dependency checksum/licenseとRust 1.85 offline build evidence。
 - `ModelLock`と`VerifiedCache`の公開fingerprint fieldをcallerが書換えられる既存core APIを、互換性を整理した独立follow-upでopaqueな内部verified identityへ移行する。B3では一致をmutable labelの整合確認として扱い、暗号学的なlock/cache結合やfull-model provenanceを主張しない。
-- full-model G3 golden token sequenceの独立確定方法。
-- model実shapeを含むop別G2 case-setとtolerance。
-- 両canonical hostのVRAM budgetとfull model peak memory。
+- Phase 3完了後の追加op・shape coverageと、それに伴う数値tolerance/performance thresholdの拡張。
 
 ## 完了後
 

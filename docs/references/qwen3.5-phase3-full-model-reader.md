@@ -455,4 +455,4 @@ API handoffの境界は、Rustのtyped execution plan/runtimeから、versioned 
 
 G3 goldenはstop tokenから逆算せず、固定model lock、同一candidate、exact target、全dispatch、fallbackなし、token IDs、stop reason、health、cleanupを含む独立evidenceとして確定する。
 
-[Stage A reader記録](qwen3.5-phase3-reader.md) / [Phase 3全体計画](../plans/active/2026/08/1-10/phase3-qwen35-4b-bf16.md)
+[Stage A reader記録](qwen3.5-phase3-reader.md) / [Phase 3全体計画](../plans/archive/2026/08/1-10/phase3-qwen35-4b-bf16.md)

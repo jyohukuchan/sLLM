@@ -22,7 +22,7 @@
 - baseline execute設計を、leading dimension flatten、prepared plan再利用・同一plan in-flight 1件、generic completion再利用、nonfinite payloadのIEEE伝播、`N <= 4096`、wave32・256 threads、additive execute/dispatch ABI、専用RMSNorm H3 artifactとして固定した。
 - BF16出力の初期acceptance budgetを`tolerance_id=rmsnorm-bf16-f32-output-v1`、`atol=0.0078125`、`rtol=0.015625`としてGPU結果の前に固定し、finite値の複合誤差比較とNaN/Inf classification比較、同一candidateでの事後拡大禁止を決定した。
 - generated-token停止policyをmodel lockへ追加し、Qwen lock fingerprintを`sha256:32265444b7cdd2a00e4e4e3e6aa8375a05acf6cddfcb9ffc348f54f67a7cd935`へ更新した。停止policy導入前の`sha256:89ba8a6b2e1b7c0324090ddf15ce0e673ff4c3dc242c4127690d490056d8efd1`は過去candidateのidentityとして保持し、現行runtime/evidenceへ混在させない。
-- この計画をPhase 3全体の完了点にはせず、full model、CLI text生成、G3までを含む[Phase 3全体計画](../../../../plans/active/2026/08/1-10/phase3-qwen35-4b-bf16.md)のStage Aへ位置付けた。
+- この計画をPhase 3全体の完了点にはせず、full model、CLI text生成、G3までを含む[Phase 3全体計画](../../../../plans/archive/2026/08/1-10/phase3-qwen35-4b-bf16.md)のStage Aへ位置付けた。
 
 ## 2026-08-07
 
