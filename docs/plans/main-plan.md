@@ -264,23 +264,27 @@
    - visionとMTPは含めない。
    - 実装と同時にG1 kernel/ABI、G2 model slice、G3 end-to-endを追加する。
 4. Qwen3.5-2B、9Bでも同一実装が動作することを確認する。
-5. OpenAI-compatible Chat Completions profile v1を実装する。
-6. CI/CDをnightly、release、compatibility、performanceへ拡張する。
-7. BF16を最適化する。
+5. エンジンレベルの性能ベンチマーク／ベースラインを取得する。
+   - ダイレクトなエンジンでprefill/TTFT、decode TPOT/token/s、end-to-end latency、peak VRAMを測定する。
+   - model-resident lifecycleとrequest-local stateを分離し、model-resident lifecycleは再利用する。
+   - OpenAI-compatible API実装後はservice/API overheadも追加測定する。
+6. OpenAI-compatible Chat Completions profile v1を実装する。
+7. CI/CDをnightly、release、compatibility、performanceへ拡張する。
+8. BF16を最適化する。
    - RDNA2。
    - RDNA4。
-8. model本体のFP8 W8A8に対応する。
+9. model本体のFP8 W8A8に対応する。
    - RDNA4。
    - RDNA2。
-9. FP8/BF16実装をCDNA3へ移植する。
-10. MI300X単体でCDNA3実機確認を行う。
-11. google/gemma-4-12Bへ対応する。
-12. Weight NVFP4へ対応する。
-13. KV cache FP8/NVFP4へ対応する。
-14. MTP、visionへ対応する。
-15. Gemma4またはQwen3.5のMoEへ対応する。
-16. 残りの初期バージョン機能を実装する。
-17. 人間がREADMEを整備し、発表する。
+10. FP8/BF16実装をCDNA3へ移植する。
+11. MI300X単体でCDNA3実機確認を行う。
+12. google/gemma-4-12Bへ対応する。
+13. Weight NVFP4へ対応する。
+14. KV cache FP8/NVFP4へ対応する。
+15. MTP、visionへ対応する。
+16. Gemma4またはQwen3.5のMoEへ対応する。
+17. 残りの初期バージョン機能を実装する。
+18. 人間がREADMEを整備し、発表する。
 
 ## 当面のPhase 1概要
 
