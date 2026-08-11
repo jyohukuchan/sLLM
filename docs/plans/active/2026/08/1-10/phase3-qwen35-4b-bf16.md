@@ -319,6 +319,8 @@ E1は8〜14時間を予測し、E0 production pathをexact target別にbuildし�
 
 E1 dirty smokeの初回はGPU前に、tokenizer base vocabulary 248,044とLM-head/model capacity 248,320の誤った等値比較を検出した。実assetはadded token 26個を含むID span 248,070で、残り250 rowはmodel outputの予約領域である。frontend contractを、全tokenizer ID spanがlocked model capacity以下であることを検査し、snapshotはmodel capacityを報告する意味へ修正した。固定asset hash、special/EOS forward/reverse identity、stop ID検査は維持する。修正後、canonical V620で`Hello` input `[9419]`からmax 1は`[220]`、max 2はprefill＋1 decodeで`[220,220]`を生成し、R9700のmax 2も同一token/stop reasonとなった。V620はVRAM 16→8,468→16 MiB、R9700は257→8,725→257 MiB、fallbackなし、cleanup 0である。これはdirty focused smokeで、修正commit固定後に再実行してE1を閉じる。
 
+E1 candidateはcommit `a7abc5a3eeef895ec49a98123337a617bd74f554`、tree `a766951e784520b22180ab017643140d0f7f727d`である。workspace/all-target check、CLI 11件、frontend 48件、affected clippy、dependency closure、format/diffをPASSした。exact CLI SHA-256は`gfx1030=9790a55184131cb5d743542f73d85c2b9c9c4aadf3b8a40fc689ab88183263c2`、`gfx1201=36c0f3f3b2b8914d332f4c7b52d3dd96709429b1be5f4aa55e5660fb4295ce6a`である。clean `Hello`/max 2は両targetでinput `[9419]`、generated/visible `[220,220]`、decode input `[220]`、`max_new_tokens` stopが一致し、V620 7.394秒、R9700 6.366秒、fallbackなし、cleanup 0、実行後全GPU processなしだった。clean report SHA-256は`gfx1030=982e7af1c8cbdf50146934d3c2db0451b810e49c268a2cb9de26175889a4a3fb`、`gfx1201=16889ecaf64b63375126809b145f81e316968cec9358ac67f3698e972370344b`である。E1を完了し、次はE2 G3 schema/golden/fixed case-setである。
+
 ## Verification lanes
 
 - docs-onlyはMarkdown、link、consistencyだけを確認し、closeoutを作らない。semantic/build identityが不変でmappingが明示される場合はGPU evidenceを再利用できる。
