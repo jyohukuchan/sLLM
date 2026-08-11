@@ -769,14 +769,15 @@ def inspect_g1_runtime_artifact(
     artifact_snapshot = _artifact_snapshot(artifact_path, "G1 final staged executable")
     try:
         tools = {name: Path(path) for name, path in EXPECTED_INSPECTOR_TOOLS.items()}
-        for name, path in tools.items():
-            try:
-                resolved_path = path.resolve(strict=True)
-                resolved_path.relative_to(Path("/opt/rocm"))
-            except (OSError, ValueError):
-                raise ContractError(f"pinned G1 inspector is missing or outside /opt/rocm: {name}")
-            if not path.is_file() or not os.access(path, os.X_OK):
-                raise ContractError(f"pinned G1 inspector is missing or not executable: {name}")
+        if tool_runner is None:
+            for name, path in tools.items():
+                try:
+                    resolved_path = path.resolve(strict=True)
+                    resolved_path.relative_to(Path("/opt/rocm"))
+                except (OSError, ValueError):
+                    raise ContractError(f"pinned G1 inspector is missing or outside /opt/rocm: {name}")
+                if not path.is_file() or not os.access(path, os.X_OK):
+                    raise ContractError(f"pinned G1 inspector is missing or not executable: {name}")
 
         host_code, host_stdout, host_err = _inspection_tool_result(
             [str(tools["llvm_readobj"]), "--file-headers", "--sections", str(artifact_path)],

@@ -40,6 +40,8 @@ jobs:
         run: |
           rustup toolchain install 1.97.1 --profile minimal --component rustfmt --component clippy
           rustup toolchain install 1.85.0 --profile minimal
+      - name: Prefetch locked Rust dependencies
+        run: cargo +1.97.1 fetch --locked
       - name: Verify clean checkout after setup
         run: test -z "$(git status --porcelain=v1 --untracked-files=all)"
       - name: Run h0 host suite
@@ -87,6 +89,8 @@ jobs:
           -r ci/requirements-host.txt
       - name: Install Rust development toolchain
         run: rustup toolchain install 1.97.1 --profile minimal
+      - name: Prefetch locked Rust dependencies
+        run: cargo +1.97.1 fetch --locked
       - name: Verify clean checkout after setup
         run: test -z "$(git status --porcelain=v1 --untracked-files=all)"
       - name: Run h1 host suite

@@ -4,6 +4,8 @@
 
 namespace {
 
+using Bf16Input = const uint16_t *;
+
 __device__ __forceinline__ uint16_t float_bits_to_f16(const uint32_t bits) {
   const uint32_t sign = (bits >> 16U) & UINT32_C(0x8000);
   const uint32_t exponent = (bits >> 23U) & UINT32_C(0xff);
@@ -60,10 +62,8 @@ __device__ __forceinline__ uint16_t bf16_to_f16(const uint16_t value) {
 
 extern "C" __global__ __launch_bounds__(
     SLLM_HIP_KV_WORKGROUP_SIZE,
-    1) void sllm_kv_state_bf16_to_f16_transpose_v1(const uint16_t *const
-                                                       key_input,
-                                                   const uint16_t *const
-                                                       value_input,
+    1) void sllm_kv_state_bf16_to_f16_transpose_v1(Bf16Input key_input,
+                                                   Bf16Input value_input,
                                                    uint16_t *const key_output,
                                                    uint16_t *const value_output,
                                                    const uint32_t token_count,

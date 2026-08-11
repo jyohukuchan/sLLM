@@ -29,6 +29,43 @@ TREE = "b" * 40
 
 
 class Phase3StageAEvidencePlanTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._g1_environment_patch = mock.patch.object(
+            planner,
+            "_g1_environment",
+            side_effect=self._portable_g1_environment,
+        )
+        self._g1_environment_patch.start()
+        self.addCleanup(self._g1_environment_patch.stop)
+
+    @staticmethod
+    def _portable_g1_environment(
+        target: str,
+        layout: object,
+    ) -> dict[str, str]:
+        return {
+            "PATH": "/usr/bin:/bin",
+            "HOME": "/tmp/sllm-host-test-home",
+            "LC_ALL": "C",
+            "LANG": "C",
+            "RUSTUP_HOME": "/tmp/sllm-host-test-home/.rustup",
+            "CARGO_HOME": "/tmp/sllm-host-test-home/.cargo",
+            "RUSTUP_TOOLCHAIN": "1.97.1",
+            "RUSTC": "/tmp/sllm-host-test-home/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/rustc",
+            "CXX": "/usr/bin/c++",
+            "ROCM_PATH": "/opt/rocm",
+            "HIP_PATH": "/opt/rocm",
+            "SLLM_HIP_COMPILER": "/opt/rocm/bin/amdclang++",
+            "CMAKE_HIP_ARCHITECTURES": target,
+            "SLLM_HIP_CODEGEN_FEATURES": "co_v6,wave32,xnack=unsupported,sramecc=unsupported,generic_processor_version=0",
+            "SLLM_ENABLE_HIP_RUNTIME": "0",
+            "SLLM_ENABLE_PUBLIC_HIP_RUNTIME": "1",
+            "SLLM_ENABLE_HIP_COMPILE_PROBE": "0",
+            "SLLM_SEMANTIC_G1_AUTHORITY": "1",
+            "CARGO_TARGET_DIR": str(layout.cargo_target_dir),
+            "SLLM_SEMANTIC_G1_NATIVE_HIP_BUILD_DIR": str(layout.native_hip_build_dir),
+        }
+
     def identity(self, _repo: Path, expected: dict[str, object]) -> dict[str, object]:
         return planner.api_only_identity_verifier(_repo, expected)
 

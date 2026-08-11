@@ -2485,7 +2485,9 @@ Sections [
                 "/tmp/private-build/rmsnorm-kernel-" + target + ".o",
                 "/tmp/private-build/rmsnorm-api-" + target + ".o",
             ])
-            self.assertNotIn("native/hip/src/rmsnorm_api.cpp", commands[-1])
+            self.assertNotIn(str(ROOT / "native/hip/src/rmsnorm_api.cpp"), commands[-1])
+            self.assertIn(str(ROOT / "native/hip/src/embedding_api.cpp"), commands[-1])
+            self.assertIn(str(ROOT / "native/hip/src/linear_attention_kernel.hip.cpp"), commands[-1])
             self.assertFalse(any("./" in token or "--run" in token for command in commands for token in command))
 
 

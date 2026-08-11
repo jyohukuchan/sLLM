@@ -15,6 +15,7 @@ import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "ci/tools"))
@@ -406,6 +407,22 @@ class G1ContractTests(unittest.TestCase):
                     tool_runner=MutatingToolRunner(fixture.target),
                 )
             self.assertNotEqual(fixture.artifact.read_bytes(), before)
+        finally:
+            fixture.close()
+
+    def test_production_inspection_requires_real_pinned_tools(self) -> None:
+        fixture = G1Fixture("gfx1030")
+        try:
+            missing = "/opt/rocm/definitely-missing/llvm-readobj"
+            with mock.patch.dict(
+                g1_contracts.EXPECTED_INSPECTOR_TOOLS,
+                {"llvm_readobj": missing},
+            ):
+                with self.assertRaisesRegex(
+                    ContractError,
+                    "pinned G1 inspector is missing or outside /opt/rocm",
+                ):
+                    inspect_g1_runtime_artifact(fixture.artifact, fixture.target)
         finally:
             fixture.close()
 

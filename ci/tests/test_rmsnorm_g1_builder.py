@@ -8,6 +8,7 @@ import hashlib
 import io
 import json
 import os
+import shutil
 import socket
 import signal
 import struct
@@ -125,6 +126,9 @@ class SemanticG1BuilderTests(unittest.TestCase):
     def _run_cmake_semantic_discovery(
         root: Path, trace: Path, descriptor: int, descriptor_text: str
     ) -> subprocess.CompletedProcess[bytes]:
+        cmake = shutil.which("cmake")
+        if cmake is None:
+            raise AssertionError("host test requires cmake on PATH")
         client_path = f"/proc/self/fd/{descriptor_text}"
         environment = {
             **os.environ,
@@ -138,7 +142,7 @@ class SemanticG1BuilderTests(unittest.TestCase):
         }
         return subprocess.run(
             [
-                "/usr/bin/cmake", "-S", str(ROOT / "native/hip"), "-B", str(root / "cmake-build"),
+                cmake, "-S", str(ROOT / "native/hip"), "-B", str(root / "cmake-build"),
                 "-G", "Unix Makefiles", "-DSLLM_ENABLE_HIP_COMPILE_PROBE=OFF",
                 "-DSLLM_ENABLE_HIP_RUNTIME=OFF", "-DSLLM_ENABLE_PUBLIC_HIP_RUNTIME=ON",
                 "-DSLLM_ENABLE_PUBLIC_RUNTIME_HOST_TEST=OFF", "-DSLLM_SEMANTIC_G1_AUTHORITY=ON",

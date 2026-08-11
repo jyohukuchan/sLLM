@@ -51,12 +51,61 @@ EXPECTED_SOURCE_PATHS = (
     "native/hip/src/public_runtime.hip.cpp",
     "native/hip/src/public_runtime_internal.hpp",
 )
-EXPECTED_DIRECT_COMPILE_SOURCE_PATHS = EXPECTED_SOURCE_PATHS + (
+PUBLIC_RUNTIME_API_SOURCE_PATHS = (
+    "native/hip/src/argmax_api.cpp",
+    "native/hip/src/attention_preprocess_api.cpp",
+    "native/hip/src/causal_attention_api.cpp",
+    "native/hip/src/elementwise_api.cpp",
+    "native/hip/src/embedding_api.cpp",
+    "native/hip/src/kv_state_api.cpp",
+    "native/hip/src/linear_attention_api.cpp",
+    "native/hip/src/matmul_api.cpp",
     "native/hip/src/rmsnorm_api.cpp",
-    "native/hip/src/rmsnorm_api.hpp",
+)
+PUBLIC_RUNTIME_KERNEL_SOURCE_PATHS = (
+    "native/hip/src/argmax_kernel.hip.cpp",
+    "native/hip/src/attention_preprocess_kernel.hip.cpp",
+    "native/hip/src/causal_attention_kernel.hip.cpp",
+    "native/hip/src/elementwise_kernel.hip.cpp",
+    "native/hip/src/embedding_kernel.hip.cpp",
+    "native/hip/src/kv_state_kernel.hip.cpp",
+    "native/hip/src/linear_attention_kernel.hip.cpp",
+    "native/hip/src/matmul_kernel.hip.cpp",
     "native/hip/src/rmsnorm_kernel.hip.cpp",
+)
+PUBLIC_RUNTIME_DIRECT_INCLUDE_PATHS = (
+    "native/hip/src/argmax_api.hpp",
+    "native/hip/src/argmax_kernel_internal.hpp",
+    "native/hip/src/argmax_runtime.inc",
+    "native/hip/src/attention_preprocess_api.hpp",
+    "native/hip/src/attention_preprocess_kernel_internal.hpp",
+    "native/hip/src/attention_preprocess_runtime.inc",
+    "native/hip/src/causal_attention_api.hpp",
+    "native/hip/src/causal_attention_kernel_internal.hpp",
+    "native/hip/src/causal_attention_runtime.inc",
+    "native/hip/src/elementwise_api.hpp",
+    "native/hip/src/elementwise_kernel_internal.hpp",
+    "native/hip/src/embedding_api.hpp",
+    "native/hip/src/embedding_kernel_internal.hpp",
+    "native/hip/src/embedding_runtime.inc",
+    "native/hip/src/evidence_abi.h",
+    "native/hip/src/kv_state_api.hpp",
+    "native/hip/src/kv_state_kernel_internal.hpp",
+    "native/hip/src/linear_attention_api.hpp",
+    "native/hip/src/linear_attention_kernel_internal.hpp",
+    "native/hip/src/linear_attention_runtime.inc",
+    "native/hip/src/matmul_api.hpp",
+    "native/hip/src/matmul_kernel_internal.hpp",
+    "native/hip/src/matmul_runtime.inc",
+    "native/hip/src/rmsnorm_api.hpp",
     "native/hip/src/rmsnorm_kernel_internal.hpp",
 )
+EXPECTED_DIRECT_COMPILE_SOURCE_PATHS = tuple(sorted(set(
+    EXPECTED_SOURCE_PATHS
+    + PUBLIC_RUNTIME_API_SOURCE_PATHS
+    + PUBLIC_RUNTIME_KERNEL_SOURCE_PATHS
+    + PUBLIC_RUNTIME_DIRECT_INCLUDE_PATHS
+)))
 EXPECTED_OUTPUT = {"root_prefix": "sllm-h3-public-runtime-", "directory_pattern": "h3-public-gfx{target}", "build_directory_pattern": "build", "probe_object_pattern": "hip-compile-probe-{target}.o", "public_runtime_object_pattern": "public-runtime-{target}.o", "rmsnorm_kernel_object_pattern": "rmsnorm-kernel-{target}.o", "rmsnorm_api_object_pattern": "rmsnorm-api-{target}.o", "host_elf_pattern": "public-runtime-{target}.elf", "probe_fatbin_pattern": "probe-{target}.fatbin", "device_object_pattern": "device-code-object-{target}.elf"}
 _AT_EMPTY_PATH = 0x1000
 _DIRECTORY_FLAGS = (
@@ -72,13 +121,41 @@ _TMPFILE_FLAGS = (
     | getattr(os, "O_NOFOLLOW", 0)
     | getattr(os, "O_CLOEXEC", 0)
 )
-PUBLIC_SYMBOLS = (
+PUBLIC_SYMBOLS = tuple(sorted({
+    "sllm_argmax_execute", "sllm_argmax_plan_release", "sllm_argmax_prepare",
+    "sllm_attention_preprocess_execute", "sllm_attention_preprocess_plan_release", "sllm_attention_preprocess_prepare",
     "sllm_backend_probe", "sllm_buffer_copy_d2h", "sllm_buffer_copy_h2d", "sllm_buffer_create",
-    "sllm_buffer_release", "sllm_buffer_size", "sllm_completion_query", "sllm_completion_read",
-    "sllm_completion_release", "sllm_completion_timing", "sllm_completion_wait", "sllm_context_create", "sllm_context_probe",
-    "sllm_context_release", "sllm_device_count", "sllm_device_query", "sllm_event_create",
-    "sllm_event_release", "sllm_get_abi_version", "sllm_query_version", "sllm_queue_create",
-    "sllm_queue_release", "sllm_rmsnorm_execute", "sllm_rmsnorm_plan_release", "sllm_rmsnorm_prepare",
+    "sllm_buffer_release", "sllm_buffer_size", "sllm_causal_attention_execute",
+    "sllm_completion_query", "sllm_completion_read", "sllm_completion_release", "sllm_completion_timing",
+    "sllm_completion_wait", "sllm_context_create", "sllm_context_probe", "sllm_context_release",
+    "sllm_device_count", "sllm_device_query", "sllm_elementwise_execute", "sllm_elementwise_plan_release",
+    "sllm_elementwise_prepare", "sllm_embedding_execute", "sllm_embedding_plan_release", "sllm_embedding_prepare",
+    "sllm_event_create", "sllm_event_release", "sllm_get_abi_version", "sllm_kv_state_append",
+    "sllm_kv_state_append_cancel", "sllm_kv_state_create", "sllm_kv_state_query", "sllm_kv_state_release",
+    "sllm_kv_state_snapshot", "sllm_kv_view_query", "sllm_kv_view_release", "sllm_linear_attention_cancel",
+    "sllm_linear_attention_execute", "sllm_linear_attention_state_create", "sllm_linear_attention_state_query",
+    "sllm_linear_attention_state_release", "sllm_matmul_execute", "sllm_matmul_plan_release",
+    "sllm_matmul_prepare", "sllm_query_version", "sllm_queue_create", "sllm_queue_release",
+    "sllm_rmsnorm_execute", "sllm_rmsnorm_plan_release", "sllm_rmsnorm_prepare",
+}))
+KERNEL_SYMBOLS = (
+    "sllm_argmax_bf16_f32_v1",
+    "sllm_attention_preprocess_headwise_norm_rope_v1",
+    "sllm_elementwise_add_bf16_fp32_v1",
+    "sllm_elementwise_copy_bf16_v1",
+    "sllm_elementwise_sigmoid_mul_bf16_fp32_v1",
+    "sllm_elementwise_silu_mul_bf16_fp32_v1",
+    "sllm_embedding_gather_bf16_i32_v1",
+    "sllm_kv_state_bf16_to_f16_transpose_v1",
+    "sllm_linear_attention_causal_conv_silu_v1",
+    "sllm_linear_attention_recurrent_gated_norm_v1",
+    "sllm_matmul_bf16_fp32_v1",
+    "sllm_rmsnorm_baseline_wave32_v1",
+)
+INTERNAL_RUNTIME_SYMBOLS = ("sllm_hip_kv_view_readback",)
+CAUSAL_ATTENTION_DEVICE_STUB_SYMBOL = (
+    "_ZN28sllm_causal_attention_kernel12_GLOBAL__N_138"
+    "__device_stub__causal_attention_kernelEPKtS2_S2_Ptjmmm"
 )
 EXPECTED_HOST_HIP_UNDEFINED_SYMBOLS = (
     "__hipPopCallConfiguration",
@@ -99,6 +176,7 @@ EXPECTED_HOST_HIP_UNDEFINED_SYMBOLS = (
     "hipLaunchKernel",
     "hipMalloc",
     "hipMemcpyAsync",
+    "hipMemset",
     "hipSetDevice",
     "hipStreamCreateWithFlags",
     "hipStreamDestroy",
@@ -621,6 +699,12 @@ def expected_build_commands() -> list[list[str]]:
             "-unwindlib=libgcc", "-pthread", "-nostartfiles",
             "{build_dir}/hip-compile-probe-{target}.o", "{build_dir}/public-runtime-{target}.o",
             "{build_dir}/rmsnorm-kernel-{target}.o", "{build_dir}/rmsnorm-api-{target}.o",
+            "-D__HIP_ROCclr__=1", "-std=gnu++17", "-I", "{repo}/include", "-I", "{repo}/native/hip/src",
+            "-x", "c++",
+            *[f"{{repo}}/{path}" for path in PUBLIC_RUNTIME_API_SOURCE_PATHS if path != "native/hip/src/rmsnorm_api.cpp"],
+            "-x", "hip",
+            *[f"{{repo}}/{path}" for path in PUBLIC_RUNTIME_KERNEL_SOURCE_PATHS if path != "native/hip/src/rmsnorm_kernel.hip.cpp"],
+            "-x", "none",
             "-o", "{build_dir}/public-runtime-{target}.elf", "/opt/rocm/lib/libamdhip64.so",
         ],
     ]
@@ -2300,6 +2384,8 @@ def _bounded_symbol_diagnostic(names: list[str] | set[str] | tuple[str, ...], co
 def _require_host_symbols(output: str) -> list[str]:
     records = _symbol_records(output)
     expected_set = set(PUBLIC_SYMBOLS)
+    kernel_set = set(KERNEL_SYMBOLS)
+    internal_set = set(INTERNAL_RUNTIME_SYMBOLS)
     probe_name = "sllm_hip_compile_probe"
     kernel_name = "sllm_rmsnorm_baseline_wave32_v1"
     probe_records = [record for record in records if record["name"] == probe_name]
@@ -2310,25 +2396,25 @@ def _require_host_symbols(output: str) -> list[str]:
             for record in records
             if record["name"].startswith("sllm_")
             and record["name"] not in expected_set
-            and record["name"] not in {probe_name, kernel_name}
+            and record["name"] not in kernel_set
+            and record["name"] not in internal_set
+            and record["name"] != probe_name
         }
     )
     if unknown:
         raise RuntimeContractError(f"linked host ELF contains unknown sllm symbols: {_bounded_symbol_diagnostic(unknown)}")
     # amdclang++ emits these compiler-owned host entry shims whenever a HIP
-    # kernel is linked. They are not the forbidden public-runtime_stub
-    # translation unit: their names are bound one-to-one to the two audited
-    # HIP definitions. Every other symbol containing "stub" remains a hard
-    # failure, including any user/runtime stub object.
-    compiler_stub_symbols = {
-        f"__device_stub__{probe_name}",
-        f"__device_stub__{kernel_name}",
-    }
+    # kernel is linked. They are bound to the exact audited kernel closure and
+    # are not the forbidden public_runtime_stub translation unit. Every other
+    # symbol containing "stub" remains a hard failure.
+    compiler_stub_symbols = {f"__device_stub__{name}" for name in (probe_name, *KERNEL_SYMBOLS)}
+    compiler_stub_symbols.add(CAUSAL_ATTENTION_DEVICE_STUB_SYMBOL)
     stub_symbols = sorted(
         {
             record["name"]
             for record in records
-            if "stub" in record["name"].lower() and record["name"] not in compiler_stub_symbols
+            if "stub" in record["name"].lower()
+            and record["name"] not in compiler_stub_symbols
         }
     )
     if stub_symbols:

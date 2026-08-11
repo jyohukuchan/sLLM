@@ -156,18 +156,27 @@
       "additionalProperties": false,
       "required": ["canonical_order", "files", "source_set_sha256"],
       "properties": {
-        "canonical_order": {"type": "array", "minItems": 8, "maxItems": 8, "items": {"type": "string"}},
-        "files": {"type": "array", "minItems": 8, "maxItems": 8, "uniqueItems": true, "items": {"$ref": "#/$defs/source"}},
+        "canonical_order": {"type": "array", "minItems": 47, "maxItems": 47, "items": {"type": "string"}},
+        "files": {"type": "array", "minItems": 47, "maxItems": 47, "uniqueItems": true, "items": {"$ref": "#/$defs/source"}},
         "source_set_sha256": {"$ref": "#/$defs/sha256"}
       }
     },
     "public_abi_symbols": {"const": [
+      "sllm_argmax_execute", "sllm_argmax_plan_release", "sllm_argmax_prepare",
+      "sllm_attention_preprocess_execute", "sllm_attention_preprocess_plan_release", "sllm_attention_preprocess_prepare",
       "sllm_backend_probe", "sllm_buffer_copy_d2h", "sllm_buffer_copy_h2d", "sllm_buffer_create",
-      "sllm_buffer_release", "sllm_buffer_size", "sllm_completion_query", "sllm_completion_read",
-      "sllm_completion_release", "sllm_completion_timing", "sllm_completion_wait", "sllm_context_create", "sllm_context_probe",
-      "sllm_context_release", "sllm_device_count", "sllm_device_query", "sllm_event_create",
-      "sllm_event_release", "sllm_get_abi_version", "sllm_query_version", "sllm_queue_create",
-      "sllm_queue_release", "sllm_rmsnorm_execute", "sllm_rmsnorm_plan_release", "sllm_rmsnorm_prepare"
+      "sllm_buffer_release", "sllm_buffer_size", "sllm_causal_attention_execute", "sllm_completion_query",
+      "sllm_completion_read", "sllm_completion_release", "sllm_completion_timing", "sllm_completion_wait",
+      "sllm_context_create", "sllm_context_probe", "sllm_context_release", "sllm_device_count", "sllm_device_query",
+      "sllm_elementwise_execute", "sllm_elementwise_plan_release", "sllm_elementwise_prepare",
+      "sllm_embedding_execute", "sllm_embedding_plan_release", "sllm_embedding_prepare",
+      "sllm_event_create", "sllm_event_release", "sllm_get_abi_version", "sllm_kv_state_append",
+      "sllm_kv_state_append_cancel", "sllm_kv_state_create", "sllm_kv_state_query", "sllm_kv_state_release",
+      "sllm_kv_state_snapshot", "sllm_kv_view_query", "sllm_kv_view_release", "sllm_linear_attention_cancel",
+      "sllm_linear_attention_execute", "sllm_linear_attention_state_create", "sllm_linear_attention_state_query",
+      "sllm_linear_attention_state_release", "sllm_matmul_execute", "sllm_matmul_plan_release", "sllm_matmul_prepare",
+      "sllm_query_version", "sllm_queue_create", "sllm_queue_release", "sllm_rmsnorm_execute",
+      "sllm_rmsnorm_plan_release", "sllm_rmsnorm_prepare"
     ]},
     "targets": {"const": ["gfx1030", "gfx1201"]},
     "rows": {"type": "array", "minItems": 2, "maxItems": 2, "items": {"$ref": "#/$defs/row"}}
