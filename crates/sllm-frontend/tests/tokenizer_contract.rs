@@ -140,7 +140,7 @@ fn lock_bytes(
     let new_contract = r#"    "tokenizer_contract": {
       "files": ["chat_template.jinja", "tokenizer.json", "tokenizer_config.json"],
       "chat_template_path": "chat_template.jinja",
-      "vocab_size": 8,
+      "vocab_size": 12,
       "eos_token_id": 8,
       "special_token_ids": {"bos": 10, "eos": 8},
       "stop_identity": {
@@ -430,7 +430,7 @@ fn vocab_size_mismatch_is_rejected() {
         error,
         TokenizerError::VocabSizeMismatch {
             lock: 7,
-            tokenizer: 8
+            tokenizer: 12
         }
     ));
     drop(fixture);
@@ -674,7 +674,7 @@ fn contract_fixture_uses_non_power_of_two_and_boundary_ids() {
             .expect("fixture ID decodes");
         assert!(!decoded.is_empty());
     }
-    assert_eq!(fixture.lock.model.tokenizer_contract.vocab_size, 8);
+    assert_eq!(fixture.lock.model.tokenizer_contract.vocab_size, 12);
     assert_eq!(
         fixture.lock.model.tokenizer_contract.special_token_ids,
         BTreeMap::from([(String::from("bos"), 10), (String::from("eos"), 8)])

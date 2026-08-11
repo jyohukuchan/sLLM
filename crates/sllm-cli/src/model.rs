@@ -208,7 +208,7 @@ impl ModelFrontendBackend for ProductionBackend {
 
     fn tokenize(&self, text: &str) -> Result<Value, String> {
         let tokenizer = TokenizerFrontendV1::from_verified_cache(&self.lock, &self.cache)
-            .map_err(|_| "verified tokenizer could not be constructed".to_owned())?;
+            .map_err(|error| format!("verified tokenizer could not be constructed: {error}"))?;
         let ids = tokenizer
             .encode(text)
             .map_err(|_| "text could not be tokenized".to_owned())?;
@@ -230,7 +230,7 @@ impl ModelFrontendBackend for ProductionBackend {
 
     fn decode(&self, ids: &TokenIdsV1, mode: DecodeModeV1) -> Result<Value, String> {
         let tokenizer = TokenizerFrontendV1::from_verified_cache(&self.lock, &self.cache)
-            .map_err(|_| "verified tokenizer could not be constructed".to_owned())?;
+            .map_err(|error| format!("verified tokenizer could not be constructed: {error}"))?;
         let text = tokenizer
             .decode(ids, mode)
             .map_err(|_| "token IDs could not be decoded".to_owned())?;
@@ -240,7 +240,7 @@ impl ModelFrontendBackend for ProductionBackend {
     fn generate(&self, request: &GenerateRequest) -> Result<Value, String> {
         let started = Instant::now();
         let tokenizer = TokenizerFrontendV1::from_verified_cache(&self.lock, &self.cache)
-            .map_err(|_| "verified tokenizer could not be constructed".to_owned())?;
+            .map_err(|error| format!("verified tokenizer could not be constructed: {error}"))?;
         let (input_kind, rendered) = match &request.input {
             GenerationInput::Prompt(prompt) => ("prompt", prompt.clone()),
             GenerationInput::Messages { messages, options } => {

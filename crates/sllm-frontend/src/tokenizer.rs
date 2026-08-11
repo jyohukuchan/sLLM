@@ -97,6 +97,8 @@ impl EosIdentitySnapshotV1 {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TokenizerSnapshotV1 {
     fingerprint: String,
+    /// Model vocabulary capacity. The tokenizer may intentionally occupy only
+    /// a prefix because the LM head retains reserved output rows.
     vocab_size: u64,
     special_roles: Vec<SpecialTokenSnapshotV1>,
     config_eos: EosIdentitySnapshotV1,
@@ -244,9 +246,8 @@ impl fmt::Display for TokenizerError {
             Self::VocabSizeOverflow { .. } => {
                 formatter.write_str("tokenizer vocabulary size does not fit u64")
             }
-            Self::VocabSizeMismatch { .. } => {
-                formatter.write_str("tokenizer vocabulary size differs from the lock")
-            }
+            Self::VocabSizeMismatch { .. } => formatter
+                .write_str("tokenizer ID span exceeds the locked model vocabulary capacity"),
             Self::SpecialTokenIdMissing { .. } => {
                 formatter.write_str("typed special token ID is unknown")
             }
@@ -329,15 +330,25 @@ impl TokenizerFrontendV1 {
         validate_generation_stop_policy(lock.generation_stop_policy())?;
         let checked = CheckedContract::new(contract)?;
 
-        let tokenizer_vocab = tokenizer.get_vocab_size(false);
-        let tokenizer_vocab_u64 =
-            u64::try_from(tokenizer_vocab).map_err(|_| TokenizerError::VocabSizeOverflow {
-                value: tokenizer_vocab,
-            })?;
-        if tokenizer_vocab_u64 != contract.vocab_size {
+        // `get_vocab_size(false)` excludes added special tokens and therefore
+        // is not the model's LM-head vocabulary. Qwen also keeps reserved,
+        // currently unassigned output rows above every tokenizer ID. Validate
+        // the complete tokenizer ID span against that model capacity instead
+        // of requiring either count to be equal to the LM-head width.
+        let tokenizer_vocab = tokenizer.get_vocab(true);
+        let tokenizer_vocab_size = tokenizer.get_vocab_size(true);
+        if tokenizer_vocab.len() != tokenizer_vocab_size {
+            return Err(TokenizerError::InvalidTokenizer);
+        }
+        let tokenizer_vocab_span = tokenizer_vocab
+            .values()
+            .copied()
+            .max()
+            .map_or(0_u64, |id| u64::from(id) + 1);
+        if tokenizer_vocab_span > contract.vocab_size {
             return Err(TokenizerError::VocabSizeMismatch {
                 lock: contract.vocab_size,
-                tokenizer: tokenizer_vocab_u64,
+                tokenizer: tokenizer_vocab_span,
             });
         }
 
@@ -387,7 +398,7 @@ impl TokenizerFrontendV1 {
             // This is retained as a consistency label only. It does not make
             // the mutable core label a cryptographic lock binding.
             fingerprint: lock.fingerprint().to_owned(),
-            vocab_size: tokenizer_vocab_u64,
+            vocab_size: contract.vocab_size,
             special_roles,
             config_eos,
             tokenizer_eos,

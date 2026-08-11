@@ -317,6 +317,8 @@ E0 host draftは既存`sllm generate`へprompt/messages排他、exact `gfx1030`/
 
 E1は8〜14時間を予測し、E0 production pathをexact target別にbuildしてcanonical V620から最小full-model smokeを実行し、D1 lowering/runtimeの実機不具合を修正する。1 token以上、全dispatch HIP、fallbackなし、model/plan identity、bounded timeout、VRAM、cleanupを必須とし、V620でPASSするまでR9700へ広げない。E2は6〜10時間を予測し、G3 report/schema、artifact binding、golden確定手順、fixed ASCII/Unicode/boundary caseを実装し、同一immutable identityのcanonical両GPU一致、pre/post health、aggregate、最終reviewを取得する。E0/E1/E2の合計予測は18〜30時間で、同一failureの2回reject、1時間以上の機能進捗停止、各上端超過、または新しいHIP ABI/kernelが必要と判明した時点で当該単位を中断しreplanする。
 
+E1 dirty smokeの初回はGPU前に、tokenizer base vocabulary 248,044とLM-head/model capacity 248,320の誤った等値比較を検出した。実assetはadded token 26個を含むID span 248,070で、残り250 rowはmodel outputの予約領域である。frontend contractを、全tokenizer ID spanがlocked model capacity以下であることを検査し、snapshotはmodel capacityを報告する意味へ修正した。固定asset hash、special/EOS forward/reverse identity、stop ID検査は維持する。修正後、canonical V620で`Hello` input `[9419]`からmax 1は`[220]`、max 2はprefill＋1 decodeで`[220,220]`を生成し、R9700のmax 2も同一token/stop reasonとなった。V620はVRAM 16→8,468→16 MiB、R9700は257→8,725→257 MiB、fallbackなし、cleanup 0である。これはdirty focused smokeで、修正commit固定後に再実行してE1を閉じる。
+
 ## Verification lanes
 
 - docs-onlyはMarkdown、link、consistencyだけを確認し、closeoutを作らない。semantic/build identityが不変でmappingが明示される場合はGPU evidenceを再利用できる。

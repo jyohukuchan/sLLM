@@ -1,7 +1,7 @@
 {
   "fixture_version": "tokenizer-v1",
-  "consistency_label": "sha256:fcc69ae95304492562605590428d92c5a092a05c548f21ec12d3675be8700827",
-  "vocab_size": 8,
+  "consistency_label": "sha256:823468084d25ca4971aa86fdf5170540330d0805d2ba534a7db732b1dd1290fc",
+  "vocab_size": 12,
   "special_roles": [
     {"role": "bos", "token_id": 10, "content": "<|bos|>"},
     {"role": "eos", "token_id": 8, "content": "<|endoftext|>"}
