@@ -35,6 +35,55 @@ option(SLLM_SEMANTIC_G1_AUTHORITY
     OFF
 )
 
+option(SLLM_SEMANTIC_G1_DISCOVERY_TEST
+    "Configure-only host contract probe for semantic G1 compiler authority"
+    OFF
+)
+
+function(sllm_validate_semantic_g1_authority compiler_path)
+    if(NOT DEFINED ENV{SLLM_HIP_COMPILER_BROKER_CLIENT} OR
+       NOT "$ENV{SLLM_HIP_COMPILER_BROKER_CLIENT}" STREQUAL "${compiler_path}" OR
+       NOT compiler_path MATCHES "^/proc/self/fd/(3|[4-9]|[1-9][0-9]+)$" OR
+       NOT DEFINED ENV{SLLM_HIP_COMPILER_BROKER_CLIENT_FD} OR
+       NOT "$ENV{SLLM_HIP_COMPILER_BROKER_CLIENT_FD}" MATCHES "^(3|[4-9]|[1-9][0-9]+)$" OR
+       NOT compiler_path STREQUAL "/proc/self/fd/$ENV{SLLM_HIP_COMPILER_BROKER_CLIENT_FD}")
+        message(FATAL_ERROR "semantic G1 requires the exact authenticated compiler broker client")
+    endif()
+    if(NOT DEFINED ENV{SLLM_HIP_COMPILER_BROKER_SOCKET} OR
+       NOT "$ENV{SLLM_HIP_COMPILER_BROKER_SOCKET}" MATCHES "^/[^\n\r ]+$" OR
+       NOT DEFINED ENV{SLLM_HIP_COMPILER_BROKER_SESSION} OR
+       NOT DEFINED ENV{SLLM_HIP_COMPILER_BROKER_TOKEN})
+        message(FATAL_ERROR "semantic G1 compiler broker session is missing or malformed")
+    endif()
+    foreach(SLLM_SEMANTIC_G1_HEX_ENV
+            SLLM_HIP_COMPILER_BROKER_SESSION
+            SLLM_HIP_COMPILER_BROKER_TOKEN
+            SLLM_HIP_COMPILER_BROKER_CLIENT_SHA256)
+        if(NOT DEFINED ENV{${SLLM_SEMANTIC_G1_HEX_ENV}})
+            message(FATAL_ERROR "semantic G1 compiler broker identity is missing")
+        endif()
+        string(LENGTH "$ENV{${SLLM_SEMANTIC_G1_HEX_ENV}}" SLLM_SEMANTIC_G1_HEX_LENGTH)
+        if(NOT SLLM_SEMANTIC_G1_HEX_LENGTH EQUAL 64 OR
+           NOT "$ENV{${SLLM_SEMANTIC_G1_HEX_ENV}}" MATCHES "^[0-9a-f]+$")
+            message(FATAL_ERROR "semantic G1 compiler broker identity is malformed")
+        endif()
+    endforeach()
+endfunction()
+
+if(SLLM_SEMANTIC_G1_DISCOVERY_TEST)
+    if(NOT SLLM_SEMANTIC_G1_AUTHORITY OR
+       NOT SLLM_ENABLE_PUBLIC_HIP_RUNTIME OR
+       SLLM_ENABLE_HIP_COMPILE_PROBE OR SLLM_ENABLE_HIP_RUNTIME OR
+       SLLM_ENABLE_PUBLIC_RUNTIME_HOST_TEST OR
+       SLLM_ENABLE_LINEAR_ATTENTION_GPU_TEST OR SLLM_ENABLE_ARGMAX_GPU_TEST)
+        message(FATAL_ERROR
+            "semantic G1 discovery test requires only public HIP runtime authority")
+    endif()
+    sllm_validate_semantic_g1_authority("${CMAKE_HIP_COMPILER}")
+    project(sllm_hip_semantic_discovery_test VERSION 0.1.0 LANGUAGES C CXX)
+    return()
+endif()
+
 if(SLLM_ENABLE_HIP_COMPILE_PROBE OR SLLM_ENABLE_HIP_RUNTIME OR
    SLLM_ENABLE_PUBLIC_HIP_RUNTIME)
     if(NOT DEFINED ROCM_PATH OR ROCM_PATH STREQUAL "")
@@ -98,36 +147,7 @@ if(SLLM_ENABLE_HIP_COMPILE_PROBE OR SLLM_ENABLE_HIP_RUNTIME OR
         # authenticated broker session.  The pathname is a retained sealed
         # descriptor, so replacement of the original client path cannot alter
         # the compiler client that CMake executes.
-        if(NOT DEFINED ENV{SLLM_HIP_COMPILER_BROKER_CLIENT} OR
-           NOT "$ENV{SLLM_HIP_COMPILER_BROKER_CLIENT}" STREQUAL "${CMAKE_HIP_COMPILER}" OR
-           NOT CMAKE_HIP_COMPILER MATCHES "^/proc/self/fd/(3|[4-9]|[1-9][0-9]+)$" OR
-           NOT DEFINED ENV{SLLM_HIP_COMPILER_BROKER_CLIENT_FD} OR
-           NOT "$ENV{SLLM_HIP_COMPILER_BROKER_CLIENT_FD}" MATCHES "^(3|[4-9]|[1-9][0-9]+)$" OR
-           NOT CMAKE_HIP_COMPILER STREQUAL "/proc/self/fd/$ENV{SLLM_HIP_COMPILER_BROKER_CLIENT_FD}")
-            message(FATAL_ERROR "semantic G1 requires the exact authenticated compiler broker client")
-        endif()
-        if(NOT DEFINED ENV{SLLM_HIP_COMPILER_BROKER_SOCKET} OR
-           NOT "$ENV{SLLM_HIP_COMPILER_BROKER_SOCKET}" MATCHES "^/[^\n\r ]+$" OR
-           NOT DEFINED ENV{SLLM_HIP_COMPILER_BROKER_SESSION} OR
-           NOT DEFINED ENV{SLLM_HIP_COMPILER_BROKER_TOKEN})
-            message(FATAL_ERROR "semantic G1 compiler broker session is missing or malformed")
-        endif()
-        foreach(SLLM_SEMANTIC_G1_HEX_ENV
-                SLLM_HIP_COMPILER_BROKER_SESSION
-                SLLM_HIP_COMPILER_BROKER_TOKEN
-                SLLM_HIP_COMPILER_BROKER_CLIENT_SHA256)
-            if(NOT DEFINED ENV{${SLLM_SEMANTIC_G1_HEX_ENV}})
-                message(FATAL_ERROR "semantic G1 compiler broker identity is missing")
-            endif()
-            string(LENGTH "$ENV{${SLLM_SEMANTIC_G1_HEX_ENV}}" SLLM_SEMANTIC_G1_HEX_LENGTH)
-            if(NOT SLLM_SEMANTIC_G1_HEX_LENGTH EQUAL 64 OR
-               NOT "$ENV{${SLLM_SEMANTIC_G1_HEX_ENV}}" MATCHES "^[0-9a-f]+$")
-                message(FATAL_ERROR "semantic G1 compiler broker identity is malformed")
-            endif()
-        endforeach()
-        if(NOT DEFINED ENV{SLLM_HIP_COMPILER_BROKER_CLIENT_SHA256})
-            message(FATAL_ERROR "semantic G1 compiler broker client byte identity is missing or malformed")
-        endif()
+        sllm_validate_semantic_g1_authority("${CMAKE_HIP_COMPILER}")
     else()
         if(NOT IS_ABSOLUTE "${CMAKE_HIP_COMPILER}")
             message(FATAL_ERROR "CMAKE_HIP_COMPILER must be an absolute path")

@@ -146,6 +146,7 @@ class SemanticG1BuilderTests(unittest.TestCase):
                 "-G", "Unix Makefiles", "-DSLLM_ENABLE_HIP_COMPILE_PROBE=OFF",
                 "-DSLLM_ENABLE_HIP_RUNTIME=OFF", "-DSLLM_ENABLE_PUBLIC_HIP_RUNTIME=ON",
                 "-DSLLM_ENABLE_PUBLIC_RUNTIME_HOST_TEST=OFF", "-DSLLM_SEMANTIC_G1_AUTHORITY=ON",
+                "-DSLLM_SEMANTIC_G1_DISCOVERY_TEST=ON",
                 "-DROCM_PATH=/opt/rocm", f"-DCMAKE_HIP_COMPILER={client_path}",
                 "-DSLLM_HIP_COMPILER_LOGICAL=/opt/rocm/bin/amdclang++",
                 "-DCMAKE_HIP_ARCHITECTURES=gfx1030", "-DSLLM_HIP_COMPILE_TARGET=gfx1030",

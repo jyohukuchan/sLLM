@@ -29,42 +29,69 @@ def candidate() -> dict[str, object]:
 
 _FRESH_G2_BINARY: Path | None = None
 _FRESH_G1_BINARY: Path | None = None
+_REAL_BUILD_G2_BINARY = builder.build_g2_binary
 
 
 def fresh_g2_binary() -> Path:
+    """Create a host-only control-plane fixture without compiling HIP code."""
+
     global _FRESH_G2_BINARY
     if _FRESH_G2_BINARY is None:
-        _FRESH_G2_BINARY = builder.build_g2_binary("gfx1030", ROOT)
+        fixture_root = Path(tempfile.mkdtemp(prefix="sllm-g2-host-fixture-"))
+        binary = fixture_root / contracts.G2_BINARY
+        identity = canonical_bytes(contracts.expected_build_identity(ROOT)["identity"]).decode("utf-8")
+        record = contracts.G2_IDENTITY_MARKER.decode("ascii") + identity
+        source = (
+            "#include <stdio.h>\n#include <string.h>\n"
+            f"static const char identity_record[] = {json.dumps(record)};\n"
+            "int main(int argc, char **argv) {\n"
+            "  if (argc == 2 && strcmp(argv[1], \"--query-build-identity\") == 0) {\n"
+            f"    fputs(identity_record + {len(contracts.G2_IDENTITY_MARKER)}, stdout); return 0;\n"
+            "  }\n"
+            "  fputs(\"HIP unavailable\\n\", stderr); return 1;\n"
+            "}\n"
+        )
+        completed = subprocess.run(
+            ["/usr/bin/cc", "-x", "c", "-O0", "-o", str(binary), "-"],
+            input=source.encode("utf-8"),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+        if completed.returncode != 0:
+            raise AssertionError(
+                "host-only G2 control-plane fixture could not be built: "
+                + completed.stderr.decode("utf-8", "replace")
+            )
+        binary.chmod(0o755)
+        digest = hashlib.sha256(binary.read_bytes()).hexdigest()
+        binary.with_name(contracts.G2_SIDECAR).write_bytes(
+            f"{digest}  {contracts.G2_BINARY}\n".encode("ascii")
+        )
+        _FRESH_G2_BINARY = binary
     return _FRESH_G2_BINARY
 
 
 def fresh_g1_binary() -> Path:
-    """Build the real G1 control binary instead of depending on test order."""
+    """Create a distinct executable G1-role substitution without HIP."""
 
     global _FRESH_G1_BINARY
     if _FRESH_G1_BINARY is None:
-        environment = os.environ.copy()
-        environment["CARGO_TARGET_DIR"] = str((ROOT / "target").resolve())
+        fixture_root = Path(tempfile.mkdtemp(prefix="sllm-g1-host-fixture-"))
+        binary = fixture_root / "sllm-rmsnorm-g1-evidence"
         completed = subprocess.run(
-            [
-                "cargo", "build", "--locked", "--offline", "-p", "sllm-hip",
-                "--bin", "sllm-rmsnorm-g1-evidence",
-            ],
-            cwd=ROOT,
-            capture_output=True,
+            ["/usr/bin/cc", "-x", "c", "-O0", "-o", str(binary), "-"],
+            input=b'static const char role[]="dedicated-g1-runtime"; int main(void){return role[0] == 0;}\n',
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             check=False,
-            env=environment,
-            timeout=900,
-            start_new_session=True,
         )
         if completed.returncode != 0:
             raise AssertionError(
-                "the actual G1 evidence binary could not be built for the substitution regression: "
+                "host-only G1 substitution fixture could not be built: "
                 + completed.stderr.decode("utf-8", "replace")
             )
-        binary = ROOT / "target/debug/sllm-rmsnorm-g1-evidence"
-        if not binary.is_file():
-            raise AssertionError("the fixed G1 Cargo build did not produce its expected binary")
+        binary.chmod(0o755)
         _FRESH_G1_BINARY = binary
     return _FRESH_G1_BINARY
 
@@ -109,6 +136,21 @@ def artifact(target: str, value: dict[str, object]) -> dict[str, object]:
 
 
 class G2RunnerTests(unittest.TestCase):
+    def setUp(self) -> None:
+        # H0 validates the host control plane only.  The immutable builder
+        # output authority is represented by the fixture above; real HIP
+        # compilation and execution belong exclusively to GPU gates.
+        self._owned_output = patch.object(
+            contracts, "builder_output_path", side_effect=lambda _repo=ROOT: fresh_g2_binary()
+        )
+        self._owned_output.start()
+        self.addCleanup(self._owned_output.stop)
+        self._g2_build = patch.object(
+            builder, "build_g2_binary", side_effect=lambda _target, _repo=ROOT: fresh_g2_binary()
+        )
+        self._g2_build.start()
+        self.addCleanup(self._g2_build.stop)
+
     def test_bounded_collector_reads_real_stdout_and_stderr_pipes(self) -> None:
         completed = runner._run_bounded_binary(
             ["/usr/bin/python3", "-c", "import sys;sys.stdout.write('out');sys.stderr.write('err')"],
@@ -277,7 +319,7 @@ class G2RunnerTests(unittest.TestCase):
                 "run",
                 return_value=builder.subprocess.CompletedProcess([], 0, b"", b""),
             ) as run:
-                result = builder.build_g2_binary("gfx1030", repo)
+                result = _REAL_BUILD_G2_BINARY("gfx1030", repo)
 
         self.assertEqual(result, binary)
         self.assertEqual(run.call_args.kwargs["env"]["CARGO_TARGET_DIR"], str((repo / "target").resolve()))
@@ -389,7 +431,7 @@ class G2RunnerTests(unittest.TestCase):
             with self.assertRaises(ContractError):
                 contracts.validate_artifact(manifest, binary_path=binary)
 
-    def test_actual_renamed_g1_binary_is_rejected_even_with_canonical_sidecar(self) -> None:
+    def test_g1_role_fixture_is_rejected_even_with_canonical_sidecar(self) -> None:
         g1 = fresh_g1_binary()
         with tempfile.TemporaryDirectory(prefix="sllm-g2-g1-substitution-") as directory:
             root = Path(directory)

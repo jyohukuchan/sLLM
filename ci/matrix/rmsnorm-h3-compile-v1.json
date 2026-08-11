@@ -98,10 +98,10 @@
         },
         {
           "path": "native/hip/CMakeLists.txt",
-          "sha256": "2f03765252d078d6ae1faf3d5d212dce1514030b4deaa1265fc9b262f1ae2f48"
+          "sha256": "1a0eae00e6df882e330047c143026dd228adff79d495c740b762e078afefbc9f"
         }
       ],
-      "source_set_sha256": "723d61973f6d10cc5db4b08ccf3eab9f7d5ad8b92a1a2bab1ccd07f9d9f6a0fa"
+      "source_set_sha256": "18dfad055e88483e5f046bccce596bc90ec74023cf0859f900a349abdca5c178"
     },
     "ci_contract": {
       "canonical_order": [
