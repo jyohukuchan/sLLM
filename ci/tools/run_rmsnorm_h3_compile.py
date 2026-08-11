@@ -27,6 +27,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+import run_h3_public_runtime_compile as public_h3
+
 ROOT = Path(__file__).resolve().parents[2]
 TARGETS = ("gfx1030", "gfx1201")
 ROWS = tuple(f"h3-rmsnorm-{target}" for target in TARGETS)
@@ -80,6 +82,9 @@ _EXPECTED_SOURCE_SETS = {
         "ci/schema/rmsnorm-h3-aggregate-v1.schema.json",
         "ci/tools/validate_rmsnorm_h3_contracts.py",
         "ci/tools/run_rmsnorm_h3_compile.py",
+        "ci/tools/run_h3_public_runtime_compile.py",
+        "ci/matrix/hip-runtime-compile-v1.json",
+        "ci/requirements-host.txt",
         "ci/tools/aggregate_rmsnorm_h3_results.py",
         "ci/tests/test_rmsnorm_h3_contracts.py",
         "ci/tests/test_rmsnorm_h3_runner.py",
@@ -87,14 +92,7 @@ _EXPECTED_SOURCE_SETS = {
         ".github/workflows/rmsnorm-h3-compile.yml",
     ),
 }
-PUBLIC_ABI_SYMBOLS = (
-    "sllm_backend_probe", "sllm_buffer_copy_d2h", "sllm_buffer_copy_h2d", "sllm_buffer_create",
-    "sllm_buffer_release", "sllm_buffer_size", "sllm_completion_query", "sllm_completion_read",
-    "sllm_completion_release", "sllm_completion_timing", "sllm_completion_wait", "sllm_context_create", "sllm_context_probe",
-    "sllm_context_release", "sllm_device_count", "sllm_device_query", "sllm_event_create",
-    "sllm_event_release", "sllm_get_abi_version", "sllm_query_version", "sllm_queue_create",
-    "sllm_queue_release", "sllm_rmsnorm_execute", "sllm_rmsnorm_plan_release", "sllm_rmsnorm_prepare",
-)
+PUBLIC_ABI_SYMBOLS = public_h3.PUBLIC_SYMBOLS
 SOURCE_SYMBOL_MAP = [
     {"path": "include/sllm/hip.h", "symbol": "sllm_rmsnorm_execute", "role": "declaration"},
     {"path": "native/hip/src/public_runtime.hip.cpp", "symbol": "sllm_rmsnorm_execute", "role": "definition"},
@@ -235,7 +233,42 @@ def check_symbol_map(repo: Path, matrix: dict[str, Any]) -> None:
             raise ContractError(f"source-symbol map occurrence count for {path} is {count}, expected 1")
 
 
+def expected_build_commands() -> list[list[str]]:
+    """Reuse the canonical public-runtime closure with RMSNorm-owned outputs."""
+
+    common_hip = [
+        COMPILER, "-D__HIP_ROCclr__=1", "-O3", "-DNDEBUG", "-std=gnu++17",
+        "-I", "{repo}/include", "-I", "{repo}/native/hip/src", "--offload-arch={target}",
+        "-mcode-object-version=6", "-mno-wavefrontsize64", "-pthread",
+    ]
+    return [
+        [*common_hip, "-o", "{build_dir}/rmsnorm-kernel-{target}.o", "-x", "hip", "-c", "{repo}/native/hip/src/rmsnorm_kernel.hip.cpp"],
+        [*common_hip, "-o", "{build_dir}/public-runtime-{target}.o", "-x", "hip", "-c", "{repo}/native/hip/src/public_runtime.hip.cpp"],
+        [
+            COMPILER, "-O3", "-DNDEBUG", "-std=gnu++17", "-I", "{repo}/include", "-I",
+            "{repo}/native/hip/src", "--offload-arch={target}", "-mcode-object-version=6",
+            "-mno-wavefrontsize64", "-pthread", "-o", "{build_dir}/rmsnorm-api-{target}.o",
+            "-c", "{repo}/native/hip/src/rmsnorm_api.cpp",
+        ],
+        [
+            COMPILER, "-O3", "-DNDEBUG", "-std=gnu++17", "--offload-arch={target}",
+            "-mcode-object-version=6", "-mno-wavefrontsize64", "--hip-link", "--rtlib=compiler-rt",
+            "-unwindlib=libgcc", "-pthread", "-nostartfiles", "{build_dir}/rmsnorm-kernel-{target}.o",
+            "{build_dir}/public-runtime-{target}.o", "{build_dir}/rmsnorm-api-{target}.o",
+            "-D__HIP_ROCclr__=1", "-I", "{repo}/include", "-I", "{repo}/native/hip/src", "-x", "c++",
+            *[f"{{repo}}/{path}" for path in public_h3.PUBLIC_RUNTIME_API_SOURCE_PATHS if path != "native/hip/src/rmsnorm_api.cpp"],
+            "-x", "hip",
+            *[f"{{repo}}/{path}" for path in public_h3.PUBLIC_RUNTIME_KERNEL_SOURCE_PATHS if path != "native/hip/src/rmsnorm_kernel.hip.cpp"],
+            "-x", "none", "-o", "{build_dir}/host-bundle-{target}.elf", "/opt/rocm/lib/libamdhip64.so",
+        ],
+    ]
+
+
 def validate_matrix(repo: Path = ROOT) -> tuple[dict[str, Any], dict[str, Any], dict[str, dict[str, Any]]]:
+    try:
+        public_h3.validate_matrix(repo)
+    except public_h3.RuntimeContractError as exc:
+        raise ContractError(f"canonical public-runtime build contract is invalid: {exc}") from exc
     matrix_path = repo / "ci/matrix/rmsnorm-h3-compile-v1.json"
     matrix = read_json(matrix_path)
     expected_top = {"$schema", "schema_version", "matrix_id", "revision", "suite_id", "tier", "toolchain_id", "container", "workflow", "source_sets", "source_symbol_map", "public_abi_symbols", "logical_kernel", "device_symbol", "case_manifest", "rows"}
@@ -278,7 +311,7 @@ def validate_matrix(repo: Path = ROOT) -> tuple[dict[str, Any], dict[str, Any], 
         if row["resource"] != {"max_rss_bytes": 4294967296, "max_output_bytes": 16777216, "timeout_seconds": 900, "max_output_file_bytes": 268435456}:
             raise ContractError(f"{expected_id} resource bounds drifted")
         build = row["build"]
-        if build.get("generator") != "direct-amdclang++" or build.get("mode") != "compile-link-extract-inspect" or build.get("build_type") != "Release" or build.get("language_standard") != "gnu++17" or build.get("sources") != ["native/hip/src/rmsnorm_kernel.hip.cpp", "native/hip/src/public_runtime.hip.cpp", "native/hip/src/rmsnorm_api.cpp"] or len(build.get("commands", [])) != 4:
+        if build.get("generator") != "direct-amdclang++" or build.get("mode") != "compile-link-extract-inspect" or build.get("build_type") != "Release" or build.get("language_standard") != "gnu++17" or build.get("sources") != ["native/hip/src/rmsnorm_kernel.hip.cpp", "native/hip/src/public_runtime.hip.cpp", "native/hip/src/rmsnorm_api.cpp"] or build.get("commands") != expected_build_commands():
             raise ContractError(f"{expected_id} build contract is not the dedicated RMSNorm tuple")
         for command in build["commands"]:
             if not command or command[0] != COMPILER or any(any(token in value for token in (";", "&&", "||", "`", "$(")) for value in command):
@@ -464,7 +497,12 @@ def inspect_host(path: Path, output: str, row: dict[str, Any], bundles: list[str
         raise ContractError("host ELF bundle list is not the exact target plus host tuple")
     names = symbol_names(output)
     sllm_names = [name for name in names if name.startswith("sllm_")]
-    allowed = set(PUBLIC_ABI_SYMBOLS) | {DEVICE_SYMBOL}
+    allowed = (
+        set(PUBLIC_ABI_SYMBOLS)
+        | set(public_h3.KERNEL_SYMBOLS)
+        | set(public_h3.INTERNAL_RUNTIME_SYMBOLS)
+        | {"sllm_hip_compile_probe"}
+    )
     if any(name not in allowed for name in sllm_names):
         raise ContractError("host ELF contains an unexpected sllm symbol")
     for name in PUBLIC_ABI_SYMBOLS:
@@ -610,8 +648,23 @@ def run_row(args: argparse.Namespace) -> dict[str, Any]:
         expected_bundles = [f"hipv4-amdgcn-amd-amdhsa--{row['target']}", HOST_BUNDLE_ID]
         if bundles != expected_bundles:
             raise ContractError(f"host ELF bundles are not exact: {bundles}")
+        kernel_build = build_dir / f"rmsnorm-kernel-{row['target']}.o"
+        require_regular(kernel_build, "RMSNorm kernel object")
+        kernel_fatbin = build_dir / "rmsnorm-kernel.fatbin"
+        result = run_process([LLVM_TOOLS["llvm_objcopy"], f"--dump-section=.hip_fatbin={kernel_fatbin}", str(kernel_build)], cwd=repo, timeout=60, output_limit=row["resource"]["max_output_bytes"])
+        result.pop("_stdout", None)
+        result.pop("_stderr", None)
+        steps.append({"step_id": "extract-rmsnorm-kernel-fatbin", **result})
+        require_regular(kernel_fatbin, "RMSNorm kernel .hip_fatbin")
+        kernel_bundle_list = run_process([bundler, "--list", "--type=o", f"--input={kernel_fatbin}"], cwd=repo, timeout=60, output_limit=row["resource"]["max_output_bytes"])
+        kernel_bundle_stdout = kernel_bundle_list.pop("_stdout").decode("utf-8", "replace")
+        kernel_bundle_list.pop("_stderr", None)
+        steps.append({"step_id": "inspect-rmsnorm-kernel-bundle-list", **kernel_bundle_list})
+        kernel_bundles = [line.strip() for line in kernel_bundle_stdout.splitlines() if line.strip()]
+        if kernel_bundles != expected_bundles:
+            raise ContractError(f"RMSNorm kernel bundles are not exact: {kernel_bundles}")
         device_build = build_dir / row["output"]["device_object_pattern"].replace("{target}", row["target"])
-        result = run_process([bundler, "--unbundle", "--type=o", f"--targets={expected_bundles[0]}", f"--input={host_fatbin}", f"--output={device_build}"], cwd=repo, timeout=60, output_limit=row["resource"]["max_output_bytes"])
+        result = run_process([bundler, "--unbundle", "--type=o", f"--targets={expected_bundles[0]}", f"--input={kernel_fatbin}", f"--output={device_build}"], cwd=repo, timeout=60, output_limit=row["resource"]["max_output_bytes"])
         result.pop("_stdout", None)
         result.pop("_stderr", None)
         steps.append({"step_id": "extract-device-code-object", **result})

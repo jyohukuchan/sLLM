@@ -1,6 +1,7 @@
 name: h3-rmsnorm-compile-only (non-required)
 
 on:
+  pull_request:
   push:
     branches: [main]
   workflow_dispatch:
@@ -35,6 +36,18 @@ jobs:
           test ! -e "$RUN_ROOT"
           mkdir -m 700 "$RUN_ROOT"
           printf 'RUN_ROOT=%s\n' "$RUN_ROOT" >> "$GITHUB_ENV"
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        with:
+          python-version: "3.12.10"
+
+      - name: Install aggregate schema requirements
+        run: >-
+          python3 -m pip install --disable-pip-version-check --no-input
+          --require-hashes --only-binary=:all: --no-deps
+          --target "$RUN_ROOT/python-packages"
+          -r ci/requirements-host.txt
 
       - name: Verify immutable identity and pinned image
         env:
@@ -146,6 +159,7 @@ jobs:
             --env REVIEWED_SHA --env TESTED_SHA --env WORKFLOW_SHA --env TREE_OID \
             --env GITHUB_RUN_ID --env GITHUB_RUN_ATTEMPT --env SLLM_H3_NETWORK_DISABLED \
             --env RMSNORM_H3_IMAGE_REFERENCE --env RMSNORM_H3_IMAGE_CONFIG_DIGEST \
+            --env PYTHONPATH=/tmp/python-packages \
             --workdir /workspace \
             "$RMSNORM_H3_IMAGE_REFERENCE" /bin/bash -eu -o pipefail -c '
               mkdir -p "$HOME"

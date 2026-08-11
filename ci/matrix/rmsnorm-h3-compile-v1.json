@@ -19,7 +19,7 @@
   },
   "workflow": {
     "path": ".github/workflows/rmsnorm-h3-compile.yml",
-    "sha256": "d5609c64879e1a4a67ee250a0e7f6f8d15d060d1e6d66051cc7b07990600e2f0"
+    "sha256": "34b8f8137d7a289e2cc420636c4de95c4728b50dabad93dc5bc293cdcc71f88c"
   },
   "source_sets": {
     "device": {
@@ -111,6 +111,9 @@
         "ci/schema/rmsnorm-h3-aggregate-v1.schema.json",
         "ci/tools/validate_rmsnorm_h3_contracts.py",
         "ci/tools/run_rmsnorm_h3_compile.py",
+        "ci/tools/run_h3_public_runtime_compile.py",
+        "ci/matrix/hip-runtime-compile-v1.json",
+        "ci/requirements-host.txt",
         "ci/tools/aggregate_rmsnorm_h3_results.py",
         "ci/tests/test_rmsnorm_h3_contracts.py",
         "ci/tests/test_rmsnorm_h3_runner.py",
@@ -140,7 +143,19 @@
         },
         {
           "path": "ci/tools/run_rmsnorm_h3_compile.py",
-          "sha256": "3ad9dabf056bd9ef07033f51ac227367bafc781403e3afd1b4821d82b07081fb"
+          "sha256": "a86dfc583c1454a3d8700bb41e42f89cbf18ac2d59cce3c20ba2737b37b1e4a3"
+        },
+        {
+          "path": "ci/tools/run_h3_public_runtime_compile.py",
+          "sha256": "74cc55f139425f7fd48ecb910ff646cdc84c752e9a8ff813cc80b11d301dffc5"
+        },
+        {
+          "path": "ci/matrix/hip-runtime-compile-v1.json",
+          "sha256": "07e905156fa51f0b3bb785bd3b5da2a7a4a9ab62f57375a99beb9f54d93cec78"
+        },
+        {
+          "path": "ci/requirements-host.txt",
+          "sha256": "de6acdba6861bb790315b575bb00d858a849d42da38ae0ccdbf504e32011aeea"
         },
         {
           "path": "ci/tools/aggregate_rmsnorm_h3_results.py",
@@ -148,7 +163,7 @@
         },
         {
           "path": "ci/tests/test_rmsnorm_h3_contracts.py",
-          "sha256": "da7a9ea0b5d96dbd4ccbec36be1d9dae2a341827e3063732e2218ec69d45ad6d"
+          "sha256": "ebf4daee04fb0cad37eb70c95bc4d0c5e4c5beb959e9178613c187fe13b62863"
         },
         {
           "path": "ci/tests/test_rmsnorm_h3_runner.py",
@@ -160,10 +175,10 @@
         },
         {
           "path": ".github/workflows/rmsnorm-h3-compile.yml",
-          "sha256": "d5609c64879e1a4a67ee250a0e7f6f8d15d060d1e6d66051cc7b07990600e2f0"
+          "sha256": "34b8f8137d7a289e2cc420636c4de95c4728b50dabad93dc5bc293cdcc71f88c"
         }
       ],
-      "source_set_sha256": "0410a7c7db160b4c6be4f23e76c669e676ace01e94b36ff85a8e85d6443073e8"
+      "source_set_sha256": "7920e303a62f962698428d219848f112910b1f11ec6c2fa3c5725574038295b8"
     }
   },
   "source_symbol_map": [
@@ -194,12 +209,19 @@
     }
   ],
   "public_abi_symbols": [
+    "sllm_argmax_execute",
+    "sllm_argmax_plan_release",
+    "sllm_argmax_prepare",
+    "sllm_attention_preprocess_execute",
+    "sllm_attention_preprocess_plan_release",
+    "sllm_attention_preprocess_prepare",
     "sllm_backend_probe",
     "sllm_buffer_copy_d2h",
     "sllm_buffer_copy_h2d",
     "sllm_buffer_create",
     "sllm_buffer_release",
     "sllm_buffer_size",
+    "sllm_causal_attention_execute",
     "sllm_completion_query",
     "sllm_completion_read",
     "sllm_completion_release",
@@ -210,9 +232,31 @@
     "sllm_context_release",
     "sllm_device_count",
     "sllm_device_query",
+    "sllm_elementwise_execute",
+    "sllm_elementwise_plan_release",
+    "sllm_elementwise_prepare",
+    "sllm_embedding_execute",
+    "sllm_embedding_plan_release",
+    "sllm_embedding_prepare",
     "sllm_event_create",
     "sllm_event_release",
     "sllm_get_abi_version",
+    "sllm_kv_state_append",
+    "sllm_kv_state_append_cancel",
+    "sllm_kv_state_create",
+    "sllm_kv_state_query",
+    "sllm_kv_state_release",
+    "sllm_kv_state_snapshot",
+    "sllm_kv_view_query",
+    "sllm_kv_view_release",
+    "sllm_linear_attention_cancel",
+    "sllm_linear_attention_execute",
+    "sllm_linear_attention_state_create",
+    "sllm_linear_attention_state_query",
+    "sllm_linear_attention_state_release",
+    "sllm_matmul_execute",
+    "sllm_matmul_plan_release",
+    "sllm_matmul_prepare",
     "sllm_query_version",
     "sllm_queue_create",
     "sllm_queue_release",
@@ -340,6 +384,33 @@
             "{build_dir}/rmsnorm-kernel-{target}.o",
             "{build_dir}/public-runtime-{target}.o",
             "{build_dir}/rmsnorm-api-{target}.o",
+            "-D__HIP_ROCclr__=1",
+            "-I",
+            "{repo}/include",
+            "-I",
+            "{repo}/native/hip/src",
+            "-x",
+            "c++",
+            "{repo}/native/hip/src/argmax_api.cpp",
+            "{repo}/native/hip/src/attention_preprocess_api.cpp",
+            "{repo}/native/hip/src/causal_attention_api.cpp",
+            "{repo}/native/hip/src/elementwise_api.cpp",
+            "{repo}/native/hip/src/embedding_api.cpp",
+            "{repo}/native/hip/src/kv_state_api.cpp",
+            "{repo}/native/hip/src/linear_attention_api.cpp",
+            "{repo}/native/hip/src/matmul_api.cpp",
+            "-x",
+            "hip",
+            "{repo}/native/hip/src/argmax_kernel.hip.cpp",
+            "{repo}/native/hip/src/attention_preprocess_kernel.hip.cpp",
+            "{repo}/native/hip/src/causal_attention_kernel.hip.cpp",
+            "{repo}/native/hip/src/elementwise_kernel.hip.cpp",
+            "{repo}/native/hip/src/embedding_kernel.hip.cpp",
+            "{repo}/native/hip/src/kv_state_kernel.hip.cpp",
+            "{repo}/native/hip/src/linear_attention_kernel.hip.cpp",
+            "{repo}/native/hip/src/matmul_kernel.hip.cpp",
+            "-x",
+            "none",
             "-o",
             "{build_dir}/host-bundle-{target}.elf",
             "/opt/rocm/lib/libamdhip64.so"
@@ -479,6 +550,33 @@
             "{build_dir}/rmsnorm-kernel-{target}.o",
             "{build_dir}/public-runtime-{target}.o",
             "{build_dir}/rmsnorm-api-{target}.o",
+            "-D__HIP_ROCclr__=1",
+            "-I",
+            "{repo}/include",
+            "-I",
+            "{repo}/native/hip/src",
+            "-x",
+            "c++",
+            "{repo}/native/hip/src/argmax_api.cpp",
+            "{repo}/native/hip/src/attention_preprocess_api.cpp",
+            "{repo}/native/hip/src/causal_attention_api.cpp",
+            "{repo}/native/hip/src/elementwise_api.cpp",
+            "{repo}/native/hip/src/embedding_api.cpp",
+            "{repo}/native/hip/src/kv_state_api.cpp",
+            "{repo}/native/hip/src/linear_attention_api.cpp",
+            "{repo}/native/hip/src/matmul_api.cpp",
+            "-x",
+            "hip",
+            "{repo}/native/hip/src/argmax_kernel.hip.cpp",
+            "{repo}/native/hip/src/attention_preprocess_kernel.hip.cpp",
+            "{repo}/native/hip/src/causal_attention_kernel.hip.cpp",
+            "{repo}/native/hip/src/elementwise_kernel.hip.cpp",
+            "{repo}/native/hip/src/embedding_kernel.hip.cpp",
+            "{repo}/native/hip/src/kv_state_kernel.hip.cpp",
+            "{repo}/native/hip/src/linear_attention_kernel.hip.cpp",
+            "{repo}/native/hip/src/matmul_kernel.hip.cpp",
+            "-x",
+            "none",
             "-o",
             "{build_dir}/host-bundle-{target}.elf",
             "/opt/rocm/lib/libamdhip64.so"
