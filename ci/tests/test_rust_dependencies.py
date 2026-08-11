@@ -187,6 +187,7 @@ class RustDependencyPolicyTests(unittest.TestCase):
             observed["command"],
             ["cargo", f"+{MSRV_AUTHORITY}", "metadata", "--locked", "--offline", "--format-version", "1"],
         )
+        self.assertNotIn("--jobs", observed["command"])
         self.assertEqual(observed["kwargs"]["env"]["CARGO_NET_OFFLINE"], "true")
         self.assertEqual(observed["kwargs"]["env"]["RUSTUP_AUTO_INSTALL"], "0")
         for name in ("PATH", "CARGO_HOME", "RUSTUP_HOME"):
@@ -215,9 +216,13 @@ class RustDependencyPolicyTests(unittest.TestCase):
         self.assertEqual(
             observed["command"],
             [
-                "cargo", f"+{MSRV_AUTHORITY}", "check", "--workspace", "--all-targets", "--locked", "--offline",
+                "cargo", f"+{MSRV_AUTHORITY}", "check", "--jobs", "1", "--workspace", "--all-targets", "--locked", "--offline",
                 "--target", MSRV_TARGET,
             ],
+        )
+        self.assertEqual(
+            list(zip(observed["command"], observed["command"][1:])).count(("--jobs", "1")),
+            1,
         )
         self.assertEqual(observed["kwargs"]["env"]["CARGO_NET_OFFLINE"], "true")
         self.assertEqual(observed["kwargs"]["env"]["RUSTUP_AUTO_INSTALL"], "0")

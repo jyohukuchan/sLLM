@@ -67,9 +67,29 @@ class HostContractTests(unittest.TestCase):
             ])],
         )
         self.assertNotIn(f"+{MSRV_RUST_VERSION}", json.dumps(suites, sort_keys=True))
-        self.assertEqual(command_for_mode("format")[1], f"+{DEV_RUST_VERSION}")
-        self.assertEqual(command_for_mode("clippy")[1], f"+{DEV_RUST_VERSION}")
-        self.assertEqual(command_for_mode("msrv")[1], f"+{MSRV_RUST_VERSION}")
+        self.assertEqual(
+            command_for_mode("format"),
+            ["cargo", f"+{DEV_RUST_VERSION}", "fmt", "--all", "--", "--check"],
+        )
+        clippy_command = command_for_mode("clippy")
+        self.assertEqual(
+            clippy_command,
+            [
+                "cargo", f"+{DEV_RUST_VERSION}", "clippy", "--jobs", "1",
+                "--workspace", "--all-targets", "--all-features", "--locked",
+                "--offline", "--", "-D", "warnings",
+            ],
+        )
+        self.assertEqual(list(zip(clippy_command, clippy_command[1:])).count(("--jobs", "1")), 1)
+        msrv_command = command_for_mode("msrv")
+        self.assertEqual(
+            msrv_command,
+            [
+                "cargo", f"+{MSRV_RUST_VERSION}", "check", "--jobs", "1",
+                "--workspace", "--locked", "--offline",
+            ],
+        )
+        self.assertEqual(list(zip(msrv_command, msrv_command[1:])).count(("--jobs", "1")), 1)
         self.assertEqual(RUSTUP_AUTO_INSTALL, "0")
 
     def test_fixture_paths_are_explicitly_owned_by_h0_and_their_consumer_tier(self) -> None:

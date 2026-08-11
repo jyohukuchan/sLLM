@@ -716,7 +716,7 @@ def run_cargo_check(repo: Path = ROOT, runner: Callable[..., subprocess.Complete
     """Run the exact B0 MSRV check; a command failure is never a pass."""
 
     command = [
-        "cargo", f"+{MSRV_AUTHORITY}", "check", "--workspace", "--all-targets", "--locked", "--offline",
+        "cargo", f"+{MSRV_AUTHORITY}", "check", "--jobs", "1", "--workspace", "--all-targets", "--locked", "--offline",
         "--target", MSRV_TARGET,
     ]
     process = runner(command, cwd=repo, text=True, capture_output=True, check=False, env=_cargo_environment())
