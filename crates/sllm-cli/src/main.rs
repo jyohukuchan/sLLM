@@ -21,7 +21,7 @@ fn run(mut arguments: impl Iterator<Item = String>) -> Result<(), String> {
         }
         Some("version") | Some("--version") | Some("-V") => print_version(),
         Some("doctor") => print_doctor(),
-        Some(command @ ("verify-model" | "tokenize" | "render" | "decode")) => {
+        Some(command @ ("verify-model" | "tokenize" | "render" | "decode" | "generate")) => {
             let output = model::run(command, arguments)?;
             println!("{output}");
             Ok(())
@@ -42,6 +42,7 @@ fn print_help() {
     println!("  tokenize      Encode text with the verified tokenizer");
     println!("  render        Render Qwen3.5 chat messages");
     println!("  decode        Decode token IDs with the verified tokenizer");
+    println!("  generate      Run greedy Qwen3.5 text generation on one exact HIP target");
 }
 
 fn print_version() -> Result<(), String> {

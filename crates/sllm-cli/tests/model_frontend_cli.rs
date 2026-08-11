@@ -12,7 +12,7 @@ fn help_lists_offline_model_frontend_commands() {
     let output = sllm(&["help"]);
     assert!(output.status.success());
     let stdout = String::from_utf8(output.stdout).unwrap();
-    for command in ["verify-model", "tokenize", "render", "decode"] {
+    for command in ["verify-model", "tokenize", "render", "decode", "generate"] {
         assert!(stdout.contains(command), "help omitted {command}");
     }
     assert!(output.stderr.is_empty());
@@ -20,7 +20,7 @@ fn help_lists_offline_model_frontend_commands() {
 
 #[test]
 fn model_frontend_failures_use_stderr_and_exit_two() {
-    for command in ["verify-model", "tokenize", "render", "decode"] {
+    for command in ["verify-model", "tokenize", "render", "decode", "generate"] {
         let output = sllm(&[command]);
         assert_eq!(output.status.code(), Some(2), "{command}");
         assert!(

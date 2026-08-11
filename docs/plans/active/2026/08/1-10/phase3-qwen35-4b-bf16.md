@@ -311,6 +311,12 @@ G3の最低case:
 
 G3は「processが終了した」「何らかのtextを出した」だけでPASSしない。固定model lock、同一semantic/build identity、exact GPU、全dispatch HIP、fallbackなし、1 token以上、token IDs/stop reasonのversioned expectation、両GPU一致、実行前後health、process cleanupを必須とする。外部engineの単独出力を数値oracleとせず、op別G2、cross-target一致、review済みgolden token sequenceを組み合わせる。golden確定手順はG3 schema実装前に別途reviewする。
 
+Stage EはE0〜E2へ分割する。E0は4〜6時間を予測し、既存offline CLIへ`generate` request contractとfrontend→generation stop controller→D1 ownerの単一orchestrationを追加する。exact target/device、固定lock/cache、greedy、`max_new_tokens`、promptまたはtext-only messagesの排他、render/tokenize、prefill last-token、反復single-token decode、stop token非表示、session cleanupを型付きで結ぶ。focused host testではfake generation executorを使い、ordinary/248046/248044/max budget、zero budget、Unicode chat、1/3/17/255/256/257境界、duplicate/missing/cross-command引数、failure時partial success非出力を確認する。E0 draftではGPUを実行せず、CLI reportのartifact/health authorityはE1 evidence controllerへ委ねる。
+
+E0 host draftは既存`sllm generate`へprompt/messages排他、exact `gfx1030`/`gfx1201`とlogical device、明示greedy、`max_new_tokens` `[1,4096]`を追加し、verified render/tokenize、D1 prefillのlast argmax、反復decode、versioned stop controller、stop token非表示、visible decode、session shutdownを単一production pathへ接続した。生成loopをfake executorでも同じcodeで検証し、248046/248044、budget 1/3/17/255/256/257、negative/exhausted output、Unicode messages、argument boundaryをPASSした。workspace/all-target check、CLI 8 unit＋3 process test、frontend 26 unit＋22 integration、CLI clippy、format/diffをPASSし、exact release CLI SHA-256は`gfx1030=6767660b39ee06fbdefec686655845f41d54b948ff1f9a4a4d9963aca903873a`、`gfx1201=7a0e3d289c61e1de95cde31c7742d72e553cffe94703ad5f43e51743ef056814`、各10 target-only HIP bundleだった。GPU/model forwardはまだ実行しておらず、次はE1 V620 first full-model smokeである。
+
+E1は8〜14時間を予測し、E0 production pathをexact target別にbuildしてcanonical V620から最小full-model smokeを実行し、D1 lowering/runtimeの実機不具合を修正する。1 token以上、全dispatch HIP、fallbackなし、model/plan identity、bounded timeout、VRAM、cleanupを必須とし、V620でPASSするまでR9700へ広げない。E2は6〜10時間を予測し、G3 report/schema、artifact binding、golden確定手順、fixed ASCII/Unicode/boundary caseを実装し、同一immutable identityのcanonical両GPU一致、pre/post health、aggregate、最終reviewを取得する。E0/E1/E2の合計予測は18〜30時間で、同一failureの2回reject、1時間以上の機能進捗停止、各上端超過、または新しいHIP ABI/kernelが必要と判明した時点で当該単位を中断しreplanする。
+
 ## Verification lanes
 
 - docs-onlyはMarkdown、link、consistencyだけを確認し、closeoutを作らない。semantic/build identityが不変でmappingが明示される場合はGPU evidenceを再利用できる。
