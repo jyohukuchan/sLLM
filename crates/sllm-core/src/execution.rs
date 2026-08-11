@@ -417,7 +417,8 @@ pub trait ExecutionSessionAdapter: Send + Sync {
         _key: &OwnedTensorBinding,
         _value: &OwnedTensorBinding,
         _request: &KvStateAppendRequest,
-    ) -> Result<Box<dyn ExecutionKvStateSubmissionAdapter>, ExecutionError> {
+    ) -> Result<(Box<dyn ExecutionKvStateSubmissionAdapter>, DispatchEvidence), ExecutionError>
+    {
         Err(ExecutionError::Unsupported {
             reason: "backend does not support request-local KV state append".to_owned(),
         })
@@ -856,7 +857,7 @@ impl ExecutionSession {
             expected_length,
             start_position,
         );
-        let inner = match self.state.adapter.append_kv_state(
+        let (inner, dispatch) = match self.state.adapter.append_kv_state(
             &ExecutionAdapterAccess { session: self },
             state,
             queue,
@@ -877,6 +878,7 @@ impl ExecutionSession {
             key,
             value,
             request,
+            dispatch,
             completion_state: ExecutionState::Pending,
             inner: Some(inner),
         })
@@ -1656,6 +1658,7 @@ pub struct KvStateAppendSubmission {
     key: OwnedTensorBinding,
     value: OwnedTensorBinding,
     request: KvStateAppendRequest,
+    dispatch: DispatchEvidence,
     completion_state: ExecutionState,
     inner: Option<Box<dyn ExecutionKvStateSubmissionAdapter>>,
 }
@@ -1687,6 +1690,10 @@ impl KvStateAppendSubmission {
 
     pub const fn request(&self) -> KvStateAppendRequest {
         self.request
+    }
+
+    pub fn dispatch(&self) -> &DispatchEvidence {
+        &self.dispatch
     }
 
     pub const fn completion_state(&self) -> ExecutionState {
@@ -3350,7 +3357,8 @@ mod tests {
             _key: &OwnedTensorBinding,
             _value: &OwnedTensorBinding,
             request: &crate::KvStateAppendRequest,
-        ) -> Result<Box<dyn ExecutionKvStateSubmissionAdapter>, ExecutionError> {
+        ) -> Result<(Box<dyn ExecutionKvStateSubmissionAdapter>, DispatchEvidence), ExecutionError>
+        {
             let entries = self
                 .store
                 .entries
@@ -3369,12 +3377,31 @@ mod tests {
                 });
             }
             self.store.append_calls.fetch_add(1, Ordering::Relaxed);
-            Ok(Box::new(FakeKvSubmission {
-                store: Arc::clone(&self.store),
-                request: *request,
-                core_append_in_flight: Arc::clone(&state.append_in_flight),
-                complete: false,
-            }))
+            Ok((
+                Box::new(FakeKvSubmission {
+                    store: Arc::clone(&self.store),
+                    request: *request,
+                    core_append_in_flight: Arc::clone(&state.append_in_flight),
+                    complete: false,
+                }),
+                DispatchEvidence {
+                    abi_version: 1,
+                    info_version: 1,
+                    dispatch_id: 1,
+                    dispatch_count: 1,
+                    kernel_id: 1,
+                    workgroup_size_x: 256,
+                    grid_size_x: (request.token_count() * 4) as u32,
+                    row_count: request.token_count(),
+                    normalized_size: 1024,
+                    backend: 1,
+                    fallback_allowed: false,
+                    fallback_used: false,
+                    kernel_symbol: "kv_state.bf16_to_f16_transpose.v1".to_owned(),
+                    device_symbol: "fake_kv_append".to_owned(),
+                    target: "fake".to_owned(),
+                },
+            ))
         }
 
         fn execute_causal_attention(
@@ -4236,6 +4263,10 @@ mod tests {
                 .unwrap();
             assert_eq!(append.request().token_count(), token_count as u64);
             assert_eq!(append.request().end_position(), token_count as u64);
+            assert_eq!(append.dispatch().backend, 1);
+            assert_eq!(append.dispatch().dispatch_count, 1);
+            assert!(!append.dispatch().fallback_allowed);
+            assert!(!append.dispatch().fallback_used);
             assert_eq!(append.query().unwrap(), ExecutionState::Success);
             assert_eq!(
                 session.kv_state_snapshot(&state).unwrap().length(),

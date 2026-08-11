@@ -200,13 +200,17 @@ struct Oracle final {
         const float q_inverse = 1.0F / std::sqrt(q_sum + 1.0e-6F);
         const float k_inverse = 1.0F / std::sqrt(k_sum + 1.0e-6F);
         for (uint32_t dimension = 0U; dimension != 128U; ++dimension) {
-          q_values[dimension] *= q_inverse;
-          k_values[dimension] *= k_inverse;
+          q_values[dimension] =
+              bf16_to_float(float_to_bf16_rne(q_values[dimension] * q_inverse));
+          k_values[dimension] =
+              bf16_to_float(float_to_bf16_rne(k_values[dimension] * k_inverse));
+          q_values[dimension] *= 1.0F / std::sqrt(128.0F);
         }
         const std::size_t scalar_index =
             static_cast<std::size_t>(token) * 32U + value_head;
-        const float beta =
+        const float beta_f32 =
             1.0F / (1.0F + std::exp(-bf16_to_float(b[scalar_index])));
+        const float beta = bf16_to_float(float_to_bf16_rne(beta_f32));
         const float a_value =
             bf16_to_float(a[scalar_index]) + bf16_to_float(dt_bias[value_head]);
         const float softplus = std::fmax(a_value, 0.0F) +
@@ -215,6 +219,10 @@ struct Oracle final {
         for (uint32_t dimension = 0U; dimension != 128U; ++dimension) {
           const std::size_t state_row =
               (static_cast<std::size_t>(value_head) * 128U + dimension) * 128U;
+          for (uint32_t key_dimension = 0U; key_dimension != 128U;
+               ++key_dimension) {
+            recurrent[state_row + key_dimension] *= decay;
+          }
           float previous_projection = 0.0F;
           for (uint32_t key_dimension = 0U; key_dimension != 128U;
                ++key_dimension) {
@@ -228,11 +236,10 @@ struct Oracle final {
           for (uint32_t key_dimension = 0U; key_dimension != 128U;
                ++key_dimension) {
             const std::size_t index = state_row + key_dimension;
-            recurrent[index] = decay * recurrent[index] +
-                               beta * residual * k_values[key_dimension];
+            recurrent[index] += beta * residual * k_values[key_dimension];
             projection += recurrent[index] * q_values[key_dimension];
           }
-          values[dimension] = projection;
+          values[dimension] = bf16_to_float(float_to_bf16_rne(projection));
         }
         float square_sum = 0.0F;
         for (const float value : values) {
@@ -246,15 +253,183 @@ struct Oracle final {
               dimension;
           const float z_value = bf16_to_float(z[output_index]);
           const float z_silu = z_value / (1.0F + std::exp(-z_value));
-          output[output_index] =
-              float_to_bf16_rne(values[dimension] * inverse_rms *
-                                norm_weight[dimension] * z_silu);
+          const float normalized = values[dimension] * inverse_rms;
+          const float normalized_bf16 =
+              bf16_to_float(float_to_bf16_rne(normalized));
+          output[output_index] = float_to_bf16_rne(
+              normalized_bf16 * norm_weight[dimension] * z_silu);
         }
       }
     }
     return output;
   }
 };
+
+struct BoundaryOptions final {
+  bool scale_query;
+  bool round_qk;
+  bool round_beta;
+  bool round_core;
+  bool round_normalized;
+  bool decay_before_memory;
+};
+
+std::array<uint16_t, 128U>
+run_scalar_boundary_oracle(const BoundaryOptions options) {
+  constexpr uint32_t seed = 1U;
+  constexpr uint32_t head_dim = 128U;
+  constexpr float beta_input = 0.63F;
+  constexpr float decay = 0.81F;
+  std::array<float, head_dim> query{};
+  std::array<float, head_dim> key{};
+  std::array<float, head_dim> value{};
+  std::array<float, head_dim * head_dim> recurrent{};
+  for (uint32_t dimension = 0U; dimension != head_dim; ++dimension) {
+    const int32_t query_base =
+        static_cast<int32_t>((dimension * 37U + seed) % 101U) - 50;
+    const int32_t key_base =
+        static_cast<int32_t>((dimension * 53U + seed * 3U) % 97U) - 48;
+    const int32_t value_base =
+        static_cast<int32_t>((dimension * 29U + seed * 7U) % 83U) - 41;
+    const int32_t query_offset = static_cast<int32_t>(dimension % 7U) - 3;
+    const int32_t key_offset = static_cast<int32_t>(dimension % 5U) - 2;
+    const int32_t value_offset = static_cast<int32_t>(dimension % 3U) - 1;
+    query[dimension] = bf16_to_float(
+        float_to_bf16_rne(static_cast<float>(query_base) * 0.013F +
+                          static_cast<float>(query_offset) * 0.004F));
+    key[dimension] = bf16_to_float(
+        float_to_bf16_rne(static_cast<float>(key_base) * 0.011F +
+                          static_cast<float>(key_offset) * 0.006F));
+    value[dimension] = bf16_to_float(
+        float_to_bf16_rne(static_cast<float>(value_base) * 0.021F +
+                          static_cast<float>(value_offset) * 0.007F));
+    for (uint32_t key_dimension = 0U; key_dimension != head_dim;
+         ++key_dimension) {
+      const int32_t state_base = static_cast<int32_t>(key_dimension % 11U) - 5;
+      const int32_t state_offset = static_cast<int32_t>(key_dimension % 4U) - 2;
+      recurrent[static_cast<std::size_t>(dimension) * head_dim +
+                key_dimension] = static_cast<float>(state_base) * 0.003F +
+                                 static_cast<float>(state_offset) * 0.0007F;
+    }
+  }
+
+  float query_square_sum = 0.0F;
+  float key_square_sum = 0.0F;
+  for (uint32_t dimension = 0U; dimension != head_dim; ++dimension) {
+    query_square_sum += query[dimension] * query[dimension];
+    key_square_sum += key[dimension] * key[dimension];
+  }
+  const float query_inverse = 1.0F / std::sqrt(query_square_sum + 1.0e-6F);
+  const float key_inverse = 1.0F / std::sqrt(key_square_sum + 1.0e-6F);
+  const float query_scale =
+      options.scale_query ? 1.0F / std::sqrt(128.0F) : 1.0F;
+  for (uint32_t dimension = 0U; dimension != head_dim; ++dimension) {
+    const float normalized_query = query[dimension] * query_inverse;
+    const float normalized_key = key[dimension] * key_inverse;
+    query[dimension] = options.round_qk
+                           ? bf16_to_float(float_to_bf16_rne(normalized_query))
+                           : normalized_query;
+    key[dimension] = options.round_qk
+                         ? bf16_to_float(float_to_bf16_rne(normalized_key))
+                         : normalized_key;
+    query[dimension] *= query_scale;
+  }
+
+  const float beta_f32 = 1.0F / (1.0F + std::exp(-beta_input));
+  const float beta = options.round_beta
+                         ? bf16_to_float(float_to_bf16_rne(beta_f32))
+                         : beta_f32;
+
+  std::array<float, head_dim> core{};
+  for (uint32_t value_dimension = 0U; value_dimension != head_dim;
+       ++value_dimension) {
+    const std::size_t state_row =
+        static_cast<std::size_t>(value_dimension) * head_dim;
+    if (options.decay_before_memory) {
+      for (uint32_t key_dimension = 0U; key_dimension != head_dim;
+           ++key_dimension) {
+        recurrent[state_row + key_dimension] *= decay;
+      }
+    }
+    float kv_memory = 0.0F;
+    for (uint32_t key_dimension = 0U; key_dimension != head_dim;
+         ++key_dimension) {
+      kv_memory += recurrent[state_row + key_dimension] * key[key_dimension];
+    }
+    const float residual = value[value_dimension] - kv_memory;
+    if (!options.decay_before_memory) {
+      for (uint32_t key_dimension = 0U; key_dimension != head_dim;
+           ++key_dimension) {
+        recurrent[state_row + key_dimension] *= decay;
+      }
+    }
+    for (uint32_t key_dimension = 0U; key_dimension != head_dim;
+         ++key_dimension) {
+      recurrent[state_row + key_dimension] +=
+          beta * residual * key[key_dimension];
+    }
+    float projection = 0.0F;
+    for (uint32_t key_dimension = 0U; key_dimension != head_dim;
+         ++key_dimension) {
+      projection += recurrent[state_row + key_dimension] * query[key_dimension];
+    }
+    core[value_dimension] = options.round_core
+                                ? bf16_to_float(float_to_bf16_rne(projection))
+                                : projection;
+  }
+
+  float core_square_sum = 0.0F;
+  for (const float core_value : core) {
+    core_square_sum += core_value * core_value;
+  }
+  const float inverse_rms =
+      1.0F / std::sqrt(core_square_sum / 128.0F + 1.0e-6F);
+  std::array<uint16_t, head_dim> result{};
+  for (uint32_t dimension = 0U; dimension != head_dim; ++dimension) {
+    const float normalized = core[dimension] * inverse_rms;
+    const float normalized_value =
+        options.round_normalized ? bf16_to_float(float_to_bf16_rne(normalized))
+                                 : normalized;
+    const int32_t z_offset =
+        static_cast<int32_t>((dimension * 17U + seed) % 19U) - 9;
+    const float z_input = 0.2F + static_cast<float>(z_offset) * 0.025F;
+    const float z_value = bf16_to_float(float_to_bf16_rne(z_input));
+    const float z_silu = z_value / (1.0F + std::exp(-z_value));
+    const float norm_weight =
+        0.7F + static_cast<float>(dimension % 11U) * 0.03F;
+    result[dimension] =
+        float_to_bf16_rne(normalized_value * norm_weight * z_silu);
+  }
+  return result;
+}
+
+bool check_scalar_boundary_regressions() {
+  const BoundaryOptions exact{true, true, true, true, true, true};
+  const auto expected = run_scalar_boundary_oracle(exact);
+  const auto without_query_scale = run_scalar_boundary_oracle(
+      BoundaryOptions{false, true, true, true, true, true});
+  const auto without_qk_round = run_scalar_boundary_oracle(
+      BoundaryOptions{true, false, true, true, true, true});
+  const auto without_beta_round = run_scalar_boundary_oracle(
+      BoundaryOptions{true, true, false, true, true, true});
+  const auto without_core_round = run_scalar_boundary_oracle(
+      BoundaryOptions{true, true, true, false, true, true});
+  const auto without_normalized_round = run_scalar_boundary_oracle(
+      BoundaryOptions{true, true, true, true, false, true});
+  const auto wrong_decay_order = run_scalar_boundary_oracle(
+      BoundaryOptions{true, true, true, true, true, false});
+  const auto differs = [&expected](const std::array<uint16_t, 128U> &actual) {
+    return actual != expected;
+  };
+  if (!differs(without_query_scale) || !differs(without_qk_round) ||
+      !differs(without_beta_round) || !differs(without_core_round) ||
+      !differs(without_normalized_round) || !differs(wrong_decay_order)) {
+    std::cerr << "scalar GDN boundary regression did not distinguish an "
+                 "omitted semantic boundary\n";
+    return false;
+  }
+  return true;
+}
 
 uint32_t bf16_ulp_distance(const uint16_t left, const uint16_t right) {
   const auto ordered = [](const uint16_t value) {
@@ -273,6 +448,9 @@ uint32_t bf16_ulp_distance(const uint16_t left, const uint16_t right) {
 int main() {
   constexpr uint64_t max_tokens = 3U;
   constexpr uint64_t capacity = 4U;
+  if (!check_scalar_boundary_regressions()) {
+    return 1;
+  }
   sllm_context_create_info_t context_info{};
   context_info.struct_size = sizeof(context_info);
   context_info.abi_version = SLLM_HIP_ABI_VERSION;
@@ -489,8 +667,10 @@ int main() {
               "context release", error)) {
     return 1;
   }
-  std::cout << "{\"state\":\"PASS\",\"target\":\"" << SLLM_TEST_EXPECTED_TARGET
-            << "\",\"prefill_tokens\":3,\"decode_tokens\":1,\"max_bf16_ulp\":"
-            << max_observed_ulp << ",\"fallback_used\":false}\n";
+  std::cout
+      << "{\"state\":\"PASS\",\"target\":\"" << SLLM_TEST_EXPECTED_TARGET
+      << "\",\"prefill_tokens\":3,\"decode_tokens\":1,\"max_bf16_ulp\":"
+      << max_observed_ulp
+      << ",\"scalar_boundary_regression\":true,\"fallback_used\":false}\n";
   return 0;
 }

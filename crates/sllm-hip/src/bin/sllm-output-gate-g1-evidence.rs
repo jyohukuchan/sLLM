@@ -17,6 +17,9 @@ const QUERY_HEADS: usize = 16;
 const HEAD_DIM: usize = 256;
 const O_PROJ_INPUT_WIDTH: usize = QUERY_HEADS * HEAD_DIM;
 const DISTINCT_INDEX: usize = 8;
+const INTERMEDIATE_BOUNDARY_INDEX: usize = 12;
+const SIGMOID_BOUNDARY_GATE: u16 = 0xc100;
+const SIGMOID_BOUNDARY_VALUE: u16 = 0xc0fe;
 const WAIT_TIMEOUT: Duration = Duration::from_secs(30);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(16);
 
@@ -58,6 +61,7 @@ struct CaseEvidence {
     nan_classification_match: bool,
     signed_zero_match: bool,
     distinct_from_silu_mul: bool,
+    intermediate_bf16_boundary_distinct: bool,
     rounded_down_values: usize,
     rounded_up_values: usize,
 }
@@ -137,6 +141,24 @@ fn bf16_to_float(value: u16) -> f32 {
     f32::from_bits(u32::from(value) << 16)
 }
 
+fn sigmoid_mul_bf16_intermediate(gate_bits: u16, value_bits: u16) -> u16 {
+    let gate = bf16_to_float(gate_bits);
+    let sigmoid_bf16 = float_to_bf16_rne(1.0_f32 / (1.0_f32 + (-gate).exp()));
+    float_to_bf16_rne(bf16_to_float(sigmoid_bf16) * bf16_to_float(value_bits))
+}
+
+fn sigmoid_mul_f32_fused(gate_bits: u16, value_bits: u16) -> u16 {
+    let gate = bf16_to_float(gate_bits);
+    let sigmoid = 1.0_f32 / (1.0_f32 + (-gate).exp());
+    float_to_bf16_rne(sigmoid * bf16_to_float(value_bits))
+}
+
+fn silu_mul_bf16_intermediate(gate_bits: u16, value_bits: u16) -> u16 {
+    let gate = bf16_to_float(gate_bits);
+    let silu_bf16 = float_to_bf16_rne(gate / (1.0_f32 + (-gate).exp()));
+    float_to_bf16_rne(bf16_to_float(silu_bf16) * bf16_to_float(value_bits))
+}
+
 fn is_bf16_nan(value: u16) -> bool {
     value & 0x7f80 == 0x7f80 && value & 0x007f != 0
 }
@@ -177,6 +199,7 @@ fn make_inputs(element_count: usize) -> (Vec<u16>, Vec<u16>) {
         (0xc000, 0x7f7f),
         (0x7f7f, 0x3f81),
         (0x0080, 0x8080),
+        (SIGMOID_BOUNDARY_GATE, SIGMOID_BOUNDARY_VALUE),
     ];
     for (index, (gate_bits, value_bits)) in special.into_iter().enumerate() {
         gate[index] = gate_bits;
@@ -201,8 +224,7 @@ fn validate_dispatch(
     element_count: usize,
     target: &str,
 ) -> Result<(), String> {
-    let expected_grid = u32::try_from(element_count.div_ceil(256))
-        .map_err(|_| "grid size does not fit u32".to_owned())?;
+    let expected_grid = dispatch_grid_size(element_count)?;
     if dispatch.abi_version != 1
         || dispatch.info_version != 1
         || dispatch.dispatch_id == 0
@@ -222,6 +244,12 @@ fn validate_dispatch(
         return Err("sigmoid_mul dispatch metadata violated the exact contract".to_owned());
     }
     Ok(())
+}
+
+fn dispatch_grid_size(element_count: usize) -> Result<u32, String> {
+    let workgroup = 256_usize;
+    let blocks = element_count / workgroup + usize::from(element_count % workgroup != 0);
+    u32::try_from(blocks).map_err(|_| "grid size does not fit u32".to_owned())
 }
 
 fn run_case(
@@ -328,6 +356,7 @@ fn run_case(
     let mut rounded_down_values = 0_usize;
     let mut rounded_up_values = 0_usize;
     let mut distinct_from_silu_mul = false;
+    let mut intermediate_bf16_boundary_distinct = false;
     for (index, ((&gate_bits, &value_bits), &actual)) in gate_words
         .iter()
         .zip(&value_words)
@@ -337,8 +366,9 @@ fn run_case(
         let gate = bf16_to_float(gate_bits);
         let value = bf16_to_float(value_bits);
         let sigmoid = 1.0_f32 / (1.0_f32 + (-gate).exp());
-        let fp32_product = sigmoid * value;
-        let expected = float_to_bf16_rne(fp32_product);
+        let sigmoid_bf16 = float_to_bf16_rne(sigmoid);
+        let fp32_product = bf16_to_float(sigmoid_bf16) * value;
+        let expected = sigmoid_mul_bf16_intermediate(gate_bits, value_bits);
         if is_bf16_nan(expected) {
             nan_classification_match &= is_bf16_nan(actual);
         } else {
@@ -358,14 +388,19 @@ fn run_case(
             }
         }
         if index == DISTINCT_INDEX {
-            let forbidden_silu = float_to_bf16_rne((gate * sigmoid) * value);
+            let forbidden_silu = silu_mul_bf16_intermediate(gate_bits, value_bits);
             distinct_from_silu_mul = expected != forbidden_silu && actual == expected;
+        }
+        if index == INTERMEDIATE_BOUNDARY_INDEX {
+            intermediate_bf16_boundary_distinct =
+                expected != sigmoid_mul_f32_fused(gate_bits, value_bits) && actual == expected;
         }
     }
     if !finite_and_infinite_bit_match
         || !nan_classification_match
         || !signed_zero_match
         || !distinct_from_silu_mul
+        || !intermediate_bf16_boundary_distinct
         || rounded_down_values == 0
         || rounded_up_values == 0
     {
@@ -384,6 +419,7 @@ fn run_case(
         nan_classification_match,
         signed_zero_match,
         distinct_from_silu_mul,
+        intermediate_bf16_boundary_distinct,
         rounded_down_values,
         rounded_up_values,
     })
@@ -421,11 +457,11 @@ fn run(config: &Config) -> Result<Report, String> {
         contract: ContractEvidence {
             semantic_op: "sigmoid_mul",
             forbidden_semantic_reuse: "silu_mul",
-            formula: "f32_sigmoid(bf16_gate) * f32(bf16_attention_value)",
+            formula: "bf16_rne(sigmoid(f32(bf16_gate))) -> f32 * f32(bf16_attention_value) -> bf16_rne",
             input_dtype: "BF16",
             operation_dtype: "FP32",
             output_dtype: "BF16",
-            output_rounding: "round-to-nearest-even once after FP32 multiply",
+            output_rounding: "round-to-nearest-even after sigmoid and once after FP32 multiply",
             shape: "[M,16,256] row-major contiguous",
             gqa_query_heads: QUERY_HEADS,
             head_dim: HEAD_DIM,
@@ -471,6 +507,14 @@ mod tests {
     use super::*;
 
     #[test]
+    fn dispatch_grid_is_exact_at_workgroup_boundaries() {
+        assert_eq!(dispatch_grid_size(1), Ok(1));
+        assert_eq!(dispatch_grid_size(255), Ok(1));
+        assert_eq!(dispatch_grid_size(256), Ok(1));
+        assert_eq!(dispatch_grid_size(257), Ok(2));
+    }
+
+    #[test]
     fn oracle_covers_required_m_special_values_and_bf16_rne_directions() {
         assert_eq!(
             float_to_bf16_rne(f32::from_bits(0x3f80_8000)),
@@ -493,8 +537,8 @@ mod tests {
             let mut rounded_up = 0_usize;
             for (&gate_bits, &value_bits) in gate.iter().zip(&value) {
                 let gate_value = bf16_to_float(gate_bits);
-                let attention_value = bf16_to_float(value_bits);
-                let product = (1.0_f32 / (1.0_f32 + (-gate_value).exp())) * attention_value;
+                let sigmoid_bf16 = float_to_bf16_rne(1.0_f32 / (1.0_f32 + (-gate_value).exp()));
+                let product = bf16_to_float(sigmoid_bf16) * bf16_to_float(value_bits);
                 if product.is_finite() && product.to_bits() & 0xffff != 0 {
                     if u32::from(float_to_bf16_rne(product)) == product.to_bits() >> 16 {
                         rounded_down += 1;
@@ -511,13 +555,17 @@ mod tests {
             assert!(is_bf16_nan(gate[4]));
             assert_eq!(gate[7], 0x0001);
             assert_eq!(gate[DISTINCT_INDEX], 0x4000);
-            let gate_two = bf16_to_float(gate[DISTINCT_INDEX]);
-            let value_one = bf16_to_float(value[DISTINCT_INDEX]);
-            let sigmoid = 1.0_f32 / (1.0_f32 + (-gate_two).exp());
             assert_ne!(
-                float_to_bf16_rne(sigmoid * value_one),
-                float_to_bf16_rne((gate_two * sigmoid) * value_one),
+                sigmoid_mul_bf16_intermediate(gate[DISTINCT_INDEX], value[DISTINCT_INDEX]),
+                silu_mul_bf16_intermediate(gate[DISTINCT_INDEX], value[DISTINCT_INDEX]),
                 "sigmoid_mul oracle must remain distinct from silu_mul"
+            );
+            assert_eq!(gate[INTERMEDIATE_BOUNDARY_INDEX], SIGMOID_BOUNDARY_GATE);
+            assert_eq!(value[INTERMEDIATE_BOUNDARY_INDEX], SIGMOID_BOUNDARY_VALUE);
+            assert_ne!(
+                sigmoid_mul_f32_fused(SIGMOID_BOUNDARY_GATE, SIGMOID_BOUNDARY_VALUE),
+                sigmoid_mul_bf16_intermediate(SIGMOID_BOUNDARY_GATE, SIGMOID_BOUNDARY_VALUE),
+                "sigmoid_mul oracle must require the BF16 sigmoid boundary"
             );
         }
     }

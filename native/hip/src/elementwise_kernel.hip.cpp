@@ -2,6 +2,7 @@
 
 #include <cmath>
 #include <cstdint>
+#include <limits>
 
 namespace {
 
@@ -67,7 +68,9 @@ __launch_bounds__(256, 1) void sllm_elementwise_silu_mul_bf16_fp32_v1(
   if (index < element_count) {
     const float gate_value = bf16_to_float(gate[index]);
     const float silu = gate_value / (1.0F + ::expf(-gate_value));
-    output[index] = float_to_bf16_rne_bits(silu * bf16_to_float(up[index]));
+    const uint16_t silu_bf16 = float_to_bf16_rne_bits(silu);
+    output[index] = float_to_bf16_rne_bits(bf16_to_float(silu_bf16) *
+                                           bf16_to_float(up[index]));
   }
 }
 
@@ -80,18 +83,27 @@ __launch_bounds__(256, 1) void sllm_elementwise_sigmoid_mul_bf16_fp32_v1(
   if (index < element_count) {
     const float gate_value = bf16_to_float(gate[index]);
     const float sigmoid = 1.0F / (1.0F + ::expf(-gate_value));
-    output[index] =
-        float_to_bf16_rne_bits(sigmoid * bf16_to_float(attention_value[index]));
+    const uint16_t sigmoid_bf16 = float_to_bf16_rne_bits(sigmoid);
+    output[index] = float_to_bf16_rne_bits(
+        bf16_to_float(sigmoid_bf16) * bf16_to_float(attention_value[index]));
   }
 }
 
 namespace sllm_elementwise_kernel {
 namespace {
 
-dim3 grid_for(const uint64_t element_count) noexcept {
-  return dim3(static_cast<uint32_t>((element_count + kWorkgroupSize - 1U) /
-                                    kWorkgroupSize),
-              1U, 1U);
+bool grid_for(const uint64_t element_count, dim3 *const grid) noexcept {
+  if (grid == nullptr || element_count == 0U) {
+    return false;
+  }
+  const uint64_t workgroup = static_cast<uint64_t>(kWorkgroupSize);
+  const uint64_t blocks = element_count / workgroup +
+                          static_cast<uint64_t>(element_count % workgroup != 0U);
+  if (blocks > std::numeric_limits<uint32_t>::max()) {
+    return false;
+  }
+  *grid = dim3(static_cast<uint32_t>(blocks), 1U, 1U);
+  return true;
 }
 
 } // namespace
@@ -99,7 +111,11 @@ dim3 grid_for(const uint64_t element_count) noexcept {
 hipError_t launch_copy(const uint16_t *const input, uint16_t *const output,
                        const uint64_t element_count,
                        const hipStream_t stream) noexcept {
-  hipLaunchKernelGGL(sllm_elementwise_copy_bf16_v1, grid_for(element_count),
+  dim3 grid;
+  if (!grid_for(element_count, &grid)) {
+    return hipErrorInvalidValue;
+  }
+  hipLaunchKernelGGL(sllm_elementwise_copy_bf16_v1, grid,
                      dim3(kWorkgroupSize), 0U, stream, input, output,
                      element_count);
   return hipGetLastError();
@@ -109,7 +125,11 @@ hipError_t launch_add(const uint16_t *const input0,
                       const uint16_t *const input1, uint16_t *const output,
                       const uint64_t element_count,
                       const hipStream_t stream) noexcept {
-  hipLaunchKernelGGL(sllm_elementwise_add_bf16_fp32_v1, grid_for(element_count),
+  dim3 grid;
+  if (!grid_for(element_count, &grid)) {
+    return hipErrorInvalidValue;
+  }
+  hipLaunchKernelGGL(sllm_elementwise_add_bf16_fp32_v1, grid,
                      dim3(kWorkgroupSize), 0U, stream, input0, input1, output,
                      element_count);
   return hipGetLastError();
@@ -118,9 +138,13 @@ hipError_t launch_add(const uint16_t *const input0,
 hipError_t launch_silu_mul(const uint16_t *const gate, const uint16_t *const up,
                            uint16_t *const output, const uint64_t element_count,
                            const hipStream_t stream) noexcept {
+  dim3 grid;
+  if (!grid_for(element_count, &grid)) {
+    return hipErrorInvalidValue;
+  }
   hipLaunchKernelGGL(sllm_elementwise_silu_mul_bf16_fp32_v1,
-                     grid_for(element_count), dim3(kWorkgroupSize), 0U, stream,
-                     gate, up, output, element_count);
+                     grid, dim3(kWorkgroupSize), 0U, stream, gate, up, output,
+                     element_count);
   return hipGetLastError();
 }
 
@@ -129,9 +153,13 @@ hipError_t launch_sigmoid_mul(const uint16_t *const gate,
                               uint16_t *const output,
                               const uint64_t element_count,
                               const hipStream_t stream) noexcept {
+  dim3 grid;
+  if (!grid_for(element_count, &grid)) {
+    return hipErrorInvalidValue;
+  }
   hipLaunchKernelGGL(sllm_elementwise_sigmoid_mul_bf16_fp32_v1,
-                     grid_for(element_count), dim3(kWorkgroupSize), 0U, stream,
-                     gate, attention_value, output, element_count);
+                     grid, dim3(kWorkgroupSize), 0U, stream, gate,
+                     attention_value, output, element_count);
   return hipGetLastError();
 }
 

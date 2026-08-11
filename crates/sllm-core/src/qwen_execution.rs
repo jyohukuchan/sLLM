@@ -8,8 +8,8 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crate::execution::{
@@ -35,13 +35,52 @@ use crate::weights::{
     WeightClassification, WeightLoadEntry, WeightLoadPlan, WeightUploadError, WeightUploadReceipt,
     WeightUploadRequest, upload_verified_weight,
 };
-use crate::{AccessMode, DType};
+use crate::{AccessMode, DType, DispatchEvidence};
 
 /// Output published by a fully completed Qwen request transition.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct QwenExecutionOutput {
     token_ids: Vec<i32>,
     committed_length: u64,
+}
+
+/// Immutable, request-local dispatch audit published after a successful
+/// transition.  The counters are accumulated from accepted backend evidence;
+/// they are not estimates of graph size.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct QwenExecutionAudit {
+    selected_backend: &'static str,
+    target: String,
+    submission_count: u64,
+    kernel_dispatch_count: u64,
+    fallback_used: bool,
+    all_dispatches_hip: bool,
+}
+
+impl QwenExecutionAudit {
+    pub const fn selected_backend(&self) -> &'static str {
+        self.selected_backend
+    }
+
+    pub fn target(&self) -> &str {
+        &self.target
+    }
+
+    pub const fn submission_count(&self) -> u64 {
+        self.submission_count
+    }
+
+    pub const fn kernel_dispatch_count(&self) -> u64 {
+        self.kernel_dispatch_count
+    }
+
+    pub const fn fallback_used(&self) -> bool {
+        self.fallback_used
+    }
+
+    pub const fn all_dispatches_hip(&self) -> bool {
+        self.all_dispatches_hip
+    }
 }
 
 impl QwenExecutionOutput {
@@ -250,6 +289,12 @@ impl QwenExecutionRequest {
     pub fn plan_digest(&self) -> &[u8; 32] {
         self.core.plan.digest()
     }
+
+    /// Returns the immutable audit accumulated by successful compute
+    /// submissions. An empty audit is never a successful request audit.
+    pub fn audit_snapshot(&self) -> Result<QwenExecutionAudit, QwenExecutionError> {
+        self.core.audit_snapshot()
+    }
 }
 
 // There is intentionally no `Drop` implementation. Destroying a request
@@ -268,9 +313,57 @@ struct QwenExecutionCore {
     linear_states: BTreeMap<u32, LinearAttentionState>,
     scales: BTreeMap<usize, CachedScale>,
     completion_timeout: Duration,
+    audit: Mutex<DispatchAuditAccumulator>,
     lifecycle: Arc<RequestLifecycle>,
     committed_length: u64,
     last_output: Option<QwenExecutionOutput>,
+}
+
+#[derive(Debug, Default)]
+struct DispatchAuditAccumulator {
+    target: Option<String>,
+    submission_count: u64,
+    kernel_dispatch_count: u64,
+    fallback_used: bool,
+    all_dispatches_hip: bool,
+}
+
+impl DispatchAuditAccumulator {
+    fn record_evidence(&mut self, evidence: &DispatchEvidence) -> Result<(), QwenExecutionError> {
+        if evidence.backend != 1
+            || evidence.fallback_allowed
+            || evidence.fallback_used
+            || evidence.dispatch_count == 0
+            || evidence.target.is_empty()
+            || !evidence.target.is_ascii()
+            || evidence.target.as_bytes().contains(&0)
+        {
+            return Err(QwenExecutionError::InvalidRequest(
+                "accepted dispatch evidence is not an exact HIP, no-fallback dispatch".to_owned(),
+            ));
+        }
+        if let Some(target) = &self.target {
+            if target != &evidence.target {
+                return Err(QwenExecutionError::InvalidRequest(
+                    "dispatch evidence targets differ within one Qwen request".to_owned(),
+                ));
+            }
+        } else {
+            self.target = Some(evidence.target.clone());
+        }
+        self.submission_count = self.submission_count.checked_add(1).ok_or_else(|| {
+            QwenExecutionError::InvalidRequest("dispatch submission count overflowed".to_owned())
+        })?;
+        self.kernel_dispatch_count = self
+            .kernel_dispatch_count
+            .checked_add(u64::from(evidence.dispatch_count))
+            .ok_or_else(|| {
+                QwenExecutionError::InvalidRequest("kernel dispatch count overflowed".to_owned())
+            })?;
+        self.all_dispatches_hip |= evidence.backend == 1;
+        self.fallback_used |= evidence.fallback_used;
+        Ok(())
+    }
 }
 
 struct TensorAllocation {
@@ -502,6 +595,7 @@ impl QwenExecutionCore {
             linear_states,
             scales,
             completion_timeout,
+            audit: Mutex::new(DispatchAuditAccumulator::default()),
             lifecycle: Arc::new(RequestLifecycle::new()),
             committed_length: 0,
             last_output: None,
@@ -708,6 +802,7 @@ impl QwenExecutionCore {
         let mut submission =
             self.submit_semantic(node.label(), descriptor, input_bindings, output_bindings)?;
         wait_submission_success(&mut submission, self.completion_timeout, node.label())?;
+        self.record_dispatch(submission.dispatch())?;
         if kind != SemanticOpKind::Argmax {
             return Ok(None);
         }
@@ -765,6 +860,7 @@ impl QwenExecutionCore {
         let outputs = self.bind_many(node.outputs(), token_count, AccessMode::Write)?;
         let mut submission = self.submit_semantic(node.label(), descriptor, inputs, outputs)?;
         wait_submission_success(&mut submission, self.completion_timeout, node.label())?;
+        self.record_dispatch(submission.dispatch())?;
         let _ = layer;
         Ok(())
     }
@@ -794,7 +890,8 @@ impl QwenExecutionCore {
             start_position,
             start_position,
         )?;
-        wait_kv_append_success(&mut submission, self.completion_timeout, node.label())
+        wait_kv_append_success(&mut submission, self.completion_timeout, node.label())?;
+        self.record_dispatch(submission.dispatch())
     }
 
     fn execute_causal_attention(
@@ -821,7 +918,8 @@ impl QwenExecutionCore {
         let mut submission =
             self.session
                 .causal_attention(state, &self.queue, query, output, descriptor)?;
-        wait_causal_attention_success(&mut submission, self.completion_timeout, node.label())
+        wait_causal_attention_success(&mut submission, self.completion_timeout, node.label())?;
+        self.record_dispatch(submission.dispatch())
     }
 
     fn execute_linear_attention(
@@ -859,7 +957,45 @@ impl QwenExecutionCore {
         let mut submission =
             self.session
                 .linear_attention(state, &self.queue, bindings, descriptor)?;
-        wait_linear_attention_success(&mut submission, self.completion_timeout, node.label())
+        wait_linear_attention_success(&mut submission, self.completion_timeout, node.label())?;
+        self.record_dispatch(submission.dispatch())
+    }
+
+    fn record_dispatch(&self, evidence: &DispatchEvidence) -> Result<(), QwenExecutionError> {
+        self.audit
+            .lock()
+            .map_err(|_| QwenExecutionError::Poisoned)?
+            .record_evidence(evidence)
+    }
+
+    fn audit_snapshot(&self) -> Result<QwenExecutionAudit, QwenExecutionError> {
+        let audit = self
+            .audit
+            .lock()
+            .map_err(|_| QwenExecutionError::Poisoned)?;
+        let target = audit.target.clone().ok_or_else(|| {
+            QwenExecutionError::InvalidRequest(
+                "successful Qwen transition has an empty dispatch audit".to_owned(),
+            )
+        })?;
+        if audit.submission_count == 0 || audit.kernel_dispatch_count == 0 {
+            return Err(QwenExecutionError::InvalidRequest(
+                "successful Qwen transition has an empty dispatch audit".to_owned(),
+            ));
+        }
+        if !audit.all_dispatches_hip || audit.fallback_used {
+            return Err(QwenExecutionError::InvalidRequest(
+                "Qwen dispatch audit is not HIP-only and fallback-free".to_owned(),
+            ));
+        }
+        Ok(QwenExecutionAudit {
+            selected_backend: if audit.all_dispatches_hip { "hip" } else { "" },
+            target,
+            submission_count: audit.submission_count,
+            kernel_dispatch_count: audit.kernel_dispatch_count,
+            fallback_used: audit.fallback_used,
+            all_dispatches_hip: audit.all_dispatches_hip,
+        })
     }
 
     fn validate_cached_scale(
@@ -2161,19 +2297,28 @@ mod tests {
             _key: &OwnedTensorBinding,
             _value: &OwnedTensorBinding,
             request: &KvStateAppendRequest,
-        ) -> Result<Box<dyn ExecutionKvStateSubmissionAdapter>, ExecutionError> {
+        ) -> Result<
+            (
+                Box<dyn ExecutionKvStateSubmissionAdapter>,
+                crate::DispatchEvidence,
+            ),
+            ExecutionError,
+        > {
             self.event(format!(
                 "kv-append:{}:{}:{}",
                 state.layer_id(),
                 request.start_position(),
                 request.token_count()
             ));
-            Ok(Box::new(RecorderKvCompletion {
-                recorder: Arc::new(self.clone_for_submission()),
-                state_id: state.id().raw(),
-                expected_length: request.end_position(),
-                completed: false,
-            }))
+            Ok((
+                Box::new(RecorderKvCompletion {
+                    recorder: Arc::new(self.clone_for_submission()),
+                    state_id: state.id().raw(),
+                    expected_length: request.end_position(),
+                    completed: false,
+                }),
+                dispatch_evidence(),
+            ))
         }
 
         fn execute_causal_attention(
@@ -2259,6 +2404,8 @@ mod tests {
                 descriptor.start_position(),
                 descriptor.token_count()
             ));
+            let mut dispatch = dispatch_evidence();
+            dispatch.dispatch_count = 2;
             Ok((
                 Box::new(RecorderLinearCompletion {
                     recorder: Arc::new(self.clone_for_submission()),
@@ -2266,7 +2413,7 @@ mod tests {
                     expected_length: descriptor.expected_length(),
                     completed: false,
                 }),
-                dispatch_evidence(),
+                dispatch,
             ))
         }
     }
@@ -2454,7 +2601,7 @@ mod tests {
             grid_size_x: 1,
             row_count: 1,
             normalized_size: 1,
-            backend: 0,
+            backend: 1,
             fallback_allowed: false,
             fallback_used: false,
             kernel_symbol: "recorder".to_owned(),
@@ -2473,6 +2620,74 @@ mod tests {
             QwenExecutionCore::provision(session, graph, plan, Duration::from_millis(1), &source)
                 .expect("structural fixture provisions");
         (core, source)
+    }
+
+    #[test]
+    fn dispatch_audit_counts_typed_multi_dispatch_and_kv_submission() {
+        let mut audit = DispatchAuditAccumulator::default();
+        let semantic = dispatch_evidence();
+        audit.record_evidence(&semantic).unwrap();
+        let mut linear = semantic.clone();
+        linear.dispatch_count = 2;
+        audit.record_evidence(&linear).unwrap();
+        let mut kv_append = semantic;
+        kv_append.dispatch_id = 3;
+        audit.record_evidence(&kv_append).unwrap();
+        assert_eq!(audit.submission_count, 3);
+        assert_eq!(audit.kernel_dispatch_count, 4);
+        assert_eq!(audit.target.as_deref(), Some("recorder"));
+    }
+
+    #[test]
+    fn dispatch_audit_rejects_mixed_target_backend_and_fallback_evidence() {
+        let mut audit = DispatchAuditAccumulator::default();
+        audit.record_evidence(&dispatch_evidence()).unwrap();
+
+        let mut wrong_target = dispatch_evidence();
+        wrong_target.target = "other".to_owned();
+        assert!(matches!(
+            audit.record_evidence(&wrong_target),
+            Err(QwenExecutionError::InvalidRequest(_))
+        ));
+
+        let mut wrong_backend = dispatch_evidence();
+        wrong_backend.backend = 0;
+        assert!(matches!(
+            audit.record_evidence(&wrong_backend),
+            Err(QwenExecutionError::InvalidRequest(_))
+        ));
+
+        let mut fallback_allowed = dispatch_evidence();
+        fallback_allowed.fallback_allowed = true;
+        assert!(matches!(
+            audit.record_evidence(&fallback_allowed),
+            Err(QwenExecutionError::InvalidRequest(_))
+        ));
+
+        let mut fallback_used = dispatch_evidence();
+        fallback_used.fallback_used = true;
+        assert!(matches!(
+            audit.record_evidence(&fallback_used),
+            Err(QwenExecutionError::InvalidRequest(_))
+        ));
+    }
+
+    #[test]
+    fn audit_snapshot_rejects_empty_and_poisoned_audits() {
+        let recorder = Arc::new(ExecutionRecorder::default());
+        let (core, _) = provisioned_core(recorder);
+        assert!(matches!(
+            core.audit_snapshot(),
+            Err(QwenExecutionError::InvalidRequest(_))
+        ));
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = core.audit.lock().unwrap();
+            panic!("poison audit mutex for fail-closed test");
+        }));
+        assert!(matches!(
+            core.audit_snapshot(),
+            Err(QwenExecutionError::Poisoned)
+        ));
     }
 
     #[test]
@@ -2546,6 +2761,15 @@ mod tests {
         assert_eq!(decode.token_ids(), &[104]);
         assert_eq!(decode.committed_length(), 4);
         assert_eq!(core.last_output.as_ref(), Some(&decode));
+        let audit = core
+            .audit_snapshot()
+            .expect("successful transition is audited");
+        assert_eq!(audit.selected_backend(), "hip");
+        assert_eq!(audit.target(), "recorder");
+        assert!(audit.submission_count() > 0);
+        assert!(audit.kernel_dispatch_count() >= audit.submission_count());
+        assert!(!audit.fallback_used());
+        assert!(audit.all_dispatches_hip());
         for state in core.kv_states.values() {
             assert_eq!(state.snapshot(core.session.as_ref()).unwrap().length(), 4);
         }
@@ -2719,5 +2943,56 @@ mod tests {
             Err(QwenExecutionError::InvalidRequest(_))
         ));
         assert!(!core.lifecycle.poisoned.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn dispatch_audit_counts_kernel_dispatches_and_rejects_non_hip_evidence() {
+        let mut audit = DispatchAuditAccumulator::default();
+        let first = dispatch_evidence();
+        audit.record_evidence(&first).unwrap();
+        let mut two_kernel = first.clone();
+        two_kernel.dispatch_id = 2;
+        two_kernel.dispatch_count = 2;
+        audit.record_evidence(&two_kernel).unwrap();
+        assert_eq!(audit.target.as_deref(), Some("recorder"));
+        assert_eq!(audit.submission_count, 2);
+        assert_eq!(audit.kernel_dispatch_count, 3);
+        assert!(audit.all_dispatches_hip);
+        assert!(!audit.fallback_used);
+
+        for invalid in [
+            {
+                let mut value = first.clone();
+                value.backend = 2;
+                value
+            },
+            {
+                let mut value = first.clone();
+                value.fallback_allowed = true;
+                value
+            },
+            {
+                let mut value = first.clone();
+                value.fallback_used = true;
+                value
+            },
+            {
+                let mut value = first.clone();
+                value.dispatch_count = 0;
+                value
+            },
+        ] {
+            assert!(
+                DispatchAuditAccumulator::default()
+                    .record_evidence(&invalid)
+                    .is_err()
+            );
+        }
+
+        let mut mixed_target = DispatchAuditAccumulator::default();
+        mixed_target.record_evidence(&first).unwrap();
+        let mut wrong_target = first;
+        wrong_target.target = "other".to_owned();
+        assert!(mixed_target.record_evidence(&wrong_target).is_err());
     }
 }

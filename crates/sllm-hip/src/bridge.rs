@@ -25,7 +25,8 @@ use sllm_core::{
 
 use crate::argmax::{ArgmaxDispatchInfo, ArgmaxSubmission, PreparedArgmax};
 use crate::kv_state::{
-    CausalAttentionCompletion, CausalAttentionEvidence, KvAppendCompletion, KvStateResource,
+    CausalAttentionCompletion, CausalAttentionEvidence, KvAppendCompletion, KvAppendEvidence,
+    KvStateResource,
 };
 use crate::linear_attention::{
     LinearAttentionCompletion, LinearAttentionEvidence, LinearAttentionStateResource,
@@ -338,7 +339,8 @@ impl ExecutionSessionAdapter for HipExecutionSession {
         key: &OwnedTensorBinding,
         value: &OwnedTensorBinding,
         request: &sllm_core::KvStateAppendRequest,
-    ) -> Result<Box<dyn ExecutionKvStateSubmissionAdapter>, ExecutionError> {
+    ) -> Result<(Box<dyn ExecutionKvStateSubmissionAdapter>, DispatchEvidence), ExecutionError>
+    {
         self.state.ensure_open()?;
         let state_resource = access
             .downcast_kv_state_payload::<KvStateResource>(state)?
@@ -353,17 +355,20 @@ impl ExecutionSessionAdapter for HipExecutionSession {
         let key = key_buffer.binding(key.view().clone());
         let value = value_buffer.binding(value.view().clone());
         let ticket = self.state.acquire_active()?;
-        let completion = match state_resource.append(&queue, &key, &value, *request) {
-            Ok(completion) => completion,
+        let (completion, evidence) = match state_resource.append(&queue, &key, &value, *request) {
+            Ok(result) => result,
             Err(error) => {
                 drop(ticket);
                 return Err(map_backend_error(error));
             }
         };
-        Ok(Box::new(HipKvSubmission {
-            completion,
-            _ticket: ticket,
-        }))
+        Ok((
+            Box::new(HipKvSubmission {
+                completion,
+                _ticket: ticket,
+            }),
+            dispatch_from_kv_append(evidence),
+        ))
     }
 
     fn execute_causal_attention(
@@ -1174,6 +1179,26 @@ fn dispatch_from_attention_preprocess(
         kernel_symbol: dispatch.kernel_symbol,
         device_symbol: dispatch.device_symbol,
         target: dispatch.gcn_arch_name,
+    }
+}
+
+fn dispatch_from_kv_append(dispatch: KvAppendEvidence) -> DispatchEvidence {
+    DispatchEvidence {
+        abi_version: sys::SLLM_HIP_ABI_VERSION,
+        info_version: sys::SLLM_HIP_KV_APPEND_INFO_VERSION,
+        dispatch_id: dispatch.dispatch_id,
+        dispatch_count: dispatch.dispatch_count,
+        kernel_id: dispatch.kernel_id,
+        workgroup_size_x: dispatch.workgroup_size_x,
+        grid_size_x: dispatch.grid_size_x,
+        row_count: dispatch.token_count,
+        normalized_size: 4 * 256,
+        backend: sys::SLLM_BACKEND_HIP,
+        fallback_allowed: dispatch.fallback_allowed,
+        fallback_used: dispatch.fallback_used,
+        kernel_symbol: dispatch.kernel_symbol,
+        device_symbol: dispatch.device_symbol,
+        target: dispatch.target,
     }
 }
 

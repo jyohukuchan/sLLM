@@ -140,17 +140,25 @@ __launch_bounds__(128, 1) void sllm_linear_attention_recurrent_gated_norm_v1(
       const uint64_t scalar_index =
           static_cast<uint64_t>(token) * 32U + value_head;
       const float b_value = bf16_to_float(b_input[scalar_index]);
-      beta = 1.0F / (1.0F + expf(-b_value));
+      const float beta_f32 = 1.0F / (1.0F + expf(-b_value));
+      beta = bf16_to_float(float_to_bf16_rne_bits(beta_f32));
       const float a_value = bf16_to_float(a_input[scalar_index]) +
                             bf16_to_float(dt_bias[value_head]);
       const float g = -expf(a_log[value_head]) * softplus(a_value);
       decay = expf(g);
     }
     __syncthreads();
-    q_values[dimension] *= q_inverse_norm;
-    k_values[dimension] *= k_inverse_norm;
+    q_values[dimension] = bf16_to_float(
+        float_to_bf16_rne_bits(q_values[dimension] * q_inverse_norm));
+    q_values[dimension] *= 1.0F / sqrtf(128.0F);
+    k_values[dimension] = bf16_to_float(
+        float_to_bf16_rne_bits(k_values[dimension] * k_inverse_norm));
     __syncthreads();
 
+    for (uint32_t key_dimension = 0U; key_dimension != head_dim;
+         ++key_dimension) {
+      next_recurrent_state[state_row + key_dimension] *= decay;
+    }
     float previous_projection = 0.0F;
     for (uint32_t key_dimension = 0U; key_dimension != head_dim;
          ++key_dimension) {
@@ -166,12 +174,13 @@ __launch_bounds__(128, 1) void sllm_linear_attention_recurrent_gated_norm_v1(
     for (uint32_t key_dimension = 0U; key_dimension != head_dim;
          ++key_dimension) {
       const uint64_t index = state_row + key_dimension;
-      const float updated = decay * next_recurrent_state[index] +
+      const float updated = next_recurrent_state[index] +
                             beta * residual * k_values[key_dimension];
       next_recurrent_state[index] = updated;
       current_projection += updated * q_values[key_dimension];
     }
-    output_values[dimension] = current_projection;
+    output_values[dimension] =
+        bf16_to_float(float_to_bf16_rne_bits(current_projection));
     __syncthreads();
     if (dimension == 0U) {
       float sum = 0.0F;
@@ -186,9 +195,11 @@ __launch_bounds__(128, 1) void sllm_linear_attention_recurrent_gated_norm_v1(
                                   dimension;
     const float z_value = bf16_to_float(z[output_index]);
     const float z_silu = z_value / (1.0F + expf(-z_value));
-    output[output_index] =
-        float_to_bf16_rne_bits(output_values[dimension] * output_inverse_rms *
-                               norm_weight[dimension] * z_silu);
+    const float normalized = output_values[dimension] * output_inverse_rms;
+    const float normalized_bf16 =
+        bf16_to_float(float_to_bf16_rne_bits(normalized));
+    output[output_index] = float_to_bf16_rne_bits(
+        normalized_bf16 * norm_weight[dimension] * z_silu);
     __syncthreads();
   }
 }
@@ -209,7 +220,9 @@ hipError_t launch_convolution(const uint16_t *const qkv,
   }
   const uint64_t elements =
       static_cast<uint64_t>(token_count) * kQkvWidth + kConvHistory * kQkvWidth;
-  const uint64_t blocks = (elements + kWorkgroupSize - 1U) / kWorkgroupSize;
+  const uint64_t workgroup = static_cast<uint64_t>(kWorkgroupSize);
+  const uint64_t blocks = elements / workgroup +
+                          static_cast<uint64_t>(elements % workgroup != 0U);
   if (blocks > std::numeric_limits<uint32_t>::max()) {
     return hipErrorInvalidValue;
   }

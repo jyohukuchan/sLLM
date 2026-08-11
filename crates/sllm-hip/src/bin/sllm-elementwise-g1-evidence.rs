@@ -13,6 +13,9 @@ use sllm_core::{
 use sllm_hip::HipBackend;
 
 const CASE_SIZES: [usize; 7] = [1, 3, 17, 255, 256, 257, 2560];
+const SILU_BOUNDARY_INDEX: usize = 3;
+const SILU_BOUNDARY_GATE: u16 = 0xc100;
+const SILU_BOUNDARY_UP: u16 = 0xc0fe;
 const WAIT_TIMEOUT: Duration = Duration::from_secs(30);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(16);
 
@@ -31,6 +34,7 @@ struct CaseEvidence {
     device_symbol: String,
     grid_size_x: u32,
     exact_match: bool,
+    intermediate_bf16_boundary_distinct: bool,
 }
 
 #[derive(Serialize)]
@@ -106,6 +110,18 @@ fn bf16_to_float(value: u16) -> f32 {
     f32::from_bits(u32::from(value) << 16)
 }
 
+fn silu_mul_bf16_intermediate(gate_bits: u16, up_bits: u16) -> u16 {
+    let gate = bf16_to_float(gate_bits);
+    let silu_bf16 = float_to_bf16_rne(gate / (1.0 + (-gate).exp()));
+    float_to_bf16_rne(bf16_to_float(silu_bf16) * bf16_to_float(up_bits))
+}
+
+fn silu_mul_f32_fused(gate_bits: u16, up_bits: u16) -> u16 {
+    let gate = bf16_to_float(gate_bits);
+    let silu = gate / (1.0 + (-gate).exp());
+    float_to_bf16_rne(silu * bf16_to_float(up_bits))
+}
+
 fn words_to_bytes(words: &[u16]) -> Vec<u8> {
     words.iter().flat_map(|word| word.to_le_bytes()).collect()
 }
@@ -165,8 +181,7 @@ fn validate_dispatch(
         ),
         _ => return Err("evidence received a non-elementwise operation".to_owned()),
     };
-    let expected_grid = u32::try_from(element_count.div_ceil(256))
-        .map_err(|_| "grid size does not fit u32".to_owned())?;
+    let expected_grid = dispatch_grid_size(element_count)?;
     if dispatch.abi_version != 1
         || dispatch.info_version != 1
         || dispatch.dispatch_id == 0
@@ -191,6 +206,12 @@ fn validate_dispatch(
     Ok(())
 }
 
+fn dispatch_grid_size(element_count: usize) -> Result<u32, String> {
+    let workgroup = 256_usize;
+    let blocks = element_count / workgroup + usize::from(element_count % workgroup != 0);
+    u32::try_from(blocks).map_err(|_| "grid size does not fit u32".to_owned())
+}
+
 fn run_case(
     session: &sllm_core::ExecutionSession,
     queue: &sllm_core::ExecutionQueue,
@@ -199,6 +220,10 @@ fn run_case(
     target: &str,
 ) -> Result<CaseEvidence, String> {
     let (mut input0_words, mut input1_words) = make_inputs(element_count);
+    if kind == SemanticOpKind::SiluMul && element_count > SILU_BOUNDARY_INDEX {
+        input0_words[SILU_BOUNDARY_INDEX] = SILU_BOUNDARY_GATE;
+        input1_words[SILU_BOUNDARY_INDEX] = SILU_BOUNDARY_UP;
+    }
     if kind == SemanticOpKind::Add && element_count >= 3 {
         input0_words[0] = 0x7f80;
         input1_words[0] = float_to_bf16_rne(1.0);
@@ -302,28 +327,35 @@ fn run_case(
     if written != actual.len() as u64 {
         return Err("output byte count mismatch".to_owned());
     }
-    let expected = match kind {
-        SemanticOpKind::Copy => input0_bytes,
-        SemanticOpKind::Add => words_to_bytes(
-            &input0_words
-                .iter()
-                .zip(input1_words)
-                .map(|(&left, right)| float_to_bf16_rne(bf16_to_float(left) + bf16_to_float(right)))
-                .collect::<Vec<_>>(),
-        ),
-        SemanticOpKind::SiluMul => words_to_bytes(
-            &input0_words
-                .iter()
-                .zip(input1_words)
-                .map(|(&gate, up)| {
-                    let gate = bf16_to_float(gate);
-                    let silu = gate / (1.0 + (-gate).exp());
-                    float_to_bf16_rne(silu * bf16_to_float(up))
-                })
-                .collect::<Vec<_>>(),
-        ),
+    let expected_words = match kind {
+        SemanticOpKind::Copy => input0_words.clone(),
+        SemanticOpKind::Add => input0_words
+            .iter()
+            .zip(&input1_words)
+            .map(|(&left, &right)| float_to_bf16_rne(bf16_to_float(left) + bf16_to_float(right)))
+            .collect::<Vec<_>>(),
+        SemanticOpKind::SiluMul => input0_words
+            .iter()
+            .zip(&input1_words)
+            .map(|(&gate, &up)| silu_mul_bf16_intermediate(gate, up))
+            .collect::<Vec<_>>(),
         _ => unreachable!(),
     };
+    let intermediate_bf16_boundary_distinct =
+        kind == SemanticOpKind::SiluMul && element_count > SILU_BOUNDARY_INDEX;
+    if intermediate_bf16_boundary_distinct {
+        let fused_words = input0_words
+            .iter()
+            .zip(&input1_words)
+            .map(|(&gate, &up)| silu_mul_f32_fused(gate, up))
+            .collect::<Vec<_>>();
+        if expected_words == fused_words {
+            return Err(format!(
+                "silu_mul oracle did not exercise the BF16 intermediate boundary at {element_count} elements"
+            ));
+        }
+    }
+    let expected = words_to_bytes(&expected_words);
     if actual != expected {
         return Err(format!(
             "{} numerical oracle mismatch at {element_count} elements",
@@ -338,6 +370,7 @@ fn run_case(
         device_symbol: dispatch.device_symbol,
         grid_size_x: dispatch.grid_size_x,
         exact_match: true,
+        intermediate_bf16_boundary_distinct,
     })
 }
 
@@ -418,5 +451,27 @@ fn main() -> ExitCode {
             eprintln!("elementwise-g1: {error}");
             ExitCode::from(2)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dispatch_grid_is_exact_at_workgroup_boundaries() {
+        assert_eq!(dispatch_grid_size(1), Ok(1));
+        assert_eq!(dispatch_grid_size(255), Ok(1));
+        assert_eq!(dispatch_grid_size(256), Ok(1));
+        assert_eq!(dispatch_grid_size(257), Ok(2));
+    }
+
+    #[test]
+    fn silu_oracle_requires_the_bf16_intermediate_boundary() {
+        let fused = silu_mul_f32_fused(SILU_BOUNDARY_GATE, SILU_BOUNDARY_UP);
+        let corrected = silu_mul_bf16_intermediate(SILU_BOUNDARY_GATE, SILU_BOUNDARY_UP);
+
+        assert_ne!(fused, corrected);
+        assert_eq!(corrected, silu_mul_bf16_intermediate(0xc100, 0xc0fe));
     }
 }

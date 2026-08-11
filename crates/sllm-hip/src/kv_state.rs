@@ -207,7 +207,7 @@ impl KvStateResource {
         key: &TensorBinding,
         value: &TensorBinding,
         request: KvStateAppendRequest,
-    ) -> Result<KvAppendCompletion, RuntimeError> {
+    ) -> Result<(KvAppendCompletion, KvAppendEvidence), RuntimeError> {
         if request.state_id() != self.inner.state_id
             || request.descriptor() != self.inner.descriptor
             || request.start_position() != request.expected_length()
@@ -266,16 +266,19 @@ impl KvStateResource {
             terminal: false,
             canceled: false,
         };
-        if let Err(error) = validate_append_info(
+        let evidence = match validate_append_info(
             &append_info,
             &self.inner.context,
             request,
             self.inner.descriptor,
         ) {
-            drop(completion);
-            return Err(error);
-        }
-        Ok(completion)
+            Ok(evidence) => evidence,
+            Err(error) => {
+                drop(completion);
+                return Err(error);
+            }
+        };
+        Ok((completion, evidence))
     }
 
     pub(crate) fn causal_attention(

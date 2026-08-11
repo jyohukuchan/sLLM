@@ -295,6 +295,14 @@ impl ModelFrontendBackend for ProductionBackend {
                 request.max_new_tokens,
                 input.as_slice(),
             )?;
+            let audit = owner
+                .audit_snapshot()
+                .map_err(|_| "Qwen dispatch audit was empty or invalid".to_owned())?;
+            if audit.target() != request.target {
+                return Err(
+                    "Qwen dispatch audit target differs from the requested target".to_owned(),
+                );
+            }
             let report = outcome.report;
             let visible = TokenIdsV1::from_slice(report.visible_token_ids());
             let text = tokenizer
@@ -318,14 +326,17 @@ impl ModelFrontendBackend for ProductionBackend {
                     "token_id": stop.token_id(),
                 },
                 "execution": {
-                    "selected_backend": "hip",
-                    "target": request.target,
+                    "selected_backend": audit.selected_backend(),
+                    "target": audit.target(),
                     "device_index": request.device_index,
                     "model_fingerprint": model_fingerprint,
                     "plan_digest": plan_digest,
                     "prefill_tokens": input.len(),
                     "decode_steps": outcome.decode_steps,
-                    "fallback_used": false,
+                    "fallback_used": audit.fallback_used(),
+                    "submission_count": audit.submission_count(),
+                    "kernel_dispatch_count": audit.kernel_dispatch_count(),
+                    "all_dispatches_hip": audit.all_dispatches_hip(),
                 },
             }))
         })();
@@ -1158,5 +1169,48 @@ mod tests {
             assert_eq!(document["result"]["kind"], command);
             assert_eq!(document["scope"]["gpu_execution"], command == "generate");
         }
+    }
+
+    #[test]
+    fn serialized_generate_report_contains_dispatch_audit_fields() {
+        let identity = ModelIdentity {
+            repo_id: "Qwen/Qwen3.5-4B".to_owned(),
+            resolved_revision: "8".repeat(40),
+            lock_fingerprint: format!("sha256:{}", "3".repeat(64)),
+        };
+        let result = json!({
+            "kind": "generate",
+            "input_kind": "prompt",
+            "input_token_ids": [9419],
+            "generated_token_ids": [220],
+            "visible_token_ids": [220],
+            "decode_input_token_ids": [],
+            "output_text": "Hello",
+            "stop_reason": {"version": 1, "reason_version": 1, "kind": "max_new_tokens", "token_id": null},
+            "execution": {
+                "selected_backend": "hip",
+                "target": "gfx1030",
+                "device_index": 0,
+                "model_fingerprint": identity.lock_fingerprint,
+                "plan_digest": format!("sha256:{}", "9".repeat(64)),
+                "prefill_tokens": 1,
+                "decode_steps": 0,
+                "fallback_used": false,
+                "submission_count": 1,
+                "kernel_dispatch_count": 1,
+                "all_dispatches_hip": true,
+            },
+            "timing_ns": 1,
+            "cleanup": {"retryable_cleanup": 0, "durable_quarantine": 0},
+        });
+        let document: Value =
+            serde_json::from_str(&serialize_report("generate", &identity, result).unwrap())
+                .unwrap();
+        assert_eq!(document["scope"]["offline"], true);
+        assert_eq!(document["scope"]["generation"], true);
+        assert_eq!(document["result"]["execution"]["selected_backend"], "hip");
+        assert_eq!(document["result"]["execution"]["submission_count"], 1);
+        assert_eq!(document["result"]["execution"]["kernel_dispatch_count"], 1);
+        assert_eq!(document["result"]["execution"]["all_dispatches_hip"], true);
     }
 }

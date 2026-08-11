@@ -1,40 +1,37 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://sllm.dev/schema/model-frontend-cli-report-v1.schema.json",
-  "title": "sLLM offline model frontend CLI success report v1",
+  "title": "sLLM model frontend CLI report v1",
   "type": "object",
   "additionalProperties": false,
   "required": ["schema_version", "command", "state", "model", "scope", "result"],
   "properties": {
     "schema_version": {"const": "model-frontend-cli-report-v1"},
-    "command": {"enum": ["verify-model", "tokenize", "render", "decode"]},
+    "command": {"enum": ["verify-model", "tokenize", "render", "decode", "generate"]},
     "state": {"const": "PASS"},
     "model": {
-      "type": "object",
-      "additionalProperties": false,
+      "type": "object", "additionalProperties": false,
       "required": ["repo_id", "resolved_revision", "lock_fingerprint"],
       "properties": {
         "repo_id": {"type": "string", "minLength": 1},
         "resolved_revision": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
-        "lock_fingerprint": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
+        "lock_fingerprint": {"$ref": "#/$defs/fingerprint"}
       }
     },
     "scope": {
-      "type": "object",
-      "additionalProperties": false,
+      "type": "object", "additionalProperties": false,
       "required": ["offline", "gpu_execution", "model_execution", "generation"],
       "properties": {
-        "offline": {"const": true},
-        "gpu_execution": {"const": false},
-        "model_execution": {"const": false},
-        "generation": {"const": false}
+        "offline": {"type": "boolean"},
+        "gpu_execution": {"type": "boolean"},
+        "model_execution": {"type": "boolean"},
+        "generation": {"type": "boolean"}
       }
     },
     "result": {
       "oneOf": [
         {
-          "type": "object",
-          "additionalProperties": false,
+          "type": "object", "additionalProperties": false,
           "required": ["kind", "locked_files", "verified_files", "tensor_count", "weight_entries", "loadable_entries", "known_unconsumed_entries", "total_destination_bytes", "plan_digest"],
           "properties": {
             "kind": {"const": "verify-model"},
@@ -45,30 +42,72 @@
             "loadable_entries": {"type": "integer", "minimum": 1},
             "known_unconsumed_entries": {"type": "integer", "minimum": 0},
             "total_destination_bytes": {"type": "integer", "minimum": 1},
-            "plan_digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
+            "plan_digest": {"$ref": "#/$defs/fingerprint"}
           }
         },
         {
-          "type": "object",
-          "additionalProperties": false,
+          "type": "object", "additionalProperties": false,
           "required": ["kind", "count", "token_ids"],
           "properties": {
             "kind": {"const": "tokenize"},
             "count": {"type": "integer", "minimum": 0},
-            "token_ids": {"type": "array", "maxItems": 1048576, "items": {"type": "integer", "minimum": 0, "maximum": 4294967295}}
+            "token_ids": {"$ref": "#/$defs/token_ids"}
           }
         },
         {
-          "type": "object",
-          "additionalProperties": false,
+          "type": "object", "additionalProperties": false,
           "required": ["kind", "text"],
           "properties": {"kind": {"const": "render"}, "text": {"type": "string", "maxLength": 16777216}}
         },
         {
-          "type": "object",
-          "additionalProperties": false,
+          "type": "object", "additionalProperties": false,
           "required": ["kind", "text"],
           "properties": {"kind": {"const": "decode"}, "text": {"type": "string"}}
+        },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["kind", "input_kind", "input_token_ids", "generated_token_ids", "visible_token_ids", "decode_input_token_ids", "output_text", "stop_reason", "execution", "timing_ns", "cleanup"],
+          "properties": {
+            "kind": {"const": "generate"},
+            "input_kind": {"enum": ["prompt", "messages"]},
+            "input_token_ids": {"$ref": "#/$defs/token_ids"},
+            "generated_token_ids": {"$ref": "#/$defs/token_ids"},
+            "visible_token_ids": {"$ref": "#/$defs/token_ids"},
+            "decode_input_token_ids": {"$ref": "#/$defs/token_ids"},
+            "output_text": {"type": "string", "maxLength": 16777216},
+            "stop_reason": {
+              "type": "object", "additionalProperties": false,
+              "required": ["version", "reason_version", "kind", "token_id"],
+              "properties": {
+                "version": {"const": 1}, "reason_version": {"const": 1},
+                "kind": {"enum": ["stop_token", "max_new_tokens"]},
+                "token_id": {"anyOf": [{"type": "null"}, {"$ref": "#/$defs/token_id"}]}
+              }
+            },
+            "execution": {
+              "type": "object", "additionalProperties": false,
+              "required": ["selected_backend", "target", "device_index", "model_fingerprint", "plan_digest", "prefill_tokens", "decode_steps", "fallback_used", "submission_count", "kernel_dispatch_count", "all_dispatches_hip"],
+              "properties": {
+                "selected_backend": {"const": "hip"},
+                "target": {"enum": ["gfx1030", "gfx1201"]},
+                "device_index": {"type": "integer", "minimum": 0, "maximum": 4294967295},
+                "model_fingerprint": {"$ref": "#/$defs/fingerprint"},
+                "plan_digest": {"$ref": "#/$defs/fingerprint"},
+                "prefill_tokens": {"type": "integer", "minimum": 1, "maximum": 1048576},
+                "decode_steps": {"type": "integer", "minimum": 0, "maximum": 1048576},
+                "fallback_used": {"const": false},
+                "submission_count": {"type": "integer", "minimum": 1, "maximum": 18446744073709551615},
+                "kernel_dispatch_count": {"type": "integer", "minimum": 1, "maximum": 18446744073709551615},
+                "all_dispatches_hip": {"const": true}
+              }
+            },
+            "timing_ns": {"type": "integer", "minimum": 0, "maximum": 18446744073709551615},
+            "cleanup": {
+              "type": "object", "additionalProperties": false,
+              "required": ["retryable_cleanup", "durable_quarantine"],
+              "properties": {"retryable_cleanup": {"const": 0}, "durable_quarantine": {"const": 0}}
+            }
+          }
         }
       ]
     }
@@ -77,6 +116,14 @@
     {"if": {"properties": {"command": {"const": "verify-model"}}}, "then": {"properties": {"result": {"properties": {"kind": {"const": "verify-model"}}}}}},
     {"if": {"properties": {"command": {"const": "tokenize"}}}, "then": {"properties": {"result": {"properties": {"kind": {"const": "tokenize"}}}}}},
     {"if": {"properties": {"command": {"const": "render"}}}, "then": {"properties": {"result": {"properties": {"kind": {"const": "render"}}}}}},
-    {"if": {"properties": {"command": {"const": "decode"}}}, "then": {"properties": {"result": {"properties": {"kind": {"const": "decode"}}}}}}
-  ]
+    {"if": {"properties": {"command": {"const": "decode"}}}, "then": {"properties": {"result": {"properties": {"kind": {"const": "decode"}}}}}},
+    {"if": {"properties": {"command": {"const": "generate"}}}, "then": {"properties": {"result": {"properties": {"kind": {"const": "generate"}}}}}},
+    {"if": {"properties": {"command": {"enum": ["verify-model", "tokenize", "render", "decode"]}}}, "then": {"properties": {"scope": {"properties": {"offline": {"const": true}, "gpu_execution": {"const": false}, "model_execution": {"const": false}, "generation": {"const": false}}}}}},
+    {"if": {"properties": {"command": {"const": "generate"}}}, "then": {"properties": {"scope": {"properties": {"offline": {"const": true}, "gpu_execution": {"const": true}, "model_execution": {"const": true}, "generation": {"const": true}}}}}}
+  ],
+  "$defs": {
+    "fingerprint": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "token_id": {"type": "integer", "minimum": 0, "maximum": 4294967295},
+    "token_ids": {"type": "array", "maxItems": 1048576, "items": {"$ref": "#/$defs/token_id"}}
+  }
 }
