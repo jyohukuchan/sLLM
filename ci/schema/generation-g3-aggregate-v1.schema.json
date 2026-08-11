@@ -1,0 +1,53 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sllm-project.local/ci/schema/generation-g3-aggregate-v1.schema.json",
+  "title": "sLLM bounded Phase 3 G3 aggregate v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "aggregate_id", "state", "required", "candidate", "matrix", "model", "rows", "counts", "scope", "raw_data_policy"],
+  "properties": {
+    "schema_version": {"const": "generation-g3-aggregate-v1"},
+    "aggregate_id": {"type": "string", "pattern": "^generation-g3-aggregate-[0-9a-f]{64}$"},
+    "state": {"const": "PASS"},
+    "required": {"const": true},
+    "candidate": {"$ref": "#/$defs/candidate"},
+    "matrix": {"$ref": "#/$defs/matrix"},
+    "model": {"$ref": "#/$defs/model"},
+    "rows": {"type": "array", "minItems": 12, "maxItems": 12, "items": {"$ref": "#/$defs/row"}},
+    "counts": {"$ref": "#/$defs/counts"},
+    "scope": {"$ref": "#/$defs/scope"},
+    "raw_data_policy": {"$ref": "#/$defs/raw_data_policy"}
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "sha40": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "fingerprint": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "token_id": {"type": "integer", "minimum": 0, "maximum": 4294967295},
+    "token_ids": {"type": "array", "maxItems": 4096, "items": {"$ref": "#/$defs/token_id"}},
+    "candidate": {"type": "object", "additionalProperties": false, "required": ["commit", "tree", "candidate_sha256"], "properties": {"commit": {"$ref": "#/$defs/sha40"}, "tree": {"$ref": "#/$defs/sha40"}, "candidate_sha256": {"$ref": "#/$defs/sha256"}}},
+    "matrix": {"type": "object", "additionalProperties": false, "required": ["matrix_id", "sha256"], "properties": {"matrix_id": {"const": "generation-g3-v1"}, "sha256": {"$ref": "#/$defs/sha256"}}},
+    "model": {"type": "object", "additionalProperties": false, "required": ["repo_id", "resolved_revision", "lock_fingerprint"], "properties": {"repo_id": {"const": "Qwen/Qwen3.5-4B"}, "resolved_revision": {"$ref": "#/$defs/sha40"}, "lock_fingerprint": {"$ref": "#/$defs/fingerprint"}}},
+    "run": {"type": "object", "additionalProperties": false, "required": ["run_id", "attempt", "identity_sha256"], "properties": {"run_id": {"type": "string", "pattern": "^g3-run-[0-9a-f]{32}$"}, "attempt": {"type": "integer", "minimum": 1, "maximum": 1000000}, "identity_sha256": {"$ref": "#/$defs/sha256"}}},
+    "device": {"type": "object", "additionalProperties": false, "required": ["target", "gpu_uuid", "gpu_bdf", "logical_device_index"], "properties": {"target": {"enum": ["gfx1030", "gfx1201"]}, "gpu_uuid": {"type": "string", "pattern": "^GPU-[0-9a-f]{16}$"}, "gpu_bdf": {"type": "string", "pattern": "^[0-9a-f]{4}:[0-9a-f]{2}:[0-9a-f]{2}\\.[0-7]$"}, "logical_device_index": {"const": 0}}},
+    "scope": {"type": "object", "additionalProperties": false, "required": ["offline", "gpu_execution", "model_execution", "generation"], "properties": {"offline": {"const": true}, "gpu_execution": {"const": true}, "model_execution": {"const": true}, "generation": {"const": true}}},
+    "stop_reason": {"type": "object", "additionalProperties": false, "required": ["version", "reason_version", "kind", "token_id"], "properties": {"version": {"const": 1}, "reason_version": {"const": 1}, "kind": {"enum": ["stop_token", "max_new_tokens"]}, "token_id": {"anyOf": [{"type": "null"}, {"$ref": "#/$defs/token_id"}]}}},
+    "generation": {"type": "object", "additionalProperties": false, "required": ["generated_token_ids", "visible_token_ids", "decode_input_token_ids", "output_text", "stop_reason"], "properties": {"generated_token_ids": {"$ref": "#/$defs/token_ids"}, "visible_token_ids": {"$ref": "#/$defs/token_ids"}, "decode_input_token_ids": {"$ref": "#/$defs/token_ids"}, "output_text": {"type": "string", "maxLength": 16777216}, "stop_reason": {"$ref": "#/$defs/stop_reason"}}},
+    "audit": {"type": "object", "additionalProperties": false, "required": ["selected_backend", "target", "device_index", "model_fingerprint", "plan_digest", "prefill_tokens", "decode_steps", "fallback_used", "submission_count", "kernel_dispatch_count", "all_dispatches_hip"], "properties": {"selected_backend": {"const": "hip"}, "target": {"enum": ["gfx1030", "gfx1201"]}, "device_index": {"const": 0}, "model_fingerprint": {"$ref": "#/$defs/fingerprint"}, "plan_digest": {"$ref": "#/$defs/fingerprint"}, "prefill_tokens": {"type": "integer", "minimum": 1, "maximum": 257}, "decode_steps": {"type": "integer", "minimum": 0, "maximum": 4096}, "fallback_used": {"const": false}, "submission_count": {"type": "integer", "minimum": 1, "maximum": 18446744073709551615}, "kernel_dispatch_count": {"type": "integer", "minimum": 1, "maximum": 18446744073709551615}, "all_dispatches_hip": {"const": true}}},
+    "cleanup": {"type": "object", "additionalProperties": false, "required": ["pre_process_clean", "post_process_clean", "process_group_gone", "retryable_cleanup", "durable_quarantine"], "properties": {"pre_process_clean": {"const": true}, "post_process_clean": {"const": true}, "process_group_gone": {"const": true}, "retryable_cleanup": {"const": 0}, "durable_quarantine": {"const": 0}}},
+    "execution": {"type": "object", "additionalProperties": false, "required": ["exit_code", "timed_out", "timeout_seconds", "duration_ns", "term_sent", "kill_sent", "process_group_gone"], "properties": {"exit_code": {"const": 0}, "timed_out": {"const": false}, "timeout_seconds": {"const": 180}, "duration_ns": {"type": "integer", "minimum": 0, "maximum": 180000000000}, "term_sent": {"const": false}, "kill_sent": {"const": false}, "process_group_gone": {"const": true}}},
+    "row": {
+      "type": "object", "additionalProperties": false,
+      "required": ["schema_version", "record_kind", "state", "golden_status", "row_id", "order", "target", "case_id", "run", "candidate", "matrix", "model", "device", "binary_sha256", "raw_report_sha256", "input", "generation", "scope", "audit", "cleanup", "execution"],
+      "properties": {
+        "schema_version": {"const": "generation-g3-report-v1"}, "record_kind": {"const": "normalized_row"}, "state": {"const": "PASS"}, "golden_status": {"const": "reviewed"}, "row_id": {"type": "string", "pattern": "^generation-g3-(gfx1030|gfx1201)-g3-[a-z0-9-]+$"}, "order": {"type": "integer", "minimum": 0, "maximum": 11}, "target": {"enum": ["gfx1030", "gfx1201"]}, "case_id": {"type": "string", "pattern": "^g3-[a-z0-9-]+$"}, "run": {"$ref": "#/$defs/run"}, "candidate": {"$ref": "#/$defs/candidate"}, "matrix": {"$ref": "#/$defs/matrix"}, "model": {"$ref": "#/$defs/model"}, "device": {"$ref": "#/$defs/device"}, "binary_sha256": {"$ref": "#/$defs/sha256"}, "raw_report_sha256": {"$ref": "#/$defs/sha256"},
+        "input": {"type": "object", "additionalProperties": false, "required": ["kind", "token_ids", "token_count"], "properties": {"kind": {"enum": ["prompt", "messages"]}, "token_ids": {"$ref": "#/$defs/token_ids"}, "token_count": {"type": "integer", "minimum": 1, "maximum": 257}}}, "generation": {"$ref": "#/$defs/generation"}, "scope": {"$ref": "#/$defs/scope"}, "audit": {"$ref": "#/$defs/audit"}, "cleanup": {"$ref": "#/$defs/cleanup"}, "execution": {"$ref": "#/$defs/execution"}
+      }
+    },
+    "counts": {
+      "type": "object", "additionalProperties": false,
+      "required": ["expected_rows", "selected_rows", "collected_rows", "passed_rows", "failed_rows", "pending_rows", "expected_cases", "reviewed_cases", "reviewed_audit_comparisons", "reviewed_audit_mismatches"],
+      "properties": {"expected_rows": {"const": 12}, "selected_rows": {"const": 12}, "collected_rows": {"const": 12}, "passed_rows": {"const": 12}, "failed_rows": {"const": 0}, "pending_rows": {"const": 0}, "expected_cases": {"const": 12}, "reviewed_cases": {"const": 6}, "reviewed_audit_comparisons": {"const": 48}, "reviewed_audit_mismatches": {"const": 0}}
+    },
+    "raw_data_policy": {"type": "object", "additionalProperties": false, "required": ["raw_model_bytes", "raw_trace", "report_contains_paths", "manifests_reopened"], "properties": {"raw_model_bytes": {"const": false}, "raw_trace": {"const": false}, "report_contains_paths": {"const": false}, "manifests_reopened": {"const": true}}}
+  }
+}
