@@ -24,6 +24,7 @@ H3_PUBLIC_RUNTIME_WORKFLOW_JOBS = {"h3-public-runtime"}
 H3_RMSNORM_WORKFLOW_JOBS = {"h3-rmsnorm"}
 H3_RMSNORM_ACTIONS = {
     "checkout": "actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803",
+    "setup_python": "actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1",
     "upload": "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a",
 }
 H3_RMSNORM_IMAGE_REFERENCE = "docker.io/rocm/dev-ubuntu-24.04@sha256:439edaa8f0c4be4a3728e528f87b8a2ea1f051f34cf10b27caa4bd94f562eda7"
@@ -249,6 +250,7 @@ docker run --rm --network none --user "$(id -u):$(id -g)" \\
   --env REVIEWED_SHA --env TESTED_SHA --env WORKFLOW_SHA --env TREE_OID \\
   --env GITHUB_RUN_ID --env GITHUB_RUN_ATTEMPT --env SLLM_H3_NETWORK_DISABLED \\
   --env RMSNORM_H3_IMAGE_REFERENCE --env RMSNORM_H3_IMAGE_CONFIG_DIGEST \\
+  --env PYTHONPATH=/tmp/python-packages \\
   --workdir /workspace \\
   "$RMSNORM_H3_IMAGE_REFERENCE" /bin/bash -eu -o pipefail -c '
     mkdir -p "$HOME"
@@ -285,6 +287,20 @@ def _expected_rmsnorm_steps() -> list[dict[str, object]]:
                 "test ! -e \"$RUN_ROOT\"\n"
                 "mkdir -m 700 \"$RUN_ROOT\"\n"
                 "printf 'RUN_ROOT=%s\\n' \"$RUN_ROOT\" >> \"$GITHUB_ENV\"\n"
+            ),
+        },
+        {
+            "name": "Set up Python 3.12",
+            "uses": H3_RMSNORM_ACTIONS["setup_python"],
+            "with": {"python-version": "3.12.10"},
+        },
+        {
+            "name": "Install aggregate schema requirements",
+            "run": (
+                "python3 -m pip install --disable-pip-version-check --no-input "
+                "--require-hashes --only-binary=:all: --no-deps "
+                '--target "$RUN_ROOT/python-packages" '
+                "-r ci/requirements-host.txt"
             ),
         },
         {
@@ -862,9 +878,9 @@ def validate_rmsnorm_h3_workflow(path: Path, document: dict[str, object]) -> lis
         if prohibited in lowered:
             raise ContractError(f"{path.relative_to(ROOT)}: RMSNorm workflow contains prohibited form {prohibited}")
     upload_steps = [step for step in steps if isinstance(step, dict) and step.get("uses")]
-    if [step.get("uses") for step in upload_steps] != [H3_RMSNORM_ACTIONS["checkout"], H3_RMSNORM_ACTIONS["upload"]]:
+    if [step.get("uses") for step in upload_steps] != [H3_RMSNORM_ACTIONS["checkout"], H3_RMSNORM_ACTIONS["setup_python"], H3_RMSNORM_ACTIONS["upload"]]:
         raise ContractError(f"{path.relative_to(ROOT)}: RMSNorm action identities/order are not exact")
-    upload = steps[6]
+    upload = steps[8]
     assert isinstance(upload, dict)
     upload_path = upload.get("with", {}).get("path", "") if isinstance(upload.get("with"), dict) else ""
     if upload_path != ".local-artifacts/rmsnorm-h3-aggregate/rmsnorm-h3-aggregate.json\n.local-artifacts/rmsnorm-h3-aggregate/rmsnorm-h3-aggregate.json.sha256\n":

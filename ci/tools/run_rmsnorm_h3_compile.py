@@ -84,6 +84,7 @@ _EXPECTED_SOURCE_SETS = {
         "ci/tools/run_rmsnorm_h3_compile.py",
         "ci/tools/run_h3_public_runtime_compile.py",
         "ci/matrix/hip-runtime-compile-v1.json",
+        "ci/requirements-host.txt",
         "ci/tools/aggregate_rmsnorm_h3_results.py",
         "ci/tests/test_rmsnorm_h3_contracts.py",
         "ci/tests/test_rmsnorm_h3_runner.py",
