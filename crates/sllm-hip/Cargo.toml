@@ -50,6 +50,10 @@ path = "src/bin/sllm-full-attention-g1-evidence.rs"
 name = "sllm-output-gate-g1-evidence"
 path = "src/bin/sllm-output-gate-g1-evidence.rs"
 
+[[bin]]
+name = "sllm-qwen-d2-evidence"
+path = "src/bin/sllm-qwen-d2-evidence.rs"
+
 [dependencies]
 serde.workspace = true
 serde_json.workspace = true

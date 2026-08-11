@@ -336,6 +336,20 @@
           "doctest": false
         },
         {
+          "name": "sllm-qwen-d2-evidence",
+          "kind": [
+            "bin"
+          ],
+          "crate_types": [
+            "bin"
+          ],
+          "edition": "2024",
+          "required_features": [],
+          "test": true,
+          "doc": true,
+          "doctest": false
+        },
+        {
           "name": "sllm-rmsnorm-g1-evidence",
           "kind": [
             "bin"

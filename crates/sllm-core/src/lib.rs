@@ -13,6 +13,8 @@ mod kv_state;
 mod linear_attention;
 mod model;
 mod op;
+mod qwen_execution;
+mod qwen_graph;
 mod registry;
 mod tensor;
 mod weights;
@@ -65,6 +67,14 @@ pub use op::{
     AttentionPreprocessPositionMode, AttentionPreprocessTensor, ElementwiseTensor, OpError,
     RmsNormAliasPolicy, RmsNormContract, RmsNormEpsilon, RmsNormScaleMode, RmsNormTensor,
     SemanticOp, SemanticOpDescriptor, SemanticOpKind,
+};
+pub use qwen_execution::{QwenExecutionError, QwenExecutionOutput, QwenExecutionRequest};
+pub use qwen_graph::{
+    QWEN35_LAYER_COUNT, QWEN35_LAYER_TYPES, QWEN35_MAX_POSITION_EMBEDDINGS,
+    QWEN35_PLAN_ENTRY_COUNT, QWEN35_REQUIRED_WEIGHT_COUNT, QwenGraph, QwenGraphDispatchError,
+    QwenGraphError, QwenGraphNode, QwenGraphNodeKind, QwenGraphState, QwenGraphStateDescriptor,
+    QwenGraphStateKind, QwenGraphTensor, QwenGraphTensorBacking, QwenGraphWeightBinding,
+    build_qwen35_graph,
 };
 pub use registry::{BACKEND_REGISTRY, BackendRegistration, backend_registry};
 pub use tensor::{TensorError, TensorView};
