@@ -108,6 +108,22 @@ Phase 12のMI300X PASSは開始条件にしない。CDNA3実機が未配置で�
 - plan cache keyへmodel fingerprint、descriptor/layout、binding identityを含め、Qwen/Gemma間の誤再利用を拒否する。
 - forced submit/query failure、timeout、dropでowner lifetime、rollback/poison、resident model再利用を確認する。
 
+Phase 13接続チェックリストは次を正とする。
+
+1. Gemma固有nodeと各node後の`ExecutionBoundaryKind`から`PreparedPlanNode<GemmaGraphNode>`列を生成し、
+   `PreparedExecutionPlan::new`へ渡す。共通plan側へGemma enumのmatchを追加しない。
+2. request admissionごとにtoken数、開始position、binding generation、state generationを検証し、
+   `PreparedTransition::new`でoverflowを拒否する。stateful cacheには`dynamic_identity()`、stateless cacheには
+   `stateless_identity()`を使う。
+3. semantic descriptorとowned bindingをmodel adapterで構築し、exact descriptor/view/buffer/accessが再利用可能な場合だけ
+   `PreparedCachePolicy::Reusable`を宣言する。position encoding等の交換不能なmetadataは`Transient`にする。
+4. model-resident ownerごとにprepared cacheを分離し、model fingerprint、resident allocation、binding generationが異なる
+   Qwen/Gemma entryを共有しない。
+5. semantic、causal attention、linear/state submissionのownerを共通segmentへ移し、KV/state publicationとterminal
+   readbackだけをadapterからboundaryとして宣言する。adapter内へper-op waitまたは独自flush loopを作らない。
+6. request開始から最終state/output公開まで共通transaction guardを保持し、cancel/error/drop/pendingではcommitしない。
+   成功後の共通auditからbackend/target、submission/kernel、fallback、segment/boundaryをservice/CLI証跡へ写す。
+
 ### P14-A5: real-weight sliceとGPU bring-up
 
 - verified cacheからraw非保存sliceを抽出し、independent higher-precision oracleで主要opと小graphを比較する。

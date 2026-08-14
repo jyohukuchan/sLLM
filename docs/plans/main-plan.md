@@ -494,13 +494,16 @@ Phase 12は`ready`のまま残し、再開時にlatest mainからexact `gfx942` 
   2026-08-15に実装した。core/public-runtime/RMSNorm H3のcanonical両targetはcompile-only PASSであり、GPU PASSではない。
 - 詳細は[Phase 12R archive](archive/2026/08/11-20/phase12r-ci-portability-repair.md)を正とする。
 
-### Phase 13: モデル非依存prepared execution制御（計画済み）
+### Phase 13: モデル非依存prepared execution制御（完了）
 
 - Phase 9で`QwenExecutionCore`内へ実装したprepared operation再利用、same-stream segment owner、
   completion集約、transactional publication境界を、model固有graphから独立した共通execution層へ移す。
 - Qwen3.5は最初のadapterとして同じ意味・性能pathを維持する。model-neutral fixtureでQwen symbolや固定shapeを
   参照せず同じ制御を利用できることを確認し、Phase 14のGemma 4 adapterが再実装せず利用できる境界を固定する。
-- 詳細は[Phase 13 active plan](active/2026/08/11-20/phase13-model-neutral-execution-control.md)を正とする。
+- 2026-08-15に共通plan/transition/cache/segment/boundary/audit/transaction、Qwen adapter移行、host fixture、
+  canonical RDNA2/RDNA4の2B/4B smoke、OpenAI service smokeを完了した。4B short-oddのsubmission/kernelはPhase 9から
+  増加せず、fallback/cleanupも維持した。
+- 詳細は[Phase 13 archive](archive/2026/08/11-20/phase13-model-neutral-execution-control.md)を正とする。
 
 ### Phase 14: google/gemma-4-12B Dense text-only（計画済み）
 
@@ -519,12 +522,11 @@ Phase 12は`ready`のまま残し、再開時にlatest mainからexact `gfx942` 
 
 ## 現在の状態と次の作業
 
-- Phase 12Rまで完了した。hardware検証順の次はPhase 12のMI300X実機確認であり、モデル非依存prepared execution制御は
-  Phase 13、Gemma 4はPhase 14、Weight NVFP4はPhase 15とする。MI300Xを管理できない現在の実行対象は
-  Phase 13のモデル非依存prepared execution制御とする。
+- Phase 13まで完了した。hardware検証順の次はPhase 12のMI300X実機確認であり、Gemma 4はPhase 14、Weight NVFP4は
+  Phase 15とする。MI300Xを管理できない現在のlocal forward実行対象はPhase 14のGemma 4とする。
 - MI300Xを管理できない期間はPhase 12を`ready`で保持し、local forward queueに従ってPhase 12R、Phase 13、
   Phase 14、共通RDNA性能bridge、Phase 15の順に先行する。Phase 12RでGitHub host/compileとtrusted local GPUの
-  verification境界を修復する。Gemma 4完了をgoal終端にせず、進捗が早い場合はPhase 16〜18の詳細計画と
+  verification境界を修復し、Phase 13で共通execution制御を抽出した。Gemma 4完了をgoal終端にせず、進捗が早い場合はPhase 16〜18の詳細計画と
   local-only実装へ続ける。
 - Phase 9のdtype非依存completion/segment骨格とtarget別BF16 providerを再利用し、Phase 10でFP8 encoding、
   sidecar/loader、native/emulation/conversion providerを追加した。Phase 13でモデル非依存層へ抽出し、

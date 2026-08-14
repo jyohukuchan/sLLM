@@ -181,6 +181,7 @@ def _validate_control_equality(control: Mapping[str, Any], sample: Mapping[str, 
     for field in (
         "selected_backend", "target", "device_index", "model_fingerprint", "plan_digest",
         "fallback_used", "all_dispatches_hip", "submission_count", "kernel_dispatch_count",
+        "segment_count", "boundary_count",
     ):
         if control_audit[field] != sample_audit[field]:
             _fail(f"render/tokenize sample audit control differs at {field}")
@@ -194,6 +195,7 @@ EXPECTED_COMPARISON = {
     "dispatch_fields": [
         "selected_backend", "target", "device_index", "model_fingerprint", "plan_digest",
         "fallback_used", "all_dispatches_hip", "submission_count", "kernel_dispatch_count",
+        "segment_count", "boundary_count",
     ],
     "dispatch_count_rule": "exact_when_token_and_stop_fields_match",
 }

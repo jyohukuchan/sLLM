@@ -105,10 +105,29 @@ reductionを区別する。canonical `gfx1201`だけはM=1、K/Nとも1024以上
 native context lifetimeで一度だけ作り、workspaceは0 bytes、provider error後のbaseline fallbackはない。
 dispatch evidenceはprovider別kernel ID/symbol、shape、exact target、fallback flag、GPU event時間を保持する。
 
-Qwen requestはlabelとtoken countが同じsemantic descriptor/bindingのprepared operationをrequest lifetimeで
-再利用する。positionを含むattention preprocessは同じM=1でも別stepで交換可能ではないためcacheしない。
-同一streamのhost wait batchingはPhase 8で測定したが採用targetで改善せず、default executionは既存の
-transactional wait/state publication境界を維持する。
+### Model-neutral prepared execution制御
+
+model adapterはimmutableなnode列を`PreparedExecutionPlan<N>`へlowerし、requestごとのtoken数、開始position、
+期待state長、binding generation、state generationを`PreparedTransition`として渡す。共通planがnode順序を所有し、
+adapter callbackはmodel固有nodeからsemantic descriptor、binding、typed state submissionを構築する。共通moduleは
+Qwen/Gemma等のmodel名、tensor名、head/vocabulary定数、kernel symbolを参照しない。
+
+semantic prepareの再利用identityはhuman-readable labelを使わない。`SemanticOpDescriptor`、input/outputのbuffer ID、
+`TensorView`、access mode、`PreparedDynamicIdentity`をexact keyとし、token/position/期待長、binding/state generationの
+いずれかが変われば別entryにする。動的positionを内包するattention preprocess等は`Transient`として再利用しない。
+cacheはrequest ownerに閉じ、resident model間で共有しないため、異なるmodel fingerprintやresident allocationのentryが
+交差しない。
+
+非同期submissionは型ごとのownerをadapterで待つのではなく、共通`ExecutionSegment`が同一ordered queue上で保持する。
+adapterが`StatePublication`、`TerminalReadback`、`Cancellation`、`Error` boundaryを宣言し、boundaryのterminal event成功後に
+segment内の先行completionをqueryしてdispatch evidenceを集約する。`PreparedExecutionAudit`はexact backend/target、
+submission/kernel、fallback、segment/boundary countを成功済みrequestだけへ公開する。
+
+request lifecycleは共通`ExecutionTransaction`がsingle in-flight、commit、drop/cancel/error時のpoisonを管理する。
+adapterはtransaction開始前にmodel固有stateをadmitし、completion・readback・state length検証の後だけcommitして公開する。
+pending、timeout、query failure、partial mutation、guard dropではoutput/stateを公開せず、同じrequest ownerの再利用を拒否する。
+Qwen3.5 adapterはgraph lowering、attention preprocess、GDN/KV descriptor、Argmax/logits解釈だけを所有し、独自のprepared
+cache、pending submission enum、flush loop、completion wait policyを持たない。
 
 ## DType と量子化 encoding
 

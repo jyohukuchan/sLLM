@@ -3,7 +3,7 @@ use std::fmt;
 use crate::{DType, Encoding, EncodingError};
 
 /// A non-owning tensor descriptor. Strides are measured in logical elements.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct TensorView {
     dtype: DType,
     encoding: Encoding,

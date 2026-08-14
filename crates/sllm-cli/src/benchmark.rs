@@ -483,7 +483,7 @@ const CONTROL_TOKEN_FIELDS: [&str; 4] = [
     "decode_input_token_ids",
 ];
 const CONTROL_STOP_FIELDS: [&str; 4] = ["version", "reason_version", "kind", "token_id"];
-const CONTROL_DISPATCH_FIELDS: [&str; 9] = [
+const CONTROL_DISPATCH_FIELDS: [&str; 11] = [
     "selected_backend",
     "target",
     "device_index",
@@ -493,6 +493,8 @@ const CONTROL_DISPATCH_FIELDS: [&str; 9] = [
     "all_dispatches_hip",
     "submission_count",
     "kernel_dispatch_count",
+    "segment_count",
+    "boundary_count",
 ];
 
 pub(crate) fn control_comparison_contract() -> Value {
@@ -710,6 +712,8 @@ mod tests {
                 "all_dispatches_hip": true,
                 "submission_count": 12,
                 "kernel_dispatch_count": 12,
+                "segment_count": 3,
+                "boundary_count": 4,
             },
         });
         assert!(compare_control_sample(&control, &control).is_ok());
@@ -719,6 +723,7 @@ mod tests {
             ("stop", "token_id", json!(248046)),
             ("audit", "target", json!("gfx1201")),
             ("audit", "kernel_dispatch_count", json!(13)),
+            ("audit", "boundary_count", json!(5)),
         ] {
             let mut sample = control.clone();
             sample[section][field] = replacement;

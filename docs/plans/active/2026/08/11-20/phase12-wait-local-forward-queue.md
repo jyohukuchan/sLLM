@@ -50,7 +50,7 @@ Phase 12RはPhase 12の完了やMI300X PASSを意味しない。runtime/model/ke
 
 ### Q1: Phase 13 モデル非依存prepared execution制御
 
-正本は[Phase 13 plan](phase13-model-neutral-execution-control.md)とする。
+正本は[Phase 13 archive](../../../../archive/2026/08/11-20/phase13-model-neutral-execution-control.md)とする。
 
 1. P13-A0で現行Qwen責務と短い回帰baselineを固定する。
 2. P13-A1/A2でmodel-neutral plan、transition、segment、boundary、cache、transactionを実装する。

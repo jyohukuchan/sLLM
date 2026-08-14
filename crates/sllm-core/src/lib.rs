@@ -15,6 +15,7 @@ mod kv_state;
 mod linear_attention;
 mod model;
 mod op;
+mod prepared_execution;
 mod qwen_execution;
 mod qwen_graph;
 mod registry;
@@ -80,6 +81,10 @@ pub use op::{
     AttentionPreprocessPositionMode, AttentionPreprocessTensor, ElementwiseTensor, OpError,
     RmsNormAliasPolicy, RmsNormContract, RmsNormEpsilon, RmsNormScaleMode, RmsNormTensor,
     SemanticOp, SemanticOpDescriptor, SemanticOpKind,
+};
+pub use prepared_execution::{
+    ExecutionBoundaryKind, PreparedCachePolicy, PreparedDynamicIdentity, PreparedExecutionAudit,
+    PreparedExecutionError, PreparedExecutionPlan, PreparedPlanNode, PreparedTransition,
 };
 pub use qwen_execution::{
     QwenExecutionAudit, QwenExecutionError, QwenExecutionOutput, QwenExecutionRequest,

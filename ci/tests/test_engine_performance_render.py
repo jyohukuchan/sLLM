@@ -101,7 +101,7 @@ def render_result_for(target: str = "gfx1030") -> dict[str, object]:
             "mode": "exact", "scope": "every_warmup_and_measured_sample",
             "token_fields": ["input_token_ids", "generated_token_ids", "visible_token_ids", "decode_input_token_ids"],
             "stop_fields": ["version", "reason_version", "kind", "token_id"],
-            "dispatch_fields": ["selected_backend", "target", "device_index", "model_fingerprint", "plan_digest", "fallback_used", "all_dispatches_hip", "submission_count", "kernel_dispatch_count"],
+            "dispatch_fields": ["selected_backend", "target", "device_index", "model_fingerprint", "plan_digest", "fallback_used", "all_dispatches_hip", "submission_count", "kernel_dispatch_count", "segment_count", "boundary_count"],
             "dispatch_count_rule": "exact_when_token_and_stop_fields_match",
         },
     }

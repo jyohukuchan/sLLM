@@ -1278,6 +1278,7 @@ def _validate_monitor_capture(capture: Mapping[str, Any], target: str, expected_
     # content digests; requiring the path set itself to remain identical would
     # reject legitimate lazy additions.
     final_loader_digest = normalized[-1]["loader_path_digest"]
+    loader_evidence = [validated_loaders[digest] for digest in sorted(validated_loaders)]
     metrics = [sample["metric"] for sample in normalized]
     vram_metrics = [sample["vram_auxiliary"] for sample in normalized]
     power_statuses = [metric["throttle_status"] for metric in metrics]
@@ -1311,7 +1312,12 @@ def _validate_monitor_capture(capture: Mapping[str, Any], target: str, expected_
         _fail("during-run monitor found an explicit throttle/violation")
     if not isinstance(capture.get("pid"), int) and expected_pid is None:
         expected_pid = None
-    return normalized, {"summary": summary, "violation": violation, "loader_path_digest": final_loader_digest}
+    return normalized, {
+        "summary": summary,
+        "violation": violation,
+        "loader_path_digest": final_loader_digest,
+        "loaders": loader_evidence,
+    }
 
 
 def _build_evidence(pre: Mapping[str, Any], post: Mapping[str, Any], capture: Mapping[str, Any], target: str, tool: Mapping[str, str]) -> dict[str, Any]:
@@ -1335,7 +1341,8 @@ def _build_evidence(pre: Mapping[str, Any], post: Mapping[str, Any], capture: Ma
     during = {
         "sample_count": len(samples), "sample_digest": sample_digest,
         "first": samples[0], "last": samples[-1], "summary": during_info["summary"],
-        "process_sample_digest": process_sample_digest, "loader": loader, "violation": during_info["violation"],
+        "process_sample_digest": process_sample_digest, "loader": loader,
+        "loaders": during_info["loaders"], "violation": during_info["violation"],
     }
     explicit = bool(pre.get("violation", {}).get("explicit_violation") or post.get("violation", {}).get("explicit_violation") or during_info["violation"]["explicit_violation"])
     if explicit:
@@ -1394,7 +1401,7 @@ def _failed_evidence(pre: Mapping[str, Any], post: Mapping[str, Any], capture: M
         "tool": {"path": AMD_SMI_EXECUTABLE, "tool_version": "unavailable", "library_version": "unavailable", "rocm_version": ROCM_RELEASE},
         "definitions": {"clock_variation": "Dynamic clock min/max is observational; no numeric threshold is a violation.", "violation": "When violation accumulators are unavailable, aggregate THROTTLED status is observational; ECC, published thermal/power limits, and exposed active violations remain fail-closed.", "process_ownership": "Every during sample must name only descendants of the benchmark process group."},
         "visibility": {"cleared": list(VISIBILITY_NAMES), "selector": "ROCR_VISIBLE_DEVICES", "uuid": expected_device(target)["gpu_uuid"]},
-        "pre": pre_phase, "during": {"sample_count": 1, "sample_digest": "sha256:" + hashlib.sha256(canonical_bytes([sample])).hexdigest(), "first": sample, "last": sample, "summary": summary, "process_sample_digest": "sha256:" + hashlib.sha256(canonical_bytes([sample["process"]])).hexdigest(), "loader": loader, "violation": {"power_statuses": ["UNAVAILABLE"], "explicit_violation": True, "accumulator_available": False, "accumulator_reason": reason, "accumulator_digest": "sha256:" + "0" * 64}}, "post": post_phase,
+        "pre": pre_phase, "during": {"sample_count": 1, "sample_digest": "sha256:" + hashlib.sha256(canonical_bytes([sample])).hexdigest(), "first": sample, "last": sample, "summary": summary, "process_sample_digest": "sha256:" + hashlib.sha256(canonical_bytes([sample["process"]])).hexdigest(), "loader": loader, "loaders": [loader], "violation": {"power_statuses": ["UNAVAILABLE"], "explicit_violation": True, "accumulator_available": False, "accumulator_reason": reason, "accumulator_digest": "sha256:" + "0" * 64}}, "post": post_phase,
         "checks": {"exact_identity": False, "static_identity_unchanged": False, "profile_unchanged": False, "limits_unchanged": False, "performance_level_unchanged": False, "explicit_violation": True, "vram_auxiliary_complete": False, "process_ownership": False, "loader_paths_verified": False, "monitor_errors": 1, "process_group_cleanup": False},
     }
 

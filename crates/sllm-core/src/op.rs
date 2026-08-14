@@ -506,7 +506,7 @@ impl AttentionPreprocessContract {
 }
 
 /// A backend-independent operation contract containing only tensor metadata.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct SemanticOpDescriptor {
     kind: SemanticOpKind,
     inputs: Vec<TensorView>,

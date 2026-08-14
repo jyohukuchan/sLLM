@@ -589,6 +589,8 @@ impl ModelFrontendBackend for ProductionBackend {
                     "fallback_used": audit.fallback_used(),
                     "submission_count": audit.submission_count(),
                     "kernel_dispatch_count": audit.kernel_dispatch_count(),
+                    "segment_count": audit.segment_count(),
+                    "boundary_count": audit.boundary_count(),
                     "all_dispatches_hip": audit.all_dispatches_hip(),
                     "weight_encoding": match fp8_provider { Some(CliFp8Provider::ConvertedBf16) => "bf16-converted-from-ocp-e4m3fn", Some(CliFp8Provider::NativeFnuz) => "e4m3fnuz-converted-from-ocp-e4m3fn-outer-f32", Some(_) => "ocp-e4m3fn-outer-f32", None => "bf16" },
                     "fp8_provider": fp8_provider.map(CliFp8Provider::label),
@@ -850,6 +852,8 @@ impl ModelFrontendBackend for ProductionBackend {
                 "fallback_used": control_audit.fallback_used(),
                 "submission_count": control_audit.submission_count(),
                 "kernel_dispatch_count": control_audit.kernel_dispatch_count(),
+                "segment_count": control_audit.segment_count(),
+                "boundary_count": control_audit.boundary_count(),
                 "all_dispatches_hip": control_audit.all_dispatches_hip(),
             });
             let correctness_control = json!({
@@ -989,6 +993,8 @@ impl ModelFrontendBackend for ProductionBackend {
                     "fallback_used": audit.fallback_used(),
                     "submission_count": audit.submission_count(),
                     "kernel_dispatch_count": audit.kernel_dispatch_count(),
+                    "segment_count": audit.segment_count(),
+                    "boundary_count": audit.boundary_count(),
                     "all_dispatches_hip": audit.all_dispatches_hip(),
                 });
                 timeline.record(BenchmarkEvent::Cleanup, cleanup_timestamp_ns)?;
@@ -1026,6 +1032,8 @@ impl ModelFrontendBackend for ProductionBackend {
             let all_samples = warmup_samples.iter().chain(measured_samples.iter());
             let mut submission_count = 0_u64;
             let mut kernel_dispatch_count = 0_u64;
+            let mut segment_count = 0_u64;
+            let mut boundary_count = 0_u64;
             for sample in all_samples {
                 let audit = sample
                     .get("audit")
@@ -1051,6 +1059,26 @@ impl ModelFrontendBackend for ProductionBackend {
                             })?,
                     )
                     .ok_or_else(|| "benchmark dispatch count overflowed".to_owned())?;
+                segment_count = segment_count
+                    .checked_add(
+                        audit
+                            .get("segment_count")
+                            .and_then(Value::as_u64)
+                            .ok_or_else(|| {
+                                "benchmark sample segment count was missing".to_owned()
+                            })?,
+                    )
+                    .ok_or_else(|| "benchmark segment count overflowed".to_owned())?;
+                boundary_count = boundary_count
+                    .checked_add(
+                        audit
+                            .get("boundary_count")
+                            .and_then(Value::as_u64)
+                            .ok_or_else(|| {
+                                "benchmark sample boundary count was missing".to_owned()
+                            })?,
+                    )
+                    .ok_or_else(|| "benchmark boundary count overflowed".to_owned())?;
             }
             drop(resident);
             let final_snapshot = session.memory_snapshot();
@@ -1133,6 +1161,8 @@ impl ModelFrontendBackend for ProductionBackend {
                     "device_index": request.device_index,
                     "submission_count": submission_count,
                     "kernel_dispatch_count": kernel_dispatch_count,
+                    "segment_count": segment_count,
+                    "boundary_count": boundary_count,
                     "fallback_used": false,
                     "all_dispatches_hip": true,
                     "model_load_count": 1,
@@ -2578,7 +2608,11 @@ mod tests {
                 "fallback_used": false,
                 "submission_count": 1,
                 "kernel_dispatch_count": 1,
+                "segment_count": 1,
+                "boundary_count": 1,
                 "all_dispatches_hip": true,
+                "weight_encoding": "bf16",
+                "fp8_provider": null,
             },
             "timing_ns": 1,
             "cleanup": {"retryable_cleanup": 0, "durable_quarantine": 0},
@@ -2591,6 +2625,10 @@ mod tests {
         assert_eq!(document["result"]["execution"]["selected_backend"], "hip");
         assert_eq!(document["result"]["execution"]["submission_count"], 1);
         assert_eq!(document["result"]["execution"]["kernel_dispatch_count"], 1);
+        assert_eq!(document["result"]["execution"]["segment_count"], 1);
+        assert_eq!(document["result"]["execution"]["boundary_count"], 1);
         assert_eq!(document["result"]["execution"]["all_dispatches_hip"], true);
+        assert_eq!(document["result"]["execution"]["weight_encoding"], "bf16");
+        assert_eq!(document["result"]["execution"]["fp8_provider"], Value::Null);
     }
 }

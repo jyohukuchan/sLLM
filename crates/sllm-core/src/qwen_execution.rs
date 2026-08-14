@@ -8,15 +8,12 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crate::execution::{
-    BoundSemanticOp, CausalAttentionSubmission, ExecutionBuffer, ExecutionError, ExecutionQueue,
-    ExecutionSession, ExecutionState, KvState, KvStateAppendSubmission, LinearAttentionBindings,
-    LinearAttentionState, LinearAttentionSubmission, OwnedTensorBinding, PrepareSupport,
-    PreparedOperation, Submission,
+    ExecutionBuffer, ExecutionError, ExecutionQueue, ExecutionSession, KvState,
+    LinearAttentionBindings, LinearAttentionState, OwnedTensorBinding, PrepareSupport, Submission,
 };
 use crate::final_output::QWEN35_VOCAB_SIZE;
 use crate::kv_state::{CausalAttentionDescriptor, KvPhysicalMemorySnapshot, KvStateDescriptor};
@@ -25,6 +22,12 @@ use crate::model::{TensorDType, VerifiedCache};
 use crate::op::{
     AttentionPreprocessContract, AttentionPreprocessPositionMode, OpError, SemanticOpDescriptor,
     SemanticOpKind,
+};
+use crate::prepared_execution::{
+    ExecutionAuditAccumulator, ExecutionBoundaryKind, ExecutionSegment, ExecutionTransaction,
+    PreparedCachePolicy, PreparedDynamicIdentity, PreparedExecutionError, PreparedExecutionPlan,
+    PreparedPlanNode, PreparedSemanticCache, PreparedTransition, require_terminal_success,
+    wait_terminal_kv_append, wait_terminal_submission,
 };
 use crate::qwen_graph::{
     QwenGraph, QwenGraphNode, QwenGraphNodeKind, QwenGraphStateDescriptor, QwenGraphTensorBacking,
@@ -65,25 +68,6 @@ struct StatefulExecution {
     expected_length: u64,
 }
 
-/// Completion owners retained until an explicit execution-segment boundary.
-/// All submissions use the request's single ordered HIP stream, so a boundary
-/// event proves that earlier work is terminal before these owners are polled.
-/// Retaining the owners also keeps every buffer and transactional state alive.
-enum PendingSegmentSubmission {
-    Semantic {
-        label: String,
-        submission: Box<Submission>,
-    },
-    CausalAttention {
-        label: String,
-        submission: Box<CausalAttentionSubmission>,
-    },
-    LinearAttention {
-        label: String,
-        submission: Box<LinearAttentionSubmission>,
-    },
-}
-
 /// Immutable, request-local dispatch audit published after a successful
 /// transition.  The counters are accumulated from accepted backend evidence;
 /// they are not estimates of graph size.
@@ -95,6 +79,8 @@ pub struct QwenExecutionAudit {
     kernel_dispatch_count: u64,
     fallback_used: bool,
     all_dispatches_hip: bool,
+    segment_count: u64,
+    boundary_count: u64,
 }
 
 impl QwenExecutionAudit {
@@ -120,6 +106,14 @@ impl QwenExecutionAudit {
 
     pub const fn all_dispatches_hip(&self) -> bool {
         self.all_dispatches_hip
+    }
+
+    pub const fn segment_count(&self) -> u64 {
+        self.segment_count
+    }
+
+    pub const fn boundary_count(&self) -> u64 {
+        self.boundary_count
     }
 }
 
@@ -298,6 +292,25 @@ impl std::error::Error for QwenExecutionError {
 impl From<ExecutionError> for QwenExecutionError {
     fn from(error: ExecutionError) -> Self {
         Self::Execution(error)
+    }
+}
+
+impl From<PreparedExecutionError> for QwenExecutionError {
+    fn from(error: PreparedExecutionError) -> Self {
+        match error {
+            PreparedExecutionError::Poisoned => Self::Poisoned,
+            PreparedExecutionError::Busy => Self::Busy,
+            PreparedExecutionError::CompletionPending { stage } => {
+                Self::CompletionPending { stage }
+            }
+            PreparedExecutionError::CompletionFailure { stage } => {
+                Self::CompletionFailure { stage }
+            }
+            PreparedExecutionError::Execution(error) => Self::Execution(error),
+            PreparedExecutionError::InvalidPlan(reason)
+            | PreparedExecutionError::InvalidTransition(reason)
+            | PreparedExecutionError::InvalidAudit(reason) => Self::InvalidRequest(reason),
+        }
     }
 }
 
@@ -599,14 +612,14 @@ impl QwenExecutionRequest {
     }
 
     pub fn is_poisoned(&self) -> bool {
-        self.core.lifecycle.poisoned.load(Ordering::Acquire)
+        self.core.lifecycle.is_poisoned()
     }
 
     /// Idempotently invalidates this request owner without affecting the
     /// resident model. Synchronous callers use it between transitions when a
     /// transport cancellation or host-side sampling/decoding failure occurs.
     pub fn cancel(&mut self) {
-        self.core.lifecycle.poisoned.store(true, Ordering::Release);
+        self.core.lifecycle.cancel();
     }
 
     pub fn model_fingerprint(&self) -> &str {
@@ -707,6 +720,7 @@ struct QwenResidentInner {
 struct QwenExecutionCore {
     session: Arc<ExecutionSession>,
     graph: QwenGraph,
+    execution_plan: PreparedExecutionPlan<QwenGraphNode>,
     plan: WeightLoadPlan,
     queue: ExecutionQueue,
     tensors: Vec<TensorAllocation>,
@@ -716,58 +730,11 @@ struct QwenExecutionCore {
     linear_states: BTreeMap<u32, LinearAttentionState>,
     scales: BTreeMap<usize, CachedScale>,
     completion_timeout: Duration,
-    audit: Mutex<DispatchAuditAccumulator>,
-    prepared_semantics: Mutex<BTreeMap<(String, u64), PreparedOperation>>,
-    lifecycle: Arc<RequestLifecycle>,
+    audit: Mutex<ExecutionAuditAccumulator>,
+    prepared_semantics: PreparedSemanticCache,
+    lifecycle: ExecutionTransaction,
     committed_length: u64,
     last_output: Option<QwenExecutionOutput>,
-}
-
-#[derive(Debug, Default)]
-struct DispatchAuditAccumulator {
-    target: Option<String>,
-    submission_count: u64,
-    kernel_dispatch_count: u64,
-    fallback_used: bool,
-    all_dispatches_hip: bool,
-}
-
-impl DispatchAuditAccumulator {
-    fn record_evidence(&mut self, evidence: &DispatchEvidence) -> Result<(), QwenExecutionError> {
-        if evidence.backend != 1
-            || evidence.fallback_allowed
-            || evidence.fallback_used
-            || evidence.dispatch_count == 0
-            || evidence.target.is_empty()
-            || !evidence.target.is_ascii()
-            || evidence.target.as_bytes().contains(&0)
-        {
-            return Err(QwenExecutionError::InvalidRequest(
-                "accepted dispatch evidence is not an exact HIP, no-fallback dispatch".to_owned(),
-            ));
-        }
-        if let Some(target) = &self.target {
-            if target != &evidence.target {
-                return Err(QwenExecutionError::InvalidRequest(
-                    "dispatch evidence targets differ within one Qwen request".to_owned(),
-                ));
-            }
-        } else {
-            self.target = Some(evidence.target.clone());
-        }
-        self.submission_count = self.submission_count.checked_add(1).ok_or_else(|| {
-            QwenExecutionError::InvalidRequest("dispatch submission count overflowed".to_owned())
-        })?;
-        self.kernel_dispatch_count = self
-            .kernel_dispatch_count
-            .checked_add(u64::from(evidence.dispatch_count))
-            .ok_or_else(|| {
-                QwenExecutionError::InvalidRequest("kernel dispatch count overflowed".to_owned())
-            })?;
-        self.all_dispatches_hip |= evidence.backend == 1;
-        self.fallback_used |= evidence.fallback_used;
-        Ok(())
-    }
 }
 
 #[derive(Clone)]
@@ -800,63 +767,27 @@ struct GraphLayout {
 
 type StateMaps = (BTreeMap<u32, KvState>, BTreeMap<u32, LinearAttentionState>);
 
-struct RequestLifecycle {
-    poisoned: AtomicBool,
-    in_flight: AtomicBool,
-}
-
-impl RequestLifecycle {
-    fn new() -> Self {
-        Self {
-            poisoned: AtomicBool::new(false),
-            in_flight: AtomicBool::new(false),
-        }
-    }
-}
-
-/// Marks the request unusable unless output publication disarms it. This is
-/// deliberately separate from Stage C completion owners: they release their
-/// own backend admission before this guard makes a graph-wide request usable.
-struct TransitionGuard {
-    lifecycle: Arc<RequestLifecycle>,
-    published: bool,
-}
-
-impl TransitionGuard {
-    fn begin(lifecycle: Arc<RequestLifecycle>) -> Result<Self, QwenExecutionError> {
-        if lifecycle.poisoned.load(Ordering::Acquire) {
-            return Err(QwenExecutionError::Poisoned);
-        }
-        if lifecycle
-            .in_flight
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .is_err()
-        {
-            return Err(QwenExecutionError::Busy);
-        }
-        if lifecycle.poisoned.load(Ordering::Acquire) {
-            lifecycle.in_flight.store(false, Ordering::Release);
-            return Err(QwenExecutionError::Poisoned);
-        }
-        Ok(Self {
-            lifecycle,
-            published: false,
+fn qwen_prepared_execution_plan(
+    graph: &QwenGraph,
+) -> Result<PreparedExecutionPlan<QwenGraphNode>, QwenExecutionError> {
+    let nodes = graph
+        .nodes()
+        .iter()
+        .cloned()
+        .map(|node| {
+            let boundary_after = match node.kind() {
+                QwenGraphNodeKind::FullKvAppend { .. } => {
+                    Some(ExecutionBoundaryKind::StatePublication)
+                }
+                QwenGraphNodeKind::Semantic(SemanticOpKind::Argmax) => {
+                    Some(ExecutionBoundaryKind::TerminalReadback)
+                }
+                _ => None,
+            };
+            PreparedPlanNode::new(node, boundary_after)
         })
-    }
-
-    fn publish(&mut self) {
-        self.published = true;
-        self.lifecycle.in_flight.store(false, Ordering::Release);
-    }
-}
-
-impl Drop for TransitionGuard {
-    fn drop(&mut self) {
-        if !self.published {
-            self.lifecycle.poisoned.store(true, Ordering::Release);
-        }
-        self.lifecycle.in_flight.store(false, Ordering::Release);
-    }
+        .collect();
+    PreparedExecutionPlan::new(nodes).map_err(Into::into)
 }
 
 trait QwenProvisionSource {
@@ -1328,9 +1259,11 @@ impl QwenExecutionCore {
             })
             .collect::<Result<BTreeMap<usize, CachedScale>, QwenExecutionError>>()?;
         let (kv_states, linear_states) = create_states(resident.session.as_ref(), &graph)?;
+        let execution_plan = qwen_prepared_execution_plan(&graph)?;
         let core = Self {
             session: Arc::clone(&resident.session),
             graph,
+            execution_plan,
             plan: resident.plan.clone(),
             queue: resident.queue.clone(),
             tensors,
@@ -1340,9 +1273,9 @@ impl QwenExecutionCore {
             linear_states,
             scales,
             completion_timeout: resident.completion_timeout,
-            audit: Mutex::new(DispatchAuditAccumulator::default()),
-            prepared_semantics: Mutex::new(BTreeMap::new()),
-            lifecycle: Arc::new(RequestLifecycle::new()),
+            audit: Mutex::new(ExecutionAuditAccumulator::new(1)),
+            prepared_semantics: PreparedSemanticCache::default(),
+            lifecycle: ExecutionTransaction::new(),
             committed_length: 0,
             last_output: None,
         };
@@ -1412,10 +1345,12 @@ impl QwenExecutionCore {
             completion_timeout,
         )?;
         let (kv_states, linear_states) = create_states(&session, &graph)?;
+        let execution_plan = qwen_prepared_execution_plan(&graph)?;
 
         let core = Self {
             session,
             graph,
+            execution_plan,
             plan,
             queue,
             tensors,
@@ -1425,9 +1360,9 @@ impl QwenExecutionCore {
             linear_states,
             scales,
             completion_timeout,
-            audit: Mutex::new(DispatchAuditAccumulator::default()),
-            prepared_semantics: Mutex::new(BTreeMap::new()),
-            lifecycle: Arc::new(RequestLifecycle::new()),
+            audit: Mutex::new(ExecutionAuditAccumulator::new(1)),
+            prepared_semantics: PreparedSemanticCache::default(),
+            lifecycle: ExecutionTransaction::new(),
             committed_length: 0,
             last_output: None,
         };
@@ -1451,7 +1386,7 @@ impl QwenExecutionCore {
         token_ids: &[i32],
         include_last_logits: bool,
     ) -> Result<QwenExecutionOutput, QwenExecutionError> {
-        if self.lifecycle.poisoned.load(Ordering::Acquire) {
+        if self.lifecycle.is_poisoned() {
             return Err(QwenExecutionError::Poisoned);
         }
         if self.committed_length != 0 {
@@ -1491,7 +1426,7 @@ impl QwenExecutionCore {
         token_id: i32,
         include_last_logits: bool,
     ) -> Result<QwenExecutionOutput, QwenExecutionError> {
-        if self.lifecycle.poisoned.load(Ordering::Acquire) {
+        if self.lifecycle.is_poisoned() {
             return Err(QwenExecutionError::Poisoned);
         }
         if self.committed_length == 0 {
@@ -1554,7 +1489,7 @@ impl QwenExecutionCore {
         // not a graph-wide partial mutation. Once the guard begins, every
         // error path poisons the request.
         self.ensure_state_lengths(start_position)?;
-        let mut guard = TransitionGuard::begin(Arc::clone(&self.lifecycle))?;
+        let mut guard = self.lifecycle.begin()?;
 
         self.upload_runtime_inputs(token_ids, start_position, token_count)?;
         let output =
@@ -1569,9 +1504,9 @@ impl QwenExecutionCore {
             last_logits,
             committed_length: expected_length,
         };
+        guard.commit()?;
         self.committed_length = expected_length;
         self.last_output = Some(output.clone());
-        guard.publish();
         Ok(output)
     }
 
@@ -1582,13 +1517,25 @@ impl QwenExecutionCore {
         expected_length: u64,
         position_mode: AttentionPreprocessPositionMode,
     ) -> Result<Vec<i32>, QwenExecutionError> {
-        let nodes = self.graph.nodes().to_vec();
+        let plan = self.execution_plan.clone();
+        let transition = PreparedTransition::new(token_count, start_position, 0, start_position)?;
+        if transition.expected_length() != expected_length {
+            return Err(QwenExecutionError::InvalidRequest(
+                "prepared transition length differs from the Qwen admission result".to_owned(),
+            ));
+        }
         let mut argmax = None;
-        let mut pending = Vec::new();
-        for node in &nodes {
+        let mut pending = ExecutionSegment::default();
+        plan.execute(transition, |planned, transition| {
+            let node = planned.operation();
             match node.kind() {
                 QwenGraphNodeKind::Semantic(_) => {
-                    let output = self.execute_semantic(node, token_count, &mut pending)?;
+                    let output = self.execute_semantic(
+                        node,
+                        transition.token_count(),
+                        planned.boundary_after(),
+                        &mut pending,
+                    )?;
                     if let Some(output) = output {
                         if argmax.replace(output).is_some() {
                             return Err(QwenExecutionError::InvalidGraph(
@@ -1613,8 +1560,8 @@ impl QwenExecutionCore {
                         q_heads,
                         kv_heads,
                         head_dim,
-                        token_count,
-                        start_position,
+                        token_count: transition.token_count(),
+                        start_position: transition.start_position(),
                         position_mode,
                     },
                     &mut pending,
@@ -1623,8 +1570,12 @@ impl QwenExecutionCore {
                     node,
                     layer,
                     state,
-                    token_count,
-                    start_position,
+                    StatefulExecution {
+                        token_count: transition.token_count(),
+                        start_position: transition.start_position(),
+                        expected_length: transition.expected_length(),
+                    },
+                    planned.boundary_after(),
                     &mut pending,
                 )?,
                 QwenGraphNodeKind::FullCausalAttention { layer, state, .. } => self
@@ -1633,9 +1584,9 @@ impl QwenExecutionCore {
                         layer,
                         state,
                         StatefulExecution {
-                            token_count,
-                            start_position,
-                            expected_length,
+                            token_count: transition.token_count(),
+                            start_position: transition.start_position(),
+                            expected_length: transition.expected_length(),
                         },
                         &mut pending,
                     )?,
@@ -1645,18 +1596,24 @@ impl QwenExecutionCore {
                         layer,
                         state,
                         StatefulExecution {
-                            token_count,
-                            start_position,
-                            expected_length,
+                            token_count: transition.token_count(),
+                            start_position: transition.start_position(),
+                            expected_length: transition.expected_length(),
                         },
                         &mut pending,
                     )?,
             }
+            Ok(())
+        })?;
+        if let Some(argmax) = argmax {
+            return Ok(argmax);
         }
-        self.flush_segment(&mut pending)?;
-        argmax.ok_or_else(|| {
-            QwenExecutionError::InvalidGraph("graph has no argmax output node".to_owned())
-        })
+        if !pending.is_empty() {
+            self.close_boundary(&mut pending, ExecutionBoundaryKind::Error)?;
+        }
+        Err(QwenExecutionError::InvalidGraph(
+            "graph has no argmax output node".to_owned(),
+        ))
     }
 
     fn read_last_logits(&self, token_count: u64) -> Result<Vec<f32>, QwenExecutionError> {
@@ -1746,7 +1703,8 @@ impl QwenExecutionCore {
         &self,
         node: &QwenGraphNode,
         token_count: u64,
-        pending: &mut Vec<PendingSegmentSubmission>,
+        boundary_after: Option<ExecutionBoundaryKind>,
+        pending: &mut ExecutionSegment,
     ) -> Result<Option<Vec<i32>>, QwenExecutionError> {
         let operation = node.operation().ok_or_else(|| {
             QwenExecutionError::InvalidGraph(format!(
@@ -1779,24 +1737,31 @@ impl QwenExecutionCore {
         let output_bindings = self.bind_many(node.outputs(), token_count, AccessMode::Write)?;
         let kind = descriptor.kind();
         let mut submission = self.submit_semantic(
-            node.label(),
             descriptor,
             input_bindings,
             output_bindings,
-            Some(token_count),
+            PreparedCachePolicy::Reusable(PreparedDynamicIdentity::stateless(token_count, 0)),
         )?;
         if kind != SemanticOpKind::Argmax {
-            pending.push(PendingSegmentSubmission::Semantic {
-                label: node.label().to_owned(),
-                submission: Box::new(submission),
-            });
+            if boundary_after.is_some() {
+                return Err(QwenExecutionError::InvalidGraph(format!(
+                    "non-terminal semantic node {} declares a boundary",
+                    node.label()
+                )));
+            }
+            pending.retain_semantic(node.label(), submission);
             return Ok(None);
         }
         // The terminal argmax completion is the final stream-ordered segment
         // boundary. Once it succeeds, every earlier completion can be checked
         // without serially sleeping between individual semantic operations.
-        wait_submission_success(&mut submission, self.completion_timeout, node.label())?;
-        self.flush_segment(pending)?;
+        if boundary_after != Some(ExecutionBoundaryKind::TerminalReadback) {
+            return Err(QwenExecutionError::InvalidGraph(
+                "terminal Argmax lacks its readback boundary".to_owned(),
+            ));
+        }
+        wait_terminal_submission(node.label(), &mut submission, self.completion_timeout)?;
+        self.close_boundary(pending, ExecutionBoundaryKind::TerminalReadback)?;
         self.record_dispatch(submission.dispatch())?;
         if node.outputs().len() != 1 {
             return Err(QwenExecutionError::InvalidGraph(
@@ -1826,7 +1791,7 @@ impl QwenExecutionCore {
         &self,
         node: &QwenGraphNode,
         execution: AttentionPreprocessExecution,
-        pending: &mut Vec<PendingSegmentSubmission>,
+        pending: &mut ExecutionSegment,
     ) -> Result<(), QwenExecutionError> {
         if node.inputs().len() != 5 || node.outputs().len() != 3 {
             return Err(QwenExecutionError::InvalidGraph(format!(
@@ -1853,11 +1818,9 @@ impl QwenExecutionCore {
         let outputs = self.bind_many(node.outputs(), execution.token_count, AccessMode::Write)?;
         // Position is part of this descriptor, so decode steps with the same
         // token count are not interchangeable prepared operations.
-        let submission = self.submit_semantic(node.label(), descriptor, inputs, outputs, None)?;
-        pending.push(PendingSegmentSubmission::Semantic {
-            label: node.label().to_owned(),
-            submission: Box::new(submission),
-        });
+        let submission =
+            self.submit_semantic(descriptor, inputs, outputs, PreparedCachePolicy::Transient)?;
+        pending.retain_semantic(node.label(), submission);
         let _ = execution.layer;
         Ok(())
     }
@@ -1867,9 +1830,9 @@ impl QwenExecutionCore {
         node: &QwenGraphNode,
         layer: u32,
         descriptor: KvStateDescriptor,
-        token_count: u64,
-        start_position: u64,
-        pending: &mut Vec<PendingSegmentSubmission>,
+        execution: StatefulExecution,
+        boundary_after: Option<ExecutionBoundaryKind>,
+        pending: &mut ExecutionSegment,
     ) -> Result<(), QwenExecutionError> {
         if node.inputs().len() != 2 || !node.outputs().is_empty() {
             return Err(QwenExecutionError::InvalidGraph(format!(
@@ -1878,21 +1841,27 @@ impl QwenExecutionCore {
             )));
         }
         let state = self.kv_state(layer, descriptor)?;
-        let key = self.bind(node.inputs()[0], token_count, AccessMode::Read)?;
-        let value = self.bind(node.inputs()[1], token_count, AccessMode::Read)?;
+        let key = self.bind(node.inputs()[0], execution.token_count, AccessMode::Read)?;
+        let value = self.bind(node.inputs()[1], execution.token_count, AccessMode::Read)?;
         let mut submission = self.session.append_kv_state(
             state,
             &self.queue,
             key,
             value,
-            start_position,
-            start_position,
+            execution.start_position,
+            execution.start_position,
         )?;
-        wait_kv_append_success(&mut submission, self.completion_timeout, node.label())?;
+        wait_terminal_kv_append(node.label(), &mut submission, self.completion_timeout)?;
         // KV publication is an unavoidable state boundary. The append event
         // is after all earlier work on the stream, so drain the preceding
         // segment now and then publish this state transition.
-        self.flush_segment(pending)?;
+        if boundary_after != Some(ExecutionBoundaryKind::StatePublication) {
+            return Err(QwenExecutionError::InvalidGraph(format!(
+                "KV append node {} lacks its state-publication boundary",
+                node.label()
+            )));
+        }
+        self.close_boundary(pending, ExecutionBoundaryKind::StatePublication)?;
         self.record_dispatch(submission.dispatch())
     }
 
@@ -1902,7 +1871,7 @@ impl QwenExecutionCore {
         layer: u32,
         state_descriptor: KvStateDescriptor,
         execution: StatefulExecution,
-        pending: &mut Vec<PendingSegmentSubmission>,
+        pending: &mut ExecutionSegment,
     ) -> Result<(), QwenExecutionError> {
         if node.inputs().len() != 1 || node.outputs().len() != 1 {
             return Err(QwenExecutionError::InvalidGraph(format!(
@@ -1922,10 +1891,7 @@ impl QwenExecutionCore {
         let submission =
             self.session
                 .causal_attention(state, &self.queue, query, output, descriptor)?;
-        pending.push(PendingSegmentSubmission::CausalAttention {
-            label: node.label().to_owned(),
-            submission: Box::new(submission),
-        });
+        pending.retain_causal_attention(node.label(), submission);
         Ok(())
     }
 
@@ -1935,7 +1901,7 @@ impl QwenExecutionCore {
         layer: u32,
         state_descriptor: LinearAttentionStateDescriptor,
         execution: StatefulExecution,
-        pending: &mut Vec<PendingSegmentSubmission>,
+        pending: &mut ExecutionSegment,
     ) -> Result<(), QwenExecutionError> {
         if node.inputs().len() != 8 || node.outputs().len() != 1 {
             return Err(QwenExecutionError::InvalidGraph(format!(
@@ -1966,70 +1932,50 @@ impl QwenExecutionCore {
         let submission = self
             .session
             .linear_attention(state, &self.queue, bindings, descriptor)?;
-        pending.push(PendingSegmentSubmission::LinearAttention {
-            label: node.label().to_owned(),
-            submission: Box::new(submission),
-        });
+        pending.retain_linear_attention(node.label(), submission);
         Ok(())
     }
 
-    fn flush_segment(
+    fn close_boundary(
         &self,
-        pending: &mut Vec<PendingSegmentSubmission>,
+        pending: &mut ExecutionSegment,
+        boundary: ExecutionBoundaryKind,
     ) -> Result<(), QwenExecutionError> {
-        for mut retained in pending.drain(..) {
-            match &mut retained {
-                PendingSegmentSubmission::Semantic { label, submission } => {
-                    require_terminal_success(label, submission.query()?)?;
-                    self.record_dispatch(submission.dispatch())?;
-                }
-                PendingSegmentSubmission::CausalAttention { label, submission } => {
-                    require_terminal_success(label, submission.query()?)?;
-                    self.record_dispatch(submission.dispatch())?;
-                }
-                PendingSegmentSubmission::LinearAttention { label, submission } => {
-                    require_terminal_success(label, submission.query()?)?;
-                    self.record_dispatch(submission.dispatch())?;
-                }
-            }
-        }
-        Ok(())
+        let mut audit = self
+            .audit
+            .lock()
+            .map_err(|_| QwenExecutionError::Poisoned)?;
+        pending.flush(boundary, &mut audit).map_err(Into::into)
     }
 
     fn record_dispatch(&self, evidence: &DispatchEvidence) -> Result<(), QwenExecutionError> {
         self.audit
             .lock()
             .map_err(|_| QwenExecutionError::Poisoned)?
-            .record_evidence(evidence)
+            .record(evidence)
+            .map_err(Into::into)
     }
 
     fn audit_snapshot(&self) -> Result<QwenExecutionAudit, QwenExecutionError> {
         let audit = self
             .audit
             .lock()
-            .map_err(|_| QwenExecutionError::Poisoned)?;
-        let target = audit.target.clone().ok_or_else(|| {
-            QwenExecutionError::InvalidRequest(
-                "successful Qwen transition has an empty dispatch audit".to_owned(),
-            )
-        })?;
-        if audit.submission_count == 0 || audit.kernel_dispatch_count == 0 {
-            return Err(QwenExecutionError::InvalidRequest(
-                "successful Qwen transition has an empty dispatch audit".to_owned(),
-            ));
-        }
-        if !audit.all_dispatches_hip || audit.fallback_used {
+            .map_err(|_| QwenExecutionError::Poisoned)?
+            .snapshot()?;
+        if audit.backend() != 1 || audit.fallback_used() {
             return Err(QwenExecutionError::InvalidRequest(
                 "Qwen dispatch audit is not HIP-only and fallback-free".to_owned(),
             ));
         }
         Ok(QwenExecutionAudit {
-            selected_backend: if audit.all_dispatches_hip { "hip" } else { "" },
-            target,
-            submission_count: audit.submission_count,
-            kernel_dispatch_count: audit.kernel_dispatch_count,
-            fallback_used: audit.fallback_used,
-            all_dispatches_hip: audit.all_dispatches_hip,
+            selected_backend: "hip",
+            target: audit.target().to_owned(),
+            submission_count: audit.submission_count(),
+            kernel_dispatch_count: audit.kernel_dispatch_count(),
+            fallback_used: audit.fallback_used(),
+            all_dispatches_hip: true,
+            segment_count: audit.segment_count(),
+            boundary_count: audit.boundary_count(),
         })
     }
 
@@ -2065,43 +2011,26 @@ impl QwenExecutionCore {
 
     fn submit_semantic(
         &self,
-        label: &str,
         descriptor: SemanticOpDescriptor,
         inputs: Vec<OwnedTensorBinding>,
         outputs: Vec<OwnedTensorBinding>,
-        cache_token_count: Option<u64>,
+        cache_policy: PreparedCachePolicy,
     ) -> Result<Submission, QwenExecutionError> {
         match self.session.supports(&descriptor) {
             PrepareSupport::Supported => {}
             PrepareSupport::Unsupported { reason } => {
                 return Err(QwenExecutionError::Execution(ExecutionError::Unsupported {
-                    reason: format!("{} is unsupported: {reason}", label),
+                    reason: format!("{:?} is unsupported: {reason}", descriptor.kind()),
                 }));
             }
         }
-        let cache_key = cache_token_count.map(|token_count| (label.to_owned(), token_count));
-        let cached = match &cache_key {
-            Some(key) => self
-                .prepared_semantics
-                .lock()
-                .map_err(|_| QwenExecutionError::Poisoned)?
-                .get(key)
-                .cloned(),
-            None => None,
-        };
-        let prepared = if let Some(prepared) = cached {
-            prepared
-        } else {
-            let operation = Arc::new(BoundSemanticOp::new(Arc::new(descriptor), inputs, outputs)?);
-            let prepared = self.session.prepare(operation)?;
-            if let Some(key) = cache_key {
-                self.prepared_semantics
-                    .lock()
-                    .map_err(|_| QwenExecutionError::Poisoned)?
-                    .insert(key, prepared.clone());
-            }
-            prepared
-        };
+        let prepared = self.prepared_semantics.prepare(
+            self.session.as_ref(),
+            descriptor,
+            inputs,
+            outputs,
+            cache_policy,
+        )?;
         Ok(self.session.submit(&prepared, &self.queue)?)
     }
 
@@ -3381,34 +3310,6 @@ fn decode_bf16_logits(bytes: &[u8]) -> Result<Vec<f32>, QwenExecutionError> {
         .collect())
 }
 
-fn require_terminal_success(stage: &str, state: ExecutionState) -> Result<(), QwenExecutionError> {
-    match state {
-        ExecutionState::Success => Ok(()),
-        ExecutionState::Pending => Err(QwenExecutionError::CompletionPending {
-            stage: stage.to_owned(),
-        }),
-        ExecutionState::Failure => Err(QwenExecutionError::CompletionFailure {
-            stage: stage.to_owned(),
-        }),
-    }
-}
-
-fn wait_submission_success(
-    submission: &mut Submission,
-    timeout: Duration,
-    stage: &str,
-) -> Result<(), QwenExecutionError> {
-    require_terminal_success(stage, submission.wait(timeout)?)
-}
-
-fn wait_kv_append_success(
-    submission: &mut KvStateAppendSubmission,
-    timeout: Duration,
-    stage: &str,
-) -> Result<(), QwenExecutionError> {
-    require_terminal_success(stage, submission.wait(timeout)?)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3417,9 +3318,10 @@ mod tests {
     use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
     use crate::execution::{
-        AdapterResource, ExecutionAdapterAccess, ExecutionCausalAttentionSubmissionAdapter,
-        ExecutionKvStateSubmissionAdapter, ExecutionLinearAttentionSubmissionAdapter,
-        ExecutionReadbackAdapter, ExecutionSessionAdapter, ExecutionSubmissionAdapter,
+        AdapterResource, BoundSemanticOp, ExecutionAdapterAccess,
+        ExecutionCausalAttentionSubmissionAdapter, ExecutionKvStateSubmissionAdapter,
+        ExecutionLinearAttentionSubmissionAdapter, ExecutionReadbackAdapter,
+        ExecutionSessionAdapter, ExecutionState, ExecutionSubmissionAdapter,
         ExecutionTransferAdapter, PreparedOperation, ShutdownReport,
     };
     use crate::kv_state::{KvStateAppendRequest, KvStateSnapshot};
@@ -4096,56 +3998,6 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_audit_counts_typed_multi_dispatch_and_kv_submission() {
-        let mut audit = DispatchAuditAccumulator::default();
-        let semantic = dispatch_evidence();
-        audit.record_evidence(&semantic).unwrap();
-        let mut linear = semantic.clone();
-        linear.dispatch_count = 2;
-        audit.record_evidence(&linear).unwrap();
-        let mut kv_append = semantic;
-        kv_append.dispatch_id = 3;
-        audit.record_evidence(&kv_append).unwrap();
-        assert_eq!(audit.submission_count, 3);
-        assert_eq!(audit.kernel_dispatch_count, 4);
-        assert_eq!(audit.target.as_deref(), Some("recorder"));
-    }
-
-    #[test]
-    fn dispatch_audit_rejects_mixed_target_backend_and_fallback_evidence() {
-        let mut audit = DispatchAuditAccumulator::default();
-        audit.record_evidence(&dispatch_evidence()).unwrap();
-
-        let mut wrong_target = dispatch_evidence();
-        wrong_target.target = "other".to_owned();
-        assert!(matches!(
-            audit.record_evidence(&wrong_target),
-            Err(QwenExecutionError::InvalidRequest(_))
-        ));
-
-        let mut wrong_backend = dispatch_evidence();
-        wrong_backend.backend = 0;
-        assert!(matches!(
-            audit.record_evidence(&wrong_backend),
-            Err(QwenExecutionError::InvalidRequest(_))
-        ));
-
-        let mut fallback_allowed = dispatch_evidence();
-        fallback_allowed.fallback_allowed = true;
-        assert!(matches!(
-            audit.record_evidence(&fallback_allowed),
-            Err(QwenExecutionError::InvalidRequest(_))
-        ));
-
-        let mut fallback_used = dispatch_evidence();
-        fallback_used.fallback_used = true;
-        assert!(matches!(
-            audit.record_evidence(&fallback_used),
-            Err(QwenExecutionError::InvalidRequest(_))
-        ));
-    }
-
-    #[test]
     fn audit_snapshot_rejects_empty_and_poisoned_audits() {
         let recorder = Arc::new(ExecutionRecorder::default());
         let (core, _) = provisioned_core(recorder);
@@ -4244,6 +4096,8 @@ mod tests {
         assert!(audit.kernel_dispatch_count() >= audit.submission_count());
         assert!(!audit.fallback_used());
         assert!(audit.all_dispatches_hip());
+        assert!(audit.segment_count() > 0);
+        assert!(audit.boundary_count() >= audit.segment_count());
         for state in core.kv_states.values() {
             assert_eq!(state.snapshot(core.session.as_ref()).unwrap().length(), 4);
         }
@@ -4352,7 +4206,7 @@ mod tests {
             core.prefill(&[1, 2, 3]),
             Err(QwenExecutionError::CompletionFailure { .. })
         ));
-        assert!(core.lifecycle.poisoned.load(Ordering::Acquire));
+        assert!(core.lifecycle.is_poisoned());
         assert_eq!(core.committed_length, 0);
         assert!(core.last_output.is_none());
         let first_linear = core.linear_states.get(&0).unwrap();
@@ -4374,15 +4228,14 @@ mod tests {
             core.prefill(&[1, 2, 3]),
             Err(QwenExecutionError::CompletionPending { .. })
         ));
-        assert!(core.lifecycle.poisoned.load(Ordering::Acquire));
+        assert!(core.lifecycle.is_poisoned());
         assert_eq!(core.committed_length, 0);
         assert!(core.last_output.is_none());
 
-        let lifecycle = Arc::new(RequestLifecycle::new());
-        let guard = TransitionGuard::begin(Arc::clone(&lifecycle)).unwrap();
+        let lifecycle = ExecutionTransaction::new();
+        let guard = lifecycle.begin().unwrap();
         drop(guard);
-        assert!(lifecycle.poisoned.load(Ordering::Acquire));
-        assert!(!lifecycle.in_flight.load(Ordering::Acquire));
+        assert!(lifecycle.is_poisoned());
     }
 
     #[test]
@@ -4393,7 +4246,7 @@ mod tests {
             core.prefill(&[1, 2, 3]),
             Err(QwenExecutionError::ArgmaxSentinel { index: 0 })
         ));
-        assert!(core.lifecycle.poisoned.load(Ordering::Acquire));
+        assert!(core.lifecycle.is_poisoned());
         assert_eq!(core.committed_length, 0);
         assert!(core.last_output.is_none());
         assert_eq!(
@@ -4422,7 +4275,7 @@ mod tests {
             core.prefill(&[QWEN35_VOCAB_SIZE as i32, 1, 2]),
             Err(QwenExecutionError::InvalidRequest(_))
         ));
-        assert!(!core.lifecycle.poisoned.load(Ordering::Acquire));
+        assert!(!core.lifecycle.is_poisoned());
         assert_eq!(position_bytes(0, 3).unwrap(), i32_bytes(&[0, 1, 2]));
         assert_eq!(position_bytes(3, 1).unwrap(), i32_bytes(&[3]));
         assert!(position_bytes(i32::MAX as u64, 2).is_err());
@@ -4440,7 +4293,7 @@ mod tests {
             core.prefill(&[1, 2, 3]),
             Err(QwenExecutionError::InvalidRequest(_))
         ));
-        assert!(core.lifecycle.poisoned.load(Ordering::Acquire));
+        assert!(core.lifecycle.is_poisoned());
         assert_eq!(core.committed_length, 0);
         assert!(core.last_output.is_none());
     }
@@ -4465,23 +4318,27 @@ mod tests {
             core.decode(7),
             Err(QwenExecutionError::InvalidRequest(_))
         ));
-        assert!(!core.lifecycle.poisoned.load(Ordering::Acquire));
+        assert!(!core.lifecycle.is_poisoned());
     }
 
     #[test]
     fn dispatch_audit_counts_kernel_dispatches_and_rejects_non_hip_evidence() {
-        let mut audit = DispatchAuditAccumulator::default();
+        let mut audit = ExecutionAuditAccumulator::new(1);
         let first = dispatch_evidence();
-        audit.record_evidence(&first).unwrap();
+        audit.record(&first).unwrap();
         let mut two_kernel = first.clone();
         two_kernel.dispatch_id = 2;
         two_kernel.dispatch_count = 2;
-        audit.record_evidence(&two_kernel).unwrap();
-        assert_eq!(audit.target.as_deref(), Some("recorder"));
-        assert_eq!(audit.submission_count, 2);
-        assert_eq!(audit.kernel_dispatch_count, 3);
-        assert!(audit.all_dispatches_hip);
-        assert!(!audit.fallback_used);
+        audit.record(&two_kernel).unwrap();
+        audit
+            .record_boundary(ExecutionBoundaryKind::TerminalReadback, true)
+            .unwrap();
+        let snapshot = audit.snapshot().unwrap();
+        assert_eq!(snapshot.target(), "recorder");
+        assert_eq!(snapshot.submission_count(), 2);
+        assert_eq!(snapshot.kernel_dispatch_count(), 3);
+        assert_eq!(snapshot.backend(), 1);
+        assert!(!snapshot.fallback_used());
 
         for invalid in [
             {
@@ -4505,18 +4362,14 @@ mod tests {
                 value
             },
         ] {
-            assert!(
-                DispatchAuditAccumulator::default()
-                    .record_evidence(&invalid)
-                    .is_err()
-            );
+            assert!(ExecutionAuditAccumulator::new(1).record(&invalid).is_err());
         }
 
-        let mut mixed_target = DispatchAuditAccumulator::default();
-        mixed_target.record_evidence(&first).unwrap();
+        let mut mixed_target = ExecutionAuditAccumulator::new(1);
+        mixed_target.record(&first).unwrap();
         let mut wrong_target = first;
         wrong_target.target = "other".to_owned();
-        assert!(mixed_target.record_evidence(&wrong_target).is_err());
+        assert!(mixed_target.record(&wrong_target).is_err());
     }
 
     #[test]

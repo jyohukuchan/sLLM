@@ -595,6 +595,8 @@
         "fallback_used",
         "submission_count",
         "kernel_dispatch_count",
+        "segment_count",
+        "boundary_count",
         "all_dispatches_hip"
       ],
       "properties": {
@@ -624,6 +626,14 @@
           "minimum": 1
         },
         "kernel_dispatch_count": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "segment_count": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "boundary_count": {
           "type": "integer",
           "minimum": 1
         },
@@ -772,7 +782,7 @@
             "scope": {"const": "every_warmup_and_measured_sample"},
             "token_fields": {"const": ["input_token_ids", "generated_token_ids", "visible_token_ids", "decode_input_token_ids"]},
             "stop_fields": {"const": ["version", "reason_version", "kind", "token_id"]},
-            "dispatch_fields": {"const": ["selected_backend", "target", "device_index", "model_fingerprint", "plan_digest", "fallback_used", "all_dispatches_hip", "submission_count", "kernel_dispatch_count"]},
+            "dispatch_fields": {"const": ["selected_backend", "target", "device_index", "model_fingerprint", "plan_digest", "fallback_used", "all_dispatches_hip", "submission_count", "kernel_dispatch_count", "segment_count", "boundary_count"]},
             "dispatch_count_rule": {"const": "exact_when_token_and_stop_fields_match"}
           }
         }
@@ -787,9 +797,13 @@
         "device_index",
         "submission_count",
         "kernel_dispatch_count",
+        "segment_count",
+        "boundary_count",
         "fallback_used",
         "all_dispatches_hip",
         "model_load_count",
+        "weight_encoding",
+        "fp8_provider",
         "request_model_load_count",
         "model_reused",
         "sample_count",
@@ -817,6 +831,14 @@
           "type": "integer",
           "minimum": 1
         },
+        "segment_count": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "boundary_count": {
+          "type": "integer",
+          "minimum": 1
+        },
         "fallback_used": {
           "const": false
         },
@@ -825,6 +847,18 @@
         },
         "model_load_count": {
           "const": 1
+        },
+        "weight_encoding": {
+          "enum": [
+            "bf16",
+            "bf16-converted-from-ocp-e4m3fn",
+            "e4m3fnuz-converted-from-ocp-e4m3fn-outer-f32",
+            "ocp-e4m3fn-outer-f32"
+          ]
+        },
+        "fp8_provider": {
+          "type": ["string", "null"],
+          "enum": [null, "native", "native-fnuz", "emulation", "converted-bf16"]
         },
         "request_model_load_count": {
           "const": 0
@@ -1213,7 +1247,7 @@
         "definitions": {"type": "object", "additionalProperties": false, "required": ["clock_variation", "violation", "process_ownership"], "properties": {"clock_variation": {"const": "Dynamic clock min/max is observational; no numeric threshold is a violation."}, "violation": {"enum": ["When violation accumulators are unavailable, aggregate THROTTLED status is observational; ECC, published thermal/power limits, and exposed active violations remain fail-closed.", "A non-UNTHROTTLED power status or exposed active violation is explicit evidence; all-N/A accumulators are a documented AMD-SMI limitation."]}, "process_ownership": {"const": "Every during sample must name only descendants of the benchmark process group."}}},
         "visibility": {"type": "object", "additionalProperties": false, "required": ["cleared", "selector", "uuid"], "properties": {"cleared": {"const": ["HIP_VISIBLE_DEVICES", "ROCR_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES", "GPU_DEVICE_ORDINAL"]}, "selector": {"const": "ROCR_VISIBLE_DEVICES"}, "uuid": {"type": "string", "pattern": "^GPU-[0-9a-f]{16}$"}}},
         "pre": {"$ref": "#/$defs/evidence_phase"},
-        "during": {"type": "object", "additionalProperties": false, "required": ["sample_count", "sample_digest", "first", "last", "summary", "process_sample_digest", "loader", "violation"], "properties": {"sample_count": {"type": "integer", "minimum": 1}, "sample_digest": {"$ref": "#/$defs/digest"}, "first": {"$ref": "#/$defs/evidence_monitor_sample"}, "last": {"$ref": "#/$defs/evidence_monitor_sample"}, "summary": {"$ref": "#/$defs/evidence_summary"}, "process_sample_digest": {"$ref": "#/$defs/digest"}, "loader": {"$ref": "#/$defs/evidence_loader"}, "violation": {"$ref": "#/$defs/evidence_violation"}}},
+        "during": {"type": "object", "additionalProperties": false, "required": ["sample_count", "sample_digest", "first", "last", "summary", "process_sample_digest", "loader", "loaders", "violation"], "properties": {"sample_count": {"type": "integer", "minimum": 1}, "sample_digest": {"$ref": "#/$defs/digest"}, "first": {"$ref": "#/$defs/evidence_monitor_sample"}, "last": {"$ref": "#/$defs/evidence_monitor_sample"}, "summary": {"$ref": "#/$defs/evidence_summary"}, "process_sample_digest": {"$ref": "#/$defs/digest"}, "loader": {"$ref": "#/$defs/evidence_loader"}, "loaders": {"type": "array", "minItems": 1, "maxItems": 1024, "uniqueItems": true, "items": {"$ref": "#/$defs/evidence_loader"}}, "violation": {"$ref": "#/$defs/evidence_violation"}}},
         "post": {"$ref": "#/$defs/evidence_phase"},
         "checks": {"type": "object", "additionalProperties": false, "required": ["exact_identity", "static_identity_unchanged", "profile_unchanged", "limits_unchanged", "performance_level_unchanged", "explicit_violation", "vram_auxiliary_complete", "process_ownership", "loader_paths_verified", "monitor_errors", "process_group_cleanup"], "properties": {"exact_identity": {"type": "boolean"}, "static_identity_unchanged": {"type": "boolean"}, "profile_unchanged": {"type": "boolean"}, "limits_unchanged": {"type": "boolean"}, "performance_level_unchanged": {"type": "boolean"}, "explicit_violation": {"type": "boolean"}, "vram_auxiliary_complete": {"type": "boolean"}, "process_ownership": {"type": "boolean"}, "loader_paths_verified": {"type": "boolean"}, "monitor_errors": {"type": "integer", "minimum": 0}, "process_group_cleanup": {"type": "boolean"}}}
       }

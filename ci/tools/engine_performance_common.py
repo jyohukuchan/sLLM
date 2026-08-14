@@ -483,20 +483,50 @@ def validate_manifest_evidence(manifest: Any) -> None:
     first = during.get("first", {})
     last = during.get("last", {})
     loader = during.get("loader", {})
-    if not isinstance(first, dict) or not isinstance(last, dict) or not isinstance(loader, dict):
+    loader_records = during.get("loaders")
+    if not isinstance(first, dict) or not isinstance(last, dict) or not isinstance(loader, dict) or not isinstance(loader_records, list) or not loader_records:
         fail("performance manifest during evidence is incomplete")
+    loaders_by_digest: dict[str, dict[str, Any]] = {}
+    for loader_record in loader_records:
+        if not isinstance(loader_record, dict):
+            fail("performance manifest loader record is not an object")
+        paths = loader_record.get("resolved_paths", [])
+        path_digest = loader_record.get("path_digest")
+        library_digests = loader_record.get("library_digests")
+        process_ids = loader_record.get("process_ids")
+        if (
+            loader_record.get("required_rocm_release") != ROCM_RELEASE
+            or loader_record.get("expected_root") != ROCM_ROOT
+            or not isinstance(paths, list)
+            or len(paths) < 2
+            or any(not isinstance(path, str) for path in paths)
+            or paths != sorted(set(paths))
+            or path_digest != "sha256:" + hashlib.sha256(canonical_bytes(paths)).hexdigest()
+            or not isinstance(library_digests, dict)
+            or set(library_digests) != set(paths)
+            or any(
+                not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{64}", value)
+                for value in library_digests.values()
+            )
+            or not isinstance(process_ids, list)
+            or not process_ids
+            or any(not isinstance(pid, int) or isinstance(pid, bool) or pid < 1 for pid in process_ids)
+        ):
+            fail("performance manifest loader path/digest/process evidence failed")
+        if not any(Path(path).name.startswith("libamdhip64.so") for path in paths) or not any(Path(path).name.startswith("libhsa-runtime64.so") for path in paths) or any(not path.startswith(ROCM_ROOT + "/") for path in paths):
+            fail("performance manifest loader root/library evidence failed")
+        if path_digest in loaders_by_digest:
+            fail("performance manifest loader evidence digest is duplicated")
+        loaders_by_digest[path_digest] = loader_record
+    if loaders_by_digest.get(loader.get("path_digest")) != loader:
+        fail("performance manifest final loader has no exact provenance record")
     for sample in (first, last):
-        if sample.get("process", {}).get("state") != "OWNED" or not sample.get("process", {}).get("pids") or sample.get("loader_path_digest") != loader.get("path_digest"):
+        if sample.get("process", {}).get("state") != "OWNED" or not sample.get("process", {}).get("pids") or sample.get("loader_path_digest") not in loaders_by_digest:
             fail("performance manifest during process/loader ownership evidence failed")
         if sample.get("metric", {}).get("throttle_status") not in {"UNTHROTTLED", "THROTTLED"} or sample.get("metric", {}).get("ecc_uncorrectable") != 0:
             fail("performance manifest during health evidence failed")
         if enforce_pass_safety:
             _validate_performance_metric_safety(pre["static"], sample["metric"], "performance manifest during")
-    paths = loader.get("resolved_paths", [])
-    if loader.get("required_rocm_release") != ROCM_RELEASE or loader.get("expected_root") != ROCM_ROOT or not isinstance(paths, list) or paths != sorted(set(paths)) or loader.get("path_digest") != "sha256:" + hashlib.sha256(canonical_bytes(paths)).hexdigest():
-        fail("performance manifest loader path evidence failed")
-    if not any(Path(path).name.startswith("libamdhip64.so") for path in paths) or not any(Path(path).name.startswith("libhsa-runtime64.so") for path in paths) or any(not path.startswith(ROCM_ROOT + "/") for path in paths):
-        fail("performance manifest loader root/library evidence failed")
     checks = evidence.get("checks", {})
     if manifest.get("state") == "PASS":
         perf_levels = during.get("summary", {}).get("perf_levels")
@@ -800,7 +830,7 @@ def validate_cli_result(result: Any, row: Mapping[str, Any], *, schema: bool = T
     if result["memory"]["model_resident_high_water_bytes"] != ready["model_high_water_bytes"] or result["memory"]["resident_vram_bytes"] != ready["model_high_water_bytes"] or result["memory"]["resident_vram_source"] != "model_resident_allocator_high_water" or result["memory"]["peak_vram_bytes"] != after_drop["total_high_water_bytes"] or result["memory"]["peak_vram_bytes"] < result["memory"]["resident_vram_bytes"] or result["memory"]["peak_source"] != "runtime_allocator":
         fail("direct memory identity or high-water mark is invalid")
     audit = result["audit"]
-    if audit["selected_backend"] != "hip" or audit["target"] != row["target"] or audit["device_index"] != device["logical_device_index"] or audit["fallback_used"] is not False or audit["all_dispatches_hip"] is not True or audit["submission_count"] < 1 or audit["kernel_dispatch_count"] < 1:
+    if audit["selected_backend"] != "hip" or audit["target"] != row["target"] or audit["device_index"] != device["logical_device_index"] or audit["fallback_used"] is not False or audit["all_dispatches_hip"] is not True or audit["submission_count"] < 1 or audit["kernel_dispatch_count"] < 1 or audit["segment_count"] < 1 or audit["boundary_count"] < 1:
         fail("direct aggregate audit is not HIP-only and fallback-free")
     if audit["model_load_count"] != 1 or audit["request_model_load_count"] != 0 or audit["model_reused"] is not True or audit["sample_count"] != 13 or audit["correctness_control_request_count"] != 1 or audit["total_request_count"] != 14:
         fail("model resident/request-local audit is invalid")
@@ -820,7 +850,7 @@ def validate_cli_result(result: Any, row: Mapping[str, Any], *, schema: bool = T
         "mode": "exact", "scope": "every_warmup_and_measured_sample",
         "token_fields": ["input_token_ids", "generated_token_ids", "visible_token_ids", "decode_input_token_ids"],
         "stop_fields": ["version", "reason_version", "kind", "token_id"],
-        "dispatch_fields": ["selected_backend", "target", "device_index", "model_fingerprint", "plan_digest", "fallback_used", "all_dispatches_hip", "submission_count", "kernel_dispatch_count"],
+        "dispatch_fields": ["selected_backend", "target", "device_index", "model_fingerprint", "plan_digest", "fallback_used", "all_dispatches_hip", "submission_count", "kernel_dispatch_count", "segment_count", "boundary_count"],
         "dispatch_count_rule": "exact_when_token_and_stop_fields_match",
     }
     if control["label"] != "correctness-only" or control["execution_path"] != "normal-untimed" or control["timing_instrumentation"] != "off" or control["included_in_performance_statistics"] is not False or control["comparison"] != expected_comparison:
@@ -832,7 +862,7 @@ def validate_cli_result(result: Any, row: Mapping[str, Any], *, schema: bool = T
         fail("correctness-control token ID is outside the locked tokenizer vocabulary")
     validate_stop_semantics(control_tokens["generated_token_ids"], control["stop"], stop_policy, row["requested_output_tokens"], "correctness-control")
     control_audit = control["audit"]
-    if control_audit["selected_backend"] != "hip" or control_audit["target"] != row["target"] or control_audit["device_index"] != device["logical_device_index"] or control_audit["model_fingerprint"] != model["lock_fingerprint"] or control_audit["plan_digest"] != identities["binding"]["plan_digest"] or control_audit["fallback_used"] is not False or control_audit["all_dispatches_hip"] is not True or control_audit["submission_count"] < 1 or control_audit["kernel_dispatch_count"] < 1:
+    if control_audit["selected_backend"] != "hip" or control_audit["target"] != row["target"] or control_audit["device_index"] != device["logical_device_index"] or control_audit["model_fingerprint"] != model["lock_fingerprint"] or control_audit["plan_digest"] != identities["binding"]["plan_digest"] or control_audit["fallback_used"] is not False or control_audit["all_dispatches_hip"] is not True or control_audit["submission_count"] < 1 or control_audit["kernel_dispatch_count"] < 1 or control_audit["segment_count"] < 1 or control_audit["boundary_count"] < 1:
         fail("correctness-control dispatch audit is invalid")
     control_start = _snapshot_values(control["memory"]["request_start"], "correctness-control request-start memory")
     control_cleanup = _snapshot_values(control["memory"]["after_cleanup"], "correctness-control after-cleanup memory")

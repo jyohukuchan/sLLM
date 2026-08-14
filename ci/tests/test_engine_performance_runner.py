@@ -637,6 +637,16 @@ class EnginePerformanceRunnerTests(unittest.TestCase):
         samples, info = runner._validate_monitor_capture(capture, "gfx1030", 123)
         self.assertEqual(len(samples), 2)
         self.assertEqual(info["loader_path_digest"], second["loader_path_digest"])
+        self.assertEqual(len(info["loaders"]), 2)
+        evidence = runner._build_evidence(
+            evidence_for("gfx1030"), evidence_for("gfx1030"), capture, "gfx1030",
+            {"path": runner.AMD_SMI_EXECUTABLE, "tool_version": "test", "library_version": "test", "rocm_version": "7.14.0"},
+        )
+        self.assertNotEqual(
+            evidence["during"]["first"]["loader_path_digest"],
+            evidence["during"]["loader"]["path_digest"],
+        )
+        self.assertEqual(len(evidence["during"]["loaders"]), 2)
 
     def test_monitor_acquisition_waits_only_for_context_and_then_uses_one_second_lane(self) -> None:
         stop = __import__("threading").Event()

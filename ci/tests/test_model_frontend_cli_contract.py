@@ -58,7 +58,11 @@ def generate_report() -> dict[str, object]:
                 "fallback_used": False,
                 "submission_count": 42,
                 "kernel_dispatch_count": 43,
+                "segment_count": 17,
+                "boundary_count": 18,
                 "all_dispatches_hip": True,
+                "weight_encoding": "bf16",
+                "fp8_provider": None,
             },
             "timing_ns": 123,
             "cleanup": {"retryable_cleanup": 0, "durable_quarantine": 0},
@@ -112,6 +116,8 @@ class ModelFrontendCliSchemaTests(unittest.TestCase):
         for field, value in [
             ("submission_count", 0),
             ("kernel_dispatch_count", 0),
+            ("segment_count", 0),
+            ("boundary_count", 0),
             ("all_dispatches_hip", False),
         ]:
             mutated = copy.deepcopy(generate_report())

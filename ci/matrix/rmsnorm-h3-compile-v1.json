@@ -94,14 +94,14 @@
         },
         {
           "path": "crates/sllm-core/src/op.rs",
-          "sha256": "80cc334ef1a7209b22be065fd0daa4132e92dcf5534000a4994d40ebfa28abf2"
+          "sha256": "464e56bb6afd7651968be505c492268b1013b80b0773c87fbfa067a7edb6e01d"
         },
         {
           "path": "native/hip/CMakeLists.txt",
           "sha256": "d8f2098219ca906bd6351095cfb38669517e555815440a351e81d8e92889524c"
         }
       ],
-      "source_set_sha256": "75b27800672c8bfe137cc919759c1da4add67077d74586099896385c28663e5f"
+      "source_set_sha256": "be8959ba99b976e00e3c5cb97ac18a9657224deeaf31f758b69a87b7b42e8f83"
     },
     "ci_contract": {
       "canonical_order": [

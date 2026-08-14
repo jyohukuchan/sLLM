@@ -86,7 +86,7 @@
             },
             "execution": {
               "type": "object", "additionalProperties": false,
-              "required": ["selected_backend", "target", "device_index", "model_fingerprint", "plan_digest", "prefill_tokens", "decode_steps", "fallback_used", "submission_count", "kernel_dispatch_count", "all_dispatches_hip"],
+              "required": ["selected_backend", "target", "device_index", "model_fingerprint", "plan_digest", "prefill_tokens", "decode_steps", "fallback_used", "submission_count", "kernel_dispatch_count", "segment_count", "boundary_count", "all_dispatches_hip", "weight_encoding", "fp8_provider"],
               "properties": {
                 "selected_backend": {"const": "hip"},
                 "target": {"enum": ["gfx1030", "gfx1201"]},
@@ -98,7 +98,11 @@
                 "fallback_used": {"const": false},
                 "submission_count": {"type": "integer", "minimum": 1, "maximum": 18446744073709551615},
                 "kernel_dispatch_count": {"type": "integer", "minimum": 1, "maximum": 18446744073709551615},
-                "all_dispatches_hip": {"const": true}
+                "segment_count": {"type": "integer", "minimum": 1, "maximum": 18446744073709551615},
+                "boundary_count": {"type": "integer", "minimum": 1, "maximum": 18446744073709551615},
+                "all_dispatches_hip": {"const": true},
+                "weight_encoding": {"enum": ["bf16", "bf16-converted-from-ocp-e4m3fn", "e4m3fnuz-converted-from-ocp-e4m3fn-outer-f32", "ocp-e4m3fn-outer-f32"]},
+                "fp8_provider": {"type": ["string", "null"], "enum": [null, "native", "native-fnuz", "emulation", "converted-bf16"]}
               }
             },
             "timing_ns": {"type": "integer", "minimum": 0, "maximum": 18446744073709551615},
